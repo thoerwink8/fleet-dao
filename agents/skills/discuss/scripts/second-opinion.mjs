@@ -663,18 +663,20 @@ function sh(cmd, args, cwd, env = process.env) {
   }).trim();
 }
 
-function preparePr(repo, pr, slot) {
+/** 审 PR 要的几样（测试换成假的）：gh、起会话、记录和锁放哪。这台没装 gh、git 在这儿报。 */
+function reviewDeps(repo) {
   for (const [bin, forWhat] of [
     ['gh', '取 PR 的信息、贴结论'],
     ['git', '取 PR 的头、切审查树'],
   ]) {
     if (!findBin(bin)) throw new NotChecked(`这台机器没装 ${bin}（PATH 上找不到；审 PR 要它${forWhat}）`);
   }
+  return { gh: (a) => gh(a, repo), session: runSession, runs: RUNS };
+}
+
+function preparePr(repo, pr, slot, ghRun) {
   const info = JSON.parse(
-    gh(
-      ['pr', 'view', String(pr), '--json', 'headRefOid,baseRefName,title,body,files,state,mergeCommit'],
-      repo,
-    ),
+    ghRun(['pr', 'view', String(pr), '--json', 'headRefOid,baseRefName,title,body,files,state,mergeCommit']),
   );
   if (info.state === 'CLOSED') throw new NotChecked(`PR #${pr} 关掉了、没合并：不审`);
   // 已经合进主线的照样审（合并后补审）：refs/pull/<号>/head 还在，三个点的 diff 照样只给它自己的改动
@@ -1319,41 +1321,38 @@ export async function checkPublishable(repo, body) {
     throw new Error(`卫生检查拦下了（${report.findings.map(scan.formatFinding).join('；')}），没贴`);
 }
 
-async function postToPr(repo, pr, body) {
+async function postToPr(repo, pr, body, ghRun, runs = RUNS) {
   await checkPublishable(repo, body);
-  mkdirSync(RUNS, { recursive: true });
-  const file = join(RUNS, `.comment-${process.pid}.md`);
+  mkdirSync(runs, { recursive: true });
+  const file = join(runs, `.comment-${process.pid}.md`);
   writeFileSync(file, body);
   try {
-    return gh(
-      [
-        'api',
-        '-X',
-        'POST',
-        `repos/{owner}/{repo}/issues/${pr}/comments`,
-        '-F',
-        `body=@${file}`,
-        '--jq',
-        '.html_url',
-      ],
-      repo,
-    );
+    return ghRun([
+      'api',
+      '-X',
+      'POST',
+      `repos/{owner}/{repo}/issues/${pr}/comments`,
+      '-F',
+      `body=@${file}`,
+      '--jq',
+      '.html_url',
+    ]);
   } finally {
     rmSync(file, { force: true });
   }
 }
 
 /** 这个头上现在的 second-opinion（GitHub 按新到旧排，取第一条）；没有回 undefined。读不到抛。 */
-function currentSecondOpinion(repo, head) {
-  const all = JSON.parse(gh(['api', `repos/{owner}/{repo}/commits/${head}/statuses`], repo) || '[]');
+function currentSecondOpinion(ghRun, head) {
+  const all = JSON.parse(ghRun(['api', `repos/{owner}/{repo}/commits/${head}/statuses`]) || '[]');
   if (!Array.isArray(all)) throw new NotChecked(`${head.slice(0, 7)} 的提交状态认不出（不是列表）`);
   return all.find((s) => s?.context === 'second-opinion');
 }
 
 /** 在审的那个头上写提交状态 second-opinion（合并闸在「先审后合」时认它，#74）。头变了旧状态自然不算。 */
-function setStatus(repo, head, { state, description }, url) {
+function setStatus(ghRun, head, { state, description }, url) {
   // 总指挥已经在这个头上放行过（审查跑到一半时放行的），就不拿这一轮的结论盖掉它；结论照样贴在 PR 评论里
-  const current = currentSecondOpinion(repo, head);
+  const current = currentSecondOpinion(ghRun, head);
   if (current?.state === 'success' && String(current.description ?? '').startsWith('总指挥放行')) {
     console.error(
       `提交状态没改：${head.slice(0, 7)} 上已有总指挥放行（${current.description}），这一轮结论只贴评论`,
@@ -1373,7 +1372,7 @@ function setStatus(repo, head, { state, description }, url) {
     `description=${clip(description)}`,
   ];
   if (url) args.push('-f', `target_url=${url}`);
-  gh(args, repo);
+  ghRun(args);
 }
 
 /**
@@ -1760,7 +1759,10 @@ export function takeLock(name, why, { dir = RUNS, pid = process.pid, alive = isA
     if (holder !== pid && alive(holder)) throw new NotChecked(`${why}（进程 ${holder}），等它跑完`);
   }
   writeFileSync(file, String(pid));
-  const release = () => rmSync(file, { force: true });
+  const release = () => {
+    process.off('exit', release);
+    rmSync(file, { force: true });
+  };
   process.on('exit', release);
   return release;
 }
@@ -1785,22 +1787,22 @@ export function takeSlot(o, deps = {}) {
  * 审一个 PR（开着的、已经合并的都行）：起会话、按标签和轮数判、贴评论、写提交状态。
  * 返回退出码：0 通过、1 必须改、2 没查成（结果格式认不出、状态没写上）；起会话这类没查成抛 NotChecked。
  */
-async function reviewPr({ o, repo, pr, log }) {
+export async function reviewPr({ o, repo, pr, log, deps = reviewDeps(repo) }) {
   const chain = prProfiles(o); // 作者族不对先在这儿报，别等树切好了才说
   // 同一个 PR 同时只跑一轮（后来的退出 2）；不同 PR 各拿各的审查树，可以并行
-  const releasePr = takeLock(`pr${pr}`, `PR #${pr} 另一轮第二意见在跑`);
-  const { slot, release: releaseSlot } = takeSlot(o);
+  const releasePr = takeLock(`pr${pr}`, `PR #${pr} 另一轮第二意见在跑`, { dir: deps.runs });
+  const { slot, release: releaseSlot } = takeSlot(o, { dir: deps.runs });
   try {
-    return await reviewPrLocked({ o, repo, pr, log, chain, slot });
+    return await reviewPrLocked({ o, repo, pr, log, chain, slot, deps });
   } finally {
     releaseSlot();
     releasePr();
   }
 }
 
-async function reviewPrLocked({ o, repo, pr, log, chain, slot }) {
-  const info = preparePr(repo, pr, slot);
-  const counted = reviewRounds(pr, (a) => gh(a, repo));
+async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
+  const info = preparePr(repo, pr, slot, deps.gh);
+  const counted = reviewRounds(pr, deps.gh);
   const round = (counted.prior ?? 0) + 1;
   const roundNote =
     counted.prior === null
@@ -1808,7 +1810,8 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot }) {
       : `这个 PR 之前审完过 ${counted.prior} 轮，这是第 ${round} 轮`;
   const afterMerge = info.merged;
   const who = afterMerge ? '合并后补审' : '第二意见';
-  const out = join(RUNS, `pr${pr}-${info.head.slice(0, 7)}-r${round}.md`);
+  mkdirSync(deps.runs, { recursive: true });
+  const out = join(deps.runs, `pr${pr}-${info.head.slice(0, 7)}-r${round}.md`);
   log(
     `PR #${pr} 头 ${info.head.slice(0, 7)}${afterMerge ? `（已合并，合并提交 ${info.mergeCommit.slice(0, 7)}：合并后补审）` : ''}，工作树 ${info.tree}；${roundNote}`,
   );
@@ -1816,7 +1819,7 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot }) {
     // 默认快：中等思考强度、只看 diff、不跑测试，和 CI 同时跑（创始人 2026-09-25 定的关卡时间预算）；--slow 才走老的完整审法
     const fast = !o.slow;
     const r = await withFallback(chain, log, (p) =>
-      runSession({
+      deps.session({
         prompt: reviewPrompt(pr, info, o.ui, fast),
         profile: p,
         workdir: info.tree,
@@ -1882,6 +1885,8 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot }) {
             roundNote,
             note: r.fallbackNote ?? '',
           }),
+          deps.gh,
+          deps.runs,
         );
         log(`贴到了 PR：${url}`);
       } catch (e) {
@@ -1889,7 +1894,7 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot }) {
         appendFileSync(out, `\n（没贴上 PR：${e.message}）\n`);
       }
       try {
-        setStatus(repo, info.head, status, url);
+        setStatus(deps.gh, info.head, status, url);
         log(
           `提交状态 second-opinion 写到了 ${info.head.slice(0, 7)}：${status.state}（${status.description}）`,
         );
@@ -1938,12 +1943,13 @@ async function afterMergeSweep({ o, repo, log }) {
  * --after-merge-resolve <原 PR> --by <修复或 revert 的 PR>：补审没过的问题已经修好、合进主线，在原 PR 的头上写通过，
  * 待补审清单就不再列它。只认「原 PR 头上是补审没过」「修复 PR 已合并」这两样都对得上的，免得拿它绕过补审。
  */
-async function afterMergeResolve({ o, repo, log }) {
+export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
   if (!Number.isInteger(o.resolve) || o.resolve <= 0 || !Number.isInteger(o.by) || o.by <= 0)
     throw new NotChecked('要 --after-merge-resolve <原 PR 号> --by <修复或 revert 的 PR 号>');
   if (o.resolve === o.by) throw new NotChecked('--by 不能是它自己');
+  const deps = given ?? reviewDeps(repo);
   const view = (n) =>
-    JSON.parse(gh(['pr', 'view', String(n), '--json', 'number,state,title,headRefOid,mergeCommit'], repo));
+    JSON.parse(deps.gh(['pr', 'view', String(n), '--json', 'number,state,title,headRefOid,mergeCommit']));
   const orig = view(o.resolve);
   const fix = view(o.by);
   if (orig.state !== 'MERGED')
@@ -1952,7 +1958,7 @@ async function afterMergeResolve({ o, repo, log }) {
     );
   if (fix.state !== 'MERGED')
     throw new NotChecked(`#${o.by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
-  const current = currentSecondOpinion(repo, orig.headRefOid);
+  const current = currentSecondOpinion(deps.gh, orig.headRefOid);
   if (current?.state === 'success') {
     console.log(`#${o.resolve} 头上的 second-opinion 已经是通过（${current.description}），不用再记`);
     return 0;
@@ -1972,13 +1978,15 @@ async function afterMergeResolve({ o, repo, log }) {
         '',
         `原来的结论：${current.description}`,
       ].join('\n'),
+      deps.gh,
+      deps.runs,
     );
     log(`贴到了 PR：${url}`);
   } catch (e) {
     log(`没贴上 PR：${e.message}`);
   }
   setStatus(
-    repo,
+    deps.gh,
     orig.headRefOid,
     { state: 'success', description: `合并后补审没过的问题已由 #${fix.number} 处理` },
     url,
