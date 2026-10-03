@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录、装路由两层 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
+# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录、装路由两层 → 照这一版的期望写本机配置（#323：只写期望变了的
+# 公开键）→ 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
 # （release.env 的 FLEET_HK_PARTS 写了 demo，人手动发布连演示版一起发到 FLEET_DEMO_PATH、记下发的是哪一版；明写了 web，才连
 # 驾驶舱静态文件一起发到根地址）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
@@ -75,12 +76,22 @@ DRAIN_WROTE=0    # 这次写了排空请求、还没撤
 DRAIN_UNTIL=0    # 请求里的截止（秒）
 ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
 ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
+# 照期望写本机配置（#323，docs/ops.md 第九节「配置进仓对账」）：切版本之前照这一版的期望写 engine.env、api.env、release.env 里
+# 公开的值，只写这一版的期望和上次写的不一样的键（上次写的记在 CONFIG_STATE），人手改的不改回（期望里 selfHeal 开了才改回）。
+# 怎么算、怎么写、写完读回都在 config.mjs（和自动发布对账同一份读法）；这里先让它算、用本脚本读 release.env 的办法核一遍，再写。
+# 期望按这台的档位挑（CONFIG_PROFILE，france.sh 记）。CONFIG_ETC、CONFIG_PROFILE 只有测试会改
+CONFIG_CLI=$DEPLOY_DIR/france/auto-release/config.mjs
+CONFIG_ETC=/etc/fleet-dao
+CONFIG_PROFILE=$CONFIG_ETC/profile
+CONFIG_STATE=$RELEASES/.config-applied.json
+CONFIG_REDS=() # config.mjs 这一次说的 red（调用方合成一条红）
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
 # release.env 里不写 FLEET_HK_PARTS 时只发飞书网关、不发静态页：发静态页会把香港根地址上的东西（现在是演示版）整个换成
 # 这一版的前端，等于对外发布，要先告诉创始人、在 release.env 里明写 web 才发。演示版（demo）只发到 FLEET_DEMO_PATH，不碰根地址
-FLEET_HK_PARTS="gateway"
+HK_PARTS_DEFAULT=gateway
+FLEET_HK_PARTS=$HK_PARTS_DEFAULT
 GATEWAY_ACTIVATED=0 # 这一版的网关这次切过去了没有（没有网关、配置没备齐就是 0，健康检查不查它）
 # 演示版在香港站点上的路径（release.env，默认 /demo/）；和香港 hk.env 的 FLEET_DEMO_PATH 是同一个
 FLEET_DEMO_PATH=""
@@ -184,25 +195,8 @@ preflight() {
     red "没有 /etc/fleet-dao/france.env 或 $RELEASE_ENV：发布只在装过 deploy/france.sh 的法国机器上跑，先跑一遍它"
     return 1
   fi
-  load_env "$RELEASE_ENV" FLEET_SERVICES FLEET_DOMAIN FLEET_HK_PARTS FLEET_DEMO_PATH
-  demo_config_ok || return 1
-  local s c
-  for s in $FLEET_HK_PARTS; do
-    if [[ " ${HK_PARTS[*]} " != *" $s "* ]]; then
-      red "$RELEASE_ENV 的 FLEET_HK_PARTS 里有不认识的「$s」（认识的：${HK_PARTS[*]}）"
-      return 1
-    fi
-  done
-  for s in $FLEET_SERVICES; do
-    if [[ " ${APP_UNITS[*]} " != *" $s "* ]]; then
-      red "$RELEASE_ENV 的 FLEET_SERVICES 里有不认识的服务「$s」（认识的：${APP_UNITS[*]}）"
-      return 1
-    fi
-  done
-  if [[ ! "$FLEET_DOMAIN" =~ ^[a-z0-9.-]+$ ]]; then
-    red "$RELEASE_ENV 的 FLEET_DOMAIN 应为驾驶舱的域名，现在是「$FLEET_DOMAIN」"
-    return 1
-  fi
+  load_release_env "$RELEASE_ENV" || return 1
+  local c
   for c in git rsync curl flock runuser psql "$NODE" /usr/local/bin/fleet-temporal; do
     if ! command -v "$c" >/dev/null; then
       red "缺 $c：先跑一遍 deploy/france.sh"
@@ -235,10 +229,39 @@ auto_parts() {
 }
 
 # 演示版在哪个路径：没写取默认 /demo/；不是一级路径、和根上已有的东西撞，报红
-demo_config_ok() {
+demo_config_ok() { # [release.env 文件]（只用在红里说是哪一份）
   FLEET_DEMO_PATH=${FLEET_DEMO_PATH:-/demo/}
   if ! demo_path_ok "$FLEET_DEMO_PATH"; then
-    red "$RELEASE_ENV 的 FLEET_DEMO_PATH 应为 /demo/ 这样的一级路径（不能是 assets、health、healthz、api、auth、github），现在是「$FLEET_DEMO_PATH」"
+    red "${1:-$RELEASE_ENV} 的 FLEET_DEMO_PATH 应为 /demo/ 这样的一级路径（不能是 assets、health、healthz、api、auth、github），现在是「$FLEET_DEMO_PATH」"
+    return 1
+  fi
+}
+
+# 读一份 release.env、核一遍：只认那四个键（load_env）、往香港发的几样和起的服务都认得、域名、演示版的路径。前提读本机那份、
+# 照期望写配置之前核算出来的新的那份（在子 shell 里，不动这里的变量）、写完重读，用的都是这一个——核得过的才写得进去，
+# 不然写进去以后每次发布都卡在前提上。没写的键回到脚本的默认值（FLEET_HK_PARTS 不写 = 只发 gateway）
+load_release_env() { # 文件
+  local s
+  FLEET_SERVICES=""
+  FLEET_DOMAIN=""
+  FLEET_HK_PARTS=$HK_PARTS_DEFAULT
+  FLEET_DEMO_PATH=""
+  load_env "$1" FLEET_SERVICES FLEET_DOMAIN FLEET_HK_PARTS FLEET_DEMO_PATH || return 1
+  demo_config_ok "$1" || return 1
+  for s in $FLEET_HK_PARTS; do
+    if [[ " ${HK_PARTS[*]} " != *" $s "* ]]; then
+      red "$1 的 FLEET_HK_PARTS 里有不认识的「$s」（认识的：${HK_PARTS[*]}）"
+      return 1
+    fi
+  done
+  for s in $FLEET_SERVICES; do
+    if [[ " ${APP_UNITS[*]} " != *" $s "* ]]; then
+      red "$1 的 FLEET_SERVICES 里有不认识的服务「$s」（认识的：${APP_UNITS[*]}）"
+      return 1
+    fi
+  done
+  if [[ ! "$FLEET_DOMAIN" =~ ^[a-z0-9.-]+$ ]]; then
+    red "$1 的 FLEET_DOMAIN 应为驾驶舱的域名，现在是「$FLEET_DOMAIN」"
     return 1
   fi
 }
@@ -819,6 +842,86 @@ load_routing() { # 提交号
     ok "路由两层已齐，这次一行没改（$line）"
   else
     changed "路由两层装进库（$line）"
+  fi
+}
+
+# ── 照期望写配置 ──
+
+# 跑 config.mjs，它说的话一行一行记账：ok、changed 照记，note 只打印，red 收进 CONFIG_REDS（调用方合成一条红）。
+# 退出码照它的：0 成、1 没成；别的（node 没跑成、用法错）也算没成，原话收进 CONFIG_REDS
+config_cli() { # 参数…
+  local out line rc=0
+  CONFIG_REDS=()
+  out=$("$NODE" "$CONFIG_CLI" "$@" 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case $line in
+    "ok "*) ok "${line#ok }" ;;
+    "changed "*) changed "${line#changed }" ;;
+    "note "*) echo "  · ${line#note }" ;;
+    "red "*)
+      CONFIG_REDS+=("${line#red }")
+      echo "    ${line#red }"
+      ;;
+    "") ;;
+    *)
+      CONFIG_REDS+=("$line")
+      echo "    $line"
+      ;;
+    esac
+  done <<<"$out"
+  if ((rc != 0 && ${#CONFIG_REDS[@]} == 0)); then CONFIG_REDS+=("$CONFIG_CLI 退出码 $rc，没说原因"); fi
+  # 说了 red 却退出 0：照没成算，不拿退出码当没事
+  if ((${#CONFIG_REDS[@]} > 0)); then return 1; fi
+  return "$rc"
+}
+
+# 照这一版的期望写本机配置（#323）：迁移、装目录、装路由两层之后，切版本之前（发布、退回、自动退回都走这里）。三步：
+#   1. config.mjs 先算（--plan）：写成什么样放进临时目录，本机配置一个字都不写；期望认不出、线上文件认不出、要写的键写了几行，
+#      在这一步就停下；
+#   2. 算出来的 release.env 用本脚本自己的读法核一遍（load_release_env，在子 shell 里）：只认那四个键、服务和往香港发的几样
+#      认得——核不过就不写，不然写进去以后每次发布都卡在前提上，连改好期望的那一版都发不上来；
+#   3. 再让它照核过的写（--expect：重新算的和核过的不一样就不写），写完照 systemd 读回核一遍，不对就改回原样。
+# 写不成判红、返回 1：不切版本（本机配置和原来一样）。release.env 变了就重读：这一版照新的起服务、往香港发
+apply_config() { # 提交号 事件（release / rollback / auto-rollback）
+  local sha=$1 how=$2 plan out why sum=""
+  local -a args=(apply --releases "$RELEASES" --commit "$sha" --how "$how" --etc "$CONFIG_ETC" --state "$CONFIG_STATE"
+    --profile "$CONFIG_PROFILE")
+  step "照期望写本机配置（${sha:0:12} 的期望 → $CONFIG_ETC）"
+  if [[ ! -e "$RELEASES/$sha/deploy/france/desired-config.json" ]]; then
+    ok "${sha:0:12} 里没有配置的期望（#323 之前的版本）：不照期望写"
+    return 0
+  fi
+  plan=$(mktemp -d)
+  if ! config_cli "${args[@]}" --plan "$plan"; then
+    rm -rf -- "$plan"
+    red "照期望写本机配置没算成：${CONFIG_REDS[0]}（本机配置一个字都没写，没切版本）"
+    return 1
+  fi
+  if [[ ! -f "$plan/release.env" ]]; then
+    # 这台档位的那份期望这一版里没有（上面已经说了）：不写
+    rm -rf -- "$plan"
+    return 0
+  fi
+  if ! out=$(load_release_env "$plan/release.env" 2>&1); then
+    rm -rf -- "$plan"
+    why=$(sed -n 's/^  ✗ //p' <<<"$out" | head -3 | tr '\n' ' ')
+    red "照 ${sha:0:12} 的期望写出来的 release.env 发布脚本认不出（${why:-没说原因}）：本机配置一个字都没写，没切版本——改期望、发下一版"
+    return 1
+  fi
+  if [[ -f "$RELEASE_ENV" ]]; then sum=$(file_sum "$RELEASE_ENV") || sum=""; fi
+  if ! config_cli "${args[@]}" --expect "$plan"; then
+    rm -rf -- "$plan"
+    red "照期望写本机配置没写成：${CONFIG_REDS[0]}（没切版本）"
+    return 1
+  fi
+  rm -rf -- "$plan"
+  if [[ "$(file_sum "$RELEASE_ENV" 2>/dev/null)" != "$sum" ]]; then
+    if ! load_release_env "$RELEASE_ENV"; then
+      red "release.env 照期望写完重读没过（原因见上）：没切版本"
+      return 1
+    fi
+    auto_parts
+    ok "release.env 照期望改了，这一版照新的来：起的服务 ${FLEET_SERVICES:-（无）}；往香港发 $(parts_said)"
   fi
 }
 
@@ -1470,6 +1573,8 @@ do_release() { # 要发的提交（空 = 主线最新）
   load_catalog "$SHA" || return 1
   load_routing "$SHA" || return 1
   before=$(api_report_before)
+  # 紧挨着切版本：写完到服务换上这一版之间，在跑的旧服务自己重启才会读到新配置，这段越短越好
+  apply_config "$SHA" release || return 1
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
   if activate "$SHA" release && health_gate "$SHA" "$before"; then
     # 之前判过不健康（比如那时本机配置没备齐）、这次过了：记回健康，它又能当退回的目标
@@ -1489,10 +1594,13 @@ do_release() { # 要发的提交（空 = 主线最新）
     if ! schema_allows "$cur"; then
       red "${SHA:0:12} 没过健康检查，也没自动退回（库的迁移比上一版新，见上）：停在 ${SHA:0:12}，要人来看"
     elif
-      # 新版不健康：它刚起来那几分钟起的会话不给宽限，马上停下（按编号续上），尽快退回
+      # 新版不健康：它刚起来那几分钟起的会话不给宽限，马上停下（按编号续上），尽快退回；配置照上一版的期望写回去。
+      # 这两步没成就还没切回去：上一版没被试过，不记它不健康，也不说退回了
       drain_request "$cur" 0
-      drain_engine && activate "$cur" auto-rollback && health_gate "$cur" ""
+      ! drain_engine || ! apply_config "$cur" auto-rollback
     then
+      red "${SHA:0:12} 没过健康检查，也没退回 ${cur:0:12}（退回之前停引擎、照它的期望写配置没成，见上）：停在 ${SHA:0:12}，要人来看"
+    elif activate "$cur" auto-rollback && health_gate "$cur" ""; then
       ok "已退回 ${cur:0:12}，健康检查过了"
       red "${SHA:0:12} 没过健康检查，已自动退回 ${cur:0:12}（原因见上面的红）"
     else
@@ -1517,6 +1625,7 @@ do_rollback() {
   hk_reachable || return 1
   drain_request "$prev" "$(drain_grace)"
   drain_engine || return 1
+  apply_config "$prev" rollback || return 1
   if activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"
   else
