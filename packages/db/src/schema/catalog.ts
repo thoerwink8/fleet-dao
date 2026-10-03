@@ -153,8 +153,10 @@ export const routes = pgTable(
 );
 
 /**
- * 每个阶段类型一行；顺序在 stage_policy_routes。旧的平铺结构：选路、路由探针、切号已改读路由两层（下面两张表，#574），
- * 这两张只剩目录装载器写、判断题后端（packages/jev 的 wiring.ts）和驾驶舱的换模型对话框读，随 #556-4 删库表那一步删。
+ * 每个阶段类型一行；顺序在 stage_policy_routes。旧的平铺结构：选路、路由探针、切号、判断题后端、驾驶舱换模型对话框、指挥官的
+ * 法国查询都已改读路由两层（下面两张表，#574），没人再按它派路由。这两张只剩目录装载器写（catalog.ts，装前读一眼判接不接手）、
+ * 发布脚本核行数（deploy/release.sh）、驾驶舱后端那个已经没有页面调的改顺序接口（PUT /routing/stages/:stage）还读写，
+ * 随 #556-4 删库表那一步一起删。
  */
 export const stagePolicies = pgTable('stage_policies', {
   stage: stageKind('stage').primaryKey(),
