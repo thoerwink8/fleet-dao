@@ -13,11 +13,11 @@ const TEXT = readFileSync(fileURLToPath(new URL('../../AGENTS.md', import.meta.u
 );
 
 /** 通用段（推给所有仓）上限：2026-10-03 减脂后约 4050 字，留一点余量。 */
-export const GENERAL_MAX = 4400;
+const GENERAL_MAX = 4400;
 /** 本仓段上限：同日减脂后约 4200 字。 */
-export const REPO_MAX = 4600;
+const REPO_MAX = 4600;
 
-export function sections(text: string): { general: string; repo: string } {
+function sections(text: string): { general: string; repo: string } {
   const start = text.indexOf('通用段 开始');
   const end = text.indexOf('通用段 结束');
   const repoAt = text.indexOf('## 本仓（fleet-dao）');
