@@ -1,10 +1,15 @@
 // 每小时对账的核对（design 第六节第 4 层，specs/293-对账三处核对）：合了的 PR 都记了账。
-// 第三处（额度读数不超过 30 分钟）等 #76 定时读额度上线后随它做：额度现在没有定时读进库，查它新不新鲜只会天天报过期。
+// 第三处（额度读数不超过 30 分钟）随 #76 定时读额度上线做了：checkQuotaFreshness，兜底定时读额度自己没在跑、读了没写库、上游数冻住。
 // 各返回一个 SweepPart，由 hourly-reconcile 的 combineParts 并进这一轮。提醒自己报、自己撤，不进 alert-sweep 的判法表。
 // 记账对不上只报、不补：补账要从会话记录重算，不在这里猜。
 // 「开着的单都有着落」那一处（一张单一个需求工作流，要补拉接活）随 Fusion 一起删了（#556）：三段流程的单是任务工作流，
 // 状态只在 Temporal 一份，不靠这一处查；它留下的旧提醒由 retireWorkflowAlerts 撤掉。
-import type { LedgerSession, MergedPrLedger } from '@fleet-dao/db';
+import {
+  type LedgerSession,
+  type MergedPrLedger,
+  QUOTA_STALE_AFTER_MS,
+  type QuotaTablePool,
+} from '@fleet-dao/db';
 import type { MergedPrAuditReport, MergedPrFinding, RepoRef } from '@fleet-dao/github';
 import type { TaskState } from '@fleet-dao/shared';
 import type { AlertSweepDeps } from './alert-sweep.ts';
@@ -54,6 +59,8 @@ export interface ReconcileCheckDeps extends Pick<AlertSweepDeps, 'alerts' | 'now
   repos(): Promise<RepoRef[]>;
   /** @fleet-dao/github 的 GitHub.auditMergedPrs。 */
   auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
+  /** 额度表（db 的 quotaTable，按 now 判过期）。 */
+  quotaPools(now: Date): Promise<QuotaTablePool[]>;
   ledgers(input: {
     since: Date;
     prs: { owner: string; name: string; number: number }[];
@@ -291,6 +298,78 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
       }
       await resolveOne(deps, part, alert.dedupeKey, '镜像里这条 PR 不再是已合并、或对不上单了');
     }
+  }
+  return part;
+}
+
+/** 额度读数过期（从没读成、超过 30 分钟没读成、上游数冻住）。后面是池编号；读新了自己撤。 */
+export const QUOTA_ALERT_PREFIX = 'reconcile:quota:';
+
+export function quotaAlertKey(poolId: string): string {
+  return `${QUOTA_ALERT_PREFIX}${poolId}`;
+}
+
+/**
+ * 每个在用的账号池额度读数不超过 30 分钟（设计 §6，#76）：定时读额度（jobs/quota-read.ts）自己对「连着两轮没读成」报警，
+ * 这里是兜底——它没在跑、跑了没写库、或上游数冻住，读数照样会旧，只有按「库里最近读成时刻」查才看得见。
+ * 在用 = 渠道开着、没过期；关掉的、过期了的池读不到是应该的，不报。
+ */
+export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<SweepPart> {
+  const part = empty();
+  const now = deps.now();
+  let pools: Awaited<ReturnType<ReconcileCheckDeps['quotaPools']>>;
+  try {
+    pools = await deps.quotaPools(now);
+  } catch (err) {
+    return { ...part, failed: `读额度表没成，额度读数新不新鲜这一轮没查：${message(err)}` };
+  }
+  let open: Set<string> | null = null;
+  try {
+    const listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
+    open = new Set(listed.alerts.map((a) => a.dedupeKey).filter((k) => k.startsWith(QUOTA_ALERT_PREFIX)));
+    if (listed.truncated) {
+      part.unchecked.push(
+        `没处理的提醒太多，额度核对这一轮只看了前 ${listed.alerts.length} 条，没看到的不撤`,
+      );
+    }
+  } catch (err) {
+    part.unchecked.push(`列没处理的提醒没成，额度读数的旧提醒这一轮不撤：${message(err)}`);
+  }
+
+  const overdue = new Set<string>();
+  for (const p of pools) {
+    if (!p.channelEnabled || (p.expiresAt !== null && p.expiresAt.getTime() <= now.getTime())) continue;
+    part.scanned += 1;
+    if (!p.readOverdue) continue;
+    const dedupeKey = quotaAlertKey(p.poolId);
+    overdue.add(dedupeKey);
+    const last = p.lastReadOkAt
+      ? `最近一次读成是 ${p.lastReadOkAt.toISOString()}（${Math.round((now.getTime() - p.lastReadOkAt.getTime()) / 60_000)} 分钟前）`
+      : '从没读成过';
+    const frozen =
+      p.lastReadOkAt && p.dataAt && now.getTime() - p.dataAt.getTime() > QUOTA_STALE_AFTER_MS
+        ? `；读是读成了，但上游数据本身停在 ${p.dataAt.toISOString()}`
+        : '';
+    try {
+      await deps.alerts.raise({
+        dedupeKey,
+        level: 'alert',
+        taskId: null,
+        title: clip(`账号池额度读数过期：${p.poolId}`, 300),
+        body: [
+          `${p.poolId}（渠道 ${p.channelName}）${last}${frozen}，超过 30 分钟，调度不会把它当「还够」。`,
+          '先看引擎的 quota-read 定时任务有没有在跑、这个池最近一次为什么没读成；读新了这条自己撤。',
+        ].join('\n'),
+      });
+      part.found += 1;
+      deps.log('info', '每小时对账：账号池额度读数过期', { poolId: p.poolId, lastReadOkAt: p.lastReadOkAt });
+    } catch (err) {
+      part.unchecked.push(`${dedupeKey} 额度读数过期，报提醒没报成：${message(err)}`);
+    }
+  }
+  for (const dedupeKey of open ?? []) {
+    if (overdue.has(dedupeKey)) continue;
+    await resolveOne(deps, part, dedupeKey, '读新了，或这个池不再在用');
   }
   return part;
 }

@@ -16,6 +16,7 @@ import type { ScheduleRunLog } from './github-reconcile.ts';
 import {
   checkLedgers,
   checkMergedPrs,
+  checkQuotaFreshness,
   type ReconcileCheckDeps,
   retireWorkflowAlerts,
 } from './reconcile-checks.ts';
@@ -97,6 +98,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const retired = await retireWorkflowAlerts(deps);
   const merged = await checkMergedPrs(deps);
   const ledgers = await checkLedgers(deps);
+  const quota = await checkQuotaFreshness(deps);
   const autoMerges = await checkAutoMerges(deps);
   let alerts: SweepPart;
   try {
@@ -107,7 +109,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   }
   // 权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰
   const apps = await checkGitHubApps(deps);
-  return combineParts([trees, retired, merged, ledgers, autoMerges, alerts, apps]);
+  return combineParts([trees, retired, merged, ledgers, quota, autoMerges, alerts, apps]);
 }
 
 /**
