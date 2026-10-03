@@ -75,6 +75,8 @@ export function createDemoApi(inner: MockApi): FleetApi {
       need('settings', '设置');
       return inner.updateSetting(key, body);
     },
+    // /changelog 页不进演示版（路由表不放）：发布的版本号也不给。
+    releaseVersion: () => Promise.reject(hidden('发布')),
     // 发演示链接只在正式驾驶舱里有。
     demoLinks: () => Promise.reject(hidden('发演示链接')),
     createDemoLink: () => Promise.reject(hidden('发演示链接')),

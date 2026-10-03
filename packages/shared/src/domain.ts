@@ -288,8 +288,15 @@ export interface SessionRun {
 export type SegmentKind = 'scope' | 'manual' | 'verify';
 /** 派工档（引擎 runner/tier.ts 的 TierEnum）：快档、中档、主力档。只有动手段分档。 */
 export type SegmentTier = 'fast' | 'medium' | 'heavyweight';
-/** 一段跑完的结局（库里 runs.outcome）；还在跑的没有。 */
-export type SegmentOutcome = 'done' | 'timeout' | 'killed' | 'spawn_failed' | 'admission_blocked' | 'failed';
+/** 一段跑完的结局（库里 runs.outcome）；还在跑的没有。org_switch = 切号先停下这一段，切完在原分支上重跑（#59）。 */
+export type SegmentOutcome =
+  | 'done'
+  | 'timeout'
+  | 'killed'
+  | 'spawn_failed'
+  | 'admission_blocked'
+  | 'failed'
+  | 'org_switch';
 
 /**
  * v3 三段里一段跑一次（库里 runs 表的一行）。读不到的字段不给，不当成 0。段名、派工档、结局库里有约束，

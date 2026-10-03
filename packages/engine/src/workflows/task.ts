@@ -19,6 +19,8 @@
 //   （jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。头换了（人推过新提交）就对新的头重走 CI 和验收，不原样重新挂：
 //   新头上没有 cold-verify，合并闸不会放行。
 // - 动手会话只试一次（activity-options.ts 的 segment 档）：基础设施的失败由这里按失败分流重试、换路由、挂起，不靠 Temporal 自动再起一遍。
+// - 切号停下的动手会话（码 org_switch，#59）不算失败：失败分流 OS1 马上接着干、不记账、不看上一次的原文（不会凑成「同因连挂」）；
+//   选路照常选到切过去的那个池，同一棵树、同一个分支重跑这一段，提示词带上被停下的原因（interrupted）。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
 import type { TaskState } from '@fleet-dao/shared';
@@ -43,6 +45,7 @@ import {
   MAX_VERIFY_ROUNDS,
   MERGE_POLL_MINUTES,
   type MergeWait,
+  ORG_SWITCH_CODE,
   ROUTE_RETRY_SECONDS,
   SEGMENT_MINUTES,
   type SegmentEvidence,
@@ -434,6 +437,8 @@ class TaskFlow {
     let avoid: Avoid = NO_AVOID;
     let previousMessage: string | undefined;
     let stick: string | undefined;
+    // 这一段上一次被切号停下了（#59）：重跑时告诉新会话树里留着上一次的东西；一直带到这一段跑成（树里的东西一直在）
+    let interrupted: string | undefined;
     for (;;) {
       this.guard();
       const route = await this.pick(avoid, stick);
@@ -457,6 +462,7 @@ class TaskFlow {
             tier,
             feedback: this.feedback,
             timeoutMinutes: SEGMENT_MINUTES,
+            ...(interrupted ? { interrupted } : {}),
           }),
         );
         if (res.ok) return;
@@ -473,6 +479,8 @@ class TaskFlow {
             message: evidence?.message ?? '会话没跑成',
             retryable: null,
           };
+      // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
+      if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
       const next = await this.classify(failure, counters, true, {
         stage: 'execute',
         route: {
@@ -487,7 +495,8 @@ class TaskFlow {
         ...(evidence?.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
         previousMessage,
       });
-      previousMessage = failure.message;
+      // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
+      if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
       this.status.lastProblem = next.reason;
       counters = bump(counters, next);
       if (next.action === 'retry') {

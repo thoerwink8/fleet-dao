@@ -2,8 +2,9 @@
 # shellcheck source-path=SCRIPTDIR
 # 本机档（#451，deploy/lib/profile.sh）：FLEET_PROFILE 认不认得出、不带这个变量时默认是不是 france（加本机档之前
 # 一个字节都不变的前提）、认不出的档名报不报清楚、is_local_profile 只看 PROFILE 这个全局变量、skip_local 是不是
-# 不算红也不算绿（只进 PENDING）。不要 root、不碰任何文件或系统状态。
-# 用法：bash deploy/test/profile.test.sh。退出码：0 通过，1 不通过。
+# 不算红也不算绿（只进 PENDING）；这台记的档位（#323，profile_marker_check）对不上、不是普通文件都不过，france.sh 前提里核、
+# 装的时候记、读回报。不要 root，只碰临时目录。
+# 用法：bash deploy/test/profile.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 unset FLEET_PROFILE
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -12,6 +13,7 @@ source "$HERE/../lib/common.sh"
 # shellcheck source=../lib/profile.sh
 source "$HERE/../lib/profile.sh"
 fail=0
+skipped=0
 pass() { echo "  ✓ $*"; }
 flunk() {
   echo "  ✗ $*"
@@ -94,8 +96,55 @@ else
   flunk "skip_local 不该动 REDS 或 CHANGES（REDS=${#REDS[@]} CHANGES=${#CHANGES[@]}）"
 fi
 
+# 这台记的档位（#323）：发布、自动发布照它挑哪一份期望写配置、对账，所以 france.sh 跑之前先核——没记、记的就是这一档才往下装；
+# 记的是别的档、不是普通文件，都不过（不替人改它）
+T=$(mktemp -d)
+trap 'rm -rf -- "$T"' EXIT
+marker_case() { # 说明 期望（过 / 不过） 这次的档位 [PROFILE_WHY 里要有的字]
+  local rc=0
+  profile_marker_check "$T/profile" "$3" || rc=$?
+  if [[ "$2" == 过 && $rc == 0 ]] || [[ "$2" == 不过 && $rc != 0 && "$PROFILE_WHY" == *"${4:-}"* ]]; then
+    pass "$1：$2"
+  else
+    flunk "$1：该$2，返回 $rc，原因「$PROFILE_WHY」"
+  fi
+}
+marker_case "还没记" 过 france
+printf 'france\n' >"$T/profile"
+marker_case "记的就是法国档" 过 france
+marker_case "记的是法国档、这次跑的是本机档（入口用错了）" 不过 local "记的是「france」档"
+printf 'local\n' >"$T/profile"
+marker_case "记的是本机档、这次跑的是法国档" 不过 france "这次跑的是「france」档"
+marker_case "记的就是本机档" 过 local
+rm -f -- "$T/profile"
+mkdir "$T/profile"
+marker_case "档位文件是个目录" 不过 france "不是普通文件"
+rmdir -- "$T/profile"
+if ln -s "$T/elsewhere" "$T/profile" 2>/dev/null && [[ -L "$T/profile" ]]; then
+  marker_case "档位文件是符号链接（断链也算）" 不过 france "不是普通文件"
+else
+  echo "  … 没跑成：这台建不了符号链接，「是符号链接」没测"
+  skipped=1
+fi
+rm -f -- "$T/profile"
+# france.sh 里：前提先核（对不上就停），装的时候记上，读回报出来
+france=$(<"$HERE/../france.sh")
+preflight_body=$(sed -n '/^preflight() {/,/^}/p' <<<"$france")
+identity_body=$(sed -n '/^setup_identity() {/,/^}/p' <<<"$france")
+# shellcheck disable=SC2016 # 找的就是字面上的变量名
+if [[ "$preflight_body" == *'profile_marker_check "$PROFILE_FILE" "$PROFILE"'* &&
+  "$identity_body" == *'put_file "$PROFILE_FILE" root:fleet 640 "$PROFILE"'* && "$france" == *$'\n  readback_profile_marker\n'* ]]; then
+  pass "france.sh：前提核档位、装的时候记上、读回报出来"
+else
+  flunk "france.sh 该在前提里核档位（profile_marker_check）、setup_identity 里记上、读回里报 readback_profile_marker"
+fi
+
 if ((fail)); then
   echo "本机档（deploy/lib/profile.sh）：不通过"
   exit 1
+fi
+if ((skipped)); then
+  echo "本机档（deploy/lib/profile.sh）：其余通过，有没跑成的（见上）"
+  exit 2
 fi
 echo "本机档（deploy/lib/profile.sh）：通过"

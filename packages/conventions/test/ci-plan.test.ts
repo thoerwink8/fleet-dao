@@ -18,9 +18,12 @@ import { keyCovers, keyRoots, sourceClosure } from '../src/ci-cache.ts';
 import {
   AGENTS_UNIT,
   ALWAYS_JOBS,
+  ALWAYS_TESTS,
   assignTests,
   type CiPlan,
   ciVerdict,
+  dependentsClosure,
+  fallbackUnits,
   PATH_RULES,
   type PackageGraph,
   PLANNED_JOBS,
@@ -285,6 +288,89 @@ describe('按改动算要跑什么', () => {
       if (dir === 'shared') continue; // shared 全跑
       expect(testArgs(pr(`packages/${dir}/src/x.ts`)), dir).toContain(`packages/${dir}/`);
     }
+  });
+});
+
+describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 test:changed）：同一份判法，只是放下升全跑那一档', () => {
+  const fb = (...changed: string[]) => fallbackUnits(changed, graph());
+  /** 依赖图里直接间接依赖 pkg 的（不含它自己）。 */
+  const usersOf = (pkg: string) => [...dependentsClosure(graph(), [pkg])].filter((u) => u !== pkg).sort();
+
+  it('改动里没有升全跑的文件：就是 planCi 选中的那份，一个不多、一个不少，没有留给 CI 的', () => {
+    const cases: string[][] = [
+      ['docs/design.md'],
+      ['AGENTS.md'],
+      ['docs/ops.md'],
+      ['agents/skills/discuss/SKILL.md'],
+      ['agents/hooks/pretool.mjs'],
+      ['.gitignore'],
+      ['.github/pull_request_template.md'],
+      ['.githooks/pre-push'],
+      ['packages/db/src/schema/index.ts', 'docs/ops.md'],
+      ...Object.keys(graph().deps)
+        .filter((d) => d !== 'shared')
+        .map((d) => [`packages/${d}/src/x.ts`]),
+    ];
+    for (const changed of cases) {
+      const p = pr(...changed);
+      expect(p.full, changed.join()).toBe(false);
+      expect(fb(...changed), changed.join()).toEqual({ units: p.testUnits, hubs: [], dependents: [] });
+    }
+  });
+
+  it('改了 shared：只算 shared 自己；依赖它的（依赖图里直接间接依赖它的全部，加上测试读它们的）放进 dependents，留给 CI', () => {
+    expect(usersOf('shared').length).toBeGreaterThan(5);
+    expect(fb('packages/shared/src/domain.ts')).toEqual({
+      units: ['shared'],
+      hubs: ['shared'],
+      // agents 不在依赖图里，它的测试读 db 的路由骨架（TEST_READS）：db 依赖 shared，agents 也算
+      dependents: [...usersOf('shared'), AGENTS_UNIT].sort(),
+    });
+  });
+
+  it('shared 和 db 一起改：db 照 planCi 带上依赖它的，shared 只算自己；已经在 units 里的不在 dependents 里重复', () => {
+    const r = fb('packages/shared/src/domain.ts', 'packages/db/src/schema/index.ts');
+    expect(r.units).toEqual([...pr('packages/db/src/schema/index.ts').testUnits, 'shared'].sort());
+    expect(r.dependents).toEqual(usersOf('shared').filter((u) => !r.units.includes(u)));
+    expect(r.dependents).not.toContain('db');
+  });
+
+  it('根配置、锁文件、CI 工作流、deploy/、认不出的路径：不落在哪个单元，什么都不加；一起改的别的文件照 planCi 算', () => {
+    for (const f of [
+      'pnpm-lock.yaml',
+      'package.json',
+      'vitest.config.ts',
+      '.github/workflows/ci.yml',
+      'deploy/france.sh',
+      'LICENSE',
+    ]) {
+      expect(pr(f).full, f).toBe(true);
+      expect(fb(f), f).toEqual({ units: [], hubs: [], dependents: [] });
+    }
+    expect(fb('pnpm-lock.yaml', 'packages/cli/src/help.ts')).toEqual({
+      units: ['cli'],
+      hubs: [],
+      dependents: [],
+    });
+  });
+
+  it('测试夹具、不在依赖图里的包目录：算那个包自己，依赖它的放进 dependents', () => {
+    expect(fb('packages/adapters/test/fixtures/claude-code/x.ndjson')).toEqual({
+      units: ['adapters'],
+      hubs: ['adapters'],
+      dependents: usersOf('adapters'),
+    });
+    expect(fb('packages/nope/src/x.ts')).toEqual({ units: ['nope'], hubs: ['nope'], dependents: [] });
+  });
+
+  it('【故意造出的失败】依赖图读不出：改到的包只算自己，dependents 是一句为什么，不拿空清单冒充「没人依赖」', () => {
+    const r = fallbackUnits(
+      ['packages/api/src/a.ts', 'packages/shared/src/domain.ts', 'AGENTS.md'],
+      '读不到 packages/api/package.json',
+    );
+    expect(r.units).toEqual(['agents', 'agents-sync', 'api', 'shared']);
+    expect(r.hubs).toEqual(['shared']);
+    expect(r.dependents).toBe('包依赖图读不出（读不到 packages/api/package.json），依赖改到的包的算不出来');
   });
 });
 
@@ -731,9 +817,7 @@ describe('ci.yml 和这里对得上', () => {
     expect(lint, 'lint job 不见了').not.toBe('');
     expect(lint).toContain('pnpm exec biome check .');
     expect(lint).toContain('pnpm exec tsc -b');
-    expect(lint).toContain(
-      'pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/',
-    );
+    expect(lint).toContain(`pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
     // 三样在同一步里各自后台跑、各写各的结果（并行跑的那步真跑一遍，见下面「lint 的并行步」）；汇总读的是这一步
     // 写出来的三样结果，不读哪一步的 conclusion（continue-on-error 的步 conclusion 会被改写成 success）。
     expect(lint).toMatch(/^\s+id: checks$/m);

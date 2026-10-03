@@ -1,6 +1,6 @@
 {
-  "id": "ae8c5a4b-9751-4c31-8076-2825f0bc29f6",
-  "prevId": "b5949af3-ba30-4206-81b0-5cb0b0c219d8",
+  "id": "620fbc8d-300a-4fc7-8bb5-adb341144c0e",
+  "prevId": "ae8c5a4b-9751-4c31-8076-2825f0bc29f6",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -830,6 +830,12 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true
+        },
+        "effort": {
+          "name": "effort",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -871,6 +877,10 @@
         "routing_catalog_position_nonneg": {
           "name": "routing_catalog_position_nonneg",
           "value": "\"routing_catalog\".\"position\" >= 0"
+        },
+        "routing_catalog_effort_known": {
+          "name": "routing_catalog_effort_known",
+          "value": "\"routing_catalog\".\"effort\" is null or \"routing_catalog\".\"effort\" in ('low', 'medium', 'high', 'xhigh', 'max')"
         }
       },
       "isRLSEnabled": false

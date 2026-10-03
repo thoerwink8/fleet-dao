@@ -2,15 +2,15 @@
 # shellcheck source-path=SCRIPTDIR
 # 应用的本机配置里装机脚本要管的几件事（deploy/lib/app-config.sh），拿临时文件走一遍：
 #   0. 读键和 systemd 同一种读法：缩进、= 两边的空白、引号、转义、注释、CRLF、同一个键写几行取最后一行，逐条造出来比
-#   1. 样例后来加的键：只补缺、已有的值不动；缩进的、KEY = 值、注释掉的、光写了键都算出现过，不补；要人定的键不补；
-#      第二遍零改动
+#   1. 新机器照仓里的期望建三份环境文件（#323，env_from_desired，拿仓里法国、本机档两份真的期望）：公开的照期望写、私有的
+#      只留空位、属主权限对；文件已经在不建不补（第二遍零改动）；期望读不到、认不出判红、不建
 #   2. api.env 的 FLEET_GITHUB_WEBHOOK_SECRET：空着才照「引擎」App 的 json 填，第二遍零改动；json 没有、不是 JSON、
 #      值的样子写不进环境文件、这一行被注释掉，都记待配、文件不动；同一个键写了两行判红、不改；读回两边不一致判红；
 #      值从头到尾不进输出
 #   3. 功能删掉了、键还留在环境文件里：装机脚本删掉那一行（生效的、被注释掉的都算）；没有这个键什么都不做；
 #      读不到、认不出判红；第二遍零改动
 #   4. 读回引擎的 engine.env：端口实现（要人定）、工作树的根和引擎状态目录钉在约定值上
-#   5. 每一种读不到（文件不在、是个目录）、认不出（引号没配上、样例里有看不懂的行）：判红、返回非 0、文件没动
+#   5. 每一种读不到（文件不在、是个目录）、认不出（引号没配上）：判红、返回非 0、文件没动
 #   6. 读回要退役的垫片：在记待配，不在通过
 #   7. 读回环境文件的属主权限：不是 640（组读不到、谁都能读）、不在、是符号链接，判红
 #   8. 读回整份环境文件里写了几行的键：任一个都判红、只报键名；文件不在判红
@@ -113,70 +113,65 @@ else
   flunk "引号没配上该认不出：返回 0，原因「$APP_CONFIG_WHY」"
 fi
 
-echo "== 样例后来加的键"
-printf '# 样例\nFLEET_ENGINE_PORTS=real\nDATABASE_URL=postgres:///fleet\nFLEET_MACHINE_NAME=法国\nFLEET_WORK_DIR=/var/lib/fleet-work\n' >"$T/engine.example"
-printf 'FLEET_ENGINE_PORTS=fake\n# 人写的注释\nDATABASE_URL=postgres:///mine\n' >"$T/engine.env"
-call add_missing_keys "$T/engine.env" "$T/engine.example"
-if ((RC == 0)) && [[ "$(env_value "$T/engine.env" FLEET_ENGINE_PORTS)" == fake && "$(env_value "$T/engine.env" DATABASE_URL)" == postgres:///mine &&
-  "$(env_value "$T/engine.env" FLEET_MACHINE_NAME)" == 法国 && "$(env_value "$T/engine.env" FLEET_WORK_DIR)" == /var/lib/fleet-work ]] &&
-  grep -q '人写的注释' "$T/engine.env"; then
-  pass "补上了缺的两个键，已有的值和注释都没动"
+echo "== 新机器照仓里的期望建环境文件（#323）"
+REPO=$(cd -- "$HERE/../.." && pwd)
+CLI=$REPO/deploy/france/auto-release/config.mjs
+FRANCE_DESIRED=$REPO/deploy/france/desired-config.json
+LOCAL_DESIRED=$REPO/deploy/local/desired-config.json
+for name in engine api release; do
+  call env_from_desired "$T/fr-$name.env" "$name.env" "$FRANCE_DESIRED" "$CLI"
+  if ((RC == 0 && ${#REDS[@]} == 0 && ${#CHANGES[@]} == 1)) && [[ "$(stat -c '%U:%G %a' "$T/fr-$name.env")" == "$APP_CONFIG_OWNER 640" ]]; then
+    pass "$name.env：照法国的期望建出来，$APP_CONFIG_OWNER 640"
+  else
+    flunk "$name.env 该照期望建出来（返回 $RC，红 ${#REDS[@]}，改动 ${#CHANGES[@]}）：$OUT"
+  fi
+done
+expect_value() { # 文件 键 期望的值 说明：按 systemd 的读法读回来，恰好一行、值对
+  local rc=0
+  env_get "$1" "$2" || rc=$?
+  if ((rc == 0 && APP_ENV_COUNT == 1)) && [[ "$APP_ENV_VALUE" == "$3" ]]; then
+    pass "$4"
+  else
+    flunk "$4：读成「$APP_ENV_VALUE」（返回 $rc，$APP_ENV_COUNT 行）"
+  fi
+}
+expect_value "$T/fr-engine.env" FLEET_ENGINE_PORTS real "engine.env 的端口实现照期望写（期望就是人定的那一份）"
+expect_value "$T/fr-engine.env" FLEET_WORK_DIR /var/lib/fleet-work "engine.env 的工作树的根照期望写"
+expect_value "$T/fr-api.env" FLEET_ENV production "api.env 的公开值照期望写"
+expect_value "$T/fr-engine.env" FLEET_CANARY_REPO "" "巡检仓（私有值）只留空位，不生造值"
+expect_value "$T/fr-api.env" FLEET_GITHUB_WEBHOOK_SECRET "" "webhook 密钥（私有值）只留空位"
+expect_value "$T/fr-api.env" FEISHU_APP_SECRET "" "飞书密钥（私有值）只留空位"
+expect_value "$T/fr-release.env" FLEET_DOMAIN "" "域名（私有值）只留空位"
+call env_from_desired "$T/lo-release.env" release.env "$LOCAL_DESIRED" "$CLI"
+expect_value "$T/lo-release.env" FLEET_DOMAIN fleet-local.invalid "本机档：照 deploy/local 那份建（占位域名是公开值）"
+expect_value "$T/lo-release.env" FLEET_HK_PARTS "" "本机档：往香港一样都不发，显式写成空的"
+# 空着的 webhook 密钥那一行，填密钥照样认得（新机器上紧接着就要填）
+printf '{"webhook_secret": "0123456789abcdef0123456789abcdef01234567"}\n' >"$T/new-app.json"
+call fill_webhook_secret "$T/fr-api.env" "$T/new-app.json"
+expect_value "$T/fr-api.env" FLEET_GITHUB_WEBHOOK_SECRET 0123456789abcdef0123456789abcdef01234567 "照期望建出来的 api.env：空着的 webhook 密钥照「引擎」App 填上"
+before=$(digest "$T/fr-engine.env")
+call env_from_desired "$T/fr-engine.env" engine.env "$FRANCE_DESIRED" "$CLI"
+if ((RC == 0 && ${#CHANGES[@]} == 0)) && [[ "$(digest "$T/fr-engine.env")" == "$before" && -z "$OUT" ]]; then
+  pass "文件已经在：不建不补，第二遍零改动"
 else
-  flunk "补键不对：$(cat "$T/engine.env")"
+  flunk "文件已经在却动了：$OUT"
 fi
-before=$(digest "$T/engine.env")
-call add_missing_keys "$T/engine.env" "$T/engine.example"
-if ((RC == 0 && ${#CHANGES[@]} == 0)) && [[ "$(digest "$T/engine.env")" == "$before" && -z "$OUT" ]]; then
-  pass "第二遍零改动"
+printf 'FLEET_MACHINE_NAME=别处\n' >"$T/hand.env"
+before=$(digest "$T/hand.env")
+call env_from_desired "$T/hand.env" engine.env "$FRANCE_DESIRED" "$CLI"
+if ((RC == 0 && ${#CHANGES[@]} == 0)) && [[ "$(digest "$T/hand.env")" == "$before" ]]; then
+  pass "人改过的文件不动、不补键（之后归发布时照期望写，对账报偏离）"
 else
-  flunk "第二遍动了文件：$OUT"
+  flunk "人改过的文件被动了：$OUT"
 fi
-
-# 人换了写法、注释掉、光写了键：都算出现过，不在末尾再补一行
-printf '  FLEET_ENGINE_PORTS=fake\nDATABASE_URL = postgres:///mine\n# FLEET_WORK_DIR=/somewhere/else\nFLEET_MACHINE_NAME\n' >"$T/styled.env"
-cp "$T/engine.example" "$T/styled.example"
-printf 'FLEET_ENGINE_STATE_DIR=/var/lib/fleet-dao/engine\n' >>"$T/styled.example"
-call add_missing_keys "$T/styled.env" "$T/styled.example"
-if ((RC == 0)) && [[ "$(env_value "$T/styled.env" FLEET_ENGINE_PORTS)" == fake && "$(env_value "$T/styled.env" DATABASE_URL)" == postgres:///mine &&
-  "$(env_value "$T/styled.env" FLEET_ENGINE_STATE_DIR)" == /var/lib/fleet-dao/engine ]] &&
-  ! grep -q '^FLEET_ENGINE_PORTS=' "$T/styled.env" && ! grep -q '^DATABASE_URL=' "$T/styled.env" &&
-  ! grep -q '^FLEET_WORK_DIR=' "$T/styled.env" && ! grep -q '^FLEET_MACHINE_NAME=' "$T/styled.env"; then
-  pass "缩进的、KEY = 值、注释掉的、光写了键都算出现过：只补了真缺的那一个"
-else
-  flunk "换了写法的键被当成缺的补了：$(cat "$T/styled.env")"
-fi
-before=$(digest "$T/styled.env")
-call add_missing_keys "$T/styled.env" "$T/styled.example"
-if ((RC == 0 && ${#CHANGES[@]} == 0)) && [[ "$(digest "$T/styled.env")" == "$before" ]]; then
-  pass "注释掉的键第二遍也不补回来"
-else
-  flunk "第二遍把注释掉的键补回来了：$OUT"
-fi
-
-printf 'DATABASE_URL=postgres:///mine\n' >"$T/noports.env"
-call add_missing_keys "$T/noports.env" "$T/engine.example"
-if ((RC == 0)) && [[ -z "$(env_value "$T/noports.env" FLEET_ENGINE_PORTS)" ]] && ! grep -q FLEET_ENGINE_PORTS "$T/noports.env"; then
-  pass "FLEET_ENGINE_PORTS 要人定：样例里有也不补"
-else
-  flunk "替人补了 FLEET_ENGINE_PORTS：$(cat "$T/noports.env")"
-fi
-
-before=$(digest "$T/engine.env")
-call add_missing_keys "$T/engine.env" "$T/no-such.example"
-expect_red_untouched "样例读不到" "$T/engine.env" "$before"
-call add_missing_keys "$T/no-such.env" "$T/engine.example"
-expect_red_untouched "要补的文件不在（不新建）" "$T/no-such.env" "不在"
-mkdir "$T/dir.env"
-call add_missing_keys "$T/dir.env" "$T/engine.example"
-expect_red_untouched "要补的文件是个目录（读不了）" "$T/dir.env" "目录"
-printf 'FLEET_ENGINE_PORTS=fake\nFEISHU_APP_SECRET="abc\n' >"$T/openquote.env"
-before=$(digest "$T/openquote.env")
-call add_missing_keys "$T/openquote.env" "$T/engine.example"
-expect_red_untouched "要补的文件引号没配上（认不出）" "$T/openquote.env" "$before"
-printf 'FLEET_A=1\nexport FLEET_B=2\n' >"$T/odd.example"
-before=$(digest "$T/engine.env")
-call add_missing_keys "$T/engine.env" "$T/odd.example"
-expect_red_untouched "样例里有看不懂的行" "$T/engine.env" "$before"
+call env_from_desired "$T/new1.env" engine.env "$T/no-such-desired.json" "$CLI"
+expect_red_untouched "期望读不到：不建" "$T/new1.env" "不在"
+printf '{' >"$T/broken-desired.json"
+call env_from_desired "$T/new2.env" engine.env "$T/broken-desired.json" "$CLI"
+expect_red_untouched "期望认不出：不建（不拿空文件顶）" "$T/new2.env" "不在"
+call env_from_desired "$T/new3.env" france.env "$FRANCE_DESIRED" "$CLI"
+expect_red_untouched "不归它建的文件（france.env）：不建" "$T/new3.env" "不在"
+mkdir "$T/dir.env" # 后面几段拿它当「是个目录、读不了」用
 
 echo "== webhook 密钥"
 SECRET=0123456789abcdef0123456789abcdef01234567
@@ -413,7 +408,7 @@ engine_case '缩进、KEY = 值照样认' pending '   FLEET_ENGINE_PORTS = fake'
 engine_case '没写端口实现（要人定）' red '' 'FLEET_ENGINE_PORTS'
 engine_case '端口实现被注释掉' red '# FLEET_ENGINE_PORTS=real' '注释'
 engine_case '端口实现不认识' red 'FLEET_ENGINE_PORTS=maybe' '「maybe」'
-# 补键只补缺、不改已有的：机器上留着的旧值只有读回拦得住
+# 发布只写期望变了的键、人手改的不改回：机器上留着的旧值只有读回拦得住
 TAIL="FLEET_ENGINE_STATE_DIR=$STATE"
 engine_case '工作树的根是旧值 /tmp' red "FLEET_ENGINE_PORTS=real
 FLEET_WORK_DIR=/tmp" '「/tmp」'
@@ -484,26 +479,13 @@ fi
 call check_env_duplicates "$T/no-such-dup.env"
 if ((RC != 0 && ${#REDS[@]} == 1)); then pass "文件不在：判红"; else flunk "文件不在该判红：$OUT"; fi
 
-echo "== 第一次照样例建：要人定的键不替人选"
-printf '# 说明\nFLEET_ENGINE_PORTS=real\nTEMPORAL_ADDRESS=127.0.0.1:7243\n' >"$T/new-example.env"
-if new_content=$(example_for_new_file "$T/new-example.env"); then
-  printf '%s\n' "$new_content" >"$T/new-engine.env"
-  call check_engine_env "$T/new-engine.env" "$WORK" "$STATE"
-  if ((RC != 0)) && [[ "$(env_value "$T/new-engine.env" TEMPORAL_ADDRESS)" == 127.0.0.1:7243 && "$OUT" == *"FLEET_ENGINE_PORTS"* ]]; then
-    pass "样例里的 FLEET_ENGINE_PORTS=real 建出来是注释，读回判红；别的键照抄"
-  else
-    flunk "建出来的文件该没有生效的端口实现、读回判红（返回 $RC）：$OUT"
-  fi
-  call add_missing_keys "$T/new-engine.env" "$T/new-example.env"
-  if [[ "$(env_value "$T/new-engine.env" FLEET_ENGINE_PORTS 2>/dev/null)" == "" ]]; then
-    pass "补键也不把它补回来"
-  else
-    flunk "补键把要人定的键补回来了"
-  fi
+echo "== 照期望建出来的 engine.env 读回：端口实现、工作树的根、引擎状态目录都对"
+call check_engine_env "$T/fr-engine.env" "$WORK" "$STATE"
+if ((RC == 0 && ${#REDS[@]} == 0 && ${#PENDING[@]} == 0)); then
+  pass "照法国的期望建出来的 engine.env：读回全过"
 else
-  flunk "读得到的样例该建得出来"
+  flunk "照期望建出来的 engine.env 读回该全过（返回 $RC，红 ${#REDS[@]}，待配 ${#PENDING[@]}）：$OUT"
 fi
-if example_for_new_file "$T/no-such-example.env" >/dev/null; then flunk "样例不在该回非 0"; else pass "样例不在：回非 0，不建"; fi
 
 echo "== 配置文件的路径不是普通文件：判红、什么都不改"
 printf 'X=1\n' >"$T/target.env"
@@ -529,9 +511,17 @@ if ((ok_file == 0 && RC == 0 && ${#REDS[@]} == 0)); then pass "普通文件、�
 setup_body=$(sed -n '/^setup_app_config() {/,/^}/p' "$HERE/../france.sh")
 # shellcheck disable=SC2016 # 找的就是字面上的 $file
 if [[ "$(grep -c 'app_config_path_ok "$file"' <<<"$setup_body")" == 2 && "$setup_body" == *'if ((api_ok)); then fill_webhook_secret'* ]]; then
-  pass "france.sh 建、补环境文件和随机密钥之前都先判路径，api.env 坏了不填 webhook 密钥"
+  pass "france.sh 建环境文件和随机密钥之前都先判路径，api.env 坏了不填 webhook 密钥"
 else
   flunk "france.sh 的 setup_app_config 没有在两个循环里先判路径"
+fi
+# shellcheck disable=SC2016 # 找的就是字面上的 $file、$desired
+if [[ "$setup_body" == *'env_from_desired "$file" "$name.env" "$desired" "$CONFIG_CLI"'* &&
+  "$setup_body" == *'desired=$(profile_desired_file "$DEPLOY_DIR")'* && "$setup_body" != *'.env.example'* &&
+  "$setup_body" != *add_missing_keys* ]]; then
+  pass "france.sh 新机器照这一档的期望建环境文件，不照样例、不补键"
+else
+  flunk "france.sh 的 setup_app_config 该照这一档的期望建（env_from_desired），不再照样例建、补键"
 fi
 
 echo "== 要退役的垫片"

@@ -33,7 +33,7 @@ export interface FailureEvidence {
   hostId?: string;
   /**
    * 这个池是 Claude 订阅的哪个组织（pools.org_kind：拼车、独享）。带了的额度用满不原地睡到清零（design 第九节
-   * 「拼车用完，切独享接着干」）：两个组织共用一个会话用户，这个池用满了引擎切号，回去选路、切了就换池 fork 续上
+   * 「拼车用完，切独享接着干」）：两个组织共用一个会话用户，这个池用满了引擎切号，回去选路、切了就换到切过去的池接着干
    * （QT1 的 orgLadder）。不给 = 不是这种池，照普通的走。
    */
   orgKind?: 'carpool' | 'solo';

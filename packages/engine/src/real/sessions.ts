@@ -123,6 +123,7 @@ import {
   scopeOomKills,
 } from './kill-evidence.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
+import type { OrgSwitchSessions } from './org-switch.ts';
 import {
   isLeadKind,
   type LeadOutputKind,
@@ -406,15 +407,11 @@ export type SessionPorts = {
 };
 
 /**
- * 切号那一刻在跑的会话（#59）。只管这个工人进程里起的会话：会话都由它起，工人重启时上一轮留下的已经收掉了。
- * stop：把跑在这些账号池上、进程已经起来的会话停下（插头收进程），它们交回 org_switch，工作流切完续同一个会话；
- * 交回这一次叫停的会话编号（已经在停的不重复叫停）。还在建树、没起进程的不碰：它们一起进程就在 live 里，下一次再停。
- * live：跑在这些账号池上、还没收场的会话编号（进程起来了、还没交回的），切号要等它们都收场。
+ * 切号那一刻在跑的 Fusion 会话（#59；接口定义在 real/org-switch.ts）。只管这个工人进程里起的会话：会话都由它起，工人重启时
+ * 上一轮留下的已经收掉了。stop 把进程已经起来的停下（它们交回 org_switch，工作流切完续同一个会话）；还在建树、没起进程的不碰：
+ * 它们一起进程就在 live 里，下一次再停。
  */
-export interface OrgSwitchSessions {
-  stop(poolIds: ReadonlySet<string>, why: string): string[];
-  live(poolIds: ReadonlySet<string>): string[];
-}
+export type { OrgSwitchSessions };
 
 interface Live {
   runId: string;
