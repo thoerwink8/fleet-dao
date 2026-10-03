@@ -19,6 +19,8 @@ export interface PublishDeps {
   gh?: (args: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
   /** git 替身。 */
   git?: (args: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+  /** 「今天」（YYYY-MM-DD，UTC）的替身：测试里钉死，不读真钟。 */
+  today?: () => string;
   /** 替好人看的回执（默认 console.log）。 */
   note?: (line: string) => void;
 }
@@ -79,7 +81,11 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
     currentBranch = r.stdout.trim();
   }
   if (!currentBranch) throw new Error('查不到当前分支：发起人先 git switch -c release/v<N> 再重跑。');
-  const plan = publishReleasePlan({ changelog, head: currentBranch });
+  const plan = publishReleasePlan({
+    changelog,
+    head: currentBranch,
+    ...(deps.today ? { today: deps.today } : {}),
+  });
 
   // 工作区除了仓根的 CHANGELOG.md 之外不许还有别的没提交的：发布 PR 不该带私货（第二意见 2026-10-02）。
   // porcelain 行格式是「XY 路径」（rename: XY 旧 → 新）；只放行精确等于「CHANGELOG.md」的路径，

@@ -24,8 +24,11 @@ export interface ChangelogSplit {
   hasContent: boolean;
 }
 
-/** Unreleased 段拿出最低层一行：空的有「什么也没有」、「还没有」等。 */
-export function splitChangelog(text: string): ChangelogSplit {
+/**
+ * Unreleased 段拿出最低层一行：空的有「什么也没有」、「还没有」等。
+ * now 是「今天」的来源（默认读真钟，UTC）：要钉死日期的调用方（测试）自己给，别拿写死的日期去比真钟。
+ */
+export function splitChangelog(text: string, now: () => string = today): ChangelogSplit {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((l) => l.trim() === UNRELEASED_HEADING);
   if (start === -1) throw new Error(`CHANGELOG.md 缺 ${UNRELEASED_HEADING}`);
@@ -54,8 +57,7 @@ export function splitChangelog(text: string): ChangelogSplit {
   const nextVersion = `v${lastNum + 1}`;
   const hasContent =
     section.length > 0 && !UNRELEASED_EMPTY_MARKS.some((mark) => section === mark || section.includes(mark));
-  const date = today();
-  return { section, next: { version: nextVersion, date }, released, hasContent };
+  return { section, next: { version: nextVersion, date: now() }, released, hasContent };
 }
 
 /** 同一行的下一版本：v1 之后是 v2。 */

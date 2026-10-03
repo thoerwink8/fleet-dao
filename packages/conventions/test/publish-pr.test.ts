@@ -185,6 +185,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
       env: { GITHUB_TOKEN: 'x' },
       root,
       currentBranch: 'release/v2',
+      // 日期钉死：不读真钟（2026-10-03 UTC 起，写死的 10-02 遇上真钟让每个 PR 的 test (rest) 都红）
+      today: () => '2026-10-02',
       git: async (args) => {
         ops.push(`git ${args.join(' ')}`);
         if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
