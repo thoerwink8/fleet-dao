@@ -243,6 +243,11 @@ describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第�
       ['+      - docs/**', '列表项'],
       ['+  attestations: write', '权限'],
       ['+  schedule:', '触发条件'],
+      ['+  workflow_job:', '顶层骨架'],
+      ['+  workflow_job: {}', '顶层骨架'],
+      ['+  future_event: [x]', '顶层骨架'],
+      ['+  group: ci-${{ github.ref }}', '顶层骨架'],
+      ['+on: [push, workflow_job]', '触发条件'],
       ['+    - cron: "0 * * * *"', '触发条件'],
       ['+  workflow_dispatch:', '触发条件'],
       ['+  workflow_call:', '触发条件'],
@@ -282,8 +287,8 @@ describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第�
       ['+    needs: [changes, lint]', '汇总、依赖'],
       ['-        run: node packages/conventions/src/bin/ci-verdict.ts', '汇总、依赖'],
       ['+        CI_NEEDS: ${{ toJSON(needs) }}', '汇总、依赖'],
-      ['-  web:', '整个 job 的增删'],
-      ['+  newjob:', '整个 job 的增删'],
+      ['-  web:', '顶层骨架'],
+      ['+  newjob:', '顶层骨架'],
     ];
     for (const [line, what] of touches) {
       const hits = verdict(patchOf(line));

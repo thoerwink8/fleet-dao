@@ -204,7 +204,9 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
   // 没有冒号的列表项（- main、- '**'、- edited）：触发过滤（branches、paths、paths-ignore、types）下新增一项会改触发范围，
   // paths-ignore 下加一项就是让这类改动不跑 CI；脚本块里的内容不是列表项，不受影响
   [/^\s*-\s+['"]?[^\s:'"][^:]*$/, '列表项（触发过滤等）'],
-  [/^ {2}[\w-]+:\s*$/, '整个 job 的增删'],
+  // 顶层键下面第一层（正好缩进两格）的任何键：job 名、on 下的事件名（含没列进上面的，如 workflow_job）、concurrency、defaults、env。
+  // 不管值写什么（{}、[]、空）都算：新增一个 job、一个触发事件、改并发组，都是改了 CI 的骨架
+  [/^ {2}[\w-]+:/, '顶层骨架（job、触发事件、并发）'],
 ];
 
 /**
