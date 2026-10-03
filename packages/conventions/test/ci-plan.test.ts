@@ -708,6 +708,73 @@ describe('ci.yml 和这里对得上', () => {
     });
   });
 
+  /**
+   * 抠出 deploy 里「给 /etc/skel 瘦身」那一步，配一个假 sudo（照原样执行，命令行含指定片段时假装失败），
+   * SKEL 指到临时目录真跑：瘦成、半路失败要挪回去、挪不回去要红。
+   */
+  describe('deploy 的 skel 瘦身步（真跑它的脚本）', { timeout: 30_000 }, () => {
+    const doc = parse(yml) as {
+      jobs: { deploy: { steps: { name?: string; if?: unknown; run?: string }[] } };
+    };
+    const step = doc.jobs.deploy.steps.find((s) => s.name?.includes('/etc/skel 瘦身'));
+    const go = (fail: string[]) => {
+      const dir = mkdtempSync(join(tmpdir(), 'skel-')).split('\\').join('/');
+      const skel = `${dir}/skel`;
+      mkdirSync(`${skel}/.rustup/toolchains`, { recursive: true });
+      writeFileSync(`${skel}/.rustup/toolchains/big`, 'x');
+      writeFileSync(`${skel}/.profile`, 'profile');
+      writeFileSync(`${skel}/.bashrc`, 'bashrc');
+      mkdirSync(`${dir}/bin`);
+      const sudo = `${dir}/bin/sudo`;
+      writeFileSync(
+        sudo,
+        [
+          '#!/usr/bin/env bash',
+          ...fail.map((f) => `case "$*" in *"${f}"*) exit 1;; esac`),
+          'exec "$@"',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(sudo, 0o755);
+      const r = spawnSync('bash', ['-c', step?.run ?? ''], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}/bin${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
+          SKEL: skel,
+        },
+      });
+      const ls = (p: string) => (existsSync(p) ? readdirSync(p).sort() : null);
+      return { r, skel: ls(skel), full: ls(`${skel}.ci-full`) };
+    };
+
+    it('只在要 sudo 的台上跑', () => {
+      expect(step, '找不到瘦身那步').toBeDefined();
+      expect(step?.if).toBe('matrix.sudo');
+    });
+
+    it('瘦成：只留顶层普通文件，工具链目录挪到 .ci-full', () => {
+      const { r, skel, full } = go([]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(skel).toEqual(['.bashrc', '.profile']);
+      expect(full).toEqual(['.bashrc', '.profile', '.rustup']);
+    });
+
+    it('【故意造出的失败】新的挪不进去：把原来的挪回去，照原样跑（退出 0、打 warning）', () => {
+      const { r, skel } = go(['skel.slim ']);
+      expect(r.status, r.stderr).toBe(0);
+      expect(skel).toEqual(['.bashrc', '.profile', '.rustup']);
+      expect(r.stdout).toContain('::warning::');
+    });
+
+    it('【故意造出的失败】新的挪不进去、原来的也挪不回去：红，不拿「照原样跑」糊过去', () => {
+      const { r, skel } = go(['skel.slim ', 'skel.ci-full ']);
+      expect(r.status).toBe(1);
+      expect(skel).toBeNull();
+      expect(r.stdout).toContain('::error::');
+    });
+  });
+
   /** 抠出 lint 里「汇总」那一步的脚本，原样交给 bash 跑：每种红法都造一遍，看退出码和报出来的名字。 */
   describe('lint 的汇总步（真跑它的脚本）', () => {
     const doc = parse(yml) as {
