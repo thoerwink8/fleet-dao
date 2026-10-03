@@ -2,6 +2,7 @@
 // 整池暂停和还没结束的 Claude 会话（db 的 sessionOrgFacts），照 jobs/org-switch.ts 判。该切：先让选路停下（读组织回 pending，
 // 选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了会话端口（#59）就把手上跑在 Claude 池上的
 // 会话停下（它们交回 org_switch，切完续同一个会话，换了池 fork 续上），等它们都收场；没接就再数一遍，还有会话就这一轮不切。
+// 三段的一次性会话（runs 里开跑就留的那一行，#157）会话端口停不下：手上有就不切、等它们跑完，切之前也再数一遍。
 // 然后经 root 帮手的 org-use 切过去（adapters 的 switchSessionOrg：帮手以会话用户读 org list 认出那一类、切、回读核对，
 // 没切成、核对不了都切回原来的），切完记操作记录。这一轮探完，切过去的那个池的路由探通了才算切成（after）。
 // 没切成、切完探针读回不在线、拼车用满却读不到几点恢复：写一条 session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱
@@ -183,12 +184,17 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
           log('error', '会话用户切号：手上的会话没停齐，这一轮不切', { from, to, problem: drained.problem });
           return null;
         }
-      } else {
-        const again = await facts();
-        if (again.busy > 0) {
-          log('info', '会话用户切号：让选路停下以后又有会话登记了，这一轮不切', { busy: again.busy });
-          return null;
-        }
+      }
+      // 再数一遍：让选路停下以前派出去的，这一会儿登记了。会话端口停得下的上面已经停下、收场了；停不下的（没接会话端口时的
+      // 全部，接了时的三段一次性会话）还在就这一轮不切
+      const again = await facts();
+      const left = w.sessions ? again.busyOneShot : again.busy;
+      if (left > 0) {
+        log('info', '会话用户切号：让选路停下以后又有会话登记了，这一轮不切', {
+          busy: again.busy,
+          busyOneShot: again.busyOneShot,
+        });
+        return null;
       }
       touched = true;
       result = await w.switchOrg(to);
@@ -240,12 +246,13 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         // 切不切看现在的真实状态：留着的读数可能是半分钟前的（起点不动：读数刚变、没定下来就这一轮不切）
         w.org.forget();
         const live = await w.org({ by: '切号' });
-        const { pools, busy, poolIds } = await facts();
+        const { pools, busy, busyOneShot, poolIds } = await facts();
         const plan = planOrgSwitch({
           live,
           pools,
           busy,
-          ...(w.sessions ? { canStopRunning: true } : {}),
+          // 会话端口停得下的照切（先停下、切完续上）；三段的一次性会话它停不下，手上有就等它们跑完
+          ...(w.sessions && busyOneShot === 0 ? { canStopRunning: true } : {}),
           now: clock(),
         });
         log('info', '会话用户切号：这一轮的判断', { action: plan.action, why: plan.why });

@@ -84,6 +84,7 @@ export async function saveVerifyRound(db: Db, row: VerifyRoundRecord, now: Date 
     issueNumber: null,
     model: modelId,
     channel: null,
+    routeId: row.routeId,
     // 这一刻的写入时刻仅作流水的临时刻度：Fusion 的 verify 会话真正起止由 #556-4 起真流水时回填（同一 id 整行覆盖）。
     startedAt: now,
     endedAt: now,

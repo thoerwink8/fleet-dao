@@ -82,6 +82,7 @@ function fakeOneShot(scripted: SpawnOutcome): {
   const commands: SpawnCommand[] = [];
   const recorded: RunRecord[] = [];
   const runs: RunsWriter = {
+    async start() {},
     async record(r: RunRecord) {
       recorded.push(r);
     },

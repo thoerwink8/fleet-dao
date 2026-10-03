@@ -7,6 +7,8 @@
 // 4. **不保留 .fleet-out/ 进度事件**：那是 Fusion 会话 io 的形状；本切片只认 stdout / stderr / exit code 三样。
 // 5. **起前做内存准入**：沿用 real/memory-admission.ts；放不下**不派**（明确失败，不鲁式化）。
 // 6. **stdout / stderr 落盘** `_tmp/<runId>/`：会话结束 24h 后由现有 _tmp 清理机制收（见引擎现有架子）。
+// 7. **开跑先在 runs 留一行没结束的**（#157）：切号数带组织类型的池上在跑的会话靠这一行，写不进去就不起会话
+//    （RUN_START_FAILED）。留了这一行之后的每条出路（跑完、超时、被杀、起不来）都要把它收掉——收不掉的行切号会一直当它在跑。
 //
 // **Spawner 依赖注入**：真实的生产 spawn 走 `real/exec.ts` 那一份 `fleet-agent-scope`；测试里换 fake——
 // 不调真进程，不调 sudo，不调 systemd，不写 /sys/fs/cgroup。本机 Windows / macOS 上跑也是 fake。
@@ -157,7 +159,8 @@ export interface OneShotDeps {
 export const SESSION_ARTIFACT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class OneShotError extends Error {
-  readonly code: 'RESUME_FORBIDDEN' | 'ADMISSION_BLOCKED' | 'SPAWN_FAILED';
+  /** RUN_START_FAILED：开跑那一行写不进 runs，会话没起（库一时不通，过一会儿再来就行）。 */
+  readonly code: 'RESUME_FORBIDDEN' | 'ADMISSION_BLOCKED' | 'SPAWN_FAILED' | 'RUN_START_FAILED';
   constructor(code: OneShotError['code'], message: string) {
     super(message);
     this.name = 'OneShotError';
@@ -206,6 +209,24 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   await mkdir(runDir, { recursive: true });
   await writeFile(join(runDir, 'brief.txt'), input.prompt, 'utf8');
 
+  // 开跑：先留一行没结束的。写不进去不起会话——起了就是一个切号看不见的会话（切号会把它当场掐断）。
+  try {
+    await deps.runs.start({
+      runId,
+      segment: input.segment,
+      ...(input.issueNumber !== undefined ? { issueNumber: input.issueNumber } : {}),
+      model: input.modelId,
+      ...(input.channel !== undefined ? { channel: input.channel } : {}),
+      ...(input.routeId !== undefined ? { routeId: input.routeId } : {}),
+      startedAt,
+    });
+  } catch (err) {
+    throw new OneShotError(
+      'RUN_START_FAILED',
+      `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const ac = new AbortController();
   const killTimer = setTimeout(() => ac.abort(new Error('one-shot timeout')), timeoutMs);
   let spawnResult: SpawnOutcome;
@@ -234,9 +255,28 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
         failureReason: `超过 ${input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES} 分钟，按规矩 kill（#554 不许拿超过 N 分钟）`,
         runsNotWired: false,
       };
-      await persistArtifacts(runDir, result);
-      await recordRun(input, result, deps.runs);
+      await settle(runDir, input, result, deps.runs);
       return result;
+    }
+    // 起不来：开跑那一行收成 spawn_failed（不留一行没结束的），再照旧抛
+    const failed: OneShotResult = {
+      runId,
+      outcome: 'spawn_failed',
+      exitCode: null,
+      stdout: '',
+      stderrTail: reason.slice(-4096),
+      startedAt,
+      endedAt: (deps.now ?? (() => new Date()))().toISOString(),
+      failureReason: `起子进程没起成：${reason}`,
+      runsNotWired: false,
+    };
+    try {
+      await recordRun(input, failed, deps.runs);
+    } catch (recordErr) {
+      throw new OneShotError(
+        'SPAWN_FAILED',
+        `起子进程没起成：${reason}；开跑那一行也没收上（${recordErr instanceof Error ? recordErr.message : String(recordErr)}）`,
+      );
     }
     throw new OneShotError('SPAWN_FAILED', `起子进程没起成：${reason}`);
   }
@@ -266,9 +306,18 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     runsNotWired: false,
     ...(spawnResult.facts !== undefined ? { facts: spawnResult.facts } : {}),
   };
-  await persistArtifacts(runDir, result);
-  await recordRun(input, result, deps.runs);
+  await settle(runDir, input, result, deps.runs);
   return result;
+}
+
+/** 收场：落盘和补完开跑那一行两样都做（一样没成不耽误另一样），没成的照抛。 */
+async function settle(runDir: string, input: OneShotInput, result: OneShotResult, runs: RunsWriter) {
+  const [recorded, persisted] = await Promise.allSettled([
+    recordRun(input, result, runs),
+    persistArtifacts(runDir, result),
+  ]);
+  if (recorded.status === 'rejected') throw recorded.reason;
+  if (persisted.status === 'rejected') throw persisted.reason;
 }
 
 async function persistArtifacts(runDir: string, result: OneShotResult): Promise<void> {
@@ -296,6 +345,7 @@ async function recordRun(input: OneShotInput, result: OneShotResult, runs: RunsW
     ...(input.issueNumber !== undefined ? { issueNumber: input.issueNumber } : {}),
     model: input.modelId,
     ...(input.channel !== undefined ? { channel: input.channel } : {}),
+    ...(input.routeId !== undefined ? { routeId: input.routeId } : {}),
     startedAt: result.startedAt,
     endedAt: result.endedAt,
     outcome:

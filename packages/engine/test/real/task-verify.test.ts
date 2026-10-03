@@ -190,6 +190,7 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
+      async start() {},
       async record(r) {
         recorded.push(r);
       },
@@ -494,6 +495,26 @@ describe('【故意造出的失败】贴不上、读不到、被叫停：抛出�
       pickRouteError: new PortError('DB_DOWN', '库连不上', { retryable: true }),
     });
     await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'DB_DOWN' });
+    expect(r.specs).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】开跑那一行写不进 runs（库一时不通，#157）：会话没起，PortError VERIFY_RUNS_UNWRITABLE 往外抛（可以重试），不是「验收做不出来」', async () => {
+    const r = rig({
+      deps: {
+        runs: {
+          async start() {
+            throw new Error('runs 开跑那一行写入失败：connection refused');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    const err = await r.run(r.input(), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'VERIFY_RUNS_UNWRITABLE', retryable: true });
+    expect((err as Error).message).toContain('connection refused');
     expect(r.specs).toHaveLength(0);
   });
 
