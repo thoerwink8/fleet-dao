@@ -135,6 +135,8 @@ export const routes = pgTable(
     }),
     // 同一模型换一种执行方式就是另一条路由；同池同模型同执行方式不许重复。
     unique('routes_pool_model_host_unique').on(t.poolId, t.modelId, t.hostId),
+    // 给 routing_catalog 的复合外键用：一条路由只能挂在它自己的模型下面（id 本来就唯一，这条只为让外键能指到 (id, model_id)）。
+    unique('routes_id_model_unique').on(t.id, t.modelId),
     // 不许拿默认值、手改冒充在线：在线必须是探针这一轮真探通了。结论为空时比较得 NULL、CHECK 会放行，所以包一层 coalesce。
     check('routes_alive_needs_probe_ok', sql`not ${t.alive} or coalesce(${t.probeState} = 'ok', false)`),
     check('routes_probe_state_at_together', sql`(${t.probeState} is null) = (${t.probedAt} is null)`),
@@ -180,6 +182,56 @@ export const stagePolicyRoutes = pgTable(
     primaryKey({ columns: [t.stage, t.routeId] }),
     unique('stage_policy_routes_stage_position_unique').on(t.stage, t.position),
     check('stage_policy_routes_position_nonneg', sql`${t.position} >= 0`),
+  ],
+);
+
+/**
+ * 路由两层的上层「用途 → 模型顺序」（#574，specs/574-路由两层DB）：每个用途（阶段类型）一串模型，越靠前越先用。
+ * 新旧并存：选路此刻仍读 stage_policy_routes，这两张表只落存的形状，读法和切换随后续切片。
+ * 「这一层现在活着吗」不存列：它由下层现算（routing-liveness.ts 写明三件事各看哪张表的哪几列）。
+ */
+export const routingPurposeModels = pgTable(
+  'routing_purpose_models',
+  {
+    purpose: stageKind('purpose').notNull(),
+    modelId: text('model_id')
+      .notNull()
+      .references(() => models.id),
+    /** 从 0 起，越小越先用。 */
+    position: integer('position').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.purpose, t.modelId] }),
+    unique('routing_purpose_models_purpose_position_unique').on(t.purpose, t.position),
+    check('routing_purpose_models_position_nonneg', sql`${t.position} >= 0`),
+  ],
+);
+
+/**
+ * 路由两层的下层「模型 → 渠道顺序」（#574）：一个模型一串路由（渠道 + 账号池 + 执行方式），越靠前越先用。
+ * 加一个能跑这个模型的新渠道，只在这个模型下加一行。路由必须是这个模型自己的（复合外键）。
+ */
+export const routingCatalog = pgTable(
+  'routing_catalog',
+  {
+    modelId: text('model_id')
+      .notNull()
+      .references(() => models.id),
+    routeId: text('route_id').notNull(),
+    /** 从 0 起，越小越先用。 */
+    position: integer('position').notNull(),
+    /** 调度台上的开关：关着的照样挂在顺序里，但不派。没有默认值：写入的地方必须逐条带上，漏带就插不进去，不会悄悄全打开。 */
+    enabled: boolean('enabled').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.modelId, t.routeId] }),
+    foreignKey({
+      name: 'routing_catalog_route_of_model_fk',
+      columns: [t.routeId, t.modelId],
+      foreignColumns: [routes.id, routes.modelId],
+    }),
+    unique('routing_catalog_model_position_unique').on(t.modelId, t.position),
+    check('routing_catalog_position_nonneg', sql`${t.position} >= 0`),
   ],
 );
 
