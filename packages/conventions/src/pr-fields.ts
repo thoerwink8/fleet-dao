@@ -55,7 +55,7 @@ function oneLine(s: string): string {
   return t.length > 60 ? `${t.slice(0, 60)}…` : t;
 }
 
-/** GitHub Actions 的报错注解（在检查页上直接显示）；% 和换行要转义。 */
-export function annotation(text: string, level: 'error' | 'warning' = 'error'): string {
+/** GitHub Actions 的注解（报错、提醒、说明，在检查页上直接显示）；% 和换行要转义。 */
+export function annotation(text: string, level: 'error' | 'warning' | 'notice' = 'error'): string {
   return `::${level}::${text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')}`;
 }

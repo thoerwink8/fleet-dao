@@ -1,5 +1,6 @@
 import { type Channel, hardBanFor, type Model, type Route, type SessionRun } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import type { SegmentRunRecord } from '../src/ports.ts';
 import {
   describeTimeline,
   findBan,
@@ -7,6 +8,7 @@ import {
   routeLookup,
   routeProblem,
   runView,
+  segmentRunViews,
   usageView,
 } from '../src/views.ts';
 
@@ -234,5 +236,33 @@ describe('任务详情的花费分清按量、套餐内', () => {
     const usage = usageView([ended('a', 'r-lost', 0.1), ended('b', 'r-none')], route);
     expect(usage.total.cost.unknown).toEqual({ runs: 2, usd: 0.1, missing: 1 });
     expect(usage.total.cost.subscription.runs).toBe(0);
+  });
+
+  it('三段的一笔：模型名查目录（查不到照写模型编号），计费方式查渠道（渠道没记、查不到都不给，汇总记进分不清）', () => {
+    const seg = (id: string, model: string, channel?: string): SegmentRunRecord => ({
+      id,
+      segment: 'verify',
+      taskId: 't',
+      model,
+      ...(channel === undefined ? {} : { channel }),
+      startedAt: '2026-09-27T01:00:00.000Z',
+      endedAt: '2026-09-27T01:08:00.000Z',
+      outcome: 'done',
+      costUsd: 0.1,
+      matchedBy: 'task',
+    });
+    const views = segmentRunViews([seg('a', opus.id, 'm'), seg('b', 'mystery-9', 'gone'), seg('c', gpt.id)], {
+      models: [opus, gpt],
+      channels,
+      taskFinished: true,
+    });
+    expect(views.map((v) => [v.modelName, v.billing ?? null])).toEqual([
+      ['Opus 5.5', 'metered'],
+      ['mystery-9', null],
+      ['GPT 5.6', null],
+    ]);
+    const usage = usageView([], routeLookup([], []), views);
+    expect(usage.total.cost.metered).toEqual({ runs: 1, usd: 0.1, missing: 0 });
+    expect(usage.total.cost.unknown).toEqual({ runs: 2, usd: 0.2, missing: 0 });
   });
 });

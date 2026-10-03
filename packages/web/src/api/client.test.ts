@@ -23,6 +23,19 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     expect(called()).toEqual([keys.routing.join('/')]);
   });
 
+  test('额度窗、渠道变了：路由两层的活不活跟着重拉（额度够不够、渠道开没开都在三件事里）', () => {
+    const { qc, called } = spy();
+    applyLiveEvent(qc, { type: 'change', table: 'quota_windows', id: 'pool-a' });
+    applyLiveEvent(qc, { type: 'change', table: 'channels', id: 'ch-a' });
+    expect(called()).toEqual([
+      keys.pools.join('/'),
+      keys.routingLayers.join('/'),
+      keys.routing.join('/'),
+      keys.pools.join('/'),
+      keys.routingLayers.join('/'),
+    ]);
+  });
+
   test('认不出的表、断线重连：全部重拉——宁可多拉，不把漏收当没变化', () => {
     const { qc, called } = spy();
     // 后端比前端先上新表时（部署先后），表名会不在这份名单里。

@@ -75,6 +75,11 @@ export function redactTaskDetail(d: TaskDetail, level: DemoDetail): TaskDetail {
     task: { ...task, title: taskTitle(d.task, level), rawRequest: HIDDEN_TEXT },
     subtasks: d.subtasks.map((s) => subtask(s, level)),
     runs: d.runs.map((r) => ({ ...r, whyRoute: HIDDEN_TEXT })),
+    // 失败原因是执行体的原话、分支名带着单子的内容：收起；段、模型、起止、用量照常
+    segmentRuns: d.segmentRuns.map((r) => {
+      const { branch: _branch, ...rest } = r;
+      return r.failureReason === undefined ? rest : { ...rest, failureReason: HIDDEN_TEXT };
+    }),
     asks: d.asks.map((a) => {
       const { answer: _a, ...rest } = a;
       return { ...rest, question: '有一个问题在等拍板（内容没开放）', options: [] };

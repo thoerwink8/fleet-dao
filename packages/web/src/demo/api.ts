@@ -46,6 +46,8 @@ export function createDemoApi(inner: MockApi): FleetApi {
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
     answerAsk: (askId, answer) => inner.answerAsk(askId, answer),
     routing: () => inner.routing(),
+    // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
+    routingLayers: () => Promise.reject(hidden('路由')),
     updateStagePolicy: (stage, body) => inner.updateStagePolicy(stage, body),
     updateChannel: (channelId, body) => inner.updateChannel(channelId, body),
     pools: () => inner.pools(),
