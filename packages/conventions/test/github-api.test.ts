@@ -321,3 +321,70 @@ describe('读 GitHub：计划和对账要的几样（里程碑说明、关单原
     expect(githubToken({ GITHUB_TOKEN: '' }, () => '')).toBeUndefined();
   });
 });
+
+describe('发布收尾要的两样（release.yml 核里程碑、关里程碑）', () => {
+  const PULLS = `${API}/pulls?state=closed&head=o:release/v3&per_page=100`;
+  const pull = (number: number, merged_at: string | null) => ({ number, merged_at });
+
+  it('已合并的发布 PR：按 head=<owner>:<分支> 查、翻页读完，只留合并了的（照 GitHub 回的先后）', async () => {
+    const page2 = `${PULLS}&page=2`;
+    const { impl } = fakeFetch({
+      [PULLS]: () =>
+        json([pull(731, '2026-10-05T02:00:00Z'), pull(730, null)], {
+          headers: { link: `<${page2}>; rel="next"` },
+        }),
+      [page2]: () => json([pull(700, '2026-10-04T00:00:00Z')]),
+    });
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.mergedPulls('release/v3')).toEqual([
+      { number: 731, mergedAt: '2026-10-05T02:00:00Z' },
+      { number: 700, mergedAt: '2026-10-04T00:00:00Z' },
+    ]);
+  });
+
+  it.each([
+    ['merged_at 认不出', [pull(731, '昨天')]],
+    ['没给 merged_at', [{ number: 731 }]],
+    ['没有号', [{ merged_at: null }]],
+  ])('故意造出的失败：已合并的发布 PR %s → 抛（不当成「没合并」把它漏掉）', async (_name, rows) => {
+    const { impl } = fakeFetch({ [PULLS]: () => json(rows) });
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).mergedPulls('release/v3'),
+    ).rejects.toThrow(/读 head 是 release\/v3 的 PR，有一条认不出/);
+  });
+
+  it('关里程碑：PATCH state=closed，回 GitHub 关完的那一份', async () => {
+    const seen: { method: string | undefined; body: string }[] = [];
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      expect(String(input)).toBe(`${API}/milestones/10`);
+      seen.push({ method: init?.method, body: String(init?.body) });
+      return json({
+        number: 10,
+        title: 'v3 三段一条龙',
+        state: 'closed',
+        description: null,
+        closed_at: '2026-10-05T02:01:30Z',
+      });
+    }) as typeof fetch;
+    const r = await liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).closeMilestone(10);
+    expect(seen).toEqual([{ method: 'PATCH', body: '{"state":"closed"}' }]);
+    expect(r).toEqual({
+      number: 10,
+      title: 'v3 三段一条龙',
+      state: 'closed',
+      description: '',
+      closedAt: '2026-10-05T02:01:30Z',
+    });
+  });
+
+  it('故意造出的失败：关里程碑 GitHub 回非 2xx、或回包认不出 → 抛', async () => {
+    const forbidden = (async () => new Response('{}', { status: 403 })) as unknown as typeof fetch;
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: forbidden }).closeMilestone(10),
+    ).rejects.toThrow('在关里程碑 #10 时，GitHub 回了 403');
+    const garbled = (async () => json({ number: 10 })) as unknown as typeof fetch;
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: garbled }).closeMilestone(10),
+    ).rejects.toThrow('读里程碑，有一条认不出');
+  });
+});
