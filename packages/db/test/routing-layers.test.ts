@@ -1,11 +1,12 @@
 // 路由两层的读法和装载（#574）：骨架写进库只补缺、引用对不上一行不写；读出来每一层写明活着吗、为什么；
 // 「接得上、额度够、没被禁令挡」走选路同一份判法（evaluateRoutes），这里只验读成三件事、合成每层的结论。
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { applyRoutingDefault } from '../src/routing-apply.ts';
 import { parseRoutingConfig, RoutingConfigError } from '../src/routing-config.ts';
 import { routingLayers } from '../src/routing-layers.ts';
 import { STAGE_KINDS } from '../src/schema/enums.ts';
-import { bans, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
+import { bans, routes, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, addWindow, catalog, MIN, NOW } from './helpers.ts';
 
@@ -143,6 +144,35 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
     // b-opus 没探过（alive=false、没有探针结论）：unknown，原因写探针还没看过
     expect(byRoute['b-opus']?.verdict).toBe('unknown');
     expect(byRoute['b-opus']?.liveness.connect.reason).toContain('探针还没看过');
+  });
+
+  it('探针没探、探了没通：原因照探针自己写的说（按量计费不探是不知道，不是挂着别的组织；没通是死）', async () => {
+    await freshQuota('relay-b');
+    const probe = (state: 'skipped' | 'failed' | 'not_wired', detail: string) =>
+      t.db
+        .update(routes)
+        .set({ alive: false, probeState: state, probedAt: NOW, probeDetail: detail })
+        .where(eq(routes.id, 'b-opus'));
+    const bOpus = async () =>
+      (await routingLayers(t.db, 'execute', { now: NOW })).models[0]?.routes.find(
+        (r) => r.candidate.routeId === 'b-opus',
+      )?.liveness.connect;
+
+    await probe('skipped', '按量计费的渠道不自动探：探一次就多一笔账');
+    expect(await bOpus()).toEqual({
+      verdict: 'unknown',
+      reason: '探针这一轮没探它（不是探了没通）：按量计费的渠道不自动探：探一次就多一笔账',
+    });
+    await probe('failed', '连探两次都没通：进程退出（退出码 1）');
+    expect(await bOpus()).toEqual({
+      verdict: 'dead',
+      reason: '探针判不在线：连探两次都没通：进程退出（退出码 1）',
+    });
+    await probe('not_wired', '执行方式「Grok 命令行」的插头引擎还没接');
+    expect(await bOpus()).toEqual({
+      verdict: 'dead',
+      reason: '探针判不在线：执行方式「Grok 命令行」的插头引擎还没接',
+    });
   });
 
   it('额度没读成：路由 unknown，整层不当 live（不当「还够」）', async () => {

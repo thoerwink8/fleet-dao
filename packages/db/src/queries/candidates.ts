@@ -7,7 +7,7 @@ import { bans, type channels, type models, type pools, quotaWindows, type routes
 import { inFlightByPool, poolDataTimes, quotaReadOverdue, type WindowState, windowState } from './quota.ts';
 
 /**
- * switched-off 调度台上这个阶段里关着；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
+ * switched-off 这条路由在它的模型下关着（路由两层的开关，不分用途）；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
  * model-retired 模型已下架；banned 命中禁令（代码里的全局硬禁令 + 库里的 bans）；quota-exhausted 适用的额度窗用满；
  * no-slot 账号池并发满了（等空位，不是坏了）。
  * 额度没读成不算挡：照常可选，但排在读到了的后面（设计 §九 选路第 3 条）。
@@ -51,6 +51,8 @@ export interface RouteCandidate {
   probedAt: Date | null;
   /** 那次结论是什么（routes.probe_state）；探针还没看过为空。 */
   probeState: (typeof routes.$inferSelect)['probeState'];
+  /** 探针自己写的原因（routes.probe_detail）：不是 ok 的结论一定有（库里约束），为什么没探、没通照它说。 */
+  probeDetail: (typeof routes.$inferSelect)['probeDetail'];
   /**
    * Claude 订阅池的路由：探针下那次结论时会话用户挂的是哪个组织（routes.probe_org）。skipped、又是另一个组织 = 那一轮
    * 没探它，不是它坏了（引擎 routing/filter.ts 按它判等不等下一轮探针）。
@@ -182,6 +184,7 @@ export async function evaluateRoutes(
       hostId: route.hostId,
       probedAt: route.probedAt,
       probeState: route.probeState,
+      probeDetail: route.probeDetail,
       probeOrg: route.probeOrg,
       quota,
       windows,

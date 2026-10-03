@@ -17,6 +17,7 @@ import {
   PoolsResponse,
   ReposResponse,
   ResolveNotificationResponse,
+  RoutingLayersResponse,
   RoutingResponse,
   RunStepsResponse,
   SETTING_SCHEMAS,
@@ -44,7 +45,7 @@ import { meBody } from './auth.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps, NotWiredMark } from './deps.ts';
-import { ApiError, readJson, readQuery, reply } from './http.ts';
+import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import {
   type Actor,
   type NewAuditEntry,
@@ -53,6 +54,7 @@ import {
   WorkflowGoneError,
   WorkflowUnavailableError,
 } from './ports.ts';
+import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
@@ -374,6 +376,32 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
     // 路由在线状态就是库里探针的结论（routes.alive、probe_*，#129），原样给驾驶舱
     return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
+  });
+
+  // 路由两层每一层现在活着吗（#574）：读的时候现算，不存。读不到回 503 写明没读成；没接上写 unavailable。
+  app.get(WebRoutes.routingLayers.path, async (c) => {
+    const now = deps.now();
+    if (!deps.routingLayers) {
+      return reply(c, RoutingLayersResponse, {
+        asOf: now.toISOString(),
+        purposes: [],
+        unavailable: ROUTING_LAYERS_NOT_HERE,
+      });
+    }
+    let layers: Awaited<ReturnType<RoutingLayersPort['read']>>;
+    try {
+      layers = await deps.routingLayers.read({ now, staleAfterMs: config.quotaStaleAfterMs });
+    } catch (err) {
+      deps.log.error('路由两层没读成', { error: fullStack(err) });
+      // message 只写原因：驾驶舱前面自己加「路由两层没读成：」
+      const cause = (err instanceof Error && err.message) || String(err);
+      throw new ApiError(503, 'routing_layers_unreadable', cause);
+    }
+    const [models, channels] = await Promise.all([store.listModels(), store.listChannels()]);
+    return reply(c, RoutingLayersResponse, {
+      asOf: now.toISOString(),
+      purposes: routingLayersView(layers, { models, channels }),
+    });
   });
 
   app.put(WebRoutes.updateStagePolicy.path, async (c) => {

@@ -657,6 +657,72 @@ export const UpdateChannelRequest = z.object({
 });
 export const UpdateChannelResponse = z.object({ ok: z.literal(true) });
 
+// —— 路由两层（#574）：每个用途 → 模型 → 路由，每一层现在活着吗 ——
+// 活不活不存，读的时候按探针、额度、禁令现算（db 的 routing-liveness.ts，判法只在那里）。
+
+/** live 派得出去；dead 派不出去；unknown 不知道（探针没看过、额度没读成）——不当活，也不当死。 */
+export const LivenessVerdictSchema = z.enum(['live', 'dead', 'unknown']);
+
+/** 接得上、额度够、没被禁令挡里的一件：结论和原因。原因总有：没查成不等于没问题。 */
+export const LivenessFactSchema = z.object({
+  verdict: LivenessVerdictSchema,
+  reason: z.string().min(1),
+});
+
+export const RoutingLayerRouteSchema = z.object({
+  routeId: Id,
+  channelId: Id,
+  /** 渠道目录里的名字；目录里找不到就是渠道编号。 */
+  channelName: z.string(),
+  poolId: Id,
+  hostId: HostIdSchema,
+  /** 这条路由在它的模型下开着吗（关着的照样挂在顺序里，但不派，ban 那一件写「开关关着」）。 */
+  enabled: z.boolean(),
+  /** 三件事合起来：任何一件 dead 就 dead；没有 dead、有 unknown 就 unknown；三件都 live 才 live。 */
+  verdict: LivenessVerdictSchema,
+  connect: LivenessFactSchema,
+  quota: LivenessFactSchema,
+  ban: LivenessFactSchema,
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）。 */
+  probedAt: Time.optional(),
+  /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
+  exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
+  /** 账号池此刻在跑几个、最多几个：满了是等空位，不算死。 */
+  inFlight: z.number().int().min(0),
+  maxConcurrency: z.number().int().min(0),
+});
+
+export const RoutingLayerModelSchema = z.object({
+  modelId: Id,
+  /** 模型目录里的名字；目录里找不到就是模型编号。 */
+  displayName: z.string(),
+  /** 目录里找不到、下面也没有路由时不给。 */
+  family: z.string().optional(),
+  /** 下面有一条 live 就 live；没有 live、有 unknown 就 unknown；全 dead 或一条都没有就 dead。 */
+  verdict: LivenessVerdictSchema,
+  /** 按这个模型下路由的先后。空 = 一条都没有（用途的 problems 里写明）。 */
+  routes: z.array(RoutingLayerRouteSchema),
+});
+
+export const RoutingLayerPurposeSchema = z.object({
+  purpose: StageKindSchema,
+  /** 判法和模型那一层一样：有一个模型 live 就 live。 */
+  verdict: LivenessVerdictSchema,
+  /** 配置上的缺口：这个用途没配模型顺序、某个模型下一条路由都没有。照实写，不当成「没有」。 */
+  problems: z.array(z.string()),
+  /** 按这个用途的模型先后。 */
+  models: z.array(RoutingLayerModelSchema),
+});
+
+export const RoutingLayersResponse = z.object({
+  /** 现算的时刻。 */
+  asOf: Time,
+  /** 每个用途一份，按 StageKind 的先后；unavailable 时为空。 */
+  purposes: z.array(RoutingLayerPurposeSchema),
+  /** 这里读不了路由两层（开发环境的内存版没有这两张表）：写明为什么，不拿空列表冒充「都没配」。 */
+  unavailable: z.string().optional(),
+});
+
 // —— 账号池与额度 ——
 
 export const QuotaWindowViewSchema = z.object({
@@ -1135,6 +1201,7 @@ export const WebRoutes = {
     response: AnswerAskResponse,
   },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
+  routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },
   updateStagePolicy: {
     method: 'PUT',
     path: '/routing/stages/:stage',
