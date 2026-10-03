@@ -38,6 +38,7 @@ import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink } from './ports.ts';
+import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
@@ -49,19 +50,30 @@ const log = jsonLogger();
 /**
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
+ * 同一份凭据还给 /changelog 的发布版本号读里程碑（release-version.ts，「引擎」机器人）；凭据没读到时那边照实报读不到。
  */
 function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
+  openMilestones: ReleaseSource['openMilestones'];
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
-    return { sink: gh.eventSink({ async wake() {} }) };
+    return {
+      sink: gh.eventSink({ async wake() {} }),
+      openMilestones: (repo, signal) => gh.readOpenMilestones({ repo, signal }),
+    };
   } catch (err) {
     log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像', { error: String(err) });
     const missing = githubAppMissing(String(err));
-    return { sink: missing.sink, credentialsMissing: missing.check };
+    return {
+      sink: missing.sink,
+      credentialsMissing: missing.check,
+      openMilestones: async () => {
+        throw new Error(`GitHub 机器人的凭据没读到（${String(err)}）`);
+      },
+    };
   }
 }
 
@@ -159,6 +171,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
     routingLayers: pgRoutingLayers(db),
+    // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
+    release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },
