@@ -442,6 +442,17 @@ jobs:
           cache: ${{ needs.changes.outputs.deploy == 'all' && 'pnpm' || '' }}
       - if: needs.changes.outputs.deploy == 'all'
         run: pnpm install --frozen-lockfile
+      # 这台一次性的 CI 机器上，新建的测试账号头一回 runuser 时 pam_systemd 会去起它的 user@ 管理器，偶尔卡到 systemd
+      # 默认的 90 秒超时（实测 cli-tools 一项 32 秒和 99 秒两种、login-user 8 秒和 49 秒两种，差的全在第一条用例之前）。
+      # 测试验的是脚本的判据，不靠用户管理器（deploy/lib 里没有 systemctl --user、loginctl、XDG_RUNTIME_DIR），
+      # 所以只在这里把 PAM 里的 pam_systemd 注释掉；生产机不动。改不成就照原样跑（只是慢），不挡。
+      - name: CI 机器上不给测试账号起 user@ 管理器（省掉偶发的 90 秒等待）
+        if: matrix.sudo
+        run: |
+          set -uo pipefail
+          files=$(grep -lE '^[^#]*pam_systemd\.so' /etc/pam.d/* 2>/dev/null || true)
+          for f in $files; do sudo sed -i -E 's/^([^#]*pam_systemd\.so.*)$/# CI 关掉：\1/' "$f" && echo "关掉了 $f 里的 pam_systemd"; done
+          [ -n "$files" ] || echo "PAM 里没找到 pam_systemd，照原样跑"
       # 每一台腿都必须真跑（原来这步只认 deploy == 'all'，ops 那台就被跳过了：空跑还报绿，#662 第二意见）。
       # 参数从矩阵来、按数组展开，不拼进命令行；ops 那台不用 sudo、不碰系统账号。
       - name: deploy 检查（${{ matrix.label }}）
