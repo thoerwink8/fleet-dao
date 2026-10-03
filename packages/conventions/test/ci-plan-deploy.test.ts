@@ -46,7 +46,9 @@ describe('deploy 那套切几台并行跑（run.sh --shard，#654 F2）', () => 
     expect(all.map((l) => l.args)).toEqual(
       Array.from({ length: DEPLOY_SHARDS }, (_, i) => ['--shard', `${i + 1}/${DEPLOY_SHARDS}`]),
     );
-    expect(deployMatrix('ops')).toEqual([{ label: 'ops', args: ['--ops'] }]);
+    // 全套那几台要 sudo（建、删真系统账号）；ops 那台不用
+    expect(all.every((l) => l.sudo === true)).toBe(true);
+    expect(deployMatrix('ops')).toEqual([{ label: 'ops', args: ['--ops'], sudo: false }]);
     expect(deployMatrix('none')).toEqual([]);
   });
 
@@ -60,7 +62,7 @@ describe('deploy 那套切几台并行跑（run.sh --shard，#654 F2）', () => 
       return JSON.parse(json) as unknown[];
     };
     expect(matrix('all')).toHaveLength(DEPLOY_SHARDS);
-    expect(matrix('ops')).toEqual([{ label: 'ops', args: ['--ops'] }]);
+    expect(matrix('ops')).toEqual([{ label: 'ops', args: ['--ops'], sudo: false }]);
     expect(matrix('none')).toEqual([]);
   });
 
@@ -83,10 +85,15 @@ describe('deploy 那套切几台并行跑（run.sh --shard，#654 F2）', () => 
     expect(body).toContain("if: needs.changes.outputs.deploy_matrix != '[]'");
     expect(body).toContain('name: deploy (${{ matrix.label }})');
     expect(body).toContain('include: ${{ fromJSON(needs.changes.outputs.deploy_matrix) }}');
-    expect(body).toMatch(
-      /sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh \$\{\{ join\(matrix\.args, ' '\) \}\}$/m,
-    );
+    // 跑测试那步不再带条件（原来写的是 deploy == 'all'，ops 那台被跳过、空跑报绿，#662 第二意见）；sudo 由矩阵决定
+    expect(body).toContain('NEEDS_SUDO: ${{ matrix.sudo }}');
+    expect(body).toMatch(/sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh "\$\{args\[@\]\}"/);
+    expect(body).toMatch(/^\s+bash deploy\/test\/run\.sh "\$\{args\[@\]\}"$/m);
     expect(body).not.toMatch(/deploy\/test\/run\.sh\s*$/m); // 不带参数跑全套的老写法没了
+    // 跑测试那一步整个块里不许再有 if:（原来写着 deploy == 'all'，ops 那台就被跳过）
+    const stepAt = body.indexOf('name: deploy 检查');
+    expect(stepAt).toBeGreaterThan(-1);
+    expect(body.slice(stepAt)).not.toMatch(/^\s+if:/m);
   });
 
   it('run.sh：--shard 的台数写错、和 --ops 一起用、认不出的参数，都退出 2（不跑任何一项）', () => {

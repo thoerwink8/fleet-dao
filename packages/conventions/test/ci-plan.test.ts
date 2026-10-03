@@ -633,13 +633,17 @@ describe('ci.yml 和这里对得上', () => {
     expect([...seen].filter((f) => !covered(f))).toEqual([]);
   });
 
-  it('deploy job：按 changes 给的矩阵铺（all 几台 --shard、ops 一台 --ops），开关空就不开；run.sh 认 --ops、全套里带着 ops-only 自检', () => {
+  it('deploy job：按 changes 给的矩阵铺（all 几台 --shard、ops 一台 --ops），开关空就不开；每一台都真跑、只有全套那几台带 sudo', () => {
     const d = job('deploy');
     expect(d).toContain("if: needs.changes.outputs.deploy_matrix != '[]'");
     expect(d).toContain('include: ${{ fromJSON(needs.changes.outputs.deploy_matrix) }}');
-    expect(d).toMatch(
-      /- if: needs\.changes\.outputs\.deploy == 'all'\n\s+run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh \$\{\{ join\(matrix\.args, ' '\) \}\}\n/,
-    );
+    // 【故意造出的失败】原来跑测试那步写着 if: deploy == 'all'：ops 那台铺了矩阵却被跳过，空跑还报绿（#662 第二意见）。
+    // 现在跑测试的那步没有条件（每一台腿都跑），sudo 由矩阵每台的 sudo 决定。
+    expect(d).not.toMatch(/run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh/);
+    expect(d).toMatch(/name: deploy 检查（\$\{\{ matrix\.label \}\}）/);
+    expect(d).toContain('NEEDS_SUDO: ${{ matrix.sudo }}');
+    expect(d).toMatch(/sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh "\$\{args\[@\]\}"/);
+    expect(d).toMatch(/^\s+bash deploy\/test\/run\.sh "\$\{args\[@\]\}"$/m);
     const runSh = readFileSync(join(ROOT, 'deploy/test/run.sh'), 'utf8');
     expect(runSh).toMatch(/^ {2}--ops\)$/m);
     expect(runSh).toContain('ops-only auto-release-state'); // 分台名单里排着 ops-only（自己也要跑）

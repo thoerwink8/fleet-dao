@@ -308,8 +308,20 @@ jobs:
           cache: ${{ needs.changes.outputs.deploy == 'all' && 'pnpm' || '' }}
       - if: needs.changes.outputs.deploy == 'all'
         run: pnpm install --frozen-lockfile
-      - if: needs.changes.outputs.deploy == 'all'
-        run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh ${{ join(matrix.args, ' ') }}
+      # 每一台腿都必须真跑（原来这步只认 deploy == 'all'，ops 那台就被跳过了：空跑还报绿，#662 第二意见）。
+      # 参数从矩阵来、按数组展开，不拼进命令行；ops 那台不用 sudo、不碰系统账号。
+      - name: deploy 检查（${{ matrix.label }}）
+        env:
+          ARGS: ${{ join(matrix.args, ' ') }}
+          NEEDS_SUDO: ${{ matrix.sudo }}
+        run: |
+          set -euo pipefail
+          read -ra args <<<"$ARGS"
+          if [ "$NEEDS_SUDO" = "true" ]; then
+            sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh "${args[@]}"
+          else
+            bash deploy/test/run.sh "${args[@]}"
+          fi
 
   # 必过检查。逐个核对：changes、docs 必须绿；biome、tsc、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过
   # （packages/conventions/src/ci-plan.ts 的 ciVerdict）。hygiene 只报不挡：仍然 needs 它、等它跑完，状态在 PR 上

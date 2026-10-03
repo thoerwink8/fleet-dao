@@ -77,14 +77,20 @@ export interface DeployLeg {
   label: string;
   /** run.sh 的参数。 */
   args: string[];
+  /**
+   * 这台要不要 sudo + FLEET_TEST_SYSTEM_USERS=1。只有全套那几台要（建、删真系统账号的测试在里面）；
+   * ops 那台不碰系统账号，不带（CI 上 sudo 要宽权限，能不带就不带）。
+   */
+  sudo: boolean;
 }
 
 export function deployMatrix(mode: DeployMode): DeployLeg[] {
   if (mode === 'none') return [];
-  if (mode === 'ops') return [{ label: 'ops', args: ['--ops'] }];
+  if (mode === 'ops') return [{ label: 'ops', args: ['--ops'], sudo: false }];
   return Array.from({ length: DEPLOY_SHARDS }, (_, i) => ({
     label: `${i + 1}/${DEPLOY_SHARDS}`,
     args: ['--shard', `${i + 1}/${DEPLOY_SHARDS}`],
+    sudo: true,
   }));
 }
 
