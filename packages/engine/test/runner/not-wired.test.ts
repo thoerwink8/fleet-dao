@@ -46,6 +46,31 @@ describe('notWiredRuns', () => {
     }
   });
 
+  it('start()：开跑那一行只挡形状、不落盘（收场那一笔才是整行）；形状不合当场红', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'fleet-554-1-nw-'));
+    try {
+      const w = notWiredRuns({ tmpDir: tmp });
+      await w.start({
+        runId: 'r-0',
+        segment: 'manual',
+        model: 'fake-model',
+        routeId: 'claude-carpool:opus-5.5:claude-code',
+        startedAt: '2026-10-02T01:00:00Z',
+      });
+      await expect(readdir(join(tmp, 'runs-not-wired'))).rejects.toThrow();
+      await expect(
+        w.start({
+          runId: 'r-0',
+          segment: 'fusion',
+          model: 'fake-model',
+          startedAt: '2026-10-02T01:00:00Z',
+        } as unknown as Parameters<typeof w.start>[0]),
+      ).rejects.toThrow();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('形状不合（缺 model / outcome），当场红、不落一行', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'fleet-554-1-nw-'));
     try {

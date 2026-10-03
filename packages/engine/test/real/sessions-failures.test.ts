@@ -4,13 +4,22 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 
 import { join } from 'node:path';
 import { scopePrefix } from '@fleet-dao/adapters';
-import { getSessionRun, notifications, quotaWindows, sessionRuns, upsertAlert } from '@fleet-dao/db';
+import {
+  getRun,
+  getSessionRun,
+  notifications,
+  openOrgRuns,
+  quotaWindows,
+  sessionRuns,
+  startRun,
+  upsertAlert,
+} from '@fleet-dao/db';
 
 import { assertPublishable } from '@fleet-dao/github';
 import { describe, expect, it, vi } from 'vitest';
 import type { JevAskContext, JevPort, JevQuestion, JevReply } from '../../src/failure/jev.ts';
 import type { LaunchSessionInput, LeadStep } from '../../src/ports.ts';
-
+import { ORPHAN_RUN_REASON } from '../../src/real/sessions.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import { layout } from '../../src/real/worktrees.ts';
 import { addCursorRoute, type FakeRunScript, git, NOW, untilAborted } from './fixtures.ts';
@@ -529,6 +538,34 @@ describe('收孤儿', () => {
     expect(scope.calls().filter((c) => c.action === 'stop')).toHaveLength(2);
     process.env.FAKE_SCOPE_LIST_EXIT = '1';
     await expect(ports.reapOrphanSessions()).rejects.toThrow('查不了上一轮留下的会话');
+  });
+
+  it('【故意造出的失败】上一轮引擎起的一次性会话没收场（runs 里还开着）：起来时收成没跑完、写明为什么，切号不再当它在跑（#157）', async () => {
+    const { ports } = setup(() => ({}));
+    process.env.FAKE_SCOPE_LIST = '';
+    const left = randomUUID();
+    const finished = randomUUID();
+    await startRun(t.db, {
+      id: left,
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId: 'carpool',
+      startedAt: NOW,
+    });
+    await startRun(t.db, {
+      id: finished,
+      segment: 'verify',
+      model: 'opus-5.5',
+      routeId: 'carpool',
+      startedAt: NOW,
+      endedAt: NOW,
+      outcome: 'done',
+    });
+    expect((await openOrgRuns(t.db)).map((r) => r.runId)).toEqual([left]);
+    await ports.reapOrphanSessions();
+    expect(await getRun(t.db, left)).toMatchObject({ outcome: 'killed', failureReason: ORPHAN_RUN_REASON });
+    expect(await getRun(t.db, finished)).toMatchObject({ outcome: 'done', failureReason: null });
+    expect(await openOrgRuns(t.db)).toEqual([]);
   });
 });
 

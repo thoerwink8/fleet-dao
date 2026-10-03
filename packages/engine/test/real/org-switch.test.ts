@@ -16,6 +16,7 @@ import {
   notifications,
   openSessionRun,
   routes,
+  runs,
   savePoolQuota,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -33,8 +34,10 @@ import {
   orgSwitchRound,
 } from '../../src/real/org-switch.ts';
 import { routeProbeJob } from '../../src/real/route-probe.ts';
+import { realRuns } from '../../src/real/runs-writer.ts';
 import type { OrgSwitchSessions } from '../../src/real/sessions.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
+import { type OneShotSpawner, runOneShot } from '../../src/runner/one-shot.ts';
 import {
   addTask,
   CARPOOL_ORG_ID,
@@ -551,6 +554,98 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
     expect(s.helperCalls).toEqual(['carpool']);
     expect(fake.stops[0]?.stopped).toEqual([a.id]);
     expect(fake.stops[0]?.why).toContain('从独享组织切到拼车组织');
+  });
+});
+
+describe('三段的一次性会话也算在跑（#157）：开跑就在 runs 留一行没结束的，会话端口停不下它，等它跑完再切', () => {
+  /** 起一个真的一次性会话（真 runs 写入、真库），进程卡在半路，放行了才收场。 */
+  function oneShotOnCarpool(now: () => Date, routeId = 'carpool') {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered: () => void = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let calls = 0;
+    const spawn: OneShotSpawner = async () => {
+      calls += 1;
+      entered();
+      await gate;
+      return { exitCode: 0, stdout: '做完了', stderr: '', killed: false };
+    };
+    const done = runOneShot(
+      { segment: 'manual', modelId: 'opus-5.5', routeId, issueNumber: 12, prompt: '干活', cwd: root },
+      { spawn, runs: realRuns({ db: t.db }), tmpDir: join(root, 'runs'), now },
+    );
+    return { done, spawned, release: () => release(), calls: () => calls };
+  }
+
+  it('一次性 Claude 会话在跑、拼车用满：不切、等（会话端口接着也不切）；它跑完了下一轮切独享', async () => {
+    const s = setup({ sessions: fakeSessions([]).sessions });
+    const job = oneShotOnCarpool(s.now);
+    await job.spawned;
+    await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
+    await s.round();
+    // 手上有一次性会话：等，帮手一次都没调、没有切号记录
+    expect(s.helperCalls).toEqual([]);
+    expect(await audits()).toEqual([]);
+    const plan = s.logs.find((l) => l.includes('这一轮的判断'));
+    expect(plan).toContain('"action":"wait"');
+    expect(plan).toContain('手上还有 1 个 Claude 会话没结束');
+    // 选路照样不往拼车派、独享没挂着：等额度
+    expect(await s.pick()).toMatchObject({ ok: false, waitFor: 'quota' });
+
+    // 跑完了：开跑那一行收掉，下一轮切到独享
+    job.release();
+    expect((await job.done).outcome).toBe('done');
+    s.advance(15 * MIN);
+    await s.round();
+    expect(s.helperCalls).toEqual(['solo']);
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('让选路停下以后等的那一会儿里起了一次性会话：这一轮不切（会话端口停不下它），帮手不调', async () => {
+    const writer = realRuns({ db: t.db });
+    const s = setup({
+      sessions: fakeSessions([]).sessions,
+      duringGrace: async () => {
+        await writer.start({
+          runId: randomUUID(),
+          segment: 'manual',
+          model: 'opus-5.5',
+          routeId: 'carpool',
+          startedAt: NOW.toISOString(),
+        });
+      },
+    });
+    await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
+    await s.round();
+    expect(s.helperCalls).toEqual([]);
+    expect(await audits()).toEqual([]);
+    expect(s.logs.join('\n')).toContain('让选路停下以后又有会话登记了，这一轮不切');
+    // 选路停的那一道解开了：照常选（拼车额度用满，等额度）
+    expect(await s.pick()).toMatchObject({ ok: false, waitFor: 'quota' });
+  });
+
+  it('【故意造出的失败】开跑那一行写不进库（路由不在库里，外键拒收）：不起会话（RUN_START_FAILED），库里不留一行', async () => {
+    let spawned = 0;
+    const err = await runOneShot(
+      { segment: 'manual', modelId: 'opus-5.5', routeId: 'no-such-route', prompt: '干活', cwd: root },
+      {
+        spawn: async () => {
+          spawned += 1;
+          return { exitCode: 0, stdout: '做完了', stderr: '', killed: false };
+        },
+        runs: realRuns({ db: t.db }),
+        tmpDir: join(root, 'runs'),
+      },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'OneShotError', code: 'RUN_START_FAILED' });
+    expect((err as Error).message).toContain('开跑那一行写不进 runs，没起会话');
+    expect(spawned).toBe(0);
+    expect(await t.db.select().from(runs)).toEqual([]);
   });
 });
 

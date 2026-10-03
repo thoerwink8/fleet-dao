@@ -1,6 +1,6 @@
 {
-  "id": "3befd66c-c3bc-410c-b5c5-3c7e15b6acb0",
-  "prevId": "aa8ab7cc-90ce-420f-a2d8-e057dd9b35fc",
+  "id": "b5949af3-ba30-4206-81b0-5cb0b0c219d8",
+  "prevId": "3befd66c-c3bc-410c-b5c5-3c7e15b6acb0",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3390,6 +3390,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "tier": {
+          "name": "tier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "started_at": {
           "name": "started_at",
           "type": "timestamp with time zone",
@@ -3621,6 +3627,10 @@
         "runs_segment_known": {
           "name": "runs_segment_known",
           "value": "\"runs\".\"segment\" in ('scope', 'manual', 'verify')"
+        },
+        "runs_tier_known": {
+          "name": "runs_tier_known",
+          "value": "\"runs\".\"tier\" is null or \"runs\".\"tier\" in ('fast', 'medium', 'heavyweight')"
         },
         "runs_outcome_known": {
           "name": "runs_outcome_known",

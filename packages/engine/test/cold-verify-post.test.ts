@@ -35,6 +35,7 @@ const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要 A、代码做
 
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
   const runs: RunsWriter = {
+    async start() {},
     async record(_r: RunRecord) {},
   };
   return {

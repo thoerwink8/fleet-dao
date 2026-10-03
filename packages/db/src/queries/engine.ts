@@ -14,6 +14,7 @@ import type {
 } from '@fleet-dao/shared';
 import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
+import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
 import {
   approvals,
   asks,
@@ -32,7 +33,7 @@ import {
   subtasks,
   tasks,
 } from '../schema/index.ts';
-import { type Blocker, type RouteCandidate, stageCandidates } from './candidates.ts';
+import type { Blocker, RouteCandidate } from './candidates.ts';
 
 /** 起出来的会话进程在哪；会话状态、markSessionRunStarted 的输入用同一个形状。 */
 type RunHandle = { pid?: number; scope?: string };
@@ -1094,11 +1095,17 @@ function usedRatio(w: {
   return null;
 }
 
-export interface StageRouteFacts {
-  stage: StageKind;
+export interface PurposeRouteFacts {
+  purpose: StageKind;
+  /** 这个用途配过模型顺序没有（routing_purpose_models 里有没有它的行）。没配就派不出，不按 id 乱挑。 */
   configured: boolean;
-  stagePinned: boolean;
+  /**
+   * 选路的先后：用途下模型的先后、再是模型下路由的先后，摊平成一串，位置从 0 数（routing-layers.ts）。开关是那条路由在它的模型下
+   * 开没开（routing_catalog.enabled，不分用途）；关着的照样排在里面，选路按 switched-off 挡。两层没有「钉住」：选路按没钉住算。
+   */
   order: { routeId: string; position: number; enabled: boolean }[];
+  /** 配置上的缺口（用途没配模型顺序、模型下一条路由都没有）：照实给出，派不出时写进原因，不当成「没有」。 */
+  problems: string[];
   routes: {
     routeId: string;
     channelId: string;
@@ -1141,25 +1148,23 @@ export interface StageRouteFacts {
 }
 
 /**
- * 在 stageCandidates 算好的挡法上加字段，不重判一遍谁能派谁不能派。stage_policy_routes 里 enabled=false 的行
- * stageCandidates 已经带着（用 'switched-off' 这个挡因标记），这里原样透出到 order。
+ * 选路的事实，按路由两层读（#574，routing-layers.ts）：在 evaluateRoutes 算好的挡法上加字段，不重判一遍谁能派谁不能派。
+ * routing_catalog 里 enabled=false 的行带着 'switched-off' 这个挡因，这里原样透出到 order。
  */
-export async function routeFactsForStage(
+export async function routeFactsForPurpose(
   db: Db,
-  stage: StageKind,
+  purpose: StageKind,
   options: { now?: Date; staleAfterMs?: number } = {},
-): Promise<StageRouteFacts> {
-  const candidates = await stageCandidates(db, stage, options);
-  if (!candidates.configured) return { stage, configured: false, stagePinned: false, order: [], routes: [] };
-
-  const sorted = [...candidates.candidates].sort((a, b) => a.position - b.position);
-  const order = sorted.map((c) => ({
+): Promise<PurposeRouteFacts> {
+  const layers = await routingLayers(db, purpose, options);
+  const configured = layers.models.length > 0;
+  const sorted = flattenRoutingLayers(layers);
+  const order = sorted.map((c, position) => ({
     routeId: c.routeId,
-    position: c.position,
+    position,
     enabled: !c.blockers.includes('switched-off'),
   }));
-  if (sorted.length === 0)
-    return { stage, configured: true, stagePinned: candidates.pinned, order, routes: [] };
+  if (sorted.length === 0) return { purpose, configured, order, problems: layers.problems, routes: [] };
 
   const routeIds = sorted.map((c) => c.routeId);
   const poolIds = [...new Set(sorted.map((c) => c.poolId))];
@@ -1235,5 +1240,5 @@ export async function routeFactsForStage(
     };
   });
 
-  return { stage, configured: true, stagePinned: candidates.pinned, order, routes: routesOut };
+  return { purpose, configured, order, problems: layers.problems, routes: routesOut };
 }

@@ -10,7 +10,6 @@ import {
   savePoolQuota,
   saveRouteProbe,
   sessionRuns,
-  stagePolicyRoutes,
   stepTimings,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -27,6 +26,7 @@ import {
   addGrokRoute,
   addTask,
   CARPOOL_ORG_ID,
+  hangRoutes,
   MIN,
   NOW,
   type OrgListRig,
@@ -64,7 +64,7 @@ const pick = (over: Partial<PickRouteInput> = {}, p = ports()) =>
   );
 
 describe('选路', () => {
-  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
+  it('按路由两层的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
     await world(t.db);
     const r = await pick();
     expect(r).toMatchObject({
@@ -185,13 +185,15 @@ describe('选路', () => {
     expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     expect(r.ok && r.why).toContain('点名的路由这次用不了');
     const unknown = await pick({ preferRouteId: 'nope' });
-    expect(unknown.ok && unknown.why).toContain('不在这个阶段的调度台顺序里');
+    expect(unknown.ok && unknown.why).toContain('不在这个用途的路由两层顺序里');
   });
 
-  it('阶段没排顺序：派不出（不按编号乱挑）', async () => {
+  it('【故意造出的失败】用途没配模型顺序：派不出（不按编号乱挑），写明是没配、不是路由坏了', async () => {
     await world(t.db, { stages: [] });
     const r = await pick({ stage: 'plan' });
     expect(r).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!r.ok && r.detail).toContain('规划阶段还没配模型顺序（路由两层「用途 → 模型」那一层是空的）');
+    expect(!r.ok && r.detail).toContain('路由两层的配置缺口：用途 plan 没配模型顺序');
   });
 
   it('近 7 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {
@@ -246,12 +248,12 @@ describe('选路', () => {
     ).rejects.toMatchObject({ code: 'ROUTING_INPUT' });
   });
 
-  it('关掉的路由（调度台上单条开关）不派', async () => {
+  it('关掉的路由（路由两层里它在模型下的开关）不派，写明关着', async () => {
     await world(t.db);
-    await t.client.query(
-      "update stage_policy_routes set enabled = false where stage = 'triage' and route_id = 'solo'",
-    );
-    expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    await t.client.query("update routing_catalog set enabled = false where route_id = 'solo'");
+    const r = await pick();
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(r.ok && r.why).toContain('这条路由在它的模型下关着（路由两层的开关）');
   });
 
   it('派活时按内存做准入（#219）：父节点增长过大被挡、恢复后又派得动；读不出来不闷头派', async () => {
@@ -697,15 +699,113 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
   });
 });
 
+/** 这个账号池的额度读成了、还宽（5 小时窗、周窗都只用了一成）。 */
+async function roomyQuota(poolId: string) {
+  await savePoolQuota(
+    t.db,
+    {
+      poolId,
+      readAt: new Date(NOW.getTime() - MIN).toISOString(),
+      complete: true,
+      windows: (['5h', '7d'] as const).map((window) => ({
+        poolId,
+        window,
+        label: window === '5h' ? 'five_hour' : 'seven_day',
+        unit: 'percent' as const,
+        utilization: 0.1,
+        reading: 'measured' as const,
+        readAt: new Date(NOW.getTime() - MIN).toISOString(),
+        source: 'test',
+      })),
+    },
+    { now: NOW },
+  );
+}
+
+/** 这条路由探了没通（探针写的结论）：在线由它定，选路当「死」挡掉。 */
+const probeFailed = (routeId: string) =>
+  saveRouteProbe(t.db, { routeId, state: 'failed', at: NOW, detail: '连不上：ECONNREFUSED' });
+
+describe('路由两层选路（#574）：先按用途的模型顺序、再按模型下的路由顺序；死的跳过，不知道的排在活的后面，全死明说派不出', () => {
+  /** 写码：Opus 排第一（下面 solo、carpool 两条），Grok 4.7 排第二（一条）；三条都探通了、额度都读成了还宽。 */
+  async function twoModels() {
+    await world(t.db, { stages: ['execute'] });
+    const { routeId: grok } = await addGrokRoute(t.db, { stages: ['execute'] });
+    await roomyQuota('grok');
+    return { grok };
+  }
+
+  it('第一顺位死了跳到第二：模型下第一条死了先派同模型的第二条，整个模型都死了才派下一个模型', async () => {
+    const { grok } = await twoModels();
+    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    await probeFailed('solo');
+    const second = await pick({ stage: 'execute' });
+    expect(second).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(second.ok && second.why).toContain('写码阶段第 2 条');
+    await probeFailed('carpool');
+    const next = await pick({ stage: 'execute' });
+    expect(next).toMatchObject({ ok: true, route: { routeId: grok, modelId: 'grok-4.7', family: 'grok' } });
+    // 为什么跳过前两条写在理由里：都是探针判不在线
+    expect(next.ok && next.why).toContain('写码阶段第 3 条');
+    expect(next.ok && next.why).toContain('第 1 条 Claude 订阅 · 拼车 · Opus 5.5 · Claude Code：不在线');
+  });
+
+  it('【故意造出的失败】全死：一条都派不出、又等不来，回 waitFor none，原因逐条写明，不拿空的、默认的顶', async () => {
+    const { grok } = await twoModels();
+    for (const routeId of ['solo', 'carpool', grok]) await probeFailed(routeId);
+    const none = await pick({ stage: 'execute' });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    const detail = !none.ok ? none.detail : '';
+    expect(detail).toContain('写码阶段没有能派的路由');
+    for (const n of [1, 2, 3])
+      expect(detail).toMatch(new RegExp(`第 ${n} 条 [^；]*：不在线（探活或熔断判的）`));
+    // 开关全关也一样：死在「关着」上，照样写明
+    await t.client.query(
+      "update routes set alive = true, probe_state = 'ok' where id in ('solo', 'carpool')",
+    );
+    await t.client.query("update routing_catalog set enabled = false where model_id = 'opus-5.5'");
+    const off = await pick({ stage: 'execute' });
+    expect(off).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!off.ok && off.detail).toContain('这条路由在它的模型下关着（路由两层的开关）');
+  });
+
+  it('不知道排后面：排第一的模型额度没读成（unknown），先派读成了的第二个模型；它也死了才派额度未知的，并写明', async () => {
+    const { grok } = await twoModels();
+    // Opus 那两个池的额度从没读成：不挡，但排在读到了的后面
+    await t.client.query("delete from quota_windows where pool_id in ('claude-solo', 'claude-carpool')");
+    await t.client.query(
+      "update pools set last_read_ok_at = null where id in ('claude-solo', 'claude-carpool')",
+    );
+    const live = await pick({ stage: 'execute' });
+    expect(live).toMatchObject({ ok: true, route: { routeId: grok } });
+    expect(live.ok && live.why).toContain('额度未知（没读成或读数过期），排在读到了的后面');
+    await probeFailed(grok);
+    const unknown = await pick({ stage: 'execute' });
+    expect(unknown).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(unknown.ok && unknown.why).toContain('额度未知（没读成或读数过期）');
+  });
+
+  it('用途里排了模型、模型下却一条路由都没有：照实写进原因（配置缺口），不当成路由都坏了', async () => {
+    await world(t.db, { stages: ['execute'] });
+    await t.client.query(
+      "insert into routing_purpose_models (purpose, model_id, position) values ('execute', 'kimi-k3', 5)",
+    );
+    for (const routeId of ['solo', 'carpool']) await probeFailed(routeId);
+    const none = await pick({ stage: 'execute' });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain(
+      '路由两层的配置缺口：模型 kimi-k3 没有路由（routing_catalog 里一条都没有）',
+    );
+  });
+});
+
 describe('流程配置里这一步的模型顺序（Fusion 的 models）', () => {
-  /** 写码阶段：调度台上 Opus 两条排最前（solo、carpool），Cursor Auto 第 9 条，钉住 Kimi k3 的 cursor 路由第 10 条。 */
+  /** 写码：路由两层里 Opus 排最前（下面 solo、carpool），Cursor Auto 第 9 位，Kimi k3（钉住它的 cursor 路由）第 10 位。 */
   async function fusionWorld() {
     await world(t.db, { stages: ['execute'] });
     const auto = (await addCursorRoute(t.db, { stages: ['execute'] })).routeId;
     const kimi = (await addCursorRoute(t.db, { modelId: 'kimi-k3', upstreamModel: 'kimi-k3' })).routeId;
-    await t.db
-      .insert(stagePolicyRoutes)
-      .values({ stage: 'execute', routeId: kimi, position: 10, enabled: true });
+    await hangRoutes(t.db, ['execute'], [kimi], 10);
     // cursor 池的额度也读成了、还宽（额度未知的会排到读到了的后面，这里只看模型顺序）
     await savePoolQuota(
       t.db,
@@ -729,7 +829,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
     return { auto, kimi };
   }
 
-  it('只派配置里这几个模型的路由：先按配置的先后（压过调度台上排在前面的），同一个模型的照调度台的先后', async () => {
+  it('只派配置里这几个模型的路由：先按配置的先后（压过路由两层里排在前面的），同一个模型的照路由两层的先后', async () => {
     const { auto, kimi } = await fusionWorld();
     expect(await pick({ stage: 'execute', models: ['cursor-auto', 'kimi-k3', 'opus-5.5'] })).toMatchObject({
       ok: true,
@@ -743,7 +843,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
       ok: true,
       route: { routeId: 'solo' },
     });
-    // 没带模型顺序的（旧的需求工作流）照调度台走
+    // 没带模型顺序的（三段一条龙）照路由两层走
     expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
   });
 
@@ -754,7 +854,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
     const none = await pick({ stage: 'execute', models: ['deepseek-flash'] });
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });
     expect(!none.ok && none.detail).toContain(
-      '流程配置里这一步的模型（deepseek-flash）在写码阶段的调度台上没有接上的路由',
+      '流程配置里这一步的模型（deepseek-flash）在写码阶段的路由两层顺序里没有接上的路由',
     );
     const empty = await pick({ stage: 'execute', models: [] });
     expect(!empty.ok && empty.detail).toContain('流程配置里这一步的模型（一个都没配）');
@@ -958,13 +1058,14 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
       upstreamModel: 'gpt-5.6-luna-high',
     });
     const grok = await addGrokRoute(t.db, { stages: ['verify'] });
-    // 验证阶段的顺序照法国：Luna 第一、Grok 第二，两个 Claude 池在后面（写这张单的族避开）。位置在阶段里不许重，先挪开再排
-    const order = [luna.routeId, grok.routeId, 'solo', 'carpool'];
+    // 验证这个用途的模型顺序照骨架：GPT 5.6 Luna 第一、Grok 4.7 第二，Opus（两个 Claude 池）在后面（写这张单的族避开）。
+    // 位置在一个用途里不许重，先挪开再排
+    const order = ['gpt-5.6-luna', 'grok-4.7', 'opus-5.5'];
     for (const base of [100, 0]) {
-      for (const [i, routeId] of order.entries()) {
+      for (const [i, modelId] of order.entries()) {
         await t.client.query(
-          "update stage_policy_routes set position = $2 where stage = 'verify' and route_id = $1",
-          [routeId, base + i],
+          "update routing_purpose_models set position = $2 where purpose = 'verify' and model_id = $1",
+          [modelId, base + i],
         );
       }
     }
