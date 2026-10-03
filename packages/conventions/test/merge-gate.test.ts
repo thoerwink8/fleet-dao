@@ -692,11 +692,16 @@ describe('合并闸：ci.yml 按结构比对（改动前后两份全文），不
     expect((await gatePr(80, deps(w))).state).toBe('success');
   });
 
-  it('【故意造出的失败】读不到文件（改动前或改动后）：算碰了，要第二意见，不当成没碰', async () => {
-    const w = world({ files: [CI], contents: { [at(HEAD)]: yml() } });
+  it('【故意造出的失败】读不到文件（改动前或改动后）：没查成，审过了也不放行', async () => {
+    const w = world({
+      files: [CI],
+      contents: { [at(HEAD)]: yml() },
+      statuses: [{ context: 'second-opinion', state: 'success', description: '通过' }],
+    });
     const r = await gatePr(80, deps(w));
     expect(r.state).toBe('failure');
-    expect(r.lines.join('\n')).toContain('等第二意见');
+    expect(r.notChecked).toBe(true);
+    expect(r.lines.join('\n')).toContain('改动前的那份读不到');
   });
 
   it('【故意造出的失败】读不懂的工作流（YAML 坏了）：算碰了', async () => {

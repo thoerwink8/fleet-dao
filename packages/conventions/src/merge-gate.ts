@@ -205,6 +205,10 @@ export async function resolveWorkflowHits(
       const origin = await gh.mergeBase(meta.base, meta.head);
       const [before, after] = await Promise.all([gh.fileAt(h.file, origin), gh.fileAt(h.file, meta.head)]);
       if (before === null || after === null) {
+        // 改了已有的文件，两头都该在：读回「不存在」是没查成（判红、写明），不是「要审」——审过了也不放行
+        notChecked.push(
+          `${h.file} 改动${before === null ? '前' : '后'}的那份读不到（${(before === null ? origin : meta.head).slice(0, 7)} 上没有这个文件）`,
+        );
         keep('改动前或改动后的文件读不到');
         continue;
       }
