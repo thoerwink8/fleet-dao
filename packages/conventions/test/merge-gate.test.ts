@@ -394,11 +394,31 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     });
   });
 
-  it('主线推送不再触发重算（#654：冲突交给 GitHub，闸只看这个头自己的事）：事件名 push 判不认得，一条状态都不写', async () => {
+  it('主线推送（工作流只在闸认的东西变了才触发它）：把开着的 PR 全重算，每个都写上状态', async () => {
+    const w = world({ open: [{ number: 80 }, { number: 81 }] });
+    const r = await run(w, 'push', { ref: 'refs/heads/main' });
+    expect(r.code).toBe(0);
+    expect(r.lines.filter((l) => l.startsWith('PR #'))).toEqual([
+      'PR #80：merge-gate success',
+      'PR #81：merge-gate success',
+    ]);
+    expect(w.written.map((s) => s.state)).toEqual(['success', 'success']);
+  });
+
+  it('主线推送时读不到开着的 PR 列表：没查成（退出码 2），一条状态都不写，不当成「没有要算的」', async () => {
     const w = world({ open: [{ number: 80 }] });
+    w.broken.openPrs = '列表读不到';
     const r = await run(w, 'push', { ref: 'refs/heads/main' });
     expect(r.code).toBe(2);
-    expect(r.lines).toEqual(['没查成：不认得的事件 push。']);
+    expect(r.lines).toEqual(['没查成：认不出这次要算哪些 PR（列表读不到）。']);
+    expect(w.written).toEqual([]);
+  });
+
+  it('不认得的事件（比如 schedule）仍判没查成，一条状态都不写', async () => {
+    const w = world({ open: [{ number: 80 }] });
+    const r = await run(w, 'schedule', {});
+    expect(r.code).toBe(2);
+    expect(r.lines).toEqual(['没查成：不认得的事件 schedule。']);
     expect(w.written).toEqual([]);
   });
 

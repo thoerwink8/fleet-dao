@@ -5,7 +5,8 @@
 // 换家族验「单子说要的东西真做了没有」）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑结果都一样，
 // design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——那是「不用验」，不是「没验成」，
 // 两者在 coldVerifyNeed 里分开。读不到、认不出写 failure（没查成）。
-// merge-gate.yml 在 PR 事件（头变了）、second-opinion 或 cold-verify 状态写上来时跑它（后两种逐个重算所有开着的 PR）；主线推送不再触发——冲突不判了，主线一变没有什么会变；
+// merge-gate.yml 在 PR 事件（头变了）、second-opinion 或 cold-verify 状态写上来时跑它（后两种逐个重算所有开着的 PR）；主线推送只在闸认的东西
+// （高风险清单、判法、工作流本身）变了才触发、同样重算所有开着的 PR——清单加了新路径，开着的 PR 上旧的 success 不能留着（#654 第二意见）；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import { isFlowBranch } from './flow-branch.ts';
@@ -277,6 +278,9 @@ export async function targetPrs(
       // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
       // 冷调用（cold-verify）写上时同理：它是另一个 context（#555-2），单子关上时这条状态才到，闸要跟着重算。
       if (ev.context !== SECOND_OPINION_CONTEXT && ev.context !== COLD_VERIFY_CONTEXT) return [];
+      return numbersOf(await gh.openPrs(), () => true);
+    case 'push':
+      // 工作流的 paths 只放行了闸认的那几个文件（merge-gate.yml），到这里就是「判定输入变了」：开着的 PR 全重算，每个都现读自己此刻的状态。
       return numbersOf(await gh.openPrs(), () => true);
     case 'workflow_dispatch': {
       const input = isObject(ev.inputs) ? String(ev.inputs.pr ?? '').trim() : '';

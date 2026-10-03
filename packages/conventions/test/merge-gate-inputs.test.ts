@@ -6,8 +6,10 @@
 // 结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）这里会红：要加得先改上面那两处的规矩，
 // 再改这里的清单。
 import { readFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const src = (name: string) => readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
 const gate = src('merge-gate.ts');
@@ -63,6 +65,86 @@ function interfaceMethods(code: string, name: string): string[] {
   const body = code.slice(start, end);
   return [...body.matchAll(/^ {2}(\w+)\(/gm)].map((m) => m[1] ?? '');
 }
+
+const REPO = fileURLToPath(new URL('../../../', import.meta.url));
+const posix = (p: string) => p.split('\\').join('/');
+
+/** 入口只借 pr-fields.ts 的 annotation 给 Actions 报错加格式：它改不了结论，不算闸的输入（和 merge-gates.test.ts 里走同一遍导入时的排除一样）。 */
+const FORMAT_ONLY = new Set(['packages/conventions/src/pr-fields.ts']);
+
+/** 闸的入口文件，顺着相对 import 能走到的每个 .ts（仓内路径）：闸的判法就是这些文件；少列一个，它变了开着的 PR 不重算。 */
+function importClosure(entry: string): string[] {
+  const seen = new Set<string>();
+  const walk = (file: string): void => {
+    if (seen.has(file) || FORMAT_ONLY.has(file)) return;
+    seen.add(file);
+    const text = readFileSync(join(REPO, file), 'utf8');
+    for (const m of text.matchAll(/from '(\.[^']+\.ts)'/g)) {
+      walk(posix(relative(REPO, join(dirname(join(REPO, file)), m[1] ?? ''))));
+    }
+  };
+  walk(entry);
+  return [...seen].sort();
+}
+
+/** merge-gate.yml 里 on.push.paths 列的路径；写法换了（没有 push、没有 paths）直接抛，不当成「没列」。 */
+function pushPaths(yml: string): string[] {
+  const doc = parse(yml) as { on?: { push?: { paths?: unknown } } } | null;
+  const paths = doc?.on?.push?.paths;
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) {
+    throw new Error('merge-gate.yml 里找不到 on.push.paths（一串路径）：写法换了，这条测试跟着改');
+  }
+  return paths as string[];
+}
+
+/** 闸的判定输入：入口文件和它 import 到的所有文件、高风险清单、这份工作流自己；在 push.paths 里漏列的。 */
+function unwatchedInputs(yml: string): string[] {
+  const watched = new Set(pushPaths(yml));
+  const inputs = [
+    ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
+    'packages/conventions/high-risk-paths.json',
+    '.github/workflows/merge-gate.yml',
+  ];
+  return inputs.filter((f) => !watched.has(f));
+}
+
+describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二意见）', () => {
+  it('闸 import 到的每个文件、高风险清单、工作流自己都在 push.paths 里：它们在主线上一变就重算所有开着的 PR', () => {
+    const inputs = importClosure('packages/conventions/src/bin/merge-gate.ts');
+    expect(inputs.length, '一个文件都没走到：解析错了，不是没有').toBeGreaterThanOrEqual(4);
+    expect(inputs, '格式化报错的 pr-fields 不算闸的输入').not.toContain(
+      'packages/conventions/src/pr-fields.ts',
+    );
+    expect(unwatchedInputs(workflow)).toEqual([]);
+  });
+
+  it('push.paths 里没有多余的：列的每个文件都真是闸的输入', () => {
+    const inputs = new Set([
+      ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
+      'packages/conventions/high-risk-paths.json',
+      '.github/workflows/merge-gate.yml',
+    ]);
+    expect(pushPaths(workflow).filter((p) => !inputs.has(p))).toEqual([]);
+  });
+
+  it('【故意造出的失败】从 push.paths 里摘掉高风险清单：查得出来', () => {
+    const narrowed = workflow.replace('      - packages/conventions/high-risk-paths.json\n', '');
+    expect(narrowed).not.toBe(workflow);
+    expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/high-risk-paths.json']);
+  });
+
+  it('【故意造出的失败】闸多 import 了一个文件却没列进 push.paths：查得出来', () => {
+    const narrowed = workflow.replace('      - packages/conventions/src/flow-branch.ts\n', '');
+    expect(narrowed).not.toBe(workflow);
+    expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/src/flow-branch.ts']);
+  });
+
+  it('【故意造出的失败】工作流里没有 push 触发：抛错，不当成「没列」', () => {
+    const noPush = workflow.replace(/^ {2}push:[\s\S]*?(?=^ {2}workflow_dispatch:)/m, '');
+    expect(noPush).not.toBe(workflow);
+    expect(() => pushPaths(noPush)).toThrow('找不到 on.push.paths');
+  });
+});
 
 describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () => {
   it('从 GitHub 读、往 GitHub 写的口子就这几个；多加一个会红（先改 design 第五节第 5 条）', () => {

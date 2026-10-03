@@ -3,11 +3,14 @@ name: merge-gate
 # 「按我们的规矩能不能合」只看它一个——改到先审后合的路径（packages/conventions/high-risk-paths.json）时当前头上有通过的
 # second-opinion、引擎任务 PR 当前头上有通过的 cold-verify（#555，合前一次冷调用）；判法在 packages/conventions/src/merge-gate.ts，
 # design 第五节「流程只为快」。PR 正文没有必填栏了，闸也不看标签、里程碑。
-# 两处触发（#654 起主线推送不再触发：冲突不判了，主线一变没有什么会变）：
+# 三处触发（#654 起主线推送只在「闸认的东西」变了才触发：冲突不判了，别的主线推送什么都没变）：
 # - PR 事件用 pull_request_target：fork 来的 PR 在 pull_request 里拿不到写状态的令牌。
 #   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的改动文件按 API 现读。
 # - status 事件：第二意见写上 second-opinion、验收那一遍写上 cold-verify 时逐个重算所有开着的 PR。
 #   不按事件里的 sha 只算那一个：下面的排队组只留最新一个，一轮对账贴好几个 PR 时中间的运行被取消，只算最后那个的话前面的就停在旧结论上。
+# - 主线推送且只动了闸认的东西（高风险清单、判法、这份工作流）：已经开着的 PR 上旧的 merge-gate 状态是按旧清单、旧判法算的，
+#   清单加了新路径、判法收紧了，旧的 success 不会自己变——所以把开着的 PR 全重算一遍（第二意见 #656 第 2 轮）。
+#   paths 要盖住判法 import 到的每一个文件，packages/conventions/test/merge-gate-inputs.test.ts 钉着：以后给闸多引一个文件却忘了列在这里会红。
 # 用 GITHUB_TOKEN 写的状态不会再触发 status 事件，不会自己转圈。也能在 Actions 页手动跑（填 PR 号，留空算所有开着的）。
 on:
   pull_request_target:
@@ -15,6 +18,16 @@ on:
     # 它们变了触发的运行多半被下面的排队组顶掉（70 次里 43 次），白占一个检查位
     types: [opened, reopened, synchronize]
   status:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/merge-gate.yml
+      - packages/conventions/high-risk-paths.json
+      - packages/conventions/src/bin/merge-gate.ts
+      - packages/conventions/src/flow-branch.ts
+      - packages/conventions/src/gh-api.ts
+      - packages/conventions/src/merge-gate.ts
+      - packages/conventions/src/merge-gates.ts
   workflow_dispatch:
     inputs:
       pr:
