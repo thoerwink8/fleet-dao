@@ -311,16 +311,18 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 全流程巡检（#223，design 第六节「断链怎么被发现」第 3 层）：
 
-- 引擎每 6 小时（北京时间 2、8、14、20 点 26 分，定时任务 `canary`）在巡检仓开一张固定的小单（往 `巡检记录.md` 追加一行），看它从收单一路走到派活、规划、执行、验证、开 PR 过 CI、合并、关单、记账、驾驶舱显示。每一步有期限（`packages/engine/src/jobs/canary.ts` 的 `CANARY_STAGE_LIMIT_MINUTES`；等并发空位、等额度的时间不算），一轮最长 5 小时。超时或出事（挂起等人、工作流没做完、单子被关成不做了）推一条卡住报警「全流程巡检断在「<哪一步>」」（`canary:broken`，正文写为什么、走到哪了、单子在哪），下一轮通过了自己撤。断的那张单留着给人看，下一轮开始时叫停它的工作流、关掉（不做了）。
-- 巡检单的需求写全在正文里（起因、要什么，最后是写了字的「## 怎么算做完」），没有「文档：」那一行、也不在巡检仓里建需求文档（#654 起所有新单都是这样：单子正文就是需求，动手会话不再被要求写 specs 的需求.md、结果.md），验收照正文里的「怎么算做完」核。开单时就挂上巡检仓的当前版本。
-- 要配齐的（缺一样，这一轮就记没跑成或断在派活，照写的原因补）：
-  1. 引擎配置 `/etc/fleet-dao/engine.env` 写 `FLEET_CANARY_REPO=<owner>/<巡检仓>`（公开仓里不写真值；仓里的期望 `deploy/france/desired-config.json` 只记它的指纹，换巡检仓照第九节「配置进仓对账」改私有值那条走），引擎下次起来（自动发布切版本）读到；读回 `grep -c '^FLEET_CANARY_REPO=' /etc/fleet-dao/engine.env`。
-  2. 巡检仓受管（在 `repos` 表里）、「让 AI 接活」开着：`fleet-api dispatch <owner>/<巡检仓> on`（第九节），读回 `... dispatch <owner>/<巡检仓> status`。
-  3. 巡检仓有一个一直开着的 `v1 巡检` 里程碑：接活只自动派挂在当前版本上的单（design 第九节「在哪能做与接活开关」），巡检开单时挂它。别关它。
-  4. 巡检仓里 `.fleet/flow.json` 写了测试命令（巡检单的验收是 `node --test` 过）。
-- 手动跑一轮：`fleet-temporal schedule trigger --schedule-id canary`。看结论：健康页「全流程巡检」一项（最近一轮的结论和时间；断了、没跑成、12 小时没通过一轮都红）；驾驶舱「定时任务」页 `canary` 一行（巡检自己跑没跑成）；库里 `runuser -u fleet -- psql -d fleet -c "select id, started_at, ended_at, verdict, stage, issue_number, left(why, 120) from canary_runs order by id desc limit 5"`；日志 `journalctl -u fleet-engine --since '-6h' | grep 全流程巡检`。
-- 「没跑成」和「断了」分开：没配巡检仓、巡检仓读不到、没有当前版本、开不了单、连着 10 回查不成、一轮的工作流没收尾就没了（被终止、工人丢了；下一轮开始时补记），都记没跑成（`schedule_runs` 里 `failed`，看门狗 #203 照登记表报）；断了的这一轮巡检本身跑成了（`schedule_runs` 记 ok、发现 1 个），报警由巡检推。
-- 演练（故意弄断一次）：挑巡检仓里没有在做的巡检单时，`fleet-api dispatch <owner>/<巡检仓> off`、手动跑一轮：开单后当场断在「派活」（开关关着），推一条卡住报警。再 `on`、手动跑一轮：通过，那条报警自己撤。
+- 引擎每 6 小时（北京时间 2、8、14、20 点 26 分，定时任务 `canary`）在巡检仓开一张固定的小单（往 `巡检记录.md` 追加一行），看它跟着三段任务工作流（`taskWorkflow`，#632）走：收单（拉单建了任务行、起了任务工作流）、动手（会话交出提交、推上去、开了 PR）、开 PR 过 CI、验收（冷验收通过）、合并、关单、记账（`runs` 里动手、验收的账都有结局、记上了用量，每步耗时进了库）、驾驶舱显示（驾驶舱后端读到任务做完、PR 镜像里这个 PR 合了、挂的是这张单——主页「做完的」就是这么显示的）。每一步有期限（`packages/engine/src/jobs/canary.ts` 的 `CANARY_STAGE_LIMIT_MINUTES`；等并发空位、等额度的时间不算），一轮最长 5 小时。超时或出事（任务工作流停下等人、没做完、被放弃、单子被关成不做了）推一条卡住报警「全流程巡检断在「<哪一步>」」（`canary:broken`，正文写为什么、这一步走了多久、走到哪了（每一步几点走完、用了多久）、单子在哪），下一轮通过了自己撤。断的那张单留着给人看，下一轮开始时给它的任务工作流发「放弃」、关掉单（不做了）。
+- 巡检单的需求写全在正文里（场景、原话、已知的模块、要什么，最后是写了字的「## 怎么算做完」——拉单要的三栏都在，测试拿真的 `buildTaskBrief` 核过），没有「文档：」那一行、也不在巡检仓里建需求文档。「已知的模块」只写 `巡检记录.md`，分档按它定成快档。开单时就挂上巡检仓的当前版本。
+- 要配齐的（缺一样，这一轮就记没跑成或断在收单、开 PR 过 CI、合并，照写的原因补）：
+  1. 引擎配置 `/etc/fleet-dao/engine.env` 写 `FLEET_CANARY_REPO=<owner>/<巡检仓>`（公开仓里不写真值；仓里的期望 `deploy/france/desired-config.json` 只记它的指纹，换巡检仓照第九节「配置进仓对账」改私有值那条走），引擎下次起来读到；读回 `grep -c '^FLEET_CANARY_REPO=' /etc/fleet-dao/engine.env`。
+  2. 巡检仓受管（在 `repos` 表里）、「让 AI 接活」开着：`fleet-api dispatch <owner>/<巡检仓> on`（第九节），读回 `... dispatch <owner>/<巡检仓> status`。开关是开单之后才打开的，这一轮当场断在收单（拉单不拉开关打开以前开的单）。
+  3. 巡检仓有一个一直开着的 `v1 巡检` 里程碑：拉单只拉挂在当前版本上的单，巡检开单时挂它。别关它。
+  4. 开巡检单的「引擎」机器人在作者白名单里：`users` 表一行 `role = 'bot'`、`github_id` 是这个 App 的机器人账号编号（只按编号认；本机档用自己的 App，编号和法国的不一样）。不在，拉单不拉，这一轮到期限断在收单。
+  5. 巡检仓的 PR 上有 CI 检查（跑 `node --test`）：一项检查都没有，任务工作流等 CI 等不到结果、停下等人，这一轮断在开 PR 过 CI。仓的设置里打开 Allow auto-merge：验收通过后任务工作流挂的是自动合并。
+- 手动跑一轮、等结论、打印每一步用时：在跑着引擎的机器上 `pnpm drill`（发布目录里，或 `node packages/engine/src/bin/drill.ts`；只连本机 Temporal，`TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE` 默认和引擎一样），和定时任务是同一个 `canary`、同一份代码：已经有一轮在跑就接上它，不另起。打印每一步几点走完（北京时间）、用了多久，断了写停在哪一步、为什么；退出码 0 通过、1 断了、2 巡检自己没跑成或这条命令没查成（连不上 Temporal、没有这个定时任务、工作流没给结论就失败了）。只触发不等：`fleet-temporal schedule trigger --schedule-id canary`。看结论：健康页「全流程巡检」一项（最近一轮的结论和时间；断了、没跑成、12 小时没通过一轮都红）；驾驶舱「定时任务」页 `canary` 一行（巡检自己跑没跑成）；库里 `runuser -u fleet -- psql -d fleet -c "select id, started_at, ended_at, verdict, stage, issue_number, left(why, 120) from canary_runs order by id desc limit 5"`；日志 `journalctl -u fleet-engine --since '-6h' | grep 全流程巡检`。
+- 「没跑成」和「断了」分开：没配巡检仓、巡检仓读不到、没有当前版本、开不了单、连着 10 回查不成（库读不到、Temporal 问不了、任务工作流的状态认不出）、一轮的工作流没收尾就没了（被终止、工人丢了；下一轮开始时补记），都记没跑成（`schedule_runs` 里 `failed`，看门狗 #203 照登记表报）；断了的这一轮巡检本身跑成了（`schedule_runs` 记 ok、发现 1 个），报警由巡检推。
+- 演练（故意弄断一次）：挑巡检仓里没有在做的巡检单时，`fleet-api dispatch <owner>/<巡检仓> off`、`pnpm drill`：开单后当场断在「收单」（开关关着），推一条卡住报警、退出码 1。再 `on`、`pnpm drill`：通过，那条报警自己撤。
+- 换成三段任务工作流之前（跟 Fusion 走）的老几轮记的是老步骤（派活、规划、执行），库里照留，健康页照样写成人话；在途的老一轮从收单接着看。
 - 停：`fleet-temporal schedule toggle --schedule-id canary --pause --reason "<为什么>"`，恢复换成 `--unpause`。引擎重启只按声明改间隔、要起的工作流，不替人把暂停的恢复。
 
 看门狗（#203，design 第六节「断链怎么被发现」第 5 层）：
