@@ -35,7 +35,14 @@ export async function auditGitHub(gh: GitHubReader, now: Date): Promise<AuditRes
   }
   if (open !== undefined) {
     checked.issues = open.length;
-    findings.push(...kindFindings(open), ...motherFindings(open, now));
+    findings.push(...kindFindings(open));
+    const mothers = motherFindings(open, now);
+    findings.push(...mothers.found);
+    if (mothers.unknown.length > 0) {
+      const shown = mothers.unknown.slice(0, 10).map((n) => `#${n}`);
+      const what = `${shown.join('、')}${mothers.unknown.length > 10 ? ` 等 ${mothers.unknown.length} 张` : ''}`;
+      notQueried.push(`接口没给 ${what} 的子单数，母单和子单对不对没核`);
+    }
     try {
       findings.push(...(await orphanFindings(open, gh)));
     } catch (e) {
@@ -70,12 +77,18 @@ function kindFindings(open: readonly PlanIssue[]): Finding[] {
   return found;
 }
 
-/** 母单和子单对得上：子单都关了的母单该关；有子单要贴「母单」标签；贴了标签却一直没有子单的摘掉。 */
-function motherFindings(open: readonly PlanIssue[], now: Date): Finding[] {
+/**
+ * 母单和子单对得上：子单都关了的母单该关；有子单要贴「母单」标签；贴了标签却一直没有子单的摘掉。
+ * 接口没给子单数的单（unknown）核不了，交回去记成「没查成」：不猜，也不当成没有断裂。
+ */
+function motherFindings(open: readonly PlanIssue[], now: Date): { found: Finding[]; unknown: number[] } {
   const found: Finding[] = [];
+  const unknown: number[] = [];
   for (const i of open) {
-    // 接口没给子单数：不猜
-    if (i.subIssues === undefined) continue;
+    if (i.subIssues === undefined) {
+      unknown.push(i.number);
+      continue;
+    }
     const isMother = i.labels.includes(MOTHER_LABEL);
     if (i.subIssues > 0 && i.subIssuesDone === i.subIssues) {
       found.push({
@@ -99,7 +112,7 @@ function motherFindings(open: readonly PlanIssue[], now: Date): Finding[] {
       });
     }
   }
-  return found;
+  return { found, unknown };
 }
 
 /** 开着的子单，母单已经关了（或查不到）：它在计划里藏在一张已关的单下面，没人会看到。 */

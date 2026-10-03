@@ -101,13 +101,27 @@ describe('GitHub 对账：母单和子单对得上', () => {
     expect(fresh.findings).toEqual([]);
   });
 
-  it('接口没给子单数：不猜，不报', async () => {
+  it('【故意造出的失败】接口没给子单数：记成「没查成」，不当成没有断裂，也不猜', async () => {
     const r = await audit(
       editWorld((w) => {
         w.issues.push(issue(40, { labels: MOTHER, createdAt: ago(9 * DAY), subIssues: undefined }));
+        // 母单的子单都关了：接口给了子单数时这条会报；没给就核不了，不能悄悄放过
+        patch(w, 10, { subIssues: undefined, subIssuesDone: undefined });
       }),
     );
     expect(r.findings).toEqual([]);
+    expect(r.notQueried).toEqual(['接口没给 #10、#40 的子单数，母单和子单对不对没核']);
+  });
+
+  it('没给子单数的单很多：只列前 10 张，说明一共几张', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        for (let n = 100; n < 112; n += 1) w.issues.push(issue(n, { subIssues: undefined }));
+      }),
+    );
+    expect(r.notQueried).toEqual([
+      '接口没给 #100、#101、#102、#103、#104、#105、#106、#107、#108、#109 等 12 张 的子单数，母单和子单对不对没核',
+    ]);
   });
 });
 
