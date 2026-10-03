@@ -148,8 +148,8 @@ describe('按改动算要跑什么', () => {
     expect(shards(p)).toEqual(['engine', 'db', 'rest']);
     expect(p.tests[0]).toEqual({
       name: 'engine',
-      label: 'engine 1/2',
-      args: ['packages/engine/', '--shard=1/2'],
+      label: 'engine 1/3',
+      args: ['packages/engine/', '--shard=1/3'],
       temporal: true,
     });
     for (const u of ['packages/api/', 'packages/github/', 'packages/jev/']) expect(testArgs(p)).toContain(u);
@@ -646,7 +646,7 @@ describe('ci.yml 和这里对得上', () => {
     expect(d).toMatch(/^\s+bash deploy\/test\/run\.sh "\$\{args\[@\]\}"$/m);
     const runSh = readFileSync(join(ROOT, 'deploy/test/run.sh'), 'utf8');
     expect(runSh).toMatch(/^ {2}--ops\)$/m);
-    expect(runSh).toContain('ops-only auto-release-state'); // 分台名单里排着 ops-only（自己也要跑）
+    expect(runSh).toMatch(/^ {2}'[^']*\bops-only\b[^']*'$/m); // 分台名单里排着 ops-only（自己也要跑）
     expect(existsSync(join(ROOT, 'deploy/test/ops-only.test.sh'))).toBe(true);
   });
 
@@ -674,28 +674,30 @@ describe('测试切成几台并行跑（vitest --shard，#654 F）', () => {
     return out;
   }
 
-  it('全跑：engine 两台、db 一台、rest 三台；每台带自己的 --shard 和 job 名', () => {
+  it('全跑：engine 三台、db 一台、rest 三台；每台带自己的 --shard 和 job 名', () => {
     const p = planCi({ event: 'push', changed: [], graph: graph() });
     expect(p.tests.map((s) => s.label)).toEqual([
-      'engine 1/2',
-      'engine 2/2',
+      'engine 1/3',
+      'engine 2/3',
+      'engine 3/3',
       'db',
       'rest 1/3',
       'rest 2/3',
       'rest 3/3',
     ]);
     expect(p.tests.filter((s) => s.name === 'engine').map((s) => s.args)).toEqual([
-      ['packages/engine/', '--shard=1/2'],
-      ['packages/engine/', '--shard=2/2'],
+      ['packages/engine/', '--shard=1/3'],
+      ['packages/engine/', '--shard=2/3'],
+      ['packages/engine/', '--shard=3/3'],
     ]);
     expect(p.tests.find((s) => s.name === 'db')?.args).toEqual(['packages/db/']);
-    expect(p.tests.filter((s) => s.temporal).map((s) => s.name)).toEqual(['engine', 'engine']);
-    expect(coverage(p)).toEqual({ engine: '2 台，1..2 齐', db: '1 台，不切', rest: '3 台，1..3 齐' });
+    expect(p.tests.filter((s) => s.temporal).map((s) => s.name)).toEqual(['engine', 'engine', 'engine']);
+    expect(coverage(p)).toEqual({ engine: '3 台，1..3 齐', db: '1 台，不切', rest: '3 台，1..3 齐' });
   });
 
-  it('改了 db：engine 切两台、rest 的包够多就切三台；每台装一份 Temporal（temporal 跟着 engine 走）', () => {
+  it('改了 db：engine 切三台、rest 的包够多就切三台；每台装一份 Temporal（temporal 跟着 engine 走）', () => {
     const p = pr('packages/db/src/schema/index.ts');
-    expect(coverage(p)).toEqual({ engine: '2 台，1..2 齐', db: '1 台，不切', rest: '3 台，1..3 齐' });
+    expect(coverage(p)).toEqual({ engine: '3 台，1..3 齐', db: '1 台，不切', rest: '3 台，1..3 齐' });
   });
 
   it('rest 只有一两个包：不切（几十秒就跑完，切开只多出每台 30 秒的固定开销）', () => {
@@ -704,8 +706,8 @@ describe('测试切成几台并行跑（vitest --shard，#654 F）', () => {
     expect(coverage(p)).toEqual({ rest: '1 台，不切' });
   });
 
-  it('改了 engine：只有 engine，切两台', () => {
-    expect(coverage(pr('packages/engine/src/worker.ts'))).toEqual({ engine: '2 台，1..2 齐' });
+  it('改了 engine：只有 engine，切三台', () => {
+    expect(coverage(pr('packages/engine/src/worker.ts'))).toEqual({ engine: '3 台，1..3 齐' });
   });
 
   it('【故意造出的失败】少了一台 / 台号对不上：coverage 报「对不上」，不当成齐了', () => {
@@ -715,10 +717,10 @@ describe('测试切成几台并行跑（vitest --shard，#654 F）', () => {
     const wrong = {
       ...p,
       tests: p.tests.map((s) =>
-        s.label === 'engine 2/2' ? { ...s, args: ['packages/engine/', '--shard=1/2'] } : s,
+        s.label === 'engine 2/3' ? { ...s, args: ['packages/engine/', '--shard=1/3'] } : s,
       ),
     };
-    expect(coverage(wrong).engine).toBe('对不上：1/2、1/2');
+    expect(coverage(wrong).engine).toBe('对不上：1/3、1/3、3/3');
   });
 
   it('ci.yml 的 job 名用 matrix.label（切了以后每台名字不同），db 的 Postgres 仍按组名 db 认', () => {

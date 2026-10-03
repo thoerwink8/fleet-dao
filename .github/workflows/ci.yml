@@ -165,7 +165,7 @@ jobs:
           set -euo pipefail
           if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
 
-  # engine 切两台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
+  # engine 切三台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
   # 只跑受影响的包（改到的 + 依赖它们的）。
   # db 分片旁边起一个 postgres:16 服务容器（和法国生产同大版本，ops.md 第二节），测试经 FLEET_TEST_PG_URL 连上，
   # 第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆一份（#220）：一个测试进程的内存从

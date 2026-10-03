@@ -45,9 +45,11 @@ export interface CiPlan {
  * 每一组测试切成几台并行跑（vitest --shard=i/n，按测试文件均分）。数字按 CI 实测的耗时定（#654 F，2026-10-03 主线全量一轮：
  * engine 121 秒、rest 147 秒、db 56 秒的纯测试时间；每台机器另有约 30 秒装依赖、起容器的固定开销）：engine 切 2、rest 切 3，
  * 一台的墙钟降到 90 秒上下；db 不切（切了每台都要再建一份模板库，不划算）。
+ * 2026-10-03 下午再量：engine 切 2 时两台差一截（80 秒、113 秒，vitest 按文件个数均分、不看耗时，real/ 下的慢文件扎堆），
+ * 墙钟被慢的那台定死；切 3 摊开，三台各 65 秒上下，整轮的瓶颈让给 db（70–80 秒）。
  * rest 只有一两个包要测时不切（几十秒就跑完，切开只多出固定开销），见 REST_SPLIT_MIN_UNITS。
  */
-export const TEST_SHARDS = { engine: 2, db: 1, rest: 3 } as const;
+export const TEST_SHARDS = { engine: 3, db: 1, rest: 3 } as const;
 
 /** rest 这一组里的包少于这么多个就不切。 */
 const REST_SPLIT_MIN_UNITS = 3;
@@ -68,7 +70,7 @@ export type DeployMode = (typeof DEPLOY_MODES)[number];
 /**
  * deploy/ 的全套切成几台并行跑（deploy/test/run.sh --shard i/n）。数字要和 run.sh 里 SHARDS 的项数一样
  * （test/ci-plan.test.ts 读 run.sh 核对）：那份文件是单一事实，这里只是把它写进 CI 的矩阵。
- * 2026-10-03 实测：全套 231 秒（shellcheck 43 秒 + 各测试），三台各 70 秒上下。
+ * 2026-10-03 实测：全套 300 秒上下，login-user 一项就 94 秒，按它搭三台各 100 秒上下（run.sh 里 SHARDS 的注释写着怎么搭）。
  */
 export const DEPLOY_SHARDS = 3;
 
