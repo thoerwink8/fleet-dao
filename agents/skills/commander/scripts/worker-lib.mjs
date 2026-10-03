@@ -244,7 +244,7 @@ export function closingBrief({ branch, noShip, noAutomerge }) {
       ];
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
-    '1. 先读仓根的 AGENTS.md，照它的规矩做。这是本机快马：不开单、不写需求文档和结果文档、不认领。',
+    '1. 先读仓根的 AGENTS.md，照它的规矩做。这是本机快马：不开单、不另写需求/结果文档、不认领（#446）。',
     '2. 改完依次跑，都要过：',
     '   - pnpm test:changed（它说要全跑、退出码 3：照它打印的命令单独跑对应包的测试，不要在这台机器上跑全量',
     '     pnpm test 或 pnpm check）',

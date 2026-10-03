@@ -440,25 +440,25 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
   });
 
   it('表在、都没到复查日期：不出声（表前有说明、表是空的也一样）', () => {
-    const dir = repo({ 'docs/plan.md': plan(subagent, '撤回就删行。\n\n') });
+    const dir = repo({ 'docs/PROGRESS.md': plan(subagent, '撤回就删行。\n\n') });
     expect(hook.checkTemporary(dir, git, Date.parse('2026-10-03T02:00:00Z'))).toEqual([]);
-    expect(hook.checkTemporary(repo({ 'docs/plan.md': plan('') }), git, NOW)).toEqual([]);
+    expect(hook.checkTemporary(repo({ 'docs/PROGRESS.md': plan('') }), git, NOW)).toEqual([]);
   });
 
   it('到了最迟复查日期（含今天）：一行列出来，提醒照读法②问创始人', () => {
     const today = row('停法国池', '机器坏了', '创始人 2026-10-01「先停」', '机器修好', '2026-10-06');
     const later = row('只开一条路由', '额度紧', '创始人 2026-10-01「先这样」', '额度恢复', '2026-10-20');
-    const dir = repo({ 'docs/plan.md': plan(subagent + today + later) });
+    const dir = repo({ 'docs/PROGRESS.md': plan(subagent + today + later) });
     const lines = hook.checkTemporary(join(dir, 'docs'), git, NOW);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/plan.md，今天 2026-10-06）');
+    expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/PROGRESS.md，今天 2026-10-06）');
     expect(lines[0]).toContain('不开子代理（最迟 2026-10-05）；停法国池（最迟 2026-10-06）');
     expect(lines[0]).toContain('读法②问创始人');
     expect(lines[0]).not.toContain('只开一条路由');
   });
 
   it('北京时间过了零点就算到期，不按 UTC 晚一天', () => {
-    const dir = repo({ 'docs/plan.md': plan(subagent) });
+    const dir = repo({ 'docs/PROGRESS.md': plan(subagent) });
     expect(hook.checkTemporary(dir, git, Date.parse('2026-10-04T17:00:00Z'))[0]).toMatch(
       /到了最迟复查日期 1 条/,
     );
@@ -481,9 +481,9 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
       row('甲', '额度', '创始人 2026-09-28', '额度恢复', '下周五') +
       row('乙', '额度', '创始人 2026-09-28', '额度恢复', '2026-02-30') +
       row('丙', '额度', '创始人 2026-09-28', '额度恢复', '10-05');
-    const lines = hook.checkTemporary(repo({ 'docs/plan.md': plan(rows) }), git, NOW);
+    const lines = hook.checkTemporary(repo({ 'docs/PROGRESS.md': plan(rows) }), git, NOW);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('临时调整表有 3 行最迟复查日期认不出（docs/plan.md）');
+    expect(lines[0]).toContain('临时调整表有 3 行最迟复查日期认不出（docs/PROGRESS.md）');
     expect(lines[0]).toContain('「甲」的「下周五」');
     expect(lines[0]).toContain('「乙」的「2026-02-30」');
     expect(lines[0]).toContain('「丙」的「10-05」');
@@ -491,17 +491,17 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
 
   it('【故意造出的失败】有标题、表认不出：没有表格、没有分隔行、表头不是五列，都明说没查成', () => {
     const none = repo({
-      'docs/plan.md': '## 生效中的临时调整\n\n（还没有）\n\n## 版本\n| a | b |\n|---|---|\n',
+      'docs/PROGRESS.md': '## 生效中的临时调整\n\n（还没有）\n\n## 版本\n| a | b |\n|---|---|\n',
     });
     expect(hook.checkTemporary(none, git, NOW)).toEqual([
-      '临时调整表没查成（docs/plan.md）：标题下面没有表格。',
+      '临时调整表没查成（docs/PROGRESS.md）：标题下面没有表格。',
     ]);
-    const noSep = repo({ 'docs/plan.md': `## 生效中的临时调整\n\n${HEAD.split('\n')[0]}\n${subagent}` });
+    const noSep = repo({ 'docs/PROGRESS.md': `## 生效中的临时调整\n\n${HEAD.split('\n')[0]}\n${subagent}` });
     expect(hook.checkTemporary(noSep, git, NOW)[0]).toMatch(
-      /临时调整表没查成（docs\/plan\.md）：第 3 行的表头下面没有 \|---\| 分隔行/,
+      /临时调整表没查成（docs\/PROGRESS\.md）：第 3 行的表头下面没有 \|---\| 分隔行/,
     );
     const fourCols = repo({
-      'docs/plan.md': '## 生效中的临时调整\n| 内容 | 为什么 | 谁拍的 | 复查 |\n|---|---|---|---|\n',
+      'docs/PROGRESS.md': '## 生效中的临时调整\n| 内容 | 为什么 | 谁拍的 | 复查 |\n|---|---|---|---|\n',
     });
     expect(hook.checkTemporary(fourCols, git, NOW)[0]).toMatch(
       /临时调整表没查成.*表头是「内容｜为什么｜谁拍的｜复查」，要五列/,
@@ -509,16 +509,16 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
   });
 
   it('没有这张表不出声：没提这个标题、只在句子里提到、只在没跟踪的文件里有、不是 git 仓', () => {
-    expect(hook.checkTemporary(repo({ 'docs/plan.md': '# 计划\n' }), git, NOW)).toEqual([]);
+    expect(hook.checkTemporary(repo({ 'docs/PROGRESS.md': '# 计划\n' }), git, NOW)).toEqual([]);
     const inline = repo({ 'AGENTS.md': '登进「## 生效中的临时调整」表\n' }, { 'scratch.md': plan(subagent) });
     expect(hook.checkTemporary(inline, git, NOW)).toEqual([]);
     expect(hook.checkTemporary(temp('plain'), git, NOW)).toEqual([]);
   });
 
   it('中文路径照样认得出；一个仓里有两张表要说并成一张', () => {
-    const dir = repo({ 'specs/12-额度/需求.md': plan(subagent), 'docs/plan.md': plan('') });
+    const dir = repo({ 'specs/12-额度/需求.md': plan(subagent), 'docs/PROGRESS.md': plan('') });
     const lines = hook.checkTemporary(dir, git, NOW);
-    expect(lines[0]).toMatch(/临时调整表不止一张（.*docs\/plan\.md:3.*specs\/12-额度\/需求\.md:3.*）/);
+    expect(lines[0]).toMatch(/临时调整表不止一张（.*docs\/PROGRESS\.md:3.*specs\/12-额度\/需求\.md:3.*）/);
     expect(lines[1]).toContain('临时调整到了最迟复查日期 1 条（specs/12-额度/需求.md:3');
   });
 
@@ -543,19 +543,19 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     ]);
     const grepGarbled: Git = (cwd, args) =>
       args[0] === 'grep'
-        ? { status: 0, stdout: 'docs/plan.md:3:## 生效中的临时调整\n', stderr: '' }
+        ? { status: 0, stdout: 'docs/PROGRESS.md:3:## 生效中的临时调整\n', stderr: '' }
         : git(cwd, args);
     expect(hook.checkTemporary(dir, grepGarbled, NOW)[0]).toMatch(/临时调整表没查成：git grep 的输出认不出/);
   });
 
   it('开会话时这几行进上下文，排在同步那一句前面', () => {
     const w = world();
-    writeFileSync(join(w.work, 'plan.md'), plan(subagent));
+    writeFileSync(join(w.work, 'PROGRESS.md'), plan(subagent));
     g(w.work, 'add', '-A');
-    g(w.work, 'commit', '-q', '-m', 'plan');
+    g(w.work, 'commit', '-q', '-m', 'progress');
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
     const lines = hook.sessionStart({ cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW });
-    expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（plan\.md/);
+    expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（PROGRESS\.md/);
     expect(lines.at(-1)).toMatch(/^规矩同步/);
   });
 });
