@@ -4,13 +4,22 @@ import type { LucideIcon } from 'lucide-react';
 import { CircleStop, MessageCircleQuestion, Pause, Play, Shuffle } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { errorText, useAnswerAsk, usePools, useRouting, useTaskAction, useTaskDetail } from '../api/client';
+import {
+  errorText,
+  useAnswerAsk,
+  usePools,
+  useRoutingLayers,
+  useTaskAction,
+  useTaskDetail,
+} from '../api/client';
 import type {
   Activity,
   BoardSubtask,
   BoardTask,
   PoolView,
-  Routing,
+  RoutingLayerPurpose,
+  RoutingLayerRoute,
+  RoutingLayers,
   StageKind,
   TaskActionBody,
   TaskState,
@@ -20,13 +29,11 @@ import {
   headlineInk,
   headlineText,
   type QuotaHeadline,
-  routeInfo,
-  routeProblem,
   routeQuotaHeadline,
-  routeStatus,
   stageLabel,
 } from '../lib/catalog';
 import { clipText } from '../lib/format';
+import { routeHost, routeTitle } from '../lib/routing';
 import { isTaskFinished, letterOf } from '../lib/status';
 import { cn } from '../lib/utils';
 import {
@@ -228,71 +235,78 @@ export interface RouteOption {
   model: string;
   where: string;
   host: string;
-  billing: string;
+  /** 额度表还没读到（在读或没读成）时是 undefined：计费方式从额度表的账号池来，没读到不猜。 */
+  billing: string | undefined;
   /**
-   * 这条路由的账号池额度，一句话（和调度台、渠道页同一套说法）：额度没查成 / 已用满 / 62% / 用量没读到……
+   * 这条路由的账号池额度，一句话（和额度页同一套说法）：额度没查成 / 已用满 / 62% / 用量没读到……
    * 额度表还没读到（在读或没读成）时是 undefined，对话框另有提示。
    */
   quota: QuotaHeadline | undefined;
   estimated: boolean;
-  /** 选不了的原因：禁令、离线、渠道下架、模型下架。 */
+  /** 选不了的原因（完整的一句，显示时再截短）；选得了是 undefined。 */
   blocked: string | undefined;
   note: string | undefined;
 }
 
-export function routeOptions(
-  routing: Routing,
-  pools: PoolView[] | undefined,
+/**
+ * 选不了的原因，照后端现算的三件事说（db 的 routing-liveness.ts），这里不再判一遍：死了的写死在哪几件；接不接得上还不知道
+ * （探针没看过、这一轮没探它）的也选不了——引擎点名派路由只派探针探通了的，点了也是照常另选。额度没读成不挡（引擎照派、排后面）。
+ */
+function blockedBy(r: RoutingLayerRoute): string | undefined {
+  const dead = [r.connect, r.quota, r.ban].filter((f) => f.verdict === 'dead').map((f) => f.reason);
+  if (dead.length) return dead.join('；');
+  if (r.connect.verdict === 'unknown') return `接不接得上还不知道：${r.connect.reason}`;
+  return undefined;
+}
+
+/** 后端回的路由两层里这个用途的那一份。没接上、认不出（回的用途里没有它）都写明为什么，不当成「没有路由」。 */
+export function purposeFor(
+  layers: RoutingLayers,
   stage: StageKind,
+): { purpose: RoutingLayerPurpose } | { problem: string } {
+  if (layers.unavailable) return { problem: `现在没法换：${layers.unavailable}` };
+  const purpose = layers.purposes.find((p) => p.purpose === stage);
+  if (!purpose) {
+    return { problem: `现在没法换：后端回的路由两层里没有「${stageLabel[stage]}」这个用途，认不出` };
+  }
+  return { purpose };
+}
+
+/**
+ * 换模型的候选：这个用途在路由两层里的路由，先模型的先后、再模型下路由的先后（和选路同一个顺序，#574）。
+ * 不在这个用途两层里的路由不列：点了引擎也不认，照常另选（engine 的 store-ports.ts 选路时写「不在这个用途的路由两层顺序里」）。
+ */
+export function routeOptions(
+  purpose: RoutingLayerPurpose,
+  pools: PoolView[] | undefined,
   currentRouteId: string | undefined,
-  now: number,
   /** 额度读取还没做（额度表的 quotaNotWired）：不写「额度没查成」，这一行不显示用量。 */
   quotaNotWired = false,
-): { ordered: RouteOption[]; others: RouteOption[] } {
-  const policy = routing.stages.find((p) => p.stage === stage);
-  const toOption = (id: string): RouteOption | undefined => {
-    const info = routeInfo(routing, id);
-    if (!info) return undefined;
-    const pool = pools?.find((p) => p.id === info.poolId);
-    // 按这条路由算：只扣别的模型组的窗满了不算它满，和调度台同一句话。
-    const quota =
-      pools && !quotaNotWired
-        ? routeQuotaHeadline(
-            pool,
-            routing.models.find((m) => m.id === info.route.modelId),
-          )
-        : undefined;
-    let blocked = routeProblem(routing, id, stage, now) ?? undefined;
-    // 不在线的选不了：原因照路由探针写的（还没探过的说「还没探过」，不说成离线）
-    if (!blocked && !info.route.alive) {
-      const st = routeStatus(info.route, now);
-      blocked = st.kind === 'unprobed' ? st.label : `${st.label}：${clipText(st.detail, 60)}`;
-    }
-    if (!blocked && !info.channelEnabled) blocked = '渠道已下架';
-    let note: string | undefined;
-    if (id === currentRouteId) note = '正在用';
-    else if (pool && pool.running >= pool.maxConcurrency)
-      note = `满 ${pool.running}/${pool.maxConcurrency}，会排队`;
-    return {
-      id,
-      model: info.model,
-      where: `${info.channel} · ${info.poolId}`,
-      host: info.host,
-      billing: info.billing ? billingLabel[info.billing] : '计费未知',
-      quota,
-      estimated: quota?.kind === 'util' && quota.w.reading === 'estimated',
-      blocked,
-      note,
-    };
-  };
-  const orderedIds = policy?.routeIds ?? [];
-  const ordered = orderedIds.map(toOption).filter((o): o is RouteOption => Boolean(o));
-  const others = routing.routes
-    .map((r) => r.id)
-    .filter((id) => !orderedIds.includes(id))
-    .map(toOption)
-    .filter((o): o is RouteOption => Boolean(o));
-  return { ordered, others };
+): RouteOption[] {
+  return purpose.models.flatMap((m) =>
+    m.routes.map((r): RouteOption => {
+      const pool = pools?.find((p) => p.id === r.poolId);
+      // 按这条路由算：只扣别的模型组的窗满了不算它满，和额度页同一句话。模型的族不知道就整池一起算（宁可说紧）。
+      const quota =
+        pools && !quotaNotWired
+          ? routeQuotaHeadline(pool, m.family ? { id: m.modelId, family: m.family } : undefined)
+          : undefined;
+      let note: string | undefined;
+      if (r.routeId === currentRouteId) note = '正在用';
+      else if (r.inFlight >= r.maxConcurrency) note = `账号池满 ${r.inFlight}/${r.maxConcurrency}`;
+      return {
+        id: r.routeId,
+        model: m.displayName,
+        where: routeTitle(r),
+        host: routeHost(r),
+        billing: pools ? (pool?.billing ? billingLabel[pool.billing] : '计费未知') : undefined,
+        quota,
+        estimated: quota?.kind === 'util' && quota.w.reading === 'estimated',
+        blocked: blockedBy(r),
+        note,
+      };
+    }),
+  );
 }
 
 function RoutePickerDialog({
@@ -304,16 +318,29 @@ function RoutePickerDialog({
   onClose(): void;
   onPick(routeId: string): void;
 }) {
-  // 对话框一直挂着：只在打开时读，不然每一页的首屏都白拉这两份、路由还每分钟重拉一次
-  const { data: routing, error: routingError } = useRouting({ enabled: Boolean(target) });
+  // 对话框一直挂着：只在打开时读，不然每一页的首屏都白拉这两份、路由两层还每分钟重拉一次
+  const { data: layers, error: layersError } = useRoutingLayers({ enabled: Boolean(target) });
   const { data: pools, error: poolsError } = usePools({ enabled: Boolean(target) });
   const activity = target ? (target.sub ? target.sub.activity : target.activity) : undefined;
   const stage: StageKind = activity?.stage ?? 'execute';
   const current = activity?.routeId;
+  const found = layers ? purposeFor(layers, stage) : undefined;
+  const purpose = found && 'purpose' in found ? found.purpose : undefined;
+  // 没读成、没接上、认不出：照实说现在没法换，不画空列表冒充「没有路由」
+  const cannot = layersError
+    ? `路由没读成，现在没法换：${errorText(layersError)}`
+    : found && 'problem' in found
+      ? found.problem
+      : undefined;
   const opts =
-    routing && target
-      ? routeOptions(routing, pools?.pools, stage, current, Date.now(), Boolean(pools?.quotaNotWired))
-      : { ordered: [], others: [] };
+    purpose && target ? routeOptions(purpose, pools?.pools, current, Boolean(pools?.quotaNotWired)) : [];
+  const empty = cannot
+    ? '现在没法换'
+    : !layers
+      ? '正在读路由…'
+      : opts.length === 0
+        ? `「${stageLabel[stage]}」用途在路由两层里一条路由都没有`
+        : '没有匹配的路由';
 
   const item = (o: RouteOption) => (
     <CommandItem
@@ -330,14 +357,22 @@ function RoutePickerDialog({
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           <span>{o.host}</span>
-          <span aria-hidden>·</span>
-          <span>{o.billing}</span>
+          {o.billing ? (
+            <>
+              <span aria-hidden>·</span>
+              <span>{o.billing}</span>
+            </>
+          ) : null}
           {o.note ? (
             <Badge variant="outline" className="h-4 px-1 text-[10px]">
               {o.note}
             </Badge>
           ) : null}
-          {o.blocked ? <span className="text-ink-fail">{o.blocked}</span> : null}
+          {o.blocked ? (
+            <span className="text-ink-fail" title={o.blocked}>
+              {clipText(o.blocked, 80)}
+            </span>
+          ) : null}
         </div>
       </div>
       {o.quota ? (
@@ -369,28 +404,28 @@ function RoutePickerDialog({
             当前会话停在干净的点（做完的已提交），换成新路由接着干。阶段：{stageLabel[stage]}。
           </DialogDescription>
         </DialogHeader>
-        {routingError ? (
+        {cannot ? (
           <p role="alert" className="mx-4 rounded-md bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
-            路由没读成，现在没法换：{errorText(routingError)}
+            {cannot}
           </p>
+        ) : null}
+        {purpose?.problems.length ? (
+          <p className="mx-4 text-xs text-ink-stall">路由两层的配置缺口：{purpose.problems.join('；')}</p>
         ) : null}
         {poolsError ? (
           <p className="mx-4 text-xs text-ink-stall">
-            额度没读成：下面不显示用量，挑之前自己去额度页看一眼。
+            额度没读成：下面不显示用量和计费方式，挑之前自己去额度页看一眼。
           </p>
         ) : null}
         <Command className="border-t">
           <CommandInput placeholder="搜模型、渠道、执行方式…" />
           <CommandList className="max-h-[420px]">
-            <CommandEmpty>
-              {routing ? '没有匹配的路由' : routingError ? '路由没读成' : '正在读路由…'}
-            </CommandEmpty>
-            <CommandGroup heading={`「${stageLabel[stage]}」阶段的路由（调度台里的顺序）`}>
-              {opts.ordered.map(item)}
+            <CommandEmpty>{empty}</CommandEmpty>
+            <CommandGroup
+              heading={`「${stageLabel[stage]}」用途的路由（路由两层的顺序：先模型，再模型下的路由）`}
+            >
+              {opts.map(item)}
             </CommandGroup>
-            {opts.others.length ? (
-              <CommandGroup heading="其它路由">{opts.others.map(item)}</CommandGroup>
-            ) : null}
           </CommandList>
         </Command>
       </DialogContent>

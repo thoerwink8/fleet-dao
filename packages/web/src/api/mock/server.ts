@@ -1174,15 +1174,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async routing() {
       await wait();
-      const stages = StageKindSchema.options.map(
-        (stage) => st.stages.find((p) => p.stage === stage) ?? { stage, routeIds: [], pinned: false },
-      );
       return RoutingResponse.parse({
         channels: st.channels,
         pools: st.pools,
         models: st.models,
         routes: st.routes,
-        stages,
         hardBans: HARD_BANS.map(({ id, reason }) => ({ id, reason })),
         bans: st.bans,
       });

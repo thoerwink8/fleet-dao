@@ -232,7 +232,7 @@ export function useRunSteps(runId: string | undefined) {
   });
 }
 
-/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。enabled 为假时不读（比如换模型的对话框没打开）。 */
+/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。 */
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000, enabled });
@@ -240,14 +240,15 @@ export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
 
 /**
  * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每分钟重拉；
- * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。
+ * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。enabled 为假时不读（比如换模型的对话框没打开）。
  */
-export function useRoutingLayers() {
+export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({
     queryKey: keys.routingLayers,
     queryFn: () => api.routingLayers(),
     refetchInterval: 60_000,
+    enabled,
   });
 }
 
@@ -388,36 +389,6 @@ export function useAnswerAsk() {
       qc.invalidateQueries({ queryKey: keys.task(taskId) });
       qc.invalidateQueries({ queryKey: ['board'] });
       qc.invalidateQueries({ queryKey: keys.timeline(taskId) });
-    },
-  });
-}
-
-/** 改一个阶段的路由：先改缓存让拖动跟手；后端说「别人刚改过」（409）就回滚并重拉。 */
-export function useUpdateStagePolicy() {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ stage, body }: { stage: StageKind; body: UpdateStagePolicyBody }) =>
-      api.updateStagePolicy(stage, body),
-    onMutate: async ({ stage, body }) => {
-      await qc.cancelQueries({ queryKey: keys.routing });
-      const prev = qc.getQueryData<Routing>(keys.routing);
-      if (prev) {
-        qc.setQueryData<Routing>(keys.routing, {
-          ...prev,
-          stages: prev.stages.map((s) =>
-            s.stage === stage ? { stage, routeIds: body.routeIds, pinned: body.pinned } : s,
-          ),
-        });
-      }
-      return { prev };
-    },
-    onError: (_e, _v, ctx) => {
-      if (ctx?.prev) qc.setQueryData(keys.routing, ctx.prev);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.routing });
-      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }

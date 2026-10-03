@@ -8,7 +8,6 @@ import {
   RunStepsResponse,
   requirementWorkflowId,
   SettingsResponse,
-  StageKindSchema,
   TaskDetailResponse,
   TimelineResponse,
   UpdateSettingResponse,
@@ -557,18 +556,23 @@ describe('发给工作流的信号', () => {
 });
 
 describe('调度台', () => {
-  it('读：每个阶段类型都有一行（没配过的是空列表）', async () => {
+  it('读路由目录：渠道、池、模型、路由照给；不再带旧的阶段平铺顺序、也不去读它（每个用途的先后在路由两层，#574）', async () => {
     const h = harness();
     const { cookie } = await h.login();
-    const body = RoutingResponse.parse(
-      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
-    );
-    expect(body.stages.map((s) => s.stage)).toEqual(StageKindSchema.options);
-    expect(body.stages.find((s) => s.stage === 'triage')).toEqual({
-      stage: 'triage',
-      routeIds: [],
-      pinned: false,
-    });
+    let policyReads = 0;
+    const listStagePolicies = h.store.listStagePolicies.bind(h.store);
+    h.store.listStagePolicies = () => {
+      policyReads += 1;
+      return listStagePolicies();
+    };
+    const raw = (await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(raw).not.toHaveProperty('stages');
+    expect(policyReads).toBe(0);
+    const body = RoutingResponse.parse(raw);
+    expect(body.routes.map((r) => r.id)).toContain('rt-claude-opus');
   });
 
   it('改路由顺序：写操作记录（改前、改后、理由）', async () => {

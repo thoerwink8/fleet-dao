@@ -45,6 +45,13 @@ const noUsage = (w: Partial<QuotaWindowView> = {}): QuotaWindowView => ({
   ...w,
 });
 
+/** 假后端路由两层里写码用途的那一份（换模型对话框列的就是它）。 */
+async function executeLayers(api: MockApi) {
+  const purpose = (await api.routingLayers()).purposes.find((p) => p.purpose === 'execute');
+  if (!purpose) throw new Error('假数据的路由两层里没有写码用途');
+  return purpose;
+}
+
 /** 把假后端所有账号池的额度窗都换成「用量没读到」。 */
 function withUnknownUsage(api: MockApi): MockApi {
   const pools = api.pools.bind(api);
@@ -136,9 +143,8 @@ describe('额度：用量没读到不当 0%', () => {
 
   test('换模型的候选：池里用量全没读到时标「用量没读到」，不给 0%', async () => {
     const api = withUnknownUsage(createMockApi({ live: false }));
-    const [routing, pools] = await Promise.all([api.routing(), api.pools()]);
-    const { ordered, others } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
-    const all = [...ordered, ...others];
+    const [purpose, pools] = await Promise.all([executeLayers(api), api.pools()]);
+    const all = routeOptions(purpose, pools.pools, undefined);
     expect(all.length).toBeGreaterThan(0);
     for (const o of all) {
       expect(o.quota?.kind).toBe('unknown');
@@ -187,10 +193,10 @@ describe('额度：一个池一句话，各页说法一致', () => {
     expect(u.tightest?.util).toBe(0.5);
 
     const api = withPools(createMockApi({ live: false }), halfAndFull);
-    const [routing, pools] = await Promise.all([api.routing(), api.pools()]);
-    const { ordered } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
-    expect(ordered.length).toBeGreaterThan(0);
-    expect(new Set(ordered.map((o) => o.quota?.kind))).toEqual(new Set(['full']));
+    const [purpose, pools] = await Promise.all([executeLayers(api), api.pools()]);
+    const options = routeOptions(purpose, pools.pools, undefined);
+    expect(options.length).toBeGreaterThan(0);
+    expect(new Set(options.map((o) => o.quota?.kind))).toEqual(new Set(['full']));
   });
 
   test('从没读成过的池：换模型候选写「额度没查成」，不是什么都不显示', async () => {
@@ -199,12 +205,11 @@ describe('额度：一个池一句话，各页说法一致', () => {
     expect(quotaHeadline(undefined).kind).toBe('unread');
 
     const api = withPools(createMockApi({ live: false }), neverRead);
-    const [routing, pools] = await Promise.all([api.routing(), api.pools()]);
-    const { ordered } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
-    expect(new Set(ordered.map((o) => o.quota?.kind))).toEqual(new Set(['unread']));
-    expect(routeOptions(routing, undefined, 'execute', undefined, NOW).ordered.every((o) => !o.quota)).toBe(
-      true,
-    );
+    const [purpose, pools] = await Promise.all([executeLayers(api), api.pools()]);
+    const options = routeOptions(purpose, pools.pools, undefined);
+    expect(new Set(options.map((o) => o.quota?.kind))).toEqual(new Set(['unread']));
+    // 额度表还没读到：不显示用量，也不猜计费方式
+    expect(routeOptions(purpose, undefined, undefined).every((o) => !o.quota && !o.billing)).toBe(true);
   });
 
   test('额度格：上游说满了却没给比例，写「已用满」、条画满，不算「用量没读到」', () => {

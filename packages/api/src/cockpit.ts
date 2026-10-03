@@ -27,7 +27,6 @@ import {
   type SettingKey,
   SettingsResponse,
   StageKindSchema,
-  type StagePolicy,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -368,22 +367,18 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, AnswerAskResponse, { ok: true });
   });
 
+  // 路由目录。每个用途的先后不在这里给：那是路由两层（下面 routingLayers），旧的阶段平铺表没人读了（#574）
   app.get(WebRoutes.routing.path, async (c) => {
-    const [channels, pools, models, routes, policies, bans] = await Promise.all([
+    const [channels, pools, models, routes, bans] = await Promise.all([
       store.listChannels(),
       store.listPools(),
       store.listModels(),
       store.listRoutes(),
-      store.listStagePolicies(),
       store.listBans(),
     ]);
-    const byStage = new Map(policies.map((p) => [p.stage, p]));
-    const stages: StagePolicy[] = StageKindSchema.options.map(
-      (stage) => byStage.get(stage) ?? { stage, routeIds: [], pinned: false },
-    );
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
     // 路由在线状态就是库里探针的结论（routes.alive、probe_*，#129），原样给驾驶舱
-    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
+    return reply(c, RoutingResponse, { channels, pools, models, routes, hardBans, bans });
   });
 
   // 路由两层每一层现在活着吗（#574）：读的时候现算，不存。读不到回 503 写明没读成；没接上写 unavailable。

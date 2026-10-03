@@ -1,9 +1,16 @@
-// judge 项测试共用：一台机器的 /etc/fleet-dao（配置文件、钥匙文件）、照仓里样例装的目录（判断阶段排第一的是 TypeSafe 那条）、
-// 不出网的假后端、往判断记录里记一次调用。
+// judge 项测试共用：一台机器的 /etc/fleet-dao（配置文件、钥匙文件）、照发布时的做法装的库（目录样例 + 路由两层默认骨架，
+// 判断用途只排 Jev、下面一条 TypeSafe 路由）、不出网的假后端、往判断记录里记一次调用。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type Db, loadCatalog, parseCatalog, seed } from '@fleet-dao/db';
+import {
+  applyRoutingDefault,
+  type Db,
+  loadCatalog,
+  loadRoutingConfig,
+  parseCatalog,
+  seed,
+} from '@fleet-dao/db';
 import {
   type BackendResult,
   createJev,
@@ -20,6 +27,7 @@ const EXAMPLE = 'deploy/examples/catalog.example.json';
 export async function judgeCatalog(db: Db): Promise<void> {
   await seed(db);
   await loadCatalog(db, parseCatalog(repoFile(EXAMPLE), EXAMPLE));
+  await applyRoutingDefault(db, await loadRoutingConfig());
 }
 
 /** 一台配好了判断题的机器；用完调 cleanup。 */
