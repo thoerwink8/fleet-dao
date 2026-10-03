@@ -1,6 +1,12 @@
 // 调度台要的配置：族、渠道、账号池、模型、路由、每个阶段的路由顺序、禁令，外加额度窗（机器写的现值）。
 
-import type { OrgKind, RunAsUser, ScopeMembership } from '@fleet-dao/shared';
+import {
+  type OrgKind,
+  type RunAsUser,
+  type ScopeMembership,
+  SESSION_EFFORTS,
+  type SessionEffort,
+} from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
@@ -229,6 +235,14 @@ export const routingCatalog = pgTable(
     position: integer('position').notNull(),
     /** 调度台上的开关：关着的照样挂在顺序里，但不派。没有默认值：写入的地方必须逐条带上，漏带就插不进去，不会悄悄全打开。 */
     enabled: boolean('enabled').notNull(),
+    /**
+     * 这条路由起会话的思考档位（#470）：空 = 没配，用 high（shared 的 DEFAULT_SESSION_EFFORT）。它是这条路由的默认也是上限，
+     * 分档只往下压（engine 的 sessionEffortFor）。运行时配置、留在库里（决定 0011 第 7 条）：驾驶舱改了，下一个起的会话就照它；
+     * 仓里骨架的值只在这个模型第一次装进库时写进来（routing-apply.ts），之后改骨架不动库里的。
+     * 这一列只挡认不出的写法；这条路由的执行方式认不认这一档（Grok 没有 max、cursor 的整串模型名配不了），由写入的地方
+     * 照 shared 的 routeEffortProblem 判（setRoutingEffort、routing-apply.ts），起会话时引擎再判一次。
+     */
+    effort: text('effort').$type<SessionEffort>(),
   },
   (t) => [
     primaryKey({ columns: [t.modelId, t.routeId] }),
@@ -239,6 +253,10 @@ export const routingCatalog = pgTable(
     }),
     unique('routing_catalog_model_position_unique').on(t.modelId, t.position),
     check('routing_catalog_position_nonneg', sql`${t.position} >= 0`),
+    check(
+      'routing_catalog_effort_known',
+      sql`${t.effort} is null or ${t.effort} in (${sql.raw(SESSION_EFFORTS.map((e) => `'${e}'`).join(', '))})`,
+    ),
   ],
 );
 

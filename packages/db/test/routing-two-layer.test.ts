@@ -1,5 +1,6 @@
 // 路由两层（#574）：两张新表的约束（跑真迁移）、默认配置的读和校验、「活着吗」的存法。选路此刻仍读旧表，这里不测选路。
 import { readFileSync } from 'node:fs';
+import { routeEffortProblem } from '@fleet-dao/shared';
 import { getTableColumns } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { parseCatalog } from '../src/catalog.ts';
@@ -98,6 +99,26 @@ describe('两张新表', () => {
       .values({ modelId: 'opus-4.9', routeId: 'a-opus', position: 0 });
     await expectViolation(write, 'enabled');
   });
+
+  it('思考档位可空（没配）；【故意造出的失败】认不出的写法写不进去', async () => {
+    await t.db.insert(routingCatalog).values([
+      { modelId: 'opus-4.9', routeId: 'a-opus', position: 0, enabled: true },
+      { modelId: 'opus-4.9', routeId: 'b-opus', position: 1, enabled: true, effort: 'max' },
+    ]);
+    const rows = await t.db.select().from(routingCatalog).orderBy(routingCatalog.position);
+    expect(rows.map((r) => r.effort)).toEqual([null, 'max']);
+    await expectViolation(
+      t.db.insert(routingCatalog).values({
+        modelId: 'claude-fable-5.2',
+        routeId: 'a-fable',
+        position: 0,
+        enabled: true,
+        // 故意写一个认不出的档位（类型上过不去，绕过类型直接看库里的约束拦不拦）
+        effort: 'turbo' as never,
+      }),
+      'routing_catalog_effort_known',
+    );
+  });
 });
 
 const repoFile = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
@@ -165,6 +186,55 @@ describe('默认配置 routing.default.json', () => {
   it('开关不写不行（没有默认值）', () => {
     const bad = { purposes: { default: ['m'] }, models: { m: [{ routeId: 'r' }] } };
     expect(() => parseRoutingConfig(JSON.stringify(bad))).toThrow(/格式不对/);
+  });
+
+  it('每条路由可以写思考档位；不写就是没配', () => {
+    const cfg = parseRoutingConfig(
+      JSON.stringify({
+        purposes: { default: ['m'] },
+        models: {
+          m: [
+            { routeId: 'r1', enabled: true, effort: 'medium' },
+            { routeId: 'r2', enabled: true },
+          ],
+        },
+      }),
+    );
+    expect(cfg.models.m?.map((r) => r.effort)).toEqual(['medium', undefined]);
+  });
+
+  it('【故意造出的失败】思考档位写了认不出的值：格式不对，写明哪条、只有哪几档', () => {
+    const bad = {
+      purposes: { default: ['m'] },
+      models: { m: [{ routeId: 'r', enabled: true, effort: 'turbo' }] },
+    };
+    const err = (() => {
+      try {
+        parseRoutingConfig(JSON.stringify(bad));
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(RoutingConfigError);
+    expect((err as RoutingConfigError).problems).toEqual([
+      'models.m.0.effort：思考档位只有 low / medium / high / xhigh / max',
+    ]);
+  });
+
+  it('仓里骨架写了的思考档位，这条路由的执行方式都认（按目录配置样例里的执行方式、上游模型串判）', async () => {
+    const cfg = await loadRoutingConfig();
+    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const byId = new Map(example.routes.map((r) => [r.id, r]));
+    const problems: string[] = [];
+    for (const routes of Object.values(cfg.models)) {
+      for (const r of routes) {
+        const route = byId.get(r.routeId);
+        if (!route || r.effort === undefined) continue;
+        const problem = routeEffortProblem(route.hostId, route.upstreamModel ?? route.modelId, r.effort);
+        if (problem) problems.push(`${r.routeId}：${problem}`);
+      }
+    }
+    expect(problems).toEqual([]);
   });
 });
 

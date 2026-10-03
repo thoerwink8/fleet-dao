@@ -2,6 +2,7 @@
 // 读不到、不是 JSON、格式认不出、引用对不上都明确报错，不拿空配置或旧配置冒充（通用段底线第三条）。
 // 这里只管读和校验；发布时只补缺写进库是 routing-apply.ts（deploy/release.sh 的 load_routing），选路读库里那两张表。
 import { readFile } from 'node:fs/promises';
+import { SESSION_EFFORTS } from '@fleet-dao/shared';
 import { z } from 'zod';
 import { STAGE_KINDS } from './schema/enums.ts';
 
@@ -14,9 +15,25 @@ export const RoutingConfigSchema = z.strictObject({
   purposes: z
     .partialRecord(z.enum(['default', ...STAGE_KINDS]), z.array(Id).min(1))
     .refine((p) => Object.keys(p).length > 0, '至少要有 default 或某个用途的模型顺序'),
-  /** 模型 → 路由顺序；enabled 是调度台上的开关（关着的照样挂着，不派）。 */
+  /**
+   * 模型 → 路由顺序；enabled 是调度台上的开关（关着的照样挂着，不派）。effort 是这条路由的思考档位（#470），不写 = 没配
+   * （起会话用 high）；这条路由的执行方式认不认这一档，装进库时对着库里的路由判（routing-apply.ts）。
+   */
   models: z
-    .record(Id, z.array(z.strictObject({ routeId: Id, enabled: z.boolean() })).min(1))
+    .record(
+      Id,
+      z
+        .array(
+          z.strictObject({
+            routeId: Id,
+            enabled: z.boolean(),
+            effort: z
+              .enum(SESSION_EFFORTS, { error: `思考档位只有 ${SESSION_EFFORTS.join(' / ')}` })
+              .optional(),
+          }),
+        )
+        .min(1),
+    )
     .refine((m) => Object.keys(m).length > 0, '至少要有一个模型'),
 });
 
