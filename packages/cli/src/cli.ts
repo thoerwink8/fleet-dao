@@ -1,4 +1,4 @@
-// fleet 命令：解析参数 → 按 agent-api 约定校验 → 调后端 → 用白话打印结果。进程无关，测试直接调 runFleet。
+// fleet 命令：解析参数 → 按 agent-api 约定校验 → 调后端 → 用白话打印结果（实验分支：量测试缓存命中）。进程无关，测试直接调 runFleet。
 import { type ParseArgsOptionsConfig, parseArgs } from 'node:util';
 import {
   AgentRoutes,
