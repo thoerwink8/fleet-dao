@@ -450,9 +450,8 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: packages/conventions
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      # 不装 Node、不装依赖：这一步跑的是汇总入口（ci-plan.ts 的 ciVerdict），只用 Node 自带能力，
+      # runner 镜像自带 Node 就够；省掉这一步约 3 秒和一次 checkout 之后的等待。
       - env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: node packages/conventions/src/bin/ci-verdict.ts
