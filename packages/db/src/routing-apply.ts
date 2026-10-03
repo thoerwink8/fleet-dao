@@ -1,7 +1,9 @@
 // 把默认骨架（routing.default.json）写进库的两张路由表（#574）。只补缺：某个用途在 routing_purpose_models 里已有行、某个模型在
-// routing_catalog 里已有行，就不动它（驾驶舱改过的顺序、开关不覆盖），和目录装载器同一个规矩。
-// 引用对不上（模型、路由库里没有，路由不属于那个模型）、有用途既没单列又没有 default：一行不写、明确报错。
+// routing_catalog 里已有行，就不动它（驾驶舱改过的顺序、开关、思考档位不覆盖），和目录装载器同一个规矩。
+// 引用对不上（模型、路由库里没有，路由不属于那个模型）、思考档位这条路由的执行方式不认、有用途既没单列又没有 default：
+// 一行不写、明确报错。
 // 发布时由 bin/routing.ts 在目录装载器之后调（deploy/release.sh 的 load_routing）：路由要先由目录装进库，骨架才对得上。
+import { routeEffortProblem } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.ts';
 import {
@@ -40,17 +42,26 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
   const knownRoutes = new Map(
     (
       await db
-        .select({ id: routes.id, modelId: routes.modelId })
+        .select({
+          id: routes.id,
+          modelId: routes.modelId,
+          hostId: routes.hostId,
+          upstreamModel: routes.upstreamModel,
+        })
         .from(routes)
         .where(inArray(routes.id, routeIds))
-    ).map((r) => [r.id, r.modelId]),
+    ).map((r) => [r.id, r]),
   );
   for (const [model, rs] of Object.entries(cfg.models)) {
     for (const r of rs) {
-      const owner = knownRoutes.get(r.routeId);
-      if (owner === undefined) problems.push(`路由 ${r.routeId} 库里没有`);
-      else if (owner !== model) {
-        problems.push(`路由 ${r.routeId} 在库里属于模型 ${owner}，配置把它挂在 ${model} 下`);
+      const known = knownRoutes.get(r.routeId);
+      if (known === undefined) problems.push(`路由 ${r.routeId} 库里没有`);
+      else if (known.modelId !== model) {
+        problems.push(`路由 ${r.routeId} 在库里属于模型 ${known.modelId}，配置把它挂在 ${model} 下`);
+      } else if (r.effort !== undefined) {
+        // 已经装过的模型这次不写，档位照样要对：骨架是一份，错的值不留到下一个新库里才发现
+        const problem = routeEffortProblem(known.hostId, known.upstreamModel ?? known.modelId, r.effort);
+        if (problem) problems.push(`路由 ${r.routeId} 的思考档位配不了：${problem}`);
       }
     }
   }
@@ -88,9 +99,15 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
         report.modelsKept.push(modelId);
         continue;
       }
-      await tx
-        .insert(routingCatalog)
-        .values(rs.map((r, position) => ({ modelId, routeId: r.routeId, position, enabled: r.enabled })));
+      await tx.insert(routingCatalog).values(
+        rs.map((r, position) => ({
+          modelId,
+          routeId: r.routeId,
+          position,
+          enabled: r.enabled,
+          effort: r.effort ?? null,
+        })),
+      );
       report.modelsApplied.push(modelId);
       report.catalogRowsInserted += rs.length;
     }
