@@ -9,9 +9,14 @@ import { buildTestGraph } from '../test-graph.ts';
 import { compareTrace, formatAudit, realMisses, runTrace } from '../test-graph-audit.ts';
 
 const args = process.argv.slice(2);
-const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim().replace(/\\/g, '/');
+const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+  .trim()
+  .replace(/\\/g, '/');
 try {
-  const files = execFileSync('git', ['-c', 'core.quotepath=false', 'ls-files'], { cwd: root, encoding: 'utf8' })
+  const files = execFileSync('git', ['-c', 'core.quotepath=false', 'ls-files'], {
+    cwd: root,
+    encoding: 'utf8',
+  })
     .split('\n')
     .filter(Boolean);
   const graph = buildTestGraph(fsRepo(root), { files });

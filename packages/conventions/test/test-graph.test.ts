@@ -131,7 +131,10 @@ describe('每类边', () => {
   it('仓根相对的字符串字面量', () => {
     expect(deps('packages/a/test/root-literal.test.ts')).toEqual(['docs/ops.md']);
     expect(sel('docs/ops.md').tests).toEqual(
-      expect.arrayContaining(['packages/a/test/root-literal.test.ts', 'packages/a/test/cross-module.test.ts']),
+      expect.arrayContaining([
+        'packages/a/test/root-literal.test.ts',
+        'packages/a/test/cross-module.test.ts',
+      ]),
     );
   });
 
@@ -158,7 +161,9 @@ describe('每类边', () => {
   });
 
   it('import(join(目录, 参数))：动态加载目录里的任意文件，连到目录（当代码，往下走）', () => {
-    expect([...(graph.dirDeps.get('packages/a/test/dir-import.test.ts') ?? [])]).toEqual(['packages/a/scripts']);
+    expect([...(graph.dirDeps.get('packages/a/test/dir-import.test.ts') ?? [])]).toEqual([
+      'packages/a/scripts',
+    ]);
     expect(sel('packages/a/src/lib.ts').tests).toContain('packages/a/test/dir-import.test.ts');
   });
 
@@ -168,7 +173,9 @@ describe('每类边', () => {
   });
 
   it('快照文件算测试的边', () => {
-    expect(sel('packages/a/test/__snapshots__/snap.test.ts.snap').tests).toEqual(['packages/a/test/snap.test.ts']);
+    expect(sel('packages/a/test/__snapshots__/snap.test.ts.snap').tests).toEqual([
+      'packages/a/test/snap.test.ts',
+    ]);
   });
 
   it('测试文件自己改了选自己；不相干的测试不选', () => {
@@ -210,7 +217,9 @@ describe('退回调用方的路径（每条都故意造出来）', () => {
   });
 
   it('没人引用的源文件：交回', () => {
-    expect(sel('packages/a/src/orphan.ts').unresolved.map((u) => u.file)).toEqual(['packages/a/src/orphan.ts']);
+    expect(sel('packages/a/src/orphan.ts').unresolved.map((u) => u.file)).toEqual([
+      'packages/a/src/orphan.ts',
+    ]);
   });
 
   it('只被 import type 引用的文件：交回（运行时没人加载它，但改它要按包级兜底）', () => {
@@ -265,7 +274,11 @@ describe('真仓抽查', () => {
   }, 60_000);
 
   it('改引擎的每小时对账，选中它的真测试，不拖上不相干的包', () => {
-    const s = selectTests({ changed: ['packages/engine/src/jobs/hourly-reconcile.ts'], repo: realRepo, graph: real });
+    const s = selectTests({
+      changed: ['packages/engine/src/jobs/hourly-reconcile.ts'],
+      repo: realRepo,
+      graph: real,
+    });
     expect(s.tests).toContain('packages/engine/test/real/hourly-reconcile.test.ts');
     expect(s.tests).toContain('packages/engine/test/hourly-reconcile.test.ts');
     expect(s.tests.some((t) => t.startsWith('packages/web/'))).toBe(false);

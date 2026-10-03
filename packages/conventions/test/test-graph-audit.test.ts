@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { fsRepo } from '../src/repo.ts';
-import { compareTrace, readTrace, realMisses, runTrace, type TraceRecord } from '../src/test-graph-audit.ts';
 import { buildTestGraph, listRepoFiles, type TestGraph } from '../src/test-graph.ts';
+import { compareTrace, readTrace, realMisses, runTrace, type TraceRecord } from '../src/test-graph-audit.ts';
 import { memRepo } from './helpers.ts';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\\/g, '/').replace(/\/$/, '');
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url))
+  .replace(/\\/g, '/')
+  .replace(/\/$/, '');
 const FAKE = '/work/repo';
 
 const repo = memRepo({
@@ -51,7 +53,11 @@ describe('compareTrace', () => {
   });
 
   it('运行时真读了、图里没有、改了会由图做主的文件：记成会选漏的漏边', () => {
-    const r = compareTrace([rec('packages/a/test/lib.test.ts', ['packages/a/src/uses-other.ts'])], graph, FAKE);
+    const r = compareTrace(
+      [rec('packages/a/test/lib.test.ts', ['packages/a/src/uses-other.ts'])],
+      graph,
+      FAKE,
+    );
     expect(realMisses(r).map((m) => [m.test, m.files])).toEqual([
       ['packages/a/test/lib.test.ts', ['packages/a/src/uses-other.ts']],
     ]);
@@ -92,7 +98,9 @@ describe('compareTrace', () => {
   });
 
   it('该核却没记到流水的测试：没查成，单独列出（不当没漏）', () => {
-    const r = compareTrace([rec('packages/a/test/lib.test.ts', [])], graph, FAKE, { scope: ['packages/a/test'] });
+    const r = compareTrace([rec('packages/a/test/lib.test.ts', [])], graph, FAKE, {
+      scope: ['packages/a/test'],
+    });
     expect(r.missingTrace).toEqual(['packages/a/test/second.test.ts']);
   });
 
@@ -100,7 +108,11 @@ describe('compareTrace', () => {
     const r = compareTrace(
       [
         rec('packages/a/test/second.test.ts', []),
-        { ...rec('packages/a/test/second.test.ts', ['packages/a/src/uses-other.ts']), child: true, loaded: [] },
+        {
+          ...rec('packages/a/test/second.test.ts', ['packages/a/src/uses-other.ts']),
+          child: true,
+          loaded: [],
+        },
       ],
       graph,
       FAKE,
@@ -131,15 +143,17 @@ describe('真跑一轮（vitest + 追踪钩子）', () => {
     const tests = ['packages/conventions/test/pr-links.test.ts', 'packages/cli/test/bin.test.ts'];
     const run = await runTrace(ROOT, tests);
     const pr = run.records.filter((r) => r.testFile.endsWith('pr-links.test.ts'));
-    expect(pr.flatMap((r) => r.read).some((p) => p.replace(/\\/g, '/').endsWith('.github/pull_request_template.md'))).toBe(
-      true,
-    );
+    expect(
+      pr
+        .flatMap((r) => r.read)
+        .some((p) => p.replace(/\\/g, '/').endsWith('.github/pull_request_template.md')),
+    ).toBe(true);
     // cli 的 bin 测试给子进程只留了 PATH：追踪照样接上，子进程加载了 bin/fleet
     const child = run.records.filter((r) => r.child === true && r.testFile.endsWith('bin.test.ts'));
     expect(child.length).toBeGreaterThan(0);
-    expect(child.flatMap((r) => r.loaded).some((p) => p.replace(/\\/g, '/').endsWith('packages/cli/bin/fleet'))).toBe(
-      true,
-    );
+    expect(
+      child.flatMap((r) => r.loaded).some((p) => p.replace(/\\/g, '/').endsWith('packages/cli/bin/fleet')),
+    ).toBe(true);
     const realGraph = buildTestGraph(fsRepo(ROOT), { files: listRepoFiles(fsRepo(ROOT)) });
     const report = compareTrace(run.records, realGraph, ROOT, { scope: tests });
     expect(report.missingTrace).toEqual([]);

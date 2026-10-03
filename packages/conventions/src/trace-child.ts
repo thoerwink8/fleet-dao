@@ -4,8 +4,7 @@
 //   $FLEET_TRACE_OUT（testFile 取 $FLEET_TRACE_TEST，即起它的那个测试文件）。
 // 没设 $FLEET_TRACE_OUT 时什么都不做。shell 脚本自己读的文件、洗掉 NODE_OPTIONS 的子进程记不到。
 import childProcess from 'node:child_process';
-import { appendFileSync } from 'node:fs';
-import fs from 'node:fs';
+import fs, { appendFileSync } from 'node:fs';
 import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -68,7 +67,8 @@ export function startTracing(): Sink {
   ])
     wrap(mod, n, sink.read);
   for (const n of ['readdirSync', 'readdir', 'opendirSync']) wrap(mod, n, sink.listed);
-  for (const n of ['readFile', 'stat', 'lstat', 'access', 'open', 'cp', 'copyFile']) wrap(mod.promises, n, sink.read);
+  for (const n of ['readFile', 'stat', 'lstat', 'access', 'open', 'cp', 'copyFile'])
+    wrap(mod.promises, n, sink.read);
   for (const n of ['readdir', 'opendir']) wrap(mod.promises, n, sink.listed);
   // 子进程：默认继承 process.env（里面已有追踪用的几个变量）；测试自己造一份 env 的，往里补上这几个，免得断了追踪
   const cp = childProcess as unknown as Record<string, unknown>;
@@ -96,7 +96,13 @@ export function startTracing(): Sink {
   return sink;
 }
 
-const TRACE_ENV = ['NODE_OPTIONS', 'FLEET_TRACE_OUT', 'FLEET_TRACE_ROOT', 'FLEET_TRACE_TEST', 'FLEET_TRACE_CHILD'];
+const TRACE_ENV = [
+  'NODE_OPTIONS',
+  'FLEET_TRACE_OUT',
+  'FLEET_TRACE_ROOT',
+  'FLEET_TRACE_TEST',
+  'FLEET_TRACE_CHILD',
+];
 /** 把我们的 --import 并进调用方给的 NODE_OPTIONS（只取我们那一段，不覆盖它自己的）。 */
 function mergeNodeOptions(theirs: string | undefined, ours: string): string {
   const hook = /--import=\S*trace-child\.ts/.exec(ours)?.[0];
@@ -106,7 +112,11 @@ function mergeNodeOptions(theirs: string | undefined, ours: string): string {
 
 const OUT = process.env.FLEET_TRACE_OUT;
 // 在 vitest 的测试进程里被 trace-setup.ts 导入时不在这里写（那边按测试文件写）；只有子进程走这里
-if (OUT !== undefined && OUT !== '' && (globalThis as { __vitest_worker__?: unknown }).__vitest_worker__ === undefined) {
+if (
+  OUT !== undefined &&
+  OUT !== '' &&
+  (globalThis as { __vitest_worker__?: unknown }).__vitest_worker__ === undefined
+) {
   const sink = startTracing();
   const write = () => {
     appendFileSync(

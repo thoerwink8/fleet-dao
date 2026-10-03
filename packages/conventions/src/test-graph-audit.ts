@@ -76,7 +76,8 @@ function relOf(p: string, root: string): string | undefined {
   return n.toLowerCase().startsWith(`${r.toLowerCase()}/`) ? n.slice(r.length + 1) : undefined;
 }
 /** 依赖、构建产物、临时文件：不是仓内的源，读了不算边。 */
-const IGNORED = /^(?:node_modules|_tmp|\.git|\.claude|coverage)(?:\/|$)|(?:^|\/)(?:node_modules|dist|dist-demo)(?:\/|$)/;
+const IGNORED =
+  /^(?:node_modules|_tmp|\.git|\.claude|coverage)(?:\/|$)|(?:^|\/)(?:node_modules|dist|dist-demo)(?:\/|$)/;
 
 export interface Miss {
   test: string;
@@ -187,7 +188,8 @@ export function formatAudit(report: AuditReport): string {
   for (const m of bad) {
     lines.push(`  ${m.test}${report.opaqueTests.has(m.test) ? '（opaque）' : ''}：${m.files.join(' ')}`);
   }
-  if (report.missingTrace.length > 0) lines.push(`没记到（没查成）：${report.missingTrace.slice(0, 30).join(' ')}`);
+  if (report.missingTrace.length > 0)
+    lines.push(`没记到（没查成）：${report.missingTrace.slice(0, 30).join(' ')}`);
   return lines.join('\n');
 }
 
@@ -206,7 +208,11 @@ export interface TraceRun {
  * 追踪用的配置写在 <root>/node_modules/.fleet-trace/ 下（它要从仓的 node_modules 解析 vitest/config）。
  * 一条都没记到时抛错（vitest 起不来、setup 没挂上），不拿空流水冒充「什么都没读」。
  */
-export async function runTrace(root: string, args: readonly string[] = [], outDir?: string): Promise<TraceRun> {
+export async function runTrace(
+  root: string,
+  args: readonly string[] = [],
+  outDir?: string,
+): Promise<TraceRun> {
   const dir = outDir ?? mkdtempSync(join(tmpdir(), 'fleet-trace-'));
   mkdirSync(dir, { recursive: true });
   const configDir = join(root, 'node_modules', '.fleet-trace');
@@ -253,9 +259,10 @@ export default mergeConfig(base, {
     },
   );
   const records = readTrace([out]);
-  if (records.length === 0) throw new Error(`一条流水都没记到（vitest 退出码 ${status}）：\n${stderr.slice(-2000)}`);
+  if (records.length === 0)
+    throw new Error(`一条流水都没记到（vitest 退出码 ${status}）：\n${stderr.slice(-2000)}`);
   // vitest 的报告里红了的文件写成「 FAIL  <路径> …」（带颜色码时先剥掉）
-  const plain = `${stdout}\n${stderr}`.replace(/\x1b\[[0-9;]*m/g, '');
+  const plain = `${stdout}\n${stderr}`.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '');
   const failed = [...new Set([...plain.matchAll(/^\s*FAIL\s+(\S+)/gm)].map((m) => m[1] as string))].sort();
   return { outDir: dir, records, status, failed, stderr };
 }

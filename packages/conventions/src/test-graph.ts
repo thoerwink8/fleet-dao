@@ -9,7 +9,7 @@
 //   （类型对不对由 tsc 那一步管，tsc 按包跑，不受这里影响）。`import { type A, b }` 这种混着的整句保留，算边。
 import { isBuiltin } from 'node:module';
 import { posix } from 'node:path';
-import { type Node, NodeFlags, type SourceFile, SyntaxKind } from 'typescript/unstable/ast';
+import { type Node, type SourceFile, SyntaxKind } from 'typescript/unstable/ast';
 import { isTypeNode } from 'typescript/unstable/ast/is';
 import { API } from 'typescript/unstable/sync';
 import { ROOT_CONFIG_FILES } from './ci-plan.ts';
@@ -127,7 +127,12 @@ function readPackages(repo: RepoView, files: ReadonlySet<string>): Map<string, P
       throw new TestGraphError(`${f} 不是 JSON（${e instanceof Error ? e.message : String(e)}）`);
     }
     if (typeof pkg.name !== 'string') throw new TestGraphError(`${f} 没有 name`);
-    byName.set(pkg.name, { dir: `packages/${m[1]}`, exports: pkg.exports, imports: pkg.imports, main: pkg.main });
+    byName.set(pkg.name, {
+      dir: `packages/${m[1]}`,
+      exports: pkg.exports,
+      imports: pkg.imports,
+      main: pkg.main,
+    });
   }
   return byName;
 }
@@ -148,7 +153,14 @@ function withParsed<T>(texts: ReadonlyMap<string, string>, use: (asts: Map<strin
   const config = `${VROOT}/tsconfig.json`;
   const norm = (f: string) => f.replace(/\\/g, '/');
   const configText = JSON.stringify({
-    compilerOptions: { allowJs: true, noResolve: true, noLib: true, types: [], noEmit: true, jsx: 'preserve' },
+    compilerOptions: {
+      allowJs: true,
+      noResolve: true,
+      noLib: true,
+      types: [],
+      noEmit: true,
+      jsx: 'preserve',
+    },
     files: [...byVirtual.keys()],
   });
   const api = new API({
@@ -300,7 +312,8 @@ function buildCtx(rel: string, sf: SourceFile): FileCtx {
       const spec = stringOf(d.moduleSpecifier);
       const clause = d.importClause;
       if (spec !== undefined && clause !== undefined && clause.phaseModifier !== SyntaxKind.TypeKeyword) {
-        const isPath = spec === 'node:path' || spec === 'path' || spec === 'node:path/posix' || spec === 'path/posix';
+        const isPath =
+          spec === 'node:path' || spec === 'path' || spec === 'node:path/posix' || spec === 'path/posix';
         const isUrl = spec === 'node:url' || spec === 'url';
         const def = nameText(clause.name);
         if (def !== undefined) {
@@ -333,7 +346,11 @@ function buildCtx(rel: string, sf: SourceFile): FileCtx {
       return undefined;
     } else if (n.kind === SyntaxKind.ExportDeclaration) {
       const d = n as unknown as { isTypeOnly: boolean; moduleSpecifier?: Node; exportClause?: Node };
-      if (!d.isTypeOnly && d.moduleSpecifier === undefined && d.exportClause?.kind === SyntaxKind.NamedExports) {
+      if (
+        !d.isTypeOnly &&
+        d.moduleSpecifier === undefined &&
+        d.exportClause?.kind === SyntaxKind.NamedExports
+      ) {
         for (const el of (d.exportClause as unknown as { elements: readonly Node[] }).elements) {
           const e = el as unknown as { name: Node; propertyName?: Node };
           const exported = nameText(e.name);
@@ -445,29 +462,46 @@ class Analyzer {
         return this.evalCall(n, c, env);
       case SyntaxKind.NewExpression: {
         const ne = n as unknown as { expression: Node; arguments?: readonly Node[] };
-        if (nameText(ne.expression) !== 'URL' || ne.arguments === undefined || ne.arguments.length === 0) return [UNK];
+        if (nameText(ne.expression) !== 'URL' || ne.arguments === undefined || ne.arguments.length === 0)
+          return [UNK];
         const [a0, a1] = ne.arguments;
         const rels = this.evaluate(a0 as Node, c, env);
         if (a1 === undefined) {
           return rels.map((v) =>
-            v.k === 'str' && v.s.startsWith('file:') ? { k: 'path', p: fileUrlPath(v.s) } : v.k === 'str' ? v : UNK,
+            v.k === 'str' && v.s.startsWith('file:')
+              ? { k: 'path', p: fileUrlPath(v.s) }
+              : v.k === 'str'
+                ? v
+                : UNK,
           );
         }
         const bases = this.evaluate(a1, c, env);
         return cross(rels, bases, (rv, bv) => {
           if (bv.k !== 'path') return UNK;
           if (rv.k === 'str') {
-            if (/^[a-z][a-z0-9+.-]*:/i.test(rv.s)) return rv.s.startsWith('file:') ? { k: 'path', p: fileUrlPath(rv.s) } : rv;
+            if (/^[a-z][a-z0-9+.-]*:/i.test(rv.s))
+              return rv.s.startsWith('file:') ? { k: 'path', p: fileUrlPath(rv.s) } : rv;
             return { k: 'path', p: urlResolve(rv.s, bv.p) };
           }
           if (rv.k === 'part' && !rv.path && rv.pre !== '') {
             const pre = urlResolve(rv.pre.replace(/[^/]*$/, ''), bv.p);
-            return { k: 'part', pre: pre.endsWith('/') ? pre : `${pre}/`, path: true, ...(rv.dep ? { dep: rv.dep } : {}) };
+            return {
+              k: 'part',
+              pre: pre.endsWith('/') ? pre : `${pre}/`,
+              path: true,
+              ...(rv.dep ? { dep: rv.dep } : {}),
+            };
           }
           if (rv.k === 'param' || (rv.k === 'part' && !rv.path && rv.pre === '')) {
             // 整个相对 URL 都是参数：调用点补得上就按实参算；补不上它可以是任何地方（'../..'、绝对路径），只能看不透
             const dep = rv.k === 'param' ? rv.fn : rv.dep;
-            return { k: 'part', pre: urlResolve('./', bv.p), path: true, bare: true, ...(dep ? { dep } : {}) };
+            return {
+              k: 'part',
+              pre: urlResolve('./', bv.p),
+              path: true,
+              bare: true,
+              ...(dep ? { dep } : {}),
+            };
           }
           return { k: 'unk', why: 'new URL(算不出的路径, import.meta.url)' };
         });
@@ -551,7 +585,12 @@ class Analyzer {
       if (obj.kind === SyntaxKind.PropertyAccessExpression) {
         const inner = obj as unknown as { expression: Node; name: Node };
         const innerObj = nameText(inner.expression);
-        if (innerObj !== undefined && c.pathNs.has(innerObj) && nameText(inner.name) === 'posix' && PATH_FNS.has(prop))
+        if (
+          innerObj !== undefined &&
+          c.pathNs.has(innerObj) &&
+          nameText(inner.name) === 'posix' &&
+          PATH_FNS.has(prop)
+        )
           return prop;
       }
       if (objName === 'process' && prop === 'cwd') return 'cwd';
@@ -573,11 +612,20 @@ class Analyzer {
       a.kind === SyntaxKind.SpreadElement ? [UNK] : this.evaluate(a, c, env),
     );
     if (fn === 'String' || fn === 'fileURLToPath' || fn === 'pathToFileURL' || fn === 'normalize') {
-      return (args[0] ?? [UNK]).map((v) => (v.k === 'str' && v.s.startsWith('file:') ? { k: 'path', p: fileUrlPath(v.s) } : v));
+      return (args[0] ?? [UNK]).map((v) =>
+        v.k === 'str' && v.s.startsWith('file:') ? { k: 'path', p: fileUrlPath(v.s) } : v,
+      );
     }
     if (fn === 'dirname') {
-      return (args[0] ?? [UNK]).map((v): Val =>
-        v.k === 'path' ? { k: 'path', p: posix.dirname(v.p) } : v.k === 'str' ? { k: 'str', s: posix.dirname(v.s) } : v.k === 'part' ? v : UNK,
+      return (args[0] ?? [UNK]).map(
+        (v): Val =>
+          v.k === 'path'
+            ? { k: 'path', p: posix.dirname(v.p) }
+            : v.k === 'str'
+              ? { k: 'str', s: posix.dirname(v.s) }
+              : v.k === 'part'
+                ? v
+                : UNK,
       );
     }
     if (fn === 'basename') return [UNK];
@@ -647,7 +695,12 @@ function joinVals(parts: Val[]): Val {
     else if (p.k === 'path') acc = posix.join(acc, p.p);
     else {
       const dep = depOf(p);
-      return { k: 'part', pre: `${acc.replace(/\/+$/, '')}/`, path: first.k === 'path', ...(dep ? { dep } : {}) };
+      return {
+        k: 'part',
+        pre: `${acc.replace(/\/+$/, '')}/`,
+        path: first.k === 'path',
+        ...(dep ? { dep } : {}),
+      };
     }
   }
   return first.k === 'path' ? { k: 'path', p: acc } : { k: 'str', s: acc };
@@ -664,7 +717,12 @@ function resolveVals(parts: Val[]): Val {
     }
   }
   const tail = parts.slice(start + 1);
-  let acc = start >= 0 ? ((parts[start] as Val).k === 'path' ? (parts[start] as { p: string }).p : (parts[start] as { s: string }).s) : VR;
+  let acc =
+    start >= 0
+      ? (parts[start] as Val).k === 'path'
+        ? (parts[start] as { p: string }).p
+        : (parts[start] as { s: string }).s
+      : VR;
   if (start < 0 && parts.some((p) => p.k !== 'str')) {
     const firstBad = parts.findIndex((p) => p.k !== 'str');
     if (firstBad === 0) {
@@ -751,7 +809,9 @@ function makeResolver(files: ReadonlySet<string>, dirs: ReadonlySet<string>, pkg
     const spec = rawSpec.replace(/\?.*$/, '');
     if (spec.startsWith('node:') || isBuiltin(spec)) return { ext: true };
     if (spec.startsWith('.') || spec.startsWith('/')) {
-      const base = posix.normalize(spec.startsWith('/') ? spec.slice(1) : posix.join(posix.dirname(from), spec));
+      const base = posix.normalize(
+        spec.startsWith('/') ? spec.slice(1) : posix.join(posix.dirname(from), spec),
+      );
       if (base.startsWith('..')) return { missing: `${rawSpec} 指到仓外` };
       const f = findFile(base);
       if (f !== undefined) return { file: f };
@@ -857,7 +917,8 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
       const myDirs = new Set<string>();
       const myData = new Set<string>();
       const myBlind: string[] = [];
-      const say = (node: Node, why: string) => myBlind.push(`${lineOf(c.sf, node)}: ${why}: ${snippet(c.sf, node)}`);
+      const say = (node: Node, why: string) =>
+        myBlind.push(`${lineOf(c.sf, node)}: ${why}: ${snippet(c.sf, node)}`);
       const addTarget = (t: Target, node: Node) => {
         if ('file' in t) myDeps.add(t.file);
         else if ('dir' in t) myDirs.add(t.dir);
@@ -896,7 +957,11 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
               if (v.bare) say(node, 'new URL(算不出的路径, import.meta.url)');
               else if (v.path) dirOfPart(v.pre, node, module);
               else if (v.pre.startsWith('./') || v.pre.startsWith('../'))
-                dirOfPart(posix.join(posix.dirname(`${VR}/${rel}`), v.pre) + (v.pre.endsWith('/') ? '/' : ''), node, module);
+                dirOfPart(
+                  posix.join(posix.dirname(`${VR}/${rel}`), v.pre) + (v.pre.endsWith('/') ? '/' : ''),
+                  node,
+                  module,
+                );
               else if (module) say(node, '动态加载的说明符算不出');
               break;
             case 'str':
@@ -923,7 +988,8 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
         const r = posix.normalize(s.replace(/^\.\//, '')).replace(/\/+$/, '');
         if (r.startsWith('..') || r.startsWith('/') || r === '.') return;
         // 不带斜杠的一整段（README.md、package.json 这种）只在实参位置当仓根相对路径：别处多半是判据、消息文本
-        const callArg = node.parent?.kind === SyntaxKind.CallExpression || node.parent?.kind === SyntaxKind.NewExpression;
+        const callArg =
+          node.parent?.kind === SyntaxKind.CallExpression || node.parent?.kind === SyntaxKind.NewExpression;
         if (r.includes('/')) existing(r, node, '', false);
         else if (callArg && files.has(r)) existing(r, node, '', false);
       };
@@ -1009,7 +1075,10 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
           return undefined;
         switch (n.kind) {
           case SyntaxKind.ImportDeclaration: {
-            const d = n as unknown as { moduleSpecifier: Node; importClause?: { phaseModifier?: SyntaxKind } };
+            const d = n as unknown as {
+              moduleSpecifier: Node;
+              importClause?: { phaseModifier?: SyntaxKind };
+            };
             if (d.importClause?.phaseModifier === SyntaxKind.TypeKeyword) return undefined;
             moduleUse(d.moduleSpecifier, n);
             return undefined;
@@ -1049,7 +1118,11 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
               } else return void say(n, 'import.meta.glob 的模式算不出');
               for (const pat of pats) {
                 const stat = pat.replace(/^!/, '').split(/[*?{[]/)[0] as string;
-                dirOfPart(`${posix.join(posix.dirname(`${VR}/${rel}`), stat.replace(/[^/]*$/, ''))}/`, n, true);
+                dirOfPart(
+                  `${posix.join(posix.dirname(`${VR}/${rel}`), stat.replace(/[^/]*$/, ''))}/`,
+                  n,
+                  true,
+                );
               }
               return undefined;
             }
@@ -1146,8 +1219,14 @@ function callSitesOf(fn: Node, c: FileCtx): { arguments: readonly Node[] }[] | u
     if (n.kind === SyntaxKind.Identifier && (n as unknown as { text: string }).text === name) {
       const p = n.parent;
       const pa = p as unknown as Record<string, unknown>;
-      if (p?.kind === SyntaxKind.CallExpression && pa.expression === n) sites.push(p as unknown as { arguments: readonly Node[] });
-      else if (!(pa.name === n && (p?.kind === SyntaxKind.VariableDeclaration || p?.kind === SyntaxKind.FunctionDeclaration)))
+      if (p?.kind === SyntaxKind.CallExpression && pa.expression === n)
+        sites.push(p as unknown as { arguments: readonly Node[] });
+      else if (
+        !(
+          pa.name === n &&
+          (p?.kind === SyntaxKind.VariableDeclaration || p?.kind === SyntaxKind.FunctionDeclaration)
+        )
+      )
         escapes = true;
     }
     n.forEachChild(visit);
@@ -1236,7 +1315,8 @@ function filesUnder(sorted: readonly string[], dir: string): string[] {
     else hi = mid;
   }
   const out: string[] = [];
-  for (let i = lo; i < sorted.length && (sorted[i] as string).startsWith(prefix); i++) out.push(sorted[i] as string);
+  for (let i = lo; i < sorted.length && (sorted[i] as string).startsWith(prefix); i++)
+    out.push(sorted[i] as string);
   return out;
 }
 
@@ -1272,7 +1352,8 @@ export function classifyChange(graph: TestGraph, f: string, index = changeIndex(
   if (graph.sources.has(f))
     return { kind: 'unresolved', why: '源文件没有任何文件引用（新文件，或只被脚本、配置调用的入口）' };
   if (graph.files.has(f) && known && DATA_EXT.test(f)) return { kind: 'resolved', why: '数据文件' };
-  if (graph.files.has(f) && known) return { kind: 'unresolved', why: '不是解析过的源文件（脚本之类），可能再引别的文件' };
+  if (graph.files.has(f) && known)
+    return { kind: 'unresolved', why: '不是解析过的源文件（脚本之类），可能再引别的文件' };
   return {
     kind: 'unresolved',
     why: graph.files.has(f) ? '没有源文件用到它（文档、配置……）' : '图里没有这个文件（删掉的、图外路径）',
@@ -1310,8 +1391,13 @@ export function selectTests({ changed, repo, graph: given, files }: SelectInput)
     const c = classifyChange(graph, f, index);
     if (c.kind === 'runAll') runAll.push({ file: f, why: c.why });
     if (c.kind === 'unresolved') unresolved.push({ file: f, why: c.why });
-    const tail = c.kind === 'resolved' ? `${hits.length} 个测试用到它` : `交回：${c.why}（另有 ${hits.length} 个测试直接用到它）`;
-    notes.push(`${f}：${c.kind === 'runAll' ? `全跑（${c.why}）` : `${c.why === '源文件' || c.why === '数据文件' ? c.why : ''}${tail}`}`);
+    const tail =
+      c.kind === 'resolved'
+        ? `${hits.length} 个测试用到它`
+        : `交回：${c.why}（另有 ${hits.length} 个测试直接用到它）`;
+    notes.push(
+      `${f}：${c.kind === 'runAll' ? `全跑（${c.why}）` : `${c.why === '源文件' || c.why === '数据文件' ? c.why : ''}${tail}`}`,
+    );
   }
   const opaque = graph.tests
     .map((t) => ({ test: t, why: (closures.get(t) as Closure).blind }))
