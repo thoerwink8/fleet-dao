@@ -2,7 +2,7 @@
 // 真库上的装配（real/canary.ts）；真 Temporal 测试服务端上的工作流。需求里的两条故意造出的失败都在这里：
 // 巡检仓的路由全关，这一轮必须报「断在派活」；巡检自己起不来，这一轮记没跑成、登记表上是 failing（看门狗 #203 照它报）。
 import { randomUUID } from 'node:crypto';
-import { bodyCriteria, specOf } from '@fleet-dao/core';
+import { cleanBody, criteriaOf } from '@fleet-dao/core';
 import type { CanaryDbFacts, CanaryStage, ScheduleResult } from '@fleet-dao/db';
 import {
   canaryRunById,
@@ -309,29 +309,25 @@ describe('走到哪一步、断没断（canaryNext）', () => {
 });
 
 describe('巡检单本身', () => {
-  it('正文照 #295 写全需求：收单认得出（照正文写需求文档，目录按标题取短名）、验证照正文读出三条验收条；没有「文档：」那一行', () => {
+  it('正文写全需求（#654 起新单都这样）：验证照正文读出三条验收条；没有「文档：」那一行，也不再要求会话写 specs 需求文档', () => {
     const issue = canaryIssue(7, T0);
     expect(issue.title).toBe('巡检第 7 轮：往巡检记录追加一行');
     expect(issue.body).not.toContain('文档：');
     expect(canaryLogLine(7, T0)).toBe('- 第 7 轮 2026-09-27T12:26:00Z');
-    // 收单、验证用的就是 core 这两个判法（Fusion 第 1 步、第 5 步）
-    const spec = specOf({ body: issue.body, issueNumber: 12, title: issue.title });
-    expect(spec).toMatchObject({ ok: 'specs/12-巡检第7轮往巡检记录追加一行' });
-    expect('requirement' in spec && spec.requirement).toContain('`- 第 7 轮 2026-09-27T12:26:00Z`');
-    const criteria = bodyCriteria(issue.body);
+    expect(issue.body).not.toContain('specs/');
+    // 验证用的就是 core 的 criteriaOf（照正文，先去掉注释和标记）
+    const criteria = criteriaOf(cleanBody(issue.body));
     expect('ok' in criteria && criteria.ok).toHaveLength(3);
     expect('ok' in criteria && criteria.ok[0]).toBe(
       '`巡检记录.md` 的最后一行是 `- 第 7 轮 2026-09-27T12:26:00Z`，一字不差。',
     );
     // 开单留的隐藏标记（openIssue 追加在正文末尾）不算一条验收条
-    expect(bodyCriteria(`${issue.body}\n\n<!-- fleet:issue:0123456789abcdef -->`)).toEqual(criteria);
+    expect(criteriaOf(cleanBody(`${issue.body}\n\n<!-- fleet:issue:0123456789abcdef -->`))).toEqual(criteria);
   });
 
-  it('【故意造出的失败】正文要是丢了「怎么算做完」：收单认不出、停下等人（巡检会报断在派活），不当成写全了', () => {
+  it('【故意造出的失败】正文要是丢了「怎么算做完」：读不出验收条、报错（巡检会报断在派活），不当成写全了', () => {
     const cut = canaryIssue(7, T0).body.split('## 怎么算做完')[0] ?? '';
-    expect(specOf({ body: cut, issueNumber: 12, title: '巡检' })).toMatchObject({
-      error: expect.any(String),
-    });
+    expect(criteriaOf(cleanBody(cut))).toMatchObject({ error: expect.any(String) });
   });
 });
 

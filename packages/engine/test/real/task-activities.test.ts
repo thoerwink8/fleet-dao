@@ -149,7 +149,7 @@ describe('读交代', () => {
     const { acts } = make({ gh });
     const got = await acts.readTaskBrief({ schemaVersion: 1, repo: REPO, issueNumber: 12 }, ctx());
     expect(asked).toEqual(['specs/12-驾驶舱状态/需求.md']);
-    expect(got).toMatchObject({ ok: true, brief: { specDir: 'specs/12-驾驶舱状态', specDocOnMain: true } });
+    expect(got).toMatchObject({ ok: true, brief: { specDir: 'specs/12-驾驶舱状态' } });
   });
 
   it('【故意造出的失败】指着的需求文档主线上没有：回交代不全（不是空交代）', async () => {
