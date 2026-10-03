@@ -743,7 +743,8 @@ describe('ci.yml 和这里对得上', () => {
    * 抠出 lint 里「并行跑」那一步的脚本，配一个假的 pnpm（按子命令决定退出码）原样交给 bash 跑：
    * 一样红了另外两样照样跑完、各自写出结果，开关说不跑的写 skipped。
    */
-  describe('lint 的并行步（真跑它的脚本）', () => {
+  // 每条都起 bash + 几个后台子进程：Windows 本机在别的测试一起跑时一条能到 5–10 秒，默认 5 秒的限时会误红。
+  describe('lint 的并行步（真跑它的脚本）', { timeout: 30_000 }, () => {
     const doc = parse(yml) as {
       jobs: { lint: { steps: { id?: string; run?: string }[] } };
     };
@@ -815,6 +816,74 @@ describe('ci.yml 和这里对得上', () => {
       expect(outputs).toEqual({ biome: 'skipped', tsc: 'skipped', docs: 'success' });
       expect(calls).not.toContain('biome');
       expect(calls).not.toContain('tsc');
+    });
+  });
+
+  /**
+   * 抠出 deploy 里「给 /etc/skel 瘦身」那一步，配一个假 sudo（照原样执行，命令行含指定片段时假装失败），
+   * SKEL 指到临时目录真跑：瘦成、半路失败要挪回去、挪不回去要红。
+   */
+  describe('deploy 的 skel 瘦身步（真跑它的脚本）', { timeout: 30_000 }, () => {
+    const doc = parse(yml) as {
+      jobs: { deploy: { steps: { name?: string; if?: unknown; run?: string }[] } };
+    };
+    const step = doc.jobs.deploy.steps.find((s) => s.name?.includes('/etc/skel 瘦身'));
+    const go = (fail: string[]) => {
+      const dir = mkdtempSync(join(tmpdir(), 'skel-')).split('\\').join('/');
+      const skel = `${dir}/skel`;
+      mkdirSync(`${skel}/.rustup/toolchains`, { recursive: true });
+      writeFileSync(`${skel}/.rustup/toolchains/big`, 'x');
+      writeFileSync(`${skel}/.profile`, 'profile');
+      writeFileSync(`${skel}/.bashrc`, 'bashrc');
+      mkdirSync(`${dir}/bin`);
+      const sudo = `${dir}/bin/sudo`;
+      writeFileSync(
+        sudo,
+        [
+          '#!/usr/bin/env bash',
+          ...fail.map((f) => `case "$*" in *"${f}"*) exit 1;; esac`),
+          'exec "$@"',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(sudo, 0o755);
+      const r = spawnSync('bash', ['-c', step?.run ?? ''], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}/bin${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
+          SKEL: skel,
+        },
+      });
+      const ls = (p: string) => (existsSync(p) ? readdirSync(p).sort() : null);
+      return { r, skel: ls(skel), full: ls(`${skel}.ci-full`) };
+    };
+
+    it('只在要 sudo 的台上跑', () => {
+      expect(step, '找不到瘦身那步').toBeDefined();
+      expect(step?.if).toBe('matrix.sudo');
+    });
+
+    it('瘦成：只留顶层普通文件，工具链目录挪到 .ci-full', () => {
+      const { r, skel, full } = go([]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(skel).toEqual(['.bashrc', '.profile']);
+      expect(full).toEqual(['.bashrc', '.profile', '.rustup']);
+    });
+
+    it('【故意造出的失败】新的挪不进去：把原来的挪回去，照原样跑（退出 0、打 warning）', () => {
+      // 只卡「把瘦身目录换进去」那条 mv（命令里 skel.slim 后面跟着空格和路径）：这时原目录已经挪走了，要走恢复那条路
+      const { r, skel } = go(['skel.slim /']);
+      expect(r.status, r.stderr).toBe(0);
+      expect(skel).toEqual(['.bashrc', '.profile', '.rustup']);
+      expect(r.stdout).toContain('::warning::');
+    });
+
+    it('【故意造出的失败】新的挪不进去、原来的也挪不回去：红，不拿「照原样跑」糊过去', () => {
+      const { r, skel } = go(['skel.slim /', 'skel.ci-full /']);
+      expect(r.status).toBe(1);
+      expect(skel).toBeNull();
+      expect(r.stdout).toContain('::error::');
     });
   });
 

@@ -476,6 +476,32 @@ jobs:
           cache: ${{ needs.changes.outputs.deploy == 'all' && 'pnpm' || '' }}
       - if: needs.changes.outputs.deploy == 'all'
         run: pnpm install --frozen-lockfile
+      # GitHub 的 runner 镜像把一堆工具链放在 /etc/skel 里（.rustup .cargo .nvm .dotnet .ghcup …，几个 G），测试里每建一个
+      # 带家目录的账号（login-user、cli-tools 等）useradd 都要整份拷一遍：实测 login-user 头一条用例 36 秒、cli-tools
+      # 头一条 93 秒，全在拷这个。这里只留 /etc/skel 顶层的普通文件（.profile .bashrc .bash_logout 这类，测试要看
+      # .profile），工具链目录挪开；只动这台一次性的 CI 机器，生产机不动。改不成就照原样跑（只是慢），不挡。
+      - name: CI 机器上给 /etc/skel 瘦身（建测试账号不再拷几个 G 的工具链）
+        if: matrix.sudo
+        # SKEL 只给测试换成临时目录用（packages/conventions/test/ci-plan.test.ts 抠出这段脚本真跑）；CI 上不设，就是 /etc/skel。
+        run: |
+          set -uo pipefail
+          skel=${SKEL:-/etc/skel}
+          echo "原来的 $skel：$(sudo du -sh "$skel" 2>/dev/null | cut -f1)，$(ls -A "$skel" | xargs)"
+          if sudo mkdir -p "$skel.slim" && sudo find "$skel" -maxdepth 1 -type f -exec cp -p {} "$skel.slim/" ';' &&
+            sudo mv "$skel" "$skel.ci-full" && sudo mv "$skel.slim" "$skel"; then
+            echo "瘦身后的 $skel：$(ls -A "$skel" | xargs)"
+          else
+            # 挪开了原来的、新的却没挪进去：把原来的挪回去，保证它一定在；挪不回去就红（后面建账号会拿不到默认文件）
+            if [ ! -d "$skel" ] && [ -d "$skel.ci-full" ] && ! sudo mv "$skel.ci-full" "$skel"; then
+              echo "::error::$skel 瘦身半路失败、原来的也挪不回去了"
+              exit 1
+            fi
+            if [ ! -d "$skel" ]; then
+              echo "::error::$skel 不见了"
+              exit 1
+            fi
+            echo "::warning::$skel 没瘦成，照原样跑（只是慢）：现在是 $(ls -A "$skel" | xargs)"
+          fi
       # 每一台腿都必须真跑（原来这步只认 deploy == 'all'，ops 那台就被跳过了：空跑还报绿，#662 第二意见）。
       # 参数从矩阵来、按数组展开，不拼进命令行；ops 那台不用 sudo、不碰系统账号。
       - name: deploy 检查（${{ matrix.label }}）
