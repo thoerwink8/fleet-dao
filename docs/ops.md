@@ -852,7 +852,7 @@ wsl --install Ubuntu-24.04 --name fleet-local --location D:\srv\fleet-local --no
    ```
    git clone https://github.com/thoerwink8/fleet-dao /srv/fleet-dao
    cd /srv/fleet-dao && git checkout <分支>
-   bash deploy/local/install.sh          # 等价于 FLEET_PROFILE=local bash deploy/france.sh
+   bash deploy/local/install.sh          # 先装本机档自己那一步（WSL 的回环留在本机，见下一节），再跑 FLEET_PROFILE=local bash deploy/france.sh
    ```
 
    长命令甩后台跑、看日志（同第四节「法国经跳板登录，长连接会被重置」那条）：`nohup setsid bash deploy/local/install.sh > /root/fleet-local-install.log 2>&1 < /dev/null &`。
@@ -863,7 +863,8 @@ wsl --install Ubuntu-24.04 --name fleet-local --location D:\srv\fleet-local --no
 
 - 创始人的登录用户 `pilot`（经 Mirasim ssh 远程模式登进来）：本机档不建，创始人直接用 Windows/WSL 登这台机器。
 - 往香港去的部分：钉香港 sshd 主机钥匙、生成往香港传静态文件和发飞书网关用的钥匙、把演示版可见范围推到香港的单元、装机读回里查香港 nginx 清没清请求头那一项。
-- WireGuard：没有香港对端，`wg-fleet` 接口只留本机地址（`10.99.0.2/24`，没有 `[Peer]`）——这不是跳过，是唯一一处「装法不同」：驾驶舱后端还是要绑住这个隧道地址才起得来（和法国一样），只是没有对端、没有真的隧道流量。
+- WireGuard：没有香港对端，`wg-fleet` 接口只留本机地址（`10.99.0.2/24`，没有 `[Peer]`）——这不是跳过，是 `deploy/france.sh` 里唯一一处「装法不同」：驾驶舱后端还是要绑住这个隧道地址才起得来（和法国一样），只是没有对端、没有真的隧道流量。
+- 多一步（只有本机档有，不在 `deploy/france.sh` 里）：WSL 的回环留在本机（#731）。WSL 的 VirtioProxy、mirrored 网络把发往 127.0.0.1 的 TCP、UDP 绕去 Windows（下面「这台本机现在的样子」第一条），`fleet_dao` 表管不着、临时端口段上的口自己连不上。`deploy/local/install.sh` 跑 `deploy/france.sh` 之前先装 `deploy/local/fleet-wsl-loopback.sh`（装成 `/usr/local/sbin/fleet-wsl-loopback`）：优先级 0 加四条规则，发往 127.0.0.0/8 的 TCP、UDP 查本机的 `local` 表，只空出 Windows 上 Clash 的 7890（本机上网经它；#14063 原样给的 `ip rule add pref 0 to 127.0.0.0/8 lookup local` 不分端口，会连 7890 一起留在本机，所以按端口段空出来）。`fleet-wsl-loopback.service` 开机补一次（排在库、Temporal 起来之前），`fleet-wsl-loopback.timer` 之后每分钟再补一次——WSL 网络变动时要是冲掉了，最多一分钟补回来，补的那一次 `journalctl -u fleet-wsl-loopback` 里有一行。读回在 `install.sh` 输出最前面那一段，结论在最后另打一遍：装上去的和仓里一样、开机补和每分钟补都挂着、规则齐不齐、127.0.0.1 的 7243、5432、临时端口段两头走不走 `lo`、7890 还去不去 Windows；手动查 `fleet-wsl-loopback check`。换了代理的口，改脚本里的 `WSL_LOOPBACK_WINDOWS_PORTS`，和上一节第 3 步那三份样例一起改。
 
 其余（防火墙 nft 表、会话用户、`fleet-agents.slice`、Temporal、PostgreSQL、pnpm、cursor-agent、grok 命令行、会话用户的 Mirasim、应用的本机配置骨架、自动发布）照装，和法国一样。跳过的每一步在输出里显示「本机档跳过：为什么」（`deploy/lib/profile.sh` 的 `skip_local`，记进「待配」那一类：不算红也不算绿）。
 
@@ -889,7 +890,7 @@ bash deploy/local/install.sh --check                     # 装机读回：跑法
   2. 临时端口段（`ip_local_port_range` 32768–60999）上的回环监听，WSL 里自己连不上：root 在 127.0.0.1 上起的监听（内核挑的口），root 自己连都「Connection refused」，等 6 秒也一样；固定端口 18765 上的监听谁都连得上。探针的口、reclaude 的本地代理口都是内核挑的：**照这个机制，会话经 reclaude 的本地代理出网也会连不上**（这台还没登录 reclaude，没实测）。
   3. Windows 那头开着的回环口是通的：Clash 的 7890 就是这么通的（下一条）。
 
-  所以换成仓里样例的 mirrored 不解决（同一套路由）；Nat 下 127.0.0.1 留在 WSL 里、规则管得着，但 127.0.0.1:7890 就到不了 Windows 上的 Clash（`wsl` 每次提示的第二句「NAT 模式下的 WSL 不支持 localhost 代理」），得改走 Windows 的地址、Clash 放开局域网、Windows 防火墙开口。Nat 为什么建不起来没查到底：HNS 的事件日志要管理员权限才读得到；看得到的是 Windows 上一个 NAT 都没有、没有 `vEthernet (WSL)` 网卡、WinNAT 驱动这次开机后一次都没起过（`sc query winnat` 退出码 1077）。不重启的修法是在 WSL 里加几条比 WSL 那几条优先的路由规则：#14063 给的是 `ip rule add pref 0 to 127.0.0.0/8 lookup local`（TCP、UDP 各再加一条）再 `ip route flush cache`，127.0.0.0/8 一律回 `local` 表；这台还要用 127.0.0.1:7890 的 Clash，得把发往 7890 的另外留给 Windows。WSL 重启后这几条会丢（要开机自动加），WSL 在网络变动时会不会把它自己那几条重装到前面要实测（#731）。修好之前，演练环境里会话用户的隔离不能算数，别在这台 WSL 里拿会话用户跑不受信的活。
+  所以换成仓里样例的 mirrored 不解决（同一套路由）；Nat 下 127.0.0.1 留在 WSL 里、规则管得着，但 127.0.0.1:7890 就到不了 Windows 上的 Clash（`wsl` 每次提示的第二句「NAT 模式下的 WSL 不支持 localhost 代理」），得改走 Windows 的地址、Clash 放开局域网、Windows 防火墙开口。Nat 为什么建不起来没查到底：HNS 的事件日志要管理员权限才读得到；看得到的是 Windows 上一个 NAT 都没有、没有 `vEthernet (WSL)` 网卡、WinNAT 驱动这次开机后一次都没起过（`sc query winnat` 退出码 1077）。不重启的修法（#731）：在 WSL 里加几条比 WSL 那几条优先的路由规则，127.0.0.0/8 的 TCP、UDP 回 `local` 表、只把发往 7890 的留给 Windows，开机补、每分钟补——见上面「本机档和法国哪里不一样」的「多一步」。装上之前，演练环境里会话用户的隔离不能算数，别在这台 WSL 里拿会话用户跑不受信的活。
 - **grok 命令行没装上**：不是代理不通。VirtioProxy 下 WSL 里的 127.0.0.1 通到 Windows 的回环（上一条），`curl -x http://127.0.0.1:7890 https://x.ai/cli/install.sh` 0.4 秒回 200（2026-10-04 实测）；Windows 的别的地址反倒不通（网关 192.168.3.1、`loopback0` 对端 169.254.73.152/154 的 7890 都连不上：Clash 只听 Windows 的 127.0.0.1，没开局域网）；不走代理直连 x.ai 20 秒超时。装不上是因为装机脚本以会话用户跑官方安装脚本时把环境清空了（`deploy/lib/grok.sh` 的 `grok_as` 用 `env -i`），代理变量没带进去，curl 只能直连、超时。同一个原因还管着运行时：引擎起会话的环境只从白名单抄变量（`packages/adapters/src/env.ts` 的 `SESSION_BASE_KEYS`，不含代理），systemd 起的引擎也不读 `/etc/environment`，所以本机档上引擎起的 grok、cursor-agent、reclaude 会话一样拿不到代理（#731）。法国不用代理，没有这个问题。
 - **应用的环境文件**：不涉密的几项 2026-10-04 照 `deploy/local/desired-config.json` 填好了（`engine.env` 的 `FLEET_ENGINE_PORTS=real`、`FLEET_MACHINE_NAME=本机`，`api.env` 的 `FLEET_PUBLIC_URL=https://fleet-local.invalid`，`release.env` 的 `FLEET_SERVICES=fleet-engine fleet-api`、`FLEET_DOMAIN=fleet-local.invalid`、`FLEET_HK_PARTS=`），目录配置照 `deploy/examples/catalog.example.json` 放成 `/etc/fleet-dao/catalog.json`（root:fleet 640）；拿 `node deploy/france/auto-release/config.mjs check --desired deploy/local/desired-config.json` 对过，其余公开值都对得上。还差：`FLEET_CANARY_REPO`（演练仓，要人定）、`FLEET_GITHUB_WEBHOOK_SECRET`（演练仓的 GitHub App 给）、`FLEET_FEISHU_LOGIN=off`（这一项的期望合进主线后补：本机档不接飞书，写 off 明说，飞书一对留空后端照样起；原来生产下飞书一对必填、本机档起不来）；`release.env` 里样例带的 `FLEET_DEMO_PATH` 期望文件里没登记，对账报「多了一项」。
 - 要创始人动手的登录：reclaude、grok、Mirasim 服务端本体、GitHub 机器人（本机档要用自己的 App）。
