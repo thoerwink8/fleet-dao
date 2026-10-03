@@ -2,14 +2,17 @@
 // 支不支持 Stop 事件看各家自己，不支持就是从来不触发，不影响别的钩子）。
 // 会话收尾时扫一眼仓根，是不是有没跟踪、看着像临时文件的（截图、导出的数据、日志）：通用段那条规矩、截图工具的默认目录
 // 都可能被绕过（别的工具、别家 AI 手滑把这类文件直接写进仓根），这里是兜底提醒，不是强制点。
-// 只提醒、不拦、不删：只用 systemMessage，不设 decision、不设 hookSpecificOutput.additionalContext，退出码一律 0——
-// Stop 上 exit 2 是「不许停，接着聊」，additionalContext 也会让对话接着走，都不是这里要的
-// （code.claude.com/docs/en/hooks.md「Stop」「Stop decision control」两节，2026-09-27 查）。
-// 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：改这里改出「拦下」或「接着聊」的效果，那边会红。
+// 没开无人值守时：只提醒、不拦、不删——只用 systemMessage，退出码一律 0。
+// 开了无人值守（unattended.mjs on）时：这一轮想结束就输出 {"decision":"block","reason":…} 挡回去（创始人 2026-10-03「选 a」）；
+// 放行的几种（做完、要他拍板、暂停、过期、状态读不了）见 unattended.mjs，读不了、判断出错都放行并说明，绝不把人困住。
+// 退出码恒为 0：Stop 上 exit 2 也是「不许停」，这里只用 JSON 的 decision，免得读不懂输入也拦下收尾
+// （code.claude.com/docs/en/hooks.md「Stop」「Stop decision control」两节，2026-10-03 又核了一遍）。
+// 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开时改出「拦下」或「接着聊」、开着时变得不拦，那边都会红。
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cleanId, decideStop, stateDir } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
 const TEMP_LIKE = /\.(png|jpe?g|gif|json|log|txt)$/i;
@@ -86,15 +89,23 @@ if (isMain()) {
   } catch {
     // 读不懂输入就当没有能提醒的信息，不出声（这只是个提醒，不是拦截，读不懂不该炸）
   }
-  // stop_hook_active：这一轮是别的 Stop 钩子把对话带下去才有的。本钩子从不 block、不加 context，
-  // 正常走不到这一步；留着这条只是防别的 Stop 钩子把它捎带触发出重复提醒。
+  // 无人值守：先判（它自己防空转，不看 stop_hook_active——我们自己挡回去之后那个标志就一直是真的）
+  const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+  const un = decideStop({ dir: stateDir(), sessionId });
+  if (un.block) {
+    process.stdout.write(JSON.stringify({ decision: 'block', reason: un.reason }) + '\n');
+    process.exit(0);
+  }
+  const notes = un.notice ? [un.notice] : [];
+  // stop_hook_active：这一轮是别的 Stop 钩子把对话带下去才有的，不重复提醒仓根的临时文件
   if (input?.stop_hook_active !== true) {
     try {
       const out = stopCheck({ cwd: pickCwd(input), git: gitRunner() });
-      if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
+      if (out) notes.push(out.systemMessage);
     } catch {
       // 钩子自己出错不影响会话收尾：安安静静退出，别把「查不成」搞成「拦下」
     }
   }
+  if (notes.length > 0) process.stdout.write(JSON.stringify({ systemMessage: notes.join('；') }) + '\n');
   process.exit(0);
 }

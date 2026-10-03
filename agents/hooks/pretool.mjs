@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cleanId, stateDir, touchTool } from './unattended.mjs';
 
 // bash 里反引号是「先把里面当命令跑」（命令替换）：只有单引号里、带引号的 heredoc（<<'EOF'）里才是普通字符。
 // 双引号里、不带引号、不带引号的 heredoc 里出现没转义的反引号，就返回 true。
@@ -1266,6 +1267,13 @@ if (isMain()) {
   } catch (err) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${err?.code ?? err}），按拦处理\n`);
     process.exit(2);
+  }
+  // 无人值守开着时，记一笔「这个会话调了工具」（Stop 钩子靠它判有没有在干活）；只记不判，出错吞掉，不影响下面的放行或拦下
+  try {
+    const id = cleanId(JSON.parse(raw)?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+    if (id) touchTool({ dir: stateDir(), sessionId: id });
+  } catch {
+    // 输入认不出由下面的 decide 按拦处理
   }
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录
   const verdict = decide(raw, process.cwd());

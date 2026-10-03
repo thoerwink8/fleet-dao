@@ -17,6 +17,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'n
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const FETCH_MS = 15_000;
 export const SYNC_MS = 30_000;
@@ -472,10 +473,20 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now() }) {
 }
 
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
-export function sessionStart({ cwd, home, git, sync, localGit = git, now = Date.now() }) {
+export function sessionStart({
+  cwd,
+  home,
+  git,
+  sync,
+  localGit = git,
+  now = Date.now(),
+  sessionId = null,
+  unattendedDir = stateDir(),
+}) {
   const here = checkHere(cwd, git);
   return [
     ...(here.line ? [here.line] : []),
+    ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
     ...checkDirectives(cwd, localGit),
     ...sweepWorktrees(cwd, localGit),
@@ -608,6 +619,7 @@ if (isMain()) {
       git: gitRunner(),
       sync: syncRunner(),
       localGit: gitRunner(GREP_MS),
+      sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
     });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];
