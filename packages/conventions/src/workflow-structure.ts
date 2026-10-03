@@ -4,7 +4,8 @@
 //
 // 改这里之前必须知道：
 // - 比的是「信任相关的结构」，不是文字：权限、触发、并发、顶层和 job 的环境、job 的增删、每个 job 的 needs / if / runs-on /
-//   权限 / 环境 / 容器 / 服务、每一步用到的 action 和它的 if / continue-on-error / shell / working-directory / persist-credentials、
+//   权限 / 环境 / 容器 / 服务、每一步用到的 action 和它的整个 with（检出的 ref/path、缓存的 key/path）、if / continue-on-error /
+//   shell / working-directory、
 //   「汇总」那些步骤的整段脚本、每个 job 里跑检查的命令还在不在、几个危险词出现的次数有没有变多。
 //   步骤顺序、超时、名字、matrix（strategy）、注释、某一步里别的命令怎么写，都不比——这些是提速改动的常态。
 // - 比不了（读不懂、不是对象）一律算「碰了」，由调用方要第二意见；不许当成「没变」。
@@ -99,8 +100,13 @@ const stepSig = (s: unknown): string => {
   if (!isObj(s)) return canon(s);
   const pick: Obj = {};
   for (const k of STEP_KEYS) if (k in s) pick[k] = s[k];
-  const w = isObj(s.with) ? s.with['persist-credentials'] : undefined;
-  if (w !== undefined) pick['persist-credentials'] = w;
+  // 用到 action 的步骤：整个 with 都比（检出的 ref/path/sparse-checkout 决定跑的是主线的代码还是 PR 的，缓存的 key/path
+  // 决定跳过什么）；没用 action 的步骤 with 没意义，只看检出那一项以防写错地方
+  if (typeof s.uses === 'string') pick.with = s.with ?? null;
+  else {
+    const w = isObj(s.with) ? s.with['persist-credentials'] : undefined;
+    if (w !== undefined) pick['persist-credentials'] = w;
+  }
   return canon(pick);
 };
 

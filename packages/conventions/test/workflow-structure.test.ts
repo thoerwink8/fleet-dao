@@ -124,6 +124,22 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
     ],
     ['检出带上令牌', swap('persist-credentials: false', 'persist-credentials: true'), '检出方式'],
     [
+      '检出换成别的提交（卫生检查就可能跑 PR 自己的代码）',
+      swap(
+        '          persist-credentials: false',
+        '          persist-credentials: false\n          ref: ${{ github.event.pull_request.head.sha }}',
+      ),
+      '检出方式',
+    ],
+    [
+      '检出换目录',
+      swap(
+        '          persist-credentials: false',
+        '          persist-credentials: false\n          path: trusted',
+      ),
+      '检出方式',
+    ],
+    [
       '步骤放过失败',
       swap('      - name: 测试\n', '      - name: 测试\n        continue-on-error: true\n'),
       'continue-on-error',
