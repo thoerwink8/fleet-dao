@@ -13,6 +13,8 @@ export default defineConfig({
       'packages/*/test/**/*.test.{ts,tsx}',
       'agents/test/**/*.test.ts',
     ],
+    // 实验（不合）：量 isolate: false 在 CI 上省多少、哪些测试靠隔离
+    isolate: false,
     // 不开 passWithNoTests：CI 按改动只跑几个包（packages/conventions/src/ci-plan.ts），路径一个测试都没匹配上要红，不能当通过。
     ...(workers.maxWorkers === undefined ? {} : { maxWorkers: workers.maxWorkers }),
   },
