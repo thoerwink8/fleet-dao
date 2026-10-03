@@ -20,6 +20,7 @@ const KEPT_ROOTS = [
   'routes/audit.tsx',
   'routes/quota.tsx',
   'routes/routing.tsx',
+  'routes/efforts.tsx',
   'routes/shell.tsx',
   'routes/task.tsx',
   'components/page.tsx',

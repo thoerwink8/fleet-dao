@@ -1,10 +1,54 @@
-// 改一条路由的思考档位（#470）：驾驶舱的「改档位」经它写 routing_catalog.effort。档位是运行时配置、留在库里（决定 0011
+// 路由两层里每条路由的思考档位（#470）：驾驶舱「思考档位」页经 routingEffortRows 读、经 setRoutingEffort 写
+// routing_catalog.effort。档位是运行时配置、留在库里（决定 0011
 // 第 7 条），不走「改仓库再部署」；引擎起会话时现读（queries/engine.ts 的 routeLaunchFacts），改完下一个会话就照新的。
 // 这条路由的执行方式认不认这一档照 shared 的 routeEffortProblem 判（和骨架装载、引擎起会话同一份判法），判不过一行不写、回原因。
-import { routeEffortProblem, type SessionEffort } from '@fleet-dao/shared';
-import { and, eq } from 'drizzle-orm';
+import { type HostId, routeEffortProblem, type SessionEffort } from '@fleet-dao/shared';
+import { and, asc, eq } from 'drizzle-orm';
 import type { Db } from './client.ts';
-import { routes, routingCatalog } from './schema/index.ts';
+import { channels, models, routes, routingCatalog } from './schema/index.ts';
+
+/** 路由两层里的一条路由和它配的档位（驾驶舱「思考档位」页一行）。 */
+export interface RoutingEffortRow {
+  modelId: string;
+  modelName: string;
+  family: string;
+  routeId: string;
+  /** 在它的模型下的先后。 */
+  position: number;
+  enabled: boolean;
+  /** 空 = 没配（起会话用 high）。 */
+  effort: SessionEffort | null;
+  hostId: HostId;
+  upstreamModel: string | null;
+  channelId: string;
+  channelName: string;
+  poolId: string;
+}
+
+/** 挂进路由两层的每一条路由（routing_catalog 的每一行），按模型编号、再按模型下的先后。读不到抛。 */
+export async function routingEffortRows(db: Db): Promise<RoutingEffortRow[]> {
+  const rows = await db
+    .select({ order: routingCatalog, route: routes, channel: channels, model: models })
+    .from(routingCatalog)
+    .innerJoin(routes, and(eq(routes.id, routingCatalog.routeId), eq(routes.modelId, routingCatalog.modelId)))
+    .innerJoin(channels, eq(channels.id, routes.channelId))
+    .innerJoin(models, eq(models.id, routingCatalog.modelId))
+    .orderBy(asc(routingCatalog.modelId), asc(routingCatalog.position));
+  return rows.map(({ order, route, channel, model }) => ({
+    modelId: order.modelId,
+    modelName: model.displayName,
+    family: model.family,
+    routeId: order.routeId,
+    position: order.position,
+    enabled: order.enabled,
+    effort: order.effort,
+    hostId: route.hostId,
+    upstreamModel: route.upstreamModel,
+    channelId: channel.id,
+    channelName: channel.name,
+    poolId: route.poolId,
+  }));
+}
 
 export interface SetRoutingEffortInput {
   modelId: string;
