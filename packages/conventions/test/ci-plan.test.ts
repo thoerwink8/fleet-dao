@@ -633,18 +633,16 @@ describe('ci.yml 和这里对得上', () => {
     expect([...seen].filter((f) => !covered(f))).toEqual([]);
   });
 
-  it('deploy job：all 跑全套、ops 跑 run.sh --ops，两种都开 job；run.sh 认 --ops、全套里带着 ops-only 自检', () => {
+  it('deploy job：按 changes 给的矩阵铺（all 几台 --shard、ops 一台 --ops），开关空就不开；run.sh 认 --ops、全套里带着 ops-only 自检', () => {
     const d = job('deploy');
-    expect(d).toContain("if: needs.changes.outputs.deploy == 'all' || needs.changes.outputs.deploy == 'ops'");
+    expect(d).toContain("if: needs.changes.outputs.deploy_matrix != '[]'");
+    expect(d).toContain('include: ${{ fromJSON(needs.changes.outputs.deploy_matrix) }}');
     expect(d).toMatch(
-      /- if: needs\.changes\.outputs\.deploy == 'all'\n\s+run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh\n/,
-    );
-    expect(d).toMatch(
-      /- if: needs\.changes\.outputs\.deploy == 'ops'\n\s+run: bash deploy\/test\/run\.sh --ops\n/,
+      /- if: needs\.changes\.outputs\.deploy == 'all'\n\s+run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh \$\{\{ join\(matrix\.args, ' '\) \}\}\n/,
     );
     const runSh = readFileSync(join(ROOT, 'deploy/test/run.sh'), 'utf8');
-    expect(runSh).toMatch(/^--ops\) only_ops=1 ;;$/m);
-    expect(runSh).toMatch(/\bops-only\b.*; do$/m);
+    expect(runSh).toMatch(/^ {2}--ops\)$/m);
+    expect(runSh).toContain('ops-only auto-release-state'); // 分台名单里排着 ops-only（自己也要跑）
     expect(existsSync(join(ROOT, 'deploy/test/ops-only.test.sh'))).toBe(true);
   });
 
