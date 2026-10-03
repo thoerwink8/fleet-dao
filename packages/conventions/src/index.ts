@@ -129,6 +129,7 @@ export {
   type PlanVersion,
   parseOrder,
   planCommand,
+  planNotes,
   readPlan,
   renderPlan,
 } from './plan-view.ts';

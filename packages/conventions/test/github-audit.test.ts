@@ -175,7 +175,8 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
         w.issues.push(issue(70, { milestone: V1 }));
       }),
     );
-    expect(r.texts).toEqual(['「v1 Fusion 接活」里 #70 开着却没排进先后（列在「先后里没排的」）']);
+    expect(r.findings).toEqual([expect.objectContaining({ issue: 70 })]);
+    expect(r.texts[0]).toContain('#70 开着，挂在「v1 Fusion 接活」里却没排进先后');
   });
 
   it('先后里的单不在这个版本里：报', async () => {

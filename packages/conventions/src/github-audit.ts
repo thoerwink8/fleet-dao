@@ -53,7 +53,15 @@ export async function auditGitHub(gh: GitHubReader, now: Date): Promise<AuditRes
   try {
     const plan = await readPlan(gh);
     checked.versions = plan.open.length + plan.closed.length;
-    for (const note of plan.notes) findings.push({ issue: undefined, key: `plan-note:${note}`, text: note });
+    for (const group of plan.loose) {
+      for (const i of group.issues) {
+        findings.push({
+          issue: i.number,
+          key: `loose:${i.number}:${group.milestone}`,
+          text: `#${i.number} 开着，挂在「${group.milestone}」里却没排进先后：把它写进这个版本里程碑说明里 fleet:order 那段（它是子单就挂到母单下面），不做了就关掉`,
+        });
+      }
+    }
   } catch (e) {
     if (e instanceof PlanProblem)
       findings.push({ issue: undefined, key: `plan:${e.message}`, text: e.message });

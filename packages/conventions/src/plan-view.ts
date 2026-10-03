@@ -93,8 +93,16 @@ export interface Plan {
   children: ReadonlyMap<number, PlanIssue[]>;
   /** 子单 → 母单。 */
   parents: ReadonlyMap<number, number>;
-  /** 给人看的提醒，不挡打印（对账把它们当成要修的）。 */
-  notes: string[];
+  /** 开着的版本里开着、却没排进先后（也不在排了的单下面）的单，按版本。打印时当提醒，对账按单留言。 */
+  loose: { milestone: string; issues: PlanIssue[] }[];
+}
+
+/** 给人看的提醒（一个版本一句），不挡打印。 */
+export function planNotes(p: Plan): string[] {
+  return p.loose.map(
+    (g) =>
+      `「${g.milestone}」里 ${g.issues.map((i) => `#${i.number}`).join('、')} 开着却没排进先后（列在「先后里没排的」）`,
+  );
 }
 
 /** 读 GitHub、核对先后，排好要打印的东西。读不到、认不出就抛（一句话说清是哪、怎么改）。 */
@@ -162,7 +170,7 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
     }
   }
 
-  const notes: string[] = [];
+  const looseByVersion: Plan['loose'] = [];
   const laidOut = versions.map((v): PlanVersion => {
     const issues = inVersion.get(v.milestone.number) ?? [];
     const order = orders.get(v.milestone.number) ?? [];
@@ -187,8 +195,7 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
     const unordered = issues.filter((i) => !order.includes(i.number) && nestedUnder(i.number) === undefined);
     const loose = unordered.filter((i) => i.state === 'open');
     if (v.milestone.state === 'open' && loose.length) {
-      const list = loose.map((i) => `#${i.number}`).join('、');
-      notes.push(`「${v.milestone.title}」里 ${list} 开着却没排进先后（列在「先后里没排的」）`);
+      looseByVersion.push({ milestone: v.milestone.title, issues: loose });
     }
     return { ...v, issues, ordered, unordered };
   });
@@ -203,7 +210,7 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
     unscheduledTotal: unscheduledAll.length,
     children,
     parents,
-    notes,
+    loose: looseByVersion,
   };
 }
 
@@ -346,7 +353,7 @@ export async function planCommand(argv: readonly string[], deps: PlanDeps): Prom
   }
   try {
     const plan = await readPlan(deps.reader);
-    const notes = plan.notes.map((n) => `提醒：${n}。`);
+    const notes = planNotes(plan).map((n) => `提醒：${n}。`);
     return {
       code: 0,
       lines: [renderPlan(plan, deps.repo, deps.now()), ...(notes.length ? ['', ...notes] : [])],
