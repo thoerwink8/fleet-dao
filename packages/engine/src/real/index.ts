@@ -1,6 +1,6 @@
 // 真端口的装配：库（packages/db）、GitHub（packages/github）、会话（packages/adapters 的插头，按执行方式分派：Claude Code、
 // cursor-agent，real/hosts.ts）、工作树（fleet-agent-scope）各一份，拼成 EnginePorts。生产按环境变量装（realPortsFromEnv，
-// 见 deploy/france/engine.env.example）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
+// 见 deploy/france/desired-config.json 的 engine 段，env 样例 #747 删了）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
