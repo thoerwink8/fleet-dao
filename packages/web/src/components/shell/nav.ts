@@ -6,6 +6,7 @@ import {
   Gauge,
   Home,
   Presentation,
+  Route,
   Scale,
   ScrollText,
   Settings,
@@ -43,6 +44,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '调度',
     items: [
+      {
+        to: '/routing',
+        label: '路由',
+        icon: Route,
+        hint: '每个用途排哪些模型、走哪几条路，现在派得出去吗',
+        // 演示版里没有这一页（只在正式驾驶舱建）。
+      },
       { to: '/models', label: '模型目录', icon: Boxes, soon: true, hint: '各家模型、上下架' },
       { to: '/quota', label: '额度', icon: Gauge, hint: '每个账号池每个时间窗还剩多少', module: 'quota' },
       { to: '/billing', label: '账单', icon: Wallet, soon: true, hint: '花了多少、值不值' },

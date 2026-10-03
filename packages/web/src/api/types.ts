@@ -20,6 +20,8 @@ import type {
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
+  LivenessFactSchema,
+  LivenessVerdictSchema,
   MeResponse,
   ModelSchema,
   NotificationLevelSchema,
@@ -32,6 +34,10 @@ import type {
   QuotaWindowViewSchema,
   RepoSchema,
   RouteSchema,
+  RoutingLayerModelSchema,
+  RoutingLayerPurposeSchema,
+  RoutingLayerRouteSchema,
+  RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
   RunStepsResponse,
@@ -89,6 +95,14 @@ export type StagePolicy = z.infer<typeof StagePolicySchema>;
 export type Ban = z.infer<typeof BanSchema>;
 export type UpdateStagePolicyBody = z.input<typeof UpdateStagePolicyRequest>;
 export type UpdateChannelBody = z.input<typeof UpdateChannelRequest>;
+
+/** 路由两层每一层现在活着吗（#574）。 */
+export type RoutingLayers = z.infer<typeof RoutingLayersResponse>;
+export type RoutingLayerPurpose = z.infer<typeof RoutingLayerPurposeSchema>;
+export type RoutingLayerModel = z.infer<typeof RoutingLayerModelSchema>;
+export type RoutingLayerRoute = z.infer<typeof RoutingLayerRouteSchema>;
+export type LivenessVerdict = z.infer<typeof LivenessVerdictSchema>;
+export type LivenessFact = z.infer<typeof LivenessFactSchema>;
 
 export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;
