@@ -225,8 +225,8 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
   it('每次都跑的两份就是 CI 里 docs 那一步跑的那两份', () => {
     const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     const line = yml.split('\n').find((l) => l.includes('vitest run') && l.includes('doc-pointers'));
-    // docs 那步在 lint job 里（几步并成一个 job），写法是带 name、id 的 step，不是单行 `- run:`。
-    expect(line?.trim()).toBe(`run: pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
+    // docs 那步在 lint job 里、和 biome/tsc 并行跑（后台进程、日志进 $LOGS），不是单行 `- run:`。
+    expect(line).toContain(`pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
   });
 
   it('基准就是 origin/main（引擎钉在会话树里的也是它）', () => {
