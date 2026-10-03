@@ -190,7 +190,11 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
   [/\buses:/, '用到的 action'],
   [/\bhygiene\b|\btrusted\b|\bTRUSTED\b|卫生检查|second-opinion|merge-gate|cold-verify/, '卫生检查或合并闸'],
   [/continue-on-error|\|\|\s*true|\bexit 0\b|set \+e/, '放过失败'],
-  [/\bif:.*(?:always\(\)|failure\(\)|cancelled\(\)|github\.event_name|github\.event\.)/, '检查跑不跑的条件'],
+  // 不只认 if: 同一行：条件可以用 >- 、| 写成多行，续行上只有表达式。所以这几个词出现在任何改动行上都算，if: 后面接块写法也算
+  [
+    /always\(\)|failure\(\)|cancelled\(\)|github\.event_name|github\.event\.|^\s*(?:-\s+)?if:\s*[>|]/,
+    '检查跑不跑的条件',
+  ],
   [
     /^\s*check:\s*$|\bneeds:|CI_NEEDS|ci-verdict|ci-plan\.ts|汇总|::error::/,
     '汇总、依赖或「该跑什么」的判法',
