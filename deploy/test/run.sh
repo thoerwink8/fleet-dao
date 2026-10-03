@@ -42,13 +42,17 @@ shard_n=0
 
 # 分台：SHARDS 的每一项是一台，里面是用空格隔开的项目名。项目名 = deploy/test 下 *.test.sh 去掉后缀；另有四个特殊项：
 # lint（语法 + shellcheck）、backup（deploy/backup/test）、node-tests（下面 NODE_TESTS 那几个 node --test）、ports（端口表）。
-# 按 CI 实测的耗时排（2026-10-03；每一项的秒数看日志里的「⏱」行，不匀了就挪项）。那轮实测的大项：
-# cli-tools 88、login-user 53、cursor-agent 48、session-ports 28、lint 20、session-pnpm/grok 各 11、release-flow/public-site 各 7~8，
-# 其余都在 2 秒以内（零碎的加一起约 20 秒）。分法：最重的三个各占一台打头（88 / 53+48 / 28+20），零碎的都塞第三台。
+# 按 CI 实测的**高值**排（2026-10-03 两轮实测取大的那个；每一项的秒数看日志里的「⏱」行，不匀了就挪项）。
+# 各家的波动不小（cli-tools 44↔88、cursor-agent 10↔48、agents-sync 2↔28），所以要按高值排、别按某一轮的平均值——
+# 第一版就是按一轮实测排的，下一轮赶上波动，台 3 从 90 秒变成 138 秒。
+# 取高值后各家的秒数：cli-tools 88、login-user 53、cursor-agent 48、session-ports 30、agents-sync 28、lint 20、
+# grok/session-pnpm 各 11、release-flow 8、public-site/agent-scope-org-use 各 7、web-publish 6、其余 2 秒以内。
+# 三台的和：113 / 113 / 114（总 340 秒），加每台固定开销 13 秒 → 关键路径约 127 秒。
+# **要再快只能砍最重那几项**（cli-tools 88 秒、login-user 53、cursor-agent 48 占了三台总和的 56%），挪项已经挪不动了。
 SHARDS=(
-  'cli-tools session-pnpm'
-  'login-user cursor-agent'
-  'lint session-ports session-user listen root-exec-check release-flow gateway-deploy gateway-bundle place-file ops-only auto-release-state public-site agents-sync agents-sync-account profile shards ports web-publish demo-scopes cursor-key grok mirasim mirasim-session node-cache backup agent-scope-adopt agent-scope-org-use app-config node-tests'
+  'cli-tools session-pnpm grok demo-scopes mirasim'
+  'login-user cursor-agent agent-scope-org-use backup listen root-exec-check place-file'
+  'session-ports agents-sync lint release-flow public-site web-publish gateway-bundle gateway-deploy ops-only auto-release-state shards ports session-user mirasim-session node-cache agents-sync-account profile cursor-key agent-scope-adopt app-config node-tests'
 )
 NODE_TESTS=(health-page auto-release config)
 SPECIAL_UNITS=(lint backup node-tests ports)
