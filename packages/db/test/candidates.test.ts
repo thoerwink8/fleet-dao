@@ -122,8 +122,8 @@ describe('某阶段的候选路由', () => {
     const ui = await stageCandidates(t.db, 'ui', { now: NOW });
     expect(ui.candidates.map((c) => [c.routeId, c.blockers, c.banReasons])).toEqual([
       ['gpt', ['banned'], ['GPT 不做 UI 类活']],
-      ['fable51', ['banned'], ['不用 Fable（出比 5.1 更高的版本之前）']],
-      ['fable52', ['banned'], ['不用 Fable（出比 5.1 更高的版本之前）']],
+      ['fable51', ['banned'], ['不用 Fable（创始人定）']],
+      ['fable52', ['banned'], ['不用 Fable（创始人定）']],
       ['grok', ['banned'], ['创始人另加：Grok 暂不做 UI']],
     ]);
     expect(await summary('execute')).toEqual([
