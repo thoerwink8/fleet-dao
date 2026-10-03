@@ -16,6 +16,7 @@
     "agents:sync": "node packages/agents-sync/bin/agents-sync-now",
     "mirasim:migrate": "node packages/mirasim-reclaude/bin/migrate",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
+    "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",

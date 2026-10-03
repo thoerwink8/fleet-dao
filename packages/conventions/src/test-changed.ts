@@ -9,7 +9,7 @@
 // ② 它只顺着 import 找受影响的测试：引擎的工作流测试跑的是 Temporal 打包器按路径打的包，几个命令行测试另起进程跑，测试直接读的
 //   文档、迁移、夹具也不在 import 里——改了引擎的工作流代码，它一个工作流测试都不跑。按包选（有 ci-plan.test.ts 扫测试源码兜着
 //   「测试读包外文件」的清单）没有这个洞，代价是比按文件多跑一些。
-import { type PackageGraph, planCi } from './ci-plan.ts';
+import { type PackageGraph, planCi, unitPath } from './ci-plan.ts';
 import type { RepoView } from './repo.ts';
 
 /** 和谁比：引擎给会话的树钉好了这个引用（packages/engine/src/real/user-git.ts 的 pinMainline），本机是 git fetch 来的。 */
@@ -103,7 +103,9 @@ export function selectTests(changed: readonly string[], graph: PackageGraph | st
       : [`装机测试（deploy/test/run.sh${plan.deploy === 'ops' ? ' --ops' : ''}）`]),
   ];
   if (plan.full) return { kind: 'all', paths: [], reasons: plan.reasons, ciOnly };
-  const paths = [...new Set([...plan.tests.flatMap((s) => s.args), ...ALWAYS_TESTS])];
+  // CI 现在按「选中的单元 → 测试文件 → 装台」跑（bin/ci-plan.ts），本机照旧按单元目录交给 vitest
+  // （本机不按耗时装箱：不是 4 核运行机，几台并行跑反而把机器拖满）。plan.full 在前一步就返回了，这里 testUnits 就是各单元。
+  const paths = [...new Set([...plan.testUnits.map(unitPath), ...ALWAYS_TESTS])];
   return { kind: 'some', paths, reasons: plan.reasons, ciOnly };
 }
 

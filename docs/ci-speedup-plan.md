@@ -24,7 +24,7 @@
 | D | 主线跑「上次绿…现在」的累计改动 | **前半已合（#688）、主线真跑通过**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动 |
 | E | PR 的测试分片结果缓存 | **已合（#688）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
 | F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已合（#688），实测 login-user 94→44s**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数本机测不了（要 root），等 CI 的 ⏱ 行，分台名单到时再重排 |
-| G | engine/db 继续分片、大文件继续拆 | 待做（在 E 之后看还差多少） |
+| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已做、待合**（本分支）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从主线日志刷新）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
 | H | 每 job 约 25 秒固定开销（checkout + setup-node + pnpm install） | 待做（在 B 之后逐项量） |
 
 ## 关键事实（都查过，别再重查）

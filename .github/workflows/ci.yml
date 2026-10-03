@@ -241,31 +241,47 @@ jobs:
           fi
           echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC docs=$DOCS"
 
-  # engine 切三台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
-  # 只跑受影响的包（改到的 + 依赖它们的）。
-  # db 分片自己起一个 postgres:16 容器（和法国生产同大版本，ops.md 第二节），测试经 FLEET_TEST_PG_URL 连上，
-  # 第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆一份（#220）：一个测试进程的内存从
-  # ~1G 降到 ~0.3G，不再每个进程各建一份内存 PGlite。engine、rest 不连这张库，照 PGlite 走；本机没设这个变量也
-  # 照 PGlite 走（packages/db/src/testing.ts，ops.md 第九节「CI 测试的 Postgres 服务」）。
-  # PR 上的结果缓存（packages/conventions/src/ci-cache.ts）：同一个 PR 重推，这一台的输入（源码、依赖、根配置、环境……）
-  # 没变、上一轮又全绿，就不再跑 vitest。缓存按 ref 分作用域，PR 的缓存只有这个 PR 自己读得到；主线（push）这一轮是
-  # 自动发布的闸门，一个测试都不许跳：下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
+  # 测试分几台、每台跑哪些文件：ci-plan.ts（选单元）→ test-split.ts（按耗时装箱，一台一份明确的文件清单），
+  # job 名就是那一台的名字（「2/5 · pg」）。不再用 vitest --shard 按文件个数切（#654 那版：engine 三台 89/35/137 秒、
+  # rest 三台 87/72/125 秒，极不均）。只跑受影响的包（改到的 + 依赖它们的）。
+  # 环境按这一台装进的文件算，不看包：
+  # - 要真 Postgres 的（packages/db 下的测试，matrix.pg）才起 postgres:16 容器，测试经 FLEET_TEST_PG_URL 连上
+  #   （和法国生产同大版本，ops.md 第二节）：第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆
+  #   一份（#220）。容器在 job 一开始就后台 docker run -d 起（pull 放到后台、装依赖之后再等，不和装依赖串着等），
+  #   pg_isready 通了才跑测试。
+  # - 要 Temporal 命令行的（github-reconcile.test.ts 用真开发服务端，matrix.temporal）才装它，版本和校验和从
+  #   deploy/france.sh 读、缓存按版本 + 校验和；测试里 CI 没给这个变量就直接红（test/support.ts）。
+  # 每台跑完都要核对「实际跑的测试文件 == 分到的这一台」（ci-box.ts verify，用 vitest 的 JSON 报告）：vitest 的位置
+  # 参数是子串过滤，交给它清单也不等于它正好跑这些；多跑、少跑都红，没跑成不许当通过。
+  # PR 上的结果缓存（packages/conventions/src/ci-cache.ts）：同一个 PR 重推，这一台的输入（分到的文件、源码、依赖、
+  # 根配置、环境……）没变、上一轮又全绿，就不再跑 vitest。缓存按 ref 分作用域，PR 的缓存只有这个 PR 自己读得到；
+  # 主线（push）这一轮是自动发布的闸门，一个测试都不许跳：下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
   # job 照常 success，跳的只是 vitest 那一步；缓存读不到、清单对不上、算不出，一律回来真跑。
   test:
     needs: changes
     if: needs.changes.outputs.tests != '[]'
     name: test (${{ matrix.label }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # FLEET_TEST_PG_URL 只给 db 分片：连旁边的 postgres:16 服务、从模板库克隆各自的测试库（#220）。不设给 engine、rest：
-    # 它们的测试照 PGlite 走，免得挂上这张白起的库。放在 job 上是为了算缓存键的那一步也看得到（有没有真 Postgres 是键的一部分）。
+    timeout-minutes: 15
+    # FLEET_TEST_PG_URL 只给 pg 台（装上来的文件要真库的那一台）：从模板库克隆各自的测试库（#220）。放在 job 上是为了
+    # 算缓存键的那一步也看得到（有没有真 Postgres 是键的一部分）。
     env:
-      FLEET_TEST_PG_URL: ${{ matrix.name == 'db' && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
+      FLEET_TEST_PG_URL: ${{ matrix.pg && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
     steps:
+      # postgres:16 只给 pg 台用，所以不用 services（services 每台都起、起一次约 12 秒，别的台白等），
+      # 改成这一台自己 docker run。整条 docker run（含拉镜像）放后台跑，这一步当场结束；装依赖之后再等它起来：
+      # 原来单独等的那 14 秒和装依赖叠在一起，不串着等。后台进程活到 job 结束（Actions 在 job 末尾才清孤儿进程）。
+      - name: 起 postgres:16（只 pg 台，后台）
+        if: matrix.pg
+        run: |
+          set -euo pipefail
+          nohup docker run -d --name fleet-test-pg -p 5432:5432 \
+            -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin \
+            postgres:16-alpine > "$RUNNER_TEMP/fleet-test-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -275,19 +291,17 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # postgres:16 只给 db 分片用，所以不用 services（services 每个分片都起、起一次约 12 秒，engine、rest 白等），
-      # 改成 db 分片自己 docker run，和装依赖并不冲突：先起、等到 pg_isready 再跑测试。
-      - name: 起 postgres:16（只 db 分片）
-        if: matrix.name == 'db'
+      - name: 等 postgres:16 起来（只 pg 台）
+        if: matrix.pg
         run: |
           set -euo pipefail
-          docker run -d --name fleet-test-pg -p 5432:5432             -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin             postgres:16-alpine
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             if docker exec fleet-test-pg pg_isready -U fleet_test -d fleet_test_admin >/dev/null 2>&1; then exit 0; fi
             sleep 1
           done
-          docker logs fleet-test-pg >&2
-          echo "postgres:16 60 秒没起来" >&2
+          cat "$RUNNER_TEMP/fleet-test-pg-start.log" >&2 || true
+          docker logs fleet-test-pg >&2 || true
+          echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
           exit 1
       # 引擎有几条测试要真的 Temporal 开发服务端（测试服务端和真服务端行为不同的地方）：用和法国同一版的命令行起，
       # 版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。测试里 CI 没给这个变量就直接红（test/support.ts）。
@@ -334,16 +348,28 @@ jobs:
           "$cli" --version
           "$cli" --version | grep -qF "$VERSION"
           echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
-      # —— PR 上的测试结果缓存（只 pull_request；说明见 test job 上面的注释）。键的算法、清单的校验都在 ci-cache.ts。
-      # 1. 算键（含 vitest list 列出这一台实际会收的测试文件）；算不出 enabled=false，后面几步都跳过、测试全跑
+      # 这一台分到哪些测试文件：矩阵里那一份 JSON 过 ci-box.ts 核一遍（名字、文件清单、两个开关），
+      # 一行一个写到 BOX_FILE，后面的步骤都按数组展开交给 vitest，不拼进命令行。
+      - name: 这一台跑哪些文件
+        id: box
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+        run: |
+          set -euo pipefail
+          box_file="$RUNNER_TEMP/fleet-test-box-files.txt"
+          mkdir -p "$RUNNER_TEMP/fleet-test-out"
+          node packages/conventions/src/bin/ci-box.ts files --box "$MATRIX" --out "$box_file"
+          echo "box_file=$box_file" >> "$GITHUB_OUTPUT"
+      # —— PR 上的测试结果缓存（只 pull_request；说明见 test job 上面的注释）。
+      # 1. 算键（这一台分到的文件、它们的哈希、源码闭包、环境身份）；算不出 enabled=false，后面几步都跳过、测试全跑
       - name: 测试缓存：算键
         if: github.event_name == 'pull_request'
         id: cache-key
         env:
-          ARGS: ${{ join(matrix.args, ' ') }}
+          BOX_FILE: ${{ steps.box.outputs.box_file }}
           LABEL: ${{ matrix.label }}
           TEMPORAL: ${{ matrix.temporal && format('{0} {1}', steps.temporal.outputs.version, steps.temporal.outputs.sha) || '' }}
-        run: node packages/conventions/src/bin/ci-cache.ts key --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --args="$ARGS" --label "$LABEL" --temporal "$TEMPORAL"
+        run: node packages/conventions/src/bin/ci-cache.ts key --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --box-file "$BOX_FILE" --label "$LABEL" --temporal "$TEMPORAL"
       # 2. 取上一轮存的清单（键完全一样才命中，不用 restore-keys）
       - name: 测试缓存：取清单
         if: github.event_name == 'pull_request' && steps.cache-key.outputs.enabled == 'true'
@@ -352,27 +378,25 @@ jobs:
         with:
           path: ${{ runner.temp }}/fleet-test-cache
           key: ${{ steps.cache-key.outputs.cache_key }}
-      # 3. 不信键：清单每个文件的哈希重算、拿 vitest 收到的文件当全集再减去盖住的；mode = all / files / none
+      # 3. 不信键：清单每个文件的哈希重算、拿分到这一台的文件当全集再减去盖住的；mode = all / files / none
       - name: 测试缓存：核对，算这次跑哪些
         if: github.event_name == 'pull_request' && steps.cache-key.outputs.enabled == 'true'
         id: cache-plan
         run: node packages/conventions/src/bin/ci-cache.ts plan --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP"
-      # 参数是 ci-plan 给的包目录（或全跑时 rest 的 --exclude）；经环境变量传、按数组展开，不拼进命令行。
-      # CACHE_MODE 空 = 没走缓存（主线推送、或上面几步没开）：和没有缓存时一模一样地全跑。all 和 files 多出一份 JSON 报告，
-      # 写清单时按它认「哪些文件真的跑成了」；files 只跑清单没盖住的那几个文件（不再带 --shard，文件已经是这一台的）；
-      # none = 清单盖住了全部，不跑 vitest。
+      # 交出去的是这一台分到的文件（BOX_FILE，一行一个）：缓存没开时全跑，files 只跑清单没盖住的那几个，none 不跑。
+      # 每一轮都出 JSON 报告（下面的核对按它认实际跑了哪些）。CACHE_MODE 认不出直接红，不悄悄全跑也不悄悄跳过。
       - env:
-          ARGS: ${{ join(matrix.args, ' ') }}
+          BOX_FILE: ${{ steps.box.outputs.box_file }}
           CACHE_MODE: ${{ steps.cache-plan.outputs.mode }}
           RUN_FILES: ${{ steps.cache-plan.outputs.run_files }}
-          REPORT: ${{ runner.temp }}/fleet-test-report.json
+          REPORT: ${{ runner.temp }}/fleet-test-out/report.json
         run: |
           set -euo pipefail
-          read -ra args <<<"$ARGS"
+          mapfile -t box <"$BOX_FILE"
           report=(--reporter=default --reporter=github-actions --reporter=json --outputFile.json="$REPORT")
           case "${CACHE_MODE:-}" in
-            "") pnpm exec vitest run "${args[@]}" ;;
-            all) pnpm exec vitest run "${args[@]}" "${report[@]}" ;;
+            "") pnpm exec vitest run "${box[@]}" "${report[@]}" ;;
+            all) pnpm exec vitest run "${box[@]}" "${report[@]}" ;;
             files)
               mapfile -t files <"$RUN_FILES"
               pnpm exec vitest run "${files[@]}" "${report[@]}"
@@ -383,11 +407,21 @@ jobs:
               exit 1
               ;;
           esac
+      # 跑完核对「实际跑的测试文件 == 分到的这一台」（命中缓存的：盖住的 + 跑的 == 分到的）：vitest 的位置参数是子串过滤，
+      # 交给它清单也不等于它正好跑这些；少跑、多跑都红并点名（底线：没跑成不许当通过）。
+      - name: 核对这一台跑的 == 分到的
+        if: success()
+        env:
+          MATRIX: ${{ toJSON(matrix) }}
+          CACHE_MODE: ${{ steps.cache-plan.outputs.mode }}
+          REPORT: ${{ runner.temp }}/fleet-test-out/report.json
+          STATE: ${{ runner.temp }}/fleet-test-cache-state.json
+        run: node packages/conventions/src/bin/ci-box.ts verify --box "$MATRIX" --mode "${CACHE_MODE:-}" --report "$REPORT" --state "$STATE"
       # 4. 只在这一台全绿之后写清单（record 自己再核对一遍：每个文件要么核对过、要么报告里标了 passed），再存缓存
       - name: 测试缓存：全绿，写清单
         if: success() && github.event_name == 'pull_request' && (steps.cache-plan.outputs.mode == 'all' || steps.cache-plan.outputs.mode == 'files')
         id: cache-record
-        run: node packages/conventions/src/bin/ci-cache.ts record --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --report "$RUNNER_TEMP/fleet-test-report.json"
+        run: node packages/conventions/src/bin/ci-cache.ts record --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --report "$RUNNER_TEMP/fleet-test-out/report.json"
       - name: 测试缓存：存清单
         if: success() && github.event_name == 'pull_request' && steps.cache-record.outputs.written == 'true' && steps.cache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
