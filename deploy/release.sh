@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
+# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录、装路由两层 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
 # （release.env 的 FLEET_HK_PARTS 写了 demo，人手动发布连演示版一起发到 FLEET_DEMO_PATH、记下发的是哪一版；明写了 web，才连
 # 驾驶舱静态文件一起发到根地址）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
@@ -755,6 +755,73 @@ load_catalog() { # 提交号
   fi
 }
 
+# ── 路由两层 ──
+
+# 路由两层那两张表的读回，一行「用途 → 模型的行数|模型 → 路由的行数」。读不到、认不出就失败，不当成 0
+routing_readback() {
+  local out
+  out=$(pg_admin -d fleet -c "select (select count(*) from routing_purpose_models), (select count(*) from routing_catalog)") || return 1
+  if [[ ! "$out" =~ ^[0-9]+\|[0-9]+$ ]]; then return 1; fi
+  printf '%s' "$out"
+}
+
+# 读回的一行说成人话
+routing_words() { # routing_readback 的一行
+  printf '用途 → 模型 %s 行、模型 → 路由 %s 行' "${1%%|*}" "${1##*|}"
+}
+
+# 装路由两层的默认骨架（#574）：目录装完之后、切版本之前，以 fleet 跑这一版的装载器（packages/db/src/bin/routing.ts，骨架是这一版
+# 自己带的 packages/db/routing.default.json，不放 /etc）。它只补缺——库里已有的用途、模型一行不动（驾驶舱改过的不覆盖）；骨架读不到、
+# 认不出、引用对不上（骨架里的模型、路由库里没有）整批不写、退出 1。装不成、读不回、装完哪张表是 0 行，都停下、不切版本（在用的那版
+# 不受影响）：选路按这两张表派活，空的就一条都派不出。路由由目录装载器先装进库，所以排在 load_catalog 后面
+load_routing() { # 提交号
+  local dir=$RELEASES/$1 before after out rc=0 line first empty=""
+  step "装路由两层（这一版的 packages/db/routing.default.json → 库 fleet）"
+  if [[ ! -f "$dir/packages/db/src/bin/routing.ts" ]]; then
+    ok "这一版没有路由两层装载器"
+    return 0
+  fi
+  if ! before=$(routing_readback); then
+    red "装路由两层之前读不到库 fleet 里那两张表的行数：没装，没切版本"
+    return 1
+  fi
+  out=$(cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
+    "$NODE" packages/db/src/bin/routing.ts 2>&1) || rc=$?
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then printf '    %s\n' "$line"; fi
+  done <<<"$out"
+  if ((rc != 0)); then
+    first=$(head -1 <<<"$out")
+    # 装载器是一个事务、出错整批不写；这里不光信它，再读回一次和装之前比，照实说库变没变
+    if ! after=$(routing_readback); then
+      line="装完读不回库，库里变没变没查成"
+    elif [[ "$after" == "$before" ]]; then
+      line="读回核过：两张表的行数和装之前一样"
+    else
+      line="库变了（装之前 $(routing_words "$before")，现在 $(routing_words "$after")），要人看"
+    fi
+    red "路由两层没装成（装载器退出码 $rc，原话见上；$line；没切版本）：${first:-（没有输出）}"
+    return 1
+  fi
+  if ! after=$(routing_readback); then
+    red "路由两层装完了，但读不回库 fleet 里那两张表的行数：没切版本"
+    return 1
+  fi
+  if [[ "${after%%|*}" == 0 ]]; then empty="用途 → 模型 0 行"; fi
+  if [[ "${after##*|}" == 0 ]]; then empty+="${empty:+、}模型 → 路由 0 行"; fi
+  if [[ -n "$empty" ]]; then
+    red "装完读回：库 fleet 里路由两层${empty}（装之前 $(routing_words "$before")），选路派不出活（要人看）；没切版本"
+    return 1
+  fi
+  line=$(routing_words "$after")
+  # 装载器只插不删：两张表的行数都没变，就是这次一行没写
+  if [[ "$after" == "$before" ]]; then
+    ok "路由两层已齐，这次一行没改（$line）"
+  else
+    changed "路由两层装进库（$line）"
+  fi
+}
+
 # ── 切版本 ──
 
 # 单元读的环境文件在它这次起来之后改过没有（改了 engine.env、api.env 要重启才生效）
@@ -1401,6 +1468,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   drain_engine || return 1
   migrate "$SHA"
   load_catalog "$SHA" || return 1
+  load_routing "$SHA" || return 1
   before=$(api_report_before)
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
   if activate "$SHA" release && health_gate "$SHA" "$before"; then

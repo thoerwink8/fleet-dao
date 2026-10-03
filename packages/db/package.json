@@ -12,7 +12,8 @@
     "db:generate": "drizzle-kit generate && biome format --write migrations",
     "db:migrate": "node src/bin/migrate.ts",
     "db:seed": "node src/bin/seed.ts",
-    "db:catalog": "node src/bin/catalog.ts"
+    "db:catalog": "node src/bin/catalog.ts",
+    "db:routing": "node src/bin/routing.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",
