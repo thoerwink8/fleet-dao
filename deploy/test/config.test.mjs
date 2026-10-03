@@ -1,13 +1,26 @@
 // 配置对账（deploy/france/auto-release/config.mjs，#323）每条路：照 systemd 读环境文件（和 deploy/lib/app-config.sh 的 env_parse
 // 同一批样本）、期望文件认不认得出、私有值的指纹、线上手改了报哪一项、私有值不一致只报「不一致」不带值、期望和钥匙读不到记没查成、
 // 命令行不打印值。仓里那份真的期望文件也在这里过一遍校验，和 france.sh 钉住的几个值对得上。
+// 发布时照期望写（apply，方案第四节）：只写期望变了的键、人手改的不改回、selfHeal 开了才改回并留痕、期望里没有了的删掉、
+// 退回照旧版写回去；期望认不出、线上文件认不出、要写的键写了几行、写后读回不一致、记录认不出、档位认不出，一律不写（写了的改回原样）。
+// 新机器照期望建文件（render）：公开的写值、私有的只留空位。档位文件挑哪一份期望（readProfile、readLive）。
 // 跑法：node --test deploy/test/config.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  APPLY_FILES,
+  applyConfig,
   CONFIG_FILES,
   ConfigError,
   cli,
@@ -19,10 +32,15 @@ import {
   judgeConfig,
   keyIdOf,
   LOCAL_DESIRED_FILE,
+  PROFILE_DESIRED,
+  parseApplied,
   parseDesired,
   parseEnv,
   parseFingerprintKey,
+  planApply,
   readLive,
+  readProfile,
+  renderEnv,
 } from '../france/auto-release/config.mjs';
 
 const KEY_TEXT = `${'5a'.repeat(32)}\n`;
@@ -559,7 +577,6 @@ test('命令行：算指纹只打印指纹；对账不打印值、退出码分�
     const etc = join(dir, 'etc');
     writeFileSync(join(dir, 'key'), KEY_TEXT);
     writeFileSync(join(dir, 'desired.json'), desiredText());
-    const { mkdirSync } = await import('node:fs');
     mkdirSync(etc);
     for (const [name, got] of Object.entries(files())) writeFileSync(join(etc, name), got.text);
     const run = async (...argv) => {
@@ -618,7 +635,6 @@ test('命令行：算指纹只打印指纹；对账不打印值、退出码分�
 test('读法国上的原文：在用那一版里的期望、几份环境文件、钥匙；不在、是符号链接都说清', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'fleet-config-'));
   try {
-    const { mkdirSync, symlinkSync } = await import('node:fs');
     const sha = 'b'.repeat(40);
     mkdirSync(join(dir, 'releases', sha, 'deploy', 'france'), { recursive: true });
     writeFileSync(join(dir, 'releases', sha, DESIRED_FILE), desiredText());
@@ -660,6 +676,616 @@ test('读法国上的原文：在用那一版里的期望、几份环境文件�
       got = readLive({ releases: join(dir, 'releases'), etc: join(dir, 'etc'), key: join(dir, 'key') });
       assert.match(got.files['api.env'].error, /符号链接/);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── 发布时照期望写（#323 方案第四节）、新机器照期望建文件、档位 ──
+
+const SHA_A = 'a'.repeat(40);
+const SHA_B = 'b'.repeat(40);
+const DOMAIN = 'cockpit.fake-domain.invalid';
+
+/**
+ * 照期望写用的期望：engine.env 两个公开值、一个私有值，api.env 一公开一私有，release.env 两个公开值、一个私有值。
+ * patch 按文件换掉几个键（值是 null 就删掉那个键），top 换掉顶上几项（selfHeal 之类）。
+ */
+function applyDesired(patch = {}, top = {}) {
+  const fp = (file, key, value) => ({ private: fingerprintOf(KEY, file, key, value) });
+  const files = {
+    'engine.env': {
+      FLEET_WORK_DIR: { value: '/var/lib/fleet-work', 说明: '工作树的根' },
+      FLEET_MACHINE_NAME: '法国',
+      FLEET_CANARY_REPO: fp('engine.env', 'FLEET_CANARY_REPO', SECRET2),
+    },
+    'api.env': { FEISHU_APP_SECRET: fp('api.env', 'FEISHU_APP_SECRET', SECRET), FLEET_ENV: 'production' },
+    'release.env': {
+      FLEET_SERVICES: 'fleet-api',
+      FLEET_DOMAIN: fp('release.env', 'FLEET_DOMAIN', DOMAIN),
+      FLEET_HK_PARTS: 'gateway',
+    },
+    'france.env': {},
+  };
+  for (const [file, keys] of Object.entries(patch)) {
+    for (const [k, v] of Object.entries(keys)) {
+      if (v === null) delete files[file][k];
+      else files[file][k] = v;
+    }
+  }
+  return JSON.stringify({
+    formatVersion: 1,
+    selfHeal: false,
+    fingerprint: { algorithm: FINGERPRINT_ALGORITHM, keyId: keyIdOf(KEY) },
+    files,
+    ...top,
+  });
+}
+/** 和 applyDesired() 一致的线上三份。 */
+const LIVE = {
+  'engine.env': `# 人写的注释\nFLEET_WORK_DIR=/var/lib/fleet-work\nFLEET_MACHINE_NAME=法国\nFLEET_CANARY_REPO=${SECRET2}\n`,
+  'api.env': `FEISHU_APP_SECRET=${SECRET}\nFLEET_ENV=production\n`,
+  'release.env': `FLEET_SERVICES=fleet-api\nFLEET_DOMAIN=${DOMAIN}\nFLEET_HK_PARTS=gateway\n`,
+};
+/** 上次照这份期望写过的记录（记的是它的公开值）。 */
+const appliedOf = (desired) => ({
+  files: planApply({ want: parseDesired(desired), live: LIVE, stamp: 'x' }).files,
+  log: [],
+});
+
+test('照期望写：只写这一版的期望和上次写的不一样的键，人手改的不改回（selfHeal 关着），私有值一个都不写', () => {
+  const applied = appliedOf(applyDesired());
+  const want = parseDesired(applyDesired({ 'release.env': { FLEET_SERVICES: 'fleet-engine fleet-api' } }));
+  const live = {
+    ...LIVE,
+    'engine.env': LIVE['engine.env'].replace('FLEET_MACHINE_NAME=法国', 'FLEET_MACHINE_NAME=手改的'),
+  };
+  const plan = planApply({ want, applied, live, stamp: 'x' });
+  assert.equal(plan.baseline, 'applied');
+  assert.deepEqual(plan.set, ['release.env:FLEET_SERVICES']);
+  assert.deepEqual(plan.drift, ['engine.env:FLEET_MACHINE_NAME'], '人手改的只记下来，不改回');
+  assert.deepEqual(plan.healed, []);
+  assert.equal(plan.texts['engine.env'], live['engine.env'], 'engine.env 一个字都没动（人手改的留着）');
+  assert.equal(plan.texts['api.env'], live['api.env'], '私有值不写');
+  assert.equal(
+    plan.texts['release.env'],
+    `FLEET_SERVICES=fleet-engine fleet-api\nFLEET_DOMAIN=${DOMAIN}\nFLEET_HK_PARTS=gateway\n`,
+    '原地换掉那一行，别的行（私有的域名）不动',
+  );
+  assert.deepEqual(
+    plan.files['release.env'],
+    { FLEET_SERVICES: 'fleet-engine fleet-api', FLEET_HK_PARTS: 'gateway' },
+    '记下的只有公开值',
+  );
+});
+
+test('照期望写：期望里新加的键补在末尾带说明（说明里的换行不会变成一条赋值），没了的键删掉，改成私有值的不写也不删', () => {
+  const applied = appliedOf(
+    applyDesired({
+      'release.env': { FLEET_OLD: 'old' },
+      'api.env': { FLEET_PUBLIC_URL: 'https://a.invalid' },
+    }),
+  );
+  const want = parseDesired(
+    applyDesired({
+      'engine.env': { FLEET_NEW: { value: 'v1', 说明: '新加的一项\nFLEET_EVIL=1' } },
+      'api.env': { FLEET_PUBLIC_URL: { private: null } },
+    }),
+  );
+  const live = {
+    ...LIVE,
+    'api.env': `${LIVE['api.env']}FLEET_PUBLIC_URL=https://a.invalid\n`,
+    'release.env': `${LIVE['release.env']}FLEET_OLD=old\n`,
+  };
+  const plan = planApply({ want, applied, live, stamp: '照 x 写上' });
+  assert.deepEqual(plan.set, ['engine.env:FLEET_NEW']);
+  assert.deepEqual(plan.removed, ['release.env:FLEET_OLD']);
+  assert.ok(
+    plan.texts['engine.env'].endsWith('# 新加的一项 FLEET_EVIL=1（照 x 写上）\nFLEET_NEW=v1\n'),
+    plan.texts['engine.env'],
+  );
+  assert.ok(
+    !parseEnv(plan.texts['engine.env']).entries.some((e) => e.key === 'FLEET_EVIL'),
+    '说明里的换行没变成一条赋值',
+  );
+  assert.equal(plan.texts['release.env'], LIVE['release.env'], '没了的键整行删掉');
+  assert.equal(plan.texts['api.env'], live['api.env'], '改成私有值的：值不写、也不删');
+  assert.ok(!Object.hasOwn(plan.files['api.env'], 'FLEET_PUBLIC_URL'), '记录里不再有它');
+});
+
+test('照期望写：第一次没有记录——有在用的版本拿它的期望当上次写的（只写这一版改了的），没有就只记基线、不写', () => {
+  const want = parseDesired(applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
+  const live = { ...LIVE, 'engine.env': LIVE['engine.env'].replace('法国', '手改的') };
+  const first = planApply({ want, live, stamp: 'x' });
+  assert.equal(first.baseline, 'new');
+  assert.deepEqual([first.set, first.removed, first.healed], [[], [], []]);
+  for (const f of APPLY_FILES) assert.equal(first.texts[f], live[f], `${f}：只记基线，一个字不写`);
+  assert.equal(first.files['release.env'].FLEET_HK_PARTS, 'gateway web', '基线记的是这一版的期望');
+  const withCurrent = planApply({ want, cur: parseDesired(applyDesired()), live, stamp: 'x' });
+  assert.equal(withCurrent.baseline, 'current');
+  assert.deepEqual(withCurrent.set, ['release.env:FLEET_HK_PARTS'], '只写在用那一版到这一版改了的');
+  assert.deepEqual(withCurrent.drift, ['engine.env:FLEET_MACHINE_NAME'], '人手改的照旧不改回');
+});
+
+test('照期望写：selfHeal 开着才把人手改的改回去；要写的键写了几行、线上文件认不出就不写', () => {
+  const applied = appliedOf(applyDesired());
+  const live = {
+    ...LIVE,
+    'engine.env': LIVE['engine.env'].replace('FLEET_MACHINE_NAME=法国', 'FLEET_MACHINE_NAME = "手改的"'),
+  };
+  const heal = planApply({
+    want: parseDesired(applyDesired({}, { selfHeal: true })),
+    applied,
+    live,
+    stamp: 'x',
+  });
+  assert.deepEqual(heal.healed, ['engine.env:FLEET_MACHINE_NAME']);
+  assert.deepEqual(heal.set, []);
+  assert.match(heal.texts['engine.env'], /^FLEET_MACHINE_NAME=法国$/m);
+  assert.match(heal.texts['engine.env'], /^# 人写的注释$/m, '没写的行（注释、私有值）原样');
+  // 写了两行：selfHeal 关着只记偏离、不碰；要写（期望变了、或 selfHeal 开着）就一个字都不写
+  const dup = { ...LIVE, 'release.env': `${LIVE['release.env']}FLEET_SERVICES=fleet-api\n` };
+  const quiet = planApply({ want: parseDesired(applyDesired()), applied, live: dup, stamp: 'x' });
+  assert.deepEqual(quiet.drift, ['release.env:FLEET_SERVICES']);
+  assert.equal(quiet.texts['release.env'], dup['release.env']);
+  for (const [what, desired] of [
+    ['期望变了', applyDesired({ 'release.env': { FLEET_SERVICES: 'fleet-engine fleet-api' } })],
+    ['selfHeal 开着', applyDesired({}, { selfHeal: true })],
+  ]) {
+    assert.throws(
+      () => planApply({ want: parseDesired(desired), applied, live: dup, stamp: 'x' }),
+      (e) => e instanceof ConfigError && /FLEET_SERVICES 写了 2 行/.test(e.message),
+      what,
+    );
+  }
+  assert.throws(
+    () =>
+      planApply({
+        want: parseDesired(applyDesired()),
+        applied,
+        live: { ...LIVE, 'api.env': 'FEISHU_APP_SECRET="没配上\n' },
+        stamp: 'x',
+      }),
+    (e) => e instanceof ConfigError && /api\.env 认不出/.test(e.message),
+  );
+});
+
+/** 一套临时的发布目录和 /etc/fleet-dao：put(提交号, 期望原文[, 位置]) 放一版，run(提交号, 事件, 参数, 写法) 跑一次 apply。 */
+function applySandbox(live = LIVE) {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-apply-'));
+  const releases = join(dir, 'releases');
+  const etc = join(dir, 'etc');
+  mkdirSync(etc, { recursive: true });
+  mkdirSync(releases, { recursive: true });
+  for (const [f, text] of Object.entries(live)) writeFileSync(join(etc, f), text);
+  const state = join(releases, '.config-applied.json');
+  const profile = join(etc, 'profile');
+  const readOr = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : '（没有）');
+  return {
+    dir,
+    releases,
+    etc,
+    state,
+    profile,
+    put(sha, text, rel = DESIRED_FILE) {
+      const parts = rel.split('/');
+      mkdirSync(join(releases, sha, ...parts.slice(0, -1)), { recursive: true });
+      writeFileSync(join(releases, sha, ...parts), text);
+    },
+    read: (f) => readOr(join(etc, f)),
+    /** 三份文件和记录现在的样子：断言「一个字没动」用。 */
+    snapshot: () => [...APPLY_FILES.map((f) => readOr(join(etc, f))), readOr(state)],
+    run(commit, how = 'release', extra = {}, writeFile = undefined) {
+      const lines = [];
+      const code = applyConfig(
+        { releases, etc, state, profile, commit, how, ...extra },
+        { out: (s) => lines.push(s), ...(writeFile ? { writeFile } : {}) },
+      );
+      return { code, lines, text: lines.join('\n') };
+    },
+    done: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+test('apply：发一版、换一版、同一版再发、退回——只写期望变了的，退回照旧版的期望写回去，记录留着每次写了什么', () => {
+  const s = applySandbox();
+  try {
+    s.put(SHA_A, applyDesired());
+    s.put(SHA_B, applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
+    let r = s.run(SHA_A);
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /^changed 第一次照期望写：.*只记基线/m);
+    for (const f of APPLY_FILES) assert.equal(s.read(f), LIVE[f], `${f} 没动`);
+    writeFileSync(
+      join(s.etc, 'engine.env'),
+      LIVE['engine.env'].replace('FLEET_MACHINE_NAME=法国', 'FLEET_MACHINE_NAME=手改的'),
+    );
+    r = s.run(SHA_B);
+    assert.equal(r.code, 0, r.text);
+    assert.match(
+      r.text,
+      /^changed release\.env 的 FLEET_HK_PARTS：照 bbbbbbbbbbbb 的期望写成「gateway web」$/m,
+    );
+    assert.match(r.text, /^note 人手改过、和期望不一致的 1 项不改回.*engine\.env:FLEET_MACHINE_NAME/m);
+    assert.ok(!r.text.includes('手改的'), '人手改成的值不打印');
+    assert.match(s.read('release.env'), /^FLEET_HK_PARTS=gateway web$/m);
+    assert.match(s.read('engine.env'), /^FLEET_MACHINE_NAME=手改的$/m, '人手改的不改回');
+    const engineAfter = s.read('engine.env');
+    const before = s.snapshot();
+    r = s.run(SHA_B);
+    assert.match(r.text, /^ok 配置：bbbbbbbbbbbb 的期望和上次写的一样，不用写$/m, '同一版再发：不写');
+    assert.ok(!r.lines.some((l) => l.startsWith('changed ')), '同一版再发：一处都没改');
+    assert.deepEqual(s.snapshot(), before, '同一版再发：文件、记录都没动');
+    r = s.run(SHA_A, 'rollback');
+    assert.equal(r.code, 0, r.text);
+    assert.match(s.read('release.env'), /^FLEET_HK_PARTS=gateway$/m, '退回：照旧版的期望写回去');
+    assert.equal(s.read('engine.env'), engineAfter, '退回也不改回人手改的');
+    const st = parseApplied(readFileSync(s.state, 'utf8'));
+    assert.deepEqual(
+      st.log.map((e) => [e.commit.slice(0, 1), e.how, e.baseline, e.set]),
+      [
+        ['a', 'release', 'new', []],
+        ['b', 'release', 'applied', ['release.env:FLEET_HK_PARTS']],
+        ['a', 'rollback', 'applied', ['release.env:FLEET_HK_PARTS']],
+      ],
+    );
+    assert.ok(!readFileSync(s.state, 'utf8').includes('手改的'), '记录里没有线上的值');
+  } finally {
+    s.done();
+  }
+});
+
+test('apply：selfHeal 开着把人手改的改回去并留痕（输出、记录里都有），线上原来的值不打印', () => {
+  const s = applySandbox({
+    ...LIVE,
+    'engine.env': LIVE['engine.env'].replace('FLEET_MACHINE_NAME=法国', 'FLEET_MACHINE_NAME=手改的'),
+  });
+  try {
+    s.put(SHA_A, applyDesired({}, { selfHeal: true }));
+    writeFileSync(
+      s.state,
+      `${JSON.stringify({ schema: 1, files: appliedOf(applyDesired()).files, log: [] })}\n`,
+    );
+    const r = s.run(SHA_A);
+    assert.equal(r.code, 0, r.text);
+    assert.match(
+      r.text,
+      /^changed engine\.env 的 FLEET_MACHINE_NAME：人手改过，期望里 selfHeal 开着，照期望改回「法国」/m,
+    );
+    assert.ok(!r.text.includes('手改的'));
+    assert.match(s.read('engine.env'), /^FLEET_MACHINE_NAME=法国$/m);
+    const raw = readFileSync(s.state, 'utf8');
+    assert.deepEqual(
+      parseApplied(raw).log.at(-1).healed,
+      ['engine.env:FLEET_MACHINE_NAME'],
+      '记录里留痕：哪一次改回了哪一项',
+    );
+    assert.ok(!raw.includes('手改的'), '记录里也没有线上原来的值');
+  } finally {
+    s.done();
+  }
+});
+
+test('apply 写不成就一个字都不写：期望认不出、线上文件认不出或不在、要写的键写了几行、记录认不出、档位认不出', () => {
+  const cases = [
+    ['期望不是 JSON', (s) => s.put(SHA_B, '{'), /bbbbbbbbbbbb 的期望认不出.*不是 JSON/],
+    [
+      '期望格式不认识',
+      (s) => s.put(SHA_B, applyDesired({}, { formatVersion: 9 })),
+      /期望认不出.*formatVersion/,
+    ],
+    [
+      '线上文件认不出（引号没配上）',
+      (s) => {
+        s.put(SHA_B, applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
+        writeFileSync(join(s.etc, 'api.env'), 'FEISHU_APP_SECRET="没配上\n');
+      },
+      /api\.env 认不出/,
+    ],
+    [
+      '线上文件不在',
+      (s) => {
+        s.put(SHA_B, applyDesired());
+        rmSync(join(s.etc, 'api.env'));
+      },
+      /api\.env 读不到/,
+    ],
+    [
+      '要写的键写了几行',
+      (s) => {
+        s.put(SHA_B, applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
+        writeFileSync(join(s.etc, 'release.env'), `${LIVE['release.env']}FLEET_HK_PARTS=demo\n`);
+      },
+      /FLEET_HK_PARTS 写了 2 行/,
+    ],
+    [
+      '记录认不出',
+      (s) => {
+        s.put(SHA_B, applyDesired());
+        writeFileSync(s.state, '{"schema":7}');
+      },
+      /上次照期望写的记录认不出.*schema/,
+    ],
+    [
+      '档位认不出',
+      (s) => {
+        s.put(SHA_B, applyDesired());
+        writeFileSync(s.profile, 'paris\n');
+      },
+      /档位文件 .* 认不出.*paris/,
+    ],
+  ];
+  for (const [what, breakIt, why] of cases) {
+    const s = applySandbox();
+    try {
+      s.put(SHA_A, applyDesired());
+      assert.equal(s.run(SHA_A).code, 0, what);
+      breakIt(s);
+      const before = s.snapshot();
+      const r = s.run(SHA_B);
+      assert.equal(r.code, 1, `${what}：退出 1（${r.text}）`);
+      assert.match(r.text, why, what);
+      assert.ok(
+        r.lines.some((l) => l.startsWith('red ')),
+        `${what}：说了 red`,
+      );
+      assert.ok(!r.lines.some((l) => l.startsWith('changed ')), `${what}：没有一处改动`);
+      assert.deepEqual(s.snapshot(), before, `${what}：三份文件和记录一个字都没动`);
+    } finally {
+      s.done();
+    }
+  }
+});
+
+test('apply：写完读回不一致、写到一半写不进、记录写不进——写过的改回原样，记录不动，退出 1；改回也没成照实说要人看', () => {
+  const plain = (path, text) => writeFileSync(path, text);
+  const failing = (needle) => (path, text) => {
+    if (path.endsWith(needle)) throw Object.assign(new Error('磁盘满了'), { code: 'ENOSPC' });
+    plain(path, text);
+  };
+  const want = applyDesired({
+    'engine.env': { FLEET_MACHINE_NAME: '巴黎' },
+    'release.env': { FLEET_HK_PARTS: 'gateway web' },
+  });
+  for (const [what, writeFile, why] of [
+    [
+      '写进去的读回来不对',
+      (path, text) =>
+        plain(path, path.endsWith('release.env') ? text.replace('gateway web', 'gateway demo') : text),
+      /写完读回不一致：release\.env 改完照 systemd 读回来不对：FLEET_HK_PARTS 不是该有的样子：写过的 engine\.env、release\.env 已改回原样/,
+    ],
+    [
+      '写第二份时写不进',
+      failing('release.env'),
+      /写 release\.env 没成（ENOSPC）：写过的 engine\.env 已改回原样/,
+    ],
+    [
+      '记录写不进',
+      failing('.config-applied.json'),
+      /记录 .* 写不进（ENOSPC）：写过的 engine\.env、release\.env 已改回原样/,
+    ],
+  ]) {
+    const s = applySandbox();
+    try {
+      s.put(SHA_A, applyDesired());
+      assert.equal(s.run(SHA_A).code, 0);
+      s.put(SHA_B, want);
+      const before = s.snapshot();
+      const r = s.run(SHA_B, 'release', {}, writeFile);
+      assert.equal(r.code, 1, `${what}：${r.text}`);
+      assert.match(r.text, why, what);
+      assert.deepEqual(s.snapshot(), before, `${what}：写过的改回原样、记录没动`);
+    } finally {
+      s.done();
+    }
+  }
+  // 头一份写上了，之后什么都写不进（连改回也不行）：不说「已改回」，说要人看
+  const s = applySandbox();
+  try {
+    s.put(SHA_A, applyDesired());
+    assert.equal(s.run(SHA_A).code, 0);
+    s.put(SHA_B, want);
+    let n = 0;
+    const r = s.run(SHA_B, 'release', {}, (path, text) => {
+      n += 1;
+      if (n > 1) throw Object.assign(new Error('只读了'), { code: 'EROFS' });
+      plain(path, text);
+    });
+    assert.equal(r.code, 1);
+    assert.match(r.text, /改回原样也没成（engine\.env 还是写过的样子）：要人看/);
+  } finally {
+    s.done();
+  }
+});
+
+test('apply --plan 只把写成什么样放进目录（线上、记录都不动），--expect 和核过的不一样就不写', () => {
+  const s = applySandbox();
+  try {
+    s.put(SHA_A, applyDesired());
+    assert.equal(s.run(SHA_A).code, 0);
+    s.put(SHA_B, applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
+    const plan = join(s.dir, 'plan');
+    mkdirSync(plan);
+    const before = s.snapshot();
+    let r = s.run(SHA_B, 'release', { plan });
+    assert.equal(r.code, 0, r.text);
+    assert.deepEqual(
+      r.lines.filter((l) => !l.startsWith('note ')),
+      [],
+      '--plan 不说写了什么（还没写）',
+    );
+    assert.deepEqual(s.snapshot(), before, '--plan：线上、记录都没动');
+    assert.match(readFileSync(join(plan, 'release.env'), 'utf8'), /^FLEET_HK_PARTS=gateway web$/m);
+    assert.equal(readFileSync(join(plan, 'api.env'), 'utf8'), LIVE['api.env'], '不用改的那份原样放进去');
+    // 核过以后线上又被人改了：重新算出来的和核过的不一样，不写
+    writeFileSync(join(s.etc, 'api.env'), `${LIVE['api.env']}FLEET_HAND_ADDED=1\n`);
+    const changed = s.snapshot();
+    r = s.run(SHA_B, 'release', { expect: plan });
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, /^red 核过以后 api\.env 又变了/m);
+    assert.deepEqual(s.snapshot(), changed);
+    // 重新核一遍再写：写上
+    assert.equal(s.run(SHA_B, 'release', { plan }).code, 0);
+    r = s.run(SHA_B, 'release', { expect: plan });
+    assert.equal(r.code, 0, r.text);
+    assert.match(s.read('release.env'), /^FLEET_HK_PARTS=gateway web$/m);
+    assert.match(s.read('api.env'), /^FLEET_HAND_ADDED=1$/m, '人加的那一行不碰');
+  } finally {
+    s.done();
+  }
+});
+
+test('apply：这一版里没有期望（#323 之前的版本）不写、退出 0；期望按档位挑——本机档用 deploy/local 那份', () => {
+  const s = applySandbox();
+  try {
+    mkdirSync(join(s.releases, SHA_A), { recursive: true });
+    let r = s.run(SHA_A);
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /^ok aaaaaaaaaaaa 里没有 deploy\/france\/desired-config\.json/m);
+    assert.match(r.text, /^note 没有档位文件 .*：按法国档/m);
+    assert.ok(!existsSync(s.state), '没有期望：记录也不建');
+    writeFileSync(s.profile, 'local\n');
+    s.put(SHA_B, applyDesired());
+    r = s.run(SHA_B);
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /里没有 deploy\/local\/desired-config\.json/, '本机档不拿法国那份写');
+    s.put(SHA_B, applyDesired({ 'engine.env': { FLEET_MACHINE_NAME: '本机' } }), PROFILE_DESIRED.local);
+    r = s.run(SHA_B);
+    assert.equal(r.code, 0, r.text);
+    const st = JSON.parse(readFileSync(s.state, 'utf8'));
+    assert.equal(st.profile, 'local');
+    assert.equal(st.desired, 'deploy/local/desired-config.json');
+    assert.equal(st.files['engine.env'].FLEET_MACHINE_NAME, '本机', '记下的是本机档那份期望');
+  } finally {
+    s.done();
+  }
+});
+
+test('apply：第一次没有记录、有在用的版本——拿它的期望当上次写的，只写这一版改了的', (t) => {
+  const s = applySandbox();
+  try {
+    s.put(SHA_A, applyDesired());
+    s.put(SHA_B, applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
+    try {
+      symlinkSync(SHA_A, join(s.releases, 'current'));
+    } catch {
+      t.skip('这台建不了符号链接（Windows 要管理员）：这一条在 CI（Linux）上跑');
+      return;
+    }
+    const r = s.run(SHA_B);
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /^note 第一次照期望写：拿在用的 aaaaaaaaaaaa 的期望当「上次写的」/m);
+    assert.match(s.read('release.env'), /^FLEET_HK_PARTS=gateway web$/m);
+  } finally {
+    s.done();
+  }
+});
+
+test('命令行 apply：参数不对 64；提交号、事件认不出退出 1、说 red', async () => {
+  const run = async (...argv) => {
+    const lines = [];
+    const code = await cli(argv, { out: (s) => lines.push(s), err: (s) => lines.push(s) });
+    return { code, text: lines.join('\n') };
+  };
+  assert.equal((await run('apply', '--plan', 'a', '--expect', 'b')).code, 64);
+  assert.equal((await run('apply', 'extra')).code, 64);
+  let r = await run('apply', '--commit', 'nothex', '--how', 'release');
+  assert.equal(r.code, 1);
+  assert.match(r.text, /^red .*提交号认不出/m);
+  r = await run('apply', '--commit', SHA_A, '--how', 'deploy');
+  assert.equal(r.code, 1);
+  assert.match(r.text, /^red --how 只认/m);
+});
+
+test('render：照仓里两份真的期望建新机器的三份文件——公开的照期望写，私有的只留空位，键一个不多一个不少，release.sh 读得懂', () => {
+  for (const path of [FRANCE_DESIRED_FILE, LOCAL_DESIRED_FILE]) {
+    const want = parseDesired(readFileSync(path, 'utf8'));
+    for (const file of APPLY_FILES) {
+      const text = renderEnv(want, file, 'x');
+      const entries = parseEnv(text).entries;
+      const declared = want.files[file];
+      assert.deepEqual(
+        entries.map((e) => e.key),
+        declared.map((d) => d.key),
+        `${file}：键和期望一样、一样一行`,
+      );
+      for (const d of declared) {
+        const got = entries.find((e) => e.key === d.key).value;
+        assert.equal(got, d.kind === 'public' ? d.value : '', `${file} 的 ${d.key}：私有值只留空位`);
+      }
+      // release.sh 的 load_env 只认注释、空行和 KEY=值
+      for (const line of text.split('\n'))
+        assert.match(line, /^(#.*|[A-Z][A-Z0-9_]*=.*|)$/, `${file}：${line}`);
+    }
+  }
+  // 说明里带换行：注释里换成空格，不会多出一条赋值；私有值空着，不生造
+  const want = parseDesired(
+    applyDesired({ 'engine.env': { FLEET_X: { value: 'v', 说明: '第一行\nFLEET_EVIL=1' } } }),
+  );
+  const text = renderEnv(want, 'engine.env', 'x');
+  assert.ok(!parseEnv(text).entries.some((e) => e.key === 'FLEET_EVIL'));
+  assert.match(text, /^FLEET_CANARY_REPO=$/m);
+  assert.ok(!text.includes(SECRET2));
+});
+
+test('命令行 render：打印照期望建的文件；不认识的文件、期望读不到明说没做成', async () => {
+  const run = async (...argv) => {
+    const out = [];
+    const err = [];
+    const code = await cli(argv, { out: (s) => out.push(s), err: (s) => err.push(s) });
+    return { code, out: out.join('\n'), err: err.join('\n') };
+  };
+  let r = await run('render', 'api.env');
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^FLEET_ENV=production$/m);
+  assert.match(r.out, /照仓里的期望 deploy\/france\/desired-config\.json 建的/);
+  r = await run('render', 'api.env', '--desired', LOCAL_DESIRED_FILE);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^FLEET_PUBLIC_URL=https:\/\/fleet-local\.invalid$/m);
+  assert.match(r.out, /照仓里的期望 deploy\/local\/desired-config\.json 建的/);
+  r = await run('render', 'france.env');
+  assert.equal(r.code, 2);
+  assert.match(r.err, /不认识的文件 france\.env/);
+  r = await run('render', 'engine.env', '--desired', join(tmpdir(), 'no-such-desired.json'));
+  assert.equal(r.code, 2);
+  assert.match(r.err, /读不到期望/);
+});
+
+test('档位：文件不在按法国；写了 local 用本机档那份；认不出、不是普通文件都不猜；对账读法国上的期望也跟着档位走', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-profile-'));
+  try {
+    const p = join(dir, 'profile');
+    const got = readProfile(p);
+    assert.equal(got.profile, 'france');
+    assert.equal(got.rel, DESIRED_FILE);
+    assert.match(got.note, /没有档位文件/);
+    writeFileSync(p, 'local\n');
+    assert.deepEqual(readProfile(p), {
+      profile: 'local',
+      rel: 'deploy/local/desired-config.json',
+      note: null,
+    });
+    writeFileSync(p, 'france');
+    assert.equal(readProfile(p).profile, 'france');
+    for (const bad of ['', 'Local\n', 'local\n\n', 'paris\n']) {
+      writeFileSync(p, bad);
+      assert.throws(
+        () => readProfile(p),
+        (e) => e instanceof ConfigError && /认不出/.test(e.message),
+        JSON.stringify(bad),
+      );
+    }
+    mkdirSync(join(dir, 'a-dir'));
+    assert.throws(() => readProfile(join(dir, 'a-dir')), ConfigError, '不是普通文件');
+    const etc = join(dir, 'etc');
+    mkdirSync(etc);
+    writeFileSync(join(etc, 'profile'), 'local\n');
+    let live = readLive({ releases: join(dir, 'releases'), etc, key: join(dir, 'key') });
+    assert.equal(live.desiredPath, PROFILE_DESIRED.local, '本机档：不一致时指本机档那份');
+    writeFileSync(join(etc, 'profile'), 'paris\n');
+    live = readLive({ releases: join(dir, 'releases'), etc, key: join(dir, 'key') });
+    assert.match(live.desired.error, /档位文件 .* 认不出/);
+    assert.equal(judgeConfig(live).result, 'unchecked', '档位认不出：对账记没查成，不当成一致');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
