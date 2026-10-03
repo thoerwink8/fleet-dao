@@ -449,7 +449,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          sparse-checkout: packages/conventions
+          # package.json 也要：下面那步要读它的 engines.node 核对镜像自带的 Node 够不够
+          sparse-checkout: |
+            packages/conventions
+            package.json
       # 不装 Node、不装依赖：这一步跑的是汇总入口（ci-plan.ts 的 ciVerdict），只用 Node 自带能力，runner 镜像自带的那版够用
       # （省掉 setup-node 约 3 秒）。但先核一下镜像自带的那版够不够：仓要 >=22.22（package.json 的 engines，直接跑 .ts 靠它的
       # 类型擦除）；镜像换了、自带版本低了就红，不靠运气。
