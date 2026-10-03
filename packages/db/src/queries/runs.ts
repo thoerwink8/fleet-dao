@@ -9,7 +9,14 @@ import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { type RunTier, runs } from '../schema/index.ts';
 
-export type RunOutcome = 'done' | 'timeout' | 'killed' | 'spawn_failed' | 'admission_blocked' | 'failed';
+export type RunOutcome =
+  | 'done'
+  | 'timeout'
+  | 'killed'
+  | 'spawn_failed'
+  | 'admission_blocked'
+  | 'failed'
+  | 'org_switch';
 
 export interface RunInsert {
   id?: string;

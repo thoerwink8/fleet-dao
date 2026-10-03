@@ -43,7 +43,8 @@ import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
-import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { oneShotSessions } from './one-shot-sessions.ts';
+import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { quotaReadJob } from './quota-read.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -51,12 +52,7 @@ import { realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
-import {
-  createSessionPorts,
-  DEFAULT_FORK_MAX_CONTEXT_TOKENS,
-  type OrgSwitchSessions,
-  type SessionPortsDeps,
-} from './sessions.ts';
+import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
@@ -506,14 +502,17 @@ export function realPortsFromEnv(
     ...(extra.drain ? { drain: extra.drain } : {}),
     ...(ioProblem ? {} : { ioRoot: config.sessionIoDir }),
   });
+  // 三段的一次性会话（动手、验收）的登记：切号照它停下跑在 Claude 池上的那一段，切完任务工作流在原分支上重跑（#59）
+  const oneShots = oneShotSessions();
   // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
-  // 先停下、切完续上（#59，换了池 fork 续上），不等它们跑完
+  // 先停下、切完接着干（#59：一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上），不等它们跑完
   const orgSwitch = orgSwitchRound({
     db,
     org: sessionOrg,
     user: sessionUser,
     switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
     sessions: real.orgSwitchSessions,
+    oneShots,
     machine: config.machine,
   });
   const jobs: EngineJobs = {
@@ -585,6 +584,7 @@ export function realPortsFromEnv(
       runs: taskRuns,
       memoryAdmission: realMemoryAdmission(),
       runsDir,
+      sessions: oneShots,
       log: taskLog,
     }),
     coldVerify: createColdVerify({
@@ -594,6 +594,7 @@ export function realPortsFromEnv(
       runs: taskRuns,
       memoryAdmission: realMemoryAdmission(),
       runsDir,
+      sessions: oneShots,
       log: taskLog,
     }),
   };

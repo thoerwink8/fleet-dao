@@ -105,7 +105,18 @@ export interface RunSegmentInput {
   /** 前几轮留下的返工意见（CI 失败日志、验收问题表、没产生提交），新一轮的会话要照着改。 */
   feedback: string[];
   timeoutMinutes: number;
+  /**
+   * 这一段上一次跑到一半被停下了（切号，#59）：为什么停的那一句。重跑时写进提示词——树里可能留着上一次的提交和没提交的改动，
+   * 新会话接着干、别从头来。没被停过的不给。
+   */
+  interrupted?: string;
 }
+
+/**
+ * 动手会话被切号停下时的结局和原因码（#59）：失败分流 OS1 认它（不算失败、不记账、马上接着干），工作流切完在原分支上重跑这一段，
+ * 提示词里带上 interrupted。和 runner/one-shot.ts 的结局 org_switch 是同一个词。
+ */
+export const ORG_SWITCH_CODE = 'org_switch';
 
 /** 动手会话没跑成时给失败分流的证据（字段照 FailureEvidence，工作流补上 routeId 这些再交给分流）。 */
 export type SegmentEvidence = Pick<
