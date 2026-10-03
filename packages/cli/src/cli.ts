@@ -1,4 +1,4 @@
-// fleet 命令：解析参数 → 按 agent-api 约定校验 → 调后端 → 用白话打印结果。进程无关，测试直接调 runFleet。
+// fleet 命令：解析参数 → 按 agent-api 约定校验 → 调后端 → 用白话打印结果。进程无关，测试直接调 runFleet。（CI 提速验收：量只改代码的 PR 一圈多久）
 import { type ParseArgsOptionsConfig, parseArgs } from 'node:util';
 import {
   AgentRoutes,
