@@ -162,12 +162,9 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   );
 }
 
-/**
- * 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行，手机上两列、每格带名字。
- * 这几处的类名不经 cn()：tailwind-merge 不认 text-caption 这类自定义字号，会当成字色和 text-muted-foreground 合并掉。
- */
+/** 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行，手机上两列、每格带名字；表头和每行共用。 */
 const COLUMNS = 'grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-12 md:items-baseline md:gap-y-0';
-const ROW = `grid ${COLUMNS}`;
+const ROW = cn('grid', COLUMNS);
 
 function Cell({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
   return (
@@ -344,7 +341,7 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
       bodyClassName="px-4 py-1"
     >
       <div
-        className={`hidden md:grid ${COLUMNS} border-b py-2 text-caption text-muted-foreground`}
+        className={cn('hidden md:grid', COLUMNS, 'border-b py-2 text-caption text-muted-foreground')}
         aria-hidden
       >
         <span className="md:col-span-2">段 / 模型</span>
@@ -379,9 +376,10 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
 function SegmentTag({ segment }: { segment: SegmentKind | null }) {
   return (
     <span
-      className={`inline-flex h-5 items-center rounded border px-1.5 text-caption font-medium${
-        segment === null ? ' border-st-stall/55 text-ink-stall' : ''
-      }`}
+      className={cn(
+        'inline-flex h-5 items-center rounded border px-1.5 text-caption font-medium',
+        segment === null && 'border-st-stall/55 text-ink-stall',
+      )}
     >
       {segment ? segmentLabel[segment] : UNKNOWN_SEGMENT}
     </span>
