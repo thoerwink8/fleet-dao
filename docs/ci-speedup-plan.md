@@ -18,12 +18,12 @@
 
 | # | 做法 | 状态 |
 |---|---|---|
-| A | 推送前预检：按改动跑 CI 上那几样确定的检查（biome/tsc），红了当场修 | **已写、本机测过、已提交（本地 commit，未推）** |
-| B | 合并 CI 小任务（biome/tsc/docs/hygiene 四台并成一个 `lint`） | **已写、已并入本分支（未推）**：一个 PR 约 14→11 个任务；各步 continue-on-error + 汇总步核对（保住 #566 的「biome 红不吃掉 tsc」）；汇总脚本被测试真跑。**没在真 GitHub 上跑过**：`lint` 里 working-directory / pnpm/action-setup / setup-node 缓存路径几处，第一次 PR 要盯它起不起得来；`lint` 约 90 秒贴着最慢测试台 87 秒，若成瓶颈把 docs 挪回独立 job |
+| A | 推送前预检：按改动跑 CI 上那几样确定的检查（biome/tsc），红了当场修 | **已合（#688）**，Windows 真推里验过 |
+| B | 合并 CI 小任务（biome/tsc/docs/hygiene 四台并成一个 `lint`） | **已合（#688）**：一个 PR 约 14→11 个任务；各步 continue-on-error + 汇总步核对（保住 #566 的「biome 红不吃掉 tsc」）；汇总脚本被测试真跑。**没在真 GitHub 上跑过**：`lint` 里 working-directory / pnpm/action-setup / setup-node 缓存路径几处，第一次 PR 要盯它起不起得来；`lint` 约 90 秒贴着最慢测试台 87 秒，若成瓶颈把 docs 挪回独立 job |
 | C | 主线只留最新一轮（连续合几个取消前面的） | **暂不做**：D 的区间口径下每轮主线已经只跑增量，取消前一轮的收益小；而取消会让自动发布闸门（认「这个提交自己那次绿」）断，要先改闸门认「被绿区间覆盖」才能开。区间口径跑出真实数字后再决定 |
-| D | 主线跑「上次绿…现在」的累计改动 | **前半已写、本机测过、已提交（4f6f21e1，未推）**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动 |
-| E | PR 的测试分片结果缓存 | **已写、已并入本分支（未推）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
-| F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已写、已提交（f85aa1c3，未推）**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数本机测不了（要 root），等 CI 的 ⏱ 行，分台名单到时再重排 |
+| D | 主线跑「上次绿…现在」的累计改动 | **前半已合（#688）、主线真跑通过**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动 |
+| E | PR 的测试分片结果缓存 | **已合（#688）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
+| F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已合（#688），实测 login-user 94→44s**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数本机测不了（要 root），等 CI 的 ⏱ 行，分台名单到时再重排 |
 | G | engine/db 继续分片、大文件继续拆 | 待做（在 E 之后看还差多少） |
 | H | 每 job 约 25 秒固定开销（checkout + setup-node + pnpm install） | 待做（在 B 之后逐项量） |
 
@@ -36,12 +36,20 @@
 - **正确的口径**：每次主线运行的区间是 `[上次真绿的头, 这次的头]`，被取消的轮次不算基准，改动被后一轮的区间吃掉；自动发布改判「这个提交被某个绿区间覆盖过」。方案细节（含 bisect 定位、fail loud 三条路径）见本文件末尾「D 的细节」。
 - GitHub 的缓存**按 ref 分作用域**：PR 跑出来的缓存只有这个 PR 自己的重跑读得到。所以 E 只在 PR 的 test job 上做，**主线那条绝不做**（主线要发布背书，一个测试都不许跳）。
 
+## 真实 CI 数字（#688 合进主线后，2026-10-03 主线 ci.yml 一轮 + PR 两轮）
+
+- 主线那轮（改了 ci.yml，按规则 deploy/web 全开）：总墙钟约 2 分 30；`check` 绿；changes 用了「上次绿…这次」的区间（日志「改了 26 个文件（push）」）。
+- PR 上的任务（秒）：changes 8、lint 38–44、web 17–22、engine 3 台 47–74、rest 3 台 47–89、db 24–142（波动大，主线那轮 142）、deploy 三台 61/66/140。
+- F 实测：login-user 94→44 秒、cli-tools 约 34 秒；但分台是按旧高值排的，第三台 140 秒拖后腿 → 本 PR 按实测重排（估三台各 80–100 秒）。
+- 验收对照：① 只改代码的 PR ≤60 秒——**没达到**，现在约 75–90 秒（最慢是 db 和 rest/engine 的最慢台，不是固定开销）；② deploy PR ≤90 秒——重排前 150 秒、重排后待测；③ 重推命中缓存 ≤40 秒——**还没测到**（需要一个 PR 重推）；④ 任务数 ≤8——**没达到**，现在约 11（lint 1 + test 7 + changes + check，deploy 开时再 +3）；⑤ 主线不全跑——已经按区间跑，未碰 deploy/workflow 的主线轮次还没见到；⑥ 不新增收费——是。
+- 下一步（G/H）：db 一台波动 24–142 秒，拆它或找出慢的那几个文件；rest 3/3、engine 1/3 再匀；每台约 25 秒固定开销（checkout + pnpm install + setup-node）再量。
+
 ## 还没验证的
 
-- A 只在**本机**跑过（`packages/conventions/test/prepare-push.test.ts` 7 条）。真实推送时钩子里的表现（`.githooks/pre-push` 调用顺序、退出码传导）没在真推里验过——本机现在连不上 GitHub，推不了。
-- B、E、F 都在工人手里，结果没回来。
-- C/D 一行没写。
-- 全部做完之前，「PR ≤ 60 秒」这条验收没有一次真实 CI 数据支撑。
+- E 缓存真实命中：同一 PR 重推要有一次实测（看「测试缓存命中」、key 步骤有没有被静默关成 enabled=false、restore/save 在 contents: read 下能否工作）。
+- A 推前预检：Windows 本机已在真推里验过（biome ENOENT 被拒推，已修，#688）；Linux/Mac 上没验过。
+- C 暂缓；自动发布闸门没动（每轮主线仍各自出结论）。
+- 主线「没改 deploy/workflow 的普通代码合并」那一轮的耗时还没见到。
 
 ## D 的细节（方案，待实现）
 
