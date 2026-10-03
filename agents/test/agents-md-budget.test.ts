@@ -12,8 +12,8 @@ const TEXT = readFileSync(fileURLToPath(new URL('../../AGENTS.md', import.meta.u
   '\n',
 );
 
-/** 通用段（推给所有仓）上限：2026-10-03 减脂后约 4050 字，留一点余量。 */
-const GENERAL_MAX = 4400;
+/** 通用段（推给所有仓）上限：2026-10-03 减脂后约 3970 字，留一点余量。 */
+const GENERAL_MAX = 4100;
 /** 本仓段上限：同日减脂后约 4200 字。 */
 const REPO_MAX = 4600;
 
