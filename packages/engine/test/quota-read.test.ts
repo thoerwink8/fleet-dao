@@ -10,6 +10,7 @@ import {
   type QuotaReadJobDeps,
   runQuotaReadJob,
 } from '../src/jobs/quota-read.ts';
+import { usageRecordsFrom } from '../src/real/quota-read.ts';
 
 const NOW = new Date('2026-10-03T08:00:00Z');
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
@@ -188,5 +189,28 @@ describe('定时读额度', () => {
     const run = await runQuotaReadJob(w.deps);
     expect(run.outcome).toBe('unscanned');
     expect(w.finished[0]).toMatchObject({ outcome: 'unscanned' });
+  });
+});
+
+describe('估算池的用量记录（usageRecordsFrom）', () => {
+  const row = (over: Partial<Parameters<typeof usageRecordsFrom>[1][number]> = {}) => ({
+    startedAt: minutesAgo(10),
+    modelId: 'm1',
+    inputTokens: 100,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    costUsd: 0.5,
+    ...over,
+  });
+
+  it('有花费的会话转成记录，为空的字段不带', () => {
+    expect(usageRecordsFrom('p1', [row()])).toEqual([
+      { poolId: 'p1', at: minutesAgo(10).toISOString(), modelId: 'm1', inputTokens: 100, costUsd: 0.5 },
+    ]);
+  });
+
+  it('【故意造出的失败】没记到花费的会话不进记录，不拿 0 冒充', () => {
+    expect(usageRecordsFrom('p1', [row({ costUsd: null }), row({ costUsd: 0 })])).toHaveLength(1);
   });
 });
