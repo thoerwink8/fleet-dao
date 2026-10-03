@@ -98,7 +98,7 @@
       },
       "FLEET_FEISHU_LOGIN": {
         "value": "on",
-        "说明": "驾驶舱接飞书登录：on 时生产必须配上面飞书一对（packages/api/src/config.ts）；法国上的这一行由 france.sh 照 api.env.example 补（样例后来加的键）"
+        "说明": "驾驶舱接飞书登录：on（不写也一样）时生产必须配上面飞书一对（packages/api/src/config.ts）；off 只给本机档（deploy/local/desired-config.json）"
       },
       "TEMPORAL_ADDRESS": {
         "value": "127.0.0.1:7243",

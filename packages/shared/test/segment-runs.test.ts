@@ -206,4 +206,10 @@ describe('【失败】派工档、结局认不出或没记', () => {
     expect(v.outcome).toBeUndefined();
     expect(reasonOf(v, 'outcome')).toBe('结局「ok」认不出');
   });
+
+  it('切号停下的一段（org_switch，#59）认得出：照给，不记「认不出」', () => {
+    const v = read(run({ outcome: 'org_switch' }));
+    expect(v.outcome).toBe('org_switch');
+    expect(reasonOf(v, 'outcome')).toBeUndefined();
+  });
 });

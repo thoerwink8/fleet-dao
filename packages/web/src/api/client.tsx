@@ -28,6 +28,7 @@ import type {
   Me,
   Notifications,
   Pools,
+  ReleaseVersion,
   Repo,
   Routing,
   RoutingLayers,
@@ -81,6 +82,8 @@ export interface FleetApi {
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
+  /** /changelog 页「发布 v<N>」的版本号（#725）：后端现读 GitHub 里程碑，和 pnpm publish:pr 同一份判法。 */
+  releaseVersion(): Promise<ReleaseVersion>;
   /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
   demoLinks(): Promise<DemoLinks>;
   createDemoLink(body: CreateDemoLinkBody): Promise<CreatedDemoLink>;
@@ -136,6 +139,7 @@ export const keys = {
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
+  releaseVersion: ['release-version'] as const,
   demoLinks: ['demo-links'] as const,
 };
 
@@ -281,6 +285,15 @@ export function useSettings() {
 export function useDemoLinks() {
   const api = useApi();
   return useQuery({ queryKey: keys.demoLinks, queryFn: () => api.demoLinks() });
+}
+
+/**
+ * /changelog 页「发布 v<N>」的版本号：后端现读 GitHub 里程碑（不在推送名单里）。页面打开时读一次，点「发布」时再核一次
+ * （changelog.tsx 调 refetch），不靠定时重拉。
+ */
+export function useReleaseVersion() {
+  const api = useApi();
+  return useQuery({ queryKey: keys.releaseVersion, queryFn: () => api.releaseVersion() });
 }
 
 /**

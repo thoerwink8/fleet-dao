@@ -34,6 +34,7 @@ export const segmentOutcomeLabel: Record<SegmentOutcome, string> = {
   spawn_failed: '没起来',
   admission_blocked: '内存满没放行',
   failed: '失败',
+  org_switch: '切号停下，切完重跑',
 };
 
 export const segmentOutcomeTone: Record<SegmentOutcome, Tone> = {
@@ -43,6 +44,8 @@ export const segmentOutcomeTone: Record<SegmentOutcome, Tone> = {
   spawn_failed: 'fail',
   admission_blocked: 'wait',
   failed: 'fail',
+  // 引擎自己停的（#59）：不是失败，切完在原分支上重跑这一段
+  org_switch: 'wait',
 };
 
 /** 哪一样没读到，叫什么。 */

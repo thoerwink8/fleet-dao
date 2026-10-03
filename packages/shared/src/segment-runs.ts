@@ -13,6 +13,7 @@ export const SEGMENT_OUTCOMES = [
   'spawn_failed',
   'admission_blocked',
   'failed',
+  'org_switch',
 ] as const satisfies readonly SegmentOutcome[];
 
 /** 进程没起来就结束的两种结局：没有用量读数。 */

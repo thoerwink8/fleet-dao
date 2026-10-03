@@ -40,8 +40,11 @@ export const RunRecordSchema = z.object({
   costUsd: z.number().nonnegative().optional(),
   /** 内存峰值（MiB）。只对挂在 cgroup 里的会话可读；本机不给。 */
   memoryPeakMb: z.number().nonnegative().optional(),
-  /** 谁把它收了：done / timeout / killed / spawn_failed / admission_blocked。 */
-  outcome: z.enum(['done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed']),
+  /**
+   * 谁把它收了：done / timeout / killed / spawn_failed / admission_blocked / failed；org_switch = 切号先停下这一段，
+   * 切完任务工作流在原分支上重跑（#59，不算失败）。
+   */
+  outcome: z.enum(['done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch']),
   /** 失败原因（exit code、错误消息），outcome != 'done' 时给。 */
   failureReason: z.string().optional(),
 });

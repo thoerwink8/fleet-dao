@@ -9,7 +9,9 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
+import type { PickRouteInput, RouteChoice } from '../src/ports.ts';
 import {
+  type RunSegmentResult,
   type TaskRun,
   type TaskStatus,
   type TaskWorkflowInput,
@@ -684,5 +686,143 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(calls.segment[1]?.feedback.join('\n')).toContain('验收没过：没做到验收条');
     expect(world.alerts).toEqual([]);
+  });
+});
+
+describe('任务工作流 · 切号停下动手那一段（org_switch，#59）', { timeout: 60_000 }, () => {
+  const CAR: RouteChoice = {
+    routeId: 'car',
+    poolId: 'claude-carpool',
+    modelId: 'm1',
+    family: 'claude',
+    hostId: 'claude-code',
+    orgKind: 'carpool',
+  };
+  const SOLO: RouteChoice = { ...CAR, routeId: 'solo', poolId: 'claude-solo', orgKind: 'solo' };
+  const STOPPED = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干（会话被停下）';
+  const BACK = '切号：会话用户从独享组织切回拼车组织，先停下，切完接着干（会话被停下）';
+  const switched = (message: string): RunSegmentResult => ({
+    ok: false,
+    runId: 'run-x',
+    outcome: 'org_switch',
+    evidence: { code: 'org_switch', message, quotaExhausted: false },
+  });
+  /** 真选路的样子：粘着的路由只差一次切号时照常选，落到切过去的那个池上；routes 是每次选中的（用完停在最后一个）。 */
+  const switching = (routes: RouteChoice[], picks: PickRouteInput[]) =>
+    createFakeWorld({
+      route: (i) => {
+        picks.push(i);
+        const route = routes[Math.min(picks.length, routes.length) - 1] as RouteChoice;
+        return { ok: true, route, why: '测试' };
+      },
+    });
+
+  it('停下之后：不报人、不报警、不换模型，切完选到切过去的池，在同一个分支、同一棵树、同一个基点上重跑，提示里带被停下的原因；轮数不多算', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = switching([CAR, SOLO], picks);
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? switched(STOPPED) : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment.map((s) => s.route.routeId)).toEqual(['car', 'solo']);
+    const [first, second] = calls.segment;
+    expect(second?.branch).toBe(first?.branch);
+    expect(second?.worktreePath).toBe(first?.worktreePath);
+    expect(second?.baseSha).toBe(first?.baseSha);
+    expect(first?.interrupted).toBeUndefined();
+    expect(second?.interrupted).toBe(STOPPED);
+    // 原路再试（不换路由、不避开谁）：带着粘着的路由去选，选路判出它只差一次切号，照常选
+    expect(picks[1]).toMatchObject({
+      stickRouteId: 'car',
+      avoidRouteIds: [],
+      avoidPoolIds: [],
+      avoidModelIds: [],
+    });
+    expect(world.alerts).toEqual([]);
+    // 树只建了一次（重跑不新开分支）
+    expect(world.count('createWorktree')).toBe(1);
+  });
+
+  it('连着切两回（切过去、又切回来）：两回都接着干，不凑成「同因连挂」停下；提示里带最近一回的原因', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = switching([CAR, SOLO, CAR], picks);
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? switched(STOPPED) : n === 2 ? switched(BACK) : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment.map((s) => s.route.routeId)).toEqual(['car', 'solo', 'car']);
+    expect(calls.segment.map((s) => s.interrupted)).toEqual([undefined, STOPPED, BACK]);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('【故意造出的失败】切过去重跑又被拒（独享也用满）：按额度用满走（回去选路等），不当切号、不停下；提示里一直带着被停下那回的原因', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = switching([CAR, SOLO, SOLO], picks);
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1
+          ? switched(STOPPED)
+          : n === 2
+            ? {
+                ok: false,
+                runId: 'run-y',
+                outcome: 'failed',
+                evidence: {
+                  code: 'quota_exhausted',
+                  message: '独享组织的 5 小时额度也用满了',
+                  quotaExhausted: true,
+                },
+              }
+            : OK_SEGMENT,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment.map((s) => s.route.routeId)).toEqual(['car', 'solo', 'solo']);
+    // 额度用满（QT1 的组织梯子）：马上回去选路、粘着这条路由等，不避开
+    expect(picks[2]).toMatchObject({ stickRouteId: 'solo', avoidRouteIds: [] });
+    expect(calls.segment[2]?.interrupted).toBe(STOPPED);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('切号前后同一个失败原文：切号不当「上一次」，照样认出「和上一次一字不差」、不在原路硬重（换路由）', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = switching([CAR, CAR, SOLO, CAR], picks);
+    const WEIRD: RunSegmentResult = {
+      ok: false,
+      runId: 'run-z',
+      outcome: 'failed',
+      evidence: { code: 'weird_thing', message: '执行体报了一句认不出的话', quotaExhausted: false },
+    };
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 || n === 3 ? WEIRD : n === 2 ? switched(STOPPED) : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(4);
+    // 第 3 回（切过去之后）又是同一句：不再原路重试，换路由——避开第 3 回跑的那条
+    expect(picks[3]?.stickRouteId).toBeUndefined();
+    expect(picks[3]?.avoidRouteIds).toEqual(['solo']);
   });
 });
