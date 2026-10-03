@@ -57,8 +57,8 @@ check "点出是 login-user" "$(grep -c 'login-user' "$OUT" | tr -d ' ')" 1
 
 echo "== 故意造错：同一项排在两台"
 fresh
-sed -i "s/^  'cli-tools session-pnpm/  'cli-tools login-user session-pnpm/" "$TMP/repo/deploy/test/run.sh"
-check "拷贝里真改了" "$(grep -c "'cli-tools login-user session-pnpm" "$TMP/repo/deploy/test/run.sh" | tr -d ' ')" 1
+sed -i "s/^  'cli-tools cursor-agent/  'cli-tools login-user cursor-agent/" "$TMP/repo/deploy/test/run.sh"
+check "拷贝里真改了" "$(grep -c "'cli-tools login-user cursor-agent" "$TMP/repo/deploy/test/run.sh" | tr -d ' ')" 1
 run --check-shards
 check "退出码" "$RC" 1
 check "点名排了不止一台的" "$(has '排了不止一台')" 1

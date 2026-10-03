@@ -165,9 +165,9 @@ jobs:
           set -euo pipefail
           if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
 
-  # engine 切两台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
+  # engine 切三台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
   # 只跑受影响的包（改到的 + 依赖它们的）。
-  # db 分片旁边起一个 postgres:16 服务容器（和法国生产同大版本，ops.md 第二节），测试经 FLEET_TEST_PG_URL 连上，
+  # db 分片自己起一个 postgres:16 容器（和法国生产同大版本，ops.md 第二节），测试经 FLEET_TEST_PG_URL 连上，
   # 第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆一份（#220）：一个测试进程的内存从
   # ~1G 降到 ~0.3G，不再每个进程各建一份内存 PGlite。engine、rest 不连这张库，照 PGlite 走；本机没设这个变量也
   # 照 PGlite 走（packages/db/src/testing.ts，ops.md 第九节「CI 测试的 Postgres 服务」）。
@@ -181,20 +181,6 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: fleet_test
-          POSTGRES_PASSWORD: fleet_test
-          POSTGRES_DB: fleet_test_admin
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U fleet_test -d fleet_test_admin"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -205,6 +191,20 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # postgres:16 只给 db 分片用，所以不用 services（services 每个分片都起、起一次约 12 秒，engine、rest 白等），
+      # 改成 db 分片自己 docker run，和装依赖并不冲突：先起、等到 pg_isready 再跑测试。
+      - name: 起 postgres:16（只 db 分片）
+        if: matrix.name == 'db'
+        run: |
+          set -euo pipefail
+          docker run -d --name fleet-test-pg -p 5432:5432             -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin             postgres:16-alpine
+          for i in $(seq 1 60); do
+            if docker exec fleet-test-pg pg_isready -U fleet_test -d fleet_test_admin >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          docker logs fleet-test-pg >&2
+          echo "postgres:16 60 秒没起来" >&2
+          exit 1
       # 引擎有几条测试要真的 Temporal 开发服务端（测试服务端和真服务端行为不同的地方）：用和法国同一版的命令行起，
       # 版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。测试里 CI 没给这个变量就直接红（test/support.ts）。
       - name: Temporal 命令行的版本（和法国同版）
@@ -280,8 +280,8 @@ jobs:
       - run: pnpm --filter ./packages/web run build:demo
 
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
-  # deploy=all 时切成 3 台并行（ci-plan.ts 的 deployMatrix / DEPLOY_SHARDS，跑 run.sh --shard i/3；一台 70 秒上下，
-  # 全套 231 秒）；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
+  # deploy=all 时切成 3 台并行（ci-plan.ts 的 deployMatrix / DEPLOY_SHARDS，跑 run.sh --shard i/3；一台 100 秒上下，
+  # 全套 300 秒上下）；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
   # 不装依赖、不用 sudo（ops-only.test.sh 在全套里核对 --ops 两块真跑了、改坏 ops.md 会红）。
   # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
   # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
