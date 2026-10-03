@@ -184,8 +184,9 @@ export async function workflowDiff(before: string, after: string): Promise<strin
         const sig = stepSig(s);
         if (sig !== '{}') return [`信任:${sig}`];
         const run = isObj(s) && typeof s.run === 'string' ? s.run : '';
-        // 装依赖那步整条命令都算（接一句 curl 就是跑别的东西了）
-        if (/\binstall\b/.test(run)) return [`装依赖:${canon(run)}`];
+        // 装依赖、下载、校验、提权、起容器的步骤整条命令都算：接一句 curl、去掉 sha256sum -c、改 sudo 的命令，都是跑别的东西了
+        if (/\binstall\b|\bcurl\b|\bwget\b|sha256sum|\bsudo\b|\bdocker\b/.test(run))
+          return [`敏感命令:${canon(run)}`];
         if (CHECK_TOKENS.some((t) => run.includes(t)))
           return [`检查:${canon({ run, env: isObj(s) ? (s.env ?? null) : null })}`];
         return [];
