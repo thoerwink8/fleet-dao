@@ -1,8 +1,8 @@
 // 只扣一组模型的窗用满了（比如只有 fable 组满了）：同池别的路由不算满，满的那一组写明是哪一组。
-// 调度台的路由行、换模型对话框都按路由算（routeQuotaHeadline，判法同 shared 的 windowAppliesTo）。
+// 换模型对话框按路由算（routeQuotaHeadline，判法同 shared 的 windowAppliesTo）。
 import { describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
-import type { PoolView, QuotaWindowView } from '../api/types';
+import type { PoolView, QuotaWindowView, RoutingLayerPurpose } from '../api/types';
 import { routeOptions } from '../components/task-actions';
 import { headlineText, quotaHeadline, routeQuotaHeadline } from './catalog';
 
@@ -70,10 +70,26 @@ describe('按路由看额度', () => {
 
   test('换模型对话框（假数据里中转站的 fable 组满了）：Kimi 不写满，Fable 写 fable 组已用满', async () => {
     const api = createMockApi({ live: false, now: () => NOW });
-    const routing = await api.routing();
-    const pools = await api.pools();
-    const { ordered, others } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
-    const all = [...ordered, ...others];
+    const [layers, pools] = await Promise.all([api.routingLayers(), api.pools()]);
+    const execute = layers.purposes.find((p) => p.purpose === 'execute');
+    const kimiModel = execute?.models.find((m) => m.modelId === 'kimi-k3');
+    const kimiRoute = kimiModel?.routes.find((r) => r.routeId === 'r-rl-kimi');
+    if (!execute || !kimiModel || !kimiRoute) throw new Error('假数据的写码用途里没有 Kimi 那条路由');
+    // 假数据里 Fable 没排进哪个用途：照 Kimi 那条（同一个中转池）抄一份挂在 Fable 下，只为看额度这一句是不是按路由算
+    const purpose: RoutingLayerPurpose = {
+      ...execute,
+      models: [
+        kimiModel,
+        {
+          ...kimiModel,
+          modelId: 'fable-5.1',
+          family: 'claude',
+          displayName: 'Fable 5.1',
+          routes: [{ ...kimiRoute, routeId: 'r-rl-fable' }],
+        },
+      ],
+    };
+    const all = routeOptions(purpose, pools.pools, undefined);
     const kimi = all.find((o) => o.id === 'r-rl-kimi');
     const fable = all.find((o) => o.id === 'r-rl-fable');
     expect(kimi?.quota && headlineText(kimi.quota)).not.toMatch(/满/);
