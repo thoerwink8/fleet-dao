@@ -11,6 +11,15 @@
   - **PR-2（还没开）**：只放迁移（drizzle-kit 生成，别手写），摘 schema 定义 + `REALTIME_TABLES`，**不挂自动合并**，写「人闸：删数据」。PR-1 上线之后才开。
 - **下一步**：PR-1 推完等 CI → PR-2 → AGENTS.md 减脂 ① 档 + 防膨胀 → v3 W4 主线（#632）。
 
+## 2026-10-03 午（#556-4 删库表 PR-1 已合、PR-2 等上线确认；Fable 永久已合；引导落盘/断链待点头）
+
+- **已合**：#669（Fable 禁令改永久；创始人「目前阶段我不希望用 fable」）、#671（#556-4 PR-1：删认领账的代码引用，`readAlertWork` 不再读 `issue_claims`、`core/src/seat.ts` 无调用方那组删了、提醒阶段去掉 `claimed`/`engine_stuck`、钉住测试 `packages/db/test/claim-ledger-gone.test.ts`）。
+- **#556-4 PR-2（还没开，人闸：删数据）**：只放迁移（drizzle-kit 生成，别手写）+ 摘 schema 里 `issueClaims`/`seatLeases`/`seatBoards` 定义 + `REALTIME_TABLES` 的 `seat_boards`（连 `web/src/api/client.tsx` 的 `seat_boards: []`）。**前提：包含 #671 的版本已上线到法国**——`deploy/release.sh` 先跑迁移才切版本，库表先删、老代码还在跑就当场报错。**法国现在跑哪一版我读不到**（这台没配 `france-ssh`），所以不开；等创始人确认法国已发含 #671 的版本。创始人 2026-10-03 回「选 1」同意删。
+- **待创始人点头（改标准，CI 全绿）**：#670（引导必须落盘 + `checkDirectives` 钩子）。**#668（断链清理）卡在 `second-opinion` 状态**：我先派了 Claude 同族的 subagent 审，结论「通过」，但它不是第二意见（规矩不让同族冒充）；已改跑 `second-opinion.mjs --pr 668` 换厂商真审，等它贴状态。
+- **#632 三段总调度核实**：S2-0 到 S2-5b 代码都在、`MERGE_GATE_REQUIRES_COLD_VERIFY = true`、生产 Spawner 在 `real/index.ts` 接上了（`SEGMENT_NOT_WIRED` 只是测试入口防呆，不是缺口）；剩 S2-7 演练仓三连跑（要演练仓机器人令牌 + 本机环境真起来，我没有）。
+- **AGENTS.md 减脂 ① 档**：等 #668、#670 合了再做——三个 PR 都碰通用段同几行，并行改必冲突。防膨胀机制定了：给 AGENTS.md 设字数预算、用测试钉死（一周从 ~6000 涨到 ~10800 字、只涨不降，根子是「每次出事只补不删」）；预算数在压完后按实际字数定。
+- **这台的网络**：10-03 午间 GitHub 断过一阵（`github.com` HTTP 000），后来恢复；需要联网的动作那段时间做不了。
+
 ## 2026-10-03 凌晨（#654 GitHub 瘦身：F2 deploy 切片 + 第二意见不再留会话）
 
 > 无人值守推进（创始人 10-02 夜「大改 github 相关」「一切要为了提速而服务」；10-03 说 deploy 231 秒「还是太久了」、第二意见「我根本不想看见它，并且我希望随时能清理掉」）。**做到哪、下一步、还剩什么没验证**写在下面；接着干的先读这一段。
