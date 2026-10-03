@@ -25,6 +25,7 @@ import { fakeTrees, git, mirror } from './fixtures.ts';
 const USER = 'fleet-agent-carpool' as SessionUser;
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
 const BRANCH = 'fleet/12-t1a2b3c4d';
+const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
 
 const route = (over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   routeId: 'r1',
@@ -154,7 +155,7 @@ function rig(
   });
   const input = (over: Partial<RunSegmentInput> = {}): RunSegmentInput => ({
     schemaVersion: 1,
-    taskId: 'task-1',
+    taskId: TASK_ID,
     repo: REPO,
     issueNumber: 12,
     route: {
@@ -217,22 +218,57 @@ describe('备树', { timeout: 60_000 }, () => {
     expect(spec.prompt).not.toContain('返工意见');
     expect(beats.n).toBeGreaterThan(0);
 
-    // runs：开跑先留一行（带路由：切号靠它认出跑在哪个池），收场同一个编号一笔 done，渠道是路由的渠道，用量花费带上
-    expect(r.started).toEqual([
-      expect.objectContaining({ runId: 'run-0002', segment: 'manual', routeId: 'r1', issueNumber: 12 }),
-    ]);
-    expect(r.recorded).toHaveLength(1);
-    expect(r.recorded[0]).toMatchObject({
+    // runs：开跑先留一行（带路由：切号靠它认出跑在哪个池），收场同一个编号一笔 done，渠道是路由的渠道，用量花费带上。
+    // 两处都记到这张单名下（#216）：tasks.id、单号、派工档、任务工作流编号、分支；第一轮还没开 PR，PR 号不写（不拿 0 顶）
+    const owner = {
       runId: 'run-0002',
       segment: 'manual',
+      taskId: TASK_ID,
+      issueNumber: 12,
+      tier: 'medium',
+      workflowId: 'task:acme/demo#12',
+      branch: BRANCH,
+    };
+    expect(r.started).toEqual([expect.objectContaining({ ...owner, routeId: 'r1' })]);
+    expect(r.started[0]).not.toHaveProperty('prNumber');
+    expect(r.recorded).toHaveLength(1);
+    expect(r.recorded[0]).toMatchObject({
+      ...owner,
       outcome: 'done',
       model: 'claude-opus-5-5',
       channel: 'claude-subscription',
       routeId: 'r1',
-      issueNumber: 12,
       inputTokens: 1200,
       costUsd: 0.42,
     });
+    expect(r.recorded[0]).not.toHaveProperty('prNumber');
+  });
+
+  it('开了 PR 以后的轮次：PR 号开跑、收场两处都记上（#216）', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const got = await r.run(r.input({ prNumber: 77 }), ctx());
+    expect(got.ok).toBe(true);
+    expect(r.started).toEqual([expect.objectContaining({ taskId: TASK_ID, prNumber: 77 })]);
+    expect(r.recorded).toEqual([expect.objectContaining({ taskId: TASK_ID, prNumber: 77, outcome: 'done' })]);
+  });
+
+  it('【故意造出的失败】派工档不在 tier.ts 那三档里：写进 runs 之前就报错，不起会话、一笔不记（不当库一时不通去重试）', async () => {
+    const r = rig();
+    const err = await r
+      .run(r.input({ tier: { tier: 'turbo', effort: 'high', reason: '造的' } as never }), ctx())
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'SEGMENT_SPAWN_FAILED', retryable: false });
+    expect((err as Error).message).toContain('记账的字段对不上 runs 的约束');
+    expect((err as Error).message).toContain('tier');
+    expect(r.specs).toHaveLength(0);
+    expect(r.started).toHaveLength(0);
+    expect(r.recorded).toHaveLength(0);
   });
 
   it('第二轮：树已经在（上一轮的提交还在），不再从镜像取；返工意见带进提示词', async () => {

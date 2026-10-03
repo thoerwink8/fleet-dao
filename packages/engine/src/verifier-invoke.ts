@@ -17,6 +17,7 @@
 // 第 2 轮、什么时候起，是调用方的事。
 //
 // 明确失败的路径（不许拿「查不到」当 pass，通用段底线第 3 条 + specs/555 第 4 条）：
+// - 入参没单号、taskId 不是库里 tasks.id 的样子 → 一进来就抛（zod），不起会话：这一次验收记进 runs 要挂得上单（#216）
 // - fetchDiff 抛错 / 返回空 diff / 返回空 changedFiles → problems: ['读不到 diff：…']、pass: false
 // - fetchSpec 抛错 → problems: ['读不到单子：…']、pass: false
 // - chooseModelForFamily 对每个可用家族都返回 undefined → problems: ['没讨论成：…']、pass: false
@@ -44,8 +45,12 @@ export const VerifierInvokeInputSchema = z.object({
   branch: z.string().min(1),
   /** diff 的基线（base..？ = PR 引入的全部改动）。 */
   baseSha: z.string().min(7),
-  /** 这单对应的「活」ID（task / run / demand 哪个层级由调用方定），本模块只透传给 fetchSpec。 */
-  taskId: z.string().min(1),
+  /** 这张单在库里的 tasks.id：fetchSpec 照它找需求文档目录，这一次验收记进 runs 也挂在这张单上（#216）。 */
+  taskId: z.guid(),
+  /** 单号（GitHub issue #）：记进 runs 的这一笔要挂得上单（#216），没有就不起会话。 */
+  issueNumber: z.number().int().positive(),
+  /** 这张单的任务工作流编号（taskWorkflowId），一起记进 runs；不在任务工作流里验的不给。 */
+  workflowId: z.string().min(1).optional(),
   /** 「要什么」原文（需求文档里的「## 场景 / 需求」段；冷调用模型要照它核）。 */
   what: z.string().min(1),
   /** 「怎么算做完」逐条原文。 */
@@ -343,6 +348,12 @@ export async function invokeVerifier(
     modelId: picked.modelId,
     ...(picked.channel !== undefined ? { channel: picked.channel } : {}),
     ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
+    // 记到这张单名下（#216）：验收是冷调用、不分档，不带派工档
+    taskId: parsed.taskId,
+    issueNumber: parsed.issueNumber,
+    ...(parsed.workflowId !== undefined ? { workflowId: parsed.workflowId } : {}),
+    prNumber: parsed.prNumber,
+    branch: parsed.branch,
     prompt,
     cwd: prepared ? prepared.cwd : deps.cwd,
     ...(deps.timeoutMinutes !== undefined ? { timeoutMinutes: deps.timeoutMinutes } : {}),

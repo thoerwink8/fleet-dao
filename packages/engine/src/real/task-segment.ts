@@ -12,11 +12,14 @@
 //   model_mismatch、relay_unknown……）就是失败分流认的码，不改写；没有原因码的才按 one-shot 的结局给一个。
 // - 起不来（路由不可用、树备不好、Spawner 抛错）一律抛 PortError，不当成「会话没跑成」：前者重试没用，要人修配置。
 //   开跑那一行写不进 runs（#157，one-shot 不起会话）抛 SEGMENT_RUNS_UNWRITABLE，可以重试：是库一时不通，不是配置。
+// - runs 里这一段记到这张单名下（#216）：tasks.id、单号、派工档、工作流编号（和起工作流、驾驶舱读的是同一个 taskWorkflowId）、
+//   分支，开了 PR 的轮次再带 PR 号；记账的字段对不上 runs 的约束，one-shot 不起会话（BAD_RUN_INPUT，按起不来处理）。
 // - one-shot 的落盘目录（brief.txt、stdout.txt……）24 小时后由这里顺手清；清不掉只记日志。
 
 import { randomUUID } from 'node:crypto';
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
@@ -213,6 +216,11 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               modelId: input.route.modelId,
               channel: routeInfo.route.channelId,
               issueNumber: input.issueNumber,
+              taskId: input.taskId,
+              tier: input.tier.tier,
+              workflowId: taskWorkflowId(input.repo, input.issueNumber),
+              branch: input.branch,
+              ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
               prompt,
               cwd: input.worktreePath,
               timeoutMinutes: input.timeoutMinutes,

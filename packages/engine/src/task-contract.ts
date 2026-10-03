@@ -91,6 +91,7 @@ export interface ReadTaskBriefInput {
 /** 起一段动手会话。runId 由活动自己起（每次尝试一个，进 runs 表的主键），工作流里不生成编号。 */
 export interface RunSegmentInput {
   schemaVersion: 1;
+  /** 库里的 tasks.id（runs 里这一段挂在这张单上，#216）。 */
   taskId: string;
   repo: Repo;
   issueNumber: number;
@@ -110,6 +111,11 @@ export interface RunSegmentInput {
    * 新会话接着干、别从头来。没被停过的不给。
    */
   interrupted?: string;
+  /**
+   * 这张单的 PR：第一轮动手时还没开（引擎在会话交付之后才开），不给；开了以后每一轮都给。只记账（runs.pr_number，#216），
+   * 会话不看它。老历史里没有这个字段。
+   */
+  prNumber?: number;
 }
 
 /**

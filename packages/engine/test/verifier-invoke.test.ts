@@ -6,7 +6,7 @@
 // （只有三种能挡）和第 4 条（读不到 PR 必填栏就明确失败）的钉子。
 
 import { describe, expect, it } from 'vitest';
-import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
+import type { RunRecord, RunStart, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
   BLOCKER_KINDS,
@@ -56,11 +56,15 @@ const MODEL_STDOUT_PASS_WITH_STYLE = [
   'verdict: pass',
 ].join('\n');
 
+const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
+
 const BASE_INPUT: VerifierInvokeInput = {
   prNumber: 42,
   branch: 'feat/x',
   baseSha: 'a'.repeat(40),
-  taskId: 'task-1',
+  taskId: TASK_ID,
+  issueNumber: 12,
+  workflowId: 'task:acme/demo#12',
   what: '要 A',
   howToFinish: ['1. 代码里有 A', '2. 还把 B 留着'],
   modelFamiliesAvoid: ['gpt'],
@@ -75,14 +79,18 @@ const FAKE_DIFF_OK = {
 function fakeOneShot(scripted: SpawnOutcome): {
   oneShot: OneShotDeps;
   recorded: RunRecord[];
+  started: RunStart[];
   spawnedArgv: string[];
   commands: SpawnCommand[];
 } {
   const spawnedArgv: string[] = [];
   const commands: SpawnCommand[] = [];
   const recorded: RunRecord[] = [];
+  const started: RunStart[] = [];
   const runs: RunsWriter = {
-    async start() {},
+    async start(r: RunStart) {
+      started.push(r);
+    },
     async record(r: RunRecord) {
       recorded.push(r);
     },
@@ -100,7 +108,7 @@ function fakeOneShot(scripted: SpawnOutcome): {
     runs,
     tmpDir: 'C:/temp/fleet-555-1-test',
   };
-  return { oneShot, recorded, spawnedArgv, commands };
+  return { oneShot, recorded, started, spawnedArgv, commands };
 }
 
 function okFetchDiff(): FetchDiff {
@@ -477,6 +485,86 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、�
     for (const kind of BLOCKER_KINDS) expect(prompt).toContain(`- ${kind}：`);
     expect(prompt).toContain('没有仓库的检出');
     expect(prompt).toContain('verdict: pass');
+  });
+});
+
+describe('invokeVerifier：这一次验收记进 runs 挂得上单（#216）', () => {
+  it('开跑那一行、收场那一笔都带 tasks.id、单号、工作流编号、PR 号、分支；验收是冷调用，不带派工档', async () => {
+    const { oneShot, started, recorded } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    const owner = {
+      segment: 'verify',
+      taskId: TASK_ID,
+      issueNumber: 12,
+      workflowId: 'task:acme/demo#12',
+      prNumber: 42,
+      branch: 'feat/x',
+    };
+    expect(started).toEqual([expect.objectContaining(owner)]);
+    expect(recorded).toEqual([expect.objectContaining({ ...owner, outcome: 'done' })]);
+    expect(started[0]).not.toHaveProperty('tier');
+    expect(recorded[0]).not.toHaveProperty('tier');
+  });
+
+  it('不在任务工作流里验的（没给工作流编号）：这一列不写，不拿空串顶', async () => {
+    const { oneShot, recorded } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    const { workflowId: _drop, ...noWorkflow } = BASE_INPUT;
+    await invokeVerifier(noWorkflow, DEPS(oneShot));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).not.toHaveProperty('workflowId');
+    expect(recorded[0]).toMatchObject({ taskId: TASK_ID, issueNumber: 12 });
+  });
+
+  it('【故意造出的失败】没给单号：一进来就报错，不拉 diff、不挑模型、不起会话，runs 里一笔不记', async () => {
+    const { oneShot, started, recorded, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    let diffs = 0;
+    let picks = 0;
+    const { issueNumber: _drop, ...noIssue } = BASE_INPUT;
+    const err = await invokeVerifier(noIssue as VerifierInvokeInput, {
+      oneShot,
+      fetchDiff: async () => {
+        diffs += 1;
+        return FAKE_DIFF_OK;
+      },
+      fetchSpec: okFetchSpec(),
+      chooseModelForFamily: async () => {
+        picks += 1;
+        return { modelId: 'claude-x' };
+      },
+      cwd: 'C:/work/x',
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String((err as Error).message)).toContain('issueNumber');
+    expect([diffs, picks, commands.length, started.length, recorded.length]).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it('【故意造出的失败】taskId 不是库里 tasks.id 的样子（不是 uuid）：一进来就报错、不起会话，免得记一笔挂不上单的', async () => {
+    const { oneShot, started, recorded, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    await expect(invokeVerifier({ ...BASE_INPUT, taskId: 'task-1' }, DEPS(oneShot))).rejects.toThrow(
+      /taskId/,
+    );
+    expect([commands.length, started.length, recorded.length]).toEqual([0, 0, 0]);
   });
 });
 
