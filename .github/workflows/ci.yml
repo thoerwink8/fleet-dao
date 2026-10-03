@@ -40,6 +40,7 @@ jobs:
       tests: ${{ steps.plan.outputs.tests }}
       web: ${{ steps.plan.outputs.web }}
       deploy: ${{ steps.plan.outputs.deploy }}
+      deploy_matrix: ${{ steps.plan.outputs.deploy_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -279,17 +280,22 @@ jobs:
       - run: pnpm --filter ./packages/web run build:demo
 
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
-  # deploy=all 跑全套；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
+  # deploy=all 时切成 3 台并行（ci-plan.ts 的 deployMatrix / DEPLOY_SHARDS，跑 run.sh --shard i/3；一台 70 秒上下，
+  # 全套 231 秒）；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
   # 不装依赖、不用 sudo（ops-only.test.sh 在全套里核对 --ops 两块真跑了、改坏 ops.md 会红）。
   # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
   # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
   # 万一没带过去，那一段报「没跑成」、这一步照样红，不会悄悄当成通过。
   deploy:
     needs: changes
-    if: needs.changes.outputs.deploy == 'all' || needs.changes.outputs.deploy == 'ops'
-    name: deploy (${{ needs.changes.outputs.deploy }})
+    if: needs.changes.outputs.deploy_matrix != '[]'
+    name: deploy (${{ matrix.label }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.deploy_matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -302,10 +308,20 @@ jobs:
           cache: ${{ needs.changes.outputs.deploy == 'all' && 'pnpm' || '' }}
       - if: needs.changes.outputs.deploy == 'all'
         run: pnpm install --frozen-lockfile
-      - if: needs.changes.outputs.deploy == 'all'
-        run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh
-      - if: needs.changes.outputs.deploy == 'ops'
-        run: bash deploy/test/run.sh --ops
+      # 每一台腿都必须真跑（原来这步只认 deploy == 'all'，ops 那台就被跳过了：空跑还报绿，#662 第二意见）。
+      # 参数从矩阵来、按数组展开，不拼进命令行；ops 那台不用 sudo、不碰系统账号。
+      - name: deploy 检查（${{ matrix.label }}）
+        env:
+          ARGS: ${{ join(matrix.args, ' ') }}
+          NEEDS_SUDO: ${{ matrix.sudo }}
+        run: |
+          set -euo pipefail
+          read -ra args <<<"$ARGS"
+          if [ "$NEEDS_SUDO" = "true" ]; then
+            sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh "${args[@]}"
+          else
+            bash deploy/test/run.sh "${args[@]}"
+          fi
 
   # 必过检查。逐个核对：changes、docs 必须绿；biome、tsc、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过
   # （packages/conventions/src/ci-plan.ts 的 ciVerdict）。hygiene 只报不挡：仍然 needs 它、等它跑完，状态在 PR 上

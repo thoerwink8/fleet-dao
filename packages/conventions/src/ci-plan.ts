@@ -65,6 +65,35 @@ function shardsOf(name: TestShard['name'], args: string[], temporal: boolean, co
 export const DEPLOY_MODES = ['all', 'ops', 'none'] as const;
 export type DeployMode = (typeof DEPLOY_MODES)[number];
 
+/**
+ * deploy/ 的全套切成几台并行跑（deploy/test/run.sh --shard i/n）。数字要和 run.sh 里 SHARDS 的项数一样
+ * （test/ci-plan.test.ts 读 run.sh 核对）：那份文件是单一事实，这里只是把它写进 CI 的矩阵。
+ * 2026-10-03 实测：全套 231 秒（shellcheck 43 秒 + 各测试），三台各 70 秒上下。
+ */
+export const DEPLOY_SHARDS = 3;
+
+/** deploy 那一 job 的矩阵：all 切成 DEPLOY_SHARDS 台、ops 一台（只跑读 docs/ops.md 的两块）、none 空。 */
+export interface DeployLeg {
+  label: string;
+  /** run.sh 的参数。 */
+  args: string[];
+  /**
+   * 这台要不要 sudo + FLEET_TEST_SYSTEM_USERS=1。只有全套那几台要（建、删真系统账号的测试在里面）；
+   * ops 那台不碰系统账号，不带（CI 上 sudo 要宽权限，能不带就不带）。
+   */
+  sudo: boolean;
+}
+
+export function deployMatrix(mode: DeployMode): DeployLeg[] {
+  if (mode === 'none') return [];
+  if (mode === 'ops') return [{ label: 'ops', args: ['--ops'], sudo: false }];
+  return Array.from({ length: DEPLOY_SHARDS }, (_, i) => ({
+    label: `${i + 1}/${DEPLOY_SHARDS}`,
+    args: ['--shard', `${i + 1}/${DEPLOY_SHARDS}`],
+    sudo: true,
+  }));
+}
+
 /** 这些包的测试或打包被 deploy/test 直接跑（agents-sync 的同步脚本、飞书网关打包、web 的扫描脚本）。 */
 export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
 
@@ -313,6 +342,7 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
     tests: JSON.stringify(plan.tests),
     web: String(plan.web),
     deploy: plan.deploy,
+    deploy_matrix: JSON.stringify(deployMatrix(plan.deploy)),
   };
 }
 
