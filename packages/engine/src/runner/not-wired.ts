@@ -27,6 +27,8 @@ export const RunRecordSchema = z.object({
   model: z.string().min(1),
   /** 挑好的渠道（poolId / routeId 的「渠道」那半截）；读不到不给。 */
   channel: z.string().min(1).optional(),
+  /** 跑在哪条路由上（选路给的）：切号靠它认出这一段跑在哪个池（#157）；不经选路起的不给。 */
+  routeId: z.string().min(1).optional(),
   /** 起止（ISO 8601）。 */
   startedAt: z.string().min(1),
   endedAt: z.string().min(1),
@@ -45,10 +47,27 @@ export const RunRecordSchema = z.object({
 });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
+/** 开跑那一刻记的一行（还没结束：没有止、没有结局、没有用量）：字段和 RunRecord 同名同义。 */
+export const RunStartSchema = RunRecordSchema.pick({
+  runId: true,
+  segment: true,
+  issueNumber: true,
+  model: true,
+  channel: true,
+  routeId: true,
+  startedAt: true,
+});
+export type RunStart = z.infer<typeof RunStartSchema>;
+
 /** 真实实现（#556 起）和 NotWired 占位都长这个样。 */
 export interface RunsWriter {
   /** 装配时给的「未接」标记：配了就说明这块压根没接上；真实现不设。 */
   readonly notWired?: string;
+  /**
+   * 开跑：留一行没结束的（#157，切号数在跑的会话靠它）。写不进去要抛——调用方就不起会话，不让一个切号看不见的会话跑起来。
+   */
+  start(run: RunStart): Promise<void>;
+  /** 收场（或没开跑就收了，比如内存放不下）：整行记下；开跑时留过那一行的，补完同一行。 */
   record(run: RunRecord): Promise<void>;
 }
 
@@ -61,6 +80,10 @@ export function notWiredRuns(deps: { tmpDir: string; now?: () => Date }): RunsWr
   const now = deps.now ?? (() => new Date());
   return {
     notWired: RUNS_NOT_WIRED,
+    async start(run) {
+      // 只挡形状、不落盘：占位不进库，切号（只读库）本来就看不见它；收场那一笔是整行，开跑这一行它都有
+      RunStartSchema.parse(run);
+    },
     async record(run) {
       // 先把进来的形状挡一道——写进 JSONL 的一定是钉死的那份（schema 漏字段当场红、不许降级）。
       const parsed = RunRecordSchema.parse(run);

@@ -147,6 +147,7 @@ function harness(
       {
         spawn,
         runs: {
+          async start() {},
           async record(r) {
             recorded.push(r);
           },

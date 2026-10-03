@@ -15,7 +15,7 @@ import {
   type RunSegmentDeps,
   sweepRunDirs,
 } from '../../src/real/task-segment.ts';
-import type { RunRecord } from '../../src/runner/not-wired.ts';
+import type { RunRecord, RunStart } from '../../src/runner/not-wired.ts';
 import type { OneShotResult } from '../../src/runner/one-shot.ts';
 import type { RunSegmentInput } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
@@ -78,6 +78,7 @@ interface Rig {
   ft: ReturnType<typeof fakeTrees>;
   dir: string;
   recorded: RunRecord[];
+  started: RunStart[];
   specs: HostRunSpec[];
   run: ReturnType<typeof createRunSegment>;
   input: (over?: Partial<RunSegmentInput>) => RunSegmentInput;
@@ -96,6 +97,7 @@ function rig(
   const ft = fakeTrees(join(sub, 'work'));
   const dir = ft.trees.treeFor(REPO, BRANCH);
   const recorded: RunRecord[] = [];
+  const started: RunStart[] = [];
   const specs: HostRunSpec[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -133,6 +135,9 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
+      async start(r) {
+        started.push(r);
+      },
       async record(r) {
         recorded.push(r);
       },
@@ -167,7 +172,7 @@ function rig(
     timeoutMinutes: 5,
     ...over,
   });
-  return { m, ft, dir, recorded, specs, run, input };
+  return { m, ft, dir, recorded, started, specs, run, input };
 }
 
 /** 假会话干活：在树里写个文件并提交。 */
@@ -211,13 +216,18 @@ describe('备树', { timeout: 60_000 }, () => {
     expect(spec.prompt).not.toContain('返工意见');
     expect(beats.n).toBeGreaterThan(0);
 
-    // runs：一笔，done，渠道是路由的渠道，用量花费带上
+    // runs：开跑先留一行（带路由：切号靠它认出跑在哪个池），收场同一个编号一笔 done，渠道是路由的渠道，用量花费带上
+    expect(r.started).toEqual([
+      expect.objectContaining({ runId: 'run-0002', segment: 'manual', routeId: 'r1', issueNumber: 12 }),
+    ]);
     expect(r.recorded).toHaveLength(1);
     expect(r.recorded[0]).toMatchObject({
+      runId: 'run-0002',
       segment: 'manual',
       outcome: 'done',
       model: 'claude-opus-5-5',
       channel: 'claude-subscription',
+      routeId: 'r1',
       issueNumber: 12,
       inputTokens: 1200,
       costUsd: 0.42,
@@ -337,6 +347,26 @@ describe('结局整理', { timeout: 60_000 }, () => {
         }),
     });
     await expect(r.run(r.input(), ctx(stop.signal))).rejects.toThrow('任务被放弃');
+  });
+
+  it('【故意造出的失败】开跑那一行写不进 runs（库一时不通）：抛 PortError SEGMENT_RUNS_UNWRITABLE（可以重试），不起会话', async () => {
+    const r = rig({
+      deps: {
+        runs: {
+          async start() {
+            throw new Error('runs 开跑那一行写入失败：connection refused');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    const err = await r.run(r.input(), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'SEGMENT_RUNS_UNWRITABLE', retryable: true });
+    expect((err as Error).message).toContain('connection refused');
+    expect(r.specs).toHaveLength(0);
   });
 
   it('【故意造出的失败】驱动自己抛错（起不来）：抛 PortError SEGMENT_SPAWN_FAILED（不重试），不当成会话没跑成', async () => {

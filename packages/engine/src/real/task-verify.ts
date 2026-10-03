@@ -23,8 +23,8 @@ import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import { runColdVerifyForPr } from '../cold-verify-run.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
-import type { RunRecord, RunsWriter } from '../runner/not-wired.ts';
-import { SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
+import type { RunRecord, RunStart, RunsWriter } from '../runner/not-wired.ts';
+import { OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import { type ColdVerifyInput, type ColdVerifyResult, ROUTE_RETRY_SECONDS } from '../task-contract.ts';
 import { FAMILY_ORDER, invokeVerifier } from '../verifier-invoke.ts';
 import type { EngineGitHub } from './github-ports.ts';
@@ -172,6 +172,8 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     // 验收的会话记到这张单名下（invokeVerifier 不知道单号）
     const runs: RunsWriter = {
       ...(deps.runs.notWired === undefined ? {} : { notWired: deps.runs.notWired }),
+      start: (run: RunStart) =>
+        deps.runs.start({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
       record: (run: RunRecord) =>
         deps.runs.record({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
     };
@@ -217,6 +219,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return await invokeVerifier(verifierInput, verifierDeps);
           } catch (error) {
             if (error instanceof PortError && error.retryable) seen.transient = error;
+            // 开跑那一行写不进 runs（#157）：会话没起，库一时不通，过一会儿再验（不是「验收做不出来」）
+            if (error instanceof OneShotError && error.code === 'RUN_START_FAILED') {
+              seen.transient = new PortError('VERIFY_RUNS_UNWRITABLE', error.message, { retryable: true });
+            }
             throw error;
           }
         },

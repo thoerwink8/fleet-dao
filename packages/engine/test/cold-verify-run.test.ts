@@ -20,7 +20,7 @@ const HEAD = 'a'.repeat(40);
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
 
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
-  const runs: RunsWriter = { async record(_r: RunRecord) {} };
+  const runs: RunsWriter = { async start() {}, async record(_r: RunRecord) {} };
   return {
     spawn: async () => scripted,
     buildCommand: (input) => ({ argv: ['fake-executor', '--model', input.modelId], cwd: input.cwd }),
