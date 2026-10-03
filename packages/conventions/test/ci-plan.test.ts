@@ -632,7 +632,8 @@ describe('ci.yml 和这里对得上', () => {
    * 抠出 lint 里「并行跑」那一步的脚本，配一个假的 pnpm（按子命令决定退出码）原样交给 bash 跑：
    * 一样红了另外两样照样跑完、各自写出结果，开关说不跑的写 skipped。
    */
-  describe('lint 的并行步（真跑它的脚本）', () => {
+  // 每条都起 bash + 几个后台子进程：Windows 本机在别的测试一起跑时一条能到 5–10 秒，默认 5 秒的限时会误红。
+  describe('lint 的并行步（真跑它的脚本）', { timeout: 30_000 }, () => {
     const doc = parse(yml) as {
       jobs: { lint: { steps: { id?: string; run?: string }[] } };
     };
