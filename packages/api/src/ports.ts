@@ -17,6 +17,8 @@ import type {
   Repo,
   Route,
   ScheduleOutcome,
+  SegmentMatch,
+  SegmentRun,
   SessionRun,
   StageKind,
   StagePolicy,
@@ -26,6 +28,9 @@ import type {
   TaskState,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
+
+/** 一张单的三段流水（库里的 runs 表）一笔，加上它是怎么和这张单对上的。 */
+export type SegmentRunRecord = SegmentRun & { matchedBy: SegmentMatch };
 
 /** 库里的一行额度窗：原名、单位、读法入库必填（领域类型里可选，是给还没入库的读数用的）；staleSince 由库的写入口管。 */
 export type QuotaWindowRecord = QuotaWindow & Required<Pick<QuotaWindow, 'label' | 'unit' | 'source'>>;
@@ -324,6 +329,12 @@ export interface BoardStore {
     active?: boolean | undefined;
   }): Promise<SessionRun[]>;
   getRun(id: string): Promise<SessionRun | null>;
+  /**
+   * 一张单的三段流水（runs 表），按起跑先后：task_id 是这张单的（matchedBy = task），加上 task_id 没记、单号对得上的老行
+   * （matchedBy = issueNumber，兜底；记了工作流编号却不是这张单的 taskWorkflowId 的不收——那是别的仓同号的单）。
+   * 没这张单（含编号不是 uuid）回空。memory-store.ts 是参照实现。
+   */
+  listSegmentRuns(taskId: string): Promise<SegmentRunRecord[]>;
   /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
   getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
   lastSay(runId: string): Promise<{ text: string; at: string } | null>;

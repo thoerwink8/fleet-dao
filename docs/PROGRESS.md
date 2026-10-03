@@ -26,6 +26,13 @@
 - **驾驶舱每层活着吗**：选路之后。
 - **还没验证**：法国真发一次（法国引擎关着，上线按版本由创始人确认）；生产目录 `/etc/fleet-dao/catalog.json` 不在仓里，骨架里的路由 id 和它对不对得上没核过——对不上第一次发布会红在「装路由两层」（照设计不吞），发之前用 `france-query` 核一遍 `routes` 表。选路切过去以后，生产上实际的顺序和开关来自骨架（只补缺），不是目录里的阶段顺序：两边不一样的以骨架为准（例如 GPT 5.6 Luna 经 Cursor 那条，平铺里只挂在开 PR 前验证；骨架里它开着，界面、判断以外的用途都排得到，在 Opus 后面；Grok 4.7 在分诊、规划这些用途里也开着、排最后）。
 
+## 2026-10-04（#216 读的那一半 + 驾驶舱，Opus 子代理，两个 PR：后端读 → 驾驶舱）
+
+- **后端读（分支 `feat/216-runs-read`）**：`runs` 加 `tier` 列（迁移 0027 只加列加约束，排在 #157 的 0026 `route_id` 之后；取值照 `runner/tier.ts`，引擎 `test/runner/tier.test.ts` 钉三处一致）；Store 加 `listSegmentRuns`（task_id 对上的 + task_id 没记、单号对上的兜底行，标 `matchedBy`；记了别的仓工作流编号的不收）；`shared/src/segment-runs.ts` 的 `readSegmentRun` 认段名、算起止、逐样点名没读到的（段名认不出、起止缺一头、单子结束了还开着、token/花费没记到、动手段没记派工档，各带原因）；`summarizeUsage` 加 `bySegment`（对题/动手/验收 × 模型）、`noQueue`（三段没有排队，不当 0 秒）；任务详情接口带 `segmentRuns`。老单照旧读 `session_runs`。
+- **驾驶舱**：`/tasks/:taskId` 任务页（主页「在跑的」卡片、追问的链接早就指到这里，#610 删页后一直 404），按段、按模型显示耗时、token、花费，没读到写原因。排在后端合进主线之后。
+- **写的那一半（下一个人，#157 已合，等 #59 合了再动）**：`runner/not-wired.ts` 的 `RunRecordSchema`（`RunStartSchema` 跟着 pick）加 `taskId`、`tier`、`workflowId`、`prNumber`、`branch`——开跑那一行也带上，在跑的那一笔才不靠单号兜底；`runner/one-shot.ts` 的 `OneShotInput` 和开跑、收场两处带过去；`real/runs-writer.ts` 的 `start`/`record` 照填进 `startRun`（`RunInsert` 已有这几列，`tier` 本 PR 加了）；`real/task-segment.ts` 给 `input.taskId`、`input.tier.tier`、`taskWorkflowId(repo, 单号)`、`input.branch`；`verifier-invoke.ts` 的验收冷调用连单号都没传，记进 runs 的那笔挂不到任何单上。
+- **还没验证**：真 `runs` 数据（等 #452 演练跑出来）；写的那一半没补之前，库里的三段流水全靠单号兜底、派工档全是「没记」。
+
 ## 2026-10-04 凌晨（流程漏洞与自评：创始人「主动发现漏洞、自定优先级、设任务和验收」「看看有没有优化空间」）
 
 **实测（`gh pr list`，10-03 一天 20 个 PR）**：不要第二意见的 PR 开到合 2–3 分钟（8 个）；要第二意见的 26–89 分钟、2–9 轮（#688 3 轮 33 分、#694 2 轮 37 分、#697 3 轮 26 分、#699 4 轮 89 分、#701 9 轮 40 分）；#704 开了 8 个多小时、7 轮还在审，中间会话断了 4 次。**时间全在审的来回和会话断掉上，不在 CI。**

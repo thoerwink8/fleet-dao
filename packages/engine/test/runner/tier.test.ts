@@ -1,13 +1,23 @@
 // tier.ts：按改动面分档（specs/509-需求梳理/流程重做方案.md §四）。
 // happy path 三档各一例；故意造红：空输入不许默认 fast；>50 动 refine 直接 heavyweight。
 
+import { RUN_TIERS } from '@fleet-dao/db';
+import { SEGMENT_TIERS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   decideTier,
   TIER_HEAVYWEIGHT_FILE_THRESHOLD,
   TierDecisionSchema,
+  TierEnum,
   TierError,
 } from '../../src/runner/tier.ts';
+
+describe('派工档的叫法三处一致', () => {
+  it('runs 表收的（库里有约束）、驾驶舱认的，和这里分出来的档一字不差：加一档要三处一起改', () => {
+    expect([...RUN_TIERS]).toEqual(TierEnum.options);
+    expect([...SEGMENT_TIERS]).toEqual(TierEnum.options);
+  });
+});
 
 describe('decideTier · happy path 三档', () => {
   it('一个文件 → fast / effort=medium（jobs 例：packages/api/src/cli.ts）', () => {

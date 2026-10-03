@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "tier" text;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_tier_known" CHECK ("runs"."tier" is null or "runs"."tier" in ('fast', 'medium', 'heavyweight'));
