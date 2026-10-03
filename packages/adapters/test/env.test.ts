@@ -1,7 +1,14 @@
 import { delimiter } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { UPSTREAM_ENV } from '../src/claude-code/run.ts';
-import { assertNoForbiddenEnv, buildSessionEnv, CREDENTIAL_ENV } from '../src/env.ts';
+import {
+  assertNoForbiddenEnv,
+  buildSessionEnv,
+  CREDENTIAL_ENV,
+  PROXY_ENV_KEYS,
+  parseSessionProxy,
+  SESSION_NO_PROXY,
+} from '../src/env.ts';
 
 describe('buildSessionEnv', () => {
   const base = {
@@ -52,6 +59,44 @@ describe('buildSessionEnv', () => {
     expect(() => buildSessionEnv({ base: {}, fleetApi: 'a', fleetToken: 'b', tmpDir: 'tmp/run-1' })).toThrow(
       '绝对路径',
     );
+  });
+
+  it('给了代理（本机档登记的 FLEET_SESSION_PROXY）：http(s)_proxy 大小写各一份、no_proxy 只放本机回环，都是规范写法', () => {
+    const env = buildSessionEnv({ base, fleetApi: 'a', fleetToken: 'b', proxy: 'http://127.0.0.1:7890/' });
+    const proxy = 'http://127.0.0.1:7890';
+    expect(Object.fromEntries(PROXY_ENV_KEYS.map((k) => [k, env[k]]))).toEqual({
+      http_proxy: proxy,
+      https_proxy: proxy,
+      HTTP_PROXY: proxy,
+      HTTPS_PROXY: proxy,
+      no_proxy: SESSION_NO_PROXY,
+      NO_PROXY: SESSION_NO_PROXY,
+    });
+    expect(SESSION_NO_PROXY).toBe('localhost,127.0.0.1,::1');
+  });
+
+  it('【故意造出的失败】给的代理认不出（带账号密码、https、socks、没写端口、带路径、乱写）：拒起，不悄悄直连', () => {
+    for (const bad of [
+      'http://user:pass@127.0.0.1:7890',
+      'http://user@127.0.0.1:7890',
+      'https://127.0.0.1:7890',
+      'socks5://127.0.0.1:7890',
+      'http://127.0.0.1',
+      'http://127.0.0.1:7890/pac',
+      'http://127.0.0.1:7890/?a=1',
+      '127.0.0.1:7890',
+      '',
+    ]) {
+      expect(() => buildSessionEnv({ base: {}, fleetApi: 'a', fleetToken: 'b', proxy: bad })).toThrow(
+        '会话的代理要写成 http://主机:端口',
+      );
+    }
+    expect(() => parseSessionProxy('http://user:pass@127.0.0.1:7890')).toThrow('账号密码会写上命令行');
+  });
+
+  it('Claude 会话给了代理就拒起（reclaude 自己管上游和代理，会话经它的本地口出去）', () => {
+    const env = buildSessionEnv({ base: {}, fleetApi: 'a', fleetToken: 'b', proxy: 'http://127.0.0.1:7890' });
+    expect(() => assertNoForbiddenEnv(env, UPSTREAM_ENV, '改道')).toThrow('PROXY');
   });
 
   it.each([

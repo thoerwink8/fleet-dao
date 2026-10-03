@@ -327,14 +327,30 @@ export interface HostDriverDeps {
   mirasimLedgerDir(user: SessionUser): string;
   /** 读账本用：引擎自己的进程进不去会话用户的家（750），经这个以他的身份读（real/index.ts 的生产装配）。 */
   mirasimLedgerFs(user: SessionUser): LedgerFs;
+  /**
+   * 会话出网经的代理（引擎配置 FLEET_SESSION_PROXY；本机档经 Windows 上的 Clash，法国直连、不给，#731）：cursor-agent、grok
+   * 的会话带上（它们和会话里跑的命令都认 http(s)_proxy）。Claude 不带：reclaude 自己管上游和代理，会话经它的本地口出去
+   * （claude-code/run.ts 的 UPSTREAM_ENV 见到代理变量就拒起）。Mirasim 不是我们起的进程，不涉及。
+   * 必须写（直连写 undefined）：起驱动的每一处都得想清楚带不带，漏传一处，那条路上的会话就悄悄直连、出不了网。
+   */
+  sessionProxy: string | undefined;
   run?: HostRunners;
+}
+
+/** 这次会话的环境要不要带上代理：配了就带（adapters 的 buildSessionEnv 照 proxy 设上那几个变量）。 */
+function withProxy(env: SessionEnvInput, proxy: string | undefined): SessionEnvInput {
+  return proxy === undefined ? env : { ...env, proxy };
 }
 
 export function hostDrivers(deps: HostDriverDeps): Record<WiredHost, HostDriver> {
   return {
     'claude-code': claudeDriver(deps.claudeCommand, deps.run?.['claude-code'] ?? runClaudeCode),
-    'cursor-agent': cursorDriver(deps.cursorCommand, deps.run?.['cursor-agent'] ?? runCursorAgent),
-    grok: grokDriver(deps.grokCommand, deps.run?.grok ?? runGrok),
+    'cursor-agent': cursorDriver(
+      deps.cursorCommand,
+      deps.run?.['cursor-agent'] ?? runCursorAgent,
+      deps.sessionProxy,
+    ),
+    grok: grokDriver(deps.grokCommand, deps.run?.grok ?? runGrok, deps.sessionProxy),
     mirasim: mirasimDriver(
       deps.mirasimConnect,
       deps.mirasimLedgerDir,
@@ -553,6 +569,7 @@ export function cursorLaunchCommand(versionsDir: string, apiKeyFile: string): st
 function cursorDriver(
   command: (user: SessionUser) => string[],
   run: NonNullable<HostRunners['cursor-agent']>,
+  proxy: string | undefined,
 ): HostDriver {
   return {
     hostId: 'cursor-agent',
@@ -574,7 +591,7 @@ function cursorDriver(
           // 干活的会话照 Claude 的理由放开命令（--force）；探针不放，什么命令都不许跑。不管放不放，插头都带 --trust（只信任
           // 工作目录、不放开命令）：不带的话，没信任过的目录里 -p 只打一段 Workspace Trust 提示就退出（CU-01）
           force: spec.purpose === 'work',
-          env: spec.env,
+          env: withProxy(spec.env, proxy),
           limits: spec.limits,
           testCommands: spec.testCommands,
           cgroup: spec.cgroup,
@@ -641,6 +658,7 @@ export function grokLaunchCommand(bin: string): string[] {
 function grokDriver(
   command: (user: SessionUser) => string[],
   run: NonNullable<HostRunners['grok']>,
+  proxy: string | undefined,
 ): HostDriver {
   return {
     hostId: 'grok',
@@ -666,7 +684,7 @@ function grokDriver(
               : { mode: 'new', id: spec.session.id },
           // 干活的会话照 Claude 的理由放开命令（--always-approve，GK-04）；探针不放：一个命令都不许跑
           alwaysApprove: spec.purpose === 'work',
-          env: spec.env,
+          env: withProxy(spec.env, proxy),
           limits: spec.limits,
           testCommands: spec.testCommands,
           cgroup: spec.cgroup,

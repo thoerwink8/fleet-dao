@@ -4,6 +4,8 @@
 // Claude 会话的网络流量经 reclaude 的代理（VPS 实测会话里 git 也带着它的 HTTPS_PROXY），凭据不能过它。
 // TMPDIR 不从宿主抄：宿主的是引擎自己的临时目录（会话用户不一定写得进）。会话的临时目录由起会话的一方给（tmpDir），
 // 每个会话一个、会话结束整个删掉；不给就用系统默认。
+// 代理也不从宿主抄（开发机上用户级的代理、长驻进程带着的旧代理都不算数）：只认起会话的一方显式给的 proxy——本机档登记在
+// engine.env 的 FLEET_SESSION_PROXY（经 Windows 上的 Clash 出网，#731）。Claude 会话不给：reclaude 自己管上游和代理。
 import { delimiter, isAbsolute } from 'node:path';
 
 /** 只从宿主环境抄这些。XDG_RUNTIME_DIR 给 systemd-run --user 用；后半截是 Windows 开发机上起 node 必需的系统变量。 */
@@ -55,8 +57,57 @@ export interface SessionEnvInput {
    * 工具往临时目录写的东西（vitest 每跑一次留下的转译缓存之类）都落在这里，不在共用的 /tmp 里越攒越多。
    */
   tmpDir?: string;
+  /**
+   * 会话出网经的代理（http://主机:端口，sessionProxyEnv 认的样子）：给了就设上 http_proxy、https_proxy（大小写各一份）和
+   * no_proxy。宿主环境里的代理变量一概不抄，只认这里显式给的。Claude 会话不给（claude-code/run.ts 的 UPSTREAM_ENV 见到就拒起）。
+   */
+  proxy?: string;
   /** 其余要带的变量，最后合并；带凭据类的键会被拒。 */
   extra?: Record<string, string>;
+}
+
+/** 给了代理时会话里设的几个变量：各家命令行、会话里跑的 curl、git、pnpm 认的写法不一，小写、大写都给。 */
+export const PROXY_ENV_KEYS: readonly string[] = [
+  'http_proxy',
+  'https_proxy',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'no_proxy',
+  'NO_PROXY',
+];
+
+/** 不经代理的：本机回环（fleet 命令连的后端、会话里自己起的服务）。 */
+export const SESSION_NO_PROXY = 'localhost,127.0.0.1,::1';
+
+/**
+ * 会话出网经的代理认成规范的写法 http://主机:端口；认不出就抛错，写清要什么样子。只认 http、要写端口、不带账号密码和路径：
+ * 它要写上起会话的命令行（procs.ts 的 scopeLaunch：sudo 记日志、/proc 里别的用户也读得到），带了账号密码就漏了。
+ */
+export function parseSessionProxy(raw: string): string {
+  const shape = `会话的代理要写成 http://主机:端口（不带账号密码、路径），现在是「${raw}」`;
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw new Error(shape);
+  }
+  if (url.protocol !== 'http:' || !url.hostname || !url.port) throw new Error(shape);
+  if (url.username || url.password) throw new Error(`${shape}：账号密码会写上命令行，不收`);
+  if (url.pathname !== '/' || url.search || url.hash) throw new Error(shape);
+  return `http://${url.hostname}:${url.port}`;
+}
+
+/** 给了代理时会话里要设的变量（PROXY_ENV_KEYS 那几个）。代理认不出就抛错（parseSessionProxy）。 */
+export function sessionProxyEnv(proxy: string): Record<string, string> {
+  const url = parseSessionProxy(proxy);
+  return {
+    http_proxy: url,
+    https_proxy: url,
+    HTTP_PROXY: url,
+    HTTPS_PROXY: url,
+    no_proxy: SESSION_NO_PROXY,
+    NO_PROXY: SESSION_NO_PROXY,
+  };
 }
 
 /** 环境里已有的同名键（Windows 上不分大小写，Path、Temp 这类）；没有就用给的写法。 */
@@ -79,6 +130,7 @@ export function buildSessionEnv(input: SessionEnvInput): Record<string, string> 
     if (!isAbsolute(input.tmpDir)) throw new Error(`会话的临时目录要写绝对路径：${input.tmpDir}`);
     for (const name of ['TMPDIR', 'TEMP', 'TMP']) env[keyOf(env, name)] = input.tmpDir;
   }
+  if (input.proxy !== undefined) Object.assign(env, sessionProxyEnv(input.proxy));
   env.FLEET_API = input.fleetApi;
   env.FLEET_TOKEN = input.fleetToken;
   if (input.extra) Object.assign(env, input.extra);

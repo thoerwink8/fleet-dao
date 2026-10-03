@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SESSION_NO_PROXY, sessionProxyEnv } from '../src/env.ts';
 import { GROK_UNATTENDED_ENV } from '../src/grok/run.ts';
 import { DEFAULT_PROCESS_LIMITS, runAgentProcess, type SpawnInfo } from '../src/process.ts';
 import {
@@ -123,6 +124,30 @@ describe('scope 的参数与环境', () => {
     );
     // 【故意造出的失败】不在白名单里的 GROK_ 开关照样拒，白名单不是按前缀放行
     expect(() => scopeLaunch({ GROK_SOMETHING: '1' })).toThrow('GROK_SOMETHING 进不了会话用户的会话');
+  });
+
+  it('出网的代理（buildSessionEnv 的 proxy 给的那几个）写上 /usr/bin/env 的参数：帮手脚本不放、命令行上照写', () => {
+    const proxy = sessionProxyEnv('http://127.0.0.1:7890');
+    const { sudoEnv, envArgs } = scopeLaunch({ PATH: '/usr/bin', ...proxy });
+    expect(envArgs).toEqual(Object.entries(proxy).map(([k, v]) => `${k}=${v}`));
+    expect(Object.keys(sudoEnv).filter((k) => /_proxy$/i.test(k))).toEqual([]);
+  });
+
+  it('【故意造出的失败】代理那几个的值不是 sessionProxyEnv 出得来的样子（带账号密码、socks、改过的 no_proxy、带控制字符）：拒，不写上命令行', () => {
+    for (const [key, value] of [
+      ['HTTPS_PROXY', 'http://user:pass@127.0.0.1:7890'],
+      ['https_proxy', 'socks5://127.0.0.1:7890'],
+      ['http_proxy', 'http://127.0.0.1:7890/'],
+      ['HTTP_PROXY', 'http://127.0.0.1:7890\n'],
+      ['no_proxy', '*'],
+      ['NO_PROXY', `${SESSION_NO_PROXY},10.0.0.0/8`],
+    ] as const) {
+      expect(() => scopeLaunch({ [key]: value })).toThrow(`${key} 的值不是不带账号密码的 http://主机:端口`);
+    }
+    // 别的写法（ALL_PROXY 这类）不在那几个里：照旧按不在白名单拒
+    expect(() => scopeLaunch({ ALL_PROXY: 'http://127.0.0.1:7890' })).toThrow(
+      'ALL_PROXY 进不了会话用户的会话',
+    );
   });
 
   it('白名单里的值带任何控制字符（\\r、\\n、\\t、ESC、DEL）也拒；工作目录同样', () => {
