@@ -1,11 +1,13 @@
 // 本机的判断题接没接、接了用哪个后端、调不调得通：引擎（提问）和驾驶舱后端（/healthz 的 judge 项）共用这一份，两边判法才一致。
 // 只有一种算「未接」：没写 FLEET_JEV_CONFIG、默认位置上也没有配置文件。别的一律算坏了、要报出来，不许当成没配悄悄不问：
-// FLEET_JEV_CONFIG 明写的文件不在、文件在却读不到（权限不够、是个目录）、内容认不出、调度台判断阶段没有开着的路由、钥匙读不到。
-// 判断阶段挂的路由不看 alive：alive 只由路由探针写（#129），而 Jev 是按量计费的渠道，探针按规矩不探、一直写「不在线」
-// （design 第九节「路由探针」）。在这里看 alive，Jev 就永远问不到；问不通会记成没判出来，照默认走。
+// FLEET_JEV_CONFIG 明写的文件不在、文件在却读不到（权限不够、是个目录）、内容认不出、路由两层里判断用途派不出路由、钥匙读不到。
+// 用哪条路由按路由两层读（db 的 routingLayers，和选路、驾驶舱「路由」页同一份，#574）：判断用途下模型的先后、再是模型下路由的
+// 先后，取第一条不是死的。改这里之前必须知道：「接得上」是不知道（unknown）的照样取——Jev 是按量计费的渠道，路由探针按规矩
+// 不探（写 skipped，design 第九节「路由探针」），接得上一直是「不知道」；这里要活的，Jev 就永远问不到。问不通会记成没判出来，
+// 照默认走。
 import { type Stats, statSync } from 'node:fs';
-import { type Db, routes, stagePolicyRoutes } from '@fleet-dao/db';
-import { and, asc, eq } from 'drizzle-orm';
+import { type Db, type RoutingLayers, type RoutingLiveness, routes, routingLayers } from '@fleet-dao/db';
+import { eq } from 'drizzle-orm';
 import type { JevBackend } from './backend.ts';
 import {
   backendForRoute,
@@ -52,28 +54,51 @@ export type JevSetup =
   | { state: 'broken'; problem: string }
   | { state: 'ready'; backend: JevBackend; routeId: string };
 
-/** 调度台「判断」阶段排第一、开着的那条路由；型号用插头实际发给上游的（没填就用目录里的模型号）。 */
-export async function judgeRouteFromDb(db: Db): Promise<{ routeId: string; route: JudgeRoute } | undefined> {
+export type JudgeRoutePick =
+  | { state: 'picked'; routeId: string; route: JudgeRoute }
+  /** 一条都派不出：problem 写明为什么（用途没配模型顺序、模型下没有路由、每条路由死在哪），不回空当成「没配」。 */
+  | { state: 'none'; problem: string };
+
+const deadReasons = (l: RoutingLiveness) =>
+  [l.connect, l.quota, l.ban]
+    .filter((f) => f.verdict === 'dead')
+    .map((f) => f.reason)
+    .join('、');
+
+function noJudgeRoute(layers: RoutingLayers): string {
+  const dead = layers.models.flatMap((m) =>
+    m.routes.map((r) => `${r.candidate.routeId} 死了：${deadReasons(r.liveness)}`),
+  );
+  return `路由两层里判断用途没有派得出去的路由：${[...layers.problems, ...dead].join('；')}`;
+}
+
+/**
+ * 路由两层里判断用途排第一、不是死的那条路由；型号用插头实际发给上游的（没填就用目录里的模型号）。
+ * 读库出错照常抛（调用方写「读不到」），不当成派不出。
+ */
+export async function judgeRouteFromDb(db: Db, now: Date): Promise<JudgeRoutePick> {
+  const layers = await routingLayers(db, 'judge', { now });
+  const pick = layers.models.flatMap((m) => m.routes).find((r) => r.verdict !== 'dead');
+  if (!pick) return { state: 'none', problem: noJudgeRoute(layers) };
+  const routeId = pick.candidate.routeId;
   const [row] = await db
-    .select({
-      routeId: routes.id,
-      hostId: routes.hostId,
-      modelId: routes.modelId,
-      upstreamModel: routes.upstreamModel,
-    })
-    .from(stagePolicyRoutes)
-    .innerJoin(routes, eq(routes.id, stagePolicyRoutes.routeId))
-    .where(and(eq(stagePolicyRoutes.stage, 'judge'), eq(stagePolicyRoutes.enabled, true)))
-    .orderBy(asc(stagePolicyRoutes.position))
-    .limit(1);
-  if (!row) return undefined;
-  return { routeId: row.routeId, route: { hostId: row.hostId, model: row.upstreamModel ?? row.modelId } };
+    .select({ modelId: routes.modelId, upstreamModel: routes.upstreamModel })
+    .from(routes)
+    .where(eq(routes.id, routeId));
+  if (!row) throw new Error(`路由 ${routeId} 在路由两层里排着，routes 里却查不到`);
+  return {
+    state: 'picked',
+    routeId,
+    route: { hostId: pick.candidate.hostId, model: row.upstreamModel ?? row.modelId },
+  };
 }
 
 export interface ResolveOptions extends JevConfigLocation {
   /** 测试里换掉：TypeSafe 后端在测试里不出网。 */
   makeBackend?: (route: JudgeRoute, config: JevMachineConfig) => Promise<JevBackend>;
   stat?: (path: string) => Stats;
+  /** 判路由活不活用的「现在」（额度窗、下架、过期都按它算）；不给就是墙钟。 */
+  now?: () => Date;
 }
 
 function problemOf(err: unknown): string {
@@ -92,13 +117,13 @@ export async function resolveJevBackend(db: Db, options: ResolveOptions): Promis
   } catch (err) {
     return { state: 'broken', problem: problemOf(err) };
   }
-  let picked: Awaited<ReturnType<typeof judgeRouteFromDb>>;
+  let picked: JudgeRoutePick;
   try {
-    picked = await judgeRouteFromDb(db);
+    picked = await judgeRouteFromDb(db, (options.now ?? (() => new Date()))());
   } catch (err) {
-    return { state: 'broken', problem: `读不到判断阶段的路由：${problemOf(err)}` };
+    return { state: 'broken', problem: `读不到路由两层里判断用途的路由：${problemOf(err)}` };
   }
-  if (!picked) return { state: 'broken', problem: '调度台的判断阶段没有开着的路由' };
+  if (picked.state === 'none') return { state: 'broken', problem: picked.problem };
   try {
     const make = options.makeBackend ?? ((route, c) => backendForRoute(route, c));
     return { state: 'ready', backend: await make(picked.route, config), routeId: picked.routeId };

@@ -4,7 +4,7 @@ import type { Stats } from 'node:fs';
 import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Db } from '@fleet-dao/db';
+import { type Db, jevAnswers } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runHealthChecks } from '../src/health.ts';
@@ -118,26 +118,40 @@ describe('/healthz 的 judge 项', () => {
     expect(r.logs.some((l) => l.includes('后端起来时有配置文件'))).toBe(true);
   });
 
-  it('后端起不来、判断阶段没开着的路由：红，原因只进日志（不带钥匙的值）', async () => {
+  it('后端起不来、路由两层里判断用途派不出路由：红，原因只进日志（不带钥匙的值）', async () => {
     const r = await report(judgeHealthCheck({ db: t.db, location: machine().location }));
     // 不注入假后端：真的 backendForRoute 读到钥匙后在「测试里不许真调 TypeSafe」这一步拒——走的是生产那条路。
     expect(r.item).toEqual({ ok: false, code: 'judge_config', message: '判断题的配置起不来' });
     expect(r.logs.join('\n')).not.toContain('k-api-test');
-    await t.client.query(`update stage_policy_routes set enabled = false where stage = 'judge'`);
+    await t.client.query(`update routing_catalog set enabled = false where model_id = 'jev-1.13'`);
     const noRoute = await report(
       judgeHealthCheck({ db: t.db, location: machine().location, makeBackend: makeFakeBackend }),
     );
     expect(noRoute.item).toMatchObject({ ok: false, code: 'judge_config' });
-    expect(noRoute.logs.some((l) => l.includes('调度台的判断阶段没有开着的路由'))).toBe(true);
+    expect(
+      noRoute.logs.some((l) => l.includes('路由两层里判断用途没有派得出去的路由') && l.includes('开关关着')),
+    ).toBe(true);
   });
 
   it('查调用记录出错：红「连不上」，不当成还没调过', async () => {
-    let selects = 0;
+    // 只让查判断记录（jev_answers）那一次出错；查路由两层的几次照常放行（不按第几次 select 数）
     const flaky = new Proxy(t.db, {
       get(target, prop, receiver) {
-        if (prop === 'select' && ++selects === 2)
-          throw new Error('canceling statement due to statement timeout');
-        return Reflect.get(target, prop, receiver);
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== 'select' || typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          const builder = value.apply(target, args);
+          return new Proxy(builder, {
+            get(b, p, r) {
+              const v = Reflect.get(b, p, r);
+              if (p !== 'from' || typeof v !== 'function') return v;
+              return (table: unknown, ...rest: unknown[]) => {
+                if (table === jevAnswers) throw new Error('canceling statement due to statement timeout');
+                return v.apply(b, [table, ...rest]);
+              };
+            },
+          });
+        };
       },
     }) as Db;
     const r = await report(
