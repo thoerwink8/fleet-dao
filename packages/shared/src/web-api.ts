@@ -14,12 +14,16 @@ import type {
   RouteProbeState,
   RunOutcome,
   ScheduleOutcome,
+  SegmentKind,
+  SegmentOutcome,
+  SegmentTier,
   StageKind,
   StepState,
   SubtaskState,
   TaskState,
 } from './domain.ts';
 import { type ChangeEvent, REALTIME_TABLES } from './realtime.ts';
+import { SEGMENT_KINDS, SEGMENT_OUTCOMES, SEGMENT_TIERS, type SegmentRunView } from './segment-runs.ts';
 import type { TaskUsage } from './usage.ts';
 
 export const WEB_API_PREFIX = '/api';
@@ -92,6 +96,9 @@ export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached'])
 export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
 export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
 export const RouteProbeStateSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped']);
+export const SegmentKindSchema = z.enum(SEGMENT_KINDS);
+export const SegmentTierSchema = z.enum(SEGMENT_TIERS);
+export const SegmentOutcomeSchema = z.enum(SEGMENT_OUTCOMES);
 
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 /** 编译期闸：上面的枚举和 domain.ts 的联合类型必须一字不差，改了一边没改另一边 `tsc` 当场报错。 */
@@ -110,7 +117,10 @@ export const ENUMS_MATCH_DOMAIN: [
   Same<z.infer<typeof QuotaUnitSchema>, QuotaUnit>,
   Same<z.infer<typeof ScheduleOutcomeSchema>, ScheduleOutcome>,
   Same<z.infer<typeof RouteProbeStateSchema>, RouteProbeState>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true];
+  Same<z.infer<typeof SegmentKindSchema>, SegmentKind>,
+  Same<z.infer<typeof SegmentTierSchema>, SegmentTier>,
+  Same<z.infer<typeof SegmentOutcomeSchema>, SegmentOutcome>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 // —— 通用 ——
 
@@ -346,14 +356,71 @@ export const UsageTotalsSchema = z.object({
   queueMs: Count,
   runMs: Count,
   missingTime: Count,
+  /** 结束了的里没有排队记录的笔数（三段的 runs 不记排队）：排队合计要把它算作没读到。 */
+  noQueue: Count,
 });
+const ModelUsageTotalsSchema = UsageTotalsSchema.extend({ model: z.string(), modelName: z.string() });
 export const TaskUsageSchema = z.object({
   total: UsageTotalsSchema,
-  byModel: z.array(UsageTotalsSchema.extend({ model: z.string(), modelName: z.string() })),
+  byModel: z.array(ModelUsageTotalsSchema),
   byStage: z.array(UsageTotalsSchema.extend({ stage: StageKindSchema })),
+  /** 三段按段（对题、动手、验收；段名认不出的 segment 为 null，排最后），每段再按模型分。 */
+  bySegment: z.array(
+    UsageTotalsSchema.extend({
+      segment: SegmentKindSchema.nullable(),
+      tiers: z.array(SegmentTierSchema),
+      missingTier: Count,
+      byModel: z.array(ModelUsageTotalsSchema),
+    }),
+  ),
 });
 /** 编译期闸：和 usage.ts 算出来的形状一字不差，改了一边没改另一边 `tsc` 当场报错。 */
 export const USAGE_MATCHES_SUMMARY: Same<z.infer<typeof TaskUsageSchema>, TaskUsage> = true;
+
+/** 一笔三段哪一样没读到、为什么（segment-runs.ts 的 readSegmentRun 判）。 */
+export const UnreadNoteSchema = z.object({
+  item: z.enum(['segment', 'time', 'outcome', 'tokens', 'cost', 'tier']),
+  reason: z.string().min(1),
+});
+
+/**
+ * 三段（库里的 runs 表）的一笔，读好给页面的样子：只给认得出的值，认不出、没记的写在 unread 里带原因，不拿 0 顶。
+ * 怎么读见 segment-runs.ts。
+ */
+export const SegmentRunSchema = z.object({
+  id: Id,
+  /** 认不出的段是 null（原样在 unread 的原因里）。 */
+  segment: SegmentKindSchema.nullable(),
+  /** 路由挑的模型（模型目录的 id）和给人看的名字。 */
+  model: z.string(),
+  modelName: z.string(),
+  channel: z.string().optional(),
+  /** 渠道的计费方式：按量的花费是真花的钱，套餐内的只是按 API 价折合。渠道查不到就没有（不猜成套餐内）。 */
+  billing: BillingKindSchema.optional(),
+  /** 派工档；只有动手段分档。 */
+  tier: SegmentTierSchema.optional(),
+  startedAt: Time.optional(),
+  endedAt: Time.optional(),
+  /** 还在跑：没结束、单子也没结束。用量等它结束才有。 */
+  running: z.boolean(),
+  outcome: SegmentOutcomeSchema.optional(),
+  /** 结束 − 开始（毫秒）；起止读不到的没有。 */
+  durationMs: Count.optional(),
+  inputTokens: Count.optional(),
+  outputTokens: Count.optional(),
+  cacheReadTokens: Count.optional(),
+  cacheWriteTokens: Count.optional(),
+  costUsd: z.number().min(0).optional(),
+  memoryPeakMb: Count.optional(),
+  failureReason: z.string().optional(),
+  prNumber: z.number().int().positive().optional(),
+  branch: z.string().optional(),
+  /** task = 按 task_id 对上；issueNumber = 这笔没记 task_id、按单号兜底对上的（单号几个仓可能重）。 */
+  matchedBy: z.enum(['task', 'issueNumber']),
+  unread: z.array(UnreadNoteSchema),
+});
+/** 编译期闸：和 segment-runs.ts 读出来的形状一字不差。 */
+export const SEGMENT_RUN_MATCHES_READING: Same<z.infer<typeof SegmentRunSchema>, SegmentRunView> = true;
 
 export const AskSchema = z.object({
   id: Id,
@@ -387,9 +454,12 @@ export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
   subtasks: z.array(BoardSubtaskSchema),
+  /** 老流程的会话（session_runs）。 */
   runs: z.array(RunSchema),
+  /** 三段（runs 表）的流水，按起跑先后：task_id 对上的，加上 task_id 没记、按单号兜底的（matchedBy 标明）。 */
+  segmentRuns: z.array(SegmentRunSchema),
   asks: z.array(AskSchema),
-  /** 这张单的会话按模型、按阶段、整张合计（耗时、token、输入当量、花费）；按 Fusion 步骤分等 #214 的步骤标记。 */
+  /** 用量：老流程的会话加三段的流水整张合计、按模型；会话按阶段、三段按段（每段再按模型）。 */
   usage: TaskUsageSchema,
 });
 
@@ -586,6 +656,72 @@ export const UpdateChannelRequest = z.object({
   reason: z.string().max(500).optional(),
 });
 export const UpdateChannelResponse = z.object({ ok: z.literal(true) });
+
+// —— 路由两层（#574）：每个用途 → 模型 → 路由，每一层现在活着吗 ——
+// 活不活不存，读的时候按探针、额度、禁令现算（db 的 routing-liveness.ts，判法只在那里）。
+
+/** live 派得出去；dead 派不出去；unknown 不知道（探针没看过、额度没读成）——不当活，也不当死。 */
+export const LivenessVerdictSchema = z.enum(['live', 'dead', 'unknown']);
+
+/** 接得上、额度够、没被禁令挡里的一件：结论和原因。原因总有：没查成不等于没问题。 */
+export const LivenessFactSchema = z.object({
+  verdict: LivenessVerdictSchema,
+  reason: z.string().min(1),
+});
+
+export const RoutingLayerRouteSchema = z.object({
+  routeId: Id,
+  channelId: Id,
+  /** 渠道目录里的名字；目录里找不到就是渠道编号。 */
+  channelName: z.string(),
+  poolId: Id,
+  hostId: HostIdSchema,
+  /** 这条路由在它的模型下开着吗（关着的照样挂在顺序里，但不派，ban 那一件写「开关关着」）。 */
+  enabled: z.boolean(),
+  /** 三件事合起来：任何一件 dead 就 dead；没有 dead、有 unknown 就 unknown；三件都 live 才 live。 */
+  verdict: LivenessVerdictSchema,
+  connect: LivenessFactSchema,
+  quota: LivenessFactSchema,
+  ban: LivenessFactSchema,
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）。 */
+  probedAt: Time.optional(),
+  /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
+  exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
+  /** 账号池此刻在跑几个、最多几个：满了是等空位，不算死。 */
+  inFlight: z.number().int().min(0),
+  maxConcurrency: z.number().int().min(0),
+});
+
+export const RoutingLayerModelSchema = z.object({
+  modelId: Id,
+  /** 模型目录里的名字；目录里找不到就是模型编号。 */
+  displayName: z.string(),
+  /** 目录里找不到、下面也没有路由时不给。 */
+  family: z.string().optional(),
+  /** 下面有一条 live 就 live；没有 live、有 unknown 就 unknown；全 dead 或一条都没有就 dead。 */
+  verdict: LivenessVerdictSchema,
+  /** 按这个模型下路由的先后。空 = 一条都没有（用途的 problems 里写明）。 */
+  routes: z.array(RoutingLayerRouteSchema),
+});
+
+export const RoutingLayerPurposeSchema = z.object({
+  purpose: StageKindSchema,
+  /** 判法和模型那一层一样：有一个模型 live 就 live。 */
+  verdict: LivenessVerdictSchema,
+  /** 配置上的缺口：这个用途没配模型顺序、某个模型下一条路由都没有。照实写，不当成「没有」。 */
+  problems: z.array(z.string()),
+  /** 按这个用途的模型先后。 */
+  models: z.array(RoutingLayerModelSchema),
+});
+
+export const RoutingLayersResponse = z.object({
+  /** 现算的时刻。 */
+  asOf: Time,
+  /** 每个用途一份，按 StageKind 的先后；unavailable 时为空。 */
+  purposes: z.array(RoutingLayerPurposeSchema),
+  /** 这里读不了路由两层（开发环境的内存版没有这两张表）：写明为什么，不拿空列表冒充「都没配」。 */
+  unavailable: z.string().optional(),
+});
 
 // —— 账号池与额度 ——
 
@@ -1065,6 +1201,7 @@ export const WebRoutes = {
     response: AnswerAskResponse,
   },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
+  routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },
   updateStagePolicy: {
     method: 'PUT',
     path: '/routing/stages/:stage',

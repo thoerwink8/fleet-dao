@@ -288,7 +288,8 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
     .join(' · ');
   const tokens = reading(t.inputTokens + t.outputTokens, t.missingTokens, t.runs);
   const cache = reading(t.cacheReadTokens + t.cacheWriteTokens, t.missingCache, t.runs);
-  const queue = withLive(reading(t.queueMs, t.missingTime, t.runs), liveQueue, live.length);
+  // 三段的 runs 不记排队（noQueue）：排队合计把它们算作没读到，不当成排了 0 秒
+  const queue = withLive(reading(t.queueMs, t.missingTime + t.noQueue, t.runs), liveQueue, live.length);
   const work = withLive(reading(t.runMs, t.missingTime, t.runs), liveWork, live.length);
   return (
     <Panel title="时间与用量" description="排队和干活分开算；读不到的写明几次没读到，不当成 0。">
@@ -304,7 +305,13 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
         >
           {t.runs + t.running} 个
         </Total>
-        <Total label="排队合计" r={queue} empty={noRuns} why="时刻认不出" note={liveNote}>
+        <Total
+          label="排队合计"
+          r={queue}
+          empty={noRuns}
+          why={t.noQueue ? '时刻认不出或没记排队' : '时刻认不出'}
+          note={liveNote}
+        >
           {queue.kind === 'full' || queue.kind === 'partial' ? formatDuration(queue.value) : null}
         </Total>
         <Total label="干活合计" r={work} empty={noRuns} why="时刻认不出" note={liveNote}>

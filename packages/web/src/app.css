@@ -97,6 +97,7 @@
   --container-notifications-list: 360px;
   --container-usage: 340px;
   --container-command-list: 440px;
+  --container-routing-list: 360px;
 
   /* 阴影：卡片描边（亮色下勾下边线）、品牌色圈（额度热）、状态色光圈（完成时一闪）。 */
   --shadow-card-edge: 0 1px 0 var(--border);
@@ -580,6 +581,11 @@
 /* 关于页的「键：值」对（窄标签 + 自由宽内容）。 */
 @utility grid-cols-about {
   grid-template-columns: var(--container-settings-row) 1fr;
+}
+
+/* 路由页（/routing）：左列用途清单、右边选中用途的详情（xl 以上）。左列宽从 --container-routing-list 取。 */
+@utility grid-cols-routing {
+  grid-template-columns: var(--container-routing-list) minmax(0, 1fr);
 }
 
 /* ---------- 动效：在跑的东西会呼吸 ----------

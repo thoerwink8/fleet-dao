@@ -27,6 +27,7 @@ import {
   quotaWindows,
   repos,
   routes,
+  runsOfTask,
   scheduleHealth,
   searchSpecs,
   sessionRuns,
@@ -47,13 +48,14 @@ import {
   toQuotaWindow,
   toRepo,
   toRoute,
+  toSegmentRun,
   toSessionRun,
   toStagePolicy,
   toSubtask,
   toTask,
   users,
 } from '@fleet-dao/db';
-import type { ProgressKind, Step } from '@fleet-dao/shared';
+import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { testRunOf } from './done-check.ts';
 import {
@@ -686,6 +688,24 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(sessionRuns).where(eq(sessionRuns.id, id));
       return row ? toSessionRun(row) : null;
+    },
+    async listSegmentRuns(taskId) {
+      if (!isUuid(taskId)) return [];
+      const [task] = await db
+        .select({ issueNumber: tasks.issueNumber, owner: repos.owner, name: repos.name })
+        .from(tasks)
+        .innerJoin(repos, eq(repos.id, tasks.repoId))
+        .where(eq(tasks.id, taskId));
+      if (!task) return [];
+      const rows = await runsOfTask(db, {
+        id: taskId,
+        issueNumber: task.issueNumber,
+        workflowId: taskWorkflowId(task, task.issueNumber),
+      });
+      return rows.map((r) => ({
+        ...toSegmentRun(r),
+        matchedBy: r.taskId === taskId ? ('task' as const) : ('issueNumber' as const),
+      }));
     },
     async getPlans(runIds) {
       const ids = runIds.filter(isUuid);

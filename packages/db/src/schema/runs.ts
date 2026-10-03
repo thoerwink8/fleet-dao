@@ -12,6 +12,8 @@
 // - retryOf 自引用，指到不存在的行要拒收（外键）。
 // - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话
 //   （db 的 session-org.ts）靠 route_id 连到池，没写 route_id 的行切号看不见。
+// - tier 是派工档，叫法和取值照 packages/engine/src/runner/tier.ts 的 TierEnum（fast | medium | heavyweight），
+//   引擎测试 test/runner/tier.test.ts 钉着两边一致；只有动手段分档（决定 0010 第 3 条），对题、验收（冷调用）不分档，留空。
 // 表名就叫 runs（和 Fusion 的 sessionRuns / verifyRounds 分开：Fusion 那两张老表本切片不动）。
 import { sql } from 'drizzle-orm';
 import {
@@ -46,6 +48,10 @@ export const RUN_OUTCOME_VALUES = [
 ] as const;
 export type RunOutcomeValue = (typeof RUN_OUTCOME_VALUES)[number];
 
+/** 派工档：和 engine runner/tier.ts 的 TierEnum 完全一致（快档 / 中档 / 主力档）。没记的不写（NULL）。 */
+export const RUN_TIERS = ['fast', 'medium', 'heavyweight'] as const;
+export type RunTier = (typeof RUN_TIERS)[number];
+
 export const runs = pgTable(
   'runs',
   {
@@ -65,6 +71,8 @@ export const runs = pgTable(
      * 指到不存在的路由拒收（外键），免得切号连不到池、把在跑的会话漏数。
      */
     routeId: text('route_id').references(() => routes.id),
+    /** 派工档（动手段按改动面分的档）；对题、验收不分档，没记的也是空——读的一方按段判是「不分档」还是「没记」。 */
+    tier: text('tier').$type<RunTier>(),
     /** 起止；ended_at 还在跑的为空（和 outcome 的空一一对应，见约束）。 */
     startedAt: timestamp('started_at', tz).notNull(),
     endedAt: timestamp('ended_at', tz),
@@ -95,6 +103,7 @@ export const runs = pgTable(
   },
   (t) => [
     check('runs_segment_known', sql`${t.segment} in ('scope', 'manual', 'verify')`),
+    check('runs_tier_known', sql`${t.tier} is null or ${t.tier} in ('fast', 'medium', 'heavyweight')`),
     check(
       'runs_outcome_known',
       sql`${t.outcome} is null or ${t.outcome} in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed')`,

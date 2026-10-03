@@ -132,6 +132,8 @@ export interface HarnessOptions {
   gatewaySeen?: Deps['gatewaySeen'];
   /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
   alertWork?: Deps['alertWork'];
+  /** 路由两层每一层现在活着吗（#574）；不给就是没接上（内存版、开发环境一样）。 */
+  routingLayers?: Deps['routingLayers'];
   /**
    * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
    * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
@@ -170,6 +172,7 @@ function wire<S extends Store>(
     ...(options.notWired ? { notWired: options.notWired } : {}),
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
+    ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

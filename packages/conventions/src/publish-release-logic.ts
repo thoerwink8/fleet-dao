@@ -1,58 +1,114 @@
 // release.yml 里那几个容易写错的步骤逻辑，从 Bash 里取出来变成纯判定 + 测试（第二意见 2026-10-02）：
-//   - pickOpenMilestone：从开放 milestone 列表里挑要关哪一张——版本号按词边界认（v1 不许撞 v10），
-//     撞多张、找不到就明说，不拿「第一张」糊弄；
+//   - decideReleaseMilestone：发 vN 时关哪张里程碑——打 tag 之前核一次、建完 release 关的时候再判一次（同一份判法），
+//     版本号对不上里程碑、撞号、找不到都明说，不拿「多半已经关过了」放过去（#593）；
 //   - extractReleaseBody：从 CHANGELOG.md 拿「## [vN] - 日期」那一段当正文，找不到、是占位符就明说拒绝（不拿
 //     Unreleased 段顶替：那里多是占位「还没有」，照抄就会发假 release）。
-// release.yml 的对应步骤只做编排（gh api、jq、读文件），纯逻辑都进这里；测试在 packages/conventions/test/publish-release-logic.test.ts。
+// release.yml 的对应步骤只做编排（读文件、调 bin），纯逻辑都进这里；测试在 packages/conventions/test/publish-release-logic.test.ts。
 // 改这里之前必须知道：
 // - 这些判定是「发了就发出去」（发假 release、关错 milestone），所以每个可失败分支都要有明确失败，不拿静默通过换。
+// - 里程碑的版本号怎么认、「当前版本」是哪张，用 labels.ts 的 milestoneVersion / currentVersion：和派活、开单同一条规矩，不另写正则。
 // - 飞书幂等：本仓 Release 正文里写 last line「<!-- fleet-notified: vN -->」当已发信号，防止这一轮和上一轮都发一遍。
 //   读 release 正文、加一行标签、写回，都是 release.yml 编排那边做的事；本文件只判定「是不是已发过」。
+import { isPlaceholderSection } from '@fleet-dao/shared';
+import { currentVersion, milestoneVersion } from './labels.ts';
 
 /** 仓根的版本标签：v<N>；版本号不是这个模样的一概认不出。 */
 export function isVersionTag(s: string): s is `v${number}` {
   return /^v\d+$/.test(s);
 }
 
-export interface OpenMilestone {
+/** 一个里程碑此刻的样子（GitHub 上现读；github-api.ts 的 MilestoneDetail 就是这个形状）。 */
+export interface MilestoneState {
   number: number;
   title: string;
+  state: 'open' | 'closed';
+  /** 关掉的时间（ISO）；开着的是 null。 */
+  closedAt: string | null;
 }
 
-export type MilestonePick =
-  | { kind: 'found'; milestone: OpenMilestone }
-  | { kind: 'none'; why: string }
-  | { kind: 'ambiguous'; message: string; candidates: OpenMilestone[] };
+/** 判出来的里程碑就是传进来的那一个（M 是调用方的类型，比如带说明的 MilestoneDetail）。 */
+export type MilestoneDecision<M extends MilestoneState = MilestoneState> =
+  | { kind: 'close'; milestone: M }
+  | { kind: 'already-closed'; milestone: M; why: string }
+  | { kind: 'error'; message: string };
+
+const named = (m: { title: string }) => `「${m.title}」`;
 
 /**
- * 从开放 milestone 列表里挑这一版对应的那一张。
- * 版本号按词边界认：^v<N>([^0-9]|$)——v1 撞上 v1 <空格>… 要放，撞上 v10 不放（第二意见 2026-10-02）。
- * 撞很多张（不只是撞 vN+ 数字、也包括「v1 xxx」和「v1 yyy」都开着）→ ambiguous，发起人要看一眼，不拿「第一张」糊弄。
+ * 发 vN 时该关哪张里程碑。
+ * - 开着的里恰好一张是 vN，而且它就是当前版本（开着的 v<N> 里 N 最小的那张）→ close；
+ * - 开着的里不止一张是 vN → error（关哪张说不清）；开着的里还有比 N 小的版本 → error（跳版了）；
+ * - 开着的里没有 vN：关了的里有 vN、而且是在这张发布 PR 合并之后关的 → already-closed（重跑：上一轮或人手已经关了）；
+ *   其余一律 error——vN 那张早在合并之前就关了（版本号贴错：比如开着的是 v3、这次发成了 v1，v1 那张是早就关掉的旧版本），
+ *   或者开着的、关了的都没有 vN（被删了、改名了）。只看名字对得上就当「已经关过了」，就会让当前版本那张一直开着、整轮报绿。
+ * mergedAt：这张发布 PR 合并的时间（ISO）。只有「开着的里没有 vN」时要用，那时没给、认不出都 error，不猜。
  */
-export function pickOpenMilestone(list: OpenMilestone[], version: `v${number}`): MilestonePick {
+export function decideReleaseMilestone<M extends MilestoneState>(opts: {
+  version: `v${number}`;
+  milestones: readonly M[];
+  mergedAt?: string | undefined;
+}): MilestoneDecision<M> {
+  const { version, milestones, mergedAt } = opts;
   if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
-  const re = new RegExp(`^${version}([^0-9]|$)`);
-  const hits = list.filter((m) => re.test(m.title));
-  if (hits.length === 0) {
+  const n = Number(version.slice(1));
+  const open = milestones.filter((m) => m.state === 'open');
+  const current = currentVersion(open);
+  const openHits = open.filter((m) => milestoneVersion(m.title) === n);
+  if (openHits.length > 1) {
     return {
-      kind: 'none',
-      why: `开放 milestone 里没找到以 ${version} 开头的；多半已经被关过了，跳。`,
+      kind: 'error',
+      message: `开着的里程碑里有 ${openHits.length} 张都是 ${version}（${openHits.map(named).join('、')}）：关哪一张说不清，不瞎猜。先在 GitHub 上把多的那张改名或关掉，再重跑。`,
     };
   }
-  if (hits.length > 1) {
-    return {
-      kind: 'ambiguous',
-      message: `开放 milestone 里有 ${hits.length} 张都以 ${version} 开头（词边界匹配也分不清）——发起人要看一眼要关哪一张、手动 gh api 补上；不瞎猜。`,
-      candidates: hits,
-    };
+  const [hit] = openHits;
+  if (hit) {
+    if (current && current.version < n) {
+      return {
+        kind: 'error',
+        message:
+          `这次发的是 ${version}，可当前版本是 v${current.version}（${named(current.milestone)}还开着；当前版本＝开着的 v<N> 里 N 最小的那张，和派活同一条规矩）：版本跳了。` +
+          `先发 v${current.version}；v${current.version} 不发了的话，先把那张里程碑里的单挪走、关掉它，再发 ${version}。`,
+      };
+    }
+    return { kind: 'close', milestone: hit };
   }
-  const [first] = hits;
-  if (!first) throw new Error('不该到这：hits.length > 1 已在上面挡过');
-  return { kind: 'found', milestone: first };
-}
 
-/** CHANGELOG.md 里找「## [$VERSION] - 日期」那一段的占位符（发起前没写正文）。 */
-const PLACEHOLDER_HEADING_MARKS = ['还没有', '没有内容', '无'];
+  const openVersions = open.filter((m) => milestoneVersion(m.title) !== undefined);
+  const openPart =
+    openVersions.length > 0
+      ? `开着的版本里程碑是${openVersions.map(named).join('、')}${current ? `（当前版本 v${current.version}）` : ''}`
+      : '开着的版本里程碑一张都没有';
+  const mergedText = mergedAt?.trim() ?? '';
+  const merged = mergedText === '' ? Number.NaN : Date.parse(mergedText);
+  if (Number.isNaN(merged)) {
+    return {
+      kind: 'error',
+      message:
+        `开着的里程碑里没有 ${version} 的（${openPart}）。要核关了的那张是不是这次发布关的，得有这张发布 PR 合并的时间，` +
+        `可${mergedText === '' ? '没拿到' : `认不出（「${mergedText}」）`}：不猜，不当成已经关过了。`,
+    };
+  }
+  const closedHits = milestones.filter((m) => m.state === 'closed' && milestoneVersion(m.title) === n);
+  const closedAfter = closedHits.filter((m) => m.closedAt !== null && Date.parse(m.closedAt) >= merged);
+  const [latest] = [...closedAfter].sort(
+    (a, b) => Date.parse(b.closedAt ?? '') - Date.parse(a.closedAt ?? ''),
+  );
+  if (latest) {
+    return {
+      kind: 'already-closed',
+      milestone: latest,
+      why: `开着的里程碑里没有 ${version} 的；${named(latest)}在 ${latest.closedAt} 关的，晚于这次发布合并（${mergedText}）：上一轮（或人手）已经关过了，不再动它。`,
+    };
+  }
+  const closedPart =
+    closedHits.length > 0
+      ? `${version} 的里程碑${closedHits.map((m) => `${named(m)}在 ${m.closedAt ?? '（没有关掉的时间）'} 就关了`).join('、')}，早于这次发布合并（${mergedText}），不是这次发布关的`
+      : `关了的里程碑里也没有 ${version} 的（被删了或改名了）`;
+  return {
+    kind: 'error',
+    message: `这次发的是 ${version}，开着的里程碑里没有 ${version} 的：${openPart}；${closedPart}。版本号和版本里程碑对不上（里程碑＝版本），不当成「已经关过了」放过去。`,
+  };
+}
 
 export type ReleaseBodyPick =
   | { kind: 'ok'; body: string }
@@ -76,7 +132,7 @@ export function extractReleaseBody(changelog: string, version: `v${number}`): Re
     return {
       kind: 'missing-heading',
       message:
-        `CHANGELOG.md 里没有「${headingDisplay}」这一版（标题要 YYYY-MM-DD）：发起人没把 Unreleased 段收进标题，或 write_dispatch 的 version 写错了。` +
+        `CHANGELOG.md 里没有「${headingDisplay}」这一版（标题要 YYYY-MM-DD）：发起人没把 Unreleased 段收进标题，或 workflow_dispatch 手动补跑填的 version 写错了。` +
         `先把正文写进 Unreleased 段、重跑发布流程（不拿 Unreleased 顶：那里多是占位「还没有」，发了就是假 release）。`,
     };
   }
@@ -97,16 +153,9 @@ export function extractReleaseBody(changelog: string, version: `v${number}`): Re
       message: `CHANGELOG.md 这一版（${version}）正文是空的：发起前要把话写进 Unreleased 段。`,
     };
   }
-  // 只把「整段就是占位」或「整行就是占位」当占位——用户写一句「新增无障碍模式」里带「无」不能误伤（第二意见 2026-10-02 小毛病）。
-  const sectionIsPlaceholder = PLACEHOLDER_HEADING_MARKS.some((m) => section === m || section === `${m}\n`);
-  const everyLineIsPlaceholder =
-    section.length > 0 &&
-    section
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .every((l) => PLACEHOLDER_HEADING_MARKS.some((m) => l === m));
-  if (sectionIsPlaceholder || everyLineIsPlaceholder) {
+  // 只把「每一行都恰好是占位」当占位——用户写一句「新增无障碍模式」里带「无」不能误伤（第二意见 2026-10-02 小毛病）；
+  // 判法和 Unreleased 段的 hasContent 同一份（shared/changelog.ts 的 isPlaceholderSection）。
+  if (isPlaceholderSection(section)) {
     return {
       kind: 'placeholder',
       message: `CHANGELOG.md 这一版（${version}）正文只剩占位「${section.slice(0, 20)}…」：发起前要把话写进 Unreleased 段。`,

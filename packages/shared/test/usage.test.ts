@@ -1,6 +1,7 @@
 // 会话用量的汇总：按模型、按阶段、整张合计，折成输入当量。每条「读不到」的路径都故意造一次：缺哪一样就记一次没读到，
 // 不当成 0 加进合计。
 import { describe, expect, it } from 'vitest';
+import { readSegmentRun, type SegmentRunFacts } from '../src/segment-runs.ts';
 import {
   INPUT_EQUIVALENT_WEIGHTS,
   inputEquivalentOf,
@@ -111,6 +112,7 @@ describe('一张单按模型、按阶段、整张合计', () => {
       queueMs: 60_000,
       runMs: 600_000,
       missingTime: 0,
+      noQueue: 0,
     });
     // 后端按同一份定义校验返回：算出来的必须过得了
     expect(TaskUsageSchema.parse(u)).toEqual(u);
@@ -315,6 +317,131 @@ describe('一张单按模型、按阶段、整张合计', () => {
       total: expect.objectContaining({ runs: 0, running: 0, missingTokens: 0 }),
       byModel: [],
       byStage: [],
+      bySegment: [],
     });
+  });
+});
+
+describe('三段按段、每段再按模型（runs 表的流水）', () => {
+  const live = { taskFinished: false };
+  /** 一笔读好的三段：默认是一笔全读到的动手（主力档、10 分钟）。 */
+  function seg(over: Partial<SegmentRunFacts> = {}, ctx = live) {
+    return readSegmentRun(
+      {
+        id: `s-${Math.random()}`,
+        segment: 'manual',
+        model: 'opus-5.5',
+        modelName: 'Opus 5.5',
+        billing: 'subscription',
+        tier: 'heavyweight',
+        startedAt: at(0),
+        endedAt: at(10),
+        outcome: 'done',
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadTokens: 30_000,
+        cacheWriteTokens: 2000,
+        costUsd: 0.25,
+        matchedBy: 'task',
+        ...over,
+      },
+      ctx,
+    );
+  }
+
+  it('按对题、动手、验收的固定先后排（不管谁先跑），段名认不出的一组排最后；每段里按模型分', () => {
+    const u = summarizeUsage(
+      [],
+      [
+        seg({ segment: 'verify', model: 'gpt-5.6', modelName: 'GPT 5.6', tier: undefined }),
+        seg({ segment: 'mystery' }),
+        seg(),
+        seg({ model: 'kimi-k3', modelName: 'Kimi k3', tier: 'fast' }),
+        seg({ segment: 'scope', tier: undefined }),
+      ],
+    );
+    expect(u.bySegment.map((s) => [s.segment, s.runs, s.byModel.map((m) => [m.model, m.runs])])).toEqual([
+      ['scope', 1, [['opus-5.5', 1]]],
+      [
+        'manual',
+        2,
+        [
+          ['opus-5.5', 1],
+          ['kimi-k3', 1],
+        ],
+      ],
+      ['verify', 1, [['gpt-5.6', 1]]],
+      [null, 1, [['opus-5.5', 1]]],
+    ]);
+    // 动手用过两档；对题、验收不分档
+    expect(u.bySegment.map((s) => [s.segment, s.tiers, s.missingTier])).toEqual([
+      ['scope', [], 0],
+      ['manual', ['heavyweight', 'fast'], 0],
+      ['verify', [], 0],
+      [null, ['heavyweight'], 0],
+    ]);
+    expect(TaskUsageSchema.parse(u)).toEqual(u);
+  });
+
+  it('整张合计和按模型把会话和三段加在一起；按阶段只算会话', () => {
+    const u = summarizeUsage([run()], [seg(), seg({ segment: 'verify', tier: undefined })]);
+    expect(u.total).toMatchObject({ runs: 3, inputEquivalent: 27_000, costUsd: 0.75 });
+    expect(u.byModel.map((m) => [m.model, m.runs])).toEqual([['opus-5.5', 3]]);
+    expect(u.byStage.map((s) => [s.stage, s.runs])).toEqual([['execute', 1]]);
+  });
+
+  it('三段没有排队：干活照加耗时，排队一笔不加、记 noQueue（排队合计算作没读到，不当 0 秒）', () => {
+    const u = summarizeUsage([run()], [seg()]);
+    expect(u.total).toMatchObject({ runs: 2, queueMs: 60_000, runMs: 1_200_000, missingTime: 0, noQueue: 1 });
+    expect(u.bySegment[0]).toMatchObject({ runs: 1, queueMs: 0, noQueue: 1, runMs: 600_000 });
+  });
+
+  it('【失败】起止读不到的一笔：耗时记没读到（missingTime），不当 0 加进去', () => {
+    const u = summarizeUsage([], [seg({ endedAt: undefined }, { taskFinished: true }), seg()]);
+    expect(u.bySegment[0]).toMatchObject({ runs: 2, running: 0, runMs: 600_000, missingTime: 1 });
+  });
+
+  it('【失败】token、花费没记到的一笔：各记没读到，读到的照加', () => {
+    const u = summarizeUsage(
+      [],
+      [seg({ cacheReadTokens: undefined, cacheWriteTokens: undefined, costUsd: undefined }), seg()],
+    );
+    expect(u.bySegment[0]).toMatchObject({
+      runs: 2,
+      inputTokens: 2000,
+      missingCache: 1,
+      inputEquivalent: 9000,
+      missingEquivalent: 1,
+      costUsd: 0.25,
+      missingCost: 1,
+    });
+  });
+
+  it('【失败】动手段没记派工档：记 missingTier，不猜档', () => {
+    const u = summarizeUsage([], [seg({ tier: undefined }), seg()]);
+    expect(u.bySegment[0]).toMatchObject({ segment: 'manual', tiers: ['heavyweight'], missingTier: 1 });
+  });
+
+  it('还在跑的一段只记 running：用量等它结束，不进合计、也不算没读到', () => {
+    const u = summarizeUsage([], [seg({ endedAt: undefined, outcome: undefined, costUsd: undefined })]);
+    expect(u.bySegment[0]).toMatchObject({ runs: 0, running: 1, missingCost: 0, missingTime: 0, noQueue: 0 });
+  });
+
+  it('进程没起来的一段：记 notStarted，用量照记没读到', () => {
+    const u = summarizeUsage(
+      [],
+      [
+        seg({
+          outcome: 'spawn_failed',
+          endedAt: at(0),
+          inputTokens: undefined,
+          outputTokens: undefined,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+          costUsd: undefined,
+        }),
+      ],
+    );
+    expect(u.total).toMatchObject({ runs: 1, notStarted: 1, missingTokens: 1, missingCost: 1, runMs: 0 });
   });
 });

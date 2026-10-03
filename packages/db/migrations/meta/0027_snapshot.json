@@ -1,5 +1,5 @@
 {
-  "id": "1eba4b47-0c76-44c4-9cf1-b53b411083e6",
+  "id": "b5949af3-ba30-4206-81b0-5cb0b0c219d8",
   "prevId": "3befd66c-c3bc-410c-b5c5-3c7e15b6acb0",
   "version": "7",
   "dialect": "postgresql",
@@ -830,12 +830,6 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true
-        },
-        "effort": {
-          "name": "effort",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -877,10 +871,6 @@
         "routing_catalog_position_nonneg": {
           "name": "routing_catalog_position_nonneg",
           "value": "\"routing_catalog\".\"position\" >= 0"
-        },
-        "routing_catalog_effort_known": {
-          "name": "routing_catalog_effort_known",
-          "value": "\"routing_catalog\".\"effort\" is null or \"routing_catalog\".\"effort\" in ('low', 'medium', 'high', 'xhigh', 'max')"
         }
       },
       "isRLSEnabled": false
@@ -3400,6 +3390,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "tier": {
+          "name": "tier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "started_at": {
           "name": "started_at",
           "type": "timestamp with time zone",
@@ -3631,6 +3627,10 @@
         "runs_segment_known": {
           "name": "runs_segment_known",
           "value": "\"runs\".\"segment\" in ('scope', 'manual', 'verify')"
+        },
+        "runs_tier_known": {
+          "name": "runs_tier_known",
+          "value": "\"runs\".\"tier\" is null or \"runs\".\"tier\" in ('fast', 'medium', 'heavyweight')"
         },
         "runs_outcome_known": {
           "name": "runs_outcome_known",

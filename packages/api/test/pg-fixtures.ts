@@ -24,6 +24,7 @@ import {
   quotaWindows,
   repos,
   routes,
+  runs,
   scheduledJobs,
   scheduleRuns,
   sessionRuns,
@@ -182,6 +183,33 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         cacheWriteTokens: r.cacheWriteTokens ?? null,
         costUsd: r.costUsd ?? null,
         testCommand: r.testCommand ?? null,
+      })),
+    );
+  }
+  if (data.segmentRuns?.length) {
+    await db.insert(runs).values(
+      data.segmentRuns.map((r) => ({
+        id: r.id,
+        segment: r.segment,
+        taskId: r.taskId ?? null,
+        issueNumber: r.issueNumber ?? null,
+        model: r.model,
+        channel: r.channel ?? null,
+        tier: r.tier ?? null,
+        startedAt: date(r.startedAt),
+        endedAt: dateOpt(r.endedAt),
+        outcome: r.outcome ?? null,
+        inputTokens: r.inputTokens ?? null,
+        outputTokens: r.outputTokens ?? null,
+        cacheReadTokens: r.cacheReadTokens ?? null,
+        cacheWriteTokens: r.cacheWriteTokens ?? null,
+        costUsd: r.costUsd ?? null,
+        memoryPeakMb: r.memoryPeakMb ?? null,
+        failureReason: r.failureReason ?? null,
+        prNumber: r.prNumber ?? null,
+        branch: r.branch ?? null,
+        workflowId: r.workflowId ?? null,
+        retryOf: r.retryOf ?? null,
       })),
     );
   }
