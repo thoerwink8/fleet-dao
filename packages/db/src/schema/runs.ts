@@ -11,8 +11,8 @@
 //   org_switch 是切号先停下这一段、切完在原分支上重跑，#59），还在跑的为空；结束了（ended_at 非空）就必须有 outcome，
 //   反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
 // - retryOf 自引用，指到不存在的行要拒收（外键）。
-// - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话
-//   （db 的 session-org.ts）靠 route_id 连到池，没写 route_id 的行切号看不见。
+// - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话、
+//   选路数池的并发（#735）都靠 route_id 连到池（db 的 queries/pool-runs.ts），没写 route_id 的行两边都看不见。
 // - tier 是派工档，叫法和取值照 packages/engine/src/runner/tier.ts 的 TierEnum（fast | medium | heavyweight），
 //   引擎测试 test/runner/tier.test.ts 钉着两边一致；只有动手段分档（决定 0010 第 3 条），对题、验收（冷调用）不分档，留空。
 // 表名就叫 runs（和 Fusion 的 sessionRuns / verifyRounds 分开：Fusion 那两张老表本切片不动）。
@@ -69,8 +69,8 @@ export const runs = pgTable(
     /** 挑好的渠道（poolId / routeId 的「渠道」那半截）；读不到不给。 */
     channel: text('channel'),
     /**
-     * 跑在哪条路由上（选路给的 routeId）：切号靠它认出这一段跑在哪个池、那个池挂不挂组织（#157）。老行、不经选路起的为空；
-     * 指到不存在的路由拒收（外键），免得切号连不到池、把在跑的会话漏数。
+     * 跑在哪条路由上（选路给的 routeId）：切号靠它认出这一段跑在哪个池、那个池挂不挂组织（#157），选路靠它把这一段算进池的并发
+     * （#735）。老行、不经选路起的为空；指到不存在的路由拒收（外键），免得连不到池、把在跑的会话漏数。
      */
     routeId: text('route_id').references(() => routes.id),
     /** 派工档（动手段按改动面分的档）；对题、验收不分档，没记的也是空——读的一方按段判是「不分档」还是「没记」。 */

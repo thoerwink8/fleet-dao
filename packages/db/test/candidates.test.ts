@@ -1,10 +1,12 @@
 // 候选路由的判法（evaluateRoutes），经路由两层读（routing-layers.ts：选路、驾驶舱都走它）：每条路由为什么不能用、额度、并发。
 // 两层怎么合成「活着吗」在 routing-layers.test.ts；选路怎么挑（死的跳过、不知道的排后面）在引擎的 store-ports.test.ts。
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type PoolQuotaSnapshot, type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
+import { finishRun, startRun } from '../src/queries/runs.ts';
 import { flattenRoutingLayers, routingLayers } from '../src/routing-layers.ts';
 import { bans, channels, models, pools, routes } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -540,5 +542,53 @@ describe('某个用途的候选路由', () => {
         ['b', 1, 1, ['no-slot']],
       ],
     );
+  });
+
+  it('三段的一次性会话（runs 里开着的行，#157）也占名额：拼车池上限 3，两行三段 + 一行 Fusion 的会话就没空位；收了一行又有', async () => {
+    await t.db.insert(pools).values({
+      id: 'claude-carpool',
+      channelId: 'claude-subscription',
+      maxConcurrency: 3,
+      runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
+    });
+    await addRoute(t.db, {
+      id: 'car',
+      channelId: 'claude-subscription',
+      poolId: 'claude-carpool',
+      modelId: 'opus-5.5',
+      upstreamModel: 'claude-opus-5-5',
+    });
+    await addRoute(t.db, { id: 'a', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['car', 'a'] },
+    });
+    await addWindow(t.db, { poolId: 'claude-carpool', window: '5h', utilization: 0.1, ...fresh });
+    await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    await addRun(t.db, { taskId: task.id, routeId: 'car', startedAt: ago(20 * MIN) });
+    const manual = randomUUID();
+    await startRun(t.db, {
+      id: manual,
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId: 'car',
+      startedAt: ago(10 * MIN),
+    });
+    await startRun(t.db, { segment: 'verify', model: 'opus-5.5', routeId: 'car', startedAt: ago(5 * MIN) });
+    const slots = async () =>
+      (await flat('execute')).map((c) => [c.routeId, c.inFlight, c.maxConcurrency, c.blockers]);
+
+    expect(await slots()).toEqual([
+      ['car', 3, 3, ['no-slot']],
+      ['a', 0, 2, []],
+    ]);
+    await finishRun(t.db, { runId: manual, outcome: 'done' }, NOW);
+    expect(await slots()).toEqual([
+      ['car', 2, 3, []],
+      ['a', 0, 2, []],
+    ]);
   });
 });
