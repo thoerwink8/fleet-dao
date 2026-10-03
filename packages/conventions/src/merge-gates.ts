@@ -174,7 +174,7 @@ export function destructiveIn(patch: string | undefined): string | undefined {
  * - 触发：on、pull_request、pull_request_target、workflow_run、types、branches、paths
  * - 外来代码：uses（新增、换版本、换来源的 action）
  * - 门槛本身：卫生检查（hygiene、trusted/TRUSTED）、second-opinion、merge-gate、cold-verify、continue-on-error、
- *   `|| true`、exit 0、set +e、if: 里带 always()/failure()/cancelled()/事件名（决定检查跑不跑、红了算不算红）
+ *   `|| true`、exit 0、set +e、任何 if: 行（决定检查跑不跑）、runs-on（换机器）、被删掉的跑检查命令（vitest、biome、tsc、run.sh 等）
  * - 汇总和依赖：check job 本身、任何 needs 行、删掉整个 job
  */
 const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
@@ -189,17 +189,23 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
   [/\buses:/, '用到的 action'],
   [/\bhygiene\b|\btrusted\b|\bTRUSTED\b|卫生检查|second-opinion|merge-gate|cold-verify/, '卫生检查或合并闸'],
   [/continue-on-error|\|\|\s*true|\bexit 0\b|set \+e/, '放过失败'],
-  // 不只认 if: 同一行：条件可以用 >- 、| 写成多行，续行上只有表达式。所以这几个词出现在任何改动行上都算，if: 后面接块写法也算
+  // 任何 if: 行的增删都算（不看里面写什么：把条件改成 if: false 也是让检查不跑）；条件可以写成多行，续行上只有表达式，
+  // 所以这几个词出现在任何改动行上也算
   [
-    /always\(\)|failure\(\)|cancelled\(\)|github\.event_name|github\.event\.|^\s*(?:-\s+)?if:\s*[>|]/,
+    /^\s*(?:-\s+)?if:|always\(\)|failure\(\)|cancelled\(\)|github\.event_name|github\.event\./,
     '检查跑不跑的条件',
   ],
+  // 换机器：self-hosted 是另一台有权限的机器，换大规格的是花钱（人闸）
+  [/\bruns-on:/, '跑在哪台机器上'],
   [
     /^\s*check:\s*$|\bneeds:|CI_NEEDS|ci-verdict|ci-plan\.ts|汇总|::error::/,
     '汇总、依赖或「该跑什么」的判法',
   ],
   [/^ {2}[\w-]+:\s*$/, '整个 job 的增删'],
 ];
+
+/** 跑检查的命令；改动里「删掉」的行出现它们，就说明有一步检查被换掉、改掉了。 */
+const REMOVED_CHECK_COMMAND = /\b(?:vitest|biome|tsc|run\.sh|ci-verdict|ci-cache|ci-box|ci-plan)\b/;
 
 /**
  * 去掉行尾的 YAML 注释（空白加 # 起到行尾），免得只改超时、行尾写一句「# permissions 不变」就被当成改了权限。
@@ -223,6 +229,10 @@ export function workflowSensitive(patch: string | undefined): string | undefined
     if (!/^[+-]/.test(raw) || raw.startsWith('+++') || raw.startsWith('---')) continue;
     const line = stripTrailingComment(raw.slice(1));
     if (/^\s*#/.test(line) || line.trim() === '') continue;
+    // 删掉的行里有跑检查的命令：把命令换成别的（run: echo ok）就是让检查不跑；加上的行看不出来，只能看被换掉的
+    if (raw.startsWith('-') && REMOVED_CHECK_COMMAND.test(line)) {
+      return `改了跑检查的命令（删掉：${line.trim().slice(0, 50)}）`;
+    }
     for (const [re, what] of WORKFLOW_SENSITIVE) {
       if (re.test(line)) return `改了${what}：${line.trim().slice(0, 50)}`;
     }
