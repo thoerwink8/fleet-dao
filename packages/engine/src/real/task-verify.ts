@@ -180,13 +180,11 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     )(input.taskId);
     // 挑中路由就登记（#59）：切号照它停下这一次验收；收场（下面的 finally）走
     let ticket: OneShotTicket | undefined;
-    // 验收的会话记到这张单名下（invokeVerifier 不知道单号）；开跑时把编号告诉登记（切号的操作记录写停了哪个）
+    // 验收的会话记到这张单名下（invokeVerifier 不知道单号）
     const runs: RunsWriter = {
       ...(deps.runs.notWired === undefined ? {} : { notWired: deps.runs.notWired }),
-      start: (run: RunStart) => {
-        ticket?.attempt(run.runId);
-        return deps.runs.start({ ...run, issueNumber: run.issueNumber ?? input.issueNumber });
-      },
+      start: (run: RunStart) =>
+        deps.runs.start({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
       record: (run: RunRecord) =>
         deps.runs.record({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
     };
@@ -252,15 +250,20 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         chooseModelForFamily: async (family) => {
           const route = await picker.pickRouteForFamily(family);
           if (route === undefined) return undefined;
+          // 这一次的编号挑中时就定下、交给登记：起会话之前（备目录那一下）被切号停下，操作记录 stopped 里写的就是
+          // 随后记成 org_switch 的那一行
+          const runId = randomUUID();
           if (deps.sessions) {
             ticket?.leave();
             ticket = deps.sessions.enter({ poolId: route.poolId });
+            ticket.attempt(runId);
             oneShot.stop = ticket.signal;
           }
           return {
             modelId: route.modelId,
             ...(route.poolId ? { channel: route.poolId } : {}),
             routeId: route.routeId,
+            runId,
           };
         },
         // 会话的工作目录由 prepareCwd 备（挑完路由才知道归哪个会话用户）；这个只是占个位，不会被用到

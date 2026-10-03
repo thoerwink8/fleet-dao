@@ -479,7 +479,25 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     expect(got.retry?.reason).toContain('切号');
     expect(got.unavailable).toBeUndefined();
     expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
-    expect(r.recorded.map((x) => x.outcome)).toEqual(['org_switch']);
+    expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([[live[0], 'org_switch']]);
+    expect(sessions.live(new Set(['pool-gpt']))).toEqual([]);
+  });
+
+  it('挑完路由、还没起会话（备目录那一下）就被切号停下：不起会话，回 retry；停下时登记的编号就是记成 org_switch 的那一行', async () => {
+    const sessions = oneShotSessions();
+    let stopped: string[] = [];
+    const r = rig({ picks: { gpt: okRoute('gpt') }, deps: { sessions } });
+    // 备目录（交给会话用户）那一下切号
+    const adopt = r.ft.trees.adopt;
+    r.ft.trees.adopt = async (dir, user) => {
+      stopped = sessions.stop(new Set(['pool-gpt']), '切号：拼车切到独享，先停下');
+      return adopt(dir, user);
+    };
+    const got = await r.run(r.input(), ctx());
+    expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS });
+    expect(r.specs).toHaveLength(0);
+    expect(stopped).toHaveLength(1);
+    expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([[stopped[0], 'org_switch']]);
     expect(sessions.live(new Set(['pool-gpt']))).toEqual([]);
   });
 });

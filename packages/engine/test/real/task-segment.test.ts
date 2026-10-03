@@ -500,17 +500,14 @@ describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
     expect(existsSync(join(r.dir, 'half.tsx'))).toBe(true);
   });
 
-  it('等内存的时候切号叫停：不再等，不起会话，回 org_switch；登记走掉', async () => {
+  it('等内存的时候切号叫停：不再等，不起会话，回 org_switch；停下时登记的编号就是随后记成 org_switch 的那一行；登记走掉', async () => {
     const sessions = oneShotSessions();
-    let reads = 0;
+    let sleeping = false;
     const r = rig({
       deps: {
         sessions,
         memoryAdmission: {
-          readText: async () => {
-            reads += 1;
-            return String(9500 * 1024 * 1024);
-          },
+          readText: async () => String(9500 * 1024 * 1024),
           cgroupRoot: '/sys/fs/cgroup',
           slicePath: 'fleet.slice/fleet-agents.slice',
           sliceHighMb: 10_000,
@@ -519,6 +516,7 @@ describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
         // 真睡：信号来了就醒
         sleep: (ms, signal) =>
           new Promise((resolve, reject) => {
+            sleeping = true;
             if (signal.aborted) return reject(signal.reason);
             const timer = setTimeout(resolve, ms);
             signal.addEventListener(
@@ -535,12 +533,37 @@ describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
     });
     const pending = r.run(r.input(), ctx());
     // 第一次放不下、睡着等：这时切号
-    for (let i = 0; i < 200 && reads === 0; i += 1) await new Promise((x) => setTimeout(x, 10));
-    expect(sessions.stop(new Set(['p1']), WHY)).toHaveLength(1);
+    for (let i = 0; i < 500 && !sleeping; i += 1) await new Promise((x) => setTimeout(x, 10));
+    const stopped = sessions.stop(new Set(['p1']), WHY);
     const got = await pending;
     expect(got).toMatchObject({ ok: false, outcome: 'org_switch', evidence: { code: 'org_switch' } });
     expect(r.specs).toHaveLength(0);
-    expect(r.recorded.map((x) => x.outcome)).toEqual(['admission_blocked', 'org_switch']);
+    expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([
+      ['run-0002', 'admission_blocked'],
+      ['run-0003', 'org_switch'],
+    ]);
+    expect(stopped).toEqual(['run-0003']);
+    expect(sessions.live(new Set(['p1']))).toEqual([]);
+  });
+
+  it('建树那会儿就被切号叫停：树照样建完，不起会话，回 org_switch；停下时登记的编号就是记成 org_switch 的那一行', async () => {
+    const sessions = oneShotSessions();
+    let stopped: string[] = [];
+    const r = rig({ deps: { sessions } });
+    // 建树的第一步（看树归谁）那一刻切号
+    const ownerOf = r.ft.trees.ownerOf;
+    r.ft.trees.ownerOf = async (dir) => {
+      if (stopped.length === 0) stopped = sessions.stop(new Set(['p1']), WHY);
+      return ownerOf(dir);
+    };
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ ok: false, runId: 'run-0002', outcome: 'org_switch' });
+    expect(stopped).toEqual(['run-0002']);
+    expect(r.specs).toHaveLength(0);
+    expect(r.started).toHaveLength(0);
+    expect(r.recorded).toEqual([expect.objectContaining({ runId: 'run-0002', outcome: 'org_switch' })]);
+    // 树建好了（重跑时接着用）
+    expect(existsSync(join(r.dir, '.git'))).toBe(true);
     expect(sessions.live(new Set(['p1']))).toEqual([]);
   });
 

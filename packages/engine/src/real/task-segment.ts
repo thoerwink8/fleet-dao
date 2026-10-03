@@ -173,6 +173,11 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>,
     ticket: OneShotTicket | undefined,
   ): Promise<RunSegmentResult> {
+    const treeRunId = newRunId();
+    // 每一次起会话的编号（runs 主键）都先交给登记再干等的事（建树、等内存）：这时被切号停下，操作记录 stopped 里写的就是
+    // 随后记成 org_switch 的那一行，查得到
+    let runId = newRunId();
+    ticket?.attempt(runId);
     // 2. 树（切号叫停不打断建树：建完了下面起会话那一步当场回 org_switch）
     await prepareSegmentTree(
       deps.tree,
@@ -182,7 +187,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         branch: input.branch,
         baseSha: input.baseSha,
         user: routeInfo.user,
-        runId: newRunId(),
+        runId: treeRunId,
       },
       ctx,
     );
@@ -200,8 +205,6 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     let result: OneShotResult;
     try {
       for (;;) {
-        const runId = newRunId();
-        ticket?.attempt(runId);
         try {
           result = await runOneShot(
             {
@@ -240,6 +243,8 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         if (result.outcome !== 'admission_blocked') break;
         if (now().getTime() - started >= admissionWaitMs) break;
         ctx.heartbeat();
+        runId = newRunId();
+        ticket?.attempt(runId);
         // 等内存时切号叫停了：不再等，下一次 one-shot 当场回 org_switch（不起会话）
         try {
           await sleep(admissionPollMs, ticket ? AbortSignal.any([stopSignal, ticket.signal]) : stopSignal);
