@@ -267,7 +267,10 @@ export function labelsOf(text) {
 }
 
 /** 去掉 Markdown 的强调和代码记号，只看字。 */
-const plain = (s) => String(s).replace(/[*_`~]/g, '').trim();
+const plain = (s) =>
+  String(s)
+    .replace(/[*_`~]/g, '')
+    .trim();
 /** 列表的一条：- * + • 或 1. 1) 1、 开头。 */
 const BULLET = /^(\s*)(?:[-*+•]|\d{1,3}[.)、．])\s+(.*)$/;
 /** 「没有」的几种写法：无、（无）、暂无、没有、无。 */
@@ -419,7 +422,10 @@ export function statusText(j, afterMerge = false) {
     ]
       .filter(Boolean)
       .join('，');
-    return { state: 'success', description: clip(`${who}通过（第 ${j.round} 轮${extra ? `；${extra}` : ''}）`) };
+    return {
+      state: 'success',
+      description: clip(`${who}通过（第 ${j.round} 轮${extra ? `；${extra}` : ''}）`),
+    };
   }
   return {
     state: 'failure',
@@ -665,7 +671,10 @@ function preparePr(repo, pr, slot) {
     if (!findBin(bin)) throw new NotChecked(`这台机器没装 ${bin}（PATH 上找不到；审 PR 要它${forWhat}）`);
   }
   const info = JSON.parse(
-    gh(['pr', 'view', String(pr), '--json', 'headRefOid,baseRefName,title,body,files,state,mergeCommit'], repo),
+    gh(
+      ['pr', 'view', String(pr), '--json', 'headRefOid,baseRefName,title,body,files,state,mergeCommit'],
+      repo,
+    ),
   );
   if (info.state === 'CLOSED') throw new NotChecked(`PR #${pr} 关掉了、没合并：不审`);
   // 已经合进主线的照样审（合并后补审）：refs/pull/<号>/head 还在，三个点的 diff 照样只给它自己的改动
@@ -1272,7 +1281,16 @@ export function stripLocalPaths(text, dirs) {
  * 贴到 PR 的评论。第一行的格式别改：POSTED_REVIEW 靠它数轮（「第二意见 第 N 轮」「审的头 七位」「：通过 / 必须改 N 条」）。
  * 结论是脚本的判定，不是审的人自己写的那句；审的人的原文（从「必须改」那一段起）附在后面。
  */
-export function prComment({ judged, head, model, body, afterMerge = false, mergeCommit = null, roundNote = '', note = '' }) {
+export function prComment({
+  judged,
+  head,
+  model,
+  body,
+  afterMerge = false,
+  mergeCommit = null,
+  roundNote = '',
+  note = '',
+}) {
   const who = afterMerge ? '合并后补审' : '第二意见';
   const conclusion = judged.pass ? '通过' : `必须改 ${judged.blocking.length} 条`;
   return [
@@ -1476,7 +1494,9 @@ export function parseNameStatusLog(stdout) {
         continue;
       }
       if (!/^[ACDMRTUXB]\d*$/.test(st))
-        throw new NotChecked(`git log 的输出认不出（${m[1].slice(0, 7)} 的改动状态是「${st.slice(0, 20)}」）`);
+        throw new NotChecked(
+          `git log 的输出认不出（${m[1].slice(0, 7)} 的改动状态是「${st.slice(0, 20)}」）`,
+        );
       const two = st[0] === 'R' || st[0] === 'C';
       const names = tokens.slice(i + 1, i + (two ? 3 : 2));
       if (names.length !== (two ? 2 : 1) || names.some((n) => !n))
@@ -1566,7 +1586,13 @@ export function classifyAfterMerge(candidates, repoData) {
  * 读不到、认不出一律抛 NotChecked（调用方判没查成），不当成「没有待补审的」。主线上的清单还没有 after-merge 的条目时
  * 列表就是空的——那是真没有，不是没查成。
  */
-export function pendingAfterMerge({ git, gh: ghRun, fetchMain = null, now = Date.now(), days = AFTER_MERGE_DAYS }) {
+export function pendingAfterMerge({
+  git,
+  gh: ghRun,
+  fetchMain = null,
+  now = Date.now(),
+  days = AFTER_MERGE_DAYS,
+}) {
   if (fetchMain) {
     try {
       fetchMain();
@@ -1629,7 +1655,9 @@ export function pendingAfterMerge({ git, gh: ghRun, fetchMain = null, now = Date
   }
   const commits = parseNameStatusLog(logText);
   if (String(commits.length) !== String(count).trim())
-    throw new NotChecked(`git log 读出 ${commits.length} 个提交，rev-list 说有 ${String(count).trim()} 个：输出认不出`);
+    throw new NotChecked(
+      `git log 读出 ${commits.length} 个提交，rev-list 说有 ${String(count).trim()} 个：输出认不出`,
+    );
   const candidates = commits
     .map((c) => ({ ...c, hits: afterMergeHits(c.files, rules) }))
     .filter((c) => c.hits.length > 0);
@@ -1707,21 +1735,50 @@ function realDeps(repo) {
   };
 }
 
-/** 一个位子同一时刻只跑一轮（每个位子一棵审查树）；要并行就换 --slot。 */
-function takeSlot(slot) {
-  if (!Number.isInteger(slot) || slot < 1 || slot > 4) throw new NotChecked('--slot 只能是 1–4');
-  mkdirSync(RUNS, { recursive: true });
-  const lock = join(RUNS, `.lock-${slot}`);
-  if (existsSync(lock)) {
-    const pid = Number(readFileSync(lock, 'utf8'));
-    let alive = false;
-    try {
-      alive = Number.isInteger(pid) && pid > 0 && process.kill(pid, 0);
-    } catch {}
-    if (alive) throw new NotChecked(`另一轮第二意见在跑（进程 ${pid}），等它跑完`);
+// ---------- 锁：同一个 PR 同时只跑一轮，不同 PR 可以并行（创始人 2026-10-03 晚：原来一把全局锁，不同 PR 也互相排队） ----------
+
+/** 拿着锁的那个进程还在不在（没权限发信号也算在）。 */
+function isAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === 'EPERM';
   }
-  writeFileSync(lock, String(process.pid));
-  process.on('exit', () => rmSync(lock, { force: true }));
+}
+
+/**
+ * 拿一把锁（文件 <dir>/.lock-<name>，里面是进程号）：拿着的进程还活着就抛 NotChecked；进程已死的陈旧锁直接盖掉。
+ * 返回放锁的函数；进程退出时也放。dir / pid / alive 只给测试换。
+ */
+export function takeLock(name, why, { dir = RUNS, pid = process.pid, alive = isAlive } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `.lock-${name}`);
+  if (existsSync(file)) {
+    const holder = Number(readFileSync(file, 'utf8'));
+    if (holder !== pid && alive(holder)) throw new NotChecked(`${why}（进程 ${holder}），等它跑完`);
+  }
+  writeFileSync(file, String(pid));
+  const release = () => rmSync(file, { force: true });
+  process.on('exit', release);
+  return release;
+}
+
+/** 每个位子一棵审查树（固定几棵轮着用，见 preparePr）：没指定 --slot 就挑第一个空着的；都被占着照实报。 */
+export function takeSlot(o, deps = {}) {
+  if (o.slotGiven && (!Number.isInteger(o.slot) || o.slot < 1 || o.slot > 4))
+    throw new NotChecked('--slot 只能是 1–4');
+  const busy = [];
+  for (const slot of o.slotGiven ? [o.slot] : [1, 2, 3, 4]) {
+    try {
+      return { slot, release: takeLock(`slot${slot}`, `审查树 ${slot} 另一轮在用`, deps) };
+    } catch (e) {
+      if (!(e instanceof NotChecked)) throw e;
+      busy.push(e.message);
+    }
+  }
+  throw new NotChecked(o.slotGiven ? busy[0] : `四棵审查树都有人在用：${busy.join('；')}`);
 }
 
 /**
@@ -1730,7 +1787,19 @@ function takeSlot(slot) {
  */
 async function reviewPr({ o, repo, pr, log }) {
   const chain = prProfiles(o); // 作者族不对先在这儿报，别等树切好了才说
-  const info = preparePr(repo, pr, o.slot);
+  // 同一个 PR 同时只跑一轮（后来的退出 2）；不同 PR 各拿各的审查树，可以并行
+  const releasePr = takeLock(`pr${pr}`, `PR #${pr} 另一轮第二意见在跑`);
+  const { slot, release: releaseSlot } = takeSlot(o);
+  try {
+    return await reviewPrLocked({ o, repo, pr, log, chain, slot });
+  } finally {
+    releaseSlot();
+    releasePr();
+  }
+}
+
+async function reviewPrLocked({ o, repo, pr, log, chain, slot }) {
+  const info = preparePr(repo, pr, slot);
   const counted = reviewRounds(pr, (a) => gh(a, repo));
   const round = (counted.prior ?? 0) + 1;
   const roundNote =
@@ -1771,7 +1840,10 @@ async function reviewPr({ o, repo, pr, log }) {
     const parsed = parseReview(r.text);
     if (!parsed.ok) {
       // 认不出的不贴、不写状态：不当通过，也不拿一份读不懂的东西去挡人
-      writeFileSync(out, [...head, `- 结论：认不出（没查成，不算通过）：${parsed.why}`, '', '---', '', r.text, ''].join('\n'));
+      writeFileSync(
+        out,
+        [...head, `- 结论：认不出（没查成，不算通过）：${parsed.why}`, '', '---', '', r.text, ''].join('\n'),
+      );
       console.log(out);
       log(`没查成：审的结果${parsed.why}`);
       return 2;
@@ -1818,7 +1890,9 @@ async function reviewPr({ o, repo, pr, log }) {
       }
       try {
         setStatus(repo, info.head, status, url);
-        log(`提交状态 second-opinion 写到了 ${info.head.slice(0, 7)}：${status.state}（${status.description}）`);
+        log(
+          `提交状态 second-opinion 写到了 ${info.head.slice(0, 7)}：${status.state}（${status.description}）`,
+        );
       } catch (e) {
         log(`提交状态没写上：${errText(e)}`);
         code = 2;
@@ -1830,7 +1904,10 @@ async function reviewPr({ o, repo, pr, log }) {
       );
     return code;
   } catch (e) {
-    writeFileSync(out, `# PR #${pr} ${who} 第 ${round} 轮：没查成\n\n- 审的头：${info.head}\n- 原因：${e.message}\n`);
+    writeFileSync(
+      out,
+      `# PR #${pr} ${who} 第 ${round} 轮：没查成\n\n- 审的头：${info.head}\n- 原因：${e.message}\n`,
+    );
     console.log(out);
     throw e;
   }
@@ -1870,8 +1947,11 @@ async function afterMergeResolve({ o, repo, log }) {
   const orig = view(o.resolve);
   const fix = view(o.by);
   if (orig.state !== 'MERGED')
-    throw new NotChecked(`#${o.resolve} 不是已合并的 PR（${orig.state}）：没合并的照常审（--pr），不走合并后补审`);
-  if (fix.state !== 'MERGED') throw new NotChecked(`#${o.by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
+    throw new NotChecked(
+      `#${o.resolve} 不是已合并的 PR（${orig.state}）：没合并的照常审（--pr），不走合并后补审`,
+    );
+  if (fix.state !== 'MERGED')
+    throw new NotChecked(`#${o.by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
   const current = currentSecondOpinion(repo, orig.headRefOid);
   if (current?.state === 'success') {
     console.log(`#${o.resolve} 头上的 second-opinion 已经是通过（${current.description}），不用再记`);
@@ -1925,8 +2005,10 @@ function args(argv) {
     } else if (a === '--by') o.by = Number(argv[++i]);
     else if (a === '--json') o.json = true;
     else if (a === '--no-fetch') o.noFetch = true;
-    else if (a === '--slot') o.slot = Number(argv[++i]);
-    else if (a === '--timeout-min') o.timeoutMin = Number(argv[++i]);
+    else if (a === '--slot') {
+      o.slot = Number(argv[++i]);
+      o.slotGiven = true;
+    } else if (a === '--timeout-min') o.timeoutMin = Number(argv[++i]);
     else if (a === '--ui') o.ui = true;
     else if (a === '--selftest') o.selftest = true;
     else if (a === '--ping') o.ping = true;
@@ -1983,12 +2065,25 @@ async function selftest(repo) {
   };
   eq(judged('## 必须改\n- `a.ts:1` 没带标签\n结论：必须改 1 条', 1), false, '没带标签的照挡');
   eq(judged('## 必须改\n- 【构造】【碰安全】`a.ts:1` 偏门写法\n结论：必须改 1 条', 1), true, '构造的不挡');
-  eq(judged('## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：必须改 1 条', 3), true, '第 3 轮其他的转合并后');
-  eq(judged('## 必须改\n- 【现实】【碰安全】`a.ts:1` 问题\n结论：必须改 1 条', 3), false, '第 3 轮碰安全照挡');
+  eq(
+    judged('## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：必须改 1 条', 3),
+    true,
+    '第 3 轮其他的转合并后',
+  );
+  eq(
+    judged('## 必须改\n- 【现实】【碰安全】`a.ts:1` 问题\n结论：必须改 1 条', 3),
+    false,
+    '第 3 轮碰安全照挡',
+  );
   eq(judged('## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：通过', 1), false, '审的人说通过也照挡');
   eq(judged('只有一句话\n结论：通过', 1), null, '没有必须改那一段认不出');
   const parsed = parseReview('我先读规矩……\n## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：必须改 1 条');
-  const c = prComment({ judged: judgeReview(parsed, 1), head: 'abcdef1234', model: 'gpt-6-luna', body: parsed.body });
+  const c = prComment({
+    judged: judgeReview(parsed, 1),
+    head: 'abcdef1234',
+    model: 'gpt-6-luna',
+    body: parsed.body,
+  });
   eq(
     c.includes('我先读规矩') || !c.includes('## 必须改') || !c.includes('abcdef1'),
     false,
@@ -2097,15 +2192,12 @@ async function main() {
     const repo = repoOf(o);
     for (const bin of ['git', 'gh'])
       if (!findBin(bin)) throw new NotChecked(`这台机器没装 ${bin}（PATH 上找不到）`);
-    takeSlot(o.slot);
     process.exitCode = await afterMergeSweep({ o, repo, log });
     return;
   }
   if (!Number.isInteger(o.pr) || o.pr <= 0)
     throw new NotChecked('要 --pr <号>、--text <文件>，或 --after-merge-pending / --after-merge-sweep');
-  const repo = repoOf(o);
-  takeSlot(o.slot);
-  process.exitCode = await reviewPr({ o, repo, pr: o.pr, log });
+  process.exitCode = await reviewPr({ o, repo: repoOf(o), pr: o.pr, log });
 }
 
 function isMain() {

@@ -489,12 +489,16 @@ const AM_NOT_CHECKED = '合并后待补审没查成';
 /** 起 second-opinion.mjs 查合并后待补审：{ status, stdout, stderr, error, timeoutMs }，超时由 spawnSync 杀掉 */
 export function afterMergeRunner(timeoutMs = AFTER_MERGE_MS) {
   return (script, repo) => {
-    const r = spawnSync(process.execPath, [script, '--after-merge-pending', '--json', '--no-fetch', '--repo', repo], {
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const r = spawnSync(
+      process.execPath,
+      [script, '--after-merge-pending', '--json', '--no-fetch', '--repo', repo],
+      {
+        encoding: 'utf8',
+        timeout: timeoutMs,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
     return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
   };
 }
@@ -528,7 +532,9 @@ export function checkAfterMerge({ cwd, git, run, fetch, mirror = null }) {
   try {
     p = JSON.parse(r.stdout);
   } catch {
-    return [`${AM_NOT_CHECKED}：second-opinion.mjs 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
+    return [
+      `${AM_NOT_CHECKED}：second-opinion.mjs 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`,
+    ];
   }
   if (![p?.unreviewed, p?.failed, p?.problems].every(Array.isArray))
     return [`${AM_NOT_CHECKED}：second-opinion.mjs 的输出少了 unreviewed、failed 或 problems。`];
