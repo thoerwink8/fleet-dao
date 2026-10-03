@@ -60,6 +60,7 @@ function detail(runs: Run[]): TaskDetail {
     repo: { id: 'r-1', owner: 'acme', name: 'orbit', defaultBranch: 'main' },
     subtasks: [],
     runs,
+    segmentRuns: [],
     asks: [],
     usage: summarizeUsage(runs.map((r) => ({ ...r, model: r.routeId, modelName: r.modelName }))),
   });

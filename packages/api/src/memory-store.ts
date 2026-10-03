@@ -1,22 +1,24 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
-import type {
-  Ban,
-  Channel,
-  Model,
-  Pool,
-  ProgressKind,
-  RealtimeTable,
-  Repo,
-  Route,
-  ScheduleOutcome,
-  SessionRun,
-  StageKind,
-  StagePolicy,
-  Step,
-  Subtask,
-  Task,
+import {
+  type Ban,
+  type Channel,
+  type Model,
+  type Pool,
+  type ProgressKind,
+  type RealtimeTable,
+  type Repo,
+  type Route,
+  type ScheduleOutcome,
+  type SegmentRun,
+  type SessionRun,
+  type StageKind,
+  type StagePolicy,
+  type Step,
+  type Subtask,
+  type Task,
+  taskWorkflowId,
 } from '@fleet-dao/shared';
 import { testRunOf } from './done-check.ts';
 import {
@@ -55,6 +57,7 @@ import {
   type QuotaWindowRecord,
   REPO_NOT_MANAGED,
   type RunPlan,
+  type SegmentRunRecord,
   type SettingRecord,
   type StagePolicyValue,
   type Store,
@@ -182,7 +185,10 @@ export interface MemoryData {
   repos: RepoRecord[];
   tasks: Task[];
   subtasks: Subtask[];
+  /** 老流程的会话（库里的 session_runs）。 */
   runs: SessionRun[];
+  /** 三段的流水（库里的 runs 表，名字撞了：这里叫 segmentRuns）。 */
+  segmentRuns: SegmentRun[];
   /** 会话进度：fleet plan 的步骤清单、测试结果都在这里（最近一条 plan 就是现行清单，kind=test 就是测试记录）。 */
   progress: ProgressRecord[];
   asks: AskRecord[];
@@ -221,6 +227,7 @@ export function emptyData(): MemoryData {
     tasks: [],
     subtasks: [],
     runs: [],
+    segmentRuns: [],
     progress: [],
     asks: [],
     stateChanges: [],
@@ -674,6 +681,20 @@ export function createMemoryStore(
     },
     async getRun(id) {
       return data.runs.find((r) => r.id === id) ?? null;
+    },
+    async listSegmentRuns(taskId) {
+      const task = data.tasks.find((t) => t.id === taskId);
+      if (!task) return [];
+      const repo = data.repos.find((r) => r.id === task.repoId);
+      const workflowId = repo ? taskWorkflowId(repo, task.issueNumber) : undefined;
+      return data.segmentRuns
+        .flatMap((r): SegmentRunRecord[] => {
+          if (r.taskId !== undefined) return r.taskId === taskId ? [{ ...r, matchedBy: 'task' }] : [];
+          if (r.issueNumber !== task.issueNumber) return [];
+          if (r.workflowId !== undefined && r.workflowId !== workflowId) return [];
+          return [{ ...r, matchedBy: 'issueNumber' }];
+        })
+        .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
     },
     async getPlans(runIds) {
       const out = new Map<string, RunPlan>();
