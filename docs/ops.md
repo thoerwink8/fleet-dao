@@ -724,7 +724,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
   - 写了 `release.env` 当场重读：这一版照新的起服务、往香港发。`engine.env`、`api.env` 写了，切版本时对应的服务照常重启（环境文件改过就重启）。
 - 看：`release.sh --check` 的「自动发布」那一段最后一行（配置和期望一致 / 哪几项不一致 / 没查成）；`bash deploy/france.sh --check` 的读回里是同一份判法，不一致判红、没查成记待配；手动比一次：`node /srv/fleet-dao/deploy/france/auto-release/config.mjs check`（退出码 0 一致、1 不一致、2 没查成）。
 - 改配置：改期望、等发布。
-  - 公开的值：改 `deploy/france/desired-config.json`（本机档改 `deploy/local/desired-config.json`）、合进主线，等发布（自动发布跟着主线，或人手动发一次）照期望写上、重启服务，不用再到机器上改。只改机器的，下一轮就报不一致，发布也不替人改回（`selfHeal` 关着）。
+  - 公开的值：改 `deploy/france/desired-config.json`（本机档改 `deploy/local/desired-config.json`）、合进主线，等下一次发布（带着这份期望的那一版切上去时）照期望写上、重启服务，不用再到机器上改。只改机器的，下一轮就报不一致，发布也不替人改回（`selfHeal` 关着）。
   - 私有值：新值照旧从保险箱放到法国（或人手放），再在法国以 root 算它的指纹：`node /srv/fleet-dao/deploy/france/auto-release/config.mjs fingerprint <文件> <键>`（只打印指纹；新值还没放上去就加 `--stdin`，从标准输入给），把指纹写进期望、合进主线，最后跑一遍保险箱的 `refresh.sh`。一次算全部私有值：`… config.mjs fingerprint --all`，打印成能贴进期望的样子，连钥匙编号。
   - 加一个键：写进期望、合进主线：公开的发布时写上；私有的照上一条，先放到机器上、再记指纹。
   - 删一个键：从期望里删掉、合进主线，发布时把上次照期望写的那一行删掉；私有的、没照期望写过的发布不删，人删。
