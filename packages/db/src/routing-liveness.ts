@@ -7,6 +7,7 @@
 // - unknown（没探过、额度没读成）不是 live：和选路一样，没查成不当「还够」。
 // - 一层一条都没有（空）是 dead，不是 live：整层没人，派不出去。
 import type { PgTable } from 'drizzle-orm/pg-core';
+import type { RouteCandidate } from './queries/candidates.ts';
 import { bans, pools, quotaWindows, routes } from './schema/index.ts';
 
 export type LivenessVerdict = 'live' | 'dead' | 'unknown';
@@ -54,4 +55,47 @@ export function layerLiveness(children: readonly LivenessVerdict[]): LivenessVer
   if (children.includes('live')) return 'live';
   if (children.includes('unknown')) return 'unknown';
   return 'dead';
+}
+
+const BLOCKER_WORDS: Readonly<Record<string, string>> = {
+  'channel-disabled': '渠道关了',
+  'pool-expired': '账号池订阅过期了',
+  'model-retired': '模型已下架',
+};
+
+/**
+ * 把选路用的候选（queries/candidates.ts 的 evaluateRoutes，「为什么不能用」只有这一处判法）读成三件事。
+ * - 接得上：渠道关了、池过期、模型下架、探针判不在线 = dead；探针还没看过、或那一轮没探它（skipped，不是它坏了）= unknown。
+ * - 额度够：用满 = dead；没读成、读数过期、窗口判不了 = unknown（不当「还够」）。
+ * - 没被禁令挡：命中禁令、或调度台上关着 = dead（关着的照样挂在顺序里，但不派）。
+ * 并发满了（no-slot）不算 dead：那是等空位，不是坏了。
+ */
+export function livenessOf(c: RouteCandidate): RoutingLiveness {
+  const dead = (reason: string): LivenessFact => ({ verdict: 'dead', reason });
+  const unknown = (reason: string): LivenessFact => ({ verdict: 'unknown', reason });
+  const live = (reason: string): LivenessFact => ({ verdict: 'live', reason });
+
+  const hard = c.blockers.find((b) => b in BLOCKER_WORDS);
+  let connect: LivenessFact;
+  if (hard) connect = dead(BLOCKER_WORDS[hard] ?? hard);
+  else if (!c.blockers.includes('offline')) connect = live('探针探通了');
+  else if (c.probeState === null) connect = unknown('探针还没看过这条路由');
+  else if (c.probeState === 'skipped')
+    connect = unknown('探针那一轮没探它（挂着的是另一个组织），不是它坏了');
+  else connect = dead(`探针判不在线（${c.probeState}）`);
+
+  const quota: LivenessFact =
+    c.quota === 'exhausted'
+      ? dead('适用的额度窗用满了')
+      : c.quota === 'unknown'
+        ? unknown('额度没读成、读数过期，或判不了扣不扣这条路由')
+        : live('额度读数新、窗口有余');
+
+  const ban: LivenessFact = c.blockers.includes('banned')
+    ? dead(`命中禁令：${c.banReasons.join('；')}`)
+    : c.blockers.includes('switched-off')
+      ? dead('调度台上关着')
+      : live('没有禁令、开关开着');
+
+  return { connect, quota, ban };
 }
