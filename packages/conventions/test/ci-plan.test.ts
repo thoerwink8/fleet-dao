@@ -186,9 +186,9 @@ describe('按改动算要跑什么', () => {
     ]);
   });
 
-  it('改了 db：db 和所有依赖它的（engine、api、github、jev）都测；pg 的测试单独一台', () => {
+  it('改了 db：db 和所有依赖它的（engine、api、github、jev）都测，读 db 路由骨架的 agents 也测；pg 的测试单独一台', () => {
     const p = pr('packages/db/src/schema/index.ts');
-    expect(units(p)).toEqual(['api', 'db', 'engine', 'github', 'jev']);
+    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'github', 'jev']);
     const packed = assigned(p);
     // db 的测试（要真 Postgres）单独一台，不和别的包混在一个 vitest 进程里（FLEET_TEST_PG_URL 一设，全进程都连真库）
     const pg = packed.tests.filter((b) => b.pg);
@@ -210,6 +210,12 @@ describe('按改动算要跑什么', () => {
         u,
       ).toBe(true);
     }
+    expect(
+      boxFiles(packed)
+        .flat()
+        .some((f) => f.startsWith('agents/')),
+      'agents',
+    ).toBe(true);
     expect(p.tsc).toEqual(expect.arrayContaining(['packages/db', 'packages/engine', 'packages/api']));
   });
 
