@@ -11,6 +11,12 @@ LOGIN_USER_LOG_GROUP=systemd-journal
 LOGIN_USER_SUDO=sudo # 测试时换成别的，造出「sudo -l 的回答认不出」
 LOGIN_USER_BAD=()    # check_login_user 的结论，每条：代号<TAB>说明（带怎么补）
 
+# 登录 shell 那一问最多等几秒（到点叫停，124）；挂起的进程收不到 TERM，再过几秒补 KILL。
+# 做成变量是为了让测试注小值（那一段按设计要真等满，见 login-user.test.sh）；生产侧（france.sh）不设，按默认。
+# 注意：这两个是 source 时就定下的全局，测试要覆盖必须在 source **之前**给，source 之后改会被这里打回。
+LOGIN_USER_PROBE_TIMEOUT=${LOGIN_USER_PROBE_TIMEOUT:-10}
+LOGIN_USER_KILL_AFTER=${LOGIN_USER_KILL_AFTER:-5}
+
 # 装：缺什么补什么，已有的不动。reclaude 只在没有时装（之后由这个用户自己 reclaude update）：从给的地址下、
 # 核对 sha256，写进它家里的事以它自己的身份做（审计 P01）。不从会话用户家里拷：会话改得了自己那份，拷过来就是
 # 一条从 AI 会话摸进创始人账号的路。
@@ -126,7 +132,7 @@ check_login_user() { # 用户
   rc=0
   probe=$(mktemp "${TMPDIR:-/var/tmp}/fleet-dao-pilot-probe.XXXXXX")
   (cd -- "$home" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" \
-    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k 5 10 "$shell" -ilc 'command -v reclaude' \
+    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k "$LOGIN_USER_KILL_AFTER" "$LOGIN_USER_PROBE_TIMEOUT" "$shell" -ilc 'command -v reclaude' \
     </dev/null >"$probe" 2>&1) || rc=$?
   # 交互 shell 起来时往 stderr 打的「no job control」在命令输出之前，所以取最后一行。
   # 退出码也要是 0：登录脚本前台卡住时 timeout 到点会给整组发信号，把卡住的那个命令杀掉，交互 bash 自己不理 TERM、

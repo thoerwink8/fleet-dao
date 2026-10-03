@@ -15,7 +15,7 @@ import type { RepoView } from './repo.ts';
 /** 和谁比：引擎给会话的树钉好了这个引用（packages/engine/src/real/user-git.ts 的 pinMainline），本机是 git fetch 来的。 */
 export const BASE = 'origin/main';
 
-/** CI 的 docs job 每个 PR 都跑的两份（.github/workflows/ci.yml；test/test-changed.test.ts 核对两边一致）。 */
+/** CI 的 lint job 里 docs 那一步每个 PR 都跑的两份（.github/workflows/ci.yml；test/test-changed.test.ts 核对两边一致）。 */
 export const ALWAYS_TESTS: readonly string[] = Object.freeze([
   'packages/conventions/test/doc-pointers.test.ts',
   'agents/test/',

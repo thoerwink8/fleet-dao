@@ -222,10 +222,11 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     expect(selectTests(['docs/ops.md'], GRAPH).ciOnly).toEqual(['装机测试（deploy/test/run.sh --ops）']);
   });
 
-  it('每次都跑的两份就是 CI docs job 跑的那两份', () => {
+  it('每次都跑的两份就是 CI 里 docs 那一步跑的那两份', () => {
     const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     const line = yml.split('\n').find((l) => l.includes('vitest run') && l.includes('doc-pointers'));
-    expect(line?.trim()).toBe(`- run: pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
+    // docs 那步在 lint job 里（几步并成一个 job），写法是带 name、id 的 step，不是单行 `- run:`。
+    expect(line?.trim()).toBe(`run: pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
   });
 
   it('基准就是 origin/main（引擎钉在会话树里的也是它）', () => {
