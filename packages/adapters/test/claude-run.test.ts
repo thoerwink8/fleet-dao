@@ -222,7 +222,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
   it('总时长到顶：连同子进程一起杀掉，判超时而不是 0', async () => {
     const pidFile = join(tempDir(), 'child.pid');
     const report = await runClaudeCode(
-      spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 3_000, killGraceMs: 300 } }),
+      spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 1_500, killGraceMs: 300 } }),
       {
         command: fakeAgent({
           replay: fixturePath('claude-code', 'cc-haiku-read'),
@@ -257,7 +257,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     // 前 5 行停在 Read 的 tool_use 上、结果还没回来
     const report = await runClaudeCode(
       spec('cc-haiku-read', {
-        limits: { startupMs: 10_000, idleMs: 300, wallClockMs: 3_000, killGraceMs: 300 },
+        limits: { startupMs: 10_000, idleMs: 300, wallClockMs: 1_500, killGraceMs: 300 },
       }),
       {
         command: fakeAgent({
@@ -301,7 +301,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
 
   it.skipIf(!onPosix)('不理 SIGTERM 的进程，宽限期过后 SIGKILL', async () => {
     const report = await runClaudeCode(
-      spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 3_000, killGraceMs: 300 } }),
+      spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 1_500, killGraceMs: 300 } }),
       {
         command: fakeAgent({
           replay: fixturePath('claude-code', 'cc-haiku-read'),
@@ -336,7 +336,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     async () => {
       const pidFile = join(tempDir(), 'child.pid');
       const report = await runClaudeCode(
-        spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 3_000, killGraceMs: 300 } }),
+        spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 1_500, killGraceMs: 300 } }),
         {
           command: fakeAgent({
             replay: fixturePath('claude-code', 'cc-haiku-read'),
