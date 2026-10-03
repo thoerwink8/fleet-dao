@@ -31,7 +31,7 @@
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
-| `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（必填栏提醒、先审后合路径等第二意见）、开单脚本、文档指针检查、欠账检查、阶段收口 |
+| `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（先审后合路径等第二意见、引擎任务 PR 等冷验收）、开单脚本、文档指针检查、欠账检查、阶段收口 |
 | `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
@@ -53,7 +53,7 @@
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，打出改到的包各自单跑的命令 `pnpm exec vitest run packages/<包>/`，真要在本机全跑带 `--all`）和格式、类型；`pnpm check` 是全量（格式、类型、全部测试、卫生检查；文档里的路径、章节指针也在里面查），本机一般不跑。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
 - 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
-- 关单：`pnpm issue:close <号>`，主线上有 `specs/<号>-<短名>/结果.md` 才关成「完成」、评论里贴结果链接；没有结果、子单还开着都不关（退出码 1），读不到 GitHub 报错不关（退出码 2）。或者最后一个 PR「这个 PR 做完就关单」填「是」、写 `Closes #<号>`，合并时关。见 design 第七节「关单要有结果」。
+- 关单：`pnpm issue:close <号>`，主线上有 `specs/<号>-<短名>/结果.md` 才关成「完成」、评论里贴结果链接；没有结果、子单还开着都不关（退出码 1），读不到 GitHub 报错不关（退出码 2）。或者最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时关。见 design 第七节「关单要有结果」。
 - 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
@@ -74,4 +74,4 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，写明「这个 PR 做完就关单」「对应计划」和「specs」；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654），这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（要在合并时关单，「需求」栏下面另起一行写 `Closes #号`）；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。

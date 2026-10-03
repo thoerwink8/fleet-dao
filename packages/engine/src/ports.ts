@@ -491,7 +491,7 @@ export interface PushBranchInput extends Scope {
 }
 
 /**
- * PR 正文的内容。正文由 github 包的 renderPrBody 按 .github/pull_request_template.md 的栏目生成（design：引擎开的 PR
+ * PR 正文的内容。正文由 github 包的 renderPrBody 按 .github/pull_request_template.md 的栏目生成（四栏，#654；design：引擎开的 PR
  * 和人开的同一套栏目，对不上测试会红），这里只给结构，不自己拼字。
  */
 export interface PrBody {
@@ -508,23 +508,6 @@ export interface PrBody {
   risks?: string[];
   /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（core 的 assumedLines，#259）；空 = 无。 */
   assumed?: string[];
-  /**
-   * 需求文档的目录（specs/<号>-<短名>/）：「specs」一栏照写；「对应计划」一栏由端口开 PR 时现读这个目录下需求.md 的
-   * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
-   */
-  specs: string;
-  /**
-   * 需求文档跟着这个 PR 才进主线（正文写全了需求、收单时照正文写的，#295）：主线上还没有它，「对应计划」一栏照单子此刻挂的
-   * 版本写（没挂写「未排期」），不读主线。
-   */
-  planFromIssue?: boolean;
-  /**
-   * 「档位」一栏（design 第五节的档位加理由）：只作说明、合并闸只提醒；合并闸按改动路径判要不要等第二意见
-   * （当前头上通过的 second-opinion 提交状态），不看这一栏。
-   */
-  tier: string;
-  /** 改到的文件（仓内相对路径）：「文档」一栏按它写。 */
-  changedFiles: string[];
 }
 
 export interface OpenPrInput extends Scope {

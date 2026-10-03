@@ -32,10 +32,6 @@ describe('开 PR', () => {
         subtask: 'A 登录表单',
         did: ['加了验证码输入框'],
         verified: ['pnpm check 全绿'],
-        plan: 'P1「工作流」',
-        specs: 'specs/12-otp/',
-        tier: '先合后看——一般改动',
-        changedFiles: ['packages/web/src/login.tsx', 'docs/design.md'],
       },
     });
     const pr = fake.pulls.get(res.number);
@@ -45,7 +41,7 @@ describe('开 PR', () => {
     expect(new Set(fake.calls('POST', /\/pulls$/).map((r) => r.as))).toEqual(new Set(['agent']));
     expect(fake.pulls.size).toBe(1);
     expect(pr?.body).toBe(
-      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**按推荐先做了**：无\n**需求**：#12 · 子任务 A 登录表单\n**认领**：引擎\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n**对应计划**：P1「工作流」\n**specs**：specs/12-otp/\n**档位**：先合后看——一般改动\n**文档**：design',
+      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**需求**：#12 · 子任务 A 登录表单',
     );
     expect(pr?.base.ref).toBe('main');
   });
@@ -144,9 +140,6 @@ describe('开 PR', () => {
           body: {
             did: [`令牌 ${token}`],
             verified: ['x'],
-            plan: 'P1「工作流」',
-            specs: 'specs/24-x/',
-            changedFiles: ['src/x.ts'],
           },
         })
         .catch((e: unknown) => e);
@@ -166,7 +159,7 @@ describe('开 PR', () => {
           branch: 'task/25-leak',
           head: A,
           title: `令牌 ${token}`,
-          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/25-x/', changedFiles: [] },
+          body: { did: ['x'], verified: ['x'] },
         }),
       ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
       expect(fake.requests).toHaveLength(0);
@@ -183,7 +176,7 @@ describe('开 PR', () => {
           branch,
           head: A,
           title: '登录页加验证码',
-          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/26-x/', changedFiles: [] },
+          body: { did: ['x'], verified: ['x'] },
         })
         .catch((e: unknown) => e);
       expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
@@ -204,7 +197,7 @@ describe('开 PR', () => {
           branch,
           head: A,
           title: '登录页加验证码',
-          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/28-x/', changedFiles: [] },
+          body: { did: ['x'], verified: ['x'] },
         })
         .catch((e: unknown) => e);
       expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED' });
@@ -224,184 +217,12 @@ describe('开 PR', () => {
           body: {
             did: ['做完了\u0000'],
             verified: ['x'],
-            plan: 'P1「工作流」',
-            specs: 'specs/27-x/',
-            changedFiles: ['src/x.ts'],
           },
         })
         .catch((e: unknown) => e);
       expect(err).toMatchObject({ code: 'HYGIENE_UNSCANNED' });
       expect((err as Error).message).toContain('PR 正文');
       expect(fake.requests).toHaveLength(0);
-    });
-  });
-
-  describe('inheritFrom：照抄需求 issue 的类别标签与里程碑', () => {
-    it('issue 有「需求」与里程碑：开出的 PR 也照抄上；重试不重复加', async () => {
-      const { gh, fake } = setup();
-      const issue = fake.addIssue({ labels: ['需求', '别的标签'], milestone: { number: 7, title: 'P1' } });
-      fake.refs.set('task/20-inherit', A);
-      const input = {
-        repo,
-        branch: 'task/20-inherit',
-        head: A,
-        title: 'x',
-        body: {
-          did: ['x'],
-          verified: ['x'],
-          plan: 'P1「工作流」',
-          specs: 'specs/20-x/',
-          changedFiles: ['src/x.ts'],
-        },
-        inheritFrom: { issueNumber: issue.number },
-      };
-      const res = await gh.openPr(input);
-      expect(res.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
-      const pr = fake.pulls.get(res.number);
-      expect(pr?.labels).toEqual(['需求']);
-      expect(pr?.milestone).toEqual({ number: 7, title: 'P1' });
-
-      // 重试（activity 重试会带同样的入参再调一次）：不重复加标签，milestone 也不会被覆盖
-      const again = await gh.openPr(input);
-      expect(again.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
-      expect(fake.pulls.get(res.number)?.labels).toEqual(['需求']);
-      expect(fake.calls('POST', /\/labels$/)).toHaveLength(1);
-      expect(fake.calls('PATCH', new RegExp(`/issues/${res.number}$`))).toHaveLength(1);
-    });
-
-    const reuseInput = (branch: string, issueNumber: number) => ({
-      repo,
-      branch,
-      head: A,
-      title: 'x',
-      body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/29-x/', changedFiles: [] },
-      inheritFrom: { issueNumber },
-    });
-
-    it('复用已有的 PR、它身上是旧的（缺陷 / P0），issue 已经改成需求 / P1：摘掉缺陷、贴上需求、里程碑改成 P1，别的标签不碰', async () => {
-      const { gh, fake } = setup();
-      const issue = fake.addIssue({ labels: ['需求'], milestone: { number: 8, title: 'P1' } });
-      const old = fake.addPull({
-        head: { ref: 'task/29-stale', sha: A },
-        labels: ['缺陷', '好上手'],
-        milestone: { number: 3, title: 'P0' },
-      });
-      const res = await gh.openPr(reuseInput('task/29-stale', issue.number));
-      expect(res).toMatchObject({ number: old.number, created: false });
-      expect(res.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
-      expect([...(fake.pulls.get(old.number)?.labels ?? [])].sort()).toEqual(['好上手', '需求'].sort());
-      expect(fake.pulls.get(old.number)?.milestone).toEqual({ number: 8, title: 'P1' });
-      expect(fake.calls('DELETE', /\/labels\//)).toHaveLength(1);
-
-      // 再开一次（下一轮推完）：已经对齐了，一个写请求都不再发
-      const writes = fake.requests.filter((r) => r.method !== 'GET').length;
-      const again = await gh.openPr(reuseInput('task/29-stale', issue.number));
-      expect(again.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
-      expect(fake.requests.filter((r) => r.method !== 'GET').length).toBe(writes);
-    });
-
-    it('要摘的类别标签刚被别人摘掉（DELETE 回 404）：要的就是它不在，照常对齐', async () => {
-      const { gh, fake } = setup();
-      const issue = fake.addIssue({ labels: ['需求'], milestone: { number: 8, title: 'P1' } });
-      const old = fake.addPull({ head: { ref: 'task/30-race', sha: A }, labels: ['缺陷'] });
-      fake.before.push((req) => {
-        // 别人抢在 DELETE 之前摘掉了：落到假服务自己的路由，身上已经没有，回 404
-        if (req.method === 'DELETE' && /\/labels\//.test(req.path)) old.labels = [];
-        return undefined;
-      });
-      const res = await gh.openPr(reuseInput('task/30-race', issue.number));
-      expect(res.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
-      expect(fake.pulls.get(old.number)?.labels).toEqual(['需求']);
-      expect(fake.calls('DELETE', /\/labels\//)).toHaveLength(1);
-    });
-
-    it('issue 自己同时贴了两个类别：明确报 ISSUE_CATEGORY_CONFLICT（等人把 issue 改成一个），PR 上的标签、里程碑一样不动', async () => {
-      const { gh, fake } = setup();
-      const issue = fake.addIssue({ labels: ['需求', '缺陷'], milestone: { number: 8, title: 'P1' } });
-      const old = fake.addPull({
-        head: { ref: 'task/31-conflict', sha: A },
-        labels: ['杂项'],
-        milestone: { number: 3, title: 'P0' },
-      });
-      const err = await gh.openPr(reuseInput('task/31-conflict', issue.number)).catch((e: unknown) => e);
-      expect(err).toMatchObject({ code: 'ISSUE_CATEGORY_CONFLICT', retryable: false });
-      expect((err as Error).message).toContain('需求、缺陷');
-      expect(fake.pulls.get(old.number)?.labels).toEqual(['杂项']);
-      expect(fake.pulls.get(old.number)?.milestone).toEqual({ number: 3, title: 'P0' });
-      expect(fake.calls('POST', /\/labels$/)).toHaveLength(0);
-      expect(fake.calls('DELETE', /\/labels\//)).toHaveLength(0);
-      expect(fake.calls('PATCH', new RegExp(`/issues/${old.number}$`))).toHaveLength(0);
-    });
-
-    it('issue 没有类别标签、没有里程碑：PR 也不挂，inherited 为空', async () => {
-      const { gh, fake } = setup();
-      const issue = fake.addIssue({});
-      fake.refs.set('task/21-empty', A);
-      const res = await gh.openPr({
-        repo,
-        branch: 'task/21-empty',
-        head: A,
-        title: 'x',
-        body: {
-          did: ['x'],
-          verified: ['x'],
-          plan: 'P1「工作流」',
-          specs: 'specs/20-x/',
-          changedFiles: ['src/x.ts'],
-        },
-        inheritFrom: { issueNumber: issue.number },
-      });
-      expect(res.inherited).toEqual({ labels: [], milestone: null });
-      const pr = fake.pulls.get(res.number);
-      expect(pr?.labels).toEqual([]);
-      expect(pr?.milestone).toBeNull();
-    });
-
-    it('读 issue 403：明确报错，不当成「issue 没标签」', async () => {
-      const { gh, fake } = setup();
-      const issue = fake.addIssue({ labels: ['需求'] });
-      fake.refs.set('task/22-forbidden', A);
-      fake.before.push((req) =>
-        req.path.endsWith(`/issues/${issue.number}`)
-          ? json(403, { message: 'Resource not accessible by integration' })
-          : undefined,
-      );
-      await expect(
-        gh.openPr({
-          repo,
-          branch: 'task/22-forbidden',
-          head: A,
-          title: 'x',
-          body: {
-            did: ['x'],
-            verified: ['x'],
-            plan: 'P1「工作流」',
-            specs: 'specs/20-x/',
-            changedFiles: ['src/x.ts'],
-          },
-          inheritFrom: { issueNumber: issue.number },
-        }),
-      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
-    });
-
-    it('不给 inheritFrom：不读 issue，结果里没有 inherited', async () => {
-      const { gh, fake } = setup();
-      fake.refs.set('task/23-no-inherit', A);
-      const res = await gh.openPr({
-        repo,
-        branch: 'task/23-no-inherit',
-        head: A,
-        title: 'x',
-        body: {
-          did: ['x'],
-          verified: ['x'],
-          plan: 'P1「工作流」',
-          specs: 'specs/20-x/',
-          changedFiles: ['src/x.ts'],
-        },
-      });
-      expect(res.inherited).toBeUndefined();
-      expect(fake.calls('GET', /\/issues\//)).toHaveLength(0);
     });
   });
 });

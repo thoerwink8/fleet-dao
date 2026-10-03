@@ -1,5 +1,5 @@
-// 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；照抄需求 issue 的
-// 类别标签和里程碑）、等 CI、并主线（并完把会话的树快进到新头）、关单，以及建树（记下主线的头；树等起会话时由会话
+// 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；PR 不抄单子的类别标签、
+// 里程碑，#654）、等 CI、并主线（并完把会话的树快进到新头）、关单，以及建树（记下主线的头；树等起会话时由会话
 // 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
@@ -19,7 +19,6 @@ import {
 } from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
-import { PLAN_LINE_HINT, planLineOf, REQUIREMENT_DOC } from './spec-doc.ts';
 import {
   bundleSince,
   changedFilesAgainst,
@@ -101,7 +100,7 @@ type GitHubPorts = Pick<
   'createWorktree' | 'removeWorktree' | 'pushBranch' | 'openPr' | 'waitCi' | 'syncMainline' | 'closeIssue'
 >;
 
-function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
+function prBody(body: PrBody): PrBodyInput {
   return {
     ...(body.requirement === undefined ? {} : { requirement: body.requirement }),
     ...(body.subtask === undefined ? {} : { subtask: body.subtask }),
@@ -109,12 +108,8 @@ function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
     verified: body.verified,
     ...(body.owed ? { owed: body.owed } : {}),
     ...(body.risks ? { risks: body.risks } : {}),
-    // 「按推荐先做了」一栏（#259）：漏传了正文里就永远是「无」
+    // 「按推荐先做了」一栏（#259）：漏传了正文里就没有这一栏
     ...(body.assumed ? { assumed: body.assumed } : {}),
-    plan,
-    specs,
-    tier: body.tier,
-    changedFiles: body.changedFiles,
   };
 }
 
@@ -183,45 +178,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     ...(deps.gitBin ? { git: deps.gitBin } : {}),
     ...(deps.shBin ? { sh: deps.shBin } : {}),
   });
-
-  /** 「对应计划」照主线上那份需求文档里的那一行：读不到、没填都明确报错，不开 PR。 */
-  const planFromDoc = async (repo: PrRepo, path: string, ctx: PortContext): Promise<string> => {
-    const doc = await mapped(() => gh.readSpecDoc({ repo, path, signal: ctx.signal }, ctx));
-    if (!doc) {
-      throw new PortError(
-        'SPEC_PLAN_MISSING',
-        `主线上没有 ${path}：开 PR 要照它写「对应计划」一栏（需求文档还没进主线？）`,
-        { retryable: false },
-      );
-    }
-    const plan = planLineOf(doc.content);
-    if ('error' in plan) {
-      throw new PortError(
-        'SPEC_PLAN_MISSING',
-        `${path} 里${plan.error}：开 PR 的「对应计划」一栏照它写，缺了不开。${PLAN_LINE_HINT}`,
-        { retryable: false },
-      );
-    }
-    return plan.ok;
-  };
-
-  /**
-   * 需求文档跟着这个 PR 才进主线的单（#295）：「对应计划」照单子此刻挂的版本写，没挂写「未排期」（和 pnpm issue:new 写进
-   * 需求文档的那一行同一个写法）。读不到单子由 github 包明确报错，不当成未排期。
-   */
-  const planFromIssue = async (
-    repo: PrRepo,
-    issueNumber: number | undefined,
-    ctx: PortContext,
-  ): Promise<string> => {
-    if (issueNumber === undefined) {
-      throw new PortError('SPEC_PLAN_MISSING', '开 PR 没给单号：「对应计划」要照单子挂的版本写，没法读', {
-        retryable: false,
-      });
-    }
-    const plan = await mapped(() => gh.readIssuePlan({ repo, issueNumber, signal: ctx.signal }, ctx));
-    return plan.milestone?.title ?? '未排期';
-  };
 
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */
   const ownerOrFail = async (dir: string): Promise<SessionUser> => {
@@ -458,22 +414,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async openPr(input, ctx) {
-      // 需求 issue 的类别标签和里程碑照抄到 PR 上（design 第七节）；读不到 issue 由 github 包明确报错，不当成「没有标签」。
-      // 「对应计划」「specs」两栏必填（#41）：specs 是需求文档的目录，对应计划现读主线上那份需求文档里的那一行。
-      const issueNumber = input.body.requirement;
-      const specs = `${input.body.specs.trim().replace(/\/+$/, '')}/`;
-      if (specs === '/') {
-        throw new PortError(
-          'SPEC_PLAN_MISSING',
-          '开 PR 没给需求文档的目录：「specs」「对应计划」两栏都没法填',
-          {
-            retryable: false,
-          },
-        );
-      }
-      const planLine = input.body.planFromIssue
-        ? await planFromIssue(input.repo, issueNumber, ctx)
-        : await planFromDoc(input.repo, `${specs}${REQUIREMENT_DOC}`, ctx);
       const r = await mapped(() =>
         gh.openPr(
           {
@@ -481,8 +421,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             branch: input.branch,
             head: input.head,
             title: input.title,
-            body: prBody(input.body, planLine, specs),
-            ...(issueNumber === undefined ? {} : { inheritFrom: { issueNumber } }),
+            body: prBody(input.body),
           },
           ctx,
         ),

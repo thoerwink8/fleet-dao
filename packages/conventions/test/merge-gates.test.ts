@@ -6,7 +6,6 @@ import {
   DESCRIPTION_MAX,
   destructiveIn,
   parseRiskPaths,
-  parseTier,
   type RiskPath,
   riskyFiles,
   secondOpinionFrom,
@@ -14,31 +13,6 @@ import {
 } from '../src/merge-gates.ts';
 
 const HEAD = 'a'.repeat(40);
-
-describe('档位', () => {
-  it('开头是三档之一、后面跟理由就认：加粗、反引号、各种隔开的写法', () => {
-    for (const [value, tier] of [
-      ['直接合（纯文档）', '直接合'],
-      ['先合后看——卫生规则只多认一种密钥', '先合后看'],
-      ['CI 绿就合，只改测试', 'CI 绿就合'],
-      ['`先审后合` 碰了登录', '先审后合'],
-      ['**先审后合**：迁移', '先审后合'],
-    ] as const) {
-      expect(parseTier(value), value).toEqual({ tier });
-    }
-  });
-
-  it('没这一栏、空的、认不出、只写档位没理由：各报一句怎么写', () => {
-    expect(parseTier(undefined)).toEqual({ problem: expect.stringContaining('正文里认不出「档位」一栏') });
-    expect(parseTier('  ')).toEqual({ problem: expect.stringContaining('「档位」一栏是空的') });
-    expect(parseTier('低风险，直接合')).toEqual({
-      problem: '「档位」写的「低风险，直接合」认不出：开头写「CI 绿就合」「先审后合」之一，后面跟理由。',
-    });
-    expect(parseTier('先合后看。')).toEqual({
-      problem: '「档位」只写了「先合后看」没写理由：后面跟一句为什么是这一档，比如 先合后看——只改测试。',
-    });
-  });
-});
 
 const changed = (filename: string, status = 'modified', over: Partial<ChangedFile> = {}): ChangedFile => ({
   filename,
@@ -90,19 +64,14 @@ describe('高风险路径清单', () => {
       expect(riskyFiles([changed(f)], parsed), f).toEqual([{ file: f, rule: f, kind: '碰安全' }]);
   });
 
-  it('合并闸决定结论的判法都在清单里：从入口顺着相对导入走一遍，每个文件都得落进清单（漏一个，PR 改它就能放松门槛）；只做提醒的必填栏那一套不走进去', () => {
+  it('合并闸决定结论的判法都在清单里：从入口顺着相对导入走一遍，每个文件都得落进清单（漏一个，PR 改它就能放松门槛）；只给报错加格式的 pr-fields 不走进去', () => {
     const parsed = parseRiskPaths(readFileSync(new URL('../high-risk-paths.json', import.meta.url), 'utf8'));
     if (typeof parsed === 'string') throw new Error(parsed);
     const root = new URL('../../../', import.meta.url);
     const todo = ['packages/conventions/src/bin/merge-gate.ts'];
     const seen = new Set<string>();
-    // 只做提醒：它们坏了改不了结论（merge-gate.test.ts「提醒那一半坏了也改不了结论」兜着）
-    const reminderOnly = new Set([
-      'packages/conventions/src/pr-fields.ts',
-      'packages/conventions/src/plan.ts',
-      'packages/conventions/src/markdown.ts',
-      'packages/conventions/src/labels.ts',
-    ]);
+    // 入口只借 pr-fields.ts 的 annotation 给 Actions 报错加格式：它改不了结论
+    const reminderOnly = new Set(['packages/conventions/src/pr-fields.ts']);
     while (todo.length > 0) {
       const rel = todo.pop() as string;
       if (seen.has(rel) || reminderOnly.has(rel)) continue;

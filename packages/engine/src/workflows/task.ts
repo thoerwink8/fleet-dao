@@ -401,10 +401,6 @@ class TaskFlow {
               `改了 ${this.changedFiles.length} 个文件`,
             ],
             verified: ['CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）'],
-            specs: `${this.specDir}/`,
-            planFromIssue: !this.specDocOnMain,
-            tier: `CI 绿就合（合并闸按改动路径判要不要第二意见；动手档位：${this.status.tier?.tier ?? '未分档'}）`,
-            changedFiles: this.changedFiles,
           },
         }),
       );

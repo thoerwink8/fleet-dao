@@ -160,7 +160,6 @@ export {
 } from './progress.ts';
 export { assertPublishable, type PublishText } from './publish-check.ts';
 export {
-  CATEGORY_LABELS,
   type CiWaitResult,
   defaultCommitMessage,
   type MergePrInput,

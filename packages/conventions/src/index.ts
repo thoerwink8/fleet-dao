@@ -142,7 +142,6 @@ export {
   destructiveIn,
   GATE_CONTEXT,
   parseRiskPaths,
-  REVIEW_TIER,
   RISK_KINDS,
   RISK_PATHS_FILE,
   type RiskKind,
@@ -151,9 +150,6 @@ export {
   riskyFiles,
   SECOND_OPINION_CONTEXT,
   statusByContext,
-  TIER_COLUMN,
-  TIERS,
-  type Tier,
 } from './merge-gates.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
@@ -176,28 +172,14 @@ export {
   spliceSnapshot,
 } from './plan-snapshot.ts';
 export {
-  CLAIM_COLUMN,
-  CLAIM_MATCH_CONTEXT,
-  ENGINE_BOT_LOGIN,
   ISSUE_COLUMN,
+  LEGACY_COLUMNS,
   linkedIssue,
-  PLAN_COLUMN,
+  OPTIONAL_COLUMNS,
   PR_COLUMNS,
-  prClaimId,
   prColumns,
-  SPECS_COLUMN,
 } from './pr-columns.ts';
-export {
-  annotation,
-  checkPlanValue,
-  checkPrFields,
-  PLAN_DOC,
-  type PrEvent,
-  type PrFacts,
-  prFromEvent,
-  type RepoFacts,
-  specsPaths,
-} from './pr-fields.ts';
+export { annotation, checkPlanValue, PLAN_DOC } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {

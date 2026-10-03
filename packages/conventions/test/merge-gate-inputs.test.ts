@@ -1,13 +1,15 @@
 // 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；design 第五节
 // 「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸 merge-gate 汇总 PR
-// 此刻的状态——PR 本身（草稿、冲突、改了哪些文件，正文里的必填栏只提醒）和当前头上的提交状态（第二意见；#555-2 起
+// 此刻的状态——PR 本身（分支名、改了哪些文件；#654 起不看草稿、冲突、正文）和当前头上的提交状态（第二意见；#555-2 起
 // 再加一条冷调用的结论）。#555-2 加 cold-verify 时**没有**给合并闸加新的读口子：冷调用的结论和第二意见在同一次
 // statuses 调用里读回来，只是另一个 context——闸里起模型调用会破坏「CI 检查必须确定」这条，所以冷调用在装配侧跑、
 // 结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）这里会红：要加得先改上面那两处的规矩，
 // 再改这里的清单。
 import { readFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const src = (name: string) => readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
 const gate = src('merge-gate.ts');
@@ -15,14 +17,11 @@ const gates = src('merge-gates.ts');
 
 /** 合并闸从 GitHub 读、往 GitHub 写的口子（merge-gate.ts 的 GitHubReads），一样一行写清看的是什么。 */
 const ALLOWED_READS: Record<string, string> = {
-  pr: 'PR 本身：草稿、冲突、当前头、改了几个文件、正文和标签（必填栏只提醒）',
+  pr: 'PR 本身：当前头、分支名、改了几个文件、开着还是关了（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
   files: 'PR 改了哪些文件：判改没改到先审后合的路径',
   statuses:
     '当前头上的提交状态（逐条的）：第二意见、合前一次冷调用的结论（#555-2，同一份读回来、各认各的 context）',
-  fileAt: '这个 PR 里的 plan.md：必填栏「对应计划」只提醒',
-  exists: '这个 PR 里的 specs 目录在不在：必填栏「specs」只提醒',
-  openPrs: '主线一动、第二意见写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
-  mainHead: '写结论前核主线在这一轮里没动：动了不写，不参与判',
+  openPrs: '第二意见、冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
   writeStatus: '写 merge-gate 这一个状态',
 };
 
@@ -66,6 +65,86 @@ function interfaceMethods(code: string, name: string): string[] {
   const body = code.slice(start, end);
   return [...body.matchAll(/^ {2}(\w+)\(/gm)].map((m) => m[1] ?? '');
 }
+
+const REPO = fileURLToPath(new URL('../../../', import.meta.url));
+const posix = (p: string) => p.split('\\').join('/');
+
+/** 入口只借 pr-fields.ts 的 annotation 给 Actions 报错加格式：它改不了结论，不算闸的输入（和 merge-gates.test.ts 里走同一遍导入时的排除一样）。 */
+const FORMAT_ONLY = new Set(['packages/conventions/src/pr-fields.ts']);
+
+/** 闸的入口文件，顺着相对 import 能走到的每个 .ts（仓内路径）：闸的判法就是这些文件；少列一个，它变了开着的 PR 不重算。 */
+function importClosure(entry: string): string[] {
+  const seen = new Set<string>();
+  const walk = (file: string): void => {
+    if (seen.has(file) || FORMAT_ONLY.has(file)) return;
+    seen.add(file);
+    const text = readFileSync(join(REPO, file), 'utf8');
+    for (const m of text.matchAll(/from '(\.[^']+\.ts)'/g)) {
+      walk(posix(relative(REPO, join(dirname(join(REPO, file)), m[1] ?? ''))));
+    }
+  };
+  walk(entry);
+  return [...seen].sort();
+}
+
+/** merge-gate.yml 里 on.push.paths 列的路径；写法换了（没有 push、没有 paths）直接抛，不当成「没列」。 */
+function pushPaths(yml: string): string[] {
+  const doc = parse(yml) as { on?: { push?: { paths?: unknown } } } | null;
+  const paths = doc?.on?.push?.paths;
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) {
+    throw new Error('merge-gate.yml 里找不到 on.push.paths（一串路径）：写法换了，这条测试跟着改');
+  }
+  return paths as string[];
+}
+
+/** 闸的判定输入：入口文件和它 import 到的所有文件、高风险清单、这份工作流自己；在 push.paths 里漏列的。 */
+function unwatchedInputs(yml: string): string[] {
+  const watched = new Set(pushPaths(yml));
+  const inputs = [
+    ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
+    'packages/conventions/high-risk-paths.json',
+    '.github/workflows/merge-gate.yml',
+  ];
+  return inputs.filter((f) => !watched.has(f));
+}
+
+describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二意见）', () => {
+  it('闸 import 到的每个文件、高风险清单、工作流自己都在 push.paths 里：它们在主线上一变就重算所有开着的 PR', () => {
+    const inputs = importClosure('packages/conventions/src/bin/merge-gate.ts');
+    expect(inputs.length, '一个文件都没走到：解析错了，不是没有').toBeGreaterThanOrEqual(4);
+    expect(inputs, '格式化报错的 pr-fields 不算闸的输入').not.toContain(
+      'packages/conventions/src/pr-fields.ts',
+    );
+    expect(unwatchedInputs(workflow)).toEqual([]);
+  });
+
+  it('push.paths 里没有多余的：列的每个文件都真是闸的输入', () => {
+    const inputs = new Set([
+      ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
+      'packages/conventions/high-risk-paths.json',
+      '.github/workflows/merge-gate.yml',
+    ]);
+    expect(pushPaths(workflow).filter((p) => !inputs.has(p))).toEqual([]);
+  });
+
+  it('【故意造出的失败】从 push.paths 里摘掉高风险清单：查得出来', () => {
+    const narrowed = workflow.replace('      - packages/conventions/high-risk-paths.json\n', '');
+    expect(narrowed).not.toBe(workflow);
+    expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/high-risk-paths.json']);
+  });
+
+  it('【故意造出的失败】闸多 import 了一个文件却没列进 push.paths：查得出来', () => {
+    const narrowed = workflow.replace('      - packages/conventions/src/flow-branch.ts\n', '');
+    expect(narrowed).not.toBe(workflow);
+    expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/src/flow-branch.ts']);
+  });
+
+  it('【故意造出的失败】工作流里没有 push 触发：抛错，不当成「没列」', () => {
+    const noPush = workflow.replace(/^ {2}push:[\s\S]*?(?=^ {2}workflow_dispatch:)/m, '');
+    expect(noPush).not.toBe(workflow);
+    expect(() => pushPaths(noPush)).toThrow('找不到 on.push.paths');
+  });
+});
 
 describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () => {
   it('从 GitHub 读、往 GitHub 写的口子就这几个；多加一个会红（先改 design 第五节第 5 条）', () => {
