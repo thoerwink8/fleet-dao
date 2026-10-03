@@ -44,6 +44,7 @@ import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
 import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { quotaReadJob } from './quota-read.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { realRuns } from './runs-writer.ts';
@@ -536,6 +537,8 @@ export function realPortsFromEnv(
       orgSwitch,
       machine: config.machine,
     }),
+    // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
+    quotaRead: quotaReadJob({ db }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
     // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
     hourlyReconcile: hourlyReconcileJob({

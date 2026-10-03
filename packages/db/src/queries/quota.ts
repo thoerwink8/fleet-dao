@@ -229,6 +229,18 @@ export async function savePoolQuota(
   });
 }
 
+/** 这些池最近一次读成额度的时刻（pools.last_read_ok_at）；库里没有这个池、或从没读成过的给 null。定时读额度判「连着两轮没读成」用。 */
+export async function poolLastReadOk(db: Db, poolIds: readonly string[]): Promise<Map<string, Date | null>> {
+  const out = new Map<string, Date | null>(poolIds.map((id) => [id, null]));
+  if (poolIds.length === 0) return out;
+  const rows = await db
+    .select({ id: pools.id, at: pools.lastReadOkAt })
+    .from(pools)
+    .where(inArray(pools.id, [...poolIds]));
+  for (const r of rows) out.set(r.id, r.at);
+  return out;
+}
+
 /** 每个账号池正在跑的会话数（已开始、没结束）。并发按池算，不按渠道或执行方式算。 */
 export async function inFlightByPool(db: Db): Promise<Map<string, number>> {
   const rows = await db

@@ -41,6 +41,7 @@ describe('活动外壳', () => {
         ...PORT_NAMES,
         'reconcileGitHub',
         'probeRoutes',
+        'readQuotas',
         'reconcileHourly',
         'canaryOpen',
         'canaryCheck',
