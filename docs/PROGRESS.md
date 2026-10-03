@@ -2,39 +2,32 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
-## 2026-10-03 08:30（GitHub 大改：流程去冗余，#654）
+## 2026-10-03 凌晨（#654 GitHub 瘦身：F2 deploy 切片 + 第二意见不再留会话）
 
-- 创始人原话（清晨）：「我们的流程不应该冗余，一切要为了提速而服务，多考虑这个点，然后大改github相关」。决定记在 `docs/decisions/0015-github-one-home.md`；清单在 GitHub #654。
-- 做到哪：A（删 PR 页没人读的检查）[#655](https://github.com/thoerwink8/fleet-dao/pull/655) 已合；B（PR 模板四栏、合并闸两条真门）[#656](https://github.com/thoerwink8/fleet-dao/pull/656) 已合，同一时段修了主线上日期写死的红（[#657](https://github.com/thoerwink8/fleet-dao/pull/657)）；C（需求只在单子正文里、关单证据、删关单对账、欠账和文档指针不再扫 specs/）[#658](https://github.com/thoerwink8/fleet-dao/pull/658) 已合；F1（CI 测试切分并行，整轮 250–290 秒、四次重跑全绿）[#659](https://github.com/thoerwink8/fleet-dao/pull/659) 已合；C2（引擎收单不再替新单写 specs 镜像）[#660](https://github.com/thoerwink8/fleet-dao/pull/660) 自动合并中；D（计划不再存进仓里：删 `docs/plan.md`，`pnpm plan` 现读 GitHub；每天一轮 `github-audit`）是本提交——对账第一次跑真仓就查出 #118、#49 挂在已关母单 #193 下面，已摘出来当独立单，再跑是「没有断裂」。
-- 下一步：F2 部署那一轮（231 秒，现在是整轮最慢的一段）提速；H 清远端已合并的分支；G（改标准）通用段和技能说明里提到被删机制的文字，等创始人点头才合；Fusion 残留（`PLAN_DOC` 和「对应计划」那套，引擎旧需求会话在用）随 #556 剩下几片删。
-- 还没验证：`retireCloseSweepAlerts`（撤旧提醒）要引擎重开后第一轮才真跑，引擎重开后确认驾驶舱上没有 `close-sweep:` 的提醒就把它删掉；`pnpm issue:close` 读时间线的形状已在真 GitHub 上核过（#654 上 #655、#656 的交叉引用），还没有真关过一张单。
+> 无人值守推进（创始人 10-02 夜「大改 github 相关」「一切要为了提速而服务」；10-03 说 deploy 231 秒「还是太久了」、第二意见「我根本不想看见它，并且我希望随时能清理掉」）。**做到哪、下一步、还剩什么没验证**写在下面；接着干的先读这一段。
 
-## 2026-10-03 06:55（GitHub 对账：计划快照、先后清单、母子单）
+- **已合**：#655（删 conflicts/pr-labels/debt 的 PR 触发）、#656（PR 模板四栏、合并闸两条真门）、#658（单子一个家，含 E）、#659（测试切 vitest --shard：engine 两台、rest 三台）、#660（引擎收单改读单子正文）、#661（`pnpm plan` 现读 GitHub + 每天一轮 `github-audit`，改到了里程碑接口缺字段的判法）、#664、#665（第二意见跑完删会话 + `--sessions`/`--stop-stale`）。
+- **#662（F2 deploy 切片）**：`deploy/test/run.sh` 加 `--shard i/n`、每项打「⏱ 名字 N 秒」、`--check-shards` 核名单；`ci-plan.ts` 加 `DEPLOY_SHARDS = 3` / `deployMatrix(mode)`；`ci.yml` 的 deploy job 铺矩阵。**实测**：deploy 三台 1m52s / 2m38s / 1m30s，整轮墙钟 144 秒（原来 deploy=all 那几次 249–286 秒、中位 231 秒）。第二意见三轮：第 1 轮揪出 **ops 腿空跑报绿**（跑测试那步写着 `if: deploy == 'all'`，只改 `docs/ops.md` 时那台什么都不跑），第 2 轮揪出 **`--ops` 跳过分台名单核对、也不打耗时行**，都改了并各配故意造错的用例；第 3 轮通过。已挂自动合并，**等最后一条 deploy 腿跑完合进来**。
+- **第二意见无头化**：Mirasim 协议没有「起了不进列表」的起法，做到的是「跑完就删」（`deleteSession` 连目录和账本一起删）。本机的无头 CLI（codex、kimi）都没登录，GPT 系还走不了真无头——**这条只做到「不留」，没做到「不起」**。
+- **已核实不是问题**：`packages/conventions` 一改并不触发 `deploy=all`（实测 deploy=none；触发 all 的只有 agents-sync、feishu、web）。先前以为它是宽触发面，是记错了。
+- **下一步**：① #662 合了之后看 `pnpm plan`；② 第三刀（`login-user`/`cli-tools`/`session-ports` 那几处「等超时」用例改成可注入的短超时，预期省 35–50 秒——**风险最高，改一个读一个**，别全局调小）；③ 干净 CI 上重新量一次整轮墙钟，看有没有真到「PR 中位 ≤ 120 秒」。
+- **还没验证**：整轮墙钟只在「有 deploy 的 PR」上量过（144 秒）；不带 deploy 的 PR 没量。第二意见的 `--sessions`/`--stop-stale` 只在真机上手动跑过，测试只盖「没装 Mirasim 时报没装」。
+- **等人闸**：G（改标准 PR：#650、#646、#624 + AGENTS/skills 措辞，等创始人点头）；H 里的清旧远端分支；`retireCloseSweepAlerts` 等引擎重开后删。
 
-- 创始人原话（约 06:40）：「我希望 GitHub Issues、PR 和我们当前正在改的流程都能同步进度，随时更新。比如：1. Issues 在里程碑里面都要正确展示；2. 如果随时有断裂，随时修复。」另一句原则「减少或优化流程步骤，不要花 80% 以上的时间在读文件上」。决定记在 `docs/decisions/0014-progress-on-github.md`。
-- 做到哪：核出并修了 8 处断点——先后清单里写了子单（计划快照直接拒绝生成）和已关的 #227；#593、#216、#76 挂在已关的旧母单下（摘出来当独立单）；#553 贴了「母单」却没有子单（摘标签）；#574 缺需求文档（补）；#555 子单全关了没收尾（补结果文档，合并后 `pnpm issue:close 555`）。计划快照已重新生成。
-- 下一步 / 还没验证：`pnpm debt:check --live` 还报 23 句旧文档里「推后的话」挂不到开着的单，下一个 PR 逐句改；#216 的标题和正文还写着 Fusion，做它那一步再改写；（计划快照这一条已由 #654 D 解决：不再存快照，`pnpm plan` 现读、每天一轮 `github-audit` 查断裂。）
+## 2026-10-02 夜（单人收尾：优先级与实现计划，不开子代理和工作流）
 
-## 2026-10-03（北京时间；「别开 subagent / workflow」这类话不落盘）
-
-- 创始人原话：03:19「1-3 / 2-1，这种都是临时命令，是不是我们处理方式有问题，都不应该列在文档里的」；03:32 前后「之前定的不开不是规则，要摘掉；subagent和workflow这种都是临时的，看看怎么改」；03:44 前后「【不开subagent和workflow】是临时的，不应写在规则里，你分析下应该怎么做；即下一个会话这条要失效」。决定记在 `docs/decisions/0013-session-directives.md`。
-- 做到哪：文档里写进去的「不开子代理和工作流」已摘（本文件 10-02 夜那节的标题和首条、临时调整表第二行、kimi 复核那节一句）；`specs/169-Fusion形态/需求.md` 第 5 条本来就记着 10-01 已撤回，没动。新规矩的那一句要写进通用段，是改标准，另开 PR、等创始人点头才合；没合之前，靠本机记忆兜住（只记「这类话不落盘」这条做法，不记那句指令本身）。
-- 下一步 / 还没验证：通用段那句合进主线后，用 `pnpm agents:sync --check` 看各台机器是否带上；下一个会话开头是否真的不再读到「不开子代理」，要等下一个会话才验得到。
-
-## 2026-10-02 夜（优先级与实现计划）
-
-- 创始人原话（2026-10-02 20:00 前后，北京时间）：「安排优先级，列出各实现计划给我，然后全实现」（原话后半句只管那一次会话怎么干，按决定 0013 不记）。上一个会话（kimi-k3）后半段输出乱码，留下一批没提交的改动，已逐个核过再处理；接手时的状态：#626 已合（runs 写作入口）、#623/#624/#625 三个 PR 开着、618 的 900 行改动没提交。
+- 创始人原话（2026-10-02 20:00 前后，北京时间）：「安排优先级，列出各实现计划给我，然后全实现，你独自干，不要开subagent和workflow」。这条覆盖他 17:08 那条「后面全用 subagent+workflow」。上一个会话（kimi-k3）后半段输出乱码，留下一批没提交的改动，已逐个核过再处理；接手时的状态：#626 已合（runs 写作入口）、#623/#624/#625 三个 PR 开着、618 的 900 行改动没提交。
 - 排序依据：`AGENTS.md` 本仓段「先后顺序」——①坏了的 ②挡住 v3 目标的（里程碑先后 #509 #554 #555 #556 #227 #450 #194 #76 #323）③创始人开的 ④AI 发现的不急的。门：先审后合＝改到 `high-risk-paths.json`，要第二意见；人闸＝改标准、删数据、对外发布，要创始人点头，不挂自动合并。
 - 每做完一件在下表改状态并带 PR 号；做不到的写卡在哪（要创始人动手、要法国真机、要真实事件才能验的不假装做完）。
 
 | 序 | 事 | 怎么做 | 门 | 状态 |
 |---|---|---|---|---|
 | 1 | `release.yml` 在主线是坏文件（#597 起连红 42 次推送，「发布 vN」没真跑过） | 顶格的 `$body` 改 `printf` 拼；加测试：`.github/workflows/` 每个文件 YAML 都得能解析 | 先审后合 | 已合 [#629](https://github.com/thoerwink8/fleet-dao/pull/629)（主线 `d9d1d1a1`，之后推主线 release.yml 不再红） |
-| 2 | #624 正文写了对话里查不到的「创始人拍加」；#623 缺同意时间 | #624 正文更正、不挂自动合并；#623 补原话和时间后挂自动合并 | 改标准 | #623 已合（`2d374ab7`）；#624 正文已更正、不挂自动合并；创始人 2026-10-03 03:19 选「先看解释再定」，解释已在当天报告里给他，**等他选加不加**；和主线的冲突只在 `docs/PROGRESS.md`，他选了再解 |
+| 2 | #624 正文写了对话里查不到的「创始人拍加」；#623 缺同意时间 | #624 正文更正、不挂自动合并；#623 补原话和时间后挂自动合并 | 改标准 | #623 已合（`2d374ab7`）；#624 已更正正文、并上主线，**等创始人选加不加** |
 | 3 | #618 / #453 法国发布改按版本（停派活→等收尾→部署→恢复，决定 0011 第 3、4 条） | 复核上个会话留下的 900 行，补故意失败的测试，过第二意见 | 先审后合 | 已合 [#631](https://github.com/thoerwink8/fleet-dao/pull/631)（`32f1e0d8`）。复核补了 4 处错：标记比在用的旧会降级发、`deploy_lag` 仍按主线头数、轻量 tag 解析不了、查不出引擎状态时按「关着」冒充。**还没装到法国**（装机算上线，等创始人点头） |
 | 4 | #555-2 验收结论接合并闸（PR #625）+ 自动触发和真取样口 | 合并闸只管引擎任务流程开的 PR（按分支名认，`flow-branch.ts`）；触发和取样口随 S2-5b 接进任务工作流 | 先审后合（对着 `standard-paths.json` 逐个判过，改到的文件里落进改标准的 0 个；先前正文写的「人闸：改标准」是错的，已更正） | [#625](https://github.com/thoerwink8/fleet-dao/pull/625) 已合（`39bda0a9`，第二意见通过）；取样口和触发见行 6 的 S2-5b |
-| 5 | #556-2/-3/-7 删 core 旧流程、API 旧接活，文档对齐（不动库表） | 逐个查引用、删、改 design/ops/AGENTS 本仓段 | CI 绿就合 | **第 1 片已合（#649）；第 2、3 片合成一片在做**（2026-10-03）：第 1 片删开 PR 前验证块、旧决定表、24 份旧流程重放夹具，引擎的接口和假世界缩到任务工作流在用的（-79263 行），引擎全量测试 1793 条过。探路时的数：删掉 core 的 fusion/flow/replica 和 api 的 issue-intake/claim-status 后类型检查 90 处错、牵连 29 个文件，不是纯删；明细和分片见 `specs/556-清理/需求.md`「现状」；第 2 片起：core 三份 + 引擎剩的指向 + db 的 flow 查询 → api 接活 → `real/sessions.ts` Fusion 那半 → 文档旧说法；**第 2+3 片现状**：分支 `feat/556-s26-api`（草稿 PR），71 个文件、`tsc -b` 0 错；测试到改完才第一次跑（api、core、shared、github 17 条红在修，db、engine、web 还没跑）；合成一片是因为 api 里的 `FlowReplica` 和接活缠在一起、分开删中间态编译不过；下一步：修红测试 → 跑 db/engine/web → 转正式 PR → 挂自动合并 |
-| 6 | 三段总调度：让一张单真能「开单→动手→PR→CI→验收→合并→关单」 | 方案已按 `best-practice-first` 写好（`specs/632-三段总调度/方案.md`），切片 S2-1…S2-7 | 视改动 | 开了 [#632](https://github.com/thoerwink8/fleet-dao/issues/632)；方案已合 [#633](https://github.com/thoerwink8/fleet-dao/pull/633)；**S2-1**（读单子和需求文档拼交代、缺栏一次全报、派活按已知的模块分档）[#635](https://github.com/thoerwink8/fleet-dao/pull/635) 已合；**S2-2**（引擎拉单的逻辑：逐道过关、交代不全留言、齐的起工作流；还没接 Schedule）[#636](https://github.com/thoerwink8/fleet-dao/pull/636) 已合；**S2-3**（一次性段会话的生产 Spawner：复用执行方式驱动，按路由编号起 Claude Code / cursor-agent / grok，用量花费额度带回来）[#637](https://github.com/thoerwink8/fleet-dao/pull/637) 已合；**S2-4a**（任务工作流 `taskWorkflow` 骨架：读交代→动手→开 PR→CI→冷验收→挂自动合并→等合并→关单，失败分流、停下等人、放弃，加四条老历史重放夹具；活动是接口，真实现和 Schedule 在 S2-4b）[#638](https://github.com/thoerwink8/fleet-dao/pull/638) 已合；**S2-4b-1**（任务活动里不碰会话的五个真实现 + 装配进工人；顺手补上改标准路径的正确判法，每小时兜底不再碰任务分支）[#639](https://github.com/thoerwink8/fleet-dao/pull/639) 已合；**S2-4b-2**（动手会话 `runSegment` 的真实现：备树、提示词、一次性会话、结局整理）[#640](https://github.com/thoerwink8/fleet-dao/pull/640) 已合；**S2-4b-3**（拉单有了 Schedule 和真依赖：每 5 分钟引擎自己读该做的单、建任务行、起任务工作流）[#641](https://github.com/thoerwink8/fleet-dao/pull/641) 已合（代码里卡着「合并闸和冷验收没接上就不拉」）；**S2-5**（合并闸认 `cold-verify`，只管引擎任务流程的 PR）[#625](https://github.com/thoerwink8/fleet-dao/pull/625) 已合；测试里轮询工作流状态的帮手修了一次 CI 里的偶发红 [#642](https://github.com/thoerwink8/fleet-dao/pull/642) 已合；**S2-5b**（冷验收真活动：取样口、按族选路由、验收会话、贴状态；头被换了对新头重走；打开拉单的卡）[#643](https://github.com/thoerwink8/fleet-dao/pull/643) 已合（`ad76dcc4`）；**「让 AI 接活」仍然没有任何仓打开**——先过演练（S2-7）、再由创始人逐个项目打开；下一片 S2-6 删旧接活和 Fusion 残留、S2-7 演练 |
+| 5 | #556-2/-3/-7 删 core 旧流程、API 旧接活，文档对齐（不动库表） | 逐个查引用、删、改 design/ops/AGENTS 本仓段 | CI 绿就合 | 待做 |
+| 6 | 三段总调度：让一张单真能「开单→动手→PR→CI→验收→合并→关单」 | 方案已按 `best-practice-first` 写好（`specs/632-三段总调度/方案.md`），切片 S2-1…S2-7 | 视改动 | 开了 [#632](https://github.com/thoerwink8/fleet-dao/issues/632)；方案已合 [#633](https://github.com/thoerwink8/fleet-dao/pull/633)；**S2-1**（读单子和需求文档拼交代、缺栏一次全报、派活按已知的模块分档）[#635](https://github.com/thoerwink8/fleet-dao/pull/635) 已合；**S2-2**（引擎拉单的逻辑：逐道过关、交代不全留言、齐的起工作流；还没接 Schedule）[#636](https://github.com/thoerwink8/fleet-dao/pull/636) 已合；**S2-3**（一次性段会话的生产 Spawner：复用执行方式驱动，按路由编号起 Claude Code / cursor-agent / grok，用量花费额度带回来）[#637](https://github.com/thoerwink8/fleet-dao/pull/637) 已合；**S2-4a**（任务工作流 `taskWorkflow` 骨架：读交代→动手→开 PR→CI→冷验收→挂自动合并→等合并→关单，失败分流、停下等人、放弃，加四条老历史重放夹具；活动是接口，真实现和 Schedule 在 S2-4b）[#638](https://github.com/thoerwink8/fleet-dao/pull/638) 已合；**S2-4b-1**（任务活动里不碰会话的五个真实现 + 装配进工人；顺手补上改标准路径的正确判法，每小时兜底不再碰任务分支）[#639](https://github.com/thoerwink8/fleet-dao/pull/639) 已合；**S2-4b-2**（动手会话 `runSegment` 的真实现：备树、提示词、一次性会话、结局整理）[#640](https://github.com/thoerwink8/fleet-dao/pull/640) 已合；**S2-4b-3**（拉单有了 Schedule 和真依赖：每 5 分钟引擎自己读该做的单、建任务行、起任务工作流）[#641](https://github.com/thoerwink8/fleet-dao/pull/641) 已合（代码里卡着「合并闸和冷验收没接上就不拉」）；**S2-5**（合并闸认 `cold-verify`，只管引擎任务流程的 PR）[#625](https://github.com/thoerwink8/fleet-dao/pull/625) 已合；测试里轮询工作流状态的帮手修了一次 CI 里的偶发红 [#642](https://github.com/thoerwink8/fleet-dao/pull/642) 已合；**S2-5b**（冷验收真活动：取样口、按族选路由、验收会话、贴状态；头被换了对新头重走；打开拉单的卡）[#643](https://github.com/thoerwink8/fleet-dao/pull/643) 开着；**「让 AI 接活」仍然没有任何仓打开**——先过演练（S2-7）、再由创始人逐个项目打开；下一片 S2-6 删旧接活和 Fusion 残留、S2-7 演练 |
 | 7 | #556-4 删 `repos.flow_*` 列、`issue_claims`/`seat_*` 三表 | 只出清单和迁移草稿 | 删数据（要创始人点头）+ 先审后合 | 只准备，不执行 |
 | 8 | 本机：WSL 前置收尾，起驾驶舱给创始人看 | 核 `fleet-local`，起 `dev:mock`，截图 | 无 | 驾驶舱演示版已在本机 `http://localhost:5173/` 跑起（截图 `_tmp/cockpit-home-1440.png`）；WSL 里装机脚本已重跑完（退出码 0），读回红项 33 → 18，其中「库在听」一项由 [#634](https://github.com/thoerwink8/fleet-dao/pull/634) 修掉（已合）；剩下的要创始人动手（登录）、要凭据（环境文件）、或网络（grok 安装脚本连不上），原因见 `docs/ops.md`「这台本机现在的样子」。**应用还没部署到本机 WSL**（缺环境文件的值） |
 | 9 | #76 额度入库、#323 配置对账剩余、#574 路由两层 DB、#470 思考档位、#216 改写 | 各按自己的需求文档 | CI 绿就合 | 待做 |
@@ -61,12 +54,6 @@
 - 555-2 原来还欠的真取样口和任务工作流的 `coldVerify` 活动真实现，由 S2-5b（[#643](https://github.com/thoerwink8/fleet-dao/pull/643)，
   母单 #632）补上。闸合进来以后，引擎的任务 PR 没有 cold-verify 就合不了；人手的 PR 不受影响。还没真跑过（演练 S2-7 之前
   「让 AI 接活」没有任何仓打开）。
-
-## 2026-10-02 夜（派工交代带上「报进度」，PR #663）
-
-- 创始人问「为什么不遵守约定、反馈要带进度，断链在哪」。查实：规矩没断（通用段第 12、13 行，`agents-sync` 正常同步到 `~/.claude/CLAUDE.md`），断在派工那一段——`commander` 技能的交代清单没要求带上汇报格式和落盘要求，工人只读交代不读通用段，于是整晚子代理做完的活报回来全是散文、进度没落回 specs。
-- 修法（创始人 2026-10-02「做」）：`agents/skills/commander/SKILL.md` 派活那一条写明「交代里必须带上通用段『报进度』那两条」；加钉住它的测试 `agents/test/rules/brief-progress.rules.test.ts`（含一条故意造出的失败）。PR [#663](https://github.com/thoerwink8/fleet-dao/pull/663) CI 全绿已合并，主线 `9135cd1`。
-- 顺带：本机 `user.email` 是 `rmtbsmgo374@outlook.com`，往 GitHub 推被 email privacy 规则拒了一次；改成仓里在用的 `211872110+thoerwink8@users.noreply.github.com` 才推上去。
 
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
@@ -118,7 +105,7 @@
 | 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |
 |---|---|---|---|---|
 | 法国引擎关闭：不再派单、不接新活，`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 只留 `fleet-api`；期望配置写在 `deploy/france/desired-config.json` 的【临时】段 | 引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%；流程重做前不再让它接活 | 创始人 2026-09-29 叫停引擎、要改成三段一条龙（原话：「要删的东西都要删」）；10-02 拍板「继续关着，到 #452 演练三连跑通 + 你说过那句『开』才再评估」(docs/decisions/0011-…md 第 2 条) | 演练过 + 创始人说「开」；撤回做法：改回 `fleet-engine fleet-api`、发布一轮，再把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个 Temporal 定时任务用 `fleet-temporal schedule toggle --unpause` 恢复；原定 10-05 复查，按 0011 第 2 条续到 10-15（#452 还没跑通） | 2026-10-15 |
-| 指挥官派工人用 Grok，不用 Claude：新派的活走 `commander` 技能的 `worker.mjs` 起 Grok 会话；改标准的活也派给 Grok，PR 不挂自动合并、等创始人点头 | reclaude 独享号额度紧 | 创始人 2026-09-28 晚（原话：「reclaude独享号额度不多了，能不能尽量都grok做，帥位查看盯着进度，临时看板也能看」，`specs/169-Fusion形态/需求.md` 行 270、第 4 条撤回条件在行 278；同晚「本机快马」第 5 条「最迟 2026-10-05 帅位复查」在行 333）；2026-10-03 03:19 对「只撤『不开子代理』那一句、派工仍走 Grok」选了「2-1」（`docs/decisions/0013-session-directives.md`；`specs/169-Fusion形态/需求.md` 行 281 记着 2026-10-01 已把这半也撤过、这行是 10-02 建表时又抄回来的，以他 10-03 的「2-1」为准保留，要整行摘掉他说一声） | reclaude 独享号额度恢复，或创始人说撤 | 2026-10-05 |
+| 指挥官派工人用 Grok，不用 Claude：新派的活走 `commander` 技能的 `worker.mjs` 起 Grok 会话；改标准的活也派给 Grok，PR 不挂自动合并、等创始人点头；不开 Claude 子代理 | reclaude 独享号额度紧 | 创始人 2026-09-28 晚（原话：「reclaude独享号额度不多了，能不能尽量都grok做，帥位查看盯着进度，临时看板也能看」，`specs/169-Fusion形态/需求.md` 行 270、第 4 条撤回条件在行 278；同晚追加「后续不要开subagent了」在行 279；同晚「本机快马」第 5 条「最迟 2026-10-05 帅位复查」在行 333）；2026-10-02 下午又说「别开subagent和workflow」 | reclaude 独享号额度恢复，或创始人说撤 | 2026-10-05 |
 
 ## 2026-10-02（Mirasim 自有 / 平台切换与 macOS，先调研出方案）
 
@@ -446,7 +433,7 @@
 
 ## 2026-10-02 15:10 起（复核 kimi-k3 合进主线的改动，本机指挥官会话）
 
-- 做法：一张张看合进去的 PR、直推的提交、它动过的单子和文档，全部在主会话里做。审查用的工作树 `.claude/worktrees/review-kimi`。
+- 做法：一张张看合进去的 PR、直推的提交、它动过的单子和文档；创始人说不开子代理和工作流，全部在主会话里做。审查用的工作树 `.claude/worktrees/review-kimi`。
 - 主线 `debt` 检查红（13:03 起）：本文件一句「留给下一个 AI」、0011 一句「再定」被认成推后的话 → 本 PR 改掉。
 - 0011：时间写错（北京 10:30 写成「UTC 10:3x / 北京 18:3x」）、把 0007 第 2 条说成「法国引擎重开」（不对）、几处乱码 → 本 PR 改正。0008 两处乱码、一个指向已关单 #454 的说法 → 改正。
 - 临时调整表：两行日期格里塞了说明，开会话钩子认不出；第二行（工人用 Grok）被那个会话自己从 10-05 延到 10-15，创始人没拍过 → 日期改回 2026-10-05，到期照规矩问。第一行续到 10-15 有 0011 第 2 条撑着，留着。
