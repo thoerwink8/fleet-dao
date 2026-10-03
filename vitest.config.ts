@@ -16,3 +16,4 @@ export default defineConfig({
     ...(workers.maxWorkers === undefined ? {} : { maxWorkers: workers.maxWorkers }),
   },
 });
+// ci-soak 1/10：这张草稿 PR 只用来连跑完整 CI 测偶发红，不合（#654）
