@@ -132,6 +132,8 @@ export interface HarnessOptions {
   gatewaySeen?: Deps['gatewaySeen'];
   /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
   alertWork?: Deps['alertWork'];
+  /** 路由两层每一层现在活着吗（#574）；不给就是没接上（内存版、开发环境一样）。 */
+  routingLayers?: Deps['routingLayers'];
   /** /changelog 发布版本号读里程碑和 CHANGELOG.md 的替身；不给就是没接上（内存版、开发环境一样）。 */
   release?: Deps['release'];
   /**
@@ -172,6 +174,7 @@ function wire<S extends Store>(
     ...(options.notWired ? { notWired: options.notWired } : {}),
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
+    ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.release ? { release: options.release } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {

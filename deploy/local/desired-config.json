@@ -60,6 +60,10 @@
         "private": null,
         "说明": "登记的差别：同 FEISHU_APP_ID，本机档不接飞书"
       },
+      "FLEET_FEISHU_LOGIN": {
+        "value": "off",
+        "说明": "登记的差别：本机档不接飞书登录（没有香港网关、没有对外域名，飞书登录的回调地址落不到这台），驾驶舱登录只剩账密（fleet-api set-password）；packages/api/src/config.ts 见到 off 才允许飞书一对空着、生产照样起，没写 off 又没配飞书照旧拒启动"
+      },
       "TEMPORAL_ADDRESS": "127.0.0.1:7243",
       "TEMPORAL_NAMESPACE": "fleet",
       "FLEET_TASK_QUEUE": "fleet",

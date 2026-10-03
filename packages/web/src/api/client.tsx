@@ -31,6 +31,7 @@ import type {
   ReleaseVersion,
   Repo,
   Routing,
+  RoutingLayers,
   RunSteps,
   Setting,
   SettingKey,
@@ -66,6 +67,8 @@ export interface FleetApi {
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   answerAsk(askId: string, answer: string): Promise<void>;
   routing(): Promise<Routing>;
+  /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
+  routingLayers(): Promise<RoutingLayers>;
   updateStagePolicy(stage: StageKind, body: UpdateStagePolicyBody): Promise<StagePolicy>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
@@ -130,6 +133,7 @@ export const keys = {
   timeline: (taskId: string) => ['timeline', taskId] as const,
   runSteps: (runId: string) => ['run-steps', runId] as const,
   routing: ['routing'] as const,
+  routingLayers: ['routing-layers'] as const,
   pools: ['pools'] as const,
   jobs: ['jobs'] as const,
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
@@ -220,6 +224,19 @@ export function useRunSteps(runId: string | undefined) {
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000, enabled });
+}
+
+/**
+ * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每分钟重拉；
+ * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。
+ */
+export function useRoutingLayers() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.routingLayers,
+    queryFn: () => api.routingLayers(),
+    refetchInterval: 60_000,
+  });
 }
 
 export function usePools({ enabled = true }: { enabled?: boolean } = {}) {
@@ -430,8 +447,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
   approvals: [['board'], ['task'], ['timeline']],
   // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
-  quota_windows: [['pools']],
-  channels: [['routing'], ['pools']],
+  quota_windows: [['pools'], ['routing-layers']],
+  channels: [['routing'], ['pools'], ['routing-layers']],
   stage_policies: [['routing']],
   notifications: [['notifications']],
   audit_log: [['audit']],

@@ -13,7 +13,10 @@ const PLANS: Record<string, { what: string; bullets: string[]; related: { to: st
       '模型下架后，对应路由自动离线并推通知',
       '新模型先考试，考过了再进调度台',
     ],
-    related: [{ to: '/quota', label: '额度' }],
+    related: [
+      { to: '/routing', label: '路由' },
+      { to: '/quota', label: '额度' },
+    ],
   },
   '/billing': {
     what: '花了多少、值不值：每个会话记模型、路由、token、耗时和所属任务。',

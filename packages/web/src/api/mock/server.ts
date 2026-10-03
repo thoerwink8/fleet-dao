@@ -22,9 +22,12 @@ import {
   type RealtimeTable,
   ReleaseVersionResponse,
   ReposResponse,
+  type Route,
+  RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
   RunStepsResponse,
+  readSegmentRun,
   SETTING_SCHEMAS,
   type SessionRun,
   type SettingKey,
@@ -42,6 +45,7 @@ import {
   UpdateSettingResponse,
   UpdateStagePolicyRequest,
   UpdateStagePolicyResponse,
+  windowAppliesTo,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import { sha256Hex } from '../../demo/scope';
@@ -82,7 +86,16 @@ const STAGE_WORDS: Record<StageKind, string> = {
 };
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
 const STALE_MS = 30 * 60_000;
+/** 路由两层里在它的模型下关着的路由（照仓里默认骨架：中转那条 Opus 关着）。 */
+const MOCK_SWITCHED_OFF = new Set(['r-rl-opus']);
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
+
+/** 一层合起来（db 的 routing-liveness.ts layerLiveness）：有一条活就活；没有活、有不知道就不知道；全死或空就死。 */
+function layerVerdict(children: readonly ('live' | 'dead' | 'unknown')[]): 'live' | 'dead' | 'unknown' {
+  if (children.includes('live')) return 'live';
+  if (children.includes('unknown')) return 'unknown';
+  return 'dead';
+}
 const GENERIC_STEPS = ['读相关代码', '改代码', '写测试', '跑测试并开 PR'];
 
 /** 可复现的随机数（mulberry32）。 */
@@ -221,6 +234,86 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     if (ban) return `${model.displayName} 不能用在${where}：${ban.reason}`;
     if (model.retiredAt && model.retiredAt <= iso()) return `${model.displayName} 已下架`;
     return null;
+  }
+
+  /**
+   * 一条路由现在活着吗：三件事的说法照 db 的 routing-liveness.ts（真后端的判法只在那里），假数据只照着拼，不另起一套措辞。
+   */
+  function mockRouteLiveness(r: Route, purpose: StageKind, t: number) {
+    const channel = st.channels.find((c) => c.id === r.channelId);
+    const pool = st.pools.find((p) => p.id === r.poolId);
+    const model = st.models.find((m) => m.id === r.modelId);
+    const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });
+
+    let connect: ReturnType<typeof fact>;
+    if (!channel?.enabled) connect = fact('dead', '渠道关了');
+    else if (pool?.expiresAt && Date.parse(pool.expiresAt) <= t) connect = fact('dead', '账号池订阅过期了');
+    else if (model?.retiredAt && Date.parse(model.retiredAt) <= t) connect = fact('dead', '模型已下架');
+    else if (r.alive) connect = fact('live', '探针探通了');
+    else if (!r.probe) connect = fact('unknown', '探针还没看过这条路由');
+    else if (r.probe.state === 'skipped')
+      connect = fact('unknown', `探针这一轮没探它（不是探了没通）：${r.probe.detail ?? '探针没写原因'}`);
+    else connect = fact('dead', `探针判不在线：${r.probe.detail ?? `探针没写原因（${r.probe.state}）`}`);
+
+    const poolWindows = st.quota.filter((w) => w.poolId === r.poolId);
+    const windows = poolWindows.filter(
+      (w) =>
+        !(w.resetsAt && Date.parse(w.resetsAt) <= t) &&
+        windowAppliesTo(w, { id: r.modelId, ...(model ? { family: model.family } : {}) }) !== 'no',
+    );
+    const full = windows.filter(
+      (w) =>
+        w.upstreamStatus === 'limit_reached' ||
+        (w.utilization !== undefined && w.utilization >= 1) ||
+        (w.used !== undefined && w.limit !== undefined && w.used >= w.limit),
+    );
+    const quota =
+      full.length > 0
+        ? fact('dead', '适用的额度窗用满了')
+        : poolWindows.length === 0 || windows.some((w) => t - Date.parse(w.readAt) > STALE_MS)
+          ? fact('unknown', '额度没读成、读数过期，或判不了扣不扣这条路由')
+          : fact('live', '额度读数新、窗口有余');
+
+    const hard = model ? hardBanFor(model, purpose) : undefined;
+    const banReasons = [
+      ...(hard ? [hard.reason] : []),
+      ...st.bans
+        .filter(
+          (b) =>
+            (b.stage === undefined || b.stage === purpose) &&
+            (b.family === undefined || b.family === model?.family) &&
+            (b.modelId === undefined || b.modelId === r.modelId),
+        )
+        .map((b) => b.reason),
+    ];
+    const enabled = !MOCK_SWITCHED_OFF.has(r.id);
+    const ban =
+      banReasons.length > 0
+        ? fact('dead', `命中禁令：${banReasons.join('；')}`)
+        : enabled
+          ? fact('live', '没有禁令、开关开着')
+          : fact('dead', '开关关着（这条路由在它的模型下关着）');
+
+    const verdicts = [connect.verdict, quota.verdict, ban.verdict];
+    return {
+      routeId: r.id,
+      channelId: r.channelId,
+      channelName: channel?.name ?? r.channelId,
+      poolId: r.poolId,
+      hostId: r.hostId,
+      enabled,
+      verdict: verdicts.includes('dead') ? 'dead' : verdicts.includes('unknown') ? 'unknown' : 'live',
+      connect,
+      quota,
+      ban,
+      ...(r.probe ? { probedAt: r.probe.at } : {}),
+      exhausted: full.map((w) => ({
+        label: w.label ?? w.window,
+        ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),
+      })),
+      inFlight: poolRunning(r.poolId),
+      maxConcurrency: pool?.maxConcurrency ?? 0,
+    } as const;
   }
 
   // ---------- 投影成契约形状 ----------
@@ -795,7 +888,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               title: a.question,
               context: `#${t.task.issueNumber} ${t.task.title}`,
               since: a.askedAt,
-              link: '/home3',
+              // 和真后端 homeDecisions 一样链到任务页
+              link: `/tasks/${t.task.id}`,
             })),
         ),
       ].sort((a, b) => b.since.localeCompare(a.since));
@@ -819,7 +913,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 ? ('queue' as const)
                 : ('nothing' as const),
             ...(queued ? { waitingSince: queued.queuedAt } : {}),
-            link: '/home3',
+            link: `/tasks/${t.task.id}`,
           };
         });
       const done = st.tasks
@@ -894,13 +988,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       const tv = findTask(taskId);
       const runs = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)];
+      // 三段的流水和真后端 segmentRunViews 一个读法（shared 的 readSegmentRun）：模型名查目录、计费方式查渠道
+      const finished = TERMINAL.has(tv.task.state);
+      const segmentRuns = (tv.segmentRuns ?? []).map((r) =>
+        readSegmentRun(
+          {
+            ...r,
+            modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+            billing: st.channels.find((c) => c.id === r.channel)?.billing,
+            matchedBy: r.taskId === undefined ? 'issueNumber' : 'task',
+          },
+          { taskFinished: finished },
+        ),
+      );
       return TaskDetailResponse.parse({
         task: tv.task,
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),
         runs: runs.map(runView),
-        // 假数据还没有三段的流水（runs 表）：驾驶舱按段显示那一片接上时一起补
-        segmentRuns: [],
+        segmentRuns,
         asks: tv.asks.map((a) => ({
           id: a.id,
           runId: a.runId,
@@ -930,6 +1036,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 billing: info.billing,
               };
             }),
+          segmentRuns,
         ),
       });
     },
@@ -1070,6 +1177,43 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         hardBans: HARD_BANS.map(({ id, reason }) => ({ id, reason })),
         bans: st.bans,
       });
+    },
+    async routingLayers() {
+      await wait();
+      const t = now();
+      // 假数据没有路由两层那两张表：模型 → 路由按路由目录的先后（一个模型的路由各用途共用），用途 → 模型按各阶段那一串里
+      // 模型第一次出现的先后。没配的用途照真后端写成缺口。
+      const purposes = StageKindSchema.options.map((purpose) => {
+        const policy = st.stages.find((p) => p.stage === purpose);
+        const modelIds = [
+          ...new Set(
+            (policy?.routeIds ?? []).flatMap((id) => st.routes.find((r) => r.id === id)?.modelId ?? []),
+          ),
+        ];
+        if (modelIds.length === 0) {
+          return {
+            purpose,
+            verdict: 'dead' as const,
+            problems: [`用途 ${purpose} 没配模型顺序`],
+            models: [],
+          };
+        }
+        const models = modelIds.map((modelId) => {
+          const model = st.models.find((m) => m.id === modelId);
+          const routes = st.routes
+            .filter((r) => r.modelId === modelId)
+            .map((r) => mockRouteLiveness(r, purpose, t));
+          return {
+            modelId,
+            displayName: model?.displayName ?? modelId,
+            ...(model ? { family: model.family } : {}),
+            verdict: layerVerdict(routes.map((r) => r.verdict)),
+            routes,
+          };
+        });
+        return { purpose, verdict: layerVerdict(models.map((m) => m.verdict)), problems: [], models };
+      });
+      return RoutingLayersResponse.parse({ asOf: iso(), purposes });
     },
     async updateStagePolicy(stage, raw) {
       await wait();

@@ -37,6 +37,8 @@ describe('演示版：模块开关', () => {
     expect(demoBlocked('/schedules')).toBe(true);
     expect(demoBlocked('/demo-links')).toBe(true);
     expect(demoBlocked('/models')).toBe(true);
+    // 路由页（#574）只在正式驾驶舱有：演示版不列、不渲染，读它的接口也回「没开放」
+    expect(demoBlocked('/routing')).toBe(true);
     // 不是导航里的路径交给 404 页
     expect(demoBlocked('/no-such-page')).toBe(false);
   });
@@ -104,6 +106,9 @@ describe('演示版：数据层', () => {
       () => api.audit(),
       () => api.settings(),
       () => api.demoLinks(),
+      // 路由两层（#574）：演示版没有这个模块，开了什么都不给
+      () => api.routingLayers(),
+      // 发布的版本号（#725）：/changelog 页不进演示版
       () => api.releaseVersion(),
     ]) {
       const err = await call().catch((e: unknown) => e);

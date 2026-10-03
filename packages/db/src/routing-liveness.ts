@@ -30,7 +30,7 @@ export interface RoutingLiveness {
 
 /** 三件事各看哪张表的哪几列（测试对着真表校验，改了列名这里不跟着改会红）。 */
 export const ROUTING_LIVENESS_SOURCES = {
-  connect: { table: routes, columns: ['alive', 'probeState', 'probedAt', 'probeOrg'] },
+  connect: { table: routes, columns: ['alive', 'probeState', 'probedAt', 'probeDetail', 'probeOrg'] },
   quota: { table: pools, columns: ['lastReadOkAt'] },
   quotaWindow: {
     table: quotaWindows,
@@ -65,7 +65,8 @@ const BLOCKER_WORDS: Readonly<Record<string, string>> = {
 
 /**
  * 把选路用的候选（queries/candidates.ts 的 evaluateRoutes，「为什么不能用」只有这一处判法）读成三件事。
- * - 接得上：渠道关了、池过期、模型下架、探针判不在线 = dead；探针还没看过、或那一轮没探它（skipped，不是它坏了）= unknown。
+ * - 接得上：渠道关了、池过期、模型下架、探针判不在线 = dead；探针还没看过、或那一轮没探它（skipped：按量计费不探、挂着的是
+ *   另一个组织……不是探了没通）= unknown。探针的原因照它自己写的（routes.probe_detail）说，这里不猜。
  * - 额度够：用满 = dead；没读成、读数过期、窗口判不了 = unknown（不当「还够」）。
  * - 没被禁令挡：命中禁令、或开关关着（这条路由在它的模型下关着）= dead（关着的照样挂在顺序里，但不派）。
  * 并发满了（no-slot）不算 dead：那是等空位，不是坏了。
@@ -81,8 +82,9 @@ export function livenessOf(c: RouteCandidate): RoutingLiveness {
   else if (!c.blockers.includes('offline')) connect = live('探针探通了');
   else if (c.probeState === null) connect = unknown('探针还没看过这条路由');
   else if (c.probeState === 'skipped')
-    connect = unknown('探针那一轮没探它（挂着的是另一个组织），不是它坏了');
-  else connect = dead(`探针判不在线（${c.probeState}）`);
+    connect = unknown(`探针这一轮没探它（不是探了没通）：${c.probeDetail || '探针没写原因'}`);
+  else if (c.probeState === 'ok') connect = dead('不在线：探针上一次探通了，但这条路由被标成了不在线');
+  else connect = dead(`探针判不在线：${c.probeDetail || `探针没写原因（${c.probeState}）`}`);
 
   const quota: LivenessFact =
     c.quota === 'exhausted'

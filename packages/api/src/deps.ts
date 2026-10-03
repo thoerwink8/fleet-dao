@@ -14,6 +14,7 @@ import type {
   WorkflowControl,
 } from './ports.ts';
 import type { ReleaseSource } from './release-version.ts';
+import type { RoutingLayersPort } from './routing-layers.ts';
 
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
 export interface Deps {
@@ -35,6 +36,11 @@ export interface Deps {
    * 另写一句「谁在处理没接上」，不拿「没人在修」顶。
    */
   alertWork?: AlertWorkPort | undefined;
+  /**
+   * 路由两层每一层现在活着吗（#574，routing-layers.ts）：驾驶舱「路由」页现算用。没给（开发、内存版没有那两张表）的接口照样回，
+   * 另写一句 unavailable，不拿空列表冒充「都没配」。
+   */
+  routingLayers?: RoutingLayersPort | undefined;
   /**
    * /changelog 页「发布 v<N>」定版本号要的两样（release-version.ts）：仓里开着的里程碑（GitHub 现读）、仓根 CHANGELOG.md。
    * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。

@@ -39,6 +39,7 @@ import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
+import { pgRoutingLayers } from './routing-layers.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { connectTemporal, ENGINE_OFF } from './temporal.ts';
@@ -168,6 +169,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     gatewaySeen,
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
     alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
+    // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
+    routingLayers: pgRoutingLayers(db),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
     release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
