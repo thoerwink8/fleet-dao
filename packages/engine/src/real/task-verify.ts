@@ -17,15 +17,18 @@
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；随后把取消原样抛出去。
 // - 切号叫停（#59）不是叫停：挑中路由就登记（sessions.enter），切号把这一次验收停下，回 retry（不贴 failure、不算一轮），
 //   工作流隔一会儿再验，选路照常选到切过去的那个池。
+// - runs 里这一次验收记到这张单名下（#216）：tasks.id、单号、工作流编号经单子那一样（spec）交给 invokeVerifier，PR 号、分支
+//   它本来就有；验收不分档，不带派工档。
 
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import { runColdVerifyForPr } from '../cold-verify-run.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
-import type { RunRecord, RunStart, RunsWriter } from '../runner/not-wired.ts';
+import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import { type ColdVerifyInput, type ColdVerifyResult, ROUTE_RETRY_SECONDS } from '../task-contract.ts';
 import { FAMILY_ORDER, invokeVerifier } from '../verifier-invoke.ts';
@@ -180,20 +183,12 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     )(input.taskId);
     // 挑中路由就登记（#59）：切号照它停下这一次验收；收场（下面的 finally）走
     let ticket: OneShotTicket | undefined;
-    // 验收的会话记到这张单名下（invokeVerifier 不知道单号）
-    const runs: RunsWriter = {
-      ...(deps.runs.notWired === undefined ? {} : { notWired: deps.runs.notWired }),
-      start: (run: RunStart) =>
-        deps.runs.start({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
-      record: (run: RunRecord) =>
-        deps.runs.record({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
-    };
     // 挑中路由时补上切号叫停的信号（挑之前不知道跑在哪个池）
     const oneShot: OneShotDeps = {
       spawn: (cmd) => spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) }),
       ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
       tmpDir: deps.runsDir,
-      runs,
+      runs: deps.runs,
       now,
     };
 
@@ -230,7 +225,13 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           spec: async () => {
             if (input.what.trim() === '') throw new Error('单子的「要什么」是空的');
             if (input.howToFinish.length === 0) throw new Error('单子的「怎么算做完」一条都没有');
-            return { taskId: input.taskId, what: input.what, howToFinish: input.howToFinish };
+            return {
+              taskId: input.taskId,
+              issueNumber: input.issueNumber,
+              workflowId: taskWorkflowId(input.repo, input.issueNumber),
+              what: input.what,
+              howToFinish: input.howToFinish,
+            };
           },
           authorFamilies: async () => input.authorFamilies,
         },

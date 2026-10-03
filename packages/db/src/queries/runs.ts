@@ -21,7 +21,8 @@ export type RunOutcome =
 export interface RunInsert {
   id?: string;
   segment: 'scope' | 'manual' | 'verify';
-  taskId?: string;
+  /** 挂在哪张单上（tasks.id）；没给就是 NULL（读的一方按单号兜底）。 */
+  taskId?: string | undefined;
   issueNumber?: number | undefined;
   model: string;
   channel?: string | undefined;
@@ -39,9 +40,9 @@ export interface RunInsert {
   costUsd?: number | null;
   memoryPeakMb?: number | null;
   failureReason?: string | null;
-  prNumber?: number;
-  branch?: string;
-  workflowId?: string;
+  prNumber?: number | undefined;
+  branch?: string | undefined;
+  workflowId?: string | undefined;
   temporalRunId?: string;
   retryOf?: string[];
 }
@@ -72,7 +73,10 @@ export class RunInputError extends Error {
 
 type RunRowSure = Omit<RunRow, 'id'> & { id: string };
 
-/** 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。 */
+/**
+ * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。再记是整行覆盖：这一次没给的列写回 NULL，
+ * 收场补完开跑那一行时要把开跑写过的列（单子、派工档、工作流、PR、分支……）再带一遍。
+ */
 export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): Promise<{ id: string }> {
   if (!row.segment) throw new RunInputError('segment 是空的');
   if (!row.model) throw new RunInputError('model 是空的');
