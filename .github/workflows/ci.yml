@@ -1,13 +1,17 @@
 name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
-# biome、tsc、test、web、deploy 看它给的开关；hygiene、docs 每次都跑；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」
-# ——hygiene 是例外，它每次都跑但只报不挡，红了不算进这条判定（真正挡的是推之前，见 hygiene job 的注释）。
+# biome、tsc、apps 里各步、test、web、deploy 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
 # 主线推送跑「上一次主线真绿的头…这次的头」那段累计改动该跑的（基准查不到、认不出路径一律退回全跑）；
 # 区间口径、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 D。
+#
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
 # - 不用工作流级的 paths 过滤：必过检查要每个 PR 都触发，跳过的 job 由汇总核对（test/ci-plan.test.ts 核这份文件的结构）。
 # - 加 job 要同时加进 ci-plan.ts 的 PLANNED_JOBS（或 ALWAYS_JOBS）和 check 的 needs。
+# - job 数 = 一个 PR 占的并发槽数（GitHub 免费档同时最多 20 个）；几个小检查并进同一个 job，装依赖只装一次，
+#   墙钟不变而槽数少几个——别为「各自干净」再把它们拆回两个 job（不够快）。
+# - 并进 lint 的几步必须各自 continue-on-error、最后一步统一判红：GitHub 默认 step 失败就停，前一步红了后一步被跳过
+#   = 类型错一路没人看见（#566 漏了 7 个 TS2532，就是 biome 先红把 tsc 跳过）。这条由 test/ci-plan.test.ts 钉着。
 on:
   pull_request:
     # opened、synchronize、reopened（GitHub 默认这三个）：hygiene 不扫 PR 标题、正文了（只扫文件树和提交历史），
@@ -68,23 +72,42 @@ jobs:
           MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
         run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE"
 
-  # 卫生检查：每个 PR 都跑、不裁剪，但只报不挡（不进 check 的必过名单，见下面 check job）——真正挡的是推之前：
-  # pre-push 钩子、引擎推分支时的扫描（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。这里留着是为了
-  # 早一步看到（PR 页面上直接标红）、也接住钩子没装或被跳过的情况。
-  # PR 检出到 pr/ 只当数据扫；执行的是目标分支（主线）上那份 packages/hygiene，检出到 trusted/，不装依赖、不跑安装
-  # 脚本——防的是这个 PR 自己改宽规则、白名单，当场就用上放过自己（#115 第二意见）。改卫生检查的规则、白名单要
-  # 合进主线之后才用上——要加白名单的，先单独合一个只改白名单的 PR。不等 changes。
-  # 除了扫 PR 最终的文件树，还按提交扫这个 PR 的历史（先加后删的、提交说明），只在 pull_request 事件上跑（push 到
-  # main 没有 base/head 这两个概念）。
-  hygiene:
+  # 一堆「装一次依赖、跑一条命令」的小检查，全并进这一个 job（原来 biome、tsc、docs、hygiene 各占一台机器，
+  # 各出 25 秒的 checkout + setup-node + pnpm install 固定开销，四台占掉四个并发槽）：一个 PR 的 CI 少占三个并发槽，
+  # 能并着跑的 PR 就多。这几步各自最慢 20 秒上下，串起来仍短于最慢的测试台（db 约 87 秒），所以整轮墙钟不变。
+  #
+  # 每一步都 continue-on-error + 最后一步（汇总）判红，而不是靠默认的「前一步红了后一步就跳过」——那正是 #566
+  # 漏检的来路（biome 先红，tsc 显示 skipped，整棵树的类型错一条都不报）。几步各跑各的、各报各的。
+  # 汇总那一步还要核「该跑的真跑了且绿、不该跑的确实跳过」（开关来自 changes 的输出）：跳过的步不能当成跑过了。
+  # 这一步的脚本由 test/ci-plan.test.ts 抠出来真跑，每种红法都造一遍。
+  #
+  # 这个 job 里各步的分工：
+  # - biome：只改 .md 时不跑（biome 不认 md）；有非 md 改动才跑。
+  # - tsc -b：跟着 biome 一起（tsc 也不看 md）；只查受影响的项目，全跑时查整棵树。
+  # - docs：文档指针、skill 指针，每个 PR 都跑、不裁剪（改名挪文件也会让文档里的指针指空）。
+  # - 卫生检查两步：每个 PR 都跑、不裁剪，但只报不挡（不算进汇总的判红，也不进 check 的必过名单）——真正挡的是
+  #   推之前：pre-push 钩子、引擎推分支时的扫描（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。这里留着
+  #   是为了早一步看到（汇总步会打一条 ::warning::）、也接住钩子没装或被跳过的情况。
+  #   PR 检出到 pr/ 只当数据扫；执行的是目标分支（主线）上那份 packages/hygiene，检出到 trusted/——防的是这个 PR 自己
+  #   改宽规则、白名单，当场就用上放过自己（#115 第二意见）。所以卫生检查两步排在 pnpm install 和一切跑 PR 代码的
+  #   步骤**之前**：PR 的安装脚本、测试还没跑，改不到 trusted/。改卫生检查的规则、白名单要合进主线之后才用上——
+  #   要加白名单的，先单独合一个只改白名单的 PR。除了扫 PR 最终的文件树，还按提交扫这个 PR 的历史（先加后删的、
+  #   提交说明），只在 pull_request 事件上跑（push 到 main 没有 base/head 这两个概念）。
+  lint:
+    needs: changes
+    # 几步各有各的开关，没法用一个 job 级 if 表达：job 一律开，里面每步自己看 changes 给的开关。
+    # 所以纯文档 PR 也会起这一台，但它跑得很快（装依赖加 docs 两份测试），且省下了「四个 job 各起一台」的固定开销。
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    # PR 在 pr/、主线的卫生检查代码在 trusted/，并排放：biome check . 不会扫到 trusted/。
+    defaults:
+      run:
+        working-directory: pr
     steps:
+      # 按提交扫这个 PR 的历史要完整提交图：默认浅克隆只有 GitHub 造的这一个合并提交，base、head 两头都不在里面。
       - uses: actions/checkout@v4
         with:
           path: pr
-          # 按提交扫这个 PR 的历史（下面）要完整提交图：默认浅克隆只有 GitHub 造的这一个合并提交，base、head 两头
-          # 都不在里面。
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -96,9 +119,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
       # 和 packages/hygiene/src/bin/check.ts 做的一样，只是代码取 trusted/、扫的是 pr/。退出码 2 = 没扫全，同样是红
       - name: 卫生检查（主线上的代码，扫 PR 的文件）
-        working-directory: pr
+        id: hygiene
+        continue-on-error: true
         env:
           TRUSTED: ${{ github.workspace }}/trusted
         run: |
@@ -112,8 +137,9 @@ jobs:
       # 上面那步只看 PR 最终的文件树：先加后删的真密钥、提交说明里的真密钥推上去就公开了，那步看不见。这里按提交扫
       # base..head，和推送前的闸（packages/hygiene/src/prepush.ts）、引擎推分支同一份判定（historyArgs / scanHistory）。
       - name: 卫生检查（主线上的代码，按提交扫这个 PR 的历史）
+        id: hygiene_history
         if: github.event_name == 'pull_request'
-        working-directory: pr
+        continue-on-error: true
         env:
           TRUSTED: ${{ github.workspace }}/trusted
           BASE: ${{ github.event.pull_request.base.sha }}
@@ -121,62 +147,79 @@ jobs:
         run: |
           node "$TRUSTED/packages/hygiene/src/bin/ci-history.ts" --base "$BASE" --head "$HEAD"
 
-  # 文档指针、skill 指针：每个 PR 都跑、不裁剪（改名挪文件也会让文档里的指针指空）。不等 changes。
-  docs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+      # ——从这里往下才跑 PR 里的代码（装依赖会跑 PR 的安装脚本）——
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: pr/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: pr/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/
 
-  # biome 和 tsc 各一个 job：放在一个 job 的连续 step 里的话，biome 先红 = 后面的 tsc 被跳过（GitHub 默认
-  # step 失败就停），类型错一路没人看见（#566 就是这么漏的 7 个 TS2532）。拆开两个各自报告、两份都要绿。
-  biome:
-    needs: changes
-    if: needs.changes.outputs.biome == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec biome check .
+      # 下面三步：各自 continue-on-error（红了不跳过后面的），最后一步「汇总」按各步的 outcome 统一判红。
+      # outcome 用 steps.<id>.outcome 读：continue-on-error 的步，outcome 才是原来的 success/failure，
+      # conclusion 会被改写成 success——所以判红必须读 outcome（读 conclusion 会把红的当成绿的）。
+      - name: biome
+        id: biome
+        if: needs.changes.outputs.biome == 'true'
+        continue-on-error: true
+        run: pnpm exec biome check .
 
-  # tsc -b 只查受影响的项目（各自 tsconfig 的 include 里跨包导入的源码一起查）；全跑时查整棵树
-  tsc:
-    needs: changes
-    if: needs.changes.outputs.tsc != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - env:
+      # tsc -b 只查受影响的项目（各自 tsconfig 的 include 里跨包导入的源码一起查）；全跑时查整棵树
+      - name: tsc
+        id: tsc
+        if: needs.changes.outputs.tsc != ''
+        continue-on-error: true
+        env:
           TSC: ${{ needs.changes.outputs.tsc }}
         run: |
           set -euo pipefail
           if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
+
+      # 文档指针、skill 指针：每个 PR 都跑、不裁剪
+      - name: docs
+        id: docs
+        continue-on-error: true
+        run: pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/
+
+      # 汇总：该跑的必须 success、不该跑的必须 skipped，哪一步不对 job 就红、连名字一起报。
+      # 卫生检查两步只报不挡：红了只打一条 ::warning::，不让 job 红。
+      - name: 汇总（biome / tsc / docs 有一步不对这里就红）
+        if: always()
+        env:
+          BIOME: ${{ steps.biome.outcome }}
+          TSC: ${{ steps.tsc.outcome }}
+          DOCS: ${{ steps.docs.outcome }}
+          BIOME_WANT: ${{ needs.changes.outputs.biome }}
+          TSC_WANT: ${{ needs.changes.outputs.tsc }}
+          HYGIENE: ${{ steps.hygiene.outcome }}
+          HYGIENE_HISTORY: ${{ steps.hygiene_history.outcome }}
+        run: |
+          set -euo pipefail
+          bad=''
+          # 参数：名字、这一步的 outcome、本该跑吗（yes/no）
+          verify() {
+            if [ "$3" = yes ]; then
+              [ "$2" = success ] || bad="$bad $1（$2，本该 success）"
+            else
+              [ "$2" = skipped ] || bad="$bad $1（$2，本该 skipped）"
+            fi
+          }
+          biome_want=no; if [ "$BIOME_WANT" = true ]; then biome_want=yes; fi
+          tsc_want=no; if [ -n "$TSC_WANT" ]; then tsc_want=yes; fi
+          verify biome "$BIOME" "$biome_want"
+          verify tsc "$TSC" "$tsc_want"
+          verify docs "$DOCS" yes
+          if [ "$HYGIENE" = failure ] || [ "$HYGIENE_HISTORY" = failure ]; then
+            echo "::warning::卫生检查没过（只报不挡，看上面那两步的日志）"
+          fi
+          if [ -n "$bad" ]; then
+            echo "::error::lint 里有检查不对：$bad"
+            exit 1
+          fi
+          echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC docs=$DOCS"
 
   # engine 切三台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
   # 只跑受影响的包（改到的 + 依赖它们的）。
@@ -336,12 +379,12 @@ jobs:
             bash deploy/test/run.sh "${args[@]}"
           fi
 
-  # 必过检查。逐个核对：changes、docs 必须绿；biome、tsc、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过
-  # （packages/conventions/src/ci-plan.ts 的 ciVerdict）。hygiene 只报不挡：仍然 needs 它、等它跑完，状态在 PR 上
-  # 看得见，但它红不算进这里的判定（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。
+  # 必过检查。逐个核对：changes 必须绿；lint 该跑的必须绿、本该跳过的必须是跳过；test、web、deploy 本该跑的必须绿、
+  # 本该跳过的必须是跳过（packages/conventions/src/ci-plan.ts 的 ciVerdict）。
+  # lint 里面几步各报各的（哪一步红写在它的 job 日志和最后的汇总步里）；汇总 job 认的是 lint 这个 job 的结论。
   check:
     if: always()
-    needs: [changes, hygiene, docs, biome, tsc, test, web, deploy]
+    needs: [changes, lint, test, web, deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -355,3 +398,4 @@ jobs:
       - env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: node packages/conventions/src/bin/ci-verdict.ts
+

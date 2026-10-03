@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import {
   AGENTS_UNIT,
   ALWAYS_JOBS,
@@ -119,7 +120,7 @@ describe('按改动算要跑什么', () => {
     }
   });
 
-  it('纯文档（docs、specs、README、开单表单）：只剩每次都跑的 hygiene、docs', () => {
+  it('纯文档（docs、specs、README、开单表单）：什么都裁掉，lint 里只剩 docs、hygiene 两步', () => {
     const p = pr(
       'docs/design.md',
       'docs/design.md',
@@ -377,10 +378,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   const plan = pr('packages/conventions/src/ci-plan.ts');
   const needs = (over: Record<string, unknown> = {}, p: CiPlan = plan) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
-    hygiene: { result: 'success', outputs: {} },
-    docs: { result: 'success', outputs: {} },
-    biome: { result: 'success', outputs: {} },
-    tsc: { result: 'success', outputs: {} },
+    lint: { result: 'success', outputs: {} },
     test: { result: 'success', outputs: {} },
     web: { result: 'skipped', outputs: {} },
     deploy: { result: 'skipped', outputs: {} },
@@ -393,11 +391,12 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(v.lines).toHaveLength(ALWAYS_JOBS.length + PLANNED_JOBS.length);
   });
 
-  it('纯文档：只有 changes、hygiene、docs 跑了', () => {
+  it('纯文档：lint（里面只跑 docs、hygiene 两步）、changes 跑了，test、web、deploy 跳过', () => {
     const docs = pr('docs/design.md');
     const skipped = { result: 'skipped' };
-    expect(ciVerdict(needs({ biome: skipped, tsc: skipped, test: skipped }, docs)).ok).toBe(true);
-    expect(ciVerdict(needs({ biome: skipped }, docs)).ok).toBe(false);
+    expect(ciVerdict(needs({ test: skipped }, docs)).ok).toBe(true);
+    // lint 是每次都得跑的（它里面有 docs、hygiene 两步每次都跑）：跳过它 = 没跑该跑的
+    expect(ciVerdict(needs({ test: skipped, lint: skipped }, docs)).ok).toBe(false);
   });
 
   it('本该跑的被跳过、红了、取消了：不过', () => {
@@ -408,9 +407,15 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     }
   });
 
+  it('lint（biome/tsc/docs/hygiene 并成的那个）红了：不过，报的是这一项', () => {
+    const v = ciVerdict(needs({ lint: { result: 'failure' } }));
+    expect(v.ok).toBe(false);
+    expect(v.lines.join('\n')).toContain('✗ lint：failure');
+  });
+
   it('deploy=ops：deploy job 要跑且绿（只跑两块也是跑），跳过、红了都不过', () => {
     const ops = pr('docs/ops.md');
-    const over = { biome: { result: 'skipped' }, tsc: { result: 'skipped' }, test: { result: 'success' } };
+    const over = { test: { result: 'success' } };
     expect(ciVerdict(needs({ ...over, deploy: { result: 'success' } }, ops)).ok).toBe(true);
     for (const result of ['skipped', 'failure']) {
       const v = ciVerdict(needs({ ...over, deploy: { result } }, ops));
@@ -425,19 +430,16 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
 
   it('changes 没算成、少了某个 job 的结果：不过', () => {
     expect(ciVerdict(needs({ changes: { result: 'failure', outputs: {} } })).ok).toBe(false);
-    expect(ciVerdict(needs({ docs: { result: 'skipped' } })).ok).toBe(false);
+    expect(ciVerdict(needs({ lint: { result: 'skipped' } })).ok).toBe(false);
     const { deploy: _, ...rest } = needs();
     expect(ciVerdict(rest).lines.join('\n')).toContain('✗ deploy：没有这个 job 的结果');
   });
 
-  it('hygiene 红了：汇总 check 照样过，不挡合并（卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍）', () => {
-    const v = ciVerdict(needs({ hygiene: { result: 'failure' } }));
+  it('hygiene 并进 lint 了：lint 绿就过，hygiene 那一步红不红由 lint 自己判（不在汇总的文字里）', () => {
+    const v = ciVerdict(needs());
     expect(v.ok).toBe(true);
-    // hygiene 不在必过名单里：不管它跑成什么样，汇总的结论文字里都不提它
+    // 卫生检查不在这份判定里：汇总的结论文字里不单独提它
     expect(v.lines.join('\n')).not.toContain('hygiene');
-    for (const result of ['skipped', 'cancelled']) {
-      expect(ciVerdict(needs({ hygiene: { result } })).ok, result).toBe(true);
-    }
   });
 
   it('plan 读不出（空、不是 JSON、缺字段）、needs 不是对象：不过，不当成全跳过', () => {
@@ -454,14 +456,11 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   it('plan 说全跑却有 job 没开（被改坏的 plan）：不过', () => {
     const full = planCi({ event: 'push', changed: [], graph: graph() });
     const broken = { ...full, web: false };
-    expect(ciVerdict(needs({ web: { result: 'skipped' }, biome: { result: 'success' } }, broken)).ok).toBe(
-      false,
-    );
+    expect(ciVerdict(needs({ web: { result: 'skipped' } }, broken)).ok).toBe(false);
     // 全跑却只跑 deploy 的两块：job 照样 success，但 plan 本身不对
     const opsOnly: CiPlan = { ...full, deploy: 'ops' };
     const allGreen = {
       web: { result: 'success' },
-      biome: { result: 'success' },
       tsc: { result: 'success' },
       deploy: { result: 'success' },
     };
@@ -538,22 +537,19 @@ describe('入口', () => {
     const p = planOutputs(pr('docs/design.md'));
     const base = {
       changes: { result: 'success', outputs: p },
-      hygiene: { result: 'success' },
-      docs: { result: 'success' },
-      biome: { result: 'skipped' },
-      tsc: { result: 'skipped' },
+      lint: { result: 'success' },
       test: { result: 'skipped' },
       web: { result: 'skipped' },
       deploy: { result: 'skipped' },
     };
     expect(run(verdict, [], { CI_NEEDS: JSON.stringify(base) }).status).toBe(0);
     expect(
-      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, docs: { result: 'failure' } }) }).status,
+      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, changes: { result: 'failure' } }) }).status,
     ).toBe(1);
-    // hygiene 红了不挡：汇总入口照样退出 0（卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍）
+    // lint 红了不挡——不行：lint 是必过的一项，红了汇总入口退出 1
     expect(
-      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, hygiene: { result: 'failure' } }) }).status,
-    ).toBe(0);
+      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, lint: { result: 'failure' } }) }).status,
+    ).toBe(1);
   });
 });
 
@@ -566,27 +562,118 @@ describe('ci.yml 和这里对得上', () => {
     return next < 0 ? yml.slice(start) : yml.slice(start, start + 1 + next);
   };
 
-  it('【故意造出的失败】biome 和 tsc 各自一个 job：合成一个 job 的连续 step，biome 先红就把 tsc 跳过（#566 的 7 个类型错就是这么漏的）', () => {
+  it('【故意造出的失败】lint 里 biome、tsc 两步各自 continue-on-error + 最后一步按 outcome 判红：谁都不能把对方跳过（#566 的 7 个类型错就是这么漏的）', () => {
     // job() 切到下一个 job 头，会把紧贴在它上面的注释一起带进来；判「正文里有没有 tsc」前先把整行注释去掉。
     const body = (id: string) =>
       job(id)
         .split('\n')
         .filter((l) => !/^\s*#/.test(l))
         .join('\n');
-    const biome = job('biome');
-    const tsc = job('tsc');
-    expect(biome, 'biome job 不见了').not.toBe('');
-    expect(tsc, 'tsc job 不见了，或者又并回 biome 里了').not.toBe('');
-    // 两个各自开、各自看自己的开关
-    expect(biome).toMatch(/^ {4}needs: changes$/m);
-    expect(biome).toMatch(/^ {4}if: needs\.changes\.outputs\.biome == 'true'$/m);
-    expect(tsc).toMatch(/^ {4}needs: changes$/m);
-    expect(tsc).toMatch(/^ {4}if: needs\.changes\.outputs\.tsc != ''$/m);
-    expect(biome).toContain('pnpm exec biome check .');
-    expect(tsc).toContain('pnpm exec tsc -b');
-    // biome 那个 job 里不许再出现 tsc（连着写就又是「前一步红了后一步不跑」）。
-    // 不认命令怎么写、不认 step 叫什么名、也不认单行还是多行 run: | —— 正文里出现 tsc 就判红。
-    expect(body('biome')).not.toMatch(/\btsc\b/);
+    const lint = body('lint');
+    expect(lint, 'lint job 不见了').not.toBe('');
+    expect(lint).toContain('pnpm exec biome check .');
+    expect(lint).toContain('pnpm exec tsc -b');
+    expect(lint).toContain(
+      'pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/',
+    );
+    // 三步各有 id、各 continue-on-error：一步红了不跳过后面的两步，各自报告（GitHub 默认 step 失败即停，
+    // 少了 continue-on-error 就又回到「biome 先红 → tsc 被跳过」）。
+    for (const id of ['biome', 'tsc', 'docs']) {
+      expect(lint, `${id} 那步没有 id: ${id}`).toMatch(new RegExp(`^\\s+id: ${id}$`, 'm'));
+    }
+    expect(lint.match(/continue-on-error: true/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    // 最后一步按各步的 outcome 判红，而不是读 conclusion（continue-on-error 的步 conclusion 会被改写成 success，
+    // 读它等于把红的当绿的）。
+    expect(lint).toContain('steps.biome.outcome');
+    expect(lint).toContain('steps.tsc.outcome');
+    expect(lint).toContain('steps.docs.outcome');
+    expect(lint).not.toMatch(/steps\.(biome|tsc|docs)\.conclusion/);
+    // 判红的那步要真的非零退出（只 echo 不算红）。
+    expect(lint).toMatch(/::error::lint 里有检查不对/);
+  });
+
+  /** 抠出 lint 里「汇总」那一步的脚本，原样交给 bash 跑：每种红法都造一遍，看退出码和报出来的名字。 */
+  describe('lint 的汇总步（真跑它的脚本）', () => {
+    const doc = parse(yml) as {
+      jobs: { lint: { steps: { name?: string; run?: string }[] } };
+    };
+    const step = doc.jobs.lint.steps.find((s) => s.name?.startsWith('汇总'));
+    const script = step?.run ?? '';
+    const base: Record<string, string> = {
+      BIOME: 'success',
+      TSC: 'success',
+      DOCS: 'success',
+      BIOME_WANT: 'true',
+      TSC_WANT: 'all',
+      HYGIENE: 'success',
+      HYGIENE_HISTORY: 'success',
+    };
+    const run = (over: Record<string, string> = {}) =>
+      spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: { ...process.env, ...base, ...over },
+      });
+
+    it('找得到汇总步和它的脚本（不然下面几条等于没查）', () => {
+      expect(script).toContain('set -euo pipefail');
+    });
+
+    it('该跑的都 success：退出 0', () => {
+      expect(run().status).toBe(0);
+    });
+
+    it('【故意造出的失败】biome 红了、tsc 照样 success：job 红，只点名 biome（tsc 没被它吃掉）', () => {
+      const r = run({ BIOME: 'failure' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('biome（failure，本该 success）');
+      expect(r.stdout).not.toContain('tsc（');
+    });
+
+    it('【故意造出的失败】tsc 红了（biome 绿）：job 红，点名 tsc', () => {
+      const r = run({ TSC: 'failure' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('tsc（failure，本该 success）');
+    });
+
+    it('【故意造出的失败】两个都红：两个名字都报出来，不是只报第一个', () => {
+      const r = run({ BIOME: 'failure', TSC: 'failure' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('biome（failure');
+      expect(r.stdout).toContain('tsc（failure');
+    });
+
+    it('【故意造出的失败】docs 红了、被跳过了（docs 每次都得跑）：都红', () => {
+      for (const DOCS of ['failure', 'skipped', 'cancelled']) {
+        const r = run({ DOCS });
+        expect(r.status, DOCS).toBe(1);
+        expect(r.stdout, DOCS).toContain(`docs（${DOCS}，本该 success）`);
+      }
+    });
+
+    it('【故意造出的失败】开关说要跑、那一步却是 skipped：红，不把「没跑」当成「跑过了」', () => {
+      const r = run({ BIOME: 'skipped' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('biome（skipped，本该 success）');
+      const t = run({ TSC: 'skipped' });
+      expect(t.status).toBe(1);
+      expect(t.stdout).toContain('tsc（skipped，本该 success）');
+    });
+
+    it('开关说不跑（只改了 .md）：那两步是 skipped 才对；跑了反而红', () => {
+      const off = { BIOME_WANT: 'false', TSC_WANT: '' };
+      expect(run({ ...off, BIOME: 'skipped', TSC: 'skipped' }).status).toBe(0);
+      const r = run({ ...off, BIOME: 'success', TSC: 'skipped' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('biome（success，本该 skipped）');
+    });
+
+    it('卫生检查红了：只打 ::warning::、不让 job 红（只报不挡）；两步都 skipped（push 事件）也不红', () => {
+      const r = run({ HYGIENE: 'failure' });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('::warning::卫生检查没过');
+      expect(run({ HYGIENE_HISTORY: 'failure' }).status).toBe(0);
+      expect(run({ HYGIENE_HISTORY: 'skipped' }).status).toBe(0);
+    });
   });
 
   it('必过检查 check 是汇总 job：always() 跑、needs 全部 job、跑汇总入口', () => {
@@ -608,32 +695,50 @@ describe('ci.yml 和这里对得上', () => {
     expect(cancel).toBe(['$', "{{ github.event_name == 'pull_request' }}"].join(''));
   });
 
-  it('按开关跑的几个 job 都看 changes 给的开关；hygiene、docs 不看、每次都跑', () => {
+  it('按开关跑的几个 job 都看 changes 给的开关；lint 每次跑，里面几步各看自己的开关', () => {
     for (const j of PLANNED_JOBS) {
       expect(job(j), j).toMatch(/^ {4}needs: changes$/m);
       expect(job(j), j).toMatch(/^ {4}if: .*needs\.changes\.outputs\./m);
     }
-    for (const j of ['hygiene', 'docs']) expect(job(j), j).not.toMatch(/^ {4}(if|needs):/m);
     expect(job('changes')).toContain('fetch-depth: 0');
     expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
+    // lint 是每次都跑的 job（里面有 docs、hygiene 两步每次都跑），没有 job 级 if；biome、tsc 两步看自己那份开关。
+    const lint = job('lint')
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(lint).toMatch(/^ {4}needs: changes$/m);
+    expect(lint).not.toMatch(/^ {4}if: /m);
+    expect(lint).toContain("if: needs.changes.outputs.biome == 'true'");
+    expect(lint).toMatch(/if: needs\.changes\.outputs\.tsc != ''/);
   });
 
-  it('没有 job 用仓库密钥；hygiene 一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到 pr/ 只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
+  it('没有 job 用仓库密钥；lint 里卫生检查一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到仓根只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
     const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
-    expect(ids).toContain('hygiene');
+    expect(ids).toContain('lint');
     for (const id of ids) expect(job(id), id).not.toContain('secrets.');
-    const h = job('hygiene');
-    expect(h).not.toMatch(/pnpm|npm |npx|vitest|cache:/);
-    // 两次检出：PR 的在 pr/，执行的代码在 trusted/，取目标分支的提交
-    expect(h).toMatch(/path: pr\n/);
-    expect(h).toMatch(
+    const lint = job('lint');
+    // 执行的是主线上的 trusted/ 那份代码：卫生检查两步都从 TRUSTED 取，PR 的文件只当数据扫。
+    expect((lint.match(/TRUSTED: \$\{\{ github\.workspace \}\}\/trusted\n/g) ?? []).length).toBe(2);
+    // PR 检出到 pr/（job 级 defaults.run.working-directory: pr，所有 run 步都在那里跑），主线的检出在并排的 trusted/，
+    // 不在 PR 树里面：biome check . 和卫生检查扫文件树都碰不到它。
+    expect(lint).toMatch(/defaults:\n\s+run:\n\s+working-directory: pr\n/);
+    expect(lint).toMatch(/path: pr\n/);
+    expect(lint).toMatch(/path: trusted\n/);
+    expect(lint).toMatch(
       /ref: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n\s+path: trusted\n/,
     );
-    // 没有单行的 run（像 node packages/… 那样跑 PR 里的文件）；动态 import 的只有 TRUSTED 下的卫生检查
-    expect(h.match(/^ +(?:- )?run: (?!\|).*$/gm)).toBeNull();
-    expect(h).toContain('working-directory: pr');
-    expect(h).toMatch(/TRUSTED: \$\{\{ github\.workspace \}\}\/trusted\n/);
-    const imports = [...h.matchAll(/import\(([^)]*)\)/g)].map((m) => m[1]);
+    // 【故意造出的失败】卫生检查两步必须排在装依赖之前：装依赖会跑 PR 的安装脚本，排后面它就能先改掉 trusted/ 里的
+    // 卫生检查代码、再让它放过自己（#115 的防线）。
+    const at = (needle: string) => lint.indexOf(needle);
+    expect(at('id: hygiene\n'), '找不到 hygiene 步').toBeGreaterThan(0);
+    expect(at('id: hygiene_history'), '找不到 hygiene_history 步').toBeGreaterThan(0);
+    const install = at('pnpm install --frozen-lockfile');
+    expect(install, '找不到装依赖那步').toBeGreaterThan(0);
+    expect(at('id: hygiene\n')).toBeLessThan(install);
+    expect(at('id: hygiene_history')).toBeLessThan(install);
+    // 动态 import 的只有 trusted/ 下的卫生检查
+    const imports = [...lint.matchAll(/import\(([^)]*)\)/g)].map((m) => m[1]);
     expect(imports).toHaveLength(1);
     expect(imports[0]).toMatch(
       /^pathToFileURL\(`\$\{process\.env\.TRUSTED\}\/packages\/hygiene\/src\/check\.ts`$/,

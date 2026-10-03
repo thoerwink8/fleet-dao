@@ -1,5 +1,7 @@
 // CI 按改动跑（.github/workflows/ci.yml）：从这次 PR 改了哪些文件、各包谁依赖谁，算出哪几个 job 要跑、测试跑哪几个包；
 // 汇总 job（必过检查 check）再逐个核对「该跑的跑了且绿、不该跑的确实跳过」。纯判断，不碰 git、不碰网络；入口在 bin/ci-plan.ts、bin/ci-verdict.ts。
+// job 数就是并发槽数（GitHub 免费档同时最多 20 个，一个 PR 的 CI 占掉越多，能并着跑的 PR 越少）：所以把两两不相干的小检查
+// 装进同一个 job（lint），装依赖只装一次；同一件事别开两个 job。见 PLANNED_JOBS 上面的注释。
 // 三态纪律：认不出的路径、读不出的依赖图、空的改动列表、非 PR 事件一律升成全跑，不拿「没改什么」冒充可以少跑。
 // 改这里之前必须知道：
 // - 测试不只读自己包里的文件（读别的包的源码、夹具，读 docs/ops.md、AGENTS.md、deploy/ 下的脚本）。PATH_RULES 和 TEST_READS
@@ -30,7 +32,9 @@ export interface CiPlan {
   full: boolean;
   /** 为什么这么跑：全跑时是触发全跑的那几条，否则是各文件落到了哪。 */
   reasons: string[];
-  /** biome。只改 .md 时不跑（biome 不认 md）；tsc 同理不看 md。两个各一个 job，别合并（见 ci.yml 的注释）。 */
+  /** biome。只改 .md 时不跑（biome 不认 md）；tsc 同理不看 md。
+   * 这两个各占一台机器，但和 docs、hygiene 一样，墙钟都远小于最慢的测试台（db 约 87 秒），所以
+   * 合成一个 job（lint）、装依赖只装一次，任务数少 3 个而整轮墙钟不变。见 PLANNED_JOBS 上面的注释。 */
   biome: boolean;
   /** tsc -b 的项目目录；'all' 是仓根整棵树。空数组 = 只跑 biome、不跑 tsc。 */
   tsc: string[] | 'all';
@@ -335,7 +339,9 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
   };
 }
 
-/** 写进 $GITHUB_OUTPUT 的几行；下游 job 的 if 和汇总 job 都只读这些。 */
+/** 写进 $GITHUB_OUTPUT 的几行；下游 job 的 if 和汇总 job 都只读这些。
+ * lint job 里的 biome、tsc 两步各读自己那一份（`biome`、`tsc`）——job 级的开与不开由 ciVerdict 核，
+ * 这两行只管 job 里面哪一步跑。 */
 export function planOutputs(plan: CiPlan): Record<string, string> {
   return {
     plan: JSON.stringify(plan),
@@ -349,17 +355,21 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
 }
 
 /**
- * 汇总 job 核对的几个 job（ci.yml 里的 job id）；changes、docs 每次都得跑且绿。hygiene 也每次都跑，但只报不挡
- * （卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍），不在这两份名单里：它红不红不影响 ciVerdict 的结论。
+ * 汇总 job 核对的几个 job（ci.yml 里的 job id）。job 数就是并发槽数（免费档同时 20 个），所以几个小检查并进
+ * 同一个 job：
+ * - `lint`：原来分开的 biome、tsc、docs、hygiene 四个 job 并成一个。整轮墙钟不变（几步串起来仍短于最慢的测试台），
+ *   但一个 PR 少占三个并发槽。**这个 job 每次都得跑且绿**：它里面几步各自 continue-on-error、最后一步按各步的
+ *   outcome 判红，所以「biome 先红 → tsc 被跳过、类型错没人看见」（#566）不会重演——红了的是 job，不是被跳过的步。
+ *   哪一步该跑、哪一步该跳也由那最后一步现核（开关在 changes 的输出里），不靠 job 级的 if。
+ * - `test`、`web`、`deploy`：按改动开关，该跑的必须绿、该跳的必须是跳过。
+ * hygiene 现在在 lint 里面，只报不挡（红了不算进 lint 的结论，创始人 2026-09-28 傍晚拍），不在这两份名单里。
  */
-/** 开着的 job：biome、tsc 各自一个（biome 先红会把 tsc 一起吃掉，两个错叠一起报，见 ci.yml 的注释）。 */
-export const PLANNED_JOBS = ['biome', 'tsc', 'test', 'web', 'deploy'] as const;
-export const ALWAYS_JOBS = ['changes', 'docs'] as const;
+export const PLANNED_JOBS = ['test', 'web', 'deploy'] as const;
+export const ALWAYS_JOBS = ['changes', 'lint'] as const;
 
 function expected(plan: CiPlan, job: (typeof PLANNED_JOBS)[number]): boolean {
   if (job === 'test') return plan.tests.length > 0;
   if (job === 'deploy') return plan.deploy !== 'none';
-  if (job === 'tsc') return plan.tsc === 'all' || plan.tsc.length > 0;
   return plan[job];
 }
 
