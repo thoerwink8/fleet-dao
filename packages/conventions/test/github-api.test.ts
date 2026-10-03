@@ -236,6 +236,25 @@ describe('读 GitHub：计划和对账要的几样（里程碑说明、关单原
     ).rejects.toThrow(message);
   });
 
+  // 【故意造出的失败】接口没给这两个字段时，别拿空串顶：说明当空串会被读成「说明里没有先后标记」，
+  // 对账当成真断裂（退出码 1、留言到单上）；关掉的时间当空会被读成「还开着的版本」。两种都是「没查成」（退出码 2）。
+  it.each([
+    ['没给 description', { description: undefined }, '认不出（description）'],
+    ['没给 closed_at', { closed_at: undefined }, '认不出（closed_at）'],
+    ['只给了别的字段', { description: undefined, closed_at: undefined }, '认不出（description）'],
+  ])('里程碑%s：抛（不当空串、不当还开着）', async (_name, extra, message) => {
+    // 键整个不在（不是值给 undefined）：照接口真省掉字段的样子造
+    const raw = ms();
+    for (const key of Object.keys(extra)) {
+      delete (raw as Record<string, unknown>)[key];
+      expect(Object.keys(raw)).not.toContain(key);
+    }
+    const { impl } = fakeFetch({ [`${API}/milestones?state=all&per_page=100`]: () => json([raw]) });
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).milestones(),
+    ).rejects.toThrow(message);
+  });
+
   it('开着的单、版本里的单：去掉 PR，带上关单原因、子单数、已关的子单数、母单号（没给是 undefined）', async () => {
     const { impl, seen } = fakeFetch({
       [`${API}/issues?state=open&per_page=100`]: () =>

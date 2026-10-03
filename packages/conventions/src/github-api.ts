@@ -259,17 +259,27 @@ function toMilestone(raw: unknown): MilestoneInfo {
   return { number: raw.number, title: raw.title, state: raw.state };
 }
 
-/** 接口回来的一个里程碑，带说明和关掉的时间；缺字段就抛，不猜。 */
+/**
+ * 接口回来的一个里程碑，带说明和关掉的时间；缺字段就抛，不猜。
+ *
+ * 两个字段都不是「可有可无」：`description` 缺了会变成「说明里没有先后标记」，被对账当成真断裂（退出码 1，
+ * 留言到单上让人去改 GitHub）；`closed_at` 缺了会变成「这是个还开着的版本」。这两种都是接口没给，不是仓里真错了，
+ * 要的是「没查成」（退出码 2）。所以只有明确的 `null`（GitHub 自己的「没有说明」/「还没关」）才当空，
+ * 字段整个不在就抛出来；`closed_at` 缺失只有一种可能——上游没给，同样抛。
+ */
 export function toMilestoneDetail(raw: unknown): MilestoneDetail {
   const base = toMilestone(raw);
+  const has = (k: string) => isObject(raw) && k in raw;
   const { description, closed_at } = raw as Record<string, unknown>;
   const bad = (field: string) => new Error(`读里程碑「${base.title}」，认不出（${field}）`);
-  if (description !== null && typeof description !== 'string') throw bad('description');
-  if (closed_at !== null && closed_at !== undefined && !isTime(closed_at)) throw bad('closed_at');
+  if (!has('description') || (description !== null && typeof description !== 'string')) {
+    throw bad('description');
+  }
+  if (!has('closed_at') || (closed_at !== null && !isTime(closed_at))) throw bad('closed_at');
   return {
     ...base,
-    description: typeof description === 'string' ? description : '',
-    closedAt: typeof closed_at === 'string' ? closed_at : null,
+    description: description === null ? '' : (description as string),
+    closedAt: closed_at === null ? null : (closed_at as string),
   };
 }
 
