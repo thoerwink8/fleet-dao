@@ -5,7 +5,7 @@
 // - endedAt / outcome 一对空/不空；
 // - 读不到的字段 NULL，不拿 0 顶（#216）。
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { runs } from '../schema/index.ts';
 
@@ -18,6 +18,8 @@ export interface RunInsert {
   issueNumber?: number | undefined;
   model: string;
   channel?: string | undefined;
+  /** 跑在哪条路由上：切号靠它连到池（#157）。 */
+  routeId?: string | undefined;
   startedAt?: Date;
   endedAt?: Date;
   outcome?: RunOutcome;
@@ -129,6 +131,31 @@ export async function runsOfIssue(db: Db, issueNumber: number): Promise<RunRow[]
   return db.select().from(runs).where(eq(runs.issueNumber, issueNumber)).orderBy(asc(runs.createdAt));
 }
 
+/**
+ * 把还没结束的行都收成 killed、写明为什么，交回收掉的编号。只给引擎起来、接活之前用（#157）：一次性会话不脱开引擎进程跑，
+ * 上一轮引擎一退它们就断了（起来时的收尾收掉了它们的 scope），库里那几行不收，切号就一直以为它们在跑、一直等。
+ * 收的时刻早于开跑时刻（时钟回拨）就按开跑时刻收，不撞 runs_ended_after_start。
+ */
+export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: string }): Promise<string[]> {
+  if (!input.reason.trim()) throw new RunInputError('收掉没结束的 runs 要写为什么');
+  try {
+    const rows = await db
+      .update(runs)
+      .set({
+        endedAt: sql`greatest(${input.endedAt.toISOString()}::timestamptz, ${runs.startedAt})`,
+        outcome: 'killed',
+        failureReason: input.reason,
+        updatedAt: input.endedAt,
+      })
+      .where(isNull(runs.endedAt))
+      .returning({ id: runs.id });
+    return rows.map((r) => r.id);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new RunInputError(`收掉没结束的 runs 失败：${message}`, { cause: error });
+  }
+}
+
 /** 各段 loading: RunInsert -> 写入形状。 */
 function toRow(row: RunInsert, now: Date): RunRowSure {
   return {
@@ -138,6 +165,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     issueNumber: row.issueNumber ?? null,
     model: row.model,
     channel: row.channel ?? null,
+    routeId: row.routeId ?? null,
     startedAt: row.startedAt ?? now,
     endedAt: row.endedAt ?? null,
     outcome: row.outcome ?? null,

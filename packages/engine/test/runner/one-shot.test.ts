@@ -60,16 +60,130 @@ describe('one-shot.ts', () => {
     }
   });
 
-  it('故意造红：spawner 抛（起不来）→ spawn_failed / timeout，不一跑就 ok', async () => {
-    const { deps, recorded, cleanup } = await fakeDeps({
+  it('故意造红：spawner 抛（起不来）→ 抛 SPAWN_FAILED，不一跑就 ok；开跑那一行收成 spawn_failed（不留一行没结束的）', async () => {
+    const { deps, recorded, started, cleanup } = await fakeDeps({
       scripted: () => {
         throw new Error('spawn ENOENT');
       },
     });
     try {
-      await expect(runOneShot(BASE_INPUT, deps)).rejects.toThrow(OneShotError);
-      // 起不来不该有 runs（这一笔不是「跑了一次」，是「起都没起」）
+      await expect(runOneShot(BASE_INPUT, deps)).rejects.toMatchObject({
+        name: 'OneShotError',
+        code: 'SPAWN_FAILED',
+      });
+      // 开跑时留了一行，起不来就把那一行收掉：留着，切号会一直以为它在跑
+      expect(started).toHaveLength(1);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({
+        runId: started[0]?.runId,
+        outcome: 'spawn_failed',
+        failureReason: '起子进程没起成：spawn ENOENT',
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('【故意造出的失败】起不来、开跑那一行也收不上：照样抛 SPAWN_FAILED，原因里两样都写', async () => {
+    const { deps, cleanup } = await fakeDeps({
+      scripted: () => {
+        throw new Error('spawn ENOENT');
+      },
+    });
+    try {
+      deps.runs.record = async () => {
+        throw new Error('库连不上');
+      };
+      const err = await runOneShot(BASE_INPUT, deps).catch((e: unknown) => e);
+      expect(err).toMatchObject({ name: 'OneShotError', code: 'SPAWN_FAILED' });
+      expect((err as Error).message).toContain('spawn ENOENT');
+      expect((err as Error).message).toContain('开跑那一行也没收上（库连不上）');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('开跑先在 runs 留一行没结束的（带路由、单号、渠道），收场按同一个编号补完', async () => {
+    const { deps, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    const order: string[] = [];
+    const { start, record } = deps.runs;
+    deps.runs.start = async (r) => {
+      order.push('start');
+      await start(r);
+    };
+    deps.runs.record = async (r) => {
+      order.push('record');
+      await record(r);
+    };
+    deps.spawn = async () => {
+      order.push('spawn');
+      return { exitCode: 0, stdout: '做完了', stderr: '', killed: false };
+    };
+    try {
+      const r = await runOneShot(
+        {
+          ...BASE_INPUT,
+          routeId: 'claude-carpool:opus-5.5:claude-code',
+          issueNumber: 157,
+          channel: 'claude-sub',
+        },
+        deps,
+      );
+      expect(order).toEqual(['start', 'spawn', 'record']);
+      expect(started).toEqual([
+        {
+          runId: r.runId,
+          segment: 'manual',
+          issueNumber: 157,
+          model: 'fake-model',
+          channel: 'claude-sub',
+          routeId: 'claude-carpool:opus-5.5:claude-code',
+          startedAt: r.startedAt,
+        },
+      ]);
+      expect(recorded[0]).toMatchObject({
+        runId: r.runId,
+        routeId: 'claude-carpool:opus-5.5:claude-code',
+        outcome: 'done',
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('【故意造出的失败】开跑那一行写不进 runs：抛 RUN_START_FAILED，不起会话、不留收场那一笔', async () => {
+    const { deps, calls, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    deps.runs.start = async () => {
+      throw new Error('runs 开跑那一行写入失败：connection refused');
+    };
+    try {
+      const err = await runOneShot(BASE_INPUT, deps).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(OneShotError);
+      expect(err).toMatchObject({ code: 'RUN_START_FAILED' });
+      expect((err as Error).message).toContain('开跑那一行写不进 runs，没起会话');
+      expect((err as Error).message).toContain('connection refused');
+      expect(calls).toHaveLength(0);
       expect(recorded).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('【故意造出的失败】收场那一笔写不进 runs：抛错（不回 done），落盘照样写了', async () => {
+    const { deps, tmpDir, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    deps.runs.record = async () => {
+      throw new Error('runs 写入失败：connection reset');
+    };
+    try {
+      await expect(runOneShot(BASE_INPUT, deps)).rejects.toThrow('connection reset');
+      const runId = started[0]?.runId as string;
+      expect(await readFile(join(tmpDir, runId, 'stdout.txt'), 'utf8')).toBe('做完了');
     } finally {
       await cleanup();
     }

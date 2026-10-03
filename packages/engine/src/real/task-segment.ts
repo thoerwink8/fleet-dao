@@ -9,6 +9,7 @@
 // - 成败只认 adapters 的 judgeRun（经 Spawner 变成退出码）：不是 done 就带着原因码回 ok:false；原因码（quota_exhausted、
 //   model_mismatch、relay_unknown……）就是失败分流认的码，不改写；没有原因码的才按 one-shot 的结局给一个。
 // - 起不来（路由不可用、树备不好、Spawner 抛错）一律抛 PortError，不当成「会话没跑成」：前者重试没用，要人修配置。
+//   开跑那一行写不进 runs（#157，one-shot 不起会话）抛 SEGMENT_RUNS_UNWRITABLE，可以重试：是库一时不通，不是配置。
 // - one-shot 的落盘目录（brief.txt、stdout.txt……）24 小时后由这里顺手清；清不掉只记日志。
 
 import { randomUUID } from 'node:crypto';
@@ -192,6 +193,10 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
           );
         } catch (error) {
           if (stopSignal.aborted) throw stopSignal.reason ?? error;
+          if (error instanceof OneShotError && error.code === 'RUN_START_FAILED') {
+            // 库一时写不进：会话没起，过一会儿再来就行
+            throw new PortError('SEGMENT_RUNS_UNWRITABLE', error.message, { retryable: true });
+          }
           if (error instanceof OneShotError) {
             throw new PortError('SEGMENT_SPAWN_FAILED', error.message, { retryable: false });
           }
