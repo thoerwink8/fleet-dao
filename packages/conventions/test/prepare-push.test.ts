@@ -71,6 +71,21 @@ describe('推送前预检', () => {
     expect(r.lines.join('\n')).toContain('pnpm install');
   });
 
+  it('【故意造出的失败】启动器在、包没装全（MODULE_NOT_FOUND 退 1）：退出码 2 没查成，不当成代码没过', () => {
+    const r = preparePush({
+      changed: () => ['packages/conventions/src/plan.ts'],
+      repo: fsRepo(ROOT),
+      graph: () => GRAPH,
+      run: () => ({
+        status: 1,
+        stdout: '',
+        stderr: "Error: Cannot find module 'x/bin/biome' { code: 'MODULE_NOT_FOUND' }",
+      }),
+    });
+    expect(r.code).toBe(2);
+    expect(r.lines.join(' ')).toContain('没查成');
+  });
+
   it('【故意造出的失败】算改动就失败（git 读不到基准）：退出码 2，一个检查都不跑', () => {
     const r = run(new Error('认不出 origin/main：先 git fetch origin'));
     expect(r.code).toBe(2);

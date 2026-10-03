@@ -78,6 +78,14 @@ export function preparePush(deps: PreparePushDeps): PreparePushResult {
         lines: [...lines, `${step.name} 没查成：${step.cmd} 起不来（${r.error.message}）——先 pnpm install`],
       };
     }
+    // 启动器起来了、但它要的包没装全（工作树里 node_modules 不完整）：node 报 MODULE_NOT_FOUND 退 1，
+    // 看着像「没过」其实是没查成——按 2 拒推，提示装依赖，别让人去改代码。
+    if (r.status !== 0 && /MODULE_NOT_FOUND|Cannot find module/.test(`${r.stdout}${r.stderr}`)) {
+      return {
+        code: 2,
+        lines: [...lines, `${step.name} 没查成：${step.cmd} 的依赖没装全（找不到模块）——先 pnpm install`],
+      };
+    }
     if (r.status !== 0) {
       const tail = `${r.stdout}${r.stderr}`.trim().split('\n').slice(-40).join('\n');
       return { code: 1, lines: [...lines, `${step.name} 没过（退出码 ${r.status}）：`, tail] };
