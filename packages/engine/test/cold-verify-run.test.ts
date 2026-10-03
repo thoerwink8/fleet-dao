@@ -5,17 +5,19 @@
 // 后两种头是有的，**必须贴上 failure**（不贴 = 合并闸判「还没验」，人一直等一个不会来的结论）。
 
 import { describe, expect, it } from 'vitest';
-import { runColdVerifyForPr } from '../src/cold-verify-run.ts';
+import { type ColdVerifySpec, runColdVerifyForPr } from '../src/cold-verify-run.ts';
 import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
   type ChooseModelForFamily,
   invokeVerifier,
+  type VerifierInvokeInput,
   type VerifierInvokeOutput,
 } from '../src/verifier-invoke.ts';
 
 const BASE = 'b'.repeat(40);
 const HEAD = 'a'.repeat(40);
+const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
 
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
 
@@ -40,7 +42,7 @@ function sources(over: Partial<Parameters<typeof mkSources>[0]> = {}) {
 function mkSources(o: {
   pr?: () => Promise<{ head: string; baseSha: string; branch: string }>;
   diff?: () => Promise<{ diffText: string; changedFiles: string[] }>;
-  spec?: () => Promise<{ taskId: string; what: string; howToFinish: string[]; specDir?: string }>;
+  spec?: () => Promise<ColdVerifySpec>;
   authors?: () => Promise<string[]>;
 }) {
   return {
@@ -49,7 +51,9 @@ function mkSources(o: {
     spec:
       o.spec ??
       (async () => ({
-        taskId: 'task-1',
+        taskId: TASK_ID,
+        issueNumber: 12,
+        workflowId: 'task:acme/demo#12',
         what: '要 A',
         howToFinish: ['代码里有 A'],
         specDir: 'specs/42-做A/',
@@ -137,6 +141,29 @@ describe('runColdVerifyForPr：跑通一路', () => {
     });
     expect(r.status.state).toBe('success');
     expect(r.head).toBe(HEAD);
+  });
+
+  it('单子是哪张（tasks.id、单号、工作流编号）连同 PR 号、分支原样交给冷调用：验收那一笔记进 runs 挂得上单（#216）', async () => {
+    const seen: VerifierInvokeInput[] = [];
+    const r = await runColdVerifyForPr(42, {
+      sources: sources(),
+      invoke: async (input, deps) => {
+        seen.push(input);
+        return await invokeVerifier(input, deps);
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+    });
+    expect(r.status.state).toBe('success');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      taskId: TASK_ID,
+      issueNumber: 12,
+      workflowId: 'task:acme/demo#12',
+      prNumber: 42,
+      branch: 'feat/x',
+    });
   });
 
   it('第 2 轮透传下去（轮数由调用方按 canStartRound 判）', async () => {

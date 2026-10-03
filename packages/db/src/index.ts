@@ -15,6 +15,7 @@ export * from './queries/history.ts';
 export * from './queries/idempotency.ts';
 export * from './queries/intake.ts';
 export * from './queries/jev.ts';
+export * from './queries/pool-runs.ts';
 export * from './queries/probe.ts';
 export * from './queries/quota.ts';
 export * from './queries/reconcile.ts';

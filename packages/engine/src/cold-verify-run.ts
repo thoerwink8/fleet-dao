@@ -34,6 +34,19 @@ import {
   type VerifierInvokeOutput,
 } from './verifier-invoke.ts';
 
+/** 这张 PR 对着的单子：是哪张（验收这一笔记进 runs 挂在它名下，#216）、要什么、怎么算做完。 */
+export interface ColdVerifySpec {
+  /** 库里的 tasks.id（fetchSpec 也照它找需求文档目录）。 */
+  taskId: string;
+  /** 单号（GitHub issue #）。 */
+  issueNumber: number;
+  /** 这张单的任务工作流编号（taskWorkflowId）；不在任务工作流里验的不给。 */
+  workflowId?: string;
+  what: string;
+  howToFinish: string[];
+  specDir?: string;
+}
+
 /**
  * 这一次要的三样从哪来。**读不到一律抛**（顶层翻成 failure 状态）：返回 undefined / 空字符串当「没有」的写法
  * 在这一层是禁止的——那正是「拿不到当没问题」。
@@ -43,8 +56,8 @@ export interface ColdVerifySources {
   pr(prNumber: number): Promise<{ head: string; baseSha: string; branch: string }>;
   /** diff 原文 + 改了哪些文件。 */
   diff(args: { prNumber: number; baseSha: string }): Promise<{ diffText: string; changedFiles: string[] }>;
-  /** 单子的「要什么 / 怎么算做完」+ 这单的 id（fetchSpec 照它找需求文档目录）。 */
-  spec(prNumber: number): Promise<{ taskId: string; what: string; howToFinish: string[]; specDir?: string }>;
+  /** 单子：是哪张、「要什么 / 怎么算做完」。 */
+  spec(prNumber: number): Promise<ColdVerifySpec>;
   /** 写过这张单的所有族（0006：全部跳过再选）。读不到就是没查成（抛），不许猜成某一族；空表也算读不到。 */
   authorFamilies(prNumber: number): Promise<string[]>;
 }
@@ -129,7 +142,7 @@ export async function runColdVerifyForPr(
   }
 
   // 2. 取单子（要什么 / 怎么算做完 / 作者族）。读不到也贴 failure。
-  let spec: { taskId: string; what: string; howToFinish: string[]; specDir?: string };
+  let spec: ColdVerifySpec;
   let authorFamilies: string[];
   try {
     spec = await deps.sources.spec(prNumber);
@@ -167,6 +180,8 @@ export async function runColdVerifyForPr(
     branch: pr.branch,
     baseSha: pr.baseSha,
     taskId: spec.taskId,
+    issueNumber: spec.issueNumber,
+    ...(spec.workflowId !== undefined ? { workflowId: spec.workflowId } : {}),
     what: spec.what,
     howToFinish: spec.howToFinish,
     modelFamiliesAvoid: avoid as [ModelFamily, ...ModelFamily[]],
