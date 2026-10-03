@@ -14,17 +14,15 @@ import { isTypeNode } from 'typescript/unstable/ast/is';
 import { API } from 'typescript/unstable/sync';
 import { ROOT_CONFIG_FILES } from './ci-plan.ts';
 import type { RepoView } from './repo.ts';
+import { isTestFile } from './test-split.ts';
 
 export class TestGraphError extends Error {
   override name = 'TestGraphError';
 }
 
-/** 和仓根 vitest.config.ts 的 include 一致（test/test-graph.test.ts 核对）。 */
-const TEST_FILE = [
-  /^packages\/[^/]+\/(?:src|test)\/(?:.+\/)?[^/]+\.test\.tsx?$/,
-  /^agents\/test\/(?:.+\/)?[^/]+\.test\.ts$/,
-];
-export const isTestFile = (rel: string) => TEST_FILE.some((re) => re.test(rel));
+/** 测试文件的认法只有一份：test-split.ts（vitest.config.ts 的 include 也取它）。 */
+export { isTestFile };
+
 const isTestish = (rel: string) => isTestFile(rel) || /(?:^|\/)test\//.test(rel);
 
 /** 所有测试都会加载的入口：它和它的闭包改了，全跑。 */

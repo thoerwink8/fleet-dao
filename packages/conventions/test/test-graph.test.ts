@@ -1,5 +1,4 @@
 // test-graph.ts：每类边一条；每条退回路径（解析失败、读不到、图外文件、看不透）各造一遍失败；再对真仓抽查几条。
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { fsRepo } from '../src/repo.ts';
@@ -7,7 +6,6 @@ import {
   buildTestGraph,
   classifyChange,
   closureOf,
-  isTestFile,
   listRepoFiles,
   selectTests,
   type TestGraph,
@@ -246,23 +244,6 @@ describe('退回调用方的路径（每条都故意造出来）', () => {
     // 能看透的不在里面
     expect(opaque.has('packages/a/test/helper.test.ts')).toBe(false);
     expect(opaque.has('packages/a/test/static.test.ts')).toBe(false);
-  });
-});
-
-describe('测试文件的认法和 vitest 配置一致', () => {
-  it('vitest.config.ts 的 include 就是这三条', () => {
-    const text = readFileSync(new URL('../../../vitest.config.ts', import.meta.url), 'utf8');
-    const include = /include:\s*\[([^\]]*)\]/.exec(text)?.[1] ?? '';
-    const globs = [...include.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-    expect(globs).toEqual([
-      'packages/*/src/**/*.test.{ts,tsx}',
-      'packages/*/test/**/*.test.{ts,tsx}',
-      'agents/test/**/*.test.ts',
-    ]);
-    expect(isTestFile('packages/web/src/lib/x.test.tsx')).toBe(true);
-    expect(isTestFile('packages/web/src/lib/x.test.mjs')).toBe(false);
-    expect(isTestFile('agents/test/rules/a.rules.test.ts')).toBe(true);
-    expect(isTestFile('agents/skills/x.test.ts')).toBe(false);
   });
 });
 
