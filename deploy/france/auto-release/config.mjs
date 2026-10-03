@@ -658,7 +658,8 @@ export function readProfile(path = PROFILE_FILE) {
   }
   const got = readText(path);
   if ('error' in got) throw new ConfigError(`档位文件读不到：${got.error}`);
-  const name = got.text.replace(/\n$/, '');
+  // 末尾的换行不算（和 france.sh 用 bash 的 $(<文件) 核对时一个读法）
+  const name = got.text.replace(/\n+$/, '');
   if (!Object.hasOwn(PROFILE_DESIRED, name)) {
     throw new ConfigError(
       `档位文件 ${path} 认不出（写的是「${name.slice(0, 40)}」，只认 ${Object.keys(PROFILE_DESIRED).join('、')}）`,

@@ -1,7 +1,7 @@
 # fleet-dao 驾驶舱后端：一个进程两个监听——驾驶舱接口（隧道地址 10.99.0.2:8787，香港经它转 /api、/auth、
 # /github/webhook、/healthz）与 fleet 命令接口（127.0.0.1:8788，只给本机的 AI 会话）。
 # deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；改这份、再发布一次，别在机器上手改。
-# 本机配置：/etc/fleet-dao/api.env（样例 deploy/france/api.env.example），密钥在 france.sh 生成的三个文件里。
+# 本机配置：/etc/fleet-dao/api.env（每一项应该是什么在仓里的 deploy/france/desired-config.json），密钥在 france.sh 生成的三个文件里。
 [Unit]
 Description=fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md

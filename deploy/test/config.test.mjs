@@ -1267,7 +1267,9 @@ test('档位：文件不在按法国；写了 local 用本机档那份；认不�
     });
     writeFileSync(p, 'france');
     assert.equal(readProfile(p).profile, 'france');
-    for (const bad of ['', 'Local\n', 'local\n\n', 'paris\n']) {
+    writeFileSync(p, 'local\n\n');
+    assert.equal(readProfile(p).profile, 'local', '末尾几个换行都不算（和 bash 的 $(<文件) 一样）');
+    for (const bad of ['', 'Local\n', ' local\n', 'local\r\n', 'paris\n']) {
       writeFileSync(p, bad);
       assert.throws(
         () => readProfile(p),

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
+  DESIRED_FILE,
   FINGERPRINT_ALGORITHM,
   fingerprintOf,
   keyIdOf,
@@ -1140,7 +1141,11 @@ test('装机层落后的路径盖住了 france.sh 从仓里读的每个文件', 
   assert.ok(inside.length > 10, `读到了 france.sh 引用的文件（${inside.length} 个）`);
   const include = INSTALL_PATHS.filter((p) => !p.startsWith(':('));
   const exclude = INSTALL_PATHS.filter((p) => p.startsWith(':(exclude)')).map((p) => p.slice(10));
+  // 配置的期望跟着版本走（INSTALL_PATHS 特意排除了它）：france.sh 只在新机器上照它建环境文件，之后每一项归发布时照期望写
+  // （#323），改了它不用重跑 france.sh，不算装机层落后
+  assert.ok(exclude.includes(DESIRED_FILE), 'INSTALL_PATHS 排除了配置的期望');
   for (const r of inside) {
+    if (r === DESIRED_FILE) continue;
     const covered =
       include.some((p) => (p.endsWith('/') ? r.startsWith(p) : r === p)) && !exclude.includes(r);
     assert.ok(covered, `${r} 没被 INSTALL_PATHS 盖住：它改了 france.sh 要重跑，后端却不会标落后`);
