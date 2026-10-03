@@ -43,6 +43,22 @@ export interface RiskPath {
   review?: 'after-merge';
 }
 
+/**
+ * 能标 review: after-merge（先合后审）的路径：只有 CI 判法那几份——改坏了一条 git revert 就退回、不泄密不提权
+ * （决定 0016 第 3 条）。清单里把别的路径标上，读清单直接认不出（判没查成），不是放行；要加一份，改这里，这个文件自己走先审后合。
+ */
+const AFTER_MERGE_ALLOWED: ReadonlySet<string> = new Set([
+  'packages/conventions/src/ci-plan.ts',
+  'packages/conventions/src/bin/ci-plan.ts',
+  'packages/conventions/src/bin/ci-verdict.ts',
+  'packages/conventions/src/test-split.ts',
+  'packages/conventions/src/ci-box.ts',
+  'packages/conventions/src/bin/ci-box.ts',
+  'packages/conventions/src/ci-cache.ts',
+  'packages/conventions/src/bin/ci-cache.ts',
+  'packages/conventions/src/repo.ts',
+]);
+
 /** 读清单：认不出返回一句为什么（调用方判没查成）；空清单也算认不出——一条都没有等于不拦。 */
 export function parseRiskPaths(text: string): RiskPath[] | string {
   let raw: unknown;
@@ -76,6 +92,9 @@ export function parseRiskPaths(text: string): RiskPath[] | string {
     if (!item.why.trim()) return `${at}（${path}）没写为什么`;
     if (item.review !== undefined && (item.review !== 'after-merge' || item.kind !== '碰安全' || item.mode)) {
       return `${at}（${path}）的 review 认不出（只有「碰安全」、不带 mode 的条目能写 "after-merge"）`;
+    }
+    if (item.review === 'after-merge' && !AFTER_MERGE_ALLOWED.has(path)) {
+      return `${at}（${path}）不许先合后审：只有 CI 判法那几份能标 "after-merge"（名单在 merge-gates.ts 的 AFTER_MERGE_ALLOWED，改名单本身走先审后合）`;
     }
     const dir = path.endsWith('/');
     if (

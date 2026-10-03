@@ -184,7 +184,8 @@ export async function workflowDiff(before: string, after: string): Promise<strin
         const sig = stepSig(s);
         if (sig !== '{}') return [`信任:${sig}`];
         const run = isObj(s) && typeof s.run === 'string' ? s.run : '';
-        if (/\binstall\b/.test(run)) return ['装依赖'];
+        // 装依赖那步整条命令都算（接一句 curl 就是跑别的东西了）
+        if (/\binstall\b/.test(run)) return [`装依赖:${canon(run)}`];
         if (CHECK_TOKENS.some((t) => run.includes(t)))
           return [`检查:${canon({ run, env: isObj(s) ? (s.env ?? null) : null })}`];
         return [];

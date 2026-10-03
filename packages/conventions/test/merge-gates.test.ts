@@ -250,7 +250,18 @@ describe('先合后审（review: after-merge）', () => {
 
   it('【故意造出的失败】review 写错、写在改数据库的条目上、和 mode 一起写：都读不出（调用方判没查成）', () => {
     const one = (item: unknown) => parseRiskPaths(JSON.stringify({ paths: [item] }));
-    expect(one({ path: 'a.ts', kind: '碰安全', why: 'x', review: 'after-merge' })).toHaveLength(1);
+    expect(
+      one({ path: 'packages/conventions/src/ci-plan.ts', kind: '碰安全', why: 'x', review: 'after-merge' }),
+    ).toHaveLength(1);
+    // 名单外的路径（登录、密钥、合并闸自己、随便一个文件）标上 after-merge：读不出，不是放行
+    for (const p of [
+      'packages/api/src/auth.ts',
+      'packages/conventions/src/merge-gates.ts',
+      'a.ts',
+      '.github/workflows/',
+    ]) {
+      expect(one({ path: p, kind: '碰安全', why: 'x', review: 'after-merge' }), p).toMatch(/不许先合后审/);
+    }
     for (const bad of [
       { path: 'a.ts', kind: '碰安全', why: 'x', review: 'later' },
       { path: 'db/', kind: '改数据库', why: 'x', review: 'after-merge' },
