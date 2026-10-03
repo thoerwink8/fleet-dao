@@ -201,6 +201,9 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
     /^\s*check:\s*$|\bneeds:|CI_NEEDS|ci-verdict|ci-plan\.ts|汇总|::error::/,
     '汇总、依赖或「该跑什么」的判法',
   ],
+  // 没有冒号的列表项（- main、- '**'、- edited）：触发过滤（branches、paths、paths-ignore、types）下新增一项会改触发范围，
+  // paths-ignore 下加一项就是让这类改动不跑 CI；脚本块里的内容不是列表项，不受影响
+  [/^\s*-\s+['"]?[^\s:'"][^:]*$/, '列表项（触发过滤等）'],
   [/^ {2}[\w-]+:\s*$/, '整个 job 的增删'],
 ];
 
