@@ -1,7 +1,7 @@
 // 欠账检查入口（#67、#87，见 ../debt.ts）：node packages/conventions/src/bin/debt-check.ts [--live [--comment]]
-// 不带参数：只看文件（推后的话带没带单号、需求.md 写没写怎么算做完），不读 GitHub，没网也能跑；
+// 不带参数：只看文件（活文档里推后的话带没带单号），不读 GitHub，没网也能跑；
 //   .github/workflows/debt.yml 在主线推送和每天跑它（不在 PR 上跑），只报告、不挡 PR（创始人 2026-09-26「流程只为快」）。
-// --live：另读 GitHub——挂的单号开没开着、开着的 issue 有没有需求文档。只给 .github/workflows/debt.yml 的定时任务用，
+// --live：另读 GitHub——挂的单号开没开着。只给 .github/workflows/debt.yml 的定时任务用，
 //   别接进 PR 的必过检查（#87）。加 --comment 把查出来的留言到对应的单上（同一条只留一次）。
 // 退出码 0 = 没欠账，或查出来的都留言到单上了；1 = 有欠账没落到单上（逐条列出）；2 = 没查成（读不到文档或 GitHub、留言没留成）。
 import { fileURLToPath } from 'node:url';
@@ -46,7 +46,6 @@ if (!live) {
   const gh = liveGitHub(name, process.env);
   const r = await liveDebt({ repo, gh });
   for (const line of r.docs.lines) (r.docs.code === 0 ? out : err)(line);
-  for (const n of r.notes) out(`提醒：${n}。`);
   let code: 0 | 1 | 2 = r.docs.code;
   const notQueried = [...r.notQueried];
   let loose = r.findings;
@@ -61,6 +60,6 @@ if (!live) {
   for (const w of notQueried) err(`没查成：${w}。`);
   if (notQueried.length) code = 2;
   else if (loose.length && code === 0) code = 1;
-  if (code === 0 && r.findings.length === 0) out('挂的单号都开着，开着的 issue 都有需求文档。');
+  if (code === 0 && r.findings.length === 0) out('挂的单号都开着。');
   process.exitCode = code;
 }

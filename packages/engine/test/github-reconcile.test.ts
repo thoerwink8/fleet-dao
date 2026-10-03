@@ -3,7 +3,15 @@
 // 只收 PR 和 CI 的事件：单子由引擎每 5 分钟自己拉，对账不管它们（#632、#556）。
 // 没跑成、没查成、认不出，都要记成明确的结局（failed / unscanned / partial），不记成 ok。
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { notifications, pullRequests, repos, scheduleHealth, scheduleRuns, users } from '@fleet-dao/db';
+import {
+  notifications,
+  pullRequests,
+  repos,
+  scheduleHealth,
+  scheduleRuns,
+  upsertAlert,
+  users,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
 import {
@@ -38,11 +46,7 @@ import {
   ROUTE_PROBE_SCHEDULE_ID,
   WATCHDOG_SCHEDULE_ID,
 } from '../src/jobs/schedules.ts';
-import {
-  closeSweepJob,
-  type GitHubReconcileWiring,
-  githubReconcileJob,
-} from '../src/real/github-reconcile.ts';
+import { githubReconcileJob, retireCloseSweepAlerts } from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
 import { createRealEnv, useEnv, withWorker } from './helpers.ts';
 
@@ -154,8 +158,6 @@ async function wiring(state: GitHubState, options: { register?: boolean } = {}) 
     gh,
     // 单子打标挂版本（#448）这里的用例不看它：没接判断题就是「没问成」，categoryPlan 不贴、只记没查成
     askIssueKind: async () => ({ judged: false, reason: 'unreachable', detail: '这个用例没接判断题' }),
-    // 关单对账（#241）按真钟每天北京 9:00 那一轮跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
-    closeSweepDue: () => false,
     // 单子打标挂版本（#448）按真钟每小时跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
     issueGroomDue: () => false,
     log: quiet,
@@ -282,14 +284,12 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
 
   function deps(
     reconcile: GitHubReconcileJobDeps['reconcile'],
-    closeSweep: GitHubReconcileJobDeps['closeSweep'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
     issueGroom: GitHubReconcileJobDeps['issueGroom'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
   ) {
     const finished: { id: number; result: unknown }[] = [];
     const logs: string[] = [];
     const d: GitHubReconcileJobDeps = {
       reconcile,
-      closeSweep,
       issueGroom,
       runs: {
         async start() {
@@ -369,56 +369,6 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     it('整步没跑成：outcome 降成 partial，原因写明是单子打标挂版本没跑成', () => {
       const got = withIssueGroom(ok, { failed: '读 repos 表超时' });
       expect(got).toMatchObject({ outcome: 'partial', why: expect.stringContaining('读 repos 表超时') });
-    });
-  });
-
-  describe('关单对账（#241）：一天一次，北京时间 9:00 起的那一轮', () => {
-    const ok = async () => ({ outcome: 'ok' as const, scanned: 1, found: 0, steps: [] });
-    const at = (iso: string, d: GitHubReconcileJobDeps) => ({ ...d, now: () => new Date(iso) });
-
-    it('到点的那一轮在对账之后跑，新留的言算处理了的；别的轮不跑', async () => {
-      const order: string[] = [];
-      const { d } = deps(
-        async () => {
-          order.push('reconcile');
-          return ok();
-        },
-        async () => {
-          order.push('close');
-          return { scanned: 1, found: 2, unchecked: [] };
-        },
-      );
-      expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toEqual({
-        runId: 7,
-        outcome: 'ok',
-        scanned: 1,
-        found: 2,
-      });
-      expect(order).toEqual(['reconcile', 'close']);
-      order.length = 0;
-      await runGitHubReconcileJob(at('2026-09-28T01:15:04Z', d));
-      expect(order).toEqual(['reconcile']);
-    });
-
-    it('【故意造出的失败】关单对账整步没跑成：不挡对账本身，这一轮记成 partial 写明原因（不当成查过、都齐了）', async () => {
-      const { d } = deps(ok, async () => {
-        throw new Error('读 repos 表超时');
-      });
-      expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toMatchObject({
-        outcome: 'partial',
-        why: '关单对账没跑成：读 repos 表超时',
-      });
-    });
-
-    it('【故意造出的失败】有仓没查成、留言没留成：这一轮记成 partial，前 3 条写进原因、其余写明还有几条', async () => {
-      const lines = [1, 2, 3, 4].map((i) => `关单对账 example/canary#${i} 留言没留成（GitHub 回 502）`);
-      const { d } = deps(ok, async () => ({ scanned: 1, found: 0, unchecked: lines }));
-      const run = await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d));
-      expect(run.outcome).toBe('partial');
-      expect(run.why?.split('；')).toEqual([
-        ...lines.slice(0, 3),
-        '关单对账另有 1 条没查成、没写成（看引擎日志）',
-      ]);
     });
   });
 });
@@ -651,27 +601,43 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
   });
 });
 
-describe('关单对账的提醒：日报级，不算「要你拍」（#445）', () => {
-  it('【故意造出的失败】closeSweepJob 报的提醒记成 daily，不是 decision；正文原样带着调用方给的单号', async () => {
-    const w = { db: t.db } as unknown as GitHubReconcileWiring;
-    const deps = closeSweepJob(
-      w,
-      async () => [],
-      quiet,
-      () => new Date(),
+describe('关单对账 #654 删了以后，它留在库里的提醒一次性撤掉', () => {
+  const repo = { owner: 'example', name: 'canary' };
+  const alert = (dedupeKey: string) => ({
+    dedupeKey,
+    level: 'daily' as const,
+    taskId: null,
+    title: '提醒',
+    body: '正文',
+    link: 'https://github.com/example/canary/issues',
+  });
+
+  it('撤 close-sweep:<仓>:<种类> 四种；别的提醒不动；再跑一遍不报错、撤 0 条', async () => {
+    const mine = ['due', 'mother', 'merged', 'no-result'].map((k) => `close-sweep:example/canary:${k}`);
+    const other = 'close-sweep:example/other-repo:due';
+    for (const key of [...mine, other, 'something-else']) await upsertAlert(t.db, alert(key));
+    const now = () => new Date('2026-10-03T00:00:00Z');
+    expect(await retireCloseSweepAlerts({ db: t.db }, [repo], now)).toBe(4);
+    const rows = await t.db.select().from(notifications);
+    for (const key of mine) {
+      const row = rows.find((n) => n.dedupeKey === key);
+      expect(row?.resolvedAt, key).not.toBeNull();
+      expect(row?.body).toContain('已撤：关单对账已删（#654）');
+    }
+    // 没列进来的仓、别的提醒不碰
+    expect(rows.find((n) => n.dedupeKey === other)?.resolvedAt).toBeNull();
+    expect(rows.find((n) => n.dedupeKey === 'something-else')?.resolvedAt).toBeNull();
+    expect(await retireCloseSweepAlerts({ db: t.db }, [repo], now)).toBe(0);
+  });
+
+  it('【故意造出的失败】库连不上：原样抛出，不回 0 冒充「没有要撤的」', async () => {
+    const broken = {
+      transaction: async () => {
+        throw new Error('连不上库');
+      },
+    } as unknown as typeof t.db;
+    await expect(retireCloseSweepAlerts({ db: broken }, [repo], () => new Date())).rejects.toThrow(
+      '连不上库',
     );
-    const body =
-      '主线上有它们的结果，也没有开着的 PR 还引用它们：确认做完了就 pnpm issue:close <单号>。\n\n- #12 登录：specs/12-登录/结果.md';
-    await deps.alert(
-      'close-sweep:example/canary:due',
-      'example/canary：1 张单看着做完了没关',
-      body,
-      'https://github.com/example/canary/issues',
-    );
-    const row = (await t.db.select().from(notifications)).find(
-      (n) => n.dedupeKey === 'close-sweep:example/canary:due',
-    );
-    expect(row?.level).toBe('daily');
-    expect(row?.body).toContain('#12');
   });
 });

@@ -3,8 +3,6 @@
 // 改这里之前必须知道：模板只有四栏（#654），但读 PR 正文时旧模板的栏名（LEGACY_COLUMNS）照样认——合并了的旧 PR 正文里还有
 // 它们，不认的话「修提醒」「需求」这些栏的值会把后面紧跟着的旧栏一起吞进去。
 
-import { CLOSE_COLUMN } from './close-rule.ts';
-
 /** 正文里写对应 issue 的那一栏。 */
 export const ISSUE_COLUMN = '需求';
 
@@ -15,7 +13,7 @@ export const PR_COLUMNS = ['做了什么', '怎么验证的', '还欠什么', IS
 export const OPTIONAL_COLUMNS = ['按推荐先做了', '修提醒'] as const;
 
 /** 旧模板（#654 前）的栏：只为读旧 PR 的正文时认得出栏的边界，新 PR 不写。 */
-export const LEGACY_COLUMNS = ['认领', CLOSE_COLUMN, '对应计划', 'specs', '档位', '文档'] as const;
+export const LEGACY_COLUMNS = ['认领', '这个 PR 做完就关单', '对应计划', 'specs', '档位', '文档'] as const;
 
 const KNOWN = new Set<string>(
   [...PR_COLUMNS, ...OPTIONAL_COLUMNS, ...LEGACY_COLUMNS].map((c) => c.toLowerCase()),
