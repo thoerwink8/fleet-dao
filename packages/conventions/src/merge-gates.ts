@@ -35,7 +35,29 @@ export interface RiskPath {
    * meta/ 下是按 SQL 生成的快照，不单独算。
    */
   mode?: 'migrations' | 'workflow';
+  /**
+   * 'after-merge'：先合后审（创始人 2026-10-03「1+2+3」第 3 条）。改坏了一条 git revert 就退回、不泄密不提权的那类
+   * （CI 判法：哪些 job 跑、测哪些文件、缓存跳哪些）才能标；合并闸不等第二意见，合并后由 second-opinion.mjs 补审。
+   * 密钥、登录、卫生检查、合并闸自己、对公网开口子的配置不许标——那些改坏了回退不了（泄露了就公开了）。
+   */
+  review?: 'after-merge';
 }
+
+/**
+ * 能标 review: after-merge（先合后审）的路径：只有 CI 判法那几份——改坏了一条 git revert 就退回、不泄密不提权
+ * （决定 0016 第 3 条）。清单里把别的路径标上，读清单直接认不出（判没查成），不是放行；要加一份，改这里，这个文件自己走先审后合。
+ */
+const AFTER_MERGE_ALLOWED: ReadonlySet<string> = new Set([
+  'packages/conventions/src/ci-plan.ts',
+  'packages/conventions/src/bin/ci-plan.ts',
+  'packages/conventions/src/bin/ci-verdict.ts',
+  'packages/conventions/src/test-split.ts',
+  'packages/conventions/src/ci-box.ts',
+  'packages/conventions/src/bin/ci-box.ts',
+  'packages/conventions/src/ci-cache.ts',
+  'packages/conventions/src/bin/ci-cache.ts',
+  'packages/conventions/src/repo.ts',
+]);
 
 /** 读清单：认不出返回一句为什么（调用方判没查成）；空清单也算认不出——一条都没有等于不拦。 */
 export function parseRiskPaths(text: string): RiskPath[] | string {
@@ -68,6 +90,12 @@ export function parseRiskPaths(text: string): RiskPath[] | string {
       return `${at}（${path}）的 kind「${String(item.kind)}」不是${RISK_KINDS.map((k) => `「${k}」`).join('')}之一`;
     }
     if (!item.why.trim()) return `${at}（${path}）没写为什么`;
+    if (item.review !== undefined && (item.review !== 'after-merge' || item.kind !== '碰安全' || item.mode)) {
+      return `${at}（${path}）的 review 认不出（只有「碰安全」、不带 mode 的条目能写 "after-merge"）`;
+    }
+    if (item.review === 'after-merge' && !AFTER_MERGE_ALLOWED.has(path)) {
+      return `${at}（${path}）不许先合后审：只有 CI 判法那几份能标 "after-merge"（名单在 merge-gates.ts 的 AFTER_MERGE_ALLOWED，改名单本身走先审后合）`;
+    }
     const dir = path.endsWith('/');
     if (
       item.mode !== undefined &&
@@ -80,6 +108,7 @@ export function parseRiskPaths(text: string): RiskPath[] | string {
       kind: item.kind as RiskKind,
       why: item.why.trim(),
       ...(item.mode === 'migrations' || item.mode === 'workflow' ? { mode: item.mode } : {}),
+      ...(item.review === 'after-merge' ? { review: 'after-merge' as const } : {}),
     });
   }
   return out;
@@ -102,6 +131,10 @@ export interface RiskyFile {
   kind: RiskKind;
   /** 迁移目录里为什么算（新迁移里有哪种语句、或看不到内容）。 */
   note?: string;
+  /** mode 为 workflow、改了已有的工作流：还要读改动前后两份全文做结构比对才知道算不算（合并闸去做），在这之前别当成「算」。 */
+  pending?: true;
+  /** 清单里这条是先合后审（review: after-merge）：合并闸不等第二意见，结论里点名合并后补审。 */
+  afterMerge?: true;
 }
 
 /**
@@ -165,93 +198,6 @@ export function destructiveIn(patch: string | undefined): string | undefined {
   return undefined;
 }
 
-/**
- * 工作流文件里「改了就得有人看一眼」的几类内容（mode 为 workflow 的那条用）。判的是改动里加上、删掉的行（注释行不算），
- * 不是整个文件：改分台、并行、超时、缓存、步骤顺序、注释这些不碰信任的，不用审；碰到下面任何一类就要审。
- * 宁可多拦：认不准的写法让第二意见看一眼，漏拦一次放宽检查或权限就回不来（改下面的清单本身就是改合并闸，走先审后合）。
- *
- * - 权限和令牌：permissions、各权限项、secrets.、GITHUB_TOKEN、github.token、persist-credentials
- * - 触发：on、pull_request、pull_request_target、workflow_run、types、branches、paths
- * - 外来代码：uses（新增、换版本、换来源的 action）
- * - 门槛本身：卫生检查（hygiene、trusted/TRUSTED）、second-opinion、merge-gate、cold-verify、continue-on-error、
- *   `|| true`、exit 0、set +e、任何 if: 行（决定检查跑不跑）、runs-on（换机器）、删了或改了已有的行（超时、名字、缓存键这类调参除外）
- * - 汇总和依赖：check job 本身、任何 needs 行、删掉整个 job
- */
-const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
-  // 权限不列名字：任何「某某: read|write|none」的行都算（GitHub 新增权限项也不会漏），再加 permissions 本身
-  [/\bpermissions\b|^\s*[\w-]+:\s*(?:read|write|none)\s*$/, '权限'],
-  [/secrets\.|GITHUB_TOKEN|github\.token|persist-credentials/, '令牌或密钥'],
-  // 触发：on 下面的事件名一个不漏（GitHub 的 webhook 事件全列，加 cron、inputs），再加 types/branches/paths 这些过滤
-  [
-    /^\s*(?:on|push|pull_request|pull_request_target|pull_request_review|pull_request_review_comment|workflow_run|workflow_dispatch|workflow_call|schedule|repository_dispatch|issue_comment|issues|release|status|check_run|check_suite|create|delete|deployment|deployment_status|discussion|discussion_comment|fork|gollum|label|merge_group|milestone|page_build|project|project_card|project_column|public|registry_package|watch):|\b(?:types|branches|branches-ignore|tags|tags-ignore|paths|paths-ignore|cron|inputs):/,
-    '触发条件',
-  ],
-  [/\buses:/, '用到的 action'],
-  [/\bhygiene\b|\btrusted\b|\bTRUSTED\b|卫生检查|second-opinion|merge-gate|cold-verify/, '卫生检查或合并闸'],
-  [/continue-on-error|\|\|\s*true|\bexit 0\b|set \+e/, '放过失败'],
-  // 任何 if: 行的增删都算（不看里面写什么：把条件改成 if: false 也是让检查不跑）；条件可以写成多行，续行上只有表达式，
-  // 所以这几个词出现在任何改动行上也算
-  [
-    /^\s*(?:-\s+)?if:|always\(\)|failure\(\)|cancelled\(\)|github\.event_name|github\.event\./,
-    '检查跑不跑的条件',
-  ],
-  // 换机器：self-hosted 是另一台有权限的机器，换大规格的是花钱（人闸）
-  [/\bruns-on:/, '跑在哪台机器上'],
-  [
-    /^\s*check:\s*$|\bneeds:|CI_NEEDS|ci-verdict|ci-plan\.ts|汇总|::error::/,
-    '汇总、依赖或「该跑什么」的判法',
-  ],
-  // 没有冒号的列表项（- main、- '**'、- edited）：触发过滤（branches、paths、paths-ignore、types）下新增一项会改触发范围，
-  // paths-ignore 下加一项就是让这类改动不跑 CI；脚本块里的内容不是列表项，不受影响
-  [/^\s*-\s+['"]?[^\s:'"][^:]*$/, '列表项（触发过滤等）'],
-  // 顶层键下面第一层（正好缩进两格）的任何键：job 名、on 下的事件名（含没列进上面的，如 workflow_job）、concurrency、defaults、env。
-  // 不管值写什么（{}、[]、空）都算：新增一个 job、一个触发事件、改并发组，都是改了 CI 的骨架
-  [/^ {2}[\w-]+:/, '顶层骨架（job、触发事件、并发）'],
-];
-
-/**
- * 改动里「删掉」的行，只有这几类算无害（超时、名字、缓存键、Node 版本、检出深度这类调参和命名；path、cache 这类会改目录或缓存范围的不算）；删掉别的任何一行都算：
- * 删掉一步、把命令换成别的（run: echo ok）、去掉一个 job 里的检查，落到文件里都是「删了已有的行」。拦的是「删」不是「加」——
- * 新加一步、新加并行、新加缓存，放松不了已有的检查（加上去的 if、continue-on-error、权限这些，上面几条各自拦）。
- * 之所以不列「哪些命令算检查」：名单总有漏的（删 web 构建、删 deploy 步），反过来列无害的才是封闭的。
- */
-const BENIGN_REMOVED =
-  /^\s*(?:-\s+)?(?:timeout-minutes|name|key|node-version|fetch-depth|retention-days|max-parallel|fail-fast):|^\s*(?:with|env):\s*$/;
-
-/**
- * 去掉行尾的 YAML 注释（空白加 # 起到行尾），免得只改超时、行尾写一句「# permissions 不变」就被当成改了权限。
- * 只在 # 之前的引号是成对的时候才去：# 落在引号字符串里（echo " # x "）它就不是注释，不能去，去了会把后面的内容藏起来。
- */
-function stripTrailingComment(line: string): string {
-  const at = line.search(/\s#/);
-  if (at < 0) return line;
-  const head = line.slice(0, at);
-  const even = (ch: string) => (head.split(ch).length - 1) % 2 === 0;
-  return even("'") && even('"') ? head : line;
-}
-
-/**
- * 工作流改动里第一处碰到信任的地方；都是不碰信任的改动回 undefined；看不到改动内容回 '看不到改动内容'。
- * 只认「+」「-」开头的行（文件头 +++/--- 不算），去掉前缀后以 # 开头的注释行不算。
- */
-export function workflowSensitive(patch: string | undefined): string | undefined {
-  if (patch === undefined) return '看不到改动内容';
-  for (const raw of patch.split('\n')) {
-    if (!/^[+-]/.test(raw) || raw.startsWith('+++') || raw.startsWith('---')) continue;
-    // 键名带引号（"uses": x、'permissions': y）是合法的 YAML，先去掉键名两边的引号再匹配，免得引号绕过下面所有规则
-    const line = stripTrailingComment(raw.slice(1)).replace(/(['"])([\w-]+)\1(\s*:)/g, '$2$3');
-    if (/^\s*#/.test(line) || line.trim() === '') continue;
-    for (const [re, what] of WORKFLOW_SENSITIVE) {
-      if (re.test(line)) return `改了${what}：${line.trim().slice(0, 50)}`;
-    }
-    // 删掉或改了已有的行（调参和命名除外）：见上面 BENIGN_REMOVED；上面具体的类先认，说得出是哪一类就说哪一类
-    if (raw.startsWith('-') && !BENIGN_REMOVED.test(line)) {
-      return `删了或改了已有的行：${line.trim().slice(0, 50)}`;
-    }
-  }
-  return undefined;
-}
-
 /** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。同一个文件多条规则都沾边时认最具体（路径最长）的那条。 */
 export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPath[]): RiskyFile[] {
   const hits: RiskyFile[] = [];
@@ -263,16 +209,18 @@ export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPat
         .filter((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path))
         .sort((a, b) => b.path.length - a.path.length)[0];
       if (!rule) continue;
-      const hit: RiskyFile = { file: name, rule: rule.path, kind: rule.kind };
+      const hit: RiskyFile = {
+        file: name,
+        rule: rule.path,
+        kind: rule.kind,
+        ...(rule.review === 'after-merge' ? { afterMerge: true as const } : {}),
+      };
       if (rule.mode === 'workflow') {
-        // 只有「改了已有的工作流」才按内容判；新加、删掉、改名一律算（整个文件都是新的信任面）
-        if (f.status === 'modified' && name === f.filename) {
-          const note = workflowSensitive(f.patch);
-          if (note === undefined) continue;
-          hit.note = note;
-        } else {
+        // 只有「改了已有的工作流」才按内容判：要读改动前后两份全文做结构比对（workflow-structure.ts），所以这里只标「待比对」，
+        // 由合并闸读了文件再定。新加、删掉、改名一律算（整个文件都是新的信任面）。
+        if (f.status === 'modified' && name === f.filename) hit.pending = true;
+        else
           hit.note = `工作流文件${f.status === 'removed' ? '被删' : f.status === 'added' ? '是新加的' : '被改名'}`;
-        }
       } else if (rule.mode === 'migrations') {
         if (name.startsWith(`${rule.path}meta/`)) continue;
         if (f.status === 'added' && name === f.filename) {
