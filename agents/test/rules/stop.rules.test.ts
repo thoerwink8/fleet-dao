@@ -110,7 +110,8 @@ describe('规矩：没开无人值守时，Stop 钩子只提醒、不拦、不�
   });
 });
 
-const UNATTENDED = fileURLToPath(new URL('../../hooks/unattended.mjs', import.meta.url));
+const UNATTENDED_URL = new URL('../../hooks/unattended.mjs', import.meta.url).href;
+const UNATTENDED = fileURLToPath(UNATTENDED_URL);
 const SID = 'test-session-0001';
 
 function cli(args: string[], env: NodeJS.ProcessEnv) {
@@ -228,14 +229,20 @@ describe('规矩：开着无人值守才拦，其余一律放行', () => {
     expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
   });
 
-  it('开会话钩子读得到：开着给一句话、暂停给一句话、没开什么都不给', async () => {
-    const { sessionLines } = await import('../../hooks/unattended.mjs');
+  it('开会话钩子读得到：开着给一句话、暂停给一句话、没开什么都不给', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
-    expect(sessionLines({ dir, sessionId: SID })).toEqual([]);
+    // 经子进程调 sessionLines：.mjs 没有类型声明，不在 TS 里直接 import
+    const lines = (): string[] => {
+      const code = `import { sessionLines } from ${JSON.stringify(UNATTENDED_URL)}; console.log(JSON.stringify(sessionLines({ dir: process.env.FLEET_UNATTENDED_DIR, sessionId: process.env.CLAUDE_CODE_SESSION_ID })));`;
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
+      expect(r.status, r.stderr).toBe(0);
+      return JSON.parse(r.stdout.trim());
+    };
+    expect(lines()).toEqual([]);
     cli(['on'], env);
-    expect(sessionLines({ dir, sessionId: SID }).join('')).toContain('无人值守开着');
+    expect(lines().join('')).toContain('无人值守开着');
     cli(['needs-you', '要花钱'], env);
-    expect(sessionLines({ dir, sessionId: SID }).join('')).toContain('暂停着（要花钱）');
+    expect(lines().join('')).toContain('暂停着（要花钱）');
   });
 });
