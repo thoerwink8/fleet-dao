@@ -844,6 +844,16 @@ async function runSession({
     `[${secs()}] 会话 ${sessionKey} 起了（${profile.agent} / ${profile.model} / 路由 ${profile.route ?? '自动'}）`,
   );
 
+  try {
+    return await pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs, log, before, secs });
+  } finally {
+    // 一次性会话：成没成、超没超时，跑完一律删掉（账本在 pollSession 里已经读完），不留在会话列表里。
+    // --keep-session 是排查用的例外：会话留着，自己去 Mirasim 里看，看完 `--stop-stale` 清掉。
+    if (!KEEP_SESSION) await forget(url, sessionKey, log);
+  }
+}
+
+async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs, log, before, secs }) {
   const deadline = since + timeoutMin * 60_000;
   let lastSig = '';
   let lastChange = Date.now();
@@ -920,6 +930,60 @@ async function stop(url, sessionKey) {
   } finally {
     wire.close();
   }
+}
+
+/**
+ * 把会话连它的目录和账本一起删掉（Mirasim 的 deleteSession）。第二意见每次都是一次性的：跑完就删，
+ * 不留在会话列表里等人来清（创始人 2026-10-03：「在 mirasim 起一个会话，我根本不想看见它，并且我希望随时能清理掉」）。
+ * 删之前账本要先读完（traffic/<uuid> 跟会话一起没）。删不掉不当成失败——结论已经拿到了，只如实说一句。
+ */
+async function forget(url, sessionKey, log) {
+  const wire = new Wire(url);
+  try {
+    await wire.opened;
+    wire.send({ type: 'clientHello' });
+    wire.send({ type: 'deleteSession', sessionKey });
+    const r = await wire.waitFor((m) => m.type === 'error' || m.type === 'sessions', 5000);
+    if (r && r.type === 'error') log?.(`会话 ${sessionKey} 没删掉：${r.message ?? JSON.stringify(r)}`);
+    else log?.(`会话 ${sessionKey} 已删（连目录和账本）`);
+  } catch (e) {
+    log?.(`会话 ${sessionKey} 没删掉：${e.message}`);
+  } finally {
+    wire.close();
+  }
+}
+
+/** 列本机 Mirasim 的会话（走 listSessions 帧）。读不到就抛，不当成「一个也没有」。 */
+async function listSessions() {
+  const { wire } = await connect();
+  try {
+    wire.send({ type: 'listSessions' });
+    const m = await wire.waitFor((x) => x.type === 'sessions' && Array.isArray(x.sessions), 20_000);
+    if (!m) throw new NotChecked('本机 Mirasim 没回会话列表（20 秒）');
+    return m.sessions;
+  } finally {
+    wire.close();
+  }
+}
+
+/** 第二意见跑出来的会话都带这个开头（reviewPrompt / critiquePrompt 的第一句），用来认哪些是我们留下的。 */
+const OUR_SESSION_TITLE = /^(你是 PR #\d+ 的「第二意见」|你是「反方」)/;
+
+/**
+ * 跑完删不删会话。默认删（一次性会话，不留在 Mirasim 列表里等人清）；`--keep-session` 留着排查用。
+ * 模块级布尔而不是逐层传参：runSession 在好几个地方起会话，参数表已经很长，这个开关只有「删不删」一个意思。
+ */
+let KEEP_SESSION = false;
+
+/** 清掉我们（second-opinion / 反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。 */
+async function stopStale(log) {
+  const { url } = await connect();
+  const sessions = await listSessions();
+  const ours = sessions.filter((s) => OUR_SESSION_TITLE.test(String(s.title ?? '')));
+  const running = ours.filter((s) => s.runState === 'running');
+  const done = ours.filter((s) => s.runState !== 'running');
+  for (const s of done) await forget(url, s.sessionKey, log);
+  return { deleted: done.length, stillRunning: running.length };
 }
 
 /** 贴到 PR 的正文：会话自己的过程话去掉，从「## 必须改」起照原样。 */
@@ -1040,6 +1104,9 @@ function args(argv) {
     else if (a === '--selftest') o.selftest = true;
     else if (a === '--ping') o.ping = true;
     else if (a === '--no-post') o.noPost = true;
+    else if (a === '--keep-session') o.keepSession = true;
+    else if (a === '--sessions') o.sessions = true;
+    else if (a === '--stop-stale') o.stopStale = true;
     else if (a === '--text') o.text = argv[++i];
     else if (a === '--name') o.name = argv[++i];
     else if (a === '--effort') o.effort = argv[++i];
@@ -1130,6 +1197,26 @@ async function selftest(repo) {
 async function main() {
   const o = args(process.argv.slice(2));
   if (o.selftest) return await selftest(repoOf(o));
+  KEEP_SESSION = o.keepSession === true;
+  // 会话列表 / 清旧会话：都是本机 Mirasim 的操作，不审东西、不碰仓。
+  if (o.sessions) {
+    const list = await listSessions();
+    if (list.length === 0) console.log('本机 Mirasim 上一个会话也没有');
+    for (const s of list) {
+      const ours = OUR_SESSION_TITLE.test(String(s.title ?? '')) ? '第二意见' : '别的';
+      console.log(
+        `${s.sessionKey}\t${s.runState ?? '?'}\t${ours}\t${String(s.title ?? '')
+          .split('\n')[0]
+          .slice(0, 40)}`,
+      );
+    }
+    return;
+  }
+  if (o.stopStale) {
+    const r = await stopStale((s) => console.log(s));
+    console.log(`清掉 ${r.deleted} 个已停的第二意见会话；还有 ${r.stillRunning} 个在跑的没动`);
+    return;
+  }
   const profile = o.ui ? PROFILES.ui : PROFILES.code;
   if (o.ping) {
     // 走一遍整条路（起会话、判完工、核账本），不审东西。
