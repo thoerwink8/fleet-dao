@@ -7,8 +7,9 @@
 // - 三段各跑一次，字段照 RunRecord：issueNumber / channel / token / costUsd / memoryPeakMb 读不到就不写，
 //   **不拿 0 顶**（#216）；没读到就是 NULL，不是 0。
 // - segment 是「scope | manual | verify」三择一（#554-1 的 RunRecord segment 枚举），写其他任何值都不收。
-// - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed」（#554-1 的枚举），
-//   还在跑的为空；结束了（ended_at 非空）就必须有 outcome，反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
+// - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed | org_switch」（#554-1 的枚举，
+//   org_switch 是切号先停下这一段、切完在原分支上重跑，#59），还在跑的为空；结束了（ended_at 非空）就必须有 outcome，
+//   反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
 // - retryOf 自引用，指到不存在的行要拒收（外键）。
 // - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话
 //   （db 的 session-org.ts）靠 route_id 连到池，没写 route_id 的行切号看不见。
@@ -43,6 +44,7 @@ export const RUN_OUTCOME_VALUES = [
   'spawn_failed',
   'admission_blocked',
   'failed',
+  'org_switch',
 ] as const;
 export type RunOutcomeValue = (typeof RUN_OUTCOME_VALUES)[number];
 
@@ -97,7 +99,7 @@ export const runs = pgTable(
     check('runs_segment_known', sql`${t.segment} in ('scope', 'manual', 'verify')`),
     check(
       'runs_outcome_known',
-      sql`${t.outcome} is null or ${t.outcome} in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed')`,
+      sql`${t.outcome} is null or ${t.outcome} in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch')`,
     ),
     //故事和 session_runs_outcome_iff_ended 一样：结束了就必须有结局，有结局就必须已结束。
     check('runs_outcome_iff_ended', sql`(${t.endedAt} is null) = (${t.outcome} is null)`),

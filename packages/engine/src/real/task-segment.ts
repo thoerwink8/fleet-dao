@@ -6,6 +6,8 @@
 // - 内存放不下新会话（准入）不是失败也不进失败分流：隔一会儿再试，最多等 ADMISSION_WAIT_MS；等到顶才回 memory_busy 交工作流。
 //   每次试都换新的执行编号（runs 主键），被拦的那几次在 runs 里各记一笔 admission_blocked。
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；这里随后把取消原样抛出去，不回「没跑成」。
+// - 切号叫停（#59）不是叫停：这一段交回 ok:false、结局和原因码都是 org_switch（失败分流 OS1：不算失败、不记账），工作流切完
+//   在原分支上重跑这一段。定了路由就登记（sessions.enter），建树、等内存、起会话都算在内，收场才走。
 // - 成败只认 adapters 的 judgeRun（经 Spawner 变成退出码）：不是 done 就带着原因码回 ok:false；原因码（quota_exhausted、
 //   model_mismatch、relay_unknown……）就是失败分流认的码，不改写；没有原因码的才按 one-shot 的结局给一个。
 // - 起不来（路由不可用、树备不好、Spawner 抛错）一律抛 PortError，不当成「会话没跑成」：前者重试没用，要人修配置。
@@ -23,6 +25,7 @@ import { renderSegmentPrompt } from '../runner/segment-prompt.ts';
 import { manualBriefOf } from '../runner/task-brief.ts';
 import type { RunSegmentInput, RunSegmentResult, SegmentEvidence } from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
+import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
 
@@ -39,6 +42,11 @@ export interface RunSegmentDeps {
   memoryAdmission?: MemoryAdmissionDeps;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
+  /**
+   * 一次性会话的登记（#59，real/one-shot-sessions.ts）：切号照它停下跑在 Claude 池上的这一段，这一段交回 org_switch，工作流切完
+   * 在原分支上重跑。不给 = 切号停不下它，只能等它跑完（#157）。
+   */
+  sessions?: OneShotSessions;
   now?: () => Date;
   /** 以下测试用。 */
   newRunId?: () => string;
@@ -69,6 +77,14 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 
 /** one-shot 的结局 → 失败分流要的证据：原因码原样带过去，没有才按结局给一个。 */
 export function evidenceOf(result: OneShotResult): SegmentEvidence {
+  // 切号停下的（#59）：码就是结局本身（失败分流 OS1 认 org_switch，不算失败、不记账），不让被杀时执行体报的原因码盖掉它
+  if (result.outcome === 'org_switch') {
+    return {
+      code: 'org_switch',
+      message: (result.failureReason ?? '切号：先停下这一段，切完在原分支上重跑').slice(0, MESSAGE_MAX),
+      quotaExhausted: false,
+    };
+  }
   const facts = result.facts;
   const reason =
     facts?.reason && facts.reason !== 'delivered' && facts.reason !== 'answered' ? facts.reason : undefined;
@@ -133,7 +149,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
   const log = deps.log ?? (() => undefined);
   const spawner = hostSegmentSpawner(deps.spawner);
 
-  return async (input: RunSegmentInput, ctx: PortContext): Promise<RunSegmentResult> => {
+  const runSegment = async (input: RunSegmentInput, ctx: PortContext): Promise<RunSegmentResult> => {
     ctx.heartbeat();
     // 1. 路由 → 会话用户（树要归它）。查不到、没接上都是配置问题，重试没用。
     let routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>;
@@ -142,7 +158,22 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     } catch (error) {
       throw new PortError('SEGMENT_ROUTE_UNUSABLE', message(error), { retryable: false });
     }
-    // 2. 树
+    // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
+    const ticket = deps.sessions?.enter({ poolId: routeInfo.route.poolId });
+    try {
+      return await run(input, ctx, routeInfo, ticket);
+    } finally {
+      ticket?.leave();
+    }
+  };
+
+  async function run(
+    input: RunSegmentInput,
+    ctx: PortContext,
+    routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>,
+    ticket: OneShotTicket | undefined,
+  ): Promise<RunSegmentResult> {
+    // 2. 树（切号叫停不打断建树：建完了下面起会话那一步当场回 org_switch）
     await prepareSegmentTree(
       deps.tree,
       {
@@ -160,8 +191,9 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       brief: manualBriefOf(input.brief, { branch: input.branch, baseSha: input.baseSha }),
       specDir: input.brief.specDir,
       feedback: input.feedback,
+      ...(input.interrupted ? { interrupted: input.interrupted } : {}),
     });
-    // 4. 起会话。叫停（ctx.signal）接进会话的看守。
+    // 4. 起会话。叫停（ctx.signal）接进会话的看守；切号叫停（ticket）交给 one-shot，结局记 org_switch。
     const stopSignal = ctx.signal;
     const beat = setInterval(() => ctx.heartbeat(), heartbeatEveryMs);
     const started = now().getTime();
@@ -169,6 +201,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     try {
       for (;;) {
         const runId = newRunId();
+        ticket?.attempt(runId);
         try {
           result = await runOneShot(
             {
@@ -189,6 +222,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               tmpDir: deps.runsDir,
               runs: deps.runs,
               now,
+              ...(ticket ? { stop: ticket.signal } : {}),
             },
           );
         } catch (error) {
@@ -206,7 +240,12 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         if (result.outcome !== 'admission_blocked') break;
         if (now().getTime() - started >= admissionWaitMs) break;
         ctx.heartbeat();
-        await sleep(admissionPollMs, stopSignal);
+        // 等内存时切号叫停了：不再等，下一次 one-shot 当场回 org_switch（不起会话）
+        try {
+          await sleep(admissionPollMs, ticket ? AbortSignal.any([stopSignal, ticket.signal]) : stopSignal);
+        } catch (error) {
+          if (stopSignal.aborted || !ticket?.signal.aborted) throw error;
+        }
       }
     } finally {
       clearInterval(beat);
@@ -223,5 +262,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       };
     }
     return { ok: false, runId: result.runId, outcome: result.outcome, evidence: evidenceOf(result) };
-  };
+  }
+
+  return runSegment;
 }
