@@ -495,7 +495,8 @@ class TaskFlow {
         ...(evidence?.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
         previousMessage,
       });
-      previousMessage = failure.message;
+      // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
+      if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
       this.status.lastProblem = next.reason;
       counters = bump(counters, next);
       if (next.action === 'retry') {
