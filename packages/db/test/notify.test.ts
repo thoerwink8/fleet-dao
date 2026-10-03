@@ -12,7 +12,6 @@ import {
   pools,
   progressEvents,
   quotaWindows,
-  seatBoards,
   sessionRuns,
   settings,
   stagePolicies,
@@ -227,8 +226,6 @@ describe('写入即通知 fleet_changes', () => {
     await t.db
       .insert(auditLog)
       .values({ actorKind: 'engine', actorId: 'w1', action: 'x', target: 'task:x', via: 'engine' });
-    // 帅位栏整张删掉（#531）后代码不再读这张表；表和数据先留着（删库表那一步再说），触发器还在，写一行报一条名字
-    await t.db.insert(seatBoards).values({ scope: 'main', project: 'fleet-dao', updatedAt: NOW });
     await settle();
     expect([...new Set(tables())].sort()).toEqual([...REALTIME_TABLES].sort());
   });

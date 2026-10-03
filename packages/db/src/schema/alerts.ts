@@ -1,5 +1,5 @@
 // 提醒是一件活（design 15.3「谁在处理」）：一条提醒一张主跟进单（alert_work）、Alertmanager 式的静默（alert_silences）。
-// 谁在处理不另记：就是跟进单上的认领（seat.ts 的 issue_claims）；状态从认领、PR 镜像、发布记录读时现算
+// 谁在处理不另记：就是跟进单上挂的 PR 和发布记录（认领账 #556 删了）；状态从 PR 镜像、发布记录读时现算
 // （@fleet-dao/core 的 alert-work.ts）。读写在 queries/alert-work.ts。
 // 改这里之前必须知道：
 // - alert_work 只记「没挂任务」或「挂了别的单」的：有 task_id 又没另挂的，跟进单就是那个任务的单，这里没有行。

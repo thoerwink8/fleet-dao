@@ -417,7 +417,6 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
   approvals: [['board'], ['task'], ['timeline']],
   // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
-  seat_boards: [],
   quota_windows: [['pools']],
   channels: [['routing'], ['pools']],
   stage_policies: [['routing']],
