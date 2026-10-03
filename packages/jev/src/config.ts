@@ -1,6 +1,6 @@
 // 机器配置：判断题后端的地址、密钥文件、起 reclaude 的命令。不进 git。
 // 从 FLEET_JEV_CONFIG 指的文件读（默认 /etc/fleet-dao/jev.json）；样例是 packages/jev/config.example.json。
-// 用哪个后端、哪个模型不在这里定：调度台「判断」阶段排第一的那条路由说了算（backendForRoute）。
+// 用哪个后端、哪个模型不在这里定：路由两层里判断用途排第一、不是死的那条路由说了算（wiring.ts → backendForRoute）。
 import { readFile } from 'node:fs/promises';
 import type { ClaudeEffort } from '@fleet-dao/adapters';
 import type { HostId } from '@fleet-dao/shared';
@@ -136,7 +136,7 @@ export async function loadJevConfig(path: string): Promise<JevMachineConfig> {
 export const CLAUDE_ROUTE_CLOSED =
   '判断路由走 Claude 会话先不开：要经 fleet-agent-scope 以会话用户的身份起，本包的 Claude 后端接上之前一律拒绝';
 
-/** 调度台「判断」阶段选中的路由：执行方式 + 具体模型（引擎把目录里的模型换成执行体认的型号）。 */
+/** 判断用途选中的路由（路由两层）：执行方式 + 具体模型（引擎把目录里的模型换成执行体认的型号）。 */
 export interface JudgeRoute {
   hostId: HostId;
   model: string;

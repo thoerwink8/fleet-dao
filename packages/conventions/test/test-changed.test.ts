@@ -309,8 +309,12 @@ describe('要全跑时本机不跑：写明原因和本机先跑的那一条命�
     expect(list).toContain('agents/test/');
     expect(list).toContain('packages/conventions/test/doc-pointers.test.ts');
     expect([...list].sort()).toEqual(['packages/shared/', ...ALWAYS_TESTS].sort());
-    // 依赖 shared 的（依赖图里直接间接依赖它的）一个不少写出来，不塞进本机那条命令
-    const users = [...dependentsClosure(graph(), ['shared'])].filter((u) => u !== 'shared').sort();
+    // 依赖 shared 的（依赖图里直接间接依赖它的，加上测试读它们的）一个不少写出来，不塞进本机那条命令；
+    // agents 不在依赖图里，它的测试读 db 的路由骨架（ci-plan.ts 的 TEST_READS），db 依赖 shared，所以也在里面
+    const users = [
+      ...[...dependentsClosure(graph(), ['shared'])].filter((u) => u !== 'shared'),
+      'agents',
+    ].sort();
     expect(users.length).toBeGreaterThan(5);
     expect(r.err).toContain(
       `依赖 shared 的也要跑——本机不逐个跑，CI 全跑会测到：${users.join('、')}（想先在本机测哪个：pnpm exec vitest run packages/<包>/）`,

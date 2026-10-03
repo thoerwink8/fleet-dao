@@ -14,7 +14,8 @@ import {
   routeOutcomesSince,
   taskContext,
 } from '../src/queries/engine.ts';
-import { pools, sessionRuns } from '../src/schema/index.ts';
+import { setRoutingEffort } from '../src/routing-effort.ts';
+import { pools, routingCatalog, sessionRuns } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -530,7 +531,22 @@ describe('routeLaunchFacts', () => {
       upstreamModel: 'claude-opus-5-5',
       runAsUser: 'fleet-agent-carpool',
       orgKind: 'solo',
+      // 没挂进路由两层：没配档位
+      effort: null,
     });
+  });
+
+  it('思考档位照路由两层里这条路由那一行现读：没配是 null，驾驶舱改了下一次读到的就是新的', async () => {
+    await t.db
+      .insert(routingCatalog)
+      .values({ modelId: 'opus-5.5', routeId: 'r1', position: 0, enabled: true });
+    expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBeNull();
+    expect(await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'r1', effort: 'xhigh' })).toEqual({
+      ok: true,
+      before: null,
+      after: 'xhigh',
+    });
+    expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBe('xhigh');
   });
 
   it('路由不在回 null', async () => {

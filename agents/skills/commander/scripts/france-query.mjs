@@ -121,10 +121,14 @@ export const SQL = {
          from schedule_runs r where r.job = j.id and r.outcome in ('ok', 'partial') order by r.ended_at desc, r.id desc limit 1) as last_success
     from scheduled_jobs j) x`,
 
+  // in_use：路由两层里开着、它的模型又排进了某个用途（#574）。和 packages/db 的 routing-layers.ts 里 routesInUse 同一个判法
+  // （探针只探这些、选路只派这些），那边改了这里跟着改。不读旧的阶段平铺表 stage_policy_routes；库里还没有两层那两张表
+  // （没跑迁移 0025）这一块就报「库查询出错」，不拿旧表顶。
   routes: `select coalesce(jsonb_agg(x order by x.id), '[]'::jsonb) from (
     select ro.id, ro.pool_id as pool, ro.model_id as model, ro.host_id as host, ro.alive, ro.probe_state, ro.probed_at,
            left(ro.probe_detail, 400) as probe_detail, p.org_kind, ch.enabled as channel_enabled, ch.billing,
-           exists (select 1 from stage_policy_routes spr where spr.route_id = ro.id and spr.enabled) as in_use
+           exists (select 1 from routing_catalog rc join routing_purpose_models rpm on rpm.model_id = rc.model_id
+                   where rc.route_id = ro.id and rc.enabled) as in_use
     from routes ro join pools p on p.id = ro.pool_id join channels ch on ch.id = ro.channel_id) x`,
 
   orgAudit: `select coalesce(jsonb_agg(x order by x.at desc), '[]'::jsonb) from (

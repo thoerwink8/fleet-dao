@@ -56,7 +56,6 @@ import {
   claudeRunFacts,
   cursorRunFacts,
   type DetachedIo,
-  GROK_EFFORTS,
   type GrokRunReport,
   type GrokRunSpec,
   grokRunFacts,
@@ -81,7 +80,17 @@ import {
   type SessionUser,
   type SpawnInfo,
 } from '@fleet-dao/adapters';
-import type { HostId, ProgressEvent } from '@fleet-dao/shared';
+import {
+  DEFAULT_SESSION_EFFORT,
+  effortRank,
+  HOST_EFFORT_SUPPORT,
+  type HostId,
+  hasModelBrackets,
+  isSessionEffort,
+  modelBracketEffort,
+  type ProgressEvent,
+  routeEffortProblem,
+} from '@fleet-dao/shared';
 import { hostName } from '../routing/names.ts';
 
 /** 引擎接上的执行方式。加一家：写它的驱动，探针跟着就能探、选路跟着就派。 */
@@ -97,42 +106,32 @@ export function isWiredHost(hostId: string): hostId is WiredHost {
   return (WIRED_HOSTS as readonly string[]).includes(hostId);
 }
 
+/** 没配思考档位时用这一档（high，创始人 2026-09-28 傍晚拍）；叫法、各家认哪些档都在 shared 的 effort.ts。 */
+export { DEFAULT_SESSION_EFFORT };
+
 /**
- * 路由没写思考档位时用这个。
- * 创始人 2026-09-28 傍晚拍（specs/169-Fusion形态/需求.md「各家模型干活的会话思考档位默认 high」）：
- * 显式传，不靠各家命令行自己的默认（Grok 自己默认 xhigh）。
- * #470 以后在驾驶舱按模型配；这次只认路由上已经写了的。
+ * 一次会话用哪一档（#470）。只有这里把两个来源合成一档，别处只管传：
+ * - configured：驾驶舱给这条路由配的（routing_catalog.effort，没配 = DEFAULT_SESSION_EFFORT）。它是这条路由的默认，也是上限。
+ * - tier：分档按改动面给的（runner/tier.ts 的 effort）。只往下压、不往上抬：比标准档（DEFAULT_SESSION_EFFORT）低才算数
+ *   （快档的 medium：小活少想），取它和 configured 里低的那个；标准档及以上 = 不压，照 configured（驾驶舱配了 xhigh 的，
+ *   中档、主力档的活就是 xhigh；配了 low 的，哪一档的活都是 low）。
+ * 认不出的值抛错（调用方不起会话），不当成 high。
  */
-export const DEFAULT_SESSION_EFFORT: SessionEffort = 'high';
-
-/** 模型串方括号里表示档位的键（cursor / ACP，docs/reference/adapters.md）。 */
-const MODEL_EFFORT_KEYS = ['effort', 'reasoning_effort', 'reasoning', 'thought_level'] as const;
-
-/** 有单独参数的执行方式，和它认的档。cursor 没有单独参数，档位写在模型串方括号里。 */
-const HOST_EFFORTS: Record<WiredHost, readonly SessionEffort[] | null> = {
-  'claude-code': SESSION_EFFORTS,
-  grok: GROK_EFFORTS,
-  mirasim: SESSION_EFFORTS,
-  'cursor-agent': null,
-};
-
-/** 方括号里已经写了的档位。写了两处还对不上就抛错。没有方括号、或方括号里没有档位键，返回 undefined。 */
-export function modelBracketEffort(model: string): string | undefined {
-  let found: string | undefined;
-  for (const group of model.matchAll(/\[([^\]]*)\]/g)) {
-    for (const part of (group[1] ?? '').split(',')) {
-      const eq = part.indexOf('=');
-      if (eq < 0) continue;
-      const key = part.slice(0, eq).trim();
-      if (!(MODEL_EFFORT_KEYS as readonly string[]).includes(key)) continue;
-      const value = part.slice(eq + 1).trim();
-      if (found !== undefined && found !== value) {
-        throw new Error(`模型串里的思考档位写了两处还对不上：${JSON.stringify(model)}`);
-      }
-      found = value;
-    }
+export function sessionEffortFor(configured: string | undefined, tier: string | undefined): SessionEffort {
+  const base = configured ?? DEFAULT_SESSION_EFFORT;
+  if (!isSessionEffort(base)) {
+    throw new Error(
+      `路由配的思考档位（effort）不认识：${JSON.stringify(base)}（只有 ${SESSION_EFFORTS.join(' / ')}）`,
+    );
   }
-  return found;
+  if (tier === undefined) return base;
+  if (!isSessionEffort(tier)) {
+    throw new Error(
+      `分档给的思考档位（effort）不认识：${JSON.stringify(tier)}（只有 ${SESSION_EFFORTS.join(' / ')}）`,
+    );
+  }
+  if (effortRank(tier) >= effortRank(DEFAULT_SESSION_EFFORT)) return base;
+  return effortRank(tier) < effortRank(base) ? tier : base;
 }
 
 function insertBracketEffort(model: string, effort: SessionEffort): string {
@@ -143,52 +142,37 @@ function insertBracketEffort(model: string, effort: SessionEffort): string {
 }
 
 /**
- * 起会话时档位怎么给这家。
- * - 方括号里已经有档位：模型串原样，不再另传（值不认识、或和路由上另配的对不上，都抛错）。
- * - 这家有单独参数、方括号里没有：用路由上写的，没有就用 DEFAULT_SESSION_EFFORT。
- * - cursor 没有单独参数：方括号里没写档位、但已经是方括号模型的，把档位补进方括号；
- *   没方括号的模型串是上游目录里的整串（auto、gpt-5.6-luna-high），自己加方括号会被拒（CU-02），保持原样。
- *   这种路由上又单独配了档位，传不出去，抛错，不许静默丢掉。
- * 不认识、这家不支持：抛错，调用方不起会话。
+ * 起会话时档位怎么给这家（这家认哪些档、怎么收，照 shared 的 HOST_EFFORT_SUPPORT 和 routeEffortProblem，和驾驶舱、骨架同一份判法）。
+ * - 路由上配的（spec.effort）先过 routeEffortProblem：不认识、这家不支持、方括号里已经写了别的档，都抛错。
+ * - 方括号里已经有档位：模型串原样，不再另传（分档也压不下去：档位写死在模型串里）。
+ * - 这家有单独参数：传 sessionEffortFor 合出来的那一档。
+ * - cursor 没有单独参数：方括号模型里没写档位的，把合出来的那一档补进方括号；没方括号的模型串是上游目录里的整串（auto、
+ *   gpt-5.6-luna-high），自己加方括号会被拒（CU-02），原样传——分档压不下去，路由上也配不了（上面那一步已经拒了）。
+ * 抛错时调用方不起会话。
  */
 export function applySessionEffort(
   host: WiredHost,
-  spec: Pick<HostRunSpec, 'model' | 'effort'>,
+  spec: Pick<HostRunSpec, 'model' | 'effort' | 'tierEffort'>,
 ): { model: string; pass?: SessionEffort } {
-  const allowed = HOST_EFFORTS[host];
+  const who = hostName(host);
+  if (spec.effort !== undefined) {
+    const problem = routeEffortProblem(host, spec.model, spec.effort, who);
+    if (problem) throw new Error(problem);
+  }
+  const support = HOST_EFFORT_SUPPORT[host];
   const embedded = modelBracketEffort(spec.model);
   if (embedded !== undefined) {
-    assertSessionEffort(embedded, allowed ?? SESSION_EFFORTS, hostName(host));
-    if (spec.effort !== undefined && spec.effort !== embedded) {
-      throw new Error(
-        `思考档位写了两处：模型串方括号里是 ${embedded}，路由上又配了 ${JSON.stringify(spec.effort)}。方括号里已经有的不再另传`,
-      );
-    }
+    assertSessionEffort(embedded, support.kind === 'flag' ? support.allowed : SESSION_EFFORTS, who);
     return { model: spec.model };
   }
-  if (allowed === null) {
-    // 已经是方括号模型、里面还没写档位：补进方括号，不另造一个参数。
-    if (/\[[^\]]*\]/.test(spec.model)) {
-      const effort = assertSessionEffort(
-        spec.effort ?? DEFAULT_SESSION_EFFORT,
-        SESSION_EFFORTS,
-        hostName(host),
-      );
-      return { model: insertBracketEffort(spec.model, effort) };
-    }
-    if (spec.effort !== undefined) {
-      // 先认值：不认识的报不认识，认得但没地方写的才报这家不支持单独传
-      assertSessionEffort(spec.effort, SESSION_EFFORTS, hostName(host));
-      throw new Error(
-        `${hostName(host)} 不支持单独传思考档位（effort）${JSON.stringify(spec.effort)}：要写在模型串的方括号里，不许另传`,
-      );
-    }
-    return { model: spec.model };
+  const effort = sessionEffortFor(spec.effort, spec.tierEffort);
+  if (support.kind === 'bracket') {
+    return hasModelBrackets(spec.model)
+      ? { model: insertBracketEffort(spec.model, effort) }
+      : { model: spec.model };
   }
-  return {
-    model: spec.model,
-    pass: assertSessionEffort(spec.effort ?? DEFAULT_SESSION_EFFORT, allowed, hostName(host)),
-  };
+  if (support.kind === 'none') throw new Error(`${who}${support.why}`);
+  return { model: spec.model, pass: assertSessionEffort(effort, support.allowed, who) };
 }
 
 /** 「Claude Code、Cursor Agent、Grok 命令行、Mirasim」：没接上的报错、探针的原因里用。 */
@@ -217,10 +201,12 @@ export interface HostRunSpec {
   /** 发给执行体的模型串：路由的 upstream_model，没有就用模型 id。 */
   model: string;
   /**
-   * 路由上写的思考档位。不给就用 DEFAULT_SESSION_EFFORT。
+   * 驾驶舱给这条路由配的思考档位（routing_catalog.effort）。不给 = 没配，用 DEFAULT_SESSION_EFFORT。
    * 模型串方括号里已经编了档位的不再另传（applySessionEffort）。
    */
   effort?: string;
+  /** 分档按改动面给的档位（runner/tier.ts）：只往下压、不往上抬，和 effort 怎么合见 sessionEffortFor。不给 = 不压。 */
+  tierEffort?: string;
   session: HostSession;
   /**
    * work = 干活的会话：命令一律放行（会话用户读不到引擎的配置和机器人凭据，design 第十四节；无头会话没人批权限）；
