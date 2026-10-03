@@ -341,11 +341,30 @@ export async function dropDatabaseForce(url: string, dbName: string): Promise<vo
   });
 }
 
-/** 清空所有表（迁移记录在 drizzle 模式里，不动），自增序号从头来。比每个测试克隆一份快一个数量级。 */
+/**
+ * 清空所有表（迁移记录在 drizzle 模式里，不动），自增序号从头来。比每个测试克隆一份快一个数量级。
+ * 只 truncate 有行的表、序号一律拨回起点：真 Postgres 上 truncate 每张表都要换新文件、落盘，四十多张表一起清
+ * 一次要几百毫秒（CI 的 db 分片每条测试都付这一笔），而一条测试通常只写了几张表。清完的样子和全表 truncate 一样：
+ * 每张表都空，每个序号（失败的插入也会推进序号，表空着不代表序号没动）都回到起点。
+ */
 export async function resetTestDb(t: TestDb): Promise<void> {
   const tables = await t.client.query<{ name: string }>(
     "select quote_ident(tablename) as name from pg_tables where schemaname = 'public'",
   );
   if (tables.rows.length === 0) throw new Error('测试库里一张表都没有：迁移没跑？');
-  await t.client.exec(`truncate ${tables.rows.map((r) => r.name).join(', ')} restart identity cascade`);
+  const filled = await t.client.query<{ name: string }>(
+    tables.rows
+      .map((r) => `select ${quoteLiteral(r.name)} as name where exists (select 1 from ${r.name})`)
+      .join(' union all '),
+  );
+  if (filled.rows.length > 0) {
+    await t.client.exec(`truncate ${filled.rows.map((r) => r.name).join(', ')} cascade`);
+  }
+  await t.client.query(
+    "select setval(format('%I.%I', schemaname, sequencename), start_value, false) from pg_sequences where schemaname = 'public'",
+  );
+}
+
+function quoteLiteral(s: string): string {
+  return `'${s.replaceAll("'", "''")}'`;
 }
