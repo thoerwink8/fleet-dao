@@ -123,6 +123,12 @@
       "why": "定令牌权限；合并闸、pull_request_target 拿写令牌也在这"
     },
     {
+      "path": ".github/workflows/ci.yml",
+      "kind": "碰安全",
+      "mode": "workflow",
+      "why": "CI 本身：只有改动碰到权限、令牌、触发条件、用到的 action、卫生检查和合并闸、放过失败的写法、汇总和依赖、整个 job 的增删才要审；改分台、并行、超时、缓存、步骤顺序、注释不用审（创始人 2026-10-03 拍，改分台这类提速改动不再每次过第二意见）。比上面整个目录那条更具体，所以对它按这条判"
+    },
+    {
       "path": "packages/conventions/high-risk-paths.json",
       "kind": "碰安全",
       "why": "CI 检查本身：就是这份清单：删一条就少拦一类"

@@ -34,7 +34,7 @@ export interface RiskPath {
    * 'migrations'：迁移目录。新加的迁移只建表、加列不算；改了、删了已有的迁移，或新迁移里有删、改已有表列数据的语句才算。
    * meta/ 下是按 SQL 生成的快照，不单独算。
    */
-  mode?: 'migrations';
+  mode?: 'migrations' | 'workflow';
 }
 
 /** 读清单：认不出返回一句为什么（调用方判没查成）；空清单也算认不出——一条都没有等于不拦。 */
@@ -68,14 +68,18 @@ export function parseRiskPaths(text: string): RiskPath[] | string {
       return `${at}（${path}）的 kind「${String(item.kind)}」不是${RISK_KINDS.map((k) => `「${k}」`).join('')}之一`;
     }
     if (!item.why.trim()) return `${at}（${path}）没写为什么`;
-    if (item.mode !== undefined && (item.mode !== 'migrations' || !path.endsWith('/'))) {
-      return `${at}（${path}）的 mode 认不出（只有目录能写 "migrations"）`;
+    const dir = path.endsWith('/');
+    if (
+      item.mode !== undefined &&
+      !((item.mode === 'migrations' && dir) || (item.mode === 'workflow' && !dir && /[.]ya?ml$/.test(path)))
+    ) {
+      return `${at}（${path}）的 mode 认不出（目录只能写 "migrations"，单个 .yml 工作流文件只能写 "workflow"）`;
     }
     out.push({
       path,
       kind: item.kind as RiskKind,
       why: item.why.trim(),
-      ...(item.mode === 'migrations' ? { mode: 'migrations' as const } : {}),
+      ...(item.mode === 'migrations' || item.mode === 'workflow' ? { mode: item.mode } : {}),
     });
   }
   return out;
@@ -161,17 +165,78 @@ export function destructiveIn(patch: string | undefined): string | undefined {
   return undefined;
 }
 
-/** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。 */
+/**
+ * 工作流文件里「改了就得有人看一眼」的几类内容（mode 为 workflow 的那条用）。判的是改动里加上、删掉的行（注释行不算），
+ * 不是整个文件：改分台、并行、超时、缓存、步骤顺序、注释这些不碰信任的，不用审；碰到下面任何一类就要审。
+ * 宁可多拦：认不准的写法让第二意见看一眼，漏拦一次放宽检查或权限就回不来（改下面的清单本身就是改合并闸，走先审后合）。
+ *
+ * - 权限和令牌：permissions、各权限项、secrets.、GITHUB_TOKEN、github.token、persist-credentials
+ * - 触发：on、pull_request、pull_request_target、workflow_run、types、branches、paths
+ * - 外来代码：uses（新增、换版本、换来源的 action）
+ * - 门槛本身：卫生检查（hygiene、trusted/TRUSTED）、second-opinion、merge-gate、cold-verify、continue-on-error、
+ *   `|| true`、exit 0、set +e、if: 里带 always()/failure()/cancelled()/事件名（决定检查跑不跑、红了算不算红）
+ * - 汇总和依赖：check job 本身、任何 needs 行、删掉整个 job
+ */
+const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
+  [
+    /\bpermissions\b|\b(?:contents|actions|statuses|pull-requests|checks|id-token|packages|issues):\s*(?:read|write|none)\b/,
+    '权限',
+  ],
+  [/secrets\.|GITHUB_TOKEN|github\.token|persist-credentials/, '令牌或密钥'],
+  [
+    /^\s*(?:on|push|pull_request|pull_request_target|workflow_run):|\b(?:types|branches|paths|paths-ignore):/,
+    '触发条件',
+  ],
+  [/\buses:/, '用到的 action'],
+  [/\bhygiene\b|\btrusted\b|\bTRUSTED\b|卫生检查|second-opinion|merge-gate|cold-verify/, '卫生检查或合并闸'],
+  [/continue-on-error|\|\|\s*true|\bexit 0\b|set \+e/, '放过失败'],
+  [/\bif:.*(?:always\(\)|failure\(\)|cancelled\(\)|github\.event_name|github\.event\.)/, '检查跑不跑的条件'],
+  [
+    /^\s*check:\s*$|\bneeds:|CI_NEEDS|ci-verdict|ci-plan\.ts|汇总|::error::/,
+    '汇总、依赖或「该跑什么」的判法',
+  ],
+  [/^ {2}[\w-]+:\s*$/, '整个 job 的增删'],
+];
+
+/**
+ * 工作流改动里第一处碰到信任的地方；都是不碰信任的改动回 undefined；看不到改动内容回 '看不到改动内容'。
+ * 只认「+」「-」开头的行（文件头 +++/--- 不算），去掉前缀后以 # 开头的注释行不算。
+ */
+export function workflowSensitive(patch: string | undefined): string | undefined {
+  if (patch === undefined) return '看不到改动内容';
+  for (const raw of patch.split('\n')) {
+    if (!/^[+-]/.test(raw) || raw.startsWith('+++') || raw.startsWith('---')) continue;
+    const line = raw.slice(1);
+    if (/^\s*#/.test(line)) continue;
+    for (const [re, what] of WORKFLOW_SENSITIVE) {
+      if (re.test(line)) return `改了${what}：${line.trim().slice(0, 50)}`;
+    }
+  }
+  return undefined;
+}
+
+/** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。同一个文件多条规则都沾边时认最具体（路径最长）的那条。 */
 export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPath[]): RiskyFile[] {
   const hits: RiskyFile[] = [];
   const seen = new Set<string>();
   for (const f of files) {
     for (const name of [f.filename, ...(f.previous ? [f.previous] : [])]) {
       if (seen.has(name)) continue;
-      const rule = list.find((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path));
+      const rule = list
+        .filter((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path))
+        .sort((a, b) => b.path.length - a.path.length)[0];
       if (!rule) continue;
       const hit: RiskyFile = { file: name, rule: rule.path, kind: rule.kind };
-      if (rule.mode === 'migrations') {
+      if (rule.mode === 'workflow') {
+        // 只有「改了已有的工作流」才按内容判；新加、删掉、改名一律算（整个文件都是新的信任面）
+        if (f.status === 'modified' && name === f.filename) {
+          const note = workflowSensitive(f.patch);
+          if (note === undefined) continue;
+          hit.note = note;
+        } else {
+          hit.note = `工作流文件${f.status === 'removed' ? '被删' : f.status === 'added' ? '是新加的' : '被改名'}`;
+        }
+      } else if (rule.mode === 'migrations') {
         if (name.startsWith(`${rule.path}meta/`)) continue;
         if (f.status === 'added' && name === f.filename) {
           const note = destructiveIn(f.patch);
