@@ -27,8 +27,12 @@ const graph = (): PackageGraph => {
   return REAL;
 };
 const pr = (...changed: string[]) => planCi({ event: 'pull_request', changed, graph: graph() });
-const testArgs = (p: CiPlan) => p.tests.flatMap((s) => s.args);
-const shards = (p: CiPlan) => p.tests.map((s) => s.name);
+/** 要测的包目录（同一组切成几台时，每台的包目录一样、只差末尾的 --shard，这里去重、去掉 --shard）。 */
+const testArgs = (p: CiPlan) => [
+  ...new Set(p.tests.flatMap((s) => s.args).filter((a) => !a.startsWith('--shard='))),
+];
+/** 跑哪几组（engine、db、rest）；一组切成几台不影响这里。 */
+const shards = (p: CiPlan) => [...new Set(p.tests.map((s) => s.name))];
 
 describe('依赖图：从 packages/*/package.json 读', () => {
   it('本仓：每个包都在，engine 依赖 db、api 依赖 github', () => {
@@ -132,7 +136,7 @@ describe('按改动算要跑什么', () => {
   it('只改一个没人依赖的包（cli）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
     const p = pr('packages/cli/src/help.ts');
     expect(p).toMatchObject({ full: false, biome: true, tsc: ['packages/cli'], web: false, deploy: 'none' });
-    expect(p.tests).toEqual([{ name: 'rest', args: ['packages/cli/'], temporal: false }]);
+    expect(p.tests).toEqual([{ name: 'rest', label: 'rest', args: ['packages/cli/'], temporal: false }]);
   });
 
   it('改了 conventions：engine 依赖它，engine 也测', () => {
@@ -142,7 +146,12 @@ describe('按改动算要跑什么', () => {
   it('改了 db：db 和所有依赖它的（engine、api、github、jev）都测；engine 单独一台、带 Temporal', () => {
     const p = pr('packages/db/src/schema/index.ts');
     expect(shards(p)).toEqual(['engine', 'db', 'rest']);
-    expect(p.tests[0]).toEqual({ name: 'engine', args: ['packages/engine/'], temporal: true });
+    expect(p.tests[0]).toEqual({
+      name: 'engine',
+      label: 'engine 1/2',
+      args: ['packages/engine/', '--shard=1/2'],
+      temporal: true,
+    });
     for (const u of ['packages/api/', 'packages/github/', 'packages/jev/']) expect(testArgs(p)).toContain(u);
     expect(p.tsc).toEqual(expect.arrayContaining(['packages/db', 'packages/engine', 'packages/api']));
   });
@@ -641,5 +650,78 @@ describe('ci.yml 和这里对得上', () => {
 
   it('不用工作流级 paths 过滤（必过检查要永远触发）', () => {
     expect(yml).not.toMatch(/^\s+paths(-ignore)?:/m);
+  });
+});
+
+describe('测试切成几台并行跑（vitest --shard，#654 F）', () => {
+  /** 每一组的 --shard=i/n 必须正好是 1..n 各一台：少一台那几个测试文件就没人跑（check 只看跑了的台是不是绿，看不出漏了哪台）。 */
+  function coverage(p: CiPlan): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const group of shards(p)) {
+      const legs = p.tests.filter((s) => s.name === group);
+      const marks = legs.map((s) => s.args.find((a) => a.startsWith('--shard='))?.slice('--shard='.length));
+      if (legs.length === 1 && marks[0] === undefined) {
+        out[group] = '1 台，不切';
+        continue;
+      }
+      const n = legs.length;
+      const got = marks.map((m) => /^(\d+)\/(\d+)$/.exec(m ?? ''));
+      const ok = got.every((m, i) => m && Number(m[1]) === i + 1 && Number(m[2]) === n);
+      out[group] = ok ? `${n} 台，1..${n} 齐` : `对不上：${marks.join('、')}`;
+    }
+    return out;
+  }
+
+  it('全跑：engine 两台、db 一台、rest 三台；每台带自己的 --shard 和 job 名', () => {
+    const p = planCi({ event: 'push', changed: [], graph: graph() });
+    expect(p.tests.map((s) => s.label)).toEqual([
+      'engine 1/2',
+      'engine 2/2',
+      'db',
+      'rest 1/3',
+      'rest 2/3',
+      'rest 3/3',
+    ]);
+    expect(p.tests.filter((s) => s.name === 'engine').map((s) => s.args)).toEqual([
+      ['packages/engine/', '--shard=1/2'],
+      ['packages/engine/', '--shard=2/2'],
+    ]);
+    expect(p.tests.find((s) => s.name === 'db')?.args).toEqual(['packages/db/']);
+    expect(p.tests.filter((s) => s.temporal).map((s) => s.name)).toEqual(['engine', 'engine']);
+    expect(coverage(p)).toEqual({ engine: '2 台，1..2 齐', db: '1 台，不切', rest: '3 台，1..3 齐' });
+  });
+
+  it('改了 db：engine 切两台、rest 的包够多就切三台；每台装一份 Temporal（temporal 跟着 engine 走）', () => {
+    const p = pr('packages/db/src/schema/index.ts');
+    expect(coverage(p)).toEqual({ engine: '2 台，1..2 齐', db: '1 台，不切', rest: '3 台，1..3 齐' });
+  });
+
+  it('rest 只有一两个包：不切（几十秒就跑完，切开只多出每台 30 秒的固定开销）', () => {
+    const p = pr('packages/cli/src/help.ts');
+    expect(p.tests).toHaveLength(1);
+    expect(coverage(p)).toEqual({ rest: '1 台，不切' });
+  });
+
+  it('改了 engine：只有 engine，切两台', () => {
+    expect(coverage(pr('packages/engine/src/worker.ts'))).toEqual({ engine: '2 台，1..2 齐' });
+  });
+
+  it('【故意造出的失败】少了一台 / 台号对不上：coverage 报「对不上」，不当成齐了', () => {
+    const p = planCi({ event: 'push', changed: [], graph: graph() });
+    const lost = { ...p, tests: p.tests.filter((s) => s.label !== 'rest 2/3') };
+    expect(coverage(lost).rest).toBe('对不上：1/3、3/3');
+    const wrong = {
+      ...p,
+      tests: p.tests.map((s) =>
+        s.label === 'engine 2/2' ? { ...s, args: ['packages/engine/', '--shard=1/2'] } : s,
+      ),
+    };
+    expect(coverage(wrong).engine).toBe('对不上：1/2、1/2');
+  });
+
+  it('ci.yml 的 job 名用 matrix.label（切了以后每台名字不同），db 的 Postgres 仍按组名 db 认', () => {
+    const yml = readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8');
+    expect(yml).toContain('name: test (${{ matrix.label }})');
+    expect(yml).toContain("matrix.name == 'db'");
   });
 });

@@ -164,7 +164,8 @@ jobs:
           set -euo pipefail
           if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
 
-  # engine、db 各一台（最慢的两个），其余一台；只跑受影响的包（改到的 + 依赖它们的）。
+  # engine 切两台、db 一台、其余切三台（ci-plan.ts 的 TEST_SHARDS，vitest --shard 按测试文件均分；包少时 rest 不切）；
+  # 只跑受影响的包（改到的 + 依赖它们的）。
   # db 分片旁边起一个 postgres:16 服务容器（和法国生产同大版本，ops.md 第二节），测试经 FLEET_TEST_PG_URL 连上，
   # 第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆一份（#220）：一个测试进程的内存从
   # ~1G 降到 ~0.3G，不再每个进程各建一份内存 PGlite。engine、rest 不连这张库，照 PGlite 走；本机没设这个变量也
@@ -172,7 +173,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.tests != '[]'
-    name: test (${{ matrix.name }})
+    name: test (${{ matrix.label }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
