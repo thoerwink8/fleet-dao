@@ -189,6 +189,171 @@ describe('高风险路径清单', () => {
   });
 });
 
+describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第二意见）', () => {
+  const list = [
+    { path: '.github/workflows/', kind: '碰安全', why: '令牌权限' },
+    { path: '.github/workflows/ci.yml', kind: '碰安全', why: '内容判', mode: 'workflow' },
+  ] as RiskPath[];
+  const patchOf = (...lines: string[]) => ['@@ -1,3 +1,3 @@', ' 上下文', ...lines].join('\n');
+  const verdict = (patch: string | undefined, file = '.github/workflows/ci.yml', status = 'modified') =>
+    riskyFiles([changed(file, status, patch === undefined ? {} : { patch })], list);
+
+  it('改分台、并行、超时、缓存、步骤顺序、注释：不用审（这是提速改动的常态）', () => {
+    expect(verdict(patchOf('-    timeout-minutes: 10', '+    timeout-minutes: 15'))).toEqual([]);
+    expect(verdict(patchOf('-        max-parallel: 3', '+        max-parallel: 6'))).toEqual([]);
+    expect(
+      verdict(
+        patchOf(
+          '-      - name: 旧名字',
+          '+      - name: 新名字',
+          '-          key: a-v1',
+          '+          key: a-v2',
+        ),
+      ),
+    ).toEqual([]);
+    // 只加不删：新加一步、新加一个并行任务，放松不了已有的检查
+    expect(
+      verdict(patchOf('+      - run: pnpm exec vitest run packages/web/', '+      - run: node a.ts &')),
+    ).toEqual([]);
+    expect(
+      verdict(patchOf('+      - run: pnpm exec vitest run packages/db/', '+      # 只加注释和一步命令')),
+    ).toEqual([]);
+    expect(verdict(patchOf('-      # 旧注释里提到 permissions 和 secrets.', '+      # 新注释'))).toEqual([]);
+    expect(verdict(patchOf('+++ b/x', '--- a/x'))).toEqual([]);
+  });
+
+  it('行尾注释不算内容（只改超时、行尾写「# permissions 不变」不该被拦）；但 # 在引号字符串里就不是注释', () => {
+    expect(verdict(patchOf('+    timeout-minutes: 15 # permissions 不变'))).toEqual([]);
+    expect(verdict(patchOf('+    timeout-minutes: 15   # 没碰 secrets. 也没碰 uses:'))).toEqual([]);
+    // 【故意造出的失败】# 在引号里：后面的 secrets. 不能被当成注释藏起来
+    expect(verdict(patchOf('+        run: echo " # " && echo ${{ secrets.X }}'))).toHaveLength(1);
+    expect(verdict(patchOf("+        run: echo ' # ' && echo ${{ secrets.X }}"))).toHaveLength(1);
+    // 注释前面本来就碰信任：照拦
+    expect(verdict(patchOf('+  contents: write # 只给读'))).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】碰到信任的每一类都要审：权限、令牌、触发、action、卫生检查和合并闸、放过失败、条件、汇总依赖、整个 job', () => {
+    const touches: [string, string][] = [
+      ['+  contents: write', '权限'],
+      ['+permissions: write-all', '权限'],
+      ['+  security-events: write', '权限'],
+      ['+      - edited', '列表项'],
+      ['+      - main', '列表项'],
+      ["+      - '**'", '列表项'],
+      ['+      - docs/**', '列表项'],
+      ['+  attestations: write', '权限'],
+      ['+  schedule:', '触发条件'],
+      ['+  workflow_job:', '顶层骨架'],
+      ['+  workflow_job: {}', '顶层骨架'],
+      ['+  future_event: [x]', '顶层骨架'],
+      ['+  group: ci-${{ github.ref }}', '顶层骨架'],
+      ['+on: [push, workflow_job]', '触发条件'],
+      ['+    - cron: "0 * * * *"', '触发条件'],
+      ['+  workflow_dispatch:', '触发条件'],
+      ['+  workflow_call:', '触发条件'],
+      ['+  issue_comment:', '触发条件'],
+      ['+        env: ${{ secrets.X }}', '令牌或密钥'],
+      ['+          GH_TOKEN: ${{ github.token }}', '令牌或密钥'],
+      ['-          persist-credentials: false', '令牌或密钥'],
+      ['+  pull_request_target:', '触发条件'],
+      ['-    types: [opened, synchronize]', '触发条件'],
+      ['+      - uses: some/action@v1', '用到的 action'],
+      ['+      "uses": some/action@v1', '用到的 action'],
+      ["+  'permissions': write-all", '权限'],
+      ['+  "contents": write', '权限'],
+      ['+      - "uses": x/y@v1', '用到的 action'],
+      ['-      - uses: actions/checkout@v4', '用到的 action'],
+      ['-      TRUSTED: ${{ github.workspace }}/trusted', '卫生检查或合并闸'],
+      ['+      - name: 卫生检查', '卫生检查或合并闸'],
+      ['+        continue-on-error: true', '放过失败'],
+      ['+        run: pnpm test || true', '放过失败'],
+      ['+        if: always()', '检查跑不跑的条件'],
+      ["+        if: github.event_name == 'push'", '检查跑不跑的条件'],
+      ["-        if: needs.changes.outputs.tests == 'true'", '检查跑不跑的条件'],
+      ['+        if: false', '检查跑不跑的条件'],
+      ['+    runs-on: self-hosted', '跑在哪台机器上'],
+      ['+    runs-on: ubuntu-latest-16-cores', '跑在哪台机器上'],
+      ['-        run: pnpm exec vitest run packages/db/', '删了或改了已有的行'],
+      ['-        run: pnpm exec biome check .', '删了或改了已有的行'],
+      ['-          bash deploy/test/run.sh "${args[@]}"', '删了或改了已有的行'],
+      ['-      - run: pnpm --filter ./packages/web run build:demo', '删了或改了已有的行'],
+      ['-        run: echo 跑一步别的', '删了或改了已有的行'],
+      ['-        shard: [1, 2, 3]', '删了或改了已有的行'],
+      ['-          path: pr', '删了或改了已有的行'],
+      ['-          cache: pnpm', '删了或改了已有的行'],
+      ['+        if: >-', '检查跑不跑的条件'],
+      ["+          github.event_name == 'push' && matrix.x", '检查跑不跑的条件'],
+      ['+          failure() || cancelled()', '检查跑不跑的条件'],
+      ['+    needs: [changes, lint]', '汇总、依赖'],
+      ['-        run: node packages/conventions/src/bin/ci-verdict.ts', '汇总、依赖'],
+      ['+        CI_NEEDS: ${{ toJSON(needs) }}', '汇总、依赖'],
+      ['-  web:', '顶层骨架'],
+      ['+  newjob:', '顶层骨架'],
+    ];
+    for (const [line, what] of touches) {
+      const hits = verdict(patchOf(line));
+      expect(hits, line).toHaveLength(1);
+      expect(hits[0]?.note, line).toContain(what);
+      expect(hits[0]?.kind).toBe('碰安全');
+    }
+  });
+
+  it('【故意造出的失败】看不到改动内容、新加、删掉、改名：都算（整个文件都是新的信任面）', () => {
+    expect(verdict(undefined)[0]?.note).toBe('看不到改动内容');
+    expect(verdict(patchOf('+x'), '.github/workflows/ci.yml', 'added')[0]?.note).toContain('新加');
+    expect(verdict(patchOf('-x'), '.github/workflows/ci.yml', 'removed')[0]?.note).toContain('被删');
+    const renamed = riskyFiles(
+      [changed('x/ci.yml', 'renamed', { previous: '.github/workflows/ci.yml', patch: patchOf('+x') })],
+      list,
+    );
+    expect(renamed.map((h) => h.file)).toEqual(['.github/workflows/ci.yml']);
+  });
+
+  it('同目录的别的工作流（合并闸自己、定时任务）不受影响：照旧改了就要审；同一文件多条规则认最具体的', () => {
+    const other = verdict(
+      patchOf('-    timeout-minutes: 10', '+    timeout-minutes: 15'),
+      '.github/workflows/merge-gate.yml',
+    );
+    expect(other).toHaveLength(1);
+    expect(other[0]?.rule).toBe('.github/workflows/');
+    // 清单里两条顺序反过来，结果一样
+    const reversed = [...list].reverse();
+    expect(
+      riskyFiles(
+        [changed('.github/workflows/ci.yml', 'modified', { patch: patchOf('+    timeout-minutes: 3') })],
+        reversed,
+      ),
+    ).toEqual([]);
+  });
+
+  it('清单写法：workflow 只能写在单个 .yml 文件上，目录、别的后缀、migrations 写在文件上都读不出', () => {
+    const one = (item: unknown) => parseRiskPaths(JSON.stringify({ paths: [item] }));
+    expect(
+      one({ path: '.github/workflows/ci.yml', kind: '碰安全', why: 'x', mode: 'workflow' }),
+    ).toHaveLength(1);
+    for (const bad of [
+      { path: '.github/workflows/', kind: '碰安全', why: 'x', mode: 'workflow' },
+      { path: 'deploy/x.sh', kind: '碰安全', why: 'x', mode: 'workflow' },
+      { path: '.github/workflows/ci.yml', kind: '碰安全', why: 'x', mode: 'migrations' },
+    ]) {
+      expect(one(bad), JSON.stringify(bad)).toMatch(/mode 认不出/);
+    }
+  });
+
+  it('真清单里 ci.yml 那条在、而且比整个目录那条更具体：只改注释不拦，改权限拦', () => {
+    const real = parseRiskPaths(readFileSync(new URL('../high-risk-paths.json', import.meta.url), 'utf8'));
+    if (typeof real === 'string') throw new Error(real);
+    const f = (patch: string) =>
+      riskyFiles([changed('.github/workflows/ci.yml', 'modified', { patch })], real);
+    expect(f(patchOf('+      # 只是注释'))).toEqual([]);
+    expect(f(patchOf('+  contents: write'))).toHaveLength(1);
+    // 合并闸自己的工作流还是整个文件都算
+    expect(
+      riskyFiles([changed('.github/workflows/merge-gate.yml', 'modified', { patch: patchOf('+# x') })], real),
+    ).toHaveLength(1);
+  });
+});
+
 describe('第二意见状态', () => {
   const status = (state: string, description = '') => ({ context: 'second-opinion', state, description });
 
