@@ -917,7 +917,7 @@ export function createSeed(now: number): MockState {
           // 中转只报输入输出：缓存读写、花费没读到（演示「没读到」不显示成 0）
           inputTokens: 58_000,
           outputTokens: 4_600,
-          branch: 'fleet/9-readme-tz',
+          branch: 'agent/9-readme-tz',
         },
         {
           id: 'seg-c9-3',
@@ -936,7 +936,7 @@ export function createSeed(now: number): MockState {
           cacheWriteTokens: 48_000,
           costUsd: 1.42,
           prNumber: 12,
-          branch: 'fleet/9-readme-tz',
+          branch: 'agent/9-readme-tz',
         },
         {
           // 写入那一端还没记 task_id 的一笔：按单号兜底对上
