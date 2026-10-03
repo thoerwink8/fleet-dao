@@ -16,9 +16,11 @@ export interface PackageGraph {
 }
 
 export interface TestShard {
-  /** engine、db 各占一台（最慢的两个），其余合一台。 */
+  /** 哪一组：engine、db 各自一组（最慢的两个），其余合一组（rest）。一组可以再切成几台并行跑（TEST_SHARDS）。 */
   name: 'engine' | 'db' | 'rest';
-  /** 交给 `vitest run` 的参数：包目录（带 / 结尾，免得 api 匹配到 api-x），或全跑时 rest 排除 engine、db 的写法。 */
+  /** job 名里显示的：组名，切了的带「第几台/共几台」。 */
+  label: string;
+  /** 交给 `vitest run` 的参数：包目录（带 / 结尾，免得 api 匹配到 api-x），或全跑时 rest 排除 engine、db 的写法；切了的末尾带 --shard=i/n。 */
   args: string[];
   /** 引擎的测试要真的 Temporal 开发服务端（test/support.ts）。 */
   temporal: boolean;
@@ -37,6 +39,27 @@ export interface CiPlan {
   web: boolean;
   /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
   deploy: DeployMode;
+}
+
+/**
+ * 每一组测试切成几台并行跑（vitest --shard=i/n，按测试文件均分）。数字按 CI 实测的耗时定（#654 F，2026-10-03 主线全量一轮：
+ * engine 121 秒、rest 147 秒、db 56 秒的纯测试时间；每台机器另有约 30 秒装依赖、起容器的固定开销）：engine 切 2、rest 切 3，
+ * 一台的墙钟降到 90 秒上下；db 不切（切了每台都要再建一份模板库，不划算）。
+ * rest 只有一两个包要测时不切（几十秒就跑完，切开只多出固定开销），见 REST_SPLIT_MIN_UNITS。
+ */
+export const TEST_SHARDS = { engine: 2, db: 1, rest: 3 } as const;
+
+/** rest 这一组里的包少于这么多个就不切。 */
+const REST_SPLIT_MIN_UNITS = 3;
+
+function shardsOf(name: TestShard['name'], args: string[], temporal: boolean, count: number): TestShard[] {
+  if (count <= 1) return [{ name, label: name, args, temporal }];
+  return Array.from({ length: count }, (_, i) => ({
+    name,
+    label: `${name} ${i + 1}/${count}`,
+    args: [...args, `--shard=${i + 1}/${count}`],
+    temporal,
+  }));
 }
 
 export const DEPLOY_MODES = ['all', 'ops', 'none'] as const;
@@ -177,13 +200,14 @@ function fullPlan(reasons: string[]): CiPlan {
     biome: true,
     tsc: 'all',
     tests: [
-      { name: 'engine', args: ['packages/engine/'], temporal: true },
-      { name: 'db', args: ['packages/db/'], temporal: false },
-      {
-        name: 'rest',
-        args: ['--exclude', 'packages/engine/**', '--exclude', 'packages/db/**'],
-        temporal: false,
-      },
+      ...shardsOf('engine', ['packages/engine/'], true, TEST_SHARDS.engine),
+      ...shardsOf('db', ['packages/db/'], false, TEST_SHARDS.db),
+      ...shardsOf(
+        'rest',
+        ['--exclude', 'packages/engine/**', '--exclude', 'packages/db/**'],
+        false,
+        TEST_SHARDS.rest,
+      ),
     ],
     web: true,
     deploy: 'all',
@@ -259,10 +283,14 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
   const all = [...new Set([...closure, ...readers])].sort();
 
   const tests: TestShard[] = [];
-  if (all.includes('engine')) tests.push({ name: 'engine', args: ['packages/engine/'], temporal: true });
-  if (all.includes('db')) tests.push({ name: 'db', args: ['packages/db/'], temporal: false });
+  if (all.includes('engine'))
+    tests.push(...shardsOf('engine', ['packages/engine/'], true, TEST_SHARDS.engine));
+  if (all.includes('db')) tests.push(...shardsOf('db', ['packages/db/'], false, TEST_SHARDS.db));
   const rest = all.filter((u) => u !== 'engine' && u !== 'db');
-  if (rest.length > 0) tests.push({ name: 'rest', args: rest.map(unitPath), temporal: false });
+  if (rest.length > 0) {
+    const count = rest.length >= REST_SPLIT_MIN_UNITS ? TEST_SHARDS.rest : 1;
+    tests.push(...shardsOf('rest', rest.map(unitPath), false, count));
+  }
 
   const biome = changed.some((f) => !f.endsWith('.md'));
   return {
