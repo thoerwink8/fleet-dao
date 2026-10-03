@@ -236,7 +236,8 @@ export function workflowSensitive(patch: string | undefined): string | undefined
   if (patch === undefined) return '看不到改动内容';
   for (const raw of patch.split('\n')) {
     if (!/^[+-]/.test(raw) || raw.startsWith('+++') || raw.startsWith('---')) continue;
-    const line = stripTrailingComment(raw.slice(1));
+    // 键名带引号（"uses": x、'permissions': y）是合法的 YAML，先去掉键名两边的引号再匹配，免得引号绕过下面所有规则
+    const line = stripTrailingComment(raw.slice(1)).replace(/(['"])([\w-]+)\1(\s*:)/g, '$2$3');
     if (/^\s*#/.test(line) || line.trim() === '') continue;
     for (const [re, what] of WORKFLOW_SENSITIVE) {
       if (re.test(line)) return `改了${what}：${line.trim().slice(0, 50)}`;
