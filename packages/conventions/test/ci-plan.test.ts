@@ -1,5 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -608,20 +617,94 @@ describe('ci.yml 和这里对得上', () => {
     expect(lint).toContain(
       'pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/',
     );
-    // 三步各有 id、各 continue-on-error：一步红了不跳过后面的两步，各自报告（GitHub 默认 step 失败即停，
-    // 少了 continue-on-error 就又回到「biome 先红 → tsc 被跳过」）。
-    for (const id of ['biome', 'tsc', 'docs']) {
-      expect(lint, `${id} 那步没有 id: ${id}`).toMatch(new RegExp(`^\\s+id: ${id}$`, 'm'));
-    }
-    expect(lint.match(/continue-on-error: true/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
-    // 最后一步按各步的 outcome 判红，而不是读 conclusion（continue-on-error 的步 conclusion 会被改写成 success，
-    // 读它等于把红的当绿的）。
-    expect(lint).toContain('steps.biome.outcome');
-    expect(lint).toContain('steps.tsc.outcome');
-    expect(lint).toContain('steps.docs.outcome');
-    expect(lint).not.toMatch(/steps\.(biome|tsc|docs)\.conclusion/);
+    // 三样在同一步里各自后台跑、各写各的结果（并行跑的那步真跑一遍，见下面「lint 的并行步」）；汇总读的是这一步
+    // 写出来的三样结果，不读哪一步的 conclusion（continue-on-error 的步 conclusion 会被改写成 success）。
+    expect(lint).toMatch(/^\s+id: checks$/m);
+    expect(lint).toContain('steps.checks.outputs.biome');
+    expect(lint).toContain('steps.checks.outputs.tsc');
+    expect(lint).toContain('steps.checks.outputs.docs');
+    expect(lint).not.toMatch(/steps\.\w+\.conclusion/);
     // 判红的那步要真的非零退出（只 echo 不算红）。
     expect(lint).toMatch(/::error::lint 里有检查不对/);
+  });
+
+  /**
+   * 抠出 lint 里「并行跑」那一步的脚本，配一个假的 pnpm（按子命令决定退出码）原样交给 bash 跑：
+   * 一样红了另外两样照样跑完、各自写出结果，开关说不跑的写 skipped。
+   */
+  describe('lint 的并行步（真跑它的脚本）', () => {
+    const doc = parse(yml) as {
+      jobs: { lint: { steps: { id?: string; run?: string }[] } };
+    };
+    const script = doc.jobs.lint.steps.find((s) => s.id === 'checks')?.run ?? '';
+    const go = (env: Record<string, string>, fail: string[]) => {
+      const dir = mkdtempSync(join(tmpdir(), 'lint-checks-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      // 假 pnpm：记下被叫了什么，参数里含 fail 里的哪个词就退 1
+      const pnpm = join(bin, 'pnpm');
+      writeFileSync(
+        pnpm,
+        [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> "${posix.join(dir.replace(/\\/g, '/'), 'calls')}"`,
+          ...fail.map((f) => `case "$*" in *${f}*) exit 1;; esac`),
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(pnpm, 0o755);
+      const out = join(dir, 'out');
+      writeFileSync(out, '');
+      const r = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
+          GITHUB_OUTPUT: out,
+          LOGS: join(dir, 'logs'),
+          ...env,
+        },
+      });
+      const outputs = Object.fromEntries(
+        readFileSync(out, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('='))
+          .map((l) => l.split('=') as [string, string]),
+      );
+      const calls = existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '';
+      return { r, outputs, calls };
+    };
+
+    it('找得到并行步和它的脚本（不然下面几条等于没查）', () => {
+      expect(script).toContain('wait');
+    });
+
+    it('三样都绿：三样都写 success，tsc 带上算出来的项目', () => {
+      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'packages/cli packages/core' }, []);
+      expect(outputs).toEqual({ biome: 'success', tsc: 'success', docs: 'success' });
+      expect(calls).toContain('exec tsc -b packages/cli packages/core');
+      expect(calls).toContain('exec biome check .');
+    });
+
+    it('【故意造出的失败】biome 红了：tsc、docs 照样跑完、照样 success，biome 写 failure（#566 不许再漏）', () => {
+      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['biome']);
+      expect(outputs).toEqual({ biome: 'failure', tsc: 'success', docs: 'success' });
+      expect(calls).toContain('exec tsc -b');
+      expect(calls).toContain('doc-pointers.test.ts');
+    });
+
+    it('【故意造出的失败】三样全红：三样都写 failure，一个不少', () => {
+      const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['biome', 'tsc', 'vitest']);
+      expect(outputs).toEqual({ biome: 'failure', tsc: 'failure', docs: 'failure' });
+    });
+
+    it('开关说不跑（只改了 .md）：biome、tsc 写 skipped、没被叫，docs 照跑', () => {
+      const { outputs, calls } = go({ BIOME_WANT: 'false', TSC: '' }, []);
+      expect(outputs).toEqual({ biome: 'skipped', tsc: 'skipped', docs: 'success' });
+      expect(calls).not.toContain('biome');
+      expect(calls).not.toContain('tsc');
+    });
   });
 
   /** 抠出 lint 里「汇总」那一步的脚本，原样交给 bash 跑：每种红法都造一遍，看退出码和报出来的名字。 */
@@ -675,7 +758,8 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('【故意造出的失败】docs 红了、被跳过了（docs 每次都得跑）：都红', () => {
-      for (const DOCS of ['failure', 'skipped', 'cancelled']) {
+      // 空值 = 并行那步中途崩了、没写出结果：同样红
+      for (const DOCS of ['failure', 'skipped', 'cancelled', '']) {
         const r = run({ DOCS });
         expect(r.status, DOCS).toBe(1);
         expect(r.stdout, DOCS).toContain(`docs（${DOCS}，本该 success）`);
@@ -734,15 +818,18 @@ describe('ci.yml 和这里对得上', () => {
     }
     expect(job('changes')).toContain('fetch-depth: 0');
     expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
-    // lint 是每次都跑的 job（里面有 docs、hygiene 两步每次都跑），没有 job 级 if；biome、tsc 两步看自己那份开关。
+    // lint 是每次都跑的 job（里面有 docs、hygiene 两步每次都跑），没有 job 级 if；不等 changes，自己用同一个入口
+    // 算同一份计划，biome、tsc 看自己算出来的开关。
     const lint = job('lint')
       .split('\n')
       .filter((l) => !/^\s*#/.test(l))
       .join('\n');
-    expect(lint).toMatch(/^ {4}needs: changes$/m);
-    expect(lint).not.toMatch(/^ {4}if: /m);
-    expect(lint).toContain("if: needs.changes.outputs.biome == 'true'");
-    expect(lint).toMatch(/if: needs\.changes\.outputs\.tsc != ''/);
+    expect(lint).not.toMatch(/^ {4}(needs|if): /m);
+    expect(lint).toContain(
+      'node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE"',
+    );
+    expect(lint).toContain(['BIOME_WANT: $', '{{ steps.plan.outputs.biome }}'].join(''));
+    expect(lint).toContain(['TSC: $', '{{ steps.plan.outputs.tsc }}'].join(''));
   });
 
   it('没有 job 用仓库密钥；lint 里卫生检查一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到仓根只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
@@ -769,6 +856,9 @@ describe('ci.yml 和这里对得上', () => {
     expect(install, '找不到装依赖那步').toBeGreaterThan(0);
     expect(at('id: hygiene\n')).toBeLessThan(install);
     expect(at('id: hygiene_history')).toBeLessThan(install);
+    // 算计划那步跑的也是 PR 里的代码（ci-plan.ts）：同样得排在卫生检查两步之后
+    expect(at('id: plan\n'), '找不到算计划那步').toBeGreaterThan(0);
+    expect(at('id: hygiene_history')).toBeLessThan(at('id: plan\n'));
     // 动态 import 的只有 trusted/ 下的卫生检查
     const imports = [...lint.matchAll(/import\(([^)]*)\)/g)].map((m) => m[1]);
     expect(imports).toHaveLength(1);
