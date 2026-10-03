@@ -29,6 +29,7 @@ const route = (over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   upstreamModel: null,
   runAsUser: USER,
   orgKind: null,
+  effort: null,
   ...over,
 });
 
@@ -190,17 +191,18 @@ describe('hostSegmentSpawner · 成功', () => {
     expect(h.recorded[0]).not.toHaveProperty('cacheWriteTokens');
   });
 
-  it('起驱动的参数：开新会话、一次性、不脱开引擎、干活的会话、思考档位原样传', async () => {
+  it('起驱动的参数：开新会话、一次性、不脱开引擎、干活的会话；分档给的档位原样交给驱动（路由没配就不给 effort）', async () => {
     const h = harness();
     await h.run({ effort: 'medium' });
     const { spec, hooks } = h.calls[0] ?? { spec: undefined, hooks: undefined };
+    expect(spec).not.toHaveProperty('effort');
     expect(spec).toMatchObject({
       runId: RUN_ID,
       user: USER,
       cwd: '/var/lib/fleet-work/acme_demo/12-x',
       prompt: '干这件事',
       model: 'claude-opus-5-5',
-      effort: 'medium',
+      tierEffort: 'medium',
       purpose: 'work',
       testCommands: [],
       session: { mode: 'new', id: '11111111-2222-4333-8444-555555555555' },
@@ -212,6 +214,16 @@ describe('hostSegmentSpawner · 成功', () => {
     });
     expect(hooks).not.toHaveProperty('io'); // 不脱开引擎进程跑
     expect(hooks?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('路由配了思考档位：和分档给的一起原样交给驱动（合成哪一档由驱动的 applySessionEffort 定）', async () => {
+    const h = harness({ route: route({ effort: 'xhigh' }) });
+    await h.run({ effort: 'medium' });
+    await h.run({ effort: undefined });
+    expect(h.calls.map((c) => [c.spec.effort, c.spec.tierEffort])).toEqual([
+      ['xhigh', 'medium'],
+      ['xhigh', undefined],
+    ]);
   });
 
   it('上游模型串优先于目录里的模型 id', async () => {
@@ -460,6 +472,20 @@ describe('hostSegmentSpawner · 【故意造出的失败】读不到、认不出
 
   it('池没绑会话用户（Claude 池）→ 起不了，不瞎挑一个', async () => {
     await failsWith(harness({ route: route({ runAsUser: null }) }), /没定会话用户/);
+  });
+
+  it('路由配的思考档位这家不认（Grok 没有 max）、cursor 的整串模型名配不了 → 起不了，说清是哪条路由、为什么', async () => {
+    await failsWith(
+      harness({ route: route({ hostId: 'grok', upstreamModel: 'grok-4.7', effort: 'max' }) }),
+      /路由 r1 配的思考档位起不了会话.*Grok 命令行 不支持思考档位（effort）max/,
+    );
+    await failsWith(
+      harness({
+        route: route({ hostId: 'cursor-agent', upstreamModel: 'gpt-5.6-luna-high', effort: 'high' }),
+        userFrom: 'sole',
+      }),
+      /路由 r1 配的思考档位起不了会话.*Cursor Agent 不支持单独传思考档位/,
+    );
   });
 
   it('资源上限不是非负整数 → 拒，不起驱动', async () => {

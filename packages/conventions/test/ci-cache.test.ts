@@ -157,14 +157,15 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     ]);
   });
 
-  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 core），不往上、不顺依赖往下传 TEST_READS', () => {
+  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 core、agents 读 db），不往上、不顺依赖往下传 TEST_READS', () => {
     expect(sourceClosure(GRAPH, ['api'])).toEqual(['api', 'db', 'shared', 'web']);
     expect(sourceClosure(GRAPH, ['db'])).toEqual(['core', 'db', 'shared']);
     expect(sourceClosure(GRAPH, ['cli'])).toEqual(['cli', 'shared']);
     // engine 依赖 api，但 api 读 web 是 api 测试自己的事：engine 的闭包里不带 web
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');
-    // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）
-    expect(sourceClosure(GRAPH, ['agents'])).toEqual(['shared']);
+    // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）；
+    // agents/test/worker.test.ts 读 db 的路由骨架（TEST_READS）。db 读 core 是 db 测试自己的事：agents 的闭包里不带 core
+    expect(sourceClosure(GRAPH, ['agents'])).toEqual(['db', 'shared']);
   });
 
   it('UNIVERSAL_PACKAGES 对得上 ci-plan.ts：PATH_RULES 里这些包一改就是全跑', () => {

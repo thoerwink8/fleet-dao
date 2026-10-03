@@ -33,7 +33,7 @@ export interface AnswerSample {
   /** 这次问的钉死模型（后端报的实际版本在 model_version 列）。 */
   model: string;
   backend: string;
-  /** 调度台判断阶段的哪条路由（routes.id）；调用方没说就没有。 */
+  /** 判断用途的哪条路由（routes.id，路由两层）；调用方没说就没有。 */
   route?: string;
   evidence: Record<string, FieldDigest>;
   /** 调用方给的、能复原原文的引用，例如 { issue: 'owner/repo#12', updatedAt: '…' }（库收不下的字已换成 U+FFFD）。 */

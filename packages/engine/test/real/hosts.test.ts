@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type GrokRunSpec, judgeRun, runGrok, type SessionUser } from '@fleet-dao/adapters';
+import { buildClaudeArgs, type GrokRunSpec, judgeRun, runGrok, type SessionUser } from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CURSOR_KEY_BAD,
@@ -29,6 +29,7 @@ import {
   MIRASIM_AGENT_BY_MODEL,
   MIRASIM_PENDING_PREFIX,
   mirasimAgentFor,
+  sessionEffortFor,
   sessionUserOf,
   WIRED_HOSTS,
   wiredHostNames,
@@ -1118,7 +1119,7 @@ describe('Mirasim 的驱动（#345）', () => {
   });
 });
 
-describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high，#470 以后才在驾驶舱配）', () => {
+describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high；驾驶舱给路由配了的照配的，#470）', () => {
   const id = () => randomUUID();
 
   it('没配的常量是 high', () => {
@@ -1245,5 +1246,80 @@ describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high，#470 以
       driver.run(spec({ model: 'grok-4.7[reasoning_effort=high]', effort: 'low' }), {}),
     ).rejects.toThrow('两处');
     expect(cursor.count()).toBe(0);
+  });
+});
+
+describe('驾驶舱配的档位和分档给的怎么合（#470，sessionEffortFor）', () => {
+  it('没配用 high；配了的就是这条路由的档位', () => {
+    expect(sessionEffortFor(undefined, undefined)).toBe('high');
+    expect(sessionEffortFor('xhigh', undefined)).toBe('xhigh');
+    expect(sessionEffortFor('low', undefined)).toBe('low');
+  });
+
+  it('分档只往下压、不往上抬：快档的 medium 压下来；high（及以上）不压，照配的', () => {
+    expect(sessionEffortFor(undefined, 'medium')).toBe('medium');
+    expect(sessionEffortFor('xhigh', 'medium')).toBe('medium');
+    expect(sessionEffortFor('xhigh', 'high')).toBe('xhigh');
+    expect(sessionEffortFor('max', 'high')).toBe('max');
+    // 配的比分档给的还低：照配的（上限）
+    expect(sessionEffortFor('low', 'medium')).toBe('low');
+    expect(sessionEffortFor('low', 'high')).toBe('low');
+    // 分档以后给出比标准档高的，也不抬过配的（没配就是 high）
+    expect(sessionEffortFor(undefined, 'max')).toBe('high');
+  });
+
+  it('【故意造出的失败】配的、分档给的认不出：抛错，不当成 high', () => {
+    expect(() => sessionEffortFor('turbo', undefined)).toThrow('路由配的思考档位（effort）不认识');
+    expect(() => sessionEffortFor(undefined, 'turbo')).toThrow('分档给的思考档位（effort）不认识');
+  });
+
+  it('起会话的参数里带的是合出来的那一档（Claude --effort、Grok --reasoning-effort、Mirasim effort）', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const mira = fakeMirasimRun(() => ({ state: { text: 'OK' } }));
+    const wired = drivers({ 'claude-code': claude.run, grok: grok.run, mirasim: mira.run });
+    const id = () => randomUUID();
+    await wired['claude-code'].run(
+      spec({
+        model: 'claude-opus-5-5',
+        session: { mode: 'new', id: id() },
+        effort: 'max',
+        tierEffort: 'high',
+      }),
+      {},
+    );
+    await wired.grok.run(
+      spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'xhigh', tierEffort: 'medium' }),
+      {},
+    );
+    await wired.mirasim.run(spec({ model: 'deepseek-flash', tierEffort: 'medium' }), {});
+    const claudeSpec = claude.specs[0];
+    if (!claudeSpec) throw new Error('Claude 的插头没被调用');
+    // 插头起 reclaude 用的就是这份参数（runClaudeCode 里同一个 buildClaudeArgs）
+    expect(buildClaudeArgs(claudeSpec)).toEqual(expect.arrayContaining(['--effort', 'max']));
+    expect(grok.specs[0]?.reasoningEffort).toBe('medium');
+    expect(mira.specs[0]?.effort).toBe('medium');
+  });
+
+  it('cursor：方括号模型补进合出来的那一档；整串模型名写死了档位，分档压不下去、照原样起（不是配错）', async () => {
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const driver = drivers({ 'cursor-agent': cursor.run })['cursor-agent'];
+    await driver.run(spec({ model: 'composer-2.5[fast=true]', effort: 'high', tierEffort: 'medium' }), {});
+    await driver.run(spec({ model: 'gpt-5.6-luna-high', tierEffort: 'medium' }), {});
+    expect(cursor.specs.map((s) => s.model)).toEqual([
+      'composer-2.5[fast=true,effort=medium]',
+      'gpt-5.6-luna-high',
+    ]);
+  });
+
+  it('【故意造出的失败】分档给的档位认不出：报错、插头不起', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    await expect(
+      drivers({ 'claude-code': claude.run })['claude-code'].run(
+        spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: randomUUID() }, tierEffort: 'turbo' }),
+        {},
+      ),
+    ).rejects.toThrow('分档给的思考档位');
+    expect(claude.count()).toBe(0);
   });
 });

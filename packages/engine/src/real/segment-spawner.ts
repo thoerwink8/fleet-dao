@@ -21,6 +21,8 @@ import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/ad
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { routeLaunchFacts, savePoolQuota } from '@fleet-dao/db';
+import { routeEffortProblem } from '@fleet-dao/shared';
+import { hostName } from '../routing/names.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
 import {
   type HostDriver,
@@ -97,7 +99,7 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
 
 /**
  * 路由编号 → 库里的路由、执行方式的驱动、会话用户。Spawner 起会话和调用方起会话之前备工作树（要知道树归谁）用同一个查法。
- * 查不到、没接上、定不下会话用户一律抛错（带白话原因），不落到某个默认执行体上。
+ * 查不到、没接上、定不下会话用户、配的思考档位这家起不了，一律抛错（带白话原因），不落到某个默认执行体、默认档位上。
  */
 export async function resolveSegmentRoute(
   deps: Pick<SegmentSpawnerDeps, 'routeFacts' | 'db' | 'drivers'>,
@@ -123,6 +125,17 @@ export async function resolveSegmentRoute(
   const driver = deps.drivers[route.hostId];
   const who = sessionUserOf(driver, route.runAsUser);
   if ('missing' in who) throw new Error(`账号池 ${route.poolId} ${who.missing}，起不了会话`);
+  if (route.effort !== null) {
+    // 起会话时驱动照同一份判法再判一次（applySessionEffort）；这里先挡，配错了不备树、不在 runs 记一笔
+    const problem = routeEffortProblem(
+      route.hostId,
+      route.upstreamModel ?? route.modelId,
+      route.effort,
+      hostName(route.hostId),
+    );
+    if (problem)
+      throw new Error(`路由 ${route.routeId} 配的思考档位起不了会话（驾驶舱改了再派）：${problem}`);
+  }
   return { route, driver, user: who.user };
 }
 
@@ -181,7 +194,9 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         ...(deps.sudo ? { sudo: deps.sudo } : {}),
       },
       model: route.upstreamModel ?? route.modelId,
-      ...(input.effort !== undefined ? { effort: input.effort } : {}),
+      // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
+      ...(route.effort !== null ? { effort: route.effort } : {}),
+      ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
       session: { mode: 'new', id: driver.newSessionId(runId).id },
       purpose: 'work',
     };

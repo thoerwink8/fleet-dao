@@ -8,6 +8,7 @@ import type {
   QuotaWindowKind,
   RunAsUser,
   RunOutcome,
+  SessionEffort,
   StageKind,
   SubtaskState,
   TaskState,
@@ -26,6 +27,7 @@ import {
   quotaWindows,
   repos,
   routes,
+  routingCatalog,
   sessionRuns,
   sessionStops,
   stepTimings,
@@ -381,14 +383,24 @@ export interface RouteLaunchFacts {
   upstreamModel: string | null;
   runAsUser: RunAsUser | null;
   orgKind: OrgKind | null;
+  /**
+   * 驾驶舱给这条路由配的思考档位（routing_catalog.effort，#470）。没配、或这条路由没挂进路由两层，是 null（起会话用 high）。
+   * 起会话时现读：驾驶舱改了，下一个会话就照新的。
+   */
+  effort: SessionEffort | null;
 }
 
-/** 起会话要的：这条路由的池、会话用户、执行方式、上游模型串。路由不在返回 null。 */
+/** 起会话要的：这条路由的池、会话用户、执行方式、上游模型串、配的思考档位。路由不在返回 null。 */
 export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLaunchFacts | null> {
   const [row] = await db
-    .select({ route: routes, pool: pools })
+    .select({ route: routes, pool: pools, effort: routingCatalog.effort })
     .from(routes)
     .innerJoin(pools, eq(pools.id, routes.poolId))
+    // 一条路由只挂在它自己的模型下（复合外键），最多一行
+    .leftJoin(
+      routingCatalog,
+      and(eq(routingCatalog.routeId, routes.id), eq(routingCatalog.modelId, routes.modelId)),
+    )
     .where(eq(routes.id, routeId));
   if (!row) return null;
   return {
@@ -400,6 +412,7 @@ export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLa
     upstreamModel: row.route.upstreamModel,
     runAsUser: row.pool.runAsUser,
     orgKind: row.pool.orgKind,
+    effort: row.effort,
   };
 }
 

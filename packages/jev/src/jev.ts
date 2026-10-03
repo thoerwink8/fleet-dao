@@ -75,7 +75,7 @@ export interface ExamContext {
 export interface JevDeps {
   db: Db;
   backend: JevBackend;
-  /** 这个后端是调度台判断阶段的哪条路由（routes.id）：记进每条判断的样本，驾驶舱改了顺序看得出下一道换没换。 */
+  /** 这个后端是判断用途的哪条路由（routes.id，路由两层）：记进每条判断的样本，两层的顺序改了看得出下一道换没换。 */
   route?: string;
   now?: () => Date;
   /** 设置表里没配时用的默认值。 */

@@ -28,6 +28,7 @@ export * from './queries/verify.ts';
 export * from './queries/worktrees.ts';
 export * from './routing-apply.ts';
 export * from './routing-config.ts';
+export * from './routing-effort.ts';
 export * from './routing-layers.ts';
 export * from './routing-liveness.ts';
 export * from './schema/index.ts';

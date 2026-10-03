@@ -1,6 +1,6 @@
 # fleet-dao 引擎工人（Temporal worker）。deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；
 # 代码在 /srv/fleet-dao-releases/current（归 root，fleet 只读）。改这份、再发布一次，别在机器上手改。
-# 本机配置：/etc/fleet-dao/engine.env（样例 deploy/france/engine.env.example）、agent-token.env（france.sh 生成）。
+# 本机配置：/etc/fleet-dao/engine.env（每一项应该是什么在仓里的 deploy/france/desired-config.json）、agent-token.env（france.sh 生成）。
 [Unit]
 Description=fleet-dao 引擎工人（Temporal worker）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md

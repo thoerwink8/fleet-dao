@@ -620,12 +620,15 @@ export const NotWiredSchema = z.object({
 });
 export type NotWired = z.infer<typeof NotWiredSchema>;
 
+/**
+ * 路由目录：渠道、账号池、模型、路由和禁令。每个用途按什么先后用哪些路由不在这里——那是路由两层（下面的
+ * RoutingLayersResponse，GET /routing/layers），换模型对话框、路由页都读那一份（#574）。
+ */
 export const RoutingResponse = z.object({
   channels: z.array(ChannelSchema),
   pools: z.array(PoolSchema),
   models: z.array(ModelSchema),
   routes: z.array(RouteSchema),
-  stages: z.array(StagePolicySchema),
   /** 写死在代码里的全局禁令（bans.ts），驾驶舱只读展示，改不了。 */
   hardBans: z.array(z.object({ id: z.string(), reason: z.string() })),
   /** 库里另外配的禁令，和 hardBans 一起生效。 */

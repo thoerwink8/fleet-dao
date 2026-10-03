@@ -1,6 +1,7 @@
 // CI 按改动跑（.github/workflows/ci.yml）：从这次 PR 改了哪些文件、各包谁依赖谁，算出哪几个 job 要跑、测试跑哪几个包，
 // 再把选中的测试文件按耗时装进几台（assignTests → test-split.ts）；
 // 汇总 job（必过检查 check）再逐个核对「该跑的跑了且绿、不该跑的确实跳过」。纯判断，不碰 git、不碰网络；入口在 bin/ci-plan.ts、bin/ci-verdict.ts。
+// 本机的 test:changed（test-changed.ts）、推前预检（prepare-push.ts）也只问这里：改这里的判法，本机那两样跟着变。
 // job 数就是并发槽数（GitHub 免费档同时最多 20 个，一个 PR 的 CI 占掉越多，能并着跑的 PR 越少）：所以把两两不相干的小检查
 // 装进同一个 job（lint），装依赖只装一次；同一件事别开两个 job。见 PLANNED_JOBS 上面的注释。
 // 三态纪律：认不出的路径、读不出的依赖图、空的改动列表、非 PR 事件一律升成全跑，不拿「没改什么」冒充可以少跑。
@@ -88,9 +89,15 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
 /**
  * 测试读了别的包的文件、但 package.json 里没有依赖：键是读的那个包，值是被读的包（被读的一改，读的那个跟着测；
  * 不再往下传——依赖读的那个包的，并不读被读的文件）。
- * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu/test/static.test.ts 读 web 的路由表。
+ * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu/test/static.test.ts 读 web 的路由表；
+ * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）。
  */
-export const TEST_READS: Record<string, string[]> = { api: ['web'], feishu: ['web'], db: ['core'] };
+export const TEST_READS: Record<string, string[]> = {
+  api: ['web'],
+  feishu: ['web'],
+  db: ['core'],
+  [AGENTS_UNIT]: ['db'],
+};
 
 export type Rule =
   | { match: (f: string) => boolean; full: string }
@@ -254,46 +261,77 @@ export interface PlanInput {
   rules?: readonly Rule[];
 }
 
+/** 测试读这些包的文件、package.json 里却没依赖它们的单元（TEST_READS；不往下传）。 */
+function testReaders(pkgs: ReadonlySet<string>): string[] {
+  return Object.entries(TEST_READS)
+    .filter(([, reads]) => reads.some((r) => pkgs.has(r)))
+    .map(([reader]) => reader);
+}
+
+/** 一份改动按 PATH_RULES 和依赖图分拣的结果。planCi 和 fallbackUnits 都从这一步算，两边不各写一套「改动落在哪」。 */
+interface Sorted {
+  /** 升全跑的文件和为什么。 */
+  fullWhy: string[];
+  /** 升全跑的文件落在的包：shared、测试夹具所在的包、不在依赖图里的包目录。 */
+  hubs: Set<string>;
+  /** 改到了源码的包：它们和依赖它们的都要测。 */
+  units: Set<string>;
+  /** 测试读了改到的包外文件的单元：只测它们自己（依赖它们的包不读那个文件）。 */
+  readers: Set<string>;
+  reasons: string[];
+  /** 取最大的：有一条要全套就全套。 */
+  deploy: DeployMode;
+}
+
+function sortChanges(
+  changed: readonly string[],
+  inGraph: (pkg: string) => boolean,
+  rules: readonly Rule[],
+): Sorted {
+  const s: Sorted = {
+    fullWhy: [],
+    hubs: new Set(),
+    units: new Set(),
+    readers: new Set(),
+    reasons: [],
+    deploy: 'none',
+  };
+  for (const f of changed) {
+    const rule = rules.find((r) => r.match(f));
+    const pkg = /^packages\/([^/]+)\//.exec(f)?.[1];
+    if (rule && 'full' in rule) {
+      s.fullWhy.push(`${f}：${rule.full}`);
+      if (pkg !== undefined) s.hubs.add(pkg);
+      continue;
+    }
+    if (rule) {
+      for (const u of rule.units) s.readers.add(u);
+      if (rule.deploy === 'all' || (rule.deploy === 'ops' && s.deploy === 'none')) s.deploy = rule.deploy;
+      s.reasons.push(`${f}：${rule.why}${rule.units.length > 0 ? `，测 ${rule.units.join('、')}` : ''}`);
+      continue;
+    }
+    if (pkg !== undefined && inGraph(pkg)) {
+      s.units.add(pkg);
+      continue;
+    }
+    s.fullWhy.push(`${f}：${pkg !== undefined ? `packages/${pkg} 不在依赖图里` : '认不出的路径'}，全跑`);
+    if (pkg !== undefined) s.hubs.add(pkg);
+  }
+  return s;
+}
+
 export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput): CiPlan {
   if (event !== 'pull_request') return fullPlan([`${event} 事件：全跑（主线上兜底）`]);
   if (typeof graph === 'string') return fullPlan([`包依赖图读不出（${graph}）：全跑`]);
   if (changed.length === 0) return fullPlan(['改动列表是空的：认不出这次改了什么，全跑']);
 
-  const fullWhy: string[] = [];
-  const reasons: string[] = [];
-  /** 改到了源码的包：它们和依赖它们的都要测。 */
-  const units = new Set<string>();
-  /** 测试读了改到的包外文件的单元：只测它们自己（依赖它们的包不读那个文件）。 */
-  const readers = new Set<string>();
-  /** 取最大的：有一条要全套就全套。 */
-  let deploy: DeployMode = 'none';
-  for (const f of changed) {
-    const rule = rules.find((r) => r.match(f));
-    if (rule && 'full' in rule) {
-      fullWhy.push(`${f}：${rule.full}`);
-      continue;
-    }
-    if (rule) {
-      for (const u of rule.units) readers.add(u);
-      if (rule.deploy === 'all' || (rule.deploy === 'ops' && deploy === 'none')) deploy = rule.deploy;
-      reasons.push(`${f}：${rule.why}${rule.units.length > 0 ? `，测 ${rule.units.join('、')}` : ''}`);
-      continue;
-    }
-    const m = /^packages\/([^/]+)\//.exec(f);
-    if (m?.[1] !== undefined && m[1] in graph.deps) {
-      units.add(m[1]);
-      continue;
-    }
-    fullWhy.push(`${f}：${m ? `packages/${m[1]} 不在依赖图里` : '认不出的路径'}，全跑`);
-  }
-  if (fullWhy.length > 0) return fullPlan(fullWhy);
+  const s = sortChanges(changed, (pkg) => Object.hasOwn(graph.deps, pkg), rules);
+  if (s.fullWhy.length > 0) return fullPlan(s.fullWhy);
 
-  const closure = dependentsClosure(graph, units);
+  const closure = dependentsClosure(graph, s.units);
+  const reasons = [...s.reasons];
   if (closure.size > 0) reasons.push(`改到源码的包和依赖它们的：${[...closure].sort().join('、')}`);
-  for (const [reader, reads] of Object.entries(TEST_READS)) {
-    if (reads.some((r) => closure.has(r))) readers.add(reader);
-  }
-  const all = [...new Set([...closure, ...readers])].sort();
+  const all = [...new Set([...closure, ...s.readers, ...testReaders(closure)])].sort();
 
   const biome = changed.some((f) => !f.endsWith('.md'));
   return {
@@ -304,8 +342,46 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
     testUnits: all,
     tests: [],
     web: closure.has('web'),
-    deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : deploy,
+    deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : s.deploy,
   };
+}
+
+/** planCi 判出全跑、本机又不全跑时，先跑哪些（fallbackUnits）。 */
+export interface Fallback {
+  /** 先跑的单元。 */
+  units: string[];
+  /** 升全跑的文件落在的包（shared、测试夹具所在的包这类）：它们自己在 units 里。 */
+  hubs: string[];
+  /** 依赖 hubs 的、units 里没有的单元：CI 全跑会测到，本机不逐个跑。依赖图读不出是一句为什么（不拿空清单冒充「没人依赖」）。 */
+  dependents: string[] | string;
+}
+
+/**
+ * planCi 判出全跑、本机又不全跑时（test:changed：几个会话同时全跑会把机器拖满）先跑哪些——同一份判法，只是放下「升全跑」那一档：
+ * - 没升全跑的文件照 planCi：改到的包和直接间接依赖它们的、测试读到改动的单元。改动里没有升全跑的文件时，units 就是 planCi 的 testUnits；
+ * - 升全跑的文件落在某个包下的（shared、测试夹具、不在依赖图里的包目录）只算那个包自己：依赖它的（升全跑正是因为几乎都依赖它）
+ *   放进 dependents，写给人看；
+ * - 根配置、CI 工作流、deploy/、认不出的路径不落在哪个单元，什么都不加（全量交给 CI）。
+ */
+export function fallbackUnits(
+  changed: readonly string[],
+  graph: PackageGraph | string,
+  rules: readonly Rule[] = PATH_RULES,
+): Fallback {
+  if (typeof graph === 'string') {
+    const s = sortChanges(changed, () => true, rules);
+    return {
+      units: [...new Set([...s.units, ...s.readers, ...s.hubs])].sort(),
+      hubs: [...s.hubs].sort(),
+      dependents: `包依赖图读不出（${graph}），依赖改到的包的算不出来`,
+    };
+  }
+  const s = sortChanges(changed, (pkg) => Object.hasOwn(graph.deps, pkg), rules);
+  const closure = dependentsClosure(graph, s.units);
+  const units = new Set([...closure, ...s.readers, ...testReaders(closure), ...s.hubs]);
+  const users = dependentsClosure(graph, s.hubs);
+  const dependents = [...new Set([...users, ...testReaders(users)])].filter((u) => !units.has(u)).sort();
+  return { units: [...units].sort(), hubs: [...s.hubs].sort(), dependents };
 }
 
 export interface TestInputs {
@@ -374,6 +450,15 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
  */
 export const PLANNED_JOBS = ['test', 'web', 'deploy'] as const;
 export const ALWAYS_JOBS = ['changes', 'lint'] as const;
+
+/**
+ * CI 不管改了什么都跑的测试：lint job 里 docs 那一步（.github/workflows/ci.yml 写死同一份；test/test-changed.test.ts 现读
+ * ci.yml，两边多一份少一份都红）。本机 test:changed 给出的清单不管选中什么、拒不拒跑都带上它们（#740：拒跑时漏过）。
+ */
+export const ALWAYS_TESTS: readonly string[] = Object.freeze([
+  'packages/conventions/test/doc-pointers.test.ts',
+  'agents/test/',
+]);
 
 function expected(plan: CiPlan, job: (typeof PLANNED_JOBS)[number]): boolean {
   if (job === 'test') return plan.tests.length > 0;
