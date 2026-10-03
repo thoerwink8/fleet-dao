@@ -299,7 +299,9 @@ describe('单条开关', () => {
   it('候选查询说关着也挡（它按同一个开关算）；两边都说只记一条', () => {
     const off = route('a', { blockers: ['switched-off'] });
     const blocks = blocksFor(off, entry('a', 0), ctx());
-    expect(blocks).toEqual([{ code: 'switched-off', text: '调度台上这一条关着', wait: null, until: null }]);
+    expect(blocks).toEqual([
+      { code: 'switched-off', text: '这条路由在它的模型下关着（路由两层的开关）', wait: null, until: null },
+    ]);
     expect(codes(off, ctx(), entry('a', 0, { enabled: false }))).toEqual(['switched-off']);
   });
 });

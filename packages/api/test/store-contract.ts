@@ -27,6 +27,11 @@ export type MakeStore = (data: Partial<MemoryData>, clock: { now: Date }) => Pro
 
 const OTHER_UUID = '99999999-0000-4000-8000-000000000000';
 const TASKLESS_RUN = 'd0000000-0000-4000-8000-0000000000ff';
+/** 三段流水里不该算进 #13 的两笔：别的仓同号（记了别的仓的工作流编号）、记了别的单的 task_id（单号却也是 13）。 */
+const OTHER_REPO_SEG = 'd1000000-0000-4000-8000-0000000130ff';
+const OTHER_TASK_SEG = 'd1000000-0000-4000-8000-0000000130fe';
+/** #13 已经结束了还开着的一段（没记结束、没记结局）：Store 照原样给，算不算在跑由任务详情判。 */
+const STALE_SEG = 'd1000000-0000-4000-8000-000000013005';
 /** 接活时新建的任务。 */
 const NEW_TASK = 'b0000000-0000-4000-8000-000000000040';
 
@@ -57,6 +62,37 @@ function contractData(): Partial<MemoryData> {
       whyRoute: '帅位会话',
       queuedAt: ago(5),
       startedAt: ago(4),
+    },
+  ];
+  data.segmentRuns = [
+    ...(data.segmentRuns ?? []),
+    {
+      id: OTHER_REPO_SEG,
+      segment: 'manual',
+      issueNumber: 13,
+      model: 'opus-5.5',
+      startedAt: ago(530),
+      endedAt: ago(520),
+      outcome: 'done',
+      workflowId: 'task:example/other#13',
+    },
+    {
+      id: OTHER_TASK_SEG,
+      segment: 'manual',
+      taskId: IDS.task12,
+      issueNumber: 13,
+      model: 'opus-5.5',
+      startedAt: ago(30),
+      endedAt: ago(25),
+      outcome: 'done',
+    },
+    {
+      id: STALE_SEG,
+      segment: 'verify',
+      taskId: IDS.task13,
+      issueNumber: 13,
+      model: 'gpt-5.6',
+      startedAt: ago(505),
     },
   ];
   data.quotaWindows = [
@@ -234,6 +270,53 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           undefined,
           undefined,
         ]);
+      });
+
+      it('三段流水：task_id 对上的、task_id 没记但单号对上的（标明兜底）都给，按起跑先后排', async () => {
+        const rows = await store.listSegmentRuns(IDS.task13);
+        expect(rows.map((r) => [r.id, r.segment, r.matchedBy])).toEqual([
+          [IDS.seg13scope, 'scope', 'task'],
+          [IDS.seg13manual1, 'manual', 'task'],
+          [IDS.seg13manual2, 'manual', 'task'],
+          [IDS.seg13verify, 'verify', 'issueNumber'],
+          [STALE_SEG, 'verify', 'task'],
+        ]);
+      });
+
+      it('三段流水不算进来的：别的仓同号（工作流编号不是这张单的）、记了别的单的 task_id；没这张单、编号看不懂是空', async () => {
+        const ids = (await store.listSegmentRuns(IDS.task13)).map((r) => r.id);
+        expect(ids).not.toContain(OTHER_REPO_SEG);
+        expect(ids).not.toContain(OTHER_TASK_SEG);
+        expect((await store.listSegmentRuns(IDS.task12)).map((r) => r.id)).toEqual([OTHER_TASK_SEG]);
+        expect(await store.listSegmentRuns(OTHER_UUID)).toEqual([]);
+        expect(await store.listSegmentRuns('task-13')).toEqual([]);
+      });
+
+      it('三段流水的读数原样读回：派工档、起止、四样 token、花费、PR；没记的不给（不是 0、不是空字符串）', async () => {
+        const rows = await store.listSegmentRuns(IDS.task13);
+        const manual1 = rows.find((r) => r.id === IDS.seg13manual1);
+        expect(manual1).toMatchObject({
+          tier: 'fast',
+          channel: 'ch-mirasim',
+          outcome: 'timeout',
+          failureReason: '30 分钟没交活，按超时收了',
+          inputTokens: 64_000,
+          outputTokens: 5_200,
+          branch: 'fleet/13-readme-time',
+        });
+        expect([manual1?.cacheReadTokens, manual1?.cacheWriteTokens, manual1?.costUsd]).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+        expect(rows.find((r) => r.id === IDS.seg13manual2)).toMatchObject({
+          costUsd: 1.86,
+          prNumber: 39,
+          cacheReadTokens: 1_120_000,
+        });
+        const stale = rows.find((r) => r.id === STALE_SEG);
+        expect([stale?.endedAt, stale?.outcome, stale?.tier]).toEqual([undefined, undefined, undefined]);
+        expect(Date.parse(stale?.startedAt ?? '')).toBe(T0.getTime() - 505 * MIN);
       });
     });
 

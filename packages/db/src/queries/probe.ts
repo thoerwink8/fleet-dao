@@ -3,7 +3,8 @@
 import type { BillingKind, HostId, OrgKind, RouteProbeState } from '@fleet-dao/shared';
 import { asc, eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { channels, models, pools, routes, stagePolicyRoutes } from '../schema/index.ts';
+import { routesInUse } from '../routing-layers.ts';
+import { channels, models, pools, routes } from '../schema/index.ts';
 
 export interface RouteProbeTarget {
   routeId: string;
@@ -22,7 +23,10 @@ export interface RouteProbeTarget {
   /** 插头实际发给上游的模型串（routes.upstream_model）；空 = 按模型目录的 id。 */
   upstreamModel: string | null;
   modelRetiredAt: Date | null;
-  /** 至少一个阶段挂着它、开着：没有阶段用的路由不花额度去探。 */
+  /**
+   * 有用途在用（路由两层：它在自己的模型下开着，这个模型又排进了至少一个用途，routing-layers.ts 的 routesInUse）：
+   * 选路派不到的路由不花额度去探。
+   */
   inUse: boolean;
   alive: boolean;
   /** 上一次的结论；探针还没看过为空。 */
@@ -39,10 +43,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
       .innerJoin(channels, eq(channels.id, routes.channelId))
       .innerJoin(models, eq(models.id, routes.modelId))
       .orderBy(asc(routes.id)),
-    db
-      .selectDistinct({ routeId: stagePolicyRoutes.routeId })
-      .from(stagePolicyRoutes)
-      .where(eq(stagePolicyRoutes.enabled, true)),
+    routesInUse(db),
   ]);
   const inUse = new Set(used.map((u) => u.routeId));
   return rows.map(({ route, pool, channel, model }) => ({

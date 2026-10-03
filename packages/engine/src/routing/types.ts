@@ -117,7 +117,7 @@ export interface RouteFacts {
   record: RouteRecord | null;
 }
 
-/** 调度台上这个阶段的一行：人排的顺序、单条开关、钉住。 */
+/** 这个用途在路由两层里摊平之后的一行（#574：用途下模型的先后、再是模型下路由的先后）：位置、单条开关、钉住。 */
 export interface StageRouteEntry {
   routeId: string;
   /** 从 0 起，越小越先用。 */
@@ -148,9 +148,9 @@ export interface OrgPlanView {
 
 export interface ChooseRouteInput {
   stage: StageKind;
-  /** 这个阶段在调度台上配过顺序没有（stage_policies 有没有这一行）。没配过就派不出，不按 id 乱挑。 */
+  /** 这个用途配过模型顺序没有（routing_purpose_models 里有没有它的行）。没配过就派不出，不按 id 乱挑。 */
   configured: boolean;
-  /** 整个阶段钉住（stage_policies.pinned）：等于每一行都钉住。 */
+  /** 整个用途钉住：等于每一行都钉住。路由两层没有这一项，引擎一律给 false（纯函数照留，测试和验证那一步的输入还用得上）。 */
   stagePinned: boolean;
   order: StageRouteEntry[];
   /** 每条路由的事实；order 里的每一条、以及任务指定的那条都要有。 */
@@ -219,7 +219,7 @@ export type VerifyProbe = Omit<ChooseRouteInput, 'stage' | 'avoid' | 'taskRouteI
 
 /**
  * 被挡的原因。waitable = 等得来（空位、额度清零、熔断到点）；其余是硬挡，等也等不来。
- * CandidateBlocker 来自候选查询（switched-off 选路也按调度台那一行自己判），其余是选路自己判的。
+ * CandidateBlocker 来自候选查询（switched-off 选路也按顺序里那一行的开关自己判），其余是选路自己判的。
  */
 export type BlockCode =
   | CandidateBlocker
@@ -249,7 +249,7 @@ export interface Block {
 
 export type Nudge = 'fast-reset' | 'poor-record' | 'quota-unknown';
 
-/** 每条路由的判定，驾驶舱调度台按它显示「这次为什么派 / 不派它」。 */
+/** 每条路由的判定，按它写「这次为什么派 / 不派它」。 */
 export interface RouteVerdict {
   routeId: string;
   /** 「独享号 · Opus 5.5 · Claude Code」。 */

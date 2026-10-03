@@ -1,6 +1,6 @@
 // 路由两层的默认配置（packages/db/routing.default.json，进仓）：每个用途的模型顺序、每个模型的路由顺序（#574）。
 // 读不到、不是 JSON、格式认不出、引用对不上都明确报错，不拿空配置或旧配置冒充（通用段底线第三条）。
-// 这一片只管读和校验；写进库、选路改读它留给后续切片，选路此刻仍读 stage_policy_routes。
+// 这里只管读和校验；发布时只补缺写进库是 routing-apply.ts（deploy/release.sh 的 load_routing），选路读库里那两张表。
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { STAGE_KINDS } from './schema/enums.ts';

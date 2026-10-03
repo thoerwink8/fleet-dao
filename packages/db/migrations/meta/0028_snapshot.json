@@ -1,6 +1,6 @@
 {
-  "id": "b5949af3-ba30-4206-81b0-5cb0b0c219d8",
-  "prevId": "3befd66c-c3bc-410c-b5c5-3c7e15b6acb0",
+  "id": "ae8c5a4b-9751-4c31-8076-2825f0bc29f6",
+  "prevId": "b5949af3-ba30-4206-81b0-5cb0b0c219d8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3634,7 +3634,7 @@
         },
         "runs_outcome_known": {
           "name": "runs_outcome_known",
-          "value": "\"runs\".\"outcome\" is null or \"runs\".\"outcome\" in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed')"
+          "value": "\"runs\".\"outcome\" is null or \"runs\".\"outcome\" in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch')"
         },
         "runs_outcome_iff_ended": {
           "name": "runs_outcome_iff_ended",

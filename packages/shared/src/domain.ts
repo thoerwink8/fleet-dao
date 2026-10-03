@@ -284,6 +284,55 @@ export interface SessionRun {
   testCommand?: string;
 }
 
+/** v3 的三段：对题、动手、验收（库里 runs.segment，引擎 RunRecord.segment）。 */
+export type SegmentKind = 'scope' | 'manual' | 'verify';
+/** 派工档（引擎 runner/tier.ts 的 TierEnum）：快档、中档、主力档。只有动手段分档。 */
+export type SegmentTier = 'fast' | 'medium' | 'heavyweight';
+/** 一段跑完的结局（库里 runs.outcome）；还在跑的没有。org_switch = 切号先停下这一段，切完在原分支上重跑（#59）。 */
+export type SegmentOutcome =
+  | 'done'
+  | 'timeout'
+  | 'killed'
+  | 'spawn_failed'
+  | 'admission_blocked'
+  | 'failed'
+  | 'org_switch';
+
+/**
+ * v3 三段里一段跑一次（库里 runs 表的一行）。读不到的字段不给，不当成 0。段名、派工档、结局库里有约束，
+ * 读的一方照样再认一遍（segment-runs.ts 的 readSegmentRun），认不出的明说。
+ */
+export interface SegmentRun {
+  id: string;
+  segment: SegmentKind;
+  /** 需求。写入那一端还没填它的老行按单号兜底对单（任务详情标明是兜底）。 */
+  taskId?: string;
+  issueNumber?: number;
+  /** 路由挑的模型（模型目录的 id）。 */
+  model: string;
+  /** 渠道（channels.id）：花费按它的计费方式分按量、套餐内。 */
+  channel?: string;
+  tier?: SegmentTier;
+  startedAt: string;
+  /** 还在跑的没有（和 outcome 一起空）。 */
+  endedAt?: string;
+  outcome?: SegmentOutcome;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
+  /** 内存峰值（MiB）：只有挂在 cgroup 里的会话读得到，本机不给。 */
+  memoryPeakMb?: number;
+  failureReason?: string;
+  prNumber?: number;
+  branch?: string;
+  /** 三段那条线的工作流编号（taskWorkflowId）。 */
+  workflowId?: string;
+  /** 重跑的是哪一笔。 */
+  retryOf?: string;
+}
+
 export type ProgressKind = 'plan' | 'say' | 'tool' | 'file' | 'test' | 'ask' | 'done' | 'blocked';
 
 /** 会话过程中的一条进度或动作，被动读出来的和 fleet 命令主动报的都进这里。 */

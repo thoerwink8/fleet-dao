@@ -1,5 +1,6 @@
 // 测试夹具：每个测试一份内存库（createTestDb 克隆出来的），数据互不可见。
 import { randomUUID } from 'node:crypto';
+import type { StageKind } from '@fleet-dao/shared';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { expect } from 'vitest';
 import type { Db } from '../src/client.ts';
@@ -10,6 +11,8 @@ import {
   quotaWindows,
   repos,
   routes,
+  routingCatalog,
+  routingPurposeModels,
   sessionRuns,
   stagePolicies,
   stagePolicyRoutes,
@@ -93,6 +96,32 @@ export async function setStageOrder(
     await db
       .insert(stagePolicyRoutes)
       .values(routeIds.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
+  }
+}
+
+/**
+ * 路由两层（#574）：purposes 是用途 → 模型顺序，models 是模型 → 路由顺序（和 routing.default.json 同一个样子），全开着。
+ * 给到的用途、模型整串换掉（先删再写）；没给到的不动。选路、探针在用的都按这两张表。
+ */
+export async function setRoutingLayers(
+  db: Db,
+  cfg: { purposes: Partial<Record<StageKind, string[]>>; models: Record<string, string[]> },
+) {
+  for (const [modelId, routeIds] of Object.entries(cfg.models)) {
+    await db.delete(routingCatalog).where(eq(routingCatalog.modelId, modelId));
+    if (routeIds.length > 0) {
+      await db
+        .insert(routingCatalog)
+        .values(routeIds.map((routeId, position) => ({ modelId, routeId, position, enabled: true })));
+    }
+  }
+  for (const [purpose, modelIds] of Object.entries(cfg.purposes) as [StageKind, string[]][]) {
+    await db.delete(routingPurposeModels).where(eq(routingPurposeModels.purpose, purpose));
+    if (modelIds.length > 0) {
+      await db
+        .insert(routingPurposeModels)
+        .values(modelIds.map((modelId, position) => ({ purpose, modelId, position })));
+    }
   }
 }
 
