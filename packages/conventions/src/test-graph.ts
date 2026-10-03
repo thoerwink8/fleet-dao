@@ -58,6 +58,8 @@ export interface TestGraph {
   /** 源文件 → 它自己看不透的写法（「行号: 原因: 原文」）。 */
   blind: ReadonlyMap<string, readonly string[]>;
   /** GLOBAL_ENTRIES 和它们的闭包。 */
+  /** 被 import 语句真加载的测试文件（极少见）：闭包要往下走。其余测试文件只在路径字符串里出现，当数据。 */
+  importedTests: ReadonlySet<string>;
   global: ReadonlySet<string>;
 }
 
@@ -492,6 +494,10 @@ class Analyzer {
               ...(rv.dep ? { dep: rv.dep } : {}),
             };
           }
+          if (rv.k === 'part' && !rv.path && rv.pre === '' && bv.p.endsWith('/')) {
+            // new URL(`${name}.ext`, 目录 URL)：落在那个目录里（name 里带 .. 或绝对路径的写法没人这么用），连到目录
+            return { k: 'part', pre: bv.p, path: true, ...(rv.dep ? { dep: rv.dep } : {}) };
+          }
           if (rv.k === 'param' || (rv.k === 'part' && !rv.path && rv.pre === '')) {
             // 整个相对 URL 都是参数：调用点补得上就按实参算；补不上它可以是任何地方（'../..'、绝对路径），只能看不透
             const dep = rv.k === 'param' ? rv.fn : rv.dep;
@@ -908,6 +914,7 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
   const dirDeps = new Map<string, Set<string>>();
   const dataDirs = new Map<string, Set<string>>();
   const blind = new Map<string, string[]>();
+  const importedTests = new Set<string>();
 
   withParsed(texts, (asts) => {
     const az = new Analyzer(asts, resolve);
@@ -920,8 +927,10 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
       const say = (node: Node, why: string) =>
         myBlind.push(`${lineOf(c.sf, node)}: ${why}: ${snippet(c.sf, node)}`);
       const addTarget = (t: Target, node: Node) => {
-        if ('file' in t) myDeps.add(t.file);
-        else if ('dir' in t) myDirs.add(t.dir);
+        if ('file' in t) {
+          myDeps.add(t.file);
+          if (isTestFile(t.file)) importedTests.add(t.file);
+        } else if ('dir' in t) myDirs.add(t.dir);
         else if ('missing' in t) say(node, t.missing);
       };
       // 目录分两种：动态加载的（当代码，往下走它们的依赖）和当数据读的（列目录、读里面的文件：只认内容与增删）
@@ -1189,6 +1198,7 @@ export function buildTestGraph(repo: RepoView, options: BuildOptions = {}): Test
     dirDeps,
     dataDirs,
     blind,
+    importedTests,
     global: new Set(),
   };
   const global = new Set<string>();
@@ -1253,6 +1263,8 @@ export function closureOf(graph: TestGraph, start: string): Closure {
     const f = todo.pop() as string;
     if (files.has(f)) continue;
     files.add(f);
+    // 别的测试文件在路径字符串里出现（扫描、点名）只是当文本读，不会被执行：不往下走它的依赖和看不透
+    if (f !== start && isTest.has(f) && !graph.importedTests.has(f)) continue;
     for (const b of graph.blind.get(f) ?? []) blind.push(`${f} ${b}`);
     for (const d of graph.deps.get(f) ?? []) if (!files.has(d)) todo.push(d);
     for (const d of graph.dirDeps.get(f) ?? []) {
