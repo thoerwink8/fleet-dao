@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Bell,
   Boxes,
+  Brain,
   CalendarClock,
   Gauge,
   Home,
@@ -49,6 +50,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         label: '路由',
         icon: Route,
         hint: '每个用途排哪些模型、走哪几条路，现在派得出去吗',
+        // 演示版里没有这一页（只在正式驾驶舱建）。
+      },
+      {
+        to: '/efforts',
+        label: '思考档位',
+        icon: Brain,
+        hint: '每个模型走的每条路起会话想多深：没配用 high，改了下一个会话就照新的',
         // 演示版里没有这一页（只在正式驾驶舱建）。
       },
       { to: '/models', label: '模型目录', icon: Boxes, soon: true, hint: '各家模型、上下架' },

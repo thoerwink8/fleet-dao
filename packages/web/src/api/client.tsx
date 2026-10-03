@@ -30,6 +30,7 @@ import type {
   Pools,
   Repo,
   Routing,
+  RoutingEfforts,
   RoutingLayers,
   RunSteps,
   Setting,
@@ -42,6 +43,8 @@ import type {
   Timeline,
   UpdateChannelBody,
   UpdateDemoDefaultBody,
+  UpdatedRouteEffort,
+  UpdateRouteEffortBody,
   UpdateSettingBody,
   UpdateStagePolicyBody,
 } from './types';
@@ -68,6 +71,14 @@ export interface FleetApi {
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
+  /** 每个模型下每条路由起会话的思考档位（#470）。 */
+  routingEfforts(): Promise<RoutingEfforts>;
+  /** 改一条路由的思考档位：effort 写 null = 回到没配（默认档）；expected 是改之前看到的，对不上 409。 */
+  updateRouteEffort(
+    modelId: string,
+    routeId: string,
+    body: UpdateRouteEffortBody,
+  ): Promise<UpdatedRouteEffort>;
   updateStagePolicy(stage: StageKind, body: UpdateStagePolicyBody): Promise<StagePolicy>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
@@ -131,6 +142,7 @@ export const keys = {
   runSteps: (runId: string) => ['run-steps', runId] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
+  routingEfforts: ['routing-efforts'] as const,
   pools: ['pools'] as const,
   jobs: ['jobs'] as const,
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
@@ -231,6 +243,16 @@ export function useRoutingLayers() {
   return useQuery({
     queryKey: keys.routingLayers,
     queryFn: () => api.routingLayers(),
+    refetchInterval: 60_000,
+  });
+}
+
+/** 每条路由的思考档位（#470）。没有推送（routing_catalog 不在推送名单里）：改的那一下自己重拉，别人改的靠定时重拉。 */
+export function useRoutingEfforts() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.routingEfforts,
+    queryFn: () => api.routingEfforts(),
     refetchInterval: 60_000,
   });
 }
@@ -396,6 +418,30 @@ export function useUpdateChannel() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.routing });
       qc.invalidateQueries({ queryKey: keys.pools });
+    },
+  });
+}
+
+/**
+ * 改一条路由的思考档位（#470）。不先改缓存：档位要等后端照这条路由的执行方式判过（不认的 422、别人刚改过 409）才算数，
+ * 页面在等的那一下标「改着」；不管成没成都重拉一次，页面上永远是库里现在的值。
+ */
+export function useUpdateRouteEffort() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      modelId,
+      routeId,
+      body,
+    }: {
+      modelId: string;
+      routeId: string;
+      body: UpdateRouteEffortBody;
+    }) => api.updateRouteEffort(modelId, routeId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingEfforts });
+      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }

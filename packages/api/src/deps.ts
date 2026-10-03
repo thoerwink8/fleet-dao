@@ -13,6 +13,7 @@ import type {
   Store,
   WorkflowControl,
 } from './ports.ts';
+import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
@@ -40,6 +41,11 @@ export interface Deps {
    * 另写一句 unavailable，不拿空列表冒充「都没配」。
    */
   routingLayers?: RoutingLayersPort | undefined;
+  /**
+   * 路由两层里每条路由的思考档位（#470，routing-efforts.ts）：驾驶舱「思考档位」页读、改。没给（开发、内存版没有那张表）的
+   * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。
+   */
+  routingEfforts?: RoutingEffortsPort | undefined;
   /**
    * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。飞书 outbox 的长轮询（feishu-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。

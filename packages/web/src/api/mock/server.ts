@@ -7,6 +7,7 @@ import {
   BoardResponse,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
+  DEFAULT_SESSION_EFFORT,
   DEMO_MODULES,
   DEMO_STRICT_DEFAULT,
   DemoLinksResponse,
@@ -22,12 +23,16 @@ import {
   type RealtimeTable,
   ReposResponse,
   type Route,
+  RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
   RunStepsResponse,
   readSegmentRun,
+  routeEffortChoices,
+  routeEffortProblem,
   SETTING_SCHEMAS,
+  type SessionEffort,
   type SessionRun,
   type SettingKey,
   SettingsResponse,
@@ -40,6 +45,8 @@ import {
   TimelineResponse,
   UpdateChannelRequest,
   UpdateDemoDefaultRequest,
+  UpdateRouteEffortRequest,
+  UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
   UpdateStagePolicyRequest,
@@ -163,6 +170,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   let counter = 0;
   /** 进合并队列的先后。 */
   const queuedAt = new Map<string, number>();
+  /** 每条路由配的思考档位（#470）：没有就是没配。种子里一条 Grok 配了 medium，页面上能看到「配过」的样子。 */
+  const mockEfforts = new Map<string, SessionEffort>([['r-grok', 'medium']]);
   const demo: {
     links: Omit<DemoLink, 'expired'>[];
     defaultScope: DemoScope;
@@ -1213,6 +1222,70 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         return { purpose, verdict: layerVerdict(models.map((m) => m.verdict)), problems: [], models };
       });
       return RoutingLayersResponse.parse({ asOf: iso(), purposes });
+    },
+    async routingEfforts() {
+      await wait();
+      // 假数据没有上游模型串：能配哪几档按模型编号判（cursor 的 auto 这类整串照样配不了），判法照 shared 的 effort.ts
+      const modelIds = [...new Set(st.routes.map((r) => r.modelId))].sort();
+      const models = modelIds.map((modelId) => {
+        const model = st.models.find((m) => m.id === modelId);
+        return {
+          modelId,
+          displayName: model?.displayName ?? modelId,
+          ...(model ? { family: model.family } : {}),
+          routes: st.routes
+            .filter((r) => r.modelId === modelId)
+            .map((r) => {
+              const choices = routeEffortChoices(r.hostId, r.modelId);
+              const effort = mockEfforts.get(r.id);
+              return {
+                routeId: r.id,
+                channelId: r.channelId,
+                channelName: st.channels.find((c) => c.id === r.channelId)?.name ?? r.channelId,
+                poolId: r.poolId,
+                hostId: r.hostId,
+                model: r.modelId,
+                enabled: !MOCK_SWITCHED_OFF.has(r.id),
+                ...(effort ? { effort } : {}),
+                choices: choices.kind === 'choices' ? [...choices.values] : [],
+                ...(choices.kind === 'fixed' ? { fixed: choices.why } : {}),
+              };
+            }),
+        };
+      });
+      return RoutingEffortsResponse.parse({ defaultEffort: DEFAULT_SESSION_EFFORT, models });
+    },
+    async updateRouteEffort(modelId, routeId, raw) {
+      await wait();
+      const body = UpdateRouteEffortRequest.parse(raw);
+      const route = st.routes.find((r) => r.id === routeId && r.modelId === modelId);
+      if (!route) {
+        throw new ApiError(404, 'route_not_found', `模型 ${modelId} 下没有路由 ${routeId}（路由两层里没挂）`);
+      }
+      if (body.effort !== null) {
+        const problem = routeEffortProblem(route.hostId, route.modelId, body.effort);
+        if (problem) throw new ApiError(422, 'effort_not_allowed', problem);
+      }
+      const current = mockEfforts.get(routeId) ?? null;
+      if (current !== body.expected) {
+        throw new ApiError(409, 'conflict', '这条路由的档位刚被别人改过，刷新后再改', { current });
+      }
+      if (body.effort === null) mockEfforts.delete(routeId);
+      else mockEfforts.set(routeId, body.effort);
+      audit({
+        actor: meActor(),
+        action: 'routing.effort.update',
+        target: `route:${routeId}`,
+        before: { modelId, effort: current },
+        after: { modelId, effort: body.effort },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return UpdateRouteEffortResponse.parse({
+        modelId,
+        routeId,
+        ...(body.effort === null ? {} : { effort: body.effort }),
+      });
     },
     async updateStagePolicy(stage, raw) {
       await wait();
