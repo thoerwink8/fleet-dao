@@ -429,6 +429,32 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
     expect(r.code).toBe(2);
     expect(r.err).toContain('认不出要审的是哪个仓');
   });
+
+  // 会话是一次性的（#654 F2 之外的另一件，创始人 2026-10-03 要求）：列会话、清旧会话是本机命令，
+  // 这台没装 Mirasim 时照实报「没装」、退出 2，不打印空表冒充「一个会话也没有」。
+  it('--sessions：这台没装 Mirasim 时退出 2，写明没装（不打印空表）', () => {
+    const r = run('second-opinion.mjs', ['--sessions'], { home: temp('home') });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('这台机器没装 Mirasim');
+    expect(r.out).not.toContain('一个会话也没有');
+  });
+
+  it('--stop-stale：这台没装 Mirasim 时退出 2，不报「清掉 0 个」', () => {
+    const r = run('second-opinion.mjs', ['--stop-stale'], { home: temp('home') });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('这台机器没装 Mirasim');
+    expect(r.out).not.toContain('清掉');
+  });
+
+  it('--keep-session 认得出（不是不认识的参数）', () => {
+    // 不带 Mirasim 时不至于报「不认识的参数 --keep-session」；它只影响跑完删不删会话
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'keep', '--author-family', 'gpt', '--keep-session'],
+      { home: temp('home') },
+    );
+    expect(r.err).not.toContain('不认识的参数');
+  });
 });
 
 // 断链修复（本机 2026-09-28 实测）：cursor-agent 在 Windows 上靠父进程环境里 Git Bash 留下的
