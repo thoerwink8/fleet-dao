@@ -2,6 +2,15 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-03 早（收拾：断链 PR #668、AGENTS.md 减脂报告、v3 W1）
+
+- **断链（PR #668，改标准，等创始人点头）**：清掉 #654 后没扫干净的旧规矩——AGENTS.md 通用段「临时调整放 docs/plan.md」（plan.md 已删）、合并闸「只看草稿冲突」、commander/SKILL.md「另写需求文档」、worker-lib.mjs「认领/档位」两栏、debt.yml 与 contents.ts 旧注释，连带改钉旧说法的测试。本地 `agents/test` 605 过、`conventions`+`github` 910 过。**merge-gate 红**：debt.yml 属碰安全路径，要第二意见——待跑。
+- **另一处真矛盾（减脂审计查出的，未修）**：AGENTS.md:51 说「合并前只拦 CI 绿」，docs/design.md:257 说合并闸判红还有 `cold-verify`——两处对不上，照 51 行会把引擎的 PR 提前合掉。
+- **AGENTS.md 减脂报告**（workflow wf_529ff172-5ca，6 分片 + 合成跑完，挑错那片没跑完）：66 行 10783 字（通用段 3778 / 本仓段 6917）。逐行核完可省约 2550 字（24%）；若把报告格式整段搬出通用段、正文只留一处，可到 40–46%。四条要创始人拍的取舍 + 一条 Fable 禁令复审（`bans.ts` 的撤回条件「出比 5.1 更高版本前」按其字面已触发，`db/test/helpers.ts` 已在用 Fable 5.2）。
+- **v3 W1 文档对齐**（workflow wf_d7a95434-9b6，4/6 片跑完）：decisions 标替代、design 横幅+五节「先别照做」、ops 收口成指针、PROGRESS 临时调整表已核（无需改）。goals 第七节、AGENTS 本仓段两片没跑完。
+- **工作树**：删了 7 棵坏的（hotfix-date/overhaul*/s26），`git worktree prune` 已清账；剩 `rules-visible`（PR #650，等点头，别动）、`second-opinion`（spawn 容器）。
+- **下一步**：等 #668 第二意见 → 挂自动合并；减脂方案摆给创始人拍；v3 按 W1→W5 推（W4 主线 #632 三段总调度是大头）。
+
 ## 2026-10-03 早（旧检出踩坑复盘：干活检出落后 + 扫过期规矩 + 打断回执）
 
 - 创始人 10-02 夜/10-03 提出三件：① 定「每次干活都从主线开始」的机制（我拍）；② 中途引导要回执；③ 本会话多派 subagent/workflow（ultra effect，只本会话，不固化）。
