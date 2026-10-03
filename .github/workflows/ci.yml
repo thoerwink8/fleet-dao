@@ -455,7 +455,9 @@ jobs:
             sudo mv /etc/skel /etc/skel.ci-full && sudo mv /etc/skel.slim /etc/skel; then
             echo "瘦身后的 /etc/skel：$(ls -A /etc/skel | xargs)"
           else
-            echo "::warning::/etc/skel 没瘦成，照原样跑（只是慢）"
+            # 挪开了原来的、新的却没挪进去：把原来的挪回去，保证 /etc/skel 一定在
+            if [ ! -d /etc/skel ] && [ -d /etc/skel.ci-full ]; then sudo mv /etc/skel.ci-full /etc/skel; fi
+            echo "::warning::/etc/skel 没瘦成，照原样跑（只是慢）：现在是 $(ls -A /etc/skel 2>/dev/null | xargs)"
           fi
       # 每一台腿都必须真跑（原来这步只认 deploy == 'all'，ops 那台就被跳过了：空跑还报绿，#662 第二意见）。
       # 参数从矩阵来、按数组展开，不拼进命令行；ops 那台不用 sudo、不碰系统账号。
