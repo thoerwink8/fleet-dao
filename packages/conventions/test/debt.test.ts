@@ -7,18 +7,15 @@ import {
   DEFERRAL_PATTERNS,
   debtFiles,
   doneSection,
-  type Finding,
   findDeferrals,
-  findingMarker,
   formatDebtProblem,
   liveDebt,
   type RefState,
   refStates,
-  reportFindings,
   staleRefFindings,
   untrackedDeferrals,
 } from '../src/debt.ts';
-import type { GitHubCommenter, GitHubReader, IssueInfo } from '../src/github-api.ts';
+import type { GitHubReader, PlanIssue } from '../src/github-api.ts';
 import { parseMd } from '../src/markdown.ts';
 import { fsRepo } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
@@ -27,7 +24,7 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 const phrases = (file: string, text: string) => findDeferrals(parseMd(file, text));
 
-function issue(number: number, extra: Partial<IssueInfo> = {}): IssueInfo {
+function issue(number: number, extra: Partial<PlanIssue> = {}): PlanIssue {
   return {
     number,
     title: `单 ${number}`,
@@ -36,12 +33,14 @@ function issue(number: number, extra: Partial<IssueInfo> = {}): IssueInfo {
     createdAt: '2026-09-20T00:00:00Z',
     labels: [],
     milestone: 'P1 核心闭环',
+    stateReason: null,
+    subIssues: 0,
     ...extra,
   };
 }
 
 /** 假 GitHub：open 里的是开着的 issue，others 里是别的号现在的样子；不在两处的号当作没有。记下每次问了什么。 */
-function fakeGh(open: IssueInfo[], others: IssueInfo[] = [], fail?: string) {
+function fakeGh(open: PlanIssue[], others: PlanIssue[] = [], fail?: string) {
   const asked: string[] = [];
   const gh: GitHubReader = {
     async openIssues() {
@@ -57,7 +56,10 @@ function fakeGh(open: IssueInfo[], others: IssueInfo[] = [], fail?: string) {
     async milestones() {
       return [];
     },
-    async openInMilestone() {
+    async milestoneIssues() {
+      return [];
+    },
+    async subIssues() {
       return [];
     },
   };
@@ -237,10 +239,10 @@ describe('欠账（只看文件）：退出码 0 / 1 / 2', () => {
   });
 
   it('有欠账：1，逐条列出', () => {
-    const r = checkDebtDocs(memRepo({ ...FILES, 'docs/plan.md': '# 计划\n\n删不删到时问你们。\n' }));
+    const r = checkDebtDocs(memRepo({ ...FILES, 'docs/notes.md': '# 笔记\n\n删不删到时问你们。\n' }));
     expect(r.code).toBe(1);
     expect(r.lines).toHaveLength(1);
-    expect(r.lines[0]).toMatch(/^docs\/plan\.md:3 {2}「删不删到时问你们。」里有「到时问」/);
+    expect(r.lines[0]).toMatch(/^docs\/notes\.md:3 {2}「删不删到时问你们。」里有「到时问」/);
   });
 
   it('一份文档都没读到：2，不是「0 个问题」', () => {
@@ -258,7 +260,7 @@ describe('欠账（只看文件）：退出码 0 / 1 / 2', () => {
 describe('欠账：必过检查必须确定（#87）', () => {
   const repo = memRepo({
     ...FILES,
-    'docs/plan.md': '# 计划\n\n留到下一轮（#29）。\n',
+    'docs/notes.md': '# 笔记\n\n留到下一轮（#29）。\n',
   });
 
   it('同一份代码，#29 开着、关了：只看文件的结果一模一样；定时任务那一半才看得出差别', async () => {
@@ -296,44 +298,6 @@ describe('欠账：必过检查必须确定（#87）', () => {
     const expected = checkDebtDocs(fsRepo(ROOT));
     expect(r.stderr).not.toContain('不许出网');
     expect(r.status).toBe(expected.code);
-  });
-});
-
-describe('欠账（定时任务）：查出来的留言到单上，同一条只留一次', () => {
-  function fakeCommenter(existing: Record<number, string[]>, failOn?: number) {
-    const posted: { n: number; body: string }[] = [];
-    const gh: GitHubCommenter = {
-      async comments(n) {
-        if (n === failOn) throw new Error('GitHub 回了 502');
-        return existing[n] ?? [];
-      },
-      async comment(n, body) {
-        posted.push({ n, body });
-      },
-    };
-    return { gh, posted };
-  }
-  const a: Finding = { issue: 29, key: 'ref:a', text: '甲' };
-  const b: Finding = { issue: 29, key: 'ref:b', text: '乙' };
-  const c: Finding = { issue: 40, key: 'ref:d', text: '丙' };
-  const loose: Finding = { issue: undefined, key: 'ref:c', text: '丁' };
-
-  it('一张单一条留言，带记号；以前留过的不再留；没处留言的交回', async () => {
-    const { gh, posted } = fakeCommenter({ 40: [`以前的留言${findingMarker('ref:d')}`] });
-    const r = await reportFindings([a, b, c, loose], gh);
-    expect(r).toEqual({ posted: [29], already: 1, unattached: [loose], errors: [] });
-    expect(posted).toHaveLength(1);
-    expect(posted[0]?.n).toBe(29);
-    expect(posted[0]?.body).toContain(`- 甲${findingMarker('ref:a')}`);
-    expect(posted[0]?.body).toContain(`- 乙${findingMarker('ref:b')}`);
-  });
-
-  it('读留言失败：记进 errors，不当成留过了', async () => {
-    const { gh, posted } = fakeCommenter({}, 29);
-    const r = await reportFindings([a, c], gh);
-    expect(r.errors).toEqual(['#29 上留言没留成（GitHub 回了 502）']);
-    expect(r.posted).toEqual([40]);
-    expect(posted.map((p) => p.n)).toEqual([40]);
   });
 });
 

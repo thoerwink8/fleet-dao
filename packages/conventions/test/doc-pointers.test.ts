@@ -43,29 +43,6 @@ const DESIGN = [
   '',
 ].join('\n');
 
-const PLAN = [
-  '# 计划',
-  '',
-  '## 一、总思路',
-  '',
-  '先跑通。',
-  '',
-  '## 三、分阶段',
-  '',
-  '### P0 地基（约 6 小时）',
-  '',
-  '- 仓骨架：pnpm、CI。',
-  '- `deploy/france.sh`：一条命令装好。',
-  '',
-  '**验收**：装两遍。',
-  '',
-  '### P1 核心闭环',
-  '',
-  '- 工作流：需求、子任务。',
-  '- 错误按「下一步动作」分流、路由熔断。',
-  '',
-].join('\n');
-
 const OPS = [
   '# 运维',
   '',
@@ -94,7 +71,6 @@ const README = [
 
 const BASE: Record<string, string> = {
   'docs/design.md': DESIGN,
-  'docs/plan.md': PLAN,
   'docs/ops.md': OPS,
   'README.md': README,
   'deploy/france.sh': '',
@@ -154,7 +130,7 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
     ],
     ['正文里不带反引号的路径不在', 'docs/ops.md', '装法见 deploy/gone.sh。', 'deploy/gone.sh 在仓里没有'],
     ['第 X 节不在', 'docs/design.md', '见第九节。', 'docs/design.md 里没有第九节'],
-    ['别的文档的第 X 节不在', 'docs/design.md', '去向见 plan.md 第五节。', 'docs/plan.md 里没有第五节'],
+    ['别的文档的第 X 节不在', 'docs/design.md', '去向见 ops.md 第五节。', 'docs/ops.md 里没有第五节'],
     [
       '第 X 节后面引的话不在那一节',
       'docs/design.md',
@@ -171,20 +147,12 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
       'README.md 里没有叫「怎么装」的标题',
     ],
     ['「标题」一节不在', 'docs/ops.md', '（「换机恢复」一节）', 'docs/ops.md 里没有叫「换机恢复」的一节'],
-    ['plan 的阶段不在', 'docs/design.md', '另见 plan.md P7。', 'plan.md 里没有 P7 这个阶段'],
-    ['plan 的条目不在', 'docs/design.md', '另见 plan.md P1「看板」。', 'plan.md 的 P1 里找不到「看板」'],
-    // 下面三条是写法本身的问题：空引号、没说哪份、指自己这份里的标题
-    [
-      'plan 的条目引号是空的',
-      'docs/design.md',
-      '另见 plan.md P1「」。',
-      'plan.md P1「」引号里是空的，没写是哪一条',
-    ],
+    // 下面两条是写法本身的问题：没说哪份、指自己这份里的标题
     [
       '没有编号小节的文档里光写「第 X 节」、没说哪份',
       'README.md',
       '设计依据：第三节。',
-      '「第三节」没说是哪份文档（README.md 自己没有编号的节）：前面写上 design、plan 或 ops',
+      '「第三节」没说是哪份文档（README.md 自己没有编号的节）：前面写上 design 或 ops',
     ],
     [
       '「「X」一节」指的是它自己的标题，自己没有这一节',
@@ -258,9 +226,8 @@ describe('文档指针：认得出的写法', () => {
     '见第二节「没人盯就停」，（第三节第 2 条）。', // 章节 + 引的话、第 N 条
     '按 15.1：说一句话；重做（15.1）；见 design 15.1 第 2 件。', // X.Y 的几种写法
     '见 README「文档各管什么」，见 design「随手记任务」，`docs/design.md`「三、已定」。', // 标题、加粗的字
-    '另见 plan.md P1「错误按「下一步动作」分流」、plan.md P0 的「仓骨架」一条，plan 的 P1。', // plan 的条目，引号里套引号
     '设计依据：design 第一节、第十五节「随手记任务」；15.1 第 1 件。', // 同一行后面接着写的也算 design 的
-    '装法：`deploy/france.sh`、`deploy/*.sh`、packages/x/src/a.ts，[计划](../docs/plan.md)。', // 路径、通配、链接
+    '装法：`deploy/france.sh`、`deploy/*.sh`、packages/x/src/a.ts，[运维](../docs/ops.md)。', // 路径、通配、链接
   ];
 
   it('都指得到，每一种都认出来了', () => {
@@ -269,15 +236,14 @@ describe('文档指针：认得出的写法', () => {
     const mine = report.pointers.filter((p) => p.file === 'docs/design.md' && p.line >= first);
     const kinds = new Set<PointerKind>(mine.map((p) => p.kind));
     expect([...kinds].sort()).toEqual(
-      ['item', 'link', 'path', 'plan', 'planItem', 'quote', 'section', 'subsection', 'title'].sort(),
+      ['item', 'link', 'path', 'quote', 'section', 'subsection', 'title'].sort(),
     );
     expect(mine.map((p) => p.text)).toEqual(
       expect.arrayContaining([
-        'P1「错误按「下一步动作」分流」',
         'docs/design.md「三、已定」',
         'docs/design.md 15.1 第 1 件',
         'deploy/*.sh',
-        '../docs/plan.md',
+        '../docs/ops.md',
       ]),
     );
   });
@@ -297,7 +263,7 @@ describe('文档指针：认得出的写法', () => {
 describe('文档指针：故意不查的', () => {
   const ignored: [name: string, file: string, lines: string[]][] = [
     ['围栏代码块里的示例', 'docs/design.md', ['```', 'edge/  以后才有', '见第九节 `docs/nope.md`', '```']],
-    ['HTML 注释里的占位', 'README.md', ['<!-- 见第九节，`docs/nope.md`，plan.md P9 -->']],
+    ['HTML 注释里的占位', 'README.md', ['<!-- 见第九节，`docs/nope.md` -->']],
     ['别的仓的路径', 'docs/ops.md', ['按 windsurf-dao 仓 `docs/decisions/x.md` 的「先观测」。']],
     [
       '版本号、小数不当小节号',
@@ -317,19 +283,15 @@ describe('文档指针：故意不查的', () => {
     ],
     ['外面的链接', 'README.md', ['[里程碑](https://github.com/o/r/milestones)、[这一段](#常用)']],
     ['路径后面紧跟中文，截不准的不查', 'docs/ops.md', ['放 specs/99-不存在/ 下面']],
-    [
-      '不是指针的「节」和「P」',
-      'docs/design.md',
-      ['见 docs/plan.md 的 PX 一节；前面各节；验证环节；第一个里程碑。'],
-    ],
+    ['不是指针的「节」', 'docs/design.md', ['见 docs/ops.md 的 PX 一节；前面各节；验证环节；第一个里程碑。']],
   ];
 
   it.each(ignored)('%s', (_name, file, lines) => {
     const { report, first } = withLines(file, lines);
     expect(report.problems.map(formatProblem)).toEqual([]);
     const mine = report.pointers.filter((p) => p.file === file && p.line >= first);
-    // 「不是指针」那条里的 docs/plan.md 本身是个真路径，照查；别的一条都不该认
-    expect(mine.filter((p) => p.text !== 'docs/plan.md')).toEqual([]);
+    // 「不是指针」那条里的 docs/ops.md 本身是个真路径，照查；别的一条都不该认
+    expect(mine.filter((p) => p.text !== 'docs/ops.md')).toEqual([]);
   });
 
   it('引擎会话在检出里落的 .fleet-out/（不进仓）不当仓里的顶层目录：指到里面的文件不报「没有」', () => {
@@ -389,19 +351,14 @@ describe('文档指针：读不到的明确报「没查成」，不当成「没�
 describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
   const report = checkDocPointers(fsRepo(ROOT));
 
-  it('只查 design、plan、ops、README 这几份活文档，specs/ 和 docs/decisions/ 是历史记录不查（#654）', () => {
+  it('只查 design、ops、README 这几份活文档，specs/ 和 docs/decisions/ 是历史记录不查（#654）', () => {
     expect(report.files).toEqual([...DOCS]);
   });
 
   // 每一类先断言「认出了至少一个」：规则认不出了，和「全都指得到」看起来一样是绿的，得分开。
   // 某一类指针在文档里真的删光了，就把它从这里去掉。
-  // plan、planItem 两类（plan.md 的阶段、条目）从前只在 specs 文档里写（「对应计划：plan.md P1「…」」），specs 不查以后活文档里一个也没有了；
-  // 规则本身由上面的夹具测试钉住。plan.md 整份退场时（#654 的 plan 那一片）这两类连同规则一起删。
-  const NO_LIVE_USE: readonly string[] = ['plan', 'planItem'];
-  it('每一类指针都认出了至少一个（plan、planItem 除外，见上）', () => {
-    const empty = Object.entries(report.checked).filter(
-      ([kind, n]) => n === 0 && !NO_LIVE_USE.includes(kind),
-    );
+  it('每一类指针都认出了至少一个', () => {
+    const empty = Object.entries(report.checked).filter(([, n]) => n === 0);
     expect(empty).toEqual([]);
   });
 

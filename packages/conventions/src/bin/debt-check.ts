@@ -6,7 +6,8 @@
 // 退出码 0 = 没欠账，或查出来的都留言到单上了；1 = 有欠账没落到单上（逐条列出）；2 = 没查成（读不到文档或 GitHub、留言没留成）。
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { checkDebtDocs, liveDebt, reportFindings } from '../debt.ts';
+import { checkDebtDocs, DEBT_REPORT_HEADER, liveDebt } from '../debt.ts';
+import { reportFindings } from '../findings.ts';
 import { liveGitHub, repoName } from '../github-api.ts';
 import { annotation } from '../pr-fields.ts';
 import { fsRepo } from '../repo.ts';
@@ -50,7 +51,7 @@ if (!live) {
   const notQueried = [...r.notQueried];
   let loose = r.findings;
   if (comment && r.findings.length) {
-    const rep = await reportFindings(r.findings, gh);
+    const rep = await reportFindings(r.findings, gh, DEBT_REPORT_HEADER);
     if (rep.posted.length) out(`留言了：${rep.posted.map((n) => `#${n}`).join('、')}。`);
     if (rep.already) out(`${rep.already} 条以前留过言，这次没再留。`);
     notQueried.push(...rep.errors);

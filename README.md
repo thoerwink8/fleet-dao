@@ -43,8 +43,8 @@
 
 - **服务器上**：`/etc/fleet-dao/`，不进 git；每个文件放什么见 ops 第三节（用户、目录、库）。
 - **加密副本**：私有仓 [fleet-dao-vault](https://github.com/thoerwink8/fleet-dao-vault)，age 加密，一个文件一个 `.age`，仓里有密文、公钥和解密钥匙本身（明文，只靠那个私有仓和 GitHub 账号保护）。它只放**我们自己有、丢了别处再也没有**的东西：两台机器上的配置和密钥、自建 VPS 的订阅地址；别人家的现场凭据不进这里（丢了跟现场要一份就有）。在创始人电脑上跑那个仓里的 `bash refresh.sh` 刷新；怎么解开、机器没了怎么恢复、钥匙丢了怎么换（`bash rekey.sh`），见那个仓 README。
-- **创始人电脑上**：`~/.fleet-dao/`，放解密钥匙 `vault-key.txt` 和 age；只有拿着这把钥匙的人解得开。钥匙还要抄一份进创始人的密码管理器（plan 第五节）。
-- 数据库备份不在保险箱里，见 plan 第二节「备份」。
+- **创始人电脑上**：`~/.fleet-dao/`，放解密钥匙 `vault-key.txt` 和 age；只有拿着这把钥匙的人解得开。钥匙还要抄一份进创始人的密码管理器。
+- 数据库备份不在保险箱里，见 ops 第十一节「备份与恢复」。
 
 ## 常用
 
@@ -55,7 +55,7 @@
 - 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
 - 关单：最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时 GitHub 自己关。没有 PR 的收尾用 `pnpm issue:close <号>`：关成「完成」要有证据（合并了的 PR 提到它、或下面的子单都关了、或 `--note "做成了什么"`），没有就不关（退出码 1），子单还开着也不关；读不到 GitHub 报错不关（退出码 2）。见 design 第七节「关单要有证据」。
 - 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
-- 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
+- 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
@@ -65,7 +65,6 @@
 | `README.md` | 门口：是什么、入口、东西在哪 | 入口或目录变了 |
 | [docs/design.md](docs/design.md) | 为什么这样定；「已定」表是拍板记录 | 改行为的 PR 同时改它 |
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
-| [docs/plan.md](docs/plan.md) | 版本快照：每个版本的目标、先后、母单和子单，未排期的单（`pnpm plan:snapshot` 从 GitHub 生成，别手改）；下面留着迁到版本之前 P0–P6 的原计划 | 每个版本开始和结束时，总指挥重新生成 |
 | `docs/decisions/` | 拍板记录：一个决定一个文件，只增不改，被推翻标「已被 xx 替代」（design 第三节的决定表拆过来，#139） | 创始人拍板的那一轮 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工 | 装法或启动器变了 |

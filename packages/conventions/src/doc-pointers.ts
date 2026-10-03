@@ -1,7 +1,6 @@
-// 文档指针检查：docs/design.md、docs/plan.md、docs/ops.md、README.md 这几份活文档里，指向仓内文件的路径、
-// 「第 X 节」「X.Y」这类章节、「「X」一节」「README「X」」这类标题、plan.md 的阶段和条目，都要指得到；指不到的报 文件:行。
-// 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、plan.md 里 pnpm plan:snapshot 生成的快照段
-// （照抄 GitHub 上的标题和里程碑说明，要改去 GitHub 改；它的标题照样能被别处指到）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
+// 文档指针检查：docs/design.md、docs/ops.md、README.md 这几份活文档里，指向仓内文件的路径、
+// 「第 X 节」「X.Y」这类章节、「「X」一节」「README「X」」这类标题，都要指得到；指不到的报 文件:行。
+// 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
 // 不以仓里现有的顶层目录或文件开头的路径（/etc/…、~/…、标签名 model/ 这类）、所在文档没有小节编号时的小数（版本号）。
 // 不查 specs/ 和 docs/decisions/（#654）：那是历史记录，后来的改名、删文件不该逼人回头改它们；指到还没有的东西不报这一类宽限也就用不着了。
 // 有误报就收窄这里的规则，不往文档里加豁免。pnpm check 里由 test/doc-pointers.test.ts 对全仓跑一遍。
@@ -17,22 +16,12 @@ import {
   sectionRange,
   stripTrailingParen,
 } from './markdown.ts';
-import { findItem, type PlanPhase, planPhases } from './plan.ts';
 import type { RepoView } from './repo.ts';
 
 /** 要查的几份活文档。 */
-export const DOCS = ['docs/design.md', 'docs/plan.md', 'docs/ops.md', 'README.md'] as const;
+export const DOCS = ['docs/design.md', 'docs/ops.md', 'README.md'] as const;
 
-export type PointerKind =
-  | 'link'
-  | 'path'
-  | 'section'
-  | 'subsection'
-  | 'quote'
-  | 'item'
-  | 'title'
-  | 'plan'
-  | 'planItem';
+export type PointerKind = 'link' | 'path' | 'section' | 'subsection' | 'quote' | 'item' | 'title';
 
 export interface Problem {
   file: string;
@@ -46,7 +35,7 @@ export interface Pointer {
   kind: PointerKind;
   file: string;
   line: number;
-  /** 认出来的样子，例如「docs/design.md 第七节」「P1「工作流」」「deploy/france.sh」。 */
+  /** 认出来的样子，例如「docs/design.md 第七节」「deploy/france.sh」。 */
   text: string;
 }
 
@@ -68,10 +57,6 @@ const ALIASES: Record<string, string> = {
   'design.md': 'docs/design.md',
   design: 'docs/design.md',
   设计文档: 'docs/design.md',
-  'docs/plan.md': 'docs/plan.md',
-  'plan.md': 'docs/plan.md',
-  plan: 'docs/plan.md',
-  实施计划: 'docs/plan.md',
   'docs/ops.md': 'docs/ops.md',
   'ops.md': 'docs/ops.md',
   ops: 'docs/ops.md',
@@ -79,7 +64,6 @@ const ALIASES: Record<string, string> = {
   'README.md': 'README.md',
   README: 'README.md',
 };
-const PLAN = 'docs/plan.md';
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const ALIAS_RE = new RegExp(
@@ -97,8 +81,6 @@ const SUB_AFTER = /^\s*(?:节|第|）|\)|：|:|。|，|、|；|;|$)/;
 /** 没写文档名的小节号，前面得是这些（「见 15.4」「按 15.4」「（15.4）」「、15.4」）。 */
 const SUB_BEFORE = /(?:见|按|（|\(|、|；|，)\s*$/;
 const ITEM_RE = /\s*第\s*(\d+)\s*(条|件)/y;
-const PHASE_RE = /(?:的\s*)?P(\d+)(?!\d)/y;
-const PHASE_ITEM_RE = /\s*(?:的\s*)?/y;
 const LINK_RE = /\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 const CODE_RE = /`([^`\n]+)`/g;
 /** 「windsurf-dao 仓 `docs/…`」：说的是别的仓，不查；「本仓」「这个仓」照查。 */
@@ -124,8 +106,6 @@ const emptyCounts = (): Record<PointerKind, number> => ({
   quote: 0,
   item: 0,
   title: 0,
-  plan: 0,
-  planItem: 0,
 });
 
 export function checkDocPointers(repo: RepoView, files: readonly string[] = DOCS): Report {
@@ -140,7 +120,6 @@ class Checker {
   readonly problems: Problem[] = [];
   readonly pointers: Pointer[] = [];
   private readonly docs = new Map<string, MdDoc | null>();
-  private readonly phases = new Map<string, Map<number, PlanPhase>>();
   private readonly bold = new Map<string, Set<string>>();
   private readonly listings = new Map<string, string[] | null>();
   private readonly repo: RepoView;
@@ -168,7 +147,7 @@ class Checker {
       return;
     }
     doc.lines.forEach((raw, i) => {
-      if (doc.fenced[i] || doc.generated[i]) return;
+      if (doc.fenced[i]) return;
       const line = i + 1;
       for (const m of raw.matchAll(CODE_RE)) {
         if (otherRepo(raw.slice(0, m.index))) continue;
@@ -260,7 +239,7 @@ class Checker {
     return this.listings.get(dir) ?? undefined;
   }
 
-  // —— 章节、标题、plan 条目 ——
+  // —— 章节、标题 ——
 
   private scanRefs(file: string, line: number, text: string): void {
     // 同一行里前面写过「design 第五节」，后面光写「第九节」「15.4」的也算 design 的
@@ -295,11 +274,6 @@ class Checker {
     const sub = SUB_RE.exec(text);
     if (sub?.[1] && SUB_AFTER.test(text.slice(SUB_RE.lastIndex))) {
       return this.subRef(file, line, text, target, sub[1], SUB_RE.lastIndex, false);
-    }
-    if (target === PLAN) {
-      PHASE_RE.lastIndex = at;
-      const phase = PHASE_RE.exec(text);
-      if (phase?.[1]) return this.phaseRef(file, line, text, Number(phase[1]), PHASE_RE.lastIndex);
     }
     const quote = readQuote(text, at);
     if (!quote) return undefined;
@@ -367,7 +341,7 @@ class Checker {
         this.problem(
           file,
           line,
-          `「第${numeral}节」没说是哪份文档（${target} 自己没有编号的节）：前面写上 design、plan 或 ops`,
+          `「第${numeral}节」没说是哪份文档（${target} 自己没有编号的节）：前面写上 design 或 ops`,
         );
       } else this.problem(file, line, `${target} 里没有第${numeral}节`);
     }
@@ -430,30 +404,6 @@ class Checker {
     return e;
   }
 
-  private phaseRef(file: string, line: number, text: string, n: number, end: number): number {
-    this.note('plan', file, line, `P${n}`);
-    const doc = this.doc(PLAN);
-    if (!doc) {
-      this.problem(file, line, `读不到 ${PLAN}`);
-      return end;
-    }
-    const phase = this.planPhases(doc).get(n);
-    if (!phase) this.problem(file, line, `plan.md 里没有 P${n} 这个阶段`);
-    PHASE_ITEM_RE.lastIndex = end;
-    PHASE_ITEM_RE.exec(text);
-    const quote = readQuote(text, PHASE_ITEM_RE.lastIndex);
-    if (!quote) return end;
-    if (phase) {
-      this.note('planItem', file, line, `P${n}「${quote.text}」`);
-      // 空引号是没填（开单骨架故意留空，不填就提交会红），不是「那一条还没有」：在哪份文档里都报
-      if (!quote.text.trim()) this.problem(file, line, `plan.md P${n}「」引号里是空的，没写是哪一条`);
-      else if (findItem(phase, quote.text) === undefined) {
-        this.problem(file, line, `plan.md 的 P${n} 里找不到「${quote.text}」`);
-      }
-    }
-    return quote.end;
-  }
-
   /**
    * 引的话得是那一节里某一行的原文（比较用的写法之后整段包含）。写大意不算：试过「三分之二的词对得上就算」，
    * 删掉一整条、改掉半个标题、意思改反了都凑得过线（#41 审查在真文档上造的三处一处没报），写大意的就改成原文。
@@ -496,15 +446,6 @@ class Checker {
       this.bold.set(doc.path, labels);
     }
     return labels;
-  }
-
-  private planPhases(doc: MdDoc): Map<number, PlanPhase> {
-    let phases = this.phases.get(doc.path);
-    if (!phases) {
-      phases = planPhases(doc);
-      this.phases.set(doc.path, phases);
-    }
-    return phases;
   }
 
   private doc(path: string): MdDoc | undefined {
