@@ -8,6 +8,7 @@ import type {
   Repo,
   Route,
   ScheduleOutcome,
+  SegmentRun,
   SessionRun,
   StagePolicy,
   Step,
@@ -48,6 +49,8 @@ export interface MTask {
   task: Task;
   /** 需求级会话：分诊、写需求文档、写方案。 */
   runs: SessionRun[];
+  /** 三段的流水（真后端的 runs 表）：走三段的单才有；模拟器不推进它。 */
+  segmentRuns?: SegmentRun[];
   subtasks: MSubtask[];
   paused: boolean;
   asks: MAsk[];
