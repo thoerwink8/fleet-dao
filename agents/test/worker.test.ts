@@ -367,7 +367,7 @@ describe('start：happy path', () => {
     expect(w.meta('w3').effort).toBe('high');
   });
 
-  it('--no-automerge：收尾交代改成开人闸 PR、不挂自动合并、CI 绿就停；不带还是本机快马老规矩', async () => {
+  it('--no-automerge：收尾交代改成开人闸 PR、不挂自动合并、CI 绿就停；不带则挂自动合并', async () => {
     // 创始人 09-28 晚上拍：改标准的活也要能派给别家模型，但改标准是人闸第四类（AGENTS.md），不能让模型自己
     // 挂自动合并把改标准的 PR 合了。
     const w = world();
@@ -379,7 +379,7 @@ describe('start：happy path', () => {
     expect(gated).toContain('人闸：改标准');
     expect(gated).toContain('不要挂自动合并');
     expect(gated).not.toContain('gh pr merge <PR 号> --auto --squash');
-    expect(gated).not.toContain('CI 绿就合（本机快马）');
+    expect(gated).toContain('四栏'); // #654：PR 模板只剩四栏，不再写「档位」栏
 
     const w2 = world();
     w2.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
@@ -388,7 +388,6 @@ describe('start：happy path', () => {
     await w2.run(['start', '--model', 'grok', '--name', 'w-fast', '--brief', brief(w2)]);
     const fast = w2.prompt('w-fast');
     expect(fast).toContain('gh pr merge <PR 号> --auto --squash');
-    expect(fast).toContain('CI 绿就合（本机快马）');
     expect(fast).not.toContain('人闸：改标准');
   });
 });
