@@ -9,7 +9,7 @@ export const DEMO_RENAMES: readonly (readonly [RegExp, string])[] = [
   // 全局禁令的理由是本项目自己的规矩原话（packages/shared/src/bans.ts，前后端共用），拿一句去搜就能对上公开仓：
   // 换成意思一样的样例说法（演示版里照样按这两条禁令拦）。改了那边的原话，demo-renames.test.ts 会红。
   [/GPT 不做 UI 类活/g, 'GPT 族不接界面类的活'],
-  [/不用 Fable（出比 5\.1 更高的版本之前）/g, 'Fable 暂不启用'],
+  [/不用 Fable（创始人定）/g, 'Fable 暂不启用'],
 ];
 
 export function demoRenamed(code: string): string {
