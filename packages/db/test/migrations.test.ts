@@ -36,6 +36,30 @@ async function runEach(db: TestDb, statements: readonly string[]) {
   for (const s of statements) await db.client.exec(s);
 }
 
+const ordered = [...journal.entries].sort((a, b) => a.idx - b.idx);
+
+/** 原样跑一条迁移文件（按 drizzle 的分句标记切开逐句跑），不记迁移日志：「在旧库上升级」的用例要停在某一条之前插旧数据。 */
+async function runMigration(pg: PGlite, tag: string) {
+  const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+  for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+}
+
+/**
+ * 跑到第 target 条之前（不含它）的一份独占 PGlite。几条「在旧库上升级」的用例原来各起一份 PGlite、各自从第 0 条跑起
+ * （一条一秒多）；现在共用一份底库按序号往前走，走到要的那一条之前 clone 一份交出去，交出去的和从头跑的是同一个库。
+ * 要的比底库已经走到的还早（单跑某一条、用例换了顺序），底库从头再建一份，不拿跑过头的库凑。
+ */
+let base: { pg: PGlite; next: number } | undefined;
+async function migratedBefore(target: number): Promise<PGlite> {
+  if (!base || base.next > target) {
+    await base?.pg.close();
+    base = { pg: new PGlite(), next: 0 };
+  }
+  for (; base.next < target; base.next += 1) await runMigration(base.pg, ordered[base.next]?.tag ?? '');
+  return (await base.pg.clone()) as PGlite;
+}
+afterAll(() => base?.pg.close());
+
 describe('迁移', () => {
   it('迁移目录里的每一条都真跑了', async () => {
     const applied = await t.client.query<{ n: number }>(
@@ -222,21 +246,14 @@ describe('迁移', () => {
 });
 
 describe('0002：额度窗改按上游原名存', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0002_quota_labels');
-
-  async function runMigration(pg: PGlite, tag: string) {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  }
+  const target = ordered.findIndex((e) => e.tag === '0002_quota_labels');
 
   it(
     '在已有旧数据的库上跑得通：旧行补上原名、单位、读法，池补上最近读成时刻，主键换成（池, 原名）',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into channels (id, name, billing) values ('relay', '中转', 'subscription');
         insert into pools (id, channel_id, max_concurrency) values
@@ -310,20 +327,14 @@ describe('0002：额度窗改按上游原名存', () => {
 });
 
 describe('0003：目录装载器要的三列', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0003_catalog');
-  const runMigration = async (pg: PGlite, tag: string) => {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  };
+  const target = ordered.findIndex((e) => e.tag === '0003_catalog');
 
   it(
     '已有的阶段顺序回填成开着，之后不再有默认值；会话用户按列名读得回来、只许两个值',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
         insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
@@ -360,20 +371,14 @@ describe('0003：目录装载器要的三列', () => {
 });
 
 describe('0005：接活入口（GitHub 事件原文、自动派活开关）', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0005_github_intake');
-  const runMigration = async (pg: PGlite, tag: string) => {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  };
+  const target = ordered.findIndex((e) => e.tag === '0005_github_intake');
 
   it(
     '已有的仓一律是关着的（不会一升级就开始自动派活）；事件表不收没原因的「不收」「出错」、处理中不许有收尾时刻',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(
           `insert into repos (owner, name, test_command) values ('acme', 'widgets', 'pnpm check')`,
         );
@@ -444,20 +449,14 @@ describe('0005：接活入口（GitHub 事件原文、自动派活开关）', ()
 });
 
 describe('0007：法国只留一个会话用户（创始人 2026-09-26）', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0007_one_session_user');
-  const runMigration = async (pg: PGlite, tag: string) => {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  };
+  const target = ordered.findIndex((e) => e.tag === '0007_one_session_user');
 
   it(
     '挂在停用用户下的池改到唯一的会话用户、按原来的用户记下组织类型；历史会话行照留；之后池只收这一个用户',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
         insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
@@ -508,20 +507,14 @@ describe('0007：法国只留一个会话用户（创始人 2026-09-26）', () =
 });
 
 describe('0011：流程配置副本、会话记下的测试命令（只加列）', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0011_flow_replica');
-  const runMigration = async (pg: PGlite, tag: string) => {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  };
+  const target = ordered.findIndex((e) => e.tag === '0011_flow_replica');
 
   it(
     '升级时已有的仓一律是「还没同步过」（派活前按停派算，等对账读成一次），手写的 test_command 照留；已有的会话行没记测试命令',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into repos (owner, name, test_command) values ('acme', 'widgets', 'pnpm check');
         insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
@@ -567,20 +560,14 @@ describe('0011：流程配置副本、会话记下的测试命令（只加列）
 });
 
 describe('0013：会话记缓存读写 token（只加列，#216）', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0013_cache_tokens');
-  const runMigration = async (pg: PGlite, tag: string) => {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  };
+  const target = ordered.findIndex((e) => e.tag === '0013_cache_tokens');
 
   it(
     '升级前的会话行缓存读写是空（没读到），不是 0，输入输出照留；之后写负数被拒',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
         insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
@@ -615,20 +602,14 @@ describe('0013：会话记缓存读写 token（只加列，#216）', () => {
 });
 
 describe('0025：路由两层（只加表、加一条唯一约束，#574）', () => {
-  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag.startsWith('0025_'));
-  const runMigration = async (pg: PGlite, tag: string) => {
-    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
-    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
-  };
+  const target = ordered.findIndex((e) => e.tag.startsWith('0025_'));
 
   it(
     '旧库升级：路由、旧的阶段顺序一行不丢；新表是空的；新表的外键能指到路由（复合唯一约束在外键之前建好）',
     async () => {
       expect(target).toBeGreaterThan(0);
-      const pg = new PGlite();
+      const pg = await migratedBefore(target);
       try {
-        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
         insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
@@ -638,7 +619,7 @@ describe('0025：路由两层（只加表、加一条唯一约束，#574）', ()
         insert into stage_policies (stage) values ('execute');
         insert into stage_policy_routes (stage, route_id, position, enabled) values ('execute', 'r1', 0, true);
       `);
-        await runMigration(pg, entries[target]?.tag ?? '');
+        await runMigration(pg, ordered[target]?.tag ?? '');
 
         expect((await pg.query('select id from routes')).rows).toEqual([{ id: 'r1' }]);
         expect((await pg.query('select route_id from stage_policy_routes')).rows).toEqual([
@@ -693,6 +674,19 @@ describe('测试库', () => {
       'select count(*)::int as n from drizzle.__drizzle_migrations',
     );
     expect(applied.rows[0]?.n).toBeGreaterThan(0);
+  });
+
+  it('【故意造出的失败】清空后自增序号回到起点：表里有行的、表空着但序号被失败的插入推进过的，都从 1 起', async () => {
+    const row = { actorKind: 'engine', actorId: 't', action: 'x', target: 't', via: 'engine' } as const;
+    // 违反 audit_log_failure_has_error：插不进去，序号却已经推进了。表是空的，只清有行的表时最容易漏掉它。
+    await expect(t.db.insert(schema.auditLog).values({ ...row, ok: false })).rejects.toThrow();
+    await resetTestDb(t);
+    const [first] = await t.db.insert(schema.auditLog).values(row).returning();
+    expect(first?.id).toBe(1);
+    await t.db.insert(schema.auditLog).values(row);
+    await resetTestDb(t);
+    const [again] = await t.db.insert(schema.auditLog).values(row).returning();
+    expect(again?.id).toBe(1);
   });
 });
 
