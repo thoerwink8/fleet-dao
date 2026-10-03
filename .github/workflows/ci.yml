@@ -442,17 +442,21 @@ jobs:
           cache: ${{ needs.changes.outputs.deploy == 'all' && 'pnpm' || '' }}
       - if: needs.changes.outputs.deploy == 'all'
         run: pnpm install --frozen-lockfile
-      # 这台一次性的 CI 机器上，新建的测试账号头一回 runuser 时 pam_systemd 会去起它的 user@ 管理器，偶尔卡到 systemd
-      # 默认的 90 秒超时（实测 cli-tools 一项 32 秒和 99 秒两种、login-user 8 秒和 49 秒两种，差的全在第一条用例之前）。
-      # 测试验的是脚本的判据，不靠用户管理器（deploy/lib 里没有 systemctl --user、loginctl、XDG_RUNTIME_DIR），
-      # 所以只在这里把 PAM 里的 pam_systemd 注释掉；生产机不动。改不成就照原样跑（只是慢），不挡。
-      - name: CI 机器上不给测试账号起 user@ 管理器（省掉偶发的 90 秒等待）
+      # GitHub 的 runner 镜像把一堆工具链放在 /etc/skel 里（.rustup .cargo .nvm .dotnet .ghcup …，几个 G），测试里每建一个
+      # 带家目录的账号（login-user、cli-tools 等）useradd 都要整份拷一遍：实测 login-user 头一条用例 36 秒、cli-tools
+      # 头一条 93 秒，全在拷这个。这里只留 /etc/skel 顶层的普通文件（.profile .bashrc .bash_logout 这类，测试要看
+      # .profile），工具链目录挪开；只动这台一次性的 CI 机器，生产机不动。改不成就照原样跑（只是慢），不挡。
+      - name: CI 机器上给 /etc/skel 瘦身（建测试账号不再拷几个 G 的工具链）
         if: matrix.sudo
         run: |
           set -uo pipefail
-          files=$(grep -lE '^[^#]*pam_systemd\.so' /etc/pam.d/* 2>/dev/null || true)
-          for f in $files; do sudo sed -i -E 's/^([^#]*pam_systemd\.so.*)$/# CI 关掉：\1/' "$f" && echo "关掉了 $f 里的 pam_systemd"; done
-          [ -n "$files" ] || echo "PAM 里没找到 pam_systemd，照原样跑"
+          echo "原来的 /etc/skel：$(sudo du -sh /etc/skel 2>/dev/null | cut -f1)，$(ls -A /etc/skel | xargs)"
+          if sudo mkdir -p /etc/skel.slim && sudo find /etc/skel -maxdepth 1 -type f -exec cp -p {} /etc/skel.slim/ ';' &&
+            sudo mv /etc/skel /etc/skel.ci-full && sudo mv /etc/skel.slim /etc/skel; then
+            echo "瘦身后的 /etc/skel：$(ls -A /etc/skel | xargs)"
+          else
+            echo "::warning::/etc/skel 没瘦成，照原样跑（只是慢）"
+          fi
       # 每一台腿都必须真跑（原来这步只认 deploy == 'all'，ops 那台就被跳过了：空跑还报绿，#662 第二意见）。
       # 参数从矩阵来、按数组展开，不拼进命令行；ops 那台不用 sudo、不碰系统账号。
       - name: deploy 检查（${{ matrix.label }}）
