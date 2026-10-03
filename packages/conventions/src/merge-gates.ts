@@ -208,13 +208,13 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
 ];
 
 /**
- * 改动里「删掉」的行，只有这几类算无害（超时、名字、缓存键和路径、Node 版本、检出深度这类调参和命名）；删掉别的任何一行都算：
+ * 改动里「删掉」的行，只有这几类算无害（超时、名字、缓存键、Node 版本、检出深度这类调参和命名；path、cache 这类会改目录或缓存范围的不算）；删掉别的任何一行都算：
  * 删掉一步、把命令换成别的（run: echo ok）、去掉一个 job 里的检查，落到文件里都是「删了已有的行」。拦的是「删」不是「加」——
  * 新加一步、新加并行、新加缓存，放松不了已有的检查（加上去的 if、continue-on-error、权限这些，上面几条各自拦）。
  * 之所以不列「哪些命令算检查」：名单总有漏的（删 web 构建、删 deploy 步），反过来列无害的才是封闭的。
  */
 const BENIGN_REMOVED =
-  /^\s*(?:-\s+)?(?:timeout-minutes|name|key|path|cache|cache-dependency-path|node-version|fetch-depth|retention-days|max-parallel|fail-fast):|^\s*(?:with|env):\s*$/;
+  /^\s*(?:-\s+)?(?:timeout-minutes|name|key|node-version|fetch-depth|retention-days|max-parallel|fail-fast):|^\s*(?:with|env):\s*$/;
 
 /**
  * 去掉行尾的 YAML 注释（空白加 # 起到行尾），免得只改超时、行尾写一句「# permissions 不变」就被当成改了权限。

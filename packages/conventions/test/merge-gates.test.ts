@@ -270,6 +270,8 @@ describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第�
       ['-      - run: pnpm --filter ./packages/web run build:demo', '删了或改了已有的行'],
       ['-        run: echo 跑一步别的', '删了或改了已有的行'],
       ['-        shard: [1, 2, 3]', '删了或改了已有的行'],
+      ['-          path: pr', '删了或改了已有的行'],
+      ['-          cache: pnpm', '删了或改了已有的行'],
       ['+        if: >-', '检查跑不跑的条件'],
       ["+          github.event_name == 'push' && matrix.x", '检查跑不跑的条件'],
       ['+          failure() || cancelled()', '检查跑不跑的条件'],
