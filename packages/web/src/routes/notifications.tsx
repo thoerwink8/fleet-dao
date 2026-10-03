@@ -80,8 +80,6 @@ const STAGE_TONE: Record<Handling['stage'], Tone> = {
   silenced: 'stop',
   waiting_founder: 'human',
   unclaimed: 'fail',
-  engine_stuck: 'stall',
-  claimed: 'run',
   pr_open: 'run',
   merged: 'wait',
   deployed: 'done',

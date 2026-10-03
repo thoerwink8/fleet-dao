@@ -1,5 +1,6 @@
-// 提醒是一件活（design 15.3「谁在处理」）：谁在处理 = 跟进单上的认领，状态从认领、PR、发布记录现算（只给驾驶舱看，
-// #445 起 `alert show` 不显示，也不会再没人认领、停太久就自动升级或开单——那一层已经删掉）。
+// 提醒是一件活（design 15.3「谁在处理」）：状态从 PR、发布记录现算（只给驾驶舱看，
+// #445 起 `alert show` 不显示，也不会再没人认领、停太久就自动升级或开单——那一层已经删掉；
+// 认领账本身也在 #556 整张删掉）。
 import { describe, expect, it } from 'vitest';
 import {
   type AlertRef,
@@ -14,7 +15,6 @@ import {
   silenceProblem,
   type WorkIssue,
 } from '../src/alert-work.ts';
-import type { IssueClaim } from '../src/seat.ts';
 
 const T0 = '2026-09-27T12:00:00.000Z';
 const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
@@ -44,28 +44,6 @@ const work: WorkIssue = {
   linkedAt: at(21),
 };
 
-const claim = (over: Partial<IssueClaim> = {}): IssueClaim => ({
-  repoId: 'r1',
-  issueNumber: 342,
-  claimId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-  ownerKind: 'worker',
-  ownerMachine: '本机',
-  ownerLabel: '工人A',
-  seatScope: 'main',
-  seatTerm: 3,
-  state: 'doing',
-  workflowId: null,
-  prNumbers: [],
-  graceMinutes: 120,
-  claimedAt: at(10),
-  heartbeatAt: at(30),
-  updatedAt: at(30),
-  endedAt: null,
-  endReason: null,
-  note: '在查磁盘',
-  ...over,
-});
-
 const pr = (over: Partial<FixPr> = {}): FixPr => ({
   repo: 'owner/fleet-dao',
   number: 350,
@@ -81,7 +59,6 @@ const pr = (over: Partial<FixPr> = {}): FixPr => ({
 const facts = (over: Partial<AlertWorkFacts> = {}): AlertWorkFacts => ({
   alert: alert(),
   work: null,
-  claim: null,
   prs: [],
   silences: [],
   ...over,
@@ -196,45 +173,24 @@ describe('谁在处理、到哪一步了（读时现算）', () => {
     expect(h.line).toBe('没人在修 · 25 分钟');
   });
 
-  it('本机认领了跟进单：谁、哪张单、一句进度、多久了', () => {
-    const h = alertHandling(facts({ work, claim: claim() }), null, at(40));
-    expect(h).toMatchObject({
-      stage: 'claimed',
-      who: '本机/工人A',
-      since: at(10),
-      stageRef: 'claimed-aaaaaaaa',
-    });
-    expect(h.line).toBe('本机/工人A 在处理 · owner/fleet-dao#342 · 在查磁盘 · 30 分钟');
-  });
-
-  it('【故意造出的失败】跟进单的认领在引擎手里（引擎自己卡住才报的）：不算有人在处理，单列 engine_stuck', () => {
-    const engineClaim = claim({
-      ownerKind: 'engine',
-      ownerMachine: null,
-      ownerLabel: null,
-      workflowId: 'req:x#293',
-    });
+  it('【故意造出的失败】跟进单上没人认领（认领账删了）：照旧是没人在修，不是「有人在修」', () => {
+    // 认领账整张删掉之后（#556），「有人在修」这一档没有了：跟进单挂着也照样按没人在修算，
+    // 从提醒报出来的那一刻算起——要是谁把认领那一档接回来，这条会红。
     const h = alertHandling(
-      facts({ alert: alert({ taskId: 't1' }), work: { ...work, source: 'task' }, claim: engineClaim }),
+      facts({ alert: alert({ taskId: 't1' }), work: { ...work, source: 'task' } }),
       null,
       at(47),
     );
-    expect(h.stage).toBe('engine_stuck');
-    expect(h.who).toBe('引擎');
-    expect(h.line).toMatch(/^没人接手：引擎拿着/);
-  });
-
-  it('认领作废了：回到没人在修，从作废那一刻算新的一段', () => {
-    const voided = claim({ state: 'voided', endedAt: at(130), endReason: '过了宽限期（120 分钟）没心跳' });
-    const h = alertHandling(facts({ work, claim: voided }), null, at(140));
-    expect(h).toMatchObject({ stage: 'unclaimed', since: at(130), episode: 'after-aaaaaaaa' });
-    expect(h.line).toMatch(/上一份认领作废了：过了宽限期/);
+    expect(h.stage).toBe('unclaimed');
+    expect(h.who).toBeNull();
+    expect(h.since).toBe(at(0));
+    expect(h.line).toBe('没人在修 · owner/fleet-dao#342 · 47 分钟');
   });
 
   it('PR 开着先于认领；合了看发布；开着的先于合了的（还在往下修）', () => {
-    expect(alertHandling(facts({ work, claim: claim(), prs: [pr()] }), null, at(50))).toMatchObject({
+    expect(alertHandling(facts({ work, prs: [pr()] }), null, at(50))).toMatchObject({
       stage: 'pr_open',
-      who: '本机/工人A',
+      who: 'PR #350',
       since: at(40),
       stageRef: 'pr_open-350',
     });
@@ -279,7 +235,7 @@ describe('谁在处理、到哪一步了（读时现算）', () => {
       expiredAt: null,
       expiredBy: null,
     };
-    expect(alertHandling(facts({ silences: [s], claim: claim(), work }), null, at(30))).toMatchObject({
+    expect(alertHandling(facts({ silences: [s], work }), null, at(30))).toMatchObject({
       stage: 'silenced',
       who: '本机/帅位',
     });

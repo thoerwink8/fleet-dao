@@ -216,7 +216,7 @@ export interface GitHub {
   }): Promise<{ number: number; title: string; body: string; state: 'open' | 'closed' }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
-  /** 「认领对得上」这一侧（#348，「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言。 */
+  /** 引擎的通用 GitHub 读写口（「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言（名字沿用 #348 的「claims」）。 */
   claims: ClaimsGitHub;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
   selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;

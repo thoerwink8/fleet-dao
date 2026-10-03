@@ -700,8 +700,6 @@ export const ALERT_STAGES = [
   'silenced',
   'waiting_founder',
   'unclaimed',
-  'engine_stuck',
-  'claimed',
   'pr_open',
   'merged',
   'deployed',
@@ -716,7 +714,7 @@ export const AlertHandlingSchema = z.object({
   stageText: z.string(),
   /** 进这个阶段的时刻：「多久了」从它算。 */
   since: Time,
-  /** 谁在处理：机器/工人、PR #号、建静默的人、创始人；没人是空。 */
+  /** 谁在处理：PR #号、建静默的人、创始人；没人是空（认领账 2026-10-03 起整张删掉，不再有「机器/工人」）。 */
   who: z.string().optional(),
   /** 跟进单：提醒挂的任务的单，或者 alert_work 表里挂的单（原来「提醒派单」自动开、`alert claim` 手动挂，#445 起这两条写路都删了，只留历史挂的）。 */
   work: z.object({ repo: AlertRepoSchema, issueNumber: z.number().int().positive() }).optional(),
@@ -733,7 +731,7 @@ export const AlertHandlingSchema = z.object({
   deploy: z
     .object({ state: z.enum(['deployed', 'not_yet', 'unknown']), why: z.string().optional() })
     .optional(),
-  /** 给人看的一行：「本机/工人A 在处理 · owner/仓#342 · PR #350 开着 · 35 分钟」。 */
+  /** 给人看的一行：「PR #350 在处理 · owner/仓#342 · PR #350 开着 · 35 分钟」。 */
   line: z.string(),
   /** 没查成的，一条一句。 */
   problems: z.array(z.string()),

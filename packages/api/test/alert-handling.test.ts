@@ -1,6 +1,6 @@
 // 驾驶舱提醒列表的「谁在处理 · 链接 · 多久了」（design 15.3）：读的时候从认领、PR 镜像、发布记录现算（core 的 alertHandling），
 // 没接上、读不到照实写 handlingProblem，不拿「没人在修」顶。拼事实（toAlertWorkFacts）和发布记录（deployFacts）也在这里验。
-import { issueClaims, linkAlertWork, pullRequests, upsertAlert } from '@fleet-dao/db';
+import { linkAlertWork, pullRequests, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { NotificationsResponse } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -82,22 +82,6 @@ describe('驾驶舱提醒列表：谁在处理', () => {
       mode: 'replace',
       audit: { actorKind: 'ai', actorId: '本机/a1', via: 'engine' },
     });
-    await t.db.insert(issueClaims).values({
-      repoId,
-      issueNumber: 360,
-      claimId: '11111111-2222-4333-8444-555555555555',
-      ownerKind: 'worker',
-      ownerMachine: '本机',
-      ownerLabel: '工人A',
-      seatScope: 'main',
-      seatTerm: 1,
-      state: 'doing',
-      graceMinutes: 120,
-      claimedAt: new Date(Date.now() - 5 * 60_000),
-      heartbeatAt: new Date(),
-      updatedAt: new Date(),
-      note: '查备份盘',
-    });
     const fixed = await upsertAlert(t.db, {
       dedupeKey: 'routing:all-open:execute',
       level: 'alert',
@@ -121,14 +105,8 @@ describe('驾驶舱提醒列表：谁在处理', () => {
     expect(list.handlingProblem).toBeUndefined();
     const by = new Map(list.items.map((n) => [n.id, n.handling]));
     expect(by.get(unclaimed.id)).toMatchObject({ stage: 'unclaimed', stageText: '没人在修' });
-    expect(by.get(claimed.id)).toMatchObject({
-      stage: 'claimed',
-      who: '本机/工人A',
-      work: { repo: { owner: 'example', name: 'canary' }, issueNumber: 360 },
-    });
-    expect(by.get(claimed.id)?.line).toMatch(
-      /^本机\/工人A 在处理 · example\/canary#360 · 查备份盘 · \d+ 分钟$/,
-    );
+    // 认领账 2026-10-03 起整张删了（#556）：跟进单上没有认领，就读不出「有人在修」，剩下的按没人在修判。
+    expect(by.get(claimed.id)).toMatchObject({ stage: 'unclaimed' });
     expect(by.get(fixed.id)).toMatchObject({
       stage: 'deployed',
       who: 'PR #370',
