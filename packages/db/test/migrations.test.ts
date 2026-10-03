@@ -614,6 +614,56 @@ describe('0013：会话记缓存读写 token（只加列，#216）', () => {
   );
 });
 
+describe('0025：路由两层（只加表、加一条唯一约束，#574）', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag.startsWith('0025_'));
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '旧库升级：路由、旧的阶段顺序一行不丢；新表是空的；新表的外键能指到路由（复合唯一约束在外键之前建好）',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'relay', 'opus', 'claude-code');
+        insert into stage_policies (stage) values ('execute');
+        insert into stage_policy_routes (stage, route_id, position, enabled) values ('execute', 'r1', 0, true);
+      `);
+        await runMigration(pg, entries[target]?.tag ?? '');
+
+        expect((await pg.query('select id from routes')).rows).toEqual([{ id: 'r1' }]);
+        expect((await pg.query('select route_id from stage_policy_routes')).rows).toEqual([
+          { route_id: 'r1' },
+        ]);
+        expect((await pg.query('select count(*)::int as n from routing_catalog')).rows).toEqual([{ n: 0 }]);
+        expect((await pg.query('select count(*)::int as n from routing_purpose_models')).rows).toEqual([
+          { n: 0 },
+        ]);
+        await pg.exec(
+          `insert into routing_catalog (model_id, route_id, position, enabled) values ('opus', 'r1', 0, true)`,
+        );
+        await expect(
+          pg.exec(
+            `insert into routing_catalog (model_id, route_id, position, enabled) values ('opus', 'nope', 1, true)`,
+          ),
+        ).rejects.toThrow(/routing_catalog_route_of_model_fk/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '两份测试库互相看不见对方的数据',
