@@ -216,6 +216,12 @@ const alert = (
 /** 直接改库（引擎包不直接依赖 drizzle）：时刻一律 ISO 字符串再 ::timestamptz（生产驱动不收 Date 参数）。 */
 const sql = (text: string, params: unknown[] = []) => t.client.query(text, params);
 
+/** world() 的额度读数停在固定的假时刻；用真钟的用例要先把读数推到此刻，免得额度核对（#76）把它们当过期报出来。 */
+async function freshenQuota() {
+  await sql('update pools set last_read_ok_at = now()');
+  await sql('update quota_windows set read_at = now()');
+}
+
 /** 把一条提醒的建立、更新时刻挪到 at（造「很久以前报的」）。 */
 async function backdate(dedupeKey: string, at: Date, updatedAt = at) {
   await sql(
@@ -1086,8 +1092,25 @@ describe('核对接到真库', { timeout: 60_000 }, () => {
     expect(again.why).toContain('acme/widgets：列合并的 PR 失败：403');
   });
 
+  it('额度读数超过 30 分钟的池（有路由在用）报 reconcile:quota 写明哪个池；读新了同一轮撤（#76）', async () => {
+    await world(t.db); // 额度读数停在假的固定时刻，对真钟早就过期
+    probeDir();
+    const first = await runHourlyReconcileJob(deps());
+    const row = await alertByKey(t.db, 'reconcile:quota:claude-solo');
+    expect(row).toMatchObject({ level: 'alert', resolvedAt: null });
+    expect(row?.body).toContain('claude-solo');
+    expect(first.found).toBeGreaterThanOrEqual(3);
+
+    await freshenQuota();
+    await runHourlyReconcileJob(deps());
+    expect(await alertByKey(t.db, 'reconcile:quota:claude-solo')).toMatchObject({
+      resolvedBy: RECONCILE_ACTOR,
+    });
+  });
+
   it('【故意造出的失败】合了的 PR 对上的单：会话没结局、单没记成做完，报 reconcile:ledger 写明缺什么；别的分支上的会话不算；补齐了撤掉', async () => {
     await world(t.db);
+    await freshenQuota();
     probeDir();
     const { repo, task } = await work('merging');
     const merged = new Date(Date.now() - 2 * HOUR);

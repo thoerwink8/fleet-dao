@@ -234,6 +234,16 @@ describe('额度写入与额度表', () => {
     ]);
   });
 
+  it('routeCount 数每个池上挂的路由；没路由的池是 0', async () => {
+    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'a-k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    const table = await quotaTable(t.db, { now: NOW });
+    expect(table.map((p) => [p.poolId, p.routeCount])).toEqual([
+      ['relay-a', 2],
+      ['relay-b', 0],
+    ]);
+  });
+
   it('每行写明实读还是估算、读法、单位、什么时候读的；最近一次读成超过 30 分钟，池和窗口都标出来', async () => {
     await save(
       readOk('relay-b', ago(3 * HOUR), [

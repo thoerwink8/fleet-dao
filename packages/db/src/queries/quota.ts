@@ -290,6 +290,8 @@ export interface QuotaTablePool {
   inFlight: number;
   expiresAt: Date | null;
   scopeModels: Record<string, ScopeMembership> | null;
+  /** 挂在这个池上的路由条数；0 = 没有路由在用它（每小时对账不查它的读数新不新鲜）。 */
+  routeCount: number;
   /** 最近一次完整读成的时刻。 */
   lastReadOkAt: Date | null;
   /** 上游数据本身的时刻（还在报的窗口里最新的读数时刻）。 */
@@ -319,6 +321,14 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
   const windowRows = await db.select().from(quotaWindows);
   const inFlight = await inFlightByPool(db);
   const dataTimes = poolDataTimes(windowRows);
+  const routeCounts = new Map(
+    (
+      await db
+        .select({ poolId: routes.poolId, n: sql<number>`count(*)::int` })
+        .from(routes)
+        .groupBy(routes.poolId)
+    ).map((r) => [r.poolId, r.n]),
+  );
 
   const byPool = new Map<string, QuotaTableWindow[]>();
   for (const w of windowRows) {
@@ -359,6 +369,7 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
       channelEnabled: channel.enabled,
       maxConcurrency: pool.maxConcurrency,
       inFlight: inFlight.get(pool.id) ?? 0,
+      routeCount: routeCounts.get(pool.id) ?? 0,
       expiresAt: pool.expiresAt,
       scopeModels: pool.scopeModels,
       ...times,

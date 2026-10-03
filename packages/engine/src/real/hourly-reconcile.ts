@@ -19,6 +19,7 @@ import {
   mergedPrLedgers,
   openSessionTrees,
   prHeadsOfBranch,
+  quotaTable,
   resolveAlertWithReason,
   startScheduleRun,
   subtaskTreeRefs,
@@ -265,6 +266,7 @@ export function hourlyReconcileJob(
       taskState: (taskId) => taskStateOf(w.db, taskId),
       repos: managedRepos,
       auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
+      quotaPools: (now) => quotaTable(w.db, { now }),
       ledgers: (input) => mergedPrLedgers(w.db, input),
       async approval(id) {
         const a = await getApproval(w.db, id);
