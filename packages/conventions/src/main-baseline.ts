@@ -7,6 +7,9 @@
 //   全跑并明确报警，不许拿空当「上次绿就是 HEAD」——那等于跳过整段改动（底线第三条）。
 // - 状态不自己存：GitHub 的运行记录就是唯一事实（和 deploy/france/auto-release/lib.mjs 的 ciVerdict 读同一份）。
 //   自己再存一份（库、git 引用、文件）就会漂移。
+// - 查询里的 `status=success` 是合法的：GitHub 的 status 参数除了 queued/in_progress/completed，也收 success、failure、
+//   cancelled 这些结论值（2026-10-03 对本仓真接口实测：total_count 433，头一条就是主线上 conclusion=success 的 ci.yml 运行）。
+//   不要改成 completed 再过滤——那样会把近 50 条都占满失败和取消的轮次、找不到绿的。本地仍再核一遍 conclusion。
 // - 只往回看这么多轮；一轮都没有（新仓、刚换工作流名）返回 null，由调用方退回全跑。
 import type { GhApi } from './gh-api.ts';
 
