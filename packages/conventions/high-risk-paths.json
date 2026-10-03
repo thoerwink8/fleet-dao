@@ -126,7 +126,7 @@
       "path": ".github/workflows/ci.yml",
       "kind": "碰安全",
       "mode": "workflow",
-      "why": "CI 本身：合并闸把改动前后两份全文各解析一遍做结构比对（packages/conventions/src/workflow-structure.ts）——权限、触发、并发、环境、job 的增删、每个 job 的 needs/if/runs-on/权限/服务、步骤用到的 action 和它的 if/continue-on-error/shell/检出方式、汇总判红的脚本、跑检查的命令还在不在、往步骤输出和环境里写东西有没有变多，碰到任何一样才要第二意见；改分台、并行、超时、缓存、步骤顺序、注释不用审（创始人 2026-10-03 拍「1+2+3」：按行匹配每轮都能被挑出新漏洞、没有终点）。比这个目录那条更具体，所以对它按这条判"
+      "why": "CI 本身：合并闸把改动前后两份全文各解析一遍做结构比对（packages/conventions/src/workflow-structure.ts）——权限、触发、并发、环境、job 的增删、每个 job 的 needs/if/runs-on/权限/服务、矩阵、步骤用到的 action 和它的整个 with/if/continue-on-error/shell、汇总判红的脚本、跑检查的命令还在不在、往步骤输出和环境里写东西或吞掉失败的写法有没有变多，碰到任何一样才要第二意见；超时、并行上限、步骤顺序、名字、注释、加一步普通命令不用审（创始人 2026-10-03 拍「1+2+3」：按行匹配每轮都能被挑出新漏洞、没有终点）。比这个目录那条更具体，所以对它按这条判"
     },
     {
       "path": "packages/conventions/high-risk-paths.json",

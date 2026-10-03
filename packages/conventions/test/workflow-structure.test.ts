@@ -52,10 +52,10 @@ describe('不碰信任的改动：放过（这是提速改动的常态）', () =
     expect(await workflowDiff(BASE, BASE)).toEqual([]);
   });
 
-  it('超时、分台（matrix）、步骤名字、注释、键的先后、加一步普通命令：都是空', async () => {
+  it('超时、fail-fast、步骤名字、注释、键的先后、加一步普通命令：都是空', async () => {
     for (const after of [
       swap('timeout-minutes: 10', 'timeout-minutes: 15'),
-      swap('shard: [1, 2, 3]', 'shard: [1, 2, 3, 4, 5, 6]'),
+      swap('      matrix:', '      fail-fast: false\n      matrix:'),
       swap('- name: 测试', '- name: 跑测试'),
       swap('name: ci', 'name: ci\n# 只加一行注释'),
       swap(
@@ -150,6 +150,7 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
       'if',
     ],
     ['检查命令换成别的', swap('run: pnpm exec vitest run', 'run: echo 跳过'), '检查命令「vitest」'],
+    ['矩阵改了（跑哪几台、测什么）', swap('shard: [1, 2, 3]', 'shard: [1]'), '矩阵'],
     ['检查命令吞掉失败', swap('run: pnpm exec vitest run', 'run: pnpm exec vitest run || true'), '|| true'],
     [
       '检查命令前关掉出错即停',

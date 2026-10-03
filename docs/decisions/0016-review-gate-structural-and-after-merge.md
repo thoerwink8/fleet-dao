@@ -22,7 +22,7 @@
 
 ## 定了什么
 
-1. **`ci.yml` 换一道确定的闸**：合并闸把改动前后两份全文各解析一遍，只比固定的几样（权限、触发、并发、环境、job 增删、每个 job 的 needs/if/runs-on/权限/服务、步骤用到的 action 和它的 if/continue-on-error/shell/检出方式、汇总判红的脚本、跑检查的命令还在不在、往步骤输出和环境里写东西有没有变多）。碰到才要第二意见；同样的输入永远同样的结论。读不懂、读不到算碰了。判法 `packages/conventions/src/workflow-structure.ts`。
+1. **`ci.yml` 换一道确定的闸**：合并闸把改动前后两份全文各解析一遍，只比固定的几样（权限、触发、并发、环境、job 增删、每个 job 的 needs/if/runs-on/权限/服务、矩阵、步骤用到的 action 和它的整个 with/if/continue-on-error/shell、汇总判红的脚本、跑检查的命令还在不在、往步骤输出和环境里写东西或吞掉失败的写法有没有变多）。碰到才要第二意见；同样的输入永远同样的结论。读不懂、读不到算碰了。判法 `packages/conventions/src/workflow-structure.ts`。
 2. **审的人只管现实里会出的事，轮数上限做进脚本**：每条必须改带【现实】/【构造】和类别标签；【构造】的不挡；第 3 轮起只有【现实】且碰安全或改数据库的挡，其余转合并后。判定在脚本里，不信审的人最后那句结论。
 3. **CI 判法那几份先合后审**（`ci-plan.ts`、`test-split.ts`、`ci-box.ts`、`ci-cache.ts`、`repo.ts` 和入口）：清单标 `review: after-merge`，合并闸不等第二意见，结论里点名「合并后补审」；合并后 `second-opinion.mjs` 补审，没过就开修复 PR 或 revert。只许标「改坏了一条 revert 就退回、不泄密不提权」的这类；密钥、登录、卫生检查、合并闸自己、对公网开口子的配置照旧先审后合（泄露了回退不了）。
 

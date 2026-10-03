@@ -7,7 +7,8 @@
 //   权限 / 环境 / 容器 / 服务、每一步用到的 action 和它的整个 with（检出的 ref/path、缓存的 key/path）、if / continue-on-error /
 //   shell / working-directory、
 //   「汇总」那些步骤的整段脚本、每个 job 里跑检查的命令还在不在、几个危险词出现的次数有没有变多。
-//   步骤顺序、超时、名字、matrix（strategy）、注释、某一步里别的命令怎么写，都不比——这些是提速改动的常态。
+//   矩阵（strategy.matrix：跑哪几台、各测什么）也比。步骤顺序、超时、名字、fail-fast/max-parallel、注释、某一步里
+//   别的命令怎么写，都不比——这些是提速改动的常态（分台怎么分在 ci-plan.ts / test-split.ts 里改，那边先合后审）。
 // - 比不了（读不懂、不是对象）一律算「碰了」，由调用方要第二意见；不许当成「没变」。
 // - 加比对项要配一条故意造出失败的测试（改了它必须被抓到）；删比对项等于放松合并闸，走先审后合。
 
@@ -172,6 +173,10 @@ export async function workflowDiff(before: string, after: string): Promise<strin
     for (const k of JOB_KEYS) {
       if (canon(jb[k]) !== canon(ja[k])) out.push(`job ${n} 的 ${k} 变了`);
     }
+    // 矩阵决定这个 job 跑哪几台、各测什么（现在由 changes 算好经 fromJSON 交进来，分台的改动在 ci-plan.ts / test-split.ts
+    // 里做，不在这里）：矩阵写法变了就算碰了；fail-fast、max-parallel 只影响快慢，不比
+    const matrix = (j: Obj) => (isObj(j.strategy) ? j.strategy.matrix : undefined);
+    if (canon(matrix(jb)) !== canon(matrix(ja))) out.push(`job ${n} 的矩阵（strategy.matrix）变了`);
     // 只比带信任相关键的步骤：一步只有 run（加一步、删一步普通命令）不算——删掉的命令里有检查，下面 CHECK_TOKENS 那条会抓到
     const sigs = (steps: unknown) =>
       (Array.isArray(steps) ? steps : [])
