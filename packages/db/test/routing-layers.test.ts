@@ -75,16 +75,70 @@ describe('把默认骨架写进库', () => {
     expect((await t.db.select().from(routingCatalog)).length).toBe(3);
   });
 
-  it('库里已有的不覆盖：驾驶舱改过的顺序、开关留着', async () => {
+  it('库里已有的不覆盖：驾驶舱改过的顺序、开关、思考档位留着', async () => {
     await t.db
       .insert(routingCatalog)
-      .values({ modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false });
-    const report = await applyRoutingDefault(t.db, config());
+      .values({ modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false, effort: 'medium' });
+    const withEffort = config({
+      models: {
+        'opus-4.9': [
+          { routeId: 'a-opus', enabled: true, effort: 'max' },
+          { routeId: 'b-opus', enabled: true, effort: 'xhigh' },
+        ],
+        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+      },
+    });
+    const report = await applyRoutingDefault(t.db, withEffort);
     expect(report.modelsKept).toEqual(['opus-4.9']);
     const rows = await t.db.select().from(routingCatalog);
     expect(rows.filter((r) => r.modelId === 'opus-4.9')).toEqual([
-      { modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false },
+      { modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false, effort: 'medium' },
     ]);
+  });
+
+  it('骨架里写的思考档位：模型第一次装进库时跟着写进去；没写的是空（起会话用 high）', async () => {
+    const withEffort = config({
+      models: {
+        'opus-4.9': [
+          { routeId: 'a-opus', enabled: true, effort: 'max' },
+          { routeId: 'b-opus', enabled: true },
+        ],
+        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true, effort: 'low' }],
+      },
+    });
+    await applyRoutingDefault(t.db, withEffort);
+    const rows = await t.db.select().from(routingCatalog);
+    expect(Object.fromEntries(rows.map((r) => [r.routeId, r.effort]))).toEqual({
+      'a-opus': 'max',
+      'b-opus': null,
+      'a-fable': 'low',
+    });
+  });
+
+  it('【故意造出的失败】骨架里的思考档位这条路由的执行方式不认：点名哪条、为什么，一行不写', async () => {
+    await addRoute(t.db, {
+      id: 'g-grok',
+      poolId: 'relay-a',
+      modelId: 'opus-4.9',
+      hostId: 'grok',
+      upstreamModel: 'grok-4.7',
+    });
+    const bad = config({
+      models: {
+        'opus-4.9': [
+          { routeId: 'a-opus', enabled: true },
+          { routeId: 'g-grok', enabled: true, effort: 'max' },
+        ],
+        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+      },
+    });
+    const err = await applyRoutingDefault(t.db, bad).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoutingConfigError);
+    expect((err as RoutingConfigError).problems.join('\n')).toContain(
+      '路由 g-grok 的思考档位配不了：grok 不支持思考档位（effort）max（只认 low / medium / high / xhigh）',
+    );
+    expect(await t.db.select().from(routingPurposeModels)).toEqual([]);
+    expect(await t.db.select().from(routingCatalog)).toEqual([]);
   });
 
   it('【故意造出的失败】引用对不上：模型、路由库里没有、路由不属于那个模型；一行都不写', async () => {

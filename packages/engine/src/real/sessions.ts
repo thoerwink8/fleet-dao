@@ -1517,6 +1517,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
       cgroup,
       model: route.upstreamModel ?? route.modelId,
+      // 驾驶舱给这条路由配的思考档位（没配用 high）；驱动起会话时照它判、照它传（hosts.ts 的 applySessionEffort）
+      ...(route.effort === null ? {} : { effort: route.effort }),
       session,
       // 会话用户读不到引擎的配置和机器人凭据（design 第十四节），无头会话没人批权限：放开（驱动按执行方式给参数）。
       purpose: 'work',

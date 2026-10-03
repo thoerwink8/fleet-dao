@@ -38,6 +38,7 @@ const routeFacts = (routeId: string, over: Partial<RouteLaunchFacts> = {}): Rout
   upstreamModel: null,
   runAsUser: USER,
   orgKind: null,
+  effort: null,
   ...over,
 });
 

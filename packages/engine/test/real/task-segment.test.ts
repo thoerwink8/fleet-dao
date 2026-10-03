@@ -34,6 +34,7 @@ const route = (over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   upstreamModel: null,
   runAsUser: USER,
   orgKind: null,
+  effort: null,
   ...over,
 });
 
