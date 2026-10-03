@@ -10,6 +10,8 @@
 // - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed」（#554-1 的枚举），
 //   还在跑的为空；结束了（ended_at 非空）就必须有 outcome，反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
 // - retryOf 自引用，指到不存在的行要拒收（外键）。
+// - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话
+//   （db 的 session-org.ts）靠 route_id 连到池，没写 route_id 的行切号看不见。
 // 表名就叫 runs（和 Fusion 的 sessionRuns / verifyRounds 分开：Fusion 那两张老表本切片不动）。
 import { sql } from 'drizzle-orm';
 import {
@@ -24,6 +26,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { routes } from './catalog.ts';
 import { tasks } from './work.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
@@ -57,6 +60,11 @@ export const runs = pgTable(
     model: text('model').notNull(),
     /** 挑好的渠道（poolId / routeId 的「渠道」那半截）；读不到不给。 */
     channel: text('channel'),
+    /**
+     * 跑在哪条路由上（选路给的 routeId）：切号靠它认出这一段跑在哪个池、那个池挂不挂组织（#157）。老行、不经选路起的为空；
+     * 指到不存在的路由拒收（外键），免得切号连不到池、把在跑的会话漏数。
+     */
+    routeId: text('route_id').references(() => routes.id),
     /** 起止；ended_at 还在跑的为空（和 outcome 的空一一对应，见约束）。 */
     startedAt: timestamp('started_at', tz).notNull(),
     endedAt: timestamp('ended_at', tz),

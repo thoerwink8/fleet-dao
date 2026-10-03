@@ -24,7 +24,8 @@
 //    把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起；没留下退出码的判 exit_lost（EN1 续会话）。
 //    引擎正常停机先排空（drain.ts）：不起新会话（startSession 抛 ENGINE_STOPPING）；脱开跑的会话不等、不停，只等接管道的。
 //    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list，能接回的留着、其余逐个 stop，再清上一轮
-//    会话的临时目录、收发目录）。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收（每小时对账还没接这一项：#247）。
+//    会话的临时目录、收发目录，把 runs 里还开着的一次性会话那几行收成没跑完）。工作流被强行终止留下的会话，现在要等工人下一次
+//    起来时这一步才收（每小时对账还没接这一项：#247）。
 
 import type { RiskyFile } from '@fleet-dao/conventions';
 import type { Brief, Rebuttal, VerifyReport } from '@fleet-dao/core';

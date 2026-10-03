@@ -5,7 +5,7 @@ import { type ModelRef, type OrgKind, windowAppliesTo } from '@fleet-dao/shared'
 import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
-import { auditLog, models, pools, quotaWindows, routes, sessionRuns } from '../schema/index.ts';
+import { auditLog, models, pools, quotaWindows, routes, runs, sessionRuns } from '../schema/index.ts';
 import { type WindowState, windowFull, windowState } from './quota.ts';
 
 /**
@@ -38,32 +38,60 @@ export interface OrgPoolFacts {
 export interface OpenOrgRun {
   runId: string;
   poolId: string;
+  /** 哪一种：session = Fusion 的会话（session_runs）；oneShot = 三段的一次性会话（runs，开跑才写那一行）。 */
+  kind: 'session' | 'oneShot';
+  /** 一次性会话没有排队这一步，就是开跑时刻。 */
   queuedAt: Date;
-  /** 进程起来了（登记了开工）；null = 还在起（建树、准备），或起之前就没了下文。 */
+  /** 进程起来了（登记了开工）；null = 还在起（建树、准备），或起之前就没了下文。一次性会话总有。 */
   startedAt: Date | null;
 }
 
 export interface SessionOrgFacts {
   /** 带组织类型的池，每个一行，按 id 排。 */
   pools: OrgPoolFacts[];
-  /** 这些池上还没结束的会话（排着的、在跑的都算）：切号会让它们当场断。 */
+  /** 这些池上还没结束的会话（排着的、在跑的都算，两种会话都数）：切号会让它们当场断。 */
   busy: number;
+  /** 其中三段的一次性会话有几个（切号停不停得下它们，引擎那边判）。 */
+  busyOneShot: number;
 }
 
-/** 带组织类型的池上还没结束的会话，按排队时刻排（切号前停会话时一轮轮看还剩哪些，#59）。 */
+/**
+ * 带组织类型的池上还没结束的会话，按排队时刻排（切号前停会话时一轮轮看还剩哪些，#59）。两种会话都算：Fusion 的会话
+ * （session_runs）和三段的一次性会话（runs，#157——开跑就留一行没结束的，靠 route_id 连到池；没写 route_id 的连不上，不算）。
+ */
 export async function openOrgRuns(db: Db): Promise<OpenOrgRun[]> {
-  return db
-    .select({
-      runId: sessionRuns.id,
-      poolId: routes.poolId,
-      queuedAt: sessionRuns.queuedAt,
-      startedAt: sessionRuns.startedAt,
-    })
-    .from(sessionRuns)
-    .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
-    .innerJoin(pools, eq(pools.id, routes.poolId))
-    .where(and(isNull(sessionRuns.endedAt), isNotNull(pools.orgKind)))
-    .orderBy(asc(sessionRuns.queuedAt), asc(sessionRuns.id));
+  const [sessions, oneShots] = await Promise.all([
+    db
+      .select({
+        runId: sessionRuns.id,
+        poolId: routes.poolId,
+        queuedAt: sessionRuns.queuedAt,
+        startedAt: sessionRuns.startedAt,
+      })
+      .from(sessionRuns)
+      .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
+      .innerJoin(pools, eq(pools.id, routes.poolId))
+      .where(and(isNull(sessionRuns.endedAt), isNotNull(pools.orgKind))),
+    db
+      .select({ runId: runs.id, poolId: routes.poolId, startedAt: runs.startedAt })
+      .from(runs)
+      .innerJoin(routes, eq(routes.id, runs.routeId))
+      .innerJoin(pools, eq(pools.id, routes.poolId))
+      .where(and(isNull(runs.endedAt), isNotNull(pools.orgKind))),
+  ]);
+  return [
+    ...sessions.map((s) => ({ ...s, kind: 'session' as const })),
+    ...oneShots.map((r) => ({
+      runId: r.runId,
+      poolId: r.poolId,
+      kind: 'oneShot' as const,
+      queuedAt: r.startedAt,
+      startedAt: r.startedAt,
+    })),
+  ].sort(
+    (a, b) =>
+      a.queuedAt.getTime() - b.queuedAt.getTime() || (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0),
+  );
 }
 
 export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<SessionOrgFacts> {
@@ -120,7 +148,11 @@ export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<S
     }
     out.push({ poolId: pool.id, orgKind: pool.orgKind, windows });
   }
-  return { pools: out, busy: open.length };
+  return {
+    pools: out,
+    busy: open.length,
+    busyOneShot: open.filter((r) => r.kind === 'oneShot').length,
+  };
 }
 
 export interface EngineAudit {

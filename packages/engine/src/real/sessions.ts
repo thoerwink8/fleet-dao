@@ -61,6 +61,7 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import { PLAN_DOC } from '@fleet-dao/conventions';
 import {
   appendProgressEvents,
+  closeOpenRuns,
   type Db,
   finishSessionRun,
   getSessionRun,
@@ -193,6 +194,9 @@ const orgSwitchFailure = (why: string) => ({ code: ORG_SWITCH_CODE, message: why
 export const ENGINE_STOP_CODE = 'engine_stop';
 /** 引擎在排空、这次没起会话（startSession 拒了）：失败分流 ES1 认它——不记账，回去选路（选路这时回「过一会儿再选」）。 */
 export const ENGINE_STOPPING_CODE = 'ENGINE_STOPPING';
+/** 工人起来时收掉上一轮引擎留下、还开着的 runs 行（#157）写的原因。 */
+export const ORPHAN_RUN_REASON =
+  '引擎重启时这一段还没收场：一次性会话不脱开引擎进程跑，上一轮引擎一退它就断了（新引擎起来时收掉了它的 scope），按没跑完收掉';
 
 /** 插头默认等第一帧的时限（adapters 的 DEFAULT_PROCESS_LIMITS.startupMs）。 */
 export const STARTUP_BASE_MS = 180_000;
@@ -385,7 +389,10 @@ export type SessionPorts = {
   awaitSession(input: AwaitSessionInput, ctx: PortContext): Promise<SessionEnd>;
   stopSession(input: StopSessionInput, ctx: PortContext): Promise<void>;
 } & {
-  /** 工人起来接活之前：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，回收了几个会话。 */
+  /**
+   * 工人起来接活之前（只在这时调）：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，
+   * runs 里还开着的一次性会话那几行收成没跑完（#157）；回收了几个会话。
+   */
   reapOrphanSessions(): Promise<number>;
   /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
   orgSwitch: OrgSwitchSessions;
@@ -2439,6 +2446,12 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const swept = await sweepTmp(new Set(kept));
     if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
     await sweepIo(new Set(kept));
+    // 三段的一次性会话（runs 表）不脱开引擎进程跑、没有能接回的：上一轮引擎一退它们就断了（scope 上面收掉了），库里还开着的
+    // 那几行收成没跑完——不收，切号就一直以为它们在跑、一直等（#157）。所以这一步只能在工人起来、接活之前跑
+    const closed = await closeOpenRuns(db, { endedAt: clock(), reason: ORPHAN_RUN_REASON });
+    if (closed.length > 0) {
+      log(`上一轮引擎起的一次性会话没收场的 ${closed.length} 个，库里那几行收成没跑完：${closed.join('、')}`);
+    }
     return reaped;
   }
 

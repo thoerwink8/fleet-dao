@@ -1,13 +1,32 @@
-// 三段（对题 / 动手 / 验收）跑完记一笔 runs（#556-6）：和 packages/engine/src/runner/not-wired.ts
+// 三段（对题 / 动手 / 验收）每跑一次记一笔 runs（#556-6）：和 packages/engine/src/runner/not-wired.ts
 // 同一个合约（RunsWriter），装配处起 runOneShot 时把 notWiredRuns() 换成它。
+// 开跑先写一行没结束的（start），收场按同一个编号整行补完（record）：切号数带组织类型的池上还没结束的会话靠开跑那一行（#157）。
 import type { Db } from '@fleet-dao/db';
 import { startRun as startRunDb } from '@fleet-dao/db';
-import type { RunRecord, RunsWriter } from '../runner/not-wired.ts';
+import type { RunRecord, RunStart, RunsWriter } from '../runner/not-wired.ts';
 
 export type { RunsWriter };
 
 export function realRuns(deps: { db: Db }): RunsWriter {
   return {
+    async start(run: RunStart) {
+      if (run.runId === '') throw new RunInputError('runId 是空的');
+      if (!run.startedAt) throw new RunInputError('startedAt 是空的');
+      try {
+        await startRunDb(deps.db, {
+          id: run.runId,
+          segment: run.segment,
+          model: run.model,
+          channel: run.channel,
+          routeId: run.routeId,
+          issueNumber: run.issueNumber,
+          startedAt: new Date(run.startedAt),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new RunInputError(`runs 开跑那一行写入失败：${message}`, { cause: error });
+      }
+    },
     async record(run: RunRecord) {
       if (run.runId === '') throw new RunInputError('runId 是空的');
       if (!run.startedAt) throw new RunInputError('startedAt 是空的');
@@ -19,6 +38,7 @@ export function realRuns(deps: { db: Db }): RunsWriter {
           segment: run.segment,
           model: run.model,
           channel: run.channel,
+          routeId: run.routeId,
           issueNumber: run.issueNumber,
           startedAt: new Date(run.startedAt),
           endedAt: new Date(run.endedAt),

@@ -9,8 +9,10 @@ import type { OrgPlanView } from '../routing/index.ts';
 export interface OrgSwitchFactsNow {
   /** 按组织类型合起来的池（拼车、独享）：窗口、整池暂停着没有。 */
   pools: Partial<Record<OrgKind, OrgPool>>;
-  /** 这些池上还没结束的会话数。 */
+  /** 这些池上还没结束的会话数（Fusion 的会话、三段的一次性会话都算）。 */
   busy: number;
+  /** 其中三段的一次性会话有几个：它们还停不下（#59 之前），有就得等它们跑完再切。 */
+  busyOneShot: number;
   poolIds: Set<string>;
 }
 
@@ -28,7 +30,12 @@ export async function loadOrgSwitchFacts(
       held: (seen?.held ?? false) || options.held.has(p.poolId),
     };
   }
-  return { pools, busy: f.busy, poolIds: new Set(f.pools.map((p) => p.poolId)) };
+  return {
+    pools,
+    busy: f.busy,
+    busyOneShot: f.busyOneShot,
+    poolIds: new Set(f.pools.map((p) => p.poolId)),
+  };
 }
 
 /**
