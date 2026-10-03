@@ -48,6 +48,7 @@ interface HookLib {
     now?: number;
   }): string[];
   checkTemporary(cwd: string, git: Git, now?: number): string[];
+  checkDirectives(cwd: string, git: Git): string[];
   sweepWorktrees(cwd: string, git: Git, now?: number): string[];
   beijingToday(now?: number): string;
   render(lines: string[]): string;
@@ -120,6 +121,20 @@ function fakeSync(result: Partial<Result> = {}) {
 const git = hook.gitRunner();
 /** 每条都要起十几次 git（建仓、推、取），Windows 上一条要几秒 */
 const SLOW = { timeout: 120_000 };
+
+/** 一个只有本地提交的仓：files 全部提交（untracked 里的不提交） */
+function repo(files: Record<string, string>, untracked: Record<string, string> = {}) {
+  const dir = temp('tmp-repo');
+  g(dir, 'init', '-q', '-b', 'main');
+  for (const [name, text] of Object.entries({ 'README.md': '# 仓\n', ...files })) {
+    mkdirSync(join(dir, name, '..'), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  g(dir, 'add', '-A');
+  g(dir, 'commit', '-q', '-m', 'init');
+  for (const [name, text] of Object.entries(untracked)) writeFileSync(join(dir, name), text);
+  return dir;
+}
 
 describe('会话所在的仓（原来的开场核规矩）', SLOW, () => {
   it('不是 git 仓：不出声', () => {
@@ -409,20 +424,6 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     '| 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |\n|---|---|---|---|---|\n';
   /** 北京时间 2026-10-06 上午十点 */
   const NOW = Date.parse('2026-10-06T02:00:00Z');
-
-  /** 一个只有本地提交的仓：files 全部提交（untracked 里的不提交） */
-  function repo(files: Record<string, string>, untracked: Record<string, string> = {}) {
-    const dir = temp('tmp-adj');
-    g(dir, 'init', '-q', '-b', 'main');
-    for (const [name, text] of Object.entries({ 'README.md': '# 仓\n', ...files })) {
-      mkdirSync(join(dir, name, '..'), { recursive: true });
-      writeFileSync(join(dir, name), text);
-    }
-    g(dir, 'add', '-A');
-    g(dir, 'commit', '-q', '-m', 'init');
-    for (const [name, text] of Object.entries(untracked)) writeFileSync(join(dir, name), text);
-    return dir;
-  }
   const plan = (rows: string, before = '') =>
     `# 计划\n\n## 生效中的临时调整\n\n${before}${HEAD}${rows}\n## 版本\n\n- 交付 3\n`;
   const row = (...cells: string[]) => `| ${cells.join(' | ')} |\n`;
@@ -557,6 +558,44 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     const lines = hook.sessionStart({ cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW });
     expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（PROGRESS\.md/);
     expect(lines.at(-1)).toMatch(/^规矩同步/);
+  });
+});
+
+describe('会话所在仓的「创始人引导（待处理）」清单', SLOW, () => {
+  const head = '# 进度\n\n## 创始人引导（待处理）\n\n';
+  const tail = '\n## 别的节\n';
+
+  it('有没处理完的引导：一行报几条，提醒办完标已处理或删掉', () => {
+    const text = `${head}- 04:42 「坏的要删」\n- 05:33 「删库表选 1」\n${tail}`;
+    const dir = repo({ 'docs/PROGRESS.md': text });
+    const lines = hook.checkDirectives(dir, git);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('创始人引导还有 2 条没处理');
+    expect(lines[0]).toContain('坏的要删');
+    expect(lines[0]).toContain('删库表选 1');
+  });
+
+  it('都标了「已处理」：不出声', () => {
+    const text = `${head}- 04:42「坏的要删」已处理\n${tail}`;
+    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git)).toEqual([]);
+  });
+
+  it('没有这一节、不是 git 仓：都不出声', () => {
+    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': '# 进度\n\n## 版本\n' }), git)).toEqual([]);
+  });
+
+  it('【故意造出失败】把待处理那条标成「已处理」之后就不再报——断言它真读了内容，不是恒返回空', () => {
+    const pending = repo({ 'docs/PROGRESS.md': `${head}- 04:42「坏的要删」\n${tail}` });
+    const done = repo({ 'docs/PROGRESS.md': `${head}- 04:42「坏的要删」已处理\n${tail}` });
+    expect(hook.checkDirectives(pending, git)).toHaveLength(1);
+    expect(hook.checkDirectives(done, git)).toEqual([]);
+  });
+
+  it('【故意造出的失败】git 跑不起来：明说没查成，不当成没事', () => {
+    const dead: Git = () => ({ status: 3221225781, stdout: '', stderr: '' });
+    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': head }), dead)[0]).toMatch(
+      /创始人引导待处理清单没查成/,
+    );
   });
 });
 
