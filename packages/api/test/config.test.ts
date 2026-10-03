@@ -184,3 +184,67 @@ describe('配置', () => {
     expect(loadConfig({ FLEET_ENV: 'development', FLEET_DEV_LOGIN: '1' }).devLogin).toBe(true);
   });
 });
+
+describe('接不接飞书登录（FLEET_FEISHU_LOGIN：本机档不接飞书，要明说 off）', () => {
+  const NO_FEISHU: Record<string, string | undefined> = {
+    ...PROD,
+    FEISHU_APP_ID: undefined,
+    FEISHU_APP_SECRET: undefined,
+  };
+
+  it('【故意造出的失败】生产上没写开关、飞书又没配：拒启动，并说清不接的要写 FLEET_FEISHU_LOGIN=off（不默认放行）；写 on、空着跟没写一样', () => {
+    for (const env of [
+      NO_FEISHU,
+      { ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'on' },
+      { ...NO_FEISHU, FLEET_FEISHU_LOGIN: '' },
+    ]) {
+      const text = problems(env).join('\n');
+      expect(text).toContain('缺 FEISHU_APP_ID / FEISHU_APP_SECRET');
+      expect(text).toContain('FLEET_FEISHU_LOGIN=off');
+    }
+  });
+
+  it('明说 off、飞书一对空着：能起，飞书登录是 null（登录只剩账密）', () => {
+    expect(loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off' }).feishu).toBeNull();
+    expect(
+      loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: ' off ', FEISHU_APP_ID: '', FEISHU_APP_SECRET: '' })
+        .feishu,
+    ).toBeNull();
+  });
+
+  it('【故意造出的失败】off 了又配了飞书（哪怕只配一半）：拒启动，接不接说不清', () => {
+    expect(problems({ ...PROD, FLEET_FEISHU_LOGIN: 'off' }).join()).toContain('接不接说不清');
+    expect(problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off', FEISHU_APP_ID: 'cli_x' }).join()).toContain(
+      '接不接说不清',
+    );
+  });
+
+  it('【故意造出的失败】开关写错（OFF、false、0、no）：拒启动，不猜成哪一种', () => {
+    for (const value of ['OFF', 'false', '0', 'no']) {
+      expect(problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: value }).join(), value).toContain(
+        'FLEET_FEISHU_LOGIN 只能是 on 或 off',
+      );
+    }
+  });
+
+  it('照常接飞书（法国）：写 on 或不写、飞书一对齐，飞书登录照常', () => {
+    const pair = { appId: 'cli_x', appSecret: 'y' };
+    expect(loadConfig(PROD).feishu).toEqual(pair);
+    expect(loadConfig({ ...PROD, FLEET_FEISHU_LOGIN: 'on' }).feishu).toEqual(pair);
+  });
+
+  it('仓里登记的期望和这里的判法对得上：本机档是 off（拿它、飞书空着起得来），法国是 on（拿它、飞书空着起不来）', () => {
+    const apiEnvOf = (profile: 'local' | 'france') =>
+      (
+        JSON.parse(
+          readFileSync(new URL(`../../../deploy/${profile}/desired-config.json`, import.meta.url), 'utf8'),
+        ) as { files: { 'api.env': Record<string, { value?: string }> } }
+      ).files['api.env'];
+    const local = apiEnvOf('local').FLEET_FEISHU_LOGIN?.value;
+    const france = apiEnvOf('france').FLEET_FEISHU_LOGIN?.value;
+    expect(local).toBe('off');
+    expect(france).toBe('on');
+    expect(loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: local }).feishu).toBeNull();
+    expect(problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: france }).join()).toContain('缺 FEISHU_APP_ID');
+  });
+});
