@@ -165,16 +165,9 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
   }
 }
 
-/**
- * 一个仓加一张需求。仓的流程配置副本默认刚同步过、测试命令是 pnpm check（起会话前要看副本，real/flow-gate.ts）：
- * testCommand 给 null = 项目没写测试命令；flowSyncedAt 给 null = 从没同步过；flowError = 副本认不出。
- */
-export async function addTask(
-  db: Db,
-  over: { testCommand?: string | null; flowSyncedAt?: Date | null; flowError?: string } = {},
-) {
+/** 一个仓加一张需求。测试命令是 pnpm check（给人看的那一列，派活不认）；testCommand 给 null = 项目没写测试命令。 */
+export async function addTask(db: Db, over: { testCommand?: string | null } = {}) {
   const testCommand = over.testCommand === undefined ? 'pnpm check' : over.testCommand;
-  const syncedAt = over.flowSyncedAt === undefined ? new Date() : over.flowSyncedAt;
   const [repo] = await db
     .insert(repos)
     .values({
@@ -182,16 +175,6 @@ export async function addTask(
       name: `widgets-${randomUUID().slice(0, 6)}`,
       // 给人看的那一列：派活不认它（占位）
       testCommand: testCommand ?? '-',
-      ...(syncedAt
-        ? {
-            flowConfig: { formatVersion: 1, ...(testCommand ? { testCommand } : {}) },
-            flowSource: 'project' as const,
-            flowCommit: 'f'.repeat(40),
-            flowSyncedAt: syncedAt,
-            flowCheckedAt: syncedAt,
-          }
-        : {}),
-      ...(over.flowError ? { flowError: over.flowError } : {}),
     })
     .returning();
   if (!repo) throw new Error('repo 没写进去');

@@ -2,6 +2,15 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-03 午（删库表 PR-1、Fable 永久、引导落盘）
+
+- **已合**：#669（Fable 禁令改永久，`bans.ts` + AGENTS.md + 测试 + `demo-renames.ts`；创始人「目前阶段我不希望用 fable」）。
+- **待点头（改标准，CI 全绿）**：#670（创始人引导必须落盘：通用段加一条 + 开会话钩子 `checkDirectives` + 钉规矩测试）；#668（断链清理，卡第二意见）。
+- **#556-4 删库表，按两个 PR 做**（创始人回「选 1」；顺序硬坑：`deploy/release.sh` 先跑迁移才切版本，库表和代码同批删，上线一刻老代码当场报错）：
+  - **PR-1（做中，分支 `chore/556-drop-dead-code`）**：删代码侧引用——`readAlertWork` 不再读 `issue_claims`、`core/src/seat.ts` 那组无调用方的 `judgeClaimMatch` 等删了、提醒阶段去掉 `claimed`/`engine_stuck`、`claims.ts` 只改过时注释（它是活的，别当残留删）；schema 定义和 `REALTIME_TABLES` 里的 `seat_boards` 此刻**留着**。钉住测试在 `packages/db/test/claim-ledger-gone.test.ts`。
+  - **PR-2（还没开）**：只放迁移（drizzle-kit 生成，别手写），摘 schema 定义 + `REALTIME_TABLES`，**不挂自动合并**，写「人闸：删数据」。PR-1 上线之后才开。
+- **下一步**：PR-1 推完等 CI → PR-2 → AGENTS.md 减脂 ① 档 + 防膨胀 → v3 W4 主线（#632）。
+
 ## 2026-10-03 凌晨（#654 GitHub 瘦身：F2 deploy 切片 + 第二意见不再留会话）
 
 > 无人值守推进（创始人 10-02 夜「大改 github 相关」「一切要为了提速而服务」；10-03 说 deploy 231 秒「还是太久了」、第二意见「我根本不想看见它，并且我希望随时能清理掉」）。**做到哪、下一步、还剩什么没验证**写在下面；接着干的先读这一段。

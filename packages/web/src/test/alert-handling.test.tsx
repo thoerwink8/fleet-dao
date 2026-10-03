@@ -10,14 +10,20 @@ import { renderApp } from './harness';
 afterEach(cleanup);
 
 describe('通知中心：谁在处理', () => {
-  test('有人在修的写谁、跟进单的链接、多久了；没人在修的标出来', async () => {
+  test('PR 开着的写谁、跟进单的链接、多久了；没人在修的标出来', async () => {
     renderApp(<NotificationsPage />, { api: createMockApi({ live: false }) });
     const title = await screen.findByText('#17 子任务 A 停滞 22 分钟');
     const row = title.closest('li');
     if (!row) throw new Error('找不到这条提醒那一行');
     const handling = within(row).getByTestId('alert-handling');
-    expect(within(handling).getByText('有人在修')).toBeTruthy();
-    expect(within(handling).getByText('本机/工人A')).toBeTruthy();
+    expect(within(handling).getByText('PR 开着')).toBeTruthy();
+    // 「PR #16」页面上有两处：谁在处理那一格的文字、PR 的链接——都该在，所以按个数验，不用 getByText（命中多个会抛）。
+    expect(within(handling).getAllByText('PR #16').length).toBe(2);
+    expect(
+      within(handling)
+        .getByRole('link', { name: /PR #16/ })
+        .getAttribute('href'),
+    ).toBe('https://github.com/acme/orbit/pull/16');
     const link = within(handling).getByRole('link', { name: /acme\/orbit#17/ });
     expect(link.getAttribute('href')).toBe('https://github.com/acme/orbit/issues/17');
     expect(within(handling).getByText(/分钟/)).toBeTruthy();
