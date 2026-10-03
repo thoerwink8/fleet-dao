@@ -28,6 +28,7 @@ import {
   secondOpinionFrom,
   statusDescription,
 } from './merge-gates.ts';
+import { workflowDiff } from './workflow-structure.ts';
 
 export type GateState = 'success' | 'failure';
 
@@ -41,6 +42,10 @@ export interface GitHubReads {
   statuses(sha: string): Promise<unknown[]>;
   /** 开着的 PR（翻完页）。 */
   openPrs(): Promise<unknown[]>;
+  /** 某个提交上某个文件的全文；文件在那个提交里不存在回 null；读不到、认不出就抛。 */
+  fileAt(path: string, ref: string): Promise<string | null>;
+  /** 两个提交的共同祖先（GET /compare）；读不到、认不出就抛。PR 的改动是对它算的，比对工作流前后两份要用同一个起点。 */
+  mergeBase(base: string, head: string): Promise<string>;
   writeStatus(
     sha: string,
     status: { state: GateState; description: string; targetUrl?: string },
@@ -92,6 +97,31 @@ export function gateGitHub(api: GhApi): GitHubReads {
       }
       throw new Error(`提交 ${sha.slice(0, 7)} 的状态超过 ${STATUS_MAX_PAGES * 100} 条，没读完`);
     },
+    async fileAt(path, ref) {
+      const got = await api.getOrNull(
+        `/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`,
+      );
+      if (got === null) return null;
+      if (
+        !isObject(got) ||
+        got.type !== 'file' ||
+        got.encoding !== 'base64' ||
+        typeof got.content !== 'string'
+      ) {
+        throw new Error(
+          `${path}（${ref.slice(0, 7)}）读回来认不出（不是 base64 的文件；超过 1MB 的文件 GitHub 不给内容）`,
+        );
+      }
+      return Buffer.from(got.content, 'base64').toString('utf8');
+    },
+    async mergeBase(base, head) {
+      const got = await api.get(`/compare/${base}...${head}`);
+      const sha = isObject(got) && isObject(got.merge_base_commit) ? got.merge_base_commit.sha : undefined;
+      if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) {
+        throw new Error(`${base.slice(0, 7)}...${head.slice(0, 7)} 的共同祖先认不出`);
+      }
+      return sha;
+    },
     async openPrs() {
       const all: unknown[] = [];
       for (let page = 1; page <= PRS_MAX_PAGES; page++) {
@@ -118,6 +148,8 @@ export interface LiveMeta {
   head: string;
   /** PR 的分支名（head.ref）：认「引擎任务工作流开的 PR」用。 */
   headRef: string;
+  /** PR 的目标分支现在的头（base.sha）：比对工作流要用它找共同祖先；认不出就没有，要比对时判没查成。 */
+  base?: string;
   changedFiles: number;
   open: boolean;
 }
@@ -135,7 +167,56 @@ export function metaOf(live: unknown): LiveMeta | string {
     return 'changed_files 认不出';
   }
   if (state !== 'open' && state !== 'closed') return 'state 认不出';
-  return { number: live.number, head, headRef, changedFiles, open: state === 'open' };
+  const base = isObject(live.base) ? live.base.sha : undefined;
+  return {
+    number: live.number,
+    head,
+    headRef,
+    ...(typeof base === 'string' && /^[0-9a-f]{40}$/.test(base) ? { base } : {}),
+    changedFiles,
+    open: state === 'open',
+  };
+}
+
+/**
+ * 改了已有的工作流（hit.pending）：读改动前后两份全文做结构比对（workflow-structure.ts）。
+ * 比出碰到信任的地方：留着，note 写第一条；一处都没碰：去掉这条（不用第二意见）；读不懂：留着（算碰了）；
+ * 读不到文件、找不到共同祖先：没查成（notChecked，不当成「没碰」），这条也留着，免得把没查成的当成没事。
+ */
+export async function resolveWorkflowHits(
+  hits: readonly RiskyFile[],
+  meta: LiveMeta,
+  gh: Pick<GitHubReads, 'fileAt' | 'mergeBase'>,
+): Promise<{ hits: RiskyFile[]; notChecked: string[] }> {
+  const out: RiskyFile[] = [];
+  const notChecked: string[] = [];
+  for (const h of hits) {
+    if (!h.pending) {
+      out.push(h);
+      continue;
+    }
+    const keep = (note: string) => out.push({ file: h.file, rule: h.rule, kind: h.kind, note });
+    if (!meta.base) {
+      notChecked.push(`PR 读回来没有 base.sha，没法比对 ${h.file} 改动前后`);
+      keep('没法比对改动前后');
+      continue;
+    }
+    try {
+      const origin = await gh.mergeBase(meta.base, meta.head);
+      const [before, after] = await Promise.all([gh.fileAt(h.file, origin), gh.fileAt(h.file, meta.head)]);
+      if (before === null || after === null) {
+        keep('改动前或改动后的文件读不到');
+        continue;
+      }
+      const diff = await workflowDiff(before, after);
+      if (typeof diff === 'string') keep(diff);
+      else if (diff.length > 0) keep(`${diff[0]}${diff.length > 1 ? `（另有 ${diff.length - 1} 处）` : ''}`);
+    } catch (e) {
+      notChecked.push(`比对 ${h.file} 改动前后没成（${message(e)}）`);
+      keep('没法比对改动前后');
+    }
+  }
+  return { hits: out, notChecked };
 }
 
 export interface GateResult {
@@ -196,7 +277,14 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       if (files.length !== meta.changedFiles) {
         faceProblem = `PR #${number} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个（GitHub 的列表最多给 3000 个）`;
         notChecked.push(`${faceProblem}，没法判改没改到先审后合的地方`);
-      } else hits = riskyFiles(files, deps.riskList);
+      } else {
+        hits = riskyFiles(files, deps.riskList);
+        if (hits.some((h) => h.pending)) {
+          const done = await resolveWorkflowHits(hits, meta, gh);
+          hits = done.hits;
+          notChecked.push(...done.notChecked);
+        }
+      }
     } catch (e) {
       faceProblem = `读不到 PR #${number} 改了哪些文件（${message(e)}）`;
       notChecked.push(faceProblem);
@@ -205,6 +293,10 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   // 合前一次冷调用（#555-2）要不要等：引擎任务工作流开的 PR 要（分支名认），别的不要——和改没改到先审后合的路径无关，
   // 所以上面判不了改没改到（faceProblem）也不影响这一条。
   const cold = coldVerifyNeed(isFlowBranch(meta.headRef));
+  // 先合后审的（清单里 review: after-merge，CI 判法那几份；创始人 2026-10-03「1+2+3」的第 3 条）：不等第二意见，
+  // 能合的结论里点名「合并后补审」，由 second-opinion.mjs --after-merge-pending / --after-merge-sweep 合并后补上
+  const later = hits.filter((h) => h.afterMerge);
+  hits = hits.filter((h) => !h.afterMerge);
   if (hits.length > 0 || cold.needed) {
     let statuses: unknown[] | undefined;
     try {
@@ -247,7 +339,13 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       : `改到 ${hits.length} 个先审后合的地方，当前头上第二意见已通过`,
     ...(cold.needed ? ['引擎任务 PR 的验收那一遍也通过'] : []),
   ].join('，');
-  return { ...base, state: 'success', notChecked: false, lines: [`能合：${why}。`] };
+  const afterMerge =
+    later.length === 0
+      ? []
+      : [
+          `合并后补审：${later.map((h) => h.file).join('、')}（先合后审；合并后跑 second-opinion.mjs --pr ${number}，没过就开修复 PR 或 revert）。`,
+        ];
+  return { ...base, state: 'success', notChecked: false, lines: [`能合：${why}。`, ...afterMerge] };
 }
 
 export interface RunResult {

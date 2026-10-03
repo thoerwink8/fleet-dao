@@ -22,6 +22,9 @@ const ALLOWED_READS: Record<string, string> = {
   statuses:
     '当前头上的提交状态（逐条的）：第二意见、合前一次冷调用的结论（#555-2，同一份读回来、各认各的 context）',
   openPrs: '第二意见、冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
+  fileAt:
+    '改了已有的 ci.yml：读改动前（共同祖先）和改动后（当前头）两份全文做结构比对，判这次改动碰没碰信任（创始人 2026-10-03「1+2+3」）',
+  mergeBase: '改动前那份取哪个提交：PR 的改动是对共同祖先算的，比对要用同一个起点',
   writeStatus: '写 merge-gate 这一个状态',
 };
 

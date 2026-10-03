@@ -841,7 +841,8 @@ describe('ci.yml 和这里对得上', () => {
         sudo,
         [
           '#!/usr/bin/env bash',
-          ...fail.map((f) => `case "$*" in *"${f}"*) exit 1;; esac`),
+          // DIR 换成这次的临时目录：只卡「某某 挪到 skel」那条 mv，不卡前面的 mkdir；不写死 /（Windows 上路径是 C:/…）
+          ...fail.map((f) => `case "$*" in *"${f.split('DIR').join(dir)}"*) exit 1;; esac`),
           'exec "$@"',
           '',
         ].join('\n'),
@@ -873,14 +874,14 @@ describe('ci.yml 和这里对得上', () => {
 
     it('【故意造出的失败】新的挪不进去：把原来的挪回去，照原样跑（退出 0、打 warning）', () => {
       // 只卡「把瘦身目录换进去」那条 mv（命令里 skel.slim 后面跟着空格和路径）：这时原目录已经挪走了，要走恢复那条路
-      const { r, skel } = go(['skel.slim /']);
+      const { r, skel } = go(['skel.slim DIR/skel']);
       expect(r.status, r.stderr).toBe(0);
       expect(skel).toEqual(['.bashrc', '.profile', '.rustup']);
       expect(r.stdout).toContain('::warning::');
     });
 
     it('【故意造出的失败】新的挪不进去、原来的也挪不回去：红，不拿「照原样跑」糊过去', () => {
-      const { r, skel } = go(['skel.slim /', 'skel.ci-full /']);
+      const { r, skel } = go(['skel.slim DIR/skel', 'skel.ci-full DIR/skel']);
       expect(r.status).toBe(1);
       expect(skel).toBeNull();
       expect(r.stdout).toContain('::error::');

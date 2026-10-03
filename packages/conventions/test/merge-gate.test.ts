@@ -15,9 +15,13 @@ import type { RiskPath } from '../src/merge-gates.ts';
 
 const HEAD = 'a'.repeat(40);
 const MERGE = 'b'.repeat(40);
+const BASE = 'c'.repeat(40);
+const MERGE_BASE = 'd'.repeat(40);
 const RISK: RiskPath[] = [
   { path: 'deploy/', kind: '碰安全', why: '真机' },
   { path: 'packages/api/src/auth.ts', kind: '碰安全', why: '登录' },
+  { path: '.github/workflows/', kind: '碰安全', why: '令牌权限' },
+  { path: '.github/workflows/ci.yml', kind: '碰安全', why: '结构比对', mode: 'workflow' },
 ];
 const RISK_TEXT = JSON.stringify({ paths: RISK });
 
@@ -31,6 +35,12 @@ interface World {
   open: Record<string, unknown>[];
   /** 读了几次 PR 本身。 */
   prReads: number;
+  /** 文件全文：键是「路径@提交」；没有的键读回 null（文件在那个提交里不存在）。 */
+  contents: Record<string, string>;
+  /** 共同祖先；不填就是 MERGE_BASE。 */
+  mergeBaseSha: string;
+  /** 改到的文件的状态（默认 modified）。 */
+  status: string;
 }
 
 function world(
@@ -41,6 +51,7 @@ function world(
       number: 80,
       title: '试一下',
       head: { sha: HEAD, ref: 'feat/x' },
+      base: { sha: BASE },
       changed_files: 1,
       state: 'open',
       ...over.prOver,
@@ -51,6 +62,9 @@ function world(
     broken: {},
     open: [],
     prReads: 0,
+    contents: {},
+    mergeBaseSha: MERGE_BASE,
+    status: 'modified',
     ...over,
   };
   if (over.files && !over.prOver?.changed_files) w.pr.changed_files = over.files.length;
@@ -65,7 +79,15 @@ function world(
     },
     async files() {
       boom('files');
-      return w.files.map((filename) => ({ filename, status: 'modified' }));
+      return w.files.map((filename) => ({ filename, status: w.status }));
+    },
+    async fileAt(path, ref) {
+      boom('fileAt');
+      return w.contents[`${path}@${ref}`] ?? null;
+    },
+    async mergeBase() {
+      boom('mergeBase');
+      return w.mergeBaseSha;
     },
     async statuses() {
       boom('statuses');
@@ -605,5 +627,135 @@ describe('读写 GitHub（假的 fetch）', () => {
       'GitHub 回了 500（GET /contents/x）',
     ]);
     for (const m of errors) expect(m).not.toContain('token-for-test');
+  });
+});
+
+describe('合并闸：ci.yml 按结构比对（改动前后两份全文），不碰信任的改动不用第二意见', () => {
+  const CI = '.github/workflows/ci.yml';
+  const yml = (extra = '', timeout = 10) =>
+    [
+      'name: ci',
+      'on:',
+      '  pull_request:',
+      'permissions:',
+      '  contents: read',
+      'jobs:',
+      '  test:',
+      '    runs-on: ubuntu-latest',
+      `    timeout-minutes: ${timeout}`,
+      '    steps:',
+      '      - uses: actions/checkout@v4',
+      '      - run: pnpm exec vitest run',
+      extra,
+      '  check:',
+      '    needs: [test]',
+      '    if: always()',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - run: node ci-verdict.ts',
+      '',
+    ].join('\n');
+  const at = (ref: string) => `${CI}@${ref}`;
+  const ci = (before: string, after: string, over: Partial<World> = {}) =>
+    world({
+      files: [CI],
+      contents: { [at(MERGE_BASE)]: before, [at(HEAD)]: after },
+      ...over,
+    });
+
+  it('只调超时、加一步不碰信任的命令：不要第二意见，能合', async () => {
+    const w = ci(yml(), yml('      - run: echo 多一步', 20));
+    const r = await gatePr(80, deps(w));
+    expect(r.state).toBe('success');
+    expect(r.notChecked).toBe(false);
+  });
+
+  it('【故意造出的失败】碰了信任（加权限、换 action、删检查命令）：要第二意见，没有就等；点名碰了什么', async () => {
+    const cases: [string, string][] = [
+      [yml().replace('contents: read', 'contents: write'), '顶层 permissions'],
+      [yml().replace('actions/checkout@v4', 'evil/x@v1'), 'action'],
+      [yml().replace('pnpm exec vitest run', 'echo 跳过'), '检查命令「vitest」'],
+      [yml().replace('if: always()', 'if: false'), 'check 的 if'],
+    ];
+    for (const [after, what] of cases) {
+      const r = await gatePr(80, deps(ci(yml(), after)));
+      expect(r.state, what).toBe('failure');
+      expect(r.lines.join('\n'), what).toContain(what);
+      expect(r.lines.join('\n'), what).toContain('等第二意见');
+    }
+  });
+
+  it('碰了信任但当前头上有通过的第二意见：能合', async () => {
+    const w = ci(yml(), yml().replace('contents: read', 'contents: write'), {
+      statuses: [{ context: 'second-opinion', state: 'success', description: '通过' }],
+    });
+    expect((await gatePr(80, deps(w))).state).toBe('success');
+  });
+
+  it('【故意造出的失败】读不到文件（改动前或改动后）：算碰了，要第二意见，不当成没碰', async () => {
+    const w = world({ files: [CI], contents: { [at(HEAD)]: yml() } });
+    const r = await gatePr(80, deps(w));
+    expect(r.state).toBe('failure');
+    expect(r.lines.join('\n')).toContain('等第二意见');
+  });
+
+  it('【故意造出的失败】读不懂的工作流（YAML 坏了）：算碰了', async () => {
+    const r = await gatePr(80, deps(ci(yml(), 'jobs: [: :')));
+    expect(r.state).toBe('failure');
+    expect(r.lines.join('\n')).toContain('读不懂');
+  });
+
+  it('【故意造出的失败】取文件、找共同祖先出错、PR 里没有 base.sha：没查成（退出码 2 那一类），不是没碰', async () => {
+    for (const broken of [{ fileAt: '炸了' }, { mergeBase: '炸了' }]) {
+      const r = await gatePr(80, deps(ci(yml(), yml('', 20), { broken })));
+      expect(r.state).toBe('failure');
+      expect(r.notChecked).toBe(true);
+    }
+    const noBase = world({
+      files: [CI],
+      contents: { [at(MERGE_BASE)]: yml(), [at(HEAD)]: yml('', 20) },
+      prOver: { base: {} },
+    });
+    const r = await gatePr(80, deps(noBase));
+    expect(r.notChecked).toBe(true);
+  });
+
+  it('新加、删掉、改名一律算碰了（整个文件都是新的信任面）', async () => {
+    for (const status of ['added', 'removed']) {
+      const r = await gatePr(80, deps(ci(yml(), yml(), { status })));
+      expect(r.state, status).toBe('failure');
+    }
+  });
+
+  it('同目录的别的工作流（合并闸自己）照旧整个文件都算，不比对', async () => {
+    const w = world({ files: ['.github/workflows/merge-gate.yml'] });
+    expect((await gatePr(80, deps(w))).state).toBe('failure');
+  });
+});
+
+describe('合并闸：先合后审（review: after-merge）不等第二意见，结论里点名合并后补审', () => {
+  const LATER: RiskPath[] = [
+    ...RISK,
+    { path: 'packages/conventions/src/ci-plan.ts', kind: '碰安全', why: 'CI 判法', review: 'after-merge' },
+  ];
+
+  it('只改到先合后审的：能合，结论里写「合并后补审」和要跑的命令', async () => {
+    const r = await gatePr(80, {
+      gh: world({ files: ['packages/conventions/src/ci-plan.ts'] }).gh,
+      riskList: LATER,
+    });
+    expect(r.state).toBe('success');
+    expect(r.lines.join('\n')).toContain('合并后补审：packages/conventions/src/ci-plan.ts');
+    expect(r.lines.join('\n')).toContain('second-opinion.mjs --pr 80');
+  });
+
+  it('【故意造出的失败】同时改到要先审的（deploy/）：照旧等第二意见，先合后审那条不能把它带过去', async () => {
+    const r = await gatePr(80, {
+      gh: world({ files: ['packages/conventions/src/ci-plan.ts', 'deploy/france.sh'] }).gh,
+      riskList: LATER,
+    });
+    expect(r.state).toBe('failure');
+    expect(r.lines.join('\n')).toContain('等第二意见');
+    expect(r.lines.join('\n')).toContain('deploy/france.sh');
   });
 });

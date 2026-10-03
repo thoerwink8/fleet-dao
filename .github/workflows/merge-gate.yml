@@ -28,6 +28,7 @@ on:
       - packages/conventions/src/gh-api.ts
       - packages/conventions/src/merge-gate.ts
       - packages/conventions/src/merge-gates.ts
+      - packages/conventions/src/workflow-structure.ts
   workflow_dispatch:
     inputs:
       pr:
@@ -50,9 +51,14 @@ jobs:
     steps:
       # 默认检出触发分支（pull_request_target 也是主线），高风险清单和判法都用主线上的：PR 改不了自己的门槛
       - uses: actions/checkout@v4
+      # ci.yml 的结构比对（workflow-structure.ts）要解析 YAML：只装 conventions 这一个包的依赖。装的是主线检出里的锁文件和
+      # 主线的代码，不碰 PR 的；装坏了只让改 ci.yml 的 PR 判「读不懂」（= 要审），别的 PR 照常判（那边是按需加载的）
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @fleet-dao/conventions
       # 退出码 2 = 有 PR 没算成或没写上状态（没写上的那个 PR 缺 merge-gate，合不了），同样是红
       - run: node packages/conventions/src/bin/merge-gate.ts
         env:
