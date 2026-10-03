@@ -127,6 +127,34 @@ export async function stageCandidates(
     .orderBy(asc(stagePolicyRoutes.position));
   if (rows.length === 0) return { stage, configured: true, pinned: policy.pinned, candidates: [] };
 
+  const candidates = await evaluateRoutes(db, stage, rows, { now, staleAfterMs });
+  // 稳定排序：额度没读成的整体往后挪，两段里各自保持调度台的顺序。
+  candidates.sort((a, b) => Number(a.quota === 'unknown') - Number(b.quota === 'unknown'));
+
+  return { stage, configured: true, pinned: policy.pinned, candidates };
+}
+
+/** 一条路由在某个顺序里的位置和开关（调度台的阶段顺序、或路由两层里的模型下的路由顺序）加上它连着的行。 */
+export interface OrderedRouteRow {
+  order: { position: number; enabled: boolean };
+  route: typeof routes.$inferSelect;
+  pool: typeof pools.$inferSelect;
+  channel: typeof channels.$inferSelect;
+  model: typeof models.$inferSelect;
+}
+
+/**
+ * 给每一行判「为什么不能用」（blockers）和额度状态。阶段顺序（stageCandidates）和路由两层（routing-layers.ts）共用这一份：
+ * 「接得上、额度够、没被禁令挡」只有一处判法，两层各自再写一遍就会各过各的。stage 只用来判禁令（硬禁令、bans 表里按阶段的）。
+ * 不排序、不丢行：返回顺序同入参。
+ */
+export async function evaluateRoutes(
+  db: Db,
+  stage: StageKind,
+  rows: readonly OrderedRouteRow[],
+  options: { now: Date; staleAfterMs: number },
+): Promise<RouteCandidate[]> {
+  const { now, staleAfterMs } = options;
   const poolIds = [...new Set(rows.map((r) => r.pool.id))];
   const windowRows = await db
     .select()
@@ -137,7 +165,7 @@ export async function stageCandidates(
   const dbBans = await db.select().from(bans);
   const inFlight = await inFlightByPool(db);
 
-  const candidates = rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
+  return rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
     // 成员表只和路由在上游的名字比（实际发的模型串 + 别名），不拿模型目录的 id 硬凑。
     const ref = {
       id: model.id,
@@ -222,8 +250,4 @@ export async function stageCandidates(
       eligible: blockers.length === 0,
     };
   });
-  // 稳定排序：额度没读成的整体往后挪，两段里各自保持调度台的顺序。
-  candidates.sort((a, b) => Number(a.quota === 'unknown') - Number(b.quota === 'unknown'));
-
-  return { stage, configured: true, pinned: policy.pinned, candidates };
 }
