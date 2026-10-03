@@ -35,7 +35,7 @@
 | `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
-| `specs/` | 需求文档，每个需求一个文件夹（需求、方案、结果） |
+| `specs/` | 方案文档（要写才写）和历史的需求、结果；需求在 GitHub 的单子里（#654） |
 
 ## 密钥和本机配置在哪
 
@@ -52,9 +52,9 @@
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，打出改到的包各自单跑的命令 `pnpm exec vitest run packages/<包>/`，真要在本机全跑带 `--all`）和格式、类型；`pnpm check` 是全量（格式、类型、全部测试、卫生检查；文档里的路径、章节指针也在里面查），本机一般不跑。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
-- 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
-- 关单：`pnpm issue:close <号>`，主线上有 `specs/<号>-<短名>/结果.md` 才关成「完成」、评论里贴结果链接；没有结果、子单还开着都不关（退出码 1），读不到 GitHub 报错不关（退出码 2）。或者最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时关。见 design 第七节「关单要有结果」。
-- 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
+- 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
+- 关单：最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时 GitHub 自己关。没有 PR 的收尾用 `pnpm issue:close <号>`：关成「完成」要有证据（合并了的 PR 提到它、或下面的子单都关了、或 `--note "做成了什么"`），没有就不关（退出码 1），子单还开着也不关；读不到 GitHub 报错不关（退出码 2）。见 design 第七节「关单要有证据」。
+- 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 

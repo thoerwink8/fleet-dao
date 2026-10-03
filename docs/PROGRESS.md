@@ -2,6 +2,13 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-03 08:30（GitHub 大改：流程去冗余，#654）
+
+- 创始人原话（清晨）：「我们的流程不应该冗余，一切要为了提速而服务，多考虑这个点，然后大改github相关」。决定记在 `docs/decisions/0015-github-one-home.md`；清单在 GitHub #654。
+- 做到哪：A（删 PR 页没人读的检查）[#655](https://github.com/thoerwink8/fleet-dao/pull/655) 已合；B（PR 模板四栏、合并闸两条真门）[#656](https://github.com/thoerwink8/fleet-dao/pull/656) 已合，同一时段修了主线上日期写死的红（[#657](https://github.com/thoerwink8/fleet-dao/pull/657)）；C（需求只在单子正文里、关单证据、删关单对账、欠账和文档指针不再扫 specs/）是本提交。
+- 下一步：D 计划现算（不再存 `docs/plan.md` 快照）+ 每天一轮 GitHub 对账；F CI 分片提速；H 清远端已合并的分支；C2 引擎收单改读单子正文；G（改标准）通用段和技能说明里提到被删机制的文字，等创始人点头才合。
+- 还没验证：`retireCloseSweepAlerts`（撤旧提醒）要引擎重开后第一轮才真跑，引擎重开后确认驾驶舱上没有 `close-sweep:` 的提醒就把它删掉；`pnpm issue:close` 读时间线的形状已在真 GitHub 上核过（#654 上 #655、#656 的交叉引用），还没有真关过一张单。
+
 ## 2026-10-03 06:55（GitHub 对账：计划快照、先后清单、母子单）
 
 - 创始人原话（约 06:40）：「我希望 GitHub Issues、PR 和我们当前正在改的流程都能同步进度，随时更新。比如：1. Issues 在里程碑里面都要正确展示；2. 如果随时有断裂，随时修复。」另一句原则「减少或优化流程步骤，不要花 80% 以上的时间在读文件上」。决定记在 `docs/decisions/0014-progress-on-github.md`。

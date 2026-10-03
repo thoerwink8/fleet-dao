@@ -16,7 +16,6 @@ import {
 } from './bundle.ts';
 import { type ClaimsGitHub, createClaimsGitHub } from './claims.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
-import { type CloseFacts, type ReadCloseFactsInput, readCloseFacts } from './close-facts.ts';
 import { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 import {
   type ReadRepoFileInput,
@@ -195,11 +194,6 @@ export interface GitHub {
    * 现读）：接活判当前版本和母单子单、fleet-api handover 判能不能交都用它。读不到、认不出抛错，不拿「没挂」「开着」「独立单」顶。
    */
   readIssuePlan(input: ReadIssuePlanInput, ctx?: ActivityContext): Promise<IssuePlan>;
-  /**
-   * 关单对账（#241）要的仓现状（「引擎」机器人现读）：主线上 specs/ 下的文件、开着的单连同子单、最近关掉的单、开着的 PR。
-   * 读不到、认不出、没翻完抛错，不拿「一张都没有」顶。
-   */
-  readCloseFacts(input: ReadCloseFactsInput): Promise<CloseFacts>;
   /** 仓里此刻还开着的里程碑（「引擎」机器人现读）：巡检开单前找巡检仓的当前版本。读不到、没翻完抛错。 */
   readOpenMilestones(input: {
     repo: RepoRef;
@@ -333,7 +327,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
     async readOpenMilestones(input) {
       return readOpenMilestones(client, input);
     },
-    readCloseFacts: (input) => readCloseFacts(client, input),
     readGroomFacts: (input) => readGroomFacts(deps, input),
     readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
     async addIssueLabel(input, ctx = {}) {

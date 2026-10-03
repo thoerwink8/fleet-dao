@@ -41,13 +41,6 @@ export {
   repoSlug,
   silentLogger,
 } from './client.ts';
-export {
-  CLOSE_FACTS_MAX_PAGES,
-  type CloseFacts,
-  type ReadCloseFactsInput,
-  readCloseFacts,
-  SUB_ISSUES_PAGE,
-} from './close-facts.ts';
 export { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 export {
   type ReadRepoFileInput,

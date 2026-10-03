@@ -1,31 +1,6 @@
-export {
-  CLOSE_COLUMN,
-  type CloseColumn,
-  closeColumnValue,
-  closingIssues,
-  closingTargets,
-  missingResults,
-  RESULT_FILE,
-  resultDocIssue,
-  resultDocOf,
-} from './close-rule.ts';
-export {
-  CLOSE_ALERT_LINES,
-  CLOSE_KINDS,
-  CLOSE_LOOKBACK_DAYS,
-  type CloseFinding,
-  type CloseKind,
-  type CloseSweep,
-  type CloseSweepFacts,
-  closeAlert,
-  closeAlertKey,
-  closeComment,
-  closeCommentKey,
-  closeSweep,
-} from './close-sweep.ts';
+export { closingIssues } from './closing-issues.ts';
 export {
   checkDebtDocs,
-  checkSpecsDone,
   DEFERRAL_PATTERNS,
   type DebtProblem,
   type DebtRun,
@@ -38,18 +13,15 @@ export {
   formatDebtProblem,
   type LiveDebt,
   liveDebt,
-  missingSpecsFindings,
   type RefState,
   refStates,
   reportFindings,
-  SPECS_GRACE_HOURS,
   staleRefFindings,
   untrackedDeferrals,
 } from './debt.ts';
 export {
   checkDocPointers,
   DOCS,
-  docFiles,
   formatProblem,
   type Pointer,
   type PointerKind,
@@ -108,12 +80,9 @@ export {
   type IssueNewDeps,
   type IssueNewResult,
   issueNew,
-  issueSummary,
   type MissingSection,
   requiredSectionProblems,
   sectionText,
-  specsDoc,
-  specsHint,
   USAGE,
 } from './issue-new.ts';
 export {

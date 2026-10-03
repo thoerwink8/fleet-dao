@@ -1,10 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { checkDocPointers, formatProblem } from '../src/doc-pointers.ts';
-import { type GhResult, ghRunner, issueNew, issueSummary, specsDoc, specsHint } from '../src/issue-new.ts';
-import { memRepo } from './helpers.ts';
+import { type GhResult, ghRunner, issueNew } from '../src/issue-new.ts';
 
 const MILESTONES = JSON.stringify([{ title: 'P0 地基' }, { title: 'P1 核心闭环' }, { title: 'P4 飞书 v2' }]);
 const ok = (stdout: string): GhResult => ({ code: 0, stdout, stderr: '' });
@@ -40,13 +38,11 @@ function setup(
   opts: {
     milestones?: GhResult;
     create?: GhResult;
-    specs?: boolean;
     body?: string;
     route?: (args: string[]) => GhResult | undefined;
   } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'fleet-issue-new-'));
-  if (opts.specs !== false) mkdirSync(join(root, 'specs'));
   writeFileSync(join(root, 'body.md'), opts.body ?? BODY);
   const calls: string[][] = [];
   const gh = async (args: string[]): Promise<GhResult> => {
@@ -56,7 +52,7 @@ function setup(
     if (args[0] === 'api') return opts.milestones ?? ok(MILESTONES);
     return opts.create ?? ok(`${URL36}\n`);
   };
-  const run = (...argv: string[]) => issueNew(argv, { gh, root, cwd: root });
+  const run = (...argv: string[]) => issueNew(argv, { gh, cwd: root });
   return { root, calls, run };
 }
 
@@ -82,7 +78,7 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
     ['缺 --title', ['--kind', '需求', '--milestone', 'P1', '--body-file', 'body.md'], '缺 --title'],
     ['缺 --body-file', ['--kind', '需求', '--milestone', 'P1', '--title', 't'], '缺 --body-file'],
     ['不认得的参数', [...base, '--label', 'x'], '参数不对'],
-    ['--specs 的短名带斜杠', [...base, '--specs', 'a/b'], '--specs 的短名「a/b」不行'],
+    ['--specs 没有了（需求只在单子正文里，#654）', [...base, '--specs', 'x'], '参数不对'],
   ])('%s', async (_name, argv, message) => {
     const { calls, run } = setup();
     await expect(run(...argv)).rejects.toThrow(message);
@@ -97,9 +93,9 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
     expect(calls).toEqual([]);
   });
 
-  it('要建需求文档可仓根下没有 specs/：不开', async () => {
-    const { calls, run } = setup({ specs: false });
-    await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow('没有 specs/ 目录');
+  it('【故意造出的失败】正文超过 GitHub 一张单的上限：在这里就拒开、gh 一次也不调（一页以内的需求碰不到）', async () => {
+    const { calls, run } = setup({ body: `${BODY}\n${'长'.repeat(65_000)}\n` });
+    await expect(run(...base)).rejects.toThrow(/正文有 \d+ 字，超过 GitHub 一张单正文的上限.*单没开/);
     expect(calls).toEqual([]);
   });
 });
@@ -126,16 +122,6 @@ describe('开单脚本：以后要做的事得写清怎么算做完（design 第
   ])('%s：不开，gh 一次也不调', async (_name, body, message) => {
     const { calls, run } = setup({ body });
     await expect(run(...base)).rejects.toThrow(message);
-    expect(calls).toEqual([]);
-  });
-
-  it('带 --specs 可正文开头就是小标题（没有原话和 AI 理解）：不开', async () => {
-    const { calls, run } = setup({
-      body: `${PROLOGUE}\n## 怎么算做完\n\n- 测试\n`,
-    });
-    await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      '--specs 时正文开头（第一个小标题之前）要写原话和 AI 理解',
-    );
     expect(calls).toEqual([]);
   });
 });
@@ -218,7 +204,6 @@ describe('开单脚本：一次带上标签和里程碑', () => {
       number: 36,
       url: URL36,
       milestone: 'P1 核心闭环',
-      specsFile: undefined,
     });
     expect(calls).toEqual([
       ['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100'],
@@ -299,7 +284,6 @@ describe('开单脚本：--milestone 未排期，不挂里程碑', () => {
       number: 36,
       url: URL36,
       milestone: '未排期',
-      specsFile: undefined,
     });
     expect(calls).toEqual([
       [
@@ -344,7 +328,6 @@ describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留
       number: 36,
       url: URL36,
       milestone: 'v1 Fusion 接活',
-      specsFile: undefined,
       local: true,
     });
     expect(calls).toEqual([
@@ -405,7 +388,6 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
       number: 36,
       url: URL36,
       milestone: 'v1 Fusion 接活',
-      specsFile: undefined,
       parent: 192,
     });
     expect(calls).toEqual([
@@ -477,16 +459,14 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
     expect(calls.some((c) => c[0] === 'issue')).toBe(false);
   });
 
-  it('【故意造出的失败】挂子议题报错：明说单开了、没挂上、现在没挂里程碑不会被派，给手动补的步骤；不挂里程碑、需求文档不建', async () => {
+  it('【故意造出的失败】挂子议题报错：明说单开了、没挂上、现在没挂里程碑不会被派，给手动补的步骤；不挂里程碑', async () => {
     const link = { code: 1, stdout: '', stderr: 'HTTP 422: Validation Failed\n' };
-    const { root, calls, run } = setup({ milestones: V1, route: routes({ link }) });
-    await expect(run(...sub, '--specs', '登录验证码')).rejects.toThrow(
+    const { calls, run } = setup({ milestones: V1, route: routes({ link }) });
+    await expect(run(...sub)).rejects.toThrow(
       `单开了（#36 ${URL36}），可没挂到 #192 下面：gh 挂子议题报错（退出码 1）：HTTP 422: Validation Failed。` +
-        '它现在没挂里程碑（未排期，不会被自动派）：在 #192 页面上把它加成子议题，再 gh issue edit 36 --milestone "v1 Fusion 接活"' +
-        '；需求文档还没建，挂好以后补上 specs/36-登录验证码/需求.md。',
+        '它现在没挂里程碑（未排期，不会被自动派）：在 #192 页面上把它加成子议题，再 gh issue edit 36 --milestone "v1 Fusion 接活"。',
     );
     expect(calls.some((c) => c[0] === 'issue' && c[1] === 'edit')).toBe(false);
-    expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
 
   it('【故意造出的失败】新单的 id 认不出：不挂、照实报', async () => {
@@ -523,99 +503,30 @@ describe('开单脚本：gh 出错照实报，不吞', () => {
     await expect(run(...base)).rejects.toThrow('gh 读回来的里程碑认不出');
   });
 
-  it('开单报错：带上 gh 的原话；不说死「没开」（超时、断连时可能已经建了），给标题让人先搜再重开；需求文档不建', async () => {
-    const { root, run } = setup({
+  it('开单报错：带上 gh 的原话；不说死「没开」（超时、断连时可能已经建了），给标题让人先搜再重开', async () => {
+    const { run } = setup({
       create: {
         code: 1,
         stdout: '',
         stderr: 'Post "https://api.github.com/graphql": context deadline exceeded\n',
       },
     });
-    await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
+    await expect(run(...base)).rejects.toThrow(
       'gh 开单报错（退出码 1）：Post "https://api.github.com/graphql": context deadline exceeded。' +
         '单多半没开，可超时、断连时也可能已经建了：先去 GitHub 按标题「登录页加验证码」搜一下，没有再重开。',
     );
-    expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
 
-  it('gh 说成功了可认不出单号：明说单可能开了、给标题、需求文档没建', async () => {
-    const { root, run } = setup({ create: ok('Creating issue in o/r\n') });
-    await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      '认不出单号：Creating issue in o/r。单多半已经开了，去 GitHub 按标题「登录页加验证码」找一下；需求文档没建。',
+  it('gh 说成功了可认不出单号：明说单可能开了、给标题', async () => {
+    const { run } = setup({ create: ok('Creating issue in o/r\n') });
+    await expect(run(...base)).rejects.toThrow(
+      '认不出单号：Creating issue in o/r。单多半已经开了，去 GitHub 按标题「登录页加验证码」找一下。',
     );
-    expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
 
   it('gh 起不来（没装、不在 PATH）：回非 0 和一句为什么，不抛', async () => {
     const r = await ghRunner(tmpdir(), 'fleet-no-such-gh-command')(['--version']);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain('找不到 fleet-no-such-gh-command 命令');
-  });
-});
-
-describe('开单脚本：--specs 时完整需求进 specs/，issue 上只留原话、AI 理解和路径', () => {
-  it('建 specs/<号>-<短名>/需求.md（整份正文），返回路径；issue 正文是第一个小标题之前那段加文档路径', async () => {
-    const { root, calls, run } = setup();
-    const r = await run(...base, '--specs', '登录验证码');
-    expect(r.specsFile).toBe('specs/36-登录验证码/需求.md');
-    const doc = readFileSync(join(root, 'specs', '36-登录验证码', '需求.md'), 'utf8');
-    expect(doc).toBe(specsDoc('登录页加验证码', 36, 'P1 核心闭环', BODY));
-    expect(doc).toContain('## 怎么算做完\n\n- 测试：过期的验证码被拒。');
-    expect(doc.trimEnd().endsWith('## 现状\n\n未开工。')).toBe(true);
-    const create = calls[1] ?? [];
-    expect(create).not.toContain('--body-file');
-    expect(create[create.indexOf('--body') + 1]).toBe(
-      '原话：给登录页加验证码（提出人：某某）\nAI 理解：登录页发短信验证码，五分钟过期。\n\n' +
-        '文档：`specs/<本单号>-登录验证码/需求.md`（完整需求和怎么算做完）\n',
-    );
-  });
-
-  it('正文自己有「## 现状」就不再补一节', () => {
-    const doc = specsDoc('t', 1, 'P1 核心闭环', `${BODY}\n## 现状\n\n依赖 #28。\n`);
-    expect(doc.match(/## 现状/g)).toHaveLength(1);
-    expect(doc).toContain('依赖 #28。');
-  });
-
-  it('issue 上留的那段：第一个小标题之前；没有小标题就是整份', () => {
-    expect(issueSummary(BODY)).toBe(
-      '原话：给登录页加验证码（提出人：某某）\nAI 理解：登录页发短信验证码，五分钟过期。',
-    );
-    expect(issueSummary('原话：x\r\nAI 理解：y\r\n')).toBe('原话：x\nAI 理解：y');
-  });
-
-  it('目录已经在了：不覆盖，明说单已经开了', async () => {
-    const { root, run } = setup();
-    mkdirSync(join(root, 'specs', '36-登录验证码'));
-    await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      `单开了（#36 ${URL36}），可需求文档没建成：specs/36-登录验证码/ 已经在了，没覆盖。`,
-    );
-  });
-
-  it('需求文档里「对应计划」的引号空着：不填就提交，文档指针检查会红', () => {
-    const doc = specsDoc('登录页加验证码', 36, 'P1 核心闭环', BODY);
-    expect(doc.split('\n').slice(0, 3)).toEqual(['# 登录页加验证码（#36）', '', '对应计划：plan.md P1「」']);
-    const report = checkDocPointers(
-      memRepo({
-        'docs/plan.md': '# 计划\n\n### P1 核心闭环\n\n- 工作流：需求。\n',
-        'specs/36-x/需求.md': doc,
-      }),
-      ['specs/36-x/需求.md'],
-    );
-    expect(report.problems.map(formatProblem)).toEqual([
-      'specs/36-x/需求.md:3  plan.md P1「」引号里是空的，没写是哪一条',
-    ]);
-  });
-
-  it('里程碑是版本或未排期：「对应计划」直接写版本全名或「未排期」，不留 plan.md 的空引号', () => {
-    expect(specsDoc('t', 1, 'v1 Fusion 接活', BODY).split('\n')[2]).toBe('对应计划：v1 Fusion 接活');
-    expect(specsDoc('t', 1, '未排期', BODY).split('\n')[2]).toBe('对应计划：未排期');
-  });
-
-  it('specsHint：P 阶段（旧写法）才提示填 plan.md 的引号，版本、未排期不用', () => {
-    expect(specsHint('P1 核心闭环')).toBe(
-      '「对应计划」的引号里填上 plan.md 那一条、「设计依据」写上 design 哪一节再提交',
-    );
-    expect(specsHint('v1 Fusion 接活')).toBe('「设计依据」写上 design 哪一节再提交');
-    expect(specsHint('未排期')).toBe('「设计依据」写上 design 哪一节再提交');
   });
 });

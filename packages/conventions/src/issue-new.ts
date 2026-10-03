@@ -1,4 +1,4 @@
-// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号] [--local]
+// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
 // 里程碑＝版本（创始人 2026-09-26 拍，替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
@@ -7,12 +7,13 @@
 // 再挂里程碑——接活只派挂在当前版本上的独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
 // 事后再挂到母单下面的，中间那一下是一张挂在当前版本上的独立单，开关开着就被派走了。--local 给这张单多贴「本机做」标签
 // （帅位留给本机做的，接活不自动派）：和类别标签在同一次建单里贴上，不事后补——开单那个事件一到，没贴的已经被派走了。
-// 带 --specs 时，完整正文写进 specs/<号>-<短名>/需求.md，issue 上只留第一个小标题之前那段（原话、AI 理解）
-// 和需求文档的路径（第七节：完整需求只在仓里存一份）。gh 出错原样报出来，退出码非 0。
+// 单子正文就是需求的唯一的家（#654）：整份正文原样进 issue，不再另写一份 specs/<号>-<短名>/需求.md 镜像（两份各改各的，
+// 对账、检查的活全是它引出来的）。正文放不下 GitHub 的上限的：需求一页以内，长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。
+// gh 出错原样报出来，退出码非 0。
 // 帅位座位整张删掉（#531）：开单时替帅位认领那一步（claimLocal）一并删——本机不再在库里认领。
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
 import {
@@ -34,8 +35,6 @@ export type Gh = (args: string[]) => Promise<GhResult>;
 
 export interface IssueNewDeps {
   gh: Gh;
-  /** 仓根：specs/ 在它下面。 */
-  root: string;
   /** --body-file 相对哪个目录（pnpm 跑脚本时是 INIT_CWD，也就是敲命令的地方）。 */
   cwd: string;
 }
@@ -45,8 +44,6 @@ export interface IssueNewResult {
   url: string;
   /** 实际挂上的里程碑全名；未排期时是「未排期」（建单没带 --milestone）。 */
   milestone: string;
-  /** 建了需求文档时，它的仓内路径。 */
-  specsFile: string | undefined;
   /** 开的是子单时，挂在哪张母单下面（--parent）。 */
   parent?: number | undefined;
   /** 贴了「本机做」（--local）时是 true。 */
@@ -54,13 +51,16 @@ export interface IssueNewResult {
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号] [--local]' +
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local]' +
   '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
-  '涉及面一律不写（那是算出来的、不是知道的）；带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签；' +
+  '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
+
+/** GitHub 一张单的正文最多 65536 字；留一点余量，超了在这里就拒开，不让 gh 回一句看不懂的错。 */
+const BODY_LIMIT = 65_000;
 
 /**
  * 一张单必带三栏——场景、原话、已知的模块（两张创始人 2026-10-02 拍「建单那个会话把只有它知道的事写进单子」，specs/553-对题
@@ -164,14 +164,10 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       `正文里${done === 'missing' ? '没有「## 怎么算做完」一节' : '「怎么算做完」一节是空的'}，单没开：以后要做的事得写清怎么算做完（测试名、脚本、真机上看到什么）。`,
     );
   }
-  const summary = o.specs === undefined ? undefined : issueSummary(body);
-  if (summary === '') {
+  if (body.length > BODY_LIMIT) {
     throw new Error(
-      '--specs 时正文开头（第一个小标题之前）要写原话和 AI 理解：issue 上只留这一段和需求文档的路径，单没开。',
+      `正文有 ${body.length} 字，超过 GitHub 一张单正文的上限（65536 字，这里留了余量按 ${BODY_LIMIT} 算），单没开：需求写一页以内；长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。`,
     );
-  }
-  if (o.specs !== undefined && !isDir(join(deps.root, 'specs'))) {
-    throw new Error(`仓根 ${deps.root} 下没有 specs/ 目录，--specs 建不了需求文档，单没开。`);
   }
 
   const milestone = o.milestone === UNSCHEDULED ? UNSCHEDULED : await resolveMilestone(deps.gh, o.milestone);
@@ -181,9 +177,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     'create',
     '--title',
     o.title,
-    ...(summary === undefined
-      ? ['--body-file', bodyPath]
-      : ['--body', `${summary}\n\n文档：\`specs/<本单号>-${o.specs}/需求.md\`（完整需求和怎么算做完）\n`]),
+    '--body-file',
+    bodyPath,
     '--label',
     o.kind,
     ...(o.mother ? ['--label', MOTHER_LABEL] : []),
@@ -202,26 +197,14 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const n = /\/issues\/(\d+)$/.exec(url)?.[1];
   if (!n) {
     throw new Error(
-      `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 按标题「${o.title}」找一下${o.specs === undefined ? '' : '；需求文档没建'}。`,
+      `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 按标题「${o.title}」找一下。`,
     );
   }
   const number = Number(n);
   const { parent } = o;
   const local = o.local || undefined;
-  if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone, specs: o.specs });
-  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined, parent, local };
-  try {
-    return {
-      number,
-      url,
-      milestone,
-      specsFile: writeSpecs(deps.root, number, o.specs, specsDoc(o.title, number, milestone, body)),
-      parent,
-      local,
-    };
-  } catch (e) {
-    throw new Error(`单开了（#${number} ${url}），可需求文档没建成：${message(e)}。`);
-  }
+  if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone });
+  return { number, url, milestone, parent, local };
 }
 
 interface Options {
@@ -229,7 +212,6 @@ interface Options {
   milestone: string;
   title: string;
   bodyFile: string;
-  specs: string | undefined;
   /** 多贴「母单」标签：这张单下面会挂子单（GitHub 自带子议题）。 */
   mother: boolean;
   /** 开的是子单：挂到这张母单下面。 */
@@ -249,7 +231,6 @@ function parse(argv: readonly string[]): Options {
         milestone: { type: 'string' },
         title: { type: 'string' },
         'body-file': { type: 'string' },
-        specs: { type: 'string' },
         mother: { type: 'boolean' },
         parent: { type: 'string' },
         local: { type: 'boolean' },
@@ -271,12 +252,6 @@ function parse(argv: readonly string[]): Options {
   if (!title) throw new Error(`缺 --title：一句话写要什么。${USAGE}`);
   const bodyFile = str(values['body-file']);
   if (!bodyFile) throw new Error(`缺 --body-file：正文写进一个文件再指过来。${USAGE}`);
-  const specs = str(values.specs);
-  if (values.specs !== undefined && !/^(?![.-])[^/\\\s<>:"|?*]+$/.test(specs ?? '')) {
-    throw new Error(
-      `--specs 的短名「${values.specs}」不行：不能空，不能带 / \\ 空格和 < > : " | ? *，也不能以 . 或 - 开头。`,
-    );
-  }
   const mother = values.mother === true;
   let parent: number | undefined;
   if (values.parent !== undefined) {
@@ -285,7 +260,7 @@ function parse(argv: readonly string[]): Options {
       throw new Error(`--parent 写母单的号（比如 --parent 192），「${values.parent}」认不出。${USAGE}`);
     parent = Number(m[1]);
   }
-  return { kind, milestone, title, bodyFile, specs, mother, parent, local: values.local === true };
+  return { kind, milestone, title, bodyFile, mother, parent, local: values.local === true };
 }
 
 /** 挂子单之前先看母单：开着的 issue、贴了「母单」标签（design 第七节：有子单的必须带）。不对就不开单。 */
@@ -324,16 +299,14 @@ async function checkParent(gh: Gh, parent: number): Promise<void> {
  */
 async function attachToParent(
   gh: Gh,
-  a: { number: number; url: string; parent: number; milestone: string; specs: string | undefined },
+  a: { number: number; url: string; parent: number; milestone: string },
 ): Promise<void> {
   const thenMilestone =
     a.milestone === UNSCHEDULED ? '' : `，再 gh issue edit ${a.number} --milestone "${a.milestone}"`;
-  const noDoc =
-    a.specs === undefined ? '' : `；需求文档还没建，挂好以后补上 specs/${a.number}-${a.specs}/需求.md`;
   const unlinked = (why: string) =>
     new Error(
       `单开了（#${a.number} ${a.url}），可没挂到 #${a.parent} 下面：${why}。它现在没挂里程碑（未排期，不会被自动派）：` +
-        `在 #${a.parent} 页面上把它加成子议题${thenMilestone}${noDoc}。`,
+        `在 #${a.parent} 页面上把它加成子议题${thenMilestone}。`,
     );
   const read = await gh(['api', `repos/{owner}/{repo}/issues/${a.number}`]);
   if (read.code !== 0) throw unlinked(`gh 读它的 id 失败（退出码 ${read.code}）：${detail(read)}`);
@@ -360,7 +333,7 @@ async function attachToParent(
   if (edit.code !== 0) {
     throw new Error(
       `单开了、挂到 #${a.parent} 下面了（#${a.number} ${a.url}），可里程碑「${a.milestone}」没挂上（退出码 ${edit.code}）：` +
-        `${detail(edit)}。手动补：gh issue edit ${a.number} --milestone "${a.milestone}"${noDoc}。`,
+        `${detail(edit)}。手动补：gh issue edit ${a.number} --milestone "${a.milestone}"。`,
     );
   }
 }
@@ -404,55 +377,6 @@ async function resolveMilestone(gh: Gh, want: string): Promise<string> {
   throw new Error(`「${want}」对上了好几个里程碑（${matches.join('、')}），单没开：写全名。`);
 }
 
-/** 正文里第一个小标题之前的那段（原话、AI 理解），去掉首尾空白。 */
-export function issueSummary(body: string): string {
-  const first = parseMd('body.md', body).headings[0];
-  return body
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .slice(0, first ? first.line - 1 : undefined)
-    .join('\n')
-    .trim();
-}
-
-/**
- * 需求文档，照 specs/ 下已有的几份的样子：标题、「对应计划」「设计依据」两行，接着是整份正文；
- * 正文里没有「## 现状」就补一节「未开工。」。里程碑是 P 阶段（旧写法）时「对应计划」的引号故意空着：不填就提交，
- * 文档指针检查会红；里程碑是版本或未排期时直接写版本全名或「未排期」，不用 plan.md 那一套核。
- */
-export function specsDoc(title: string, number: number, milestone: string, body: string): string {
-  const phase = milestonePhase(milestone);
-  const plan = phase === undefined ? milestone : `plan.md P${phase}「」`;
-  const text = body.replace(/\r\n?/g, '\n').trim();
-  const hasStatus = parseMd('body.md', text).headings.some((h) => h.title.trim() === '现状');
-  return [
-    `# ${title}（#${number}）`,
-    '',
-    `对应计划：${plan}`,
-    '设计依据：',
-    '',
-    text,
-    ...(hasStatus ? [] : ['', '## 现状', '', '未开工。']),
-    '',
-  ].join('\n');
-}
-
-/** 建了需求文档后 bin 打的提示：P 阶段（旧写法）还要去 plan.md 那一条的引号里填字，版本、未排期不用。 */
-export function specsHint(milestone: string): string {
-  return milestonePhase(milestone) === undefined
-    ? '「设计依据」写上 design 哪一节再提交'
-    : '「对应计划」的引号里填上 plan.md 那一条、「设计依据」写上 design 哪一节再提交';
-}
-
-function writeSpecs(root: string, number: number, short: string, text: string): string {
-  const name = `${number}-${short}`;
-  const dir = join(root, 'specs', name);
-  if (existsSync(dir)) throw new Error(`specs/${name}/ 已经在了，没覆盖`);
-  mkdirSync(dir);
-  writeFileSync(join(dir, '需求.md'), text, { flag: 'wx' });
-  return `specs/${name}/需求.md`;
-}
-
 /** 真的 gh：不经 shell，参数原样传；gh 起不来（没装、不在 PATH）也回一个非 0 的结果，不抛。 */
 export function ghRunner(root: string, command = 'gh'): Gh {
   return (args) =>
@@ -474,14 +398,6 @@ export function ghRunner(root: string, command = 'gh'): Gh {
 
 function detail(r: GhResult): string {
   return (r.stderr.trim() || r.stdout.trim() || '（gh 什么也没说）').replace(/\s+/g, ' ');
-}
-
-function isDir(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
 }
 
 function message(e: unknown): string {
