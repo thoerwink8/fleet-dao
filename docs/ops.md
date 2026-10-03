@@ -723,7 +723,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 **CI 测试的 Postgres 服务**（#220，只在 CI，不装到任何机器：
 
-- 在哪：`ci.yml` 的 `test` job 旁边起一个 `postgres:16-alpine` 服务容器（大版本和法国生产一致，第二节），`fleet_test`/`fleet_test`，库 `fleet_test_admin`，健康检查 `pg_isready`。只在 tests 那个分片的运行期间活，跑完整只容器销毁，不写持久化，也不是生产。
+- 在哪：`ci.yml` 的 `test` job 里 db 分片自己 `docker run` 起一个 `postgres:16-alpine` 容器（不用 `services:`：那个每个分片都起，engine、rest 白等约 12 秒）（大版本和法国生产一致，第二节），`fleet_test`/`fleet_test`，库 `fleet_test_admin`，健康检查 `pg_isready`。只在 tests 那个分片的运行期间活，跑完整只容器销毁，不写持久化，也不是生产。
 - 用法：`packages/db/src/testing.ts` 在 `FLEET_TEST_PG_URL` 有值时真连过去：第一次跑迁移建一个模板库 `fleet_test_template`（同一台服务的多个测试进程用咨询锁串行，不重建），之后每个测试文件 `CREATE DATABASE <随机名> TEMPLATE fleet_test_template` 克隆一份当自己的测试库，跑完整张删（`drop database … with (force)`），堆不出几 G。`ci.yml` 只把 `FLEET_TEST_PG_URL` 给到 `db` 分片；`engine`、`rest` 不设、本机也不设，都照 PGlite 走。
 - 登不上去、建不了模板当场红（packages/db/test/real-pg.test.ts 故意造出失败的那条：`createTestDb` 克隆出来的库里业务表必须全是空的，读到正式库数据一定红）。**不静默退回 PGlite 冒充**——#220「测试库连不上要明确报错」。
 - 为什么这么写：每个测试进程不再各建一份内存 PGlite（峰值 800+ MiB），共用一张真库之后降到 ~0.3G；`packages/conventions/src/test-run.ts` 的 `WORKER_MIB`/`RESERVE_MIB` 等实测过再调。CI 上这个容器是 GitHub Actions 的 service container（runner 内部账号、监听 localhost:5432，跟生产用户、登录鉴权没有任何关系）。
