@@ -1,7 +1,8 @@
 // CHANGELOG.md → 版本号、正文、tag 名、milestone 名、飞书消息，发布合并后那一步「记一版」的核心解析。
-// 仓里现在有两头用：
-//   - packages/conventions/src/release-notes.ts：发布那条线（tag、release、milestone、飞书、状态机），在这一份上再叠。
+// 仓里现在有三头用：
+//   - packages/conventions/src/release-notes.ts、publish-actions.ts：发布那条线（发起 PR、tag、release、milestone、飞书、状态机），在这一份上再叠。
 //   - packages/web/src/lib/changelog.ts：驾驶舱 /changelog 页拿它把仓根的 CHANGELOG.md 摆出来。
+//   - packages/api/src/release-version.ts：驾驶舱后端拿已发的版本，照 publish:pr 同一份判法核这一版的版本号。
 // 改这里之前必须知道：
 // - CHANGELOG.md 的格式钉死了（Unreleased 标题、版本标题的样子见本文件里的常量）：识别不到模样就报错，不宽容。
 // - 同一个提交幂等：tag 名、release 名、milestone 名、飞书头之一是重复的话就当「做过了」，不暗示第二次。
@@ -32,11 +33,12 @@ export interface ChangelogSplit {
   /** Unreleased 后面那一段（拼正文用）。 */
   section: string;
   /**
-   * 只按 CHANGELOG.md 猜的下一版：已发的最大版本 +1（一版没发过就是 v1），日期是今天。
-   * 不是这一版真正的版本号——真正的取当前版本里程碑（packages/conventions/src/publish-actions.ts 的 releaseVersion）：
-   * 里程碑和更新日志的版本号可以不连续（v1、v2 是没写更新日志就关掉的里程碑）。只给驾驶舱显示用。
+   * 下一版收进「## [v<N>] - 日期」标题时用的日期（今天，UTC）。这里不给版本号：版本号取当前版本里程碑
+   * （packages/conventions/src/publish-actions.ts 的 releaseVersion），里程碑和更新日志的版本号可以不连续
+   * （v1、v2 是没写更新日志就关掉的里程碑）。原先这里还按「已发的最大版本 +1」猜一个，驾驶舱拿它显示，
+   * 第一版叫成了 v1（#725）；别再从更新日志推版本号。
    */
-  next: { version: string; date: string };
+  next: { date: string };
   /** 仓里已经记住的版本（拼「上一版」用）。 */
   released: Version[];
   /** Unreleased 是否有真内容（不是空、也不是只剩占位）。 */
@@ -71,17 +73,8 @@ export function splitChangelog(text: string, now: () => string = today): Changel
     if (m) released.push({ version: m[1] ?? '', date: m[2] ?? '' });
   }
   released.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.version < b.version ? 1 : -1));
-  const last = released[0];
-  const lastNum = last ? parseInt(last.version.slice(1), 10) : 0;
-  const nextVersion = `v${lastNum + 1}`;
   const hasContent = section.length > 0 && !isPlaceholderSection(section);
-  return { section, next: { version: nextVersion, date: now() }, released, hasContent };
-}
-
-/** 同一行的下一版本：v1 之后是 v2。 */
-export function nextVersion(version: string): string {
-  if (!/^v\d+$/.test(version)) throw new Error(`真的版本号模样认不出（应为 v<N>）：「${version}」`);
-  return `v${parseInt(version.slice(1), 10) + 1}`;
+  return { section, next: { date: now() }, released, hasContent };
 }
 
 /** 日期只为「今天」，UTC（不拿机器本地时区，在 v1 收尾时想要走到 UTC 里真正的一天）。 */
