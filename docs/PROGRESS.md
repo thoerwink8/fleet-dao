@@ -62,6 +62,12 @@
   母单 #632）补上。闸合进来以后，引擎的任务 PR 没有 cold-verify 就合不了；人手的 PR 不受影响。还没真跑过（演练 S2-7 之前
   「让 AI 接活」没有任何仓打开）。
 
+## 2026-10-02 夜（派工交代带上「报进度」，PR #663）
+
+- 创始人问「为什么不遵守约定、反馈要带进度，断链在哪」。查实：规矩没断（通用段第 12、13 行，`agents-sync` 正常同步到 `~/.claude/CLAUDE.md`），断在派工那一段——`commander` 技能的交代清单没要求带上汇报格式和落盘要求，工人只读交代不读通用段，于是整晚子代理做完的活报回来全是散文、进度没落回 specs。
+- 修法（创始人 2026-10-02「做」）：`agents/skills/commander/SKILL.md` 派活那一条写明「交代里必须带上通用段『报进度』那两条」；加钉住它的测试 `agents/test/rules/brief-progress.rules.test.ts`（含一条故意造出的失败）。PR [#663](https://github.com/thoerwink8/fleet-dao/pull/663) CI 全绿已合并，主线 `9135cd1`。
+- 顺带：本机 `user.email` 是 `rmtbsmgo374@outlook.com`，往 GitHub 推被 email privacy 规则拒了一次；改成仓里在用的 `211872110+thoerwink8@users.noreply.github.com` 才推上去。
+
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
 - 16:28 收尾：PR [#621](https://github.com/thoerwink8/fleet-dao/pull/621) 已合并，主线 `20a7e476`；必过 CI 及 Windows、Intel Mac、Apple Silicon Mac、Linux 原生测试/构建全部通过（Actions `36983791868` / `36983791622`）。16:29 本机一键同步已取到该主线，退出 0，并确认 Mirasim 已是当前新版、未重启会话；旧命令与参数备份保留。实现与本机迁移已交付；未验的仍为真实两向模型请求的服务端额度、用户 Mac GUI、法国现场，不能用上述检查替代。
