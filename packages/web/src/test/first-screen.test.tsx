@@ -101,8 +101,9 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     expect(screen.queryByText('正在确认登录…')).toBeNull();
     expect(w.subscribed).toEqual([2]);
     await w.release();
-    // 主页用不到路由（路由是任务详情的换模型对话框用，没打开也不读）
+    // 主页用不到路由（路由两层是换模型对话框用的，没打开也不读）
     expect(w.called('routing')).toBe(false);
+    expect(w.called('routingLayers')).toBe(false);
   });
 
   test('主页就算本机没记过仓，me、repos、home、notifications 也还是第 1 轮发；各仓的看板等仓列表，第 2 轮', async () => {

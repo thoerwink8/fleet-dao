@@ -7,6 +7,7 @@ import {
   AuditQuery,
   AuditResponse,
   BoardResponse,
+  DEFAULT_SESSION_EFFORT,
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
@@ -18,6 +19,7 @@ import {
   PoolsResponse,
   ReposResponse,
   ResolveNotificationResponse,
+  RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
   RunStepsResponse,
@@ -25,13 +27,14 @@ import {
   type SettingKey,
   SettingsResponse,
   StageKindSchema,
-  type StagePolicy,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
   TimelineResponse,
   UpdateChannelRequest,
   UpdateChannelResponse,
+  UpdateRouteEffortRequest,
+  UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
   UpdateStagePolicyRequest,
@@ -56,6 +59,7 @@ import {
   WorkflowUnavailableError,
 } from './ports.ts';
 import { registerReleaseRoutes } from './release-version.ts';
+import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { findSelfRepo } from './self-repo.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
@@ -363,22 +367,18 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, AnswerAskResponse, { ok: true });
   });
 
+  // 路由目录。每个用途的先后不在这里给：那是路由两层（下面 routingLayers），旧的阶段平铺表没人读了（#574）
   app.get(WebRoutes.routing.path, async (c) => {
-    const [channels, pools, models, routes, policies, bans] = await Promise.all([
+    const [channels, pools, models, routes, bans] = await Promise.all([
       store.listChannels(),
       store.listPools(),
       store.listModels(),
       store.listRoutes(),
-      store.listStagePolicies(),
       store.listBans(),
     ]);
-    const byStage = new Map(policies.map((p) => [p.stage, p]));
-    const stages: StagePolicy[] = StageKindSchema.options.map(
-      (stage) => byStage.get(stage) ?? { stage, routeIds: [], pinned: false },
-    );
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
     // 路由在线状态就是库里探针的结论（routes.alive、probe_*，#129），原样给驾驶舱
-    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
+    return reply(c, RoutingResponse, { channels, pools, models, routes, hardBans, bans });
   });
 
   // 路由两层每一层现在活着吗（#574）：读的时候现算，不存。读不到回 503 写明没读成；没接上写 unavailable。
@@ -404,6 +404,74 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, RoutingLayersResponse, {
       asOf: now.toISOString(),
       purposes: routingLayersView(layers, { models, channels }),
+    });
+  });
+
+  // 每条路由的思考档位（#470）：读库里现在配的。没接上写 unavailable；读不到回 503 写明没读成。
+  app.get(WebRoutes.routingEfforts.path, async (c) => {
+    if (!deps.routingEfforts) {
+      return reply(c, RoutingEffortsResponse, {
+        defaultEffort: DEFAULT_SESSION_EFFORT,
+        models: [],
+        unavailable: ROUTING_EFFORTS_NOT_HERE,
+      });
+    }
+    let rows: Awaited<ReturnType<RoutingEffortsPort['read']>>;
+    try {
+      rows = await deps.routingEfforts.read();
+    } catch (err) {
+      deps.log.error('思考档位没读成', { error: fullStack(err) });
+      throw new ApiError(
+        503,
+        'routing_efforts_unreadable',
+        (err instanceof Error && err.message) || String(err),
+      );
+    }
+    return reply(c, RoutingEffortsResponse, {
+      defaultEffort: DEFAULT_SESSION_EFFORT,
+      models: routingEffortsView(rows),
+    });
+  });
+
+  // 改一条路由的思考档位（#470）：直接写库（运行时配置，决定 0011 第 7 条），和操作记录同一事务；下一个起的会话就照它。
+  // 这条路由的执行方式不认、路由两层里没挂、别人刚改过，都拒，库里一行不动。
+  app.put(WebRoutes.updateRouteEffort.path, async (c) => {
+    const modelId = c.req.param('modelId');
+    const routeId = c.req.param('routeId');
+    const body = await readJson(c, UpdateRouteEffortRequest);
+    if (!deps.routingEfforts) throw new ApiError(503, 'routing_efforts_not_wired', ROUTING_EFFORTS_NOT_HERE);
+    let result: Awaited<ReturnType<RoutingEffortsPort['set']>>;
+    try {
+      result = await deps.routingEfforts.set(
+        { modelId, routeId, effort: body.effort, expected: body.expected },
+        {
+          actor: actorOf(c),
+          action: 'routing.effort.update',
+          target: `route:${routeId}`,
+          reason: body.reason,
+          via: c.get('via'),
+          ok: true,
+        },
+      );
+    } catch (err) {
+      deps.log.error('思考档位没改成', { modelId, routeId, error: fullStack(err) });
+      throw new ApiError(
+        503,
+        'routing_effort_unwritable',
+        (err instanceof Error && err.message) || String(err),
+      );
+    }
+    if (!result.ok) {
+      if (result.kind === 'not_found') throw new ApiError(404, 'route_not_found', result.why);
+      if (result.kind === 'invalid') throw new ApiError(422, 'effort_not_allowed', result.why);
+      throw new ApiError(409, 'conflict', '这条路由的档位刚被别人改过，刷新后再改', {
+        current: result.current,
+      });
+    }
+    return reply(c, UpdateRouteEffortResponse, {
+      modelId,
+      routeId,
+      ...(result.after === null ? {} : { effort: result.after }),
     });
   });
 

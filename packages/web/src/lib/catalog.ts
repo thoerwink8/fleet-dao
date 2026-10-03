@@ -1,11 +1,6 @@
 // 路由、模型、账号池、额度窗的查询与白话名。各页都从这里拿名字，不各拼各的。
 
-import {
-  hardBanFor,
-  ROUTE_PROBE_EVERY_MINUTES,
-  routeProbeStaleMinutes,
-  windowAppliesTo,
-} from '@fleet-dao/shared';
+import { ROUTE_PROBE_EVERY_MINUTES, routeProbeStaleMinutes, windowAppliesTo } from '@fleet-dao/shared';
 import { brand } from '#brand';
 import type {
   BillingKind,
@@ -112,34 +107,6 @@ export function routeInfo(routing: Routing, routeId: string): RouteInfo | undefi
     channelEnabled: channel?.enabled ?? false,
     retired: Boolean(model?.retiredAt),
   };
-}
-
-/**
- * 这条路由能不能用在这个阶段；能就返回 null，不能就返回白话原因。
- * 和后端的 routeProblem 同一套判据：先过写死的硬禁令（shared/bans.ts），再过库里的禁令，再看下架。
- */
-export function routeProblem(
-  routing: Routing,
-  routeId: string,
-  stage: StageKind | undefined,
-  now: number,
-): string | null {
-  const route = routing.routes.find((r) => r.id === routeId);
-  if (!route) return `路由 ${routeId} 不存在`;
-  const model = routing.models.find((m) => m.id === route.modelId);
-  if (!model) return `路由 ${routeId} 用的模型 ${route.modelId} 不在模型目录里`;
-  const hard = hardBanFor(model, stage);
-  if (hard) return `禁令：${hard.reason}`;
-  const ban = routing.bans.find((b) => {
-    if (b.family === undefined && b.modelId === undefined) return false;
-    if (b.family !== undefined && b.family.toLowerCase() !== model.family.toLowerCase()) return false;
-    if (b.modelId !== undefined && b.modelId !== model.id) return false;
-    if (b.stage !== undefined && b.stage !== stage) return false;
-    return true;
-  });
-  if (ban) return `禁令：${ban.reason}`;
-  if (model.retiredAt && Date.parse(model.retiredAt) <= now) return '模型已下架';
-  return null;
 }
 
 /**

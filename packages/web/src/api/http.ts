@@ -14,6 +14,7 @@ import {
   TaskActionRequest,
   UpdateChannelRequest,
   UpdateDemoDefaultRequest,
+  UpdateRouteEffortRequest,
   UpdateSettingRequest,
   UpdateStagePolicyRequest,
   WEB_API_PREFIX,
@@ -176,6 +177,11 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     },
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),
     routingLayers: () => send('GET', apiUrl(R.routingLayers.path), R.routingLayers.response),
+    routingEfforts: () => send('GET', apiUrl(R.routingEfforts.path), R.routingEfforts.response),
+    updateRouteEffort: (modelId, routeId, body) =>
+      send('PUT', apiUrl(R.updateRouteEffort.path, { modelId, routeId }), R.updateRouteEffort.response, {
+        body: UpdateRouteEffortRequest.parse(body),
+      }),
     async updateStagePolicy(stage, body) {
       const res = await send(
         'PUT',

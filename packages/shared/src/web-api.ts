@@ -22,6 +22,7 @@ import type {
   SubtaskState,
   TaskState,
 } from './domain.ts';
+import { SESSION_EFFORTS } from './effort.ts';
 import { type ChangeEvent, REALTIME_TABLES } from './realtime.ts';
 import { SEGMENT_KINDS, SEGMENT_OUTCOMES, SEGMENT_TIERS, type SegmentRunView } from './segment-runs.ts';
 import type { TaskUsage } from './usage.ts';
@@ -620,12 +621,15 @@ export const NotWiredSchema = z.object({
 });
 export type NotWired = z.infer<typeof NotWiredSchema>;
 
+/**
+ * 路由目录：渠道、账号池、模型、路由和禁令。每个用途按什么先后用哪些路由不在这里——那是路由两层（下面的
+ * RoutingLayersResponse，GET /routing/layers），换模型对话框、路由页都读那一份（#574）。
+ */
 export const RoutingResponse = z.object({
   channels: z.array(ChannelSchema),
   pools: z.array(PoolSchema),
   models: z.array(ModelSchema),
   routes: z.array(RouteSchema),
-  stages: z.array(StagePolicySchema),
   /** 写死在代码里的全局禁令（bans.ts），驾驶舱只读展示，改不了。 */
   hardBans: z.array(z.object({ id: z.string(), reason: z.string() })),
   /** 库里另外配的禁令，和 hardBans 一起生效。 */
@@ -721,6 +725,65 @@ export const RoutingLayersResponse = z.object({
   purposes: z.array(RoutingLayerPurposeSchema),
   /** 这里读不了路由两层（开发环境的内存版没有这两张表）：写明为什么，不拿空列表冒充「都没配」。 */
   unavailable: z.string().optional(),
+});
+
+// —— 思考档位（#470）：路由两层里每个模型下的每条路由，起会话想多深 ——
+// 存在库里（routing_catalog.effort，运行时配置，决定 0011 第 7 条）：改了下一个起的会话就照新的，不走改仓库再部署。
+// 能配哪几档照 effort.ts 的 routeEffortChoices（和引擎起会话、骨架装载同一份判法）。
+
+export const SessionEffortSchema = z.enum(SESSION_EFFORTS);
+
+export const RouteEffortSchema = z.object({
+  routeId: Id,
+  channelId: Id,
+  /** 渠道目录里的名字；目录里找不到就是渠道编号。 */
+  channelName: z.string(),
+  poolId: Id,
+  hostId: HostIdSchema,
+  /** 起会话时发给执行体的模型串（路由的上游模型串，没有就是模型编号）：cursor 能不能配看它带不带方括号。 */
+  model: z.string(),
+  /** 这条路由在它的模型下开着吗：关着的也能先配好，开了就照它。 */
+  enabled: z.boolean(),
+  /** 配的档位；没有 = 没配，起会话用 defaultEffort。 */
+  effort: SessionEffortSchema.optional(),
+  /** 能配哪几档，从低到高；配不了时为空，fixed 写为什么。 */
+  choices: z.array(SessionEffortSchema),
+  fixed: z.string().optional(),
+});
+
+export const EffortModelSchema = z.object({
+  modelId: Id,
+  /** 模型目录里的名字；目录里找不到就是模型编号。 */
+  displayName: z.string(),
+  family: z.string().optional(),
+  /** 这个模型下的路由，按路由两层里的先后。 */
+  routes: z.array(RouteEffortSchema),
+});
+
+export const RoutingEffortsResponse = z.object({
+  /** 没配的路由起会话用这一档。 */
+  defaultEffort: SessionEffortSchema,
+  /** 挂进了路由两层的模型（按模型编号排）。unavailable 时为空。 */
+  models: z.array(EffortModelSchema),
+  /** 这里读不了（开发环境的内存版没有路由两层那两张表）：写明为什么，不拿空列表冒充「都没配」。 */
+  unavailable: z.string().optional(),
+});
+
+/**
+ * 改一条路由的思考档位。effort 写 null = 清掉、回到没配（用 defaultEffort）。expected 填改之前看到的（没配写 null）：
+ * 别人先改了就返回 409，刷新后再改，不悄悄盖掉。这条路由的执行方式不认的档返回 422 写明为什么。
+ */
+export const UpdateRouteEffortRequest = z.object({
+  effort: SessionEffortSchema.nullable(),
+  expected: SessionEffortSchema.nullable(),
+  /** 写进操作记录。 */
+  reason: z.string().max(500).optional(),
+});
+export const UpdateRouteEffortResponse = z.object({
+  modelId: Id,
+  routeId: Id,
+  /** 改完的档位；没有 = 没配。 */
+  effort: SessionEffortSchema.optional(),
 });
 
 // —— 账号池与额度 ——
@@ -1230,6 +1293,13 @@ export const WebRoutes = {
   },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
   routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },
+  routingEfforts: { method: 'GET', path: '/routing/efforts', response: RoutingEffortsResponse },
+  updateRouteEffort: {
+    method: 'PUT',
+    path: '/routing/efforts/:modelId/:routeId',
+    request: UpdateRouteEffortRequest,
+    response: UpdateRouteEffortResponse,
+  },
   updateStagePolicy: {
     method: 'PUT',
     path: '/routing/stages/:stage',

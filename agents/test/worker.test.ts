@@ -42,6 +42,7 @@ interface WorkerIo {
 }
 interface WorkerLib {
   USAGE: string;
+  SESSION_EFFORTS: string[];
   EFFORTS: string[];
   DEFAULT_EFFORT: string;
   GITHUB_HOSTS: string[];
@@ -86,11 +87,22 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** 仓里真的路由骨架：家目录的同步专用检出里默认放这一份（启动器的档位照它定，#470）。 */
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const REAL_SKELETON = readFileSync(join(REPO_ROOT, 'packages', 'db', 'routing.default.json'), 'utf8');
+const skeletonFile = (home: string) =>
+  join(home, '.fleet-dao', 'origin-main', 'packages', 'db', 'routing.default.json');
+function writeSkeleton(home: string, text: string) {
+  mkdirSync(join(home, '.fleet-dao', 'origin-main', 'packages', 'db'), { recursive: true });
+  writeFileSync(skeletonFile(home), text);
+}
+
 /** repo 是一个真实存在的临时目录（不是 git 仓，git/gh/pnpm 全是假的），worktreeDir 是它的兄弟目录 fd-w-<name>。 */
 function world() {
   const home = mkdtempSync(join(tmpdir(), 'fleet-worker-home-'));
   const parent = mkdtempSync(join(tmpdir(), 'fleet-worker-parent-'));
   dirs.push(home, parent);
+  writeSkeleton(home, REAL_SKELETON);
   const repo = join(parent, 'fleet-dao');
   mkdirSync(repo, { recursive: true });
 
@@ -187,9 +199,16 @@ function world() {
       writeFileSync(join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
       return dir;
     },
+    /** 换掉同步专用检出里的路由骨架（text 是文件原文）；dropSkeleton 删掉它。 */
+    skeleton: (text: string) => writeSkeleton(home, text),
+    dropSkeleton: () => rmSync(skeletonFile(home)),
     run: (argv: string[]) => lib.runWorker(argv, io),
   };
 }
+
+/** 一份最小的路由骨架：models 给什么就是什么。 */
+const skeletonWith = (models: Record<string, unknown>) =>
+  JSON.stringify({ purposes: { default: Object.keys(models) }, models });
 
 /** start 的一份合格 meta：clean/status/stop 的用例不走 start，直接手写一份，省得每次都跑一遍 start 的六步。 */
 function validMeta(w: ReturnType<typeof world>, name: string, over: Record<string, unknown> = {}) {
@@ -355,7 +374,7 @@ describe('start：happy path', () => {
     expect(prompt).not.toContain('gh pr create');
   });
 
-  it('--effort 不给就是 high，且总是显式传给命令行', async () => {
+  it('--effort 不给、仓里的路由骨架没给这个模型配档位：就是 high，且总是显式传给命令行', async () => {
     const w = world();
     w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
     w.pnpmReplies.push(ok());
@@ -365,6 +384,7 @@ describe('start：happy path', () => {
     const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
     expect(spec.args).toEqual(expect.arrayContaining(['--reasoning-effort', 'high']));
     expect(w.meta('w3').effort).toBe('high');
+    expect(w.out.join('\n')).toContain('档位 high（路由骨架里 grok-4.7 没配，用默认）');
   });
 
   it('--no-automerge：收尾交代改成开人闸 PR、不挂自动合并、CI 绿就停；不带则挂自动合并', async () => {
@@ -389,6 +409,141 @@ describe('start：happy path', () => {
     const fast = w2.prompt('w-fast');
     expect(fast).toContain('gh pr merge <PR 号> --auto --squash');
     expect(fast).not.toContain('人闸：改标准');
+  });
+});
+
+// 叫法和档位照 packages/shared/src/effort.ts（驾驶舱、引擎用的那一份）：启动器是 .mjs、引不了它，这里钉住两边一样
+const sharedEffort = (await import(
+  pathToFileURL(join(REPO_ROOT, 'packages', 'shared', 'src', 'effort.ts')).href
+)) as {
+  SESSION_EFFORTS: readonly string[];
+  GROK_EFFORTS: readonly string[];
+  DEFAULT_SESSION_EFFORT: string;
+};
+
+describe('start：思考档位照仓里的路由骨架（#470，本机读不到法国库）', () => {
+  /** 跑一次 start 到起模型那一步（git、pnpm、spawn 都给成功）。 */
+  const started = async (w: ReturnType<typeof world>, args: string[]) => {
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 7 });
+    const code = await w.run(['start', ...args, '--brief', brief(w)]);
+    return { code, spec: w.spawnCalls[0] };
+  };
+
+  it('档位的叫法、默认档和驾驶舱、引擎用的同一份（packages/shared/src/effort.ts）', () => {
+    expect(lib.SESSION_EFFORTS).toEqual([...sharedEffort.SESSION_EFFORTS]);
+    expect(lib.DEFAULT_EFFORT).toBe(sharedEffort.DEFAULT_SESSION_EFFORT);
+    // grok 命令行认的档：和引擎起 grok 会话认的一样
+    expect(lib.EFFORTS).toEqual([...sharedEffort.GROK_EFFORTS]);
+  });
+
+  it('grok：骨架给 grok-4.7 配了 medium，命令行就是 --reasoning-effort medium，说清是骨架配的', async () => {
+    const w = world();
+    w.skeleton(
+      skeletonWith({ 'grok-4.7': [{ routeId: 'grok:grok-4.7:grok', enabled: true, effort: 'medium' }] }),
+    );
+    const { code, spec } = await started(w, ['--model', 'grok', '--name', 'e1']);
+    expect(code).toBe(0);
+    expect(spec?.args).toEqual(expect.arrayContaining(['--reasoning-effort', 'medium']));
+    expect(w.meta('e1').effort).toBe('medium');
+    expect(w.out.join('\n')).toContain('档位 medium（路由骨架给 grok-4.7 配的）');
+  });
+
+  it('codex：照 GPT（gpt-5.6-luna）配的；没配的路由（cursor 的整串模型名）不算', async () => {
+    const w = world();
+    w.skeleton(
+      skeletonWith({
+        'gpt-5.6-luna': [
+          { routeId: 'cursor:gpt-5.6-luna:cursor-agent', enabled: true },
+          { routeId: 'mirasim-relay:gpt-5.6-luna:mirasim', enabled: false, effort: 'low' },
+        ],
+      }),
+    );
+    const { code, spec } = await started(w, ['--model', 'codex', '--name', 'e2']);
+    expect(code).toBe(0);
+    expect(spec?.args).toEqual(expect.arrayContaining(['-c', 'model_reasoning_effort="low"']));
+  });
+
+  it('--model-id 给了按它查；骨架里没有这个模型：high，说清没配', async () => {
+    const w = world();
+    const { code, spec } = await started(w, ['--model', 'grok', '--name', 'e3', '--model-id', 'grok-4.8']);
+    expect(code).toBe(0);
+    expect(spec?.args).toEqual(expect.arrayContaining(['--reasoning-effort', 'high', '--model', 'grok-4.8']));
+    expect(w.out.join('\n')).toContain('档位 high（路由骨架里没有模型 grok-4.8，用默认）');
+  });
+
+  it('--effort 给了：这一次照它（不读骨架，骨架不在也行）', async () => {
+    const w = world();
+    w.skeleton(
+      skeletonWith({ 'grok-4.7': [{ routeId: 'grok:grok-4.7:grok', enabled: true, effort: 'medium' }] }),
+    );
+    const first = await started(w, ['--model', 'grok', '--name', 'e4', '--effort', 'xhigh']);
+    expect(first.spec?.args).toEqual(expect.arrayContaining(['--reasoning-effort', 'xhigh']));
+    expect(w.out.join('\n')).toContain('档位 xhigh（--effort 指定的）');
+
+    const w2 = world();
+    w2.dropSkeleton();
+    const second = await started(w2, ['--model', 'grok', '--name', 'e5', '--effort', 'low']);
+    expect(second.code).toBe(0);
+    expect(second.spec?.args).toEqual(expect.arrayContaining(['--reasoning-effort', 'low']));
+  });
+
+  describe('【故意造出的失败】骨架读不到、认不出：退出码 2、说清哪里不对，不碰 git、不起模型，不当成 high', () => {
+    const refused = async (w: ReturnType<typeof world>, text: string | RegExp, model = 'grok') => {
+      const code = await w.run(['start', '--model', model, '--name', 'bad', '--brief', brief(w)]);
+      expect(code).toBe(2);
+      expect(w.err.at(-1)).toMatch(text);
+      expect(w.gitCalls).toEqual([]);
+      expect(w.spawnCalls).toEqual([]);
+    };
+
+    it('同步专用检出里没有骨架', async () => {
+      const w = world();
+      w.dropSkeleton();
+      await refused(w, /路由骨架读不到.*pnpm agents:sync/);
+    });
+
+    it('不是 JSON、没有 models、模型下不是路由列表', async () => {
+      const w = world();
+      w.skeleton('{ 坏的');
+      await refused(w, /路由骨架不是 JSON/);
+      const w2 = world();
+      w2.skeleton(JSON.stringify({ purposes: {} }));
+      await refused(w2, /没有 models/);
+      const w3 = world();
+      w3.skeleton(skeletonWith({ 'grok-4.7': { routeId: 'x' } }));
+      await refused(w3, /models\.grok-4\.7 不是路由列表/);
+    });
+
+    it('档位写了认不出的值', async () => {
+      const w = world();
+      w.skeleton(
+        skeletonWith({ 'grok-4.7': [{ routeId: 'grok:grok-4.7:grok', enabled: true, effort: 'turbo' }] }),
+      );
+      await refused(w, /grok:grok-4\.7:grok 的思考档位认不出："turbo"/);
+    });
+
+    it('配了这个命令行不认的档（grok 没有 max）', async () => {
+      const w = world();
+      w.skeleton(
+        skeletonWith({ 'grok-4.7': [{ routeId: 'grok:grok-4.7:grok', enabled: true, effort: 'max' }] }),
+      );
+      await refused(w, /配的是 max，grok 命令行不认/);
+    });
+
+    it('同一模型几条路由配的不一样：不知道照哪条，不挑一个', async () => {
+      const w = world();
+      w.skeleton(
+        skeletonWith({
+          'gpt-5.6-luna': [
+            { routeId: 'a', enabled: true, effort: 'low' },
+            { routeId: 'b', enabled: true, effort: 'high' },
+          ],
+        }),
+      );
+      await refused(w, /几条路由配的档位不一样（a：low、b：high）/, 'codex');
+    });
   });
 });
 

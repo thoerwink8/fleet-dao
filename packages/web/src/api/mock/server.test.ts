@@ -200,9 +200,13 @@ describe('假后端：追问', () => {
 });
 
 describe('假后端：调度台', () => {
+  // 路由目录（routing()）不再带阶段顺序（#574）：改阶段顺序的结果直接看假数据
+  const stageOf = (api: ReturnType<typeof fresh>, stage: string) =>
+    api.state().stages.find((s) => s.stage === stage);
+
   test('按「改之前看到的样子」保存；别人先改了就 409，不悄悄盖掉', async () => {
     const api = fresh();
-    const seen = (await api.routing()).stages.find((s) => s.stage === 'review');
+    const seen = structuredClone(stageOf(api, 'review'));
     if (!seen) throw new Error('没有 review 阶段');
     const reversed = [...seen.routeIds].reverse();
     await api.updateStagePolicy('review', {
@@ -219,8 +223,7 @@ describe('假后端：调度台', () => {
     );
     expect(stale.status).toBe(409);
     expect(stale.code).toBe('conflict');
-    const now = (await api.routing()).stages.find((s) => s.stage === 'review');
-    expect(now?.routeIds).toEqual(reversed);
+    expect(stageOf(api, 'review')?.routeIds).toEqual(reversed);
     const { items } = await api.audit({ target: 'stage:review' });
     expect(items[0]).toMatchObject({
       action: 'stage_policy.update',
@@ -231,7 +234,7 @@ describe('假后端：调度台', () => {
 
   test('UI 阶段放不进 GPT：写死的禁令，422', async () => {
     const api = fresh();
-    const ui = (await api.routing()).stages.find((s) => s.stage === 'ui');
+    const ui = structuredClone(stageOf(api, 'ui'));
     if (!ui) throw new Error('没有 ui 阶段');
     const e = await rejects(
       api.updateStagePolicy('ui', {

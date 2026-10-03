@@ -31,6 +31,7 @@ import type {
   ReleaseVersion,
   Repo,
   Routing,
+  RoutingEfforts,
   RoutingLayers,
   RunSteps,
   Setting,
@@ -43,6 +44,8 @@ import type {
   Timeline,
   UpdateChannelBody,
   UpdateDemoDefaultBody,
+  UpdatedRouteEffort,
+  UpdateRouteEffortBody,
   UpdateSettingBody,
   UpdateStagePolicyBody,
 } from './types';
@@ -69,6 +72,14 @@ export interface FleetApi {
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
+  /** 每个模型下每条路由起会话的思考档位（#470）。 */
+  routingEfforts(): Promise<RoutingEfforts>;
+  /** 改一条路由的思考档位：effort 写 null = 回到没配（默认档）；expected 是改之前看到的，对不上 409。 */
+  updateRouteEffort(
+    modelId: string,
+    routeId: string,
+    body: UpdateRouteEffortBody,
+  ): Promise<UpdatedRouteEffort>;
   updateStagePolicy(stage: StageKind, body: UpdateStagePolicyBody): Promise<StagePolicy>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
@@ -134,6 +145,7 @@ export const keys = {
   runSteps: (runId: string) => ['run-steps', runId] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
+  routingEfforts: ['routing-efforts'] as const,
   pools: ['pools'] as const,
   jobs: ['jobs'] as const,
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
@@ -220,7 +232,7 @@ export function useRunSteps(runId: string | undefined) {
   });
 }
 
-/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。enabled 为假时不读（比如换模型的对话框没打开）。 */
+/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。 */
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000, enabled });
@@ -228,13 +240,24 @@ export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
 
 /**
  * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每分钟重拉；
- * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。
+ * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。enabled 为假时不读（比如换模型的对话框没打开）。
  */
-export function useRoutingLayers() {
+export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({
     queryKey: keys.routingLayers,
     queryFn: () => api.routingLayers(),
+    refetchInterval: 60_000,
+    enabled,
+  });
+}
+
+/** 每条路由的思考档位（#470）。没有推送（routing_catalog 不在推送名单里）：改的那一下自己重拉，别人改的靠定时重拉。 */
+export function useRoutingEfforts() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.routingEfforts,
+    queryFn: () => api.routingEfforts(),
     refetchInterval: 60_000,
   });
 }
@@ -370,36 +393,6 @@ export function useAnswerAsk() {
   });
 }
 
-/** 改一个阶段的路由：先改缓存让拖动跟手；后端说「别人刚改过」（409）就回滚并重拉。 */
-export function useUpdateStagePolicy() {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ stage, body }: { stage: StageKind; body: UpdateStagePolicyBody }) =>
-      api.updateStagePolicy(stage, body),
-    onMutate: async ({ stage, body }) => {
-      await qc.cancelQueries({ queryKey: keys.routing });
-      const prev = qc.getQueryData<Routing>(keys.routing);
-      if (prev) {
-        qc.setQueryData<Routing>(keys.routing, {
-          ...prev,
-          stages: prev.stages.map((s) =>
-            s.stage === stage ? { stage, routeIds: body.routeIds, pinned: body.pinned } : s,
-          ),
-        });
-      }
-      return { prev };
-    },
-    onError: (_e, _v, ctx) => {
-      if (ctx?.prev) qc.setQueryData(keys.routing, ctx.prev);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.routing });
-      qc.invalidateQueries({ queryKey: ['audit'] });
-    },
-  });
-}
-
 export function useUpdateChannel() {
   const api = useApi();
   const qc = useQueryClient();
@@ -409,6 +402,30 @@ export function useUpdateChannel() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.routing });
       qc.invalidateQueries({ queryKey: keys.pools });
+    },
+  });
+}
+
+/**
+ * 改一条路由的思考档位（#470）。不先改缓存：档位要等后端照这条路由的执行方式判过（不认的 422、别人刚改过 409）才算数，
+ * 页面在等的那一下标「改着」；不管成没成都重拉一次，页面上永远是库里现在的值。
+ */
+export function useUpdateRouteEffort() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      modelId,
+      routeId,
+      body,
+    }: {
+      modelId: string;
+      routeId: string;
+      body: UpdateRouteEffortBody;
+    }) => api.updateRouteEffort(modelId, routeId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingEfforts });
+      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }
