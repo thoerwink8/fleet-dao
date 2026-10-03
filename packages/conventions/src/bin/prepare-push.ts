@@ -19,12 +19,15 @@ const git: GitRun = (args) => {
 };
 
 const repo = fsRepo(root);
-/** 包自己的可执行文件（biome、tsc 都是依赖，装在各包的 node_modules/.bin 里）。找不到就报「没查成」，不当成通过。 */
+const win = process.platform === 'win32';
+/**
+ * 包自己的可执行文件（biome、tsc 都是依赖，装在 node_modules/.bin 里）。找不到就报「没查成」，不当成通过。
+ * Windows 上 .bin 里同名那份是 sh 脚本、spawn 不起来（ENOENT），要认 .cmd；.cmd 又只能经 shell 起。
+ */
 const bin = (name: string): string | null => {
-  for (const p of [
-    join(root, 'node_modules', '.bin', name),
-    join(root, 'node_modules', '.bin', `${name}.cmd`),
-  ]) {
+  const names = win ? [`${name}.cmd`] : [name];
+  for (const n of names) {
+    const p = join(root, 'node_modules', '.bin', n);
     if (existsSync(p)) return p;
   }
   return null;
@@ -36,7 +39,15 @@ const result = preparePush({
   graph: () => readGraph(repo),
   run(name, args) {
     const p = bin(name) ?? join(root, 'node_modules', '.bin', name);
-    const r = spawnSync(p, [...args], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    // 参数是 prepare-push.ts 里写死的（check . / -b 加 ci-plan 给的项目目录），不含用户输入，shell 起 .cmd 安全
+    const r = win
+      ? spawnSync([`"${p}"`, ...args].join(' '), {
+          cwd: root,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+          shell: true,
+        })
+      : spawnSync(p, [...args], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error };
   },
 });
