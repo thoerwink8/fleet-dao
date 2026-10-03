@@ -1,5 +1,6 @@
 // 驾驶舱接口（/api）：看板、任务、步骤、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
-// 读一律从数据库读（不直接查 GitHub）；每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
+// 读一律从数据库读（不直接查 GitHub；唯一的例外是 /changelog 的发布版本号，现读 GitHub 里程碑，见 release-version.ts）；
+// 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
 import {
   AnswerAskRequest,
   AnswerAskResponse,
@@ -53,6 +54,8 @@ import {
   WorkflowGoneError,
   WorkflowUnavailableError,
 } from './ports.ts';
+import { registerReleaseRoutes } from './release-version.ts';
+import { findSelfRepo } from './self-repo.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
@@ -527,6 +530,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDemoRoutes(app, deps, actorOf);
+  registerReleaseRoutes(app, deps);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */
   async function settingsView() {
@@ -546,11 +550,9 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   return app;
 }
 
-/** 这些单开在 fleet-dao 自己这个仓：在受管的仓里按名字找它，找到了驾驶舱才链得过去（找不到只显示单号）。 */
-const SELF_REPO_NAME = 'fleet-dao';
-
+/** 这些单开在 fleet-dao 自己这个仓：在受管的仓里找到它，驾驶舱才链得过去（找不到只显示单号）。 */
 async function notWiredView(store: Store, mark: NotWiredMark | undefined): Promise<NotWired | undefined> {
   if (!mark) return undefined;
-  const self = (await store.listRepos()).find((r) => r.name === SELF_REPO_NAME);
+  const self = await findSelfRepo(store);
   return { ...mark, ...(self ? { issueRepo: { owner: self.owner, name: self.name } } : {}) };
 }
