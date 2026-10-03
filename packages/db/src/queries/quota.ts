@@ -1,6 +1,6 @@
 // 额度：唯一写入口 savePoolQuota，驾驶舱「额度表」quotaTable，以及判一个窗口能不能用的 windowState（调度也用它）。
 import type { QuotaWindow, ScopeMembership } from '@fleet-dao/shared';
-import { and, asc, eq, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { channels, pools, quotaWindows, routes, sessionRuns } from '../schema/index.ts';
 
@@ -239,6 +239,48 @@ export async function poolLastReadOk(db: Db, poolIds: readonly string[]): Promis
     .where(inArray(pools.id, [...poolIds]));
   for (const r of rows) out.set(r.id, r.at);
   return out;
+}
+
+/** 估算类的池算用量用：这个池的路由在 [since, until] 内开始的会话，各自的 token、花费。 */
+export interface PoolSessionUsage {
+  startedAt: Date;
+  modelId: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  costUsd: number | null;
+}
+
+/**
+ * 没记到花费的会话（cost_usd 为空）照样返回、字段为空：由调用方决定怎么算，这里不拿 0 冒充记到了。
+ * 只看开始了的会话（started_at 不空）；没跑成的也算，它花过的用量记在账上就是用过的。
+ */
+export async function poolSessionUsage(
+  db: Db,
+  q: { poolId: string; since: Date; until: Date },
+): Promise<PoolSessionUsage[]> {
+  const rows = await db
+    .select({
+      startedAt: sessionRuns.startedAt,
+      modelId: routes.modelId,
+      inputTokens: sessionRuns.inputTokens,
+      outputTokens: sessionRuns.outputTokens,
+      cacheReadTokens: sessionRuns.cacheReadTokens,
+      cacheWriteTokens: sessionRuns.cacheWriteTokens,
+      costUsd: sessionRuns.costUsd,
+    })
+    .from(sessionRuns)
+    .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
+    .where(
+      and(
+        eq(routes.poolId, q.poolId),
+        isNotNull(sessionRuns.startedAt),
+        gte(sessionRuns.startedAt, q.since),
+        lte(sessionRuns.startedAt, q.until),
+      ),
+    );
+  return rows.flatMap((r) => (r.startedAt === null ? [] : [{ ...r, startedAt: r.startedAt }]));
 }
 
 /** 每个账号池正在跑的会话数（已开始、没结束）。并发按池算，不按渠道或执行方式算。 */
