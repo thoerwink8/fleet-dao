@@ -3,6 +3,7 @@ import type { QuotaWindow, ScopeMembership } from '@fleet-dao/shared';
 import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { channels, pools, quotaWindows, routes, sessionRuns } from '../schema/index.ts';
+import { openPoolRuns } from './pool-runs.ts';
 
 /** 读数超过这么久没更新就不当现值（设计 §6：每个账号池的额度读数不超过 30 分钟）。 */
 export const QUOTA_STALE_AFTER_MS = 30 * 60_000;
@@ -283,15 +284,17 @@ export async function poolSessionUsage(
   return rows.flatMap((r) => (r.startedAt === null ? [] : [{ ...r, startedAt: r.startedAt }]));
 }
 
-/** 每个账号池正在跑的会话数（已开始、没结束）。并发按池算，不按渠道或执行方式算。 */
+/**
+ * 每个账号池正在跑的会话数（已开工、没结束）：Fusion 的会话、三段的一次性会话都数（pool-runs.ts，和切号数在跑的同一份）。
+ * Fusion 排着还没开工的不在这里（选路另按「已选定还没开工」数，engine.ts 的 reserved）。并发按池算，不按渠道或执行方式算。
+ * 读不了照常抛，不当成 0。
+ */
 export async function inFlightByPool(db: Db): Promise<Map<string, number>> {
-  const rows = await db
-    .select({ poolId: routes.poolId, n: sql<number>`count(*)::int` })
-    .from(sessionRuns)
-    .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
-    .where(and(isNotNull(sessionRuns.startedAt), isNull(sessionRuns.endedAt)))
-    .groupBy(routes.poolId);
-  return new Map(rows.map((r) => [r.poolId, r.n]));
+  const out = new Map<string, number>();
+  for (const r of await openPoolRuns(db)) {
+    if (r.startedAt !== null) out.set(r.poolId, (out.get(r.poolId) ?? 0) + 1);
+  }
+  return out;
 }
 
 type WindowRow = typeof quotaWindows.$inferSelect;
