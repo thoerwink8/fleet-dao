@@ -32,6 +32,13 @@ describe('认格式（Keep a Changelog 1.1.0）', () => {
     expect(splitChangelog(text).next).toEqual({ version: 'v1', date: today() });
   });
 
+  test('日期可以由调用方给（测试钉死、不读真钟）：给了就用它，不给才读真钟', () => {
+    const text = `${BASE}
+- 加了记一版
+`;
+    expect(splitChangelog(text, () => '2030-01-02').next).toEqual({ version: 'v1', date: '2030-01-02' });
+  });
+
   test('只有 Unreleased 一张时 next 是 v1，没有上一版', () => {
     const text = `${BASE}
 - 一条

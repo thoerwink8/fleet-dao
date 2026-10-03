@@ -6,7 +6,7 @@
 //   （第二意见 2026-10-02），所以发起 CLI 同时「改写 CHANGELOG.md：Unreleased 段收进 ## [vN] 标题」＋提交＋推——这样 head 分支上
 //   有一个和 main 不一样的提交、PR 上能看见内容、发起人审起来也有东西看。
 // - head 分支名的协议在 ./publish.ts 的 RELEASE_BRANCH_RE；这里只跟着它起名，不另写正则。
-import { splitChangelog, today, UNRELEASED_HEADING } from '@fleet-dao/shared';
+import { splitChangelog, UNRELEASED_HEADING } from '@fleet-dao/shared';
 import { RELEASE_BRANCH_RE } from './publish.ts';
 
 export interface PublishOptions {
@@ -14,6 +14,8 @@ export interface PublishOptions {
   head?: string;
   /** 仓根 CHANGELOG.md 的当前内容（发布之前那份）。 */
   changelog: string;
+  /** 「今天」（YYYY-MM-DD，UTC）；不给就读真钟。测试必须给：写死的日期遇上真钟，过了那天零点就红。 */
+  today?: () => string;
 }
 
 export interface PublishPlan {
@@ -80,7 +82,7 @@ export function finalizeChangelog(changelog: string, opts: { version: `v${number
  * 分支不对的话 PR 开出来合并之后工作流落不进 proceed；与其开了一张注定红的 PR，不如 CLI 这里就明说不开（第二意见 2026-10-02）。
  */
 export function publishReleasePlan(options: PublishOptions): PublishPlan {
-  const split = splitChangelog(options.changelog);
+  const split = splitChangelog(options.changelog, options.today);
   const version = split.next.version as `v${number}`;
   const headBranch = options.head ?? '';
   if (!headBranch.trim()) {
@@ -102,7 +104,7 @@ export function publishReleasePlan(options: PublishOptions): PublishPlan {
         `要么改 CHANGELOG.md、要么换个对得上的分支（release/${version}）。`,
     );
   }
-  const date = split.next.date || today();
+  const date = split.next.date;
   const nextChangelog = finalizeChangelog(options.changelog, { version, date });
   const body = [
     `# ${publishPrName(version)}`,
