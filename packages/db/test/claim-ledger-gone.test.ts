@@ -1,9 +1,8 @@
-// 钉住认领账的「代码不再读它」这一半不会倒退（#556-4 的 PR-1：删代码引用；表和列留到 PR-2 的迁移才删）。
+// 钉住认领账「代码不再读、表和列也删了」不会倒退（#556-4：PR-1 删代码引用，PR-2 迁移 0024 删表和列）。
 // 创始人 2026-10-03 对话里回「选 1」同意删库表，但顺序有硬坑：deploy/release.sh 先跑迁移才切版本，
 // 库表和「代码不读它」同一批改，上线那一刻老代码会当场报错。所以先删代码引用、上线之后再 DROP。
-// 这里钉的是 PR-1 的结果：下面这些源文件里不许再出现认领账的读取；schema 里的定义此刻还在（PR-2 才摘），要断言它还在，
-// 免得有人把 PR-2 的活提前塞进来、又不带迁移，schema 和库对不上。
-import { readFileSync } from 'node:fs';
+// 钉的内容：提醒的读链上不许再出现认领账的读取；schema 里的定义和 flow_* 列不在了；迁移 0024 里有对应的 DROP。
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -42,11 +41,24 @@ describe('规矩：认领账代码不再读它（#556-4 PR-1）', () => {
     expect(shared).not.toMatch(/ALERT_STAGES[\s\S]{0,300}'engine_stuck'/);
   });
 
-  it('表的定义此刻还在 schema 里（PR-2 带迁移才摘，别提前摘）', () => {
-    const schema = read('packages/db/src/schema/seat.ts');
-    expect(schema).toMatch(/export const issueClaims = pgTable\(/);
-    expect(schema).toMatch(/export const seatLeases = pgTable\(/);
-    expect(schema).toMatch(/export const seatBoards = pgTable\(/);
+  it('表和列也删了（迁移 0024）：schema 里不再有定义，迁移里有对应的 DROP', () => {
+    expect(existsSync(join(ROOT, 'packages/db/src/schema/seat.ts'))).toBe(false);
+    const work = read('packages/db/src/schema/work.ts');
+    expect(work).not.toMatch(/flow_(config|source|commit|synced_at|error|checked_at|unread)/);
+    const mig = read('packages/db/migrations/0024_clammy_maestro.sql');
+    for (const t of ['issue_claims', 'seat_boards', 'seat_leases'])
+      expect(mig).toContain(`DROP TABLE "${t}"`);
+    for (const c of [
+      'flow_config',
+      'flow_source',
+      'flow_commit',
+      'flow_synced_at',
+      'flow_error',
+      'flow_checked_at',
+      'flow_unread',
+    ])
+      expect(mig, c).toContain(`ALTER TABLE "repos" DROP COLUMN "${c}"`);
+    expect(mig).toContain('ALTER TABLE "tasks" DROP COLUMN "flow_source"');
   });
 
   it('【故意造出的失败】把读链塞回来：查得出来；注释里提名字不算', () => {
