@@ -175,6 +175,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       });
     },
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),
+    routingLayers: () => send('GET', apiUrl(R.routingLayers.path), R.routingLayers.response),
     async updateStagePolicy(stage, body) {
       const res = await send(
         'PUT',
