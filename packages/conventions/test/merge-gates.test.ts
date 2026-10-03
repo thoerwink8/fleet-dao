@@ -236,7 +236,7 @@ describe('第二意见状态', () => {
 describe('状态说明', () => {
   it('放第一条，多的写另有几条；再长也不超过 GitHub 的 140 个字符', () => {
     expect(statusDescription(['是草稿。'])).toBe('是草稿。');
-    expect(statusDescription(['是草稿。', '缺档位。'])).toBe('是草稿。（另有 1 条，点详情看）');
+    expect(statusDescription(['是草稿。', '等第二意见。'])).toBe('是草稿。（另有 1 条，点详情看）');
     const long = statusDescription(['很'.repeat(300), '第二条']);
     expect([...long].length).toBeLessThanOrEqual(DESCRIPTION_MAX);
     expect(long).toMatch(/…（另有 1 条，点详情看）$/);

@@ -134,8 +134,9 @@ describe('合并闸：验收场景', () => {
     expect(passed.lines[0]).toBe('能合：改到 1 个先审后合的地方，当前头上第二意见已通过。');
   });
 
-  it('没改到先审后合的地方：正文写「先审后合」也不等第二意见', async () => {
-    const r = await gatePr(80, deps(world({ prOver: { body: '**档位**：先审后合——拿不准' } })));
+  it('没改到先审后合的地方：正文里怎么写都不等第二意见', async () => {
+    // #654：闸按改动路径判，PR 正文写了什么都不看（模板里也再没有「档位」这一栏）。
+    const r = await gatePr(80, deps(world({ prOver: { body: '**还欠什么**：先审后合——拿不准' } })));
     expect(r.state).toBe('success');
   });
 

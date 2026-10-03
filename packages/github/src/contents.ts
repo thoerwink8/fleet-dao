@@ -71,8 +71,7 @@ export interface ReadSpecDocResult {
 }
 
 /**
- * 读默认分支上的需求文档。开 PR 的正文要写「对应计划」「specs」两栏（#41 的 pr-fields 缺了就红），对应计划那一行在
- * 需求文档里（人写了之后也可能手改），所以每次现读一份，不把值抄到工作流的历史里（抄了会和文件分家）。
+ * 读默认分支上的需求文档。这份文档人写了之后也可能手改，所以每次现读一份，不把值抄到工作流的历史里（抄了会和文件分家）。
  * 文件不在返回 null——调用方要说清「需求文档还没进主线」，不当成空文档。
  */
 export async function readSpecDoc(deps: Deps, input: ReadSpecDocInput): Promise<ReadSpecDocResult | null> {

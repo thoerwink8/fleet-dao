@@ -57,7 +57,7 @@ export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检
   start --model grok|codex|kimi --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
         [--effort low|medium|high|xhigh，不给是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
                     在主检出的上一级建一棵工作树、起一个别家模型命令行去干活（后台跑，这条命令退出它照跑）
-                    --no-automerge：开非草稿 PR 但不挂自动合并，PR 正文第一行写「人闸：改标准」，CI 绿了就停
+                    --no-automerge：开非草稿 PR 但不挂自动合并，正文「还欠什么」栏写「人闸：改标准」，CI 绿了就停
                     （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
                     CI 绿就合、自动挂上。
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
@@ -231,16 +231,14 @@ export function closingBrief({ branch, noShip, noAutomerge }) {
   }
   const prSteps = noAutomerge
     ? [
-        '5. gh pr create（不开草稿）：正文第一行写「人闸：改标准」，其余栏目照',
-        '   .github/pull_request_template.md 填；「认领」栏写「无」；「档位」栏也写「人闸：改标准」。',
+        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的四栏填；「还欠什么」栏写「人闸：改标准」，不再另写档位栏。',
         '6. 不要挂自动合并、不要跑 gh pr merge：这条改的是要创始人拍板的标准，他同意之前不能自己合，合并由',
         '   创始人或帅位在他同意后另外做。',
         '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不用等合并、不用',
         '   等创始人回话。',
       ]
     : [
-        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的栏目填；「认领」栏写「无」；',
-        '   「档位」栏写「CI 绿就合（本机快马）」，理由写清楚。',
+        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的四栏填。',
         '6. gh pr merge <PR 号> --auto --squash 挂自动合并。',
         '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
       ];
