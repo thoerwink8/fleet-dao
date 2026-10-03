@@ -14,12 +14,16 @@ import type {
   RouteProbeState,
   RunOutcome,
   ScheduleOutcome,
+  SegmentKind,
+  SegmentOutcome,
+  SegmentTier,
   StageKind,
   StepState,
   SubtaskState,
   TaskState,
 } from './domain.ts';
 import { type ChangeEvent, REALTIME_TABLES } from './realtime.ts';
+import { SEGMENT_KINDS, SEGMENT_OUTCOMES, SEGMENT_TIERS, type SegmentRunView } from './segment-runs.ts';
 import type { TaskUsage } from './usage.ts';
 
 export const WEB_API_PREFIX = '/api';
@@ -92,6 +96,9 @@ export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached'])
 export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
 export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
 export const RouteProbeStateSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped']);
+export const SegmentKindSchema = z.enum(SEGMENT_KINDS);
+export const SegmentTierSchema = z.enum(SEGMENT_TIERS);
+export const SegmentOutcomeSchema = z.enum(SEGMENT_OUTCOMES);
 
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 /** 编译期闸：上面的枚举和 domain.ts 的联合类型必须一字不差，改了一边没改另一边 `tsc` 当场报错。 */
@@ -110,7 +117,10 @@ export const ENUMS_MATCH_DOMAIN: [
   Same<z.infer<typeof QuotaUnitSchema>, QuotaUnit>,
   Same<z.infer<typeof ScheduleOutcomeSchema>, ScheduleOutcome>,
   Same<z.infer<typeof RouteProbeStateSchema>, RouteProbeState>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true];
+  Same<z.infer<typeof SegmentKindSchema>, SegmentKind>,
+  Same<z.infer<typeof SegmentTierSchema>, SegmentTier>,
+  Same<z.infer<typeof SegmentOutcomeSchema>, SegmentOutcome>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 // —— 通用 ——
 
@@ -346,14 +356,71 @@ export const UsageTotalsSchema = z.object({
   queueMs: Count,
   runMs: Count,
   missingTime: Count,
+  /** 结束了的里没有排队记录的笔数（三段的 runs 不记排队）：排队合计要把它算作没读到。 */
+  noQueue: Count,
 });
+const ModelUsageTotalsSchema = UsageTotalsSchema.extend({ model: z.string(), modelName: z.string() });
 export const TaskUsageSchema = z.object({
   total: UsageTotalsSchema,
-  byModel: z.array(UsageTotalsSchema.extend({ model: z.string(), modelName: z.string() })),
+  byModel: z.array(ModelUsageTotalsSchema),
   byStage: z.array(UsageTotalsSchema.extend({ stage: StageKindSchema })),
+  /** 三段按段（对题、动手、验收；段名认不出的 segment 为 null，排最后），每段再按模型分。 */
+  bySegment: z.array(
+    UsageTotalsSchema.extend({
+      segment: SegmentKindSchema.nullable(),
+      tiers: z.array(SegmentTierSchema),
+      missingTier: Count,
+      byModel: z.array(ModelUsageTotalsSchema),
+    }),
+  ),
 });
 /** 编译期闸：和 usage.ts 算出来的形状一字不差，改了一边没改另一边 `tsc` 当场报错。 */
 export const USAGE_MATCHES_SUMMARY: Same<z.infer<typeof TaskUsageSchema>, TaskUsage> = true;
+
+/** 一笔三段哪一样没读到、为什么（segment-runs.ts 的 readSegmentRun 判）。 */
+export const UnreadNoteSchema = z.object({
+  item: z.enum(['segment', 'time', 'outcome', 'tokens', 'cost', 'tier']),
+  reason: z.string().min(1),
+});
+
+/**
+ * 三段（库里的 runs 表）的一笔，读好给页面的样子：只给认得出的值，认不出、没记的写在 unread 里带原因，不拿 0 顶。
+ * 怎么读见 segment-runs.ts。
+ */
+export const SegmentRunSchema = z.object({
+  id: Id,
+  /** 认不出的段是 null（原样在 unread 的原因里）。 */
+  segment: SegmentKindSchema.nullable(),
+  /** 路由挑的模型（模型目录的 id）和给人看的名字。 */
+  model: z.string(),
+  modelName: z.string(),
+  channel: z.string().optional(),
+  /** 渠道的计费方式：按量的花费是真花的钱，套餐内的只是按 API 价折合。渠道查不到就没有（不猜成套餐内）。 */
+  billing: BillingKindSchema.optional(),
+  /** 派工档；只有动手段分档。 */
+  tier: SegmentTierSchema.optional(),
+  startedAt: Time.optional(),
+  endedAt: Time.optional(),
+  /** 还在跑：没结束、单子也没结束。用量等它结束才有。 */
+  running: z.boolean(),
+  outcome: SegmentOutcomeSchema.optional(),
+  /** 结束 − 开始（毫秒）；起止读不到的没有。 */
+  durationMs: Count.optional(),
+  inputTokens: Count.optional(),
+  outputTokens: Count.optional(),
+  cacheReadTokens: Count.optional(),
+  cacheWriteTokens: Count.optional(),
+  costUsd: z.number().min(0).optional(),
+  memoryPeakMb: Count.optional(),
+  failureReason: z.string().optional(),
+  prNumber: z.number().int().positive().optional(),
+  branch: z.string().optional(),
+  /** task = 按 task_id 对上；issueNumber = 这笔没记 task_id、按单号兜底对上的（单号几个仓可能重）。 */
+  matchedBy: z.enum(['task', 'issueNumber']),
+  unread: z.array(UnreadNoteSchema),
+});
+/** 编译期闸：和 segment-runs.ts 读出来的形状一字不差。 */
+export const SEGMENT_RUN_MATCHES_READING: Same<z.infer<typeof SegmentRunSchema>, SegmentRunView> = true;
 
 export const AskSchema = z.object({
   id: Id,
@@ -387,9 +454,12 @@ export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
   subtasks: z.array(BoardSubtaskSchema),
+  /** 老流程的会话（session_runs）。 */
   runs: z.array(RunSchema),
+  /** 三段（runs 表）的流水，按起跑先后：task_id 对上的，加上 task_id 没记、按单号兜底的（matchedBy 标明）。 */
+  segmentRuns: z.array(SegmentRunSchema),
   asks: z.array(AskSchema),
-  /** 这张单的会话按模型、按阶段、整张合计（耗时、token、输入当量、花费）；按 Fusion 步骤分等 #214 的步骤标记。 */
+  /** 用量：老流程的会话加三段的流水整张合计、按模型；会话按阶段、三段按段（每段再按模型）。 */
   usage: TaskUsageSchema,
 });
 

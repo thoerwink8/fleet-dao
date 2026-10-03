@@ -68,6 +68,7 @@ import {
   routeLookup,
   routeProblem,
   runView,
+  segmentRunViews,
   subtaskViews,
   usageView,
 } from './views.ts';
@@ -196,10 +197,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.task.path, async (c) => {
     const task = await store.getTask(c.req.param('taskId'));
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
-    const [repo, subtasks, runs, asks, routes, models, channels] = await Promise.all([
+    const [repo, subtasks, runs, segmentRecords, asks, routes, models, channels] = await Promise.all([
       store.getRepo(task.repoId),
       store.listSubtasks([task.id]),
       store.listRuns({ taskIds: [task.id] }),
+      store.listSegmentRuns(task.id),
       store.listAsks(task.id),
       store.listRoutes(),
       store.listModels(),
@@ -210,11 +212,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const plans = await store.getPlans(activeRuns.map((r) => r.id));
     // 带上渠道表：会话和用量汇总的花费要分清按量、套餐内
     const route = routeLookup(routes, models, channels);
+    const segmentRuns = segmentRunViews(segmentRecords, {
+      models,
+      channels,
+      taskFinished: isTaskFinished(task),
+    });
     return reply(c, TaskDetailResponse, {
       task,
       repo,
       subtasks: subtaskViews(task.id, { tasks: [task], subtasks, activeRuns, plans, route }),
       runs: runs.map((r) => runView(r, route(r.routeId))),
+      segmentRuns,
       asks: asks.map((a) => ({
         id: a.id,
         runId: a.runId,
@@ -231,7 +239,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         effect: askLate(a, task.state),
         followUpIssue: a.followUpIssue,
       })),
-      usage: usageView(runs, route),
+      usage: usageView(runs, route, segmentRuns),
     });
   });
 

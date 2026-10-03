@@ -5,9 +5,9 @@
 // - endedAt / outcome 一对空/不空；
 // - 读不到的字段 NULL，不拿 0 顶（#216）。
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull, or } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { runs } from '../schema/index.ts';
+import { type RunTier, runs } from '../schema/index.ts';
 
 export type RunOutcome = 'done' | 'timeout' | 'killed' | 'spawn_failed' | 'admission_blocked' | 'failed';
 
@@ -18,6 +18,8 @@ export interface RunInsert {
   issueNumber?: number | undefined;
   model: string;
   channel?: string | undefined;
+  /** 派工档（只有动手段分档）；没给就是没记（NULL）。 */
+  tier?: RunTier | undefined;
   startedAt?: Date;
   endedAt?: Date;
   outcome?: RunOutcome;
@@ -129,6 +131,31 @@ export async function runsOfIssue(db: Db, issueNumber: number): Promise<RunRow[]
   return db.select().from(runs).where(eq(runs.issueNumber, issueNumber)).orderBy(asc(runs.createdAt));
 }
 
+/**
+ * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号对得上的老行（兜底，调用方要标明）。
+ * 单号在几个仓里会重：兜底的行记了工作流编号、却不是这张单的（别的仓同号的单、巡检这类），不收；没记工作流编号的分不出，照收。
+ * 按起跑先后排。
+ */
+export async function runsOfTask(
+  db: Db,
+  task: { id: string; issueNumber: number; workflowId: string },
+): Promise<RunRow[]> {
+  return db
+    .select()
+    .from(runs)
+    .where(
+      or(
+        eq(runs.taskId, task.id),
+        and(
+          isNull(runs.taskId),
+          eq(runs.issueNumber, task.issueNumber),
+          or(isNull(runs.workflowId), eq(runs.workflowId, task.workflowId)),
+        ),
+      ),
+    )
+    .orderBy(asc(runs.startedAt), asc(runs.createdAt), asc(runs.id));
+}
+
 /** 各段 loading: RunInsert -> 写入形状。 */
 function toRow(row: RunInsert, now: Date): RunRowSure {
   return {
@@ -138,6 +165,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     issueNumber: row.issueNumber ?? null,
     model: row.model,
     channel: row.channel ?? null,
+    tier: row.tier ?? null,
     startedAt: row.startedAt ?? now,
     endedAt: row.endedAt ?? null,
     outcome: row.outcome ?? null,

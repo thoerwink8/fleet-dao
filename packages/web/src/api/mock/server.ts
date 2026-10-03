@@ -898,6 +898,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),
         runs: runs.map(runView),
+        // 假数据还没有三段的流水（runs 表）：驾驶舱按段显示那一片接上时一起补
+        segmentRuns: [],
         asks: tv.asks.map((a) => ({
           id: a.id,
           runId: a.runId,
