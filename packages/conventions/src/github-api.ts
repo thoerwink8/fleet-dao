@@ -1,4 +1,5 @@
-// 欠账检查、GitHub 对账、pnpm plan 要读 GitHub 上 issue、里程碑、母子单现在的样子，欠账检查和对账还往单上留言：走 REST 接口。
+// 欠账检查、GitHub 对账、pnpm plan 要读 GitHub 上 issue、里程碑、母子单现在的样子，欠账检查和对账还往单上留言；
+// 发起发布（publish-pr 读当前版本里程碑）、发布收尾（release.yml 查发布 PR 的合并时间、关里程碑）也走这里：都是 REST 接口。
 // 必过检查（pnpm check）不许用这里（#87：同一份代码什么时候跑结果都一样）。
 // 令牌按 GITHUB_TOKEN → GH_TOKEN → 本机 `gh auth token` 的顺序找，都没有就不带（公开仓不带令牌也读得到，
 // 只是每小时 60 次）。令牌只放进请求头，报错里不带。读不到、认不出一律抛，由调用方判「没查成」，不当成没问题。
@@ -64,6 +65,20 @@ export interface GitHubCommenter {
   comment(n: number, body: string): Promise<void>;
 }
 
+/** 一张已经合并的 PR：号和合并的时间（ISO）。 */
+export interface MergedPull {
+  number: number;
+  mergedAt: string;
+}
+
+/** 发布收尾（release.yml 核里程碑、关里程碑那两步）用（要能写 issue 的令牌：里程碑归 issues 权限）。 */
+export interface GitHubReleaser {
+  /** head 是本仓这个分支、已经合并了的 PR，照 GitHub 回的先后（新开的在前）。 */
+  mergedPulls(head: string): Promise<MergedPull[]>;
+  /** 关掉这个里程碑，回 GitHub 关完之后的那一份（PATCH 的回包，调用方拿它核是不是真关了）。 */
+  closeMilestone(n: number): Promise<MilestoneDetail>;
+}
+
 type Env = Record<string, string | undefined>;
 
 /** 仓名：GITHUB_REPOSITORY（Actions 里有），没有就从 origin 的地址认。认不出返回 undefined。 */
@@ -111,7 +126,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter {
+): GitHubReader & GitHubCommenter & GitHubReleaser {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -207,6 +222,30 @@ export function liveGitHub(
         body: JSON.stringify({ body }),
       });
       if (res.status !== 201) throw failed(res, `在 #${n} 上留言`);
+    },
+    async mergedPulls(head) {
+      const owner = repo.split('/')[0];
+      const what = ` head 是 ${head} 的 PR`;
+      const rows = await pages(`/repos/${repo}/pulls?state=closed&head=${owner}:${head}&per_page=100`, what);
+      const merged: MergedPull[] = [];
+      for (const r of rows) {
+        if (!isObject(r) || typeof r.number !== 'number')
+          throw new Error(`读${what}，有一条认不出（number）`);
+        // merged_at 整个不在、或不是时间：认不出就抛，不当成「没合并」（那会把这张发布 PR 漏掉）。
+        if (!('merged_at' in r) || (r.merged_at !== null && !isTime(r.merged_at))) {
+          throw new Error(`读${what}，有一条认不出（merged_at）`);
+        }
+        if (typeof r.merged_at === 'string') merged.push({ number: r.number, mergedAt: r.merged_at });
+      }
+      return merged;
+    },
+    async closeMilestone(n) {
+      const res = await get(`/repos/${repo}/milestones/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ state: 'closed' }),
+      });
+      if (!res.ok) throw failed(res, `在关里程碑 #${n} 时`);
+      return toMilestoneDetail(await json(res, `关里程碑 #${n} 的回包`));
     },
   };
 }

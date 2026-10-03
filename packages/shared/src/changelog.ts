@@ -10,17 +10,36 @@
 export const UNRELEASED_HEADING = '## [Unreleased]';
 const HEADING_LINE = /^## \[(v\d+)\] - (\d{4}-\d{2}-\d{2})\s*$/;
 
-const UNRELEASED_EMPTY_MARKS = ['还没有', '没有内容', '无'];
+/** 占位词：一段正文里每一行都恰好是其中之一，这段就算「还没写」。 */
+export const PLACEHOLDER_MARKS: readonly string[] = ['还没有', '没有内容', '无'];
+
+/**
+ * 这段正文是不是只剩占位：去掉空行后，每一行都恰好是一个占位词。只认整行——「加了无人值守推进」里带「无」、
+ * 「补上以前还没有的收尾」里带「还没有」都是真内容（原先按「含不含」判，这两句都被当成空的，发起脚本就拒发）。
+ * 空段不算占位（是不是空由调用方另判）。Unreleased 段（splitChangelog）和某一版正文（release.yml 建 release 前）同用这一份。
+ */
+export function isPlaceholderSection(section: string): boolean {
+  const lines = section
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return lines.length > 0 && lines.every((l) => PLACEHOLDER_MARKS.includes(l));
+}
+
 export type Version = { version: string; date: string };
 
 export interface ChangelogSplit {
   /** Unreleased 后面那一段（拼正文用）。 */
   section: string;
-  /** 下一版本号：Unreleased 里没写 v1 的话，按 Union 里该有的版本号往下推下来。 */
+  /**
+   * 只按 CHANGELOG.md 猜的下一版：已发的最大版本 +1（一版没发过就是 v1），日期是今天。
+   * 不是这一版真正的版本号——真正的取当前版本里程碑（packages/conventions/src/publish-actions.ts 的 releaseVersion）：
+   * 里程碑和更新日志的版本号可以不连续（v1、v2 是没写更新日志就关掉的里程碑）。只给驾驶舱显示用。
+   */
   next: { version: string; date: string };
   /** 仓里已经记住的版本（拼「上一版」用）。 */
   released: Version[];
-  /** Unreleased 是否有真内容（CI 检查那个用）。 */
+  /** Unreleased 是否有真内容（不是空、也不是只剩占位）。 */
   hasContent: boolean;
 }
 
@@ -55,8 +74,7 @@ export function splitChangelog(text: string, now: () => string = today): Changel
   const last = released[0];
   const lastNum = last ? parseInt(last.version.slice(1), 10) : 0;
   const nextVersion = `v${lastNum + 1}`;
-  const hasContent =
-    section.length > 0 && !UNRELEASED_EMPTY_MARKS.some((mark) => section === mark || section.includes(mark));
+  const hasContent = section.length > 0 && !isPlaceholderSection(section);
   return { section, next: { version: nextVersion, date: now() }, released, hasContent };
 }
 

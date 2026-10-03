@@ -1,71 +1,125 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendFeishuAttemptMark,
+  decideReleaseMilestone,
   extractReleaseBody,
   feishuAlreadyNotified,
   feishuAttemptMark,
   feishuAttemptWritten,
   feishuNotifiedMark,
-  pickOpenMilestone,
+  type MilestoneState,
   promoteFeishuAttemptToNotified,
   stripFeishuAttemptMark,
 } from '../src/publish-release-logic.ts';
 
-describe('pickOpenMilestone：从开放 milestone 里挑要关的那一张', () => {
-  it('只有一张 v1 开头 → 找它', () => {
-    const r = pickOpenMilestone(
-      [
-        { number: 1, title: 'v1 Fusion 接活' },
-        { number: 2, title: 'v2 后面那版' },
-      ],
-      'v1',
-    );
-    expect(r).toEqual({ kind: 'found', milestone: { number: 1, title: 'v1 Fusion 接活' } });
+const open = (number: number, title: string): MilestoneState => ({
+  number,
+  title,
+  state: 'open',
+  closedAt: null,
+});
+const closed = (number: number, title: string, closedAt: string): MilestoneState => ({
+  number,
+  title,
+  state: 'closed',
+  closedAt,
+});
+
+/** 仓里 2026-10-04 的样子：v1、v2 是早就手动关掉的旧版本（没写过更新日志），开着的是 v3。 */
+const REPO_NOW = [
+  closed(8, 'v1 Fusion 接活', '2026-10-01T14:58:46Z'),
+  closed(9, 'v2 引擎打磨：环节可配、检验制度、经验库', '2026-10-01T14:57:24Z'),
+  closed(2, 'P1 核心闭环', '2026-09-26T19:12:28Z'),
+  open(10, 'v3 三段一条龙'),
+];
+const MERGED = '2026-10-05T02:00:00Z';
+
+describe('decideReleaseMilestone：发 vN 时关哪张里程碑（打 tag 之前核、关的时候再判，同一份）', () => {
+  it('开着的当前版本就是这一版 → close 它（合并时间用不着，没给也行）', () => {
+    expect(decideReleaseMilestone({ version: 'v3', milestones: REPO_NOW })).toEqual({
+      kind: 'close',
+      milestone: open(10, 'v3 三段一条龙'),
+    });
   });
 
-  it('v1 不撞 v10（词边界匹配）：同时开着 v1 和 v10 时，挑到 v1、不撞 v10（第二意见 2026-10-02）', () => {
-    const r = pickOpenMilestone(
-      [
-        { number: 10, title: 'v10 后面那版' },
-        { number: 1, title: 'v1 Fusion 接活' },
-      ],
-      'v1',
-    );
-    expect(r).toEqual({ kind: 'found', milestone: { number: 1, title: 'v1 Fusion 接活' } });
-  });
-
-  it('v1 不撞 v11、v123：版本号末尾必须是词界（不是 0-9）', () => {
-    const list = [
-      { number: 11, title: 'v11 xxx' },
-      { number: 123, title: 'v123 yyy' },
-    ];
-    const r = pickOpenMilestone(list, 'v1');
-    expect(r.kind).toBe('none');
-  });
-
-  it('开放 milestone 里没找到 → none：多半已经被关过了，跳（不算错）', () => {
-    const r = pickOpenMilestone([{ number: 2, title: 'v2 xxx' }], 'v1');
-    expect(r.kind).toBe('none');
-    if (r.kind === 'none') expect(r.why).toMatch(/多半已经被关过了/);
-  });
-
-  it('同时开着「v1 xxx」和「v1 yyy」两张 → ambiguous：发起人要看一眼，不拿「第一张」糊弄', () => {
-    const r = pickOpenMilestone(
-      [
-        { number: 1, title: 'v1 xxx' },
-        { number: 99, title: 'v1 yyy' },
-      ],
-      'v1',
-    );
-    expect(r.kind).toBe('ambiguous');
-    if (r.kind === 'ambiguous') {
-      expect(r.candidates.map((m) => m.number)).toEqual([1, 99]);
-      expect(r.message).toMatch(/2 张都以 v1 开头/);
+  // 【故意造出的失败】#593：版本号按 CHANGELOG.md「上一版 +1」算成了 v1。原先开着的里没有 v1，就去关了的里找、
+  // 找到「v1 Fusion 接活」判「多半已经关过了」退出码 0——开着的 v3 不关、整轮报绿。
+  it('版本号贴错（开着的是 v3、这次发成 v1，v1 那张早在合并之前就关了）→ error，不当成已经关过了', () => {
+    const r = decideReleaseMilestone({ version: 'v1', milestones: REPO_NOW, mergedAt: MERGED });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error') {
+      expect(r.message).toContain('开着的版本里程碑是「v3 三段一条龙」（当前版本 v3）');
+      expect(r.message).toContain('「v1 Fusion 接活」在 2026-10-01T14:58:46Z 就关了');
+      expect(r.message).toMatch(/早于这次发布合并[\s\S]*对不上/);
     }
   });
 
+  it('重跑：开着的里没有这一版、它在这次发布合并之后关了（下一版 v4 都开出来了）→ already-closed，不再动它', () => {
+    const milestones = [
+      ...REPO_NOW.slice(0, 3),
+      closed(10, 'v3 三段一条龙', '2026-10-05T02:01:30Z'),
+      open(11, 'v4 下一版'),
+    ];
+    const r = decideReleaseMilestone({ version: 'v3', milestones, mergedAt: MERGED });
+    expect(r.kind).toBe('already-closed');
+    if (r.kind === 'already-closed') {
+      expect(r.milestone.number).toBe(10);
+      expect(r.why).toMatch(/晚于这次发布合并/);
+    }
+  });
+
+  it('故意造出的失败：开着、关了的里都没有这一版（被删了或改名了）→ error', () => {
+    const r = decideReleaseMilestone({ version: 'v7', milestones: REPO_NOW, mergedAt: MERGED });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error') expect(r.message).toMatch(/关了的里程碑里也没有 v7 的（被删了或改名了）/);
+  });
+
+  it('故意造出的失败：开着的里有这一版，可还开着更小的版本（跳版）→ error', () => {
+    const r = decideReleaseMilestone({ version: 'v4', milestones: [...REPO_NOW, open(11, 'v4 下一版')] });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error') expect(r.message).toMatch(/当前版本是 v3[\s\S]*版本跳了/);
+  });
+
+  it('故意造出的失败：开着的里有两张都是这一版 → error，不拿「第一张」糊弄', () => {
+    const r = decideReleaseMilestone({
+      version: 'v3',
+      milestones: [open(10, 'v3 三段一条龙'), open(12, 'v3 另一张')],
+    });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error') expect(r.message).toMatch(/有 2 张都是 v3/);
+  });
+
+  it.each([
+    ['没给', undefined, '没拿到'],
+    ['是空串', '', '没拿到'],
+    ['认不出', '上周三', '认不出（「上周三」）'],
+  ])(
+    '故意造出的失败：开着的里没有这一版、合并时间%s → error，不猜「已经关过了」',
+    (_name, mergedAt, words) => {
+      const milestones = [closed(10, 'v3 三段一条龙', '2026-10-05T02:01:30Z')];
+      const r = decideReleaseMilestone({ version: 'v3', milestones, mergedAt });
+      expect(r.kind).toBe('error');
+      if (r.kind === 'error') expect(r.message).toContain(words);
+    },
+  );
+
+  it('版本号认法和派活、开单同一份：v1 不撞 v10、v11；「v1.5 …」「V1 …」不算 v1', () => {
+    const milestones = [
+      open(10, 'v10 后面'),
+      open(11, 'v11 再后面'),
+      open(15, 'v1.5 小版本'),
+      open(16, 'V1 大写'),
+    ];
+    const r = decideReleaseMilestone({ version: 'v1', milestones, mergedAt: MERGED });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error')
+      expect(r.message).toContain('开着的版本里程碑是「v10 后面」、「v11 再后面」（当前版本 v10）');
+  });
+
   it('v<非数字> 直接拒绝', () => {
-    expect(() => pickOpenMilestone([], 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
+    expect(() => decideReleaseMilestone({ version: 'vNext' as `v${number}`, milestones: [] })).toThrow(
+      /不是 v<N>/,
+    );
   });
 });
 

@@ -1,15 +1,17 @@
-// 「发布 vN」PR 的编排：读仓根 CHANGELOG.md、问当前分支、把 CHANGELOG.md 的 Unreleased 段收进
-// 「## [vN] - 日期」标题、git add+commit+push，然后跑 gh pr create、拿到 PR 号。
+// 「发布 vN」PR 的编排：读仓根 CHANGELOG.md、问当前分支、读 GitHub 上的当前版本里程碑定这一版叫什么、把 CHANGELOG.md 的
+// Unreleased 段收进「## [vN] - 日期」标题、git add+commit+push，然后跑 gh pr create、拿到 PR 号。
 // 顺序不能反：必须先提交+推上 head 分支再开 PR——head 分支如果没提交差于 main，gh pr create 会失败
-// （GraphQL: No commits between main and <branch>，第二意见 2026-10-02）。
-// 入口在 ./bin/publish-pr.ts；驾驶舱 /changelog 的「发布 v<N>」按钮（packages/web/src/routes/changelog.tsx）只是提示入口。
+// （GraphQL: No commits between main and <branch>，第二意见 2026-10-02）；动仓之前该核的（分支、工作区、身份、版本号）全核完。
+// 入口在 ./bin/publish-pr.ts（`pnpm publish:pr`）；驾驶舱 /changelog 的「发布 v<N>」按钮（packages/web/src/routes/changelog.tsx）只是提示入口。
 import { execFile } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { parseCreatedPr, publishReleasePlan } from './publish-actions.ts';
+import { liveGitHub, repoName } from './github-api.ts';
+import type { MilestoneRef } from './labels.ts';
+import { parseCreatedPr, publishReleasePlan, releaseBranchVersion } from './publish-actions.ts';
 
 export interface PublishDeps {
-  /** 环境变量：查 GITHUB_TOKEN。 */
+  /** 环境变量：读 GitHub 用的令牌（GITHUB_TOKEN / GH_TOKEN，没有就用 gh auth token）、仓名（GITHUB_REPOSITORY，没有就认 origin）。 */
   env: Record<string, string | undefined>;
   /** 仓根（找 CHANGELOG.md）。 */
   root: string;
@@ -19,9 +21,11 @@ export interface PublishDeps {
   gh?: (args: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
   /** git 替身。 */
   git?: (args: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+  /** 读仓里全部里程碑的替身（默认现读 GitHub：github-api.ts 的 liveGitHub）；版本号从开着的当前版本里程碑取。 */
+  milestones?: () => Promise<readonly (MilestoneRef & { state: 'open' | 'closed' })[]>;
   /** 「今天」（YYYY-MM-DD，UTC）的替身：测试里钉死，不读真钟。 */
   today?: () => string;
-  /** 替好人看的回执（默认 console.log）。 */
+  /** 给人看的回执（不给就不打；bin 传 console.log）。 */
   note?: (line: string) => void;
 }
 
@@ -61,12 +65,13 @@ const fail = (what: string, r: RunnerResult) =>
 
 /**
  * 状态机：
- *   1) 读 CHANGELOG.md → publishReleasePlan 算 head/版本/新 CHANGELOG 文本/提交信息；
+ *   1) 读 CHANGELOG.md、查当前分支：分支得是 release/v<N>（不碰网络先核模样）；
  *   2) git status --porcelain：工作区必须干净（除了 CHANGELOG.md 之外不许还有别的没提交的，免得发布 PR 带私货）；
- *   3) writeFile CHANGELOG.md = nextChangelog；
- *   4) git add CHANGELOG.md、git commit、git push -u origin <head>；
- *   5) gh pr create → parseCreatedPr → 返回。
- * 任一步挂照实报错、写明哪一步、不往下走。
+ *   3) gh auth status：有身份才往下走；
+ *   4) 读 GitHub 上的里程碑 → publishReleasePlan 算版本（当前版本里程碑）/核分支/新 CHANGELOG 文本/提交信息；
+ *   5) writeFile CHANGELOG.md = nextChangelog；git add CHANGELOG.md、git commit、git push -u origin <head>；
+ *   6) gh pr create → parseCreatedPr → 返回。
+ * 任一步挂照实报错、写明哪一步、不往下走；1–4 都不动仓。
  */
 export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
   const note = deps.note ?? (() => {});
@@ -81,11 +86,7 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
     currentBranch = r.stdout.trim();
   }
   if (!currentBranch) throw new Error('查不到当前分支：发起人先 git switch -c release/v<N> 再重跑。');
-  const plan = publishReleasePlan({
-    changelog,
-    head: currentBranch,
-    ...(deps.today ? { today: deps.today } : {}),
-  });
+  releaseBranchVersion(currentBranch);
 
   // 工作区除了仓根的 CHANGELOG.md 之外不许还有别的没提交的：发布 PR 不该带私货（第二意见 2026-10-02）。
   // porcelain 行格式是「XY 路径」（rename: XY 旧 → 新）；只放行精确等于「CHANGELOG.md」的路径，
@@ -119,6 +120,30 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
         '发起人先 gh auth login、或把 GITHUB_TOKEN/GH_TOKEN 放进环境，再重跑。没令牌不伪造成功、也不动仓。',
     );
   }
+
+  // 这一版叫什么：当前版本里程碑的版本号（publish-actions.ts 的 releaseVersion）。读不到就停，不拿 CHANGELOG.md「上一版 +1」猜。
+  const readMilestones =
+    deps.milestones ??
+    (async () => {
+      const repo = repoName(deps.env, deps.root);
+      if (!repo) throw new Error('认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）');
+      return await liveGitHub(repo, deps.env).milestones();
+    });
+  let milestones: Awaited<ReturnType<typeof readMilestones>>;
+  try {
+    milestones = await readMilestones();
+  } catch (e) {
+    throw new Error(
+      `读 GitHub 上的里程碑失败（${e instanceof Error ? e.message : String(e)}）：版本号取当前版本里程碑，读不到就不知道这一版叫什么——不猜、不动仓。`,
+    );
+  }
+  const plan = publishReleasePlan({
+    changelog,
+    head: currentBranch,
+    openMilestones: milestones.filter((m) => m.state === 'open'),
+    ...(deps.today ? { today: deps.today } : {}),
+  });
+  note(`这一版是 ${plan.version}（当前版本里程碑「${plan.milestone.title}」）`);
 
   // 改写 CHANGELOG.md：Unreleased 段收进 ## [vN] - 日期。
   await writeFile(changelogPath, plan.nextChangelog, 'utf8');
