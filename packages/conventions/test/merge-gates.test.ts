@@ -200,7 +200,21 @@ describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第�
 
   it('改分台、并行、超时、缓存、步骤顺序、注释：不用审（这是提速改动的常态）', () => {
     expect(verdict(patchOf('-    timeout-minutes: 10', '+    timeout-minutes: 15'))).toEqual([]);
-    expect(verdict(patchOf('-        shard: [1, 2, 3]', '+        shard: [1, 2, 3, 4, 5, 6]'))).toEqual([]);
+    expect(verdict(patchOf('-        max-parallel: 3', '+        max-parallel: 6'))).toEqual([]);
+    expect(
+      verdict(
+        patchOf(
+          '-      - name: 旧名字',
+          '+      - name: 新名字',
+          '-          key: a-v1',
+          '+          key: a-v2',
+        ),
+      ),
+    ).toEqual([]);
+    // 只加不删：新加一步、新加一个并行任务，放松不了已有的检查
+    expect(
+      verdict(patchOf('+      - run: pnpm exec vitest run packages/web/', '+      - run: node a.ts &')),
+    ).toEqual([]);
     expect(
       verdict(patchOf('+      - run: pnpm exec vitest run packages/db/', '+      # 只加注释和一步命令')),
     ).toEqual([]);
@@ -246,14 +260,17 @@ describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第�
       ['+        if: false', '检查跑不跑的条件'],
       ['+    runs-on: self-hosted', '跑在哪台机器上'],
       ['+    runs-on: ubuntu-latest-16-cores', '跑在哪台机器上'],
-      ['-        run: pnpm exec vitest run packages/db/', '改了跑检查的命令'],
-      ['-        run: pnpm exec biome check .', '改了跑检查的命令'],
-      ['-          bash deploy/test/run.sh "${args[@]}"', '改了跑检查的命令'],
+      ['-        run: pnpm exec vitest run packages/db/', '删了或改了已有的行'],
+      ['-        run: pnpm exec biome check .', '删了或改了已有的行'],
+      ['-          bash deploy/test/run.sh "${args[@]}"', '删了或改了已有的行'],
+      ['-      - run: pnpm --filter ./packages/web run build:demo', '删了或改了已有的行'],
+      ['-        run: echo 跑一步别的', '删了或改了已有的行'],
+      ['-        shard: [1, 2, 3]', '删了或改了已有的行'],
       ['+        if: >-', '检查跑不跑的条件'],
       ["+          github.event_name == 'push' && matrix.x", '检查跑不跑的条件'],
       ['+          failure() || cancelled()', '检查跑不跑的条件'],
       ['+    needs: [changes, lint]', '汇总、依赖'],
-      ['-        run: node packages/conventions/src/bin/ci-verdict.ts', '改了跑检查的命令'],
+      ['-        run: node packages/conventions/src/bin/ci-verdict.ts', '汇总、依赖'],
       ['+        CI_NEEDS: ${{ toJSON(needs) }}', '汇总、依赖'],
       ['-  web:', '整个 job 的增删'],
       ['+  newjob:', '整个 job 的增删'],

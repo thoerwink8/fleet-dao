@@ -174,7 +174,7 @@ export function destructiveIn(patch: string | undefined): string | undefined {
  * - 触发：on、pull_request、pull_request_target、workflow_run、types、branches、paths
  * - 外来代码：uses（新增、换版本、换来源的 action）
  * - 门槛本身：卫生检查（hygiene、trusted/TRUSTED）、second-opinion、merge-gate、cold-verify、continue-on-error、
- *   `|| true`、exit 0、set +e、任何 if: 行（决定检查跑不跑）、runs-on（换机器）、被删掉的跑检查命令（vitest、biome、tsc、run.sh 等）
+ *   `|| true`、exit 0、set +e、任何 if: 行（决定检查跑不跑）、runs-on（换机器）、删了或改了已有的行（超时、名字、缓存键这类调参除外）
  * - 汇总和依赖：check job 本身、任何 needs 行、删掉整个 job
  */
 const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
@@ -204,8 +204,14 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
   [/^ {2}[\w-]+:\s*$/, '整个 job 的增删'],
 ];
 
-/** 跑检查的命令；改动里「删掉」的行出现它们，就说明有一步检查被换掉、改掉了。 */
-const REMOVED_CHECK_COMMAND = /\b(?:vitest|biome|tsc|run\.sh|ci-verdict|ci-cache|ci-box|ci-plan)\b/;
+/**
+ * 改动里「删掉」的行，只有这几类算无害（超时、名字、缓存键和路径、Node 版本、检出深度这类调参和命名）；删掉别的任何一行都算：
+ * 删掉一步、把命令换成别的（run: echo ok）、去掉一个 job 里的检查，落到文件里都是「删了已有的行」。拦的是「删」不是「加」——
+ * 新加一步、新加并行、新加缓存，放松不了已有的检查（加上去的 if、continue-on-error、权限这些，上面几条各自拦）。
+ * 之所以不列「哪些命令算检查」：名单总有漏的（删 web 构建、删 deploy 步），反过来列无害的才是封闭的。
+ */
+const BENIGN_REMOVED =
+  /^\s*(?:-\s+)?(?:timeout-minutes|name|key|path|cache|cache-dependency-path|node-version|fetch-depth|retention-days|max-parallel|fail-fast):|^\s*(?:with|env):\s*$/;
 
 /**
  * 去掉行尾的 YAML 注释（空白加 # 起到行尾），免得只改超时、行尾写一句「# permissions 不变」就被当成改了权限。
@@ -229,12 +235,12 @@ export function workflowSensitive(patch: string | undefined): string | undefined
     if (!/^[+-]/.test(raw) || raw.startsWith('+++') || raw.startsWith('---')) continue;
     const line = stripTrailingComment(raw.slice(1));
     if (/^\s*#/.test(line) || line.trim() === '') continue;
-    // 删掉的行里有跑检查的命令：把命令换成别的（run: echo ok）就是让检查不跑；加上的行看不出来，只能看被换掉的
-    if (raw.startsWith('-') && REMOVED_CHECK_COMMAND.test(line)) {
-      return `改了跑检查的命令（删掉：${line.trim().slice(0, 50)}）`;
-    }
     for (const [re, what] of WORKFLOW_SENSITIVE) {
       if (re.test(line)) return `改了${what}：${line.trim().slice(0, 50)}`;
+    }
+    // 删掉或改了已有的行（调参和命名除外）：见上面 BENIGN_REMOVED；上面具体的类先认，说得出是哪一类就说哪一类
+    if (raw.startsWith('-') && !BENIGN_REMOVED.test(line)) {
+      return `删了或改了已有的行：${line.trim().slice(0, 50)}`;
     }
   }
   return undefined;
