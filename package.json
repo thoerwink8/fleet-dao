@@ -22,6 +22,7 @@
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
+    "drill": "node packages/engine/src/bin/drill.ts",
     "publish:pr": "node packages/conventions/src/bin/publish-pr.ts"
   },
   "devDependencies": {

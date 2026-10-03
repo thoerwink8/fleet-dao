@@ -20,10 +20,11 @@
 
 ## 2026-10-04（#574 剩的代码，Opus 子代理分三个 PR：装载 → 选路 → 界面）
 
-- **装载（分支 `feat/574-routing-apply-release`）**：发布时目录装完接着装路由两层（`deploy/release.sh` 的 `load_routing` → `packages/db/src/bin/routing.ts` → `runRoutingApply`：读这一版带的 `packages/db/routing.default.json`、只补缺写进两张表、日志写补了几行/保持几个），装不成、读不回、装完 0 行都红、不切版本。测试：`packages/db/test/routing-apply-release.test.ts`（真骨架 + 目录样例装得进、再装已齐；骨架读不到、目录没装都明确失败一行不写）、`deploy/test/release-flow.test.sh`「装路由两层」一段（本机 Git Bash 建不了符号链接，「切到哪一版」那几条只在 CI 上验）。
-- **选路改读新表**：排在装载合进主线之后（先合选路、后合装载，自动发布会对着空表选路、一条活都派不出）。
+- **装载，#716 已合**：发布时目录装完接着装路由两层（`deploy/release.sh` 的 `load_routing` → `packages/db/src/bin/routing.ts` → `runRoutingApply`：读这一版带的 `packages/db/routing.default.json`、只补缺写进两张表、日志写补了几行/保持几个），装不成、读不回、装完 0 行都红、不切版本。测试：`packages/db/test/routing-apply-release.test.ts`（真骨架 + 目录样例装得进、再装已齐；骨架读不到、目录没装都明确失败一行不写）、`deploy/test/release-flow.test.sh`「装路由两层」一段（本机 Git Bash 建不了符号链接，「切到哪一版」那几条只在 CI 上验）。
+- **选路改读新表（分支 `feat/574-routing-select-two-layer`）**：引擎 `pickRoute` / `stageAllOpen` 的事实改成 `routeFactsForPurpose`（`routingLayers` 摊平：先用途的模型顺序、再模型下的路由顺序），仍交给同一个 `chooseRoute`——死的挡掉写原因、额度未知的排在活的后面、全死回 `waitFor: 'none'` 逐条写原因，配置缺口（用途没配、模型下没路由）写进原因；两层没有「钉住」，一律按没钉住算。路由探针的「在不在用」、切号看的「在用的路由」也改按两层（`routesInUse`）。`stageCandidates` 没有别的调用方，删了，测试改到两层上。新测试：`packages/engine/test/real/store-ports.test.ts`「路由两层选路」四条（第一顺位死了跳到第二、全死明确失败、不知道排后面、配置缺口写进原因）。
+- **还读旧平铺表的（这次没切）**：判断题后端 `packages/jev/src/wiring.ts`（判断阶段排第一的开着的路由）、驾驶舱换模型对话框（`GET /routing` 的 `stages`）、commander 的 `france-query.mjs`（`in_use` 列；法国还没跑迁移 0025，先切会让这条查询报错）。删旧表（#556-4）之前要一起切。
 - **驾驶舱每层活着吗**：选路之后。
-- **还没验证**：法国真发一次（法国引擎关着，上线按版本由创始人确认）；生产目录 `/etc/fleet-dao/catalog.json` 不在仓里，骨架里的路由 id 和它对不对得上没核过——对不上第一次发布会红在「装路由两层」（照设计不吞），发之前用 `france-query` 核一遍 `routes` 表。
+- **还没验证**：法国真发一次（法国引擎关着，上线按版本由创始人确认）；生产目录 `/etc/fleet-dao/catalog.json` 不在仓里，骨架里的路由 id 和它对不对得上没核过——对不上第一次发布会红在「装路由两层」（照设计不吞），发之前用 `france-query` 核一遍 `routes` 表。选路切过去以后，生产上实际的顺序和开关来自骨架（只补缺），不是目录里的阶段顺序：两边不一样的以骨架为准（例如 GPT 5.6 Luna 经 Cursor 那条，平铺里只挂在开 PR 前验证；骨架里它开着，界面、判断以外的用途都排得到，在 Opus 后面；Grok 4.7 在分诊、规划这些用途里也开着、排最后）。
 
 ## 2026-10-04 凌晨（流程漏洞与自评：创始人「主动发现漏洞、自定优先级、设任务和验收」「看看有没有优化空间」）
 
