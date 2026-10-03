@@ -61,9 +61,16 @@ migrate() {
 }
 api_report_before() { :; }
 SYNCED=0 # 往香港发过几次静态文件
-PROBED=0 # 试通过几次往香港传静态文件的路
+PROBED=0   # 试通过几次往香港传静态文件的路
+WEB_DOWN=0 # 1 = 往香港传静态文件的路试不通
 sync_web() { SYNCED=$((SYNCED + 1)); }
-web_reachable() { PROBED=$((PROBED + 1)); }
+web_reachable() {
+  PROBED=$((PROBED + 1))
+  if ((WEB_DOWN)); then
+    red "桩：试着往香港传文件没通"
+    return 1
+  fi
+}
 # 香港网关的入口（fleet-gateway-deploy）换成桩：状态从 $GWD 下的文件读，收下、切过去也落在那里（发布脚本多在命令替换里调它，
 # 变量带不回来）；调过什么一行一条记进 $GWD/calls：「命令 提交号头一个字」
 GWD=$TMP/gw
@@ -1330,6 +1337,27 @@ EOF
   check "没切回去：上一版没试过，不记它不健康" "$(last_event "$D")" auto-rollback
   NODE=$REAL_NODE
   GATE=()
+
+  # 期望给往香港发的加了一样：发布开头只试了原来那几样（这时一样都没有），写之前照样试通新加的，不通就不写、不切
+  Z=$(printf '6%.0s' {1..40})
+  put_desired "$Z" 巴黎 z.invalid "" web
+  WEB_DOWN=1
+  was_sum=$(etc_sum)
+  was_probed=$PROBED
+  reset
+  do_release "$Z" >"$TMP/out"
+  check "期望新加了往香港发 web、试不通：不切，本机配置和记录一个字没动" "$(current_sha):$(etc_sum)" "$X2:$was_sum"
+  check "试的是新加的那一样，红里说清" "$((PROBED - was_probed)):$(reds_with '要往香港新发的几样试不通')" "1:1"
+  WEB_DOWN=0
+  was_probed=$PROBED
+  was_synced=$SYNCED
+  reset
+  do_release "$Z" >"$TMP/out"
+  check "试得通：切到 Z、照期望写上、这一版照新的发了静态文件" \
+    "$(current_sha):$(has_line release.env FLEET_HK_PARTS=web):$((PROBED - was_probed)):$((SYNCED - was_synced))" "$Z:有:1:1"
+  reset
+  do_release "$Z" >"$TMP/out"
+  check "再发 Z：开头就照新的几样试通，写配置时不再多试一遍" "$((PROBED - was_probed))" 2
 
   build_release "$E" >/dev/null # 老提交：这一版里没有配置的期望
   reset

@@ -879,11 +879,12 @@ config_cli() { # 参数…
 #   1. config.mjs 先算（--plan）：写成什么样放进临时目录，本机配置一个字都不写；期望认不出、线上文件认不出、要写的键写了几行，
 #      在这一步就停下；
 #   2. 算出来的 release.env 用本脚本自己的读法核一遍（load_release_env，在子 shell 里）：只认那四个键、服务和往香港发的几样
-#      认得——核不过就不写，不然写进去以后每次发布都卡在前提上，连改好期望的那一版都发不上来；
+#      认得——核不过就不写，不然写进去以后每次发布都卡在前提上，连改好期望的那一版都发不上来；照它往香港新发的几样先试通
+#      （new_parts_reachable）；
 #   3. 再让它照核过的写（--expect：重新算的和核过的不一样就不写），写完照 systemd 读回核一遍，不对就改回原样。
 # 写不成判红、返回 1：不切版本（本机配置和原来一样）。release.env 变了就重读：这一版照新的起服务、往香港发
 apply_config() { # 提交号 事件（release / rollback / auto-rollback）
-  local sha=$1 how=$2 plan out why sum=""
+  local sha=$1 how=$2 plan out why sum="" parts
   local -a args=(apply --releases "$RELEASES" --commit "$sha" --how "$how" --etc "$CONFIG_ETC" --state "$CONFIG_STATE"
     --profile "$CONFIG_PROFILE")
   step "照期望写本机配置（${sha:0:12} 的期望 → $CONFIG_ETC）"
@@ -902,10 +903,16 @@ apply_config() { # 提交号 事件（release / rollback / auto-rollback）
     rm -rf -- "$plan"
     return 0
   fi
-  if ! out=$(load_release_env "$plan/release.env" 2>&1); then
+  if ! out=$(load_release_env "$plan/release.env" 2>&1 && printf '\nPARTS=%s' "$FLEET_HK_PARTS"); then
     rm -rf -- "$plan"
     why=$(sed -n 's/^  ✗ //p' <<<"$out" | head -3 | tr '\n' ' ')
     red "照 ${sha:0:12} 的期望写出来的 release.env 发布脚本认不出（${why:-没说原因}）：本机配置一个字都没写，没切版本——改期望、发下一版"
+    return 1
+  fi
+  parts=${out##*$'\n'PARTS=}
+  if ! new_parts_reachable "$parts"; then
+    rm -rf -- "$plan"
+    red "照 ${sha:0:12} 的期望要往香港新发的几样试不通（见上）：本机配置一个字都没写，没切版本"
     return 1
   fi
   if [[ -f "$RELEASE_ENV" ]]; then sum=$(file_sum "$RELEASE_ENV") || sum=""; fi
@@ -917,7 +924,7 @@ apply_config() { # 提交号 事件（release / rollback / auto-rollback）
   rm -rf -- "$plan"
   if [[ "$(file_sum "$RELEASE_ENV" 2>/dev/null)" != "$sum" ]]; then
     if ! load_release_env "$RELEASE_ENV"; then
-      red "release.env 照期望写完重读没过（原因见上）：没切版本"
+      red "release.env 照期望写上了，重读却没过（原因见上）：没切版本，要人看"
       return 1
     fi
     auto_parts
@@ -1032,6 +1039,22 @@ hk_reachable() {
   local bad=0
   if has_part web || sends_demo; then web_reachable || bad=1; fi
   if has_part gateway; then gateway_reachable || bad=1; fi
+  return "$bad"
+}
+
+# 照期望写配置要往香港新加的几样（算出来的 release.env 里有、现在没有的），写之前照样试通：发布开头的 hk_reachable 只试了原来那几样
+new_parts_reachable() { # 算出来的 FLEET_HK_PARTS
+  local p parts_added="" old_parts=$FLEET_HK_PARTS old_demo=$DEMO_PUBLISH bad=0
+  for p in $1; do
+    if ! has_part "$p"; then parts_added+="${parts_added:+ }$p"; fi
+  done
+  if [[ -z "$parts_added" ]]; then return 0; fi
+  FLEET_HK_PARTS=$parts_added
+  # 自动发布不发演示版（auto_parts），新加的 demo 也不用试通
+  if ((AUTO)); then DEMO_PUBLISH=0; fi
+  hk_reachable || bad=1
+  FLEET_HK_PARTS=$old_parts
+  DEMO_PUBLISH=$old_demo
   return "$bad"
 }
 
