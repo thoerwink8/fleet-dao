@@ -187,6 +187,25 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   const runId = input.runId ?? randomUUID();
   const startedAt = (deps.now ?? (() => new Date()))().toISOString();
   const timeoutMs = (input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES) * 60 * 1000;
+  const halted = (stop: AbortSignal, where: string): OneShotResult => ({
+    runId,
+    outcome: 'org_switch',
+    exitCode: null,
+    stdout: '',
+    stderrTail: '',
+    startedAt,
+    endedAt: (deps.now ?? (() => new Date()))().toISOString(),
+    failureReason: switchReason(stop, where),
+    runsNotWired: false,
+  });
+
+  // 切号已经叫停了（调用方等内存时叫停的也在这儿收）：先于内存准入看——放在准入后面，内存一直放不下时
+  // 这一段会一直回 admission_blocked、调用方一直等，切号等它收场等到超时。
+  if (deps.stop?.aborted) {
+    const result = halted(deps.stop, '还没起会话');
+    await recordRun(input, result, deps.runs);
+    return result;
+  }
 
   // 内存准入（沿用 real/memory-admission.ts）：本机（没挂载）会 skip，放了 block 才拦。
   if (deps.memoryAdmission !== undefined) {
@@ -217,21 +236,11 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   await mkdir(runDir, { recursive: true });
   await writeFile(join(runDir, 'brief.txt'), input.prompt, 'utf8');
 
-  // 切号已经叫停了：不起会话，记一笔 org_switch（和内存放不下一样：没起也有账）
+  // 查内存、建落盘目录那会儿叫停的：同样不起会话，记一笔 org_switch（没起也有账）
   if (deps.stop?.aborted) {
-    const halted: OneShotResult = {
-      runId,
-      outcome: 'org_switch',
-      exitCode: null,
-      stdout: '',
-      stderrTail: '',
-      startedAt,
-      endedAt: (deps.now ?? (() => new Date()))().toISOString(),
-      failureReason: switchReason(deps.stop, '还没起会话'),
-      runsNotWired: false,
-    };
-    await settle(runDir, input, halted, deps.runs);
-    return halted;
+    const result = halted(deps.stop, '还没起会话');
+    await settle(runDir, input, result, deps.runs);
+    return result;
   }
 
   // 开跑：先留一行没结束的。写不进去不起会话——起了就是一个切号看不见的会话（切号会把它当场掐断）。
@@ -270,17 +279,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     clearTimeout(killTimer);
     const reason = err instanceof Error ? err.message : String(err);
     if (switched() && deps.stop) {
-      const result: OneShotResult = {
-        runId,
-        outcome: 'org_switch',
-        exitCode: null,
-        stdout: '',
-        stderrTail: reason.slice(-4096),
-        startedAt,
-        endedAt: (deps.now ?? (() => new Date()))().toISOString(),
-        failureReason: switchReason(deps.stop, '会话被停下'),
-        runsNotWired: false,
-      };
+      const result: OneShotResult = { ...halted(deps.stop, '会话被停下'), stderrTail: reason.slice(-4096) };
       await settle(runDir, input, result, deps.runs);
       return result;
     }
