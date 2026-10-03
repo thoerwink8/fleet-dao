@@ -484,6 +484,7 @@ function quotaPool(over: Partial<QuotaTablePool> = {}): QuotaTablePool {
     poolId: 'p1',
     channelName: '渠道一',
     channelEnabled: true,
+    routeCount: 2,
     expiresAt: null,
     lastReadOkAt: new Date(NOW.getTime() - 5 * 60_000),
     dataAt: new Date(NOW.getTime() - 5 * 60_000),
@@ -514,10 +515,11 @@ describe('额度读数新不新鲜（checkQuotaFreshness，#76）', () => {
     expect(w.raised[1]?.body).toContain('从没读成过');
   });
 
-  it('渠道关了、池过期了的不查也不报', async () => {
+  it('渠道关了、没有路由在用、池过期了的不查也不报', async () => {
     const w = world({
       quotaPools: async () => [
         quotaPool({ channelEnabled: false, readOverdue: true }),
+        quotaPool({ poolId: 'p3', routeCount: 0, readOverdue: true }),
         quotaPool({ poolId: 'p2', expiresAt: new Date(NOW.getTime() - 1000), readOverdue: true }),
       ],
     });

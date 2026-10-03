@@ -312,7 +312,7 @@ export function quotaAlertKey(poolId: string): string {
 /**
  * 每个在用的账号池额度读数不超过 30 分钟（设计 §6，#76）：定时读额度（jobs/quota-read.ts）自己对「连着两轮没读成」报警，
  * 这里是兜底——它没在跑、跑了没写库、或上游数冻住，读数照样会旧，只有按「库里最近读成时刻」查才看得见。
- * 在用 = 渠道开着、没过期；关掉的、过期了的池读不到是应该的，不报。
+ * 在用 = 渠道开着、有路由挂在它上面、没过期；关掉的、没路由用的、过期了的池读不到是应该的，不报。
  */
 export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
@@ -338,7 +338,12 @@ export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<Swe
 
   const overdue = new Set<string>();
   for (const p of pools) {
-    if (!p.channelEnabled || (p.expiresAt !== null && p.expiresAt.getTime() <= now.getTime())) continue;
+    if (
+      !p.channelEnabled ||
+      p.routeCount === 0 ||
+      (p.expiresAt !== null && p.expiresAt.getTime() <= now.getTime())
+    )
+      continue;
     part.scanned += 1;
     if (!p.readOverdue) continue;
     const dedupeKey = quotaAlertKey(p.poolId);
