@@ -227,12 +227,20 @@ jobs:
   # 第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆一份（#220）：一个测试进程的内存从
   # ~1G 降到 ~0.3G，不再每个进程各建一份内存 PGlite。engine、rest 不连这张库，照 PGlite 走；本机没设这个变量也
   # 照 PGlite 走（packages/db/src/testing.ts，ops.md 第九节「CI 测试的 Postgres 服务」）。
+  # PR 上的结果缓存（packages/conventions/src/ci-cache.ts）：同一个 PR 重推，这一台的输入（源码、依赖、根配置、环境……）
+  # 没变、上一轮又全绿，就不再跑 vitest。缓存按 ref 分作用域，PR 的缓存只有这个 PR 自己读得到；主线（push）这一轮是
+  # 自动发布的闸门，一个测试都不许跳：下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
+  # job 照常 success，跳的只是 vitest 那一步；缓存读不到、清单对不上、算不出，一律回来真跑。
   test:
     needs: changes
     if: needs.changes.outputs.tests != '[]'
     name: test (${{ matrix.label }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # FLEET_TEST_PG_URL 只给 db 分片：连旁边的 postgres:16 服务、从模板库克隆各自的测试库（#220）。不设给 engine、rest：
+    # 它们的测试照 PGlite 走，免得挂上这张白起的库。放在 job 上是为了算缓存键的那一步也看得到（有没有真 Postgres 是键的一部分）。
+    env:
+      FLEET_TEST_PG_URL: ${{ matrix.name == 'db' && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -306,16 +314,66 @@ jobs:
           "$cli" --version
           "$cli" --version | grep -qF "$VERSION"
           echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
-      # 参数是 ci-plan 给的包目录（或全跑时 rest 的 --exclude）；经环境变量传、按数组展开，不拼进命令行
-      # FLEET_TEST_PG_URL 只给 db 分片：连旁边的 postgres:16 服务、从模板库克隆各自的测试库（#220）。
-      # 不设给 engine、rest：它们的测试照 PGlite 走，免得挂上这张白起的库。
+      # —— PR 上的测试结果缓存（只 pull_request；说明见 test job 上面的注释）。键的算法、清单的校验都在 ci-cache.ts。
+      # 1. 算键（含 vitest list 列出这一台实际会收的测试文件）；算不出 enabled=false，后面几步都跳过、测试全跑
+      - name: 测试缓存：算键
+        if: github.event_name == 'pull_request'
+        id: cache-key
+        env:
+          ARGS: ${{ join(matrix.args, ' ') }}
+          LABEL: ${{ matrix.label }}
+          TEMPORAL: ${{ matrix.temporal && format('{0} {1}', steps.temporal.outputs.version, steps.temporal.outputs.sha) || '' }}
+        run: node packages/conventions/src/bin/ci-cache.ts key --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --args="$ARGS" --label "$LABEL" --temporal "$TEMPORAL"
+      # 2. 取上一轮存的清单（键完全一样才命中，不用 restore-keys）
+      - name: 测试缓存：取清单
+        if: github.event_name == 'pull_request' && steps.cache-key.outputs.enabled == 'true'
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/fleet-test-cache
+          key: ${{ steps.cache-key.outputs.cache_key }}
+      # 3. 不信键：清单每个文件的哈希重算、拿 vitest 收到的文件当全集再减去盖住的；mode = all / files / none
+      - name: 测试缓存：核对，算这次跑哪些
+        if: github.event_name == 'pull_request' && steps.cache-key.outputs.enabled == 'true'
+        id: cache-plan
+        run: node packages/conventions/src/bin/ci-cache.ts plan --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP"
+      # 参数是 ci-plan 给的包目录（或全跑时 rest 的 --exclude）；经环境变量传、按数组展开，不拼进命令行。
+      # CACHE_MODE 空 = 没走缓存（主线推送、或上面几步没开）：和没有缓存时一模一样地全跑。all 和 files 多出一份 JSON 报告，
+      # 写清单时按它认「哪些文件真的跑成了」；files 只跑清单没盖住的那几个文件（不再带 --shard，文件已经是这一台的）；
+      # none = 清单盖住了全部，不跑 vitest。
       - env:
           ARGS: ${{ join(matrix.args, ' ') }}
-          FLEET_TEST_PG_URL: ${{ matrix.name == 'db' && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
+          CACHE_MODE: ${{ steps.cache-plan.outputs.mode }}
+          RUN_FILES: ${{ steps.cache-plan.outputs.run_files }}
+          REPORT: ${{ runner.temp }}/fleet-test-report.json
         run: |
           set -euo pipefail
           read -ra args <<<"$ARGS"
-          pnpm exec vitest run "${args[@]}"
+          report=(--reporter=default --reporter=github-actions --reporter=json --outputFile.json="$REPORT")
+          case "${CACHE_MODE:-}" in
+            "") pnpm exec vitest run "${args[@]}" ;;
+            all) pnpm exec vitest run "${args[@]}" "${report[@]}" ;;
+            files)
+              mapfile -t files <"$RUN_FILES"
+              pnpm exec vitest run "${files[@]}" "${report[@]}"
+              ;;
+            none) echo "测试缓存命中：这一台的输入没变、上一轮全绿，不跑 vitest" ;;
+            *)
+              echo "认不出的缓存模式「$CACHE_MODE」" >&2
+              exit 1
+              ;;
+          esac
+      # 4. 只在这一台全绿之后写清单（record 自己再核对一遍：每个文件要么核对过、要么报告里标了 passed），再存缓存
+      - name: 测试缓存：全绿，写清单
+        if: success() && github.event_name == 'pull_request' && (steps.cache-plan.outputs.mode == 'all' || steps.cache-plan.outputs.mode == 'files')
+        id: cache-record
+        run: node packages/conventions/src/bin/ci-cache.ts record --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --report "$RUNNER_TEMP/fleet-test-report.json"
+      - name: 测试缓存：存清单
+        if: success() && github.event_name == 'pull_request' && steps.cache-record.outputs.written == 'true' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/fleet-test-cache
+          key: ${{ steps.cache-key.outputs.cache_key }}
 
   # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
   web:

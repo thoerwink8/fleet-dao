@@ -22,7 +22,7 @@
 | B | 合并 CI 小任务（biome/tsc/docs/hygiene 四台并成一个 `lint`） | **已写、已并入本分支（未推）**：一个 PR 约 14→11 个任务；各步 continue-on-error + 汇总步核对（保住 #566 的「biome 红不吃掉 tsc」）；汇总脚本被测试真跑。**没在真 GitHub 上跑过**：`lint` 里 working-directory / pnpm/action-setup / setup-node 缓存路径几处，第一次 PR 要盯它起不起得来；`lint` 约 90 秒贴着最慢测试台 87 秒，若成瓶颈把 docs 挪回独立 job |
 | C | 主线只留最新一轮（连续合几个取消前面的） | **暂不做**：D 的区间口径下每轮主线已经只跑增量，取消前一轮的收益小；而取消会让自动发布闸门（认「这个提交自己那次绿」）断，要先改闸门认「被绿区间覆盖」才能开。区间口径跑出真实数字后再决定 |
 | D | 主线跑「上次绿…现在」的累计改动 | **前半已写、本机测过、已提交（4f6f21e1，未推）**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动 |
-| E | PR 的测试分片结果缓存 | 工人做中（独立工作树） |
+| E | PR 的测试分片结果缓存 | **已写、已并入本分支（未推）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
 | F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已写、已提交（f85aa1c3，未推）**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数本机测不了（要 root），等 CI 的 ⏱ 行，分台名单到时再重排 |
 | G | engine/db 继续分片、大文件继续拆 | 待做（在 E 之后看还差多少） |
 | H | 每 job 约 25 秒固定开销（checkout + setup-node + pnpm install） | 待做（在 B 之后逐项量） |

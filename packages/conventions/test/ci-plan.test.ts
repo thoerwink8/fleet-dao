@@ -5,6 +5,7 @@ import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { keyCovers, keyRoots, sourceClosure } from '../src/ci-cache.ts';
 import {
   AGENTS_UNIT,
   ALWAYS_JOBS,
@@ -341,6 +342,42 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
 
   it('每一处都落进 PATH_RULES / 依赖图 / TEST_READS', () => {
     expect(scan((changed) => pr(...changed))).toEqual([]);
+  });
+
+  /**
+   * PR 的测试分片结果缓存（ci-cache.ts）的键必须盖住同一批读取：测试读的包外文件改了，命中缓存就会跳过读它的测试。
+   * 输入集从上面的扫描器反推（refs 扫出来的每一处），不手写第二份清单。docs job 每个 PR 单独跑的那两份不算（ALWAYS 里
+   * 的 ci-plan.test.ts 不免：它在 rest 分片里真跑，读的 ci.yml、deploy/、各包测试源码都得在键里）。
+   */
+  const cacheMissed = (cover: typeof keyCovers) => {
+    const missed: string[] = [];
+    for (const { unit, rel } of files) {
+      if (rel === 'packages/conventions/test/doc-pointers.test.ts' || rel === 'agents/test/skills.test.ts')
+        continue;
+      const roots = keyRoots([unit], sourceClosure(graph(), [unit]));
+      for (const ref of refs(rel)) {
+        // 「.」是仓根这个底（const ROOT = fileURLToPath(new URL('../../../', …))），不是读了哪个文件：
+        // 它下面具体读的文件，写得出字面量的会作为各自的路径出现在这里
+        if (ref === '.') continue;
+        if (!cover(roots, ref)) missed.push(`${rel} 读 ${ref}，缓存键没盖住`);
+      }
+    }
+    return missed;
+  };
+
+  it('缓存键盖住扫描器扫出的每一处包外读取（ci-cache.ts 的 keyCovers）', () => {
+    expect(cacheMissed(keyCovers)).toEqual([]);
+  });
+
+  it('【故意造出的失败】缓存键少盖一块（deploy/ 那棵）：扫出来必须正好是读 deploy/ 的那些测试，不是空、也不是别人', () => {
+    const noDeploy: typeof keyCovers = (roots, path) =>
+      keyCovers({ ...roots, dirs: roots.dirs.filter((d) => d !== 'deploy') }, path);
+    const missed = cacheMissed(noDeploy);
+    expect(missed.length, 'deploy/ 没有被任何测试读到了：这条查的东西不存在，测试该删').toBeGreaterThan(0);
+    expect(
+      missed.every((m) => /读 deploy(\/|$)/.test(m)),
+      missed.join('\n'),
+    ).toBe(true);
   });
 
   /**
@@ -750,7 +787,12 @@ describe('ci.yml 和这里对得上', () => {
     if (typeof parsed === 'string') throw new Error(parsed);
     const covered = (f: string) =>
       parsed.some((r) => (r.path.endsWith('/') ? f.startsWith(r.path) : f === r.path));
-    const todo = ['packages/conventions/src/bin/ci-plan.ts', 'packages/conventions/src/bin/ci-verdict.ts'];
+    // 缓存那两个文件也是「决定少跑」的一步（PR 的测试分片结果缓存）：它们顺着导入走到的文件同样要在清单里
+    const todo = [
+      'packages/conventions/src/bin/ci-plan.ts',
+      'packages/conventions/src/bin/ci-verdict.ts',
+      'packages/conventions/src/bin/ci-cache.ts',
+    ];
     const seen = new Set<string>();
     while (todo.length > 0) {
       const rel = todo.pop() as string;

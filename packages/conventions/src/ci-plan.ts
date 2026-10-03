@@ -117,23 +117,26 @@ export type Rule =
 const exact = (p: string) => (f: string) => f === p;
 const under = (p: string) => (f: string) => f.startsWith(p);
 
+/** 仓根的配置：改到任何一个，所有包都受影响（PATH_RULES 全跑；ci-cache.ts 的缓存键也认这一份）。 */
+export const ROOT_CONFIG_FILES: readonly string[] = [
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'tsconfig.json',
+  'tsconfig.base.json',
+  'biome.json',
+  'vitest.config.ts',
+];
+
+/** 测试夹具：别的包的测试也读（PATH_RULES 全跑；ci-cache.ts 的缓存键也认这一条）。 */
+export const FIXTURE_PATH = /^packages\/[^/]+\/test\/(?:.+\/)?fixtures\//;
+
 /** 包外路径的去处，按顺序取第一条。包内的（packages/<包>/…）不在这里，按依赖图算。 */
 export const PATH_RULES: readonly Rule[] = [
-  ...[
-    'package.json',
-    'pnpm-lock.yaml',
-    'pnpm-workspace.yaml',
-    'tsconfig.json',
-    'tsconfig.base.json',
-    'biome.json',
-    'vitest.config.ts',
-  ].map((p) => ({ match: exact(p), full: '根配置，所有包都受影响' })),
+  ...ROOT_CONFIG_FILES.map((p) => ({ match: exact(p), full: '根配置，所有包都受影响' })),
   { match: under('.github/workflows/'), full: 'CI 工作流本身' },
   { match: under('packages/shared/'), full: '几乎所有包都依赖 shared' },
-  {
-    match: (f) => /^packages\/[^/]+\/test\/(?:.+\/)?fixtures\//.test(f),
-    full: '测试夹具，别的包的测试也读',
-  },
+  { match: (f) => FIXTURE_PATH.test(f), full: '测试夹具，别的包的测试也读' },
   { match: under('deploy/'), full: '装机脚本：deploy/test 全跑，好几个包的测试也直接读 deploy/ 下的文件' },
   // deploy/test 里读 docs/ops.md 的只有端口表那段和 place-file.test.sh：只改文档跑这两块（run.sh --ops），不拖上全套
   {
