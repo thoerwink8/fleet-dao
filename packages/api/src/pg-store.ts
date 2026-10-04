@@ -1151,26 +1151,31 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
 
     // —— GitHub 事件 ——
     async claimDelivery(delivery, { staleBefore, skipIfSeen }) {
-      let seenBefore = false;
-      if (skipIfSeen) {
-        // 带过这一版的别的投递（同一版一般只有一两条）：有没被门挡掉的就不再做；只有被挡掉的，照样做、回 seenBefore
-        const carriers = await db
-          .select({ status: githubEvents.status, reason: githubEvents.reason })
-          .from(githubEventVersions)
-          .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
-          .where(
-            and(
-              eq(githubEventVersions.object, skipIfSeen.object),
-              eq(githubEventVersions.version, new Date(skipIfSeen.version)),
-              ne(githubEventVersions.deliveryId, delivery.id),
-            ),
-          );
-        if (carriers.some((c) => c.status !== 'ignored')) return { status: 'duplicate' };
-        seenBefore = carriers.some((c) => c.reason !== REPO_NOT_MANAGED);
-      }
-      const seen = seenBefore ? { seenBefore } : {};
       const at = now();
-      const inserted = await db.transaction(async (tx) => {
+      const attempt = await db.transaction(async (tx) => {
+        // 「带没带过这一版」的查和这一条的插必须在同一把锁下：两条带同一版的投递同时来，各自查都查不到对方（对方还没提交）、
+        // 就会都收下。锁按（对象，版）加（含这一条自己带的几版，所以 webhook 先到、补收后到也看得见），排好序再加，免得互相等死。
+        const lockKeys = new Set(delivery.versions.map((v) => versionLockKey(v)));
+        if (skipIfSeen) lockKeys.add(versionLockKey(skipIfSeen));
+        for (const key of [...lockKeys].sort())
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
+        let seenBefore = false;
+        if (skipIfSeen) {
+          // 带过这一版的别的投递（同一版一般只有一两条）：有没被门挡掉的就不再做；只有被挡掉的，照样做、回 seenBefore
+          const carriers = await tx
+            .select({ status: githubEvents.status, reason: githubEvents.reason })
+            .from(githubEventVersions)
+            .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
+            .where(
+              and(
+                eq(githubEventVersions.object, skipIfSeen.object),
+                eq(githubEventVersions.version, new Date(skipIfSeen.version)),
+                ne(githubEventVersions.deliveryId, delivery.id),
+              ),
+            );
+          if (carriers.some((c) => c.status !== 'ignored')) return undefined;
+          seenBefore = carriers.some((c) => c.reason !== REPO_NOT_MANAGED);
+        }
         const rows = await tx
           .insert(githubEvents)
           .values({
@@ -1198,9 +1203,11 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             })),
           );
         }
-        return rows;
+        return { inserted: rows.length > 0, seenBefore };
       });
-      if (inserted.length > 0) return { status: 'claimed', token: iso(at), retry: false, ...seen };
+      if (attempt === undefined) return { status: 'duplicate' };
+      const seen = attempt.seenBefore ? { seenBefore: true } : {};
+      if (attempt.inserted) return { status: 'claimed', token: iso(at), retry: false, ...seen };
       // 已经有这一条：条件更新是原子的，两个请求同时来接，只有一个接得到
       const taken = await db
         .update(githubEvents)
@@ -1913,6 +1920,11 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       });
     },
   };
+}
+
+/** 收投递时按（对象，版）加的锁名：版本换成毫秒时刻再拼，写法不同（带不带毫秒）的同一时刻锁的是同一把。 */
+function versionLockKey(v: Pick<GitHubObjectVersion, 'object' | 'version'>): string {
+  return `github-version:${v.object}@${new Date(v.version).toISOString()}`;
 }
 
 /** 上次出错的、在等着的、处理中但占用早于 stale 的（那一次多半死了）：可以接过来重做。 */
