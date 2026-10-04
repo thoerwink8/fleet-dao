@@ -14,6 +14,7 @@ const api = (used: number | null, over: Record<string, unknown> = {}) => ({
   resetsAt: new Date(NOW.getTime() + 2 * H) as Date | null,
   readAt: new Date(NOW.getTime() - 60_000),
   staleSince: null,
+  poolsWithWindow: 1,
   ...over,
 });
 const spend = (over: Partial<CarpoolWindowSpend> = {}): CarpoolWindowSpend => ({
@@ -97,6 +98,7 @@ describe('carpoolReconcileView', () => {
     expect(why(view(api(null)))).toContain('没有已用美元或上限');
     expect(why(view(api(10, { limit: null })))).toContain('没有已用美元或上限');
     expect(why(view(api(10, { limit: 0 })))).toContain('没有已用美元或上限');
+    expect(why(view(api(50, { poolsWithWindow: 2 })))).toContain('2 个池都读到了这个窗口');
     expect(why(view(api(50, { staleSince: new Date(NOW.getTime() - 60_000) })))).toContain('不再报这个窗口');
     expect(why(view(api(10, { resetsAt: null })))).toContain('没给清零时刻');
     expect(why(view(api(10, { resetsAt: new Date(NOW.getTime() - 1) })))).toContain('已经过了清零时刻');

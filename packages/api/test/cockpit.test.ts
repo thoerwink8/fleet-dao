@@ -729,6 +729,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
             resetsAt: new Date(T0.getTime() + 2 * 3_600_000),
             readAt: new Date(T0.getTime() - 60_000),
             staleSince: null,
+            poolsWithWindow: 1,
           },
           spend: { sessions: 3, recordedUsd: 10, recorded: 3, unrecorded: 0, unrecordedSwitchStopped: 0 },
         }),

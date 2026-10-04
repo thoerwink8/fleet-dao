@@ -34,7 +34,7 @@ export function pgCarpoolReconcile(db: Db): CarpoolReconcilePort {
       if (!api) return null;
       // 窗口起点要清零时刻才推得出；没有就让调用方照实写「没给清零时刻」，不去猜起点
       const since = api.resetsAt ? new Date(api.resetsAt.getTime() - CARPOOL_WINDOW_MS) : api.readAt;
-      const spend = await carpoolWindowSpend(db, { since, until: api.readAt });
+      const spend = await carpoolWindowSpend(db, { since, until: api.readAt, poolId: api.poolId });
       return { api, spend };
     },
   };
@@ -58,6 +58,12 @@ export function carpoolReconcileView(
     };
   }
   const { api, spend } = raw;
+  if (api.poolsWithWindow > 1) {
+    return {
+      state: 'unavailable',
+      why: `有 ${api.poolsWithWindow} 个池都读到了这个窗口：接口说的是账号级的数，对不上单个池的花费，没法对账`,
+    };
+  }
   if (api.staleSince) {
     return {
       state: 'unavailable',

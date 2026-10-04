@@ -100,6 +100,19 @@ describe('carpoolWindowSpend：窗口里本机记到的拼车花费', () => {
     });
   });
 
+  it('给了 poolId 只算这个池：两个拼车池各自的花费不混在一起（第二意见第 2 轮）', async () => {
+    await asCarpool('relay-a');
+    await asCarpool('relay-b');
+    const task = await addTask(t.db, (await addRepo(t.db)).id);
+    await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(30 * MIN), costUsd: 3 });
+    await addRun(t.db, { taskId: task.id, routeId: 'b-opus', startedAt: ago(20 * MIN), costUsd: 5 });
+    const q = { since: ago(5 * HOUR), until: NOW };
+    expect((await carpoolWindowSpend(t.db, q)).recordedUsd).toBe(8);
+    expect((await carpoolWindowSpend(t.db, { ...q, poolId: 'relay-a' })).recordedUsd).toBe(3);
+    expect((await carpoolWindowSpend(t.db, { ...q, poolId: 'relay-b' })).recordedUsd).toBe(5);
+    expect((await carpoolWindowSpend(t.db, { ...q, poolId: 'nope' })).sessions).toBe(0);
+  });
+
   it('窗口里一个会话都没有：全是 0（真的没有），不是认不出', async () => {
     await asCarpool('relay-a');
     expect(await carpoolWindowSpend(t.db, { since: ago(5 * HOUR), until: NOW })).toEqual({
@@ -153,6 +166,15 @@ describe('carpoolApiWindow：接口读到的拼车 5 小时美元窗口', () => 
       resetsAt: later(2 * HOUR),
       readAt: ago(3 * MIN),
       staleSince: null,
+      poolsWithWindow: 1,
     });
+  });
+
+  it('两个拼车池都读到了窗口：取读数最新的，并写明有 2 个池（对账据此说没法对）', async () => {
+    await asCarpool('relay-a');
+    await asCarpool('relay-b');
+    await usd('relay-a', ago(5 * MIN), 10);
+    await usd('relay-b', ago(MIN), 12);
+    expect(await carpoolApiWindow(t.db)).toMatchObject({ poolId: 'relay-b', used: 12, poolsWithWindow: 2 });
   });
 });

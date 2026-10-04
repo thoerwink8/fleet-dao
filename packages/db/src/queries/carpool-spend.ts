@@ -39,8 +39,10 @@ export interface CarpoolWindowSpend {
  */
 export async function carpoolWindowSpend(
   db: Db,
-  q: { since: Date; until: Date },
+  q: { since: Date; until: Date; poolId?: string },
 ): Promise<CarpoolWindowSpend> {
+  // 给了 poolId 只算这个池（对账时窗口读数属于哪个池就只算哪个池的花费，不拿一个池的读数对所有拼车池的花费）
+  const onPool = (col: typeof pools.id) => (q.poolId === undefined ? [] : [eq(col, q.poolId)]);
   const [sessions, oneShots] = await Promise.all([
     db
       .select({ costUsd: sessionRuns.costUsd, outcome: sessionRuns.outcome })
@@ -50,6 +52,7 @@ export async function carpoolWindowSpend(
       .where(
         and(
           eq(pools.orgKind, 'carpool'),
+          ...onPool(pools.id),
           isNotNull(sessionRuns.startedAt),
           gte(sessionRuns.startedAt, q.since),
           lte(sessionRuns.startedAt, q.until),
@@ -60,7 +63,14 @@ export async function carpoolWindowSpend(
       .from(runs)
       .innerJoin(routes, eq(routes.id, runs.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
-      .where(and(eq(pools.orgKind, 'carpool'), gte(runs.startedAt, q.since), lte(runs.startedAt, q.until))),
+      .where(
+        and(
+          eq(pools.orgKind, 'carpool'),
+          ...onPool(pools.id),
+          gte(runs.startedAt, q.since),
+          lte(runs.startedAt, q.until),
+        ),
+      ),
   ]);
   const out: CarpoolWindowSpend = {
     sessions: 0,
@@ -90,11 +100,13 @@ export interface CarpoolApiWindow {
   readAt: Date;
   /** 读成了、但接口这次起没再报这个窗口。 */
   staleSince: Date | null;
+  /** 有几个拼车池读到了这种窗口。大于 1 时接口是账号级读数、对不上单个池的花费，对账要说没法对（api 的 carpool-reconcile-view.ts）。 */
+  poolsWithWindow: number;
 }
 
 /**
- * 拼车池最近一次读到的「5 小时美元窗口」（reclaude 开放接口读来的，source reclaude-carpool、单位美元）。几个拼车池有几个取读数最新的；
- * 一个都没有回 null（没读到过），由调用方写明，不当成「没用」。
+ * 拼车池最近一次读到的「5 小时美元窗口」（reclaude 开放接口读来的，source reclaude-carpool、单位美元）。取读数最新的那一个池，
+ * 并带上有几个池读到了（poolsWithWindow）；一个都没有回 null（没读到过），由调用方写明，不当成「没用」。
  */
 export async function carpoolApiWindow(db: Db): Promise<CarpoolApiWindow | null> {
   const rows = await db
@@ -116,5 +128,6 @@ export async function carpoolApiWindow(db: Db): Promise<CarpoolApiWindow | null>
         eq(quotaWindows.source, 'reclaude-carpool'),
       ),
     );
-  return rows.sort((a, b) => b.readAt.getTime() - a.readAt.getTime())[0] ?? null;
+  const latest = rows.sort((a, b) => b.readAt.getTime() - a.readAt.getTime())[0];
+  return latest ? { ...latest, poolsWithWindow: new Set(rows.map((r) => r.poolId)).size } : null;
 }
