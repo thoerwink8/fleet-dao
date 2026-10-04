@@ -265,7 +265,14 @@ function fakeSessions(runs: { id: string; poolId: string }[], settle = 1) {
 }
 
 /** #194 新加的几种记录（恢复条件、渠道状态、顺手发生的事、切回宽限）：单独看，不混进切号、核对这几条老记录里。 */
-const NEW_AUDITS = ['session-org.outage', 'session-org.channel', 'session-org.note', 'session-org.drain'];
+const NEW_AUDITS = [
+  'session-org.outage',
+  'session-org.channel',
+  'session-org.note',
+  'session-org.drain',
+  'session-org.limit',
+  'session-org.read-backoff',
+];
 const auditsWhere = async (keep: (action: string) => boolean) =>
   (await t.db.select().from(auditLog))
     .filter((a) => a.action.startsWith('session-org.') && keep(a.action))
@@ -1137,5 +1144,118 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
     expect(await s.orgSwitch.now({ by: '定时读接口' })).toBe('carpool');
     expect(s.helperCalls).toEqual(['carpool']);
     expect(fake.stops.flatMap((x) => x.stopped)).toEqual([old.id]);
+  });
+});
+
+describe('读接口的节奏（#194 方案 4.1）：切号前后各现读一次、退避期不砸接口、上限变了和进退避记一笔', () => {
+  const USER = 'fleet-agent-carpool';
+  const failedRead = (at: Date, code: 'throttled' | 'http' | 'network' = 'throttled'): CarpoolApiRead => ({
+    ok: false,
+    requestedAt: at,
+    code,
+    why: code === 'throttled' ? 'HTTP 429' : 'HTTP 503',
+  });
+  /** 账本里先放几条读数（接口那边的历史）。 */
+  const seed = (reads: CarpoolApiRead[], at: Date) =>
+    saveOrgState(t.db, USER, serializeLedger({ ...emptyLedger(), reads }), at);
+  const full = (at: Date) => fullRead(at, new Date(at.getTime() + 2 * H));
+  const counting = (make: (at: Date) => CarpoolApiRead) => {
+    const state = { calls: 0 };
+    return {
+      state,
+      api: (at: Date) => {
+        state.calls += 1;
+        return make(at);
+      },
+    };
+  };
+
+  it('切号前现读一次：手上的读数是旧的、说用满，新读数说有余额——重判后不切（不凭旧读数动手）', async () => {
+    const c = counting(healthyRead);
+    const s = setup({ api: c.api });
+    const stale = full(new Date(s.now().getTime() - 60_000));
+    expect(await s.orgSwitch.now({ by: '定时读接口', read: stale })).toBeNull();
+    expect(c.state.calls).toBe(1);
+    expect(s.helperCalls).toEqual([]);
+  });
+
+  it('切号前、切完各现读一次：旧读数说用满、新读数还是用满 → 切；这一次一共现读了 2 次（切前 1、切完 1）', async () => {
+    const c = counting(full);
+    const s = setup({ api: c.api });
+    const stale = full(new Date(s.now().getTime() - 60_000));
+    expect(await s.orgSwitch.now({ by: '定时读接口', read: stale })).toBe('solo');
+    expect(c.state.calls).toBe(2);
+  });
+
+  it('刚读过（几秒内）的不为了「切前现读」再砸一次：只有切完那 1 次', async () => {
+    const c = counting(full);
+    const s = setup({ api: c.api });
+    expect(await s.orgSwitch.now({ by: '定时读接口', read: full(s.now()) })).toBe('solo');
+    expect(c.state.calls).toBe(1);
+  });
+
+  it('【故意造出失败】退避期里（最近一次读失败不到 1 分钟）：被拒当场判也不去砸接口，按读不到办（账号状态读不到不切）；退避过了才读、才切', async () => {
+    const c = counting(healthyRead);
+    const s = setup({ api: c.api });
+    // 账号清单还是 10 分钟前读成的那份（15 分钟内算数），之后读失败进了退避
+    await seed(
+      [healthyRead(new Date(s.now().getTime() - 10 * MIN)), failedRead(new Date(s.now().getTime() - 30_000))],
+      s.now(),
+    );
+    await s.orgSwitch.now({
+      by: '被拒',
+      rejection: { at: s.now(), code: 'quota_exhausted', text: '拼车 5 小时额度已用完，约 120 分钟后重置' },
+    });
+    expect(c.state.calls).toBe(0);
+    // 最近一次读失败 → 账号状态读不到 → 照现有规矩（方案第六节第 1 条）不切、不当成账号可用；退避过了读成了才切
+    expect(s.helperCalls).toEqual([]);
+    s.advance(2 * MIN);
+    await s.orgSwitch.now({
+      by: '被拒',
+      rejection: { at: s.now(), code: 'quota_exhausted', text: '拼车 5 小时额度已用完，约 120 分钟后重置' },
+    });
+    expect(c.state.calls).toBeGreaterThan(0);
+    expect(s.helperCalls).toEqual(['solo']);
+  });
+
+  it('【故意造出失败】退避期里没有被拒、也没有别的证据：不读、不切；退避过了才读', async () => {
+    const c = counting(healthyRead);
+    const s = setup({ api: c.api });
+    await seed([failedRead(new Date(s.now().getTime() - 30_000))], s.now());
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(c.state.calls).toBe(0);
+    expect(s.helperCalls).toEqual([]);
+    s.advance(2 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(c.state.calls).toBe(1);
+  });
+
+  it('拼车上限变了（80 → 100）：操作记录写一笔「拼车上限从 80 变成 100」；没变不记', async () => {
+    const at = (m: number) => new Date(NOW.getTime() + m * MIN);
+    const s = setup({
+      api: (when) => {
+        const r = healthyRead(when);
+        return r.ok && when.getTime() >= at(10).getTime()
+          ? { ...r, quota: { ...(r.quota as NonNullable<typeof r.quota>), limitUsd: 100 } }
+          : r;
+      },
+    });
+    await seed([healthyRead(at(-10))], s.now());
+    s.advance(10 * MIN - 1);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(await newAudits('session-org.limit')).toEqual([]);
+    s.advance(MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    const [note] = await newAudits('session-org.limit');
+    expect(note?.reason).toContain('拼车上限从 80 变成 100');
+    expect(note).toMatchObject({ ok: true, before: { limitUsd: 80 }, after: { limitUsd: 100 } });
+  });
+
+  it('【故意造出失败】接口 429：进退避，操作记录记一笔（第 1 次、等 1 分钟），不是静默', async () => {
+    const s = setup({ api: (at) => failedRead(at) });
+    await s.orgSwitch.now({ by: '定时读接口' });
+    const [note] = await newAudits('session-org.read-backoff');
+    expect(note).toMatchObject({ ok: false, after: { fails: 1, waitMinutes: 1, code: 'throttled' } });
+    expect(note?.reason).toContain('429');
   });
 });

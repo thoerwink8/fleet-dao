@@ -674,6 +674,43 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(bk && 'why' in bk && bk.why).toContain('读切号账本没成：连接断了');
   });
 
+  it('切号现状带烧速（#194 4.1）：挂着拼车、读数够 → 每分钟花多少、还能撑几分钟；读数不够 → 还算不出（不带 0）；挂着独享不算', async () => {
+    const poolsBody = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolsResponse.parse(await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json());
+    const base = {
+      liveAt: '2026-10-04T11:59:00.000Z',
+      onSoloSince: null,
+      outage: null,
+      channel: null,
+      backPending: null,
+      whites: { count: 0 },
+    };
+    const read = (m: number, used: number) => ({
+      ok: true,
+      requestedAt: new Date(T0.getTime() + m * 60_000).toISOString(),
+      quota: { usedUsd: used, limitUsd: 80 },
+    });
+    const view = async (doc: Record<string, unknown>) => {
+      const h = harness({ orgSwitch: { read: async () => ({ doc: { ...base, ...doc }, updatedAt: T0 }) } });
+      const { cookie } = await h.login();
+      return (await poolsBody(h, cookie)).orgSwitch;
+    };
+    const enough = await view({ live: 'carpool', reads: [read(-10, 20), read(-5, 30), read(-1, 38)] });
+    expect(enough).toMatchObject({ state: 'known', burn: { state: 'known', remainingUsd: 42 } });
+    const burn = enough && 'burn' in enough ? enough.burn : undefined;
+    expect(burn?.state === 'known' && Math.round(burn.minutesLeft ?? 0)).toBe(21);
+    // 【故意造出失败】只有 1 个读数：还算不出，不是 0
+    const few = await view({ live: 'carpool', reads: [read(-1, 38)] });
+    expect(few).toMatchObject({ burn: { state: 'unknown' } });
+    expect(JSON.stringify(few)).not.toContain('usdPerMinute');
+    // 【故意造出失败】账本里的读数没带额度（老账本）：算不出
+    const old = await view({ live: 'carpool', reads: [{ ok: true, requestedAt: read(-1, 1).requestedAt }] });
+    expect(old).toMatchObject({ burn: { state: 'unknown' } });
+    // 挂着独享：不带烧速
+    const solo = await view({ live: 'solo', reads: [read(-10, 20), read(-1, 38)] });
+    expect(solo && 'burn' in solo ? solo.burn : 'x').toBeUndefined();
+  });
+
   it('路由表带上探针的结论（#129）：在线的带 ok 和时刻，离线的带原因，探针还没看过的不带（不说成离线）', async () => {
     const data = devFixtures(T0);
     const at = new Date(T0.getTime() - 5 * 60_000).toISOString();

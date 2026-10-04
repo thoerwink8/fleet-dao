@@ -858,6 +858,23 @@ export const OrgSwitchViewSchema = z.discriminatedUnion('state', [
     whites: z.number().int().min(0),
     /** 最近一次读接口：几点、成没成（没成写原因）。 */
     lastRead: z.object({ at: Time, ok: z.boolean(), why: z.string().optional() }).optional(),
+    /**
+     * 拼车额度烧得多快（#194 方案 4.1，shared 的 estimateBurn 按最近 15 分钟的接口读数算）：
+     * known 带每分钟花多少、还剩多少、还能撑几分钟（null = 最近没在花、用不满）；unknown = 还算不出（写原因，不显示 0 也不显示猜的数）。
+     * 挂着独享时不算（那时本人拼车额度没在花）；后端没带这一项（老后端）没有。
+     */
+    burn: z
+      .discriminatedUnion('state', [
+        z.object({
+          state: z.literal('known'),
+          usdPerMinute: z.number().min(0),
+          remainingUsd: z.number().min(0),
+          minutesLeft: z.number().min(0).nullable(),
+          spanMinutes: z.number().positive(),
+        }),
+        z.object({ state: z.literal('unknown'), why: z.string() }),
+      ])
+      .optional(),
     soloPaused: z.boolean(),
     updatedAt: Time,
   }),

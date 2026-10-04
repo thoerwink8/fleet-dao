@@ -506,7 +506,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       orgSwitch = { state: 'unavailable', why: ORG_SWITCH_NOT_HERE, soloPaused };
     } else {
       try {
-        orgSwitch = orgSwitchView(await deps.orgSwitch.read(), soloPaused);
+        orgSwitch = orgSwitchView(await deps.orgSwitch.read(), soloPaused, now);
       } catch (error) {
         orgSwitch = {
           state: 'unavailable',

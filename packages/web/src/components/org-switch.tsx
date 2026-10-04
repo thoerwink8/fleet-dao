@@ -101,6 +101,25 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
     );
     raise('stall');
   }
+  if (v.burn) {
+    const b = v.burn;
+    if (b.state === 'unknown') {
+      // 算不出就明说原因：不显示 0，也不显示一个猜的数
+      details.push(`烧速还算不出：${b.why}`);
+    } else if (b.minutesLeft === null) {
+      details.push(
+        `最近 ${Math.round(b.spanMinutes)} 分钟没在花${carpool()}额度，暂时用不满（还剩 $${b.remainingUsd.toFixed(2)}）`,
+      );
+    } else if (b.minutesLeft === 0) {
+      details.push(`${carpool()}本人额度已经用满`);
+    } else {
+      const left = Math.ceil(b.minutesLeft);
+      details.push(
+        `按现在的速度约 ${left} 分钟后用满（最近 ${Math.round(b.spanMinutes)} 分钟每分钟约 $${b.usdPerMinute.toFixed(2)}，还剩 $${b.remainingUsd.toFixed(2)}）`,
+      );
+      if (left <= 20) raise('stall');
+    }
+  }
   details.push(...paused);
   if (v.soloPaused) raise('stall');
   return { tone, headline, details };
