@@ -68,7 +68,7 @@
 | `docs/decisions/` | 拍板记录：一个决定一个文件，只增不改，被推翻标「已被 xx 替代」（design 第三节的决定表拆过来，#139） | 创始人拍板的那一轮 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工 | 装法或启动器变了 |
-| [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 装了 reclaude 的机器上机前 / 换机后怎么自检：清旧账号 id、四步查有没有在产生上报 | 清法与判据变了 |
+| [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 装了 reclaude 的机器上机前 / 换机后怎么自检：清旧账号 id、按点名的组织编号摘被封号的邮箱、四步查有没有在产生上报 | 清法与判据变了 |
 | [AGENTS.md](AGENTS.md) | 给 AI 的一页约定：上半段各仓通用（同步脚本写进各家 AI 的全局说明），下半段只管本仓 | 规则变了；改上半段要各台机器重跑同步脚本 |
 
 ## 协作

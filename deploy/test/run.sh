@@ -210,6 +210,7 @@ unit_lint() {
 unit_node_tests() {
   if command -v node >/dev/null; then
     if node --test "$HERE/health-page.test.mjs"; then echo "健康页的判定：通过"; else fail=1; fi
+    if node --test "$HERE/reclaude-old-account-clean.test.mjs"; then echo "被封号邮箱清理：通过"; else fail=1; fi
     if node --test "$HERE/auto-release.test.mjs"; then echo "自动发布的判断和流程：通过"; else fail=1; fi
     if node --test "$HERE/config.test.mjs"; then echo "配置对账（期望进仓、私有值只比指纹）：通过"; else fail=1; fi
   else
