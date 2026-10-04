@@ -14,12 +14,12 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FeishuRoutes, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
-import { silentLogger } from '@fleet-dao/store';
+import { DEPLOY_LAG_NOT_HERE, silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE, canaryHealthCheck } from '../src/canary-health.ts';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { probeDb } from '../src/db-probe.ts';
-import { DEPLOY_LAG_NOT_HERE, deployLagCheck } from '../src/deploy-lag.ts';
+import { deployLagCheck } from '../src/deploy-lag-check.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from '../src/gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';

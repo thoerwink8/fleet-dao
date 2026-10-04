@@ -13,8 +13,8 @@
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
+import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
-import type { AlertWorkPort } from './alert-work.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
@@ -447,8 +447,8 @@ async function openPgAlertWork(
 ): Promise<{ alerts: AlertWorkPort; close(): Promise<void> }> {
   const { createDb } = await import('@fleet-dao/db');
   const { withStatementTimeout } = await import('@fleet-dao/store');
-  const { deployFacts, pgAlertWork } = await import('./alert-work.ts');
-  const { readDeployLagInput } = await import('./deploy-lag.ts');
+  const { deployFacts, pgAlertWork } = await import('@fleet-dao/store');
+  const { readDeployLagInput } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   // 发布记录只在法国的正式机器上有（和后端 main.ts 的 deploy_lag 同一个判法：没写 FLEET_ENV 的就是正式的）
   const production = (env.FLEET_ENV ?? 'production') === 'production';

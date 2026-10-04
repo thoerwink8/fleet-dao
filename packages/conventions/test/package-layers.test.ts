@@ -16,12 +16,6 @@ const MUST_NOT_USE: Record<string, readonly string[]> = {
 };
 const TOP = 'api';
 
-/**
- * 还没清掉的旧违例（#865 分四步搬，第 4 步清空并删掉这个名单）：这里列的「谁→谁」暂时不算违例，
- * 但下面有一条测试要求它们真的还在——清掉了还留着名单，测试就红，提醒删。新违例不在名单里，照样红。
- */
-export const PENDING_865: ReadonlyArray<readonly [string, string]> = [['engine', 'api']];
-
 export interface PackageFacts {
   name: string;
   /** package.json 里 dependencies、devDependencies、peerDependencies 写的包名。 */
@@ -35,15 +29,14 @@ export interface ImportFact {
 }
 
 /** 返回每一处违例的说法；空数组 = 分层没破。 */
-export function layerViolations(
-  facts: { packages: readonly PackageFacts[]; imports: readonly ImportFact[] },
-  pending: ReadonlyArray<readonly [string, string]> = [],
-): string[] {
+export function layerViolations(facts: {
+  packages: readonly PackageFacts[];
+  imports: readonly ImportFact[];
+}): string[] {
   const out: string[] = [];
   const bare = (s: string) => (s.startsWith(SCOPE) ? (s.slice(SCOPE.length).split('/')[0] ?? '') : '');
   const forbidden = (from: string, to: string): string | null => {
     if (from === to) return null;
-    if (pending.some(([f, t]) => f === from && t === to)) return null;
     if (to === TOP) return `${from} 依赖了 ${TOP}：${TOP} 是最上面的驾驶舱后端，别的包不许依赖它`;
     if (MUST_NOT_USE[from]?.includes(to)) return `${from} 依赖了 ${to}：${from} 不许反过来依赖 ${to}`;
     return null;
@@ -115,31 +108,8 @@ export function repoFacts(root: string): { packages: PackageFacts[]; imports: Im
 }
 
 describe('包的分层', () => {
-  it('仓里没有包反着依赖 api，store 不依赖 engine（待清名单里的除外）', () => {
-    expect(layerViolations(repoFacts(ROOT), PENDING_865)).toEqual([]);
-  });
-
-  it('待清名单里的每一条都还真有违例；清掉了就把它从名单里删掉', () => {
-    const facts = repoFacts(ROOT);
-    for (const [from, to] of PENDING_865) {
-      const only = layerViolations(facts).filter((v) => v.includes(`${from} 依赖了 ${to}`));
-      expect(only.length, `${from} → ${to} 已经清掉了，从 PENDING_865 删掉这一条`).toBeGreaterThan(0);
-    }
-  });
-
-  it('待清名单只放过它列出的那一条，别的违例照样报', () => {
-    const got = layerViolations(
-      {
-        packages: [
-          { name: 'engine', deps: ['@fleet-dao/api'] },
-          { name: 'db', deps: ['@fleet-dao/api'] },
-        ],
-        imports: [],
-      },
-      [['engine', 'api']],
-    );
-    expect(got).toHaveLength(1);
-    expect(got[0]).toContain('packages/db/package.json');
+  it('仓里没有包反着依赖 api，store 不依赖 engine', () => {
+    expect(layerViolations(repoFacts(ROOT))).toEqual([]);
   });
 
   it('故意造的违例都认得出：引擎依赖 api、引擎源码 import api 的子路径、store 依赖 engine', () => {

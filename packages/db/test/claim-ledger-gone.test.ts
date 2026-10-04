@@ -13,7 +13,7 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8').replace(/\r\
 /** 读认领账的人：这些文件里不许再 import / 查 issue_claims。 */
 const READERS = [
   'packages/db/src/queries/alert-work.ts',
-  'packages/api/src/alert-work.ts',
+  'packages/store/src/alert-work.ts',
   'packages/core/src/alert-work.ts',
 ];
 
