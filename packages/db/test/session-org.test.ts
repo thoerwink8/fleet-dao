@@ -177,6 +177,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       {
         runId: running.id,
         poolId: 'claude-solo',
+        routeId: 'solo',
         kind: 'session',
         queuedAt: running.queuedAt,
         startedAt: running.startedAt,
@@ -184,6 +185,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       {
         runId: queued.id,
         poolId: 'claude-carpool',
+        routeId: 'car',
         kind: 'session',
         queuedAt: queued.queuedAt,
         startedAt: null,
@@ -224,6 +226,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       {
         runId: fusion.id,
         poolId: 'claude-solo',
+        routeId: 'solo',
         kind: 'session',
         queuedAt: fusion.queuedAt,
         startedAt: fusion.startedAt,
@@ -231,6 +234,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       {
         runId: oneShot,
         poolId: 'claude-carpool',
+        routeId: 'car',
         kind: 'oneShot',
         queuedAt: ago(5 * MIN),
         startedAt: ago(5 * MIN),

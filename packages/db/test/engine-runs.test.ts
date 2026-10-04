@@ -8,10 +8,8 @@ import {
   latestRunOfSession,
   markSessionRunStarted,
   openSessionRun,
-  openSessionRuns,
   requestSessionStop,
   routeLaunchFacts,
-  routeOutcomesSince,
   taskContext,
 } from '../src/queries/engine.ts';
 import { setRoutingEffort } from '../src/routing-effort.ts';
@@ -401,91 +399,6 @@ describe('latestRunOfSession', () => {
 
   it('没有这个执行体会话编号回 null', async () => {
     expect(await latestRunOfSession(t.db, 'nobody-home')).toBeNull();
-  });
-});
-
-describe('openSessionRuns', () => {
-  it('只要还没结束的；给了 runAsUser 就只要那个会话用户的', async () => {
-    // 另一个用户用停用的 fleet-agent-dedicated：库里只剩历史行会带它
-    const retired = runId();
-    const carpool = runId();
-    const ended = runId();
-    await openSessionRun(t.db, {
-      id: retired,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
-      worktreePath: null,
-    });
-    await openSessionRun(t.db, {
-      id: carpool,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-carpool',
-      worktreePath: null,
-    });
-    await openSessionRun(t.db, {
-      id: ended,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
-      worktreePath: null,
-    });
-    await markSessionRunStarted(t.db, { id: ended, startedAt: NOW, sessionId: 's', handle: null });
-    await finishSessionRun(t.db, { id: ended, outcome: 'ok', endedAt: later(MIN) });
-
-    expect(new Set((await openSessionRuns(t.db)).map((r) => r.id))).toEqual(new Set([retired, carpool]));
-    expect((await openSessionRuns(t.db, { runAsUser: 'fleet-agent-carpool' })).map((r) => r.id)).toEqual([
-      carpool,
-    ]);
-  });
-});
-
-describe('routeOutcomesSince', () => {
-  it('只要 since 之后结束的会话', async () => {
-    const early = runId();
-    const late = runId();
-    for (const [id, endedAt] of [
-      [early, ago(2 * HOUR)],
-      [late, ago(MIN)],
-    ] as const) {
-      await openSessionRun(t.db, {
-        id,
-        taskId: null,
-        subtaskId: null,
-        stage: 'execute',
-        routeId: 'r1',
-        whyRoute: 'x',
-        branch: null,
-        queuedAt: ago(3 * HOUR),
-        workflowId: null,
-        runAsUser: null,
-        worktreePath: null,
-      });
-      await markSessionRunStarted(t.db, { id, startedAt: ago(3 * HOUR), sessionId: id, handle: null });
-      await finishSessionRun(t.db, { id, outcome: 'ok', endedAt, routeOutcome: 'ok' });
-    }
-    const rows = await routeOutcomesSince(t.db, ago(HOUR));
-    expect(rows.map((r) => r.routeId)).toEqual(['r1']);
-    expect(rows[0]).toMatchObject({ stage: 'execute', outcome: 'ok', routeOutcome: 'ok' });
   });
 });
 
