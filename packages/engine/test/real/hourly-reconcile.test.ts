@@ -37,6 +37,8 @@ import {
   type HourlyReconcileWiring,
   hourlyReconcileJob,
   listDirEntries,
+  taskViewOf,
+  temporalWorkflows,
   workflowViewOf,
 } from '../../src/real/hourly-reconcile.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
@@ -1236,5 +1238,80 @@ describe('status 查询认不出', () => {
       doing: '写码',
       approval: { approvalId: 'x', state: 'pending' },
     });
+  });
+});
+
+describe('任务工作流的 taskStatus 查询（#901）', () => {
+  it('phase = parked 才算挂着；waiting、doing 原样带出；没有等批准这一项', () => {
+    expect(
+      taskViewOf(
+        {
+          phase: 'parked',
+          doing: '停下等人：交代不全',
+          waiting: {
+            kind: 'human',
+            detail: '交代不全（等「继续」或「放弃」）',
+            since: '2026-10-05T01:00:00.000Z',
+          },
+        },
+        'task:a/b#1',
+      ),
+    ).toEqual({
+      parked: true,
+      waiting: {
+        kind: 'human',
+        detail: '交代不全（等「继续」或「放弃」）',
+        since: '2026-10-05T01:00:00.000Z',
+      },
+      doing: '停下等人：交代不全',
+      approval: null,
+    });
+    expect(
+      taskViewOf({ phase: 'implement', doing: '动手第 1 轮', waiting: null }, 'task:a/b#1'),
+    ).toMatchObject({
+      parked: false,
+      waiting: null,
+    });
+  });
+
+  it('【故意造出的失败】回的是旧 status 的形状（有 parked 没 phase）、null、waiting 形状不对：明确报错，不当成「没挂着」', () => {
+    expect(() => taskViewOf({ parked: true, doing: 'x' }, 'task:a/b#1')).toThrow('没有 phase');
+    expect(() => taskViewOf(null, 'task:a/b#1')).toThrow('认不出');
+    expect(() => taskViewOf({ phase: 'parked', waiting: { kind: 1 } }, 'task:a/b#1')).toThrow(
+      'waiting 认不出',
+    );
+  });
+
+  it('temporalWorkflows.view：task: 编号问 taskStatus，旧的 req:/sub: 编号还问 status；查询失败原样抛', async () => {
+    const asked: [string, string][] = [];
+    const client = {
+      workflow: {
+        getHandle: (id: string) => ({
+          query: async (q: string | { name: string }) => {
+            const name = typeof q === 'string' ? q : q.name;
+            asked.push([id, name]);
+            if (id === 'task:a/b#9') throw new Error('query rejected（故意造的）');
+            return name === 'taskStatus'
+              ? {
+                  phase: 'parked',
+                  doing: '停着',
+                  waiting: { kind: 'human', detail: 'd', since: '2026-10-05T00:00:00Z' },
+                }
+              : { parked: false, waiting: null, doing: '旧的' };
+          },
+        }),
+      },
+    };
+    const reader = temporalWorkflows(client as never);
+    expect((await reader.view('task:a/b#1')).parked).toBe(true);
+    expect((await reader.view('req:a/b#1')).doing).toBe('旧的');
+    expect((await reader.view('sub:x')).parked).toBe(false);
+    await expect(reader.view('task:a/b#9')).rejects.toThrow('query rejected');
+    expect(asked).toEqual([
+      ['task:a/b#1', 'taskStatus'],
+      ['req:a/b#1', 'status'],
+      ['sub:x', 'status'],
+      ['task:a/b#9', 'taskStatus'],
+    ]);
   });
 });

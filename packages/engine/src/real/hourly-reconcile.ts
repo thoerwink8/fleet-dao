@@ -36,6 +36,7 @@ import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
+import { taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -77,6 +78,32 @@ export function workflowViewOf(raw: unknown, workflowId: string): WorkflowView {
   return { parked: r.parked, waiting, doing: typeof r.doing === 'string' ? r.doing : '', approval };
 }
 
+/**
+ * 任务工作流的 taskStatus 查询（task-contract.ts 的 TaskStatus）→ 对账要用的几样：停着等人（phase = parked）、在等什么、
+ * 在做什么。任务工作流没有「等批准」这一项（approval 恒为 null）。认不出照抛，不当成「没挂着」：对账读错查询名、或工作流
+ * 回的东西变了形，都该报「没查成」，不能悄悄当成「已经不挂着了」把提醒撤掉（#901）。
+ */
+export function taskViewOf(raw: unknown, workflowId: string): WorkflowView {
+  const r = asRecord(raw);
+  if (!r || typeof r.phase !== 'string') {
+    throw new Error(`${workflowId} 的 taskStatus 查询回的东西认不出（没有 phase）`);
+  }
+  let waiting: WorkflowView['waiting'] = null;
+  if (r.waiting !== null && r.waiting !== undefined) {
+    const w = asRecord(r.waiting);
+    if (!w || typeof w.kind !== 'string' || typeof w.detail !== 'string' || typeof w.since !== 'string') {
+      throw new Error(`${workflowId} 的 taskStatus 查询里 waiting 认不出`);
+    }
+    waiting = { kind: w.kind, detail: w.detail, since: w.since };
+  }
+  return {
+    parked: r.phase === 'parked',
+    waiting,
+    doing: typeof r.doing === 'string' ? r.doing : '',
+    approval: null,
+  };
+}
+
 /** 问 Temporal：没有这条工作流是 missing；别的查不了（连不上、没权限）照抛。 */
 export function temporalWorkflows(client: Pick<Client, 'workflow'>): WorkflowReader {
   return {
@@ -92,7 +119,10 @@ export function temporalWorkflows(client: Pick<Client, 'workflow'>): WorkflowRea
       }
     },
     async view(workflowId) {
-      return workflowViewOf(await client.workflow.getHandle(workflowId).query('status'), workflowId);
+      const handle = client.workflow.getHandle(workflowId);
+      // 任务工作流（task:）答的是 taskStatus，旧的需求、子任务工作流答的是 status：按编号前缀选，别拿 status 去问任务工作流
+      if (workflowId.startsWith('task:')) return taskViewOf(await handle.query(taskStatusQuery), workflowId);
+      return workflowViewOf(await handle.query('status'), workflowId);
     },
   };
 }
