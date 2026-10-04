@@ -1,5 +1,5 @@
 // 单子里问创始人（#259）落地之后要读写的几样：引擎在存档点看晚到的回答、决定要不要照改（listTaskAsks），
-// 改完记 markAsksApplied；开 PR 写「按推荐先做了」、关单记数（core 的 tallyAsks）也从 listTaskAsks 读。
+// 改完记 markAsksApplied；listTaskAsks 现在只有测试在读（core 里按它记数、写 PR 正文的函数已在 #901 删掉）。
 // follow_up_issue 这一栏原来由 GitHub 对账开单后回写，#530 删了那一步，现在只读、没人写；列留到删库表那一步。
 import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';

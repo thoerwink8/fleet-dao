@@ -67,7 +67,7 @@ export interface FilterContext {
   uiWork: boolean;
 }
 
-/** 族名比较用的写法：去掉首尾空白、小写（和 core 的 decideVerdict 判同族一个认法）。 */
+/** 族名比较用的写法：去掉首尾空白、小写。 */
 export const familyKey = (family: string): string => family.trim().toLowerCase();
 
 /** 这条路由此刻的全部被挡原因；空数组 = 能派。entry 是它在路由两层顺序里的那一行（任务指定、不在顺序里的没有）。 */
