@@ -26,7 +26,9 @@
 ## 2026-10-05 #901 子单：驾驶舱发信号的断链（Sonnet 5.5 子代理，分支 `fix/signal-chain`，`Refs #901` 不写 Closes，chain-first）
 
 做到哪：断链证实了（先写红的测试 `packages/api/test/signal-chain.test.ts`：后端发的是 `req:<仓>#<号>` + `stop/resume/pause`，引擎只有 `task:<仓>#<号>` + `taskContinue/taskAbandon/taskRouteWake`），并用一次性脚本把真的 api 发信号函数接到真 Temporal 测试服务端上的真任务工作流跑通了（没提交）。修法：信号名和参数形状收进 `shared/task-signals.ts`（引擎 `defineSignal` 和后端共用）；后端改发 `task:` 编号 + `taskContinue`（继续）/`taskAbandon`（叫停，reason 缺省补一句）；引擎没有接收处的信号（pause、reroute、answer、requireApproval、agentEvent）不再发，暂停和换路由回 409 `action_not_supported`、回答只落库、fleet 命令只写库、碰人闸的提问回 409 `hold_not_supported`；`workflow_gone` 409 和「拼不出编号」404 都带人话原因。同根的引擎侧读法顺手修一处：每小时对账的工作树清扫认的是 `req:`，任务工作流等 CI/合并时没开着的会话，树会被当残留删（`worktree-sweep.ts` 改认 `task:`，有测试）。删了 shared 的 `REQUIREMENT_WORKFLOW_TYPE`、`FUSION_WORKFLOW_TYPE`、`AGENT_EVENT_WAKE_KINDS`；`requirementWorkflowId` 不能删：每小时对账认旧批准提醒还在拼它。
-下一步：盯 CI 合并。还没验证：真环境（法国引擎关着）；驾驶舱前端的「暂停」「换路由」按钮还在，点了会看到 409 的话（前端没动，#856 说它们本来就没页面入口）。同根没修的（要另开单）：`alert-sweep.ts` 的挂起提醒只认 `req|sub` 前缀、读 `status` 查询，任务工作流报的 `task:…:park:N` 不会被自动撤；`hourly-reconcile` 对账读任务工作流的查询名是 `taskStatus` 不是 `status`。
+同根三处已各一个 PR 修完：#933（对账读任务工作流改问 `taskStatus`，读不懂明确报错）、#936（挂起提醒的撤销规则认 `task:`，读不到状态不撤并记没查成）、本 PR（前端 `availableActions` 只画继续、叫停、回答；查实「暂停」「换模型」按钮现在页面上根本没画——看板删后 `ActionButtons` 没有调用方，只剩通知中心的「回答」——所以不存在「点了弹 409」，只是以后接入口时不许画；#856、#928 已留言：暂停、换模型引擎没有，该删的整块删归 #856，继续、叫停的入口归 #928，没有截图——页面上没有可见变化）。还没验证：真环境（法国引擎关着）。
+
+**「回答追问」没有收信处（一页说明；单 #939）**：①现状：驾驶舱和飞书回答追问只写库，#925 起不再发信号（引擎的任务工作流只听继续、放弃、路由叫醒）；新引擎里没有任何一处读追问回答。②三段流程里它本该怎么走：`docs/decisions/0010` 和 `specs/509-需求梳理/流程重做方案.md` 里没有「AI 追问」这个环节——对题是指挥官当面问创始人、问清才开单（`docs/goals.md`「有个想法」），动手是无头会话、`segment-spawner.ts` 给的 `fleetApi`、`fleetToken` 都是空串（发不出 `fleet ask`），卡住的唯一出口是任务停下等人、人点「继续」或「放弃」（`task-runtime.ts` 的 `park()`）。③所以追问记录目前只可能来自还没删的 Fusion 时代会话（`real/prompts.ts` 第 180、270 行的提示词、`/agent/v1/ask`）。④这是设计缺口不是实现漏：要创始人在 #939 里列的三条路里选一条（补通 / 按 v3 原意删 / 只留对题阶段），选定后再动手；本任务没硬补。
 
 ## 2026-10-05 驾驶舱首页恢复流程图（母单 #902，Sonnet 5.5 子代理，分支 `feat/902-home-flow`，PR #914）
 
