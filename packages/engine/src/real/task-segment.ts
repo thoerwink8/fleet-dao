@@ -9,7 +9,8 @@
 // - 切号叫停（#59）不是叫停：这一段交回 ok:false、结局和原因码都是 org_switch（失败分流 OS1：不算失败、不记账），工作流切完
 //   在原分支上重跑这一段。定了路由就登记（sessions.enter），建树、等内存、起会话都算在内，收场才走。
 // - 成败只认 adapters 的 judgeRun（经 Spawner 变成退出码）：不是 done 就带着原因码回 ok:false；原因码（quota_exhausted、
-//   model_mismatch、relay_unknown……）就是失败分流认的码，不改写；没有原因码的才按 one-shot 的结局给一个。
+//   model_mismatch、relay_unknown……）就是失败分流认的码，不改写；没有原因码的才按 one-shot 的结局给一个（runner/evidence.ts
+//   的 segmentEvidence：熔断认的「算不算路由的账」也出自它，两边一份证据）。
 // - 起不来（路由不可用、树备不好、Spawner 抛错）一律抛 PortError，不当成「会话没跑成」：前者重试没用，要人修配置。
 //   开跑那一行写不进 runs（#157，one-shot 不起会话）抛 SEGMENT_RUNS_UNWRITABLE，可以重试：是库一时不通，不是配置。
 // - runs 里这一段记到这张单名下（#216）：tasks.id、单号、派工档、工作流编号（和起工作流、驾驶舱读的是同一个 taskWorkflowId）、
@@ -22,11 +23,12 @@ import { join } from 'node:path';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
+import { segmentEvidence } from '../runner/evidence.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { OneShotError, type OneShotResult, runOneShot, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import { renderSegmentPrompt } from '../runner/segment-prompt.ts';
 import { manualBriefOf } from '../runner/task-brief.ts';
-import type { RunSegmentInput, RunSegmentResult, SegmentEvidence } from '../task-contract.ts';
+import type { RunSegmentInput, RunSegmentResult } from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
@@ -61,7 +63,6 @@ export interface RunSegmentDeps {
 }
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-const MESSAGE_MAX = 4000;
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -76,39 +77,6 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
     };
     signal.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-/** one-shot 的结局 → 失败分流要的证据：原因码原样带过去，没有才按结局给一个。 */
-export function evidenceOf(result: OneShotResult): SegmentEvidence {
-  // 切号停下的（#59）：码就是结局本身（失败分流 OS1 认 org_switch，不算失败、不记账），不让被杀时执行体报的原因码盖掉它
-  if (result.outcome === 'org_switch') {
-    return {
-      code: 'org_switch',
-      message: (result.failureReason ?? '切号：先停下这一段，切完在原分支上重跑').slice(0, MESSAGE_MAX),
-      quotaExhausted: false,
-    };
-  }
-  const facts = result.facts;
-  const reason =
-    facts?.reason && facts.reason !== 'delivered' && facts.reason !== 'answered' ? facts.reason : undefined;
-  const code =
-    reason ??
-    (result.outcome === 'timeout'
-      ? 'wall_clock_timeout'
-      : result.outcome === 'admission_blocked'
-        ? 'memory_busy'
-        : result.outcome);
-  const text = [facts?.detail, facts?.rawError, result.failureReason, result.stderrTail]
-    .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
-    .join('\n');
-  return {
-    code,
-    message: (text || `会话没跑成（${result.outcome}）`).slice(0, MESSAGE_MAX),
-    ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
-    ...(facts?.httpStatus === undefined ? {} : { httpStatus: facts.httpStatus }),
-    ...(facts?.resetsAt === undefined ? {} : { resetsAt: facts.resetsAt }),
-    quotaExhausted: facts?.quotaExhausted === true,
-  };
 }
 
 /** 删 runsDir 下超过 ttl 的执行目录。不抛：清不掉只记日志，下次再清。 */
@@ -274,7 +242,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         ...(result.facts?.actualModel === undefined ? {} : { actualModel: result.facts.actualModel }),
       };
     }
-    return { ok: false, runId: result.runId, outcome: result.outcome, evidence: evidenceOf(result) };
+    return { ok: false, runId: result.runId, outcome: result.outcome, evidence: segmentEvidence(result) };
   }
 
   return runSegment;

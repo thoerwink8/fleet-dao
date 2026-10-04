@@ -17,7 +17,7 @@ import {
   type OneShotSpawner,
   runOneShot,
 } from '../../src/runner/one-shot.ts';
-import { addTask } from './fixtures.ts';
+import { addTask, world } from './fixtures.ts';
 
 const BRANCH = 'fleet/12-t1a2b3c4d';
 
@@ -96,6 +96,7 @@ describe('三段各一笔记进 runs：记到这张单名下（#216）', { timeo
       expect(row).toMatchObject({
         ...columns,
         outcome: 'done',
+        routeOutcome: 'ok',
         inputTokens: 1000,
         outputTokens: 200,
         cacheReadTokens: 30,
@@ -136,6 +137,51 @@ describe('三段各一笔记进 runs：记到这张单名下（#216）', { timeo
       branch: BRANCH,
       prNumber: null,
     });
+  });
+});
+
+describe('收场那一笔带上算不算路由的账（#758）：和失败分流同一份证据，选路的熔断、战绩靠它', { timeout: 60_000 }, () => {
+  const manual = (cwd: string): OneShotInput => ({
+    segment: 'manual',
+    modelId: 'opus-5.5',
+    routeId: 'carpool',
+    prompt: '动手',
+    cwd,
+  });
+  const refused = (reason: string): OneShotSpawner => async () => ({
+    exitCode: 1,
+    stdout: '',
+    stderr: '',
+    killed: false,
+    facts: { reason, detail: '上游说的' },
+  });
+  const outcomeOf = async (spawn: OneShotSpawner) => {
+    const r = await runOneShot(manual(root), {
+      spawn,
+      runs: realRuns({ db: t.db }),
+      tmpDir: join(root, 'runs'),
+    }).catch((e: unknown) => e);
+    const rows = await t.db.select().from(runs);
+    const row = rows.at(-1);
+    await t.db.delete(runs);
+    return { r, row };
+  };
+
+  it('路由繁忙（分流判路由的错）记 fail；额度用满（账号池的事）记 neutral；起不来的记 neutral', async () => {
+    await world(t.db);
+    expect((await outcomeOf(refused('overloaded'))).row).toMatchObject({
+      outcome: 'failed',
+      routeOutcome: 'fail',
+    });
+    expect((await outcomeOf(refused('quota_exhausted'))).row).toMatchObject({
+      outcome: 'failed',
+      routeOutcome: 'neutral',
+    });
+    const spawnFailed = await outcomeOf(async () => {
+      throw new Error('执行方式没接上');
+    });
+    expect(spawnFailed.r).toMatchObject({ code: 'SPAWN_FAILED' });
+    expect(spawnFailed.row).toMatchObject({ outcome: 'spawn_failed', routeOutcome: 'neutral' });
   });
 });
 
@@ -193,10 +239,27 @@ describe('【故意造出的失败】对不上 runs 约束的：写进库之前�
         startedAt: '2026-10-04T01:00:00Z',
         endedAt: '2026-10-04T01:10:00Z',
         outcome: 'done',
+        routeOutcome: 'ok',
       })
       .catch((e: unknown) => e);
     expect(recordErr).toBeInstanceOf(RunInputError);
     expect((recordErr as Error).message).toContain('taskId');
+    expect(await t.db.select().from(runs)).toEqual([]);
+  });
+
+  it('收场那一笔没带算不算路由的账（#758）：碰库之前拒，不让熔断看不见这一次', async () => {
+    const err = await realRuns({ db: t.db })
+      .record({
+        runId: '0b6f8a4e-5d2c-4e1b-8a3f-2c1d0e9f8a7d',
+        segment: 'manual',
+        model: 'opus-5.5',
+        startedAt: '2026-10-04T01:00:00Z',
+        endedAt: '2026-10-04T01:10:00Z',
+        outcome: 'failed',
+      } as never)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunInputError);
+    expect((err as Error).message).toContain('routeOutcome');
     expect(await t.db.select().from(runs)).toEqual([]);
   });
 });

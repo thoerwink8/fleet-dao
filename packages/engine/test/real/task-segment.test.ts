@@ -10,14 +10,8 @@ import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
-import {
-  createRunSegment,
-  evidenceOf,
-  type RunSegmentDeps,
-  sweepRunDirs,
-} from '../../src/real/task-segment.ts';
+import { createRunSegment, type RunSegmentDeps, sweepRunDirs } from '../../src/real/task-segment.ts';
 import type { RunRecord, RunStart } from '../../src/runner/not-wired.ts';
-import type { OneShotResult } from '../../src/runner/one-shot.ts';
 import type { RunSegmentInput } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
 import { fakeTrees, git, mirror } from './fixtures.ts';
@@ -624,34 +618,7 @@ describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
   });
 });
 
-describe('证据和落盘目录清理', () => {
-  const base: OneShotResult = {
-    runId: 'x',
-    outcome: 'failed',
-    exitCode: 2,
-    stdout: '',
-    stderrTail: 'boom',
-    startedAt: '2026-10-02T00:00:00Z',
-    endedAt: '2026-10-02T00:01:00Z',
-    runsNotWired: false,
-  };
-
-  it('没有原因码就按结局给码；有原因码原样；delivered / answered 不算失败原因；读不到的字段不写', () => {
-    expect(evidenceOf(base)).toMatchObject({ code: 'failed', exitCode: 2, quotaExhausted: false });
-    expect(evidenceOf({ ...base, outcome: 'killed', exitCode: null })).toMatchObject({ code: 'killed' });
-    expect('exitCode' in evidenceOf({ ...base, exitCode: null })).toBe(false);
-    expect(evidenceOf({ ...base, outcome: 'timeout' }).code).toBe('wall_clock_timeout');
-    expect(evidenceOf({ ...base, facts: { reason: 'relay_unknown', detail: '账本没读成' } })).toMatchObject({
-      code: 'relay_unknown',
-      message: expect.stringContaining('账本没读成'),
-    });
-    expect(evidenceOf({ ...base, facts: { reason: 'answered' } }).code).toBe('failed');
-    expect(evidenceOf({ ...base, stderrTail: '' }).message).toContain('没跑成');
-    expect(
-      (evidenceOf({ ...base, stderrTail: 'x'.repeat(10_000) }).message ?? '').length,
-    ).toBeLessThanOrEqual(4000);
-  });
-
+describe('落盘目录清理', () => {
   it('清理：超过期限的执行目录删，新的留；目录不在回 0；删不掉只记日志不抛', async () => {
     const dir = join(root, 'runs');
     mkdirSync(join(dir, 'old'), { recursive: true });
