@@ -21,6 +21,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { ClaimsGitHub, GitHub } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import { createPgStore } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import {
@@ -125,7 +126,7 @@ export async function closeLeftoverPulls(
     } catch (err) {
       log('warn', '巡检收单：给 PR 留说明没留成，照样关', {
         pull: pull.number,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMessage(err),
       });
     }
     await claims.closePull(repo, pull.number);

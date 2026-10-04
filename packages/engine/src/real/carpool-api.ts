@@ -5,6 +5,7 @@
 // - 配置读不到、没有 reclaude-carpool 池：回 ok:false（code auth，Key 没处找），不抛、不当成「接口正常」。
 // - 拼车组织状况（org）从账号清单里推：没有拼车组织 = none；有可用的（分到账号、没到期）= ok；全不可用按「没分到账号」「到期」
 //   的顺序报最先的那种；组织接口没读成、回包没说分没分到 = unknown（判法不当成能用）。
+
 import {
   loadQuotaConfig,
   productionQuotaIo,
@@ -14,6 +15,7 @@ import {
   type ReclaudeOrgRead,
   readReclaudeApi,
 } from '@fleet-dao/adapters/quota';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolApiRead, CarpoolOrgState } from '../jobs/carpool-outage.ts';
 
 export function carpoolOrgState(accounts: readonly ReclaudeOrgRead[], now: Date): CarpoolOrgState {
@@ -62,7 +64,7 @@ export function carpoolApiReader(w: CarpoolApiWiring = {}): () => Promise<Carpoo
         ok: false,
         requestedAt: at,
         code: 'auth',
-        why: `额度配置读不到，找不到 reclaude Key：${err instanceof Error ? err.message : String(err)}`,
+        why: `额度配置读不到，找不到 reclaude Key：${errMessage(err)}`,
       };
     }
     const pool = config.pools.find((p) => p.reader === 'reclaude-carpool');

@@ -8,9 +8,11 @@
 // 改这里之前必须知道：原来失败分流把 143/SIGTERM 一律写成「多半是内存超限」（KL2 的提示），把「我们自己的发布把它叫停了」盖住了
 // ——2026-09-27 19:28:51、20:46:26 两次都是引擎被自动发布重启时 sudo 把 SIGTERM 转给了会话。码交给失败分流：engine_stop（KL3）、
 // oom_killed（KL2）、signal_unexplained（KL4），规则见 failure/rules.ts。
+
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { Cordon } from '../drain.ts';
 
 export const CGROUP_ROOT = '/sys/fs/cgroup';
@@ -45,8 +47,6 @@ export interface KillEvidenceDeps {
   releasesDir: string;
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 /**
  * memory.events 里按内存杀进程的累计数那一行；没有、数认不出都抛（调用方记没读成）。
  * 报错和原因里不写那个计数的英文名：失败分流 KL2 按原文认它，写进去会把「没读成」认成内存超限。
@@ -63,7 +63,7 @@ export async function oomCounters(deps: KillEvidenceDeps): Promise<OomCounters> 
   try {
     return { slice: parseOomKill(await deps.readText(path)) };
   } catch (err) {
-    return { slice: undefined, sliceWhy: `${path} 没读成（${message(err)}）` };
+    return { slice: undefined, sliceWhy: `${path} 没读成（${errMessage(err)}）` };
   }
 }
 
@@ -121,7 +121,7 @@ async function releaseNote(deps: KillEvidenceDeps): Promise<string> {
       parts.push(`自动发布在发 ${a.sha.slice(0, 12)}（${String(a.startedAt)} 起）`);
     }
   } catch (err) {
-    parts.push(`自动发布的读数没读成（${message(err)}）`);
+    parts.push(`自动发布的读数没读成（${errMessage(err)}）`);
   }
   return parts.join('，');
 }

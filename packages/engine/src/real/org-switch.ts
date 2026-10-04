@@ -13,6 +13,7 @@
 // 没切成、切完探针读回不在线、卡住（白切三次、切回预算用完、读不到几点恢复）、渠道不可用、账号只剩 1 个而且不是挂着的那个：写一条
 // session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱后端的健康检查 session_org 跟着红），条件没了自己撤。出什么错都不抛。
 // 读数变了、引擎没切过号（real/session-org.ts 的起点变动）由 orgDriftReporter 写 session-org:drift 提醒和操作记录（#335）。
+
 import type { SessionUser, SwitchSessionOrgResult } from '@fleet-dao/adapters';
 import {
   type Db,
@@ -23,6 +24,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { OrgKind } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { type CarpoolApiRead, type CarpoolOutage, classifyCarpoolRejection } from '../jobs/carpool-outage.ts';
 import { readNotes } from '../jobs/carpool-read-notes.ts';
 import { readBackoff } from '../jobs/carpool-watch.ts';
@@ -130,7 +132,6 @@ export interface OrgSwitchWiring {
   log?: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const NOW_NAMES: Readonly<Record<string, string>> = {
   ...ORG_NAMES,
   other: '类型认不出的',
@@ -434,7 +435,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
           ...(n.error ? { error: n.error } : {}),
         });
       } catch (err) {
-        log('error', '会话用户切号：读数的操作记录写不进库', { action: n.action, error: message(err) });
+        log('error', '会话用户切号：读数的操作记录写不进库', { action: n.action, error: errMessage(err) });
       }
     }
     return withRead(l, read);
@@ -451,7 +452,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         await store.save(await ingestRead(l, await readApi()));
       });
     } catch (err) {
-      log('error', '会话用户切号：切完现读一次接口这一步出错', { error: message(err) });
+      log('error', '会话用户切号：切完现读一次接口这一步出错', { error: errMessage(err) });
     }
   }
 
@@ -565,7 +566,10 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     try {
       outcome = await store.withLock(() => run(trigger));
     } catch (err) {
-      log('error', '会话用户切号这一步出错（这一轮不切，探针照探）', { by: trigger.by, error: message(err) });
+      log('error', '会话用户切号这一步出错（这一轮不切，探针照探）', {
+        by: trigger.by,
+        error: errMessage(err),
+      });
       return null;
     }
     if (!outcome.ran) {
@@ -578,7 +582,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       try {
         await verifyAfter(to, await w.probeNow(to));
       } catch (err) {
-        log('error', '会话用户切号：切完当场探这一步出错', { to, error: message(err) });
+        log('error', '会话用户切号：切完当场探这一步出错', { to, error: errMessage(err) });
       }
     }
     if (to !== null) await readAfterSwitch();
@@ -602,7 +606,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         }
         await verifyAfter(to, probed);
       } catch (err) {
-        log('error', '会话用户切号：探完核对这一步出错', { to, error: message(err) });
+        log('error', '会话用户切号：探完核对这一步出错', { to, error: errMessage(err) });
       }
     },
   };
