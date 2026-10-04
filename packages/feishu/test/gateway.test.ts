@@ -19,7 +19,7 @@ import {
   TEST_GROUP,
 } from './events.ts';
 import { apiError } from './fake-backend.ts';
-import { FakeFeishu, textIn, titleOf, unavailable } from './fake-feishu.ts';
+import { FakeFeishu, unavailable } from './fake-feishu.ts';
 import { type Harness, harness, TOKEN, until } from './harness.ts';
 
 let h: Harness;
@@ -71,9 +71,21 @@ describe('收原话：每一句原样转后端', () => {
     expect(h.feishu.newMessages()).toHaveLength(0);
 
     const [call] = h.backend.calls('POST', '/feishu/intake/messages');
+    expect(call).toBeDefined();
+    const body = call?.body as {
+      sentAt: string;
+      rawContent: string;
+      messageId: string;
+      chatKind: string;
+      source: string;
+      msgType: string;
+      text: string;
+      atBot: boolean;
+      newSegment: boolean;
+    };
     expect(call?.headers.authorization).toBe(`Bearer ${TOKEN}`);
     expect(call?.headers['x-fleet-acting-feishu']).toBe(A);
-    expect(call?.body).toMatchObject({
+    expect(body).toMatchObject({
       messageId: msg.messageId,
       chatKind: 'p2p',
       source: 'event',
@@ -82,11 +94,9 @@ describe('收原话：每一句原样转后端', () => {
       atBot: false,
       newSegment: false,
     });
-    expect(typeof (call?.body as { sentAt: string }).sentAt).toBe('string');
+    expect(typeof body.sentAt).toBe('string');
     // 原始 content 一个字不动地带上（后端靠它判同一条消息内容变没变）。
-    expect((call?.body as { rawContent: string }).rawContent).toBe(
-      JSON.stringify({ text: '给登录页加手机验证码' }),
-    );
+    expect(body.rawContent).toBe(JSON.stringify({ text: '给登录页加手机验证码' }));
     // 存下了：心跳里记一笔（看守按它报「后端通不通」），没有任何「没记成」的计数
     h.gateway.watch.heartbeat();
     const beat = h.logs.filter((l) => l.message === '网关心跳').at(-1);
@@ -119,9 +129,11 @@ describe('收原话：每一句原样转后端', () => {
 
     await say('另起', { chat: 'group', chatId: TEAM, mentionBot: true });
     const second = h.backend.calls('POST', '/feishu/intake/messages')[1];
-    expect(second?.body).toMatchObject({ newSegment: true, atBot: true });
+    expect(second).toBeDefined();
+    const body = second?.body as { text: string; newSegment: boolean; atBot: boolean };
+    expect(body).toMatchObject({ newSegment: true, atBot: true });
     // 「另起」去掉那个 @ 之后整句就是这两个字：归一化把 @机器人 去掉了
-    expect((second?.body as { text: string }).text).toBe('另起');
+    expect(body.text).toBe('另起');
   });
 
   it('回复某条：回复的是哪条一起转（后端据此归段）；在话题里的带上话题编号', async () => {
@@ -707,6 +719,5 @@ describe('卡片的字没跑到别处', () => {
     expect(h.feishu.of('reply')).toHaveLength(0);
     expect(h.feishu.of('update')).toHaveLength(0);
     expect(h.feishu.newMessages()).toHaveLength(0);
-    expect(titleOf({ header: { title: { content: '' } } })).toBe('');
   });
 });

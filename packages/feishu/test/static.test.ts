@@ -6,7 +6,7 @@ import { FEISHU_GATEWAY_WEB_ROUTES, FEISHU_UNDERSTAND_MS, FeishuRoutes, WebRoute
 import { describe, expect, it } from 'vitest';
 import { ACTING_HEADER } from '../src/backend.ts';
 import { COCKPIT_PATHS } from '../src/cards.ts';
-import { DEFAULT_TIMING, MENU_KEYS, TARGET_CARD_MS } from '../src/gateway.ts';
+import { DEFAULT_TIMING, TARGET_ACK_MS } from '../src/gateway.ts';
 
 const pkg = new URL('../', import.meta.url);
 const srcDir = new URL('src/', pkg);
@@ -113,14 +113,22 @@ describe('静态检查', () => {
     expect(routes).toContain("route('tasks/:taskId'");
   });
 
-  it('时间预算守得住：后端答应的理解时限 + 网关多等的 + 发卡的余量 < 确认卡 10 秒', () => {
-    expect(DEFAULT_TIMING.understandWaitMs).toBeGreaterThan(FEISHU_UNDERSTAND_MS);
-    // 等不到就发「正在理解」卡：一次回复消息给 1 秒余量（香港调飞书实测 0.17 秒）。
-    expect(DEFAULT_TIMING.understandWaitMs + 1_000).toBeLessThanOrEqual(TARGET_CARD_MS);
+  it('时间预算守得住：转后端 5 秒（方案 5.4）之内回来，「收到」2 秒内加上', () => {
+    // 收原话给后端 5 秒（方案 5.4）；超时按没存成办（打「没记成」、记补漏），不再有「先回一张卡守住 10 秒」这套。
+    expect(DEFAULT_TIMING.intakeMs).toBe(5_000);
+    // 「收到」还是 2 秒的目标（design 15.4）：转后端比它慢没关系，表情是另外一步。
+    expect(DEFAULT_TIMING.intakeMs).toBeGreaterThanOrEqual(TARGET_ACK_MS);
+    // 后端答应 FEISHU_UNDERSTAND_MS 内回（那条口还在）；网关自己按 5 秒算，别比后端答应的还短。
+    expect(DEFAULT_TIMING.intakeMs).toBeLessThanOrEqual(FEISHU_UNDERSTAND_MS);
   });
 
-  it('菜单的 event_key 写进了样例配置的说明里（开发者后台照着配）', () => {
+  it('旧的菜单 event_key 已经从样例配置里删掉（菜单停用了，开发者后台也该删）', () => {
     const env = read(new URL('deploy/feishu.env.example', pkg));
-    for (const key of Object.values(MENU_KEYS)) expect(env).toContain(key);
+    expect(env).toContain('im.message.recalled_v1');
+    expect(env).toContain('im:message.group_msg');
+    expect(env).toContain('im:message:readonly');
+    // 不再要求配菜单：菜单停用了
+    expect(env).toContain('菜单和卡片按钮都已停用');
+    expect(env).not.toMatch(/event_key/);
   });
 });

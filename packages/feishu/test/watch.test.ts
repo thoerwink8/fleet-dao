@@ -338,6 +338,9 @@ describe('心跳', () => {
     s.watch.ok('board', 50);
     s.watch.ok('board', 150);
     s.watch.ok('intents', 20);
+    s.watch.intake(true);
+    s.watch.intake(false);
+    s.watch.backfill(2, 1);
     s.watch.acked(300);
     s.watch.acked(2_500);
     s.watch.acked(null);
@@ -369,6 +372,8 @@ describe('心跳', () => {
           },
           board: { ok: 2, failed: 1, avgMs: 100, maxMs: 150, lastOkAt: okAt },
           intents: { ok: 1, failed: 0, lastOkAt: okAt },
+          intake: { stored: 1, failed: 1 },
+          backfill: { rounds: 1, filled: 2, failed: 1 },
           messages: {
             count: 3,
             ackAvgMs: 1_400,

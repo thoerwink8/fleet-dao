@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { BOARD_RESEND_AFTER_MS } from '../src/board.ts';
 import { checkCard } from '../src/cards.ts';
-import { A, asAction, cardEvent, TEAM } from './events.ts';
+import { asAction, cardEvent, TEAM } from './events.ts';
 import { apiError } from './fake-backend.ts';
 import { buttonsOf, textIn, titleOf } from './fake-feishu.ts';
 import { type Harness, harness, snapshot } from './harness.ts';
@@ -136,32 +136,29 @@ describe('置顶盘面卡', () => {
     expect(h.feishu.of('send')).toHaveLength(1);
   });
 
-  it('盘面卡上的按钮：「看卡住的」私聊发清单并在卡上注明；「刷新」现取现改；点过的卡都换上新的回传值', async () => {
+  it('盘面卡还照样原地刷新、置顶；但卡上的按钮已经停用：点了只回一句「已停用」，不办原来的事', async () => {
     h = await harness();
     h.backend.on('GET', '/feishu/board', { body: snapshot(pinnedAt('om_board', Date.now())) });
     await h.gateway.board.tick();
     const before = buttonsOf(h.feishu.cardOf('om_board') ?? {});
-
     const stalled = before.find((b) => b.label === '看卡住的')?.value;
+
+    // 旧按钮：不私聊清单、不查后端，只在卡下面回一句「已停用」
     h.gateway.onCardAction(await asAction(cardEvent({ messageId: 'om_board', value: stalled })));
     await h.gateway.idle();
-    const [dm] = h.feishu.of('send');
-    expect(dm?.to).toEqual({ openId: A });
-    const list = dm?.message && 'card' in dm.message ? dm.message.card : {};
-    expect(titleOf(list)).toBe('卡住的 1 件');
-    expect(textIn(list)).toContain('#9 账单导出（acme/api） — 卡了 3 小时：测试一直红');
-    expect(checkCard(list)).toEqual([]);
-    expect(textIn(h.feishu.cardOf('om_board'))).toContain('卡住的清单已私聊发给甲');
-    // 私聊发的清单登记成 list：盘面快照里的 teamBoardCard 只认团队群置顶的那张。
-    await h.gateway.idle();
-    expect(h.backend.calls('PUT', `/feishu/cards/${dm?.sentId}`)[0]?.body).toMatchObject({ kind: 'list' });
+    expect(h.feishu.of('send')).toHaveLength(0);
+    const [reply] = h.feishu.of('reply');
+    expect(reply?.messageId).toBe('om_board');
+    const said = reply?.message && 'text' in reply.message ? reply.message.text : '';
+    expect(said).toContain('已经停用');
+    expect(said).toContain('飞书现在只收原话');
+    expect(h.gateway.stats).toMatchObject({ disabled_button: 1 });
 
-    const boardCalls = h.backend.calls('GET', '/feishu/board').length;
+    // 盘面卡本身还在（置顶、原地刷新那套照旧跑），但点它的任何按钮都不再办事
     const refresh = buttonsOf(h.feishu.cardOf('om_board')).find((b) => b.label === '刷新')?.value;
-    expect(refresh).not.toEqual(before.find((b) => b.label === '刷新')?.value);
+    const boardCalls = h.backend.calls('GET', '/feishu/board').length;
     h.gateway.onCardAction(await asAction(cardEvent({ messageId: 'om_board', value: refresh })));
     await h.gateway.idle();
-    expect(h.backend.calls('GET', '/feishu/board').length).toBe(boardCalls + 1);
-    expect(textIn(h.feishu.cardOf('om_board'))).not.toContain('卡住的清单已私聊');
+    expect(h.backend.calls('GET', '/feishu/board').length).toBe(boardCalls);
   });
 });
