@@ -398,7 +398,7 @@ function UserMenu() {
         <DropdownMenuLabel>
           <div className="text-sm">{user?.displayName}</div>
           <div className="text-xs font-normal text-muted-foreground">
-            {api.source === 'demo' ? '访客 · 演示版不用登录' : '创始人 · 飞书登录'}
+            {api.source === 'demo' ? '访客 · 演示版不用登录' : '创始人'}
           </div>
         </DropdownMenuLabel>
         {canSee('settings') ? (

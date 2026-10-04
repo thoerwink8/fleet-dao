@@ -15,6 +15,7 @@ import type {
   ChannelSchema,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
+  CredentialsResponse,
   DemoLinkSchema,
   DemoLinksResponse,
   DemoScopeSchema,
@@ -52,6 +53,7 @@ import type {
   SettingsResponse,
   TaskActionRequest,
   TaskDetailResponse,
+  UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
@@ -75,6 +77,8 @@ export type {
 
 export type Me = z.infer<typeof MeResponse>;
 export type AuthConfig = z.infer<typeof AuthConfigResponse>;
+export type Credentials = z.infer<typeof CredentialsResponse>;
+export type UpdateCredentialsBody = z.input<typeof UpdateCredentialsRequest>;
 export type Repo = z.infer<typeof RepoSchema>;
 
 export type Board = z.infer<typeof BoardResponse>;

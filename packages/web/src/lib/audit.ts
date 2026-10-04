@@ -20,6 +20,8 @@ const ACTION_LABEL: Record<string, string> = {
   'demo.link.create': '发了演示链接',
   'demo.link.revoke': '作废了演示链接',
   'demo.default.update': '改了演示版的默认范围',
+  'credentials.set': '设了账密登录',
+  'credentials.change': '改了账密登录',
   login: `登录了${brand.product}`,
   logout: `退出了${brand.product}`,
   // 引擎一侧的动作（名字以引擎实际写的为准，认不出的原样显示）。
@@ -92,6 +94,8 @@ export function targetLabel(
       return `路由 ${id}`;
     case 'setting':
       return id in settingLabel ? `设置「${settingLabel[id as SettingKey]}」` : `设置 ${id}`;
+    case 'user':
+      return '账号的登录方式';
     case 'notification':
       return '一条提醒';
     case 'demo-link':

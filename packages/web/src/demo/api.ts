@@ -25,6 +25,10 @@ export function createDemoApi(inner: MockApi): FleetApi {
     authConfig: () => Promise.resolve({ devLogin: false }),
     devLogin: noLogin,
     feishuAccess: noLogin,
+    passwordLogin: noLogin,
+    // 账密只在正式驾驶舱里有：演示版没有这个模块
+    credentials: () => Promise.reject(hidden('账密设置')),
+    updateCredentials: () => Promise.reject(hidden('账密设置')),
     logout: () => Promise.resolve(),
     async me() {
       const me = await inner.me();

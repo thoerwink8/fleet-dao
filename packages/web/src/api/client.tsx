@@ -20,6 +20,7 @@ import type {
   Board,
   CreateDemoLinkBody,
   CreatedDemoLink,
+  Credentials,
   DemoLinks,
   DemoScopeView,
   HomeResponse,
@@ -40,6 +41,7 @@ import type {
   Settings,
   TaskActionBody,
   TaskDetail,
+  UpdateCredentialsBody,
   UpdateDemoDefaultBody,
   UpdatedRouteEffort,
   UpdateRouteEffortBody,
@@ -54,6 +56,15 @@ export interface FleetApi {
   authConfig(): Promise<AuthConfig>;
   devLogin(userId: string): Promise<Me>;
   feishuAccess(code: string): Promise<Me>;
+  /**
+   * 账密登录（#120）：后端成功回 204 + 会话 Cookie，这里随后读一次 /api/me 取 CSRF 令牌，返回登录的人。
+   * 失败抛 ApiError：401 bad_credentials（一律这一句，不区分账号在不在）、429 locked（details.until）。
+   */
+  passwordLogin(username: string, password: string): Promise<Me>;
+  /** 设置页「账密登录」一节：设过没有、用户名、上次改密码的时间、能不能不带当前密码设第一次。 */
+  credentials(): Promise<Credentials>;
+  /** 设 / 改用户名、密码；成功没有返回值。错误的 details.field 指明是哪一栏（见 shared 的 UpdateCredentialsRequest）。 */
+  updateCredentials(body: UpdateCredentialsBody): Promise<void>;
   logout(): Promise<void>;
   me(): Promise<Me>;
   repos(): Promise<{ repos: Repo[] }>;
@@ -135,6 +146,7 @@ export function useApi(): FleetApi {
 export const keys = {
   me: ['me'] as const,
   authConfig: ['auth-config'] as const,
+  credentials: ['credentials'] as const,
   repos: ['repos'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
@@ -162,6 +174,19 @@ export function useMe() {
 export function useAuthConfig() {
   const api = useApi();
   return useQuery({ queryKey: keys.authConfig, queryFn: () => api.authConfig(), retry: false });
+}
+
+/** 账密登录的现状。不重试、不缓存：每次进设置页都现读（「10 分钟内飞书登录过」这条随时间变）。 */
+export function useCredentials({ enabled = true }: { enabled?: boolean } = {}) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.credentials,
+    queryFn: () => api.credentials(),
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+    enabled,
+  });
 }
 
 export function useRepos() {
@@ -421,6 +446,20 @@ export function useUpdateSetting() {
       qc.invalidateQueries({ queryKey: keys.settings });
       qc.invalidateQueries({ queryKey: keys.poolHolds });
     },
+  });
+}
+
+/**
+ * 设 / 改账密：成了操作记录里多一条（credentials.set / credentials.change）。不管成不成，所有查询都重拉一遍：
+ * 改密码时页面上在途的读取带的是旧 Cookie、回来是 401（http.ts 已不把它们当登录过期），这些查询要用新 Cookie 再读一次，
+ * 不然页面上留着一堆「没读成」。
+ */
+export function useUpdateCredentials() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateCredentialsBody) => api.updateCredentials(body),
+    onSettled: () => qc.invalidateQueries(),
   });
 }
 

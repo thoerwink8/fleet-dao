@@ -1,12 +1,13 @@
 import { quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
-import { BellRing, FolderGit2, Info, Palette, SlidersHorizontal } from 'lucide-react';
+import { BellRing, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
 import { brand } from '#brand';
 import { ApiError, errorText, useApi, useMe, usePools, useSettings, useUpdateSetting } from '../api/client';
 import type { Setting, SettingKey } from '../api/types';
+import { CredentialsSection } from '../components/credentials-section';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { useRepo } from '../components/repo-context';
@@ -501,6 +502,18 @@ export default function Settings() {
         )}
       </Section>
 
+      {/* 账密只在正式驾驶舱里有：演示版没有登录（也读不到这个接口） */}
+      {api.source === 'demo' ? null : (
+        <Section
+          id="account"
+          icon={KeyRound}
+          title="账密登录"
+          description={`设一个用户名和密码，飞书登录出问题时也进得去${brand.product}。`}
+        >
+          <CredentialsSection />
+        </Section>
+      )}
+
       <Section
         id="repos"
         icon={FolderGit2}
@@ -537,7 +550,7 @@ export default function Settings() {
         </ul>
       </Section>
 
-      <Section id="about" icon={Info} title="关于" description={`${brand.product} v1 的前端。`}>
+      <Section id="about" icon={Info} title="关于" description={`${brand.product}的前端。`}>
         <dl className="grid max-w-md grid-cols-about gap-y-2 text-sm">
           <dt className="text-muted-foreground">数据</dt>
           <dd>
@@ -550,7 +563,7 @@ export default function Settings() {
             {api.source === 'demo'
               ? '访客（演示版不用登录）'
               : me
-                ? `${me.user.displayName}（飞书账号，只放行创始人）`
+                ? `${me.user.displayName}（飞书或账密，只放行创始人）`
                 : '—'}
           </dd>
           {import.meta.env.MODE !== 'demo' ? (

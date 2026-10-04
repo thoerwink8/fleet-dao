@@ -111,20 +111,28 @@ describe('登录页：已登录、没登录', () => {
     expect(link.getAttribute('href')).toBe('/auth/feishu/login?next=%2F');
   });
 
-  test('【故意造出的失败】后端没配飞书登录：写「还没配置」，登录按钮点不了、不给链接', async () => {
+  test('【故意造出的失败】一个登录入口都没开：明说「登录没有配好」，不留灰按钮、没有链接、没有输入栏', async () => {
     renderApp(<App />, { api: loggedOut({}), route: '/login' });
-    expect(await screen.findByText('飞书登录还没配置。')).toBeTruthy();
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      '登录没有配好：请在服务器上设置账密或飞书',
+    );
     expect(screen.queryByRole('link', { name: /用飞书登录/ })).toBeNull();
-    expect(screen.getByRole('button', { name: /用飞书登录/ })).toHaveProperty('disabled', true);
+    expect(screen.queryByRole('button', { name: /用飞书登录/ })).toBeNull();
+    expect(screen.queryByLabelText('用户名')).toBeNull();
+    expect(screen.queryByRole('button', { name: '登录' })).toBeNull();
   });
 
-  test('【故意造出的失败】读不到登录配置：写「连不上…后端」和原因，不冒充「没配置」', async () => {
-    renderApp(<App />, {
-      api: loggedOut(new ApiError(502, 'bad_gateway', '网关没连上后端')),
-      route: '/login',
-    });
+  test('【故意造出的失败】读不到登录配置：写「连不上…后端」和原因，不冒充「没配好」；点重试再读一次', async () => {
+    const authConfig = vi
+      .fn<FleetApi['authConfig']>()
+      .mockRejectedValueOnce(new ApiError(502, 'bad_gateway', '网关没连上后端'))
+      .mockResolvedValue({ devLogin: false, passwordLogin: true });
+    renderApp(<App />, { api: loggedOut({}, { authConfig }), route: '/login' });
     expect((await screen.findByText(/连不上.*后端：网关没连上后端/)).textContent).toContain('网关没连上后端');
-    expect(screen.queryByText('飞书登录还没配置。')).toBeNull();
+    expect(screen.queryByText(/登录没有配好/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByLabelText('用户名')).toBeTruthy();
+    expect(authConfig).toHaveBeenCalledTimes(2);
   });
 
   test('假数据模式：不用登录，点一下进 next', async () => {
@@ -188,6 +196,164 @@ describe('开发环境免登', () => {
     submit();
     expect((await screen.findByRole('alert')).textContent).toContain('连不上驾驶舱后端');
     expect(screen.queryByTestId('landed')).toBeNull();
+  });
+});
+
+describe('账密登录', () => {
+  const username = () => screen.getByLabelText('用户名') as HTMLInputElement;
+  const password = () => screen.getByLabelText('密码') as HTMLInputElement;
+  const fill = (u: string, p: string) => {
+    fireEvent.change(username(), { target: { value: u } });
+    fireEvent.change(password(), { target: { value: p } });
+  };
+  const form = () => screen.getByRole('form', { name: '账号密码登录' }) as HTMLFormElement;
+  const open = async (over: Partial<FleetApi>, route = '/login', config: Partial<AuthConfig> = {}) => {
+    renderApp(<App />, { api: loggedOut({ passwordLogin: true, ...config }, over), route });
+    await screen.findByLabelText('用户名');
+  };
+
+  test('passwordLogin 为真：有用户名、密码两栏和「登录」按钮；栏的 autocomplete 让密码管理器认得出', async () => {
+    await open({});
+    expect(username().getAttribute('autocomplete')).toBe('username');
+    expect(password().getAttribute('autocomplete')).toBe('current-password');
+    expect(password().type).toBe('password');
+    expect(screen.getByRole('button', { name: '登录' })).toHaveProperty('type', 'submit');
+    // 万一表单没被 JS 接住也不会把密码拼进地址（GET 会）
+    expect(form().method).toBe('post');
+  });
+
+  test('填好点登录（表单提交就是回车）：passwordLogin 收到去掉用户名首尾空白的用户名和原样的密码，成功落到 next', async () => {
+    const passwordLogin = vi.fn(() => Promise.resolve(ME));
+    await open({ passwordLogin }, '/login?next=%2Fsettings');
+    fill('  founder  ', ' p w ');
+    fireEvent.submit(form());
+    expect((await screen.findByTestId('landed')).textContent).toBe('/settings');
+    expect(passwordLogin).toHaveBeenCalledExactlyOnceWith('founder', ' p w ');
+  });
+
+  test('账密和飞书都开着：两样都显示；只开飞书（旧后端没给 passwordLogin）时没有账密表单', async () => {
+    renderApp(<App />, { api: loggedOut({ passwordLogin: true, feishuAppId: 'cli_x' }), route: '/login' });
+    expect(await screen.findByLabelText('用户名')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /用飞书登录/ })).toBeTruthy();
+    cleanup();
+    renderApp(<App />, { api: loggedOut({ feishuAppId: 'cli_x' }), route: '/login' });
+    expect(await screen.findByRole('link', { name: /用飞书登录/ })).toBeTruthy();
+    expect(screen.queryByLabelText('用户名')).toBeNull();
+  });
+
+  test('【故意造出的失败】两栏没填就提交：提示填写、不发请求；只缺密码时光标去密码栏', async () => {
+    const passwordLogin = vi.fn(() => Promise.resolve(ME));
+    await open({ passwordLogin });
+    fireEvent.submit(form());
+    expect((await screen.findByRole('alert')).textContent).toBe('请填写用户名和密码。');
+    fireEvent.change(username(), { target: { value: 'founder' } });
+    fireEvent.submit(form());
+    expect(document.activeElement).toBe(password());
+    expect(passwordLogin).not.toHaveBeenCalled();
+  });
+
+  test('提交中：按钮禁用并写「登录中…」，栏只读，再提交不会发第二次；成功前不落地', async () => {
+    let resolve: (m: Me) => void = () => undefined;
+    const passwordLogin = vi.fn(() => new Promise<Me>((r) => (resolve = r)));
+    await open({ passwordLogin });
+    fill('founder', 'correct horse battery');
+    fireEvent.submit(form());
+    const btn = await screen.findByRole('button', { name: /登录中/ });
+    expect(btn).toHaveProperty('disabled', true);
+    expect(username().readOnly).toBe(true);
+    fireEvent.submit(form());
+    expect(passwordLogin).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('landed')).toBeNull();
+    resolve(ME);
+    expect(await screen.findByTestId('landed')).toBeTruthy();
+  });
+
+  test('【故意造出的失败】密码不对（401 bad_credentials）：写「用户名或密码不对」，不说是哪个；密码栏清空、光标回密码栏、用户名留着；按钮恢复；不跳走', async () => {
+    const passwordLogin = vi.fn(() =>
+      Promise.reject(new ApiError(401, 'bad_credentials', '用户名或密码不对')),
+    );
+    await open({ passwordLogin });
+    fill('founder', 'wrong-secret-123');
+    fireEvent.submit(form());
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('用户名或密码不对');
+    // 密码不进页面上的任何一句话
+    expect(document.body.textContent).not.toContain('wrong-secret-123');
+    expect(password().value).toBe('');
+    expect(username().value).toBe('founder');
+    await waitFor(() => expect(document.activeElement).toBe(password()));
+    expect(screen.getByRole('button', { name: '登录' })).toHaveProperty('disabled', false);
+    expect(screen.queryByTestId('landed')).toBeNull();
+  });
+
+  test('【故意造出的失败】被锁了（429 locked + 锁到几点）：说锁了、什么时候能再试，不说「密码不对」；密码栏不清', async () => {
+    const until = new Date(Date.now() + 14 * 60_000).toISOString();
+    const passwordLogin = vi.fn(() =>
+      Promise.reject(new ApiError(429, 'locked', '输错次数太多，已临时锁住，稍后再试', { until })),
+    );
+    await open({ passwordLogin });
+    fill('founder', 'whatever-1234');
+    fireEvent.submit(form());
+    const text = (await screen.findByRole('alert')).textContent ?? '';
+    expect(text).toContain('已临时锁住');
+    expect(text).toMatch(/\d+ 分钟后/);
+    expect(text).not.toContain('用户名或密码不对');
+    expect(password().value).toBe('whatever-1234');
+  });
+
+  test('【故意造出的失败】锁到几点读不懂（details 缺）：照说锁了、只说「过一会儿」，不编时刻', async () => {
+    const passwordLogin = vi.fn(() => Promise.reject(new ApiError(429, 'locked', '锁了', { until: 'soon' })));
+    await open({ passwordLogin });
+    fill('founder', 'whatever-1234');
+    fireEvent.submit(form());
+    expect((await screen.findByRole('alert')).textContent).toBe('输错次数太多，已临时锁住，请过一会儿再试。');
+  });
+
+  test('【故意造出的失败】请求太频繁（别处回的 429，不是账号锁）：写「请求太频繁」', async () => {
+    const passwordLogin = vi.fn(() => Promise.reject(new ApiError(429, 'too_many_requests', '慢一点')));
+    await open({ passwordLogin });
+    fill('founder', 'whatever-1234');
+    fireEvent.submit(form());
+    expect((await screen.findByRole('alert')).textContent).toBe('请求太频繁，请稍后再试。');
+  });
+
+  test('【故意造出的失败】读不到后端（断网）：写读不到后端、说明不是密码的问题，不清密码栏', async () => {
+    const passwordLogin = vi.fn(() =>
+      Promise.reject(new ApiError(0, 'network', '连不上驾驶舱后端：Failed to fetch')),
+    );
+    await open({ passwordLogin });
+    fill('founder', 'whatever-1234');
+    fireEvent.submit(form());
+    const text = (await screen.findByRole('alert')).textContent ?? '';
+    expect(text).toContain('读不到后端');
+    expect(text).toContain('不是密码的问题');
+    expect(text).not.toContain('用户名或密码不对');
+    expect(password().value).toBe('whatever-1234');
+  });
+
+  test('【故意造出的失败】后端出错（500）：写后端出错了和原话，不说密码不对', async () => {
+    const passwordLogin = vi.fn(() =>
+      Promise.reject(new ApiError(500, 'credentials_missing', '读不到登录信息')),
+    );
+    await open({ passwordLogin });
+    fill('founder', 'whatever-1234');
+    fireEvent.submit(form());
+    const text = (await screen.findByRole('alert')).textContent ?? '';
+    expect(text).toContain('后端出错了（500）');
+    expect(text).toContain('读不到登录信息');
+  });
+
+  test('「显示密码」按钮：点一下明文、再点藏回去', async () => {
+    await open({});
+    fireEvent.click(screen.getByRole('button', { name: '显示密码' }));
+    expect(password().type).toBe('text');
+    fireEvent.click(screen.getByRole('button', { name: '隐藏密码' }));
+    expect(password().type).toBe('password');
+  });
+
+  test('页面写明第一次怎么设账密（先飞书登录、到设置里设）', async () => {
+    await open({});
+    expect(screen.getByText(/还没设过账密.*设置 → 账密登录/)).toBeTruthy();
   });
 });
 

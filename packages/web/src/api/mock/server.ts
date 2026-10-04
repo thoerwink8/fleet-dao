@@ -7,6 +7,7 @@ import {
   BoardResponse,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
+  CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
   DEMO_MODULES,
   DEMO_STRICT_DEFAULT,
@@ -22,6 +23,7 @@ import {
   LegacyAsksResponse,
   MeResponse,
   NotificationsResponse,
+  PASSWORD_MIN_LENGTH,
   POOL_HOLDS_SETTING,
   PoolHoldsResponse,
   PoolsResponse,
@@ -51,6 +53,7 @@ import {
   TaskActionRequest,
   TaskDetailResponse,
   taskFlow,
+  UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
@@ -203,6 +206,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     defaultScope: DemoScope;
     defaultPublished: boolean;
   } = { links: [], defaultScope: DEMO_STRICT_DEFAULT, defaultPublished: false };
+
+  /** 假数据里的账密（只在这个模拟器里存明文，真后端只存哈希）：没设过就是空的。 */
+  const mockCreds: { username?: string; password?: string; changedAt?: string } = {};
 
   const iso = () => new Date(now()).toISOString();
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -895,7 +901,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
     async authConfig() {
       await wait();
-      return AuthConfigResponse.parse({ devLogin: false });
+      return AuthConfigResponse.parse({ devLogin: false, passwordLogin: true });
     },
     async devLogin() {
       await wait();
@@ -904,6 +910,73 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async feishuAccess() {
       await wait();
       return MeResponse.parse(st.me);
+    },
+    async passwordLogin(username, password) {
+      await wait();
+      const c = mockCreds;
+      if (
+        c.password === undefined ||
+        c.username?.toLowerCase() !== username.toLowerCase() ||
+        c.password !== password
+      )
+        throw new ApiError(401, 'bad_credentials', '用户名或密码不对');
+      return MeResponse.parse(st.me);
+    },
+    async credentials() {
+      await wait();
+      return CredentialsResponse.parse({
+        hasPassword: mockCreds.password !== undefined,
+        username: mockCreds.username ?? null,
+        passwordChangedAt: mockCreds.changedAt ?? null,
+        // 假数据没有「飞书登录过几分钟」：没设过就当可以直接设
+        canSetWithoutCurrent: mockCreds.password === undefined,
+      });
+    },
+    async updateCredentials(raw) {
+      await wait();
+      const { username, newPassword, currentPassword } = UpdateCredentialsRequest.parse(raw);
+      // 校验顺序和真后端（api/src/credentials.ts）一致；规则的出处在 api/src/password.ts
+      if (username === undefined && newPassword === undefined)
+        throw new ApiError(400, 'nothing_to_change', '用户名和新密码至少给一样');
+      if (username !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$/.test(username))
+        throw new ApiError(
+          400,
+          'invalid_username',
+          '用户名 3–32 位，字母或数字开头，只能用字母、数字、点、下划线、连字符',
+          {
+            field: 'username',
+          },
+        );
+      if (newPassword !== undefined && [...newPassword.normalize('NFKC')].length < PASSWORD_MIN_LENGTH)
+        throw new ApiError(400, 'weak_password', `密码至少 ${PASSWORD_MIN_LENGTH} 位`, {
+          field: 'newPassword',
+        });
+      const c = mockCreds;
+      if (c.password !== undefined) {
+        if (!currentPassword)
+          throw new ApiError(400, 'current_password_required', '改之前要输入当前密码', {
+            field: 'currentPassword',
+          });
+        if (currentPassword !== c.password)
+          throw new ApiError(401, 'bad_current_password', '当前密码不对', { field: 'currentPassword' });
+      }
+      if (newPassword !== undefined && username === undefined && c.username === undefined)
+        throw new ApiError(400, 'username_required', '第一次设密码要同时设用户名', { field: 'username' });
+      const had = c.password !== undefined;
+      const before = { username: c.username ?? null, hasPassword: had };
+      if (username !== undefined) c.username = username;
+      if (newPassword !== undefined) {
+        c.password = newPassword;
+        c.changedAt = iso();
+      }
+      audit({
+        actor: meActor(),
+        action: had ? 'credentials.change' : 'credentials.set',
+        target: `user:${st.me.user.id}`,
+        before,
+        after: { username: c.username ?? null, passwordChanged: newPassword !== undefined },
+        via: 'cockpit',
+      });
     },
     async logout() {
       await wait();

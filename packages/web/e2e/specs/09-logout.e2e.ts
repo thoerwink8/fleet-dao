@@ -34,8 +34,16 @@ test.describe('退出', () => {
     await expect(page).toHaveURL(/\/login\?next=%2Fsettings/);
     await shot(page, '09-退出后');
 
+    // 退出再登：这回走登录页的账密表单（不走接口），登进去账号菜单还是写着名字
+    await page.getByLabel('用户名').fill(stack.facts.username);
+    await page.getByLabel('密码', { exact: true }).fill(stack.facts.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await page.getByRole('button', { name: '我的账号' }).click();
+    await expect(page.getByRole('menu')).toContainText('创始人甲');
+    await page.keyboard.press('Escape');
+
     // 退出这件事进了操作记录（重新登录后看）
-    await login();
     const audit = (await api.get('/api/audit?limit=50')) as { items: { action: string }[] };
     expect(audit.items.some((a) => a.action === 'logout')).toBe(true);
   });
