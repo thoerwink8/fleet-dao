@@ -27,6 +27,14 @@ import {
   tookOverResult,
 } from './command-logic.ts';
 import {
+  askConstraintViolation,
+  isAskOpen,
+  isNotificationOpen,
+  isSettingConflict,
+  nextSettingVersion,
+} from './console-logic.ts';
+import { clearedFailures, isLockedAt, nextFailureState, passwordNeedsUsername } from './credentials-logic.ts';
+import {
   assertOutcomeHasReason,
   claimedResult,
   duplicateVersionObject,
@@ -585,11 +593,10 @@ export function createMemoryStore(
         ...current,
         ...(username !== undefined && { username }),
         ...(passwordHash !== undefined && { passwordHash, passwordChangedAt: at.toISOString() }),
-        failedLogins: 0,
-        lockedUntil: undefined,
+        ...clearedFailures(),
       };
       // 和库里的约束 users_password_needs_username 一样：有密码就得有用户名
-      if (next.passwordHash !== undefined && next.username === undefined) {
+      if (passwordNeedsUsername(next)) {
         throw new Error('users_password_needs_username：设密码之前要先有用户名');
       }
       checkAudit(entry);
@@ -601,13 +608,8 @@ export function createMemoryStore(
     async recordPasswordFailure({ userId, at, maxFails, lockMs }) {
       if (!data.users.some((u) => u.id === userId)) return null;
       const c = data.credentials.get(userId) ?? { userId, failedLogins: 0 };
-      const lockedMs = c.lockedUntil === undefined ? undefined : Date.parse(c.lockedUntil);
-      if (lockedMs !== undefined && lockedMs > at.getTime()) return { lockedUntil: c.lockedUntil };
-      const count = (lockedMs === undefined ? c.failedLogins : 0) + 1;
-      const next: PasswordCredentials =
-        count >= maxFails
-          ? { ...c, failedLogins: 0, lockedUntil: new Date(at.getTime() + lockMs).toISOString() }
-          : { ...c, failedLogins: count, lockedUntil: undefined };
+      if (isLockedAt(c, at.getTime())) return { lockedUntil: c.lockedUntil };
+      const next: PasswordCredentials = { ...c, ...nextFailureState(c, at.getTime(), maxFails, lockMs) };
       data.credentials.set(userId, next);
       return { lockedUntil: next.lockedUntil };
     },
@@ -616,7 +618,7 @@ export function createMemoryStore(
     },
     async recordPasswordSuccess(userId) {
       const c = data.credentials.get(userId);
-      if (c) data.credentials.set(userId, { ...c, failedLogins: 0, lockedUntil: undefined });
+      if (c) data.credentials.set(userId, { ...c, ...clearedFailures() });
     },
 
     // —— 看板 ——
@@ -815,7 +817,7 @@ export function createMemoryStore(
     async answerAsk({ askId, answer, by }, entry) {
       const ask = data.asks.find((a) => a.id === askId);
       if (!ask) return 'not_found';
-      if (ask.answer !== undefined) return 'already_answered';
+      if (!isAskOpen(ask)) return 'already_answered';
       checkAudit(entry);
       ask.answer = answer;
       ask.answeredBy = by.id;
@@ -898,7 +900,7 @@ export function createMemoryStore(
     async resolveNotification({ id, by }, entry) {
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return 'not_found';
-      if (n.resolvedAt !== undefined) return 'already_resolved';
+      if (!isNotificationOpen(n)) return 'already_resolved';
       checkAudit(entry);
       n.resolvedAt = now().toISOString();
       n.resolvedBy = by.id;
@@ -921,12 +923,12 @@ export function createMemoryStore(
     },
     async putSetting({ key, value, expectedVersion, by }, entry) {
       const current = data.settings.find((s) => s.key === key);
-      if ((current?.version ?? 0) !== expectedVersion) return 'conflict';
+      if (isSettingConflict(current?.version, expectedVersion)) return 'conflict';
       checkAudit(entry);
       const next: SettingRecord = {
         key,
         value,
-        version: expectedVersion + 1,
+        version: nextSettingVersion(expectedVersion),
         updatedAt: now().toISOString(),
         updatedBy: by.id,
       };
@@ -965,8 +967,8 @@ export function createMemoryStore(
     },
     async openAsk({ runId, taskId, question, options: choices, scope, recommended, hold }) {
       // 和库里的约束一样、也和库一样先查约束再去重：推荐的一定在选项里，人闸只跟着 hold 走（不拿空的冒充推荐）
-      if (!choices.includes(recommended)) throw new Error(`推荐的「${recommended}」不在选项里`);
-      if ((scope === 'hold') !== (hold !== undefined)) throw new Error('人闸和提问的范围对不上');
+      const violation = askConstraintViolation({ options: choices, recommended, scope, hold });
+      if (violation !== undefined) throw new Error(violation);
       const existing = data.asks.find((a) => a.runId === runId && a.question === question);
       if (existing) return { ask: existing, created: false };
       const ask: AskRecord = {

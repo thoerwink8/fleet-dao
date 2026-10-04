@@ -154,6 +154,19 @@ export function describeCredentialsStoreContract(name: string, make: MakeStore):
       expect((await store.getPasswordCredentials(DEV_USER_ID))?.failedLogins).toBe(0);
     });
 
+    it('锁到的那一刻正好算过期：这一次是新一轮的第 1 次，不是锁着的（两套 Store 边界一致）', async () => {
+      await store.setPasswordCredentials(
+        { userId: DEV_USER_ID, username: 'edge-lock', passwordHash: HASH, at: T0 },
+        audit(),
+      );
+      for (let i = 1; i <= 5; i++) await fail();
+      const until = new Date(T0.getTime() + 15 * MIN);
+      expect((await store.getPasswordCredentials(DEV_USER_ID))?.lockedUntil).toBe(until.toISOString());
+      expect(await fail(new Date(until.getTime() - 1))).toEqual({ lockedUntil: until.toISOString() });
+      expect(await fail(until)).toEqual({ lockedUntil: undefined });
+      expect(await store.getPasswordCredentials(DEV_USER_ID)).toMatchObject({ failedLogins: 1 });
+    });
+
     it('会话版本：设密码加 1、只改用户名不加、bumpSessionVersion 加 1；没这个人 false', async () => {
       const version = async () => (await store.getUser(DEV_USER_ID))?.sessionVersion ?? 0;
       expect(await version()).toBe(0);
