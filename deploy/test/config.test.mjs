@@ -18,11 +18,14 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   APPLY_FILES,
   applyConfig,
+  CARPOOL_CAP,
   CONFIG_FILES,
   ConfigError,
+  carpoolCapProblems,
   cli,
   DESIRED_FILE,
   diffProfiles,
@@ -41,6 +44,7 @@ import {
   readLive,
   readProfile,
   renderEnv,
+  unregisteredDesiredFiles,
 } from '../france/auto-release/config.mjs';
 
 const KEY_TEXT = `${'5a'.repeat(32)}\n`;
@@ -668,6 +672,128 @@ test('仓里 deploy/local 和 deploy/france 的期望：差别都登记过了（
     rSame.drift.map((d) => [d.scope, d.file, d.key]),
     [['must-differ', 'engine.env', 'FLEET_CANARY_REPO']],
   );
+});
+
+// ── 拼车并发总上限登记（#194 方案 4.7）──
+
+const DEPLOY_DIR = fileURLToPath(new URL('../', import.meta.url));
+
+/** 仓里两份真期望，解析好的样子。 */
+const realMachines = () => [
+  { name: '法国', desired: parseDesired(readFileSync(FRANCE_DESIRED_FILE, 'utf8')) },
+  { name: '本机档', desired: parseDesired(readFileSync(LOCAL_DESIRED_FILE, 'utf8')) },
+];
+/** 把某台某一项换成别的写法（undefined = 删掉这一项）。 */
+function withCap(machines, name, key, spec) {
+  return machines.map((m) => {
+    if (m.name !== name) return m;
+    const list = m.desired.files['engine.env'].filter((d) => d.key !== key);
+    if (spec !== undefined) list.push({ key, ...spec });
+    return { ...m, desired: { ...m.desired, files: { ...m.desired.files, 'engine.env': list } } };
+  });
+}
+const pub = (value) => ({ kind: 'public', value });
+
+test('拼车并发登记：仓里两份期望都登记了、加起来不超过总上限，没有没登记的机器档', () => {
+  const machines = realMachines();
+  assert.deepEqual(carpoolCapProblems(machines), []);
+  assert.deepEqual(unregisteredDesiredFiles(DEPLOY_DIR), []);
+  const own = (n) =>
+    Number(
+      machines.find((m) => m.name === n).desired.files['engine.env'].find((d) => d.key === CARPOOL_CAP.own)
+        .value,
+    );
+  assert.equal(own('法国') + own('本机档') <= 6, true);
+  // diff-local 命令行把它也算进去：真文件现在是一致的
+  return cli(['diff-local'], { out: () => {}, err: () => {} }).then((code) => assert.equal(code, 0));
+});
+
+test('拼车并发登记：加起来超过总上限判红（故意造出失败）', () => {
+  const over = withCap(realMachines(), '法国', CARPOOL_CAP.own, pub('5'));
+  const r = carpoolCapProblems(over);
+  assert.deepEqual(
+    r.map((d) => [d.scope, d.key]),
+    [['carpool-cap', CARPOOL_CAP.own]],
+  );
+  assert.match(r[0].title, /超过总上限：7 > 6/);
+  assert.deepEqual(carpoolCapProblems(withCap(realMachines(), '法国', CARPOOL_CAP.own, pub('4'))), []);
+});
+
+test('拼车并发登记：加一台机器不改登记也判红；没登记、私有、空、不是正整数都判红，不当成「不限」', () => {
+  // 第三台机器登记了 1：4 + 2 + 1 > 6，必须有人把别台往下调
+  const third = [...realMachines(), { name: 'WSL2', desired: realMachines()[1].desired }];
+  const r3 = carpoolCapProblems(withCap(third, 'WSL2', CARPOOL_CAP.own, pub('1')));
+  assert.equal(r3.length, 1);
+  assert.match(r3[0].title, /7 > 6/);
+  // 第三台干脆没登记这一项
+  const missing = carpoolCapProblems(withCap(third, 'WSL2', CARPOOL_CAP.own, undefined));
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].title, /WSL2没登记拼车并发上限/);
+  for (const [spec, why] of [
+    [{ kind: 'private', fp: null }, /私有值/],
+    [pub(''), /不是正整数/],
+    [pub('0'), /不是正整数/],
+    [pub('-1'), /不是正整数/],
+    [pub('四'), /不是正整数/],
+    [pub('2.5'), /不是正整数/],
+  ]) {
+    const r = carpoolCapProblems(withCap(realMachines(), '本机档', CARPOOL_CAP.own, spec));
+    assert.equal(r.length, 1, JSON.stringify(spec));
+    assert.match(r[0].body, why);
+  }
+});
+
+test('拼车并发登记：总上限没写、写成私有、两边不一样都判红', () => {
+  const noTotal = carpoolCapProblems(withCap(realMachines(), '法国', CARPOOL_CAP.total, undefined));
+  assert.equal(noTotal.length, 1);
+  assert.match(noTotal[0].title, /法国没登记拼车并发总上限/);
+  const differ = carpoolCapProblems(withCap(realMachines(), '本机档', CARPOOL_CAP.total, pub('8')));
+  assert.equal(differ.length, 1);
+  assert.match(differ[0].title, /总上限不一样/);
+  const priv = carpoolCapProblems(
+    withCap(realMachines(), '本机档', CARPOOL_CAP.total, { kind: 'private', fp: null }),
+  );
+  assert.equal(priv.length, 1);
+  assert.match(priv[0].body, /私有值/);
+});
+
+test('拼车并发登记：仓里多出一份没登记的机器档判红，读不了目录是没查成', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-deploy-'));
+  try {
+    for (const rel of Object.values(PROFILE_DESIRED)) {
+      mkdirSync(join(dir, rel.split('/')[1]), { recursive: true });
+      writeFileSync(join(dir, rel.split('/')[1], 'desired-config.json'), '{}');
+    }
+    mkdirSync(join(dir, 'newbox'));
+    writeFileSync(join(dir, 'newbox', 'desired-config.json'), '{}');
+    mkdirSync(join(dir, 'examples')); // 没有 desired-config.json 的目录不算机器档
+    const r = unregisteredDesiredFiles(dir);
+    assert.deepEqual(
+      r.map((d) => d.file),
+      ['deploy/newbox/desired-config.json'],
+    );
+    assert.throws(() => unregisteredDesiredFiles(join(dir, '不存在')), ConfigError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('命令行 diff-local：拼车并发超了退出码 1、写明加起来多少', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-config-'));
+  try {
+    const france = JSON.parse(readFileSync(FRANCE_DESIRED_FILE, 'utf8'));
+    france.files['engine.env'].FLEET_CARPOOL_MAX_CONCURRENCY.value = '5';
+    writeFileSync(join(dir, 'a.json'), JSON.stringify(france));
+    const out = [];
+    const code = await cli(['diff-local', '--france', join(dir, 'a.json'), '--local', LOCAL_DESIRED_FILE], {
+      out: (s) => out.push(s),
+      err: () => {},
+    });
+    assert.equal(code, 1);
+    assert.match(out.join('\n'), /red .*加起来超过总上限：7 > 6/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /** 法国期望里「引擎临时关着」的那一项该有的样子：值只有 fleet-api，说明里写清原因、撤回条件、撤回做法、最迟复查日期。返回哪里不对（空 = 都对）。 */
