@@ -55,6 +55,7 @@ import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reco
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
+import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
@@ -106,6 +107,13 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   const { config, store } = deps;
   const app = new Hono<CockpitEnv>();
   app.use('*', requireSession(config, store, deps.now));
+
+  const engineProbe = engineHealthProbe({
+    health: deps.health,
+    engineOff: config.engineOff,
+    log: deps.log,
+    now: deps.now,
+  });
 
   const actorOf = (c: Context<CockpitEnv>): Actor => ({ kind: 'user', id: c.get('user').id });
 
@@ -184,19 +192,31 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     for (const key of missing) deps.log.warn('主页「做完的」反查不到挂的单，只显示 PR 号', { issue: key });
     const taskIds = tasks.map((t) => t.id);
-    const [notifications, pendingAsks, activeRuns, pools, channels, windows, routes, models, segmentRuns] =
-      await Promise.all([
-        store.listNotifications({ status: 'open', limit: 200 }),
-        store.listPendingAsks(),
-        store.listRuns({ taskIds, active: true }),
-        store.listPools(),
-        store.listChannels(),
-        store.listQuotaWindows(),
-        store.listRoutes(),
-        store.listModels(),
-        // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
-        store.listSegmentRunsForTasks(taskIds),
-      ]);
+    const [
+      notifications,
+      pendingAsks,
+      activeRuns,
+      pools,
+      channels,
+      windows,
+      routes,
+      models,
+      segmentRuns,
+      engine,
+    ] = await Promise.all([
+      store.listNotifications({ status: 'open', limit: 200 }),
+      store.listPendingAsks(),
+      store.listRuns({ taskIds, active: true }),
+      store.listPools(),
+      store.listChannels(),
+      store.listQuotaWindows(),
+      store.listRoutes(),
+      store.listModels(),
+      // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
+      store.listSegmentRunsForTasks(taskIds),
+      // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
+      engineProbe(),
+    ]);
     const now = deps.now();
     const poolViews = buildPools(
       { pools, channels, windows, routes, activeRuns },
@@ -213,7 +233,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         repos,
         pools: poolViews,
         routes,
-        engineOff: config.engineOff,
+        engine,
         segmentRuns,
         models,
         channels,

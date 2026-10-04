@@ -87,9 +87,12 @@ export const HomeDoneSchema = z.object({
 });
 
 /**
- * 持续状态条：额度、中转、引擎开关。有问题一直显示、不伪装成失败（tight/degraded/off 都不是「坏了」）。
- * engine 一项：后端读的是这台机器 release.env 的 FLEET_SERVICES（库自主管理才写的期望；运行时状态由 Temporal 拉，
- * 本切片只展示这个开关）。读不到（开发环境、机器上没有 release.env）按开着算，和 config.ts 的 engineEnabled 一个判法。
+ * 持续状态条：额度、中转、引擎。有问题一直显示、不伪装成失败（tight/degraded/off 都不是「坏了」）。
+ * engine 一项（#902 D7）四种：
+ * - off：这台机器按 release.env 的 FLEET_SERVICES 没开引擎（临时调整），是「已停用」，不是坏了，不标红；
+ * - on：开着、而且任务队列上有在拉活的引擎工人（和 /healthz 的 engine 项同一个探法）；
+ * - down：开着、但探不到在线的工人或连不上调度服务——真的没连上，标红；
+ * - unknown：这台后端没有引擎探针（开发、内存版），没查成，不冒充正常。
  */
 export const HomeHealthSchema = z.object({
   quota: z.object({
@@ -101,7 +104,7 @@ export const HomeHealthSchema = z.object({
     detail: z.string(),
   }),
   engine: z.object({
-    state: z.enum(['on', 'off']),
+    state: z.enum(['on', 'off', 'down', 'unknown']),
     detail: z.string().optional(),
   }),
 });

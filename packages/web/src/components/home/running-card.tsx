@@ -116,7 +116,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
 
         <div className="flex items-center gap-x-2 text-xs text-muted-foreground">
           <Bot className="size-3 shrink-0" aria-hidden />
-          <span className={cn('min-w-0 truncate', item.worker ? 'text-foreground' : undefined)}>
+          <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
             {item.worker ?? '没有进程在跑'}
           </span>
           {item.stageSince ? (
@@ -128,7 +128,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
           {item.taskSince ? (
             <>
               <span aria-hidden>·</span>
-              <span className="num shrink-0">共 {since(item.taskSince)}</span>
+              <span className="num min-w-0 truncate">共 {since(item.taskSince)}</span>
             </>
           ) : null}
         </div>

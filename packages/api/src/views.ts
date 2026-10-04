@@ -552,7 +552,8 @@ export function homeDone(input: {
 export function homeHealth(input: {
   pools: z.input<typeof PoolViewSchema>[];
   routes: Route[];
-  engineOff: boolean;
+  /** 引擎那一格：home-engine.ts 的探针现算好的（开着的才真探），这里原样放进去。 */
+  engine: HomeHealth['engine'];
 }): HomeHealth {
   const pools = input.pools;
   let quota: HomeHealth['quota'];
@@ -603,9 +604,7 @@ export function homeHealth(input: {
   return {
     quota,
     routes: routesHealth,
-    engine: input.engineOff
-      ? { state: 'off', detail: '这台机器按 release.env 的 FLEET_SERVICES 没开引擎（临时调整）' }
-      : { state: 'on' },
+    engine: input.engine,
   };
 }
 
@@ -618,7 +617,7 @@ export function buildHome(input: {
   repos: Repo[];
   pools: z.input<typeof PoolViewSchema>[];
   routes: Route[];
-  engineOff: boolean;
+  engine: HomeHealth['engine'];
   /** 看板窗口里所有单的三段流水（store.listSegmentRunsForTasks）+ 模型表 / 渠道表（读模型名、计费方式用）。 */
   segmentRuns: SegmentRunRecord[];
   models: Model[];
@@ -667,7 +666,7 @@ export function buildHome(input: {
       repoOf: (repoId) => repoById.get(repoId),
       taskOfIssue: (repoId, issueNumber) => taskByIssue.get(`${repoId}#${issueNumber}`),
     }),
-    health: homeHealth({ pools: input.pools, routes: input.routes, engineOff: input.engineOff }),
+    health: homeHealth({ pools: input.pools, routes: input.routes, engine: input.engine }),
     asOf: input.now.toISOString(),
   };
 }

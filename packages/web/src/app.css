@@ -726,6 +726,14 @@
   opacity: 0;
   pointer-events: none;
 }
+/*
+ * 窄屏上流水线图的泳道竖着叠、不能拖（#902 D11）：d3-zoom 默认在图上写 touch-action:none，手指按在图上页面就滚不动；
+ * 这里改回只让浏览器处理竖向滑动。
+ */
+.fd-flow-stacked .react-flow__renderer,
+.fd-flow-stacked .react-flow__pane {
+  touch-action: pan-y !important;
+}
 
 /*
  * 减少动效：设置页的开关（data-motion="reduced"）或系统设置，任一个开着都停。

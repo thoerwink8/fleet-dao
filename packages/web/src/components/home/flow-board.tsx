@@ -21,7 +21,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/base.css';
 import { Maximize2, Minus, Plus } from 'lucide-react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { formatDuration } from '../../lib/format';
 import { buildFlowLayout, type FlowNodeData, HEADER_H, type LaneInfo, PAD } from '../../lib/home-flow-layout';
 import { SEGMENT_UNMETERED, segmentHint, segmentLabel } from '../../lib/segments';
@@ -74,8 +74,17 @@ const LaneView = memo(function LaneView({ data }: NodeProps<LaneNode>) {
         </p>
       </div>
       {total === 0 ? <p className="px-4 pt-4 text-xs text-muted-foreground">这一段现在没有单</p> : null}
-      <Handle type="target" position={Position.Left} style={{ top: HEADER_H / 2 }} />
-      <Handle type="source" position={Position.Right} style={{ top: HEADER_H / 2 }} />
+      {data.stacked ? (
+        <>
+          <Handle type="target" position={Position.Top} />
+          <Handle type="source" position={Position.Bottom} />
+        </>
+      ) : (
+        <>
+          <Handle type="target" position={Position.Left} style={{ top: HEADER_H / 2 }} />
+          <Handle type="source" position={Position.Right} style={{ top: HEADER_H / 2 }} />
+        </>
+      )}
     </div>
   );
 });
@@ -95,16 +104,23 @@ const MoreView = memo(function MoreView({ data }: NodeProps<MoreNode>) {
 // 放在组件外面：react-flow 要求 nodeTypes 引用稳定，否则每次重画都当成换了节点类型。
 const nodeTypes = { lane: LaneView, ticket: TicketView, more: MoreView };
 
-/** 量容器宽度（ResizeObserver）；量不到（没有这个 API、或还没排版）退回 fallback，不当 0。 */
+/**
+ * 量容器宽度（ResizeObserver）。第一次量在画面画出来之前（useLayoutEffect）：画布要等量到了才挂上去，
+ * 否则它先按退路宽度排一遍、视口被 react-flow 居中到一个错的位置，后面容器变宽也不会自己回正（#902 D9：验收泳道被右边挤掉一截）。
+ * 量不到（没有排版：测试环境宽度恒为 0、没有这个 API）退回 fallback，不当 0。
+ */
 function useElementWidth(fallback: number) {
   const ref = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(fallback);
-  useEffect(() => {
+  const [state, setState] = useState<{ width: number; measured: boolean }>({
+    width: fallback,
+    measured: false,
+  });
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const read = () => {
-      const w = el.getBoundingClientRect().width;
-      if (w > 0) setWidth(Math.round(w));
+      const w = Math.round(el.getBoundingClientRect().width);
+      setState((prev) => ({ width: w > 0 ? w : prev.width, measured: true }));
     };
     read();
     if (typeof ResizeObserver === 'undefined') return;
@@ -112,7 +128,7 @@ function useElementWidth(fallback: number) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  return { ref, width };
+  return { ref, width: state.width, measured: state.measured };
 }
 
 function Legend() {
@@ -157,6 +173,16 @@ function Toolbar() {
   );
 }
 
+/** 容器宽度、横竖排变了就把视口放回原点：react-flow 只在用户拖动时才按新的范围收视口，不放回会留着旧的偏移。 */
+function ViewportHome({ width, stacked }: { width: number; stacked: boolean }) {
+  const rf = useReactFlow();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: width、stacked 变了就要回原点，不读它们的值
+  useEffect(() => {
+    void rf.setViewport({ x: 0, y: 0, zoom: 1 });
+  }, [rf, width, stacked]);
+  return null;
+}
+
 const FALLBACK_WIDTH = 1200;
 
 export function FlowBoard({
@@ -168,8 +194,9 @@ export function FlowBoard({
   flow: readonly HomeFlowStage[];
   className?: string;
 }) {
-  const { ref, width } = useElementWidth(FALLBACK_WIDTH);
+  const { ref, width, measured } = useElementWidth(FALLBACK_WIDTH);
   const layout = useMemo(() => buildFlowLayout(running, flow, width), [running, flow, width]);
+  const stacked = layout.stacked === true;
   const nodes = useMemo<Node[]>(
     () =>
       layout.nodes.map(
@@ -208,30 +235,40 @@ export function FlowBoard({
       <div className={cn('flex flex-col', className)} data-flow-board>
         <div className="flex items-center justify-between gap-3 px-4 py-2">
           <Legend />
-          <Toolbar />
+          {stacked ? null : <Toolbar />}
         </div>
-        <div ref={ref} style={{ height: layout.height }} className="border-t">
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            defaultViewport={{ x: 0, y: 0, zoom: 1 }}
-            minZoom={0.6}
-            maxZoom={1.6}
-            translateExtent={[
-              [-PAD * 4, -PAD * 4],
-              [layout.width + PAD * 4, layout.height + PAD * 4],
-            ]}
-            nodesDraggable={false}
-            nodesConnectable={false}
-            nodesFocusable={false}
-            edgesFocusable={false}
-            elementsSelectable={false}
-            zoomOnScroll={false}
-            zoomOnDoubleClick={false}
-            preventScrolling={false}
-            panOnDrag
-          />
+        <div
+          ref={ref}
+          style={{ height: layout.height }}
+          className={cn('border-t', stacked && 'fd-flow-stacked')}
+          data-flow-stacked={stacked}
+        >
+          {measured ? (
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+              minZoom={0.6}
+              maxZoom={1.6}
+              translateExtent={[
+                [0, 0],
+                [layout.width, layout.height],
+              ]}
+              nodesDraggable={false}
+              nodesConnectable={false}
+              nodesFocusable={false}
+              edgesFocusable={false}
+              elementsSelectable={false}
+              zoomOnScroll={false}
+              zoomOnDoubleClick={false}
+              zoomOnPinch={!stacked}
+              preventScrolling={false}
+              panOnDrag={!stacked}
+            >
+              <ViewportHome width={layout.width} stacked={stacked} />
+            </ReactFlow>
+          ) : null}
         </div>
       </div>
     </ReactFlowProvider>
