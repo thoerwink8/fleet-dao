@@ -1,7 +1,7 @@
 // 现在的计划（#654，pnpm plan）：用假的 GitHub（内存里的里程碑、单子、子单）跑 planCommand，不打真接口。
 // 读不到、认不出的每一条都故意造出来，断言退出码 2、什么都没打印成计划。
 import { describe, expect, it } from 'vitest';
-import { formatAt, PlanProblem, parseOrder, planCommand, readPlan } from '../src/plan-view.ts';
+import { addToOrder, formatAt, PlanProblem, parseOrder, planCommand, readPlan } from '../src/plan-view.ts';
 import { fakeReader, issue, type Method, milestone, order, V0, V1, type World } from './fake-github.ts';
 
 /** 和真仓差不多的一份：v1 开着（有母单、没排进先后的单），v0 关了，未排期里有母单、没贴标签的母单、空母单。 */
@@ -304,5 +304,59 @@ describe('现在的计划：小零件', () => {
 
   it('时间写成北京时间', () => {
     expect(formatAt(new Date('2026-09-26T23:59:00Z'))).toBe('北京时间 2026-09-27 07:59');
+  });
+});
+
+// 往先后里加一张（pnpm issue:new 开版本单那一刻用，#807）：认法和 parseOrder 是同一份，写出来的 parseOrder 一定认得。
+describe('先后：往里加一张（addToOrder）', () => {
+  const desc = `目标：做完。\n\n${order(5, 3)}\n\n尾巴`;
+
+  it('没给插在哪：排末尾，标记之外一个字不动；parseOrder 读回来就是加完的', () => {
+    const r = addToOrder(desc, 9);
+    expect(r).toEqual({
+      ok: true,
+      description: `目标：做完。\n\n${order(5, 3, 9)}\n\n尾巴`,
+      order: [5, 3, 9],
+      changed: true,
+    });
+    if (r.ok) expect(parseOrder(r.description)).toEqual({ ok: true, order: [5, 3, 9], before: '目标：做完。', after: '尾巴' });
+  });
+
+  it('插在某张后面：后面的序号顺延；插在最后一张后面就是末尾', () => {
+    expect(addToOrder(desc, 9, 5)).toMatchObject({ ok: true, description: `目标：做完。\n\n${order(5, 9, 3)}\n\n尾巴` });
+    expect(addToOrder(desc, 9, 3)).toMatchObject({ ok: true, order: [5, 3, 9] });
+  });
+
+  it('标记之间空着：排成第一张；空行、行首行尾的空白重写成标准的一行一张', () => {
+    expect(addToOrder('<!-- fleet:order -->\n\n<!-- /fleet:order -->', 9)).toMatchObject({
+      ok: true,
+      description: order(9),
+    });
+    expect(addToOrder('<!--fleet:order-->\n  1. #5  \n\n2.  #3\n<!--/fleet:order-->', 9)).toMatchObject({
+      ok: true,
+      description: '<!--fleet:order-->\n1. #5\n2. #3\n3. #9\n<!--/fleet:order-->',
+    });
+  });
+
+  it('原文用 CRLF：照 CRLF 写，标记之外不改成 LF', () => {
+    const crlf = desc.replace(/\n/g, '\r\n');
+    expect(addToOrder(crlf, 9)).toMatchObject({
+      ok: true,
+      description: `目标：做完。\r\n\r\n${order(5, 3, 9).replace(/\n/g, '\r\n')}\r\n\r\n尾巴`,
+    });
+  });
+
+  it('已经在先后里：不再加，原文照回', () => {
+    expect(addToOrder(desc, 3)).toEqual({ ok: true, description: desc, order: [5, 3], changed: false });
+  });
+
+  it.each([
+    ['标记缺了', '目标：只写了目标', 9, undefined, '说明里没有先后标记'],
+    ['标记不成对', '<!-- fleet:order -->\n1. #5', 9, undefined, '先后标记要恰好一对'],
+    ['有一行认不出', '<!-- fleet:order -->\n1. #5 定稿\n<!-- /fleet:order -->', 9, undefined, '先后第 1 行「1. #5 定稿」认不出'],
+    ['插在谁后面，它不在先后里', desc, 9, 7, '#7 不在先后里（现在排的是 #5、#3），插不到它后面'],
+    ['先后空着，插在谁后面都找不到', '<!-- fleet:order -->\n<!-- /fleet:order -->', 9, 7, '#7 不在先后里（现在一张也没排）'],
+  ])('【故意造出的失败】%s：不猜着改，说清为什么', (_name, description, n, after, message) => {
+    expect(addToOrder(description, n, after)).toEqual({ ok: false, problem: expect.stringContaining(message) });
   });
 });

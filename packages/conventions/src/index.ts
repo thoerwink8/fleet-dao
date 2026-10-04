@@ -119,7 +119,9 @@ export {
 } from './merge-gates.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
+  addToOrder,
   formatAt,
+  type OrderAdd,
   type OrderParse,
   PLAN_USAGE,
   type Plan,

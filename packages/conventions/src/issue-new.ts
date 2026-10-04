@@ -1,4 +1,4 @@
-// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local]
+// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
 // 里程碑＝版本（创始人 2026-09-26 拍，替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
@@ -9,6 +9,10 @@
 // （帅位留给本机做的，接活不自动派）：和类别标签在同一次建单里贴上，不事后补——开单那个事件一到，没贴的已经被派走了。
 // 单子正文就是需求的唯一的家（#654）：整份正文原样进 issue，不再另写一份 specs/<号>-<短名>/需求.md 镜像（两份各改各的，
 // 对账、检查的活全是它引出来的）。正文放不下 GitHub 的上限的：需求一页以内，长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。
+// 挂版本的母单、单独的单开好就排进那个版本里程碑说明的先后（<!-- fleet:order --> 之间，#807）：每天的 GitHub 对账查「挂在版本里
+// 却没排进先后」，原来靠人记得事后补，2026-10-04 一天红了两回。默认排末尾，--order-after <号> 插在那张后面；子单在母单页面上排、
+// 未排期和旧的 P 阶段没有先后，都不排。认法和对账、pnpm plan 是同一份（plan-view.ts 的 addToOrder / parseOrder）。排不进去
+// （标记缺了、认不出、说明读不到、改不成）单照开、不回滚，报「开了 #N，但没排进先后」和怎么手工补，退出码非 0。
 // gh 出错原样报出来，退出码非 0。
 // 帅位座位整张删掉（#531）：开单时替帅位认领那一步（claimLocal）一并删——本机不再在库里认领。
 import { execFile } from 'node:child_process';
@@ -16,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
+import { type MilestoneDetail, toMilestoneDetail } from './github-api.ts';
 import {
   isKindLabel,
   KIND_LABELS,
@@ -25,6 +30,7 @@ import {
   milestoneVersion,
 } from './labels.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
+import { addToOrder, type OrderParse, parseOrder } from './plan-view.ts';
 
 export interface GhResult {
   code: number;
@@ -48,13 +54,16 @@ export interface IssueNewResult {
   parent?: number | undefined;
   /** 贴了「本机做」（--local）时是 true。 */
   local?: true | undefined;
+  /** 排进了版本的先后（挂版本的母单、单独的单）：排在第几位（从 1 数）、先后里一共几张。 */
+  order?: { position: number; count: number } | undefined;
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local]' +
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
   '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
-  '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派）';
+  '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
+  '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
@@ -170,7 +179,14 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     );
   }
 
-  const milestone = o.milestone === UNSCHEDULED ? UNSCHEDULED : await resolveMilestone(deps.gh, o.milestone);
+  const picked = o.milestone === UNSCHEDULED ? undefined : await resolveMilestone(deps.gh, o.milestone);
+  const milestone = picked?.title ?? UNSCHEDULED;
+  // 要排进版本先后的：挂版本（v<N> 开头）、不是子单（子单在母单页面上排，不进这层）；未排期、旧的 P 阶段没有先后
+  const version =
+    picked !== undefined && o.parent === undefined && milestoneVersion(picked.title) !== undefined
+      ? versionOf(picked)
+      : undefined;
+  if (o.orderAfter !== undefined) checkOrderAfter(o.orderAfter, milestone, version);
   if (o.parent !== undefined) await checkParent(deps.gh, o.parent);
   const created = await deps.gh([
     'issue',
@@ -204,7 +220,11 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const { parent } = o;
   const local = o.local || undefined;
   if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone });
-  return { number, url, milestone, parent, local };
+  const order =
+    version === undefined
+      ? undefined
+      : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
+  return { number, url, milestone, parent, local, order };
 }
 
 interface Options {
@@ -218,6 +238,8 @@ interface Options {
   parent: number | undefined;
   /** 多贴「本机做」标签：帅位留给本机做，接活不自动派（#299 止血）。 */
   local: boolean;
+  /** 排进版本先后时插在这张后面；没给排末尾。 */
+  orderAfter: number | undefined;
 }
 
 function parse(argv: readonly string[]): Options {
@@ -234,6 +256,7 @@ function parse(argv: readonly string[]): Options {
         mother: { type: 'boolean' },
         parent: { type: 'string' },
         local: { type: 'boolean' },
+        'order-after': { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -243,6 +266,14 @@ function parse(argv: readonly string[]): Options {
   }
   const str = (v: string | boolean | undefined): string | undefined =>
     typeof v === 'string' ? v.trim() : undefined;
+  /** 单号参数：写成 192 或 #192；没给是 undefined，认不出就拒（还没调 gh）。 */
+  const issueArg = (flag: 'parent' | 'order-after', what: string, example: number): number | undefined => {
+    const raw = values[flag];
+    if (raw === undefined) return undefined;
+    const m = /^#?([1-9]\d*)$/.exec(str(raw) ?? '');
+    if (!m?.[1]) throw new Error(`--${flag} 写${what}的号（比如 --${flag} ${example}），「${raw}」认不出。${USAGE}`);
+    return Number(m[1]);
+  };
   const kind = str(values.kind);
   if (!kind) throw new Error(`缺 --kind：从 ${KIND_LABELS.join('、')} 里挑一个。${USAGE}`);
   if (!isKindLabel(kind)) throw new Error(`--kind 只能是 ${KIND_LABELS.join('、')}，没有「${kind}」。`);
@@ -253,14 +284,17 @@ function parse(argv: readonly string[]): Options {
   const bodyFile = str(values['body-file']);
   if (!bodyFile) throw new Error(`缺 --body-file：正文写进一个文件再指过来。${USAGE}`);
   const mother = values.mother === true;
-  let parent: number | undefined;
-  if (values.parent !== undefined) {
-    const m = /^#?([1-9]\d*)$/.exec(str(values.parent) ?? '');
-    if (!m?.[1])
-      throw new Error(`--parent 写母单的号（比如 --parent 192），「${values.parent}」认不出。${USAGE}`);
-    parent = Number(m[1]);
+  const parent = issueArg('parent', '母单', 192);
+  const orderAfter = issueArg('order-after', '先后里排在它前面的那张单', 450);
+  if (orderAfter !== undefined && parent !== undefined) {
+    throw new Error(
+      `--order-after 和 --parent 不能一起用：子单不进版本的先后，在母单 #${parent} 页面上排。${USAGE}`,
+    );
   }
-  return { kind, milestone, title, bodyFile, mother, parent, local: values.local === true };
+  if (orderAfter !== undefined && milestone === UNSCHEDULED) {
+    throw new Error(`--order-after 和 --milestone ${UNSCHEDULED} 不能一起用：未排期的单没有先后。${USAGE}`);
+  }
+  return { kind, milestone, title, bodyFile, mother, parent, local: values.local === true, orderAfter };
 }
 
 /** 挂子单之前先看母单：开着的 issue、贴了「母单」标签（design 第七节：有子单的必须带）。不对就不开单。 */
@@ -338,43 +372,121 @@ async function attachToParent(
   }
 }
 
+/** 选中的开放里程碑：全名，和接口回的那一项原样（要排先后的再按 toMilestoneDetail 认编号和说明，不排的不多挑）。 */
+interface Picked {
+  title: string;
+  raw: unknown;
+}
+
 /**
- * 「v1」「P1」（旧）→ 开放里程碑里那个简写开头的那一个的全名；给的就是全名也行。
+ * 「v1」「P1」（旧）→ 开放里程碑里那个简写开头的那一个；给的就是全名也行。
  * 「未排期」不经过这里：issueNew 里直接处理，不查里程碑列表。
  */
-async function resolveMilestone(gh: Gh, want: string): Promise<string> {
+async function resolveMilestone(gh: Gh, want: string): Promise<Picked> {
   const r = await gh(['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100']);
   if (r.code !== 0) throw new Error(`gh 读里程碑失败（退出码 ${r.code}），单没开：${detail(r)}`);
-  let titles: string[];
+  let items: Picked[];
   try {
     const data: unknown = JSON.parse(r.stdout);
     if (!Array.isArray(data)) throw new Error('不是列表');
-    titles = data.map((m: unknown) => {
+    items = data.map((m: unknown) => {
       const title = typeof m === 'object' && m !== null ? (m as { title?: unknown }).title : undefined;
       if (typeof title !== 'string') throw new Error('有一项没有 title');
-      return title;
+      return { title, raw: m };
     });
   } catch (e) {
     throw new Error(`gh 读回来的里程碑认不出（${message(e)}），单没开。`);
   }
-  const exact = titles.filter((t) => t === want);
+  const exact = items.filter((m) => m.title === want);
   const phase = /^P\d+$/.test(want) ? Number(want.slice(1)) : undefined;
   const version = /^v\d+$/.test(want) ? Number(want.slice(1)) : undefined;
   const shorthand =
     phase !== undefined
-      ? titles.filter((t) => milestonePhase(t) === phase)
+      ? items.filter((m) => milestonePhase(m.title) === phase)
       : version !== undefined
-        ? titles.filter((t) => milestoneVersion(t) === version)
+        ? items.filter((m) => milestoneVersion(m.title) === version)
         : undefined;
   const matches = exact.length || shorthand === undefined ? exact : shorthand;
   const [only, ...more] = matches;
   if (only !== undefined && more.length === 0) return only;
   if (only === undefined) {
+    const open = items.map((m) => m.title).join('、') || '（一个也没有）';
+    throw new Error(`没有叫「${want}」的开放里程碑，单没开：开放的有 ${open}。`);
+  }
+  throw new Error(
+    `「${want}」对上了好几个里程碑（${matches.map((m) => m.title).join('、')}），单没开：写全名。`,
+  );
+}
+
+/** 要排先后的版本里程碑：认出编号和说明（排的时候要按编号改它的说明）；认不出就不开单——开了也排不进去。 */
+function versionOf(picked: Picked): MilestoneDetail {
+  try {
+    return toMilestoneDetail(picked.raw);
+  } catch (e) {
+    throw new Error(`gh 读回来的里程碑「${picked.title}」认不出（${message(e)}），单没开：排先后要用它的编号和说明。`);
+  }
+}
+
+/**
+ * --order-after 开单之前先核（写错了开单前就拦下；开完再发现只能手工补）：只给要排进版本先后的单用，插到谁后面它得在先后里。
+ * 说明现在就认不出先后的不在这里拦：开单后排先后那一步照实报。
+ */
+function checkOrderAfter(after: number, milestone: string, version: MilestoneDetail | undefined): void {
+  if (version === undefined) {
     throw new Error(
-      `没有叫「${want}」的开放里程碑，单没开：开放的有 ${titles.join('、') || '（一个也没有）'}。`,
+      `「${milestone}」不是版本（v<N> 开头的里程碑），没有先后，--order-after 用不上，单没开。${USAGE}`,
     );
   }
-  throw new Error(`「${want}」对上了好几个里程碑（${matches.join('、')}），单没开：写全名。`);
+  const now = parseOrder(version.description);
+  if (now.ok && !now.order.includes(after)) {
+    throw new Error(
+      `--order-after #${after} 不在「${version.title}」的先后里（现在排的是 ${now.order.map((n) => `#${n}`).join('、')}），` +
+        '单没开：写先后里有的单号；不写就排到末尾。',
+    );
+  }
+}
+
+/**
+ * 挂版本的母单、单独的单开好以后，排进那个版本里程碑说明的先后（#807）。读最新的说明 → addToOrder（和对账、pnpm plan 同一份
+ * 认法）→ PATCH → 拿回包核一遍真排进去了，不拿「退出码 0」当排好了。哪一步没成都不回滚单（单已经开了，重开会开出重复的），
+ * 照实报「开了 #N，但没排进先后」、原因和怎么手工补。
+ */
+async function orderIntoVersion(
+  gh: Gh,
+  a: { number: number; url: string; version: MilestoneDetail; after: number | undefined },
+): Promise<{ position: number; count: number }> {
+  const page = a.url.replace(/\/issues\/\d+$/, `/milestone/${a.version.number}`);
+  const where = a.after === undefined ? '末尾加一行' : `#${a.after} 后面插一行（后面的序号顺延）`;
+  const unordered = (why: string) =>
+    new Error(
+      `开了 #${a.number}（${a.url}），但没排进「${a.version.title}」的先后：${why}。自己去里程碑说明里补：` +
+        `打开 ${page} → Edit milestone，在 <!-- fleet:order --> 和 <!-- /fleet:order --> 之间${where}「<序号>. #${a.number}」。`,
+    );
+  const path = `repos/{owner}/{repo}/milestones/${a.version.number}`;
+  const read = await gh(['api', path]);
+  if (read.code !== 0) throw unordered(`gh 读里程碑说明失败（退出码 ${read.code}）：${detail(read)}`);
+  let description: string;
+  try {
+    description = toMilestoneDetail(JSON.parse(read.stdout)).description;
+  } catch (e) {
+    throw unordered(`gh 读回来的里程碑认不出（${message(e)}）`);
+  }
+  const added = addToOrder(description, a.number, a.after);
+  if (!added.ok) throw unordered(added.problem);
+  if (added.changed) {
+    const patch = await gh(['api', '-X', 'PATCH', path, '-f', `description=${added.description}`]);
+    if (patch.code !== 0) throw unordered(`gh 改里程碑说明报错（退出码 ${patch.code}）：${detail(patch)}`);
+    let back: OrderParse | undefined;
+    try {
+      back = parseOrder(toMilestoneDetail(JSON.parse(patch.stdout)).description);
+    } catch {
+      back = undefined;
+    }
+    if (!back?.ok || !back.order.includes(a.number)) {
+      throw unordered('gh 说改好了，可改完回来的说明里认不出它（可能已经改了一半）：先打开看一眼');
+    }
+  }
+  return { position: added.order.indexOf(a.number) + 1, count: added.order.length };
 }
 
 /** 真的 gh：不经 shell，参数原样传；gh 起不来（没装、不在 PATH）也回一个非 0 的结果，不抛。 */

@@ -3,10 +3,62 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { type GhResult, ghRunner, issueNew } from '../src/issue-new.ts';
+import { parseOrder } from '../src/plan-view.ts';
+import { order } from './fake-github.ts';
 
 const MILESTONES = JSON.stringify([{ title: 'P0 地基' }, { title: 'P1 核心闭环' }, { title: 'P4 飞书 v2' }]);
 const ok = (stdout: string): GhResult => ({ code: 0, stdout, stderr: '' });
+const fail = (stderr: string): GhResult => ({ code: 1, stdout: '', stderr: `${stderr}\n` });
 const URL36 = 'https://github.com/o/r/issues/36';
+
+const V1_TITLE = 'v1 Fusion 接活';
+/** v1（里程碑 8）的说明：先后里已经排了 #20、#30，标记前后还有别的话。 */
+const V1_DESC = `目标：Fusion 接活。\n\n先后：\n${order(20, 30)}\n\n收尾：做完就关。`;
+const LIST = 'repos/{owner}/{repo}/milestones?state=open&per_page=100';
+const MS8 = 'repos/{owner}/{repo}/milestones/8';
+
+interface FakeMilestone {
+  number: number;
+  title: string;
+  description: string | null;
+}
+/** 接口回的一个开放里程碑（gh api 读回来的样子）。 */
+const msJson = (m: FakeMilestone) => ({ ...m, state: 'open', closed_at: null });
+
+/**
+ * 假 GitHub 上的开放里程碑：列表、读一个、改说明（gh api -X PATCH … -f description=…）都按 store 回，改了就记进 store。
+ * read、patch 给了就按给的回；patchBody 给了，改照改、回包换成它（故意造出的失败用）。
+ */
+function milestoneApi(
+  list: FakeMilestone[] = [
+    { number: 1, title: 'P1 核心闭环', description: null },
+    { number: 8, title: V1_TITLE, description: V1_DESC },
+  ],
+  f: { read?: GhResult; patch?: GhResult; patchBody?: string } = {},
+) {
+  const store = new Map(list.map((m) => [m.number, { ...m }]));
+  const route = (args: string[]): GhResult | undefined => {
+    if (args[0] !== 'api') return undefined;
+    if (args[1] === LIST) return ok(JSON.stringify([...store.values()].map(msJson)));
+    const read = /^repos\/\{owner\}\/\{repo\}\/milestones\/(\d+)$/.exec(args[1] ?? '');
+    if (read) {
+      const m = store.get(Number(read[1]));
+      return f.read ?? (m ? ok(JSON.stringify(msJson(m))) : fail('HTTP 404: Not Found'));
+    }
+    if (args[1] === '-X' && args[2] === 'PATCH') {
+      if (f.patch) return f.patch;
+      const m = store.get(Number(/\/milestones\/(\d+)$/.exec(args[3] ?? '')?.[1]));
+      const field = args[5] ?? '';
+      if (!m || args.length !== 6 || args[4] !== '-f' || !field.startsWith('description=')) {
+        return fail(`假 GitHub 认不出这次改里程碑：${JSON.stringify(args)}`);
+      }
+      m.description = field.slice('description='.length);
+      return ok(f.patchBody ?? JSON.stringify(msJson(m)));
+    }
+    return undefined;
+  };
+  return { route, description: (n: number) => store.get(n)?.description };
+}
 const BODY = [
   '原话：给登录页加验证码（提出人：某某）',
   'AI 理解：登录页发短信验证码，五分钟过期。',
@@ -247,9 +299,7 @@ describe('开单脚本：一次带上标签和里程碑', () => {
   });
 
   it('v1 换成版本全名（里程碑＝版本，创始人 2026-09-26 拍，替代 P 阶段）', async () => {
-    const { calls, run } = setup({
-      milestones: ok(JSON.stringify([{ title: 'P1 核心闭环' }, { title: 'v1 Fusion 接活' }])),
-    });
+    const { calls, run } = setup({ route: milestoneApi().route });
     await expect(run(...base.slice(0, 3), 'v1', ...base.slice(4))).resolves.toMatchObject({
       milestone: 'v1 Fusion 接活',
     });
@@ -323,14 +373,15 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
 
 describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留给本机做，接活不自动派）', () => {
   it('【故意造出的失败】「本机做」和类别标签、里程碑在同一次 gh issue create 里贴上，不事后补；结果里记 local', async () => {
-    const { root, calls, run } = setup({ milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])) });
+    const { root, calls, run } = setup({ route: milestoneApi().route });
     await expect(run(...base.slice(0, 3), 'v1', ...base.slice(4), '--local')).resolves.toEqual({
       number: 36,
       url: URL36,
       milestone: 'v1 Fusion 接活',
       local: true,
+      order: { position: 3, count: 3 },
     });
-    expect(calls).toEqual([
+    expect(calls.slice(0, 2)).toEqual([
       ['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100'],
       [
         'issue',
@@ -357,7 +408,7 @@ describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留
   });
 
   it('帅位座位整张删掉（#531）：--local 不再替帅位在库里认领（claimLocal 一并删）', async () => {
-    const { calls, run } = setup({ milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])) });
+    const { calls, run } = setup({ route: milestoneApi().route });
     const r = await run(...base.slice(0, 3), 'v1', ...base.slice(4), '--local');
     expect(r.local).toBe(true);
     expect('claimed' in r).toBe(false);
@@ -484,6 +535,222 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
       `单开了、挂到 #192 下面了（#36 ${URL36}），可里程碑「v1 Fusion 接活」没挂上（退出码 1）：` +
         'could not add to milestone \'v1 Fusion 接活\'。手动补：gh issue edit 36 --milestone "v1 Fusion 接活"。',
     );
+  });
+});
+
+describe('开单脚本：挂版本的母单、单独的单开完排进版本的先后（#807：每天对账查「挂在版本里却没排进先后」）', () => {
+  const v1 = [...base.slice(0, 3), 'v1', ...base.slice(4)];
+  const created = (calls: string[][]) => calls.some((c) => c[0] === 'issue' && c[1] === 'create');
+  const patched = (calls: string[][]) => calls.some((c) => c.includes('PATCH'));
+  /** 开了、没排进去时报的话：说清开了哪张、为什么没排进、去哪补（末尾补一行）。 */
+  const unordered = (why: string) =>
+    `开了 #36（${URL36}），但没排进「v1 Fusion 接活」的先后：${why}。自己去里程碑说明里补：` +
+    '打开 https://github.com/o/r/milestone/8 → Edit milestone，在 <!-- fleet:order --> 和 <!-- /fleet:order --> 之间末尾加一行「<序号>. #36」。';
+
+  it('单独的单：先后末尾多一行「3. #36」，标记之外一个字不动；开完读最新的说明再改，结果里记排第几位', async () => {
+    const api = milestoneApi();
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).resolves.toEqual({
+      number: 36,
+      url: URL36,
+      milestone: V1_TITLE,
+      order: { position: 3, count: 3 },
+    });
+    expect(api.description(8)).toBe(V1_DESC.replace('2. #30\n', '2. #30\n3. #36\n'));
+    expect(calls.map((c) => c.slice(0, 4))).toEqual([
+      ['api', LIST],
+      ['issue', 'create', '--title', '登录页加验证码'],
+      ['api', MS8],
+      ['api', '-X', 'PATCH', MS8],
+    ]);
+    expect(calls.at(-1)?.slice(4)).toEqual(['-f', `description=${api.description(8)}`]);
+  });
+
+  it('写进去的就是对账、pnpm plan 认的格式：parseOrder 读回来是 #20、#30、#36，标记前后的话照旧', async () => {
+    const api = milestoneApi();
+    const { run } = setup({ route: api.route });
+    await run(...v1);
+    expect(parseOrder(api.description(8) ?? '')).toEqual({
+      ok: true,
+      order: [20, 30, 36],
+      before: '目标：Fusion 接活。\n\n先后：',
+      after: '收尾：做完就关。',
+    });
+  });
+
+  it('--order-after #20：插在 #20 后面，后面的序号顺延', async () => {
+    const api = milestoneApi();
+    const { run } = setup({ route: api.route });
+    await expect(run(...v1, '--order-after', '#20')).resolves.toMatchObject({
+      order: { position: 2, count: 3 },
+    });
+    expect(api.description(8)).toBe(V1_DESC.replace('1. #20\n2. #30\n', '1. #20\n2. #36\n3. #30\n'));
+  });
+
+  it('母单（--mother）照样排；--milestone 写版本全名也排', async () => {
+    const api = milestoneApi();
+    const { run } = setup({ route: api.route });
+    await expect(run(...base.slice(0, 3), V1_TITLE, ...base.slice(4), '--mother')).resolves.toMatchObject({
+      order: { position: 3, count: 3 },
+    });
+    expect(parseOrder(api.description(8) ?? '')).toMatchObject({ ok: true, order: [20, 30, 36] });
+  });
+
+  it('先后标记之间还空着（新版本）：排成第一张', async () => {
+    const empty = '目标。\n<!-- fleet:order -->\n<!-- /fleet:order -->';
+    const api = milestoneApi([{ number: 8, title: V1_TITLE, description: empty }]);
+    const { run } = setup({ route: api.route });
+    await expect(run(...v1)).resolves.toMatchObject({ order: { position: 1, count: 1 } });
+    expect(api.description(8)).toBe('目标。\n<!-- fleet:order -->\n1. #36\n<!-- /fleet:order -->');
+  });
+
+  it('先后里已经有它（开单和改说明之间有人抢先补了）：不再写一遍，不改说明', async () => {
+    const api = milestoneApi([{ number: 8, title: V1_TITLE, description: order(20, 36) }]);
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).resolves.toMatchObject({ order: { position: 2, count: 2 } });
+    expect(api.description(8)).toBe(order(20, 36));
+    expect(patched(calls)).toBe(false);
+  });
+
+  it('子单（--parent）不排：子单在母单页面上排，不读、不改里程碑说明', async () => {
+    const api = milestoneApi();
+    const parentRoute = (args: string[]): GhResult | undefined => {
+      if (args[1] === 'repos/{owner}/{repo}/issues/192') {
+        return ok(JSON.stringify({ number: 192, state: 'open', labels: [{ name: '需求' }, { name: '母单' }] }));
+      }
+      if (args[1] === 'repos/{owner}/{repo}/issues/36') return ok(JSON.stringify({ number: 36, id: 9036 }));
+      if (args[1] === '-X' && args[2] === 'POST') return ok('{}');
+      return undefined;
+    };
+    const { calls, run } = setup({ route: (args) => parentRoute(args) ?? api.route(args) });
+    const r = await run(...v1, '--parent', '192');
+    expect(r).toMatchObject({ parent: 192, milestone: V1_TITLE });
+    expect(r.order).toBeUndefined();
+    expect(api.description(8)).toBe(V1_DESC);
+    expect(calls.some((c) => c[1] === MS8)).toBe(false);
+    expect(patched(calls)).toBe(false);
+  });
+
+  it('未排期不排：没有先后，里程碑一次也不读', async () => {
+    const api = milestoneApi();
+    const { calls, run } = setup({ route: api.route });
+    const r = await run(...base.slice(0, 3), '未排期', ...base.slice(4));
+    expect(r.order).toBeUndefined();
+    expect(calls.filter((c) => c[0] === 'api')).toEqual([]);
+    expect(api.description(8)).toBe(V1_DESC);
+  });
+
+  it('旧的 P 阶段不排：没有先后', async () => {
+    const api = milestoneApi();
+    const { calls, run } = setup({ route: api.route });
+    const r = await run(...base);
+    expect(r).toMatchObject({ milestone: 'P1 核心闭环' });
+    expect(r.order).toBeUndefined();
+    expect(calls.map((c) => c.slice(0, 2))).toEqual([
+      ['api', LIST],
+      ['issue', 'create'],
+    ]);
+  });
+
+  it('【故意造出的失败】说明里找不到先后标记：单照开、不回滚，明说开了、没排进、怎么补；不改说明', async () => {
+    const api = milestoneApi([{ number: 8, title: V1_TITLE, description: '目标：只写了目标，忘了先后' }]);
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).rejects.toThrow(
+      unordered('说明里没有先后标记（<!-- fleet:order --> 和 <!-- /fleet:order --> 两行，之间一行一张写「1. #单号」）'),
+    );
+    expect(calls.map((c) => c.slice(0, 2))).toEqual([
+      ['api', LIST],
+      ['issue', 'create'],
+      ['api', MS8],
+    ]);
+  });
+
+  it('【故意造出的失败】改里程碑说明失败：单照开，明说没排进、带上 gh 的原话', async () => {
+    const api = milestoneApi(undefined, { patch: fail('HTTP 403: Resource not accessible by integration') });
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).rejects.toThrow(
+      unordered('gh 改里程碑说明报错（退出码 1）：HTTP 403: Resource not accessible by integration'),
+    );
+    expect(created(calls)).toBe(true);
+    expect(api.description(8)).toBe(V1_DESC);
+  });
+
+  it('【故意造出的失败】里程碑说明读不到：单照开，明说没排进，不改说明', async () => {
+    const api = milestoneApi(undefined, { read: fail('HTTP 502: Bad Gateway') });
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).rejects.toThrow(unordered('gh 读里程碑说明失败（退出码 1）：HTTP 502: Bad Gateway'));
+    expect(created(calls)).toBe(true);
+    expect(patched(calls)).toBe(false);
+  });
+
+  it('【故意造出的失败】里程碑读回来认不出：不当成「没有先后」去瞎改', async () => {
+    const api = milestoneApi(undefined, { read: ok('<html>') });
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).rejects.toThrow(
+      `开了 #36（${URL36}），但没排进「v1 Fusion 接活」的先后：gh 读回来的里程碑认不出（`,
+    );
+    expect(patched(calls)).toBe(false);
+  });
+
+  it('【故意造出的失败】先后认不出（序号跳了）：不猜着改，照实报', async () => {
+    const skipped = '<!-- fleet:order -->\n1. #20\n3. #30\n<!-- /fleet:order -->';
+    const api = milestoneApi([{ number: 8, title: V1_TITLE, description: skipped }]);
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...v1)).rejects.toThrow(unordered('先后第 2 行的序号写成了 3：从 1 起挨着排'));
+    expect(patched(calls)).toBe(false);
+    expect(api.description(8)).toBe(skipped);
+  });
+
+  it('【故意造出的失败】gh 说改好了、回包里却没有它：不拿退出码 0 当排好了', async () => {
+    const stale = JSON.stringify(msJson({ number: 8, title: V1_TITLE, description: V1_DESC }));
+    const { run } = setup({ route: milestoneApi(undefined, { patchBody: stale }).route });
+    await expect(run(...v1)).rejects.toThrow(
+      unordered('gh 说改好了，可改完回来的说明里认不出它（可能已经改了一半）：先打开看一眼'),
+    );
+  });
+
+  it('【故意造出的失败】--order-after 的单不在先后里：开单前就拦下，gh issue create 一次也不调', async () => {
+    const { calls, run } = setup({ route: milestoneApi().route });
+    await expect(run(...v1, '--order-after', '99')).rejects.toThrow(
+      '--order-after #99 不在「v1 Fusion 接活」的先后里（现在排的是 #20、#30），单没开：写先后里有的单号；不写就排到末尾。',
+    );
+    expect(calls).toEqual([['api', LIST]]);
+  });
+
+  it.each([
+    [
+      '和 --parent 一起',
+      [...v1, '--order-after', '20', '--parent', '192'],
+      '--order-after 和 --parent 不能一起用：子单不进版本的先后，在母单 #192 页面上排。',
+    ],
+    [
+      '配未排期',
+      [...base.slice(0, 3), '未排期', ...base.slice(4), '--order-after', '20'],
+      '--order-after 和 --milestone 未排期 不能一起用：未排期的单没有先后。',
+    ],
+    [
+      '号认不出',
+      [...v1, '--order-after', 'abc'],
+      '--order-after 写先后里排在它前面的那张单的号（比如 --order-after 450），「abc」认不出。',
+    ],
+  ])('【故意造出的失败】--order-after %s：不开，gh 一次也不调', async (_name, argv, message) => {
+    const { calls, run } = setup({ route: milestoneApi().route });
+    await expect(run(...argv)).rejects.toThrow(message);
+    expect(calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】--order-after 配旧的 P 阶段：读完里程碑就拦下，不开', async () => {
+    const { calls, run } = setup({ route: milestoneApi().route });
+    await expect(run(...base, '--order-after', '20')).rejects.toThrow(
+      '「P1 核心闭环」不是版本（v<N> 开头的里程碑），没有先后，--order-after 用不上，单没开。',
+    );
+    expect(calls).toEqual([['api', LIST]]);
+  });
+
+  it('【故意造出的失败】版本里程碑读回来缺编号：开单前就拦下（开了也排不进去）', async () => {
+    const { calls, run } = setup({ milestones: ok(JSON.stringify([{ title: V1_TITLE, description: V1_DESC }])) });
+    await expect(run(...v1)).rejects.toThrow('gh 读回来的里程碑「v1 Fusion 接活」认不出（');
+    expect(calls).toEqual([['api', LIST]]);
   });
 });
 
