@@ -70,6 +70,11 @@ const APPLIED_LOG_KEEP = 20;
 export const PROFILE_FILE = `${ETC_DIR}/profile`;
 /** 档位 → 这个档位的期望在每一版目录里的位置（#451：本机档的差别只写在 deploy/local 那一份）。 */
 export const PROFILE_DESIRED = { france: DESIRED_FILE, local: 'deploy/local/desired-config.json' };
+/** 这个期望路径是不是本机档那份（仓里的相对位置、绝对路径、Windows 反斜杠都认）。 */
+const isLocalDesired = (path) => {
+  const p = path.replaceAll('\\', '/');
+  return p === PROFILE_DESIRED.local || p.endsWith(`/${PROFILE_DESIRED.local}`);
+};
 
 const KEY_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -395,6 +400,10 @@ export function fingerprintOf(key, file, name, value) {
 export function judgeConfig({ desired, files = {}, key, desiredPath }) {
   const drift = [];
   const unchecked = [];
+  // 报警里「改哪份期望、在哪台上跑命令」都跟着 desiredPath 走（本机档 #451 传的是本机档那份）；没给（老调用方、测试）
+  // 照旧当法国。别在下面再直接写 DESIRED_FILE：本机档的人会照着去改法国那份期望。
+  const wantPath = desiredPath ?? DESIRED_FILE;
+  const host = isLocalDesired(wantPath) ? '本机档' : '法国';
   if (!desired || 'error' in desired) {
     return {
       result: 'unchecked',
@@ -459,8 +468,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
       byKey.set(e.key, list);
     }
     const add = (k, kind, title, body) => drift.push({ id: `${file}:${k}`, file, key: k, kind, title, body });
-    // desiredPath 没给（老调用方、测试）就照旧当法国：不传这个参数时行为不变
-    const fix = `期望在仓里 ${desiredPath ?? DESIRED_FILE}（在用的那一版）：线上是手改的就改回去；真要改期望，改那份文件、合进主线`;
+    const fix = `期望在仓里 ${wantPath}（在用的那一版）：线上是手改的就改回去；真要改期望，改那份文件、合进主线`;
     for (const d of declared) {
       const values = byKey.get(d.key) ?? [];
       const what = d.kind === 'private' ? '私有值' : `期望「${d.value}」`;
@@ -468,7 +476,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
         add(
           d.key,
           'missing',
-          `法国配置缺了一项：${file} 的 ${d.key}`,
+          `${host}配置缺了一项：${file} 的 ${d.key}`,
           `${file} 里没有生效的 ${d.key}（没写，或被注释掉了），${what}。${fix}`,
         );
         continue;
@@ -477,7 +485,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
         add(
           d.key,
           'duplicate',
-          `法国配置写重了：${file} 的 ${d.key}`,
+          `${host}配置写重了：${file} 的 ${d.key}`,
           `${file} 里 ${d.key} 写了 ${values.length} 行（服务里生效的是最后一行，人改了前一行会以为改好了）：删成一行，${what}。`,
         );
         continue;
@@ -488,7 +496,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
           add(
             d.key,
             'value',
-            `法国配置和仓里的期望不一致：${file} 的 ${d.key}`,
+            `${host}配置和仓里的期望不一致：${file} 的 ${d.key}`,
             `${file} 的 ${d.key} ${what}，线上现在不是这个值（线上的值不打印）。${fix}。`,
           );
         }
@@ -503,10 +511,10 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
         add(
           d.key,
           'private',
-          `法国配置和仓里的期望不一致：${file} 的 ${d.key}`,
+          `${host}配置和仓里的期望不一致：${file} 的 ${d.key}`,
           `${file} 的 ${d.key} 是私有值，和仓里记的指纹对不上（值不打印）。线上是手改的就照保险箱里那份放回去；` +
-            `真要换成新值：在法国以 root 跑 node ${CONFIG_CLI} fingerprint ${file} ${d.key}，` +
-            `把打印出来的指纹写进 ${DESIRED_FILE}、合进主线。`,
+            `真要换成新值：在${host}上以 root 跑 node ${CONFIG_CLI} fingerprint ${file} ${d.key}，` +
+            `把打印出来的指纹写进 ${wantPath}、合进主线。`,
         );
       }
     }
@@ -516,9 +524,9 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
       add(
         k,
         'undeclared',
-        `法国配置多了一项：${file} 的 ${k}`,
+        `${host}配置多了一项：${file} 的 ${k}`,
         `${file} 里有 ${k}${values.length > 1 ? `（写了 ${values.length} 行）` : ''}，仓里的期望没有这一项（值不打印）。` +
-          `要留着就把它写进 ${DESIRED_FILE}（私有的写指纹）、合进主线；不要就从 ${file} 里删掉。`,
+          `要留着就把它写进 ${wantPath}（私有的写指纹）、合进主线；不要就从 ${file} 里删掉。`,
       );
     }
   }
@@ -1284,7 +1292,7 @@ export async function cli(
       const r = judgeConfig(live);
       const from =
         o.desired ??
-        (live.commit ? `在用的 ${live.commit.slice(0, 12)} 里的 ${DESIRED_FILE}` : '在用的那一版');
+        (live.commit ? `在用的 ${live.commit.slice(0, 12)} 里的 ${live.desiredPath}` : '在用的那一版');
       for (const d of r.drift) io.out(`red ${d.title}：${d.body}`);
       for (const u of r.unchecked) io.out(`pending 配置没查成：${u}`);
       if (r.result === 'ok') io.out(`ok 本机配置和期望（${from}）一致（值不打印）`);
