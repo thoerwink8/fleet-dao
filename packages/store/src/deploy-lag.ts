@@ -10,7 +10,6 @@ import { readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Db, openAlertsByPrefix, resolveAlertByKey, upsertAlert } from '@fleet-dao/db';
 import { z } from 'zod';
-import { PublicHealthError } from './health.ts';
 import type { Logger } from './ports.ts';
 
 /** 法国上各版所在的目录（deploy/release.sh 的 RELEASES）。 */
@@ -450,23 +449,6 @@ function errno(err: unknown): string | undefined {
   return typeof err === 'object' && err !== null && 'code' in err
     ? String((err as { code: unknown }).code)
     : undefined;
-}
-
-/** /healthz 的 deploy_lag 一项：不对就抛（对外一句中性的话，细节只进日志）。 */
-export function deployLagCheck(read: () => DeployLagInput, now: () => Date): () => Promise<void> {
-  return async () => {
-    const v = judgeDeployLag(read(), now());
-    const first = v.problems[0];
-    if (!first) return;
-    throw new PublicHealthError(
-      first.code,
-      v.problems.map((p) => p.message).join('；'),
-      v.problems
-        .map((p) => p.detail)
-        .filter(Boolean)
-        .join('；'),
-    );
-  };
 }
 
 /**

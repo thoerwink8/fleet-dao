@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@fleet-dao/adapters": "workspace:*",
-    "@fleet-dao/api": "workspace:*",
     "@fleet-dao/conventions": "workspace:*",
     "@fleet-dao/core": "workspace:*",
     "@fleet-dao/db": "workspace:*",

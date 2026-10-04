@@ -13,27 +13,26 @@ import { jevConfigLocation } from '@fleet-dao/jev';
 import {
   createMemoryStore,
   createPgStore,
+  DEPLOY_LAG_NOT_HERE,
   DEV_RUN_ID,
   DEV_USER_ID,
+  deployFacts,
   devFixtures,
   IDS,
   jsonLogger,
+  pgAlertWork,
+  readDeployLagInput,
+  startDeployLagWatch,
   withStatementTimeout,
 } from '@fleet-dao/store';
 import { signAgentToken } from './agent-token.ts';
-import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
-import {
-  DEPLOY_LAG_NOT_HERE,
-  deployLagCheck,
-  readDeployLagInput,
-  startDeployLagWatch,
-} from './deploy-lag.ts';
+import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';

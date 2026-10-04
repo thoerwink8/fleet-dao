@@ -1,16 +1,14 @@
-import { devFixtures } from '@fleet-dao/store';
-import { describe, expect, it } from 'vitest';
 import {
   createGitHubIntake,
-  githubAppMissing,
-  githubEventsCheck,
+  devFixtures,
   githubWhitelist,
   objectKey,
   pollDeliveryId,
   screenGithubEvent,
-  verifyGithubSignature,
   versionsOf,
-} from '../src/github.ts';
+} from '@fleet-dao/store';
+import { describe, expect, it } from 'vitest';
+import { githubAppMissing, githubEventsCheck, verifyGithubSignature } from '../src/github.ts';
 import type { GitHubDelivery } from '../src/ports.ts';
 import {
   deliverGithub as deliver,

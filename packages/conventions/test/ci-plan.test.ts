@@ -180,12 +180,13 @@ describe('按改动算要跑什么', () => {
     ).toBe(true);
   });
 
-  it('改了 conventions：engine 依赖它，engine 也测（api、github 经 engine 传上来：它们依赖 engine）', () => {
+  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github）', () => {
     expect(units(pr('packages/conventions/src/ci-plan.ts'))).toEqual([
       'api',
       'conventions',
       'engine',
       'github',
+      'store',
     ]);
   });
 

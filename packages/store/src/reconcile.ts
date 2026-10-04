@@ -4,10 +4,8 @@
 // （packages/engine/src/jobs/，specs/43-接活入口/方案-对账调度.md）。
 import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
-import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github.ts';
+import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github-intake.ts';
 import type { GitHubDelivery, Logger, Store } from './ports.ts';
-
-export { MAX_AUTO_REPLAYS } from './github.ts';
 
 /** 一轮最多重放几条。 */
 const REPLAY_BATCH = 50;

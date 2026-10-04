@@ -3,6 +3,7 @@
 //   生产上听 WireGuard 地址，香港经加密通道转进来。
 // - agent：fleet 命令接口 /agent/v1。只听本机回环地址，AI 会话在同一台机器上调；外面够不着。
 import { AGENT_API_PREFIX, AUTH_PREFIX, WEB_API_PREFIX } from '@fleet-dao/shared';
+import { createGitHubIntake } from '@fleet-dao/store';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { agentRoutes } from './agent.ts';
@@ -11,7 +12,7 @@ import { cockpitRoutes } from './cockpit.ts';
 import type { Deps } from './deps.ts';
 import { createDraftOpenRunner, type DraftOpenLimits, type DraftOpenRunner } from './draft-opening.ts';
 import { feishuRoutes } from './feishu-routes.ts';
-import { createGitHubIntake, githubRoutes } from './github.ts';
+import { githubRoutes } from './github.ts';
 import { healthHandler } from './health.ts';
 import { errorBody, errorHandler, notFound } from './http.ts';
 import { intentRoutes } from './intent-routes.ts';
