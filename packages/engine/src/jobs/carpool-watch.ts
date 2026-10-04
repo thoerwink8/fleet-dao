@@ -8,13 +8,12 @@
 // - 读不到、认不出明确失败（读数记成 ok:false 带原因，进账本），不当成「没事」：连着两次没读成报警（#76 同一个规矩），Key 失效、回包认不出
 //   当场报；读成了自己撤。
 // - 什么都不用判的时候（挂着拼车、没有恢复条件、没到点读）整轮不碰切号，不白起 reclaude org list。
-import type { ScheduleOutcome } from '@fleet-dao/shared';
-import type { OrgKind } from '@fleet-dao/shared';
+import type { OrgKind, ScheduleOutcome } from '@fleet-dao/shared';
 import type { CarpoolWatchRun } from '../contract.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { CarpoolApiRead } from './carpool-outage.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { type OrgLedger, lastOkRead } from './org-ledger.ts';
+import { lastOkRead, type OrgLedger } from './org-ledger.ts';
 import type { OrgSwitchTrigger } from './org-switch.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
@@ -104,7 +103,12 @@ function hotReason(ledger: OrgLedger, live: LiveOrgReading, now: Date, policy: W
   if (ledger.backPending) return '切回宽限中';
   if (live.ok && live.org === 'carpool') {
     const q = lastOkRead(ledger)?.quota;
-    if (q && Number.isFinite(q.limitUsd) && q.limitUsd > 0 && 1 - q.usedUsd / q.limitUsd < policy.hotRemaining) {
+    if (
+      q &&
+      Number.isFinite(q.limitUsd) &&
+      q.limitUsd > 0 &&
+      1 - q.usedUsd / q.limitUsd < policy.hotRemaining
+    ) {
       return `本人额度剩不到 ${Math.round(policy.hotRemaining * 100)}%`;
     }
   }
@@ -164,7 +168,9 @@ export function apiFailureAlert(
   };
 }
 
-async function round(deps: CarpoolWatchDeps): Promise<{ outcome: ScheduleOutcome; why?: string; found: number }> {
+async function round(
+  deps: CarpoolWatchDeps,
+): Promise<{ outcome: ScheduleOutcome; why?: string; found: number }> {
   const policy = deps.policy ?? DEFAULT_WATCH_POLICY;
   const ledger = await deps.loadLedger();
   const live = await deps.liveOrg();
@@ -186,11 +192,9 @@ async function round(deps: CarpoolWatchDeps): Promise<{ outcome: ScheduleOutcome
       problem = `这一次没读成（${read.code}）：${read.why}`;
     }
   }
+  // 读到了的（成不成）一律交给切号：读数要进账本（挂着拼车没记着什么也要存，下一次判用得上）；没读的只在有事要判时才叫
   if (needsSwitchCheck(ledger, live, read !== undefined)) {
     await deps.switchNow({ by: '定时读接口', ...(read ? { read } : {}) });
-  } else if (read) {
-    // 挂着拼车、没有要判的：读数也要进账本（下一次判要用），经 switchNow 的路径统一存，这里不会走到
-    deps.log('info', '拼车盯读：读到了但不用判', { why: sched.why });
   }
   return problem ? { outcome: 'partial', why: problem, found } : { outcome: 'ok', found };
 }

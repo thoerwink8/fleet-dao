@@ -74,6 +74,8 @@ export interface CarpoolRejection {
   at: Date;
   code?: string;
   httpStatus?: number;
+  /** 上游在被拒那一帧里给的清零时刻（Claude 流里的额度读数）；原文里没写「约 N 分钟」时拿它当恢复时刻。 */
+  resetsAt?: Date;
   text: string;
 }
 
@@ -149,7 +151,12 @@ export function classifyCarpoolRejection(
     };
   }
   const waitSec = waitFromText(text, rej.at.getTime());
-  const fromText = waitSec === undefined ? null : new Date(rej.at.getTime() + waitSec * 1000);
+  const fromText =
+    waitSec !== undefined
+      ? new Date(rej.at.getTime() + waitSec * 1000)
+      : rej.resetsAt && rej.resetsAt.getTime() > rej.at.getTime()
+        ? rej.resetsAt
+        : null;
   const full = quotaFull(api);
   const apiQuota = api?.ok ? api.quota : null;
   const apiResets = full === true && apiQuota?.resetsAt ? apiQuota.resetsAt : null;

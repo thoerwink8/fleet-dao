@@ -3,6 +3,7 @@
 // 编号一样（测试核对两边对得上）。看门狗自己也登记：它停没停由后端按这一行现算（packages/api 的 watchdog-health.ts）。
 import { type Db, registerScheduledJobs } from '@fleet-dao/db';
 import { CANARY_JOB } from '../jobs/canary.ts';
+import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
 import { INTAKE_JOB } from '../jobs/intake.ts';
@@ -14,6 +15,7 @@ export const ENGINE_JOBS = [
   GITHUB_RECONCILE_JOB,
   ROUTE_PROBE_JOB,
   QUOTA_READ_JOB,
+  CARPOOL_WATCH_JOB,
   HOURLY_RECONCILE_JOB,
   CANARY_JOB,
   WATCHDOG_JOB,

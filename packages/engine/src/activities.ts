@@ -11,6 +11,7 @@ import {
   checkCanaryRound,
   openCanaryRound,
 } from './jobs/canary.ts';
+import { type CarpoolWatchDeps, CarpoolWatchFailedError, runCarpoolWatchJob } from './jobs/carpool-watch.ts';
 import {
   GitHubReconcileFailedError,
   type GitHubReconcileJobDeps,
@@ -190,6 +191,8 @@ export interface EngineJobs {
   routeProbe?: () => RouteProbeJobDeps;
   /** 定时读额度（#76）：读配置、读各池额度、读成的写库、读失败的报警。 */
   quotaRead?: () => QuotaReadJobDeps;
+  /** 拼车额度盯读（#194，给切号用）：按情况读开放接口、交给切号当场判。 */
+  carpoolWatch?: () => CarpoolWatchDeps;
   /**
    * 每小时对账：看工作树、两处核对、撤过时的提醒、再推没人处理的、机器人权限自检（查工作流在不在跑、挂没挂着用这次活动的
    * Temporal 客户端；taskQueue 同上：排队的单补拉起的工作流起在这里）。
@@ -293,6 +296,29 @@ async function readQuotas(jobs: EngineJobs): Promise<unknown> {
   } catch (error) {
     if (error instanceof QuotaReadFailedError) {
       throw new PortError('QUOTA_READ_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
+/** 引擎自己的活动：拼车盯读跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮一分钟后照来）。 */
+async function watchCarpool(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.carpoolWatch;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装拼车盯读（假端口，或真端口没接上库）：不装作读过',
+      { retryable: false },
+    );
+  }
+  try {
+    return await runCarpoolWatchJob(make());
+  } catch (error) {
+    if (error instanceof CarpoolWatchFailedError) {
+      throw new PortError('CARPOOL_WATCH_FAILED', error.message, {
         retryable: false,
         details: { runId: error.runId },
       });
@@ -431,6 +457,7 @@ export function createActivities(
   out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
   out.probeRoutes = timed('probeRoutes', () => probeRoutes(jobs), record);
   out.readQuotas = timed('readQuotas', () => readQuotas(jobs), record);
+  out.watchCarpool = timed('watchCarpool', () => watchCarpool(jobs), record);
   out.reconcileHourly = timed('reconcileHourly', () => reconcileHourly(jobs), record);
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
