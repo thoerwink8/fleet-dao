@@ -103,6 +103,10 @@
 
 **如果两个键设了还停**（issue #13291 有人报过这种情况，WSL 新版本改过空闲回收行为）：兜底是「留一个进程在实例里」——`wsl --exec dbus-launch true`（这条起的进程挂在实例的 PID 2 下，能吊住整个发行版；Windows 重启后要重跑一次），或者干脆跑演练那几次**留一个 wsl 窗口开着别关**，实测窗口开着就不回收。备选 `tmux new -d` 也行。这三条都不用改配置、不用 `wsl --shutdown`。
 
+## 2026-10-04 晚（#194 拼车自动切独享，按 `specs/194-拼车自动切换/方案-v2.md` 选项 A 切片，子代理）
+
+- 片 1「拼车用不了是哪一种、恢复凭什么认」：`packages/engine/src/jobs/carpool-outage.ts` 纯判法 + `test/carpool-outage.test.ts`（被拒分 E1/E2/E3/设备级/限流；E1 连着两次真新读数过切回线 50%、E2 恢复时刻之后的新读数、E3 接口说组织能用；缓存、旧读数、读不成、金额认不出、status 非 active 各造一次失败）。**还没接线**，切号照旧。分支 `feat/194-carpool-outage-judge`。
+
 ## 2026-10-04（#777 法国巡检仓和本机演练仓分开，Opus 子代理，PR #838，先审后合）
 
 - **仓里做完的**：`deploy/france/desired-config.json` 的 `engine.env` `FLEET_CANARY_REPO` 从私有值（指纹，据 #777 就是演练仓 `fleet-dao-canary`）改成公开值 `thoerwink8/fleet-dao-canary-fr`；`config.mjs` 的 `diffProfiles` 加 `MUST_DIFFER`：两边这一项必须是非空公开值且不一样（不分大小写），一样、写成私有值、空着、两边都删了都判红（`deploy/test/config.test.mjs` 每种各造一次，外加拿两份真文件把本机档改成法国的值必须红）；`docs/ops.md` 第五节、第九节、第十三节跟着改。
