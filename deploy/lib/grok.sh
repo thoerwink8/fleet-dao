@@ -33,15 +33,18 @@ GROK_VERSION_RE='^grok ([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?)( \([0-9a-f]+\)
 grok_bin() { printf '%s' "${GROK_BIN//\{user\}/$1}"; }             # 会话用户
 grok_auth_file() { printf '%s' "${GROK_AUTH_FILE//\{user\}/$1}"; } # 会话用户
 
-# 以那个用户的身份跑一条命令：环境清干净，PATH 只有系统目录、SHELL 是 /bin/sh（为什么见开头）；照 lib/cursor-agent.sh 的
-# cursor_agent_as 防卡——不带控制终端（setsid），到点叫停、不理叫停的再过 5 秒强杀（被强杀时 timeout 连自己一起杀掉，退出码
-# 是 137 而不是 124）；标准输出、标准错误落进 root 建的两个文件（不走 $(...) 的管道：他留个后台进程占着写端，管道就一直等）。
-# 返回命令的退出码
+# 以那个用户的身份跑一条命令：环境清干净，PATH 只有系统目录、SHELL 是 /bin/sh（为什么见开头）；登记了会话代理就带上
+# 那几个代理变量（common.sh 的 session_proxy_args：本机档直连 x.ai 不通、要经 Windows 上的 Clash，#731；调用者自己环境里
+# 的代理不带）；照 lib/cursor-agent.sh 的 cursor_agent_as 防卡——不带控制终端（setsid），到点叫停、不理叫停的再过 5 秒强杀
+# （被强杀时 timeout 连自己一起杀掉，退出码是 137 而不是 124）；标准输出、标准错误落进 root 建的两个文件（不走 $(...) 的
+# 管道：他留个后台进程占着写端，管道就一直等）。返回命令的退出码
 grok_as() { # 用户 家目录 秒数 标准输出文件 标准错误文件 命令…
-  local u=$1 home=$2 secs=$3 out=$4 err=$5
+  local u=$1 home=$2 secs=$3 out=$4 err=$5 proxy=()
   shift 5
+  # 代理认不出就不带（ensure_grok 装之前已判红、不装）
+  mapfile -t proxy < <(session_proxy_args || true)
   (cd -- "$home" && runuser -u "$u" -- env -i HOME="$home" USER="$u" LOGNAME="$u" PATH=/usr/local/bin:/usr/bin:/bin \
-    SHELL=/bin/sh LANG=C.UTF-8 /usr/bin/setsid -w /usr/bin/timeout -k 5 "$secs" "$@") </dev/null >"$out" 2>"$err"
+    SHELL=/bin/sh LANG=C.UTF-8 "${proxy[@]}" /usr/bin/setsid -w /usr/bin/timeout -k 5 "$secs" "$@") </dev/null >"$out" 2>"$err"
 }
 
 # 报错里带的那几行：去掉终端控制符，\r 刷新的进度条拆成行，留最后 3 行非空的
@@ -106,6 +109,10 @@ ensure_grok() { # 用户 grok 的位置 安装脚本地址
   fi
   if ((GROK_ABSENT == 0)); then
     red "$u 的 grok：$GROK_BAD；不重装、不删，先看清是什么"
+    return 0
+  fi
+  if ! session_proxy_args >/dev/null; then
+    red "会话代理 FLEET_SESSION_PROXY 认不出（要 http://主机:端口，不带账号密码；本机档照 deploy/local/desired-config.json 登记的给）：$u 的 grok 没装"
     return 0
   fi
   home=$(getent passwd "$u" | cut -d: -f6) || home=""

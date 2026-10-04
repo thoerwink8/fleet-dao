@@ -29,6 +29,8 @@ U=fleet-cursor-test-$$
 T=$(mktemp -d /var/tmp/cursor-agent-test.XXXXXX)
 cleanup() {
   pkill -KILL -u "$U" >/dev/null 2>&1
+  # 卡住被强杀的那次，下下来的安装脚本删不掉；不清掉，下一回 useradd 拿到同一个号，第 1 节「跑完删了」就读红
+  find /tmp -maxdepth 1 -user "$U" -exec rm -rf -- {} + >/dev/null 2>&1
   userdel "$U" >/dev/null 2>&1
   rm -rf -- "$T"
 }
@@ -51,6 +53,7 @@ install -o "$U" -g "$U" -m 644 /dev/null "$T/install.log"
 cat >"$T/install.sh" <<EOF
 #!/usr/bin/env bash
 echo "\$(id -un) \$HOME \$PWD \${CURSOR_TEST_LEAK-unset} \$0" >>"$T/install.log"
+echo "\${http_proxy-unset} \${https_proxy-unset} \${HTTP_PROXY-unset} \${HTTPS_PROXY-unset} \${no_proxy-unset} \${NO_PROXY-unset}" >>"$T/proxy.log"
 if [ -e "$T/install-fail" ]; then
   echo "curl: (22) The requested URL returned error: 404" >&2
   printf '\033[0;31m✗\033[0m Download failed.\n'
@@ -68,8 +71,12 @@ ln -sf "\$d/$VER/cursor-agent" "\$HOME/.local/bin/cursor-agent"
 ln -sf "\$d/$VER/cursor-agent" "\$HOME/.local/bin/agent"
 EOF
 chmod 644 "$T/install.sh"
+install -o "$U" -g "$U" -m 644 /dev/null "$T/proxy.log"
 URL=file://$T/install.sh
 runs() { wc -l <"$T/install.log"; }
+# root 自己环境里的代理（本机档 root 的登录 shell 就有）：安装脚本只该看到登记的那个（FLEET_SESSION_PROXY），看不到这个
+export https_proxy=http://root-only.invalid:1 HTTPS_PROXY=http://root-only.invalid:1
+unset FLEET_SESSION_PROXY
 # 在版本目录里放一个假 cursor-agent（以他的身份），正文是 sh；第三个参数给 644 就是不能跑
 put_agent() { # 目录名 正文 [权限]
   as_u mkdir -p "$V/$1"
@@ -118,6 +125,8 @@ check "安装脚本跑了一次" "$(runs)" 1
 read -r who home pwd leak self <"$T/install.log"
 check "以他的身份、家目录和当前目录都是他家" "$who $home $pwd" "$U $H $H"
 check "root 这边的环境变量带不进去" "$leak" unset
+check "没登记会话代理（法国）：一个代理变量都不带，root 自己的代理也带不进去" "$(tail -1 "$T/proxy.log")" \
+  "unset unset unset unset unset unset"
 has "安装脚本先下成文件再跑（不是 curl | bash）" "$self" '^/tmp/'
 check "下下来的安装脚本跑完删了" "$(find /tmp -maxdepth 1 -user "$U" -printf '%p\n' | head -3)" ""
 cursor_agent_version "$U" "$V"
@@ -254,6 +263,26 @@ cursor_agent_version nobody /nonexistent/versions
 check "起不来：不认成没装" "$?:$CURSOR_AGENT_ABSENT" 1:0
 has "起不来：原因说没跑成、带着报错" "$CURSOR_AGENT_BAD" '以 nobody 的身份找 cursor-agent 没跑成（退出 1）：.+'
 check "没查成的几次都没跑安装脚本" "$(($(runs) - before))" 0
+
+echo "== 登记了会话代理（本机档，#731：本机上网要经 Windows 上的 Clash）"
+rm -rf -- "$V"
+before=$(runs)
+FLEET_SESSION_PROXY='socks5://127.0.0.1:7890'
+CHANGES=() REDS=()
+ensure_cursor_agent "$U" "$V" "$URL" >/dev/null
+check "【故意造出的失败】代理不是 http 的（认不出）：不装、记红" "$(($(runs) - before)) ${#CHANGES[@]} ${#REDS[@]}" "0 0 1"
+has "认不出：红里写清要什么样子" "$(last_red)" 'FLEET_SESSION_PROXY 认不出（要 http://主机:端口，不带账号密码'
+FLEET_SESSION_PROXY=http://127.0.0.1:7890
+CHANGES=() REDS=()
+ensure_cursor_agent "$U" "$V" "$URL" >/dev/null
+check "装上" "${#CHANGES[@]} ${#REDS[@]}" "1 0"
+# 【故意造出的失败】的另一面：登记了代理、安装脚本的环境里却没有，这里就红
+check "安装脚本的环境里带上登记的代理（大小写各一份、no_proxy 只放本机回环），root 自己的代理没带进去" \
+  "$(tail -1 "$T/proxy.log")" \
+  "http://127.0.0.1:7890 http://127.0.0.1:7890 http://127.0.0.1:7890 http://127.0.0.1:7890 localhost,127.0.0.1,::1 localhost,127.0.0.1,::1"
+read -r who home pwd leak self < <(tail -1 "$T/install.log")
+check "别的照旧清干净：root 的变量带不进去" "$leak" unset
+unset FLEET_SESSION_PROXY
 
 if ((fail)); then
   echo "cursor-agent：不通过"

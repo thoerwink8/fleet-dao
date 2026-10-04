@@ -3,6 +3,9 @@
 # 本机档装机入口（#451）：在 fleet-local 里以 root 跑，两步——
 #   1. 本机档自己的一步：WSL 的回环留在本机（#731，为什么见 fleet-wsl-loopback.sh 开头）。把那个脚本装成
 #      /usr/local/sbin/fleet-wsl-loopback、装两个单元（开机补一次、之后每分钟补一次），现在就补一次，再读回规则和实际走哪；
+#      再照 deploy/local/desired-config.json 登记的会话代理（engine.env 的 FLEET_SESSION_PROXY，和引擎给会话的同一个）导出
+#      FLEET_SESSION_PROXY：下一步以会话用户跑 grok、cursor-agent 的官方安装脚本时经它出网（common.sh 的
+#      session_proxy_args；本机档直连 x.ai 不通）；
 #   2. FLEET_PROFILE=local bash deploy/france.sh "$@"（包这一层也省得每次记 FLEET_PROFILE 这个变量名，deploy/lib/profile.sh
 #      讲了为什么是环境变量、不是配置文件里一项）。
 # 第 1 步排在前面：france.sh 的读回（会话用户连不连得上 Temporal、库，会话用户开的口）要连回环，规则不在就全是红的。第 1 步
@@ -22,6 +25,18 @@ WSL_LOOPBACK_SRC=$LOCAL_DIR/fleet-wsl-loopback.sh
 WSL_LOOPBACK_BIN=/usr/local/sbin/fleet-wsl-loopback
 WSL_LOOPBACK_UNIT_DIR=/etc/systemd/system
 WSL_LOOPBACK_UNITS=(fleet-wsl-loopback.service fleet-wsl-loopback.timer)
+LOCAL_DESIRED=$LOCAL_DIR/desired-config.json
+CONFIG_CLI=$LOCAL_DIR/../france/auto-release/config.mjs
+INSTALL_NODE=/usr/bin/node
+
+# 本机档登记的会话代理：照期望出一份 engine.env（config.mjs render，只有公开值，私有的留空位）取 FLEET_SESSION_PROXY 那一行，
+# 打到标准输出（登记成空串就打空串＝直连）。render 没跑成、这一项没登记返回 1——不当成直连
+local_session_proxy() {
+  local out line
+  if ! out=$("$INSTALL_NODE" "$CONFIG_CLI" render engine.env --desired "$LOCAL_DESIRED" 2>&1); then return 1; fi
+  line=$(grep -E '^FLEET_SESSION_PROXY=' <<<"$out") || return 1
+  printf '%s' "${line#FLEET_SESSION_PROXY=}"
+}
 
 # 仓里的一份文件读成字符串（打到标准输出）：读不了、是空的返回 1——不拿空串当内容装上去
 wsl_loopback_read() { # 文件
@@ -136,7 +151,7 @@ combine_rc() { # 第 1 步 france.sh
 }
 
 main() {
-  local frc=0 lrc=0
+  local frc=0 lrc=0 proxy
   set -Eeuo pipefail
   case "${1:-}" in
   --check) CHECK_ONLY=1 ;;
@@ -155,9 +170,16 @@ main() {
   step "本机档：WSL 的回环留在本机（#731；规则不在，下面 france.sh 读回里连回环的几项都会红）"
   if ((CHECK_ONLY == 0)); then setup_wsl_loopback; fi
   readback_wsl_loopback
+  step "本机档：装机脚本经登记的会话代理出网（#731；以会话用户跑 grok、cursor-agent 的官方安装脚本时带上）"
+  if proxy=$(local_session_proxy); then
+    export FLEET_SESSION_PROXY=$proxy
+    ok "照 $LOCAL_DESIRED 登记的给：FLEET_SESSION_PROXY=${proxy:-（空：直连）}"
+  else
+    red "从 $LOCAL_DESIRED 读不出登记的会话代理（engine.env 的 FLEET_SESSION_PROXY）：下面装 grok、cursor-agent 不经代理，本机档直连多半装不上"
+  fi
   trap - ERR
   env FLEET_PROFILE=local bash "$LOCAL_DIR/../france.sh" "$@" || frc=$?
-  printf '\n== 本机档自己那一步（WSL 的回环留在本机）的结论\n'
+  printf '\n== 本机档自己的两步（WSL 的回环留在本机、装机脚本经登记的代理出网）的结论\n'
   if ((${#CHANGES[@]})); then
     printf '本次改动 %d 处：\n' "${#CHANGES[@]}"
     printf '  - %s\n' "${CHANGES[@]}"

@@ -21,15 +21,18 @@ CURSOR_AGENT_INSTALL_TIMEOUT=900 # 安装脚本等几秒（要下一百多兆的
 CURSOR_AGENT_PROBE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/cursor-agent-version.sh
 CURSOR_AGENT_VERSION_RE='^[0-9]+\.[0-9][0-9A-Za-z._-]*$' # 和版本目录名一个样子（2026.09.26-dd393fe）
 
-# 以那个用户的身份跑一条命令：环境和 cli-tools.sh 的 as_tool_user 一样清干净；照 ddgs_version 防卡——不带控制终端
+# 以那个用户的身份跑一条命令：环境和 cli-tools.sh 的 as_tool_user 一样清干净，登记了会话代理就带上那几个代理变量
+# （common.sh 的 session_proxy_args，#731；调用者自己环境里的代理不带）；照 ddgs_version 防卡——不带控制终端
 # （setsid：不和 root 共用终端，抢终端会被挂起），到点叫停、不理叫停的再过 5 秒强杀（被强杀时 timeout 连自己一起杀掉，
 # 退出码是 137 而不是 124）；标准输出、标准错误落进 root 建的两个文件（不走 $(...) 的管道：他留个后台进程占着写端，
 # 管道就一直等）。返回命令的退出码
 cursor_agent_as() { # 用户 家目录 秒数 标准输出文件 标准错误文件 命令…
-  local u=$1 home=$2 secs=$3 out=$4 err=$5
+  local u=$1 home=$2 secs=$3 out=$4 err=$5 proxy=()
   shift 5
+  # 代理认不出就不带（ensure_cursor_agent 装之前已判红、不装）
+  mapfile -t proxy < <(session_proxy_args || true)
   (cd -- "$home" && runuser -u "$u" -- env -i HOME="$home" USER="$u" LOGNAME="$u" PATH="$(tool_path "$home")" \
-    LANG=C.UTF-8 /usr/bin/setsid -w /usr/bin/timeout -k 5 "$secs" "$@") </dev/null >"$out" 2>"$err"
+    LANG=C.UTF-8 "${proxy[@]}" /usr/bin/setsid -w /usr/bin/timeout -k 5 "$secs" "$@") </dev/null >"$out" 2>"$err"
 }
 
 # 报错里带的那几行：去掉终端控制符（安装脚本不管有没有终端都打光标上移），\r 刷新的进度条拆成行，留最后 3 行非空的
@@ -110,6 +113,10 @@ ensure_cursor_agent() { # 用户 版本目录 安装脚本地址
   fi
   if ((CURSOR_AGENT_ABSENT == 0)); then
     red "$u 的 cursor-agent：$CURSOR_AGENT_BAD；不重装、不删，先看清是什么"
+    return 0
+  fi
+  if ! session_proxy_args >/dev/null; then
+    red "会话代理 FLEET_SESSION_PROXY 认不出（要 http://主机:端口，不带账号密码；本机档照 deploy/local/desired-config.json 登记的给）：$u 的 cursor-agent 没装"
     return 0
   fi
   home=$(getent passwd "$u" | cut -d: -f6) || home=""

@@ -16,6 +16,8 @@
 #   8. install.sh 的第 1 步（替身 systemctl）：装上脚本和两个单元、启用、补规则，读回全绿；第二遍一处不改；装上去的脚本被
 #      改过、权限松了、timer 没在跑、开机那个没启用、上一次没跑成、规则被删了，读回各判红；两步的退出码取更坏的那个；
 #      参数不对退出 64、什么都不做
+#   9. install.sh 给装机脚本的会话代理：照 deploy/local/desired-config.json 读得出登记的那个；WSL 回环规则空出的口、三份
+#      代理样例都对得上它（改口几处一起改）；【故意造出的失败】期望里没登记、期望读不到，都返回 1、不当成直连
 # 不碰宿主的路由：全在 unshare --net 起的命名空间里。要 root（建命名空间、改策略路由、以 root:root 放文件）。
 # 用法：sudo bash deploy/test/wsl-loopback.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
@@ -298,6 +300,33 @@ inner() {
   check "第 1 步红、france.sh 绿" "$(combine_rc 1 0)" 1
   check "france.sh 认不出的退出码照原样" "$(combine_rc 0 64)" 64
   check "第 1 步红压过 france.sh 认不出的" "$(combine_rc 1 64)" 1
+
+  echo "9. 登记的会话代理（install.sh 照 deploy/local/desired-config.json 给装机脚本，#731）"
+  INSTALL_NODE=$NODE
+  local proxy port f broken
+  proxy=$(local_session_proxy)
+  check "读得出登记的代理" "$?:$proxy" "0:http://127.0.0.1:7890"
+  port=${proxy##*:}
+  # 改口要几处一起改：WSL 回环规则空出的口、三份代理样例都得跟着登记的这个
+  check "WSL 回环规则空出的口里有登记的代理口（不然发往它的被留在本机，Clash 够不着）" \
+    "$(printf '%s\n' "${WSL_LOOPBACK_WINDOWS_PORTS[@]}" | grep -cx -- "$port")" 1
+  for f in environment.example zz-local-proxy.sh.example 95local-proxy.example; do
+    has "deploy/local/$f 写的是登记的代理" "$(cat -- "$LOCAL/$f")" "${proxy//./\\.}"
+  done
+  broken=$(mktemp)
+  "$NODE" -e '
+    const fs = require("node:fs");
+    const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    delete j.files["engine.env"].FLEET_SESSION_PROXY;
+    fs.writeFileSync(process.argv[2], JSON.stringify(j));' "$LOCAL/desired-config.json" "$broken"
+  rc=0
+  LOCAL_DESIRED=$broken local_session_proxy >/dev/null || rc=$?
+  check "【故意造出的失败】期望里没登记这一项：返回 1（不当成直连）" "$rc" 1
+  rc=0
+  LOCAL_DESIRED=$T-没有这份.json local_session_proxy >/dev/null || rc=$?
+  check "【故意造出的失败】期望读不到：返回 1" "$rc" 1
+  rm -f -- "$broken"
+  LOCAL_DESIRED=$LOCAL/desired-config.json
 }
 
 if [[ "${1:-}" == --inner ]]; then
