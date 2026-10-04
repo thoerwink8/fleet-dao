@@ -150,8 +150,9 @@ export async function runsOfIssue(db: Db, issueNumber: number): Promise<RunRow[]
 }
 
 /**
- * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号对得上的老行（兜底，调用方要标明）。
- * 单号在几个仓里会重：兜底的行记了工作流编号、却不是这张单的（别的仓同号的单、巡检这类），不收；没记工作流编号的分不出，照收。
+ * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号和工作流编号都对得上的老行（兜底，调用方要标明）。
+ * 单号在几个仓里会重：兜底必须靠工作流编号（带着仓名）认；工作流编号也没记的行分不出是哪个仓的，不收——
+ * 宁可少一行，也不把别的仓同号的单的会话混进这张单。
  * 按起跑先后排。
  */
 export async function runsOfTask(
@@ -167,7 +168,7 @@ export async function runsOfTask(
         and(
           isNull(runs.taskId),
           eq(runs.issueNumber, task.issueNumber),
-          or(isNull(runs.workflowId), eq(runs.workflowId, task.workflowId)),
+          eq(runs.workflowId, task.workflowId),
         ),
       ),
     )
