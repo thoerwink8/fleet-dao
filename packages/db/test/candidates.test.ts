@@ -5,10 +5,11 @@ import { readFileSync } from 'node:fs';
 import { type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { clearReservations, reservePoolSlot } from '../src/queries/pool-runs.ts';
 import { type PoolQuotaSnapshot, type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
 import { finishRun, startRun } from '../src/queries/runs.ts';
 import { flattenRoutingLayers, routingLayers } from '../src/routing-layers.ts';
-import { bans, channels, models, pools, routes } from '../src/schema/index.ts';
+import { bans, channels, models, poolReservations, pools, routes } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -590,5 +591,74 @@ describe('某个用途的候选路由', () => {
       ['car', 2, 3, []],
       ['a', 0, 2, []],
     ]);
+  });
+
+  describe('已选定还没开跑的预占也占名额（#800）：候选查询的 no-slot 和引擎、驾驶舱同一个判法（shared 的 poolFull）', () => {
+    const setup = async () => {
+      await t.db.insert(pools).values({
+        id: 'claude-carpool',
+        channelId: 'claude-subscription',
+        maxConcurrency: 3,
+        runAsUser: 'fleet-agent-carpool',
+        orgKind: 'carpool',
+      });
+      await addRoute(t.db, {
+        id: 'car',
+        channelId: 'claude-subscription',
+        poolId: 'claude-carpool',
+        modelId: 'opus-5.5',
+        upstreamModel: 'claude-opus-5-5',
+      });
+      await setRoutingLayers(t.db, { purposes: { execute: ['opus-5.5'] }, models: { 'opus-5.5': ['car'] } });
+      await addWindow(t.db, { poolId: 'claude-carpool', window: '5h', utilization: 0.1, ...fresh });
+      const repo = await addRepo(t.db);
+      const tasks: [{ id: string }, { id: string }, { id: string }] = [
+        await addTask(t.db, repo.id),
+        await addTask(t.db, repo.id),
+        await addTask(t.db, repo.id),
+      ];
+      const reserve = async (taskId: string, over: { reservedAt?: Date; expiresAt?: Date } = {}) => {
+        const got = await reservePoolSlot(t.db, {
+          taskId,
+          segment: 'manual',
+          routeId: 'car',
+          reservedAt: NOW,
+          expiresAt: later(20 * MIN),
+          ...over,
+        });
+        if (!got.reserved) throw new Error(`夹具：${taskId} 应该预占上了`);
+      };
+      const view = async () =>
+        (await flat('execute')).map((c) => [c.inFlight, c.reserved, c.maxConcurrency, c.blockers]);
+      return { tasks, reserve, view };
+    };
+
+    it('上限 3、1 个在跑、2 个预占：满了（no-slot），不是 1/3 没满', async () => {
+      const { tasks, reserve, view } = await setup();
+      const [a, b] = tasks;
+      await addRun(t.db, { taskId: a.id, routeId: 'car', startedAt: ago(20 * MIN) });
+      expect(await view()).toEqual([[1, 0, 3, []]]);
+      await reserve(a.id);
+      expect(await view()).toEqual([[1, 1, 3, []]]);
+      await reserve(b.id);
+      expect(await view()).toEqual([[1, 2, 3, ['no-slot']]]);
+    });
+
+    it('预占过了期不算占用；引擎重启清掉预占（clearReservations）之后不再算，又有空位', async () => {
+      const { tasks, reserve, view } = await setup();
+      const [a, b, c] = tasks;
+      await addRun(t.db, { taskId: a.id, routeId: 'car', startedAt: ago(20 * MIN) });
+      await reserve(b.id);
+      await reserve(c.id);
+      expect(await view()).toEqual([[1, 2, 3, ['no-slot']]]);
+      // 过期的那一张：直接把它的过期时刻挪到现在以前（预占那一步会顺手收掉过期的，这里要它留在表里）
+      await t.db
+        .update(poolReservations)
+        .set({ reservedAt: ago(40 * MIN), expiresAt: ago(20 * MIN) })
+        .where(eq(poolReservations.taskId, c.id));
+      expect(await view()).toEqual([[1, 1, 3, []]]);
+      await clearReservations(t.db);
+      expect(await view()).toEqual([[1, 0, 3, []]]);
+    });
   });
 });

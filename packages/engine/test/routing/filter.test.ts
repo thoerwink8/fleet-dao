@@ -715,3 +715,67 @@ describe('额度留量线（#194 方案 4.8）：线只来自库里的设置，�
     );
   });
 });
+
+describe('拼车并发登记核对不上：不往拼车池派（#896，方案第六节第 19 条）', () => {
+  const car = (over: Partial<RouteFacts> = {}) =>
+    route('car', { orgKind: 'carpool', poolId: 'claude-carpool', poolName: '拼车号', ...over });
+  const solo = (over: Partial<RouteFacts> = {}) =>
+    route('solo', { orgKind: 'solo', poolId: 'claude-solo', poolName: '独享号', ...over });
+  const bad = (why: string) => ctx({ carpoolRegistry: { ok: false, why } });
+
+  it('核对不上：拼车池硬挡、写明核对出的原因；对上了照派', () => {
+    const blocks = blocksFor(car(), entry('car', 0), bad('登记的拼车并发上限是 2，库里拼车池加起来是 4'));
+    expect(blocks.map((b) => [b.code, b.wait])).toEqual([['carpool-registry', null]]);
+    expect(blocks[0]?.text).toContain('拼车号暂不派');
+    expect(blocks[0]?.text).toContain('登记的拼车并发上限是 2，库里拼车池加起来是 4');
+    expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+    expect(codes(car(), ctx({ carpoolRegistry: { ok: true } }))).toEqual([]);
+  });
+
+  it('只管拼车池：独享池、别家的池照派', () => {
+    const c = { ...bad('没登记'), liveOrg: 'solo' as const };
+    expect(codes(solo(), c)).toEqual([]);
+    expect(codes(route('relay'), c)).toEqual([]);
+  });
+
+  it('不给（老输入、纯函数）：不判', () => {
+    expect(codes(car())).toEqual([]);
+  });
+
+  it('选路：拼车排第一、核对不上 → 派给后面的路由，派工理由写明拼车为什么没派；核对对上了又回到拼车', () => {
+    const routes = [car(), route('relay')];
+    const withBad = chooseRoute(
+      input(routes, { liveOrg: 'carpool', carpoolRegistry: { ok: false, why: '没登记' } }),
+    );
+    expect(withBad).toMatchObject({ kind: 'dispatch', routeId: 'relay' });
+    expect(withBad.kind === 'dispatch' && withBad.why).toContain('拼车并发登记核对不上（没登记）');
+    const good = chooseRoute(input(routes, { liveOrg: 'carpool', carpoolRegistry: { ok: true } }));
+    expect(good).toMatchObject({ kind: 'dispatch', routeId: 'car' });
+  });
+
+  it('选路：只剩拼车池又核对不上 → 派不出（none），原因里有登记核对；点名拼车池的路由同样用不了、不偷偷换', () => {
+    const only = chooseRoute(
+      input([car()], { liveOrg: 'carpool', carpoolRegistry: { ok: false, why: '库里没有拼车池' } }),
+    );
+    expect(only.kind).toBe('none');
+    expect(only.kind === 'none' && only.reason).toContain('库里没有拼车池');
+    const named = chooseRoute(
+      input([car(), route('relay')], {
+        liveOrg: 'carpool',
+        taskRouteId: 'car',
+        carpoolRegistry: { ok: false, why: '写坏了' },
+      }),
+    );
+    expect(named.kind).toBe('none');
+    expect(named.kind === 'none' && named.reason).toContain('指定的路由用不了');
+  });
+
+  it('【故意造出的失败】核对的结论认不出（缺 why、不是对象、ok 不是布尔）：选路判不了、抛，不当成对上了', () => {
+    for (const broken of [{ ok: false }, { ok: false, why: '  ' }, 'ok', null, { ok: 'yes' }, {}]) {
+      expect(
+        () => chooseRoute(input([car()], { liveOrg: 'carpool', carpoolRegistry: broken as never })),
+        JSON.stringify(broken),
+      ).toThrow(/拼车并发登记核对的结论认不出/);
+    }
+  });
+});

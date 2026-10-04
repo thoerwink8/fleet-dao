@@ -68,10 +68,11 @@ const BLOCKER_WORDS: Readonly<Record<string, string>> = {
  * - 接得上：渠道关了、池过期、模型下架、探针判不在线 = dead；探针还没看过、或那一轮没探它（skipped：按量计费不探、挂着的是
  *   另一个组织……不是探了没通）= unknown。探针的原因照它自己写的（routes.probe_detail）说，这里不猜。
  * - 额度够：用满 = dead；没读成、读数过期、窗口判不了 = unknown（不当「还够」）。
- * - 没被禁令挡：命中禁令、或开关关着（这条路由在它的模型下关着）= dead（关着的照样挂在顺序里，但不派）。
+ * - 没被禁令挡：命中禁令、或开关关着（这条路由在它的模型下关着）= dead（关着的照样挂在顺序里，但不派）；
+ *   引擎暂时不往它派（hold，例如拼车并发登记核对不上，#896）也算这一件：写明原因，对上了自己恢复。
  * 并发满了（no-slot）不算 dead：那是等空位，不是坏了。
  */
-export function livenessOf(c: RouteCandidate): RoutingLiveness {
+export function livenessOf(c: RouteCandidate, options: { hold?: string } = {}): RoutingLiveness {
   const dead = (reason: string): LivenessFact => ({ verdict: 'dead', reason });
   const unknown = (reason: string): LivenessFact => ({ verdict: 'unknown', reason });
   const live = (reason: string): LivenessFact => ({ verdict: 'live', reason });
@@ -97,7 +98,9 @@ export function livenessOf(c: RouteCandidate): RoutingLiveness {
     ? dead(`命中禁令：${c.banReasons.join('；')}`)
     : c.blockers.includes('switched-off')
       ? dead('开关关着（这条路由在它的模型下关着）')
-      : live('没有禁令、开关开着');
+      : options.hold
+        ? dead(options.hold)
+        : live('没有禁令、开关开着');
 
   return { connect, quota, ban };
 }

@@ -2,11 +2,14 @@
 // 「接得上、额度够、没被禁令挡」走选路同一份判法（evaluateRoutes），这里只验读成三件事、合成每层的结论。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { resolveAlertWithReason } from '../src/queries/alerts.ts';
+import { CARPOOL_CAP_ALERT } from '../src/queries/carpool-spend.ts';
+import { upsertAlert } from '../src/queries/engine-alerts.ts';
 import { applyRoutingDefault } from '../src/routing-apply.ts';
 import { parseRoutingConfig, RoutingConfigError } from '../src/routing-config.ts';
 import { routingLayers } from '../src/routing-layers.ts';
 import { STAGE_KINDS } from '../src/schema/enums.ts';
-import { bans, routes, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
+import { bans, pools, routes, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, addWindow, catalog, MIN, NOW } from './helpers.ts';
 
@@ -262,6 +265,70 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
     const offOpus = off.models.find((m) => m.modelId === 'opus-4.9');
     expect(offOpus?.routes.every((r) => r.liveness.ban.reason.includes('关着'))).toBe(true);
     expect(offOpus?.verdict).toBe('dead');
+  });
+
+  describe('拼车并发登记核对不上（carpool-cap:registry 提醒开着）：拼车池的路由在驾驶舱上写明不派（#896）', () => {
+    const capAlert = async (resolved: boolean) => {
+      await upsertAlert(t.db, {
+        dedupeKey: CARPOOL_CAP_ALERT,
+        level: 'alert',
+        taskId: null,
+        title: '法国的拼车并发上限和登记的对不上',
+        body: '登记 2，库里 4',
+      });
+      if (resolved) {
+        await resolveAlertWithReason(t.db, { dedupeKey: CARPOOL_CAP_ALERT, by: 'test', why: '对上了' });
+      }
+    };
+    /** relay-a 当拼车池（带组织类型 carpool）；relay-b 是普通池。 */
+    const withCarpool = async () => {
+      await t.db
+        .update(pools)
+        .set({ orgKind: 'carpool', runAsUser: 'fleet-agent-carpool' })
+        .where(eq(pools.id, 'relay-a'));
+      await freshQuota('relay-a');
+      await freshQuota('relay-b');
+    };
+    const banOf = async (routeId: string) => {
+      const layers = await routingLayers(t.db, 'execute', { now: NOW });
+      const route = layers.models.flatMap((m) => m.routes).find((r) => r.candidate.routeId === routeId);
+      return { verdict: route?.verdict, ban: route?.liveness.ban };
+    };
+
+    it('提醒开着：拼车池的路由「禁令与开关」那一件是 dead、写明原因；别的池不受影响', async () => {
+      await withCarpool();
+      await capAlert(false);
+      const carpool = await banOf('a-opus');
+      expect(carpool.verdict).toBe('dead');
+      expect(carpool.ban?.verdict).toBe('dead');
+      expect(carpool.ban?.reason).toContain('引擎暂不往拼车池派新活');
+      expect(carpool.ban?.reason).toContain('拼车并发登记核对不上');
+      expect(await banOf('b-opus')).toMatchObject({ ban: { verdict: 'live' } });
+    });
+
+    it('提醒撤了（对上了）、或从来没推过：恢复', async () => {
+      await withCarpool();
+      expect((await banOf('a-opus')).ban?.verdict).toBe('live');
+      await capAlert(true);
+      expect((await banOf('a-opus')).ban?.verdict).toBe('live');
+    });
+
+    it('原来就被禁令、开关挡着的，原因照旧写禁令、开关（不被登记那一条盖掉）', async () => {
+      await withCarpool();
+      await capAlert(false);
+      await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.routeId, 'a-opus'));
+      expect((await banOf('a-opus')).ban?.reason).toContain('开关关着');
+    });
+
+    it('【故意造出的失败】提醒读不了（notifications 表挪开）：照常抛，不当成没事', async () => {
+      await withCarpool();
+      await t.client.exec('alter table notifications rename to notifications_unreadable');
+      try {
+        await expect(routingLayers(t.db, 'execute', { now: NOW })).rejects.toThrow();
+      } finally {
+        await t.client.exec('alter table notifications_unreadable rename to notifications');
+      }
+    });
   });
 
   it('【故意造出的失败】没配的用途、没有路由的模型：整层 dead，problems 里写明，不当 live', async () => {

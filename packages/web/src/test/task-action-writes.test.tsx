@@ -81,6 +81,7 @@ function route(routeId: string, over: Partial<RoutingLayerRoute> = {}): RoutingL
     ban: live('没有禁令、开关开着'),
     exhausted: [],
     inFlight: 0,
+    reserved: 0,
     maxConcurrency: 2,
     ...over,
   };

@@ -33,7 +33,7 @@ import {
   stageLabel,
 } from '../lib/catalog';
 import { clipText } from '../lib/format';
-import { routeHost, routeTitle } from '../lib/routing';
+import { routeHost, routeSlots, routeTitle } from '../lib/routing';
 import { isTaskFinished, letterOf } from '../lib/status';
 import { cn } from '../lib/utils';
 import {
@@ -290,7 +290,11 @@ export function routeOptions(
         : undefined;
       let note: string | undefined;
       if (r.routeId === currentRouteId) note = '正在用';
-      else if (r.inFlight >= r.maxConcurrency) note = `账号池满 ${r.inFlight}/${r.maxConcurrency}`;
+      else {
+        // 满不满和路由页同一个判法（lib/routing.ts 的 routeSlots → shared 的 poolFull）：在跑的 + 已选定还没开跑的
+        const slots = routeSlots(r);
+        if (slots.full) note = `账号池满 ${slots.count}`;
+      }
       return {
         id: r.routeId,
         model: m.displayName,

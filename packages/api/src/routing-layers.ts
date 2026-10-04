@@ -48,6 +48,7 @@ function routeView(r: RoutingRouteView, channels: ReadonlyMap<string, Channel>) 
       .filter((w) => w.applies === 'yes' && w.state === 'exhausted')
       .map((w) => ({ label: w.label, ...(w.resetsAt ? { resetsAt: w.resetsAt.toISOString() } : {}) })),
     inFlight: c.inFlight,
+    reserved: c.reserved,
     maxConcurrency: c.maxConcurrency,
   } satisfies z.input<typeof RoutingLayerRouteSchema>;
 }

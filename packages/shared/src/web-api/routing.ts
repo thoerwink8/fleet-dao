@@ -155,8 +155,9 @@ export const RoutingLayerRouteSchema = z.object({
   probedAt: Time.optional(),
   /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
   exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
-  /** 账号池此刻在跑几个、最多几个：满了是等空位，不算死。 */
+  /** 账号池此刻在跑几个、已选定还没开跑几个（#757 预占）、最多几个：两者之和到了上限就是满（shared 的 poolFull），等空位，不算死。 */
   inFlight: z.number().int().min(0),
+  reserved: z.number().int().min(0),
   maxConcurrency: z.number().int().min(0),
 });
 

@@ -6,6 +6,12 @@ import { and, eq, gte, isNotNull, lte } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { pools, quotaWindows, routes, runs, sessionRuns } from '../schema/index.ts';
 
+/**
+ * 引擎核「登记的拼车并发上限」和库里拼车池对不上时推的提醒（engine 的 real/carpool-cap.ts 写、对上了自己撤）：开着就是引擎
+ * 现在不往拼车池派新活（#896）。驾驶舱路由页读它，在拼车池的路由上写明原因（routing-layers.ts）。键只此一处定义。
+ */
+export const CARPOOL_CAP_ALERT = 'carpool-cap:registry';
+
 export interface CarpoolPoolCap {
   poolId: string;
   maxConcurrency: number;

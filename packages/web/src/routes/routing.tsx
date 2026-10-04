@@ -25,6 +25,7 @@ import {
   purposeLine,
   purposeVerdictLabel,
   routeHost,
+  routeSlots,
   routeTitle,
   verdictLabel,
   verdictTone,
@@ -285,7 +286,7 @@ function RouteItem({
   firstLive: boolean;
 }) {
   const stale = probeStale(r, now);
-  const full = r.inFlight >= r.maxConcurrency;
+  const slots = routeSlots(r);
   return (
     <li
       data-route={r.routeId}
@@ -306,11 +307,8 @@ function RouteItem({
           </Badge>
         ) : null}
         <span className="text-caption text-muted-foreground">
-          {routeHost(r)} · 在跑{' '}
-          <span className="num">
-            {r.inFlight}/{r.maxConcurrency}
-          </span>
-          {full ? <span className="text-ink-stall">（满了，等空位，不算死）</span> : null}
+          {routeHost(r)} · <span className="num">{slots.text}</span>
+          {slots.full ? <span className="text-ink-stall">（满了，等空位，不算死）</span> : null}
         </span>
         <span className="num ml-auto truncate text-micro text-faint" title={r.routeId}>
           {r.routeId}

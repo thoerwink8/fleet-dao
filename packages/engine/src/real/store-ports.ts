@@ -57,6 +57,7 @@ import {
 import {
   type AllOpenCheck,
   type BreakerFacts,
+  type CarpoolRegistryView,
   type ChooseRouteInput,
   type ChooseRouteResult,
   chooseRoute,
@@ -139,6 +140,12 @@ export interface StorePortsDeps {
    * 才问。读不了照抛（选路报没查成，不当成不打算切）。测试可换。
    */
   orgPlan?: (input: { live: OrgKind; held: ReadonlySet<string>; now: Date }) => Promise<OrgPlanView>;
+  /**
+   * 拼车并发登记的现核（real/carpool-cap.ts 的 carpoolRegistry().view，#896）：候选里有带拼车组织类型的池才问；核对不上（没登记、
+   * 对不上、写坏了、库里没有拼车池、核对没读成）选路不往拼车池派、写明原因。生产两处装配（createRealPorts 的 RealPortsDeps、
+   * hourlyReconcileJob 的 HourlyReconcileWiring）这一项是必填、漏接过不了类型检查；这里不给 = 没判（单测路由纯函数、不涉及拼车的测试）。
+   */
+  carpoolRegistry?: () => Promise<CarpoolRegistryView>;
   now?: () => Date;
   /** [0, 1) 的随机数，试探用（调度策略开了试探才用得上）。 */
   draw?: () => number;
@@ -417,6 +424,14 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     return { setting: r.set ? r.value : undefined };
   }
 
+  /** 拼车并发登记核对的结论（#896）：候选里有拼车池才问；没接 carpoolRegistry 就不给（选路不判这一项）。 */
+  async function carpoolRegistryFor(
+    routes: readonly RouteFacts[],
+  ): Promise<{ carpoolRegistry: CarpoolRegistryView } | Record<string, never>> {
+    if (!deps.carpoolRegistry || !routes.some((r) => r.orgKind === 'carpool')) return {};
+    return { carpoolRegistry: await deps.carpoolRegistry() };
+  }
+
   const planOf = deps.orgPlan ?? ((input) => orgPlanView(db, input));
 
   /**
@@ -562,6 +577,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(orgPlan ? { orgPlan } : {}),
           // 各渠道的额度留量线（#194 方案 4.8）：这一步和给验证留一家的那一步同一份；库读不了照抛
           quotaReserve: await quotaReserveFor(),
+          // 拼车并发登记核对（#896）：核对不上选路不往拼车池派；这一步和给验证留一家的那一步同一份
+          ...(await carpoolRegistryFor([...all.routes, ...(verifyAll?.routes ?? [])])),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
         // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
@@ -789,6 +806,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
         ...(orgPlan ? { orgPlan } : {}),
         quotaReserve: await quotaReserveFor(),
+        ...(await carpoolRegistryFor(facts.routes)),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       });
     },
