@@ -222,8 +222,11 @@ function changesOutboxRow(row: FeishuOutboxRow, next: Partial<FeishuOutboxRow>):
 export type RepoRecord = Repo & { autoDispatchSince?: string | undefined };
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
+/** 内存里的人：多一个可选的创建时刻（库里 users.created_at），只用来给 listUsers 排序，读出去时不带。 */
+export type MemoryUser = User & { createdAt?: string | undefined };
+
 export interface MemoryData {
-  users: User[];
+  users: MemoryUser[];
   repos: RepoRecord[];
   tasks: Task[];
   subtasks: Subtask[];
@@ -568,8 +571,11 @@ export function createMemoryStore(
         null
       );
     },
+    // 和库版一样：创建时刻、并列再按编号；内存里没记创建时刻的当作并列（只剩按编号）。交出去的是副本，不带创建时刻。
     async listUsers() {
-      return data.users;
+      return [...data.users]
+        .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || compareIds(a.id, b.id))
+        .map(({ createdAt: _createdAt, ...user }): User => user);
     },
     async findUserByUsername(username) {
       const want = username.toLowerCase();
@@ -661,7 +667,7 @@ export function createMemoryStore(
             (!taskIds || (r.taskId !== undefined && taskIds.includes(r.taskId))) &&
             (!active || r.endedAt === undefined),
         )
-        .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
+        .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt) || compareIds(a.id, b.id));
     },
     async getRun(id) {
       return data.runs.find((r) => r.id === id) ?? null;
@@ -800,7 +806,9 @@ export function createMemoryStore(
       return paginate(items, page);
     },
     async listAsks(taskId) {
-      return data.asks.filter((a) => a.taskId === taskId).sort((a, b) => a.askedAt.localeCompare(b.askedAt));
+      return data.asks
+        .filter((a) => a.taskId === taskId)
+        .sort((a, b) => a.askedAt.localeCompare(b.askedAt) || compareIds(a.id, b.id));
     },
     async getAsk(id) {
       return data.asks.find((a) => a.id === id) ?? null;
@@ -808,17 +816,21 @@ export function createMemoryStore(
     async listPendingAsks() {
       return data.asks
         .filter((a) => a.answer === undefined)
-        .sort((a, b) => a.askedAt.localeCompare(b.askedAt));
+        .sort((a, b) => a.askedAt.localeCompare(b.askedAt) || compareIds(a.id, b.id));
     },
     async listPullRequests(input = {}) {
       const limit = input.limit ?? 50;
       const rows = data.pullRequests.filter((p) => input.state === undefined || p.state === input.state);
-      // merged 按合并时刻倒序、其余按镜像更新时刻倒序；镜像里没读到这两个时刻的排最后，不拿它们当「最新」。
-      const keyOf = (p: (typeof rows)[number]) =>
-        (input.state === 'merged' ? p.mergedAt : undefined) ?? p.updatedAt ?? '';
-      return [...rows]
-        .sort((a, b) => keyOf(b).localeCompare(keyOf(a)) || b.number - a.number)
-        .slice(0, limit);
+      // 和库版一样：merged 按合并时刻倒序、没读到合并时刻的排最后（不拿 updatedAt 顶，不当「最新」）；
+      // 其余按镜像更新时刻倒序（没读到的排最后）；并列都按编号倒序。
+      const keyOf = (p: (typeof rows)[number]) => (input.state === 'merged' ? p.mergedAt : p.updatedAt);
+      const byKeyDesc = (a: (typeof rows)[number], b: (typeof rows)[number]) => {
+        const ka = keyOf(a);
+        const kb = keyOf(b);
+        if (ka === undefined || kb === undefined) return ka === kb ? 0 : ka === undefined ? 1 : -1;
+        return kb.localeCompare(ka);
+      };
+      return [...rows].sort((a, b) => byKeyDesc(a, b) || b.number - a.number).slice(0, limit);
     },
     async answerAsk({ askId, answer, by }, entry) {
       const ask = data.asks.find((a) => a.id === askId);
@@ -846,8 +858,9 @@ export function createMemoryStore(
     async listRoutes() {
       return [...data.routes].sort((a, b) => a.id.localeCompare(b.id));
     },
+    // 库里按自增编号排＝写入先后；交出去的是副本。
     async listBans() {
-      return data.bans;
+      return data.bans.map((b) => ({ ...b }));
     },
     async listQuotaWindows() {
       return [...data.quotaWindows].sort(

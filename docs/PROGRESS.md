@@ -132,6 +132,10 @@
 
 做到哪：审查报告 `specs/901-项目瘦身与提速/文档与仓体量审查.md` 写完；本文件 209 KB / 800 多行 → 约 80 KB，历史节原样搬进 `docs/archive/`（搬前搬后逐行核过，丢 0 行）；钉骨架的测试 `agents/test/progress-structure.test.ts`、欠账检查跳过 `docs/archive/`、删了没人引用的 `.claude/handoff-2026-09-25.md`。下一步：盯 #910 的 CI 到合并；design/ops 拆分按报告第 4.4 节 P0、P1 起（未开工）。还没验证：合并后下一个新会话开场的钩子输出是否是「创始人引导还有 47 条没处理」且不报临时调整表问题（现在只在临时 git 仓里用真文件验过）。
 
+## 2026-10-05 #878 #883 #884 Store 内存版对齐库版（Sonnet 5.5 子代理，分支 `fix/878-883-884-memory-store-align`，PR #917）
+
+做到哪：`memory-store.ts` 的 `listUsers`（创建时刻再 id，内存用户加了可选 `createdAt` 只用来排序、读出去不带）、`listBans`（写入先后＝库里自增编号，交副本）、`listRuns`/`listAsks`/`listPendingAsks`（时刻再 id）、`listPullRequests`（merged 没合并时刻排最后、编号倒序兜底）已和 `pg-store.ts` 对齐；`store-contract.ts` 加了「列表的顺序与副本」6 条，先在内存版上看过 5 条红（listBans 顺序那条本来就对）再修绿。内存版、pg 版（本机 PGlite）各 112 条全绿，CI 全绿。下一步：自动合并。还没验证：无。
+
 ## 2026-10-05 #857 web 写方法同步抛错（Sonnet 5.5 子代理，分支 `fix/857-web-write-async`）
 
 做到哪：`packages/web/src/api/http.ts` 里 `createDemoLink`、`updateRouteEffort` 改成 async，校验失败返回被拒的 Promise；`http-writes.test.ts` 那条故意造出失败的测试改成不套包装直接调、同步抛就判失败（旧代码下三条红）。单上说的第三个 `updateDemoDefault` 在主线上本来就是 async，没改，只补了一条它的坏请求体用例。web 的 api、demo、page-writes 共 150 条过。还没验证：无。
