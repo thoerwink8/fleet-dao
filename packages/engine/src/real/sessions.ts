@@ -78,7 +78,6 @@ import {
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { RepoRef } from '@fleet-dao/github';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
 import { stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
@@ -149,10 +148,6 @@ import {
   ORPHAN_RUN_REASON,
   orgSwitchFailure,
   REATTACH_MARGIN_MS,
-  RESUME_STARTUP_MAX_MS,
-  RESUME_STARTUP_RUN_MS_PER_MINUTE,
-  RESUME_STARTUP_TOKENS_PER_MINUTE,
-  STARTUP_BASE_MS,
 } from './session-codes.ts';
 import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
 import type { SessionPorts, SessionPortsDeps } from './session-types.ts';
@@ -198,120 +193,23 @@ export {
 export type { SessionPorts, SessionPortsDeps } from './session-types.ts';
 export { scopeSize } from './session-util.ts';
 
-export type { ContinueMode };
+import { decideContinuation, resumeStartupMs } from './session-continuation.ts';
+import { otherVendor, screenForOtherVendor, VERIFY_MATERIAL, WORK_MATERIAL } from './session-screen.ts';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * 续会话（resume、fork）等第一帧的时限，按会话已有的长度放宽：执行体要先把整段过程记录读进来才吐第一帧，会话越长读得越久。
- * 2026-09-28 02:01:47 #276 的 Grok 会话跑了 55 分钟，续的时候 3 分钟没第一帧（startup_timeout），退回去续了规划那一步的会话，
- * 55 分钟的上下文丢了。新开、接力的会话不读过程记录，照插头默认（undefined）。
- */
-export function resumeStartupMs(
-  mode: ContinueMode,
-  prior: Pick<SessionRunState, 'contextTokens' | 'startedAt' | 'endedAt'> | null,
-): number | undefined {
-  if ((mode !== 'resume' && mode !== 'fork') || !prior) return undefined;
-  let extraMinutes: number;
-  if (prior.contextTokens !== null && prior.contextTokens > 0) {
-    extraMinutes = Math.ceil(prior.contextTokens / RESUME_STARTUP_TOKENS_PER_MINUTE);
-  } else if (prior.startedAt && prior.endedAt) {
-    extraMinutes = Math.ceil(
-      (prior.endedAt.getTime() - prior.startedAt.getTime()) / RESUME_STARTUP_RUN_MS_PER_MINUTE,
-    );
-  } else {
-    // 多长都不知道：按放宽的一半给，不拿默认的 3 分钟赌
-    return Math.round((STARTUP_BASE_MS + RESUME_STARTUP_MAX_MS) / 2);
-  }
-  return Math.min(RESUME_STARTUP_MAX_MS, STARTUP_BASE_MS + Math.max(0, extraMinutes) * 60_000);
-}
-
-export interface ContinuationFacts {
-  /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
-  resumeId: string;
-  /**
-   * 这个号最近一轮的记录（latestRunOfSession）；查不到 = null。
-   * outcome、failureCode 不给就当上一轮没失败（调方在 #489 之前不带这两项时照旧同池 resume）。
-   */
-  prior:
-    | (Pick<SessionRunState, 'runAsUser' | 'routeId' | 'worktreePath' | 'contextTokens'> &
-        Partial<Pick<SessionRunState, 'outcome' | 'failureCode'>>)
-    | null;
-  /** 上一轮的路由现在的样子（routeLaunchFacts）；查不到 = null。 */
-  before: { hostId: string; poolId: string } | null;
-  /** 这次的路由。 */
-  route: { poolId: string };
-  driver: Pick<HostDriver, 'hostId' | 'canFork'>;
-  user: SessionUser;
-  /** 这次会话的工作目录。 */
-  dir: string;
-  forkMax: number;
-}
-
-/**
- * 续上一个会话的方式：同池、同会话用户、同执行方式、同一个目录、真号 → --resume；只换了池、执行方式能 fork、上一轮上下文还小
- * → fork；别的一律接力（开新会话带接力任务书），why 写清为什么续不上。先后就是判断的先后，每个分支都有测试。
- * 不硬续的理由：会话记录存在会话用户家里、按工作目录分（Claude 的 ~/.claude/projects/<目录>、cursor 的 ~/.cursor/chats/<目录的哈希>），
- * 换了用户、目录、执行方式都找不到；cursor 的临时号不是它的会话号；cursor 没有 fork，切了池原会话续不上。
- * 结构上续得上、却仍改接力的（#489）：这个号上一轮续起来没有第一帧（startup_timeout）——resume 和 fork 都是续这个号，不再连试；
- * 本来要同池 resume、执行方式是 Grok、上一轮判了停滞的：原样 -r 起不来，改开新会话带接力任务书。Claude 判了停滞仍续（失败分流 SL1）。
- */
-export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; why: string } {
-  const { resumeId, prior, before } = x;
-  const relay = (why: string) => ({ mode: 'relay' as const, why });
-  if (!prior) return relay(`上一个会话 ${resumeId} 的记录查不到`);
-  if (asSessionUser(prior.runAsUser) !== x.user) {
-    return relay(
-      `上一个会话 ${resumeId} 跑在 ${prior.runAsUser ?? '没记'} 下，不是现在的会话用户 ${x.user}，续不上`,
-    );
-  }
-  if (!before) {
-    return relay(`上一个会话 ${resumeId} 的路由 ${prior.routeId} 已不在，不知道它是哪种执行方式、哪个账号池`);
-  }
-  if (before.hostId !== x.driver.hostId) {
-    return relay(
-      `上一个会话 ${resumeId} 是 ${hostName(before.hostId)} 的，这次是 ${hostName(x.driver.hostId)}：换了执行方式，续不上`,
-    );
-  }
-  if (!UUID.test(resumeId)) {
-    return relay(`上一个会话的号 ${resumeId} 不是执行体自己的会话号（会话在报出会话号之前就断了），续不上`);
-  }
-  if (prior.worktreePath !== x.dir) {
-    return relay(
-      `上一个会话 ${resumeId} 在 ${prior.worktreePath ?? '没记的目录'} 里跑，这次在 ${x.dir}：过程记录按目录存，换了目录续不上`,
-    );
-  }
-  // 不给 failureCode / outcome 就当没失败：#489 之前记下的轮次、调用方没带这两项的，同池照旧 resume（上面各分支的「续不上」理由在先）。
-  if (prior.failureCode === 'startup_timeout') {
-    return relay(
-      `上一个会话 ${resumeId} 续起来没有第一帧（startup_timeout），不再续这个号，开新会话带接力任务书`,
-    );
-  }
-  if (before.poolId === x.route.poolId) {
-    if (
-      x.driver.hostId === 'grok' &&
-      (prior.outcome === 'stalled' || prior.failureCode === 'SESSION_STALLED')
-    ) {
-      return relay(`上一个会话 ${resumeId} 上一轮判了停滞，原样续起不来，开新会话带接力任务书`);
-    }
-    return { mode: 'resume', why: '' };
-  }
-  const moved = `换了账号池（${before.poolId} → ${x.route.poolId}）`;
-  if (!x.driver.canFork) return relay(`${moved}，${hostName(x.driver.hostId)} 不能 fork`);
-  if (prior.contextTokens !== null && prior.contextTokens < x.forkMax) return { mode: 'fork', why: '' };
-  return relay(
-    prior.contextTokens === null
-      ? `${moved}，上一轮的上下文大小不知道`
-      : `${moved}，上一轮的上下文有 ${prior.contextTokens} 个 token，大了不 fork`,
-  );
-}
-
+export { type ContinuationFacts, decideContinuation, resumeStartupMs } from './session-continuation.ts';
+export {
+  type Material,
+  otherVendor,
+  screenForOtherVendor,
+  VERIFY_MATERIAL,
+  WORK_MATERIAL,
+} from './session-screen.ts';
 /**
  * 切号那一刻在跑的 Fusion 会话（#59；接口定义在 real/org-switch.ts）。只管这个工人进程里起的会话：会话都由它起，工人重启时
  * 上一轮留下的已经收掉了。stop 把进程已经起来的停下（它们交回 org_switch，工作流切完续同一个会话）；还在建树、没起进程的不碰：
  * 它们一起进程就在 live 里，下一次再停。
  */
-export type { OrgSwitchSessions };
+export type { ContinueMode, OrgSwitchSessions };
 
 interface Live {
   runId: string;
@@ -410,74 +308,6 @@ export function confirmedSeq(
   const top = Math.max(...seqs);
   const seq = nextSeq === top ? top - 1 : top;
   return seq >= 0 ? seq : undefined;
-}
-
-/** 发给别家的材料在卫生检查里叫什么（报错里的位置只有它和行号、规则名，没有值）。 */
-export interface Material {
-  what: string;
-  path: string;
-}
-export const VERIFY_MATERIAL: Material = { what: '发给别家的验证材料', path: '验证提示词' };
-export const WORK_MATERIAL: Material = { what: '发给别家的交代', path: '提示词' };
-
-/** 自家（Claude）之外的族都算别家：派给它的整份提示词先过卫生检查。 */
-export function otherVendor(family: string): boolean {
-  return family.trim().toLowerCase() !== 'claude';
-}
-
-/**
- * 发给别家之前的卫生检查：查出真密钥的报 MATERIAL_BLOCKED（不可重试；失败分流 HY4 当场挂起报警——材料是工作流交代的，
- * 换路由、退回会话都还是它）；没扫成原样报 HYGIENE_UNSCANNED（HY2 挂起）；没配检查、检查自己出错都算没扫成，不发。
- * 报错里只有位置、行号和规则名（assertPublishable 不打值）。
- */
-export function screenForOtherVendor(
-  repo: RepoRef,
-  screen: SessionPortsDeps['screen'],
-  prompt: string,
-  to: string,
-  material: Material = VERIFY_MATERIAL,
-): void {
-  if (!screen) {
-    throw new PortError(
-      'HYGIENE_UNSCANNED',
-      `${material.what}没法过卫生检查（会话端口没配检查），不发给${to}`,
-      {
-        retryable: false,
-      },
-    );
-  }
-  try {
-    screen(repo, material.what, [{ path: material.path, text: prompt }]);
-  } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
-    const details = (error as { details?: unknown } | null)?.details;
-    if (code === 'HYGIENE_BLOCKED') {
-      const raw = (details as { findings?: unknown } | undefined)?.findings;
-      const findings = Array.isArray(raw)
-        ? (raw as { path?: unknown; line?: unknown; rule?: unknown }[])
-        : [];
-      const where = findings
-        .slice(0, 10)
-        .map(
-          (f) =>
-            `${String(f.path)}${typeof f.line === 'number' && f.line > 0 ? ` 第 ${f.line} 行` : ''} ${String(f.rule)}`,
-        )
-        .join('；');
-      throw new PortError(
-        'MATERIAL_BLOCKED',
-        where
-          ? `${material.what}没过卫生检查，没发给${to}：查出 ${findings.length} 处（${where}）`
-          : `${material.what}没过卫生检查，没发给${to}：${errorText(error)}`,
-        { retryable: false, details },
-      );
-    }
-    if (code === 'HYGIENE_UNSCANNED') {
-      throw new PortError(code, errorText(error), { retryable: false, details });
-    }
-    throw new PortError('HYGIENE_UNSCANNED', `${material.what}没扫成，不发给${to}：${errorText(error)}`, {
-      retryable: false,
-    });
-  }
 }
 
 export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
