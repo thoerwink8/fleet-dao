@@ -49,6 +49,7 @@ function contextOf(
     liveOrgProblem: input.liveOrgProblem,
     orgPlan: input.orgPlan,
     quotaReserve: input.quotaReserve,
+    carpoolRegistry: input.carpoolRegistry,
     uiWork: input.uiWork ?? false,
   };
 }

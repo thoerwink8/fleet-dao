@@ -144,6 +144,7 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     trees: ft.trees,
     exec: localExec(),
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
+    carpoolRegistry: async () => ({ ok: true }),
     machine: '法国',
     selfCheck: async () => [],
     gitBin: 'git',

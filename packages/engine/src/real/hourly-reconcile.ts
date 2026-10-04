@@ -36,6 +36,7 @@ import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
+import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { PROBE_DIR } from './route-probe.ts';
@@ -158,6 +159,8 @@ export interface HourlyReconcileWiring {
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
   sessionOrg: SessionOrgReader;
+  /** 拼车并发登记的现核（real/carpool-cap.ts，#896）：判阶段派不派得出去和选路同一套，拼车池核对不上也不算派得出去。必填，漏接过不了类型检查。 */
+  carpoolRegistry: () => Promise<CarpoolRegistryView>;
   /** 这台机器给人看的名字（FLEET_MACHINE_NAME）。 */
   machine: string;
   /** GitHub 两个机器人在这些仓上的权限够不够（生产是 createGitHub 的 selfCheck）。 */
@@ -185,7 +188,12 @@ export function hourlyReconcileJob(
   const now = w.now ?? (() => new Date());
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  const store = createStorePorts({ db: w.db, now, sessionOrg: w.sessionOrg });
+  const store = createStorePorts({
+    db: w.db,
+    now,
+    sessionOrg: w.sessionOrg,
+    carpoolRegistry: w.carpoolRegistry,
+  });
   // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去。这时它还会顺手把「全熔断」那条提醒
   // 再报一次（条件确实还在）。这条提醒撤不撤不在这里判，走下面的 stageAllOpen（只读，不写库、不报警）。
   const stageRoutable: HourlyReconcileJobDeps['stageRoutable'] =

@@ -5,6 +5,8 @@ import {
   evaluateReserve,
   hardBanFor,
   type OrgKind,
+  poolFull,
+  poolOccupiedText,
   type ReserveReading,
   ROUTE_PROBE_EVERY_MINUTES,
   reserveHitText,
@@ -26,6 +28,7 @@ import { ABILITY_NAMES, HOST_ABILITIES, type RoutingPolicy, STAGE_NEEDS } from '
 import type {
   Block,
   CandidateBlocker,
+  CarpoolRegistryView,
   OrgPlanView,
   RouteFacts,
   RouteWindow,
@@ -63,6 +66,8 @@ export interface FilterContext {
   orgPlan?: OrgPlanView | undefined;
   /** 各渠道的额度留量线设置原值（ChooseRouteInput.quotaReserve）；不给 = 没判。 */
   quotaReserve?: { setting: unknown } | undefined;
+  /** 拼车并发登记核对的结论（ChooseRouteInput.carpoolRegistry）；不给 = 没判。 */
+  carpoolRegistry?: CarpoolRegistryView | undefined;
   /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
   uiWork: boolean;
 }
@@ -89,6 +94,8 @@ export function blocksFor(
   if (avoided) out.push(hard('avoided', avoided));
   const spoiled = ctx.spoils?.get(familyKey(route.family));
   if (spoiled) out.push(hard('no-verifier', spoiled));
+  const unregistered = carpoolRegistryBlock(route, ctx);
+  if (unregistered) out.push(unregistered);
   const notLive = orgBlock(route, ctx);
   if (notLive) out.push(notLive);
   out.push(...shortBlocks(route, ctx));
@@ -138,26 +145,15 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
     out.push(hard('banned', `犯禁令：${reasons.length > 0 ? reasons.join('、') : '原因没写'}`));
   }
   if (route.blockers.includes('quota-exhausted')) out.push(exhaustedBlock(route, ctx.now));
-  // 候选查询只数已开工的；已选定、还没开工的也占位子，这里再按两者之和判一次。
-  if (route.blockers.includes('no-slot') || occupied(route) >= route.maxConcurrency) {
+  // 判满只有 shared 的 poolFull（在跑 + 已选定还没开工；驾驶舱路由页、换路由选项、候选查询的 no-slot 同一个判法）
+  if (route.blockers.includes('no-slot') || poolFull(route)) {
     const text =
       route.reserved > 0
-        ? `${holders(route)}，上限 ${route.maxConcurrency} 个`
+        ? `${poolOccupiedText(route)}，上限 ${route.maxConcurrency} 个`
         : `${route.inFlight}/${route.maxConcurrency}`;
     out.push({ code: 'no-slot', text: `${route.poolName}并发满了（${text}）`, wait: 'slot', until: null });
   }
   return out;
-}
-
-/** 这个池占着的位子：在跑的 + 已选定还没开工的。 */
-function occupied(route: RouteFacts): number {
-  return route.inFlight + route.reserved;
-}
-
-function holders(route: RouteFacts): string {
-  return route.reserved > 0
-    ? `已经有 ${occupied(route)} 个（在跑 ${route.inFlight} 个、已选定还没开工 ${route.reserved} 个）`
-    : `已经在跑 ${route.inFlight} 个`;
 }
 
 /** 用满的窗口全都清零了才放得出来：所以最早能派 = 这些窗口里最晚的清零时刻；有一个不知道就不知道。 */
@@ -204,6 +200,20 @@ export function hostUnfit(hostId: string, stage: StageKind): string | null {
   const missing = STAGE_NEEDS[stage].filter((a) => !abilities.includes(a));
   if (missing.length === 0) return null;
   return `${hostName(hostId)}不会${missing.map((a) => ABILITY_NAMES[a]).join('、')}，${STAGE_NAMES[stage]}阶段要`;
+}
+
+/**
+ * 拼车并发登记核对不上（#194 方案第六节第 19 条、#896）：登记的数和引擎实际按库里拼车池放行的数对不上（没登记、写坏了、库里没有
+ * 拼车池、核对本身没读成也算），带拼车组织类型的池暂时标「不可用」、一律不派，写明核对出的原因；对上了自己恢复。
+ * 硬挡不是等：要人改配置（目录配置的拼车并发或仓里的登记），改对重启引擎才会好；独享、别家的池不受影响。
+ */
+function carpoolRegistryBlock(route: RouteFacts, ctx: FilterContext): Block | null {
+  const reg = ctx.carpoolRegistry;
+  if (route.orgKind !== 'carpool' || reg === undefined || reg.ok) return null;
+  return hard(
+    'carpool-registry',
+    `${route.poolName}暂不派：拼车并发登记核对不上（${reg.why}），改对后自己恢复；这期间不往拼车池派新活`,
+  );
 }
 
 /**

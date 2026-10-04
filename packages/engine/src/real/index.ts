@@ -25,10 +25,11 @@ import type { JevPort } from '../failure/jev.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
+import type { CarpoolRegistryView } from '../routing/index.ts';
 import { configFromEnv } from '../worker.ts';
 import { canaryJob } from './canary.ts';
 import { carpoolApiReader } from './carpool-api.ts';
-import { checkCarpoolCap } from './carpool-cap.ts';
+import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
@@ -109,6 +110,11 @@ export interface RealPortsDeps {
    * 不给就发不出去（验证会话起不来，报 HYGIENE_UNSCANNED），不当成查过了。
    */
   screen?: SessionPortsDeps['screen'];
+  /**
+   * 拼车并发登记的现核（real/carpool-cap.ts，#896）：选路前问，核对不上不往拼车池派。必填：不给就是拼车池不受登记核对管，
+   * 漏接要过不了类型检查，不靠默认。
+   */
+  carpoolRegistry: () => Promise<CarpoolRegistryView>;
   /** 会话脱开引擎跑的收发目录的根（session-io.ts，核过能用才给）；不给就接管道（引擎一停会话就断）。 */
   ioRoot?: string;
   /** 以下测试用。 */
@@ -146,6 +152,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   const store = createStorePorts({
     db: deps.db,
     sessionOrg: deps.sessionOrg,
+    carpoolRegistry: deps.carpoolRegistry,
     ...(deps.drain ? { drain: deps.drain } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.log ? { log: deps.log } : {}),
@@ -516,8 +523,12 @@ export function realPortsFromEnv(
     proxy: config.sessionProxy,
     onEvent: orgDriftReporter({ db, user: sessionUser, machine: config.machine }),
   });
+  // 拼车并发登记的核对（#194 方案 4.7、#896）：引擎起来核一遍推提醒（registerJobs），选路前、每小时对账判阶段派不派得出去时现核，
+  // 对不上拼车池不派新活。同一个对象，「上一次对上没对上」的记忆只有一份。
+  const carpoolCap = carpoolRegistry({ db, env, machine: config.machine });
   const real = createRealPorts({
     db,
+    carpoolRegistry: () => carpoolCap.view(),
     jev: jev.port,
     gh,
     // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；只管 fleet-dao 这个仓，别的仓按它们自己的标准）。
@@ -606,6 +617,7 @@ export function realPortsFromEnv(
       trees,
       exec,
       sessionOrg,
+      carpoolRegistry: () => carpoolCap.view(),
       machine: config.machine,
       selfCheck: (repos) => gh.selfCheck(repos),
     }),
@@ -683,8 +695,9 @@ export function realPortsFromEnv(
     stateDir: config.stateDir,
     registerJobs: async () => {
       await registerEngineJobs(db);
-      // 拼车并发上限和仓里登记的对不对得上（#194 方案 4.7）：对不上推提醒、不挡接活；库读不了照样抛，registerJobs 这一步不当成对上了
-      await checkCarpoolCap({ db, env, machine: config.machine });
+      // 拼车并发上限和仓里登记的对不对得上（#194 方案 4.7）：对不上推提醒、不挡接活（拼车池由选路按 carpoolCap.view() 不派，#896）；
+      // 库读不了照样抛，registerJobs 这一步不当成对上了
+      await carpoolCap.check();
       // 判断题起不来、登记不上只报错（error 级日志 + /healthz 的 judge 项红），不挡引擎接活：照规则走一样能干。
       const registered = await jev.register();
       if (registered.level === 'error') console.error(registered.message);

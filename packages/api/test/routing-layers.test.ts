@@ -1,8 +1,17 @@
 // 驾驶舱「路由」页的接口（#574）：路由两层每一层现在活着吗。真库上按路由两层那两张表 + 探针、额度、禁令现算；
 // 没接上（内存版）写 unavailable，读不到回 503 写明没读成——都不回空列表冒充「都没配」。
-import { quotaWindows, routingCatalog, routingPurposeModels } from '@fleet-dao/db';
+import {
+  clearReservations,
+  poolReservations,
+  pools,
+  quotaWindows,
+  reservePoolSlot,
+  routingCatalog,
+  routingPurposeModels,
+  tasks,
+} from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { RoutingLayersResponse, type StageKind } from '@fleet-dao/shared';
+import { poolFull, RoutingLayersResponse, type StageKind } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRoutingLayers, type RoutingLayersPort } from '../src/routing-layers.ts';
@@ -167,6 +176,55 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     });
     // 两个模型都死：整个用途死
     expect(execute?.verdict).toBe('dead');
+  });
+
+  it('已选定还没开跑的预占也带出来（#800）：池上限 = 在跑 + 2，两个预占 → 接口给 inFlight、reserved、max，满不满由两者之和判；过期的预占不算、清掉后不再算', async () => {
+    current = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
+    await setLayers({ execute: ['opus-5.5'] }, { 'opus-5.5': SAMPLE_MODELS['opus-5.5'] });
+    const { cookie } = await current.login();
+    const route = async () =>
+      (await layers(current as Harness, cookie)).purposes
+        .find((p) => p.purpose === 'execute')
+        ?.models[0]?.routes.find((r) => r.routeId === 'rt-claude-opus');
+    const before = await route();
+    const running = before?.inFlight ?? Number.NaN;
+    expect(before?.reserved).toBe(0);
+    // 上限 = 在跑的 + 2：只看在跑数就是「有空位」，两个预占占满后就是满
+    await t.db
+      .update(pools)
+      .set({ maxConcurrency: running + 2 })
+      .where(eq(pools.id, 'pool-claude-a'));
+    const [task] = await t.db.select({ id: tasks.id }).from(tasks).limit(1);
+    if (!task) throw new Error('夹具里没有单');
+    const reserve = (segment: 'manual' | 'verify', over: { expiresAt?: Date } = {}) =>
+      reservePoolSlot(t.db, {
+        taskId: task.id,
+        segment,
+        routeId: 'rt-claude-opus',
+        reservedAt: T0,
+        expiresAt: new Date(T0.getTime() + 20 * 60_000),
+        ...over,
+      });
+    expect(await reserve('manual')).toMatchObject({ reserved: true });
+    expect(await reserve('verify')).toMatchObject({ reserved: true });
+    const full = await route();
+    expect(full).toMatchObject({ inFlight: running, reserved: 2, maxConcurrency: running + 2 });
+    expect(poolFull(full as NonNullable<typeof full>)).toBe(true);
+    // 预占过了期：不算
+    await t.db
+      .update(poolReservations)
+      .set({
+        reservedAt: new Date(T0.getTime() - 40 * 60_000),
+        expiresAt: new Date(T0.getTime() - 20 * 60_000),
+      });
+    const lapsed = await route();
+    expect(lapsed).toMatchObject({ inFlight: running, reserved: 0 });
+    expect(poolFull(lapsed as NonNullable<typeof lapsed>)).toBe(false);
+    // 引擎重启清掉预占：不再算
+    await reserve('manual');
+    expect((await route())?.reserved).toBe(1);
+    await clearReservations(t.db);
+    expect((await route())?.reserved).toBe(0);
   });
 
   it('【故意造出的失败】库里还没有路由两层那两张表（或读不到库）：回 503 写明没读成，不回空列表', async () => {

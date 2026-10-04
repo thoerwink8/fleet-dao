@@ -10,6 +10,7 @@ export * from './home-flow.ts';
 export * from './intent-api.ts';
 export * from './org-ledger-doc.ts';
 export * from './pool-holds.ts';
+export * from './pool-slots.ts';
 export * from './quota.ts';
 export * from './quota-reserve.ts';
 export * from './realtime.ts';

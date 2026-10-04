@@ -155,6 +155,12 @@ export interface OrgPlanView {
   channelDown?: string | null;
 }
 
+/**
+ * 拼车并发登记核对的结论（#896，real/carpool-cap.ts 现核）：ok:false = 登记的拼车并发上限和库里拼车池的对不上、没登记、写坏了、
+ * 库里没有拼车池、或核对本身没读成，why 写明是哪一种。核对不上时选路不往带拼车组织类型的池派新活（对上了自己恢复）。
+ */
+export type CarpoolRegistryView = { ok: true } | { ok: false; why: string };
+
 export interface ChooseRouteInput {
   stage: StageKind;
   /** 这个用途配过模型顺序没有（routing_purpose_models 里有没有它的行）。没配过就派不出，不按 id 乱挑。 */
@@ -194,6 +200,11 @@ export interface ChooseRouteInput {
    * 已用到线的池不派新活（等得来：到清零时刻，或人改线）；设置认不出的池同样硬挡；这个池没写线 = 不限。不给 = 没判（老的输入、纯函数测试），留量线不管——真装配（store-ports）一定给。
    */
   quotaReserve?: { setting: unknown };
+  /**
+   * 拼车并发登记核对的结论（#896）：ok:false 时带 orgKind 为 carpool 的池一律不派（硬挡，写明 why，核对对上了自己恢复）。
+   * 不给 = 没判（老的输入、纯函数测试）——真装配（store-ports 经 real/index.ts 接 carpoolRegistry）一定给，测试钉着。
+   */
+  carpoolRegistry?: CarpoolRegistryView;
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
   now: string;
@@ -244,6 +255,8 @@ export type BlockCode =
   | 'quota-short'
   /** 到了额度留量线（或留量线的设置认不出）：引擎最多用到那条线就停（#194 方案 4.8）。 */
   | 'quota-reserve'
+  /** 拼车并发登记核对不上：不往拼车池派，对上了自己恢复（#896）。 */
+  | 'carpool-registry'
   | 'org-not-live'
   /** 选它开 PR 前验证就没有别家可派了（ChooseRouteInput.keepVerifier）。 */
   | 'no-verifier';

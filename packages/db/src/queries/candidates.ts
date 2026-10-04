@@ -1,6 +1,6 @@
 // 候选路由的判法：给一串排好的路由逐条写明它为什么不能用（被挡的不删，带原因留在表里）。用的人是路由两层的读法
 // （routing-layers.ts：选路、驾驶舱都经它），「接得上、额度够、没被禁令挡」只有这一处判法。
-import { hardBanFor, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
+import { hardBanFor, poolFull, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { asc, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { bans, type channels, type models, type pools, quotaWindows, type routes } from '../schema/index.ts';
@@ -69,11 +69,11 @@ export interface RouteCandidate {
    * （不知道清零时刻的，按读数 30 分钟内算），过了清零时刻才放。
    */
   windows: CandidateWindow[];
-  /** 池上已开工、没结束的会话数：到上限就挡 no-slot。 */
+  /** 池上已开工、没结束的会话数；加上 reserved 到上限就挡 no-slot。 */
   inFlight: number;
   /**
-   * 池上选定了还没开工的（Fusion 排着的、三段的一段占着名额的，#757）：和 inFlight 同一次读出来。这里不按它挡，派不派得出由
-   * 选路按两者之和判（引擎 routing/filter.ts）。
+   * 池上选定了还没开工的（Fusion 排着的、三段的一段占着名额的，#757）：和 inFlight 同一次读出来。no-slot 按两者之和判
+   * （shared 的 poolFull，引擎选路、驾驶舱路由页同一个判法）。
    */
   reserved: number;
   maxConcurrency: number;
@@ -169,6 +169,7 @@ export async function evaluateRoutes(
     ];
 
     const running = occupancy.get(pool.id)?.inFlight ?? 0;
+    const reserved = occupancy.get(pool.id)?.reserved ?? 0;
     const blockers: Blocker[] = [];
     if (!order.enabled) blockers.push('switched-off');
     if (!route.alive) blockers.push('offline');
@@ -178,7 +179,9 @@ export async function evaluateRoutes(
       blockers.push('model-retired');
     if (banReasons.length > 0) blockers.push('banned');
     if (quota === 'exhausted') blockers.push('quota-exhausted');
-    if (running >= pool.maxConcurrency) blockers.push('no-slot');
+    // 满不满只有 shared 的 poolFull 一个判法：在跑的 + 已选定还没开工的（#757 预占、#800），引擎选路、驾驶舱同一个
+    if (poolFull({ inFlight: running, reserved, maxConcurrency: pool.maxConcurrency }))
+      blockers.push('no-slot');
 
     return {
       routeId: route.id,
@@ -195,7 +198,7 @@ export async function evaluateRoutes(
       quota,
       windows,
       inFlight: running,
-      reserved: occupancy.get(pool.id)?.reserved ?? 0,
+      reserved,
       maxConcurrency: pool.maxConcurrency,
       banReasons,
       blockers,

@@ -23,6 +23,7 @@ import {
   POOL_HOLDS_SETTING,
   PoolHoldsResponse,
   PoolsResponse,
+  poolFull,
   poolHoldsView,
   type RealtimeTable,
   ReleaseVersionResponse,
@@ -228,6 +229,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   function poolRunning(poolId: string): number {
     return allRuns().filter((r) => isRunning(r) && routeInfo(r.routeId).route?.poolId === poolId).length;
   }
+  /** 已选定还没开跑的（排队中、没结束）：和真后端一样占池的名额（#757 预占）。 */
+  function poolReserved(poolId: string): number {
+    return allRuns().filter(
+      (r) => !r.startedAt && !r.endedAt && routeInfo(r.routeId).route?.poolId === poolId,
+    ).length;
+  }
 
   /** 和真后端 routeProblem 同一套判据：先硬禁令，再库里的禁令，再看下架。 */
   function routeProblem(routeId: string, stage: StageKind | undefined): string | null {
@@ -325,6 +332,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),
       })),
       inFlight: poolRunning(r.poolId),
+      reserved: poolReserved(r.poolId),
       maxConcurrency: pool?.maxConcurrency ?? 0,
     } as const;
   }
@@ -455,7 +463,15 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       if (!route?.alive) continue;
       if (!st.channels.find((c) => c.id === route.channelId)?.enabled) continue;
       const pool = st.pools.find((p) => p.id === route.poolId);
-      if (pool && poolRunning(pool.id) >= pool.maxConcurrency) continue;
+      if (
+        pool &&
+        poolFull({
+          inFlight: poolRunning(pool.id),
+          reserved: poolReserved(pool.id),
+          maxConcurrency: pool.maxConcurrency,
+        })
+      )
+        continue;
       return rid;
     }
     return undefined;
