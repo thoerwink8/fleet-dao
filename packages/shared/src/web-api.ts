@@ -900,11 +900,41 @@ export const OrgSwitchViewSchema = z.discriminatedUnion('state', [
   }),
 ]);
 
+/**
+ * 拼车额度对账（#194 方案 4.7）：这一窗本机记到在拼车上花了多少，接口说用了多少；差得多、扣掉没记到花费的会话以后还差得多，
+ * 多半是别的设备在用。先只显示、不报警。unavailable = 没法对（没读到窗口、窗口已过、没接上），why 写明，不拿「对得上」冒充。
+ * verdict：match 对得上 / others 差得多、多半是别的设备在用 / unrecorded 没记到花费的会话太多、说不准 / local_over 本机记的比接口说的还多。
+ */
+export const CarpoolReconcileViewSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('unavailable'), why: z.string() }),
+  z.object({
+    state: z.literal('known'),
+    windowStart: Time,
+    windowEnd: Time,
+    /** 接口这次读数的时刻；本机的花费也只算到这一刻开始的会话。 */
+    apiReadAt: Time,
+    localUsd: z.number().min(0),
+    apiUsedUsd: z.number().min(0),
+    apiLimitUsd: z.number().positive(),
+    /** 窗口里开始了的拼车会话数、其中没记到花费的、其中被切号停下的。 */
+    sessions: z.number().int().min(0),
+    unrecorded: z.number().int().min(0),
+    unrecordedSwitchStopped: z.number().int().min(0),
+    /** 接口说的减本机记的（可为负）。 */
+    gapUsd: z.number(),
+    verdict: z.enum(['match', 'others', 'unrecorded', 'local_over']),
+    /** 给人看的一句话（差多少、凭什么这么说）。 */
+    note: z.string(),
+  }),
+]);
+
 export const PoolsResponse = z.object({
   pools: z.array(PoolViewSchema),
   staleAfterMinutes: z.number().int().positive(),
   /** 切号现状。后端没接这一块（老后端）没有这一项。 */
   orgSwitch: OrgSwitchViewSchema.optional(),
+  /** 拼车额度对账。后端没接这一块（老后端）没有这一项。 */
+  carpoolReconcile: CarpoolReconcileViewSchema.optional(),
   asOf: Time,
 });
 

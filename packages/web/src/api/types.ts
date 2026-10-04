@@ -10,6 +10,7 @@ import type {
   BoardResponse,
   BoardSubtaskSchema,
   BoardTaskSchema,
+  CarpoolReconcileViewSchema,
   ChangeEventSchema,
   ChannelSchema,
   CreateDemoLinkRequest,
@@ -119,6 +120,8 @@ export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;
 /** 会话用户切号现状（#194）：额度页顶上一栏。 */
 export type OrgSwitchView = z.infer<typeof OrgSwitchViewSchema>;
+/** 拼车额度对账（#194 方案 4.7）：本机记到的花费 vs 接口说的已用。 */
+export type CarpoolReconcileView = z.infer<typeof CarpoolReconcileViewSchema>;
 export type QuotaWindowView = z.infer<typeof QuotaWindowViewSchema>;
 
 export type Jobs = z.infer<typeof JobsResponse>;

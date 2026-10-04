@@ -4,8 +4,10 @@ import type { SessionUser } from '@fleet-dao/adapters';
 import { type Db, finishScheduleRun, resolveAlertByKey, startScheduleRun, upsertAlert } from '@fleet-dao/db';
 import type { CarpoolApiRead } from '../jobs/carpool-outage.ts';
 import type { CarpoolWatchDeps } from '../jobs/carpool-watch.ts';
+import { OrgLedgerError } from '../jobs/org-ledger.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
 import { loadLedger } from './org-ledger.ts';
+import { ORG_LEDGER_ALERT } from './org-switch.ts';
 import type { SessionOrgReader } from './session-org.ts';
 
 export interface CarpoolWatchWiring {
@@ -27,7 +29,25 @@ export function carpoolWatchJob(w: CarpoolWatchWiring): () => CarpoolWatchDeps {
   const log: CarpoolWatchDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   return () => ({
-    loadLedger: () => loadLedger(w.db, w.user),
+    // 账本认不出：和切号那边同一条提醒（session-org:ledger），盯读这一轮起不来也要让人看见，不只记一条没跑成的记录；读得出了自己撤
+    loadLedger: async () => {
+      try {
+        const ledger = await loadLedger(w.db, w.user);
+        await resolveAlertByKey(w.db, { dedupeKey: ORG_LEDGER_ALERT, by: 'engine' });
+        return ledger;
+      } catch (err) {
+        if (err instanceof OrgLedgerError) {
+          await upsertAlert(w.db, {
+            dedupeKey: ORG_LEDGER_ALERT,
+            level: 'alert',
+            taskId: null,
+            title: '切号账本认不出：引擎不切号',
+            body: `${err.message}。拼车盯读这一轮读不了账本，没法判切不切；到会话用户所在机器上看账本（session_org_state）为什么认不出，照 docs/ops.md 第五节「会话用户挂的组织」处理。`,
+          });
+        }
+        throw err;
+      }
+    },
     liveOrg: () => w.sessionOrg({ by: '拼车盯读' }),
     read: w.readApi,
     switchNow: (trigger) => w.orgSwitch.now(trigger),

@@ -43,6 +43,7 @@ import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
+import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
@@ -530,10 +531,25 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         };
       }
     }
+    // 拼车额度对账（#194 方案 4.7）：读不到不拖垮额度页，明说没读成
+    let carpoolReconcile: ReturnType<typeof carpoolReconcileView>;
+    if (!deps.carpoolReconcile) {
+      carpoolReconcile = { state: 'unavailable', why: CARPOOL_RECONCILE_NOT_HERE };
+    } else {
+      try {
+        carpoolReconcile = carpoolReconcileView(await deps.carpoolReconcile.read(), now);
+      } catch (error) {
+        carpoolReconcile = {
+          state: 'unavailable',
+          why: `读拼车对账用的会话花费和额度没成：${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
     return reply(c, PoolsResponse, {
       pools: poolViews,
       staleAfterMinutes: Math.round(config.quotaStaleAfterMs / 60_000),
       orgSwitch,
+      carpoolReconcile,
       asOf: now.toISOString(),
     });
   });

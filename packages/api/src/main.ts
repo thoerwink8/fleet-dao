@@ -28,6 +28,7 @@ import {
 import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
+import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
@@ -186,6 +187,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     routingLayers: pgRoutingLayers(db),
     // 会话用户切号的现状（#194）：引擎落库的切号账本，额度页顶上一行
     orgSwitch: pgOrgSwitch(db),
+    // 拼车额度对账（#194 方案 4.7）：接口说的已用美元 vs 本机会话记到的花费
+    carpoolReconcile: pgCarpoolReconcile(db),
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md

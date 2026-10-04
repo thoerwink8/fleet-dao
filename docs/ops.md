@@ -204,7 +204,7 @@ node 的编译缓存目录（查 #164 时发现：会话能借它以 fleet、pil
 reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，对这个用户的所有会话一起生效，请求按设备签名。一个账户最多挂 4 台设备、一个家目录算一台，所以法国只登录这一个用户（pilot 不登录，见下面）；不拷别的用户的 `~/.reclaude`（同一设备号从两个家目录跑会互相打架）。
 
 1. 准备（装机这边做）：`france.sh` 给会话用户装 reclaude 二进制到 `/home/fleet-agent-carpool/.local/bin/reclaude`（只在没有时装，版本和 sha256 钉在脚本顶部，以这个用户自己的身份写，之后它自己 `reclaude update`）；读回里它缺了判红——引擎起 Claude 会话用的就是这一份。不拷别的用户的 `~/.reclaude`。
-2. 创始人以 root 登法国跑：`sudo -iu fleet-agent-carpool reclaude login`。终端里会打印一行「Open this URL in your browser to authorize this CLI session」和一个链接：在浏览器里打开，用 reclaude 账号登录，授权这个命令行会话；授权完终端自己往下走。
+2. 创始人以 root 登法国跑：`sudo -iu fleet-agent-carpool reclaude login`。终端里会打印一行「Open this URL in your browser to authorize this CLI session」和一个链接：在浏览器里打开，用 reclaude 账号登录，授权这个命令行会话；授权完终端自己往下走。**设备名额 4 台已满**（mac、本机、本机 WSL、法国正好四台，公司设备已撤，创始人 2026-10-04）：再加机器、或被撤后重新登录（会多注册一台），都要先去 reclaude 网页「设备」页撤掉一台旧的，不然登录会因为名额满了失败；撤哪台要和创始人确认（#194 方案 4.7）。
 3. 选拼车组织：`sudo /usr/local/sbin/fleet-agent-scope org-use carpool --user fleet-agent-carpool`（帮手以会话用户读 `org list`、认出拼车（team）那个切过去、回读核对，标准输出最后一行 `switched carpool` 或 `already carpool` 是成；编号不用人抄）。之后拼车用满切独享、恢复切回由引擎管（下面「会话用户挂的组织」）。人要手动切也用这条（`carpool` 换成 `solo` 是独享），挑手上没有在跑的会话时切：一切号这个家目录下在跑的会话全断；切完不用告诉引擎，它下一次读（最多 30 秒）就发现组织变了、又没有它自己的切号记录——推一条 `session-org:drift`（带前后两次读数），连着 2 分钟读到的都一样才照新的来（这 2 分钟里 Claude 的活等着、不挂起）；切过去又切回来的，回来马上照常（下面「会话用户挂的组织」）。拼车没用满时手动切到独享，下一轮路由探针引擎会切回拼车；法国暂不用独享号期间（`pool-hold:claude-solo` 开着）别手动切到独享。
 4. 重跑 `deploy/france.sh`：读回里「reclaude 还没登录」消失。
 
@@ -738,6 +738,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
   - 加一个键：写进期望、合进主线：公开的发布时写上；私有的照上一条，先放到机器上、再记指纹。
   - 删一个键：从期望里删掉、合进主线，发布时把上次照期望写的那一行删掉；私有的、没照期望写过的发布不删，人删。
   - 要一直空着的项（本机档的飞书一对、隧道对端，法国的会话代理）不是私有值：登记成公开的空值（`"value": ""`），对账照它比——空着对得上，填了值报不一致。`"private": null` 只表示「还没记指纹」，线上空不空都记「没查成」：还没放的私有值（比如本机档等 GitHub App 的 webhook 密钥）不能因为线上空着就当成对得上，放好后照第十三节「从零建 fleet-local」第 6 步（法国照上面「私有值」那条）记指纹。
+- 拼车并发总上限登记（#194 方案 4.7）：每台跑引擎的机器在自己那份期望的 `engine.env` 里写 `FLEET_CARPOOL_MAX_CONCURRENCY`（这台最多同时开几个拼车会话；法国 4、本机档 WSL 演练台 2，创始人本机固定独享、不登记），两份都写 `FLEET_CARPOOL_TOTAL_CAP`（总上限，6，两边逐字一样，只有配置检查读）。`config.mjs diff-local`（CI 里 `deploy/test/config.test.mjs` 拿两份真文件跑；france.sh 读回也跑）核：每台都登记成公开的正整数、各台加起来不超过总上限、仓里没有没登记进 `PROFILE_DESIRED` 的 `deploy/*/desired-config.json`（加一台机器不登记就红）。引擎起来（registerJobs 那一步）拿自己的登记数核库里拼车池（目录配置里 `orgKind` 为 `carpool` 的池）`maxConcurrency` 加起来是不是同一个数：对不上、没登记、写坏了、库里没有拼车池都推 `carpool-cap:registry` 提醒（不挡接活，对上了自己撤；怎么修：改目录配置 `catalog.json` 里拼车池的 `maxConcurrency` 重新装，或改仓里的登记，两边要同时过配置检查）。数值只放在两份期望里，代码里没有默认数。额度配置 `/etc/fleet-dao/quota.json` 是手放的文件、不在期望里（里面有 Key 文件路径）：里面没有 `reclaude-carpool` 池时切号读接口读不到 Key，盯读当场推 `carpool-api`（`packages/engine/test/real/carpool-api.test.ts` 钉着）；样例见 `deploy/examples/quota.example.json`。
 - 新机器：france.sh 照这一档的期望建 `engine.env`、`api.env`、`release.env`（公开值照期望、私有值只留空位，`deploy/lib/app-config.sh` 的 `env_from_desired`）；已有的文件不照期望改（照旧只修属主权限、删退役的键）。私有值从保险箱放上来或由人填。
 - 换机：从保险箱把 `/etc/fleet-dao` 整份放回（连指纹钥匙），对账照旧对得上；`.config-applied.json` 不在保险箱里，换机后第一次发布只记基线。钥匙没放回、france.sh 生成了新的：钥匙编号对不上，私有值全部记没查成（一条报警，不会报成一堆不一致），照上面「一次算全部私有值」重算、改期望。
 - 换指纹钥匙（怀疑漏了）：删掉 `/etc/fleet-dao/config-fingerprint.key`、重跑 france.sh 生成新的，重算全部私有值的指纹、改期望、合进主线；中间那段私有值记没查成。

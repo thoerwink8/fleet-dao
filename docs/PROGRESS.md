@@ -20,6 +20,16 @@
 - 做法：任务工作流新加信号 `taskRouteWake`（`task-contract.ts`）；选路排队和验收等空位改用 `pauseForRoute`（`workflows/task-runtime.ts`，问选路之前取记号，问的那一刻到的叫醒不丢，叫醒后选不到回去再等、不空转）；发信一侧 `real/route-wake.ts`（切号两条路各接一次：当场切号 `probeNow` 之后、探针那一轮 `after` 核对之后）；收信人不在略过，收信失败、列不出在跑的工作流报警 `route-wake:signal`、全部成功再撤；2 分钟上限留作兜底。方案-v2 第十一节那一行、`docs/design.md` 切号那段已改成「做了」。
 - 测试：`test/task-route-wake.test.ts`（Temporal 测试服务端）、`test/real/route-wake.test.ts`。
 
+## 2026-10-05 #194 方案 4.7「拼车并发总上限登记 + 配置检查 + 对账显示」+「上线前要核」（Sonnet 5.5 子代理，分支 `feat/194-concurrency-cap`，`Refs #194`，先审后合：碰了 `deploy/france/desired-config.json`）
+
+做到哪：代码、测试、文档都写完并推了，PR 待开（开出来后补 PR 号、第二意见）；下一步：开 PR、走 `discuss` 的「审 PR」、过了挂自动合并、盯 CI。还没验证：法国、本机真机上发布后 `engine.env` 里真的带上两项、引擎起来核的结果（法国引擎关着，复查 10-15）；驾驶舱额度页的对账在真库、真读数上的样子（只在内存库测试里验过）。
+- 登记（done）：`deploy/france/desired-config.json`、`deploy/local/desired-config.json` 的 `engine.env` 各加 `FLEET_CARPOOL_MAX_CONCURRENCY`（法国 4、本机档 2）、`FLEET_CARPOOL_TOTAL_CAP`（6，两边逐字一样）；数值只在这两份里，代码没有默认数（创始人说留量线不许写死，这里同一个做法）。已定默认：总上限 6、法国 4、WSL 演练台 2、创始人本机固定独享不登记。
+- 配置检查（done）：`deploy/france/auto-release/config.mjs` 的 `carpoolCapProblems`（每台公开正整数、总上限一致、加起来不超）、`unregisteredDesiredFiles`（`deploy/*/desired-config.json` 没登记进 `PROFILE_DESIRED` 就红），都由 `diff-local` 调；测试 `deploy/test/config.test.mjs`。
+- 引擎起来核（done）：`packages/engine/src/real/carpool-cap.ts`，`registerJobs` 里调；对不上、没登记、写坏了、库里没有拼车池推 `carpool-cap:registry`，对上了撤；测试 `test/real/carpool-cap.test.ts`。
+- 对账显示（done）：`db/src/queries/carpool-spend.ts`、`api/src/carpool-reconcile-view.ts`、`shared` 的 `CarpoolReconcileViewSchema`（`PoolsResponse.carpoolReconcile`）、`web/src/components/carpool-reconcile.tsx`（额度页切号现状下面）；只显示、不报警。「差得多」的线是显示用的经验值（差额至少 $2 且至少占接口已用的 25%，`RECONCILE_MIN_GAP_*`），只决定那一句话怎么写，不触发动作；没记到花费的会话按本窗已记会话的平均估，没有已记会话可估就写「说不准」，不往别的设备上猜。
+- 上线前要核（done）：① 盯读账本认不出原来只记「没跑成」、不推 `session-org:ledger`（只有切号那条路推）——已补（`real/carpool-watch.ts`），测试 `test/real/carpool-watch-ledger.test.ts`（账本认不出推提醒、修好撤；库读不了照常抛、不冒充账本认不出）；② 额度配置 `/etc/fleet-dao/quota.json` 是手放的文件、不在期望里（`desired-config` 只管三份环境文件和 `france.env`），所以没法把 `reclaude-carpool` 池补进去；缺它时盯读当场推 `carpool-api`（`test/real/carpool-api.test.ts` 钉着），ops 第九节写明；③ ops 第五节登录步骤补了「设备名额 4 台已满」一句。
+- 方案-v2 第十一节 4.7 行、第 19 条、11.4 已改成「做了」。
+
 ## 2026-10-05 CI 第三轮（创始人 10-04 夜「按照你推荐去做，自我验证，持续优化到最佳」，Sonnet 5.5 子代理）
 
 - 做到哪、数字、怎么量：`docs/ci-speedup-plan.md`「第三轮」。第一块（#876，已合）：合并闸只在改了已有 ci.yml 时装 YAML 依赖 + debt 推主线只留看文件那一半 + `pnpm ci:stats` 量法。第三块（#885）：release 对普通 PR 不起机器 + lint 并行三样记秒数 + 量测结论（「第三轮结果」，停的依据在那里）；第二块（#881，已合，真主线验证过）：主线同树复用，方案在 PR 说明和 ci-speedup-plan 的 D 第 6 点；会改 ci.yml，要走第二意见，合并后要看第一批主线轮次的 `main-reuse` 输出（声明上线前跑的 PR 检查没有声明，会 warning 后全跑，是预期）。量几条（tsc 增量缓存、分片结果缓存主线写 PR 读、固定开销、CLEAN 到 MERGED 的滞后、第二意见自动触发）的结论并进对应 PR 的文档，不单开 PR。还没验证：合并闸改后的真实数字（合并后才生效）。
