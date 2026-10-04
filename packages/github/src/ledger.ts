@@ -15,7 +15,7 @@ import {
   pgIdempotencyStore,
 } from './idempotency.ts';
 
-export interface PgLockerOptions {
+export interface LockerOptions {
   now?: () => Date;
   /** 等锁时两次尝试之间怎么睡（测试给假的）。 */
   sleep?: (ms: number) => Promise<void>;
@@ -25,15 +25,23 @@ export interface PgLockerOptions {
   log?: Logger;
 }
 
+/** 旧名字：#901 ⑤ 把 Postgres 的部分挪去 store 之前，调用方都叫它（⑤-3 删）。 */
+export type PgLockerOptions = LockerOptions;
+
+/** 拿 Postgres 的幂等账造跨工人的锁（⑤-3 起这个函数只在 store 里，见 packages/store/src/github-pg.ts）。 */
+export function pgLocker(db: Db, options: PgLockerOptions = {}): Locker {
+  return lockerOver(pgIdempotencyStore(db), options);
+}
+
 /**
  * 跨工人的锁：锁是幂等账里的一行（action=github.lock，键 gh:lock:<名字>），持锁期间定时续，用完删掉。
+ * 逻辑只依赖幂等账这个接口（账存在哪——Postgres、内存——它不知道），所以和库无关。
  * 改这里之前必须知道：锁不占着库连接。持锁的 fn 里是几次 HTTP（秒到分钟级），还要查库（幂等账、回声）；
  * 要是像事务级 advisory lock 那样一直占着一条连接，fn 查库得再借一条，同时等锁、持锁的一多到连接池上限，
  * 就全在等彼此（PGlite 只有一条连接，一把锁就卡死）。
  * 代价：持锁的工人死了，别人要等它的占用过期（staleAfterMs）才接得过去。同一个进程里抢同一个键的先在进程内排队，不去库里轮询。
  */
-export function pgLocker(db: Db, options: PgLockerOptions = {}): Locker {
-  const store = pgIdempotencyStore(db);
+export function lockerOver(store: IdempotencyStore, options: LockerOptions = {}): Locker {
   const local = memoryLocker();
   const o = {
     now: options.now ?? (() => new Date()),
