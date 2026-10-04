@@ -81,6 +81,9 @@ export interface FailureRule {
 
 const TRANSIENT_LADDER: readonly Rung[] = ['retry', 'swapRoute', 'park'];
 
+/** 按分钟限流的原文（RL1）；拼车被拒分流（jobs/carpool-outage.ts）也按它认「不是额度用满」。 */
+export const RL1_TEXT = /\bper[ -]?(?:second|minute|min)\b|\b(?:requests?|tokens?) per\b|每(?:秒|分钟)/i;
+
 export const RULES: readonly FailureRule[] = [
   // 在途工作流重放对不上现在的代码：重试只会每轮再撞一次（windsurf-dao#1633）。
   {
@@ -223,7 +226,7 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'RL1',
     title: '按分钟限流',
-    text: /\bper[ -]?(?:second|minute|min)\b|\b(?:requests?|tokens?) per\b|每(?:秒|分钟)/i,
+    text: RL1_TEXT,
     ladder: ['wait', 'swapRoute', 'park'],
     maxRetries: 1,
     defaultWaitSeconds: 60,
