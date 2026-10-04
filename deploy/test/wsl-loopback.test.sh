@@ -305,7 +305,9 @@ inner() {
   # shellcheck source=../lib/profile.sh
   source "$HERE/../lib/profile.sh"
   local port f
-  PROFILE=local SESSION_PROXY_NODE=$NODE SESSION_PROXY_STATE=""
+  PROFILE=local SESSION_PROXY_STATE=""
+  # SESSION_PROXY_NODE 在 source 之后设：profile.sh 里那一项（按 PATH 找 node）会把它覆盖掉
+  SESSION_PROXY_NODE=$NODE
   session_proxy_load
   check "读得出登记的代理" "$?:$SESSION_PROXY" "0:http://127.0.0.1:7890"
   port=${SESSION_PROXY##*:}

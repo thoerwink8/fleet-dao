@@ -25,6 +25,11 @@ umask 022
 DEPLOY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
+# 本机档（#451、#786）：这一档期望里登记的会话代理（FLEET_SESSION_PROXY）。发布取代码、装依赖原来是直连——本机档
+# WSL 直连 github.com、registry.npmjs.org 时通时不通，发布就卡在取代码上（#786）。profile.sh 只管读期望、挑哪一份
+# 期望按 PROFILE 走，所以下面照这台的档位文件把 PROFILE 定下来（france.sh 是照环境变量定的，发布没有那个环境变量）。
+# shellcheck source=lib/profile.sh
+source "$DEPLOY_DIR/lib/profile.sh"
 
 REPO_URL=https://github.com/thoerwink8/fleet-dao.git
 RELEASES=${FLEET_RELEASES_DIR:-/srv/fleet-dao-releases} # 只有 deploy/test/release-flow.test.sh 会改它
@@ -85,6 +90,72 @@ CONFIG_ETC=/etc/fleet-dao
 CONFIG_PROFILE=$CONFIG_ETC/profile
 CONFIG_STATE=$RELEASES/.config-applied.json
 CONFIG_REDS=() # config.mjs 这一次说的 red（调用方合成一条红）
+
+# 这一档登记的会话代理（#786）：本机档的 WSL 出网要经 Windows 上 Clash 的 127.0.0.1:7890，法国登记的
+# FLEET_SESSION_PROXY 是空＝直连。发布里有两处要出网、环境都是清干净的——取代码（systemd 临时服务里以 root 跑
+# git fetch，环境里只有 HOME）和装依赖（以 fleet 的 env -i 跑 pnpm install），两处都拿不到 /etc/environment 里的
+# 代理，本机档就直连 github.com / registry.npmjs.org，时通时不通：10:19 那次取代码被重置、没发成。只认这一档期望里
+# 登记的那一项，不认调用者环境里的同名变量（同 #731）：root 的登录 shell 里碰巧有代理，法国照样直连。
+# 读一次记下来（session_proxy_load 要在当前 shell 里叫，在 $(...) 里叫记不住），读不出就不发（不拿直连顶）。
+SESSION_PROXY_NODE=$NODE # 读期望的 node（config.mjs 要用它算）
+SESSION_PROXY_STATE=""   # 空：还没读；ok：读到了；bad：没读成（原因在 SESSION_PROXY_WHY）
+PROXY=()                 # 给 git 的 -c http.proxy=…，直连时是空的
+PROXY_ENVS=()            # 给 pnpm、reclaude 的环境变量（KEY=值），直连时是空的
+PROXY_READY=0            # 1：读过了、可以用（读了直连也算）
+
+# 这台的档位（#431、#323）：照档位文件定 PROFILE，profile.sh 才知道挑哪一份期望读会话代理。文件不在算法国
+# （和 config.mjs 的 readProfile 同一个判法：装档位文件之前的机器都是这样）；读不了、认不出的不当成法国——
+# 本机档拿法国的期望读，就把「本机直连」当成这一档的登记，取代码照样不通，所以这里判红、不猜。
+profile_set() {
+  local got
+  PROFILE=france
+  if [[ ! -e "$CONFIG_PROFILE" && ! -L "$CONFIG_PROFILE" ]]; then return 0; fi
+  if [[ -L "$CONFIG_PROFILE" || ! -f "$CONFIG_PROFILE" ]]; then
+    red "$CONFIG_PROFILE 不是普通文件：认不出这台的档位（照着它挑这一档的期望读会话代理），不敢当法国"
+    return 1
+  fi
+  if ! got=$(<"$CONFIG_PROFILE") 2>/dev/null; then
+    red "读不了 $CONFIG_PROFILE：认不出这台的档位，不敢当法国"
+    return 1
+  fi
+  got=${got%$'\n'}
+  case $got in
+  france | local) PROFILE=$got ;;
+  *)
+    red "$CONFIG_PROFILE 里的档位认不出（只认 france、local）：不敢当法国"
+    return 1
+    ;;
+  esac
+}
+
+# 读这一档登记的会话代理，编译成 git 的参数（PROXY）和要带进命令环境的变量（PROXY_ENVS）。读不成（期望读不出、
+# 没登记这一项、登记的认不出）判红、返回 1：调用方在前提那一步停下，不带着「拿直连顶」去发版。读一次记下来
+# （session_proxy_load 要在当前 shell 里叫，在 $(...) 里叫记不住），再叫什么都不重读。
+proxy_load() {
+  if ((PROXY_READY)); then return 0; fi
+  if ! session_proxy_load; then
+    red "这一档登记的会话代理没读成（$SESSION_PROXY_WHY）：取代码、装依赖没经代理，不拿直连顶"
+    return 1
+  fi
+  PROXY_READY=1
+  PROXY=() PROXY_ENVS=()
+  if [[ -n "$SESSION_PROXY" ]]; then
+    PROXY=(-c "http.proxy=$SESSION_PROXY")
+    PROXY_ENVS=("${SESSION_PROXY_VARS[@]}")
+    ok "取代码、装依赖经这一档登记的代理（${SESSION_PROXY%%:*}:…，值不打全）"
+  else
+    ok "这一档登记的会话代理是空：取代码、装依赖直连（法国）"
+  fi
+}
+
+# 要出网的 git：带上这一档登记的代理（-c 要写在子命令前面）。只在取代码这种要出网的地方用——rev-parse、cat-file、
+# merge-base 这些本地命令不带，看不出区别，也省得把代理写进每一行。限时套在里面、不套在外面：`timeout 300 git_net …`
+# 是错的——timeout 起的是外部命令，看不见 shell 函数（真机上「failed to run command 'git_net'」直接退 127）
+git_net() { # 限时秒数 参数…：和 timeout 一样，把 git 跑起来
+  local secs=$1
+  shift
+  timeout "$secs" git "${PROXY[@]}" "$@"
+}
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
@@ -172,12 +243,15 @@ kv_get() { # 文件 键：「键=值」一行一项的文件里这一项的值�
   done <"$1"
 }
 
-# 以 fleet 身份、在给定目录里跑命令（环境清空，同 as_user）
+# 以 fleet 身份、在给定目录里跑命令（环境清空，同 as_user）。这一档登记的代理要出网时带上（#786：本机档装依赖
+# pnpm install 要连 registry.npmjs.org，直连时通时不通）；法国登记的代理是空，一个字都不加。读代理之前（PROXY_READY=0）
+# 不带：下面前提那一步读不出会判红、不发版，走到这里就一定是读过了
 as_fleet_in() { # 目录 命令…
   local dir=$1
   shift
   (cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
-    PATH=/home/fleet/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$@")
+    PATH=/home/fleet/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    "${PROXY_ENVS[@]}" "$@")
 }
 
 pg_admin() { (cd / && runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -tA "$@"); }
@@ -203,6 +277,9 @@ preflight() {
       return 1
     fi
   done
+  # 取代码、装依赖经这一档登记的代理（#786）：读不出、认不出就停下——走到取代码那一步才发现不通，白等一轮
+  profile_set || return 1
+  proxy_load || return 1
   auto_parts
   ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：$(parts_said)；域名 $FLEET_DOMAIN"
   if has_part demo; then ok "演示版在香港站点的 $FLEET_DEMO_PATH"; fi
@@ -432,7 +509,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
     git -C "$CACHE" remote add origin "$REPO_URL"
     echo "  · 建了取代码用的裸仓 $CACHE"
   fi
-  if ! out=$(timeout 300 git -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' 2>&1); then
+  if ! out=$(git_net 300 -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' 2>&1); then
     red "从 $REPO_URL 取主线失败：$(tail -2 <<<"$out" | tr '\n' ' ')"
     return 1
   fi
@@ -444,7 +521,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
         red "本地没有 $target，短提交号又没法向 GitHub 要：给完整的 40 位提交号"
         return 1
       fi
-      if ! out=$(timeout 300 git -C "$CACHE" fetch -q origin "$target" 2>&1); then
+      if ! out=$(git_net 300 -C "$CACHE" fetch -q origin "$target" 2>&1); then
         red "向 GitHub 要不到提交 $target：$(tail -2 <<<"$out" | tr '\n' ' ')"
         return 1
       fi
