@@ -16,7 +16,7 @@ import {
   type CanaryVerdict,
   type RecordedCanaryStage,
 } from '@fleet-dao/db';
-import { asRecord, errMessage } from '@fleet-dao/shared/util';
+import { asRecord, errMessage, sleep as realSleep } from '@fleet-dao/shared/util';
 import { type Client, ScheduleNotFoundError, ScheduleOverlapPolicy } from '@temporalio/client';
 import { CANARY_JOB, CANARY_MAX_MINUTES, spanWords, stepSpans } from './jobs/canary.ts';
 
@@ -199,7 +199,7 @@ export function temporalDrill(client: DrillClient, o: TemporalDrillOptions): Omi
   const startTimeoutMs = o.startTimeoutMs ?? 60_000;
   const pollMs = o.pollMs ?? 2_000;
   const noteEveryMs = o.noteEveryMs ?? 10 * 60_000;
-  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sleep = o.sleep ?? realSleep;
   const now = o.now ?? (() => Date.now());
   const handle = client.schedule.getHandle(scheduleId);
   const describe = async () => {

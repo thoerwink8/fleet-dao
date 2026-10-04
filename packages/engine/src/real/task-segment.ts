@@ -23,7 +23,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { errMessage } from '@fleet-dao/shared/util';
+import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
@@ -73,21 +73,6 @@ export interface RunSegmentDeps {
   admissionPollMs?: number;
   heartbeatEveryMs?: number;
   log?: (message: string, fields?: Record<string, unknown>) => void;
-}
-
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(signal.reason ?? new Error('被叫停了'));
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason ?? new Error('被叫停了'));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 /** 删 runsDir 下超过 ttl 的执行目录。不抛：清不掉只记日志，下次再清。 */

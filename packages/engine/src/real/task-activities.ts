@@ -22,7 +22,7 @@ import {
   standardFiles,
 } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
-import { errMessage } from '@fleet-dao/shared/util';
+import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
 import { readTaskBrief } from '../runner/task-brief.ts';
@@ -74,26 +74,6 @@ type TaskActivities = Required<
 
 const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo.owner, name: repo.name });
 const short = (sha: string) => sha.slice(0, 7);
-
-/** 可以被叫停打断的休眠。 */
-export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(abortReason(signal));
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(abortReason(signal));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new Error('被叫停了');
-}
 
 /** GitHub 拒绝挂自动合并、因为 PR 已经满足全部合并条件（没什么可等的）。 */
 function isCleanStatus(error: unknown): boolean {

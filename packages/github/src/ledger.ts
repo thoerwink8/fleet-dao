@@ -3,6 +3,7 @@
 // github-pg.ts，表结构在 @fleet-dao/db。packages/conventions/test/package-layers.test.ts 钉住「github 不许依赖 db、store」。
 // 驾驶舱、fleet done 的核实都只读镜像、不直接查 GitHub，所以镜像写错了人看到的就是错的：写入按 GitHub 的 updated_at 防倒退
 // （Postgres 版和内存版都要照这条）。
+import { sleep } from '@fleet-dao/shared/util';
 import { type Logger, type RepoRef, silentLogger } from './client.ts';
 import { type Locker, memoryLocker } from './deps.ts';
 import { GitHubError } from './errors.ts';
@@ -36,7 +37,7 @@ export function lockerOver(store: IdempotencyStore, options: LockerOptions = {})
   const local = memoryLocker();
   const o = {
     now: options.now ?? (() => new Date()),
-    sleep: options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    sleep: options.sleep ?? sleep,
     staleAfterMs: options.staleAfterMs ?? CLAIM_STALE_AFTER_MS,
     renewEveryMs: options.renewEveryMs,
     log: options.log ?? silentLogger,
