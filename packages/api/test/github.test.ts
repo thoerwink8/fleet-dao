@@ -1,5 +1,5 @@
+import { devFixtures } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { devFixtures } from '../src/dev-fixtures.ts';
 import {
   createGitHubIntake,
   githubAppMissing,

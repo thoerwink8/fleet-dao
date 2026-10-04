@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
-import { silentLogger } from '@fleet-dao/store';
+import { isLockWaitError, silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
+import { probeDb } from '../src/db-probe.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
-import { isLockWaitError, probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';

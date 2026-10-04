@@ -16,8 +16,8 @@ import {
   type IntentDetailSchema,
   IntentIssueRefSchema,
 } from '@fleet-dao/shared';
+import { wellFormed } from '@fleet-dao/store';
 import type { z } from 'zod';
-import { wellFormed } from './feishu-records.ts';
 import type { IntentAudit, IntentStore } from './intent-store.ts';
 import {
   beijingRange,

@@ -20,9 +20,9 @@ import {
   IntentIntakeRecallResponse,
   IntentRoutes,
 } from '@fleet-dao/shared';
+import { wellFormed } from '@fleet-dao/store';
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import type { Deps } from './deps.ts';
-import { wellFormed } from './feishu-records.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
 import type { DueCards, IntentStore } from './intent-store.ts';
 import { composeCard } from './intents.ts';

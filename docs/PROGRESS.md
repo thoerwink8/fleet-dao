@@ -5,7 +5,7 @@
 ## 2026-10-04 夜（#865 纠正分层：引擎不再依赖 api，Sonnet 5.5 子代理，分 4 个 PR）
 
 - 方案 `specs/865-分层纠正/方案.md`（新包 `@fleet-dao/store`；`PublicHealthError` 和抛它的函数留在 api，`auth.ts`、`health.ts` 不碰）。
-- 第 1 步（类型、日志、ids、白名单搬进 store，引擎的白名单和 `User` 改引 store）：本 PR。下一步：第 2 步两套 Store 和契约；第 3 步进门/对账/告警/落后（碰 `github.ts`，走第二意见）；第 4 步摘 engine 对 api 的依赖并清空 `packages/conventions/test/package-layers.test.ts` 里的 `PENDING_865` 名单（钉子本身第 1 步已带上：api 顶层、store 不依赖 engine、故意造违例）。
+- 第 1 步（类型、日志、ids、白名单搬进 store，引擎的白名单和 `User` 改引 store）：#868 已合。第 2 步（两套 Store、契约测试、`testing` 夹具搬进 store；`probeDb` 留 api 的 `db-probe.ts`）：本 PR。下一步：第 3 步进门/对账/告警/落后（碰 `github.ts`，走第二意见）；第 4 步摘 engine 对 api 的依赖并清空 `packages/conventions/test/package-layers.test.ts` 里的 `PENDING_865` 名单（钉子本身第 1 步已带上：api 顶层、store 不依赖 engine、故意造违例）。
 
 ## 2026-10-04 夜 交接（创始人让结束当前会话、新开会话接着干）
 

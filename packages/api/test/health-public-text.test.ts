@@ -18,6 +18,7 @@ import { silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE, canaryHealthCheck } from '../src/canary-health.ts';
 import { startPgChangeFeed } from '../src/changes.ts';
+import { probeDb } from '../src/db-probe.ts';
 import { DEPLOY_LAG_NOT_HERE, deployLagCheck } from '../src/deploy-lag.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from '../src/gateway-seen.ts';
@@ -25,7 +26,6 @@ import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { type HealthReport, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { judgeHealthCheck } from '../src/judge-health.ts';
-import { probeDb } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import {

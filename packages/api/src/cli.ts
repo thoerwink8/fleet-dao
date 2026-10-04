@@ -427,7 +427,7 @@ export interface CliDeps {
 
 async function openPgIntents(url: string): Promise<{ intents: IntentStore; close(): Promise<void> }> {
   const { createDb } = await import('@fleet-dao/db');
-  const { withStatementTimeout } = await import('./pg-store.ts');
+  const { withStatementTimeout } = await import('@fleet-dao/store');
   const { createPgIntentStore } = await import('./intent-store-pg.ts');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return { intents: createPgIntentStore(db), close };
@@ -436,7 +436,7 @@ async function openPgIntents(url: string): Promise<{ intents: IntentStore; close
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
   // 到这里才加载库：参数不对时不用连库
   const { createDb } = await import('@fleet-dao/db');
-  const { createPgStore, withStatementTimeout } = await import('./pg-store.ts');
+  const { createPgStore, withStatementTimeout } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return { store: createPgStore(db), close };
 }
@@ -446,7 +446,7 @@ async function openPgAlertWork(
   env: CliEnv,
 ): Promise<{ alerts: AlertWorkPort; close(): Promise<void> }> {
   const { createDb } = await import('@fleet-dao/db');
-  const { withStatementTimeout } = await import('./pg-store.ts');
+  const { withStatementTimeout } = await import('@fleet-dao/store');
   const { deployFacts, pgAlertWork } = await import('./alert-work.ts');
   const { readDeployLagInput } = await import('./deploy-lag.ts');
   const { db, close } = createDb({ url: withStatementTimeout(url) });

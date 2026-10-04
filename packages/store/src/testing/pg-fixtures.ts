@@ -34,7 +34,7 @@ import {
   users,
 } from '@fleet-dao/db';
 import { sql } from 'drizzle-orm';
-import type { MemoryData } from '../src/memory-store.ts';
+import type { MemoryData } from '../memory-store.ts';
 
 const date = (iso: string) => new Date(iso);
 const dateOpt = (iso: string | undefined) => (iso === undefined ? null : new Date(iso));

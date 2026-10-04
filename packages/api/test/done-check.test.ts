@@ -1,5 +1,5 @@
+import { checkDone, testRunOf } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { checkDone, testRunOf } from '../src/done-check.ts';
 import type { PullRequestRecord, TestRunRecord } from '../src/ports.ts';
 
 const pr = (over: Partial<PullRequestRecord> = {}): PullRequestRecord => ({

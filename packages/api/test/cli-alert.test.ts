@@ -4,13 +4,12 @@
 // 判法的边界表在 core 的 alert-work.test.ts，读写在 db 的 alert-work.test.ts；这里管命令这一层（真 Postgres：PGlite）。
 import { upsertAlert } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { createPgStore, devFixtures } from '@fleet-dao/store';
+import { seedPg } from '@fleet-dao/store/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertWorkPort, pgAlertWork } from '../src/alert-work.ts';
 import { type CliDeps, main } from '../src/cli.ts';
-import { devFixtures } from '../src/dev-fixtures.ts';
-import { createPgStore } from '../src/pg-store.ts';
 import type { Store } from '../src/ports.ts';
-import { seedPg } from './pg-fixtures.ts';
 
 const T0 = new Date('2026-09-27T08:00:00.000Z');
 const A = ['--machine', '本机', '--session', 'a1'];

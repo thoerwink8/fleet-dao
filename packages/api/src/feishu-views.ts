@@ -14,8 +14,8 @@ import {
   type Task,
   type TaskState,
 } from '@fleet-dao/shared';
+import { clip, UNDERSTANDING_MAX } from '@fleet-dao/store';
 import type { z } from 'zod';
-import { clip, UNDERSTANDING_MAX } from './feishu-records.ts';
 import type {
   AskRecord,
   DraftRecord,

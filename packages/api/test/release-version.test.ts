@@ -2,9 +2,9 @@
 // 故意造出的失败：读不到里程碑、一张版本里程碑都没开、CHANGELOG.md 读不了或认不出、受管的仓里没有 fleet-dao、没接上、
 // 读超时——都照实回 unreadable / blocked 带原因，不回 v1、不回 0、不拿「上一版 +1」顶。
 import { ReleaseVersionResponse, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
+import type { MemoryData } from '@fleet-dao/store';
+import { devFixtures } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { devFixtures } from '../src/dev-fixtures.ts';
-import type { MemoryData } from '../src/memory-store.ts';
 import { type ReleaseSource, readReleaseVersion } from '../src/release-version.ts';
 import { type Harness, harness, T0 } from './harness.ts';
 
