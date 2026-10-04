@@ -100,7 +100,9 @@
 - `debt.yml`：两个 job 是 `debt-docs`（只看文件）和 `debt-live`（读 GitHub 现状、给单子留言）。推主线时 `debt-live` 不再起，只留每天凌晨一次和手动运行：它看的是单子开没开，和这次推的代码无关。实测推主线时这两个 job 各约 7 秒（最近 40 次推送合计 572 秒），去掉后者每次推送少一个 job、少约 7 秒机器时间。
 - 改后实测数字：合并闸那一半要等这个 PR 合进主线才生效（`pull_request_target` 跑的是主线上的工作流），改后的量在下一个 PR 的「第三轮结果」里补，量法同上（`pnpm ci:stats --workflow merge-gate.yml --since <合并时间>`）。
 
-## D 的细节（方案，待实现）
+**第二块：主线同树复用（一个 PR，方案和判法见下面「D 的细节」第 6 点）**：主线这次提交的树和某次成功的 PR 检查测的是同一棵、基准也是上次真绿的头 → test、web、deploy 不重测。命中率实测（最近 49 个主线合并）：树口径 43 个（88%），严格口径 37 个（76%）。改后的实测数字（命中的主线轮次 job 数 / 机器分钟 / 墙钟）合并后用 `pnpm ci:stats --workflow ci.yml --event push --since <合并时间>` 量，写在这里。
+
+## D 的细节（方案，已实现，见第 6 点）
 
 1. `packages/conventions/src/bin/ci-plan.ts`：`event === 'push'` 时也走 diff——base 不取 `origin/<目标分支>`，而是**上一次主线绿的那次 ci.yml run 的 head_sha**（从 GitHub API 现读，不新存状态）。base 读不到 → 退回全跑 + 明确报警，不当绿。
 2. `.github/workflows/ci.yml`：`changes` job 增加一步查这个 SHA；`concurrency.cancel-in-progress` 改成 `true`（push 也取消）。**注意 `packages/conventions/test/ci-plan.test.ts` 有两条钉子测试钉着这两处，必须一起改。**
