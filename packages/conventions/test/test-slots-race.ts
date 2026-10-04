@@ -22,8 +22,13 @@ const cfg: SlotConfig = {
   pollMs: 1000,
   reportMs: 10_000,
 };
+// 先睡到差几毫秒（几个子进程同时忙等会互相抢 CPU），最后几毫秒忙等到点：两个子进程尽量同一刻进 tryAcquire
+function pause(ms: number): void {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+pause(Number(startAt) - Date.now() - 20);
 while (Date.now() < Number(startAt)) {
-  // 忙等到点：两个子进程尽量同一刻进 tryAcquire
+  // 忙等最后几毫秒
 }
 try {
   const r = tryAcquire(
@@ -32,10 +37,7 @@ try {
   );
   if (r.kind === 'got') {
     console.log('GOT');
-    const until = Date.now() + Number(holdMs);
-    while (Date.now() < until) {
-      // 占着
-    }
+    pause(Number(holdMs)); // 占着（进程活着、槽文件在）
     r.handle.release();
   } else {
     console.log('BUSY');
