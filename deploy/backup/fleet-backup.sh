@@ -3,7 +3,7 @@
 # 备份的定时任务本体（法国，以 fleet 跑，由 units/ 里的定时器经 systemd 拉起）：
 #   fleet-backup.sh backup  每晚：三个库各导一份（行数清单和导出用同一个快照），restic 加密后经隧道存进香港，按 7 日 + 4 周删过期的
 #   fleet-backup.sh drill   每周：把最近一份从香港取回来，逐个恢复进临时库，核对每张表的行数和各时间列的最新值，删掉临时库
-#   fleet-backup.sh watch   每小时：两台机器的磁盘用量；前两个任务多久没跑了
+#   fleet-backup.sh watch   每小时：两台机器的磁盘用量（前两个任务多久没开跑由引擎的看门狗看，这里不重复，#339）
 # 每跑一次在 schedule_runs 记一行（四种结局见 packages/db/src/queries/schedule.ts）；没做成的、查出问题的在 notifications
 # 发报警，好了自动解除。退出码：没做成 1（systemd 隔一会儿重试），其余 0——「查出问题」不算任务失败（docs/reference/deploy.md P12）。
 # 由 deploy/backup/install.sh 装到 /usr/local/lib/fleet-dao/backup/；改这份、再跑一遍装机脚本，别在机器上手改。
@@ -460,48 +460,19 @@ watch_hk() { # 路径…
   done
 }
 
-# 前两个任务多久没「开跑」了：超过登记的过期分钟就报警。跑了但没做成的由它们自己报，这里只抓「定时器根本没在响」（P08）。
-watch_fresh() {
-  local rows id line expect age name
-  if ! rows=$(bk_sql fleet 2>"$WATCH/err" <<'SQL'
-select j.id, j.expect_every_minutes,
-  coalesce(floor(extract(epoch from now() - max(r.started_at)))::bigint::text, 'never')
-from scheduled_jobs j left join schedule_runs r on r.job = j.id
-where j.id in ('backup.nightly', 'backup.drill')
-group by j.id, j.expect_every_minutes;
-SQL
-  ); then
-    WATCH_MISSING+=("备份新鲜度：$(tail_of "$WATCH/err")")
-    return
-  fi
+# 备份「多久没开跑」不在这里查（#339）：引擎的看门狗（#203）按 scheduled_jobs 登记表看所有定时任务，备份的三个也在里面，
+# 备份停了（定时器不响）它推「定时任务「…」停了」；这里再查一遍就是一件事两张卡。跑了但没做成的由各任务自己报。
+# 以前这里报过的 backup.stale:<任务> 两条已经退役：已经开着的（删这段之前推出来的）每轮顺手撤掉，不然没人再去撤它们。
+retire_stale_alerts() {
+  local id
   for id in backup.nightly backup.drill; do
-    line=$(awk -F '\t' -v id="$id" '$1 == id' <<<"$rows")
-    if [[ -z "$line" ]]; then
-      WATCH_MISSING+=("$id 没登记（跑一遍 install.sh france）")
-      continue
-    fi
-    IFS=$'\t' read -r _ expect age <<<"$line"
-    if [[ ! "$expect" =~ ^[0-9]+$ || ! "$age" =~ ^([0-9]+|never)$ ]]; then
-      WATCH_MISSING+=("$id 的读数认不出（「$line」）")
-      continue
-    fi
-    WATCH_SCANNED=$((WATCH_SCANNED + 1))
-    if [[ "$age" == never ]] || ((age > expect * 60)); then
-      WATCH_FOUND=$((WATCH_FOUND + 1))
-      if [[ "$age" == never ]]; then age="从没跑过"; else age="上次开跑在 $((age / 3600)) 小时前"; fi
-      name=$(bk_job_name "$id")
-      alert_raise "backup.stale:$id" "${name%%（*}超过 $((expect / 60)) 小时没开跑" \
-        "$age。定时器可能没在排班：法国 systemctl list-timers 'fleet-backup*'" || true
-    else
-      alert_resolve "backup.stale:$id" || true
-      echo "$id：$((age / 60)) 分钟前开跑过"
-    fi
+    alert_resolve "backup.stale:$id" || true
   done
 }
 
 cmd_watch() {
   take_lock watch
-  run_start backup.watch fleet-backup-watch.service 磁盘与备份巡检
+  run_start backup.watch fleet-backup-watch.service 磁盘巡检
   CLEANUP=cleanup_watch
   local outcome why
   local -a fr hk
@@ -514,9 +485,9 @@ cmd_watch() {
   read -r -a hk <<<"${FLEET_DISK_PATHS_HK:-}"
   watch_france "${fr[@]}"
   watch_hk "${hk[@]}"
-  watch_fresh
+  retire_stale_alerts
   outcome=$(bk_outcome "$WATCH_SCANNED" "$WATCH_FOUND" "${#WATCH_MISSING[@]}")
-  why="看了 $WATCH_SCANNED 项，超线或过期 $WATCH_FOUND 项"
+  why="看了 $WATCH_SCANNED 项，超线 $WATCH_FOUND 项"
   if ((${#WATCH_MISSING[@]})); then why+="；没查成：$(bk_join '；' "${WATCH_MISSING[@]}")"; fi
   if [[ "$outcome" == unscanned ]]; then why="配置里一条要看的都没有（$BK_CONFIG）"; fi
   finish "$outcome" "$WATCH_SCANNED" "$WATCH_FOUND" "$why"
