@@ -62,6 +62,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { ackReasonOf, holdUntilOf, judgeOutboxAck } from './outbox-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AgentSession,
@@ -1527,30 +1528,14 @@ export function createMemoryStore(
       const report: FeishuAckReport = { applied: 0, skipped: [] };
       for (const ack of acks) {
         const row = data.feishuOutbox.find((r) => r.id === ack.itemId);
-        if (!row) {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'unknown_item' });
-          continue;
-        }
-        if (ack.revision > row.revision) {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'future_revision' });
+        const verdict = judgeOutboxAck(row, ack);
+        if (!row || verdict.kind === 'skip') {
+          const why = verdict.kind === 'skip' ? verdict.why : 'unknown_item';
+          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why });
           continue;
         }
         const r = ack.result;
-        const current = ack.revision === row.revision;
-        if (!current && r.status !== 'sent' && r.status !== 'updated') {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-          continue;
-        }
-        // 已经送到过更新一版的卡：旧版本的回执后到（重试、迟到）不能把「送到的卡」退回旧卡。
-        if (
-          !current &&
-          row.deliveredMessageId !== undefined &&
-          row.deliveredRevision !== undefined &&
-          ack.revision < row.deliveredRevision
-        ) {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-          continue;
-        }
+        const current = verdict.current;
         const next: Partial<FeishuOutboxRow> = {};
         if (r.status === 'sent') {
           Object.assign(next, {
@@ -1580,13 +1565,8 @@ export function createMemoryStore(
           Object.assign(next, {
             ackRevision: ack.revision,
             ackStatus: r.status,
-            ackReason:
-              r.status === 'dropped' || r.status === 'deferred'
-                ? r.reason
-                : r.status === 'failed'
-                  ? r.error
-                  : undefined,
-            holdUntil: r.status === 'deferred' ? r.until : r.status === 'failed' ? r.retryAfter : undefined,
+            ackReason: ackReasonOf(r),
+            holdUntil: holdUntilOf(r),
           });
         }
         // 记下来什么都不变：同一条回执又来了一遍（网关重发、两批叠上），不再记一次（失败次数、送达尝试数都不加）。

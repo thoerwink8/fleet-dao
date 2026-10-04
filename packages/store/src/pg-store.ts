@@ -81,6 +81,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { ackReasonOf, holdUntilOf, judgeOutboxAck } from './outbox-logic.ts';
 import { nextCursorOf, pageOfSorted } from './paging.ts';
 import {
   type AskRecord,
@@ -1659,30 +1660,14 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             .from(feishuOutbox)
             .where(eq(feishuOutbox.id, ack.itemId))
             .for('update');
-          if (!row) {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'unknown_item' });
-            continue;
-          }
-          if (ack.revision > row.revision) {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'future_revision' });
+          const verdict = judgeOutboxAck(row, ack);
+          if (!row || verdict.kind === 'skip') {
+            const why = verdict.kind === 'skip' ? verdict.why : 'unknown_item';
+            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why });
             continue;
           }
           const r = ack.result;
-          const current = ack.revision === row.revision;
-          if (!current && r.status !== 'sent' && r.status !== 'updated') {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-            continue;
-          }
-          // 已经送到过更新一版的卡：旧版本的回执后到（重试、迟到）不能把「送到的卡」退回旧卡。
-          if (
-            !current &&
-            row.deliveredMessageId !== null &&
-            row.deliveredRevision !== null &&
-            ack.revision < row.deliveredRevision
-          ) {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-            continue;
-          }
+          const current = verdict.current;
           const set: Partial<typeof feishuOutbox.$inferInsert> = {};
           if (r.status === 'sent') {
             Object.assign(set, {
@@ -1716,21 +1701,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             }
           }
           if (current) {
+            const holdUntil = holdUntilOf(r);
             Object.assign(set, {
               ackRevision: ack.revision,
               ackStatus: r.status,
-              ackReason:
-                r.status === 'dropped' || r.status === 'deferred'
-                  ? r.reason
-                  : r.status === 'failed'
-                    ? r.error
-                    : null,
-              holdUntil:
-                r.status === 'deferred'
-                  ? new Date(r.until)
-                  : r.status === 'failed'
-                    ? new Date(r.retryAfter)
-                    : null,
+              ackReason: ackReasonOf(r) ?? null,
+              holdUntil: holdUntil === undefined ? null : new Date(holdUntil),
             });
           }
           // 记下来什么都不变：同一条回执又来了一遍（网关重发、两批叠上），不再记一次（失败次数、送达尝试数都不加）。
