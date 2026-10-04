@@ -16,6 +16,9 @@
 //    BAD_RUN_INPUT：不起会话、一行不写。
 // 10. **收场那一笔带上算不算路由的账（#758）**：每条出路都经 recordRun，由 evidence.ts 的 routeOutcomeOf 判（和失败分流同一份
 //    证据），选路的熔断、战绩靠它看见三段的会话。
+// 11. **开跑那一行就是占上池的名额（#757）**：选路时预占的名额（reservationId）交给 runs.start，同一下换成这一行；没预占着、
+//    池又满了，start 抛 NoSlotError，这里报 NO_SLOT、不起会话（不是库写不进，别当成 RUN_START_FAILED）。没开跑就收场的那几条路
+//    （内存放不下、切号停下）不碰预占：内存放不下的调用方隔一会儿再来，名额还给它占着；放不放由调用方收场时定。
 //
 // **Spawner 依赖注入**：真实的生产 spawn 走 `real/exec.ts` 那一份 `fleet-agent-scope`；测试里换 fake——
 // 不调真进程，不调 sudo，不调 systemd，不写 /sys/fs/cgroup。本机 Windows / macOS 上跑也是 fake。
@@ -28,7 +31,7 @@ import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { AGENT_SLICE_PATH, admitSessionMemory, CGROUP_ROOT } from '../real/memory-admission.ts';
 import type { AnyBrief } from './brief.ts';
 import { routeOutcomeOf } from './evidence.ts';
-import { type RunRecord, type RunStart, RunStartSchema, type RunsWriter } from './not-wired.ts';
+import { NoSlotError, type RunRecord, type RunStart, RunStartSchema, type RunsWriter } from './not-wired.ts';
 import type { Tier } from './tier.ts';
 
 /** 默认会话总时限（分钟）。不调传。 */
@@ -75,6 +78,8 @@ export interface OneShotInput {
   routeId?: string;
   /** 思考档位（按改动面分档给的，tier.ts 的 effort）；不给用执行方式自己的默认。 */
   effort?: string;
+  /** 选路时给这一段预占的池的名额（#757，pool_reservations 的编号）：开跑那一行写进去时换成这一行。不经选路的不给。 */
+  reservationId?: string;
 }
 
 export const ONE_SHOT_OUTCOMES = [
@@ -186,6 +191,7 @@ export const SESSION_ARTIFACT_TTL_MS = 24 * 60 * 60 * 1000;
 export class OneShotError extends Error {
   /**
    * RUN_START_FAILED：开跑那一行写不进 runs，会话没起（库一时不通，过一会儿再来就行）。
+   * NO_SLOT：开跑时池的名额满了（选路时预占的名额过期了、或没预占，#757），会话没起、一行没写；过一会儿重新选路就行。
    * BAD_RUN_INPUT：记到谁名下的字段对不上 runs 的约束，会话没起、一行没写；是调用方的毛病，重试没用。
    */
   readonly code:
@@ -193,6 +199,7 @@ export class OneShotError extends Error {
     | 'ADMISSION_BLOCKED'
     | 'SPAWN_FAILED'
     | 'RUN_START_FAILED'
+    | 'NO_SLOT'
     | 'BAD_RUN_INPUT';
   constructor(code: OneShotError['code'], message: string) {
     super(message);
@@ -282,8 +289,12 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
 
   // 开跑：先留一行没结束的。写不进去不起会话——起了就是一个切号看不见的会话（切号会把它当场掐断）。
   try {
-    await deps.runs.start(opening);
+    if (input.reservationId === undefined) await deps.runs.start(opening);
+    else await deps.runs.start(opening, { reservationId: input.reservationId });
   } catch (err) {
+    if (err instanceof NoSlotError) {
+      throw new OneShotError('NO_SLOT', `池的名额满了，没起会话：${err.message}`);
+    }
     throw new OneShotError(
       'RUN_START_FAILED',
       `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${err instanceof Error ? err.message : String(err)}`,

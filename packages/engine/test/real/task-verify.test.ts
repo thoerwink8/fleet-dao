@@ -17,7 +17,7 @@ import {
   renderDiff,
   VERIFY_ORG_SWITCH_RETRY_SECONDS,
 } from '../../src/real/task-verify.ts';
-import type { RunRecord, RunStart } from '../../src/runner/not-wired.ts';
+import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
 import type { ColdVerifyInput } from '../../src/task-contract.ts';
 import { FAMILY_ORDER, type ModelFamily } from '../../src/verifier-invoke.ts';
 import { fakeTrees } from './fixtures.ts';
@@ -139,6 +139,10 @@ function rig(
   const specs: HostRunSpec[] = [];
   const recorded: RunRecord[] = [];
   const started: RunStart[] = [];
+  /** 每次开跑带给 runs.start 的预占编号（没带是 undefined）。 */
+  const startedWith: (string | undefined)[] = [];
+  /** 收场时放掉的预占编号。 */
+  const released: string[] = [];
   const asked: PickRouteInput[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -195,11 +199,17 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
-      async start(r) {
+      async start(r, options) {
         started.push(r);
+        startedWith.push(options?.reservationId);
       },
       async record(r) {
         recorded.push(r);
+      },
+    },
+    reservations: {
+      async release(id) {
+        released.push(id);
       },
     },
     runsDir: join(sub, 'runs'),
@@ -225,7 +235,7 @@ function rig(
     round: 1,
     ...over,
   });
-  return { run, input, ft, posted, specs, recorded, started, asked };
+  return { run, input, ft, posted, specs, recorded, started, startedWith, released, asked };
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
@@ -515,6 +525,77 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     expect(stopped).toHaveLength(1);
     expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([[stopped[0], 'org_switch']]);
     expect(sessions.live(new Set(['pool-gpt']))).toEqual([]);
+  });
+});
+
+describe('按族选路时给这一次验收预占池的名额（#757）', { timeout: 30_000 }, () => {
+  /** 选路交回的路由带着预占。 */
+  const reservedRoute = (
+    family: ModelFamily,
+    reservationId: string,
+    routeFamily = family,
+  ): PickRouteResult => {
+    const r = okRoute(family);
+    if (!r.ok) throw new Error('夹具：okRoute 该是派出去的');
+    return { ...r, route: { ...r.route, family: routeFamily, reservationId } };
+  };
+
+  it('选路带上 reserve（验收那一段）；开跑那一行带上预占（在那一下换掉）；收场照样放一次', async () => {
+    const r = rig({ picks: { gpt: reservedRoute('gpt', 'res-gpt') } });
+    expect(await r.run(r.input(), ctx())).toMatchObject({ pass: true });
+    expect(r.asked.map((a) => a.reserve)).toEqual([{ segment: 'verify' }]);
+    expect(r.startedWith).toEqual(['res-gpt']);
+    expect(r.released).toEqual(['res-gpt']);
+  });
+
+  it('选路交回的族对不上、这一次没用上：它预占的名额也放掉；真用上的那一次照常交接', async () => {
+    const r = rig({
+      picks: {
+        gpt: reservedRoute('gpt', 'res-mismatch', 'grok'),
+        deepseek: reservedRoute('deepseek', 'res-ds'),
+      },
+    });
+    expect(await r.run(r.input(), ctx())).toMatchObject({ pass: true });
+    expect(r.startedWith).toEqual(['res-ds']);
+    expect([...r.released].sort()).toEqual(['res-ds', 'res-mismatch']);
+  });
+
+  it('【故意造出的失败】开跑时名额已经没了（预占过期、空位给了别的单）：会话没起，PortError VERIFY_NO_SLOT 往外抛（可以重试，不是「验收做不出来」），预占照样放', async () => {
+    const r = rig({
+      picks: { gpt: reservedRoute('gpt', 'res-gpt') },
+      deps: {
+        runs: {
+          async start() {
+            throw new NoSlotError('池 pool-gpt 的名额满了（已经有 3 个，上限 3 个）');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    const err = await r.run(r.input(), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'VERIFY_NO_SLOT', retryable: true });
+    expect(r.specs).toHaveLength(0);
+    expect(r.released).toEqual(['res-gpt']);
+  });
+
+  it('【故意造出的失败】预占放不掉（库一时不通）：只记日志、写明放不掉，结论照旧（名额到点自己过期）', async () => {
+    const logs: string[] = [];
+    const r = rig({
+      picks: { gpt: reservedRoute('gpt', 'res-gpt') },
+      deps: {
+        reservations: {
+          async release() {
+            throw new Error('connection refused');
+          },
+        },
+        log: (message, fields) => logs.push(`${message} ${JSON.stringify(fields)}`),
+      },
+    });
+    expect(await r.run(r.input(), ctx())).toMatchObject({ pass: true });
+    expect(logs.filter((l) => l.includes('没放掉'))).toEqual([expect.stringContaining('connection refused')]);
   });
 });
 

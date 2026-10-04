@@ -19,6 +19,9 @@
 //   工作流隔一会儿再验，选路照常选到切过去的那个池。
 // - runs 里这一次验收记到这张单名下（#216）：tasks.id、单号、工作流编号经单子那一样（spec）交给 invokeVerifier，PR 号、分支
 //   它本来就有；验收不分档，不带派工档。
+// - 按族选路时给这一次验收预占池的名额（#757，pickRoute 的 reserve）：开跑那一行写进去时换掉；挑中了又没用上的（选路交回的
+//   族对不上）、没开跑就收场的，收场时一个个放掉，放不掉只记日志（到点自己过期）。开跑时名额已经没了抛 VERIFY_NO_SLOT，
+//   可以重试。
 
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
@@ -41,6 +44,7 @@ import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import { mapped } from './mirror.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
+import type { SegmentReservations } from './runs-writer.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { sweepRunDirs } from './task-segment.ts';
 
@@ -63,6 +67,8 @@ export interface ColdVerifyActivityDeps {
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
   spawner: SegmentSpawnerDeps;
   runs: RunsWriter;
+  /** 选路时预占的名额（#757）：没开跑就收场的、挑中了没用上的，收场时放掉（runs-writer.ts 的 realReservations）。 */
+  reservations: SegmentReservations;
   memoryAdmission?: MemoryAdmissionDeps;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
@@ -171,8 +177,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
 
     const seen: Seen = {};
     const waits: PickWait[] = [];
+    // 选路给这一次验收预占的名额（#757）：每挑中一次记下，收场（下面的 finally）一个个放掉，开跑了的放一次什么都不做
+    const reservations: string[] = [];
     const picker = familyPickerFrom(
-      (pickInput) => deps.pickRoute(pickInput, ctx),
+      async (pickInput) => {
+        const got = await deps.pickRoute({ ...pickInput, reserve: { segment: 'verify' } }, ctx);
+        if (got.ok && got.route.reservationId) reservations.push(got.route.reservationId);
+        return got;
+      },
       FAMILY_ORDER,
       SEGMENT_STAGE.verify,
       (family, why) => {
@@ -249,6 +261,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             if (error instanceof OneShotError && error.code === 'RUN_START_FAILED') {
               seen.transient = new PortError('VERIFY_RUNS_UNWRITABLE', error.message, { retryable: true });
             }
+            // 预占的名额过期了、空位给了别的单（#757）：会话没起，过一会儿重新选路再验
+            if (error instanceof OneShotError && error.code === 'NO_SLOT') {
+              seen.transient = new PortError('VERIFY_NO_SLOT', error.message, { retryable: true });
+            }
             throw error;
           }
         },
@@ -270,6 +286,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             ...(route.poolId ? { channel: route.poolId } : {}),
             routeId: route.routeId,
             runId,
+            ...(route.reservationId ? { reservationId: route.reservationId } : {}),
           };
         },
         // 会话的工作目录由 prepareCwd 备（挑完路由才知道归哪个会话用户）；这个只是占个位，不会被用到
@@ -320,6 +337,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     } finally {
       clearInterval(beat);
       ticket?.leave();
+      for (const reservationId of reservations) {
+        await deps.reservations.release(reservationId).catch((error: unknown) => {
+          log('选路时给验收预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
+            reservationId,
+            error: message(error),
+          });
+        });
+      }
     }
     // 叫停：取消原样往外抛，不回「没跑成」
     if (ctx.signal.aborted) throw ctx.signal.reason ?? new Error('被叫停了');

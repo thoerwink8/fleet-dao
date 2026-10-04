@@ -61,6 +61,7 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import { PLAN_DOC } from '@fleet-dao/conventions';
 import {
   appendProgressEvents,
+  clearReservations,
   closeOpenRuns,
   type Db,
   finishSessionRun,
@@ -394,7 +395,7 @@ export type SessionPorts = {
 } & {
   /**
    * 工人起来接活之前（只在这时调）：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，
-   * runs 里还开着的一次性会话那几行收成没跑完（#157）；回收了几个会话。
+   * runs 里还开着的一次性会话那几行收成没跑完（#157），上一轮选路时预占、还没开跑的名额清掉（#757）；回收了几个会话。
    */
   reapOrphanSessions(): Promise<number>;
   /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
@@ -2453,6 +2454,14 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const closed = await closeOpenRuns(db, { endedAt: clock(), reason: ORPHAN_RUN_REASON });
     if (closed.length > 0) {
       log(`上一轮引擎起的一次性会话没收场的 ${closed.length} 个，库里那几行收成没跑完：${closed.join('、')}`);
+    }
+    // 上一轮选路时给三段的一段预占的名额（#757）：那些段的活动跟着上一轮引擎断了，一个都起不来，不清掉选路就一直当池占着
+    // （最多到预占过期）。和上面一样只能在接活之前清：清的时候不能有这一轮选路刚占的
+    const dropped = await clearReservations(db);
+    if (dropped.length > 0) {
+      log(
+        `上一轮选路时预占、还没开跑的名额 ${dropped.length} 个，清掉：${dropped.map((r) => `${r.taskId}/${r.segment}@${r.routeId}`).join('、')}`,
+      );
     }
     return reaped;
   }
