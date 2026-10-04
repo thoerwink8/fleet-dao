@@ -255,15 +255,14 @@ function SoloPaused({ s }: { s: Setting | undefined }) {
         <div>
           <div className="text-sm font-medium">{settingLabel['engine.soloPaused']}</div>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            开着时：拼车用不了（额度用满、整辆车被用光）也不自动切到独享，Claude
-            的活等拼车恢复或交给别家模型。已经挂着独享的不受影响，拼车恢复照常切回。
+            {`开着时：${brand.terms.carpool}用不了（额度用满、整辆车被用光）也不自动切到${brand.terms.solo}，Claude 的活等${brand.terms.carpool}恢复或交给别家模型。已经挂着${brand.terms.solo}的不受影响，${brand.terms.carpool}恢复照常切回。`}
           </p>
         </div>
         <Switch
           checked={on}
           disabled={pending}
           onCheckedChange={(next) => save('engine.soloPaused', next, s)}
-          aria-label="引擎暂不用独享"
+          aria-label={settingLabel['engine.soloPaused']}
         />
       </div>
       <SettingMeta s={s} />

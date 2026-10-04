@@ -1,14 +1,20 @@
 import { ArrowLeftRight } from 'lucide-react';
+import { brand } from '#brand';
 import type { OrgSwitchView } from '../api/types';
 import { formatClock } from '../lib/format';
 import { cn } from '../lib/utils';
 
+// 两类账号叫什么走品牌文件（brand.terms.carpool / solo）：演示版的包里不许出现正式版的内部叫法（src/build/scan.ts）。
+const carpool = () => brand.terms.carpool;
+const solo = () => brand.terms.solo;
+
 /** 不同的拼车「用不了」的叫法（方案 v2 4.2）。 */
-const OUTAGE_NAME = {
-  E1: '本人 5 小时额度用满',
-  E2: '整辆车的官方窗口被用光',
-  E3: '拼车组织本身用不了',
-} as const;
+const outageName = (kind: 'E1' | 'E2' | 'E3'): string =>
+  ({
+    E1: `${carpool()}本人 5 小时额度用满`,
+    E2: `${carpool()}整辆车的官方窗口被用光`,
+    E3: `${carpool()}组织本身用不了`,
+  })[kind];
 
 export type OrgSwitchTone = 'muted' | 'ok' | 'stall' | 'fail';
 
@@ -26,7 +32,9 @@ export interface OrgSwitchSummary {
  */
 export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
   const paused = v.soloPaused
-    ? ['已点「引擎暂不用独享」：拼车用不了也不切独享，Claude 的活等拼车恢复或交给别家模型']
+    ? [
+        `已点「引擎暂不用${solo()}」：${carpool()}用不了也不切${solo()}，Claude 的活等${carpool()}恢复或交给别家模型`,
+      ]
     : [];
   if (v.state === 'unavailable') {
     return { tone: 'muted', headline: `切号现状看不到：${v.why}`, details: paused };
@@ -45,25 +53,25 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
     headline = '还没读到会话用户现在挂的是哪个组织';
     raise('stall');
   } else if (v.live === 'solo') {
-    headline = '挂着独享';
+    headline = `挂着${solo()}`;
     if (v.outage) {
       const when = v.outage.resetsAt
         ? `预计 ${formatClock(v.outage.resetsAt)} 恢复（来源：${v.outage.resetsFrom === 'api' ? '接口' : '被拒原文'}）`
         : '几点恢复不知道';
-      headline += `；拼车${OUTAGE_NAME[v.outage.kind]}，${when}`;
+      headline += `；${outageName(v.outage.kind)}，${when}`;
       details.push(`凭什么：${v.outage.evidence}`);
     } else {
-      headline += '；没有记着的拼车恢复条件（多半是人手动切的）';
+      headline += `；没有记着的${carpool()}恢复条件（多半是人手动切的）`;
     }
     if (v.backPendingSince) {
       details.push(
-        `拼车恢复了，切回的宽限中（${formatClock(v.backPendingSince)} 起）：新活先不往独享派，在跑的收尾后切回`,
+        `${carpool()}恢复了，切回的宽限中（${formatClock(v.backPendingSince)} 起）：新活先不往${solo()}派，在跑的收尾后切回`,
       );
     }
   } else {
-    headline = '挂着拼车';
+    headline = `挂着${carpool()}`;
     if (v.outage) {
-      headline += `；拼车${OUTAGE_NAME[v.outage.kind]}，正要切独享`;
+      headline += `；${outageName(v.outage.kind)}，正要切${solo()}`;
       details.push(`凭什么：${v.outage.evidence}`);
       raise('stall');
     }
@@ -83,12 +91,14 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
   }
   if (v.whites > 0) {
     details.push(
-      `切回拼车后马上又被拒（白切）连着 ${v.whites} 次${v.whites >= 3 ? '，已不再自己切回，要人看' : ''}`,
+      `切回${carpool()}后马上又被拒（白切）连着 ${v.whites} 次${v.whites >= 3 ? '，已不再自己切回，要人看' : ''}`,
     );
     raise(v.whites >= 3 ? 'fail' : 'stall');
   }
   if (v.lastRead && !v.lastRead.ok) {
-    details.push(`最近一次读拼车接口没成（${formatClock(v.lastRead.at)}）：${v.lastRead.why ?? '原因没写'}`);
+    details.push(
+      `最近一次读${carpool()}接口没成（${formatClock(v.lastRead.at)}）：${v.lastRead.why ?? '原因没写'}`,
+    );
     raise('stall');
   }
   details.push(...paused);
