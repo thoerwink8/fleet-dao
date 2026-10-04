@@ -11,6 +11,7 @@
 
 import { type Db, resolveAlertWithReason, upsertAlert } from '@fleet-dao/db';
 import type { OrgKind } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { Client, Connection, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import type { OrgSwitchRound, ProbedRoute } from '../jobs/org-switch.ts';
@@ -61,7 +62,7 @@ export interface RouteWakerDeps {
 function message(err: unknown): string {
   const parts: string[] = [];
   for (let e: unknown = err, depth = 0; e !== undefined && e !== null && depth < 4; depth++) {
-    parts.push(e instanceof Error ? e.message : String(e));
+    parts.push(errMessage(e));
     e = e instanceof Error ? e.cause : undefined;
   }
   return parts.join('；原因：');

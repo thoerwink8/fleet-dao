@@ -23,6 +23,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
@@ -74,8 +75,6 @@ export interface RunSegmentDeps {
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason ?? new Error('被叫停了'));
@@ -103,7 +102,7 @@ export async function sweepRunDirs(
     names = await readdir(runsDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      log('一次性会话的落盘目录读不了，没清', { runsDir, error: message(error) });
+      log('一次性会话的落盘目录读不了，没清', { runsDir, error: errMessage(error) });
     }
     return 0;
   }
@@ -116,7 +115,7 @@ export async function sweepRunDirs(
       await rm(dir, { recursive: true, force: true });
       removed += 1;
     } catch (error) {
-      log('一次性会话的落盘目录没清掉（下次再清）', { dir, error: message(error) });
+      log('一次性会话的落盘目录没清掉（下次再清）', { dir, error: errMessage(error) });
     }
   }
   return removed;
@@ -140,7 +139,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     } catch (error) {
       log('选路时预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
         reservationId,
-        error: message(error),
+        error: errMessage(error),
       });
     }
   };
@@ -153,7 +152,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       try {
         routeInfo = await resolveSegmentRoute(deps.spawner, input.route.routeId);
       } catch (error) {
-        throw new PortError('SEGMENT_ROUTE_UNUSABLE', message(error), { retryable: false });
+        throw new PortError('SEGMENT_ROUTE_UNUSABLE', errMessage(error), { retryable: false });
       }
       // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
       const ticket = deps.sessions?.enter({ poolId: routeInfo.route.poolId });
