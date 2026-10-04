@@ -3,6 +3,7 @@
 
 import { type Db, finishScheduleRun, resolveAlertWithReason, startScheduleRun } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   createGitHubIntake,
   createPgStore,
@@ -92,7 +93,7 @@ export function githubReconcileJob(
             if (n > 0) log.info('撤了关单对账留在库里的旧提醒', { retired: n });
           } catch (err) {
             log.warn('撤关单对账的旧提醒没成，下一轮再试', {
-              error: err instanceof Error ? err.message : String(err),
+              error: errMessage(err),
             });
           }
         }

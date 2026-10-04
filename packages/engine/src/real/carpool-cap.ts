@@ -9,6 +9,7 @@
 //   （驾驶舱路由页读同一条提醒显示原因）；对上了自己恢复、提醒自己撤。不拿「提醒开着没」当开关：人点掉提醒不该放开拼车；
 // - 引擎起来那一下（registerJobs）仍调 checkCarpoolCap：库读不了照常抛给调用方（记错误日志），不当成「对上了」；
 //   选路那条路读不了不抛（别的池照派），拼车池按「核对没读成」不派。
+
 import {
   CARPOOL_CAP_ALERT,
   carpoolPoolCaps,
@@ -16,6 +17,7 @@ import {
   resolveAlertWithReason,
   upsertAlert,
 } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRegistryView } from '../routing/types.ts';
 
 export { CARPOOL_CAP_ALERT };
@@ -150,7 +152,7 @@ export function carpoolRegistry(d: CarpoolCapCheckDeps): CarpoolRegistry {
         verdict = {
           ok: false,
           code: 'unreadable',
-          why: `拼车并发登记没核成，读不到库里的拼车池：${error instanceof Error ? error.message : String(error)}`,
+          why: `拼车并发登记没核成，读不到库里的拼车池：${errMessage(error)}`,
         };
       }
       if (lastOk !== verdict.ok) {

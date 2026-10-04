@@ -16,6 +16,7 @@ import {
 } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
@@ -304,7 +305,7 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
     try {
       sessionProxy = parseSessionProxy(rawProxy);
     } catch (err) {
-      problems.push(`FLEET_SESSION_PROXY：${err instanceof Error ? err.message : String(err)}`);
+      problems.push(`FLEET_SESSION_PROXY：${errMessage(err)}`);
     }
   }
   if (problems.length > 0) throw new Error(`真端口起不来，本机配置缺这些或不对：${problems.join('；')}`);
@@ -517,7 +518,7 @@ export function realPortsFromEnv(
   const ioProblem = checkIoRoot(config.sessionIoDir);
   if (ioProblem) console.error(`会话不脱开跑（发布、重启引擎还会停在跑的会话）：${ioProblem}`);
   void reportIoRoot(db, config.machine, ioProblem).catch((error: unknown) =>
-    console.error('收发目录的提醒没写进库', error instanceof Error ? error.message : String(error)),
+    console.error('收发目录的提醒没写进库', errMessage(error)),
   );
   const sessionOrg = sessionOrgReader({
     exec,
@@ -713,12 +714,7 @@ export function realPortsFromEnv(
     close: async () => {
       await wakeClient
         .close()
-        .catch((error: unknown) =>
-          console.error(
-            '叫醒用的 Temporal 连接没关干净',
-            error instanceof Error ? error.message : String(error),
-          ),
-        );
+        .catch((error: unknown) => console.error('叫醒用的 Temporal 连接没关干净', errMessage(error)));
       await close();
     },
   };

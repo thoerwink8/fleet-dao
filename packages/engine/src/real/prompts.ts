@@ -7,6 +7,7 @@
 
 import { checkReport, outsideBrief, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type {
   Finding,
   PlannedSubtask,
@@ -449,7 +450,7 @@ function parseJson(text: string, what: string): Parsed<unknown> {
   try {
     return { ok: JSON.parse(text) as unknown };
   } catch (error) {
-    return { error: `${what} 不是合法的 JSON（${error instanceof Error ? error.message : String(error)}）` };
+    return { error: `${what} 不是合法的 JSON（${errMessage(error)}）` };
   }
 }
 
