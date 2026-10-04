@@ -33,7 +33,7 @@ import {
 } from '../src/ci-plan.ts';
 import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
-import { listTestFiles, parseTimings, TARGET_BOX_MS, type TestBox, TIMINGS_FILE } from '../src/test-split.ts';
+import { listTestFiles, parseTimings, type TestBox, TIMINGS_FILE } from '../src/test-split.ts';
 import { memRepo } from './helpers.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -1211,7 +1211,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
 
   it('全跑：每一台都有明确的文件清单，合起来正好是全部测试文件、不重不漏；每台的名字看得出第几台/共几台、pg、temporal', () => {
     const p = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
-    // 8 台封顶（TARGET_BOX_MS 50 秒、MAX_BOXES 8）：全量 687 秒的耗时合计 → 8 台，每台 91 秒上下
+    // 8 台封顶（TARGET_BOX_MS 50 秒、MAX_BOXES 8）：全量的耗时合计远大于 8×50 秒 → 8 台
     expect(p.tests.length).toBe(8);
     const all = boxFiles(p).flat();
     expect(all.length).toBe(ALL_TESTS.length);
@@ -1220,8 +1220,11 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     expect(labels(p).map((l, i) => l.startsWith(`${i + 1}/8`))).toEqual(Array(8).fill(true));
     expect(labels(p).filter((l) => l.includes('· pg')).length).toBeGreaterThanOrEqual(1);
     expect(labels(p).filter((l) => l.includes('· temporal'))).toHaveLength(1);
-    // 每台的估计耗时都在「目标 50 秒」的两倍以内（LPT 装得住；一台 4 核、并行跑的墙钟约是它的一半）
-    for (const b of p.tests) expect(b.estMs).toBeLessThanOrEqual(TARGET_BOX_MS * 2);
+    // 台数封顶 8 之后，全量合计远大于 8×目标（表里 455 个文件合计 700 秒上下），每台自然超过「目标 50 秒」，所以不拿目标比、
+    // 拿平均比：装得匀，哪一台都不超过平均的 1.3 倍（pg 台只有 db 的文件、不能和别的台互补，它是最容易偏高的那一台）。
+    // 原来写「目标的两倍」，耗时表一刷新（总量涨了）就红，不是装箱坏了。
+    const avg = p.tests.reduce((s, b) => s + b.estMs, 0) / p.tests.length;
+    for (const b of p.tests) expect(b.estMs).toBeLessThanOrEqual(avg * 1.3);
     expect(coverage(p)).toEqual(Object.fromEntries(p.testUnits.map((u) => [u, '有台'])));
   });
 
