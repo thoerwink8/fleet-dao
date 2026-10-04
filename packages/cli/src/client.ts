@@ -1,6 +1,8 @@
 // fleet 命令到后端的一次请求：带通行证和幂等键；连不上或后端临时不可用时短暂重试，之后大声失败。
+
 import { randomUUID } from 'node:crypto';
 import { AGENT_API_PREFIX } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 
 /** 退出码。AI 和脚本按它判下一步，改之前看 fleet --help 里的说明。 */
 export const EXIT = {
@@ -134,5 +136,5 @@ function messageOf(text: string): string {
 function networkError(err: unknown): string {
   const cause =
     err instanceof Error ? (err.cause as { code?: string; message?: string } | undefined) : undefined;
-  return cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err));
+  return cause?.code ?? cause?.message ?? errMessage(err);
 }

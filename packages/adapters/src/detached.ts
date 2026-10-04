@@ -10,9 +10,11 @@
 //   （POSIX：前台命令没结束，trap 不跑）。外壳被 SIGKILL 就没有退出码：读的一方照实报「退出码丢了」（exitLost），不当成 0。
 // - 序号 = out 里第几行（从 0 起，超长丢掉的行不占号）：同一份文件怎么重读都是同一个号，引擎按它去重。
 // - 接回时（attach）不起进程：起的时刻、上一次写输出的时刻从文件读，总时长、停滞照原来的起点算。
+
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { LineSplitter } from './lines.ts';
 import type {
   AgentProcessHooks,
@@ -66,8 +68,6 @@ export const WRAPPER = [
 ].join('\n');
 
 const STDERR_TAIL = 16 * 1024;
-
-const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** 引擎建收发目录：目录 0711、提示词 0644、会话要写的几个文件先建好 0622（会话用户写得进、别人读不到内容）。 */
 export async function prepareIo(dir: string, prompt: string, startedAt: string): Promise<void> {
@@ -143,7 +143,7 @@ export function runDetached(
     const reapErrors: string[] = [];
     let scopeStop: Promise<void> | undefined;
     const record = (err: unknown) => {
-      hookError ??= errorText(err);
+      hookError ??= errMessage(err);
     };
 
     const control: ProcessControl = {
@@ -259,7 +259,7 @@ export function runDetached(
         reaped = { stragglers: r.found, leftovers: r.leftovers };
         if (r.error) reapErrors.push(r.error);
       } catch (err) {
-        reapErrors.push(errorText(err));
+        reapErrors.push(errMessage(err));
       }
       const stderrTail = [
         await tail(file(IO_FILES.helperErr), 4 * 1024),
@@ -294,7 +294,7 @@ export function runDetached(
         await readOut();
         const exitText = await readFile(file(IO_FILES.exit), 'utf8').catch((err: NodeJS.ErrnoException) => {
           // 退出码文件本该在（引擎自己建的）：读不成照实记，按丢了处理
-          exitLost ??= `退出码文件读不成（${errorText(err)}）`;
+          exitLost ??= `退出码文件读不成（${errMessage(err)}）`;
           return '';
         });
         try {
@@ -305,7 +305,7 @@ export function runDetached(
             return;
           }
         } catch (err) {
-          exitLost ??= errorText(err);
+          exitLost ??= errMessage(err);
         }
         // 外壳还没写退出码：会话那一侧没了（帮手退了、scope 空了、进程号没了）就再等一小会儿，还没有就判「丢了」
         // 查在不在（scope 要经 systemctl）最多两秒一次，两次之间沿用上一次的结论
@@ -476,7 +476,7 @@ export function runDetached(
       resolve({
         exitCode: null,
         signal: null,
-        spawnError: `会话的收发文件没备好：${errorText(err)}`,
+        spawnError: `会话的收发文件没备好：${errMessage(err)}`,
         stragglers: 0,
         leftovers: 0,
         stderrTail: '',

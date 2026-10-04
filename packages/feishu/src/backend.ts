@@ -1,5 +1,6 @@
 // 调驾驶舱后端：经隧道走驾驶舱同一套接口（/api），一律带网关通行证；路由表标 acting=required 的才注明代表哪位创始人。
 // 返回一律按 shared 里的约定校验：形状不对当场报错，不把坏数据往卡片上放。
+
 import {
   AnswerAskRequest,
   AnswerAskResponse,
@@ -39,6 +40,7 @@ import {
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 
 /**
@@ -450,5 +452,5 @@ function fill(path: string, params: Record<string, string>): string {
 function reasonOf(err: unknown): string {
   const cause =
     err instanceof Error ? (err.cause as { code?: string; message?: string } | undefined) : undefined;
-  return cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err));
+  return cause?.code ?? cause?.message ?? errMessage(err);
 }

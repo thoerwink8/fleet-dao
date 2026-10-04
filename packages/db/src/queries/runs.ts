@@ -4,7 +4,9 @@
 // - start/runId：幂等（同一次跑写进去两笔）
 // - endedAt / outcome 一对空/不空；
 // - 读不到的字段 NULL，不拿 0 顶（#216）。
+
 import { randomUUID } from 'node:crypto';
+import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { type RunRouteOutcome, type RunTier, runs } from '../schema/index.ts';
@@ -94,7 +96,7 @@ export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): 
         set: pickRowWithoutId(r),
       });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errMessage(error);
     throw new RunInputError(`写入 runs 失败：${message}`, { cause: error });
   }
   return { id: r.id };
@@ -128,7 +130,7 @@ export async function finishRun(
     return updated.length > 0 ? 'finished' : 'not_found';
   } catch (error) {
     if (error instanceof RunInputError) throw error;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errMessage(error);
     throw new RunInputError(`更新 runs 失败：${message}`, { cause: error });
   }
 }
@@ -196,7 +198,7 @@ export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: stri
       .returning({ id: runs.id });
     return rows.map((r) => r.id);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errMessage(error);
     throw new RunInputError(`收掉没结束的 runs 失败：${message}`, { cause: error });
   }
 }

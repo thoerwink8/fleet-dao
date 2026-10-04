@@ -5,6 +5,7 @@
 // - 「改数据 + 写操作记录」放在同一个事务里：操作记录写不进，改动一起回滚。
 // - 翻页游标是 `时刻|编号`（ids.ts 判读，看不懂抛 InvalidCursorError）；库里的时刻比毫秒精细，比较时截到毫秒，
 //   和游标的精度一致，翻页不漏同一毫秒里的几条。
+
 import {
   asks,
   auditLog,
@@ -53,6 +54,7 @@ import {
   users,
 } from '@fleet-dao/db';
 import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -1602,7 +1604,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         if (err instanceof TableLockedError) throw err;
         if (isLockWaitError(err)) {
           throw new TableLockedError(
-            `outbox 联查 tasks/repos 时表被锁住、等锁超时（${lockWaitWhy(err)}）：${err instanceof Error ? err.message : String(err)}`,
+            `outbox 联查 tasks/repos 时表被锁住、等锁超时（${lockWaitWhy(err)}）：${errMessage(err)}`,
           );
         }
         throw err;

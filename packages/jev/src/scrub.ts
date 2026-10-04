@@ -1,7 +1,9 @@
 // 写库之前的脱敏只抹开头一段：证据、上游报错可能有几万字，而库里只留开头，整段过 redact 白花时间。
 // 截断处要避开令牌：先截再脱敏，跨过截断处的令牌会剩下认不出的半截，半截就原样漏进库。
 // 写进库的字都要收得下：jsonb 不收落单的代理项（emoji 截在一半）和 NUL，text 列不收 NUL，碰上整行写不进库。
+
 import { redact } from '@fleet-dao/adapters';
+import { errMessage } from '@fleet-dao/shared/util';
 
 /** 令牌、密钥、邮箱、IP、长串都只由这些字符组成：截在别的字符处，截处两边不会各留半截。 */
 const TOKEN_CHAR = /[A-Za-z0-9._~+/=%@-]/;
@@ -51,7 +53,7 @@ export function storableRef(ref: unknown): { ref: unknown } | { problem: string 
     json = JSON.stringify(ref);
   } catch (err) {
     // 原因也写进库：toJSON 自己抛出来的什么字都可能有，一样要收得下。
-    const why = err instanceof Error ? err.message : String(err);
+    const why = errMessage(err);
     return { problem: cutAt(wellFormed(`转不成 JSON：${why}`), 200) };
   }
   if (json === undefined) return { problem: '转不成 JSON（是函数或 undefined）' };

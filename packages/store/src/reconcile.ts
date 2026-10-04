@@ -2,8 +2,10 @@
 // 每一样怎么查在 @fleet-dao/github 的 reconcile.ts；补回来的东西一律走 GitHubIntake（同一道门、同一本投递账）。
 // 定时调它的是引擎里的 Temporal 定时任务 github-reconcile：每 15 分钟一次、往回看 2 小时，结局记进 schedule_runs
 // （packages/engine/src/jobs/，specs/43-接活入口/方案-对账调度.md）。
+
 import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github-intake.ts';
 import type { GitHubDelivery, Logger, Store } from './ports.ts';
 
@@ -60,8 +62,6 @@ export interface ReconcileParts {
   now: () => Date;
 }
 
-const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 /** since：轮询、重投往回看到哪一刻（调用方给，比上一轮开始的时刻再早一些，重叠的部分去重账会认出来）。 */
 export async function reconcileGitHub(
   parts: ReconcileParts,
@@ -98,7 +98,7 @@ export async function reconcileGitHub(
       const result = await parts.intake.replay(d.id);
       if (result.verdict === 'accepted') replayed += 1;
     } catch (err) {
-      replayErrors.push(`${d.id}：${why(err)}`);
+      replayErrors.push(`${d.id}：${errMessage(err)}`);
     }
   }
   if (stuck.length > 0) {
