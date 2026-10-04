@@ -79,8 +79,6 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
-      // elkjs 打包后约 1.5 MB，只在桌面看板按需加载，不进首屏。
-      chunkSizeWarningLimit: 1700,
       sourcemap: false,
       // 第三方许可证声明：vite 汇总、src/build/licenses.ts 补全后写成产物根上的 licenses.txt（两个版本都有）。
       license: { fileName: LICENSE_DATA },
