@@ -32,9 +32,8 @@ export function toIso(v: unknown): string | undefined {
   return undefined;
 }
 
-export function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
+/** 排除 null 和数组的「是不是对象」：定义在 @fleet-dao/shared/util（#901 ①），这里转出去，本目录原来的 import 不用改。 */
+export { isRecord } from '@fleet-dao/shared/util';
 
 /** 邮箱「@」前面那一段能用的字符。 */
 const EMAIL_LOCAL_CHAR = /[A-Za-z0-9._%+-]/;

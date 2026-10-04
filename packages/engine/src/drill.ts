@@ -16,7 +16,7 @@ import {
   type CanaryVerdict,
   type RecordedCanaryStage,
 } from '@fleet-dao/db';
-import { errMessage } from '@fleet-dao/shared/util';
+import { asRecord, errMessage } from '@fleet-dao/shared/util';
 import { type Client, ScheduleNotFoundError, ScheduleOverlapPolicy } from '@temporalio/client';
 import { CANARY_JOB, CANARY_MAX_MINUTES, spanWords, stepSpans } from './jobs/canary.ts';
 
@@ -50,9 +50,6 @@ interface DrillRun {
   endedAt: string | null;
   steps: CanaryStep[] | null;
 }
-
-const asRecord = (x: unknown): Record<string, unknown> | null =>
-  x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : null;
 
 const isVerdict = (x: unknown): x is CanaryVerdict => CANARY_VERDICTS.some((v) => v === x);
 
