@@ -198,7 +198,7 @@ export const stagePolicyRoutes = pgTable(
 
 /**
  * 路由两层的上层「用途 → 模型顺序」（#574，specs/574-路由两层DB）：每个用途（阶段类型）一串模型，越靠前越先用。
- * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine.ts 的 routeFactsForPurpose）；发布时由仓里的默认骨架
+ * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine-route-facts.ts 的 routeFactsForPurpose）；发布时由仓里的默认骨架
  * 只补缺装进来（routing-apply.ts）。两层没有「钉住」这一列，选路一律按没钉住算。
  * 「这一层现在活着吗」不存列：它由下层现算（routing-liveness.ts 写明三件事各看哪张表的哪几列）。
  */
