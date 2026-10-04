@@ -124,7 +124,7 @@
 
 ## 2026-10-05 文档与仓体量审查 + PROGRESS 归档（#901，Sonnet 5.5 子代理，分支 `chore/901-docs-slim`，PR #910）
 
-做到哪：审查报告 `specs/901-项目瘦身与提速/文档与仓体量审查.md` 写完；本文件 209 KB / 800 多行 → 约 80 KB，历史节原样搬进 `docs/archive/`（搬前搬后逐行核过，丢 0 行）；钉骨架的测试 `agents/test/progress-structure.test.ts`、欠账检查跳过 `docs/archive/`、`.gitignore` 加 `_tmp_*` `*.log`、删了没人引用的 `.claude/handoff-2026-09-25.md`。下一步：盯 #910 的 CI 到合并；design/ops 拆分按报告第 4.4 节 P0、P1 起（未开工）。还没验证：合并后下一个新会话开场的钩子输出是否是「创始人引导还有 47 条没处理」且不报临时调整表问题（现在只在临时 git 仓里用真文件验过）。
+做到哪：审查报告 `specs/901-项目瘦身与提速/文档与仓体量审查.md` 写完；本文件 209 KB / 800 多行 → 约 80 KB，历史节原样搬进 `docs/archive/`（搬前搬后逐行核过，丢 0 行）；钉骨架的测试 `agents/test/progress-structure.test.ts`、欠账检查跳过 `docs/archive/`、删了没人引用的 `.claude/handoff-2026-09-25.md`。下一步：盯 #910 的 CI 到合并；design/ops 拆分按报告第 4.4 节 P0、P1 起（未开工）。还没验证：合并后下一个新会话开场的钩子输出是否是「创始人引导还有 47 条没处理」且不报临时调整表问题（现在只在临时 git 仓里用真文件验过）。
 
 ## 2026-10-05 #901 代码层臃肿审查（Sonnet 5.5 子代理，分支 `slim/901-*`，`Refs #901` 不写 Closes）
 
