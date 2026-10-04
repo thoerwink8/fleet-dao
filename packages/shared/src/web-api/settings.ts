@@ -28,6 +28,66 @@ export const QuotaReserveSettingSchema = z.record(z.string().min(1), PoolReserve
 export const RESERVE_KEYS_MATCH_WINDOWS: Same<keyof z.infer<typeof PoolReserveLinesSchema>, QuotaWindowKind> =
   true;
 
+/** 北京时间的一个日期（YYYY-MM-DD）：格式对、日历上真有这一天才算（2026-02-30 不算）。 */
+export const BeijingDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, '日期格式是 YYYY-MM-DD')
+  .refine((s) => {
+    const d = new Date(`${s}T00:00:00Z`);
+    return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === s;
+  }, '日历上没有这一天');
+
+const HoldText = z.string().trim().min(1, '不能留空').max(500, '最多 500 字');
+
+/**
+ * 一条整池暂停（#746）：通用段里「临时调整」的五列（内容 = 哪个池，下面四项），缺一项写不进去，多一项也不收（认不出明确失败）。
+ * reason 为什么停；decidedBy 谁拍的（原话加日期）；revokeWhen 撤回条件；reviewBy 最迟复查日期（北京时间）。
+ */
+export const PoolHoldSchema = z.strictObject({
+  reason: HoldText,
+  decidedBy: HoldText,
+  revokeWhen: HoldText,
+  reviewBy: BeijingDateSchema,
+});
+/** 账号池编号 → 这个池的整池暂停。没有这个池的条目 = 没暂停；撤回 = 把这个池的条目删掉（撤回原因写在这次改动的 reason，进操作记录）。 */
+export const PoolHoldsSettingSchema = z.record(z.string().min(1), PoolHoldSchema);
+
+/** 整池暂停的现状（现算）：设置里认得出的、认不出的、还靠旧提醒顶着的、到期没复查的。 */
+export const PoolHoldViewSchema = PoolHoldSchema.extend({
+  poolId: z.string(),
+  /** 到了最迟复查日期（当天及以后）还开着：标红，不自动撤，等人撤或续期。 */
+  overdue: z.boolean(),
+  /** 过了复查日期几天；当天为 0，没到期为 0 且 overdue=false。 */
+  overdueDays: z.number().int().min(0),
+});
+export const PoolHoldProblemSchema = z.object({
+  /** 哪个池的那一项认不出；整份认不出为 null（所有池都按暂停办）。 */
+  poolId: z.string().nullable(),
+  why: z.string(),
+});
+/** 还靠 `pool-hold:<池>` 提醒顶着的暂停（兼容读法，保留一版）：请迁成上面的开关。 */
+export const LegacyPoolHoldSchema = z.object({
+  poolId: z.string(),
+  title: z.string(),
+  since: Time,
+  /** 这个池同时已经有开关了：提醒是多余的，等它自己撤或手动处理。 */
+  alsoSwitched: z.boolean(),
+});
+export const PoolHoldsResponse = z.object({
+  holds: z.array(PoolHoldViewSchema),
+  problems: z.array(PoolHoldProblemSchema),
+  /** 设置整份认不出：引擎对所有池按暂停办。 */
+  holdAll: z.boolean(),
+  legacy: z.array(LegacyPoolHoldSchema),
+  /** 读旧提醒没读成：为什么（不拿「没有旧提醒」顶）。读成了没有这一项。 */
+  legacyProblem: z.string().optional(),
+  /** 设置的版本号（0 = 还没设过）：新建、撤回时带回来。 */
+  version: z.number().int().min(0),
+  /** 这次算「今天」用的北京日期。 */
+  today: BeijingDateSchema,
+  asOf: Time,
+});
+
 /** 驾驶舱能改的全局设置。新增一项就在这里加一行；不在表里的键一律拒收。 */
 export const SETTING_SCHEMAS = {
   /** 同时跑的 AI 会话上限（设计文档第四节：起步 6 个）。 */
@@ -48,6 +108,12 @@ export const SETTING_SCHEMAS = {
    * 库里没有这一行 = 种子没装上，明确失败（引擎不派、不切），不当成不限。
    */
   'engine.quotaReserve': QuotaReserveSettingSchema,
+  /**
+   * 整池暂停（#746，创始人 2026-10-02 拍开关留在库里当指令）：{池编号: {reason, decidedBy, revokeWhen, reviewBy}}。选路、切号整池避开；
+   * 探针探通、会话跑通都撤不掉它，只有人撤（驾驶舱设置页撤回要写原因，进操作记录）。过了 reviewBy 标红、不自动撤。
+   * 没设过 = 没有暂停；认不出（整份或某个池的那一项）按暂停办并报警，不当成能用。
+   */
+  'engine.poolHolds': PoolHoldsSettingSchema,
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

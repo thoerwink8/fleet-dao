@@ -27,6 +27,7 @@ import type {
   LiveEvent,
   Me,
   Notifications,
+  PoolHolds,
   Pools,
   ReleaseVersion,
   Repo,
@@ -80,6 +81,8 @@ export interface FleetApi {
   ): Promise<UpdatedRouteEffort>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
+  /** 整池暂停现状（#746）：开关（到期标红）、认不出的、还靠旧提醒顶着的。新建、撤回走 updateSetting('engine.poolHolds')。 */
+  poolHolds(): Promise<PoolHolds>;
   jobs(): Promise<Jobs>;
   notifications(query?: {
     status?: 'open' | 'all';
@@ -144,6 +147,7 @@ export const keys = {
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
   pools: ['pools'] as const,
+  poolHolds: ['pool-holds'] as const,
   jobs: ['jobs'] as const,
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
   audit: (target: string) => ['audit', target] as const,
@@ -262,6 +266,12 @@ export function useRoutingEfforts() {
 export function usePools({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({ queryKey: keys.pools, queryFn: () => api.pools(), enabled });
+}
+
+/** 整池暂停现状（#746）：到期是按日期现算的，不靠推送，每分钟重拉；改设置、改提醒时另外作废（useUpdateSetting）。 */
+export function usePoolHolds() {
+  const api = useApi();
+  return useQuery({ queryKey: keys.poolHolds, queryFn: () => api.poolHolds(), refetchInterval: 60_000 });
 }
 
 /** 定时任务不在推送名单里，每 30 秒重拉一次。 */
@@ -443,7 +453,10 @@ export function useUpdateSetting() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ key, body }: { key: SettingKey; body: UpdateSettingBody }) => api.updateSetting(key, body),
-    onSettled: () => qc.invalidateQueries({ queryKey: keys.settings }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.settings });
+      qc.invalidateQueries({ queryKey: keys.poolHolds });
+    },
   });
 }
 

@@ -53,6 +53,10 @@ export function createDemoApi(inner: MockApi): FleetApi {
     updateRouteEffort: () => Promise.reject(hidden('思考档位')),
     updateChannel: (channelId, body) => inner.updateChannel(channelId, body),
     pools: () => inner.pools(),
+    async poolHolds() {
+      need('settings', '设置');
+      return inner.poolHolds();
+    },
     async jobs() {
       need('schedules', '定时任务');
       return inner.jobs();

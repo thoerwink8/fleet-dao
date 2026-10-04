@@ -52,6 +52,11 @@
 - **#339 做完、PR 待开**（分支 `fix/339-backup-watch-dup`）：删 `deploy/backup/fleet-backup.sh` 的 `watch_fresh`（整段只有「没开跑」这一种），换成每轮顺手撤退役的 `backup.stale:*` 两条；看门狗（`watchdog.test.ts` 已有备份任务「从没跑过」「停了」的测试）仍会报备份停了。不在先审后合清单（`deploy/backup/` 不在 `high-risk-paths.json`），没要第二意见。**还欠（要人做）**：备份脚本不随自动发布走，法国上要重跑一遍 `deploy/backup/install.sh france` 才换成新脚本。
 - elkjs：还没开始。
 
+## 2026-10-05 #746 整池暂停做成库里的正式开关（Sonnet 5.5 子代理，分支 `feat/746-pool-hold-switch`）
+
+做到哪：设置键 `engine.poolHolds`（`{池: {reason, decidedBy, revokeWhen, reviewBy}}`，带版本号、进操作记录，缺一项写不进）；选路、切号读它（engine `real/pool-holds.ts`，和旧 `pool-hold:` 提醒并成一份），续会话的试探也不放过开关暂停的池；探针、会话碰不到它；读不出按暂停办（整份认不出所有池停、某项认不出只停那个池）并报 `session-org:pool-hold`；到期报 `session-org:pool-hold-overdue`、`/api/pool-holds` 和设置页「整池暂停」标红，不自动撤；撤回、续期后端落库前要求写原因（400 `reason_required`）；旧提醒读法保留一版，设置页提示「请迁成开关」。文档：design 第九节、ops 第五节同步改了。
+下一步：盯 CI 合并。还没验证：真环境（法国引擎关着、库里还有 `pool-hold:claude-solo`，发布后设置页应该列出它并提示迁移）；界面真实画面（1920×1080、1366×768）在 `_tmp/746-*.png`。没做：每天对账里「过了复查日期报给负责人」的飞书推送（现在只有引擎一轮写的提醒和驾驶舱标红）、负责人字段（单里写了默认指挥官，这次没加这一列）、`session-start.mjs` 开会话钩子不动（标准路径，要提到期要另开 PR）。
+
 ## 创始人引导（待处理）
 
 > 创始人插话给的引导、修正、决定落在这里（通用段「你的引导必须落盘」那条），别只留在对话里。办完标「已处理」或删掉；只管这一次会话怎么干的**不记**（决定 0013）。

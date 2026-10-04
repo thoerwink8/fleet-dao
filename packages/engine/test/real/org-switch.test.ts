@@ -24,7 +24,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import type { OrgKind } from '@fleet-dao/shared';
+import { beijingDateOf, type OrgKind } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
@@ -34,6 +34,8 @@ import {
   ORG_CHANNEL_ALERT,
   ORG_DRIFT_ALERT,
   ORG_LEDGER_ALERT,
+  ORG_POOL_HOLD_ALERT,
+  ORG_POOL_HOLD_OVERDUE_ALERT,
   ORG_RESERVE_ALERT,
   ORG_STUCK_ALERT,
   ORG_SWITCH_ALERT,
@@ -950,6 +952,74 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
     await t.db.insert(settings).values({ key: 'engine.soloPaused', value: '开' });
     expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
     expect(s.logs.join('\n')).toContain('认不出，按暂停办');
+  });
+
+  describe('整池暂停开关（#746，设置 engine.poolHolds）：切号照它整池避开，读不出按暂停办并报警，到期标红不自动撤', () => {
+    const hold = (over: Record<string, unknown> = {}) => ({
+      reason: '创始人要大用独享',
+      decidedBy: '「法国暂时不用独享号」2026-09-27',
+      revokeWhen: '创始人说可以用了',
+      reviewBy: '2026-10-30',
+      ...over,
+    });
+    const putHolds = (value: unknown) =>
+      t.client.query(
+        `insert into settings (key, value, updated_by) values ('engine.poolHolds', $1::jsonb, '创始人')
+         on conflict (key) do update set value = excluded.value`,
+        [JSON.stringify(value)],
+      );
+    const open = async (key: string) => {
+      const a = await alertOf(key);
+      return a !== undefined && a.resolvedAt === null;
+    };
+
+    it('【故意造出的失败】独享池开关暂停着：拼车被拒也不切过去；撤了开关（删掉那一项）下一次立刻就切', async () => {
+      const s = setup();
+      await putHolds({ 'claude-solo': hold() });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(s.logs.join('\n')).toContain('独享账号不可用');
+      await putHolds({});
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    });
+
+    it('【故意造出的失败】开关缺字段（读不出）：这个池照样按暂停办、不切；报「要人看」；补全了自己撤', async () => {
+      const s = setup();
+      await putHolds({ 'claude-solo': hold({ reviewBy: undefined }) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(true);
+      expect((await alertOf(ORG_POOL_HOLD_ALERT))?.body).toContain('claude-solo');
+      await putHolds({ 'claude-solo': hold() });
+      await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) });
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(false);
+    });
+
+    it('【故意造出的失败】整份设置认不出（不是对象）：所有池按暂停办、不切，报警', async () => {
+      const s = setup();
+      await putHolds('停');
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(true);
+    });
+
+    it('【故意造出的失败】过了复查日期还开着：报「到期」但不自动撤（开关还在、照样不切）；人改了日期续期才撤掉这条提醒', async () => {
+      const s = setup();
+      const yesterday = beijingDateOf(new Date(s.now().getTime() - 24 * H));
+      await putHolds({ 'claude-solo': hold({ reviewBy: yesterday }) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(await open(ORG_POOL_HOLD_OVERDUE_ALERT)).toBe(true);
+      expect((await alertOf(ORG_POOL_HOLD_OVERDUE_ALERT))?.body).toContain('不会自动撤');
+      const left = await t.client.query<{ value: object }>(
+        `select value from settings where key = 'engine.poolHolds'`,
+      );
+      expect(Object.keys(left.rows[0]?.value ?? {})).toEqual(['claude-solo']);
+      await putHolds({
+        'claude-solo': hold({ reviewBy: beijingDateOf(new Date(s.now().getTime() + 30 * 24 * H)) }),
+      });
+      await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) });
+      expect(await open(ORG_POOL_HOLD_OVERDUE_ALERT)).toBe(false);
+    });
   });
 
   describe('额度留量线（#194 方案 4.8）：线只来自库里（种子装的），引擎、驾驶舱读同一份', () => {

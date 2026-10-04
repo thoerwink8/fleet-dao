@@ -76,7 +76,7 @@ function mergeReserve(a: OrgReserveFacts | undefined, b: OrgReserveFacts): OrgRe
   };
 }
 
-/** held：整池暂停着的池（pool-hold:<池> 那条要人拍还开着）。库读不了照抛。 */
+/** held：整池暂停着的池（开关 engine.poolHolds 加 pool-hold:<池> 那条要人拍还开着的，real/pool-holds.ts 的 loadHeldPools）。库读不了照抛。 */
 export async function loadOrgSwitchFacts(
   db: Db,
   options: { now: Date; held: ReadonlySet<string> },

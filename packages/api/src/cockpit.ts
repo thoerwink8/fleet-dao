@@ -11,11 +11,15 @@ import {
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
+  type LegacyRead,
   MeResponse,
   NotificationsQuery,
   NotificationsResponse,
   PageQuery,
+  POOL_HOLDS_SETTING,
+  PoolHoldsResponse,
   PoolsResponse,
+  poolHoldsView,
   QUOTA_RESERVE_SETTING,
   ReposResponse,
   ResolveNotificationResponse,
@@ -23,6 +27,7 @@ import {
   RoutingLayersResponse,
   RoutingResponse,
   RunStepsResponse,
+  revocationProblem,
   SETTING_SCHEMAS,
   type SettingKey,
   SettingsResponse,
@@ -39,7 +44,7 @@ import {
   UpdateSettingResponse,
   WebRoutes,
 } from '@fleet-dao/shared';
-import { handlingOf, handlingView } from '@fleet-dao/store';
+import { handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
@@ -80,6 +85,9 @@ import {
   subtaskViews,
   usageView,
 } from './views.ts';
+
+/** 读旧 pool-hold 提醒时最多翻几页没处理的提醒（每页 200 条）；翻不完明说没读全，不拿「没有」顶。 */
+const LEGACY_ALERT_PAGES = 5;
 
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
 
@@ -561,6 +569,36 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     });
   });
 
+  app.get(WebRoutes.poolHolds.path, async (c) => {
+    const now = deps.now();
+    const setting = (await store.listSettings()).find((s) => s.key === POOL_HOLDS_SETTING);
+    // 旧的 pool-hold:<池> 提醒（兼容读法）：读不成明说，不拿「没有旧提醒」顶
+    let legacy: LegacyRead;
+    try {
+      const alerts: NotificationRecord[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < LEGACY_ALERT_PAGES; page += 1) {
+        const got = await store.listNotifications({
+          status: 'open',
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        });
+        alerts.push(...got.items);
+        cursor = got.nextCursor;
+        if (!cursor) break;
+      }
+      legacy = cursor
+        ? { ok: false, why: `没处理的提醒超过 ${LEGACY_ALERT_PAGES * 200} 条，旧的 pool-hold 提醒没读全` }
+        : { ok: true, alerts };
+    } catch (error) {
+      legacy = {
+        ok: false,
+        why: `读没处理的提醒没成：${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    return reply(c, PoolHoldsResponse, poolHoldsView(setting, legacy, now));
+  });
+
   app.get(WebRoutes.jobs.path, async (c) => {
     const now = deps.now();
     const jobs = await store.listJobs();
@@ -616,6 +654,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const value = valueSchema.safeParse(body.value);
     if (!value.success) throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
     const before = (await settingsView()).find((s) => s.key === key);
+    // 整池暂停：撤回、续期必须写原因（写进操作记录），在落库前这一步拦，不靠页面自觉
+    if (key === POOL_HOLDS_SETTING) {
+      const missing = revocationProblem(before?.value, value.data, body.reason);
+      if (missing) throw new ApiError(400, 'reason_required', missing);
+    }
     const actor = actorOf(c);
     const result = await store.putSetting(
       { key, value: value.data, expectedVersion: body.version, by: actor },

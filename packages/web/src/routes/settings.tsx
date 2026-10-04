@@ -8,6 +8,7 @@ import { brand } from '#brand';
 import { ApiError, errorText, useApi, useMe, usePools, useSettings, useUpdateSetting } from '../api/client';
 import type { Setting, SettingKey } from '../api/types';
 import { LoadError, LoadingRows, Page } from '../components/page';
+import { PoolHoldsPanel } from '../components/pool-holds';
 import { useRepo } from '../components/repo-context';
 import { PaletteSwatch } from '../components/shell/palette-swatch';
 import { ModeSwitch } from '../components/shell/topbar';
@@ -480,6 +481,7 @@ export default function Settings() {
             />
             <SoloPaused s={find('engine.soloPaused')} />
             <QuotaReserve s={find('engine.quotaReserve')} />
+            <PoolHoldsPanel />
           </div>
         )}
       </Section>

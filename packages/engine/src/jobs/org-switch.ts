@@ -33,7 +33,7 @@ export interface OrgPool {
   windows: OrgWindow[];
   /** 没给 = 没判留量线（老的输入、纯函数测试）；真装配（real/org-plan.ts 的 loadOrgSwitchFacts）一定给。 */
   reserve?: OrgReserveFacts;
-  /** 整池暂停着（pool-hold 那条要人拍还开着：登录失效、封号……）：切过去也派不了。 */
+  /** 整池暂停着（开关 engine.poolHolds，或 pool-hold 那条要人拍还开着：登录失效、封号……）：切过去也派不了。 */
   held: boolean;
 }
 
