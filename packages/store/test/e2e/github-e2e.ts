@@ -2,7 +2,8 @@
 // 每一步都用这个包的真实现、真 GitHub、真凭据，并核对回读（作者、头、合并人、正文、state_reason）。
 //
 // 在法国 VPS 上以引擎的运行用户跑（凭据只有它读得到）：
-//   node packages/github/test/e2e/github-e2e.ts --repo <owner>/fleet-dao-canary [--record <目录>]
+//   node packages/store/test/e2e/github-e2e.ts --repo <owner>/fleet-dao-canary [--record <目录>]
+// （#901 ⑤：原来在 packages/github/test/e2e/；github 包不再依赖 db，这个脚本要 PGlite 做幂等账，挪到了 store。）
 // 凭据从 /etc/fleet-dao/github 读（FLEET_GITHUB_APP_DIR 可改）；幂等账用内存里的 Postgres（PGlite，跑真迁移），不碰生产库。
 // 只写巡检仓：一张 issue（最后关掉）、一个分支（合并后删掉）、主线上一个改 README 的小提交。别的仓一个字不写。
 // --record：把用到的 GitHub 返回脱敏后存成测试夹具（令牌那一类接口一律不录）。
@@ -18,11 +19,10 @@ import {
   type GitHub,
   isBot,
   parseRepoSlug,
-  pgLedger,
-  pgLocker,
   redact,
   repoSlug,
-} from '../../src/index.ts';
+} from '@fleet-dao/github';
+import { pgLedger, pgLocker } from '../../src/github-pg.ts';
 
 const argv = process.argv.slice(2);
 const flag = (name: string) => {
@@ -33,7 +33,7 @@ const repoArg = flag('--repo');
 const recordDir = flag('--record');
 if (!repoArg) {
   console.error(
-    '用法：node packages/github/test/e2e/github-e2e.ts --repo <owner>/fleet-dao-canary [--record <目录>]',
+    '用法：node packages/store/test/e2e/github-e2e.ts --repo <owner>/fleet-dao-canary [--record <目录>]',
   );
   process.exit(2);
 }
