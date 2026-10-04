@@ -24,7 +24,9 @@ describe('segmentEvidence：交给失败分流的证据', () => {
     expect(segmentEvidence({ ...base, outcome: 'killed', exitCode: null })).toMatchObject({ code: 'killed' });
     expect('exitCode' in segmentEvidence({ ...base, exitCode: null })).toBe(false);
     expect(segmentEvidence({ ...base, outcome: 'timeout' }).code).toBe('wall_clock_timeout');
-    expect(segmentEvidence({ ...base, facts: { reason: 'relay_unknown', detail: '账本没读成' } })).toMatchObject({
+    expect(
+      segmentEvidence({ ...base, facts: { reason: 'relay_unknown', detail: '账本没读成' } }),
+    ).toMatchObject({
       code: 'relay_unknown',
       message: expect.stringContaining('账本没读成'),
     });
@@ -63,7 +65,12 @@ describe('routeOutcomeOf：这一次算不算这条路由的账（#758）', () =
       const e = segmentEvidence(result);
       const triaged = classifyFailure(
         triageEvidence({
-          failure: { source: 'session:execute', code: e.code ?? 'failed', message: e.message ?? '', retryable: null },
+          failure: {
+            source: 'session:execute',
+            code: e.code ?? 'failed',
+            message: e.message ?? '',
+            retryable: null,
+          },
           limits: { retryAttempts: 3, routeSwaps: 2, modelSwaps: 1 },
           routeBound: true,
           context: {
@@ -85,7 +92,9 @@ describe('routeOutcomeOf：这一次算不算这条路由的账（#758）', () =
     // 执行体被杀时报的原因码（繁忙）不能把「我们停的」翻成路由的错
     const loud = { stderrTail: 'overloaded_error', facts: { reason: 'overloaded' } };
     for (const outcome of ['org_switch', 'admission_blocked', 'spawn_failed', 'killed'] as const) {
-      expect(routeOutcomeOf({ ...base, ...loud, outcome, exitCode: null }, 'manual'), outcome).toBe('neutral');
+      expect(routeOutcomeOf({ ...base, ...loud, outcome, exitCode: null }, 'manual'), outcome).toBe(
+        'neutral',
+      );
     }
   });
 });

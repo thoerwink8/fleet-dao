@@ -148,19 +148,22 @@ describe('notWiredRuns', () => {
   it.each([
     ['没带', undefined],
     ['写了枚举以外的字', 'bad'],
-  ])('【故意造出的失败】收场那一笔算不算路由的账%s（#758）：当场红，不让熔断看不见这一次', (_what, routeOutcome) => {
-    const parsed = RunRecordSchema.safeParse({
-      runId: 'r',
-      segment: 'manual',
-      model: 'm',
-      startedAt: '2026-10-04T01:00:00Z',
-      endedAt: '2026-10-04T01:30:00Z',
-      outcome: 'failed',
-      ...(routeOutcome === undefined ? {} : { routeOutcome }),
-    });
-    expect(parsed.success).toBe(false);
-    expect(parsed.error?.issues.map((i) => i.path.join('.'))).toContain('routeOutcome');
-  });
+  ])(
+    '【故意造出的失败】收场那一笔算不算路由的账%s（#758）：当场红，不让熔断看不见这一次',
+    (_what, routeOutcome) => {
+      const parsed = RunRecordSchema.safeParse({
+        runId: 'r',
+        segment: 'manual',
+        model: 'm',
+        startedAt: '2026-10-04T01:00:00Z',
+        endedAt: '2026-10-04T01:30:00Z',
+        outcome: 'failed',
+        ...(routeOutcome === undefined ? {} : { routeOutcome }),
+      });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues.map((i) => i.path.join('.'))).toContain('routeOutcome');
+    },
+  );
 
   it('【故意造出的失败】占位的 start() 也照这份挡：验收段带派工档当场红', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'fleet-554-1-nw-'));

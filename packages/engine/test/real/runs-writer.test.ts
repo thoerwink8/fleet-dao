@@ -140,7 +140,9 @@ describe('三段各一笔记进 runs：记到这张单名下（#216）', { timeo
   });
 });
 
-describe('收场那一笔带上算不算路由的账（#758）：和失败分流同一份证据，选路的熔断、战绩靠它', { timeout: 60_000 }, () => {
+describe('收场那一笔带上算不算路由的账（#758）：和失败分流同一份证据，选路的熔断、战绩靠它', {
+  timeout: 60_000,
+}, () => {
   const manual = (cwd: string): OneShotInput => ({
     segment: 'manual',
     modelId: 'opus-5.5',
@@ -148,13 +150,15 @@ describe('收场那一笔带上算不算路由的账（#758）：和失败分流
     prompt: '动手',
     cwd,
   });
-  const refused = (reason: string): OneShotSpawner => async () => ({
-    exitCode: 1,
-    stdout: '',
-    stderr: '',
-    killed: false,
-    facts: { reason, detail: '上游说的' },
-  });
+  const refused =
+    (reason: string): OneShotSpawner =>
+    async () => ({
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+      killed: false,
+      facts: { reason, detail: '上游说的' },
+    });
   const outcomeOf = async (spawn: OneShotSpawner) => {
     const r = await runOneShot(manual(root), {
       spawn,

@@ -164,7 +164,12 @@ function stageOf(run: EndedPoolRun): StageKind | null {
 }
 
 /** 没下过结论的（老行、只记流水的那几笔）按不算账读：和 Fusion 的会话没记的一样当 neutral。 */
-function breakerOf(outcomes: readonly EndedPoolRun[], now: Date, inFlight: number, routeId: string): BreakerFacts {
+function breakerOf(
+  outcomes: readonly EndedPoolRun[],
+  now: Date,
+  inFlight: number,
+  routeId: string,
+): BreakerFacts {
   const state = routeBreaker(
     outcomes.map((o) => ({ at: o.endedAt.toISOString(), result: o.routeOutcome ?? 'neutral' })),
     { now: now.toISOString(), inFlight, routeId },

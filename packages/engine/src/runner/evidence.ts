@@ -51,7 +51,10 @@ export function segmentEvidence(result: OneShotResult): SegmentEvidence {
 }
 
 /** 这一次算不算这条路由的账（runs.route_outcome）。 */
-export function routeOutcomeOf(result: OneShotResult, segment: OneShotInput['segment']): RunRecord['routeOutcome'] {
+export function routeOutcomeOf(
+  result: OneShotResult,
+  segment: OneShotInput['segment'],
+): RunRecord['routeOutcome'] {
   switch (result.outcome) {
     case 'done':
       return 'ok';
