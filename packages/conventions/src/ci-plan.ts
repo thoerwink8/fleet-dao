@@ -9,6 +9,7 @@
 // - 测试不只读自己包里的文件（读别的包的源码、夹具，读 docs/ops.md、AGENTS.md、deploy/ 下的脚本）。PATH_RULES 和 TEST_READS
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
 // - 这里判「少跑」等于放行没测过的改动，所以本文件和两个入口都在 high-risk-paths.json 里（先审后合）。
+import { type Reuse, reuseOf } from './main-reuse.ts';
 import type { RepoView } from './repo.ts';
 import {
   type Packed,
@@ -49,6 +50,11 @@ export interface CiPlan {
   web: boolean;
   /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
   deploy: DeployMode;
+  /**
+   * 只有主线推送会有：这一轮的 test、web、deploy 不重测，复用了一次同树、同基准树、成功的 PR 检查（main-reuse.ts 判）。
+   * 有它时 tests 空、web 假、deploy none——汇总 job 据此认「这三个 job 本该跳过」，同时核对它是主线事件上带来的、字段齐全。
+   */
+  reused?: Reuse;
 }
 
 export const DEPLOY_MODES = ['all', 'ops', 'none'] as const;
@@ -424,6 +430,30 @@ export function assignTests(
   return { plan: { ...plan, tests: packed.boxes, reasons: [...plan.reasons, ...packed.notes] }, packed };
 }
 
+/**
+ * 主线这一轮复用了一次同树的 PR 检查（main-reuse.ts 已经核过树和基准树）：test、web、deploy 不再测。biome、tsc 的开关不动
+ * （lint 本来就每轮自己跑一遍）。plan 先按区间算好、装好箱再交进来：被跳过的是「本来要测的」，不是「什么都不用测」。
+ */
+export function applyReuse(plan: CiPlan, reuse: Reuse): CiPlan {
+  const wasTesting = plan.full
+    ? '全部测试'
+    : `${plan.tests.reduce((n, b) => n + b.files.length, 0)} 个测试文件`;
+  return {
+    ...plan,
+    full: false,
+    testUnits: [],
+    tests: [],
+    web: false,
+    deploy: 'none',
+    reused: reuse,
+    reasons: [
+      ...plan.reasons,
+      `同树复用：这次主线提交的树和 PR #${reuse.pr} 的检查（运行 ${reuse.run}）测的是同一棵、基准也是上次真绿的头；` +
+        `本来要测的（${wasTesting}${plan.web ? '、web' : ''}${plan.deploy === 'none' ? '' : `、deploy ${plan.deploy}`}）不再重测`,
+    ],
+  };
+}
+
 /** 写进 $GITHUB_OUTPUT 的几行；下游 job 的 if 和汇总 job 都只读这些。
  * lint job 里的 biome、tsc 两步各读自己那一份（`biome`、`tsc`）——job 级的开与不开由 ciVerdict 核，
  * 这两行只管 job 里面哪一步跑。 */
@@ -436,6 +466,8 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
     web: String(plan.web),
     deploy: plan.deploy,
     deploy_matrix: JSON.stringify(deployMatrix(plan.deploy)),
+    // 复用的那次 PR 检查的运行号；没复用是空串。汇总 job 核它和 plan 里的是同一份。
+    reused: plan.reused ? String(plan.reused.run) : '',
   };
 }
 
@@ -490,7 +522,15 @@ function parsePlan(text: unknown): CiPlan | string {
     return 'changes 给的 plan 认不出';
   }
   const why = testsProblem(o as CiPlan);
-  return why ?? (o as CiPlan);
+  if (why !== undefined) return why;
+  if ('reused' in o && o.reused !== undefined) {
+    const reused = reuseOf(o.reused);
+    if (reused === null) return 'changes 给的 plan 里 reused（同树复用）字段不齐全';
+    if (o.full || o.testUnits?.length || o.tests?.length || o.web || o.deploy !== 'none')
+      return 'plan 说复用了同树的 PR 检查，却还有要测的 test、web、deploy';
+    return { ...(o as CiPlan), reused };
+  }
+  return o as CiPlan;
 }
 
 /**
@@ -536,7 +576,7 @@ function testsProblem(plan: CiPlan): string | undefined {
  * 「本该跑 → success、本该不跑 → skipped」，changes、docs 必须 success；有一条不对、认不出，就不通过。
  * hygiene 不在这条判定里（红了不挡，见 ALWAYS_JOBS 的注释），但 ci.yml 仍然 needs 它，check 会等它跑完。
  */
-export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
+export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines: string[] } {
   const lines: string[] = [];
   if (typeof needs !== 'object' || needs === null)
     return { ok: false, lines: ['读不出各 job 的结果（needs）'] };
@@ -561,6 +601,19 @@ export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
     bad('changes 给 test job 铺矩阵的 tests 和 plan 里的测试台不是同一份');
   if (plan.full && (PLANNED_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
+  // 同树复用（主线推送才有）：test、web、deploy 本该跳过的依据。只认主线事件、且 changes 的输出和 plan 里是同一次运行；
+  // 事件没给（旧调用）、不是 push 都不认——一个 PR 的 plan 不能靠它把测试变成「本该跳过」。
+  const claimedRun = n.changes?.outputs?.reused;
+  if (plan.reused) {
+    if (event !== 'push')
+      bad(`plan 说复用了同树的 PR 检查，但这一轮不是主线推送（事件：${event ?? '没给'}）`);
+    if (claimedRun !== String(plan.reused.run)) bad('changes 的 reused 输出和 plan 里复用的运行号不是同一份');
+    lines.push(
+      `✓ 同树复用：test、web、deploy 复用 PR #${plan.reused.pr} 的检查（运行 ${plan.reused.run}），不重测`,
+    );
+  } else if (typeof claimedRun === 'string' && claimedRun !== '') {
+    bad('changes 给了 reused 输出，plan 里却没有复用的记录');
+  }
   for (const job of PLANNED_JOBS) {
     const want = expected(plan, job) ? 'success' : 'skipped';
     const r = n[job]?.result;

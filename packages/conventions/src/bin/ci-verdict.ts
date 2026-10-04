@@ -15,7 +15,8 @@ try {
   console.error(`::error::CI_NEEDS 不是 JSON（${e instanceof Error ? e.message : String(e)}）`);
   process.exit(2);
 }
-const { ok, lines } = ciVerdict(needs);
+// CI_EVENT = 这一轮的事件名（github.event_name）：同树复用只有主线推送认；没给不报错（旧调用照旧判），但带复用记录的 plan 会判红
+const { ok, lines } = ciVerdict(needs, process.env.CI_EVENT || undefined);
 for (const line of lines) (ok ? console.log : console.error)(line);
 if (!ok) console.error('::error::CI 没过：上面打 ✗ 的 job 不对');
 process.exitCode = ok ? 0 : 1;
