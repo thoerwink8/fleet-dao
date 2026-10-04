@@ -93,16 +93,16 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
 };
 
 /**
- * 按状态决定能做哪些操作。暂停、叫停对整个需求生效，所以只放在需求上；子任务上只有「换模型」。
- * 接口里没有「暂停中」这个状态，暂停和继续都给出来，由后端判断。
+ * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（继续、叫停，外加回答）。暂停、换模型引擎没有这两个动作
+ * （后端回 409 action_not_supported，api/src/cockpit.ts；#901），所以不画：画出来点了只会弹一句「做不到」。
+ * 叫停、继续对整个需求生效，只放在需求上。接口里没有「暂停中」这个状态，「继续」一直给出来，由后端判断（没停着等人就没有收信的）。
+ * 现在页面上只有通知中心用到「回答」（看板删了以后这个函数没有别的调用方，#856）；将来哪个页面接这排按钮，都从这里取。
  */
 export function availableActions(target: ActionTarget): UiAction[] {
   if (isTaskFinished(target)) return [];
   const list: UiAction[] = [];
   if (!target.sub && target.state === 'asking') list.push('answer');
-  const activity = target.sub ? target.sub.activity : target.activity;
-  if (activity) list.push('reroute');
-  if (!target.sub) list.push('pause', 'resume', 'stop');
+  if (!target.sub) list.push('resume', 'stop');
   return list;
 }
 
