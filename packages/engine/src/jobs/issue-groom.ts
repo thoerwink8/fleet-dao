@@ -10,6 +10,7 @@
 // 读不到、认不出、写不成都记没查成（unchecked），不拿「没有」顶；把握不够的、人摘过类别的、已经挂着版本的、
 // 现在没到期的闲置单，都是正常状态，不算没查成。一轮的活动（贴了什么、没把握的、清了哪些）汇总成一条日报级的提醒
 // （design 第七节，和关单对账的 alert 同一个口子，level=alert 不是要人拍的 decision）。
+
 import {
   categoryPlan,
   categoryRemovedByHuman,
@@ -28,7 +29,8 @@ import {
   milestonePlan,
   staleSinceOf,
 } from '@fleet-dao/conventions';
-import { message, type ReconcileLog } from './reconcile-common.ts';
+import { errMessage } from '@fleet-dao/shared/util';
+import type { ReconcileLog } from './reconcile-common.ts';
 
 export interface IssueGroomRepo {
   owner: string;
@@ -180,7 +182,7 @@ async function groomRepo(
     try {
       events = await deps.labelEvents(repo, issue.number);
     } catch (err) {
-      unchecked.push(`${slug}#${issue.number} 标签时间线没查成（${message(err)}），这一轮不问 Jev`);
+      unchecked.push(`${slug}#${issue.number} 标签时间线没查成（${errMessage(err)}），这一轮不问 Jev`);
       continue;
     }
     if (categoryRemovedByHuman(events)) continue; // 只贴不摘，以后不再碰，不报
@@ -192,7 +194,7 @@ async function groomRepo(
         activity.labeled.push({ issue: issue.number, label: plan.label });
         found += 1;
       } catch (err) {
-        unchecked.push(`${slug}#${issue.number} 贴类别标签「${plan.label}」没写成（${message(err)}）`);
+        unchecked.push(`${slug}#${issue.number} 贴类别标签「${plan.label}」没写成（${errMessage(err)}）`);
       }
       continue;
     }
@@ -213,7 +215,7 @@ async function groomRepo(
         found += 1;
       } catch (err) {
         unchecked.push(
-          `${slug}#${issue.number} 挂里程碑「${decision.milestone.title}」没写成（${message(err)}）`,
+          `${slug}#${issue.number} 挂里程碑「${decision.milestone.title}」没写成（${errMessage(err)}）`,
         );
       }
       continue;
@@ -229,7 +231,7 @@ async function groomRepo(
       try {
         staleSince = staleSinceOf(await deps.labelEvents(repo, issue.number));
       } catch (err) {
-        unchecked.push(`${slug}#${issue.number} 标签时间线没查成（${message(err)}），这一轮不查闲置`);
+        unchecked.push(`${slug}#${issue.number} 标签时间线没查成（${errMessage(err)}），这一轮不查闲置`);
         continue;
       }
     }
@@ -244,7 +246,7 @@ async function groomRepo(
         activity.staleMarked.push(issue.number);
         found += 1;
       } catch (err) {
-        unchecked.push(`${slug}#${issue.number} 贴「过时」没写成（${message(err)}）`);
+        unchecked.push(`${slug}#${issue.number} 贴「过时」没写成（${errMessage(err)}）`);
       }
     } else if (idle.action === 'close') {
       try {
@@ -252,7 +254,7 @@ async function groomRepo(
         activity.closed.push(issue.number);
         found += 1;
       } catch (err) {
-        unchecked.push(`${slug}#${issue.number} 关成「不做了」没成（${message(err)}）`);
+        unchecked.push(`${slug}#${issue.number} 关成「不做了」没成（${errMessage(err)}）`);
       }
     }
   }
@@ -282,7 +284,7 @@ async function groomRepo(
       activity.handedOff.push({ issue: issue.number, from: issue.milestone.title, to: decision.to.title });
       found += 1;
     } catch (err) {
-      unchecked.push(`${slug}#${issue.number} 版本交接没写成（${message(err)}）`);
+      unchecked.push(`${slug}#${issue.number} 版本交接没写成（${errMessage(err)}）`);
     }
   }
 
@@ -299,7 +301,7 @@ export async function sweepIssueGroom(deps: IssueGroomJobDeps): Promise<IssueGro
     try {
       facts = await deps.facts(repo);
     } catch (err) {
-      result.unchecked.push(`${slug} 单子打标没查成（${message(err)}）`);
+      result.unchecked.push(`${slug} 单子打标没查成（${errMessage(err)}）`);
       continue;
     }
     result.scanned += 1;
@@ -309,7 +311,7 @@ export async function sweepIssueGroom(deps: IssueGroomJobDeps): Promise<IssueGro
     try {
       await deps.digest(repo, `${slug}：单子打标挂版本`, renderDigest(activity));
     } catch (err) {
-      result.unchecked.push(`${slug} 单子打标的日报没写成（${message(err)}）`);
+      result.unchecked.push(`${slug} 单子打标的日报没写成（${errMessage(err)}）`);
     }
     deps.log('info', '单子打标挂版本查完一个仓', {
       repo: slug,

@@ -35,9 +35,11 @@
 //   （已删的对账给提问另开单推出来的，#530）如果还开着，不再有代码去撤它们，落进下面「判不了、还没接的」那一档，
 //   只靠 24 小时再推。
 // - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）。
+
 import { type AlertStage, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
 import {
@@ -45,7 +47,6 @@ import {
   beijingDate,
   clip,
   isStage,
-  message,
   notRunningWords,
   RECONCILE_ACTOR,
   type ReconcileLog,
@@ -330,7 +331,7 @@ async function quietAlerts(c: Ctx, alerts: readonly AlertRow[]): Promise<Set<str
       if (h.stage === 'silenced' || HANDLED_STAGES.includes(h.stage)) quiet.add(id);
     }
   } catch (err) {
-    c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${message(err)}`);
+    c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${errMessage(err)}`);
   }
   return quiet;
 }
@@ -367,7 +368,7 @@ export async function sweepAlerts(
           }
         }
       } catch (err) {
-        c.part.unchecked.push(`提醒 ${alert.dedupeKey}（${rule.name}）没查成：${message(err)}`);
+        c.part.unchecked.push(`提醒 ${alert.dedupeKey}（${rule.name}）没查成：${errMessage(err)}`);
       }
       break;
     }
@@ -382,7 +383,7 @@ export async function sweepAlerts(
     try {
       await remind(c, alert);
     } catch (err) {
-      c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${message(err)}`);
+      c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${errMessage(err)}`);
     }
   }
   // 3. 原来那条已经处理了的再提醒，跟着撤
@@ -393,7 +394,7 @@ export async function sweepAlerts(
     try {
       await resolve(c, alert, '原来那条已经处理了');
     } catch (err) {
-      c.part.unchecked.push(`再提醒 ${alert.dedupeKey} 没撤成：${message(err)}`);
+      c.part.unchecked.push(`再提醒 ${alert.dedupeKey} 没撤成：${errMessage(err)}`);
     }
   }
   return c.part;

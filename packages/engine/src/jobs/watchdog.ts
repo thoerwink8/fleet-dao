@@ -12,11 +12,13 @@
 // - 标题正文不带「多久了」这种每轮都变的话：只写上次跑成的时刻、最近一次的原因，没变就不改卡（飞书免费版每月 1 万次接口调用）。
 // - 任务自己报「没跑成」的（键以 <编号>:run 开头，备份脚本就这么报）：它为最近这次没跑成报过（那条在这次开始之后建的或改过，
 //   人处理没处理都算），看门狗不为同一件事再报一条，自己那条撤掉写明看哪条；「停了」照报（停了它自己报不了）。
+
 import type { JobHealth, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { beijingDate, clip, message, stamp } from './reconcile-common.ts';
+import { beijingDate, clip, stamp } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
 export const WATCHDOG_JOB = {
@@ -250,7 +252,7 @@ async function attempt<T>(
   try {
     return { ok: true, value: await fn() };
   } catch (err) {
-    s.problems.push(`${what}：${message(err)}`);
+    s.problems.push(`${what}：${errMessage(err)}`);
     return { ok: false };
   }
 }
@@ -274,11 +276,11 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
   try {
     health = await deps.health(now);
   } catch (err) {
-    const notes = [`读不到定时任务的登记表或跑记录：${message(err)}`];
+    const notes = [`读不到定时任务的登记表或跑记录：${errMessage(err)}`];
     try {
       await raiseUnchecked(deps, notes[0] ?? '', now);
     } catch (e) {
-      notes.push(`「看门狗没查成」这条提醒也没写进去：${message(e)}`);
+      notes.push(`「看门狗没查成」这条提醒也没写进去：${errMessage(e)}`);
     }
     return { outcome: 'failed', why: clip(notes.join('；'), WATCHDOG_WHY_MAX) };
   }
@@ -358,7 +360,7 @@ export async function runWatchdogJob(deps: WatchdogDeps): Promise<WatchdogRun> {
   try {
     result = await round(deps);
   } catch (err) {
-    result = { outcome: 'failed', why: clip(`看门狗没跑成：${message(err)}`, WATCHDOG_WHY_MAX) };
+    result = { outcome: 'failed', why: clip(`看门狗没跑成：${errMessage(err)}`, WATCHDOG_WHY_MAX) };
   }
   await deps.runs.finish(runId, result, deps.now());
   const run: WatchdogRun = {

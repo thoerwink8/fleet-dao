@@ -1,5 +1,6 @@
 import type { DeliveryCheck } from '@fleet-dao/adapters';
 import { PLAN_DOC } from '@fleet-dao/conventions';
+import { errMessage } from '@fleet-dao/shared/util';
 import { PortError, type SessionOutput } from '../ports.ts';
 import {
   type LeadOutputKind,
@@ -19,7 +20,7 @@ import {
 } from './prompts.ts';
 import type { Live } from './session-live.ts';
 import type { createTree } from './session-tree.ts';
-import { errorText, SHA } from './session-util.ts';
+import { SHA } from './session-util.ts';
 import {
   changedFilesSince,
   commitsSince,
@@ -102,7 +103,7 @@ export function createOutput(parts: Pick<ReturnType<typeof createTree>, 'treeAs'
         changed,
       };
     } catch (error) {
-      return { check: { state: 'unknown', target, detail: errorText(error) }, changed: [] };
+      return { check: { state: 'unknown', target, detail: errMessage(error) }, changed: [] };
     }
   }
 
@@ -163,7 +164,7 @@ export function createOutput(parts: Pick<ReturnType<typeof createTree>, 'treeAs'
           return await readLeadOutput(live, live.kind, read);
       }
     } catch (error) {
-      throw new PortError('READ_FAILED', `读会话交回来的结论文件没成：${errorText(error)}`, {
+      throw new PortError('READ_FAILED', `读会话交回来的结论文件没成：${errMessage(error)}`, {
         retryable: true,
       });
     }

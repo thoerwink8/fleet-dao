@@ -14,6 +14,7 @@ import {
   type SessionRunState,
   taskContext,
 } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import { stoppingNote } from '../drain.ts';
 import {
   type LaunchSessionInput,
@@ -44,7 +45,7 @@ import type { createProgress } from './session-progress.ts';
 import { otherVendor, screenForOtherVendor, VERIFY_MATERIAL, WORK_MATERIAL } from './session-screen.ts';
 import type { createTree } from './session-tree.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText, scopeLimitsOf } from './session-util.ts';
+import { scopeLimitsOf } from './session-util.ts';
 import { launchSegment, SEGMENT_NOT_WIRED_CODE } from './sessions-segment.ts';
 import { removeFileAs, worktreeChanges } from './user-git.ts';
 
@@ -211,7 +212,7 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
     try {
       kind = outputKindFor(input.stage, input.brief);
     } catch (error) {
-      throw new PortError('BAD_INPUT', errorText(error), { retryable: false });
+      throw new PortError('BAD_INPUT', errMessage(error), { retryable: false });
     }
     // 资源上限先换算、先校验：不对就在登记这一行之前拒，库里不留没起也没结束的会话
     const limits = scopeLimitsOf(input.resources);
@@ -287,7 +288,7 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
               : `切号停下的会话续不上原会话，在 ${route.poolId} 上开新会话带接力任务书：${why}`,
         ok: true,
       }).catch((error: unknown) =>
-        log('切号后续会话的操作记录没写进库', { runId: input.runId, error: errorText(error) }),
+        log('切号后续会话的操作记录没写进库', { runId: input.runId, error: errMessage(error) }),
       );
     }
     // 这次的会话号：续会话就是原来那个；开新会话、fork 由驱动给——Claude 的号我们定，cursor 的先给临时号、真号 init 帧里报，
@@ -326,7 +327,7 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
     try {
       leftover = await worktreeChanges(t);
     } catch (error) {
-      leftover = { error: errorText(error) };
+      leftover = { error: errMessage(error) };
     }
     const prompt = stagePrompt({
       stage: input.stage,
@@ -443,7 +444,7 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
         // 进程还没起：和「没起来」一样收尾（记结局、删临时目录），明确报错
         const failure = new PortError(
           'IO_PREP_FAILED',
-          `会话的收发目录备不好（${ioDir}）：${errorText(error)}`,
+          `会话的收发目录备不好（${ioDir}）：${errMessage(error)}`,
           {
             retryable: false,
           },
@@ -457,7 +458,7 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
           failureCode: failure.code,
           failureMessage: failure.message,
           routeOutcome: 'neutral',
-        }).catch((e: unknown) => log('没起来的会话没记上结局', { runId: input.runId, error: errorText(e) }));
+        }).catch((e: unknown) => log('没起来的会话没记上结局', { runId: input.runId, error: errMessage(e) }));
         throw failure;
       }
     }
@@ -495,7 +496,9 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
         },
         (error: unknown) => {
           spawnReject(
-            new PortError('LAUNCH_FAILED', `起会话之前就被拦下了：${errorText(error)}`, { retryable: false }),
+            new PortError('LAUNCH_FAILED', `起会话之前就被拦下了：${errMessage(error)}`, {
+              retryable: false,
+            }),
           );
           throw error;
         },
@@ -530,9 +533,9 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
         outcome: 'failed',
         endedAt: clock(),
         failureCode: error instanceof PortError ? error.code : 'LAUNCH_FAILED',
-        failureMessage: errorText(error),
+        failureMessage: errMessage(error),
         routeOutcome: 'neutral',
-      }).catch((e: unknown) => log('没起来的会话没记上结局', { runId: input.runId, error: errorText(e) }));
+      }).catch((e: unknown) => log('没起来的会话没记上结局', { runId: input.runId, error: errMessage(e) }));
       throw error;
     } finally {
       clearTimeout(timer);
@@ -552,7 +555,7 @@ export function createLaunch(shared: SessionShared, parts: LaunchParts) {
       const stopped = await abandonStarted(live, user, '开工没记进库');
       throw new PortError(
         'SESSION_RECORD_FAILED',
-        `会话 ${input.runId} 起来了，开工却没记进库（${errorText(error)}）：已经停掉${stopped}`,
+        `会话 ${input.runId} 起来了，开工却没记进库（${errMessage(error)}）：已经停掉${stopped}`,
         { retryable: true },
       );
     }

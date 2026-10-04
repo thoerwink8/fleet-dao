@@ -9,10 +9,6 @@ export function asSessionUser(user: string | null | undefined): SessionUser | un
   return (SESSION_USERS as readonly string[]).includes(user ?? '') ? (user as SessionUser) : undefined;
 }
 
-export function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** 失败信息接上执行体只在 stderr 里说的原话（已经在里面的不重复）：cursor 的认证、额度、网络报错就只有它。 */
 export function withRawError(message: string, raw: string | undefined): string {
   return raw && !message.includes(raw) ? `${message}（执行体原话：${raw}）` : message;

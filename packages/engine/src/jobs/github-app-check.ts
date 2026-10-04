@@ -3,9 +3,11 @@
 // 查一次两个机器人实际拿到的权限，缺的、不该有的、没查成的各报一条「要人看」提醒（键 github-app:<机器人>:<仓>），好了下一轮
 // 自己撤；后端健康页的 github_app 项看这些提醒开没开着（同一个前缀 GITHUB_APP_ALERT_PREFIX）。
 // 改这里之前必须知道：没查成（没装到这个仓、凭据读不到、GitHub 回的认不出）也报提醒、这一轮记没查全，不当成权限够。
+
 import { GITHUB_APP_ALERT_PREFIX } from '@fleet-dao/db';
 import type { RepoRef, SelfCheckItem } from '@fleet-dao/github';
-import { type AlertStore, message, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
+import { errMessage } from '@fleet-dao/shared/util';
+import { type AlertStore, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
 export interface GitHubAppCheckDeps {
   apps: {
@@ -51,7 +53,7 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
     repos = await deps.apps.repos();
   } catch (err) {
     return {
-      failed: `GitHub 机器人权限自检：列受管的仓没成：${message(err)}`,
+      failed: `GitHub 机器人权限自检：列受管的仓没成：${errMessage(err)}`,
       scanned: 0,
       found: 0,
       unchecked: [],
@@ -62,7 +64,7 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
   try {
     items = await deps.apps.selfCheck(repos);
   } catch (err) {
-    return { failed: `GitHub 机器人权限自检没跑成：${message(err)}`, scanned: 0, found: 0, unchecked: [] };
+    return { failed: `GitHub 机器人权限自检没跑成：${errMessage(err)}`, scanned: 0, found: 0, unchecked: [] };
   }
   const unchecked: string[] = [];
   let found = 0;
@@ -86,7 +88,7 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
       await deps.alerts.raise({ dedupeKey: key, level: 'alert', taskId: null, ...githubAppAlert(item) });
       found += 1;
     } catch (err) {
-      unchecked.push(`${key} 的提醒没写成：${message(err)}`);
+      unchecked.push(`${key} 的提醒没写成：${errMessage(err)}`);
     }
   }
   return { scanned: items.length, found, unchecked };

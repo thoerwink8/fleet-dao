@@ -5,9 +5,9 @@ import type { LineMeta, PlanPayload, RateLimitReading, ToolPayload } from '@flee
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import { appendProgressEvents, savePoolQuota } from '@fleet-dao/db';
 import type { ProgressEvent } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { Live } from './session-live.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText } from './session-util.ts';
 
 const STEP_RANK: Record<string, number> = { pending: 0, in_progress: 1, done: 2 };
 const PENDING_MAX = 5_000;
@@ -49,7 +49,7 @@ export function createProgress(shared: SessionShared) {
             return;
           }
         } catch (error) {
-          live.writeError ??= errorText(error);
+          live.writeError ??= errMessage(error);
           // 写不进去先放回去，下一轮再写；攒太多就丢最老的，记下丢了几条（不静默）。
           live.pending.unshift(...batch);
           if (live.pending.length > PENDING_MAX) {
@@ -115,7 +115,7 @@ export function createProgress(shared: SessionShared) {
       complete: false,
       windows,
     }).catch((error: unknown) => {
-      live.quotaError ??= errorText(error);
+      live.quotaError ??= errMessage(error);
     });
   };
 
