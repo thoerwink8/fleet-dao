@@ -4,7 +4,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   inFlightByPool,
   type PoolQuotaSnapshot,
-  poolSessionUsage,
   QUOTA_UNREPORTED_TTL_MS,
   quotaTable,
   type StoredQuotaWindow,
@@ -287,28 +286,6 @@ describe('额度写入与额度表', () => {
       true,
       ago(3 * HOUR),
     ]);
-  });
-
-  it('poolSessionUsage：只返回这个池、时间范围内开始了的会话；花费为空的照样返回、字段为空', async () => {
-    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
-    await addRoute(t.db, { id: 'b-opus', poolId: 'relay-b', modelId: 'opus-5.5' });
-    const repo = await addRepo(t.db);
-    const task = await addTask(t.db, repo.id);
-    const run = (routeId: string, over: Record<string, unknown>) =>
-      addRun(t.db, { taskId: task.id, routeId, ...over });
-    await run('a-opus', { startedAt: ago(10 * MIN), inputTokens: 100, costUsd: 0.25 });
-    await run('a-opus', { startedAt: ago(5 * MIN) }); // 没记到花费
-    await run('a-opus', { queuedAt: ago(4 * HOUR), startedAt: ago(3 * HOUR), costUsd: 9 }); // 范围外
-    await run('a-opus', {}); // 还在排队、没开始
-    await run('b-opus', { startedAt: ago(10 * MIN), costUsd: 7 }); // 别的池
-    const rows = await poolSessionUsage(t.db, { poolId: 'relay-a', since: ago(HOUR), until: NOW });
-    expect(rows.map((r) => [r.modelId, r.inputTokens, r.costUsd])).toEqual(
-      expect.arrayContaining([
-        ['opus-5.5', 100, 0.25],
-        ['opus-5.5', null, null],
-      ]),
-    );
-    expect(rows).toHaveLength(2);
   });
 
   it('在跑的会话按账号池计：排队的、已结束的都不占名额，不属于任何需求的会话照样占', async () => {

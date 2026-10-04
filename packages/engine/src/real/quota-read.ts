@@ -3,7 +3,8 @@
 // 改这里之前必须知道：
 // - 读取用的是引擎进程自己的身份和家目录（productionQuotaIo）：要会话用户的登录态才读得到的池（独享组织的 /usage）读不到时
 //   报 not_current / no_credentials，由 jobs/quota-read.ts 按规矩处理（not_current 不报警、凭据类当场报），不在这里绕。
-// - 估算类的池的用量记录（usageRecords）读 session_runs 里这个池路由的会话；没记到花费的会话不进记录（不拿 0 冒充），
+// - 估算类的池的用量记录（usageRecords）读这个池路由上的会话，Fusion 的（session_runs）和三段的一次性会话（runs）都算（db 的
+//   pool-runs.ts，#758）；runs 读不了照抛（这个池没读成），不拿 Fusion 那一半当全部。没记到花费的会话不进记录（不拿 0 冒充），
 //   估算读取器对「一条记录都没有」自己写「0 只是下限」。池自己配了日账目录（usage）的不走这里。
 import {
   loadQuotaConfig,
@@ -16,9 +17,9 @@ import {
 import {
   type Db,
   finishScheduleRun,
-  type PoolSessionUsage,
+  type PoolRunUsage,
   poolLastReadOk,
-  poolSessionUsage,
+  poolRunUsage,
   resolveAlertByKey,
   savePoolQuota,
   startScheduleRun,
@@ -36,7 +37,7 @@ export interface QuotaReadWiring {
 }
 
 /** 会话用量转成估算读取器要的记录：花费为空的会话跳过（它没记到钱，按 0 算就是编数）。 */
-export function usageRecordsFrom(poolId: string, rows: readonly PoolSessionUsage[]): UsageRecord[] {
+export function usageRecordsFrom(poolId: string, rows: readonly PoolRunUsage[]): UsageRecord[] {
   return rows.flatMap((r) =>
     r.costUsd === null
       ? []
@@ -56,7 +57,7 @@ export function usageRecordsFrom(poolId: string, rows: readonly PoolSessionUsage
 }
 
 export function sessionUsageSource(db: Db): UsageSource {
-  return async (q) => usageRecordsFrom(q.poolId, await poolSessionUsage(db, q));
+  return async (q) => usageRecordsFrom(q.poolId, await poolRunUsage(db, q));
 }
 
 /** 给 EngineJobs.quotaRead 用的工厂。 */

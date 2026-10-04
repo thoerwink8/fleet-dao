@@ -334,6 +334,8 @@ export interface SessionPortsDeps {
   mirasimLedgerDir(user: SessionUser): string;
   mirasimLedgerFs(user: SessionUser): LedgerFs;
   forkMaxContextTokens?: number;
+  /** 会话出网经的代理（FLEET_SESSION_PROXY）：cursor-agent、grok 的会话带上，Claude 不带（hosts.ts）。不给就直连。 */
+  sessionProxy?: string;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
   helper?: string;
   sudo?: readonly string[];
@@ -631,6 +633,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     mirasimConnect: deps.mirasimConnect,
     mirasimLedgerDir: deps.mirasimLedgerDir,
     mirasimLedgerFs: deps.mirasimLedgerFs,
+    sessionProxy: deps.sessionProxy,
     ...(deps.run ? { run: deps.run } : {}),
   });
   const forkMax = deps.forkMaxContextTokens ?? DEFAULT_FORK_MAX_CONTEXT_TOKENS;

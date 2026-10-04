@@ -53,6 +53,11 @@ const RunRecordFields = z.object({
    * 切完任务工作流在原分支上重跑（#59，不算失败）。
    */
   outcome: z.enum(['done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch']),
+  /**
+   * 这一次算不算这条路由的账（runner/evidence.ts 的 routeOutcomeOf：跑通了 ok、失败分流判路由的错 fail、别的 neutral）：
+   * 选路的熔断、战绩读它（#758）。收场必带，漏了当场拒，不让熔断看不见这一次。
+   */
+  routeOutcome: z.enum(['ok', 'fail', 'neutral']),
   /** 失败原因（exit code、错误消息），outcome != 'done' 时给。 */
   failureReason: z.string().optional(),
 });

@@ -116,6 +116,32 @@ describe('runs 表本身的约束', () => {
     await expectViolation(insertRun({ endedAt: NOW, outcome: 'oops' as 'done' }), 'runs_outcome_known');
   });
 
+  it('算不算路由的账（#758）：收场的行收 ok / fail / neutral，没写就是 NULL', async () => {
+    const ids = { ok: randomUUID(), fail: randomUUID(), neutral: randomUUID(), blank: randomUUID() };
+    await insertRun({ id: ids.ok, endedAt: NOW, outcome: 'done', routeOutcome: 'ok' });
+    await insertRun({ id: ids.fail, endedAt: NOW, outcome: 'failed', routeOutcome: 'fail' });
+    await insertRun({ id: ids.neutral, endedAt: NOW, outcome: 'org_switch', routeOutcome: 'neutral' });
+    await insertRun({ id: ids.blank, endedAt: NOW, outcome: 'done' });
+    const rows = await t.db.select({ id: runs.id, routeOutcome: runs.routeOutcome }).from(runs);
+    expect(Object.fromEntries(rows.map((r) => [r.id, r.routeOutcome]))).toEqual({
+      [ids.ok]: 'ok',
+      [ids.fail]: 'fail',
+      [ids.neutral]: 'neutral',
+      [ids.blank]: null,
+    });
+  });
+
+  it('【失败】算不算路由的账写了别的字：库拒收（runs_route_outcome_known）', async () => {
+    await expectViolation(
+      insertRun({ endedAt: NOW, outcome: 'failed', routeOutcome: 'bad' as 'fail' }),
+      'runs_route_outcome_known',
+    );
+  });
+
+  it('【失败】还在跑的行就写了算不算路由的账：库拒收（runs_route_outcome_after_end），结论只在收场时下', async () => {
+    await expectViolation(insertRun({ routeOutcome: 'fail' }), 'runs_route_outcome_after_end');
+  });
+
   it('【失败】给了 endedAt 但 outcome 是空：库拒收（runs_outcome_iff_ended）', async () => {
     await expectViolation(insertRun({ endedAt: NOW }), 'runs_outcome_iff_ended');
   });
@@ -231,7 +257,7 @@ describe('startRun / closeOpenRuns：开跑留一行没结束的，引擎起来�
     expect(await listOpenRuns(t.db)).toEqual([]);
   });
 
-  it('还开着的收成 killed、写明为什么、交回编号；收过场的不动；收的时刻早于开跑时刻按开跑时刻收', async () => {
+  it('还开着的收成 killed、写明为什么、交回编号、不算路由的账；收过场的不动；收的时刻早于开跑时刻按开跑时刻收', async () => {
     const open = randomUUID();
     const future = randomUUID();
     const done = randomUUID();
@@ -256,18 +282,21 @@ describe('startRun / closeOpenRuns：开跑留一行没结束的，引擎起来�
       startedAt: ago(40 * MIN),
       endedAt: ago(35 * MIN),
       outcome: 'done',
+      routeOutcome: 'ok',
     });
     const closed = await closeOpenRuns(t.db, { endedAt: NOW, reason: '引擎重启时这一段还没收场' });
     expect(closed.sort()).toEqual([open, future].sort());
     expect(await getRun(t.db, open)).toMatchObject({
       endedAt: NOW,
       outcome: 'killed',
+      routeOutcome: 'neutral',
       failureReason: '引擎重启时这一段还没收场',
     });
     expect((await getRun(t.db, future))?.endedAt).toEqual(new Date(NOW.getTime() + MIN));
     expect(await getRun(t.db, done)).toMatchObject({
       endedAt: ago(35 * MIN),
       outcome: 'done',
+      routeOutcome: 'ok',
       failureReason: null,
     });
     expect(await closeOpenRuns(t.db, { endedAt: NOW, reason: '再收一遍' })).toEqual([]);

@@ -33,8 +33,12 @@
       "FLEET_FORK_MAX_CONTEXT_TOKENS": "100000",
       "FLEET_CURSOR_VERSIONS_DIR": "/home/{user}/.local/share/cursor-agent/versions",
       "FLEET_CANARY_REPO": {
-        "private": null,
-        "说明": "登记的差别：用本机自己的演练仓，不是法国的全流程巡检仓（本机档只接演练仓，specs/451 的「AI 理解」）；还没配，指纹先留空"
+        "value": "thoerwink8/fleet-dao-canary",
+        "说明": "登记的差别：本机档只接演练仓（specs/451 的「AI 理解」），用的是 #452 需求里写定的演练仓，不是法国的全流程巡检仓；仓名已经公开写在 #452 里，当公开值处理（法国那个巡检仓照旧是私有值、只记指纹）"
+      },
+      "FLEET_SESSION_PROXY": {
+        "value": "http://127.0.0.1:7890",
+        "说明": "登记的差别：本机档上网要经 Windows 上的 Clash（只听 Windows 的 127.0.0.1:7890；WSL 里直连 x.ai 12 秒超时，经它 0.4 秒，2026-10-04 实测），引擎起 grok、cursor-agent 的会话和探针带上它（Claude 不带：reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/profile.sh 的 session_proxy_load 照这一档的期望读这一项，不认 root 环境里的同名变量）；法国直连，留空。WSL 的回环规则（deploy/local/fleet-wsl-loopback.sh 的 WSL_LOOPBACK_WINDOWS_PORTS）空出的就是这个口，改口两处一起改（#731）"
       }
     },
     "api.env": {
