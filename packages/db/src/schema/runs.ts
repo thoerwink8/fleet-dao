@@ -19,6 +19,9 @@
 //   两张表并起来读（queries/pool-runs.ts，#758）。收场时由引擎判好写下（runner/evidence.ts）；还在跑的不许有；空的（老行、
 //   Fusion 验证那一笔流水）按不算账读，不进熔断、战绩。
 // 表名就叫 runs（和 Fusion 的 sessionRuns / verifyRounds 分开：Fusion 那两张老表本切片不动）。
+//
+// pool_holds（#757）是一段选定路由之后、写下开跑那一行之前占着的池的名额：一行就是「这张单的这一段已经派到这条路由上、
+// 还在建树或等内存」。怎么占、怎么交接、怎么放都在 queries/pool-runs.ts，别处不写这张表。
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -30,6 +33,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { routes } from './catalog.ts';
@@ -150,5 +154,42 @@ export const runs = pgTable(
       columns: [t.retryOf],
       foreignColumns: [t.id],
     }),
+  ],
+);
+
+/** 经选路、会占池的名额的两段：动手、验收（对题不经选路，engine 的 task-contract.ts 的 SEGMENT_STAGE）。 */
+export const HELD_SEGMENTS = ['manual', 'verify'] as const;
+export type HeldSegment = (typeof HELD_SEGMENTS)[number];
+
+/**
+ * 选定了路由、还没写下开跑那一行的一段占着的池的名额（#757）。选路数池的并发时和 runs、session_runs 里开着的行一起数
+ * （queries/pool-runs.ts 的 openPoolRuns）：不数它，一批单同时选路都看见池空着、都派过去，内存一放开一起起会话，把拼车池派超。
+ * 一张单的一段同一时刻只占一个（再选路就换掉旧的）；过了 expires_at 就不算（建树、等内存卡死了不能一直占着）。
+ * 都是一时的状态：单子、路由删了跟着删，引擎重启整表清掉。
+ */
+export const poolHolds = pgTable(
+  'pool_holds',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** 哪张单（tasks.id）。 */
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    /** 哪一段（HELD_SEGMENTS）。 */
+    segment: text('segment').$type<HeldSegment>().notNull(),
+    /** 选中的路由：经它连到池，和 runs.route_id 一样。 */
+    routeId: text('route_id')
+      .notNull()
+      .references(() => routes.id, { onDelete: 'cascade' }),
+    /** 选中的时刻。 */
+    heldAt: timestamp('held_at', tz).notNull(),
+    /** 过了这一刻就不算占着（这一段开跑时再按当时的空位排）。 */
+    expiresAt: timestamp('expires_at', tz).notNull(),
+  },
+  (t) => [
+    check('pool_holds_segment_routed', sql`${t.segment} in ('manual', 'verify')`),
+    check('pool_holds_expires_after_held', sql`${t.expiresAt} > ${t.heldAt}`),
+    uniqueIndex('pool_holds_task_segment_uq').on(t.taskId, t.segment),
+    index('pool_holds_route_idx').on(t.routeId),
   ],
 );

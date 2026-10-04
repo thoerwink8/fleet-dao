@@ -1,36 +1,66 @@
-// 账号池上的会话：Fusion 的会话（session_runs）和三段的一次性会话（runs）并起来看，各自经路由连到池。选路要的会话事实都从这里读，
-// 两张表一份并法：池上还开着的（quota.ts 的 inFlightByPool 数池的并发，候选路由和额度表都用它；选路按路由数熔断半开时在途的
-// 试探；session-org.ts 的 openOrgRuns 切号前数带组织类型的池上还开着的）、近几天结束的（选路的熔断和战绩）、花了多少（估算类的
-// 池的用量）。各写各的就会一处数得着、一处数不着：#735 选路只数了 session_runs，三段的会话不占池的名额；#758 熔断、战绩、估算
-// 也只读 session_runs，三段的会话连着失败不熔断、花的钱不进估算。
+// 账号池上的会话：Fusion 的会话（session_runs）和三段的一次性会话（runs，加上选定了路由、还没开跑时占着的名额 pool_holds）
+// 并起来看，各自经路由连到池。选路要的会话事实都从这里读，一份并法：池上还开着的（quota.ts 的 poolOccupancy 数池的并发，候选
+// 路由和额度表都用它；选路按路由数熔断半开时在途的试探；session-org.ts 的 openOrgRuns 切号前数带组织类型的池上还开着的）、近几天
+// 结束的（选路的熔断和战绩）、花了多少（估算类的池的用量）。各写各的就会一处数得着、一处数不着：#735 选路只数了 session_runs，
+// 三段的会话不占池的名额；#758 熔断、战绩、估算也只读 session_runs，三段的会话连着失败不熔断、花的钱不进估算；#757 三段的一段从
+// 选定路由到写下开跑那一行之间（建树、等内存）谁都数不着，一批单同时选路就把拼车池派超。
 // 哪张表读不了都照常抛：读不全就不知道池满没满、路由坏没坏、额度用了多少，当成没有三段的会话会把池派超、派到坏路由上、把池估宽。
+//
+// 三段的一段占名额的一辈子（#757），写 pool_holds 的只有这个文件：
+// 1. 选路派出去那一刻占（holdPoolSlot）：锁住池那一行再数、数完没满才写，几张单同时选路也只放得进上限那么多；
+// 2. 开跑那一行写进 runs 时同一个事务里收掉（admitRun）：名额从「占着」变成「在跑」，中间没有谁都数不着的空当；
+// 3. 没开跑就收场了（建树失败、内存一直放不下、被叫停、切号停下、换了路由）由引擎放掉（releasePoolHold）；
+// 4. 都没赶上的到 expires_at 自己不算（卡死了不一直占着），这一段要是后来又开跑，开跑时按当时的空位重新排、满了就不让起；
+// 5. 引擎重启时整表清掉（clearPoolHolds）：上一轮的会话一个都起不来了。
 import type { StageKind } from '@fleet-dao/shared';
-import { and, eq, gte, isNotNull, isNull, lte } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { pools, type RunRouteOutcome, type RunSegment, routes, runs, sessionRuns } from '../schema/index.ts';
+import {
+  type HeldSegment,
+  poolHolds,
+  pools,
+  type RunRouteOutcome,
+  type RunSegment,
+  routes,
+  runs,
+  sessionRuns,
+} from '../schema/index.ts';
+import { type RunInsert, startRun } from './runs.ts';
 
 /** 账号池上还没结束的一次会话。 */
 export interface OpenPoolRun {
+  /** 会话的编号；一次性会话占着名额、还没开跑的，是预占的编号（pool_holds.id）。 */
   runId: string;
   poolId: string;
   /** 跑在哪条路由上：选路按路由数熔断半开时在途的试探。 */
   routeId: string;
-  /** 哪一种：session = Fusion 的会话（session_runs）；oneShot = 三段的一次性会话（runs，开跑才写那一行）。 */
+  /**
+   * 哪一种：session = Fusion 的会话（session_runs）；oneShot = 三段的一次性会话（runs 里开跑写下的那一行，或选定了路由、
+   * 还没开跑时占着的名额 pool_holds）。
+   */
   kind: 'session' | 'oneShot';
-  /** 一次性会话没有排队这一步，就是开跑时刻。 */
+  /** 选定的时刻：Fusion 是排队时刻；一次性会话开跑了是开跑时刻，还占着名额的是选中的时刻。 */
   queuedAt: Date;
-  /** 进程起来了（登记了开工）；null = 还在起（建树、准备），或起之前就没了下文。一次性会话总有。 */
+  /**
+   * 进程起来了（Fusion 登记了开工、一次性会话写下了开跑那一行）；null = 选定了、还没开工（Fusion 在建树、准备；一次性会话
+   * 占着名额在建树、等内存），或起之前就没了下文。
+   */
   startedAt: Date | null;
 }
 
 /**
- * 还没结束（ended_at 为空）的会话，按排队时刻排；orgPoolsOnly 只要带组织类型的池（Claude 订阅：拼车、独享）上的。
+ * 还没结束（ended_at 为空）的会话，加上还没过期（expires_at 晚于 now）的预占，按选定的时刻排；orgPoolsOnly 只要带组织类型的池
+ * （Claude 订阅：拼车、独享）上的。now 只用来判预占过没过期，默认现在。
  * runs 里 route_id 为空的行不算：连不到路由就不知道它占的是哪个池的名额，算到哪个池都是猜。这种是 #157 加 route_id 之前的
  * 老行、不经选路起的会话；选路派出去的一次性会话开跑那一行都带 route_id（engine 的 runner/one-shot.ts）。
  */
-export async function openPoolRuns(db: Db, options: { orgPoolsOnly?: boolean } = {}): Promise<OpenPoolRun[]> {
+export async function openPoolRuns(
+  db: Db,
+  options: { orgPoolsOnly?: boolean; now?: Date } = {},
+): Promise<OpenPoolRun[]> {
   const orgOnly = options.orgPoolsOnly ? [isNotNull(pools.orgKind)] : [];
-  const [sessions, oneShots] = await Promise.all([
+  const now = options.now ?? new Date();
+  const [sessions, oneShots, holds] = await Promise.all([
     db
       .select({
         runId: sessionRuns.id,
@@ -49,6 +79,12 @@ export async function openPoolRuns(db: Db, options: { orgPoolsOnly?: boolean } =
       .innerJoin(routes, eq(routes.id, runs.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
       .where(and(isNull(runs.endedAt), ...orgOnly)),
+    db
+      .select({ runId: poolHolds.id, poolId: routes.poolId, routeId: routes.id, heldAt: poolHolds.heldAt })
+      .from(poolHolds)
+      .innerJoin(routes, eq(routes.id, poolHolds.routeId))
+      .innerJoin(pools, eq(pools.id, routes.poolId))
+      .where(and(gt(poolHolds.expiresAt, now), ...orgOnly)),
   ]);
   return [
     ...sessions.map((s) => ({ ...s, kind: 'session' as const })),
@@ -60,7 +96,208 @@ export async function openPoolRuns(db: Db, options: { orgPoolsOnly?: boolean } =
       queuedAt: r.startedAt,
       startedAt: r.startedAt,
     })),
+    ...holds.map((h) => ({
+      runId: h.runId,
+      poolId: h.poolId,
+      routeId: h.routeId,
+      kind: 'oneShot' as const,
+      queuedAt: h.heldAt,
+      startedAt: null,
+    })),
   ].sort((a, b) => a.queuedAt.getTime() - b.queuedAt.getTime() || byId(a.runId, b.runId));
+}
+
+/** 这次占名额时顺手收掉的、已经过期的预占（别的单占着没开跑、也没放掉的）：调用方记日志，那一段多半卡住了。 */
+export interface ExpiredPoolHold {
+  taskId: string;
+  segment: HeldSegment;
+  routeId: string;
+  heldAt: Date;
+}
+
+export interface PoolHoldRequest {
+  /** 哪张单（tasks.id）。 */
+  taskId: string;
+  segment: HeldSegment;
+  /** 选中的路由。 */
+  routeId: string;
+  /** 选中的时刻：判池满没满、哪些预占过期了都按它。 */
+  heldAt: Date;
+  /** 占到什么时候。 */
+  expiresAt: Date;
+}
+
+export type PoolHoldResult =
+  | { held: true; holdId: string; poolId: string; expired: ExpiredPoolHold[] }
+  /** 池满了：选路读事实到占名额之间，空位被别的单占走了。占的人照当时的事实重新选。 */
+  | { held: false; poolId: string; occupied: number; maxConcurrency: number; expired: ExpiredPoolHold[] };
+
+/**
+ * 选路派出去那一刻，给这张单的这一段占一个池的名额。锁住池那一行再数（和 admitRun 同一把锁）：几张单同时选路时排着队数，
+ * 后来的看得见先来的占的，满了回 held: false、不写。这张单这一段之前占的（上一次选路占了、没开跑也没放掉）先换掉，不和
+ * 自己抢名额。只锁池、不管 Fusion 那边：Fusion 起会话不走这把锁，同一刻两边一起派还可能多出一个（Fusion 要删，不为它加锁）。
+ */
+export async function holdPoolSlot(db: Db, req: PoolHoldRequest): Promise<PoolHoldResult> {
+  if (req.expiresAt.getTime() <= req.heldAt.getTime()) {
+    throw new Error(
+      `预占的过期时刻（${req.expiresAt.toISOString()}）要晚于选中的时刻（${req.heldAt.toISOString()}）`,
+    );
+  }
+  return db.transaction(async (tx) => {
+    const pool = await lockPoolOf(tx, req.routeId);
+    await tx
+      .delete(poolHolds)
+      .where(and(eq(poolHolds.taskId, req.taskId), eq(poolHolds.segment, req.segment)));
+    const expired = await tx
+      .delete(poolHolds)
+      .where(
+        and(
+          inArray(
+            poolHolds.routeId,
+            tx.select({ id: routes.id }).from(routes).where(eq(routes.poolId, pool.id)),
+          ),
+          lte(poolHolds.expiresAt, req.heldAt),
+        ),
+      )
+      .returning({
+        taskId: poolHolds.taskId,
+        segment: poolHolds.segment,
+        routeId: poolHolds.routeId,
+        heldAt: poolHolds.heldAt,
+      });
+    const occupied = await occupiedOn(tx, pool.id, req.heldAt);
+    if (occupied >= pool.maxConcurrency) {
+      return { held: false, poolId: pool.id, occupied, maxConcurrency: pool.maxConcurrency, expired };
+    }
+    const [row] = await tx
+      .insert(poolHolds)
+      .values({
+        taskId: req.taskId,
+        segment: req.segment,
+        routeId: req.routeId,
+        heldAt: req.heldAt,
+        expiresAt: req.expiresAt,
+      })
+      .returning({ id: poolHolds.id });
+    if (!row) throw new Error(`预占写进去了却没交回编号（池 ${pool.id}、路由 ${req.routeId}）`);
+    return { held: true, holdId: row.id, poolId: pool.id, expired };
+  });
+}
+
+/** 开跑时池的名额满了：这一段没占着名额（占的过期了、或没占），空位已经给了别的会话。开跑那一行没写，会话不该起。 */
+export class PoolFullError extends Error {
+  readonly poolId: string;
+  readonly occupied: number;
+  readonly maxConcurrency: number;
+  constructor(input: { poolId: string; occupied: number; maxConcurrency: number; why: string }) {
+    super(
+      `池 ${input.poolId} 的名额满了（已经有 ${input.occupied} 个，上限 ${input.maxConcurrency} 个）：${input.why}，开跑那一行没写`,
+    );
+    this.name = 'PoolFullError';
+    this.poolId = input.poolId;
+    this.occupied = input.occupied;
+    this.maxConcurrency = input.maxConcurrency;
+  }
+}
+
+/** 开跑时这一段占的名额怎么样了：taken = 还占着、换成了这一行；stale = 占的过期了（或占在别的池上），按当时的空位重新排过；none = 没占。 */
+export type AdmitHold = 'taken' | 'stale' | 'none';
+
+/**
+ * 开跑：在 runs 里留下没结束的那一行（#157），这一次会话就此占上池的名额。和 holdPoolSlot 同一把锁（池那一行）：
+ * 给了 holdId、预占还在、没过期、在同一个池上，就在同一个事务里把它换成这一行（名额从「占着」变成「在跑」，中间谁都不会
+ * 多数或漏数）；没占（不经选路的老路子）、占的过期了，按当时的空位排：满了抛 PoolFullError、一行不写。
+ * 同一个编号再开跑一次（重试）不和自己抢名额。写不进去照常抛（startRun 的 RunInputError），事务整个退回、预占原样留着。
+ */
+export async function admitRun(
+  db: Db,
+  row: RunInsert & { id: string; routeId: string; startedAt: Date },
+  options: { holdId?: string } = {},
+): Promise<{ hold: AdmitHold }> {
+  return db.transaction(async (tx) => {
+    const pool = await lockPoolOf(tx, row.routeId);
+    const [hold] =
+      options.holdId === undefined
+        ? []
+        : await tx
+            .delete(poolHolds)
+            .where(eq(poolHolds.id, options.holdId))
+            .returning({ routeId: poolHolds.routeId, expiresAt: poolHolds.expiresAt });
+    const holdPool = hold ? await poolIdOf(tx, hold.routeId) : undefined;
+    const taken =
+      hold !== undefined && hold.expiresAt.getTime() > row.startedAt.getTime() && holdPool === pool.id;
+    if (!taken) {
+      const occupied = await occupiedOn(tx, pool.id, row.startedAt, row.id);
+      if (occupied >= pool.maxConcurrency) {
+        throw new PoolFullError({
+          poolId: pool.id,
+          occupied,
+          maxConcurrency: pool.maxConcurrency,
+          why: hold
+            ? holdPool === pool.id
+              ? `选路时占的名额 ${hold.expiresAt.toISOString()} 就过期了（建树、等内存卡得太久），空位让给了别的会话`
+              : `选路时占的名额在池 ${holdPool ?? '（路由已经没了）'} 上，不是这个池`
+            : options.holdId === undefined
+              ? '这一次没占名额'
+              : `选路时占的名额 ${options.holdId} 已经不在了（过期后被收掉、或引擎重启时清掉）`,
+        });
+      }
+    }
+    await startRun(tx, row);
+    return { hold: taken ? 'taken' : hold ? 'stale' : 'none' };
+  });
+}
+
+/** 这一段没开跑就收场了：放掉选路时占的名额。已经换成开跑那一行的、过期被收掉的，什么都不做（回 false）。 */
+export async function releasePoolHold(db: Db, holdId: string): Promise<boolean> {
+  const rows = await db.delete(poolHolds).where(eq(poolHolds.id, holdId)).returning({ id: poolHolds.id });
+  return rows.length > 0;
+}
+
+/** 这张单的这一段重新选路：之前占的作废（它已经不会拿那个名额开跑了），别让它把池占满、挡了自己。 */
+export async function releaseTaskHold(
+  db: Db,
+  key: { taskId: string; segment: HeldSegment },
+): Promise<boolean> {
+  const rows = await db
+    .delete(poolHolds)
+    .where(and(eq(poolHolds.taskId, key.taskId), eq(poolHolds.segment, key.segment)))
+    .returning({ id: poolHolds.id });
+  return rows.length > 0;
+}
+
+/** 引擎起来、接活之前：上一轮占着的名额全清掉（那些段一个都起不来了），交回清掉的。 */
+export async function clearPoolHolds(db: Db): Promise<ExpiredPoolHold[]> {
+  return db.delete(poolHolds).returning({
+    taskId: poolHolds.taskId,
+    segment: poolHolds.segment,
+    routeId: poolHolds.routeId,
+    heldAt: poolHolds.heldAt,
+  });
+}
+
+/** 锁住这条路由所在的池那一行，交回池和它的并发上限。路由、池库里没有就抛。 */
+async function lockPoolOf(db: Db, routeId: string): Promise<{ id: string; maxConcurrency: number }> {
+  const poolId = await poolIdOf(db, routeId);
+  if (poolId === undefined) throw new Error(`库里没有路由 ${routeId}，不知道它占的是哪个池的名额`);
+  const [pool] = await db
+    .select({ id: pools.id, maxConcurrency: pools.maxConcurrency })
+    .from(pools)
+    .where(eq(pools.id, poolId))
+    .for('update');
+  if (!pool) throw new Error(`库里没有账号池 ${poolId}（路由 ${routeId} 挂着它）`);
+  return pool;
+}
+
+async function poolIdOf(db: Db, routeId: string): Promise<string | undefined> {
+  const [route] = await db.select({ poolId: routes.poolId }).from(routes).where(eq(routes.id, routeId));
+  return route?.poolId;
+}
+
+/** 这个池上占着的名额（在跑的、选定了还没开工的、预占着的），和选路数的是同一份（openPoolRuns）。 */
+async function occupiedOn(db: Db, poolId: string, now: Date, exceptRunId?: string): Promise<number> {
+  return (await openPoolRuns(db, { now })).filter((r) => r.poolId === poolId && r.runId !== exceptRunId)
+    .length;
 }
 
 /** 一次结束了的会话记在路由上的账：选路按路由算熔断、按用途算战绩。 */
