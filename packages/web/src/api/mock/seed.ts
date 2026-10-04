@@ -1397,6 +1397,7 @@ export function createSeed(now: number): MockState {
       updatedBy: 'u-zhou',
     },
     { key: 'judge.dailyCallLimit', value: null, version: 0 },
+    { key: 'engine.soloPaused', value: null, version: 0 },
   ];
 
   const state: MockState = {

@@ -15,6 +15,8 @@ export const WORKFLOW_TYPES = {
   routeProbe: 'routeProbeWorkflow',
   /** 定时读额度入库（#76）：Temporal Schedule 每 15 分钟起一条，见 jobs/schedules.ts、jobs/quota-read.ts。 */
   quotaRead: 'quotaReadWorkflow',
+  /** 拼车额度盯读（#194，给切号用）：Temporal Schedule 每分钟起一条，自己按情况定真不真读接口，见 jobs/carpool-watch.ts。 */
+  carpoolWatch: 'carpoolWatchWorkflow',
   /**
    * 每小时对账（工作树残留、核对、提醒按条件撤和再推、GitHub 机器人权限自检）：Temporal Schedule 每小时起一条，
    * 见 jobs/schedules.ts。
@@ -108,6 +110,20 @@ export interface QuotaReadInput {
 
 /** 定时读额度一轮的结局：和记进 schedule_runs 的同一份。scanned = 配置里几个池，found = 这一轮要报的池数。 */
 export interface QuotaReadRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
+  why?: string | undefined;
+}
+
+/** 拼车盯读一轮的输入：读不读接口、读了判不判切号由活动按账本和当时的时刻定（工作流里不取时刻）。 */
+export interface CarpoolWatchInput {
+  schemaVersion: 1;
+}
+
+/** 拼车盯读一轮的结局：和记进 schedule_runs 的同一份。scanned = 1，found = 这一轮要报的提醒数。 */
+export interface CarpoolWatchRun {
   runId: number;
   outcome: ScheduleOutcome;
   scanned: number;

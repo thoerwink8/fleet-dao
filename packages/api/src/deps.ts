@@ -3,6 +3,7 @@ import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { IntentStore } from './intent-store.ts';
+import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
 import type {
   ChangeFeed,
@@ -48,6 +49,11 @@ export interface Deps {
    * 另写一句 unavailable，不拿空列表冒充「都没配」。
    */
   routingLayers?: RoutingLayersPort | undefined;
+  /**
+   * 会话用户切号的现状（#194，org-switch-view.ts）：驾驶舱额度页顶上「挂着独享；拼车预计几点恢复」读它。没给（开发、内存版没有
+   * 那张表）的额度页照样回，另写一句 unavailable，不拿空冒充「没事」。
+   */
+  orgSwitch?: OrgSwitchPort | undefined;
   /**
    * 路由两层里每条路由的思考档位（#470，routing-efforts.ts）：驾驶舱「思考档位」页读、改。没给（开发、内存版没有那张表）的
    * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。

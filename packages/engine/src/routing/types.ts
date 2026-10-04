@@ -144,6 +144,15 @@ export interface OrgPlanView {
   to: OrgKind | null;
   at: string | null;
   why: string;
+  /**
+   * 切回拼车的宽限中（#194 方案 4.5）：这一类的池（现在挂着的）新活先不派，等切回；已经在跑的照跑到宽限到点。不给 = 不在宽限中。
+   */
+  drain?: OrgKind | null;
+  /**
+   * 渠道不可用（#194，创始人 2026-10-04 约 22:30：可用账号 0 个「渠道不可用」）：带组织类型的池一个都不派，写明原因；
+   * 有账号恢复后自己消失。不给 = 渠道没问题。
+   */
+  channelDown?: string | null;
 }
 
 export interface ChooseRouteInput {

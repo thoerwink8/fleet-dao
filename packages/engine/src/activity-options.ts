@@ -4,6 +4,8 @@
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type {
   CanaryInput,
+  CarpoolWatchInput,
+  CarpoolWatchRun,
   GitHubReconcileInput,
   GitHubReconcileRun,
   HourlyReconcileInput,
@@ -51,6 +53,8 @@ export type EngineActivities = PortActivities & {
   probeRoutes(input: RouteProbeInput): Promise<RouteProbeRun>;
   /** 引擎自己的活动：定时读额度跑一轮，读成的写进 quota_windows、结局记进 schedule_runs（jobs/quota-read.ts）。 */
   readQuotas(input: QuotaReadInput): Promise<QuotaReadRun>;
+  /** 引擎自己的活动：拼车额度盯读一轮（按情况读接口、交给切号当场判），结局记进 schedule_runs（jobs/carpool-watch.ts）。 */
+  watchCarpool(input: CarpoolWatchInput): Promise<CarpoolWatchRun>;
   /**
    * 引擎自己的活动：每小时对账跑一轮（工作树残留、两处核对、提醒按条件撤和再推、机器人权限自检），结局记进 schedule_runs
    * （jobs/hourly-reconcile.ts）。
@@ -116,6 +120,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   reconcileGitHub: 'job',
   probeRoutes: 'job',
   readQuotas: 'job',
+  watchCarpool: 'job',
   reconcileHourly: 'job',
   canaryOpen: 'job',
   canaryCheck: 'job',

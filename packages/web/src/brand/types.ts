@@ -29,6 +29,10 @@ export interface Brand {
     marshal: string;
     /** 同上，句子里的短说法：「已交××诊断」。 */
     marshalShort: string;
+    /** Claude 订阅里多人共用的那一类账号（切号：额度用满自动切到另一类）。 */
+    carpool: string;
+    /** Claude 订阅里自己专用的那一类账号。 */
+    solo: string;
   };
   /**
    * 调度台里转述本项目规矩的两条阶段说明：正式版照原话，演示版换成样例说法

@@ -26,7 +26,17 @@ import { createStorePorts } from '../../src/real/store-ports.ts';
 import { createRunSegment } from '../../src/real/task-segment.ts';
 import type { RunSegmentInput, RunSegmentResult, SegmentEvidence } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
-import { addTask, fakeTrees, git, MIN, mirror, NOW, orgListRig, world } from './fixtures.ts';
+import {
+  addTask,
+  fakeTrees,
+  git,
+  healthyCarpoolRead,
+  MIN,
+  mirror,
+  NOW,
+  orgListRig,
+  world,
+} from './fixtures.ts';
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
@@ -155,6 +165,7 @@ function harness(opts: { drainTimeoutMs?: number; switchFails?: () => string | u
     },
     oneShots,
     machine: '法国',
+    readApi: async () => healthyCarpoolRead(now()),
     now,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     graceMs: 0,
@@ -399,6 +410,9 @@ describe('拼车用完、切号那一刻手上的一次性会话：先停下这�
 
     // 到拼车恢复时刻：c 这一段在独享上跑着 → 停下、切回拼车 → 在拼车上重跑、跑完
     h.advance(2 * H + MIN);
+    // 恢复要连着两次「被拒之后的新读数」（隔一分钟以上，#194）：这是第一次，还不切回
+    expect(await h.round.before()).toBeNull();
+    h.advance(MIN);
     const c = h.task('c');
     const cIn = deferred();
     c.plan(runsUntilStopped('c-half.ts', cIn.resolve), finishes('c-rest.ts'));
@@ -406,9 +420,14 @@ describe('拼车用完、切号那一刻手上的一次性会话：先停下这�
     expect(cRoute.poolId).toBe('claude-solo');
     const c1 = c.run(cRoute);
     await cIn.promise;
+    // 恢复了、手上有一段刚开跑的：进切回宽限，开跑不到 5 分钟的当场停（方案 4.5）；这时还没切，新活先不往独享派
+    expect(await h.round.before()).toBeNull();
+    expect(h.switches).toEqual(['solo']);
+    const c1End = await c1;
+    expect(c1End).toMatchObject({ ok: false, outcome: 'org_switch' });
+    // 手上空了：下一轮切回拼车
     expect(await h.round.before()).toBe('carpool');
     expect(h.switches).toEqual(['solo', 'carpool']);
-    const c1End = await c1;
     expect(judge(h, cRoute, c1End)).toMatchObject({ action: 'retry', rule: 'OS1' });
     const c2 = await rerun(h, c, cRoute, 'claude-carpool', evidence(c1End).message);
     expect(c2.res.ok).toBe(true);
@@ -417,7 +436,8 @@ describe('拼车用完、切号那一刻手上的一次性会话：先停下这�
     const audits = await switchAudits();
     expect(audits.map((x) => [x.ok, x.before, x.after])).toEqual([
       [true, { org: 'carpool' }, { org: 'solo', stopped: [a1End.runId] }],
-      [true, { org: 'solo' }, { org: 'carpool', stopped: [c1End.runId] }],
+      // 切回时手上已经空了（宽限开始时停下的那段记在 session-org.drain 里）：确认过的切回
+      [true, { org: 'solo' }, { org: 'carpool', mode: 'confirmed' }],
     ]);
     expect(audits[0]?.reason).toContain('切之前停下了 1 个在跑的 Claude 会话，切完各自接着干');
 
@@ -505,8 +525,9 @@ describe('【故意造出的失败】停不下来、切号没成、重跑又被�
     expect(judge(h, aRoute, a1End)).toMatchObject({ action: 'retry', rule: 'OS1' });
     expect(await pick(h, aRoute.routeId)).toMatchObject({ ok: false, waitFor: 'quota' });
 
-    // 帮手好了：下一轮切成，在独享上重跑、跑完
+    // 帮手好了：下一轮切成，在独享上重跑、跑完（帮手刚失败按 2 分钟退避，过了才再试，#194）
     broken = false;
+    h.advance(3 * MIN);
     expect(await h.round.before()).toBe('solo');
     const a2 = await rerun(h, a, aRoute, 'claude-solo', evidence(a1End).message);
     expect(a2.res.ok).toBe(true);

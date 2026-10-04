@@ -1,14 +1,17 @@
-// 会话用户切号的真装配（#157、#59）：路由探针每一轮探之前，现读会话用户挂的组织（session-org.ts）、库里两个 Claude 池的额度、
-// 整池暂停和还没结束的 Claude 会话（db 的 sessionOrgFacts），照 jobs/org-switch.ts 判。该切：先让选路停下（读组织回 pending，
-// 选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了停会话的那两样（#59）就把手上跑在 Claude 池上的
-// 会话停下，等它们都收场：三段的一次性会话（oneShots，real/one-shot-sessions.ts）交回 org_switch，任务工作流切完在原分支上
-// 重跑这一段；Fusion 的会话（sessions）交回 org_switch，切完续同一个会话、换了池 fork 续上。哪一种没接，那一种在跑就停不下：
-// 手上有就不切、等它们跑完（#157 的做法），切之前也再数一遍。
-// 然后经 root 帮手的 org-use 切过去（adapters 的 switchSessionOrg：帮手以会话用户读 org list 认出那一类、切、回读核对，
-// 没切成、核对不了都切回原来的），切完记操作记录。这一轮探完，切过去的那个池的路由探通了才算切成（after）。
-// 没切成、切完探针读回不在线、拼车用满却读不到几点恢复：写一条 session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱
-// 后端的健康检查 session_org 跟着红），条件没了自己撤。这一步出什么错都不抛：探针照探，下一轮再判。
-// 事实和判法跟选路判「等不等切号」同一份（real/org-plan.ts）；经帮手动过组织就告诉读法（engineSwitched），切完读成的是新起点。
+// 会话用户切号的真装配（#157、#59、#194，design 第九节「拼车用完，切独享接着干」）。
+// 三个入口，同一个判法（jobs/org-decision.ts）、同一份事实（real/org-plan.ts）、同一把单飞锁（real/org-ledger.ts）：
+// - now：被拒当场（拼车会话、探针交来被拒的证据）和定时读接口那一轮（real/carpool-watch.ts），不等路由探针，切完当场探一次；
+// - before / after：路由探针每一轮探之前判、探完核对，当兜底（和以前一样）。
+// 判之前先拿账本（落库：恢复条件、切回记录、最近几次接口读数）、现读会话用户挂的组织、现读一次接口（最近 30 秒内读过的不重读）；
+// 逐个账号看状态，可用 ≥ 2 才切（创始人 2026-10-04 约 22:30 的要求）；判完先把新账本存下，再动手。
+// 该切：先让选路停下（读组织回 pending，选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了停会话的两样
+// （#59）就把手上跑在 Claude 池上的会话停下，等它们都收场：三段的一次性会话（oneShots）交回 org_switch，任务工作流切完在原分支上重跑
+// 这一段；Fusion 的会话（sessions）交回 org_switch，切完续同一个会话、换了池 fork 续上。哪一种没接，那一种在跑就停不下：手上有就不切、
+// 等它们跑完（#157 的做法），切之前也再数一遍。切回拼车有宽限（方案 4.5）：新活先不往独享派，开跑不到 5 分钟的当场停，其余给 10 分钟。
+// 然后经 root 帮手的 org-use 切过去（adapters 的 switchSessionOrg：帮手以会话用户读 org list 认出那一类、切、回读核对，没切成、核对不了都
+// 切回原来的），切完记操作记录和账本。切完当场探切过去的那个池，探通了才算切成（after / verifyAfter）。
+// 没切成、切完探针读回不在线、卡住（白切三次、切回预算用完、读不到几点恢复）、渠道不可用、账号只剩 1 个而且不是挂着的那个：写一条
+// session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱后端的健康检查 session_org 跟着红），条件没了自己撤。出什么错都不抛。
 // 读数变了、引擎没切过号（real/session-org.ts 的起点变动）由 orgDriftReporter 写 session-org:drift 提醒和操作记录（#335）。
 import type { SessionUser, SwitchSessionOrgResult } from '@fleet-dao/adapters';
 import {
@@ -21,9 +24,13 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { OrgKind } from '@fleet-dao/shared';
-import { type OrgSwitchRound, planOrgSwitch } from '../jobs/org-switch.ts';
+import { type CarpoolApiRead, type CarpoolOutage, classifyCarpoolRejection } from '../jobs/carpool-outage.ts';
+import { type OrgDecision, type OrgPlan, stamp } from '../jobs/org-decision.ts';
+import { ledgerAfterSwitch, type OrgLedger, OrgLedgerError, withRead } from '../jobs/org-ledger.ts';
+import type { OrgSwitchRound, OrgSwitchTrigger, ProbedRoute } from '../jobs/org-switch.ts';
 import { ORG_NAMES } from '../routing/names.ts';
-import { loadOrgSwitchFacts } from './org-plan.ts';
+import { type LedgerStore, ledgerStore } from './org-ledger.ts';
+import { decideFrom, loadOrgSwitchFacts, soloPauseOf } from './org-plan.ts';
 import {
   type OrgSighting,
   readingStamp,
@@ -36,11 +43,12 @@ import { POOL_HOLD_PREFIX } from './store-ports.ts';
 /**
  * 切号那一刻在跑的会话（#59），一种会话一份（Fusion 的会话端口、三段的一次性会话登记）。只管这个工人进程里起的：一次性会话不脱开
  * 引擎跑，Fusion 的会话工人重启时收掉或接回，库里还开着、手上没有的都不是在跑的进程。
- * stop：把跑在这些账号池上的停下（发信号、不等），交回这一次叫停的编号（已经在停的不重复叫停）。
+ * stop：把跑在这些账号池上的停下（发信号、不等），交回这一次叫停的编号（已经在停的不重复叫停）。only 给了就只停它认的那些
+ * （切回宽限开始时只停开跑不到 5 分钟的）。
  * live：跑在这些账号池上、还没收场的编号，切号要等它们都收场。
  */
 export interface OrgSwitchSessions {
-  stop(poolIds: ReadonlySet<string>, why: string): string[];
+  stop(poolIds: ReadonlySet<string>, why: string, only?: (runId: string) => boolean): string[];
   live(poolIds: ReadonlySet<string>): string[];
 }
 
@@ -48,13 +56,19 @@ export interface OrgSwitchSessions {
 export const ORG_SWITCH_ALERT = `${SESSION_ORG_ALERT_PREFIX}switch`;
 /** 切过去了，这一轮探针读回切过去的那个池不在线。之后哪一轮挂着的那个池探通了撤。 */
 export const ORG_VERIFY_ALERT = `${SESSION_ORG_ALERT_PREFIX}verify`;
-/** 拼车用满了却读不到几点恢复：不知道什么时候切回。 */
+/** 切号卡住要人看：拼车用满读不到几点恢复、连着白切、切回预算用完。 */
 export const ORG_STUCK_ALERT = `${SESSION_ORG_ALERT_PREFIX}stuck`;
 /**
  * 会话用户挂的组织读数变了、引擎没切过号（#335，real/session-org.ts 的起点）：带前后两次读数。读数回到原来的、或者连着
  * SESSION_ORG_SETTLE_MS 都是新的（认它了）、或者引擎切了号，撤。
  */
 export const ORG_DRIFT_ALERT = `${SESSION_ORG_ALERT_PREFIX}drift`;
+/** 渠道状态不对（#194，创始人 2026-10-04 约 22:30）：可用账号 0 个（渠道不可用）、只剩 1 个且不是挂着的、读不到账号状态超过 15 分钟。 */
+export const ORG_CHANNEL_ALERT = `${SESSION_ORG_ALERT_PREFIX}channel`;
+/** 过了预计恢复时刻很久还挂在独享上（方案 4.4）。 */
+export const ORG_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}overdue`;
+/** 切号账本认不出：引擎不切号，要人看（jobs/org-ledger.ts）。 */
+export const ORG_LEDGER_ALERT = `${SESSION_ORG_ALERT_PREFIX}ledger`;
 /**
  * 让选路停下以后等多久、再数一遍没结束的会话才切：选路派出去到起会话那一步登记（session_runs）之间隔着一次活动调度和几次查库，
  * 平时一两秒。切号一次（一个 5 小时窗口最多两次）Claude 停派这么久，换不让刚派的会话被切号掐断。
@@ -70,6 +84,8 @@ export const ORG_DRAIN_POLL_MS = 2_000;
  * 登记了、进程还没起来的会话（还在建树、准备）要等它起来再停；排队这么久还没起来的，是没了下文的（工作流没了），不等它。
  */
 export const ORG_STARTING_MAX_MS = 10 * 60_000;
+/** 当场判之前，最近这么久里读过接口就不重读（一批会话同时被拒不会砸出一排请求）。 */
+export const ORG_READ_REUSE_MS = 30_000;
 const ACTOR = 'engine:org-switch';
 
 export interface OrgSwitchWiring {
@@ -91,6 +107,12 @@ export interface OrgSwitchWiring {
    * 在原分支上重跑这一段。不给就等它们跑完再切（#157）。
    */
   oneShots?: OrgSwitchSessions;
+  /** 账本和锁（默认按 db、user 建）。测试可换。 */
+  store?: LedgerStore;
+  /** 现读一次 reclaude 开放接口（real/carpool-api.ts）。不给就不读：没有账号清单，判法一律「读不到状态、不切」。 */
+  readApi?: () => Promise<CarpoolApiRead>;
+  /** 切完当场探一次切过去的那个组织的池（jobs/route-probe.ts 的 probeOrgNow）。不给就等下一轮路由探针核对。 */
+  probeNow?: (to: OrgKind) => Promise<ProbedRoute[]>;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
@@ -106,6 +128,9 @@ const NOW_NAMES: Readonly<Record<string, string>> = {
   unknown: '认不出的',
 };
 
+const sameOutage = (a: CarpoolOutage | null, b: CarpoolOutage | null) =>
+  a !== null && b !== null && a.kind === b.kind && a.since.getTime() === b.since.getTime();
+
 export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
   const clock = w.now ?? (() => new Date());
   const sleep = w.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -113,6 +138,8 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const target = `session-user:${w.user}`;
   const fix = `在${w.machine}上看会话用户现在挂的是哪个、额度几点清零，照 docs/ops.md 第五节「会话用户挂的组织」处理`;
+  const store =
+    w.store ?? ledgerStore({ db: w.db, user: w.user, holder: `${w.machine}:${process.pid}`, now: clock });
 
   const alert = (dedupeKey: string, title: string, body: string) =>
     upsertAlert(w.db, { dedupeKey, level: 'alert', taskId: null, title, body });
@@ -133,12 +160,34 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     parts.length === 0
       ? null
       : {
-          stop: (poolIds, why) => parts.flatMap((s) => s.stop(poolIds, why)),
+          stop: (poolIds, why, only) => parts.flatMap((s) => s.stop(poolIds, why, only)),
           live: (poolIds) => parts.flatMap((s) => s.live(poolIds)),
         };
   /** 停不下的在跑会话有几个：哪一种没接，那一种在跑的都停不下，只能等它们跑完。 */
   const unstoppable = (f: { busy: number; busyOneShot: number }) =>
     (w.sessions ? 0 : f.busy - f.busyOneShot) + (w.oneShots ? 0 : f.busyOneShot);
+
+  const audit = (
+    action: string,
+    fields: {
+      before?: unknown;
+      after?: unknown;
+      reason: string;
+      ok?: boolean;
+      error?: string;
+    },
+  ) =>
+    recordEngineAudit(w.db, {
+      action,
+      target,
+      actorId: ACTOR,
+      ...(fields.before === undefined ? {} : { before: fields.before }),
+      ...(fields.after === undefined ? {} : { after: fields.after }),
+      reason: fields.reason,
+      ok: fields.ok ?? true,
+      ...(fields.error ? { error: fields.error } : {}),
+      at: clock(),
+    });
 
   /**
    * 切之前把手上跑在 Claude 池上的会话停下，等它们都收场（#59）。登记了、进程还没起来的（还在建树）等它起来再停；三段的一段
@@ -174,11 +223,56 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     }
   }
 
+  /** 切回宽限开始：只停开跑不到 youngMs 的（还没开跑的也停，它们没有进度）；发信号、不等。 */
+  async function stopYoung(poolIds: ReadonlySet<string>, youngMs: number, why: string): Promise<string[]> {
+    if (!stopper) return [];
+    const now = clock().getTime();
+    const older = new Set(
+      (await openOrgRuns(w.db, new Date(now)))
+        .filter((r) => r.startedAt !== null && now - r.startedAt.getTime() >= youngMs)
+        .map((r) => r.runId),
+    );
+    return stopper.stop(poolIds, why, (runId) => !older.has(runId));
+  }
+
+  /** 切完探针（当场或一轮探完）读回切过去的那个池：探通了才算切成。 */
+  async function verifyAfter(to: OrgKind, probed: readonly ProbedRoute[]) {
+    const name = ORG_NAMES[to];
+    const mine = probed.filter((p) => p.orgKind === to);
+    const answered = mine.filter((p) => p.state === 'ok');
+    if (answered.length > 0) {
+      await audit('session-org.verify', {
+        after: { org: to },
+        reason: `切到${name}组织以后，${name}池的路由探通了 ${answered.length} 条`,
+      });
+      await settle(ORG_VERIFY_ALERT, `切到${name}组织，探针读回在线`);
+      return;
+    }
+    const why =
+      mine.length === 0
+        ? `这一轮没有真探${name}池的路由，核对不了`
+        : `${name}池的路由一条都没探通：${mine.map((p) => `${p.routeId}：${p.detail}`).join('；')}`;
+    await audit('session-org.verify', {
+      after: { org: to },
+      reason: `切到${name}组织以后核对`,
+      ok: false,
+      error: why,
+    });
+    await alert(
+      ORG_VERIFY_ALERT,
+      `切到${name}组织以后探针读回不在线`,
+      `${why}。下一轮路由探针探通了自己撤；${fix}`,
+    );
+    log('error', '会话用户切号：切完探针读回不在线', { to, why });
+  }
+
   async function switchOver(
     from: OrgKind,
     to: OrgKind,
     why: string,
     poolIds: ReadonlySet<string>,
+    mode: 'confirmed' | 'trial' | null,
+    ledger: OrgLedger,
   ): Promise<OrgKind | null> {
     const release = w.org.hold(`正在把会话用户从${ORG_NAMES[from]}组织切到${ORG_NAMES[to]}组织`);
     let result: SwitchSessionOrgResult;
@@ -195,21 +289,17 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         );
         stopped = drained.stopped;
         if (drained.problem) {
-          await recordEngineAudit(w.db, {
-            action: 'session-org.switch',
-            target,
-            actorId: ACTOR,
+          await audit('session-org.switch', {
             before: { org: from },
             after: { org: to, stopped },
             reason: why,
             ok: false,
             error: drained.problem,
-            at: clock(),
           });
           await alert(
             ORG_SWITCH_ALERT,
             `会话用户切号没成：${ORG_NAMES[from]} → ${ORG_NAMES[to]}`,
-            `为什么切：${why}。没成：${drained.problem}。下一轮路由探针还会再判、再试；${fix}`,
+            `为什么切：${why}。没成：${drained.problem}。下一次判断还会再试；${fix}`,
           );
           log('error', '会话用户切号：手上的会话没停齐，这一轮不切', { from, to, problem: drained.problem });
           return null;
@@ -233,71 +323,172 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     const halted =
       stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切完各自接着干）` : '';
     if (result.ok) {
-      await recordEngineAudit(w.db, {
-        action: 'session-org.switch',
-        target,
-        actorId: ACTOR,
+      await audit('session-org.switch', {
         before: { org: from },
-        after: { org: to, ...(stopped.length > 0 ? { stopped } : {}) },
+        after: { org: to, ...(stopped.length > 0 ? { stopped } : {}), ...(mode ? { mode } : {}) },
         reason: `${result.changed ? why : `${why}（帮手读到本来就挂着${ORG_NAMES[to]}）`}${halted}`,
-        ok: true,
-        at: clock(),
       });
+      await store.save(
+        ledgerAfterSwitch(ledger, to, clock(), to === 'carpool' ? (mode ?? 'confirmed') : null),
+      );
       await settle(ORG_SWITCH_ALERT, `这一次切成了：${ORG_NAMES[from]} → ${ORG_NAMES[to]}`);
       log('info', '会话用户切号：切过去了，这一轮探完核对', { from, to, changed: result.changed });
       return to;
     }
     const error = `${result.detail}（现在挂的是${NOW_NAMES[result.now] ?? '认不出的'}组织）`;
-    await recordEngineAudit(w.db, {
-      action: 'session-org.switch',
-      target,
-      actorId: ACTOR,
+    await audit('session-org.switch', {
       before: { org: from },
       after: { org: to, ...(stopped.length > 0 ? { stopped } : {}) },
       reason: `${why}${stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切号没成，它们照样接着干）` : ''}`,
       ok: false,
       error,
-      at: clock(),
     });
+    // 帮手连着失败按退避（2、10、30 分钟），不每分钟砸一次（方案第六节第 10 条）
+    await store.save({ ...ledger, helperFailures: [...ledger.helperFailures, clock()].slice(-5) });
     await alert(
       ORG_SWITCH_ALERT,
       `会话用户切号没成：${ORG_NAMES[from]} → ${ORG_NAMES[to]}`,
-      `为什么切：${why}。没成：${error}。下一轮路由探针还会再判、再试；${fix}`,
+      `为什么切：${why}。没成：${error}。下一次判断（帮手失败后按 2、10、30 分钟退避）还会再试；${fix}`,
     );
     log('error', '会话用户切号没成', { from, to, error });
     return null;
   }
 
-  return {
-    async before() {
-      try {
-        // 切不切看现在的真实状态：留着的读数可能是半分钟前的（起点不动：读数刚变、没定下来就这一轮不切）
-        w.org.forget();
-        const live = await w.org({ by: '切号' });
-        const { pools, busy, busyOneShot, poolIds } = await facts();
-        const plan = planOrgSwitch({
-          live,
-          pools,
-          busy,
-          // 手上在跑的都停得下就照切（先停下、切完接着干）；有停不下的（没接的那一种）就等它们跑完
-          ...(stopper && unstoppable({ busy, busyOneShot }) === 0 ? { canStopRunning: true } : {}),
-          now: clock(),
-        });
-        log('info', '会话用户切号：这一轮的判断', { action: plan.action, why: plan.why });
-        if (plan.action === 'stuck') {
-          await alert(ORG_STUCK_ALERT, '拼车恢复时刻读不到，不知道什么时候切回拼车', `${plan.why}。${fix}`);
-          return null;
-        }
-        await settle(ORG_STUCK_ALERT, `不再卡着：${plan.why}`);
-        // 挂的是哪个认得出、又不用切：之前没切成的那条过去了（人切好了，或者额度变了不用切了）
-        if (plan.action === 'stay' && live.ok) await settle(ORG_SWITCH_ALERT, `现在不用切了：${plan.why}`);
-        if (plan.action !== 'switch' || !live.ok) return null;
-        return await switchOver(live.org, plan.to, plan.why, poolIds);
-      } catch (err) {
-        log('error', '会话用户切号这一步出错（这一轮不切，探针照探）', { error: message(err) });
-        return null;
+  /** 判完之后把值得记的写进库：渠道状态、提醒、恢复条件、顺手发生的事。 */
+  async function publish(decision: OrgDecision, before: OrgLedger) {
+    const { channel, ledger } = decision;
+    if (channel.alert)
+      await alert(ORG_CHANNEL_ALERT, channel.alert.title, `${channel.alert.body}${fix ? `（${fix}）` : ''}`);
+    else await settle(ORG_CHANNEL_ALERT, `渠道状态：${channel.summary}`);
+    if (channel.changed) {
+      await audit('session-org.channel', {
+        ...(before.channel ? { before: { state: before.channel.state } } : {}),
+        after: { state: channel.state },
+        reason: channel.summary,
+        ok: channel.state !== 'unavailable',
+        ...(channel.state === 'unavailable' ? { error: '渠道不可用：没有一个可用账号' } : {}),
+      });
+    }
+    if (ledger.outage && !sameOutage(before.outage, ledger.outage)) {
+      await audit('session-org.outage', {
+        after: {
+          kind: ledger.outage.kind,
+          since: ledger.outage.since.toISOString(),
+          resetsAt: ledger.outage.resetsAt ? ledger.outage.resetsAt.toISOString() : null,
+          resetsFrom: ledger.outage.resetsFrom,
+        },
+        reason: `拼车用不了（${ledger.outage.kind}）：${ledger.outage.evidence}`,
+      });
+    }
+    for (const note of decision.notes) await audit('session-org.note', { reason: note });
+    if (decision.overdue)
+      await alert(ORG_OVERDUE_ALERT, '拼车恢复了却还挂在独享上', `${decision.overdue}。${fix}`);
+    else await settle(ORG_OVERDUE_ALERT, '没有「在独享上待太久」的情况');
+  }
+
+  /** 一次判断 + 动手。在锁里跑。交回切到哪一类（没切 null）。 */
+  async function run(trigger: OrgSwitchTrigger): Promise<{ to: OrgKind | null }> {
+    let loaded: OrgLedger;
+    try {
+      loaded = await store.load();
+    } catch (err) {
+      if (err instanceof OrgLedgerError) {
+        await alert(ORG_LEDGER_ALERT, '切号账本认不出：引擎不切号', `${err.message}。${fix}`);
+        log('error', '会话用户切号：账本认不出，这一轮不切', { error: err.message });
+        return { to: null };
       }
-    },
+      throw err;
+    }
+    await settle(ORG_LEDGER_ALERT, '切号账本读得出了');
+    const t0 = clock();
+    let read = trigger.read;
+    if (!read && w.readApi) {
+      const last = loaded.reads.at(-1);
+      if (!last || t0.getTime() - last.requestedAt.getTime() > ORG_READ_REUSE_MS) read = await w.readApi();
+    }
+    const ledger = read ? withRead(loaded, read) : loaded;
+    // 切不切看现在的真实状态：留着的读数可能是半分钟前的（起点不动：读数刚变、没定下来就这一轮不切）
+    w.org.forget();
+    const live = await w.org({ by: trigger.by });
+    const f = await facts();
+    const { pause, problem } = await soloPauseOf(w.db);
+    if (problem) log('error', '设置「引擎暂不用独享」的值认不出，按暂停办', { problem });
+    let rejection: CarpoolOutage | undefined;
+    if (trigger.rejection) {
+      const verdict = classifyCarpoolRejection(trigger.rejection, ledger.reads.at(-1) ?? null);
+      if (verdict.kind === 'outage') rejection = verdict.outage;
+      else log('info', '会话用户切号：这次被拒不是拼车用不了的那几种，不据此切', { verdict });
+    }
+    const decision = decideFrom({
+      live,
+      facts: f,
+      ledger,
+      now: t0,
+      ...(stopper && unstoppable(f) === 0 ? { canStopRunning: true } : {}),
+      ...(rejection ? { rejection } : {}),
+      pause,
+    });
+    // 先存账本再动手：恢复条件、切回记录、白切记账不因为后面的动作没成就丢
+    await store.save(decision.ledger);
+    await publish(decision, loaded);
+    const plan: OrgPlan = decision.plan;
+    log('info', '会话用户切号：这一轮的判断', { by: trigger.by, action: plan.action, why: plan.why });
+    if (plan.action === 'stuck') {
+      await alert(ORG_STUCK_ALERT, '会话用户切号卡住了，要人看', `${plan.why}。${fix}`);
+      return { to: null };
+    }
+    await settle(ORG_STUCK_ALERT, `不再卡着：${plan.why}`);
+    // 挂的是哪个认得出、又不用切：之前没切成的那条过去了（人切好了，或者额度变了不用切了）
+    if (plan.action === 'stay' && live.ok) await settle(ORG_SWITCH_ALERT, `现在不用切了：${plan.why}`);
+    if (plan.action === 'drain') {
+      if (plan.stopYoungerThanMs !== null) {
+        const stopped = await stopYoung(
+          f.poolIds,
+          plan.stopYoungerThanMs,
+          '切回拼车的宽限开始：开跑不到几分钟的先停下，重跑丢得少',
+        );
+        await audit('session-org.drain', {
+          after: { stopped, until: plan.until.toISOString() },
+          reason: `${plan.why}（先停下了 ${stopped.length} 个）`,
+        });
+        log('info', '会话用户切号：切回宽限开始', { stopped: stopped.length, until: stamp(plan.until) });
+      }
+      return { to: null };
+    }
+    if (plan.action !== 'switch' || !live.ok) return { to: null };
+    const to = await switchOver(live.org, plan.to, plan.why, f.poolIds, plan.mode ?? null, decision.ledger);
+    return { to };
+  }
+
+  /** 单飞：同一时刻只一个判断在跑；撞上的这一次不判。出什么错都不抛。 */
+  async function evaluate(trigger: OrgSwitchTrigger, probeRound: boolean): Promise<OrgKind | null> {
+    let outcome: { ran: true; value: { to: OrgKind | null } } | { ran: false; why: string };
+    try {
+      outcome = await store.withLock(() => run(trigger));
+    } catch (err) {
+      log('error', '会话用户切号这一步出错（这一轮不切，探针照探）', { by: trigger.by, error: message(err) });
+      return null;
+    }
+    if (!outcome.ran) {
+      log('info', '会话用户切号：撞上另一个切号判断，这一次不判', { by: trigger.by, why: outcome.why });
+      return null;
+    }
+    const to = outcome.value.to;
+    // 当场触发的：切完当场探一次切过去的那个池（探针那一轮的由探针自己核对）。放在锁外：探一次最长几分钟
+    if (to !== null && !probeRound && w.probeNow) {
+      try {
+        await verifyAfter(to, await w.probeNow(to));
+      } catch (err) {
+        log('error', '会话用户切号：切完当场探这一步出错', { to, error: message(err) });
+      }
+    }
+    return to;
+  }
+
+  return {
+    now: (trigger) => evaluate(trigger, false),
+
+    before: () => evaluate({ by: '切号' }, true),
 
     async after(to, probed) {
       try {
@@ -309,42 +500,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
           }
           return;
         }
-        const name = ORG_NAMES[to];
-        const mine = probed.filter((p) => p.orgKind === to);
-        const answered = mine.filter((p) => p.state === 'ok');
-        if (answered.length > 0) {
-          await recordEngineAudit(w.db, {
-            action: 'session-org.verify',
-            target,
-            actorId: ACTOR,
-            after: { org: to },
-            reason: `切到${name}组织以后，${name}池的路由探通了 ${answered.length} 条`,
-            ok: true,
-            at: clock(),
-          });
-          await settle(ORG_VERIFY_ALERT, `切到${name}组织，探针读回在线`);
-          return;
-        }
-        const why =
-          mine.length === 0
-            ? `这一轮没有真探${name}池的路由，核对不了`
-            : `${name}池的路由一条都没探通：${mine.map((p) => `${p.routeId}：${p.detail}`).join('；')}`;
-        await recordEngineAudit(w.db, {
-          action: 'session-org.verify',
-          target,
-          actorId: ACTOR,
-          after: { org: to },
-          reason: `切到${name}组织以后核对`,
-          ok: false,
-          error: why,
-          at: clock(),
-        });
-        await alert(
-          ORG_VERIFY_ALERT,
-          `切到${name}组织以后探针读回不在线`,
-          `${why}。下一轮路由探针探通了自己撤；${fix}`,
-        );
-        log('error', '会话用户切号：切完探针读回不在线', { to, why });
+        await verifyAfter(to, probed);
       } catch (err) {
         log('error', '会话用户切号：探完核对这一步出错', { to, error: message(err) });
       }

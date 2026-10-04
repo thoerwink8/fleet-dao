@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { RateLimitReading, RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import {
   hostSegmentSpawner,
@@ -91,6 +92,8 @@ function harness(
     unwired?: boolean;
     /** 给了就把会话流里读到的额度记到库里（路由查询照样走 routeFacts）。 */
     db?: Db;
+    /** 拼车池上的会话没成：被拒的证据当场交给谁（#194）。 */
+    onCarpoolRejection?: (rejection: CarpoolRejection) => void;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -135,6 +138,7 @@ function harness(
     baseEnv: { PATH: '/usr/bin', GITHUB_TOKEN: 'secret-should-not-pass' },
     resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     ...(opts.db ? { db: opts.db } : {}),
+    ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
   const run: Harness['run'] = (input = {}, timeoutMinutes = 60) =>
@@ -520,5 +524,67 @@ describe('hostSegmentSpawner · 【故意造出的失败】读不到、认不出
       resources: { memoryHighMb: 1, memoryMaxMb: 2, swapMaxMb: 0 },
     });
     await expect(spawn(command())).rejects.toThrow(/没装路由查询/);
+  });
+});
+
+describe('hostSegmentSpawner · 拼车被拒当场交给切号（#194）', () => {
+  const rejectedReport = () =>
+    report({
+      facts: okFacts({
+        quotaExhausted: true,
+        terminal: { isError: true, detail: '拼车 5 小时额度已用完，约 120 分钟后重置' },
+      }),
+      resetsAt: '2099-01-01T00:00:00.000Z',
+      httpStatus: 429,
+    });
+
+  it('拼车池上被拒：把证据（码、状态码、清零时刻、原文）当场交出去；会话结局照旧', async () => {
+    const seen: CarpoolRejection[] = [];
+    const h = harness({
+      route: route({ orgKind: 'carpool' }),
+      driverRun: async () => rejectedReport(),
+      onCarpoolRejection: (r) => void seen.push(r),
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('failed');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ code: 'quota_exhausted', httpStatus: 429 });
+    expect(seen[0]?.resetsAt).toEqual(new Date('2099-01-01T00:00:00.000Z'));
+    expect(seen[0]?.text).toContain('拼车 5 小时额度已用完');
+  });
+
+  it('【故意造出的失败】不是拼车池（独享、别家）的被拒不交；成功的不交；被我们杀掉的不交', async () => {
+    const seen: CarpoolRejection[] = [];
+    for (const [orgKind, driverRun] of [
+      ['solo', async () => rejectedReport()],
+      [null, async () => rejectedReport()],
+      ['carpool', async () => report()],
+      [
+        'carpool',
+        async () =>
+          report({ facts: okFacts({ exitCode: null, killed: 'wall_clock_timeout', terminal: undefined }) }),
+      ],
+    ] as const) {
+      const h = harness({
+        route: route({ orgKind }),
+        driverRun,
+        onCarpoolRejection: (r) => void seen.push(r),
+      });
+      await h.run();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('【故意造出的失败】交证据的那一步抛了：只记日志，会话结局照旧、不抛', async () => {
+    const h = harness({
+      route: route({ orgKind: 'carpool' }),
+      driverRun: async () => rejectedReport(),
+      onCarpoolRejection: () => {
+        throw new Error('切号没接上');
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('failed');
+    expect(h.logs.join(' ')).toContain('拼车被拒的证据没交给切号');
   });
 });

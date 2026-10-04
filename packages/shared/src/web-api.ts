@@ -819,9 +819,55 @@ export const PoolViewSchema = z.object({
   windows: z.array(QuotaWindowViewSchema),
 });
 
+/**
+ * 会话用户切号的现状（#194，方案 v2 4.4：驾驶舱额度表顶上一行「挂着独享；拼车预计 HH:MM 恢复」）。从引擎落库的切号账本读：
+ * unavailable = 没接上（开发、内存版）或引擎还没记过；unreadable = 账本在库里却认不出（引擎也因此不切号，要人看）；
+ * known = 读到了。soloPaused 是设置里的「引擎暂不用独享」（人叫停）。
+ */
+export const OrgSwitchViewSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('unavailable'), why: z.string(), soloPaused: z.boolean() }),
+  z.object({ state: z.literal('unreadable'), why: z.string(), soloPaused: z.boolean() }),
+  z.object({
+    state: z.literal('known'),
+    /** 引擎最近一次读到会话用户挂的组织（拼车 / 独享）；还没读到过为 null。 */
+    live: z.enum(['carpool', 'solo']).nullable(),
+    liveAt: Time.optional(),
+    /** 这一次挂到独享的时刻（挂着拼车没有）。 */
+    onSoloSince: Time.optional(),
+    /** 记着的拼车恢复条件：哪一种用不了（E1 本人额度、E2 整辆车、E3 组织本身）、凭什么、预计几点恢复、从哪读来。 */
+    outage: z
+      .object({
+        kind: z.enum(['E1', 'E2', 'E3']),
+        evidence: z.string(),
+        since: Time,
+        resetsAt: Time.optional(),
+        resetsFrom: z.enum(['api', 'text']).optional(),
+      })
+      .optional(),
+    /** 渠道（所有 Claude 账号合起来）：ok 可用 ≥ 2；single 只剩 1 个；unavailable 一个都没有；unknown 读不到账号状态。 */
+    channel: z
+      .object({
+        state: z.enum(['ok', 'single', 'unavailable', 'unknown']),
+        since: Time,
+        why: z.string(),
+      })
+      .optional(),
+    /** 切回宽限从这一刻起（新活不往独享派）；不在宽限中没有。 */
+    backPendingSince: Time.optional(),
+    /** 连着白切几次。 */
+    whites: z.number().int().min(0),
+    /** 最近一次读接口：几点、成没成（没成写原因）。 */
+    lastRead: z.object({ at: Time, ok: z.boolean(), why: z.string().optional() }).optional(),
+    soloPaused: z.boolean(),
+    updatedAt: Time,
+  }),
+]);
+
 export const PoolsResponse = z.object({
   pools: z.array(PoolViewSchema),
   staleAfterMinutes: z.number().int().positive(),
+  /** 切号现状。后端没接这一块（老后端）没有这一项。 */
+  orgSwitch: OrgSwitchViewSchema.optional(),
   asOf: Time,
 });
 
@@ -985,6 +1031,11 @@ export const SETTING_SCHEMAS = {
   'notify.quietHours': z.object({ start: HHMM, end: HHMM }).nullable(),
   /** Jev 每天最多调用多少次。 */
   'judge.dailyCallLimit': z.number().int().min(0).max(100_000),
+  /**
+   * 引擎暂不用独享（#194 方案 v2 4.8）：开着时拼车用不了也不切独享，Claude 的活等拼车恢复或交给别家模型——创始人自己要大用
+   * 独享时一键关掉引擎这一路。已经挂着独享时不受影响（该切回照切回）。没设过 = false。
+   */
+  'engine.soloPaused': z.boolean(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

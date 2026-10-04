@@ -21,9 +21,12 @@ import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
+import { probeOrgNow } from '../jobs/route-probe.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
 import { canaryJob } from './canary.ts';
+import { carpoolApiReader } from './carpool-api.ts';
+import { carpoolWatchJob } from './carpool-watch.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
@@ -527,6 +530,8 @@ export function realPortsFromEnv(
   const oneShots = oneShotSessions();
   // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
   // 先停下、切完接着干（#59：一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上），不等它们跑完
+  // #194：被拒当场判、定时盯读接口那一轮也走它（同一把单飞锁）；读接口给切号前现读，切完当场探切过去的池（和路由探针同一份探法）
+  const readCarpoolApi = carpoolApiReader();
   const orgSwitch = orgSwitchRound({
     db,
     org: sessionOrg,
@@ -535,6 +540,22 @@ export function realPortsFromEnv(
     sessions: real.orgSwitchSessions,
     oneShots,
     machine: config.machine,
+    readApi: readCarpoolApi,
+    probeNow: (to) => probeOrgNow(routeProbe(), to),
+  });
+  const routeProbe = routeProbeJob({
+    db,
+    trees,
+    claudeCommand,
+    cursorCommand,
+    grokCommand,
+    mirasimConnect: mirasim.connect,
+    mirasimLedgerDir: mirasim.ledgerDir,
+    mirasimLedgerFs: mirasim.ledgerFs,
+    sessionOrg,
+    orgSwitch,
+    machine: config.machine,
+    ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
   });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({
@@ -544,22 +565,17 @@ export function realPortsFromEnv(
       issueGroomIdlePolicy: issueGroomIdlePolicyFromEnv(env),
     }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok、Mirasim）、同一个工作树的根（探针目录在它下面）
-    routeProbe: routeProbeJob({
-      db,
-      trees,
-      claudeCommand,
-      cursorCommand,
-      grokCommand,
-      mirasimConnect: mirasim.connect,
-      mirasimLedgerDir: mirasim.ledgerDir,
-      mirasimLedgerFs: mirasim.ledgerFs,
-      sessionOrg,
-      orgSwitch,
-      machine: config.machine,
-      ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
-    }),
+    routeProbe,
     // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
     quotaRead: quotaReadJob({ db }),
+    // 拼车额度盯读（#194）：每分钟起一条，按情况读开放接口、交给切号当场判
+    carpoolWatch: carpoolWatchJob({
+      db,
+      user: sessionUser,
+      sessionOrg,
+      orgSwitch,
+      readApi: readCarpoolApi,
+    }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
     // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
     hourlyReconcile: hourlyReconcileJob({
@@ -595,6 +611,10 @@ export function realPortsFromEnv(
     trees,
     baseEnv: env,
     resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
+    // 拼车池上的会话被拒：证据当场交给切号判（#194 方案 4.3），不等路由探针那一轮；不等结果（切号要等这个会话收场）
+    onCarpoolRejection: (rejection) => {
+      void orgSwitch.now({ by: '拼车会话被拒', rejection });
+    },
     log: taskLog,
   };
   const taskRuns = realRuns({ db });

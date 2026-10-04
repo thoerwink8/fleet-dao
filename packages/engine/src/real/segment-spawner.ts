@@ -22,6 +22,7 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { routeLaunchFacts, savePoolQuota } from '@fleet-dao/db';
 import { routeEffortProblem } from '@fleet-dao/shared';
+import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
 import {
@@ -52,6 +53,11 @@ export interface SegmentSpawnerDeps {
   baseEnv: Readonly<Record<string, string | undefined>>;
   /** 一个会话的内存软上限、硬上限、swap 上限（MB）：照 limits.ts 的 SESSION_MEMORY_*，swap 一般给 0。 */
   resources: { memoryHighMb: number; memoryMaxMb: number; swapMaxMb: number };
+  /**
+   * 拼车池上的会话没成（退出码不是 0、不是我们叫停的）：被拒的证据当场交出去（#194 方案 4.3），由切号判是不是「拼车用不了」、
+   * 要不要当场切独享。只发出去、不等：切号要等这一个会话收场，等它会互相卡住。抛了只记日志。
+   */
+  onCarpoolRejection?: (rejection: CarpoolRejection) => void;
   /** 帮手脚本、sudo 前缀（测试里给假帮手）。 */
   helper?: string;
   sudo?: readonly string[];
@@ -207,7 +213,35 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
           : {}),
       });
-      return outcomeOfReport(report);
+      const outcome = outcomeOfReport(report);
+      if (
+        deps.onCarpoolRejection &&
+        route.orgKind === 'carpool' &&
+        !outcome.killed &&
+        outcome.exitCode !== 0
+      ) {
+        const resets = outcome.facts?.resetsAt ? new Date(outcome.facts.resetsAt) : undefined;
+        try {
+          deps.onCarpoolRejection({
+            at: new Date(),
+            ...(outcome.facts?.quotaExhausted ? { code: 'quota_exhausted' } : {}),
+            ...(outcome.facts?.httpStatus !== undefined ? { httpStatus: outcome.facts.httpStatus } : {}),
+            ...(resets && !Number.isNaN(resets.getTime()) ? { resetsAt: resets } : {}),
+            // 执行体报的原话（reclaude 的「拼车 5 小时额度已用完，约 N 分钟后重置」在终帧里）排在前面：判是哪一种、几点恢复靠它
+            text: [
+              report.facts.terminal?.detail,
+              outcome.facts?.detail,
+              outcome.facts?.rawError,
+              outcome.stderr,
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          });
+        } catch (err) {
+          log('拼车被拒的证据没交给切号', { runId, error: message(err) });
+        }
+      }
+      return outcome;
     } finally {
       await deps.trees.remove(tmpDir).catch((err: unknown) => {
         log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {

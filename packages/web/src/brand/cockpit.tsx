@@ -37,6 +37,8 @@ export const brand: Brand = {
     judgeNav: 'Jev 判断',
     marshal: 'AI 帅位',
     marshalShort: '帅位',
+    carpool: '拼车',
+    solo: '独享',
   },
   stageHints: {
     triage: '判断是哪类活、说没说清、多大、碰不碰人闸',

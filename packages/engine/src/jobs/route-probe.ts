@@ -18,7 +18,7 @@ import type { RouteProbeRun } from '../contract.ts';
 import { hostName, ORG_NAMES } from '../routing/names.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import type { OrgSwitchRound } from './org-switch.ts';
+import type { OrgSwitchRound, ProbedRoute } from './org-switch.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
 export const ROUTE_PROBE_JOB = {
@@ -436,4 +436,36 @@ export async function runRouteProbeJob(deps: RouteProbeJobDeps): Promise<RoutePr
   if (run.outcome === 'ok') deps.log('info', '路由探针跑完了', fields);
   else deps.log('warn', '路由探针这一轮没探全', { ...fields, why: run.why });
   return run;
+}
+
+/**
+ * 切号切完当场探一次切过去的那个组织的池（#194 方案 4.3）：只探这一类的路由、各写一条结论，不记 schedule_runs、不再判切号
+ * （调用方就是切号本身）。放慢的、这会儿定不下来没探的不算，和一轮探针里的「真探了的才算读回」同一个口径。读不到路由照抛。
+ */
+export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promise<ProbedRoute[]> {
+  const mine = (await deps.targets()).filter((t) => t.orgKind === kind);
+  const conclusions = await mapLimit(mine, deps.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
+    conclude(deps, t),
+  );
+  const probed: ProbedRoute[] = [];
+  for (const c of conclusions) {
+    if (c.kept || c.unsettled) continue;
+    try {
+      await deps.save({
+        routeId: c.target.routeId,
+        state: c.state,
+        at: c.at,
+        detail: c.detail,
+        org: c.org,
+      });
+    } catch (err) {
+      // 结论没写进库不改探到的结果：核对照探到的算，写不进的下一轮探针会再写
+      deps.log('error', '路由探针（切号后当场探）：结论没写进库', {
+        routeId: c.target.routeId,
+        error: message(err),
+      });
+    }
+    probed.push({ routeId: c.target.routeId, orgKind: c.target.orgKind, state: c.state, detail: c.detail });
+  }
+  return probed;
 }
