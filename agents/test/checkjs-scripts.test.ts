@@ -16,6 +16,8 @@ const CHECKED = [
   'skills/discuss/scripts/second-opinion.mjs',
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
+  'hooks/pretool.mjs',
+  'hooks/unattended.mjs',
 ];
 
 /** 盖住类型检查的写法：@ts-nocheck、@ts-expect-error、@ts-expect-error，和 JSDoc 里写 any。回命中的那几处。 */
