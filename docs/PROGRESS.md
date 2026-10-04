@@ -103,6 +103,11 @@
 
 **如果两个键设了还停**（issue #13291 有人报过这种情况，WSL 新版本改过空闲回收行为）：兜底是「留一个进程在实例里」——`wsl --exec dbus-launch true`（这条起的进程挂在实例的 PID 2 下，能吊住整个发行版；Windows 重启后要重跑一次），或者干脆跑演练那几次**留一个 wsl 窗口开着别关**，实测窗口开着就不回收。备选 `tmux new -d` 也行。这三条都不用改配置、不用 `wsl --shutdown`。
 
+## 2026-10-04（#777 法国巡检仓和本机演练仓分开，Opus 子代理，分支 `fix/777-canary-repo-split`）
+
+- **仓里做完的**：`deploy/france/desired-config.json` 的 `engine.env` `FLEET_CANARY_REPO` 从私有值（指纹，据 #777 就是演练仓 `fleet-dao-canary`）改成公开值 `thoerwink8/fleet-dao-canary-fr`；`config.mjs` 的 `diffProfiles` 加 `MUST_DIFFER`：两边这一项必须是非空公开值且不一样（不分大小写），一样、写成私有值、空着、两边都删了都判红（`deploy/test/config.test.mjs` 每种各造一次，外加拿两份真文件把本机档改成法国的值必须红）；`docs/ops.md` 第五节、第九节、第十三节跟着改。
+- **还欠（要创始人做，外部动作）**：GitHub 上建公开空仓 `thoerwink8/fleet-dao-canary-fr`（名字不同就改期望里那一项）、装法国两个 App、照 ops 第五节「全流程巡检」配齐（纳管、接活开关、`v1 巡检` 里程碑、CI、允许自动合并）；`fleet-dao-canary` 简介改成「本机演练仓」；那边 #26–#35 旧巡检单关掉。合进主线后法国下一次发布会把新仓名写进 `engine.env`（引擎关着，没人读）；法国引擎重开（临时调整表第一行撤回）前先核这几样做完、#777 关了。
+
 ## 2026-10-04（#574 剩的代码，Opus 子代理分三个 PR：装载 → 选路 → 界面）
 
 - **装载，#716 已合**：发布时目录装完接着装路由两层（`deploy/release.sh` 的 `load_routing` → `packages/db/src/bin/routing.ts` → `runRoutingApply`：读这一版带的 `packages/db/routing.default.json`、只补缺写进两张表、日志写补了几行/保持几个），装不成、读不回、装完 0 行都红、不切版本。测试：`packages/db/test/routing-apply-release.test.ts`（真骨架 + 目录样例装得进、再装已齐；骨架读不到、目录没装都明确失败一行不写）、`deploy/test/release-flow.test.sh`「装路由两层」一段（本机 Git Bash 建不了符号链接，「切到哪一版」那几条只在 CI 上验）。
