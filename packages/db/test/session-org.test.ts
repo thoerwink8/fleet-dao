@@ -91,10 +91,21 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       ['claude-carpool', 'carpool'],
       ['claude-solo', 'solo'],
     ]);
+    // window / scope / used 是额度留量线要的（#194 4.8，shared 的 evaluateReserve）：已用比例读不出来就是 null，不是 0
     expect(f.pools[0]?.windows).toEqual([
-      { label: 'five_hour', state: 'exhausted', full: true, resetsAt: later(2 * HOUR) },
+      {
+        label: 'five_hour',
+        window: '5h',
+        scope: null,
+        used: null,
+        state: 'exhausted',
+        full: true,
+        resetsAt: later(2 * HOUR),
+      },
     ]);
-    expect(f.pools[1]?.windows).toEqual([{ label: 'five_hour', state: 'ok', full: false, resetsAt: null }]);
+    expect(f.pools[1]?.windows).toEqual([
+      { label: 'five_hour', window: '5h', scope: null, used: 0.3, state: 'ok', full: false, resetsAt: null },
+    ]);
     expect(f.busy).toBe(0);
   });
 
@@ -108,7 +119,17 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       readAt: ago(2 * HOUR),
     });
     const f = await sessionOrgFacts(t.db, { now: NOW });
-    expect(f.pools[0]?.windows).toEqual([{ label: 'five_hour', state: 'stale', full: true, resetsAt: null }]);
+    expect(f.pools[0]?.windows).toEqual([
+      {
+        label: 'five_hour',
+        window: '5h',
+        scope: null,
+        used: null,
+        state: 'stale',
+        full: true,
+        resetsAt: null,
+      },
+    ]);
   });
 
   it('按模型组扣的窗口：只算扣得着在用路由的（只扣 Sonnet 的不算，扣 Opus 的算）；上游不再报的，除非还用满着，不算', async () => {
