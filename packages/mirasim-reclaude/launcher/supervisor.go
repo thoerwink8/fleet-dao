@@ -287,6 +287,23 @@ func supervise(cfg configuration) error {
 			if err != nil {
 				return err
 			}
+			// 已经跑过的会话切 cloud 而活着的参数里没有平台网关：不杀会话，把这一条用户消息
+			// 以报错结果退回给 Mirasim，进程和当前额度原样保留（首次启动仍按原规矩硬失败）。
+			if started && sel.mode == "cloud" && verifyGatewaySettings(cfg.args) != nil {
+				logLine("event=refuse-switch route=cloud sid=" + sel.sessionID + " reason=no-gateway-in-live-args")
+				queue = queue[1:]
+				refusal := frame{}
+				refusal.set("type", "result")
+				refusal.set("subtype", "error_during_execution")
+				refusal.set("session_id", native)
+				refusal.set("result", platformSwitchRefusal)
+				refusal["is_error"] = json.RawMessage("true")
+				if err := writeFrame(os.Stdout, refusal); err != nil {
+					return err
+				}
+				fmt.Fprintln(os.Stderr, "mirasim-reclaude: switch_refused", platformSwitchRefusal)
+				continue
+			}
 			if child == nil {
 				recovering := started
 				if err = start(sel, recovering); err != nil {

@@ -59,6 +59,10 @@ func verifyGatewaySettings(args []string) error {
 	return nil
 }
 
+// 会话进程是以自有额度起的时候，Mirasim 没把平台网关地址和令牌交给启动器；
+// 启动器自己编不出来，所以「当场切平台」做不到。必须明说原因和办法，不能让会话悄悄死掉或悄悄仍走自有。
+const platformSwitchRefusal = "这个会话的进程是以自有额度启动的，启动参数里没有平台网关，当场切不到平台额度，这条消息没有发出，仍在用自有额度。办法：在 Mirasim 里确认该会话已选「平台」，然后重新发送这条消息；还不行就新开一个会话，或重启这个会话的进程。"
+
 func rewriteArgs(in []string) (out []string, temps []string, changed bool, err error) {
 	out = append([]string(nil), in...)
 	defer func() {
