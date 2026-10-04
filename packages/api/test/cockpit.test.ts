@@ -708,7 +708,8 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(old).toMatchObject({ burn: { state: 'unknown' } });
     // 挂着独享：不带烧速
     const solo = await view({ live: 'solo', reads: [read(-10, 20), read(-1, 38)] });
-    expect(solo && 'burn' in solo ? solo.burn : 'x').toBeUndefined();
+    expect(solo).toMatchObject({ state: 'known', live: 'solo' });
+    expect(solo).not.toHaveProperty('burn');
   });
 
   it('路由表带上探针的结论（#129）：在线的带 ok 和时刻，离线的带原因，探针还没看过的不带（不说成离线）', async () => {

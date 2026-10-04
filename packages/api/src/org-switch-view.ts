@@ -28,6 +28,7 @@ export const ORG_SWITCH_NOT_HERE =
   '切号现状没接上：这里是开发环境的内存版，没有切号账本那张表（session_org_state），真库上才有';
 
 type View = z.input<typeof OrgSwitchViewSchema>;
+type Known = Extract<View, { state: 'known' }>;
 
 /** 账本 → 驾驶舱的形状。soloPaused 是设置里的「引擎暂不用独享」（人叫停）。 */
 export function orgSwitchView(
@@ -50,7 +51,7 @@ export function orgSwitchView(
   const d = parsed.data;
   const last = [...d.reads].sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt)).at(-1);
   // 烧速：挂着独享时本人拼车额度没在花，不算（不显示一个「最近没在花」冒充事实）
-  const burn: View['burn'] | undefined =
+  const burn: Known['burn'] | undefined =
     d.live === 'solo'
       ? undefined
       : toBurnView(
@@ -105,7 +106,7 @@ export function orgSwitchView(
   };
 }
 
-function toBurnView(e: BurnEstimate): View['burn'] {
+function toBurnView(e: BurnEstimate): Known['burn'] {
   if (e.state === 'unknown') return { state: 'unknown', why: e.why };
   return {
     state: 'known',
