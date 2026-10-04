@@ -57,7 +57,15 @@ export interface RouteWakerDeps {
   log?: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+/** 错误文字连原因一起写（Temporal 客户端把真原因包在 cause 里，只写外层是一句「Failed to signal Workflow」）。 */
+function message(err: unknown): string {
+  const parts: string[] = [];
+  for (let e: unknown = err, depth = 0; e !== undefined && e !== null && depth < 4; depth++) {
+    parts.push(e instanceof Error ? e.message : String(e));
+    e = e instanceof Error ? e.cause : undefined;
+  }
+  return parts.join('；原因：');
+}
 
 export function routeWaker(deps: RouteWakerDeps): RouteWaker {
   const log = deps.log ?? (() => {});
@@ -157,11 +165,15 @@ export function wakeAfterProbeRound(round: OrgSwitchRound, waker: RouteWaker): O
 
 /** 工作流不在（没有这个编号，或已经结束）：客户端抛 WorkflowNotFoundError；服务端 NOT_FOUND 的另一种文案也认。 */
 export function isWorkflowGone(err: unknown): boolean {
-  return (
-    err instanceof WorkflowNotFoundError ||
-    (err instanceof Error &&
-      (err.name === 'WorkflowNotFoundError' || /workflow execution already completed/i.test(err.message)))
-  );
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 4; e = e.cause, depth++) {
+    if (
+      e instanceof WorkflowNotFoundError ||
+      e.name === 'WorkflowNotFoundError' ||
+      /workflow execution already completed/i.test(e.message)
+    )
+      return true;
+  }
+  return false;
 }
 
 /** 真客户端：对着一个 Temporal 客户端（测试可传测试服务端的 client）。 */
@@ -228,11 +240,7 @@ export function lazyTemporalWakeClient(opts: {
 }
 
 /** 引擎的装配：报警走 upsertAlert、撤警走 resolveAlertWithReason（和切号的提醒同一个做法）。 */
-export function routeWakerFromDb(
-  db: Db,
-  client: RouteWakeClient,
-  log?: RouteWakerDeps['log'],
-): RouteWaker {
+export function routeWakerFromDb(db: Db, client: RouteWakeClient, log?: RouteWakerDeps['log']): RouteWaker {
   return routeWaker({
     client,
     raise: async (a) => {

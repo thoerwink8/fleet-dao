@@ -52,13 +52,13 @@ import { oneShotSessions } from './one-shot-sessions.ts';
 import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { quotaReadJob } from './quota-read.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
+import { routeProbeJob } from './route-probe.ts';
 import {
   lazyTemporalWakeClient,
   routeWakerFromDb,
   wakeAfterProbeNow,
   wakeAfterProbeRound,
 } from './route-wake.ts';
-import { routeProbeJob } from './route-probe.ts';
 import { realReservations, realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
@@ -686,9 +686,14 @@ export function realPortsFromEnv(
     },
     retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
     close: async () => {
-      await wakeClient.close().catch((error: unknown) =>
-        console.error('叫醒用的 Temporal 连接没关干净', error instanceof Error ? error.message : String(error)),
-      );
+      await wakeClient
+        .close()
+        .catch((error: unknown) =>
+          console.error(
+            '叫醒用的 Temporal 连接没关干净',
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
       await close();
     },
   };
