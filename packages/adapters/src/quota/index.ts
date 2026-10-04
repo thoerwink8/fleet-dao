@@ -33,6 +33,15 @@ export { dailyTokenFilesSource, estimateWindows, windowSpan } from './readers/es
 export { readingsFromGrokBilling } from './readers/grok.ts';
 export { readingsFromRelayFrame } from './readers/mirasim.ts';
 export { carpoolSubscription, readingsFromCarpoolQuota } from './readers/reclaude.ts';
+export type {
+  ReclaudeApiCode,
+  ReclaudeApiConfig,
+  ReclaudeApiIo,
+  ReclaudeApiRead,
+  ReclaudeOrgRead,
+  ReclaudeQuotaRead,
+} from './readers/reclaude-api.ts';
+export { parseCarpoolQuota, parseOrgAccounts, readReclaudeApi } from './readers/reclaude-api.ts';
 export type * from './types.ts';
 export { QuotaReadError } from './types.ts';
 export {
