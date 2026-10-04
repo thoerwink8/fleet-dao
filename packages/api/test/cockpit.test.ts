@@ -614,6 +614,66 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(pools.pools.some((p) => p.quotaStatus === 'unread')).toBe(true);
   });
 
+  it('切号现状（#194）：没接上写 unavailable；接上了读账本；账本认不出写 unreadable；读不到写明没读成，都不拿空冒充没事', async () => {
+    const poolsBody = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolsResponse.parse(await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json());
+    const none = harness();
+    const a = await none.login();
+    expect((await poolsBody(none, a.cookie)).orgSwitch).toMatchObject({
+      state: 'unavailable',
+      soloPaused: false,
+    });
+
+    const doc = {
+      live: 'solo',
+      liveAt: '2026-10-04T12:00:00.000Z',
+      onSoloSince: '2026-10-04T10:00:00.000Z',
+      outage: {
+        kind: 'E1',
+        since: '2026-10-04T10:00:00.000Z',
+        resetsAt: '2026-10-04T14:00:00.000Z',
+        resetsFrom: 'api',
+        evidence: '被拒原文是拼车本人额度那句',
+      },
+      channel: { state: 'ok', since: '2026-10-04T09:00:00.000Z', why: '账号状态正常' },
+      backPending: null,
+      whites: { count: 1 },
+      reads: [
+        { ok: true, requestedAt: '2026-10-04T11:58:00.000Z' },
+        { ok: false, requestedAt: '2026-10-04T11:59:00.000Z', why: '503' },
+      ],
+    };
+    const known = harness({ orgSwitch: { read: async () => ({ doc, updatedAt: T0 }) } });
+    const b = await known.login();
+    expect((await poolsBody(known, b.cookie)).orgSwitch).toMatchObject({
+      state: 'known',
+      live: 'solo',
+      outage: { kind: 'E1', resetsAt: '2026-10-04T14:00:00.000Z', resetsFrom: 'api' },
+      channel: { state: 'ok' },
+      whites: 1,
+      lastRead: { ok: false, why: '503' },
+      soloPaused: false,
+    });
+
+    const garbled = harness({ orgSwitch: { read: async () => ({ doc: { v: 99 }, updatedAt: T0 }) } });
+    const c = await garbled.login();
+    const g = (await poolsBody(garbled, c.cookie)).orgSwitch;
+    expect(g).toMatchObject({ state: 'unreadable' });
+    expect(g && 'why' in g && g.why).toContain('认不出');
+
+    const broken = harness({
+      orgSwitch: {
+        read: async () => {
+          throw new Error('连接断了');
+        },
+      },
+    });
+    const d = await broken.login();
+    const bk = (await poolsBody(broken, d.cookie)).orgSwitch;
+    expect(bk).toMatchObject({ state: 'unavailable' });
+    expect(bk && 'why' in bk && bk.why).toContain('读切号账本没成：连接断了');
+  });
+
   it('路由表带上探针的结论（#129）：在线的带 ok 和时刻，离线的带原因，探针还没看过的不带（不说成离线）', async () => {
     const data = devFixtures(T0);
     const at = new Date(T0.getTime() - 5 * 60_000).toISOString();

@@ -227,7 +227,15 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
             ...(outcome.facts?.quotaExhausted ? { code: 'quota_exhausted' } : {}),
             ...(outcome.facts?.httpStatus !== undefined ? { httpStatus: outcome.facts.httpStatus } : {}),
             ...(resets && !Number.isNaN(resets.getTime()) ? { resetsAt: resets } : {}),
-            text: [outcome.facts?.detail, outcome.facts?.rawError, outcome.stderr].filter(Boolean).join('\n'),
+            // 执行体报的原话（reclaude 的「拼车 5 小时额度已用完，约 N 分钟后重置」在终帧里）排在前面：判是哪一种、几点恢复靠它
+            text: [
+              report.facts.terminal?.detail,
+              outcome.facts?.detail,
+              outcome.facts?.rawError,
+              outcome.stderr,
+            ]
+              .filter(Boolean)
+              .join('\n'),
           });
         } catch (err) {
           log('拼车被拒的证据没交给切号', { runId, error: message(err) });

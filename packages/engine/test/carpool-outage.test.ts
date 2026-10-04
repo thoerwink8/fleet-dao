@@ -83,6 +83,28 @@ describe('被拒是哪一种', () => {
     expect(v).toMatchObject({ kind: 'outage', outage: { kind: 'E2', resetsAt: null, resetsFrom: null } });
   });
 
+  it('被拒那一帧带了清零时刻（Claude 流里的额度读数）、原文没写「约 N 分钟」：恢复时刻取它；已经过了的不算（当不知道）', () => {
+    const withFrame = classifyCarpoolRejection(
+      { at: T0, text: OFFICIAL_REJECT, resetsAt: at(45 * MIN) },
+      failRead(-MIN),
+    );
+    expect(withFrame).toMatchObject({
+      kind: 'outage',
+      outage: { kind: 'E2', resetsAt: at(45 * MIN), resetsFrom: 'text' },
+    });
+    const stale = classifyCarpoolRejection(
+      { at: T0, text: OFFICIAL_REJECT, resetsAt: at(-5 * MIN) },
+      failRead(-MIN),
+    );
+    expect(stale).toMatchObject({ kind: 'outage', outage: { resetsAt: null, resetsFrom: null } });
+    // 原文写了就听原文的
+    const both = classifyCarpoolRejection(
+      { at: T0, text: `${OFFICIAL_REJECT}, resets in 30 minutes`, resetsAt: at(45 * MIN) },
+      failRead(-MIN),
+    );
+    expect(both).toMatchObject({ kind: 'outage', outage: { resetsAt: at(30 * MIN) } });
+  });
+
   it('「所选组织没有可用的绑定账号」→ E3，没有恢复时刻', () => {
     const v = classifyCarpoolRejection({ at: T0, text: '所选组织没有可用的绑定账号' }, null);
     expect(v).toMatchObject({ kind: 'outage', outage: { kind: 'E3', resetsAt: null } });

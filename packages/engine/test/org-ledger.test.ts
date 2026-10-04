@@ -1,4 +1,5 @@
 // 切号账本（jobs/org-ledger.ts，#194 第六节第 13 条）：存了能原样读回；认不出明确失败，不当成空账本。
+import { OrgLedgerViewDocSchema } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { CarpoolApiRead } from '../src/jobs/carpool-outage.ts';
 import {
@@ -52,6 +53,37 @@ describe('存取', () => {
       liveAt: at(-1),
     };
     expect(parseLedger(JSON.parse(JSON.stringify(serializeLedger(full))))).toEqual(full);
+  });
+});
+
+describe('和驾驶舱后端读的形状对得上（shared 的 org-ledger-doc.ts）', () => {
+  it('引擎写出去的账本（空的、满的）驾驶舱读得出；字段改了名它会红', () => {
+    const full = {
+      ...emptyLedger(),
+      outage: {
+        kind: 'E1' as const,
+        since: at(-5),
+        resetsAt: at(30),
+        resetsFrom: 'api' as const,
+        evidence: 'x',
+      },
+      onSoloSince: at(-4),
+      channel: { state: 'single' as const, since: at(-10), why: '只剩 1 个' },
+      backPending: { since: at(-1), mode: 'confirmed' as const, why: 'x' },
+      whites: { count: 2, lastAt: at(-9), lastTrial: false },
+      reads: [read(-2), { ok: false as const, requestedAt: at(-1), code: 'http' as const, why: '503' }],
+      live: 'solo' as const,
+      liveAt: at(-1),
+    };
+    for (const l of [emptyLedger(), full]) {
+      expect(OrgLedgerViewDocSchema.safeParse(JSON.parse(JSON.stringify(serializeLedger(l)))).success).toBe(
+        true,
+      );
+    }
+    const renamed = JSON.parse(JSON.stringify(serializeLedger(full)));
+    renamed.liveOrg = renamed.live;
+    renamed.live = undefined;
+    expect(OrgLedgerViewDocSchema.safeParse(renamed).success).toBe(false);
   });
 });
 
