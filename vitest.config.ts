@@ -12,6 +12,9 @@ if (posixNote) console.warn(posixNote);
 const workers = testWorkers();
 if (workers.note) console.warn(workers.note);
 
+// 实验（#901，不合并）：把 PGlite 快照关掉，对照组的对面
+process.env.FLEET_TEST_PGLITE_SNAPSHOT = 'off';
+
 export default defineConfig({
   test: {
     // 收哪些测试文件只有一份（test-split.ts 的 TEST_INCLUDE）：CI 的 changes job 不装依赖，要自己在仓里按它枚举
