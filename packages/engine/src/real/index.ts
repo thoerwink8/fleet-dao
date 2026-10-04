@@ -52,6 +52,7 @@ import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
+import { productionMemoryPeak } from './memory-peak.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { quotaReadJob } from './quota-read.ts';
@@ -648,6 +649,8 @@ export function realPortsFromEnv(
     trees,
     baseEnv: env,
     resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
+    // 会话 scope 的内存峰值写进 runs（#948）：边跑边读 cgroup 的 memory.peak
+    memoryPeak: productionMemoryPeak(),
     // 拼车池上的会话被拒：证据当场交给切号判（#194 方案 4.3），不等路由探针那一轮；不等结果（切号要等这个会话收场）
     onCarpoolRejection: (rejection) => {
       void orgSwitch.now({ by: '拼车会话被拒', rejection });

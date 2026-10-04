@@ -149,6 +149,10 @@ export interface SpawnFacts {
   detail?: string;
   /** 执行体报的原话（认证、额度、网络报错只在 stderr 的那几家）。 */
   rawError?: string;
+  /** 会话 scope 的内存峰值（MB，整数，real/memory-peak.ts 采的 cgroup memory.peak）；没读到不给，不当成 0（#948）。 */
+  memoryPeakMb?: number;
+  /** 没读到内存峰值的原因（白话）：进日志和落盘的 result.json，runs 那一列留空（#948）。 */
+  memoryPeakWhy?: string;
 }
 
 export interface SpawnCommand {
@@ -422,6 +426,9 @@ async function persistArtifacts(runDir: string, result: OneShotResult): Promise<
     startedAt: result.startedAt,
     endedAt: result.endedAt,
     failureReason: result.failureReason,
+    // 内存峰值（#948）：读到的数，或没读到的原因（runs 那一列没数时在这里看得到为什么）
+    memoryPeakMb: result.facts?.memoryPeakMb,
+    memoryPeakWhy: result.facts?.memoryPeakWhy,
     /** 落盘 TTL：调用方该在这之后清理。 */
     cleanupAfter: SESSION_ARTIFACT_TTL_MS,
   };
@@ -474,6 +481,7 @@ function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
     ...(u?.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
     ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
     ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
+    ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
   };
 }
 
