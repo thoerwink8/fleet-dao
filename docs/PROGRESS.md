@@ -51,6 +51,38 @@
   - 「8按照你推荐」——拼车怎么归零：按我的兜底做法（判「用满」以真请求被拒为准、判「恢复」以到点后的新读数为准），不依赖「滚动窗口怎么归零」那个未知。
   - 「飞鼠你帮我操作浏览器，我帮你登录」——**飞书开发者后台已在办**：他登录后我操作。已做完两项权限（`im:message.group_msg` 从没有到**已开通**；`im:message:readonly` 本来就有）、正在订撤回事件 `im.message.recalled_v1`；剩「版本管理与发布」里发一版。
 
+### WSL 不让它睡：为什么、怎么做（2026-10-04 查证）
+
+**为什么**：#452 演练的引擎跑在 `fleet-local` 里，WSL 没人连着几分钟就整台停、引擎跟着停（PROGRESS 10-04「本机演练环境起来了」第 ④ 条）。演练要它一直跑。
+
+**根子是两个键，不是一个**（2026-10-04 查 WSL 官方文档 + microsoft/WSL 的 issue 核过）：
+
+1. `instanceIdleTimeout`：一个**发行版**没有活跃用户进程后能待多久，到点这个实例就关了（默认 8000 毫秒）。
+2. `vmIdleTimeout`：**所有**发行版都没了之后，WSL 那个虚拟机进程还能留多久（默认 60000 毫秒）。
+
+只写 `vmIdleTimeout=-1` 不管用——那管的是「东西都已经没了之后别再收」，拦不住发行版先被空闲关掉。两个都要设。
+
+**本机 WSL 版本**：2.6.3.0（`wsl --version` 读的）。
+
+**怎么做**（你自己在 Windows 上，管理员 PowerShell）：
+
+1. 看有没有这个文件：`%UserProfile%\.wslconfig`。**这台机器现在没有**（我查过，`C:\Users\Administrator\.wslconfig` 不存在）。
+2. 新建（或编辑）它，加两段：
+
+   ```ini
+   [general]
+   instanceIdleTimeout=-1
+
+   [wsl2]
+   vmIdleTimeout=-1
+   ```
+
+   已经有别的段（比如 `[wsl2]` 下已有的 `memory`、`processors`、`networkingMode`）就**加进去、别整份覆盖**——仓里 `deploy/local/wslconfig.example` 是 fleet-local 的那份样例（16G / 8 线程 / 镜像网络），可以照它合。**注意**：`.wslconfig` 的注释用 `#` 还是 `;` 各版本说法不一，最稳是不写注释；写了报「unknown key」之类就把注释去掉再来。
+3. 改完跑一次 `wsl --shutdown` 才生效（**这一下会把 fleet-local 连同里面的引擎一起停掉重启**，所以挑没在跑演练的时候做）。
+4. 验证：跑 `wsl -d fleet-local -- systemctl is-active fleet-engine`，然后关掉所有 WSL 窗口、等十分钟以上，再跑一次同一条命令。回 `active` = 成了；回别的或报连不上 = 没成。
+
+**如果两个键设了还停**（issue #13291 有人报过这种情况，WSL 新版本改过空闲回收行为）：兜底是「留一个进程在实例里」——`wsl --exec dbus-launch true`（这条起的进程挂在实例的 PID 2 下，能吊住整个发行版；Windows 重启后要重跑一次），或者干脆跑演练那几次**留一个 wsl 窗口开着别关**，实测窗口开着就不回收。备选 `tmux new -d` 也行。这三条都不用改配置、不用 `wsl --shutdown`。
+
 ## 2026-10-04（#574 剩的代码，Opus 子代理分三个 PR：装载 → 选路 → 界面）
 
 - **装载，#716 已合**：发布时目录装完接着装路由两层（`deploy/release.sh` 的 `load_routing` → `packages/db/src/bin/routing.ts` → `runRoutingApply`：读这一版带的 `packages/db/routing.default.json`、只补缺写进两张表、日志写补了几行/保持几个），装不成、读不回、装完 0 行都红、不切版本。测试：`packages/db/test/routing-apply-release.test.ts`（真骨架 + 目录样例装得进、再装已齐；骨架读不到、目录没装都明确失败一行不写）、`deploy/test/release-flow.test.sh`「装路由两层」一段（本机 Git Bash 建不了符号链接，「切到哪一版」那几条只在 CI 上验）。
