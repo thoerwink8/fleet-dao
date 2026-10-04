@@ -8,6 +8,9 @@ coverage/
 .playwright-mcp/
 # 本机工具和临时文件：临时目录、Claude Code 的工作树、Mirasim 的本机定时任务、codegraph 的本机索引（每个仓 codegraph init 建，不进仓）
 _tmp/
+# 仓根的临时文件（安装日志之类，如 _tmp_install.log）：临时文件放 _tmp/，万一落在根上也不进仓
+_tmp_*
+*.log
 .claude/worktrees/
 .mirasim/
 .codegraph/
