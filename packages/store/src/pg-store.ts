@@ -54,6 +54,14 @@ import {
 } from '@fleet-dao/db';
 import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import {
+  ATTEMPT_FREE_STATUS,
+  claimedResult,
+  judgeCarriers,
+  outcomeFields,
+  RECLAIMABLE_STATUSES,
+  reclaimMissStatus,
+} from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import {
   feishuMessageKey,
@@ -88,7 +96,6 @@ import {
   type Page,
   type PasswordCredentials,
   type PullRequestRecord,
-  REPO_NOT_MANAGED,
   type RunPlan,
   type SettingRecord,
   type Store,
@@ -1172,8 +1179,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
                 ne(githubEventVersions.deliveryId, delivery.id),
               ),
             );
-          if (carriers.some((c) => c.status !== 'ignored')) return undefined;
-          seenBefore = carriers.some((c) => c.reason !== REPO_NOT_MANAGED);
+          const verdict = judgeCarriers(carriers);
+          if (verdict.duplicate) return undefined;
+          seenBefore = verdict.seenBefore;
         }
         const rows = await tx
           .insert(githubEvents)
@@ -1205,17 +1213,14 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return { inserted: rows.length > 0, seenBefore };
       });
       if (attempt === undefined) return { status: 'duplicate' };
-      const seen = attempt.seenBefore ? { seenBefore: true } : {};
-      if (attempt.inserted) return { status: 'claimed', token: iso(at), retry: false, ...seen };
+      if (attempt.inserted) return claimedResult(iso(at), false, attempt.seenBefore);
       // 已经有这一条：条件更新是原子的，两个请求同时来接，只有一个接得到
       const taken = await db
         .update(githubEvents)
         .set(reclaimSet(at))
         .where(and(eq(githubEvents.deliveryId, delivery.id), reclaimableRow(new Date(staleBefore))))
         .returning({ id: githubEvents.deliveryId });
-      return taken.length > 0
-        ? { status: 'claimed', token: iso(at), retry: true, ...seen }
-        : { status: 'duplicate' };
+      return taken.length > 0 ? claimedResult(iso(at), true, attempt.seenBefore) : { status: 'duplicate' };
     },
     async reclaimDelivery(id, { staleBefore, force }) {
       const at = now();
@@ -1240,8 +1245,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .select({ status: githubEvents.status })
         .from(githubEvents)
         .where(eq(githubEvents.deliveryId, id));
-      if (!existing) return { status: 'not_found' };
-      return { status: existing.status === 'processing' ? 'in_flight' : 'finished' };
+      return { status: reclaimMissStatus(existing?.status) };
     },
 
     // —— 飞书 ——
@@ -1729,12 +1733,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       });
     },
     async finishDelivery(id, token, outcome) {
+      const fields = outcomeFields(outcome);
       const rows = await db
         .update(githubEvents)
         .set({
-          status: outcome.status,
-          reason: outcome.status === 'accepted' ? null : outcome.reason,
-          note: outcome.status === 'accepted' ? (outcome.note ?? null) : null,
+          status: fields.status,
+          reason: fields.reason ?? null,
+          note: fields.note ?? null,
           finishedAt: now(),
         })
         .where(
@@ -1929,7 +1934,7 @@ function versionLockKey(v: Pick<GitHubObjectVersion, 'object' | 'version'>): str
 /** 上次出错的、在等着的、处理中但占用早于 stale 的（那一次多半死了）：可以接过来重做。 */
 function reclaimableRow(stale: Date) {
   return or(
-    inArray(githubEvents.status, ['failed', 'waiting']),
+    inArray(githubEvents.status, [...RECLAIMABLE_STATUSES]),
     and(eq(githubEvents.status, 'processing'), lt(githubEvents.claimedAt, stale)),
   );
 }
@@ -1941,7 +1946,7 @@ function reclaimableRow(stale: Date) {
 function reclaimSet(at: Date) {
   return {
     status: 'processing' as const,
-    attempts: sql`${githubEvents.attempts} + case when ${githubEvents.status} = 'waiting' then 0 else 1 end`,
+    attempts: sql`${githubEvents.attempts} + case when ${githubEvents.status} = ${ATTEMPT_FREE_STATUS} then 0 else 1 end`,
     claimedAt: at,
     finishedAt: null,
   };

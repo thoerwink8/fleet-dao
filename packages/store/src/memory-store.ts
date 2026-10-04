@@ -19,6 +19,20 @@ import {
   type Task,
   taskWorkflowId,
 } from '@fleet-dao/shared';
+import {
+  assertOutcomeHasReason,
+  claimedResult,
+  duplicateVersionObject,
+  isForceReclaimable,
+  isReclaimable,
+  judgeCarriers,
+  newestSuperseding,
+  outcomeFields,
+  reclaimedAttempts,
+  reclaimMissStatus,
+  sameInstant,
+  supersedes,
+} from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import {
   feishuMessageKey,
@@ -32,35 +46,34 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import {
-  type AgentSession,
-  type AskRecord,
-  type AuditRecord,
-  type CommandClaim,
-  type DraftRecord,
-  type FeishuAckReport,
-  type FeishuCardRecord,
-  type FeishuChatType,
-  type FeishuMessageRecord,
-  type FeishuOutboxAck,
-  type FeishuOutboxState,
-  type FeishuTaskInfo,
-  type GitHubDelivery,
-  type JobRecord,
-  type NewAuditEntry,
-  type NotificationRecord,
-  type Page,
-  type PageRequest,
-  type PasswordCredentials,
-  type PullRequestRecord,
-  type QuotaWindowRecord,
-  REPO_NOT_MANAGED,
-  type RunPlan,
-  type SegmentRunRecord,
-  type SettingRecord,
-  type Store,
-  type TimelineRecord,
-  type User,
+import type {
+  AgentSession,
+  AskRecord,
+  AuditRecord,
+  CommandClaim,
+  DraftRecord,
+  FeishuAckReport,
+  FeishuCardRecord,
+  FeishuChatType,
+  FeishuMessageRecord,
+  FeishuOutboxAck,
+  FeishuOutboxState,
+  FeishuTaskInfo,
+  GitHubDelivery,
+  JobRecord,
+  NewAuditEntry,
+  NotificationRecord,
+  Page,
+  PageRequest,
+  PasswordCredentials,
+  PullRequestRecord,
+  QuotaWindowRecord,
+  RunPlan,
+  SegmentRunRecord,
+  SettingRecord,
+  Store,
+  TimelineRecord,
+  User,
 } from './ports.ts';
 
 export interface ProgressRecord {
@@ -273,16 +286,6 @@ const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
     .map((v) => ({ ...v }))
     .sort((a, b) => (a.object < b.object ? -1 : a.object > b.object ? 1 : 0)),
 });
-
-/** 同一时刻不同写法（秒 / 毫秒）算同一个。 */
-const sameInstant = (a: string, b: string) => Date.parse(a) === Date.parse(b);
-
-/** 上次出错的、在等着的、处理中但占用早于 staleBefore 的（那一次多半死了），可以接过来重做。时刻都是 toISOString 的写法，按字面比就是按先后比。 */
-const reclaimable = (e: GitHubDelivery, staleBefore: string) =>
-  e.status === 'failed' || e.status === 'waiting' || (e.status === 'processing' && e.claimedAt < staleBefore);
-
-/** 接过来重做：次数加一；从等着接回来的不加（等上一轮不占自动重放的次数）。 */
-const reclaimedAttempts = (e: GitHubDelivery) => e.attempts + (e.status === 'waiting' ? 0 : 1);
 
 function byAtThenId(a: { at: string; id: string }, b: { at: string; id: string }): number {
   return a.at.localeCompare(b.at) || compareIds(a.id, b.id);
@@ -1071,13 +1074,13 @@ export function createMemoryStore(
               (v) => v.object === skipIfSeen.object && sameInstant(v.version, skipIfSeen.version),
             ),
         );
-        if (carriers.some((e) => e.status !== 'ignored')) return { status: 'duplicate' };
-        seenBefore = carriers.some((e) => e.reason !== REPO_NOT_MANAGED);
+        const verdict = judgeCarriers(carriers);
+        if (verdict.duplicate) return { status: 'duplicate' };
+        seenBefore = verdict.seenBefore;
       }
-      const seen = seenBefore ? { seenBefore } : {};
       const existing = data.githubEvents.get(delivery.id);
       if (!existing) {
-        if (new Set(delivery.versions.map((v) => v.object)).size !== delivery.versions.length) {
+        if (duplicateVersionObject(delivery.versions) !== undefined) {
           throw new Error('github_event_versions_delivery_id_object_pk：同一条投递里同一个对象只能有一版');
         }
         data.githubEvents.set(delivery.id, {
@@ -1088,19 +1091,18 @@ export function createMemoryStore(
           receivedAt: at,
           claimedAt: at,
         });
-        return { status: 'claimed', token: at, retry: false, ...seen };
+        return claimedResult(at, false, seenBefore);
       }
-      if (!reclaimable(existing, staleBefore)) return { status: 'duplicate' };
+      if (!isReclaimable(existing, staleBefore)) return { status: 'duplicate' };
       Object.assign(existing, { status: 'processing', attempts: reclaimedAttempts(existing), claimedAt: at });
       existing.finishedAt = undefined;
-      return { status: 'claimed', token: at, retry: true, ...seen };
+      return claimedResult(at, true, seenBefore);
     },
     async reclaimDelivery(id, { staleBefore, force }) {
       const existing = data.githubEvents.get(id);
-      if (!existing) return { status: 'not_found' };
-      if (!reclaimable(existing, staleBefore)) {
-        if (existing.status === 'processing') return { status: 'in_flight' };
-        if (!force) return { status: 'finished' };
+      if (!existing) return { status: reclaimMissStatus(undefined) };
+      if (!(force ? isForceReclaimable(existing, staleBefore) : isReclaimable(existing, staleBefore))) {
+        return { status: reclaimMissStatus(existing.status) };
       }
       const at = now().toISOString();
       Object.assign(existing, { status: 'processing', attempts: reclaimedAttempts(existing), claimedAt: at });
@@ -1110,12 +1112,8 @@ export function createMemoryStore(
     async finishDelivery(id, token, outcome) {
       const existing = data.githubEvents.get(id);
       if (existing?.status !== 'processing' || existing.claimedAt !== token) return false;
-      if (outcome.status !== 'accepted' && !outcome.reason) {
-        throw new Error('github_events_reason_when_not_taken：不收、出错都得写原因');
-      }
-      existing.status = outcome.status;
-      existing.reason = outcome.status === 'accepted' ? undefined : outcome.reason;
-      existing.note = outcome.status === 'accepted' ? outcome.note : undefined;
+      assertOutcomeHasReason(outcome);
+      Object.assign(existing, outcomeFields(outcome));
       existing.finishedAt = now().toISOString();
       return true;
     },
@@ -1125,7 +1123,7 @@ export function createMemoryStore(
     },
     async listUnfinishedDeliveries({ staleBefore, limit }) {
       return [...data.githubEvents.values()]
-        .filter((e) => reclaimable(e, staleBefore))
+        .filter((e) => isReclaimable(e, staleBefore))
         .sort(
           (a, b) =>
             a.attempts - b.attempts || a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id),
@@ -1137,18 +1135,15 @@ export function createMemoryStore(
       return new Set(ids.filter((id) => data.githubEvents.has(id)));
     },
     async findSupersedingVersion({ object, version, state, excludeDeliveryId }) {
-      let newest: { deliveryId: string; version: string; state: 'open' | 'closed' } | null = null;
+      const query = { object, version, state };
+      const candidates: { deliveryId: string; version: string; state: 'open' | 'closed' }[] = [];
       for (const e of data.githubEvents.values()) {
         if (e.id === excludeDeliveryId || e.status !== 'accepted') continue;
         for (const v of e.versions) {
-          if (v.object !== object || !v.state || v.state === state) continue;
-          if (Date.parse(v.version) <= Date.parse(version)) continue;
-          if (!newest || Date.parse(v.version) > Date.parse(newest.version)) {
-            newest = { deliveryId: e.id, version: v.version, state: v.state };
-          }
+          if (supersedes(v, query)) candidates.push({ deliveryId: e.id, version: v.version, state: v.state });
         }
       }
-      return newest;
+      return newestSuperseding(candidates);
     },
     async countStuckDeliveries({ staleBefore, maxAttempts }) {
       const all = [...data.githubEvents.values()];
