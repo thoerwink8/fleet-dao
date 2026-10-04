@@ -24,7 +24,7 @@
 | D | 主线跑「上次绿…现在」的累计改动 | **前半已合（#688）、主线真跑通过**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动。**同树复用（第三轮，创始人 2026-10-03「全程你拍板」）**：主线这次提交的树和某次成功的 PR 检查测的是同一棵、那次比的基准树又正是「上次真绿的头」的树 → test、web、deploy 不再重测（lint 照跑，check 照出结论）；对不上、查不到、读不到都照旧按区间全跑 + ::warning::，见「D 的细节」第 6 点 |
 | E | PR 的测试分片结果缓存 | **已合（#688）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
 | F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已合（#688），实测 login-user 94→44s**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数后来在 CI 的 ⏱ 行量到：慢的根子是建测试账号时整份拷 `/etc/skel` 里 801M 工具链，瘦身后 login-user 49→3 秒、cli-tools 99→6 秒（#699），分台已按实测重排（#698），见第二轮结果 |
-| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已合**（第二轮）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从主线日志刷新）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
+| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已合**（第二轮）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从最近几轮真跑了测试的 CI 日志取每个文件的中位数刷新，第四轮起，见 `specs/901-项目瘦身与提速/CI耗时实测.md`）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
 | H | 每 job 约 25 秒固定开销（checkout + setup-node + pnpm install） | 待做（在 B 之后逐项量） |
 
 ## 关键事实（都查过，别再重查）
@@ -119,6 +119,10 @@
 | e) 第二意见一推送就自动触发 | 现在：开 PR 后由 AI 手动跑 `second-opinion.mjs --pr <号> --high-risk`；实测一轮 30–510 秒（#876 三轮：约 40、510、约 40 秒；#881 一轮；#885 一轮约 30 秒），碰安全的 PR 合并时间基本由它定 | 没改 | **建议，不在这个 PR 做（要改标准）**：做法是加一个调工具后的钩子（`agents/hooks/`），见到 `gh pr create` 或对已有 PR 的 `git push` 成功、且 PR 改到 `high-risk-paths.json` 里没标 `after-merge` 的路径时，后台起 `second-opinion.mjs`，并在头变了时重起。它会改 `agents/` 下的钩子登记和 `agents/test/rules/` 钉子，属于「改标准」，等创始人点头；做成后省下的是「开 PR 到想起来跑」那段（目前我是开完 PR 就手动后台跑，实际没有空等，但换会话、换人这段会丢）。不接 CI：第二意见要本机登录好的 Mirasim，CI 里没有 |
 
 **停的依据**：到这里每一项要么已做、要么「每轮再省不到 5 秒」（tsc 缓存净省 3–4 秒、固定开销每步 1–4 秒、滞后 8 秒且在 GitHub 一侧）、要么「要改标准」（第二意见自动触发）、要么「要花钱」（更大的机器、付费功能：一律没碰）。主线一轮现在的下限是 lint 那台（约 35 秒）加 changes、check，命中同树复用时墙钟 54 秒；PR 一轮 30–90 秒。下一个能想到的办法（把 docs 并进别的 job、web 打包并进 lint、tsc 缓存）每轮都省不到 5 秒或增加假绿口子，按第二轮定下的停的标准不做；谁要重开，先 `pnpm ci:stats` 量。
+
+## 第四轮（母单 #901，创始人 2026-10-05「项目臃肿+ci流程慢」）
+
+数字、做法、量过没接的都在 `specs/901-项目瘦身与提速/CI耗时实测.md`。一句话：全量 PR 最慢的测试台是整轮的 84%，原因是耗时表过期（96 个新文件按 98 毫秒估），刷新后最慢台 87→75 秒；并行进程数、台内排序、Temporal 服务端下载都量了、没有收益；多个会话同时开 PR 时慢的是免费档 20 个并发槽排队和主线复用被「合并前主线又动过」打掉，不是单个 job。
 
 ## D 的细节（方案，已实现，见第 6 点）
 
