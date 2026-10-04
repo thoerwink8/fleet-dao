@@ -271,10 +271,20 @@ function secretUnder(rest, isSecret) {
   return parts.some((p) => p === '.' || p === '..') || isSecret(parts.map((p) => p.toLowerCase()));
 }
 
+/**
+ * Windows 那头碰 WSL 里的文件写成 \\wsl.localhost\<发行版>\…、\\wsl$\<发行版>\…（还有 \\?\UNC\ 打头的）：反斜杠换成 / 之后把这截换成 /，
+ * 剩下的就是 Linux 那头的路径。不换的话 /etc/fleet-dao 前面紧挨着发行版名，认不出来（Get-Content、Read 读得到里面的密钥）。
+ */
+const WSL_UNC_RE = /(?:\/[?.]\/unc)?\/wsl(?:\$|\.localhost)\/[^/\s'"\x60;|&()<>,]+/gi;
+
 /** 这段文字碰到了哪类密钥路径（给提示用的说法）；没碰到返回 null。反斜杠当路径分隔、再去掉转义和引号各看一遍 */
 export function secretMention(text) {
   const s = String(text);
-  for (const v of [s.replace(/\\/g, '/').replace(/\/{2,}/g, '/'), s.replace(/[\\'"\x60]/g, '')]) {
+  const slashed = s
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/')
+    .replace(WSL_UNC_RE, '/');
+  for (const v of [slashed, s.replace(/[\\'"\x60]/g, '')]) {
     for (const m of v.matchAll(RECLAUDE_RE)) {
       if (secretUnder(m.groups?.rest, (p) => p[0] === 'backups' || RECLAUDE_SECRETS.has(p.at(-1) ?? ''))) {
         return '~/.reclaude/ 里 reclaude 的设备密钥和账号';
@@ -558,13 +568,106 @@ const PREFIX_ARGS = {
   doas: opts('-u -C'),
 };
 const SH_NAMES = opts('bash sh zsh dash ksh ash');
-const PWSH_ARGS = opts(
-  '-executionpolicy -ex -ep -workingdirectory -wd -outputformat -of -o -inputformat -if -windowstyle -w -version -v -configurationname -config -custompipename -settingsfile',
-);
+/**
+ * pwsh、powershell 吃掉下一个词的开关：[全名, 最短能认的那截]（PowerShell 源码 CommandLineParameterParser.cs 的 MatchSwitch，
+ * pwsh 7.6 的 -? 对过）。开关名写全名的任一截前缀都算，只要不短于最短那截：-exec、-executionpolicy 都是 -ExecutionPolicy。
+ * -Version 在 pwsh 7 里打完版本就退出，按 Windows PowerShell 5.1 的 -Version 2 算它吃一个。
+ */
+const PWSH_VALUE_SWITCHES = [
+  ['version', 'v'],
+  ['configurationfile', 'configurationfile'],
+  ['configurationname', 'config'],
+  ['custompipename', 'cus'],
+  ['windowstyle', 'w'],
+  ['outputformat', 'o'],
+  ['of', 'o'],
+  ['inputformat', 'inp'],
+  ['if', 'if'],
+  ['executionpolicy', 'ex'],
+  ['ep', 'ep'],
+  ['encodedarguments', 'encodeda'],
+  ['ea', 'ea'],
+  ['settingsfile', 'settings'],
+  ['workingdirectory', 'wo'],
+  ['wd', 'wd'],
+  ['token', 'to'],
+  ['utctimestamp', 'utc'],
+];
+const PWSH_DASHES = new Set(['-', '–', '—', '―']);
+
+/** pwsh 的开关名（去掉前缀、小写）；不是开关返回 null。前缀 -、--、/ 和长横线（– — ―）都认（源码的 GetSwitchKey） */
+function pwshSwitchKey(v) {
+  const first = v[0];
+  if (first !== '/' && !PWSH_DASHES.has(first)) return null;
+  return v.slice(first !== '/' && v[1] === first ? 2 : 1).toLowerCase();
+}
 
 /**
- * 剥掉 sudo、env、xargs 这类前缀，拿到真正跑的命令：{ leaf }；ssh、bash -c、pwsh -Command、cmd /c 里的命令另算一条命令行：
- * { nested }；看不清：{ complex }。exclude 是不算「碰到」的词：ssh、scp 自己的选项（-i 指的钥匙是拿来用的，不打出来）和主机名。
+ * wsl.exe 自己的选项里吃掉下一个词的（`wsl --help`「运行 Linux 二进制文件的参数」「选项」两节，WSL 2.6.3 对过；区分大小写，
+ * 不认 -d=名字）。别的 - 开头的（--list、--export、--install……）是管理分发版的，或者 wsl 不认、报错退出：都不在 Linux 里跑命令。
+ */
+const WSL_ARGS = opts('-d --distribution --distribution-id -u --user --cd --shell-type');
+
+/**
+ * 一个词照 Windows 命令行的引法写回去（Git Bash、PowerShell 7 起 wsl.exe 时都这么引）：空的、带空白或双引号的套双引号，
+ * 里面的双引号前加反斜杠，紧挨在双引号前和词尾的反斜杠加倍
+ */
+function winQuote(v) {
+  if (v !== '' && !/[\s"]/.test(v)) return v;
+  return `"${v.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+}
+
+/**
+ * wsl 在 Linux 里跑的那条命令行：{ text, cd }（cd 是 --cd 后面那个词）；只开 shell、管理分发版、选项不对（wsl 报错退出）返回 null。
+ * WSL 2.6.3 实测：不写 -e 时（写了 -- 也一样）wsl 把后面原样交给 Linux 那头的 bash 重新切一遍，所以词按 Windows 的引法拼回去，
+ * 没套引号的词里的 ; | & 在那头照样生效（wsl -- printf %s 'a;echo' 跑了两条命令）；-e、--shell-type none 不经 shell、原样 exec，
+ * 拼成每个词各加单引号的一条，切回来还是那几个词。-e 后面的全是命令；头一个词是 ~ 等于 --cd ~。
+ */
+function wslRun(rest) {
+  let cd;
+  let exec = false;
+  let i = 0;
+  if (rest[0]?.value === '~') {
+    cd = rest[0];
+    i = 1;
+  }
+  while (i < rest.length) {
+    const v = rest[i].value;
+    if (v === '--' || v === '-e' || v === '--exec') {
+      exec ||= v !== '--';
+      i++;
+      break;
+    }
+    // --% 是 PowerShell 的「后面原样交出去」，不是 wsl 的选项
+    if (v === '--system' || v === '--%') {
+      i++;
+      continue;
+    }
+    if (!WSL_ARGS.has(v)) {
+      if (v.startsWith('-')) return null;
+      break;
+    }
+    const arg = rest[i + 1];
+    if (arg === undefined) return null;
+    if (v === '--cd') cd = arg;
+    if (v === '--shell-type') {
+      if (!['standard', 'login', 'none'].includes(arg.value)) return null;
+      exec = arg.value === 'none';
+    }
+    i += 2;
+  }
+  const words = rest.slice(i);
+  if (words.length === 0) return null;
+  const quote = exec ? (x) => `'${x.value.replace(/'/g, "'\\''")}'` : (x) => winQuote(x.value);
+  return { text: words.map(quote).join(' '), cd };
+}
+
+const joinValues = (words) => words.map((x) => x.value).join(' ');
+
+/**
+ * 剥掉 sudo、env、xargs 这类前缀，拿到真正跑的命令：{ leaf }；ssh、wsl、bash -c、pwsh -Command、cmd /c 里的命令另算一条命令行：
+ * { nested }（nested.cwd 是那条命令行在哪个目录跑：ssh 是那头的家目录，wsl 看 --cd，没写就是这头的会话目录）；看不清：{ complex }。
+ * exclude 是不算「碰到」的词：ssh、scp 自己的选项（-i 指的钥匙是拿来用的，不打出来）和主机名。
  */
 function unwrap(words) {
   const exclude = new Set();
@@ -600,7 +703,15 @@ function unwrap(words) {
       for (const x of rest.slice(0, at + 1)) exclude.add(x);
       const remote = rest.slice(at + 1);
       if (remote.length === 0) return { leaf: { name, args: rest, viaXargs }, exclude };
-      return { nested: { text: remote.map((x) => x.value).join(' '), kind: 'bash' }, name, exclude };
+      return { nested: { text: joinValues(remote), kind: 'bash', cwd: '~' }, name, exclude };
+    } else if (name === 'wsl') {
+      const run = wslRun(rest);
+      if (run === null) return { leaf: { name, args: rest, viaXargs }, exclude };
+      // --cd 进了放密钥的目录：后面按相对路径读的是哪个文件，钩子看不清（和 cd ~/.reclaude && cat device.json 一样）
+      if (run.cd && (secretMention(run.cd.raw) ?? secretMention(run.cd.value)) !== null) {
+        return { complex: 'wsl --cd 进了放密钥的目录', exclude };
+      }
+      return { nested: { text: run.text, kind: 'bash', cwd: run.cd?.value }, name, exclude };
     } else if (SH_NAMES.has(name)) {
       let i = 0;
       let dashC = false;
@@ -624,32 +735,36 @@ function unwrap(words) {
     } else if (name === 'pwsh' || name === 'powershell') {
       let i = 0;
       while (i < rest.length) {
-        const v = rest[i].value.toLowerCase();
-        if (/^-(?:e|ec|en|enc|enco|encod|encode|encoded\w*)$/.test(v))
-          return { complex: '-EncodedCommand', exclude };
-        if (
-          /^-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?$/.test(v) ||
-          (!v.startsWith('-') && name === 'powershell')
-        ) {
-          const from = v.startsWith('-') ? i + 1 : i;
-          const text = rest
-            .slice(from)
-            .map((x) => x.value)
-            .join(' ');
-          return { nested: { text, kind: 'powershell' }, name, exclude };
+        const key = pwshSwitchKey(rest[i].value);
+        // 不是开关：Windows PowerShell 5.1 把它连同后面的都当 -Command 的命令文字，pwsh 7 当 -File 的脚本
+        if (key === null) {
+          if (name !== 'powershell') break;
+          return { nested: { text: joinValues(rest.slice(i)), kind: 'powershell' }, name, exclude };
         }
-        if (!v.startsWith('-') || /^-f(?:ile)?$/.test(v)) break;
-        i += PWSH_ARGS.has(v) ? 2 : 1;
+        const is = (full, least) => key.length >= least.length && full.startsWith(key);
+        // -CommandWithArgs：只有紧跟的那个词是命令，后面的是它的 $args
+        if (is('commandwithargs', 'commandwithargs') || is('cwa', 'cwa')) {
+          const script = rest[i + 1];
+          if (script === undefined) return { complex: `${name} -CommandWithArgs 后面没有命令`, exclude };
+          return {
+            nested: { text: script.value, kind: 'powershell' },
+            name,
+            extra: rest.slice(i + 2),
+            exclude,
+          };
+        }
+        if (is('command', 'c')) {
+          return { nested: { text: joinValues(rest.slice(i + 1)), kind: 'powershell' }, name, exclude };
+        }
+        if (is('encodedcommand', 'e') || is('ec', 'e')) return { complex: '-EncodedCommand', exclude };
+        if (is('file', 'f')) break;
+        i += PWSH_VALUE_SWITCHES.some(([full, least]) => is(full, least)) ? 2 : 1;
       }
       return { leaf: { name, args: rest, viaXargs }, exclude };
     } else if (name === 'cmd') {
       const at = rest.findIndex((x) => /^\/[ck]$/i.test(x.value));
       if (at < 0) return { leaf: { name, args: rest, viaXargs }, exclude };
-      const text = rest
-        .slice(at + 1)
-        .map((x) => x.value)
-        .join(' ');
-      return { nested: { text, kind: 'shell' }, name, exclude };
+      return { nested: { text: joinValues(rest.slice(at + 1)), kind: 'shell' }, name, exclude };
     } else {
       if (name === 'scp' || name === 'sftp') {
         rest.forEach((x, i) => {
@@ -947,7 +1062,7 @@ function secretBlock(label, why) {
     [
       `fleet-guard：这条命令碰到了${label}${why ? `，又${why}` : ''}，按拦处理（密钥、令牌、口令的值不进对话）；${SECRET_WAY}。`,
       '碰到密钥文件只放行不读内容的：ls、stat、test、Test-Path、Get-Item 这类看在不在、看权限的，单独一条跑（别 cd 进去、别赋给变量、别套循环或 $( )）。',
-      `查看脚本认 JSON、env、PEM；别的机器上的文件：cat ${SHAPE} | ssh <机器> 'node --input-type=module - <文件>'。`,
+      `查看脚本认 JSON、env、PEM；别的机器上的文件：cat ${SHAPE} | ssh <机器> 'node --input-type=module - <文件>'；WSL 里的：cat ${SHAPE} | wsl -d <发行版> -- node --input-type=module - <文件>。`,
       '提交信息、PR 正文里要写这些路径：先用 Write 写进文件，再 -F / --body-file；在代码里搜这些名字用 Grep 工具。',
     ].join('\n'),
   );
@@ -1132,7 +1247,7 @@ const RISKY_TYPES = new Set(['json', 'jsonl', 'txt', 'yaml']);
 
 /** 搜的起点规整成 / 分隔、去掉 . 和 ..、末尾不带 /；相对路径接在 cwd 后面，cwd 也没有返回 null（看不出来） */
 function normRoot(p, cwd) {
-  let s = String(p).replace(/['"]/g, '').replace(/\\/g, '/');
+  let s = String(p).replace(/['"]/g, '').replace(/\\/g, '/').replace(WSL_UNC_RE, '/');
   if (!isAbsolutePath(s)) {
     if (!cwd) return null;
     s = `${String(cwd).replace(/['"]/g, '').replace(/\\/g, '/')}/${s}`;
@@ -1236,13 +1351,16 @@ function recursiveSearch(leaf, cwd) {
   return { roots: roots.length > 0 ? roots : [cwd], quiet, globs, types };
 }
 
-/** 命令行里有没有从上层目录往下递归搜、又要打出内容的；有返回 block。ssh 到别的机器上跑的，没写起点就是那头的家目录 */
+/**
+ * 命令行里有没有从上层目录往下递归搜、又要打出内容的；有返回 block。ssh 到别的机器上跑的，没写起点就是那头的家目录；
+ * wsl 里跑的按 --cd（没写就是这头的会话目录，WSL 把它换成 /mnt/<盘>/… 照用）
+ */
 function broadSearchLine(text, kind, cwd, depth) {
   if (depth > 4) return null;
   for (const c of scanCommand(text, kind).pipelines.flat()) {
     const u = unwrap(c.words);
     if (u.nested) {
-      const r = broadSearchLine(u.nested.text, u.nested.kind, u.name === 'ssh' ? '~' : cwd, depth + 1);
+      const r = broadSearchLine(u.nested.text, u.nested.kind, u.nested.cwd ?? cwd, depth + 1);
       if (r) return r;
       continue;
     }
