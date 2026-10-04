@@ -13,6 +13,7 @@ import {
   NEW_TASK_STATE,
   nextTaskPriority,
   RECENT_TERMINAL_MS,
+  segmentRunMatch,
   TERMINAL_TASK_STATES,
 } from '../src/task-logic.ts';
 
@@ -64,6 +65,30 @@ describe('任务共用判断', () => {
     expect(NEW_TASK_STATE).toBe('queued');
     expect(canStopTask('queued')).toBe(true);
     for (const s of ['running', 'done', 'stopped', 'failed', '']) expect(canStopTask(s)).toBe(false);
+  });
+
+  it('segmentRunMatch：记了任务号的只认任务号（别张任务的不收，哪怕 issue 号和工作流编号都碰巧对上）', () => {
+    const task = { id: 't1', issueNumber: 12, workflowId: 'task:a/b#12' };
+    expect(segmentRunMatch({ taskId: 't1' }, task)).toBe('task');
+    expect(
+      segmentRunMatch({ taskId: 't2', issueNumber: 12, workflowId: 'task:a/b#12' }, task),
+    ).toBeUndefined();
+    expect(segmentRunMatch({ taskId: null, issueNumber: 12, workflowId: 'task:a/b#12' }, task)).toBe(
+      'issueNumber',
+    );
+  });
+
+  it('segmentRunMatch：没记任务号的按 issue 号兜底，工作流编号不对、没记、任务那边算不出都不收', () => {
+    const task = { id: 't1', issueNumber: 12, workflowId: 'task:a/b#12' };
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12' }, task)).toBe('issueNumber');
+    expect(segmentRunMatch({ issueNumber: 13, workflowId: 'task:a/b#12' }, task)).toBeUndefined();
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:other/b#12' }, task)).toBeUndefined();
+    expect(segmentRunMatch({ issueNumber: 12 }, task)).toBeUndefined();
+    expect(segmentRunMatch({}, task)).toBeUndefined();
+    expect(
+      segmentRunMatch({ issueNumber: 12, workflowId: 'x' }, { ...task, workflowId: undefined }),
+    ).toBeUndefined();
+    expect(segmentRunMatch({ issueNumber: 12 }, { ...task, workflowId: undefined })).toBeUndefined();
   });
 
   it('isAutoDispatchUnchanged：有打开时刻 = 开着；要的状态和现在一样就不改', () => {

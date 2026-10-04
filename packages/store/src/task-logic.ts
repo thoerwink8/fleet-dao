@@ -38,6 +38,26 @@ export const isRequestUnchanged = (
 /** 只有排队中的才能停。 */
 export const canStopTask = (state: string): boolean => state === NEW_TASK_STATE;
 
+/**
+ * 一条三段流水算不算这张任务的：记了任务号的只认任务号（别张任务的不收）；没记任务号的老行按 issue 号兜底，还得工作流编号
+ * 对得上（没记工作流编号的分不出是哪个仓，不收——别的仓可能有同号的单）。回怎么对上的：task = 任务号对上，issueNumber = 兜底。
+ * pg 版把同样的筛法写在 SQL 里（packages/db 的 runsOfTask：task_id = 任务，或 task_id 为空且 issue 号、工作流编号都对上），
+ * 筛出来的行里 task_id 等于任务号的标 task、其余标 issueNumber；改这里要对着改那条 SQL。
+ */
+export function segmentRunMatch(
+  run: {
+    taskId?: string | null | undefined;
+    issueNumber?: number | null | undefined;
+    workflowId?: string | null | undefined;
+  },
+  task: { id: string; issueNumber: number; workflowId: string | undefined },
+): 'task' | 'issueNumber' | undefined {
+  if (run.taskId !== undefined && run.taskId !== null) return run.taskId === task.id ? 'task' : undefined;
+  if (run.issueNumber !== task.issueNumber) return undefined;
+  if (task.workflowId === undefined || run.workflowId !== task.workflowId) return undefined;
+  return 'issueNumber';
+}
+
 /** 开关要改成 on：现在已经是了（有打开时刻 = 开着）就不改、不记操作记录。 */
 export const isAutoDispatchUnchanged = (before: string | null, on: boolean): boolean =>
   (before !== null) === on;

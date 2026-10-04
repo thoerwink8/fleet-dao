@@ -104,6 +104,7 @@ import {
   keepOnBoard,
   NEW_TASK_STATE,
   nextTaskPriority,
+  segmentRunMatch,
 } from './task-logic.ts';
 
 export interface ProgressRecord {
@@ -672,11 +673,8 @@ export function createMemoryStore(
       const workflowId = repo ? taskWorkflowId(repo, task.issueNumber) : undefined;
       return data.segmentRuns
         .flatMap((r): SegmentRunRecord[] => {
-          if (r.taskId !== undefined) return r.taskId === taskId ? [{ ...r, matchedBy: 'task' }] : [];
-          if (r.issueNumber !== task.issueNumber) return [];
-          // 工作流编号没记的分不出是哪个仓的：不收（和 Postgres 版同一规矩）
-          if (workflowId === undefined || r.workflowId !== workflowId) return [];
-          return [{ ...r, matchedBy: 'issueNumber' }];
+          const matchedBy = segmentRunMatch(r, { id: taskId, issueNumber: task.issueNumber, workflowId });
+          return matchedBy === undefined ? [] : [{ ...r, matchedBy }];
         })
         .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
     },
