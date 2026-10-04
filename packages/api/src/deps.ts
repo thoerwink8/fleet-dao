@@ -2,6 +2,7 @@ import type { AlertWorkPort } from './alert-work.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
+import type { IntentStore } from './intent-store.ts';
 import type { ScryptParams } from './password.ts';
 import type {
   ChangeFeed,
@@ -32,6 +33,11 @@ export interface Deps {
   health: HealthCheck[];
   /** 飞书网关来没来过：飞书接口的门口验过通行证就记一笔，/healthz 的 feishu_gateway 读它。没给就不记（开发、多数测试）。 */
   gatewaySeen?: GatewaySeen | undefined;
+  /**
+   * 飞书群聊理成的意图（#553 第 4 条，intent-store.ts）：网关收原话、取意图卡都经它。没给的话网关的意图接口一律 503
+   * 「没接上」（原话没存，网关标「没记成」、之后补漏），不回 200 冒充存下了。
+   */
+  intents?: IntentStore | undefined;
   /**
    * 提醒谁在处理、修到哪（design 15.3，alert-work.ts）：驾驶舱提醒列表现算用。没给（开发、内存版）的提醒列表照样出，
    * 另写一句「谁在处理没接上」，不拿「没人在修」顶。

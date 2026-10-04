@@ -65,7 +65,7 @@ interface Am {
 const amOf = (m: ReturnType<typeof machine>): Am => m.settings().autoMode as Am;
 
 describe('装', () => {
-  it('没有设置文件：新建，permissions 四项和 autoMode 两档都写上，家目录占位符换成这台的家目录', () => {
+  it('没有设置文件：新建，permissions 四项、autoMode 两档、env 里的子代理默认模型都写上，家目录占位符换成这台的家目录', () => {
     const m = machine();
     expectKind(m.check(), KEY, 'missing');
     expectKind(m.apply(), KEY, 'changed');
@@ -76,10 +76,12 @@ describe('装', () => {
       deny: PERMS_SPEC.deny,
     });
     expect(amOf(m)).toEqual(PERMS_SPEC.autoMode);
+    expect(m.settings().env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
     expectKind(m.check(), KEY, 'ok');
+    expect(textOf(m.check())).toContain('env.CLAUDE_CODE_SUBAGENT_MODEL 是 claude-opus-5-5');
   });
 
-  it('设置文件里别的键、机器上自己加的 allow 都不动，已退役的摘掉', () => {
+  it('设置文件里别的键、机器上自己加的 allow、env 里别的变量都不动，已退役的摘掉', () => {
     const m = machine();
     put(
       m.home,
@@ -93,7 +95,11 @@ describe('装', () => {
     expectKind(m.apply(), KEY, 'changed');
     const s = m.settings();
     expect(s.model).toBe('x');
-    expect(s.env).toEqual({ HTTP_PROXY: 'a', http_proxy: 'b' });
+    expect(s.env).toEqual({
+      HTTP_PROXY: 'a',
+      http_proxy: 'b',
+      CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5',
+    });
     const p = s.permissions as Perm & { ask: string[] };
     expect(p.ask).toEqual(['Edit']);
     expect(p.allow).toEqual(['Bash(mine:*)', 'Read', 'Bash(git:*)']);
@@ -147,6 +153,30 @@ describe('装', () => {
     put(m.home, '.claude/settings.json', text);
     expectKind(m.apply(), KEY, 'changed');
     expect(amOf(m)).toEqual({ environment: ['机器上的'], allow: ['机器上的'] });
+  });
+
+  // 决定 0017：子代理只用 Opus 或 Sonnet。机器上被改成 Fable（谁改的都一样）：算漂移，改回仓里的
+  it('【故意造出的失败】机器上的子代理默认模型是 Fable：--check 报漂移，写的时候改回仓里的，别的变量不动', () => {
+    const m = machine();
+    m.apply();
+    const have = getJson(m.home, '.claude/settings.json') as { env: Record<string, string> };
+    have.env = { HTTP_PROXY: 'a', CLAUDE_CODE_SUBAGENT_MODEL: 'claude-fable-5-1' };
+    put(m.home, '.claude/settings.json', JSON.stringify(have));
+    const check = m.check();
+    expectKind(check, KEY, 'drift');
+    expect(textOf(check)).toContain(
+      'env.CLAUDE_CODE_SUBAGENT_MODEL 是 "claude-fable-5-1"，该是 claude-opus-5-5',
+    );
+    expectKind(m.apply(), KEY, 'changed');
+    expect(m.settings().env).toEqual({ HTTP_PROXY: 'a', CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
+    expectKind(m.check(), KEY, 'ok');
+  });
+
+  it('机器上的子代理默认模型是别的 Opus 或 Sonnet：也改回仓里的（全队一个规矩，要改先改仓里）', () => {
+    const m = machine();
+    put(m.home, '.claude/settings.json', JSON.stringify({ env: { CLAUDE_CODE_SUBAGENT_MODEL: 'sonnet' } }));
+    expectKind(m.apply(), KEY, 'changed');
+    expect(m.settings().env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
   });
 
   it('defaultMode 不一样：覆盖成仓里的', () => {
@@ -217,6 +247,11 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     expect(real.ok).toBe(true);
     if (!real.ok) return;
     expect(real.value.defaultMode).toBe('auto');
+  });
+
+  it('子代理默认模型是 Opus 5.5（决定 0017：子代理只用 Opus 或 Sonnet），env 里只有这一项', () => {
+    if (!real.ok) throw new Error(real.why);
+    expect(real.value.env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
   });
 
   it('创始人 2026-09-30 要的最宽松：shell 整个放开、没有 deny，旧的 9 条拒绝只摘不留', () => {
@@ -325,6 +360,8 @@ describe('读不懂就不动', () => {
   bad('autoMode 不是对象', '{"autoMode": []}', 'drift');
   bad('autoMode.environment 不是数组', '{"autoMode": {"environment": "x"}}', 'drift');
   bad('autoMode.allow 不是数组', '{"autoMode": {"allow": 3}}', 'drift');
+  bad('env 不是对象', '{"env": []}', 'drift');
+  bad('env 是字符串', '{"env": "CLAUDE_CODE_SUBAGENT_MODEL=opus"}', 'drift');
   // 机器上那一档在、却没带 "$defaults"：内置规则已经被整段换掉了，没有源文件也认得出，报出来、整份不动
   bad('机器上 autoMode.environment 没带 "$defaults"', '{"autoMode": {"environment": ["机器上的"]}}', 'drift');
 });
@@ -405,6 +442,29 @@ describe('仓里的源文件', () => {
       'autoMode.allow 里有空串',
       JSON.stringify({ ...PERMS_SPEC, autoMode: { ...PERMS_SPEC.autoMode, allow: ['$defaults', ''] } }),
     ],
+    // env：决定 0017「子代理只用 Opus 或 Sonnet」。少了子代理默认模型、值不是 Opus 或 Sonnet、多写没登记的变量都拒收，不替它补上
+    ['env 没写', JSON.stringify({ ...PERMS_SPEC, env: undefined })],
+    ['env 不是对象', JSON.stringify({ ...PERMS_SPEC, env: [] })],
+    ['env 里没有子代理默认模型', JSON.stringify({ ...PERMS_SPEC, env: {} })],
+    subagentModel('写成 Fable 的 id', 'claude-fable-5-1'),
+    subagentModel('写成 Fable 的别名', 'fable'),
+    subagentModel('写成 Fable 带 1M', 'fable[1m]'),
+    subagentModel('写成 Mythos', 'claude-mythos-5-1'),
+    subagentModel('写成 Haiku 的 id', 'claude-haiku-4-5'),
+    subagentModel('写成 Haiku 的别名', 'haiku'),
+    subagentModel('写成 inherit（等于不设，跟主会话走）', 'inherit'),
+    subagentModel('写成 best（指最强的那个，可能就是 Fable）', 'best'),
+    subagentModel('写成 opusplan（不是一个固定的模型）', 'opusplan'),
+    subagentModel('写成空串', ''),
+    subagentModel('两头带空格', ' claude-opus-5-5 '),
+    subagentModel('不是字符串', 5),
+    [
+      'env 里多写了同步工具没登记的变量',
+      JSON.stringify({
+        ...PERMS_SPEC,
+        env: { ...PERMS_SPEC.env, ANTHROPIC_BASE_URL: 'https://example.invalid' },
+      }),
+    ],
   ];
   for (const [name, text] of invalid) {
     it(`${name}：拒收，设置文件不碰`, () => {
@@ -415,4 +475,41 @@ describe('仓里的源文件', () => {
       expect(() => m.settings()).toThrow();
     });
   }
+
+  it('子代理默认模型是 Fable：拒收的原因写明「子代理只用 Opus 或 Sonnet」、指向决定 0017', () => {
+    const [, text] = subagentModel('Fable', 'claude-fable-5-1');
+    const parsed = parsePermissions(text, '/h');
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.why).toContain('子代理只用 Opus 或 Sonnet');
+      expect(parsed.why).toContain('决定 0017');
+    }
+  });
+
+  it('子代理默认模型认得的写法：opus、sonnet 别名，claude-opus-…、claude-sonnet-… 完整 id，可带 [1m]', () => {
+    for (const value of [
+      'opus',
+      'sonnet',
+      'opus[1m]',
+      'sonnet[1m]',
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-opus-5',
+      'claude-opus-5-5[1m]',
+      'claude-sonnet-4-5-20250929',
+    ]) {
+      const [, text] = subagentModel(value, value);
+      const parsed = parsePermissions(text, '/h');
+      expect(parsed.ok, value).toBe(true);
+      if (parsed.ok) expect(parsed.value.env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: value });
+    }
+  });
 });
+
+/** 源文件里子代理默认模型写成 value 的一份：[用例名, 源文件原文]（给上面的拒收清单和认得的写法用） */
+function subagentModel(name: string, value: unknown): [string, string] {
+  return [
+    `子代理默认模型${name}`,
+    JSON.stringify({ ...PERMS_SPEC, env: { CLAUDE_CODE_SUBAGENT_MODEL: value } }),
+  ];
+}

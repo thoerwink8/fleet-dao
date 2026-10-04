@@ -4,6 +4,8 @@
 // PowerShell 不管）；fleet-dao 开单走 pnpm issue:new；认不出的输入按拦处理；
 // 密钥文件的内容不进对话：碰到密钥路径只放行不读内容的（列目录、看权限、判断在不在），看结构走 secret-shape.mjs，
 // 它一个值都不打（2026-09-27 帅位按字段名猜着遮值，把 reclaude 的设备密钥和账号名打进了对话）。脚本改了这些判断，这里会红。
+// 命令的输出也带密钥：打印进程命令行（ps -ef、/proc/*/cmdline、Win32_Process、挑 CommandLine 那一列）时，进程的参数里
+// 常常带着口令，接上 redact-secrets.mjs 才放行（2026-10-02 lark-mcp 的 -s <secret> 就是这么漏的，创始人拍了加这条）。
 // 命令字符串拆开拼：免得跑这条测试的命令、或者有人 grep 它时，本机的护栏把自己拦下。
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,12 +22,28 @@ interface PretoolLib {
 interface ShapeLib {
   main(argv: string[], io: { out(line: string): void; err(line: string): void }): number;
 }
+interface RedactLib {
+  redactText(text: string): string;
+  redactLines(text: string): string;
+  hasSecretValue(text: string): boolean;
+}
+interface RedactCliLib {
+  main(
+    argv: string[],
+    io: { out(line: string): void; err(line: string): void },
+    readStdin?: () => string,
+  ): number;
+}
 
 const HOOKS = fileURLToPath(new URL('../../hooks/', import.meta.url));
 const HOOK = join(HOOKS, 'pretool.mjs');
 const SHAPE_SCRIPT = join(HOOKS, 'secret-shape.mjs');
+const REDACT_LIB = join(HOOKS, 'redact.mjs');
+const REDACT_CLI = join(HOOKS, 'redact-secrets.mjs');
 const lib = (await import(pathToFileURL(HOOK).href)) as PretoolLib;
 const shape = (await import(pathToFileURL(SHAPE_SCRIPT).href)) as ShapeLib;
+const redact = (await import(pathToFileURL(REDACT_LIB).href)) as RedactLib;
+const redactCli = (await import(pathToFileURL(REDACT_CLI).href)) as RedactCliLib;
 
 const s = `st${'ash'}`;
 const rc = `recl${'aude'}`;
@@ -816,5 +834,300 @@ describe('安全查看脚本 secret-shape.mjs：只打字段名、类型、长�
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('读不了');
     expect(missing.stdout).toBe('');
+  });
+});
+
+// —— 命令的输出里带密钥：打印进程命令行 ——
+// 进程的整条命令行是公开的（/proc/<pid>/cmdline、Win32_Process.CommandLine），把口令当参数交给别的进程之后，
+// 那句口令就躺在那里。「看现在有哪些进程」这种平常命令会把它们整段打出来（2026-10-02 就是这么漏的）。
+// 规矩：这类命令要接上 redact-secrets.mjs 才放行，不接的拦下；认不出的输入照旧按拦处理。
+const REDACT = '"$HOME/.fleet-dao/hooks/redact-secrets.mjs"';
+
+/** [说明, 命令, 该给的退出码, 工具名] */
+type ListingCase = [string, string, 0 | 2, string?];
+const listingCases: ListingCase[] = [
+  // 打印命令行的一律拦（不接管道）
+  ['ps -ef', 'ps -ef', 2],
+  ['ps aux', 'ps aux', 2],
+  ['ps -f', 'ps -f', 2],
+  ['ps -eo pid,args', 'ps -eo pid,args', 2],
+  ['ps -o pid,cmd', 'ps -o pid,cmd', 2],
+  ['ps --format pid,cmd', 'ps --format pid,cmd', 2],
+  ['ps -ef 接别的管道', 'ps -ef | grep node', 2],
+  ['ps -ef 写进文件', 'ps -ef > /tmp/procs.txt', 2],
+  ['ssh 到别的机器上 ps -ef', 'ssh fr "ps -ef"', 2],
+  ['读 /proc 的 cmdline', 'cat /proc/1234/cmdline', 2],
+  ['读 /proc 通配的 cmdline', 'cat /proc/*/cmdline', 2],
+  ['wmic 取进程命令行', 'wmic process get commandline', 2],
+  ['Win32_Process', 'Get-CimInstance Win32_Process', 2],
+  ['Win32_Process 挑 CommandLine 列', 'Get-CimInstance Win32_Process | Select-Object CommandLine', 2],
+  ['Get-Process 挑 CommandLine 列', 'Get-Process | Select-Object CommandLine', 2],
+  ['Grok 的终端（借道读这份钩子）', 'ps -ef', 2, 'run_terminal_command'],
+  ['Devin 的终端（借道读这份钩子）', 'ps aux', 2, 'exec'],
+  ['Cursor 的终端（借道读这份钩子）', 'cat /proc/1/cmdline', 2, 'Shell'],
+  // 接上 redactor 就放行（这就是给的那条明路）
+  ['ps -ef 接 redactor', `ps -ef | node ${REDACT}`, 0],
+  ['ps aux 接 redactor 再 grep', `ps aux | node ${REDACT} | grep lark`, 0],
+  ['管道中间的 grep 也接上 redactor', `ps -ef | grep node | node ${REDACT}`, 0],
+  [
+    'Win32_Process 挑列后接 redactor',
+    `Get-CimInstance Win32_Process | Select-Object CommandLine | node ${REDACT}`,
+    0,
+  ],
+  ['读 /proc 的 cmdline 接 redactor', `cat /proc/1/cmdline | node ${REDACT}`, 0],
+  ['ssh 那头接 redactor', `ssh fr "ps -ef | node ${REDACT}"`, 0],
+  ['redactor 直接读文件（文件里的进程列表）', `node ${REDACT} /tmp/procs.txt`, 0],
+  // 只列进程名和 pid 的：不打参数，放行
+  ['ps 不带参数只打自己那行', 'ps', 0],
+  ['ps -A 只列进程', 'ps -A', 0],
+  ['ps -l 长格式但不带命令行', 'ps -l', 0],
+  ['ps -eo pid,comm 只有程序名', 'ps -eo pid,comm', 0],
+  ['ps -e -o pid,comm 分开写', 'ps -e -o pid,comm', 0],
+  ['ps --format pid,comm', 'ps --format pid,comm', 0],
+  ['tasklist 不带 /v', 'tasklist', 0],
+  ['Get-Process 只打名字和 pid', 'Get-Process', 0],
+  ['列出 /proc 下的目录', 'ls -la /proc/1234/', 0],
+  ['wmic 取别的东西', 'wmic os get caption', 0],
+  ['ps 的输出接给 redactor 之外的地方也不算（ps 本身没打参数）', 'ps -eo pid,comm | wc -l', 0],
+  // 别的不受这条影响
+  ['grep -s 不是 ps -s', 'grep -s foo /etc/hosts', 0],
+  ['df、top 这类不看命令行', 'df -h', 0],
+];
+
+describe('打印进程命令行：不接 redactor 就拦，认不出的输入照旧拦', () => {
+  it.each(listingCases.map((c) => [c[0], c[2], c] as const))('%s → 退出码 %i', (_name, want, c) => {
+    const [, command, , tool = 'Bash'] = c;
+    const got = lib.decide(JSON.stringify({ tool_name: tool, tool_input: { command }, cwd: O }));
+    expect(got.code).toBe(want);
+    if (want === 2) {
+      const first = got.message?.split('\n')[0] ?? '';
+      expect(first).toContain('进程的命令行');
+      // 第一行就说清是什么错，接下来几行给照着敲的明路（Grok 只把第一行交给模型）
+      expect(got.message).toContain('redact-secrets.mjs');
+      expect(got.message).toContain('ps -ef | node');
+    }
+  });
+
+  it('拦下时给的那条命令，照着敲一遍确实放行（配方不是写着好看的）', () => {
+    const blocked = lib.decide(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ps -ef' }, cwd: O }),
+    );
+    const recipe = /^\s*(ps -ef \| node .+)$/m.exec(blocked.message ?? '')?.[1];
+    expect(recipe).toBeDefined();
+    expect(recipe).toContain('redact-secrets.mjs');
+    expect(
+      lib.decide(JSON.stringify({ tool_name: 'Bash', tool_input: { command: recipe }, cwd: O })).code,
+    ).toBe(0);
+  });
+
+  it('拿变量当命令的认不出（这一段的边界）：说不出是 ps 就不拦，但认不出的输入本身照旧拦', () => {
+    // 说明白：文本里看不到 ps 两个字，钩子看不出它要跑什么。这是这一段的边界，写在脚本注释里。
+    // 要紧的是「认不出 = 放行」不能蔓延到别处：输入不是 JSON、没有命令、工具名认不得，都还是拦。
+    const opaque = lib.decide(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'CMD=ps; $CMD -ef' }, cwd: O }),
+    );
+    expect(opaque.code).toBe(0);
+    expect(lib.decide(JSON.stringify({ tool_name: 'Bash', tool_input: {} })).code).toBe(2);
+    expect(lib.decide('不是 JSON').code).toBe(2);
+    expect(lib.decide(JSON.stringify({ tool_name: 'Edit', tool_input: { command: 'ps -ef' } })).code).toBe(2);
+  });
+});
+
+// —— redactor（agents/hooks/redact.mjs）：把命令行里的密钥值换成 *** ——
+// 接在打印进程命令行的命令后面，屏幕上就只剩打码后的样子。判的是「值有没有被换掉」，不是「换个猜法」：
+// 认不出的写法（变量展开出来的、编码过的）照样漏，说明写在脚本开头。
+// 夹具里的密钥一律带 FAKE：卫生检查按「值像不像真密钥」判，带这个词的就不算（packages/hygiene/src/rules.ts
+// 的 isFakeValue），不用往白名单里加条目。写成一个变量，下面每条夹具都拼它，别在字符串里重复写。
+const FAKE_SECRET = 'FAKEFeishuAppSecret0123456789abc'; // 32 个字符：和 2026-10-02 漏的那个飞书 app secret 一样长
+const CLI = `red${'act'}-secrets.mjs`;
+const FORMS: [string, string][] = [
+  ['-s VALUE', `node build/index.js -s FAKEFeishuAppSecret0123456789abc`],
+  ['--secret VALUE', 'app --secret FAKEFeishuAppSecret0123456789abc'],
+  ['--secret=VALUE', 'app --secret=FAKEFeishuAppSecret0123456789abc'],
+  ['--secret="VALUE"', 'app --secret="FAKEFeishuAppSecret0123456789abc"'],
+  ['-p VALUE', 'db --port 5432 -p FAKEpassword1'],
+  ['--token VALUE', 'curl --token ghp_FAKETOKEN0000000000 x'],
+  ['--password VALUE', 'mysql --password FAKEpassword2'],
+  ['--password=VALUE', 'mysql --password=FAKEpassword2'],
+  ['JSON 的 clientSecret', '{"app_id":"cli_x","clientSecret":"FAKEFeishuAppSecret0123456789abc"}'],
+  ['JSON 的 appSecret', '{"appSecret":"FAKEFeishuAppSecret0123456789abc"}'],
+  ['JSON 的 refresh_token', '{"refresh_token":"FAKErefreshToken00"}'],
+  ['JSON 的 password', '{"password":"FAKEpassword2"}'],
+  ['JSON 的 apiKey', '{"apiKey":"sk-rec-FAKE000000000000000000"}'],
+  ['JSON 的 privateKey', '{"privateKey":"-----BEGIN PRIVATE KEY-----"}'],
+];
+
+describe('redactor：把口令的值换成 ***，别的文字一个字不动', () => {
+  it.each(FORMS)('%s：值不出现，键名照旧', (_name, command) => {
+    const out = redact.redactText(command);
+    expect(out).not.toContain(FAKE_SECRET);
+    expect(out).not.toContain('FAKEpassword1');
+    expect(out).not.toContain('FAKEpassword2');
+    expect(out).toContain('***');
+    expect(redact.hasSecretValue(command)).toBe(true);
+  });
+
+  it('2026-10-02 那次的原样：lark-mcp 那行的 -s，32 个字符的密钥照样遮住', () => {
+    // 当时那套遮值只认 40 个字符以上的串（32 个字符的飞书 app secret 就过去了）
+    const line = 'node /opt/lark-mcp/build/index.js -s FAKEFeishuAppSecret0123456789abc';
+    expect(FAKE_SECRET.length).toBe(32);
+    const out = redact.redactText(line);
+    expect(out).toBe('node /opt/lark-mcp/build/index.js -s ***');
+  });
+
+  it('2026-09-30 那次的形状：JSON 里的 app secret 带引号也遮住', () => {
+    const line = '{"feishu":{"app_secret":"FAKEappSecret00","appId":"cli_x"}}';
+    const out = redact.redactText(line);
+    expect(out).toContain('"appId":"cli_x"');
+    expect(out).not.toContain('FAKEappSecret00');
+  });
+
+  it('整段 ps 输出过一遍：命令行还在，值没了', () => {
+    const line = [
+      'lark-mcp            4127     1  0 09:42 ?   00:00:12 node /opt/lark-mcp/build/index.js -s FAKEFeishuAppSecret0123456789abc',
+      'node                4200     1  0 09:42 ?   00:00:01 node /srv/api/dist/server.js --db-password FAKEpassword2',
+      'PostgreSQL          1204     1  0 08:10 ?   00:00:31 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main',
+    ].join('\n');
+    const out = redact.redactLines(line);
+    expect(out).not.toContain(FAKE_SECRET);
+    expect(out).not.toContain('FAKEpassword2');
+    // 进程名、pid、路径这些该看到的还在
+    expect(out).toContain('lark-mcp');
+    expect(out).toContain('4127');
+    expect(out).toContain('/srv/api/dist/server.js');
+    expect(out).toContain('/var/lib/postgresql/16/main');
+    // 行数不变（一行一行过，不该把行吃掉）
+    expect(out.split('\n').length).toBe(3);
+  });
+
+  it('没碰上的文字一个字不动', () => {
+    const lines = [
+      'ps -ef',
+      'ps aux --sort=-%mem',
+      'ps -p 1234 -o pid,cmd',
+      'ps -eo pid,comm',
+      'sort -S 2G x  # 大写的 -S 是 sort 自己的参数，不是 --secret',
+      'grep -P "a(b)c" x',
+      'python -p /usr/lib',
+      '-s /etc/fstab',
+      'timeout -s KILL 5 cmd',
+      'ls -p /usr/bin',
+      'tail -p 5 x',
+      'git log --oneline',
+      'a-s foo  # 词中间的 -s',
+      '{"key":"plain-value","name":"x"}  # 光叫 key 的不算',
+      '{"note":"the clientSecret is set in the env file"}  # 不在键名位置上',
+    ];
+    for (const line of lines) {
+      expect([line, redact.redactText(line)]).toEqual([line, line]);
+      expect([line, redact.hasSecretValue(line)]).toEqual([line, false]);
+    }
+  });
+
+  it('拿不准就遮：名字里带 secret / token / password 的参数一律遮，哪怕前缀长得像', () => {
+    // --secretly、--token-timeout 这类同前缀的参数：遮错一个的代价是屏幕上少几个字，
+    // 漏遮一个的代价是密钥进对话。判准写在 redact.mjs 的 FLAG_SECRET_WORD 上面。
+    expect(redact.redactText('look --secretly hidden')).toBe('look --secretly ***');
+    expect(redact.redactText('x --token-timeout 30')).toBe('x --token-timeout ***');
+    // 不带这几个词的参数一个不碰
+    expect(redact.redactText('x --verbose --timeout 30 --key-file a.pem')).toBe(
+      'x --verbose --timeout 30 --key-file a.pem',
+    );
+    // 命令里的注释也照遮：钩子不替调用者判哪一段是注释（遮多了比漏了好）
+    expect(redact.redactText('curl x  # 注释里写的 --secret abc')).toBe('curl x  # 注释里写的 --secret ***');
+  });
+
+  it('拿不准就遮：值不认识的短参数也遮（-p FAKEpassword1 这种遮了才对）', () => {
+    expect(redact.redactText('db -p FAKEpassword1')).toBe('db -p ***');
+    expect(redact.redactText('-s 8f3a91d2c4b7e6a0')).toBe('-s ***');
+  });
+
+  it('纯函数：同样的输入永远同样的输出，不改入参', () => {
+    const text = 'app --token abc123 -s xyz';
+    const once = redact.redactText(text);
+    expect(text).toBe('app --token abc123 -s xyz');
+    expect(redact.redactText(text)).toBe(once);
+    expect(redact.redactText(once)).toBe(once); // 已经打过码的再过一遍不会变（*** 里没有能再被打码的值）
+  });
+});
+
+describe('redactor 的命令行外壳：管道进、打码后的文字出；读不了就报失败', () => {
+  const run = (argv: string[], stdin?: string) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = redactCli.main(
+      argv,
+      { out: (l) => out.push(l), err: (l) => err.push(l) },
+      stdin === undefined ? undefined : () => stdin,
+    );
+    return { code, out: out.join('\n'), err: err.join('\n') };
+  };
+
+  it('不给文件就读标准输入：打码后打出来，退出码 0', () => {
+    const r = run([], `lark-mcp -s ${FAKE_SECRET}\n`);
+    expect(r.code).toBe(0);
+    expect(r.err).toBe('');
+    expect(r.out).toBe('lark-mcp -s ***\n');
+    expect(r.out).not.toContain(FAKE_SECRET);
+  });
+
+  it('标准输入读不成（编码坏掉）：退出码 1、明说原因，输出是空的（不拿空当「没有密钥」）', () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = redactCli.main([], { out: (l) => out.push(l), err: (l) => err.push(l) }, () => {
+      throw Object.assign(new Error('bad'), { code: 'EILSEQ' });
+    });
+    expect(code).toBe(1);
+    expect(err.join('\n')).toContain('EILSEQ');
+    expect(err.join('\n')).toContain('没打码');
+    expect(out).toEqual([]);
+  });
+
+  it('给了文件就读文件；读不了的文件明说、退出码 1', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'redact-'));
+    try {
+      const file = join(dir, 'ps.txt');
+      writeFileSync(file, `lark-mcp -s ${FAKE_SECRET}\n`);
+      const ok = run([file]);
+      expect(ok.code).toBe(0);
+      expect(ok.out).toContain('lark-mcp -s ***');
+      expect(ok.out).not.toContain(FAKE_SECRET);
+      const missing = run([join(dir, 'nope.txt')]);
+      expect(missing.code).toBe(1);
+      expect(missing.err).toContain('读不了');
+      expect(missing.out).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--help：说用法、退出码 2', () => {
+    const r = run(['--help']);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('用法');
+  });
+
+  // 同步起子进程：真起一个进程，管道那一路和上面一样（#264 的写法）
+  it('命令行外壳：真起一个进程，管道进、退出码 0', { timeout: 0 }, () => {
+    const r = spawnSync(process.execPath, [REDACT_CLI], {
+      input: `ps\nlark-mcp -s ${FAKE_SECRET}\n`,
+      encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('-s ***');
+    expect(r.stdout).not.toContain(FAKE_SECRET);
+  });
+
+  it('两个脚本都装进同一个目录（agents-sync 整份拷，targets.ts 的 HOOKS_DIR）', () => {
+    expect(existsSync(REDACT_LIB)).toBe(true);
+    expect(existsSync(REDACT_CLI)).toBe(true);
+    // 钩子给的那条配方里写的就是这个文件名
+    const blocked = lib.decide(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ps -ef' }, cwd: O }),
+    );
+    expect(blocked.message).toContain(CLI);
   });
 });

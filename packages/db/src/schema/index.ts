@@ -3,6 +3,7 @@ export * from './alerts.ts';
 export * from './catalog.ts';
 export * from './enums.ts';
 export * from './feishu.ts';
+export * from './intents.ts';
 export * from './ops.ts';
 export * from './runs.ts';
 export * from './work.ts';

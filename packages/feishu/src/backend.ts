@@ -23,6 +23,16 @@ import {
   FeishuReviseDraftResponse,
   FeishuRoutes,
   FeishuTaskLookupResponse,
+  IntentCardAckRequest,
+  IntentCardAckResponse,
+  type IntentCardAckSchema,
+  IntentCardsResponse,
+  IntentCursorsResponse,
+  IntentIntakeMessageRequest,
+  IntentIntakeMessageResponse,
+  IntentIntakeRecallRequest,
+  IntentIntakeRecallResponse,
+  IntentRoutes,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -48,6 +58,16 @@ export type OutboxItem = OutboxBatch['items'][number];
 export type OutboxAck = z.input<typeof FeishuOutboxAckRequest>['acks'][number];
 export type CardRecord = z.output<typeof FeishuCardRecordSchema>;
 export type CardKind = CardRecord['kind'];
+/** 意图（#553 第 4 条）：收原话、撤回、补漏游标、意图卡和回执，约定在 shared 的 intent-api.ts。 */
+export type IntakeMessage = z.input<typeof IntentIntakeMessageRequest>;
+export type IntakeResult = z.output<typeof IntentIntakeMessageResponse>;
+export type IntakeRecall = z.input<typeof IntentIntakeRecallRequest>;
+export type IntakeRecallResult = z.output<typeof IntentIntakeRecallResponse>;
+export type IntakeCursors = z.output<typeof IntentCursorsResponse>;
+export type IntentCardBatch = z.output<typeof IntentCardsResponse>;
+export type IntentCard = IntentCardBatch['items'][number];
+export type IntentCardAck = z.input<typeof IntentCardAckSchema>;
+export type IntentCardAckReport = z.output<typeof IntentCardAckResponse>;
 
 /**
  * unreachable = 连不上；timeout = 超时；aborted = 网关自己叫停（停机）；rejected = 4xx（带 code）；
@@ -143,6 +163,16 @@ export interface Backend {
   outbox(waitSeconds: number, signal?: AbortSignal): Promise<OutboxBatch>;
   ackOutbox(acks: OutboxAck[]): Promise<void>;
   putCard(record: CardRecord): Promise<void>;
+  /** 收原话：代表说这句话的那位创始人。没存成（连不上、超时、5xx、被拒）一律抛：调用方据此标「没记成」、标补漏。 */
+  intake(as: Acting, body: IntakeMessage, opts?: CallOptions): Promise<IntakeResult>;
+  /** 收撤回（飞书的撤回事件不带是谁撤的）。 */
+  intakeRecall(body: IntakeRecall, opts?: CallOptions): Promise<IntakeRecallResult>;
+  /** 补漏前问每个会话存到哪了；带 chatId 只问一个（没见过的回 known=false）。 */
+  intakeCursors(chatId?: string, opts?: CallOptions): Promise<IntakeCursors>;
+  /** 长轮询要发、要改的意图卡。读不了库后端回 503，这里抛，不当成「没有要发的」。 */
+  intentCards(waitSeconds: number, signal?: AbortSignal): Promise<IntentCardBatch>;
+  /** 意图卡的回执：按条处理，后端认不出的跳过（回 skipped 数）。 */
+  ackIntentCards(acks: IntentCardAck[]): Promise<IntentCardAckReport>;
 }
 
 export interface BackendOptions {
@@ -370,6 +400,42 @@ export function createBackend(options: BackendOptions): Backend {
         FeishuOkResponse,
       );
     },
+
+    intake: (as, body, opts) =>
+      call(
+        IntentRoutes.intakeMessage,
+        {
+          acting: as,
+          body: IntentIntakeMessageRequest.parse(body),
+          timeoutMs: opts?.timeoutMs,
+          signal: opts?.signal,
+        },
+        IntentIntakeMessageResponse,
+      ),
+
+    intakeRecall: (body, opts) =>
+      call(
+        IntentRoutes.intakeRecall,
+        { body: IntentIntakeRecallRequest.parse(body), timeoutMs: opts?.timeoutMs, signal: opts?.signal },
+        IntentIntakeRecallResponse,
+      ),
+
+    intakeCursors: (chatId, opts) =>
+      call(
+        IntentRoutes.cursors,
+        { query: { chatId }, timeoutMs: opts?.timeoutMs, signal: opts?.signal },
+        IntentCursorsResponse,
+      ),
+
+    intentCards: (waitSeconds, signal) =>
+      call(
+        IntentRoutes.cards,
+        { query: { waitSeconds }, timeoutMs: waitSeconds * 1000 + 10_000, signal },
+        IntentCardsResponse,
+      ),
+
+    ackIntentCards: (acks) =>
+      call(IntentRoutes.ackCards, { body: IntentCardAckRequest.parse({ acks }) }, IntentCardAckResponse),
   };
 }
 
