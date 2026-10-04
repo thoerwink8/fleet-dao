@@ -79,6 +79,77 @@ export interface GitHubReleaser {
   closeMilestone(n: number): Promise<MilestoneDetail>;
 }
 
+/** 远端的一条分支。 */
+export interface RemoteBranch {
+  name: string;
+  /** 分支头（40 位）。 */
+  sha: string;
+  protected: boolean;
+}
+
+/** 一个 PR 的头和目标分支（分支体检判「有没有开着的 PR」「合并时的头是不是现在的头」用）。 */
+export interface PullHead {
+  number: number;
+  state: 'open' | 'closed';
+  /** 合并过（merged_at 有值）。 */
+  merged: boolean;
+  headRef: string;
+  /** 合并的、关掉的 PR，这是它最后的头（GitHub 留在 refs/pull/N/head）。 */
+  headSha: string;
+  /** 头分支所在的仓（owner/名字）；fork 被删了是 null。 */
+  headRepo: string | null;
+  baseRef: string;
+}
+
+/** 一张开着的单或 PR：标题、正文、评论（分支体检查「有没有被提到」用）、谁开的（认巡检单用）。 */
+export interface OpenThread {
+  number: number;
+  isPr: boolean;
+  title: string;
+  body: string;
+  comments: string[];
+  /** 开单的人（login）；账号没了是 null。 */
+  author: string | null;
+  /** 开单的人和仓的关系（OWNER、MEMBER、COLLABORATOR、CONTRIBUTOR、NONE…）。 */
+  association: string;
+}
+
+/** GitHub 动态记录里一条分支的一次推送、新建、删除（/activity）。 */
+export interface BranchActivity {
+  /** ISO 时间。 */
+  timestamp: string;
+  /** push、force_push、branch_creation、branch_deletion、pr_merge…… */
+  type: string;
+  /** 谁干的（login）；账号没了是 null。 */
+  actor: string | null;
+}
+
+/** 分支体检（#769）读写 GitHub：列分支和 PR、读开着的单和评论、读动态、删分支、维护巡检单。 */
+export interface GitHubBranches {
+  /** 仓的默认分支名。 */
+  defaultBranch(): Promise<string>;
+  branches(): Promise<RemoteBranch[]>;
+  /** 开着的 PR（fork 来的也在内）。 */
+  openPulls(): Promise<PullHead[]>;
+  /**
+   * 头是本仓这条分支的 PR（开着的、关了的、合了的）。按分支查，不一次列全部 PR：全部 PR 一天几十个地涨，
+   * 几个月就翻过 50 页的上限，整轮就读不成了。
+   */
+  pullsForHead(branch: string): Promise<PullHead[]>;
+  /** 开着的单和开着的 PR，带标题、正文和全部评论。 */
+  openThreads(): Promise<OpenThread[]>;
+  /** 这条分支最近的动态（新的在前，最多 100 条）；没有记录是空列表。 */
+  activity(branch: string): Promise<BranchActivity[]>;
+  /** 这条分支现在的头；分支不在了回 undefined。 */
+  branchHead(branch: string): Promise<string | undefined>;
+  /** 删这条分支；回 false = 删的时候它已经不在了。 */
+  deleteBranch(branch: string): Promise<boolean>;
+  /** 开一张单，回号。 */
+  createIssue(title: string, body: string, labels: string[]): Promise<number>;
+  /** 改一张单的正文。 */
+  updateIssueBody(n: number, body: string): Promise<void>;
+}
+
 type Env = Record<string, string | undefined>;
 
 /** 仓名：GITHUB_REPOSITORY（Actions 里有），没有就从 origin 的地址认。认不出返回 undefined。 */
@@ -126,7 +197,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter & GitHubReleaser {
+): GitHubReader & GitHubCommenter & GitHubReleaser & GitHubBranches {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -183,6 +254,26 @@ export function liveGitHub(
     return all;
   };
 
+  const readComments = async (n: number): Promise<string[]> => {
+    const rows = await pages(`/repos/${repo}/issues/${n}/comments?per_page=100`, ` #${n} 的留言`);
+    return rows.map((r) => {
+      if (!isObject(r) || typeof r.body !== 'string')
+        throw new Error(`读 #${n} 的留言，有一条认不出（body）`);
+      return r.body;
+    });
+  };
+
+  const branchHead = async (branch: string): Promise<string | undefined> => {
+    const what = ` ${branch} 的分支头`;
+    const res = await get(`/repos/${repo}/git/ref/heads/${encRef(branch)}`);
+    if (res.status === 404) return undefined;
+    if (!res.ok) throw failed(res, what);
+    const data = await json(res, what);
+    const sha = isObject(data) && isObject(data.object) ? data.object.sha : undefined;
+    if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error(`读${what}，认不出（object.sha）`);
+    return sha;
+  };
+
   return {
     async openIssues() {
       const rows = await pages(`/repos/${repo}/issues?state=open&per_page=100`, '开着的 issue');
@@ -208,14 +299,7 @@ export function liveGitHub(
       const rows = await pages(`/repos/${repo}/issues/${n}/sub_issues?per_page=100`, what);
       return rows.map((r) => toPlanIssue(r, what));
     },
-    async comments(n) {
-      const rows = await pages(`/repos/${repo}/issues/${n}/comments?per_page=100`, ` #${n} 的留言`);
-      return rows.map((r) => {
-        if (!isObject(r) || typeof r.body !== 'string')
-          throw new Error(`读 #${n} 的留言，有一条认不出（body）`);
-        return r.body;
-      });
-    },
+    comments: readComments,
     async comment(n, body) {
       const res = await get(`/repos/${repo}/issues/${n}/comments`, {
         method: 'POST',
@@ -247,6 +331,165 @@ export function liveGitHub(
       if (!res.ok) throw failed(res, `在关里程碑 #${n} 时`);
       return toMilestoneDetail(await json(res, `关里程碑 #${n} 的回包`));
     },
+    async defaultBranch() {
+      const res = await get(`/repos/${repo}`);
+      if (!res.ok) throw failed(res, '仓的设置');
+      const data = await json(res, '仓的设置');
+      if (!isObject(data) || typeof data.default_branch !== 'string' || !data.default_branch) {
+        throw new Error('读仓的设置，认不出（default_branch）');
+      }
+      return data.default_branch;
+    },
+    async branches() {
+      const what = '远端分支';
+      const rows = await pages(`/repos/${repo}/branches?per_page=100`, what);
+      return rows.map((r) => {
+        if (!isObject(r) || typeof r.name !== 'string' || !r.name)
+          throw new Error(`读${what}，有一条认不出（name）`);
+        const sha = isObject(r.commit) ? r.commit.sha : undefined;
+        if (typeof sha !== 'string' || !SHA.test(sha))
+          throw new Error(`读${what}，${r.name} 认不出（commit.sha）`);
+        if (typeof r.protected !== 'boolean') throw new Error(`读${what}，${r.name} 认不出（protected）`);
+        return { name: r.name, sha, protected: r.protected };
+      });
+    },
+    async openPulls() {
+      const rows = await pages(`/repos/${repo}/pulls?state=open&per_page=100`, '开着的 PR');
+      return rows.map((r) => toPullHead(r, '开着的 PR'));
+    },
+    async pullsForHead(branch) {
+      const owner = repo.split('/')[0];
+      const what = ` ${branch} 的 PR`;
+      const rows = await pages(
+        `/repos/${repo}/pulls?state=all&head=${owner}:${encodeURIComponent(branch)}&per_page=100`,
+        what,
+      );
+      const found = rows.map((r) => toPullHead(r, what));
+      // head 过滤要是被 GitHub 忽略了（参数写错、接口变了），回来的就是别的分支的 PR：认不出，不拿它判
+      if (found.some((p) => p.headRef !== branch)) throw new Error(`读${what}，回来的 PR 头不是这条分支`);
+      return found;
+    },
+    async openThreads() {
+      const what = '开着的单和 PR';
+      const rows = await pages(`/repos/${repo}/issues?state=open&per_page=100`, what);
+      const threads: OpenThread[] = [];
+      for (const r of rows) {
+        const i = toIssue(r, what);
+        if (i.body === undefined) throw new Error(`读${what}，#${i.number} 认不出（body）`);
+        // 接口给了评论数且是 0 就不再去读（省一次请求）；给的不是数就照读，不猜。
+        const count = isObject(r) && typeof r.comments === 'number' ? r.comments : undefined;
+        // 开单的人认不出就抛：巡检单只认仓里的人或 Actions 开的，猜错了就会照外人写的勾删分支
+        const user = isObject(r) ? r.user : undefined;
+        const author =
+          user === null ? null : isObject(user) && typeof user.login === 'string' ? user.login : undefined;
+        const association = isObject(r) ? r.author_association : undefined;
+        if (author === undefined || typeof association !== 'string') {
+          throw new Error(`读${what}，#${i.number} 认不出（user、author_association）`);
+        }
+        const comments = count === 0 ? [] : await readComments(i.number);
+        threads.push({
+          number: i.number,
+          isPr: i.isPr,
+          title: i.title,
+          body: i.body,
+          comments,
+          author,
+          association,
+        });
+      }
+      return threads;
+    },
+    async activity(branch) {
+      const what = ` ${branch} 的动态`;
+      const ref = encodeURIComponent(`refs/heads/${branch}`);
+      const res = await get(`/repos/${repo}/activity?ref=${ref}&per_page=100`);
+      if (!res.ok) throw failed(res, what);
+      const data = await json(res, what);
+      if (!Array.isArray(data)) throw new Error(`读${what}，读回来的不是列表`);
+      return data.map((r) => {
+        if (!isObject(r) || !isTime(r.timestamp) || typeof r.activity_type !== 'string') {
+          throw new Error(`读${what}，有一条认不出（timestamp、activity_type）`);
+        }
+        const actor =
+          r.actor === null
+            ? null
+            : isObject(r.actor) && typeof r.actor.login === 'string'
+              ? r.actor.login
+              : undefined;
+        if (actor === undefined) throw new Error(`读${what}，有一条认不出（actor）`);
+        return { timestamp: r.timestamp, type: r.activity_type, actor };
+      });
+    },
+    branchHead,
+    async deleteBranch(branch) {
+      const res = await get(`/repos/${repo}/git/refs/heads/${encRef(branch)}`, { method: 'DELETE' });
+      if (res.status === 204) return true;
+      if (res.status === 404) return false;
+      // 422 也可能是「不让删」（规则集挡着）：回读一下，真不在了才算「本来就没了」，还在就照报没删成。
+      if (res.status === 422 && (await branchHead(branch)) === undefined) return false;
+      throw failed(res, `在删分支 ${branch} 时`);
+    },
+    async createIssue(title, body, labels) {
+      const res = await get(`/repos/${repo}/issues`, {
+        method: 'POST',
+        body: JSON.stringify({ title, body, labels }),
+      });
+      if (res.status !== 201) throw failed(res, '在开单时');
+      const data = await json(res, '开单的回包');
+      if (!isObject(data) || typeof data.number !== 'number')
+        throw new Error('读开单的回包，认不出（number）');
+      return data.number;
+    },
+    async updateIssueBody(n, body) {
+      const res = await get(`/repos/${repo}/issues/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ body }),
+      });
+      if (!res.ok) throw failed(res, `在改 #${n} 的正文时`);
+    },
+  };
+}
+
+const SHA = /^[0-9a-f]{40}$/;
+
+/** 分支名放进网址：按 / 分段各自转义（分支名里可以有 /）。 */
+function encRef(branch: string): string {
+  return branch.split('/').map(encodeURIComponent).join('/');
+}
+
+/** 接口回来的一个 PR，只取头、目标分支和状态；缺字段、认不出就抛，不猜（漏认一个开着的 PR 会把它的分支删掉）。 */
+export function toPullHead(raw: unknown, what = 'PR'): PullHead {
+  const bad = (field: string) => new Error(`读${what}，有一条认不出（${field}）`);
+  if (!isObject(raw)) throw bad('不是对象');
+  const { number, state, merged_at, head, base } = raw;
+  if (typeof number !== 'number') throw bad('number');
+  if (state !== 'open' && state !== 'closed') throw bad(`#${number} 的 state`);
+  if (!('merged_at' in raw) || (merged_at !== null && !isTime(merged_at)))
+    throw bad(`#${number} 的 merged_at`);
+  if (
+    !isObject(head) ||
+    typeof head.ref !== 'string' ||
+    typeof head.sha !== 'string' ||
+    !SHA.test(head.sha)
+  ) {
+    throw bad(`#${number} 的 head`);
+  }
+  const headRepo =
+    head.repo === null
+      ? null
+      : isObject(head.repo) && typeof head.repo.full_name === 'string'
+        ? head.repo.full_name
+        : undefined;
+  if (headRepo === undefined) throw bad(`#${number} 的 head.repo`);
+  if (!isObject(base) || typeof base.ref !== 'string') throw bad(`#${number} 的 base`);
+  return {
+    number,
+    state,
+    merged: merged_at !== null,
+    headRef: head.ref,
+    headSha: head.sha,
+    headRepo,
+    baseRef: base.ref,
   };
 }
 
