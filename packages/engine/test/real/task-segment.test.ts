@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { RouteLaunchFacts } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
@@ -627,6 +628,147 @@ describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
     const plain = rig({ driverRun: async () => report() });
     await plain.run(plain.input(), ctx());
     expect(plain.specs[0]?.prompt).not.toContain('上一次跑到一半被停下了');
+  });
+});
+
+describe('发布排空看得见动手会话（#957）', { timeout: 60_000 }, () => {
+  const DEADLINE = '到了发布宽限的截止';
+  const aborted = (signal: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      if (signal.aborted) return resolve();
+      signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+  /** 起一段会话、等它进了「在跑」。 */
+  async function startedSegment(over: Parameters<typeof rig>[0] = {}) {
+    const drain = createEngineDrain();
+    const sessions = oneShotSessions({ drain });
+    let resolveStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const r = rig({
+      ...over,
+      deps: { sessions, ...over.deps },
+      driverRun:
+        over.driverRun ??
+        (async (_spec, hooks) => {
+          resolveStarted();
+          await aborted(hooks.signal as AbortSignal);
+          return report({ facts: { exitCode: null, killed: 'aborted', quotaExhausted: false } });
+        }),
+    });
+    const pending = r.run(r.input(), ctx());
+    // 先挂上，不让没人接的拒绝报成未处理
+    pending.catch(() => undefined);
+    await started;
+    return { drain, sessions, r, pending };
+  }
+
+  it('动手会话在跑时，排空报「还有 1 个」（带阶段、单、在跑）；到截止停下它，这一段交回 org_switch，清单走空，排空 empty', async () => {
+    const { drain, sessions, pending } = await startedSegment();
+    expect(drain.inFlight()).toEqual([
+      expect.objectContaining({ runId: 'run-0002', stage: 'execute', taskId: TASK_ID, phase: 'running' }),
+    ]);
+    // 发布来了、已经过了截止：排空照在途清单等；停会话（drain-control 到点调的那一路）
+    drain.cordon({ source: 'release', since: 'x', until: new Date(0).toISOString(), why: '发布 aaaa' });
+    const seen: number[] = [];
+    const ended = await waitDrained(drain, {
+      stopSessions: (why) => sessions.drainStop(why),
+      forced: () => false,
+      pollMs: 5,
+      onTick: (waiting) => seen.push(waiting.length),
+    });
+    expect(seen[0]).toBe(1);
+    expect(ended).toEqual({ end: 'empty', left: [] });
+    expect(await pending).toMatchObject({
+      ok: false,
+      outcome: 'org_switch',
+      evidence: { code: 'org_switch' },
+    });
+    expect(drain.inFlight()).toEqual([]);
+  });
+
+  it('没到截止：排空不放行（waitDrained 一直等，只报「还有 1 个」），会话没被动', async () => {
+    const { drain, sessions } = await startedSegment();
+    drain.cordon({
+      source: 'release',
+      since: 'x',
+      until: new Date(Date.now() + 3_600_000).toISOString(),
+      why: '发布',
+    });
+    let stopCalls = 0;
+    let ticks = 0;
+    const waiting = waitDrained(drain, {
+      stopSessions: (why) => {
+        stopCalls += 1;
+        return sessions.drainStop(why);
+      },
+      forced: () => ticks >= 3,
+      pollMs: 5,
+      onTick: () => {
+        ticks += 1;
+      },
+    });
+    expect(await waiting).toMatchObject({
+      end: 'forced',
+      left: [expect.objectContaining({ stage: 'execute' })],
+    });
+    expect(stopCalls).toBe(0);
+    expect(drain.inFlight()).toHaveLength(1);
+    sessions.drainStop(DEADLINE);
+  });
+
+  it('【故意造出的失败】会话抛错、被叫停、没起会话：登记一定撤掉，不泄漏成永远排不空', async () => {
+    // 抛错：驱动自己炸了
+    const drain = createEngineDrain();
+    const sessions = oneShotSessions({ drain });
+    const thrown = rig({
+      deps: { sessions },
+      driverRun: async () => {
+        throw new Error('驱动炸了');
+      },
+    });
+    await expect(thrown.run(thrown.input(), ctx())).rejects.toBeDefined();
+    expect(drain.inFlight()).toEqual([]);
+
+    // 工作流放弃（ctx.signal 响了）
+    const stop = new AbortController();
+    const d2 = createEngineDrain();
+    const s2 = oneShotSessions({ drain: d2 });
+    const abandoned = rig({
+      deps: { sessions: s2 },
+      driverRun: async (_spec, hooks) => {
+        stop.abort(new Error('任务被放弃'));
+        await aborted(hooks.signal as AbortSignal);
+        return report({ facts: { exitCode: null, killed: 'aborted', quotaExhausted: false } });
+      },
+    });
+    await expect(abandoned.run(abandoned.input(), ctx(stop.signal))).rejects.toBeDefined();
+    expect(d2.inFlight()).toEqual([]);
+
+    // 路由用不了：还没起会话就抛
+    const d3 = createEngineDrain();
+    const noRoute = rig({ route: null, deps: { sessions: oneShotSessions({ drain: d3 }) } });
+    await expect(noRoute.run(noRoute.input(), ctx())).rejects.toMatchObject({
+      code: 'SEGMENT_ROUTE_UNUSABLE',
+    });
+    expect(d3.inFlight()).toEqual([]);
+  });
+
+  it('已经在排空时才轮到这一段：不起会话（没动 Spawner），回 org_switch，登记走掉', async () => {
+    const drain = createEngineDrain();
+    drain.cordon({
+      source: 'release',
+      since: 'x',
+      until: new Date(Date.now() + 600_000).toISOString(),
+      why: '发布 aaaa',
+    });
+    const r = rig({ deps: { sessions: oneShotSessions({ drain }) } });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ ok: false, outcome: 'org_switch', evidence: { code: 'org_switch' } });
+    expect((got as { evidence: { message: string } }).evidence.message).toContain('要发新版本');
+    expect(r.specs).toHaveLength(0);
+    expect(drain.inFlight()).toEqual([]);
   });
 });
 

@@ -7,6 +7,7 @@ import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { RouteLaunchFacts } from '@fleet-dao/db';
 import type { PullFacts } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../../src/ports.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
@@ -525,6 +526,66 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     expect(stopped).toHaveLength(1);
     expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([[stopped[0], 'org_switch']]);
     expect(sessions.live(new Set(['pool-gpt']))).toEqual([]);
+  });
+});
+
+describe('发布排空看得见验收会话（#957）', { timeout: 30_000 }, () => {
+  const abortable = (signal: AbortSignal) =>
+    new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+
+  it('验收会话在跑时，排空报「还有 1 个」（review 阶段、这张单、在跑）；到截止停下它，回 retry、不贴 failure，清单走空', async () => {
+    const drain = createEngineDrain();
+    const sessions = oneShotSessions({ drain });
+    let resolveStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const r = rig({
+      picks: { gpt: okRoute('gpt') },
+      deps: { sessions },
+      driverRun: async (_spec, hooks) => {
+        resolveStarted();
+        await abortable(hooks.signal as AbortSignal);
+        return report('', {
+          facts: { exitCode: null, killed: 'aborted', quotaExhausted: false } as RunFacts,
+        });
+      },
+    });
+    const pending = r.run(r.input(), ctx());
+    pending.catch(() => undefined);
+    await started;
+    expect(drain.inFlight()).toEqual([
+      expect.objectContaining({ stage: 'review', taskId: TASK_ID, phase: 'running' }),
+    ]);
+    drain.cordon({ source: 'release', since: 'x', until: new Date(0).toISOString(), why: '发布 aaaa' });
+    const seen: number[] = [];
+    const ended = await waitDrained(drain, {
+      stopSessions: (why) => sessions.drainStop(why),
+      forced: () => false,
+      pollMs: 5,
+      onTick: (waiting) => seen.push(waiting.length),
+    });
+    expect(seen[0]).toBe(1);
+    expect(ended).toEqual({ end: 'empty', left: [] });
+    const got = await pending;
+    expect(got).toMatchObject({ pass: false, problems: [], retry: { wait: 'slot' } });
+    expect(got.unavailable).toBeUndefined();
+    expect(r.posted.map((p) => p.state)).not.toContain('failure');
+    expect(r.recorded.map((x) => x.outcome)).toEqual(['org_switch']);
+    expect(drain.inFlight()).toEqual([]);
+  });
+
+  it('【故意造出的失败】验收会话抛错：登记一定撤掉，不泄漏成永远排不空', async () => {
+    const drain = createEngineDrain();
+    const r = rig({
+      picks: { gpt: okRoute('gpt') },
+      deps: { sessions: oneShotSessions({ drain }) },
+      driverRun: async () => {
+        throw new Error('驱动炸了');
+      },
+    });
+    await r.run(r.input(), ctx()).catch(() => undefined);
+    expect(drain.inFlight()).toEqual([]);
   });
 });
 

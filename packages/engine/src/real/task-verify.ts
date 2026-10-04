@@ -202,7 +202,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     let ticket: OneShotTicket | undefined;
     // 挑中路由时补上切号叫停的信号（挑之前不知道跑在哪个池）
     const oneShot: OneShotDeps = {
-      spawn: (cmd) => spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) }),
+      spawn: (cmd) => {
+        ticket?.running();
+        return spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) });
+      },
       ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
       tmpDir: deps.runsDir,
       runs: deps.runs,
@@ -277,7 +280,11 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           const runId = randomUUID();
           if (deps.sessions) {
             ticket?.leave();
-            ticket = deps.sessions.enter({ poolId: route.poolId });
+            ticket = deps.sessions.enter({
+              poolId: route.poolId,
+              stage: SEGMENT_STAGE.verify,
+              taskId: input.taskId,
+            });
             ticket.attempt(runId);
             oneShot.stop = ticket.signal;
           }
