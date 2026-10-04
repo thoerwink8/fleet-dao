@@ -929,10 +929,20 @@ bash deploy/local/install.sh --check                     # 装机读回：跑法
 3. 引擎没有 GitHub 机器人的凭据时，预期是：`fleet-engine` 照样起、接 Temporal 的任务队列（健康检查这一项照样过），但 GitHub 相关的（收 webhook、写 PR 镜像）记不到、健康页 `github_events` 报红——这是「待配」的自然结果，不是装机脚本的错，配好凭据、重启 `fleet-api` 就好（这一条是照代码读出来的预期，#451 因为上面第 1 条还没能在真机上跑到这一步、实测验证）。这台 2026-10-04 是先放好凭据再发的第一版（#452），`github_app` 一项第一次起来就是好的。
 4. 接 GitHub 的两样、演练仓的接活开关（发完第一版、库里有表之后；第九节「接 GitHub 要齐两样」，法国当初也是这样手工 SQL 加的，没有脚本），以 root 跑，已有的不动：
    - 两个机器人各一行 `role = 'bot'`，编号是 `<App 的 slug>[bot]` 这个账号的编号（不是 App 编号，`gh api 'users/<slug>[bot]' --jq .id` 查），本机档用自己的 App，和法国的不一样：
-     `runuser -u fleet -- psql -d fleet -c "insert into users (display_name, role, github_login, github_id) values ('fleet-local-canary-engine[bot]', 'bot', 'fleet-local-canary-engine[bot]', 337539092) on conflict (github_id) do nothing"`，干活的那个照样一行（`fleet-local-canary-agent[bot]`，337539992）。「引擎」那一行就是巡检单的作者白名单（第五节「全流程巡检」要配齐的第 4 条：不在，拉单不拉、断在收单）；干活的开的 PR 也按这张表认。
+
+     ```
+     runuser -u fleet -- psql -d fleet -c "insert into users (display_name, role, github_login, github_id) values ('fleet-local-canary-engine[bot]', 'bot', 'fleet-local-canary-engine[bot]', 337539092) on conflict (github_id) do nothing"
+     runuser -u fleet -- psql -d fleet -c "insert into users (display_name, role, github_login, github_id) values ('fleet-local-canary-agent[bot]', 'bot', 'fleet-local-canary-agent[bot]', 337539992) on conflict (github_id) do nothing"
+     ```
+     「引擎」那一行就是巡检单的作者白名单（第五节「全流程巡检」要配齐的第 4 条：不在，拉单不拉、断在收单）；干活的那一行也要，它开的 PR 按这张表认，漏了演练会卡在 PR 那几步。
    - 演练仓纳管，测试命令照演练仓 CI 跑的写：`runuser -u fleet -- psql -d fleet -c "insert into repos (owner, name, default_branch, test_command) values ('thoerwink8', 'fleet-dao-canary', 'main', 'node --test') on conflict (owner, name) do nothing"`。
    - 打开演练仓的接活开关（只开演练仓；开关打开以前开的单不拉）：`bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch thoerwink8/fleet-dao-canary on`，读回把 `on` 换成 `status`。
-   - 读回：`runuser -u fleet -- psql -d fleet -c "select display_name, role, github_id, active from users where role = 'bot'"`、`... -c "select owner, name, test_command, auto_dispatch_since from repos"`。
+   - 读回（机器人要正好两行、都是 `active`；演练仓一行、`auto_dispatch_since` 不空）：
+
+     ```
+     runuser -u fleet -- psql -d fleet -c "select display_name, role, github_id, active from users where role = 'bot' order by github_id"
+     runuser -u fleet -- psql -d fleet -c "select owner, name, test_command, auto_dispatch_since from repos"
+     ```
    - 白名单里还要一位带 GitHub 账号的人（机器人不算），健康页 `github_events` 才不报 `no_github_members`：先照第 1 步「驾驶舱登录」补创始人那一行，再照第九节补他的 GitHub 编号和登录名。
    2026-10-04 这台照这几条加好了两个机器人、演练仓、接活开关（创始人那一行还没有）。
 
