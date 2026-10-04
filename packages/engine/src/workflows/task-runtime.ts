@@ -29,6 +29,7 @@ import {
   type TaskWorkflowInput,
   taskAbandonSignal,
   taskContinueSignal,
+  taskRouteWakeSignal,
   taskStatusQuery,
 } from '../task-contract.ts';
 import { failureOf, iso, judgeRetrying } from './kit.ts';
@@ -40,6 +41,7 @@ export class TaskRuntime {
   readonly limits: Limits;
   readonly status: TaskStatus;
   private continued = 0;
+  private routeWakes = 0;
   private abandon: AbandonCommand | null = null;
   private parks = 0;
   private cancelRunning: (() => void) | null = null;
@@ -76,6 +78,9 @@ export class TaskRuntime {
     };
     setHandler(taskContinueSignal, () => {
       this.continued += 1;
+    });
+    setHandler(taskRouteWakeSignal, () => {
+      this.routeWakes += 1;
     });
     setHandler(taskAbandonSignal, (command) => {
       this.abandon ??= command;
@@ -134,6 +139,31 @@ export class TaskRuntime {
   async pause(kind: TaskWait['kind'], detail: string, seconds: number): Promise<void> {
     await this.waiting(kind, detail, () => condition(() => this.abandon !== null, `${seconds} seconds`));
     this.guard();
+  }
+
+  /**
+   * 叫醒信号收到过几次（#194 方案 4.3）。等路由的那一步在**问选路之前**取一个记号，问完要等时交给 pauseForRoute：
+   * 问的那一刻到睡下之间到的叫醒不丢（那次选路读的是切号完成之前的事实，得再选一次）。
+   */
+  routeWakeMark(): number {
+    return this.routeWakes;
+  }
+
+  /**
+   * 等路由：睡 seconds 秒，但路由那边变了（叫醒信号，记号之后到过一次就算）当场醒、放弃了马上醒（抛 Abandoned）。
+   * 返回是不是被叫醒的（日志、测试看）；醒了调用方照旧重新选一次，选不到会拿新记号再来等，不空转。
+   */
+  async pauseForRoute(
+    kind: TaskWait['kind'],
+    detail: string,
+    seconds: number,
+    mark: number,
+  ): Promise<'woken' | 'timeout'> {
+    const woken = await this.waiting(kind, detail, () =>
+      condition(() => this.abandon !== null || this.routeWakes > mark, `${seconds} seconds`),
+    );
+    this.guard();
+    return woken ? 'woken' : 'timeout';
   }
 
   /** 把一段长活动放进可取消的范围：放弃的信号一到就取消它（活动心跳，收得到），结果抛 Abandoned。 */

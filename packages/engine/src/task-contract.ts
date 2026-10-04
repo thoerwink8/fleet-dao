@@ -85,8 +85,19 @@ export interface AbandonCommand {
   reason: string;
 }
 
+/**
+ * 「叫醒」（#194 方案 4.3）：路由那边变了（切号切完、切过去的池探通了），等路由的活不用睡满 MAX_ROUTE_WAIT_SECONDS，
+ * 当场重新选一次。只叫醒「等路由」那一种等待（选路排队、验收等空位/额度）；停下等人、等 CI、等合并都不理它。
+ * 发信号的是引擎进程（real/route-wake.ts）；信号丢了也不会等超过 MAX_ROUTE_WAIT_SECONDS（等待本身有上限）。
+ */
+export interface RouteWakeCommand {
+  by: string;
+  reason: string;
+}
+
 export const taskContinueSignal = defineSignal<[ContinueCommand]>('taskContinue');
 export const taskAbandonSignal = defineSignal<[AbandonCommand]>('taskAbandon');
+export const taskRouteWakeSignal = defineSignal<[RouteWakeCommand]>('taskRouteWake');
 export const taskStatusQuery = defineQuery<TaskStatus>('taskStatus');
 
 // ---- 新增的活动（EngineActivities 里的「任务」一组）

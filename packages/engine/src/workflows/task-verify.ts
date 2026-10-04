@@ -31,6 +31,7 @@ export async function coldVerifyPr(
     rt.set('verify', `验收第 ${rt.verifyRound} 轮`);
     const prNumber: number = rt.prNumber;
     const headSha: string = rt.head;
+    const mark = rt.routeWakeMark(); // 叫醒的记号在验之前取，理由见 task-session.ts 的 pickRoute
     const res = await rt.step('coldVerify', () =>
       rt.cancellable(() =>
         rt.acts.coldVerify({
@@ -58,7 +59,7 @@ export async function coldVerifyPr(
     if (res.retry) {
       // 这会儿验不了、过一会儿就行（没空位、内存放不下、引擎在停机）：不算一轮，不停下报人
       rt.verifyRound -= 1;
-      await rt.pause(res.retry.wait, res.retry.reason, res.retry.afterSeconds);
+      await rt.pauseForRoute(res.retry.wait, res.retry.reason, res.retry.afterSeconds, mark);
       continue;
     }
     if (res.unavailable) {

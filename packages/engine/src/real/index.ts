@@ -24,6 +24,7 @@ import type { JevPort } from '../failure/jev.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
+import { configFromEnv } from '../worker.ts';
 import { canaryJob } from './canary.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
@@ -51,6 +52,12 @@ import { oneShotSessions } from './one-shot-sessions.ts';
 import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { quotaReadJob } from './quota-read.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
+import {
+  lazyTemporalWakeClient,
+  routeWakerFromDb,
+  wakeAfterProbeNow,
+  wakeAfterProbeRound,
+} from './route-wake.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { realReservations, realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
@@ -532,6 +539,12 @@ export function realPortsFromEnv(
   // 先停下、切完接着干（#59：一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上），不等它们跑完
   // #194：被拒当场判、定时盯读接口那一轮也走它（同一把单飞锁）；读接口给切号前现读，切完当场探切过去的池（和路由探针同一份探法）
   const readCarpoolApi = carpoolApiReader();
+  // 叫醒等路由的活（real/route-wake.ts）：第一次叫醒时才连 Temporal（切号这条路上手里没有 Temporal 客户端）
+  const temporal = configFromEnv(env as Record<string, string | undefined>);
+  const wakeClient = lazyTemporalWakeClient({ address: temporal.address, namespace: temporal.namespace });
+  const routeWake = routeWakerFromDb(db, wakeClient, (level, text, fields) =>
+    console[level === 'info' ? 'info' : level](text, fields ?? {}),
+  );
   const orgSwitch = orgSwitchRound({
     db,
     org: sessionOrg,
@@ -541,7 +554,8 @@ export function realPortsFromEnv(
     oneShots,
     machine: config.machine,
     readApi: readCarpoolApi,
-    probeNow: (to) => probeOrgNow(routeProbe(), to),
+    // 切完探通，当场叫醒等路由的任务工作流重新选一次（#194 方案 4.3，不等 MAX_ROUTE_WAIT_SECONDS），见 real/route-wake.ts
+    probeNow: wakeAfterProbeNow((to) => probeOrgNow(routeProbe(), to), routeWake),
   });
   const routeProbe = routeProbeJob({
     db,
@@ -553,7 +567,8 @@ export function realPortsFromEnv(
     mirasimLedgerDir: mirasim.ledgerDir,
     mirasimLedgerFs: mirasim.ledgerFs,
     sessionOrg,
-    orgSwitch,
+    // 探针那一轮里切的号：这一轮探完核对之后也叫醒（当场触发的那条路在上面 probeNow 里叫过了，两条路不重叠）
+    orgSwitch: wakeAfterProbeRound(orgSwitch, routeWake),
     machine: config.machine,
     ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
   });
@@ -670,6 +685,11 @@ export function realPortsFromEnv(
       else console.info(issueKindRegistered.message);
     },
     retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
-    close,
+    close: async () => {
+      await wakeClient.close().catch((error: unknown) =>
+        console.error('叫醒用的 Temporal 连接没关干净', error instanceof Error ? error.message : String(error)),
+      );
+      await close();
+    },
   };
 }
