@@ -149,8 +149,13 @@ proxy_load() {
 }
 
 # 要出网的 git：带上这一档登记的代理（-c 要写在子命令前面）。只在取代码这种要出网的地方用——rev-parse、cat-file、
-# merge-base 这些本地命令不带，看不出区别，也省得把代理写进每一行
-git_net() { git "${PROXY[@]}" "$@"; }
+# merge-base 这些本地命令不带，看不出区别，也省得把代理写进每一行。限时套在里面、不套在外面：`timeout 300 git_net …`
+# 是错的——timeout 起的是外部命令，看不见 shell 函数（真机上「failed to run command 'git_net'」直接退 127）
+git_net() { # 限时秒数 参数…：和 timeout 一样，把 git 跑起来
+  local secs=$1
+  shift
+  timeout "$secs" git "${PROXY[@]}" "$@"
+}
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
@@ -504,7 +509,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
     git -C "$CACHE" remote add origin "$REPO_URL"
     echo "  · 建了取代码用的裸仓 $CACHE"
   fi
-  if ! out=$(timeout 300 git_net -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' 2>&1); then
+  if ! out=$(git_net 300 -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' 2>&1); then
     red "从 $REPO_URL 取主线失败：$(tail -2 <<<"$out" | tr '\n' ' ')"
     return 1
   fi
@@ -516,7 +521,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
         red "本地没有 $target，短提交号又没法向 GitHub 要：给完整的 40 位提交号"
         return 1
       fi
-      if ! out=$(timeout 300 git_net -C "$CACHE" fetch -q origin "$target" 2>&1); then
+      if ! out=$(git_net 300 -C "$CACHE" fetch -q origin "$target" 2>&1); then
         red "向 GitHub 要不到提交 $target：$(tail -2 <<<"$out" | tr '\n' ' ')"
         return 1
       fi

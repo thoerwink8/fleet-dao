@@ -14,7 +14,7 @@
 # 会话用户的 grok 命令行的装和查、登录态的读回（grok）、会话用户自己的 Mirasim 服务的读回（mirasim，#345；
 # 装、登录要创始人在自己电脑上做，这里只查 ~/.mirasim/run 下的令牌）、Mirasim 常驻单元该不该装、装了活没活
 # （mirasim-session，#424：服务端本体没装待配、不装单元；装了单元不活或 /api/health 不通判红）、
-# 切会话用户挂的 reclaude 组织（agent-scope-org-use）、
+# 切会话用户挂的 reclaude 组织（agent-scope-org-use）、本机档发布取代码、装依赖经这一档登记的会话代理（release-proxy，#786）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 本机档 WSL 的回环留在本机、只空出 Windows 上代理的口（wsl-loopback，#731：照 WSL 的样子摆好策略路由真跑，装机第 1 步的装和读回）、
 # docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）、
@@ -48,7 +48,7 @@ shard_n=0
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports'
+  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports release-proxy'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use wsl-loopback'
   'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )

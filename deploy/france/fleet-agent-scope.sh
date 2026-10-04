@@ -37,6 +37,7 @@
 # 会话里不许有 GitHub 凭据：推分支、开 PR 由引擎在会话外做，GH_TOKEN 之类一概不放。
 # 降权用 setpriv --init-groups --no-new-privs：systemd-run --uid 在 scope 里不清附加组，会话会带着 root 组（法国实测）；
 # no-new-privs 让会话里的 sudo、setuid 程序都提不了权。
+# shellcheck disable=SC2034 # PROFILE 是给 source 进来的 profile.sh 读的（挑哪一份期望），本文件自己不读
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 SESSION_USERS=(fleet-agent-carpool)
@@ -75,6 +76,7 @@ read_proxy() {
     esac
   fi
   # shellcheck source=../lib/profile.sh
+  # shellcheck disable=SC1091 # 路径是运行时给的（装到 /usr/local/sbin/，仓里那份的位置由 AGENT_SCOPE_TEST_DEPLOY 换）
   source "$AGENT_SCOPE_DEPLOY/lib/profile.sh"
   if session_proxy_load; then PROXY_VARS=("${SESSION_PROXY_VARS[@]}"); fi
 }
