@@ -4,7 +4,7 @@ import { hardBanFor, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { asc, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { bans, type channels, type models, type pools, quotaWindows, type routes } from '../schema/index.ts';
-import { inFlightByPool, poolDataTimes, quotaReadOverdue, type WindowState, windowState } from './quota.ts';
+import { poolDataTimes, poolOccupancy, quotaReadOverdue, type WindowState, windowState } from './quota.ts';
 
 /**
  * switched-off 这条路由在它的模型下关着（路由两层的开关，不分用途）；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
@@ -69,7 +69,13 @@ export interface RouteCandidate {
    * （不知道清零时刻的，按读数 30 分钟内算），过了清零时刻才放。
    */
   windows: CandidateWindow[];
+  /** 池上已开工、没结束的会话数：到上限就挡 no-slot。 */
   inFlight: number;
+  /**
+   * 池上选定了还没开工的（Fusion 排着的、三段的一段占着名额的，#757）：和 inFlight 同一次读出来。这里不按它挡，派不派得出由
+   * 选路按两者之和判（引擎 routing/filter.ts）。
+   */
+  reserved: number;
   maxConcurrency: number;
   /** 命中的禁令原因。 */
   banReasons: string[];
@@ -107,7 +113,7 @@ export async function evaluateRoutes(
     .orderBy(asc(quotaWindows.label));
   const dataTimes = poolDataTimes(windowRows);
   const dbBans = await db.select().from(bans);
-  const inFlight = await inFlightByPool(db);
+  const occupancy = await poolOccupancy(db, { now });
 
   return rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
     // 成员表只和路由在上游的名字比（实际发的模型串 + 别名），不拿模型目录的 id 硬凑。
@@ -162,7 +168,7 @@ export async function evaluateRoutes(
         .map((b) => b.reason),
     ];
 
-    const running = inFlight.get(pool.id) ?? 0;
+    const running = occupancy.get(pool.id)?.inFlight ?? 0;
     const blockers: Blocker[] = [];
     if (!order.enabled) blockers.push('switched-off');
     if (!route.alive) blockers.push('offline');
@@ -189,6 +195,7 @@ export async function evaluateRoutes(
       quota,
       windows,
       inFlight: running,
+      reserved: occupancy.get(pool.id)?.reserved ?? 0,
       maxConcurrency: pool.maxConcurrency,
       banReasons,
       blockers,

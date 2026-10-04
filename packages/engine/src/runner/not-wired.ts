@@ -107,10 +107,23 @@ export interface RunsWriter {
   readonly notWired?: string;
   /**
    * 开跑：留一行没结束的（#157，切号数在跑的会话靠它）。写不进去要抛——调用方就不起会话，不让一个切号看不见的会话跑起来。
+   * 带路由的这一行就是这一次会话占上了池的名额（#757）：给了 reservationId（选路时预占的名额），同一下把它换成这一行；没预占
+   * 着名额、池又满了，抛 NoSlotError、一行不写。
    */
-  start(run: RunStart): Promise<void>;
+  start(run: RunStart, options?: { reservationId?: string }): Promise<void>;
   /** 收场（或没开跑就收了，比如内存放不下）：整行记下；开跑时留过那一行的，补完同一行。 */
   record(run: RunRecord): Promise<void>;
+}
+
+/**
+ * 开跑时池的名额满了（#757）：这一段选路时预占的名额过期了（建树、等内存卡得太久）或没预占，空位已经给了别的会话。开跑那一行
+ * 没写，会话不起；不是库写不进（那是别的错），过一会儿重新选路就行。
+ */
+export class NoSlotError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'NoSlotError';
+  }
 }
 
 /**

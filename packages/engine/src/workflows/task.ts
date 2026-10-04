@@ -522,7 +522,10 @@ class TaskFlow {
     }
   }
 
-  /** 选路：排队（没空位、额度没读成）就隔一会儿再选；一条能用的都没有就停下等人。 */
+  /**
+   * 选路：排队（没空位、额度没读成）就隔一会儿再选；一条能用的都没有就停下等人。派得出就当场给动手这一段预占池的名额（#757），
+   * 交回的路由带着它进 runSegment：开跑时换成开跑那一行，没开跑就收场的由 runSegment 放掉。
+   */
   private async pick(avoid: Avoid, stick?: string): Promise<RouteChoice> {
     for (;;) {
       this.guard();
@@ -534,6 +537,7 @@ class TaskFlow {
           avoidPoolIds: avoid.poolIds,
           avoidModelIds: avoid.modelIds,
           ...(stick ? { stickRouteId: stick } : {}),
+          reserve: { segment: 'manual' },
         }),
       );
       if (got.ok) return got.route;

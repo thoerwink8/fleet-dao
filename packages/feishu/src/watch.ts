@@ -16,10 +16,11 @@ import { type FeishuPort, feishuErrorKind } from './port.ts';
 import { nextNonce, uuidFor } from './util.ts';
 import { clip, duration, when } from './words.ts';
 
-export type LoopName = 'outbox' | 'board';
+/** 三条定时活：推送（旧的待推送）、盘面快照、意图卡（#553 第 4 条；旧的两条退役后只剩它）。 */
+export type LoopName = 'outbox' | 'board' | 'intents';
 export type PushStatus = OutboxAck['result']['status'];
 
-export const LOOPS: readonly LoopName[] = ['outbox', 'board'];
+export const LOOPS: readonly LoopName[] = ['outbox', 'board', 'intents'];
 
 export interface WatchLimits {
   /**
@@ -112,6 +113,7 @@ function freshWindow(at: number) {
       maxMs: 0,
     },
     board: { ok: 0, failed: 0, totalMs: 0, maxMs: 0 },
+    intents: { ok: 0, failed: 0 },
     messages: {
       count: 0,
       noAck: 0,
@@ -132,6 +134,7 @@ export function createWatch(deps: WatchDeps): Watch {
   const loops: Record<LoopName, LoopState> = {
     outbox: { lastOkAt: null, upSince: null, lastFail: null },
     board: { lastOkAt: null, upSince: null, lastFail: null },
+    intents: { lastOkAt: null, upSince: null, lastFail: null },
   };
   let win = freshWindow(startedAt);
   let incident: Incident | null = null;
@@ -288,6 +291,7 @@ export function createWatch(deps: WatchDeps): Watch {
       s.lastOkAt = t;
       s.upSince ??= t;
       if (loop === 'outbox') win.push.rounds += 1;
+      else if (loop === 'intents') win.intents.ok += 1;
       else {
         win.board.ok += 1;
         win.board.totalMs += ms;
@@ -305,6 +309,7 @@ export function createWatch(deps: WatchDeps): Watch {
       s.lastFail = { at: t, reason };
       win.lastError = { loop, at: t, reason };
       if (loop === 'outbox') win.push.failedRounds += 1;
+      else if (loop === 'intents') win.intents.failed += 1;
       else win.board.failed += 1;
     },
 
@@ -374,6 +379,7 @@ export function createWatch(deps: WatchDeps): Watch {
           maxMs: w.board.ok > 0 ? w.board.maxMs : null,
           lastOkAt: iso(loops.board.lastOkAt),
         },
+        intents: { ok: w.intents.ok, failed: w.intents.failed, lastOkAt: iso(loops.intents.lastOkAt) },
         messages: {
           count: w.messages.count,
           ackAvgMs: avg(w.messages.totalMs, acked),

@@ -17,6 +17,10 @@
 // 号，#335）就过一会儿再选。不是挂着的那个组织的池：引擎打算切过去的（real/org-plan.ts，和切号同一个判法）算等得来——
 // 等切号，任务不挂起；续会话的那条只差切号就不等它，照常选到挂着的那个池（换池 fork 续上，#59）。
 // 引擎在停（收到停机信号在排空，drain.ts）时一条都不派，回「过一会儿再选」：派出去的会话会被停机截断。
+// 三段的一段来选路（input.reserve，#757）：派出去那一刻给它预占一个池的名额（db 的 reservePoolSlot，锁住池再数再占），交回的
+// 路由带 reservationId；读事实到预占之间池被别的单占满了，按新的事实重选（最多 RESERVE_RACE_ROUNDS 次，再不行回「过一会儿再
+// 选」），不硬塞。池上占着的名额（在跑的、选定了还没开工的、预占着的）都进没空位的判断（routing/filter.ts 按 inFlight +
+// reserved 判）；三段的一段预占着的也算熔断半开时在途的试探（已经派出去了）。
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
@@ -31,6 +35,8 @@ import {
   openPoolRuns,
   type RunSegment,
   recordStepTiming,
+  releaseTaskReservation,
+  reservePoolSlot,
   resolveAlertWithReason,
   routeFactsForPurpose,
   saveTaskSnapshot,
@@ -69,6 +75,7 @@ import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
 import type { SessionOrgReader } from './session-org.ts';
+import { RESERVATION_TTL_MS } from './task-segment.ts';
 
 /** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
 export const POOL_HOLD_PREFIX = 'pool-hold:';
@@ -99,6 +106,18 @@ export const ORG_READ_WAIT_MS = 15_000;
 export const ORG_READ_RETRY_SECONDS = 30;
 /** 父节点内存放不下一个新会话时，隔多久再选一次：内核回收、别家收场都不会立刻反映到 memory.current，按轮询间隔。 */
 export const MEMORY_ADMISSION_RETRY_SECONDS = 30;
+/** 三段的一段预占名额时，选中的池在预占那一下被别的单同时占满：按新事实最多重选几次（#757）。 */
+export const RESERVE_RACE_ROUNDS = 3;
+/** 连着几次都在预占那一下被抢先：隔多久再选（别的单刚派出去，池马上就看得见满没满，不用等一整个选路间隔）。 */
+export const RESERVE_RACE_RETRY_SECONDS = 5;
+
+/** 预占那一下池被别的单同时占满了（读事实到预占之间）：这一次的结论不作数，按新事实重选。 */
+class SlotTaken extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SlotTaken';
+  }
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -134,6 +153,8 @@ export interface StorePortsDeps {
    * 真路径；不给就不闸（老历史回放、单测路由纯函数时也不用）。
    */
   memoryAdmission?: MemoryAdmissionDeps;
+  /** 三段的一段预占的名额占多久（默认 task-segment.ts 的 RESERVATION_TTL_MS），测试用。 */
+  reservationTtlMs?: number;
 }
 
 type StorePorts = Pick<
@@ -253,13 +274,14 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
   const draw = deps.draw ?? Math.random;
   const wired = deps.wiredHosts ?? WIRED_HOSTS;
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
+  const reservationTtlMs = deps.reservationTtlMs ?? RESERVATION_TTL_MS;
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
     // 两种会话都读（db 的 pool-runs.ts）：哪张表读不了照抛，不当成没有三段的会话（熔断、战绩、试探数都会算少）
     const [facts, outcomes, open] = await Promise.all([
       routeFactsForPurpose(db, stage, { now }),
       endedPoolRuns(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
-      openPoolRuns(db),
+      openPoolRuns(db, { now }),
     ]);
     const byRoute = new Map<string, EndedPoolRun[]>();
     for (const o of [...outcomes].sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime())) {
@@ -267,9 +289,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       list.push(o);
       byRoute.set(o.routeId, list);
     }
-    // 熔断半开时在途的那一个就是试探：按路由数已经开工、还没结束的会话（三段的一次性会话开跑才留那一行，都算开工了的）。
+    // 熔断半开时在途的那一个就是试探：按路由数已经派出去、还没结束的会话。三段的一次性会话开跑留的那一行、选定了路由还没开跑
+    // 时预占着的名额（#757，过期的 openPoolRuns 已经不给）都算：不算预占的，一批单同时选路会给半开的路由派出好几个试探。
+    // Fusion 排着还没开工的不算。
     const running = new Map<string, number>();
-    for (const r of open) if (r.startedAt) running.set(r.routeId, (running.get(r.routeId) ?? 0) + 1);
+    for (const r of open) {
+      if (r.startedAt || r.kind === 'oneShot') running.set(r.routeId, (running.get(r.routeId) ?? 0) + 1);
+    }
 
     const all: RouteFacts[] = facts.routes.map((r) => ({
       routeId: r.routeId,
@@ -393,6 +419,37 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     return planOf({ live: live.org, held, now });
   }
 
+  /**
+   * 给这张单的这一段在选中的路由的池上预占一个名额（#757），交回预占的编号。池在读事实到这一下之间被别的单占满了抛 SlotTaken；
+   * 写不进去照常抛（不当成占上了）。顺手收掉的过期预占记一笔：那一段选定路由后这么久还没开跑，多半卡在建树、等内存上。
+   */
+  async function reserveSlot(
+    taskId: string,
+    segment: 'manual' | 'verify',
+    fact: RouteFacts,
+    now: Date,
+  ): Promise<string> {
+    const got = await reservePoolSlot(db, {
+      taskId,
+      segment,
+      routeId: fact.routeId,
+      reservedAt: now,
+      expiresAt: new Date(now.getTime() + reservationTtlMs),
+    });
+    for (const e of got.expired) {
+      log('收掉一个过期的预占：那一段选定路由后过了这么久还没开跑（多半卡在建树、等内存），名额让出来', {
+        taskId: e.taskId,
+        segment: e.segment,
+        routeId: e.routeId,
+        reservedAt: e.reservedAt.toISOString(),
+      });
+    }
+    if (!got.reserved) {
+      throw new SlotTaken(`${routeLabel(fact)}：池刚被别的单占满（${got.occupied}/${got.maxConcurrency}）`);
+    }
+    return got.reservationId;
+  }
+
   async function allOpenAlarm(stage: StageKind, taskId: string, alarm: string): Promise<void> {
     try {
       await upsertAlert(db, {
@@ -437,203 +494,241 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           });
         }
       }
-      const now = clock();
-      const all = await loadStage(input.stage, now);
-      // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）
-      const facts = input.models ? onlyModels(all, input.models) : all;
-      const held = await heldPools();
-      // 给开 PR 前验证留一家：写这张单的族（和验证查作者同一个查询）、验证那一步的事实（照流程配置里验证的模型）
-      const keep = input.keepVerifier;
-      const writers = keep ? await writerFamilies(input.taskId) : [];
-      const verifyAll = keep ? await loadStage('verify', now) : null;
-      const verifyFacts = verifyAll && keep?.models ? onlyModels(verifyAll, keep.models) : verifyAll;
-      // 会话用户此刻挂的组织：候选里有带组织类型的池（Claude 订阅）才读。读不到、认不出的原话交给选路，那些池一律不派；
-      // 还没读完（reclaude 首跑同步配置）、正在切号（real/org-switch.ts 让选路停下的那十几秒）、读数刚变又没有引擎切号
-      // （real/session-org.ts 的起点，#335）不算认不出：过一会儿再选，不悄悄照新读数派，也不挂起等人
-      const live = [...all.routes, ...(verifyAll?.routes ?? [])].some((r) => r.orgKind)
-        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS, by: '选路' })
-        : null;
-      if (live && !live.ok && live.pending) {
-        return {
-          ok: false,
-          waitFor: 'slot',
-          detail: `会话用户挂的组织这会儿定不下来，过一会儿再选：${live.why}`,
-          retryAfterSeconds: ORG_READ_RETRY_SECONDS,
+      const reserve = input.reserve;
+      /** 读一遍事实、选一次。要预占时，选中的池在预占那一下被别的单占满了抛 SlotTaken（这一次的结论不作数）。 */
+      const pickOnce = async (): Promise<PickRouteResult> => {
+        const now = clock();
+        const all = await loadStage(input.stage, now);
+        // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）
+        const facts = input.models ? onlyModels(all, input.models) : all;
+        const held = await heldPools();
+        // 给开 PR 前验证留一家：写这张单的族（和验证查作者同一个查询）、验证那一步的事实（照流程配置里验证的模型）
+        const keep = input.keepVerifier;
+        const writers = keep ? await writerFamilies(input.taskId) : [];
+        const verifyAll = keep ? await loadStage('verify', now) : null;
+        const verifyFacts = verifyAll && keep?.models ? onlyModels(verifyAll, keep.models) : verifyAll;
+        // 会话用户此刻挂的组织：候选里有带组织类型的池（Claude 订阅）才读。读不到、认不出的原话交给选路，那些池一律不派；
+        // 还没读完（reclaude 首跑同步配置）、正在切号（real/org-switch.ts 让选路停下的那十几秒）、读数刚变又没有引擎切号
+        // （real/session-org.ts 的起点，#335）不算认不出：过一会儿再选，不悄悄照新读数派，也不挂起等人
+        const live = [...all.routes, ...(verifyAll?.routes ?? [])].some((r) => r.orgKind)
+          ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS, by: '选路' })
+          : null;
+        if (live && !live.ok && live.pending) {
+          return {
+            ok: false,
+            waitFor: 'slot',
+            detail: `会话用户挂的组织这会儿定不下来，过一会儿再选：${live.why}`,
+            retryAfterSeconds: ORG_READ_RETRY_SECONDS,
+          };
+        }
+        if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池这次不派', { why: live.why });
+        // 引擎切号的打算：这一步和给验证留一家的那一步同一份（两边的 Claude 池都按它判等不等切号）
+        const orgPlan = await orgPlanFor([...all.routes, ...(verifyAll?.routes ?? [])], live, held, now);
+        const known = (id: string) => facts.routes.find((r) => r.routeId === id);
+        const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
+        // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
+        const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
+        const avoid = (exceptPool?: string) => ({
+          routeIds: input.avoidRouteIds,
+          poolIds: [...new Set([...input.avoidPoolIds, ...[...held].filter((p) => p !== exceptPool)])],
+          modelIds: input.avoidModelIds,
+          ...(families.length > 0 ? { families } : {}),
+        });
+        const drawn = draw();
+        const orgFacts = {
+          ...(live?.ok ? { liveOrg: live.org } : {}),
+          ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
+          ...(orgPlan ? { orgPlan } : {}),
         };
-      }
-      if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池这次不派', { why: live.why });
-      // 引擎切号的打算：这一步和给验证留一家的那一步同一份（两边的 Claude 池都按它判等不等切号）
-      const orgPlan = await orgPlanFor([...all.routes, ...(verifyAll?.routes ?? [])], live, held, now);
-      const known = (id: string) => facts.routes.find((r) => r.routeId === id);
-      const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
-      // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
-      const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
-      const avoid = (exceptPool?: string) => ({
-        routeIds: input.avoidRouteIds,
-        poolIds: [...new Set([...input.avoidPoolIds, ...[...held].filter((p) => p !== exceptPool)])],
-        modelIds: input.avoidModelIds,
-        ...(families.length > 0 ? { families } : {}),
-      });
-      const drawn = draw();
-      const orgFacts = {
-        ...(live?.ok ? { liveOrg: live.org } : {}),
-        ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
-        ...(orgPlan ? { orgPlan } : {}),
-      };
-      const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
-      // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
-      const keepVerifier: KeepVerifier | undefined =
-        keep && verifyFacts
-          ? {
-              writers,
-              verify: {
-                configured: verifyFacts.configured,
-                stagePinned: verifyFacts.stagePinned,
-                order: verifyFacts.order,
-                routes: verifyFacts.routes,
-                now: now.toISOString(),
-                draw: drawn,
-                avoid: { poolIds: [...held] },
-                ...orgFacts,
-                ...(keep.uiWork ? { uiWork: true } : {}),
-                ...policy,
-              },
-              ...(keep.spare?.length ? { spare: keep.spare } : {}),
-              otherwise: keep.otherwise,
+        const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
+        // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
+        const keepVerifier: KeepVerifier | undefined =
+          keep && verifyFacts
+            ? {
+                writers,
+                verify: {
+                  configured: verifyFacts.configured,
+                  stagePinned: verifyFacts.stagePinned,
+                  order: verifyFacts.order,
+                  routes: verifyFacts.routes,
+                  now: now.toISOString(),
+                  draw: drawn,
+                  avoid: { poolIds: [...held] },
+                  ...orgFacts,
+                  ...(keep.uiWork ? { uiWork: true } : {}),
+                  ...policy,
+                },
+                ...(keep.spare?.length ? { spare: keep.spare } : {}),
+                otherwise: keep.otherwise,
+              }
+            : undefined;
+        const base = {
+          stage: input.stage,
+          configured: facts.configured,
+          stagePinned: facts.stagePinned,
+          order: facts.order,
+          routes: facts.routes,
+          now: now.toISOString(),
+          draw: drawn,
+          ...orgFacts,
+          ...(input.uiWork ? { uiWork: true } : {}),
+          ...policy,
+          ...(keepVerifier ? { keepVerifier } : {}),
+        } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
+        /** 给验证留一家的结论落库：留不下当场报警（报不进去照常抛，不当成报了），留得下撤掉这张单之前报的。 */
+        const settled = async (r: ChooseRouteResult) => {
+          if (!keep) return;
+          if (r.noVerifier) await noVerifierAlarm(input.taskId, r.noVerifier, keep);
+          else
+            await clearNoVerifier(
+              input.taskId,
+              `再选路时给开 PR 前验证留得下别家了（${STAGE_NAMES[input.stage]}阶段）`,
+            );
+        };
+        const notes: string[] = [];
+        const missing = (id: string, what: string) =>
+          all.unwiredIds.has(id)
+            ? `${what} ${id} 的执行方式引擎还没接上，照常选`
+            : knownAny(id)
+              ? `${what} ${id} 的模型不在流程配置这一步的模型里，照常选`
+              : `${what} ${id} 不在这个用途的路由两层顺序里，照常选`;
+
+        const dispatched = async (r: Extract<ChooseRouteResult, { kind: 'dispatch' }>, why: string) => {
+          const fact = knownAny(r.routeId);
+          if (!fact) throw new PortError('ROUTING_INPUT', `选路派给了事实里没有的路由 ${r.routeId}`);
+          // 先预占（#757）：占不上（SlotTaken）这一次的结论不作数，下面的报警、撤提醒都不做，按新事实重选
+          const reservationId = reserve
+            ? await reserveSlot(input.taskId, reserve.segment, fact, now)
+            : undefined;
+          if (r.alarm) await allOpenAlarm(input.stage, input.taskId, r.alarm);
+          await settled(r);
+          // 开 PR 前验证派出去了：规划时报的「做完没人能验」不成立了
+          if (input.stage === 'verify' && families.length > 0) {
+            await clearNoVerifier(input.taskId, `开 PR 前验证派出去了：${routeLabel(fact)}`);
+          }
+          const route: RouteChoice = {
+            routeId: r.routeId,
+            poolId: r.poolId,
+            modelId: r.modelId,
+            family: r.family,
+            hostId: r.hostId,
+            ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
+            ...(reservationId ? { reservationId } : {}),
+          };
+          return { ok: true as const, route, why };
+        };
+        const waiting = (
+          r: Extract<ChooseRouteResult, { kind: 'wait' }>,
+          extra: string[],
+        ): PickRouteResult => {
+          const until = r.until ? Date.parse(r.until) : Number.NaN;
+          const retryAfterSeconds = Number.isFinite(until)
+            ? Math.min(MAX_ROUTE_WAIT_SECONDS, Math.max(1, Math.ceil((until - now.getTime()) / 1000)))
+            : undefined;
+          return {
+            ok: false,
+            // 等熔断到点也是「等空位」一类：随时可能好，按间隔再选。
+            waitFor: r.waitFor === 'quota' ? 'quota' : 'slot',
+            detail: [r.reason, ...extra].join('；'),
+            ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+          };
+        };
+
+        if (input.preferRouteId) {
+          if (!knownAny(input.preferRouteId)) notes.push(missing(input.preferRouteId, '点名的路由'));
+          else {
+            const r = choose({
+              ...base,
+              order: all.order,
+              routes: all.routes,
+              taskRouteId: input.preferRouteId,
+              avoid: avoid(),
+            });
+            if (r.kind === 'dispatch') return dispatched(r, `点名的路由：${r.why}`);
+            notes.push(`点名的路由这次用不了（${r.reason}），照常选`);
+          }
+        } else if (input.stickRouteId) {
+          const stick = known(input.stickRouteId);
+          if (!stick) notes.push(missing(input.stickRouteId, '续会话的路由'));
+          else {
+            const probing = held.has(stick.poolId);
+            const r = choose({ ...base, taskRouteId: stick.routeId, avoid: avoid(stick.poolId) });
+            if (r.kind === 'dispatch') {
+              return dispatched(
+                r,
+                probing
+                  ? `续同一个会话；这个账号池暂停着（等人修），这一单就是看修好了没有：${r.why}`
+                  : `续同一个会话：${r.why}`,
+              );
             }
-          : undefined;
-      const base = {
-        stage: input.stage,
-        configured: facts.configured,
-        stagePinned: facts.stagePinned,
-        order: facts.order,
-        routes: facts.routes,
-        now: now.toISOString(),
-        draw: drawn,
-        ...orgFacts,
-        ...(input.uiWork ? { uiWork: true } : {}),
-        ...policy,
-        ...(keepVerifier ? { keepVerifier } : {}),
-      } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
-      /** 给验证留一家的结论落库：留不下当场报警（报不进去照常抛，不当成报了），留得下撤掉这张单之前报的。 */
-      const settled = async (r: ChooseRouteResult) => {
-        if (!keep) return;
-        if (r.noVerifier) await noVerifierAlarm(input.taskId, r.noVerifier, keep);
-        else
-          await clearNoVerifier(
-            input.taskId,
-            `再选路时给开 PR 前验证留得下别家了（${STAGE_NAMES[input.stage]}阶段）`,
-          );
-      };
-      const notes: string[] = [];
-      const missing = (id: string, what: string) =>
-        all.unwiredIds.has(id)
-          ? `${what} ${id} 的执行方式引擎还没接上，照常选`
-          : knownAny(id)
-            ? `${what} ${id} 的模型不在流程配置这一步的模型里，照常选`
-            : `${what} ${id} 不在这个用途的路由两层顺序里，照常选`;
-
-      const dispatched = async (r: Extract<ChooseRouteResult, { kind: 'dispatch' }>, why: string) => {
-        const fact = knownAny(r.routeId);
-        if (!fact) throw new PortError('ROUTING_INPUT', `选路派给了事实里没有的路由 ${r.routeId}`);
-        if (r.alarm) await allOpenAlarm(input.stage, input.taskId, r.alarm);
-        await settled(r);
-        // 开 PR 前验证派出去了：规划时报的「做完没人能验」不成立了
-        if (input.stage === 'verify' && families.length > 0) {
-          await clearNoVerifier(input.taskId, `开 PR 前验证派出去了：${routeLabel(fact)}`);
-        }
-        const route: RouteChoice = {
-          routeId: r.routeId,
-          poolId: r.poolId,
-          modelId: r.modelId,
-          family: r.family,
-          hostId: r.hostId,
-          ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
-        };
-        return { ok: true as const, route, why };
-      };
-      const waiting = (r: Extract<ChooseRouteResult, { kind: 'wait' }>, extra: string[]): PickRouteResult => {
-        const until = r.until ? Date.parse(r.until) : Number.NaN;
-        const retryAfterSeconds = Number.isFinite(until)
-          ? Math.min(MAX_ROUTE_WAIT_SECONDS, Math.max(1, Math.ceil((until - now.getTime()) / 1000)))
-          : undefined;
-        return {
-          ok: false,
-          // 等熔断到点也是「等空位」一类：随时可能好，按间隔再选。
-          waitFor: r.waitFor === 'quota' ? 'quota' : 'slot',
-          detail: [r.reason, ...extra].join('；'),
-          ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
-        };
-      };
-
-      if (input.preferRouteId) {
-        if (!knownAny(input.preferRouteId)) notes.push(missing(input.preferRouteId, '点名的路由'));
-        else {
-          const r = choose({
-            ...base,
-            order: all.order,
-            routes: all.routes,
-            taskRouteId: input.preferRouteId,
-            avoid: avoid(),
-          });
-          if (r.kind === 'dispatch') return dispatched(r, `点名的路由：${r.why}`);
-          notes.push(`点名的路由这次用不了（${r.reason}），照常选`);
-        }
-      } else if (input.stickRouteId) {
-        const stick = known(input.stickRouteId);
-        if (!stick) notes.push(missing(input.stickRouteId, '续会话的路由'));
-        else {
-          const probing = held.has(stick.poolId);
-          const r = choose({ ...base, taskRouteId: stick.routeId, avoid: avoid(stick.poolId) });
-          if (r.kind === 'dispatch') {
-            return dispatched(
-              r,
-              probing
-                ? `续同一个会话；这个账号池暂停着（等人修），这一单就是看修好了没有：${r.why}`
-                : `续同一个会话：${r.why}`,
+            // 暂时派不了（空位、额度、熔断到点）就等它，不换：换了就续不上这个会话。只差切号（会话用户挂的不是它的组织、
+            // 或切过来还没探过）不等它：照常选到挂着的那个池，换池 fork 续上（#59），不为等切号把活停着
+            const orgWait = r.verdicts.some((v) =>
+              v.blocks.some((b) => b.wait === 'org' || b.wait === 'probe'),
+            );
+            if (r.kind === 'wait' && !orgWait) {
+              await settled(r);
+              return waiting(r, ['续同一个会话，等这条路由']);
+            }
+            notes.push(
+              r.kind === 'wait'
+                ? `续会话的路由要等切号（${r.reason}），照常选`
+                : `续会话的路由用不了了（${r.reason}），照常选`,
             );
           }
-          // 暂时派不了（空位、额度、熔断到点）就等它，不换：换了就续不上这个会话。只差切号（会话用户挂的不是它的组织、
-          // 或切过来还没探过）不等它：照常选到挂着的那个池，换池 fork 续上（#59），不为等切号把活停着
-          const orgWait = r.verdicts.some((v) =>
-            v.blocks.some((b) => b.wait === 'org' || b.wait === 'probe'),
-          );
-          if (r.kind === 'wait' && !orgWait) {
-            await settled(r);
-            return waiting(r, ['续同一个会话，等这条路由']);
-          }
-          notes.push(
-            r.kind === 'wait'
-              ? `续会话的路由要等切号（${r.reason}），照常选`
-              : `续会话的路由用不了了（${r.reason}），照常选`,
-          );
+        }
+
+        const context = [
+          ...notes,
+          ...(held.size > 0 ? [`暂停着、等人处理的账号池：${[...held].join('、')}`] : []),
+          ...(facts.unwired.length > 0
+            ? [`执行方式引擎还没接上、这次没算的：${facts.unwired.join('、')}`]
+            : []),
+          // 两层配置上的缺口（模型下一条路由都没有这类）照实带上：派不出时人要知道是配置空着，不是路由都坏了
+          ...(facts.problems.length > 0 ? [`路由两层的配置缺口：${facts.problems.join('、')}`] : []),
+        ];
+        const noOther =
+          families.length > 0
+            ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
+            : [];
+        // 路由两层排了这个用途、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个用途一条都没配」
+        if (input.models && facts.configured && facts.order.length === 0) {
+          const models = input.models.length > 0 ? input.models.join('、') : '一个都没配';
+          const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的路由两层顺序里没有接上的路由`;
+          return { ok: false, waitFor: 'none', detail: [...noOther, reason, ...context].join('；') };
+        }
+        const r = choose({ ...base, avoid: avoid() });
+        if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
+        await settled(r);
+        if (r.kind === 'wait') return waiting(r, context);
+        return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
+      };
+
+      if (!reserve) return pickOnce();
+      if (!UUID.test(input.taskId)) {
+        throw new PortError(
+          'BAD_INPUT',
+          `要给这一段预占池的名额，得有库里的单（tasks.id）：「${input.taskId}」不是`,
+          { retryable: false },
+        );
+      }
+      // 这一段又来选路，上一次预占的就作废了（没开跑、也没放掉：起会话那一边放不成、选路这一步被重试过）：不让它把池占满、挡了自己
+      await releaseTaskReservation(db, { taskId: input.taskId, segment: reserve.segment });
+      const lost: string[] = [];
+      for (let round = 1; round <= RESERVE_RACE_ROUNDS; round += 1) {
+        try {
+          return await pickOnce();
+        } catch (error) {
+          if (!(error instanceof SlotTaken)) throw error;
+          lost.push(error.message);
         }
       }
-
-      const context = [
-        ...notes,
-        ...(held.size > 0 ? [`暂停着、等人处理的账号池：${[...held].join('、')}`] : []),
-        ...(facts.unwired.length > 0
-          ? [`执行方式引擎还没接上、这次没算的：${facts.unwired.join('、')}`]
-          : []),
-        // 两层配置上的缺口（模型下一条路由都没有这类）照实带上：派不出时人要知道是配置空着，不是路由都坏了
-        ...(facts.problems.length > 0 ? [`路由两层的配置缺口：${facts.problems.join('、')}`] : []),
-      ];
-      const noOther =
-        families.length > 0
-          ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
-          : [];
-      // 路由两层排了这个用途、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个用途一条都没配」
-      if (input.models && facts.configured && facts.order.length === 0) {
-        const models = input.models.length > 0 ? input.models.join('、') : '一个都没配';
-        const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的路由两层顺序里没有接上的路由`;
-        return { ok: false, waitFor: 'none', detail: [...noOther, reason, ...context].join('；') };
-      }
-      const r = choose({ ...base, avoid: avoid() });
-      if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
-      await settled(r);
-      if (r.kind === 'wait') return waiting(r, context);
-      return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
+      return {
+        ok: false,
+        waitFor: 'slot',
+        detail: `连着 ${RESERVE_RACE_ROUNDS} 次，选中的池都在预占那一下被别的单同时占满了（${lost.join('；')}），过一会儿再选`,
+        retryAfterSeconds: RESERVE_RACE_RETRY_SECONDS,
+      };
     },
 
     async stageAllOpen(stage) {

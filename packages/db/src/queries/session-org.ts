@@ -38,18 +38,18 @@ export interface OrgPoolFacts {
 export interface SessionOrgFacts {
   /** 带组织类型的池，每个一行，按 id 排。 */
   pools: OrgPoolFacts[];
-  /** 这些池上还没结束的会话（排着的、在跑的都算，两种会话都数）：切号会让它们当场断。 */
+  /** 这些池上还没结束的会话（排着的、在跑的、三段占着名额还没开跑的都算，两种会话都数）：切号会让它们当场断。 */
   busy: number;
-  /** 其中三段的一次性会话有几个（切号停不停得下它们，引擎那边判）。 */
+  /** 其中三段的一次性会话有几个（含占着名额还没开跑的；切号停不停得下它们，引擎那边判）。 */
   busyOneShot: number;
 }
 
 /**
- * 带组织类型的池上还没结束的会话，按排队时刻排（切号前停会话时一轮轮看还剩哪些，#59）。两种会话都算，和选路数池的并发
- * 同一份（pool-runs.ts）。
+ * 带组织类型的池上还没结束的会话，按排队时刻排（切号前停会话时一轮轮看还剩哪些，#59）。两种会话都算，三段占着名额、还没开跑的
+ * 也算（startedAt 为空，#757），和选路数池的并发同一份（pool-runs.ts）。now 判预占过没过期，默认现在。
  */
-export async function openOrgRuns(db: Db): Promise<OpenPoolRun[]> {
-  return openPoolRuns(db, { orgPoolsOnly: true });
+export async function openOrgRuns(db: Db, now?: Date): Promise<OpenPoolRun[]> {
+  return openPoolRuns(db, { orgPoolsOnly: true, ...(now ? { now } : {}) });
 }
 
 export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<SessionOrgFacts> {
@@ -77,7 +77,7 @@ export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<S
           .from(routes)
           .innerJoin(models, eq(models.id, routes.modelId))
           .where(and(inArray(routes.id, routesInUse(db)), inArray(routes.poolId, poolIds))),
-    openOrgRuns(db),
+    openOrgRuns(db, options.now),
   ]);
   // 在用的路由（路由两层里开着、模型排进了某个用途的，routing-layers.ts 的 routesInUse）→ 各池的模型
   const refs = new Map<string, Map<string, ModelRef>>();

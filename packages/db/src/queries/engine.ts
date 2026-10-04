@@ -1127,7 +1127,7 @@ export async function routeFactsForPurpose(
 
   const routeIds = sorted.map((c) => c.routeId);
   const poolIds = [...new Set(sorted.map((c) => c.poolId))];
-  const [detailRows, windowRows, reservedRows] = await Promise.all([
+  const [detailRows, windowRows] = await Promise.all([
     db
       .select({
         routeId: routes.id,
@@ -1144,16 +1144,9 @@ export async function routeFactsForPurpose(
       .innerJoin(channels, eq(channels.id, routes.channelId))
       .where(inArray(routes.id, routeIds)),
     db.select().from(quotaWindows).where(inArray(quotaWindows.poolId, poolIds)),
-    db
-      .select({ poolId: routes.poolId, n: sql<number>`count(*)::int` })
-      .from(sessionRuns)
-      .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
-      .where(and(isNull(sessionRuns.startedAt), isNull(sessionRuns.endedAt)))
-      .groupBy(routes.poolId),
   ]);
   const detailByRoute = new Map(detailRows.map((r) => [r.routeId, r]));
   const windowByKey = new Map(windowRows.map((w) => [`${w.poolId}\u0000${w.label}`, w]));
-  const reservedByPool = new Map(reservedRows.map((r) => [r.poolId, r.n]));
 
   const routesOut = sorted.map((c) => {
     const detail = detailByRoute.get(c.routeId);
@@ -1192,7 +1185,8 @@ export async function routeFactsForPurpose(
         };
       }),
       inFlight: c.inFlight,
-      reserved: reservedByPool.get(c.poolId) ?? 0,
+      // 和 inFlight 同一次读出来（candidates.ts），Fusion 排着的、三段占着名额的都在里面（#757）
+      reserved: c.reserved,
       maxConcurrency: c.maxConcurrency,
       banReasons: c.banReasons,
       blockers: c.blockers,
