@@ -18,6 +18,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
 import { settingLabel } from '../lib/audit';
+import { poolTitle } from '../lib/catalog';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
@@ -316,7 +317,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
       for (const k of r.kinds) {
         const parsed = parseReserveInput(draft[`${r.pool.id}|${k}`] ?? '');
         if (!parsed.ok) {
-          toast.error('这个值不行', { description: `${r.pool.channelName}：${parsed.why}` });
+          toast.error('这个值不行', { description: `${poolTitle(r.pool)}：${parsed.why}` });
           return;
         }
         if (parsed.value === undefined) delete lines[k];
@@ -358,7 +359,8 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
       <div className="mt-3 space-y-3">
         {rows.map((r) => (
           <div key={r.pool.id}>
-            <div className="text-sm">{r.pool.channelName}</div>
+            {/* 拼车和独享两个池同属一个渠道：只写渠道名会出现两行一模一样的「Claude 订阅」，要带上池编号 */}
+            <div className="text-sm">{poolTitle(r.pool)}</div>
             {r.kinds.length === 0 ? (
               <p className="text-xs text-muted-foreground">还没读到额度窗，读到以后在这里配。</p>
             ) : (
