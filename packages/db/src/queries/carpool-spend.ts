@@ -4,7 +4,7 @@
 // 读不了照常抛，不拿空、0 冒充没事；花费没记到的会话单独数，不当成 0 美元。
 import { and, eq, gte, isNotNull, lte } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { pools, routes, runs, sessionRuns } from '../schema/index.ts';
+import { pools, quotaWindows, routes, runs, sessionRuns } from '../schema/index.ts';
 
 export interface CarpoolPoolCap {
   poolId: string;
@@ -80,4 +80,41 @@ export async function carpoolWindowSpend(
     }
   }
   return out;
+}
+
+export interface CarpoolApiWindow {
+  poolId: string;
+  used: number | null;
+  limit: number | null;
+  resetsAt: Date | null;
+  readAt: Date;
+  /** 读成了、但接口这次起没再报这个窗口。 */
+  staleSince: Date | null;
+}
+
+/**
+ * 拼车池最近一次读到的「5 小时美元窗口」（reclaude 开放接口读来的，source reclaude-carpool、单位美元）。几个拼车池有几个取读数最新的；
+ * 一个都没有回 null（没读到过），由调用方写明，不当成「没用」。
+ */
+export async function carpoolApiWindow(db: Db): Promise<CarpoolApiWindow | null> {
+  const rows = await db
+    .select({
+      poolId: quotaWindows.poolId,
+      used: quotaWindows.used,
+      limit: quotaWindows.limit,
+      resetsAt: quotaWindows.resetsAt,
+      readAt: quotaWindows.readAt,
+      staleSince: quotaWindows.staleSince,
+    })
+    .from(quotaWindows)
+    .innerJoin(pools, eq(pools.id, quotaWindows.poolId))
+    .where(
+      and(
+        eq(pools.orgKind, 'carpool'),
+        eq(quotaWindows.window, '5h'),
+        eq(quotaWindows.unit, 'usd'),
+        eq(quotaWindows.source, 'reclaude-carpool'),
+      ),
+    );
+  return rows.sort((a, b) => b.readAt.getTime() - a.readAt.getTime())[0] ?? null;
 }

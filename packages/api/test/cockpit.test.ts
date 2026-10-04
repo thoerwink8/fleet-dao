@@ -712,6 +712,46 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(solo).not.toHaveProperty('burn');
   });
 
+  it('拼车额度对账（#194 方案 4.7）：没接上写 unavailable；接上了写两个数；读不到写明没读成，不拿对得上冒充', async () => {
+    const poolsBody = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolsResponse.parse(await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json());
+    const none = harness();
+    const a = await none.login();
+    expect((await poolsBody(none, a.cookie)).carpoolReconcile).toMatchObject({ state: 'unavailable' });
+
+    const known = harness({
+      carpoolReconcile: {
+        read: async () => ({
+          api: {
+            poolId: 'claude-carpool',
+            used: 50,
+            limit: 80,
+            resetsAt: new Date(T0.getTime() + 2 * 3_600_000),
+            readAt: new Date(T0.getTime() - 60_000),
+            staleSince: null,
+          },
+          spend: { sessions: 3, recordedUsd: 10, recorded: 3, unrecorded: 0, unrecordedSwitchStopped: 0 },
+        }),
+      },
+    });
+    const b = await known.login();
+    const view = (await poolsBody(known, b.cookie)).carpoolReconcile;
+    expect(view).toMatchObject({ state: 'known', verdict: 'others', localUsd: 10, apiUsedUsd: 50 });
+    expect(view && 'note' in view && view.note).toContain('多半是别的设备在用');
+
+    const broken = harness({
+      carpoolReconcile: {
+        read: async () => {
+          throw new Error('连接断了');
+        },
+      },
+    });
+    const c = await broken.login();
+    const bk = (await poolsBody(broken, c.cookie)).carpoolReconcile;
+    expect(bk).toMatchObject({ state: 'unavailable' });
+    expect(bk && 'why' in bk && bk.why).toContain('没成：连接断了');
+  });
+
   it('路由表带上探针的结论（#129）：在线的带 ok 和时刻，离线的带原因，探针还没看过的不带（不说成离线）', async () => {
     const data = devFixtures(T0);
     const at = new Date(T0.getTime() - 5 * 60_000).toISOString();

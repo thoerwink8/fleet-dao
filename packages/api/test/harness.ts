@@ -145,6 +145,8 @@ export interface HarnessOptions {
   routingEfforts?: Deps['routingEfforts'];
   /** 会话用户切号的现状（#194，额度页顶上一行）；不给就是没接上（内存版、开发环境一样）。 */
   orgSwitch?: Deps['orgSwitch'];
+  /** 拼车额度对账（#194 方案 4.7）；不给就是没接上。 */
+  carpoolReconcile?: Deps['carpoolReconcile'];
   /** /changelog 发布版本号读里程碑和 CHANGELOG.md 的替身；不给就是没接上（内存版、开发环境一样）。 */
   release?: Deps['release'];
   /**
@@ -188,6 +190,7 @@ function wire<S extends Store>(
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
+    ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
     ...(options.release ? { release: options.release } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {

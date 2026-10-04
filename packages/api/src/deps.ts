@@ -1,4 +1,5 @@
 import type { AlertWorkPort } from '@fleet-dao/store';
+import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
@@ -54,6 +55,11 @@ export interface Deps {
    * 那张表）的额度页照样回，另写一句 unavailable，不拿空冒充「没事」。
    */
   orgSwitch?: OrgSwitchPort | undefined;
+  /**
+   * 拼车额度对账（#194 方案 4.7，carpool-reconcile-view.ts）：额度页写「这一窗本机记到花了 $X，接口说用了 $Y」。没给（开发、内存版
+   * 没有会话和额度读数那几张表）的额度页照样回，另写一句 unavailable，不拿「对得上」冒充。
+   */
+  carpoolReconcile?: CarpoolReconcilePort | undefined;
   /**
    * 路由两层里每条路由的思考档位（#470，routing-efforts.ts）：驾驶舱「思考档位」页读、改。没给（开发、内存版没有那张表）的
    * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。

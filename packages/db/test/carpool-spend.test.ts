@@ -1,10 +1,22 @@
 // 拼车池的并发上限和窗口里本机记到的花费（queries/carpool-spend.ts，#194 方案 4.7）：只认带组织类型 carpool 的池；
 // 花费没记到的会话单独数、不当 0 美元；读不了照常抛。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { carpoolPoolCaps, carpoolWindowSpend } from '../src/queries/carpool-spend.ts';
+import { carpoolApiWindow, carpoolPoolCaps, carpoolWindowSpend } from '../src/queries/carpool-spend.ts';
 import { startRun } from '../src/queries/runs.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addRun, addTask, ago, catalog, HOUR, MIN, NOW } from './helpers.ts';
+import {
+  addRepo,
+  addRoute,
+  addRun,
+  addTask,
+  addWindow,
+  ago,
+  catalog,
+  HOUR,
+  later,
+  MIN,
+  NOW,
+} from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -107,5 +119,40 @@ describe('carpoolWindowSpend：窗口里本机记到的拼车花费', () => {
     } finally {
       await t.client.exec('alter table runs_unreadable rename to runs');
     }
+  });
+});
+
+describe('carpoolApiWindow：接口读到的拼车 5 小时美元窗口', () => {
+  const usd = (poolId: string, readAt: Date, used: number, over: Record<string, unknown> = {}) =>
+    addWindow(t.db, {
+      poolId,
+      window: '5h',
+      label: 'carpool_5h_usd',
+      unit: 'usd',
+      used,
+      limit: 80,
+      utilization: used / 80,
+      resetsAt: later(2 * HOUR),
+      reading: 'measured',
+      source: 'reclaude-carpool',
+      readAt,
+      ...over,
+    });
+
+  it('没读到过回 null（不当成没用）；读到了回已用、上限、清零时刻；不是拼车池、不是接口读的、不是美元的都不算', async () => {
+    await asCarpool('relay-a');
+    expect(await carpoolApiWindow(t.db)).toBeNull();
+    await usd('relay-b', ago(MIN), 9); // 不是拼车池
+    await usd('relay-a', ago(2 * MIN), 20, { label: 'x_percent', unit: 'percent', source: 'claude-usage' }); // 不是接口的美元
+    expect(await carpoolApiWindow(t.db)).toBeNull();
+    await usd('relay-a', ago(3 * MIN), 31.5);
+    expect(await carpoolApiWindow(t.db)).toEqual({
+      poolId: 'relay-a',
+      used: 31.5,
+      limit: 80,
+      resetsAt: later(2 * HOUR),
+      readAt: ago(3 * MIN),
+      staleSince: null,
+    });
   });
 });
