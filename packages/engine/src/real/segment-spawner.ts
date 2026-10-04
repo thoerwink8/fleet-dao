@@ -34,6 +34,7 @@ import {
   type WiredHost,
   wiredHostNames,
 } from './hosts.ts';
+import { type MemoryPeakDeps, type MemoryPeakResult, sampleMemoryPeak } from './memory-peak.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 /** 总时长比 one-shot 的时限早多久到（毫秒）：驱动先收场，one-shot 的时限信号是兜底。 */
@@ -58,6 +59,11 @@ export interface SegmentSpawnerDeps {
    * 要不要当场切独享。只发出去、不等：切号要等这一个会话收场，等它会互相卡住。抛了只记日志。
    */
   onCarpoolRejection?: (rejection: CarpoolRejection) => void;
+  /**
+   * 会话 scope 的内存峰值怎么读（real/memory-peak.ts 的 productionMemoryPeak）：给了就采、写进 runs.memory_peak_mb（#948）；
+   * 不给（测试、没有 cgroup 的开发机）就不采，那一列留空。
+   */
+  memoryPeak?: MemoryPeakDeps;
   /** 帮手脚本、sudo 前缀（测试里给假帮手）。 */
   helper?: string;
   sudo?: readonly string[];
@@ -206,6 +212,15 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       session: { mode: 'new', id: driver.newSessionId(runId).id },
       purpose: 'work',
     };
+    // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
+    const peak = deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
+    let peakResult: MemoryPeakResult | undefined;
+    const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
+      if (!peak || peakResult) return peakResult;
+      peakResult = await peak.stop();
+      if (peakResult.why !== undefined) log('会话内存峰值没读到', { runId, why: peakResult.why });
+      return peakResult;
+    };
     try {
       const report = await driver.run(spec, {
         signal: cmd.signal,
@@ -214,6 +229,13 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           : {}),
       });
       const outcome = outcomeOfReport(report);
+      const measured = await finishPeak();
+      if (measured) {
+        outcome.facts = {
+          ...outcome.facts,
+          ...(measured.mb !== undefined ? { memoryPeakMb: measured.mb } : { memoryPeakWhy: measured.why }),
+        };
+      }
       if (
         deps.onCarpoolRejection &&
         route.orgKind === 'carpool' &&
@@ -243,6 +265,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       }
       return outcome;
     } finally {
+      await finishPeak().catch(() => undefined);
       await deps.trees.remove(tmpDir).catch((err: unknown) => {
         log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
           runId,
