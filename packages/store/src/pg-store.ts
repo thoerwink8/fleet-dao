@@ -54,6 +54,21 @@ import {
 } from '@fleet-dao/db';
 import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import {
+  claimedCommandResult,
+  commandKey,
+  commandTarget,
+  judgeExistingCommand,
+  tookOverResult,
+} from './command-logic.ts';
+import {
+  ATTEMPT_FREE_STATUS,
+  claimedResult,
+  judgeCarriers,
+  outcomeFields,
+  RECLAIMABLE_STATUSES,
+  reclaimMissStatus,
+} from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import {
   feishuMessageKey,
@@ -66,6 +81,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { nextCursorOf, pageOfSorted } from './paging.ts';
 import {
   type AskRecord,
   type AuditRecord,
@@ -88,7 +104,6 @@ import {
   type Page,
   type PasswordCredentials,
   type PullRequestRecord,
-  REPO_NOT_MANAGED,
   type RunPlan,
   type SettingRecord,
   type Store,
@@ -365,7 +380,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     return out;
   }
 
-  const commandKey = (runId: string, key: string) => `fleet:${runId}:${key}`;
   /** 还没做完、而且还是这张凭据占着的那一行。 */
   const heldBy = (key: string, token: string) =>
     and(
@@ -738,12 +752,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const subtaskOfRun = new Map(timeline.runs.map((r) => [r.id, r.subtaskId]));
       // 库给的是按 (at, id) 正序，倒过来就是倒序。
       const all = timeline.events.map((e) => timelineRecord(e, subtaskOfRun)).reverse();
-      let start = 0;
-      if (cursor) {
-        start = all.findIndex((r) => r.at < cursor.at || (r.at === cursor.at && r.id < cursor.id));
-        if (start === -1) start = all.length;
-      }
-      const items = all.slice(start, start + page.limit);
+      const { items, nextCursor } = pageOfSorted(all, cursor, page.limit);
       // 操作记录的 after（回答原文、交活被退回的原因……）和 error 库里的时间线不带，按这一页里的编号补上。
       const auditIds = items.filter((r) => r.id.startsWith('audit:')).map((r) => Number(r.id.slice(6)));
       if (auditIds.length > 0) {
@@ -764,11 +773,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           };
         }
       }
-      const last = items.at(-1);
-      return {
-        items,
-        nextCursor: last && start + page.limit < all.length ? `${last.at}|${last.id}` : undefined,
-      };
+      return { items, nextCursor };
     },
     async listAsks(taskId) {
       if (!isUuid(taskId)) return [];
@@ -914,7 +919,10 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         }),
       );
       const last = items.at(-1);
-      return { items, nextCursor: rows.length > limit && last ? `${last.createdAt}|${last.id}` : undefined };
+      return {
+        items,
+        nextCursor: nextCursorOf(last && { at: last.createdAt, id: last.id }, rows.length > limit),
+      };
     },
     async resolveNotification({ id, by }, entry) {
       if (!isUuid(id)) return 'not_found';
@@ -954,8 +962,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .orderBy(sql`date_trunc('milliseconds', ${auditLog.at}) desc`, desc(auditLog.id))
         .limit(limit + 1);
       const items = rows.slice(0, limit).map(toAudit);
-      const last = items.at(-1);
-      return { items, nextCursor: rows.length > limit && last ? `${last.at}|${last.id}` : undefined };
+      return { items, nextCursor: nextCursorOf(items.at(-1), rows.length > limit) };
     },
     async listSettings() {
       const rows = await db.select().from(settings).orderBy(asc(settings.key));
@@ -1111,15 +1118,23 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         const at = now();
         const inserted = await db
           .insert(idempotencyKeys)
-          .values({ key: k, action, target: `run:${runId}`, claimedAt: at })
+          .values({ key: k, action, target: commandTarget(runId), claimedAt: at })
           .onConflictDoNothing()
           .returning({ key: idempotencyKeys.key });
-        if (inserted.length > 0) return { status: 'claimed', token: iso(at) };
+        if (inserted.length > 0) return claimedCommandResult(iso(at));
         const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, k));
         if (!row) continue;
-        if (row.action !== action) return { status: 'other-action', action: row.action };
-        if (row.completedAt !== null) return { status: 'done', result: row.result };
-        if (!(row.claimedAt < cutoff)) return { status: 'in-flight', claimedAt: iso(row.claimedAt) };
+        const verdict = judgeExistingCommand(
+          {
+            action: row.action,
+            claimedAt: iso(row.claimedAt),
+            completed: row.completedAt !== null,
+            result: row.result,
+          },
+          action,
+          takeOverBefore,
+        );
+        if (verdict.status !== 'take-over') return verdict;
         // 条件更新是原子的：两个请求同时来接，后一个等前一个提交后重新判条件，claimed_at 已经变新，接不到。
         const taken = await db
           .update(idempotencyKeys)
@@ -1132,7 +1147,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             ),
           )
           .returning({ key: idempotencyKeys.key });
-        if (taken.length > 0) return { status: 'claimed', token: iso(at), tookOver: true };
+        if (taken.length > 0) return tookOverResult(iso(at));
       }
       throw new Error(`幂等键 ${key} 反复被别的请求抢占，稍后再试`);
     },
@@ -1172,8 +1187,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
                 ne(githubEventVersions.deliveryId, delivery.id),
               ),
             );
-          if (carriers.some((c) => c.status !== 'ignored')) return undefined;
-          seenBefore = carriers.some((c) => c.reason !== REPO_NOT_MANAGED);
+          const verdict = judgeCarriers(carriers);
+          if (verdict.duplicate) return undefined;
+          seenBefore = verdict.seenBefore;
         }
         const rows = await tx
           .insert(githubEvents)
@@ -1205,17 +1221,14 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return { inserted: rows.length > 0, seenBefore };
       });
       if (attempt === undefined) return { status: 'duplicate' };
-      const seen = attempt.seenBefore ? { seenBefore: true } : {};
-      if (attempt.inserted) return { status: 'claimed', token: iso(at), retry: false, ...seen };
+      if (attempt.inserted) return claimedResult(iso(at), false, attempt.seenBefore);
       // 已经有这一条：条件更新是原子的，两个请求同时来接，只有一个接得到
       const taken = await db
         .update(githubEvents)
         .set(reclaimSet(at))
         .where(and(eq(githubEvents.deliveryId, delivery.id), reclaimableRow(new Date(staleBefore))))
         .returning({ id: githubEvents.deliveryId });
-      return taken.length > 0
-        ? { status: 'claimed', token: iso(at), retry: true, ...seen }
-        : { status: 'duplicate' };
+      return taken.length > 0 ? claimedResult(iso(at), true, attempt.seenBefore) : { status: 'duplicate' };
     },
     async reclaimDelivery(id, { staleBefore, force }) {
       const at = now();
@@ -1240,8 +1253,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .select({ status: githubEvents.status })
         .from(githubEvents)
         .where(eq(githubEvents.deliveryId, id));
-      if (!existing) return { status: 'not_found' };
-      return { status: existing.status === 'processing' ? 'in_flight' : 'finished' };
+      return { status: reclaimMissStatus(existing?.status) };
     },
 
     // —— 飞书 ——
@@ -1729,12 +1741,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       });
     },
     async finishDelivery(id, token, outcome) {
+      const fields = outcomeFields(outcome);
       const rows = await db
         .update(githubEvents)
         .set({
-          status: outcome.status,
-          reason: outcome.status === 'accepted' ? null : outcome.reason,
-          note: outcome.status === 'accepted' ? (outcome.note ?? null) : null,
+          status: fields.status,
+          reason: fields.reason ?? null,
+          note: fields.note ?? null,
           finishedAt: now(),
         })
         .where(
@@ -1929,7 +1942,7 @@ function versionLockKey(v: Pick<GitHubObjectVersion, 'object' | 'version'>): str
 /** 上次出错的、在等着的、处理中但占用早于 stale 的（那一次多半死了）：可以接过来重做。 */
 function reclaimableRow(stale: Date) {
   return or(
-    inArray(githubEvents.status, ['failed', 'waiting']),
+    inArray(githubEvents.status, [...RECLAIMABLE_STATUSES]),
     and(eq(githubEvents.status, 'processing'), lt(githubEvents.claimedAt, stale)),
   );
 }
@@ -1941,7 +1954,7 @@ function reclaimableRow(stale: Date) {
 function reclaimSet(at: Date) {
   return {
     status: 'processing' as const,
-    attempts: sql`${githubEvents.attempts} + case when ${githubEvents.status} = 'waiting' then 0 else 1 end`,
+    attempts: sql`${githubEvents.attempts} + case when ${githubEvents.status} = ${ATTEMPT_FREE_STATUS} then 0 else 1 end`,
     claimedAt: at,
     finishedAt: null,
   };
