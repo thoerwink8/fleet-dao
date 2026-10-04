@@ -8,7 +8,6 @@ import {
   latestRunOfSession,
   markSessionRunStarted,
   openSessionRun,
-  openSessionRuns,
   requestSessionStop,
   routeLaunchFacts,
   taskContext,
@@ -400,61 +399,6 @@ describe('latestRunOfSession', () => {
 
   it('没有这个执行体会话编号回 null', async () => {
     expect(await latestRunOfSession(t.db, 'nobody-home')).toBeNull();
-  });
-});
-
-describe('openSessionRuns', () => {
-  it('只要还没结束的；给了 runAsUser 就只要那个会话用户的', async () => {
-    // 另一个用户用停用的 fleet-agent-dedicated：库里只剩历史行会带它
-    const retired = runId();
-    const carpool = runId();
-    const ended = runId();
-    await openSessionRun(t.db, {
-      id: retired,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
-      worktreePath: null,
-    });
-    await openSessionRun(t.db, {
-      id: carpool,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-carpool',
-      worktreePath: null,
-    });
-    await openSessionRun(t.db, {
-      id: ended,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
-      worktreePath: null,
-    });
-    await markSessionRunStarted(t.db, { id: ended, startedAt: NOW, sessionId: 's', handle: null });
-    await finishSessionRun(t.db, { id: ended, outcome: 'ok', endedAt: later(MIN) });
-
-    expect(new Set((await openSessionRuns(t.db)).map((r) => r.id))).toEqual(new Set([retired, carpool]));
-    expect((await openSessionRuns(t.db, { runAsUser: 'fleet-agent-carpool' })).map((r) => r.id)).toEqual([
-      carpool,
-    ]);
   });
 });
 

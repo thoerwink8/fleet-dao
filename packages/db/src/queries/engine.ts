@@ -273,25 +273,8 @@ export async function latestRunOfSession(db: Db, sessionId: string): Promise<Ses
   return row ? mapSessionRun(row.run, row.stop) : null;
 }
 
-/** 还没结束的会话；给了 runAsUser 就只要这个会话用户的。 */
-export async function openSessionRuns(
-  db: Db,
-  filter: { runAsUser?: string } = {},
-): Promise<SessionRunState[]> {
-  const rows = await db
-    .select({ run: sessionRuns, stop: sessionStops })
-    .from(sessionRuns)
-    .leftJoin(sessionStops, eq(sessionStops.runId, sessionRuns.id))
-    .where(
-      and(
-        isNull(sessionRuns.endedAt),
-        filter.runAsUser !== undefined ? eq(sessionRuns.runAsUser, filter.runAsUser as RunAsUser) : undefined,
-      ),
-    );
-  return rows.map((r) => mapSessionRun(r.run, r.stop));
-}
-
-// 选路要的会话事实（池的并发、熔断、战绩、估算的用量）两张表并起来读，都在 pool-runs.ts：别在这里另写只读 session_runs 的（#758）。
+// 选路要的会话事实（池的并发、熔断、战绩、半开时在途的试探、估算的用量）两张表并起来读，都在 pool-runs.ts：别在这里另写只读
+// session_runs 的（#735、#758；原来的 openSessionRuns、routeOutcomesSince 就是这么漏掉三段的会话的）。
 
 // ---- 起会话要的事实
 

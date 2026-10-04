@@ -339,20 +339,22 @@ describe('选路', () => {
       expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     });
 
-    it('【故意造出的失败】runs 读不了：判全熔断明确报错，不当成没有三段的会话', async () => {
+    it('【故意造出的失败】runs 读不了：选路、判全熔断都明确报错，不当成没有三段的会话', async () => {
       await world(t.db);
       await t.client.exec('alter table runs rename to runs_unreadable');
       try {
-        const err = await ports()
-          .stageAllOpen('execute')
-          .then(
+        const chains = async (work: Promise<unknown>, what: string) => {
+          const err = await work.then(
             () => null,
             (e: unknown) => e,
           );
-        expect(err, '读不了 runs 却判出了全熔断与否').not.toBeNull();
-        const messages: string[] = [];
-        for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
-        expect(messages.join('\n')).toContain('relation "runs" does not exist');
+          expect(err, `读不了 runs 却${what}`).not.toBeNull();
+          const messages: string[] = [];
+          for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+          expect(messages.join('\n')).toContain('relation "runs" does not exist');
+        };
+        await chains(pick({ stage: 'execute' }), '派出了路由');
+        await chains(ports().stageAllOpen('execute'), '判出了全熔断与否');
       } finally {
         await t.client.exec('alter table runs_unreadable rename to runs');
       }

@@ -86,6 +86,8 @@ describe('one-shot.ts', () => {
       expect(recorded[0]).toMatchObject({
         runId: started[0]?.runId,
         outcome: 'spawn_failed',
+        // 起不来不是路由的错（#758）：不进熔断、战绩
+        routeOutcome: 'neutral',
         failureReason: '起子进程没起成：spawn ENOENT',
       });
     } finally {
@@ -208,9 +210,9 @@ describe('one-shot.ts', () => {
       const owner = { runId: r.runId, segment: 'manual', issueNumber: 216, ...OWNER };
       expect(started).toEqual([{ ...owner, model: 'fake-model', startedAt: r.startedAt }]);
       expect(recorded).toHaveLength(1);
-      const { endedAt, outcome, ...opening } = recorded[0] as NonNullable<(typeof recorded)[0]>;
+      const { endedAt, outcome, routeOutcome, ...opening } = recorded[0] as NonNullable<(typeof recorded)[0]>;
       expect(opening).toEqual(started[0]);
-      expect([endedAt, outcome]).toEqual([r.endedAt, 'done']);
+      expect([endedAt, outcome, routeOutcome]).toEqual([r.endedAt, 'done', 'ok']);
     } finally {
       await cleanup();
     }
@@ -323,10 +325,12 @@ describe('切号叫停（deps.stop，#59）：结局 org_switch，不是 killed�
       expect(r.outcome).toBe('org_switch');
       expect(r.failureReason).toBe(`${WHY}（会话被停下）`);
       expect(started).toHaveLength(1);
+      // 切号停的不算这条路由的账（#758）：熔断、战绩看不见这一次
       expect(recorded).toEqual([
         expect.objectContaining({
           runId: r.runId,
           outcome: 'org_switch',
+          routeOutcome: 'neutral',
           failureReason: `${WHY}（会话被停下）`,
         }),
       ]);
