@@ -498,24 +498,25 @@ async function deployStep(io, st, now) {
   }
   st.current = current;
 
+  // 上一轮的发布没收到结果（那一轮被杀了、机器重启了）：发布锁还占着就接着等，空了按现在在用的是谁定成败。
+  // 收尾排在读版本标记之前：一个 v<N> 标记都没有、或标记读不到时下面 markerStep 会让这一轮提前返回，收尾排在它后面就永远走不到
+  // （本机档一直没有版本标记，健康页 deploy_lag 因此永远报「跑了 N 小时还没完」，#802）。
+  let busyWhy = null;
+  if (st.attempt?.result === 'running') {
+    try {
+      busyWhy = (await io.releaseBusy()) ? `上一轮的自动发布（${short(st.attempt.sha)}）还在跑` : null;
+    } catch (e) {
+      busyWhy = `上一轮的自动发布还在不在跑没查成：${why(e)}`;
+    }
+    if (!busyWhy) settleDangling(st, now, current);
+  }
+
   // 版本标记：这一轮发什么全看它。读不到 / 认不出 / 不是主线上的提交：报警、不发主线头（下面 markerStep 收尾）
   const marker = await markerStep(io, st, now, commits);
   if (!marker) return current;
-
-  if (st.attempt?.result === 'running') {
-    // 上一轮的发布没收到结果（那一轮被杀了、机器重启了）：发布锁还占着就接着等，空了按现在在用的是谁定成败
-    let still;
-    try {
-      still = await io.releaseBusy();
-    } catch (e) {
-      act(st, now, 'release-busy', `上一轮的自动发布还在不在跑没查成：${why(e)}`);
-      return current;
-    }
-    if (still) {
-      act(st, now, 'release-busy', `上一轮的自动发布（${short(st.attempt.sha)}）还在跑`);
-      return current;
-    }
-    settleDangling(st, now, current);
+  if (busyWhy) {
+    act(st, now, 'release-busy', busyWhy);
+    return current;
   }
 
   // 在用的就是这个标记指向的提交：这一版已经上过线了，收工
