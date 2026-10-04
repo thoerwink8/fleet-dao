@@ -441,6 +441,23 @@ jobs:
           esac
       # 跑完核对「实际跑的测试文件 == 分到的这一台」（命中缓存的：盖住的 + 跑的 == 分到的）：vitest 的位置参数是子串过滤，
       # 交给它清单也不等于它正好跑这些；少跑、多跑都红并点名（底线：没跑成不许当通过）。
+      - name: 实验（不合并）：同一台同一批文件换并行进程数再跑，量秒数
+        if: always()
+        continue-on-error: true
+        env:
+          BOX_FILE: ${{ steps.box.outputs.box_file }}
+        run: |
+          set -uo pipefail
+          echo "cpus=$(node -p 'require("os").availableParallelism()') mem=$(free -m | awk '/Mem:/{print $2}')MB"
+          mapfile -t box <"$BOX_FILE"
+          for variant in "w4:--maxWorkers=4" "w6:--maxWorkers=6" "w3:--maxWorkers=3" "w8:--maxWorkers=8" "threads:--pool=threads"; do
+            name=${variant%%:*}; flag=${variant#*:}
+            s=$SECONDS
+            pnpm exec vitest run "${box[@]}" $flag --reporter=dot >"$RUNNER_TEMP/ab-$name.log" 2>&1
+            rc=$?
+            echo "AB $name rc=$rc secs=$((SECONDS - s)) $(grep -E 'Duration' "$RUNNER_TEMP/ab-$name.log" | sed 's/\x1b\[[0-9;]*m//g' | head -1)"
+            grep -E "FAIL|Tests  " "$RUNNER_TEMP/ab-$name.log" | sed 's/\x1b\[[0-9;]*m//g' | head -5
+          done
       - name: 核对这一台跑的 == 分到的
         if: success()
         env:
