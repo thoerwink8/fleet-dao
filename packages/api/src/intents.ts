@@ -275,6 +275,36 @@ export function bumped(i: IntentRecord, now: Date, card: { urgent: boolean } | n
 export const hasLiveMessage = (messages: readonly IntentMessageRecord[]) =>
   messages.some((m) => m.recalledAt === undefined);
 
+/**
+ * 这一段有卡在等着发：定了到期时刻、卡上显示的不是最新一版（没发过也算）、而且有东西可发（卡发过、或还有一条可读的原话）。
+ * pg 版把同样的三条写在 dueCards 的 SQL 里（card_due_at、card_shown_rev < card_rev、exists 一条没撤回的原话），改这里要对着改。
+ */
+export const isCardPending = (card: IntentRecord['card'], hasLive: boolean): boolean =>
+  card.dueAt !== undefined &&
+  (card.shownRev === undefined || card.shownRev < card.rev) &&
+  (card.messageId !== undefined || hasLive);
+
+/** 到期的卡按到期先后、同一刻按段号排（pg 版是 order by card_due_at, seq）。 */
+export const byCardDue = (a: IntentRecord, b: IntentRecord): number =>
+  Date.parse(a.card.dueAt ?? '') - Date.parse(b.card.dueAt ?? '') || a.seq - b.seq;
+
+/** 回执里说的段不存在（认不出、不是合法编号）：跳过时写的原因。 */
+export const NO_SUCH_INTENT = '没有这段意图';
+
+/**
+ * 撤回事件和库里已有的对不上会话：消息记在另一个会话（原话那边）、或这个消息编号的撤回已记在另一个会话（墓碑那边），
+ * 回原因，没冲突回 undefined。原话那边先判。
+ */
+export function recallConflict(
+  stored: { chatId: string } | undefined,
+  tombstone: { chatId: string } | undefined,
+  chatId: string,
+): string | undefined {
+  if (stored && stored.chatId !== chatId) return '要撤回的这条原话记在另一个会话里';
+  if (tombstone && tombstone.chatId !== chatId) return '这个消息编号的撤回已经记在另一个会话里';
+  return undefined;
+}
+
 export type LinkPlan =
   | { status: 'linked' | 'added' | 'updated'; next: IntentRecord }
   | { status: 'already_linked'; issues: string[] }

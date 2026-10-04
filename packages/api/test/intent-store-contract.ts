@@ -316,6 +316,16 @@ export function describeIntentStoreContract(name: string, make: MakeIntentStore)
         expect((await intent(1)).messages[0]?.recalledAt).toBeUndefined();
       });
 
+      it('【故意造出的失败】墓碑记在一个会话，另一个会话又撤同一个消息编号：reused 并写明，墓碑不动', async () => {
+        const m = said();
+        const recall = { messageId: m.messageId, recalledAt: at(1), source: 'event' } as const;
+        expect(await store.intakeRecall({ ...recall, chatId: 'oc_team' })).toEqual({ status: 'tombstone' });
+        const other = await store.intakeRecall({ ...recall, chatId: 'oc_other' });
+        expect(other).toMatchObject({ status: 'reused' });
+        expect(other.status === 'reused' ? other.why : '').toContain('另一个会话');
+        expect(await store.intakeMessage(m)).toMatchObject({ status: 'recalled' });
+      });
+
       it('开成单之后撤回：标「开单后在飞书撤回了」，要人定删不删', async () => {
         const m = said();
         await store.intakeMessage(m);
@@ -378,6 +388,13 @@ export function describeIntentStoreContract(name: string, make: MakeIntentStore)
 
         await store.intakeMessage(said({ sentAt: at(20), atBot: true }));
         expect((await store.dueCards(10)).items.map((i) => i.intent.seq)).toEqual([1, 2]);
+      });
+
+      it('到期的卡先到期的在前（不是按段号）：后开的段 @机器人 马上到期，排在先开的那段前面', async () => {
+        await store.intakeMessage(said({ chatId: 'oc_a' }));
+        await store.intakeMessage(said({ chatId: 'oc_b', atBot: true }));
+        clock.now = new Date(T0.getTime() + CARD_QUIET_MS.group);
+        expect((await store.dueCards(10)).items.map((i) => i.intent.seq)).toEqual([2, 1]);
       });
 
       it('发了、是最新的：不再给；又来了新话：停下来后原地改同一张（带着卡的编号）', async () => {
@@ -463,6 +480,8 @@ export function describeIntentStoreContract(name: string, make: MakeIntentStore)
           id,
         ]);
         expect(report.skipped[2]?.why).toContain('第 9 版');
+        expect(report.skipped[0]?.why).toBe('没有这段意图');
+        expect(report.skipped[1]?.why).toBe('没有这段意图');
       });
     });
 
