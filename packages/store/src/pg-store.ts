@@ -53,7 +53,6 @@ import {
   users,
 } from '@fleet-dao/db';
 import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
-import { isSerial, isUuid, parseCursor } from '@fleet-dao/store';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { testRunOf } from './done-check.ts';
 import {
@@ -66,7 +65,7 @@ import {
   reviseReplay,
   withNote,
 } from './feishu-records.ts';
-import { PublicHealthError } from './health.ts';
+import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
   type AskRecord,
   type AuditRecord,
@@ -1981,34 +1980,6 @@ export const DB_STATEMENT_TIMEOUT_MS = 5_000;
 export function withStatementTimeout(url: string, ms = DB_STATEMENT_TIMEOUT_MS): string {
   if (/[?&]statement_timeout=/.test(url)) return url;
   return `${url}${url.includes('?') ? '&' : '?'}statement_timeout=${ms}`;
-}
-
-/** 健康检查探库的上限：比单项上限（health.ts 的 3 秒）早到点，报出来的是「查库超时」而不是笼统的超时。 */
-const PROBE_TIMEOUT_MS = 2_000;
-
-/**
- * 健康检查用：真去读登录和首页要用的表（users、repos、tasks），本事务里等锁和跑语句都限时，到点报红。
- * 只 select 1 查不出「表被锁住」：锁表时它照样秒回，接口却全卡住。
- */
-export async function probeDb(db: Db, timeoutMs = PROBE_TIMEOUT_MS): Promise<void> {
-  try {
-    await db.transaction(async (tx) => {
-      const ms = String(timeoutMs);
-      await tx.execute(
-        sql`select set_config('lock_timeout', ${ms}, true), set_config('statement_timeout', ${ms}, true)`,
-      );
-      await tx.execute(
-        sql`select (select 1 from ${users} limit 1), (select 1 from ${repos} limit 1), (select 1 from ${tasks} limit 1)`,
-      );
-    });
-  } catch (err) {
-    const code = sqlState(err);
-    // 57014 = 语句超时，55P03 = 等锁超时。
-    if (code === '57014' || code === '55P03') {
-      throw new PublicHealthError('timeout', `查库超过 ${timeoutMs / 1000} 秒没回来（多半有表被锁住）`);
-    }
-    throw err;
-  }
 }
 
 /** Postgres 的错误码（SQLSTATE）。drizzle 把驱动的错误包在 cause 里，往里找几层。 */

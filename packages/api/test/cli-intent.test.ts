@@ -7,9 +7,9 @@ import {
   IntentCliShowOutput,
   IntentCliWriteOutput,
 } from '@fleet-dao/shared';
+import { IDS } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { type CliDeps, main } from '../src/cli.ts';
-import { IDS } from '../src/dev-fixtures.ts';
 import { createMemoryIntentStore, type IntentStore } from '../src/intent-store.ts';
 
 const T0 = new Date('2026-10-04T06:00:00.000Z');

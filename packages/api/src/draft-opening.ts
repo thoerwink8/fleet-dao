@@ -2,7 +2,7 @@
 // 确认时当场开一次、最多等几秒；没成的留在「待开单」，这里每分钟补开一轮，按次数退避。开单接上之前一律没成、留着，不丢。
 // 时限自己掐，不指望实现理会 signal：到点没回就记「开单超时」、算没成；那次调用留在 inflight 里直到真的结束，
 // 期间这张草稿不开第二次。一直开不成由健康检查（draft_opener、draft_backlog）报红。
-import { clip } from './feishu-records.ts';
+import { clip } from '@fleet-dao/store';
 import { issueTitle } from './feishu-views.ts';
 import { PublicHealthError } from './health.ts';
 import {

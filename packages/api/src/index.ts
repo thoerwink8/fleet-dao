@@ -1,6 +1,20 @@
 // 驾驶舱后端（Hono）：登录、接口、实时推送、发给工作流的信号、fleet 命令接口、GitHub 事件接收。
 
-export { isSerial, isUuid, jsonLogger, parseCursor, silentLogger } from '@fleet-dao/store';
+// 过渡：这些搬进 @fleet-dao/store 了，先从这里转出去，引擎第 4 步改完就删。
+export {
+  createMemoryStore,
+  createPgStore,
+  DB_STATEMENT_TIMEOUT_MS,
+  emptyData,
+  isSerial,
+  isUuid,
+  jsonLogger,
+  type MemoryData,
+  parseCursor,
+  silentLogger,
+  sqlState,
+  withStatementTimeout,
+} from '@fleet-dao/store';
 export {
   AGENT_TOKEN_MAX_TTL_SECONDS,
   type AgentTokenCheck,
@@ -28,6 +42,7 @@ export {
   startPgChangeFeed,
 } from './changes.ts';
 export { type Config, ConfigError, loadConfig } from './config.ts';
+export { probeDb } from './db-probe.ts';
 export { readDeployLagInput } from './deploy-lag.ts';
 export type { Deps } from './deps.ts';
 export {
@@ -60,14 +75,6 @@ export {
   versionsOf,
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
-export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
-export {
-  createPgStore,
-  DB_STATEMENT_TIMEOUT_MS,
-  probeDb,
-  sqlState,
-  withStatementTimeout,
-} from './pg-store.ts';
 export * from './ports.ts';
 export {
   type GitHubReconcileResult,

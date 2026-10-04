@@ -3,10 +3,10 @@
 // 只收 PR 和 CI 的事件（issue、评论不收，#556）：单子由引擎每 5 分钟自己去 GitHub 上拉，对账不管它们。
 import { generateKeyPairSync } from 'node:crypto';
 import { type AppCredentials, createGitHub, memoryLedger } from '@fleet-dao/github';
+import type { MemoryData } from '@fleet-dao/store';
+import { devFixtures } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { devFixtures } from '../src/dev-fixtures.ts';
 import { createGitHubIntake, githubEventsCheck, pollDeliveryId } from '../src/github.ts';
-import type { MemoryData } from '../src/memory-store.ts';
 import type { GitHubDelivery } from '../src/ports.ts';
 import { MAX_AUTO_REPLAYS, reconcileGitHub, reconcilerOptions } from '../src/reconcile.ts';
 import { deliverGithub as deliver, harness, T0 } from './harness.ts';

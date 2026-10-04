@@ -1,7 +1,8 @@
 // 意图存储契约（#553 第 4 条）：内存版（参照实现）和 Postgres 版过同一套，入口在 intent-store.memory.test.ts /
 // intent-store.pg.test.ts。方案第六节 B2、B5、B8、B9、B11、B12 落在存储这一层的那半在这里；接口那半在 intent-routes.test.ts。
+
+import { IDS } from '@fleet-dao/store';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { IDS } from '../src/dev-fixtures.ts';
 import type { IntakeMessage, IntentAudit, IntentStore } from '../src/intent-store.ts';
 import { CARD_QUIET_MS, composeCard, intentDetail, SEGMENT_WINDOW_MS } from '../src/intents.ts';
 

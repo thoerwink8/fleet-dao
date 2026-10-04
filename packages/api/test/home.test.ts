@@ -2,9 +2,9 @@
 // 内存版和 PG 版都回港一次（PGlite 真迁移）；语义（怎么分三块、verified_pending 不写成失败、读不到不容空）都在这里按内存版测。
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { HomeResponseSchema, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
+import type { MemoryData } from '@fleet-dao/store';
+import { devFixtures, IDS } from '@fleet-dao/store';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { devFixtures, IDS } from '../src/dev-fixtures.ts';
-import type { MemoryData } from '../src/memory-store.ts';
 import { type Harness, type HarnessOptions, harness, pgHarness, T0 } from './harness.ts';
 
 const HOME_PATH = WEB_API_PREFIX + WebRoutes.home.path;

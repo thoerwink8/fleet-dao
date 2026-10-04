@@ -14,8 +14,8 @@ import {
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { devFixtures } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { devFixtures } from '../src/dev-fixtures.ts';
 import { WorkflowGoneError } from '../src/ports.ts';
 import { DEV_RUN_ID, DEV_USER_ID, errorCode, harness, IDS, T0, write } from './harness.ts';
 

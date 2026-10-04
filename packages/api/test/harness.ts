@@ -4,6 +4,16 @@ import { createHmac } from 'node:crypto';
 import type { TestDb } from '@fleet-dao/db/testing';
 import { resetTestDb } from '@fleet-dao/db/testing';
 import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import {
+  createMemoryStore,
+  createPgStore,
+  DEV_RUN_ID,
+  DEV_USER_ID,
+  devFixtures,
+  IDS,
+  type MemoryData,
+} from '@fleet-dao/store';
+import { seedPg } from '@fleet-dao/store/testing';
 import type { Hono } from 'hono';
 import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
@@ -11,13 +21,10 @@ import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed }
 import type { Config } from '../src/config.ts';
 import type { DemoPublisher } from '../src/demo.ts';
 import type { Deps } from '../src/deps.ts';
-import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { type DraftOpenLimits, type DraftOpenRunner, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { createMemoryIntentStore } from '../src/intent-store.ts';
-import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
 import type { ScryptParams } from '../src/password.ts';
-import { createPgStore } from '../src/pg-store.ts';
 import type {
   ChangeFeed,
   DraftOpener,
@@ -32,7 +39,6 @@ import type {
   WorkflowControl,
 } from '../src/ports.ts';
 import type { SseRelay } from '../src/sse.ts';
-import { seedPg } from './pg-fixtures.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
 
