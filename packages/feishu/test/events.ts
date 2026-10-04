@@ -61,7 +61,9 @@ export function messageEvent(o: {
   const mentions = fixture('message-group-at').event.message.mentions;
   m.mentions = [
     ...(mention ? mentions : []),
-    ...(o.mentionAll ? [{ key: '@_all', id: { union_id: '', user_id: '', open_id: '' }, name: '所有人' }] : []),
+    ...(o.mentionAll
+      ? [{ key: '@_all', id: { union_id: '', user_id: '', open_id: '' }, name: '所有人' }]
+      : []),
   ];
   if (m.mentions.length === 0) delete m.mentions;
   const root = o.rootId ?? o.replyTo;

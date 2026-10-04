@@ -86,7 +86,9 @@ function parseRaw(rawContent: string): Record<string, unknown> | undefined {
 }
 
 /** 存进「原话」的那段字。 */
-export function intakeText(msg: Pick<InboundMessage, 'msgType' | 'text' | 'rawContent' | 'mentions'>): string {
+export function intakeText(
+  msg: Pick<InboundMessage, 'msgType' | 'text' | 'rawContent' | 'mentions'>,
+): string {
   if (!SDK_KNOWN.has(msg.msgType)) return `[认不出的消息类型 ${msg.msgType}]`;
   const media = placeholder(msg.msgType, parseRaw(msg.rawContent));
   if (media !== undefined) return media;

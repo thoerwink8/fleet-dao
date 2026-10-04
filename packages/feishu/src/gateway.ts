@@ -248,7 +248,12 @@ export function createGateway(o: GatewayOptions): Gateway {
   }
 
   /** 记下这个会话要补漏：从最早一句没存成的起翻；在话题里的，那个话题另外翻。 */
-  function wantBackfill(chatId: string, chatKind: MissedChat['chatKind'], sinceMs: number, threadId?: string) {
+  function wantBackfill(
+    chatId: string,
+    chatKind: MissedChat['chatKind'],
+    sinceMs: number,
+    threadId?: string,
+  ) {
     const known = missedChats.get(chatId);
     const chat = known ?? { chatId, chatKind, sinceMs, threadIds: new Set<string>() };
     chat.sinceMs = Math.min(chat.sinceMs, sinceMs);
@@ -260,7 +265,8 @@ export function createGateway(o: GatewayOptions): Gateway {
   async function markNotStored(msg: InboundMessage, keep: boolean): Promise<void> {
     try {
       const reactionId = await o.feishu.react(msg.messageId, NOT_STORED_EMOJI);
-      if (keep) notStoredMarks.set(msg.messageId, { messageId: msg.messageId, chatId: msg.chatId, reactionId });
+      if (keep)
+        notStoredMarks.set(msg.messageId, { messageId: msg.messageId, chatId: msg.chatId, reactionId });
     } catch (err) {
       count('not_stored_mark_failed');
       log.error('「没记成」表情没加上', { messageId: msg.messageId, error: clip(String(err), 300) });
