@@ -340,11 +340,11 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
           </span>
         ) : source.kind === 'seed' ? (
           <span className="text-muted-foreground">
-            现在的线来自种子（发布时装载器装的，还没人在驾驶舱改过）
+            {`现在的线来自种子（发布时装载器装的，还没人在${brand.product}改过）`}
           </span>
         ) : (
           <span className="text-muted-foreground">
-            现在的线是人在驾驶舱改过的{source.by ? `（${source.by}）` : ''}，发布时的种子不会覆盖它
+            {`现在的线是人在${brand.product}改过的${source.by ? `（${source.by}）` : ''}，发布时的种子不会覆盖它`}
           </span>
         )}
       </p>
