@@ -27,6 +27,7 @@ import type { EnginePorts } from '../ports.ts';
 import { configFromEnv } from '../worker.ts';
 import { canaryJob } from './canary.ts';
 import { carpoolApiReader } from './carpool-api.ts';
+import { checkCarpoolCap } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
@@ -676,6 +677,8 @@ export function realPortsFromEnv(
     stateDir: config.stateDir,
     registerJobs: async () => {
       await registerEngineJobs(db);
+      // 拼车并发上限和仓里登记的对不对得上（#194 方案 4.7）：对不上推提醒、不挡接活；库读不了照样抛，registerJobs 这一步不当成对上了
+      await checkCarpoolCap({ db, env, machine: config.machine });
       // 判断题起不来、登记不上只报错（error 级日志 + /healthz 的 judge 项红），不挡引擎接活：照规则走一样能干。
       const registered = await jev.register();
       if (registered.level === 'error') console.error(registered.message);
