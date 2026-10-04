@@ -52,6 +52,18 @@ import { missingWalkthrough } from './walkthrough.mjs';
 /** @typedef {{ text: string, sessionKey: string, model: string | null, ledgerNote: string, usage: string, fallbackNote?: string }} SessionResult 一次会话跑完的结果 */
 /** @typedef {(s: string) => void} Log */
 /** @typedef {{ context?: unknown, state?: unknown, description?: unknown }} StatusRow GitHub 提交状态的一条 */
+/** @typedef {{ path: string, afterMerge: boolean }} RiskRule 高风险清单的一条：路径、是不是先合后审 */
+/** @typedef {{ path: string, previous?: string }} ChangedFile 一个提交改到的文件（改名、复制带上旧名字） */
+/** @typedef {{ sha: string, date: string, files: ChangedFile[] }} LoggedCommit */
+/** @typedef {{ sha: string, hits: string[] }} Candidate 碰了先合后审路径的一个主线提交 */
+/** @typedef {{ number: number, title: string, mergedAt: unknown, head: string, mergeCommit: string, files: string[], state: string | null, description: string }} MergedPr 合并后待补审的一个 PR */
+/** @typedef {{ done: MergedPr[], failed: MergedPr[], unreviewed: MergedPr[], problems: string[] }} Classified */
+/** @typedef {Classified & { days: number, afterMergePaths: string[], since: string | null, note?: string }} Pending */
+/** @typedef {{ oid?: unknown, status?: { context?: { state?: unknown, description?: unknown } | null } | null }} StatusCommit */
+/** @typedef {{ number?: unknown, title?: unknown, state?: unknown, mergedAt?: unknown, headRefOid?: unknown, baseRefName?: unknown, mergeCommit?: { oid?: unknown } | null, commits?: { nodes?: { commit?: StatusCommit }[] } }} GraphqlPr GraphQL 里一个 PR 用到的字段 */
+/** @typedef {{ associatedPullRequests?: { nodes?: unknown } } | null | undefined} GraphqlCommit */
+/** @typedef {{ dir?: string | undefined, pid?: number, alive?: (pid: number) => boolean }} LockOptions 只给测试换 */
+/** @typedef {{ number: number, state: string, title: string, headRefOid: string, mergeCommit?: { oid?: unknown } | null }} PrView gh pr view 里用到的几个字段 */
 /** @typedef {{ scanFiles: (files: string[], read: (file: string) => Buffer) => { binary: unknown[], scanned: unknown[], findings: unknown[] }, formatFinding: (finding: unknown) => string }} HygieneScan 仓里卫生检查（packages/hygiene/src/scan.ts）用到的两个导出 */
 /** @typedef {(args: string[]) => string} GhRun 起 gh（失败抛错、成功回 stdout；测试里换成假的） */
 /**
@@ -60,13 +72,13 @@ import { missingWalkthrough } from './walkthrough.mjs';
  */
 /** @typedef {{ phase: string | null, text: string, toolCalls: number, error: string | null, incomplete: boolean, model: string | null, interactions: unknown[], updatedAt: unknown }} SessionView 一帧快照整理出来的会话现状 */
 /** @typedef {{ headRefOid: string, baseRefName: string, title: string, body?: string | null, files?: { path: string }[], state: string, mergeCommit?: { oid?: unknown } | null }} PrInfo gh pr view --json 里用到的那几个字段 */
-/** @typedef {PrInfo & { head: string, tree: string, merged: boolean, mergeCommit: string | null }} PreparedPr 审查树切好之后的 PR */
+/** @typedef {Omit<PrInfo, 'mergeCommit'> & { head: string, tree: string, merged: boolean, mergeCommit: string | null }} PreparedPr 审查树切好之后的 PR */
 /** @typedef {{ head: string, baseRefName: string, title: string, body?: string | null | undefined, files?: { path: string }[] | undefined, merged?: boolean | undefined, mergeCommit?: string | null | undefined }} PromptInfo */
 /** @typedef {{ prompt: string, profile: Profile, workdir: string, timeoutMin: number, log: Log, pollMs?: number, effort?: string | undefined, discussion?: boolean }} SessionOpts runSession 要的 */
 /** @typedef {{ gh: GhRun, session: (opts: SessionOpts) => Promise<SessionResult>, runs: string }} ReviewDeps 审 PR 要的几样（测试换成假的） */
 /**
  * 命令行参数（args() 整理出来的）。
- * @typedef {{ timeoutMin: number, ui: boolean, slot: number, pr?: number, repo?: string, roundGiven?: boolean, afterMergePending?: boolean, afterMergeSweep?: boolean, resolve?: number, resolveGiven?: boolean, by?: number, json?: boolean, noFetch?: boolean, slotGiven?: boolean, selftest?: boolean, ping?: boolean, noPost?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string, name?: string, effort?: string, agent?: string, authorFamily?: string, excludeFamily?: string, budgetSec?: number, blind?: boolean, slow?: boolean, highRisk?: boolean, postMerge?: boolean }} Options
+ * @typedef {{ timeoutMin: number, ui: boolean, slot: number, pr?: number, repo?: string | undefined, roundGiven?: boolean, afterMergePending?: boolean, afterMergeSweep?: boolean, resolve?: number, resolveGiven?: boolean, by?: number, json?: boolean, noFetch?: boolean, slotGiven?: boolean, selftest?: boolean, ping?: boolean, noPost?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string | undefined, name?: string | undefined, effort?: string | undefined, agent?: string | undefined, authorFamily?: string, excludeFamily?: string | undefined, budgetSec?: number, blind?: boolean, slow?: boolean, highRisk?: boolean, postMerge?: boolean }} Options
  */
 
 /**
@@ -865,10 +877,12 @@ function sh(cmd, args, cwd, env = process.env) {
  * @returns {ReviewDeps}
  */
 function reviewDeps(repo) {
-  for (const [bin, forWhat] of [
+  /** @type {[string, string][]} */
+  const needed = [
     ['gh', '取 PR 的信息、贴结论'],
     ['git', '取 PR 的头、切审查树'],
-  ]) {
+  ];
+  for (const [bin, forWhat] of needed) {
     if (!findBin(bin)) throw new NotChecked(`这台机器没装 ${bin}（PATH 上找不到；审 PR 要它${forWhat}）`);
   }
   return { gh: (a) => gh(a, repo), session: runSession, runs: RUNS };
@@ -1766,19 +1780,23 @@ export const RISK_PATHS_FILE = 'packages/conventions/high-risk-paths.json';
 /**
  * 主线上那份清单 → 每条的路径、是不是先合后审（认最具体的那条要用全部）。认不出回一句为什么（调用方判没查成）：
  * 不是 JSON、没有 paths、有一条没有 path、review 写了 after-merge 以外的东西。
+ * @param {string} text
+ * @returns {RiskRule[] | string}
  */
 export function riskRules(text) {
+  /** @type {unknown} */
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    return `不是合法的 JSON（${e.message}）`;
+    return `不是合法的 JSON（${messageOf(e)}）`;
   }
-  const paths = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.paths : undefined;
+  const paths = isObjectLike(raw) && !Array.isArray(raw) ? raw.paths : undefined;
   if (!Array.isArray(paths) || paths.length === 0) return '没有 paths 列表（或是空的）';
+  /** @type {RiskRule[]} */
   const rules = [];
   for (const [i, item] of paths.entries()) {
-    if (!item || typeof item !== 'object' || typeof item.path !== 'string' || !item.path.trim())
+    if (!isObjectLike(item) || typeof item.path !== 'string' || !item.path.trim())
       return `paths 第 ${i + 1} 条认不出（没有 path）`;
     if (item.review !== undefined && item.review !== 'after-merge')
       return `paths 第 ${i + 1} 条（${item.path}）的 review「${String(item.review)}」认不出`;
@@ -1787,8 +1805,14 @@ export function riskRules(text) {
   return rules;
 }
 
-/** 改到的文件里按「最具体（路径最长）的那条规则」算是先合后审的；改名的新旧名字都算（和合并闸的 riskyFiles 一个判法）。 */
+/**
+ * 改到的文件里按「最具体（路径最长）的那条规则」算是先合后审的；改名的新旧名字都算（和合并闸的 riskyFiles 一个判法）。
+ * @param {readonly ChangedFile[]} files
+ * @param {readonly RiskRule[]} rules
+ * @returns {string[]}
+ */
 export function afterMergeHits(files, rules) {
+  /** @type {string[]} */
   const hits = [];
   for (const f of files) {
     for (const name of [f.path, f.previous]) {
@@ -1802,41 +1826,59 @@ export function afterMergeHits(files, rules) {
   return hits;
 }
 
-/** `git log -z --name-status --format=%x01%H %cI` 的输出 → 每个提交改了哪些文件（改名、复制带上旧名字）。认不出抛。 */
+/**
+ * `git log -z --name-status --format=%x01%H %cI` 的输出 → 每个提交改了哪些文件（改名、复制带上旧名字）。认不出抛。
+ * @param {unknown} stdout
+ * @returns {LoggedCommit[]}
+ */
 export function parseNameStatusLog(stdout) {
+  /** @type {LoggedCommit[]} */
   const commits = [];
   for (const chunk of String(stdout).split('\x01').slice(1)) {
     const cut = chunk.indexOf('\0');
     const header = (cut < 0 ? chunk : chunk.slice(0, cut)).trim();
     const m = /^([0-9a-f]{40}) (\S+)$/.exec(header);
     if (!m) throw new NotChecked(`git log 的输出认不出（提交那一行是「${header.slice(0, 60)}」）`);
+    const [, sha = '', date = ''] = m;
     const tokens = (cut < 0 ? '' : chunk.slice(cut + 1)).split('\0').map((t) => t.replace(/^\n/, ''));
+    /** @type {ChangedFile[]} */
     const files = [];
     for (let i = 0; i < tokens.length; ) {
-      const st = tokens[i];
+      const st = tokens[i] ?? '';
       if (st === '') {
         i++;
         continue;
       }
       if (!/^[ACDMRTUXB]\d*$/.test(st))
-        throw new NotChecked(
-          `git log 的输出认不出（${m[1].slice(0, 7)} 的改动状态是「${st.slice(0, 20)}」）`,
-        );
+        throw new NotChecked(`git log 的输出认不出（${sha.slice(0, 7)} 的改动状态是「${st.slice(0, 20)}」）`);
       const two = st[0] === 'R' || st[0] === 'C';
       const names = tokens.slice(i + 1, i + (two ? 3 : 2));
-      if (names.length !== (two ? 2 : 1) || names.some((n) => !n))
-        throw new NotChecked(`git log 的输出认不出（${m[1].slice(0, 7)} 少了文件名）`);
-      files.push(two ? { path: names[1], previous: names[0] } : { path: names[0] });
-      i += two ? 3 : 2;
+      const [first, second] = names;
+      if (two) {
+        if (names.length !== 2 || !first || !second)
+          throw new NotChecked(`git log 的输出认不出（${sha.slice(0, 7)} 少了文件名）`);
+        files.push({ path: second, previous: first });
+        i += 3;
+      } else {
+        if (names.length !== 1 || !first)
+          throw new NotChecked(`git log 的输出认不出（${sha.slice(0, 7)} 少了文件名）`);
+        files.push({ path: first });
+        i += 2;
+      }
     }
-    commits.push({ sha: m[1], date: m[2], files });
+    commits.push({ sha, date, files });
   }
   return commits;
 }
 
+/** @type {Set<string>} */
 const SO_STATES = new Set(['success', 'failure', 'error', 'pending', 'expected']);
 
-/** 一次问 GitHub：这几个主线提交各是哪个 PR 合进来的、那个 PR 头上的 second-opinion 是什么。 */
+/**
+ * 一次问 GitHub：这几个主线提交各是哪个 PR 合进来的、那个 PR 头上的 second-opinion 是什么。
+ * @param {readonly string[]} shas
+ * @returns {string}
+ */
 export function prsOfCommitsQuery(shas) {
   const pr =
     'number title state mergedAt headRefOid baseRefName mergeCommit { oid } commits(last: 1) { nodes { commit { oid status { context(name: "second-opinion") { state description } } } } }';
@@ -1851,15 +1893,19 @@ export function prsOfCommitsQuery(shas) {
  * 每个碰了先合后审路径的主线提交对到 PR 上（合并提交对得上的优先，其次合进 main 的），按 PR 头上的 second-opinion 分：
  * done（success）、failed（failure：补审没过，等修复或 revert）、unreviewed（没有、pending、error）。对不上 PR 的进 problems。
  * GitHub 回的样子认不出抛 NotChecked。
+ * @param {readonly Candidate[]} candidates
+ * @param {unknown} repoData
+ * @returns {Classified}
  */
 export function classifyAfterMerge(candidates, repoData) {
-  if (!repoData || typeof repoData !== 'object')
-    throw new NotChecked('GitHub 回的 GraphQL 认不出（没有 data.repository）');
+  if (!isObjectLike(repoData)) throw new NotChecked('GitHub 回的 GraphQL 认不出（没有 data.repository）');
+  /** @type {Map<number, MergedPr>} */
   const byPr = new Map();
+  /** @type {string[]} */
   const problems = [];
   candidates.forEach((c, i) => {
     const where = `${c.sha.slice(0, 7)}（改到 ${c.hits.join('、')}）`;
-    const node = repoData[`c${i}`];
+    const node = /** @type {GraphqlCommit} */ (repoData[`c${i}`]);
     if (node == null) {
       problems.push(`${where}：GitHub 上找不到这个提交`);
       return;
@@ -1867,30 +1913,39 @@ export function classifyAfterMerge(candidates, repoData) {
     const nodes = node.associatedPullRequests?.nodes;
     if (!Array.isArray(nodes))
       throw new NotChecked(`GitHub 回的 ${c.sha.slice(0, 7)} 认不出（没有 associatedPullRequests）`);
+    // 下面对每个要用的字段都有显式判断（number、headRefOid、状态），GitHub 回的样子不对就抛 NotChecked
+    const prs = /** @type {(GraphqlPr | null | undefined)[]} */ (nodes);
     const pr =
-      nodes.find((p) => p?.mergeCommit?.oid === c.sha) ??
-      nodes.find((p) => p?.state === 'MERGED' && p?.baseRefName === 'main');
+      prs.find((p) => p?.mergeCommit?.oid === c.sha) ??
+      prs.find((p) => p?.state === 'MERGED' && p?.baseRefName === 'main');
     if (!pr) {
       problems.push(`${where}：找不到合它进主线的 PR（直接推到主线的？没法按 PR 补审）`);
       return;
     }
     const head = pr.commits?.nodes?.[0]?.commit;
-    if (!Number.isInteger(pr.number) || typeof pr.headRefOid !== 'string' || head?.oid !== pr.headRefOid)
-      throw new NotChecked(`GitHub 回的 #${pr.number ?? '?'} 认不出（读不到它的头）`);
+    const number = pr.number;
+    const headOid = pr.headRefOid;
+    if (
+      typeof number !== 'number' ||
+      !Number.isInteger(number) ||
+      typeof headOid !== 'string' ||
+      head?.oid !== headOid
+    )
+      throw new NotChecked(`GitHub 回的 #${number ?? '?'} 认不出（读不到它的头）`);
     const raw = head.status?.context?.state;
     const state = raw == null ? null : String(raw).toLowerCase();
     if (state !== null && !SO_STATES.has(state))
-      throw new NotChecked(`#${pr.number} 头上的 second-opinion 状态「${raw}」认不出`);
-    const seen = byPr.get(pr.number);
+      throw new NotChecked(`#${number} 头上的 second-opinion 状态「${raw}」认不出`);
+    const seen = byPr.get(number);
     if (seen) {
       for (const h of c.hits) if (!seen.files.includes(h)) seen.files.push(h);
       return;
     }
-    byPr.set(pr.number, {
-      number: pr.number,
+    byPr.set(number, {
+      number,
       title: String(pr.title ?? ''),
       mergedAt: pr.mergedAt ?? null,
-      head: pr.headRefOid,
+      head: headOid,
       mergeCommit: typeof pr.mergeCommit?.oid === 'string' ? pr.mergeCommit.oid : c.sha,
       files: [...c.hits],
       state,
@@ -1910,6 +1965,8 @@ export function classifyAfterMerge(candidates, repoData) {
  * 合并后待补审的。git、gh 是起命令的两样（失败抛错、成功回 stdout）；fetchMain 不给就不取远端（开会话钩子刚取过）。
  * 读不到、认不出一律抛 NotChecked（调用方判没查成），不当成「没有待补审的」。主线上的清单还没有 after-merge 的条目时
  * 列表就是空的——那是真没有，不是没查成。
+ * @param {{ git: (args: string[]) => string, gh: GhRun, fetchMain?: (() => void) | null, now?: number, days?: number }} deps
+ * @returns {Pending}
  */
 export function pendingAfterMerge({
   git,
@@ -1934,10 +1991,12 @@ export function pendingAfterMerge({
   const rules = riskRules(listText);
   if (typeof rules === 'string') throw new NotChecked(`主线上的 ${RISK_PATHS_FILE} ${rules}`);
   const afterMergePaths = rules.filter((r) => r.afterMerge).map((r) => r.path);
+  /** @type {Omit<Pending, 'since' | 'note'>} */
   const base = { days, afterMergePaths, done: [], failed: [], unreviewed: [], problems: [] };
   if (afterMergePaths.length === 0)
     return { ...base, since: null, note: '主线上的清单还没有标 review: after-merge 的条目' };
   // 先合后审从哪天起：这个标记第一次出现在主线上的那个提交（-S 列的是标记个数变了的提交，最后一行最早）
+  /** @type {string} */
   let intro;
   try {
     intro = git([
@@ -1958,7 +2017,9 @@ export function pendingAfterMerge({
   if (!Number.isFinite(startedAt))
     throw new NotChecked(`查不出先合后审是哪天起的（git log -S 的输出认不出：「${oldest.slice(0, 60)}」）`);
   const since = new Date(Math.max(now - days * 86_400_000, startedAt)).toISOString();
+  /** @type {string} */
   let logText;
+  /** @type {string} */
   let count;
   try {
     logText = git([
@@ -1987,6 +2048,7 @@ export function pendingAfterMerge({
     .map((c) => ({ ...c, hits: afterMergeHits(c.files, rules) }))
     .filter((c) => c.hits.length > 0);
   if (candidates.length === 0) return { ...base, since };
+  /** @type {unknown} */
   let data;
   try {
     const out = ghRun([
@@ -2008,10 +2070,14 @@ export function pendingAfterMerge({
 }
 
 const SWEEP_HINT = '--after-merge-sweep --author-family <写它的模型族>';
+/** @param {MergedPr} p */
 const prLine = (p) =>
   `- #${p.number} ${p.title}（合并于 ${String(p.mergedAt ?? '?').slice(0, 10)}，改到 ${p.files.join('、')}）`;
 
-/** --after-merge-pending 给人看的那几行。 */
+/**
+ * --after-merge-pending 给人看的那几行。
+ * @param {Pending} p
+ */
 export function formatPending(p) {
   if (p.note) return `没有合并后待补审的：${p.note}。`;
   const out = [
@@ -2033,7 +2099,10 @@ export function formatPending(p) {
   return out.join('\n');
 }
 
-/** 取一次主线（和审 PR 时一样：先照常取，不行再绕开代理直连）。 */
+/**
+ * 取一次主线（和审 PR 时一样：先照常取，不行再绕开代理直连）。
+ * @param {string} repo
+ */
 function fetchMain(repo) {
   const refs = ['fetch', '-q', 'origin', 'main'];
   const { https_proxy, http_proxy, HTTPS_PROXY, HTTP_PROXY, ...direct } = process.env;
@@ -2048,11 +2117,14 @@ function fetchMain(repo) {
   }
 }
 
-/** 起 git、gh 的真家伙（测试换成假的）：失败抛错，成功回 stdout。 */
+/**
+ * 起 git、gh 的真家伙（测试换成假的）：失败抛错，成功回 stdout。
+ * @param {string} repo
+ */
 function realDeps(repo) {
   return {
-    git: (a) => sh('git', a, repo),
-    gh: (a) => {
+    git: (/** @type {string[]} */ a) => sh('git', a, repo),
+    gh: (/** @type {string[]} */ a) => {
       if (!findBin('gh')) throw new Error('这台机器没装 gh（PATH 上找不到）');
       return gh(a, repo);
     },
@@ -2062,20 +2134,27 @@ function realDeps(repo) {
 
 // ---------- 锁：同一个 PR 同时只跑一轮，不同 PR 可以并行（创始人 2026-10-03 晚：原来一把全局锁，不同 PR 也互相排队） ----------
 
-/** 拿着锁的那个进程还在不在（没权限发信号也算在）。 */
+/**
+ * 拿着锁的那个进程还在不在（没权限发信号也算在）。
+ * @param {number} pid
+ */
 function isAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return e?.code === 'EPERM';
+    return errCode(e) === 'EPERM';
   }
 }
 
 /**
  * 拿一把锁（文件 <dir>/.lock-<name>，里面是进程号）：拿着的进程还活着就抛 NotChecked；进程已死的陈旧锁直接盖掉。
  * 返回放锁的函数；进程退出时也放。dir / pid / alive 只给测试换。
+ * @param {string} name
+ * @param {string} why
+ * @param {LockOptions} [opts]
+ * @returns {() => void}
  */
 export function takeLock(name, why, { dir = RUNS, pid = process.pid, alive = isAlive } = {}) {
   mkdirSync(dir, { recursive: true });
@@ -2093,10 +2172,16 @@ export function takeLock(name, why, { dir = RUNS, pid = process.pid, alive = isA
   return release;
 }
 
-/** 每个位子一棵审查树（固定几棵轮着用，见 preparePr）：没指定 --slot 就挑第一个空着的；都被占着照实报。 */
+/**
+ * 每个位子一棵审查树（固定几棵轮着用，见 preparePr）：没指定 --slot 就挑第一个空着的；都被占着照实报。
+ * @param {{ slotGiven?: boolean | undefined, slot: number }} o
+ * @param {LockOptions} [deps]
+ * @returns {{ slot: number, release: () => void }}
+ */
 export function takeSlot(o, deps = {}) {
   if (o.slotGiven && (!Number.isInteger(o.slot) || o.slot < 1 || o.slot > 4))
     throw new NotChecked('--slot 只能是 1–4');
+  /** @type {string[]} */
   const busy = [];
   for (const slot of o.slotGiven ? [o.slot] : [1, 2, 3, 4]) {
     try {
@@ -2106,12 +2191,15 @@ export function takeSlot(o, deps = {}) {
       busy.push(e.message);
     }
   }
-  throw new NotChecked(o.slotGiven ? busy[0] : `四棵审查树都有人在用：${busy.join('；')}`);
+  // 指定了位子就只试过它一个，busy 里只有一条，join 出来就是那一条
+  throw new NotChecked(o.slotGiven ? busy.join('；') : `四棵审查树都有人在用：${busy.join('；')}`);
 }
 
 /**
  * 审一个 PR（开着的、已经合并的都行）：起会话、按标签和轮数判、贴评论、写提交状态。
  * 返回退出码：0 通过、1 必须改、2 没查成（结果格式认不出、状态没写上）；起会话这类没查成抛 NotChecked。
+ * @param {{ o: Options, repo: string, pr: number, log: Log, deps?: ReviewDeps }} opts
+ * @returns {Promise<number>}
  */
 export async function reviewPr({ o, repo, pr, log, deps = reviewDeps(repo) }) {
   const chain = prProfiles(o); // 作者族不对先在这儿报，别等树切好了才说
@@ -2126,6 +2214,10 @@ export async function reviewPr({ o, repo, pr, log, deps = reviewDeps(repo) }) {
   }
 }
 
+/**
+ * @param {{ o: Options, repo: string, pr: number, log: Log, chain: Profile[], slot: number, deps: ReviewDeps }} opts
+ * @returns {Promise<number>}
+ */
 async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
   const info = preparePr(repo, pr, slot, deps.gh);
   const counted = reviewRounds(pr, deps.gh);
@@ -2139,7 +2231,7 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
   mkdirSync(deps.runs, { recursive: true });
   const out = join(deps.runs, `pr${pr}-${info.head.slice(0, 7)}-r${round}.md`);
   log(
-    `PR #${pr} 头 ${info.head.slice(0, 7)}${afterMerge ? `（已合并，合并提交 ${info.mergeCommit.slice(0, 7)}：合并后补审）` : ''}，工作树 ${info.tree}；${roundNote}`,
+    `PR #${pr} 头 ${info.head.slice(0, 7)}${afterMerge ? `（已合并，合并提交 ${String(info.mergeCommit).slice(0, 7)}：合并后补审）` : ''}，工作树 ${info.tree}；${roundNote}`,
   );
   try {
     // 默认快：中等思考强度、只看 diff、不跑测试，和 CI 同时跑（创始人 2026-09-25 定的关卡时间预算）；--slow 才走老的完整审法
@@ -2216,8 +2308,8 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
         );
         log(`贴到了 PR：${url}`);
       } catch (e) {
-        log(`没贴上 PR：${e.message}`);
-        appendFileSync(out, `\n（没贴上 PR：${e.message}）\n`);
+        log(`没贴上 PR：${messageOf(e)}`);
+        appendFileSync(out, `\n（没贴上 PR：${messageOf(e)}）\n`);
       }
       try {
         setStatus(deps.gh, info.head, status, url);
@@ -2231,23 +2323,31 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
     }
     if (afterMerge && !judged.pass)
       console.log(
-        `合并后补审没过：开修复 PR，或 git revert ${info.mergeCommit.slice(0, 7)}；修复合了跑 --after-merge-resolve ${pr} --by <修复 PR 号>`,
+        `合并后补审没过：开修复 PR，或 git revert ${String(info.mergeCommit).slice(0, 7)}；修复合了跑 --after-merge-resolve ${pr} --by <修复 PR 号>`,
       );
     return code;
   } catch (e) {
     writeFileSync(
       out,
-      `# PR #${pr} ${who} 第 ${round} 轮：没查成\n\n- 审的头：${info.head}\n- 原因：${e.message}\n`,
+      `# PR #${pr} ${who} 第 ${round} 轮：没查成\n\n- 审的头：${info.head}\n- 原因：${messageOf(e)}\n`,
     );
     console.log(out);
     throw e;
   }
 }
 
-/** 退出码合起来：有没查成的算 2，否则有必须改的算 1。 */
+/**
+ * 退出码合起来：有没查成的算 2，否则有必须改的算 1。
+ * @param {number} a
+ * @param {number} b
+ */
 const worse = (a, b) => (a === 2 || b === 2 ? 2 : Math.max(a, b));
 
-/** --after-merge-sweep：把还没补审的逐个审一遍（补审没过的不重跑，见本段开头）。 */
+/**
+ * --after-merge-sweep：把还没补审的逐个审一遍（补审没过的不重跑，见本段开头）。
+ * @param {{ o: Options, repo: string, log: Log }} opts
+ * @returns {Promise<number>}
+ */
 async function afterMergeSweep({ o, repo, log }) {
   prProfiles(o); // 作者族先核
   const p = pendingAfterMerge({ ...realDeps(repo), fetchMain: o.noFetch ? null : () => fetchMain(repo) });
@@ -2258,7 +2358,7 @@ async function afterMergeSweep({ o, repo, log }) {
     try {
       code = worse(code, await reviewPr({ o, repo, pr: item.number, log }));
     } catch (e) {
-      log(`#${item.number} 没查成：${e.message}`);
+      log(`#${item.number} 没查成：${messageOf(e)}`);
       code = 2;
     }
   }
@@ -2268,37 +2368,50 @@ async function afterMergeSweep({ o, repo, log }) {
 /**
  * --after-merge-resolve <原 PR> --by <修复或 revert 的 PR>：补审没过的问题已经修好、合进主线，在原 PR 的头上写通过，
  * 待补审清单就不再列它。只认「原 PR 头上是补审没过」「修复 PR 已合并」这两样都对得上的，免得拿它绕过补审。
+ * @param {{ o: Options, repo: string, log: Log, deps?: ReviewDeps | null }} opts
+ * @returns {Promise<number>}
  */
 export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
-  if (!Number.isInteger(o.resolve) || o.resolve <= 0 || !Number.isInteger(o.by) || o.by <= 0)
+  const { resolve: original, by } = o;
+  if (
+    typeof original !== 'number' ||
+    !Number.isInteger(original) ||
+    original <= 0 ||
+    typeof by !== 'number' ||
+    !Number.isInteger(by) ||
+    by <= 0
+  )
     throw new NotChecked('要 --after-merge-resolve <原 PR 号> --by <修复或 revert 的 PR 号>');
-  if (o.resolve === o.by) throw new NotChecked('--by 不能是它自己');
+  if (original === by) throw new NotChecked('--by 不能是它自己');
   const deps = given ?? reviewDeps(repo);
+  /** @param {number} n */
   const view = (n) =>
-    JSON.parse(deps.gh(['pr', 'view', String(n), '--json', 'number,state,title,headRefOid,mergeCommit']));
-  const orig = view(o.resolve);
-  const fix = view(o.by);
+    /** @type {PrView} */ (
+      JSON.parse(deps.gh(['pr', 'view', String(n), '--json', 'number,state,title,headRefOid,mergeCommit']))
+    );
+  const orig = view(original);
+  const fix = view(by);
   if (orig.state !== 'MERGED')
     throw new NotChecked(
-      `#${o.resolve} 不是已合并的 PR（${orig.state}）：没合并的照常审（--pr），不走合并后补审`,
+      `#${original} 不是已合并的 PR（${orig.state}）：没合并的照常审（--pr），不走合并后补审`,
     );
   if (fix.state !== 'MERGED')
-    throw new NotChecked(`#${o.by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
+    throw new NotChecked(`#${by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
   const current = currentSecondOpinion(deps.gh, orig.headRefOid);
   if (current?.state === 'success') {
-    console.log(`#${o.resolve} 头上的 second-opinion 已经是通过（${current.description}），不用再记`);
+    console.log(`#${original} 头上的 second-opinion 已经是通过（${current.description}），不用再记`);
     return 0;
   }
   if (current?.state !== 'failure')
     throw new NotChecked(
-      `#${o.resolve} 头上的 second-opinion 是「${current?.state ?? '没有'}」，不是补审没过：还没补审的先跑 --after-merge-sweep`,
+      `#${original} 头上的 second-opinion 是「${current?.state ?? '没有'}」，不是补审没过：还没补审的先跑 --after-merge-sweep`,
     );
   const fixAt = String(fix.mergeCommit?.oid ?? '').slice(0, 7);
   let url;
   try {
     url = await postToPr(
       repo,
-      o.resolve,
+      original,
       [
         `**合并后补审：已处理**——补审没过的问题由 #${fix.number}（${fix.title}${fixAt ? `，合并提交 ${fixAt}` : ''}）处理。`,
         '',
@@ -2309,7 +2422,7 @@ export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
     );
     log(`贴到了 PR：${url}`);
   } catch (e) {
-    log(`没贴上 PR：${e.message}`);
+    log(`没贴上 PR：${messageOf(e)}`);
   }
   setStatus(
     deps.gh,
@@ -2317,11 +2430,16 @@ export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
     { state: 'success', description: `合并后补审没过的问题已由 #${fix.number} 处理` },
     url,
   );
-  console.log(`#${o.resolve} 记成已处理（由 #${fix.number}）：头 ${orig.headRefOid.slice(0, 7)} 上写了通过`);
+  console.log(`#${original} 记成已处理（由 #${fix.number}）：头 ${orig.headRefOid.slice(0, 7)} 上写了通过`);
   return 0;
 }
 
+/**
+ * @param {string[]} argv
+ * @returns {Options}
+ */
 function args(argv) {
+  /** @type {Options} */
   const o = { timeoutMin: 45, ui: false, slot: 1 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -2366,7 +2484,13 @@ function args(argv) {
   return o;
 }
 
+/** @param {string} repo */
 async function selftest(repo) {
+  /**
+   * @param {unknown} a
+   * @param {unknown} b
+   * @param {string} what
+   */
   const eq = (a, b, what) => {
     if (JSON.stringify(a) !== JSON.stringify(b))
       throw new Error(`${what}：要 ${JSON.stringify(b)}，得 ${JSON.stringify(a)}`);
@@ -2386,6 +2510,12 @@ async function selftest(repo) {
   eq(judgeSnapshot({}).status, 'unknown', '没有 phase');
   eq(judgeSnapshot({ phase: 'done', error: null }).status, 'done', '真完工');
   const t0 = Date.parse('2026-09-25T10:00:00Z');
+  /**
+   * @param {string} ts
+   * @param {number} status
+   * @param {boolean} viaRelay
+   * @param {string} [upstreamHost]
+   */
   const row = (ts, status, viaRelay, upstreamHost = 'relay') => ({ ts, status, viaRelay, upstreamHost });
   eq(judgeLedger([row('2026-09-25T10:00:05Z', 200, true)], t0, true).ok, true, '中继成功');
   eq(judgeLedger([row('2026-09-25T09:00:00Z', 200, true)], t0, true).ok, false, '只有起针前的行');
@@ -2393,6 +2523,10 @@ async function selftest(repo) {
   eq(judgeLedger([row('2026-09-25T10:00:05Z', 429, true)], t0, true).ok, false, '只有失败行');
   eq(judgeLedger([], t0, true).ok, false, '空账本');
   // 挡不挡由脚本判（规矩钉在 agents/test/rules/second-opinion-verdict.rules.test.ts，这里只抽几条）
+  /**
+   * @param {string} text
+   * @param {number} round
+   */
   const judged = (text, round) => {
     const p = parseReview(text);
     return p.ok ? judgeReview(p, round).pass : null;
@@ -2412,6 +2546,7 @@ async function selftest(repo) {
   eq(judged('## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：通过', 1), false, '审的人说通过也照挡');
   eq(judged('只有一句话\n结论：通过', 1), null, '没有必须改那一段认不出');
   const parsed = parseReview('我先读规矩……\n## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：必须改 1 条');
+  if (!parsed.ok) throw new Error(`贴 PR 的样例解析不出：${parsed.why}`);
   const c = prComment({
     judged: judgeReview(parsed, 1),
     head: 'abcdef1234',
@@ -2427,6 +2562,7 @@ async function selftest(repo) {
   // 卫生检查：扫出真密钥不贴、干净的放行（卫生检查的代码用 repo 里那份；账号、组织编号、邮箱、IP 这类标识不算
   // 泄漏，不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）
   const leakToken = ['ghp', 'Q3mNz8VbTf6RpLc2WdYs5HuXa9GjKe4B'].join('_');
+  /** @param {Promise<unknown>} p */
   const rejects = async (p) =>
     p.then(
       () => false,
@@ -2468,9 +2604,7 @@ async function main() {
     for (const s of list) {
       const ours = OUR_SESSION_TITLE.test(String(s.title ?? '')) ? '第二意见' : '别的';
       console.log(
-        `${s.sessionKey}\t${s.runState ?? '?'}\t${ours}\t${String(s.title ?? '')
-          .split('\n')[0]
-          .slice(0, 40)}`,
+        `${s.sessionKey}\t${s.runState ?? '?'}\t${ours}\t${(String(s.title ?? '').split('\n')[0] ?? '').slice(0, 40)}`,
       );
     }
     return;
@@ -2498,6 +2632,7 @@ async function main() {
     process.exitCode = parseVerdict(r.text)?.pass ? 0 : 2;
     return;
   }
+  /** @type {Log} */
   const log = (s) => console.error(s);
   if (o.roundGiven) log('--round 不再起作用：第几轮由脚本数这个 PR 上已经贴过的结论评论（不管头变没变）');
   // 合并后补审：列、记成已处理都不审东西；要不要 --high-risk 不相干（清单里标 review: after-merge 的本来就是先审后合的路径）
@@ -2521,7 +2656,8 @@ async function main() {
     process.exitCode = 3;
     return;
   }
-  if (o.text) return await critique({ ...o, timeoutMin: o.timeoutMin === 45 ? 0.5 : o.timeoutMin });
+  if (o.text)
+    return await critique({ ...o, text: o.text, timeoutMin: o.timeoutMin === 45 ? 0.5 : o.timeoutMin });
   if (o.afterMergeSweep) {
     const repo = repoOf(o);
     for (const bin of ['git', 'gh'])
@@ -2529,22 +2665,29 @@ async function main() {
     process.exitCode = await afterMergeSweep({ o, repo, log });
     return;
   }
-  if (!Number.isInteger(o.pr) || o.pr <= 0)
+  const pr = o.pr;
+  if (pr === undefined || !Number.isInteger(pr) || pr <= 0)
     throw new NotChecked('要 --pr <号>、--text <文件>，或 --after-merge-pending / --after-merge-sweep');
-  process.exitCode = await reviewPr({ o, repo: repoOf(o), pr: o.pr, log });
+  process.exitCode = await reviewPr({ o, repo: repoOf(o), pr, log });
 }
 
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
 }
 
 // 被测试 import 时不跑
 if (isMain()) {
   main().catch((e) => {
-    console.error(e instanceof NotChecked || e instanceof NotInstalled ? `没查成：${e.message}` : e.stack);
+    console.error(
+      e instanceof NotChecked || e instanceof NotInstalled
+        ? `没查成：${e.message}`
+        : isObjectLike(e)
+          ? e.stack
+          : undefined,
+    );
     process.exitCode = 2;
   });
 }
