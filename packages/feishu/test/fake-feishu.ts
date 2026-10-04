@@ -1,14 +1,18 @@
 // 假飞书（FeishuPort）：记下每个动作和时刻；同一个 uuid 只发一条（和飞书一样），能注入失败和延迟。
+// 翻历史（补漏用）按测试摆好的页回：摆几页回几页，翻到头就 has_more=false。
 import {
   type Card,
   FeishuError,
   type FeishuPort,
+  type HistoryPage,
+  type HistoryRequest,
+  type InboundMessage,
   type OutMessage,
   type Sent,
   type Target,
 } from '../src/port.ts';
 
-export type Op = 'react' | 'send' | 'reply' | 'update' | 'pin';
+export type Op = 'react' | 'send' | 'reply' | 'update' | 'pin' | 'unreact' | 'history';
 
 export interface Call {
   op: Op;
@@ -20,8 +24,14 @@ export interface Call {
   card?: Card;
   uuid?: string;
   emoji?: string;
+  /** react 成功时飞书回的 reaction_id。 */
+  reactionId?: string;
   /** send / reply 成功时飞书回的消息编号。 */
   sentId?: string;
+  /** unreact 撤的是哪个表情。 */
+  unreactedId?: string;
+  /** history 翻的是哪个容器、从什么时刻起。 */
+  history?: HistoryRequest;
 }
 
 interface Stored {
@@ -42,6 +52,16 @@ export class FakeFeishu implements FeishuPort {
   private readonly started = Date.now();
   private readonly byUuid = new Map<string, Sent>();
   private seq = 0;
+  private reactionSeq = 0;
+  /** 翻历史：按调用顺序一页页回（摆了几页给几页）；翻光了回一页空的（has_more=false）。 */
+  private historyPages: HistoryPage[] = [];
+  /** 已经撤掉的 reaction_id：reactionsOn 看的是还没撤的。 */
+  private readonly unreacted = new Set<string>();
+
+  /** 摆好补漏翻历史要回的页：一次 history() 消耗一页。 */
+  scriptHistory(...pages: HistoryPage[]): void {
+    this.historyPages = [...pages];
+  }
 
   fail(op: Op, ...errors: FeishuError[]): void {
     this.failures[op] = [...(this.failures[op] ?? []), ...errors];
@@ -77,8 +97,65 @@ export class FakeFeishu implements FeishuPort {
     return sent;
   }
 
-  async react(messageId: string, emojiType: string): Promise<void> {
-    await this.step('react', { messageId, emoji: emojiType });
+  async react(messageId: string, emojiType: string): Promise<string | undefined> {
+    const call = await this.step('react', { messageId, emoji: emojiType });
+    this.reactionSeq += 1;
+    call.reactionId = `rx_fake_${this.reactionSeq}`;
+    return call.reactionId;
+  }
+
+  /** 撤掉一个表情回应。撤掉了就从「这条消息上的表情」里摘掉（reactionsOn 看的是剩下的）。 */
+  async unreact(messageId: string, reactionId: string): Promise<void> {
+    await this.step('unreact', { messageId, unreactedId: reactionId });
+    this.unreacted.add(reactionId);
+  }
+
+  /** 翻历史：按摆好的页一页页回（没摆就回空的）；记下这次翻的是哪个容器、从什么时刻起。 */
+  async history(req: HistoryRequest): Promise<HistoryPage> {
+    await this.step('history', { history: req });
+    const page = this.historyPages.shift();
+    return page ?? { messages: [], unrecognized: 0 };
+  }
+
+  /** 某条消息上现在加过的表情（按加的先后；撤掉的不算）。 */
+  reactionsOn(messageId: string): string[] {
+    return this.of('react')
+      .filter((c) => c.messageId === messageId && c.reactionId !== undefined)
+      .filter((c) => !this.unreacted.has(c.reactionId ?? ''))
+      .map((c) => c.emoji ?? '');
+  }
+
+  /** 造一条历史里的消息（补漏测试用）。 */
+  static historyMessage(o: {
+    messageId: string;
+    chatId: string;
+    chatType?: InboundMessage['chatType'];
+    senderId: string;
+    text?: string;
+    createTime: number;
+    threadId?: string;
+    rootId?: string;
+    replyToMessageId?: string;
+    fromBot?: boolean;
+    msgType?: string;
+    rawContent?: string;
+  }): InboundMessage {
+    return {
+      messageId: o.messageId,
+      chatId: o.chatId,
+      chatType: o.chatType ?? 'p2p',
+      senderId: o.senderId,
+      text: o.text ?? '补漏补回来的话',
+      msgType: o.msgType ?? 'text',
+      rawContent: o.rawContent ?? JSON.stringify({ text: o.text ?? '补漏补回来的话' }),
+      mentionedBot: false,
+      mentions: [],
+      ...(o.threadId ? { threadId: o.threadId } : {}),
+      ...(o.rootId ? { rootId: o.rootId } : {}),
+      ...(o.replyToMessageId ? { replyToMessageId: o.replyToMessageId } : {}),
+      createTime: o.createTime,
+      fromBot: o.fromBot ?? false,
+    };
   }
 
   async send(to: Target, message: OutMessage, opts: { uuid: string }): Promise<Sent> {

@@ -6,9 +6,9 @@ import { createBackend } from '../src/backend.ts';
 import { createGateway, type Gateway } from '../src/gateway.ts';
 import { createLark, type Lark, sdkDetail } from '../src/lark.ts';
 import { FeishuError } from '../src/port.ts';
-import { A, B, BOT, cardEvent, menuEvent, messageEvent, TEAM } from './events.ts';
+import { A, B, BOT, cardEvent, menuEvent, messageEvent, recallEvent, TEAM } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
-import { draft, memoryLogger, outboxItem, TOKEN, until } from './harness.ts';
+import { memoryLogger, outboxItem, TOKEN, until } from './harness.ts';
 
 interface HttpCall {
   method: string;
@@ -161,49 +161,57 @@ async function start(
 const imCalls = (s: Stack) => s.open.calls.filter((c) => c.path.startsWith('/open-apis/im/'));
 
 describe('飞书 SDK 这一层', () => {
-  it('私聊一句话：经 SDK 分发、去重、排队到网关；表情回应和确认卡都是真发的请求，带 uuid；同一条消息重投只处理一次', async () => {
+  it('私聊一句话：经 SDK 分发、去重、排队到网关；原话原样转后端、表情回应是真发的请求；同一条消息重投只处理一次', async () => {
     const s = await start();
-    s.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
+    s.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
     const event = messageEvent({ text: '给登录页加手机验证码', id: 'om_user_dup' });
     await s.lark.dispatch(event);
     await s.lark.dispatch(event);
-    await until(() => imCalls(s).length >= 2);
+    await until(() => imCalls(s).length >= 1);
     await s.gateway.idle();
 
-    const [react, reply, ...rest] = imCalls(s);
+    // 只加了一个「收到」表情：不再回「我理解为」那张卡
+    const [react, ...rest] = imCalls(s);
     expect(react).toMatchObject({
       method: 'POST',
       path: '/open-apis/im/v1/messages/om_user_dup/reactions',
       data: { reaction_type: { emoji_type: 'Get' } },
     });
-    expect(reply?.path).toBe('/open-apis/im/v1/messages/om_user_dup/reply');
-    const body = reply?.data as { msg_type: string; content: string; uuid: string };
-    expect(body.msg_type).toBe('interactive');
-    expect(body.uuid).toMatch(/^[0-9a-f]{32}$/);
-    expect(JSON.parse(body.content)).toMatchObject({ schema: '2.0', config: { update_multi: true } });
     expect(rest).toEqual([]);
-    expect(s.backend.calls('POST', '/feishu/messages')).toHaveLength(1);
+    // 重投两次，后端只收到一次
+    const sent = s.backend.calls('POST', '/feishu/intake/messages');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.body).toMatchObject({
+      messageId: 'om_user_dup',
+      chatKind: 'p2p',
+      source: 'event',
+      text: '给登录页加手机验证码',
+    });
   });
 
-  it('群里：没 @我 的、别的群的，被 SDK 的策略拦下（计数，不回话）；两个人前后脚说话不会被并成一条', async () => {
+  it('群里：不 @ 也收；别的群、机器人自己发的被拦下（计数，不回话）；两个人前后脚说话不会被并成一条', async () => {
     const s = await start();
-    s.backend.on('POST', '/feishu/messages', { body: { kind: 'answer', text: '好' } });
+    s.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
     await s.lark.dispatch(messageEvent({ text: '随便聊聊', chat: 'group', chatId: TEAM, mentionBot: false }));
     await s.lark.dispatch(
       messageEvent({ text: '给登录页加验证码', chat: 'group', chatId: 'oc_other_group' }),
     );
     await s.lark.dispatch(messageEvent({ text: '甲的需求', chat: 'group', chatId: TEAM, from: A }));
     await s.lark.dispatch(messageEvent({ text: '乙的需求', chat: 'group', chatId: TEAM, from: B }));
-    await until(() => s.backend.calls('POST', '/feishu/messages').length === 2);
+    await until(() => s.backend.calls('POST', '/feishu/intake/messages').length === 3);
     await s.gateway.idle();
-    const asked = s.backend
-      .calls('POST', '/feishu/messages')
-      .map((r) => [r.headers['x-fleet-acting-feishu'], (r.body as { text: string }).text]);
-    expect(asked).toEqual([
+    expect(
+      s.backend
+        .calls('POST', '/feishu/intake/messages')
+        .map((r) => [r.headers['x-fleet-acting-feishu'], (r.body as { text: string }).text]),
+    ).toEqual([
+      [A, '随便聊聊'],
       [A, '甲的需求'],
       [B, '乙的需求'],
     ]);
-    expect(s.gateway.stats).toMatchObject({ rejected_no_mention: 1, rejected_group_not_allowed: 1 });
+    // 只有别的群那条被 SDK 的策略拦下：允许的群里不 @ 也收
+    expect(s.gateway.stats).toMatchObject({ rejected_group_not_allowed: 1 });
+    expect(s.gateway.stats.rejected_no_mention ?? 0).toBe(0);
   });
 
   it('机器人菜单：从 SDK 的分发器进来（Channel 自己不管这个事件），回到点菜单的人的私聊', async () => {
@@ -230,9 +238,8 @@ describe('飞书 SDK 这一层', () => {
     expect(imCalls(s)).toHaveLength(0);
   });
 
-  it('卡片表单提交：输入框的值（form_value）SDK 的归一化里没有，从原始事件取到', async () => {
+  it('卡片表单提交：输入框的值（form_value）能取到；但旧卡的按钮已停用，只回一句「已停用」，不调后端', async () => {
     const s = await start();
-    s.backend.on('POST', '/feishu/drafts/:draftId/revise', { body: { draft: draft({ revision: 2 }) } });
     await s.lark.dispatch(
       cardEvent({
         messageId: 'om_card_1',
@@ -240,17 +247,36 @@ describe('飞书 SDK 这一层', () => {
         form: { note: '只做网页版', repo: 'repo-api' },
       }),
     );
-    await until(() => s.backend.calls('POST', '/feishu/drafts/draft-1/revise').length === 1);
+    await until(() => imCalls(s).length >= 1);
     await s.gateway.idle();
-    expect(s.backend.calls('POST', '/feishu/drafts/draft-1/revise')[0]?.body).toMatchObject({
-      note: '只做网页版',
-      repoId: 'repo-api',
+    // 一个后端请求都没有：旧按钮不办事了
+    expect(s.backend.requests).toHaveLength(0);
+    const [reply] = imCalls(s);
+    expect(reply).toMatchObject({
+      method: 'POST',
+      path: '/open-apis/im/v1/messages/om_card_1/reply',
+      data: { msg_type: 'text' },
     });
-    const patches = imCalls(s).filter((c) => c.method === 'PATCH');
-    expect(patches.map((p) => p.path)).toEqual([
-      '/open-apis/im/v1/messages/om_card_1',
-      '/open-apis/im/v1/messages/om_card_1',
-    ]);
+    const sent = reply?.data as { content: string };
+    const said = JSON.parse(sent.content) as { text: string };
+    expect(said.text).toContain('已经停用');
+    expect(s.gateway.stats).toMatchObject({ disabled_button: 1 });
+  });
+
+  it('撤回事件：经 SDK 的分发器进来，转给后端', async () => {
+    const s = await start();
+    s.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
+    s.backend.on('POST', '/feishu/intake/recalls', { body: { status: 'recalled', intentSeq: 1 } });
+    // 先在允许的群里说一句，网关才认得这个会话（撤回事件不带会话种类）
+    await s.lark.dispatch(messageEvent({ text: '给登录页加验证码', chat: 'group', chatId: TEAM }));
+    await until(() => s.backend.calls('POST', '/feishu/intake/messages').length === 1);
+    await s.lark.dispatch(recallEvent({ messageId: 'om_user_dup', chatId: TEAM }));
+    await until(() => s.backend.calls('POST', '/feishu/intake/recalls').length === 1);
+    expect(s.backend.calls('POST', '/feishu/intake/recalls')[0]?.body).toMatchObject({
+      messageId: 'om_user_dup',
+      chatId: TEAM,
+      source: 'event',
+    });
   });
 
   it('飞书的错误归类：230031 = 卡片超 14 天改不了；没回 message_id 算没发出去；连不上重试三次再报', async () => {

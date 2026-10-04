@@ -1,7 +1,10 @@
 // 飞书官方 SDK（@larksuiteoapi/node-sdk）的 Channel：长连接收事件（服务器不开端口）、自带去重和按会话排队。
 // 往飞书发东西只在这个文件里（test/static.test.ts 查着）：别处经 FeishuPort。
+// 收法（#553 第 4 条）：允许的群里每条都收、不用 @（要飞书开发者后台给应用开「获取群组中所有消息」im:message.group_msg；
+// 没开时飞书只推 @机器人 的和私聊），@所有人 的也收；谁的话存、谁的丢由网关判（gateway.ts），这里只挡别的群。
 // Channel 没管的几处自己补：
-// - 机器人菜单事件 application.bot.menu_v6：注册到 Channel 内部的事件分发器上（它没公开，升级 SDK 后 test/lark.test.ts 会报）；
+// - 机器人菜单事件 application.bot.menu_v6、撤回事件 im.message.recalled_v1：注册到 Channel 内部的事件分发器上
+//   （它没公开，升级 SDK 后 test/lark.test.ts 会报）；
 // - 发消息带 uuid（同一件事重试不重复发）：Channel.send 不带，改用它公开的 rawClient；
 // - 超时：SDK 默认的 HTTP 实例不设超时（实读为 0），飞书接口一挂住，推送和盘面这些串行的活就全停、也不报警。
 //   每次调用自己限时（表情回应 3 秒，其余 10 秒），超时记错误；HTTP 实例上也带同样的上限，挂住的连接会被收掉。
@@ -15,6 +18,8 @@ import {
   type LarkChannel,
   LoggerLevel,
   type NormalizedMessage,
+  normalize,
+  type RawMessageEvent,
 } from '@larksuiteoapi/node-sdk';
 import type { Logger } from './log.ts';
 import {
@@ -25,6 +30,8 @@ import {
   type InboundCardAction,
   type InboundMenu,
   type InboundMessage,
+  type InboundRecall,
+  LATE_DELIVERY_MS,
   type OutMessage,
   type Sent,
   type Target,
@@ -36,6 +43,7 @@ export const FEISHU_TIMEOUTS = { reactMs: 3_000, callMs: 10_000 };
 
 export interface InboundHandlers {
   onMessage(msg: InboundMessage): void;
+  onRecall(evt: InboundRecall): void;
   onCardAction(evt: InboundCardAction): void;
   onMenu(evt: InboundMenu): void;
   onReject(evt: { messageId: string; chatId: string; senderId: string; reason: string }): void;
@@ -44,7 +52,7 @@ export interface InboundHandlers {
 export interface LarkOptions {
   appId: string;
   appSecret: string;
-  /** 允许的群（团队群、测试群）；别的群里 @我 一律不理。 */
+  /** 允许的群（团队群、测试群）；别的群里说什么一律不收。 */
   groups: string[];
   log: Logger;
   timeouts?: Partial<typeof FEISHU_TIMEOUTS>;
@@ -66,6 +74,9 @@ export interface Lark {
 }
 
 const MENU_EVENT = 'application.bot.menu_v6';
+const RECALL_EVENT = 'im.message.recalled_v1';
+/** 翻历史一页几条（飞书上限 50；补漏按顺序一页页翻，够用）。 */
+export const HISTORY_PAGE_SIZE = 50;
 
 export function createLark(opts: LarkOptions): Lark {
   const timeouts = { ...FEISHU_TIMEOUTS, ...opts.timeouts };
@@ -73,12 +84,13 @@ export function createLark(opts: LarkOptions): Lark {
     appId: opts.appId,
     appSecret: opts.appSecret,
     transport: opts.transport ?? 'websocket',
-    policy: { requireMention: true, dmMode: 'open', groupAllowlist: opts.groups, respondToMentionAll: false },
+    // 群里不要求 @：创始人的每句话都是意图的一部分；@所有人 的照收（只是存，机器人不回话）
+    policy: { requireMention: false, dmMode: 'open', groupAllowlist: opts.groups, respondToMentionAll: true },
     safety: {
       // 不合并连发的消息：两个人在群里前后脚说话，合并会把前一个人的话算到后一个人头上。
       batch: { text: { delayMs: 0 } },
       // 默认 30 分钟前的消息静默丢掉；网关重启或断线期间的消息宁可晚回也不丢。
-      staleMessageWindowMs: 6 * 60 * 60 * 1000,
+      staleMessageWindowMs: LATE_DELIVERY_MS,
     },
     // 卡片表单的输入值（form_value）SDK 的归一化里没有，要从原始事件里取。
     includeRawEvent: true,
@@ -150,7 +162,7 @@ export function createLark(opts: LarkOptions): Lark {
 
   const port: FeishuPort = {
     async react(messageId, emojiType) {
-      await api(
+      const res = await api(
         '加表情回应',
         () =>
           client.im.v1.messageReaction.create({
@@ -160,6 +172,7 @@ export function createLark(opts: LarkOptions): Lark {
         // 回应只有赶在 2 秒内才有用：不重试。
         { retries: 0, timeoutMs: timeouts.reactMs },
       );
+      return res.data?.reaction_id || undefined;
     },
 
     async send(to: Target, message, { uuid }) {
@@ -204,6 +217,48 @@ export function createLark(opts: LarkOptions): Lark {
         }),
       );
     },
+
+    async unreact(messageId, reactionId) {
+      await api('撤表情回应', () =>
+        client.im.v1.messageReaction.delete({ path: { message_id: messageId, reaction_id: reactionId } }),
+      );
+    },
+
+    async history(req) {
+      const res = await api('翻会话历史', () =>
+        client.im.v1.message.list({
+          params: {
+            container_id_type: req.container === 'thread' ? 'thread' : 'chat',
+            container_id: req.containerId,
+            // 只要这个时刻之后的（含）：飞书按毫秒时间戳过滤
+            start_time: String(Math.floor(req.sinceMs / 1000)),
+            sort_type: 'ByCreateTimeAsc',
+            page_size: req.pageSize ?? HISTORY_PAGE_SIZE,
+            ...(req.pageToken ? { page_token: req.pageToken } : {}),
+          },
+        }),
+      );
+      const items = res.data?.items ?? [];
+      const messages: InboundMessage[] = [];
+      let unrecognized = 0;
+      for (const item of items) {
+        const msg = await toHistoryInbound(item, req.chatKind, channel.botIdentity?.openId);
+        if (msg) messages.push(msg);
+        else {
+          unrecognized += 1;
+          opts.log.warn('历史里有认不出的一行，跳过（缺编号、会话、发出时刻或原始内容）', {
+            messageId: item.message_id ?? null,
+            chatId: item.chat_id ?? null,
+          });
+        }
+      }
+      const hasMore = res.data?.has_more === true && !!res.data?.page_token;
+      return {
+        messages,
+        ...(hasMore ? { nextPageToken: res.data?.page_token } : {}),
+        unrecognized,
+      };
+    },
   };
 
   return {
@@ -227,6 +282,17 @@ export function createLark(opts: LarkOptions): Lark {
           // 立刻返回：长连接等这个返回值才回飞书。
           return undefined;
         },
+        [RECALL_EVENT]: (data: unknown) => {
+          const recall = toRecall(data);
+          if (recall) handlers.onRecall(recall);
+          else {
+            // 撤回事件里没有原话：整条记下来也不漏什么
+            opts.log.warn('撤回事件认不出，丢了（补漏时历史接口会再标一次撤回）', {
+              data: JSON.stringify(data).slice(0, 300),
+            });
+          }
+          return undefined;
+        },
       });
     },
 
@@ -237,20 +303,110 @@ export function createLark(opts: LarkOptions): Lark {
 }
 
 export function toInbound(msg: NormalizedMessage, botOpenId: string | undefined): InboundMessage {
-  const raw = msg.raw as { sender?: { sender_type?: string } } | undefined;
+  // includeRawEvent 开着：raw 是 SDK 解出来的事件（header、event 两层摊平），原始 content 在 raw.message.content
+  const raw = msg.raw as { sender?: { sender_type?: string }; message?: { content?: unknown } } | undefined;
   const senderType = raw?.sender?.sender_type;
+  const content = raw?.message?.content;
   return {
     messageId: msg.messageId,
     chatId: msg.chatId,
     chatType: msg.chatType,
     senderId: msg.senderId,
     text: msg.content,
+    msgType: msg.rawContentType,
+    rawContent: typeof content === 'string' ? content : '',
     mentionedBot: msg.mentionedBot,
+    mentions: msg.mentions.map((m) => ({ name: m.name, openId: m.openId, isBot: m.isBot === true })),
     replyToMessageId: msg.replyToMessageId,
+    rootId: msg.rootId,
+    threadId: msg.threadId,
     createTime: msg.createTime,
     fromBot:
       (senderType !== undefined && senderType !== 'user') || (!!botOpenId && msg.senderId === botOpenId),
   };
+}
+
+/** 撤回事件：编号、会话、撤回时刻都得有，少一样就是认不出（null）。 */
+export function toRecall(data: unknown): InboundRecall | null {
+  const d = data as { message_id?: unknown; chat_id?: unknown; recall_time?: unknown } | null;
+  if (!d || typeof d.message_id !== 'string' || !d.message_id || typeof d.chat_id !== 'string' || !d.chat_id)
+    return null;
+  const at = typeof d.recall_time === 'string' ? Number(d.recall_time) : Number.NaN;
+  if (!Number.isFinite(at) || at <= 0) return null;
+  return { messageId: d.message_id, chatId: d.chat_id, recalledAt: at };
+}
+
+/** 飞书「获取会话历史消息」回的一行（只列用得上的；这是别人的接口，字段可缺）。 */
+export interface HistoryItem {
+  message_id?: string | undefined;
+  chat_id?: string | undefined;
+  msg_type?: string | undefined;
+  create_time?: string | number | undefined;
+  update_time?: string | number | undefined;
+  root_id?: string | undefined;
+  parent_id?: string | undefined;
+  thread_id?: string | undefined;
+  body?: { content?: string | undefined } | undefined;
+  sender?: { id?: string | undefined; sender_type?: string | undefined } | undefined;
+  mentions?: Array<{ id?: string | undefined; name?: string | undefined }> | undefined;
+}
+
+/**
+ * 翻历史翻出来的一行 → 一份和事件同形的「原始事件」：飞书的「获取会话历史消息」给的字段比事件少
+ * （没有 chat_type、没有 mentions 的 key、没有归一化后的文字），这里按它给的拼回去，
+ * 再走 SDK 的 normalize + toInbound——两条路（事件、补漏）存下的原话就一个样。
+ */
+function historyEvent(item: HistoryItem, chatKind: InboundMessage['chatType']): unknown {
+  const mentions = (item.mentions ?? []).map((m, i) => ({
+    // 历史接口给的是「这条消息 @了谁」：只用来算「@了机器人没有」、把 @ 写成 @名字，key 怎么排不影响
+    key: `@_user_${i + 1}`,
+    id: { open_id: m.id ?? '', user_id: '', union_id: '' },
+    name: m.name ?? '',
+  }));
+  return {
+    header: { event_type: 'im.message.receive_v1', event_id: `history:${item.message_id ?? ''}` },
+    event: {
+      sender: {
+        sender_id: { open_id: item.sender?.id ?? '', user_id: '', union_id: '' },
+        sender_type: item.sender?.sender_type ?? 'user',
+      },
+      message: {
+        message_id: item.message_id,
+        chat_id: item.chat_id,
+        chat_type: chatKind,
+        message_type: item.msg_type,
+        content: item.body?.content,
+        create_time: String(item.create_time ?? ''),
+        update_time: String(item.update_time ?? ''),
+        root_id: item.root_id,
+        parent_id: item.parent_id,
+        thread_id: item.thread_id,
+        mentions,
+      },
+    },
+  };
+}
+
+/**
+ * 一行历史 → InboundMessage（走和事件同一套归一化）。缺编号、会话、类型、发出时刻、原始内容的，
+ * 认不出（null），由调用方计数——不悄悄少算，也不拿空串顶。
+ */
+export async function toHistoryInbound(
+  item: HistoryItem,
+  chatKind: InboundMessage['chatType'],
+  botOpenId: string | undefined,
+): Promise<InboundMessage | null> {
+  const at = Number(item.create_time);
+  if (!item.message_id || !item.chat_id || !item.msg_type || !Number.isFinite(at) || at <= 0) return null;
+  if (typeof item.body?.content !== 'string' || !item.body.content) return null;
+  const msg = await normalize(historyEvent(item, chatKind) as RawMessageEvent, {
+    botIdentity: { openId: botOpenId ?? '', name: '' },
+    stripBotMentions: true,
+    includeRaw: true,
+  });
+  const inbound = toInbound(msg, botOpenId);
+  const updated = Number(item.update_time);
+  return Number.isFinite(updated) && updated > at ? { ...inbound, editedAt: updated } : inbound;
 }
 
 export function toAction(evt: CardActionEvent): InboundCardAction {
@@ -307,12 +463,15 @@ function within<T>(ms: number, what: string, work: Promise<T>): Promise<T> {
 
 /**
  * 飞书错误码 → 下一步怎么办。只收有出处的：230031 超 14 天不能改卡、230020 限频（docs/reference/feishu.md 第四节）、
- * 200861 卡片里有 JSON 2.0 不支持的组件（同上，windsurf-dao#1052）；其余归 unknown，原码写进日志。
+ * 200861 卡片里有 JSON 2.0 不支持的组件（同上，windsurf-dao#1052）；230027 缺必要的权限、230002 机器人不在群里
+ * （「获取会话历史消息」接口的错误码表，2026-10-04 查）、99991672 应用没开这项权限（服务端通用错误码）；其余归 unknown，
+ * 原码写进日志。
  */
 function kindOf(code: number | undefined, status: number | undefined): FeishuErrorKind {
   if (code === 230031) return 'too_old';
   if (code === 230020 || status === 429) return 'rate_limited';
   if (code === 200861) return 'format';
+  if (code === 230027 || code === 230002 || code === 99991672) return 'permission';
   if (status === 401 || status === 403) return 'permission';
   if (status !== undefined && status >= 500) return 'unavailable';
   return 'unknown';

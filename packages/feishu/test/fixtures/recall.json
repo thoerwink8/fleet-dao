@@ -1,0 +1,17 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_recall_0001",
+    "event_type": "im.message.recalled_v1",
+    "create_time": "1790000000000",
+    "token": "verification_token_placeholder",
+    "app_id": "cli_app_placeholder",
+    "tenant_key": "tenant_placeholder"
+  },
+  "event": {
+    "message_id": "om_user_0201",
+    "chat_id": "oc_team",
+    "recall_time": "1790000000000",
+    "recall_type": "message_owner"
+  }
+}
