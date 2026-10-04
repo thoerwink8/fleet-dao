@@ -257,6 +257,62 @@ describe('startRun / closeOpenRuns：开跑留一行没结束的，引擎起来�
     expect(await listOpenRuns(t.db)).toEqual([]);
   });
 
+  it('已经收场的那一行再收到一次开跑（重放、重试）：endedAt、outcome 和用量原样留着，不被冲回「还在跑」；开跑写的列照旧整行覆盖', async () => {
+    const id = randomUUID();
+    const base = {
+      id,
+      segment: 'manual',
+      model: 'kimi-k3',
+      routeId: 'kimi-r',
+      startedAt: ago(5 * MIN),
+    } as const;
+    await startRun(t.db, { ...base, issueNumber: 157 }, ago(5 * MIN));
+    await startRun(t.db, {
+      ...base,
+      issueNumber: 157,
+      endedAt: NOW,
+      outcome: 'failed',
+      routeOutcome: 'ok',
+      inputTokens: 10,
+      costUsd: 0.5,
+      failureReason: '退出码 1',
+    });
+    // 开跑那一笔又来一次：没带结局、也没带这一次的单号
+    await startRun(t.db, { ...base, tier: 'fast' });
+    expect(await getRun(t.db, id)).toMatchObject({
+      endedAt: NOW,
+      outcome: 'failed',
+      routeOutcome: 'ok',
+      inputTokens: 10,
+      costUsd: 0.5,
+      failureReason: '退出码 1',
+      tier: 'fast',
+      issueNumber: null,
+    });
+    expect(await listOpenRuns(t.db)).toEqual([]);
+    // 给了结局的收场照样覆盖已有的（引擎重启收成 killed 之后，迟到的真结局以它为准）
+    await startRun(t.db, {
+      ...base,
+      endedAt: new Date(NOW.getTime() + MIN),
+      outcome: 'done',
+      routeOutcome: 'ok',
+    });
+    expect(await getRun(t.db, id)).toMatchObject({
+      endedAt: new Date(NOW.getTime() + MIN),
+      outcome: 'done',
+      inputTokens: 10,
+    });
+  });
+
+  it('【失败】收场只给 endedAt 不给 outcome：库的一对空/不空约束仍然拒收，不靠保留旧值蒙混', async () => {
+    const id = randomUUID();
+    await startRun(t.db, { id, segment: 'manual', model: 'kimi-k3', startedAt: ago(MIN) });
+    await expect(
+      startRun(t.db, { id, segment: 'manual', model: 'kimi-k3', startedAt: ago(MIN), endedAt: NOW }),
+    ).rejects.toThrow('写入 runs 失败');
+    expect((await getRun(t.db, id))?.endedAt).toBeNull();
+  });
+
   it('还开着的收成 killed、写明为什么、交回编号、不算路由的账；收过场的不动；收的时刻早于开跑时刻按开跑时刻收', async () => {
     const open = randomUUID();
     const future = randomUUID();

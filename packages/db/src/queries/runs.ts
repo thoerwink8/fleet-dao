@@ -77,8 +77,9 @@ export class RunInputError extends Error {
 type RunRowSure = Omit<RunRow, 'id'> & { id: string };
 
 /**
- * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。再记是整行覆盖：这一次没给的列写回 NULL，
- * 收场补完开跑那一行时要把开跑写过的列（单子、派工档、工作流、PR、分支……）再带一遍。
+ * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。再记时：开跑写的那几列（单子、派工档、工作流、PR、分支……）
+ * 整行覆盖，这一次没给的写回 NULL，收场补完开跑那一行时要把它们再带一遍；收场才有的列（endedAt、outcome、routeOutcome、
+ * 用量、花费、内存峰值、失败原因）没给就保留库里已有的，所以重放的开跑不会把已经收场的那一行冲回「还在跑」。
  */
 export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): Promise<{ id: string }> {
   if (!row.segment) throw new RunInputError('segment 是空的');
@@ -231,7 +232,20 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
   };
 }
 
+/** 再记时要改的列：收场才有的那几列用 coalesce(新值, 库里已有的)，没给就不清。 */
 function pickRowWithoutId(r: RunRowSure) {
   const { id: _i, createdAt: _c, ...rest } = r;
-  return rest;
+  return {
+    ...rest,
+    endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,
+    outcome: sql`coalesce(${r.outcome}, ${runs.outcome})`,
+    routeOutcome: sql`coalesce(${r.routeOutcome}, ${runs.routeOutcome})`,
+    inputTokens: sql`coalesce(${r.inputTokens}::bigint, ${runs.inputTokens})`,
+    outputTokens: sql`coalesce(${r.outputTokens}::bigint, ${runs.outputTokens})`,
+    cacheReadTokens: sql`coalesce(${r.cacheReadTokens}::bigint, ${runs.cacheReadTokens})`,
+    cacheWriteTokens: sql`coalesce(${r.cacheWriteTokens}::bigint, ${runs.cacheWriteTokens})`,
+    costUsd: sql`coalesce(${r.costUsd}::numeric, ${runs.costUsd})`,
+    memoryPeakMb: sql`coalesce(${r.memoryPeakMb}::integer, ${runs.memoryPeakMb})`,
+    failureReason: sql`coalesce(${r.failureReason}, ${runs.failureReason})`,
+  };
 }
