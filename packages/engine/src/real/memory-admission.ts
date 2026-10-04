@@ -22,7 +22,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { SLICE_MEMORY_HIGH_MB } from '../limits.ts';
 
 export const CGROUP_ROOT = '/sys/fs/cgroup';
-/** 会话资源池在 cgroup 树里的位置（和 kill-evidence.ts 的 AGENT_SLICE_PATH 一致；systemd 的层级用「-」连）。 */
+/** 会话资源池在 cgroup 树里的位置（和 deploy/france/fleet-agents.slice 一致；systemd 的层级用「-」连）。 */
 export const AGENT_SLICE_PATH = 'fleet.slice/fleet-agents.slice';
 
 /**

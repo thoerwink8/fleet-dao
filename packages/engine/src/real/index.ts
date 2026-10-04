@@ -15,14 +15,13 @@ import {
   switchSessionOrg,
 } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
-import { assertPublishable, createGitHub } from '@fleet-dao/github';
+import { createGitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
-import type { JevPort } from '../failure/jev.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
@@ -51,12 +50,13 @@ import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
-import { realKillEvidence } from './kill-evidence.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
 import { productionMemoryPeak } from './memory-peak.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
-import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { orphanReaper } from './orphan-reap.ts';
 import { quotaReadJob } from './quota-read.ts';
+import { realReleaseEvidence } from './release-evidence.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
 import {
@@ -67,9 +67,7 @@ import {
 } from './route-wake.ts';
 import { realReservations, realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
-import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
-import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
@@ -89,65 +87,26 @@ export interface RealPortsDeps {
   /** 引擎自己的临时目录（bundle）、存档目录（没合并就收的树里没提交的改动）。 */
   tmpDir: string;
   archiveDir: string;
-  machine: string;
-  claudeCommand(user: SessionUser): string[];
-  cursorCommand(user: SessionUser): string[];
-  grokCommand(user: SessionUser): string[];
-  /** 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的文件访问（mirasimDepsFor 生产装配）。 */
-  mirasimConnect(user: SessionUser): MirasimConnect;
-  mirasimLedgerDir(user: SessionUser): string;
-  mirasimLedgerFs(user: SessionUser): LedgerFs;
-  forkMaxContextTokens?: number;
-  /** 会话出网经的代理（FLEET_SESSION_PROXY，hosts.ts 的 HostDriverDeps.sessionProxy）；不给就直连。 */
-  sessionProxy?: string;
-  /** 错误分流、停滞预判问 Jev 用（real/jev-port.ts）；不给就不问，照规则走。 */
-  jev?: JevPort;
   /**
-   * 排空（drain.ts）：在排空时选路回「过一会儿再选」、起会话直接拒；在途会话登记在它上面，到截止按切号那一套停下。
-   * 不给就不闸（测试、只起一次的工具）。
+   * 排空（drain.ts）：在排空时选路回「过一会儿再选」。不给就不闸（测试、只起一次的工具）。
+   * 三段会话登记进排空清单的是 oneShotSessions（下面 realPortsFromEnv），不在这里。
    */
   drain?: EngineDrain;
-  /**
-   * 发给别家（开 PR 前验证）的材料过卫生检查：生产用 github 包的 assertPublishable，和推分支、开 PR 同一套规则。
-   * 不给就发不出去（验证会话起不来，报 HYGIENE_UNSCANNED），不当成查过了。
-   */
-  screen?: SessionPortsDeps['screen'];
   /**
    * 拼车并发登记的现核（real/carpool-cap.ts，#896）：选路前问，核对不上不往拼车池派。必填：不给就是拼车池不受登记核对管，
    * 漏接要过不了类型检查，不靠默认。
    */
   carpoolRegistry: () => Promise<CarpoolRegistryView>;
-  /** 会话脱开引擎跑的收发目录的根（session-io.ts，核过能用才给）；不给就接管道（引擎一停会话就断）。 */
-  ioRoot?: string;
   /** 以下测试用。 */
-  session?: Partial<
-    Pick<
-      SessionPortsDeps,
-      | 'helper'
-      | 'sudo'
-      | 'gitBin'
-      | 'shBin'
-      | 'run'
-      | 'now'
-      | 'tickMs'
-      | 'stallCheckMs'
-      | 'flushMs'
-      | 'baseEnv'
-    >
-  >;
+  session?: Partial<{ helper: string; sudo: readonly string[]; gitBin: string; shBin: string }>;
   now?: () => Date;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
 export interface RealPorts {
   ports: EnginePorts;
+  /** 工人起来接活之前收上一轮留下的会话 scope、临时目录、没收场的 runs 行、预占的名额（real/orphan-reap.ts）；回收了几个 scope。 */
   reapOrphanSessions(): Promise<number>;
-  /** 切号那一刻在跑的会话（#59）：交给 real/org-switch.ts 停下、等收场。 */
-  orgSwitchSessions: OrgSwitchSessions;
-  /** 排空到截止时停下还在跑的会话（交回 engine_stop，按编号续上）；返回这次叫停的。 */
-  drainStop(why: string): string[];
-  /** 停机时放手脱开跑的会话（不停它们），新引擎起来接回；返回放手的。 */
-  releaseDetached(): string[];
 }
 
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
@@ -171,28 +130,6 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.session?.gitBin ? { gitBin: deps.session.gitBin } : {}),
     ...(deps.session?.shBin ? { shBin: deps.session.shBin } : {}),
   });
-  const sessions = createSessionPorts({
-    db: deps.db,
-    trees: deps.trees,
-    exec: deps.exec,
-    gh: deps.gh,
-    tmpDir: deps.tmpDir,
-    machine: deps.machine,
-    claudeCommand: deps.claudeCommand,
-    cursorCommand: deps.cursorCommand,
-    grokCommand: deps.grokCommand,
-    mirasimConnect: deps.mirasimConnect,
-    mirasimLedgerDir: deps.mirasimLedgerDir,
-    mirasimLedgerFs: deps.mirasimLedgerFs,
-    ...(deps.forkMaxContextTokens === undefined ? {} : { forkMaxContextTokens: deps.forkMaxContextTokens }),
-    ...(deps.sessionProxy === undefined ? {} : { sessionProxy: deps.sessionProxy }),
-    ...(deps.log ? { log: deps.log } : {}),
-    ...(deps.jev ? { jev: deps.jev } : {}),
-    ...(deps.screen ? { screen: deps.screen } : {}),
-    ...(deps.drain ? { drain: deps.drain } : {}),
-    ...(deps.ioRoot ? { ioRoot: deps.ioRoot } : {}),
-    ...deps.session,
-  });
   const ports: EnginePorts = {
     pickRoute: store.pickRoute,
     raiseAlert: store.raiseAlert,
@@ -209,10 +146,14 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   };
   return {
     ports,
-    reapOrphanSessions: sessions.reapOrphanSessions,
-    orgSwitchSessions: sessions.orgSwitch,
-    drainStop: sessions.drainStop,
-    releaseDetached: sessions.releaseDetached,
+    reapOrphanSessions: orphanReaper({
+      db: deps.db,
+      trees: deps.trees,
+      ...(deps.session?.helper ? { helper: deps.session.helper } : {}),
+      ...(deps.session?.sudo ? { sudo: deps.session.sudo } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+      ...(deps.log ? { log: deps.log } : {}),
+    }),
   };
 }
 
@@ -252,9 +193,6 @@ export interface RealPortsConfig {
   mirasimHome: string;
   /** 桥接脚本的绝对路径（会话用户读得到；real/index.ts 的 DEFAULT_MIRASIM_BRIDGE_SCRIPT）。 */
   mirasimBridge: string;
-  forkMaxContextTokens: number;
-  /** 会话脱开引擎跑的收发目录的根（FLEET_SESSION_IO_DIR，默认 DEFAULT_SESSION_IO_DIR）。 */
-  sessionIoDir: string;
   /**
    * 会话出网经的代理（FLEET_SESSION_PROXY，规范成 http://主机:端口）：没写、空着是直连（法国），本机档登记的是 Windows 上
    * Clash 的口（deploy/local/desired-config.json）。cursor-agent、grok 的会话带上，Claude 不带（hosts.ts）。
@@ -291,14 +229,6 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
     problems.push(`FLEET_MIRASIM_BRIDGE 要写绝对路径（现在是 ${rawMirasimBridge}）`);
   }
   const mirasimBridge = rawMirasimBridge || DEFAULT_MIRASIM_BRIDGE_SCRIPT;
-  const rawFork = env.FLEET_FORK_MAX_CONTEXT_TOKENS?.trim();
-  const forkMaxContextTokens = rawFork ? Number(rawFork) : DEFAULT_FORK_MAX_CONTEXT_TOKENS;
-  if (!Number.isInteger(forkMaxContextTokens) || forkMaxContextTokens <= 0) {
-    problems.push(`FLEET_FORK_MAX_CONTEXT_TOKENS 要是正整数（现在是 ${rawFork}）`);
-  }
-  const sessionIoDir = env.FLEET_SESSION_IO_DIR?.trim() || DEFAULT_SESSION_IO_DIR;
-  if (!sessionIoDir.startsWith('/'))
-    problems.push(`FLEET_SESSION_IO_DIR 要写绝对路径（现在是 ${sessionIoDir}）`);
   // 写了却认不出就不起：不悄悄当成直连（本机档直连出不了网，会话会一个个莫名其妙地连不上）
   const rawProxy = env.FLEET_SESSION_PROXY?.trim();
   let sessionProxy: string | undefined;
@@ -319,8 +249,6 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
     grokBin,
     mirasimHome,
     mirasimBridge,
-    forkMaxContextTokens,
-    sessionIoDir,
     ...(sessionProxy === undefined ? {} : { sessionProxy }),
   };
 }
@@ -515,12 +443,6 @@ export function realPortsFromEnv(
   // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、切号、每小时对账共用这一个（读成了的留 30 秒），
   // 按同一个起点判：读数变了、引擎没切过号，推 session-org:drift（带前后两次读数），定下来之前谁都不照它来（#335）
   const [sessionUser] = SESSION_USERS;
-  // 会话脱开引擎跑（发布不碰在跑的会话）：收发目录的根核过能用才开；不能用照旧接管道起会话，推提醒说清这一版发布还会停会话
-  const ioProblem = checkIoRoot(config.sessionIoDir);
-  if (ioProblem) console.error(`会话不脱开跑（发布、重启引擎还会停在跑的会话）：${ioProblem}`);
-  void reportIoRoot(db, config.machine, ioProblem).catch((error: unknown) =>
-    console.error('收发目录的提醒没写进库', errMessage(error)),
-  );
   const sessionOrg = sessionOrgReader({
     exec,
     user: sessionUser,
@@ -534,27 +456,13 @@ export function realPortsFromEnv(
   const real = createRealPorts({
     db,
     carpoolRegistry: () => carpoolCap.view(),
-    jev: jev.port,
     gh,
-    // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；只管 fleet-dao 这个仓，别的仓按它们自己的标准）。
-    // guard 从 gh 里取同一份：配置里改了 hygieneRepo，这条路上也得跟着改，不然两边认的仓不一样。
-    screen: (repo, what, texts) => assertPublishable(repo, what, texts, gh.deps.hygieneRepo),
     trees,
     exec,
     sessionOrg,
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
-    machine: config.machine,
-    claudeCommand,
-    cursorCommand,
-    grokCommand,
-    mirasimConnect: mirasim.connect,
-    mirasimLedgerDir: mirasim.ledgerDir,
-    mirasimLedgerFs: mirasim.ledgerFs,
-    forkMaxContextTokens: config.forkMaxContextTokens,
-    ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
     ...(extra.drain ? { drain: extra.drain } : {}),
-    ...(ioProblem ? {} : { ioRoot: config.sessionIoDir }),
   });
   // 三段的一次性会话（动手、验收）的登记：切号照它停下跑在 Claude 池上的那一段，切完任务工作流在原分支上重跑（#59）
   // 同时登记进发布排空的在途清单（#957）：不接 drain，发布排空看不见动手、验收会话，会提前放行、到点也停不到它们
@@ -575,7 +483,7 @@ export function realPortsFromEnv(
     org: sessionOrg,
     user: sessionUser,
     switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
-    sessions: real.orgSwitchSessions,
+    sessions: NO_FUSION_SESSIONS,
     oneShots,
     machine: config.machine,
     readApi: readCarpoolApi,
@@ -688,13 +596,13 @@ export function realPortsFromEnv(
       log: taskLog,
     }),
   };
-  const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
+  const evidence = realReleaseEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
     readRequest: () => readDrainRequest(drainRequestFile(evidence.releasesDir)),
     releaseLockBusy: () => evidence.releaseLockBusy(),
     ownSha: extra.ownSha ?? null,
-    // 两路一起停：Fusion 的老会话（接着管道的）、三段的一次性会话（动手、验收，#957）
-    stopSessions: (why) => [...real.drainStop(why), ...oneShots.drainStop(why)],
+    // 到截止停下三段的一次性会话（动手、验收，#957）；老 Fusion 会话端口已删，没有别的会话要停
+    stopSessions: (why) => oneShots.drainStop(why),
     notify: drainNotifier({ db, machine: config.machine }),
   };
   return {

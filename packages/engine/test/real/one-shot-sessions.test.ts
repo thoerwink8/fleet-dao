@@ -117,13 +117,13 @@ describe('【故意造出的失败】生产装配漏接排空：real/index.ts �
 
   it('oneShotSessions 带着 extra.drain 起；stopSessions 里有 oneShots.drainStop', () => {
     expect(source).toMatch(/oneShotSessions\(\{[^)]*extra\.drain[^)]*\}\)/);
-    expect(source).toMatch(/stopSessions:[^\n]*real\.drainStop\([^\n]*oneShots\.drainStop\(/);
+    expect(source).toMatch(/stopSessions:[^\n]*oneShots\.drainStop\(/);
   });
 
   it('检查本身有牙：把那两处拿掉，同一个检查会红', () => {
     const without = source
       .replace('oneShotSessions({ ...(extra.drain ? { drain: extra.drain } : {}) })', 'oneShotSessions()')
-      .replace(', ...oneShots.drainStop(why)', '');
+      .replace('stopSessions: (why) => oneShots.drainStop(why)', 'stopSessions: () => []');
     expect(without).not.toBe(source);
     expect(without).not.toMatch(/oneShotSessions\(\{[^)]*extra\.drain[^)]*\}\)/);
     expect(without).not.toMatch(/stopSessions:[^\n]*oneShots\.drainStop\(/);
