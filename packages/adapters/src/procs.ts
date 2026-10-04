@@ -6,7 +6,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { OrgKind } from '@fleet-dao/shared';
-import { SESSION_BASE_KEYS } from './env.ts';
+import { PROXY_ENV_KEYS, parseSessionProxy, SESSION_BASE_KEYS, SESSION_NO_PROXY } from './env.ts';
 
 /** 会话标记的环境变量名：每个会话一个值，子孙进程都继承它，重启后的引擎也能按它认出旧会话的进程。 */
 export const RUN_MARKER_KEY = 'FLEET_RUN_ID';
@@ -233,8 +233,21 @@ export const SCOPE_ENV_ARGS: ReadonlySet<string> = new Set([
 export interface ScopeLaunch {
   /** 调 sudo 时的环境：FLEET_* 这几类，加 FLEET_SESSION_PATH。 */
   sudoEnv: Record<string, string>;
-  /** 会话自己的 TMPDIR 和白名单里的执行体开关（例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
+  /** 会话自己的 TMPDIR、出网的代理和白名单里的执行体开关（例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
   envArgs: string[];
+}
+
+/**
+ * 代理那几个变量能不能写上命令行：只认 env.ts 的 sessionProxyEnv 出得来的值——代理是规范写法的 http://主机:端口（不带账号
+ * 密码，不是凭据），no_proxy 是固定的那一串。别的值（带账号密码的、socks 的、手拼的）一律不写上去。
+ */
+function proxyArgOk(key: string, value: string): boolean {
+  if (key.toLowerCase() === 'no_proxy') return value === SESSION_NO_PROXY;
+  try {
+    return parseSessionProxy(value) === value;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -243,6 +256,8 @@ export interface ScopeLaunch {
  * 会话用户的登录态要在它自己家里登好，不从引擎这边传。
  * TMPDIR 只会是起会话的一方给这次会话建的临时目录（buildSessionEnv 不从宿主抄它）：帮手脚本不放 TMPDIR，
  * 写成 /usr/bin/env 的参数。它是工作树根下的路径（和 --cwd 一样本来就在命令行上），不是凭据；要绝对路径。
+ * 出网的代理（buildSessionEnv 的 proxy 给的那几个）帮手脚本也不放，同样写成 /usr/bin/env 的参数：值只认不带账号密码的
+ * http://主机:端口和固定的 no_proxy（proxyArgOk），别的样子照样拒。
  */
 export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
   const sudoEnv: Record<string, string> = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' };
@@ -255,7 +270,14 @@ export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
       if (CONTROL_CHAR.test(value)) throw new Error('会话的 TMPDIR 里有控制字符，不写上命令行');
       envArgs.push(`TMPDIR=${value}`);
     } else if (SESSION_BASE_KEYS.has(key.toUpperCase())) continue;
-    else if (!SCOPE_ENV_ARGS.has(key)) {
+    else if (PROXY_ENV_KEYS.includes(key)) {
+      if (!proxyArgOk(key, value)) {
+        throw new Error(
+          `${key} 的值不是不带账号密码的 http://主机:端口（no_proxy 只认 ${SESSION_NO_PROXY}）：不写上命令行`,
+        );
+      }
+      envArgs.push(`${key}=${value}`);
+    } else if (!SCOPE_ENV_ARGS.has(key)) {
       throw new Error(
         `${key} 进不了会话用户的会话：帮手脚本只放 FLEET_* 这几类环境变量，命令行上只放白名单里的执行体开关——登录态在会话用户家里登好`,
       );

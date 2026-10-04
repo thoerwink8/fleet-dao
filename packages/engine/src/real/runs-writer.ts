@@ -33,6 +33,7 @@ export function realRuns(deps: { db: Db }): RunsWriter {
           ...columns(run),
           endedAt: new Date(run.endedAt),
           outcome: run.outcome,
+          routeOutcome: run.routeOutcome,
           inputTokens: run.inputTokens ?? null,
           outputTokens: run.outputTokens ?? null,
           cacheReadTokens: run.cacheReadTokens ?? null,

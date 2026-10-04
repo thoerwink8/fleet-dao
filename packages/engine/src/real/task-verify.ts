@@ -30,7 +30,12 @@ import { runColdVerifyForPr } from '../cold-verify-run.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
-import { type ColdVerifyInput, type ColdVerifyResult, ROUTE_RETRY_SECONDS } from '../task-contract.ts';
+import {
+  type ColdVerifyInput,
+  type ColdVerifyResult,
+  ROUTE_RETRY_SECONDS,
+  SEGMENT_STAGE,
+} from '../task-contract.ts';
 import { FAMILY_ORDER, invokeVerifier } from '../verifier-invoke.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
@@ -169,7 +174,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const picker = familyPickerFrom(
       (pickInput) => deps.pickRoute(pickInput, ctx),
       FAMILY_ORDER,
-      'review',
+      SEGMENT_STAGE.verify,
       (family, why) => {
         if (why.waitFor !== 'none') {
           waits.push({

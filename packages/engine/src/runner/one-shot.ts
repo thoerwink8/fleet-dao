@@ -14,6 +14,8 @@
 // 9. **记到谁名下（#216）**：单子（taskId、单号）、派工档、工作流编号、PR、分支开跑那一行和收场那一笔带同一份（runFields）；
 //    收场是整行覆盖，两处不一样就把开跑写的冲掉。取值对不上 runs 的约束（派工档不在三档里、对题验收带了档……）一进来就报
 //    BAD_RUN_INPUT：不起会话、一行不写。
+// 10. **收场那一笔带上算不算路由的账（#758）**：每条出路都经 recordRun，由 evidence.ts 的 routeOutcomeOf 判（和失败分流同一份
+//    证据），选路的熔断、战绩靠它看见三段的会话。
 //
 // **Spawner 依赖注入**：真实的生产 spawn 走 `real/exec.ts` 那一份 `fleet-agent-scope`；测试里换 fake——
 // 不调真进程，不调 sudo，不调 systemd，不写 /sys/fs/cgroup。本机 Windows / macOS 上跑也是 fake。
@@ -25,6 +27,7 @@ import { SLICE_MEMORY_HIGH_MB } from '../limits.ts';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { AGENT_SLICE_PATH, admitSessionMemory, CGROUP_ROOT } from '../real/memory-admission.ts';
 import type { AnyBrief } from './brief.ts';
+import { routeOutcomeOf } from './evidence.ts';
 import { type RunRecord, type RunStart, RunStartSchema, type RunsWriter } from './not-wired.ts';
 import type { Tier } from './tier.ts';
 
@@ -443,6 +446,7 @@ async function recordRun(input: OneShotInput, result: OneShotResult, runs: RunsW
     endedAt: result.endedAt,
     // 一次性会话的结局和 runs 的结局是同一份（ONE_SHOT_OUTCOMES、RunRecord.outcome、库里 runs_outcome_known）
     outcome: result.outcome,
+    routeOutcome: routeOutcomeOf(result, input.segment),
     ...(result.failureReason !== undefined ? { failureReason: result.failureReason } : {}),
     ...usageFields(result.facts),
   };

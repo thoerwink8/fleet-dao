@@ -194,6 +194,7 @@ describe('定时读额度', () => {
 
 describe('估算池的用量记录（usageRecordsFrom）', () => {
   const row = (over: Partial<Parameters<typeof usageRecordsFrom>[1][number]> = {}) => ({
+    kind: 'session' as const,
     startedAt: minutesAgo(10),
     modelId: 'm1',
     inputTokens: 100,

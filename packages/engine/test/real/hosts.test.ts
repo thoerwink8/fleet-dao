@@ -7,7 +7,17 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildClaudeArgs, type GrokRunSpec, judgeRun, runGrok, type SessionUser } from '@fleet-dao/adapters';
+import {
+  buildClaudeArgs,
+  buildSessionEnv,
+  type GrokRunSpec,
+  judgeRun,
+  runGrok,
+  SESSION_NO_PROXY,
+  type SessionEnvInput,
+  type SessionUser,
+  scopeLaunch,
+} from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CURSOR_KEY_BAD,
@@ -670,15 +680,114 @@ function spec(over: Partial<HostRunSpec> = {}): HostRunSpec {
   };
 }
 
-function drivers(run: HostRunners) {
+function drivers(run: HostRunners, sessionProxy?: string) {
   return hostDrivers({
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
     ...fakeMirasimDeps(),
+    sessionProxy,
     run,
   });
 }
+
+describe('会话出网经的代理（#731：本机档经 Windows 上的 Clash，法国直连）', () => {
+  const PROXY = 'http://127.0.0.1:7890';
+  const env = { FLEET_MACHINE_NAME: '本机', DATABASE_URL: 'postgres:///fleet' };
+  const proxyKeys = (built: Record<string, string>) =>
+    Object.keys(built)
+      .filter((k) => /_proxy$/i.test(k))
+      .sort();
+  /** 插头真起会话时就照这一份建环境（adapters 的 buildSessionEnv），经帮手脚本起时再拆成 sudo 的环境和命令行（scopeLaunch）。 */
+  const launched = (input: SessionEnvInput | undefined) => {
+    if (!input) throw new Error('插头没被叫到');
+    const built = buildSessionEnv(input);
+    return { built, envArgs: scopeLaunch(built).envArgs };
+  };
+
+  it('配了代理：grok、cursor-agent 的会话环境带上 http(s)_proxy（大小写各一份）和 no_proxy，经帮手脚本起时写上 /usr/bin/env 的参数；Claude 的不带（reclaude 自己管）', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const wired = drivers({ 'claude-code': claude.run, grok: grok.run, 'cursor-agent': cursor.run }, PROXY);
+    await wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: randomUUID() } }), {});
+    await wired['cursor-agent'].run(spec({ model: 'auto' }), {});
+    await wired['claude-code'].run(
+      spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: randomUUID() } }),
+      {},
+    );
+    // 【故意造出的失败】登记了代理、这两家的会话环境里却没有：这里就红（本机档直连出不了网，x.ai 直连 12 秒超时）
+    for (const input of [grok.specs[0]?.env, cursor.specs[0]?.env]) {
+      const { built, envArgs } = launched(input);
+      expect(built).toMatchObject({
+        http_proxy: PROXY,
+        https_proxy: PROXY,
+        HTTP_PROXY: PROXY,
+        HTTPS_PROXY: PROXY,
+        no_proxy: SESSION_NO_PROXY,
+        NO_PROXY: SESSION_NO_PROXY,
+      });
+      expect(envArgs).toEqual(
+        expect.arrayContaining([
+          `https_proxy=${PROXY}`,
+          `HTTPS_PROXY=${PROXY}`,
+          `no_proxy=${SESSION_NO_PROXY}`,
+        ]),
+      );
+    }
+    expect(claude.specs[0]?.env.proxy).toBeUndefined();
+    expect(proxyKeys(launched(claude.specs[0]?.env).built)).toEqual([]);
+  });
+
+  it('没配代理（法国）：哪家的会话环境都不带代理变量，宿主进程的环境里有也不抄', async () => {
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const wired = drivers({ grok: grok.run, 'cursor-agent': cursor.run });
+    const host = {
+      base: { PATH: '/usr/bin', HTTPS_PROXY: PROXY, https_proxy: PROXY },
+      fleetApi: '',
+      fleetToken: '',
+    };
+    await wired.grok.run(
+      spec({ model: 'grok-4.7', env: host, session: { mode: 'new', id: randomUUID() } }),
+      {},
+    );
+    await wired['cursor-agent'].run(spec({ model: 'auto', env: host }), {});
+    expect(proxyKeys(launched(grok.specs[0]?.env).built)).toEqual([]);
+    expect(proxyKeys(launched(cursor.specs[0]?.env).built)).toEqual([]);
+  });
+
+  it('引擎配置：FLEET_SESSION_PROXY 没写、空着是直连；写了照规范写法存（去掉末尾的 /）', () => {
+    expect(realPortsConfigFromEnv(env).sessionProxy).toBeUndefined();
+    expect(realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: '' }).sessionProxy).toBeUndefined();
+    expect(realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: ` ${PROXY}/ ` }).sessionProxy).toBe(PROXY);
+  });
+
+  it.each([
+    ['带账号密码（要写上命令行，会漏）', 'http://user:pass@127.0.0.1:7890'],
+    ['https 代理', 'https://127.0.0.1:7890'],
+    ['socks 代理', 'socks5://127.0.0.1:7890'],
+    ['没写端口', 'http://127.0.0.1'],
+    ['带路径', 'http://127.0.0.1:7890/pac'],
+    ['乱写', '127.0.0.1:7890'],
+  ])('【故意造出的失败】FLEET_SESSION_PROXY %s：引擎起不来，不悄悄当成直连', (_why, value) => {
+    expect(() => realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: value })).toThrow(
+      'FLEET_SESSION_PROXY',
+    );
+  });
+
+  it('【故意造出的失败】FLEET_SESSION_PROXY 带账号密码：起不来的报错里不带原值（会进引擎的日志）', () => {
+    let message = '';
+    try {
+      realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: 'http://user:fakesecret@127.0.0.1:7890' });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('FLEET_SESSION_PROXY');
+    expect(message).toContain('带了账号密码');
+    expect(message).not.toContain('fakesecret');
+  });
+});
 
 describe('cursor-agent 的驱动', () => {
   const cursorWith = (script: FakeCursorScript) => {

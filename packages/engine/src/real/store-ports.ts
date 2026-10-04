@@ -1,6 +1,8 @@
 // 引擎端口 → 库（packages/db）：选路、提问、人闸、报警、计时、任务快照。
 // 选路：路由两层的顺序和候选事实（routeFactsForPurpose，#574：先按这个用途的模型顺序、再按模型下的路由顺序，摊平成一串；
 // 不读旧的阶段平铺表 stage_policy_routes）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
+// （熔断、战绩、半开时在途的试探都是两种会话并起来算：Fusion 的会话和三段的一次性会话，db 的 pool-runs.ts，#758；三段的那一段按
+// 它选路的用途算战绩，task-contract.ts 的 SEGMENT_STAGE）
 // + 被暂停的账号池（pool-hold:<池> 那条没处理的「要人拍」提醒，见 sessions.ts）交给纯函数 chooseRoute，三种结果原样换成
 // 端口的三种：判「死」的（不在线、渠道关了、犯禁令、开关关着……）挡掉、写明原因；额度未知的排在读到了的后面（routing/rank.ts）；
 // 一条都派不出、又等不来，明说派不出（带每条为什么），不拿空的、默认的顶。两层里没有「钉住」，一律按没钉住算。
@@ -22,13 +24,15 @@
 import {
   authorFamiliesOfTask,
   type Db,
+  type EndedPoolRun,
+  endedPoolRuns,
   finishSessionRun,
   openAlertsByPrefix,
-  openSessionRuns,
+  openPoolRuns,
+  type RunSegment,
   recordStepTiming,
   resolveAlertWithReason,
   routeFactsForPurpose,
-  routeOutcomesSince,
   saveTaskSnapshot,
   taskContext,
   upsertAlert,
@@ -60,6 +64,7 @@ import {
   routeLabel,
   STAGE_NAMES,
 } from '../routing/index.ts';
+import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
@@ -148,9 +153,23 @@ export function poolNameOf(channelName: string, orgKind: OrgKind | null): string
   return channelName;
 }
 
-type Outcome = Awaited<ReturnType<typeof routeOutcomesSince>>[number];
+/**
+ * 一次结束了的会话按哪个用途算战绩：Fusion 的会话是它选路时的阶段；三段的一次性会话按这一段选路的用途（SEGMENT_STAGE），
+ * 不经选路的段（对题）不算哪个用途的。
+ */
+function stageOf(run: EndedPoolRun): StageKind | null {
+  if (run.kind === 'session') return run.stage;
+  const stages: Partial<Record<RunSegment, StageKind>> = SEGMENT_STAGE;
+  return stages[run.segment] ?? null;
+}
 
-function breakerOf(outcomes: readonly Outcome[], now: Date, inFlight: number, routeId: string): BreakerFacts {
+/** 没下过结论的（老行、只记流水的那几笔）按不算账读：和 Fusion 的会话没记的一样当 neutral。 */
+function breakerOf(
+  outcomes: readonly EndedPoolRun[],
+  now: Date,
+  inFlight: number,
+  routeId: string,
+): BreakerFacts {
   const state = routeBreaker(
     outcomes.map((o) => ({ at: o.endedAt.toISOString(), result: o.routeOutcome ?? 'neutral' })),
     { now: now.toISOString(), inFlight, routeId },
@@ -164,11 +183,11 @@ function breakerOf(outcomes: readonly Outcome[], now: Date, inFlight: number, ro
 }
 
 /** 这条路由在这个阶段上的战绩：只数算路由账的（ok、fail），neutral 和没记的不算。一条都没有 = 没跑过（null）。 */
-function recordOf(outcomes: readonly Outcome[], stage: StageKind): RouteRecord | null {
+function recordOf(outcomes: readonly EndedPoolRun[], stage: StageKind): RouteRecord | null {
   let samples = 0;
   let successes = 0;
   for (const o of outcomes) {
-    if (o.stage !== stage || (o.routeOutcome !== 'ok' && o.routeOutcome !== 'fail')) continue;
+    if (stageOf(o) !== stage || (o.routeOutcome !== 'ok' && o.routeOutcome !== 'fail')) continue;
     samples += 1;
     if (o.routeOutcome === 'ok') successes += 1;
   }
@@ -236,18 +255,19 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
+    // 两种会话都读（db 的 pool-runs.ts）：哪张表读不了照抛，不当成没有三段的会话（熔断、战绩、试探数都会算少）
     const [facts, outcomes, open] = await Promise.all([
       routeFactsForPurpose(db, stage, { now }),
-      routeOutcomesSince(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
-      openSessionRuns(db),
+      endedPoolRuns(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
+      openPoolRuns(db),
     ]);
-    const byRoute = new Map<string, Outcome[]>();
+    const byRoute = new Map<string, EndedPoolRun[]>();
     for (const o of [...outcomes].sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime())) {
       const list = byRoute.get(o.routeId) ?? [];
       list.push(o);
       byRoute.set(o.routeId, list);
     }
-    // 熔断半开时在途的那一个就是试探：按路由数已经开工、还没结束的会话。
+    // 熔断半开时在途的那一个就是试探：按路由数已经开工、还没结束的会话（三段的一次性会话开跑才留那一行，都算开工了的）。
     const running = new Map<string, number>();
     for (const r of open) if (r.startedAt) running.set(r.routeId, (running.get(r.routeId) ?? 0) + 1);
 

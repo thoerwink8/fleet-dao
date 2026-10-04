@@ -48,6 +48,7 @@ import {
   ORG_SWITCH_CODE,
   ROUTE_RETRY_SECONDS,
   SEGMENT_MINUTES,
+  SEGMENT_STAGE,
   type SegmentEvidence,
   type TaskPhase,
   type TaskRun,
@@ -484,7 +485,7 @@ class TaskFlow {
       // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
       if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
       const next = await this.classify(failure, counters, true, {
-        stage: 'execute',
+        stage: SEGMENT_STAGE.manual,
         route: {
           routeId: route.routeId,
           poolId: route.poolId,
@@ -528,7 +529,7 @@ class TaskFlow {
       const got: PickRouteResult = await this.step('pickRoute', () =>
         this.acts.pickRoute({
           taskId: this.input.taskId,
-          stage: 'execute',
+          stage: SEGMENT_STAGE.manual,
           avoidRouteIds: avoid.routeIds,
           avoidPoolIds: avoid.poolIds,
           avoidModelIds: avoid.modelIds,

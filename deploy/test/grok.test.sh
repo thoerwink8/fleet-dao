@@ -10,21 +10,38 @@
 #   5. 没查成（临时目录建不了、查不到这个用户、起不来）：不当成没装、不装
 #   6. 登录态：没有记待配、写清怎么登录；是符号链接、目录、属主不对、权限不是 600、空的判红；在就只报属主、权限、大小，
 #      全部输出里没有文件内容
+#   7. 会话代理（#731）：只带这一档期望里登记的——法国登记的是空，一个代理变量都不带（root 环境里的 http(s)_proxy、
+#      FLEET_SESSION_PROXY 都带不进去）；本机档带上 Clash 的口；登记的读不出：不装，装着了也判红、不报绿
 # 不出网：官方安装脚本换成假的（照官方的样子把二进制放进 ~/.grok/downloads、~/.grok/bin 下链过去；PATH 上有他写得动的
 # ~/.local/bin 就往里链 agent；SHELL 是 bash、zsh、fish 就改启动文件——它是 bash 跑的，SHELL 空着 bash 会自己填上登录 shell），
 # 经 file:// 下；$T 下放开关文件让它故意出错。
 # 临时用户的编号会被下一个测试的临时用户重用（cursor-agent 的测试卡住那一条也会在 /tmp 留下文件）：查「下下来的安装脚本删了」
 # 只看这一次下的那个文件，收尾时把这个用户留在 /tmp 的东西删掉，不留给后面的测试。
-# 要 root：得建临时用户、以他的身份跑。用法：sudo bash deploy/test/grok.test.sh。退出码：0 通过，1 不通过，2 没跑成。
+# 要 root：得建临时用户、以他的身份跑；要 node（照期望读会话代理）。用法：sudo bash deploy/test/grok.test.sh。
+# 退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
+# shellcheck source=../lib/profile.sh
+source "$HERE/../lib/profile.sh"
 # shellcheck source=../lib/grok.sh
 source "$HERE/../lib/grok.sh"
 
 if ((EUID != 0)); then
   echo "grok：没跑成：要 root（得建临时用户、以他的身份跑）"
+  exit 2
+fi
+# sudo 会换掉 PATH，CI 里 setup-node 装的那个不在上面，去它的缓存目录找
+SESSION_PROXY_NODE=""
+for n in "$(command -v node 2>/dev/null || true)" /opt/hostedtoolcache/node/*/x64/bin/node /usr/bin/node /usr/local/bin/node; do
+  if [[ -x "$n" ]]; then
+    SESSION_PROXY_NODE=$n
+    break
+  fi
+done
+if [[ -z "$SESSION_PROXY_NODE" ]]; then
+  echo "grok：没跑成：这台找不到 node（照期望读会话代理要它）"
   exit 2
 fi
 
@@ -61,6 +78,7 @@ install -o "$U" -g "$U" -m 644 /dev/null "$T/install.log"
 cat >"$T/install.sh" <<EOF
 #!/usr/bin/env bash
 echo "\$(id -un) \$HOME \$PWD \${GROK_TEST_LEAK-unset} \${SHELL-unset} \$0 \$PATH" >>"$T/install.log"
+echo "\${http_proxy-unset} \${https_proxy-unset} \${HTTP_PROXY-unset} \${HTTPS_PROXY-unset} \${no_proxy-unset} \${NO_PROXY-unset}" >>"$T/proxy.log"
 if [ -e "$T/install-fail" ]; then
   printf '\033[0;31mError: binary download failed from https://x.ai/cli/grok-$VER-linux-x86_64\033[0m\n' >&2
   exit 1
@@ -80,8 +98,13 @@ case ":\$PATH:" in *":\$HOME/.local/bin:"*) ln -sf "\$b/agent" "\$HOME/.local/bi
 case "\$(basename "\${SHELL:-}")" in bash | zsh | fish) printf '\n# >>> grok installer >>>\n' >>"\$HOME/.bashrc" ;; esac
 EOF
 chmod 644 "$T/install.sh"
+install -o "$U" -g "$U" -m 644 /dev/null "$T/proxy.log"
 URL=file://$T/install.sh
 runs() { wc -l <"$T/install.log"; }
+# root 自己环境里的代理（本机档 root 的登录 shell 就有）、碰巧有的 FLEET_SESSION_PROXY：安装脚本只该看到这一档期望里
+# 登记的，这几个一个都看不到
+export https_proxy=http://root-only.invalid:1 HTTPS_PROXY=http://root-only.invalid:1
+export FLEET_SESSION_PROXY=http://root-only.invalid:1
 # 放一个假 grok 在他家里（以他的身份），正文是 sh；第二个参数给 644 就是不能跑
 put_grok() { # 正文 [权限]
   as_u mkdir -p "${B%/*}"
@@ -131,6 +154,8 @@ check "以他的身份、家目录和当前目录都是他家" "$who $home $pwd"
 check "root 这边的环境变量带不进去" "$leak" unset
 check "SHELL 是 /bin/sh（安装脚本就不改他的启动文件；root 这边的 /bin/bash 带不进去）" "$shell" /bin/sh
 check "PATH 只有系统目录（没有他写得动的 ~/.local/bin）" "$path" /usr/local/bin:/usr/bin:/bin
+check "法国（期望登记的会话代理是空）：一个代理变量都不带，root 环境里的代理、FLEET_SESSION_PROXY 都带不进去" \
+  "$(tail -1 "$T/proxy.log")" "unset unset unset unset unset unset"
 has "安装脚本先下成文件再跑（不是 curl | bash）" "$self" '^/tmp/'
 check "下下来的安装脚本跑完删了" "$(if [[ -e "$self" ]]; then echo "还在：$self"; fi)" ""
 check "他家 .local/bin 里 cursor-agent 链的 agent 没被盖掉" "$(readlink "$H/.local/bin/agent")" /nonexistent/cursor-agent
@@ -295,6 +320,31 @@ login
 check "放好了：不判红、不待配" "${#PENDING[@]} ${#REDS[@]}" "0 0"
 has "放好了：只报属主、权限、大小" "$LAST" "登录态在：$A 属 $U、600、${#TOKEN} 字节（内容没读"
 check "全部输出里没有文件内容" "$(grep -c -- "$TOKEN" <<<"$out")" 0
+
+echo "== 7. 会话代理（#731：本机档直连 x.ai 不通，要经 Windows 上的 Clash；只认这一档期望里登记的）"
+rm -rf -- "$H/.grok"
+before=$(runs)
+SESSION_PROXY_DESIRED=$T/没有这份.json SESSION_PROXY_STATE=""
+CHANGES=() REDS=()
+ensure_grok "$U" "$B" "$URL" >/dev/null
+check "【故意造出的失败】登记的会话代理读不出：不装、记红（不拿直连顶）" "$(($(runs) - before)) ${#CHANGES[@]} ${#REDS[@]}" "0 0 1"
+has "读不出：红里写清是会话代理没读成" "$(last_red)" '这一档登记的会话代理没读成（照期望 .*没有这份\.json 出不了 engine\.env'
+SESSION_PROXY_DESIRED="" SESSION_PROXY_STATE="" PROFILE=local
+CHANGES=() REDS=()
+ensure_grok "$U" "$B" "$URL" >/dev/null
+check "本机档：装上" "${#CHANGES[@]} ${#REDS[@]}" "1 0"
+# 【故意造出的失败】的另一面：登记了代理、安装脚本的环境里却没有，这里就红（本机档上就是 grok 装不上的那次）
+check "本机档：安装脚本的环境里带上 deploy/local/desired-config.json 登记的代理（大小写各一份、no_proxy 只放本机回环），root 环境里的没带进去" \
+  "$(tail -1 "$T/proxy.log")" \
+  "http://127.0.0.1:7890 http://127.0.0.1:7890 http://127.0.0.1:7890 http://127.0.0.1:7890 localhost,127.0.0.1,::1 localhost,127.0.0.1,::1"
+read -r who home pwd leak shell self path < <(tail -1 "$T/install.log")
+check "别的照旧清干净：root 的变量、SHELL、PATH" "$leak $shell $path" "unset /bin/sh /usr/local/bin:/usr/bin:/bin"
+SESSION_PROXY_DESIRED=$T/没有这份.json SESSION_PROXY_STATE=""
+CHANGES=() REDS=()
+ensure_grok "$U" "$B" "$URL" >/dev/null
+check "【故意造出的失败】装着了、登记的会话代理读不出：照样判红，不拿没经代理查的报绿" "${#CHANGES[@]} ${#REDS[@]}" "0 1"
+unset PROFILE
+SESSION_PROXY_DESIRED="" SESSION_PROXY_STATE=""
 
 if ((fail)); then
   echo "grok：不通过"

@@ -89,6 +89,9 @@ export async function saveVerifyRound(db: Db, row: VerifyRoundRecord, now: Date 
     startedAt: now,
     endedAt: now,
     outcome: 'done' as const,
+    // 这一笔只是流水：验证会话本身在 session_runs 里记了结局和用量，选路的熔断、战绩、估算从那边算（pool-runs.ts 两张表并起来读），
+    // 这里再记一份就把同一次会话算两遍
+    routeOutcome: null,
     inputTokens: null,
     outputTokens: null,
     cacheReadTokens: null,
