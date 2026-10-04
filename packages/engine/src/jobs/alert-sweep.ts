@@ -12,7 +12,8 @@
 // 各种提醒谁来撤（改这里之前先对一遍）：
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
 //   工作树那一部分撤（jobs/worktree-sweep.ts）。
-// - <工作流>:park:<n> 挂起：工作流不在跑了、不挂着了、后来又挂起了一次（这条是旧的）就撤；「「<阶段>」没有能用的路由」
+// - <工作流>:park:<n> 挂起（任务工作流报的键是 task:<仓>#<号>:park:<n>，旧的是 req:/sub:；#901 之前这里不认 task:，
+//   任务工作流的挂起提醒永远撤不掉；读它的状态走 taskStatus 查询，real/hourly-reconcile.ts 的 taskViewOf）：工作流不在跑了、不挂着了、后来又挂起了一次（这条是旧的）就撤；「「<阶段>」没有能用的路由」
 //   挂着时路由恢复了，正文开头写一句「路由已经恢复…点继续」（不撤：任务还挂着等人点继续）。
 // - <工作流>:history 事件数到线：工作流结束了就撤。
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
@@ -141,7 +142,7 @@ export function withRouteNote(body: string, note: string | null): string {
 export const RULES: readonly Rule[] = [
   {
     name: '挂起',
-    pattern: /^((?:req|sub):.+):park:\d+$/,
+    pattern: /^((?:task|req|sub):.+):park:\d+$/,
     async judge(deps, alert, m) {
       const wf = m[1] as string;
       const st = await deps.workflows.state(wf);

@@ -743,6 +743,30 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     );
   });
 
+  it('任务工作流（task:）的挂起提醒：工作流已结束→撤；还停在这一次→不撤；读不到状态→不撤、这一轮记没查成（#901）', async () => {
+    probeDir();
+    const ended = 'task:acme/patrol#11:park:1';
+    const stillParked = 'task:acme/patrol#12:park:1';
+    const unreadable = 'task:acme/patrol#13:park:1';
+    for (const key of [ended, stillParked, unreadable]) await alert(key, { title: '动手 3 轮都没过' });
+    await backdate(stillParked, new Date(Date.now() - 2 * HOUR));
+    const wf = fakeWorkflows(
+      {
+        'task:acme/patrol#11': { state: 'closed', status: 'COMPLETED' },
+        'task:acme/patrol#12': { state: 'running' },
+        'task:acme/patrol#13': { state: 'running' },
+      },
+      // #13 故意不给查询结果：fakeWorkflows 的 view 对没给的抛错，和真实读不了 taskStatus 是同一个效果
+      { 'task:acme/patrol#12': parkedView(new Date(Date.now() - 3 * HOUR)) },
+    );
+    const run = await runHourlyReconcileJob(deps({ workflows: wf.reader }));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain(`提醒 ${unreadable}（挂起）没查成`);
+    expect((await alertByKey(t.db, ended))?.body).toMatch(/^已撤：任务已经不挂着了：工作流已经结束/);
+    expect((await alertByKey(t.db, stillParked))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, unreadable))?.resolvedAt).toBeNull();
+  });
+
   it('事件数到线：工作流结束了才撤；需求没做完：状态不再是 failed 才撤；要人批：批了才撤', async () => {
     probeDir();
     const { task, sub } = await work('failed');
