@@ -1,111 +1,23 @@
-// PR 必填栏：恰好一个类别标签、挂一个里程碑（版本，如 v1 Fusion 接活；旧的 P 阶段仍认）；正文「对应计划」写
-// 版本全名、#<单号>、未排期，或 plan.md 的哪一条（旧写法），「specs」写需求目录或「不适用」，「档位」写档位加理由。
-// 每缺一样给一句话：缺什么、怎么补——没挂里程碑但「对应计划」写着未排期就不提醒。design 第七节「标签和里程碑不靠人记得贴」。
-// 纯判断，不碰网络：合并闸（merge-gate.ts）现读 PR 和仓里的文件后调这里；这些只是提醒，不挡合并（创始人 2026-09-26）。
+// 只剩两样：（1）PR 正文「对应计划」那一栏的核对 checkPlanValue——引擎收需求文档（Fusion 时代的 sessions.ts）还在用，
+// 随 #556-4 一起删；（2）GitHub Actions 的报错注解 annotation。
+// #654 前这里还管「PR 必填栏」（类别标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）的提醒：全是只提醒不挡合并，
+// 填的人 8 成写「无」或「不适用」，删了；PR 模板只剩四栏，合并闸也不再提醒。
 
-import { CLOSE_COLUMN, type CloseColumn, closeColumnValue, closingIssues } from './close-rule.ts';
-import { isKindLabel, KIND_LABELS, milestonePhase, milestoneVersion } from './labels.ts';
+import { milestoneVersion } from './labels.ts';
 import { parseMd } from './markdown.ts';
-import { parseTier, TIER_COLUMN } from './merge-gates.ts';
-import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
-import { issueColumnNumber, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN } from './pr-columns.ts';
+import { findItem, itemExample, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
 
-// 各栏怎么认在 pr-columns.ts（claim-status.ts 判挂了哪张单也用它）；这里照旧导出，老的引用不用改
-export { CLOSE_COLUMN, type CloseColumn, closeColumnValue, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN };
-
-/** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
+/** plan.md 在仓里的位置：引擎收需求文档时核「对应计划」那一行，按它找。 */
 export const PLAN_DOC = 'docs/plan.md';
 
-export interface PrFacts {
-  labels: readonly string[];
-  /** 里程碑的名字；没挂是 null。 */
-  milestone: string | null;
-  body: string;
-}
-
-export interface RepoFacts {
-  /** plan.md 的各阶段。 */
-  phases: Map<number, PlanPhase>;
-  /** 仓内相对路径在不在（这个 PR 检出来的样子）。 */
-  exists(rel: string): boolean;
-}
-
-export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
-  const problems: string[] = [];
-  const range = phaseRange(repo.phases);
-
-  const kinds = pr.labels.filter(isKindLabel);
-  if (kinds.length === 0) {
-    problems.push(
-      `没贴类别标签：在 PR 右边的 Labels 里从${KIND_LABELS.map((k) => `「${k}」`).join('')}里挑一个贴上。`,
-    );
-  } else if (kinds.length > 1) {
-    problems.push(`类别标签贴了 ${kinds.length} 个（${kinds.join('、')}）：只留一个。`);
-  }
-
-  const cols = prColumns(pr.body);
-  let milestone: number | undefined;
-  if (pr.milestone === null || !pr.milestone.trim()) {
-    if (!isUnscheduled(cols.get(PLAN_COLUMN))) {
-      problems.push('没挂里程碑：在 PR 右边的 Milestone 里挂上对应单所在的版本；对应的单未排期就不用挂。');
-    }
-  } else if (milestoneVersion(pr.milestone) === undefined) {
-    milestone = milestonePhase(pr.milestone);
-    if (milestone === undefined) {
-      problems.push(`里程碑「${pr.milestone}」认不出是哪个阶段：换成 plan.md 的阶段（${range}）之一。`);
-    } else if (!repo.phases.has(milestone)) {
-      problems.push(`里程碑「${pr.milestone}」的 P${milestone} 在 plan.md 里没有：换成 ${range} 之一。`);
-      milestone = undefined;
-    }
-  }
-
-  problems.push(...checkPlan(cols.get(PLAN_COLUMN), milestone, repo, range));
-  problems.push(...checkSpecs(cols.get(SPECS_COLUMN), repo));
-  const tier = parseTier(cols.get(TIER_COLUMN));
-  if ('problem' in tier) problems.push(tier.problem);
-  // 这一栏查缺、空、认不出三种，外加（#460）填了「是」却一个关单词都没写：GitHub 不会关那张单，这里另起一行提醒该
-  // 补哪个 Closes；每天的关单对账（close-sweep.ts）合并后再兜底一次——这个 PR 合进去以后挂的单还开着照样会被列出来。
-  const close = closeColumnValue(pr.body);
-  if (close.value !== 'yes' && close.value !== 'no') {
-    problems.push(closeColumnProblem(close));
-  } else if (close.value === 'yes' && closingIssues(pr.body).length === 0) {
-    problems.push(closeWordMissingProblem(pr.body));
-  }
-  return problems;
-}
-
-/** 「是」却一个关单词都没写（#460）：号从「需求」栏取，取不到就提通用的一句，不瞎编号。 */
-function closeWordMissingProblem(body: string): string {
-  const n = issueColumnNumber(body);
-  const fix = n === undefined ? '写上要关的单号' : `Closes #${n}`;
-  return `「${CLOSE_COLUMN}」填了「是」，正文里却没有关单词：另起一行写 ${fix}（GitHub 合并时才会关，不写不会关）。`;
-}
-
-function closeColumnProblem(c: CloseColumn): string {
-  const how =
-    '合进去这张单就做完了写「是」，正文另起一行写 Closes #<单号>（GitHub 合并时关）；还有后续、或者合完用 pnpm issue:close 关的写「否」';
-  if (c.value === 'missing')
-    return `正文里认不出「${CLOSE_COLUMN}」一栏：单独起一行写 ${CLOSE_COLUMN}：是 或 否（${how}）。`;
-  if (c.value === 'other') return `「${CLOSE_COLUMN}」写的「${c.text}」认不出：${how}。`;
-  return `「${CLOSE_COLUMN}」一栏是空的：${how}。`;
-}
-
-/** 「对应计划」写「未排期」（可以带别的字）：这一单本来就没排版本。判不了（没这一栏、写的是别的）时不算未排期。 */
-function isUnscheduled(value: string | undefined): boolean {
-  return (value ?? '').replace(/`/g, '').trim().startsWith('未排期');
-}
-
-function checkPlan(
-  value: string | undefined,
-  milestone: number | undefined,
-  repo: RepoFacts,
-  range: string,
-): string[] {
-  if (value === undefined) {
-    return [
-      '正文里认不出「对应计划」一栏：要写成 对应计划：P1「工作流」（单独起一行；plan.md 的阶段加那一条的原话开头）。',
-    ];
-  }
+/**
+ * 只核「对应计划」这一栏的值：版本全名、#<单号>、未排期都直接算过；旧写法要阶段在 plan.md 里有、引号里是那一阶段某一条的
+ * 原话。引擎收写需求文档的会话交回来的「对应计划：」那一行时先核一遍。plan.md 里一个阶段都认不出也算一条问题，不当成过了。
+ */
+export function checkPlanValue(value: string, planMarkdown: string): string[] {
+  const phases = planPhases(parseMd(PLAN_DOC, planMarkdown));
+  if (phases.size === 0) return [`${PLAN_DOC} 里一个阶段（### P0 …）也没认出来`];
+  const range = phaseRange(phases);
   if (!value) return ['「对应计划」一栏是空的：写 plan.md 的阶段加那一条的原话开头，比如 P1「工作流」。'];
   const v = value.replace(/`/g, '').trim();
   if (v.startsWith('未排期') || /^#\d+/.test(v) || milestoneVersion(v) !== undefined) return [];
@@ -117,7 +29,7 @@ function checkPlan(
   }
   const problems: string[] = [];
   for (const ref of refs) {
-    const phase = repo.phases.get(ref.phase);
+    const phase = phases.get(ref.phase);
     const example = `P${ref.phase}「${itemExample(phase)}」`;
     if (!phase) {
       problems.push(
@@ -135,61 +47,7 @@ function checkPlan(
       );
     }
   }
-  if (milestone !== undefined && !refs.some((r) => r.phase === milestone)) {
-    problems.push(
-      `里程碑是 P${milestone}，「对应计划」里却没有 P${milestone} 的条目：改里程碑，或在「对应计划」里写上 P${milestone} 的哪一条。`,
-    );
-  }
   return problems;
-}
-
-/**
- * 只核「对应计划」这一栏的值（不看里程碑）：版本全名、#<单号>、未排期都直接算过；旧写法要阶段在 plan.md 里有、
- * 引号里是那一阶段某一条的原话——和 PR 上 pr-fields 判的是同一套。引擎收写需求文档的会话交回来的「对应计划：」
- * 那一行时先核一遍：开出来的 PR 这一栏红了，会话改不了正文。plan.md 里一个阶段都认不出也算一条问题，不当成过了。
- */
-export function checkPlanValue(value: string, planMarkdown: string): string[] {
-  const phases = planPhases(parseMd(PLAN_DOC, planMarkdown));
-  if (phases.size === 0) return [`${PLAN_DOC} 里一个阶段（### P0 …）也没认出来`];
-  return checkPlan(value, undefined, { phases, exists: () => false }, phaseRange(phases));
-}
-
-function checkSpecs(value: string | undefined, repo: RepoFacts): string[] {
-  if (value === undefined) {
-    return [
-      '正文里认不出「specs」一栏：要写成 specs：specs/<号>-<短名>/（单独起一行），杂活写 specs：不适用。',
-    ];
-  }
-  const v = value.replace(/`/g, '').trim();
-  if (!v) return ['「specs」一栏是空的：写需求文档的目录（specs/<号>-<短名>/），杂活写「不适用」。'];
-  if (v.startsWith('不适用')) return [];
-  const paths = specsPaths(v);
-  if (paths.length === 0) {
-    return [
-      `「specs」写的「${oneLine(v)}」不是 specs/ 下的需求目录：写成 specs/<号>-<短名>/，杂活写「不适用」。`,
-    ];
-  }
-  return paths
-    .filter((p) => p.split('/').includes('..') || !repo.exists(p.replace(/\/+$/, '')))
-    .map((p) => `「specs」写的 ${p} 在这个 PR 里没有：先把需求.md 放进去，或者改成已有的目录。`);
-}
-
-/**
- * 「specs」一栏里写的 specs/ 路径（原样，结尾的 / 留着）。合并闸不检出 PR，先按这份去 GitHub 上问在不在，再交给 checkPrFields。
- * 链接也认（[specs/12-x/](https://…/specs/12-x)）：只取不在网址中间的那个。
- */
-export function specsPaths(value: string): string[] {
-  return [...value.replace(/`/g, '').matchAll(/(?<![\w./%-])specs\/[^\s、，,；;：:。()（）[\]「」]+/g)].map(
-    (m) => decode(m[0]).replace(/[。.]+$/, ''),
-  );
-}
-
-function decode(s: string): string {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
 }
 
 function oneLine(s: string): string {
@@ -197,38 +55,7 @@ function oneLine(s: string): string {
   return t.length > 60 ? `${t.slice(0, 60)}…` : t;
 }
 
-// —— 合并闸（merge-gate.ts）用：事件只拿来认是哪个 PR，标签、里程碑、正文按 PR 现在的样子判 ——
-
-export interface PrEvent extends PrFacts {
-  number: number;
-}
-
-/** 从事件（或接口读回来的 PR，包成 { pull_request }）里取 PR；认不出返回一句为什么。 */
-export function prFromEvent(event: unknown): PrEvent | string {
-  const pr = isObject(event) ? event.pull_request : undefined;
-  if (!isObject(pr)) return '事件里没有 pull_request（这条检查只接 pull_request 事件）';
-  const { number, labels, milestone, body } = pr;
-  if (typeof number !== 'number') return '事件里的 pull_request 没有 number';
-  if (!Array.isArray(labels) || !labels.every((l) => isObject(l) && typeof l.name === 'string')) {
-    return 'pull_request.labels 认不出（应当是带 name 的列表）';
-  }
-  if (milestone !== null && !(isObject(milestone) && typeof milestone.title === 'string')) {
-    return 'pull_request.milestone 认不出（应当是 null 或带 title 的对象）';
-  }
-  if (body !== null && body !== undefined && typeof body !== 'string') return 'pull_request.body 认不出';
-  return {
-    number,
-    labels: labels.map((l) => String((l as { name: string }).name)),
-    milestone: milestone === null ? null : String((milestone as { title: string }).title),
-    body: typeof body === 'string' ? body : '',
-  };
-}
-
-/** GitHub Actions 的报错注解（在检查页上直接显示）；% 和换行要转义。 */
-export function annotation(text: string, level: 'error' | 'warning' = 'error'): string {
+/** GitHub Actions 的注解（报错、提醒、说明，在检查页上直接显示）；% 和换行要转义。 */
+export function annotation(text: string, level: 'error' | 'warning' | 'notice' = 'error'): string {
   return `::${level}::${text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')}`;
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

@@ -1,10 +1,14 @@
+// 候选路由的判法（evaluateRoutes），经路由两层读（routing-layers.ts：选路、驾驶舱都走它）：每条路由为什么不能用、额度、并发。
+// 两层怎么合成「活着吗」在 routing-layers.test.ts；选路怎么挑（死的跳过、不知道的排后面）在引擎的 store-ports.test.ts。
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { windowAppliesTo } from '@fleet-dao/shared';
+import { type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { stageCandidates } from '../src/queries/candidates.ts';
 import { type PoolQuotaSnapshot, type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
-import { bans, channels, models, pools, routes, stagePolicies } from '../src/schema/index.ts';
+import { finishRun, startRun } from '../src/queries/runs.ts';
+import { flattenRoutingLayers, routingLayers } from '../src/routing-layers.ts';
+import { bans, channels, models, pools, routes } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -19,7 +23,7 @@ import {
   later,
   MIN,
   NOW,
-  setStageOrder,
+  setRoutingLayers,
 } from './helpers.ts';
 
 let t: TestDb;
@@ -33,36 +37,41 @@ beforeEach(async () => {
 });
 
 const fresh = { reading: 'measured', readAt: ago(MIN) } as const;
-const summary = async (stage: Parameters<typeof stageCandidates>[1]) =>
-  (await stageCandidates(t.db, stage, { now: NOW })).candidates.map((c) => [c.routeId, c.blockers]);
+/** 这个用途摊平之后的候选：用途下模型的先后、再是模型下路由的先后。 */
+const flat = async (purpose: StageKind, now = NOW) =>
+  flattenRoutingLayers(await routingLayers(t.db, purpose, { now }));
+const summary = async (purpose: StageKind) => (await flat(purpose)).map((c) => [c.routeId, c.blockers]);
 /** 经写入口写一次读数，时钟用 NOW；没说的都当读全了。 */
 const saveRead = (snapshot: Omit<PoolQuotaSnapshot, 'complete'> & { complete?: boolean }) =>
   savePoolQuota(t.db, { complete: true, ...snapshot }, { now: NOW });
 
-describe('某阶段的候选路由', () => {
-  it('按调度台排的顺序，不按 id 字母序', async () => {
+describe('某个用途的候选路由', () => {
+  it('按两层的顺序：先是用途下模型的先后，再是模型下路由的先后，不按 id 字母序', async () => {
     await addRoute(t.db, { id: 'z-first', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'a-second', poolId: 'relay-b', modelId: 'opus-5.5' });
-    await setStageOrder(t.db, 'execute', ['z-first', 'a-second']);
+    await addRoute(t.db, { id: 'k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['kimi-k3', 'opus-5.5'] },
+      models: { 'opus-5.5': ['z-first', 'a-second'], 'kimi-k3': ['k3'] },
+    });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
     expect(await summary('execute')).toEqual([
+      ['k3', []],
       ['z-first', []],
       ['a-second', []],
     ]);
   });
 
-  it('阶段还没配顺序：候选为空并写明，不拿全部路由凑数', async () => {
-    await t.db.delete(stagePolicies).where(eq(stagePolicies.stage, 'research'));
+  it('【故意造出的失败】用途没配模型顺序、模型下一条路由都没有：候选为空并写明，不拿全部路由凑数', async () => {
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    expect(await stageCandidates(t.db, 'research', { now: NOW })).toEqual({
-      stage: 'research',
-      configured: false,
-      pinned: false,
-      candidates: [],
-    });
-    // 种子给每个阶段建了空顺序：配了但没挂路由，同样为空。
-    expect((await stageCandidates(t.db, 'review', { now: NOW })).candidates).toEqual([]);
+    const none = await routingLayers(t.db, 'research', { now: NOW });
+    expect(flattenRoutingLayers(none)).toEqual([]);
+    expect(none.problems).toEqual(['用途 research 没配模型顺序']);
+    await setRoutingLayers(t.db, { purposes: { review: ['opus-5.5'] }, models: {} });
+    const empty = await routingLayers(t.db, 'review', { now: NOW });
+    expect(flattenRoutingLayers(empty)).toEqual([]);
+    expect(empty.problems).toEqual(['模型 opus-5.5 没有路由（routing_catalog 里一条都没有）']);
   });
 
   it('被挡的路由不删，留在表里并写明每一条原因', async () => {
@@ -72,7 +81,10 @@ describe('某阶段的候选路由', () => {
       .update(models)
       .set({ retiredAt: ago(HOUR) })
       .where(eq(models.id, 'opus-4.9'));
-    await setStageOrder(t.db, 'execute', ['offline', 'retired']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5', 'opus-4.9'] },
+      models: { 'opus-5.5': ['offline'], 'opus-4.9': ['retired'] },
+    });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     expect(await summary('execute')).toEqual([
       ['offline', ['offline']],
@@ -83,7 +95,10 @@ describe('某阶段的候选路由', () => {
   it('探针下结论的时刻原样给（在线的有，探针还没看过的为空）；过没过期由选路判，候选查询不因此挡', async () => {
     await addRoute(t.db, { id: 'probed', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'never', poolId: 'relay-b', modelId: 'opus-5.5', alive: false });
-    await setStageOrder(t.db, 'execute', ['probed', 'never']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['probed', 'never'] },
+    });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
     // 三小时前的结论（探针可能停了）：照样在线，挡不挡只看 alive
@@ -91,14 +106,14 @@ describe('某阶段的候选路由', () => {
       .update(routes)
       .set({ probedAt: ago(3 * HOUR) })
       .where(eq(routes.id, 'probed'));
-    const [probed, never] = (await stageCandidates(t.db, 'execute', { now: NOW })).candidates;
+    const [probed, never] = await flat('execute');
     expect(probed).toMatchObject({ routeId: 'probed', probedAt: ago(3 * HOUR), blockers: [] });
     expect(never).toMatchObject({ routeId: 'never', probedAt: null, blockers: ['offline'] });
   });
 
   it('渠道关了、订阅过期都挡', async () => {
     await addRoute(t.db, { id: 'r-a', poolId: 'relay-a', modelId: 'opus-5.5' });
-    await setStageOrder(t.db, 'execute', ['r-a']);
+    await setRoutingLayers(t.db, { purposes: { execute: ['opus-5.5'] }, models: { 'opus-5.5': ['r-a'] } });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     await t.db.update(channels).set({ enabled: false }).where(eq(channels.id, 'relay'));
     await t.db
@@ -108,22 +123,31 @@ describe('某阶段的候选路由', () => {
     expect(await summary('execute')).toEqual([['r-a', ['channel-disabled', 'pool-expired']]]);
   });
 
-  it('禁令：代码里的硬禁令（GPT 不做 UI、不用 Fable）库里没有也生效，再并上库里另加的', async () => {
+  it('禁令：代码里的硬禁令（GPT 不做 UI、不用 Fable）库里没有也生效，再并上库里另加的；按用途判', async () => {
     expect(await t.db.select().from(bans)).toEqual([]);
     await addRoute(t.db, { id: 'gpt', poolId: 'relay-a', modelId: 'gpt-5.6-luna', hostId: 'codex' });
     await addRoute(t.db, { id: 'fable51', poolId: 'relay-a', modelId: 'fable-5.1' });
     await addRoute(t.db, { id: 'fable52', poolId: 'relay-b', modelId: 'claude-fable-5.2' });
     await addRoute(t.db, { id: 'grok', poolId: 'relay-b', modelId: 'grok-4.7', hostId: 'grok' });
-    await setStageOrder(t.db, 'ui', ['gpt', 'fable51', 'fable52', 'grok']);
-    await setStageOrder(t.db, 'execute', ['gpt', 'grok']);
+    await setRoutingLayers(t.db, {
+      purposes: {
+        ui: ['gpt-5.6-luna', 'fable-5.1', 'claude-fable-5.2', 'grok-4.7'],
+        execute: ['gpt-5.6-luna', 'grok-4.7'],
+      },
+      models: {
+        'gpt-5.6-luna': ['gpt'],
+        'fable-5.1': ['fable51'],
+        'claude-fable-5.2': ['fable52'],
+        'grok-4.7': ['grok'],
+      },
+    });
     await t.db.insert(bans).values({ family: 'grok', stage: 'ui', reason: '创始人另加：Grok 暂不做 UI' });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
-    const ui = await stageCandidates(t.db, 'ui', { now: NOW });
-    expect(ui.candidates.map((c) => [c.routeId, c.blockers, c.banReasons])).toEqual([
+    expect((await flat('ui')).map((c) => [c.routeId, c.blockers, c.banReasons])).toEqual([
       ['gpt', ['banned'], ['GPT 不做 UI 类活']],
-      ['fable51', ['banned'], ['不用 Fable（出比 5.1 更高的版本之前）']],
-      ['fable52', ['banned'], ['不用 Fable（出比 5.1 更高的版本之前）']],
+      ['fable51', ['banned'], ['不用 Fable（创始人定）']],
+      ['fable52', ['banned'], ['不用 Fable（创始人定）']],
       ['grok', ['banned'], ['创始人另加：Grok 暂不做 UI']],
     ]);
     expect(await summary('execute')).toEqual([
@@ -135,7 +159,10 @@ describe('某阶段的候选路由', () => {
   it('模型组窗口只卡组名对得上的模型：7d_claude 满了，同池的 Kimi 照常', async () => {
     await addRoute(t.db, { id: 'opus', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
-    await setStageOrder(t.db, 'execute', ['opus', 'k3']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5', 'kimi-k3'] },
+      models: { 'opus-5.5': ['opus'], 'kimi-k3': ['k3'] },
+    });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', used: 285511, limit: 512600, ...fresh });
     await addWindow(t.db, {
       poolId: 'relay-a',
@@ -147,8 +174,7 @@ describe('某阶段的候选路由', () => {
       resetsAt: later(2 * 24 * HOUR),
       ...fresh,
     });
-    const result = await stageCandidates(t.db, 'execute', { now: NOW });
-    expect(result.candidates.map((c) => [c.routeId, c.quota, c.windows.length, c.blockers])).toEqual([
+    expect((await flat('execute')).map((c) => [c.routeId, c.quota, c.windows.length, c.blockers])).toEqual([
       ['opus', 'exhausted', 2, ['quota-exhausted']],
       ['k3', 'ok', 1, []],
     ]);
@@ -196,7 +222,10 @@ describe('某阶段的候选路由', () => {
       upstreamModel: 'claude-opus-5-5',
       ...onCursor,
     });
-    await setStageOrder(t.db, 'execute', ['composer', 'opus-on-cursor']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['composer-2', 'opus-5.5'] },
+      models: { 'composer-2': ['composer'], 'opus-5.5': ['opus-on-cursor'] },
+    });
     // 读取器的原样输出：两个桶都归 other，组名 auto / api，成员表来自接口的 autoBucketModels。
     const read = (used: { auto: number; api: number }, at: Date) =>
       saveRead({
@@ -234,7 +263,10 @@ describe('某阶段的候选路由', () => {
     await addRoute(t.db, { id: 'opus-b', poolId: 'relay-b', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'k3-a', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
     await addRoute(t.db, { id: 'opus-a', poolId: 'relay-a', modelId: 'opus-5.5' });
-    await setStageOrder(t.db, 'execute', ['opus-b', 'k3-a', 'opus-a']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5', 'kimi-k3'] },
+      models: { 'opus-5.5': ['opus-b', 'opus-a'], 'kimi-k3': ['k3-a'] },
+    });
     const base = (poolId: string, at: Date) =>
       ({
         poolId,
@@ -267,21 +299,20 @@ describe('某阶段的候选路由', () => {
     await save('relay-b', before, [sevenDay('relay-b', before), claudeFull('relay-b', before)]);
     await save('relay-a', ago(MIN), [sevenDay('relay-a', ago(MIN))]);
     await save('relay-b', ago(MIN), [sevenDay('relay-b', ago(MIN))]);
-    // relay-b 的旧「满」不知道哪天清零、读数也旧了：不挡，也不让 opus-b 排到最后。
+    // relay-b 的旧「满」不知道哪天清零、读数也旧了：不挡，额度照算 ok（不让 opus-b 当成额度未知排到后面）。
     // relay-a 的明天才清零：照样挡 opus-a。
-    const result = await stageCandidates(t.db, 'execute', { now: NOW });
     expect(
-      result.candidates.map((c) => [c.routeId, c.quota, c.blockers, c.windows.map((w) => w.label)]),
+      (await flat('execute')).map((c) => [c.routeId, c.quota, c.blockers, c.windows.map((w) => w.label)]),
     ).toEqual([
       ['opus-b', 'ok', [], ['7d']],
-      ['k3-a', 'ok', [], ['7d']],
       ['opus-a', 'exhausted', ['quota-exhausted'], ['7d', '7d_claude']],
+      ['k3-a', 'ok', [], ['7d']],
     ]);
   });
 
   it('中转 7d_claude 已满、明天才清零，之后的读数里没了它：Opus 照样挡，过了清零时刻才放', async () => {
     await addRoute(t.db, { id: 'opus', poolId: 'relay-a', modelId: 'opus-5.5' });
-    await setStageOrder(t.db, 'execute', ['opus']);
+    await setRoutingLayers(t.db, { purposes: { execute: ['opus-5.5'] }, models: { 'opus-5.5': ['opus'] } });
     const tomorrow = later(DAY);
     const relayWindow = (label: string, at: Date, more: Partial<StoredQuotaWindow>): StoredQuotaWindow => ({
       poolId: 'relay-a',
@@ -313,7 +344,7 @@ describe('某阶段的候选路由', () => {
       complete: false,
       windows: [sevenDay(ago(2 * MIN))],
     });
-    const opusAt = async (now: Date) => (await stageCandidates(t.db, 'execute', { now })).candidates[0];
+    const opusAt = async (now: Date) => (await flat('execute', now))[0];
     expect((await opusAt(NOW))?.blockers).toEqual(['quota-exhausted']);
     // 下一次说读全了、还是没有它：标了过期，最后一次读到是用满、明天才清零，照样挡。
     await saveRead({ poolId: 'relay-a', readAt: ago(MIN).toISOString(), windows: [sevenDay(ago(MIN))] });
@@ -362,7 +393,14 @@ describe('某阶段的候选路由', () => {
       upstreamModel: 'claude-opus-5-5',
       ...onCursor,
     });
-    await setStageOrder(t.db, 'execute', ['cursor-auto', 'grok-on-cursor', 'opus-on-cursor']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['cursor-auto', 'grok-4.7', 'opus-5.5'] },
+      models: {
+        'cursor-auto': ['cursor-auto'],
+        'grok-4.7': ['grok-on-cursor'],
+        'opus-5.5': ['opus-on-cursor'],
+      },
+    });
 
     const at = ago(MIN).toISOString();
     const bucket = (scope: 'auto' | 'api', used: number): StoredQuotaWindow => ({
@@ -397,9 +435,8 @@ describe('某阶段的候选路由', () => {
         bucket('api', 0),
       ],
     });
-    const result = await stageCandidates(t.db, 'execute', { now: NOW });
     expect(
-      result.candidates.map((c) => [
+      (await flat('execute')).map((c) => [
         c.routeId,
         c.quota,
         c.blockers,
@@ -407,9 +444,9 @@ describe('某阶段的候选路由', () => {
       ]),
     ).toEqual([
       ['cursor-auto', 'exhausted', ['quota-exhausted'], ['auto_percent:yes', 'plan_usd:yes']],
-      ['opus-on-cursor', 'ok', [], ['api_percent:yes', 'plan_usd:yes']],
-      // 不知道 Grok 这条在 Cursor 叫什么：两个桶都判不了，额度按未知算、排到后面，不算进 api 桶。
+      // 不知道 Grok 这条在 Cursor 叫什么：两个桶都判不了，额度按未知算（不挡；排不排后面由选路判），不算进 api 桶。
       ['grok-on-cursor', 'unknown', [], ['api_percent:unknown', 'auto_percent:unknown', 'plan_usd:yes']],
+      ['opus-on-cursor', 'ok', [], ['api_percent:yes', 'plan_usd:yes']],
     ]);
   });
 
@@ -424,7 +461,10 @@ describe('某阶段的候选路由', () => {
       hostId: 'cursor-agent',
       upstreamModel: 'claude-opus-5-5',
     });
-    await setStageOrder(t.db, 'execute', ['never-read', 'opus-on-cursor']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['never-read', 'opus-on-cursor'] },
+    });
     // Cursor 这次只报了 auto 桶（用满了），成员表说它只扣 Composer。
     await saveRead({
       poolId: 'cursor-a',
@@ -445,19 +485,21 @@ describe('某阶段的候选路由', () => {
         },
       ],
     });
-    const result = await stageCandidates(t.db, 'execute', { now: NOW });
-    expect(result.candidates.map((c) => [c.routeId, c.quota, c.blockers, c.windows.length])).toEqual([
-      ['opus-on-cursor', 'ok', [], 0],
+    expect((await flat('execute')).map((c) => [c.routeId, c.quota, c.blockers, c.windows.length])).toEqual([
       ['never-read', 'unknown', [], 0],
+      ['opus-on-cursor', 'ok', [], 0],
     ]);
   });
 
-  it('额度没读成（从没读过、读数过期）不挡，但排在读到了的后面，标 unknown', async () => {
+  it('额度没读成（从没读过、读数过期）不挡、标 unknown，照两层的顺序给（排不排后面由选路判）', async () => {
     await t.db.insert(pools).values({ id: 'relay-c', channelId: 'relay', maxConcurrency: 1 });
     await addRoute(t.db, { id: 'never-read', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'stale', poolId: 'relay-b', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'fresh', poolId: 'relay-c', modelId: 'opus-5.5' });
-    await setStageOrder(t.db, 'execute', ['never-read', 'stale', 'fresh']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['never-read', 'stale', 'fresh'] },
+    });
     await addWindow(t.db, {
       poolId: 'relay-b',
       window: '7d',
@@ -466,12 +508,10 @@ describe('某阶段的候选路由', () => {
       readAt: ago(3 * HOUR),
     });
     await addWindow(t.db, { poolId: 'relay-c', window: '7d', utilization: 0.1, ...fresh });
-    const result = await stageCandidates(t.db, 'execute', { now: NOW });
-    // 读到了的排前面；没读成的两条挪到后面，彼此仍按调度台的顺序。
-    expect(result.candidates.map((c) => [c.routeId, c.position, c.quota, c.eligible])).toEqual([
-      ['fresh', 2, 'ok', true],
+    expect((await flat('execute')).map((c) => [c.routeId, c.position, c.quota, c.eligible])).toEqual([
       ['never-read', 0, 'unknown', true],
       ['stale', 1, 'unknown', true],
+      ['fresh', 2, 'ok', true],
     ]);
   });
 
@@ -479,12 +519,12 @@ describe('某阶段的候选路由', () => {
     await addRoute(t.db, { id: 'a', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'b', poolId: 'relay-b', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'b-k3', poolId: 'relay-b', modelId: 'kimi-k3', hostId: 'mirasim' });
-    await setStageOrder(t.db, 'execute', ['a', 'b']);
+    await setRoutingLayers(t.db, { purposes: { execute: ['opus-5.5'] }, models: { 'opus-5.5': ['a', 'b'] } });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
-    // relay-b 上限 1：一场考新模型的会话（不属于任何需求、路由也不在本阶段）占着。
+    // relay-b 上限 1：一场考新模型的会话（不属于任何需求、路由也不在本用途）占着。
     await addRun(t.db, { taskId: null, stage: 'judge', routeId: 'b-k3', startedAt: ago(5 * MIN) });
     // relay-a 上限 2：只有一个在跑，一个已结束。
     await addRun(t.db, { taskId: task.id, routeId: 'a', startedAt: ago(5 * MIN) });
@@ -496,15 +536,59 @@ describe('某阶段的候选路由', () => {
       endedAt: ago(40 * MIN),
       outcome: 'ok',
     });
-    const result = await stageCandidates(t.db, 'execute', { now: NOW });
-    expect(result.candidates.map((c) => [c.routeId, c.inFlight, c.maxConcurrency, c.blockers])).toEqual([
-      ['a', 1, 2, []],
-      ['b', 1, 1, ['no-slot']],
-    ]);
+    expect((await flat('execute')).map((c) => [c.routeId, c.inFlight, c.maxConcurrency, c.blockers])).toEqual(
+      [
+        ['a', 1, 2, []],
+        ['b', 1, 1, ['no-slot']],
+      ],
+    );
   });
 
-  it('钉住的顺序标出来', async () => {
-    await t.db.update(stagePolicies).set({ pinned: true }).where(eq(stagePolicies.stage, 'plan'));
-    expect((await stageCandidates(t.db, 'plan', { now: NOW })).pinned).toBe(true);
+  it('三段的一次性会话（runs 里开着的行，#157）也占名额：拼车池上限 3，两行三段 + 一行 Fusion 的会话就没空位；收了一行又有', async () => {
+    await t.db.insert(pools).values({
+      id: 'claude-carpool',
+      channelId: 'claude-subscription',
+      maxConcurrency: 3,
+      runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
+    });
+    await addRoute(t.db, {
+      id: 'car',
+      channelId: 'claude-subscription',
+      poolId: 'claude-carpool',
+      modelId: 'opus-5.5',
+      upstreamModel: 'claude-opus-5-5',
+    });
+    await addRoute(t.db, { id: 'a', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['car', 'a'] },
+    });
+    await addWindow(t.db, { poolId: 'claude-carpool', window: '5h', utilization: 0.1, ...fresh });
+    await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    await addRun(t.db, { taskId: task.id, routeId: 'car', startedAt: ago(20 * MIN) });
+    const manual = randomUUID();
+    await startRun(t.db, {
+      id: manual,
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId: 'car',
+      startedAt: ago(10 * MIN),
+    });
+    await startRun(t.db, { segment: 'verify', model: 'opus-5.5', routeId: 'car', startedAt: ago(5 * MIN) });
+    const slots = async () =>
+      (await flat('execute')).map((c) => [c.routeId, c.inFlight, c.maxConcurrency, c.blockers]);
+
+    expect(await slots()).toEqual([
+      ['car', 3, 3, ['no-slot']],
+      ['a', 0, 2, []],
+    ]);
+    await finishRun(t.db, { runId: manual, outcome: 'done' }, NOW);
+    expect(await slots()).toEqual([
+      ['car', 2, 3, []],
+      ['a', 0, 2, []],
+    ]);
   });
 });

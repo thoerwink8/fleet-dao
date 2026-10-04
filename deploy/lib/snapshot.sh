@@ -105,6 +105,7 @@ snapshot_ours() {
   snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /srv/fleet-dao-gateway /var/www/fleet-dao-acme \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /usr/local/bin/pnpm /usr/local/sbin/fleet-agent-scope /usr/local/sbin/fleet-gateway-deploy \
+    /usr/local/sbin/fleet-wsl-loopback \
     /usr/local/lib/fleet-dao \
     /etc/sudoers.d/fleet-dao /etc/tmpfiles.d/fleet-dao-node-compile-cache.conf /home/fleet/.local/bin \
     /home/fleet-agent-carpool/.local/bin \

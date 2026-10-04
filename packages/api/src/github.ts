@@ -1,5 +1,5 @@
-// GitHub 事件接收：验签名（X-Hub-Signature-256）→ 原文落库、投递编号去重 → 白名单过滤 → PR 镜像 → issue 变成任务和工作流、
-// PR 按库里的认领贴「认领对得上」（#348，issue-intake.ts 交给 claim-status.ts）。
+// GitHub 事件接收：验签名（X-Hub-Signature-256）→ 原文落库、投递编号去重 → 白名单过滤 → PR 镜像。只收 PR 和 CI 的事件（给驾驶舱的镜像用）；
+// issue、评论的事件不收：单子由引擎每 5 分钟自己去 GitHub 上拉（#632），不靠事件，也没有认领（#556）。
 // 香港只转发不验签：请求体和几个头原样透传，签名必须对收到的原始字节算，不许先解析再序列化。
 // 验签不过的不落库（没认证的请求不许往库里写），只回 401、记日志。
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -9,7 +9,6 @@ import { z } from 'zod';
 import type { Deps } from './deps.ts';
 import { PublicHealthError } from './health.ts';
 import { ApiError, errorBody } from './http.ts';
-import { CommentPayload, createIssueIntake, IssuePayload, RetryLaterError } from './issue-intake.ts';
 import {
   type GitHubDeliveryOutcome,
   type GitHubDeliverySource,
@@ -155,14 +154,6 @@ export function screenGithubEvent(
 
   const author = (() => {
     switch (event) {
-      case 'issues': {
-        const p = IssuePayload.safeParse(payload);
-        return p.success ? p.data.issue.user : null;
-      }
-      case 'issue_comment': {
-        const p = CommentPayload.safeParse(payload);
-        return p.success ? p.data.comment.user : null;
-      }
       case 'pull_request': {
         const p = PullPayload.safeParse(payload);
         if (!p.success) return null;
@@ -202,18 +193,7 @@ export function objectKey(repo: string, kind: 'issue' | 'comment' | 'pull', id: 
   return `${repo.toLowerCase()}:${kind}:${id}`;
 }
 
-const VersionedIssue = z.object({
-  number: z.number(),
-  updated_at: z.string().optional(),
-  state: z.string().optional(),
-  pull_request: z.unknown().optional(),
-});
 const Versioned = {
-  issues: z.object({ issue: VersionedIssue }),
-  issue_comment: z.object({
-    comment: z.object({ id: z.number(), updated_at: z.string() }),
-    issue: VersionedIssue.optional(),
-  }),
   pull: z.object({
     pull_request: z.object({ number: z.number(), updated_at: z.string(), state: z.string().optional() }),
   }),
@@ -238,24 +218,12 @@ function versionOf(
 }
 
 /**
- * 这条事件带着的每个对象的那一版，主对象在第一个：issue 事件是 issue；评论事件是评论，再是被它顶新的 issue
- * （PR 上的评论是 PR）；PR 和它的审查、审查评论是 PR。认不出版本的不写。
+ * 这条事件带着的那一版：PR 和它的审查、审查评论都是 PR 这一个对象。认不出版本的不写。
  */
 export function versionsOf(event: string, payload: unknown, repo: string | undefined): GitHubObjectVersion[] {
   if (!repo) return [];
   const out: (GitHubObjectVersion | null)[] = [];
-  const issueVersion = (i: z.infer<typeof VersionedIssue>) =>
-    versionOf(repo, i.pull_request ? 'pull' : 'issue', i.number, i.updated_at, i.state);
-  if (event === 'issues') {
-    const p = Versioned.issues.safeParse(payload);
-    if (p.success) out.push(issueVersion(p.data.issue));
-  } else if (event === 'issue_comment') {
-    const p = Versioned.issue_comment.safeParse(payload);
-    if (p.success) {
-      out.push(versionOf(repo, 'comment', p.data.comment.id, p.data.comment.updated_at));
-      if (p.data.issue) out.push(issueVersion(p.data.issue));
-    }
-  } else if (PULL_EVENTS.has(event)) {
+  if (PULL_EVENTS.has(event)) {
     const p = Versioned.pull.safeParse(payload);
     if (p.success) {
       const pr = p.data.pull_request;
@@ -324,11 +292,8 @@ export interface GitHubIntake {
 }
 
 /** 收件（webhook）、补收（对账、轮询）、重放共用这一道门和这一本投递账（github_events）。 */
-export function createGitHubIntake(
-  deps: Pick<Deps, 'store' | 'github' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now' | 'claims'>,
-): GitHubIntake {
+export function createGitHubIntake(deps: Pick<Deps, 'store' | 'github' | 'log' | 'now'>): GitHubIntake {
   const { store, log } = deps;
-  const issues = createIssueIntake(deps);
   const staleBefore = () => new Date(deps.now().getTime() - DELIVERY_STALE_MS).toISOString();
 
   async function finish(id: string, token: string, outcome: GitHubDeliveryOutcome): Promise<void> {
@@ -365,28 +330,6 @@ export function createGitHubIntake(
         await finish(deliveryId, token, { status: 'ignored', reason: screening.reason });
         return { verdict: 'ignored', reason: screening.reason };
       }
-      // issue 事件晚到、或者是重放：同一张 issue 更新的一版已经处理过、开关状态又不一样，就按新的那版算，这条旧的不做
-      // （旧的「重开」不会把后来关了的单又拉起来，旧的「关单」也不会把后来重开的单叫停）
-      if (event === 'issues') {
-        const [v] = versionsOf(event, payload, screening.repo);
-        const newer = v?.state
-          ? await store.findSupersedingVersion({
-              object: v.object,
-              version: v.version,
-              state: v.state,
-              excludeDeliveryId: deliveryId,
-            })
-          : null;
-        if (newer) {
-          log.info('同一张 issue 更新的一版已经处理过、开关状态不一样：这条旧的不再做', {
-            deliveryId,
-            newer: newer.deliveryId,
-            newerVersion: newer.version,
-          });
-          await finish(deliveryId, token, { status: 'ignored', reason: 'superseded' });
-          return { verdict: 'ignored', reason: 'superseded' };
-        }
-      }
       const ingested: IngestedEvent = {
         deliveryId,
         source,
@@ -398,23 +341,18 @@ export function createGitHubIntake(
         payload,
       };
       await deps.github.accept(ingested);
-      const note = await issues.handle(ingested);
-      await finish(deliveryId, token, { status: 'accepted', note });
-      if (note) log.info('GitHub 事件已处理', { deliveryId, event, note });
+      await finish(deliveryId, token, { status: 'accepted' });
       return {
         verdict: 'accepted',
         wake: screening.wake,
-        ...(note ? { note } : {}),
         ...(delivery.seenBefore ? { seenBefore: true } : {}),
       };
     } catch (err) {
       const reason =
         (err instanceof Error ? err.message : String(err)).slice(0, MAX_REASON_CHARS) || '没带原因';
-      // 原文留在库里：重投、补收或对账重放时还能再来。现在做不了、要等前一件事的（重开时上一轮还没结束）记成等着：
-      // 每轮对账都重放，不占自动重放的次数
-      const status = err instanceof RetryLaterError ? 'waiting' : 'failed';
+      // 原文留在库里：重投、补收或对账重放时还能再来
       try {
-        await finish(deliveryId, token, { status, reason });
+        await finish(deliveryId, token, { status: 'failed', reason });
       } catch (recordErr) {
         log.error('GitHub 事件没处理成，出错记录也没写进去', {
           deliveryId,
@@ -503,19 +441,8 @@ export function githubRoutes(deps: Deps, intake: GitHubIntake): Hono {
         deps.log.warn('GitHub 事件的请求体不是 JSON，已拒绝', { deliveryId, event, bytes: body.length });
         throw new ApiError(400, 'invalid_json', '请求体不是 JSON（Content type 要选 application/json）');
       }
-      try {
-        const result = await intake.ingest({ deliveryId, event, payload, source: 'webhook' });
-        return c.json({ ok: true, ...result });
-      } catch (err) {
-        // 现在做不了、过一会儿就行（关了又重开、上一轮还没结束）：这条已经记成等着，每轮对账重放，不当后端出错
-        if (!(err instanceof RetryLaterError)) throw err;
-        deps.log.warn('GitHub 事件现在做不了，记成等着、对账时再来', {
-          deliveryId,
-          event,
-          reason: err.message,
-        });
-        return c.json(errorBody('retry_later', err.message), 503);
-      }
+      const result = await intake.ingest({ deliveryId, event, payload, source: 'webhook' });
+      return c.json({ ok: true, ...result });
     },
   );
   return app;

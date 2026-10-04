@@ -20,10 +20,12 @@
 // - 进程用 detached + windowsHide + stdio 指向真文件描述符（不是管道）起，spawn 完立刻 unref：这样 `start` 这条命令
 //   退出之后子进程照样活着；用文件描述符不用 pipe，是因为 pipe 要父进程留着读写端才不出问题，文件描述符不需要。
 // - 状态记在 ~/.fleet-dao/workers/<短名>/（meta.json、out.log、err.log、prompt.txt）：机器本地、不进仓。
-// - 思考档位（创始人 2026-09-28 拍）：默认 high，简单活可以 medium，不用 xhigh；--effort 不给就是 high，
-//   总是显式传给命令行，不靠模型自己的默认（grok 自己的默认是 xhigh，09-28 冒烟撞过）。grok 传
-//   --reasoning-effort <档>；codex 传 -c model_reasoning_effort="<档>"（TOML 字符串，引号是字面量，
-//   ~/.codex/config.toml 里本来就有这个键，键名对得上）；kimi 不支持，不传，status 里标「不支持」。
+// - 思考档位（创始人 2026-09-28 拍）：默认 high，简单活可以 medium，不用 xhigh。--effort 不给就照仓里路由骨架
+//   （packages/db/routing.default.json，#470）给这个模型配的：引擎起会话照法国库里的路由两层，库里的值由这份骨架装进去、
+//   驾驶舱再改；本机读不到法国库，读同步专用检出 ~/.fleet-dao/origin-main 里的那份（技能脚本也是从它装的，停在 origin/main）。
+//   没配就是 high；骨架读不到、认不出，不起（不当成 high）。总是显式传给命令行，不靠模型自己的默认（grok 自己的默认是
+//   xhigh，09-28 冒烟撞过）。grok 传 --reasoning-effort <档>；codex 传 -c model_reasoning_effort="<档>"（TOML 字符串，
+//   引号是字面量，~/.codex/config.toml 里本来就有这个键，键名对得上）；kimi 不支持，不传，status 里标「不支持」。
 // - --repo 不给默认值就用当前目录（不写死这台机器的主检出路径）：这是公开仓，写死的本机路径会被卫生检查当成
 //   「盘符下的个人目录」拦下，AGENTS.md 也不许公开仓里写个人目录路径；帅位平时就在主检出的检出里跑命令，默认当前
 //   目录已经够用，--repo 留给不在那跑的场景。
@@ -47,17 +49,31 @@ import { dirname, isAbsolute, join } from 'node:path';
 
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MODELS = ['grok', 'codex', 'kimi'];
-/** 思考档位：不给就是 DEFAULT_EFFORT，总是显式传给模型命令行（创始人 2026-09-28 拍：默认 high，别用 xhigh）。 */
+/** 思考档位的叫法，和 packages/shared/src/effort.ts 的 SESSION_EFFORTS 一样（测试钉着）。 */
+export const SESSION_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** grok、codex 命令行认的档（都没有 max）；总是显式传给模型命令行。 */
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+/** 骨架里这个模型没配档位时用这一档（创始人 2026-09-28 拍：默认 high，别用 xhigh）。 */
 export const DEFAULT_EFFORT = 'high';
+/** 路由骨架在同步专用检出里的位置（相对家目录）：本机读不到法国库，档位照它（见文件头）。 */
+export const ROUTING_DEFAULT_REL = join(
+  '.fleet-dao',
+  'origin-main',
+  'packages',
+  'db',
+  'routing.default.json',
+);
+/** 不给 --model-id 时按骨架里哪个模型查档位：本机 grok 命令行跑的就是 grok-4.7（法国 grok 那条路由同一个命令行），codex 跑 GPT。 */
+export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna' };
 /** 模型自己要连的 GitHub 域名：让它自己跑的 git/gh 绕开代理直连这几个。 */
 export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.com'];
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
   start --model grok|codex|kimi --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
-        [--effort low|medium|high|xhigh，不给是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
+        [--effort low|medium|high|xhigh，这一次用的；不给照 ~/${ROUTING_DEFAULT_REL.replaceAll('\\', '/')} 给这个模型配的，
+        没配是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
                     在主检出的上一级建一棵工作树、起一个别家模型命令行去干活（后台跑，这条命令退出它照跑）
-                    --no-automerge：开非草稿 PR 但不挂自动合并，PR 正文第一行写「人闸：改标准」，CI 绿了就停
+                    --no-automerge：开非草稿 PR 但不挂自动合并，正文「还欠什么」栏写「人闸：改标准」，CI 绿了就停
                     （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
                     CI 绿就合、自动挂上。
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
@@ -126,11 +142,85 @@ function modelOf(p) {
   return v;
 }
 
-function effortOf(p) {
+/** 命令行给的 --effort（一次性的指令，不改骨架）；没给是 undefined。 */
+function explicitEffortOf(p) {
   const v = p.options.get('effort');
-  if (v === undefined) return DEFAULT_EFFORT;
+  if (v === undefined) return undefined;
   if (!EFFORTS.includes(v)) throw new UsageError(`不认识的档位「${v}」：只有 ${EFFORTS.join('、')}`);
   return v;
+}
+
+/**
+ * 这次起工人用哪一档（#470）：--effort 给了就用它；不给照路由骨架给这个模型配的——模型下几条路由配了的都一样就用它，一条都没配、
+ * 骨架里没这个模型就是 DEFAULT_EFFORT。骨架读不到、不是 JSON、形状或档位认不出、几条路由配的不一样（不知道照哪条）、这个命令行
+ * 不认那一档：回 { ok: false, why }，调用方不起，不当成 high。
+ */
+export function routingEffortFor(home, model, modelId) {
+  const file = join(home, ROUTING_DEFAULT_REL);
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    return {
+      ok: false,
+      why: `路由骨架读不到（${file}：${e.code ?? e.message}），档位照它定、读不到不起：这台机器的同步专用检出没装好就先跑 pnpm agents:sync，或者带 --effort 明说这一次用哪档`,
+    };
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, why: `路由骨架不是 JSON（${file}：${e.message}）` };
+  }
+  const models = cfg?.models;
+  if (!models || typeof models !== 'object' || Array.isArray(models)) {
+    return { ok: false, why: `路由骨架认不出（${file}）：没有 models（模型 → 路由顺序）` };
+  }
+  const routingModel = modelId ?? ROUTING_MODEL_OF[model];
+  const routes = models[routingModel];
+  if (routes === undefined) {
+    return { ok: true, effort: DEFAULT_EFFORT, source: `路由骨架里没有模型 ${routingModel}，用默认` };
+  }
+  if (!Array.isArray(routes)) {
+    return { ok: false, why: `路由骨架认不出（${file}）：models.${routingModel} 不是路由列表` };
+  }
+  const configured = [];
+  for (const [i, r] of routes.entries()) {
+    if (!r || typeof r !== 'object' || typeof r.routeId !== 'string') {
+      return {
+        ok: false,
+        why: `路由骨架认不出（${file}）：models.${routingModel} 第 ${i + 1} 项不是 { routeId, enabled }`,
+      };
+    }
+    if (r.effort === undefined) continue;
+    if (!SESSION_EFFORTS.includes(r.effort)) {
+      return {
+        ok: false,
+        why: `路由骨架里 ${r.routeId} 的思考档位认不出：${JSON.stringify(r.effort)}（只有 ${SESSION_EFFORTS.join('、')}）`,
+      };
+    }
+    configured.push(r);
+  }
+  const distinct = [...new Set(configured.map((r) => r.effort))];
+  if (distinct.length > 1) {
+    return {
+      ok: false,
+      why: `路由骨架里模型 ${routingModel} 几条路由配的档位不一样（${configured.map((r) => `${r.routeId}：${r.effort}`).join('、')}），启动器不知道照哪条：带 --effort 明说这一次用哪档`,
+    };
+  }
+  const effort = distinct[0] ?? DEFAULT_EFFORT;
+  if (!EFFORTS.includes(effort)) {
+    return {
+      ok: false,
+      why: `路由骨架给模型 ${routingModel} 配的是 ${effort}，${model} 命令行不认（只认 ${EFFORTS.join('、')}）：带 --effort 明说这一次用哪档`,
+    };
+  }
+  return {
+    ok: true,
+    effort,
+    source:
+      distinct.length > 0 ? `路由骨架给 ${routingModel} 配的` : `路由骨架里 ${routingModel} 没配，用默认`,
+  };
 }
 
 /** 相对路径按 io.cwd() 展开，不用真的 process.cwd()（测试里两者不是一回事）。 */
@@ -231,22 +321,20 @@ export function closingBrief({ branch, noShip, noAutomerge }) {
   }
   const prSteps = noAutomerge
     ? [
-        '5. gh pr create（不开草稿）：正文第一行写「人闸：改标准」，其余栏目照',
-        '   .github/pull_request_template.md 填；「认领」栏写「无」；「档位」栏也写「人闸：改标准」。',
+        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的四栏填；「还欠什么」栏写「人闸：改标准」，不再另写档位栏。',
         '6. 不要挂自动合并、不要跑 gh pr merge：这条改的是要创始人拍板的标准，他同意之前不能自己合，合并由',
         '   创始人或帅位在他同意后另外做。',
         '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不用等合并、不用',
         '   等创始人回话。',
       ]
     : [
-        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的栏目填；「认领」栏写「无」；',
-        '   「档位」栏写「CI 绿就合（本机快马）」，理由写清楚。',
+        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的四栏填。',
         '6. gh pr merge <PR 号> --auto --squash 挂自动合并。',
         '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
       ];
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
-    '1. 先读仓根的 AGENTS.md，照它的规矩做。这是本机快马：不开单、不写需求文档和结果文档、不认领。',
+    '1. 先读仓根的 AGENTS.md，照它的规矩做。这是本机快马：不开单、不另写需求/结果文档、不认领（#446）。',
     '2. 改完依次跑，都要过：',
     '   - pnpm test:changed（它说要全跑、退出码 3：照它打印的命令单独跑对应包的测试，不要在这台机器上跑全量',
     '     pnpm test 或 pnpm check）',
@@ -431,11 +519,19 @@ async function cmdStart(p, io) {
   const briefArg = p.options.get('brief');
   if (!briefArg) throw new UsageError('要带 --brief <文件>');
   const modelId = p.options.get('model-id');
-  const effort = effortOf(p);
+  const explicitEffort = explicitEffortOf(p);
   const noShip = p.flags.has('no-ship');
   const noAutomerge = p.flags.has('no-automerge');
 
   if (model === 'kimi') return fail(io, KIMI_UNSUPPORTED);
+
+  // 档位先定：骨架读不到、认不出就不起，什么都还没建
+  const picked =
+    explicitEffort === undefined
+      ? routingEffortFor(io.home, model, modelId)
+      : { ok: true, effort: explicitEffort, source: '--effort 指定的' };
+  if (!picked.ok) return fail(io, picked.why);
+  const { effort } = picked;
 
   const briefPath = resolvePath(io, briefArg);
   let briefText;
@@ -559,7 +655,9 @@ async function cmdStart(p, io) {
       2,
     )}\n`,
   );
-  io.out(`${name}：pid ${spawned.pid}，档位 ${effort}，工作树 ${worktreeDir}，日志 ${outLog}`);
+  io.out(
+    `${name}：pid ${spawned.pid}，档位 ${effort}（${picked.source}），工作树 ${worktreeDir}，日志 ${outLog}`,
+  );
   return 0;
 }
 

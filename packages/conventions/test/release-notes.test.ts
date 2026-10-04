@@ -29,18 +29,25 @@ describe('认格式（Keep a Changelog 1.1.0）', () => {
 `;
     expect(splitChangelog(text).hasContent).toBe(true);
     expect(splitChangelog(text).section).toBe('- 加了记一版\n- 加了 CI 检查');
-    expect(splitChangelog(text).next).toEqual({ version: 'v1', date: today() });
+    expect(splitChangelog(text).next).toEqual({ date: today() });
   });
 
-  test('只有 Unreleased 一张时 next 是 v1，没有上一版', () => {
+  test('日期可以由调用方给（测试钉死、不读真钟）：给了就用它，不给才读真钟', () => {
+    const text = `${BASE}
+- 加了记一版
+`;
+    expect(splitChangelog(text, () => '2030-01-02').next).toEqual({ date: '2030-01-02' });
+  });
+
+  test('只有 Unreleased 一张时没有上一版，也不按「上一版 +1」猜这一版叫 v1（版本号取当前版本里程碑，#725）', () => {
     const text = `${BASE}
 - 一条
 `;
-    expect(splitChangelog(text).next.version).toBe('v1');
+    expect(splitChangelog(text).next).not.toHaveProperty('version');
     expect(splitChangelog(text).released).toEqual([]);
   });
 
-  test('有上一版时，下一版是它加一', () => {
+  test('已发的版本按日期从新到旧排；下一版叫什么不从这里推', () => {
     const text = `${BASE}
 - 一条
 
@@ -57,7 +64,7 @@ ${HEADING_V2}
 - 第二版。
 `;
     const r = splitChangelog(text);
-    expect(r.next.version).toBe('v3');
+    expect(r.next).not.toHaveProperty('version');
     expect(r.released[0]).toEqual({ version: 'v2', date: '2026-11-10' });
     expect(r.released[1]).toEqual({ version: 'v1', date: '2026-10-09' });
   });

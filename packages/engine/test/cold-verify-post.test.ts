@@ -23,7 +23,8 @@ const INPUT: VerifierInvokeInput = {
   prNumber: 42,
   branch: 'feat/x',
   baseSha: 'b'.repeat(40),
-  taskId: 'task-1',
+  taskId: '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69',
+  issueNumber: 12,
   what: '要 A',
   howToFinish: ['代码里有 A'],
   modelFamiliesAvoid: ['gpt'],
@@ -35,6 +36,7 @@ const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要 A、代码做
 
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
   const runs: RunsWriter = {
+    async start() {},
     async record(_r: RunRecord) {},
   };
   return {

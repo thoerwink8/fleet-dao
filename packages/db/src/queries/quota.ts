@@ -1,8 +1,9 @@
 // 额度：唯一写入口 savePoolQuota，驾驶舱「额度表」quotaTable，以及判一个窗口能不能用的 windowState（调度也用它）。
 import type { QuotaWindow, ScopeMembership } from '@fleet-dao/shared';
-import { and, asc, eq, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { channels, pools, quotaWindows, routes, sessionRuns } from '../schema/index.ts';
+import { openPoolRuns } from './pool-runs.ts';
 
 /** 读数超过这么久没更新就不当现值（设计 §6：每个账号池的额度读数不超过 30 分钟）。 */
 export const QUOTA_STALE_AFTER_MS = 30 * 60_000;
@@ -229,15 +230,71 @@ export async function savePoolQuota(
   });
 }
 
-/** 每个账号池正在跑的会话数（已开始、没结束）。并发按池算，不按渠道或执行方式算。 */
-export async function inFlightByPool(db: Db): Promise<Map<string, number>> {
+/** 这些池最近一次读成额度的时刻（pools.last_read_ok_at）；库里没有这个池、或从没读成过的给 null。定时读额度判「连着两轮没读成」用。 */
+export async function poolLastReadOk(db: Db, poolIds: readonly string[]): Promise<Map<string, Date | null>> {
+  const out = new Map<string, Date | null>(poolIds.map((id) => [id, null]));
+  if (poolIds.length === 0) return out;
   const rows = await db
-    .select({ poolId: routes.poolId, n: sql<number>`count(*)::int` })
+    .select({ id: pools.id, at: pools.lastReadOkAt })
+    .from(pools)
+    .where(inArray(pools.id, [...poolIds]));
+  for (const r of rows) out.set(r.id, r.at);
+  return out;
+}
+
+/** 估算类的池算用量用：这个池的路由在 [since, until] 内开始的会话，各自的 token、花费。 */
+export interface PoolSessionUsage {
+  startedAt: Date;
+  modelId: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  costUsd: number | null;
+}
+
+/**
+ * 没记到花费的会话（cost_usd 为空）照样返回、字段为空：由调用方决定怎么算，这里不拿 0 冒充记到了。
+ * 只看开始了的会话（started_at 不空）；没跑成的也算，它花过的用量记在账上就是用过的。
+ */
+export async function poolSessionUsage(
+  db: Db,
+  q: { poolId: string; since: Date; until: Date },
+): Promise<PoolSessionUsage[]> {
+  const rows = await db
+    .select({
+      startedAt: sessionRuns.startedAt,
+      modelId: routes.modelId,
+      inputTokens: sessionRuns.inputTokens,
+      outputTokens: sessionRuns.outputTokens,
+      cacheReadTokens: sessionRuns.cacheReadTokens,
+      cacheWriteTokens: sessionRuns.cacheWriteTokens,
+      costUsd: sessionRuns.costUsd,
+    })
     .from(sessionRuns)
     .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
-    .where(and(isNotNull(sessionRuns.startedAt), isNull(sessionRuns.endedAt)))
-    .groupBy(routes.poolId);
-  return new Map(rows.map((r) => [r.poolId, r.n]));
+    .where(
+      and(
+        eq(routes.poolId, q.poolId),
+        isNotNull(sessionRuns.startedAt),
+        gte(sessionRuns.startedAt, q.since),
+        lte(sessionRuns.startedAt, q.until),
+      ),
+    );
+  return rows.flatMap((r) => (r.startedAt === null ? [] : [{ ...r, startedAt: r.startedAt }]));
+}
+
+/**
+ * 每个账号池正在跑的会话数（已开工、没结束）：Fusion 的会话、三段的一次性会话都数（pool-runs.ts，和切号数在跑的同一份）。
+ * Fusion 排着还没开工的不在这里（选路另按「已选定还没开工」数，engine.ts 的 reserved）。并发按池算，不按渠道或执行方式算。
+ * 读不了照常抛，不当成 0。
+ */
+export async function inFlightByPool(db: Db): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (const r of await openPoolRuns(db)) {
+    if (r.startedAt !== null) out.set(r.poolId, (out.get(r.poolId) ?? 0) + 1);
+  }
+  return out;
 }
 
 type WindowRow = typeof quotaWindows.$inferSelect;
@@ -278,6 +335,8 @@ export interface QuotaTablePool {
   inFlight: number;
   expiresAt: Date | null;
   scopeModels: Record<string, ScopeMembership> | null;
+  /** 挂在这个池上的路由条数；0 = 没有路由在用它（每小时对账不查它的读数新不新鲜）。 */
+  routeCount: number;
   /** 最近一次完整读成的时刻。 */
   lastReadOkAt: Date | null;
   /** 上游数据本身的时刻（还在报的窗口里最新的读数时刻）。 */
@@ -307,6 +366,14 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
   const windowRows = await db.select().from(quotaWindows);
   const inFlight = await inFlightByPool(db);
   const dataTimes = poolDataTimes(windowRows);
+  const routeCounts = new Map(
+    (
+      await db
+        .select({ poolId: routes.poolId, n: sql<number>`count(*)::int` })
+        .from(routes)
+        .groupBy(routes.poolId)
+    ).map((r) => [r.poolId, r.n]),
+  );
 
   const byPool = new Map<string, QuotaTableWindow[]>();
   for (const w of windowRows) {
@@ -347,6 +414,7 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
       channelEnabled: channel.enabled,
       maxConcurrency: pool.maxConcurrency,
       inFlight: inFlight.get(pool.id) ?? 0,
+      routeCount: routeCounts.get(pool.id) ?? 0,
       expiresAt: pool.expiresAt,
       scopeModels: pool.scopeModels,
       ...times,

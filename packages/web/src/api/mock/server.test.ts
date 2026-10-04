@@ -51,9 +51,37 @@ describe('假后端：任务详情的用量汇总', () => {
     expect(d.runs.find((r) => r.routeId === 'r-grok')?.billing).toBe('subscription');
   });
 
-  test('别的演示单结束了的会话用量都读得到：「没读到」只在专门演示的那张单上', async () => {
+  test('三段的演示单 t-c9：每一笔过 readSegmentRun，按单号兜底的、没记缓存和花费的都看得到', async () => {
+    const d = await fresh().task('t-c9');
+    expect(d.runs).toEqual([]);
+    expect(d.segmentRuns.map((r) => [r.id, r.segment, r.matchedBy])).toEqual([
+      ['seg-c9-1', 'scope', 'task'],
+      ['seg-c9-2', 'manual', 'task'],
+      ['seg-c9-3', 'manual', 'task'],
+      ['seg-c9-4', 'verify', 'issueNumber'],
+    ]);
+    expect(d.segmentRuns.find((r) => r.id === 'seg-c9-2')?.unread.map((n) => n.item)).toEqual([
+      'tokens',
+      'cost',
+    ]);
+    expect(d.usage.total).toMatchObject({
+      runs: 4,
+      running: 0,
+      missingTokens: 0,
+      missingCache: 1,
+      noQueue: 4,
+    });
+    expect(d.usage.total.cost.subscription).toMatchObject({ runs: 4, missing: 2 });
+    expect(d.usage.bySegment.map((s) => [s.segment, s.byModel.map((m) => m.model)])).toEqual([
+      ['scope', ['opus-5.5']],
+      ['manual', ['kimi-k3', 'opus-5.5']],
+      ['verify', ['gpt-5.6-luna']],
+    ]);
+  });
+
+  test('别的演示单结束了的会话用量都读得到：「没读到」只在专门演示的两张单上（t-12 老会话、t-c9 三段）', async () => {
     const api = fresh();
-    for (const t of api.state().tasks.filter((x) => x.task.id !== 't-12')) {
+    for (const t of api.state().tasks.filter((x) => x.task.id !== 't-12' && x.task.id !== 't-c9')) {
       const { total } = (await api.task(t.task.id)).usage;
       expect([t.task.id, total.missingTokens, total.missingCache], t.task.id).toEqual([t.task.id, 0, 0]);
     }
@@ -172,9 +200,13 @@ describe('假后端：追问', () => {
 });
 
 describe('假后端：调度台', () => {
+  // 路由目录（routing()）不再带阶段顺序（#574）：改阶段顺序的结果直接看假数据
+  const stageOf = (api: ReturnType<typeof fresh>, stage: string) =>
+    api.state().stages.find((s) => s.stage === stage);
+
   test('按「改之前看到的样子」保存；别人先改了就 409，不悄悄盖掉', async () => {
     const api = fresh();
-    const seen = (await api.routing()).stages.find((s) => s.stage === 'review');
+    const seen = structuredClone(stageOf(api, 'review'));
     if (!seen) throw new Error('没有 review 阶段');
     const reversed = [...seen.routeIds].reverse();
     await api.updateStagePolicy('review', {
@@ -191,8 +223,7 @@ describe('假后端：调度台', () => {
     );
     expect(stale.status).toBe(409);
     expect(stale.code).toBe('conflict');
-    const now = (await api.routing()).stages.find((s) => s.stage === 'review');
-    expect(now?.routeIds).toEqual(reversed);
+    expect(stageOf(api, 'review')?.routeIds).toEqual(reversed);
     const { items } = await api.audit({ target: 'stage:review' });
     expect(items[0]).toMatchObject({
       action: 'stage_policy.update',
@@ -203,7 +234,7 @@ describe('假后端：调度台', () => {
 
   test('UI 阶段放不进 GPT：写死的禁令，422', async () => {
     const api = fresh();
-    const ui = (await api.routing()).stages.find((s) => s.stage === 'ui');
+    const ui = structuredClone(stageOf(api, 'ui'));
     if (!ui) throw new Error('没有 ui 阶段');
     const e = await rejects(
       api.updateStagePolicy('ui', {

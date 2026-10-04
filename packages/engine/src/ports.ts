@@ -24,10 +24,11 @@
 //    把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起；没留下退出码的判 exit_lost（EN1 续会话）。
 //    引擎正常停机先排空（drain.ts）：不起新会话（startSession 抛 ENGINE_STOPPING）；脱开跑的会话不等、不停，只等接管道的。
 //    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list，能接回的留着、其余逐个 stop，再清上一轮
-//    会话的临时目录、收发目录）。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收（每小时对账还没接这一项：#247）。
+//    会话的临时目录、收发目录，把 runs 里还开着的一次性会话那几行收成没跑完）。工作流被强行终止留下的会话，现在要等工人下一次
+//    起来时这一步才收（每小时对账还没接这一项：#247）。
 
 import type { RiskyFile } from '@fleet-dao/conventions';
-import type { Brief, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
+import type { Brief, Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type {
   HostId,
   OrgKind,
@@ -133,7 +134,7 @@ export interface PickRouteInput extends Scope {
   uiWork?: boolean;
   /**
    * 流程配置里这一步的模型顺序（0003 第 9 条，目录里的模型 id）：只派这几个模型的路由，按这个先后；同一个模型的几条路由
-   * 照调度台的先后。给了空数组 = 这一步没配模型，派不出。不给 = 照调度台（需求工作流、子任务不给）。
+   * 照路由两层的先后。给了空数组 = 这一步没配模型，派不出。不给 = 照路由两层（用途 → 模型 → 路由，#574；三段一条龙不给）。
    */
   models?: string[];
   /**
@@ -148,7 +149,7 @@ export interface PickRouteInput extends Scope {
 
 /** PickRouteInput.keepVerifier：验证那一步怎么派（流程配置、界面类），留不下时怎么办。 */
 export interface KeepVerifierRequest {
-  /** 验证这一步的模型顺序（流程配置，0003 第 9 条）；不给照调度台。 */
+  /** 验证这一步的模型顺序（流程配置，0003 第 9 条）；不给照路由两层。 */
   models?: string[];
   /** 验证算不算界面类的活（规划完就知道：任务简报碰没碰页面代码）：GPT 不验。 */
   uiWork: boolean;
@@ -224,6 +225,13 @@ export interface SessionBrief {
  * （副手打回两次还没做好、副手派不出、单模型模式）。
  */
 export type LeadStep = 'plan' | 'accept' | 'rebut' | 'fix-brief' | 'review' | 'pr-text' | 'takeover';
+
+/** 能驳回的一条：target 照抄，kind 说是哪种挡法（Fusion 的 Lead 简报用；随 real/sessions.ts 的会话链一起删，#556）。 */
+export interface Rebuttable {
+  target: string;
+  kind: 'not-done' | 'breaks-existing' | 'security' | 'data-loss';
+  evidence: string;
+}
 
 export interface LeadBrief {
   step: LeadStep;
@@ -484,7 +492,7 @@ export interface PushBranchInput extends Scope {
 }
 
 /**
- * PR 正文的内容。正文由 github 包的 renderPrBody 按 .github/pull_request_template.md 的栏目生成（design：引擎开的 PR
+ * PR 正文的内容。正文由 github 包的 renderPrBody 按 .github/pull_request_template.md 的栏目生成（四栏，#654；design：引擎开的 PR
  * 和人开的同一套栏目，对不上测试会红），这里只给结构，不自己拼字。
  */
 export interface PrBody {
@@ -501,23 +509,6 @@ export interface PrBody {
   risks?: string[];
   /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（core 的 assumedLines，#259）；空 = 无。 */
   assumed?: string[];
-  /**
-   * 需求文档的目录（specs/<号>-<短名>/）：「specs」一栏照写；「对应计划」一栏由端口开 PR 时现读这个目录下需求.md 的
-   * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
-   */
-  specs: string;
-  /**
-   * 需求文档跟着这个 PR 才进主线（正文写全了需求、收单时照正文写的，#295）：主线上还没有它，「对应计划」一栏照单子此刻挂的
-   * 版本写（没挂写「未排期」），不读主线。
-   */
-  planFromIssue?: boolean;
-  /**
-   * 「档位」一栏（design 第五节的档位加理由）：只作说明、合并闸只提醒；合并闸按改动路径判要不要等第二意见
-   * （当前头上通过的 second-opinion 提交状态），不看这一栏。
-   */
-  tier: string;
-  /** 改到的文件（仓内相对路径）：「文档」一栏按它写。 */
-  changedFiles: string[];
 }
 
 export interface OpenPrInput extends Scope {
@@ -660,8 +651,6 @@ export interface TaskStateSnapshot extends Scope {
   specDir?: string;
   docs?: { requirement?: string; plan?: string; result?: string };
   lastProblem: string | null;
-  /** 这一轮用的流程配置读自仓里还是全组织默认（驾驶舱要标出后者）：Fusion 开工前判完配置才有，旧的需求工作流不给。 */
-  flowSource?: 'project' | 'org_default';
   subtasks: {
     id: string;
     key: string;

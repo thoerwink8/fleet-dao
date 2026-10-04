@@ -1,7 +1,10 @@
 // 引擎端口 → 库（packages/db）：选路、提问、人闸、报警、计时、任务快照。
-// 选路：调度台的顺序和候选事实（routeFactsForStage）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
+// 选路：路由两层的顺序和候选事实（routeFactsForPurpose，#574：先按这个用途的模型顺序、再按模型下的路由顺序，摊平成一串；
+// 不读旧的阶段平铺表 stage_policy_routes）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
 // + 被暂停的账号池（pool-hold:<池> 那条没处理的「要人拍」提醒，见 sessions.ts）交给纯函数 chooseRoute，三种结果原样换成
-// 端口的三种。点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
+// 端口的三种：判「死」的（不在线、渠道关了、犯禁令、开关关着……）挡掉、写明原因；额度未知的排在读到了的后面（routing/rank.ts）；
+// 一条都派不出、又等不来，明说派不出（带每条为什么），不拿空的、默认的顶。两层里没有「钉住」，一律按没钉住算。
+// 点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
 // 账号池暂停着时，续会话的那一单照样放过去——它就是看人修好了没有的试探。Fusion 带了流程配置里这一步的模型顺序（models）
 // 就只派这几个模型的路由、先按配置的先后排（onlyModels），一条都没有明说；人点名的路由不受它限制。
 // 给开 PR 前验证留一家（keepVerifier：Fusion 规划完、开 PR 之前选副手、Lead 换路由）：写这张单的族现从库里查（和 authorFamilies
@@ -16,7 +19,6 @@
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
-import { engineClaimEnd } from '@fleet-dao/core';
 import {
   authorFamiliesOfTask,
   type Db,
@@ -25,7 +27,7 @@ import {
   openSessionRuns,
   recordStepTiming,
   resolveAlertWithReason,
-  routeFactsForStage,
+  routeFactsForPurpose,
   routeOutcomesSince,
   saveTaskSnapshot,
   taskContext,
@@ -181,10 +183,12 @@ interface StageFacts {
   /** 执行方式还没接上、这次不算的路由（给人看的名字）。 */
   unwired: string[];
   unwiredIds: Set<string>;
+  /** 路由两层的配置缺口（用途没配模型顺序、模型下一条路由都没有）：派不出时写进原因。 */
+  problems: string[];
 }
 
 /**
- * 流程配置里这一步的模型顺序（0003 第 9 条）：只留这几个模型的路由，先按配置里的先后、同一个模型的照调度台的先后排，
+ * 流程配置里这一步的模型顺序（0003 第 9 条）：只留这几个模型的路由，先按配置里的先后、同一个模型的照路由两层的先后排，
  * 位置从 0 重新数（选路按位置排、也按它写「第几条」）。额度、战绩这些微调照常在它上面做（「再打分：配置顺序、战绩」）。
  */
 function onlyModels(facts: StageFacts, models: readonly string[]): StageFacts {
@@ -233,7 +237,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
     const [facts, outcomes, open] = await Promise.all([
-      routeFactsForStage(db, stage, { now }),
+      routeFactsForPurpose(db, stage, { now }),
       routeOutcomesSince(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
       openSessionRuns(db),
     ]);
@@ -287,14 +291,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     const unwiredIds = new Set(unwiredRoutes.map((r) => r.routeId));
     return {
       configured: facts.configured,
-      stagePinned: facts.stagePinned,
-      // 单条钉住调度台上还没有（只有整个阶段钉住）：这里一律 false，阶段钉住由 stagePinned 带进去。
+      // 路由两层没有「钉住」（#574 的两张表都没这一列）：一律按没钉住算，快清零提前、战绩差往后、额度未知排后照常做。
+      stagePinned: false,
       order: facts.order
         .filter((e) => !unwiredIds.has(e.routeId))
         .map((e) => ({ routeId: e.routeId, position: e.position, enabled: e.enabled, pinned: false })),
       routes: all.filter((r) => !unwiredIds.has(r.routeId)),
       unwired: unwiredRoutes.map((r) => routeLabel(r)),
       unwiredIds,
+      problems: facts.problems,
     };
   }
 
@@ -324,7 +329,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     const task = UUID.test(taskId) ? await taskContext(db, taskId) : null;
     const models = keep.models
       ? `按流程配置只派 ${keep.models.join('、') || '（一个都没配）'}`
-      : '照调度台派';
+      : '照路由两层派';
     await upsertAlert(db, {
       dedupeKey: noVerifierKey(taskId),
       level: 'alert',
@@ -333,7 +338,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       body: [
         reason,
         `验证这一步${models}${keep.uiWork ? '；这张单改到了页面代码，GPT 不验（禁令）' : ''}。`,
-        '现在就补：给调度台的开 PR 前验证阶段接上一条能派的别家路由（在线、不犯禁令、和写这张单的不同族），或者换这张单的副手、Lead；不补的话，干完走到验证那一步会挂起「没有别家可验」。验证留得下了、验证派出去了，选路自己撤这条。',
+        '现在就补：给开 PR 前验证这个用途排上一个能派的别家模型（路由两层：用途 → 模型、模型 → 路由；在线、不犯禁令、和写这张单的不同族），或者换这张单的副手、Lead；不补的话，干完走到验证那一步会挂起「没有别家可验」。验证留得下了、验证派出去了，选路自己撤这条。',
       ].join('\n\n'),
     });
   }
@@ -506,7 +511,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ? `${what} ${id} 的执行方式引擎还没接上，照常选`
           : knownAny(id)
             ? `${what} ${id} 的模型不在流程配置这一步的模型里，照常选`
-            : `${what} ${id} 不在这个阶段的调度台顺序里，照常选`;
+            : `${what} ${id} 不在这个用途的路由两层顺序里，照常选`;
 
       const dispatched = async (r: Extract<ChooseRouteResult, { kind: 'dispatch' }>, why: string) => {
         const fact = knownAny(r.routeId);
@@ -591,15 +596,17 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(facts.unwired.length > 0
           ? [`执行方式引擎还没接上、这次没算的：${facts.unwired.join('、')}`]
           : []),
+        // 两层配置上的缺口（模型下一条路由都没有这类）照实带上：派不出时人要知道是配置空着，不是路由都坏了
+        ...(facts.problems.length > 0 ? [`路由两层的配置缺口：${facts.problems.join('、')}`] : []),
       ];
       const noOther =
         families.length > 0
           ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
           : [];
-      // 调度台排了这个阶段、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个阶段一条都没配」
+      // 路由两层排了这个用途、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个用途一条都没配」
       if (input.models && facts.configured && facts.order.length === 0) {
         const models = input.models.length > 0 ? input.models.join('、') : '一个都没配';
-        const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的调度台上没有接上的路由`;
+        const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的路由两层顺序里没有接上的路由`;
         return { ok: false, waitFor: 'none', detail: [...noOther, reason, ...context].join('；') };
       }
       const r = choose({ ...base, avoid: avoid() });
@@ -733,10 +740,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(input.specDir !== undefined ? { specDir: input.specDir } : {}),
         ...(input.docs !== undefined ? { docs: input.docs } : {}),
         lastProblem: input.lastProblem,
-        ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         subtasks: input.subtasks,
-        // 这张单上引擎的认领跟着任务走（#299）：结束了跟着结束，在跑的待起改成在做
-        claimEnd: engineClaimEnd(input.state),
       });
       if (r === 'task_not_found') {
         throw new PortError('TASK_NOT_FOUND', `任务 ${input.taskId} 在库里没有，写不了快照`, {

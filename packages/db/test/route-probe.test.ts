@@ -3,9 +3,9 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { toRoute } from '../src/domain-map.ts';
 import { routeProbeTargets, saveRouteProbe } from '../src/queries/probe.ts';
-import { channels, models, pools, routes, stagePolicyRoutes } from '../src/schema/index.ts';
+import { channels, models, pools, routes, routingCatalog } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRoute, catalog, MIN, NOW, setStageOrder } from './helpers.ts';
+import { addRoute, catalog, MIN, NOW, setRoutingLayers, setStageOrder } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -34,7 +34,7 @@ beforeEach(async () => {
 const routeRow = async (id: string) => (await t.db.select().from(routes).where(eq(routes.id, id)))[0];
 
 describe('读：每条路由探得了探不了的事实', () => {
-  it('渠道、计费、池的会话用户和组织、模型、有没有阶段开着它、上一次的结论都读出来', async () => {
+  it('渠道、计费、池的会话用户和组织、模型、在不在用（路由两层里开着、模型排进了用途）、上一次的结论都读出来', async () => {
     await addRoute(t.db, {
       id: 'car',
       channelId: 'claude-subscription',
@@ -51,16 +51,21 @@ describe('读：每条路由探得了探不了的事实', () => {
       alive: false,
     });
     await addRoute(t.db, { id: 'relay-opus', poolId: 'relay-a', modelId: 'opus-5.5', hostId: 'mirasim' });
-    await setStageOrder(t.db, 'execute', ['car', 'relay-opus']);
-    // relay-opus 在 execute 里关着：不算「有阶段开着它」
-    await t.db
-      .update(stagePolicyRoutes)
-      .set({ enabled: false })
-      .where(eq(stagePolicyRoutes.routeId, 'relay-opus'));
+    await addRoute(t.db, { id: 'k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['car', 'relay-opus'], 'kimi-k3': ['k3'] },
+    });
+    // relay-opus 在它的模型下关着：不算在用
+    await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.routeId, 'relay-opus'));
+    // 旧的平铺表里 relay-opus 开着：在不在用只看路由两层
+    await setStageOrder(t.db, 'review', ['relay-opus']);
 
     const targets = await routeProbeTargets(t.db);
-    expect(targets.map((x) => x.routeId)).toEqual(['car', 'meter', 'relay-opus']);
-    const [car, meter, relay] = targets;
+    expect(targets.map((x) => x.routeId)).toEqual(['car', 'k3', 'meter', 'relay-opus']);
+    const [car, k3, meter, relay] = targets;
+    // k3 在它的模型下开着，可 kimi-k3 没排进任何用途：选路派不到它，也不算在用
+    expect(k3).toMatchObject({ inUse: false });
     expect(car).toMatchObject({
       hostId: 'claude-code',
       channelName: 'Claude 订阅',

@@ -59,6 +59,7 @@ describe('工作流文件的规矩', () => {
       'index.ts',
       'intake.ts',
       'kit.ts',
+      'quota-read.ts',
       'route-probe.ts',
       'task.ts',
       'watchdog.ts',

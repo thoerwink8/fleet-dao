@@ -17,8 +17,6 @@ export const REALTIME_TABLES = [
   'settings',
   'audit_log',
   'approvals',
-  // 帅位栏整张删掉（#531）后代码不再读这张表，表里留着的写得照触发器；触发器在新的迁移拆之前照报，驾驶舱收到这种表名全量重拉。
-  'seat_boards',
 ] as const;
 
 export type RealtimeTable = (typeof REALTIME_TABLES)[number];

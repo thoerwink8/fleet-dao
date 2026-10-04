@@ -1,0 +1,2 @@
+ALTER TABLE "runs" DROP CONSTRAINT "runs_outcome_known";--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_outcome_known" CHECK ("runs"."outcome" is null or "runs"."outcome" in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch'));

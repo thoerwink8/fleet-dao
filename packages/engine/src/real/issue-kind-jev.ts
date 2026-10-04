@@ -1,7 +1,7 @@
 // issue 归类这道题（#448）问 Jev：题面、把握线、每日上限、记账都走 packages/jev 的题库（bank.ts 的 ISSUE_KIND），
 // 和错误分流、停滞预判（jev-port.ts）并排的一份，不共用那边的 JevPort/JevReply（那套是给「选一条能撤回的动作」设计的
 // choice/effect 抽象，这里只是「选需求/缺陷/杂项之一」，直接吃 Verdict 更直接）。
-// 每次问都现找后端（和 /healthz 的 judge 项同一个 resolveJevBackend）：改了 jev.json、调度台换了判断路由都不用重启。
+// 每次问都现找后端（和 /healthz 的 judge 项同一个 resolveJevBackend）：改了 jev.json、路由两层换了判断路由都不用重启。
 // 没接、起不来、没判出来一律交回「没判出来」，不当成「是」也不当成「否」（issue-groom.ts 的 categoryPlan 再判该不该贴）。
 import type { JevKindAnswer, KindLabel } from '@fleet-dao/conventions';
 import type { Db } from '@fleet-dao/db';
@@ -35,7 +35,7 @@ export function issueKindAnswerOf(v: Verdict): JevKindAnswer {
 
 export interface IssueKindJevDeps {
   db: Db;
-  /** 现找后端（生产：resolveJevBackend 读 jev.json、判断阶段排第一的路由、钥匙文件）。 */
+  /** 现找后端（生产：resolveJevBackend 读 jev.json、路由两层里判断用途排第一的路由、钥匙文件）。 */
   resolve: () => Promise<JevSetup>;
   now?: () => Date;
   log?: (message: string, fields?: Record<string, unknown>) => void;

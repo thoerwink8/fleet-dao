@@ -4,7 +4,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RunRecord, RunsWriter } from '../../src/runner/not-wired.ts';
+import type { RunRecord, RunStart, RunsWriter } from '../../src/runner/not-wired.ts';
 import type { OneShotDeps, OneShotInput, OneShotSpawner, SpawnOutcome } from '../../src/runner/one-shot.ts';
 
 export interface FakeSpawnCall {
@@ -30,16 +30,21 @@ export function fakeSpawner(
   return { spawner, calls };
 }
 
-/** fake runs：全收进数组。真 NotWired 落盘由 #556 那一片再测。 */
-export function fakeRuns(): { runs: RunsWriter; recorded: RunRecord[] } {
+/** fake runs：开跑、收场各收进一个数组。真 NotWired 落盘由 #556 那一片再测。 */
+export function fakeRuns(): { runs: RunsWriter; recorded: RunRecord[]; started: RunStart[] } {
   const recorded: RunRecord[] = [];
+  const started: RunStart[] = [];
   return {
     runs: {
+      async start(r: RunStart) {
+        started.push(r);
+      },
       async record(r: RunRecord) {
         recorded.push(r);
       },
     },
     recorded,
+    started,
   };
 }
 
@@ -50,12 +55,13 @@ export async function fakeDeps(opts: {
   deps: OneShotDeps;
   calls: FakeSpawnCall[];
   recorded: RunRecord[];
+  started: RunStart[];
   tmpDir: string;
   cleanup: () => Promise<void>;
 }> {
   const tmpDir = await mkdtemp(join(tmpdir(), 'fleet-554-1-'));
   const { spawner, calls } = fakeSpawner(opts.scripted);
-  const { runs, recorded } = fakeRuns();
+  const { runs, recorded, started } = fakeRuns();
   const deps: OneShotDeps = {
     spawn: spawner,
     buildCommand: (input: OneShotInput) => ({
@@ -69,6 +75,7 @@ export async function fakeDeps(opts: {
     deps,
     calls,
     recorded,
+    started,
     tmpDir,
     cleanup: () => rm(tmpDir, { recursive: true, force: true }),
   };

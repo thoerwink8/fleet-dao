@@ -1,4 +1,4 @@
-// 读本仓 Markdown 文档的几样小工具：标题与各节、围栏代码块、HTML 注释、生成的快照段、「」引号（里面可以再套「」）、中文序数。
+// 读本仓 Markdown 文档的几样小工具：标题与各节、围栏代码块、HTML 注释、「」引号（里面可以再套「」）、中文序数。
 // 只认本仓文档在用的写法，不是通用的 Markdown 解析器。
 
 export interface Heading {
@@ -24,27 +24,7 @@ export interface MdDoc {
   lines: string[];
   /** 这一行在围栏代码块里（围栏那两行也算）。 */
   fenced: boolean[];
-  /** 这一行在生成的快照里（两行快照标记之间，标记也算；标记不成对时一行也不算）。 */
-  generated: boolean[];
   headings: Heading[];
-}
-
-/**
- * docs/plan.md 里 pnpm plan:snapshot 生成的那段（#138）的开始、结束标记，各占一行的 HTML 注释。
- * 那段照抄 GitHub 上的标题和里程碑说明，文档指针、欠账这些查手写文档的检查不查它（要改去 GitHub 改）。
- */
-export const SNAPSHOT_BEGIN_LINE = /^<!--\s*fleet:plan-snapshot(?![\w/-])[^\n]*-->$/;
-export const SNAPSHOT_END_LINE = /^<!--\s*\/fleet:plan-snapshot\s*-->$/;
-
-/** 快照开始、结束标记各在哪几行（下标从 0 起）。 */
-export function snapshotMarkers(lines: readonly string[]): { begins: number[]; ends: number[] } {
-  const begins: number[] = [];
-  const ends: number[] = [];
-  lines.forEach((l, i) => {
-    if (SNAPSHOT_BEGIN_LINE.test(l.trim())) begins.push(i);
-    else if (SNAPSHOT_END_LINE.test(l.trim())) ends.push(i);
-  });
-  return { begins, ends };
 }
 
 /** 去掉 HTML 注释：注释里是模板提示和占位，不算正文。换行照留，行号不变。 */
@@ -55,11 +35,6 @@ export function stripComments(text: string): string {
 export function parseMd(path: string, text: string): MdDoc {
   const raw = text.replace(/\r\n?/g, '\n');
   const lines = stripComments(raw).split('\n');
-  const { begins, ends } = snapshotMarkers(raw.split('\n'));
-  const [begin] = begins;
-  const [end] = ends;
-  const paired = begins.length === 1 && ends.length === 1 && begin !== undefined && end !== undefined;
-  const generated = lines.map((_, i) => paired && begin < end && i >= begin && i <= end);
   const fenced: boolean[] = [];
   const headings: Heading[] = [];
   let inFence = false;
@@ -73,7 +48,7 @@ export function parseMd(path: string, text: string): MdDoc {
     const m = inFence ? null : /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
     if (m?.[1] && m[2] !== undefined) headings.push(heading(i + 1, m[1].length, m[2]));
   });
-  return { path, lines, fenced, generated, headings };
+  return { path, lines, fenced, headings };
 }
 
 function heading(line: number, level: number, text: string): Heading {

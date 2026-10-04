@@ -294,7 +294,8 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
   it('Mirasim 没接受命令：回读失败，不标迁移成功', async () => {
     const m = await machine({ ignoreSet: true });
     try {
-      await expect(migrate(m.config)).rejects.toThrow(/回读|设置/);
+      // 回读等满限时才判失败：默认 5 秒白等，这里给 600ms（假 Mirasim 当场回帧，回读一次几毫秒，照样轮好几次都对不上）。
+      await expect(migrate({ ...m.config, replyMs: 600 })).rejects.toThrow(/启动命令回读未匹配/);
       expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude.command).toBe(m.oldCommand);
     } finally {
       await m.close();

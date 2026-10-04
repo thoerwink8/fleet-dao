@@ -9,13 +9,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
+import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
 import {
   createRunSegment,
   evidenceOf,
   type RunSegmentDeps,
   sweepRunDirs,
 } from '../../src/real/task-segment.ts';
-import type { RunRecord } from '../../src/runner/not-wired.ts';
+import type { RunRecord, RunStart } from '../../src/runner/not-wired.ts';
 import type { OneShotResult } from '../../src/runner/one-shot.ts';
 import type { RunSegmentInput } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
@@ -24,6 +25,7 @@ import { fakeTrees, git, mirror } from './fixtures.ts';
 const USER = 'fleet-agent-carpool' as SessionUser;
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
 const BRANCH = 'fleet/12-t1a2b3c4d';
+const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
 
 const route = (over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   routeId: 'r1',
@@ -34,6 +36,7 @@ const route = (over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   upstreamModel: null,
   runAsUser: USER,
   orgKind: null,
+  effort: null,
   ...over,
 });
 
@@ -78,6 +81,7 @@ interface Rig {
   ft: ReturnType<typeof fakeTrees>;
   dir: string;
   recorded: RunRecord[];
+  started: RunStart[];
   specs: HostRunSpec[];
   run: ReturnType<typeof createRunSegment>;
   input: (over?: Partial<RunSegmentInput>) => RunSegmentInput;
@@ -96,6 +100,7 @@ function rig(
   const ft = fakeTrees(join(sub, 'work'));
   const dir = ft.trees.treeFor(REPO, BRANCH);
   const recorded: RunRecord[] = [];
+  const started: RunStart[] = [];
   const specs: HostRunSpec[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -133,6 +138,9 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
+      async start(r) {
+        started.push(r);
+      },
       async record(r) {
         recorded.push(r);
       },
@@ -148,7 +156,7 @@ function rig(
   });
   const input = (over: Partial<RunSegmentInput> = {}): RunSegmentInput => ({
     schemaVersion: 1,
-    taskId: 'task-1',
+    taskId: TASK_ID,
     repo: REPO,
     issueNumber: 12,
     route: {
@@ -167,7 +175,7 @@ function rig(
     timeoutMinutes: 5,
     ...over,
   });
-  return { m, ft, dir, recorded, specs, run, input };
+  return { m, ft, dir, recorded, started, specs, run, input };
 }
 
 /** 假会话干活：在树里写个文件并提交。 */
@@ -211,17 +219,57 @@ describe('备树', { timeout: 60_000 }, () => {
     expect(spec.prompt).not.toContain('返工意见');
     expect(beats.n).toBeGreaterThan(0);
 
-    // runs：一笔，done，渠道是路由的渠道，用量花费带上
+    // runs：开跑先留一行（带路由：切号靠它认出跑在哪个池），收场同一个编号一笔 done，渠道是路由的渠道，用量花费带上。
+    // 两处都记到这张单名下（#216）：tasks.id、单号、派工档、任务工作流编号、分支；第一轮还没开 PR，PR 号不写（不拿 0 顶）
+    const owner = {
+      runId: 'run-0002',
+      segment: 'manual',
+      taskId: TASK_ID,
+      issueNumber: 12,
+      tier: 'medium',
+      workflowId: 'task:acme/demo#12',
+      branch: BRANCH,
+    };
+    expect(r.started).toEqual([expect.objectContaining({ ...owner, routeId: 'r1' })]);
+    expect(r.started[0]).not.toHaveProperty('prNumber');
     expect(r.recorded).toHaveLength(1);
     expect(r.recorded[0]).toMatchObject({
-      segment: 'manual',
+      ...owner,
       outcome: 'done',
       model: 'claude-opus-5-5',
       channel: 'claude-subscription',
-      issueNumber: 12,
+      routeId: 'r1',
       inputTokens: 1200,
       costUsd: 0.42,
     });
+    expect(r.recorded[0]).not.toHaveProperty('prNumber');
+  });
+
+  it('开了 PR 以后的轮次：PR 号开跑、收场两处都记上（#216）', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const got = await r.run(r.input({ prNumber: 77 }), ctx());
+    expect(got.ok).toBe(true);
+    expect(r.started).toEqual([expect.objectContaining({ taskId: TASK_ID, prNumber: 77 })]);
+    expect(r.recorded).toEqual([expect.objectContaining({ taskId: TASK_ID, prNumber: 77, outcome: 'done' })]);
+  });
+
+  it('【故意造出的失败】派工档不在 tier.ts 那三档里：写进 runs 之前就报错，不起会话、一笔不记（不当库一时不通去重试）', async () => {
+    const r = rig();
+    const err = await r
+      .run(r.input({ tier: { tier: 'turbo', effort: 'high', reason: '造的' } as never }), ctx())
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'SEGMENT_SPAWN_FAILED', retryable: false });
+    expect((err as Error).message).toContain('记账的字段对不上 runs 的约束');
+    expect((err as Error).message).toContain('tier');
+    expect(r.specs).toHaveLength(0);
+    expect(r.started).toHaveLength(0);
+    expect(r.recorded).toHaveLength(0);
   });
 
   it('第二轮：树已经在（上一轮的提交还在），不再从镜像取；返工意见带进提示词', async () => {
@@ -339,6 +387,26 @@ describe('结局整理', { timeout: 60_000 }, () => {
     await expect(r.run(r.input(), ctx(stop.signal))).rejects.toThrow('任务被放弃');
   });
 
+  it('【故意造出的失败】开跑那一行写不进 runs（库一时不通）：抛 PortError SEGMENT_RUNS_UNWRITABLE（可以重试），不起会话', async () => {
+    const r = rig({
+      deps: {
+        runs: {
+          async start() {
+            throw new Error('runs 开跑那一行写入失败：connection refused');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    const err = await r.run(r.input(), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'SEGMENT_RUNS_UNWRITABLE', retryable: true });
+    expect((err as Error).message).toContain('connection refused');
+    expect(r.specs).toHaveLength(0);
+  });
+
   it('【故意造出的失败】驱动自己抛错（起不来）：抛 PortError SEGMENT_SPAWN_FAILED（不重试），不当成会话没跑成', async () => {
     const r = rig({
       driverRun: async () => {
@@ -427,6 +495,132 @@ describe('内存放不下新会话', { timeout: 60_000 }, () => {
     });
     await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'SEGMENT_SPAWN_FAILED' });
     expect(r.specs).toHaveLength(0);
+  });
+});
+
+describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
+  const WHY = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干';
+
+  it('定了路由就登记；会话跑着时切号叫停：ok:false、结局和原因码都是 org_switch（不算失败），runs 收成 org_switch，收场就从登记里走', async () => {
+    const sessions = oneShotSessions();
+    let resolveStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const r = rig({
+      deps: { sessions },
+      driverRun: async (spec, hooks) => {
+        commitInTree(spec, 'half.tsx');
+        resolveStarted();
+        await new Promise<void>((resolve) => {
+          (hooks.signal as AbortSignal).addEventListener('abort', () => resolve(), { once: true });
+        });
+        return report({ facts: { exitCode: null, killed: 'aborted', quotaExhausted: false } });
+      },
+    });
+    const pending = r.run(r.input(), ctx());
+    await started;
+    // 跑在路由 r1 的池 p1 上：切号看得见它（编号是这一次的 runs 编号）
+    expect(sessions.live(new Set(['p1']))).toEqual(['run-0002']);
+    expect(sessions.stop(new Set(['p1', 'p2']), WHY)).toEqual(['run-0002']);
+    const got = await pending;
+    expect(got).toMatchObject({
+      ok: false,
+      runId: 'run-0002',
+      outcome: 'org_switch',
+      evidence: { code: 'org_switch' },
+    });
+    expect((got as { evidence: { message: string } }).evidence.message).toContain(WHY);
+    expect(r.recorded).toEqual([expect.objectContaining({ runId: 'run-0002', outcome: 'org_switch' })]);
+    expect(sessions.live(new Set(['p1']))).toEqual([]);
+    // 停下之前提交的还在这棵树上（工作流在原分支上重跑这一段）
+    expect(existsSync(join(r.dir, 'half.tsx'))).toBe(true);
+  });
+
+  it('等内存的时候切号叫停：不再等，不起会话，回 org_switch；停下时登记的编号就是随后记成 org_switch 的那一行；登记走掉', async () => {
+    const sessions = oneShotSessions();
+    let sleeping = false;
+    const r = rig({
+      deps: {
+        sessions,
+        memoryAdmission: {
+          readText: async () => String(9500 * 1024 * 1024),
+          cgroupRoot: '/sys/fs/cgroup',
+          slicePath: 'fleet.slice/fleet-agents.slice',
+          sliceHighMb: 10_000,
+          reservePerSessionMb: 2048,
+        },
+        // 真睡：信号来了就醒
+        sleep: (ms, signal) =>
+          new Promise((resolve, reject) => {
+            sleeping = true;
+            if (signal.aborted) return reject(signal.reason);
+            const timer = setTimeout(resolve, ms);
+            signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer);
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          }),
+        admissionPollMs: 60_000,
+      },
+    });
+    const pending = r.run(r.input(), ctx());
+    // 第一次放不下、睡着等：这时切号
+    for (let i = 0; i < 500 && !sleeping; i += 1) await new Promise((x) => setTimeout(x, 10));
+    const stopped = sessions.stop(new Set(['p1']), WHY);
+    const got = await pending;
+    expect(got).toMatchObject({ ok: false, outcome: 'org_switch', evidence: { code: 'org_switch' } });
+    expect(r.specs).toHaveLength(0);
+    expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([
+      ['run-0002', 'admission_blocked'],
+      ['run-0003', 'org_switch'],
+    ]);
+    expect(stopped).toEqual(['run-0003']);
+    expect(sessions.live(new Set(['p1']))).toEqual([]);
+  });
+
+  it('建树那会儿就被切号叫停：树照样建完，不起会话，回 org_switch；停下时登记的编号就是记成 org_switch 的那一行', async () => {
+    const sessions = oneShotSessions();
+    let stopped: string[] = [];
+    const r = rig({ deps: { sessions } });
+    // 建树的第一步（看树归谁）那一刻切号
+    const ownerOf = r.ft.trees.ownerOf;
+    r.ft.trees.ownerOf = async (dir) => {
+      if (stopped.length === 0) stopped = sessions.stop(new Set(['p1']), WHY);
+      return ownerOf(dir);
+    };
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ ok: false, runId: 'run-0002', outcome: 'org_switch' });
+    expect(stopped).toEqual(['run-0002']);
+    expect(r.specs).toHaveLength(0);
+    expect(r.started).toHaveLength(0);
+    expect(r.recorded).toEqual([expect.objectContaining({ runId: 'run-0002', outcome: 'org_switch' })]);
+    // 树建好了（重跑时接着用）
+    expect(existsSync(join(r.dir, '.git'))).toBe(true);
+    expect(sessions.live(new Set(['p1']))).toEqual([]);
+  });
+
+  it('上一次被切号停下的重跑：提示词里写着上一次为什么停、树里留着它的东西、接着干', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const got = await r.run(r.input({ interrupted: `${WHY}（会话被停下）` }), ctx());
+    expect(got.ok).toBe(true);
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('## 这一段上一次跑到一半被停下了');
+    expect(prompt).toContain(WHY);
+    expect(prompt).toContain('先看 git status、git log');
+    // 没被停过的没有这一节
+    const plain = rig({ driverRun: async () => report() });
+    await plain.run(plain.input(), ctx());
+    expect(plain.specs[0]?.prompt).not.toContain('上一次跑到一半被停下了');
   });
 });
 

@@ -8,7 +8,6 @@ import {
   RunStepsResponse,
   requirementWorkflowId,
   SettingsResponse,
-  StageKindSchema,
   TaskDetailResponse,
   TimelineResponse,
   UpdateSettingResponse,
@@ -98,45 +97,6 @@ describe('看板与任务', () => {
     expect(task?.progress).toEqual({ done: 0, total: 2 });
     expect(board.now.map((n) => [n.taskId, n.runId])).toEqual([[IDS.task12, DEV_RUN_ID]]);
     expect((await h.cockpit.request('/api/repos/nope/board', { headers: { cookie } })).status).toBe(404);
-  });
-
-  it('这一轮用全组织默认的单，详情和看板都带 flowSource；库里空着的 JSON 没有这个键', async () => {
-    const h = harness();
-    const { cookie } = await h.login();
-    const marked = h.store.data.tasks.find((t) => t.id === IDS.task12);
-    const blank = h.store.data.tasks.find((t) => t.id === IDS.task13);
-    if (!marked || !blank) throw new Error('样例数据里没有这两张单');
-    marked.flowSource = 'org_default';
-    const headers = { cookie };
-    const board = (await (await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers })).json()) as {
-      tasks: { id: string; flowSource?: string }[];
-    };
-    const onBoard = (id: string) => {
-      const task = board.tasks.find((t) => t.id === id);
-      if (!task) throw new Error(`看板上没有 ${id}`);
-      return task;
-    };
-    expect(onBoard(IDS.task12).flowSource).toBe('org_default');
-    expect('flowSource' in onBoard(IDS.task13)).toBe(false);
-    const detail = async (id: string) =>
-      (await (await h.cockpit.request(`/api/tasks/${id}`, { headers })).json()) as {
-        task: { flowSource?: string };
-      };
-    expect((await detail(IDS.task12)).task.flowSource).toBe('org_default');
-    expect('flowSource' in (await detail(IDS.task13)).task).toBe(false);
-  });
-
-  it('副本认不出：看板停派，原因里有这段错误', async () => {
-    const h = harness();
-    const { cookie } = await h.login();
-    const repo = h.store.data.repos.find((r) => r.id === IDS.repo);
-    if (!repo?.flow) throw new Error('样例仓没有流程配置副本');
-    repo.flow.error = '不是合法的 JSON';
-    const board = (await (
-      await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers: { cookie } })
-    ).json()) as { flow: { paused: boolean; why?: string } };
-    expect(board.flow.paused).toBe(true);
-    expect(board.flow.why).toContain('不是合法的 JSON');
   });
 
   it('任务详情带全部会话（含已结束的）与追问', async () => {
@@ -242,6 +202,151 @@ describe('看板与任务', () => {
       ['plan', 1, 0, 385_000],
       ['execute', 0, 1, 0],
     ]);
+  });
+
+  describe('三段的单（runs 表）：任务详情按段、按模型，读不到的逐笔写明原因', () => {
+    async function detailOf(h: ReturnType<typeof harness>, taskId: string) {
+      const { cookie } = await h.login();
+      const res = await h.cockpit.request(`/api/tasks/${taskId}`, { headers: { cookie } });
+      expect(res.status).toBe(200);
+      return TaskDetailResponse.parse(await res.json());
+    }
+    const reasons = (run: { unread: { item: string; reason: string }[] } | undefined) =>
+      Object.fromEntries((run?.unread ?? []).map((n) => [n.item, n.reason]));
+
+    it('每一笔：段、模型名（查模型目录）、计费方式（查渠道）、派工档、耗时；兜底对上的标明；读不到的带原因', async () => {
+      const d = await detailOf(harness(), IDS.task13);
+      expect(d.runs).toEqual([]);
+      expect(
+        d.segmentRuns.map((r) => [r.id, r.segment, r.modelName, r.tier ?? null, r.matchedBy, r.durationMs]),
+      ).toEqual([
+        [IDS.seg13scope, 'scope', 'Opus 5.5', null, 'task', 7 * 60_000],
+        [IDS.seg13manual1, 'manual', 'Kimi k3', 'fast', 'task', 30 * 60_000],
+        [IDS.seg13manual2, 'manual', 'Opus 5.5', 'fast', 'task', 25 * 60_000],
+        [IDS.seg13verify, 'verify', 'GPT 5.6', null, 'issueNumber', 8 * 60_000],
+      ]);
+      const [scope, manual1, manual2, verify] = d.segmentRuns;
+      expect(scope?.billing).toBe('subscription');
+      expect(reasons(scope)).toEqual({});
+      expect(reasons(manual1)).toEqual({ tokens: '没记到：缓存读、缓存写', cost: '花费没记到' });
+      expect(manual1).toMatchObject({
+        outcome: 'timeout',
+        inputTokens: 64_000,
+        failureReason: '30 分钟没交活，按超时收了',
+      });
+      expect(manual1?.cacheReadTokens).toBeUndefined();
+      expect(reasons(manual2)).toEqual({});
+      expect(manual2).toMatchObject({ prNumber: 39, costUsd: 1.86 });
+      expect(reasons(verify)).toEqual({ cost: '花费没记到' });
+    });
+
+    it('用量按段（对题、动手、验收），每段再按模型；整张合计把三段算进去，排队记作没读到（noQueue），不当 0', async () => {
+      const { usage } = await detailOf(harness(), IDS.task13);
+      expect(
+        usage.bySegment.map((s) => [
+          s.segment,
+          s.runs,
+          s.tiers,
+          s.missingTier,
+          s.byModel.map((m) => m.model),
+        ]),
+      ).toEqual([
+        ['scope', 1, [], 0, ['opus-5.5']],
+        ['manual', 2, ['fast'], 0, ['kimi-k3', 'opus-5.5']],
+        ['verify', 1, [], 0, ['gpt-5.6']],
+      ]);
+      expect(usage.bySegment[1]).toMatchObject({
+        runMs: 55 * 60_000,
+        missingCache: 1,
+        missingCost: 1,
+        costUsd: 1.86,
+        cost: { subscription: { runs: 2, usd: 1.86, missing: 1 } },
+      });
+      expect(usage.total).toMatchObject({ runs: 4, running: 0, noQueue: 4, queueMs: 0, missingCost: 2 });
+      expect(usage.byStage).toEqual([]);
+      expect(usage.byModel.map((m) => [m.model, m.runs])).toEqual([
+        ['opus-5.5', 2],
+        ['kimi-k3', 1],
+        ['gpt-5.6', 1],
+      ]);
+    });
+
+    it('【失败】段名认不出：不猜成哪一段，段给 null、原样写进原因；按段那一组单列在最后', async () => {
+      const h = harness();
+      h.store.data.segmentRuns.push({
+        id: 'd1000000-0000-4000-8000-0000000130aa',
+        segment: 'fusion-execute' as 'manual',
+        taskId: IDS.task13,
+        model: 'opus-5.5',
+        startedAt: new Date(T0.getTime() - 500 * 60_000).toISOString(),
+        endedAt: new Date(T0.getTime() - 490 * 60_000).toISOString(),
+        outcome: 'done',
+      });
+      const d = await detailOf(h, IDS.task13);
+      const odd = d.segmentRuns.find((r) => r.id === 'd1000000-0000-4000-8000-0000000130aa');
+      expect(odd?.segment).toBeNull();
+      expect(reasons(odd).segment).toContain('fusion-execute');
+      expect(d.usage.bySegment.map((s) => s.segment)).toEqual(['scope', 'manual', 'verify', null]);
+    });
+
+    it('【失败】起止缺一头：单子已经结束、这一段没记结束——不当在跑，耗时没读到并写明原因', async () => {
+      const h = harness();
+      h.store.data.segmentRuns.push({
+        id: 'd1000000-0000-4000-8000-0000000130ab',
+        segment: 'verify',
+        taskId: IDS.task13,
+        model: 'gpt-5.6',
+        startedAt: new Date(T0.getTime() - 505 * 60_000).toISOString(),
+      });
+      const d = await detailOf(h, IDS.task13);
+      const stale = d.segmentRuns.find((r) => r.id === 'd1000000-0000-4000-8000-0000000130ab');
+      expect(stale).toMatchObject({ running: false });
+      expect(stale?.durationMs).toBeUndefined();
+      expect(reasons(stale).time).toContain('没记结束时刻');
+      expect(d.usage.bySegment.find((s) => s.segment === 'verify')).toMatchObject({
+        runs: 2,
+        running: 0,
+        missingTime: 1,
+      });
+    });
+
+    it('单子还在跑、这一段没结束：算在跑（用量等它结束），不算没读到', async () => {
+      const h = harness();
+      h.store.data.segmentRuns.push({
+        id: 'd1000000-0000-4000-8000-0000000120ac',
+        segment: 'manual',
+        taskId: IDS.task12,
+        model: 'opus-5.5',
+        tier: 'heavyweight',
+        startedAt: new Date(T0.getTime() - 5 * 60_000).toISOString(),
+      });
+      const d = await detailOf(h, IDS.task12);
+      expect(d.segmentRuns).toEqual([expect.objectContaining({ running: true, unread: [] })]);
+      expect(d.usage.bySegment).toEqual([
+        expect.objectContaining({ segment: 'manual', runs: 0, running: 1 }),
+      ]);
+      // 老流程的会话照旧按阶段算，和三段一起进整张合计
+      expect(d.usage.total).toMatchObject({ runs: 1, running: 2 });
+    });
+
+    it('【失败】token 一样都没记到：写明「四样 token 都没记到」，当量、token 记没读到，不当 0', async () => {
+      const h = harness();
+      const verify = h.store.data.segmentRuns.find((r) => r.id === IDS.seg13verify);
+      if (!verify) throw new Error('样例数据里要有 #13 的验收那一笔');
+      delete verify.inputTokens;
+      delete verify.outputTokens;
+      delete verify.cacheReadTokens;
+      delete verify.cacheWriteTokens;
+      const d = await detailOf(h, IDS.task13);
+      expect(reasons(d.segmentRuns.find((r) => r.id === IDS.seg13verify)).tokens).toBe('四样 token 都没记到');
+      expect(d.usage.bySegment.find((s) => s.segment === 'verify')).toMatchObject({
+        inputTokens: 0,
+        missingTokens: 1,
+        missingCache: 1,
+        inputEquivalent: 0,
+        missingEquivalent: 1,
+      });
+    });
   });
 
   it('时间线：会话报的、人做的都在，按时间倒序，翻页不重不漏', async () => {
@@ -451,18 +556,23 @@ describe('发给工作流的信号', () => {
 });
 
 describe('调度台', () => {
-  it('读：每个阶段类型都有一行（没配过的是空列表）', async () => {
+  it('读路由目录：渠道、池、模型、路由照给；不再带旧的阶段平铺顺序、也不去读它（每个用途的先后在路由两层，#574）', async () => {
     const h = harness();
     const { cookie } = await h.login();
-    const body = RoutingResponse.parse(
-      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
-    );
-    expect(body.stages.map((s) => s.stage)).toEqual(StageKindSchema.options);
-    expect(body.stages.find((s) => s.stage === 'triage')).toEqual({
-      stage: 'triage',
-      routeIds: [],
-      pinned: false,
-    });
+    let policyReads = 0;
+    const listStagePolicies = h.store.listStagePolicies.bind(h.store);
+    h.store.listStagePolicies = () => {
+      policyReads += 1;
+      return listStagePolicies();
+    };
+    const raw = (await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(raw).not.toHaveProperty('stages');
+    expect(policyReads).toBe(0);
+    const body = RoutingResponse.parse(raw);
+    expect(body.routes.map((r) => r.id)).toContain('rt-claude-opus');
   });
 
   it('改路由顺序：写操作记录（改前、改后、理由）', async () => {

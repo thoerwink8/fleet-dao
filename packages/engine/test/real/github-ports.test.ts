@@ -633,12 +633,9 @@ describe('开 PR、CI、合并', () => {
     subtask: 'login 登录',
     did: ['加了验证码'],
     verified: ['pnpm check'],
-    specs: 'specs/28-接真端口/',
-    tier: '先合后看——一般改动',
-    changedFiles: ['src/login.ts'],
   };
 
-  it('正文给结构（github 包按模板渲染）；照抄需求 issue 的类别标签和里程碑', async () => {
+  it('正文给结构（github 包按模板渲染）；不抄需求 issue 的类别标签和里程碑、不读需求文档、不读单子挂的版本（#654）', async () => {
     const { ports, calls } = setup();
     expect(
       await ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
@@ -646,25 +643,24 @@ describe('开 PR、CI、合并', () => {
       prNumber: 101,
       url: 'https://github.com/acme/widgets/pull/101',
     });
-    expect(calls.openPr?.[0]).toMatchObject({
-      body: {
-        requirement: 12,
-        did: ['加了验证码'],
-        plan: 'plan.md P1「工作流」',
-        specs: 'specs/28-接真端口/',
-        tier: '先合后看——一般改动',
-      },
-      inheritFrom: { issueNumber: 12 },
-    });
-    // 「对应计划」是现读主线上那份需求文档里的那一行（人改了文件，下一次开 PR 就跟上）
-    expect(calls.readSpecDoc?.[0]).toMatchObject({ path: 'specs/28-接真端口/需求.md' });
-    const { ports: p2, calls: c2 } = setup();
-    const { requirement: _dropped, ...noIssue } = body;
-    await p2.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '杂活', body: noIssue }, ctx);
-    expect(c2.openPr?.[0]).not.toHaveProperty('inheritFrom');
+    expect(calls.openPr?.[0]).toMatchObject({ body: { requirement: 12, did: ['加了验证码'] } });
+    // 【故意造出的失败】PR 上不挂里程碑、不贴标签（里程碑页的进度只数单子）；开 PR 也不再读需求文档和单子的版本
+    expect(calls.openPr?.[0]).not.toHaveProperty('inheritFrom');
+    expect(calls.readSpecDoc).toBeUndefined();
+    expect(calls.readIssuePlan).toBeUndefined();
   });
 
-  it('「按推荐先做了」（#259）照传给正文生成：漏传了 PR 正文里那一栏永远是「无」', async () => {
+  it('没有需求号的杂活也一样开', async () => {
+    const { ports, calls } = setup();
+    const { requirement: _dropped, ...noIssue } = body;
+    await ports.openPr(
+      { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '杂活', body: noIssue },
+      ctx,
+    );
+    expect(calls.openPr?.[0]).toMatchObject({ body: { did: ['加了验证码'] } });
+  });
+
+  it('「按推荐先做了」（#259）照传给正文生成：漏传了 PR 正文里就没有那一栏', async () => {
     const { ports, calls } = setup();
     const assumed = ['验证码几位？ → 先按推荐做了「6 位」，创始人还没回'];
     await ports.openPr(
@@ -672,164 +668,6 @@ describe('开 PR、CI、合并', () => {
       ctx,
     );
     expect(calls.openPr?.[0]).toMatchObject({ body: { assumed } });
-  });
-
-  it('需求文档随这个 PR 才进主线（#295）：「对应计划」照单子此刻挂的版本写，没挂写「未排期」，不去读主线', async () => {
-    const { ports, calls } = setup();
-    await ports.openPr(
-      {
-        taskId: 't1',
-        repo,
-        branch: BRANCH,
-        head: m.head,
-        title: '#11 的后续',
-        body: { ...body, planFromIssue: true },
-      },
-      ctx,
-    );
-    expect(calls.readSpecDoc).toBeUndefined();
-    expect(calls.readIssuePlan?.[0]).toMatchObject({
-      repo: { owner: repo.owner, name: repo.name },
-      issueNumber: 12,
-    });
-    expect(calls.openPr?.[0]).toMatchObject({ body: { plan: 'v1 Fusion 接活' } });
-
-    const unscheduled = setup({
-      readIssuePlan: () => ({
-        state: 'open',
-        reopened: false,
-        pullRequest: false,
-        author: null,
-        milestone: null,
-        openMilestones: [],
-        labels: [],
-        parent: null,
-        subIssues: 0,
-      }),
-    });
-    await unscheduled.ports.openPr(
-      {
-        taskId: 't1',
-        repo,
-        branch: BRANCH,
-        head: m.head,
-        title: '#11',
-        body: { ...body, planFromIssue: true },
-      },
-      ctx,
-    );
-    expect(unscheduled.calls.openPr?.[0]).toMatchObject({ body: { plan: '未排期' } });
-  });
-
-  it('【失败】照单子挂的版本写「对应计划」却读不到单子（502）、没给单号：不开 PR，明确报错，不当成未排期', async () => {
-    const down = setup({
-      readIssuePlan: () => {
-        throw new GitHubError('UPSTREAM', 'GitHub 502', { retryable: true });
-      },
-    });
-    await expect(
-      down.ports.openPr(
-        {
-          taskId: 't1',
-          repo,
-          branch: BRANCH,
-          head: m.head,
-          title: '#11',
-          body: { ...body, planFromIssue: true },
-        },
-        ctx,
-      ),
-    ).rejects.toMatchObject({ code: 'UPSTREAM' });
-    expect(down.calls.openPr).toBeUndefined();
-
-    const { requirement: _dropped, ...noIssue } = body;
-    const { ports, calls } = setup();
-    await expect(
-      ports.openPr(
-        {
-          taskId: 't1',
-          repo,
-          branch: BRANCH,
-          head: m.head,
-          title: '#11',
-          body: { ...noIssue, planFromIssue: true },
-        },
-        ctx,
-      ),
-    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
-    expect(calls.openPr).toBeUndefined();
-  });
-
-  it('需求文档没有「对应计划」那一行：不开 PR，明确报错（SPEC_PLAN_MISSING，不重试）', async () => {
-    const { ports } = setup({
-      readSpecDoc: (input: { path: string }) => ({
-        path: input.path,
-        content: '# 需求\n要验证码\n',
-        url: 'x',
-      }),
-    });
-    await expect(
-      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
-    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
-  });
-
-  it('那一行后面空着：「对应计划」不许填空的，明确报错（不重试）', async () => {
-    const { ports } = setup({
-      readSpecDoc: (input: { path: string }) => ({
-        path: input.path,
-        content: '# 需求\n\n对应计划：\n',
-        url: 'x',
-      }),
-    });
-    await expect(
-      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
-    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
-  });
-
-  it('需求文档还没进主线（读回 null）：明确报错，不当成空文档', async () => {
-    const { ports } = setup({ readSpecDoc: () => null });
-    await expect(
-      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
-    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
-  });
-
-  it('读需求文档读不了（403）：原样带过，不当成「没有那一行」', async () => {
-    const { ports } = setup({
-      readSpecDoc: () => {
-        throw new GitHubError('FORBIDDEN', 'Resource not accessible by integration');
-      },
-    });
-    await expect(
-      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
-  });
-
-  it('specs 目录给的是空串：明确报错，连需求文档都不去读', async () => {
-    const { ports, calls } = setup();
-    await expect(
-      ports.openPr(
-        { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body: { ...body, specs: '  ' } },
-        ctx,
-      ),
-    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
-    expect(calls.readSpecDoc).toBeUndefined();
-  });
-
-  it('specs 目录末尾没带斜杠：补上（PR 模板里就带斜杠）', async () => {
-    const { ports, calls } = setup();
-    await ports.openPr(
-      {
-        taskId: 't1',
-        repo,
-        branch: BRANCH,
-        head: m.head,
-        title: '登录',
-        body: { ...body, specs: 'specs/28-接真端口' },
-      },
-      ctx,
-    );
-    expect(calls.readSpecDoc?.[0]).toMatchObject({ path: 'specs/28-接真端口/需求.md' });
-    expect(calls.openPr?.[0]).toMatchObject({ body: { specs: 'specs/28-接真端口/' } });
   });
 });
 

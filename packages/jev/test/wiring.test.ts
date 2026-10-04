@@ -1,21 +1,26 @@
 // 本机的判断题接没接、接了用哪个后端、调不调得通（wiring.ts）：引擎每次提问和 /healthz 的 judge 项都走这一份。
 // 「未接」只有默认位置上没有配置文件一种；别的读不成都要报坏（不许当成没配悄悄不问），每条都故意造一次。
-// 库里的目录照仓里的样例装（deploy/examples/catalog.example.json）：判断阶段排第一的是 TypeSafe 那条，两条 Claude 关着。
+// 库照发布时的做法装：先装仓里的目录样例（deploy/examples/catalog.example.json），再把路由两层的默认骨架
+// （packages/db/routing.default.json）只补缺装进去——判断用途只排 Jev 1.13，它下面一条 TypeSafe 的路由、开着。
 import type { Stats } from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyRoutingDefault,
   type Db,
   jevAnswers,
   loadCatalog,
+  loadRoutingConfig,
   parseCatalog,
+  routes,
+  routingCatalog,
+  routingPurposeModels,
   seed,
   settings,
-  stagePolicyRoutes,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { BackendResult, JevBackend } from '../src/backend.ts';
 import { ERROR_NEXT, STALL_STATE } from '../src/bank.ts';
@@ -44,7 +49,41 @@ beforeEach(async () => {
   await resetTestDb(t);
   await seed(t.db);
   await loadCatalog(t.db, parseCatalog(repoFile(EXAMPLE), EXAMPLE));
+  await applyRoutingDefault(t.db, await loadRoutingConfig());
 });
+
+/** 判断用途的模型顺序整串换掉（路由两层的上层）。 */
+async function setJudgeModels(modelIds: string[]) {
+  await t.db.delete(routingPurposeModels).where(eq(routingPurposeModels.purpose, 'judge'));
+  if (modelIds.length > 0) {
+    await t.db
+      .insert(routingPurposeModels)
+      .values(modelIds.map((modelId, position) => ({ purpose: 'judge' as const, modelId, position })));
+  }
+}
+
+/** 只让查判断记录（jev_answers）的那一次出错，查路由两层的照常放行：不按第几次 select 数，两层读法多查几张表也不跟着改。 */
+function failingOnAnswers(real: Db, error: Error): Db {
+  return new Proxy(real, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (prop !== 'select' || typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const builder = value.apply(target, args);
+        return new Proxy(builder, {
+          get(b, p, r) {
+            const v = Reflect.get(b, p, r);
+            if (p !== 'from' || typeof v !== 'function') return v;
+            return (table: unknown, ...rest: unknown[]) => {
+              if (table === jevAnswers) throw error;
+              return v.apply(b, [table, ...rest]);
+            };
+          },
+        });
+      };
+    },
+  }) as Db;
+}
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -112,8 +151,8 @@ describe('配置文件在不在', () => {
   });
 });
 
-describe('按配置和调度台现找后端', () => {
-  it('配好了：用判断阶段排第一、开着的那条路由（插头发给上游的型号）起后端', async () => {
+describe('按配置和路由两层现找后端', () => {
+  it('配好了：用路由两层里判断用途排第一、不是死的那条路由（插头发给上游的型号）起后端', async () => {
     const seen: JudgeRoute[] = [];
     const setup = await resolveJevBackend(t.db, { ...machine().at, makeBackend: fakeMake(seen) });
     expect(setup).toMatchObject({ state: 'ready', routeId: JEV_ROUTE, backend: { model: MODEL } });
@@ -136,45 +175,76 @@ describe('按配置和调度台现找后端', () => {
     expect(unknown.state === 'broken' && unknown.problem).toContain('有不认识的键 extra');
   });
 
-  it('判断阶段一条开着的路由都没有：坏了，不当成判断通过', async () => {
-    await t.db.update(stagePolicyRoutes).set({ enabled: false }).where(eq(stagePolicyRoutes.stage, 'judge'));
+  it('判断用途下唯一那条路由关着：坏了，写明是哪条、死在哪，不当成判断通过', async () => {
+    await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.modelId, 'jev-1.13'));
     expect(await resolveJevBackend(t.db, { ...machine().at, makeBackend: fakeMake() })).toEqual({
       state: 'broken',
-      problem: '调度台的判断阶段没有开着的路由',
+      problem: `路由两层里判断用途没有派得出去的路由：${JEV_ROUTE} 死了：开关关着（这条路由在它的模型下关着）`,
     });
   });
 
-  it('驾驶舱改了顺序、开关，下一次就按新的走：Claude 那条排到第一、打开，接不了就明说', async () => {
+  it('探针真探了、没通（不是按量计费不探）：那条算死，原因照探针写的', async () => {
+    await t.db
+      .update(routes)
+      .set({ probeState: 'failed', probedAt: new Date(), probeDetail: '连不上 TypeSafe：ECONNREFUSED' })
+      .where(eq(routes.id, JEV_ROUTE));
+    const setup = await resolveJevBackend(t.db, { ...machine().at, makeBackend: fakeMake() });
+    expect(setup).toEqual({
+      state: 'broken',
+      problem: `路由两层里判断用途没有派得出去的路由：${JEV_ROUTE} 死了：探针判不在线：连不上 TypeSafe：ECONNREFUSED`,
+    });
+  });
+
+  it('判断用途没配模型顺序：坏了，写明没配，不回空当成没事', async () => {
+    await setJudgeModels([]);
+    expect(await resolveJevBackend(t.db, { ...machine().at, makeBackend: fakeMake() })).toEqual({
+      state: 'broken',
+      problem: '路由两层里判断用途没有派得出去的路由：用途 judge 没配模型顺序',
+    });
+  });
+
+  it('判断用途排的模型下一条路由都没有：坏了，写明是哪个模型', async () => {
+    await t.db.delete(routingCatalog).where(eq(routingCatalog.modelId, 'jev-1.13'));
+    expect(await resolveJevBackend(t.db, { ...machine().at, makeBackend: fakeMake() })).toEqual({
+      state: 'broken',
+      problem: '路由两层里判断用途没有派得出去的路由：模型 jev-1.13 没有路由（routing_catalog 里一条都没有）',
+    });
+  });
+
+  it('两层的顺序、开关改了，下一次就按新的走：Opus 排到第一、它的 Claude 路由开着就用它、接不了明说；关掉就跳过、回到 Jev', async () => {
     const claude = 'claude-solo:opus-5.5:claude-code';
     const at = machine().at;
     expect(await resolveJevBackend(t.db, { ...at, makeBackend: fakeMake() })).toMatchObject({
       state: 'ready',
       routeId: JEV_ROUTE,
     });
-    // 同一阶段里位置不许重（唯一约束逐条查）：先把 TypeSafe 那条挪开，再把 Claude 那条放到第一。
-    const move = (routeId: string, set: { position: number; enabled?: boolean }) =>
-      t.db
-        .update(stagePolicyRoutes)
-        .set(set)
-        .where(and(eq(stagePolicyRoutes.stage, 'judge'), eq(stagePolicyRoutes.routeId, routeId)));
-    await move(JEV_ROUTE, { position: 9 });
-    await move(claude, { position: 0, enabled: true });
-    await move(JEV_ROUTE, { position: 1 });
+    // Claude 那条还没探过：接得上是「不知道」，不算死，照样排在 Jev 前面被取到
+    await setJudgeModels(['opus-5.5', 'jev-1.13']);
     const setup = await resolveJevBackend(t.db, at);
     expect(setup.state).toBe('broken');
     expect(setup.state === 'broken' && setup.problem).toContain(`判断路由 ${claude} 起不了后端`);
     expect(setup.state === 'broken' && setup.problem).toContain(CLAUDE_ROUTE_CLOSED);
+    // Opus 下的路由都关了：都是死的，跳过，取后面 Jev 那条
+    await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.modelId, 'opus-5.5'));
+    const seen: JudgeRoute[] = [];
+    expect(await resolveJevBackend(t.db, { ...at, makeBackend: fakeMake(seen) })).toMatchObject({
+      state: 'ready',
+      routeId: JEV_ROUTE,
+    });
+    expect(seen).toEqual([{ hostId: 'api-shell', model: 'jev-1.13.0' }]);
   });
 
-  it('读不到判断阶段的路由（库出错）：坏了，原因里是库报的错', async () => {
+  it('读不到路由两层（库出错）：坏了，原因里是库报的错', async () => {
     const failing = {
       select() {
-        throw new Error('Failed query', { cause: new Error('relation "routes" does not exist') });
+        throw new Error('Failed query', {
+          cause: new Error('relation "routing_purpose_models" does not exist'),
+        });
       },
     } as unknown as Db;
     expect(await resolveJevBackend(failing, machine().at)).toEqual({
       state: 'broken',
-      problem: '读不到判断阶段的路由：relation "routes" does not exist',
+      problem: '读不到路由两层里判断用途的路由：relation "routing_purpose_models" does not exist',
     });
   });
 
@@ -287,18 +357,10 @@ describe('/healthz 的 judge 项看什么', () => {
   });
 
   it('查调用记录出错：抛出去（健康检查报「连不上」），不当成还没调过', async () => {
-    const real = t.db;
-    let calls = 0;
-    const flaky = new Proxy(real, {
-      get(target, prop, receiver) {
-        // 第一次 select 是查判断路由，放行；第二次是查调用记录，让它出错。
-        if (prop === 'select') {
-          calls += 1;
-          if (calls === 2) throw new Error('Failed query', { cause: new Error('canceling statement') });
-        }
-        return Reflect.get(target, prop, receiver);
-      },
-    }) as Db;
+    const flaky = failingOnAnswers(
+      t.db,
+      new Error('Failed query', { cause: new Error('canceling statement') }),
+    );
     await expect(judgeHealth(flaky, { ...machine().at, makeBackend: fakeMake() })).rejects.toThrow(
       'Failed query',
     );

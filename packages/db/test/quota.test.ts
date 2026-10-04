@@ -1,14 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   inFlightByPool,
   type PoolQuotaSnapshot,
+  poolSessionUsage,
   QUOTA_UNREPORTED_TTL_MS,
   quotaTable,
   type StoredQuotaWindow,
   savePoolQuota,
   windowState,
 } from '../src/queries/quota.ts';
+import { finishRun, startRun } from '../src/queries/runs.ts';
 import { pools, quotaWindows } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
@@ -117,6 +120,18 @@ function readOk(
     ),
     ...extra,
   };
+}
+
+/** 报的错是读 runs 读出来的：drizzle 外面包了一层「Failed query」，原来那句在 cause 里。 */
+async function expectRunsUnreadable(read: Promise<unknown>): Promise<void> {
+  const err = await read.then(
+    () => null,
+    (e: unknown) => e,
+  );
+  expect(err, 'runs 读不了却照常回了结果').not.toBeNull();
+  const messages: string[] = [];
+  for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+  expect(messages.join('\n')).toContain('relation "runs" does not exist');
 }
 
 describe('额度写入与额度表', () => {
@@ -234,6 +249,16 @@ describe('额度写入与额度表', () => {
     ]);
   });
 
+  it('routeCount 数每个池上挂的路由；没路由的池是 0', async () => {
+    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'a-k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    const table = await quotaTable(t.db, { now: NOW });
+    expect(table.map((p) => [p.poolId, p.routeCount])).toEqual([
+      ['relay-a', 2],
+      ['relay-b', 0],
+    ]);
+  });
+
   it('每行写明实读还是估算、读法、单位、什么时候读的；最近一次读成超过 30 分钟，池和窗口都标出来', async () => {
     await save(
       readOk('relay-b', ago(3 * HOUR), [
@@ -264,6 +289,28 @@ describe('额度写入与额度表', () => {
     ]);
   });
 
+  it('poolSessionUsage：只返回这个池、时间范围内开始了的会话；花费为空的照样返回、字段为空', async () => {
+    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'b-opus', poolId: 'relay-b', modelId: 'opus-5.5' });
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    const run = (routeId: string, over: Record<string, unknown>) =>
+      addRun(t.db, { taskId: task.id, routeId, ...over });
+    await run('a-opus', { startedAt: ago(10 * MIN), inputTokens: 100, costUsd: 0.25 });
+    await run('a-opus', { startedAt: ago(5 * MIN) }); // 没记到花费
+    await run('a-opus', { queuedAt: ago(4 * HOUR), startedAt: ago(3 * HOUR), costUsd: 9 }); // 范围外
+    await run('a-opus', {}); // 还在排队、没开始
+    await run('b-opus', { startedAt: ago(10 * MIN), costUsd: 7 }); // 别的池
+    const rows = await poolSessionUsage(t.db, { poolId: 'relay-a', since: ago(HOUR), until: NOW });
+    expect(rows.map((r) => [r.modelId, r.inputTokens, r.costUsd])).toEqual(
+      expect.arrayContaining([
+        ['opus-5.5', 100, 0.25],
+        ['opus-5.5', null, null],
+      ]),
+    );
+    expect(rows).toHaveLength(2);
+  });
+
   it('在跑的会话按账号池计：排队的、已结束的都不占名额，不属于任何需求的会话照样占', async () => {
     await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'a-k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
@@ -288,6 +335,79 @@ describe('额度写入与额度表', () => {
       ['relay-a', 2, 2],
       ['relay-b', 0, 1],
     ]);
+  });
+
+  it('三段的一次性会话（runs 里开跑就留的那一行，#157）也占名额：拼车池上两行三段 + 一行 Fusion 的会话是 3，收了一行是 2；收了场的、没写路由的不算', async () => {
+    await t.db.insert(pools).values({
+      id: 'claude-carpool',
+      channelId: 'claude-subscription',
+      maxConcurrency: 3,
+      runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
+    });
+    await addRoute(t.db, {
+      id: 'car',
+      channelId: 'claude-subscription',
+      poolId: 'claude-carpool',
+      modelId: 'opus-5.5',
+      upstreamModel: 'claude-opus-5-5',
+    });
+    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    await addRun(t.db, { taskId: task.id, routeId: 'car', startedAt: ago(20 * MIN) });
+    const manual = randomUUID();
+    const oneShot = { model: 'opus-5.5' } as const;
+    await startRun(t.db, {
+      ...oneShot,
+      id: manual,
+      segment: 'manual',
+      routeId: 'car',
+      startedAt: ago(10 * MIN),
+    });
+    await startRun(t.db, { ...oneShot, segment: 'verify', routeId: 'car', startedAt: ago(5 * MIN) });
+    await startRun(t.db, { ...oneShot, segment: 'scope', routeId: 'a-opus', startedAt: ago(5 * MIN) });
+    await startRun(t.db, {
+      ...oneShot,
+      segment: 'scope',
+      routeId: 'car',
+      startedAt: ago(40 * MIN),
+      endedAt: ago(30 * MIN),
+      outcome: 'done',
+    });
+    // 没写路由：连不到池，算不到谁头上
+    await startRun(t.db, { ...oneShot, segment: 'manual', startedAt: ago(MIN) });
+    const table = async () =>
+      (await quotaTable(t.db, { now: NOW })).map((p) => [p.poolId, p.inFlight, p.maxConcurrency]);
+
+    expect(Object.fromEntries(await inFlightByPool(t.db))).toEqual({ 'claude-carpool': 3, 'relay-a': 1 });
+    expect(await table()).toEqual([
+      ['claude-carpool', 3, 3],
+      ['relay-a', 1, 2],
+      ['relay-b', 0, 1],
+    ]);
+    await finishRun(t.db, { runId: manual, outcome: 'done' }, NOW);
+    expect(Object.fromEntries(await inFlightByPool(t.db))).toEqual({ 'claude-carpool': 2, 'relay-a': 1 });
+    expect(await table()).toEqual([
+      ['claude-carpool', 2, 3],
+      ['relay-a', 1, 2],
+      ['relay-b', 0, 1],
+    ]);
+  });
+
+  it('【故意造出的失败】runs 读不了（把表挪开，查它就报错，和库断在这一步一样）：在跑数、额度表都明确报错，不当成池空着', async () => {
+    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    // Fusion 那一半读得到：不能拿它的数顶
+    await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(10 * MIN) });
+    await t.client.exec('alter table runs rename to runs_unreadable');
+    try {
+      await expectRunsUnreadable(inFlightByPool(t.db));
+      await expectRunsUnreadable(quotaTable(t.db, { now: NOW }));
+    } finally {
+      await t.client.exec('alter table runs_unreadable rename to runs');
+    }
   });
 
   it('超额是真实情况：利用率可以大于 1，算用满，剩余按 0 显示', async () => {

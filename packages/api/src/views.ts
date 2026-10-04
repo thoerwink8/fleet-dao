@@ -1,12 +1,11 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
 
-import { type FlowReplica, type LateAnswer, lateAnswer, replicaVerdict } from '@fleet-dao/core';
+import { type LateAnswer, lateAnswer } from '@fleet-dao/core';
 import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
   type Ban,
   type BillingKind,
-  type BoardFlowSchema,
   type BoardResponse,
   type BoardSubtaskSchema,
   type BoardTaskSchema,
@@ -27,6 +26,8 @@ import {
   type Repo,
   type Route,
   type RunSchema,
+  readSegmentRun,
+  type SegmentRunView,
   type SessionRun,
   type StageKind,
   type Subtask,
@@ -42,8 +43,8 @@ import type {
   NotificationRecord,
   PullRequestRecord,
   QuotaWindowRecord,
-  RepoFlowRow,
   RunPlan,
+  SegmentRunRecord,
   TimelineRecord,
 } from './ports.ts';
 
@@ -161,8 +162,13 @@ export function runView(run: SessionRun, info: RouteInfo): z.input<typeof RunSch
 /**
  * 任务详情的用量汇总：记在路由上的模型名下（和 Fusion 关单评论「各模型额度」一个口径），算法在 shared 的 usage.ts。
  * 花费按渠道的计费方式分按量、套餐内：route 要用带渠道表的 routeLookup，不然全记成分不清。
+ * segments 是三段读好的流水（segmentRunViews 的结果）：合计、按模型里一起算，另出按段一组。
  */
-export function usageView(runs: readonly SessionRun[], route: (routeId: string) => RouteInfo): TaskUsage {
+export function usageView(
+  runs: readonly SessionRun[],
+  route: (routeId: string) => RouteInfo,
+  segments: readonly SegmentRunView[] = [],
+): TaskUsage {
   return summarizeUsage(
     runs.map((r) => {
       const info = route(r.routeId);
@@ -173,6 +179,29 @@ export function usageView(runs: readonly SessionRun[], route: (routeId: string) 
         billing: info.billing,
       };
     }),
+    segments,
+  );
+}
+
+/**
+ * 三段流水读给任务详情：模型名查模型目录（查不到照写模型编号），计费方式查渠道表（渠道查不到就不给，花费记进分不清）。
+ * 认段名、算起止、点名没读到的在 shared 的 segment-runs.ts；单子已经结束时，开着的那一段算没收尾、不算在跑。
+ */
+export function segmentRunViews(
+  records: readonly SegmentRunRecord[],
+  ctx: { models: readonly Model[]; channels: readonly Channel[]; taskFinished: boolean },
+): SegmentRunView[] {
+  const modelById = new Map(ctx.models.map((m) => [m.id, m]));
+  const channelById = new Map(ctx.channels.map((c) => [c.id, c]));
+  return records.map((r) =>
+    readSegmentRun(
+      {
+        ...r,
+        modelName: modelById.get(r.model)?.displayName ?? r.model,
+        billing: r.channel === undefined ? undefined : channelById.get(r.channel)?.billing,
+      },
+      { taskFinished: ctx.taskFinished },
+    ),
   );
 }
 
@@ -211,47 +240,7 @@ export function taskActivity(taskId: string, input: BoardInput): Activity | unde
   return run ? activityOf(run, input.plans.get(run.id), input.route(run.routeId)) : undefined;
 }
 
-/** 提交给人看的长度：前 7 位；不足 7 位原样，不加省略号。 */
-function shortCommit(commit: string): string {
-  return commit.length <= 7 ? commit : commit.slice(0, 7);
-}
-
-/**
- * 看板顶栏。停派只问 replicaVerdict，why 原样带上，不改写。
- * 判得过但来源、提交或同步时刻缺了：直接拒绝，不返回 paused: false，也不拿 project 顶。
- */
-export function boardFlow(row: RepoFlowRow, now: Date): z.input<typeof BoardFlowSchema> {
-  const replica: FlowReplica = {
-    syncedAt: row.syncedAt,
-    error: row.error,
-    unread: row.unread,
-    testCommand: null,
-  };
-  const verdict = replicaVerdict(replica, now);
-  const source = row.source ?? undefined;
-  const commit = row.commit ? shortCommit(row.commit) : undefined;
-  const syncedAt = row.syncedAt ?? undefined;
-  if (verdict.ok) {
-    if (!source || !commit || !syncedAt) {
-      throw new Error('流程配置副本判得过，但缺来源、提交或同步时刻，不拿 project 顶');
-    }
-    return { source, commit, syncedAt, paused: false };
-  }
-  return {
-    ...(source ? { source } : {}),
-    ...(commit ? { commit } : {}),
-    ...(syncedAt ? { syncedAt } : {}),
-    paused: true,
-    why: verdict.why,
-  };
-}
-
-export function buildBoard(
-  repo: Repo,
-  input: BoardInput,
-  now: Date,
-  repoFlow: RepoFlowRow,
-): z.input<typeof BoardResponse> {
+export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<typeof BoardResponse> {
   const tasks = [...input.tasks].sort(
     (a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt),
   );
@@ -266,7 +255,6 @@ export function buildBoard(
       priority: t.priority,
       requestedBy: t.requestedBy,
       createdAt: t.createdAt,
-      ...(t.flowSource ? { flowSource: t.flowSource } : {}),
       progress: { done: subtasks.filter((s) => s.state === 'merged').length, total: subtasks.length },
       activity: taskActivity(t.id, input),
       subtasks,
@@ -285,7 +273,6 @@ export function buildBoard(
     repo: { id: repo.id, owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch },
     tasks: boardTasks,
     now: now_,
-    flow: boardFlow(repoFlow, now),
     asOf: now.toISOString(),
   };
 }

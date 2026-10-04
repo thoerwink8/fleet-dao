@@ -46,6 +46,11 @@ export function createDemoApi(inner: MockApi): FleetApi {
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
     answerAsk: (askId, answer) => inner.answerAsk(askId, answer),
     routing: () => inner.routing(),
+    // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
+    routingLayers: () => Promise.reject(hidden('路由')),
+    // 思考档位页也只在正式驾驶舱里有：演示版看不到、更改不了。
+    routingEfforts: () => Promise.reject(hidden('思考档位')),
+    updateRouteEffort: () => Promise.reject(hidden('思考档位')),
     updateStagePolicy: (stage, body) => inner.updateStagePolicy(stage, body),
     updateChannel: (channelId, body) => inner.updateChannel(channelId, body),
     pools: () => inner.pools(),
@@ -73,6 +78,8 @@ export function createDemoApi(inner: MockApi): FleetApi {
       need('settings', '设置');
       return inner.updateSetting(key, body);
     },
+    // /changelog 页不进演示版（路由表不放）：发布的版本号也不给。
+    releaseVersion: () => Promise.reject(hidden('发布')),
     // 发演示链接只在正式驾驶舱里有。
     demoLinks: () => Promise.reject(hidden('发演示链接')),
     createDemoLink: () => Promise.reject(hidden('发演示链接')),

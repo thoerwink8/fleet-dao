@@ -1,28 +1,24 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// 判红只有这几样（#444 起去掉「认领对得上」「写了关单却没带结果.md」两项——缺的由每天的关单对账另外提醒，不再挡合并）：
-// 草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而
-// 当前头上没有通过的 second-opinion；#555-2 起还要一条：引擎任务工作流（#632）开的 PR（分支 fleet/<单号>-t<8 位>），当前头上
-// 要有通过的 cold-verify（合前一次冷调用，换家族验「单子说要的东西真做了没有」）——**闸只读这条状态，不在这里起模型调用**
-// （判法要确定，同一份代码什么时候跑结果都一样，design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，
-// 也就没有这条状态——那是「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。读不到、认不出写 failure（没查成），
-// GitHub 还没算完冲突写 pending。必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。
-// merge-gate.yml 在 PR 事件、主线推送、second-opinion 或 cold-verify 状态写上来时跑它（后两种逐个重算所有开着的 PR）；
+// 判红只有两样（#444 收窄到四样；#654 起草稿和冲突交给 GitHub 自己拦——它本来就合不了——不再在这里判，PR 正文也没有必填栏、闸不再提醒）：
+// 改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而当前头上没有通过的 second-opinion；
+// #555-2 起还有一条：引擎任务工作流（#632）开的 PR（分支 fleet/<单号>-t<8 位>），当前头上要有通过的 cold-verify（合前一次冷调用，
+// 换家族验「单子说要的东西真做了没有」）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑结果都一样，
+// design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——那是「不用验」，不是「没验成」，
+// 两者在 coldVerifyNeed 里分开。读不到、认不出写 failure（没查成）。
+// merge-gate.yml 在 PR 事件（头变了）、second-opinion 或 cold-verify 状态写上来时跑它（后两种逐个重算所有开着的 PR）；主线推送只在闸认的东西
+// （高风险清单、判法、工作流本身）变了才触发、同样重算所有开着的 PR——清单加了新路径，开着的 PR 上旧的 success 不能留着（#654 第二意见）；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import { isFlowBranch } from './flow-branch.ts';
 import type { GhApi } from './gh-api.ts';
-import { parseMd } from './markdown.ts';
 import {
   type ChangedFile,
   COLD_VERIFY_CONTEXT,
-  CONFLICT_PROBLEM,
   checkColdVerify,
   checkSecondOpinion,
   coldVerifyFrom,
   coldVerifyNeed,
-  DRAFT_PROBLEM,
   GATE_CONTEXT,
-  MERGEABLE_UNKNOWN,
   parseRiskPaths,
   RISK_PATHS_FILE,
   type RiskPath,
@@ -32,10 +28,9 @@ import {
   secondOpinionFrom,
   statusDescription,
 } from './merge-gates.ts';
-import { planPhases } from './plan.ts';
-import { checkPrFields, PLAN_DOC, prColumns, prFromEvent, SPECS_COLUMN, specsPaths } from './pr-fields.ts';
+import { workflowDiff } from './workflow-structure.ts';
 
-export type GateState = 'success' | 'failure' | 'pending';
+export type GateState = 'success' | 'failure';
 
 /** 合并闸要读写的 GitHub 上的东西；读不到、读回来认不出就抛（调用方判「没查成」）。 */
 export interface GitHubReads {
@@ -45,14 +40,12 @@ export interface GitHubReads {
   files(number: number): Promise<ChangedFile[]>;
   /** 某个提交上各 context 最新的一条提交状态（翻完页）。 */
   statuses(sha: string): Promise<unknown[]>;
-  /** 仓内文件在某个提交上的内容；没有这个文件回 null。 */
-  fileAt(path: string, ref: string): Promise<string | null>;
-  /** 仓内路径（文件或目录）在某个提交上在不在。 */
-  exists(path: string, ref: string): Promise<boolean>;
   /** 开着的 PR（翻完页）。 */
   openPrs(): Promise<unknown[]>;
-  /** 主线（默认分支）现在的头提交。 */
-  mainHead(): Promise<string>;
+  /** 某个提交上某个文件的全文；文件在那个提交里不存在回 null；读不到、认不出就抛。 */
+  fileAt(path: string, ref: string): Promise<string | null>;
+  /** 两个提交的共同祖先（GET /compare）；读不到、认不出就抛。PR 的改动是对它算的，比对工作流前后两份要用同一个起点。 */
+  mergeBase(base: string, head: string): Promise<string>;
   writeStatus(
     sha: string,
     status: { state: GateState; description: string; targetUrl?: string },
@@ -65,8 +58,6 @@ const FILES_MAX_PAGES = 30;
 const PRS_MAX_PAGES = 20;
 /** 一个提交上的状态：每个 context 最多 1000 条（GitHub 的上限），合并闸自己、第二意见两样。 */
 const STATUS_MAX_PAGES = 30;
-
-const encodePath = (p: string) => p.split('/').filter(Boolean).map(encodeURIComponent).join('/');
 
 export function gateGitHub(api: GhApi): GitHubReads {
   return {
@@ -107,7 +98,9 @@ export function gateGitHub(api: GhApi): GitHubReads {
       throw new Error(`提交 ${sha.slice(0, 7)} 的状态超过 ${STATUS_MAX_PAGES * 100} 条，没读完`);
     },
     async fileAt(path, ref) {
-      const got = await api.getOrNull(`/contents/${encodePath(path)}?ref=${ref}`);
+      const got = await api.getOrNull(
+        `/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`,
+      );
       if (got === null) return null;
       if (
         !isObject(got) ||
@@ -115,12 +108,19 @@ export function gateGitHub(api: GhApi): GitHubReads {
         got.encoding !== 'base64' ||
         typeof got.content !== 'string'
       ) {
-        throw new Error(`${path} 读回来认不出（不是 base64 的文件内容）`);
+        throw new Error(
+          `${path}（${ref.slice(0, 7)}）读回来认不出（不是 base64 的文件；超过 1MB 的文件 GitHub 不给内容）`,
+        );
       }
       return Buffer.from(got.content, 'base64').toString('utf8');
     },
-    async exists(path, ref) {
-      return (await api.getOrNull(`/contents/${encodePath(path)}?ref=${ref}`)) !== null;
+    async mergeBase(base, head) {
+      const got = await api.get(`/compare/${base}...${head}`);
+      const sha = isObject(got) && isObject(got.merge_base_commit) ? got.merge_base_commit.sha : undefined;
+      if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) {
+        throw new Error(`${base.slice(0, 7)}...${head.slice(0, 7)} 的共同祖先认不出`);
+      }
+      return sha;
     },
     async openPrs() {
       const all: unknown[] = [];
@@ -131,16 +131,6 @@ export function gateGitHub(api: GhApi): GitHubReads {
         if (got.length < 100) return all;
       }
       throw new Error(`开着的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
-    },
-    async mainHead() {
-      const repo = await api.get('');
-      const branch = isObject(repo) ? repo.default_branch : undefined;
-      if (typeof branch !== 'string' || !branch) throw new Error('仓的 default_branch 认不出');
-      const ref = await api.get(`/git/ref/heads/${encodePath(branch)}`);
-      const sha = isObject(ref) && isObject(ref.object) ? ref.object.sha : undefined;
-      if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha))
-        throw new Error(`主线 ${branch} 的头认不出`);
-      return sha;
     },
     async writeStatus(sha, s) {
       await api.post(`/statuses/${sha}`, {
@@ -158,11 +148,9 @@ export interface LiveMeta {
   head: string;
   /** PR 的分支名（head.ref）：认「引擎任务工作流开的 PR」用。 */
   headRef: string;
+  /** PR 的目标分支现在的头（base.sha）：比对工作流要用它找共同祖先；认不出就没有，要比对时判没查成。 */
+  base?: string;
   changedFiles: number;
-  draft: boolean;
-  /** GitHub 还在算是 null。 */
-  mergeable: boolean | null;
-  mergeCommit: string | null;
   open: boolean;
 }
 
@@ -174,26 +162,65 @@ export function metaOf(live: unknown): LiveMeta | string {
   if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return 'head.sha 认不出';
   const headRef = isObject(live.head) ? live.head.ref : undefined;
   if (typeof headRef !== 'string' || !headRef) return 'head.ref 认不出';
-  const { changed_files: changedFiles, draft, mergeable, merge_commit_sha: mergeCommit, state } = live;
+  const { changed_files: changedFiles, state } = live;
   if (typeof changedFiles !== 'number' || !Number.isInteger(changedFiles) || changedFiles < 0) {
     return 'changed_files 认不出';
   }
-  if (typeof draft !== 'boolean') return 'draft 认不出';
-  if (mergeable !== null && typeof mergeable !== 'boolean') return 'mergeable 认不出';
-  if (mergeCommit !== null && mergeCommit !== undefined && typeof mergeCommit !== 'string') {
-    return 'merge_commit_sha 认不出';
-  }
   if (state !== 'open' && state !== 'closed') return 'state 认不出';
+  const base = isObject(live.base) ? live.base.sha : undefined;
   return {
     number: live.number,
     head,
     headRef,
+    ...(typeof base === 'string' && /^[0-9a-f]{40}$/.test(base) ? { base } : {}),
     changedFiles,
-    draft,
-    mergeable,
-    mergeCommit: typeof mergeCommit === 'string' ? mergeCommit : null,
     open: state === 'open',
   };
+}
+
+/**
+ * 改了已有的工作流（hit.pending）：读改动前后两份全文做结构比对（workflow-structure.ts）。
+ * 比出碰到信任的地方：留着，note 写第一条；一处都没碰：去掉这条（不用第二意见）；读不懂：留着（算碰了）；
+ * 读不到文件、找不到共同祖先：没查成（notChecked，不当成「没碰」），这条也留着，免得把没查成的当成没事。
+ */
+export async function resolveWorkflowHits(
+  hits: readonly RiskyFile[],
+  meta: LiveMeta,
+  gh: Pick<GitHubReads, 'fileAt' | 'mergeBase'>,
+): Promise<{ hits: RiskyFile[]; notChecked: string[] }> {
+  const out: RiskyFile[] = [];
+  const notChecked: string[] = [];
+  for (const h of hits) {
+    if (!h.pending) {
+      out.push(h);
+      continue;
+    }
+    const keep = (note: string) => out.push({ file: h.file, rule: h.rule, kind: h.kind, note });
+    if (!meta.base) {
+      notChecked.push(`PR 读回来没有 base.sha，没法比对 ${h.file} 改动前后`);
+      keep('没法比对改动前后');
+      continue;
+    }
+    try {
+      const origin = await gh.mergeBase(meta.base, meta.head);
+      const [before, after] = await Promise.all([gh.fileAt(h.file, origin), gh.fileAt(h.file, meta.head)]);
+      if (before === null || after === null) {
+        // 改了已有的文件，两头都该在：读回「不存在」是没查成（判红、写明），不是「要审」——审过了也不放行
+        notChecked.push(
+          `${h.file} 改动${before === null ? '前' : '后'}的那份读不到（${(before === null ? origin : meta.head).slice(0, 7)} 上没有这个文件）`,
+        );
+        keep('改动前或改动后的文件读不到');
+        continue;
+      }
+      const diff = await workflowDiff(before, after);
+      if (typeof diff === 'string') keep(diff);
+      else if (diff.length > 0) keep(`${diff[0]}${diff.length > 1 ? `（另有 ${diff.length - 1} 处）` : ''}`);
+    } catch (e) {
+      notChecked.push(`比对 ${h.file} 改动前后没成（${message(e)}）`);
+      keep('没法比对改动前后');
+    }
+  }
+  return { hits: out, notChecked };
 }
 
 export interface GateResult {
@@ -212,19 +239,14 @@ export interface GateDeps {
   gh: GitHubReads;
   /** 高风险清单：认出来的条目，或认不出的原因。 */
   riskList: RiskPath[] | string;
-  sleep?: (ms: number) => Promise<void>;
-  /** GitHub 还在算冲突时再读几次、每次隔多久。 */
-  mergeablePolls?: number;
-  mergeablePollMs?: number;
 }
 
 /**
- * 判一个 PR。只读，不写状态。判红只有：草稿、和主线冲突（这两样 GitHub 本来就合不了）、改到先审后合的路径
- * 而当前头上没有通过的 second-opinion；读不到、认不出也判红（没查成）。必填栏只提醒。
+ * 判一个 PR。只读，不写状态。判红只有：改到先审后合的路径而当前头上没有通过的 second-opinion；引擎任务 PR 当前头上没有通过的
+ * cold-verify；读不到、认不出（没查成）。草稿、冲突 GitHub 自己就合不了，这里不判（#654）。
  */
 export async function gatePr(number: number, deps: GateDeps): Promise<GateResult> {
   const { gh } = deps;
-  const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const broken = (why: string): GateResult => ({
     number,
     head: null,
@@ -232,18 +254,9 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
     notChecked: true,
     lines: [`没查成：${why}。`],
   });
-  let live: unknown;
   let meta: LiveMeta | string;
   try {
-    live = await gh.pr(number);
-    meta = metaOf(live);
-    // mergeable 是 GitHub 读的时候才开始算的：第一次多半是 null，隔一会儿再读
-    for (let i = 0; typeof meta !== 'string' && meta.open && meta.mergeable === null; i++) {
-      if (i >= (deps.mergeablePolls ?? 10)) break;
-      await sleep(deps.mergeablePollMs ?? 3000);
-      live = await gh.pr(number);
-      meta = metaOf(live);
-    }
+    meta = metaOf(await gh.pr(number));
   } catch (e) {
     return broken(`读不到 PR #${number} 现在的样子（${message(e)}）`);
   }
@@ -255,8 +268,6 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
 
   const notChecked: string[] = [];
   const problems: string[] = [];
-  if (meta.draft) problems.push(DRAFT_PROBLEM);
-  if (meta.mergeable === false) problems.push(CONFLICT_PROBLEM);
 
   let hits: RiskyFile[] = [];
   // 判不了「改没改到先审后合/N 的地方」的原因：有它就是没查成（下面两条判法都据此判红），不当成「没改到」。
@@ -270,7 +281,14 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       if (files.length !== meta.changedFiles) {
         faceProblem = `PR #${number} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个（GitHub 的列表最多给 3000 个）`;
         notChecked.push(`${faceProblem}，没法判改没改到先审后合的地方`);
-      } else hits = riskyFiles(files, deps.riskList);
+      } else {
+        hits = riskyFiles(files, deps.riskList);
+        if (hits.some((h) => h.pending)) {
+          const done = await resolveWorkflowHits(hits, meta, gh);
+          hits = done.hits;
+          notChecked.push(...done.notChecked);
+        }
+      }
     } catch (e) {
       faceProblem = `读不到 PR #${number} 改了哪些文件（${message(e)}）`;
       notChecked.push(faceProblem);
@@ -279,6 +297,10 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   // 合前一次冷调用（#555-2）要不要等：引擎任务工作流开的 PR 要（分支名认），别的不要——和改没改到先审后合的路径无关，
   // 所以上面判不了改没改到（faceProblem）也不影响这一条。
   const cold = coldVerifyNeed(isFlowBranch(meta.headRef));
+  // 先合后审的（清单里 review: after-merge，CI 判法那几份；创始人 2026-10-03「1+2+3」的第 3 条）：不等第二意见，
+  // 能合的结论里点名「合并后补审」，由 second-opinion.mjs --after-merge-pending / --after-merge-sweep 合并后补上
+  const later = hits.filter((h) => h.afterMerge);
+  hits = hits.filter((h) => !h.afterMerge);
   if (hits.length > 0 || cold.needed) {
     let statuses: unknown[] | undefined;
     try {
@@ -304,7 +326,6 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       }
     }
   }
-  const notes = (await reminders(live, meta, gh)).map((r) => `提醒：${r}`);
 
   const base = { number, head: meta.head };
   if (notChecked.length > 0) {
@@ -312,55 +333,23 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       ...base,
       state: 'failure',
       notChecked: true,
-      lines: [...notChecked.map((w) => `没查成：${w}。`), ...problems, ...notes],
+      lines: [...notChecked.map((w) => `没查成：${w}。`), ...problems],
     };
   }
-  if (problems.length > 0)
-    return { ...base, state: 'failure', notChecked: false, lines: [...problems, ...notes] };
-  if (meta.mergeable === null)
-    return { ...base, state: 'pending', notChecked: false, lines: [MERGEABLE_UNKNOWN, ...notes] };
+  if (problems.length > 0) return { ...base, state: 'failure', notChecked: false, lines: problems };
   const why = [
     hits.length === 0
       ? '没改到先审后合的地方'
       : `改到 ${hits.length} 个先审后合的地方，当前头上第二意见已通过`,
     ...(cold.needed ? ['引擎任务 PR 的验收那一遍也通过'] : []),
   ].join('，');
-  return {
-    ...base,
-    state: 'success',
-    notChecked: false,
-    lines: [`能合：不是草稿、没冲突，${why}。`, ...notes],
-  };
-}
-
-/**
- * 必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒、不挡合并（创始人 2026-09-26「流程只为快」）。
- * 这里的任何读不到、认不出都只变成一条提醒，影响不了合并闸的结论——所以 pr-fields.ts 那套判法不在先审后合的清单里。
- */
-export async function reminders(live: unknown, meta: LiveMeta, gh: GitHubReads): Promise<string[]> {
-  const pr = prFromEvent({ pull_request: live });
-  if (typeof pr === 'string') return [`必填栏没查成：${pr}`];
-  // plan.md、specs 目录按「合进去之后的样子」查；有冲突、还在算时退回按头查
-  const ref = meta.mergeable === true && meta.mergeCommit ? meta.mergeCommit : meta.head;
-  const cols = prColumns(pr.body);
-  const out: string[] = [];
-  try {
-    const planText = await gh.fileAt(PLAN_DOC, ref);
-    const phases = planText === null ? undefined : planPhases(parseMd(PLAN_DOC, planText));
-    if (!phases) out.push(`必填栏没查成：这个 PR 里读不到 ${PLAN_DOC}`);
-    else if (phases.size === 0) out.push(`必填栏没查成：${PLAN_DOC} 里一个阶段（### P0 …）也没认出来`);
-    else {
-      const there = new Map<string, boolean>();
-      for (const p of specsPaths(cols.get(SPECS_COLUMN) ?? '')) {
-        const rel = p.replace(/\/+$/, '');
-        if (!rel.split('/').includes('..') && !there.has(rel)) there.set(rel, await gh.exists(rel, ref));
-      }
-      out.push(...checkPrFields(pr, { phases, exists: (rel) => there.get(rel) ?? false }));
-    }
-  } catch (e) {
-    out.push(`必填栏没查成：读不到这个 PR 里的 ${PLAN_DOC} 或 specs 目录（${message(e)}）`);
-  }
-  return out;
+  const afterMerge =
+    later.length === 0
+      ? []
+      : [
+          `合并后补审：${later.map((h) => h.file).join('、')}（先合后审；合并后跑 second-opinion.mjs --pr ${number}，没过就开修复 PR 或 revert）。`,
+        ];
+  return { ...base, state: 'success', notChecked: false, lines: [`能合：${why}。`, ...afterMerge] };
 }
 
 export interface RunResult {
@@ -385,14 +374,15 @@ export async function targetPrs(
       const pr = isObject(ev.pull_request) ? ev.pull_request.number : undefined;
       return typeof pr === 'number' ? [pr] : '事件里没有 pull_request.number';
     }
-    case 'push':
-      return numbersOf(await gh.openPrs(), () => true);
     case 'status':
       // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
       // 一轮里给好几个 PR 贴 second-opinion 时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
       // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
       // 冷调用（cold-verify）写上时同理：它是另一个 context（#555-2），单子关上时这条状态才到，闸要跟着重算。
       if (ev.context !== SECOND_OPINION_CONTEXT && ev.context !== COLD_VERIFY_CONTEXT) return [];
+      return numbersOf(await gh.openPrs(), () => true);
+    case 'push':
+      // 工作流的 paths 只放行了闸认的那几个文件（merge-gate.yml），到这里就是「判定输入变了」：开着的 PR 全重算，每个都现读自己此刻的状态。
       return numbersOf(await gh.openPrs(), () => true);
     case 'workflow_dispatch': {
       const input = isObject(ev.inputs) ? String(ev.inputs.pr ?? '').trim() : '';
@@ -427,8 +417,6 @@ export async function runMergeGate(opts: {
   write: boolean;
   /** 状态上「详情」链到的地方（这次运行的页面）。 */
   targetUrl?: string;
-  sleep?: (ms: number) => Promise<void>;
-  mergeablePollMs?: number;
 }): Promise<RunResult> {
   const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
   if (!opts.eventName || !opts.eventPath)
@@ -450,23 +438,9 @@ export async function runMergeGate(opts: {
   if (numbers.length === 0) return { code: 0, lines: ['这次没有要算的 PR。'] };
 
   const riskList = opts.riskListText === undefined ? '读不到' : parseRiskPaths(opts.riskListText);
-  const deps: GateDeps = {
-    gh: opts.gh,
-    riskList,
-    ...(opts.sleep ? { sleep: opts.sleep } : {}),
-    ...(opts.mergeablePollMs === undefined ? {} : { mergeablePollMs: opts.mergeablePollMs }),
-  };
+  const deps: GateDeps = { gh: opts.gh, riskList };
   const lines: string[] = [];
   let code: 0 | 1 | 2 = 0;
-  // 写回前确认主线头没变：主线一变冲突就可能变，主线推送会起一轮新的重算；旧的运行晚写回会盖掉新结果，所以不写
-  let startMain: string | undefined;
-  if (opts.write) {
-    try {
-      startMain = await opts.gh.mainHead();
-    } catch (e) {
-      return fail(`读不到主线现在的头（${message(e)}），不写状态（写了可能是过期的）`);
-    }
-  }
   for (const n of numbers) {
     const r = await gatePr(n, deps);
     if (r.closed) {
@@ -483,20 +457,6 @@ export async function runMergeGate(opts: {
       lines.push('  没写上状态：连 PR 的头都没读到。');
       code = 2;
       continue;
-    }
-    let nowMain: string;
-    try {
-      nowMain = await opts.gh.mainHead();
-    } catch (e) {
-      lines.push(`  没写上状态：写之前读不到主线现在的头（${message(e)}）。`);
-      code = 2;
-      continue;
-    }
-    if (nowMain !== startMain) {
-      lines.push(
-        `主线在这次运行里变了（${String(startMain).slice(0, 7)} → ${nowMain.slice(0, 7)}），剩下的不写回，交给主线推送起的那轮重算。`,
-      );
-      break;
     }
     try {
       await opts.gh.writeStatus(r.head, {

@@ -3,4 +3,9 @@
 # 设成了 .githooks。拦下来时先把东西拿掉再推，别用 --no-verify 硬推。
 # 原来第一步查「带着认领的分支认领还归不归你」（#299），2026-09-29 起指挥官不再在库里认领（docs/goals.md「六、要删的，和怎么删」），删了：
 # core.hooksPath 常指向主检出，这份钩子会在别的工作树里跑，不能引用只在某个分支上才有的脚本路径。
-node packages/hygiene/src/bin/pre-push.ts "$@"
+node packages/hygiene/src/bin/pre-push.ts "$@" || exit $?
+
+# 卫生检查过了再看这次改动要在 CI 上跑什么，本机先跑掉确定的那些（格式、类型；判法见 packages/conventions/src/prepare-push.ts）。
+# 退出码照传：1 = 查出来没过，2 = 没查成（都别推）。
+node packages/conventions/src/bin/prepare-push.ts
+exit $?

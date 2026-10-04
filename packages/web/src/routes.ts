@@ -10,6 +10,10 @@ const cockpitOnly = demo
       route('demo-links', 'routes/demo-links.tsx'),
       // 仓根 CHANGELOG.md 的仓名不能进演示版产物，这一页也不放进演示版路由表（导航同时不给 module）。
       route('changelog', 'routes/changelog.tsx'),
+      // 路由两层每一层现在活着吗（#574）：演示版没有这个模块。
+      route('routing', 'routes/routing.tsx'),
+      // 每条路由起会话的思考档位（#470）：演示版没有这个模块，也改不了。
+      route('efforts', 'routes/efforts.tsx'),
       // 第二批页面（P3 之后）：先放占位页。
       route('models', 'routes/soon.tsx', { id: 'soon-models' }),
       route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
@@ -21,6 +25,8 @@ export default [
   ...(demo ? [] : [route('login', 'routes/login.tsx')]),
   layout('routes/shell.tsx', [
     index('routes/home.tsx'),
+    // 主页「在跑的」、追问的链接（后端拼的 /tasks/<编号>）落在这里；演示版按「任务」模块的开关看
+    route('tasks/:taskId', 'routes/task.tsx'),
     route('quota', 'routes/quota.tsx'),
     route('schedules', 'routes/schedules.tsx'),
     route('notifications', 'routes/notifications.tsx'),

@@ -11,6 +11,10 @@
 # 退出码：0 通过，1 不通过，2 没跑成（不是 root、缺工具）。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# 登录 shell 那一问的超时压到最小：那条「前台卡住判 124」的用例按设计要真等满（默认 10 秒 + 强杀 5 秒）。
+# 必须在 source login-user.sh **之前**给：那里 source 时就赋默认值，晚了会被打回。
+LOGIN_USER_PROBE_TIMEOUT=2
+LOGIN_USER_KILL_AFTER=1
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 # shellcheck source=../lib/login-user.sh
@@ -171,7 +175,8 @@ check_login_user "$U"
 rc=$?
 elapsed=$((SECONDS - start))
 msg=$(printf '%s\n' "${LOGIN_USER_BAD[@]}")
-if ((rc == 1)) && [[ "$msg" == *reclaude-not-on-path* && "$msg" == *"退出码 124"* ]] && ((elapsed < 25)); then
+# 窗口按注入的超时算（+3 秒余量）：原来写死 25 秒，注入 2 秒后太宽，缩不缩都测不出回归
+if ((rc == 1)) && [[ "$msg" == *reclaude-not-on-path* && "$msg" == *"退出码 124"* ]] && ((elapsed < LOGIN_USER_PROBE_TIMEOUT + 3)); then
   pass "登录脚本前台卡住：判红、退出码 124、$elapsed 秒内返回"
 else
   flunk "前台卡住没按预期（rc=$rc，$elapsed 秒）：$msg"

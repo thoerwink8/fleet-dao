@@ -1,21 +1,19 @@
 // 定时对账补漏（#43）：Temporal 定时任务 → 工作流 → 活动 → 后端的 reconcileGitHub（真 Store、真 GitHubIntake、@fleet-dao/github
 // 的真轮询，对着照 GitHub 接口回话的假服务）→ 结局记进 schedule_runs。库是 PGlite 上跑真迁移。
+// 只收 PR 和 CI 的事件：单子由引擎每 5 分钟自己拉，对账不管它们（#632、#556）。
 // 没跑成、没查成、认不出，都要记成明确的结局（failed / unscanned / partial），不记成 ok。
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { type RequirementStart, type RequirementWorkflows, WorkflowUnavailableError } from '@fleet-dao/api';
-import type { Source } from '@fleet-dao/core';
 import {
-  githubEvents,
   notifications,
+  pullRequests,
   repos,
   scheduleHealth,
   scheduleRuns,
-  tasks,
+  upsertAlert,
   users,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
-import { requirementWorkflowId } from '@fleet-dao/shared';
 import {
   type Client,
   ScheduleAlreadyRunning,
@@ -33,7 +31,6 @@ import {
   type GitHubReconcileJobDeps,
   runGitHubReconcileJob,
   toScheduleResult,
-  withFlowSync,
   withIssueGroom,
 } from '../src/jobs/github-reconcile.ts';
 import type { RetiredSchedule } from '../src/jobs/retired-schedules.ts';
@@ -46,14 +43,11 @@ import {
   GITHUB_RECONCILE_SCHEDULE_ID,
   HOURLY_RECONCILE_SCHEDULE_ID,
   INTAKE_SCHEDULE_ID,
+  QUOTA_READ_SCHEDULE_ID,
   ROUTE_PROBE_SCHEDULE_ID,
   WATCHDOG_SCHEDULE_ID,
 } from '../src/jobs/schedules.ts';
-import {
-  closeSweepJob,
-  type GitHubReconcileWiring,
-  githubReconcileJob,
-} from '../src/real/github-reconcile.ts';
+import { githubReconcileJob, retireCloseSweepAlerts } from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
 import { createRealEnv, useEnv, withWorker } from './helpers.ts';
 
@@ -83,34 +77,16 @@ function apps(): Record<'agent' | 'engine', AppCredentials> {
   };
 }
 
-/** 仓里的版本（GitHub 上的里程碑）：v1 是当前版本。 */
-const V1 = { number: 8, title: 'v1 Fusion 接活' };
-const V2 = { number: 9, title: 'v2 引擎打磨' };
-
 interface GitHubState {
-  issues: unknown[];
-  /** 仓里还开着的里程碑；不给就是只有 v1。 */
-  milestones?: { number: number; title: string }[];
+  /** 这个仓的 PR 列表（回得和 GitHub 一样：新的在前）。 */
+  pulls: unknown[];
   /** 设了就所有接口都这样回（读不到 GitHub）。 */
   down?: number;
-  /** 默认分支头上的 .fleet/flow.json：给了是正文，不给（undefined）是没有这个文件。 */
-  flowFile?: string;
-  /** 设了就只有读 .fleet/flow.json 这样回（读流程配置没查成）。 */
-  flowDown?: number;
-  /** 默认分支头的提交。 */
-  head?: string;
-  /**
-   * compare base...head 回的 behind_by（流程配置「比引擎新」那条例外用它判祖先关系）：不给就是没配这条路，
-   * 回 404（当「比较不出关系」，见 packages/github 的 commitContains）。
-   */
-  compareBehindBy?: number;
 }
 
-const HEAD_A = 'a'.repeat(40);
-
 /**
- * 只答对账会问的几条：安装、令牌、仓（默认分支）、默认分支头、.fleet/flow.json、issue 列表、单张 issue、还开着的里程碑、
- * 评论列表、PR 列表、投递日志。since 照 GitHub 的规矩过滤。
+ * 只答对账会问的几条：安装、令牌、PR 列表、投递日志。别的路径一律 404——对账要是还去拉 issue、评论、流程配置，
+ * 这一轮就会算没做完，测试跟着红。
  */
 function githubApi(state: GitHubState): typeof fetch {
   return async (input, init) => {
@@ -126,120 +102,21 @@ function githubApi(state: GitHubState): typeof fetch {
         permissions: {},
       });
     }
-    const since = url.searchParams.get('since');
-    const fresh = (x: unknown) =>
-      !since ||
-      typeof x !== 'object' ||
-      x === null ||
-      String((x as { updated_at?: unknown }).updated_at) >= since;
-    const base = `/repos/${SLUG}`;
-    if (url.pathname === base) return reply(200, { default_branch: 'main', full_name: SLUG, private: false });
-    if (url.pathname === `${base}/git/ref/heads/main`) {
-      return reply(200, { ref: 'refs/heads/main', object: { sha: state.head ?? HEAD_A, type: 'commit' } });
-    }
-    if (url.pathname === `${base}/contents/.fleet/flow.json`) {
-      if (state.flowDown) return reply(state.flowDown, { message: 'Server Error' });
-      if (url.searchParams.get('ref') !== (state.head ?? HEAD_A))
-        return reply(400, { message: '读的不是分支头' });
-      if (state.flowFile === undefined) return reply(404, { message: 'Not Found' });
-      return reply(200, {
-        type: 'file',
-        encoding: 'base64',
-        path: '.fleet/flow.json',
-        content: Buffer.from(state.flowFile, 'utf8').toString('base64'),
-      });
-    }
-    if (url.pathname.startsWith(`${base}/compare/`)) {
-      if (state.compareBehindBy === undefined) return reply(404, { message: 'no common ancestor' });
-      return reply(200, { ahead_by: 1, behind_by: state.compareBehindBy });
-    }
-    if (url.pathname === `${base}/issues`) {
-      const open = url.searchParams.get('state') === 'open';
-      return reply(
-        200,
-        state.issues.filter((i) => (open ? (i as { state?: unknown }).state === 'open' : fresh(i))),
-      );
-    }
-    const single = new RegExp(`^${base}/issues/(\\d+)$`).exec(url.pathname);
-    if (single) {
-      const found = state.issues.find((i) => (i as { number?: number }).number === Number(single[1]));
-      return found ? reply(200, found) : reply(404, { message: 'Not Found' });
-    }
-    // 拉起前一次 GraphQL 现读这张单挂在哪个里程碑、是不是母单子单、仓里还开着哪些里程碑（接活只派当前版本的独立单）
-    if (url.pathname === '/graphql' && init?.method === 'POST') {
-      const { variables } = JSON.parse(String(init.body)) as { variables: { number: number } };
-      const found = state.issues.find((i) => (i as { number?: unknown }).number === variables.number) as
-        | (ReturnType<typeof issue> & { labels?: string[]; parent?: number; subIssues?: number })
-        | undefined;
-      const open = state.milestones ?? [V1];
-      const milestones = { totalCount: open.length, nodes: open };
-      if (!found) {
-        return reply(200, {
-          data: { repository: { issueOrPullRequest: null, milestones } },
-          errors: [
-            {
-              type: 'NOT_FOUND',
-              message: `Could not resolve to an issue with the number of ${variables.number}.`,
-            },
-          ],
-        });
-      }
-      const labels = found.labels ?? [];
-      return reply(200, {
-        data: {
-          repository: {
-            issueOrPullRequest: {
-              __typename: 'Issue',
-              state: found.state.toUpperCase(),
-              stateReason: null,
-              author: { login: found.user.login },
-              milestone: found.milestone,
-              labels: { totalCount: labels.length, nodes: labels.map((name) => ({ name })) },
-              parent: found.parent ? { number: found.parent } : null,
-              subIssuesSummary: { total: found.subIssues ?? 0 },
-            },
-            milestones,
-          },
-        },
-      });
-    }
-    if (url.pathname === `${base}/issues/comments`) return reply(200, []);
-    if (url.pathname === `${base}/pulls`) return reply(200, []);
+    if (url.pathname === `/repos/${SLUG}/pulls`) return reply(200, state.pulls);
     if (url.pathname === '/app/hook/deliveries') return reply(200, []);
     return reply(404, { message: `假 GitHub 里没有 ${init?.method ?? 'GET'} ${url.pathname}` });
   };
 }
 
-/** 默认挂在当前版本 v1 上。 */
-function issue(number: number, minutes: number, milestone: { number: number; title: string } | null = V1) {
+function pull(number: number, minutes: number) {
   return {
     number,
-    node_id: `I_${number}`,
-    html_url: `https://github.test/${SLUG}/issues/${number}`,
-    title: `需求 ${number}`,
-    body: `第 ${number} 张的原话`,
     state: 'open',
-    user: founder,
-    created_at: at(minutes),
+    merged_at: null,
     updated_at: at(minutes),
-    milestone,
-  };
-}
-
-/** 记下拉起了哪些需求工作流；同一张已经在跑的回 already_running（和真 Temporal 一样按工作流编号去重）。 */
-function fakeRequirements(): { starts: RequirementStart[]; requirements: RequirementWorkflows } {
-  const starts: RequirementStart[] = [];
-  return {
-    starts,
-    requirements: {
-      async start(input) {
-        if (starts.some((s) => s.repo.id === input.repo.id && s.issueNumber === input.issueNumber)) {
-          return 'already_running';
-        }
-        starts.push(input);
-        return 'started';
-      },
-    },
+    user: founder,
+    head: { ref: `fleet/${number}-a`, sha: 'a'.repeat(40), repo: { full_name: SLUG } },
+    base: { ref: 'main', repo: { full_name: SLUG } },
   };
 }
 
@@ -254,19 +131,8 @@ beforeEach(async () => {
   await resetTestDb(t);
 });
 
-/** 受管的仓（自动派活开关一小时前打开）、白名单里的创始人、登记好的定时任务，加一个照 GitHub 回话的假服务。 */
-async function wiring(
-  state: GitHubState,
-  /** requirements：'real' = 真的经 Temporal 起工作流（后端的 createTemporalRequirementWorkflows，起 Fusion）；不给就是只记下的假的。 */
-  options: {
-    requirements?: RequirementWorkflows | 'real';
-    register?: boolean;
-    /** 换掉全组织默认（不给就读代码里带的 packages/core/flow.default.json）。 */
-    orgDefault?: () => Promise<Source>;
-    /** 测试用：引擎自己在跑哪个提交（不给就是真的 ownReleaseSha，测试进程里认不出，回 null）。 */
-    ownCommit?: () => string | null;
-  } = {},
-) {
+/** 受管的仓、白名单里的创始人、登记好的定时任务，加一个照 GitHub 回话的假服务。 */
+async function wiring(state: GitHubState, options: { register?: boolean } = {}) {
   const [repo] = await t.db
     .insert(repos)
     .values({
@@ -288,22 +154,16 @@ async function wiring(
     sleep: async () => {},
     env: {},
   });
-  const fake = fakeRequirements();
   const job = githubReconcileJob({
     db: t.db,
     gh,
     // 单子打标挂版本（#448）这里的用例不看它：没接判断题就是「没问成」，categoryPlan 不贴、只记没查成
     askIssueKind: async () => ({ judged: false, reason: 'unreachable', detail: '这个用例没接判断题' }),
-    ...(options.requirements === 'real' ? {} : { requirements: options.requirements ?? fake.requirements }),
-    ...(options.orgDefault ? { orgDefault: options.orgDefault } : {}),
-    ...(options.ownCommit ? { ownCommit: options.ownCommit } : {}),
-    // 关单对账（#241）按真钟每天北京 9:00 那一轮跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
-    closeSweepDue: () => false,
     // 单子打标挂版本（#448）按真钟每小时跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
     issueGroomDue: () => false,
     log: quiet,
   });
-  return { repoId: repo?.id ?? '', starts: fake.starts, job };
+  return { repoId: repo?.id ?? '', job };
 }
 
 const runsOf = async () =>
@@ -311,8 +171,10 @@ const runsOf = async () =>
     .filter((r) => r.job === GITHUB_RECONCILE_JOB.id)
     .sort((a, b) => a.id - b.id);
 const healthOf = async () => (await scheduleHealth(t.db)).find((h) => h.job.id === GITHUB_RECONCILE_JOB.id);
+const pullsOf = async (repoId: string) =>
+  (await t.db.select().from(pullRequests)).filter((r) => r.repoId === repoId);
 
-// 起工人、真起需求工作流，整包一起跑时一条用例能到 6–7 秒，超过默认的 5 秒（和「你好」工作流的用例同一个上限）。
+// 起工人、真跑一轮，整包一起跑时一条用例能到 6–7 秒，超过默认的 5 秒（和「你好」工作流的用例同一个上限）。
 describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout: 60_000 }, () => {
   const env = useEnv();
 
@@ -343,27 +205,17 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     return cause as ApplicationFailure;
   }
 
-  it('库里缺一条 issue：跑一轮补上任务行、经 Temporal 真起工作流（和 webhook 那条一样起 Fusion），记一行 ok；再跑一轮不重复建、不重复起', async () => {
-    const w = await wiring({ issues: [issue(41, -20)] }, { requirements: 'real' });
+  it('库里缺一个 PR：跑一轮由轮询补上镜像，记一行 ok；再跑一轮不重复', async () => {
+    const w = await wiring({ pulls: [pull(41, -20)] });
     const jobs = { githubReconcile: w.job };
-    const requirement = () =>
-      env()
-        .client.workflow.getHandle(requirementWorkflowId({ owner: OWNER, name: NAME }, 41))
-        .describe();
 
     const first = await runOnce(jobs);
     expect(first).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
-    const rows = (await t.db.select().from(tasks)).filter((r) => r.repoId === w.repoId);
-    expect(rows.map((r) => [r.issueNumber, r.title])).toEqual([[41, '需求 41']]);
-    const started = await requirement();
-    // 对账补漏（引擎这边重放投递）和 webhook（后端）用同一份拉起实现：起的一定是同一种，不会一边起 Fusion 一边起旧的
-    expect(started.type).toBe(WORKFLOW_TYPES.fusion);
+    expect((await pullsOf(w.repoId)).map((r) => [r.number, r.state])).toEqual([[41, 'open']]);
 
     const second = await runOnce(jobs);
     expect(second).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
-    expect((await t.db.select().from(tasks)).filter((r) => r.repoId === w.repoId)).toHaveLength(1);
-    // 同一个编号只有那一次执行：第二轮没再起
-    expect((await requirement()).runId).toBe(started.runId);
+    expect(await pullsOf(w.repoId)).toHaveLength(1);
 
     const runs = await runsOf();
     expect(runs.map((r) => [r.id, r.outcome, r.scanned, r.found])).toEqual([
@@ -373,8 +225,8 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     expect((await healthOf())?.status).toBe('ok');
   });
 
-  it('读不到 GitHub：这一轮记成 unscanned（不是 ok），定时任务页标「没扫到」，不建任务', async () => {
-    const w = await wiring({ issues: [issue(41, -20)], down: 500 });
+  it('读不到 GitHub：这一轮记成 unscanned（不是 ok），定时任务页标「没扫到」，不补任何镜像', async () => {
+    const w = await wiring({ pulls: [pull(41, -20)], down: 500 });
     const run = await runOnce({ githubReconcile: w.job });
     expect(run.outcome).toBe('unscanned');
     expect(run.why).toBeTruthy();
@@ -382,35 +234,21 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     expect(row).toMatchObject({ outcome: 'unscanned', scanned: 0 });
     expect(row?.why).toBeTruthy();
     expect((await healthOf())?.status).toBe('no-samples');
-    expect(await t.db.select().from(tasks)).toHaveLength(0);
+    expect(await pullsOf(w.repoId)).toHaveLength(0);
   });
 
-  it('GitHub 回的 issue 列表认不出：这一轮不记 ok，原因写进 schedule_runs', async () => {
-    const w = await wiring({ issues: [{ numero: 41, titulo: '认不出的形状' }] });
+  it('GitHub 回的 PR 列表认不出：这一轮不记 ok，原因写进 schedule_runs', async () => {
+    const w = await wiring({ pulls: [{ numero: 41, titulo: '认不出的形状' }] });
     const run = await runOnce({ githubReconcile: w.job });
     expect(run.outcome).not.toBe('ok');
     const [row] = await runsOf();
     expect(row?.outcome).toBe(run.outcome);
     expect(row?.why).toMatch(/poll/);
-    expect(await t.db.select().from(tasks)).toHaveLength(0);
-  });
-
-  it('拉起工作流时 Temporal 连不上：这一轮不记 ok（投递记成出错，等下一轮重放），不装作拉起了', async () => {
-    const unreachable: RequirementWorkflows = {
-      async start() {
-        throw new WorkflowUnavailableError('拉起工作流：Temporal 连不上或没回应');
-      },
-    };
-    const w = await wiring({ issues: [issue(41, -20)] }, { requirements: unreachable });
-    const run = await runOnce({ githubReconcile: w.job });
-    expect(run.outcome).not.toBe('ok');
-    const [row] = await runsOf();
-    expect(row?.outcome).toBe(run.outcome);
-    expect(row?.why).toMatch(/Temporal 连不上/);
+    expect(await pullsOf(w.repoId)).toHaveLength(0);
   });
 
   it('对账本身抛错（读库失败）：记成 failed、活动报 RECONCILE_FAILED，定时任务页标「没跑成」', async () => {
-    const w = await wiring({ issues: [] });
+    const w = await wiring({ pulls: [] });
     const failure = await failureOf({
       githubReconcile: (client, taskQueue) => ({
         ...w.job(client, taskQueue),
@@ -428,11 +266,11 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
   });
 
   it('记不上开始（定时任务没登记，schedule_runs 的外键不让写）：这一轮失败、不去对账，不装作跑过', async () => {
-    const w = await wiring({ issues: [issue(41, -20)] }, { register: false });
+    const w = await wiring({ pulls: [pull(41, -20)] }, { register: false });
     const failure = await failureOf({ githubReconcile: w.job });
     expect(failure.message).toBeTruthy();
     expect(await runsOf()).toHaveLength(0);
-    expect(await t.db.select().from(tasks)).toHaveLength(0);
+    expect(await pullsOf(w.repoId)).toHaveLength(0);
   });
 
   it('假端口的工人（没装对账）接到这一轮：明确报 JOB_NOT_CONFIGURED，不回一个空的 ok', async () => {
@@ -442,236 +280,17 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
   });
 });
 
-// 流程配置副本（0003 第 9 条）：每轮对账先读仓里默认分支头上的 .fleet/flow.json，合并校验后写进 repos 的 flow_* 列，
-// 接活拉起工作流前看它。不起 Temporal：直接跑一轮（拉起需求工作流用只记下的假的），库是 PGlite 上跑真迁移。
-describe('流程配置副本：每轮对账从仓里同步（真库、照 GitHub 回话的假服务）', () => {
-  const HEAD_B = 'b'.repeat(40);
-  const KEY = `flow-config:${SLUG}`;
-  const config = (o: Record<string, unknown>) => JSON.stringify({ formatVersion: 1, ...o });
-  const round = (w: Awaited<ReturnType<typeof wiring>>) =>
-    runGitHubReconcileJob(w.job({} as unknown as Client, 'fleet-test'));
-  const row = async () => {
-    const [r] = await t.db.select().from(repos);
-    if (!r) throw new Error('库里没有这个仓');
-    return r;
-  };
-  const alertOf = async (key: string) =>
-    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === key);
-
-  it('仓里没有 .fleet/flow.json：副本用全组织默认、标成 org_default，记下读的提交；给人看的 test_command 不动；单照常拉起', async () => {
-    const w = await wiring({ issues: [issue(41, -20)] });
-    expect(await round(w)).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
-    const r = await row();
-    expect(r).toMatchObject({
-      flowSource: 'org_default',
-      flowCommit: HEAD_A,
-      flowError: null,
-      flowUnread: null,
-      testCommand: 'pnpm check',
-    });
-    expect(r.flowSyncedAt).toBeInstanceOf(Date);
-    expect(r.flowConfig).toMatchObject({ formatVersion: 1, categoryProfiles: { 需求: 'default' } });
-    // 全组织默认里不放测试命令：这个仓的写码会话会停下说「项目没写测试命令」（real/flow-gate.ts）
-    expect(r.flowConfig).not.toHaveProperty('testCommand');
-    expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
-  });
-
-  it('仓里写了测试命令、后来改了：副本整份跟着变（测试命令、读的提交），给人看的 test_command 也改成一样的', async () => {
-    const state: GitHubState = { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) };
-    const w = await wiring(state);
-    await round(w);
-    expect(await row()).toMatchObject({
-      flowSource: 'project',
-      flowCommit: HEAD_A,
-      testCommand: 'pnpm test:changed',
-      flowConfig: expect.objectContaining({ testCommand: 'pnpm test:changed' }),
-    });
-    state.flowFile = config({ testCommand: 'pnpm test' });
-    state.head = HEAD_B;
-    await round(w);
-    expect(await row()).toMatchObject({
-      flowCommit: HEAD_B,
-      testCommand: 'pnpm test',
-      flowConfig: expect.objectContaining({ testCommand: 'pnpm test' }),
-    });
-  });
-
-  it('【失败】坏 JSON：这个项目停派、报一条提醒，单子建了行但不拉起（投递记成等着）；改好之后下一轮自动恢复、补拉起、撤掉提醒', async () => {
-    const state: GitHubState = { issues: [issue(41, -20)], flowFile: '{"formatVersion": 1,' };
-    const w = await wiring(state);
-    const first = await round(w);
-    // 轮询到这张单时接活说「等着」，这个仓这一轮没轮询完：不记 ok，原因里两样都写明
-    expect(first.outcome).not.toBe('ok');
-    expect(first.why).toContain(`流程配置 ${SLUG} 认不出、停派`);
-    expect(first.why).toContain('这个项目停派：流程配置认不出');
-    const r = await row();
-    expect(r.flowError).toMatch(/项目配置 \.fleet\/flow\.json：不是 JSON.*（提交 aaaaaaa）/);
-    expect(r.flowSyncedAt).toBeNull();
-    expect(await alertOf(KEY)).toMatchObject({
-      level: 'alert',
-      resolvedAt: null,
-      title: `${SLUG} 的流程配置认不出：这个项目停派`,
-    });
-    expect((await t.db.select().from(tasks)).map((x) => x.issueNumber)).toEqual([41]);
-    expect(w.starts).toEqual([]);
-    const waiting = (await t.db.select().from(githubEvents)).filter((e) => e.status === 'waiting');
-    expect(waiting.map((e) => e.reason)).toEqual([expect.stringContaining('这个项目停派：流程配置认不出')]);
-
-    // 仓里改好了：下一轮先同步副本，再重放等着的投递——这回拉起，提醒撤掉
-    state.flowFile = config({ testCommand: 'pnpm test:changed' });
-    await round(w);
-    expect(await row()).toMatchObject({ flowError: null, testCommand: 'pnpm test:changed' });
-    expect((await alertOf(KEY))?.resolvedAt).toBeInstanceOf(Date);
-    expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
-  });
-
-  it('版本错位：先正常同步过一轮，下一轮多了新字段、核实过配置比引擎新——不停派，副本留着上一轮同步成的样子，只报日报级提醒', async () => {
-    const OWN_SHA = 'f'.repeat(40);
-    const state: GitHubState = { issues: [issue(41, -20)], flowFile: config({ testCommand: 'pnpm check' }) };
-    const w = await wiring(state, { ownCommit: () => OWN_SHA });
-    // 第一轮：配置还是这版认得的样子，正常同步成
-    await round(w);
-    const synced = await row();
-    expect(synced).toMatchObject({ flowSource: 'project', flowError: null, testCommand: 'pnpm check' });
-    expect(synced.flowSyncedAt).toBeInstanceOf(Date);
-
-    // 第二轮：主线加了个这版还不认得的新字段，且 GitHub compare 核实过这份配置确实含着引擎自己在跑的 OWN_SHA
-    state.flowFile = config({ testCommand: 'pnpm check', 未来字段: 'x' });
-    state.compareBehindBy = 0;
-    state.issues.push(issue(42, -5));
-    const second = await round(w);
-    // 不算「找到问题」：这个仓不记进 found，新单子照常拉起
-    expect(second).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
-    expect(w.starts.map((s) => s.issueNumber)).toEqual([41, 42]);
-    // 副本原样留着上一轮同步成的（没有因为这版认不出的新字段就停派、清掉）
-    expect(await row()).toEqual(synced);
-    expect(await alertOf(KEY)).toMatchObject({
-      level: 'daily',
-      resolvedAt: null,
-      title: expect.stringContaining('比在跑的引擎新（多了 未来字段 字段）'),
-    });
-  });
-
-  it('【失败】读 .fleet/flow.json 时 GitHub 出错：记下没查成，副本一样不动（不当成没有这个文件）；这一轮记成没查全', async () => {
-    const state: GitHubState = { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) };
-    const w = await wiring(state);
-    await round(w);
-    const before = await row();
-    state.flowDown = 502;
-    delete state.flowFile; // 就算文件真没了，没查成也看不出来：不许写成「没有」
-    const run = await round(w);
-    expect(run.outcome).toBe('partial');
-    expect(run.why).toContain(`流程配置 ${SLUG} 没查成`);
-    const after = await row();
-    expect(after.flowUnread).toMatch(/502/);
-    const same = (x: typeof after) => ({ ...x, flowUnread: null, flowCheckedAt: null });
-    expect(same(after)).toEqual(same(before));
-    // 还在时限里：照样能派，不报提醒
-    expect(await alertOf(KEY)).toBeUndefined();
-  });
-
-  it('【失败】没查成、副本又已经超过 45 分钟没同步成：停派并报提醒；读成一次就撤掉', async () => {
-    const state: GitHubState = { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) };
-    const w = await wiring(state);
-    await round(w);
-    await t.db.update(repos).set({ flowSyncedAt: new Date(Date.now() - 50 * 60_000) });
-    state.flowDown = 502;
-    await round(w);
-    expect(await alertOf(KEY)).toMatchObject({
-      resolvedAt: null,
-      body: expect.stringMatching(/5\d 分钟没同步成.*最近一次没查成/),
-    });
-    delete state.flowDown;
-    await round(w);
-    expect((await alertOf(KEY))?.resolvedAt).toBeInstanceOf(Date);
-  });
-
-  it('【失败】全组织默认坏了：所有仓停派，只报一条全组织的提醒（不按仓各报一条）', async () => {
-    const w = await wiring(
-      { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) },
-      { orgDefault: async () => ({ kind: 'text', text: '{' }) },
-    );
-    // 这一轮查全了（ok），认不出算发现的问题；原因在提醒和副本里
-    expect(await round(w)).toMatchObject({ outcome: 'ok', found: 1 });
-    expect((await row()).flowError).toMatch(/^全组织默认：不是 JSON/);
-    expect(await alertOf('flow-config:org')).toMatchObject({
-      resolvedAt: null,
-      title: '全组织默认的流程配置认不出：所有项目停派',
-    });
-    expect(await alertOf(KEY)).toBeUndefined();
-  });
-});
-
-// 只派当前版本的单（0003 第 2、8 条）：对账补收、重放和 webhook 走同一道门、同一套判法，挂在哪由「引擎」机器人拉起前现读。
-describe('只派当前版本的独立单（母单、子单不派）：对账补收进来的也一样（真库、照 GitHub 回话的假服务）', () => {
-  const round = (w: Awaited<ReturnType<typeof wiring>>) =>
-    runGitHubReconcileJob(w.job({} as unknown as Client, 'fleet-test'));
-  const notes = async () =>
-    Object.fromEntries(
-      (await t.db.select().from(githubEvents))
-        .filter((e) => e.event === 'issues')
-        .map((e) => [(e.payload as { issue: { number: number } }).issue.number, e.note]),
-    );
-
-  it('【故意造出的失败】未排期的、挂在 v2 上的、v1 的母单和它的子单补收进来：建了任务行、不拉起，投递写明原因；v1 的独立单拉起', async () => {
-    const w = await wiring({
-      issues: [
-        issue(41, -20),
-        issue(42, -20, null),
-        issue(43, -20, V2),
-        { ...issue(44, -20), labels: ['需求', '母单'], subIssues: 1 },
-        { ...issue(45, -20), parent: 44 },
-      ],
-      milestones: [V1, V2],
-    });
-    await round(w);
-    const rows = (await t.db.select().from(tasks)).filter((r) => r.repoId === w.repoId);
-    expect(rows.map((r) => r.issueNumber).sort()).toEqual([41, 42, 43, 44, 45]);
-    expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
-    expect(await notes()).toMatchObject({
-      41: 'task=created, workflow=started',
-      42: 'task=created, workflow=unscheduled',
-      43: 'task=created, workflow=not_current_version',
-      44: 'task=created, workflow=mother_ticket',
-      45: 'task=created, workflow=sub_issue',
-    });
-  });
-
-  it('【故意造出的失败】读不到这张单挂在哪个版本、是不是母单子单（里程碑列表认不出）：不派，投递记成出错、写明没查成，这一轮不记 ok', async () => {
-    const w = await wiring({
-      issues: [issue(41, -20)],
-      // 只有「列还开着的里程碑」这一条回的形状不对：轮询、建任务行照常
-      milestones: [{ id: 1, name: '不是里程碑的形状' }] as unknown as (typeof V1)[],
-    });
-    const run = await round(w);
-    expect(run.outcome).not.toBe('ok');
-    expect(w.starts).toEqual([]);
-    expect((await t.db.select().from(tasks)).map((r) => [r.issueNumber, r.state])).toEqual([[41, 'queued']]);
-    const [event] = (await t.db.select().from(githubEvents)).filter((e) => e.event === 'issues');
-    expect(event).toMatchObject({
-      status: 'failed',
-      reason: expect.stringMatching(
-        /^没查成：读不到 example\/canary#41 挂在哪个版本、是不是母单子单（.+），这张单没派；对账重放时再判$/,
-      ),
-    });
-  });
-});
-
 describe('对账补漏一轮的记账（不起 Temporal）', () => {
   const NOW = new Date('2026-09-25T08:00:00.000Z');
 
   function deps(
     reconcile: GitHubReconcileJobDeps['reconcile'],
-    syncFlowConfigs: GitHubReconcileJobDeps['syncFlowConfigs'] = async () => ({ repos: [] }),
-    closeSweep: GitHubReconcileJobDeps['closeSweep'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
     issueGroom: GitHubReconcileJobDeps['issueGroom'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
   ) {
     const finished: { id: number; result: unknown }[] = [];
     const logs: string[] = [];
     const d: GitHubReconcileJobDeps = {
-      syncFlowConfigs,
       reconcile,
-      closeSweep,
       issueGroom,
       runs: {
         async start() {
@@ -723,65 +342,6 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     await expect(runGitHubReconcileJob(d)).rejects.toThrow('库连不上');
   });
 
-  it('先同步流程配置副本、再对账（同一轮里重放等着的投递看到的是新副本）', async () => {
-    const order: string[] = [];
-    const { d } = deps(
-      async () => {
-        order.push('reconcile');
-        return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
-      },
-      async () => {
-        order.push('flow');
-        return { repos: [{ repo: 'example/canary', outcome: 'synced', source: 'project', blocked: false }] };
-      },
-    );
-    expect(await runGitHubReconcileJob(d)).toEqual({ runId: 7, outcome: 'ok', scanned: 1, found: 0 });
-    expect(order).toEqual(['flow', 'reconcile']);
-  });
-
-  it('【失败】有仓的流程配置没查成：这一轮记成 partial（没查全），原因写明；认不出的算发现的问题', async () => {
-    const { d, finished } = deps(
-      async () => ({ outcome: 'ok', scanned: 2, found: 0, steps: [] }),
-      async () => ({
-        repos: [
-          { repo: 'example/canary', outcome: 'unread', why: 'GitHub 回 502', blocked: false },
-          {
-            repo: 'example/other',
-            outcome: 'invalid',
-            why: '项目配置 .fleet/flow.json：不是 JSON',
-            blocked: true,
-          },
-        ],
-      }),
-    );
-    const run = await runGitHubReconcileJob(d);
-    expect(run).toMatchObject({ outcome: 'partial', scanned: 2, found: 1 });
-    expect(run.why).toContain('流程配置 example/canary 没查成（GitHub 回 502）');
-    expect(run.why).toContain('流程配置 example/other 认不出、停派（项目配置 .fleet/flow.json：不是 JSON）');
-    expect(finished[0]?.result).toMatchObject({ outcome: 'partial', found: 1 });
-  });
-
-  it('【失败】流程配置整步没跑成（读仓列表出错）：不挡对账本身，这一轮记成 partial 写明原因', async () => {
-    let reconciled = false;
-    const { d } = deps(
-      async () => {
-        reconciled = true;
-        return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
-      },
-      async () => {
-        throw new Error('读 repos 表超时');
-      },
-    );
-    const run = await runGitHubReconcileJob(d);
-    expect(reconciled).toBe(true);
-    expect(run).toMatchObject({ outcome: 'partial', why: '流程配置没同步成：读 repos 表超时' });
-  });
-
-  it('流程配置全同步成、没问题：这一轮的结局照对账的原样', () => {
-    const r = { outcome: 'unscanned' as const, scanned: 0, found: 0, why: '没有受管的仓', steps: [] };
-    expect(withFlowSync(r, { repos: [] })).toBe(r);
-  });
-
   describe('单子打标挂版本这一步并进这一轮的结局（#448）', () => {
     const ok = { outcome: 'ok' as const, scanned: 1, found: 2, steps: [] };
 
@@ -810,57 +370,6 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     it('整步没跑成：outcome 降成 partial，原因写明是单子打标挂版本没跑成', () => {
       const got = withIssueGroom(ok, { failed: '读 repos 表超时' });
       expect(got).toMatchObject({ outcome: 'partial', why: expect.stringContaining('读 repos 表超时') });
-    });
-  });
-
-  describe('关单对账（#241）：一天一次，北京时间 9:00 起的那一轮', () => {
-    const ok = async () => ({ outcome: 'ok' as const, scanned: 1, found: 0, steps: [] });
-    const at = (iso: string, d: GitHubReconcileJobDeps) => ({ ...d, now: () => new Date(iso) });
-
-    it('到点的那一轮在对账之后跑，新留的言算处理了的；别的轮不跑', async () => {
-      const order: string[] = [];
-      const { d } = deps(
-        async () => {
-          order.push('reconcile');
-          return ok();
-        },
-        undefined,
-        async () => {
-          order.push('close');
-          return { scanned: 1, found: 2, unchecked: [] };
-        },
-      );
-      expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toEqual({
-        runId: 7,
-        outcome: 'ok',
-        scanned: 1,
-        found: 2,
-      });
-      expect(order).toEqual(['reconcile', 'close']);
-      order.length = 0;
-      await runGitHubReconcileJob(at('2026-09-28T01:15:04Z', d));
-      expect(order).toEqual(['reconcile']);
-    });
-
-    it('【故意造出的失败】关单对账整步没跑成：不挡对账本身，这一轮记成 partial 写明原因（不当成查过、都齐了）', async () => {
-      const { d } = deps(ok, undefined, async () => {
-        throw new Error('读 repos 表超时');
-      });
-      expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toMatchObject({
-        outcome: 'partial',
-        why: '关单对账没跑成：读 repos 表超时',
-      });
-    });
-
-    it('【故意造出的失败】有仓没查成、留言没留成：这一轮记成 partial，前 3 条写进原因、其余写明还有几条', async () => {
-      const lines = [1, 2, 3, 4].map((i) => `关单对账 example/canary#${i} 留言没留成（GitHub 回 502）`);
-      const { d } = deps(ok, undefined, async () => ({ scanned: 1, found: 0, unchecked: lines }));
-      const run = await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d));
-      expect(run.outcome).toBe('partial');
-      expect(run.why?.split('；')).toEqual([
-        ...lines.slice(0, 3),
-        '关单对账另有 1 条没查成、没写成（看引擎日志）',
-      ]);
     });
   });
 });
@@ -902,6 +411,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     expect(await ensureEngineSchedules(fresh.client, 'fleet')).toEqual({
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
       [ROUTE_PROBE_SCHEDULE_ID]: 'created',
+      [QUOTA_READ_SCHEDULE_ID]: 'created',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
       [CANARY_SCHEDULE_ID]: 'created',
       [WATCHDOG_SCHEDULE_ID]: 'created',
@@ -911,6 +421,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
       [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
+      [QUOTA_READ_SCHEDULE_ID]: 'updated',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
       [CANARY_SCHEDULE_ID]: 'updated',
       [WATCHDOG_SCHEDULE_ID]: 'updated',
@@ -921,6 +432,8 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       `update:${GITHUB_RECONCILE_SCHEDULE_ID}`,
       `create:${ROUTE_PROBE_SCHEDULE_ID}`,
       `update:${ROUTE_PROBE_SCHEDULE_ID}`,
+      `create:${QUOTA_READ_SCHEDULE_ID}`,
+      `update:${QUOTA_READ_SCHEDULE_ID}`,
       `create:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `update:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `create:${CANARY_SCHEDULE_ID}`,
@@ -987,6 +500,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       expect(await ensureEngineSchedules(client, 'fleet-a')).toEqual({
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
         [ROUTE_PROBE_SCHEDULE_ID]: 'created',
+        [QUOTA_READ_SCHEDULE_ID]: 'created',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
         [CANARY_SCHEDULE_ID]: 'created',
         [WATCHDOG_SCHEDULE_ID]: 'created',
@@ -996,6 +510,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
         [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
+        [QUOTA_READ_SCHEDULE_ID]: 'updated',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
         [CANARY_SCHEDULE_ID]: 'updated',
         [WATCHDOG_SCHEDULE_ID]: 'updated',
@@ -1093,27 +608,43 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
   });
 });
 
-describe('关单对账的提醒：日报级，不算「要你拍」（#445）', () => {
-  it('【故意造出的失败】closeSweepJob 报的提醒记成 daily，不是 decision；正文原样带着调用方给的单号', async () => {
-    const w = { db: t.db } as unknown as GitHubReconcileWiring;
-    const deps = closeSweepJob(
-      w,
-      async () => [],
-      quiet,
-      () => new Date(),
+describe('关单对账 #654 删了以后，它留在库里的提醒一次性撤掉', () => {
+  const repo = { owner: 'example', name: 'canary' };
+  const alert = (dedupeKey: string) => ({
+    dedupeKey,
+    level: 'daily' as const,
+    taskId: null,
+    title: '提醒',
+    body: '正文',
+    link: 'https://github.com/example/canary/issues',
+  });
+
+  it('撤 close-sweep:<仓>:<种类> 四种；别的提醒不动；再跑一遍不报错、撤 0 条', async () => {
+    const mine = ['due', 'mother', 'merged', 'no-result'].map((k) => `close-sweep:example/canary:${k}`);
+    const other = 'close-sweep:example/other-repo:due';
+    for (const key of [...mine, other, 'something-else']) await upsertAlert(t.db, alert(key));
+    const now = () => new Date('2026-10-03T00:00:00Z');
+    expect(await retireCloseSweepAlerts({ db: t.db }, [repo], now)).toBe(4);
+    const rows = await t.db.select().from(notifications);
+    for (const key of mine) {
+      const row = rows.find((n) => n.dedupeKey === key);
+      expect(row?.resolvedAt, key).not.toBeNull();
+      expect(row?.body).toContain('已撤：关单对账已删（#654）');
+    }
+    // 没列进来的仓、别的提醒不碰
+    expect(rows.find((n) => n.dedupeKey === other)?.resolvedAt).toBeNull();
+    expect(rows.find((n) => n.dedupeKey === 'something-else')?.resolvedAt).toBeNull();
+    expect(await retireCloseSweepAlerts({ db: t.db }, [repo], now)).toBe(0);
+  });
+
+  it('【故意造出的失败】库连不上：原样抛出，不回 0 冒充「没有要撤的」', async () => {
+    const broken = {
+      transaction: async () => {
+        throw new Error('连不上库');
+      },
+    } as unknown as typeof t.db;
+    await expect(retireCloseSweepAlerts({ db: broken }, [repo], () => new Date())).rejects.toThrow(
+      '连不上库',
     );
-    const body =
-      '主线上有它们的结果，也没有开着的 PR 还引用它们：确认做完了就 pnpm issue:close <单号>。\n\n- #12 登录：specs/12-登录/结果.md';
-    await deps.alert(
-      'close-sweep:example/canary:due',
-      'example/canary：1 张单看着做完了没关',
-      body,
-      'https://github.com/example/canary/issues',
-    );
-    const row = (await t.db.select().from(notifications)).find(
-      (n) => n.dedupeKey === 'close-sweep:example/canary:due',
-    );
-    expect(row?.level).toBe('daily');
-    expect(row?.body).toContain('#12');
   });
 });

@@ -11,6 +11,11 @@
 DDGS_HAVE=""    # ddgs_version 读到的版本号
 CLI_TOOL_BAD="" # ddgs_version 没读成、ddgs_pinned 对不上时的原因
 
+# ddgs version 最多等几秒；到点叫停（124），不理叫停的再过几秒强杀（137）。做成变量是为了让测试注入小值
+# （测试里跑一次要真等满，见 cli-tools.test.sh；生产侧（france.sh）不设，按这两个默认值）。
+CLI_TOOLS_TIMEOUT=${CLI_TOOLS_TIMEOUT:-10}
+CLI_TOOLS_KILL_AFTER=${CLI_TOOLS_KILL_AFTER:-5}
+
 # 和 fleet-agent-scope 给会话的默认 PATH 一样：系统目录在前，他自己写得动的 ~/.local/bin 接在最后
 # （放在前面，他放个同名的 python3、timeout 就能顶掉系统的）
 tool_path() { printf '/usr/local/bin:/usr/bin:/bin:%s/.local/bin' "$1"; } # 家目录
@@ -39,7 +44,7 @@ ddgs_version() { # 用户
     return 1
   fi
   (cd -- "$home" && runuser -u "$u" -- env -i HOME="$home" USER="$u" LOGNAME="$u" PATH="$(tool_path "$home")" \
-    LANG=C.UTF-8 /usr/bin/setsid -w /usr/bin/timeout -k 5 10 ddgs version </dev/null >"$probe" 2>&1) || rc=$?
+    LANG=C.UTF-8 /usr/bin/setsid -w /usr/bin/timeout -k "$CLI_TOOLS_KILL_AFTER" "$CLI_TOOLS_TIMEOUT" ddgs version </dev/null >"$probe" 2>&1) || rc=$?
   out=$(<"$probe")
   rm -f -- "$probe"
   if ((rc == 127)); then
@@ -47,7 +52,7 @@ ddgs_version() { # 用户
     return 1
   fi
   if ((rc == 124 || rc == 137)); then
-    CLI_TOOL_BAD="ddgs version 卡住，被 timeout 叫停（退出码 $rc：124＝到 10 秒叫停，137＝不理叫停、再过 5 秒被强杀）"
+    CLI_TOOL_BAD="ddgs version 卡住，被 timeout 叫停（退出码 $rc：124＝到 $CLI_TOOLS_TIMEOUT 秒叫停，137＝不理叫停、再过 $CLI_TOOLS_KILL_AFTER 秒被强杀）"
     return 1
   fi
   if ((rc != 0)); then

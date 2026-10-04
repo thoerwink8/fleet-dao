@@ -1,30 +1,40 @@
-// 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒现算处理状态要的事实（跟进单、认领、挂钩的 PR、静默），
-// 挂跟进单、建和撤静默。判法在 @fleet-dao/core 的 alert-work.ts；把行拼成 core 的样子在 @fleet-dao/api 的 alert-facts.ts。
+// 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒现算处理状态要的事实（跟进单、挂钩的 PR、静默），
+// 挂跟进单、建和撤静默。判法在 @fleet-dao/core 的 alert-work.ts；把行拼成 core 的样子在 @fleet-dao/api 的 alert-work.ts。
 // 改这里之前必须知道：
 // - 挂跟进单两种写法：if_absent（原「提醒派单」开的小单专用，只在没有时写，不覆盖人挂的）、replace（原帅位
 //   `alert claim --issue` 专用，换单记操作记录：原来是哪张、为什么换）。两条调用方都在 #445 删了，函数留着给以后
 //   要挂跟进单的功能用；同一事务里写操作记录。
 // - 静默的到期一律按库的 now() 算（ends_at = now() + 分钟数），不拿各机器的钟；最长 7 天由表约束钉死。
 // - 读不到就抛（连不上库、语句出错），不回空：外壳把它当「没查成」，不当「没人在修」。
+// - 认领账（issue_claims）2026-10-03 起整张删掉（#556，创始人回「选 1」）：这里不再读它、也没有 ClaimRow 了。
 import { and, asc, eq, getTableColumns, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
   alertSilences,
   alertWork,
   auditLog,
-  issueClaims,
   notifications,
   pullRequests,
   repos,
   tasks,
 } from '../schema/index.ts';
 import type { AlertRow } from './alerts.ts';
-import { readDbNow } from './seat.ts';
 
 export type AlertWorkRow = typeof alertWork.$inferSelect & { owner: string; name: string };
 export type AlertSilenceRow = typeof alertSilences.$inferSelect;
 export type PullRequestRefRow = typeof pullRequests.$inferSelect & { owner: string; name: string };
-export type ClaimRow = typeof issueClaims.$inferSelect;
+
+/** 库的 now()，毫秒数（两种驱动都读成数字）。 */
+const nowMs = sql<number>`floor(extract(epoch from now()) * 1000)::float8`.mapWith(Number);
+/** 只有一行的表：读库的 now() 用。 */
+const ONE_ROW = sql`(values (1)) as one (x)`;
+
+/** 库的 now()。 */
+export async function readDbNow(db: Db): Promise<Date> {
+  const [row] = await db.select({ now: nowMs }).from(ONE_ROW);
+  if (!row) throw new Error('读库的时钟时连一行都没回（select 一行常量也没回来）');
+  return new Date(row.now);
+}
 
 /** 一批提醒现算处理状态要的全部行（按库的 now 读的）。 */
 export interface AlertWorkRaw {
@@ -33,9 +43,7 @@ export interface AlertWorkRaw {
   /** 提醒挂的任务对应的单。 */
   tasks: { id: string; repoId: string; owner: string; name: string; issueNumber: number }[];
   work: AlertWorkRow[];
-  /** 跟进单上的认领（活着的、结束了的都给）。 */
-  claims: ClaimRow[];
-  /** 挂钩的 PR：正文「修提醒」栏写了这批提醒的键或编号、正文挂了跟进单、跟进单的认领登记过的。 */
+  /** 挂钩的 PR：正文「修提醒」栏写了这批提醒的键或编号、正文挂了跟进单。 */
   prs: PullRequestRefRow[];
   /** 还没提前撤、没到期的静默（全表里的；对不对得上由 core 判）。 */
   silences: AlertSilenceRow[];
@@ -75,7 +83,7 @@ export async function readAlertWork(db: Db, notificationIds: readonly string[]):
   if (notificationIds.length > 500)
     throw new Error(`一次最多看 500 条提醒，给了 ${notificationIds.length} 条`);
   const now = await readDbNow(db);
-  const empty: AlertWorkRaw = { now, alerts: [], tasks: [], work: [], claims: [], prs: [], silences: [] };
+  const empty: AlertWorkRaw = { now, alerts: [], tasks: [], work: [], prs: [], silences: [] };
   const ids = [...new Set(notificationIds)].filter((id) => UUID.test(id));
   if (ids.length === 0) return empty;
   const alerts = await db
@@ -118,24 +126,10 @@ export async function readAlertWork(db: Db, notificationIds: readonly string[]):
     if (issue) workIssues.set(`${issue.repoId}#${issue.issueNumber}`, issue);
   }
   const issueList = [...workIssues.values()];
-  const claims =
-    issueList.length === 0
-      ? []
-      : await db
-          .select()
-          .from(issueClaims)
-          .where(
-            or(
-              ...issueList.map((i) =>
-                and(eq(issueClaims.repoId, i.repoId), eq(issueClaims.issueNumber, i.issueNumber)),
-              ),
-            ),
-          );
 
   const refs = [...new Set(alerts.flatMap((a) => [a.dedupeKey, a.id]))];
   const byRepo = new Map<string, Set<number>>();
   for (const i of issueList) byRepo.set(i.repoId, (byRepo.get(i.repoId) ?? new Set()).add(i.issueNumber));
-  const claimPrs = claims.flatMap((c) => c.prNumbers.map((n) => ({ repoId: c.repoId, number: n })));
   const prConditions = [
     sql`${pullRequests.alertRefs} && ${sql`array[${sql.join(
       refs.map((r) => sql`${r}`),
@@ -148,7 +142,6 @@ export async function readAlertWork(db: Db, notificationIds: readonly string[]):
           sql`, `,
         )}]::integer[]`})`,
     ),
-    ...claimPrs.map((p) => and(eq(pullRequests.repoId, p.repoId), eq(pullRequests.number, p.number))),
   ];
   const prs = await db
     .select({ ...getTableColumns(pullRequests), owner: repos.owner, name: repos.name })
@@ -161,7 +154,7 @@ export async function readAlertWork(db: Db, notificationIds: readonly string[]):
     .from(alertSilences)
     .where(and(isNull(alertSilences.expiredAt), gt(alertSilences.endsAt, sql`now()`)))
     .orderBy(asc(alertSilences.createdAt));
-  return { now, alerts, tasks: taskRows, work, claims, prs, silences };
+  return { now, alerts, tasks: taskRows, work, prs, silences };
 }
 
 export interface AuditWho {

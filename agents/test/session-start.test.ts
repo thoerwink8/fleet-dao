@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -48,11 +49,22 @@ interface HookLib {
     now?: number;
   }): string[];
   checkTemporary(cwd: string, git: Git, now?: number): string[];
+  checkDirectives(cwd: string, git: Git): string[];
   sweepWorktrees(cwd: string, git: Git, now?: number): string[];
   beijingToday(now?: number): string;
   render(lines: string[]): string;
   pickCwd(input: unknown): string;
+  AFTER_MERGE_MS: number;
+  afterMergeRunner(timeoutMs?: number): AfterMergeRun;
+  checkAfterMerge(o: {
+    cwd: string;
+    git: Git;
+    run: AfterMergeRun;
+    fetch: Fetch | null;
+    mirror?: string | null;
+  }): string[];
 }
+type AfterMergeRun = (script: string, repo: string) => Result;
 
 const HOOKS = fileURLToPath(new URL('../hooks/', import.meta.url));
 const HOOK = join(HOOKS, 'session-start.mjs');
@@ -120,6 +132,20 @@ function fakeSync(result: Partial<Result> = {}) {
 const git = hook.gitRunner();
 /** 每条都要起十几次 git（建仓、推、取），Windows 上一条要几秒 */
 const SLOW = { timeout: 120_000 };
+
+/** 一个只有本地提交的仓：files 全部提交（untracked 里的不提交） */
+function repo(files: Record<string, string>, untracked: Record<string, string> = {}) {
+  const dir = temp('tmp-repo');
+  g(dir, 'init', '-q', '-b', 'main');
+  for (const [name, text] of Object.entries({ 'README.md': '# 仓\n', ...files })) {
+    mkdirSync(join(dir, name, '..'), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  g(dir, 'add', '-A');
+  g(dir, 'commit', '-q', '-m', 'init');
+  for (const [name, text] of Object.entries(untracked)) writeFileSync(join(dir, name), text);
+  return dir;
+}
 
 describe('会话所在的仓（原来的开场核规矩）', SLOW, () => {
   it('不是 git 仓：不出声', () => {
@@ -409,20 +435,6 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     '| 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |\n|---|---|---|---|---|\n';
   /** 北京时间 2026-10-06 上午十点 */
   const NOW = Date.parse('2026-10-06T02:00:00Z');
-
-  /** 一个只有本地提交的仓：files 全部提交（untracked 里的不提交） */
-  function repo(files: Record<string, string>, untracked: Record<string, string> = {}) {
-    const dir = temp('tmp-adj');
-    g(dir, 'init', '-q', '-b', 'main');
-    for (const [name, text] of Object.entries({ 'README.md': '# 仓\n', ...files })) {
-      mkdirSync(join(dir, name, '..'), { recursive: true });
-      writeFileSync(join(dir, name), text);
-    }
-    g(dir, 'add', '-A');
-    g(dir, 'commit', '-q', '-m', 'init');
-    for (const [name, text] of Object.entries(untracked)) writeFileSync(join(dir, name), text);
-    return dir;
-  }
   const plan = (rows: string, before = '') =>
     `# 计划\n\n## 生效中的临时调整\n\n${before}${HEAD}${rows}\n## 版本\n\n- 交付 3\n`;
   const row = (...cells: string[]) => `| ${cells.join(' | ')} |\n`;
@@ -440,25 +452,25 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
   });
 
   it('表在、都没到复查日期：不出声（表前有说明、表是空的也一样）', () => {
-    const dir = repo({ 'docs/plan.md': plan(subagent, '撤回就删行。\n\n') });
+    const dir = repo({ 'docs/PROGRESS.md': plan(subagent, '撤回就删行。\n\n') });
     expect(hook.checkTemporary(dir, git, Date.parse('2026-10-03T02:00:00Z'))).toEqual([]);
-    expect(hook.checkTemporary(repo({ 'docs/plan.md': plan('') }), git, NOW)).toEqual([]);
+    expect(hook.checkTemporary(repo({ 'docs/PROGRESS.md': plan('') }), git, NOW)).toEqual([]);
   });
 
   it('到了最迟复查日期（含今天）：一行列出来，提醒照读法②问创始人', () => {
     const today = row('停法国池', '机器坏了', '创始人 2026-10-01「先停」', '机器修好', '2026-10-06');
     const later = row('只开一条路由', '额度紧', '创始人 2026-10-01「先这样」', '额度恢复', '2026-10-20');
-    const dir = repo({ 'docs/plan.md': plan(subagent + today + later) });
+    const dir = repo({ 'docs/PROGRESS.md': plan(subagent + today + later) });
     const lines = hook.checkTemporary(join(dir, 'docs'), git, NOW);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/plan.md，今天 2026-10-06）');
+    expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/PROGRESS.md，今天 2026-10-06）');
     expect(lines[0]).toContain('不开子代理（最迟 2026-10-05）；停法国池（最迟 2026-10-06）');
     expect(lines[0]).toContain('读法②问创始人');
     expect(lines[0]).not.toContain('只开一条路由');
   });
 
   it('北京时间过了零点就算到期，不按 UTC 晚一天', () => {
-    const dir = repo({ 'docs/plan.md': plan(subagent) });
+    const dir = repo({ 'docs/PROGRESS.md': plan(subagent) });
     expect(hook.checkTemporary(dir, git, Date.parse('2026-10-04T17:00:00Z'))[0]).toMatch(
       /到了最迟复查日期 1 条/,
     );
@@ -481,9 +493,9 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
       row('甲', '额度', '创始人 2026-09-28', '额度恢复', '下周五') +
       row('乙', '额度', '创始人 2026-09-28', '额度恢复', '2026-02-30') +
       row('丙', '额度', '创始人 2026-09-28', '额度恢复', '10-05');
-    const lines = hook.checkTemporary(repo({ 'docs/plan.md': plan(rows) }), git, NOW);
+    const lines = hook.checkTemporary(repo({ 'docs/PROGRESS.md': plan(rows) }), git, NOW);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('临时调整表有 3 行最迟复查日期认不出（docs/plan.md）');
+    expect(lines[0]).toContain('临时调整表有 3 行最迟复查日期认不出（docs/PROGRESS.md）');
     expect(lines[0]).toContain('「甲」的「下周五」');
     expect(lines[0]).toContain('「乙」的「2026-02-30」');
     expect(lines[0]).toContain('「丙」的「10-05」');
@@ -491,17 +503,17 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
 
   it('【故意造出的失败】有标题、表认不出：没有表格、没有分隔行、表头不是五列，都明说没查成', () => {
     const none = repo({
-      'docs/plan.md': '## 生效中的临时调整\n\n（还没有）\n\n## 版本\n| a | b |\n|---|---|\n',
+      'docs/PROGRESS.md': '## 生效中的临时调整\n\n（还没有）\n\n## 版本\n| a | b |\n|---|---|\n',
     });
     expect(hook.checkTemporary(none, git, NOW)).toEqual([
-      '临时调整表没查成（docs/plan.md）：标题下面没有表格。',
+      '临时调整表没查成（docs/PROGRESS.md）：标题下面没有表格。',
     ]);
-    const noSep = repo({ 'docs/plan.md': `## 生效中的临时调整\n\n${HEAD.split('\n')[0]}\n${subagent}` });
+    const noSep = repo({ 'docs/PROGRESS.md': `## 生效中的临时调整\n\n${HEAD.split('\n')[0]}\n${subagent}` });
     expect(hook.checkTemporary(noSep, git, NOW)[0]).toMatch(
-      /临时调整表没查成（docs\/plan\.md）：第 3 行的表头下面没有 \|---\| 分隔行/,
+      /临时调整表没查成（docs\/PROGRESS\.md）：第 3 行的表头下面没有 \|---\| 分隔行/,
     );
     const fourCols = repo({
-      'docs/plan.md': '## 生效中的临时调整\n| 内容 | 为什么 | 谁拍的 | 复查 |\n|---|---|---|---|\n',
+      'docs/PROGRESS.md': '## 生效中的临时调整\n| 内容 | 为什么 | 谁拍的 | 复查 |\n|---|---|---|---|\n',
     });
     expect(hook.checkTemporary(fourCols, git, NOW)[0]).toMatch(
       /临时调整表没查成.*表头是「内容｜为什么｜谁拍的｜复查」，要五列/,
@@ -509,16 +521,16 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
   });
 
   it('没有这张表不出声：没提这个标题、只在句子里提到、只在没跟踪的文件里有、不是 git 仓', () => {
-    expect(hook.checkTemporary(repo({ 'docs/plan.md': '# 计划\n' }), git, NOW)).toEqual([]);
+    expect(hook.checkTemporary(repo({ 'docs/PROGRESS.md': '# 计划\n' }), git, NOW)).toEqual([]);
     const inline = repo({ 'AGENTS.md': '登进「## 生效中的临时调整」表\n' }, { 'scratch.md': plan(subagent) });
     expect(hook.checkTemporary(inline, git, NOW)).toEqual([]);
     expect(hook.checkTemporary(temp('plain'), git, NOW)).toEqual([]);
   });
 
   it('中文路径照样认得出；一个仓里有两张表要说并成一张', () => {
-    const dir = repo({ 'specs/12-额度/需求.md': plan(subagent), 'docs/plan.md': plan('') });
+    const dir = repo({ 'specs/12-额度/需求.md': plan(subagent), 'docs/PROGRESS.md': plan('') });
     const lines = hook.checkTemporary(dir, git, NOW);
-    expect(lines[0]).toMatch(/临时调整表不止一张（.*docs\/plan\.md:3.*specs\/12-额度\/需求\.md:3.*）/);
+    expect(lines[0]).toMatch(/临时调整表不止一张（.*docs\/PROGRESS\.md:3.*specs\/12-额度\/需求\.md:3.*）/);
     expect(lines[1]).toContain('临时调整到了最迟复查日期 1 条（specs/12-额度/需求.md:3');
   });
 
@@ -543,20 +555,58 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     ]);
     const grepGarbled: Git = (cwd, args) =>
       args[0] === 'grep'
-        ? { status: 0, stdout: 'docs/plan.md:3:## 生效中的临时调整\n', stderr: '' }
+        ? { status: 0, stdout: 'docs/PROGRESS.md:3:## 生效中的临时调整\n', stderr: '' }
         : git(cwd, args);
     expect(hook.checkTemporary(dir, grepGarbled, NOW)[0]).toMatch(/临时调整表没查成：git grep 的输出认不出/);
   });
 
   it('开会话时这几行进上下文，排在同步那一句前面', () => {
     const w = world();
-    writeFileSync(join(w.work, 'plan.md'), plan(subagent));
+    writeFileSync(join(w.work, 'PROGRESS.md'), plan(subagent));
     g(w.work, 'add', '-A');
-    g(w.work, 'commit', '-q', '-m', 'plan');
+    g(w.work, 'commit', '-q', '-m', 'progress');
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
     const lines = hook.sessionStart({ cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW });
-    expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（plan\.md/);
+    expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（PROGRESS\.md/);
     expect(lines.at(-1)).toMatch(/^规矩同步/);
+  });
+});
+
+describe('会话所在仓的「创始人引导（待处理）」清单', SLOW, () => {
+  const head = '# 进度\n\n## 创始人引导（待处理）\n\n';
+  const tail = '\n## 别的节\n';
+
+  it('有没处理完的引导：一行报几条，提醒办完标已处理或删掉', () => {
+    const text = `${head}- 04:42 「坏的要删」\n- 05:33 「删库表选 1」\n${tail}`;
+    const dir = repo({ 'docs/PROGRESS.md': text });
+    const lines = hook.checkDirectives(dir, git);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('创始人引导还有 2 条没处理');
+    expect(lines[0]).toContain('坏的要删');
+    expect(lines[0]).toContain('删库表选 1');
+  });
+
+  it('都标了「已处理」：不出声', () => {
+    const text = `${head}- 04:42「坏的要删」已处理\n${tail}`;
+    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git)).toEqual([]);
+  });
+
+  it('没有这一节、不是 git 仓：都不出声', () => {
+    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': '# 进度\n\n## 版本\n' }), git)).toEqual([]);
+  });
+
+  it('【故意造出失败】把待处理那条标成「已处理」之后就不再报——断言它真读了内容，不是恒返回空', () => {
+    const pending = repo({ 'docs/PROGRESS.md': `${head}- 04:42「坏的要删」\n${tail}` });
+    const done = repo({ 'docs/PROGRESS.md': `${head}- 04:42「坏的要删」已处理\n${tail}` });
+    expect(hook.checkDirectives(pending, git)).toHaveLength(1);
+    expect(hook.checkDirectives(done, git)).toEqual([]);
+  });
+
+  it('【故意造出的失败】git 跑不起来：明说没查成，不当成没事', () => {
+    const dead: Git = () => ({ status: 3221225781, stdout: '', stderr: '' });
+    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': head }), dead)[0]).toMatch(
+      /创始人引导待处理清单没查成/,
+    );
   });
 });
 
@@ -639,5 +689,171 @@ describe('刚动过的树不碰（可能有人正在里面干活）', SLOW, () =
     const later = hook.sweepWorktrees(w.work, git, Date.now() + 31 * 60_000);
     expect(existsSync(dir)).toBe(false);
     expect(later.join('\n')).toMatch(/清掉了 1 棵/);
+  });
+});
+
+// 第 4 件：合并后待补审（先合后审，创始人 2026-10-03「1+2+3」第 3 条）。只在 fleet-dao 的检出里查；查的是
+// discuss 技能的 second-opinion.mjs --after-merge-pending --json，硬超时；超时、网络不通、输出认不出都明说没查成，不当成「没有」。
+describe('合并后待补审：只在 fleet-dao 里提醒，没查成不当成没有', SLOW, () => {
+  const SO = fileURLToPath(new URL('../skills/discuss/scripts/second-opinion.mjs', import.meta.url));
+  const fetched: Fetch = { common: null, ok: true, why: '' };
+  /** 一个 origin 指向 fleet-dao 的检出（不取远端；origin/main 指到本地的 HEAD） */
+  function fleetRepo(): string {
+    const dir = repo({});
+    g(dir, 'remote', 'add', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    g(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    return dir;
+  }
+  function fakeRun(result: Partial<Result>) {
+    const calls: [string, string][] = [];
+    const run: AfterMergeRun = (script, r) => {
+      calls.push([script, r]);
+      return { status: 0, stdout: '', stderr: '', ...result };
+    };
+    return { run, calls };
+  }
+  const pending = (o: object) =>
+    JSON.stringify({
+      days: 14,
+      afterMergePaths: ['packages/conventions/src/ci-plan.ts'],
+      done: [],
+      failed: [],
+      unreviewed: [],
+      problems: [],
+      since: '2026-10-01T00:00:00.000Z',
+      ...o,
+    });
+  const pr = (number: number) => ({ number, title: 't', mergedAt: '2026-10-03T10:00:00Z', files: ['x'] });
+
+  it('不是 fleet-dao 的检出（origin 指别处）、不是 git 仓：不查、不出声', () => {
+    const w = world();
+    const f = fakeRun({ stdout: pending({ unreviewed: [pr(1)] }) });
+    expect(hook.checkAfterMerge({ cwd: w.work, git, run: f.run, fetch: fetched, mirror: HOOK })).toEqual([]);
+    expect(hook.checkAfterMerge({ cwd: temp('plain'), git, run: f.run, fetch: null, mirror: HOOK })).toEqual(
+      [],
+    );
+    expect(f.calls).toEqual([]);
+  });
+
+  it('有待补审的：一行列 PR 号和要跑的命令；补审没过的、对不上 PR 的各一行；都没有不出声', () => {
+    const dir = fleetRepo();
+    const f = fakeRun({
+      stdout: pending({
+        unreviewed: [pr(701), pr(702)],
+        failed: [pr(690)],
+        problems: ['ebcad84（改到 x）：找不到合它进主线的 PR'],
+      }),
+    });
+    const lines = hook.checkAfterMerge({ cwd: dir, git, run: f.run, fetch: fetched, mirror: HOOK });
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('合并后待补审 2 个：#701、#702');
+    expect(lines[0]).toContain('second-opinion.mjs --after-merge-sweep');
+    expect(lines[1]).toContain('合并后补审没过、等修复或 revert 1 个：#690');
+    expect(lines[1]).toContain('--after-merge-resolve');
+    expect(lines[2]).toContain('对不上 PR 的提交 1 个：ebcad84');
+    // 脚本是在仓根跑的、用的是给的那份脚本（git 回的仓根是长名正斜杠，临时目录可能是 8.3 短名：按真实路径比）
+    const real = (p: string) => realpathSync.native(p).toLowerCase();
+    expect(f.calls.map(([script, root]) => [script, real(root)])).toEqual([[HOOK, real(dir)]]);
+    expect(
+      hook.checkAfterMerge({
+        cwd: dir,
+        git,
+        run: fakeRun({ stdout: pending({}) }).run,
+        fetch: fetched,
+        mirror: HOOK,
+      }),
+    ).toEqual([]);
+  });
+
+  it('【故意造出的失败】超时、脚本退出 2（网络不通、读不到清单）、取不到远端：都明说没查成，不当成没有', () => {
+    const dir = fleetRepo();
+    const slow = fakeRun({
+      status: null,
+      error: Object.assign(new Error('spawnSync node ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      timeoutMs: 8_000,
+    });
+    expect(hook.checkAfterMerge({ cwd: dir, git, run: slow.run, fetch: fetched, mirror: HOOK })).toEqual([
+      '合并后待补审没查成：超过 8 秒没完（自己跑一遍 node agents/skills/discuss/scripts/second-opinion.mjs --after-merge-pending 看原因）。',
+    ]);
+    const broken = fakeRun({
+      status: 2,
+      stderr: '没查成：读不到主线上的 packages/conventions/high-risk-paths.json（fatal: x）\n',
+    });
+    expect(hook.checkAfterMerge({ cwd: dir, git, run: broken.run, fetch: fetched, mirror: HOOK })[0]).toMatch(
+      /^合并后待补审没查成：读不到主线上的 packages\/conventions\/high-risk-paths\.json/,
+    );
+    const offline = fakeRun({ stdout: pending({}) });
+    const lines = hook.checkAfterMerge({
+      cwd: dir,
+      git,
+      run: offline.run,
+      fetch: { common: null, ok: false, why: '超过 15 秒没完' },
+      mirror: HOOK,
+    });
+    expect(lines).toEqual([
+      '合并后待补审没查成：取不到远端（超过 15 秒没完），最近合并的 PR 补审了没有不知道。',
+    ]);
+    expect(offline.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】输出认不出、少了字段、找不到脚本：没查成', () => {
+    const dir = fleetRepo();
+    expect(
+      hook.checkAfterMerge({
+        cwd: dir,
+        git,
+        run: fakeRun({ stdout: '不是 JSON' }).run,
+        fetch: fetched,
+        mirror: HOOK,
+      })[0],
+    ).toMatch(/^合并后待补审没查成：second-opinion\.mjs 的输出认不出/);
+    expect(
+      hook.checkAfterMerge({
+        cwd: dir,
+        git,
+        run: fakeRun({ stdout: '{"unreviewed":[]}' }).run,
+        fetch: fetched,
+        mirror: HOOK,
+      })[0],
+    ).toMatch(/少了 unreviewed、failed 或 problems/);
+    const f = fakeRun({ stdout: pending({}) });
+    expect(hook.checkAfterMerge({ cwd: dir, git, run: f.run, fetch: fetched, mirror: null })).toEqual([
+      '合并后待补审没查成：找不到 agents/skills/discuss/scripts/second-opinion.mjs。',
+    ]);
+    expect(f.calls).toEqual([]);
+  });
+
+  it('真起脚本：主线上读不到清单时它退出 2，钩子说没查成（不是「没有」）', () => {
+    const dir = fleetRepo();
+    const lines = hook.checkAfterMerge({
+      cwd: dir,
+      git,
+      run: hook.afterMergeRunner(),
+      fetch: fetched,
+      mirror: SO,
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(
+      /^合并后待补审没查成：读不到主线上的 packages\/conventions\/high-risk-paths\.json（/,
+    );
+  });
+
+  it('【故意造出的失败】真起脚本、硬超时：到点杀掉、说没查成，不拖着开会话', () => {
+    const dir = fleetRepo();
+    const sleeper = join(temp('sleeper'), 'sleep.mjs');
+    writeFileSync(sleeper, 'setTimeout(() => {}, 20_000);\n');
+    const started = Date.now();
+    const lines = hook.checkAfterMerge({
+      cwd: dir,
+      git,
+      run: hook.afterMergeRunner(1_000),
+      fetch: fetched,
+      mirror: sleeper,
+    });
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(lines).toEqual([
+      '合并后待补审没查成：超过 1 秒没完（自己跑一遍 node agents/skills/discuss/scripts/second-opinion.mjs --after-merge-pending 看原因）。',
+    ]);
+    expect(hook.AFTER_MERGE_MS).toBe(8_000);
   });
 });

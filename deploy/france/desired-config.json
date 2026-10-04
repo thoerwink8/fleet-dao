@@ -96,6 +96,10 @@
         "private": "473fcbb2c51e0cb398d35d26bb36c4175b248ade5673ac6174bd5b9790c1ac7e",
         "说明": "飞书自建应用的凭据：私有值"
       },
+      "FLEET_FEISHU_LOGIN": {
+        "value": "on",
+        "说明": "驾驶舱接飞书登录：on（不写也一样）时生产必须配上面飞书一对（packages/api/src/config.ts）；off 只给本机档（deploy/local/desired-config.json）"
+      },
       "TEMPORAL_ADDRESS": {
         "value": "127.0.0.1:7243",
         "说明": "本机的 Temporal（同 engine.env）：发给工作流的信号、/healthz 的 temporal 项都连它"

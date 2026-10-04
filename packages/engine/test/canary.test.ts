@@ -1,22 +1,26 @@
 // 全流程巡检（#223）：判走到哪一步、断在哪（canaryNext）；开单、看一回、记结论、推报警（openCanaryRound、checkCanaryRound）；
-// 真库上的装配（real/canary.ts）；真 Temporal 测试服务端上的工作流。需求里的两条故意造出的失败都在这里：
-// 巡检仓的路由全关，这一轮必须报「断在派活」；巡检自己起不来，这一轮记没跑成、登记表上是 failing（看门狗 #203 照它报）。
+// 真库上的装配（real/canary.ts）；真 Temporal 测试服务端上的工作流。巡检跟着三段任务工作流走（#452）：收单 → 动手 →
+// 开 PR、过 CI → 验收 → 合并 → 关单 → 记账 → 驾驶舱显示。故意造出的失败都在这里：工作流读不到 → 这一回记没查成、连着到上限
+// 这一轮没跑成；停在某一步 → 断在那一步，写出名字和这一步走了多久；巡检自己起不来 → 没跑成、登记表上是 failing（看门狗 #203 照它报）。
 import { randomUUID } from 'node:crypto';
-import { bodyCriteria, specOf } from '@fleet-dao/core';
-import type { CanaryDbFacts, CanaryStage, ScheduleResult } from '@fleet-dao/db';
+import { cleanBody, criteriaOf } from '@fleet-dao/core';
+import type { CanaryDbFacts, ScheduleResult } from '@fleet-dao/db';
 import {
   canaryRunById,
   latestCanaryRuns,
   notifications,
+  pullRequests,
   repos,
   scheduleHealth,
   scheduleRuns,
+  startRun,
+  stepTimings,
   tasks,
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { Client } from '@temporalio/client';
-import { WorkflowFailedError } from '@temporalio/client';
+import { WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
 import { CANARY_CHECK_FAILURE_LIMIT, WORKFLOW_TYPES } from '../src/contract.ts';
@@ -28,6 +32,7 @@ import {
   CANARY_MAX_MINUTES,
   CANARY_RUN_TIMEOUT_MINUTES,
   CANARY_STAGE_LIMIT_MINUTES,
+  type CanaryBoard,
   type CanaryDeps,
   type CanaryObservation,
   type CanaryRun,
@@ -38,15 +43,22 @@ import {
   canaryNext,
   checkCanaryRound,
   openCanaryRound,
+  spanWords,
+  stepSpans,
 } from '../src/jobs/canary.ts';
 import { canaryJob, canaryRepoFrom, canaryViewOf } from '../src/real/canary.ts';
 import { registerEngineJobs } from '../src/real/jobs.ts';
+import { buildTaskBrief } from '../src/runner/task-brief.ts';
 import { useEnv, withWorker } from './helpers.ts';
 
 const T0 = new Date('2026-09-27T12:26:00.000Z');
 const at = (min: number) => new Date(T0.getTime() + min * 60_000).toISOString();
 const REPO = { owner: 'acme', name: 'canary' };
-const WF = 'req:acme/canary#12';
+const WF = 'task:acme/canary#12';
+const ALL_STAGES = ['open', 'intake', 'implement', 'pr', 'verify', 'merge', 'close', 'ledger', 'board'];
+const NO_RUNS = { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0 };
+/** 一张做完的小单记的账：动手两笔、验收一笔，都结束了、记上了用量。 */
+const LEDGER = { total: 3, ended: 3, manual: 2, verify: 1, withUsage: 3 };
 
 function state(over: Partial<CanaryState> = {}): CanaryState {
   return {
@@ -73,11 +85,10 @@ function facts(over: Partial<CanaryDbFacts> = {}): CanaryDbFacts {
   return {
     repo: { id: 'repo-1', autoDispatchSince: new Date(T0.getTime() - 24 * 60 * 60_000) },
     task: null,
-    sessions: { total: 0, started: 0, ended: 0, withUsage: 0 },
+    runs: NO_RUNS,
     timings: 0,
-    block: null,
     openAlerts: [],
-    lastDelivery: null,
+    lastIntake: null,
     ...over,
   };
 }
@@ -85,7 +96,7 @@ function facts(over: Partial<CanaryDbFacts> = {}): CanaryDbFacts {
 const TASK = {
   id: 'task-12',
   state: 'running' as const,
-  phase: 'fusion:plan',
+  phase: 'brief',
   lastProblem: null,
   updatedAt: null,
 };
@@ -103,235 +114,336 @@ function obs(min: number, over: Partial<CanaryObservation> = {}): CanaryObservat
 }
 
 function view(over: Partial<CanaryView> = {}): CanaryView {
-  return { step: 'plan', parked: false, waiting: null, prNumber: null, lastProblem: null, ...over };
+  return {
+    phase: 'implement',
+    doing: '第 1 轮：grok-5 动手',
+    parked: false,
+    waiting: null,
+    prNumber: null,
+    lastProblem: null,
+    round: 1,
+    verifyRound: 0,
+    ...over,
+  };
 }
 
-/** 一整张做完的单：任务做完、GitHub 上做完关了、会话都有结局有用量、每步耗时进了库、驾驶舱读到做完带 PR。 */
+/** 在跑：任务行在、任务工作流在跑、它的状态是 v。 */
+function running(
+  min: number,
+  v: Partial<CanaryView> = {},
+  db: Partial<CanaryDbFacts> = {},
+): CanaryObservation {
+  return obs(min, { db: facts({ task: TASK, ...db }), workflow: { state: 'running' }, view: view(v) });
+}
+
+const BOARD_DONE: CanaryBoard = {
+  taskState: 'done',
+  pr: { number: 13, state: 'merged', mergedAt: at(40), linkedIssue: 12 },
+};
+
+/** 一整张做完的单：任务做完、GitHub 上做完关了、runs 每笔都有结局有用量、每步耗时进了库、驾驶舱读到做完、PR 合了挂着这张单。 */
 function finished(min: number): CanaryObservation {
   return obs(min, {
-    db: facts({
-      task: { ...TASK, state: 'done', phase: 'fusion:done' },
-      sessions: { total: 4, started: 4, ended: 4, withUsage: 3 },
-      timings: 40,
-      block: { prNumber: 13, state: 'merged' },
-    }),
+    db: facts({ task: { ...TASK, state: 'done', phase: 'done' }, runs: LEDGER, timings: 40 }),
     workflow: { state: 'closed', status: 'COMPLETED' },
     issue: { state: 'closed', stateReason: 'completed' },
-    board: { taskState: 'done', prNumber: 13, blockState: 'merged' },
+    board: BOARD_DONE,
   });
 }
 
 const stagesOf = (s: CanaryState) => s.steps.map((x) => x.stage);
+const whyOf = (d: ReturnType<typeof canaryNext>) => (d.kind === 'broken' ? d.why : '');
 
 describe('走到哪一步、断没断（canaryNext）', () => {
-  it('收单：库里还没有任务行就等；20 分钟还没有，断在「收单」并写明投递怎么处理的', () => {
+  it('收单：库里还没有任务行就等；20 分钟还没有，断在「收单」，写明这一步走了多久、最近一轮拉单怎么了', () => {
     expect(canaryNext(state(), obs(5)).kind).toBe('continue');
     const d = canaryNext(
       state(),
       obs(21, {
         db: facts({
-          lastDelivery: {
-            event: 'issues',
-            action: 'opened',
-            status: 'failed',
-            reason: '库连不上',
-            note: null,
+          lastIntake: {
+            startedAt: new Date(at(18)),
+            endedAt: new Date(at(18)),
+            outcome: 'failed',
+            why: '白名单读不到',
           },
         }),
       }),
     );
-    expect(d).toMatchObject({ kind: 'broken', stage: 'intake' });
-    expect(d.kind === 'broken' && d.why).toContain('20 分钟没走完');
-    expect(d.kind === 'broken' && d.why).toContain('库连不上');
+    expect(d).toMatchObject({ kind: 'broken', stage: 'intake', spentMs: 21 * 60_000 });
+    expect(whyOf(d)).toContain('超过期限 20 分钟还没走完');
+    expect(whyOf(d)).toContain('白名单读不到');
+    // 拉单一轮都没跑过：照实说，不说成「拉了、没拉到」
+    expect(whyOf(canaryNext(state(), obs(21)))).toContain('一轮都没跑过');
   });
 
-  it('一回里能走几步走几步：任务行有了、第一个会话起来了、Fusion 在执行，就停在「执行」', () => {
+  it('【故意造出的失败】巡检仓的「让 AI 接活」关着、或开单之后才打开：不用等期限，当场断在「收单」', () => {
+    const off = canaryNext(
+      state(),
+      obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: null } }) }),
+    );
+    expect(off).toMatchObject({ kind: 'broken', stage: 'intake' });
+    expect(whyOf(off)).toContain('「让 AI 接活」开关关着');
+    const late = canaryNext(
+      state(),
+      obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: new Date(at(1)) } }) }),
+    );
+    expect(late).toMatchObject({ kind: 'broken', stage: 'intake' });
+    expect(whyOf(late)).toContain('开单之后才打开');
+  });
+
+  it('任务行建了、任务工作流还没起来：还在收单（起不成的下一轮拉单再起），到期限写明卡在这儿', () => {
+    const queued = { ...TASK, state: 'queued' as const, phase: null };
+    expect(canaryNext(state(), obs(8, { db: facts({ task: queued }) })).state.stage).toBe('intake');
+    const d = canaryNext(state(), obs(21, { db: facts({ task: queued }) }));
+    expect(d).toMatchObject({ kind: 'broken', stage: 'intake' });
+    expect(whyOf(d)).toContain('任务行建了（queued），任务工作流还没起来');
+  });
+
+  it('一回里能走几步走几步：任务工作流在等 CI（PR 开了）就停在「开 PR、过 CI」，记下 PR 号', () => {
     const d = canaryNext(
       state(),
-      obs(8, {
-        db: facts({
-          task: { ...TASK, phase: 'fusion:execute' },
-          sessions: { total: 2, started: 2, ended: 1, withUsage: 1 },
-        }),
-        workflow: { state: 'running' },
-        view: view({ step: 'execute' }),
+      running(8, {
+        phase: 'ci',
+        doing: '等 PR #13 的 CI',
+        prNumber: 13,
+        waiting: { kind: 'ci', detail: '等 PR #13 的 CI' },
       }),
     );
     expect(d.kind).toBe('continue');
-    expect(d.state.stage).toBe('execute');
-    expect(stagesOf(d.state)).toEqual(['open', 'intake', 'dispatch', 'plan']);
-    expect(d.state.taskId).toBe('task-12');
+    expect(d.state.stage).toBe('pr');
+    expect(stagesOf(d.state)).toEqual(['open', 'intake', 'implement']);
+    expect(d.state).toMatchObject({ taskId: 'task-12', prNumber: 13 });
   });
 
-  it('【故意造出的失败】巡检仓的路由全关：工作流起来了、一个会话都起不来、挂起等人，这一轮断在「派活」', () => {
-    const d = canaryNext(
-      state({
-        stage: 'dispatch',
-        steps: [
-          { stage: 'open', at: at(0) },
-          { stage: 'intake', at: at(1) },
-        ],
-      }),
-      obs(3, {
-        db: facts({
-          task: TASK,
-          openAlerts: [{ dedupeKey: `${WF}:park:1`, title: '「plan」没有能用的路由' }],
-        }),
-        workflow: { state: 'running' },
-        view: view({
-          parked: true,
-          waiting: { kind: 'human', detail: '挂起：「plan」没有能用的路由（等「继续」或「换路由」）' },
-        }),
-      }),
+  it('【故意造出的失败】停在「验收」：45 分钟没走完，断在这一步，报出这一步的名字、走了多久、在做什么', () => {
+    const s = state({ stage: 'verify', stageSince: at(30), taskId: 'task-12', prNumber: 13 });
+    const verifying = (min: number) =>
+      running(min, { phase: 'verify', doing: '验收第 1 轮', prNumber: 13, verifyRound: 1 });
+    expect(canaryNext(s, verifying(70)).kind).toBe('continue');
+    const d = canaryNext(s, verifying(77));
+    expect(d).toMatchObject({ kind: 'broken', stage: 'verify', spentMs: 47 * 60_000 });
+    expect(whyOf(d)).toContain('超过期限 45 分钟还没走完');
+    expect(whyOf(d)).toContain('在做：验收第 1 轮');
+  });
+
+  it('【故意造出的失败】巡检仓的路由全关：任务工作流停下等人（没有可用的路由），不用等期限，当场断在「动手」', () => {
+    const parked = { phase: 'parked', parked: true, doing: '停下等人：没有可用的路由' };
+    const waiting = { kind: 'human', detail: '没有可用的路由（等「继续」或「放弃」）' };
+    const s = state({
+      stage: 'implement',
+      steps: [
+        { stage: 'open', at: at(0) },
+        { stage: 'intake', at: at(1) },
+      ],
+    });
+    const withAlert = canaryNext(
+      s,
+      running(
+        3,
+        { ...parked, waiting },
+        { openAlerts: [{ dedupeKey: `${WF}:park:1`, title: '没有可用的路由' }] },
+      ),
     );
-    expect(d).toMatchObject({ kind: 'broken', stage: 'dispatch' });
-    expect(d.kind === 'broken' && d.why).toContain('没有能用的路由');
+    expect(withAlert).toMatchObject({ kind: 'broken', stage: 'implement' });
+    expect(whyOf(withAlert)).toContain('停下等人：没有可用的路由');
+    // 报警没发出去（库那一下没写成）：状态里停下等人照样认得出
+    const noAlert = canaryNext(s, running(3, { ...parked, waiting }));
+    expect(noAlert).toMatchObject({ kind: 'broken', stage: 'implement' });
+    expect(whyOf(noAlert)).toContain('停下等人：没有可用的路由（等「继续」或「放弃」）');
   });
 
-  it('【故意造出的失败】巡检仓的「让 AI 接活」关着：不用等期限，当场断在「派活」', () => {
-    const d = canaryNext(
-      state({ stage: 'dispatch' }),
-      obs(2, {
-        db: facts({
-          repo: { id: 'repo-1', autoDispatchSince: null },
-          task: { ...TASK, state: 'queued', phase: null },
-        }),
-      }),
-    );
-    expect(d).toMatchObject({ kind: 'broken', stage: 'dispatch' });
-    expect(d.kind === 'broken' && d.why).toContain('「让 AI 接活」开关关着');
-  });
-
-  it('等并发空位、额度的时间不算进这一步的期限（忙不是断）；等人一样算断', () => {
-    let s = state({ stage: 'dispatch', stageSince: at(0), lastCheckAt: at(0) });
+  it('等并发空位、额度的时间不算进这一步的期限（忙不是断）；不等了还没走完，照算', () => {
+    let s = state({ stage: 'implement', stageSince: at(0), lastCheckAt: at(0) });
     const busy = (min: number) =>
-      obs(min, {
-        db: facts({ task: TASK }),
-        workflow: { state: 'running' },
-        view: view({ waiting: { kind: 'slot', detail: '等 Claude 订阅 · 拼车的并发空位' } }),
-      });
-    for (let min = 2; min <= 40; min += 2) {
+      running(min, { phase: 'implement', waiting: { kind: 'slot', detail: '等 Grok 的并发空位' } });
+    for (let min = 2; min <= 80; min += 2) {
       const d = canaryNext(s, busy(min));
       expect(d.kind, `第 ${min} 分钟`).toBe('continue');
       s = d.state;
     }
-    expect(s.busyMs).toBe(40 * 60_000);
-    // 不等空位了却还没起会话：这之后的时间照算，30 分钟到了就断
-    const idle = (min: number) =>
-      obs(min, { db: facts({ task: TASK }), workflow: { state: 'running' }, view: view() });
-    expect(canaryNext(s, idle(60)).kind).toBe('continue');
-    const d = canaryNext(s, idle(71));
-    expect(d).toMatchObject({ kind: 'broken', stage: 'dispatch' });
-    expect(d.kind === 'broken' && d.why).toContain('工作流起来了，第一个会话还没起来');
+    expect(s.busyMs).toBe(80 * 60_000);
+    const idle = (min: number) => running(min, { phase: 'implement' });
+    expect(canaryNext(s, idle(130)).kind).toBe('continue');
+    const d = canaryNext(s, idle(141));
+    expect(d).toMatchObject({ kind: 'broken', stage: 'implement', spentMs: 61 * 60_000 });
+    expect(whyOf(d)).toContain('在做：第 1 轮：grok-5 动手');
+  });
+
+  it('返工（验收没过回去动手）：巡检停在「验收」不往回退；到期限写明返工了几轮、最近的问题', () => {
+    const s = state({ stage: 'verify', stageSince: at(30), taskId: 'task-12', prNumber: 13 });
+    const rework = (min: number) =>
+      running(min, {
+        phase: 'implement',
+        doing: '第 2 轮：grok-5 动手',
+        prNumber: 13,
+        round: 2,
+        verifyRound: 1,
+        lastProblem: '验收没过',
+      });
+    const d1 = canaryNext(s, rework(40));
+    expect(d1).toMatchObject({ kind: 'continue', state: { stage: 'verify' } });
+    expect(stagesOf(d1.state)).toEqual(stagesOf(s));
+    const d = canaryNext(s, rework(76));
+    expect(d).toMatchObject({ kind: 'broken', stage: 'verify' });
+    expect(whyOf(d)).toContain('返工过：动手第 2 轮、验收第 1 轮');
+    expect(whyOf(d)).toContain('最近的问题：验收没过');
   });
 
   it('一轮总上限：一直在等空位、额度也不能拖过 5 小时', () => {
     const s = state({
-      stage: 'plan',
+      stage: 'merge',
       stageSince: at(10),
       lastCheckAt: at(CANARY_MAX_MINUTES - 1),
       busyMs: (CANARY_MAX_MINUTES - 12) * 60_000,
     });
     const d = canaryNext(
       s,
-      obs(CANARY_MAX_MINUTES + 1, {
-        db: facts({ task: TASK, sessions: { total: 1, started: 1, ended: 0, withUsage: 0 } }),
-        workflow: { state: 'running' },
-        view: view({ waiting: { kind: 'quota', detail: '等额度清零' } }),
-      }),
+      running(CANARY_MAX_MINUTES + 1, { phase: 'merge', waiting: { kind: 'quota', detail: '等额度清零' } }),
     );
-    expect(d).toMatchObject({ kind: 'broken', stage: 'plan' });
-    expect(d.kind === 'broken' && d.why).toContain('5 小时还没走完');
+    expect(d).toMatchObject({ kind: 'broken', stage: 'merge' });
+    expect(whyOf(d)).toContain('5 小时还没走完');
   });
 
-  it('【故意造出的失败】工作流失败了、任务失败了、单子被关成不做了：断在当时那一步', () => {
-    const exec = state({ stage: 'execute' });
-    const running = facts({
-      task: { ...TASK, phase: 'fusion:execute' },
-      sessions: { total: 2, started: 2, ended: 1, withUsage: 1 },
-    });
+  it('【故意造出的失败】任务工作流失败了、任务失败了、被放弃了、单子被关成不做了：断在当时那一步', () => {
+    const pr = state({ stage: 'pr' });
     const failed = canaryNext(
-      exec,
-      obs(30, { db: running, workflow: { state: 'closed', status: 'FAILED' } }),
+      pr,
+      obs(30, { db: facts({ task: TASK }), workflow: { state: 'closed', status: 'FAILED' } }),
     );
-    expect(failed).toMatchObject({ kind: 'broken', stage: 'execute' });
-    expect(failed.kind === 'broken' && failed.why).toContain('失败了');
+    expect(failed).toMatchObject({ kind: 'broken', stage: 'pr' });
+    expect(whyOf(failed)).toContain('任务工作流失败了');
     const taskFailed = canaryNext(
-      exec,
-      obs(30, { db: facts({ ...running, task: { ...TASK, state: 'failed', lastProblem: '测试没过' } }) }),
+      pr,
+      obs(30, { db: facts({ task: { ...TASK, state: 'failed', lastProblem: 'CI 红了' } }) }),
     );
-    expect(taskFailed.kind === 'broken' && taskFailed.why).toContain('测试没过');
-    const close = state({ stage: 'close' });
-    const notPlanned = canaryNext(
-      close,
-      obs(90, { ...finished(90), issue: { state: 'closed', stateReason: 'not_planned' } }),
+    expect(whyOf(taskFailed)).toContain('CI 红了');
+    const abandoned = canaryNext(
+      pr,
+      obs(30, {
+        db: facts({ task: { ...TASK, state: 'stopped', phase: 'abandoned' } }),
+        workflow: { state: 'closed', status: 'COMPLETED' },
+      }),
     );
+    expect(whyOf(abandoned)).toContain('被叫停了（放弃）');
+    const notPlanned = canaryNext(state({ stage: 'close' }), {
+      ...finished(90),
+      issue: { state: 'closed', stateReason: 'not_planned' },
+    });
     expect(notPlanned).toMatchObject({ kind: 'broken', stage: 'close' });
   });
 
-  it('整张单做完：一回里走完剩下的每一步，通过；十一步都记了走完的时刻', () => {
+  it('【故意造出的失败】收单以后任务工作流不见了（没在跑、Temporal 里也查不到）：断在「动手」', () => {
+    const d = canaryNext(state({ stage: 'implement' }), obs(10, { db: facts({ task: TASK }) }));
+    expect(d).toMatchObject({ kind: 'broken', stage: 'implement' });
+    expect(whyOf(d)).toContain('任务工作流不见了');
+  });
+
+  it('整张单做完：一回里走完剩下的每一步，通过；九步都记了走完的时刻', () => {
     const d = canaryNext(state({ stage: 'merge', steps: [] }), finished(50));
     expect(d.kind).toBe('pass');
     expect(stagesOf(d.state)).toEqual(['merge', 'close', 'ledger', 'board']);
     const all = canaryNext(state(), finished(50));
     expect(all.kind).toBe('pass');
-    expect(stagesOf(all.state)).toEqual([
-      'open',
-      'intake',
-      'dispatch',
-      'plan',
-      'execute',
-      'verify',
-      'pr',
-      'merge',
-      'close',
-      'ledger',
-      'board',
-    ]);
+    expect(stagesOf(all.state)).toEqual(ALL_STAGES);
   });
 
-  it('【故意造出的失败】做完了却没记账（会话都没记上用量）、驾驶舱读到的不是做完：各自到期限断在「记账」「驾驶舱显示」', () => {
-    const noUsage = {
-      ...finished(60),
-      db: facts({ ...finished(60).db, sessions: { total: 2, started: 2, ended: 2, withUsage: 0 } }),
-    };
+  it('【故意造出的失败】做完了却没记全账（验收那段没进 runs、用量全空）：到期限断在「记账」，写清记了几笔', () => {
     const s = state({ stage: 'ledger', stageSince: at(60) });
-    expect(canaryNext(s, { ...noUsage, at: at(65) }).kind).toBe('continue');
-    const ledger = canaryNext(s, { ...noUsage, at: at(60 + CANARY_STAGE_LIMIT_MINUTES.ledger + 1) });
+    const noVerify = {
+      ...finished(60),
+      db: facts({
+        ...finished(60).db,
+        runs: { total: 2, ended: 2, manual: 2, verify: 0, withUsage: 2 },
+      }),
+    };
+    expect(canaryNext(s, { ...noVerify, at: at(65) }).kind).toBe('continue');
+    const ledger = canaryNext(s, { ...noVerify, at: at(60 + CANARY_STAGE_LIMIT_MINUTES.ledger + 1) });
     expect(ledger).toMatchObject({ kind: 'broken', stage: 'ledger' });
-    expect(ledger.kind === 'broken' && ledger.why).toContain('记上用量的 0 个');
-    const board = canaryNext(state({ stage: 'board', stageSince: at(60) }), {
-      ...finished(60 + CANARY_STAGE_LIMIT_MINUTES.board + 1),
-      board: { taskState: 'running', prNumber: null, blockState: 'verifying' },
+    expect(whyOf(ledger)).toContain('runs 记了 2 笔（动手 2、验收 0）');
+    const noUsage = { ...finished(60), db: facts({ ...finished(60).db, runs: { ...LEDGER, withUsage: 0 } }) };
+    expect(canaryNext(s, { ...noUsage, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
+    const open = { ...finished(60), db: facts({ ...finished(60).db, runs: { ...LEDGER, ended: 2 } }) };
+    expect(canaryNext(s, { ...open, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
+  });
+
+  it('【故意造出的失败】驾驶舱读到的 PR 还没合、挂的不是这张单、镜像里没有：到期限断在「驾驶舱显示」，写清读到了什么', () => {
+    const s = state({ stage: 'board', stageSince: at(60) });
+    const late = at(60 + CANARY_STAGE_LIMIT_MINUTES.board + 1);
+    const stale = canaryNext(s, {
+      ...finished(0),
+      at: late,
+      board: { taskState: 'done', pr: { number: 13, state: 'open', mergedAt: null, linkedIssue: 12 } },
     });
-    expect(board).toMatchObject({ kind: 'broken', stage: 'board' });
+    expect(stale).toMatchObject({ kind: 'broken', stage: 'board' });
+    expect(whyOf(stale)).toContain('PR #13 open');
+    const wrong = canaryNext(s, {
+      ...finished(0),
+      at: late,
+      board: { taskState: 'done', pr: { number: 13, state: 'merged', mergedAt: at(40), linkedIssue: 99 } },
+    });
+    expect(wrong).toMatchObject({ kind: 'broken', stage: 'board' });
+    expect(whyOf(wrong)).toContain('挂的单 #99');
+    const missing = canaryNext(s, { ...finished(0), at: late, board: { taskState: 'done', pr: null } });
+    expect(whyOf(missing)).toContain('PR 镜像里没有这张单的 PR');
+  });
+
+  it('换版本前起的一轮（停在老步骤「派活」上）：从收单接着看，这一回能走完的照走', () => {
+    const legacy = { ...state(), stage: 'dispatch' } as unknown as CanaryState;
+    const d = canaryNext(legacy, running(8, { phase: 'ci', prNumber: 13 }));
+    expect(d.kind).toBe('continue');
+    expect(d.state.stage).toBe('pr');
+    expect(stagesOf(d.state)).toEqual(['open', 'intake', 'implement']);
+  });
+
+  it('每步用时说成人话；时刻认不出的那一步不拿 0 顶', () => {
+    expect(spanWords(40_000)).toBe('40 秒');
+    expect(spanWords(47 * 60_000 + 3_000)).toBe('47 分 3 秒');
+    expect(spanWords(2 * 3_600_000 + 5 * 60_000)).toBe('2 小时 5 分');
+    expect(
+      stepSpans(at(0), [
+        { stage: 'open', at: at(0.5) },
+        { stage: 'intake', at: at(6) },
+        { stage: 'implement', at: '认不出' },
+      ]),
+    ).toEqual([
+      { stage: 'open', at: at(0.5), ms: 30_000 },
+      { stage: 'intake', at: at(6), ms: 330_000 },
+      { stage: 'implement', at: '认不出', ms: null },
+    ]);
   });
 });
 
 describe('巡检单本身', () => {
-  it('正文照 #295 写全需求：收单认得出（照正文写需求文档，目录按标题取短名）、验证照正文读出三条验收条；没有「文档：」那一行', () => {
+  it('正文过得了拉单那一道交代检查（真的 buildTaskBrief）：三栏齐、三条验收条、已知的模块只有巡检记录 → 快档；没有「文档：」那一行', () => {
     const issue = canaryIssue(7, T0);
     expect(issue.title).toBe('巡检第 7 轮：往巡检记录追加一行');
     expect(issue.body).not.toContain('文档：');
     expect(canaryLogLine(7, T0)).toBe('- 第 7 轮 2026-09-27T12:26:00Z');
-    // 收单、验证用的就是 core 这两个判法（Fusion 第 1 步、第 5 步）
-    const spec = specOf({ body: issue.body, issueNumber: 12, title: issue.title });
-    expect(spec).toMatchObject({ ok: 'specs/12-巡检第7轮往巡检记录追加一行' });
-    expect('requirement' in spec && spec.requirement).toContain('`- 第 7 轮 2026-09-27T12:26:00Z`');
-    const criteria = bodyCriteria(issue.body);
-    expect('ok' in criteria && criteria.ok).toHaveLength(3);
-    expect('ok' in criteria && criteria.ok[0]).toBe(
+    // 开单留的隐藏标记（openIssue 追加在正文末尾）不影响交代
+    const body = `${issue.body}\n\n<!-- fleet:issue:0123456789abcdef -->`;
+    const got = buildTaskBrief({ issue: { number: 12, title: issue.title, body, state: 'open' } });
+    if (!got.ok) throw new Error(`巡检单的交代不全：${JSON.stringify(got.problems)}`);
+    expect(got.brief.acceptance).toHaveLength(3);
+    expect(got.brief.acceptance[0]).toBe(
       '`巡检记录.md` 的最后一行是 `- 第 7 轮 2026-09-27T12:26:00Z`，一字不差。',
     );
-    // 开单留的隐藏标记（openIssue 追加在正文末尾）不算一条验收条
-    expect(bodyCriteria(`${issue.body}\n\n<!-- fleet:issue:0123456789abcdef -->`)).toEqual(criteria);
+    expect(got.brief.touches).toEqual(['`巡检记录.md`']);
+    expect(got.brief.tier.tier).toBe('fast');
+    expect(got.brief.specDir).toBeUndefined();
   });
 
-  it('【故意造出的失败】正文要是丢了「怎么算做完」：收单认不出、停下等人（巡检会报断在派活），不当成写全了', () => {
-    const cut = canaryIssue(7, T0).body.split('## 怎么算做完')[0] ?? '';
-    expect(specOf({ body: cut, issueNumber: 12, title: '巡检' })).toMatchObject({
-      error: expect.any(String),
-    });
+  it('【故意造出的失败】正文要是丢了拉单要的一栏（已知的模块）或「怎么算做完」：交代不全、拉单不派，不当成写全了', () => {
+    const body = canaryIssue(7, T0).body;
+    const noModules = body.replace('## 已知的模块\n\n- `巡检记录.md`\n\n', '');
+    expect(noModules).not.toContain('已知的模块');
+    const a = buildTaskBrief({ issue: { number: 12, title: 't', body: noModules, state: 'open' } });
+    expect(a.ok).toBe(false);
+    expect(!a.ok && a.problems.map((p) => p.field)).toContain('已知的模块');
+    const cut = body.split('## 怎么算做完')[0] ?? '';
+    expect(criteriaOf(cleanBody(cut))).toMatchObject({ error: expect.any(String) });
+    const b = buildTaskBrief({ issue: { number: 12, title: 't', body: cut, state: 'open' } });
+    expect(!b.ok && b.problems.map((p) => p.field)).toContain('怎么算做完');
   });
 });
 
@@ -340,8 +452,9 @@ describe('巡检单本身', () => {
 interface Harness {
   deps: CanaryDeps;
   calls: string[];
+  boardAsked: { taskId: string; prNumber: number | null }[];
   runsFinished: { id: number; result: ScheduleResult }[];
-  finished: { id: number; verdict: string; stage: CanaryStage; why: string | null }[];
+  finished: { id: number; verdict: string; stage: string; why: string | null }[];
   alerts: { raised: { title: string; body: string }[]; resolved: string[] };
   setFacts(f: CanaryDbFacts): void;
   setWorkflow(w: CanaryObservation['workflow'], v?: CanaryView): void;
@@ -349,6 +462,7 @@ interface Harness {
 
 function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github']> = {}): Harness {
   const calls: string[] = [];
+  const boardAsked: Harness['boardAsked'] = [];
   const runsFinished: Harness['runsFinished'] = [];
   const finishedRows: Harness['finished'] = [];
   const alerts: Harness['alerts'] = { raised: [], resolved: [] };
@@ -401,7 +515,10 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
         return 'sent';
       },
     },
-    board: async () => ({ taskState: 'done', prNumber: 13, blockState: 'merged' }),
+    board: async (taskId, prNumber) => {
+      boardAsked.push({ taskId, prNumber });
+      return BOARD_DONE;
+    },
     alerts: {
       raise: async (a) => {
         alerts.raised.push(a);
@@ -420,6 +537,7 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
   return {
     deps,
     calls,
+    boardAsked,
     runsFinished,
     finished: finishedRows,
     alerts,
@@ -445,7 +563,7 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
   it('【故意造出的失败】巡检自己起不来（没配巡检仓）：这一轮记没跑成（schedule_runs 记 failed），不开单', async () => {
     const h = harness({ repo: canaryRepoFrom(undefined) });
     const r = await openCanaryRound(h.deps);
-    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open' } });
+    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open', steps: [] } });
     expect(h.runsFinished[0]?.result).toMatchObject({ outcome: 'failed' });
     expect(h.runsFinished[0]?.result).toMatchObject({ why: expect.stringContaining('FLEET_CANARY_REPO') });
     expect(h.calls).toEqual([]);
@@ -475,7 +593,8 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     expect(h.runsFinished[0]?.result.outcome).toBe('failed');
   });
 
-  it('开单前收掉前几轮留下的单：叫停工作流、关单、记下收过了；收不掉的写进备注，不挡这一轮', async () => {
+  it('开单前收掉前几轮留下的单：放弃它的任务工作流（task: 编号）、关单、记下收过了；收不掉的写进备注，不挡这一轮', async () => {
+    const stopped: string[] = [];
     const h = harness({
       record: {
         ...harness().deps.record,
@@ -489,6 +608,7 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
         state: async () => ({ state: 'missing' }),
         view: async () => view(),
         stop: async (id) => {
+          stopped.push(id);
           if (id.endsWith('#9')) throw new Error('Temporal 连不上');
           return 'gone';
         },
@@ -497,6 +617,7 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     h.deps.github.issueState = async () => ({ state: 'open', stateReason: null });
     const r = await openCanaryRound(h.deps);
     expect(r.done).toBe(false);
+    expect(stopped).toEqual(['task:acme/canary#5', 'task:acme/canary#9']);
     expect(h.calls).toContain('close:5');
     expect(!r.done && r.state.notes).toEqual([
       '收掉了上一轮留下的 #5',
@@ -532,45 +653,76 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     expect(!r.done && r.state.notes).toEqual(['补记了没收尾的一轮（#5）：没跑成', '收掉了上一轮留下的 #5']);
   });
 
-  it('看一回、还在走：写进度、接着看；做完了：记通过、schedule_runs 记 ok（发现 0 个）、撤断了的报警', async () => {
+  it('看一回、还在走：写进度、记下 PR 号；做完了：记通过、驾驶舱按这个 PR 号读、schedule_runs 记 ok（走了九步、发现 0 个）、撤断了的报警', async () => {
     const h = harness();
     const opened = await openCanaryRound(h.deps);
     if (opened.done) throw new Error('应当开成');
     h.setFacts(facts({ task: TASK }));
-    h.setWorkflow({ state: 'running' }, view());
+    h.setWorkflow({ state: 'running' }, view({ phase: 'ci', doing: '等 PR #13 的 CI', prNumber: 13 }));
     const next = await checkCanaryRound(h.deps, opened.state);
-    expect(next.done).toBe(false);
+    if (next.done) throw new Error('应当还在走');
+    expect(next.state).toMatchObject({ stage: 'pr', prNumber: 13 });
     h.setFacts(finished(0).db);
     h.setWorkflow({ state: 'closed', status: 'COMPLETED' });
-    const done = await checkCanaryRound(h.deps, next.done ? opened.state : next.state);
-    expect(done).toMatchObject({ done: true, run: { verdict: 'pass', stage: 'board' } });
-    expect(h.runsFinished.at(-1)?.result).toEqual({ outcome: 'ok', scanned: 11, found: 0 });
+    const done = await checkCanaryRound(h.deps, next.state);
+    expect(done).toMatchObject({
+      done: true,
+      run: { verdict: 'pass', stage: 'board', startedAt: opened.state.openedAt },
+    });
+    expect(done.done && done.run.steps.map((s) => s.stage)).toEqual(ALL_STAGES);
+    expect(h.boardAsked).toEqual([{ taskId: 'task-12', prNumber: 13 }]);
+    expect(h.runsFinished.at(-1)?.result).toEqual({ outcome: 'ok', scanned: 9, found: 0 });
     expect(h.alerts.resolved).toHaveLength(1);
     expect(h.alerts.raised).toEqual([]);
   });
 
-  it('断了：推一条卡住报警（写清断在哪一步、走到哪了、单子在哪），记 broken；这一轮巡检本身跑成了（schedule_runs 记 ok、发现 1 个）', async () => {
+  it('【故意造出的失败】停在「验收」：推一条卡住报警（断在哪一步、这一步走了多久、走到哪了每步几点用了多久、单子在哪），记 broken；这一轮巡检本身跑成了（schedule_runs 记 ok、发现 1 个）', async () => {
     const h = harness();
-    const opened = await openCanaryRound(h.deps);
-    if (opened.done) throw new Error('应当开成');
-    h.setFacts(
-      facts({ task: TASK, openAlerts: [{ dedupeKey: `${WF}:park:1`, title: '「plan」没有能用的路由' }] }),
+    h.setFacts(facts({ task: TASK }));
+    h.setWorkflow(
+      { state: 'running' },
+      view({ phase: 'verify', doing: '验收第 1 轮', prNumber: 13, verifyRound: 1 }),
     );
-    h.setWorkflow({ state: 'running' }, view({ parked: true }));
-    const r = await checkCanaryRound(h.deps, opened.state);
-    expect(r).toMatchObject({ done: true, run: { verdict: 'broken', stage: 'dispatch' } });
+    const s = state({
+      stage: 'verify',
+      stageSince: at(-60),
+      openedAt: at(-90),
+      taskId: 'task-12',
+      prNumber: 13,
+      steps: [
+        { stage: 'open', at: at(-90) },
+        { stage: 'intake', at: at(-85) },
+        { stage: 'implement', at: at(-70) },
+        { stage: 'pr', at: at(-60) },
+      ],
+    });
+    const r = await checkCanaryRound(h.deps, s);
+    expect(r).toMatchObject({ done: true, run: { verdict: 'broken', stage: 'verify', issueNumber: 12 } });
     expect(h.alerts.raised).toHaveLength(1);
-    expect(h.alerts.raised[0]?.title).toBe('全流程巡检断在「派活」');
-    expect(h.alerts.raised[0]?.body).toContain('没有能用的路由');
-    expect(h.alerts.raised[0]?.body).toContain('https://github.test/acme/canary/issues/12');
-    expect(h.runsFinished.at(-1)?.result).toEqual({ outcome: 'ok', scanned: 2, found: 1 });
-    expect(h.finished.at(-1)).toMatchObject({ verdict: 'broken', stage: 'dispatch' });
+    expect(h.alerts.raised[0]?.title).toBe('全流程巡检断在「验收」');
+    const body = h.alerts.raised[0]?.body ?? '';
+    expect(body).toContain('断在「验收」（这一步走了 1 小时 1 分）：超过期限 45 分钟还没走完');
+    expect(body).toContain('在做：验收第 1 轮');
+    expect(body).toContain('收单 09-27 19:01（5 分 0 秒）');
+    expect(body).toContain('动手 09-27 19:16（15 分 0 秒）');
+    expect(body).toContain('验收（没走完，走了 1 小时 1 分）');
+    expect(body).toContain('https://github.test/acme/canary/issues/12');
+    expect(h.finished.at(-1)).toMatchObject({
+      verdict: 'broken',
+      stage: 'verify',
+      why: expect.stringContaining('断在「验收」（这一步走了 1 小时 1 分）'),
+    });
+    expect(h.runsFinished.at(-1)?.result).toEqual({ outcome: 'ok', scanned: 4, found: 1 });
   });
 
-  it('【故意造出的失败】连着查不成到上限：这一轮算巡检自己没跑成（schedule_runs 记 failed），不当成没问题', async () => {
+  it('【故意造出的失败】工作流读不到（Temporal 连不上）：这一回记没查成、接着看，不当成断了；连着到上限，这一轮算巡检自己没跑成（schedule_runs 记 failed）', async () => {
     const h = harness({
-      facts: async () => {
-        throw new Error('库连不上');
+      workflows: {
+        state: async () => {
+          throw new Error('Temporal 连不上：14 UNAVAILABLE');
+        },
+        view: async () => view(),
+        stop: async () => 'sent',
       },
     });
     let s = state();
@@ -581,33 +733,67 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
       expect(s.checkFailures).toBe(i);
     }
     const r = await checkCanaryRound(h.deps, s);
-    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run' } });
-    expect(r.done && r.run.why).toContain('库连不上');
+    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'intake' } });
+    expect(r.done && r.run.why).toContain(`连着 ${CANARY_CHECK_FAILURE_LIMIT} 回没查成（停在「收单」）`);
+    expect(r.done && r.run.why).toContain('Temporal 连不上');
     expect(h.runsFinished.at(-1)?.result.outcome).toBe('failed');
+    expect(h.alerts.raised).toEqual([]);
+  });
+
+  it('【故意造出的失败】任务工作流的状态认不出（taskStatus 查询回的不是它的形状）、库读不到：都算这一回没查成，不当成「没停下」往前走', async () => {
+    const odd = harness({
+      workflows: {
+        state: async () => ({ state: 'running' }),
+        view: async (id) => canaryViewOf({ step: 'plan', parked: false }, id),
+        stop: async () => 'sent',
+      },
+    });
+    odd.setFacts(facts({ task: TASK }));
+    const a = await checkCanaryRound(odd.deps, state());
+    expect(a).toMatchObject({ done: false, state: { checkFailures: 1, stage: 'intake' } });
+    const noDb = harness({
+      facts: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const b = await checkCanaryRound(noDb.deps, state({ checkFailures: CANARY_CHECK_FAILURE_LIMIT - 1 }));
+    expect(b).toMatchObject({ done: true, run: { verdict: 'not_run' } });
+    expect(b.done && b.run.why).toContain('库连不上');
   });
 });
 
 describe('status 查询、巡检仓配置的读法', () => {
-  it('认得出 Fusion 的 status；认不出的抛错（这一回没查成），不当成「没挂着」', () => {
+  it('认得出任务工作流的 taskStatus（停下等人：阶段是 parked 或在等人）；认不出的抛错（这一回没查成），不当成「没停下」', () => {
+    const raw = {
+      phase: 'parked',
+      doing: '停下等人：没有可用的路由',
+      round: 1,
+      verifyRound: 0,
+      prNumber: null,
+      waiting: { kind: 'human', detail: '没有可用的路由（等「继续」或「放弃」）', since: at(0) },
+      lastProblem: '没有可用的路由',
+      tier: null,
+    };
+    expect(canaryViewOf(raw, WF)).toEqual({
+      phase: 'parked',
+      doing: '停下等人：没有可用的路由',
+      parked: true,
+      waiting: { kind: 'human', detail: '没有可用的路由（等「继续」或「放弃」）' },
+      prNumber: null,
+      lastProblem: '没有可用的路由',
+      round: 1,
+      verifyRound: 0,
+    });
     expect(
       canaryViewOf(
-        {
-          step: 'plan',
-          parked: true,
-          waiting: { kind: 'human', detail: '挂起', since: at(0) },
-          prNumber: null,
-        },
+        { ...raw, phase: 'ci', waiting: { kind: 'ci', detail: '等 CI', since: at(0) }, prNumber: 13 },
         WF,
       ),
-    ).toEqual({
-      step: 'plan',
-      parked: true,
-      waiting: { kind: 'human', detail: '挂起' },
-      prNumber: null,
-      lastProblem: null,
-    });
-    expect(() => canaryViewOf({ parked: false }, WF)).toThrow('认不出');
-    expect(() => canaryViewOf({ step: 'plan', parked: false, waiting: 'x' }, WF)).toThrow('waiting');
+    ).toMatchObject({ parked: false, prNumber: 13 });
+    // Fusion 的 status（step、parked）不是任务工作流的：认不出
+    expect(() => canaryViewOf({ step: 'plan', parked: false }, WF)).toThrow('认不出');
+    expect(() => canaryViewOf({ ...raw, waiting: 'x' }, WF)).toThrow('waiting');
+    expect(() => canaryViewOf({ ...raw, prNumber: '13' }, WF)).toThrow('prNumber');
   });
 
   it('FLEET_CANARY_REPO：owner/name 才认；没配、写错都明说', () => {
@@ -648,21 +834,11 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
     return { gh, calls };
   }
 
-  /** 假的 Temporal 客户端：这张单的工作流在跑、挂着等人。 */
-  function parkedClient(): Client {
+  /** 假的 Temporal 客户端：这张单的任务工作流 describe 回 status，taskStatus 查询回 taskStatus。 */
+  function fakeClient(status: string, taskStatus?: unknown): Client {
     const handle = {
-      describe: async () => ({ status: { name: 'RUNNING' } }),
-      query: async () => ({
-        step: 'plan',
-        parked: true,
-        waiting: {
-          kind: 'human',
-          detail: '挂起：「plan」没有能用的路由（等「继续」或「换路由」）',
-          since: T0.toISOString(),
-        },
-        prNumber: null,
-        lastProblem: '「plan」没有能用的路由',
-      }),
+      describe: async () => ({ status: { name: status } }),
+      query: async () => taskStatus,
       signal: async () => {},
     };
     return {
@@ -671,13 +847,38 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
     } as unknown as Client;
   }
 
+  async function canaryRepo(): Promise<string> {
+    const [repo] = await t.db
+      .insert(repos)
+      .values({ ...REPO, testCommand: 'node --test', autoDispatchSince: new Date(T0.getTime() - 60_000) })
+      .returning();
+    if (!repo) throw new Error('仓没写进去');
+    return repo.id;
+  }
+
+  async function canaryTask(repoId: string, state: 'stalled' | 'done', phase: string): Promise<string> {
+    const [task] = await t.db
+      .insert(tasks)
+      .values({
+        repoId,
+        issueNumber: 12,
+        title: '巡检第 1 轮：往巡检记录追加一行',
+        rawRequest: '巡检单',
+        requestedBy: 'engine',
+        priority: 10,
+        state,
+        phase,
+      })
+      .returning();
+    if (!task) throw new Error('任务行没写进去');
+    return task.id;
+  }
+
   it(
-    '【故意造出的失败】巡检仓的路由全关：这一轮报「断在派活」、推一条卡住报警、记进库；巡检本身跑成了（登记表上是 ok）',
+    '【故意造出的失败】巡检仓的路由全关：任务工作流停下等人，这一轮报「断在动手」、推一条卡住报警、记进库；巡检本身跑成了（登记表上是 ok）',
     async () => {
       await registerEngineJobs(t.db);
-      await t.db
-        .insert(repos)
-        .values({ ...REPO, testCommand: 'node --test', autoDispatchSince: new Date(T0.getTime() - 60_000) });
+      const repoId = await canaryRepo();
       const { gh, calls } = fakeGh();
       let clock = T0.getTime();
       const make = canaryJob({
@@ -690,46 +891,159 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
         },
         log: () => {},
       });
-      const deps = make(parkedClient());
+      const deps = make(
+        fakeClient('RUNNING', {
+          phase: 'parked',
+          doing: '停下等人：没有可用的路由',
+          round: 1,
+          verifyRound: 0,
+          prNumber: null,
+          waiting: {
+            kind: 'human',
+            detail: '没有可用的路由（等「继续」或「放弃」）',
+            since: T0.toISOString(),
+          },
+          lastProblem: '没有可用的路由',
+          tier: null,
+        }),
+      );
       const opened = await openCanaryRound(deps);
       if (opened.done) throw new Error(`应当开成：${opened.run.why}`);
       // 开单不贴标签、开单时就挂上当前版本（去重键带这一轮的编号）
       expect(calls).toEqual(['open:canary:1:0:1']);
-      // 接活收进来了这张单、派出去了；Fusion 起来了，Lead 选路一条都没有：挂起、报警（kit.ts 的 park）
-      const [repo] = await t.db.select().from(repos);
-      const [task] = await t.db
-        .insert(tasks)
-        .values({
-          repoId: repo?.id ?? '',
-          issueNumber: 12,
-          title: '巡检',
-          rawRequest: '巡检单',
-          requestedBy: 'engine',
-          priority: 10,
-          state: 'planning',
-          phase: 'fusion:plan',
-        })
-        .returning();
+      // 拉单建了任务行、起了任务工作流；工作流选路一条都没有：停下等人、报警（workflows/task.ts 的 park）
+      const taskId = await canaryTask(repoId, 'stalled', 'parked');
       await upsertAlert(t.db, {
         dedupeKey: `${WF}:park:1`,
         level: 'alert',
-        taskId: task?.id ?? null,
-        title: '「plan」没有能用的路由',
+        taskId,
+        title: '没有可用的路由',
         body: '一条都派不出去',
       });
       const r = await checkCanaryRound(deps, opened.state);
-      expect(r).toMatchObject({ done: true, run: { verdict: 'broken', stage: 'dispatch', issueNumber: 12 } });
+      expect(r).toMatchObject({
+        done: true,
+        run: { verdict: 'broken', stage: 'implement', issueNumber: 12 },
+      });
       const row = await canaryRunById(t.db, opened.state.canaryRunId);
-      expect(row).toMatchObject({ verdict: 'broken', stage: 'dispatch', issueNumber: 12, taskId: task?.id });
-      expect(row?.why).toContain('断在「派活」');
+      expect(row).toMatchObject({ verdict: 'broken', stage: 'implement', issueNumber: 12, taskId });
+      expect(row?.why).toContain('断在「动手」');
+      expect(row?.why).toContain('停下等人：没有可用的路由');
       expect(row?.steps.map((s) => s.stage)).toEqual(['open', 'intake']);
       const alert = (await t.db.select().from(notifications)).find((n) => n.dedupeKey === CANARY_ALERT_KEY);
-      expect(alert).toMatchObject({ level: 'alert', title: '全流程巡检断在「派活」', resolvedAt: null });
+      expect(alert).toMatchObject({ level: 'alert', title: '全流程巡检断在「动手」', resolvedAt: null });
       const [run] = await t.db.select().from(scheduleRuns);
       expect(run).toMatchObject({ job: 'canary', outcome: 'ok', found: 1 });
       const health = (await scheduleHealth(t.db, new Date(clock))).find((h) => h.job.id === 'canary');
       expect(health?.status).toBe('ok');
       expect((await latestCanaryRuns(t.db)).finished?.verdict).toBe('broken');
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it(
+    '一整张做完的单：库里的账（runs、每步耗时）、PR 镜像（驾驶舱 Store 读）、GitHub 上做完关了 → 这一轮通过，九步都记进库',
+    async () => {
+      await registerEngineJobs(t.db);
+      const repoId = await canaryRepo();
+      const { gh } = fakeGh({ readIssueState: async () => ({ state: 'closed', stateReason: 'completed' }) });
+      let clock = T0.getTime();
+      const deps = canaryJob({
+        db: t.db,
+        gh,
+        repo: 'acme/canary',
+        now: () => {
+          clock += 60_000;
+          return new Date(clock);
+        },
+        log: () => {},
+      })(fakeClient('COMPLETED'));
+      const opened = await openCanaryRound(deps);
+      if (opened.done) throw new Error(`应当开成：${opened.run.why}`);
+      const taskId = await canaryTask(repoId, 'done', 'done');
+      const after = (min: number) => new Date(T0.getTime() + min * 60_000);
+      await startRun(t.db, {
+        segment: 'manual',
+        issueNumber: 12,
+        model: 'grok-5',
+        startedAt: after(10),
+        endedAt: after(20),
+        outcome: 'done',
+        inputTokens: 5000,
+      });
+      await startRun(t.db, {
+        segment: 'verify',
+        issueNumber: 12,
+        model: 'opus-5.5',
+        startedAt: after(25),
+        endedAt: after(30),
+        outcome: 'done',
+        inputTokens: 3000,
+      });
+      await t.db.insert(stepTimings).values({
+        kind: 'activity',
+        workflowId: WF,
+        temporalRunId: 'run-1',
+        workflowType: 'taskWorkflow',
+        taskId,
+        activity: 'createWorktree',
+        attempt: 1,
+        scheduledAt: after(5),
+        startedAt: after(5),
+        endedAt: after(6),
+        queueMs: 0,
+        runMs: 60_000,
+        outcome: 'ok',
+      });
+      await t.db.insert(pullRequests).values({
+        repoId,
+        number: 13,
+        state: 'merged',
+        headRef: 'fleet/12-t0123abcd',
+        headSha: 'a'.repeat(40),
+        updatedAt: after(35),
+        openedAt: after(20),
+        mergedAt: after(35),
+        mergeSha: 'b'.repeat(40),
+        issueRefs: [12],
+      });
+      // 任务工作流在跑时巡检读到过 PR 号（开 PR 以后的 taskStatus）
+      const r = await checkCanaryRound(deps, { ...opened.state, prNumber: 13 });
+      expect(r).toMatchObject({ done: true, run: { verdict: 'pass', stage: 'board', issueNumber: 12 } });
+      const row = await canaryRunById(t.db, opened.state.canaryRunId);
+      expect(row).toMatchObject({ verdict: 'pass', stage: 'board', taskId });
+      expect(row?.steps.map((s) => s.stage)).toEqual(ALL_STAGES);
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it(
+    '收前几轮留下的单：真装配给任务工作流发「放弃」信号（taskAbandon，谁发的写 engine:canary）；工作流早没了回 gone，不当成出错',
+    async () => {
+      const sent: { id: string; name: string; arg: unknown }[] = [];
+      const client = {
+        workflow: {
+          getHandle: (id: string) => ({
+            signal: async (def: { name: string }, arg: unknown) => {
+              if (id.endsWith('#9')) throw new WorkflowNotFoundError('工作流不在了', id, undefined);
+              sent.push({ id, name: def.name, arg });
+            },
+          }),
+        },
+        connection: { withDeadline: <R>(_: number, fn: () => Promise<R>) => fn() },
+      } as unknown as Client;
+      const deps = canaryJob({
+        db: t.db,
+        gh: fakeGh().gh,
+        repo: 'acme/canary',
+        now: () => T0,
+        log: () => {},
+      })(client);
+      expect(await deps.workflows.stop('task:acme/canary#5', '收掉')).toBe('sent');
+      expect(sent).toEqual([
+        { id: 'task:acme/canary#5', name: 'taskAbandon', arg: { by: 'engine:canary', reason: '收掉' } },
+      ]);
+      expect(await deps.workflows.stop('task:acme/canary#9', '收掉')).toBe('gone');
     },
     TEST_DB_TIMEOUT_MS,
   );
@@ -746,13 +1060,13 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
         },
       });
       const unconfigured = canaryJob({ db: t.db, gh, repo: undefined, now: () => T0, log: () => {} });
-      const a = await openCanaryRound(unconfigured(parkedClient()));
+      const a = await openCanaryRound(unconfigured(fakeClient('RUNNING')));
       expect(a).toMatchObject({ done: true, run: { verdict: 'not_run' } });
       let health = (await scheduleHealth(t.db, T0)).find((h) => h.job.id === CANARY_JOB.id);
       expect(health?.status).toBe('failing');
       expect(health?.lastRun?.why).toContain('FLEET_CANARY_REPO');
       const unreadable = canaryJob({ db: t.db, gh, repo: 'acme/canary', now: () => T0, log: () => {} });
-      const b = await openCanaryRound(unreadable(parkedClient()));
+      const b = await openCanaryRound(unreadable(fakeClient('RUNNING')));
       expect(b).toMatchObject({ done: true, run: { verdict: 'not_run' } });
       health = (await scheduleHealth(t.db, T0)).find((h) => h.job.id === CANARY_JOB.id);
       expect(health?.status).toBe('failing');
@@ -783,20 +1097,21 @@ describe('全流程巡检的工作流（真 Temporal 测试服务端）', { time
     );
   }
 
-  it('开单、隔一会儿看一回、一直看到有结论：交回这一轮的结局', async () => {
+  it('开单、隔一会儿看一回、一直看到有结论：交回这一轮的结局（带每一步走完的时刻）', async () => {
     const h = harness();
     let checks = 0;
     const inner = h.deps.facts;
-    h.deps.facts = async (n) => {
+    h.deps.facts = async (input) => {
       checks += 1;
       if (checks >= 3) {
         h.setWorkflow({ state: 'closed', status: 'COMPLETED' });
         return finished(0).db;
       }
-      return inner(n);
+      return inner(input);
     };
     const run = await runOnce({ canary: () => h.deps });
     expect(run).toMatchObject({ verdict: 'pass', stage: 'board', issueNumber: 12 });
+    expect(run.steps.map((s) => s.stage)).toEqual(ALL_STAGES);
     expect(checks).toBe(3);
   });
 

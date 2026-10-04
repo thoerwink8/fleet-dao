@@ -17,9 +17,12 @@
 //   晚一点到，是兜底（驱动卡死了）。
 // - 会话的临时目录（TMPDIR）：起之前交给会话用户，收场后删；删不掉只记日志（占盘，下次引擎起来的清理会收），不改结局。
 
-import { judgeRun, type SessionUser } from '@fleet-dao/adapters';
+import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/adapters';
+import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
-import { routeLaunchFacts } from '@fleet-dao/db';
+import { routeLaunchFacts, savePoolQuota } from '@fleet-dao/db';
+import { routeEffortProblem } from '@fleet-dao/shared';
+import { hostName } from '../routing/names.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
 import {
   type HostDriver,
@@ -96,7 +99,7 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
 
 /**
  * 路由编号 → 库里的路由、执行方式的驱动、会话用户。Spawner 起会话和调用方起会话之前备工作树（要知道树归谁）用同一个查法。
- * 查不到、没接上、定不下会话用户一律抛错（带白话原因），不落到某个默认执行体上。
+ * 查不到、没接上、定不下会话用户、配的思考档位这家起不了，一律抛错（带白话原因），不落到某个默认执行体、默认档位上。
  */
 export async function resolveSegmentRoute(
   deps: Pick<SegmentSpawnerDeps, 'routeFacts' | 'db' | 'drivers'>,
@@ -122,11 +125,46 @@ export async function resolveSegmentRoute(
   const driver = deps.drivers[route.hostId];
   const who = sessionUserOf(driver, route.runAsUser);
   if ('missing' in who) throw new Error(`账号池 ${route.poolId} ${who.missing}，起不了会话`);
+  if (route.effort !== null) {
+    // 起会话时驱动照同一份判法再判一次（applySessionEffort）；这里先挡，配错了不备树、不在 runs 记一笔
+    const problem = routeEffortProblem(
+      route.hostId,
+      route.upstreamModel ?? route.modelId,
+      route.effort,
+      hostName(route.hostId),
+    );
+    if (problem)
+      throw new Error(`路由 ${route.routeId} 配的思考档位起不了会话（驾驶舱改了再派）：${problem}`);
+  }
   return { route, driver, user: who.user };
 }
 
 export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
   const log = deps.log ?? (() => undefined);
+
+  /**
+   * 会话流里顺带读到的额度（被拒的那一帧带着清零时刻）记到这条路由的池上：和 Fusion 的会话、路由探针同一个写入口、同一个做法
+   * （complete=false：只是几个窗口，不标别的窗口过期）。切号、选路判拼车用满靠它——不记，一次性会话被拒了引擎也不知道（#59）。
+   * 交回写库那一下：插头收场前等它落定（adapters 的 CallbackGate），这一段交回「额度用满」时读数已经在库里，工作流马上
+   * 重新选路不会又派回这个池。记不上只记日志，不改这一段的结局（所以这个 promise 不会 reject）。
+   */
+  const saveReading = (
+    db: Db,
+    route: RouteLaunchFacts,
+    reading: RateLimitReading,
+  ): Promise<void> | undefined => {
+    const windows = readingsFromRateLimit(reading, { poolId: route.poolId });
+    if (!windows?.length) return undefined;
+    return savePoolQuota(db, {
+      poolId: route.poolId,
+      readAt: reading.observedAt,
+      complete: false,
+      windows,
+    }).then(
+      () => undefined,
+      (err: unknown) => log('一次性会话读到的额度没记上', { poolId: route.poolId, error: message(err) }),
+    );
+  };
 
   return async (cmd) => {
     const { input } = cmd;
@@ -156,12 +194,19 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         ...(deps.sudo ? { sudo: deps.sudo } : {}),
       },
       model: route.upstreamModel ?? route.modelId,
-      ...(input.effort !== undefined ? { effort: input.effort } : {}),
+      // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
+      ...(route.effort !== null ? { effort: route.effort } : {}),
+      ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
       session: { mode: 'new', id: driver.newSessionId(runId).id },
       purpose: 'work',
     };
     try {
-      const report = await driver.run(spec, { signal: cmd.signal });
+      const report = await driver.run(spec, {
+        signal: cmd.signal,
+        ...(deps.db
+          ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
+          : {}),
+      });
       return outcomeOfReport(report);
     } finally {
       await deps.trees.remove(tmpDir).catch((err: unknown) => {

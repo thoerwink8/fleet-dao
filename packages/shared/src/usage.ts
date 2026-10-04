@@ -1,7 +1,8 @@
-// 会话用量怎么汇总（#216）：一张单按模型、按阶段、整张合计，四样 token 折成输入当量。
-// 后端的任务详情、网页的演示数据和会话时间线（一次会话也按它算）都调这一份（Fusion 关单评论的「各模型额度」以后也该用它），
-// 免得几处算法不一样。读不到的另记次数（missing*），不当成 0：没读到的那一项不往合计里加任何东西。
-import type { BillingKind, SessionRun, StageKind } from './domain.ts';
+// 会话用量怎么汇总（#216）：一张单按模型、按阶段（老流程的会话）、按段（三段的 runs，每段再按模型）、整张合计，
+// 四样 token 折成输入当量。后端的任务详情、网页的演示数据和会话时间线（一次会话也按它算）都调这一份，免得几处算法不一样。
+// 读不到的另记次数（missing*），不当成 0：没读到的那一项不往合计里加任何东西。
+import type { BillingKind, SegmentKind, SegmentTier, SessionRun, StageKind } from './domain.ts';
+import { SEGMENT_KINDS, type SegmentRunView } from './segment-runs.ts';
 
 /**
  * 输入当量的折法（docs/design.md 第十节「一个 5 小时窗能干多少活」）：输入 1、缓存写 1.25、缓存读 0.1、输出 5。
@@ -126,10 +127,14 @@ export interface UsageTotals {
   costUsd: number;
   missingCost: number;
   cost: CostByBilling;
-  /** 排队、干活时长（毫秒），和库里 queue_ms / run_ms 同一个算法；时刻认不出或倒着的记 missingTime。 */
+  /**
+   * 排队、干活时长（毫秒），和库里 queue_ms / run_ms 同一个算法；时刻认不出或倒着的记 missingTime。
+   * 三段的一笔没有排队这回事（runs 表不记）：干活 = 结束 − 开始，排队不加，记一次 noQueue——排队合计要把它算作没读到。
+   */
   queueMs: number;
   runMs: number;
   missingTime: number;
+  noQueue: number;
 }
 
 export interface ModelUsageTotals extends UsageTotals {
@@ -141,12 +146,46 @@ export interface StageUsageTotals extends UsageTotals {
   stage: StageKind;
 }
 
-export interface TaskUsage {
-  total: UsageTotals;
-  /** 按第一次出现的先后：会话按排队时刻排好传进来，就是先用上的在前。 */
+/** 三段里的一段（对题 / 动手 / 验收）：合计，再按模型分。 */
+export interface SegmentUsageTotals extends UsageTotals {
+  /** 段名认不出的几笔归在 null 这一组（每一笔认不出的原样在它的 unread 里）。 */
+  segment: SegmentKind | null;
+  /** 这一段用过的派工档，按第一次出现的先后；对题、验收不分档，是空的。 */
+  tiers: SegmentTier[];
+  /** 没记派工档或认不出的笔数（只有动手段分档，对题、验收不算）。 */
+  missingTier: number;
   byModel: ModelUsageTotals[];
-  byStage: StageUsageTotals[];
 }
+
+export interface TaskUsage {
+  /** 老流程的会话和三段的 runs 加在一起：各模型额度看这里才全。 */
+  total: UsageTotals;
+  /** 按第一次出现的先后：会话按排队时刻、三段按起跑时刻排好传进来，就是先用上的在前。 */
+  byModel: ModelUsageTotals[];
+  /** 老流程（session_runs）的会话按阶段。 */
+  byStage: StageUsageTotals[];
+  /** 三段（runs）按段：对题、动手、验收的固定先后，段名认不出的一组排最后。只列有过一笔的段。 */
+  bySegment: SegmentUsageTotals[];
+}
+
+/** 汇总要用的一笔三段：readSegmentRun 读好的结果（认不出的、读不到的已经剔掉、记在 unread 里）。 */
+export type SegmentUsageFacts = Pick<
+  SegmentRunView,
+  | 'segment'
+  | 'model'
+  | 'modelName'
+  | 'billing'
+  | 'tier'
+  | 'running'
+  | 'outcome'
+  | 'durationMs'
+  | 'inputTokens'
+  | 'outputTokens'
+  | 'cacheReadTokens'
+  | 'cacheWriteTokens'
+  | 'costUsd'
+  | 'unread'
+>;
 
 function emptyShare(): CostShare {
   return { runs: 0, usd: 0, missing: 0 };
@@ -171,6 +210,7 @@ function emptyTotals(): UsageTotals {
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
+    noQueue: 0,
   };
 }
 
@@ -200,7 +240,34 @@ function add(t: UsageTotals, run: RunUsageFacts): void {
   }
   t.runs += 1;
   if (run.startedAt === undefined) t.notStarted += 1;
+  addReadings(t, run);
+  const spent = durations(run, run.endedAt);
+  if (spent) {
+    t.queueMs += spent.queueMs;
+    t.runMs += spent.runMs;
+  } else t.missingTime += 1;
+}
 
+/** 三段的一笔：在跑的只记 running；结束了的干活 = 读好的耗时（读不到记 missingTime），排队不记（noQueue）。 */
+function addSegment(t: UsageTotals, run: SegmentUsageFacts): void {
+  if (run.running) {
+    t.running += 1;
+    return;
+  }
+  t.runs += 1;
+  t.noQueue += 1;
+  if (run.outcome === 'spawn_failed' || run.outcome === 'admission_blocked') t.notStarted += 1;
+  addReadings(t, run);
+  const ms = run.durationMs;
+  if (ms !== undefined && Number.isFinite(ms) && ms >= 0) t.runMs += ms;
+  else t.missingTime += 1;
+}
+
+/** 结束了的一笔的 token、缓存、当量、花费：读到的加进来，缺哪样记哪样没读到。 */
+function addReadings(
+  t: UsageTotals,
+  run: TokenCounts & { costUsd?: number | undefined; billing?: BillingKind | undefined },
+): void {
   const input = tokens(run.inputTokens);
   const output = tokens(run.outputTokens);
   if (input !== undefined && output !== undefined) {
@@ -229,33 +296,74 @@ function add(t: UsageTotals, run: RunUsageFacts): void {
     t.missingCost += 1;
     share.missing += 1;
   }
-
-  const spent = durations(run, run.endedAt);
-  if (spent) {
-    t.queueMs += spent.queueMs;
-    t.runMs += spent.runMs;
-  } else t.missingTime += 1;
 }
 
-/** 一张单的会话按模型、按阶段、整张合计。 */
-export function summarizeUsage(runs: readonly RunUsageFacts[]): TaskUsage {
+function modelOf(
+  byModel: Map<string, ModelUsageTotals>,
+  run: { model: string; modelName: string },
+): ModelUsageTotals {
+  let model = byModel.get(run.model);
+  if (!model) {
+    model = { model: run.model, modelName: run.modelName, ...emptyTotals() };
+    byModel.set(run.model, model);
+  }
+  return model;
+}
+
+/** 段的先后：对题、动手、验收，认不出的排最后。 */
+const segmentRank = (s: SegmentKind | null) => (s === null ? SEGMENT_KINDS.length : SEGMENT_KINDS.indexOf(s));
+
+/**
+ * 一张单的用量：runs 是老流程的会话（按排队时刻排好），segments 是三段读好的流水（readSegmentRun 的结果，按起跑时刻排好）。
+ * 整张合计和按模型两样都算；按阶段只算会话，按段只算三段。
+ */
+export function summarizeUsage(
+  runs: readonly RunUsageFacts[],
+  segments: readonly SegmentUsageFacts[] = [],
+): TaskUsage {
   const total = emptyTotals();
   const byModel = new Map<string, ModelUsageTotals>();
   const byStage = new Map<StageKind, StageUsageTotals>();
   for (const run of runs) {
-    let model = byModel.get(run.model);
-    if (!model) {
-      model = { model: run.model, modelName: run.modelName, ...emptyTotals() };
-      byModel.set(run.model, model);
-    }
     let stage = byStage.get(run.stage);
     if (!stage) {
       stage = { stage: run.stage, ...emptyTotals() };
       byStage.set(run.stage, stage);
     }
     add(total, run);
-    add(model, run);
+    add(modelOf(byModel, run), run);
     add(stage, run);
   }
-  return { total, byModel: [...byModel.values()], byStage: [...byStage.values()] };
+  const bySegment = new Map<
+    SegmentKind | null,
+    SegmentUsageTotals & { models: Map<string, ModelUsageTotals> }
+  >();
+  for (const run of segments) {
+    let seg = bySegment.get(run.segment);
+    if (!seg) {
+      seg = {
+        segment: run.segment,
+        tiers: [],
+        missingTier: 0,
+        byModel: [],
+        models: new Map(),
+        ...emptyTotals(),
+      };
+      bySegment.set(run.segment, seg);
+    }
+    if (run.tier !== undefined && !seg.tiers.includes(run.tier)) seg.tiers.push(run.tier);
+    if (run.unread.some((n) => n.item === 'tier')) seg.missingTier += 1;
+    addSegment(total, run);
+    addSegment(modelOf(byModel, run), run);
+    addSegment(seg, run);
+    addSegment(modelOf(seg.models, run), run);
+  }
+  return {
+    total,
+    byModel: [...byModel.values()],
+    byStage: [...byStage.values()],
+    bySegment: [...bySegment.values()]
+      .sort((a, b) => segmentRank(a.segment) - segmentRank(b.segment))
+      .map(({ models, ...seg }) => ({ ...seg, byModel: [...models.values()] })),
+  };
 }

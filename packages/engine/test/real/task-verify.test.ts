@@ -9,13 +9,15 @@ import type { PullFacts } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../../src/ports.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
+import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
 import {
   type ColdVerifyActivityDeps,
   createColdVerify,
   type DiffFile,
   renderDiff,
+  VERIFY_ORG_SWITCH_RETRY_SECONDS,
 } from '../../src/real/task-verify.ts';
-import type { RunRecord } from '../../src/runner/not-wired.ts';
+import type { RunRecord, RunStart } from '../../src/runner/not-wired.ts';
 import type { ColdVerifyInput } from '../../src/task-contract.ts';
 import { FAMILY_ORDER, type ModelFamily } from '../../src/verifier-invoke.ts';
 import { fakeTrees } from './fixtures.ts';
@@ -23,6 +25,7 @@ import { fakeTrees } from './fixtures.ts';
 const USER = 'fleet-agent-carpool' as SessionUser;
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
 const BRANCH = 'fleet/12-t1a2b3c4d';
+const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 
@@ -38,6 +41,7 @@ const routeFacts = (routeId: string, over: Partial<RouteLaunchFacts> = {}): Rout
   upstreamModel: null,
   runAsUser: USER,
   orgKind: null,
+  effort: null,
   ...over,
 });
 
@@ -134,6 +138,7 @@ function rig(
   const posted: Posted[] = [];
   const specs: HostRunSpec[] = [];
   const recorded: RunRecord[] = [];
+  const started: RunStart[] = [];
   const asked: PickRouteInput[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -190,6 +195,9 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
+      async start(r) {
+        started.push(r);
+      },
       async record(r) {
         recorded.push(r);
       },
@@ -204,7 +212,7 @@ function rig(
   });
   const input = (over: Partial<ColdVerifyInput> = {}): ColdVerifyInput => ({
     schemaVersion: 1,
-    taskId: 'task-1',
+    taskId: TASK_ID,
     repo: REPO,
     issueNumber: 12,
     prNumber: 42,
@@ -217,7 +225,7 @@ function rig(
     round: 1,
     ...over,
   });
-  return { run, input, ft, posted, specs, recorded, asked };
+  return { run, input, ft, posted, specs, recorded, started, asked };
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
@@ -232,7 +240,7 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     ]);
     // 作者是 claude：按 0006 顺序问的第一家是 gpt
     expect(r.asked.map((a) => a.avoidFamilies?.includes('gpt'))).toEqual([false]);
-    expect(r.asked[0]).toMatchObject({ taskId: 'task-1', stage: 'review' });
+    expect(r.asked[0]).toMatchObject({ taskId: TASK_ID, stage: 'review' });
     // 会话：空目录归会话用户、会话在里面起、收场删掉
     expect(r.specs).toHaveLength(1);
     const cwd = r.specs[0]?.cwd ?? '';
@@ -246,9 +254,20 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     expect(r.specs[0]?.prompt).toContain('export const Status = 1;');
     expect(r.specs[0]?.prompt).toContain('给驾驶舱加状态栏');
     expect(r.specs[0]?.prompt).toContain('驾驶舱顶部有状态栏');
-    // runs：segment 是 verify，记到这张单名下
+    // runs：segment 是 verify，开跑那一行、收场那一笔都记到这张单名下（#216）：tasks.id、单号、任务工作流编号、PR、分支；
+    // 验收是冷调用，不带派工档
+    const owner = {
+      segment: 'verify',
+      taskId: TASK_ID,
+      issueNumber: 12,
+      workflowId: 'task:acme/demo#12',
+      prNumber: 42,
+      branch: BRANCH,
+    };
+    expect(r.started).toEqual([expect.objectContaining(owner)]);
     expect(r.recorded).toHaveLength(1);
-    expect(r.recorded[0]).toMatchObject({ segment: 'verify', issueNumber: 12, outcome: 'done' });
+    expect(r.recorded[0]).toMatchObject({ ...owner, outcome: 'done' });
+    expect(r.recorded[0]).not.toHaveProperty('tier');
   });
 
   it('没过：问题原样带出，贴 failure；不是 unavailable（返工解决得了）', async () => {
@@ -441,6 +460,62 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
     expect(r.recorded.map((x) => x.outcome)).toEqual(['admission_blocked']);
   });
+
+  it('切号把这一次验收停下（#59）：retry（slot、切号的秒数），状态 pending 不是 failure；runs 记 org_switch；登记走掉', async () => {
+    const sessions = oneShotSessions();
+    let resolveStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const r = rig({
+      picks: { gpt: okRoute('gpt') },
+      deps: { sessions },
+      driverRun: async (_spec, hooks) => {
+        resolveStarted();
+        await new Promise<void>((resolve) => {
+          (hooks.signal as AbortSignal).addEventListener('abort', () => resolve(), { once: true });
+        });
+        return report('', {
+          facts: { exitCode: null, killed: 'aborted', quotaExhausted: false } as RunFacts,
+        });
+      },
+    });
+    const pending = r.run(r.input(), ctx());
+    await started;
+    // 挑中的路由在 pool-gpt 上：切号看得见这一次验收（编号是开跑时 runs 那一行的编号）
+    const live = sessions.live(new Set(['pool-gpt']));
+    expect(live).toHaveLength(1);
+    expect(sessions.stop(new Set(['pool-gpt']), '切号：拼车切到独享，先停下')).toEqual(live);
+    const got = await pending;
+    expect(got).toMatchObject({
+      pass: false,
+      problems: [],
+      retry: { wait: 'slot', afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS },
+    });
+    expect(got.retry?.reason).toContain('切号');
+    expect(got.unavailable).toBeUndefined();
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+    expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([[live[0], 'org_switch']]);
+    expect(sessions.live(new Set(['pool-gpt']))).toEqual([]);
+  });
+
+  it('挑完路由、还没起会话（备目录那一下）就被切号停下：不起会话，回 retry；停下时登记的编号就是记成 org_switch 的那一行', async () => {
+    const sessions = oneShotSessions();
+    let stopped: string[] = [];
+    const r = rig({ picks: { gpt: okRoute('gpt') }, deps: { sessions } });
+    // 备目录（交给会话用户）那一下切号
+    const adopt = r.ft.trees.adopt;
+    r.ft.trees.adopt = async (dir, user) => {
+      stopped = sessions.stop(new Set(['pool-gpt']), '切号：拼车切到独享，先停下');
+      return adopt(dir, user);
+    };
+    const got = await r.run(r.input(), ctx());
+    expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS });
+    expect(r.specs).toHaveLength(0);
+    expect(stopped).toHaveLength(1);
+    expect(r.recorded.map((x) => [x.runId, x.outcome])).toEqual([[stopped[0], 'org_switch']]);
+    expect(sessions.live(new Set(['pool-gpt']))).toEqual([]);
+  });
 });
 
 describe('PR 的头不是要验的那个了', { timeout: 30_000 }, () => {
@@ -494,6 +569,26 @@ describe('【故意造出的失败】贴不上、读不到、被叫停：抛出�
       pickRouteError: new PortError('DB_DOWN', '库连不上', { retryable: true }),
     });
     await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'DB_DOWN' });
+    expect(r.specs).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】开跑那一行写不进 runs（库一时不通，#157）：会话没起，PortError VERIFY_RUNS_UNWRITABLE 往外抛（可以重试），不是「验收做不出来」', async () => {
+    const r = rig({
+      deps: {
+        runs: {
+          async start() {
+            throw new Error('runs 开跑那一行写入失败：connection refused');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    const err = await r.run(r.input(), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'VERIFY_RUNS_UNWRITABLE', retryable: true });
+    expect((err as Error).message).toContain('connection refused');
     expect(r.specs).toHaveLength(0);
   });
 

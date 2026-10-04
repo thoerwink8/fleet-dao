@@ -3,9 +3,9 @@
 # 应用的本机配置（/etc/fleet-dao 下）里装机脚本还要管的几件事，和上线前后要读回的几样。要先 source common.sh。
 # france.sh 用它装和读回；deploy/test/app-config.test.sh 拿临时文件喂它，验第二遍零改动、值不进输出、每种读不到都判红。
 #   1. 读键和 systemd 同一种读法（env_parse）：engine.env、api.env 和几个随机密钥文件是单元的 EnvironmentFile，
-#      服务里生效的值按 systemd 的读法算。装机脚本补键、填值、读回都照这一种读法，读回说的才是服务里生效的那个值。
-#   2. 样例后来加的键：机器上的文件里一次都没出现过（生效的赋值、注释掉的赋值、光写了键，都算出现过）才照样例补上。
-#      只补缺，已有的一概不动：这些文件之后归人改。要人定的键（APP_CONFIG_MUST_SET）不补，缺了读回判红。
+#      服务里生效的值按 systemd 的读法算。装机脚本填值、读回都照这一种读法，读回说的才是服务里生效的那个值。
+#   2. 新机器上照仓里的期望建 engine.env、api.env、release.env（env_from_desired，#323）：公开的照期望写，私有的只留空位
+#      等人放。文件已经在就不建、不补：之后每一项都由发布时照期望写（deploy/release.sh，只写期望变了的键），对账报偏离。
 #   3. api.env 的 FLEET_GITHUB_WEBHOOK_SECRET：要和 GitHub 上「引擎」App 设置里的 Webhook secret 一致（App 级 webhook
 #      挂在引擎机器人上），值就在 /etc/fleet-dao/github/ 引擎那份 json 的 webhook_secret 里。api.env 里为空才填；
 #      json 里没有、或者值的样子写不进环境文件，就记待配，不瞎填（瞎填的值和 App 的对不上，webhook 签名全部验不过）。
@@ -15,10 +15,8 @@
 # 值一律不打印、不上命令行（/proc 里别的用户看得到命令行）：只在 bash 变量里过手，经 put_file 写文件。
 
 APP_CONFIG_OWNER=root:fleet   # 测试时换成 root:root（测试机上没有 fleet 组）
-APP_CONFIG_NODE=/usr/bin/node # 读 json 用的 node（france.sh 的前提里查过）；测试机上可能在别处
+APP_CONFIG_NODE=/usr/bin/node # 读 json、照期望建文件用的 node（france.sh 的前提里查过）；测试机上可能在别处
 APP_CONFIG_WHY=""             # 最近一次读不到、认不出、取不到值的原因
-# 要人定的键：样例里有也不补（补上就等于替人选了），缺了读回判红。FLEET_ENGINE_PORTS 决定引擎碰不碰真仓、真会话
-APP_CONFIG_MUST_SET=(FLEET_ENGINE_PORTS)
 
 # env_parse 的结果：生效的赋值按出现顺序（同一个键写几次就几条）；出现过但不生效的键名（注释掉的赋值、光写了键）
 APP_ENV_KEYS=()
@@ -216,14 +214,6 @@ env_mentioned() { # 键
   return 1
 }
 
-app_config_must_set() { # 键
-  local k
-  for k in "${APP_CONFIG_MUST_SET[@]}"; do
-    if [[ "$k" == "$1" ]]; then return 0; fi
-  done
-  return 1
-}
-
 # 配置文件的路径能不能动：不在（第一次建）或是普通文件才能。符号链接（含断链）不跟着改——属主权限会改到链接指的
 # 文件上，写文件会把链接换掉；目录和别的东西也不动。这几种判红、返回 1，调用方跳过这个文件、什么都不改
 app_config_path_ok() { # 路径
@@ -238,62 +228,18 @@ app_config_path_ok() { # 路径
   return 0
 }
 
-# 第一次照样例建环境文件时用的内容：要人定的键（APP_CONFIG_MUST_SET）那一行改成注释，不替人选——样例里的
-# FLEET_ENGINE_PORTS=real 原样抄过去，就等于没人确认就让引擎碰真仓、真会话。注释掉以后补键不会补回来（算出现过），
-# 读回判红，等人放开。样例读不到回 1（APP_CONFIG_WHY 写明），调用方不建文件
-example_for_new_file() { # 样例
-  local example=$1 content line k out="" re
-  APP_CONFIG_WHY=""
-  if [[ ! -f "$example" ]] || ! { content=$(<"$example"); } 2>/dev/null; then
-    APP_CONFIG_WHY="读不了样例 $example"
+# 新机器上照仓里的期望建一份应用的环境文件（#323）：文件不在才建（在了就不动——之后归发布时照期望写，deploy/release.sh）。
+# 内容由 config.mjs render 照期望出：公开的写期望的值，私有的只留空位（KEY=）等人放，不生造值。期望读不到、认不出、
+# render 没跑成：判红、返回 1、不建（不拿空文件、半截文件顶）
+env_from_desired() { # 要建的文件 文件名（engine.env、api.env、release.env） 期望文件 config.mjs
+  local file=$1 name=$2 desired=$3 cli=$4 content
+  if [[ -e "$file" || -L "$file" ]]; then return 0; fi
+  if ! content=$("$APP_CONFIG_NODE" "$cli" render "$name" --desired "$desired" 2>&1) || [[ -z "$content" ]]; then
+    red "建不了 $file：照期望 $desired 出不了内容（${content##*$'\n'}），没建"
     return 1
   fi
-  while IFS= read -r line; do
-    for k in "${APP_CONFIG_MUST_SET[@]}"; do
-      re="^[[:space:]]*${k}[[:space:]]*="
-      if [[ "$line" =~ $re ]]; then
-        line="# $line    # 要人定，装机脚本不替人选：放开这一行再发布"
-        break
-      fi
-    done
-    out+="$line"$'\n'
-  done <<<"$content"
-  printf '%s' "${out%$'\n'}"
-}
-
-# 样例里有、文件里一次都没出现过的键，照样例（连同样例给的值）补在文件末尾，前面加一行说明是哪几个。要人定的键不补。
-# 第二遍零改动。文件、样例读不到或认不出：判红、返回 1、文件不动（不当成「一个键都没有」把样例整份补进去）
-add_missing_keys() { # 文件 样例
-  local file=$1 example=$2 line key content ex n=0 added=() lines=()
-  if ! env_parse "$file"; then
-    red "补不了样例后来加的键：$APP_CONFIG_WHY（文件不动）"
-    return 1
-  fi
-  if ! { content=$(<"$file"); } 2>/dev/null; then
-    red "补不了样例后来加的键：读不了 $file（文件不动）"
-    return 1
-  fi
-  if [[ ! -f "$example" || ! -r "$example" ]] || ! { ex=$(<"$example"); } 2>/dev/null; then
-    red "补不了样例后来加的键：读不了样例 $example（$file 不动）"
-    return 1
-  fi
-  while IFS= read -r line; do
-    n=$((n + 1))
-    if [[ "$line" =~ ^[[:space:]]*(#|$) ]]; then continue; fi
-    if [[ ! "$line" =~ ^([A-Z][A-Z0-9_]*)= ]]; then
-      red "样例 $example 第 $n 行认不出（样例里只写注释和 KEY=值）：$file 不动"
-      return 1
-    fi
-    key=${BASH_REMATCH[1]}
-    if app_config_must_set "$key" || env_mentioned "$key"; then continue; fi
-    lines+=("$line")
-    added+=("$key")
-  done <<<"$ex"
-  if ((${#added[@]} == 0)); then return 0; fi
-  content+=$'\n'"# deploy/france.sh 照新版样例补的（样例后来加的键，值是样例给的，要改就在这里改）：${added[*]}"
-  for line in "${lines[@]}"; do content+=$'\n'"$line"; done
   put_file "$file" "$APP_CONFIG_OWNER" 640 "$content"
-  changed "$file 照新版样例补上 ${#added[@]} 个键：${added[*]}（值不打印）"
+  echo "  · $file 是照期望 $desired 建的：私有值空着，等人放（值不打印）"
 }
 
 # 从 GitHub App 的 json 取 webhook_secret（打印到标准输出，只给调用方收进变量）。取不到、样子不对回 1，原因在 APP_CONFIG_WHY。
@@ -456,8 +402,8 @@ check_env_duplicates() { # 文件…
 }
 
 # 读回引擎的 engine.env（fleet-engine.service 的 EnvironmentFile），按 systemd 的读法：
-#   FLEET_ENGINE_PORTS 要人定（real / fake；缺了引擎起不来，装机脚本不补）；
-#   下面两个键要钉在约定的值上，补键只补缺、不改已有的，所以旧值（比如 FLEET_WORK_DIR=/tmp）只有读回拦得住：
+#   FLEET_ENGINE_PORTS 要写（real / fake；缺了引擎起不来；期望里写的是哪个，新机器照期望建、发布照期望写）；
+#   下面两个键要钉在约定的值上：发布只写期望变了的键、人手改的不改回，所以旧值（比如 FLEET_WORK_DIR=/tmp）只有读回拦得住：
 #   FLEET_WORK_DIR 要是 fleet-agent-scope 认的工作树的根（它只认这一个，引擎算到别处建树、交树都会被拒）；
 #   FLEET_ENGINE_STATE_DIR 要是 france.sh 建好、属 fleet 的那个目录。
 # 文件读不到、认不出，和键没写、写了几行、值不认识，各报各的
@@ -469,7 +415,7 @@ check_engine_env() { # engine.env 工作树的根 引擎状态目录
     return 1
   fi
   if ((rc == 1)); then
-    red "$file 里没有生效的 FLEET_ENGINE_PORTS（没写，或被注释掉了）：引擎起不来。这一项装机脚本不替人定，写 real（真仓、真会话）或 fake（假实现）"
+    red "$file 里没有生效的 FLEET_ENGINE_PORTS（没写，或被注释掉了）：引擎起不来。照仓里的期望写回来（real 真仓、真会话；fake 假实现），要换先改期望"
     bad=1
   elif ((APP_ENV_COUNT > 1)); then
     red "$file 里 FLEET_ENGINE_PORTS 写了 $APP_ENV_COUNT 行（服务里生效的是最后一行「$APP_ENV_VALUE」）：删成一行"
@@ -489,7 +435,7 @@ check_engine_env() { # engine.env 工作树的根 引擎状态目录
   ((bad == 0))
 }
 
-# engine.env 里一个要钉在约定值上的键：等于约定值通过；没写、被注释掉记待配（没写时 france.sh 照样例补）；
+# engine.env 里一个要钉在约定值上的键：等于约定值通过；没写、被注释掉记待配（期望里有它：照期望写回那一行）；
 # 写了几行、值不对判红、返回 1。文件读不到、认不出也判红（调用方前面已经读过一次，这里照样不装没事）
 pin_engine_key() { # engine.env 键 约定值 是什么
   local file=$1 key=$2 want=$3 what=$4 rc=0
@@ -502,7 +448,7 @@ pin_engine_key() { # engine.env 键 约定值 是什么
     if env_mentioned "$key"; then
       pending "$file 里的 $key 被注释掉了（$what 要是 $want）：放开那一行"
     else
-      pending "$file 没写 $key（$what 要是 $want）：跑一遍 france.sh 会照样例补上"
+      pending "$file 没写 $key（$what 要是 $want）：照仓里的期望把 $key=$want 写回去（发布只写期望变了的键，不替人补回删掉的）"
     fi
     return 0
   fi

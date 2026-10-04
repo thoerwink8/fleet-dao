@@ -114,8 +114,6 @@ export function createSeed(now: number): MockState {
     runs?: SessionRun[];
     subtasks?: MSubtask[];
     asks?: MAsk[];
-    /** 这一轮开工时读自哪。不填 = 卡片上不标。 */
-    flowSource?: 'project' | 'org_default';
   }
   function task(s: TaskSpec): MTask {
     const t: MTask['task'] = {
@@ -130,7 +128,6 @@ export function createSeed(now: number): MockState {
       createdAt: at(s.created),
     };
     if (s.spec) t.specDir = s.spec;
-    if (s.flowSource) t.flowSource = s.flowSource;
     return { task: t, runs: s.runs ?? [], subtasks: s.subtasks ?? [], paused: false, asks: s.asks ?? [] };
   }
   /** 分诊、需求文档、方案三段需求级会话。 */
@@ -687,7 +684,6 @@ export function createSeed(now: number): MockState {
       state: 'running',
       priority: 1,
       created: -9,
-      flowSource: 'org_default',
       runs: [
         run({
           task: 't-c7',
@@ -744,7 +740,6 @@ export function createSeed(now: number): MockState {
       state: 'done',
       priority: 2,
       created: -372,
-      flowSource: 'org_default',
       runs: [
         run({
           task: 't-c6',
@@ -877,6 +872,90 @@ export function createSeed(now: number): MockState {
       priority: 3,
       created: -30,
     }),
+    // 走三段的单：没有老流程的会话，只有 runs 表的流水（对题一次、动手两轮快档、验收一次冷调用）
+    {
+      ...task({
+        id: 't-c9',
+        repo: 'r-canary',
+        issue: 9,
+        title: 'README 的时间改成北京时间',
+        raw: '巡检：README 那行时间改成北京时间',
+        by: 'u-bot',
+        state: 'done',
+        priority: 1,
+        created: -185,
+      }),
+      segmentRuns: [
+        {
+          id: 'seg-c9-1',
+          segment: 'scope',
+          taskId: 't-c9',
+          issueNumber: 9,
+          model: 'opus-5.5',
+          channel: 'ch-claude',
+          startedAt: at(-182),
+          endedAt: at(-176),
+          outcome: 'done',
+          inputTokens: 16_400,
+          outputTokens: 2_100,
+          cacheReadTokens: 188_000,
+          cacheWriteTokens: 8_200,
+          costUsd: 0.38,
+        },
+        {
+          id: 'seg-c9-2',
+          segment: 'manual',
+          taskId: 't-c9',
+          issueNumber: 9,
+          model: 'kimi-k3',
+          channel: 'ch-relay',
+          tier: 'fast',
+          startedAt: at(-174),
+          endedAt: at(-144),
+          outcome: 'timeout',
+          failureReason: '30 分钟没交活，按超时收了',
+          // 中转只报输入输出：缓存读写、花费没读到（演示「没读到」不显示成 0）
+          inputTokens: 58_000,
+          outputTokens: 4_600,
+          branch: 'agent/9-readme-tz',
+        },
+        {
+          id: 'seg-c9-3',
+          segment: 'manual',
+          taskId: 't-c9',
+          issueNumber: 9,
+          model: 'opus-5.5',
+          channel: 'ch-claude',
+          tier: 'fast',
+          startedAt: at(-142),
+          endedAt: at(-119),
+          outcome: 'done',
+          inputTokens: 39_000,
+          outputTokens: 7_100,
+          cacheReadTokens: 1_040_000,
+          cacheWriteTokens: 48_000,
+          costUsd: 1.42,
+          prNumber: 12,
+          branch: 'agent/9-readme-tz',
+        },
+        {
+          // 写入那一端还没记 task_id 的一笔：按单号兜底对上
+          id: 'seg-c9-4',
+          segment: 'verify',
+          issueNumber: 9,
+          model: 'gpt-5.6-luna',
+          channel: 'ch-relay',
+          startedAt: at(-110),
+          endedAt: at(-103),
+          outcome: 'done',
+          inputTokens: 21_000,
+          outputTokens: 900,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          prNumber: 12,
+        },
+      ],
+    },
   ];
 
   // ---------- 还没拆出来的子任务 ----------
@@ -1071,12 +1150,13 @@ export function createSeed(now: number): MockState {
       createdAt: at(-3),
       deliveries: delivered(-3),
       handling: {
-        stage: 'claimed',
-        stageText: '有人在修',
+        stage: 'pr_open',
+        stageText: 'PR 开着',
         since: at(-2),
-        who: '本机/工人A',
+        who: 'PR #16',
         work: { repo: { owner: 'acme', name: 'orbit' }, issueNumber: 17 },
-        line: '本机/工人A 在处理 · acme/orbit#17 · 查备份机的 ssh · 2 分钟',
+        pr: { repo: { owner: 'acme', name: 'orbit' }, number: 16, state: 'open' },
+        line: 'PR #16 在处理 · acme/orbit#17 · PR #16 开着 · 2 分钟',
         problems: [],
       },
     },
@@ -1332,30 +1412,6 @@ export function createSeed(now: number): MockState {
       },
       { id: 'r-site', owner: 'acme', name: 'website', defaultBranch: 'main', testCommand: 'pnpm test' },
     ],
-    // 顶栏三种样子。提交 40 位十六进制；认不出不抹掉上次读成的。不在这里重算 45 分钟。
-    repoFlows: {
-      'r-orbit': {
-        source: 'project',
-        commit: `${'a1b2c3d'.padEnd(40, 'e')}`,
-        syncedAt: at(-6),
-        error: null,
-        unread: null,
-      },
-      'r-canary': {
-        source: 'org_default',
-        commit: `${'b7c0de1'.padEnd(40, 'b')}`,
-        syncedAt: at(-6),
-        error: null,
-        unread: null,
-      },
-      'r-site': {
-        source: 'project',
-        commit: `${'c9ffee0'.padEnd(40, 'c')}`,
-        syncedAt: at(-6),
-        error: '不是合法的 JSON',
-        unread: null,
-      },
-    },
     channels: [
       { id: 'ch-claude', name: 'Claude 订阅', billing: 'subscription', enabled: true },
       { id: 'ch-relay', name: '中转站', billing: 'subscription', enabled: true },

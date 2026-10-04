@@ -61,6 +61,7 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import { PLAN_DOC } from '@fleet-dao/conventions';
 import {
   appendProgressEvents,
+  closeOpenRuns,
   type Db,
   finishSessionRun,
   getSessionRun,
@@ -99,7 +100,6 @@ import {
 } from '../ports.ts';
 import { hostName } from '../routing/names.ts';
 import type { UserExec } from './exec.ts';
-import { sessionTestCommandOrStop } from './flow-gate.ts';
 import {
   type ContinueMode,
   type HostDriver,
@@ -123,6 +123,7 @@ import {
   scopeOomKills,
 } from './kill-evidence.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
+import type { OrgSwitchSessions } from './org-switch.ts';
 import {
   isLeadKind,
   type LeadOutputKind,
@@ -194,6 +195,9 @@ const orgSwitchFailure = (why: string) => ({ code: ORG_SWITCH_CODE, message: why
 export const ENGINE_STOP_CODE = 'engine_stop';
 /** 引擎在排空、这次没起会话（startSession 拒了）：失败分流 ES1 认它——不记账，回去选路（选路这时回「过一会儿再选」）。 */
 export const ENGINE_STOPPING_CODE = 'ENGINE_STOPPING';
+/** 工人起来时收掉上一轮引擎留下、还开着的 runs 行（#157）写的原因。 */
+export const ORPHAN_RUN_REASON =
+  '引擎重启时这一段还没收场：一次性会话不脱开引擎进程跑，上一轮引擎一退它就断了（新引擎起来时收掉了它的 scope），按没跑完收掉';
 
 /** 插头默认等第一帧的时限（adapters 的 DEFAULT_PROCESS_LIMITS.startupMs）。 */
 export const STARTUP_BASE_MS = 180_000;
@@ -386,7 +390,10 @@ export type SessionPorts = {
   awaitSession(input: AwaitSessionInput, ctx: PortContext): Promise<SessionEnd>;
   stopSession(input: StopSessionInput, ctx: PortContext): Promise<void>;
 } & {
-  /** 工人起来接活之前：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，回收了几个会话。 */
+  /**
+   * 工人起来接活之前（只在这时调）：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，
+   * runs 里还开着的一次性会话那几行收成没跑完（#157）；回收了几个会话。
+   */
   reapOrphanSessions(): Promise<number>;
   /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
   orgSwitch: OrgSwitchSessions;
@@ -400,15 +407,11 @@ export type SessionPorts = {
 };
 
 /**
- * 切号那一刻在跑的会话（#59）。只管这个工人进程里起的会话：会话都由它起，工人重启时上一轮留下的已经收掉了。
- * stop：把跑在这些账号池上、进程已经起来的会话停下（插头收进程），它们交回 org_switch，工作流切完续同一个会话；
- * 交回这一次叫停的会话编号（已经在停的不重复叫停）。还在建树、没起进程的不碰：它们一起进程就在 live 里，下一次再停。
- * live：跑在这些账号池上、还没收场的会话编号（进程起来了、还没交回的），切号要等它们都收场。
+ * 切号那一刻在跑的 Fusion 会话（#59；接口定义在 real/org-switch.ts）。只管这个工人进程里起的会话：会话都由它起，工人重启时
+ * 上一轮留下的已经收掉了。stop 把进程已经起来的停下（它们交回 org_switch，工作流切完续同一个会话）；还在建树、没起进程的不碰：
+ * 它们一起进程就在 live 里，下一次再停。
  */
-export interface OrgSwitchSessions {
-  stop(poolIds: ReadonlySet<string>, why: string): string[];
-  live(poolIds: ReadonlySet<string>): string[];
-}
+export type { OrgSwitchSessions };
 
 interface Live {
   runId: string;
@@ -1296,8 +1299,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
     // 资源上限先换算、先校验：不对就在登记这一行之前拒，库里不留没起也没结束的会话
     const limits = scopeLimitsOf(input.resources);
-    // 流程配置副本也先核（flow-gate.ts）：坏了、太旧不起；写码阶段项目没写测试命令明确失败。交代的命令记进这一行，交活认它
-    const testCommand = sessionTestCommandOrStop(task, input.stage, clock());
+    // 交代的测试命令记进这一行，交活认它（没有每仓流程配置了，直接用仓的 test_command）
+    const testCommand = task.repo.testCommand;
     let dir: string;
     if (kind === 'delivery' || isLeadKind(kind)) {
       // Fusion 的 Lead 每一步都在这张单的工作树里（续同一个会话要同一个目录；写方案、写结果就提交在分支上）
@@ -1511,6 +1514,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
       cgroup,
       model: route.upstreamModel ?? route.modelId,
+      // 驾驶舱给这条路由配的思考档位（没配用 high）；驱动起会话时照它判、照它传（hosts.ts 的 applySessionEffort）
+      ...(route.effort === null ? {} : { effort: route.effort }),
       session,
       // 会话用户读不到引擎的配置和机器人凭据（design 第十四节），无头会话没人批权限：放开（驱动按执行方式给参数）。
       purpose: 'work',
@@ -2440,6 +2445,12 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const swept = await sweepTmp(new Set(kept));
     if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
     await sweepIo(new Set(kept));
+    // 三段的一次性会话（runs 表）不脱开引擎进程跑、没有能接回的：上一轮引擎一退它们就断了（scope 上面收掉了），库里还开着的
+    // 那几行收成没跑完——不收，切号就一直以为它们在跑、一直等（#157）。所以这一步只能在工人起来、接活之前跑
+    const closed = await closeOpenRuns(db, { endedAt: clock(), reason: ORPHAN_RUN_REASON });
+    if (closed.length > 0) {
+      log(`上一轮引擎起的一次性会话没收场的 ${closed.length} 个，库里那几行收成没跑完：${closed.join('、')}`);
+    }
     return reaped;
   }
 
