@@ -1,6 +1,6 @@
 // PreToolUse 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，Claude Code 每次调 Bash、PowerShell、Read、Grep 之前跑）：
-// 拦住绕过仓里脚本、会把本机会话全弄断、会把密钥文件的内容读进对话的调用。只是止血：正式的强制点在仓里
-// （packages/conventions、卫生检查），这里挡的是会话自己手滑。
+// 拦住绕过仓里脚本、会把本机会话全弄断、会把密钥文件的内容读进对话、会把别的进程的命令行（里面常有口令）打出来的调用。
+// 只是止血：正式的强制点在仓里（packages/conventions、卫生检查），这里挡的是会话自己手滑。
 // 协议：stdin 一份 JSON（tool_name、tool_input、cwd）；退出码 2 = 拦下，stderr 给模型看；0 = 放行。
 // 输入认不出一律按拦处理（退出码 2），不当成没事放行。
 // 规矩本身由 agents/test/rules/pretool.rules.test.ts 钉住：改这里的判断改了规矩，那边会红。
@@ -795,6 +795,132 @@ function isViewerFeeder(info) {
   return files.length === 1 && VIEWER_RE.test(files[0].value);
 }
 
+const REDACTOR_RE = /(?:^|[\\/])redact-secrets\.mjs$/i;
+
+/** 这个管道里有没有一段在跑 redactor：node <…/redact-secrets.mjs>（带 --env-file、-r 这类前置选项也认） */
+function redactorAt(pipeline) {
+  for (const c of pipeline) {
+    const u = unwrap(c.words);
+    const leaf = u.leaf;
+    if (!leaf) continue;
+    if (!['node', 'nodejs'].includes(leaf.name)) continue;
+    if (isViewerRun(leaf.args, {})) continue; // 认得出是 secret-shape.mjs 的那种写法
+    for (let i = 0; i < leaf.args.length; i++) {
+      const v = leaf.args[i].value;
+      if (v === '--') {
+        const next = leaf.args[i + 1];
+        if (next !== undefined && REDACTOR_RE.test(next.value)) return true;
+        break;
+      }
+      if (v.startsWith('--')) {
+        if (
+          !v.includes('=') &&
+          /^--(?:require|import|loader|env-file|conditions|experimental-loader)$/.test(v)
+        )
+          i++;
+        continue;
+      }
+      if (v.startsWith('-') && v !== '-') {
+        if (/^-[ri]/.test(v) || /^-[CD]$/.test(v)) i++;
+        continue;
+      }
+      if (REDACTOR_RE.test(v)) return true;
+      break; // 头一个不是选项的词就是脚本名（或者 `-`），后面全是它的参数
+    }
+  }
+  return false;
+}
+
+// —— 命令的输出里带密钥：打印进程命令行 ——
+// 命令行把口令当参数交给别的进程之后，口令就落在那个进程的命令行里（Windows 的 Win32_Process.CommandLine、Linux 的
+// /proc/<pid>/cmdline），而进程的命令行是公开的、谁都能读。于是「看现在有哪些进程」这条平常的命令会把它们整段打出来：
+// 2026-10-02 就是这么漏的（Get-CimInstance Win32_Process 看 MCP 服务起了没，lark-mcp 那行的 -s <secret> 全打进了对话；
+// 2026-09-30 那次是读 MCP 运行目录的 JSON，里面把飞书 app secret 写在参数里，当时那套遮值只认 40 个字符以上的串，
+// 32 个字符的密钥过去了）。密钥文件那条（上面）只管「输入的路径」，管不到「命令的输出」，所以另立这一段。
+//
+// 这一段的处理是「拦住、给条明路」，不是「一律不许看」：看进程是调试的日常，不能堵死。要跑就接一条管道
+// 把输出过 redactor（agents/hooks/redact-secrets.mjs，和这条钩子一起装进 ~/.fleet-dao/hooks/）：
+//   ps -ef | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
+//   Get-CimInstance Win32_Process | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
+// 为什么不直接放行、让模型自己记得接管道：这一步是动作必经的那一步（design 第五节「发现问题当场修」），
+// 人记不住、模型也记不住——两次都是从这条路上漏的。为什么不索性一律拦住（连接了管道的也拦）：那等于把看进程
+// 变得做不了，而凭据根本不在命令行里的那九成情况也跟着遭殃；接上管道之后屏幕上确实没有值了，再拦没有意义。
+// 认不出一律按拦处理（和这份文件别的段落一样）：看不清管道接了什么，就当没接。
+
+/** 这段 ps 参数里有没有要求打命令行：-e -f -w -x，或者 -o / --format 后面写了 cmd / args / command */
+const PS_CMDLINE_SHORT = new Set([...'efwx']);
+/** cmd、args、command 是整条命令行；comm 只是程序名（ps -eo pid,comm），不带参数，不算 */
+const PS_CMDLINE_COLUMN = /\b(?:cmd|args?|command)\b/i;
+
+function psPrintsCommandLine(args) {
+  const words = args.map((x) => x.value);
+  for (const v of words) if (/^(?:aux|ef|ew|auxww|efww)$/i.test(v)) return true;
+  // 先看有没有 -o/--format：写了它，打哪几列就由格式串说了算，别的短选项（-e、-f、-w、-x）不再单独算数
+  let format = null;
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i];
+    if (v === '--') break;
+    if (/^--format(?:=|$)/.test(v)) {
+      format = v.includes('=') ? v.slice(v.indexOf('=') + 1) : (words[i + 1] ?? '');
+      continue;
+    }
+    if (!v.startsWith('-') || v === '-') continue;
+    const at = v.search(/[oO]/);
+    if (at >= 0) format = at === v.length - 1 ? (words[i + 1] ?? '') : v.slice(at + 1);
+  }
+  if (format !== null) return PS_CMDLINE_COLUMN.test(format);
+  // 没写格式串的短选项：-e、-f、-w、-x 各自都能带出命令行（-f 最典型：UID PID PPID C STIME TTY TIME CMD）
+  for (const v of words) {
+    if (!v.startsWith('-') || v.startsWith('--') || v === '-') continue;
+    for (const c of v.slice(1)) if (PS_CMDLINE_SHORT.has(c)) return true;
+  }
+  return false;
+}
+
+/**
+ * 这条叶子命令会不会把某个进程的命令行打出来：是就返回一句说明（拦下时告诉模型是哪一条），不是返回 null。
+ * 只看写死的写法；拿变量当命令、或者把输出再加工一道的看不出来——那是这一段的边界，说清楚比假装拦住了好。
+ * tasklist、Get-Process 不带 -o/Select-Object 时只打进程名和 pid，不打参数，放行。
+ */
+function printsCommandLines(leaf) {
+  if (!leaf) return null;
+  const words = leaf.args.map((x) => x.value);
+  if (leaf.name === 'ps') return psPrintsCommandLine(leaf.args) ? 'ps 打出了进程的命令行' : null;
+  if (leaf.name === 'wmic') {
+    const sub = words.find((v) => !v.startsWith('-')) ?? '';
+    return /^process(?:_get)?$/i.test(sub) ? 'wmic process 打出了进程的命令行' : null;
+  }
+  if (['get-ciminstance', 'get-wmiobject', 'gcim', 'gwmi'].includes(leaf.name)) {
+    const cls = words.find((v) => !v.startsWith('-')) ?? '';
+    return /^(?:win32_)?process$/i.test(cls) ? `${cls} 打出了进程的命令行` : null;
+  }
+  return null;
+}
+
+/** 读 /proc 下某个进程的 cmdline（写死路径、通配都算）：那里就是那个进程的整条命令行 */
+const PROC_CMDLINE_RE = /\/proc\/(?:[^/\s'"\x60|&;<>]*\/)*cmdline(?![\w.-])/i;
+/** PowerShell 里挑出命令行这一列：Select-Object CommandLine、Format-List CommandLine… */
+const COMMANDLINE_COLUMN_RE =
+  /(?:^|[\s|,;([{-])(?:select-object|select|format-table|format-list|format-wide|ft|fl|fw|where-object|where|sort-object|sort)\s[^|;\n]*\bCommandLine\b/i;
+
+/** 这条命令行里为什么算「打印进程命令行」；不像返回 null。text 是这一层命令行的原文 */
+function processListing(text, kind) {
+  const flat = String(text).replace(/\\/g, '/');
+  if (PROC_CMDLINE_RE.test(flat)) return { why: '读了 /proc 下的 cmdline（那里是那个进程的整条命令行）' };
+  if (COMMANDLINE_COLUMN_RE.test(text)) return { why: '挑出了 CommandLine 这一列（命令行就在这一列里）' };
+  for (const c of scanCommand(text, kind).pipelines.flat()) {
+    const u = unwrap(c.words);
+    if (u.nested) {
+      const inner = processListing(u.nested.text, u.nested.kind);
+      if (inner !== null) return inner;
+      continue;
+    }
+    const why = printsCommandLines(u.leaf);
+    if (why !== null) return { why };
+  }
+  return null;
+}
+
 /** 值往这里送就不过屏幕：ssh 到别的机器（ops 第九节「值不过屏幕」那几条管道）、只出摘要的 */
 function isSink(info) {
   return info.u.name === 'ssh' ? info.u.nested !== undefined : HASHES.has(info.u.leaf?.name ?? '');
@@ -918,6 +1044,61 @@ function secretVerdict(command, kind) {
   } catch (err) {
     return secretBlock(label, `钩子没看懂这条命令（${err?.message ?? err}）`);
   }
+}
+
+/** redactor 装在哪（和这条钩子同一个目录，agents-sync 整份拷过去） */
+const REDACT = '"$HOME/.fleet-dao/hooks/redact-secrets.mjs"';
+/** 拦下时给的那几条照着敲的命令：把进程列表接上它 */
+const REDACT_RECIPE = [
+  `把输出接一条管道过它（把 -s / --secret / --token / --password 的值、名字带 secret/token 的字段换成 ***）：`,
+  `  ps -ef | node ${REDACT}`,
+  `  Get-CimInstance Win32_Process | node ${REDACT}`,
+  `  ... | node ${REDACT} | grep lark-mcp（后面还要接 head、grep、Select-Object 的，接在它后面）`,
+  `  要看的是文件里的进程列表：node ${REDACT} <文件>`,
+].join('\n');
+
+function processBlock(why) {
+  return block(
+    [
+      `fleet-guard：这条命令${why}，进程的命令行里常常带着别的进程的口令（命令行交给进程之后，它就落在那个进程的命令行里，谁都能读：MCP 服务的 -s <secret>、--token、数据库口令），按拦处理（密钥、令牌、口令的值不进对话）。`,
+      REDACT_RECIPE,
+      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、tasklist、Get-Process（不带 Select-Object CommandLine）。',
+    ].join('\n'),
+  );
+}
+
+/**
+ * redactor 在不在这条命令行里：整条命令行（含 ssh 那头、bash -c 里头）任一段管道跑的是 redact-secrets.mjs 就算。
+ * 判的是「这条命令行里有没有它」，不是「它接在哪个位置」——接错位置（接在不打进程列表的那一段后面）等于没接，
+ * 那种写法本来就该按拦处理，这里不为它开例外。
+ */
+function hasRedactor(command, kind, depth = 0) {
+  if (depth > 4) return false;
+  for (const c of scanCommand(command, kind).pipelines) {
+    if (redactorAt(c)) return true;
+    for (const leaf of c) {
+      const u = unwrap(leaf.words);
+      if (u.nested && hasRedactor(u.nested.text, u.nested.kind, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+/** 打印进程命令行的命令判一下：不是这类返回 null；认不出（钩子没看懂这条命令）也按拦处理 */
+function processListingVerdict(command, kind) {
+  let hit;
+  try {
+    hit = processListing(command, kind);
+  } catch (err) {
+    return block(`fleet-guard：钩子没看懂这条看进程的命令（${err?.message ?? err}），按拦处理`);
+  }
+  if (hit === null) return null;
+  try {
+    if (hasRedactor(command, kind)) return null;
+  } catch {
+    return processBlock(`${hit.why}，钩子又没看懂这条命令的管道`);
+  }
+  return processBlock(hit.why);
 }
 
 // —— 从上层目录往下搜 ——
@@ -1219,6 +1400,9 @@ export function decide(raw, fallbackCwd = '') {
   // 密钥文件的内容不进对话（上面「密钥文件」「从上层目录往下搜」两段）。不分仓，全机都拦；别家的终端按 bash 的写法切。
   const secret = secretVerdict(cmd, kind) ?? broadSearchVerdict(cmd, kind, rawCwd);
   if (secret) return secret;
+  // 命令的输出里带密钥：打印进程命令行（上面那一段）。密钥文件那条只看输入、看不到输出，所以单独判。
+  const listing = processListingVerdict(cmd, kind);
+  if (listing) return listing;
   // 2026-09-26 撞过两回：子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
   if (kind === 'bash' && bashBacktickSubst(cmd)) {

@@ -2,7 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 # 本机档（#451，deploy/lib/profile.sh）：FLEET_PROFILE 认不认得出、不带这个变量时默认是不是 france（加本机档之前
 # 一个字节都不变的前提）、认不出的档名报不报清楚、is_local_profile 只看 PROFILE 这个全局变量、skip_local 是不是
-# 不算红也不算绿（只进 PENDING）；这台记的档位（#323，profile_marker_check）对不上、不是普通文件都不过，france.sh 前提里核、
+# 不算红也不算绿（只进 PENDING）、profile_skips_user 只在本机档认 pilot（#731）；这台记的档位（#323，profile_marker_check）对不上、不是普通文件都不过，france.sh 前提里核、
 # 装的时候记、读回报；会话代理（#731，session_proxy_load）只认这一档期望里登记的、读不出不当成直连。不要 root，只碰临时目录
 # （会话代理那几条要 node，找不到记没跑成）。
 # 用法：bash deploy/test/profile.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
@@ -96,6 +96,19 @@ if ((${#REDS[@]} == 0 && ${#CHANGES[@]} == 0)); then
 else
   flunk "skip_local 不该动 REDS 或 CHANGES（REDS=${#REDS[@]} CHANGES=${#CHANGES[@]}）"
 fi
+
+# profile_skips_user（#731）：这一档本来就不建的用户。本机档只认 france.sh 的 PILOT_USER（叫的时候读）；法国档、PILOT_USER
+# 没定义、别的用户都不算——读回拿它定「查不到这个用户」是跳过还是没查（lib/session-ports.sh 的 check_session_ports）
+PROFILE=local PILOT_USER=pilot
+if profile_skips_user pilot; then pass "本机档：pilot 算这一档不建的"; else flunk "本机档应该把 pilot（PILOT_USER）算成这一档不建的"; fi
+if profile_skips_user fleet; then flunk "本机档不该把 fleet 算成这一档不建的"; else pass "本机档：别的用户（fleet）不算"; fi
+PROFILE=france
+if profile_skips_user pilot; then flunk "法国档不该跳过 pilot：查不到就是没查"; else pass "法国档：pilot 也不算，查不到照旧没查"; fi
+PROFILE=local
+unset PILOT_USER
+if profile_skips_user pilot; then flunk "PILOT_USER 没定义时谁都不该算"; else pass "PILOT_USER 没定义：谁都不算"; fi
+if profile_skips_user ""; then flunk "PILOT_USER 没定义时空用户名也不该算"; else pass "PILOT_USER 没定义：空用户名也不算"; fi
+unset PROFILE
 
 # 这台记的档位（#323）：发布、自动发布照它挑哪一份期望写配置、对账，所以 france.sh 跑之前先核——没记、记的就是这一档才往下装；
 # 记的是别的档、不是普通文件，都不过（不替人改它）

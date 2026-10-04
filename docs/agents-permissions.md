@@ -25,7 +25,7 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 
 | 家 | 写到哪 | 怎么写 | 状态 |
 |---|---|---|---|
-| Claude Code | `~/.claude/settings.json` 的 `permissions` 和 `autoMode` | `defaultMode`（覆盖，**机器上自己设成 `bypassPermissions` 的除外**：那种保留、只报一行）、`allow`/`deny`/`additionalDirectories`（补缺、不删自己加的）；`autoMode` 的 `environment`、`allow`（并集、不删自己加的，见下面一节） | 已合并（#516）、本机实测；`autoMode` 2026-10-01 加（同 PR 带进主线）；保留机器上的 bypass 2026-10-01 下午加 |
+| Claude Code | `~/.claude/settings.json` 的 `permissions`、`autoMode` 和 `env` 里的子代理默认模型 | `defaultMode`（覆盖，**机器上自己设成 `bypassPermissions` 的除外**：那种保留、只报一行）、`allow`/`deny`/`additionalDirectories`（补缺、不删自己加的）；`autoMode` 的 `environment`、`allow`（并集、不删自己加的，见下面一节）；`env.CLAUDE_CODE_SUBAGENT_MODEL`（覆盖、`env` 里别的变量不碰，见「子代理默认模型」一节） | 已合并（#516）、本机实测；`autoMode` 2026-10-01 加（同 PR 带进主线）；保留机器上的 bypass 2026-10-01 下午加；子代理默认模型 2026-10-04 加（#785） |
 | Grok | 不另写 | 它直接读 `~/.claude/settings.json` 的 `permissions`（含 `defaultMode`），随 Claude 那份生效；它不认的工具（`NotebookEdit`、`PowerShell(…)`）开会话时跳过并警告，不影响别的 | 本机实测：`grok inspect --json` 的 `permissions` 里读到 34 条、跳过 9 条（依据 `~/.grok/docs/user-guide/22-permissions-and-safety.md` 第 3 节） |
 | Kimi Code | `~/.kimi-code/config.toml` | 最前面一行 `default_permission_mode = "auto"`；文件末尾一块托管块，里面是 `[[permission.rules]]`（先匹配的生效，所以拒绝排在放行前面；现在没有拒绝） | 本机装了：`kimi doctor` 认这份配置 |
 | Codex | `~/.codex/rules/default.rules` | 一块托管块，里面是 `prefix_rule(pattern=["git"], decision="allow")` / `decision="forbidden"` | 本机装了：`codex execpolicy check` 核过匹配结果 |
@@ -105,6 +105,30 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 
 改这一段是改标准（这份清单在 `packages/conventions/standard-paths.json` 里）：PR 正文「还欠什么」写「人闸：改标准」，创始人同意才合。合进主线后各台开会话时自动同步，机器上重开会话才生效。
 
+## 子代理默认模型
+
+`~/.claude/settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL`。决定 0017（`docs/decisions/0017-fable-only-in-founder-main-session.md`，创始人 2026-10-04）：子代理永不用 Fable，只用 Opus 或 Sonnet。光靠派的时候记得写 `model` 不够：没写的子代理会跟主会话同一个模型，而创始人本机的主会话可能是他自己选的 Fable。所以把「默认子代理模型」钉进设置，由同步工具写到每台机器。
+
+- **是什么**：Claude Code 的默认子代理模型只有环境变量这一种设法（`settings.json` 里没有同名的键），写在 `~/.claude/settings.json` 的 `env` 里、开会话时生效。仓里 `agents/config/claude-permissions.json` 写的是 `"env": { "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5-5" }`，即 Opus 5.5。
+- **管得到哪些子代理**：先后是 调用时写的 `model` > 子代理定义里写的模型（写 `inherit` 就跟主会话）> 这个变量 > 主会话（官方文档 model-config、sub-agents 两页，和本机 Claude Code 2.1.285 的程序一致）。所以它只兜住**两头都没写**的那些：
+
+  | 子代理 | 定义里写的模型 | 派的时候没写 `model`，用的是 |
+  |---|---|---|
+  | general-purpose（不写类型默认就是它）、workflow 里起的、队友、自己定义又没写模型的 | 没写 | **这个变量：Opus 5.5** |
+  | Plan、`fork` 这类 | `inherit` | 主会话（主会话是 Fable 就是 Fable） |
+  | Explore | `inherit`，主会话比 Opus 高一档时最高只到 Opus | 主会话，最高 Opus |
+  | claude-code-guide | `haiku` | Haiku |
+  | statusline-setup | `sonnet` | Sonnet |
+
+  所以**派子代理照旧一律写明 `model: "opus"`（或 `"sonnet"`）**（指挥官技能「派活」那条），主会话在 Fable 上时照旧别用 `fork`。这个变量是忘了写时的兜底，不是替代。
+- **同步工具怎么写**：只写 `env` 里这一项、每次覆盖（同 `defaultMode`：机器上改成别的，哪怕也是 Opus 或 Sonnet，也报漂移、改回仓里的；要换先改仓里）；`env` 里别的变量（代理这些）一个不碰；机器上的 `env` 不是对象就整份不动、报没做成。`--user`（法国装机）跟权限一起整段不写。
+- **源文件拒收**（报没查成 / 没做成，一台机器都不写，不替它补上）：没写 `env` 或这一项；值不是 Opus 或 Sonnet（只认 `opus`、`sonnet` 或 `claude-opus-…`、`claude-sonnet-…` 这样的 id，可带 `[1m]`；Fable、Mythos、Haiku、`inherit`、`best`、`opusplan` 都不认）；`env` 里多写了同步工具没登记的变量（`env` 会推给每一台机器，要加新变量，先在 `packages/agents-sync/src/permissions.ts` 的 `ENV_KEYS` 里登记它的校验）。
+- **钉住它的测试**：`agents/test/rules/subagent-model.rules.test.ts`（改成 Fable、Haiku、`inherit` 或删掉都红；自己判、不借同步工具的校验，那边哪天被放宽了这条照样红）；同步工具这边的用例在 `packages/agents-sync/test/permissions.test.ts`。
+- **看过、没用的几个设置**：
+  - `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`：调用写的 `model` 和定义里写的模型都不算了，一律用这个变量（`fork` 除外），能把上面表里 Plan、claude-code-guide 那几条路也堵上；代价是派活写 `sonnet` 也会被改成 Opus、workflow 里写的模型全被忽略，比创始人选的「Opus 或 Sonnet」窄，要他拍了才能加。
+  - `availableModels`（白名单，哪个设置文件里都认）、`deniedModels`（黑名单，只认系统级的托管设置）：连主会话一起管，会把创始人本机主对话里自己选 Fable 也禁掉，和决定 0017 第 4 条冲突，本机不能用。VPS、WSL 上主会话也不许用 Fable（第 3 条），那边可以用托管设置里的 `deniedModels`，要动部署，这次没做。
+- 改它是改标准（同上：这份清单在 `packages/conventions/standard-paths.json` 里）。合进主线后各台开会话时自动同步，**重开会话才生效**；查这台装没装上：`pnpm agents:sync --check` 里 `~/.claude/settings.json#permissions` 那一行会写「env.CLAUDE_CODE_SUBAGENT_MODEL 是 claude-opus-5-5」。
+
 ## 托管块和「不删你自己加的」
 
 - Kimi、Codex 的托管块用两行注释圈起来（`# >>> fleet-dao 权限` … `# <<< fleet-dao 权限`）：块里整块由同步脚本写，手改的下次会被覆盖；块外的内容一个字不碰（Codex 以后自己追加的规则、你自己写的规则都留着）。两行标记缺一行、重复、颠倒，或文件里有多行字符串读不准：不动，报没做成，要人看。
@@ -117,7 +141,20 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 - **原则：尽量宽松、只放不收**（创始人 2026-09-30）。他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死。所以 Claude **仓里**保持 `defaultMode: auto`，`Bash`、`PowerShell`、各工具和常用 MCP 服务整个放开，`deny` 是空的，早先那 9 条拒绝（`grep`、`cat`、`head`、`tail`、`find`、`rg`、`ag`、`ack`、`Select-String`）在 `retiredDeny` 里，各机器同步时摘掉。以后要收紧，先找创始人。
 - **仓里的 `auto` 和机器自己的 `bypassPermissions` 不冲突**（创始人 2026-10-01 下午）：仓里仍不许写 `bypassPermissions`（会推给无人值守的机器），但机器上自己设成 `bypassPermissions` 的**保留、只报不改**（上面「`defaultMode` 与机器上的 `bypassPermissions`」一节）。他自己那台开着 bypass，同步不会把它改回 `auto`。
 - **Kimi 的默认模式用 `auto`（不打断、自动判断）**，不用 `yolo`（日常自动、危险的仍问）：`yolo` 遇到要问的会在没人点的界面里卡住。
-- **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」，不属于权限清单，照旧生效。
+- **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」「打印进程命令行不打码」，不属于权限清单，照旧生效。
+- **打印进程命令行时要把密钥打码**（2026-10-02 加，创始人拍的）：进程的整条命令行是公开的（Linux 的
+  `/proc/<pid>/cmdline`、Windows 的 `Win32_Process.CommandLine`），口令当参数交给别的进程之后就躺在那里——`ps -ef`、
+  `wmic process`、`Get-CimInstance Win32_Process` 这类「看现在有哪些进程」的平常命令会把它们整段打出来（2026-10-02 就是这么漏的：
+  lark-mcp 那行的 `-s <secret>`）。要跑就接一条管道过 redactor（`~/.fleet-dao/hooks/redact-secrets.mjs`，随钩子一起装）：
+
+  ```
+  ps -ef | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
+  Get-CimInstance Win32_Process | Select-Object CommandLine | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
+  ```
+
+  不接的会被钩子拦下（只列进程名和 pid 的 `ps -A`、`ps -eo pid,comm`、`tasklist`、`Get-Process` 照样放行）。
+  打码的是 `-s` / `--secret` / `--token` / `--password` 这几类参数的值、名字带 secret / token / password 的 JSON 字段；
+  拿不准就遮。这是安全网、不是保险箱：变量展开出来的、编码过的照样漏（说明写在 `agents/hooks/redact.mjs` 开头）。
 - **Codex 的 `allow` 是「不问、不进沙箱直接跑」**：`git`、`node`、`python`、`pnpm` 这类前缀放行后，带任何参数都不再问，和 Claude 里 `Bash(python:*)` 一样宽；只按前缀匹配、没有通配符，`git` 不会匹配 `gitk`（本机核过）。
 
 ## 生效的条件（做了什么、什么时候才算生效）
@@ -148,8 +185,12 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 
 ## 代码在哪
 
-- `packages/agents-sync/src/permissions.ts`：Claude 的合并逻辑（`permissions` 和 `autoMode` 两段），也给 Devin 用（`judge`、`merged`、`checkJson`、`applyJson`；Devin 那边不写 `autoMode`）。
+- `packages/agents-sync/src/permissions.ts`：Claude 的合并逻辑（`permissions`、`autoMode` 两段和 `env` 里的子代理默认模型：`ENV_KEYS`、`OPUS_OR_SONNET`），也给 Devin 用（`judge`、`merged`、`checkJson`、`applyJson`；Devin 那边不写 `autoMode`、`env`）。
 - `packages/agents-sync/src/permissions-vendors.ts`：翻译和 Kimi、Codex 的托管块。
 - `packages/agents-sync/src/targets.ts`：每家写到哪（`PERMISSIONS_TARGET`、`KIMI_PERMISSIONS` 等）和做不到的几家的理由（`PERMISSION_GAPS`）。
 - `packages/agents-sync/src/sync-now.ts`：一键命令。
-- 测试：`packages/agents-sync/test/permissions*.test.ts`、`sync-now.test.ts`，每条读不懂、写不成的路径都有故意造出失败的用例。
+- `agents/hooks/redact.mjs`、`agents/hooks/redact-secrets.mjs`：把命令输出里的密钥值换成 `***`（上面「打印进程命令行」那条），装上以后就用
+  `~/.fleet-dao/hooks/` 下的那份。
+- 测试：`packages/agents-sync/test/permissions*.test.ts`、`sync-now.test.ts`，每条读不懂、写不成的路径都有故意造出失败的用例；
+  钩子拦的规矩（含打印进程命令行那一条）在 `agents/test/rules/pretool.rules.test.ts`，改了拦什么那里会红；
+  子代理默认模型只用 Opus 或 Sonnet 钉在 `agents/test/rules/subagent-model.rules.test.ts`。
