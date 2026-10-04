@@ -9,6 +9,7 @@
 //   `pnpm intents` 按它解析。读不成绝不打空列表：「没有新的意图」只在读成了、真的一条都没有时才说。
 // - 原话原样打出来，一个字不改；AI 归纳只从 --summary-file 来（指挥官开单时写的），永远不进原话。
 // - 写回、放下和操作记录在同一个事务里（存储那层管），记不下就不改。
+
 import {
   INTENT_REASON_MAX,
   INTENT_SUMMARY_MAX,
@@ -16,6 +17,7 @@ import {
   type IntentDetailSchema,
   IntentIssueRefSchema,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { wellFormed } from '@fleet-dao/store';
 import type { z } from 'zod';
 import type { IntentAudit, IntentStore } from './intent-store.ts';
@@ -254,7 +256,7 @@ export async function runIntent(cmd: IntentCommand, deps: IntentCliDeps): Promis
         raw = await deps.readSummary(cmd.summaryFile);
       } catch (err) {
         throw new IntentCliError(
-          `读不到归纳（${cmd.summaryFile === '-' ? '标准输入' : cmd.summaryFile}）：${err instanceof Error ? err.message : String(err)}`,
+          `读不到归纳（${cmd.summaryFile === '-' ? '标准输入' : cmd.summaryFile}）：${errMessage(err)}`,
           'usage',
         );
       }

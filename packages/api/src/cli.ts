@@ -10,9 +10,11 @@
 //   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
+
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
@@ -274,11 +276,11 @@ export function describeDbError(err: unknown): string {
   for (let i = 0; i < 10 && inner instanceof Error && inner.cause !== undefined; i++) inner = inner.cause;
   const raw = (inner as { code?: unknown } | null | undefined)?.code;
   const code = typeof raw === 'string' && raw !== '' ? raw : undefined;
-  let text = inner instanceof Error ? inner.message : String(inner);
+  let text = errMessage(inner);
   // IPv4、IPv6 都试过、都连不上时 Node 给的是 AggregateError：message 是空的，原因在 errors 里
   if (!text && inner instanceof AggregateError)
     text = inner.errors
-      .map((e: unknown) => (e instanceof Error ? e.message : String(e)))
+      .map((e: unknown) => errMessage(e))
       .filter(Boolean)
       .join('；');
   const detail = code && !text.includes(code) ? `${code}：${text}` : text || code || '没说原因';
@@ -563,7 +565,7 @@ async function runIntentCommand(rest: readonly string[], deps: CliDeps): Promise
       try {
         return databaseUrl(deps.env);
       } catch (err) {
-        throw new IntentCliError(err instanceof Error ? err.message : String(err), 'usage');
+        throw new IntentCliError(errMessage(err), 'usage');
       }
     })();
     opened = await (deps.openIntents ?? openPgIntents)(url);

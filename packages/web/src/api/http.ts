@@ -1,5 +1,6 @@
 // 真后端（packages/api）的实现：请求体和返回都按 shared/web-api.ts 校验；写操作带 X-CSRF-Token；推送走 SSE。
 // 路径和形状全部取自 WebRoutes / AuthRoutes，不在这里另写。
+
 import {
   AnswerAskRequest,
   ApiErrorBody,
@@ -19,6 +20,7 @@ import {
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import { ApiError, type FleetApi, type LiveStatus } from './client';
 import type { LiveEvent } from './types';
@@ -80,11 +82,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     try {
       res = await doFetch(url, init);
     } catch (err) {
-      throw new ApiError(
-        0,
-        'network',
-        `连不上驾驶舱后端：${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw new ApiError(0, 'network', `连不上驾驶舱后端：${errMessage(err)}`);
     }
     if (!res.ok) {
       const raw: unknown = await res.json().catch(() => undefined);

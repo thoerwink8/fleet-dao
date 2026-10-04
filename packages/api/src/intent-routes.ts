@@ -6,6 +6,7 @@
 // - 意图卡长轮询读不了库回 503 写明原因，不回空列表（空列表网关会当成「没有要发的」）。
 // - 日志不记原话正文，只记长度、编号（方案第一节规则 13）。
 // - 指挥官不走这里：他经 ssh 跑 `fleet-api intent …`（intent-cli.ts），不开对公网的口子。
+
 import {
   type FeishuRoute,
   IntentCardAckRequest,
@@ -20,6 +21,7 @@ import {
   IntentIntakeRecallResponse,
   IntentRoutes,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { wellFormed } from '@fleet-dao/store';
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import type { Deps } from './deps.ts';
@@ -170,7 +172,7 @@ export function intentRoutes(deps: Deps): Hono<IntentEnv> {
       try {
         batch = await store.dueCards(CARDS_BATCH);
       } catch (err) {
-        const why = err instanceof Error ? err.message : String(err);
+        const why = errMessage(err);
         log.warn('意图卡长轮询读库没成', { error: why.slice(0, 300) });
         throw new ApiError(503, 'intent_cards_unreadable', `要发的意图卡读不出来：${why.slice(0, 300)}`);
       }

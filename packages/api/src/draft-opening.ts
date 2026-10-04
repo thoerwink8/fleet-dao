@@ -2,6 +2,7 @@
 // 确认时当场开一次、最多等几秒；没成的留在「待开单」，这里每分钟补开一轮，按次数退避。开单接上之前一律没成、留着，不丢。
 // 时限自己掐，不指望实现理会 signal：到点没回就记「开单超时」、算没成；那次调用留在 inflight 里直到真的结束，
 // 期间这张草稿不开第二次。一直开不成由健康检查（draft_opener、draft_backlog）报红。
+import { errMessage } from '@fleet-dao/shared/util';
 import { clip } from '@fleet-dao/store';
 import { issueTitle } from './feishu-views.ts';
 import { PublicHealthError } from './health.ts';
@@ -183,9 +184,7 @@ export function createDraftOpenRunner(deps: {
         const err = first.error;
         return fail(
           draft,
-          err instanceof DraftOpenerUnavailableError
-            ? err.message
-            : `开单出错：${err instanceof Error ? err.message : String(err)}`,
+          err instanceof DraftOpenerUnavailableError ? err.message : `开单出错：${errMessage(err)}`,
         );
       }
       return record(draft, first.opened);
