@@ -183,7 +183,7 @@ describe('--user：替别的用户写', () => {
     // Stop 不需要会话、不用等自动发布，照样能装）
     expect(r.out).toContain('· SessionStart：替别的用户写（--user）时不登记开会话钩子');
     const settings = JSON.parse(get(home, '.claude/settings.json')) as { hooks: Record<string, unknown> };
-    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse', 'Stop']);
+    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse', 'Stop', 'UserPromptSubmit']);
     expect(JSON.stringify(settings.hooks.PreToolUse)).toContain('/.fleet-dao/hooks/pretool.mjs');
     expect(JSON.stringify(settings.hooks.Stop)).toContain('/.fleet-dao/hooks/stop.mjs');
     expect(existsSync(join(home, '.fleet-dao', 'hooks', 'pretool.mjs'))).toBe(true);

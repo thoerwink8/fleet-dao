@@ -233,7 +233,7 @@ describe('调工具前那条挂在哪些工具上', () => {
       text: `SessionStart：${skip.why}`,
     });
     const s = m.settings();
-    expect(Object.keys(s.hooks)).toEqual(['PreToolUse', 'Stop']);
+    expect(Object.keys(s.hooks)).toEqual(['PreToolUse', 'Stop', 'UserPromptSubmit']);
     expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
     expect(s.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }]);
     expect(exitCode(m.check())).toBe(0);
