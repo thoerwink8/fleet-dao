@@ -1,6 +1,6 @@
 // 欠账检查（#67）：「以后要做」的事必须是一张开着的 issue（design 第三节第 35 条）。分两半（#87：必过检查必须确定）：
 // - 只看文件的（checkDebtDocs，.github/workflows/debt.yml 在主线推送和每天跑，不进 pnpm check）：活文档（AGENTS.md、README.md、
-//   docs/ 下除了 reference/ 和 decisions/）里推后的话（「以后再做」「先不建」「再定」「留到下一轮」「后面阶段」这类）同一句里要带单号。
+//   docs/ 下除了 reference/、decisions/、archive/）里推后的话（「以后再做」「先不建」「再定」「留到下一轮」「后面阶段」这类）同一句里要带单号。
 //   不读 GitHub：同一份代码什么时候跑、单子开着还是关了，结果都一样，没网也照常跑。
 // - 看 GitHub 现状的（liveDebt，只在 debt.yml 的定时任务里跑）：挂的单号是不是开着的 issue。查出来留言到对应的单上，
 //   不让任何 PR 变红。别把这一半接回 pnpm check：#83 这么接过，#67 一关主线和所有 PR 一起红。
@@ -10,7 +10,7 @@
 // 推后的说法用一张写死的词表认（检查要每次一样、测试不出网，见 judge-or-code 第 3 问），宁漏不误：
 // 「以后加机器就是加工人」「先说结果，再说要我做什么」「它以后再发一次」这类不是推后，都不认。
 // 故意不查的：围栏代码块、HTML 注释、反引号里、「」引号里（那是在提这个词，不是在推后）、docs/reference/
-// （旧系统审计的快照，记的是当时的待查项）、docs/decisions/ 和 specs/（历史记录，#654）。
+// （旧系统审计的快照，记的是当时的待查项）、docs/decisions/ 和 specs/（历史记录，#654）、docs/archive/（PROGRESS 搬走的历史节，#901）。
 // 有误报就收窄词表，不往文档里加豁免；漏了就补进词表，并在测试里加一条。
 
 import type { Finding } from './findings.ts';
@@ -36,9 +36,12 @@ export const DEFERRAL_PATTERNS: readonly RegExp[] = [
   /(?:验收|上线)(?:之)?后(?:再)?做/,
 ];
 
-/** 查哪些文档：仓根的 AGENTS.md、README.md，docs/ 下（除了 docs/reference/、docs/decisions/）所有的 .md；specs/ 是历史记录，不查。 */
+/**
+ * 查哪些文档：仓根的 AGENTS.md、README.md，docs/ 下（除了 docs/reference/、docs/decisions/、docs/archive/）所有的 .md；
+ * specs/ 是历史记录，不查。docs/archive/ 是 docs/PROGRESS.md 搬走的历史节（#901），写的是当时的「下一步」「待办」，原样保留、不改字。
+ */
 export const DEBT_ROOT_DOCS = ['AGENTS.md', 'README.md'] as const;
-const SKIPPED_DIRS = new Set(['docs/reference', 'docs/decisions']);
+const SKIPPED_DIRS = new Set(['docs/reference', 'docs/decisions', 'docs/archive']);
 
 /** 同仓的单号：`#12`；`windsurf-dao#12`、`owner/repo#12` 是别的仓的，不算。 */
 const ISSUE_REF = /(?<![\w/#-])#(\d+)(?!\d)/g;

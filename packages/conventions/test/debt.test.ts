@@ -224,6 +224,8 @@ const FILES: Record<string, string> = {
   'docs/reference/old.md': '旧系统这块以后再做。\n',
   // 历史记录不查（#654）：下面两份里推后的话都没带单号，也不报
   'docs/decisions/0001-x.md': '当时拍板：这块以后再做。\n',
+  // 进度归档页（#901）是原样搬来的历史节，不改字，所以也不查
+  'docs/archive/progress-2026-10-01.md': '## 2026-10-01\n\n下一步：这块以后再做。\n',
   'specs/37-浏览器端口/需求.md': '# x（#37）\n\n## 怎么算做完\n\n- 测试 a\n\n## 现状\n\nP1 验收后做。\n',
 };
 
@@ -234,7 +236,7 @@ describe('欠账（只看文件）：退出码 0 / 1 / 2', () => {
     expect(r.lines).toEqual(['欠账检查（只看文件）过了：3 份文档里 1 句推后的话都带着单号。']);
   });
 
-  it('docs/reference/、docs/decisions/、specs/ 不查（旧系统快照、历史决定、历史需求）', () => {
+  it('docs/reference/、docs/decisions/、docs/archive/、specs/ 不查（旧系统快照、历史决定、搬走的历史进度、历史需求）', () => {
     expect(debtFiles(memRepo(FILES)).files).toEqual(['AGENTS.md', 'README.md', 'docs/design.md']);
   });
 
