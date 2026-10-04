@@ -215,21 +215,38 @@ export function applyEdit(
   };
 }
 
-/** 晚到的旧一版：按被改掉的时刻插进旧版本里（最新的那版不动）。 */
+/**
+ * 晚到的旧一版（它的改动时刻比存下的最新一版早）：按每一版「从几点起是这样」排进旧版本，每一版被改掉的时刻是下一版
+ * 的起点；最新的那版不动。第一版从发出时刻起。
+ */
 export function insertOlderEdit(
   stored: IntentMessageRecord,
   incoming: { text: string; rawContent: string; contentHash: string; editedAt: string },
 ): IntentMessageRecord {
-  const edits = [
-    ...stored.edits,
-    {
-      text: incoming.text,
-      rawContent: incoming.rawContent,
-      contentHash: incoming.contentHash,
-      replacedAt: incoming.editedAt,
-    },
-  ].sort((a, b) => Date.parse(a.replacedAt) - Date.parse(b.replacedAt));
-  return { ...stored, edits };
+  const latestSince = stored.editedAt;
+  if (latestSince === undefined) throw new Error('存下的这条没改过，不会有比它旧的一版');
+  const chain: { text: string; rawContent: string; contentHash: string; since: string }[] = [];
+  let since = stored.sentAt;
+  for (const e of stored.edits) {
+    chain.push({ text: e.text, rawContent: e.rawContent, contentHash: e.contentHash, since });
+    since = e.replacedAt;
+  }
+  chain.push({
+    text: incoming.text,
+    rawContent: incoming.rawContent,
+    contentHash: incoming.contentHash,
+    since: incoming.editedAt,
+  });
+  chain.sort((a, b) => Date.parse(a.since) - Date.parse(b.since));
+  return {
+    ...stored,
+    edits: chain.map((v, i) => ({
+      text: v.text,
+      rawContent: v.rawContent,
+      contentHash: v.contentHash,
+      replacedAt: chain[i + 1]?.since ?? latestSince,
+    })),
+  };
 }
 
 // —— 卡什么时候该发 ——
@@ -243,6 +260,101 @@ export function cardDueAt(chatKind: IntentChatKind, now: Date, urgent: boolean):
 export function cardRetryAt(attempts: number, now: Date): string {
   const wait = CARD_RETRY_MS[Math.min(Math.max(attempts, 1), CARD_RETRY_MS.length) - 1] ?? 60 * 60_000;
   return new Date(now.getTime() + wait).toISOString();
+}
+
+/** 这段改了：版本加 1；卡上看得出的（card 不是 null）卡的版本也加 1、按急不急定到期。改字只加版本。 */
+export function bumped(i: IntentRecord, now: Date, card: { urgent: boolean } | null): IntentRecord {
+  return {
+    ...i,
+    revision: i.revision + 1,
+    card: card ? { ...i.card, rev: i.card.rev + 1, dueAt: cardDueAt(i.chatKind, now, card.urgent) } : i.card,
+  };
+}
+
+/** 这段一条可读的原话都没有（全撤回了）：开不了单。 */
+export const hasLiveMessage = (messages: readonly IntentMessageRecord[]) =>
+  messages.some((m) => m.recalledAt === undefined);
+
+export type LinkPlan =
+  | { status: 'linked' | 'added' | 'updated'; next: IntentRecord }
+  | { status: 'already_linked'; issues: string[] }
+  | { status: 'empty' };
+
+/**
+ * 指挥官开单时写回：归纳（谁写的、几点、这时有几条原话）+ 开成的单。同一张单再写只更新归纳、不多记一笔；已经开成了
+ * 别的单，不带 relink 不挂（一段开成两张、并进已有的单要明说）。放下过的照样能开成单（理由留着当历史）。
+ */
+export function planLink(
+  i: IntentRecord,
+  messages: readonly IntentMessageRecord[],
+  input: { issue: string; summary: { text: string; by: string }; operator: string; relink: boolean },
+  now: Date,
+): LinkPlan {
+  if (!hasLiveMessage(messages)) return { status: 'empty' };
+  const already = i.links.some((l) => l.issue === input.issue);
+  const others = i.links.filter((l) => l.issue !== input.issue).map((l) => l.issue);
+  if (!already && others.length > 0 && !input.relink) return { status: 'already_linked', issues: others };
+  const at = now.toISOString();
+  const next: IntentRecord = {
+    ...bumped(i, now, { urgent: true }),
+    status: 'linked',
+    summary: { text: input.summary.text, by: input.summary.by, at, covers: messages.length },
+    links: already ? i.links : [...i.links, { issue: input.issue, by: input.operator, at }],
+  };
+  return { status: already ? 'updated' : i.links.length > 0 ? 'added' : 'linked', next };
+}
+
+export type DropPlan =
+  | { status: 'dropped'; next: IntentRecord }
+  | { status: 'already' }
+  | { status: 'linked'; issues: string[] };
+
+/** 放下（闲聊、重复的）：开成了单的不能放下；放下过的不再改理由。 */
+export function planDrop(i: IntentRecord, input: { reason: string; operator: string }, now: Date): DropPlan {
+  if (i.status === 'linked') return { status: 'linked', issues: i.links.map((l) => l.issue) };
+  if (i.status === 'dropped') return { status: 'already' };
+  return {
+    status: 'dropped',
+    next: {
+      ...bumped(i, now, { urgent: true }),
+      status: 'dropped',
+      dropped: { reason: input.reason, by: input.operator, at: now.toISOString() },
+    },
+  };
+}
+
+export type AckPlan = { kind: 'apply'; card: IntentRecord['card'] } | { kind: 'skip'; why: string };
+
+/** 卡的回执：发了、改了记下卡的编号和显示到第几版（是最新的就不用再发）；没发成记原因、过一阵再给。 */
+export function planAck(
+  i: IntentRecord,
+  ack: {
+    cardRev: number;
+    result: { status: 'sent' | 'updated'; messageId: string } | { status: 'failed'; error: string };
+  },
+  now: Date,
+): AckPlan {
+  if (ack.cardRev > i.card.rev) {
+    return { kind: 'skip', why: `回执说的是第 ${ack.cardRev} 版，库里最新才第 ${i.card.rev} 版` };
+  }
+  if (ack.result.status === 'failed') {
+    const attempts = i.card.attempts + 1;
+    return {
+      kind: 'apply',
+      card: { ...i.card, attempts, error: ack.result.error, dueAt: cardRetryAt(attempts, now) },
+    };
+  }
+  return {
+    kind: 'apply',
+    card: {
+      rev: i.card.rev,
+      shownRev: Math.max(i.card.shownRev ?? 0, ack.cardRev),
+      messageId: ack.result.messageId,
+      dueAt: ack.cardRev >= i.card.rev ? undefined : i.card.dueAt,
+      attempts: 0,
+      error: undefined,
+    },
+  };
 }
 
 // —— 排序、卡上的字、给指挥官看的样子 ——
