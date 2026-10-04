@@ -53,6 +53,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AgentSession,
   AskRecord,
@@ -294,16 +295,6 @@ const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
     .sort((a, b) => (a.object < b.object ? -1 : a.object > b.object ? 1 : 0)),
 });
 
-function byAtThenId(a: { at: string; id: string }, b: { at: string; id: string }): number {
-  return a.at.localeCompare(b.at) || compareIds(a.id, b.id);
-}
-
-/** 纯数字的编号按数值比，其余按字面比。 */
-function compareIds(a: string, b: string): number {
-  if (/^\d+$/.test(a) && /^\d+$/.test(b)) return Number(a) - Number(b);
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
 /** 按 (at, id) 倒序翻页；游标就是上一页最后一条的 `at|id`，看不懂就抛 InvalidCursorError（和库版同一个判法）。 */
 function paginate<T extends { at: string; id: string }>(
   items: T[],
@@ -311,18 +302,11 @@ function paginate<T extends { at: string; id: string }>(
   idOk?: (id: string) => boolean,
 ): Page<T> {
   const cursor = parseCursor(page.cursor, idOk);
-  const sorted = [...items].sort((a, b) => byAtThenId(b, a));
-  let start = 0;
-  if (cursor) {
-    start = sorted.findIndex((x) => byAtThenId(x, cursor) < 0);
-    if (start === -1) start = sorted.length;
-  }
-  const slice = sorted.slice(start, start + page.limit);
-  const last = slice.at(-1);
-  return {
-    items: slice,
-    nextCursor: last && start + page.limit < sorted.length ? `${last.at}|${last.id}` : undefined,
-  };
+  return pageOfSorted(
+    [...items].sort((a, b) => byAtThenId(b, a)),
+    cursor,
+    page.limit,
+  );
 }
 
 export function createMemoryStore(

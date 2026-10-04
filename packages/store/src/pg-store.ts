@@ -81,6 +81,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { nextCursorOf, pageOfSorted } from './paging.ts';
 import {
   type AskRecord,
   type AuditRecord,
@@ -751,12 +752,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const subtaskOfRun = new Map(timeline.runs.map((r) => [r.id, r.subtaskId]));
       // 库给的是按 (at, id) 正序，倒过来就是倒序。
       const all = timeline.events.map((e) => timelineRecord(e, subtaskOfRun)).reverse();
-      let start = 0;
-      if (cursor) {
-        start = all.findIndex((r) => r.at < cursor.at || (r.at === cursor.at && r.id < cursor.id));
-        if (start === -1) start = all.length;
-      }
-      const items = all.slice(start, start + page.limit);
+      const { items, nextCursor } = pageOfSorted(all, cursor, page.limit);
       // 操作记录的 after（回答原文、交活被退回的原因……）和 error 库里的时间线不带，按这一页里的编号补上。
       const auditIds = items.filter((r) => r.id.startsWith('audit:')).map((r) => Number(r.id.slice(6)));
       if (auditIds.length > 0) {
@@ -777,11 +773,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           };
         }
       }
-      const last = items.at(-1);
-      return {
-        items,
-        nextCursor: last && start + page.limit < all.length ? `${last.at}|${last.id}` : undefined,
-      };
+      return { items, nextCursor };
     },
     async listAsks(taskId) {
       if (!isUuid(taskId)) return [];
@@ -927,7 +919,10 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         }),
       );
       const last = items.at(-1);
-      return { items, nextCursor: rows.length > limit && last ? `${last.createdAt}|${last.id}` : undefined };
+      return {
+        items,
+        nextCursor: nextCursorOf(last && { at: last.createdAt, id: last.id }, rows.length > limit),
+      };
     },
     async resolveNotification({ id, by }, entry) {
       if (!isUuid(id)) return 'not_found';
@@ -967,8 +962,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .orderBy(sql`date_trunc('milliseconds', ${auditLog.at}) desc`, desc(auditLog.id))
         .limit(limit + 1);
       const items = rows.slice(0, limit).map(toAudit);
-      const last = items.at(-1);
-      return { items, nextCursor: rows.length > limit && last ? `${last.at}|${last.id}` : undefined };
+      return { items, nextCursor: nextCursorOf(items.at(-1), rows.length > limit) };
     },
     async listSettings() {
       const rows = await db.select().from(settings).orderBy(asc(settings.key));
