@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freshBeforeSubagent, gitCall, gitOk, gitWhy, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
 import { armForBackground, cleanId, startsBackground, stateDir, touchTool } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
@@ -2100,6 +2101,28 @@ if (isMain()) {
     backgroundOnly = typeof tool === 'string' && BACKGROUND_ONLY_TOOLS.has(tool);
   } catch {
     // 输入认不出由下面的 decide 按拦处理
+  }
+  // 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成才拦（fresh-main.mjs）。出错吞掉，不影响放行
+  try {
+    /** @type {unknown} */
+    const input = JSON.parse(raw);
+    const stale = freshBeforeSubagent({
+      tool: prop(input, 'tool_name') ?? prop(input, 'toolName'),
+      toolInput: prop(input, 'tool_input') ?? prop(input, 'toolInput'),
+      cwd:
+        typeof prop(input, 'cwd') === 'string' && prop(input, 'cwd')
+          ? String(prop(input, 'cwd'))
+          : process.cwd(),
+      git: gitCall(SUBAGENT_FETCH_MS),
+      okOf: gitOk,
+      whyOf: gitWhy,
+    });
+    if (stale) {
+      process.stderr.write(`${stale.message}\n`);
+      process.exit(2);
+    }
+  } catch {
+    // 取不到、认不出都不拦：这一步只是顺手
   }
   if (backgroundOnly) process.exit(0);
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录

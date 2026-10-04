@@ -17,6 +17,7 @@ const CHECKED = [
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'hooks/pretool.mjs',
+  'hooks/fresh-main.mjs',
   'hooks/unattended.mjs',
 ];
 

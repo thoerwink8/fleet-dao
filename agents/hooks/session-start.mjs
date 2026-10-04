@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchWithFallback, withoutProxy } from './fresh-main.mjs';
 import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const FETCH_MS = 15_000;
@@ -39,9 +40,10 @@ try {
 
 /** git 跑一条命令：{ status, stdout, stderr, error } */
 export function gitRunner(timeoutMs = FETCH_MS) {
-  return (cwd, args) => {
+  return (cwd, args, opts = {}) => {
     const r = spawnSync('git', args, {
       cwd,
+      ...(opts.direct ? { env: withoutProxy() } : {}),
       encoding: 'utf8',
       timeout: timeoutMs,
       windowsHide: true,
@@ -112,11 +114,12 @@ export function checkHere(cwd, git) {
   // 不是 git 仓的目录不出声；git 自己跑不起来也不在这儿说（第 2 件同步那一句会说清，免得同一个毛病说两遍）
   if (!ok(inside) || inside.stdout.trim() !== 'true') return { line: null, fetch: null };
   const common = commonOf(g);
-  const fetched = g('fetch', '-q', 'origin');
-  if (!ok(fetched))
+  // 先照环境里的代理取（reclaude 的口），没成再直连取一次；两次的原因都带上（fresh-main.mjs）
+  const fetched = fetchWithFallback(git, cwd, ['fetch', '-q', 'origin'], { okOf: ok, whyOf: why });
+  if (!fetched.ok)
     return {
-      line: `开场核规矩没查成：git fetch 失败（${why(fetched)}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
-      fetch: { common, ok: false, why: why(fetched) },
+      line: `开场核规矩没查成：git fetch 失败（${fetched.why}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
+      fetch: { common, ok: false, why: fetched.why },
     };
   const fetch = { common, ok: true, why: '' };
   if (!ok(g('rev-parse', '-q', '--verify', ORIGIN_MAIN))) return { line: null, fetch };
