@@ -16,7 +16,7 @@
   - #786 `fix/786-engine-git-proxy`（工作树 agent-a96bc63c3957397dc，未提交 6 个文件）：本机档发布取代码、装依赖走登记的代理。
   - #820 `feat/820-env-views-abort-resume`（工作树 agent-a8a1e976f84600a39，还没改动）：先写方案 specs/820-*/方案.md 再分切片。
 - 等创始人拍：#452 本机演练（fleet-local 里 root 发一版并让 WSL 常开；推荐选 1）、#754 删表迁移、#777 的 GitHub 仓和 App。
-- 插话补回已上线（#842、#844）：新会话开场会列出 Mirasim 记着、没送到的插话。
+- 插话补回（#842、#844）已于 2026-10-04 夜去掉（创始人选「只去掉补回」，PR #870）：`steer-recover.mjs` 删了，新会话开场不再从 Mirasim 记录补插话；消息一到就落盘的钩子（#823）和开场列最近 60 分钟落盘的话（#831、#833）留着。
 
 ## 创始人引导（待处理）
 
@@ -25,7 +25,7 @@
 - 2026-10-04 夜（新会话，时刻未记）「其他 AI 查出了这么多问题，你分析查看一下，然后排一下优先级，多 sub agent 分别去解决吧。尽量在 V3 上线前把这些问题全解决，你看合不合理？」（附 18 条审查：拆 sessions.ts、engine 不依赖 api 的分层、Store 去重、三个大脚本进 tsc、web 补测试、README 目录、#133 TODO、github-audit 红、ci.yml 卫生检查要不要挡、checkGuarded 继续后再拦、installationToken 降权、claimDelivery 去重、startRun 覆盖、0033 快照、runsOfTask 串仓、workflows 权限、esbuild audit、task.ts 与 queries/engine.ts 拆分）——**办中，Sonnet 5.5 子代理**。第一波（互不抢文件，已派）：#10+#18 的 task.ts 拆分｜#11+#16 令牌降权与 workflows 权限｜#12+#13+#15 存储层三处正确性｜#14+#17 迁移快照与 esbuild｜#8+#7+#6 github-audit 数据、#133 TODO、README｜#1 拆 sessions.ts｜#5 web 测试。第二波（等第一波的存储层 PR 合了再开，免得抢文件）：#2 Store 挪出 api 包 → #3 抽 Store 纯逻辑 → #18 的 queries/engine.ts 拆分；#4 三个大脚本（钩子要保持纯 node 直接可跑，只能走 JSDoc + checkJs 进 tsc，不能改成 .ts）。#9（PR 上卫生检查改成挡）**和创始人 2026-09-28/10-01 已拍的「CI 里 hygiene 只报不挡」冲突，等他定，推荐维持**。原审查里「合之前跑 pnpm check」与本仓「本机不跑全量 pnpm check」冲突，按本仓：本机只跑 test:changed，全量交 CI。
   - 上一条的进展（2026-10-04 夜）：已合 #849（第 14）、#850（第 6、7）、#851（第 17）、#852 和 #855（第 5）、#853（第 12）、#858（第 13）、#859（第 10）、#854（第 11）、#860（第 16）；第 8 条数据已被人修好、检查没误报，不用改。在做：第 15 条、`task.ts` 拆分（#861）、`sessions.ts` 拆分。开了未排期单 #856、#857（web 测试代理发现的）。第二波（#2→#3→`queries/engine.ts` 拆分、#4）等第 15 条合完再开。**上线前要核**：#854 改了线上令牌的请求体（按用途降权），这版上线后第一次换令牌，看健康页 `github_app` 自检是否仍绿；读分支规则那个接口要不要 `administration` 读，没法在真 GitHub 上验，保守留了只读。
   - 第 18 条后一半（2026-10-05，Sonnet 5.5 子代理）：`packages/db/src/queries/engine.ts` 已拆成 9 个 `engine-*.ts`（会话、起会话事实、进度、提问、报警、人闸、执行计时、任务快照、选路事实），`engine.ts` 只留聚合出口，导出清单搬前搬后逐名对比为空（PR #867）。`sessions.ts` 拆分、Store 挪出 api 包不在这条里。
-- 2026-10-04 约 19:33「怎么样你才能收到引导呢？你有没有方案呢」——**已处理（#842 已合）**：Mirasim 自己把每条插话记在 `~/.mirasim/sessions/claude/<会话号>/turns.jsonl` 的 `steers` 里（含我没收到的）；开会话钩子新加 `agents/hooks/steer-recover.mjs`，拿它和 prompt-log 比，多出来的补进落盘记录并在开场说出来。合并后标已处理。实时补投（会话死的那一刻）仍要 Mirasim 客户端自己做。
+- 2026-10-04 约 19:33「怎么样你才能收到引导呢？你有没有方案呢」——**已处理（#842 已合）**：Mirasim 自己把每条插话记在 `~/.mirasim/sessions/claude/<会话号>/turns.jsonl` 的 `steers` 里（含我没收到的）；开会话钩子新加 `agents/hooks/steer-recover.mjs`，拿它和 prompt-log 比，多出来的补进落盘记录并在开场说出来。合并后标已处理。实时补投（会话死的那一刻）仍要 Mirasim 客户端自己做。**补回钩子后来被去掉**（创始人 2026-10-04 夜约 21:10 回「1. 之去掉补回」，理由是他以后不再「引导」、直接插队），见 PR #870；上面说的 `steer-recover.mjs` 已不存在。
 - 2026-10-04 约 19:20（界面标「已引导」的那条，我没收到，是从他发的截图里看到的）「改一个方案，subagent都改成用sonnet5.5而不是opus5.5」+「好像还是没生效，为什么引导还是好像没收到」——**这一次会话照办**：停掉的三个子代理（#323、#194、#553）用 Sonnet 5.5 续上，这次会话起的子代理都用 Sonnet 5.5；他没说「以后」，所以不改决定 0017 的长期口径（子代理只用 Opus 或 Sonnet），要长期改他再说一声。**为什么没收到**：那条是他在我正等后台时插的，界面标了「已引导」，但那一刻会话进程又死了，消息还停在界面那头的队列里、没进到 Claude Code，所以 UserPromptSubmit 钩子也没机会落盘（落盘文件里只有进了会话的几条）；这一段在 Mirasim 客户端，仓里修不了，要它把排队的引导持久化、重启后补投。
 - 2026-10-04 约 20:50「然后开启无人值守模式，把剩下的任务，按照优先级做完」——已开无人值守（8 小时，到约 04:50 北京时间前自动放行）；先后按当前版本里程碑说明里那段列表（pnpm plan），碰人闸四类的（删数据、改标准没选定的、对外发布、花钱）不自己拍，攒进 needs-you。
 - 2026-10-04 约 20:00「选1」（对「有后台活在跑就不许收尾」）——**办中**：调工具前钩子见到 Agent/Task/Monitor/Workflow 或 run_in_background 的 Bash/PowerShell，自动开 30 分钟的无人值守（unattended.mjs 的 armForBackground），Stop 把收尾挡回去，全收口跑 done；手动开的更长的不缩短；规矩钉在 agents/test/rules/inflight.rules.test.ts。PR 见 feat/auto-arm-inflight。
