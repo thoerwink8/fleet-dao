@@ -68,6 +68,8 @@
 
 **10-04 08:40 创始人醒来，退出无人值守时的现状**：主会话 08:30 左右又断过一次，两个帮手（#731 第 2 个 PR #763、#758/#757）中断——#763 第二意见第 1 轮挡了 1 条（装机脚本直接读进程环境里的 `FLEET_SESSION_PROXY`，法国 root 环境带了它就会走代理，要改成只认期望解析出的显式参数）、工作树里还有一批没提交的改动；#758 库那一半 1 个提交没推、引擎那一半暂存没提交——两处都已换新的 Opus 子代理接着在原工作树上做（不用 SendMessage 叫旧帮手：会继承主会话的 Fable）。#654 等 github-audit 首轮（09:41）绿了就关。
 
+**10-04 09:30 第二次重派**：09:00 创始人回完话后派了 9 个帮手，主会话 09:26 又断（gh 请求 EOF 后进程退出），9 个全停、1 个被平台 422 掐断。断前落地的：#763 合（#731 第 2 个）、#767 合（#758 关）、#650 合（改标准，创始人放行）、#766 开（通知 webhook）。重派 9 个（有工作树的在原树接：Fable 收窄 PR、#646/#624 并主线合、飞书 PR-1、切号方案 v2、分支体检；重开：#757、#731 机器上的验收、#618 装法国（先只读核对上一个帮手动没动过）、演练仓 GitHub App 代建）。**网络变了**：GitHub 直连通、Clash 7890 对 api.github.com 回 403——帮手一律先直连、不通再走代理。断链根因还没查：进程退出前最后一条都是 gh/GraphQL 报 EOF 或工具调用被中断，怀疑是网络抖动把会话进程带崩；缓解只有「帮手每块就推、我每步落盘」。
+
 **整个 v3 的关键路径是 #452 本机演练**：它跑通 → #632 关 → 法国引擎才评估重开 → #76/#157/#59/#345 才能真机验 → 发第一版（#593/#618 自证）→ #509 关。**要创始人给或拍的（攒着，下次报进度放「要我拍的」）**：① #452 演练仓专用 GitHub App（编号、私钥、webhook 密钥给到 WSL，或授权 AI 在他登录的浏览器里代建）；② WSL 会话用户下登录两家不同家族的模型（reclaude 限 4 台可能顶到，满了他说腾哪台）；③ WSL Nat 隔离起不来：等 AI 查清（要重启得他自己重启）还是明说「隔离没好也先跑演练」；④ #618 装到法国（对外发布；装上后法国停在现版、报「没有版本标记」直到发第一版）；⑤ 第一版什么时候发（建议 #452 三连跑通后发 v3）；⑥ #345 他用 Mirasim 桌面端连一次法国 `fleet-agent-carpool`（`docs/ops.md` 第五节）；⑦ #76/#345 要不要让法国引擎只跑定时任务（读额度、探针、对账）不跑流程——改「法国引擎关闭」那条临时调整；⑧ #654 没合并过的 29 条远端分支删不删（删数据；`notes/requirements-2026-09-30`、`exp/test-graph` 建议留）。**调研顺手查到、已派人修的**：巡检还找 Fusion 的 `req:` 工作流（#452 车道）；一次性会话不写 `session_runs`、`runs` 只在收场写，切号判「有没有在跑」永远是 0、拼车一满会切断正在写码的会话（#157 车道；PROGRESS 10-03 下午「#59/#157 代码早已做完」那句不成立）；驾驶舱后端只读 `session_runs`、三段的 `runs` 一行看不到（#216 车道）；`pretool.mjs` 还教人用已删的 `--specs`（#654 车道）；「#364 要先修」过期，#364 已由 #563 修好。
 
 未排期这三张的先后：#705（最省人力）→ #706（偶发红直接浪费 CI 圈）→ #707。
@@ -163,6 +165,15 @@
 - 验证：先看到 `TestUnmarkedProxyWithoutCredentialStripsToOwn` 以同一句报错失败，改完 `go test`（launcher）通过。20:18 本机迁移回读：`migration.json` 状态 `migrated`，磁盘命令和 Mirasim 的 Claude 启动命令都是 `releases/44e35673b882e819a76c0bbb7b5c6322152cdaf067fdd2ef9b42fb525c1d064b/mirasim-reclaude.exe`；`--fleet-version` 的 `sourceCommit` 是 `c7c77f0eba8c313ac284f9092fac610075d8882c`，`sourceHash` 与目录一致。
 - 20:26 PR [#627](https://github.com/thoerwink8/fleet-dao/pull/627) 已合进主线 `e1d35186`。别的机器在 fleet-dao 检出里跑 `pnpm agents:sync`（或新开 AI 会话，开会话钩子自己同步）就会换上。有 Go 的当场编译；没有 Go 的等主线 `mirasim-launcher` 这轮构建成功再同步。
 - 还没验证：真实两向请求扣费；明确选了「平台」但 Mirasim 仍不带令牌时，仍会拒绝。
+
+## 2026-10-02（钩子层不再从打印出来的命令行漏密钥）
+
+- 分支 `guard/redact-command-lines`（PR #624，改标准）。10-02 先前这里写的「创始人拍了，原话「2」」在对话记录里查不到（PR 正文 10-02 夜已更正）；真正放行是 2026-10-04 约 08:50 他对晨报第 9 条（列了 #650、#646、#624）回「9 条改标准的我都通过。」，当天并主线、挂自动合并。做了什么：`agents/hooks/` 加 `redact.mjs`（纯函数，把 `-s` / `--secret` / `--token` / `--password` 这类参数的值、名字带 secret / token / password 的 JSON 字段换成 `***`）和 `redact-secrets.mjs`（命令行外壳：管道进、打码后的文字出，读不了标准输入或文件就退出码 1 并说明，不打空）。
+- `pretool.mjs` 加一段：认打印进程命令行的命令（`ps -ef` / `ps aux` / `ps -o pid,cmd` / `/proc/*/cmdline` / `wmic process` / `Get-CimInstance Win32_Process` / 挑 `CommandLine` 那一列），**不接 redactor 就拦下**、拦下的消息里给几条照着敲的配方；接上的放行；只列进程名和 pid 的（`ps -A`、`ps -eo pid,comm`、`tasklist`、`Get-Process`）照样放行。认不出的输入照旧按拦处理。
+- 钉住规矩的测试在 `agents/test/rules/pretool.rules.test.ts`（+368 条里新增的那批）：两种故意造出失败都验过——把 `SHORT_FLAGS` 抽空、让 `ps -ef` 直接过，都会红；夹具里的密钥一律带 `FAKE`（卫生检查按值判，不用进白名单）。
+- 已跑：`pnpm exec vitest run agents/test/`（13 文件 / 687 过）、`packages/agents-sync/`（22 文件 / 307 过）、`packages/conventions/`（23 文件 / 662 过）、`pnpm exec tsc -b`、`biome check`（干净）、`node packages/hygiene/src/bin/check.ts`（0 条）。没跑全量 `pnpm check`（仓规）。
+- 还没验证：这台机器上 `pnpm agents:sync` 之后新脚本真的落到 `~/.fleet-dao/hooks/`（同步工具整份拷目录，`packages/agents-sync/test/hooks.test.ts` 覆盖拷贝，但本机没实地同步）；法国那两台的实际行为；引擎经 `--settings` 起会话时的表现。
+
 ## 2026-10-02（验收段 555-2：冷调用接通合并闸）
 
 - 555-2（母单 #555，排期见 `docs/decisions/0009-v3-implementation-plan.md` 第 6 行）：**合并闸加一条输入 `cold-verify`**——
