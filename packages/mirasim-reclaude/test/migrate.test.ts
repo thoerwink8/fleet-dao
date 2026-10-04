@@ -11,9 +11,8 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { tempDir } from '../../adapters/test/helpers.ts';
-import { startWsServer } from '../../adapters/test/ws-server.ts';
 import { type MigrationOptions, migrate } from '../src/migrate.ts';
 
 const mini =
