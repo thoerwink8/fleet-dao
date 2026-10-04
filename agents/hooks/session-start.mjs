@@ -19,7 +19,17 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { recoverSteers } from './steer-recover.mjs';
 import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
+
+/** 从 Mirasim 记录补回没送到的创始人插话（steer-recover.mjs）；任何意外只当没补，不拖垮开会话 */
+function recoverLost({ home, now }) {
+  try {
+    return recoverSteers({ home, now }).lines;
+  } catch (err) {
+    return [`没送到的插话没查成：补回模块自己出错（${err?.message ?? err}）。`];
+  }
+}
 
 export const FETCH_MS = 15_000;
 export const SYNC_MS = 30_000;
@@ -629,6 +639,7 @@ export function sessionStart({
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
     ...checkDirectives(cwd, localGit),
+    ...recoverLost({ home, now }),
     ...recentPrompts({ home, now }),
     ...sweepWorktrees(cwd, localGit),
     ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
