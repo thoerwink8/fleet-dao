@@ -8,6 +8,7 @@
 // - 本人被拒就是用到头了，不管车上几个人（创始人 2026-10-04 06:08：80 刀 / 5 小时是防一人多用的额外闸）。
 import { RL1_TEXT } from '../failure/rules.ts';
 import { waitFromText } from '../failure/scan.ts';
+import type { ApiOrgAccount } from './org-accounts.ts';
 
 /**
  * 拼车用不了的三种（方案 4.2）：
@@ -57,6 +58,8 @@ export type CarpoolApiRead =
       ageSeconds: number | null;
       quota: CarpoolQuota | null;
       org: CarpoolOrgState;
+      /** 接口里每个组织（账号）的事实：账号数量不固定，切号前逐个查状态用（jobs/org-accounts.ts）。读法没给就没有。 */
+      accounts?: readonly ApiOrgAccount[];
     }
   | {
       ok: false;
