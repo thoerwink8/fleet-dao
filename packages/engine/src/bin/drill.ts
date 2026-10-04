@@ -2,6 +2,7 @@
 // canary，同一份代码）。在跑着引擎的那台机器上跑（本机演练环境 fleet-local、法国）：只连本机 Temporal，不连库、不碰 GitHub。
 // 地址和命名空间读 TEMPORAL_ADDRESS、TEMPORAL_NAMESPACE（默认和引擎一样：127.0.0.1:7243、fleet）。
 // 退出码：0 通过；1 断了（停在哪一步照打）；2 巡检自己没跑成，或没查成（连不上 Temporal、没有这个定时任务……）。
+import { errMessage } from '@fleet-dao/shared/util';
 import { Client, Connection } from '@temporalio/client';
 import { runDrill, temporalDrill } from '../drill.ts';
 import { configFromEnv } from '../worker.ts';
@@ -27,9 +28,7 @@ if (args.includes('--help') || args.includes('-h')) {
     const client = new Client({ connection, namespace });
     process.exitCode = await runDrill({ ...temporalDrill(client, { print }), print });
   } catch (err) {
-    print(
-      `没查成：连不上 Temporal（${address}，命名空间 ${namespace}）：${err instanceof Error ? err.message : String(err)}`,
-    );
+    print(`没查成：连不上 Temporal（${address}，命名空间 ${namespace}）：${errMessage(err)}`);
     process.exitCode = 2;
   } finally {
     await connection?.close();

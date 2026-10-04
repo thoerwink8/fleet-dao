@@ -1,5 +1,6 @@
 // 引擎的 Temporal 定时任务（design 第四节：替代旧系统的 systemd 定时器）。引擎每次启动都按这里的声明对一遍：
 // 编号固定，没有就建，有了就按声明更新（保留人手动暂停的状态），重启、重复部署都不会多出第二个。
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type Client,
   ScheduleAlreadyRunning,
@@ -315,12 +316,8 @@ export async function deleteRetiredSchedules(
       await client.schedule.getHandle(id).delete();
       out[id] = 'deleted';
     } catch (err) {
-      out[id] = err instanceof ScheduleNotFoundError ? 'absent' : { error: describeError(err) };
+      out[id] = err instanceof ScheduleNotFoundError ? 'absent' : { error: errMessage(err) };
     }
   }
   return out;
-}
-
-function describeError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

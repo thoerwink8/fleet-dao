@@ -8,6 +8,7 @@
 // - 读不到、认不出明确失败（读数记成 ok:false 带原因，进账本），不当成「没事」：连着两次没读成报警（#76 同一个规矩），Key 失效、回包认不出
 //   当场报；读成了自己撤。
 // - 什么都不用判的时候（挂着拼车、没有恢复条件、没到点读）整轮不碰切号，不白起 reclaude org list。
+
 import {
   type BurnEstimate,
   type BurnRead,
@@ -15,6 +16,7 @@ import {
   type OrgKind,
   type ScheduleOutcome,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolWatchRun } from '../contract.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { CarpoolApiRead } from './carpool-outage.ts';
@@ -209,8 +211,6 @@ export class CarpoolWatchFailedError extends Error {
   }
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 /** 这一次读失败要不要报：Key 失效、回包认不出当场报；别的连着 alertAfterFailures 次才报。 */
 export function apiFailureAlert(
   read: Extract<CarpoolApiRead, { ok: false }>,
@@ -265,7 +265,7 @@ export async function runCarpoolWatchJob(deps: CarpoolWatchDeps): Promise<Carpoo
   try {
     r = await round(deps);
   } catch (err) {
-    r = { outcome: 'failed', why: `拼车盯读没跑成：${message(err)}`, found: 0 };
+    r = { outcome: 'failed', why: `拼车盯读没跑成：${errMessage(err)}`, found: 0 };
   }
   await deps.runs.finish(
     runId,

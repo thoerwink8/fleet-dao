@@ -26,6 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { SLICE_MEMORY_HIGH_MB } from '../limits.ts';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { AGENT_SLICE_PATH, admitSessionMemory, CGROUP_ROOT } from '../real/memory-admission.ts';
@@ -301,7 +302,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     }
     throw new OneShotError(
       'RUN_START_FAILED',
-      `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${err instanceof Error ? err.message : String(err)}`,
+      `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${errMessage(err)}`,
     );
   }
 
@@ -321,7 +322,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     });
   } catch (err) {
     clearTimeout(killTimer);
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errMessage(err);
     if (switched() && deps.stop) {
       const result: OneShotResult = { ...halted(deps.stop, '会话被停下'), stderrTail: reason.slice(-4096) };
       await settle(runDir, input, result, deps.runs);
@@ -360,7 +361,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     } catch (recordErr) {
       throw new OneShotError(
         'SPAWN_FAILED',
-        `起子进程没起成：${reason}；开跑那一行也没收上（${recordErr instanceof Error ? recordErr.message : String(recordErr)}）`,
+        `起子进程没起成：${reason}；开跑那一行也没收上（${errMessage(recordErr)}）`,
       );
     }
     throw new OneShotError('SPAWN_FAILED', `起子进程没起成：${reason}`);
