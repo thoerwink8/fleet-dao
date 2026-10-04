@@ -26,38 +26,31 @@ export interface Allowed {
   why: string;
 }
 
-/** 包名 @fleet-dao/shared 这类引用的登记（零安装区里例外放行的）。 */
-export const ALLOWED_BARE: readonly Allowed[] = [
-  ...['release-notes.ts', 'publish-release-logic.ts', 'publish-actions.ts'].map((f) => ({
-    file: `packages/conventions/src/${f}`,
-    spec: '@fleet-dao/shared',
-    why: '发布流程用（release.yml 在 pnpm install 之后才跑它），不在 CI 的 install 之前那几个入口的引用链上',
-  })),
-  {
-    file: 'packages/conventions/src/intents.ts',
-    spec: '@fleet-dao/shared',
-    why: 'pnpm intents 在指挥官本机跑（装过依赖），不在 CI 的 install 之前那几个入口的引用链上',
-  },
-];
-
-/** 跨包相对路径的登记。 */
-export const ALLOWED_CROSS: readonly Allowed[] = [
-  {
-    file: 'packages/mirasim-reclaude/src/migrate.ts',
-    spec: '../../adapters/src/mirasim/wire.ts',
-    why: '专用同步检出不装 node_modules（docs/reclaude-in-mirasim.md 第 56 行），借 adapters 的零依赖 wire.ts；package.json 声明保留，它是 CI 选测的变更边',
-  },
-  {
-    file: 'packages/agents-sync/src/main.ts',
-    spec: '../../mirasim-reclaude/bin/migrate',
-    why: '同上，不装依赖；用路径起 mirasim-reclaude 的 bin 当子进程，没有 import；package.json 声明保留作变更边',
-  },
-  {
-    file: 'packages/engine/src/real/index.ts',
-    spec: '../../../adapters/src/mirasim/bridge.ts',
-    why: '过渡：#901 ⑥-2 改成 import.meta.resolve(adapters 的 exports 子路径)后删这一条',
-  },
-];
+/**
+ * 登记名单在 package-boundaries.allowed.json（bare：零安装区里例外放行的包名引用；cross：跨包相对路径）。
+ * 不写在这个文件里：这里的路径字面量会被 ci-plan 的「测试读包外文件」扫描器当成本测试在读那些文件。
+ * 读不到、认不出就抛，不当成「没有登记」。
+ */
+export function parseAllowed(text: string, file: string): { bare: Allowed[]; cross: Allowed[] } {
+  const parsed: unknown = JSON.parse(text);
+  const rec = (parsed ?? {}) as Record<string, unknown>;
+  const list = (key: string): Allowed[] => {
+    const v = rec[key];
+    if (!Array.isArray(v)) throw new Error(`${file} 的 ${key} 不是数组`);
+    return v.map((x, i) => {
+      const e = (x ?? {}) as Record<string, unknown>;
+      if (typeof e.file !== 'string' || typeof e.spec !== 'string' || typeof e.why !== 'string' || !e.why) {
+        throw new Error(`${file} 的 ${key}[${i}] 要有 file、spec、why 三个字符串`);
+      }
+      return { file: e.file, spec: e.spec, why: e.why };
+    });
+  };
+  return { bare: list('bare'), cross: list('cross') };
+}
+const ALLOWED_FILE = fileURLToPath(new URL('./package-boundaries.allowed.json', import.meta.url));
+const ALLOWED = parseAllowed(readFileSync(ALLOWED_FILE, 'utf8'), ALLOWED_FILE);
+export const ALLOWED_BARE: readonly Allowed[] = ALLOWED.bare;
+export const ALLOWED_CROSS: readonly Allowed[] = ALLOWED.cross;
 
 export interface SrcFile {
   /** 仓根起的相对路径，正斜杠，如 packages/x/src/a.ts。 */
@@ -342,6 +335,19 @@ describe('包边界：零安装区不引包名，跨包相对路径有名有姓'
     ].join('\n');
     expect(boundaryProblems(facts({ files: [{ rel: 'packages/hygiene/src/x.ts', text }] }))).toEqual([]);
     expect(boundaryProblems(facts({ files: [{ rel, text }] }))).toEqual([]);
+  });
+
+  it('【故意造出的失败】登记名单认不出（缺 why、不是数组、不是 JSON）时抛错，不当成没有登记', () => {
+    expect(() => parseAllowed('{"bare": [], "cross": [{"file": "a", "spec": "b"}]}', 'x.json')).toThrow(
+      'cross[0]',
+    );
+    expect(() => parseAllowed('{"bare": [{"file":"a","spec":"b","why":""}], "cross": []}', 'x.json')).toThrow(
+      'bare[0]',
+    );
+    expect(() => parseAllowed('{"bare": 3, "cross": []}', 'x.json')).toThrow('bare 不是数组');
+    expect(() => parseAllowed('不是 json', 'x.json')).toThrow();
+    expect(ALLOWED_BARE.length).toBeGreaterThan(0);
+    expect(ALLOWED_CROSS.length).toBeGreaterThan(0);
   });
 
   it('package.json 读不到或认不出时抛错，不当成没有依赖', () => {
