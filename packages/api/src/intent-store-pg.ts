@@ -28,10 +28,12 @@ import {
   type IntentWithMessages,
   insertOlderEdit,
   judgeRepeat,
+  NO_SUCH_INTENT,
   orderMessages,
   planAck,
   planDrop,
   planLink,
+  recallConflict,
   type SegmentCandidate,
 } from './intents.ts';
 
@@ -415,12 +417,8 @@ export function createPgIntentStore(db: Db, options: { now?: () => Date } = {}):
           .where(eq(intentMessages.messageId, r.messageId))
           .for('update');
         const [tomb] = await tx.select().from(intentRecalls).where(eq(intentRecalls.messageId, r.messageId));
-        if (stored && stored.chatId !== r.chatId) {
-          return { status: 'reused', why: '要撤回的这条原话记在另一个会话里' } as const;
-        }
-        if (tomb && tomb.chatId !== r.chatId) {
-          return { status: 'reused', why: '这个消息编号的撤回已经记在另一个会话里' } as const;
-        }
+        const conflict = recallConflict(stored, tomb, r.chatId);
+        if (conflict !== undefined) return { status: 'reused', why: conflict } as const;
         if (!tomb) {
           await tx.insert(intentRecalls).values({
             messageId: r.messageId,
@@ -503,7 +501,7 @@ export function createPgIntentStore(db: Db, options: { now?: () => Date } = {}):
             ? await oneIntent(tx, eq(intents.id, ack.intentId), true)
             : undefined;
           if (!intent) {
-            report.skipped.push({ intentId: ack.intentId, why: '没有这段意图' });
+            report.skipped.push({ intentId: ack.intentId, why: NO_SUCH_INTENT });
             continue;
           }
           const plan = planAck(intent, ack, now());

@@ -27,6 +27,14 @@ import {
   tookOverResult,
 } from './command-logic.ts';
 import {
+  askConstraintViolation,
+  isAskOpen,
+  isNotificationOpen,
+  isSettingConflict,
+  nextSettingVersion,
+} from './console-logic.ts';
+import { clearedFailures, isLockedAt, nextFailureState, passwordNeedsUsername } from './credentials-logic.ts';
+import {
   assertOutcomeHasReason,
   claimedResult,
   duplicateVersionObject,
@@ -41,6 +49,7 @@ import {
   supersedes,
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
+import { isAwaitingOpen, isDraftConfirmed, judgeConfirm } from './draft-logic.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -53,6 +62,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { ackReasonOf, holdUntilOf, judgeOutboxAck } from './outbox-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AgentSession,
@@ -83,6 +93,19 @@ import type {
   TimelineRecord,
   User,
 } from './ports.ts';
+import {
+  autoDispatchAudit,
+  autoDispatchChanged,
+  autoDispatchUnchanged,
+  boardCutoffMs,
+  canStopTask,
+  isAutoDispatchUnchanged,
+  isRequestUnchanged,
+  keepOnBoard,
+  NEW_TASK_STATE,
+  nextTaskPriority,
+  segmentRunMatch,
+} from './task-logic.ts';
 
 export interface ProgressRecord {
   id: string;
@@ -277,10 +300,8 @@ export interface MemoryStoreOptions {
   onChange?: (table: RealtimeTable, id: string) => void;
 }
 
-const TERMINAL_TASK_STATES: readonly string[] = ['done', 'stopped', 'failed'];
 /** 时间线默认不放量大的动作流（和 packages/db 的 DEFAULT_TIMELINE_PROGRESS_KINDS 一致）。 */
 const QUIET_PROGRESS_KINDS: readonly ProgressKind[] = ['tool', 'file'];
-const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 
 /** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
@@ -574,11 +595,10 @@ export function createMemoryStore(
         ...current,
         ...(username !== undefined && { username }),
         ...(passwordHash !== undefined && { passwordHash, passwordChangedAt: at.toISOString() }),
-        failedLogins: 0,
-        lockedUntil: undefined,
+        ...clearedFailures(),
       };
       // 和库里的约束 users_password_needs_username 一样：有密码就得有用户名
-      if (next.passwordHash !== undefined && next.username === undefined) {
+      if (passwordNeedsUsername(next)) {
         throw new Error('users_password_needs_username：设密码之前要先有用户名');
       }
       checkAudit(entry);
@@ -590,13 +610,8 @@ export function createMemoryStore(
     async recordPasswordFailure({ userId, at, maxFails, lockMs }) {
       if (!data.users.some((u) => u.id === userId)) return null;
       const c = data.credentials.get(userId) ?? { userId, failedLogins: 0 };
-      const lockedMs = c.lockedUntil === undefined ? undefined : Date.parse(c.lockedUntil);
-      if (lockedMs !== undefined && lockedMs > at.getTime()) return { lockedUntil: c.lockedUntil };
-      const count = (lockedMs === undefined ? c.failedLogins : 0) + 1;
-      const next: PasswordCredentials =
-        count >= maxFails
-          ? { ...c, failedLogins: 0, lockedUntil: new Date(at.getTime() + lockMs).toISOString() }
-          : { ...c, failedLogins: count, lockedUntil: undefined };
+      if (isLockedAt(c, at.getTime())) return { lockedUntil: c.lockedUntil };
+      const next: PasswordCredentials = { ...c, ...nextFailureState(c, at.getTime(), maxFails, lockMs) };
       data.credentials.set(userId, next);
       return { lockedUntil: next.lockedUntil };
     },
@@ -605,7 +620,7 @@ export function createMemoryStore(
     },
     async recordPasswordSuccess(userId) {
       const c = data.credentials.get(userId);
-      if (c) data.credentials.set(userId, { ...c, failedLogins: 0, lockedUntil: undefined });
+      if (c) data.credentials.set(userId, { ...c, ...clearedFailures() });
     },
 
     // —— 看板 ——
@@ -619,16 +634,15 @@ export function createMemoryStore(
       return repo ? repoOnly(repo) : null;
     },
     async listBoardTasks(repoId) {
-      const cutoff = now().getTime() - RECENT_TERMINAL_MS;
+      const cutoff = boardCutoffMs(now().getTime());
       return data.tasks
         .filter((t) => t.repoId === repoId)
         .filter((t) => {
-          if (!TERMINAL_TASK_STATES.includes(t.state)) return true;
           const since = data.stateChanges
             .filter((c) => c.entityId === t.id)
             .sort(byAtThenId)
             .at(-1)?.at;
-          return Date.parse(since ?? t.createdAt) >= cutoff;
+          return keepOnBoard(t.state, Date.parse(since ?? t.createdAt), cutoff);
         })
         .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt));
     },
@@ -659,11 +673,8 @@ export function createMemoryStore(
       const workflowId = repo ? taskWorkflowId(repo, task.issueNumber) : undefined;
       return data.segmentRuns
         .flatMap((r): SegmentRunRecord[] => {
-          if (r.taskId !== undefined) return r.taskId === taskId ? [{ ...r, matchedBy: 'task' }] : [];
-          if (r.issueNumber !== task.issueNumber) return [];
-          // 工作流编号没记的分不出是哪个仓的：不收（和 Postgres 版同一规矩）
-          if (workflowId === undefined || r.workflowId !== workflowId) return [];
-          return [{ ...r, matchedBy: 'issueNumber' }];
+          const matchedBy = segmentRunMatch(r, { id: taskId, issueNumber: task.issueNumber, workflowId });
+          return matchedBy === undefined ? [] : [{ ...r, matchedBy }];
         })
         .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
     },
@@ -805,7 +816,7 @@ export function createMemoryStore(
     async answerAsk({ askId, answer, by }, entry) {
       const ask = data.asks.find((a) => a.id === askId);
       if (!ask) return 'not_found';
-      if (ask.answer !== undefined) return 'already_answered';
+      if (!isAskOpen(ask)) return 'already_answered';
       checkAudit(entry);
       ask.answer = answer;
       ask.answeredBy = by.id;
@@ -888,7 +899,7 @@ export function createMemoryStore(
     async resolveNotification({ id, by }, entry) {
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return 'not_found';
-      if (n.resolvedAt !== undefined) return 'already_resolved';
+      if (!isNotificationOpen(n)) return 'already_resolved';
       checkAudit(entry);
       n.resolvedAt = now().toISOString();
       n.resolvedBy = by.id;
@@ -911,12 +922,12 @@ export function createMemoryStore(
     },
     async putSetting({ key, value, expectedVersion, by }, entry) {
       const current = data.settings.find((s) => s.key === key);
-      if ((current?.version ?? 0) !== expectedVersion) return 'conflict';
+      if (isSettingConflict(current?.version, expectedVersion)) return 'conflict';
       checkAudit(entry);
       const next: SettingRecord = {
         key,
         value,
-        version: expectedVersion + 1,
+        version: nextSettingVersion(expectedVersion),
         updatedAt: now().toISOString(),
         updatedBy: by.id,
       };
@@ -955,8 +966,8 @@ export function createMemoryStore(
     },
     async openAsk({ runId, taskId, question, options: choices, scope, recommended, hold }) {
       // 和库里的约束一样、也和库一样先查约束再去重：推荐的一定在选项里，人闸只跟着 hold 走（不拿空的冒充推荐）
-      if (!choices.includes(recommended)) throw new Error(`推荐的「${recommended}」不在选项里`);
-      if ((scope === 'hold') !== (hold !== undefined)) throw new Error('人闸和提问的范围对不上');
+      const violation = askConstraintViolation({ options: choices, recommended, scope, hold });
+      if (violation !== undefined) throw new Error(violation);
       const existing = data.asks.find((a) => a.runId === runId && a.question === question);
       if (existing) return { ask: existing, created: false };
       const ask: AskRecord = {
@@ -1181,9 +1192,9 @@ export function createMemoryStore(
         title: input.title,
         rawRequest: input.rawRequest,
         requestedBy: input.requestedBy,
-        state: 'queued',
+        state: NEW_TASK_STATE,
         // 排在这个仓最后
-        priority: Math.max(0, ...inRepo) + 1,
+        priority: nextTaskPriority(inRepo),
         acceptance: [],
         createdAt: now().toISOString(),
       };
@@ -1203,7 +1214,7 @@ export function createMemoryStore(
     async updateTaskRequest({ taskId, title, rawRequest }, entry) {
       const task = data.tasks.find((t) => t.id === taskId);
       if (!task) return 'not_found';
-      if (task.title === title && task.rawRequest === rawRequest) return 'unchanged';
+      if (isRequestUnchanged(task, { title, rawRequest })) return 'unchanged';
       checkAudit(entry);
       task.title = title;
       task.rawRequest = rawRequest;
@@ -1213,7 +1224,7 @@ export function createMemoryStore(
     },
     async stopQueuedTask(taskId, entry) {
       const task = data.tasks.find((t) => t.id === taskId);
-      if (task?.state !== 'queued') return 'not_queued';
+      if (!task || !canStopTask(task.state)) return 'not_queued';
       checkAudit(entry);
       task.state = 'stopped';
       data.stateChanges.push({
@@ -1233,16 +1244,12 @@ export function createMemoryStore(
       const repo = data.repos.find((r) => r.id === repoId);
       if (!repo) return 'not_found';
       const before = repo.autoDispatchSince ?? null;
-      if ((before !== null) === on) return { changed: false, autoDispatchSince: before };
+      if (isAutoDispatchUnchanged(before, on)) return autoDispatchUnchanged(before);
       const after = on ? now().toISOString() : null;
-      const full: NewAuditEntry = {
-        ...entry,
-        before: { autoDispatchSince: before },
-        after: { autoDispatchSince: after },
-      };
+      const full = autoDispatchAudit(entry, before, after);
       checkAudit(full);
       repo.autoDispatchSince = after ?? undefined;
-      return { changed: true, autoDispatchSince: after, auditId: audit(full) };
+      return autoDispatchChanged(after, audit(full));
     },
 
     // —— 飞书 ——
@@ -1309,7 +1316,7 @@ export function createMemoryStore(
           return { status: replay === 'same' ? 'replayed' : 'request_reused', draft: draftOut(row) };
         }
       }
-      if (row.status === 'confirmed') return { status: 'confirmed', draft: draftOut(row) };
+      if (isDraftConfirmed(row.status)) return { status: 'confirmed', draft: draftOut(row) };
       checkAudit(entry);
       if (repoId !== undefined) needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
       const next = note ? withNote(row, note) : row;
@@ -1346,8 +1353,8 @@ export function createMemoryStore(
     async confirmDraft({ draftId, revision, repoId, by }, entry) {
       const row = data.feishuDrafts.find((d) => d.id === draftId);
       if (!row) return { status: 'not_found' };
-      if (row.status === 'confirmed') return { status: 'already', draft: draftOut(row) };
-      if (row.revision !== revision) return { status: 'changed', draft: draftOut(row) };
+      const verdict = judgeConfirm(row, revision);
+      if (verdict !== 'proceed') return { status: verdict, draft: draftOut(row) };
       checkAudit(entry);
       needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
       needUser(by, 'feishu_drafts_confirmed_by_users_id_fk');
@@ -1369,7 +1376,9 @@ export function createMemoryStore(
     },
     async recordDraftOpened({ draftId, taskId }) {
       const row = data.feishuDrafts.find((d) => d.id === draftId);
-      if (row?.status !== 'confirmed' || row.taskId !== undefined) return 'not_pending';
+      if (!row || !isAwaitingOpen({ status: row.status, hasTask: row.taskId !== undefined })) {
+        return 'not_pending';
+      }
       if (!data.tasks.some((t) => t.id === taskId)) return 'task_not_found';
       row.taskId = taskId;
       row.openError = undefined;
@@ -1517,30 +1526,14 @@ export function createMemoryStore(
       const report: FeishuAckReport = { applied: 0, skipped: [] };
       for (const ack of acks) {
         const row = data.feishuOutbox.find((r) => r.id === ack.itemId);
-        if (!row) {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'unknown_item' });
-          continue;
-        }
-        if (ack.revision > row.revision) {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'future_revision' });
+        const verdict = judgeOutboxAck(row, ack);
+        if (!row || verdict.kind === 'skip') {
+          const why = verdict.kind === 'skip' ? verdict.why : 'unknown_item';
+          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why });
           continue;
         }
         const r = ack.result;
-        const current = ack.revision === row.revision;
-        if (!current && r.status !== 'sent' && r.status !== 'updated') {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-          continue;
-        }
-        // 已经送到过更新一版的卡：旧版本的回执后到（重试、迟到）不能把「送到的卡」退回旧卡。
-        if (
-          !current &&
-          row.deliveredMessageId !== undefined &&
-          row.deliveredRevision !== undefined &&
-          ack.revision < row.deliveredRevision
-        ) {
-          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-          continue;
-        }
+        const current = verdict.current;
         const next: Partial<FeishuOutboxRow> = {};
         if (r.status === 'sent') {
           Object.assign(next, {
@@ -1570,13 +1563,8 @@ export function createMemoryStore(
           Object.assign(next, {
             ackRevision: ack.revision,
             ackStatus: r.status,
-            ackReason:
-              r.status === 'dropped' || r.status === 'deferred'
-                ? r.reason
-                : r.status === 'failed'
-                  ? r.error
-                  : undefined,
-            holdUntil: r.status === 'deferred' ? r.until : r.status === 'failed' ? r.retryAfter : undefined,
+            ackReason: ackReasonOf(r),
+            holdUntil: holdUntilOf(r),
           });
         }
         // 记下来什么都不变：同一条回执又来了一遍（网关重发、两批叠上），不再记一次（失败次数、送达尝试数都不加）。
