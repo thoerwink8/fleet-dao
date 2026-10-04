@@ -11,12 +11,28 @@
 // - 网关那边自己也看着（packages/feishu/src/watch.ts）：它调不通后端时自己往飞书群报警；这一项管网关整个没了、它自己报不了的时候。
 //   两边同一个 5 分钟。
 import { FeishuRoutes, IntentRoutes } from '@fleet-dao/shared';
-import { PublicHealthError } from './health.ts';
+import { PublicHealthError, type serviceHealthChecks } from './health.ts';
 
 /** 推送轮询这么久没来就报红：和网关自己报警同一个时限（packages/feishu/src/watch.ts 的 WATCH_LIMITS.alertAfterMs）。 */
 export const GATEWAY_SILENT_MS = 5 * 60_000;
 /** 没配网关通行证：网关的请求一律不认，这一项报「未接」（公网看得到）。 */
 export const GATEWAY_NO_PASS = '没配飞书网关的通行证，网关的请求一律不认';
+
+/** 这台明说不接飞书（FLEET_FEISHU_LOGIN=off，本机档）：没有飞书网关，这一项报「未接」（公网看得到）。 */
+export const GATEWAY_FEISHU_OFF = '这台不接飞书，没有飞书网关';
+
+/**
+ * /healthz 的 feishu_gateway 一项接什么：明说不接飞书的（off）和没配通行证的都报「未接」，只有配了通行证才查网关来没来。
+ * 明说不接的排在最前：装机照样会生成通行证，没有这一条就一直等一个永远不会来的网关、健康页一直红（#803）。
+ */
+export function feishuGatewayPart(
+  config: { feishuOff: boolean; feishuGatewayToken: string | null },
+  seen: GatewaySeen,
+): Parameters<typeof serviceHealthChecks>[0]['feishuGateway'] {
+  if (config.feishuOff) return { check: async () => {}, notWired: GATEWAY_FEISHU_OFF };
+  if (!config.feishuGatewayToken) return { check: async () => {}, notWired: GATEWAY_NO_PASS };
+  return seen;
+}
 
 interface RouteKey {
   method: string;
