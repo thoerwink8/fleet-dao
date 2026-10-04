@@ -35,7 +35,7 @@
 | 5 | 人 | 两位创始人一起用；用飞书账号登录驾驶舱，不需要 GitHub 账号；写 GitHub 的动作由机器人代发并记下提出人；每个操作留记录 |
 | 6 | 访问 | 香港 VPS 当门面：驾驶舱入口 + 飞书网关都在香港；域名用 DigitalPlat 的免费域名（DNS 也用 DigitalPlat 的，国内外解析均已验证）；它一个账号只给一个域名（数量以[官方 FAQ](https://github.com/DigitalPlatDev/FreeDomain/blob/main/documents/domains/faq.md)为准），以后的项目都挂在它下面的子域名上；公开仓里写 `<驾驶舱域名>`，真值只在机器配置里（第十四节「演示版」）；法国 VPS 不对外开端口，只和香港之间走加密通道。（原定的 workers.dev 在国内被 DNS 污染，作废） |
 | 7 | 通知 | 飞书机器人 + 驾驶舱提醒中心 |
-| 8 | 模型 | 构建期全程 Opus 5.5（先用 Claude 订阅的额度）；判断阶段例外：Claude 判断后端接上之前先用 TypeSafe 的 Jev（第十一节）；第二意见例外：换厂商（第五节）；机器派的会话（引擎、工人）、子代理、VPS 和 WSL 上都不用 Fable，子代理只用 Opus 或 Sonnet，Fable 只在创始人本机主对话里由他自己选（2026-10-04 收窄，`docs/decisions/0017-fable-only-in-founder-main-session.md`）；流程写完后默认值换成按数据分工，创始人再调；验收时 Kimi 和 Cursor 各跑一条小任务测插头 |
+| 8 | 模型 | 构建期全程 Opus 5.5（先用 Claude 订阅的额度）；判断阶段例外：Claude 判断后端接上之前先用 TypeSafe 的 Jev（第十一节）；第二意见例外：换厂商（第五节）；机器派的会话（引擎、工人、路由）、子代理、VPS 和 WSL 上的会话永不用 Fable，子代理只用 Opus 或 Sonnet，Fable 只在创始人本机的主对话里由他自己选（2026-10-03 拍永久，2026-10-04 收窄，`docs/decisions/0017-fable-only-in-founder-main-session.md`）；流程写完后默认值换成按数据分工，创始人再调；验收时 Kimi 和 Cursor 各跑一条小任务测插头 |
 | 9 | 派工模型 | 渠道 / 族 / 模型 / 执行方式 / 阶段类型 **自由组合**；全局禁令只有两条：GPT 不碰 UI，不用 Fable |
 | 10 | 推荐 | 人排先后 + 额度和战绩自动微调 + 约 10% 试探；每次派工写一句原因 |
 | 11 | 闲置 | 渠道空了按序找活：积压任务里它能干的 → 重要任务加一份并行尝试 → 给别的 PR 当第二意见 → 考新模型。**不许 AI 自己编活** |
