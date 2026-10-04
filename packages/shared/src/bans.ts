@@ -31,7 +31,8 @@ export const HARD_BANS: readonly HardBan[] = [
   },
   {
     // Fable 算在 claude 族里，只能按名字认：模型 id、显示名、上游串、别名，哪个带 fable 都算。
-    // 永久禁令（不挂版本号）：创始人 2026-10-03 拍「目前阶段我不希望用 fable」——不碰界面是模型族约束，和出到几版无关。
+    // 永久禁令（不挂版本号，决定 0017）：选路派的都是机器派的会话，永不用 Fable。2026-10-04 收窄后 Fable 只在
+    // 创始人本机主对话里由他自己选，那条路不经过这里，所以这里照禁、不放开。
     id: 'no-fable',
     reason: '不用 Fable（创始人定）',
     applies: (subject) => names(subject).some((n) => /fable/i.test(n)),
