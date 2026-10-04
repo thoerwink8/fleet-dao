@@ -78,11 +78,11 @@ import {
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
+import type { ProgressEvent, RunOutcome } from '@fleet-dao/shared';
 import { stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
 import type { JevReply } from '../failure/jev.ts';
-import { judgeStall, type StallToolCall } from '../failure/stall.ts';
+import { judgeStall } from '../failure/stall.ts';
 import type { FailureVerdict, TriageChoice } from '../failure/types.ts';
 import {
   type AwaitSessionInput,
@@ -105,7 +105,6 @@ import {
   hostDrivers,
   isWiredHost,
   sessionUserOf,
-  type WiredHost,
   wiredHostNames,
 } from './hosts.ts';
 import {
@@ -150,7 +149,8 @@ import {
   REATTACH_MARGIN_MS,
 } from './session-codes.ts';
 import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
-import type { SessionPorts, SessionPortsDeps } from './session-types.ts';
+import { createLive, type Live } from './session-live.ts';
+import type { SessionPorts, SessionPortsDeps, SessionShared } from './session-types.ts';
 import { asSessionUser, errorText, SHA, scopeLimitsOf, withRawError } from './session-util.ts';
 import { launchSegment, SEGMENT_NOT_WIRED_CODE, type SegmentOutcome } from './sessions-segment.ts';
 import { POOL_HOLD_PREFIX, poolHoldKey } from './store-ports.ts';
@@ -210,76 +210,6 @@ export {
  * 它们一起进程就在 live 里，下一次再停。
  */
 export type { ContinueMode, OrgSwitchSessions };
-
-interface Live {
-  runId: string;
-  /** 起会话时回给工作流的号（看守拿它对会话）：cursor 开新会话时是临时号。 */
-  sessionId: string;
-  /** 执行体真用的会话号：Claude、续会话一开始就知道；cursor 开新会话要等 init 帧报上来，没报就一直没有。 */
-  agentSessionId: string | undefined;
-  hostId: WiredHost;
-  driver: HostDriver;
-  taskId: string;
-  stage: StageKind;
-  kind: OutputKind;
-  mode: ContinueMode;
-  user: SessionUser;
-  poolId: string;
-  routeId: string;
-  dir: string;
-  baseHead: string | undefined;
-  /** 仓的主线分支：交活核对、Lead 交的改动扣掉并进来的主线（树里钉的 origin/<它>，user-git.ts 的 ownSpan）。 */
-  defaultBranch: string;
-  reviewHead: string | undefined;
-  /** 开 PR 前验证对照的「怎么算做完」：读结论文件时拿它核逐条答全了没有。 */
-  verifyCriteria: string[] | undefined;
-  /** 续会话时上一轮结束时的会话累计花费：这一轮的花费按它求差。 */
-  previousCost: number | null | undefined;
-  startedAt: number;
-  spawned: Promise<SpawnInfo>;
-  report: Promise<HostReport>;
-  /** 插头收场（进程、scope 都收了）之后删这次会话的临时目录；不会失败（删不掉只记日志）。 */
-  cleaned: Promise<void>;
-  abort: AbortController;
-  stop:
-    | { kind: 'stop'; reason: string }
-    | { kind: 'stall'; rule: string; basis: string }
-    /** 切号（#59）：会话用户要换组织，先停下，切过去接着干（交回 org_switch，失败分流 OS1 马上续）。 */
-    | { kind: 'org-switch'; why: string }
-    /** 排空到截止（drain.ts）：先停下，新引擎起来按编号续上（交回 engine_stop，失败分流 KL3）。 */
-    | { kind: 'engine-stop'; why: string }
-    | undefined;
-  /** 还没进库的进度事件；seq = 出自输出的哪一行（走文件时有），进库时一起把「确认到哪一行」推上去。 */
-  pending: { event: ProgressEvent; seq: number | undefined }[];
-  /** 走文件、脱开引擎进程跑（deps.ioRoot）：引擎重启了由新引擎接回，停机不停它、排空不等它。 */
-  detached: boolean;
-  /** 引擎停机时放手（releaseDetached）：不再读它的输出、不写库、不停它，留给下一个引擎接回。 */
-  release: AbortController;
-  flushTimer: ReturnType<typeof setTimeout> | undefined;
-  flushing: Promise<void>;
-  writeError: string | undefined;
-  dropped: number;
-  lastEventAt: number | null;
-  /** 上次为停滞题问 Jev 的时刻（Date.now()）；没问过是 undefined。 */
-  stallJevAt?: number;
-  lastStepAt: number | undefined;
-  lastFileAt: number | undefined;
-  tools: Map<string, { name: string; since: number }>;
-  recent: StallToolCall[];
-  says: string[];
-  plan: Map<string, string>;
-  quotaError: string | undefined;
-  /** 起来时读的会话资源池按内存杀进程的累计数：被信号杀掉时拿它比（kill-evidence.ts）。 */
-  oomBefore: Promise<OomCounters>;
-  /** 会话自己的 scope 名（插头交回的），看守醒来读它的内存记录。 */
-  scopeUnit: string | undefined;
-  /** 看守读到的它自己 scope 里按内存杀进程的最大数；没读到过是 undefined。 */
-  scopeOomSeen: number | undefined;
-  /** 这个会话在跑时，这个工人手上同时在跑的别的会话最多几个。 */
-  peersSeen: number;
-  /** 正挂着的看守有几个（看守被取消时会话可能还在跑，收场后由起会话那头撤掉排空的登记）。 */
-  awaiting: number;
-}
 
 const STEP_RANK: Record<string, number> = { pending: 0, in_progress: 1, done: 2 };
 const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
@@ -345,6 +275,29 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
    */
   const segments = new Map<string, Promise<SegmentOutcome>>();
   const identities = new Map<string, Promise<{ name: string; email: string }>>();
+  const shared: SessionShared = {
+    deps,
+    db,
+    trees,
+    gh,
+    clock,
+    drivers,
+    forkMax,
+    tickMs,
+    stallCheckMs,
+    jev,
+    jevTimeout,
+    stallJevEveryMs,
+    flushMs,
+    spawnTimeoutMs,
+    log,
+    evidence,
+    helperOpts,
+    registry,
+    segments,
+    identities,
+  };
+  const { newLive } = createLive(shared);
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, signal?: AbortSignal): UserTree => ({
     exec: deps.exec,
@@ -605,61 +558,6 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       stopRequested: Boolean(stored.stopRequested),
     });
     return { live };
-  }
-
-  /** 新看守的状态：起会话、接回共用，只给认得出这个会话的那些，其余从空开始。 */
-  function newLive(
-    base: Pick<
-      Live,
-      | 'runId'
-      | 'sessionId'
-      | 'agentSessionId'
-      | 'hostId'
-      | 'driver'
-      | 'taskId'
-      | 'stage'
-      | 'kind'
-      | 'mode'
-      | 'user'
-      | 'poolId'
-      | 'routeId'
-      | 'dir'
-      | 'baseHead'
-      | 'defaultBranch'
-      | 'reviewHead'
-      | 'verifyCriteria'
-      | 'previousCost'
-      | 'startedAt'
-      | 'spawned'
-      | 'abort'
-      | 'detached'
-      | 'oomBefore'
-    >,
-  ): Live {
-    return {
-      ...base,
-      release: new AbortController(),
-      report: Promise.resolve(undefined as unknown as HostReport),
-      cleaned: Promise.resolve(),
-      stop: undefined,
-      pending: [],
-      flushTimer: undefined,
-      flushing: Promise.resolve(),
-      writeError: undefined,
-      dropped: 0,
-      lastEventAt: null,
-      lastStepAt: undefined,
-      lastFileAt: undefined,
-      tools: new Map(),
-      recent: [],
-      says: [],
-      plan: new Map(),
-      quotaError: undefined,
-      scopeUnit: undefined,
-      scopeOomSeen: undefined,
-      peersSeen: registry.size,
-      awaiting: 0,
-    };
   }
 
   // ---- 进度：攒一小批写库

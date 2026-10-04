@@ -16,11 +16,12 @@ import type {
   StopSessionInput,
 } from '../ports.ts';
 import type { UserExec } from './exec.ts';
-import type { HostRunners } from './hosts.ts';
+import type { HostRunners, hostDrivers } from './hosts.ts';
 import type { KillEvidenceDeps } from './kill-evidence.ts';
 import type { MirrorGitHub } from './mirror.ts';
 import type { OrgSwitchSessions } from './org-switch.ts';
-import type { SegmentPortsDepsForSessions } from './sessions-segment.ts';
+import type { Live } from './session-live.ts';
+import type { SegmentOutcome, SegmentPortsDepsForSessions } from './sessions-segment.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 export interface SessionPortsDeps {
@@ -119,3 +120,31 @@ export type SessionPorts = {
    */
   drainStop(why: string): string[];
 };
+
+/**
+ * createSessionPorts 里各块共用的那些：依赖、按依赖定下的取值（时限、日志、驱动……）和三张登记表。拆出去的每个 createXxx(shared)
+ * 都从这里解构自己要用的，名字和原来闭包里的一样；登记表（registry、segments、identities）是同一个 Map，各块改的是同一份。
+ */
+export interface SessionShared {
+  deps: SessionPortsDeps;
+  db: Db;
+  trees: WorkTrees;
+  gh: SessionPortsDeps['gh'];
+  clock: () => Date;
+  drivers: ReturnType<typeof hostDrivers>;
+  forkMax: number;
+  tickMs: number;
+  stallCheckMs: number;
+  jev: JevPort;
+  jevTimeout: { timeoutMs?: number };
+  stallJevEveryMs: number;
+  flushMs: number;
+  spawnTimeoutMs: number;
+  log: NonNullable<SessionPortsDeps['log']>;
+  evidence: KillEvidenceDeps;
+  helperOpts: { helper?: string; sudo?: readonly string[] };
+  registry: Map<string, Live>;
+  /** 三段（对题 / 动手 / 验收）走 runner 的会话 registry（#554-4），见 sessions.ts 装配处。 */
+  segments: Map<string, Promise<SegmentOutcome>>;
+  identities: Map<string, Promise<{ name: string; email: string }>>;
+}
