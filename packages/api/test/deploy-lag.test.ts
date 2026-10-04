@@ -6,17 +6,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { notifications } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEPLOY_LAG_LIMITS,
   type DeployLagInput,
   DeployLagState,
   type DeployLagVerdict,
-  deployLagCheck,
   judgeDeployLag,
   readDeployLagInput,
   watchOnce,
-} from '../src/deploy-lag.ts';
+} from '@fleet-dao/store';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { deployLagCheck } from '../src/deploy-lag-check.ts';
 
 // 别的包、仓里 deploy/ 下的文件：路径放变量里动态取（写成字面量 tsc 会把它们拉进本包的工程里查）
 const SCAN = '../../web/src/build/scan.ts';

@@ -285,17 +285,10 @@ describe('要全跑时本机不跑：写明原因和本机先跑的那一条命�
     expect(r.out.some((l) => l.startsWith('- pnpm-lock.yaml：'))).toBe(true);
     expect(r.err[0]).toContain('要全跑');
     expect(r.err[0]).toContain('全量交给 CI');
-    // 先跑的就一条命令，照 CI 那套判法：改到的 api 和依赖它的 engine、skill 带上的 agents 和 agents-sync、shared 自己，
-    // 再加 CI 每次都跑的那两份
+    // 先跑的就一条命令，照 CI 那套判法：改到的 api（没有包依赖它：#865 之后引擎不再依赖 api）、skill 带上的 agents 和
+    // agents-sync、shared 自己，再加 CI 每次都跑的那两份
     expect(refusedList(r.err).sort()).toEqual(
-      [
-        'agents/',
-        'packages/agents-sync/',
-        'packages/api/',
-        'packages/engine/',
-        'packages/shared/',
-        ...ALWAYS_TESTS,
-      ].sort(),
+      ['agents/', 'packages/agents-sync/', 'packages/api/', 'packages/shared/', ...ALWAYS_TESTS].sort(),
     );
     expect(r.err.filter((l) => /^\s+pnpm exec vitest run /.test(l))).toHaveLength(1);
     expect(r.err).toContain('真要在本机全跑：pnpm test:changed --all');

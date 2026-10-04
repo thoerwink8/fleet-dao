@@ -73,7 +73,9 @@ export function rowOf(run: RunInput, jobs: readonly JobInput[]): RunRow {
 
 const median = (a: readonly number[]): number => {
   const s = [...a].sort((x, y) => x - y);
-  return s[Math.floor(s.length / 2)] ?? 0;
+  const mid = Math.floor(s.length / 2);
+  // 偶数个取中间两个的平均（不是偏上的那个）；summarize 只对非空的一组调它
+  return s.length % 2 === 1 ? (s[mid] ?? 0) : ((s[mid - 1] ?? 0) + (s[mid] ?? 0)) / 2;
 };
 
 export interface Summary {

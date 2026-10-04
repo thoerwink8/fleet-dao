@@ -12,7 +12,7 @@ import {
   silenceProblem,
 } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
-import { type AlertWorkPort, seatAuditWho } from './alert-work.ts';
+import { type AlertWorkPort, seatAuditWho } from '@fleet-dao/store';
 import type { Store } from './ports.ts';
 
 export class AlertCliError extends Error {

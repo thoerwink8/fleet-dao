@@ -4,11 +4,17 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { type AppCredentials, createGitHub, memoryLedger } from '@fleet-dao/github';
 import type { MemoryData } from '@fleet-dao/store';
-import { devFixtures } from '@fleet-dao/store';
+import {
+  createGitHubIntake,
+  devFixtures,
+  MAX_AUTO_REPLAYS,
+  pollDeliveryId,
+  reconcileGitHub,
+  reconcilerOptions,
+} from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { createGitHubIntake, githubEventsCheck, pollDeliveryId } from '../src/github.ts';
+import { githubEventsCheck } from '../src/github.ts';
 import type { GitHubDelivery } from '../src/ports.ts';
-import { MAX_AUTO_REPLAYS, reconcileGitHub, reconcilerOptions } from '../src/reconcile.ts';
 import { deliverGithub as deliver, harness, T0 } from './harness.ts';
 
 const API = 'https://api.github.test';

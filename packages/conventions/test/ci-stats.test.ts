@@ -68,5 +68,8 @@ describe('summarize', () => {
     expect(s.map((x) => x.event)).toEqual(['pull_request', 'push']);
     expect(s[1]).toMatchObject({ runs: 3, wallMedian: 80, wallMax: 100, machineMinTotal: 7 });
     expect(summarize([])).toEqual([]);
+    // 偶数个：中位数是中间两个的平均
+    const even = summarize([mk('push', 60, 60), mk('push', 100, 60)]);
+    expect(even[0]?.wallMedian).toBe(80);
   });
 });
