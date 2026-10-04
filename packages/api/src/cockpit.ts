@@ -14,7 +14,6 @@ import {
   MeResponse,
   NotificationsQuery,
   NotificationsResponse,
-  type NotWired,
   PageQuery,
   PoolsResponse,
   ReposResponse,
@@ -45,12 +44,11 @@ import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
-import type { Deps, NotWiredMark } from './deps.ts';
+import type { Deps } from './deps.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import {
   type Actor,
   type NewAuditEntry,
-  type Store,
   type TaskSignal,
   WorkflowGoneError,
   WorkflowUnavailableError,
@@ -58,7 +56,6 @@ import {
 import { registerReleaseRoutes } from './release-version.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
-import { findSelfRepo } from './self-repo.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
@@ -500,10 +497,8 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       store.listRuns({ active: true }),
     ]);
     const now = deps.now();
-    const quotaNotWired = await notWiredView(store, deps.notWired?.quota);
     return reply(c, PoolsResponse, {
       pools: buildPools({ pools, channels, windows, routes, activeRuns }, now, config.quotaStaleAfterMs),
-      ...(quotaNotWired ? { quotaNotWired } : {}),
       staleAfterMinutes: Math.round(config.quotaStaleAfterMs / 60_000),
       asOf: now.toISOString(),
     });
@@ -604,11 +599,4 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   }
 
   return app;
-}
-
-/** 这些单开在 fleet-dao 自己这个仓：在受管的仓里找到它，驾驶舱才链得过去（找不到只显示单号）。 */
-async function notWiredView(store: Store, mark: NotWiredMark | undefined): Promise<NotWired | undefined> {
-  if (!mark) return undefined;
-  const self = await findSelfRepo(store);
-  return { ...mark, ...(self ? { issueRepo: { owner: self.owner, name: self.name } } : {}) };
 }

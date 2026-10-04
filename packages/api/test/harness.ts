@@ -127,8 +127,6 @@ export interface HarnessOptions {
   draftOpenLimits?: Partial<DraftOpenLimits>;
   /** 演示版的发布处；不给就是没配。 */
   demo?: DemoPublisher | null;
-  /** 还没做的读取器；不给就是都接上了。 */
-  notWired?: Deps['notWired'];
   /** 飞书网关来没来过的记录（/healthz 的 feishu_gateway）；不给就不记。 */
   gatewaySeen?: Deps['gatewaySeen'];
   /** 意图存储（#553）；不给就是一份跟着测试时钟走的内存版，null 是没接上。 */
@@ -176,7 +174,6 @@ function wire<S extends Store>(
     now,
     health: options.health ?? [],
     demo: options.demo ?? null,
-    ...(options.notWired ? { notWired: options.notWired } : {}),
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),

@@ -40,12 +40,13 @@ export function QuotaBar({ util, className }: { util: number | undefined; classN
   );
 }
 
-/** 每个额度数字都要标明来源：实读（接口读到的）还是估算（按我们自己的用量算的）。 */
+/** 每个额度数字都要标明来源：实读（接口读到的）还是估算（按我们自己的用量算的），悬停看读法（reclaude-carpool……）。 */
 export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?: string }) {
   const measured = w.reading === 'measured';
   return (
     <span
-      title={measured ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}
+      title={`${measured ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}（读法 ${w.source}）`}
+      data-source={w.source}
       className={cn(
         'inline-flex h-4 shrink-0 items-center gap-1 rounded px-1 text-micro leading-none whitespace-nowrap',
         measured

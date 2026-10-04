@@ -280,17 +280,14 @@ export function routeOptions(
   purpose: RoutingLayerPurpose,
   pools: PoolView[] | undefined,
   currentRouteId: string | undefined,
-  /** 额度读取还没做（额度表的 quotaNotWired）：不写「额度没查成」，这一行不显示用量。 */
-  quotaNotWired = false,
 ): RouteOption[] {
   return purpose.models.flatMap((m) =>
     m.routes.map((r): RouteOption => {
       const pool = pools?.find((p) => p.id === r.poolId);
       // 按这条路由算：只扣别的模型组的窗满了不算它满，和额度页同一句话。模型的族不知道就整池一起算（宁可说紧）。
-      const quota =
-        pools && !quotaNotWired
-          ? routeQuotaHeadline(pool, m.family ? { id: m.modelId, family: m.family } : undefined)
-          : undefined;
+      const quota = pools
+        ? routeQuotaHeadline(pool, m.family ? { id: m.modelId, family: m.family } : undefined)
+        : undefined;
       let note: string | undefined;
       if (r.routeId === currentRouteId) note = '正在用';
       else if (r.inFlight >= r.maxConcurrency) note = `账号池满 ${r.inFlight}/${r.maxConcurrency}`;
@@ -332,8 +329,7 @@ function RoutePickerDialog({
     : found && 'problem' in found
       ? found.problem
       : undefined;
-  const opts =
-    purpose && target ? routeOptions(purpose, pools?.pools, current, Boolean(pools?.quotaNotWired)) : [];
+  const opts = purpose && target ? routeOptions(purpose, pools?.pools, current) : [];
   const empty = cannot
     ? '现在没法换'
     : !layers

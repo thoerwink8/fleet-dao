@@ -181,10 +181,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     routingEfforts: pgRoutingEfforts(db, now),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
     release: { openMilestones: github.openMilestones, changelog: repoChangelog },
-    // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
-    notWired: {
-      quota: { what: '额度读数', phase: 'P3', issue: 76 },
-    },
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,
