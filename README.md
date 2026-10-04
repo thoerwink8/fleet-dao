@@ -22,6 +22,7 @@
 | 目录 | 是什么 |
 |---|---|
 | `packages/shared` | 各包共用的类型、校验和常量；包与包之间的接口约定在这 |
+| `packages/core` | 三段流程用的纯判断：接活的几道关、任务简报、验证结论、提醒谁在处理；不碰网络和库，引擎、后端、网页、`fleet` 命令都调它判 |
 | `packages/db` | Postgres 表结构、迁移、查询、渠道目录装载器 |
 | `packages/engine` | 引擎：Temporal 工作流、失败分流与熔断、停滞判定 |
 | `packages/adapters` | 渠道插头：无头起各家写码助手、读过程记录；各渠道的额度读取 |
@@ -32,7 +33,10 @@
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
 | `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（先审后合路径等第二意见、引擎任务 PR 等冷验收）、开单脚本、文档指针检查、欠账检查、阶段收口 |
+| `packages/hygiene` | 公开仓卫生检查：全仓扫描和推送前的闸，只拦私钥、令牌、密码这类真密钥（账号、邮箱、IP 不拦） |
 | `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
+| `packages/mirasim-reclaude` | Mirasim 的回合选路启动器（Go 写的，在 `launcher/`）和安全迁移入口（`pnpm mirasim:migrate`：旧接入空闲后才更新，可检查、可回滚，不重启整个 Mirasim） |
+| `agents/` | 给各家 AI 装的东西的原件：技能（`skills/`）、钩子（`hooks/`）、权限配置（`config/`），和钉住规矩的测试（`test/rules/`）；由 agents-sync 装出去 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
 | `specs/` | 方案文档（要写才写）和历史的需求、结果；需求在 GitHub 的单子里（#654） |
