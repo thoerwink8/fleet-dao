@@ -52,7 +52,7 @@ SHARDS=(
   'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use wsl-loopback'
   'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
-NODE_TESTS=(health-page auto-release config)
+NODE_TESTS=(health-page reclaude-old-account-clean auto-release config)
 SPECIAL_UNITS=(lint backup node-tests ports)
 
 usage_error() {
@@ -210,6 +210,7 @@ unit_lint() {
 unit_node_tests() {
   if command -v node >/dev/null; then
     if node --test "$HERE/health-page.test.mjs"; then echo "健康页的判定：通过"; else fail=1; fi
+    if node --test "$HERE/reclaude-old-account-clean.test.mjs"; then echo "被封号邮箱清理：通过"; else fail=1; fi
     if node --test "$HERE/auto-release.test.mjs"; then echo "自动发布的判断和流程：通过"; else fail=1; fi
     if node --test "$HERE/config.test.mjs"; then echo "配置对账（期望进仓、私有值只比指纹）：通过"; else fail=1; fi
   else

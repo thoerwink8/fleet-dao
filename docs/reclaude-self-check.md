@@ -1,9 +1,9 @@
 # 防封环境自检：接 reclaude 的机器该查什么
 
-> 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。
+> 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。入口和「某号被封了」的提示词在 [reclaude.md](reclaude.md)。
 > 配套：装法与原理在 `docs/reclaude-in-mirasim.md`。本文讲两件事：先清掉 reclaude 使用前那个 Claude 账号留在本机的 id，再查有没有在产生上报。
 >
-> **脚本在哪**：旧账号清理、旧 `machine-check.mjs` 仍只在已退役的 ai-gateway-stack 存档仓，本文相关历史步骤不代表新版接入。Mirasim 启动器及迁移已由本仓 `packages/mirasim-reclaude` 维护，检查用 `pnpm mirasim:migrate --check`；来源验证见配套指南。清账号或删痕迹仍须先获删数据授权，不由迁移器执行。
+> **脚本在哪**：`deploy/reclaude-old-account-clean.mjs`（本仓）。旧 `machine-check.mjs` 仍在已退役的 ai-gateway-stack。Mirasim 启动器及迁移由本仓 `packages/mirasim-reclaude` 维护，检查用 `pnpm mirasim:migrate --check`；来源验证见配套指南。清账号或删痕迹仍须先获删数据授权，不由迁移器执行。
 
 ## 0. 立场
 
@@ -41,7 +41,7 @@ node deploy/reclaude-old-account-clean.mjs --all-homes --apply
 
 - 旧 = oauth 邮箱 ≠ `device.json` 的 `user_email`。只摘这几串：邮箱、`accountUuid`、`organizationUuid`、`userID`（短显示名、创建时间不拿去全文替换）。
 - `settings.json` 里没有这些字符串就**整文件不重写**（覆写这份文件可能 401，改回去也回不来）。
-- 不动 `~/.reclaude/device.json` / `device.key`（那是现账号的设备）、不动 `machineID`、不动会话 `jsonl`、不动 `daemon.log`。
+- 不动 `~/.reclaude/device.json` / `device.key`（那是现账号的设备）、不动 `machineID`、不动会话 `jsonl`、不动 `daemon.log`。这一节不碰会话；被封的号另走下面第 1.1 节。
 - 输出只打条数和键名，不打印邮箱、uuid、token。
 
 判读（「扫完是 0」和「没查成」不是一回事）：
@@ -65,6 +65,21 @@ node deploy/reclaude-old-account-clean.mjs --all-homes --apply
 - oauth 又在，邮箱仍和 `device.json` 的 `user_email` 不同：reclaude 把这份当成当前登录，本地删文件留不住。不要隔几分钟删一次。记下这台机器、哪一家目录。要去掉它，是换 reclaude 里的这份登录，不是再删文件。
 
 （2026-09-26 在本机 Windows 上实测到的就是后一种：清完 `status=clean`，一拉起 reclaude，同一份 oauth 又回来了，`machine-check` 的 `old-claude-account` 照旧红。）
+
+## 1.1 被封的号
+
+起因不是「它是拼车号」或「它是独享号」。某个号被封了，创始人点名那个组织编号，只摘这个号的邮箱。下次换一个被封的号，就换编号，不改脚本。（创始人 2026-10-04 14:51：「不是因为是拼车号所以清理，而是因为这个拼车号被封禁了，所以要清理；所以下次我会指明哪个号被封了，清理哪个号信息」。）
+
+邮箱从 `reclaude org list` 里该编号那一行取，一行里必须正好有一个邮箱。没有这个编号、一行里没有或多于一个邮箱：退出码 2，一个字节不写。不拿「当前是拼车」或「只有一个 team」去猜。
+
+摘这些地方里这一整串邮箱（大小写都算）：`~/.claude.json` 和它的备份、`~/.claude/settings.json`（没有这串就整文件不重写）、`~/.claude/projects/**/memory/`、`~/.claude/projects/**/*.jsonl`。会话行原来是 JSON 的，摘完必须还能解析，解析不了就整家不写。别的号的邮箱留着。`device.json`、凭据、`daemon.log` 不动。这串如果就是当前 `~/.claude.json` 里的登录邮箱，不改这份文件（改了也会被 reclaude 填回去），会话里的仍摘。
+
+```bash
+node deploy/reclaude-old-account-clean.mjs --org <编号>            # 干跑
+node deploy/reclaude-old-account-clean.mjs --org <编号> --apply    # 当前用户
+```
+
+输出只打条数和路径，不打邮箱。`sessions=none-found` 才是会话扫过、这串已经没有。`sessions=not-scanned` 或退出码 2 是没查成。
 
 ## 2. 四步自检（全绿才算接上）
 
@@ -101,7 +116,7 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 ## 4. 环境纪律
 
 - **一号一环境**：同一台机器上多开账号、或让网关以非本体身份替 claude 出网，都会把设备拖进上报链。
-- 可以清理下旧账号绑定的 id 和痕迹。清的是第 1 节那一处，不是去擦上报日志。
+- 可以清理下旧账号绑定的 id 和痕迹。清的是第 1 节那一处，不是去擦上报日志。被封的号按第 1.1 节点名编号，只摘那一串邮箱。
 - **别用「伪装成官方客户端」的路子**过服务端的客户端校验。本仓不做。
 - **换机照 `docs/reclaude-in-mirasim.md` 装完，回到本文第 1 节再第 2 节。** 新机器同样要清。
 
