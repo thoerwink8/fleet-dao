@@ -362,24 +362,27 @@ describe('跨进程', () => {
   it('两个进程同时抢最后一个槽：只有一个拿到', async () => {
     const dir = join(tmp(), 'slots');
     const script = fileURLToPath(new URL('./test-slots-race.ts', import.meta.url));
-    for (let round = 0; round < 3; round++) {
-      const roundDir = join(dir, `r${round}`);
-      const startAt = Date.now() + 3000;
-      const runOne = () =>
-        new Promise<string>((resolve, reject) => {
-          const child = spawn(process.execPath, [script, roundDir, String(startAt), '1500'], {
-            env: { ...process.env, RACE_SLOTS: '1' },
-            stdio: ['ignore', 'pipe', 'inherit'],
+    // 三轮各用各的槽目录、互不相干：一起跑（原来一轮一轮串着，每轮光等开抢时刻就 3 秒）
+    await Promise.all(
+      [0, 1, 2].map(async (round) => {
+        const roundDir = join(dir, `r${round}`);
+        const startAt = Date.now() + 3000;
+        const runOne = () =>
+          new Promise<string>((resolve, reject) => {
+            const child = spawn(process.execPath, [script, roundDir, String(startAt), '1500'], {
+              env: { ...process.env, RACE_SLOTS: '1' },
+              stdio: ['ignore', 'pipe', 'inherit'],
+            });
+            let out = '';
+            child.stdout.on('data', (d: Buffer) => {
+              out += d.toString();
+            });
+            child.on('error', reject);
+            child.on('close', () => resolve(out.trim()));
           });
-          let out = '';
-          child.stdout.on('data', (d: Buffer) => {
-            out += d.toString();
-          });
-          child.on('error', reject);
-          child.on('close', () => resolve(out.trim()));
-        });
-      const results = await Promise.all([runOne(), runOne()]);
-      expect(results.sort()).toEqual(['BUSY', 'GOT']);
-    }
+        const results = await Promise.all([runOne(), runOne()]);
+        expect(results.sort()).toEqual(['BUSY', 'GOT']);
+      }),
+    );
   }, 60_000);
 });
