@@ -49,8 +49,8 @@
 
 - **#761 已合（PR #940）**：选了「不计」——对题在创始人和指挥官的对话里做，开单脚本读不到那个会话的起止/模型/token、本机也写不进法国库，凑空行是假数。任务页「三段」对题行写「在对话里做的，不计」和原因，主页对题泳道头写「在对话里做的，不计耗时」；名单和文案在 `packages/web/src/lib/segments.ts` 的 `SEGMENT_UNMETERED`（只有 scope），以后 runs 里有对题行（#553 意图归纳）照常显示并注明只含引擎起的会话；`docs/design.md` 第八节写明。没验证：真库上长什么样。
 - **#336 已合（PR #945）**：`cleanLeftovers` 关单后连它开的、还开着的 PR 一起关（`real/canary.ts` 的 `closeLeftoverPulls`）；关不掉推单独报警 `canary:leftover-pr`、不记收过了、下一轮接着关。没验证：真巡检仓上（法国引擎关着）。
-- **#339 做完、PR 待开**（分支 `fix/339-backup-watch-dup`）：删 `deploy/backup/fleet-backup.sh` 的 `watch_fresh`（整段只有「没开跑」这一种），换成每轮顺手撤退役的 `backup.stale:*` 两条；看门狗（`watchdog.test.ts` 已有备份任务「从没跑过」「停了」的测试）仍会报备份停了。不在先审后合清单（`deploy/backup/` 不在 `high-risk-paths.json`），没要第二意见。**还欠（要人做）**：备份脚本不随自动发布走，法国上要重跑一遍 `deploy/backup/install.sh france` 才换成新脚本。
-- elkjs：还没开始。
+- **#339 已合（PR #949）**：删 `deploy/backup/fleet-backup.sh` 的 `watch_fresh`（整段只有「没开跑」这一种），换成每轮顺手撤退役的 `backup.stale:*` 两条；看门狗（`watchdog.test.ts` 已有备份任务「从没跑过」「停了」的测试）仍会报备份停了。不在先审后合清单（`deploy/backup/` 不在 `high-risk-paths.json`），没要第二意见。**还欠（要人做）**：备份脚本不随自动发布走，法国上要重跑一遍 `deploy/backup/install.sh france` 才换成新脚本。
+- **删 elkjs 做完、PR 待合**（分支 `chore/drop-elkjs`）：`packages/web` 源码、测试、脚本里没有任何 import（`git log -S` 只在最早的看板画布 #13、删看板 #613 里出现过；首页流程图 #914 用的是固定版式、没碰它），从 `package.json`、`pnpm-lock.yaml`（用 `pnpm install --lockfile-only` 重生成，只少 8 行）去掉，`vite.config.ts` 那句注释连同只为它放宽的 `chunkSizeWarningLimit: 1700` 一起删（去掉后构建没有分块过大的警告）。`@xyflow/react` 首页在用，没动。`pnpm install --frozen-lockfile` 过、`build:demo` 过、演示版扫描过；前后产物逐字节一样（前后 client 目录都是 1,695,254 字节、js+css gzip 403,576 字节、63 个文件）——它本来就因为没人 import 没进过包，省的是安装和锁文件，不是产物体积。
 
 ## 创始人引导（待处理）
 
