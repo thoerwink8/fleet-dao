@@ -35,7 +35,6 @@ import {
   stateChanges,
   subtaskDeps,
   subtasks,
-  TERMINAL_TASK_STATES,
   type TimelineEvent,
   tasks,
   taskTimeline,
@@ -70,6 +69,7 @@ import {
   reclaimMissStatus,
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
+import { isAwaitingOpen, isDraftConfirmed, judgeConfirm } from './draft-logic.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -111,12 +111,20 @@ import {
   type TimelineRecord,
   type User,
 } from './ports.ts';
+import {
+  autoDispatchAudit,
+  autoDispatchChanged,
+  autoDispatchUnchanged,
+  boardCutoffMs,
+  isAutoDispatchUnchanged,
+  isTerminalTaskState,
+  keepOnBoard,
+} from './task-logic.ts';
 
 export interface PgStoreOptions {
   now?: () => Date;
 }
 
-const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 const opt = <V>(v: V | null): V | undefined => v ?? undefined;
 const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d ? d.toISOString() : undefined);
@@ -634,8 +642,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(tasks)
         .where(eq(tasks.repoId, repoId))
         .orderBy(asc(tasks.priority), asc(tasks.createdAt));
-      const terminal: readonly string[] = TERMINAL_TASK_STATES;
-      const finished = rows.filter((t) => terminal.includes(t.state)).map((t) => t.id);
+      const finished = rows.filter((t) => isTerminalTaskState(t.state)).map((t) => t.id);
       const since =
         finished.length === 0
           ? new Map<string, Date>()
@@ -651,9 +658,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
                   .orderBy(stateChanges.entityId, desc(stateChanges.id))
               ).map((r) => [r.entityId, r.at]),
             );
-      const cutoff = now().getTime() - RECENT_TERMINAL_MS;
+      const cutoff = boardCutoffMs(now().getTime());
       return rows
-        .filter((t) => !terminal.includes(t.state) || (since.get(t.id) ?? t.createdAt).getTime() >= cutoff)
+        .filter((t) => keepOnBoard(t.state, (since.get(t.id) ?? t.createdAt).getTime(), cutoff))
         .map(toTask);
     },
     async getTask(id) {
@@ -1319,7 +1326,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             };
           }
         }
-        if (row.status === 'confirmed')
+        if (isDraftConfirmed(row.status))
           return { status: 'confirmed' as const, draft: await draftOut(tx, row) };
         const at = now();
         const claimed = await tx
@@ -1366,8 +1373,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return db.transaction(async (tx) => {
         const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
         if (!row) return { status: 'not_found' as const };
-        if (row.status === 'confirmed') return { status: 'already' as const, draft: await draftOut(tx, row) };
-        if (row.revision !== revision) return { status: 'changed' as const, draft: await draftOut(tx, row) };
+        const verdict = judgeConfirm(row, revision);
+        if (verdict !== 'proceed') return { status: verdict, draft: await draftOut(tx, row) };
         const at = now();
         const [updated] = await tx
           .update(feishuDrafts)
@@ -1392,7 +1399,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(draftId)) return 'not_pending';
       return db.transaction(async (tx) => {
         const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
-        if (row?.status !== 'confirmed' || row.taskId !== null) return 'not_pending' as const;
+        if (!row || !isAwaitingOpen({ status: row.status, hasTask: row.taskId !== null })) {
+          return 'not_pending' as const;
+        }
         if (!isUuid(taskId)) return 'task_not_found' as const;
         const [task] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId));
         if (!task) return 'task_not_found' as const;
@@ -1915,7 +1924,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .for('update');
         if (!row) return 'not_found';
         const before = row.since ? iso(row.since) : null;
-        if ((before !== null) === on) return { changed: false, autoDispatchSince: before };
+        if (isAutoDispatchUnchanged(before, on)) return autoDispatchUnchanged(before);
         const [updated] = await tx
           .update(repos)
           .set({ autoDispatchSince: on ? now() : null })
@@ -1923,12 +1932,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .returning({ since: repos.autoDispatchSince });
         if (!updated) throw new Error(`仓 ${repoId} 锁住了却没改成`);
         const after = updated.since ? iso(updated.since) : null;
-        const auditId = await insertAudit(tx, {
-          ...entry,
-          before: { autoDispatchSince: before },
-          after: { autoDispatchSince: after },
-        });
-        return { changed: true, autoDispatchSince: after, auditId };
+        const auditId = await insertAudit(tx, autoDispatchAudit(entry, before, after));
+        return autoDispatchChanged(after, auditId);
       });
     },
   };

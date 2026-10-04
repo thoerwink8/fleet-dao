@@ -41,6 +41,7 @@ import {
   supersedes,
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
+import { isAwaitingOpen, isDraftConfirmed, judgeConfirm } from './draft-logic.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -83,6 +84,18 @@ import type {
   TimelineRecord,
   User,
 } from './ports.ts';
+import {
+  autoDispatchAudit,
+  autoDispatchChanged,
+  autoDispatchUnchanged,
+  boardCutoffMs,
+  canStopTask,
+  isAutoDispatchUnchanged,
+  isRequestUnchanged,
+  keepOnBoard,
+  NEW_TASK_STATE,
+  nextTaskPriority,
+} from './task-logic.ts';
 
 export interface ProgressRecord {
   id: string;
@@ -277,10 +290,8 @@ export interface MemoryStoreOptions {
   onChange?: (table: RealtimeTable, id: string) => void;
 }
 
-const TERMINAL_TASK_STATES: readonly string[] = ['done', 'stopped', 'failed'];
 /** 时间线默认不放量大的动作流（和 packages/db 的 DEFAULT_TIMELINE_PROGRESS_KINDS 一致）。 */
 const QUIET_PROGRESS_KINDS: readonly ProgressKind[] = ['tool', 'file'];
-const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 
 /** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
@@ -619,16 +630,15 @@ export function createMemoryStore(
       return repo ? repoOnly(repo) : null;
     },
     async listBoardTasks(repoId) {
-      const cutoff = now().getTime() - RECENT_TERMINAL_MS;
+      const cutoff = boardCutoffMs(now().getTime());
       return data.tasks
         .filter((t) => t.repoId === repoId)
         .filter((t) => {
-          if (!TERMINAL_TASK_STATES.includes(t.state)) return true;
           const since = data.stateChanges
             .filter((c) => c.entityId === t.id)
             .sort(byAtThenId)
             .at(-1)?.at;
-          return Date.parse(since ?? t.createdAt) >= cutoff;
+          return keepOnBoard(t.state, Date.parse(since ?? t.createdAt), cutoff);
         })
         .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt));
     },
@@ -1181,9 +1191,9 @@ export function createMemoryStore(
         title: input.title,
         rawRequest: input.rawRequest,
         requestedBy: input.requestedBy,
-        state: 'queued',
+        state: NEW_TASK_STATE,
         // 排在这个仓最后
-        priority: Math.max(0, ...inRepo) + 1,
+        priority: nextTaskPriority(inRepo),
         acceptance: [],
         createdAt: now().toISOString(),
       };
@@ -1203,7 +1213,7 @@ export function createMemoryStore(
     async updateTaskRequest({ taskId, title, rawRequest }, entry) {
       const task = data.tasks.find((t) => t.id === taskId);
       if (!task) return 'not_found';
-      if (task.title === title && task.rawRequest === rawRequest) return 'unchanged';
+      if (isRequestUnchanged(task, { title, rawRequest })) return 'unchanged';
       checkAudit(entry);
       task.title = title;
       task.rawRequest = rawRequest;
@@ -1213,7 +1223,7 @@ export function createMemoryStore(
     },
     async stopQueuedTask(taskId, entry) {
       const task = data.tasks.find((t) => t.id === taskId);
-      if (task?.state !== 'queued') return 'not_queued';
+      if (!task || !canStopTask(task.state)) return 'not_queued';
       checkAudit(entry);
       task.state = 'stopped';
       data.stateChanges.push({
@@ -1233,16 +1243,12 @@ export function createMemoryStore(
       const repo = data.repos.find((r) => r.id === repoId);
       if (!repo) return 'not_found';
       const before = repo.autoDispatchSince ?? null;
-      if ((before !== null) === on) return { changed: false, autoDispatchSince: before };
+      if (isAutoDispatchUnchanged(before, on)) return autoDispatchUnchanged(before);
       const after = on ? now().toISOString() : null;
-      const full: NewAuditEntry = {
-        ...entry,
-        before: { autoDispatchSince: before },
-        after: { autoDispatchSince: after },
-      };
+      const full = autoDispatchAudit(entry, before, after);
       checkAudit(full);
       repo.autoDispatchSince = after ?? undefined;
-      return { changed: true, autoDispatchSince: after, auditId: audit(full) };
+      return autoDispatchChanged(after, audit(full));
     },
 
     // —— 飞书 ——
@@ -1309,7 +1315,7 @@ export function createMemoryStore(
           return { status: replay === 'same' ? 'replayed' : 'request_reused', draft: draftOut(row) };
         }
       }
-      if (row.status === 'confirmed') return { status: 'confirmed', draft: draftOut(row) };
+      if (isDraftConfirmed(row.status)) return { status: 'confirmed', draft: draftOut(row) };
       checkAudit(entry);
       if (repoId !== undefined) needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
       const next = note ? withNote(row, note) : row;
@@ -1346,8 +1352,8 @@ export function createMemoryStore(
     async confirmDraft({ draftId, revision, repoId, by }, entry) {
       const row = data.feishuDrafts.find((d) => d.id === draftId);
       if (!row) return { status: 'not_found' };
-      if (row.status === 'confirmed') return { status: 'already', draft: draftOut(row) };
-      if (row.revision !== revision) return { status: 'changed', draft: draftOut(row) };
+      const verdict = judgeConfirm(row, revision);
+      if (verdict !== 'proceed') return { status: verdict, draft: draftOut(row) };
       checkAudit(entry);
       needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
       needUser(by, 'feishu_drafts_confirmed_by_users_id_fk');
@@ -1369,7 +1375,9 @@ export function createMemoryStore(
     },
     async recordDraftOpened({ draftId, taskId }) {
       const row = data.feishuDrafts.find((d) => d.id === draftId);
-      if (row?.status !== 'confirmed' || row.taskId !== undefined) return 'not_pending';
+      if (!row || !isAwaitingOpen({ status: row.status, hasTask: row.taskId !== undefined })) {
+        return 'not_pending';
+      }
       if (!data.tasks.some((t) => t.id === taskId)) return 'task_not_found';
       row.taskId = taskId;
       row.openError = undefined;
