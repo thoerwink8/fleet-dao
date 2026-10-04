@@ -545,6 +545,46 @@ function afterOptions(words, argOpts) {
   return i;
 }
 
+/**
+ * 照 getopt 的认法拆参数：-abc 一簇里 argShort 的字母吃掉这簇剩下的、没剩就吃下一个词（optShort 的只吃这簇剩下的，
+ * 不吃下一个词：top 的 -w[宽度]）；--name 在 argLong 里、又没写 =值 的吃下一个词；-- 之后全是位置参数。
+ * 返回 { flags（出现过的单字母）, longs（出现过的长选项，不带 =值）, positional }。吃掉的值不算选项：pgrep -ualice 里没有 -a。
+ */
+function getopt(words, argShort, argLong = new Set(), optShort = new Set()) {
+  const flags = new Set();
+  const longs = [];
+  const positional = [];
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i];
+    if (v === '--') {
+      positional.push(...words.slice(i + 1));
+      break;
+    }
+    if (v.startsWith('--')) {
+      const name = v.includes('=') ? v.slice(0, v.indexOf('=')) : v;
+      longs.push(name);
+      if (!v.includes('=') && argLong.has(name)) i++;
+      continue;
+    }
+    if (!v.startsWith('-') || v === '-') {
+      positional.push(v);
+      continue;
+    }
+    for (let k = 1; k < v.length; k++) {
+      flags.add(v[k]);
+      if (optShort.has(v[k])) break;
+      if (argShort.has(v[k])) {
+        if (k === v.length - 1) i++;
+        break;
+      }
+    }
+  }
+  return { flags, longs, positional };
+}
+
+/** 长选项写成了 full 的哪一截前缀（getopt_long 认不冲突的缩写）：不短于 least 就算 */
+const longIs = (name, full, least) => name.length >= least.length && full.startsWith(name);
+
 const opts = (list) => new Set(list.split(' '));
 const SUDO_ARGS = opts(
   '-u -g -h -p -C -D -R -T -U -r -t --user --group --host --prompt --chdir --role --type',
@@ -992,22 +1032,54 @@ function psPrintsCommandLine(args) {
   return false;
 }
 
+/** pgrep 吃掉一个值的选项（procps-ng src/pgrep.c 的 opts、longopts）：-u alice 的 alice 不是 -a */
+const PGREP_ARGS = new Set([...'dgGpPOstuUFrq']);
+const PGREP_LONG_ARGS = opts(
+  '--signal --cgroup --delimiter --pgroup --group --older --pid --parent --session --terminal --euid --uid --pidfile --ns --nslist --queue --runstates --env',
+);
+/** pstree 吃掉一个值的选项：-C 颜色、-H 高亮的 pid、-N 名字空间 */
+const PSTREE_ARGS = new Set([...'CHN']);
+/** top 吃掉一个值的选项（procps-ng top 的 getopt 串 "bcd:E:e:Hhin:Oo:p:SsU:u:Vw::1"）；-w 的宽度只能紧贴着写 */
+const TOP_ARGS = new Set([...'dEenopUu']);
+
 /**
- * 这条叶子命令会不会把某个进程的命令行打出来：是就返回一句说明（拦下时告诉模型是哪一条），不是返回 null。
+ * 这条叶子命令会不会把某个进程的命令行打出来：是就返回 { why }（why 是拦下时告诉模型是哪一条），不是返回 null。
  * 只看写死的写法；拿变量当命令、或者把输出再加工一道的看不出来——那是这一段的边界，说清楚比假装拦住了好。
- * tasklist、Get-Process 不带 -o/Select-Object 时只打进程名和 pid，不打参数，放行。
+ * 只打进程名和 pid 的放行：tasklist（不带 /v）、Get-Process（不挑 CommandLine）、pgrep（-l 只打进程名，procps-ng 的
+ * pgrep.c 里 -l 打的是 CMD、-a 才是整条 cmdline）、pstree（不带 -a）、top（不带 -c，默认只打程序名；~/.toprc 里存了
+ * 「显示命令行」的认不出，这也是边界）。
  */
 function printsCommandLines(leaf) {
   if (!leaf) return null;
   const words = leaf.args.map((x) => x.value);
-  if (leaf.name === 'ps') return psPrintsCommandLine(leaf.args) ? 'ps 打出了进程的命令行' : null;
+  if (leaf.name === 'ps') return psPrintsCommandLine(leaf.args) ? { why: 'ps 打出了进程的命令行' } : null;
+  if (leaf.name === 'pgrep') {
+    const o = getopt(words, PGREP_ARGS, PGREP_LONG_ARGS);
+    const full = o.flags.has('a') || o.longs.some((l) => longIs(l, '--list-full', '--list-f'));
+    return full ? { why: 'pgrep -a 打出了进程的整条命令行' } : null;
+  }
+  if (leaf.name === 'pstree') {
+    const o = getopt(words, PSTREE_ARGS);
+    const args = o.flags.has('a') || o.longs.some((l) => longIs(l, '--arguments', '--ar'));
+    return args ? { why: 'pstree -a 打出了每个进程的命令行参数' } : null;
+  }
+  if (leaf.name === 'top') {
+    const o = getopt(words, TOP_ARGS, new Set(), new Set(['w']));
+    const full = o.flags.has('c') || o.longs.some((l) => longIs(l, '--cmdline-toggle', '--c'));
+    return full ? { why: 'top -c 打出了进程的命令行' } : null;
+  }
+  // /v 多出来的「窗口标题」一列：cmd 窗口跑着命令时，标题就是「cmd.exe - 那条命令行」。Git Bash 里得写 //v（单斜杠会被当路径改写）
+  if (leaf.name === 'tasklist') {
+    const verbose = words.some((v) => /^(?:\/\/?|-)v$/i.test(v));
+    return verbose ? { why: 'tasklist /v 打出了窗口标题（cmd 窗口的标题里就是正在跑的那条命令行）' } : null;
+  }
   if (leaf.name === 'wmic') {
     const sub = words.find((v) => !v.startsWith('-')) ?? '';
-    return /^process(?:_get)?$/i.test(sub) ? 'wmic process 打出了进程的命令行' : null;
+    return /^process(?:_get)?$/i.test(sub) ? { why: 'wmic process 打出了进程的命令行' } : null;
   }
   if (['get-ciminstance', 'get-wmiobject', 'gcim', 'gwmi'].includes(leaf.name)) {
     const cls = words.find((v) => !v.startsWith('-')) ?? '';
-    return /^(?:win32_)?process$/i.test(cls) ? `${cls} 打出了进程的命令行` : null;
+    return /^(?:win32_)?process$/i.test(cls) ? { why: `${cls} 打出了进程的命令行` } : null;
   }
   return null;
 }
@@ -1030,8 +1102,8 @@ function processListing(text, kind) {
       if (inner !== null) return inner;
       continue;
     }
-    const why = printsCommandLines(u.leaf);
-    if (why !== null) return { why };
+    const hit = printsCommandLines(u.leaf);
+    if (hit !== null) return hit;
   }
   return null;
 }
@@ -1177,7 +1249,7 @@ function processBlock(why) {
     [
       `fleet-guard：这条命令${why}，进程的命令行里常常带着别的进程的口令（命令行交给进程之后，它就落在那个进程的命令行里，谁都能读：MCP 服务的 -s <secret>、--token、数据库口令），按拦处理（密钥、令牌、口令的值不进对话）。`,
       REDACT_RECIPE,
-      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、tasklist、Get-Process（不带 Select-Object CommandLine）。',
+      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、pgrep（-l 只打进程名，不带 -a）、pstree -p（不带 -a）、top（不带 -c）、tasklist（不带 /v）、Get-Process（不挑 CommandLine）。',
     ].join('\n'),
   );
 }
