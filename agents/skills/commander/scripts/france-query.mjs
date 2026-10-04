@@ -11,6 +11,17 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readlinkSync } from 'node:fs';
 
+// 类型只写在 JSDoc 里（这份文件经 ssh 喂给法国的 node、本机也直接 import，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
+/**
+ * 一条命令跑完的结果：error 是没起来的原因（起不了、不在名单里），status 是退出码（被信号停了是 null）。
+ * @typedef {{ status: number | null, stdout: string, stderr: string, error: string | null }} RunResult
+ */
+/**
+ * 查询用到的外界：时钟、起命令、读文件、读链接。真的在 realIo，测试里换成假的。
+ * @typedef {{ now: () => Date, run: (argv: readonly string[], input?: string) => RunResult, readFile: (path: string) => string, readlink: (path: string) => string }} QueryIo
+ */
+/** @typedef {{ ok: false, why: string } | ({ ok: true } & Record<string, unknown>)} QuerySection 一块：读到了带内容，没读到带原因 */
+
 export const APP = 'fleet-france-query';
 export const SCHEMA = 1;
 export const RELEASES = '/srv/fleet-dao-releases';
@@ -142,7 +153,17 @@ export const SQL = {
     select owner || '/' || name as repo, auto_dispatch_since from repos) x`,
 };
 
+/** @param {unknown} e */
 const message = (e) => (e instanceof Error ? e.message : String(e));
+/**
+ * 抛出来的东西上的 code（ENOENT 这类）；不是带 code 的对象就是 undefined。
+ * @param {unknown} e
+ */
+const errCode = (e) => (typeof e === 'object' && e !== null && 'code' in e ? e.code : undefined);
+/**
+ * @param {unknown} text
+ * @param {number} [n]
+ */
 const firstLines = (text, n = 3) =>
   String(text ?? '')
     .split('\n')
@@ -151,12 +172,19 @@ const firstLines = (text, n = 3) =>
     .slice(0, n)
     .join(' / ');
 
-/** 这条命令是不是 ALLOWED 里的某一条（一字不差）。 */
+/**
+ * 这条命令是不是 ALLOWED 里的某一条（一字不差）。是的话它一定非空（类型上跟着认）。
+ * @param {readonly string[]} argv
+ * @returns {argv is [string, ...string[]]}
+ */
 export function allowed(argv) {
   return ALLOWED.some((a) => a.length === argv.length && a.every((part, i) => argv[i] === part));
 }
 
-/** 所有块的查询拼成一份 psql 脚本：一块一个记号，查错了在记号后面报 psql 读到的错，接着查下一块。 */
+/**
+ * 所有块的查询拼成一份 psql 脚本：一块一个记号，查错了在记号后面报 psql 读到的错，接着查下一块。
+ * @param {Record<string, string>} [sql]
+ */
 export function psqlScript(sql = SQL) {
   const lines = ['\\set ON_ERROR_STOP off', '\\set VERBOSITY terse'];
   for (const [name, text] of Object.entries(sql)) {
@@ -171,20 +199,28 @@ export function psqlScript(sql = SQL) {
   return `${lines.join('\n')}\n`;
 }
 
-/** 按记号切开 psql 的输出，每块解析成 JSON；没见到记号的块算没回。 */
+/**
+ * 按记号切开 psql 的输出，每块解析成 JSON；没见到记号的块算没回。
+ * @param {unknown} stdout
+ * @param {string[]} names
+ * @returns {Record<string, { ok: true, value: unknown } | { ok: false, why: string }>}
+ */
 export function parsePsql(stdout, names) {
+  /** @type {Map<string, { lines: string[], error: string | null }>} */
   const raw = new Map();
+  /** @type {{ lines: string[], error: string | null } | null} */
   let current = null;
   for (const line of String(stdout).split('\n')) {
     if (line.startsWith(`${MARK} `)) {
-      current = line.slice(MARK.length + 1).trim();
-      raw.set(current, { lines: [], error: null });
+      current = { lines: [], error: null };
+      raw.set(line.slice(MARK.length + 1).trim(), current);
     } else if (current !== null && line.startsWith(`${ERR} `)) {
-      raw.get(current).error = line.slice(ERR.length + 1).trim() || '（没说为什么）';
+      current.error = line.slice(ERR.length + 1).trim() || '（没说为什么）';
     } else if (current !== null) {
-      raw.get(current).lines.push(line);
+      current.lines.push(line);
     }
   }
+  /** @type {Record<string, { ok: true, value: unknown } | { ok: false, why: string }>} */
   const out = {};
   for (const name of names) {
     const got = raw.get(name);
@@ -210,9 +246,22 @@ export function parsePsql(stdout, names) {
   return out;
 }
 
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+/**
+ * @param {unknown} v
+ * @returns {v is { rows: unknown[], count?: unknown }}
+ */
+const hasRows = (v) => isObj(v) && Array.isArray(v.rows);
 
-/** 库的几块：一次 psql 查完。连不上、起不来：每一块都报同一个原因。 */
+/**
+ * 库的几块：一次 psql 查完。连不上、起不来：每一块都报同一个原因。
+ * @param {QueryIo} io
+ * @returns {Record<string, QuerySection>}
+ */
 export function dbSections(io) {
   const names = Object.keys(SQL);
   const r = io.run(PSQL, psqlScript());
@@ -224,8 +273,17 @@ export function dbSections(io) {
     return Object.fromEntries(names.map((n) => [n, { ok: false, why }]));
   }
   const parsed = parsePsql(r.stdout, names);
+  /**
+   * @template T
+   * @param {string} name
+   * @param {(v: unknown) => v is T} check
+   * @param {(v: T) => Record<string, unknown>} pick
+   * @returns {QuerySection}
+   */
   const shaped = (name, check, pick) => {
     const s = parsed[name];
+    // parsePsql 给 names 里的每一块都回了一条；取不到只会是它出了岔子，说法同「库那头没回」
+    if (!s) return { ok: false, why: '库那头没回这一块（psql 中途停了？）' };
     if (!s.ok) return s;
     return check(s.value) ? { ok: true, ...pick(s.value) } : { ok: false, why: '库回的形状不对' };
   };
@@ -233,11 +291,7 @@ export function dbSections(io) {
     db: shaped('db', isObj, (v) => ({ now: v.now, readOnly: v.readOnly })),
     tasks: shaped('tasks', Array.isArray, (v) => ({ rows: v })),
     runs: shaped('runs', Array.isArray, (v) => ({ rows: v })),
-    notifications: shaped(
-      'notifications',
-      (v) => isObj(v) && Array.isArray(v.rows),
-      (v) => ({ count: v.count, rows: v.rows }),
-    ),
+    notifications: shaped('notifications', hasRows, (v) => ({ count: v.count, rows: v.rows })),
     jobs: shaped('jobs', Array.isArray, (v) => ({ rows: v })),
     routes: shaped('routes', Array.isArray, (v) => ({ rows: v })),
     orgAudit: shaped('orgAudit', Array.isArray, (v) => ({ rows: v })),
@@ -245,7 +299,11 @@ export function dbSections(io) {
   };
 }
 
-/** 几个服务在不在（systemctl is-active 一个服务一行）。 */
+/**
+ * 几个服务在不在（systemctl is-active 一个服务一行）。
+ * @param {QueryIo} io
+ * @returns {QuerySection}
+ */
 export function servicesSection(io) {
   const r = io.run(SERVICES_ARGV);
   if (r.error) return { ok: false, why: `起不了 systemctl（${r.error}）` };
@@ -258,32 +316,53 @@ export function servicesSection(io) {
       ok: false,
       why: `systemctl 回了 ${lines.length} 行，要 ${UNITS.length} 行：${firstLines(r.stderr) || firstLines(r.stdout) || '什么都没回'}`,
     };
-  return { ok: true, units: UNITS.map((unit, i) => ({ unit, state: lines[i] })) };
+  return {
+    ok: true,
+    units: UNITS.map((unit, i) => {
+      const state = lines[i];
+      // 行数刚核过和服务数相等，取不到不会发生；真发生了也别拿空顶，交给 collect 的 guard 报「这一块查的时候出错」
+      if (state === undefined) throw new RangeError(`systemctl 的第 ${i + 1} 行取不到`);
+      return { unit, state };
+    }),
+  };
 }
 
-/** 在用的是哪一版：current 链接指的目录名就是提交号。 */
+/**
+ * 在用的是哪一版：current 链接指的目录名就是提交号。
+ * @param {QueryIo} io
+ * @returns {QuerySection}
+ */
 export function currentSection(io) {
+  /** @type {string} */
   let target;
   try {
     target = io.readlink(CURRENT_LINK);
   } catch (e) {
-    return { ok: false, why: `读不了在用的版本（${CURRENT_LINK}：${e?.code ?? message(e)}）` };
+    return { ok: false, why: `读不了在用的版本（${CURRENT_LINK}：${errCode(e) ?? message(e)}）` };
   }
   const sha = String(target).split('/').filter(Boolean).at(-1) ?? '';
   if (!/^[0-9a-f]{40}$/.test(sha)) return { ok: false, why: `在用的版本认不出（链接指向的不是提交号）` };
   return { ok: true, sha: sha.slice(0, 12) };
 }
 
+/** @param {unknown} v */
 const sha12 = (v) => (typeof v === 'string' ? v.slice(0, 12) : v);
 
-/** 自动发布的读数（deploy/france/auto-release/lib.mjs 每一轮写的状态文件）：只取要用的几样，提交号截成 12 位。 */
+/**
+ * 自动发布的读数（deploy/france/auto-release/lib.mjs 每一轮写的状态文件）：只取要用的几样，提交号截成 12 位。
+ * 这里只是搬运、不认形状：认不认得由本机那头（france-lib.mjs 的 autoReleaseProblem）核。
+ * @param {QueryIo} io
+ * @returns {QuerySection}
+ */
 export function autoReleaseSection(io) {
+  /** @type {string} */
   let text;
   try {
     text = io.readFile(STATE_FILE);
   } catch (e) {
-    return { ok: false, why: `自动发布的读数读不了（${STATE_FILE}：${e?.code ?? message(e)}）` };
+    return { ok: false, why: `自动发布的读数读不了（${STATE_FILE}：${errCode(e) ?? message(e)}）` };
   }
+  /** @type {unknown} */
   let s;
   try {
     s = JSON.parse(text);
@@ -291,25 +370,33 @@ export function autoReleaseSection(io) {
     return { ok: false, why: `自动发布的读数不是 JSON（${message(e)}）` };
   }
   if (!isObj(s)) return { ok: false, why: '自动发布的读数认不出（不是一个对象）' };
-  const main = isObj(s.main)
+  const rawMain = s.main;
+  const main = isObj(rawMain)
     ? {
-        head: sha12(s.main.head),
-        headAt: s.main.headAt,
-        checkedAt: s.main.checkedAt,
-        commits: Array.isArray(s.main.commits)
-          ? s.main.commits.slice(0, COMMITS_KEEP).map((c) => (Array.isArray(c) ? [sha12(c[0]), c[1]] : c))
-          : s.main.commits,
+        head: sha12(rawMain.head),
+        headAt: rawMain.headAt,
+        checkedAt: rawMain.checkedAt,
+        commits: Array.isArray(rawMain.commits)
+          ? rawMain.commits
+              .slice(0, COMMITS_KEEP)
+              .map((/** @type {unknown} */ c) => (Array.isArray(c) ? [sha12(c[0]), c[1]] : c))
+          : rawMain.commits,
       }
-    : s.main;
-  const attempt = isObj(s.attempt)
+    : rawMain;
+  const rawAttempt = s.attempt;
+  const attempt = isObj(rawAttempt)
     ? {
-        sha: sha12(s.attempt.sha),
-        startedAt: s.attempt.startedAt,
-        endedAt: s.attempt.endedAt ?? null,
-        result: s.attempt.result,
-        detail: s.attempt.detail ?? '',
+        sha: sha12(rawAttempt.sha),
+        startedAt: rawAttempt.startedAt,
+        endedAt: rawAttempt.endedAt ?? null,
+        result: rawAttempt.result,
+        detail: rawAttempt.detail ?? '',
       }
-    : s.attempt;
+    : rawAttempt;
+  /**
+   * @param {unknown} o
+   * @param {string} key
+   */
   const pickSha = (o, key) => (isObj(o) ? { ...o, [key]: sha12(o[key]) } : o);
   return {
     ok: true,
@@ -331,7 +418,7 @@ export function autoReleaseSection(io) {
             checkedAt: s.config.checkedAt,
             result: s.config.result,
             drift: Array.isArray(s.config.drift)
-              ? s.config.drift.map((d) => (isObj(d) ? d.id : d))
+              ? s.config.drift.map((/** @type {unknown} */ d) => (isObj(d) ? d.id : d))
               : s.config.drift,
             unchecked: s.config.unchecked,
           }
@@ -340,23 +427,34 @@ export function autoReleaseSection(io) {
   };
 }
 
-/** 自动发布最近几轮的结论：日志里每轮一行「…这轮：…」。只留时刻和那一行的话（不带主机名、进程号）。 */
+/**
+ * 自动发布最近几轮的结论：日志里每轮一行「…这轮：…」。只留时刻和那一行的话（不带主机名、进程号）。
+ * @param {QueryIo} io
+ * @returns {QuerySection}
+ */
 export function roundsSection(io) {
   const r = io.run(ROUNDS_ARGV);
   if (r.error) return { ok: false, why: `起不了 journalctl（${r.error}）` };
   if (r.status !== 0)
     return { ok: false, why: `journalctl 退出码 ${r.status}：${firstLines(r.stderr) || '没说为什么'}` };
+  /** @type {{ at: string, text: string }[]} */
   const rows = [];
   for (const line of String(r.stdout ?? '').split('\n')) {
     if (!line.includes('这轮：')) continue;
     const m = /^(\S+)\s+\S+\s+[^:]+:\s(.*)$/.exec(line);
-    if (m) rows.push({ at: m[1], text: m[2].trim() });
+    const at = m?.[1];
+    const text = m?.[2];
+    if (at !== undefined && text !== undefined) rows.push({ at, text: text.trim() });
   }
   return { ok: true, since: ROUNDS_SINCE, rows: rows.slice(-ROUNDS_KEEP) };
 }
 
-/** 查一遍。io：{ now(), run(argv, input?), readFile(path), readlink(path) }；每一块出错都关在自己那一块里。 */
+/**
+ * 查一遍。io：{ now(), run(argv, input?), readFile(path), readlink(path) }；每一块出错都关在自己那一块里。
+ * @param {QueryIo} io
+ */
 export function collect(io) {
+  /** @param {(io: QueryIo) => QuerySection} fn */
   const guard = (fn) => {
     try {
       return fn(io);
@@ -364,6 +462,7 @@ export function collect(io) {
       return { ok: false, why: `这一块查的时候出错：${message(e)}` };
     }
   };
+  /** @type {Record<string, QuerySection>} */
   let db;
   try {
     db = dbSections(io);
@@ -385,7 +484,10 @@ export function collect(io) {
   };
 }
 
-/** 真的 io：命令不在 ALLOWED 里一律不起。 */
+/**
+ * 真的 io：命令不在 ALLOWED 里一律不起。
+ * @returns {QueryIo}
+ */
 export function realIo() {
   return {
     now: () => new Date(),
@@ -398,7 +500,7 @@ export function realIo() {
           error: `不许起这条命令：${argv.slice(0, 3).join(' ')}`,
         };
       const r = spawnSync(argv[0], argv.slice(1), {
-        input,
+        ...(input === undefined ? {} : { input }),
         encoding: 'utf8',
         timeout: 20_000,
         maxBuffer: 64 * 1024 * 1024,
@@ -407,7 +509,7 @@ export function realIo() {
         status: r.status,
         stdout: r.stdout ?? '',
         stderr: r.stderr ?? '',
-        error: r.error ? (r.error.code ?? r.error.message) : null,
+        error: r.error ? String(errCode(r.error) ?? r.error.message) : null,
       };
     },
     readFile: (path) => readFileSync(path, 'utf8'),

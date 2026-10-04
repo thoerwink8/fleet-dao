@@ -16,6 +16,78 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 
+/** @import { ChildProcessByStdio } from 'node:child_process' */
+/** @import { Readable, Writable } from 'node:stream' */
+/** @typedef {ChildProcessByStdio<Writable, Readable, Readable>} PipedChild 三条管道都开着的子进程 */
+/** @typedef {(command: string, args: string[], options: { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: boolean }) => PipedChild} SpawnPiped spawn 的这一种用法（测试里换成假的） */
+
+// 类型只写在 JSDoc 里（这份文件被原样装到机器上、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
+// 「法国回来的」那几份形状在 parseSnapshot 里运行时逐项核过才认，核过之后才当成下面这些类型用。
+
+/** @typedef {{ ok: false, kind: string, why: string }} Failure 没做成：kind 见文件头那一串；why 是给人看的原因 */
+
+/**
+ * 库里每个定时任务最近一次的某条记录（没有就是 null）。
+ * @typedef {{ started_at: string, ended_at?: string | null, outcome?: string | null, why?: string | null }} JobRunFact
+ */
+/** @typedef {{ repo: string, n: number, title: string, state: string, phase?: string | null, doing?: string | null, last_problem?: string | null, created_at: string, updated_at?: string | null }} TaskRow */
+/** @typedef {{ repo?: string | null, n?: number | null, stage: string, route_id: string, model?: string | null, model_name?: string | null, host?: string | null, pool?: string | null, billing?: string | null, actual_model?: string | null, queued_at: string, started_at?: string | null, ended_at?: string | null, input_tokens?: number | null, output_tokens?: number | null, cache_read_tokens?: number | null, cache_write_tokens?: number | null, cost_usd?: number | null, session_cost_usd?: number | null, outcome?: string | null, failure_code?: string | null, failure_message?: string | null, subtask_index?: number | null, subtask_title?: string | null }} RunRow */
+/** @typedef {{ level: string, dedupe_key: string, title: string, body?: string | null, link?: string | null, created_at: string, updated_at?: string | null, n?: number | null }} NotificationRow */
+/** @typedef {{ id: string, name: string, schedule: string, every: number, last_run?: JobRunFact | null, last_finished?: JobRunFact | null, last_success?: JobRunFact | null }} JobRow */
+/** @typedef {{ id: string, pool: string, model: string, host: string, alive: boolean, probe_state?: string | null, probed_at?: string | null, probe_detail?: string | null, org_kind?: string | null, channel_enabled: boolean, billing: string, in_use: boolean }} RouteRow */
+/** @typedef {{ at: string, action: string, ok: boolean, from_org?: string | null, to_org?: string | null, error?: string | null }} OrgAuditRow */
+/** @typedef {{ repo: string, auto_dispatch_since?: string | null }} RepoRow */
+/** @typedef {{ at: string, text: string }} RoundRow */
+/** @typedef {{ unit: string, state: string }} ServiceUnit */
+
+/** @typedef {{ head: string, headAt: string, checkedAt: string, commits: [string, string][] }} MainFacts */
+/** @typedef {{ sha: string, verdict: 'green' | 'red' | 'pending' | 'unknown', detail: string, checkedAt: string }} CiFacts */
+/** @typedef {{ since: string, sha: string, event: string, unmerged: boolean }} HoldFacts */
+/** @typedef {{ sha: string, startedAt: string, endedAt?: string | null, detail?: string | null, result: 'running' | 'ok' | 'failed' }} AttemptFacts */
+/** @typedef {{ commit?: string | null, at: string, detail: string, result: 'ok' | 'failed' | 'unchecked' }} RulesFacts */
+/** @typedef {{ error: string } | { appliedSha: string, oldestAt?: string | null, behind: number }} SystemFacts */
+/** @typedef {{ action: string, detail: string, at: string }} LastFacts */
+/** @typedef {{ checkedAt: string, result: string, drift: string[], unchecked: string[] }} ConfigFacts */
+/**
+ * 自动发布的读数（deploy/france/auto-release/lib.mjs 写的状态文件，france-query.mjs 带回来）。
+ * @typedef {{ schema: 1, ranAt: string, main: MainFacts | null, mainError: string | null, ci: CiFacts | null, hold: HoldFacts | null, waitingSince: string | null, attempt: AttemptFacts | null, rules: RulesFacts | null, system: SystemFacts | null, last: LastFacts | null, config?: ConfigFacts | null }} AutoReleaseState
+ */
+
+/**
+ * 一块：读到了是 { ok: true, ...内容 }，没读到是 { ok: false, why }。
+ * @template T
+ * @typedef {({ ok: true } & T) | { ok: false, why: string }} Section
+ */
+/**
+ * @typedef {{
+ *   db: Section<{ now: string, readOnly: string }>,
+ *   tasks: Section<{ rows: TaskRow[] }>,
+ *   runs: Section<{ rows: RunRow[] }>,
+ *   notifications: Section<{ count: number, rows: NotificationRow[] }>,
+ *   jobs: Section<{ rows: JobRow[] }>,
+ *   routes: Section<{ rows: RouteRow[] }>,
+ *   orgAudit: Section<{ rows: OrgAuditRow[] }>,
+ *   repos: Section<{ rows: RepoRow[] }>,
+ *   services: Section<{ units: ServiceUnit[] }>,
+ *   current: Section<{ sha: string }>,
+ *   autoRelease: Section<{ state: AutoReleaseState }>,
+ *   rounds: Section<{ since: string, rows: RoundRow[] }>,
+ * }} Sections
+ */
+/** @typedef {keyof Sections} SectionName */
+/** @typedef {{ at: string, sections: Sections }} Snapshot parseSnapshot 认过的一份 */
+
+/**
+ * 「额度」那几处吃的会话：toRun 整理出来的样子（字段名是驼峰），可空的都可以缺。
+ * @typedef {{ model?: string | null, modelName?: string | null, stage: string, queuedAt: string, startedAt?: string | null, endedAt?: string | null, inputTokens?: number | null, outputTokens?: number | null, cacheReadTokens?: number | null, cacheWriteTokens?: number | null, billing?: string | null, costUsd?: number | null }} UsageRun
+ */
+/** @typedef {{ runs: number, usd: number, missing: number }} CostShare */
+/**
+ * @typedef {{ runs: number, running: number, notStarted: number, inputTokens: number, outputTokens: number, missingTokens: number, cacheReadTokens: number, cacheWriteTokens: number, missingCache: number, inputEquivalent: number, missingEquivalent: number, costUsd: number, missingCost: number, cost: { metered: CostShare, subscription: CostShare, unknown: CostShare }, queueMs: number, runMs: number, missingTime: number, noQueue: number }} Totals
+ */
+
+/** @typedef {{ level: 'bad' | 'note', what: string, where: string }} Issue */
+
 export const ENV_NAME = 'FLEET_FRANCE_SSH';
 /** 页面开着时多久从法国读一次。没人看就不读（不白连 ssh）。 */
 export const REFRESH_MS = 30_000;
@@ -54,12 +126,15 @@ export const LIMITS = {
 /** 路由探针：平时每 15 分钟一轮，结论 45 分钟没更新算过期；贵的执行方式探通后隔 120 分钟再探（shared 的 web-api.ts）。 */
 export const PROBE_EVERY = 15;
 export const PROBE_STALE = 45;
+/** @type {Record<string, number>} */
 export const SLOW_PROBE_EVERY = { 'cursor-agent': 120, grok: 120, mirasim: 120 };
+/** @param {string} host */
 export const probeStaleMinutes = (host) =>
   (SLOW_PROBE_EVERY[host] ?? PROBE_EVERY) + PROBE_STALE - PROBE_EVERY;
 
 // —— 给人看的名字（跟 engine 的 routing/names.ts、feishu 的 words.ts 走） ——
 
+/** @type {Record<string, string>} */
 export const STAGE_NAMES = {
   triage: '分诊',
   spec: '需求文档',
@@ -71,6 +146,7 @@ export const STAGE_NAMES = {
   research: '调研',
   judge: '判断题',
 };
+/** @type {Record<string, string>} */
 export const TASK_STATE_WORDS = {
   queued: '排队中',
   triaging: '在看需求',
@@ -83,6 +159,7 @@ export const TASK_STATE_WORDS = {
   failed: '没做成',
   stalled: '卡住了',
 };
+/** @type {Record<string, string>} */
 export const HOST_NAMES = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
@@ -91,12 +168,19 @@ export const HOST_NAMES = {
   mirasim: 'Mirasim',
   'api-shell': '接口外壳',
 };
+/** @type {Record<string, string>} */
 export const ORG_NAMES = { solo: '独享', carpool: '拼车' };
+/** @type {Record<string, string>} */
 export const OUTCOME_WORDS = { ok: '成了', failed: '没成', stopped: '叫停了', stalled: '卡住了' };
+/** @type {Record<string, string>} */
 export const PROBE_WORDS = { ok: '探通了', failed: '没探通', not_wired: '插头没接', skipped: '没探' };
+/** @type {string[]} */
 export const TERMINAL = ['done', 'stopped', 'failed'];
 
-/** 各块的中文名：没读到时说「没读到：<名字>」。 */
+/**
+ * 各块的中文名：没读到时说「没读到：<名字>」。
+ * @type {Record<SectionName, string>}
+ */
 export const SECTION_NAMES = {
   db: '库',
   tasks: '单子',
@@ -111,18 +195,39 @@ export const SECTION_NAMES = {
   autoRelease: '自动发布的读数',
   rounds: '自动发布的日志',
 };
-const DB_SECTIONS = Object.keys(SQL);
+/** 库查询的那几块（france-query.mjs 的 SQL 的键）。 */
+const DB_SECTIONS = /** @type {SectionName[]} */ (Object.keys(SQL));
+/** @type {SectionName[]} */
 export const SECTIONS = [...DB_SECTIONS, 'services', 'current', 'autoRelease', 'rounds'];
 
+/** @param {unknown} e */
 const message = (e) => (e instanceof Error ? e.message : String(e));
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+/**
+ * 抛出来的东西上的 code（ENOENT 这类）；不是带 code 的对象就是 undefined。
+ * @param {unknown} e
+ */
+const errCode = (e) => (isObj(e) ? e.code : undefined);
+/** @param {unknown} v */
 const isIso = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
+/** @param {string} iso */
 const ms = (iso) => Date.parse(iso);
+/**
+ * @param {string} fromIso
+ * @param {string} toIso
+ */
 const minutesBetween = (fromIso, toIso) => Math.floor((ms(toIso) - ms(fromIso)) / 60_000);
 
 // —— 抹字 ——
 
-/** 页面上、命令行里显示之前过这一道：令牌、密钥、邮箱、IP、长串抹掉（和 adapters 的 redact 同一套认法）。 */
+/**
+ * 页面上、命令行里显示之前过这一道：令牌、密钥、邮箱、IP、长串抹掉（和 adapters 的 redact 同一套认法）。
+ * @param {unknown} text
+ */
 export function scrubText(text) {
   return String(text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <令牌>')
@@ -140,7 +245,11 @@ export function scrubText(text) {
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '<长串>');
 }
 
-/** 逐层抹：对象、数组里的每个字符串都过 scrubText。 */
+/**
+ * 逐层抹：对象、数组里的每个字符串都过 scrubText。
+ * @param {unknown} value
+ * @returns {unknown}
+ */
 export function scrubDeep(value) {
   if (typeof value === 'string') return scrubText(value);
   if (Array.isArray(value)) return value.map(scrubDeep);
@@ -150,11 +259,14 @@ export function scrubDeep(value) {
 
 // —— 从哪读 ——
 
+/** @param {string} home */
 export const configFile = (home) => join(home, '.fleet-dao', 'france-ssh');
 
 /**
  * 登法国的 ssh 名字：环境变量 FLEET_FRANCE_SSH，其次 ~/.fleet-dao/france-ssh 的第一行（#299 定的放法，不进仓）。
  * 回 { ok: true, host } 或 { ok: false, kind, why }；原因里不带名字本身（可能写的是 IP）。
+ * @param {{ env: Record<string, string | undefined>, home: string, readText: (file: string) => string }} io
+ * @returns {{ ok: true, host: string } | Failure}
  */
 export function readTarget({ env, home, readText }) {
   const fromEnv = env[ENV_NAME];
@@ -165,13 +277,13 @@ export function readTarget({ env, home, readText }) {
   try {
     text = readText(file);
   } catch (e) {
-    if (e?.code === 'ENOENT')
+    if (errCode(e) === 'ENOENT')
       return {
         ok: false,
         kind: 'not-configured',
         why: `这台机器没配登法国的 ssh 名字：在 ${file} 写一行 ~/.ssh/config 里的 Host 名（或设环境变量 ${ENV_NAME}）。手机、网页会话登不了法国，这一页看不了`,
       };
-    return { ok: false, kind: 'bad-config', why: `${file} 读不了（${e?.code ?? message(e)}）` };
+    return { ok: false, kind: 'bad-config', why: `${file} 读不了（${errCode(e) ?? message(e)}）` };
   }
   const line = String(text)
     .split(/\r?\n/)
@@ -182,6 +294,11 @@ export function readTarget({ env, home, readText }) {
   return checkHost(line, file);
 }
 
+/**
+ * @param {string} host
+ * @param {string} from
+ * @returns {{ ok: true, host: string } | Failure}
+ */
 function checkHost(host, from) {
   // 不许以横线开头：挡住被 ssh 当成选项（-oProxyCommand=…）
   if (!/^[A-Za-z0-9_][A-Za-z0-9._@-]{0,200}$/.test(host))
@@ -196,6 +313,7 @@ function checkHost(host, from) {
 /**
  * ssh 的参数：不问口令（没钥匙就直接失败）、连 10 秒连不上就算。开压缩：本机到法国的线路慢（09-27 实测约 5KB/秒），
  * 回来的 JSON 压完小一大截，一次读从十几秒降到七秒上下（其中握手四秒多）。
+ * @param {string} host
  */
 export function sshArgs(host) {
   return [
@@ -214,6 +332,10 @@ export function sshArgs(host) {
   ];
 }
 
+/**
+ * @param {unknown} text
+ * @param {number} [n]
+ */
 const tail = (text, n = 2) =>
   scrubText(
     String(text ?? '')
@@ -227,6 +349,8 @@ const tail = (text, n = 2) =>
 /**
  * 起 ssh、把查询脚本从标准输入喂过去、收回标准输出。回 { ok: true, stdout } 或 { ok: false, kind, why }：
  * ssh-failed（起不了 ssh、ssh 自己报错，退出码 255）、timeout、query-failed（法国上的脚本没跑成）、bad-json（太大）。
+ * @param {{ command: string, args: string[], script: string, timeoutMs?: number, maxBytes?: number, spawnImpl?: SpawnPiped }} opts
+ * @returns {Promise<{ ok: true, stdout: string } | Failure>}
  */
 export function runRemote({
   command,
@@ -237,20 +361,24 @@ export function runRemote({
   spawnImpl = spawn,
 }) {
   return new Promise((resolve) => {
+    /** @type {PipedChild} */
     let child;
     try {
       child = spawnImpl(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     } catch (e) {
-      resolve({ ok: false, kind: 'ssh-failed', why: `起不了 ssh（${e?.code ?? message(e)}）` });
+      resolve({ ok: false, kind: 'ssh-failed', why: `起不了 ssh（${errCode(e) ?? message(e)}）` });
       return;
     }
+    /** @type {Buffer[]} */
     const out = [];
+    /** @type {Buffer[]} */
     const err = [];
     let outBytes = 0;
     let errBytes = 0;
     let settled = false;
     let timedOut = false;
     let tooBig = false;
+    /** @param {{ ok: true, stdout: string } | Failure} value */
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -266,19 +394,19 @@ export function runRemote({
         ok: false,
         kind: 'ssh-failed',
         why:
-          e?.code === 'ENOENT'
+          errCode(e) === 'ENOENT'
             ? `本机找不到 ${command} 命令：装上 OpenSSH 客户端、放进 PATH`
-            : `ssh 没起来（${e?.code ?? message(e)}）`,
+            : `ssh 没起来（${errCode(e) ?? message(e)}）`,
       }),
     );
-    child.stdout.on('data', (d) => {
+    child.stdout.on('data', (/** @type {Buffer} */ d) => {
       outBytes += d.length;
       if (outBytes > maxBytes) {
         tooBig = true;
         child.kill();
       } else out.push(d);
     });
-    child.stderr.on('data', (d) => {
+    child.stderr.on('data', (/** @type {Buffer} */ d) => {
       errBytes += d.length;
       if (errBytes <= 64 * 1024) err.push(d);
     });
@@ -313,6 +441,7 @@ export function runRemote({
 
 // —— 回来的认不认得 ——
 
+/** @type {Record<string, (v: unknown) => boolean>} */
 const TYPES = {
   str: (v) => typeof v === 'string',
   int: (v) => Number.isInteger(v),
@@ -320,14 +449,22 @@ const TYPES = {
   bool: (v) => typeof v === 'boolean',
   iso: isIso,
 };
+/** @typedef {{ [key: string]: string | ShapeSpec }} ShapeSpec 一个对象该有的键：'str'、'int?'（可空）、嵌套对象（可空） */
+/** @type {ShapeSpec} */
 const RUN_FACT = { started_at: 'iso', ended_at: 'iso?', outcome: 'str?', why: 'str?' };
 
-/** 按 spec 查一个对象：'str'、'int?'（可空）、嵌套对象（可空）。回第一处不对的描述，对就回 null。 */
+/**
+ * 按 spec 查一个对象：'str'、'int?'（可空）、嵌套对象（可空）。回第一处不对的描述，对就回 null。
+ * @param {unknown} value
+ * @param {ShapeSpec} spec
+ * @param {string} at
+ * @returns {string | null}
+ */
 function shapeProblem(value, spec, at) {
   if (!isObj(value)) return `${at} 不是对象`;
   for (const [key, want] of Object.entries(spec)) {
     const v = value[key];
-    if (isObj(want)) {
+    if (typeof want !== 'string') {
       if (v === null || v === undefined) continue;
       const p = shapeProblem(v, want, `${at}.${key}`);
       if (p) return p;
@@ -335,11 +472,20 @@ function shapeProblem(value, spec, at) {
     }
     const optional = want.endsWith('?');
     if (optional && (v === null || v === undefined)) continue;
-    if (!TYPES[want.replace('?', '')](v)) return `${at}.${key} 不是${want.replace('?', '')}`;
+    const typeName = want.replace('?', '');
+    const check = TYPES[typeName];
+    if (!check) throw new TypeError(`形状表里没有「${typeName}」这种类型（${at}.${key}）`);
+    if (!check(v)) return `${at}.${key} 不是${typeName}`;
   }
   return null;
 }
 
+/**
+ * @param {unknown} rows
+ * @param {ShapeSpec} spec
+ * @param {string} [at]
+ * @returns {string | null}
+ */
 function rowsProblem(rows, spec, at = 'rows') {
   if (!Array.isArray(rows)) return `${at} 不是列表`;
   for (const [i, row] of rows.entries()) {
@@ -349,6 +495,7 @@ function rowsProblem(rows, spec, at = 'rows') {
   return null;
 }
 
+/** @type {Record<'tasks' | 'runs' | 'notifications' | 'jobs' | 'routes' | 'orgAudit' | 'repos' | 'rounds', ShapeSpec>} */
 const ROW_SPECS = {
   tasks: {
     repo: 'str',
@@ -425,81 +572,117 @@ const ROW_SPECS = {
   rounds: { at: 'iso', text: 'str' },
 };
 
+/** @type {readonly unknown[]} */
 const ALERT_RESULTS = ['running', 'ok', 'failed'];
+/** @type {readonly unknown[]} */
 const CI_VERDICTS = ['green', 'red', 'pending', 'unknown'];
+/** @type {readonly unknown[]} */
 const RULES_RESULTS = ['ok', 'failed', 'unchecked'];
 
-/** 自动发布的读数（lib.mjs 写、packages/api 的 deploy-lag.ts 认的那几样）。回第一处不对的描述，对就回 null。 */
+/**
+ * 自动发布的读数（lib.mjs 写、packages/api 的 deploy-lag.ts 认的那几样）。回第一处不对的描述，对就回 null。
+ * 下面每处先 isObj 再 shapeProblem：shapeProblem 对非对象回的也是「<键> 不是对象」，说法不变；先认一遍只为让类型跟上。
+ * @param {unknown} s
+ * @returns {string | null}
+ */
 export function autoReleaseProblem(s) {
   if (!isObj(s)) return '不是对象';
   if (s.schema !== 1) return `schema 是 ${JSON.stringify(s.schema)}，只认 1`;
   if (!isIso(s.ranAt)) return 'ranAt 不是时间';
-  if (s.main !== null) {
-    const p = shapeProblem(s.main, { head: 'str', headAt: 'iso', checkedAt: 'iso' }, 'main');
+  const main = s.main;
+  if (main !== null) {
+    if (!isObj(main)) return 'main 不是对象';
+    const p = shapeProblem(main, { head: 'str', headAt: 'iso', checkedAt: 'iso' }, 'main');
     if (p) return p;
-    if (!Array.isArray(s.main.commits) || s.main.commits.length === 0) return 'main.commits 不是列表或是空的';
-    if (!s.main.commits.every((c) => Array.isArray(c) && TYPES.str(c[0]) && isIso(c[1])))
+    const commits = main.commits;
+    if (!Array.isArray(commits) || commits.length === 0) return 'main.commits 不是列表或是空的';
+    if (
+      !commits.every(
+        (/** @type {unknown} */ c) => Array.isArray(c) && typeof c[0] === 'string' && isIso(c[1]),
+      )
+    )
       return 'main.commits 里有认不出的一项';
   }
-  if (s.mainError !== null && !TYPES.str(s.mainError)) return 'mainError 不是字符串';
-  if (s.ci !== null) {
-    const p = shapeProblem(s.ci, { sha: 'str', detail: 'str', checkedAt: 'iso' }, 'ci');
+  if (s.mainError !== null && typeof s.mainError !== 'string') return 'mainError 不是字符串';
+  const ci = s.ci;
+  if (ci !== null) {
+    if (!isObj(ci)) return 'ci 不是对象';
+    const p = shapeProblem(ci, { sha: 'str', detail: 'str', checkedAt: 'iso' }, 'ci');
     if (p) return p;
-    if (!CI_VERDICTS.includes(s.ci.verdict)) return `ci.verdict 是 ${JSON.stringify(s.ci.verdict)}`;
+    if (!CI_VERDICTS.includes(ci.verdict)) return `ci.verdict 是 ${JSON.stringify(ci.verdict)}`;
   }
   if (s.hold !== null) {
     const p = shapeProblem(s.hold, { since: 'iso', sha: 'str', event: 'str', unmerged: 'bool' }, 'hold');
     if (p) return p;
   }
   if (s.waitingSince !== null && !isIso(s.waitingSince)) return 'waitingSince 不是时间';
-  if (s.attempt !== null) {
+  const attempt = s.attempt;
+  if (attempt !== null) {
+    if (!isObj(attempt)) return 'attempt 不是对象';
     const p = shapeProblem(
-      s.attempt,
+      attempt,
       { sha: 'str', startedAt: 'iso', endedAt: 'iso?', detail: 'str?' },
       'attempt',
     );
     if (p) return p;
-    if (!ALERT_RESULTS.includes(s.attempt.result))
-      return `attempt.result 是 ${JSON.stringify(s.attempt.result)}`;
+    if (!ALERT_RESULTS.includes(attempt.result)) return `attempt.result 是 ${JSON.stringify(attempt.result)}`;
   }
-  if (s.rules !== null) {
-    const p = shapeProblem(s.rules, { commit: 'str?', at: 'iso', detail: 'str' }, 'rules');
+  const rules = s.rules;
+  if (rules !== null) {
+    if (!isObj(rules)) return 'rules 不是对象';
+    const p = shapeProblem(rules, { commit: 'str?', at: 'iso', detail: 'str' }, 'rules');
     if (p) return p;
-    if (!RULES_RESULTS.includes(s.rules.result)) return `rules.result 是 ${JSON.stringify(s.rules.result)}`;
+    if (!RULES_RESULTS.includes(rules.result)) return `rules.result 是 ${JSON.stringify(rules.result)}`;
   }
-  if (s.system !== null) {
-    if (!isObj(s.system)) return 'system 不是对象';
-    if (!('error' in s.system)) {
-      const p = shapeProblem(s.system, { appliedSha: 'str', oldestAt: 'iso?' }, 'system');
+  const system = s.system;
+  if (system !== null) {
+    if (!isObj(system)) return 'system 不是对象';
+    if (!('error' in system)) {
+      const p = shapeProblem(system, { appliedSha: 'str', oldestAt: 'iso?' }, 'system');
       if (p) return p;
-      if (!Number.isInteger(s.system.behind) || s.system.behind < 0) return 'system.behind 不是非负整数';
-    } else if (!TYPES.str(s.system.error)) return 'system.error 不是字符串';
+      const behind = system.behind;
+      if (typeof behind !== 'number' || !Number.isInteger(behind) || behind < 0)
+        return 'system.behind 不是非负整数';
+    } else if (typeof system.error !== 'string') return 'system.error 不是字符串';
   }
   if (s.last !== null) {
     const p = shapeProblem(s.last, { action: 'str', detail: 'str', at: 'iso' }, 'last');
     if (p) return p;
   }
   // 配置对账（#323）是后加的：旧的状态文件没有这一项，不算认不出
-  if (s.config !== null && s.config !== undefined) {
-    const p = shapeProblem(s.config, { checkedAt: 'iso', result: 'str' }, 'config');
+  const config = s.config;
+  if (config !== null && config !== undefined) {
+    if (!isObj(config)) return 'config 不是对象';
+    const p = shapeProblem(config, { checkedAt: 'iso', result: 'str' }, 'config');
     if (p) return p;
-    if (!Array.isArray(s.config.drift) || !s.config.drift.every(TYPES.str))
-      return 'config.drift 不是一串名字';
-    if (!Array.isArray(s.config.unchecked) || !s.config.unchecked.every(TYPES.str))
-      return 'config.unchecked 不是一串原因';
+    if (!isNames(config.drift)) return 'config.drift 不是一串名字';
+    if (!isNames(config.unchecked)) return 'config.unchecked 不是一串原因';
   }
   return null;
 }
 
-/** 一块的形状对不对：对就原样回（ok: true 那一份），不对就改成 { ok: false, why }。 */
+/**
+ * 是一串字符串。
+ * @param {unknown} v
+ */
+const isNames = (v) => Array.isArray(v) && v.every((/** @type {unknown} */ x) => typeof x === 'string');
+
+/**
+ * 一块的形状对不对：对就原样回（ok: true 那一份），不对就改成 { ok: false, why }。
+ * 回的是「认过的」那一份，不再逐字段标类型：parseSnapshot 把整份认成 Sections。
+ * @param {SectionName} name
+ * @param {unknown} s
+ * @returns {Record<string, unknown>}
+ */
 function checkSection(name, s) {
   if (!isObj(s) || typeof s.ok !== 'boolean')
     return { ok: false, why: '法国那头没给这一块（查询脚本和本机不是同一版？）' };
-  if (!s.ok) return { ok: false, why: TYPES.str(s.why) && s.why ? s.why : '没说为什么' };
+  if (!s.ok) return { ok: false, why: typeof s.why === 'string' && s.why ? s.why : '没说为什么' };
+  /** @type {string | null} */
   let problem = null;
   switch (name) {
     case 'db':
-      problem = isIso(s.now) && TYPES.str(s.readOnly) ? null : 'now、readOnly 认不出';
+      problem = isIso(s.now) && typeof s.readOnly === 'string' ? null : 'now、readOnly 认不出';
       break;
     case 'notifications':
       problem = Number.isInteger(s.count) ? rowsProblem(s.rows, ROW_SPECS.notifications) : 'count 不是整数';
@@ -508,7 +691,7 @@ function checkSection(name, s) {
       problem = rowsProblem(s.units, { unit: 'str', state: 'str' }, 'units');
       break;
     case 'current':
-      problem = TYPES.str(s.sha) && s.sha !== '' ? null : 'sha 认不出';
+      problem = typeof s.sha === 'string' && s.sha !== '' ? null : 'sha 认不出';
       break;
     case 'autoRelease':
       problem = autoReleaseProblem(s.state);
@@ -522,10 +705,13 @@ function checkSection(name, s) {
 /**
  * 法国回来的一行 JSON。成功 { ok: true, data: { at, sections } }（字都抹过）；整份认不出 { ok: false, kind, why }：
  * bad-json（不是 JSON、什么都没打）、bad-shape（不是这份查询脚本打的、版本对不上）。单独一块不对只标那一块。
+ * @param {unknown} text
+ * @returns {{ ok: true, data: Snapshot } | Failure}
  */
 export function parseSnapshot(text) {
   const t = String(text ?? '').trim();
   if (t === '') return { ok: false, kind: 'bad-json', why: '法国上的查询脚本什么都没打出来' };
+  /** @type {unknown} */
   let data;
   try {
     data = JSON.parse(t);
@@ -545,19 +731,28 @@ export function parseSnapshot(text) {
       why: `法国回来的是第 ${JSON.stringify(data.schema)} 版格式，本机只认第 ${SCHEMA} 版`,
     };
   if (!isIso(data.at)) return { ok: false, kind: 'bad-shape', why: '法国回来的 JSON 没有查的时刻（at）' };
-  if (!isObj(data.sections)) return { ok: false, kind: 'bad-shape', why: '法国回来的 JSON 没有 sections' };
-  const sections = Object.fromEntries(
-    SECTIONS.map((name) => [name, checkSection(name, data.sections[name])]),
-  );
-  return { ok: true, data: scrubDeep({ at: data.at, sections }) };
+  const rawSections = data.sections;
+  if (!isObj(rawSections)) return { ok: false, kind: 'bad-shape', why: '法国回来的 JSON 没有 sections' };
+  const sections = Object.fromEntries(SECTIONS.map((name) => [name, checkSection(name, rawSections[name])]));
+  // 每一块上面都按形状表逐项核过了（核不过的已经换成 { ok: false, why }），所以这里才认成 Snapshot
+  return { ok: true, data: /** @type {Snapshot} */ (scrubDeep({ at: data.at, sections })) };
 }
 
 // —— 额度（跟 packages/shared/src/usage.ts 走） ——
 
 /** 输入当量的折法：输入 1、缓存写 1.25、缓存读 0.1、输出 5；按二十分之一算成整数再除，免得小数尾巴。 */
 const SCALED = { input: 20, cacheWrite: 25, cacheRead: 2, output: 100 };
-const tokens = (v) => (v !== undefined && v !== null && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
+/**
+ * 读到的、不为负的整数才算数；其余（没读到、小数、负数、字符串）一律当没读到。
+ * @param {unknown} v
+ * @returns {number | undefined}
+ */
+const tokens = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
 
+/**
+ * @param {Pick<UsageRun, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>} r
+ * @returns {number | undefined}
+ */
 export function inputEquivalentOf(r) {
   const input = tokens(r.inputTokens);
   const output = tokens(r.outputTokens);
@@ -571,7 +766,9 @@ export function inputEquivalentOf(r) {
   );
 }
 
+/** @returns {CostShare} */
 const emptyShare = () => ({ runs: 0, usd: 0, missing: 0 });
+/** @returns {Totals} */
 export function emptyTotals() {
   return {
     runs: 0,
@@ -596,9 +793,13 @@ export function emptyTotals() {
   };
 }
 
+/**
+ * @param {UsageRun} r
+ * @returns {{ queueMs: number, runMs: number } | undefined}
+ */
 function durations(r) {
   const queued = ms(r.queuedAt);
-  const ended = ms(r.endedAt);
+  const ended = r.endedAt === null || r.endedAt === undefined ? Number.NaN : ms(r.endedAt);
   const started = r.startedAt === null || r.startedAt === undefined ? undefined : ms(r.startedAt);
   if (!Number.isFinite(queued) || !Number.isFinite(ended)) return undefined;
   if (started !== undefined && !Number.isFinite(started)) return undefined;
@@ -607,6 +808,10 @@ function durations(r) {
   return queueMs >= 0 && runMs >= 0 ? { queueMs, runMs } : undefined;
 }
 
+/**
+ * @param {Totals} t
+ * @param {UsageRun} r
+ */
 function addRun(t, r) {
   if (r.endedAt === null || r.endedAt === undefined) {
     t.running += 1;
@@ -652,34 +857,55 @@ function addRun(t, r) {
 }
 
 /** 一组会话按模型（路由上的模型）、按环节、整组合计；会话按排队时刻排好传进来。 */
+/**
+ * @param {UsageRun[]} runs
+ * @returns {{ total: Totals, byModel: (Totals & { model: string, modelName: string })[], byStage: (Totals & { stage: string })[] }}
+ */
 export function summarizeUsage(runs) {
   const total = emptyTotals();
+  /** @type {Map<string, Totals & { model: string, modelName: string }>} */
   const byModel = new Map();
+  /** @type {Map<string, Totals & { stage: string }>} */
   const byStage = new Map();
   for (const r of runs) {
     const modelKey = r.model ?? '?';
-    if (!byModel.has(modelKey))
-      byModel.set(modelKey, {
+    let forModel = byModel.get(modelKey);
+    if (!forModel) {
+      forModel = {
         model: modelKey,
         modelName: r.modelName ?? r.model ?? '（路由查不到）',
         ...emptyTotals(),
-      });
-    if (!byStage.has(r.stage)) byStage.set(r.stage, { stage: r.stage, ...emptyTotals() });
+      };
+      byModel.set(modelKey, forModel);
+    }
+    let forStage = byStage.get(r.stage);
+    if (!forStage) {
+      forStage = { stage: r.stage, ...emptyTotals() };
+      byStage.set(r.stage, forStage);
+    }
     addRun(total, r);
-    addRun(byModel.get(modelKey), r);
-    addRun(byStage.get(r.stage), r);
+    addRun(forModel, r);
+    addRun(forStage, r);
   }
   return { total, byModel: [...byModel.values()], byStage: [...byStage.values()] };
 }
 
 // —— 整理成页面要的样子 ——
 
+/**
+ * @param {string} repo
+ * @param {number} n
+ */
 const taskKey = (repo, n) => `${repo}#${n}`;
+/** @param {string | null | undefined} repo */
 const repoName = (repo) =>
   String(repo ?? '')
     .split('/')
     .at(-1) ?? '';
 
+/** @typedef {ReturnType<typeof toRun>} RunView 页面上一次会话的样子（字段名驼峰、可空的都补成 null） */
+
+/** @param {RunRow} r */
 function toRun(r) {
   return {
     key: r.repo && r.n !== null && r.n !== undefined ? taskKey(r.repo, r.n) : null,
@@ -713,7 +939,11 @@ function toRun(r) {
   };
 }
 
-/** 一次会话排队、干活各多久（还在跑的按到 at 为止算）。 */
+/**
+ * 一次会话排队、干活各多久（还在跑的按到 at 为止算）。
+ * @param {RunView} r
+ * @param {string} at
+ */
 function runTimes(r, at) {
   const end = r.endedAt ?? at;
   const queueMs = Math.max(0, ms(r.startedAt ?? end) - ms(r.queuedAt));
@@ -721,8 +951,17 @@ function runTimes(r, at) {
   return { queueMs, runMs };
 }
 
-/** 会话用户此刻挂的号：看引擎自己记的——路由探针的结论（挂着的池才探、没挂的池写明「现在挂的是…」）和切号记录，取最新的。 */
+/** @typedef {{ at: string, org: string | null, how?: string | undefined, why?: string | null | undefined }} OrgSighting 引擎记过的一笔「会话用户挂的是哪个号」 */
+/** @typedef {{ ok: false, why: string, at?: string } | { ok: true, org: string, name: string, at: string, how?: string | undefined }} MountedOrg */
+
+/**
+ * 会话用户此刻挂的号：看引擎自己记的——路由探针的结论（挂着的池才探、没挂的池写明「现在挂的是…」）和切号记录，取最新的。
+ * @param {readonly Pick<RouteRow, 'org_kind' | 'probed_at' | 'probe_state' | 'probe_detail'>[] | null | undefined} routes
+ * @param {readonly OrgAuditRow[] | null | undefined} audits
+ * @returns {MountedOrg}
+ */
 export function mountedOrg(routes, audits) {
+  /** @type {OrgSighting[]} */
   const seen = [];
   for (const r of routes ?? []) {
     if (!r.org_kind || !r.probed_at) continue;
@@ -745,10 +984,9 @@ export function mountedOrg(routes, audits) {
         how: a.action === 'session-org.switch' ? '引擎切号的记录' : '切号后核对的记录',
       });
   }
-  if (seen.length === 0)
-    return { ok: false, why: '引擎还没记过（路由探针没探过 Claude 的池，也没有切号记录）' };
   seen.sort((a, b) => ms(b.at) - ms(a.at));
   const latest = seen[0];
+  if (!latest) return { ok: false, why: '引擎还没记过（路由探针没探过 Claude 的池，也没有切号记录）' };
   if (latest.org === null) return { ok: false, at: latest.at, why: `路由探针上一轮读不出：${latest.why}` };
   return {
     ok: true,
@@ -759,7 +997,11 @@ export function mountedOrg(routes, audits) {
   };
 }
 
-/** 多久以前（相对法国查的那一刻）：「5 分钟前」「3 小时前」「2 天前」。 */
+/**
+ * 多久以前（相对法国查的那一刻）：「5 分钟前」「3 小时前」「2 天前」。
+ * @param {string} fromIso
+ * @param {string} at
+ */
 export function agoText(fromIso, at) {
   const m = Math.max(0, minutesBetween(fromIso, at));
   if (m < 60) return `${m} 分钟前`;
@@ -767,7 +1009,12 @@ export function agoText(fromIso, at) {
   return h < 48 ? `${h} 小时前` : `${Math.floor(h / 24)} 天前`;
 }
 
-/** 定时任务新不新鲜：和 packages/db 的 scheduleHealth 同一条线。 */
+/**
+ * 定时任务新不新鲜：和 packages/db 的 scheduleHealth 同一条线。
+ * @param {JobRow} job
+ * @param {string} at
+ * @returns {'never' | 'failing' | 'no-samples' | 'stale' | 'ok'}
+ */
 export function jobStatus(job, at) {
   if (!job.last_run) return 'never';
   if (job.last_finished?.outcome === 'failed') return 'failing';
@@ -776,6 +1023,7 @@ export function jobStatus(job, at) {
   if (!ended || ms(at) - ms(ended) > job.every * 60_000) return 'stale';
   return 'ok';
 }
+/** @type {Record<'never' | 'failing' | 'no-samples' | 'stale' | 'ok', string>} */
 export const JOB_STATUS_WORDS = {
   never: '从没跑过',
   failing: '最近一轮没跑成',
@@ -787,20 +1035,22 @@ export const JOB_STATUS_WORDS = {
 const WHERE = {
   unread:
     '本机跑 node $S/france.mjs 看原因；法国上手动跑同一份查询：ssh <法国> node --input-type=module - --collect < $S/france-query.mjs',
-  service: (u) => `法国：systemctl status ${u}；journalctl -u ${u} -n 50`,
+  service: (/** @type {string} */ u) => `法国：systemctl status ${u}；journalctl -u ${u} -n 50`,
   autoRelease: '法国：systemctl status fleet-auto-release.timer；journalctl -u fleet-auto-release -n 30',
   releaseLog: '法国：journalctl -u fleet-auto-release -n 50；/srv/fleet-dao-releases/.logs/ 下最新的日志',
   installer: '法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（碰防火墙、sudoers，要人看着跑）',
   notifications: '驾驶舱「提醒」或飞书；法国库 notifications 表 resolved_at 为空的',
-  job: (id) => `法国：journalctl -u fleet-engine | grep ${id}；库 schedule_runs 表 job='${id}'`,
+  job: (/** @type {string} */ id) =>
+    `法国：journalctl -u fleet-engine | grep ${id}；库 schedule_runs 表 job='${id}'`,
   route: '法国：journalctl -u fleet-engine | grep route-probe；库 routes 表',
   org: '法国：journalctl -u fleet-engine | grep session-org；docs/ops.md 第五节（会话用户切号）',
   session: '法国：journalctl -u fleet-engine；驾驶舱这张单的会话时间线',
-  task: (repo, n) =>
+  task: (/** @type {string} */ repo, /** @type {number} */ n) =>
     `https://github.com/${repo}/issues/${n}；法国：journalctl -u fleet-engine | grep '#${n}'`,
   readOnly: '本机 $S/france-query.mjs 里的 PSQL（连接参数 default_transaction_read_only）',
 };
 
+/** @type {Record<string, string>} */
 const WAITING = {
   'ci-pending': '在等 CI',
   'wait-idle': '在等引擎空闲',
@@ -809,7 +1059,10 @@ const WAITING = {
   releasing: '在发',
 };
 
-/** 自动发布一轮的结论（deploy/france/auto-release/lib.mjs 的 act）的白话；认不出的原样给。 */
+/**
+ * 自动发布一轮的结论（deploy/france/auto-release/lib.mjs 的 act）的白话；认不出的原样给。
+ * @type {Record<string, string>}
+ */
 export const ACTION_WORDS = {
   'up-to-date': '跟上了',
   released: '发了',
@@ -834,12 +1087,25 @@ export const ACTION_WORDS = {
   'state-unwritable': '状态文件写不进去',
 };
 
-/** 版本和自动发布：落后多少、卡在哪，给页面的样子和要标的异常。 */
+/**
+ * 页面上「版本和自动发布」那一块（读到了的样子）。
+ * @typedef {{ ok: true, current: string | null, currentWhy: string | null, head: string | null, headAt: string | null, checkedAt: string | null, mainError: string | null, ranAt: string, ci: CiFacts | null, hold: HoldFacts | null, waitingSince: string | null, attempt: AttemptFacts | null, rules: RulesFacts | null, system: SystemFacts | null, last: (LastFacts & { actionName: string }) | null, config: ConfigFacts | null, behind: number | null, oldestUnreleasedAt: string | null, inRecent: boolean | null, recentCount: number, waiting: string | null }} ReleaseView
+ */
+
+/**
+ * 版本和自动发布：落后多少、卡在哪，给页面的样子和要标的异常。
+ * @param {Sections['current']} current
+ * @param {Sections['autoRelease']} auto
+ * @param {string} at
+ * @returns {{ view: ReleaseView | { ok: false, why: string, current: string | null }, issues: Issue[] }}
+ */
 function releaseFacts(current, auto, at) {
+  /** @type {Issue[]} */
   const issues = [];
   if (!auto.ok)
     return { view: { ok: false, why: auto.why, current: current.ok ? current.sha : null }, issues };
   const st = auto.state;
+  /** @type {ReleaseView} */
   const view = {
     ok: true,
     current: current.ok ? current.sha : null,
@@ -861,14 +1127,15 @@ function releaseFacts(current, auto, at) {
     oldestUnreleasedAt: null,
     inRecent: null,
     recentCount: st.main?.commits.length ?? 0,
-    waiting: WAITING[st.last?.action] ?? null,
+    waiting: (st.last ? WAITING[st.last.action] : undefined) ?? null,
   };
   const running = st.attempt?.result === 'running' ? minutesBetween(st.attempt.startedAt, at) : null;
   let fresh = true;
   if (running !== null && running > LIMITS.autoReleaseRunning) {
     issues.push({
       level: 'bad',
-      what: `自动发布这一轮跑了 ${running} 分钟还没完（在发 ${st.attempt.sha}）`,
+      // running 不是 null 就是上面那个 attempt 在跑，所以 ?. 取到的一定是它的 sha
+      what: `自动发布这一轮跑了 ${running} 分钟还没完（在发 ${st.attempt?.sha}）`,
       where: WHERE.releaseLog,
     });
   } else if (running === null && minutesBetween(st.ranAt, at) > LIMITS.autoReleaseStale) {
@@ -899,7 +1166,9 @@ function releaseFacts(current, auto, at) {
     view.inRecent = i >= 0;
     if (i > 0) {
       view.behind = i;
-      view.oldestUnreleasedAt = st.main.commits[i - 1][1];
+      const newer = st.main.commits[i - 1];
+      if (!newer) throw new RangeError(`commits[${i - 1}] 取不到（i 来自 findIndex，不该发生）`);
+      view.oldestUnreleasedAt = newer[1];
       const waited = minutesBetween(view.oldestUnreleasedAt, at);
       if (fresh && waited > LIMITS.lag)
         issues.push({
@@ -946,26 +1215,41 @@ function releaseFacts(current, auto, at) {
 /**
  * 一份快照整理成页面要的样子：断链排查（最要紧的在前）、每张单一行（点开是每次会话）、近 24 小时按环节和模型的汇总、
  * 引擎健康。每一块都带 ok；没读到的带 why，不拿空的顶。
+ * @param {Snapshot} snapshot
  */
 export function buildView(snapshot) {
   const { at, sections: S } = snapshot;
+  /** @type {Issue[]} */
   const issues = [];
+  /**
+   * @param {string} what
+   * @param {string} where
+   */
   const bad = (what, where) => issues.push({ level: 'bad', what, where });
+  /**
+   * @param {string} what
+   * @param {string} where
+   */
   const note = (what, where) => issues.push({ level: 'note', what, where });
 
   // 没读到的块：库的几块常是同一个原因，并成一条
+  /** 没读到的那一块的原因（读到了的没有）。 */
+  const whyOf = (/** @type {SectionName} */ n) => {
+    const s = S[n];
+    return s.ok ? undefined : s.why;
+  };
   const unread = SECTIONS.filter((n) => !S[n].ok);
   const dbUnread = unread.filter((n) => DB_SECTIONS.includes(n));
-  const sameDbWhy =
-    dbUnread.length === DB_SECTIONS.length && new Set(dbUnread.map((n) => S[n].why)).size === 1;
+  const sameDbWhy = dbUnread.length === DB_SECTIONS.length && new Set(dbUnread.map(whyOf)).size === 1;
+  /** @type {{ level: 'unread', what: string, where: string }[]} */
   const unreadItems = [];
   if (sameDbWhy)
-    unreadItems.push({ level: 'unread', what: `没读到：库（${S.db.why}）`, where: WHERE.unread });
+    unreadItems.push({ level: 'unread', what: `没读到：库（${whyOf('db')}）`, where: WHERE.unread });
   for (const n of unread) {
     if (sameDbWhy && DB_SECTIONS.includes(n)) continue;
     unreadItems.push({
       level: 'unread',
-      what: `没读到：${SECTION_NAMES[n]}（${S[n].why}）`,
+      what: `没读到：${SECTION_NAMES[n]}（${whyOf(n)}）`,
       where: WHERE.unread,
     });
   }
@@ -1003,9 +1287,9 @@ export function buildView(snapshot) {
         const label = `定时任务「${j.name}」`;
         if (status === 'never') bad(`${label}从没跑过`, WHERE.job(j.id));
         else if (status === 'failing')
-          bad(`${label}最近一轮没跑成：${j.last_finished.why ?? '没写原因'}`, WHERE.job(j.id));
+          bad(`${label}最近一轮没跑成：${j.last_finished?.why ?? '没写原因'}`, WHERE.job(j.id));
         else if (status === 'no-samples')
-          bad(`${label}最近一轮一个都没扫到：${j.last_finished.why ?? '没写原因'}`, WHERE.job(j.id));
+          bad(`${label}最近一轮一个都没扫到：${j.last_finished?.why ?? '没写原因'}`, WHERE.job(j.id));
         else if (status === 'stale')
           bad(
             lastOkAgo === null
@@ -1014,7 +1298,7 @@ export function buildView(snapshot) {
             WHERE.job(j.id),
           );
         else if (j.last_finished?.outcome === 'partial')
-          note(`${label}最近一轮只查了一部分：${j.last_finished.why ?? '没写原因'}`, WHERE.job(j.id));
+          note(`${label}最近一轮只查了一部分：${j.last_finished?.why ?? '没写原因'}`, WHERE.job(j.id));
         return {
           id: j.id,
           name: j.name,
@@ -1071,19 +1355,23 @@ export function buildView(snapshot) {
   let org;
   if (!S.routes.ok && !S.orgAudit.ok) org = { ok: false, why: `路由和切号记录都没读到（${S.routes.why}）` };
   else {
-    org = mountedOrg(S.routes.ok ? S.routes.rows : [], S.orgAudit.ok ? S.orgAudit.rows : []);
-    if (!org.ok && org.at) bad(`会话用户挂的号认不出，Claude 的两个池都不派：${org.why}`, WHERE.org);
-    org.recent = S.orgAudit.ok
-      ? S.orgAudit.rows.map((a) => ({
-          at: a.at,
-          action: a.action === 'session-org.switch' ? '切号' : '核对',
-          ok: a.ok,
-          from: a.from_org ? (ORG_NAMES[a.from_org] ?? a.from_org) : null,
-          to: a.to_org ? (ORG_NAMES[a.to_org] ?? a.to_org) : null,
-          error: a.error,
-        }))
-      : null;
-    org.recentWhy = S.orgAudit.ok ? null : S.orgAudit.why;
+    const mounted = mountedOrg(S.routes.ok ? S.routes.rows : [], S.orgAudit.ok ? S.orgAudit.rows : []);
+    if (!mounted.ok && mounted.at)
+      bad(`会话用户挂的号认不出，Claude 的两个池都不派：${mounted.why}`, WHERE.org);
+    org = {
+      ...mounted,
+      recent: S.orgAudit.ok
+        ? S.orgAudit.rows.map((a) => ({
+            at: a.at,
+            action: a.action === 'session-org.switch' ? '切号' : '核对',
+            ok: a.ok,
+            from: a.from_org ? (ORG_NAMES[a.from_org] ?? a.from_org) : null,
+            to: a.to_org ? (ORG_NAMES[a.to_org] ?? a.to_org) : null,
+            error: a.error,
+          }))
+        : null,
+      recentWhy: S.orgAudit.ok ? null : S.orgAudit.why,
+    };
   }
 
   // 会话和单子
@@ -1100,7 +1388,7 @@ export function buildView(snapshot) {
     }
   }
   for (const r of runs) {
-    if (!r.endedAt || !['failed', 'stalled'].includes(r.outcome)) continue;
+    if (!r.endedAt || (r.outcome !== 'failed' && r.outcome !== 'stalled')) continue;
     if (minutesBetween(r.endedAt, at) > LIMITS.failedLookback) continue;
     note(
       `会话${r.outcomeName}：${r.n ? `#${r.n} ` : ''}${r.stageName}（${r.routeId}）${r.failureCode ? ` ${r.failureCode}` : ''}${r.failureMessage ? `：${r.failureMessage}` : ''}`,
@@ -1108,13 +1396,17 @@ export function buildView(snapshot) {
     );
   }
 
+  /** @type {Map<string, RunView[]>} */
   const runsByTask = new Map();
   for (const r of runs) {
     if (!r.key) continue;
-    if (!runsByTask.has(r.key)) runsByTask.set(r.key, []);
-    runsByTask.get(r.key).push(r);
+    const list = runsByTask.get(r.key);
+    if (list) list.push(r);
+    else runsByTask.set(r.key, [r]);
   }
+  /** @param {RunView} r */
   const withTimes = (r) => ({ ...r, ...runTimes(r, at), inputEquivalent: inputEquivalentOf(r) ?? null });
+  /** @param {TaskRow} t */
   const taskRow = (t) => {
     const key = taskKey(t.repo, t.n);
     const mine = runsByTask.get(key) ?? [];
@@ -1201,6 +1493,7 @@ export function buildView(snapshot) {
     for (const r of repos)
       if (!r.on) note(`仓 ${r.repoName} 的「让 AI 接活」关着：引擎不接这个仓的新单`, '驾驶舱这个项目的设置');
 
+  /** @type {Record<'bad' | 'unread' | 'note', number>} */
   const order = { bad: 0, unread: 1, note: 2 };
   const anomalies = [...issues, ...unreadItems]
     .map((x, i) => ({ ...x, i }))
@@ -1224,9 +1517,9 @@ export function buildView(snapshot) {
         : { ok: false, why: S.rounds.why },
       services: S.services.ok ? { ok: true, units: S.services.units } : { ok: false, why: S.services.why },
       org,
-      repos: repos ? { ok: true, rows: repos } : { ok: false, why: S.repos.why },
-      jobs: jobs ? { ok: true, rows: jobs } : { ok: false, why: S.jobs.why },
-      routes: routes ? { ok: true, rows: routes } : { ok: false, why: S.routes.why },
+      repos: repos ? { ok: true, rows: repos } : { ok: false, why: whyOf('repos') },
+      jobs: jobs ? { ok: true, rows: jobs } : { ok: false, why: whyOf('jobs') },
+      routes: routes ? { ok: true, rows: routes } : { ok: false, why: whyOf('routes') },
       notifications: S.notifications.ok
         ? { ok: true, count: S.notifications.count, rows: S.notifications.rows }
         : { ok: false, why: S.notifications.why },
@@ -1238,7 +1531,14 @@ export function buildView(snapshot) {
 
 // —— 取一次、页面服务里的缓存 ——
 
-/** 取一次：读 ssh 名字、读查询脚本、经 ssh 跑、认回来的。回 { ok: true, data } 或 { ok: false, kind, why }，不抛。 */
+/** @typedef {ReturnType<typeof buildView>} View 页面要的整份数据 */
+/** @typedef {{ ok: true, data: Snapshot } | Failure} FetchResult 取一次的结局 */
+
+/**
+ * 取一次：读 ssh 名字、读查询脚本、经 ssh 跑、认回来的。回 { ok: true, data } 或 { ok: false, kind, why }，不抛。
+ * @param {{ home: string, env: Record<string, string | undefined>, scriptFile: string, command?: string, argsFor?: (host: string) => string[], timeoutMs?: number, readText?: (file: string) => string, spawnImpl?: SpawnPiped }} opts
+ * @returns {() => Promise<FetchResult>}
+ */
 export function franceFetcher({
   home,
   env,
@@ -1252,6 +1552,7 @@ export function franceFetcher({
   return async () => {
     const target = readTarget({ env, home, readText });
     if (!target.ok) return target;
+    /** @type {string} */
     let script;
     try {
       script = readText(scriptFile);
@@ -1259,7 +1560,7 @@ export function franceFetcher({
       return {
         ok: false,
         kind: 'no-script',
-        why: `本机的查询脚本读不到（${scriptFile}：${e?.code ?? message(e)}）`,
+        why: `本机的查询脚本读不到（${scriptFile}：${errCode(e) ?? message(e)}）`,
       };
     }
     const r = await runRemote({ command, args: argsFor(target.host), script, timeoutMs, spawnImpl });
@@ -1272,6 +1573,7 @@ export function franceFetcher({
  * 页面服务里的那一份：有人来读、离上次读完过了 refreshMs，就在后台再从法国读一次（同时只一次）；马上回手上有的。
  * 回 { refreshMs, now, loading, lastTry, good }：good 是最近一次读成的（带整理好的 view），lastTry 是最近一次的结局——
  * 读失败了 good 照留，页面照实写「最近一次没读到」和多久以前的数据。
+ * @param {{ fetchOnce: () => Promise<FetchResult>, now?: () => Date, refreshMs?: number, htmlFile?: string | null }} opts
  */
 export function createFranceSource({
   fetchOnce,
@@ -1279,18 +1581,23 @@ export function createFranceSource({
   refreshMs = REFRESH_MS,
   htmlFile = null,
 }) {
+  /** @type {{ fetchedAt: string, tookMs: number, view: View | null } | null} */
   let good = null;
+  /** @type {{ at: string, endedAt: string, tookMs: number, ok: boolean, kind?: string, why?: string } | null} */
   let lastTry = null;
+  /** @type {{ since: Date, promise: Promise<void> } | null} */
   let inflight = null;
   const start = () => {
     const since = now();
     const promise = (async () => {
+      /** @type {FetchResult} */
       let r;
       try {
         r = await fetchOnce();
       } catch (e) {
         r = { ok: false, kind: 'crashed', why: `取数出错：${message(e)}` };
       }
+      /** @type {View | null} */
       let view = null;
       if (r.ok) {
         try {
@@ -1344,13 +1651,23 @@ export const APP_ID = 'fleet-progress';
 /**
  * 页面服务：/ 转到 /france；/france 给法国引擎页，/api/france 给它的数据（france.read()），/api/ping 认自己。只许读。
  * 页面文件每次现读：读不到 500 带原因，不给空页面。france 是 createFranceSource 的那一份，必给。
+ * @param {{ france: ReturnType<typeof createFranceSource> }} opts
  */
 export function createFranceServer({ france }) {
   return createServer((req, res) => {
+    /**
+     * @param {number} code
+     * @param {string} type
+     * @param {string | Buffer} body
+     */
     const send = (code, type, body) => {
       res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
       res.end(body);
     };
+    /**
+     * @param {number} code
+     * @param {unknown} value
+     */
     const json = (code, value) => send(code, 'application/json; charset=utf-8', JSON.stringify(value));
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(405, { error: '只能读' });
     const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
@@ -1361,17 +1678,26 @@ export function createFranceServer({ france }) {
     if (path === '/api/ping') return json(200, { app: APP_ID });
     if (path === '/api/france') return json(200, france.read());
     if (path === '/france') {
+      // createFranceSource 的 htmlFile 默认是 null：以前直接把 null 交给 readFileSync、抛 ERR_INVALID_ARG_TYPE 落进下面的 500；
+      // 现在在这里明说没给页面文件的路径（同样是 500，只是原因写得清楚）
+      if (france.htmlFile === null)
+        return send(500, 'text/plain; charset=utf-8', '页面文件读不到（没有给页面文件的路径）');
       try {
         return send(200, 'text/html; charset=utf-8', readFileSync(france.htmlFile));
       } catch (e) {
-        return send(500, 'text/plain; charset=utf-8', `页面文件读不到（${e?.code ?? message(e)}）`);
+        return send(500, 'text/plain; charset=utf-8', `页面文件读不到（${errCode(e) ?? message(e)}）`);
       }
     }
     return json(404, { error: '没有这个地址' });
   });
 }
 
-/** 端口：--port <n>，其次环境变量 FLEET_PROGRESS_PORT，都没有用 1127。认不出返回原因（字符串）。 */
+/**
+ * 端口：--port <n>，其次环境变量 FLEET_PROGRESS_PORT，都没有用 1127。认不出返回原因（字符串）。
+ * @param {string[]} argv
+ * @param {Record<string, string | undefined>} env
+ * @returns {number | string}
+ */
 export function parsePort(argv, env) {
   const i = argv.indexOf('--port');
   const raw = i >= 0 ? argv[i + 1] : env[PORT_ENV];
@@ -1380,11 +1706,17 @@ export function parsePort(argv, env) {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : `端口要是 0–65535 的整数，「${raw}」不行`;
 }
 
-/** 端口上是不是我们自己的页面服务（问 /api/ping）。连不上、回的不对都算不是。 */
+/**
+ * 端口上是不是我们自己的页面服务（问 /api/ping）。连不上、回的不对都算不是。
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
 export async function isOurs(port) {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/ping`, { signal: AbortSignal.timeout(2000) });
-    return r.ok && (await r.json()).app === APP_ID;
+    if (!r.ok) return false;
+    const body = await r.json();
+    return isObj(body) && body.app === APP_ID;
   } catch {
     return false;
   }
@@ -1393,12 +1725,14 @@ export async function isOurs(port) {
 /**
  * 起页面服务，只听 127.0.0.1。端口上已经是我们的页面服务：说一声、退出码 0（可以放心重复跑）；被别的程序占着：退出码 1。
  * 返回 { code, server?, port? }。
+ * @param {{ port: number, france: ReturnType<typeof createFranceSource>, out: (line: string) => void, err: (line: string) => void }} opts
+ * @returns {Promise<{ code: number, server?: ReturnType<typeof createFranceServer>, port?: number }>}
  */
 export function startFranceServer({ port, france, out, err }) {
   return new Promise((resolve) => {
     const server = createFranceServer({ france });
-    server.once('error', async (e) => {
-      if (e.code === 'EADDRINUSE') {
+    server.once('error', async (/** @type {Error} */ e) => {
+      if (errCode(e) === 'EADDRINUSE') {
         if (await isOurs(port)) {
           out(`法国引擎页已经在跑：http://127.0.0.1:${port}/france`);
           return resolve({ code: 0 });
@@ -1410,7 +1744,9 @@ export function startFranceServer({ port, france, out, err }) {
       resolve({ code: 1 });
     });
     server.listen(port, '127.0.0.1', () => {
-      const actual = server.address().port;
+      // 听的是 TCP 端口，address() 在这里一定是 { port }；不是的话（不该发生）退回要的端口，不抛
+      const addr = server.address();
+      const actual = typeof addr === 'object' && addr !== null ? addr.port : port;
       out(`法国引擎页：http://127.0.0.1:${actual}/france`);
       resolve({ code: 0, server, port: actual });
     });
