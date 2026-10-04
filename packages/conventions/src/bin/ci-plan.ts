@@ -125,7 +125,7 @@ const human = [
     (b) =>
       `- test (${b.label})：${b.files.length} 个文件，估 ${Math.round(b.estMs / 1000)} 秒（${unitsOf(b.files)}）`,
   ),
-  `web：${plan.web}  deploy：${plan.deploy}`,
+  `web：${plan.web}  e2e：${plan.e2e}  deploy：${plan.deploy}`,
 ];
 console.log(`改了 ${changed.length} 个文件（${event}${event === 'pull_request' ? `，比 ${base}` : ''}）`);
 for (const line of human) console.log(line);

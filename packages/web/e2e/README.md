@@ -20,9 +20,13 @@ E2E_PG_ADMIN_URL=postgres://postgres:<密码>@127.0.0.1:5432/postgres pnpm --fil
 
 本机没有 Postgres 的办法：WSL 里装的 Postgres 16 也行；或者用 npm 的 `@embedded-postgres/windows-x64`（Windows 版 PG 二进制，不用装、不用管理员，`initdb` + `postgres.exe -p 55432` 起一份，装在仓外）。
 
-## 为什么没进 CI
+## 在 CI 里怎么跑（#930）
 
-CI 的 `test` job 只收 `*.test.ts(x)`，`*.e2e.ts` 不在其内，`pnpm test` 不会误跑它。要进 CI 得在 `ci.yml` 里加一个 job（postgres 服务容器 + 装浏览器 + 起三个进程，约几分钟），那是改 CI 工作流（先审后合），单开了子单跟踪（见 `specs/902-驾驶舱用户视角e2e/缺陷清单.md` 末尾），现在是手动脚本。
+`.github/workflows/ci.yml` 的 `e2e` job：Linux、容器里的 `postgres:16-alpine`（`E2E_PG_ADMIN_URL` 指向它）、Playwright 的 Chromium（`E2E_BROWSER_CHANNEL=chromium`，`playwright install --with-deps chromium`，浏览器按 Playwright 版本缓存）。
+- 只在改到 `packages/web`、`api`、`db`、`shared`、依赖文件（`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`）、`ci.yml` 自己，或认不出改了什么时才跑（判法 `packages/conventions/src/ci-plan.ts` 的 `touchesE2e`），别的 PR 跳过。
+- 红了挡合并：必过检查 `check` 等它，该跑的它必须绿（`ciVerdict`）。失败时报告、截图、各进程日志当 artifact 留 7 天（`e2e-<运行号>`）。
+- 和本机的差别：本机是 Windows + 本机 Chrome + 自己起的 Windows 版 PG；CI 是 Linux + 下载的 Chromium + 容器 PG。库名、端口、用例顺序一样。
+- CI 的 `test` job 只收 `*.test.ts(x)`，`*.e2e.ts` 不在其内，`pnpm test` 不会误跑它。
 
 ## 用例
 
