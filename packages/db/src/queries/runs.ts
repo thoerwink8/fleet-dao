@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { type RunTier, runs } from '../schema/index.ts';
+import { type RunRouteOutcome, type RunTier, runs } from '../schema/index.ts';
 
 export type RunOutcome =
   | 'done'
@@ -33,6 +33,8 @@ export interface RunInsert {
   startedAt?: Date;
   endedAt?: Date;
   outcome?: RunOutcome;
+  /** 这一次算不算这条路由的账（收场才有）；没给就是 NULL（按不算账读）。 */
+  routeOutcome?: RunRouteOutcome | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
   cacheReadTokens?: number | null;
@@ -50,6 +52,7 @@ export interface RunInsert {
 export interface RunFinishInput {
   runId: string;
   outcome?: RunOutcome;
+  routeOutcome?: RunRouteOutcome | null;
   startedAt?: Date;
   endedAt?: Date;
   inputTokens?: number | null;
@@ -105,6 +108,7 @@ export async function finishRun(
   const changes = {
     endedAt: row.endedAt ?? now,
     outcome: row.outcome,
+    ...(row.routeOutcome !== undefined ? { routeOutcome: row.routeOutcome } : {}),
     ...(row.inputTokens !== undefined ? { inputTokens: row.inputTokens } : {}),
     ...(row.outputTokens !== undefined ? { outputTokens: row.outputTokens } : {}),
     ...(row.cacheReadTokens !== undefined ? { cacheReadTokens: row.cacheReadTokens } : {}),
@@ -172,7 +176,7 @@ export async function runsOfTask(
 /**
  * 把还没结束的行都收成 killed、写明为什么，交回收掉的编号。只给引擎起来、接活之前用（#157）：一次性会话不脱开引擎进程跑，
  * 上一轮引擎一退它们就断了（起来时的收尾收掉了它们的 scope），库里那几行不收，切号就一直以为它们在跑、一直等。
- * 收的时刻早于开跑时刻（时钟回拨）就按开跑时刻收，不撞 runs_ended_after_start。
+ * 收的时刻早于开跑时刻（时钟回拨）就按开跑时刻收，不撞 runs_ended_after_start。是引擎退了断的，不算路由的账（neutral）。
  */
 export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: string }): Promise<string[]> {
   if (!input.reason.trim()) throw new RunInputError('收掉没结束的 runs 要写为什么');
@@ -182,6 +186,7 @@ export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: stri
       .set({
         endedAt: sql`greatest(${input.endedAt.toISOString()}::timestamptz, ${runs.startedAt})`,
         outcome: 'killed',
+        routeOutcome: 'neutral',
         failureReason: input.reason,
         updatedAt: input.endedAt,
       })
@@ -208,6 +213,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     startedAt: row.startedAt ?? now,
     endedAt: row.endedAt ?? null,
     outcome: row.outcome ?? null,
+    routeOutcome: row.routeOutcome ?? null,
     inputTokens: row.inputTokens ?? null,
     outputTokens: row.outputTokens ?? null,
     cacheReadTokens: row.cacheReadTokens ?? null,

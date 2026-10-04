@@ -277,6 +277,90 @@ describe('选路', () => {
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
   });
 
+  describe('三段的一次性会话也喂熔断、战绩、半开试探（runs 里的行，#758）', () => {
+    it('动手那一段在这条路由上连着失败三次、失败分流判是路由的错：熔断，派给下一条', async () => {
+      await world(t.db);
+      for (const minutesAgo of [3, 2, 1]) await oneShotEnded('solo', minutesAgo);
+      expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    });
+
+    it('【故意造出的失败】切号停下、内存放不下没开跑（不算路由的错）连着三次，加一笔没下过结论的老行：不熔断，照派这一条', async () => {
+      await world(t.db);
+      await oneShotEnded('solo', 4, { outcome: 'org_switch', routeOutcome: 'neutral' });
+      await oneShotEnded('solo', 3, { outcome: 'admission_blocked', routeOutcome: 'neutral' });
+      await oneShotEnded('solo', 2, { outcome: 'org_switch', routeOutcome: 'neutral' });
+      await oneShotEnded('solo', 1, { outcome: 'failed', routeOutcome: null });
+      expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    });
+
+    it('战绩算进三段的结局：动手按写码、验收按审查（SEGMENT_STAGE），各算各的用途', async () => {
+      await world(t.db);
+      // 10 笔里成 4 笔（低于五成，算战绩差）；每笔隔 7 小时（熔断看 6 小时内的失败率，一次只有一笔；连败最多两笔，不熔断）
+      const pattern = ['fail', 'ok', 'fail', 'ok', 'fail', 'fail', 'ok', 'fail', 'fail', 'ok'] as const;
+      let hoursAgo = 150;
+      const poor = async (segment: 'manual' | 'verify') => {
+        for (const routeOutcome of pattern) {
+          await oneShotEnded('solo', hoursAgo * 60, {
+            segment,
+            outcome: routeOutcome === 'ok' ? 'done' : 'failed',
+            routeOutcome,
+          });
+          hoursAgo -= 7;
+        }
+      };
+      await poor('manual');
+      const execute = await pick({ stage: 'execute' });
+      expect(execute).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(execute.ok && execute.why).toContain('战绩差（近期 10 次成 4 次），往后放');
+      // 动手的结局不算进审查用途的战绩
+      expect(await pick({ stage: 'review' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+
+      await poor('verify');
+      const review = await pick({ stage: 'review' });
+      expect(review).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(review.ok && review.why).toContain('战绩差（近期 10 次成 4 次），往后放');
+    });
+
+    it('熔断半开时，这条路由上开着的三段会话就是在途的试探：只放一个', async () => {
+      await world(t.db);
+      // 40 分钟前连败三次熔断，冷却 10 分钟上下，现在半开
+      for (const minutesAgo of [42, 41, 40]) await oneShotEnded('solo', minutesAgo);
+      const trial = await pick({ stage: 'execute' });
+      expect(trial).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+      expect(trial.ok && trial.why).toContain('熔断半开，这一单当试探');
+
+      // 试探派出去了（三段的一次性会话开跑留下那一行）：再来一单不再放试探，派给下一条
+      await startRun(t.db, {
+        segment: 'manual',
+        model: 'opus-5.5',
+        routeId: 'solo',
+        startedAt: new Date(NOW.getTime() - MIN),
+      });
+      expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    });
+
+    it('【故意造出的失败】runs 读不了：选路、判全熔断都明确报错，不当成没有三段的会话', async () => {
+      await world(t.db);
+      await t.client.exec('alter table runs rename to runs_unreadable');
+      try {
+        const chains = async (work: Promise<unknown>, what: string) => {
+          const err = await work.then(
+            () => null,
+            (e: unknown) => e,
+          );
+          expect(err, `读不了 runs 却${what}`).not.toBeNull();
+          const messages: string[] = [];
+          for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+          expect(messages.join('\n')).toContain('relation "runs" does not exist');
+        };
+        await chains(pick({ stage: 'execute' }), '派出了路由');
+        await chains(ports().stageAllOpen('execute'), '判出了全熔断与否');
+      } finally {
+        await t.client.exec('alter table runs_unreadable rename to runs');
+      }
+    });
+  });
+
   it('选路的输入认不出（这里是越界的调度策略）：抛 ROUTING_INPUT，不当成「没有路由」', async () => {
     await world(t.db);
     const bad = createStorePorts({
@@ -1049,6 +1133,31 @@ describe('计时、快照', () => {
     ).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
   });
 });
+
+/**
+ * 这条路由上三段的一次性会话收了场的一笔（runs，#758）：默认是动手那一段失败、失败分流判路由的错。minutesAgo 是收场离现在
+ * 多久，开跑在它前一分钟。
+ */
+async function oneShotEnded(
+  routeId: string,
+  minutesAgo: number,
+  over: {
+    segment?: 'manual' | 'verify';
+    outcome?: 'done' | 'failed' | 'org_switch' | 'admission_blocked';
+    routeOutcome?: 'ok' | 'fail' | 'neutral' | null;
+  } = {},
+) {
+  const endedAt = new Date(NOW.getTime() - minutesAgo * MIN);
+  await startRun(t.db, {
+    segment: over.segment ?? 'manual',
+    model: 'opus-5.5',
+    routeId,
+    startedAt: new Date(endedAt.getTime() - MIN),
+    endedAt,
+    outcome: over.outcome ?? 'failed',
+    routeOutcome: over.routeOutcome === undefined ? 'fail' : over.routeOutcome,
+  });
+}
 
 /** 这张单上起过（有开工时刻）的一次会话。 */
 async function startedRun(taskId: string, routeId: string, stage: StageKind) {

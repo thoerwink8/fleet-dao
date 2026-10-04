@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo } from '@fleet-dao/shared';
+import type { Repo, StageKind } from '@fleet-dao/shared';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
@@ -20,6 +20,15 @@ export const SEGMENT_MINUTES = 60;
 export const MERGE_POLL_MINUTES = 15;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
+
+/**
+ * 三段里经选路的那几段各按哪个用途选（路由两层的用途）：动手按写码（工作流的 pick）；验收按审查（cold-verify-pick.ts 写了为什么
+ * 不是 verify）。选路的战绩按它把 runs 里这一段的结局算到这个用途上（real/store-ports.ts）：两边读这一份，改一处两边一起变。
+ * 对题还不经选路（segments/scope.ts 不带路由），不在这里。
+ */
+export const SEGMENT_STAGE = { manual: 'execute', verify: 'review' } as const satisfies Partial<
+  Record<'scope' | 'manual' | 'verify', StageKind>
+>;
 
 export { taskBranch } from './task-branch.ts';
 
