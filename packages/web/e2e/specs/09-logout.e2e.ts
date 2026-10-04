@@ -9,7 +9,10 @@ test.describe('退出', () => {
     login,
     api,
     shot,
+    problems,
   }, info) => {
+    // 退出后外壳里还在飞的读取全是 401、被带走的请求会被取消：都是预期里的
+    for (const x of ['HTTP 401', 'status of 401', 'ERR_ABORTED']) problems.allow(x);
     test.skip(!onlyDesktop(info), '退出会让这个人所有设备上的会话作废：只在 1920 那一遍、放在最后跑');
     await login();
     await page.goto('/');

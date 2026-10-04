@@ -39,7 +39,9 @@ test.describe('单子详情', () => {
     expect(detail.runs.length).toBeGreaterThan(0);
     await page.goto(`/tasks/${stack.facts.tasks.running}`);
     await expect(page.getByRole('heading', { name: /#12 登录页加验证码/ })).toBeVisible();
-    await expect(page.getByText('会话时间线')).toBeVisible();
+    // #12 既有三段流水（对题收了、动手在跑），又有老流程的会话：两块都要在
+    await expect(page.getByText('老流程的会话')).toBeVisible();
+    await expect(page.getByText('动手').first()).toBeVisible();
     await shot(page, '03-单子详情-在跑的');
   });
 

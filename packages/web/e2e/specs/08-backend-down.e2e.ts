@@ -77,6 +77,26 @@ test.describe('后端不可用', () => {
     await shot(page, '08-后端500');
   });
 
+  test('主页读不到：写「主页没读成」和原因、有重试，不是空白流水线；好了点重试就回来', async ({
+    page,
+    request,
+    stack,
+    shot,
+  }) => {
+    await page.goto('/quota');
+    await expect(page.getByText('claude-carpool').first()).toBeVisible();
+    await request.post(`${stack.controlOrigin}/mode/error`);
+    await page.getByRole('link', { name: '主页' }).first().click();
+    const alert = page.getByRole('alert').filter({ hasText: '主页没读成' });
+    await expect(alert).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('[data-flow-board]')).toHaveCount(0);
+    await shot(page, '08-主页读不到');
+    await request.post(`${stack.controlOrigin}/mode/up`);
+    await alert.getByRole('button', { name: '重试' }).click();
+    await expect(page.locator('[data-flow-board]')).toBeVisible();
+    await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeVisible();
+  });
+
   test('改设置时后端断了：保存失败要弹明确的话，设置没有被当成改成功', async ({
     page,
     request,
@@ -88,7 +108,7 @@ test.describe('后端不可用', () => {
     await box.fill('200');
     await request.post(`${stack.controlOrigin}/mode/down`);
     await box.locator('xpath=ancestor::form').getByRole('button', { name: '保存' }).click();
-    await expect(page.getByText(/没保存成|保存没成|没存上|没成/).first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/没保存上/).first()).toBeVisible({ timeout: 30_000 });
     await request.post(`${stack.controlOrigin}/mode/up`);
     // 后端好了以后刷新：这项设置还是「没设过」，没被悄悄写进去
     await page.reload();

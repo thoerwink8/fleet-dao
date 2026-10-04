@@ -17,6 +17,7 @@ import {
   applyQuotaReserveSeed,
   createDb,
   type Db,
+  finishRun,
   loadCatalog,
   loadQuotaReserveSeed,
   parseCatalog,
@@ -26,6 +27,7 @@ import {
   runMigrations,
   runRoutingApply,
   saveOrgState,
+  startRun,
 } from '@fleet-dao/db';
 import { createPgStore, DEV_USER_ID, devFixtures, IDS } from '@fleet-dao/store';
 import { seedPg } from '@fleet-dao/store/testing';
@@ -420,6 +422,49 @@ export async function prepare(env: Record<string, string | undefined> = process.
       ],
     };
     await seedPg(db, data);
+
+    // 主页三段流水线图（#914）读的是三段流水（runs 表）：用引擎自己的写法 startRun / finishRun 写，而不是直接塞行。
+    // #12：对题收了、动手正在跑（落在「动手」、有人在做）；#17：对题、动手都收了、验收还没起（落在「验收」、还没验）。
+    const flowRun = async (
+      taskId: string,
+      issueNumber: number,
+      segment: 'scope' | 'manual' | 'verify',
+      model: string,
+      startedMinutesAgo: number,
+      endedMinutesAgo?: number,
+    ) => {
+      const { id } = await startRun(
+        db,
+        {
+          segment,
+          taskId,
+          issueNumber,
+          model,
+          channel: model === 'opus-5.5' ? 'claude-sub' : 'mirasim',
+          ...(segment === 'manual' ? { tier: 'fast' as const } : {}),
+          startedAt: new Date(ago(startedMinutesAgo)),
+        },
+        now,
+      );
+      if (endedMinutesAgo !== undefined) {
+        await finishRun(
+          db,
+          {
+            runId: id,
+            outcome: 'done',
+            endedAt: new Date(ago(endedMinutesAgo)),
+            inputTokens: 20_000,
+            outputTokens: 3_000,
+            costUsd: 0.5,
+          },
+          now,
+        );
+      }
+    };
+    await flowRun(IDS.task12, 12, 'scope', 'opus-5.5', 50, 44);
+    await flowRun(IDS.task12, 12, 'manual', 'opus-5.5', 12);
+    await flowRun(taskIds.asking, 17, 'scope', 'opus-5.5', 40, 35);
+    await flowRun(taskIds.asking, 17, 'manual', 'kimi-k3', 34, 20);
     await writeLedger(db, now);
     // 各池最近一次读成额度的时刻（读成才算「查成过」，主页的额度条和对账看它）：和上面各池读数的时刻一致。
     for (const [poolId, minutes] of [

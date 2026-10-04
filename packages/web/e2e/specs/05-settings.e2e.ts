@@ -63,7 +63,7 @@ test.describe('设置页', () => {
     );
     expect(entry, '操作记录里要有这次改动').toBeTruthy();
     expect(entry?.after).toBe(true);
-    expect(entry?.actor.kind).toBe('human');
+    expect(entry?.actor.kind).toBe('user');
 
     // 刷新后还在
     await page.reload();
@@ -111,7 +111,7 @@ test.describe('设置页', () => {
     await shot(page, '05-设置-改完');
   });
 
-  test('独享 5 小时留量线 80% → 75%：落库（整份换、版本 +1）、改成「人改过」、刷新还在、额度页的线跟着变', async ({
+  test('独享 5 小时留量线 80% → 50%（独享已用 55%，到线了）：落库（整份换、版本 +1）、改成「人改过」、刷新还在、额度页的线跟着变', async ({
     page,
     api,
   }, info) => {
@@ -120,24 +120,26 @@ test.describe('设置页', () => {
     expect(before.value).toMatchObject({ 'claude-solo': { '5h': 0.8, '7d': 0.7 } });
     await page.goto('/settings');
     const reserve = page.locator('form', { hasText: '各渠道的额度留量线' });
-    await page.locator('#reserve-claude-solo-5h').fill('75');
+    await page.locator('#reserve-claude-solo-5h').fill('50');
     await reserve.getByRole('button', { name: '保存' }).click();
     await expect
       .poll(async () => settingOf(api, 'engine.quotaReserve'))
       .toMatchObject({
-        value: { 'claude-solo': { '5h': 0.75, '7d': 0.7 } },
+        value: { 'claude-solo': { '5h': 0.5, '7d': 0.7 } },
         version: before.version + 1,
       });
     await page.reload();
-    await expect(page.locator('#reserve-claude-solo-5h')).toHaveValue('75');
+    await expect(page.locator('#reserve-claude-solo-5h')).toHaveValue('50');
     await expect(page.getByTestId('reserve-source')).toContainText('人在驾驶舱改过');
     const audit = (await api.get('/api/audit?limit=50')) as Audit;
     expect(
       audit.items.some((a) => a.action === 'setting.update' && a.target === 'setting:engine.quotaReserve'),
     ).toBe(true);
 
-    // 额度页上的留量线现状按新线算（独享 5 小时 55% 用到，离 75% 线还差 20 个点）
+    // 改低到 50% 以后独享 5 小时窗已用 55% 就到线了：额度页立刻明说「到了留量线」，后端 /api/pools 也是 reached
+    const pools = (await api.get('/api/pools')) as { orgSwitch: { soloReserve?: { state: string } } };
+    expect(pools.orgSwitch.soloReserve?.state).toBe('reached');
     await page.goto('/quota');
-    await expect(page.getByText(/75%/).first()).toBeVisible();
+    await expect(page.getByText(/到了留量线/).first()).toBeVisible();
   });
 });

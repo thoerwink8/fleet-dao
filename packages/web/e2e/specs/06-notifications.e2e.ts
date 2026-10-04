@@ -44,6 +44,7 @@ test.describe('通知中心', () => {
     await item.getByRole('button', { name: '回答' }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText('新模板的落款用谁的名字？')).toBeVisible();
+    await page.waitForTimeout(500); // 对话框有淡入动画，等它停稳再截
     await shot(page, '06-回答追问对话框');
     await dialog.getByRole('button', { name: '团队名' }).click();
     await expect(page.getByText(/回答了 .* 的追问/)).toBeVisible();
