@@ -5,6 +5,8 @@
 // 改这里之前必须知道：
 // - 读不到（没登录、接口报错）、先后标记缺了或认不出：一律退出码 2、不打印空计划冒充，每条都在 test/plan-view.test.ts 里有一条故意造出失败的测试。
 // - 输出只由读到的数据和打印时间定：版本按号、单按号排，子单按 GitHub 上排的先后；时间只出现在第一行。
+// - 先后的认法只有 scanOrder 这一份：读（parseOrder：对账、pnpm plan）和写（addToOrder：pnpm issue:new 开版本单那一刻，#807）
+//   都经它，改写法两边一起变；别在别处另写一份解析。
 import { parseArgs } from 'node:util';
 import type { GitHubReader, MilestoneDetail, PlanIssue } from './github-api.ts';
 import { MOTHER_LABEL, milestoneVersion } from './labels.ts';
@@ -19,19 +21,36 @@ const ORDER_BEGIN = /<!--\s*fleet:order\s*-->/g;
 const ORDER_END = /<!--\s*\/fleet:order\s*-->/g;
 const ORDER_LINE = /^(\d+)\.\s+#(\d+)$/;
 
+/** 先后里第 i 行（从 0 数）的写法：ORDER_LINE 认的就是这个样子，addToOrder 写回去也只写这个样子。 */
+function orderLine(n: number, i: number): string {
+  return `${i + 1}. #${n}`;
+}
+
 export type OrderParse =
   | { ok: true; order: number[]; before: string; after: string }
   | { ok: false; problem: string };
 
 /**
- * 从里程碑说明里取先后：标记恰好一对，之间一行一张（「1. #169」），序号从 1 起挨着排，同一张不写两遍。
- * before、after 是标记前后的说明原文（去掉首尾空白），打印时照抄，标记那一段换成排好的列表。
+ * 认先后的唯一一份：标记恰好一对，之间一行一张（「1. #169」），序号从 1 起挨着排，同一张不写两遍；之间一张也没有也算认出
+ * （往空列表里加第一张时用，parseOrder 再把它判成问题）。位置都按原文算（不先把 CRLF 换成 LF），写回去时标记之外一个字不动。
  */
-export function parseOrder(description: string): OrderParse {
-  const text = description.replace(/\r\n?/g, '\n');
-  const begins = [...text.matchAll(ORDER_BEGIN)];
-  const ends = [...text.matchAll(ORDER_END)];
-  const fail = (problem: string): OrderParse => ({ ok: false, problem });
+type OrderScan =
+  | {
+      ok: true;
+      order: number[];
+      /** 开头标记从哪起、结尾标记到哪止。 */
+      open: number;
+      close: number;
+      /** 两个标记之间那一段（开头标记之后、结尾标记之前）。 */
+      from: number;
+      to: number;
+    }
+  | { ok: false; problem: string };
+
+function scanOrder(description: string): OrderScan {
+  const begins = [...description.matchAll(ORDER_BEGIN)];
+  const ends = [...description.matchAll(ORDER_END)];
+  const fail = (problem: string): OrderScan => ({ ok: false, problem });
   if (begins.length === 0 && ends.length === 0) {
     return fail(
       '说明里没有先后标记（<!-- fleet:order --> 和 <!-- /fleet:order --> 两行，之间一行一张写「1. #单号」）',
@@ -43,12 +62,12 @@ export function parseOrder(description: string): OrderParse {
     return fail(`先后标记要恰好一对，现在开头的有 ${begins.length} 个、结尾的有 ${ends.length} 个`);
   }
   if (end.index < begin.index) return fail('先后的结尾标记写在了开头标记前面');
-  const rows = text
-    .slice(begin.index + begin[0].length, end.index)
-    .split('\n')
+  const from = begin.index + begin[0].length;
+  const rows = description
+    .slice(from, end.index)
+    .split(/\r\n?|\n/)
     .map((l) => l.trim())
     .filter(Boolean);
-  if (rows.length === 0) return fail('先后标记之间一张单也没有');
   const order: number[] = [];
   for (const [i, row] of rows.entries()) {
     const m = ORDER_LINE.exec(row);
@@ -58,11 +77,67 @@ export function parseOrder(description: string): OrderParse {
     if (order.includes(n)) return fail(`先后里 #${n} 写了两遍`);
     order.push(n);
   }
+  return { ok: true, order, open: begin.index, close: end.index + end[0].length, from, to: end.index };
+}
+
+/**
+ * 从里程碑说明里取先后（对账、pnpm plan 用）：认法是 scanOrder，之间一张也没有算问题。
+ * before、after 是标记前后的说明原文（CRLF 统一成 LF、去掉首尾空白），打印时照抄，标记那一段换成排好的列表。
+ */
+export function parseOrder(description: string): OrderParse {
+  const scan = scanOrder(description);
+  if (!scan.ok) return scan;
+  if (scan.order.length === 0) return { ok: false, problem: '先后标记之间一张单也没有' };
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n').trim();
   return {
     ok: true,
+    order: scan.order,
+    before: lf(description.slice(0, scan.open)),
+    after: lf(description.slice(scan.close)),
+  };
+}
+
+export type OrderAdd =
+  | {
+      ok: true;
+      /** 改好的整份说明；changed 是 false 时就是原文。 */
+      description: string;
+      /** 改好之后的先后。 */
+      order: number[];
+      /** false：这张本来就在先后里，没动。 */
+      changed: boolean;
+    }
+  | { ok: false; problem: string };
+
+/**
+ * 往先后里加一张（pnpm issue:new 开挂版本的母单、单独的单那一刻用，#807）：认法和 parseOrder 是同一份（scanOrder），写回的每行
+ * 也是它认的样子，所以对账、pnpm plan 一定认得开单写的。标记之间整段按「<序号>. #<单号>」重写（序号从 1 起挨着排，空行去掉），
+ * 标记之外的原文一个字不动（原文用 CRLF 就照 CRLF 写）。after 给了就插在那张后面、后面的序号顺延；没给排在末尾。
+ * 已经在先后里的不再加（changed: false）。标记缺了、认不出、after 不在先后里：回 ok: false 和一句为什么，不猜着改。
+ */
+export function addToOrder(description: string, n: number, after?: number): OrderAdd {
+  const scan = scanOrder(description);
+  if (!scan.ok) return scan;
+  if (scan.order.includes(n)) return { ok: true, description, order: scan.order, changed: false };
+  let at = scan.order.length;
+  if (after !== undefined) {
+    const i = scan.order.indexOf(after);
+    if (i < 0) {
+      const now = scan.order.length
+        ? `现在排的是 ${scan.order.map((x) => `#${x}`).join('、')}`
+        : '现在一张也没排';
+      return { ok: false, problem: `#${after} 不在先后里（${now}），插不到它后面` };
+    }
+    at = i + 1;
+  }
+  const order = [...scan.order.slice(0, at), n, ...scan.order.slice(at)];
+  const eol = description.includes('\r\n') ? '\r\n' : '\n';
+  const rows = order.map(orderLine).join(eol);
+  return {
+    ok: true,
+    description: `${description.slice(0, scan.from)}${eol}${rows}${eol}${description.slice(scan.to)}`,
     order,
-    before: text.slice(0, begin.index).trim(),
-    after: text.slice(end.index + end[0].length).trim(),
+    changed: true,
   };
 }
 
