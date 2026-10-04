@@ -61,6 +61,7 @@ printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/S
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
 printf '// 假的收尾提醒钩子\n' >"$R/agents/hooks/stop.mjs"
+printf '// 假的落盘钩子\n' >"$R/agents/hooks/prompt-log.mjs"
 chmod -R go-rwx "$R"
 
 fail=0
@@ -91,9 +92,9 @@ check "清单记下了装过的 skill" "$(grep -c '"demo"' "$H/.fleet-dao/agents
 # Stop 不需要会话、不用等自动发布），开会话那条不登记（它要在他自己能拉、能写的检出里快进、同步，法国的检出跟着自动发布走）
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
-check "Claude 的设置里登记了调工具前、Stop 那两条" \
+check "Claude 的设置里登记了调工具前、Stop、UserPromptSubmit 三条" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
-  PreToolUse,Stop
+  PreToolUse,Stop,UserPromptSubmit
 check "写明开会话那条为什么不登记" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 1
 # 全局 git 忽略：换完身份之后才起的 git 子进程，cwd 还是原来那个仓目录（$U 摸不到）——踩过一次
 # 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好

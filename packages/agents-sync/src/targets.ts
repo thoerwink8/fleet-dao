@@ -160,6 +160,10 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
       { event: 'PreToolUse', matcher: 'Bash|PowerShell|Read|Grep', script: 'pretool.mjs', timeout: 10 },
       { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
       { event: 'Stop', script: 'stop.mjs', timeout: 10 },
+      // 创始人每条消息一到就原样落盘一份（2026-10-04 他问「丢失我的回复」）。为什么要有它、为什么
+      // 绝不 exit 2 / 绝不输出、超时为什么是 30000 这些，写在 agents/hooks/prompt-log.mjs 开头。
+      // UserPromptSubmit 不吃 matcher，别写；timeout 按毫秒算，写小了等于钩子从没跑成。
+      { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30000 },
     ],
   },
 ];

@@ -90,13 +90,14 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  * 测试读了别的包的文件、但 package.json 里没有依赖：键是读的那个包，值是被读的包（被读的一改，读的那个跟着测；
  * 不再往下传——依赖读的那个包的，并不读被读的文件）。
  * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu/test/static.test.ts 读 web 的路由表；
- * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）。
+ * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）；
+ * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）。
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
   feishu: ['web'],
   db: ['core'],
-  [AGENTS_UNIT]: ['db'],
+  [AGENTS_UNIT]: ['db', 'agents-sync'],
 };
 
 export type Rule =
