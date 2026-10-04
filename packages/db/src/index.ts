@@ -22,6 +22,7 @@ export * from './queries/reconcile.ts';
 export * from './queries/runs.ts';
 export * from './queries/schedule.ts';
 export * from './queries/session-org.ts';
+export * from './queries/session-org-state.ts';
 export * from './queries/subtasks.ts';
 export * from './queries/timeline.ts';
 export * from './queries/verify.ts';
