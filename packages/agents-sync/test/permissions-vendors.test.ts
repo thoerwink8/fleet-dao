@@ -268,7 +268,7 @@ describe('Devin', () => {
     expectKind(m.check(), DEVIN, 'ok');
   });
 
-  it('自己的设置和自己加的规则不删；退役的摘掉；不写 defaultMode', () => {
+  it('自己的设置和自己加的规则不删；退役的摘掉；不写 defaultMode，也不写 Claude 的子代理默认模型（env）', () => {
     const m = machine(['devin'], { ...PERMS_SPEC, retired: ['Bash(old:*)'] });
     put(
       m.home,
@@ -276,10 +276,15 @@ describe('Devin', () => {
       JSON.stringify({ theme: 'x', permissions: { allow: ['Exec(old)', 'Exec(mine)'] } }),
     );
     expectKind(m.apply(), DEVIN, 'changed');
-    const j = getJson(m.home, DEVIN_REL) as { theme: string; permissions: Record<string, unknown> };
+    const j = getJson(m.home, DEVIN_REL) as {
+      theme: string;
+      permissions: Record<string, unknown>;
+      env?: unknown;
+    };
     expect(j.theme).toBe('x');
     expect(j.permissions.allow).toEqual(['Exec(mine)', 'Read(**)', 'Exec(git)']);
     expect(j.permissions.defaultMode).toBeUndefined();
+    expect(j.env).toBeUndefined();
   });
 
   // 故意造出失败
