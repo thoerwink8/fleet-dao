@@ -9,6 +9,7 @@ import {
   liveMs,
   noTierText,
   SEGMENT_ORDER,
+  SEGMENT_UNMETERED,
   type SegmentRunView,
   type SegmentTotals,
   segmentHint,
@@ -285,6 +286,11 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
           <div className="text-caption text-muted-foreground">
             {s.segment ? segmentHint[s.segment] : '原样写在下面每一笔里'}
           </div>
+          {s.segment && SEGMENT_UNMETERED[s.segment] ? (
+            <div className="text-caption text-muted-foreground" data-unmetered={s.segment}>
+              {SEGMENT_UNMETERED[s.segment]?.partial}
+            </div>
+          ) : null}
         </div>
         <Cell label="次数" className="md:col-span-1">
           <span className="num">{timesText(s)}</span>
@@ -357,6 +363,21 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
         {SEGMENT_ORDER.map((segment) => {
           const s = bySegment.get(segment);
           if (!s) {
+            const unmetered = SEGMENT_UNMETERED[segment];
+            if (unmetered) {
+              return (
+                <li
+                  key={segment}
+                  className="flex flex-wrap items-baseline gap-x-3 py-3"
+                  data-segment={segment}
+                  data-unmetered={segment}
+                >
+                  <span className="font-medium text-muted-foreground">{segmentLabel[segment]}</span>
+                  <span className="text-sub text-muted-foreground">{unmetered.short}</span>
+                  <span className="w-full text-caption text-muted-foreground">{unmetered.why}</span>
+                </li>
+              );
+            }
             return (
               <li key={segment} className="flex flex-wrap items-baseline gap-x-3 py-3" data-segment={segment}>
                 <span className="font-medium text-muted-foreground">{segmentLabel[segment]}</span>

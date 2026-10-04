@@ -26,6 +26,24 @@ export const segmentHint: Record<SegmentKind, string> = {
   verify: '换一家冷调用来验',
 };
 
+/**
+ * 不计的段（#761）：这一段不是引擎起的会话，库里（runs）本来就不会有它的行，页面写「不计」和原因，不写「没记」「没有记录」。
+ * 对题是创始人和指挥官在对话里做的，那个会话在创始人自己的机器上，开单脚本读不到它的起止、模型和 token，法国库本机也写不进；
+ * 凑一笔「起止不明、用量为空」的假行进去，只会让合计看上去是三段齐了。
+ * 改这里之前必须知道：只有这里列了的段才许写「不计」；动手、验收没有行是真的没跑或没记，要照旧点名读不到。
+ * 以后引擎自己起了对题那一类会话（例如 #553 的意图归纳，段记 scope）、runs 里有了对题的行，页面照常显示那几笔，
+ * 只在段名下加一句 partial，不把它们说成整段对题。
+ */
+export const SEGMENT_UNMETERED: Partial<
+  Record<SegmentKind, { short: string; why: string; partial: string }>
+> = {
+  scope: {
+    short: '在对话里做的，不计',
+    why: '对题是创始人和指挥官在对话里做的，引擎没有起会话，没有耗时和 token 可记；不是没记，是不计。',
+    partial: '只含引擎起的会话；在对话里做的部分不计',
+  },
+};
+
 /** 认不出的段（段名不在三段里）怎么叫。 */
 export const UNKNOWN_SEGMENT = '段名认不出';
 
