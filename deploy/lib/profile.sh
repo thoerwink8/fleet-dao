@@ -27,6 +27,13 @@ is_local_profile() { [[ "${PROFILE:-france}" == local ]]; }
 # 本机档跳过一步：不算红也不算绿（记进 PENDING，退出码同真的待配）。调用方先判过 is_local_profile 才叫它。
 skip_local() { pending "本机档跳过：$1"; } # 为什么
 
+# 这一档本来就不建的用户：本机档不建创始人的登录用户 pilot（france.sh 的 setup_pilot 跳过，创始人直接用 Windows/WSL
+# 登这台机器）。拿「别的用户」去试的读回（lib/session-ports.sh 的 check_session_ports）查不到它就跳过、写明，不记
+# 「没查」（#731）；法国档谁都不算，查不到就是没查。用户名照 france.sh 的 PILOT_USER，叫的时候才读（没定义就谁都不算）
+profile_skips_user() { # 用户名
+  is_local_profile && [[ -n "${PILOT_USER:-}" && "$1" == "${PILOT_USER:-}" ]]
+}
+
 # readback_config 拿哪份期望和线上比（#451）：本机档是 deploy/local/desired-config.json（本机档登记过的差别——
 # 比如 FLEET_MACHINE_NAME 改成「本机」——不然会被拿法国那份比出来，当成「手改了、改回去」误判成红）；法国不传
 # --desired，config.mjs 自己按「在用的那一版」找 deploy/france/desired-config.json，和加本机档之前一个字节都不
