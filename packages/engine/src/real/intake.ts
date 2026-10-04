@@ -1,5 +1,5 @@
 // 拉单（jobs/intake.ts）的真装配（#632 S2-4b-3）：受管的仓和任务行从库里读，开着的单、现读一张单、读需求文档、留言都经「引擎」
-// 机器人（@fleet-dao/github），作者白名单由 users 表拼（@fleet-dao/api，和老的 webhook 接活同一份），起任务工作流和数在跑的
+// 机器人（@fleet-dao/github），作者白名单由 users 表拼（@fleet-dao/store，和后端收 webhook 同一份），起任务工作流和数在跑的
 // 用这次活动自己的 Temporal 客户端。
 //
 // 改这里之前必须知道：
@@ -11,8 +11,7 @@
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
 import { randomUUID } from 'node:crypto';
-import { createPgStore, type User } from '@fleet-dao/api';
-import { actorFor, githubWhitelist, memberFor } from '@fleet-dao/api/whitelist';
+import { createPgStore } from '@fleet-dao/api';
 import {
   type Db,
   finishScheduleRun,
@@ -22,6 +21,7 @@ import {
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { actorFor, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
 import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import type { IntakeDeps } from '../jobs/intake.ts';

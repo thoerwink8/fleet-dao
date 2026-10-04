@@ -16,8 +16,6 @@
 // - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条：开关刚打开、一堆单同时合格时，
 //   一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
 import { createHash } from 'node:crypto';
-import type { GithubWhitelist } from '@fleet-dao/api/whitelist';
-import { isTrusted } from '@fleet-dao/api/whitelist';
 import {
   autoDispatchGate,
   familyGate,
@@ -28,6 +26,8 @@ import {
   versionGate,
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
+import type { GithubWhitelist } from '@fleet-dao/store';
+import { isTrusted } from '@fleet-dao/store';
 import type { IntakeRun } from '../contract.ts';
 import { type BriefProblem, describeBriefProblems, readTaskBrief } from '../runner/task-brief.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';

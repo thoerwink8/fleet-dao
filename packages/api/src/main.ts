@@ -10,6 +10,7 @@
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
+import { jsonLogger } from '@fleet-dao/store';
 import { signAgentToken } from './agent-token.ts';
 import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
@@ -36,7 +37,6 @@ import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
-import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink } from './ports.ts';

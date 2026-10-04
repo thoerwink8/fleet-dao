@@ -11,9 +11,9 @@ import {
   startScheduleRun,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PublicHealthError, runHealthChecks } from '../src/health.ts';
-import { silentLogger } from '../src/log.ts';
 import {
   WATCHDOG_DOWN_PREFIX,
   watchdogHealth,

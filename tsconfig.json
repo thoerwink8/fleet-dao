@@ -23,6 +23,9 @@
       "path": "packages/cli"
     },
     {
+      "path": "packages/store"
+    },
+    {
       "path": "packages/api"
     },
     {

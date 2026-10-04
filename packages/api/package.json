@@ -6,8 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./agent-token": "./src/agent-token.ts",
-    "./whitelist": "./src/whitelist.ts"
+    "./agent-token": "./src/agent-token.ts"
   },
   "scripts": {
     "dev": "node --watch src/main.ts"
@@ -19,6 +18,7 @@
     "@fleet-dao/github": "workspace:*",
     "@fleet-dao/jev": "workspace:*",
     "@fleet-dao/shared": "workspace:*",
+    "@fleet-dao/store": "workspace:*",
     "@hono/node-server": "^2.1.1",
     "@temporalio/client": "1.24.0",
     "drizzle-orm": "^0.45.3",
