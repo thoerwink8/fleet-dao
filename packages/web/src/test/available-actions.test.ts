@@ -1,4 +1,4 @@
-// 该画出哪些快捷操作（task-actions.tsx 的 availableActions，#901）：引擎的任务工作流只听继续、叫停（外加回答，只落库），
+// 该画出哪些快捷操作（task-actions.tsx 的 availableActions，#901）：引擎的任务工作流只听继续、叫停，
 // 暂停、换模型后端回 409 action_not_supported，所以不画——画出来点了只会弹一句「做不到」。
 import { describe, expect, test } from 'vitest';
 import type { BoardSubtask } from '../api/types';
@@ -16,8 +16,10 @@ describe('availableActions：只画引擎真有人听的动作', () => {
     expect(list).not.toContain('reroute');
   });
 
-  test('等人回答的需求多一个「回答」；子任务上什么都没有（叫停、继续对整个需求生效）', () => {
-    expect(availableActions({ ...base, state: 'asking' })).toEqual(['answer', 'resume', 'stop']);
+  test('卡在旧追问上的需求（asking）也没有「回答」：新流程没有收追问回答的地方（#928）；子任务上什么都没有', () => {
+    const asking = availableActions({ ...base, state: 'asking' });
+    expect(asking).toEqual(['resume', 'stop']);
+    expect(asking as string[]).not.toContain('answer');
     expect(availableActions({ ...base, sub })).toEqual([]);
   });
 

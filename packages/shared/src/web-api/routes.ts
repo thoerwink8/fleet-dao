@@ -11,7 +11,6 @@ import {
   UpdateCredentialsRequest,
 } from './auth.ts';
 import { BoardResponse, ReposResponse } from './board.ts';
-import { PageQuery } from './common.ts';
 import {
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
@@ -35,8 +34,6 @@ import {
   RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
-  UpdateChannelRequest,
-  UpdateChannelResponse,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
 } from './routing.ts';
@@ -49,11 +46,11 @@ import {
 import {
   AnswerAskRequest,
   AnswerAskResponse,
-  RunStepsResponse,
+  CloseAskResponse,
+  LegacyAsksResponse,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
-  TimelineResponse,
 } from './task.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
@@ -69,20 +66,23 @@ export const WebRoutes = {
   home: { method: 'GET', path: '/home', response: HomeResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
-  timeline: { method: 'GET', path: '/tasks/:taskId/timeline', query: PageQuery, response: TimelineResponse },
   taskAction: {
     method: 'POST',
     path: '/tasks/:taskId/actions',
     request: TaskActionRequest,
     response: TaskActionResponse,
   },
-  runSteps: { method: 'GET', path: '/runs/:runId/steps', response: RunStepsResponse },
+  /** 一律回 409 asks_not_received（#928）：新流程没有收追问回答的地方。只有飞书网关还在调它。 */
   answerAsk: {
     method: 'POST',
     path: '/asks/:askId/answer',
     request: AnswerAskRequest,
     response: AnswerAskResponse,
   },
+  /** 旧会话留下的、还没处理的追问（通知中心只读展示用，#928）。 */
+  legacyAsks: { method: 'GET', path: '/asks/legacy', response: LegacyAsksResponse },
+  /** 把一条旧追问标成已处理（落库、进操作记录 ask.close）；已经处理过回 409。 */
+  closeAsk: { method: 'POST', path: '/asks/:askId/close', response: CloseAskResponse },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
   routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },
   routingEfforts: { method: 'GET', path: '/routing/efforts', response: RoutingEffortsResponse },
@@ -91,12 +91,6 @@ export const WebRoutes = {
     path: '/routing/efforts/:modelId/:routeId',
     request: UpdateRouteEffortRequest,
     response: UpdateRouteEffortResponse,
-  },
-  updateChannel: {
-    method: 'PATCH',
-    path: '/routing/channels/:channelId',
-    request: UpdateChannelRequest,
-    response: UpdateChannelResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
   /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */

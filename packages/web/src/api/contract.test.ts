@@ -19,6 +19,8 @@ function used(prefix: string): Set<string> {
 const WEB_NOT_USED: Record<string, string> = {
   credentials: '缺陷 D1（#902）：设置页没有账密设置，前端那一半 #120 没做',
   updateCredentials: '缺陷 D1（#902）：同上',
+  answerAsk:
+    '回答追问一律 409（新流程没有收回答的地方，#928）：驾驶舱不再调，只剩飞书网关还在用它（FEISHU_GATEWAY_WEB_ROUTES）',
 };
 const AUTH_NOT_USED: Record<string, string> = {
   passwordLogin: '缺陷 D1（#902）：登录页没有用户名、密码两栏',

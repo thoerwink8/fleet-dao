@@ -60,7 +60,7 @@ const SAMPLE: HomeData = {
       link: '/home3',
     },
     {
-      kind: 'ask',
+      kind: 'notification',
       id: 'q-1',
       title: '#509：v3 第三阶段要不要先开演练场？',
       since: '2026-10-02T06:00:00Z',

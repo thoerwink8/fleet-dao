@@ -22,8 +22,9 @@ test.describe('主页', () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: '要你拍的' })).toBeVisible();
 
-    // 要你拍的：一条待批、两条追问（库里 approval 通知 + 两条未答的 ask）；页面上最多 3 条，剩下的写「还有 N 条」
-    expect(home.decisions.map((d) => d.kind)).toEqual(expect.arrayContaining(['approval', 'ask']));
+    // 要你拍的：一条待批（库里 approval 通知）和 decision 级通知；库里两条未答的旧追问不在这里（#928）。页面上最多 3 条，剩下的写「还有 N 条」
+    expect(home.decisions.map((d) => d.kind)).toContain('approval');
+    expect(home.decisions.map((d) => d.kind)).not.toContain('ask');
     for (const d of home.decisions.slice(0, 3)) await expect(page.getByText(d.title).first()).toBeVisible();
     await expect(page.getByText('等你批：合并 PR #41（碰了删数据的人闸）').first()).toBeVisible();
 
@@ -86,13 +87,21 @@ test.describe('主页', () => {
     await expect(card(page, 14)).toHaveAttribute('data-needs-founder', 'false');
   });
 
-  // 缺陷 D3（#902）：「要你拍的」里追问的「去答」点过去是任务详情页，那页没有任何回答的地方。
-  test('追问点「去答」之后，能在那一页回答它', async ({ page, stack }) => {
-    test.fail(true, '缺陷 D3：「去答」是死胡同，任务页没有回答入口');
+  // 缺陷 D3（#902）已按 v3 原意收掉（#928）：v3 三段流程没有 AI 追问这一环——动手会话发不出追问、引擎没有收回答的地方——
+  // 所以「去答」那条死胡同连同追问一起从主页拿掉；库里还有的旧追问在通知中心只读展示、可关闭（06-notifications）。
+  test('主页「要你拍的」不放追问：库里两条未答的旧追问都不在，页上也没有追问卡', async ({
+    page,
+    api,
+    stack,
+  }) => {
+    const home = (await api.get('/api/home')) as Home;
+    expect(home.decisions.some((d) => d.id === stack.facts.askId || d.id === stack.facts.askingAskId)).toBe(
+      false,
+    );
     await page.goto('/');
-    await page.getByRole('link', { name: '去答' }).nth(1).click();
-    await expect(page).toHaveURL(new RegExp(`/tasks/${stack.facts.tasks.running}`));
-    await expect(page.getByRole('button', { name: /回答/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '要你拍的' })).toBeVisible();
+    await expect(page.locator('[data-decision-card="ask"]')).toHaveCount(0);
+    await expect(page.getByText('验证码短信走哪家通道？')).toHaveCount(0);
   });
 
   // 缺陷 D9（#902，#914 之后修）：1920×1080 上「验收」泳道的右边缘贴着面板边、被截掉一截。

@@ -4,7 +4,7 @@
 // 前端那一头（http.ts 用了契约里的哪些）在 packages/web/src/api/http.test.ts 旁边的 contract.test.ts 对。
 import { AUTH_PREFIX, AuthRoutes, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { harness } from './harness.ts';
+import { DEV_RUN_ID, harness, IDS, write } from './harness.ts';
 
 type Entry = { method: string; path: string };
 const key = (e: Entry) => `${e.method} ${e.path}`;
@@ -47,5 +47,34 @@ describe('契约 ↔ 后端注册的路由', () => {
     const have = new Set(registered.map(key));
     const fake: Entry = { method: 'GET', path: '/api/definitely-not-there' };
     expect([fake].filter((e) => !have.has(key(e))).map(key)).toEqual(['GET /api/definitely-not-there']);
+  });
+});
+
+// 看板删除（#556）后留下的、没有任何页面用的三条（D6，#928）从契约、后端、前端三处一起删了：
+// 谁把它们加回来（只加后端不加契约、或只加契约），上面的对账会红；这里再钉一次「契约里没有、后端真的不认」。
+describe('已删的接口不会悄悄回来', () => {
+  it('契约里没有这三条', () => {
+    for (const name of ['timeline', 'runSteps', 'updateChannel']) {
+      expect(Object.keys(WebRoutes), name).not.toContain(name);
+    }
+  });
+
+  it('登录后真去请求：404，不是 200', async () => {
+    const h = harness();
+    const s = await h.login();
+    const gone = [
+      `${WEB_API_PREFIX}/tasks/${IDS.task12}/timeline`,
+      `${WEB_API_PREFIX}/runs/${DEV_RUN_ID}/steps`,
+    ];
+    for (const path of gone) {
+      const res = await h.cockpit.request(path, { headers: { cookie: s.cookie } });
+      expect(res.status, path).toBe(404);
+    }
+    const patch = await h.cockpit.request(
+      `${WEB_API_PREFIX}/routing/channels/ch-cursor`,
+      write('PATCH', s, { enabled: false }),
+    );
+    expect(patch.status).toBe(404);
+    expect(h.store.data.channels.find((c) => c.id === 'ch-cursor')?.enabled).not.toBe(false);
   });
 });

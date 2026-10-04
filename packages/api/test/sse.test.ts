@@ -86,7 +86,7 @@ describe('实时推送（SSE）', () => {
     expect(small.since(small.latestId())).toEqual([]);
   });
 
-  it('写库引起的变化推给打开的页面（例：回答追问，asks 表会发通知）', async () => {
+  it('写库引起的变化推给打开的页面（例：关闭旧追问，asks 表会发通知）', async () => {
     const h = harness();
     const session = await h.login();
     const askId = 'a1000000-0000-4000-8000-000000000001';
@@ -99,7 +99,7 @@ describe('实时推送（SSE）', () => {
     });
     const { reader } = await open(h, session.cookie);
     const buf = await readUntil(reader, 'event: ready');
-    await h.cockpit.request(`/api/asks/${askId}/answer`, write('POST', session, { answer: '6 位' }));
+    await h.cockpit.request(`/api/asks/${askId}/close`, write('POST', session));
     await readUntil(reader, `{"table":"asks","id":"${askId}"}`, buf);
     await reader.cancel();
   });

@@ -116,7 +116,9 @@ describe('接真后端：请求', () => {
   test('请求体先按 web-api.ts 校验，不合约定的不发出去', async () => {
     const { fn, calls } = fakeFetch({ 'GET /api/me': () => ({ body: ME }) });
     const api = createHttpApi({ fetch: fn });
-    await expect(api.answerAsk('a-1', '')).rejects.toThrow();
+    await expect(
+      api.updateRouteEffort('m', 'r', { effort: 'ultra' as never, expected: null }),
+    ).rejects.toThrow();
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
   });
 });

@@ -1,17 +1,10 @@
 // 快捷操作只有这一份定义：悬停条、右键菜单、侧边详情、手机列表、任务详情都从这里取，行为一致。
-// 能做的动作以 shared/web-api.ts 的 TaskActionRequest 为准：暂停、继续、叫停、换路由（可指定子任务），另有回答追问。
+// 能做的动作以 shared/web-api.ts 的 TaskActionRequest 为准：暂停、继续、叫停、换路由（可指定子任务）。没有「回答追问」：v3 没有 AI 追问这一环（#928）。
 import type { LucideIcon } from 'lucide-react';
-import { CircleStop, MessageCircleQuestion, Pause, Play, Shuffle } from 'lucide-react';
+import { CircleStop, Pause, Play, Shuffle } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import {
-  errorText,
-  useAnswerAsk,
-  usePools,
-  useRoutingLayers,
-  useTaskAction,
-  useTaskDetail,
-} from '../api/client';
+import { errorText, usePools, useRoutingLayers, useTaskAction } from '../api/client';
 import type {
   Activity,
   BoardSubtask,
@@ -50,7 +43,6 @@ import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './ui/command';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
-import { Textarea } from './ui/textarea';
 
 /** 一个操作对着谁：需求，或需求下的某个子任务。 */
 export interface ActionTarget {
@@ -74,7 +66,7 @@ export function targetOf(t: BoardTask, sub?: BoardSubtask): ActionTarget {
   };
 }
 
-export type UiAction = 'answer' | 'reroute' | 'pause' | 'resume' | 'stop';
+export type UiAction = 'reroute' | 'pause' | 'resume' | 'stop';
 
 export interface ActionDef {
   label: string;
@@ -85,7 +77,6 @@ export interface ActionDef {
 }
 
 export const ACTIONS: Record<UiAction, ActionDef> = {
-  answer: { label: '回答', icon: MessageCircleQuestion, key: 'A' },
   reroute: { label: '换模型', icon: Shuffle, key: 'M' },
   pause: { label: '暂停', icon: Pause, key: 'P' },
   resume: { label: '继续', icon: Play, key: 'C' },
@@ -93,15 +84,14 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
 };
 
 /**
- * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（继续、叫停，外加回答）。暂停、换模型引擎没有这两个动作
+ * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（继续、叫停）。暂停、换模型引擎没有这两个动作
  * （后端回 409 action_not_supported，api/src/cockpit.ts；#901），所以不画：画出来点了只会弹一句「做不到」。
  * 叫停、继续对整个需求生效，只放在需求上。接口里没有「暂停中」这个状态，「继续」一直给出来，由后端判断（没停着等人就没有收信的）。
- * 现在页面上只有通知中心用到「回答」（看板删了以后这个函数没有别的调用方，#856）；将来哪个页面接这排按钮，都从这里取。
+ * 现在页面上没有谁用这个函数（看板删了以后没有调用方，#856）；将来哪个页面接这排按钮，都从这里取。
  */
 export function availableActions(target: ActionTarget): UiAction[] {
   if (isTaskFinished(target)) return [];
   const list: UiAction[] = [];
-  if (!target.sub && target.state === 'asking') list.push('answer');
   if (!target.sub) list.push('resume', 'stop');
   return list;
 }
@@ -111,11 +101,7 @@ export function targetName(t: ActionTarget): string {
   return t.sub ? `${n} 子任务 ${letterOf(t.sub.index)}` : n;
 }
 
-type DialogState =
-  | { kind: 'route'; target: ActionTarget }
-  | { kind: 'stop'; target: ActionTarget }
-  | { kind: 'answer'; target: ActionTarget }
-  | null;
+type DialogState = { kind: 'route'; target: ActionTarget } | { kind: 'stop'; target: ActionTarget } | null;
 
 interface TaskActionsApi {
   trigger(action: UiAction, target: ActionTarget): void;
@@ -146,7 +132,6 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
     (action: UiAction, target: ActionTarget) => {
       if (action === 'reroute') setDialog({ kind: 'route', target });
       else if (action === 'stop') setDialog({ kind: 'stop', target });
-      else if (action === 'answer') setDialog({ kind: 'answer', target });
       else void send(target, { action }, ACTIONS[action].label);
     },
     [send],
@@ -192,7 +177,6 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
           ) : null}
         </AlertDialogContent>
       </AlertDialog>
-      <AnswerDialog target={dialog?.kind === 'answer' ? dialog.target : null} onClose={close} />
     </Ctx>
   );
 }
@@ -217,7 +201,7 @@ export function ActionButtons({ target, size = 'sm' }: { target: ActionTarget; s
           <Button
             key={a}
             size={size}
-            variant={a === 'answer' ? 'default' : 'outline'}
+            variant="outline"
             className={cn(def.danger && 'text-ink-fail hover:text-ink-fail')}
             onClick={() => trigger(a, target)}
           >
@@ -428,95 +412,6 @@ function RoutePickerDialog({
             </CommandGroup>
           </CommandList>
         </Command>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** 回答追问：列出这个需求里还没回答的追问，每条可以点选项或直接写。 */
-function AnswerDialog({ target, onClose }: { target: ActionTarget | null; onClose(): void }) {
-  const detail = useTaskDetail(target?.taskId);
-  const answer = useAnswerAsk();
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const pending = detail.data?.asks.filter((a) => a.status === 'pending') ?? [];
-
-  const submit = (askId: string, text: string) => {
-    if (!target || !text.trim()) return;
-    answer.mutate(
-      { askId, answer: text.trim(), taskId: target.taskId },
-      {
-        onSuccess: () => {
-          toast.success(`回答了 ${targetName(target)} 的追问`);
-          setDrafts((d) => ({ ...d, [askId]: '' }));
-          if (pending.length <= 1) onClose();
-        },
-        onError: (e) => toast.error('回答没发出去', { description: errorText(e) }),
-      },
-    );
-  };
-
-  return (
-    <Dialog open={Boolean(target)} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>回答 {target ? targetName(target) : ''} 的追问</DialogTitle>
-          <DialogDescription>{target?.title}</DialogDescription>
-        </DialogHeader>
-        {detail.isLoading ? <p className="text-sm text-muted-foreground">正在读追问…</p> : null}
-        {detail.error ? (
-          <p role="alert" className="text-sm text-ink-fail">
-            追问没读成：{errorText(detail.error)}
-          </p>
-        ) : null}
-        {detail.data && pending.length === 0 ? (
-          <p className="text-sm text-muted-foreground">这个需求现在没有待回答的追问。</p>
-        ) : null}
-        <div className="space-y-5">
-          {pending.map((ask) => (
-            <div key={ask.id} className="space-y-2">
-              <p className="text-sm font-medium">{ask.question}</p>
-              {ask.options.length ? (
-                <div className="grid gap-2">
-                  {ask.options.map((o) => (
-                    <Button
-                      key={o}
-                      variant="outline"
-                      className="justify-start"
-                      disabled={answer.isPending}
-                      onClick={() => submit(ask.id, o)}
-                    >
-                      {o}
-                      {o === ask.recommended ? (
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {ask.scope === 'outside' ? '推荐' : '推荐 · AI 已按它先做'}
-                        </span>
-                      ) : null}
-                    </Button>
-                  ))}
-                </div>
-              ) : null}
-              <form
-                className="grid gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  submit(ask.id, drafts[ask.id] ?? '');
-                }}
-              >
-                <Textarea
-                  value={drafts[ask.id] ?? ''}
-                  onChange={(e) => setDrafts((d) => ({ ...d, [ask.id]: e.target.value }))}
-                  placeholder="或者直接写你的回答…"
-                  className="min-h-20"
-                />
-                <div className="flex justify-end">
-                  <Button type="submit" disabled={!(drafts[ask.id] ?? '').trim() || answer.isPending}>
-                    发出回答
-                  </Button>
-                </div>
-              </form>
-            </div>
-          ))}
-        </div>
       </DialogContent>
     </Dialog>
   );

@@ -1,7 +1,7 @@
 // 「要你拍的」一张卡：一个决定、一句背景、一个去答的地方。
-// 来源三种——decision 级通知、待批的 approval、还没答的 ask。只显示一条（最重要的），多的进通知中心。
+// 来源两种——decision 级通知、待批的 approval。追问不在这里：v3 没有 AI 追问这一环，旧会话留下的追问在通知中心只读展示、可关闭（#928）。
 
-import { ArrowRight, MessageCircleQuestion, ScrollText, Send } from 'lucide-react';
+import { ArrowRight, ScrollText, Send } from 'lucide-react';
 import { Link } from 'react-router';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
@@ -12,7 +12,6 @@ import type { HomeDecision } from './types';
 const KIND_META: Record<HomeDecision['kind'], { icon: typeof Send; label: string }> = {
   notification: { icon: Send, label: '通知' },
   approval: { icon: ScrollText, label: '待批' },
-  ask: { icon: MessageCircleQuestion, label: '追问' },
 };
 
 export function DecisionCard({ decision, className }: { decision: HomeDecision; className?: string }) {

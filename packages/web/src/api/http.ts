@@ -2,7 +2,6 @@
 // 路径和形状全部取自 WebRoutes / AuthRoutes，不在这里另写。
 
 import {
-  AnswerAskRequest,
   ApiErrorBody,
   AUTH_PREFIX,
   AuthRoutes,
@@ -13,7 +12,6 @@ import {
   FeishuAccessRequest,
   SSE_EVENTS,
   TaskActionRequest,
-  UpdateChannelRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
@@ -155,22 +153,14 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     home: () => send('GET', apiUrl(R.home.path), R.home.response),
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),
     task: (taskId) => send('GET', apiUrl(R.task.path, { taskId }), R.task.response),
-    timeline: (taskId, page) =>
-      send(
-        'GET',
-        apiUrl(R.timeline.path, { taskId }, { cursor: page?.cursor, limit: page?.limit }),
-        R.timeline.response,
-      ),
-    runSteps: (runId) => send('GET', apiUrl(R.runSteps.path, { runId }), R.runSteps.response),
     async taskAction(taskId, body) {
       await send('POST', apiUrl(R.taskAction.path, { taskId }), R.taskAction.response, {
         body: TaskActionRequest.parse(body),
       });
     },
-    async answerAsk(askId, answer) {
-      await send('POST', apiUrl(R.answerAsk.path, { askId }), R.answerAsk.response, {
-        body: AnswerAskRequest.parse({ answer }),
-      });
+    legacyAsks: () => send('GET', apiUrl(R.legacyAsks.path), R.legacyAsks.response),
+    async closeAsk(askId) {
+      await send('POST', apiUrl(R.closeAsk.path, { askId }), R.closeAsk.response);
     },
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),
     routingLayers: () => send('GET', apiUrl(R.routingLayers.path), R.routingLayers.response),
@@ -186,11 +176,6 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
           body: UpdateRouteEffortRequest.parse(body),
         },
       );
-    },
-    async updateChannel(channelId, body) {
-      await send('PATCH', apiUrl(R.updateChannel.path, { channelId }), R.updateChannel.response, {
-        body: UpdateChannelRequest.parse(body),
-      });
     },
     pools: () => send('GET', apiUrl(R.pools.path), R.pools.response),
     poolHolds: () => send('GET', apiUrl(R.poolHolds.path), R.poolHolds.response),

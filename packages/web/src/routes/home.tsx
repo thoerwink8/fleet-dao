@@ -34,7 +34,7 @@ function HomeBody({ data }: { data: HomeData }) {
       <div className="grid items-start gap-4 2xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)] 2xl:grid-rows-[auto_1fr]">
         <Panel
           title="要你拍的"
-          description="决定、待批、追问。多的去通知中心。"
+          description="决定、待批。多的去通知中心。"
           actions={
             <Button asChild size="sm" variant="ghost" className="h-7">
               <Link to="/notifications">全部</Link>
@@ -50,7 +50,7 @@ function HomeBody({ data }: { data: HomeData }) {
               ))}
             </ul>
           ) : (
-            <Empty icon={Hand} title="没有要你拍的" hint="有决定、待批、追问时会出现在这里。" />
+            <Empty icon={Hand} title="没有要你拍的" hint="有决定、待批时会出现在这里。" />
           )}
           {more > 0 ? (
             <p className="mt-3 px-1 text-xs text-muted-foreground">

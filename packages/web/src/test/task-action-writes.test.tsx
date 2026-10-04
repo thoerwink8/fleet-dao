@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// 快捷操作（暂停、继续、叫停、换模型、回答追问）会改服务端状态：点了发什么请求、成功说什么、失败时必须把后端的原因
-// 弹出来（toast.error），不吞错、不冒充成功；叫停先二次确认，选不了的路由点了不发请求，空回答不发请求。
+// 快捷操作（暂停、继续、叫停、换模型）会改服务端状态：点了发什么请求、成功说什么、失败时必须把后端的原因
+// 弹出来（toast.error），不吞错、不冒充成功；叫停先二次确认，选不了的路由点了不发请求。
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-const ACTIONS = ['pause', 'resume', 'stop', 'reroute', 'answer'] as const;
+const ACTIONS = ['pause', 'resume', 'stop', 'reroute'] as const;
 
 /** 每个快捷操作一个按钮，点了就 trigger（真页面的入口各处不同，这里只测操作本身）。 */
 function Buttons({ target }: { target: ActionTarget }) {
@@ -112,12 +112,11 @@ function layers(stage: StageKind): RoutingLayers {
   };
 }
 
-/** 假后端：taskAction / answerAsk 用 spy 记下请求（默认成功）。 */
+/** 假后端：taskAction 用 spy 记下请求（默认成功）。 */
 function backend() {
   const api = createMockApi({ live: false });
   const taskAction = vi.spyOn(api, 'taskAction').mockResolvedValue(undefined);
-  const answerAsk = vi.spyOn(api, 'answerAsk').mockResolvedValue(undefined);
-  return { api, taskAction, answerAsk };
+  return { api, taskAction };
 }
 
 const FAILED = new ApiError(409, 'task_finished', '任务已经结束（done），不能再暂停');
@@ -293,66 +292,5 @@ describe('换模型：点哪条路由发哪条；选不了的不发', () => {
       expect(toast.error).toHaveBeenCalledWith('换模型没成功', { description: '这条路由现在不在线' }),
     );
     expect(toast.success).not.toHaveBeenCalled();
-  });
-});
-
-describe('回答追问', () => {
-  const OPTION = '发一条新消息';
-  const open = async (api: MockApi) => {
-    const task = (await board(api)).find((t) => t.state === 'asking');
-    if (!task) throw new Error('假数据里没有在追问的需求');
-    renderApp(<Buttons target={targetOf(task)} />, { api });
-    press('answer');
-    await screen.findByText(/再提醒时，要发一条新消息/);
-    return task;
-  };
-
-  test('点选项：发 answerAsk(追问号, 选项原文)，提示回答了，请求之后重读任务详情', async () => {
-    const { api, answerAsk } = backend();
-    const taskRead = vi.spyOn(api, 'task');
-    const task = await open(api);
-    const before = taskRead.mock.calls.length;
-    fireEvent.click(screen.getByRole('button', { name: new RegExp(OPTION) }));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(`回答了 #${task.issueNumber} 的追问`));
-    expect(answerAsk).toHaveBeenCalledExactlyOnceWith('ask-15-1', OPTION);
-    await waitFor(() => expect(taskRead.mock.calls.length).toBeGreaterThan(before));
-  });
-
-  test('写一段话发出：请求里是去掉首尾空白的原文', async () => {
-    const { api, answerAsk } = backend();
-    await open(api);
-    fireEvent.change(screen.getByPlaceholderText('或者直接写你的回答…'), {
-      target: { value: '  顶上来，但别重排  ' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: '发出回答' }));
-    await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
-    expect(answerAsk).toHaveBeenCalledWith('ask-15-1', '顶上来，但别重排');
-  });
-
-  test('【故意造出的失败】什么都没写、或只有空白：发出回答点不了，硬提交也不发请求', async () => {
-    const { api, answerAsk } = backend();
-    await open(api);
-    const send = screen.getByRole('button', { name: '发出回答' });
-    expect(send).toHaveProperty('disabled', true);
-    const box = screen.getByPlaceholderText('或者直接写你的回答…');
-    fireEvent.change(box, { target: { value: '   ' } });
-    expect(send).toHaveProperty('disabled', true);
-    fireEvent.submit(box.closest('form') as HTMLFormElement);
-    expect(answerAsk).not.toHaveBeenCalled();
-  });
-
-  test('【故意造出的失败】后端拒了（已经有人回答 409）：弹「回答没发出去」和原因，对话框还在、写的内容还在，不弹成功', async () => {
-    const { api, answerAsk } = backend();
-    answerAsk.mockRejectedValueOnce(new ApiError(409, 'already_answered', '这条追问已经有人回答了'));
-    await open(api);
-    const box = screen.getByPlaceholderText('或者直接写你的回答…');
-    fireEvent.change(box, { target: { value: '顶上来' } });
-    fireEvent.click(screen.getByRole('button', { name: '发出回答' }));
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('回答没发出去', { description: '这条追问已经有人回答了' }),
-    );
-    expect(toast.success).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog')).toBeTruthy();
-    expect((screen.getByPlaceholderText('或者直接写你的回答…') as HTMLTextAreaElement).value).toBe('顶上来');
   });
 });

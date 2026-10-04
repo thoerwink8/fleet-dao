@@ -18,7 +18,9 @@ import {
   type HomeRunningSchema,
   type HostId,
   hardBanFor,
+  isLegacyAskClosed,
   type JobViewSchema,
+  type LegacyAskSchema,
   type Model,
   type NotificationSchema,
   type Pool,
@@ -47,7 +49,6 @@ import type {
   QuotaWindowRecord,
   RunPlan,
   SegmentRunRecord,
-  TimelineRecord,
 } from './ports.ts';
 
 type Activity = z.input<typeof ActivitySchema>;
@@ -55,7 +56,8 @@ type Progress = z.input<typeof ProgressSchema>;
 
 /** 按推荐先做了的（task、hold）这条回答算哪种（core 的 lateAnswer）；没回答的、另开单的、老式的没有。 */
 export function askLate(ask: AskRecord, taskState: TaskState): LateAnswer | undefined {
-  if (ask.answer === undefined || ask.recommended === undefined) return undefined;
+  if (ask.answer === undefined || ask.recommended === undefined || isLegacyAskClosed(ask.answer))
+    return undefined;
   if (ask.scope !== 'task' && ask.scope !== 'hold') return undefined;
   return lateAnswer({
     recommended: ask.recommended,
@@ -409,11 +411,11 @@ type HomeHealth = z.input<typeof HomeHealthSchema>;
 
 /**
  * 「要你拍的」：decision 级未处理通知（approvals 未决在写下那一刻就同步开了这么一条，不另查 approvals 表，
- * 免得一件事显示两回）+ 还没答的追问。通知在前（它是真「要他拍」的），追问在后；各按时刻新到旧。
+ * 免得一件事显示两回），按时刻新到旧。追问不放这里：v3 没有 AI 追问这一环、答了没人收；库里旧会话留下的追问
+ * 在通知中心只读展示、可关闭（legacyAskViews，#928）。
  */
 export function homeDecisions(input: {
   notifications: NotificationRecord[];
-  pendingAsks: AskRecord[];
   taskOf: (taskId: string) => { issueNumber: number; title: string } | undefined;
 }): HomeDecision[] {
   const items: HomeDecision[] = [];
@@ -429,24 +431,33 @@ export function homeDecisions(input: {
       link: n.link ?? (n.taskId ? `/tasks/${n.taskId}` : '/notifications'),
     });
   }
-  for (const a of input.pendingAsks) {
-    const task = input.taskOf(a.taskId);
-    items.push({
-      kind: 'ask',
-      id: a.id,
-      title: a.question,
-      ...(task ? { context: `#${task.issueNumber} ${task.title}` } : {}),
-      since: a.askedAt,
-      link: `/tasks/${a.taskId}`,
-    });
-  }
   return items.sort((a, b) => b.since.localeCompare(a.since));
 }
 
-/** 哪张单有什么在等创始人拍：decision 级未处理通知在前、追问在后，各取最新的一条。 */
+/**
+ * 通知中心里的旧追问：库里还没处理的、旧会话留下的提问。只读展示 + 关闭；按提问先后排（最早的最先看到）。
+ * 单子读不到不丢这条追问（它还在库里、要能被关掉），只是没有「#12 标题」那句背景。
+ */
+export function legacyAskViews(
+  asks: AskRecord[],
+  taskOf: (taskId: string) => { issueNumber: number; title: string } | undefined,
+): z.input<typeof LegacyAskSchema>[] {
+  return asks.map((a) => {
+    const task = taskOf(a.taskId);
+    return {
+      id: a.id,
+      taskId: a.taskId,
+      question: a.question,
+      askedAt: a.askedAt,
+      ...(task ? { context: `#${task.issueNumber} ${task.title}` } : {}),
+      link: `/tasks/${a.taskId}`,
+    };
+  });
+}
+
+/** 哪张单有什么在等创始人拍：decision 级未处理通知，每张单取最新的一条。 */
 export function pendingDecisionByTask(input: {
   notifications: NotificationRecord[];
-  pendingAsks: AskRecord[];
 }): Map<string, { title: string; since: string }> {
   const out = new Map<string, { title: string; since: string }>();
   const put = (taskId: string | undefined, title: string, since: string) => {
@@ -455,14 +466,13 @@ export function pendingDecisionByTask(input: {
     if (!prev || since > prev.since) out.set(taskId, { title, since });
   };
   for (const n of input.notifications) if (n.level === 'decision') put(n.taskId, n.title, n.createdAt);
-  for (const a of input.pendingAsks) put(a.taskId, a.question, a.askedAt);
   return out;
 }
 
 /**
  * 「在跑的」：没结束的需求（done / stopped / failed 之外）。在哪一段、谁在做、最近一次事件从三段流水推（home-flow.ts 的
  * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：有人在等创始人回答
- * （state=asking）→ founder_decision（从追问的提问时刻起算）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
+ * （state=asking，只有旧会话留下的单会是这个状态）→ founder_decision（有 decision 级通知就从它的时刻起算，没有就不给起点）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
  * 在合并 → merge_queue；其余 nothing。额度、内存、CI 这几种等 segment 之外的信号才分得出，分不出时不猜。
  */
 export function homeRunning(input: {
@@ -610,7 +620,6 @@ export function homeHealth(input: {
 
 export function buildHome(input: {
   notifications: NotificationRecord[];
-  pendingAsks: AskRecord[];
   tasks: Task[];
   activeRuns: SessionRun[];
   merged: PullRequestRecord[];
@@ -656,7 +665,6 @@ export function buildHome(input: {
   return {
     decisions: homeDecisions({
       notifications: input.notifications,
-      pendingAsks: input.pendingAsks,
       taskOf: (taskId) => taskById.get(taskId),
     }),
     running,
@@ -715,104 +723,4 @@ export function notificationView(n: NotificationRecord): z.input<typeof Notifica
       lastAttemptAt: d.lastAttemptAt,
     })),
   };
-}
-
-// —— 时间线 ——
-
-function field(payload: unknown, key: string): unknown {
-  return payload && typeof payload === 'object' ? (payload as Record<string, unknown>)[key] : undefined;
-}
-
-function text(payload: unknown, key: string): string | undefined {
-  const v = field(payload, key);
-  return typeof v === 'string' && v.length > 0 ? v : undefined;
-}
-
-const ACTION_WORDS: Record<string, string> = {
-  pause: '暂停',
-  resume: '继续',
-  stop: '叫停',
-  reroute: '换路由',
-  handover: '交给 fleet',
-};
-
-/** 一行白话。会话被动读出来的 file/test/tool 的载荷由插头决定，这里只认常见字段，认不出就只写种类。 */
-export function describeTimeline(rec: TimelineRecord): string {
-  const p = rec.payload;
-  switch (rec.kind) {
-    case 'say':
-      return text(p, 'text') ?? '报了一句进度';
-    case 'plan': {
-      const steps = field(p, 'steps');
-      if (!Array.isArray(steps)) return '更新了步骤清单';
-      const done = steps.filter((s) => field(s, 'state') === 'done').length;
-      const current = steps.find((s) => field(s, 'state') === 'in_progress');
-      const now = current ? text(current, 'title') : undefined;
-      return `步骤清单：完成 ${done}/${steps.length}${now ? `，正在${now.replace(/^正在/, '')}` : ''}`;
-    }
-    case 'ask':
-      return `问：${text(p, 'question') ?? '（没带问题原文）'}`;
-    case 'done':
-      return `交活：${text(p, 'summary') ?? '（没带说明）'}`;
-    case 'blocked':
-      return `卡住：${text(p, 'reason') ?? '（没带原因）'}`;
-    case 'test': {
-      const passed = field(p, 'passed');
-      const cmd = text(p, 'command');
-      const verdict = passed === true ? '通过' : passed === false ? '没过' : '结果没读到';
-      return `跑测试${cmd ? `（${cmd}）` : ''}：${verdict}`;
-    }
-    case 'file':
-      return `改文件：${text(p, 'path') ?? '（没带路径）'}`;
-    case 'tool':
-      return `用工具：${text(p, 'name') ?? '（没带名字）'}`;
-    case 'state': {
-      const who = field(p, 'entity') === 'subtask' ? '子任务' : '需求';
-      const from = text(p, 'from');
-      const to = text(p, 'to') ?? '?';
-      return from ? `${who}状态：${from} → ${to}` : `${who}建立：${to}`;
-    }
-    case 'run_queued': {
-      const stage = text(p, 'stage');
-      const word = stage && stage in STAGE_WORDS ? STAGE_WORDS[stage as StageKind] : (stage ?? '会话');
-      const why = text(p, 'whyRoute');
-      return `${word}排进队列${why ? `（${why}）` : ''}`;
-    }
-    case 'run_started': {
-      const queueMs = field(p, 'queueMs');
-      return typeof queueMs === 'number' ? `开工（排队 ${Math.round(queueMs / 60_000)} 分钟）` : '开工';
-    }
-    case 'run_ended': {
-      const outcome = text(p, 'outcome');
-      const word =
-        outcome === 'ok'
-          ? '做完'
-          : outcome === 'failed'
-            ? '失败'
-            : outcome === 'stopped'
-              ? '被叫停'
-              : outcome === 'stalled'
-                ? '停滞'
-                : '结束';
-      return `会话${word}`;
-    }
-    case 'notification':
-      return `通知：${text(p, 'title') ?? '（没带标题）'}`;
-    case 'answer':
-      return `回答追问：${text(p, 'answer') ?? '（没带回答原文）'}`;
-    case 'done_rejected': {
-      const reasons = field(p, 'reasons');
-      const why = Array.isArray(reasons) ? reasons.filter((r) => typeof r === 'string').join('；') : '';
-      const head = field(p, 'code') === 'not_verifiable_yet' ? '交活暂时核实不了' : '交活被退回';
-      return why ? `${head}：${why}` : head;
-    }
-    default: {
-      const word = ACTION_WORDS[rec.kind];
-      if (!word) return rec.kind;
-      // 先记后做：没做成的那一条（ok=false）单独写明。
-      if (field(p, 'ok') === false) return `${word}没做成：${text(p, 'error') ?? '原因没记下'}`;
-      const reason = text(p, 'reason');
-      return reason ? `${word}：${reason}` : word;
-    }
-  }
 }

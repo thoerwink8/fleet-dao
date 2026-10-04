@@ -13,7 +13,7 @@ import {
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
 import { brand } from '#brand';
 import type { HomeState } from '../components/home/types';
-import { canSee, canSeeDetail } from '../demo/access';
+import { canSee } from '../demo/access';
 import type {
   Audit,
   AuthConfig,
@@ -24,6 +24,7 @@ import type {
   DemoScopeView,
   HomeResponse,
   Jobs,
+  LegacyAsks,
   LiveEvent,
   Me,
   Notifications,
@@ -34,15 +35,11 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
-  RunSteps,
   Setting,
   SettingKey,
   Settings,
-  StageKind,
   TaskActionBody,
   TaskDetail,
-  Timeline,
-  UpdateChannelBody,
   UpdateDemoDefaultBody,
   UpdatedRouteEffort,
   UpdateRouteEffortBody,
@@ -64,10 +61,11 @@ export interface FleetApi {
   home(): Promise<HomeResponse>;
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
-  timeline(taskId: string, page?: { cursor?: string | undefined; limit?: number }): Promise<Timeline>;
-  runSteps(runId: string): Promise<RunSteps>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
-  answerAsk(askId: string, answer: string): Promise<void>;
+  /** 旧会话留下的、还没处理的追问（通知中心只读展示，#928）。 */
+  legacyAsks(): Promise<LegacyAsks>;
+  /** 把一条旧追问标成已处理（落库、进操作记录）；没有「回答」：新流程没有收追问回答的地方。 */
+  closeAsk(askId: string): Promise<void>;
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
@@ -79,7 +77,6 @@ export interface FleetApi {
     routeId: string,
     body: UpdateRouteEffortBody,
   ): Promise<UpdatedRouteEffort>;
-  updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
   /** 整池暂停现状（#746）：开关（到期标红）、认不出的、还靠旧提醒顶着的。新建、撤回走 updateSetting('engine.poolHolds')。 */
   poolHolds(): Promise<PoolHolds>;
@@ -141,8 +138,7 @@ export const keys = {
   repos: ['repos'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
-  timeline: (taskId: string) => ['timeline', taskId] as const,
-  runSteps: (runId: string) => ['run-steps', runId] as const,
+  legacyAsks: ['legacy-asks'] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
@@ -208,28 +204,6 @@ export function useTaskDetail(taskId: string | undefined) {
     queryKey: keys.task(taskId ?? ''),
     queryFn: () => api.task(taskId ?? ''),
     enabled: Boolean(taskId),
-  });
-}
-
-/** 时间线按新到旧分页；fetchNextPage 往前翻更早的。 */
-export function useTimeline(taskId: string | undefined) {
-  const api = useApi();
-  return useInfiniteQuery({
-    queryKey: keys.timeline(taskId ?? ''),
-    queryFn: ({ pageParam }) => api.timeline(taskId ?? '', { cursor: pageParam, limit: 100 }),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.nextCursor,
-    // 演示版细节不到「过程」这一级就不读（页面上另说「没开放」）。
-    enabled: Boolean(taskId) && canSeeDetail('process'),
-  });
-}
-
-export function useRunSteps(runId: string | undefined) {
-  const api = useApi();
-  return useQuery({
-    queryKey: keys.runSteps(runId ?? ''),
-    queryFn: () => api.runSteps(runId ?? ''),
-    enabled: Boolean(runId) && canSeeDetail('process'),
   });
 }
 
@@ -383,34 +357,24 @@ export function useTaskAction() {
     onSettled: (_d, _e, { taskId }) => {
       qc.invalidateQueries({ queryKey: keys.task(taskId) });
       qc.invalidateQueries({ queryKey: ['board'] });
-      qc.invalidateQueries({ queryKey: keys.timeline(taskId) });
     },
   });
 }
 
-export function useAnswerAsk() {
+/** 旧会话留下的、还没处理的追问（通知中心用）。 */
+export function useLegacyAsks() {
   const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ askId, answer }: { askId: string; answer: string; taskId: string }) =>
-      api.answerAsk(askId, answer),
-    onSettled: (_d, _e, { taskId }) => {
-      qc.invalidateQueries({ queryKey: keys.task(taskId) });
-      qc.invalidateQueries({ queryKey: ['board'] });
-      qc.invalidateQueries({ queryKey: keys.timeline(taskId) });
-    },
-  });
+  return useQuery({ queryKey: keys.legacyAsks, queryFn: () => api.legacyAsks() });
 }
 
-export function useUpdateChannel() {
+export function useCloseAsk() {
   const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ channelId, body }: { channelId: string; body: UpdateChannelBody }) =>
-      api.updateChannel(channelId, body),
+    mutationFn: (askId: string) => api.closeAsk(askId),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.routing });
-      qc.invalidateQueries({ queryKey: keys.pools });
+      qc.invalidateQueries({ queryKey: keys.legacyAsks });
+      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }
@@ -468,13 +432,13 @@ export function useUpdateSetting() {
  * 不在名单里的表（定时任务、路由、模型……）没有推送，对应页面靠定时重拉。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
-  tasks: [['board'], ['task'], ['timeline']],
-  subtasks: [['board'], ['task'], ['timeline']],
-  session_runs: [['board'], ['task'], ['timeline'], ['run-steps'], ['pools']],
-  progress_events: [['board'], ['task'], ['timeline'], ['run-steps']],
-  asks: [['board'], ['task'], ['timeline']],
-  // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
-  approvals: [['board'], ['task'], ['timeline']],
+  tasks: [['board'], ['task']],
+  subtasks: [['board'], ['task']],
+  session_runs: [['board'], ['task'], ['pools']],
+  progress_events: [['board'], ['task']],
+  asks: [['board'], ['task'], ['legacy-asks']],
+  // approvals 还没有专门的页面查询键；按它挂在任务 / 子任务上，先失效这两处。
+  approvals: [['board'], ['task']],
   // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
   quota_windows: [['pools'], ['routing-layers']],
   channels: [['routing'], ['pools'], ['routing-layers']],

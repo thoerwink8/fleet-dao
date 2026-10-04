@@ -7,10 +7,10 @@ import { Id, Time } from './internal.ts';
 
 /**
  * 「要你拍的」一条：decision 级通知（approvals 未决开的时候就经 openApproval 同步写了这么一条，
- * 不另查 approvals 表，免得一条事显示两回）+ 还没答的追问。
+ * 不另查 approvals 表，免得一条事显示两回）。追问不在这里：v3 没有 AI 追问这一环，旧会话留下的追问在通知中心只读展示（#928）。
  */
 export const HomeDecisionSchema = z.object({
-  kind: z.enum(['notification', 'approval', 'ask']),
+  kind: z.enum(['notification', 'approval']),
   id: Id,
   title: z.string(),
   /** 来源需求 / PR / 会话的一句话背景；没有就没有这个键。 */

@@ -16,6 +16,7 @@ import { devFixtures, feishuMessageKey, feishuReviseKey } from '@fleet-dao/store
 import { FEISHU_IDS, feishuData } from '@fleet-dao/store/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ANSWER_TEXTS } from '../src/feishu-views.ts';
+import { ASKS_NOT_RECEIVED_WHY } from '../src/legacy-asks.ts';
 import {
   type DraftOpener,
   DraftOpenerUnavailableError,
@@ -350,7 +351,7 @@ describe('POST /feishu/messages：一句话', () => {
     expect(h.store.data.feishuDrafts[0]?.revision).toBe(1);
   });
 
-  it('回复 AI 追问卡：这句话就是回答——写库、留操作记录、发信号给工作流；重投不记两次', async () => {
+  it('回复 AI 追问卡（#928）：新流程不再收追问回答——明说，不写库、不进操作记录、不发信号；重投同一句回同一句话', async () => {
     const h = harness({ data: feishuData() });
     await h.store.putCard({
       messageId: 'om_ask_card',
@@ -359,6 +360,7 @@ describe('POST /feishu/messages：一句话', () => {
       ref: { askId: FEISHU_IDS.askOpen, taskId: IDS.task12, outboxId: `ask:${FEISHU_IDS.askOpen}` },
       sentAt: T0.toISOString(),
     });
+    const audits = h.store.data.audit.length;
     const reply = () =>
       h.cockpit.request(
         '/api/feishu/messages',
@@ -370,113 +372,36 @@ describe('POST /feishu/messages：一句话', () => {
         }),
       );
     const body = FeishuMessageResponse.parse(await (await reply()).json());
-    expect(body).toEqual({ kind: 'answer', text: '已记下你的回答，AI 会接着干。', taskId: IDS.task12 });
-    expect(h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen)).toMatchObject({
-      answer: '6 位',
-      answeredBy: IDS.founderA,
-    });
-    expect(h.store.data.audit.at(-1)).toMatchObject({
-      action: 'ask.answer',
-      via: 'feishu',
-      target: `task:${IDS.task12}`,
-    });
-    // 引擎的任务工作流不听「回答」信号：回答只落库，不往 Temporal 发（#901）
+    expect(body).toEqual({ kind: 'answer', text: ASKS_NOT_RECEIVED_WHY, taskId: IDS.task12 });
+    expect(body.kind === 'answer' && body.text).toContain('不再收追问回答');
+    expect(h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen)?.answer).toBeUndefined();
+    expect(h.store.data.audit.length).toBe(audits);
     expect(h.signals).toEqual([]);
     expect(FeishuMessageResponse.parse(await (await reply()).json())).toEqual(body);
-    expect(h.signals).toHaveLength(0);
-    expect(h.store.data.audit.filter((a) => a.action === 'ask.answer')).toHaveLength(1);
   });
 
-  it('回复按推荐先做了的追问卡（#259）：照这张单走到哪说清回答之后会怎样', async () => {
-    const cases = [
-      { state: 'running' as const, text: '4 位', said: '已记下：你选的就是 AI 先做的那个，不用改。' },
-      { state: 'running' as const, text: '6 位', said: '已记下：和 AI 先做的不一样，下个存档点交给 AI 改。' },
-      {
-        state: 'done' as const,
-        text: '6 位',
-        said: '已记下：这张单已经合进去了，会另开一张后续单照你选的改。',
-      },
-      {
-        state: 'stopped' as const,
-        text: '6 位',
-        said: '已记下：这张单没做成就停了，只记下，重开时照你选的做。',
-      },
-    ];
-    for (const { state, text, said } of cases) {
-      const h = harness({ data: feishuData() });
-      const ask = h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen);
-      const task12 = h.store.data.tasks.find((t) => t.id === IDS.task12);
-      if (!ask || !task12) throw new Error('样例里应当有 12 和它的追问');
-      Object.assign(ask, { options: ['4 位', '6 位'], scope: 'task', recommended: '4 位' });
-      task12.state = state;
-      await h.store.putCard({
-        messageId: 'om_ask_card',
-        chatId: 'oc_team',
-        kind: 'ask',
-        ref: { askId: FEISHU_IDS.askOpen, taskId: IDS.task12 },
-        sentAt: T0.toISOString(),
-      });
+  it('回复已经有人答过的、或库里已经没有的追问卡：同样是那句「不再收追问回答」，不改已有的答案', async () => {
+    const h = harness({ data: feishuData() });
+    await h.store.putCard({
+      messageId: 'om_answered_card',
+      chatId: 'oc_team',
+      kind: 'ask',
+      ref: { askId: FEISHU_IDS.askAnswered, taskId: IDS.task12 },
+      sentAt: T0.toISOString(),
+    });
+    await h.store.putCard({
+      messageId: 'om_ghost_ask',
+      chatId: 'oc_team',
+      kind: 'ask',
+      ref: { askId: '10000000-0000-4000-8000-0000000000ff', taskId: IDS.task12 },
+      sentAt: T0.toISOString(),
+    });
+    for (const card of ['om_answered_card', 'om_ghost_ask']) {
       const body = FeishuMessageResponse.parse(
-        await (
-          await h.cockpit.request(
-            '/api/feishu/messages',
-            gw('POST', {
-              sourceMessageId: `om_answer_${state}_${text}`,
-              text,
-              chatType: 'group',
-              replyToMessageId: 'om_ask_card',
-            }),
-          )
-        ).json(),
+        await (await say(h, '用腾讯云', { replyToMessageId: card })).json(),
       );
-      expect(body, `${state} ${text}`).toEqual({ kind: 'answer', text: said, taskId: IDS.task12 });
+      expect(body, card).toEqual({ kind: 'answer', text: ASKS_NOT_RECEIVED_WHY, taskId: IDS.task12 });
     }
-    // 另开单的：记在那张单上
-    const h = harness({ data: feishuData() });
-    const ask = h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen);
-    if (!ask) throw new Error('样例里应当有追问');
-    Object.assign(ask, { options: ['4 位', '6 位'], scope: 'outside', recommended: '4 位' });
-    await h.store.putCard({
-      messageId: 'om_ask_card',
-      chatId: 'oc_team',
-      kind: 'ask',
-      ref: { askId: FEISHU_IDS.askOpen, taskId: IDS.task12 },
-      sentAt: T0.toISOString(),
-    });
-    expect(
-      FeishuMessageResponse.parse(
-        await (
-          await h.cockpit.request(
-            '/api/feishu/messages',
-            gw('POST', {
-              sourceMessageId: 'om_answer_outside',
-              text: '6 位',
-              chatType: 'group',
-              replyToMessageId: 'om_ask_card',
-            }),
-          )
-        ).json(),
-      ),
-    ).toMatchObject({ kind: 'answer', text: '已记下你的回答，记在另开的那张单上。' });
-  });
-
-  it('回复别人已经答过的追问卡：不改答案，明说已经有人答了', async () => {
-    const h = harness({ data: feishuData() });
-    await h.store.putCard({
-      messageId: 'om_ask_card',
-      chatId: 'oc_team',
-      kind: 'ask',
-      ref: { askId: FEISHU_IDS.askAnswered },
-      sentAt: T0.toISOString(),
-    });
-    const body = FeishuMessageResponse.parse(
-      await (await say(h, '用腾讯云', { replyToMessageId: 'om_ask_card' })).json(),
-    );
-    expect(body).toEqual({
-      kind: 'answer',
-      text: '这个问题已经回答过了（创始人乙：阿里云），这句没有记成新的回答。',
-      taskId: IDS.task12,
-    });
     expect(h.store.data.asks.find((a) => a.id === FEISHU_IDS.askAnswered)?.answer).toBe('阿里云');
     expect(h.signals).toHaveLength(0);
   });
@@ -563,37 +488,6 @@ describe('POST /feishu/messages：一句话', () => {
     );
     expect(body).toEqual({ kind: 'answer', text: ANSWER_TEXTS.draftMissing });
     expect(h.store.data.feishuDrafts).toHaveLength(1);
-  });
-
-  it('回复的追问卡对应的追问读不到（登记里有、库里没有，或答的那一刻没了）：如实说没记成回答，不回「还答不了」把回答吞掉', async () => {
-    const h = harness({ data: feishuData() });
-    await h.store.putCard({
-      messageId: 'om_ghost_ask',
-      chatId: 'oc_team',
-      kind: 'ask',
-      ref: { askId: '10000000-0000-4000-8000-0000000000ff', taskId: IDS.task12 },
-      sentAt: T0.toISOString(),
-    });
-    const ghost = FeishuMessageResponse.parse(
-      await (await say(h, '6 位', { replyToMessageId: 'om_ghost_ask' })).json(),
-    );
-    expect(ghost).toEqual({ kind: 'answer', text: ANSWER_TEXTS.askMissing, taskId: IDS.task12 });
-    expect(h.logs.find((l) => l.message.includes('追问读不到'))?.level).toBe('warn');
-
-    await h.store.putCard({
-      messageId: 'om_ask_card',
-      chatId: 'oc_team',
-      kind: 'ask',
-      ref: { askId: FEISHU_IDS.askOpen },
-      sentAt: T0.toISOString(),
-    });
-    vi.spyOn(h.store, 'answerAsk').mockResolvedValueOnce('not_found');
-    const gone = FeishuMessageResponse.parse(
-      await (await say(h, '6 位', { replyToMessageId: 'om_ask_card' })).json(),
-    );
-    expect(gone).toEqual({ kind: 'answer', text: ANSWER_TEXTS.askMissing, taskId: IDS.task12 });
-    expect(h.signals).toEqual([]);
-    expect(h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen)?.answer).toBeUndefined();
   });
 
   it('原话里有孤立的半个 emoji（被截成两半）：入口换成 �、记日志，照样记成草稿；回复草稿卡、改一下也一样', async () => {

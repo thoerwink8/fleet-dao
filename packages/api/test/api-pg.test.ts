@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asks, auditLog, feishuDrafts, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { AskResponse, BoardResponse, TaskDetailResponse, TimelineResponse } from '@fleet-dao/shared';
+import { AskResponse, BoardResponse, TaskDetailResponse } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, devFixtures } from '@fleet-dao/store';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -71,8 +71,6 @@ describe('接口跑在真库上', () => {
     // 计费方式从库里的渠道表读：Claude 订阅是套餐内，没记的花费记在套餐内那一栏的没读到
     expect(detail.runs.find((r) => r.id === IDS.run0)?.billing).toBe('subscription');
     expect(detail.usage.total.cost.subscription).toEqual({ runs: 1, usd: 0, missing: 1 });
-    const timeline = TimelineResponse.parse(await get(`/api/tasks/${IDS.task12}/timeline`));
-    expect(timeline.items.length).toBeGreaterThan(0);
     // 登录本身也落了库里的操作记录。
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
   });
@@ -131,7 +129,7 @@ describe('接口跑在真库上', () => {
     expect(await ask()).toEqual({ askId: first.askId, status: 'answered', answer: '腾讯云' });
   });
 
-  it('SSE：驾驶舱里回答追问 → 库里的触发器发通知 → 打开的页面收到 asks 的变化', async () => {
+  it('SSE：驾驶舱里关闭旧追问 → 库里的触发器发通知 → 打开的页面收到 asks 的变化', async () => {
     const h = await start();
     const session = await h.login();
     const asked = AskResponse.parse(
@@ -148,10 +146,7 @@ describe('接口跑在真库上', () => {
     );
     const { reader } = await openEvents(h, session.cookie);
     const buf = await readUntil(reader, 'event: ready');
-    const res = await h.cockpit.request(
-      `/api/asks/${asked.askId}/answer`,
-      write('POST', session, { answer: '6 位' }),
-    );
+    const res = await h.cockpit.request(`/api/asks/${asked.askId}/close`, write('POST', session));
     expect(res.status).toBe(200);
     await readUntil(reader, `{"table":"asks","id":"${asked.askId}"}`, buf);
     await reader.cancel();

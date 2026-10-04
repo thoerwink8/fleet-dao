@@ -1,5 +1,5 @@
 // 任务页（/tasks/:taskId）：一张单走了哪几段、每段每个模型花了多久、多少 token 和钱（#216）。
-// 主页「在跑的」卡片、「要你拍的」追问都链到这里。三段的单读 runs 表的流水（segmentRuns、usage.bySegment）；
+// 主页「在跑的」卡片、「要你拍的」都链到这里。三段的单读 runs 表的流水（segmentRuns、usage.bySegment）；
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
 import { ArrowLeft, ListChecks } from 'lucide-react';
