@@ -10,6 +10,7 @@
 // 3. **只贴一次**：同一次运行的重试不许贴出第二条冲突的状态（同一 context 同一头再贴就是覆盖，GitHub 只留最新一条，
 //    但重试时旧的那条已经写上了就不该再动——万一第二轮结论不一样，覆盖掉第一轮的风险由调用方按轮数决定）。
 
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type ColdVerifyStatus,
   type ColdVerifyTarget,
@@ -25,9 +26,9 @@ export class ColdVerifyWriteError extends Error {
   readonly head: string;
   constructor(target: ColdVerifyTarget, cause: unknown) {
     super(
-      `PR #${target.prNumber} 的头 ${target.head.slice(0, 7)} 上没贴上 cold-verify 状态（${
-        cause instanceof Error ? cause.message : String(cause)
-      }）：这条状态是合并闸的输入，没贴成就不算验过，别当成贴上了`,
+      `PR #${target.prNumber} 的头 ${target.head.slice(0, 7)} 上没贴上 cold-verify 状态（${errMessage(
+        cause,
+      )}）：这条状态是合并闸的输入，没贴成就不算验过，别当成贴上了`,
     );
     this.name = 'ColdVerifyWriteError';
     this.prNumber = target.prNumber;
@@ -64,7 +65,7 @@ export async function runColdVerifyAndPost(
   try {
     verdict = await deps.invoke(input);
   } catch (err) {
-    const status = coldVerifyNotRun(err instanceof Error ? err.message : String(err));
+    const status = coldVerifyNotRun(errMessage(err));
     await post(target, status, deps.writeStatus);
     return { status };
   }

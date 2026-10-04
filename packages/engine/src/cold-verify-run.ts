@@ -15,6 +15,7 @@
 // 这一层只要被调了就跑；谁调它、什么时候调，见调用方（任务工作流在挂自动合并之前调）。重复贴同一条状态没有害处
 // （同一 context 同一头只留最新一条），所以「该验的没验」这件事由合并闸拦住、不由这一层猜。
 
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type ColdVerifyStatus,
   coldVerifyNotRun,
@@ -130,7 +131,7 @@ export async function runColdVerifyForPr(
   try {
     pr = await deps.sources.pr(prNumber);
   } catch (err) {
-    const why = message(err);
+    const why = errMessage(err);
     const status = coldVerifyNotRun(`读不到 PR #${prNumber} 现在的样子（${why}）`);
     return await post(null, status, { sourceProblem: `读不到 PR：${why}` });
   }
@@ -148,7 +149,7 @@ export async function runColdVerifyForPr(
     spec = await deps.sources.spec(prNumber);
     authorFamilies = await deps.sources.authorFamilies(prNumber);
   } catch (err) {
-    const why = message(err);
+    const why = errMessage(err);
     const status = coldVerifyNotRun(`读不到 PR #${prNumber} 的单子（要什么 / 怎么算做完 / 作者族）：${why}`);
     return await post(pr.head, status, { sourceProblem: `读不到单子：${why}` });
   }
@@ -201,7 +202,7 @@ export async function runColdVerifyForPr(
   try {
     verdict = await deps.invoke(input, invokeDeps);
   } catch (err) {
-    const why = message(err);
+    const why = errMessage(err);
     const status = coldVerifyNotRun(`冷调用这一次没跑起来（${why}）`);
     return await post(pr.head, status, { sourceProblem: `起调用失败：${why}` });
   }
@@ -231,10 +232,6 @@ const SOURCE_PREFIXES = ['读不到 diff：', '读不到单子：', '没讨论�
 
 function isSourceProblem(problem: string | undefined): boolean {
   return problem !== undefined && SOURCE_PREFIXES.some((p) => problem.startsWith(p));
-}
-
-function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** runs 记账的占位：调用方不给真 writer 时用（#556 接真表）。 */

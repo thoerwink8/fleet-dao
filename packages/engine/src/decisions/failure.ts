@@ -3,6 +3,7 @@
 // 分流自己出错或答非所问（规则表写坏了）也不判死：退回只看次数的兜底梯（重试 → 换路由 → 换模型 → 挂起并报警）。
 
 import type { StageKind } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
 import type { JevReply } from '../failure/jev.ts';
 import type { FailureEvidence, FailurePolicy, FailureVerdict, TriageChoice } from '../failure/types.ts';
@@ -195,7 +196,7 @@ export function nextAction(input: FailureInput, triage: FailureTriage = classify
     verdict = triage(evidenceOf(input), policy);
     if (!usable(verdict)) broken = '分流答非所问';
   } catch (error) {
-    broken = `分流出错：${error instanceof Error ? error.message : String(error)}`;
+    broken = `分流出错：${errMessage(error)}`;
   }
   if (broken !== null || !usable(verdict)) return fallback(input, broken ?? '分流答非所问');
   const v = verdict;
