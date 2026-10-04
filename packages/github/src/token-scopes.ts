@@ -13,9 +13,9 @@ export type PermissionSet = Readonly<Record<string, PermissionLevel>>;
 
 /**
  * api = 平时调 REST / GraphQL 的令牌（默认）；git = 交给 git 子进程推送的令牌；git-read = 只抓取的 git 令牌；
- * admin = 只有互动限制这类要 Administration 的接口用。
+ * admin = 只有互动限制这类要 Administration 写的接口用；rules = 读分支规则（只要 Administration 读）。
  */
-export type TokenScope = 'api' | 'git' | 'git-read' | 'admin';
+export type TokenScope = 'api' | 'git' | 'git-read' | 'admin' | 'rules';
 
 export const TOKEN_SCOPES: Record<AppRole, Partial<Record<TokenScope, PermissionSet>>> = {
   agent: {
@@ -40,6 +40,10 @@ export const TOKEN_SCOPES: Record<AppRole, Partial<Record<TokenScope, Permission
     },
     // 续互动限制（interaction.ts：GET/PUT interaction-limits）要 Administration 写
     admin: { administration: 'write', metadata: 'read' },
+    // 读分支规则（repos.ts：GET rules/branches/<分支>，合并和等 CI 判必过检查用）：第二意见（#854 第 1 轮）认为它要
+    // Administration 读，repos.ts 原注释写的是只要 Metadata。没有在真 GitHub 上核实过、不拿线上赌，所以按要
+    // administration:read 留着（只读，不放 administration:write 回日常令牌）；核实只要 Metadata 之后再删这一项。
+    rules: { administration: 'read', metadata: 'read' },
   },
 };
 

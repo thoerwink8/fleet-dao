@@ -507,6 +507,10 @@ export class FakeGitHub {
     }
     x = /^\/rules\/branches\/(.+)$/.exec(rest);
     if (x && m === 'GET') {
+      // 保守按「要 Administration 读」建模（#854 第二意见的说法，没在真 GitHub 上核实）：令牌没有就 403
+      if (req.grants?.administration !== 'read' && req.grants?.administration !== 'write') {
+        return this.json(403, { message: 'Resource not accessible by integration' });
+      }
       if (decodeURIComponent(x[1] ?? '') !== this.defaultBranch) return this.json(200, []);
       return this.json(200, [
         { type: 'deletion' },

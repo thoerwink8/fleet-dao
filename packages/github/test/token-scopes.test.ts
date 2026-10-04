@@ -16,15 +16,17 @@ describe('令牌用途表', () => {
     expect(scopePermissions('agent', 'git-read')).toEqual({ contents: 'read', metadata: 'read' });
   });
 
-  it('administration 只在 engine 的 admin 里；没有任何别的用途带它，也没有用途带 workflows', () => {
+  it('administration 只在 engine 的 admin（写）和 rules（读）里；日常 api、git 令牌都不带，也没有用途带 workflows', () => {
     for (const [role, scopes] of Object.entries(TOKEN_SCOPES)) {
       for (const [scope, set] of Object.entries(scopes)) {
         expect(Object.keys(set ?? {}), `${role}/${scope}`).not.toContain('workflows');
-        if (role === 'engine' && scope === 'admin') continue;
+        if (role === 'engine' && (scope === 'admin' || scope === 'rules')) continue;
         expect(Object.keys(set ?? {}), `${role}/${scope}`).not.toContain('administration');
       }
     }
     expect(scopePermissions('engine', 'admin')).toEqual({ administration: 'write', metadata: 'read' });
+    // 读分支规则只给读，不把 administration:write 放回日常令牌（#854 第二意见第 1 轮）
+    expect(scopePermissions('engine', 'rules')).toEqual({ administration: 'read', metadata: 'read' });
   });
 
   it('自检要的权限 = 各用途的并集，值和改之前一模一样（没悄悄缩，也没悄悄放大）', () => {
@@ -161,5 +163,35 @@ describe('换令牌时请求体里写明权限', () => {
     await expect(
       gh.client.request({ method: 'GET', path: '/repos/acme/widgets', auth: { as: 'engine', repo } }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 422 });
+  });
+
+  it('读分支规则单独换一枚 rules 令牌（administration 只读 + metadata），日常令牌没有 administration，判必过检查能判出来', async () => {
+    const { gh, fake } = setup();
+    const rules = await gh.deps.facts.branchRules(repo, 'main', 'engine');
+    expect(rules.requiredChecks).toEqual(['check']);
+    expect(mintBodies(fake).at(-1)).toEqual({
+      repositories: ['widgets'],
+      permissions: { administration: 'read', metadata: 'read' },
+    });
+    expect(fake.calls('GET', /rules\/branches/)[0]?.grants).toEqual({
+      administration: 'read',
+      metadata: 'read',
+    });
+    // 日常请求仍用 api 令牌：没有 administration
+    await gh.client.request({ method: 'GET', path: '/repos/acme/widgets', auth: { as: 'engine', repo } });
+    expect(fake.calls('GET', /^\/repos\/acme\/widgets$/)[0]?.grants?.administration).toBeUndefined();
+  });
+
+  it('【故意造出的失败】引擎没有 administration 授权：读分支规则 403 报出来，不当成「没有必过检查」', async () => {
+    const { gh, fake } = setup();
+    fake.permissions.engine = {
+      contents: 'write',
+      pull_requests: 'write',
+      issues: 'write',
+      metadata: 'read',
+    };
+    await expect(gh.deps.facts.branchRules(repo, 'main', 'engine')).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
   });
 });
