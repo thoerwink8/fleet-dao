@@ -13,7 +13,11 @@
 //   beforeAll(async () => { t = await createTestDb(); }, TEST_DB_TIMEOUT_MS);
 //   afterAll(() => t.close());
 //   beforeEach(() => resetTestDb(t));
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator';
@@ -55,11 +59,114 @@ export function realTestPgUrl(
 
 let pgliteTemplate: Promise<PGlite> | undefined;
 
-/** 每个进程只建一次 PGlite、跑一次迁移，之后克隆。 */
+/**
+ * 迁移跑完的 PGlite 数据目录快照放在系统临时目录里，跨测试文件（vitest 每个文件一个新进程）共用：
+ * 没有它，每个用 PGlite 的测试文件都从头 initdb + 跑全部迁移（本机量：新进程冷建 2.3 秒，从快照载入 0.5 秒）。
+ * 改这里之前必须知道：
+ * - 文件名里带「迁移目录全部内容 + PGlite 版本」的哈希：迁移、PGlite 一变就是另一个文件，不会拿旧库顶新迁移；
+ *   写的时候先写临时名再改名，别的进程读到的要么没有、要么是完整的一份；并发的几个进程同时建就各建各的、后改名的盖掉先改名的。
+ * - 快照读不出来（半截、坏了）就删掉重建，不当成没事用；FLEET_TEST_PGLITE_SNAPSHOT=off 关掉快照，一律冷建（查迁移本身时用）。
+ */
+export function pgliteSnapshotKey(
+  migrationsFolder: string = MIGRATIONS_FOLDER,
+  pgliteVersion: string = installedPgliteVersion(),
+): string {
+  const hash = createHash('sha256').update(`pglite@${pgliteVersion}\n`);
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.sql') || e.name === '_journal.json') {
+        hash.update(`${e.name}\n`).update(readFileSync(p)).update('\n');
+      }
+    }
+  };
+  walk(migrationsFolder);
+  return hash.digest('hex').slice(0, 16);
+}
+
+function installedPgliteVersion(): string {
+  // 包的 exports 没开 ./package.json：从入口文件往上找到那一份
+  let dir = dirname(createRequire(import.meta.url).resolve('@electric-sql/pglite'));
+  for (;;) {
+    const file = join(dir, 'package.json');
+    if (existsSync(file)) {
+      const pkg = JSON.parse(readFileSync(file, 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === '@electric-sql/pglite') {
+        if (!pkg.version) throw new Error('@electric-sql/pglite 的 package.json 里没有版本');
+        return pkg.version;
+      }
+    }
+    const up = dirname(dir);
+    if (up === dir) throw new Error('找不到 @electric-sql/pglite 的 package.json，快照认不出是哪一版建的');
+    dir = up;
+  }
+}
+
+const SNAPSHOT_PREFIX = 'fleet-pglite-';
+
+export async function coldMigratedPglite(): Promise<PGlite> {
+  const pg = new PGlite();
+  await migratePglite(drizzlePglite(pg, { schema }), { migrationsFolder: MIGRATIONS_FOLDER });
+  return pg;
+}
+
+/** 载入快照；没有这份快照返回 undefined，有但读不出来（半截、坏了）先删掉再返回 undefined。 */
+export async function loadPgliteSnapshot(file: string): Promise<PGlite | undefined> {
+  if (!existsSync(file)) return undefined;
+  let pg: PGlite | undefined;
+  try {
+    pg = new PGlite({ loadDataDir: new Blob([readFileSync(file)]) });
+    await pg.waitReady;
+    // 认一下确实是迁移跑完的库：迁移记录条数要等于日志里的条数
+    const journal = JSON.parse(readFileSync(join(MIGRATIONS_FOLDER, 'meta', '_journal.json'), 'utf8')) as {
+      entries: unknown[];
+    };
+    const applied = await pg.query<{ n: number }>(
+      'select count(*)::int as n from drizzle.__drizzle_migrations',
+    );
+    if (applied.rows[0]?.n !== journal.entries.length) throw new Error('快照里的迁移记录条数和日志对不上');
+    return pg;
+  } catch {
+    await pg?.close().catch(() => {});
+    rmSync(file, { force: true });
+    return undefined;
+  }
+}
+
+export async function savePgliteSnapshot(pg: PGlite, file: string): Promise<void> {
+  const blob = await pg.dumpDataDir('none');
+  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  writeFileSync(tmp, Buffer.from(await blob.arrayBuffer()));
+  renameSync(tmp, file);
+  // 别的迁移版本留下的旧快照（每份 40 多 MB）超过一天的顺手清掉（一天内的可能是别的检出正在用，不动）；清不掉不影响这一次
+  for (const name of readdirSync(tmpdir())) {
+    const old = join(tmpdir(), name);
+    if (!name.startsWith(SNAPSHOT_PREFIX) || old === file) continue;
+    try {
+      if (Date.now() - statSync(old).mtimeMs > 24 * 3_600_000) rmSync(old, { force: true });
+    } catch {
+      // 被别的进程占着或刚被删：下次再清
+    }
+  }
+}
+
+/** 每个进程只建一次（优先从快照载入，没有就冷建并存快照），之后克隆。 */
 async function migratedPgliteTemplate(): Promise<PGlite> {
   pgliteTemplate ??= (async () => {
-    const pg = new PGlite();
-    await migratePglite(drizzlePglite(pg, { schema }), { migrationsFolder: MIGRATIONS_FOLDER });
+    if (process.env.FLEET_TEST_PGLITE_SNAPSHOT === 'off') return coldMigratedPglite();
+    const file = join(tmpdir(), `${SNAPSHOT_PREFIX}${pgliteSnapshotKey()}.tar`);
+    const loaded = await loadPgliteSnapshot(file);
+    if (loaded) return loaded;
+    const pg = await coldMigratedPglite();
+    try {
+      await savePgliteSnapshot(pg, file);
+    } catch (err) {
+      // 存不了（盘满、临时目录只读）不挡测试：这个进程照样拿冷建的用，只是下一个文件还得冷建
+      process.stderr.write(
+        `PGlite 快照没存成（${err instanceof Error ? err.message : String(err)}），照冷建用\n`,
+      );
+    }
     return pg;
   })();
   return pgliteTemplate;
