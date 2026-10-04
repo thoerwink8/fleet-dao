@@ -591,6 +591,8 @@ export function emptyTotals() {
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
+    // shared 的 usage.ts 给三段的 runs 记「没有排队」的笔数；这页只读会话（session_runs），恒为 0
+    noQueue: 0,
   };
 }
 

@@ -1,6 +1,8 @@
 // 会话用户切号要看的（sessionOrgFacts）和要记的（recordEngineAudit），#157：带组织类型的池各自的额度窗口（和选路同一个判法，
 // 只算管得着在用路由的窗口）、这些池上还没结束的会话；切号、核对进操作记录，没成的必须写为什么。
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { startRun } from '../src/queries/runs.ts';
 import { openOrgRuns, recordEngineAudit, sessionOrgFacts } from '../src/queries/session-org.ts';
 import { auditLog, pools } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -16,7 +18,7 @@ import {
   later,
   MIN,
   NOW,
-  setStageOrder,
+  setRoutingLayers,
 } from './helpers.ts';
 
 let t: TestDb;
@@ -56,7 +58,10 @@ beforeEach(async () => {
     });
   }
   await addRoute(t.db, { id: 'relay-opus', poolId: 'relay-a', modelId: 'opus-5.5', hostId: 'mirasim' });
-  await setStageOrder(t.db, 'execute', ['car', 'solo', 'relay-opus']);
+  await setRoutingLayers(t.db, {
+    purposes: { execute: ['opus-5.5'] },
+    models: { 'opus-5.5': ['car', 'solo', 'relay-opus'] },
+  });
 });
 
 const fresh = { reading: 'measured', readAt: ago(MIN) } as const;
@@ -141,7 +146,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
   });
 
   it('池没有在用的路由：按模型组扣的窗口一个都不算，不分模型的照算', async () => {
-    await t.client.query(`update stage_policy_routes set enabled = false where route_id = 'car'`);
+    await t.client.query(`update routing_catalog set enabled = false where route_id = 'car'`);
     await addWindow(t.db, {
       poolId: 'claude-carpool',
       window: '7d_model',
@@ -166,19 +171,93 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       outcome: 'ok',
     });
     await addRun(t.db, { taskId: task.id, routeId: 'relay-opus' });
-    expect((await sessionOrgFacts(t.db, { now: NOW })).busy).toBe(2);
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 2, busyOneShot: 0 });
     // 切号前停会话时一轮轮看的就是这几个（#59）：按排队时刻排，分得清还在起的（没开工）和在跑的
     expect(await openOrgRuns(t.db)).toEqual([
-      { runId: running.id, poolId: 'claude-solo', queuedAt: running.queuedAt, startedAt: running.startedAt },
-      { runId: queued.id, poolId: 'claude-carpool', queuedAt: queued.queuedAt, startedAt: null },
+      {
+        runId: running.id,
+        poolId: 'claude-solo',
+        routeId: 'solo',
+        kind: 'session',
+        queuedAt: running.queuedAt,
+        startedAt: running.startedAt,
+      },
+      {
+        runId: queued.id,
+        poolId: 'claude-carpool',
+        routeId: 'car',
+        kind: 'session',
+        queuedAt: queued.queuedAt,
+        startedAt: null,
+      },
     ]);
   });
 
+  it('三段的一次性会话（runs 里开跑就留的那一行，#157）也数：只数带组织类型的池上、还没结束的；连不到路由的数不着', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    const fusion = await addRun(t.db, { taskId: task.id, routeId: 'solo', startedAt: ago(30 * MIN) });
+    const oneShot = randomUUID();
+    await startRun(t.db, {
+      id: oneShot,
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId: 'car',
+      startedAt: ago(5 * MIN),
+    });
+    // 收了场的、别的池上的、没写路由的（老行）：都不算
+    await startRun(t.db, {
+      segment: 'verify',
+      model: 'opus-5.5',
+      routeId: 'car',
+      startedAt: ago(20 * MIN),
+      endedAt: ago(MIN),
+      outcome: 'done',
+    });
+    await startRun(t.db, {
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId: 'relay-opus',
+      startedAt: ago(MIN),
+    });
+    await startRun(t.db, { segment: 'manual', model: 'opus-5.5', startedAt: ago(MIN) });
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 2, busyOneShot: 1 });
+    expect(await openOrgRuns(t.db)).toEqual([
+      {
+        runId: fusion.id,
+        poolId: 'claude-solo',
+        routeId: 'solo',
+        kind: 'session',
+        queuedAt: fusion.queuedAt,
+        startedAt: fusion.startedAt,
+      },
+      {
+        runId: oneShot,
+        poolId: 'claude-carpool',
+        routeId: 'car',
+        kind: 'oneShot',
+        queuedAt: ago(5 * MIN),
+        startedAt: ago(5 * MIN),
+      },
+    ]);
+    // 收场补完那一行（同一个编号）：不再算
+    await startRun(t.db, {
+      id: oneShot,
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId: 'car',
+      startedAt: ago(5 * MIN),
+      endedAt: NOW,
+      outcome: 'failed',
+    });
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 1, busyOneShot: 0 });
+  });
+
   it('库里没有带组织类型的池：空的，会话照数', async () => {
-    await t.client.query(`delete from stage_policy_routes where route_id in ('car', 'solo')`);
+    await t.client.query(`delete from routing_catalog where route_id in ('car', 'solo')`);
     await t.client.query(`delete from routes where id in ('car', 'solo')`);
     await t.client.query(`delete from pools where org_kind is not null`);
-    expect(await sessionOrgFacts(t.db, { now: NOW })).toEqual({ pools: [], busy: 0 });
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toEqual({ pools: [], busy: 0, busyOneShot: 0 });
   });
 });
 

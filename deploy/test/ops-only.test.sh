@@ -70,6 +70,13 @@ run_ops "$OPS" --opz
 check "退出码" "$RC" 2
 check "说了认不出" "$(has '认不出的参数')" 1
 
+echo "== 故意造错：新加一个测试文件、没排进任何一台 —— --ops 也报红（#662 第二意见第 2 轮）"
+: >"$REPO/deploy/test/zz-new.test.sh"
+run_ops "$OPS"
+check "退出码" "$RC" 1
+check "点名没排进台的" "$(has '没排进任何一台')" 1
+rm -- "$REPO/deploy/test/zz-new.test.sh"
+
 if ((fail)); then
   echo "ops-only：不通过"
   exit 1

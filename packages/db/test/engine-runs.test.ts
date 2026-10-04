@@ -8,14 +8,12 @@ import {
   latestRunOfSession,
   markSessionRunStarted,
   openSessionRun,
-  openSessionRuns,
   requestSessionStop,
   routeLaunchFacts,
-  routeOutcomesSince,
   taskContext,
 } from '../src/queries/engine.ts';
-import { writeFlowReplica } from '../src/queries/flow.ts';
-import { pools, sessionRuns } from '../src/schema/index.ts';
+import { setRoutingEffort } from '../src/routing-effort.ts';
+import { pools, routingCatalog, sessionRuns } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -404,93 +402,8 @@ describe('latestRunOfSession', () => {
   });
 });
 
-describe('openSessionRuns', () => {
-  it('只要还没结束的；给了 runAsUser 就只要那个会话用户的', async () => {
-    // 另一个用户用停用的 fleet-agent-dedicated：库里只剩历史行会带它
-    const retired = runId();
-    const carpool = runId();
-    const ended = runId();
-    await openSessionRun(t.db, {
-      id: retired,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
-      worktreePath: null,
-    });
-    await openSessionRun(t.db, {
-      id: carpool,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-carpool',
-      worktreePath: null,
-    });
-    await openSessionRun(t.db, {
-      id: ended,
-      taskId: null,
-      subtaskId: null,
-      stage: 'judge',
-      routeId: 'r1',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
-      worktreePath: null,
-    });
-    await markSessionRunStarted(t.db, { id: ended, startedAt: NOW, sessionId: 's', handle: null });
-    await finishSessionRun(t.db, { id: ended, outcome: 'ok', endedAt: later(MIN) });
-
-    expect(new Set((await openSessionRuns(t.db)).map((r) => r.id))).toEqual(new Set([retired, carpool]));
-    expect((await openSessionRuns(t.db, { runAsUser: 'fleet-agent-carpool' })).map((r) => r.id)).toEqual([
-      carpool,
-    ]);
-  });
-});
-
-describe('routeOutcomesSince', () => {
-  it('只要 since 之后结束的会话', async () => {
-    const early = runId();
-    const late = runId();
-    for (const [id, endedAt] of [
-      [early, ago(2 * HOUR)],
-      [late, ago(MIN)],
-    ] as const) {
-      await openSessionRun(t.db, {
-        id,
-        taskId: null,
-        subtaskId: null,
-        stage: 'execute',
-        routeId: 'r1',
-        whyRoute: 'x',
-        branch: null,
-        queuedAt: ago(3 * HOUR),
-        workflowId: null,
-        runAsUser: null,
-        worktreePath: null,
-      });
-      await markSessionRunStarted(t.db, { id, startedAt: ago(3 * HOUR), sessionId: id, handle: null });
-      await finishSessionRun(t.db, { id, outcome: 'ok', endedAt, routeOutcome: 'ok' });
-    }
-    const rows = await routeOutcomesSince(t.db, ago(HOUR));
-    expect(rows.map((r) => r.routeId)).toEqual(['r1']);
-    expect(rows[0]).toMatchObject({ stage: 'execute', outcome: 'ok', routeOutcome: 'ok' });
-  });
-});
-
 describe('taskContext', () => {
-  it('给出任务属于哪个仓、哪张 issue，连同仓的流程配置副本；测试命令只认副本里的（从没同步过就没有，不拿 test_command 列顶）', async () => {
+  it('给出任务属于哪个仓、哪张 issue，连同仓的测试命令（repos.test_command）', async () => {
     const repo = await addRepo(t.db, 'shop');
     const task = await addTask(t.db, repo.id, { issueNumber: 42, title: '标题', rawRequest: '原话' });
     expect(await taskContext(t.db, task.id)).toEqual({
@@ -500,48 +413,7 @@ describe('taskContext', () => {
       rawRequest: '原话',
       specDir: null,
       acceptance: [],
-      repo: {
-        id: repo.id,
-        owner: 'acme',
-        name: 'shop',
-        defaultBranch: 'main',
-        testCommand: null,
-        flow: {
-          repoId: repo.id,
-          owner: 'acme',
-          name: 'shop',
-          syncedAt: null,
-          error: null,
-          unread: null,
-          testCommand: null,
-          config: null,
-          source: null,
-          commit: null,
-          checkedAt: null,
-        },
-      },
-    });
-    await writeFlowReplica(
-      t.db,
-      repo.id,
-      {
-        write: 'synced',
-        config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
-        source: 'project',
-        commit: 'c'.repeat(40),
-        testCommand: 'pnpm test:changed',
-      },
-      NOW,
-    );
-    expect((await taskContext(t.db, task.id))?.repo).toMatchObject({
-      testCommand: 'pnpm test:changed',
-      flow: {
-        syncedAt: NOW,
-        testCommand: 'pnpm test:changed',
-        source: 'project',
-        // 整份原样交出去（Fusion 起步前由 core 判认不认得出），不补默认值
-        config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
-      },
+      repo: { id: repo.id, owner: 'acme', name: 'shop', defaultBranch: 'main', testCommand: 'pnpm check' },
     });
   });
 
@@ -572,7 +444,22 @@ describe('routeLaunchFacts', () => {
       upstreamModel: 'claude-opus-5-5',
       runAsUser: 'fleet-agent-carpool',
       orgKind: 'solo',
+      // 没挂进路由两层：没配档位
+      effort: null,
     });
+  });
+
+  it('思考档位照路由两层里这条路由那一行现读：没配是 null，驾驶舱改了下一次读到的就是新的', async () => {
+    await t.db
+      .insert(routingCatalog)
+      .values({ modelId: 'opus-5.5', routeId: 'r1', position: 0, enabled: true });
+    expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBeNull();
+    expect(await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'r1', effort: 'xhigh' })).toEqual({
+      ok: true,
+      before: null,
+      after: 'xhigh',
+    });
+    expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBe('xhigh');
   });
 
   it('路由不在回 null', async () => {

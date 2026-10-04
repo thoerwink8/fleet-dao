@@ -1,6 +1,6 @@
 // 引擎这两道题（错误分流、停滞预判）交给 packages/jev 问：题面、选项、每日上限、记账、只记不拦都走那边的题库
 // （bank.ts 的 ERROR_NEXT、STALL_STATE）。这里只做两件事：把引擎的题换成题库里那道、把判断换回引擎认的回答。
-// 每次问都现找后端（和 /healthz 的 judge 项同一个 resolveJevBackend）：改了 jev.json、调度台换了判断路由都不用重启，
+// 每次问都现找后端（和 /healthz 的 judge 项同一个 resolveJevBackend）：改了 jev.json、路由两层换了判断路由都不用重启，
 // 两边说法也一致。没接、起不来、没判出来一律交回「没判出来」，引擎照默认走，不当成「是」也不当成「否」。
 import type { Db } from '@fleet-dao/db';
 import {
@@ -70,7 +70,7 @@ export function replyOf<C extends string>(
 
 export interface EngineJevDeps {
   db: Db;
-  /** 现找后端（生产：resolveJevBackend 读 jev.json、判断阶段排第一的路由、钥匙文件）。 */
+  /** 现找后端（生产：resolveJevBackend 读 jev.json、路由两层里判断用途排第一的路由、钥匙文件）。 */
   resolve: () => Promise<JevSetup>;
   now?: () => Date;
   log?: (message: string, fields?: Record<string, unknown>) => void;

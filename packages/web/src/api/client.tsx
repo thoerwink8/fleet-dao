@@ -28,8 +28,11 @@ import type {
   Me,
   Notifications,
   Pools,
+  ReleaseVersion,
   Repo,
   Routing,
+  RoutingEfforts,
+  RoutingLayers,
   RunSteps,
   Setting,
   SettingKey,
@@ -41,6 +44,8 @@ import type {
   Timeline,
   UpdateChannelBody,
   UpdateDemoDefaultBody,
+  UpdatedRouteEffort,
+  UpdateRouteEffortBody,
   UpdateSettingBody,
   UpdateStagePolicyBody,
 } from './types';
@@ -65,6 +70,16 @@ export interface FleetApi {
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   answerAsk(askId: string, answer: string): Promise<void>;
   routing(): Promise<Routing>;
+  /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
+  routingLayers(): Promise<RoutingLayers>;
+  /** 每个模型下每条路由起会话的思考档位（#470）。 */
+  routingEfforts(): Promise<RoutingEfforts>;
+  /** 改一条路由的思考档位：effort 写 null = 回到没配（默认档）；expected 是改之前看到的，对不上 409。 */
+  updateRouteEffort(
+    modelId: string,
+    routeId: string,
+    body: UpdateRouteEffortBody,
+  ): Promise<UpdatedRouteEffort>;
   updateStagePolicy(stage: StageKind, body: UpdateStagePolicyBody): Promise<StagePolicy>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
@@ -78,6 +93,8 @@ export interface FleetApi {
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
+  /** /changelog 页「发布 v<N>」的版本号（#725）：后端现读 GitHub 里程碑，和 pnpm publish:pr 同一份判法。 */
+  releaseVersion(): Promise<ReleaseVersion>;
   /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
   demoLinks(): Promise<DemoLinks>;
   createDemoLink(body: CreateDemoLinkBody): Promise<CreatedDemoLink>;
@@ -127,11 +144,14 @@ export const keys = {
   timeline: (taskId: string) => ['timeline', taskId] as const,
   runSteps: (runId: string) => ['run-steps', runId] as const,
   routing: ['routing'] as const,
+  routingLayers: ['routing-layers'] as const,
+  routingEfforts: ['routing-efforts'] as const,
   pools: ['pools'] as const,
   jobs: ['jobs'] as const,
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
+  releaseVersion: ['release-version'] as const,
   demoLinks: ['demo-links'] as const,
 };
 
@@ -212,10 +232,34 @@ export function useRunSteps(runId: string | undefined) {
   });
 }
 
-/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。enabled 为假时不读（比如换模型的对话框没打开）。 */
+/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。 */
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000, enabled });
+}
+
+/**
+ * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每分钟重拉；
+ * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。enabled 为假时不读（比如换模型的对话框没打开）。
+ */
+export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.routingLayers,
+    queryFn: () => api.routingLayers(),
+    refetchInterval: 60_000,
+    enabled,
+  });
+}
+
+/** 每条路由的思考档位（#470）。没有推送（routing_catalog 不在推送名单里）：改的那一下自己重拉，别人改的靠定时重拉。 */
+export function useRoutingEfforts() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.routingEfforts,
+    queryFn: () => api.routingEfforts(),
+    refetchInterval: 60_000,
+  });
 }
 
 export function usePools({ enabled = true }: { enabled?: boolean } = {}) {
@@ -263,6 +307,15 @@ export function useSettings() {
 export function useDemoLinks() {
   const api = useApi();
   return useQuery({ queryKey: keys.demoLinks, queryFn: () => api.demoLinks() });
+}
+
+/**
+ * /changelog 页「发布 v<N>」的版本号：后端现读 GitHub 里程碑（不在推送名单里）。页面打开时读一次，点「发布」时再核一次
+ * （changelog.tsx 调 refetch），不靠定时重拉。
+ */
+export function useReleaseVersion() {
+  const api = useApi();
+  return useQuery({ queryKey: keys.releaseVersion, queryFn: () => api.releaseVersion() });
 }
 
 /**
@@ -340,36 +393,6 @@ export function useAnswerAsk() {
   });
 }
 
-/** 改一个阶段的路由：先改缓存让拖动跟手；后端说「别人刚改过」（409）就回滚并重拉。 */
-export function useUpdateStagePolicy() {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ stage, body }: { stage: StageKind; body: UpdateStagePolicyBody }) =>
-      api.updateStagePolicy(stage, body),
-    onMutate: async ({ stage, body }) => {
-      await qc.cancelQueries({ queryKey: keys.routing });
-      const prev = qc.getQueryData<Routing>(keys.routing);
-      if (prev) {
-        qc.setQueryData<Routing>(keys.routing, {
-          ...prev,
-          stages: prev.stages.map((s) =>
-            s.stage === stage ? { stage, routeIds: body.routeIds, pinned: body.pinned } : s,
-          ),
-        });
-      }
-      return { prev };
-    },
-    onError: (_e, _v, ctx) => {
-      if (ctx?.prev) qc.setQueryData(keys.routing, ctx.prev);
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.routing });
-      qc.invalidateQueries({ queryKey: ['audit'] });
-    },
-  });
-}
-
 export function useUpdateChannel() {
   const api = useApi();
   const qc = useQueryClient();
@@ -379,6 +402,30 @@ export function useUpdateChannel() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.routing });
       qc.invalidateQueries({ queryKey: keys.pools });
+    },
+  });
+}
+
+/**
+ * 改一条路由的思考档位（#470）。不先改缓存：档位要等后端照这条路由的执行方式判过（不认的 422、别人刚改过 409）才算数，
+ * 页面在等的那一下标「改着」；不管成没成都重拉一次，页面上永远是库里现在的值。
+ */
+export function useUpdateRouteEffort() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      modelId,
+      routeId,
+      body,
+    }: {
+      modelId: string;
+      routeId: string;
+      body: UpdateRouteEffortBody;
+    }) => api.updateRouteEffort(modelId, routeId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingEfforts });
+      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }
@@ -417,9 +464,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
   approvals: [['board'], ['task'], ['timeline']],
   // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
-  seat_boards: [],
-  quota_windows: [['pools']],
-  channels: [['routing'], ['pools']],
+  quota_windows: [['pools'], ['routing-layers']],
+  channels: [['routing'], ['pools'], ['routing-layers']],
   stage_policies: [['routing']],
   notifications: [['notifications']],
   audit_log: [['audit']],

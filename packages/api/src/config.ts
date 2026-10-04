@@ -23,7 +23,10 @@ export interface Config {
   agentTokenSecret: string;
   /** 没配时 GitHub 事件入口返回 503（只允许在开发环境缺）。 */
   githubWebhookSecret: string | null;
-  /** 没配时飞书登录返回 503（只允许在开发环境缺）。 */
+  /**
+   * 没配时飞书登录返回 503，登录只剩账密。生产上只有两种情况允许没有：开发环境，或 FLEET_FEISHU_LOGIN=off 明说这台不接飞书登录
+   * （本机档，见 feishuLogin）。
+   */
   feishu: { appId: string; appSecret: string } | null;
   /** Postgres 连接串（DATABASE_URL）。生产必须有；开发环境没有就用内存里的样例数据。 */
   databaseUrl: string | null;
@@ -138,12 +141,20 @@ export function loadConfig(env: Env): Config {
   if (!githubWebhookSecret && !dev) problems.push('缺 FLEET_GITHUB_WEBHOOK_SECRET');
 
   let feishu: Config['feishu'] = null;
-  if (env.FEISHU_APP_ID && env.FEISHU_APP_SECRET) {
+  if (feishuLogin(env, problems) === 'off') {
+    if (env.FEISHU_APP_ID || env.FEISHU_APP_SECRET) {
+      problems.push(
+        'FLEET_FEISHU_LOGIN=off（这台不接飞书登录），FEISHU_APP_ID / FEISHU_APP_SECRET 却配了：接不接说不清，二选一（不接就把这两项清空，接就去掉 off）',
+      );
+    }
+  } else if (env.FEISHU_APP_ID && env.FEISHU_APP_SECRET) {
     feishu = { appId: env.FEISHU_APP_ID, appSecret: env.FEISHU_APP_SECRET };
   } else if (env.FEISHU_APP_ID || env.FEISHU_APP_SECRET) {
     problems.push('FEISHU_APP_ID 和 FEISHU_APP_SECRET 要一起给');
   } else if (!dev) {
-    problems.push('缺 FEISHU_APP_ID / FEISHU_APP_SECRET');
+    problems.push(
+      '缺 FEISHU_APP_ID / FEISHU_APP_SECRET（这台确实不接飞书登录的——比如本机档——写 FLEET_FEISHU_LOGIN=off 明说，登录只剩账密）',
+    );
   }
 
   const databaseUrl = env.DATABASE_URL || null;
@@ -205,6 +216,19 @@ export function loadConfig(env: Env): Config {
     fleetTaskQueue,
     engineOff: !engineEnabled(env),
   };
+}
+
+/**
+ * 驾驶舱接不接飞书登录（FLEET_FEISHU_LOGIN）：不写、空着或 on——接，生产必须配飞书一对；off——这台不接（本机档：没有香港、
+ * 没有对外域名，deploy/local/desired-config.json 登记的差别），飞书一对必须空着，登录只剩账密（fleet-api set-password）。
+ * 只认这两个写法，写错了拒启动、不猜成哪一种；没写 off、飞书又没配，生产照旧拒启动——不默认放行。
+ */
+function feishuLogin(env: Env, problems: string[]): 'on' | 'off' {
+  const value = env.FLEET_FEISHU_LOGIN?.trim();
+  if (value === undefined || value === '' || value === 'on') return 'on';
+  if (value === 'off') return 'off';
+  problems.push(`FLEET_FEISHU_LOGIN 只能是 on 或 off（off = 这台不接飞书登录），现在是「${value}」`);
+  return 'on';
 }
 
 function parseEnv(value: string | undefined, problems: string[]): FleetEnv {

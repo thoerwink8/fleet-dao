@@ -2,7 +2,7 @@
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { asks, auditLog, feishuDrafts, githubEvents, progressEvents, tasks } from '@fleet-dao/db';
+import { asks, auditLog, feishuDrafts, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
   AskResponse,
@@ -193,45 +193,52 @@ describe('接口跑在真库上', () => {
     ]);
   });
 
-  it('GitHub 事件进来（真库）：原文落库、建任务行、拉起需求工作流；看板实时收到新任务；同一投递再来不重复建', async () => {
-    const data = devFixtures(T0);
-    data.repos = (data.repos ?? []).map((r) => ({ ...r, autoDispatchSince: '2026-09-25T07:00:00.000Z' }));
-    const h = await start({ data });
-    const session = await h.login();
-    const { reader } = await openEvents(h, session.cookie);
-    const buffer = await readUntil(reader, 'event: ready');
+  it('GitHub 事件进来（真库）：PR 事件原文落库、写镜像；同一投递再来不重复；issue 的事件记成不处理、不建任务', async () => {
+    const h = await start({ data: devFixtures(T0) });
     const founderA = { login: 'founder-a', id: 1001, type: 'User' };
+    const repository = { full_name: 'example/canary' };
     const payload = {
+      action: 'opened',
+      pull_request: {
+        number: 7,
+        state: 'open',
+        updated_at: '2026-09-25T07:30:00Z',
+        user: founderA,
+        head: { ref: 'fleet/7-a', sha: 'a'.repeat(40), repo: repository },
+        base: { ref: 'main', repo: repository },
+      },
+      sender: founderA,
+      repository,
+    };
+    const res = await deliverGithub(h, 'pull_request', payload, { delivery: 'pg-1' });
+    expect(await res.json()).toMatchObject({ ok: true, verdict: 'accepted' });
+    expect(
+      await deliverGithub(h, 'pull_request', payload, { delivery: 'pg-1' }).then((r) => r.json()),
+    ).toMatchObject({ verdict: 'duplicate' });
+    const [event] = await t.db.select().from(githubEvents).where(eq(githubEvents.deliveryId, 'pg-1'));
+    expect(event).toMatchObject({ status: 'accepted', attempts: 1, payload });
+    expect(h.accepted.map((e) => e.deliveryId)).toEqual(['pg-1']);
+
+    // issue 的事件门口不收（单子由引擎自己拉）：记成不处理，不建任务
+    const issue = {
       action: 'opened',
       issue: {
         number: 40,
-        title: '给 README 加一行当前时间',
-        body: '在 README 末尾加一行当前时间',
+        title: '给 README 加一行',
         state: 'open',
-        user: founderA,
         created_at: '2026-09-25T07:30:00Z',
-        updated_at: '2026-09-25T07:30:00Z',
+        user: founderA,
       },
       sender: founderA,
-      repository: { full_name: 'example/canary' },
+      repository,
     };
-    const res = await deliverGithub(h, 'issues', payload, { delivery: 'pg-1' });
-    expect(await res.json()).toMatchObject({ verdict: 'accepted', note: 'task=created, workflow=started' });
-    expect(
-      await deliverGithub(h, 'issues', payload, { delivery: 'pg-1' }).then((r) => r.json()),
-    ).toMatchObject({
-      verdict: 'duplicate',
-    });
-
-    const rows = await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40));
-    expect(rows.map((r) => ({ state: r.state, priority: r.priority, requestedBy: r.requestedBy }))).toEqual([
-      { state: 'queued', priority: 3, requestedBy: IDS.founderA },
-    ]);
-    const [event] = await t.db.select().from(githubEvents).where(eq(githubEvents.deliveryId, 'pg-1'));
-    expect(event).toMatchObject({ status: 'accepted', attempts: 1, payload });
-    expect(h.starts.map((s) => s.taskId)).toEqual([rows[0]?.id]);
-    await readUntil(reader, `"table":"tasks","id":"${rows[0]?.id}"`, buffer);
-    await reader.cancel();
+    expect(await deliverGithub(h, 'issues', issue, { delivery: 'pg-2' }).then((r) => r.json())).toMatchObject(
+      {
+        verdict: 'ignored',
+        reason: 'event_not_handled',
+      },
+    );
+    expect(await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40))).toHaveLength(0);
   });
 
   it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到如实报红，飞书草稿开单没接上报「未接」；LISTEN 停了实时推送也报红', async () => {
@@ -323,4 +330,86 @@ describe('接口跑在真库上', () => {
     const after = (await (await h.cockpit.request('/healthz')).json()) as { checks: Record<string, unknown> };
     expect(after.checks.realtime).toMatchObject({ ok: false, code: 'not_listening' });
   });
+});
+
+describe('三段的流水（runs 表）跑在真库上：任务详情按段、按模型，读不到的逐笔写明原因', () => {
+  async function detailOf(h: Awaited<ReturnType<typeof pgHarness>>, taskId: string) {
+    const session = await h.login();
+    const res = await h.cockpit.request(`/api/tasks/${taskId}`, { headers: { cookie: session.cookie } });
+    expect(res.status).toBe(200);
+    return TaskDetailResponse.parse(await res.json());
+  }
+  const reasons = (run: { unread: { item: string; reason: string }[] } | undefined) =>
+    Object.fromEntries((run?.unread ?? []).map((n) => [n.item, n.reason]));
+
+  it('从库里读：task_id 对上的、按单号兜底的（标明）都在；派工档、耗时、按段每段再按模型；没记的 token、花费写明没记到', async () => {
+    const d = await detailOf(await start(), IDS.task13);
+    expect(d.segmentRuns.map((r) => [r.id, r.segment, r.tier ?? null, r.matchedBy])).toEqual([
+      [IDS.seg13scope, 'scope', null, 'task'],
+      [IDS.seg13manual1, 'manual', 'fast', 'task'],
+      [IDS.seg13manual2, 'manual', 'fast', 'task'],
+      [IDS.seg13verify, 'verify', null, 'issueNumber'],
+    ]);
+    expect(reasons(d.segmentRuns[1])).toEqual({ tokens: '没记到：缓存读、缓存写', cost: '花费没记到' });
+    expect(d.segmentRuns[2]).toMatchObject({
+      durationMs: 25 * 60_000,
+      costUsd: 1.86,
+      billing: 'subscription',
+    });
+    expect(d.usage.bySegment.map((s) => [s.segment, s.runs, s.byModel.map((m) => m.model)])).toEqual([
+      ['scope', 1, ['opus-5.5']],
+      ['manual', 2, ['kimi-k3', 'opus-5.5']],
+      ['verify', 1, ['gpt-5.6']],
+    ]);
+    expect(d.usage.total).toMatchObject({ runs: 4, noQueue: 4, missingCost: 2 });
+  });
+
+  it('【失败】起止缺一头：库里一段 ended_at、outcome 都空，单子却已经结束——不当在跑，耗时没读到并写明原因', async () => {
+    const h = await start();
+    await t.db.insert(runs).values({
+      id: 'd1000000-0000-4000-8000-0000000130ab',
+      segment: 'verify',
+      taskId: IDS.task13,
+      model: 'gpt-5.6',
+      startedAt: new Date(T0.getTime() - 505 * 60_000),
+    });
+    const d = await detailOf(h, IDS.task13);
+    const stale = d.segmentRuns.find((r) => r.id === 'd1000000-0000-4000-8000-0000000130ab');
+    expect(stale?.running).toBe(false);
+    expect(reasons(stale).time).toContain('没记结束时刻');
+    expect(d.usage.bySegment.find((s) => s.segment === 'verify')).toMatchObject({ runs: 2, missingTime: 1 });
+  });
+
+  it(
+    '【失败】段名认不出：库里的约束挡不到的数据（约束被放宽、整表导进来）读出来也不猜成哪一段，写明原样',
+    async () => {
+      // 单独一份库：要拆掉 runs_segment_known 才写得进认不出的段名，不能动别的用例共用的那份
+      const loose = await createTestDb();
+      try {
+        await loose.client.exec('alter table runs drop constraint runs_segment_known');
+        const h = await pgHarness(loose);
+        try {
+          await loose.db.insert(runs).values({
+            id: 'd1000000-0000-4000-8000-0000000130aa',
+            segment: 'fusion-execute' as 'manual',
+            taskId: IDS.task13,
+            model: 'opus-5.5',
+            startedAt: new Date(T0.getTime() - 500 * 60_000),
+            endedAt: new Date(T0.getTime() - 490 * 60_000),
+            outcome: 'done',
+          });
+          const d = await detailOf(h, IDS.task13);
+          const odd = d.segmentRuns.find((r) => r.id === 'd1000000-0000-4000-8000-0000000130aa');
+          expect(odd?.segment).toBeNull();
+          expect(reasons(odd).segment).toContain('fusion-execute');
+          expect(d.usage.bySegment.at(-1)).toMatchObject({ segment: null, runs: 1 });
+        } finally {
+          await h.stop();
+        }
+      } finally {
+        await loose.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 });

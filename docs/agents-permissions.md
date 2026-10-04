@@ -103,7 +103,7 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 2. **`autoMode` 在后**：分类器按 `environment` 判「这是不是外面」、按 `soft_deny` / `hard_deny` 判危险、按 `allow` 放行例外。`deny` 和 `ask` 排在分类器之前，谁也覆盖不了。
 3. 所以一条命令被拦，先看是哪一层拦的：说 `Denied by auto mode classifier` 是第二层，要动的是 `autoMode`；说「权限被拒」是第一层，要动的是 `permissions`。
 
-改这一段是改标准（这份清单在 `packages/conventions/standard-paths.json` 里）：PR 正文写「人闸：改标准」，创始人同意才合。合进主线后各台开会话时自动同步，机器上重开会话才生效。
+改这一段是改标准（这份清单在 `packages/conventions/standard-paths.json` 里）：PR 正文「还欠什么」写「人闸：改标准」，创始人同意才合。合进主线后各台开会话时自动同步，机器上重开会话才生效。
 
 ## 托管块和「不删你自己加的」
 
@@ -139,7 +139,7 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 
 1. 改 `agents/config/claude-permissions.json`：加就加进 `allow` / `deny`；撤就从里面删掉、写进 `retired`（两边都摘）或 `retiredDeny`（只从 deny 里摘，放宽时把旧拒绝撤了、同一条又放进 allow 用它），各机器下一次同步才会摘掉。
    `autoMode` 的 `environment` / `allow` 直接改那两条数组，**`"$defaults"` 别动**（见上面那一节）；只写「日常」，推送、删除、发布、强推这些不写进去（「取凭证走保险箱」是取法的日常，写进去了，「到处翻找凭证」不写）。撤一条就从数组里删掉——`autoMode` 没有 `retired` 那一套：它按并集合并，机器上原来装过的条目不会自动摘掉，要摘得在机器上手动删（这类条目不多，且多半是各台自己加的）。
-2. 这份文件在 `packages/conventions/standard-paths.json` 里，改它是「改标准」：PR 正文写「人闸：改标准」，创始人同意才合。
+2. 这份文件在 `packages/conventions/standard-paths.json` 里，改它是「改标准」：PR 正文「还欠什么」写「人闸：改标准」，创始人同意才合。
 3. 合进主线后，各开发机开会话时自动同步，或者手动 `pnpm agents:sync`。
 
 ## 法国

@@ -8,25 +8,35 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { TierEnum } from './tier.ts';
 
 /** 健康检查 / 驾驶舱里显示的「未接」那一句（外部看得到）。 */
 export const RUNS_NOT_WIRED = 'runs 表还没建（#556）';
 
-/**
- * 会话结束要记的那一笔。zod 钉住形状：调进来的、占位要落盘的、#556 真实实现要入库的，都是这一份。
- * 所有「读不到就不给」的字段（#216：token、costUsd 不当 0）都 optional。
- */
-export const RunRecordSchema = z.object({
+/** runs 一行的各列（下面 RunRecordSchema、RunStartSchema 都从这里取；zod 的 pick 不收带 refine 的对象）。 */
+const RunRecordFields = z.object({
   /** 这一次会话的编号（UUID，调用方起）。同一 runId 记第二笔由 #556 的真实实现按幂等键去重。 */
   runId: z.string().min(1),
   /** 哪一段：scope | manual | verify。 */
   segment: z.enum(['scope', 'manual', 'verify']),
+  /** 这一笔挂在哪张单上：库里的 tasks.id（uuid）。不属于任何需求的会话（巡逻、实验）不给。 */
+  taskId: z.guid().optional(),
   /** 需求单号（GitHub issue #）；不属于任何需求的会话（巡逻、实验）可空。 */
   issueNumber: z.number().int().positive().optional(),
   /** 挑好的模型（路由给的 modelId；不是家族的）。 */
   model: z.string().min(1),
   /** 挑好的渠道（poolId / routeId 的「渠道」那半截）；读不到不给。 */
   channel: z.string().min(1).optional(),
+  /** 跑在哪条路由上（选路给的）：切号靠它认出这一段跑在哪个池（#157）；不经选路起的不给。 */
+  routeId: z.string().min(1).optional(),
+  /** 派工档（runner/tier.ts 的三档）：只有动手段分档（决定 0010 第 3 条），对题、验收带了就拒收。 */
+  tier: TierEnum.optional(),
+  /** 跑在哪条 Temporal 工作流里（任务工作流是 taskWorkflowId(仓, 单号)）；不在工作流里跑的不给。 */
+  workflowId: z.string().min(1).optional(),
+  /** 这一段对着的 PR；还没开 PR 的（动手第一轮）不给。 */
+  prNumber: z.number().int().positive().optional(),
+  /** 会话干活的分支。 */
+  branch: z.string().min(1).optional(),
   /** 起止（ISO 8601）。 */
   startedAt: z.string().min(1),
   endedAt: z.string().min(1),
@@ -38,17 +48,68 @@ export const RunRecordSchema = z.object({
   costUsd: z.number().nonnegative().optional(),
   /** 内存峰值（MiB）。只对挂在 cgroup 里的会话可读；本机不给。 */
   memoryPeakMb: z.number().nonnegative().optional(),
-  /** 谁把它收了：done / timeout / killed / spawn_failed / admission_blocked。 */
-  outcome: z.enum(['done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed']),
+  /**
+   * 谁把它收了：done / timeout / killed / spawn_failed / admission_blocked / failed；org_switch = 切号先停下这一段，
+   * 切完任务工作流在原分支上重跑（#59，不算失败）。
+   */
+  outcome: z.enum(['done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch']),
+  /**
+   * 这一次算不算这条路由的账（runner/evidence.ts 的 routeOutcomeOf：跑通了 ok、失败分流判路由的错 fail、别的 neutral）：
+   * 选路的熔断、战绩读它（#758）。收场必带，漏了当场拒，不让熔断看不见这一次。
+   */
+  routeOutcome: z.enum(['ok', 'fail', 'neutral']),
   /** 失败原因（exit code、错误消息），outcome != 'done' 时给。 */
   failureReason: z.string().optional(),
 });
+
+/** 只有动手段分档：对题不分档、验收是冷调用，带了派工档就是调用方弄错了。 */
+function onlyManualTiered(run: { segment: string; tier?: string | undefined }, ctx: z.RefinementCtx): void {
+  if (run.tier !== undefined && run.segment !== 'manual') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['tier'],
+      message: `只有动手段分档（决定 0010 第 3 条），${run.segment} 段不该带派工档「${run.tier}」`,
+    });
+  }
+}
+
+/**
+ * 会话结束要记的那一笔。zod 钉住形状：调进来的、占位要落盘的、#556 真实实现要入库的，都是这一份。
+ * 所有「读不到就不给」的字段（#216：token、costUsd、PR 号不当 0，分支不当空串）都 optional。
+ * 每一样的取值照库里 runs 表的约束收（task_id 是 uuid、派工档三档、PR 号正数……）：对不上的在这里就拒，不等写库时被拒。
+ */
+export const RunRecordSchema = RunRecordFields.superRefine(onlyManualTiered);
 export type RunRecord = z.infer<typeof RunRecordSchema>;
+
+/**
+ * 开跑那一刻记的一行（还没结束：没有止、没有结局、没有用量）：字段和 RunRecord 同名同义。
+ * 记到谁名下的几样（单子、派工档、工作流、PR、分支）开跑就带上：在跑的那一笔才挂得上单，不靠单号兜底。
+ */
+export const RunStartSchema = RunRecordFields.pick({
+  runId: true,
+  segment: true,
+  taskId: true,
+  issueNumber: true,
+  model: true,
+  channel: true,
+  routeId: true,
+  tier: true,
+  workflowId: true,
+  prNumber: true,
+  branch: true,
+  startedAt: true,
+}).superRefine(onlyManualTiered);
+export type RunStart = z.infer<typeof RunStartSchema>;
 
 /** 真实实现（#556 起）和 NotWired 占位都长这个样。 */
 export interface RunsWriter {
   /** 装配时给的「未接」标记：配了就说明这块压根没接上；真实现不设。 */
   readonly notWired?: string;
+  /**
+   * 开跑：留一行没结束的（#157，切号数在跑的会话靠它）。写不进去要抛——调用方就不起会话，不让一个切号看不见的会话跑起来。
+   */
+  start(run: RunStart): Promise<void>;
+  /** 收场（或没开跑就收了，比如内存放不下）：整行记下；开跑时留过那一行的，补完同一行。 */
   record(run: RunRecord): Promise<void>;
 }
 
@@ -61,6 +122,10 @@ export function notWiredRuns(deps: { tmpDir: string; now?: () => Date }): RunsWr
   const now = deps.now ?? (() => new Date());
   return {
     notWired: RUNS_NOT_WIRED,
+    async start(run) {
+      // 只挡形状、不落盘：占位不进库，切号（只读库）本来就看不见它；收场那一笔是整行，开跑这一行它都有
+      RunStartSchema.parse(run);
+    },
     async record(run) {
       // 先把进来的形状挡一道——写进 JSONL 的一定是钉死的那份（schema 漏字段当场红、不许降级）。
       const parsed = RunRecordSchema.parse(run);

@@ -43,12 +43,6 @@ function setup(over: { alerts?: AlertWorkPort; store?: Store } = {}) {
       opened += 1;
       return { alerts, close: async () => {} };
     },
-    openIssuePlans: async () => {
-      throw new Error('alert 不该读 GitHub');
-    },
-    openTemporal: async () => {
-      throw new Error('alert 不该连 Temporal');
-    },
     now: () => new Date(),
   };
   const run = async (...args: string[]) => {

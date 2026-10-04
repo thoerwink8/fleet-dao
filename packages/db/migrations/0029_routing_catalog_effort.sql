@@ -1,0 +1,2 @@
+ALTER TABLE "routing_catalog" ADD COLUMN "effort" text;--> statement-breakpoint
+ALTER TABLE "routing_catalog" ADD CONSTRAINT "routing_catalog_effort_known" CHECK ("routing_catalog"."effort" is null or "routing_catalog"."effort" in ('low', 'medium', 'high', 'xhigh', 'max'));

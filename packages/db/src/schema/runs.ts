@@ -7,9 +7,17 @@
 // - 三段各跑一次，字段照 RunRecord：issueNumber / channel / token / costUsd / memoryPeakMb 读不到就不写，
 //   **不拿 0 顶**（#216）；没读到就是 NULL，不是 0。
 // - segment 是「scope | manual | verify」三择一（#554-1 的 RunRecord segment 枚举），写其他任何值都不收。
-// - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed」（#554-1 的枚举），
-//   还在跑的为空；结束了（ended_at 非空）就必须有 outcome，反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
+// - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed | org_switch」（#554-1 的枚举，
+//   org_switch 是切号先停下这一段、切完在原分支上重跑，#59），还在跑的为空；结束了（ended_at 非空）就必须有 outcome，
+//   反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
 // - retryOf 自引用，指到不存在的行要拒收（外键）。
+// - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话、
+//   选路数池的并发（#735）都靠 route_id 连到池（db 的 queries/pool-runs.ts），没写 route_id 的行两边都看不见。
+// - tier 是派工档，叫法和取值照 packages/engine/src/runner/tier.ts 的 TierEnum（fast | medium | heavyweight），
+//   引擎测试 test/runner/tier.test.ts 钉着两边一致；只有动手段分档（决定 0010 第 3 条），对题、验收（冷调用）不分档，留空。
+// - route_outcome 是这一次算不算路由的账（ok | fail | neutral），和 session_runs.route_outcome 同一个口径，选路的熔断、战绩
+//   两张表并起来读（queries/pool-runs.ts，#758）。收场时由引擎判好写下（runner/evidence.ts）；还在跑的不许有；空的（老行、
+//   Fusion 验证那一笔流水）按不算账读，不进熔断、战绩。
 // 表名就叫 runs（和 Fusion 的 sessionRuns / verifyRounds 分开：Fusion 那两张老表本切片不动）。
 import { sql } from 'drizzle-orm';
 import {
@@ -24,6 +32,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { routes } from './catalog.ts';
 import { tasks } from './work.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
@@ -40,8 +49,20 @@ export const RUN_OUTCOME_VALUES = [
   'spawn_failed',
   'admission_blocked',
   'failed',
+  'org_switch',
 ] as const;
 export type RunOutcomeValue = (typeof RUN_OUTCOME_VALUES)[number];
+
+/** 派工档：和 engine runner/tier.ts 的 TierEnum 完全一致（快档 / 中档 / 主力档）。没记的不写（NULL）。 */
+export const RUN_TIERS = ['fast', 'medium', 'heavyweight'] as const;
+export type RunTier = (typeof RUN_TIERS)[number];
+
+/**
+ * 这一次算不算这条路由的账（喂选路的熔断和战绩）：ok = 跑通了；fail = 失败分流判是路由的错；neutral = 不算（我们停的、
+ * 没起来、内存放不下、分流判不是路由的错）。和 session_runs.route_outcome 取值、口径都一样。
+ */
+export const RUN_ROUTE_OUTCOMES = ['ok', 'fail', 'neutral'] as const;
+export type RunRouteOutcome = (typeof RUN_ROUTE_OUTCOMES)[number];
 
 export const runs = pgTable(
   'runs',
@@ -57,11 +78,20 @@ export const runs = pgTable(
     model: text('model').notNull(),
     /** 挑好的渠道（poolId / routeId 的「渠道」那半截）；读不到不给。 */
     channel: text('channel'),
+    /**
+     * 跑在哪条路由上（选路给的 routeId）：切号靠它认出这一段跑在哪个池、那个池挂不挂组织（#157），选路靠它把这一段算进池的并发
+     * （#735）。老行、不经选路起的为空；指到不存在的路由拒收（外键），免得连不到池、把在跑的会话漏数。
+     */
+    routeId: text('route_id').references(() => routes.id),
+    /** 派工档（动手段按改动面分的档）；对题、验收不分档，没记的也是空——读的一方按段判是「不分档」还是「没记」。 */
+    tier: text('tier').$type<RunTier>(),
     /** 起止；ended_at 还在跑的为空（和 outcome 的空一一对应，见约束）。 */
     startedAt: timestamp('started_at', tz).notNull(),
     endedAt: timestamp('ended_at', tz),
     /** 结局；和 ended_at 的空一一对应，还在跑就是空。 */
     outcome: text('outcome').$type<RunOutcomeValue>(),
+    /** 这一次算不算这条路由的账（RUN_ROUTE_OUTCOMES）：收场时写；还在跑的为空，空的结束行按不算账读。 */
+    routeOutcome: text('route_outcome').$type<RunRouteOutcome>(),
     /** token / 花费 / 内存：读不到不给，不当 0（#216）。 */
     inputTokens: bigint('input_tokens', { mode: 'number' }),
     outputTokens: bigint('output_tokens', { mode: 'number' }),
@@ -87,12 +117,19 @@ export const runs = pgTable(
   },
   (t) => [
     check('runs_segment_known', sql`${t.segment} in ('scope', 'manual', 'verify')`),
+    check('runs_tier_known', sql`${t.tier} is null or ${t.tier} in ('fast', 'medium', 'heavyweight')`),
     check(
       'runs_outcome_known',
-      sql`${t.outcome} is null or ${t.outcome} in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed')`,
+      sql`${t.outcome} is null or ${t.outcome} in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch')`,
     ),
     //故事和 session_runs_outcome_iff_ended 一样：结束了就必须有结局，有结局就必须已结束。
     check('runs_outcome_iff_ended', sql`(${t.endedAt} is null) = (${t.outcome} is null)`),
+    check(
+      'runs_route_outcome_known',
+      sql`${t.routeOutcome} is null or ${t.routeOutcome} in ('ok', 'fail', 'neutral')`,
+    ),
+    // 还在跑的没有「算不算路由的账」：结论只在收场时下
+    check('runs_route_outcome_after_end', sql`${t.routeOutcome} is null or ${t.endedAt} is not null`),
     check('runs_ended_after_start', sql`${t.endedAt} is null or ${t.endedAt} >= ${t.startedAt}`),
     check('runs_issue_positive', sql`${t.issueNumber} is null or ${t.issueNumber} > 0`),
     check('runs_pr_positive', sql`${t.prNumber} is null or ${t.prNumber} > 0`),

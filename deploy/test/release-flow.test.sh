@@ -2,8 +2,8 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # APP_UNITS、SHA 这些是给 source 进来的 release.sh 里的函数读写的
 # deploy/release.sh 的来回：换版、健康检查不过自动退回、一键退回、不退到判过不健康的版本、只留最近几版；
-# 飞书网关什么时候发、什么时候不动香港，网关的健康检查怎么判；装目录的每条失败路径。
-# 取代码、构建、迁移、健康检查、往香港传文件、香港网关的入口、目录装载器和库的读回换成桩（按提交号预先定好健康不健康）；
+# 飞书网关什么时候发、什么时候不动香港，网关的健康检查怎么判；装目录、装路由两层的每条失败路径。
+# 取代码、构建、迁移、健康检查、往香港传文件、香港网关的入口、目录装载器、路由两层装载器和库的读回换成桩（按提交号预先定好健康不健康）；
 # 切 current、记历史、挑上一版、清旧版、迁移把关、装目录的检查、发网关的决定、网关健康检查用的是 release.sh 里的真代码，
 # 目录落在临时目录、不连网；
 # 最后一段以 root 真起一个临时服务
@@ -61,9 +61,16 @@ migrate() {
 }
 api_report_before() { :; }
 SYNCED=0 # 往香港发过几次静态文件
-PROBED=0 # 试通过几次往香港传静态文件的路
+PROBED=0   # 试通过几次往香港传静态文件的路
+WEB_DOWN=0 # 1 = 往香港传静态文件的路试不通
 sync_web() { SYNCED=$((SYNCED + 1)); }
-web_reachable() { PROBED=$((PROBED + 1)); }
+web_reachable() {
+  PROBED=$((PROBED + 1))
+  if ((WEB_DOWN)); then
+    red "桩：试着往香港传文件没通"
+    return 1
+  fi
+}
 # 香港网关的入口（fleet-gateway-deploy）换成桩：状态从 $GWD 下的文件读，收下、切过去也落在那里（发布脚本多在命令替换里调它，
 # 变量带不回来）；调过什么一行一条记进 $GWD/calls：「命令 提交号头一个字」
 GWD=$TMP/gw
@@ -719,6 +726,159 @@ check "这一版没有装载器：说了一声" "$(said '这一版没有目录�
 # runuser、pg_admin 的桩留着：后面那段不用它们（unset 掉 shellcheck 会当成桩从没被调过）
 NODE=$(command -v node) || NODE=""
 
+echo "== 装路由两层（#574）：目录装完之后、切版本之前；读不回、装载器报错、装完是 0 行都停下不切；同一版再发说已齐；老版本没有它照切"
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+GATE=()
+MIG=()
+DB_MIG=0
+FLEET_HK_PARTS=""
+# 两个装载器共用「这一版的 node」，桩按第一个参数分：目录装载器一律答已齐（上一段专测它）；路由两层装载器照 mode 答
+# （changed 装进去了、same 已齐、别的就报错），每次记一行「参数|当前目录|库连接」进 calls；order 记两个装载器谁先跑、
+# 跑的那一刻 current 指着哪一版
+RFAKE=$TMP/routing-fake
+mkdir -p "$RFAKE"
+cat >"$RFAKE/node" <<'EOF'
+#!/bin/bash
+d=$(dirname "$0")
+case $1 in
+packages/db/src/bin/catalog.ts)
+  printf 'catalog current=%s\n' "$(readlink ../current 2>/dev/null)" >>"$d/order"
+  echo "库里已经齐了，这次一行没改"
+  ;;
+packages/db/src/bin/routing.ts)
+  printf '%s|%s|%s\n' "$*" "$PWD" "${DATABASE_URL:-}" >>"$d/calls"
+  printf 'routing current=%s\n' "$(readlink ../current 2>/dev/null)" >>"$d/order"
+  case $(cat "$d/mode") in
+  changed)
+    echo "补了用途 → 模型 48 行（9 个用途：triage、spec、plan、execute、ui、review、verify、research、judge）"
+    echo "补了模型 → 路由 10 行（7 个模型：opus-5.5、gpt-5.6-luna、kimi-k3、deepseek-flash、cursor-auto、grok-4.7、jev-1.13）"
+    ;;
+  same) echo "路由两层已齐，这次一行没改；库里已有、没动的：用途 9 个、模型 7 个（驾驶舱改过的不覆盖）" ;;
+  *)
+    echo "默认骨架和库里对不上，一行没写"
+    echo "- 路由 grok:grok-4.7:grok 库里没有"
+    exit 1
+    ;;
+  esac
+  ;;
+*)
+  echo "桩：认不出的命令 $*" >&2
+  exit 99
+  ;;
+esac
+EOF
+chmod +x "$RFAKE/node"
+NODE=$RFAKE/node
+# 读回的桩：目录那几张表一律「都齐、装载器没改」；路由两层那两张，装载器这一轮还没跑时按 R_BEFORE 答，跑过了按 R_AFTER 答：
+# empty 两张都是 0 行，full 装齐了（48、10），fail 连不上库，garbage 答的不是数，zero-1 / zero-2 第几张是 0 行，grown 多出几行
+R_BEFORE=empty
+R_AFTER=full
+pg_admin() {
+  if [[ "$*" != *routing_purpose_models* ]]; then
+    printf '6|9|8|58|0\n'
+    return 0
+  fi
+  local mode=$R_BEFORE
+  if [[ -s "$RFAKE/calls" ]]; then mode=$R_AFTER; fi
+  case $mode in
+  fail)
+    echo 'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed' >&2
+    return 2
+    ;;
+  garbage) echo 'ERROR:  relation "routing_catalog" does not exist' ;;
+  empty) echo '0|0' ;;
+  full) echo '48|10' ;;
+  zero-1) echo '0|10' ;;
+  zero-2) echo '48|0' ;;
+  grown) echo '3|1' ;;
+  esac
+}
+with_loaders() { # 提交号：构建这一版（桩），带上目录、路由两层两个装载器
+  build_release "$1" >/dev/null
+  mkdir -p "$RELEASES/$1/packages/db/src/bin"
+  : >"$RELEASES/$1/packages/db/src/bin/catalog.ts"
+  : >"$RELEASES/$1/packages/db/src/bin/routing.ts"
+}
+routing_runs() { if [[ -f "$RFAKE/calls" ]]; then grep -c . "$RFAKE/calls"; else echo 0; fi; }
+rround() { # 路由两层装载器这一轮怎么答；清掉上一轮的记录
+  printf '%s' "$1" >"$RFAKE/mode"
+  rm -f -- "$RFAKE/calls" "$RFAKE/order"
+  reset
+}
+with_loaders "$A"
+rround changed
+do_release "$A" >"$TMP/out"
+check "路由两层装进去了：切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
+IFS='|' read -r got_args got_cwd got_db <"$RFAKE/calls"
+check "路由两层装载器收到的：这一版的命令，不带别的参数（骨架是这一版自己带的）" "$got_args" "packages/db/src/bin/routing.ts"
+check "路由两层装载器在这一版的目录里跑" "$([[ "$got_cwd" == */releases/"$A" ]] && echo 是 || echo "不是（$got_cwd）")" 是
+check "路由两层装载器连的是本机库" "$got_db" "postgres:///fleet"
+check "先装目录、再装路由两层，都在切版本之前（current 还没指着 A）" "$(tr '\n' '|' <"$RFAKE/order")" \
+  "catalog current=|routing current=|"
+check "路由两层装载器的话打出来了（补了几行）" "$(said '补了模型 → 路由 10 行')" 1
+check "记一处改动，带上读回的行数" \
+  "$(printf '%s\n' "${CHANGES[@]}" | grep -c '^路由两层装进库（用途 → 模型 48 行、模型 → 路由 10 行）$')" 1
+R_BEFORE=full
+rround same
+do_release "$A" >"$TMP/out"
+check "同一版再发：路由两层装载器照样跑，没有红、改动 0 处" "$(routing_runs):${#REDS[@]}:${#CHANGES[@]}" "1:0:0"
+check "同一版再发：说的是路由两层已齐" "$(said '路由两层已齐，这次一行没改（用途 → 模型 48 行、模型 → 路由 10 行）')" 1
+with_loaders "$B"
+before=$(events)
+rblocked() { # 说明 红里要有的字 装载器该跑几次：发 B，应当停下、不切、历史不变
+  do_release "$B" >"$TMP/out"
+  check "$1：不切，还在 A" "$(current_sha)" "$A"
+  check "$1：报红，说清是哪一种" "$(reds_with "$2")" 1
+  check "$1：历史没变" "$(events)" "$before"
+  check "$1：路由两层装载器跑了 $3 次" "$(routing_runs)" "$3"
+}
+R_BEFORE=fail
+rround changed
+rblocked "路由两层装之前连不上库" "装路由两层之前读不到库 fleet 里那两张表的行数：没装，没切版本" 0
+R_BEFORE=garbage
+rround changed
+rblocked "路由两层装之前读回的不是数" "装路由两层之前读不到库 fleet 里那两张表的行数" 0
+R_BEFORE=empty
+R_AFTER=empty
+rround fail
+rblocked "路由两层装载器报错（骨架里的路由库里没有），读回和装之前一样" \
+  "路由两层没装成（装载器退出码 1，原话见上；读回核过：两张表的行数和装之前一样；没切版本）：默认骨架和库里对不上，一行没写" 1
+check "路由两层装载器报错：它的原话一条条打出来了" "$(said '- 路由 grok:grok-4.7:grok 库里没有')" 1
+R_AFTER=grown
+rround fail
+rblocked "路由两层装载器报错，读回库却变了" \
+  "库变了（装之前 用途 → 模型 0 行、模型 → 路由 0 行，现在 用途 → 模型 3 行、模型 → 路由 1 行），要人看；没切版本" 1
+R_AFTER=fail
+rround fail
+rblocked "路由两层装载器报错，读回也读不到" "装完读不回库，库里变没变没查成；没切版本" 1
+rround changed
+rblocked "路由两层装完连不上库" "路由两层装完了，但读不回库 fleet 里那两张表的行数：没切版本" 1
+R_AFTER=garbage
+rround changed
+rblocked "路由两层装完读回的不是数" "路由两层装完了，但读不回库 fleet 里那两张表的行数" 1
+R_AFTER=zero-1
+rround changed
+rblocked "装完用途 → 模型是 0 行" \
+  "库 fleet 里路由两层用途 → 模型 0 行（装之前 用途 → 模型 0 行、模型 → 路由 0 行），选路派不出活（要人看）；没切版本" 1
+R_AFTER=zero-2
+rround changed
+rblocked "装完模型 → 路由是 0 行" "库 fleet 里路由两层模型 → 路由 0 行" 1
+R_AFTER=full
+rround changed
+do_release "$B" >"$TMP/out"
+check "路由两层都齐了再发 B：切到 B、没有红" "$(current_sha):${#REDS[@]}" "$B:0"
+check "发 B：先装目录、再装路由两层，装的时候还没切版本（current 还指着 A）" "$(tr '\n' '|' <"$RFAKE/order")" \
+  "catalog current=$A|routing current=$A|"
+build_release "$C" >/dev/null # 老提交：带目录装载器，没有路由两层装载器
+mkdir -p "$RELEASES/$C/packages/db/src/bin"
+: >"$RELEASES/$C/packages/db/src/bin/catalog.ts"
+rround changed
+do_release "$C" >"$TMP/out"
+check "这一版没有路由两层装载器：照常切到 C" "$(current_sha)" "$C"
+check "这一版没有路由两层装载器：没跑它、没有红" "$(routing_runs):${#REDS[@]}" "0:0"
+check "这一版没有路由两层装载器：说了一声" "$(said '这一版没有路由两层装载器')" 1
+NODE=$(command -v node) || NODE=""
+
 echo "== 自动发布（--auto）：演示版不发（对外，要人确认）；历史行带 auto；切之前看会话——在跑、读不到、认不出都不切，什么都没动（退出码 76）；--busy-ok 照切；另一个发布在跑是 75"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()
@@ -1018,6 +1178,207 @@ else
   FLEET_SERVICES=""
   ENGINE_STOPPED=0
   scope idle
+fi
+
+echo "== 照期望写本机配置（#323）：切版本之前、只写期望变了的键，人手改的不改回，退回、自动退回照旧版写回去；写不成（期望认不出、线上文件认不出、一个键几行、新的 release.env 发布脚本认不出、写后读回不一致、档位认不出）就不切、一个字不写"
+NODE=$(command -v node) || NODE=""
+if [[ -z "$NODE" ]]; then
+  echo "  ✗ 没跑成：这台没有 node"
+  fail=1
+elif ((EUID != 0)); then
+  echo "  … 没跑成：release.env 要属 root 才读（load_env），这一段要 root"
+  skipped=1
+else
+  rm -rf "${RELEASES:?}"/* "$RELEASES"/.history "$CONFIG_STATE"
+  GATE=()
+  MIG=()
+  DB_MIG=0
+  AUTO=0
+  FLEET_HK_PARTS=""
+  FLEET_SERVICES=""
+  saved_release_env=$RELEASE_ENV
+  CONFIG_ETC=$TMP/etc-apply
+  CONFIG_PROFILE=$CONFIG_ETC/profile
+  RELEASE_ENV=$CONFIG_ETC/release.env
+  mkdir -p "$CONFIG_ETC"
+  # 这一版的期望：机器名、域名，engine.env 多加的一项（「,"键":"值"」），往香港发几样，放在哪（不给就是法国那份）。
+  # 起的服务一直是空的：桩里没有单元可装（APP_UNITS 是空的），写了服务名发布脚本自己就认不出
+  put_desired() { # 提交号 机器名 域名 [多加的一项] [往香港发] [位置]
+    local file=$RELEASES/$1/${6:-deploy/france/desired-config.json}
+    mkdir -p "$(dirname "$file")"
+    printf '{"formatVersion":1,"selfHeal":false,"files":{"engine.env":{"FLEET_MACHINE_NAME":"%s"%s},"api.env":{"FLEET_ENV":"production"},"release.env":{"FLEET_SERVICES":"","FLEET_DOMAIN":"%s","FLEET_HK_PARTS":"%s"},"france.env":{}}}\n' \
+      "$2" "${4:-}" "$3" "${5:-}" >"$file"
+  }
+  live_files() { # 机器名 域名
+    printf '# 人写的注释\nFLEET_MACHINE_NAME=%s\n' "$1" >"$CONFIG_ETC/engine.env"
+    printf 'FLEET_ENV=production\n' >"$CONFIG_ETC/api.env"
+    printf 'FLEET_SERVICES=\nFLEET_DOMAIN=%s\nFLEET_HK_PARTS=\n' "$2" >"$RELEASE_ENV"
+    chmod 640 "$CONFIG_ETC"/*.env
+  }
+  env_sum() { cat -- "$CONFIG_ETC/engine.env" "$CONFIG_ETC/api.env" "$RELEASE_ENV" 2>/dev/null | sha256sum | cut -c1-16; }
+  etc_sum() { printf '%s %s' "$(env_sum)" "$(sha256sum <"$CONFIG_STATE" 2>/dev/null | cut -c1-16)"; } # 连记录一起
+  has_line() { if grep -qxF -- "$2" "$CONFIG_ETC/$1"; then echo 有; else echo 没有; fi; } # 文件 整行
+  live_files 法国 a.invalid
+  put_desired "$A" 法国 a.invalid
+  before=$(env_sum)
+  reset
+  do_release "$A" >"$TMP/out"
+  check "第一次：切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
+  check "第一次：只记基线，环境文件一个字不写" "$(said '只记基线'):$(env_sum)" "1:$before"
+  check "第一次：记下了基线" "$([[ -f "$CONFIG_STATE" ]] && echo 有 || echo 没有)" 有
+  put_desired "$B" 巴黎 b.invalid
+  reset
+  do_release "$B" >"$TMP/out"
+  check "发 B：切到 B、没有红" "$(current_sha):${#REDS[@]}" "$B:0"
+  check "发 B：engine.env、release.env 照 B 的期望写上" \
+    "$(has_line engine.env FLEET_MACHINE_NAME=巴黎):$(has_line release.env FLEET_DOMAIN=b.invalid)" "有:有"
+  check "发 B：两处都记成改动" "$(printf '%s\n' "${CHANGES[@]}" | grep -c '照 bbbbbbbbbbbb 的期望写成')" 2
+  check "发 B：release.env 重读过，这一版照新的来" "$FLEET_DOMAIN" b.invalid
+  check "发 B：别的行（人写的注释）没动" "$(has_line engine.env '# 人写的注释')" 有
+  check "发 B：先照期望写配置、再切版本" \
+    "$(awk '/== 照期望写本机配置/ { w = NR } /== 切到/ { s = NR } END { print (w && s && w < s) ? "先写后切" : "不对" }' "$TMP/out")" 先写后切
+  reset
+  do_release "$B" >"$TMP/out"
+  check "再发 B：改动 0 处、说不用写" "${#CHANGES[@]}:$(said '的期望和上次写的一样，不用写')" "0:1"
+  sed -i 's/^FLEET_MACHINE_NAME=.*/FLEET_MACHINE_NAME=手改的/' "$CONFIG_ETC/engine.env"
+  put_desired "$C" 巴黎 b.invalid ',"FLEET_NEW_KEY":"v1"'
+  reset
+  do_release "$C" >"$TMP/out"
+  check "发 C：切到 C" "$(current_sha)" "$C"
+  check "发 C：期望里新加的键补上" "$(has_line engine.env FLEET_NEW_KEY=v1)" 有
+  check "发 C：人手改的不改回（selfHeal 关着）" "$(has_line engine.env FLEET_MACHINE_NAME=手改的)" 有
+  check "发 C：说了人手改的不改回，值不打印" "$(said '不改回（期望里 selfHeal 关着'):$(said '手改的')" "1:0"
+  reset
+  do_rollback >"$TMP/out"
+  check "一键退回：在用 B、没有红" "$(current_sha):${#REDS[@]}" "$B:0"
+  check "一键退回：照 B 的期望写回去（C 新加的键删掉），人手改的照旧不动" \
+    "$(has_line engine.env FLEET_NEW_KEY=v1):$(has_line engine.env FLEET_MACHINE_NAME=手改的)" "没有:有"
+
+  cblocked() { # 说明 红里要有的字：发 D，应当停下、不切、历史不变、本机配置和记录一个字没动
+    local was_events was_sum
+    was_events=$(events)
+    was_sum=$(etc_sum)
+    reset
+    do_release "$D" >"$TMP/out"
+    check "$1：不切，还在 B" "$(current_sha)" "$B"
+    check "$1：报红，说清是哪一种" "$(reds_with "$2")" 1
+    check "$1：历史没变" "$(events)" "$was_events"
+    check "$1：本机配置和记录一个字没动" "$(etc_sum)" "$was_sum"
+  }
+  build_release "$D" >/dev/null
+  mkdir -p "$RELEASES/$D/deploy/france"
+  printf '{' >"$RELEASES/$D/deploy/france/desired-config.json"
+  cblocked "期望认不出（不是 JSON）" "dddddddddddd 的期望认不出"
+  put_desired "$D" 巴黎 d.invalid
+  cp -- "$CONFIG_ETC/engine.env" "$TMP/engine.saved"
+  printf 'FLEET_MACHINE_NAME="没配上\n' >"$CONFIG_ETC/engine.env"
+  cblocked "线上文件认不出（引号没配上）" "engine.env 认不出"
+  cp -- "$TMP/engine.saved" "$CONFIG_ETC/engine.env"
+  cp -- "$RELEASE_ENV" "$TMP/release.saved"
+  printf 'FLEET_DOMAIN=b.invalid\n' >>"$RELEASE_ENV"
+  cblocked "要写的键在文件里写了两行" "FLEET_DOMAIN 写了 2 行"
+  cp -- "$TMP/release.saved" "$RELEASE_ENV"
+  put_desired "$D" 巴黎 d.invalid "" bogus
+  cblocked "照期望写出来的 release.env 发布脚本认不出" "发布脚本认不出"
+  check "认不出的是哪一样说清了" "$(reds_with '不认识的「bogus」')" 1
+  put_desired "$D" 巴黎 d.invalid
+  export REAL_NODE=$NODE
+  cat >"$TMP/node-expect-fails" <<'EOF'
+#!/bin/bash
+# 桩：算（--plan）照真的跑，写（--expect）时照 config.mjs 写完读回不一致、已改回原样的样子答
+for a in "$@"; do
+  if [[ "$a" == --expect ]]; then
+    echo "red 写完读回不一致：release.env 改完照 systemd 读回来不对：FLEET_DOMAIN 不是该有的样子：写过的 release.env 已改回原样"
+    exit 1
+  fi
+done
+exec "$REAL_NODE" "$@"
+EOF
+  chmod +x "$TMP/node-expect-fails"
+  NODE=$TMP/node-expect-fails
+  cblocked "写后读回不一致" "照期望写本机配置没写成：写完读回不一致"
+  NODE=$REAL_NODE
+  printf 'paris\n' >"$CONFIG_PROFILE"
+  chmod 640 "$CONFIG_PROFILE"
+  cblocked "档位认不出" "档位文件"
+  rm -f -- "$CONFIG_PROFILE"
+  reset
+  do_release "$D" >"$TMP/out"
+  check "都改好了再发 D：切到 D、照期望写上" "$(current_sha):$(has_line release.env FLEET_DOMAIN=d.invalid)" "$D:有"
+
+  X1=$(printf '3%.0s' {1..40})
+  X2=$(printf '4%.0s' {1..40})
+  put_desired "$X1" 巴黎 x1.invalid
+  GATE[$X1]=bad
+  reset
+  do_release "$X1" >"$TMP/out"
+  check "新版没过健康检查：自动退回 D" "$(current_sha)" "$D"
+  check "自动退回：配置照 D 的期望写回去、重读过" "$(has_line release.env FLEET_DOMAIN=d.invalid):$FLEET_DOMAIN" "有:d.invalid"
+  check "自动退回：历史照常" "$(tail -3 "$HISTORY" | awk '{ printf "%s:%s ", substr($2, 1, 1), $3 }')" "3:release 3:unhealthy d:auto-rollback "
+  cat >"$TMP/node-rollback-fails" <<'EOF'
+#!/bin/bash
+# 桩：发新版照真的跑；自动退回时照期望写配置没成
+for a in "$@"; do
+  if [[ "$a" == auto-rollback ]]; then
+    echo "red 桩：照上一版的期望写配置没成"
+    exit 1
+  fi
+done
+exec "$REAL_NODE" "$@"
+EOF
+  chmod +x "$TMP/node-rollback-fails"
+  NODE=$TMP/node-rollback-fails
+  put_desired "$X2" 巴黎 x2.invalid
+  GATE[$X2]=bad
+  reset
+  do_release "$X2" >"$TMP/out"
+  check "自动退回时照期望写配置没成：没切回去，照实说没退回" \
+    "$(current_sha):$(reds_with '也没退回 dddddddddddd')" "$X2:1"
+  check "没切回去：上一版没试过，不记它不健康" "$(last_event "$D")" auto-rollback
+  NODE=$REAL_NODE
+  GATE=()
+
+  # 期望给往香港发的加了一样：发布开头只试了原来那几样（这时一样都没有），写之前照样试通新加的，不通就不写、不切
+  Z=$(printf '6%.0s' {1..40})
+  put_desired "$Z" 巴黎 z.invalid "" web
+  WEB_DOWN=1
+  was_sum=$(etc_sum)
+  was_probed=$PROBED
+  reset
+  do_release "$Z" >"$TMP/out"
+  check "期望新加了往香港发 web、试不通：不切，本机配置和记录一个字没动" "$(current_sha):$(etc_sum)" "$X2:$was_sum"
+  check "试的是新加的那一样，红里说清" "$((PROBED - was_probed)):$(reds_with '要往香港新发的几样试不通')" "1:1"
+  WEB_DOWN=0
+  was_probed=$PROBED
+  was_synced=$SYNCED
+  reset
+  do_release "$Z" >"$TMP/out"
+  check "试得通：切到 Z、照期望写上、这一版照新的发了静态文件" \
+    "$(current_sha):$(has_line release.env FLEET_HK_PARTS=web):$((PROBED - was_probed)):$((SYNCED - was_synced))" "$Z:有:1:1"
+  reset
+  do_release "$Z" >"$TMP/out"
+  check "再发 Z：开头就照新的几样试通，写配置时不再多试一遍" "$((PROBED - was_probed))" 2
+
+  build_release "$E" >/dev/null # 老提交：这一版里没有配置的期望
+  reset
+  do_release "$E" >"$TMP/out"
+  check "这一版没有配置的期望：照常切到 E、不写、没有红" \
+    "$(current_sha):$(said '里没有配置的期望（#323 之前的版本）：不照期望写'):${#REDS[@]}" "$E:1:0"
+  # 本机档：照这一版里 deploy/local 那份写，不拿法国那份
+  printf 'local\n' >"$CONFIG_PROFILE"
+  chmod 640 "$CONFIG_PROFILE"
+  Y=$(printf '5%.0s' {1..40})
+  put_desired "$Y" 法国 x2.invalid
+  put_desired "$Y" 本机 fleet-local.invalid "" "" deploy/local/desired-config.json
+  reset
+  do_release "$Y" >"$TMP/out"
+  check "本机档：照 deploy/local 那份写" \
+    "$(current_sha):$(has_line engine.env FLEET_MACHINE_NAME=本机):$(has_line release.env FLEET_DOMAIN=fleet-local.invalid)" "$Y:有:有"
+  rm -f -- "$CONFIG_PROFILE"
+  unset REAL_NODE
+  RELEASE_ENV=$saved_release_env
+  FLEET_HK_PARTS=""
+  FLEET_SERVICES=""
 fi
 
 echo "== 自动发布的参数：--auto 只跟一个主线上的提交，--busy-ok 只跟着 --auto，--now 不跟 --auto、--check；不对就用法错（64），什么都不做"

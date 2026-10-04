@@ -84,10 +84,14 @@ export async function saveVerifyRound(db: Db, row: VerifyRoundRecord, now: Date 
     issueNumber: null,
     model: modelId,
     channel: null,
+    routeId: row.routeId,
     // 这一刻的写入时刻仅作流水的临时刻度：Fusion 的 verify 会话真正起止由 #556-4 起真流水时回填（同一 id 整行覆盖）。
     startedAt: now,
     endedAt: now,
     outcome: 'done' as const,
+    // 这一笔只是流水：验证会话本身在 session_runs 里记了结局和用量，选路的熔断、战绩、估算从那边算（pool-runs.ts 两张表并起来读），
+    // 这里再记一份就把同一次会话算两遍
+    routeOutcome: null,
     inputTokens: null,
     outputTokens: null,
     cacheReadTokens: null,

@@ -20,17 +20,12 @@ function specifiers(code: string): string[] {
 describe('core 只放纯判断', () => {
   it('扫到了 src 下的文件（不是空扫一遍就算过）', () => {
     expect(files.sort()).toEqual([
-      'acceptance.ts',
       'alert-work.ts',
       'ask.ts',
       'brief.ts',
-      'config.ts',
       'criteria.ts',
       'dispatch.ts',
-      'flow.ts',
-      'fusion.ts',
       'index.ts',
-      'replica.ts',
       'seat.ts',
       'verdict.ts',
     ]);

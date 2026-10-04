@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo } from '@fleet-dao/shared';
+import type { Repo, StageKind } from '@fleet-dao/shared';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
@@ -20,6 +20,15 @@ export const SEGMENT_MINUTES = 60;
 export const MERGE_POLL_MINUTES = 15;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
+
+/**
+ * 三段里经选路的那几段各按哪个用途选（路由两层的用途）：动手按写码（工作流的 pick）；验收按审查（cold-verify-pick.ts 写了为什么
+ * 不是 verify）。选路的战绩按它把 runs 里这一段的结局算到这个用途上（real/store-ports.ts）：两边读这一份，改一处两边一起变。
+ * 对题还不经选路（segments/scope.ts 不带路由），不在这里。
+ */
+export const SEGMENT_STAGE = { manual: 'execute', verify: 'review' } as const satisfies Partial<
+  Record<'scope' | 'manual' | 'verify', StageKind>
+>;
 
 export { taskBranch } from './task-branch.ts';
 
@@ -91,6 +100,7 @@ export interface ReadTaskBriefInput {
 /** 起一段动手会话。runId 由活动自己起（每次尝试一个，进 runs 表的主键），工作流里不生成编号。 */
 export interface RunSegmentInput {
   schemaVersion: 1;
+  /** 库里的 tasks.id（runs 里这一段挂在这张单上，#216）。 */
   taskId: string;
   repo: Repo;
   issueNumber: number;
@@ -105,7 +115,23 @@ export interface RunSegmentInput {
   /** 前几轮留下的返工意见（CI 失败日志、验收问题表、没产生提交），新一轮的会话要照着改。 */
   feedback: string[];
   timeoutMinutes: number;
+  /**
+   * 这一段上一次跑到一半被停下了（切号，#59）：为什么停的那一句。重跑时写进提示词——树里可能留着上一次的提交和没提交的改动，
+   * 新会话接着干、别从头来。没被停过的不给。
+   */
+  interrupted?: string;
+  /**
+   * 这张单的 PR：第一轮动手时还没开（引擎在会话交付之后才开），不给；开了以后每一轮都给。只记账（runs.pr_number，#216），
+   * 会话不看它。老历史里没有这个字段。
+   */
+  prNumber?: number;
 }
+
+/**
+ * 动手会话被切号停下时的结局和原因码（#59）：失败分流 OS1 认它（不算失败、不记账、马上接着干），工作流切完在原分支上重跑这一段，
+ * 提示词里带上 interrupted。和 runner/one-shot.ts 的结局 org_switch 是同一个词。
+ */
+export const ORG_SWITCH_CODE = 'org_switch';
 
 /** 动手会话没跑成时给失败分流的证据（字段照 FailureEvidence，工作流补上 routeId 这些再交给分流）。 */
 export type SegmentEvidence = Pick<

@@ -10,13 +10,16 @@
 //    上次同步成功不到 QUIET_MS 就不再跑：Cursor 讨论一次并行起好几个会话，每个都会触发这个钩子。
 // 3. 会话所在仓的「## 生效中的临时调整」表（通用段「我拍了板」那条）：到了最迟复查日期的、缺列的、日期认不出的
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
+// 4. 会话开在 fleet-dao 里时：合并后待补审的 PR（先合后审，创始人 2026-10-03「1+2+3」），有待补审的或没查成才说一行；
+//    限时 AFTER_MERGE_MS，超时、网络不通明说没查成，不当成「没有」。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const FETCH_MS = 15_000;
 export const SYNC_MS = 30_000;
@@ -265,6 +268,74 @@ export function checkTemporary(cwd, git, now = Date.now()) {
   return out;
 }
 
+/**
+ * 第 3.5 件：会话所在仓里的「## 创始人引导（待处理）」一节（通用段「你的引导必须落盘」那条）。
+ * 有没处理完的引导就报几条、让人接着办；没有这一节、不是 git 仓不出声；git 跑不起来、读不了明说没查成。
+ * 只用本地 git grep 找已跟踪的 .md（不取远端，限时 GREP_MS），不拖慢开会话。返回要说的几行。
+ */
+export const DIRECTIVE_HEADING = '## 创始人引导（待处理）';
+const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
+
+export function checkDirectives(cwd, git) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (gitBroken(top))
+    return [
+      `${DIRECTIVE_NOT_CHECKED}：这台的 git 跑不起来（${why(top)}），会话所在仓里有没有没处理的引导不知道。`,
+    ];
+  const root = top.stdout.trim();
+  if (!ok(top) || !root) return [];
+  const found = git(root, [
+    'grep',
+    '-n',
+    '-z',
+    '-I',
+    '-E',
+    `^${DIRECTIVE_HEADING}[[:space:]]*$`,
+    '--',
+    '*.md',
+  ]);
+  if (found.status === 1 && !found.error && !found.stderr.trim()) return [];
+  if (!ok(found)) return [`${DIRECTIVE_NOT_CHECKED}：git grep 找这一节没成（${why(found)}）。`];
+  const hits = found.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => /^([^\0]+)\0(\d+)\0/.exec(l));
+  if (hits.length === 0 || hits.some((m) => m === null))
+    return [`${DIRECTIVE_NOT_CHECKED}：git grep 的输出认不出（${why(found)}）。`];
+  const out = [];
+  for (const [, file, n] of hits) {
+    let text;
+    try {
+      text = readFileSync(join(root, file), 'utf8');
+    } catch (err) {
+      out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：读不了（${err?.code ?? err?.message ?? err}）。`);
+      continue;
+    }
+    const items = directiveItems(text, Number(n));
+    if (items === null) {
+      out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：标题下面认不出条目。`);
+      continue;
+    }
+    if (items.length > 0)
+      out.push(
+        `创始人引导还有 ${items.length} 条没处理（${file}:${n}）：${items.slice(0, 5).join('；')}${items.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
+      );
+  }
+  return out;
+}
+
+/** 「## 创始人引导（待处理）」标题下一节里的条目：`- ` 开头、没标「已处理」的非空行；标题下到下一个一、二级标题为止 */
+function directiveItems(text, headingLine) {
+  const lines = text.split(/\r?\n/);
+  const items = [];
+  for (let i = headingLine; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (/^#{1,2}\s/.test(t)) break;
+    if (t.startsWith('- ') && !/已处理/.test(t)) items.push(brief(t.slice(2).trim()));
+  }
+  return items;
+}
+
 /** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
 function lag(g, synced, stale) {
   const basis = stale ? '（按本机上次取到的主线算）' : '';
@@ -403,13 +474,106 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now() }) {
   }
 }
 
+/**
+ * 第 4 件：合并后待补审（清单里标 review: after-merge 的 CI 判法先合后审，合并后由 discuss 技能的 second-opinion.mjs 补审）。
+ * 只在 fleet-dao 自己的检出里查（origin 指向它；和 packages/github/src/hygiene-scope.ts 的 HYGIENE_REPO 是同一个仓）。
+ * 查法不在这里另写一份：起 second-opinion.mjs --after-merge-pending --json，硬超时 AFTER_MERGE_MS。脚本优先用同步专用检出里
+ * 那份（和这个钩子一样来自 origin/main，旧分支的检出里那份可能还不认这个参数），没有再用会话所在检出里的。
+ */
+export const AFTER_MERGE_MS = 8_000;
+export const FLEET_ORIGIN = /github\.com[:/]+thoerwink8\/fleet-dao(?:\.git)?\/?$/i;
+const SO_SCRIPT = join('agents', 'skills', 'discuss', 'scripts', 'second-opinion.mjs');
+const SO_RUN = 'node agents/skills/discuss/scripts/second-opinion.mjs';
+const AM_NOT_CHECKED = '合并后待补审没查成';
+
+/** 起 second-opinion.mjs 查合并后待补审：{ status, stdout, stderr, error, timeoutMs }，超时由 spawnSync 杀掉 */
+export function afterMergeRunner(timeoutMs = AFTER_MERGE_MS) {
+  return (script, repo) => {
+    const r = spawnSync(
+      process.execPath,
+      [script, '--after-merge-pending', '--json', '--no-fetch', '--repo', repo],
+      {
+        encoding: 'utf8',
+        timeout: timeoutMs,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
+  };
+}
+
+const prList = (items) =>
+  items
+    .slice(0, 6)
+    .map((p) => `#${p.number}`)
+    .join('、') + (items.length > 6 ? ' 等' : '');
+
+/**
+ * fetch 是第 1 件在会话所在仓里取远端的结果（取不到时主线上合了什么不知道，直接说没查成，不起脚本）。
+ * mirror 是同步专用检出里那份脚本（先试它），再试会话所在检出里的。返回要说的几行：没有待补审的、不是 fleet-dao 都不出声。
+ */
+export function checkAfterMerge({ cwd, git, run, fetch, mirror = null }) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (!ok(top) || !top.stdout.trim()) return [];
+  const root = top.stdout.trim();
+  const url = git(root, ['config', '--get', 'remote.origin.url']);
+  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return [];
+  if (fetch && fetch.ok === false)
+    return [`${AM_NOT_CHECKED}：取不到远端（${fetch.why}），最近合并的 PR 补审了没有不知道。`];
+  const script = [mirror, join(root, SO_SCRIPT)].find((s) => s && existsSync(s));
+  if (!script) return [`${AM_NOT_CHECKED}：找不到 ${SO_SCRIPT.replaceAll('\\', '/')}。`];
+  const r = run(script, root);
+  if (r.error || r.status !== 0)
+    return [
+      `${AM_NOT_CHECKED}：${why(r).replace(/^没查成：/, '')}（自己跑一遍 ${SO_RUN} --after-merge-pending 看原因）。`,
+    ];
+  let p;
+  try {
+    p = JSON.parse(r.stdout);
+  } catch {
+    return [
+      `${AM_NOT_CHECKED}：second-opinion.mjs 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`,
+    ];
+  }
+  if (![p?.unreviewed, p?.failed, p?.problems].every(Array.isArray))
+    return [`${AM_NOT_CHECKED}：second-opinion.mjs 的输出少了 unreviewed、failed 或 problems。`];
+  const lines = [];
+  if (p.unreviewed.length > 0)
+    lines.push(
+      `合并后待补审 ${p.unreviewed.length} 个：${prList(p.unreviewed)}（跑 ${SO_RUN} --after-merge-sweep --author-family <写它的模型族>）。`,
+    );
+  if (p.failed.length > 0)
+    lines.push(
+      `合并后补审没过、等修复或 revert ${p.failed.length} 个：${prList(p.failed)}（修复合了跑 ${SO_RUN} --after-merge-resolve <号> --by <修复 PR 号>）。`,
+    );
+  if (p.problems.length > 0)
+    lines.push(`合并后补审对不上 PR 的提交 ${p.problems.length} 个：${p.problems.slice(0, 2).join('；')}。`);
+  return lines;
+}
+
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
-export function sessionStart({ cwd, home, git, sync, localGit = git, now = Date.now() }) {
+export function sessionStart({
+  cwd,
+  home,
+  git,
+  sync,
+  localGit = git,
+  now = Date.now(),
+  sessionId = null,
+  unattendedDir = stateDir(),
+  afterMerge = afterMergeRunner(),
+}) {
   const here = checkHere(cwd, git);
+  // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
+  const mirror = source ? join(source.syncDirIn(home), SO_SCRIPT) : null;
   return [
     ...(here.line ? [here.line] : []),
+    ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
+    ...checkDirectives(cwd, localGit),
     ...sweepWorktrees(cwd, localGit),
+    ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
 }
@@ -539,6 +703,7 @@ if (isMain()) {
       git: gitRunner(),
       sync: syncRunner(),
       localGit: gitRunner(GREP_MS),
+      sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
     });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];

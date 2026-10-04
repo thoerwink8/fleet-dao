@@ -139,7 +139,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   if (!input.configured) {
     return {
       kind: 'none',
-      reason: `${stageName}阶段还没在调度台上排路由顺序：不按编号乱挑，请先排好`,
+      reason: `${stageName}阶段还没配模型顺序（路由两层「用途 → 模型」那一层是空的）：不按编号乱挑，请先配好`,
       verdicts: [],
     };
   }
@@ -288,7 +288,7 @@ export function stageAllOpen(input: ChooseRouteInput): AllOpenCheck {
   const now = validateInput(input, policy.trialEnabled);
   const stageName = STAGE_NAMES[input.stage];
   if (!input.configured) {
-    return { allOpen: false, detail: `${stageName}阶段还没在调度台上排路由顺序` };
+    return { allOpen: false, detail: `${stageName}阶段还没配模型顺序` };
   }
   if (input.order.length === 0) {
     return { allOpen: false, detail: `${stageName}阶段一条路由都没配` };

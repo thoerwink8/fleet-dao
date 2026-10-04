@@ -7,7 +7,17 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type GrokRunSpec, judgeRun, runGrok, type SessionUser } from '@fleet-dao/adapters';
+import {
+  buildClaudeArgs,
+  buildSessionEnv,
+  type GrokRunSpec,
+  judgeRun,
+  runGrok,
+  SESSION_NO_PROXY,
+  type SessionEnvInput,
+  type SessionUser,
+  scopeLaunch,
+} from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CURSOR_KEY_BAD,
@@ -29,6 +39,7 @@ import {
   MIRASIM_AGENT_BY_MODEL,
   MIRASIM_PENDING_PREFIX,
   mirasimAgentFor,
+  sessionEffortFor,
   sessionUserOf,
   WIRED_HOSTS,
   wiredHostNames,
@@ -669,15 +680,114 @@ function spec(over: Partial<HostRunSpec> = {}): HostRunSpec {
   };
 }
 
-function drivers(run: HostRunners) {
+function drivers(run: HostRunners, sessionProxy?: string) {
   return hostDrivers({
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
     ...fakeMirasimDeps(),
+    sessionProxy,
     run,
   });
 }
+
+describe('会话出网经的代理（#731：本机档经 Windows 上的 Clash，法国直连）', () => {
+  const PROXY = 'http://127.0.0.1:7890';
+  const env = { FLEET_MACHINE_NAME: '本机', DATABASE_URL: 'postgres:///fleet' };
+  const proxyKeys = (built: Record<string, string>) =>
+    Object.keys(built)
+      .filter((k) => /_proxy$/i.test(k))
+      .sort();
+  /** 插头真起会话时就照这一份建环境（adapters 的 buildSessionEnv），经帮手脚本起时再拆成 sudo 的环境和命令行（scopeLaunch）。 */
+  const launched = (input: SessionEnvInput | undefined) => {
+    if (!input) throw new Error('插头没被叫到');
+    const built = buildSessionEnv(input);
+    return { built, envArgs: scopeLaunch(built).envArgs };
+  };
+
+  it('配了代理：grok、cursor-agent 的会话环境带上 http(s)_proxy（大小写各一份）和 no_proxy，经帮手脚本起时写上 /usr/bin/env 的参数；Claude 的不带（reclaude 自己管）', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const wired = drivers({ 'claude-code': claude.run, grok: grok.run, 'cursor-agent': cursor.run }, PROXY);
+    await wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: randomUUID() } }), {});
+    await wired['cursor-agent'].run(spec({ model: 'auto' }), {});
+    await wired['claude-code'].run(
+      spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: randomUUID() } }),
+      {},
+    );
+    // 【故意造出的失败】登记了代理、这两家的会话环境里却没有：这里就红（本机档直连出不了网，x.ai 直连 12 秒超时）
+    for (const input of [grok.specs[0]?.env, cursor.specs[0]?.env]) {
+      const { built, envArgs } = launched(input);
+      expect(built).toMatchObject({
+        http_proxy: PROXY,
+        https_proxy: PROXY,
+        HTTP_PROXY: PROXY,
+        HTTPS_PROXY: PROXY,
+        no_proxy: SESSION_NO_PROXY,
+        NO_PROXY: SESSION_NO_PROXY,
+      });
+      expect(envArgs).toEqual(
+        expect.arrayContaining([
+          `https_proxy=${PROXY}`,
+          `HTTPS_PROXY=${PROXY}`,
+          `no_proxy=${SESSION_NO_PROXY}`,
+        ]),
+      );
+    }
+    expect(claude.specs[0]?.env.proxy).toBeUndefined();
+    expect(proxyKeys(launched(claude.specs[0]?.env).built)).toEqual([]);
+  });
+
+  it('没配代理（法国）：哪家的会话环境都不带代理变量，宿主进程的环境里有也不抄', async () => {
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const wired = drivers({ grok: grok.run, 'cursor-agent': cursor.run });
+    const host = {
+      base: { PATH: '/usr/bin', HTTPS_PROXY: PROXY, https_proxy: PROXY },
+      fleetApi: '',
+      fleetToken: '',
+    };
+    await wired.grok.run(
+      spec({ model: 'grok-4.7', env: host, session: { mode: 'new', id: randomUUID() } }),
+      {},
+    );
+    await wired['cursor-agent'].run(spec({ model: 'auto', env: host }), {});
+    expect(proxyKeys(launched(grok.specs[0]?.env).built)).toEqual([]);
+    expect(proxyKeys(launched(cursor.specs[0]?.env).built)).toEqual([]);
+  });
+
+  it('引擎配置：FLEET_SESSION_PROXY 没写、空着是直连；写了照规范写法存（去掉末尾的 /）', () => {
+    expect(realPortsConfigFromEnv(env).sessionProxy).toBeUndefined();
+    expect(realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: '' }).sessionProxy).toBeUndefined();
+    expect(realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: ` ${PROXY}/ ` }).sessionProxy).toBe(PROXY);
+  });
+
+  it.each([
+    ['带账号密码（要写上命令行，会漏）', 'http://user:pass@127.0.0.1:7890'],
+    ['https 代理', 'https://127.0.0.1:7890'],
+    ['socks 代理', 'socks5://127.0.0.1:7890'],
+    ['没写端口', 'http://127.0.0.1'],
+    ['带路径', 'http://127.0.0.1:7890/pac'],
+    ['乱写', '127.0.0.1:7890'],
+  ])('【故意造出的失败】FLEET_SESSION_PROXY %s：引擎起不来，不悄悄当成直连', (_why, value) => {
+    expect(() => realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: value })).toThrow(
+      'FLEET_SESSION_PROXY',
+    );
+  });
+
+  it('【故意造出的失败】FLEET_SESSION_PROXY 带账号密码：起不来的报错里不带原值（会进引擎的日志）', () => {
+    let message = '';
+    try {
+      realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: 'http://user:fakesecret@127.0.0.1:7890' });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('FLEET_SESSION_PROXY');
+    expect(message).toContain('带了账号密码');
+    expect(message).not.toContain('fakesecret');
+  });
+});
 
 describe('cursor-agent 的驱动', () => {
   const cursorWith = (script: FakeCursorScript) => {
@@ -1118,7 +1228,7 @@ describe('Mirasim 的驱动（#345）', () => {
   });
 });
 
-describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high，#470 以后才在驾驶舱配）', () => {
+describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high；驾驶舱给路由配了的照配的，#470）', () => {
   const id = () => randomUUID();
 
   it('没配的常量是 high', () => {
@@ -1245,5 +1355,80 @@ describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high，#470 以
       driver.run(spec({ model: 'grok-4.7[reasoning_effort=high]', effort: 'low' }), {}),
     ).rejects.toThrow('两处');
     expect(cursor.count()).toBe(0);
+  });
+});
+
+describe('驾驶舱配的档位和分档给的怎么合（#470，sessionEffortFor）', () => {
+  it('没配用 high；配了的就是这条路由的档位', () => {
+    expect(sessionEffortFor(undefined, undefined)).toBe('high');
+    expect(sessionEffortFor('xhigh', undefined)).toBe('xhigh');
+    expect(sessionEffortFor('low', undefined)).toBe('low');
+  });
+
+  it('分档只往下压、不往上抬：快档的 medium 压下来；high（及以上）不压，照配的', () => {
+    expect(sessionEffortFor(undefined, 'medium')).toBe('medium');
+    expect(sessionEffortFor('xhigh', 'medium')).toBe('medium');
+    expect(sessionEffortFor('xhigh', 'high')).toBe('xhigh');
+    expect(sessionEffortFor('max', 'high')).toBe('max');
+    // 配的比分档给的还低：照配的（上限）
+    expect(sessionEffortFor('low', 'medium')).toBe('low');
+    expect(sessionEffortFor('low', 'high')).toBe('low');
+    // 分档以后给出比标准档高的，也不抬过配的（没配就是 high）
+    expect(sessionEffortFor(undefined, 'max')).toBe('high');
+  });
+
+  it('【故意造出的失败】配的、分档给的认不出：抛错，不当成 high', () => {
+    expect(() => sessionEffortFor('turbo', undefined)).toThrow('路由配的思考档位（effort）不认识');
+    expect(() => sessionEffortFor(undefined, 'turbo')).toThrow('分档给的思考档位（effort）不认识');
+  });
+
+  it('起会话的参数里带的是合出来的那一档（Claude --effort、Grok --reasoning-effort、Mirasim effort）', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const mira = fakeMirasimRun(() => ({ state: { text: 'OK' } }));
+    const wired = drivers({ 'claude-code': claude.run, grok: grok.run, mirasim: mira.run });
+    const id = () => randomUUID();
+    await wired['claude-code'].run(
+      spec({
+        model: 'claude-opus-5-5',
+        session: { mode: 'new', id: id() },
+        effort: 'max',
+        tierEffort: 'high',
+      }),
+      {},
+    );
+    await wired.grok.run(
+      spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'xhigh', tierEffort: 'medium' }),
+      {},
+    );
+    await wired.mirasim.run(spec({ model: 'deepseek-flash', tierEffort: 'medium' }), {});
+    const claudeSpec = claude.specs[0];
+    if (!claudeSpec) throw new Error('Claude 的插头没被调用');
+    // 插头起 reclaude 用的就是这份参数（runClaudeCode 里同一个 buildClaudeArgs）
+    expect(buildClaudeArgs(claudeSpec)).toEqual(expect.arrayContaining(['--effort', 'max']));
+    expect(grok.specs[0]?.reasoningEffort).toBe('medium');
+    expect(mira.specs[0]?.effort).toBe('medium');
+  });
+
+  it('cursor：方括号模型补进合出来的那一档；整串模型名写死了档位，分档压不下去、照原样起（不是配错）', async () => {
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const driver = drivers({ 'cursor-agent': cursor.run })['cursor-agent'];
+    await driver.run(spec({ model: 'composer-2.5[fast=true]', effort: 'high', tierEffort: 'medium' }), {});
+    await driver.run(spec({ model: 'gpt-5.6-luna-high', tierEffort: 'medium' }), {});
+    expect(cursor.specs.map((s) => s.model)).toEqual([
+      'composer-2.5[fast=true,effort=medium]',
+      'gpt-5.6-luna-high',
+    ]);
+  });
+
+  it('【故意造出的失败】分档给的档位认不出：报错、插头不起', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    await expect(
+      drivers({ 'claude-code': claude.run })['claude-code'].run(
+        spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: randomUUID() }, tierEffort: 'turbo' }),
+        {},
+      ),
+    ).rejects.toThrow('分档给的思考档位');
+    expect(claude.count()).toBe(0);
   });
 });

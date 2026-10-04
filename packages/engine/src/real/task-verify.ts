@@ -15,21 +15,32 @@
 // - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
 //   diff 超过 MAX_DIFF_CHARS、或有文本文件 GitHub 没给 diff：回 unavailable，不截断了假装看全。
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；随后把取消原样抛出去。
+// - 切号叫停（#59）不是叫停：挑中路由就登记（sessions.enter），切号把这一次验收停下，回 retry（不贴 failure、不算一轮），
+//   工作流隔一会儿再验，选路照常选到切过去的那个池。
+// - runs 里这一次验收记到这张单名下（#216）：tasks.id、单号、工作流编号经单子那一样（spec）交给 invokeVerifier，PR 号、分支
+//   它本来就有；验收不分档，不带派工档。
 
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import { runColdVerifyForPr } from '../cold-verify-run.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
-import type { RunRecord, RunsWriter } from '../runner/not-wired.ts';
-import { SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
-import { type ColdVerifyInput, type ColdVerifyResult, ROUTE_RETRY_SECONDS } from '../task-contract.ts';
+import type { RunsWriter } from '../runner/not-wired.ts';
+import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
+import {
+  type ColdVerifyInput,
+  type ColdVerifyResult,
+  ROUTE_RETRY_SECONDS,
+  SEGMENT_STAGE,
+} from '../task-contract.ts';
 import { FAMILY_ORDER, invokeVerifier } from '../verifier-invoke.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import { mapped } from './mirror.ts';
+import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { sweepRunDirs } from './task-segment.ts';
 
@@ -41,6 +52,8 @@ export const MAX_DIFF_CHARS = 240_000;
 export const VERIFY_HEARTBEAT_MS = 15_000;
 /** 内存放不下新会话时，隔多久再来（秒）。 */
 export const VERIFY_ADMISSION_RETRY_SECONDS = 60;
+/** 切号停下了这一次验收（#59），隔多久再验（秒）：切号停派十几秒、切完下一轮探针探过才派得到切过去的池。 */
+export const VERIFY_ORG_SWITCH_RETRY_SECONDS = 30;
 
 export interface ColdVerifyActivityDeps {
   /** 读 PR、读改到的文件、贴提交状态（引擎机器人）。 */
@@ -53,6 +66,8 @@ export interface ColdVerifyActivityDeps {
   memoryAdmission?: MemoryAdmissionDeps;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
+  /** 一次性会话的登记（#59，real/one-shot-sessions.ts）：切号照它停下这一次验收。不给 = 停不下，切号等它跑完。 */
+  sessions?: OneShotSessions;
   timeoutMinutes?: number;
   maxDiffChars?: number;
   now?: () => Date;
@@ -132,6 +147,8 @@ interface Seen {
   transient?: PortError;
   /** 内存放不下没派出去。 */
   admission?: boolean;
+  /** 切号停下了这一次验收（#59）。 */
+  orgSwitch?: boolean;
 }
 
 export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<EngineTasks['coldVerify']> {
@@ -157,7 +174,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const picker = familyPickerFrom(
       (pickInput) => deps.pickRoute(pickInput, ctx),
       FAMILY_ORDER,
-      'review',
+      SEGMENT_STAGE.verify,
       (family, why) => {
         if (why.waitFor !== 'none') {
           waits.push({
@@ -169,14 +186,19 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         }
       },
     )(input.taskId);
-    // 验收的会话记到这张单名下（invokeVerifier 不知道单号）
-    const runs: RunsWriter = {
-      ...(deps.runs.notWired === undefined ? {} : { notWired: deps.runs.notWired }),
-      record: (run: RunRecord) =>
-        deps.runs.record({ ...run, issueNumber: run.issueNumber ?? input.issueNumber }),
+    // 挑中路由就登记（#59）：切号照它停下这一次验收；收场（下面的 finally）走
+    let ticket: OneShotTicket | undefined;
+    // 挑中路由时补上切号叫停的信号（挑之前不知道跑在哪个池）
+    const oneShot: OneShotDeps = {
+      spawn: (cmd) => spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) }),
+      ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
+      tmpDir: deps.runsDir,
+      runs: deps.runs,
+      now,
     };
 
     const retryFor = (reason: string): NonNullable<ColdVerifyResult['retry']> => {
+      if (seen.orgSwitch) return { wait: 'slot', reason, afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS };
       if (seen.admission) return { wait: 'slot', reason, afterSeconds: VERIFY_ADMISSION_RETRY_SECONDS };
       const slot = waits.filter((w) => w.waitFor === 'slot');
       const pool = slot.length > 0 ? slot : waits;
@@ -208,7 +230,13 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           spec: async () => {
             if (input.what.trim() === '') throw new Error('单子的「要什么」是空的');
             if (input.howToFinish.length === 0) throw new Error('单子的「怎么算做完」一条都没有');
-            return { taskId: input.taskId, what: input.what, howToFinish: input.howToFinish };
+            return {
+              taskId: input.taskId,
+              issueNumber: input.issueNumber,
+              workflowId: taskWorkflowId(input.repo, input.issueNumber),
+              what: input.what,
+              howToFinish: input.howToFinish,
+            };
           },
           authorFamilies: async () => input.authorFamilies,
         },
@@ -217,23 +245,31 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return await invokeVerifier(verifierInput, verifierDeps);
           } catch (error) {
             if (error instanceof PortError && error.retryable) seen.transient = error;
+            // 开跑那一行写不进 runs（#157）：会话没起，库一时不通，过一会儿再验（不是「验收做不出来」）
+            if (error instanceof OneShotError && error.code === 'RUN_START_FAILED') {
+              seen.transient = new PortError('VERIFY_RUNS_UNWRITABLE', error.message, { retryable: true });
+            }
             throw error;
           }
         },
-        oneShot: {
-          spawn: (cmd) => spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) }),
-          ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
-          tmpDir: deps.runsDir,
-          runs,
-          now,
-        },
+        oneShot,
         chooseModelForFamily: async (family) => {
           const route = await picker.pickRouteForFamily(family);
           if (route === undefined) return undefined;
+          // 这一次的编号挑中时就定下、交给登记：起会话之前（备目录那一下）被切号停下，操作记录 stopped 里写的就是
+          // 随后记成 org_switch 的那一行
+          const runId = randomUUID();
+          if (deps.sessions) {
+            ticket?.leave();
+            ticket = deps.sessions.enter({ poolId: route.poolId });
+            ticket.attempt(runId);
+            oneShot.stop = ticket.signal;
+          }
           return {
             modelId: route.modelId,
             ...(route.poolId ? { channel: route.poolId } : {}),
             routeId: route.routeId,
+            runId,
           };
         },
         // 会话的工作目录由 prepareCwd 备（挑完路由才知道归哪个会话用户）；这个只是占个位，不会被用到
@@ -263,6 +299,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         round,
         timeoutMinutes: deps.timeoutMinutes ?? VERIFY_MINUTES,
         waitReason: (verdict) => {
+          if (verdict.session?.outcome === 'org_switch') {
+            seen.orgSwitch = true;
+            return '切号：这一次验收先停下，切完重验';
+          }
           if (verdict.session?.outcome === 'admission_blocked') {
             seen.admission = true;
             return '机器内存放不下新会话';
@@ -279,6 +319,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     } finally {
       clearInterval(beat);
+      ticket?.leave();
     }
     // 叫停：取消原样往外抛，不回「没跑成」
     if (ctx.signal.aborted) throw ctx.signal.reason ?? new Error('被叫停了');

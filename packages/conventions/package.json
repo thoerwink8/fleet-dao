@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@fleet-dao/shared": "workspace:*"
+    "@fleet-dao/shared": "workspace:*",
+    "yaml": "^2.9.1"
   }
 }

@@ -1,55 +1,25 @@
-export {
-  CLOSE_COLUMN,
-  type CloseColumn,
-  closeColumnValue,
-  closingIssues,
-  closingTargets,
-  missingResults,
-  RESULT_FILE,
-  resultDocIssue,
-  resultDocOf,
-} from './close-rule.ts';
-export {
-  CLOSE_ALERT_LINES,
-  CLOSE_KINDS,
-  CLOSE_LOOKBACK_DAYS,
-  type CloseFinding,
-  type CloseKind,
-  type CloseSweep,
-  type CloseSweepFacts,
-  closeAlert,
-  closeAlertKey,
-  closeComment,
-  closeCommentKey,
-  closeSweep,
-} from './close-sweep.ts';
+export { closingIssues } from './closing-issues.ts';
 export {
   checkDebtDocs,
-  checkSpecsDone,
+  DEBT_REPORT_HEADER,
   DEFERRAL_PATTERNS,
   type DebtProblem,
   type DebtRun,
   type Deferral,
   debtFiles,
   doneSection,
-  type Finding,
   findDeferrals,
-  findingMarker,
   formatDebtProblem,
   type LiveDebt,
   liveDebt,
-  missingSpecsFindings,
   type RefState,
   refStates,
-  reportFindings,
-  SPECS_GRACE_HOURS,
   staleRefFindings,
   untrackedDeferrals,
 } from './debt.ts';
 export {
   checkDocPointers,
   DOCS,
-  docFiles,
   formatProblem,
   type Pointer,
   type PointerKind,
@@ -59,7 +29,6 @@ export {
 export { FLOW_BRANCH_PATTERN, isFlowBranch } from './flow-branch.ts';
 export {
   type GitHubCommenter,
-  type GitHubPrLabeler,
   type GitHubReader,
   githubToken,
   type IssueInfo,
@@ -67,8 +36,6 @@ export {
   type MilestoneDetail,
   type MilestoneInfo,
   type PlanIssue,
-  type PlanReader,
-  type PullInfo,
   repoName,
   toIssue,
   toMilestoneDetail,
@@ -110,12 +77,9 @@ export {
   type IssueNewDeps,
   type IssueNewResult,
   issueNew,
-  issueSummary,
   type MissingSection,
   requiredSectionProblems,
   sectionText,
-  specsDoc,
-  specsHint,
   USAGE,
 } from './issue-new.ts';
 export {
@@ -144,7 +108,6 @@ export {
   destructiveIn,
   GATE_CONTEXT,
   parseRiskPaths,
-  REVIEW_TIER,
   RISK_KINDS,
   RISK_PATHS_FILE,
   type RiskKind,
@@ -153,62 +116,34 @@ export {
   riskyFiles,
   SECOND_OPINION_CONTEXT,
   statusByContext,
-  TIER_COLUMN,
-  TIERS,
-  type Tier,
 } from './merge-gates.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
-  escapeText,
-  findSnapshot,
   formatAt,
   type OrderParse,
-  type PlanSnapshotDeps,
-  parseAt,
+  PLAN_USAGE,
+  type Plan,
+  type PlanDeps,
+  PlanProblem,
+  type PlanRun,
+  type PlanVersion,
   parseOrder,
-  planSnapshot,
-  readSnapshot,
-  renderSnapshot,
-  SNAPSHOT_BEGIN,
-  SNAPSHOT_END,
-  SNAPSHOT_USAGE,
-  type Snapshot,
-  type SnapshotRun,
-  type SnapshotVersion,
-  spliceSnapshot,
-} from './plan-snapshot.ts';
+  planCommand,
+  planNotes,
+  readPlan,
+  renderPlan,
+} from './plan-view.ts';
 export {
-  CLAIM_COLUMN,
-  CLAIM_MATCH_CONTEXT,
-  ENGINE_BOT_LOGIN,
   ISSUE_COLUMN,
+  LEGACY_COLUMNS,
   linkedIssue,
-  PLAN_COLUMN,
+  OPTIONAL_COLUMNS,
   PR_COLUMNS,
-  prClaimId,
   prColumns,
-  SPECS_COLUMN,
 } from './pr-columns.ts';
-export {
-  annotation,
-  checkPlanValue,
-  checkPrFields,
-  PLAN_DOC,
-  type PrEvent,
-  type PrFacts,
-  prFromEvent,
-  type RepoFacts,
-  specsPaths,
-} from './pr-fields.ts';
-export {
-  type LabelPlan,
-  type LabelRun,
-  type PrState,
-  planLabels,
-  runPrLabels,
-  titlePrefixKind,
-} from './pr-labels.ts';
+export { annotation, checkPlanValue, PLAN_DOC } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
+export { releaseVersion } from './publish-actions.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {
   matchesStandardPath,

@@ -62,6 +62,10 @@
       "FLEET_CANARY_REPO": {
         "private": "67514fa0e273daaec37f215554967308c904134ea1a65ca8e735c32e2ee8b2e4",
         "说明": "全流程巡检的巡检仓（owner/仓名）：私有值，公开仓里不写真值（docs/ops.md 第五节「全流程巡检」）"
+      },
+      "FLEET_SESSION_PROXY": {
+        "value": "",
+        "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/profile.sh 照这一档的期望读，不认 root 环境里的同名变量）。法国直连，留空＝不经代理；本机档经 Windows 上的 Clash（#731）"
       }
     },
     "api.env": {
@@ -95,6 +99,10 @@
       "FEISHU_APP_SECRET": {
         "private": "473fcbb2c51e0cb398d35d26bb36c4175b248ade5673ac6174bd5b9790c1ac7e",
         "说明": "飞书自建应用的凭据：私有值"
+      },
+      "FLEET_FEISHU_LOGIN": {
+        "value": "on",
+        "说明": "驾驶舱接飞书登录：on（不写也一样）时生产必须配上面飞书一对（packages/api/src/config.ts）；off 只给本机档（deploy/local/desired-config.json）"
       },
       "TEMPORAL_ADDRESS": {
         "value": "127.0.0.1:7243",

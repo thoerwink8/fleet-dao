@@ -1,9 +1,10 @@
-// 提醒是一件活（design 15.3「谁在处理」）的外壳：从库里读一批提醒的跟进单、认领、挂钩的 PR、静默，从法国的发布记录读在用的
-// 版本，拼成 @fleet-dao/core 的 AlertWorkFacts，交给 core 的 alertHandling 现算「谁在处理、修到哪」。驾驶舱提醒列表都经这里读，
+// 提醒是一件活（design 15.3「谁在处理」）的外壳：从库里读一批提醒的跟进单、挂钩的 PR、静默，从法国的发布记录读在用的
+// 版本，拼成 @fleet-dao/core 的 AlertWorkFacts，交给 core 的 alertHandling 现算「在处理、修到哪」。驾驶舱提醒列表都经这里读，
 // 判法只 core 那一份；`fleet-api alert show` 只读跟进单、PR、静默，不再显示这份「谁在处理」（#445）。
 // 改这里之前必须知道：
 // - 读不到就抛（连不上库、语句出错），调用方写明「没查成」，不当成「没人在修」。
 // - 发布记录只在法国上有（readDeployLagInput 读 current 链接和自动发布的状态文件）；别处给 null，core 写明「这里查不了发布」。
+// - 认领账（issue_claims）2026-10-03 起整张删掉（#556，创始人回「选 1」）：这里不再读它，也没有 toIssueClaim 了。
 import {
   type AlertHandling,
   type AlertLevel,
@@ -32,7 +33,6 @@ import {
 import type { AlertHandlingSchema } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { DeployLagInput } from './deploy-lag.ts';
-import { toIssueClaim } from './seat-store.ts';
 
 const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d ? d.toISOString() : null);
@@ -51,7 +51,7 @@ export function toAlertSilence(r: AlertSilenceRow): AlertSilence {
   };
 }
 
-/** 库里读出来的一批行拼成每条提醒的事实（跟进单：另挂的优先，没有就是任务的那张；PR 三种挂法都算）。 */
+/** 库里读出来的一批行拼成每条提醒的事实（跟进单：另挂的优先，没有就是任务的那张；PR 两种挂法：正文写了它、正文挂了跟进单）。 */
 export function toAlertWorkFacts(raw: AlertWorkRaw): AlertWorkFacts[] {
   const tasks = new Map(raw.tasks.map((t) => [t.id, t]));
   return raw.alerts.map((a) => {
@@ -76,16 +76,11 @@ export function toAlertWorkFacts(raw: AlertWorkRaw): AlertWorkFacts[] {
             linkedAt: null,
           }
         : null;
-    const claimRow = work
-      ? raw.claims.find((c) => c.repoId === work.repoId && c.issueNumber === work.issueNumber)
-      : undefined;
-    const claim = claimRow ? toIssueClaim(claimRow) : null;
     const prs: FixPr[] = [];
     for (const p of raw.prs) {
-      const via: ('alert' | 'issue' | 'claim')[] = [];
+      const via: ('alert' | 'issue')[] = [];
       if (p.alertRefs.includes(a.dedupeKey) || p.alertRefs.includes(a.id)) via.push('alert');
       if (work && p.repoId === work.repoId && p.issueRefs.includes(work.issueNumber)) via.push('issue');
-      if (claim && p.repoId === claim.repoId && claim.prNumbers.includes(p.number)) via.push('claim');
       if (via.length === 0) continue;
       prs.push({
         repo: `${p.owner}/${p.name}`,
@@ -113,7 +108,6 @@ export function toAlertWorkFacts(raw: AlertWorkRaw): AlertWorkFacts[] {
         resolvedBy: a.resolvedBy,
       },
       work,
-      claim,
       prs,
       silences: raw.silences.map(toAlertSilence),
     };

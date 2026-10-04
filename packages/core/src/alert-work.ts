@@ -1,15 +1,13 @@
 // 提醒是一件活（design 15.3「谁在处理」；创始人 2026-09-27 夜：「标上谁在处理……更类似于一个派单状态」）：要修的提醒挂在
-// 一张跟进单上（有 task_id 的就是那张单，没挂单的由人另开一张、挂到提醒上），谁在处理
-// 就是那张单上的认领（#299，seat.ts），不另记；状态从认领、PR 镜像、发布记录读时现算（照 k8s Conditions：只看真实记录，
-// 每个阶段带进入的时刻）。这里只判，读库、读文件、开单是外壳的事；这份「谁在处理」只给驾驶舱看，
+// 一张跟进单上（有 task_id 的就是那张单，没挂单的由人另开一张、挂到提醒上），状态从 PR 镜像、发布记录读时现算（照 k8s
+// Conditions：只看真实记录，每个阶段带进入的时刻）。这里只判，读库、读文件、开单是外壳的事；这份「谁在处理」只给驾驶舱看，
 // `fleet-api alert show` 不再显示（#445，删掉了自动开跟进单、要认领、按分钟再推那一层——原来这里的「提醒派单」）。
 // 改这里之前必须知道：
-// - 引擎自己的认领不算有人在处理：提醒是引擎自己搞不定才报的（#293「没有别家可验」时 #293 的认领在引擎手里）。单列成
-//   engine_stuck，和没人在修一样；转人工要创始人说改派。
+// - 认领账（issue_claims）2026-10-03 起整张删掉（#556，创始人回「选 1」）：不再有「有人在修」这个阶段，
+//   也没了引擎自己卡住单列成 engine_stuck 那一档——原来这两档都是读认领账判的。
 // - 读不到、认不出的写进 problems、阶段不猜：发布判不了就停在「合进主线」并写明没查成；整条读不到的由外壳报没查成，
 //   不当成「没人在修」（创始人 2026-09-28：删减只删拦人催人的，不许驾驶舱少看到东西——没查成和没人在修必须分得开）。
 import type { ALERT_STAGES } from '@fleet-dao/shared';
-import { claimOwnerText, type IssueClaim, isActiveClaim } from './seat.ts';
 
 // —— 事实：外壳从库里、文件里读出来交给这里 ——
 
@@ -75,8 +73,6 @@ export interface AlertSilence {
 export interface AlertWorkFacts {
   alert: AlertRef;
   work: WorkIssue | null;
-  /** 跟进单上的认领（活着的、结束了的都给：结束了的用来算「没人在修」从哪算起）；没有是 null。 */
-  claim: IssueClaim | null;
   prs: readonly FixPr[];
   /** 和这条提醒的键对得上的静默（活着的、过期的都行，这里判）。 */
   silences: readonly AlertSilence[];
@@ -215,19 +211,21 @@ export function deployStateOf(
 
 // —— 处理状态 ——
 
-/** 阶段的名字就是驾驶舱接口里的那一份（@fleet-dao/shared 的 ALERT_STAGES）。 */
+/**
+ * 阶段的名字就是驾驶舱接口里的那一份（@fleet-dao/shared 的 ALERT_STAGES）。
+ */
 export type AlertStage = (typeof ALERT_STAGES)[number];
 
 // 「没人在修」「有人在修」不是「没人认领」「认领了」（#445，创始人 2026-09-28：删减只删拦人催人的，不许驾驶舱少看到
-// 东西——认领本身没删，issue_claims、帅位这一套照旧；只是提醒这一层不再拿「认领没认领」当第一位的说法，
-// 改成直接说「谁在修、修到哪」，没人在修就照实说没人在修，不是报错也不是没人认领这种听着像在催人的说法）。
+// 东西——当时认领没删，只是提醒这一层不再拿「认领没认领」当第一位的说法，改成直接说「谁在修、修到哪」，
+// 没人在修就照实说没人在修，不是报错也不是没人认领这种听着像在催人的说法）。
+// 认领账整张删掉之后（#556，创始人回「选 1」），「有人在修」和「引擎拿着」这两档跟着没了：只剩「等创始人拍」
+// 「没人在修」和从 PR 镜像、发布记录读出来的几档。
 const STAGE_WORDS: Readonly<Record<AlertStage, string>> = {
   resolved: '已撤',
   silenced: '已静默',
   waiting_founder: '等创始人拍',
   unclaimed: '没人在修',
-  engine_stuck: '引擎拿着、它自己卡住了',
-  claimed: '有人在修',
   pr_open: 'PR 开着',
   merged: '合进主线、等发布',
   deployed: '法国已发布、等条件撤',
@@ -238,39 +236,36 @@ export function alertStageText(stage: AlertStage): string {
 }
 
 /** 有人在处理的几个阶段（升级看「停得太久」，不看「没人在修」）。 */
-export const HANDLED_STAGES: readonly AlertStage[] = ['claimed', 'pr_open', 'merged', 'deployed'];
+export const HANDLED_STAGES: readonly AlertStage[] = ['pr_open', 'merged', 'deployed'];
 /** 没人在处理的几个阶段（升级看「没人在修」）。 */
-export const UNHANDLED_STAGES: readonly AlertStage[] = ['waiting_founder', 'unclaimed', 'engine_stuck'];
+export const UNHANDLED_STAGES: readonly AlertStage[] = ['waiting_founder', 'unclaimed'];
 
 export interface AlertHandling {
   stage: AlertStage;
   /** 进这个阶段的时刻（k8s Conditions 的 lastTransitionTime），「多久了」从它算。 */
   since: string;
-  /** 谁在处理：本机的认领写「机器/工人」；只有 PR 的写「PR #号」；静默写建静默的人；等创始人拍写创始人；没人是 null。 */
+  /** 谁在处理：只有 PR 的写「PR #号」；静默写建静默的人；等创始人拍写创始人；没人是 null。 */
   who: string | null;
   work: WorkIssue | null;
-  /** 活着的认领（引擎的也给：engine_stuck 要说是谁拿着）；没有是 null。 */
-  claim: IssueClaim | null;
   /** 带动这个阶段的那个 PR（开着的、合了的）；没有是 null。 */
   pr: FixPr | null;
   silence: AlertSilence | null;
   /** 合了以后才有：发布了没有。 */
   deploy: DeployState | null;
   /**
-   * 「没人在修」这一段从哪算起（再推的键用）：first = 提醒开着以来没人在修过；after-<认领号前 8 位> = 那份认领结束以后。
+   * 「没人在修」这一段从哪算起（再推的键用）：认领账删掉之后只剩 first = 提醒开着以来一直没人在修。
    * 有人在处理、静默、已撤的是 null。
    */
   episode: string | null;
-  /** 停在哪（「停得太久」再推的键用）：<阶段>-<认领号前 8 位 | PR 号 | 合并提交前 12 位>；没人在处理的是 null。 */
+  /** 停在哪（「停得太久」再推的键用）：<阶段>-<PR 号 | 合并提交前 12 位>；没人在处理的是 null。 */
   stageRef: string | null;
-  /** 给人看的一行：「本机/工人A 在处理 · #342 · PR #350 开着 · 35 分钟」。 */
+  /** 给人看的一行：「PR #350 开着 · #342 · 35 分钟」。 */
   line: string;
   /** 没查成的，一条一句（发布判不了之类）。 */
   problems: string[];
 }
 
 const issueRef = (w: WorkIssue) => `${w.repo}#${w.issueNumber}`;
-const short = (id: string) => id.slice(0, 8);
 
 /** 分钟说成人话：「35 分钟」「2 小时 10 分钟」「3 天 4 小时」。 */
 export function spokenMinutes(total: number): string {
@@ -292,16 +287,13 @@ const later = (a: string, b: string | null | undefined) => (b && Date.parse(b) >
 /**
  * 一条提醒此刻的处理状态（纯函数：驾驶舱、本机看板都用它；`fleet-api alert show` 只借它读静默、没查成，
  * 不再显示 `line`/`who`，#445）。先后：
- * 已撤 → 静默 → 修复的 PR（开着的先于合了的：还在往下修）→ 本机的认领 → 等创始人拍（decision）→ 引擎自己卡住 → 没人在修。
+ * 已撤 → 静默 → 修复的 PR（开着的先于合了的：还在往下修）→ 等创始人拍（decision）→ 没人在修。
  */
 export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now: string): AlertHandling {
   const { alert, work } = f;
   const problems: string[] = [];
-  const claim = f.claim && isActiveClaim(f.claim.state) ? f.claim : null;
-  const humanClaim = claim && claim.ownerKind !== 'engine' ? claim : null;
   const base = {
     work,
-    claim,
     pr: null as FixPr | null,
     silence: null as AlertSilence | null,
     deploy: null as DeployState | null,
@@ -334,13 +326,13 @@ export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now
     };
   }
 
-  const whoOf = (pr: FixPr) => (humanClaim ? claimOwnerText(humanClaim) : `PR #${pr.number}`);
+  const whoOf = (pr: FixPr) => `PR #${pr.number}`;
   const openPrs = f.prs.filter((p) => p.state === 'open');
   if (openPrs.length > 0) {
     const pr = [...openPrs].sort(
       (a, b) => Date.parse(a.openedAt ?? a.updatedAt) - Date.parse(b.openedAt ?? b.updatedAt),
     )[0] as FixPr;
-    const since = later(pr.openedAt ?? pr.updatedAt, humanClaim?.claimedAt);
+    const since = pr.openedAt ?? pr.updatedAt;
     const who = whoOf(pr);
     return {
       ...base,
@@ -387,26 +379,9 @@ export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now
     };
   }
 
-  if (humanClaim) {
-    const who = claimOwnerText(humanClaim);
-    return {
-      ...base,
-      stage: 'claimed',
-      since: humanClaim.claimedAt,
-      who,
-      stageRef: `claimed-${short(humanClaim.claimId)}`,
-      line: `${who} 在处理${workText} · ${humanClaim.note ? `${humanClaim.note} · ` : ''}${ago(humanClaim.claimedAt)}`,
-    };
-  }
-
-  // 没人在处理：从什么时候算起（上一份认领结束以后是新的一段）
-  const ended = f.claim && !isActiveClaim(f.claim.state) ? f.claim : null;
-  const endedAfter = ended?.endedAt && Date.parse(ended.endedAt) > Date.parse(alert.createdAt) ? ended : null;
-  const since = endedAfter?.endedAt ?? alert.createdAt;
-  const episode = endedAfter ? `after-${short(endedAfter.claimId)}` : 'first';
-  const endedText = endedAfter
-    ? `（上一份认领${endedAfter.state === 'voided' ? '作废了' : endedAfter.state === 'released' ? '放下了' : '做完了'}：${endedAfter.endReason ?? '没写原因'}）`
-    : '';
+  // 没人在处理：从提醒报出来的那一刻算起（认领账删掉之后不再有「上一份认领结束以后」这一段）
+  const since = alert.createdAt;
+  const episode = 'first';
 
   if (alert.level === 'decision') {
     return {
@@ -415,17 +390,7 @@ export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now
       since,
       who: '创始人',
       episode,
-      line: `等创始人拍${workText}${endedText} · ${ago(since)}`,
-    };
-  }
-  if (claim && claim.ownerKind === 'engine') {
-    return {
-      ...base,
-      stage: 'engine_stuck',
-      since,
-      who: '引擎',
-      episode,
-      line: `没人接手：引擎拿着${workText}、它自己卡住了${endedText} · ${ago(since)}`,
+      line: `等创始人拍${workText} · ${ago(since)}`,
     };
   }
   return {
@@ -434,7 +399,7 @@ export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now
     since,
     who: null,
     episode,
-    line: `没人在修${workText}${endedText} · ${ago(since)}`,
+    line: `没人在修${workText} · ${ago(since)}`,
   };
 }
 

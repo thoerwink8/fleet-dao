@@ -7,6 +7,7 @@ import {
   BoardResponse,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
+  DEFAULT_SESSION_EFFORT,
   DEMO_MODULES,
   DEMO_STRICT_DEFAULT,
   DemoLinksResponse,
@@ -20,11 +21,19 @@ import {
   NotificationsResponse,
   PoolsResponse,
   type RealtimeTable,
+  ReleaseVersionResponse,
   ReposResponse,
+  type Route,
+  RoutingEffortsResponse,
+  RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
   RunStepsResponse,
+  readSegmentRun,
+  routeEffortChoices,
+  routeEffortProblem,
   SETTING_SCHEMAS,
+  type SessionEffort,
   type SessionRun,
   type SettingKey,
   SettingsResponse,
@@ -37,17 +46,19 @@ import {
   TimelineResponse,
   UpdateChannelRequest,
   UpdateDemoDefaultRequest,
+  UpdateRouteEffortRequest,
+  UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
   UpdateStagePolicyRequest,
   UpdateStagePolicyResponse,
+  windowAppliesTo,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import { brand } from '#brand';
 import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
 import type { Ask, AuditEntry, DemoLink, LiveEvent, TaskState } from '../types';
-import type { MAsk, MLog, MockRepoFlow, MockState, MSubtask, MTask } from './model';
+import type { MAsk, MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 
 export interface MockOptions {
@@ -82,7 +93,16 @@ const STAGE_WORDS: Record<StageKind, string> = {
 };
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
 const STALE_MS = 30 * 60_000;
+/** 路由两层里在它的模型下关着的路由（照仓里默认骨架：中转那条 Opus 关着）。 */
+const MOCK_SWITCHED_OFF = new Set(['r-rl-opus']);
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
+
+/** 一层合起来（db 的 routing-liveness.ts layerLiveness）：有一条活就活；没有活、有不知道就不知道；全死或空就死。 */
+function layerVerdict(children: readonly ('live' | 'dead' | 'unknown')[]): 'live' | 'dead' | 'unknown' {
+  if (children.includes('live')) return 'live';
+  if (children.includes('unknown')) return 'unknown';
+  return 'dead';
+}
 const GENERIC_STEPS = ['读相关代码', '改代码', '写测试', '跑测试并开 PR'];
 
 /** 可复现的随机数（mulberry32）。 */
@@ -151,6 +171,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   let counter = 0;
   /** 进合并队列的先后。 */
   const queuedAt = new Map<string, number>();
+  /** 每条路由配的思考档位（#470）：没有就是没配。种子里一条 Grok 配了 medium，页面上能看到「配过」的样子。 */
+  const mockEfforts = new Map<string, SessionEffort>([['r-grok', 'medium']]);
   const demo: {
     links: Omit<DemoLink, 'expired'>[];
     defaultScope: DemoScope;
@@ -223,6 +245,86 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     return null;
   }
 
+  /**
+   * 一条路由现在活着吗：三件事的说法照 db 的 routing-liveness.ts（真后端的判法只在那里），假数据只照着拼，不另起一套措辞。
+   */
+  function mockRouteLiveness(r: Route, purpose: StageKind, t: number) {
+    const channel = st.channels.find((c) => c.id === r.channelId);
+    const pool = st.pools.find((p) => p.id === r.poolId);
+    const model = st.models.find((m) => m.id === r.modelId);
+    const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });
+
+    let connect: ReturnType<typeof fact>;
+    if (!channel?.enabled) connect = fact('dead', '渠道关了');
+    else if (pool?.expiresAt && Date.parse(pool.expiresAt) <= t) connect = fact('dead', '账号池订阅过期了');
+    else if (model?.retiredAt && Date.parse(model.retiredAt) <= t) connect = fact('dead', '模型已下架');
+    else if (r.alive) connect = fact('live', '探针探通了');
+    else if (!r.probe) connect = fact('unknown', '探针还没看过这条路由');
+    else if (r.probe.state === 'skipped')
+      connect = fact('unknown', `探针这一轮没探它（不是探了没通）：${r.probe.detail ?? '探针没写原因'}`);
+    else connect = fact('dead', `探针判不在线：${r.probe.detail ?? `探针没写原因（${r.probe.state}）`}`);
+
+    const poolWindows = st.quota.filter((w) => w.poolId === r.poolId);
+    const windows = poolWindows.filter(
+      (w) =>
+        !(w.resetsAt && Date.parse(w.resetsAt) <= t) &&
+        windowAppliesTo(w, { id: r.modelId, ...(model ? { family: model.family } : {}) }) !== 'no',
+    );
+    const full = windows.filter(
+      (w) =>
+        w.upstreamStatus === 'limit_reached' ||
+        (w.utilization !== undefined && w.utilization >= 1) ||
+        (w.used !== undefined && w.limit !== undefined && w.used >= w.limit),
+    );
+    const quota =
+      full.length > 0
+        ? fact('dead', '适用的额度窗用满了')
+        : poolWindows.length === 0 || windows.some((w) => t - Date.parse(w.readAt) > STALE_MS)
+          ? fact('unknown', '额度没读成、读数过期，或判不了扣不扣这条路由')
+          : fact('live', '额度读数新、窗口有余');
+
+    const hard = model ? hardBanFor(model, purpose) : undefined;
+    const banReasons = [
+      ...(hard ? [hard.reason] : []),
+      ...st.bans
+        .filter(
+          (b) =>
+            (b.stage === undefined || b.stage === purpose) &&
+            (b.family === undefined || b.family === model?.family) &&
+            (b.modelId === undefined || b.modelId === r.modelId),
+        )
+        .map((b) => b.reason),
+    ];
+    const enabled = !MOCK_SWITCHED_OFF.has(r.id);
+    const ban =
+      banReasons.length > 0
+        ? fact('dead', `命中禁令：${banReasons.join('；')}`)
+        : enabled
+          ? fact('live', '没有禁令、开关开着')
+          : fact('dead', '开关关着（这条路由在它的模型下关着）');
+
+    const verdicts = [connect.verdict, quota.verdict, ban.verdict];
+    return {
+      routeId: r.id,
+      channelId: r.channelId,
+      channelName: channel?.name ?? r.channelId,
+      poolId: r.poolId,
+      hostId: r.hostId,
+      enabled,
+      verdict: verdicts.includes('dead') ? 'dead' : verdicts.includes('unknown') ? 'unknown' : 'live',
+      connect,
+      quota,
+      ban,
+      ...(r.probe ? { probedAt: r.probe.at } : {}),
+      exhausted: full.map((w) => ({
+        label: w.label ?? w.window,
+        ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),
+      })),
+      inFlight: poolRunning(r.poolId),
+      maxConcurrency: pool?.maxConcurrency ?? 0,
+    } as const;
+  }
+
   // ---------- 投影成契约形状 ----------
 
   function activityOf(run: SessionRun, steps: Step[] | undefined) {
@@ -269,33 +371,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     return { id: repo.id, owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch };
   }
 
-  // 文件名从品牌读。假数据写死三种样子，不在这里重算 45 分钟，也不拿 project 去填空的来源。
-  function flowView(row: MockRepoFlow) {
-    const commit =
-      row.commit == null || row.commit === ''
-        ? undefined
-        : row.commit.length <= 7
-          ? row.commit
-          : row.commit.slice(0, 7);
-    if (row.error) {
-      return {
-        paused: true as const,
-        why: `流程配置认不出：${row.error}。改好仓里的 ${brand.flow.fileName}，合进主线、对账读成后自动恢复`,
-        ...(row.source ? { source: row.source } : {}),
-        ...(commit ? { commit } : {}),
-        ...(row.syncedAt ? { syncedAt: row.syncedAt } : {}),
-      };
-    }
-    if (row.source && commit && row.syncedAt) {
-      return { paused: false as const, source: row.source, commit, syncedAt: row.syncedAt };
-    }
-    throw new Error('假数据的流程配置副本对不上：没有错误，也凑不齐来源、提交和同步时刻，不拿 project 顶');
-  }
-
   function boardOf(repoId: string) {
     const repo = repoView(repoId);
-    const replica = st.repoFlows[repoId];
-    if (!replica) throw new Error(`假数据没有仓 ${repoId} 的流程配置副本`);
     const tasks = st.tasks
       .filter((t) => t.task.repoId === repoId)
       .sort((a, b) => a.task.priority - b.task.priority || a.task.createdAt.localeCompare(b.task.createdAt));
@@ -326,7 +403,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           priority: t.task.priority,
           requestedBy: t.task.requestedBy,
           createdAt: t.task.createdAt,
-          ...(t.task.flowSource ? { flowSource: t.task.flowSource } : {}),
           progress: {
             done: t.subtasks.filter((s) => s.subtask.state === 'merged').length,
             total: t.subtasks.length,
@@ -336,7 +412,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         };
       }),
       now: nowItems,
-      flow: flowView(replica),
       asOf: iso(),
     });
   }
@@ -822,7 +897,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               title: a.question,
               context: `#${t.task.issueNumber} ${t.task.title}`,
               since: a.askedAt,
-              link: '/home3',
+              // 和真后端 homeDecisions 一样链到任务页
+              link: `/tasks/${t.task.id}`,
             })),
         ),
       ].sort((a, b) => b.since.localeCompare(a.since));
@@ -846,7 +922,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 ? ('queue' as const)
                 : ('nothing' as const),
             ...(queued ? { waitingSince: queued.queuedAt } : {}),
-            link: '/home3',
+            link: `/tasks/${t.task.id}`,
           };
         });
       const done = st.tasks
@@ -921,11 +997,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       const tv = findTask(taskId);
       const runs = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)];
+      // 三段的流水和真后端 segmentRunViews 一个读法（shared 的 readSegmentRun）：模型名查目录、计费方式查渠道
+      const finished = TERMINAL.has(tv.task.state);
+      const segmentRuns = (tv.segmentRuns ?? []).map((r) =>
+        readSegmentRun(
+          {
+            ...r,
+            modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+            billing: st.channels.find((c) => c.id === r.channel)?.billing,
+            matchedBy: r.taskId === undefined ? 'issueNumber' : 'task',
+          },
+          { taskFinished: finished },
+        ),
+      );
       return TaskDetailResponse.parse({
         task: tv.task,
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),
         runs: runs.map(runView),
+        segmentRuns,
         asks: tv.asks.map((a) => ({
           id: a.id,
           runId: a.runId,
@@ -955,6 +1045,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 billing: info.billing,
               };
             }),
+          segmentRuns,
         ),
       });
     },
@@ -1083,17 +1174,114 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async routing() {
       await wait();
-      const stages = StageKindSchema.options.map(
-        (stage) => st.stages.find((p) => p.stage === stage) ?? { stage, routeIds: [], pinned: false },
-      );
       return RoutingResponse.parse({
         channels: st.channels,
         pools: st.pools,
         models: st.models,
         routes: st.routes,
-        stages,
         hardBans: HARD_BANS.map(({ id, reason }) => ({ id, reason })),
         bans: st.bans,
+      });
+    },
+    async routingLayers() {
+      await wait();
+      const t = now();
+      // 假数据没有路由两层那两张表：模型 → 路由按路由目录的先后（一个模型的路由各用途共用），用途 → 模型按各阶段那一串里
+      // 模型第一次出现的先后。没配的用途照真后端写成缺口。
+      const purposes = StageKindSchema.options.map((purpose) => {
+        const policy = st.stages.find((p) => p.stage === purpose);
+        const modelIds = [
+          ...new Set(
+            (policy?.routeIds ?? []).flatMap((id) => st.routes.find((r) => r.id === id)?.modelId ?? []),
+          ),
+        ];
+        if (modelIds.length === 0) {
+          return {
+            purpose,
+            verdict: 'dead' as const,
+            problems: [`用途 ${purpose} 没配模型顺序`],
+            models: [],
+          };
+        }
+        const models = modelIds.map((modelId) => {
+          const model = st.models.find((m) => m.id === modelId);
+          const routes = st.routes
+            .filter((r) => r.modelId === modelId)
+            .map((r) => mockRouteLiveness(r, purpose, t));
+          return {
+            modelId,
+            displayName: model?.displayName ?? modelId,
+            ...(model ? { family: model.family } : {}),
+            verdict: layerVerdict(routes.map((r) => r.verdict)),
+            routes,
+          };
+        });
+        return { purpose, verdict: layerVerdict(models.map((m) => m.verdict)), problems: [], models };
+      });
+      return RoutingLayersResponse.parse({ asOf: iso(), purposes });
+    },
+    async routingEfforts() {
+      await wait();
+      // 假数据没有上游模型串：能配哪几档按模型编号判（cursor 的 auto 这类整串照样配不了），判法照 shared 的 effort.ts
+      const modelIds = [...new Set(st.routes.map((r) => r.modelId))].sort();
+      const models = modelIds.map((modelId) => {
+        const model = st.models.find((m) => m.id === modelId);
+        return {
+          modelId,
+          displayName: model?.displayName ?? modelId,
+          ...(model ? { family: model.family } : {}),
+          routes: st.routes
+            .filter((r) => r.modelId === modelId)
+            .map((r) => {
+              const choices = routeEffortChoices(r.hostId, r.modelId);
+              const effort = mockEfforts.get(r.id);
+              return {
+                routeId: r.id,
+                channelId: r.channelId,
+                channelName: st.channels.find((c) => c.id === r.channelId)?.name ?? r.channelId,
+                poolId: r.poolId,
+                hostId: r.hostId,
+                model: r.modelId,
+                enabled: !MOCK_SWITCHED_OFF.has(r.id),
+                ...(effort ? { effort } : {}),
+                choices: choices.kind === 'choices' ? [...choices.values] : [],
+                ...(choices.kind === 'fixed' ? { fixed: choices.why } : {}),
+              };
+            }),
+        };
+      });
+      return RoutingEffortsResponse.parse({ defaultEffort: DEFAULT_SESSION_EFFORT, models });
+    },
+    async updateRouteEffort(modelId, routeId, raw) {
+      await wait();
+      const body = UpdateRouteEffortRequest.parse(raw);
+      const route = st.routes.find((r) => r.id === routeId && r.modelId === modelId);
+      if (!route) {
+        throw new ApiError(404, 'route_not_found', `模型 ${modelId} 下没有路由 ${routeId}（路由两层里没挂）`);
+      }
+      if (body.effort !== null) {
+        const problem = routeEffortProblem(route.hostId, route.modelId, body.effort);
+        if (problem) throw new ApiError(422, 'effort_not_allowed', problem);
+      }
+      const current = mockEfforts.get(routeId) ?? null;
+      if (current !== body.expected) {
+        throw new ApiError(409, 'conflict', '这条路由的档位刚被别人改过，刷新后再改', { current });
+      }
+      if (body.effort === null) mockEfforts.delete(routeId);
+      else mockEfforts.set(routeId, body.effort);
+      audit({
+        actor: meActor(),
+        action: 'routing.effort.update',
+        target: `route:${routeId}`,
+        before: { modelId, effort: current },
+        after: { modelId, effort: body.effort },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return UpdateRouteEffortResponse.parse({
+        modelId,
+        routeId,
+        ...(body.effort === null ? {} : { effort: body.effort }),
       });
     },
     async updateStagePolicy(stage, raw) {
@@ -1239,6 +1427,18 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       });
       emit('settings', key);
       return UpdateSettingResponse.parse({ setting: next }).setting;
+    },
+    async releaseVersion() {
+      await wait();
+      // 假数据：当前版本里程碑是 v3，还开着一张 v4（真后端读 GitHub，见 packages/api/src/release-version.ts）。
+      // 这份假数据也进演示版的包：标题别带演示版禁词（build/scan.ts）。
+      return ReleaseVersionResponse.parse({
+        state: 'ok',
+        version: 'v3',
+        milestone: { number: 3, title: 'v3 三段一条龙' },
+        others: [{ number: 4, title: 'v4 看得更清楚' }],
+        asOf: iso(),
+      });
     },
     async demoLinks() {
       await wait();

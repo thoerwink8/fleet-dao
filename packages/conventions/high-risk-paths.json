@@ -1,5 +1,5 @@
 {
-  "说明": "先审后合的路径（design 第五节「流程只为快」：只有两种——迁移里有删改语句；碰安全：密钥与登录鉴权、卫生检查和 CI 工作流本身，外加对公网开口子和提权的生产配置（法国防火墙、sudoers、香港 nginx）。deploy/ 里其余的部署脚本和引擎代码、必填栏判法一样不算，CI 绿就合，创始人 2026-09-26 下午拍）。PR 改到这里的文件，当前头上要有通过的 second-opinion，合并闸（merge-gate）才放行；按路径判，不看 PR 自己写的档位。合并闸用的是主线上的这一份，PR 里改了要合进主线之后才算数。以 / 结尾的是目录（下面所有文件都算），否则是单个文件；kind 是两种之一；mode 为 migrations 的目录里，新加的迁移只建表、加列不算。加一条要写为什么。",
+  "说明": "先审后合的路径（design 第五节「流程只为快」：只有两种——迁移里有删改语句；碰安全：密钥与登录鉴权、卫生检查和 CI 工作流本身，外加对公网开口子和提权的生产配置（法国防火墙、sudoers、香港 nginx）。deploy/ 里其余的部署脚本和引擎代码、必填栏判法一样不算，CI 绿就合，创始人 2026-09-26 下午拍）。PR 改到这里的文件，当前头上要有通过的 second-opinion，合并闸（merge-gate）才放行；按路径判，不看 PR 自己写的档位。合并闸用的是主线上的这一份，PR 里改了要合进主线之后才算数。以 / 结尾的是目录（下面所有文件都算），否则是单个文件；kind 是两种之一；mode 为 migrations 的目录里，新加的迁移只建表、加列不算。加一条要写为什么。 review 为 after-merge 的条目是先合后审（创始人 2026-10-03「1+2+3」第 3 条）：合并闸不等第二意见，结论里点名「合并后补审」，合并后由 second-opinion.mjs 补；只许标改坏了一条 git revert 就退回、不泄密不提权的 CI 判法那几份。",
   "paths": [
     {
       "path": "packages/db/migrations/",
@@ -123,6 +123,12 @@
       "why": "定令牌权限；合并闸、pull_request_target 拿写令牌也在这"
     },
     {
+      "path": ".github/workflows/ci.yml",
+      "kind": "碰安全",
+      "mode": "workflow",
+      "why": "CI 本身：合并闸把改动前后两份全文各解析一遍做结构比对（packages/conventions/src/workflow-structure.ts）——权限、触发、并发、环境、job 的增删、每个 job 的 needs/if/runs-on/权限/服务、矩阵、步骤用到的 action 和它的整个 with/if/continue-on-error/shell、汇总判红的脚本、跑检查的命令还在不在、往步骤输出和环境里写东西或吞掉失败的写法有没有变多，碰到任何一样才要第二意见；超时、并行上限、步骤顺序、名字、注释、加一步普通命令不用审（创始人 2026-10-03 拍「1+2+3」：按行匹配每轮都能被挑出新漏洞、没有终点）。比这个目录那条更具体，所以对它按这条判"
+    },
+    {
       "path": "packages/conventions/high-risk-paths.json",
       "kind": "碰安全",
       "why": "CI 检查本身：就是这份清单：删一条就少拦一类"
@@ -143,6 +149,11 @@
       "why": "合并闸读写 GitHub 用的令牌客户端"
     },
     {
+      "path": "packages/conventions/src/workflow-structure.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身（合并闸）：ci.yml 改动碰没碰信任的结构比对，放松它等于让改权限、改触发的 PR 不过第二意见"
+    },
+    {
       "path": "packages/conventions/src/bin/merge-gate.ts",
       "kind": "碰安全",
       "why": "合并闸在 Actions 里跑的入口"
@@ -150,17 +161,50 @@
     {
       "path": "packages/conventions/src/ci-plan.ts",
       "kind": "碰安全",
+      "review": "after-merge",
       "why": "CI 检查本身：按改动算哪几个 job 跑、测哪几个包，汇总 check 的结论也在这；判「少跑」等于放行没测过的改动"
     },
     {
       "path": "packages/conventions/src/bin/ci-plan.ts",
       "kind": "碰安全",
+      "review": "after-merge",
       "why": "CI 的 changes job 入口：git diff 算改动、写各 job 的开关"
     },
     {
       "path": "packages/conventions/src/bin/ci-verdict.ts",
       "kind": "碰安全",
+      "review": "after-merge",
       "why": "CI 汇总 job（必过检查 check）的入口"
+    },
+    {
+      "path": "packages/conventions/src/test-split.ts",
+      "kind": "碰安全",
+      "review": "after-merge",
+      "why": "CI 检查本身：列测试文件、按环境的类分台、按耗时装箱（哪些测试跑、哪一台跑）；少列一个文件、少装一台，那个测试就没人跑了"
+    },
+    {
+      "path": "packages/conventions/src/ci-box.ts",
+      "kind": "碰安全",
+      "review": "after-merge",
+      "why": "CI 检查本身：认矩阵里那一台、跑完核对「实际跑的 == 分到的」；放松它等于让少跑、多跑都算过"
+    },
+    {
+      "path": "packages/conventions/src/bin/ci-box.ts",
+      "kind": "碰安全",
+      "review": "after-merge",
+      "why": "test job 里认这一台、跑完核对那两步的入口"
+    },
+    {
+      "path": "packages/conventions/src/ci-cache.ts",
+      "kind": "碰安全",
+      "review": "after-merge",
+      "why": "CI 检查本身：PR 的测试分片结果缓存，算键、核对清单、决定哪些测试这一轮不跑；判「少跑」等于放行没测过的改动，主线那一轮（自动发布的闸门）也靠它认事件名才不被跳"
+    },
+    {
+      "path": "packages/conventions/src/bin/ci-cache.ts",
+      "kind": "碰安全",
+      "review": "after-merge",
+      "why": "CI test job 里缓存那几步的入口：vitest list、写清单、写 GITHUB_OUTPUT 里的跑法（all / files / none）"
     },
     {
       "path": "packages/conventions/src/flow-branch.ts",
@@ -170,6 +214,7 @@
     {
       "path": "packages/conventions/src/repo.ts",
       "kind": "碰安全",
+      "review": "after-merge",
       "why": "CI 的 changes job 经它读 package.json 算依赖图：改它能伪造依赖图，让受影响的包不测"
     }
   ]

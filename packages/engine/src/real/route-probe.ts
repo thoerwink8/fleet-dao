@@ -261,6 +261,8 @@ export interface RouteProbeWiring {
   /** 会话用户切号（real/org-switch.ts，#157）：每一轮探之前判、该切就切。不给就不切。 */
   orgSwitch?: OrgSwitchRound;
   machine: string;
+  /** 会话出网经的代理（FLEET_SESSION_PROXY）：和干活的会话同一份，cursor-agent、grok 的探针带上（hosts.ts）。不给就直连。 */
+  sessionProxy?: string;
   now?: () => Date;
   log?: RouteProbeJobDeps['log'];
   /** 以下测试用。 */
@@ -284,6 +286,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     mirasimConnect: w.mirasimConnect,
     mirasimLedgerDir: w.mirasimLedgerDir,
     mirasimLedgerFs: w.mirasimLedgerFs,
+    sessionProxy: w.sessionProxy,
     ...(w.run ? { run: w.run } : {}),
   });
   const deps: ProberDeps = {

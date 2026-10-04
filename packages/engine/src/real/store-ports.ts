@@ -1,7 +1,12 @@
 // 引擎端口 → 库（packages/db）：选路、提问、人闸、报警、计时、任务快照。
-// 选路：调度台的顺序和候选事实（routeFactsForStage）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
+// 选路：路由两层的顺序和候选事实（routeFactsForPurpose，#574：先按这个用途的模型顺序、再按模型下的路由顺序，摊平成一串；
+// 不读旧的阶段平铺表 stage_policy_routes）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
+// （熔断、战绩、半开时在途的试探都是两种会话并起来算：Fusion 的会话和三段的一次性会话，db 的 pool-runs.ts，#758；三段的那一段按
+// 它选路的用途算战绩，task-contract.ts 的 SEGMENT_STAGE）
 // + 被暂停的账号池（pool-hold:<池> 那条没处理的「要人拍」提醒，见 sessions.ts）交给纯函数 chooseRoute，三种结果原样换成
-// 端口的三种。点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
+// 端口的三种：判「死」的（不在线、渠道关了、犯禁令、开关关着……）挡掉、写明原因；额度未知的排在读到了的后面（routing/rank.ts）；
+// 一条都派不出、又等不来，明说派不出（带每条为什么），不拿空的、默认的顶。两层里没有「钉住」，一律按没钉住算。
+// 点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
 // 账号池暂停着时，续会话的那一单照样放过去——它就是看人修好了没有的试探。Fusion 带了流程配置里这一步的模型顺序（models）
 // 就只派这几个模型的路由、先按配置的先后排（onlyModels），一条都没有明说；人点名的路由不受它限制。
 // 给开 PR 前验证留一家（keepVerifier：Fusion 规划完、开 PR 之前选副手、Lead 换路由）：写这张单的族现从库里查（和 authorFamilies
@@ -16,24 +21,19 @@
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
-import { engineClaimEnd, type TaskAsk } from '@fleet-dao/core';
 import {
   authorFamiliesOfTask,
   type Db,
+  type EndedPoolRun,
+  endedPoolRuns,
   finishSessionRun,
-  listTaskAsks,
-  markAsksApplied as markAsksAppliedInDb,
   openAlertsByPrefix,
-  openApproval,
-  openEngineAsk,
-  openSessionRuns,
+  openPoolRuns,
+  type RunSegment,
   recordStepTiming,
   resolveAlertWithReason,
-  routeFactsForStage,
-  routeOutcomesSince,
+  routeFactsForPurpose,
   saveTaskSnapshot,
-  saveVerifyRound,
-  type TaskAskRow,
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -64,6 +64,7 @@ import {
   routeLabel,
   STAGE_NAMES,
 } from '../routing/index.ts';
+import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
@@ -137,18 +138,7 @@ export interface StorePortsDeps {
 
 type StorePorts = Pick<
   EnginePorts,
-  | 'pickRoute'
-  | 'askHuman'
-  | 'taskAsks'
-  | 'markAsksApplied'
-  | 'requestApproval'
-  | 'raiseAlert'
-  | 'recordTiming'
-  | 'saveTaskState'
-  | 'authorFamilies'
-  | 'recordVerification'
-  | 'flowConfig'
-  | 'taskRequest'
+  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'authorFamilies'
 > & {
   /**
    * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
@@ -157,31 +147,29 @@ type StorePorts = Pick<
   stageAllOpen(stage: StageKind): Promise<AllOpenCheck>;
 };
 
-/** 库里的一条提问 → core 的 TaskAsk（存档点、PR 正文、关单记数都按它判）：空的列不给，不拿空串、0 顶。 */
-export function toTaskAsk(r: TaskAskRow): TaskAsk {
-  return {
-    id: r.id,
-    question: r.question,
-    options: r.options,
-    applied: r.appliedAt !== null,
-    ...(r.scope === null ? {} : { scope: r.scope }),
-    ...(r.recommended === null ? {} : { recommended: r.recommended }),
-    ...(r.hold === null ? {} : { hold: r.hold }),
-    ...(r.answer === null ? {} : { answer: r.answer }),
-    ...(r.followUpIssue === null ? {} : { followUpIssue: r.followUpIssue }),
-  };
-}
-
-/** 给人看的池名：从渠道名拼，独享、拼车按池的组织类型分（两个 Claude 池是同一个会话用户）；不带账号、组织编号。 */
 export function poolNameOf(channelName: string, orgKind: OrgKind | null): string {
   if (orgKind === 'solo') return `${channelName} · 独享`;
   if (orgKind === 'carpool') return `${channelName} · 拼车`;
   return channelName;
 }
 
-type Outcome = Awaited<ReturnType<typeof routeOutcomesSince>>[number];
+/**
+ * 一次结束了的会话按哪个用途算战绩：Fusion 的会话是它选路时的阶段；三段的一次性会话按这一段选路的用途（SEGMENT_STAGE），
+ * 不经选路的段（对题）不算哪个用途的。
+ */
+function stageOf(run: EndedPoolRun): StageKind | null {
+  if (run.kind === 'session') return run.stage;
+  const stages: Partial<Record<RunSegment, StageKind>> = SEGMENT_STAGE;
+  return stages[run.segment] ?? null;
+}
 
-function breakerOf(outcomes: readonly Outcome[], now: Date, inFlight: number, routeId: string): BreakerFacts {
+/** 没下过结论的（老行、只记流水的那几笔）按不算账读：和 Fusion 的会话没记的一样当 neutral。 */
+function breakerOf(
+  outcomes: readonly EndedPoolRun[],
+  now: Date,
+  inFlight: number,
+  routeId: string,
+): BreakerFacts {
   const state = routeBreaker(
     outcomes.map((o) => ({ at: o.endedAt.toISOString(), result: o.routeOutcome ?? 'neutral' })),
     { now: now.toISOString(), inFlight, routeId },
@@ -195,11 +183,11 @@ function breakerOf(outcomes: readonly Outcome[], now: Date, inFlight: number, ro
 }
 
 /** 这条路由在这个阶段上的战绩：只数算路由账的（ok、fail），neutral 和没记的不算。一条都没有 = 没跑过（null）。 */
-function recordOf(outcomes: readonly Outcome[], stage: StageKind): RouteRecord | null {
+function recordOf(outcomes: readonly EndedPoolRun[], stage: StageKind): RouteRecord | null {
   let samples = 0;
   let successes = 0;
   for (const o of outcomes) {
-    if (o.stage !== stage || (o.routeOutcome !== 'ok' && o.routeOutcome !== 'fail')) continue;
+    if (stageOf(o) !== stage || (o.routeOutcome !== 'ok' && o.routeOutcome !== 'fail')) continue;
     samples += 1;
     if (o.routeOutcome === 'ok') successes += 1;
   }
@@ -214,10 +202,12 @@ interface StageFacts {
   /** 执行方式还没接上、这次不算的路由（给人看的名字）。 */
   unwired: string[];
   unwiredIds: Set<string>;
+  /** 路由两层的配置缺口（用途没配模型顺序、模型下一条路由都没有）：派不出时写进原因。 */
+  problems: string[];
 }
 
 /**
- * 流程配置里这一步的模型顺序（0003 第 9 条）：只留这几个模型的路由，先按配置里的先后、同一个模型的照调度台的先后排，
+ * 流程配置里这一步的模型顺序（0003 第 9 条）：只留这几个模型的路由，先按配置里的先后、同一个模型的照路由两层的先后排，
  * 位置从 0 重新数（选路按位置排、也按它写「第几条」）。额度、战绩这些微调照常在它上面做（「再打分：配置顺序、战绩」）。
  */
 function onlyModels(facts: StageFacts, models: readonly string[]): StageFacts {
@@ -265,18 +255,19 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
+    // 两种会话都读（db 的 pool-runs.ts）：哪张表读不了照抛，不当成没有三段的会话（熔断、战绩、试探数都会算少）
     const [facts, outcomes, open] = await Promise.all([
-      routeFactsForStage(db, stage, { now }),
-      routeOutcomesSince(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
-      openSessionRuns(db),
+      routeFactsForPurpose(db, stage, { now }),
+      endedPoolRuns(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
+      openPoolRuns(db),
     ]);
-    const byRoute = new Map<string, Outcome[]>();
+    const byRoute = new Map<string, EndedPoolRun[]>();
     for (const o of [...outcomes].sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime())) {
       const list = byRoute.get(o.routeId) ?? [];
       list.push(o);
       byRoute.set(o.routeId, list);
     }
-    // 熔断半开时在途的那一个就是试探：按路由数已经开工、还没结束的会话。
+    // 熔断半开时在途的那一个就是试探：按路由数已经开工、还没结束的会话（三段的一次性会话开跑才留那一行，都算开工了的）。
     const running = new Map<string, number>();
     for (const r of open) if (r.startedAt) running.set(r.routeId, (running.get(r.routeId) ?? 0) + 1);
 
@@ -320,14 +311,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     const unwiredIds = new Set(unwiredRoutes.map((r) => r.routeId));
     return {
       configured: facts.configured,
-      stagePinned: facts.stagePinned,
-      // 单条钉住调度台上还没有（只有整个阶段钉住）：这里一律 false，阶段钉住由 stagePinned 带进去。
+      // 路由两层没有「钉住」（#574 的两张表都没这一列）：一律按没钉住算，快清零提前、战绩差往后、额度未知排后照常做。
+      stagePinned: false,
       order: facts.order
         .filter((e) => !unwiredIds.has(e.routeId))
         .map((e) => ({ routeId: e.routeId, position: e.position, enabled: e.enabled, pinned: false })),
       routes: all.filter((r) => !unwiredIds.has(r.routeId)),
       unwired: unwiredRoutes.map((r) => routeLabel(r)),
       unwiredIds,
+      problems: facts.problems,
     };
   }
 
@@ -357,7 +349,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     const task = UUID.test(taskId) ? await taskContext(db, taskId) : null;
     const models = keep.models
       ? `按流程配置只派 ${keep.models.join('、') || '（一个都没配）'}`
-      : '照调度台派';
+      : '照路由两层派';
     await upsertAlert(db, {
       dedupeKey: noVerifierKey(taskId),
       level: 'alert',
@@ -366,7 +358,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       body: [
         reason,
         `验证这一步${models}${keep.uiWork ? '；这张单改到了页面代码，GPT 不验（禁令）' : ''}。`,
-        '现在就补：给调度台的开 PR 前验证阶段接上一条能派的别家路由（在线、不犯禁令、和写这张单的不同族），或者换这张单的副手、Lead；不补的话，干完走到验证那一步会挂起「没有别家可验」。验证留得下了、验证派出去了，选路自己撤这条。',
+        '现在就补：给开 PR 前验证这个用途排上一个能派的别家模型（路由两层：用途 → 模型、模型 → 路由；在线、不犯禁令、和写这张单的不同族），或者换这张单的副手、Lead；不补的话，干完走到验证那一步会挂起「没有别家可验」。验证留得下了、验证派出去了，选路自己撤这条。',
       ].join('\n\n'),
     });
   }
@@ -539,7 +531,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ? `${what} ${id} 的执行方式引擎还没接上，照常选`
           : knownAny(id)
             ? `${what} ${id} 的模型不在流程配置这一步的模型里，照常选`
-            : `${what} ${id} 不在这个阶段的调度台顺序里，照常选`;
+            : `${what} ${id} 不在这个用途的路由两层顺序里，照常选`;
 
       const dispatched = async (r: Extract<ChooseRouteResult, { kind: 'dispatch' }>, why: string) => {
         const fact = knownAny(r.routeId);
@@ -624,15 +616,17 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(facts.unwired.length > 0
           ? [`执行方式引擎还没接上、这次没算的：${facts.unwired.join('、')}`]
           : []),
+        // 两层配置上的缺口（模型下一条路由都没有这类）照实带上：派不出时人要知道是配置空着，不是路由都坏了
+        ...(facts.problems.length > 0 ? [`路由两层的配置缺口：${facts.problems.join('、')}`] : []),
       ];
       const noOther =
         families.length > 0
           ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
           : [];
-      // 调度台排了这个阶段、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个阶段一条都没配」
+      // 路由两层排了这个用途、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个用途一条都没配」
       if (input.models && facts.configured && facts.order.length === 0) {
         const models = input.models.length > 0 ? input.models.join('、') : '一个都没配';
-        const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的调度台上没有接上的路由`;
+        const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的路由两层顺序里没有接上的路由`;
         return { ok: false, waitFor: 'none', detail: [...noOther, reason, ...context].join('；') };
       }
       const r = choose({ ...base, avoid: avoid() });
@@ -687,110 +681,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         );
       }
       return { families };
-    },
-
-    async recordVerification(input) {
-      await saveVerifyRound(
-        db,
-        {
-          id: input.id,
-          taskId: input.taskId,
-          round: input.round,
-          head: input.head,
-          runId: input.runId,
-          routeId: input.routeId,
-          family: input.family,
-          authorFamilies: input.authorFamilies,
-          criteria: input.criteria,
-          report: input.report ?? null,
-          verdict: input.verdict,
-          invalidWhy: input.invalidWhy ?? null,
-          rebuttals: input.rebuttals,
-          finalVerdict: input.finalVerdict ?? null,
-          reasons: input.reasons,
-          notes: input.notes,
-        },
-        clock(),
-      );
-    },
-
-    async flowConfig(input) {
-      // 任务所在仓的流程配置副本原样交出去：能不能派、用哪套由 core 判（Fusion 起步的 setupFusion），这里不补默认值
-      const task = UUID.test(input.taskId) ? await taskContext(db, input.taskId) : null;
-      if (!task) {
-        throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}：读不了它那个仓的流程配置`, {
-          retryable: false,
-        });
-      }
-      const { flow } = task.repo;
-      return {
-        replica: {
-          syncedAt: flow.syncedAt ? flow.syncedAt.toISOString() : null,
-          error: flow.error,
-          unread: flow.unread,
-          testCommand: flow.testCommand,
-        },
-        source: flow.source,
-        config: flow.config,
-      };
-    },
-
-    async taskRequest(input) {
-      // 库里这张单的标题和正文：单子在 GitHub 上改了，接活那边（api 的 updateTaskRequest）会跟着改
-      const task = UUID.test(input.taskId) ? await taskContext(db, input.taskId) : null;
-      if (!task) {
-        throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}`, { retryable: false });
-      }
-      return { title: task.title, rawRequest: task.rawRequest };
-    },
-
-    async askHuman(input) {
-      await openEngineAsk(db, {
-        id: input.askId,
-        taskId: input.taskId,
-        runId: input.runId ?? null,
-        question: input.question,
-        options: input.options ?? [],
-        // 引擎自己问、带了推荐的（分诊说不清，#259）：按推荐先做了，记成这张单范围内的岔路，卡片写「已按推荐先做」
-        ...(input.recommended === undefined
-          ? {}
-          : { recommended: input.recommended, scope: 'task' as const }),
-      });
-    },
-
-    async taskAsks(input) {
-      const missing = () =>
-        new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}：读不了它问过创始人的`, {
-          retryable: false,
-        });
-      if (!UUID.test(input.taskId)) throw missing();
-      const rows = await listTaskAsks(db, input.taskId);
-      // 一条都没有时核一下任务在不在：不在是明确的错，不当成「一条都没问过」
-      if (rows.length === 0 && !(await taskContext(db, input.taskId))) throw missing();
-      return rows.map(toTaskAsk);
-    },
-
-    async markAsksApplied(input) {
-      if (!UUID.test(input.taskId)) {
-        throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}：记不了照改`, {
-          retryable: false,
-        });
-      }
-      // 只记这张单的、回答了的、没记过的：重试时已经记过的不动（照改的时刻不往后挪）
-      await markAsksAppliedInDb(db, { taskId: input.taskId, askIds: input.askIds, at: clock() });
-    },
-
-    async requestApproval(input) {
-      await openApproval(db, {
-        id: input.approvalId,
-        taskId: input.taskId,
-        subtaskId: input.subtaskId ?? null,
-        holds: input.holds,
-        prNumber: input.prNumber,
-        head: input.head,
-        title: input.title,
-        summary: input.summary,
-      });
     },
 
     async raiseAlert(input) {
@@ -870,10 +760,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(input.specDir !== undefined ? { specDir: input.specDir } : {}),
         ...(input.docs !== undefined ? { docs: input.docs } : {}),
         lastProblem: input.lastProblem,
-        ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         subtasks: input.subtasks,
-        // 这张单上引擎的认领跟着任务走（#299）：结束了跟着结束，在跑的待起改成在做
-        claimEnd: engineClaimEnd(input.state),
       });
       if (r === 'task_not_found') {
         throw new PortError('TASK_NOT_FOUND', `任务 ${input.taskId} 在库里没有，写不了快照`, {

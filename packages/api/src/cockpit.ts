@@ -1,11 +1,13 @@
 // 驾驶舱接口（/api）：看板、任务、步骤、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
-// 读一律从数据库读（不直接查 GitHub）；每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
+// 读一律从数据库读（不直接查 GitHub；唯一的例外是 /changelog 的发布版本号，现读 GitHub 里程碑，见 release-version.ts）；
+// 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
 import {
   AnswerAskRequest,
   AnswerAskResponse,
   AuditQuery,
   AuditResponse,
   BoardResponse,
+  DEFAULT_SESSION_EFFORT,
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
@@ -17,19 +19,22 @@ import {
   PoolsResponse,
   ReposResponse,
   ResolveNotificationResponse,
+  RoutingEffortsResponse,
+  RoutingLayersResponse,
   RoutingResponse,
   RunStepsResponse,
   SETTING_SCHEMAS,
   type SettingKey,
   SettingsResponse,
   StageKindSchema,
-  type StagePolicy,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
   TimelineResponse,
   UpdateChannelRequest,
   UpdateChannelResponse,
+  UpdateRouteEffortRequest,
+  UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
   UpdateStagePolicyRequest,
@@ -44,7 +49,7 @@ import { meBody } from './auth.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps, NotWiredMark } from './deps.ts';
-import { ApiError, readJson, readQuery, reply } from './http.ts';
+import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import {
   type Actor,
   type NewAuditEntry,
@@ -53,6 +58,10 @@ import {
   WorkflowGoneError,
   WorkflowUnavailableError,
 } from './ports.ts';
+import { registerReleaseRoutes } from './release-version.ts';
+import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
+import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
+import { findSelfRepo } from './self-repo.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
@@ -68,6 +77,7 @@ import {
   routeLookup,
   routeProblem,
   runView,
+  segmentRunViews,
   subtaskViews,
   usageView,
 } from './views.ts';
@@ -176,8 +186,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.board.path, async (c) => {
     const repo = await store.getRepo(c.req.param('repoId'));
     if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个仓');
-    const repoFlow = await store.getRepoFlow(repo.id);
-    if (!repoFlow) throw new ApiError(404, 'repo_not_found', '没有这个仓');
     const tasks = await store.listBoardTasks(repo.id);
     const taskIds = tasks.map((t) => t.id);
     const [subtasks, activeRuns, routes, models] = await Promise.all([
@@ -191,17 +199,18 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(
       c,
       BoardResponse,
-      buildBoard(repo, { tasks, subtasks, activeRuns, plans, route }, deps.now(), repoFlow),
+      buildBoard(repo, { tasks, subtasks, activeRuns, plans, route }, deps.now()),
     );
   });
 
   app.get(WebRoutes.task.path, async (c) => {
     const task = await store.getTask(c.req.param('taskId'));
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
-    const [repo, subtasks, runs, asks, routes, models, channels] = await Promise.all([
+    const [repo, subtasks, runs, segmentRecords, asks, routes, models, channels] = await Promise.all([
       store.getRepo(task.repoId),
       store.listSubtasks([task.id]),
       store.listRuns({ taskIds: [task.id] }),
+      store.listSegmentRuns(task.id),
       store.listAsks(task.id),
       store.listRoutes(),
       store.listModels(),
@@ -212,11 +221,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const plans = await store.getPlans(activeRuns.map((r) => r.id));
     // 带上渠道表：会话和用量汇总的花费要分清按量、套餐内
     const route = routeLookup(routes, models, channels);
+    const segmentRuns = segmentRunViews(segmentRecords, {
+      models,
+      channels,
+      taskFinished: isTaskFinished(task),
+    });
     return reply(c, TaskDetailResponse, {
       task,
       repo,
       subtasks: subtaskViews(task.id, { tasks: [task], subtasks, activeRuns, plans, route }),
       runs: runs.map((r) => runView(r, route(r.routeId))),
+      segmentRuns,
       asks: asks.map((a) => ({
         id: a.id,
         runId: a.runId,
@@ -233,7 +248,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         effect: askLate(a, task.state),
         followUpIssue: a.followUpIssue,
       })),
-      usage: usageView(runs, route),
+      usage: usageView(runs, route, segmentRuns),
     });
   });
 
@@ -352,22 +367,112 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, AnswerAskResponse, { ok: true });
   });
 
+  // 路由目录。每个用途的先后不在这里给：那是路由两层（下面 routingLayers），旧的阶段平铺表没人读了（#574）
   app.get(WebRoutes.routing.path, async (c) => {
-    const [channels, pools, models, routes, policies, bans] = await Promise.all([
+    const [channels, pools, models, routes, bans] = await Promise.all([
       store.listChannels(),
       store.listPools(),
       store.listModels(),
       store.listRoutes(),
-      store.listStagePolicies(),
       store.listBans(),
     ]);
-    const byStage = new Map(policies.map((p) => [p.stage, p]));
-    const stages: StagePolicy[] = StageKindSchema.options.map(
-      (stage) => byStage.get(stage) ?? { stage, routeIds: [], pinned: false },
-    );
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
     // 路由在线状态就是库里探针的结论（routes.alive、probe_*，#129），原样给驾驶舱
-    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
+    return reply(c, RoutingResponse, { channels, pools, models, routes, hardBans, bans });
+  });
+
+  // 路由两层每一层现在活着吗（#574）：读的时候现算，不存。读不到回 503 写明没读成；没接上写 unavailable。
+  app.get(WebRoutes.routingLayers.path, async (c) => {
+    const now = deps.now();
+    if (!deps.routingLayers) {
+      return reply(c, RoutingLayersResponse, {
+        asOf: now.toISOString(),
+        purposes: [],
+        unavailable: ROUTING_LAYERS_NOT_HERE,
+      });
+    }
+    let layers: Awaited<ReturnType<RoutingLayersPort['read']>>;
+    try {
+      layers = await deps.routingLayers.read({ now, staleAfterMs: config.quotaStaleAfterMs });
+    } catch (err) {
+      deps.log.error('路由两层没读成', { error: fullStack(err) });
+      // message 只写原因：驾驶舱前面自己加「路由两层没读成：」
+      const cause = (err instanceof Error && err.message) || String(err);
+      throw new ApiError(503, 'routing_layers_unreadable', cause);
+    }
+    const [models, channels] = await Promise.all([store.listModels(), store.listChannels()]);
+    return reply(c, RoutingLayersResponse, {
+      asOf: now.toISOString(),
+      purposes: routingLayersView(layers, { models, channels }),
+    });
+  });
+
+  // 每条路由的思考档位（#470）：读库里现在配的。没接上写 unavailable；读不到回 503 写明没读成。
+  app.get(WebRoutes.routingEfforts.path, async (c) => {
+    if (!deps.routingEfforts) {
+      return reply(c, RoutingEffortsResponse, {
+        defaultEffort: DEFAULT_SESSION_EFFORT,
+        models: [],
+        unavailable: ROUTING_EFFORTS_NOT_HERE,
+      });
+    }
+    let rows: Awaited<ReturnType<RoutingEffortsPort['read']>>;
+    try {
+      rows = await deps.routingEfforts.read();
+    } catch (err) {
+      deps.log.error('思考档位没读成', { error: fullStack(err) });
+      throw new ApiError(
+        503,
+        'routing_efforts_unreadable',
+        (err instanceof Error && err.message) || String(err),
+      );
+    }
+    return reply(c, RoutingEffortsResponse, {
+      defaultEffort: DEFAULT_SESSION_EFFORT,
+      models: routingEffortsView(rows),
+    });
+  });
+
+  // 改一条路由的思考档位（#470）：直接写库（运行时配置，决定 0011 第 7 条），和操作记录同一事务；下一个起的会话就照它。
+  // 这条路由的执行方式不认、路由两层里没挂、别人刚改过，都拒，库里一行不动。
+  app.put(WebRoutes.updateRouteEffort.path, async (c) => {
+    const modelId = c.req.param('modelId');
+    const routeId = c.req.param('routeId');
+    const body = await readJson(c, UpdateRouteEffortRequest);
+    if (!deps.routingEfforts) throw new ApiError(503, 'routing_efforts_not_wired', ROUTING_EFFORTS_NOT_HERE);
+    let result: Awaited<ReturnType<RoutingEffortsPort['set']>>;
+    try {
+      result = await deps.routingEfforts.set(
+        { modelId, routeId, effort: body.effort, expected: body.expected },
+        {
+          actor: actorOf(c),
+          action: 'routing.effort.update',
+          target: `route:${routeId}`,
+          reason: body.reason,
+          via: c.get('via'),
+          ok: true,
+        },
+      );
+    } catch (err) {
+      deps.log.error('思考档位没改成', { modelId, routeId, error: fullStack(err) });
+      throw new ApiError(
+        503,
+        'routing_effort_unwritable',
+        (err instanceof Error && err.message) || String(err),
+      );
+    }
+    if (!result.ok) {
+      if (result.kind === 'not_found') throw new ApiError(404, 'route_not_found', result.why);
+      if (result.kind === 'invalid') throw new ApiError(422, 'effort_not_allowed', result.why);
+      throw new ApiError(409, 'conflict', '这条路由的档位刚被别人改过，刷新后再改', {
+        current: result.current,
+      });
+    }
+    return reply(c, UpdateRouteEffortResponse, {
+      modelId,
+      routeId,
+      ...(result.after === null ? {} : { effort: result.after }),
+    });
   });
 
   app.put(WebRoutes.updateStagePolicy.path, async (c) => {
@@ -521,6 +626,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDemoRoutes(app, deps, actorOf);
+  registerReleaseRoutes(app, deps);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */
   async function settingsView() {
@@ -540,11 +646,9 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   return app;
 }
 
-/** 这些单开在 fleet-dao 自己这个仓：在受管的仓里按名字找它，找到了驾驶舱才链得过去（找不到只显示单号）。 */
-const SELF_REPO_NAME = 'fleet-dao';
-
+/** 这些单开在 fleet-dao 自己这个仓：在受管的仓里找到它，驾驶舱才链得过去（找不到只显示单号）。 */
 async function notWiredView(store: Store, mark: NotWiredMark | undefined): Promise<NotWired | undefined> {
   if (!mark) return undefined;
-  const self = (await store.listRepos()).find((r) => r.name === SELF_REPO_NAME);
+  const self = await findSelfRepo(store);
   return { ...mark, ...(self ? { issueRepo: { owner: self.owner, name: self.name } } : {}) };
 }

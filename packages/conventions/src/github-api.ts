@@ -1,5 +1,5 @@
-// 欠账的定时任务、阶段收口要读 GitHub 上 issue 和里程碑现在的样子，欠账的定时任务还往单上留言，
-// PR 补贴（pr-labels）读 PR、往 PR 上补类别标签和里程碑，版本快照（plan-snapshot）读版本、先后和子单：走 REST 接口。
+// 欠账检查、GitHub 对账、pnpm plan 要读 GitHub 上 issue、里程碑、母子单现在的样子，欠账检查和对账还往单上留言；
+// 发起发布（publish-pr 读当前版本里程碑）、发布收尾（release.yml 查发布 PR 的合并时间、关里程碑）也走这里：都是 REST 接口。
 // 必过检查（pnpm check）不许用这里（#87：同一份代码什么时候跑结果都一样）。
 // 令牌按 GITHUB_TOKEN → GH_TOKEN → 本机 `gh auth token` 的顺序找，都没有就不带（公开仓不带令牌也读得到，
 // 只是每小时 60 次）。令牌只放进请求头，报错里不带。读不到、认不出一律抛，由调用方判「没查成」，不当成没问题。
@@ -25,48 +25,16 @@ export interface MilestoneInfo {
   state: 'open' | 'closed';
 }
 
-export interface GitHubReader {
-  /** 开着的 issue（不含 PR）。 */
-  openIssues(): Promise<IssueInfo[]>;
-  /** 这个号现在的样子；没有这个号（404、410）返回 undefined。 */
-  issue(n: number): Promise<IssueInfo | undefined>;
-  /** 所有里程碑（开着的、关了的）。 */
-  milestones(): Promise<MilestoneInfo[]>;
-  /** 这个里程碑里开着的 issue 和 PR。 */
-  openInMilestone(milestone: number): Promise<IssueInfo[]>;
-}
-
-/** 欠账的定时任务往单上留言用（要能写 issue 的令牌）。 */
-export interface GitHubCommenter {
-  /** 这张单上所有留言的正文。 */
-  comments(n: number): Promise<string[]>;
-  comment(n: number, body: string): Promise<void>;
-}
-
-/** PR 补贴（pr-labels.ts）用：读 PR 现在的样子，补类别标签和里程碑（要能写 PR 的令牌）。 */
-export interface GitHubPrLabeler {
-  /** PR 现在的样子；读不到（含没有这个号）就抛。 */
-  pull(n: number): Promise<PullInfo>;
-  /** 给 PR 加一个标签；返回加完以后 PR 上的全部标签（GitHub 回的）。 */
-  addLabel(n: number, name: string): Promise<string[]>;
-  /** 给 PR 挂里程碑（按里程碑的号）；返回挂完以后的里程碑名字（GitHub 回的）。 */
-  setMilestone(n: number, milestone: number): Promise<string | null>;
-}
-
-export interface PullInfo {
-  number: number;
-  title: string;
-  body: string;
-  labels: string[];
-  milestone: string | null;
-}
-
-/** 版本快照读的一张单：比 IssueInfo 多关单原因和 GitHub 记着的子单数。 */
+/** 一张单：比 IssueInfo 多关单原因和母子单关系（GitHub 自带的子议题）。 */
 export interface PlanIssue extends IssueInfo {
   /** 关单原因（completed、not_planned、duplicate…）；开着的、没写原因的是 null。 */
   stateReason: string | null;
   /** GitHub 记着的子单数（sub_issues_summary.total）；接口没给是 undefined。 */
   subIssues: number | undefined;
+  /** 其中已经关了的（sub_issues_summary.completed）；接口没给是 undefined。 */
+  subIssuesDone?: number | undefined;
+  /** 母单的号（parent_issue_url）；没有母单是 undefined。 */
+  parent?: number | undefined;
 }
 
 /** 带说明的里程碑：版本里的先后写在说明里（#169 第 5 件）。 */
@@ -77,16 +45,38 @@ export interface MilestoneDetail extends MilestoneInfo {
   closedAt: string | null;
 }
 
-/** 版本快照（plan-snapshot.ts，#138）用：读版本、版本里的单、未排期的单和子单。 */
-export interface PlanReader {
-  /** 所有里程碑（开着的、关了的），带说明。 */
-  milestoneDetails(): Promise<MilestoneDetail[]>;
+export interface GitHubReader {
   /** 开着的 issue（不含 PR）。 */
-  openPlanIssues(): Promise<PlanIssue[]>;
+  openIssues(): Promise<PlanIssue[]>;
+  /** 这个号现在的样子；没有这个号（404、410）返回 undefined。 */
+  issue(n: number): Promise<PlanIssue | undefined>;
+  /** 所有里程碑（开着的、关了的），带说明。 */
+  milestones(): Promise<MilestoneDetail[]>;
   /** 这个里程碑里的 issue，开着的、关了的都要（不含 PR）。 */
-  milestonePlanIssues(milestone: number): Promise<PlanIssue[]>;
+  milestoneIssues(milestone: number): Promise<PlanIssue[]>;
   /** 这张单的子单（GitHub 自带的子议题），按母单页面上排的先后。 */
   subIssues(n: number): Promise<PlanIssue[]>;
+}
+
+/** 欠账检查、对账往单上留言用（要能写 issue 的令牌）。 */
+export interface GitHubCommenter {
+  /** 这张单上所有留言的正文。 */
+  comments(n: number): Promise<string[]>;
+  comment(n: number, body: string): Promise<void>;
+}
+
+/** 一张已经合并的 PR：号和合并的时间（ISO）。 */
+export interface MergedPull {
+  number: number;
+  mergedAt: string;
+}
+
+/** 发布收尾（release.yml 核里程碑、关里程碑那两步）用（要能写 issue 的令牌：里程碑归 issues 权限）。 */
+export interface GitHubReleaser {
+  /** head 是本仓这个分支、已经合并了的 PR，照 GitHub 回的先后（新开的在前）。 */
+  mergedPulls(head: string): Promise<MergedPull[]>;
+  /** 关掉这个里程碑，回 GitHub 关完之后的那一份（PATCH 的回包，调用方拿它核是不是真关了）。 */
+  closeMilestone(n: number): Promise<MilestoneDetail>;
 }
 
 type Env = Record<string, string | undefined>;
@@ -136,7 +126,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter & GitHubPrLabeler & PlanReader {
+): GitHubReader & GitHubCommenter & GitHubReleaser {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -196,24 +186,27 @@ export function liveGitHub(
   return {
     async openIssues() {
       const rows = await pages(`/repos/${repo}/issues?state=open&per_page=100`, '开着的 issue');
-      return rows.map((r) => toIssue(r, '开着的 issue')).filter((i) => !i.isPr);
+      return rows.map((r) => toPlanIssue(r, '开着的 issue')).filter((i) => !i.isPr);
     },
     async issue(n) {
       const res = await get(`/repos/${repo}/issues/${n}`);
       if (res.status === 404 || res.status === 410) return undefined;
       if (!res.ok) throw failed(res, ` #${n} `);
-      return toIssue(await json(res, ` #${n} `), ` #${n} `);
+      return toPlanIssue(await json(res, ` #${n} `), ` #${n} `);
     },
     async milestones() {
       const rows = await pages(`/repos/${repo}/milestones?state=all&per_page=100`, '里程碑');
-      return rows.map(toMilestone);
+      return rows.map(toMilestoneDetail);
     },
-    async openInMilestone(milestone) {
-      const rows = await pages(
-        `/repos/${repo}/issues?milestone=${milestone}&state=open&per_page=100`,
-        '里程碑里开着的单',
-      );
-      return rows.map((r) => toIssue(r, '里程碑里开着的单'));
+    async milestoneIssues(milestone) {
+      const what = '里程碑里的单';
+      const rows = await pages(`/repos/${repo}/issues?milestone=${milestone}&state=all&per_page=100`, what);
+      return rows.map((r) => toPlanIssue(r, what)).filter((i) => !i.isPr);
+    },
+    async subIssues(n) {
+      const what = ` #${n} 的子单`;
+      const rows = await pages(`/repos/${repo}/issues/${n}/sub_issues?per_page=100`, what);
+      return rows.map((r) => toPlanIssue(r, what));
     },
     async comments(n) {
       const rows = await pages(`/repos/${repo}/issues/${n}/comments?per_page=100`, ` #${n} 的留言`);
@@ -230,56 +223,29 @@ export function liveGitHub(
       });
       if (res.status !== 201) throw failed(res, `在 #${n} 上留言`);
     },
-    async pull(n) {
-      const what = ` PR #${n} `;
-      const res = await get(`/repos/${repo}/pulls/${n}`);
-      if (!res.ok) throw failed(res, what);
-      const raw = await json(res, what);
-      if (!isObject(raw)) throw new Error(`读${what}，读回来的不是对象`);
-      if (raw.body !== null && typeof raw.body !== 'string') throw new Error(`读${what}，认不出（body）`);
-      const { number, title, labels, milestone } = toIssue({ ...raw, pull_request: {} }, what);
-      if (number !== n) throw new Error(`要读 PR #${n}，读回来的是 #${number}`);
-      return { number, title, body: raw.body ?? '', labels, milestone };
-    },
-    async addLabel(n, name) {
-      const what = `给 PR #${n} 加标签「${name}」`;
-      const res = await get(`/repos/${repo}/issues/${n}/labels`, {
-        method: 'POST',
-        body: JSON.stringify({ labels: [name] }),
-      });
-      if (!res.ok) throw failed(res, `在${what}时`);
-      const data = await json(res, what);
-      if (!Array.isArray(data) || !data.every((l) => isObject(l) && typeof l.name === 'string')) {
-        throw new Error(`${what}，GitHub 回的认不出（应当是标签列表）`);
+    async mergedPulls(head) {
+      const owner = repo.split('/')[0];
+      const what = ` head 是 ${head} 的 PR`;
+      const rows = await pages(`/repos/${repo}/pulls?state=closed&head=${owner}:${head}&per_page=100`, what);
+      const merged: MergedPull[] = [];
+      for (const r of rows) {
+        if (!isObject(r) || typeof r.number !== 'number')
+          throw new Error(`读${what}，有一条认不出（number）`);
+        // merged_at 整个不在、或不是时间：认不出就抛，不当成「没合并」（那会把这张发布 PR 漏掉）。
+        if (!('merged_at' in r) || (r.merged_at !== null && !isTime(r.merged_at))) {
+          throw new Error(`读${what}，有一条认不出（merged_at）`);
+        }
+        if (typeof r.merged_at === 'string') merged.push({ number: r.number, mergedAt: r.merged_at });
       }
-      return data.map((l) => String((l as { name: string }).name));
+      return merged;
     },
-    async setMilestone(n, milestone) {
-      const what = `给 PR #${n} 挂里程碑`;
-      const res = await get(`/repos/${repo}/issues/${n}`, {
+    async closeMilestone(n) {
+      const res = await get(`/repos/${repo}/milestones/${n}`, {
         method: 'PATCH',
-        body: JSON.stringify({ milestone }),
+        body: JSON.stringify({ state: 'closed' }),
       });
-      if (!res.ok) throw failed(res, `在${what}时`);
-      return toIssue(await json(res, what), what).milestone;
-    },
-    async milestoneDetails() {
-      const rows = await pages(`/repos/${repo}/milestones?state=all&per_page=100`, '里程碑');
-      return rows.map(toMilestoneDetail);
-    },
-    async openPlanIssues() {
-      const rows = await pages(`/repos/${repo}/issues?state=open&per_page=100`, '开着的 issue');
-      return rows.map((r) => toPlanIssue(r, '开着的 issue')).filter((i) => !i.isPr);
-    },
-    async milestonePlanIssues(milestone) {
-      const what = '里程碑里的单';
-      const rows = await pages(`/repos/${repo}/issues?milestone=${milestone}&state=all&per_page=100`, what);
-      return rows.map((r) => toPlanIssue(r, what)).filter((i) => !i.isPr);
-    },
-    async subIssues(n) {
-      const what = ` #${n} 的子单`;
-      const rows = await pages(`/repos/${repo}/issues/${n}/sub_issues?per_page=100`, what);
-      return rows.map((r) => toPlanIssue(r, what));
+      if (!res.ok) throw failed(res, `在关里程碑 #${n} 时`);
+      return toMilestoneDetail(await json(res, `关里程碑 #${n} 的回包`));
     },
   };
 }
@@ -332,35 +298,62 @@ function toMilestone(raw: unknown): MilestoneInfo {
   return { number: raw.number, title: raw.title, state: raw.state };
 }
 
-/** 接口回来的一个里程碑，带说明和关掉的时间；缺字段就抛，不猜。 */
+/**
+ * 接口回来的一个里程碑，带说明和关掉的时间；缺字段就抛，不猜。
+ *
+ * 两个字段都不是「可有可无」：`description` 缺了会变成「说明里没有先后标记」，被对账当成真断裂（退出码 1，
+ * 留言到单上让人去改 GitHub）；`closed_at` 缺了会变成「这是个还开着的版本」。这两种都是接口没给，不是仓里真错了，
+ * 要的是「没查成」（退出码 2）。所以只有明确的 `null`（GitHub 自己的「没有说明」/「还没关」）才当空，
+ * 字段整个不在就抛出来；`closed_at` 缺失只有一种可能——上游没给，同样抛。
+ */
 export function toMilestoneDetail(raw: unknown): MilestoneDetail {
   const base = toMilestone(raw);
+  const has = (k: string) => isObject(raw) && k in raw;
   const { description, closed_at } = raw as Record<string, unknown>;
   const bad = (field: string) => new Error(`读里程碑「${base.title}」，认不出（${field}）`);
-  if (description !== null && typeof description !== 'string') throw bad('description');
-  if (closed_at !== null && closed_at !== undefined && !isTime(closed_at)) throw bad('closed_at');
+  if (!has('description') || (description !== null && typeof description !== 'string')) {
+    throw bad('description');
+  }
+  if (!has('closed_at') || (closed_at !== null && !isTime(closed_at))) throw bad('closed_at');
   return {
     ...base,
-    description: typeof description === 'string' ? description : '',
-    closedAt: typeof closed_at === 'string' ? closed_at : null,
+    description: description === null ? '' : (description as string),
+    closedAt: closed_at === null ? null : (closed_at as string),
   };
 }
 
-/** 接口回来的一张单，外加关单原因和子单数；缺字段、认不出就抛，不猜。 */
+/** 接口回来的一张单，外加关单原因、子单数、已关的子单数、母单号；缺字段、认不出就抛，不猜。 */
 export function toPlanIssue(raw: unknown, what = 'issue'): PlanIssue {
   const base = toIssue(raw, what);
-  const { state_reason, sub_issues_summary } = raw as Record<string, unknown>;
+  const { state_reason, sub_issues_summary, parent_issue_url } = raw as Record<string, unknown>;
   const bad = (field: string) => new Error(`读${what}，有一条认不出（${field}）`);
   if (state_reason !== null && state_reason !== undefined && typeof state_reason !== 'string') {
     throw bad('state_reason');
   }
   let subIssues: number | undefined;
+  let subIssuesDone: number | undefined;
   if (sub_issues_summary !== null && sub_issues_summary !== undefined) {
-    const total = isObject(sub_issues_summary) ? sub_issues_summary.total : undefined;
-    if (typeof total !== 'number' || !Number.isInteger(total) || total < 0) throw bad('sub_issues_summary');
-    subIssues = total;
+    const count = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined);
+    const summary = isObject(sub_issues_summary) ? sub_issues_summary : {};
+    subIssues = count(summary.total);
+    subIssuesDone = count(summary.completed);
+    if (subIssues === undefined || subIssuesDone === undefined || subIssuesDone > subIssues) {
+      throw bad('sub_issues_summary');
+    }
   }
-  return { ...base, stateReason: typeof state_reason === 'string' ? state_reason : null, subIssues };
+  let parent: number | undefined;
+  if (parent_issue_url !== null && parent_issue_url !== undefined) {
+    const m = typeof parent_issue_url === 'string' ? /\/issues\/(\d+)$/.exec(parent_issue_url) : null;
+    if (!m?.[1]) throw bad('parent_issue_url');
+    parent = Number(m[1]);
+  }
+  return {
+    ...base,
+    stateReason: typeof state_reason === 'string' ? state_reason : null,
+    subIssues,
+    subIssuesDone,
+    parent,
+  };
 }
 
 function isTime(v: unknown): v is string {

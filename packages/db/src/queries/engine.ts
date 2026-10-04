@@ -8,12 +8,14 @@ import type {
   QuotaWindowKind,
   RunAsUser,
   RunOutcome,
+  SessionEffort,
   StageKind,
   SubtaskState,
   TaskState,
 } from '@fleet-dao/shared';
-import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
+import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
 import {
   approvals,
   asks,
@@ -25,6 +27,7 @@ import {
   quotaWindows,
   repos,
   routes,
+  routingCatalog,
   sessionRuns,
   sessionStops,
   stepTimings,
@@ -32,9 +35,7 @@ import {
   subtasks,
   tasks,
 } from '../schema/index.ts';
-import { type Blocker, type RouteCandidate, stageCandidates } from './candidates.ts';
-import { type FlowReplicaState, flowReplicaOf } from './flow.ts';
-import { followTaskOnEngineClaim } from './seat.ts';
+import type { Blocker, RouteCandidate } from './candidates.ts';
 
 /** 起出来的会话进程在哪；会话状态、markSessionRunStarted 的输入用同一个形状。 */
 type RunHandle = { pid?: number; scope?: string };
@@ -272,62 +273,8 @@ export async function latestRunOfSession(db: Db, sessionId: string): Promise<Ses
   return row ? mapSessionRun(row.run, row.stop) : null;
 }
 
-/** 还没结束的会话；给了 runAsUser 就只要这个会话用户的。 */
-export async function openSessionRuns(
-  db: Db,
-  filter: { runAsUser?: string } = {},
-): Promise<SessionRunState[]> {
-  const rows = await db
-    .select({ run: sessionRuns, stop: sessionStops })
-    .from(sessionRuns)
-    .leftJoin(sessionStops, eq(sessionStops.runId, sessionRuns.id))
-    .where(
-      and(
-        isNull(sessionRuns.endedAt),
-        filter.runAsUser !== undefined ? eq(sessionRuns.runAsUser, filter.runAsUser as RunAsUser) : undefined,
-      ),
-    );
-  return rows.map((r) => mapSessionRun(r.run, r.stop));
-}
-
-/** 选路算熔断和战绩用：since 之后结束的会话。 */
-export async function routeOutcomesSince(
-  db: Db,
-  since: Date,
-): Promise<
-  {
-    routeId: string;
-    stage: StageKind;
-    endedAt: Date;
-    outcome: RunOutcome;
-    routeOutcome: 'ok' | 'fail' | 'neutral' | null;
-  }[]
-> {
-  const rows = await db
-    .select({
-      routeId: sessionRuns.routeId,
-      stage: sessionRuns.stage,
-      endedAt: sessionRuns.endedAt,
-      outcome: sessionRuns.outcome,
-      routeOutcome: sessionRuns.routeOutcome,
-    })
-    .from(sessionRuns)
-    .where(gte(sessionRuns.endedAt, since));
-  return rows.map((r) => {
-    // 结束了就必有结局（session_runs_outcome_iff_ended 检查约束），gte 也已经把 endedAt 为空的行排除在外；
-    // 这里只是不裸用 ! 断言，真出现数据和约束对不上时要能看见报错，不是当空处理。
-    if (r.endedAt === null || r.outcome === null) {
-      throw new Error(`会话（路由 ${r.routeId}）已结束却没有结局，数据和检查约束对不上`);
-    }
-    return {
-      routeId: r.routeId,
-      stage: r.stage,
-      endedAt: r.endedAt,
-      outcome: r.outcome,
-      routeOutcome: r.routeOutcome,
-    };
-  });
-}
+// 选路要的会话事实（池的并发、熔断、战绩、半开时在途的试探、估算的用量）两张表并起来读，都在 pool-runs.ts：别在这里另写只读
+// session_runs 的（#735、#758；原来的 openSessionRuns、routeOutcomesSince 就是这么漏掉三段的会话的）。
 
 // ---- 起会话要的事实
 
@@ -343,17 +290,12 @@ export interface TaskContext {
     owner: string;
     name: string;
     defaultBranch: string;
-    /**
-     * 流程配置副本里的测试命令（flow_config 的 testCommand，不是给人看的 test_command 列）；项目没写、从没同步成过
-     * 都是 null。起会话前按 core 的 sessionTestCommand 核过再用（packages/engine/src/real/flow-gate.ts）。
-     */
+    /** 仓的测试命令（repos.test_command，建仓时填）。 */
     testCommand: string | null;
-    /** 副本此刻的样子：派活前判能不能用。 */
-    flow: FlowReplicaState;
   };
 }
 
-/** 起会话、拼接力任务书要的：任务属于哪个仓、哪张 issue，连同仓的流程配置副本。任务不在返回 null。 */
+/** 起会话、拼接力任务书要的：任务属于哪个仓、哪张 issue，连同仓的测试命令。任务不在返回 null。 */
 export async function taskContext(db: Db, taskId: string): Promise<TaskContext | null> {
   const [row] = await db
     .select({ task: tasks, repo: repos })
@@ -361,7 +303,6 @@ export async function taskContext(db: Db, taskId: string): Promise<TaskContext |
     .innerJoin(repos, eq(repos.id, tasks.repoId))
     .where(eq(tasks.id, taskId));
   if (!row) return null;
-  const flow = flowReplicaOf(row.repo);
   return {
     taskId: row.task.id,
     issueNumber: row.task.issueNumber,
@@ -374,8 +315,7 @@ export async function taskContext(db: Db, taskId: string): Promise<TaskContext |
       owner: row.repo.owner,
       name: row.repo.name,
       defaultBranch: row.repo.defaultBranch,
-      testCommand: flow.testCommand,
-      flow,
+      testCommand: row.repo.testCommand,
     },
   };
 }
@@ -389,14 +329,24 @@ export interface RouteLaunchFacts {
   upstreamModel: string | null;
   runAsUser: RunAsUser | null;
   orgKind: OrgKind | null;
+  /**
+   * 驾驶舱给这条路由配的思考档位（routing_catalog.effort，#470）。没配、或这条路由没挂进路由两层，是 null（起会话用 high）。
+   * 起会话时现读：驾驶舱改了，下一个会话就照新的。
+   */
+  effort: SessionEffort | null;
 }
 
-/** 起会话要的：这条路由的池、会话用户、执行方式、上游模型串。路由不在返回 null。 */
+/** 起会话要的：这条路由的池、会话用户、执行方式、上游模型串、配的思考档位。路由不在返回 null。 */
 export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLaunchFacts | null> {
   const [row] = await db
-    .select({ route: routes, pool: pools })
+    .select({ route: routes, pool: pools, effort: routingCatalog.effort })
     .from(routes)
     .innerJoin(pools, eq(pools.id, routes.poolId))
+    // 一条路由只挂在它自己的模型下（复合外键），最多一行
+    .leftJoin(
+      routingCatalog,
+      and(eq(routingCatalog.routeId, routes.id), eq(routingCatalog.modelId, routes.modelId)),
+    )
     .where(eq(routes.id, routeId));
   if (!row) return null;
   return {
@@ -408,6 +358,7 @@ export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLa
     upstreamModel: row.route.upstreamModel,
     runAsUser: row.pool.runAsUser,
     orgKind: row.pool.orgKind,
+    effort: row.effort,
   };
 }
 
@@ -998,13 +949,6 @@ export interface TaskSnapshotInput {
   specDir?: string;
   docs?: { requirement?: string; plan?: string; result?: string };
   lastProblem: string | null;
-  /** 这一轮用的流程配置读自哪（tasks.flow_source）；不给就不动（旧的需求工作流不读流程配置，不给）。 */
-  flowSource?: 'project' | 'org_default';
-  /**
-   * 这张单上引擎的认领（#299）怎么跟着走：任务结束了给结束成什么（@fleet-dao/core 的 engineClaimEnd），没结束给 null
-   * （还在待起的改成在做：工作流在跑了）。本机的认领不碰。
-   */
-  claimEnd: { state: 'done' | 'released'; reason: string } | null;
   subtasks: {
     id: string;
     key: string;
@@ -1043,13 +987,11 @@ export async function saveTaskSnapshot(
         ...(input.specDir !== undefined ? { specDir: input.specDir } : {}),
         ...(input.docs !== undefined ? { docs: input.docs } : {}),
         lastProblem: input.lastProblem,
-        ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         updatedAt: new Date(),
       })
       .where(eq(tasks.id, input.taskId))
       .returning({ id: tasks.id });
     if (updated.length === 0) return 'task_not_found';
-    await followTaskOnEngineClaim(tx, { taskId: input.taskId, end: input.claimEnd });
 
     const keepIds = input.subtasks.map((s) => s.id);
     await tx
@@ -1112,11 +1054,17 @@ function usedRatio(w: {
   return null;
 }
 
-export interface StageRouteFacts {
-  stage: StageKind;
+export interface PurposeRouteFacts {
+  purpose: StageKind;
+  /** 这个用途配过模型顺序没有（routing_purpose_models 里有没有它的行）。没配就派不出，不按 id 乱挑。 */
   configured: boolean;
-  stagePinned: boolean;
+  /**
+   * 选路的先后：用途下模型的先后、再是模型下路由的先后，摊平成一串，位置从 0 数（routing-layers.ts）。开关是那条路由在它的模型下
+   * 开没开（routing_catalog.enabled，不分用途）；关着的照样排在里面，选路按 switched-off 挡。两层没有「钉住」：选路按没钉住算。
+   */
   order: { routeId: string; position: number; enabled: boolean }[];
+  /** 配置上的缺口（用途没配模型顺序、模型下一条路由都没有）：照实给出，派不出时写进原因，不当成「没有」。 */
+  problems: string[];
   routes: {
     routeId: string;
     channelId: string;
@@ -1159,25 +1107,23 @@ export interface StageRouteFacts {
 }
 
 /**
- * 在 stageCandidates 算好的挡法上加字段，不重判一遍谁能派谁不能派。stage_policy_routes 里 enabled=false 的行
- * stageCandidates 已经带着（用 'switched-off' 这个挡因标记），这里原样透出到 order。
+ * 选路的事实，按路由两层读（#574，routing-layers.ts）：在 evaluateRoutes 算好的挡法上加字段，不重判一遍谁能派谁不能派。
+ * routing_catalog 里 enabled=false 的行带着 'switched-off' 这个挡因，这里原样透出到 order。
  */
-export async function routeFactsForStage(
+export async function routeFactsForPurpose(
   db: Db,
-  stage: StageKind,
+  purpose: StageKind,
   options: { now?: Date; staleAfterMs?: number } = {},
-): Promise<StageRouteFacts> {
-  const candidates = await stageCandidates(db, stage, options);
-  if (!candidates.configured) return { stage, configured: false, stagePinned: false, order: [], routes: [] };
-
-  const sorted = [...candidates.candidates].sort((a, b) => a.position - b.position);
-  const order = sorted.map((c) => ({
+): Promise<PurposeRouteFacts> {
+  const layers = await routingLayers(db, purpose, options);
+  const configured = layers.models.length > 0;
+  const sorted = flattenRoutingLayers(layers);
+  const order = sorted.map((c, position) => ({
     routeId: c.routeId,
-    position: c.position,
+    position,
     enabled: !c.blockers.includes('switched-off'),
   }));
-  if (sorted.length === 0)
-    return { stage, configured: true, stagePinned: candidates.pinned, order, routes: [] };
+  if (sorted.length === 0) return { purpose, configured, order, problems: layers.problems, routes: [] };
 
   const routeIds = sorted.map((c) => c.routeId);
   const poolIds = [...new Set(sorted.map((c) => c.poolId))];
@@ -1253,5 +1199,5 @@ export async function routeFactsForStage(
     };
   });
 
-  return { stage, configured: true, stagePinned: candidates.pinned, order, routes: routesOut };
+  return { purpose, configured, order, problems: layers.problems, routes: routesOut };
 }

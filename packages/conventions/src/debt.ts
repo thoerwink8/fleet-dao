@@ -1,20 +1,20 @@
 // 欠账检查（#67）：「以后要做」的事必须是一张开着的 issue（design 第三节第 35 条）。分两半（#87：必过检查必须确定）：
-// - 只看文件的（checkDebtDocs，pnpm check 里跑）：文档里推后的话（「以后再做」「先不建」「再定」「留到下一轮」
-//   「后面阶段」这类）同一句里要带单号，specs/<号>-<短名>/ 下的文档本单号也算；specs/*/需求.md 的「怎么算做完」不空。
+// - 只看文件的（checkDebtDocs，.github/workflows/debt.yml 在主线推送和每天跑，不进 pnpm check）：活文档（AGENTS.md、README.md、
+//   docs/ 下除了 reference/ 和 decisions/）里推后的话（「以后再做」「先不建」「再定」「留到下一轮」「后面阶段」这类）同一句里要带单号。
 //   不读 GitHub：同一份代码什么时候跑、单子开着还是关了，结果都一样，没网也照常跑。
-// - 看 GitHub 现状的（liveDebt，只在 .github/workflows/debt.yml 的定时任务里跑）：挂的单号是不是开着的 issue、
-//   开着的 issue 在主线上有没有需求文档（开单一天内不算欠）。查出来留言到对应的单上，不让任何 PR 变红。
-//   别把这一半接回 pnpm check：#83 这么接过，#67 一关主线和所有 PR 一起红。
+// - 看 GitHub 现状的（liveDebt，只在 debt.yml 的定时任务里跑）：挂的单号是不是开着的 issue。查出来留言到对应的单上，
+//   不让任何 PR 变红。别把这一半接回 pnpm check：#83 这么接过，#67 一关主线和所有 PR 一起红。
+// 不查 specs/ 和 docs/decisions/（#654）：那是历史记录，写下那一刻的话不该被后来的检查逼着回头改；需求本身就在 GitHub 的单子里
+// （单子正文是需求的唯一的家），「怎么算做完」写没写由 pnpm issue:new 开单时拦，不再要求仓里另存一份需求.md。
 //
 // 推后的说法用一张写死的词表认（检查要每次一样、测试不出网，见 judge-or-code 第 3 问），宁漏不误：
 // 「以后加机器就是加工人」「先说结果，再说要我做什么」「它以后再发一次」这类不是推后，都不认。
 // 故意不查的：围栏代码块、HTML 注释、反引号里、「」引号里（那是在提这个词，不是在推后）、docs/reference/
-// （旧系统审计的快照，记的是当时的待查项；新系统要做的已经搬进 design、plan 和 specs）、plan.md 里
-// pnpm plan:snapshot 生成的快照段（照抄 GitHub 上的单子标题和里程碑说明，每一行本来就是一张单）。
+// （旧系统审计的快照，记的是当时的待查项）、docs/decisions/ 和 specs/（历史记录，#654）。
 // 有误报就收窄词表，不往文档里加豁免；漏了就补进词表，并在测试里加一条。
 
-import { createHash } from 'node:crypto';
-import type { GitHubCommenter, GitHubReader, IssueInfo } from './github-api.ts';
+import type { Finding } from './findings.ts';
+import type { GitHubReader } from './github-api.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
 import type { RepoView } from './repo.ts';
 
@@ -36,9 +36,9 @@ export const DEFERRAL_PATTERNS: readonly RegExp[] = [
   /(?:验收|上线)(?:之)?后(?:再)?做/,
 ];
 
-/** 查哪些文档：仓根的 AGENTS.md、README.md，docs/ 下（除了 docs/reference/）和 specs/ 下所有的 .md。 */
+/** 查哪些文档：仓根的 AGENTS.md、README.md，docs/ 下（除了 docs/reference/、docs/decisions/）所有的 .md；specs/ 是历史记录，不查。 */
 export const DEBT_ROOT_DOCS = ['AGENTS.md', 'README.md'] as const;
-const SKIPPED_DIRS = new Set(['docs/reference']);
+const SKIPPED_DIRS = new Set(['docs/reference', 'docs/decisions']);
 
 /** 同仓的单号：`#12`；`windsurf-dao#12`、`owner/repo#12` 是别的仓的，不算。 */
 const ISSUE_REF = /(?<![\w/#-])#(\d+)(?!\d)/g;
@@ -59,8 +59,6 @@ export interface Deferral {
   sentence: string;
   /** 这一句里写的同仓单号。 */
   refs: number[];
-  /** 文档在 specs/<号>-<短名>/ 下时的那个号。 */
-  owner: number | undefined;
 }
 
 export function formatDebtProblem(p: DebtProblem): string {
@@ -89,14 +87,7 @@ export function debtFiles(repo: RepoView): { files: string[]; problems: DebtProb
     }
   };
   walk('docs');
-  walk('specs');
   return { files: files.sort(), problems };
-}
-
-/** specs/12-登录验证码/需求.md → 12。 */
-export function specsOwner(file: string): number | undefined {
-  const m = /^specs\/(\d+)-[^/]+\//.exec(file);
-  return m?.[1] ? Number(m[1]) : undefined;
 }
 
 /** 反引号里、「」引号里的字换成占位（长度不变）：那是在提这个词，不是在用。 */
@@ -113,9 +104,8 @@ function maskMentions(line: string): string {
 /** 一份文档里推后的句子。 */
 export function findDeferrals(doc: MdDoc): Deferral[] {
   const found: Deferral[] = [];
-  const owner = specsOwner(doc.path);
   doc.lines.forEach((raw, i) => {
-    if (doc.fenced[i] || doc.generated[i]) return;
+    if (doc.fenced[i]) return;
     const masked = maskMentions(raw);
     let start = 0;
     for (const piece of masked.split(/(?<=[。；！？])/)) {
@@ -129,7 +119,6 @@ export function findDeferrals(doc: MdDoc): Deferral[] {
           phrase,
           sentence: sentence.trim(),
           refs: [...sentence.matchAll(ISSUE_REF)].map((m) => Number(m[1])),
-          owner,
         });
       }
       start = end;
@@ -157,55 +146,15 @@ export function doneSection(doc: MdDoc): DoneSection {
   return doc.lines.slice(start + 1, end).some((l) => l.trim()) ? 'ok' : 'empty';
 }
 
-/** specs/ 下每个需求目录都要有 需求.md，里面「怎么算做完」不空。 */
-export function checkSpecsDone(repo: RepoView): { checked: number; problems: DebtProblem[] } {
-  const problems: DebtProblem[] = [];
-  const dirs = repo.list('specs');
-  if (dirs === undefined) {
-    return { checked: 0, problems: [{ file: 'specs/', line: 0, message: '列不出 specs/ 下的目录' }] };
-  }
-  let checked = 0;
-  for (const name of dirs.sort()) {
-    const dir = `specs/${name}`;
-    if (!repo.isDir(dir)) continue;
-    if (!/^\d+-./.test(name)) {
-      problems.push({ file: `${dir}/`, line: 0, message: '目录名认不出单号：要叫 specs/<号>-<短名>/' });
-      continue;
-    }
-    const file = `${dir}/需求.md`;
-    const text = repo.read(file);
-    if (text === undefined) {
-      problems.push({ file: `${dir}/`, line: 0, message: '没有 需求.md（或读不到）' });
-      continue;
-    }
-    checked++;
-    const state = doneSection(parseMd(file, text));
-    if (state === 'missing') {
-      problems.push({
-        file,
-        line: 0,
-        message: '没有「## 怎么算做完」一节：写成能检查的样子（测试名、脚本、真机上看到什么）',
-      });
-    } else if (state === 'empty') {
-      problems.push({
-        file,
-        line: 0,
-        message: '「怎么算做完」一节是空的：写成能检查的样子（测试名、脚本、真机上看到什么）',
-      });
-    }
-  }
-  return { checked, problems };
-}
-
 export type RefState = 'open' | 'closed' | 'pr' | 'missing';
 
 /**
- * 只看文件：推后的话同一句里没有单号（所在需求目录的号也算）就是问题。单号开没开着不在这里判——
+ * 只看文件：推后的话同一句里没有单号就是问题。单号开没开着不在这里判——
  * 那要读 GitHub，同一份代码前后两次结果会不同（#87），挪到定时任务（liveDebt）。
  */
 export function untrackedDeferrals(deferrals: readonly Deferral[]): DebtProblem[] {
   return deferrals
-    .filter((d) => d.refs.length === 0 && d.owner === undefined)
+    .filter((d) => d.refs.length === 0)
     .map((d) => ({
       file: d.file,
       line: d.line,
@@ -213,19 +162,11 @@ export function untrackedDeferrals(deferrals: readonly Deferral[]): DebtProblem[
     }));
 }
 
-/** 定时任务查出来的一条欠账。issue 是要留言的那张单；没有能留言的单时是 undefined。 */
-export interface Finding {
-  issue: number | undefined;
-  /** 同一条欠账的稳定标识：留言里带着它，下次查到同一条就不再重复留言。 */
-  key: string;
-  text: string;
-}
-
 /** 推后的话挂的单号都不是开着的 issue：留言到那张关了的单上；只挂着 PR 或查不到的号，没处留言。 */
 export function staleRefFindings(deferrals: readonly Deferral[], states: Map<number, RefState>): Finding[] {
   const found: Finding[] = [];
   for (const d of deferrals) {
-    const candidates = [...new Set([...d.refs, ...(d.owner === undefined ? [] : [d.owner])])];
+    const candidates = [...new Set(d.refs)];
     if (candidates.length === 0 || candidates.some((n) => states.get(n) === 'open')) continue;
     const why = candidates.map((n) => `#${n} ${describe(states.get(n))}`).join('，');
     const text = `${d.file}:${d.line}「${shorten(d.sentence)}」里有「${d.phrase}」，可挂的单号都不是开着的 issue（${why}）：换成开着的单号，或者改掉推后的说法`;
@@ -273,46 +214,6 @@ export async function refStates(numbers: Iterable<number>, gh: GitHubReader): Pr
   return states;
 }
 
-/** 开单后多久还没有需求文档就算欠（第六节：分支活不过一天）。 */
-export const SPECS_GRACE_HOURS = 24;
-
-/**
- * 开着的 issue 在 specs/ 下有没有 <号>-<短名>/需求.md；开单不满一天的只提一句，不算欠。正文写全了需求的（#295）不算欠。
- * 欠的留言到那张单上。
- */
-export function missingSpecsFindings(
-  repo: RepoView,
-  open: readonly IssueInfo[],
-  now: Date,
-): { findings: Finding[]; problems: DebtProblem[]; notes: string[] } {
-  const findings: Finding[] = [];
-  const notes: string[] = [];
-  const dirs = repo.list('specs');
-  if (dirs === undefined) {
-    return { findings, problems: [{ file: 'specs/', line: 0, message: '列不出 specs/ 下的目录' }], notes };
-  }
-  for (const issue of [...open].sort((a, b) => a.number - b.number)) {
-    if (issue.isPr) continue;
-    const has = dirs.some((d) => d.startsWith(`${issue.number}-`) && repo.exists(`specs/${d}/需求.md`));
-    if (has) continue;
-    // 正文写全了需求（有写了字的「## 怎么算做完」，引擎对账开的单就是这样）：接手时引擎照正文写需求文档、随 PR 进主线（#295），不算欠
-    if (issue.body !== undefined && doneSection(parseMd(`#${issue.number}`, issue.body)) === 'ok') continue;
-    const created = Date.parse(issue.createdAt);
-    const hours = (now.getTime() - created) / 3_600_000;
-    if (!Number.isNaN(created) && hours < SPECS_GRACE_HOURS) {
-      notes.push(`#${issue.number} 还没有需求文档，开单 ${Math.floor(hours)} 小时，一天内补上就行`);
-      continue;
-    }
-    const age = Number.isNaN(created) ? `开单时间认不出（${issue.createdAt}），当作欠着` : '开单超过一天';
-    findings.push({
-      issue: issue.number,
-      key: `specs:${issue.number}`,
-      text: `#${issue.number}「${shorten(issue.title)}」开着，主线上还没有 specs/${issue.number}-<短名>/需求.md（${age}）：照 issue 写一份，完整需求只在仓里存一处，issue 上留原话、AI 理解和链接`,
-    });
-  }
-  return { findings, problems: [], notes };
-}
-
 export interface DebtRun {
   /** 0 = 没欠账；1 = 有欠账；2 = 没查成（读不到文档），同样是红。 */
   code: 0 | 1 | 2;
@@ -341,15 +242,12 @@ export function checkDebtDocs(repo: RepoView): DebtRun & { deferrals: Deferral[]
   }
   if (readable === 0) notQueried.push('一份文档也没读到');
   problems.push(...untrackedDeferrals(deferrals));
-  const done = checkSpecsDone(repo);
-  problems.push(...done.problems);
-  if (done.checked === 0) notQueried.push('specs/ 下一份 需求.md 也没读到');
 
   const lines = [...problems.map(formatDebtProblem), ...notQueried.map((w) => `没查成：${w}。`)];
   const code = notQueried.length ? 2 : problems.length ? 1 : 0;
   if (code === 0) {
     lines.unshift(
-      `欠账检查（只看文件）过了：${readable} 份文档里 ${deferrals.length} 句推后的话都带着单号；${done.checked} 份需求.md 都写了怎么算做完。`,
+      `欠账检查（只看文件）过了：${readable} 份文档里 ${deferrals.length} 句推后的话都带着单号。`,
     );
   }
   return { code, lines, deferrals };
@@ -358,78 +256,29 @@ export function checkDebtDocs(repo: RepoView): DebtRun & { deferrals: Deferral[]
 export interface LiveDebt {
   docs: DebtRun;
   findings: Finding[];
-  notes: string[];
-  /** 没查成的几样（读不到 GitHub、列不出 specs/）：定时任务照样判红，不当成没欠账。 */
+  /** 没查成的几样（读不到 GitHub）：定时任务照样判红，不当成没欠账。 */
   notQueried: string[];
 }
 
 /**
- * 定时任务那一半（.github/workflows/debt.yml）：推后的话挂的单号是不是开着的 issue、开着的 issue 有没有需求文档。
- * 看的是 GitHub 上的现状，所以不进 PR 的必过检查；查出来的是 findings，由 reportFindings 留言到对应的单上。
+ * 定时任务那一半（.github/workflows/debt.yml）：推后的话挂的单号是不是开着的 issue。
+ * 看的是 GitHub 上的现状，所以不进 PR 的必过检查；查出来的是 findings，由 findings.ts 的 reportFindings 留言到对应的单上。
  */
-export async function liveDebt(opts: { repo: RepoView; gh: GitHubReader; now?: Date }): Promise<LiveDebt> {
+export async function liveDebt(opts: { repo: RepoView; gh: GitHubReader }): Promise<LiveDebt> {
   const docs = checkDebtDocs(opts.repo);
   const findings: Finding[] = [];
-  const notes: string[] = [];
   const notQueried: string[] = [];
-  const numbers = docs.deferrals.flatMap((d) => [...d.refs, ...(d.owner === undefined ? [] : [d.owner])]);
+  const numbers = docs.deferrals.flatMap((d) => d.refs);
   try {
     findings.push(...staleRefFindings(docs.deferrals, await refStates(numbers, opts.gh)));
   } catch (e) {
     notQueried.push(`读不到 GitHub 上单子的状态（${message(e)}），推后的句子挂的单号没核`);
   }
-  try {
-    const cov = missingSpecsFindings(opts.repo, await opts.gh.openIssues(), opts.now ?? new Date());
-    findings.push(...cov.findings);
-    notes.push(...cov.notes);
-    notQueried.push(...cov.problems.map(formatDebtProblem));
-  } catch (e) {
-    notQueried.push(`读不到开着的 issue（${message(e)}），没核它们有没有需求文档`);
-  }
-  return { docs: { code: docs.code, lines: docs.lines }, findings, notes, notQueried };
+  return { docs: { code: docs.code, lines: docs.lines }, findings, notQueried };
 }
 
-/** 留言里的记号：同一条欠账只留一次。 */
-export function findingMarker(key: string): string {
-  return `<!-- fleet-debt:${createHash('sha256').update(key).digest('hex').slice(0, 16)} -->`;
-}
-
-/**
- * 把查出来的欠账留言到对应的单上：一张单一条留言，已经留过的（带着同一个记号）不再留。
- * 没处留言的（只挂着 PR 或查不到的号）原样交回；读留言、写留言失败记进 errors，不当成留过了。
- */
-export async function reportFindings(
-  findings: readonly Finding[],
-  gh: GitHubCommenter,
-): Promise<{ posted: number[]; already: number; unattached: Finding[]; errors: string[] }> {
-  const byIssue = new Map<number, Finding[]>();
-  const unattached: Finding[] = [];
-  for (const f of findings) {
-    if (f.issue === undefined) unattached.push(f);
-    else byIssue.set(f.issue, [...(byIssue.get(f.issue) ?? []), f]);
-  }
-  const posted: number[] = [];
-  const errors: string[] = [];
-  let already = 0;
-  for (const [n, list] of [...byIssue].sort((a, b) => a[0] - b[0])) {
-    try {
-      const existing = (await gh.comments(n)).join('\n');
-      const fresh = list.filter((f) => !existing.includes(findingMarker(f.key)));
-      already += list.length - fresh.length;
-      if (fresh.length === 0) continue;
-      const body = [
-        '欠账检查（.github/workflows/debt.yml，#67、#87）查出来的，挂在这张单上：',
-        '',
-        ...fresh.map((f) => `- ${f.text}${findingMarker(f.key)}`),
-      ].join('\n');
-      await gh.comment(n, body);
-      posted.push(n);
-    } catch (e) {
-      errors.push(`#${n} 上留言没留成（${message(e)}）`);
-    }
-  }
-  return { posted, already, unattached, errors };
-}
+/** 欠账留言的开头一句（findings.ts 的 reportFindings 用）。 */
+export const DEBT_REPORT_HEADER = '欠账检查（.github/workflows/debt.yml，#67、#87）查出来的，挂在这张单上：';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);

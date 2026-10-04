@@ -1,6 +1,12 @@
 // 调度台要的配置：族、渠道、账号池、模型、路由、每个阶段的路由顺序、禁令，外加额度窗（机器写的现值）。
 
-import type { OrgKind, RunAsUser, ScopeMembership } from '@fleet-dao/shared';
+import {
+  type OrgKind,
+  type RunAsUser,
+  type ScopeMembership,
+  SESSION_EFFORTS,
+  type SessionEffort,
+} from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
@@ -135,6 +141,8 @@ export const routes = pgTable(
     }),
     // 同一模型换一种执行方式就是另一条路由；同池同模型同执行方式不许重复。
     unique('routes_pool_model_host_unique').on(t.poolId, t.modelId, t.hostId),
+    // 给 routing_catalog 的复合外键用：一条路由只能挂在它自己的模型下面（id 本来就唯一，这条只为让外键能指到 (id, model_id)）。
+    unique('routes_id_model_unique').on(t.id, t.modelId),
     // 不许拿默认值、手改冒充在线：在线必须是探针这一轮真探通了。结论为空时比较得 NULL、CHECK 会放行，所以包一层 coalesce。
     check('routes_alive_needs_probe_ok', sql`not ${t.alive} or coalesce(${t.probeState} = 'ok', false)`),
     check('routes_probe_state_at_together', sql`(${t.probeState} is null) = (${t.probedAt} is null)`),
@@ -150,7 +158,12 @@ export const routes = pgTable(
   ],
 );
 
-/** 每个阶段类型一行；顺序在 stage_policy_routes。 */
+/**
+ * 每个阶段类型一行；顺序在 stage_policy_routes。旧的平铺结构：选路、路由探针、切号、判断题后端、驾驶舱换模型对话框、指挥官的
+ * 法国查询都已改读路由两层（下面两张表，#574），没人再按它派路由。这两张只剩目录装载器写（catalog.ts，装前读一眼判接不接手）、
+ * 发布脚本核行数（deploy/release.sh）、驾驶舱后端那个已经没有页面调的改顺序接口（PUT /routing/stages/:stage）还读写，
+ * 随 #556-4 删库表那一步一起删。
+ */
 export const stagePolicies = pgTable('stage_policies', {
   stage: stageKind('stage').primaryKey(),
   /** 创始人手动钉住的顺序，AI 帅位不改。 */
@@ -180,6 +193,70 @@ export const stagePolicyRoutes = pgTable(
     primaryKey({ columns: [t.stage, t.routeId] }),
     unique('stage_policy_routes_stage_position_unique').on(t.stage, t.position),
     check('stage_policy_routes_position_nonneg', sql`${t.position} >= 0`),
+  ],
+);
+
+/**
+ * 路由两层的上层「用途 → 模型顺序」（#574，specs/574-路由两层DB）：每个用途（阶段类型）一串模型，越靠前越先用。
+ * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine.ts 的 routeFactsForPurpose）；发布时由仓里的默认骨架
+ * 只补缺装进来（routing-apply.ts）。两层没有「钉住」这一列，选路一律按没钉住算。
+ * 「这一层现在活着吗」不存列：它由下层现算（routing-liveness.ts 写明三件事各看哪张表的哪几列）。
+ */
+export const routingPurposeModels = pgTable(
+  'routing_purpose_models',
+  {
+    purpose: stageKind('purpose').notNull(),
+    modelId: text('model_id')
+      .notNull()
+      .references(() => models.id),
+    /** 从 0 起，越小越先用。 */
+    position: integer('position').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.purpose, t.modelId] }),
+    unique('routing_purpose_models_purpose_position_unique').on(t.purpose, t.position),
+    check('routing_purpose_models_position_nonneg', sql`${t.position} >= 0`),
+  ],
+);
+
+/**
+ * 路由两层的下层「模型 → 渠道顺序」（#574）：一个模型一串路由（渠道 + 账号池 + 执行方式），越靠前越先用。
+ * 加一个能跑这个模型的新渠道，只在这个模型下加一行。路由必须是这个模型自己的（复合外键）。
+ * 开关不分用途：关了这一行，哪个用途都不派它；路由探针也只探开着、模型又排进了某个用途的（routing-layers.ts 的 routesInUse）。
+ */
+export const routingCatalog = pgTable(
+  'routing_catalog',
+  {
+    modelId: text('model_id')
+      .notNull()
+      .references(() => models.id),
+    routeId: text('route_id').notNull(),
+    /** 从 0 起，越小越先用。 */
+    position: integer('position').notNull(),
+    /** 调度台上的开关：关着的照样挂在顺序里，但不派。没有默认值：写入的地方必须逐条带上，漏带就插不进去，不会悄悄全打开。 */
+    enabled: boolean('enabled').notNull(),
+    /**
+     * 这条路由起会话的思考档位（#470）：空 = 没配，用 high（shared 的 DEFAULT_SESSION_EFFORT）。它是这条路由的默认也是上限，
+     * 分档只往下压（engine 的 sessionEffortFor）。运行时配置、留在库里（决定 0011 第 7 条）：驾驶舱改了，下一个起的会话就照它；
+     * 仓里骨架的值只在这个模型第一次装进库时写进来（routing-apply.ts），之后改骨架不动库里的。
+     * 这一列只挡认不出的写法；这条路由的执行方式认不认这一档（Grok 没有 max、cursor 的整串模型名配不了），由写入的地方
+     * 照 shared 的 routeEffortProblem 判（setRoutingEffort、routing-apply.ts），起会话时引擎再判一次。
+     */
+    effort: text('effort').$type<SessionEffort>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.modelId, t.routeId] }),
+    foreignKey({
+      name: 'routing_catalog_route_of_model_fk',
+      columns: [t.routeId, t.modelId],
+      foreignColumns: [routes.id, routes.modelId],
+    }),
+    unique('routing_catalog_model_position_unique').on(t.modelId, t.position),
+    check('routing_catalog_position_nonneg', sql`${t.position} >= 0`),
+    check(
+      'routing_catalog_effort_known',
+      sql`${t.effort} is null or ${t.effort} in (${sql.raw(SESSION_EFFORTS.map((e) => `'${e}'`).join(', '))})`,
+    ),
   ],
 );
 

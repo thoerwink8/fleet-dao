@@ -1,22 +1,16 @@
-// 发给工作流的信号、拉起一张单的工作流、健康检查都经这里的一份 Temporal 连接。
+// 发给工作流的信号、健康检查都经这里的一份 Temporal 连接。
 // 调用方（agent.ts 的 wake、cockpit.ts 的 signalAndAudit）先把目标算成工作流编号——子任务编号直接拼
 // subtaskWorkflowId，需求工作流编号要查库（requirementWorkflowIdForTask：getTask 拿 repoId/issueNumber，
 // getRepo 拿 owner/name），查不到就明确抛 WorkflowTargetNotFoundError，不瞎拼——算完了才调
 // WorkflowControl.signal(workflowId, signal)。
-// 拉起一张单的工作流（issue-intake.ts 调 RequirementWorkflows.start）：起的是 Fusion 工作流（FUSION_WORKFLOW_TYPE，
-// 0003 第 5 条；#214 起不再起旧的需求工作流，在途的旧工作流照旧跑完），按 requirementWorkflowId 起，同一张 issue 只有
-// 一条在跑：撞上在跑的（Fusion 或在途的旧需求工作流都算）回 already_running；连不上、超时、认不出的错一律抛出，不回
-// started（投递记成出错，对账重放再来）。后端（webhook）和引擎的对账补漏（重放投递）用的是这同一份实现，两边起的是同一种。
 // 真客户端由 connectTemporal 用 @temporalio/client 的懒连接（Connection.lazy）装配：这一步不连网络，
 // Temporal 没起来时后端照样能起，真正发信号或查健康才会报错。测试一律用假客户端（TemporalClientLike /
 // EnginePollerSource 的最小形状），不碰真网络；connectTemporal 本身没有自动化测试覆盖（要连真 Temporal）。
-// 拉起工作流另有一条对着 Temporal 测试服务端和真引擎工作流的：packages/engine/test/requirement-start.test.ts。
-import { FUSION_WORKFLOW_TYPE, type RequirementStartInput, requirementWorkflowId } from '@fleet-dao/shared';
-import { Client, Connection, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
+import { requirementWorkflowId } from '@fleet-dao/shared';
+import { Client, Connection } from '@temporalio/client';
 import { PublicHealthError } from './health.ts';
 import type { BoardStore } from './ports.ts';
 import {
-  type RequirementWorkflows,
   type TemporalConnection,
   type WorkflowControl,
   WorkflowGoneError,
@@ -33,11 +27,6 @@ export function notConnectedTemporal(): TemporalConnection {
   return {
     control: {
       async signal() {
-        throw new WorkflowUnavailableError(why);
-      },
-    },
-    requirements: {
-      async start() {
         throw new WorkflowUnavailableError(why);
       },
     },
@@ -121,76 +110,6 @@ function isUnavailable(err: unknown): boolean {
     if (/UNAVAILABLE|DEADLINE_EXCEEDED|秒没回应/.test(e.message)) return true;
   }
   return false;
-}
-
-// ---- 拉起一张单的工作流（Fusion） ----
-
-/** 起工作流用得到的最小一块客户端形状；真客户端 `new Client(...)` 满足它。 */
-export interface WorkflowStarterLike {
-  /** 同 TemporalClientLike.connection：起工作流的调用挂在连接的 deadline 下，到点由连接取消（DEADLINE_EXCEEDED）。 */
-  connection: {
-    withDeadline<R>(deadline: number | Date, fn: () => Promise<R>): Promise<R>;
-  };
-  workflow: {
-    start(
-      workflowType: string,
-      options: {
-        taskQueue: string;
-        workflowId: string;
-        args: [RequirementStartInput];
-        workflowIdConflictPolicy: 'FAIL';
-        workflowIdReusePolicy: 'ALLOW_DUPLICATE';
-      },
-    ): Promise<unknown>;
-  };
-}
-
-/** 起一次工作流多久没回应就当连不上。 */
-const DEFAULT_START_TIMEOUT_MS = 5_000;
-
-/**
- * 拉起一张单的工作流的真实现：起 Fusion 工作流（FUSION_WORKFLOW_TYPE），编号 requirementWorkflowId(repo, issueNumber)。
- * Fusion 模式还是单模型模式由工作流开工前按流程配置副本判（0003 第 7、9 条），这里不带。
- * - 同一编号正在跑（服务端 ALREADY_EXISTS，客户端抛 WorkflowExecutionAlreadyStartedError）→ already_running，不起第二条；
- *   在跑的是切换之前起的旧需求工作流也一样：不换、不叫停，它照旧跑完；
- * - 上一条已经结束（需求重开）→ 再起一条 Fusion（ALLOW_DUPLICATE）；
- * - 连不上、超时 → WorkflowUnavailableError；别的错原样抛。都不回 started。
- * 已知的窟窿：起工作流到点被取消、其实服务端已经起了，重放时会拿到 already_running——新开单无所谓（就是起来了），
- * 重开的会等这一条跑完再起一轮（多跑一轮）。客户端没公开 requestId，堵不上。
- */
-export function createTemporalRequirementWorkflows(
-  client: WorkflowStarterLike,
-  taskQueue: string,
-  timeoutMs = DEFAULT_START_TIMEOUT_MS,
-): RequirementWorkflows {
-  return {
-    async start(input) {
-      const workflowId = requirementWorkflowId(input.repo, input.issueNumber);
-      try {
-        await client.connection.withDeadline(Date.now() + timeoutMs, () =>
-          client.workflow.start(FUSION_WORKFLOW_TYPE, {
-            taskQueue,
-            workflowId,
-            args: [input],
-            workflowIdConflictPolicy: 'FAIL',
-            workflowIdReusePolicy: 'ALLOW_DUPLICATE',
-          }),
-        );
-        return 'started';
-      } catch (err) {
-        if (isAlreadyStarted(err)) return 'already_running';
-        if (isUnavailable(err)) {
-          throw new WorkflowUnavailableError(`拉起工作流 ${workflowId}：Temporal 连不上或没回应`, err);
-        }
-        throw err;
-      }
-    },
-  };
-}
-
-/** 同一编号的工作流正在跑：客户端把服务端的 ALREADY_EXISTS 转成 WorkflowExecutionAlreadyStartedError。只认这个类，不按名字猜。 */
-function isAlreadyStarted(err: unknown): boolean {
-  return err instanceof WorkflowExecutionAlreadyStartedError;
 }
 
 // ---- 引擎在不在：查任务队列上 workflow、activity 两类 poller ----
@@ -326,7 +245,7 @@ function enginePollerSourceFromClient(client: Client, config: TemporalConnection
 
 /**
  * 真接 Temporal：懒连接（Connection.lazy），这一步不连网络、不校验能不能连上，后端照样能起；
- * 真正发信号、起工作流、查健康才会报错。判断逻辑（命名空间查不到、poller 缺不缺、新不新鲜）在 createNamespaceCheck /
+ * 真正发信号、查健康才会报错。判断逻辑（命名空间查不到、poller 缺不缺、新不新鲜）在 createNamespaceCheck /
  * createEnginePollerCheck 里，用假客户端测过；这里只是把真客户端接进那两个函数，没有自动化测试覆盖
  * （测试规矩不许连真网络），改动后要在真机上核对。
  */
@@ -335,7 +254,6 @@ export function connectTemporal(config: TemporalConnectionConfig): TemporalConne
   const client = new Client({ connection, namespace: config.namespace });
   return {
     control: createTemporalWorkflowControl(client),
-    requirements: createTemporalRequirementWorkflows(client, config.taskQueue),
     check: createNamespaceCheck(
       {
         async describeNamespace(namespace) {

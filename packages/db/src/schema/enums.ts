@@ -118,18 +118,17 @@ export const CANARY_VERDICTS = ['pass', 'broken', 'not_run'] as const;
 export type CanaryVerdict = (typeof CANARY_VERDICTS)[number];
 
 /**
- * 巡检看的整条链，一步一步（先后就是这个顺序）：巡检自己开单 → 收单（库里有任务行）→ 派活（工作流起来、第一个会话选上
- * 路由起来）→ 规划 → 执行 → 验证 → 开 PR、过 CI → 合并 → 关单 → 记账（会话都有结局、用量和每步耗时进了库）→
- * 驾驶舱显示（驾驶舱读到的是做完了、带 PR）。库里不加检查约束：以后加一步不用改表。
+ * 巡检看的整条链，一步一步（先后就是这个顺序），跟着三段任务工作流走（#452；specs/632-三段总调度/方案.md §五）：
+ * 巡检自己开单 → 收单（拉单建了任务行、起了任务工作流）→ 动手（会话写出提交、推上去、开了 PR）→ 开 PR、过 CI →
+ * 验收（冷验收通过）→ 合并 → 关单 → 记账（runs 每笔都有结局、记上了用量，每步耗时进了库）→ 驾驶舱显示（驾驶舱读到
+ * 任务做完了、PR 合了、挂着这张单）。库里不加检查约束：以后加一步不用改表。
  */
 export const CANARY_STAGES = [
   'open',
   'intake',
-  'dispatch',
-  'plan',
-  'execute',
-  'verify',
+  'implement',
   'pr',
+  'verify',
   'merge',
   'close',
   'ledger',
@@ -137,19 +136,28 @@ export const CANARY_STAGES = [
 ] as const;
 export type CanaryStage = (typeof CANARY_STAGES)[number];
 
-/** 巡检每一步给人看的名字（报警、健康页、驾驶舱都用这一份）。 */
-export const CANARY_STAGE_NAMES: Readonly<Record<CanaryStage, string>> = {
+/**
+ * 跟 Fusion 走时的老步骤（派活、规划、执行）：换成三段任务工作流以后不再写，库里换版本之前的几轮还记着，只为读出来给人看。
+ */
+export const RETIRED_CANARY_STAGES = ['dispatch', 'plan', 'execute'] as const;
+export type RetiredCanaryStage = (typeof RETIRED_CANARY_STAGES)[number];
+/** canary_runs 的 stage、steps 里读得到的：现在的几步，加上老的几轮记下的老步骤。 */
+export type RecordedCanaryStage = CanaryStage | RetiredCanaryStage;
+
+/** 巡检每一步给人看的名字（报警、健康页、演练命令都用这一份）；老步骤也在，库里老的几轮读出来照样是人话。 */
+export const CANARY_STAGE_NAMES: Readonly<Record<RecordedCanaryStage, string>> = {
   open: '开单',
   intake: '收单',
-  dispatch: '派活',
-  plan: '规划',
-  execute: '执行',
-  verify: '验证',
+  implement: '动手',
   pr: '开 PR、过 CI',
+  verify: '验收',
   merge: '合并',
   close: '关单',
   ledger: '记账',
   board: '驾驶舱显示',
+  dispatch: '派活',
+  plan: '规划',
+  execute: '执行',
 };
 
 /** 巡检一轮最长多久（分钟）：到了还没走完，断在当时那一步。 */

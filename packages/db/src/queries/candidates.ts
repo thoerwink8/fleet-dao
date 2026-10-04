@@ -1,28 +1,13 @@
-// 某阶段的候选路由：列出该阶段挂的每一条路由，并写明它为什么不能用（被挡的不删，带原因留在表里）。
+// 候选路由的判法：给一串排好的路由逐条写明它为什么不能用（被挡的不删，带原因留在表里）。用的人是路由两层的读法
+// （routing-layers.ts：选路、驾驶舱都经它），「接得上、额度够、没被禁令挡」只有这一处判法。
 import { hardBanFor, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
-import { asc, eq, inArray } from 'drizzle-orm';
+import { asc, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import {
-  bans,
-  channels,
-  models,
-  pools,
-  quotaWindows,
-  routes,
-  stagePolicies,
-  stagePolicyRoutes,
-} from '../schema/index.ts';
-import {
-  inFlightByPool,
-  poolDataTimes,
-  QUOTA_STALE_AFTER_MS,
-  quotaReadOverdue,
-  type WindowState,
-  windowState,
-} from './quota.ts';
+import { bans, type channels, type models, type pools, quotaWindows, type routes } from '../schema/index.ts';
+import { inFlightByPool, poolDataTimes, quotaReadOverdue, type WindowState, windowState } from './quota.ts';
 
 /**
- * switched-off 调度台上这个阶段里关着；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
+ * switched-off 这条路由在它的模型下关着（路由两层的开关，不分用途）；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
  * model-retired 模型已下架；banned 命中禁令（代码里的全局硬禁令 + 库里的 bans）；quota-exhausted 适用的额度窗用满；
  * no-slot 账号池并发满了（等空位，不是坏了）。
  * 额度没读成不算挡：照常可选，但排在读到了的后面（设计 §九 选路第 3 条）。
@@ -52,7 +37,7 @@ export interface CandidateWindow {
 
 export interface RouteCandidate {
   routeId: string;
-  /** 调度台上排的位置。 */
+  /** 在它那一串里排的位置（路由两层里是模型下路由的位置，routing_catalog.position）。 */
   position: number;
   channelId: string;
   poolId: string;
@@ -66,6 +51,8 @@ export interface RouteCandidate {
   probedAt: Date | null;
   /** 那次结论是什么（routes.probe_state）；探针还没看过为空。 */
   probeState: (typeof routes.$inferSelect)['probeState'];
+  /** 探针自己写的原因（routes.probe_detail）：不是 ok 的结论一定有（库里约束），为什么没探、没通照它说。 */
+  probeDetail: (typeof routes.$inferSelect)['probeDetail'];
   /**
    * Claude 订阅池的路由：探针下那次结论时会话用户挂的是哪个组织（routes.probe_org）。skipped、又是另一个组织 = 那一轮
    * 没探它，不是它坏了（引擎 routing/filter.ts 按它判等不等下一轮探针）。
@@ -91,42 +78,27 @@ export interface RouteCandidate {
   eligible: boolean;
 }
 
-export interface StageCandidates {
-  stage: StageKind;
-  /** 这个阶段还没配顺序（没有 stage_policies 行）时为 false；此时候选为空，不按 id 顺序乱挑。 */
-  configured: boolean;
-  pinned: boolean;
-  /** 数组顺序就是实际先后：调度台的顺序，额度没读成的整体挪到读到了的后面。 */
-  candidates: RouteCandidate[];
+/** 一条路由在某个顺序里的位置和开关（路由两层里模型下的路由顺序，routing_catalog）加上它连着的行。 */
+export interface OrderedRouteRow {
+  order: { position: number; enabled: boolean };
+  route: typeof routes.$inferSelect;
+  pool: typeof pools.$inferSelect;
+  channel: typeof channels.$inferSelect;
+  model: typeof models.$inferSelect;
 }
 
-export interface StageCandidatesOptions {
-  now?: Date;
-  staleAfterMs?: number;
-}
-
-export async function stageCandidates(
+/**
+ * 给每一行判「为什么不能用」（blockers）和额度状态。路由两层（routing-layers.ts）的每一层都靠这一份：
+ * 「接得上、额度够、没被禁令挡」只有一处判法，各处再写一遍就会各过各的。stage 只用来判禁令（硬禁令、bans 表里按阶段的）。
+ * 不排序、不丢行：返回顺序同入参。额度没读成不挡，只标 unknown：排不排后面由选路判（引擎 routing/rank.ts）。
+ */
+export async function evaluateRoutes(
   db: Db,
   stage: StageKind,
-  options: StageCandidatesOptions = {},
-): Promise<StageCandidates> {
-  const now = options.now ?? new Date();
-  const staleAfterMs = options.staleAfterMs ?? QUOTA_STALE_AFTER_MS;
-
-  const [policy] = await db.select().from(stagePolicies).where(eq(stagePolicies.stage, stage));
-  if (!policy) return { stage, configured: false, pinned: false, candidates: [] };
-
-  const rows = await db
-    .select({ order: stagePolicyRoutes, route: routes, pool: pools, channel: channels, model: models })
-    .from(stagePolicyRoutes)
-    .innerJoin(routes, eq(routes.id, stagePolicyRoutes.routeId))
-    .innerJoin(pools, eq(pools.id, routes.poolId))
-    .innerJoin(channels, eq(channels.id, routes.channelId))
-    .innerJoin(models, eq(models.id, routes.modelId))
-    .where(eq(stagePolicyRoutes.stage, stage))
-    .orderBy(asc(stagePolicyRoutes.position));
-  if (rows.length === 0) return { stage, configured: true, pinned: policy.pinned, candidates: [] };
-
+  rows: readonly OrderedRouteRow[],
+  options: { now: Date; staleAfterMs: number },
+): Promise<RouteCandidate[]> {
+  const { now, staleAfterMs } = options;
   const poolIds = [...new Set(rows.map((r) => r.pool.id))];
   const windowRows = await db
     .select()
@@ -137,7 +109,7 @@ export async function stageCandidates(
   const dbBans = await db.select().from(bans);
   const inFlight = await inFlightByPool(db);
 
-  const candidates = rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
+  return rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
     // 成员表只和路由在上游的名字比（实际发的模型串 + 别名），不拿模型目录的 id 硬凑。
     const ref = {
       id: model.id,
@@ -212,6 +184,7 @@ export async function stageCandidates(
       hostId: route.hostId,
       probedAt: route.probedAt,
       probeState: route.probeState,
+      probeDetail: route.probeDetail,
       probeOrg: route.probeOrg,
       quota,
       windows,
@@ -222,8 +195,4 @@ export async function stageCandidates(
       eligible: blockers.length === 0,
     };
   });
-  // 稳定排序：额度没读成的整体往后挪，两段里各自保持调度台的顺序。
-  candidates.sort((a, b) => Number(a.quota === 'unknown') - Number(b.quota === 'unknown'));
-
-  return { stage, configured: true, pinned: policy.pinned, candidates };
 }

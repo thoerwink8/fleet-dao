@@ -8,6 +8,7 @@ import type {
   Repo,
   Route,
   ScheduleOutcome,
+  SegmentRun,
   SessionRun,
   StagePolicy,
   Step,
@@ -48,6 +49,8 @@ export interface MTask {
   task: Task;
   /** 需求级会话：分诊、写需求文档、写方案。 */
   runs: SessionRun[];
+  /** 三段的流水（真后端的 runs 表）：走三段的单才有；模拟器不推进它。 */
+  segmentRuns?: SegmentRun[];
   subtasks: MSubtask[];
   paused: boolean;
   asks: MAsk[];
@@ -94,20 +97,9 @@ export interface PlanTemplate {
   steps: string[];
 }
 
-/** 看板顶栏用的流程配置副本。不放进 repos：仓列表不带停派原因。 */
-export interface MockRepoFlow {
-  source: 'project' | 'org_default' | null;
-  commit: string | null;
-  syncedAt: string | null;
-  error: string | null;
-  unread: string | null;
-}
-
 export interface MockState {
   me: Me;
   repos: Repo[];
-  /** 按仓编号。三个仓写成顶栏的三种样子，假后端不重算 45 分钟。 */
-  repoFlows: Record<string, MockRepoFlow>;
   channels: Channel[];
   pools: Pool[];
   models: Model[];

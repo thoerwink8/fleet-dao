@@ -1,16 +1,8 @@
-// 合并闸的判法（design 第五节「流程只为快」，#74；#444 起只留四样）：不是草稿、和主线没冲突、改到的文件碰没碰先审后合
-// 的路径、碰了的当前头上有没有通过的第二意见；PR 正文的档位只做提醒（parseTier 给 pr-fields 用）。纯判断，不碰网络；
-// 读写 GitHub 的在 merge-gate.ts。「认领对得上」「写了关单却没带结果.md」两项 #444 起从判红里去掉（引擎机器人照样贴
-// 「认领对得上」，只是合并闸不再等它；缺结果的由每天的关单对账另外提醒）；ENGINE_BOT_LOGIN、CLAIM_MATCH_CONTEXT 这两个
-// 认领相关的常量搬去了 pr-columns.ts（claim-status.ts 那套认领系统还用得上）。
+// 合并闸的判法（design 第五节「流程只为快」，#74；#444 起只留四样；#654 起草稿、冲突交给 GitHub 自己拦）：改到的文件碰没碰先审后合
+// 的路径、碰了的当前头上有没有通过的第二意见、引擎任务 PR 当前头上有没有通过的冷调用结论。纯判断，不碰网络；读写 GitHub 的在
+// merge-gate.ts。「认领对得上」「写了关单却没带结果.md」两项 #444 起从判红里去掉，「档位」「必填栏」#654 起整个没有了。
 // 三态纪律：读不到、认不出由调用方判「没查成」（退出码 2），不当成「没问题」。
 
-/** 两档（design 第五节「流程只为快」）；后两个是 2026-09-26 之前的三档叫法，照样认。 */
-export const TIERS = ['CI 绿就合', '先审后合', '直接合', '先合后看'] as const;
-export type Tier = (typeof TIERS)[number];
-/** 要第二意见通过才能合的那一档。 */
-export const REVIEW_TIER: Tier = '先审后合';
-export const TIER_COLUMN = '档位';
 /** 本机垫片（将来是引擎）审完写在 PR 当前头上的提交状态。 */
 export const SECOND_OPINION_CONTEXT = 'second-opinion';
 /**
@@ -25,10 +17,6 @@ export const COLD_VERIFY_CONTEXT = 'cold-verify';
 export const COLD_VERIFY_MAX_ROUND = 2;
 /** 高风险路径清单在仓里的位置（design 第五节「路径规则放每个仓的配置」）。 */
 export const RISK_PATHS_FILE = 'packages/conventions/high-risk-paths.json';
-
-const TIER_LIST = TIERS.slice(0, 2)
-  .map((t) => `「${t}」`)
-  .join('');
 
 /**
  * 先审后合只有这两种（design 第五节：删改迁移；碰安全——密钥鉴权、CI 工作流和卫生检查、对公网开口子和提权的生产配置）。
@@ -46,8 +34,30 @@ export interface RiskPath {
    * 'migrations'：迁移目录。新加的迁移只建表、加列不算；改了、删了已有的迁移，或新迁移里有删、改已有表列数据的语句才算。
    * meta/ 下是按 SQL 生成的快照，不单独算。
    */
-  mode?: 'migrations';
+  mode?: 'migrations' | 'workflow';
+  /**
+   * 'after-merge'：先合后审（创始人 2026-10-03「1+2+3」第 3 条）。改坏了一条 git revert 就退回、不泄密不提权的那类
+   * （CI 判法：哪些 job 跑、测哪些文件、缓存跳哪些）才能标；合并闸不等第二意见，合并后由 second-opinion.mjs 补审。
+   * 密钥、登录、卫生检查、合并闸自己、对公网开口子的配置不许标——那些改坏了回退不了（泄露了就公开了）。
+   */
+  review?: 'after-merge';
 }
+
+/**
+ * 能标 review: after-merge（先合后审）的路径：只有 CI 判法那几份——改坏了一条 git revert 就退回、不泄密不提权
+ * （决定 0016 第 3 条）。清单里把别的路径标上，读清单直接认不出（判没查成），不是放行；要加一份，改这里，这个文件自己走先审后合。
+ */
+const AFTER_MERGE_ALLOWED: ReadonlySet<string> = new Set([
+  'packages/conventions/src/ci-plan.ts',
+  'packages/conventions/src/bin/ci-plan.ts',
+  'packages/conventions/src/bin/ci-verdict.ts',
+  'packages/conventions/src/test-split.ts',
+  'packages/conventions/src/ci-box.ts',
+  'packages/conventions/src/bin/ci-box.ts',
+  'packages/conventions/src/ci-cache.ts',
+  'packages/conventions/src/bin/ci-cache.ts',
+  'packages/conventions/src/repo.ts',
+]);
 
 /** 读清单：认不出返回一句为什么（调用方判没查成）；空清单也算认不出——一条都没有等于不拦。 */
 export function parseRiskPaths(text: string): RiskPath[] | string {
@@ -80,14 +90,25 @@ export function parseRiskPaths(text: string): RiskPath[] | string {
       return `${at}（${path}）的 kind「${String(item.kind)}」不是${RISK_KINDS.map((k) => `「${k}」`).join('')}之一`;
     }
     if (!item.why.trim()) return `${at}（${path}）没写为什么`;
-    if (item.mode !== undefined && (item.mode !== 'migrations' || !path.endsWith('/'))) {
-      return `${at}（${path}）的 mode 认不出（只有目录能写 "migrations"）`;
+    if (item.review !== undefined && (item.review !== 'after-merge' || item.kind !== '碰安全' || item.mode)) {
+      return `${at}（${path}）的 review 认不出（只有「碰安全」、不带 mode 的条目能写 "after-merge"）`;
+    }
+    if (item.review === 'after-merge' && !AFTER_MERGE_ALLOWED.has(path)) {
+      return `${at}（${path}）不许先合后审：只有 CI 判法那几份能标 "after-merge"（名单在 merge-gates.ts 的 AFTER_MERGE_ALLOWED，改名单本身走先审后合）`;
+    }
+    const dir = path.endsWith('/');
+    if (
+      item.mode !== undefined &&
+      !((item.mode === 'migrations' && dir) || (item.mode === 'workflow' && !dir && /[.]ya?ml$/.test(path)))
+    ) {
+      return `${at}（${path}）的 mode 认不出（目录只能写 "migrations"，单个 .yml 工作流文件只能写 "workflow"）`;
     }
     out.push({
       path,
       kind: item.kind as RiskKind,
       why: item.why.trim(),
-      ...(item.mode === 'migrations' ? { mode: 'migrations' as const } : {}),
+      ...(item.mode === 'migrations' || item.mode === 'workflow' ? { mode: item.mode } : {}),
+      ...(item.review === 'after-merge' ? { review: 'after-merge' as const } : {}),
     });
   }
   return out;
@@ -110,6 +131,10 @@ export interface RiskyFile {
   kind: RiskKind;
   /** 迁移目录里为什么算（新迁移里有哪种语句、或看不到内容）。 */
   note?: string;
+  /** mode 为 workflow、改了已有的工作流：还要读改动前后两份全文做结构比对才知道算不算（合并闸去做），在这之前别当成「算」。 */
+  pending?: true;
+  /** 清单里这条是先合后审（review: after-merge）：合并闸不等第二意见，结论里点名合并后补审。 */
+  afterMerge?: true;
 }
 
 /**
@@ -173,17 +198,30 @@ export function destructiveIn(patch: string | undefined): string | undefined {
   return undefined;
 }
 
-/** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。 */
+/** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。同一个文件多条规则都沾边时认最具体（路径最长）的那条。 */
 export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPath[]): RiskyFile[] {
   const hits: RiskyFile[] = [];
   const seen = new Set<string>();
   for (const f of files) {
     for (const name of [f.filename, ...(f.previous ? [f.previous] : [])]) {
       if (seen.has(name)) continue;
-      const rule = list.find((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path));
+      const rule = list
+        .filter((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path))
+        .sort((a, b) => b.path.length - a.path.length)[0];
       if (!rule) continue;
-      const hit: RiskyFile = { file: name, rule: rule.path, kind: rule.kind };
-      if (rule.mode === 'migrations') {
+      const hit: RiskyFile = {
+        file: name,
+        rule: rule.path,
+        kind: rule.kind,
+        ...(rule.review === 'after-merge' ? { afterMerge: true as const } : {}),
+      };
+      if (rule.mode === 'workflow') {
+        // 只有「改了已有的工作流」才按内容判：要读改动前后两份全文做结构比对（workflow-structure.ts），所以这里只标「待比对」，
+        // 由合并闸读了文件再定。新加、删掉、改名一律算（整个文件都是新的信任面）。
+        if (f.status === 'modified' && name === f.filename) hit.pending = true;
+        else
+          hit.note = `工作流文件${f.status === 'removed' ? '被删' : f.status === 'added' ? '是新加的' : '被改名'}`;
+      } else if (rule.mode === 'migrations') {
         if (name.startsWith(`${rule.path}meta/`)) continue;
         if (f.status === 'added' && name === f.filename) {
           const note = destructiveIn(f.patch);
@@ -198,30 +236,6 @@ export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPat
     }
   }
   return hits;
-}
-
-export type TierRead = { tier: Tier } | { problem: string };
-
-/** 「档位」一栏：开头是三档之一，后面跟理由（design：档位和理由写进 PR 正文）。 */
-export function parseTier(value: string | undefined): TierRead {
-  if (value === undefined) {
-    return {
-      problem: `正文里认不出「档位」一栏：要写成 档位：CI 绿就合——理由（单独起一行；两档是${TIER_LIST}，见 design 第五节，拿不准写「先审后合」）。`,
-    };
-  }
-  const v = value.replace(/`|\*\*/g, '').trim();
-  if (!v) return { problem: `「档位」一栏是空的：写${TIER_LIST}之一，后面跟理由（拿不准写「先审后合」）。` };
-  const tier = TIERS.find((t) => v.startsWith(t));
-  if (!tier) {
-    return { problem: `「档位」写的「${oneLine(v)}」认不出：开头写${TIER_LIST}之一，后面跟理由。` };
-  }
-  const reason = v.slice(tier.length).replace(/[\s\-—–:：,，;；.。、()（）[\]【】]/g, '');
-  if (!reason) {
-    return {
-      problem: `「档位」只写了「${tier}」没写理由：后面跟一句为什么是这一档，比如 ${tier}——只改测试。`,
-    };
-  }
-  return { tier };
 }
 
 export type StatusState = 'success' | 'failure' | 'error' | 'pending';
@@ -368,12 +382,6 @@ export function checkColdVerify(head: string, got: SecondOpinion | null, need: C
 
 /** 合并闸写在 PR 当前头上的提交状态：「按我们的规矩能不能合」的唯一信号。 */
 export const GATE_CONTEXT = 'merge-gate';
-export const DRAFT_PROBLEM = '是草稿：做完了点「Ready for review」，合并闸会自动重算。';
-export const CONFLICT_PROBLEM =
-  '和主线有冲突，合不进去：把最新主线合进来（或 rebase）解掉冲突再推，合并闸会自动重算。';
-export const MERGEABLE_UNKNOWN =
-  'GitHub 还没算完和主线有没有冲突：过一会儿再算（再推一次、改一下正文，或在 Actions 里手动跑 merge-gate）。';
-
 /** 提交状态的 description 上限（GitHub 限 140 个字符）。 */
 export const DESCRIPTION_MAX = 140;
 

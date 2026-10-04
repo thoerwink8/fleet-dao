@@ -6,7 +6,6 @@ import {
   DESCRIPTION_MAX,
   destructiveIn,
   parseRiskPaths,
-  parseTier,
   type RiskPath,
   riskyFiles,
   secondOpinionFrom,
@@ -14,31 +13,6 @@ import {
 } from '../src/merge-gates.ts';
 
 const HEAD = 'a'.repeat(40);
-
-describe('档位', () => {
-  it('开头是三档之一、后面跟理由就认：加粗、反引号、各种隔开的写法', () => {
-    for (const [value, tier] of [
-      ['直接合（纯文档）', '直接合'],
-      ['先合后看——卫生规则只多认一种密钥', '先合后看'],
-      ['CI 绿就合，只改测试', 'CI 绿就合'],
-      ['`先审后合` 碰了登录', '先审后合'],
-      ['**先审后合**：迁移', '先审后合'],
-    ] as const) {
-      expect(parseTier(value), value).toEqual({ tier });
-    }
-  });
-
-  it('没这一栏、空的、认不出、只写档位没理由：各报一句怎么写', () => {
-    expect(parseTier(undefined)).toEqual({ problem: expect.stringContaining('正文里认不出「档位」一栏') });
-    expect(parseTier('  ')).toEqual({ problem: expect.stringContaining('「档位」一栏是空的') });
-    expect(parseTier('低风险，直接合')).toEqual({
-      problem: '「档位」写的「低风险，直接合」认不出：开头写「CI 绿就合」「先审后合」之一，后面跟理由。',
-    });
-    expect(parseTier('先合后看。')).toEqual({
-      problem: '「档位」只写了「先合后看」没写理由：后面跟一句为什么是这一档，比如 先合后看——只改测试。',
-    });
-  });
-});
 
 const changed = (filename: string, status = 'modified', over: Partial<ChangedFile> = {}): ChangedFile => ({
   filename,
@@ -90,19 +64,14 @@ describe('高风险路径清单', () => {
       expect(riskyFiles([changed(f)], parsed), f).toEqual([{ file: f, rule: f, kind: '碰安全' }]);
   });
 
-  it('合并闸决定结论的判法都在清单里：从入口顺着相对导入走一遍，每个文件都得落进清单（漏一个，PR 改它就能放松门槛）；只做提醒的必填栏那一套不走进去', () => {
+  it('合并闸决定结论的判法都在清单里：从入口顺着相对导入走一遍，每个文件都得落进清单（漏一个，PR 改它就能放松门槛）；只给报错加格式的 pr-fields 不走进去', () => {
     const parsed = parseRiskPaths(readFileSync(new URL('../high-risk-paths.json', import.meta.url), 'utf8'));
     if (typeof parsed === 'string') throw new Error(parsed);
     const root = new URL('../../../', import.meta.url);
     const todo = ['packages/conventions/src/bin/merge-gate.ts'];
     const seen = new Set<string>();
-    // 只做提醒：它们坏了改不了结论（merge-gate.test.ts「提醒那一半坏了也改不了结论」兜着）
-    const reminderOnly = new Set([
-      'packages/conventions/src/pr-fields.ts',
-      'packages/conventions/src/plan.ts',
-      'packages/conventions/src/markdown.ts',
-      'packages/conventions/src/labels.ts',
-    ]);
+    // 入口只借 pr-fields.ts 的 annotation 给 Actions 报错加格式：它改不了结论
+    const reminderOnly = new Set(['packages/conventions/src/pr-fields.ts']);
     while (todo.length > 0) {
       const rel = todo.pop() as string;
       if (seen.has(rel) || reminderOnly.has(rel)) continue;
@@ -220,6 +189,102 @@ describe('高风险路径清单', () => {
   });
 });
 
+describe('工作流（ci.yml）：改了已有的标「待比对」，交给合并闸读全文做结构比对', () => {
+  const list = [
+    { path: '.github/workflows/', kind: '碰安全', why: '令牌权限' },
+    { path: '.github/workflows/ci.yml', kind: '碰安全', why: '结构比对', mode: 'workflow' },
+  ] as RiskPath[];
+  const CI = '.github/workflows/ci.yml';
+
+  it('改了已有的 ci.yml：标 pending（还不知道算不算），不在这里按行猜', () => {
+    expect(riskyFiles([changed(CI)], list)).toEqual([{ file: CI, rule: CI, kind: '碰安全', pending: true }]);
+  });
+
+  it('【故意造出的失败】新加、删掉、改名：直接算（整个文件都是新的信任面），不标 pending', () => {
+    for (const status of ['added', 'removed']) {
+      const [hit] = riskyFiles([changed(CI, status)], list);
+      expect(hit?.pending, status).toBeUndefined();
+      expect(hit?.note, status).toMatch(/新加|被删/);
+    }
+    const [renamed] = riskyFiles([changed('x/ci.yml', 'renamed', { previous: CI })], list);
+    expect(renamed?.file).toBe(CI);
+    expect(renamed?.pending).toBeUndefined();
+  });
+
+  it('同目录的别的工作流（合并闸自己）照旧整个文件都算；同一文件多条规则认最具体的，和清单顺序无关', () => {
+    const [other] = riskyFiles([changed('.github/workflows/merge-gate.yml')], list);
+    expect(other?.rule).toBe('.github/workflows/');
+    expect(other?.pending).toBeUndefined();
+    expect(riskyFiles([changed(CI)], [...list].reverse())[0]?.pending).toBe(true);
+  });
+
+  it('清单写法：workflow 只能写在单个 .yml 文件上，目录、别的后缀、migrations 写在文件上都读不出', () => {
+    const one = (item: unknown) => parseRiskPaths(JSON.stringify({ paths: [item] }));
+    expect(one({ path: CI, kind: '碰安全', why: 'x', mode: 'workflow' })).toHaveLength(1);
+    for (const bad of [
+      { path: '.github/workflows/', kind: '碰安全', why: 'x', mode: 'workflow' },
+      { path: 'deploy/x.sh', kind: '碰安全', why: 'x', mode: 'workflow' },
+      { path: CI, kind: '碰安全', why: 'x', mode: 'migrations' },
+    ]) {
+      expect(one(bad), JSON.stringify(bad)).toMatch(/mode 认不出/);
+    }
+  });
+
+  it('真清单里 ci.yml 那条在、比整个目录那条更具体', () => {
+    const real = parseRiskPaths(readFileSync(new URL('../high-risk-paths.json', import.meta.url), 'utf8'));
+    if (typeof real === 'string') throw new Error(real);
+    expect(riskyFiles([changed(CI)], real)[0]?.pending).toBe(true);
+    expect(riskyFiles([changed('.github/workflows/merge-gate.yml')], real)[0]?.pending).toBeUndefined();
+  });
+});
+
+describe('先合后审（review: after-merge）', () => {
+  it('标了的条目命中时带 afterMerge；没标的不带', () => {
+    const list = [
+      { path: 'packages/conventions/src/ci-plan.ts', kind: '碰安全', why: 'CI 判法', review: 'after-merge' },
+      { path: 'packages/hygiene/', kind: '碰安全', why: '卫生检查' },
+    ] as RiskPath[];
+    expect(riskyFiles([changed('packages/conventions/src/ci-plan.ts')], list)[0]?.afterMerge).toBe(true);
+    expect(riskyFiles([changed('packages/hygiene/src/x.ts')], list)[0]?.afterMerge).toBeUndefined();
+  });
+
+  it('【故意造出的失败】review 写错、写在改数据库的条目上、和 mode 一起写：都读不出（调用方判没查成）', () => {
+    const one = (item: unknown) => parseRiskPaths(JSON.stringify({ paths: [item] }));
+    expect(
+      one({ path: 'packages/conventions/src/ci-plan.ts', kind: '碰安全', why: 'x', review: 'after-merge' }),
+    ).toHaveLength(1);
+    // 名单外的路径（登录、密钥、合并闸自己、随便一个文件）标上 after-merge：读不出，不是放行
+    for (const p of [
+      'packages/api/src/auth.ts',
+      'packages/conventions/src/merge-gates.ts',
+      'a.ts',
+      '.github/workflows/',
+    ]) {
+      expect(one({ path: p, kind: '碰安全', why: 'x', review: 'after-merge' }), p).toMatch(/不许先合后审/);
+    }
+    for (const bad of [
+      { path: 'a.ts', kind: '碰安全', why: 'x', review: 'later' },
+      { path: 'db/', kind: '改数据库', why: 'x', review: 'after-merge' },
+      { path: 'db/', kind: '改数据库', why: 'x', mode: 'migrations', review: 'after-merge' },
+      { path: '.github/workflows/ci.yml', kind: '碰安全', why: 'x', mode: 'workflow', review: 'after-merge' },
+    ]) {
+      expect(one(bad), JSON.stringify(bad)).toMatch(/review 认不出/);
+    }
+  });
+
+  it('【故意造出的失败】真清单里：密钥、登录、卫生检查、合并闸自己、工作流目录都不许先合后审（那些改坏了回退不了）', () => {
+    const real = parseRiskPaths(readFileSync(new URL('../high-risk-paths.json', import.meta.url), 'utf8'));
+    if (typeof real === 'string') throw new Error(real);
+    const later = real.filter((r) => r.review === 'after-merge').map((r) => r.path);
+    expect(later.length).toBeGreaterThan(0);
+    for (const p of later) {
+      expect(p, p).toMatch(
+        /^packages\/conventions\/src\/(?:bin\/)?(?:ci-plan|ci-verdict|test-split|ci-box|ci-cache|repo)\.ts$/,
+      );
+    }
+  });
+});
+
 describe('第二意见状态', () => {
   const status = (state: string, description = '') => ({ context: 'second-opinion', state, description });
 
@@ -267,7 +332,7 @@ describe('第二意见状态', () => {
 describe('状态说明', () => {
   it('放第一条，多的写另有几条；再长也不超过 GitHub 的 140 个字符', () => {
     expect(statusDescription(['是草稿。'])).toBe('是草稿。');
-    expect(statusDescription(['是草稿。', '缺档位。'])).toBe('是草稿。（另有 1 条，点详情看）');
+    expect(statusDescription(['是草稿。', '等第二意见。'])).toBe('是草稿。（另有 1 条，点详情看）');
     const long = statusDescription(['很'.repeat(300), '第二条']);
     expect([...long].length).toBeLessThanOrEqual(DESCRIPTION_MAX);
     expect(long).toMatch(/…（另有 1 条，点详情看）$/);

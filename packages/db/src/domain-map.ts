@@ -11,6 +11,7 @@ import type {
   QuotaWindow,
   Repo,
   Route,
+  SegmentRun,
   SessionRun,
   StagePolicy,
   Subtask,
@@ -26,6 +27,7 @@ import type {
   quotaWindows,
   repos,
   routes,
+  runs,
   sessionRuns,
   stagePolicies,
   subtasks,
@@ -66,7 +68,6 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     priority: r.priority,
     specDir: opt(r.specDir),
     acceptance: r.acceptance,
-    flowSource: opt(r.flowSource),
     createdAt: r.createdAt.toISOString(),
   });
 
@@ -190,6 +191,31 @@ export const toSessionRun = (r: typeof sessionRuns.$inferSelect): SessionRun =>
     cacheWriteTokens: opt(r.cacheWriteTokens),
     costUsd: opt(r.costUsd),
     testCommand: opt(r.testCommand),
+  });
+
+export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
+  build<SegmentRun>({
+    id: r.id,
+    segment: r.segment,
+    taskId: opt(r.taskId),
+    issueNumber: opt(r.issueNumber),
+    model: r.model,
+    channel: opt(r.channel),
+    tier: opt(r.tier),
+    startedAt: r.startedAt.toISOString(),
+    endedAt: isoOpt(r.endedAt),
+    outcome: opt(r.outcome),
+    inputTokens: opt(r.inputTokens),
+    outputTokens: opt(r.outputTokens),
+    cacheReadTokens: opt(r.cacheReadTokens),
+    cacheWriteTokens: opt(r.cacheWriteTokens),
+    costUsd: opt(r.costUsd),
+    memoryPeakMb: opt(r.memoryPeakMb),
+    failureReason: opt(r.failureReason),
+    prNumber: opt(r.prNumber),
+    branch: opt(r.branch),
+    workflowId: opt(r.workflowId),
+    retryOf: opt(r.retryOf),
   });
 
 export const toProgressEvent = (r: typeof progressEvents.$inferSelect): ProgressEvent =>
