@@ -26,6 +26,7 @@ import {
   SETTING_SCHEMAS,
   type SettingKey,
   SettingsResponse,
+  TASK_SIGNAL_NAMES,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -54,6 +55,7 @@ import {
   type NewAuditEntry,
   type TaskSignal,
   WorkflowGoneError,
+  WorkflowTargetNotFoundError,
   WorkflowUnavailableError,
 } from './ports.ts';
 import { registerReleaseRoutes } from './release-version.ts';
@@ -62,7 +64,7 @@ import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView }
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
-import { requirementWorkflowIdForTask } from './temporal.ts';
+import { taskWorkflowIdForTask } from './temporal.ts';
 import {
   askLate,
   buildBoard,
@@ -73,7 +75,6 @@ import {
   jobView,
   notificationView,
   routeLookup,
-  routeProblem,
   runView,
   segmentRunViews,
   subtaskViews,
@@ -81,6 +82,15 @@ import {
 } from './views.ts';
 
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
+
+/** 叫停没写原因时补的一句话：引擎的放弃信号 reason 必填（task-contract.ts 的 AbandonCommand），工作流拿它写状态。 */
+const DEFAULT_STOP_REASON = '驾驶舱上点了叫停';
+
+/** 引擎没有接收处的动作，各自该怎么说（驾驶舱原样显示）。 */
+const UNSUPPORTED_ACTION_WHY = {
+  pause: '任务工作流没有「暂停」：它只会在碰到问题时自己停下等人。想让它别再做，请用「叫停」',
+  reroute: '任务工作流没有「中途换路由」：每一段会话开始前它自己按路由顺序选路。想让它别再做，请用「叫停」',
+} as const;
 
 export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   const { config, store } = deps;
@@ -90,25 +100,39 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   const actorOf = (c: Context<CockpitEnv>): Actor => ({ kind: 'user', id: c.get('user').id });
 
   /**
-   * 先记后做：操作记录写不进就抛错，信号不发。命令按任务发给需求工作流，编号查库拼（requirementWorkflowIdForTask）。
-   * 信号没发成再追加一条 ok=false 的记录（工作流不在了 409、Temporal 没接上或连不上 503、别的 502）；
-   * 这一条也写不进时只能留日志，但不改变返回给人的结果。
+   * 先记后做：操作记录写不进就抛错，信号不发。命令按任务发给任务工作流，编号查库拼（taskWorkflowIdForTask）。
+   * 信号没发成再追加一条 ok=false 的记录（工作流不在了 409、拼不出编号 404、Temporal 没接上或连不上 503、别的 502），
+   * 每一种都给驾驶舱一句人话原因；这一条也写不进时只能留日志，但不改变返回给人的结果。
    */
   async function signalAndAudit(taskId: string, signal: TaskSignal, audit: NewAuditEntry): Promise<void> {
     await store.appendAudit(audit);
     try {
-      const workflowId = await requirementWorkflowIdForTask(store, taskId);
+      const workflowId = await taskWorkflowIdForTask(store, taskId);
       await deps.workflows.signal(workflowId, signal);
     } catch (err) {
       const gone = err instanceof WorkflowGoneError;
       const unavailable = err instanceof WorkflowUnavailableError;
-      const error = gone ? 'workflow_gone' : unavailable ? 'workflow_unavailable' : String(err);
+      const notFound = err instanceof WorkflowTargetNotFoundError;
+      const error = gone
+        ? 'workflow_gone'
+        : unavailable
+          ? 'workflow_unavailable'
+          : notFound
+            ? 'workflow_target_not_found'
+            : String(err);
       try {
         await store.appendAudit({ ...audit, ok: false, error });
       } catch (auditErr) {
         deps.log.error('信号没发成，这条失败记录也没写进去', { taskId, error, auditError: String(auditErr) });
       }
-      if (gone) throw new ApiError(409, 'workflow_gone', '这个任务的工作流已经结束或不存在');
+      if (gone) {
+        throw new ApiError(
+          409,
+          'workflow_gone',
+          '这张单的任务工作流已经结束或不存在（做完了、已被叫停，或引擎还没拉起它），没有谁能收到这个操作',
+        );
+      }
+      if (notFound) throw new ApiError(404, 'workflow_target_not_found', err.message);
       deps.log.error('发信号失败', { taskId, signal: signal.name, error: String(err) });
       if (unavailable) throw new ApiError(503, 'workflow_unavailable', '工作流服务暂时连不上，稍后再试');
       throw new ApiError(502, 'workflow_unreachable', '发给工作流的信号没发出去，稍后再试');
@@ -293,41 +317,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const by = c.get('user').id;
     let signal: TaskSignal;
     switch (body.action) {
-      case 'pause':
-        signal = { name: 'pause', by, reason: body.reason };
-        break;
       case 'resume':
-        signal = { name: 'resume', by };
+        signal = { name: TASK_SIGNAL_NAMES.continue, by };
         break;
       case 'stop':
-        signal = { name: 'stop', by, reason: body.reason };
+        signal = { name: TASK_SIGNAL_NAMES.abandon, by, reason: body.reason ?? DEFAULT_STOP_REASON };
         break;
-      case 'reroute': {
-        const running = (await store.listRuns({ taskIds: [taskId], active: true })).filter(
-          (r) => body.subtaskId === undefined || r.subtaskId === body.subtaskId,
-        );
-        const target = running.sort((a, b) =>
-          (b.startedAt ?? b.queuedAt).localeCompare(a.startedAt ?? a.queuedAt),
-        )[0];
-        if (!target) throw new ApiError(409, 'no_active_run', '这个任务现在没有在跑的会话，没法换路由');
-        const [routes, models, bans] = await Promise.all([
-          store.listRoutes(),
-          store.listModels(),
-          store.listBans(),
-        ]);
-        const route = routeLookup(routes, models);
-        const problem = routeProblem(body.routeId, target.stage, { route, bans, now: deps.now() });
-        if (problem) throw new ApiError(422, 'route_not_allowed', problem);
-        if (!route(body.routeId).route?.alive) throw new ApiError(422, 'route_offline', '这条路由现在不在线');
-        signal = {
-          name: 'reroute',
-          by,
-          routeId: body.routeId,
-          subtaskId: target.subtaskId,
-          reason: body.reason,
-        };
-        break;
-      }
+      // 引擎的任务工作流没有「暂停」「中途换路由」的接收处（它只会碰到问题自己停下等人、每一段重新选路）：
+      // 发了也没人收，所以当场回明确的 409，不记操作、不假装发出去了（#901）。要补就先在引擎里接上、再回这里。
+      case 'pause':
+      case 'reroute':
+        throw new ApiError(409, 'action_not_supported', UNSUPPORTED_ACTION_WHY[body.action]);
     }
     const { name: _name, by: _by, ...detail } = signal;
     await signalAndAudit(taskId, signal, {

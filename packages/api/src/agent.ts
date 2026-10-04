@@ -1,9 +1,9 @@
 // fleet 命令的接口（/agent/v1，照 shared/agent-api.ts）：只认 fleet 令牌，只能动令牌对应的那一次会话。
-// 每条命令先写库、再叫醒工作流；库是准，信号只是叫醒。
+// 每条命令只写库，不发信号：引擎的任务工作流不听 fleet 命令的叫醒（它只听继续、放弃、路由叫醒），以前这里发的
+// agentEvent / requireApproval 发给一个不存在的工作流、没人收（#901）。
 
 import { ASK_HOLD_NAMES, type AskHold, type AskScope, checkAsk } from '@fleet-dao/core';
 import {
-  AGENT_EVENT_WAKE_KINDS,
   AgentRoutes,
   AskRequest,
   AskResponse,
@@ -14,7 +14,6 @@ import {
   IDEMPOTENCY_KEY_HEADER,
   PlanRequest,
   SayRequest,
-  subtaskWorkflowId,
   TaskResponse,
 } from '@fleet-dao/shared';
 import { checkDone } from '@fleet-dao/store';
@@ -24,14 +23,7 @@ import type { z } from 'zod';
 import { verifyAgentToken } from './agent-token.ts';
 import type { Deps } from './deps.ts';
 import { ApiError, readJson, reply } from './http.ts';
-import {
-  type AgentSession,
-  type AskRecord,
-  type TaskSignal,
-  WorkflowGoneError,
-  WorkflowUnavailableError,
-} from './ports.ts';
-import { requirementWorkflowIdForTask } from './temporal.ts';
+import type { AgentSession, AskRecord } from './ports.ts';
 
 export type AgentEnv = { Variables: { agent: AgentSession } };
 
@@ -110,13 +102,6 @@ const TOKEN_PROBLEMS = {
   ttl_too_long: '令牌有效期超过上限，不认',
 } as const;
 
-type AgentEventKind = Extract<TaskSignal, { name: 'agentEvent' }>['kind'];
-
-/** 这一类 fleet 命令值不值得叫醒工作流（say、plan 不值得，只进库）。 */
-function isWakeKind(kind: AgentEventKind): kind is (typeof AGENT_EVENT_WAKE_KINDS)[number] {
-  return (AGENT_EVENT_WAKE_KINDS as readonly string[]).includes(kind);
-}
-
 /**
  * fleet ask 当场回什么：创始人回过这一句（同一个会话问过一模一样的）就回他的回答；不然按提问的范围——
  * 这张单范围内的按推荐先做，超出范围的另开单，碰人闸的先按推荐做、合并前等批。
@@ -166,64 +151,23 @@ export function agentAuth(deps: Deps): MiddlewareHandler<AgentEnv> {
 }
 
 export function agentRoutes(deps: Deps): Hono<AgentEnv> {
-  const { store, log } = deps;
+  const { store } = deps;
   const bootedAt = deps.now().getTime();
   const app = new Hono<AgentEnv>();
   app.use('*', agentAuth(deps));
   const ok = { ok: true } as const;
 
   /**
-   * 叫醒工作流：只有 AGENT_EVENT_WAKE_KINDS 这几类（ask、done、blocked）才发，say、plan 只进库、不发信号
-   * （每条都发的话，一个需求二十来个子任务能把需求的历史撑到上万条事件，撞上 Temporal 的信号上限）。
-   * 直接发给会话所属的工作流：子任务会话发它的子任务工作流（编号直接拼），需求自己的会话（分诊、需求文档、方案）
-   * 发需求工作流（编号查库拼）。叫醒失败不挡命令：记录已经写库，引擎按库补看；但要留日志，不能悄悄吞掉。
+   * 碰了人闸的提问（scope = hold）：以前是给工作流发 requireApproval 信号，合并前等创始人批。引擎的任务工作流没有这个接收处
+   * （人闸只有它自己按改到的路径判的那一种：改标准、先审后合的路径），所以现在没法按提问加人闸——明说没加上（409），
+   * 不回「已按推荐先做、合并前等批」装作拦住了。问题本身已经记在库里，驾驶舱看得到（#901）。
    */
-  async function wake(session: AgentSession, kind: AgentEventKind, askId?: string) {
-    if (!isWakeKind(kind)) return;
-    try {
-      const workflowId = session.subtaskId
-        ? subtaskWorkflowId(session.subtaskId)
-        : await requirementWorkflowIdForTask(store, session.taskId);
-      await deps.workflows.signal(workflowId, { name: 'agentEvent', runId: session.runId, kind, askId });
-    } catch (err) {
-      log.warn('fleet 命令已写库，但叫醒工作流没成功', { runId: session.runId, kind, error: String(err) });
-    }
-  }
-
-  /**
-   * 碰了人闸的提问（scope = hold）：给这张单的工作流加人闸，合并前等创始人批（和驾驶舱加人闸同一个信号）。
-   * 发给需求那一层（Fusion 就是它本身）：子任务会话点名自己的子任务。引擎连不上就明说没加上（503，fleet 会重试，
-   * 重试时问题去重、人闸再加一次），不回「已按推荐先做、合并前等批」装作拦住了；工作流已经结束的，这张单不会再合并，只记日志。
-   */
-  async function holdMerge(session: AgentSession, hold: AskHold, askId: string) {
-    let workflowId: string;
-    try {
-      workflowId = await requirementWorkflowIdForTask(store, session.taskId);
-      await deps.workflows.signal(workflowId, {
-        name: 'requireApproval',
-        by: `session:${session.runId}`,
-        holds: [hold],
-        ...(session.subtaskId ? { subtaskId: session.subtaskId } : {}),
-        reason: `会话问创始人时碰了人闸（追问 ${askId}）`,
-      });
-    } catch (err) {
-      if (err instanceof WorkflowGoneError) {
-        log.warn('碰了人闸的提问已记下，但工作流已经结束，人闸没处加', { runId: session.runId, askId, hold });
-        return;
-      }
-      log.error('碰了人闸的提问已记下，但人闸没加上', {
-        runId: session.runId,
-        askId,
-        hold,
-        error: String(err),
-      });
-      const why = err instanceof WorkflowUnavailableError ? '引擎这会儿连不上' : String(err);
-      throw new ApiError(
-        err instanceof WorkflowUnavailableError ? 503 : 500,
-        'hold_not_set',
-        `问题已经记下，但人闸（${ASK_HOLD_NAMES[hold]}）没加上：${why}。重跑同一条 fleet ask 会再加一次`,
-      );
-    }
+  function holdMerge(hold: AskHold): never {
+    throw new ApiError(
+      409,
+      'hold_not_supported',
+      `问题已经记下，但人闸（${ASK_HOLD_NAMES[hold]}）没加上：现在的任务工作流不支持按提问追加人闸，合并前没有东西会拦`,
+    );
   }
 
   app.get(AgentRoutes.task.path, async (c) => {
@@ -256,7 +200,6 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
       session.runId,
       steps.map((s, index) => ({ index, title: s.title, state: s.state })),
     );
-    await wake(session, 'plan');
     return c.json(ok);
   });
 
@@ -264,7 +207,6 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
     const session = c.get('agent');
     const { text } = await readJson(c, SayRequest);
     await store.appendProgress(session.runId, 'say', { text });
-    await wake(session, 'say');
     return c.json(ok);
   });
 
@@ -275,7 +217,7 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
     const checked = checkAsk(body);
     if (!checked.ok) throw new ApiError(400, 'ask_incomplete', checked.why);
     const q = checked.ask;
-    const { ask, created } = await store.openAsk({
+    const { ask } = await store.openAsk({
       runId: session.runId,
       taskId: session.taskId,
       question: q.question,
@@ -284,11 +226,9 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
       recommended: q.recommended,
       ...(q.hold ? { hold: q.hold } : {}),
     });
-    // 追问和它的 ask 进度在 openAsk 里同一事务写进去了，这里只叫醒工作流。
-    if (created) await wake(session, 'ask', ask.id);
-    // 碰了人闸：每次问（含重试、同一句再问）都给工作流加一次人闸，加过的工作流自己认「已经有了」。
+    // 追问和它的 ask 进度在 openAsk 里同一事务写进去了。碰了人闸的：每次问（含重试、同一句再问）都明说没加上。
     const hold = ask.hold ?? q.hold;
-    if (hold) await holdMerge(session, hold, ask.id);
+    if (hold) holdMerge(hold);
     return reply(c, AskResponse, askReply(ask, q.scope, q.recommended));
   });
 
@@ -342,7 +282,6 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
       testsPassed: request.testsPassed,
       verified: verdict.evidence,
     });
-    await wake(session, 'done');
     return c.json(ok);
   });
 
@@ -350,7 +289,6 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
     const session = c.get('agent');
     const body = await readJson(c, BlockedRequest);
     await store.appendProgress(session.runId, 'blocked', { reason: body.reason, needs: body.needs });
-    await wake(session, 'blocked');
     return c.json(ok);
   });
 

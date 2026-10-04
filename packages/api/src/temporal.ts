@@ -1,12 +1,13 @@
 // 发给工作流的信号、健康检查都经这里的一份 Temporal 连接。
-// 调用方（agent.ts 的 wake、cockpit.ts 的 signalAndAudit）先把目标算成工作流编号——子任务编号直接拼
-// subtaskWorkflowId，需求工作流编号要查库（requirementWorkflowIdForTask：getTask 拿 repoId/issueNumber，
-// getRepo 拿 owner/name），查不到就明确抛 WorkflowTargetNotFoundError，不瞎拼——算完了才调
-// WorkflowControl.signal(workflowId, signal)。
+// 调用方（cockpit.ts 的 signalAndAudit）先把目标算成工作流编号——任务工作流编号要查库（taskWorkflowIdForTask：
+// getTask 拿 repoId/issueNumber，getRepo 拿 owner/name），查不到就明确抛 WorkflowTargetNotFoundError，不瞎拼——
+// 算完了才调 WorkflowControl.signal(workflowId, signal)。编号和信号名都和引擎同一份（shared/workflow-ids.ts、
+// shared/task-signals.ts）：改一边不改另一边，packages/api/test/signal-chain.test.ts 和
+// packages/engine/test/task-signals.test.ts 会红。
 // 真客户端由 connectTemporal 用 @temporalio/client 的懒连接（Connection.lazy）装配：这一步不连网络，
 // Temporal 没起来时后端照样能起，真正发信号或查健康才会报错。测试一律用假客户端（TemporalClientLike /
 // EnginePollerSource 的最小形状），不碰真网络；connectTemporal 本身没有自动化测试覆盖（要连真 Temporal）。
-import { requirementWorkflowId } from '@fleet-dao/shared';
+import { taskWorkflowId } from '@fleet-dao/shared';
 import { Client, Connection } from '@temporalio/client';
 import { PublicHealthError } from './health.ts';
 import type { BoardStore } from './ports.ts';
@@ -36,20 +37,20 @@ export function notConnectedTemporal(): TemporalConnection {
   };
 }
 
-/** 这个任务的需求工作流编号：查库拼。任务或它所在的仓不在库里就明确抛错，不瞎拼。 */
-export async function requirementWorkflowIdForTask(
+/** 这个任务的任务工作流编号（引擎拉单起的那一条，task:<仓>#<号>）：查库拼。任务或它所在的仓不在库里就明确抛错，不瞎拼。 */
+export async function taskWorkflowIdForTask(
   store: Pick<BoardStore, 'getTask' | 'getRepo'>,
   taskId: string,
 ): Promise<string> {
   const task = await store.getTask(taskId);
-  if (!task) throw new WorkflowTargetNotFoundError(`任务 ${taskId} 不在库里，拼不出需求工作流编号`);
+  if (!task) throw new WorkflowTargetNotFoundError(`任务 ${taskId} 不在库里，拼不出任务工作流编号`);
   const repo = await store.getRepo(task.repoId);
   if (!repo) {
     throw new WorkflowTargetNotFoundError(
-      `任务 ${taskId} 所在的仓 ${task.repoId} 不在库里，拼不出需求工作流编号`,
+      `任务 ${taskId} 所在的仓 ${task.repoId} 不在库里，拼不出任务工作流编号`,
     );
   }
-  return requirementWorkflowId(repo, task.issueNumber);
+  return taskWorkflowId(repo, task.issueNumber);
 }
 
 /** 发信号用得到的最小一块 Temporal 客户端形状；真客户端 `new Client(...)` 满足它（BaseClient.connection 就是 ConnectionLike）。 */

@@ -6,10 +6,10 @@ import {
   PoolsResponse,
   RoutingResponse,
   RunStepsResponse,
-  requirementWorkflowId,
   SettingsResponse,
   TaskDetailResponse,
   TimelineResponse,
+  taskWorkflowId,
   UpdateSettingResponse,
   WEB_API_PREFIX,
   WebRoutes,
@@ -363,7 +363,7 @@ describe('看板与任务', () => {
     h.clock.now = new Date(h.clock.now.getTime() + 1000);
     await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      write('POST', session, { action: 'pause', reason: '先停一下' }),
+      write('POST', session, { action: 'stop', reason: '先停一下' }),
     );
 
     const seen: string[] = [];
@@ -381,7 +381,7 @@ describe('看板与任务', () => {
       cursor = body.nextCursor;
       if (!cursor) break;
     }
-    expect(seen[0]).toBe('暂停：先停一下');
+    expect(seen[0]).toBe('叫停：先停一下');
     expect(seen.slice(1, 6)).toEqual(['第 4 句', '第 3 句', '第 2 句', '第 1 句', '第 0 句']);
     expect(new Set(seen).size).toBe(seen.length);
     expect(seen).toContain('正在写验证码过期的测试');
@@ -413,52 +413,36 @@ describe('看板与任务', () => {
 });
 
 describe('发给工作流的信号', () => {
-  // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成这个需求工作流。
-  const TASK12_WORKFLOW_ID = requirementWorkflowId({ owner: 'example', name: 'canary' }, 12);
+  // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成引擎起的那条任务工作流（task:<仓>#<号>）。
+  // 信号名只有引擎真有人听的两个（继续、放弃）；整条链的钉子在 signal-chain.test.ts。
+  const TASK12_WORKFLOW_ID = taskWorkflowId({ owner: 'example', name: 'canary' }, 12);
 
-  it('暂停、继续、叫停：发给这个任务的工作流，并写操作记录', async () => {
+  it('继续、叫停：发给这个任务的任务工作流，并写操作记录', async () => {
     const h = harness();
     const s = await h.login();
-    for (const action of ['pause', 'resume', 'stop'] as const) {
+    for (const action of ['resume', 'stop'] as const) {
       const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(200);
     }
     expect(h.signals.map((x) => [x.workflowId, x.signal.name])).toEqual([
-      [TASK12_WORKFLOW_ID, 'pause'],
-      [TASK12_WORKFLOW_ID, 'resume'],
-      [TASK12_WORKFLOW_ID, 'stop'],
+      [TASK12_WORKFLOW_ID, 'taskContinue'],
+      [TASK12_WORKFLOW_ID, 'taskAbandon'],
     ]);
     expect(h.signals[0]?.signal).toMatchObject({ by: DEV_USER_ID });
-    expect(h.store.data.audit.slice(-3).map((a) => a.action)).toEqual([
-      'task.pause',
-      'task.resume',
-      'task.stop',
-    ]);
+    expect(h.store.data.audit.slice(-2).map((a) => a.action)).toEqual(['task.resume', 'task.stop']);
   });
 
-  it('换路由：只许换到在线、不犯禁令的路由；目标是在跑的那次会话', async () => {
+  it('暂停、换路由：引擎没有这两个动作，409 action_not_supported，不写操作记录、不发信号', async () => {
     const h = harness();
     const s = await h.login();
-    const post = (body: unknown) =>
-      h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
-    const fable = await post({ action: 'reroute', routeId: 'rt-mirasim-fable' });
-    expect(await errorCode(fable)).toBe('route_not_allowed');
-    const offline = h.store.data.routes.find((r) => r.id === 'rt-mirasim-kimi');
-    if (!offline) throw new Error('样例数据里没有这条路由');
-    offline.alive = false;
-    expect(await errorCode(await post({ action: 'reroute', routeId: 'rt-mirasim-kimi' }))).toBe(
-      'route_offline',
-    );
-    offline.alive = true;
-    const ok = await post({ action: 'reroute', routeId: 'rt-mirasim-kimi', reason: '试试 Kimi' });
-    expect(ok.status).toBe(200);
-    expect(h.signals.at(-1)?.signal).toEqual({
-      name: 'reroute',
-      by: DEV_USER_ID,
-      routeId: 'rt-mirasim-kimi',
-      subtaskId: IDS.sub12a,
-      reason: '试试 Kimi',
-    });
+    const before = h.store.data.audit.length;
+    for (const body of [{ action: 'pause' }, { action: 'reroute', routeId: 'rt-mirasim-kimi' }]) {
+      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
+      expect(res.status, body.action).toBe(409);
+      expect(await errorCode(res)).toBe('action_not_supported');
+    }
+    expect(h.signals).toHaveLength(0);
+    expect(h.store.data.audit.length).toBe(before);
   });
 
   it('任务已结束、工作流不在了：409；先记后做——发起那条在前，没做成再追加一条 ok=false', async () => {
@@ -477,19 +461,19 @@ describe('发给工作流的信号', () => {
     expect(await errorCode(done)).toBe('task_finished');
     const gone = await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      write('POST', s, { action: 'pause' }),
+      write('POST', s, { action: 'resume' }),
     );
     expect(await errorCode(gone)).toBe('workflow_gone');
     expect(h.store.data.audit.slice(-2)).toMatchObject([
-      { action: 'task.pause', target: `task:${IDS.task12}`, ok: true },
-      { action: 'task.pause', target: `task:${IDS.task12}`, ok: false, error: 'workflow_gone' },
+      { action: 'task.resume', target: `task:${IDS.task12}`, ok: true },
+      { action: 'task.resume', target: `task:${IDS.task12}`, ok: false, error: 'workflow_gone' },
     ]);
     const timeline = TimelineResponse.parse(
       await (
         await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline`, { headers: { cookie: s.cookie } })
       ).json(),
     );
-    expect(timeline.items.map((i) => i.text)).toContain('暂停没做成：workflow_gone');
+    expect(timeline.items.map((i) => i.text)).toContain('继续没做成：workflow_gone');
   });
 
   it('操作记录写不进：信号不发（故障注入）', async () => {
@@ -498,19 +482,14 @@ describe('发给工作流的信号', () => {
     h.store.appendAudit = async () => {
       throw new Error('库写不进');
     };
-    for (const action of ['pause', 'resume', 'stop']) {
+    for (const action of ['resume', 'stop']) {
       const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(500);
     }
-    const reroute = await h.cockpit.request(
-      `/api/tasks/${IDS.task12}/actions`,
-      write('POST', s, { action: 'reroute', routeId: 'rt-mirasim-kimi' }),
-    );
-    expect(reroute.status).toBe(500);
     expect(h.signals).toHaveLength(0);
   });
 
-  it('回答追问：写库、发 answer 信号、留记录；第二次回答 409', async () => {
+  it('回答追问：写库、留记录，不发信号（引擎不听「回答」，#901）；第二次回答 409', async () => {
     const h = harness();
     const s = await h.login();
     h.store.data.asks.push({
@@ -527,16 +506,13 @@ describe('发给工作流的信号', () => {
       answer: '6',
       answeredBy: DEV_USER_ID,
     });
-    expect(h.signals.at(-1)).toEqual({
-      workflowId: TASK12_WORKFLOW_ID,
-      signal: { name: 'answer', by: DEV_USER_ID, askId: 'ask-1', answer: '6' },
-    });
+    expect(h.signals).toHaveLength(0);
     expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'ask.answer', target: `task:${IDS.task12}` });
     const again = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '4' }));
     expect(await errorCode(again)).toBe('already_answered');
   });
 
-  it('回答追问指向的任务不在库里：回答照常成功，但拼不出工作流编号、叫醒失败要留日志（不瞎拼、不装成功）', async () => {
+  it('回答追问指向的任务不在库里：回答照常成功（只写库，不依赖工作流编号拼得出来）', async () => {
     const h = harness();
     const s = await h.login();
     h.store.data.asks.push({
@@ -550,7 +526,6 @@ describe('发给工作流的信号', () => {
     const res = await h.cockpit.request('/api/asks/ask-orphan/answer', write('POST', s, { answer: '随便' }));
     expect(res.status).toBe(200);
     expect(h.signals).toHaveLength(0);
-    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('叫醒工作流没成功'))).toBe(true);
   });
 });
 

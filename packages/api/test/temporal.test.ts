@@ -9,8 +9,8 @@ import {
   type EnginePollerSource,
   type NamespaceCheckClient,
   type PollerSnapshot,
-  requirementWorkflowIdForTask,
   type TemporalClientLike,
+  taskWorkflowIdForTask,
 } from '../src/temporal.ts';
 
 /** withDeadline 透传给 fn：默认场景里连接本身不到点，只验证 signal 调用的成败。 */
@@ -38,9 +38,9 @@ describe('Temporal 信号', () => {
   it('按给定的工作流编号找到工作流，信号名就是 TaskSignal 的 name，其余字段是参数', async () => {
     const { client, sent } = fakeClient();
     const control = createTemporalWorkflowControl(client);
-    await control.signal('task/t1', { name: 'reroute', by: 'u1', routeId: 'r2', subtaskId: 's1' });
+    await control.signal('task/t1', { name: 'taskAbandon', by: 'u1', reason: '不做了' });
     expect(sent).toEqual([
-      { workflowId: 'task/t1', name: 'reroute', arg: { by: 'u1', routeId: 'r2', subtaskId: 's1' } },
+      { workflowId: 'task/t1', name: 'taskAbandon', arg: { by: 'u1', reason: '不做了' } },
     ]);
   });
 
@@ -49,10 +49,10 @@ describe('Temporal 信号', () => {
       name: 'WorkflowNotFoundError',
     });
     const control = createTemporalWorkflowControl(fakeClient(notFound).client);
-    await expect(control.signal('task/t1', { name: 'pause', by: 'u1' })).rejects.toBeInstanceOf(
+    await expect(control.signal('task/t1', { name: 'taskContinue', by: 'u1' })).rejects.toBeInstanceOf(
       WorkflowGoneError,
     );
-    await expect(control.signal('task/t1', { name: 'pause', by: 'u1' })).rejects.toMatchObject({
+    await expect(control.signal('task/t1', { name: 'taskContinue', by: 'u1' })).rejects.toMatchObject({
       workflowId: 'task/t1',
     });
   });
@@ -63,7 +63,7 @@ describe('Temporal 信号', () => {
       '4 DEADLINE_EXCEEDED: deadline exceeded',
     ]) {
       const control = createTemporalWorkflowControl(fakeClient(new Error(message)).client);
-      await expect(control.signal('t1', { name: 'pause', by: 'u1' }), message).rejects.toBeInstanceOf(
+      await expect(control.signal('t1', { name: 'taskContinue', by: 'u1' }), message).rejects.toBeInstanceOf(
         WorkflowUnavailableError,
       );
     }
@@ -84,7 +84,7 @@ describe('Temporal 信号', () => {
       workflow: { getHandle: () => ({ signal: () => new Promise(() => {}) }) },
     };
     const control = createTemporalWorkflowControl(timesOut, 20);
-    await expect(control.signal('t1', { name: 'pause', by: 'u1' })).rejects.toBeInstanceOf(
+    await expect(control.signal('t1', { name: 'taskContinue', by: 'u1' })).rejects.toBeInstanceOf(
       WorkflowUnavailableError,
     );
     expect(calledFn).toBe(true);
@@ -95,7 +95,7 @@ describe('Temporal 信号', () => {
       cause: Object.assign(new Error('No connection established'), { code: 14 }),
     });
     const control = createTemporalWorkflowControl(fakeClient(wrapped).client);
-    await expect(control.signal('t1', { name: 'pause', by: 'u1' })).rejects.toBeInstanceOf(
+    await expect(control.signal('t1', { name: 'taskContinue', by: 'u1' })).rejects.toBeInstanceOf(
       WorkflowUnavailableError,
     );
   });
@@ -103,11 +103,11 @@ describe('Temporal 信号', () => {
   it('别的错误原样抛，不装成上面两种', async () => {
     const boom = new Error('boom');
     const control = createTemporalWorkflowControl(fakeClient(boom).client);
-    await expect(control.signal('t1', { name: 'pause', by: 'u1' })).rejects.toBe(boom);
+    await expect(control.signal('t1', { name: 'taskContinue', by: 'u1' })).rejects.toBe(boom);
   });
 });
 
-describe('requirementWorkflowIdForTask：任务的需求工作流编号查库拼，查不到就明确抛错', () => {
+describe('taskWorkflowIdForTask：任务的任务工作流编号查库拼，查不到就明确抛错', () => {
   const TASK: Task = {
     id: 't1',
     repoId: 'r1',
@@ -136,26 +136,22 @@ describe('requirementWorkflowIdForTask：任务的需求工作流编号查库拼
     };
   }
 
-  it('查得到任务和仓：拼成 req:owner/name#issueNumber', async () => {
+  it('查得到任务和仓：拼成 task:owner/name#issueNumber', async () => {
     const store = fakeStore({
       getTask: async (id) => (id === 't1' ? TASK : null),
       getRepo: async (id) => (id === 'r1' ? REPO : null),
     });
-    expect(await requirementWorkflowIdForTask(store, 't1')).toBe('req:acme/demo#7');
+    expect(await taskWorkflowIdForTask(store, 't1')).toBe('task:acme/demo#7');
   });
 
   it('任务查不到：明确抛 WorkflowTargetNotFoundError，不瞎拼', async () => {
     const store = fakeStore();
-    await expect(requirementWorkflowIdForTask(store, 'missing')).rejects.toBeInstanceOf(
-      WorkflowTargetNotFoundError,
-    );
+    await expect(taskWorkflowIdForTask(store, 'missing')).rejects.toBeInstanceOf(WorkflowTargetNotFoundError);
   });
 
   it('任务在，但它所在的仓查不到：也明确抛错，不瞎拼', async () => {
     const store = fakeStore({ getTask: async (id) => (id === 't1' ? TASK : null) });
-    await expect(requirementWorkflowIdForTask(store, 't1')).rejects.toBeInstanceOf(
-      WorkflowTargetNotFoundError,
-    );
+    await expect(taskWorkflowIdForTask(store, 't1')).rejects.toBeInstanceOf(WorkflowTargetNotFoundError);
   });
 });
 

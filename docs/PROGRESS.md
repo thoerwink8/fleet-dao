@@ -23,6 +23,11 @@
 |---|---|---|---|---|
 | 法国引擎关闭：不再派单、不接新活，`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 只留 `fleet-api`；期望配置写在 `deploy/france/desired-config.json` 的【临时】段 | 引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%；流程重做前不再让它接活 | 创始人 2026-09-29 叫停引擎、要改成三段一条龙（原话：「要删的东西都要删」）；10-02 拍板「继续关着，到 #452 演练三连跑通 + 你说过那句『开』才再评估」(docs/decisions/0011-…md 第 2 条)；10-03 补：「法国vps很久都没跑了，你随时可以更新，但是我建议v3上线前,法国不要跑流程」（所以法国没有旧代码在跑，能随时发版落迁移；v3 上线前仍不开流程） | 演练过 + 创始人说「开」；撤回做法：改回 `fleet-engine fleet-api`、发布一轮，再把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个 Temporal 定时任务用 `fleet-temporal schedule toggle --unpause` 恢复；原定 10-05 复查，按 0011 第 2 条续到 10-15（#452 还没跑通） | 2026-10-15 |
 
+## 2026-10-05 #901 子单：驾驶舱发信号的断链（Sonnet 5.5 子代理，分支 `fix/signal-chain`，`Refs #901` 不写 Closes，chain-first）
+
+做到哪：断链证实了（先写红的测试 `packages/api/test/signal-chain.test.ts`：后端发的是 `req:<仓>#<号>` + `stop/resume/pause`，引擎只有 `task:<仓>#<号>` + `taskContinue/taskAbandon/taskRouteWake`），并用一次性脚本把真的 api 发信号函数接到真 Temporal 测试服务端上的真任务工作流跑通了（没提交）。修法：信号名和参数形状收进 `shared/task-signals.ts`（引擎 `defineSignal` 和后端共用）；后端改发 `task:` 编号 + `taskContinue`（继续）/`taskAbandon`（叫停，reason 缺省补一句）；引擎没有接收处的信号（pause、reroute、answer、requireApproval、agentEvent）不再发，暂停和换路由回 409 `action_not_supported`、回答只落库、fleet 命令只写库、碰人闸的提问回 409 `hold_not_supported`；`workflow_gone` 409 和「拼不出编号」404 都带人话原因。同根的引擎侧读法顺手修一处：每小时对账的工作树清扫认的是 `req:`，任务工作流等 CI/合并时没开着的会话，树会被当残留删（`worktree-sweep.ts` 改认 `task:`，有测试）。删了 shared 的 `REQUIREMENT_WORKFLOW_TYPE`、`FUSION_WORKFLOW_TYPE`、`AGENT_EVENT_WAKE_KINDS`；`requirementWorkflowId` 不能删：每小时对账认旧批准提醒还在拼它。
+下一步：盯 CI 合并。还没验证：真环境（法国引擎关着）；驾驶舱前端的「暂停」「换路由」按钮还在，点了会看到 409 的话（前端没动，#856 说它们本来就没页面入口）。同根没修的（要另开单）：`alert-sweep.ts` 的挂起提醒只认 `req|sub` 前缀、读 `status` 查询，任务工作流报的 `task:…:park:N` 不会被自动撤；`hourly-reconcile` 对账读任务工作流的查询名是 `taskStatus` 不是 `status`。
+
 ## 2026-10-05 驾驶舱首页恢复流程图（母单 #902，Sonnet 5.5 子代理，分支 `feat/902-home-flow`，PR #914）
 
 做到哪：后端（`/api/home` 补 segment / worker / lastEvent / flow、store 新增批量读三段流水）、前端（react-flow 三泳道流水线图、卡片重做、读不到带重试）、测试、真实画面（1920×1080 / 1366×768 + 对照，在 `_tmp/home-flow/`）、体积和构建时间实测都做完，CI 全绿；下一步：自动合并。还没验证：真库真引擎写的 runs 行上流水线图长什么样（只在内存库、PGlite 和假后端上验过）、深色主题和手机宽度的图；best-practice-first 六步记录（业界对照、代价表、版面验收三问）在 `specs/902-驾驶舱首页流程图/方案.md`。react-flow 代价：全站 js+css gzip 354.8 → 417.5 KB（+62.7 KB，只在首页路由加载），客户端构建 1.73 → 4.54 s。

@@ -222,12 +222,12 @@ describe('健康检查', () => {
     const session = await h.login();
     const res = await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      write('POST', session, { action: 'pause' }),
+      write('POST', session, { action: 'resume' }),
     );
     expect(res.status).toBe(503);
     expect(await errorCode(res)).toBe('workflow_unavailable');
     expect(h.store.data.audit.at(-1)).toMatchObject({
-      action: 'task.pause',
+      action: 'task.resume',
       ok: false,
       error: 'workflow_unavailable',
     });

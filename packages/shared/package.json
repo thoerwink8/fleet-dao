@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./task-signals": "./src/task-signals.ts",
     "./workflow-ids": "./src/workflow-ids.ts"
   },
   "dependencies": {
