@@ -1,8 +1,8 @@
-// 这个包在库里读写的东西：幂等账、PR 镜像（pull_requests）、按 owner/name 找仓、按 issue 号找需求。
-// 表结构在 @fleet-dao/db；这里只放 GitHub 这一块要用的几条查询（以后别的包也要用，再挪进 db 包的 queries）。
-// 驾驶舱、fleet done 的核实都只读镜像、不直接查 GitHub，所以镜像写错了人看到的就是错的：写入按 GitHub 的 updated_at 防倒退。
-import { type Db, pullRequests, repos, tasks } from '@fleet-dao/db';
-import { and, eq, sql } from 'drizzle-orm';
+// 这个包要用的账的形状：幂等账、PR 镜像（pull_requests）、按 owner/name 找仓、按 issue 号找需求，和不连库的内存实现、跨工人的锁的逻辑。
+// 这个包是纯 GitHub API 包，不依赖数据库（#901 ⑤）：Postgres 的实现（pgLedger、pgLocker、pgIdempotencyStore）在 @fleet-dao/store 的
+// github-pg.ts，表结构在 @fleet-dao/db。packages/conventions/test/package-layers.test.ts 钉住「github 不许依赖 db、store」。
+// 驾驶舱、fleet done 的核实都只读镜像、不直接查 GitHub，所以镜像写错了人看到的就是错的：写入按 GitHub 的 updated_at 防倒退
+// （Postgres 版和内存版都要照这条）。
 import { type Logger, type RepoRef, silentLogger } from './client.ts';
 import { type Locker, memoryLocker } from './deps.ts';
 import { GitHubError } from './errors.ts';
@@ -12,7 +12,6 @@ import {
   type IdempotencyStore,
   type Lease,
   memoryIdempotencyStore,
-  pgIdempotencyStore,
 } from './idempotency.ts';
 
 export interface LockerOptions {
@@ -23,14 +22,6 @@ export interface LockerOptions {
   staleAfterMs?: number;
   renewEveryMs?: number;
   log?: Logger;
-}
-
-/** 旧名字：#901 ⑤ 把 Postgres 的部分挪去 store 之前，调用方都叫它（⑤-3 删）。 */
-export type PgLockerOptions = LockerOptions;
-
-/** 拿 Postgres 的幂等账造跨工人的锁（⑤-3 起这个函数只在 store 里，见 packages/store/src/github-pg.ts）。 */
-export function pgLocker(db: Db, options: PgLockerOptions = {}): Locker {
-  return lockerOver(pgIdempotencyStore(db), options);
 }
 
 /**
@@ -70,7 +61,7 @@ async function acquireLock(
   store: IdempotencyStore,
   key: string,
   name: string,
-  o: Required<Omit<PgLockerOptions, 'renewEveryMs'>> & { renewEveryMs: number | undefined },
+  o: Required<Omit<LockerOptions, 'renewEveryMs'>> & { renewEveryMs: number | undefined },
 ): Promise<Lease> {
   const lease = (since: Date) => holdLease(store, { key, now: o.now, renewEveryMs: o.renewEveryMs }, since);
   for (let attempt = 0; ; attempt += 1) {
@@ -136,114 +127,6 @@ export interface Ledger {
   setChecks(repoId: string, number: number, headSha: string, checks: PrChecks): Promise<boolean>;
   /** 这张 issue 有没有对应的需求（有需求 = 工作流起过）。 */
   taskFor(repoId: string, issueNumber: number): Promise<{ id: string; state: string } | null>;
-}
-
-export function pgLedger(db: Db): Ledger {
-  const toMirror = (r: typeof pullRequests.$inferSelect): PrMirror => ({
-    repoId: r.repoId,
-    number: r.number,
-    state: r.state,
-    headRef: r.headRef,
-    headSha: r.headSha,
-    checks: r.checks,
-    updatedAt: r.updatedAt,
-    openedAt: r.openedAt,
-    mergedAt: r.mergedAt,
-    mergeSha: r.mergeSha,
-    links: { issues: r.issueRefs, alerts: r.alertRefs },
-  });
-  return {
-    idempotency: pgIdempotencyStore(db),
-    async repoId(repo) {
-      const [row] = await db
-        .select({ id: repos.id })
-        .from(repos)
-        .where(
-          and(
-            sql`lower(${repos.owner}) = lower(${repo.owner})`,
-            sql`lower(${repos.name}) = lower(${repo.name})`,
-          ),
-        );
-      return row?.id ?? null;
-    },
-    async upsertPullRequest(row) {
-      const written = await db
-        .insert(pullRequests)
-        .values({
-          repoId: row.repoId,
-          number: row.number,
-          state: row.state,
-          headRef: row.headRef,
-          headSha: row.headSha,
-          checks: row.checks ?? 'pending',
-          updatedAt: row.updatedAt,
-          syncedAt: new Date(),
-          openedAt: row.openedAt ?? null,
-          mergedAt: row.mergedAt ?? null,
-          mergeSha: row.mergeSha ?? null,
-          issueRefs: row.links?.issues ?? [],
-          alertRefs: row.links?.alerts ?? [],
-        })
-        .onConflictDoUpdate({
-          target: [pullRequests.repoId, pullRequests.number],
-          set: {
-            state: sql`excluded.state`,
-            headRef: sql`excluded.head_ref`,
-            headSha: sql`excluded.head_sha`,
-            checks: row.checks
-              ? sql`excluded.checks`
-              : sql`case when ${pullRequests.headSha} = excluded.head_sha then ${pullRequests.checks} else 'pending'::pr_checks end`,
-            updatedAt: sql`excluded.updated_at`,
-            syncedAt: sql`excluded.synced_at`,
-            // 这次没读到的（undefined）不改：旧值留着
-            ...(row.openedAt === undefined ? {} : { openedAt: sql`excluded.opened_at` }),
-            ...(row.mergedAt === undefined ? {} : { mergedAt: sql`excluded.merged_at` }),
-            ...(row.mergeSha === undefined ? {} : { mergeSha: sql`excluded.merge_sha` }),
-            ...(row.links === undefined
-              ? {}
-              : { issueRefs: sql`excluded.issue_refs`, alertRefs: sql`excluded.alert_refs` }),
-          },
-          setWhere: sql`${pullRequests.updatedAt} <= excluded.updated_at`,
-        })
-        .returning({ number: pullRequests.number });
-      return written.length > 0 ? 'written' : 'stale';
-    },
-    async getPullRequest(repoId, number) {
-      const [row] = await db
-        .select()
-        .from(pullRequests)
-        .where(and(eq(pullRequests.repoId, repoId), eq(pullRequests.number, number)));
-      return row ? toMirror(row) : null;
-    },
-    async pullRequestsByHead(repoId, headSha) {
-      const rows = await db
-        .select()
-        .from(pullRequests)
-        .where(and(eq(pullRequests.repoId, repoId), eq(pullRequests.headSha, headSha)));
-      return rows.map(toMirror);
-    },
-    async setChecks(repoId, number, headSha, checks) {
-      const rows = await db
-        .update(pullRequests)
-        .set({ checks, syncedAt: new Date() })
-        .where(
-          and(
-            eq(pullRequests.repoId, repoId),
-            eq(pullRequests.number, number),
-            eq(pullRequests.headSha, headSha),
-          ),
-        )
-        .returning({ number: pullRequests.number });
-      return rows.length > 0;
-    },
-    async taskFor(repoId, issueNumber) {
-      const [row] = await db
-        .select({ id: tasks.id, state: tasks.state })
-        .from(tasks)
-        .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
-      return row ?? null;
-    },
-  };
 }
 
 /** 不连库的实现：测试、以及真机验收时不想碰生产库的场合。 */

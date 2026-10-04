@@ -15,8 +15,8 @@ import {
   type IdempotencyStore,
   type Ledger,
   type Locker,
+  type LockerOptions,
   lockerOver,
-  type PgLockerOptions,
   type PrMirror,
 } from '@fleet-dao/github';
 import { and, eq, isNull, sql } from 'drizzle-orm';
@@ -67,7 +67,7 @@ export function pgIdempotencyStore(db: Db): IdempotencyStore {
 }
 
 /** 跨工人的锁：逻辑在 github 的 lockerOver，这里只是拿 Postgres 的幂等账来造它。 */
-export function pgLocker(db: Db, options: PgLockerOptions = {}): Locker {
+export function pgLocker(db: Db, options: LockerOptions = {}): Locker {
   return lockerOver(pgIdempotencyStore(db), options);
 }
 
