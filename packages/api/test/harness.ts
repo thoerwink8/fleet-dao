@@ -73,6 +73,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     temporalNamespace: 'fleet',
     fleetTaskQueue: 'fleet',
     engineOff: false,
+    feishuOff: false,
     ...overrides,
   };
 }

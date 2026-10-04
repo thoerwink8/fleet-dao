@@ -37,7 +37,7 @@ import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
-import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
+import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
@@ -205,9 +205,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
       deployLag,
-      feishuGateway: config.feishuGatewayToken
-        ? gatewaySeen
-        : { check: async () => {}, notWired: GATEWAY_NO_PASS },
+      feishuGateway: feishuGatewayPart(config, gatewaySeen),
       // 引擎切号（#157）写的提醒：只有法国的引擎会写，别处一直是好的
       sessionOrg: sessionOrgHealthCheck(db),
       // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有法国的引擎会写

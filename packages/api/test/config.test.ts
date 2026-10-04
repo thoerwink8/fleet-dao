@@ -212,6 +212,20 @@ describe('接不接飞书登录（FLEET_FEISHU_LOGIN：本机档不接飞书，�
     ).toBeNull();
   });
 
+  it('【故意造出的失败】#803 明说 off、环境文件里却留着网关通行证：不认它（null）、feishuOff 为 true；不写 off 的照旧认', () => {
+    const token = 'g'.repeat(40);
+    const off = loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off', FLEET_FEISHU_GATEWAY_TOKEN: token });
+    expect(off.feishuOff).toBe(true);
+    expect(off.feishuGatewayToken).toBeNull();
+    const on = loadConfig({ ...PROD, FLEET_FEISHU_GATEWAY_TOKEN: token });
+    expect(on.feishuOff).toBe(false);
+    expect(on.feishuGatewayToken).toBe(token);
+    // 通行证写坏了，off 也不放过
+    expect(
+      problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off', FLEET_FEISHU_GATEWAY_TOKEN: 'short' }).join(),
+    ).toContain('FLEET_FEISHU_GATEWAY_TOKEN 太短');
+  });
+
   it('【故意造出的失败】off 了又配了飞书（哪怕只配一半）：拒启动，接不接说不清', () => {
     expect(problems({ ...PROD, FLEET_FEISHU_LOGIN: 'off' }).join()).toContain('接不接说不清');
     expect(problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off', FEISHU_APP_ID: 'cli_x' }).join()).toContain(
