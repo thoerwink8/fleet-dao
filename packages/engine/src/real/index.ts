@@ -49,7 +49,7 @@ import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-
 import { quotaReadJob } from './quota-read.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
-import { realRuns } from './runs-writer.ts';
+import { realReservations, realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
@@ -598,6 +598,8 @@ export function realPortsFromEnv(
     log: taskLog,
   };
   const taskRuns = realRuns({ db });
+  // 选路给三段的一段预占的池的名额（#757）：开跑那一行（taskRuns.start）换掉，没开跑就收场的由这两个活动放掉
+  const reservations = realReservations({ db });
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({ gh, trees, exec, log: taskLog }),
@@ -605,6 +607,7 @@ export function realPortsFromEnv(
       tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
       spawner: segmentSpawner,
       runs: taskRuns,
+      reservations,
       memoryAdmission: realMemoryAdmission(),
       runsDir,
       sessions: oneShots,
@@ -615,6 +618,7 @@ export function realPortsFromEnv(
       pickRoute: real.ports.pickRoute,
       spawner: segmentSpawner,
       runs: taskRuns,
+      reservations,
       memoryAdmission: realMemoryAdmission(),
       runsDir,
       sessions: oneShots,

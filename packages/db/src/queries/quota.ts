@@ -242,16 +242,37 @@ export async function poolLastReadOk(db: Db, poolIds: readonly string[]): Promis
   return out;
 }
 
+/** 一个账号池占着的名额：在跑的、选定了还没开工的，两样加起来到上限就没空位。 */
+export interface PoolOccupancy {
+  /** 已开工、没结束（Fusion 登记了开工的、三段写下了开跑那一行的）。 */
+  inFlight: number;
+  /** 选定了还没开工：Fusion 排着的、三段的一段占着名额在建树或等内存的（#757）。 */
+  reserved: number;
+}
+
 /**
- * 每个账号池正在跑的会话数（已开工、没结束）：Fusion 的会话、三段的一次性会话都数（pool-runs.ts，和切号数在跑的同一份）。
- * Fusion 排着还没开工的不在这里（选路另按「已选定还没开工」数，engine.ts 的 reserved）。并发按池算，不按渠道或执行方式算。
- * 读不了照常抛，不当成 0。
+ * 每个账号池占着的名额，一次读出来（pool-runs.ts 的 openPoolRuns，和切号数在跑的同一份）：在跑的、选定了还没开工的分开数，
+ * 同一刻的快照——分两次读，一段在这两次之间从「占着」换成「在跑」，两边都数不着。并发按池算，不按渠道或执行方式算。
+ * now 判预占过没过期。读不了照常抛，不当成 0。
  */
+export async function poolOccupancy(
+  db: Db,
+  options: { now?: Date } = {},
+): Promise<Map<string, PoolOccupancy>> {
+  const out = new Map<string, PoolOccupancy>();
+  for (const r of await openPoolRuns(db, options)) {
+    const o = out.get(r.poolId) ?? { inFlight: 0, reserved: 0 };
+    if (r.startedAt !== null) o.inFlight += 1;
+    else o.reserved += 1;
+    out.set(r.poolId, o);
+  }
+  return out;
+}
+
+/** 每个账号池正在跑的会话数（已开工、没结束），poolOccupancy 的 inFlight。读不了照常抛，不当成 0。 */
 export async function inFlightByPool(db: Db): Promise<Map<string, number>> {
   const out = new Map<string, number>();
-  for (const r of await openPoolRuns(db)) {
-    if (r.startedAt !== null) out.set(r.poolId, (out.get(r.poolId) ?? 0) + 1);
-  }
+  for (const [poolId, o] of await poolOccupancy(db)) if (o.inFlight > 0) out.set(poolId, o.inFlight);
   return out;
 }
 

@@ -21,7 +21,7 @@ import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
 import { ORG_SWITCH_ALERT, orgSwitchRound } from '../../src/real/org-switch.ts';
-import { realRuns } from '../../src/real/runs-writer.ts';
+import { realReservations, realRuns } from '../../src/real/runs-writer.ts';
 import { createStorePorts } from '../../src/real/store-ports.ts';
 import { createRunSegment } from '../../src/real/task-segment.ts';
 import type { RunSegmentInput, RunSegmentResult, SegmentEvidence } from '../../src/task-contract.ts';
@@ -202,6 +202,7 @@ function harness(opts: { drainTimeoutMs?: number; switchFails?: () => string | u
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: realRuns({ db: t.db }),
+    reservations: realReservations({ db: t.db }),
     runsDir: join(root, 'runs'),
     sessions: oneShots,
     heartbeatEveryMs: 5,

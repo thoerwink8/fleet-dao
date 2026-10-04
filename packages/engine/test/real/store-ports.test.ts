@@ -8,6 +8,7 @@ import {
   markSessionRunStarted,
   notifications,
   openSessionRun,
+  poolReservations,
   savePoolQuota,
   saveRouteProbe,
   sessionRuns,
@@ -337,6 +338,25 @@ describe('选路', () => {
         startedAt: new Date(NOW.getTime() - MIN),
       });
       expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    });
+
+    it('熔断半开时，选定了这条路由、预占着名额还没开跑的那一段也是在途的试探（#757）：一批单同时来只放一个试探；不预占的选路不写预占', async () => {
+      await world(t.db);
+      for (const minutesAgo of [42, 41, 40]) await oneShotEnded('solo', minutesAgo);
+      const { task } = await addTask(t.db);
+      const trial = await pick({ stage: 'execute', taskId: task.id, reserve: { segment: 'manual' } });
+      expect(trial).toMatchObject({
+        ok: true,
+        route: { routeId: 'solo', reservationId: expect.any(String) },
+      });
+      expect(trial.ok && trial.why).toContain('熔断半开，这一单当试探');
+      // 试探还在建树、等内存（没写开跑那一行）：再来一单不再放试探，派给下一条
+      const next = await pick({ stage: 'execute' });
+      expect(next).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(next.ok && next.route.reservationId).toBeUndefined();
+      expect((await t.db.select().from(poolReservations)).map((r) => [r.taskId, r.routeId])).toEqual([
+        [task.id, 'solo'],
+      ]);
     });
 
     it('【故意造出的失败】runs 读不了：选路、判全熔断都明确报错，不当成没有三段的会话', async () => {

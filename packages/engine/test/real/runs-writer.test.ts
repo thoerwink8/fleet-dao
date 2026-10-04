@@ -6,7 +6,15 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getRun, type RunRow, runs, runsOfTask } from '@fleet-dao/db';
+import {
+  getRun,
+  poolReservations,
+  type RunRow,
+  reservePoolSlot,
+  runs,
+  runsOfTask,
+  startRun,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -186,6 +194,74 @@ describe('收场那一笔带上算不算路由的账（#758）：和失败分流
     });
     expect(spawnFailed.r).toMatchObject({ code: 'SPAWN_FAILED' });
     expect(spawnFailed.row).toMatchObject({ outcome: 'spawn_failed', routeOutcome: 'neutral' });
+  });
+});
+
+describe('开跑那一行就是占上池的名额（#757）：选路时预占的在那一下换掉，没预占着、池又满了不让开跑', {
+  timeout: 60_000,
+}, () => {
+  const at = '2026-09-25T08:00:00.000Z';
+  const manual = (cwd: string, over: Partial<OneShotInput> = {}): OneShotInput => ({
+    segment: 'manual',
+    modelId: 'opus-5.5',
+    routeId: 'carpool',
+    prompt: '动手',
+    cwd,
+    ...over,
+  });
+  /** 拼车池（上限 3）上先开着 n 行一次性会话。 */
+  const busy = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      await startRun(t.db, {
+        segment: 'verify',
+        model: 'opus-5.5',
+        routeId: 'carpool',
+        startedAt: new Date(at),
+      });
+    }
+  };
+  const deps = (spawned: { n: number }) => ({
+    spawn: async () => {
+      spawned.n += 1;
+      return { exitCode: 0, stdout: '做完了', stderr: '', killed: false };
+    },
+    runs: realRuns({ db: t.db }),
+    tmpDir: join(root, 'runs'),
+    now: () => new Date(at),
+  });
+
+  it('带着预占开跑：池满着也照样开跑（名额本来就是它的），预占在开跑那一下换成这一行', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    await busy(2);
+    const held = await reservePoolSlot(t.db, {
+      taskId: task.id,
+      segment: 'manual',
+      routeId: 'carpool',
+      reservedAt: new Date(at),
+      expiresAt: new Date(Date.parse(at) + 20 * 60_000),
+    });
+    if (!held.reserved) throw new Error('夹具：应该预占上了');
+    const opening: (RunRow | null)[] = [];
+    const r = await runOneShot(manual(root, { taskId: task.id, reservationId: held.reservationId }), {
+      ...deps({ n: 0 }),
+      spawn: spawnPeeking(opening),
+    });
+    expect(r.outcome).toBe('done');
+    expect(opening[0]).toMatchObject({ taskId: task.id, routeId: 'carpool', endedAt: null });
+    expect(await t.db.select().from(poolReservations)).toEqual([]);
+  });
+
+  it('【故意造出的失败】没预占着、池又满了：runOneShot 报 NO_SLOT（不当成库一时不通的 RUN_START_FAILED），会话没起、库里不多一行', async () => {
+    await world(t.db);
+    await busy(3);
+    const spawned = { n: 0 };
+    const err = await runOneShot(manual(root), deps(spawned)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OneShotError);
+    expect(err).toMatchObject({ code: 'NO_SLOT' });
+    expect((err as Error).message).toContain('名额满了');
+    expect(spawned.n).toBe(0);
+    expect(await t.db.select().from(runs)).toHaveLength(3);
   });
 });
 

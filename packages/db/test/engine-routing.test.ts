@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { recordStepTiming, routeFactsForPurpose, saveTaskSnapshot } from '../src/queries/engine.ts';
+import { reservePoolSlot } from '../src/queries/pool-runs.ts';
 import { saveRouteProbe } from '../src/queries/probe.ts';
-import { routingCatalog, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
+import { poolReservations, routingCatalog, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -15,6 +16,7 @@ import {
   ago,
   catalog,
   expectViolation,
+  later,
   MIN,
   NOW,
   setRoutingLayers,
@@ -321,10 +323,28 @@ describe('routeFactsForPurpose（路由两层，#574）', () => {
       ...fresh,
     });
 
-    // relay-a 上一个已选定、还没开工的会话：算进 on 这条路由的 reserved。
+    // relay-a 上一个已选定、还没开工的会话，加上三段的一段预占着的名额（#757，没过期的）：都算进 on 这条路由的 reserved；
+    // 过了期的预占不算。
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
     await addRun(t.db, { taskId: task.id, routeId: 'on', queuedAt: ago(MIN) });
+    const reserving = await addTask(t.db, repo.id);
+    const lapsed = await addTask(t.db, repo.id);
+    await reservePoolSlot(t.db, {
+      taskId: reserving.id,
+      segment: 'manual',
+      routeId: 'on',
+      reservedAt: ago(2 * MIN),
+      expiresAt: later(18 * MIN),
+    });
+    // 直接写一行过了期的（预占那一步会顺手收掉它，这里要它留在表里）
+    await t.db.insert(poolReservations).values({
+      taskId: lapsed.id,
+      segment: 'manual',
+      routeId: 'on',
+      reservedAt: ago(30 * MIN),
+      expiresAt: ago(10 * MIN),
+    });
 
     const facts = await routeFactsForPurpose(t.db, 'execute', { now: NOW });
     expect(facts.configured).toBe(true);
@@ -340,7 +360,7 @@ describe('routeFactsForPurpose（路由两层，#574）', () => {
       upstreamModel: 'claude-opus-5-5',
       // 探针下结论的时刻原样透出去：过没过期由选路按现在判
       probedAt: ago(MIN),
-      reserved: 1,
+      reserved: 2,
       inFlight: 0,
     });
     expect(on?.windows).toEqual([

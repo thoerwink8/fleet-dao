@@ -747,6 +747,8 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
       avoidPoolIds: [],
       avoidModelIds: [],
     });
+    // 动手这一段每次选路都要预占池的名额（#757）：选定路由到写下开跑那一行之间，别的单数得到它
+    expect(picks.map((p) => p.reserve)).toEqual(picks.map(() => ({ segment: 'manual' })));
     expect(world.alerts).toEqual([]);
     // 树只建了一次（重跑不新开分支）
     expect(world.count('createWorktree')).toBe(1);

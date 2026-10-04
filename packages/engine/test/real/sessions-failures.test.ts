@@ -9,7 +9,9 @@ import {
   getSessionRun,
   notifications,
   openOrgRuns,
+  poolReservations,
   quotaWindows,
+  reservePoolSlot,
   sessionRuns,
   startRun,
   upsertAlert,
@@ -566,6 +568,23 @@ describe('收孤儿', () => {
     expect(await getRun(t.db, left)).toMatchObject({ outcome: 'killed', failureReason: ORPHAN_RUN_REASON });
     expect(await getRun(t.db, finished)).toMatchObject({ outcome: 'done', failureReason: null });
     expect(await openOrgRuns(t.db)).toEqual([]);
+  });
+
+  it('【故意造出的失败】上一轮选路时给三段的一段预占、还没开跑的名额（#757）：起来时整表清掉，选路、切号不再当池占着', async () => {
+    const { ports } = setup(() => ({}));
+    process.env.FAKE_SCOPE_LIST = '';
+    const held = await reservePoolSlot(t.db, {
+      taskId,
+      segment: 'manual',
+      routeId: 'carpool',
+      reservedAt: NOW,
+      expiresAt: new Date(NOW.getTime() + 20 * 60_000),
+    });
+    expect(held).toMatchObject({ reserved: true });
+    expect((await openOrgRuns(t.db, NOW)).map((r) => [r.kind, r.startedAt])).toEqual([['oneShot', null]]);
+    await ports.reapOrphanSessions();
+    expect(await t.db.select().from(poolReservations)).toEqual([]);
+    expect(await openOrgRuns(t.db, NOW)).toEqual([]);
   });
 });
 

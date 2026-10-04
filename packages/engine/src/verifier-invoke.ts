@@ -107,11 +107,19 @@ export type FetchSpec = (args: { taskId: string }) => Promise<{ specDir?: string
 /**
  * 按家族挑一个能跑的 model：注入。「挑不出」调用方返回 undefined。
  * routeId：生产的 Spawner 据此在库里查执行方式、会话用户、上游模型串（modelId 只是记账用）；不给，测试里的假 Spawner 也能跑。
+ * runId：这一次起会话的编号（runs 主键），挑中时先定下（切号的登记要在起会话之前就知道它，#59）；不给由 one-shot 自己起。
+ * reservationId：选路时给这一次验收预占的池的名额（#757）：开跑那一行写进去时换掉；不经选路的不给。
  */
-/** runId：这一次起会话的编号（runs 主键），挑中时先定下（切号的登记要在起会话之前就知道它，#59）；不给由 one-shot 自己起。 */
-export type ChooseModelForFamily = (
-  family: ModelFamily,
-) => Promise<{ modelId: string; channel?: string; routeId?: string; runId?: string } | undefined>;
+export type ChooseModelForFamily = (family: ModelFamily) => Promise<
+  | {
+      modelId: string;
+      channel?: string;
+      routeId?: string;
+      runId?: string;
+      reservationId?: string;
+    }
+  | undefined
+>;
 
 /** 挑中的验收方：哪一族、哪个模型、哪条路由。 */
 export interface PickedVerifier {
@@ -313,6 +321,7 @@ export async function invokeVerifier(
   const avoid = new Set<string>(parsed.modelFamiliesAvoid);
   let picked: PickedVerifier | undefined;
   let runId: string | undefined;
+  let reservationId: string | undefined;
   for (const family of FAMILY_ORDER) {
     if (avoid.has(family)) continue;
     const m = await deps.chooseModelForFamily(family);
@@ -324,6 +333,7 @@ export async function invokeVerifier(
         ...(m.routeId !== undefined ? { routeId: m.routeId } : {}),
       };
       runId = m.runId;
+      reservationId = m.reservationId;
       break;
     }
   }
@@ -344,6 +354,7 @@ export async function invokeVerifier(
   const prepared = deps.prepareCwd ? await deps.prepareCwd(picked) : undefined;
   const oneShotInput: OneShotInput = {
     ...(runId !== undefined ? { runId } : {}),
+    ...(reservationId !== undefined ? { reservationId } : {}),
     segment: 'verify',
     modelId: picked.modelId,
     ...(picked.channel !== undefined ? { channel: picked.channel } : {}),

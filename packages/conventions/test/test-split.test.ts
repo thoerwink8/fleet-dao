@@ -308,10 +308,13 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     });
     if (typeof r === 'string') throw new Error(r);
     const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
-    // 8 台的合计 = 全部文件的耗时合计；最重的台和最轻的差不过 2 倍（LPT 的效果）
-    expect(seconds.reduce((a, b) => a + b, 0)).toBe(
-      Math.round(Object.values(REAL_TIMINGS.files).reduce((a, b) => a + b, 0) / 1000),
-    );
+    // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按表的中位数估，
+    // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
+    // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
+    const table = Object.values(REAL_TIMINGS.files).sort((a, b) => a - b);
+    const median = table[Math.floor((table.length - 1) / 2)] ?? 0;
+    const expected = FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? median), 0);
+    expect(r.boxes.reduce((t, b) => t + b.estMs, 0)).toBe(expected);
     expect(Math.max(...seconds)).toBeLessThanOrEqual(Math.min(...seconds) * 2);
   });
 

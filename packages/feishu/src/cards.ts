@@ -581,7 +581,7 @@ export interface LinkAlert {
   at: number;
   /** 没走通的那几条定时活。 */
   loops: Array<{
-    name: 'outbox' | 'board';
+    name: 'outbox' | 'board' | 'intents';
     lastOkAt: number | null;
     lastFail: { at: number; reason: string } | null;
   }>;
@@ -589,17 +589,20 @@ export interface LinkAlert {
   backAt?: number | undefined;
 }
 
-/** 两条定时活给人看的名字（报警卡、「通了」那句）。 */
-export const LINK_WORDS = { outbox: '推送', board: '盘面快照' } as const;
+/** 定时活给人看的名字（报警卡、「通了」那句）。 */
+export const LINK_WORDS = { outbox: '推送', board: '盘面快照', intents: '意图卡' } as const;
 
 export function linkAlertCard(a: LinkAlert, ctx: RenderContext): Card {
   const names = new Set(a.loops.map((l) => l.name));
-  const both = names.has('outbox') && names.has('board');
+  // 两条以上一起没走通：多半是后端整个连不上
+  const both = names.size >= 2;
   const title = both
     ? '机器人连不上后端了'
     : names.has('outbox')
       ? '推送卡住了：机器人调不通后端'
-      : '盘面卡住了：机器人取不到快照';
+      : names.has('intents')
+        ? '意图卡卡住了：机器人调不通后端'
+        : '盘面卡住了：机器人取不到快照';
   const since = when(a.since, ctx.now);
   const never = a.loops.every((l) => l.lastOkAt === null);
   const elements: El[] = [
@@ -620,6 +623,9 @@ export function linkAlertCard(a: LinkAlert, ctx: RenderContext): Card {
   }
   if (names.has('outbox')) {
     elements.push(text('这期间要你们拍的事、卡住报警推不过来（后端都记着，通了会接着推）。'));
+  }
+  if (names.has('intents')) {
+    elements.push(text('这期间意图卡发不出来、改不了（存下的原话后端都记着，通了会接着发）。'));
   }
   const board = a.loops.find((l) => l.name === 'board');
   if (board) {
@@ -669,8 +675,11 @@ const INTERNAL_CODES =
   /\b(queued|triaging|asking|planning|merging|stopped|stalled|pending|waiting_deps|waiting_slot|verifying|in_merge_queue|merged)\b/;
 const MAX_CARD_BYTES = 30 * 1024;
 
-/** 返回问题清单；空 = 这张卡按我们的规矩是好的。 */
-export function checkCard(c: Card): string[] {
+/**
+ * 返回问题清单；空 = 这张卡按我们的规矩是好的。buttons='none' 是有意不放按钮的卡（意图卡：飞书上不建开单界面），
+ * 这时一个按钮都不许有；其余的卡正好一个主按钮。
+ */
+export function checkCard(c: Card, opts: { buttons?: 'one-primary' | 'none' } = {}): string[] {
   const problems: string[] = [];
   if (c.schema !== '2.0') problems.push('schema 不是 2.0');
   const config = c.config as { update_multi?: unknown } | undefined;
@@ -682,6 +691,7 @@ export function checkCard(c: Card): string[] {
 
   let elements = 0;
   let primaries = 0;
+  let buttons = 0;
   const names = new Set<string>();
   const walk = (node: unknown, inForm: boolean): void => {
     if (Array.isArray(node)) {
@@ -701,6 +711,7 @@ export function checkCard(c: Card): string[] {
         if (code) problems.push(`文字里有内部代号「${code[1]}」：${content.slice(0, 40)}`);
       }
       if (tag === 'button') {
+        buttons += 1;
         if (typeof o.type === 'string' && o.type.startsWith('primary')) primaries += 1;
         const behaviors = Array.isArray(o.behaviors) ? (o.behaviors as Record<string, unknown>[]) : [];
         if (behaviors.length === 0) problems.push('按钮没有 behaviors');
@@ -735,6 +746,10 @@ export function checkCard(c: Card): string[] {
   walk(c.header, false);
   walk(c.body, false);
   if (elements > 200) problems.push(`组件和元素共 ${elements} 个，超过 200`);
-  if (primaries !== 1) problems.push(`主按钮有 ${primaries} 个，应当正好 1 个`);
+  if (opts.buttons === 'none') {
+    if (buttons > 0) problems.push(`这张卡不该有按钮，却有 ${buttons} 个`);
+  } else if (primaries !== 1) {
+    problems.push(`主按钮有 ${primaries} 个，应当正好 1 个`);
+  }
   return problems;
 }
