@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendFeishuAttemptMark,
+  decideRelease,
   decideReleaseMilestone,
+  decideTag,
   extractReleaseBody,
   feishuAlreadyNotified,
   feishuAttemptMark,
   feishuAttemptWritten,
   feishuNotifiedMark,
+  feishuReplyOk,
   type MilestoneState,
   promoteFeishuAttemptToNotified,
-  stripFeishuAttemptMark,
+  releaseBodyCore,
+  releaseMarks,
 } from '../src/publish-release-logic.ts';
 
 const open = (number: number, title: string): MilestoneState => ({
@@ -193,7 +197,7 @@ describe('extractReleaseBody：从 CHANGELOG.md 拿「## [vN] - 」那一段当�
 });
 
 describe('飞书幂等：release 正文末尾的「<!-- fleet-notify-attempt/notified: vN -->」标签', () => {
-  it('尝试标记：append → written；发成之后 promote → notified；发失败 strip 剥掉', () => {
+  it('尝试标记：append → written；发成之后 promote → notified', () => {
     let body = '- 一条\n- 两条';
     expect(feishuAlreadyNotified(body, 'v2')).toBe(false);
     expect(feishuAttemptWritten(body, 'v2')).toBe(false);
@@ -207,13 +211,11 @@ describe('飞书幂等：release 正文末尾的「<!-- fleet-notify-attempt/not
     expect(body).not.toContain(feishuAttemptMark('v2'));
   });
 
-  it('发失败 → stripFeishuAttemptMark 剥掉尝试标记，下一次能再发（第二意见 2026-10-02：发送失败+标记回不去会重复推）', () => {
-    let body = '- 一条\n- 两条';
-    body = appendFeishuAttemptMark(body, 'v2');
+  it('发失败 → 尝试标记留着（看得见「试过、没确认」），判「发没发过」只看 notified，下一轮照样再发；再写一次尝试标记不叠', () => {
+    const body = appendFeishuAttemptMark('- 一条\n- 两条', 'v2');
     expect(feishuAttemptWritten(body, 'v2')).toBe(true);
-    body = stripFeishuAttemptMark(body, 'v2');
-    expect(feishuAttemptWritten(body, 'v2')).toBe(false);
     expect(feishuAlreadyNotified(body, 'v2')).toBe(false);
+    expect(appendFeishuAttemptMark(body, 'v2')).toBe(body);
   });
 
   it('正文中间出现同样注释不算已发（放宽 includes 会把正文里随手一句「<!-- fleet-notified: v2 -->」当成已发而跳过，第二意见 2026-10-02）', () => {
@@ -235,6 +237,98 @@ describe('飞书幂等：release 正文末尾的「<!-- fleet-notify-attempt/not
     expect(() => feishuAlreadyNotified('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
     expect(() => appendFeishuAttemptMark('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
     expect(() => promoteFeishuAttemptToNotified('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
-    expect(() => stripFeishuAttemptMark('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
+  });
+});
+
+const SHA_A = 'a'.repeat(40);
+const SHA_B = 'b'.repeat(40);
+
+describe('decideTag：打 tag 这一步怎么走', () => {
+  it('不在 → 打', () => {
+    expect(decideTag('v3', undefined, SHA_A)).toEqual({ kind: 'create' });
+  });
+
+  it('故意造出的失败之一（打 tag 已存在）：在、指着本次发布合并 → 跳（重跑）', () => {
+    expect(decideTag('v3', SHA_A, SHA_A).kind).toBe('skip');
+  });
+
+  it('故意造出的失败：在、但指着别的提交 → 红（撞名的 tag 不当成这一版、也不挪它）', () => {
+    const d = decideTag('v3', SHA_B, SHA_A);
+    expect(d.kind).toBe('error');
+    expect(d.kind === 'error' && d.message).toMatch(
+      /tag v3 已经在，但指的是 bbbbbbb，不是本次发布合并 aaaaaaa/,
+    );
+  });
+
+  it('故意造出的失败：本次发布合并的提交认不出（空、短号）→ 红，不知道打在哪', () => {
+    expect(decideTag('v3', undefined, '').kind).toBe('error');
+    expect(decideTag('v3', undefined, 'abc1234').kind).toBe('error');
+  });
+
+  it('v<非数字> 直接拒绝', () => {
+    expect(() => decideTag('vNext' as `v${number}`, undefined, SHA_A)).toThrow(/不是 v<N>/);
+  });
+});
+
+describe('decideRelease：建 Release 这一步怎么走', () => {
+  const want = '### 新增\n\n- 一条';
+
+  it('不在 → 建，正文就是 CHANGELOG.md 那一段', () => {
+    expect(decideRelease('v3', undefined, want)).toEqual({ kind: 'create', body: want });
+  });
+
+  it('在、正文一样（末尾带飞书标记、换行是 CRLF、行尾多空格都不算不一样）→ 跳', () => {
+    const existing = `### 新增  \r\n\r\n- 一条\r\n\r\n${feishuNotifiedMark('v3')}\r\n`;
+    expect(decideRelease('v3', { tagName: 'v3', body: existing }, want).kind).toBe('skip');
+    const attempt = `${want}\n\n${feishuAttemptMark('v3')}\n`;
+    expect(decideRelease('v3', { tagName: 'v3', body: attempt }, want).kind).toBe('skip');
+  });
+
+  it('在、正文被人手改过 → 改回 CHANGELOG.md 那一段，飞书标记原样留在末尾（不抹掉「发过」的证据）', () => {
+    const existing = `人手改的\n\n${feishuNotifiedMark('v3')}\n`;
+    const d = decideRelease('v3', { tagName: 'v3', body: existing }, want);
+    expect(d.kind).toBe('update');
+    expect(d.kind === 'update' && d.body).toBe(`${want}\n\n${feishuNotifiedMark('v3')}\n`);
+    expect(d.kind === 'update' && feishuAlreadyNotified(d.body, 'v3')).toBe(true);
+  });
+
+  it('在、正文被改过、没有标记 → 改回原文，不凭空加标记', () => {
+    const d = decideRelease('v3', { tagName: 'v3', body: '人手改的' }, want);
+    expect(d).toMatchObject({ kind: 'update', body: want });
+  });
+
+  it('故意造出的失败：同名 Release 挂的 tag 不是 vN → 红', () => {
+    const d = decideRelease('v3', { tagName: 'v3-old', body: want }, want);
+    expect(d.kind).toBe('error');
+    expect(d.kind === 'error' && d.message).toMatch(/挂的 tag 是「v3-old」/);
+  });
+
+  it('releaseBodyCore 只剥整行的标记：正文里随手写的一句不剥；releaseMarks 照先后取出整行标记', () => {
+    const body = `- 写了 ${feishuNotifiedMark('v3')} 一句\n\n${feishuAttemptMark('v3')}\n${feishuNotifiedMark('v2')}`;
+    expect(releaseBodyCore(body)).toBe(`- 写了 ${feishuNotifiedMark('v3')} 一句`);
+    expect(releaseMarks(body)).toEqual([feishuAttemptMark('v3'), feishuNotifiedMark('v2')]);
+  });
+});
+
+describe('feishuReplyOk：飞书 webhook 回包算不算发成', () => {
+  it('{ code: 0 } 和老格式 { StatusCode: 0 } 算发成', () => {
+    expect(feishuReplyOk({ code: 0, msg: 'success', data: {} })).toEqual({ ok: true });
+    expect(feishuReplyOk({ StatusCode: 0, StatusMessage: 'success' })).toEqual({ ok: true });
+  });
+
+  it.each([
+    [
+      '业务码不是 0（关键词没对上）',
+      { code: 19024, msg: 'Key Words Not Found' },
+      /code=19024，msg=Key Words Not Found/,
+    ],
+    ['老格式业务码不是 0', { StatusCode: 9499, StatusMessage: 'Bad Request' }, /StatusCode=9499/],
+    ['没有 code', { msg: 'success' }, /没有 code/],
+    ['不是对象', 'ok', /不是 JSON 对象/],
+    ['是 null', null, /不是 JSON 对象/],
+  ])('故意造出的失败：%s → 算没发成', (_name, reply, re) => {
+    const r = feishuReplyOk(reply);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.message).toMatch(re);
   });
 });

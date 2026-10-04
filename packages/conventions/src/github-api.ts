@@ -65,18 +65,40 @@ export interface GitHubCommenter {
   comment(n: number, body: string): Promise<void>;
 }
 
-/** 一张已经合并的 PR：号和合并的时间（ISO）。 */
+/** 一张已经合并的 PR：号、合并的时间（ISO）、合进主线的那个提交（squash / merge / rebase 都是 GitHub 给的 merge_commit_sha）。 */
 export interface MergedPull {
   number: number;
   mergedAt: string;
+  mergeCommitSha: string;
 }
 
-/** 发布收尾（release.yml 核里程碑、关里程碑那两步）用（要能写 issue 的令牌：里程碑归 issues 权限）。 */
+/** 一份 GitHub Release（发布收尾只用到这几样）。 */
+export interface GitHubRelease {
+  id: number;
+  tagName: string;
+  /** 正文原文；GitHub 回 null 的当空串。 */
+  body: string;
+}
+
+/**
+ * 发布收尾（release.yml，编排在 release-finalize.ts）用：令牌要能写 contents（tag、release）和 issues（里程碑）。
+ * 「不在」一律回 undefined（只认 404），别的失败都抛——读挂了不能当「不在」接着建（会重复或覆盖）。
+ */
 export interface GitHubReleaser {
   /** head 是本仓这个分支、已经合并了的 PR，照 GitHub 回的先后（新开的在前）。 */
   mergedPulls(head: string): Promise<MergedPull[]>;
   /** 关掉这个里程碑，回 GitHub 关完之后的那一份（PATCH 的回包，调用方拿它核是不是真关了）。 */
   closeMilestone(n: number): Promise<MilestoneDetail>;
+  /** 这个 tag 最终指的提交（附注 tag 剥到底）；没有这个 tag 回 undefined。 */
+  tagCommit(tag: string): Promise<string | undefined>;
+  /** 在这个提交上打附注 tag（先建 tag 对象、再建 refs/tags/<tag>）；ref 已经有了照样抛，由调用方重读再判。 */
+  createTag(tag: string, sha: string, message: string): Promise<void>;
+  /** 挂在这个 tag 上的 Release（已发布的）；没有回 undefined。 */
+  release(tag: string): Promise<GitHubRelease | undefined>;
+  createRelease(tag: string, name: string, body: string): Promise<GitHubRelease>;
+  updateReleaseBody(id: number, body: string): Promise<GitHubRelease>;
+  /** 这个提交上某个文件的原文；文件不在回 undefined。 */
+  fileAt(path: string, ref: string): Promise<string | undefined>;
 }
 
 /** 远端的一条分支。 */
@@ -319,9 +341,85 @@ export function liveGitHub(
         if (!('merged_at' in r) || (r.merged_at !== null && !isTime(r.merged_at))) {
           throw new Error(`读${what}，有一条认不出（merged_at）`);
         }
-        if (typeof r.merged_at === 'string') merged.push({ number: r.number, mergedAt: r.merged_at });
+        if (typeof r.merged_at !== 'string') continue;
+        // 合并了的一定有 merge_commit_sha；没有、认不出就抛，不拿空串去打 tag。
+        if (typeof r.merge_commit_sha !== 'string' || !SHA.test(r.merge_commit_sha)) {
+          throw new Error(`读${what}，#${r.number} 认不出（merge_commit_sha）`);
+        }
+        merged.push({ number: r.number, mergedAt: r.merged_at, mergeCommitSha: r.merge_commit_sha });
       }
       return merged;
+    },
+    async tagCommit(tag) {
+      const what = ` tag ${tag}`;
+      const res = await get(`/repos/${repo}/git/ref/tags/${encRef(tag)}`);
+      if (res.status === 404) return undefined;
+      if (!res.ok) throw failed(res, what);
+      let obj = gitObject(await json(res, what), what);
+      // 附注 tag 指的是 tag 对象，要再剥一层；tag 指 tag 的套娃最多剥 5 层，再多当认不出。
+      for (let i = 0; obj.type === 'tag'; i++) {
+        if (i >= 5) throw new Error(`读${what}，tag 套了 5 层还没到提交，认不出`);
+        const r = await get(`/repos/${repo}/git/tags/${obj.sha}`);
+        if (!r.ok) throw failed(r, `${what} 的 tag 对象`);
+        obj = gitObject(await json(r, `${what} 的 tag 对象`), `${what} 的 tag 对象`);
+      }
+      if (obj.type !== 'commit') throw new Error(`读${what}，它指的不是提交（${obj.type}）`);
+      return obj.sha;
+    },
+    async createTag(tag, sha, message) {
+      const res = await get(`/repos/${repo}/git/tags`, {
+        method: 'POST',
+        body: JSON.stringify({ tag, message, object: sha, type: 'commit' }),
+      });
+      if (res.status !== 201) throw failed(res, `在建 tag 对象 ${tag} 时`);
+      const data = await json(res, `建 tag 对象 ${tag} 的回包`);
+      const objSha = isObject(data) ? data.sha : undefined;
+      if (typeof objSha !== 'string' || !SHA.test(objSha))
+        throw new Error(`读建 tag 对象 ${tag} 的回包，认不出（sha）`);
+      const ref = await get(`/repos/${repo}/git/refs`, {
+        method: 'POST',
+        body: JSON.stringify({ ref: `refs/tags/${tag}`, sha: objSha }),
+      });
+      if (ref.status !== 201) throw failed(ref, `在建 refs/tags/${tag} 时`);
+    },
+    async release(tag) {
+      const what = ` ${tag} 的 Release`;
+      const res = await get(`/repos/${repo}/releases/tags/${encRef(tag)}`);
+      if (res.status === 404) return undefined;
+      if (!res.ok) throw failed(res, what);
+      return toRelease(await json(res, what), what);
+    },
+    async createRelease(tag, name, body) {
+      const res = await get(`/repos/${repo}/releases`, {
+        method: 'POST',
+        body: JSON.stringify({ tag_name: tag, name, body, draft: false, prerelease: false }),
+      });
+      if (res.status !== 201) throw failed(res, `在建 ${tag} 的 Release 时`);
+      return toRelease(await json(res, `建 ${tag} 的 Release 的回包`), `建 ${tag} 的 Release 的回包`);
+    },
+    async updateReleaseBody(id, body) {
+      const res = await get(`/repos/${repo}/releases/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ body }),
+      });
+      if (!res.ok) throw failed(res, `在改 Release #${id} 的正文时`);
+      return toRelease(await json(res, `改 Release #${id} 的回包`), `改 Release #${id} 的回包`);
+    },
+    async fileAt(path, ref) {
+      const what = ` ${path}（${ref.slice(0, 7)}）`;
+      const res = await get(`/repos/${repo}/contents/${encRef(path)}?ref=${encodeURIComponent(ref)}`);
+      if (res.status === 404) return undefined;
+      if (!res.ok) throw failed(res, what);
+      const data = await json(res, what);
+      if (
+        !isObject(data) ||
+        data.type !== 'file' ||
+        data.encoding !== 'base64' ||
+        typeof data.content !== 'string'
+      ) {
+        throw new Error(`读${what}，认不出（不是 base64 的文件；超过 1MB 的文件 GitHub 不给内容）`);
+      }
+      return Buffer.from(data.content, 'base64').toString('utf8');
     },
     async closeMilestone(n) {
       const res = await get(`/repos/${repo}/milestones/${n}`, {
@@ -451,6 +549,25 @@ export function liveGitHub(
 }
 
 const SHA = /^[0-9a-f]{40}$/;
+
+/** git 引用、tag 对象回包里的 object：{ type, sha }；认不出就抛。 */
+function gitObject(raw: unknown, what: string): { type: string; sha: string } {
+  const obj = isObject(raw) ? raw.object : undefined;
+  if (!isObject(obj) || typeof obj.type !== 'string' || typeof obj.sha !== 'string' || !SHA.test(obj.sha)) {
+    throw new Error(`读${what}，认不出（object）`);
+  }
+  return { type: obj.type, sha: obj.sha };
+}
+
+/** 接口回来的一份 Release；缺字段就抛。body 只有明确的 null 当空串。 */
+function toRelease(raw: unknown, what: string): GitHubRelease {
+  const bad = (field: string) => new Error(`读${what}，认不出（${field}）`);
+  if (!isObject(raw)) throw bad('不是对象');
+  if (typeof raw.id !== 'number') throw bad('id');
+  if (typeof raw.tag_name !== 'string') throw bad('tag_name');
+  if (!('body' in raw) || (raw.body !== null && typeof raw.body !== 'string')) throw bad('body');
+  return { id: raw.id, tagName: raw.tag_name, body: typeof raw.body === 'string' ? raw.body : '' };
+}
 
 /** 分支名放进网址：按 / 分段各自转义（分支名里可以有 /）。 */
 function encRef(branch: string): string {

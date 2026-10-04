@@ -118,6 +118,11 @@
 
 排队：#194 拼车自动切独享（方案 v2 他已答完，工作量大）、#323 配置进仓对账、#574 #216 #345 剩的、#820 驾驶舱补环境视图。
 
+## 2026-10-04 晚（#593 发布收尾改成可测的代码，Opus 子代理）
+
+- **#839（分支 `fix/593-release-finalize-ts`）**：`release.yml` 里打 tag、建 Release、推飞书那两百行 Bash 搬进 `packages/conventions/src/release-finalize.ts`（七步按死顺序、每步先查 GitHub 现状、做过的跳过、红了后面都不走、七步状态写进 Actions 运行摘要），判定进 `publish-release-logic.ts`（`decideTag`、`decideRelease`、`feishuReplyOk`）；CHANGELOG 改按本次合并的提交读、挪到打 tag 之前。测试钉住「打 tag 已存在 → 跳、其余照走」「建 Release 失败 → 不关里程碑、不推飞书」等。`publish:pr` CLI、`classifyPullRequestClosed`、里程碑核对 #597/#726 早已做完、本次没动。
+- **还没验证**：真机自证（第一版「发布 vN」PR 合并 → Actions 走完七步），要创始人拍发第一版；#593 因此不关。驾驶舱「发布 vN」按钮（界面）、法国那一截（#453）不在这张。
+
 ## 2026-10-04 晚（#76 定时读额度收尾，Opus 子代理）
 
 - **现状查清**：引擎那一半早已合（#677 `quota-read` 每 15 分钟读、读成按池入库、连着两轮没读成或凭据/配置类当场报；#678 每小时对账第三处 `checkQuotaFreshness`；#679 估算类池接用量记录），测试齐。**缺的是驾驶舱**：`api/src/main.ts` 还挂着 `notWired.quota`，额度页在生产上整块是「待实现 · #76」，拼车 5 小时美元窗口根本看不到。

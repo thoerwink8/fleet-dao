@@ -1,9 +1,9 @@
-// release.yml 里「核版本里程碑（打 tag 之前）」「关里程碑」两步的编排：读 GitHub 上的里程碑、这张发布 PR 合并的时间，
+// 发布收尾里「核版本里程碑（打 tag 之前）」「关里程碑」两步：读 GitHub 上的里程碑、这张发布 PR 合并的时间，
 // 照 publish-release-logic.ts 的 decideReleaseMilestone 判；close 那一步再真关，拿 GitHub 的回包核是不是真关了。
-// 入口在 ./bin/release-milestone.ts；测试在 packages/conventions/test/release-milestone.test.ts。
+// 由 release-finalize.ts 按先后调；测试在 packages/conventions/test/release-milestone.test.ts。
 // 改这里之前必须知道：
 // - check 在打 tag 之前跑：版本号对不上里程碑时，tag、release 一样都还没动——这是这一步存在的全部意义，别挪到 tag 后面。
-// - 判不了（读不到、认不出、对不上）一律抛，bin 打 ::error::、退出码 1；不许拿「跳」冒充已经关过了（#593 第一次发布前修的就是这个）。
+// - 判不了（读不到、认不出、对不上）一律抛，那一步记红、后面都不走；不许拿「跳」冒充已经关过了（#593 第一次发布前修的就是这个）。
 import type { MergedPull, MilestoneDetail } from './github-api.ts';
 import { milestoneVersion } from './labels.ts';
 import { decideReleaseMilestone, isVersionTag } from './publish-release-logic.ts';

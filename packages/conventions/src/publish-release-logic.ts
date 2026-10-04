@@ -1,14 +1,18 @@
-// release.yml 里那几个容易写错的步骤逻辑，从 Bash 里取出来变成纯判定 + 测试（第二意见 2026-10-02）：
+// 发布收尾（release.yml → release-finalize.ts）每一步「该做、该跳、还是该红」的纯判定，原先是 release.yml 里的 Bash，
+// 抠出来配测试（#593）：
 //   - decideReleaseMilestone：发 vN 时关哪张里程碑——打 tag 之前核一次、建完 release 关的时候再判一次（同一份判法），
-//     版本号对不上里程碑、撞号、找不到都明说，不拿「多半已经关过了」放过去（#593）；
+//     版本号对不上里程碑、撞号、找不到都明说，不拿「多半已经关过了」放过去；
 //   - extractReleaseBody：从 CHANGELOG.md 拿「## [vN] - 日期」那一段当正文，找不到、是占位符就明说拒绝（不拿
-//     Unreleased 段顶替：那里多是占位「还没有」，照抄就会发假 release）。
-// release.yml 的对应步骤只做编排（读文件、调 bin），纯逻辑都进这里；测试在 packages/conventions/test/publish-release-logic.test.ts。
+//     Unreleased 段顶替：那里多是占位「还没有」，照抄就会发假 release）；
+//   - decideTag：tag 不在就打、在且指着本次发布合并就跳、指着别的提交就红；
+//   - decideRelease：Release 不在就建、正文（去掉飞书标记后）对得上就跳、被人改过就改回（标记留着）、名字撞了 tag 不对就红；
+//   - 飞书幂等标记、feishuReplyOk（webhook HTTP 200 也可能是业务失败）。
+// 编排（谁先谁后、读写 GitHub、发飞书）在 release-finalize.ts；测试在 packages/conventions/test/publish-release-logic.test.ts。
 // 改这里之前必须知道：
 // - 这些判定是「发了就发出去」（发假 release、关错 milestone），所以每个可失败分支都要有明确失败，不拿静默通过换。
 // - 里程碑的版本号怎么认、「当前版本」是哪张，用 labels.ts 的 milestoneVersion / currentVersion：和派活、开单同一条规矩，不另写正则。
-// - 飞书幂等：本仓 Release 正文里写 last line「<!-- fleet-notified: vN -->」当已发信号，防止这一轮和上一轮都发一遍。
-//   读 release 正文、加一行标签、写回，都是 release.yml 编排那边做的事；本文件只判定「是不是已发过」。
+// - 飞书幂等：Release 正文末尾的「<!-- fleet-notified: vN -->」是已发信号；发之前先写「<!-- fleet-notify-attempt: vN -->」，
+//   发成才换成 notified。发失败 attempt 留着（看得见「试过、没确认」），下一轮照样再发——判「发没发过」只看 notified。
 import { isPlaceholderSection } from '@fleet-dao/shared';
 import { currentVersion, milestoneVersion } from './labels.ts';
 
@@ -216,10 +220,119 @@ export function promoteFeishuAttemptToNotified(releaseBody: string, version: `v$
   return lines.join('\n');
 }
 
-/** 发失败之后把「尝试标记」剥掉，别把「已尝过」的假证据留下让下一次当已发而跳过。 */
-export function stripFeishuAttemptMark(releaseBody: string, version: `v${number}`): string {
+const SHA = /^[0-9a-f]{40}$/;
+
+export type TagDecision =
+  | { kind: 'create' }
+  | { kind: 'skip'; note: string }
+  | { kind: 'error'; message: string };
+
+/**
+ * 打 tag 这一步怎么走。existing：这个 tag 现在指的提交（不在是 undefined）；mergeSha：本次发布合进 main 的那个提交。
+ * 在且指着本次合并 → 跳（重跑）；在但指着别的 → 红（撞名的 tag 不当成这一版，也不挪它）；不在 → 打。
+ */
+export function decideTag(
+  version: `v${number}`,
+  existing: string | undefined,
+  mergeSha: string,
+): TagDecision {
   if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
-  const attempt = feishuAttemptMark(version);
-  const lines = releaseBody.replace(/\r\n?/g, '\n').split('\n');
-  return lines.filter((l) => l.trim() !== attempt).join('\n');
+  if (!SHA.test(mergeSha)) {
+    return { kind: 'error', message: `本次发布合并的提交认不出（「${mergeSha}」）：不知道该打在哪，不打。` };
+  }
+  if (existing === undefined) return { kind: 'create' };
+  if (existing === mergeSha)
+    return {
+      kind: 'skip',
+      note: `tag ${version} 已经在、指着本次发布合并 ${mergeSha.slice(0, 7)}（重跑，跳）。`,
+    };
+  return {
+    kind: 'error',
+    message:
+      `tag ${version} 已经在，但指的是 ${existing.slice(0, 7)}，不是本次发布合并 ${mergeSha.slice(0, 7)}：撞名的 tag 不当成这一版、也不挪它。` +
+      `人先看一眼那个 tag 是谁打的；确认是错的，删掉（gh api -X DELETE repos/<仓>/git/refs/tags/${version}）再手动补跑这条工作流。`,
+  };
+}
+
+const MARK_LINE = /^<!-- fleet-(?:notified|notify-attempt): v\d+ -->$/;
+
+/** Release 正文去掉飞书标记行、统一换行、去掉行尾空白和末尾空行：拿它和 CHANGELOG.md 那一段比「是不是同一份」。 */
+export function releaseBodyCore(body: string): string {
+  return body
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .filter((l) => !MARK_LINE.test(l.trim()))
+    .map((l) => l.trimEnd())
+    .join('\n')
+    .trim();
+}
+
+/** Release 正文里的飞书标记行（照原先后）：改回正文时要原样留着，别把「发过飞书」的证据一起抹了。 */
+export function releaseMarks(body: string): string[] {
+  return body
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => MARK_LINE.test(l));
+}
+
+export type ReleaseDecision =
+  | { kind: 'create'; body: string }
+  | { kind: 'skip'; note: string }
+  | { kind: 'update'; body: string; note: string }
+  | { kind: 'error'; message: string };
+
+/**
+ * 建 Release 这一步怎么走。want：CHANGELOG.md 里这一版那一段（extractReleaseBody 拿的）。
+ * 不在 → 建；在但挂的 tag 不是 vN → 红；正文（去掉飞书标记）对得上 → 跳；对不上（被人手改过）→ 改回，飞书标记原样留在末尾。
+ */
+export function decideRelease(
+  version: `v${number}`,
+  existing: { tagName: string; body: string } | undefined,
+  want: string,
+): ReleaseDecision {
+  if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
+  if (existing === undefined) return { kind: 'create', body: want };
+  if (existing.tagName !== version) {
+    return {
+      kind: 'error',
+      message: `Release「${version}」在，但挂的 tag 是「${existing.tagName}」：名字撞了、指着别的，不接着走。人先看一眼是谁建的。`,
+    };
+  }
+  if (releaseBodyCore(existing.body) === releaseBodyCore(want)) {
+    return { kind: 'skip', note: `Release ${version} 已经在、正文和 CHANGELOG.md 对得上（重跑，跳）。` };
+  }
+  const marks = releaseMarks(existing.body);
+  const body = marks.length > 0 ? `${want.trimEnd()}\n\n${marks.join('\n')}\n` : want;
+  return {
+    kind: 'update',
+    body,
+    note: `Release ${version} 已经在，正文和 CHANGELOG.md 对不上（被人手改过）：改回 CHANGELOG.md 那一段${marks.length > 0 ? '，飞书标记留着' : ''}。`,
+  };
+}
+
+/**
+ * 飞书自定义机器人 webhook 的回包算不算发成：HTTP 200 也会用 code != 0 表示业务失败（关键词、签名、频率不对）。
+ * 现在的格式 { code: 0, msg: 'success' }；老格式 { StatusCode: 0, StatusMessage: 'success' }。别的、认不出的都算没发成。
+ */
+export function feishuReplyOk(reply: unknown): { ok: true } | { ok: false; message: string } {
+  if (typeof reply !== 'object' || reply === null || Array.isArray(reply)) {
+    return { ok: false, message: '飞书回包认不出（不是 JSON 对象）' };
+  }
+  const r = reply as Record<string, unknown>;
+  if ('code' in r) {
+    if (r.code === 0) return { ok: true };
+    return {
+      ok: false,
+      message: `飞书回的业务码不是 0（code=${String(r.code)}，msg=${String(r.msg ?? '')}）`,
+    };
+  }
+  if ('StatusCode' in r) {
+    if (r.StatusCode === 0) return { ok: true };
+    return {
+      ok: false,
+      message: `飞书回的业务码不是 0（StatusCode=${String(r.StatusCode)}，StatusMessage=${String(r.StatusMessage ?? '')}）`,
+    };
+  }
+  return { ok: false, message: '飞书回包里没有 code，认不出算没发成' };
 }
