@@ -46,6 +46,7 @@ import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
+import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
   type Actor,
   type NewAuditEntry,
@@ -489,17 +490,35 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   });
 
   app.get(WebRoutes.pools.path, async (c) => {
-    const [pools, channels, windows, routes, activeRuns] = await Promise.all([
+    const [pools, channels, windows, routes, activeRuns, savedSettings] = await Promise.all([
       store.listPools(),
       store.listChannels(),
       store.listQuotaWindows(),
       store.listRoutes(),
       store.listRuns({ active: true }),
+      store.listSettings(),
     ]);
     const now = deps.now();
+    // 切号现状（#194）：读不到不拖垮额度页，但要明说没读成（不拿空冒充没事）
+    const soloPaused = savedSettings.find((s) => s.key === 'engine.soloPaused')?.value === true;
+    let orgSwitch: ReturnType<typeof orgSwitchView>;
+    if (!deps.orgSwitch) {
+      orgSwitch = { state: 'unavailable', why: ORG_SWITCH_NOT_HERE, soloPaused };
+    } else {
+      try {
+        orgSwitch = orgSwitchView(await deps.orgSwitch.read(), soloPaused);
+      } catch (error) {
+        orgSwitch = {
+          state: 'unavailable',
+          why: `读切号账本没成：${error instanceof Error ? error.message : String(error)}`,
+          soloPaused,
+        };
+      }
+    }
     return reply(c, PoolsResponse, {
       pools: buildPools({ pools, channels, windows, routes, activeRuns }, now, config.quotaStaleAfterMs),
       staleAfterMinutes: Math.round(config.quotaStaleAfterMs / 60_000),
+      orgSwitch,
       asOf: now.toISOString(),
     });
   });

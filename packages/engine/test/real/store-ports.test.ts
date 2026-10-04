@@ -9,6 +9,7 @@ import {
   notifications,
   openSessionRun,
   poolReservations,
+  saveOrgState,
   savePoolQuota,
   saveRouteProbe,
   sessionRuns,
@@ -19,6 +20,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
 import { SLICE_MEMORY_HIGH_MB } from '../../src/limits.ts';
 import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
@@ -581,6 +583,35 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     await world(t.db);
     // 真实的样子：独享池挂在独享组织上、拼车池挂在拼车组织上
     await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-solo'`);
+    // 引擎盯读接口记下的账本（#194）：一分钟前读到拼车、独享各一个可用账号——切号的打算（选路按它判等不等切号）要账号状态
+    const at = new Date(NOW.getTime() - MIN);
+    await saveOrgState(
+      t.db,
+      'fleet-agent-carpool',
+      serializeLedger({
+        ...emptyLedger(),
+        reads: [
+          {
+            ok: true,
+            requestedAt: at,
+            serverDate: at,
+            ageSeconds: null,
+            quota: {
+              usedUsd: 10,
+              limitUsd: 80,
+              resetsAt: new Date(NOW.getTime() + 3 * 60 * MIN),
+              status: 'active',
+            },
+            org: 'ok',
+            accounts: [
+              { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+              { id: 'solo-1', kind: 'solo', hasAssignedAccount: true, expiresAt: null },
+            ],
+          },
+        ],
+      }),
+      NOW,
+    );
   });
   const onRig = () => ports(rig.reader());
   /** 派不出的原因里不许带组织编号、邮箱（它会进库、上驾驶舱、上单子）。 */
@@ -808,9 +839,9 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       },
     });
     await expect(pick({ stage: 'execute' }, p)).rejects.toThrow('sessionOrgFacts：连接断了');
-    // 候选里都是挂着的那个组织的池（没有要问打算的）：不问，照常派
+    // 候选里都是挂着的那个组织的池也要问（#194：切回宽限中、渠道不可用都要看打算）：照样报错，不当成「没事」照派
     await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-carpool'`);
-    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    await expect(pick({ stage: 'execute' }, p)).rejects.toThrow('sessionOrgFacts：连接断了');
   });
 
   it('探针在另一个组织挂着时没探的那条（库里 probe_org 是另一个组织）：它的组织挂上以后等下一轮探针，不挂起；探了没通的照样不在线', async () => {

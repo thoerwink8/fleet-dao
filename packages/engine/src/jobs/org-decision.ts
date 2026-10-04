@@ -147,6 +147,7 @@ export function decideOrgSwitch(
   const base: OrgLedger = {
     ...f.ledger,
     channel: { state: channel.state, since: channel.since, why: channel.summary },
+    ...(f.live.ok ? { live: f.live.org, liveAt: f.now } : {}),
   };
   const notes: string[] = [];
   const out = (plan: OrgPlan, ledger: OrgLedger = base, overdue?: string): OrgDecision => {

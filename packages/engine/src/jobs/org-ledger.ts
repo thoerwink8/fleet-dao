@@ -54,6 +54,9 @@ export interface OrgLedger {
   soloPause: SoloPause | null;
   channel: ChannelRecord | null;
   backPending: BackPending | null;
+  /** 最近一次读到会话用户挂的是哪个组织、几点读到的（给驾驶舱看；读不到时不动）。 */
+  live: 'carpool' | 'solo' | null;
+  liveAt: Date | null;
 }
 
 export class OrgLedgerError extends Error {
@@ -76,6 +79,8 @@ export function emptyLedger(): OrgLedger {
     soloPause: null,
     channel: null,
     backPending: null,
+    live: null,
+    liveAt: null,
   };
 }
 
@@ -147,6 +152,8 @@ const LedgerSchema = z.object({
     .object({ state: z.enum(['ok', 'single', 'unavailable', 'unknown']), since: D, why: z.string() })
     .nullable(),
   backPending: z.object({ since: D, mode: z.enum(['confirmed', 'trial']), why: z.string() }).nullable(),
+  live: z.enum(['carpool', 'solo']).nullable(),
+  liveAt: D.nullable(),
 });
 
 /** 库里读回来的 doc → 账本。认不出抛 OrgLedgerError（带第一条原因）。 */
@@ -218,6 +225,8 @@ export function serializeLedger(l: OrgLedger): unknown {
     backPending: l.backPending
       ? { since: l.backPending.since.toISOString(), mode: l.backPending.mode, why: l.backPending.why }
       : null,
+    live: l.live,
+    liveAt: iso(l.liveAt),
   };
 }
 

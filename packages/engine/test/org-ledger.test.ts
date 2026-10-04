@@ -48,6 +48,8 @@ describe('存取', () => {
       soloPause: { since: at(-60), by: '创始人', reason: '我要用独享' },
       channel: { state: 'single' as const, since: at(-10), why: '只剩 1 个' },
       backPending: { since: at(-1), mode: 'trial' as const, why: 'x' },
+      live: 'solo' as const,
+      liveAt: at(-1),
     };
     expect(parseLedger(JSON.parse(JSON.stringify(serializeLedger(full))))).toEqual(full);
   });

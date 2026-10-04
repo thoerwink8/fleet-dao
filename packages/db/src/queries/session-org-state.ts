@@ -2,7 +2,7 @@
 // 这里只管存、取、拿锁、放锁：
 // - 取：没有这一行回 null（引擎当作「从没切过」）；有就原样给 doc，认不认得出由引擎判，认不出它会明确失败。
 // - 锁：单飞，一次只一个拿着；过期的（引擎做到一半重启没放）下一个能拿；同一个持有人可以重入续期。
-import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, isNull, lt, or } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { sessionOrgState, settings } from '../schema/index.ts';
 
@@ -38,6 +38,16 @@ export interface OrgStateRow {
 
 export async function readOrgState(db: Db, userName: string): Promise<OrgStateRow | null> {
   const [row] = await db.select().from(sessionOrgState).where(eq(sessionOrgState.userName, userName));
+  if (!row) return null;
+  return { doc: row.doc, updatedAt: row.updatedAt, lockHolder: row.lockHolder, lockUntil: row.lockUntil };
+}
+
+/**
+ * 驾驶舱只读：最近一次更新的那一行（现在只有一个会话用户，一行）。没有 = 引擎还没记过。
+ * 驾驶舱后端不依赖引擎，认不认得出这份账本由它自己的读法判（api 的 org-switch-view.ts）。
+ */
+export async function readLatestOrgState(db: Db): Promise<OrgStateRow | null> {
+  const [row] = await db.select().from(sessionOrgState).orderBy(desc(sessionOrgState.updatedAt)).limit(1);
   if (!row) return null;
   return { doc: row.doc, updatedAt: row.updatedAt, lockHolder: row.lockHolder, lockUntil: row.lockUntil };
 }

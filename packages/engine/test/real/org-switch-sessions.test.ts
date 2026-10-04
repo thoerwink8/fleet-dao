@@ -27,6 +27,7 @@ import {
   fakeScopeHelper,
   fakeTrees,
   git,
+  healthyCarpoolRead,
   MIN,
   mirror,
   NOW,
@@ -141,6 +142,7 @@ function harness() {
     },
     sessions: sessions.orgSwitch,
     machine: '法国',
+    readApi: async () => healthyCarpoolRead(now()),
     now,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     graceMs: 0,
@@ -331,13 +333,24 @@ describe('拼车用完、切号那一刻手上的活原地接着干（#59）', (
 
     // 到拼车恢复时刻：两张单的下一步又在独享上跑着（新开的会话）
     h.advance(2 * H + MIN);
+    // 恢复要连着两次「被拒之后的新读数」（隔一分钟以上，#194）：这是第一次，还不切回
+    expect(await h.round.before()).toBeNull();
+    h.advance(MIN);
     const a3 = await start(h, a.launch(await picked(h, a.taskId)));
     const b3 = await start(h, b.launch(await picked(h, b.taskId)));
     expect([a3.input.route.poolId, b3.input.route.poolId]).toEqual(['claude-solo', 'claude-solo']);
+    // 恢复了、手上有两个刚开跑的：进切回宽限，开跑不到 5 分钟的当场停（方案 4.5）；这时还没切
+    expect(await h.round.before()).toBeNull();
+    expect(h.switches).toEqual(['solo']);
+    const ended = new Map([
+      [a3, await a3.ended],
+      [b3, await b3.ended],
+    ]);
+    // 手上空了：下一轮切回拼车
     expect(await h.round.before()).toBe('carpool');
     expect(h.switches).toEqual(['solo', 'carpool']);
     for (const run of [a3, b3]) {
-      const carried = await carryOn(h, run, await run.ended, 'claude-carpool');
+      const carried = await carryOn(h, run, ended.get(run) as Awaited<typeof run.ended>, 'claude-carpool');
       expect(carried.next).toMatchObject({ rule: 'OS1' });
       expect(carried.end.outcome).toBe('done');
     }
@@ -351,7 +364,12 @@ describe('拼车用完、切号那一刻手上的活原地接着干（#59）', (
       [true, { org: 'solo' }, 'carpool'],
     ]);
     expect(after(0)?.stopped).toEqual([b1.input.runId]);
-    expect([...(after(1)?.stopped ?? [])].sort()).toEqual([a3.input.runId, b3.input.runId].sort());
+    // 切回时手上已经空了：停下的两个记在切回宽限那一条里
+    expect(after(1)?.stopped).toBeUndefined();
+    const drained = rows.find((r) => r.action === 'session-org.drain');
+    expect([...((drained?.after as { stopped: string[] } | null)?.stopped ?? [])].sort()).toEqual(
+      [a3.input.runId, b3.input.runId].sort(),
+    );
     const resumed = rows.filter((r) => r.action === 'session-org.resume');
     expect(resumed.map((r) => r.after)).toEqual([
       expect.objectContaining({ poolId: 'claude-solo', mode: 'fork' }),
