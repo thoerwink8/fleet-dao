@@ -23,8 +23,9 @@
 //   读不了记没查成，不撤）。
 // - no-verifier:<任务> 这张单做完没人能验（选路给开 PR 前验证留一家留不下时报的）：这张单做完、叫停、没做完了就撤；
 //   验证留得下了、验证派出去了由选路自己撤（real/store-ports.ts）。
-// - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤）、session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、
-//   组织读数定下来了就撤，real/org-switch.ts）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
+// - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤；人拍的暂停不在这里，在设置 engine.poolHolds，只有人撤，#746）、
+//   session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、组织读数定下来了、整池暂停的设置读得出了就撤，
+//   real/org-switch.ts；整池暂停到了复查日期的 session-org:pool-hold-overdue 也在这里：人撤了或续了期才撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
 //   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、canary:leftover-pr（巡检收上一轮留下的单时没关掉它开的 PR，之后一轮把 PR 关掉了就撤，#336）、
 //   watchdog:job:<任务>:…、watchdog:unchecked:<日子>（看门狗 jobs/watchdog.ts：任务按期跑成了、读到登记表了就撤）、
 //   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）、

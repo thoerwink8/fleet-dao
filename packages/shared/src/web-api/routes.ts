@@ -40,7 +40,12 @@ import {
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
 } from './routing.ts';
-import { SettingsResponse, UpdateSettingRequest, UpdateSettingResponse } from './settings.ts';
+import {
+  PoolHoldsResponse,
+  SettingsResponse,
+  UpdateSettingRequest,
+  UpdateSettingResponse,
+} from './settings.ts';
 import {
   AnswerAskRequest,
   AnswerAskResponse,
@@ -94,6 +99,8 @@ export const WebRoutes = {
     response: UpdateChannelResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
+  /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */
+  poolHolds: { method: 'GET', path: '/pool-holds', response: PoolHoldsResponse },
   jobs: { method: 'GET', path: '/jobs', response: JobsResponse },
   notifications: {
     method: 'GET',

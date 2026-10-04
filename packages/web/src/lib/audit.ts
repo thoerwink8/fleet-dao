@@ -62,6 +62,7 @@ export const settingLabel: Record<SettingKey, string> = {
   'judge.dailyCallLimit': `${brand.terms.judgeQuiz}每天调用上限`,
   'engine.soloPaused': `引擎暂不用${brand.terms.solo}`,
   'engine.quotaReserve': '各渠道的额度留量线',
+  'engine.poolHolds': '整池暂停',
 };
 
 function isStage(s: string): s is StageKind {

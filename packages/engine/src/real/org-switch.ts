@@ -16,7 +16,6 @@
 import type { SessionUser, SwitchSessionOrgResult } from '@fleet-dao/adapters';
 import {
   type Db,
-  openAlertsByPrefix,
   openOrgRuns,
   recordEngineAudit,
   resolveAlertWithReason,
@@ -33,6 +32,7 @@ import type { OrgSwitchRound, OrgSwitchTrigger, ProbedRoute } from '../jobs/org-
 import { ORG_NAMES } from '../routing/names.ts';
 import { type LedgerStore, ledgerStore } from './org-ledger.ts';
 import { decideFrom, loadOrgSwitchFacts, soloPauseOf } from './org-plan.ts';
+import { type HeldPools, loadHeldPools } from './pool-holds.ts';
 import {
   type OrgSighting,
   readingStamp,
@@ -40,7 +40,6 @@ import {
   type SessionOrgControl,
   type SessionOrgEvent,
 } from './session-org.ts';
-import { POOL_HOLD_PREFIX } from './store-ports.ts';
 
 /**
  * 切号那一刻在跑的会话（#59），一种会话一份（Fusion 的会话端口、三段的一次性会话登记）。只管这个工人进程里起的：一次性会话不脱开
@@ -71,6 +70,10 @@ export const ORG_CHANNEL_ALERT = `${SESSION_ORG_ALERT_PREFIX}channel`;
 export const ORG_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}overdue`;
 /** 额度留量线（设置 engine.quotaReserve）库里没有、认不出：引擎对这类池不派、不切，要人看（#194 4.8）。 */
 export const ORG_RESERVE_ALERT = `${SESSION_ORG_ALERT_PREFIX}reserve`;
+/** 整池暂停的开关（设置 engine.poolHolds）读不出、认不出：对应的池按暂停办，要人看（#746，real/pool-holds.ts）。 */
+export const ORG_POOL_HOLD_ALERT = `${SESSION_ORG_ALERT_PREFIX}pool-hold`;
+/** 整池暂停过了复查日期还开着：不自动撤，提醒人撤或续期（#746）。 */
+export const ORG_POOL_HOLD_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}pool-hold-overdue`;
 /** 切号账本认不出：引擎不切号，要人看（jobs/org-ledger.ts）。 */
 export const ORG_LEDGER_ALERT = `${SESSION_ORG_ALERT_PREFIX}ledger`;
 /**
@@ -155,9 +158,36 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
 
   // 和选路判「等不等切号」同一份事实（real/org-plan.ts）
   async function facts() {
-    const holds = await openAlertsByPrefix(w.db, POOL_HOLD_PREFIX);
-    const held = new Set(holds.map((a) => a.dedupeKey.slice(POOL_HOLD_PREFIX.length)));
-    return loadOrgSwitchFacts(w.db, { now: clock(), held });
+    const now = clock();
+    const holds = await loadHeldPools(w.db, now);
+    return { ...(await loadOrgSwitchFacts(w.db, { now, held: holds.all })), holds };
+  }
+
+  /**
+   * 整池暂停开关（#746）读不出、过了复查日期，写一条要人看的提醒（好了自己撤）：认不出的按暂停办（不当成能用），到期的不自动撤，
+   * 只提醒人撤或写明理由续期。
+   */
+  async function publishPoolHolds(holds: HeldPools) {
+    const { problems, holds: known } = holds.facts;
+    if (problems.length > 0) {
+      await alert(
+        ORG_POOL_HOLD_ALERT,
+        '整池暂停的设置读不出或认不出，对应的池按暂停办',
+        `${problems.map((p) => p.why).join('；')}。到驾驶舱设置页「整池暂停」改好（缺哪项补哪项）；${fix}`,
+      );
+    } else {
+      await settle(ORG_POOL_HOLD_ALERT, '整池暂停的设置读得出、认得出了');
+    }
+    const overdue = known.filter((h) => h.overdue);
+    if (overdue.length > 0) {
+      await alert(
+        ORG_POOL_HOLD_OVERDUE_ALERT,
+        `整池暂停到了复查日期：${overdue.map((h) => h.poolId).join('、')}`,
+        `${overdue.map((h) => `${h.poolId}：复查日期 ${h.reviewBy}（${h.overdueDays === 0 ? '就是今天' : `已过 ${h.overdueDays} 天`}），原因：${h.reason}；撤回条件：${h.revokeWhen}；谁拍的：${h.decidedBy}`).join('\n')}\n引擎不会自动撤它。到驾驶舱设置页「整池暂停」撤回（要写原因），或改复查日期续期。`,
+      );
+    } else {
+      await settle(ORG_POOL_HOLD_OVERDUE_ALERT, '没有到期没复查的整池暂停');
+    }
   }
 
   // 停会话的：接了哪一种就停得下哪一种（两种都接了，一起停、一起等）
@@ -451,6 +481,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     w.org.forget();
     const live = await w.org({ by: trigger.by });
     const f = await facts();
+    await publishPoolHolds(f.holds);
     // 额度留量线读不到、认不出（种子没装上、值被人改坏）：要人看，引擎对这类池不派、不切；好了自己撤
     const reserveProblems = [
       ...new Set(

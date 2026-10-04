@@ -3,6 +3,7 @@ import {
   BoardResponse,
   JobsResponse,
   NotificationsResponse,
+  PoolHoldsResponse,
   PoolsResponse,
   RoutingResponse,
   RunStepsResponse,
@@ -997,5 +998,140 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     });
     // 版本号对不上（别人先改了）：409，不悄悄覆盖
     expect((await put({ value: {}, version: 0 })).status).toBe(409);
+  });
+
+  describe('整池暂停开关（#746，engine.poolHolds）', () => {
+    const hold = (over: Record<string, unknown> = {}) => ({
+      reason: '创始人要大用独享',
+      decidedBy: '「法国暂时不用独享号」2026-09-27',
+      revokeWhen: '创始人说可以用了',
+      reviewBy: '2026-12-31',
+      ...over,
+    });
+    const view = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolHoldsResponse.parse(
+        await (await h.cockpit.request('/api/pool-holds', { headers: { cookie } })).json(),
+      );
+
+    it('【故意造出的失败】缺字段、日期假的、多字段都拒收；齐全的存下，带版本号、进操作记录', async () => {
+      const h = harness();
+      const s = await h.login();
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      for (const bad of [
+        { 'claude-solo': hold({ reviewBy: undefined }) },
+        { 'claude-solo': hold({ reason: ' ' }) },
+        { 'claude-solo': hold({ reviewBy: '2026-02-30' }) },
+        { 'claude-solo': hold({ owner: '帅位' }) },
+        'on',
+        null,
+      ]) {
+        expect(await errorCode(await put({ value: bad, version: 0 })), JSON.stringify(bad)).toBe(
+          'invalid_request',
+        );
+      }
+      const ok = await put({ value: { 'claude-solo': hold() }, version: 0 });
+      expect(UpdateSettingResponse.parse(await ok.json()).setting).toMatchObject({ version: 1 });
+      expect(h.store.data.audit.at(-1)).toMatchObject({
+        action: 'setting.update',
+        target: 'setting:engine.poolHolds',
+        after: { 'claude-solo': hold() },
+      });
+      expect((await view(h, s.cookie)).holds.map((x) => x.poolId)).toEqual(['claude-solo']);
+    });
+
+    it('【故意造出的失败】撤回、续期没写原因：400，设置不变；写了原因才撤，原因进操作记录；撤完 /api/pool-holds 没有了', async () => {
+      const h = harness();
+      const s = await h.login();
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      await put({ value: { 'claude-solo': hold(), 'claude-carpool': hold() }, version: 0 });
+      // 撤一个、没写原因
+      expect(await errorCode(await put({ value: { 'claude-carpool': hold() }, version: 1 }))).toBe(
+        'reason_required',
+      );
+      // 续期（改复查日期）没写原因
+      expect(
+        await errorCode(
+          await put({
+            value: { 'claude-solo': hold({ reviewBy: '2027-01-31' }), 'claude-carpool': hold() },
+            version: 1,
+            reason: '  ',
+          }),
+        ),
+      ).toBe('reason_required');
+      expect((await view(h, s.cookie)).holds).toHaveLength(2);
+      const revoked = await put({
+        value: { 'claude-carpool': hold() },
+        version: 1,
+        reason: '创始人 10-05 说独享正常跑',
+      });
+      expect(revoked.status).toBe(200);
+      expect(h.store.data.audit.at(-1)).toMatchObject({
+        target: 'setting:engine.poolHolds',
+        reason: '创始人 10-05 说独享正常跑',
+      });
+      expect((await view(h, s.cookie)).holds.map((x) => x.poolId)).toEqual(['claude-carpool']);
+      // 新建一条不用写原因
+      expect(
+        (await put({ value: { 'claude-carpool': hold(), 'claude-solo': hold() }, version: 2 })).status,
+      ).toBe(200);
+    });
+
+    it('/api/pool-holds：到期标红但还在名单里（不自动撤）；旧的 pool-hold 提醒列出来提示迁成开关；已处理的不算', async () => {
+      const h = harness();
+      const s = await h.login();
+      // 假钟是 2026-09-25 16:00（北京）：9-24 是昨天
+      const yesterday = '2026-09-24';
+      await h.cockpit.request(
+        '/api/settings/engine.poolHolds',
+        write('PUT', s, { value: { 'claude-solo': hold({ reviewBy: yesterday }) }, version: 0 }),
+      );
+      for (const [id, key, resolvedAt] of [
+        ['n-hold-1', 'pool-hold:claude-solo', undefined],
+        ['n-hold-2', 'pool-hold:claude-carpool', undefined],
+        ['n-hold-3', 'pool-hold:old', h.clock.now.toISOString()],
+      ] as const) {
+        h.store.data.notifications.push({
+          id,
+          level: 'decision',
+          title: `账号池 ${key.slice(10)} 整池暂停：登录失效`,
+          body: '占位',
+          createdAt: h.clock.now.toISOString(),
+          dedupeKey: key,
+          deliveries: [],
+          ...(resolvedAt ? { resolvedAt } : {}),
+        });
+      }
+      const v = await view(h, s.cookie);
+      expect(v.holds[0]).toMatchObject({ poolId: 'claude-solo', overdue: true });
+      expect(v.holds[0]?.overdueDays).toBeGreaterThanOrEqual(1);
+      expect(v.legacy.map((l) => [l.poolId, l.alsoSwitched]).sort()).toEqual([
+        ['claude-carpool', false],
+        ['claude-solo', true],
+      ]);
+      expect(v.problems).toEqual([]);
+      expect(v.legacyProblem).toBeUndefined();
+    });
+
+    it('【故意造出的失败】库里存的值认不出（被人直接改库）：/api/pool-holds 明说认不出、所有池按暂停办，不是「没有暂停」；修它也要写原因', async () => {
+      const h = harness();
+      const s = await h.login();
+      h.store.data.settings.push({
+        key: 'engine.poolHolds',
+        value: '停',
+        version: 4,
+        updatedAt: h.clock.now.toISOString(),
+        updatedBy: 'x',
+      });
+      const v = await view(h, s.cookie);
+      expect(v.holdAll).toBe(true);
+      expect(v.problems[0]?.why).toContain('所有账号池按暂停办');
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      expect(await errorCode(await put({ value: {}, version: 4 }))).toBe('reason_required');
+      expect((await put({ value: {}, version: 4, reason: '清掉被改坏的值' })).status).toBe(200);
+      expect((await view(h, s.cookie)).holdAll).toBe(false);
+    });
   });
 });

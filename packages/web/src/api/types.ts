@@ -31,6 +31,7 @@ import type {
   NotificationsResponse,
   NowItemSchema,
   OrgSwitchViewSchema,
+  PoolHoldsView,
   PoolSchema,
   PoolsResponse,
   PoolViewSchema,
@@ -115,6 +116,10 @@ export type EffortModel = z.infer<typeof EffortModelSchema>;
 export type RouteEffort = z.infer<typeof RouteEffortSchema>;
 export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
 export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
+
+/** 整池暂停的现状（#746）：开关、认不出的、旧提醒、到期没复查的。 */
+export type PoolHolds = PoolHoldsView;
+export type PoolHoldFactView = PoolHoldsView['holds'][number];
 
 export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;

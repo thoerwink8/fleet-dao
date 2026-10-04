@@ -20,7 +20,10 @@ import {
   JobsResponse,
   MeResponse,
   NotificationsResponse,
+  POOL_HOLDS_SETTING,
+  PoolHoldsResponse,
   PoolsResponse,
+  poolHoldsView,
   type RealtimeTable,
   ReleaseVersionResponse,
   ReposResponse,
@@ -31,6 +34,7 @@ import {
   type RunOutcome,
   RunStepsResponse,
   readSegmentRun,
+  revocationProblem,
   routeEffortChoices,
   routeEffortProblem,
   SETTING_SCHEMAS,
@@ -1369,6 +1373,16 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         asOf: iso(),
       });
     },
+    async poolHolds() {
+      await wait();
+      return PoolHoldsResponse.parse(
+        poolHoldsView(
+          st.settings.find((s) => s.key === POOL_HOLDS_SETTING),
+          { ok: true, alerts: st.notifications },
+          new Date(now()),
+        ),
+      );
+    },
     async jobs() {
       await wait();
       const t = now();
@@ -1428,6 +1442,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const current = st.settings.find((s) => s.key === key) ?? { key, value: null, version: 0 };
       if (current.version !== body.version)
         throw new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改');
+      // 整池暂停：撤回、续期必须写原因（和后端同一条判法）
+      if (key === POOL_HOLDS_SETTING) {
+        const missing = revocationProblem(current.value, value.data, body.reason);
+        if (missing) throw new ApiError(400, 'reason_required', missing);
+      }
       const next = {
         key,
         value: value.data,

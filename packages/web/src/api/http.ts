@@ -195,6 +195,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       });
     },
     pools: () => send('GET', apiUrl(R.pools.path), R.pools.response),
+    poolHolds: () => send('GET', apiUrl(R.poolHolds.path), R.poolHolds.response),
     jobs: () => send('GET', apiUrl(R.jobs.path), R.jobs.response),
     notifications: (query) =>
       send(
