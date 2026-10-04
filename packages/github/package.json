@@ -10,6 +10,7 @@
   "dependencies": {
     "@fleet-dao/conventions": "workspace:*",
     "@fleet-dao/hygiene": "workspace:*",
+    "@fleet-dao/shared": "workspace:*",
     "zod": "^4.6.5"
   }
 }

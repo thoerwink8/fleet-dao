@@ -1,7 +1,9 @@
 // 装配：一个对象给引擎用（活动的真实现）、给后端用（事件之后的处理）、给定时任务用（对账补漏）。
 // 生产：createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) })（这两个在 @fleet-dao/store）——凭据从 /etc/fleet-dao/github 读（环境变量可改），
 // 推送用的裸仓放在 FLEET_GITHUB_STATE_DIR（默认 /var/lib/fleet-dao/github）下。
+
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import {
   type BundleCommitsInput,
@@ -390,7 +392,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
               ok: false,
               missing: [],
               extra: [],
-              why: `${ROLE_NAMES[role]}没查成：${err instanceof Error ? err.message : String(err)}`,
+              why: `${ROLE_NAMES[role]}没查成：${errMessage(err)}`,
             });
           }
         }
