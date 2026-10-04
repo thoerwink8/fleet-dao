@@ -52,6 +52,15 @@ describe('前台等待上限', () => {
     expect(run(tool, input).code).toBe(0);
   });
 
+  it('框架给没写 timeout 的调用自动补 120000：不能因此把每条普通命令都拦了（#827 当天误拦过）；显式写别的数照拦', () => {
+    expect(run('Bash', { command: 'git status', timeout: 120_000 }).code).toBe(0);
+    expect(run('PowerShell', { command: 'Get-Date', timeout: 120_000 }).code).toBe(0);
+    expect(run('Bash', { command: 'git status', timeout: 119_999 }).code).toBe(2);
+    expect(run('Bash', { command: 'git status', timeout: 120_001 }).code).toBe(2);
+    // 默认的 timeout 不能给 sleep 开后门
+    expect(run('Bash', { command: 'sleep 100', timeout: 120_000 }).code).toBe(2);
+  });
+
   it('后台跑的不受限：run_in_background 为真，再长的 sleep 和 timeout 都放行', () => {
     expect(run('Bash', { command: 'sleep 600', run_in_background: true }).code).toBe(0);
     expect(run('Bash', { command: 'pnpm test', timeout: 900_000, run_in_background: true }).code).toBe(0);
