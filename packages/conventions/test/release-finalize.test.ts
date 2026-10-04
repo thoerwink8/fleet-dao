@@ -390,6 +390,43 @@ describe('故意造出的失败：半截时后面的步骤一律不走', () => {
   });
 });
 
+describe('Release 正文被人改过 + 上一轮飞书只留了「试过」标记（第二意见 #839 第 1 轮）', () => {
+  it('改回正文时 attempt 留着；没确认送到所以这一轮发一次、换成 notified；再补跑一次不再发', async () => {
+    const g = fakeGitHub({
+      tags: { v3: MERGE },
+      releases: { v3: { id: 7, tagName: 'v3', body: `人手改的\n\n${feishuAttemptMark('v3')}\n` } },
+    });
+    const f = fakeFeishu();
+    const first = await run({ github: g.github, feishu: f.feishu });
+    expect(first.ok).toBe(true);
+    expect(statuses(first)).toMatchObject({ release: 'done', feishu: 'done' });
+    expect(f.sent).toHaveLength(1);
+    expect(g.releases.v3?.body).toBe(`${SECTION}\n\n${feishuNotifiedMark('v3')}\n`);
+
+    const again = await run({ github: g.github, feishu: f.feishu });
+    expect(statuses(again)).toMatchObject({ release: 'skipped', feishu: 'skipped' });
+    expect(f.sent).toHaveLength(1);
+  });
+
+  it('改正文那一步把 notified 和 attempt 都留着：notified 在就不发，哪怕 attempt 也在', async () => {
+    const g = fakeGitHub({
+      tags: { v3: MERGE },
+      releases: {
+        v3: {
+          id: 7,
+          tagName: 'v3',
+          body: `人手改的\n\n${feishuAttemptMark('v3')}\n${feishuNotifiedMark('v3')}\n`,
+        },
+      },
+    });
+    const f = fakeFeishu();
+    const r = await run({ github: g.github, feishu: f.feishu });
+    expect(statuses(r)).toMatchObject({ release: 'done', feishu: 'skipped' });
+    expect(f.sent).toEqual([]);
+    expect(g.releases.v3?.body).toContain(feishuNotifiedMark('v3'));
+  });
+});
+
 describe('postFeishu：往飞书 webhook 发一条', () => {
   // 假地址（.invalid 不会解析）：长得像真飞书 webhook 的会被推前卫生检查当成密钥拦下。
   const HOOK = 'https://hook.invalid/bot/secret-token-xyz';

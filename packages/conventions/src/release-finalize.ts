@@ -179,7 +179,11 @@ export async function finalizeRelease(opts: FinalizeOptions): Promise<FinalizeRe
       if (feishuAlreadyNotified(rel.body, v)) {
         return { status: 'skipped', note: `Release 正文末尾已有 fleet-notified: ${v}：上一轮推过了（跳）。` };
       }
-      // 先写「试过」标记再发：runner 在发出去之前死掉，下一轮看到的不是 notified，会再发——宁可重一条，不漏。
+      // 判「发没发过」只看 notified。只留着 attempt（上一轮发失败、或发之前死掉）＝没确认送到，这一轮照发——
+      // 上一步改回 Release 正文时两种标记都原样留着，所以改正文不会让已经 notified 的版本重发。
+      // 已知取舍（飞书 webhook 没有幂等键，「不重」和「不漏」只能保一头）：进程恰好死在「飞书发成、notified 还没写回」之间，
+      // 补跑会再推一条重复的。选「宁可重一条、不漏」：漏一条通知比多一条难发现得多。窗口只有一次 PATCH 的时长。
+      // 先写「试过」标记再发：runner 在发出去之前死掉，下一轮看到的不是 notified，会再发。
       const attempt = appendFeishuAttemptMark(rel.body, v);
       if (attempt !== rel.body) {
         try {
