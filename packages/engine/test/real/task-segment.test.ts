@@ -11,7 +11,7 @@ import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
 import { createRunSegment, type RunSegmentDeps, sweepRunDirs } from '../../src/real/task-segment.ts';
-import type { RunRecord, RunStart } from '../../src/runner/not-wired.ts';
+import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
 import type { RunSegmentInput } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
 import { fakeTrees, git, mirror } from './fixtures.ts';
@@ -627,6 +627,119 @@ describe('切号停下这一段（#59）', { timeout: 60_000 }, () => {
     const plain = rig({ driverRun: async () => report() });
     await plain.run(plain.input(), ctx());
     expect(plain.specs[0]?.prompt).not.toContain('上一次跑到一半被停下了');
+  });
+});
+
+describe('选路时预占的池的名额（#757）', { timeout: 60_000 }, () => {
+  /** 选路交回的路由带着预占（和任务工作流一样原样交进来）。 */
+  const reserved = (r: Rig, over: Partial<RunSegmentInput> = {}) =>
+    r.input({ route: { ...r.input().route, reservationId: 'res-1' }, ...over });
+  /** 父节点一直放不下新会话。 */
+  const fullMemory = {
+    readText: async () => String(9500 * 1024 * 1024),
+    cgroupRoot: '/sys/fs/cgroup',
+    slicePath: 'fleet.slice/fleet-agents.slice',
+    sliceHighMb: 10_000,
+    reservePerSessionMb: 2048,
+  };
+
+  it('开跑那一行带上预占（在那一下换成这一行）；收场照样放一次（开跑了的放了什么都不做）；不经选路的不带、不放', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    expect(await r.run(reserved(r), ctx())).toMatchObject({ ok: true });
+    expect(r.startedWith).toEqual(['res-1']);
+    expect(r.released).toEqual(['res-1']);
+
+    const plain = rig({ driverRun: async () => report() });
+    await plain.run(plain.input(), ctx());
+    expect(plain.startedWith).toEqual([undefined]);
+    expect(plain.released).toEqual([]);
+  });
+
+  it('内存放不下、隔一会儿再试：每次都带同一个预占去试，名额一直替这一段占着；等到顶交回 memory_busy，收场放掉', async () => {
+    let clock = Date.parse('2026-10-02T12:00:00Z');
+    const r = rig({
+      deps: {
+        memoryAdmission: fullMemory,
+        now: () => new Date(clock),
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        admissionWaitMs: 2 * 60_000,
+      },
+    });
+    expect(await r.run(reserved(r), ctx())).toMatchObject({ ok: false, evidence: { code: 'memory_busy' } });
+    expect(r.startedWith).toEqual([]);
+    expect(r.released).toEqual(['res-1']);
+  });
+
+  it('【故意造出的失败】没开跑就收场——建树失败、路由用不了、等内存时被叫停：都把预占放掉，池不一直显得满', async () => {
+    const bad = rig();
+    await expect(bad.run(reserved(bad, { baseSha: 'abc' }), ctx())).rejects.toMatchObject({
+      code: 'BAD_INPUT',
+    });
+    expect([bad.startedWith, bad.released]).toEqual([[], ['res-1']]);
+
+    const noRoute = rig({ route: null });
+    await expect(noRoute.run(reserved(noRoute), ctx())).rejects.toMatchObject({
+      code: 'SEGMENT_ROUTE_UNUSABLE',
+    });
+    expect([noRoute.startedWith, noRoute.released]).toEqual([[], ['res-1']]);
+
+    const stop = new AbortController();
+    const abandoned = rig({
+      deps: {
+        memoryAdmission: fullMemory,
+        sleep: async (_ms, signal) => {
+          stop.abort(new Error('任务被放弃'));
+          throw signal.reason;
+        },
+      },
+    });
+    await expect(abandoned.run(reserved(abandoned), ctx(stop.signal))).rejects.toThrow('任务被放弃');
+    expect([abandoned.startedWith, abandoned.released]).toEqual([[], ['res-1']]);
+  });
+
+  it('【故意造出的失败】开跑时名额已经没了（预占过期、空位给了别的单，runs.start 抛 NoSlotError）：不起会话，抛 SEGMENT_NO_SLOT（可以重试，不当成 runs 写不进），预占照样放', async () => {
+    const r = rig({
+      deps: {
+        runs: {
+          async start() {
+            throw new NoSlotError('池 claude-carpool 的名额满了（已经有 3 个，上限 3 个）');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    const err = await r.run(reserved(r), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'SEGMENT_NO_SLOT', retryable: true });
+    expect((err as Error).message).toContain('名额满了');
+    expect(r.specs).toHaveLength(0);
+    expect(r.released).toEqual(['res-1']);
+  });
+
+  it('【故意造出的失败】预占放不掉（库一时不通）：只记日志、写明放不掉，这一段的结局照旧（名额到点自己过期）', async () => {
+    const logs: string[] = [];
+    const r = rig({
+      deps: {
+        reservations: {
+          async release() {
+            throw new Error('connection refused');
+          },
+        },
+        log: (message, fields) => logs.push(`${message} ${JSON.stringify(fields)}`),
+      },
+      driverRun: async () => report(),
+    });
+    expect(await r.run(reserved(r), ctx())).toMatchObject({ ok: true });
+    expect(logs.filter((l) => l.includes('没放掉'))).toEqual([expect.stringContaining('connection refused')]);
   });
 });
 
