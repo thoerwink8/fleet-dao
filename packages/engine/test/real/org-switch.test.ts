@@ -30,6 +30,7 @@ import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
 import { probeOrgNow, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
+import type { OrgSwitchSessions } from '../../src/real/org-switch.ts';
 import {
   ORG_CHANNEL_ALERT,
   ORG_DRIFT_ALERT,
@@ -45,7 +46,6 @@ import {
 } from '../../src/real/org-switch.ts';
 import { routeProbeJob } from '../../src/real/route-probe.ts';
 import { realRuns } from '../../src/real/runs-writer.ts';
-import type { OrgSwitchSessions } from '../../src/real/sessions.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
 import { type OneShotSpawner, runOneShot } from '../../src/runner/one-shot.ts';
 import {

@@ -89,6 +89,10 @@
 做到哪：设置键 `engine.poolHolds`（`{池: {reason, decidedBy, revokeWhen, reviewBy}}`，带版本号、进操作记录，缺一项写不进）；选路、切号读它（engine `real/pool-holds.ts`，和旧 `pool-hold:` 提醒并成一份），续会话的试探也不放过开关暂停的池；探针、会话碰不到它；读不出按暂停办（整份认不出所有池停、某项认不出只停那个池）并报 `session-org:pool-hold`；到期报 `session-org:pool-hold-overdue`、`/api/pool-holds` 和设置页「整池暂停」标红，不自动撤；撤回、续期后端落库前要求写原因（400 `reason_required`）；旧提醒读法保留一版，设置页提示「请迁成开关」。文档：design 第九节、ops 第五节同步改了。
 下一步：盯 CI 合并。还没验证：真环境（法国引擎关着、库里还有 `pool-hold:claude-solo`，发布后设置页应该列出它并提示迁移）；界面真实画面（1920×1080、1366×768）在 `_tmp/746-*.png`。没做：每天对账里「过了复查日期报给负责人」的飞书推送（现在只有引擎一轮写的提醒和驾驶舱标红）、负责人字段（单里写了默认指挥官，这次没加这一列）、`session-start.mjs` 开会话钩子不动（标准路径，要提到期要另开 PR）。
 
+## 2026-10-05 #901 删引擎里已无人调用的老会话端口（Sonnet 5.5 子代理，分支 `chore/901-old-session-ports`，`Refs #901` 不写 Closes）
+
+做到哪：证据表在 `specs/901-项目瘦身与提速/老会话端口调查.md`（符号｜调用方｜证据）。已删 `real/sessions.ts` 和 `session-*.ts` 等 20 个文件、`prompts.ts`、`spec-doc.ts`、`session-io.ts`、`kill-evidence.ts` 的杀因解释、`user-git.ts` 的 6 个无调用方函数，连同只测它们的 12 个测试文件；产品代码约 −4,370 行、测试约 −5,400 行。`reapOrphanSessions` 留下，改成 `real/orphan-reap.ts`（三段流程在用：收 scope、清临时目录、收 runs 行、清预占），断言搬进 `orphan-reap.test.ts`。`orgSwitch / drainStop / releaseDetached` 删（登记表永远是空的）。下一步：盯 CI 到合并。还没验证：法国/WSL 上真跑引擎、生产库里有没有遗留的 `session_runs` 开口行和 `engine-session-io` 提醒。没删的（库表、adapters 脱开支、failure 的 KL 规则、ports.ts 老类型、deploy 文件）和原因见调查文档「没删」。要创始人知道：`docs/goals.md` H 节「会话脱开引擎跑」只有老会话做过，三段会话靠 #957 排空，这行目标现在没有代码实现。
+
 ## 创始人引导（待处理）
 
 > 创始人插话给的引导、修正、决定落在这里（通用段「你的引导必须落盘」那条），别只留在对话里。办完标「已处理」或删掉；只管这一次会话怎么干的**不记**（决定 0013）。

@@ -45,7 +45,7 @@ import {
 
 /**
  * 切号那一刻在跑的会话（#59），一种会话一份（Fusion 的会话端口、三段的一次性会话登记）。只管这个工人进程里起的：一次性会话不脱开
- * 引擎跑，Fusion 的会话工人重启时收掉或接回，库里还开着、手上没有的都不是在跑的进程。
+ * 引擎跑，工人重启时 reapOrphanSessions 把上一轮的都收掉，库里还开着、手上没有的都不是在跑的进程。
  * stop：把跑在这些账号池上的停下（发信号、不等），交回这一次叫停的编号（已经在停的不重复叫停）。only 给了就只停它认的那些
  * （切回宽限开始时只停开跑不到 5 分钟的）。
  * live：跑在这些账号池上、还没收场的编号，切号要等它们都收场。
@@ -54,6 +54,13 @@ export interface OrgSwitchSessions {
   stop(poolIds: ReadonlySet<string>, why: string, only?: (runId: string) => boolean): string[];
   live(poolIds: ReadonlySet<string>): string[];
 }
+
+/**
+ * 「Fusion 会话端口」那一槽的生产值：老会话端口（startSession / awaitSession）已经删了，不会再有 Fusion 会话在这个进程里跑，
+ * 所以停不用停、也没有要等的。仍然接上这一槽而不是不给，是因为 session_runs 里可能还留着没收场的老行：不给的话
+ * unstoppable() 会把它们算成「停不下的在跑会话」，切号就一直等（#157 的老做法）；接上就不算。
+ */
+export const NO_FUSION_SESSIONS: OrgSwitchSessions = { stop: () => [], live: () => [] };
 
 /** 切号没成（帮手没切过去）。下一次切成了、或者不用切了（人切好了、额度变了）撤。 */
 export const ORG_SWITCH_ALERT = `${SESSION_ORG_ALERT_PREFIX}switch`;
@@ -109,8 +116,8 @@ export interface OrgSwitchWiring {
   /** 这台机器给人看的名字：提醒里写清去哪台机器看。 */
   machine: string;
   /**
-   * Fusion 会话端口的切号那两样（real/sessions.ts，#59）：它的会话在跑也照切——先停下、等收场、再切，切完续上。
-   * 不给就等它的会话跑完再切（#157 的做法）。
+   * Fusion 会话端口的切号那两样（#59）：它的会话在跑也照切——先停下、等收场、再切，切完续上。端口本身已删（#901），
+   * 生产给 NO_FUSION_SESSIONS（见上）；不给就等它的会话跑完再切（#157 的做法）。
    */
   sessions?: OrgSwitchSessions;
   /**

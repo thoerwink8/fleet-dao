@@ -7,16 +7,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
-import { OUT_DIR } from '../../src/real/prompts.ts';
 import {
   bundleSince,
   changedFilesAgainst,
   changedFilesSince,
   checkoutBranch,
-  checkoutDetached,
   commitsSince,
   DISPOSABLE,
-  diffstatSince,
   disposableArgs,
   fastForward,
   fetchBundle,
@@ -25,10 +22,9 @@ import {
   LEFTOVER_LIST_MAX,
   mainlineRef,
   mergeInto,
+  OUT_DIR,
   ownSpan,
-  patchIdOf,
   pinMainline,
-  readFileAs,
   treeLeftovers,
   type UserTree,
   uncommittedTracked,
@@ -260,25 +256,6 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     expect(sh(t.dir, 'rev-parse', 'origin/main')).toBe(m.head);
   });
 
-  it('只读检出：分离头、清掉上一轮留下的文件', async () => {
-    const m = mirror();
-    const t = tree('scratch');
-    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
-    await checkoutDetached(t, m.head);
-    mkdirSync(join(t.dir, '.fleet-out'));
-    writeFileSync(join(t.dir, '.fleet-out', 'triage.json'), '{"clear":true}');
-    expect(await readFileAs(t, '.fleet-out/triage.json')).toBe('{"clear":true}');
-    await checkoutDetached(t, m.head);
-    expect(await readFileAs(t, '.fleet-out/triage.json')).toBeNull();
-  });
-
-  it('读结论文件：不在回 null；绝对路径、带 .. 的不读', async () => {
-    const t = tree('plain');
-    expect(await readFileAs(t, 'missing.json')).toBeNull();
-    await expect(readFileAs(t, '/etc/passwd')).rejects.toMatchObject({ code: 'BAD_INPUT' });
-    await expect(readFileAs(t, '../x')).rejects.toMatchObject({ code: 'BAD_INPUT' });
-  });
-
   it('git 没跑成（目录里没有仓）：明确报错，不当成「没有改动」', async () => {
     const t = tree('empty');
     await expect(uncommittedTracked(t)).rejects.toBeInstanceOf(PortError);
@@ -287,7 +264,6 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     const span = { base: 'a'.repeat(40), from: 'a'.repeat(40), mainline: 'b'.repeat(40) };
     await expect(changedFilesSince(t, span)).rejects.toMatchObject({ code: 'GIT_FAILED' });
     await expect(commitsSince(t, span)).rejects.toMatchObject({ code: 'GIT_FAILED' });
-    await expect(diffstatSince(t, span)).rejects.toMatchObject({ code: 'GIT_FAILED' });
     await expect(changedFilesAgainst(t, 'a'.repeat(40), 'b'.repeat(40))).rejects.toMatchObject({
       code: 'GIT_FAILED',
     });
@@ -300,74 +276,6 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
       code: 'BAD_INPUT',
     });
     await expect(checkoutBranch(t, 'b', 'HEAD')).rejects.toMatchObject({ code: 'BAD_INPUT' });
-  });
-});
-
-// patch-id：合并前重跑那一步头变了（合并队列自己把主线并进分支），判「这段时间是不是只并了主线、PR 自己的改动
-// 没变」用（fusion.ts 的 tryReuseSecondOpinion，#307/#389 那次真事：白白退回了三轮，其实测试没红）。
-describe('patch-id：ref 相对主线的改动', { timeout: 60_000 }, () => {
-  it('只并了主线、PR 自己的改动没变：两个不同的头，patch-id 一样', async () => {
-    const m = mirror();
-    const t = tree('work');
-    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
-    await checkoutBranch(t, 'fleet/12-a', m.head);
-    await pinMainline(t, 'main', m.head);
-    writeFileSync(join(t.dir, 'feature.ts'), 'export const feature = 1;\n');
-    execFileSync('git', ['add', '.'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'add feature'], { cwd: t.dir, env: ENV });
-    const head1 = sh(t.dir, 'rev-parse', 'HEAD');
-    const id1 = await patchIdOf(t, 'main', head1);
-    expect(id1).toMatch(/^[0-9a-f]{40}$/);
-
-    // 主线又往前走了一步：合并队列把它并进分支（普通合并，不是 rebase），PR 自己一个字都没再改
-    writeFileSync(join(m.dir, 'c.ts'), 'export const c = 1;\n');
-    sh(m.dir, 'add', '.');
-    sh(m.dir, 'commit', '-q', '-m', 'mainline moves on');
-    const mainNext = sh(m.dir, 'rev-parse', 'HEAD');
-    await fetchBundle(t, m.bundle(mainNext, m.head), 'refs/fleet/export/0');
-    await pinMainline(t, 'main', mainNext);
-    execFileSync('git', ['merge', '-q', '--no-ff', '--no-edit', 'refs/fleet/incoming'], {
-      cwd: t.dir,
-      env: ENV,
-    });
-    const head2 = sh(t.dir, 'rev-parse', 'HEAD');
-    expect(head2).not.toBe(head1);
-
-    const id2 = await patchIdOf(t, 'main', head2);
-    expect(id2).toBe(id1);
-  });
-
-  it('PR 自己又真改了一处：patch-id 跟着变，不当成一样', async () => {
-    const m = mirror();
-    const t = tree('work');
-    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
-    await checkoutBranch(t, 'fleet/12-a', m.head);
-    await pinMainline(t, 'main', m.head);
-    writeFileSync(join(t.dir, 'feature.ts'), 'export const feature = 1;\n');
-    execFileSync('git', ['add', '.'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'add feature'], { cwd: t.dir, env: ENV });
-    const id1 = await patchIdOf(t, 'main', sh(t.dir, 'rev-parse', 'HEAD'));
-
-    writeFileSync(join(t.dir, 'feature.ts'), 'export const feature = 2;\n');
-    execFileSync('git', ['add', '.'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'change feature again'], { cwd: t.dir, env: ENV });
-    const id2 = await patchIdOf(t, 'main', sh(t.dir, 'rev-parse', 'HEAD'));
-    expect(id2).not.toBe(id1);
-  });
-
-  it('【故意造出的失败】没钉主线、给的提交不在树里：算不出来，抛 GIT_FAILED（调用方按「没查成」处理，不许当成一样）', async () => {
-    const empty = tree('empty');
-    await expect(patchIdOf(empty, 'main', 'a'.repeat(40))).rejects.toMatchObject({ code: 'GIT_FAILED' });
-
-    const m = mirror();
-    const t = tree('work2');
-    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
-    await checkoutBranch(t, 'fleet/12-b', m.head);
-    // 没钉主线：merge-base 找不到 origin/main
-    await expect(patchIdOf(t, 'main', m.head)).rejects.toMatchObject({ code: 'GIT_FAILED' });
-    // 主线钉了，但给的提交不在树里
-    await pinMainline(t, 'main', m.head);
-    await expect(patchIdOf(t, 'main', 'f'.repeat(40))).rejects.toMatchObject({ code: 'GIT_FAILED' });
   });
 });
 
@@ -421,9 +329,6 @@ describe('这一步自己改了什么：扣掉会话并进来的主线（#293）
     const span = await ownSpan(t, base, 'main');
     expect(span).toMatchObject({ base, mainline: main });
     expect(await changedFilesSince(t, span)).toEqual(['packages/engine/src/hourly.ts']);
-    const stat = (await diffstatSince(t, span)).join('\n');
-    expect(stat).toContain('hourly.ts');
-    expect(stat).not.toContain('health');
     // 新提交：会话自己的并提交和提交，主线上别人的提交不算
     const commits = subjects(await commitsSince(t, span));
     expect(commits).toHaveLength(2);
@@ -442,7 +347,6 @@ describe('这一步自己改了什么：扣掉会话并进来的主线（#293）
     expect(sh(t.dir, 'diff', '--name-only', base, 'HEAD')).toBe(UI);
     const span = await ownSpan(t, base, 'main');
     expect(await changedFilesSince(t, span)).toEqual([]);
-    expect(await diffstatSince(t, span)).toEqual([]);
     // 只剩会话自己那个并提交
     expect(await commitsSince(t, span)).toHaveLength(1);
   });
@@ -771,7 +675,7 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     });
     const s = tree('scratch');
     await fetchBundle(s, m.bundle(m.head), 'refs/fleet/export/0');
-    await checkoutDetached(s, m.head);
+    sh(s.dir, 'checkout', '-q', '--force', '--detach', m.head);
     expect(await treeLeftovers(s, [])).toMatchObject({ kind: 'repo', unpushedCount: 0, dirtyCount: 0 });
   });
 
@@ -917,7 +821,7 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     // 和引擎给审查会话备的一样：检出 PR 头，主线另取进来再钉（refs/fleet/incoming 换成了主线头）
     const s = tree('12.review.a');
     await fetchBundle(s, m.bundle(pr), 'refs/fleet/export/0');
-    await checkoutDetached(s, pr);
+    sh(s.dir, 'checkout', '-q', '--force', '--detach', pr);
     await fetchBundle(s, m.bundle(main2, pr), 'refs/fleet/export/0');
     await pinMainline(s, 'main', main2);
     mkdirSync(join(s.dir, '.fleet-out'));

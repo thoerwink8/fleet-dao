@@ -72,8 +72,8 @@ export interface CreateEngineWorkerOptions {
   config: EngineConfig;
   ports: EnginePorts;
   /**
-   * 接活之前先收掉上一轮留下的会话（fleet-agent-scope list 再逐个 stop，再清它们的临时目录），返回收了几个会话。
-   * 引擎被强杀时会话留在自己的 scope 里；它们的输出管道断了、接不上，工作流会按 SESSION_LOST 续会话重起。
+   * 接活之前先收掉上一轮留下的会话（fleet-agent-scope list 再逐个 stop，再清它们的临时目录、收掉 runs 里没收场的行），返回收了几个会话。
+   * 引擎被强杀时会话留在自己的 scope 里；它们的输出管道断了、接不上，三段那一段由任务工作流重跑（real/orphan-reap.ts）。
    */
   reapOrphanSessions?: () => Promise<number>;
   /** 定时任务要的东西（真端口才有）；不给，定时任务的活动明确报 JOB_NOT_CONFIGURED。 */
@@ -138,7 +138,7 @@ export interface SignalSource {
 export interface GracefulShutdownOptions {
   worker: Pick<Worker, 'getState' | 'shutdown'>;
   drain: EngineDrain;
-  /** 到截止、被强停时停下还在跑的会话（real/sessions.ts 的 drainStop；假端口没有会话，给空的）。 */
+  /** 到截止、被强停时停下还在跑的会话（real/one-shot-sessions.ts 的 drainStop；假端口没有会话，给空的）。 */
   stopSessions(why: string): string[];
   log: (message: string) => void;
   /** 停机信号来时给在跑的会话的宽限；不给就是 RELEASE_GRACE_MS。发布请求的截止更早就按它的。 */
@@ -280,7 +280,6 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
   let stopSessions: (why: string) => string[] = () => [];
-  let releaseDetached: () => string[] = () => [];
   if (mode === 'real') {
     const { realPortsFromEnv } = await import('./real/index.ts');
     const real = realPortsFromEnv(env, { drain, ownSha: ownReleaseSha() });
@@ -294,7 +293,6 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
     stopSessions = real.drainControl.stopSessions;
-    releaseDetached = real.releaseDetached;
   } else {
     ports = createFakeWorld().ports;
   }
@@ -350,11 +348,6 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     );
     await worker.run();
   } finally {
-    // 工人停了、关库之前：脱开跑的会话放手（不停、不再写库），新引擎起来接回
-    const released = releaseDetached();
-    if (released.length > 0) {
-      console.info(`停机不停会话：${released.length} 个会话接着跑，新引擎起来接回：${released.join('、')}`);
-    }
     shutdown?.dispose();
     stopControl?.();
     await status?.flush();
