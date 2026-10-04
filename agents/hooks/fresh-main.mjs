@@ -63,8 +63,13 @@ export function fetchWithFallback(git, cwd, args, h) {
   };
 }
 
-/** 起子代理前取远端，每次取各自最多等这么久：调工具前钩子总共只有 10 秒（targets.ts），两次加起来要留出余量 */
-export const SUBAGENT_FETCH_MS = 4_000;
+/**
+ * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），两次加起来要留出余量。
+ * 首选路（环境里的代理，reclaude 的口）给 6 秒——2026-10-05 同时起了十来个子代理，代理瞬时慢过 4 秒，三个带工作树的子代理被误拦；
+ * 直连只是兜底给 3 秒（这台机器上直连经常直接超时，实测 21 秒才报错）。
+ */
+export const SUBAGENT_FETCH_MS = 6_000;
+export const SUBAGENT_DIRECT_MS = 3_000;
 
 /**
  * 起子代理（Agent / Task）之前，把 origin/main 取到最新：子代理的工作树从它切（见文件头）。
@@ -102,7 +107,7 @@ export function freshBeforeSubagent(o) {
 }
 
 /** 钩子里跑 git 的一份：opts.direct 为 true 时去掉代理；返回 { status, stdout, stderr, error, timeoutMs } */
-export function gitCall(/** @type {number} */ timeoutMs) {
+export function gitCall(/** @type {number} */ timeoutMs, /** @type {number} */ directTimeoutMs = timeoutMs) {
   return (
     /** @type {string} */ cwd,
     /** @type {string[]} */ args,
@@ -112,7 +117,7 @@ export function gitCall(/** @type {number} */ timeoutMs) {
       cwd,
       ...(opts.direct ? { env: withoutProxy() } : {}),
       encoding: 'utf8',
-      timeout: timeoutMs,
+      timeout: opts.direct ? directTimeoutMs : timeoutMs,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

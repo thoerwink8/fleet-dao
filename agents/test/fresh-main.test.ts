@@ -35,6 +35,8 @@ interface Lib {
     whyOf: (r: R) => string;
     env?: Record<string, string | undefined>;
   }): { block: true; message: string } | null;
+  SUBAGENT_FETCH_MS: number;
+  SUBAGENT_DIRECT_MS: number;
   gitOk(r: R): boolean;
   gitWhy(r: R): string;
 }
@@ -135,6 +137,14 @@ function repoGit(fetchResults: R[]) {
   };
   return { git, calls };
 }
+
+describe('起子代理前取远端的时间预算', () => {
+  // 调工具前钩子总共只有 10 秒（targets.ts）：超了钩子被杀，子代理照起、origin/main 却没取成，等于没拦住也没说
+  it('代理那一次加直连那一次，加起来留够余量（< 10 秒）；首选路比兜底的直连给得多', () => {
+    expect(lib.SUBAGENT_FETCH_MS + lib.SUBAGENT_DIRECT_MS).toBeLessThanOrEqual(9_000);
+    expect(lib.SUBAGENT_FETCH_MS).toBeGreaterThan(lib.SUBAGENT_DIRECT_MS);
+  });
+});
 
 describe('起子代理前先把 origin/main 取到最新', () => {
   it('取成了：放行（null），而且取的是 origin main', () => {
