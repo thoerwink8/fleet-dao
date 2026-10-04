@@ -1,7 +1,13 @@
 // 驾驶舱后端自己的接口：飞书草稿开单、发给工作流的信号（Temporal）、数据变化推送、健康检查、飞书登录。
 // Store 契约、GitHub 事件的接口、Logger 这些「不碰 HTTP」的在 @fleet-dao/store（引擎也用，api 不能被引擎反着依赖）；
 // 下面一行把它们转出来，是因为 auth.ts、health.ts、session.ts 这几份安全文件从 './ports.ts' 取类型，它们不跟着改。
-import type { RealtimeTable, Repo } from '@fleet-dao/shared';
+import type {
+  AbandonCommand,
+  ContinueCommand,
+  RealtimeTable,
+  Repo,
+  TASK_SIGNAL_NAMES,
+} from '@fleet-dao/shared';
 
 export * from '@fleet-dao/store';
 
@@ -55,38 +61,18 @@ export class DraftOpenerUnavailableError extends Error {
 
 // —— 发给工作流的信号（Temporal）——
 
+/**
+ * 驾驶舱后端能发给任务工作流的信号：只有引擎里真有人听的两个（名字和参数形状在 shared/task-signals.ts，引擎的 defineSignal
+ * 用同一份）。以前这里还列着 pause / reroute / answer / requireApproval / agentEvent，引擎里没有一个接收处，发出去等于没发（#901）；
+ * 要加新信号，先在引擎里接上、在 shared/task-signals.ts 里定名字，再回这里加。路由叫醒（taskRouteWake）只有引擎进程自己发。
+ */
 export type TaskSignal =
-  | { name: 'pause'; by: string; reason?: string | undefined }
-  | { name: 'resume'; by: string }
-  | { name: 'stop'; by: string; reason?: string | undefined }
-  | {
-      name: 'reroute';
-      by: string;
-      routeId: string;
-      subtaskId?: string | undefined;
-      reason?: string | undefined;
-    }
-  | { name: 'answer'; by: string; askId: string; answer: string }
-  /** 加人闸（合并前等人批）：会话问创始人时碰了人闸四类（#259）。不点名子任务就是整个需求。 */
-  | {
-      name: 'requireApproval';
-      by: string;
-      holds: string[];
-      subtaskId?: string | undefined;
-      reason?: string | undefined;
-    }
-  /** fleet 命令写库之后叫醒工作流（按进展判死活要用）。 */
-  | {
-      name: 'agentEvent';
-      runId: string;
-      kind: 'plan' | 'say' | 'ask' | 'done' | 'blocked';
-      askId?: string | undefined;
-    };
+  | ({ name: typeof TASK_SIGNAL_NAMES.continue } & ContinueCommand)
+  | ({ name: typeof TASK_SIGNAL_NAMES.abandon } & AbandonCommand);
 
 export interface WorkflowControl {
   /**
-   * 发给这条工作流（编号已经算好：调用方按 requirementWorkflowIdForTask 查库拼需求工作流编号，或
-   * subtaskWorkflowId 直接拼子任务编号，见 temporal.ts）。
+   * 发给这条工作流（编号已经算好：调用方按 taskWorkflowIdForTask 查库拼，见 temporal.ts）。
    * 工作流不存在或已结束时抛 WorkflowGoneError；Temporal 连不上、超时时抛 WorkflowUnavailableError。
    */
   signal(workflowId: string, signal: TaskSignal): Promise<void>;
@@ -109,7 +95,7 @@ export class WorkflowUnavailableError extends Error {
   }
 }
 
-/** 把任务/子任务解成工作流编号时，任务或它所在的仓不在库里：拼不出编号，不瞎拼，明确报错。 */
+/** 把任务解成工作流编号时，任务或它所在的仓不在库里：拼不出编号，不瞎拼，明确报错。 */
 export class WorkflowTargetNotFoundError extends Error {
   constructor(message: string) {
     super(message);

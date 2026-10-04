@@ -439,22 +439,36 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     },
   );
 
-  it('需求工作流还在跑、或者它的子任务工作流还在收尾：这张需求的树都不碰，「工作树没收掉」也留着', async () => {
+  it('任务工作流还在跑、或者它的子任务工作流还在收尾：这张单的树都不碰，「工作树没收掉」也留着', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login');
     probeDir();
     await alert(`sub:${sub.id}:worktree`);
-    const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    const running = fakeWorkflows({ 'task:acme/widgets#160': { state: 'running' } });
     expect(await runHourlyReconcileJob(deps({ workflows: running.reader }))).toMatchObject({ outcome: 'ok' });
     expect(existsSync(tree.dir)).toBe(true);
     expect((await alertByKey(t.db, `sub:${sub.id}:worktree`))?.resolvedAt).toBeNull();
 
     const finishing = fakeWorkflows({
-      'req:acme/widgets#160': { state: 'closed', status: 'COMPLETED' },
+      'task:acme/widgets#160': { state: 'closed', status: 'COMPLETED' },
       [`sub:${sub.id}`]: { state: 'running' },
     });
     await runHourlyReconcileJob(deps({ workflows: finishing.reader }));
     expect(existsSync(tree.dir)).toBe(true);
+  });
+
+  it('任务工作流（task:）在跑、树里没开着的会话（等 CI、等合并）：任务自己的树 <号>-t<8 位> 不被当残留删掉（#901）', async () => {
+    await work();
+    probeDir();
+    const tree = makeTree('acme_widgets/160-t1234abcd');
+    const running = fakeWorkflows({ 'task:acme/widgets#160': { state: 'running' } });
+    expect(await runHourlyReconcileJob(deps({ workflows: running.reader }))).toMatchObject({ outcome: 'ok' });
+    expect(running.asked).toContain('task:acme/widgets#160');
+    expect(existsSync(tree.dir)).toBe(true);
+    // 对照：旧的 req: 编号在跑（现实里不会有这条工作流）不算在用，这棵干净的树照删——保护认的是 task: 不是 req:
+    const legacy = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    await runHourlyReconcileJob(deps({ workflows: legacy.reader }));
+    expect(existsSync(tree.dir)).toBe(false);
   });
 
   it('工作流都不在跑了、树里却还有没结束的会话（被强行终止留下的、认不出的工作流起的）：不碰，记没查成写明是哪个会话；会话结束了照删', async () => {
@@ -512,8 +526,8 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     const stillOpen = async () =>
       (await alertByKey(t.db, 'req:acme/widgets#160:worktree'))?.resolvedAt === null;
 
-    // Fusion 的编号和需求工作流同一个：还在跑，树不碰、提醒留着
-    const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    // 这张单的任务工作流还在跑：树不碰、提醒留着
+    const running = fakeWorkflows({ 'task:acme/widgets#160': { state: 'running' } });
     await runHourlyReconcileJob(deps({ workflows: running.reader }));
     expect(existsSync(tree.dir)).toBe(true);
     expect(await stillOpen()).toBe(true);
@@ -539,7 +553,7 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     probeDir();
     makeTree('acme_widgets/161-fabcdef12');
     await alert('req:acme/widgets#160:worktree');
-    const other = fakeWorkflows({ 'req:acme/widgets#161': { state: 'running' } });
+    const other = fakeWorkflows({ 'task:acme/widgets#161': { state: 'running' } });
     await runHourlyReconcileJob(deps({ workflows: other.reader }));
     expect((await alertByKey(t.db, 'req:acme/widgets#160:worktree'))?.body).toMatch(
       /^已撤：这张需求的树已经不在了（acme_widgets\/160-f…）/,

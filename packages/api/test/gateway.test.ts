@@ -1,4 +1,4 @@
-import { FEISHU_ACTING_HEADER, requirementWorkflowId, TaskDetailResponse } from '@fleet-dao/shared';
+import { FEISHU_ACTING_HEADER, TaskDetailResponse, taskWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   agentRequest,
@@ -28,8 +28,8 @@ describe('飞书网关通行证', () => {
     expect(res.status).toBe(200);
     expect(h.signals).toEqual([
       {
-        workflowId: requirementWorkflowId({ owner: 'example', name: 'canary' }, 12),
-        signal: { name: 'stop', by: DEV_USER_ID, reason: '飞书里点的叫停' },
+        workflowId: taskWorkflowId({ owner: 'example', name: 'canary' }, 12),
+        signal: { name: 'taskAbandon', by: DEV_USER_ID, reason: '飞书里点的叫停' },
       },
     ]);
     expect(h.store.data.audit.at(-1)).toMatchObject({
@@ -40,7 +40,7 @@ describe('飞书网关通行证', () => {
     });
   });
 
-  it('网关对需求只能叫停：暂停、继续、换路由一律 403，什么都不做；驾驶舱里照常能暂停', async () => {
+  it('网关对需求只能叫停：暂停、继续、换路由一律 403，什么都不做；驾驶舱里照常能继续', async () => {
     const h = harness();
     for (const body of [
       { action: 'pause', reason: '飞书里点的暂停' },
@@ -62,10 +62,10 @@ describe('飞书网关通行证', () => {
     const session = await h.login();
     const res = await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      write('POST', session, { action: 'pause', reason: '驾驶舱里点的暂停' }),
+      write('POST', session, { action: 'resume' }),
     );
     expect(res.status).toBe(200);
-    expect(h.signals.map((s) => s.signal.name)).toEqual(['pause']);
+    expect(h.signals.map((s) => s.signal.name)).toEqual(['taskContinue']);
   });
 
   it('通行证不对、格式不对、没配通行证：401；不会退回去认 Cookie', async () => {

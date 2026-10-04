@@ -77,10 +77,9 @@ describe('接口跑在真库上', () => {
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
   });
 
-  it('fleet 命令带同一个幂等键重试：库里只有一条进度，只叫醒一次', async () => {
+  it('fleet 命令带同一个幂等键重试：库里只有一条进度，不发信号', async () => {
     const h = await start();
-    // blocked 属于 AGENT_EVENT_WAKE_KINDS（会叫醒工作流），say 不会——用它才能证明「幂等键去重连带去重叫醒」
-    // 在真库（不只是内存版）上也成立。
+    // 幂等键去重在真库（不只是内存版）上也成立；fleet 命令只写库、不发信号（#901）。
     const blocked = () =>
       h.agent.request(
         '/agent/v1/blocked',
@@ -98,7 +97,7 @@ describe('接口跑在真库上', () => {
       .from(progressEvents)
       .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'blocked')));
     expect(rows.filter((r) => (r.payload as { reason?: string }).reason === '真库上的一句')).toHaveLength(1);
-    expect(h.signals).toHaveLength(1);
+    expect(h.signals).toHaveLength(0);
   });
 
   it('fleet ask 在真库上：不等回答、当场按推荐先做，范围和推荐落库；别处（飞书、issue）写进库的回答，再问同一句回「答过了」', async () => {

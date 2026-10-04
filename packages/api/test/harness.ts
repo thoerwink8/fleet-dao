@@ -108,7 +108,7 @@ export interface Harness<S extends Store = Store> {
   config: Config;
   store: S;
   changes: ChangeFeed;
-  /** workflowId 是目标工作流的编号（req:owner/name#issueNumber 或 sub:subtaskId），不是调用方传的原始 taskId。 */
+  /** workflowId 是目标工作流的编号（task:owner/name#issueNumber），不是调用方传的原始 taskId。 */
   signals: { workflowId: string; signal: TaskSignal }[];
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];

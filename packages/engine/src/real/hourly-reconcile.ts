@@ -271,7 +271,9 @@ export function hourlyReconcileJob(
       async approval(id) {
         const a = await getApproval(w.db, id);
         if (!a) return null;
-        // 子任务发的等子任务工作流；Fusion 发的（没有子任务）等需求工作流（编号和需求工作流同一个）
+        // 子任务发的等子任务工作流；Fusion 发的（没有子任务）等需求工作流（编号和需求工作流同一个）。这两种工作流引擎里都
+        // 已经没有了：旧批准提醒查出来是「不在了」就撤，这里要继续拼旧的 req: 编号才撤得掉，不能换成 task:（任务工作流的
+        // status 查询形状不同，对账读不了会一直记没查成）。#901 查出来的，随提醒对账那一整套旧读法另开单换。
         let waitingWorkflowId: string | null = a.subtaskId ? subtaskWorkflowId(a.subtaskId) : null;
         if (!a.subtaskId) {
           const task = await taskContext(w.db, a.taskId);

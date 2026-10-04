@@ -15,13 +15,18 @@ export const TASK_WORKFLOW_TYPE = 'taskWorkflow';
 
 /**
  * 一张 issue 一条任务工作流，例如 `task:acme/demo#12`。编号定死、起的时候用 REJECT_DUPLICATE（同一编号不管开着还是已经结束都不许再起），
- * 同一张单任何时候最多一条：做完的、停下的不会自己重来，要人在驾驶舱点「继续」（发信号）。驾驶舱后端发信号也按这个拼。
+ * 同一张单任何时候最多一条：做完的、被放弃的不会自己重来，也收不到信号（驾驶舱「继续」「叫停」发给它回 409 workflow_gone）；
+ * 「继续」只叫得醒还在跑、停着等人的那一条。驾驶舱后端发信号也按这个拼（api/src/temporal.ts 的 taskWorkflowIdForTask），信号名见 task-signals.ts。
  */
 export function taskWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `task:${repo.owner}/${repo.name}#${issueNumber}`;
 }
 
-/** 一张 issue 一条工作流（Fusion；在途的旧需求工作流也是这个编号），例如 `req:acme/demo#12`。 */
+/**
+ * 旧 Fusion 的需求工作流编号，例如 `req:acme/demo#12`。引擎里这条工作流已经没有了，驾驶舱后端也不再往它发信号（#901）；
+ * 只剩每小时对账（engine/src/real/hourly-reconcile.ts）拼它来认「在等旧批准的工作流已经不在了」、把旧提醒撤掉。
+ * 对账那一套旧读法换掉时（#901 查出的同根问题，另开单）这个函数一起删，别在别处新用。
+ */
 export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `req:${repo.owner}/${repo.name}#${issueNumber}`;
 }
@@ -33,10 +38,3 @@ export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number
 export function subtaskWorkflowId(subtaskId: string): string {
   return `sub:${subtaskId}`;
 }
-
-/**
- * fleet 命令写库之后，只有这几类值得叫醒工作流（会改变走向）；say、plan 只进库，驾驶舱从库里读。
- * 每条都发的话，一个需求二十来个子任务就能把工作流的历史撑到上万条事件，撞上 Temporal 每条执行 1 万个信号的上限后，
- * 连叫停都发不进去。叫醒直接发给会话所属的工作流：子任务的会话发 subtaskWorkflowId，需求自己的会话发需求工作流。
- */
-export const AGENT_EVENT_WAKE_KINDS = ['ask', 'done', 'blocked'] as const;

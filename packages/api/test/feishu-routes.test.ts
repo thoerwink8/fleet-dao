@@ -10,7 +10,6 @@ import {
   FeishuReviseDraftResponse,
   FeishuRoutes,
   FeishuTaskLookupResponse,
-  requirementWorkflowId,
 } from '@fleet-dao/shared';
 import type { MemoryData } from '@fleet-dao/store';
 import { devFixtures, feishuMessageKey, feishuReviseKey } from '@fleet-dao/store';
@@ -381,14 +380,10 @@ describe('POST /feishu/messages：一句话', () => {
       via: 'feishu',
       target: `task:${IDS.task12}`,
     });
-    expect(h.signals).toEqual([
-      {
-        workflowId: requirementWorkflowId({ owner: 'example', name: 'canary' }, 12),
-        signal: { name: 'answer', by: IDS.founderA, askId: FEISHU_IDS.askOpen, answer: '6 位' },
-      },
-    ]);
+    // 引擎的任务工作流不听「回答」信号：回答只落库，不往 Temporal 发（#901）
+    expect(h.signals).toEqual([]);
     expect(FeishuMessageResponse.parse(await (await reply()).json())).toEqual(body);
-    expect(h.signals).toHaveLength(1);
+    expect(h.signals).toHaveLength(0);
     expect(h.store.data.audit.filter((a) => a.action === 'ask.answer')).toHaveLength(1);
   });
 
