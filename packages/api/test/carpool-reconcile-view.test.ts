@@ -1,5 +1,7 @@
 // 驾驶舱额度页的「拼车额度对账」（carpool-reconcile-view.ts，#194 方案 4.7）：本机记到的花费 vs 接口说的已用；
 // 差得多写「多半是别的设备在用」，扣掉没记到花费的会话；读不到、窗口已过、没法估都写明，不拿「对得上」冒充。只显示、不报警。
+
+import type { CarpoolWindowSpend } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import { carpoolReconcileView } from '../src/carpool-reconcile-view.ts';
 
@@ -14,7 +16,7 @@ const api = (used: number | null, over: Record<string, unknown> = {}) => ({
   staleSince: null,
   ...over,
 });
-const spend = (over: Partial<Parameters<typeof carpoolReconcileView>[0] & object>['spend'] = {}) => ({
+const spend = (over: Partial<CarpoolWindowSpend> = {}): CarpoolWindowSpend => ({
   sessions: 5,
   recordedUsd: 20,
   recorded: 5,
