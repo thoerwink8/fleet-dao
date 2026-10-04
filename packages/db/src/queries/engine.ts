@@ -13,7 +13,7 @@ import type {
   SubtaskState,
   TaskState,
 } from '@fleet-dao/shared';
-import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
 import {
@@ -291,44 +291,7 @@ export async function openSessionRuns(
   return rows.map((r) => mapSessionRun(r.run, r.stop));
 }
 
-/** 选路算熔断和战绩用：since 之后结束的会话。 */
-export async function routeOutcomesSince(
-  db: Db,
-  since: Date,
-): Promise<
-  {
-    routeId: string;
-    stage: StageKind;
-    endedAt: Date;
-    outcome: RunOutcome;
-    routeOutcome: 'ok' | 'fail' | 'neutral' | null;
-  }[]
-> {
-  const rows = await db
-    .select({
-      routeId: sessionRuns.routeId,
-      stage: sessionRuns.stage,
-      endedAt: sessionRuns.endedAt,
-      outcome: sessionRuns.outcome,
-      routeOutcome: sessionRuns.routeOutcome,
-    })
-    .from(sessionRuns)
-    .where(gte(sessionRuns.endedAt, since));
-  return rows.map((r) => {
-    // 结束了就必有结局（session_runs_outcome_iff_ended 检查约束），gte 也已经把 endedAt 为空的行排除在外；
-    // 这里只是不裸用 ! 断言，真出现数据和约束对不上时要能看见报错，不是当空处理。
-    if (r.endedAt === null || r.outcome === null) {
-      throw new Error(`会话（路由 ${r.routeId}）已结束却没有结局，数据和检查约束对不上`);
-    }
-    return {
-      routeId: r.routeId,
-      stage: r.stage,
-      endedAt: r.endedAt,
-      outcome: r.outcome,
-      routeOutcome: r.routeOutcome,
-    };
-  });
-}
+// 选路要的会话事实（池的并发、熔断、战绩、估算的用量）两张表并起来读，都在 pool-runs.ts：别在这里另写只读 session_runs 的（#758）。
 
 // ---- 起会话要的事实
 

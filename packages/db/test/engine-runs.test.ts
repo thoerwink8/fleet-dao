@@ -11,7 +11,6 @@ import {
   openSessionRuns,
   requestSessionStop,
   routeLaunchFacts,
-  routeOutcomesSince,
   taskContext,
 } from '../src/queries/engine.ts';
 import { setRoutingEffort } from '../src/routing-effort.ts';
@@ -456,36 +455,6 @@ describe('openSessionRuns', () => {
     expect((await openSessionRuns(t.db, { runAsUser: 'fleet-agent-carpool' })).map((r) => r.id)).toEqual([
       carpool,
     ]);
-  });
-});
-
-describe('routeOutcomesSince', () => {
-  it('只要 since 之后结束的会话', async () => {
-    const early = runId();
-    const late = runId();
-    for (const [id, endedAt] of [
-      [early, ago(2 * HOUR)],
-      [late, ago(MIN)],
-    ] as const) {
-      await openSessionRun(t.db, {
-        id,
-        taskId: null,
-        subtaskId: null,
-        stage: 'execute',
-        routeId: 'r1',
-        whyRoute: 'x',
-        branch: null,
-        queuedAt: ago(3 * HOUR),
-        workflowId: null,
-        runAsUser: null,
-        worktreePath: null,
-      });
-      await markSessionRunStarted(t.db, { id, startedAt: ago(3 * HOUR), sessionId: id, handle: null });
-      await finishSessionRun(t.db, { id, outcome: 'ok', endedAt, routeOutcome: 'ok' });
-    }
-    const rows = await routeOutcomesSince(t.db, ago(HOUR));
-    expect(rows.map((r) => r.routeId)).toEqual(['r1']);
-    expect(rows[0]).toMatchObject({ stage: 'execute', outcome: 'ok', routeOutcome: 'ok' });
   });
 });
 
