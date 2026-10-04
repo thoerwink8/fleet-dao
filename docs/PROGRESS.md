@@ -103,11 +103,23 @@
 
 **如果两个键设了还停**（issue #13291 有人报过这种情况，WSL 新版本改过空闲回收行为）：兜底是「留一个进程在实例里」——`wsl --exec dbus-launch true`（这条起的进程挂在实例的 PID 2 下，能吊住整个发行版；Windows 重启后要重跑一次），或者干脆跑演练那几次**留一个 wsl 窗口开着别关**，实测窗口开着就不回收。备选 `tmux new -d` 也行。这三条都不用改配置、不用 `wsl --shutdown`。
 
+## 2026-10-04 晚（无人值守队列，创始人 20:50「按优先级做完」）
+
+先后按 `pnpm plan`（v3 先后清单）。今晚已合：#823 消息落盘、#829/#832 引导钩子（旧钩子发现并换新）、#830 #754 第一步（只摘触发器，不删表）、#831/#833 开会话列最近的话、#834 起后台活自动开无人值守。清单修了一处：#786 是 #450 的子单不能排在这层，已摘（连同已关的 #769、#807）。
+
+在做（子代理 Opus，各自工作树）：#593 发布 PR 触发 Actions 收尾；#777 法国巡检仓换成不同于演练仓的另一个；#76 定时读额度入库（先查现状）。
+
+卡着等创始人：① #452 本机演练要在 fleet-local 里以 root 发一版并让 WSL 一直开着——安全检查拦过一次，没绕开，等他点头（选 1 两个动作都做、选 2 只发布）；② #754 删表迁移（删数据）；③ WSL 的 .wslconfig（他自己的 Windows 那头）。
+
+排队：#194 拼车自动切独享（方案 v2 他已答完，工作量大）、#323 配置进仓对账、#574 #216 #345 剩的、#820 驾驶舱补环境视图。
+
 ## 2026-10-04 晚（#76 定时读额度收尾，Opus 子代理）
 
 - **现状查清**：引擎那一半早已合（#677 `quota-read` 每 15 分钟读、读成按池入库、连着两轮没读成或凭据/配置类当场报；#678 每小时对账第三处 `checkQuotaFreshness`；#679 估算类池接用量记录），测试齐。**缺的是驾驶舱**：`api/src/main.ts` 还挂着 `notWired.quota`，额度页在生产上整块是「待实现 · #76」，拼车 5 小时美元窗口根本看不到。
 - **#837（分支 `feat/76-quota-dashboard-wired`）**：去掉额度的「待实现」占位（连同只为它留的 `Deps.notWired`、`PoolsResponse.quotaNotWired`、换模型对话框的 `quotaNotWired` 参数）；额度格的「实读/估算」悬停写读法（`reclaude-carpool` 等）；design 第六节第 4 层、ops（对账提醒怎么处理、`/etc/fleet-dao/quota.json` 进配置清单、「待实现」那段）、adapters 文档跟着写实。
 - **还没做 / 没验证**：法国真机（法国引擎关着，复查 10-15；`/etc/fleet-dao/quota.json` 还没放，要创始人的凭据和机器，放上之前 `quota-read:config` 会一直报）；Grok、Cursor 池在法国怎么读（凭据形态没定，读不到照实报没读成）；「发布时核对 quota.json」10-03 判为重复不做，验收原文改不改等关单时创始人定。#76 不关。
+
+## 2026-10-04（#574 剩的代码，Opus 子代理分三个 PR：装载 → 选路 → 界面）
 
 - **装载，#716 已合**：发布时目录装完接着装路由两层（`deploy/release.sh` 的 `load_routing` → `packages/db/src/bin/routing.ts` → `runRoutingApply`：读这一版带的 `packages/db/routing.default.json`、只补缺写进两张表、日志写补了几行/保持几个），装不成、读不回、装完 0 行都红、不切版本。测试：`packages/db/test/routing-apply-release.test.ts`（真骨架 + 目录样例装得进、再装已齐；骨架读不到、目录没装都明确失败一行不写）、`deploy/test/release-flow.test.sh`「装路由两层」一段（本机 Git Bash 建不了符号链接，「切到哪一版」那几条只在 CI 上验）。
 - **选路改读新表，#722 已合**：引擎 `pickRoute` / `stageAllOpen` 的事实改成 `routeFactsForPurpose`（`routingLayers` 摊平：先用途的模型顺序、再模型下的路由顺序），仍交给同一个 `chooseRoute`——死的挡掉写原因、额度未知的排在活的后面、全死回 `waitFor: 'none'` 逐条写原因，配置缺口（用途没配、模型下没路由）写进原因；两层没有「钉住」，一律按没钉住算。路由探针的「在不在用」、切号看的「在用的路由」也改按两层（`routesInUse`）。`stageCandidates` 没有别的调用方，删了，测试改到两层上。新测试：`packages/engine/test/real/store-ports.test.ts`「路由两层选路」四条（第一顺位死了跳到第二、全死明确失败、不知道排后面、配置缺口写进原因）。
