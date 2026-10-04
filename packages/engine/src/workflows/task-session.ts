@@ -123,6 +123,8 @@ export async function writeSession(
 async function pickRoute(rt: TaskRuntime, avoid: Avoid, stick?: string): Promise<RouteChoice> {
   for (;;) {
     rt.guard();
+    // 叫醒的记号要在问选路之前取（#194 方案 4.3）：问的这一下读的是切号完成之前的事实，期间到的叫醒要让下面的等待当场醒
+    const mark = rt.routeWakeMark();
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,
@@ -140,6 +142,7 @@ async function pickRoute(rt: TaskRuntime, avoid: Avoid, stick?: string): Promise
       avoid = NO_AVOID;
       continue;
     }
-    await rt.pause(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS);
+    // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒
+    await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
   }
 }
