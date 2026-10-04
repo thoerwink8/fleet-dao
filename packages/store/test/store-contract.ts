@@ -434,6 +434,26 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(first.nextCursor).toBeDefined();
         await store.listAudit({ cursor: first.nextCursor, limit: 1 });
       });
+
+      it('刚好翻完一页整数条：最后一页没有下一页游标；少取一条就有（操作记录、时间线、通知同一个判法）', async () => {
+        for (let i = 0; i < 3; i++) {
+          tick();
+          await store.appendAudit(audit());
+        }
+        const total = (await store.listAudit({ limit: 500 })).items.length;
+        expect((await store.listAudit({ limit: total })).nextCursor).toBeUndefined();
+        expect((await store.listAudit({ limit: total - 1 })).nextCursor).toBeDefined();
+        const timeline = (await store.listTimeline(IDS.task12, { limit: 500 })).items.length;
+        expect((await store.listTimeline(IDS.task12, { limit: timeline })).nextCursor).toBeUndefined();
+        expect((await store.listTimeline(IDS.task12, { limit: timeline - 1 })).nextCursor).toBeDefined();
+        const notes = (await store.listNotifications({ status: 'all', limit: 500 })).items.length;
+        expect((await store.listNotifications({ status: 'all', limit: notes })).nextCursor).toBeUndefined();
+        if (notes > 1) {
+          expect(
+            (await store.listNotifications({ status: 'all', limit: notes - 1 })).nextCursor,
+          ).toBeDefined();
+        }
+      });
     });
 
     describe('追问', () => {
@@ -1334,6 +1354,78 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           exhausted: 2,
           stale: 2,
         });
+      });
+
+      // —— 下面几条钉住两套 Store 共用的判断（delivery-logic.ts）的边界：改错任何一边，两边都得红 ——
+
+      it('占用刚好等于 staleBefore 不算过期（严格早于才算）；晚一毫秒就接得过去', async () => {
+        await store.claimDelivery(delivery('edge'), { staleBefore: stale() });
+        const claimedAt = clock.now.toISOString();
+        expect(await store.claimDelivery(delivery('edge'), { staleBefore: claimedAt })).toEqual({
+          status: 'duplicate',
+        });
+        expect(await store.reclaimDelivery('edge', { staleBefore: claimedAt, force: false })).toEqual({
+          status: 'in_flight',
+        });
+        expect(await store.listUnfinishedDeliveries({ staleBefore: claimedAt, limit: 10 })).toEqual([]);
+        tick(1);
+        expect(
+          await store.claimDelivery(delivery('edge'), { staleBefore: clock.now.toISOString() }),
+        ).toMatchObject({ status: 'claimed', retry: true });
+      });
+
+      it('force 重放：处理中而且占用已过期的也抢得到（和不 force 一样）；没过期的 force 也不抢', async () => {
+        const first = await store.claimDelivery(delivery('stuck'), { staleBefore: stale() });
+        expect(await store.reclaimDelivery('stuck', { staleBefore: stale(), force: true })).toEqual({
+          status: 'in_flight',
+        });
+        tick(6 * MIN);
+        const forced = await store.reclaimDelivery('stuck', { staleBefore: stale(), force: true });
+        expect(forced).toMatchObject({ status: 'claimed' });
+        if (forced.status !== 'claimed') throw new Error('没抢到');
+        expect(forced.delivery).toMatchObject({ id: 'stuck', status: 'processing', attempts: 2 });
+        // 抢走之后旧凭据记不上
+        expect(await store.finishDelivery('stuck', tokenOf(first), { status: 'accepted' })).toBe(false);
+        tick(6 * MIN);
+        const plain = await store.reclaimDelivery('stuck', { staleBefore: stale(), force: false });
+        expect(plain).toMatchObject({ status: 'claimed' });
+      });
+
+      it('别的投递带过这一版、但出错或等着（不是被门挡掉）：补收是 duplicate，不落库', async () => {
+        const carry = async (
+          id: string,
+          version: string,
+          outcome: Parameters<Store['finishDelivery']>[2],
+        ) => {
+          await settled(delivery(id, { versions: [ver(version)] }), outcome);
+          expect(
+            await store.claimDelivery(
+              delivery(`poll-after-${id}`, { source: 'poll', versions: [ver(version)] }),
+              { staleBefore: stale(), skipIfSeen: { object: ISSUE, version } },
+            ),
+          ).toEqual({ status: 'duplicate' });
+          expect(await store.getDelivery(`poll-after-${id}`)).toBeNull();
+        };
+        await carry('carrier-failed', V1, { status: 'failed', reason: '库连不上' });
+        await carry('carrier-waiting', '2026-09-25T07:30:00.000Z', {
+          status: 'waiting',
+          reason: '上一轮还没结束',
+        });
+      });
+
+      it('同一时刻的两版（更新的一版时刻相同）不算盖过', async () => {
+        const at = '2026-09-25T07:03:00.000Z';
+        await settled(delivery('same-closed', { versions: [ver(at, { state: 'closed' })] }), {
+          status: 'accepted',
+        });
+        expect(
+          await store.findSupersedingVersion({
+            object: ISSUE,
+            version: '2026-09-25T07:03:00Z',
+            state: 'open',
+            excludeDeliveryId: 'me',
+          }),
+        ).toBeNull();
       });
     });
 

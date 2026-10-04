@@ -51,17 +51,25 @@ jobs:
     steps:
       # 默认检出触发分支（pull_request_target 也是主线），高风险清单和判法都用主线上的：PR 改不了自己的门槛
       - uses: actions/checkout@v4
-      # ci.yml 的结构比对（workflow-structure.ts）要解析 YAML：只装 conventions 这一个包的依赖。装的是主线检出里的锁文件和
-      # 主线的代码，不碰 PR 的。这三步都 continue-on-error：装不上（镜像、网络、锁文件坏了）不能让所有 PR 的合并闸一起红，
-      # 只让改 ci.yml 的 PR 判「读不懂」（= 要审）——那边是按需加载 yaml 的，别的 PR 用不到它、照常判。
-      - uses: pnpm/action-setup@v4
-        continue-on-error: true
       - uses: actions/setup-node@v4
-        continue-on-error: true
         with:
           node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile --filter @fleet-dao/conventions
+      # ci.yml 的结构比对（workflow-structure.ts）要解析 YAML，得装 conventions 这一个包的依赖——但只有改了已有 ci.yml 的 PR
+      # 才用得到它（按需加载 yaml），绝大多数 PR 不碰 ci.yml：先问一遍「这次要算的 PR 里有没有改已有 ci.yml 的」，
+      # 查实没有（needed=false）才不装；查不成、事件认不出、清单读不出，一律 true（装），所以这一步崩了没写出输出也是「不是 false 就装」。
+      # 装的是主线检出里的锁文件和主线的代码，不碰 PR 的。装依赖那三步 continue-on-error：装不上（镜像、网络、锁文件坏了）
+      # 不能让所有 PR 的合并闸一起红，只让改 ci.yml 的 PR 判「读不懂」（= 要审）。
+      # 实测：装依赖这几步（action-setup、带缓存的 setup-node、install）占这个 job 15 秒里的 8–10 秒。
+      - id: yaml
+        continue-on-error: true
+        run: node packages/conventions/src/bin/merge-gate.ts --needs-yaml
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - if: steps.yaml.outputs.needed != 'false'
+        uses: pnpm/action-setup@v4
+        continue-on-error: true
+      - if: steps.yaml.outputs.needed != 'false'
+        run: pnpm install --frozen-lockfile --filter @fleet-dao/conventions
         continue-on-error: true
       # 退出码 2 = 有 PR 没算成或没写上状态（没写上的那个 PR 缺 merge-gate，合不了），同样是红
       - run: node packages/conventions/src/bin/merge-gate.ts

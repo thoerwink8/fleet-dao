@@ -1,6 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ghApi } from '../src/gh-api.ts';
 import {
@@ -10,6 +11,7 @@ import {
   gateGitHub,
   gatePr,
   runMergeGate,
+  workflowParseNeeded,
 } from '../src/merge-gate.ts';
 import type { RiskPath } from '../src/merge-gates.ts';
 
@@ -763,5 +765,145 @@ describe('合并闸：先合后审（review: after-merge）不等第二意见，
     expect(r.state).toBe('failure');
     expect(r.lines.join('\n')).toContain('等第二意见');
     expect(r.lines.join('\n')).toContain('deploy/france.sh');
+  });
+});
+
+describe('合并闸：只有改了已有 ci.yml 的 PR 才装 YAML 依赖（workflowParseNeeded + merge-gate.yml）', () => {
+  const CI = '.github/workflows/ci.yml';
+  function eventFile(event: unknown): string {
+    const path = join(mkdtempSync(join(tmpdir(), 'fleet-gate-need-')), 'event.json');
+    writeFileSync(path, JSON.stringify(event));
+    return path;
+  }
+  const need = (
+    w: { gh: GitHubReads },
+    eventName = 'pull_request_target',
+    event: unknown = { pull_request: { number: 80 } },
+    riskListText: string | undefined = RISK_TEXT,
+  ) => workflowParseNeeded({ eventName, eventPath: eventFile(event), riskListText, gh: w.gh });
+
+  it('假 PR 事件一：只改了普通文件（没改 ci.yml）→ 不用装', async () => {
+    const r = await need(world({ files: ['docs/x.md', 'packages/cli/src/help.ts'] }));
+    expect(r.needed).toBe(false);
+  });
+
+  it('假 PR 事件二：改了已有的 ci.yml → 要装', async () => {
+    const r = await need(world({ files: ['docs/x.md', CI] }));
+    expect(r.needed).toBe(true);
+    expect(r.why).toContain('改了已有的工作流');
+  });
+
+  it('同目录别的工作流、新加/删掉 ci.yml：闸整份算碰了、不解析前后两份，不用装', async () => {
+    expect((await need(world({ files: ['.github/workflows/merge-gate.yml'] }))).needed).toBe(false);
+    for (const status of ['added', 'removed']) {
+      expect((await need(world({ files: [CI], status }))).needed, status).toBe(false);
+    }
+  });
+
+  it('主线推送、状态事件（开着的 PR 全重算）：只要有一个改了 ci.yml 就装；都没有就不装；已关的不算', async () => {
+    const prs = new Map([
+      [80, ['docs/x.md']],
+      [81, [CI]],
+    ]);
+    const gh: GitHubReads = {
+      ...world().gh,
+      pr: async (n) => ({
+        number: n,
+        head: { sha: HEAD, ref: 'feat/x' },
+        base: { sha: BASE },
+        changed_files: prs.get(n)?.length ?? 0,
+        state: 'open',
+      }),
+      files: async (n) => (prs.get(n) ?? []).map((filename) => ({ filename, status: 'modified' })),
+      openPrs: async () => [...prs.keys()].map((number) => ({ number })),
+    };
+    expect((await need({ gh }, 'push', { ref: 'refs/heads/main' })).needed).toBe(true);
+    prs.delete(81);
+    expect((await need({ gh }, 'push', { ref: 'refs/heads/main' })).needed).toBe(false);
+    const closed = world({ files: [CI], prOver: { state: 'closed' } });
+    expect((await need(closed)).needed).toBe(false);
+  });
+
+  it('【故意造出的失败】没判成的一律要装（不拿「没查成」当「不需要」）：事件认不出、读不到文件列表、读不到 PR、清单读不出、文件数对不上', async () => {
+    const files = world({ files: ['docs/x.md'] });
+    expect((await need(files, 'schedule', {})).needed).toBe(true);
+    expect((await need(files, 'pull_request_target', {})).needed).toBe(true);
+    const ev = { pull_request: { number: 80 } };
+    // 清单读不到（undefined）、认不出（不是 JSON）
+    for (const riskListText of [undefined, '{']) {
+      const r = await workflowParseNeeded({
+        eventName: 'pull_request_target',
+        eventPath: eventFile(ev),
+        riskListText,
+        gh: files.gh,
+      });
+      expect(r.needed, String(riskListText)).toBe(true);
+    }
+    const noFiles = world({ files: ['docs/x.md'] });
+    noFiles.broken.files = '限流';
+    const r = await need(noFiles);
+    expect(r.needed).toBe(true);
+    expect(r.why).toContain('限流');
+    const noPr = world({ files: ['docs/x.md'] });
+    noPr.broken.pr = '502';
+    expect((await need(noPr)).needed).toBe(true);
+    // PR 说改了 3 个文件、只读到 1 个（超过 GitHub 列表上限）：可能漏了 ci.yml
+    const short = world({ files: ['docs/x.md'], prOver: { changed_files: 3 } });
+    expect((await need(short)).needed).toBe(true);
+    const noEvent = await workflowParseNeeded({
+      eventName: 'pull_request_target',
+      eventPath: '/不存在/event.json',
+      riskListText: RISK_TEXT,
+      gh: files.gh,
+    });
+    expect(noEvent.needed).toBe(true);
+  });
+
+  describe('merge-gate.yml 的写法', () => {
+    const yml = readFileSync(
+      fileURLToPath(new URL('../../../.github/workflows/merge-gate.yml', import.meta.url)),
+      'utf8',
+    );
+    const WHEN = "if: steps.yaml.outputs.needed != 'false'";
+    /** 装依赖那两步没按 needed 条件限制、判断步没有 continue-on-error、顺序不对：返回问题；没问题返回空。 */
+    function problems(text: string): string[] {
+      const out: string[] = [];
+      const steps = text.slice(text.indexOf('    steps:')).split(/^ {6}- /m);
+      const find = (needle: string) => steps.find((s) => s.includes(needle));
+      const ask = find('--needs-yaml');
+      if (!ask) return ['没有「先问要不要装」那一步'];
+      if (!/id: yaml\b/.test(ask)) out.push('问的那一步没有 id: yaml');
+      if (!ask.includes('continue-on-error: true'))
+        out.push('问的那一步没有 continue-on-error（它崩了会让所有 PR 的闸一起红）');
+      for (const needle of ['pnpm/action-setup', 'pnpm install']) {
+        const s = find(needle);
+        if (!s) out.push(`没有 ${needle} 那一步`);
+        else if (!s.includes(WHEN)) out.push(`${needle} 没按「不是 false 就装」限制`);
+      }
+      if (text.indexOf('--needs-yaml') > text.indexOf('pnpm install')) out.push('问的那一步排在装依赖之后');
+      return out;
+    }
+
+    it('问一步、装依赖按「不是 false 就装」，真正判的那一步在后面', () => {
+      expect(problems(yml)).toEqual([]);
+      expect(yml.indexOf('bin/merge-gate.ts --needs-yaml')).toBeLessThan(
+        yml.lastIndexOf('node packages/conventions/src/bin/merge-gate.ts\n'),
+      );
+    });
+
+    it('【故意造出的失败】条件写成「== true 才装」（输出没写出来就不装）、去掉条件、判断步没有 continue-on-error：都查得出来', () => {
+      const lenient = yml.replaceAll(
+        "steps.yaml.outputs.needed != 'false'",
+        "steps.yaml.outputs.needed == 'true'",
+      );
+      expect(lenient).not.toBe(yml);
+      expect(problems(lenient).length).toBeGreaterThan(0);
+      const noIf = yml.replaceAll(`      - ${WHEN}\n        `, '      - ');
+      expect(noIf).not.toBe(yml);
+      expect(problems(noIf).length).toBeGreaterThan(0);
+      const noCoe = yml.replace('      - id: yaml\n        continue-on-error: true\n', '      - id: yaml\n');
+      expect(noCoe).not.toBe(yml);
+      expect(problems(noCoe)).toContain('问的那一步没有 continue-on-error（它崩了会让所有 PR 的闸一起红）');
+    });
   });
 });
