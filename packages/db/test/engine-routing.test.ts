@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { recordStepTiming, routeFactsForPurpose, saveTaskSnapshot } from '../src/queries/engine.ts';
-import { holdPoolSlot } from '../src/queries/pool-runs.ts';
+import { reservePoolSlot } from '../src/queries/pool-runs.ts';
 import { saveRouteProbe } from '../src/queries/probe.ts';
-import { poolHolds, routingCatalog, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
+import { poolReservations, routingCatalog, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -323,26 +323,26 @@ describe('routeFactsForPurpose（路由两层，#574）', () => {
       ...fresh,
     });
 
-    // relay-a 上一个已选定、还没开工的会话，加上三段的一段占着的名额（#757，没过期的）：都算进 on 这条路由的 reserved；
+    // relay-a 上一个已选定、还没开工的会话，加上三段的一段预占着的名额（#757，没过期的）：都算进 on 这条路由的 reserved；
     // 过了期的预占不算。
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
     await addRun(t.db, { taskId: task.id, routeId: 'on', queuedAt: ago(MIN) });
-    const holding = await addTask(t.db, repo.id);
+    const reserving = await addTask(t.db, repo.id);
     const lapsed = await addTask(t.db, repo.id);
-    await holdPoolSlot(t.db, {
-      taskId: holding.id,
+    await reservePoolSlot(t.db, {
+      taskId: reserving.id,
       segment: 'manual',
       routeId: 'on',
-      heldAt: ago(2 * MIN),
+      reservedAt: ago(2 * MIN),
       expiresAt: later(18 * MIN),
     });
-    // 直接写一行过了期的（占名额那一步会顺手收掉它，这里要它留在表里）
-    await t.db.insert(poolHolds).values({
+    // 直接写一行过了期的（预占那一步会顺手收掉它，这里要它留在表里）
+    await t.db.insert(poolReservations).values({
       taskId: lapsed.id,
       segment: 'manual',
       routeId: 'on',
-      heldAt: ago(30 * MIN),
+      reservedAt: ago(30 * MIN),
       expiresAt: ago(10 * MIN),
     });
 

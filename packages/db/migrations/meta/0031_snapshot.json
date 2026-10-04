@@ -1,5 +1,5 @@
 {
-  "id": "fc20275d-e4dd-4692-876e-3d86c6e0aa73",
+  "id": "553cb645-53e6-4eab-867a-de29f832fa81",
   "prevId": "027a31cf-3a82-4cfd-a288-6cd1ec3e522e",
   "version": "7",
   "dialect": "postgresql",
@@ -3353,8 +3353,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.pool_holds": {
-      "name": "pool_holds",
+    "public.pool_reservations": {
+      "name": "pool_reservations",
       "schema": "",
       "columns": {
         "id": {
@@ -3382,8 +3382,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "held_at": {
-          "name": "held_at",
+        "reserved_at": {
+          "name": "reserved_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
@@ -3396,8 +3396,8 @@
         }
       },
       "indexes": {
-        "pool_holds_task_segment_uq": {
-          "name": "pool_holds_task_segment_uq",
+        "pool_reservations_task_segment_uq": {
+          "name": "pool_reservations_task_segment_uq",
           "columns": [
             {
               "expression": "task_id",
@@ -3417,8 +3417,8 @@
           "method": "btree",
           "with": {}
         },
-        "pool_holds_route_idx": {
-          "name": "pool_holds_route_idx",
+        "pool_reservations_route_idx": {
+          "name": "pool_reservations_route_idx",
           "columns": [
             {
               "expression": "route_id",
@@ -3434,18 +3434,18 @@
         }
       },
       "foreignKeys": {
-        "pool_holds_task_id_tasks_id_fk": {
-          "name": "pool_holds_task_id_tasks_id_fk",
-          "tableFrom": "pool_holds",
+        "pool_reservations_task_id_tasks_id_fk": {
+          "name": "pool_reservations_task_id_tasks_id_fk",
+          "tableFrom": "pool_reservations",
           "tableTo": "tasks",
           "columnsFrom": ["task_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "pool_holds_route_id_routes_id_fk": {
-          "name": "pool_holds_route_id_routes_id_fk",
-          "tableFrom": "pool_holds",
+        "pool_reservations_route_id_routes_id_fk": {
+          "name": "pool_reservations_route_id_routes_id_fk",
+          "tableFrom": "pool_reservations",
           "tableTo": "routes",
           "columnsFrom": ["route_id"],
           "columnsTo": ["id"],
@@ -3457,13 +3457,13 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "pool_holds_segment_routed": {
-          "name": "pool_holds_segment_routed",
-          "value": "\"pool_holds\".\"segment\" in ('manual', 'verify')"
+        "pool_reservations_segment_routed": {
+          "name": "pool_reservations_segment_routed",
+          "value": "\"pool_reservations\".\"segment\" in ('manual', 'verify')"
         },
-        "pool_holds_expires_after_held": {
-          "name": "pool_holds_expires_after_held",
-          "value": "\"pool_holds\".\"expires_at\" > \"pool_holds\".\"held_at\""
+        "pool_reservations_expires_after_reserved": {
+          "name": "pool_reservations_expires_after_reserved",
+          "value": "\"pool_reservations\".\"expires_at\" > \"pool_reservations\".\"reserved_at\""
         }
       },
       "isRLSEnabled": false
