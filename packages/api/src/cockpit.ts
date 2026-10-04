@@ -1,6 +1,7 @@
 // 驾驶舱接口（/api）：看板、任务、步骤、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
 // 读一律从数据库读（不直接查 GitHub；唯一的例外是 /changelog 的发布版本号，现读 GitHub 里程碑，见 release-version.ts）；
 // 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
+
 import {
   AnswerAskRequest,
   AnswerAskResponse,
@@ -44,6 +45,7 @@ import {
   UpdateSettingResponse,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
@@ -540,7 +542,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       } catch (error) {
         orgSwitch = {
           state: 'unavailable',
-          why: `读切号账本没成：${error instanceof Error ? error.message : String(error)}`,
+          why: `读切号账本没成：${errMessage(error)}`,
           soloPaused,
           ...reserve,
         };
@@ -556,7 +558,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       } catch (error) {
         carpoolReconcile = {
           state: 'unavailable',
-          why: `读拼车对账用的会话花费和额度没成：${error instanceof Error ? error.message : String(error)}`,
+          why: `读拼车对账用的会话花费和额度没成：${errMessage(error)}`,
         };
       }
     }
@@ -593,7 +595,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     } catch (error) {
       legacy = {
         ok: false,
-        why: `读没处理的提醒没成：${error instanceof Error ? error.message : String(error)}`,
+        why: `读没处理的提醒没成：${errMessage(error)}`,
       };
     }
     return reply(c, PoolHoldsResponse, poolHoldsView(setting, legacy, now));

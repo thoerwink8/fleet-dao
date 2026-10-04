@@ -1,3 +1,4 @@
+import { errMessage } from '@fleet-dao/shared/util';
 import { useQueryClient } from '@tanstack/react-query';
 import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -155,7 +156,7 @@ export function LoadError({
       className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-ink-fail"
     >
       <span>
-        {what ? `${what}没读成` : '没查成'}：{error instanceof Error ? error.message : String(error)}
+        {what ? `${what}没读成` : '没查成'}：{errMessage(error)}
       </span>
       <Button type="button" size="xs" variant="outline" onClick={retry}>
         重试

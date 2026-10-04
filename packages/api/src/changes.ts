@@ -1,7 +1,9 @@
 // 数据变化的来源：Postgres 的 LISTEN fleet_changes（频道名、会发通知的表、载荷形状都在 @fleet-dao/shared 的 realtime.ts），
 // 在进程里分发给所有订阅者（SSE、等回答的 fleet ask）。整个进程只占一条 LISTEN 连接，不是每个浏览器一条。
+
 import type { PgListen } from '@fleet-dao/db';
 import { ChangeEventSchema, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { PublicHealthError } from './health.ts';
 import type { ChangeFeed, FeedEvent, Logger } from './ports.ts';
 import { randomToken } from './tokens.ts';
@@ -152,7 +154,7 @@ export function startPgChangeFeed(
       if (stopped) await handle.unlisten();
       else handles.push(handle);
     } catch (err) {
-      const reason = `LISTEN ${channel} 没接上：${err instanceof Error ? err.message : String(err)}`;
+      const reason = `LISTEN ${channel} 没接上：${errMessage(err)}`;
       log.error('LISTEN 没接上；连接库会自己重连，接上后恢复', { channel, error: reason });
       down(reason);
     }
@@ -173,7 +175,7 @@ export function startPgChangeFeed(
       try {
         await pg.notify(PROBE_CHANNEL, `${boot}:${n}`);
       } catch (err) {
-        down(`探活 ping 发不出去：${err instanceof Error ? err.message : String(err)}`);
+        down(`探活 ping 发不出去：${errMessage(err)}`);
         throw new PublicHealthError('not_listening', '实时推送探活失败：连不上库');
       }
       const late = new Promise<'late'>((resolve) => {

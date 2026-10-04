@@ -2,6 +2,7 @@
 // required 的认出代表哪位创始人（操作记录 via=feishu），none 的只验通行证、带了代表人也不认。数据一律从库里读写。
 // 还没接模型理解：一句话按原话记成草稿、标「拿不准」；回复别的卡时答不了的明说，不编；回复的卡对应的东西读不到也明说，
 // 不悄悄当成别的事（另起草稿、吞掉回答）。进来的话先规范化（wellFormed）。
+
 import {
   FEISHU_NOTE_MAX,
   FeishuBoardSnapshotSchema,
@@ -25,6 +26,7 @@ import {
   FeishuTaskLookupResponse,
   SETTING_SCHEMAS,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { textHash, wellFormed } from '@fleet-dao/store';
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
@@ -117,11 +119,7 @@ export function feishuRoutes(deps: Deps, opening: DraftOpenRunner): Hono<FeishuE
     try {
       return draftView(d, { repos, users, task: task && taskRepo ? { task, repo: taskRepo } : undefined });
     } catch (err) {
-      throw new ApiError(
-        500,
-        'draft_unreadable',
-        `草稿读不全：${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw new ApiError(500, 'draft_unreadable', `草稿读不全：${errMessage(err)}`);
     }
   }
 
