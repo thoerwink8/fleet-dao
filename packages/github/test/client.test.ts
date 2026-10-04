@@ -27,7 +27,9 @@ describe('App 身份与安装令牌', () => {
     expect(fake.tokensMinted).toBe(1);
     const mint = fake.calls('POST', /access_tokens$/)[0];
     expect(mint?.as).toBe('app:engine');
-    expect(mint?.body).toEqual({ repositories: ['widgets'] });
+    // 请求体里写明只要哪几项权限（日常 engine 令牌没有 administration）；细节见 token-scopes.test.ts
+    expect(mint?.body).toMatchObject({ repositories: ['widgets'], permissions: { statuses: 'write' } });
+    expect(mint?.body).not.toHaveProperty('permissions.administration');
     expect(fake.calls('GET', /^\/repos\/acme\/widgets$/).map((r) => r.as)).toEqual([
       'engine',
       'engine',

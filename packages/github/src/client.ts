@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type MintedToken, signAppJwt, TokenCache } from './app-auth.ts';
 import { type AppCredentials, type AppRole, ROLE_NAMES } from './credentials.ts';
 import { GitHubError, redact } from './errors.ts';
+import { narrowToGranted, scopePermissions, type TokenScope } from './token-scopes.ts';
 
 export interface RepoRef {
   owner: string;
@@ -26,8 +27,13 @@ export function parseRepoSlug(slug: string): RepoRef {
   return { owner: m[1], name: m[2] };
 }
 
-/** app = App 自己的 JWT（只调 /app/…）；agent / engine = 那个机器人在某个仓上的安装令牌。 */
-export type Auth = { as: 'app'; role: AppRole } | { as: AppRole; repo: RepoRef } | { as: 'anonymous' };
+/**
+ * app = App 自己的 JWT（只调 /app/…）；agent / engine = 那个机器人在某个仓上的安装令牌（scope 不写 = 'api'，见 token-scopes.ts）。
+ */
+export type Auth =
+  | { as: 'app'; role: AppRole }
+  | { as: AppRole; repo: RepoRef; scope?: TokenScope | undefined }
+  | { as: 'anonymous' };
 
 export type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
@@ -162,7 +168,17 @@ export class GitHubClient {
     const key = `${role}:${repoSlug(repo).toLowerCase()}`;
     const hit = this.installations.get(key);
     if (hit !== undefined && !options.fresh) return hit;
-    const res = await this.request<{ id?: unknown }>({
+    return (await this.lookupInstallation(role, repo, signal)).id;
+  }
+
+  /** 现查一次安装（编号 + GitHub 回的授权表）；换令牌前用它看这个仓上到底授了什么，不用缓存（授权改了要能立刻跟上）。 */
+  private async lookupInstallation(
+    role: AppRole,
+    repo: RepoRef,
+    signal?: AbortSignal,
+  ): Promise<{ id: number; permissions: Record<string, string> | undefined }> {
+    const key = `${role}:${repoSlug(repo).toLowerCase()}`;
+    const res = await this.request<{ id?: unknown; permissions?: unknown }>({
       method: 'GET',
       path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/installation`,
       auth: { as: 'app', role },
@@ -180,29 +196,59 @@ export class GitHubClient {
     const id = res.data.id;
     if (typeof id !== 'number') throw unexpected('查安装编号', res.data);
     this.installations.set(key, id);
-    return id;
+    return { id, permissions: isStringRecord(res.data.permissions) ? res.data.permissions : undefined };
   }
 
-  /** 这个机器人在这个仓上的安装令牌（只对这一个仓有效）。只在要交给 git 子进程时才直接拿。 */
-  async installationToken(role: AppRole, repo: RepoRef, signal?: AbortSignal): Promise<MintedToken> {
-    const key = `${role}:${repoSlug(repo).toLowerCase()}`;
-    return this.tokens.get(key, async () => {
-      const id = await this.installationId(role, repo, signal);
-      const res = await this.request<{ token?: unknown; expires_at?: unknown; permissions?: unknown }>({
+  /**
+   * 这个机器人在这个仓上、按用途降过权的安装令牌（只对这一个仓有效，请求体里写明只要 token-scopes.ts 里该用途的那几项权限）。
+   * scope 不写 = 'api'；交给 git 子进程的用 'git' / 'git-read'，续互动限制用 'admin'。不同用途各换各的、各缓存各的，不混用。
+   */
+  async installationToken(
+    role: AppRole,
+    repo: RepoRef,
+    signal?: AbortSignal,
+    scope: TokenScope = 'api',
+  ): Promise<MintedToken> {
+    return this.tokens.get(tokenKey(role, repo, scope), async () => {
+      const slug = repoSlug(repo);
+      const want = scopePermissions(role, scope);
+      const installation = await this.lookupInstallation(role, repo, signal);
+      // 授权表读得到就只请求装上的那几项；读不到就按用途要的请求（GitHub 对多要的回 422，下面按「权限没授」报）
+      const requested = installation.permissions ? narrowToGranted(want, installation.permissions) : want;
+      if (Object.keys(requested).length === 0) {
+        throw new GitHubError(
+          'FORBIDDEN',
+          `${ROLE_NAMES[role]}在 ${slug} 上一项「${scope}」用途要的权限都没有（要 ${describePermissions(want)}）：到 App 设置里补上权限，再到装它的地方点接受`,
+          { details: { role, repo: slug, scope, wanted: want } },
+        );
+      }
+      const res = await this.request<{
+        token?: unknown;
+        expires_at?: unknown;
+        permissions?: unknown;
+        message?: unknown;
+      }>({
         method: 'POST',
-        path: `/app/installations/${id}/access_tokens`,
+        path: `/app/installations/${installation.id}/access_tokens`,
         auth: { as: 'app', role },
-        body: { repositories: [repo.name] },
+        body: { repositories: [repo.name], permissions: requested },
         idempotent: true,
         allow: [404, 422],
         signal,
       });
       if (res.status === 404 || res.status === 422) {
-        this.installations.delete(key);
+        this.installations.delete(`${role}:${slug.toLowerCase()}`);
+        if (res.status === 422 && /permission/i.test(String(res.data?.message ?? ''))) {
+          throw new GitHubError(
+            'FORBIDDEN',
+            `${ROLE_NAMES[role]}换不到 ${slug} 的「${scope}」令牌：GitHub 说请求的权限（${describePermissions(requested)}）装的那份没授：${String(res.data.message)}`,
+            { details: { role, repo: slug, scope, requested }, status: 422 },
+          );
+        }
         throw new GitHubError(
           'NOT_INSTALLED',
-          `${ROLE_NAMES[role]}换不到 ${repoSlug(repo)} 的令牌（安装已被移除，或没勾选这个仓）`,
-          { details: { role, repo: repoSlug(repo) }, status: res.status },
+          `${ROLE_NAMES[role]}换不到 ${slug} 的令牌（安装已被移除，或没勾选这个仓）`,
+          { details: { role, repo: slug }, status: res.status },
         );
       }
       const { token, expires_at: expiresAt, permissions } = res.data;
@@ -218,12 +264,12 @@ export class GitHubClient {
   private async credential(auth: Auth, signal?: AbortSignal): Promise<string | null> {
     if (auth.as === 'anonymous') return null;
     if (auth.as === 'app') return this.appJwt(auth.role);
-    return (await this.installationToken(auth.as, auth.repo, signal)).token;
+    return (await this.installationToken(auth.as, auth.repo, signal, auth.scope)).token;
   }
 
   private dropCredential(auth: Auth, token: string): void {
     if (auth.as === 'agent' || auth.as === 'engine') {
-      this.tokens.invalidate(`${auth.as}:${repoSlug(auth.repo).toLowerCase()}`, token);
+      this.tokens.invalidate(tokenKey(auth.as, auth.repo, auth.scope ?? 'api'), token);
     }
   }
 
@@ -597,6 +643,17 @@ function nextLink(link: string | null): string | null {
     if (m?.[1] && m[2]?.split(/\s+/).includes('next')) return m[1];
   }
   return null;
+}
+
+/** 令牌缓存的键：身份 + 用途 + 仓。用途不同的令牌各缓存各的（git 令牌和 api 令牌权限不同，不能互相顶替）。 */
+function tokenKey(role: AppRole, repo: RepoRef, scope: TokenScope): string {
+  return `${role}:${scope}:${repoSlug(repo).toLowerCase()}`;
+}
+
+function describePermissions(set: Readonly<Record<string, string>>): string {
+  return Object.entries(set)
+    .map(([name, level]) => `${name}:${level}`)
+    .join('、');
 }
 
 function isStringRecord(v: unknown): v is Record<string, string> {

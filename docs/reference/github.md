@@ -44,7 +44,7 @@
 3. 换令牌：`POST /app/installations/{installation_id}/access_tokens`，要求 201 且带 token/expires_at（`:256-279`）。
 4. 缓存：每个角色一个令牌缓存文件（0600），剩余 ≤10 分钟就重换——令牌 1 小时硬过期，长任务跑一半会 401（`:15`、`:141`、`:196-211`、`:280-290`）。
 5. 自检：`gh-as.mjs <role> --whoami` 调 `GET /installation/repositories`，并与期望权限逐项比对；读不到算「没查成」，不算「0 条差异」（`:371-420`）。
-6. 官方补充（审计时核对「Generating an installation access token」页）：换令牌时可带 `repositories`/`repository_ids` 与 `permissions` 把令牌收窄到单仓、单权限；令牌 1 小时过期；GitHub 已预告安装令牌不再固定 40 字符，别按长度判断。
+6. 官方补充（审计时核对「Generating an installation access token」页）：换令牌时可带 `repositories`/`repository_ids` 与 `permissions` 把令牌收窄到单仓、单权限；令牌 1 小时过期；GitHub 已预告安装令牌不再固定 40 字符，别按长度判断。**fleet-dao 的实现已按用途降权**（`packages/github/src/token-scopes.ts`）：git 子进程拿的令牌只有 contents（推送写、抓取读），`administration` 只在续互动限制那一枚 `admin` 令牌里。
 
 **提交身份**：每棵工作树写 worktree 级 `user.name=<slug>[bot]`、`user.email` 用 `<AppID>+<slug>[bot]` 拼 GitHub 的 noreply 邮箱，写完回读（`scripts/lib/gh.mjs:446-471`；windsurf-dao#573 ③：「只改一半比不改更容易误判」）。邮箱前缀用错了，见 §0 第 6 条与 §6 A4。
 
