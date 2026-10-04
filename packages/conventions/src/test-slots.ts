@@ -380,6 +380,28 @@ export function acquireSlot(cfg: SlotConfig, deps: SlotDeps): SlotHandle {
   }
 }
 
+/** 和 test-changed.ts 的 vitest 依赖同一个形状：退出码（被信号杀掉是 null）、信号、起不来的原因。 */
+export interface RunResult {
+  status: number | null;
+  signal?: string | null;
+  error?: Error | undefined;
+}
+
+/**
+ * pnpm test:changed 真起 vitest 的那一步：按 slotPolicy 决定拿不拿槽，拿了就带着 ENV_HELD 跑 run。
+ * 拿不到槽（满了等太久、槽目录用不了、环境变量写错）回 {status: null, error}——上游当「没跑成」（退出码 2），
+ * 不是测试没过，更不会当成拿到了槽继续跑。
+ */
+export function runInSlot(env: Env, deps: SlotDeps, run: (held: string | undefined) => RunResult): RunResult {
+  if (slotPolicy(env).kind === 'skip') return run(undefined);
+  try {
+    return withTestSlot(readSlotConfig(env), deps, (handle) => run(handle.token));
+  } catch (e) {
+    if (e instanceof TestSlotError) return { status: null, error: e };
+    throw e;
+  }
+}
+
 /** 拿槽、跑 fn、还槽（fn 抛了也还）。拿不到抛 TestSlotError，fn 不会被调用。 */
 export function withTestSlot<T>(cfg: SlotConfig, deps: SlotDeps, fn: (handle: SlotHandle) => T): T {
   const handle = acquireSlot(cfg, deps);

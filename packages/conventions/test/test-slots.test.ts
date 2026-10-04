@@ -18,6 +18,7 @@ import {
   ENV_WAIT_MIN,
   type Holder,
   readSlotConfig,
+  runInSlot,
   type SlotConfig,
   type SlotDeps,
   slotPolicy,
@@ -288,6 +289,72 @@ describe('acquireSlot / withTestSlot', () => {
       }),
     ).toThrow(TestSlotError);
     expect(called).toBe(false);
+  });
+});
+
+describe('runInSlot（test:changed 真起 vitest 的那一步）', () => {
+  it('拿到槽才跑，把 token 交给 run（写进 vitest 的环境），跑完槽已还', () => {
+    const dir = tmp();
+    const f = fakeDeps();
+    const seen: Array<string | undefined> = [];
+    const r = runInSlot({ [ENV_DIR]: dir }, f.deps, (held) => {
+      seen.push(held);
+      expect(slotFiles(dir)).toHaveLength(1);
+      return { status: 0 };
+    });
+    expect(r).toEqual({ status: 0 });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/^[0-9a-f]{16}$/);
+    expect(slotFiles(dir)).toEqual([]);
+  });
+
+  it('CI 里和外层已拿着槽：不碰槽目录，直接跑', () => {
+    const file = join(tmp(), 'would-fail');
+    writeFileSync(file, 'x'); // 槽目录若被碰就会报错
+    const f = fakeDeps();
+    for (const env of [
+      { CI: 'true', [ENV_DIR]: file },
+      { [ENV_HELD]: 'abc', [ENV_DIR]: file },
+    ]) {
+      expect(runInSlot(env, f.deps, (held) => ({ status: held === undefined ? 0 : 9 }))).toEqual({
+        status: 0,
+      });
+    }
+  });
+
+  it('拿不到槽（槽目录用不了、等太久、个数写错）：回 error、run 一次都不调用，不当成拿到了', () => {
+    const f = fakeDeps();
+    let calls = 0;
+    const run = () => {
+      calls += 1;
+      return { status: 0 };
+    };
+    const file = join(tmp(), 'a-file');
+    writeFileSync(file, 'x');
+    const full = tmp();
+    putHolder(full, 0, { pid: 31337 });
+    putHolder(full, 1, { pid: 31338 });
+    for (const env of [
+      { [ENV_DIR]: file },
+      { [ENV_DIR]: full, [ENV_WAIT_MIN]: '0.01' },
+      { [ENV_DIR]: tmp(), [ENV_SLOTS]: 'zero' },
+    ]) {
+      const r = runInSlot(env, f.deps, run);
+      expect(r.status).toBeNull();
+      expect(r.error).toBeInstanceOf(TestSlotError);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it('run 自己抛的不是槽的错：照样往上抛、槽照样还', () => {
+    const dir = tmp();
+    const f = fakeDeps();
+    expect(() =>
+      runInSlot({ [ENV_DIR]: dir }, f.deps, () => {
+        throw new Error('boom');
+      }),
+    ).toThrow('boom');
+    expect(slotFiles(dir)).toEqual([]);
   });
 });
 
