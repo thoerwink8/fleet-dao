@@ -83,6 +83,12 @@ const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
 
 export function blockReason(state, now) {
   const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
+  if (state.auto === true) {
+    return (
+      `你起了后台活（子代理、监视、后台命令），这一轮结束它们会跟着会话进程一起被杀、没有谁会被完成通知叫醒，所以先别结束这一轮（自动挡 ${left} 分钟）。` +
+      `继续等它们的结果、接着干；全收口了：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的：node ${SCRIPT} needs-you "要他拍什么"。`
+    );
+  }
   return (
     `无人值守开着（还剩约 ${left} 分钟）：不要结束这一轮。还有没做完的事就接着干——先短报一行进度，然后继续调工具；` +
     `全做完了：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（对外发布、花钱、删数据、改标准）：` +
@@ -147,6 +153,58 @@ export function touchTool({ dir, sessionId }) {
     writeState(dir, sessionId, { ...r.state, toolSinceBlock: true });
   } catch {
     // 记不上最多让这一轮早点被放行，不影响调用
+  }
+}
+
+/** 起了后台活自动开的无人值守开多久（创始人 2026-10-04「选 1」）；再起一个后台活就续到再过这么久。 */
+export const AUTO_ARM_MINUTES = 30;
+
+/**
+ * 这次工具调用是不是起了一件在后台跑的活。后台活是挂在这个会话进程上的：一轮结束、进程一重开它就被杀，
+ * 也就没有谁会被它的完成通知叫醒（2026-10-04 上午、下午各丢过一回：#754 的测试和三个监视任务跟着一轮结束一起没了）。
+ * Agent（子代理）默认在后台，只有显式 run_in_background:false 才是前台；Monitor、Workflow 本来就是后台；Bash、PowerShell 要显式 true。
+ */
+export function startsBackground(toolName, toolInput) {
+  const bg = toolInput && typeof toolInput === 'object' ? toolInput.run_in_background : undefined;
+  if (toolName === 'Monitor' || toolName === 'Workflow') return true;
+  if (toolName === 'Agent' || toolName === 'Task') return bg !== false;
+  if (toolName === 'Bash' || toolName === 'PowerShell') return bg === true;
+  return false;
+}
+
+/**
+ * 起了后台活：没开无人值守（或已收尾、暂停、过期）就自动开一个 AUTO_ARM_MINUTES 分钟的，这一轮结束会被挡回来；
+ * 已经开着的：自动开的续期，创始人手动开的（通常更长）一个字不动。状态读不了就不写（不覆盖认不出的东西），返回为什么。
+ * 活全收口了跑 done 放行；忘了跑也不会困住人：到期自动关、连着 3 次挡回去没调工具就暂停（decideStop）。
+ * 返回 { armed, kept?, why? }；不抛。
+ */
+export function armForBackground({ dir, sessionId, now = Date.now(), minutes = AUTO_ARM_MINUTES }) {
+  try {
+    if (!cleanId(sessionId)) return { armed: false, why: '拿不到会话号' };
+    const r = readState(dir, sessionId);
+    if (!r.ok) return { armed: false, why: r.why };
+    const s = r.state;
+    const until = new Date(now + minutes * 60_000).toISOString();
+    if (s !== null && s.state === 'on' && now <= Date.parse(s.expiresAt)) {
+      if (s.auto === true && Date.parse(s.expiresAt) < Date.parse(until)) {
+        writeState(dir, sessionId, { ...s, expiresAt: until });
+        return { armed: false, kept: true };
+      }
+      return { armed: false, kept: true };
+    }
+    writeState(dir, sessionId, {
+      state: 'on',
+      auto: true,
+      since: new Date(now).toISOString(),
+      expiresAt: until,
+      idle: 0,
+      totalBlocks: 0,
+      toolSinceBlock: true,
+      note: '起了后台活，自动开的',
+    });
+    return { armed: true };
+  } catch (err) {
+    return { armed: false, why: err?.message ?? String(err) };
   }
 }
 
