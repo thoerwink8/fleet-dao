@@ -78,11 +78,19 @@ SESSION_PROXY_RE='^http://([A-Za-z0-9.-]+):([0-9]{1,5})/?$'
 SESSION_NO_PROXY=localhost,127.0.0.1,::1 # 和 env.ts 的 SESSION_NO_PROXY 一样
 # deploy 目录：挑期望、找 config.mjs
 SESSION_PROXY_DEPLOY=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-# 读期望的 node（france.sh 的前提里查过）。先按 PATH 找，找不到再用 /usr/bin/node：装机、发布会话里它就在那儿，
-# 但 CI 的 runner 是把 node 装在别处的（/opt/hostedtoolcache，deploy/test 那几个测试也是这么找的），写死一个路径就
-# 读不出期望——那样本机档会一声不响地退回直连（#786）。调用方（测试）要给别的，source 之后再覆盖 SESSION_PROXY_NODE
-SESSION_PROXY_NODE=$(command -v node 2>/dev/null || true)
-[[ -x "$SESSION_PROXY_NODE" ]] || SESSION_PROXY_NODE=/usr/bin/node
+# 读期望的 node（france.sh 的前提里查过）。装机、发布的会话里它在 /usr/bin；CI 的 runner 装的是 actions/setup-node
+# 从缓存里取的那份（/opt/hostedtoolcache），/usr/bin/node 不存在，deploy/test 的那几个测试也是照这几个地方找的——
+# 这里跟着照抄一遍，因为这一项还会被 sourcing 进 PATH 已经被收窄的脚本（fleet-agent-scope.sh 开头把 PATH 设成
+# /usr/sbin:/usr/bin:/sbin:/bin，command -v node 在那样的 PATH 下什么也找不到）。写死一个路径就有一边读不出期望，
+# 那样本机档会一声不响地退回直连（#786）。调用方（测试）要给别的，source 之后再覆盖 SESSION_PROXY_NODE
+SESSION_PROXY_NODE=""
+for _n in "$(command -v node 2>/dev/null || true)" /usr/local/bin/node /usr/bin/node /opt/hostedtoolcache/node/*/x64/bin/node; do
+  if [[ -x "$_n" ]]; then
+    SESSION_PROXY_NODE=$_n
+    break
+  fi
+done
+unset _n
 SESSION_PROXY_DESIRED=""         # 只有测试会给：不给就照档位挑仓里那一份
 SESSION_PROXY_STATE=""           # 空：还没读；ok：读到了；bad：没读成（原因在 SESSION_PROXY_WHY）
 SESSION_PROXY=""                 # 读到的代理（规范写法），空＝直连
