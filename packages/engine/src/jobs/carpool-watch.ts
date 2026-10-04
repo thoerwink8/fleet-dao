@@ -52,6 +52,12 @@ export interface WatchPolicy {
   alertAfterFailures: number;
 }
 
+/**
+ * 读频率的全部阈值集中在这一处（创始人 2026-10-04：额度相关的线不许散落写死、要能配）。出处：方案 v2 4.1（specs/194-拼车自动切换/方案-v2.md）——
+ * 平时 5 分钟、紧时 1 分钟、读失败 1 → 2 → 5 分钟退避（接口限流文档没写，按业界常规退避）、剩不到 25%、离恢复时刻不到 15 分钟、
+ * 预计 20 分钟内用满（烧速的窗口和门槛在 shared 的 carpool-burn.ts，同样集中成 DEFAULT_BURN_POLICY）。
+ * 调整只改这一处；要驾驶舱可配，沿用「设置键」那套（engine.soloPaused 同款）另起一单，目前这些数还是编译进去的默认值。
+ */
 export const DEFAULT_WATCH_POLICY: Readonly<WatchPolicy> = Object.freeze({
   baseMs: 5 * MIN,
   hotMs: 1 * MIN,

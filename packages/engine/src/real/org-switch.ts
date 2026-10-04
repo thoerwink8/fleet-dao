@@ -25,6 +25,8 @@ import {
 } from '@fleet-dao/db';
 import type { OrgKind } from '@fleet-dao/shared';
 import { type CarpoolApiRead, type CarpoolOutage, classifyCarpoolRejection } from '../jobs/carpool-outage.ts';
+import { readNotes } from '../jobs/carpool-read-notes.ts';
+import { readBackoff } from '../jobs/carpool-watch.ts';
 import { type OrgDecision, type OrgPlan, stamp } from '../jobs/org-decision.ts';
 import { ledgerAfterSwitch, type OrgLedger, OrgLedgerError, withRead } from '../jobs/org-ledger.ts';
 import type { OrgSwitchRound, OrgSwitchTrigger, ProbedRoute } from '../jobs/org-switch.ts';
@@ -86,6 +88,8 @@ export const ORG_DRAIN_POLL_MS = 2_000;
 export const ORG_STARTING_MAX_MS = 10 * 60_000;
 /** 当场判之前，最近这么久里读过接口就不重读（一批会话同时被拒不会砸出一排请求）。 */
 export const ORG_READ_REUSE_MS = 30_000;
+/** 判成要切之后的那次现读：最近这么久（几秒）里刚读过就不重读（定时盯读刚读完交过来的不用再砸一次）。方案 4.1「切号前现读一次不用缓存」。 */
+export const ORG_PRESWITCH_REUSE_MS = 5_000;
 const ACTOR = 'engine:org-switch';
 
 export interface OrgSwitchWiring {
@@ -386,6 +390,39 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     else await settle(ORG_OVERDUE_ALERT, '没有「在独享上待太久」的情况');
   }
 
+  /** 一条读数入账：按它记该记的几笔（拼车上限变了、进退避、退避结束），写不进操作记录不挡切号。 */
+  async function ingestRead(l: OrgLedger, read: CarpoolApiRead): Promise<OrgLedger> {
+    for (const n of readNotes(l, read)) {
+      try {
+        await audit(n.action, {
+          ...(n.before === undefined ? {} : { before: n.before }),
+          ...(n.after === undefined ? {} : { after: n.after }),
+          reason: n.reason,
+          ok: n.ok,
+          ...(n.error ? { error: n.error } : {}),
+        });
+      } catch (err) {
+        log('error', '会话用户切号：读数的操作记录写不进库', { action: n.action, error: message(err) });
+      }
+    }
+    return withRead(l, read);
+  }
+
+  /** 切完现读一次（方案 4.1），存进账本：切完的新读数给下一轮判恢复、给驾驶舱烧速用。退避期里不读；出什么错都不抛。 */
+  async function readAfterSwitch(): Promise<void> {
+    const readApi = w.readApi;
+    if (!readApi) return;
+    try {
+      await store.withLock(async () => {
+        const l = await store.load();
+        if (readBackoff(l, clock()).active) return;
+        await store.save(await ingestRead(l, await readApi()));
+      });
+    } catch (err) {
+      log('error', '会话用户切号：切完现读一次接口这一步出错', { error: message(err) });
+    }
+  }
+
   /** 一次判断 + 动手。在锁里跑。交回切到哪一类（没切 null）。 */
   async function run(trigger: OrgSwitchTrigger): Promise<{ to: OrgKind | null }> {
     let loaded: OrgLedger;
@@ -402,11 +439,12 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     await settle(ORG_LEDGER_ALERT, '切号账本读得出了');
     const t0 = clock();
     let read = trigger.read;
-    if (!read && w.readApi) {
+    // 退避期里谁都不砸接口（方案 4.1）：这一轮拿不到新读数，按「读不到」办——不当拼车能用、也不当额度满
+    if (!read && w.readApi && !readBackoff(loaded, t0).active) {
       const last = loaded.reads.at(-1);
       if (!last || t0.getTime() - last.requestedAt.getTime() > ORG_READ_REUSE_MS) read = await w.readApi();
     }
-    const ledger = read ? withRead(loaded, read) : loaded;
+    let ledger = read ? await ingestRead(loaded, read) : loaded;
     // 切不切看现在的真实状态：留着的读数可能是半分钟前的（起点不动：读数刚变、没定下来就这一轮不切）
     w.org.forget();
     const live = await w.org({ by: trigger.by });
@@ -419,15 +457,26 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       if (verdict.kind === 'outage') rejection = verdict.outage;
       else log('info', '会话用户切号：这次被拒不是拼车用不了的那几种，不据此切', { verdict });
     }
-    const decision = decideFrom({
-      live,
-      facts: f,
-      ledger,
-      now: t0,
-      ...(stopper && unstoppable(f) === 0 ? { canStopRunning: true } : {}),
-      ...(rejection ? { rejection } : {}),
-      pause,
-    });
+    const decide = (l: OrgLedger, at: Date) =>
+      decideFrom({
+        live,
+        facts: f,
+        ledger: l,
+        now: at,
+        ...(stopper && unstoppable(f) === 0 ? { canStopRunning: true } : {}),
+        ...(rejection ? { rejection } : {}),
+        pause,
+      });
+    let decision = decide(ledger, t0);
+    // 切号前现读一次（方案 4.1）：判成要切，就用一次不重用旧读数的新读数再判一遍，免得凭半分钟前的读数动手；
+    // 刚读过（几秒内）的不重读，退避期里不读。重判的结果为准（可能变成不切）。
+    if (decision.plan.action === 'switch' && w.readApi && !readBackoff(ledger, t0).active) {
+      const last = ledger.reads.at(-1);
+      if (!last || t0.getTime() - last.requestedAt.getTime() > ORG_PRESWITCH_REUSE_MS) {
+        ledger = await ingestRead(ledger, await w.readApi());
+        decision = decide(ledger, clock());
+      }
+    }
     // 先存账本再动手：恢复条件、切回记录、白切记账不因为后面的动作没成就丢
     await store.save(decision.ledger);
     await publish(decision, loaded);
@@ -482,6 +531,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         log('error', '会话用户切号：切完当场探这一步出错', { to, error: message(err) });
       }
     }
+    if (to !== null) await readAfterSwitch();
     return to;
   }
 
