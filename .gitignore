@@ -11,6 +11,9 @@ _tmp/
 .claude/worktrees/
 .mirasim/
 .codegraph/
+# 误落在仓根的临时文件（约定放 _tmp/，见通用段）：根上的 _tmp_* 和日志不该被 git add 带上
+_tmp_*
+*.log
 
 # >>> 密钥文件名单（公开仓，一律不进）
 # 密钥和本机配置不进公开仓，加密副本在私有仓 fleet-dao-vault（README「密钥和本机配置在哪」）。
