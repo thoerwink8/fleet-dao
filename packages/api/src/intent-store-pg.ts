@@ -6,9 +6,9 @@
 // - 写回归纳、开成单、放下和操作记录在同一个事务里：记不下就不改。
 // - 时刻：这里自己写的（收到时刻、卡的到期、写回时刻）一律用传进来的钟，和后端其余部分同一个钟。
 import { auditLog, type Db, intentMessages, intentRecalls, intents } from '@fleet-dao/db';
+import { isUuid } from '@fleet-dao/store';
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { isUuid } from './ids.ts';
 import {
   auditShape,
   type CardAckReport,

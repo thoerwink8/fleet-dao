@@ -1,0 +1,15 @@
+{
+  "name": "@fleet-dao/store",
+  "version": "0.0.0",
+  "private": true,
+  "description": "后端和引擎共用、不碰 HTTP 的那一层：Store 契约和两套实现（内存、Postgres）、GitHub 作者白名单、日志接口",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/core": "workspace:*",
+    "@fleet-dao/shared": "workspace:*",
+    "zod": "^4.6.5"
+  }
+}

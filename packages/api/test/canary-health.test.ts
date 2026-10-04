@@ -9,10 +9,10 @@ import {
   startScheduleRun,
 } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CANARY_STALE_MS, canaryHealth, canaryHealthCheck } from '../src/canary-health.ts';
 import { PublicHealthError, runHealthChecks } from '../src/health.ts';
-import { silentLogger } from '../src/log.ts';
 
 // 路径放进变量：api 的 tsconfig 不收 web 包的文件，照 deploy-lag.test.ts 的写法运行时再载
 const SCAN = '../../web/src/build/scan.ts';

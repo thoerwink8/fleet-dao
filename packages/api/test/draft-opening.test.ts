@@ -1,5 +1,7 @@
 // 飞书草稿开单（draft-opening.ts）：时限自己掐（实现不回也不卡住等它的人）、超时之后开成了照样记上、
 // 同一张草稿不同时开两次、补开一轮没跑完不叠第二轮、健康检查（draft_opener / draft_backlog）如实报红。
+
+import { silentLogger } from '@fleet-dao/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDS } from '../src/dev-fixtures.ts';
 import {
@@ -8,7 +10,6 @@ import {
   draftBacklogCheck,
   notWiredDraftOpener,
 } from '../src/draft-opening.ts';
-import { silentLogger } from '../src/log.ts';
 import { createMemoryStore, type FeishuDraftRow } from '../src/memory-store.ts';
 import type { DraftOpener, DraftRecord, Logger, Store } from '../src/ports.ts';
 import { FEISHU_IDS, feishuData, T0 } from './store-contract-feishu.ts';

@@ -1,4 +1,6 @@
 // 驾驶舱后端（Hono）：登录、接口、实时推送、发给工作流的信号、fleet 命令接口、GitHub 事件接收。
+
+export { isSerial, isUuid, jsonLogger, parseCursor, silentLogger } from '@fleet-dao/store';
 export {
   AGENT_TOKEN_MAX_TTL_SECONDS,
   type AgentTokenCheck,
@@ -58,8 +60,6 @@ export {
   versionsOf,
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
-export { isSerial, isUuid, parseCursor } from './ids.ts';
-export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
 export {
   createPgStore,

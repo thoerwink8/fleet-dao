@@ -27,6 +27,7 @@
 | `packages/engine` | 引擎：Temporal 工作流、失败分流与熔断、停滞判定 |
 | `packages/adapters` | 渠道插头：无头起各家写码助手、读过程记录；各渠道的额度读取 |
 | `packages/cli` | `fleet` 命令：AI 会话汇报进度、提问、交活 |
+| `packages/store` | 后端和引擎共用、不碰 HTTP 的那一层：Store 契约和两套实现（内存、Postgres）、GitHub 作者白名单、对账和进门的判法；只许 api、engine 依赖它，它不许依赖 api、engine |
 | `packages/api` | 驾驶舱后端：登录、接口、实时推送、给工作流发信号、fleet 命令接口、收 GitHub 事件 |
 | `packages/web` | 驾驶舱前端：看板和后台管理页面；同一份代码另打一个演示版（`build:demo`） |
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
