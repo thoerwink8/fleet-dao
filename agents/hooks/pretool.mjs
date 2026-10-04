@@ -7,7 +7,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanId, stateDir, touchTool } from './unattended.mjs';
+import { armForBackground, cleanId, startsBackground, stateDir, touchTool } from './unattended.mjs';
+
+/** 只为记「起了后台活」才登记到这条钩子上的工具：不判、直接放行 */
+export const BACKGROUND_ONLY_TOOLS = new Set(['Agent', 'Task', 'Monitor', 'Workflow']);
 
 // bash 里反引号是「先把里面当命令跑」（命令替换）：只有单引号里、带引号的 heredoc（<<'EOF'）里才是普通字符。
 // 双引号里、不带引号、不带引号的 heredoc 里出现没转义的反引号，就返回 true。
@@ -1687,6 +1690,8 @@ export function decide(raw, fallbackCwd = '') {
     return block('fleet-guard：钩子输入不是 JSON，按拦处理');
   }
   const tool = input?.tool_name ?? input?.toolName;
+  // 只为记「起了后台活」才登记的工具（main 里已经记过）：这里不判，放行
+  if (typeof tool === 'string' && BACKGROUND_ONLY_TOOLS.has(tool)) return { code: 0 };
   if (typeof tool === 'string' && Object.hasOwn(READ_TOOLS, tool)) {
     return readVerdict(tool, READ_TOOLS[tool], input, fallbackCwd);
   }
@@ -1766,12 +1771,21 @@ if (isMain()) {
     process.exit(2);
   }
   // 无人值守开着时，记一笔「这个会话调了工具」（Stop 钩子靠它判有没有在干活）；只记不判，出错吞掉，不影响下面的放行或拦下
+  let backgroundOnly = false;
   try {
-    const id = cleanId(JSON.parse(raw)?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+    const input = JSON.parse(raw);
+    const id = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
     if (id) touchTool({ dir: stateDir(), sessionId: id });
+    // 起后台活（子代理、监视、后台命令）：自动开一个短的无人值守，这一轮就不能先收尾（unattended.mjs 的 armForBackground）。
+    // Agent、Monitor、Workflow 登记到这条钩子上只为了在这儿记一笔，不是要判它们（decide 不认识它们的名字会按拦处理）
+    const tool = input?.tool_name ?? input?.toolName;
+    const toolInput = input?.tool_input ?? input?.toolInput;
+    if (id && startsBackground(tool, toolInput)) armForBackground({ dir: stateDir(), sessionId: id });
+    backgroundOnly = BACKGROUND_ONLY_TOOLS.has(tool);
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }
+  if (backgroundOnly) process.exit(0);
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录
   const verdict = decide(raw, process.cwd());
   if (verdict.code !== 0) process.stderr.write(`${verdict.message}\n`);

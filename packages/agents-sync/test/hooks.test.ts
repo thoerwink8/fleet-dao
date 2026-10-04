@@ -133,7 +133,7 @@ describe('装', () => {
     const partly = m.check();
     expectKind(partly, SETTINGS, 'missing');
     expect(partly.find((l) => l.key === SETTINGS)?.text).toContain(
-      '没登记 SessionStart（session-start.mjs）、PreToolUse（pretool.mjs，matcher Bash|PowerShell|Read|Grep）',
+      '没登记 SessionStart（session-start.mjs）、PreToolUse（pretool.mjs，matcher Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow）',
     );
   });
 
@@ -178,8 +178,11 @@ describe('装', () => {
 // Glob 只列路径（和 ls 一样放行），不挂：挂上只会多一个要认的别家工具名（Grok 把 Glob 换成它的 list_dir）。
 // Devin 不换 Claude 的工具名、按不锚定的正则比它自己的小写名字，所以另一组锚定的 ^(exec|read|grep)$。
 describe('调工具前那条挂在哪些工具上', () => {
-  it('两组：Claude 的名字 Bash、PowerShell、Read、Grep（只含字母和 |，逐个全等比）；Devin 的名字 exec、read、grep（锚定）', () => {
-    expect(PRETOOL_MATCHERS).toEqual(['Bash|PowerShell|Read|Grep', '^(exec|read|grep)$']);
+  it('两组：Claude 的名字 Bash、PowerShell、Read、Grep 加起后台活的 Agent、Task、Monitor、Workflow（只含字母和 |，逐个全等比）；Devin 的名字 exec、read、grep（锚定）', () => {
+    expect(PRETOOL_MATCHERS).toEqual([
+      'Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow',
+      '^(exec|read|grep)$',
+    ]);
   });
 
   it('Devin 那组锚定了：不会连 notebook_read、read_subagent、mcp_read_resource、MCP 工具一起匹配上', () => {
@@ -211,6 +214,10 @@ describe('调工具前那条挂在哪些工具上', () => {
       exec: { command: 'git status', shell_id: 'main' },
       read: { file_path: '/work/repo/README.md' },
       grep: { pattern: 'TODO', path: '/work/repo/src' },
+      Agent: { prompt: '查一下', description: '查' },
+      Task: { prompt: '查一下', description: '查' },
+      Monitor: { command: 'until false; do sleep 1; done' },
+      Workflow: { script: 'x' },
     };
     const names = PRETOOL_MATCHERS.flatMap((m) => m.replace(/^\^\(|\)\$$/g, '').split('|'));
     expect([...names].sort()).toEqual(Object.keys(normal).sort());
