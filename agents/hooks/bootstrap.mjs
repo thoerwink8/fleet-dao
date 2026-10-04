@@ -59,13 +59,19 @@ function settingsCommands(file) {
   return { ok: true, missing: false, cmds };
 }
 
-/** 这台该不该由引导钩子管：{ manage: true } 或 { manage: false, why } */
+const unreadableLine = (why) =>
+  `引导钩子没核成：${why}；这台的钩子是不是最新判不了，先不动，修好设置文件再开会话，或手动跑 pnpm agents:sync。`;
+
+/** 这台该不该由引导钩子管：{ manage: true } 或 { manage: false, why } 或 { manage: false, unreadable }（读不了，要明说） */
 export function shouldManage({ home, env = process.env }) {
   if (env.FLEET_BOOTSTRAP === 'off') return { manage: false, why: 'FLEET_BOOTSTRAP=off' };
   const synced = existsSync(join(home, '.fleet-dao', 'synced.json'));
   const s = settingsCommands(join(home, '.claude', 'settings.json'));
   const legacy = s.ok && s.cmds.some((c) => LEGACY_STYLE.test(c.command));
   if (synced || legacy) return { manage: true };
+  // 设置文件读不了（不是没有）：判不出这台有没有挂旧钩子，不能当成「没有」静默退出——
+  // 没有 synced.json 的老机器恰恰是这一关要管的那类（#829 合并后补审挑出来的）
+  if (!s.ok) return { manage: false, unreadable: `~/.claude/settings.json 读不了（${s.why}）` };
   return {
     manage: false,
     why: '这台没做过完整同步、也没挂以前手装的钩子（法国会话用户、第一次装机都在这一类）',
@@ -112,9 +118,9 @@ export function healthReasons({ home }) {
 export function bootstrap(deps) {
   const { home, projectDir, env = process.env, now = Date.now() } = deps;
   const m = shouldManage({ home, env });
-  if (!m.manage) return [];
+  if (!m.manage) return m.unreadable ? [unreadableLine(m.unreadable)] : [];
   const h = healthReasons({ home });
-  if (h.unreadable) return [`引导钩子没核成：${h.unreadable}；这台的钩子是不是最新判不了，先不动。`];
+  if (h.unreadable) return [unreadableLine(h.unreadable)];
   if (h.reasons.length === 0) return [];
   const said = `发现旧钩子：${h.reasons.join('；')}。正在换成主线最新的。`;
   // 强制跑一遍，别被「3 分钟内刚同步成功过」的静默期挡掉：旧钩子的同步成功过不代表装对了
@@ -149,7 +155,8 @@ if (isMain()) {
     // 只在要动手的时候才加载 session-start.mjs（它顶层会动态加载同步专用检出那一段）
     const home = homedir();
     const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    if (!shouldManage({ home }).manage) lines = [];
+    const m = shouldManage({ home });
+    if (!m.manage) lines = m.unreadable ? [unreadableLine(m.unreadable)] : [];
     else {
       const ss = await import(
         pathToFileURL(join(fileURLToPath(new URL('.', import.meta.url)), SESSION_SCRIPT)).href
