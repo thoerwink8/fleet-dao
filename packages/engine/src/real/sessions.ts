@@ -37,7 +37,7 @@
 // Jev（判断题）只在这个活动里问（design 第十一节「错误分流」「停滞预判」）：规则认不出的失败问一次，回答随结局交给工作流的
 // 失败分流；停滞拿不准时问，同一个会话隔 stallJevEveryMs 才再问。只记不拦的题、没判出来的一律照规则走。
 
-import { readdir, readFile, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type CgroupScope,
@@ -107,14 +107,7 @@ import {
   sessionUserOf,
   wiredHostNames,
 } from './hosts.ts';
-import {
-  explainKill,
-  killSignal,
-  type OomCounters,
-  oomCounters,
-  realKillEvidence,
-  scopeOomKills,
-} from './kill-evidence.ts';
+import { explainKill, killSignal, oomCounters, realKillEvidence, scopeOomKills } from './kill-evidence.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
 import type { OrgSwitchSessions } from './org-switch.ts';
 import {
@@ -146,9 +139,9 @@ import {
   ORG_SWITCH_CODE,
   ORPHAN_RUN_REASON,
   orgSwitchFailure,
-  REATTACH_MARGIN_MS,
 } from './session-codes.ts';
-import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
+import { createDetached } from './session-detached.ts';
+import { readSessionMeta, writeSessionMeta } from './session-io.ts';
 import { createLive, type Live } from './session-live.ts';
 import { createTree } from './session-tree.ts';
 import type { SessionPorts, SessionPortsDeps, SessionShared } from './session-types.ts';
@@ -213,7 +206,6 @@ export {
 export type { ContinueMode, OrgSwitchSessions };
 
 const STEP_RANK: Record<string, number> = { pending: 0, in_progress: 1, done: 2 };
-const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const PENDING_MAX = 5_000;
 const RECENT_TOOLS = 30;
 const SAYS_KEPT = 12;
@@ -300,94 +292,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   };
   const { newLive } = createLive(shared);
   const { treeAs, identityOf, removeTmp, sweepTmp } = createTree(shared);
-
-  // ---- 脱开跑的会话：收发目录、接回（session-io.ts、adapters 的 detached.ts）
-
-  /** 这个会话的收发目录；没配根（走管道）、编号不像 scope 编号都是 undefined。 */
-  const ioDirOf = (runId: string): string | undefined =>
-    deps.ioRoot && SCOPE_ID.test(runId) ? join(deps.ioRoot, runId) : undefined;
-
-  function metaOf(live: Live, spec: HostRunSpec, oomBefore: OomCounters): SessionMeta {
-    return {
-      v: 1,
-      runId: live.runId,
-      sessionId: live.sessionId,
-      agentSessionId: live.agentSessionId ?? null,
-      hostId: live.hostId,
-      taskId: live.taskId,
-      stage: live.stage,
-      kind: live.kind,
-      mode: live.mode,
-      user: live.user,
-      poolId: live.poolId,
-      routeId: live.routeId,
-      dir: live.dir,
-      baseHead: live.baseHead ?? null,
-      defaultBranch: live.defaultBranch,
-      reviewHead: live.reviewHead ?? null,
-      verifyCriteria: live.verifyCriteria ?? null,
-      ...(live.previousCost === undefined ? {} : { previousCost: live.previousCost }),
-      startedAt: live.startedAt,
-      oomBefore,
-      limits: spec.limits,
-      testCommands: [...spec.testCommands],
-      cgroupLimits: spec.cgroup.limits ?? null,
-      model: spec.model,
-      session: spec.session,
-      purpose: spec.purpose,
-    };
-  }
-
-  /** 删收发目录。不抛：删不掉记日志，工人下次起来时 sweepIo 再清。 */
-  async function removeIo(runId: string): Promise<void> {
-    const dir = ioDirOf(runId);
-    if (!dir) return;
-    try {
-      await rm(dir, { recursive: true, force: true });
-    } catch (error) {
-      log('会话的收发目录没删掉（工人下次起来时再清）', { runId, dir, error: errorText(error) });
-    }
-  }
-
-  /** 工人起来时：收发目录里既不在这个进程手上、也不留着接回的，删掉。列不出、删不掉只记日志。 */
-  async function sweepIo(keep: ReadonlySet<string>): Promise<void> {
-    if (!deps.ioRoot) return;
-    let names: string[];
-    try {
-      names = await readdir(deps.ioRoot);
-    } catch (error) {
-      log('上一轮会话留下的收发目录没清成：列不出来', { dir: deps.ioRoot, error: errorText(error) });
-      return;
-    }
-    for (const name of names) {
-      if (registry.has(name) || keep.has(name)) continue;
-      try {
-        await rm(join(deps.ioRoot, name), { recursive: true, force: true });
-      } catch (error) {
-        log('上一轮会话留下的收发目录没删掉（下次起来再清）', { name, error: errorText(error) });
-      }
-    }
-  }
-
-  /**
-   * 上一个工人起的这个会话接不接得回：有接回记录、库里这一轮没结束也没叫停、没过总时限加 REATTACH_MARGIN_MS。
-   * 接得回回 true，接不回回原因。库读不成照抛（不能因为一次读库失败就收掉在跑的会话）。
-   */
-  async function keepForReattach(runId: string): Promise<true | string> {
-    const dir = ioDirOf(runId);
-    if (!dir) return deps.ioRoot ? `编号 ${runId} 不像会话编号` : '这个引擎没配收发目录，会话不脱开跑';
-    const got = await readSessionMeta(dir);
-    if ('error' in got) return got.error;
-    const stored = await getSessionRun(db, runId);
-    if (!stored) return '库里没这一轮';
-    if (stored.endedAt) return '库里这一轮已经记了结局';
-    if (stored.stopRequested) return `已经叫停（${stored.stopRequested.reason}）`;
-    const deadline = got.meta.startedAt + (got.meta.limits.wallClockMs ?? 0) + REATTACH_MARGIN_MS;
-    if (clock().getTime() > deadline) {
-      return `过了总时限还没人接回（起于 ${new Date(got.meta.startedAt).toISOString()}）`;
-    }
-    return true;
-  }
+  const { ioDirOf, metaOf, removeIo, sweepIo, keepForReattach, finishedWhileAway } = createDetached(shared);
 
   /**
    * 看守在新工人上重试、手上没有这个会话：照收发目录和库里那一行接回（不起进程，从头重读输出：库里确认过的行只重建状态、
@@ -1896,25 +1801,6 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
     if (live.quotaError) log('会话里读到的额度没记上', { poolId: live.poolId, error: live.quotaError });
     return end;
-  }
-
-  /** 收发目录里有、scope 已经没了、还能接回的（keepForReattach）：引擎不在时跑完的会话。列不出记日志、当没有。 */
-  async function finishedWhileAway(seen: ReadonlySet<string>): Promise<string[]> {
-    if (!deps.ioRoot) return [];
-    let names: string[];
-    try {
-      names = await readdir(deps.ioRoot);
-    } catch (error) {
-      log('收发目录列不出来，引擎不在时跑完的会话接不回', { dir: deps.ioRoot, error: errorText(error) });
-      return [];
-    }
-    const out: string[] = [];
-    for (const name of names) {
-      if (seen.has(name) || registry.has(name)) continue;
-      const why = await keepForReattach(name);
-      if (why === true) out.push(name);
-    }
-    return out;
   }
 
   async function stopSession(input: StopSessionInput) {
