@@ -2,6 +2,18 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-04 已开着的会话切不到平台额度（只记进度）
+
+会话 `claude:1aedaaec-91ac-4245-a8d5-13d628b767b2`，本机 Mirasim `0.0.411`。做到哪：链查完，这条会话的钉没写上。下一步：没有新的启动器改动（当场切不到平台、又不杀会话，主线已有 #873）。还没验证：真扣费。Mirasim 会自己更新，下面的界面和注入只对 `0.0.411` 这一次成立。
+
+- 写方：桌面点选发 `setSessionRoute`。正好是 `cloud` 或 `local` 才写入；`null`（跟随全局）会删掉这条钉。已开着的会话发消息不带 `route`。界面用「本会话的钉，没有就用全局档」画高亮。全局 `failover.enabled=true` 时，没钉住也显示平台。
+- 存放处：`~/.mirasim/plugin-index/QzpcVXNlcnNcQWRtaW5pc3RyYXRvcg.json` 的 `routes`。2026-10-04 21:36 没有这条键（当时 445 条 `cloud`、34 条 `local`；同日复查 447 / 34，键仍没有）。同一模型的 `claude:a79e3d2d-c99b-4484-bf11-7df25e0c9949` 是 `cloud`。
+- 读方：没有键就是 `default`。这条会话 19:57 到 21:36 共 8 次全是 `event=launch route=default generation=1`，没有 `event=switch`、没有 `event=reject`。正在用的设置文件没有 `env`。对照那条钉了 `cloud` 的，拉起时设置里有回环地址和令牌，日志是 `route=cloud`。
+- 断点：21:02:51 到 21:03:19 有 4 次 `setSessionRoute`，诊断不记 route 的值，之后索引里仍然没有这条键，所以最后一次生效的不是 `cloud` 也不是 `local`。没钉住的 Claude 不注入网关。启动器没有丢掉一份已经给过的网关。
+- e2e（另起 `claude:8ab4102d-ef34-4f23-ab97-23a978c574c6`，临时目录，没碰上面那条，没切号）：不钉时 `route=default`、回复 PING、没有平台账本；钉 `local` 后新进程 `route=local`、回复 LOCAL、设置无网关；钉 `cloud` 后新进程 `route=cloud`、设置有回环和令牌、账本 `viaRelay=true`、主机 `relay.mirasim.ai`、状态 200、回复 CLOUD。四次都是 `generation=1`。再钉回 `local` 时进程是 `route=local`，回复是空的（脚本紧接着 stop）。
+- 启动器不读、不锁 Mirasim 的版本，只认索引里的 `local` / `cloud`，以及 `--settings` 里的回环地址和令牌（形状自 `0.0.354`）。下一版改了点选是否写钉、没钉住注不注入、令牌还在不在 `--settings`，这条结论就作废。明确的 `cloud` 若不再带令牌，启动器会拒绝，不会退回自有。各台机器的 Mirasim 版本可以不同，同步启动器不会把界面行为拉齐。
+- 主线 #873（`671158af`）已合：自有起的进程当场切平台、活着的参数里没有网关时，退回这条消息并明说办法（`event=refuse-switch`），不杀会话。这次 e2e 没走到那条，因为钉上 `cloud` 之后 Mirasim 重开了进程，新进程的设置里带了网关。创始人 2026-10-04 22:30：「mirasim版本随时更新的，你考虑到了吗」。
+
 ## 2026-10-05 CI 第三轮（创始人 10-04 夜「按照你推荐去做，自我验证，持续优化到最佳」，Sonnet 5.5 子代理）
 
 - 做到哪、数字、怎么量：`docs/ci-speedup-plan.md`「第三轮」。第一块（#876，已合）：合并闸只在改了已有 ci.yml 时装 YAML 依赖 + debt 推主线只留看文件那一半 + `pnpm ci:stats` 量法。第三块（#885）：release 对普通 PR 不起机器 + lint 并行三样记秒数 + 量测结论（「第三轮结果」，停的依据在那里）；第二块（#881，已合，真主线验证过）：主线同树复用，方案在 PR 说明和 ci-speedup-plan 的 D 第 6 点；会改 ci.yml，要走第二意见，合并后要看第一批主线轮次的 `main-reuse` 输出（声明上线前跑的 PR 检查没有声明，会 warning 后全跑，是预期）。量几条（tsc 增量缓存、分片结果缓存主线写 PR 读、固定开销、CLEAN 到 MERGED 的滞后、第二意见自动触发）的结论并进对应 PR 的文档，不单开 PR。还没验证：合并闸改后的真实数字（合并后才生效）。
@@ -25,6 +37,8 @@
 ## 创始人引导（待处理）
 
 > 创始人插话给的引导、修正、决定落在这里（通用段「你的引导必须落盘」那条），别只留在对话里。办完标「已处理」或删掉；只管这一次会话怎么干的**不记**（决定 0013）。
+
+- 2026-10-04 22:30 原话：「mirasim版本随时更新的，你考虑到了吗」。已处理：上面「已开着的会话切不到平台额度」写明结论只覆盖本机当时的 Mirasim `0.0.411`，启动器不锁它的版本。
 
 - 2026-10-04 夜（新会话，时刻未记）「其他 AI 查出了这么多问题，你分析查看一下，然后排一下优先级，多 sub agent 分别去解决吧。尽量在 V3 上线前把这些问题全解决，你看合不合理？」（附 18 条审查：拆 sessions.ts、engine 不依赖 api 的分层、Store 去重、三个大脚本进 tsc、web 补测试、README 目录、#133 TODO、github-audit 红、ci.yml 卫生检查要不要挡、checkGuarded 继续后再拦、installationToken 降权、claimDelivery 去重、startRun 覆盖、0033 快照、runsOfTask 串仓、workflows 权限、esbuild audit、task.ts 与 queries/engine.ts 拆分）——**办中，Sonnet 5.5 子代理**。第一波（互不抢文件，已派）：#10+#18 的 task.ts 拆分｜#11+#16 令牌降权与 workflows 权限｜#12+#13+#15 存储层三处正确性｜#14+#17 迁移快照与 esbuild｜#8+#7+#6 github-audit 数据、#133 TODO、README｜#1 拆 sessions.ts｜#5 web 测试。第二波（等第一波的存储层 PR 合了再开，免得抢文件）：#2 Store 挪出 api 包 → #3 抽 Store 纯逻辑 → #18 的 queries/engine.ts 拆分；#4 三个大脚本（钩子要保持纯 node 直接可跑，只能走 JSDoc + checkJs 进 tsc，不能改成 .ts）。#9（PR 上卫生检查改成挡）**和创始人 2026-09-28/10-01 已拍的「CI 里 hygiene 只报不挡」冲突，等他定，推荐维持**。原审查里「合之前跑 pnpm check」与本仓「本机不跑全量 pnpm check」冲突，按本仓：本机只跑 test:changed，全量交 CI。
   - 上一条的进展（2026-10-04 夜）：已合 #849（第 14）、#850（第 6、7）、#851（第 17）、#852 和 #855（第 5）、#853（第 12）、#858（第 13）、#859（第 10）、#854（第 11）、#860（第 16）；第 8 条数据已被人修好、检查没误报，不用改。在做：第 15 条、`task.ts` 拆分（#861）、`sessions.ts` 拆分。开了未排期单 #856、#857（web 测试代理发现的）。第二波（#2→#3→`queries/engine.ts` 拆分、#4）等第 15 条合完再开。**上线前要核**：#854 改了线上令牌的请求体（按用途降权），这版上线后第一次换令牌，看健康页 `github_app` 自检是否仍绿；读分支规则那个接口要不要 `administration` 读，没法在真 GitHub 上验，保守留了只读。
