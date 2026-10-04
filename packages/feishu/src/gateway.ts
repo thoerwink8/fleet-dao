@@ -30,6 +30,7 @@ import {
   type RenderContext,
 } from './cards.ts';
 import type { Founder } from './config.ts';
+import { createIntentCards } from './intent-cards.ts';
 import type { Logger } from './log.ts';
 import { createOutbox, type Outbox } from './outbox.ts';
 import {
@@ -176,6 +177,15 @@ export function createGateway(o: GatewayOptions): Gateway {
     founders: new Set(founders.keys()),
     publicUrl: o.publicUrl,
     askBudgetPerDay: o.askBudgetPerDay,
+    waitSeconds: timing.outboxWaitSeconds,
+    watch,
+  });
+  /** 意图卡（#553 第 4 条）：长轮询后端要发、要改的意图卡，回复在那段第一条原话下面、之后原地改。 */
+  const intentCards = createIntentCards({
+    backend: o.backend,
+    feishu: o.feishu,
+    log,
+    now,
     waitSeconds: timing.outboxWaitSeconds,
     watch,
   });
@@ -818,6 +828,7 @@ export function createGateway(o: GatewayOptions): Gateway {
   let heartbeatTimer: NodeJS.Timeout | undefined;
   let ticking: Promise<void> | null = null;
   let outboxRun: Promise<void> | null = null;
+  let intentCardsRun: Promise<void> | null = null;
 
   function tick(): void {
     if (ticking) return;
@@ -899,6 +910,9 @@ export function createGateway(o: GatewayOptions): Gateway {
       tick();
       boardTimer = setInterval(tick, o.boardRefreshMs);
       outboxRun = outbox.run(life.signal).catch((err) => log.error('推送循环停了', { error: String(err) }));
+      intentCardsRun = intentCards
+        .run(life.signal)
+        .catch((err) => log.error('意图卡循环停了', { error: String(err) }));
       watchTimer = setInterval(() => void watch.check(), watch.limits.checkEveryMs);
       heartbeatTimer = setInterval(() => watch.heartbeat(), watch.limits.heartbeatMs);
     },
@@ -909,6 +923,7 @@ export function createGateway(o: GatewayOptions): Gateway {
       clearInterval(heartbeatTimer);
       life.abort();
       await outboxRun;
+      await intentCardsRun;
       await ticking;
       await watch.idle();
       const left = await inflight.drain(drainMs);
