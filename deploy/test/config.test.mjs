@@ -368,6 +368,50 @@ test('私有值还没记指纹、线上文件读不到或认不出：那几项�
     live({ files: files({ 'engine.env': { text: 'A="没配上\n' }, 'api.env': { text: API } }) }),
   );
   assert.match(r.unchecked.join(), /engine\.env 认不出/);
+  // 线上空着也一样：null 是「还没记指纹」，不是「登记成留空」——还没放的私有值（比如等 GitHub App 的 webhook 密钥）
+  // 不能因为线上空着就当成对得上；真要留空的登记成公开的空值（下一条）
+  r = judgeConfig(
+    live({
+      desired: { text: JSON.stringify(noFp) },
+      files: files({ 'api.env': { text: 'FEISHU_APP_SECRET=\nFLEET_ENV=production\n' } }),
+    }),
+  );
+  assert.deepEqual(r.drift, []);
+  assert.deepEqual(r.unchecked, ['api.env 的 FEISHU_APP_SECRET 是私有值，仓里还没记它的指纹']);
+});
+
+test('本机档不接飞书，飞书一对登记成留空（公开的空值，#731）：线上空着对得上、不记没查成；填了值报不一致，值不打印', () => {
+  const localText = readFileSync(LOCAL_DESIRED_FILE, 'utf8');
+  const want = parseDesired(localText);
+  for (const key of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET']) {
+    const d = want.files['api.env'].find((x) => x.key === key);
+    assert.deepEqual([d.kind, d.value], ['public', ''], `${key}：登记成公开的空值`);
+    assert.match(d.note ?? '', /不接飞书/, `${key}：说明里写清为什么留空`);
+  }
+  // 线上照期望建出来的样子（公开的照期望写、私有的留空位）：飞书一对本来就该空着
+  const liveFiles = Object.fromEntries(CONFIG_FILES.map((f) => [f, { text: renderEnv(want, f, 'x') }]));
+  const judge = (over = {}) =>
+    judgeConfig({
+      desired: { text: localText },
+      files: { ...liveFiles, ...over },
+      key: { error: '这台还没有指纹钥匙' },
+      desiredPath: LOCAL_DESIRED_FILE,
+    });
+  let r = judge();
+  assert.deepEqual(r.drift, []);
+  assert.ok(
+    !r.unchecked.some((u) => u.includes('FEISHU')),
+    `飞书一对按登记留空，不该记没查成：${r.unchecked.join('；')}`,
+  );
+  const filled = liveFiles['api.env'].text.replace(/^FEISHU_APP_ID=$/m, `FEISHU_APP_ID=${SECRET}`);
+  assert.notEqual(filled, liveFiles['api.env'].text, '故意填上值');
+  r = judge({ 'api.env': { text: filled } });
+  assert.equal(r.result, 'drift');
+  assert.deepEqual(
+    r.drift.map((d) => [d.id, d.kind]),
+    [['api.env:FEISHU_APP_ID', 'value']],
+  );
+  noValues(r, SECRET);
 });
 
 test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，法国几份文件都在里面', () => {

@@ -196,6 +196,8 @@ session_ports_cut() { # 会话用户
 #   2. 以它的身份现起一个探针监听（落在临时端口段，和 reclaude 一样）：别的用户读不到问候、它自己读得到；
 #   3. 以第一个别的用户起探针、最后一个别的用户去连，读得到问候：规则只挡会话用户的口，没挡多。
 # 连得上判红；查不到用户、ss 跑不成、起不了探针、没以某个用户的身份跑起来记待配（没查成，不当成挡住了）。
+# 例外：这一档本来就不建的用户（本机档的 pilot，lib/profile.sh 的 profile_skips_user）查不到就跳过、写明，不算没查——
+# 不然本机档这一项的 ok 行永远打不出来；没 source profile.sh 的调用方照旧算没查。
 check_session_ports() { # 会话用户 别的用户…
   local session=$1 uid u addr port list foreign names cuid csock ssock rc bad=0 unsure=0 n=0
   shift
@@ -207,11 +209,17 @@ check_session_ports() { # 会话用户 别的用户…
   for u in "$@"; do
     if id -u -- "$u" >/dev/null 2>&1; then
       others+=("$u")
+    elif declare -F profile_skips_user >/dev/null && profile_skips_user "$u"; then
+      skip_local "没有 $u（这一档不建），拿他连 $session 的口这一项不试"
     else
       pending "查不到用户 $u，拿他连 $session 的口这一项没查"
       unsure=1
     fi
   done
+  if ((${#others[@]} == 0)); then
+    pending "没有能拿来试的别的用户（给的 $* 都不在），$session 开的口别人连不连得上没查"
+    unsure=1
+  fi
   if ! foreign=$(session_ports_foreign "$uid") || ! list=$(session_ports_listening "$uid"); then
     pending "ss 跑不成，$session 此刻在听的口没逐个试、规则载上之前就连着它的连接没查"
     unsure=1
@@ -281,7 +289,10 @@ check_session_ports() { # 会话用户 别的用户…
   fi
   if ((bad == 0 && unsure == 0)); then
     printf -v names '%s、' "${others[@]}"
-    ok "别的用户（${names%、}）连不上 $session 在本机开的口（现起的探针，和它此刻在听的 $n 个口），也没有规则载上之前连上的；它自己连得上；别人之间照常通"
+    # 只剩一个别的用户（本机档跳过了 pilot）时，「没挡多」那一项是他连自己开的临时口，照实写
+    local between=别人之间照常通
+    if ((${#others[@]} == 1)); then between="${others[0]} 连自己开的临时口照常通"; fi
+    ok "别的用户（${names%、}）连不上 $session 在本机开的口（现起的探针，和它此刻在听的 $n 个口），也没有规则载上之前连上的；它自己连得上；$between"
   fi
 }
 
