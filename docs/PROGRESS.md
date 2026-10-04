@@ -120,7 +120,7 @@
 
 ## 2026-10-05 #901 第三阶段：纯重构方案（① shared 小工具、③ web-api 拆分、⑤ github 变纯、⑥ 跨包路径；Sonnet 5.5 子代理，分支 `slim/901-refactor-plan`，PR #920，`Refs #901` 不写 Closes）
 
-做到哪：方案写完并过了别家挑错（GPT、Kimi 各一份有效意见；前两轮四家都超 30 秒没答完，已在方案第 7 节照实写），`specs/901-项目瘦身与提速/重构方案.md`。下一步：方案进主线 → 按方案第 5 节的 PR 表依次实施（`packages/conventions/test/package-boundaries.test.ts` 与 shared/util 纯加 → ⑤ → ⑥ → ③ → ① 各包替换，每片一类）。还没验证：方案里的数字来自本机脚本读代码；零安装区（CI 的 changes/check job、agents-sync、mirasim-reclaude、bridge.ts）的清单读自 workflow 和文档，没逐个在无 node_modules 的环境里跑过；`import.meta.resolve` 取桥接脚本在法国真机上的路径没在本机验（只能合并后随部署看）。
+做到哪（2026-10-05 12:30）：方案 `specs/901-项目瘦身与提速/重构方案.md` 已合（#920，过了别家挑错，GPT、Kimi 各一份有效意见，前两轮四家都超 30 秒没答完，方案第 7 节照实写）。已合的实施片：shared/util 纯加 #929、包边界守卫测试 #931、⑤-1 store 里先放 Postgres 实现 #935、⑤-2 调用方改引用 #944、③ web-api 拆 16 个文件 #946；在 CI 里：⑤-3 github 变纯 #951、⑥-1/2 引擎取桥接脚本走 exports #952（auto-merge 已挂）。下一步：⑥-3（`mirasim-reclaude` 测试改走 `@fleet-dao/adapters/testing`、删手工 tsconfig.include），再做 ① 的各包替换（`errMessage` 约 90 处分 adapters/jev/cli/feishu/store/db → api/web → engine 三片 → github，再 `isRecord`/`asRecord`、`abortableSleep`/`sleep`，每片一类、一个包群）。和方案不一样的地方：北京时间不收进 shared（八份没有两份行为相同，方案 0 节第 2 条）；③ 的守卫测试和搬家合进一个 PR。还没验证：方案里的数字来自本机脚本读代码；零安装区（CI 的 changes/check job、agents-sync、mirasim-reclaude、bridge.ts）的清单读自 workflow 和文档，没逐个在无 node_modules 的环境里跑过；引擎改用 `createRequire().resolve` 取桥接脚本，法国真机上会话用户的 node 读这个路径本机验不了（路径和以前指向同一个文件，只能合并后随部署看）；本机 `engine/test/real` 整批有 13 个文件在 Windows PowerShell 里失败（`spawnSync sh ENOENT`，没有 sh），以 CI 为准。
 
 ## 2026-10-05 #789 + #805 小单（Sonnet 5.5 子代理，PR #924，分支 `fix/789-805-conventions-small`；#857 已在 #919 合并）
 
