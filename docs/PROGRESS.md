@@ -299,7 +299,7 @@ PR-1（#781）、PR-2（#787 #793 #813）已合。PR-4 现在就能做：它不�
 
 ## 2026-10-05 #901 测试层的臃肿与慢（Sonnet 5.5 子代理，分支 `test/901-*`、`docs/901-test-audit`，`Refs #901` 不写 Closes）
 
-做到哪：审查写完，`specs/901-项目瘦身与提速/测试体量审查.md`（最慢 30 文件 / 30 用例、重复与过度、偶发超时四张单的根因、Windows 红的真因）。已合：#965（PGlite 迁移快照跨测试文件共用，新进程建库 3.5→1.7 秒）、#968（Windows 上把 Git 的 `usr\bin` 排进 PATH 最前，90 多条 PowerShell 下整片红的用例变绿，没加平台跳过）、#969（`test-slots` 跨进程用例 13.65→5.26 秒）；#975 待合（conventions 14 处同步起子进程改 `runChild`）。下一步：①指挥官评估 Fusion 会话端口整条线（`engine/src/real/session-*.ts`，`startSession`/`awaitSession` 已无生产调用方，7 个测试文件 CI 116.9 秒占 15%）要不要出删除方案；②`agents/test/rules/stop.rules.test.ts`（#718，标准路径）要创始人同意才能改；③#706 候选根因（心跳节流 60 秒，取消靠心跳送进活动）要在 CI 上验，本机 8 遍没复现。还没验证：PGlite 快照在 CI 上的实际省时（合并后看下一轮全量 PR 的 test 台日志）；其余包里还有 38 个文件直接调 `spawnSync`，没迁。
+做到哪：审查写完，`specs/901-项目瘦身与提速/测试体量审查.md`（最慢 30 文件 / 30 用例、重复与过度、偶发超时四张单的根因、Windows 红的真因）。已合：#965（PGlite 迁移快照跨测试文件共用，新进程建库本机 3.5→1.7 秒，CI 上 A/B 在噪声里：7 台合计 −7%、去掉一个离群台 −1.4%）、#968（Windows 上把 Git 的 `usr\bin` 排进 PATH 最前，90 多条 PowerShell 下整片红的用例变绿，没加平台跳过）、#969（`test-slots` 跨进程用例 13.65→5.26 秒）；#975（conventions 14 处同步起子进程改 `runChild`，已合）。下一步：①指挥官评估 Fusion 会话端口整条线（`engine/src/real/session-*.ts`，`startSession`/`awaitSession` 已无生产调用方，7 个测试文件 CI 116.9 秒占 15%）要不要出删除方案；②`agents/test/rules/stop.rules.test.ts`（#718，标准路径）要创始人同意才能改；③#706 候选根因（心跳节流 60 秒，取消靠心跳送进活动）要在 CI 上验，本机 8 遍没复现。还没验证：PGlite 快照 CI 收益只有一次 A/B（噪声大）；其余包里还有 38 个文件直接调 `spawnSync`，没迁。
 
 ## 2026-10-05 #194 方案 4.3「切完当场叫醒等路由的活」（Sonnet 5.5 子代理，分支 `feat/194-wake-routes`）
 
