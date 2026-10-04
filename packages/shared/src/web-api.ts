@@ -985,6 +985,11 @@ export const SETTING_SCHEMAS = {
   'notify.quietHours': z.object({ start: HHMM, end: HHMM }).nullable(),
   /** Jev 每天最多调用多少次。 */
   'judge.dailyCallLimit': z.number().int().min(0).max(100_000),
+  /**
+   * 引擎暂不用独享（#194 方案 v2 4.8）：开着时拼车用不了也不切独享，Claude 的活等拼车恢复或交给别家模型——创始人自己要大用
+   * 独享时一键关掉引擎这一路。已经挂着独享时不受影响（该切回照切回）。没设过 = false。
+   */
+  'engine.soloPaused': z.boolean(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

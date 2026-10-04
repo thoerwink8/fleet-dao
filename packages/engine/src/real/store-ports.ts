@@ -98,8 +98,12 @@ export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 
 /** 战绩和熔断看最近几天的会话结局。 */
 export const RECORD_DAYS = 7;
-/** 选路要等时，最多隔这么久再选一次（等额度清零可能要几天：中途人点名换路由、额度提前清零要看得见）。 */
-export const MAX_ROUTE_WAIT_SECONDS = 600;
+/**
+ * 选路要等时，最多隔这么久再选一次（等额度清零可能要几天：中途人点名换路由、额度提前清零要看得见）。
+ * 2 分钟（原来 10 分钟，#194）：拼车被拒、当场切到独享以后，等路由的活要在 2 分钟内重新选到独享（方案 4.3 的目标），
+ * 不靠信号叫醒——选路只是查库，隔 2 分钟再选一次很便宜。
+ */
+export const MAX_ROUTE_WAIT_SECONDS = 120;
 /** 选路读会话用户挂的组织最多等多久：选路这一步（quick 一档）一次尝试只有 30 秒，还要查库。 */
 export const ORG_READ_WAIT_MS = 15_000;
 /** 组织还没读出来时隔多久再选：平时一读 0.3 秒，慢的是 reclaude 首跑同步配置（上百秒），读在后台接着跑。 */
@@ -415,7 +419,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     held: ReadonlySet<string>,
     now: Date,
   ): Promise<OrgPlanView | undefined> {
-    if (!live?.ok || !routes.some((r) => r.orgKind && r.orgKind !== live.org)) return undefined;
+    // 候选里有带组织类型的池就问：不是挂着的那个组织的池要等切号；挂着的这一类也可能在切回的宽限中、或整个渠道不可用（#194）
+    if (!live?.ok || !routes.some((r) => r.orgKind)) return undefined;
     return planOf({ live: live.org, held, now });
   }
 

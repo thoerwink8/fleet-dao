@@ -209,6 +209,10 @@ function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
   const kind = route.orgKind;
   if (kind === undefined || kind === null) return null;
   const { liveOrg, liveOrgProblem: problem, orgPlan: plan } = ctx;
+  // 渠道不可用（可用账号 0 个）：不管挂着哪个组织，Claude 订阅的池都不派，写明原因（自己恢复后这一条就没了）
+  if (plan?.channelDown) {
+    return hard('org-not-live', `渠道不可用，${route.poolName}不派：${plan.channelDown}`);
+  }
   if (liveOrg === undefined) {
     return hard(
       'org-not-live',
@@ -217,7 +221,19 @@ function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
         : `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`,
     );
   }
-  if (kind === liveOrg) return null;
+  if (kind === liveOrg) {
+    // 切回拼车的宽限中：现在挂着的这一类新活先不派，等切回（在跑的不动，宽限到点才停）
+    if (plan?.drain === kind) {
+      const at = plan.at === null ? null : ahead(Date.parse(plan.at), ctx.now);
+      return {
+        code: 'org-not-live',
+        text: `${route.poolName}在切回${plan.to ? ORG_NAMES[plan.to] : '另一个'}组织的宽限中，新活先不派（${plan.why}），等切号`,
+        wait: 'org',
+        until: at === null ? null : new Date(at).toISOString(),
+      };
+    }
+    return null;
+  }
   const head = `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
   if (!plan) return hard('org-not-live', head);
   if (plan.to !== kind) return hard('org-not-live', `${head}；引擎现在不打算切过去（${plan.why}）`);
@@ -305,6 +321,10 @@ const EPSILON = 1e-9;
  */
 function shortBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   if (route.blockers.includes('quota-exhausted')) return [];
+  // 拼车池不按「够收尾」挡（#194 方案 4.3，创始人 2026-10-04 约 08:50「拼车要尽可能用完」）：拼车额度不用就作废、还会被同车的人
+  // 用掉，所以用到被拒为止，被拒当场切独享；剩最后一成就不派的话，那点额度用不掉、活还空等（G1 死区）。用满了（exhausted）的照挡，
+  // 上面已经 return。独享、别家照判。
+  if (route.orgKind === 'carpool') return [];
   const out: Block[] = [];
   for (const w of route.windows) {
     if (w.applies !== 'yes' || w.state !== 'ok') continue;

@@ -4,7 +4,30 @@
 // - 锁：单飞，一次只一个拿着；过期的（引擎做到一半重启没放）下一个能拿；同一个持有人可以重入续期。
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { sessionOrgState } from '../schema/index.ts';
+import { sessionOrgState, settings } from '../schema/index.ts';
+
+/** 设置表里「引擎暂不用独享」那一项的键（值是布尔；驾驶舱设置页改，web-api 的 SETTING_SCHEMAS 里同名）。 */
+export const SOLO_PAUSED_SETTING = 'engine.soloPaused';
+
+export type SoloPausedReading =
+  | { state: 'off' }
+  | { state: 'on'; since: Date; by: string | null }
+  /** 设置的值不是布尔（被人直接改库、旧数据）：认不出，调用方按「暂停」办（保守：不动创始人的独享）并报错。 */
+  | { state: 'unreadable'; since: Date; by: string | null; why: string };
+
+/** 读「引擎暂不用独享」：没设过 = 关；值是 true = 开；其余认不出（不当成关）。库读不了照抛。 */
+export async function readSoloPaused(db: Db): Promise<SoloPausedReading> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, SOLO_PAUSED_SETTING));
+  if (!row) return { state: 'off' };
+  if (row.value === false) return { state: 'off' };
+  if (row.value === true) return { state: 'on', since: row.updatedAt, by: row.updatedBy };
+  return {
+    state: 'unreadable',
+    since: row.updatedAt,
+    by: row.updatedBy,
+    why: `设置 ${SOLO_PAUSED_SETTING} 的值不是 true/false：${JSON.stringify(row.value)}`,
+  };
+}
 
 export interface OrgStateRow {
   doc: unknown;

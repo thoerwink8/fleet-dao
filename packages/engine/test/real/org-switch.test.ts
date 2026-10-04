@@ -23,6 +23,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { OrgKind } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import { runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import {
@@ -72,8 +73,30 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 const H = 60 * MIN;
 const answered = (): FakeRunScript => ({ result: { text: 'OK' } });
 
+/** 接口读数的替身：本人额度还宽、拼车和独享各一个可用账号。每次现读都是新的（时刻跟着假钟走）。 */
+const healthyRead = (at: Date): CarpoolApiRead => ({
+  ok: true,
+  requestedAt: at,
+  serverDate: at,
+  ageSeconds: null,
+  quota: { usedUsd: 10, limitUsd: 80, resetsAt: new Date(at.getTime() + 3 * 60 * MIN), status: 'active' },
+  org: 'ok',
+  accounts: [
+    { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+    { id: 'solo-1', kind: 'solo', hasAssignedAccount: true, expiresAt: null },
+  ],
+});
+
+/** 本人额度到顶的接口读数（几点恢复由接口说）。 */
+const fullRead = (at: Date, resetsAt: Date): CarpoolApiRead => {
+  const ok = healthyRead(at);
+  return ok.ok ? { ...ok, quota: { usedUsd: 80, limitUsd: 80, resetsAt, status: 'active' } } : ok;
+};
+
 function setup(
   over: {
+    /** 接口读数的替身：不给就是两个账号都可用、本人额度还宽。 */
+    api?: (at: Date) => CarpoolApiRead;
     /** 帮手的替身：不给就切成（假 reclaude 跟着改成切过去的那个）。 */
     helper?: (to: OrgKind) => Promise<SwitchSessionOrgResult>;
     probe?: (n: number) => FakeRunScript;
@@ -114,6 +137,7 @@ function setup(
       return { ok: true, changed: true };
     },
     machine: '法国',
+    readApi: async () => (over.api ?? healthyRead)(now()),
     ...(over.sessions ? { sessions: over.sessions } : {}),
     now,
     sleep: async () => {
@@ -230,18 +254,32 @@ function fakeSessions(runs: { id: string; poolId: string }[], settle = 1) {
   return { sessions, stops };
 }
 
-const audits = async () =>
+/** #194 新加的几种记录（恢复条件、渠道状态、顺手发生的事、切回宽限）：单独看，不混进切号、核对这几条老记录里。 */
+const NEW_AUDITS = ['session-org.outage', 'session-org.channel', 'session-org.note', 'session-org.drain'];
+const auditsWhere = async (keep: (action: string) => boolean) =>
   (await t.db.select().from(auditLog))
-    .filter((a) => a.action.startsWith('session-org.'))
+    .filter((a) => a.action.startsWith('session-org.') && keep(a.action))
     .sort((a, b) => a.id - b.id)
-    .map((a) => ({ action: a.action, ok: a.ok, before: a.before, after: a.after, error: a.error }));
+    .map((a) => ({
+      action: a.action,
+      ok: a.ok,
+      before: a.before,
+      after: a.after,
+      error: a.error,
+      reason: a.reason,
+    }));
+const audits = async () =>
+  (await auditsWhere((x) => !NEW_AUDITS.includes(x))).map(({ reason: _r, ...rest }) => rest);
+const newAudits = (action: string) => auditsWhere((x) => x === action);
 const alertOf = async (key: string) =>
   (await t.db.select().from(notifications)).find((n) => n.dedupeKey === key);
 const row = async (id: string) => (await t.db.select().from(routes)).find((r) => r.id === id);
 
 describe('全程：拼车被拒 → 等到没有在跑的会话 → 切独享 → 读回在线 → 到恢复时刻 → 空着时切回 → 读回在线', () => {
   it('操作记录里切号、切回、两次核对都在；每次切都是在没有会话的时候；切完选路跟着走', async () => {
-    const s = setup();
+    // 接口读数跟着假钟走：清零时刻（NOW + 2 小时）之前说本人额度到顶，之后说恢复了
+    const resetsAt = new Date(NOW.getTime() + 2 * H);
+    const s = setup({ api: (at) => (at < resetsAt ? fullRead(at, resetsAt) : healthyRead(at)) });
     // 平时：挂拼车、额度宽，不切；拼车池探通，独享池不探
     await s.round();
     expect(s.helperCalls).toEqual([]);
@@ -355,7 +393,7 @@ describe('【故意造出的失败】', () => {
     ]);
     const alarm = await alertOf(ORG_SWITCH_ALERT);
     expect(alarm).toMatchObject({ level: 'alert', resolvedAt: null, title: '会话用户切号没成：拼车 → 独享' });
-    expect(alarm?.body).toContain('拼车额度用满了');
+    expect(alarm?.body).toContain('拼车本人 5 小时额度用满');
     expect(alarm?.body).toContain('法国');
 
     fail = false;
@@ -470,7 +508,9 @@ describe('【故意造出的失败】', () => {
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
     await s.round();
     expect(s.helperCalls).toEqual([]);
-    expect(s.logs.join('\n')).toContain('独享池整池暂停着');
+    // 独享这一类的池整池暂停 = 独享账号不可用，只剩拼车 1 个可用账号：没得切（创始人 2026-10-04 约 22:30 的规矩）
+    expect(s.logs.join('\n')).toContain('只剩 1 个可用账号');
+    expect(s.logs.join('\n')).toContain('独享账号不可用');
   });
 });
 

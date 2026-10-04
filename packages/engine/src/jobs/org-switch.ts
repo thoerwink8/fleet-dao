@@ -8,6 +8,7 @@
 import type { OrgKind, RouteProbeState } from '@fleet-dao/shared';
 import { ORG_NAMES } from '../routing/names.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
+import type { CarpoolApiRead, CarpoolRejection } from './carpool-outage.ts';
 
 export interface OrgWindow {
   label: string;
@@ -154,8 +155,23 @@ export interface ProbedRoute {
   detail: string;
 }
 
-/** 探针每一轮带着的切号（真实现 real/org-switch.ts 的 orgSwitchRound）。两步都不许抛。 */
+/**
+ * 当场判一次要不要切（#194，方案 4.3）：不等路由探针那一轮。by 写进日志和操作记录；read 是刚读成的接口读数（定时读接口那一轮给），
+ * rejection 是刚被拒的证据（拼车会话、探针当场交来）。两样都不给就是只按库里现有的事实判一次。
+ */
+export interface OrgSwitchTrigger {
+  by: string;
+  read?: CarpoolApiRead;
+  rejection?: CarpoolRejection;
+}
+
+/** 探针每一轮带着的切号（真实现 real/org-switch.ts 的 orgSwitchRound）。三步都不许抛。 */
 export interface OrgSwitchRound {
+  /**
+   * 当场判、该切就切，切完当场探一次切过去的那个池（方案 4.3：不等下一轮探针）。真切过去了交回切到哪一类，不然 null。
+   * 同一台机器同一时刻只有一个切号在跑（单飞锁）：撞上的这一次不判、交回 null，操作记录只有一条。
+   */
+  now(trigger: OrgSwitchTrigger): Promise<OrgKind | null>;
   /** 这一轮探之前：判、该切就切。真切过去了交回切到哪一类（这一轮探完要核对），不然 null。 */
   before(): Promise<OrgKind | null>;
   /**
