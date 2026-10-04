@@ -1,6 +1,7 @@
-// 任务简报的边界表，含故意造出失败的行。
+// 任务简报：「改了简报外的哪些文件」的边界表。
+// 简报齐不齐（checkBrief）和几份能不能同时派（checkParallel）是 Fusion 的东西，#901 审查时只有测试在用，连测试一起删了。
 import { describe, expect, it } from 'vitest';
-import { type Brief, checkBrief, checkParallel, outsideBrief } from '../src/brief.ts';
+import { type Brief, outsideBrief } from '../src/brief.ts';
 
 const good: Brief = {
   goal: '给登录加验证码过期',
@@ -12,48 +13,6 @@ const good: Brief = {
 };
 
 describe('任务简报', () => {
-  it('齐全的收', () => {
-    expect(checkBrief(good)).toEqual({ ok: true, brief: good });
-  });
-
-  it.each([
-    ['【失败】缺目标', { ...good, goal: '  ' }, /缺「目标」/],
-    ['【失败】没写只许改的文件', { ...good, files: [] }, /缺「只许改的文件」/],
-    ['【失败】没写怎么算合格', { ...good, acceptance: [] }, /缺「怎么算合格」/],
-    ['【失败】缺交回格式', { ...good, returnFormat: undefined }, /缺「交回格式」/],
-    ['【失败】绝对路径', { ...good, files: ['/etc/passwd'] }, /绝对路径/],
-    ['【失败】盘符', { ...good, files: ['C:/x.ts'] }, /绝对路径/],
-    ['【失败】跳出仓', { ...good, files: ['packages/../../x'] }, /带 \.\./],
-    ['【失败】反斜杠', { ...good, files: ['packages\\api\\x.ts'] }, /反斜杠/],
-    ['【失败】写了两遍', { ...good, files: ['a.ts', 'a.ts'] }, /写了两遍/],
-    ['【失败】不是对象', 'goal: x', /认不出/],
-  ])('%s', (_name, input, problem) => {
-    const got = checkBrief(input);
-    expect(got.ok).toBe(false);
-    if (!got.ok) expect(got.problems.join('\n')).toMatch(problem);
-  });
-
-  it('不撞文件的三份能同时派', () => {
-    const a = { ...good, files: ['packages/api/'] };
-    const b = { ...good, files: ['packages/web/src/login.tsx'] };
-    const c = { ...good, files: ['docs/design.md'] };
-    expect(checkParallel([a, b, c])).toEqual({ ok: true });
-  });
-
-  it.each([
-    [
-      '【失败】两份改同一个文件',
-      [good, { ...good, files: ['packages/api/src/auth.ts'] }],
-      /都要改「packages\/api\/src\/auth\.ts」/,
-    ],
-    ['【失败】目录包住文件', [good, { ...good, files: ['packages/api/'] }], /都要改/],
-    ['【失败】超过 3 份', [1, 2, 3, 4].map((i) => ({ ...good, files: [`f${i}.ts`] })), /最多 3 个副手/],
-  ])('%s', (_name, briefs, problem) => {
-    const got = checkParallel(briefs);
-    expect(got.ok).toBe(false);
-    if (!got.ok) expect(got.problems.join('\n')).toMatch(problem);
-  });
-
   it('只许改的文件：目录下的算，别处不算', () => {
     expect(
       outsideBrief(good, [
@@ -62,5 +21,9 @@ describe('任务简报', () => {
         'packages/api/src/db.ts',
       ]),
     ).toEqual(['packages/api/src/db.ts']);
+  });
+
+  it('【失败】一个文件都不在简报里：全部报出来，不当没事', () => {
+    expect(outsideBrief(good, ['docs/design.md'])).toEqual(['docs/design.md']);
   });
 });

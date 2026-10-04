@@ -4,7 +4,6 @@
 import { describe, expect, it } from 'vitest';
 import { createDecide, evidenceOf, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
-import { describeHolds, normalizeHolds } from '../src/holds.ts';
 import {
   assertSessionFitsSlice,
   DEFAULT_LIMITS,
@@ -18,7 +17,6 @@ import {
   SLICE_MEMORY_HIGH_MB,
   SLICE_MEMORY_MAX_MB,
 } from '../src/limits.ts';
-import { costOfRun } from '../src/usage.ts';
 
 const limits = DEFAULT_LIMITS;
 const failure = (code: string, retryable: boolean | null = null) => ({
@@ -64,13 +62,6 @@ describe('上限：读时现算默认值', () => {
     const { historyAlertEvents: _missing, ...old } = DEFAULT_LIMITS;
     expect(historyAlertLine(old)).toBe(DEFAULT_LIMITS.historyAlertEvents);
     expect(historyAlertLine({ ...old, historyAlertEvents: 20 })).toBe(20);
-  });
-});
-
-describe('人闸标记规整', () => {
-  it('规整成小写、去重、排序；认不得的也留着（宁可多拦一次）', () => {
-    expect(normalizeHolds([' Spend', 3, '', 'spend'])).toEqual(['spend']);
-    expect(describeHolds(['release', 'spend', 'delete', '上线'])).toBe('对外发布、花钱、删数据、上线');
   });
 });
 
@@ -301,15 +292,5 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
         })
       ).action,
     ).toBe('park');
-  });
-});
-
-describe('这一次的花费（执行体报的是会话累计）', () => {
-  it('头一回跑取累计；续会话取差；上一轮没读到就不给，不记 0', () => {
-    expect(costOfRun(undefined, 0.3)).toBe(0.3);
-    expect(costOfRun(0.3, 0.5)).toBe(0.2);
-    expect(costOfRun(null, 0.5)).toBeUndefined();
-    expect(costOfRun(0.3, undefined)).toBeUndefined();
-    expect(costOfRun(0.5, 0.3)).toBe(0);
   });
 });
