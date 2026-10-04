@@ -105,7 +105,8 @@
 
 ## 2026-10-04 晚（#194 拼车自动切独享，按 `specs/194-拼车自动切换/方案-v2.md` 选项 A 切片，子代理）
 
-- 片 1「拼车用不了是哪一种、恢复凭什么认」：`packages/engine/src/jobs/carpool-outage.ts` 纯判法 + `test/carpool-outage.test.ts`（被拒分 E1/E2/E3/设备级/限流；E1 连着两次真新读数过切回线 50%、E2 恢复时刻之后的新读数、E3 接口说组织能用；缓存、旧读数、读不成、金额认不出、status 非 active 各造一次失败）。**还没接线**，切号照旧。分支 `feat/194-carpool-outage-judge`。
+- 片 1「拼车用不了是哪一种、恢复凭什么认」：`packages/engine/src/jobs/carpool-outage.ts` 纯判法 + `test/carpool-outage.test.ts`（被拒分 E1/E2/E3/设备级/限流；E1 连着两次真新读数过切回线 50%、E2 恢复时刻之后的新读数、E3 接口说组织能用；缓存、旧读数、读不成、金额认不出、status 非 active 各造一次失败）。**还没接线**，切号照旧。PR #845。
+- 片 2「切号防来回抖」：`packages/engine/src/jobs/org-switch-guard.ts` 纯判法 + 测试（`decideSwitchBack`：最小停留 20 分钟、E1 读数确认的不受限；白切退避 15→30→60→120→240 分钟、试探撞的从 30 起；连着 3 次白切、5 小时里第 4 次自动切回都转「要人看」；接口读不到时预计恢复时刻过了 15 分钟才试探切回；过预计恢复时刻 30 分钟还在独享另报一条；帮手切号失败按 2/10/30 分钟退避）。**还没接线**。分支 `feat/194-switch-guard`（基于片 1）。
 
 ## 2026-10-04（#777 法国巡检仓和本机演练仓分开，Opus 子代理，PR #838，先审后合）
 
