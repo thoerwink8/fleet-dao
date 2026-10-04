@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { PlanIssue } from '../src/github-api.ts';
 import { auditGitHub } from '../src/github-audit.ts';
+import { addToOrder } from '../src/plan-view.ts';
 import { fakeReader, issue, type Method, milestone, order, V0, V1, type World } from './fake-github.ts';
 
 const NOW = new Date('2026-10-03T00:00:00Z');
@@ -177,6 +178,23 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
     );
     expect(r.findings).toEqual([expect.objectContaining({ issue: 70 })]);
     expect(r.texts[0]).toContain('#70 开着，挂在「v1 Fusion 接活」里却没排进先后');
+  });
+
+  it('pnpm issue:new 开单那一刻写进先后的（addToOrder 写的样子，排末尾和 --order-after 各一张）：判已排进，不报（#807）', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        w.issues.push(issue(70, { milestone: V1 }), issue(71, { milestone: V1, labels: ['缺陷'] }));
+        const v1 = w.milestones.find((m) => m.title === V1);
+        if (!v1) throw new Error('假数据里没有 v1');
+        const appended = addToOrder(v1.description, 70);
+        const inserted = appended.ok ? addToOrder(appended.description, 71, 10) : appended;
+        if (!inserted.ok) throw new Error(inserted.problem);
+        expect(inserted.order).toEqual([10, 71, 20, 70]);
+        v1.description = inserted.description;
+      }),
+    );
+    expect(r.findings).toEqual([]);
+    expect(r.notQueried).toEqual([]);
   });
 
   it('先后里的单不在这个版本里：报', async () => {
