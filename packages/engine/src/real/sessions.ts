@@ -44,10 +44,8 @@ import {
   type DeliveryCheck,
   IO_FILES,
   judgeRun,
-  type LedgerFs,
   type LineMeta,
   listAgentScopes,
-  type MirasimConnect,
   type PlanPayload,
   type RateLimitReading,
   reapSession,
@@ -63,7 +61,6 @@ import {
   appendProgressEvents,
   clearReservations,
   closeOpenRuns,
-  type Db,
   finishSessionRun,
   getSessionRun,
   latestRunOfSession,
@@ -83,10 +80,10 @@ import {
 } from '@fleet-dao/db';
 import type { RepoRef } from '@fleet-dao/github';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
-import { type EngineDrain, stoppingNote } from '../drain.ts';
+import { stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
-import type { JevPort, JevReply } from '../failure/jev.ts';
-import { judgeStall, type StallPolicy, type StallToolCall } from '../failure/stall.ts';
+import type { JevReply } from '../failure/jev.ts';
+import { judgeStall, type StallToolCall } from '../failure/stall.ts';
 import type { FailureVerdict, TriageChoice } from '../failure/types.ts';
 import {
   type AwaitSessionInput,
@@ -100,12 +97,10 @@ import {
   type StopSessionInput,
 } from '../ports.ts';
 import { hostName } from '../routing/names.ts';
-import type { UserExec } from './exec.ts';
 import {
   type ContinueMode,
   type HostDriver,
   type HostReport,
-  type HostRunners,
   type HostRunSpec,
   type HostSession,
   hostDrivers,
@@ -116,14 +111,13 @@ import {
 } from './hosts.ts';
 import {
   explainKill,
-  type KillEvidenceDeps,
   killSignal,
   type OomCounters,
   oomCounters,
   realKillEvidence,
   scopeOomKills,
 } from './kill-evidence.ts';
-import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
+import { bundleFromMirror, mapped } from './mirror.ts';
 import type { OrgSwitchSessions } from './org-switch.ts';
 import {
   isLeadKind,
@@ -147,13 +141,23 @@ import {
   type RelayFacts,
   stagePrompt,
 } from './prompts.ts';
-import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
 import {
-  launchSegment,
-  SEGMENT_NOT_WIRED_CODE,
-  type SegmentOutcome,
-  type SegmentPortsDepsForSessions,
-} from './sessions-segment.ts';
+  DEFAULT_FORK_MAX_CONTEXT_TOKENS,
+  ENGINE_STOP_CODE,
+  ENGINE_STOPPING_CODE,
+  ORG_SWITCH_CODE,
+  ORPHAN_RUN_REASON,
+  orgSwitchFailure,
+  REATTACH_MARGIN_MS,
+  RESUME_STARTUP_MAX_MS,
+  RESUME_STARTUP_RUN_MS_PER_MINUTE,
+  RESUME_STARTUP_TOKENS_PER_MINUTE,
+  STARTUP_BASE_MS,
+} from './session-codes.ts';
+import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
+import type { SessionPorts, SessionPortsDeps } from './session-types.ts';
+import { asSessionUser, errorText, SHA, scopeLimitsOf, withRawError } from './session-util.ts';
+import { launchSegment, SEGMENT_NOT_WIRED_CODE, type SegmentOutcome } from './sessions-segment.ts';
 import { POOL_HOLD_PREFIX, poolHoldKey } from './store-ports.ts';
 import {
   changedFilesSince,
@@ -177,36 +181,26 @@ import {
   uncommittedTracked,
   worktreeChanges,
 } from './user-git.ts';
-import type { WorkTrees } from './worktrees.ts';
 
-/** 上下文比这个小才 fork 续到别的会话用户；大了开新会话带接力任务书（design 第九节「上下文越长越贵」）。 */
-export const DEFAULT_FORK_MAX_CONTEXT_TOKENS = 100_000;
+// 拆出去的模块里的名字，对外仍从这里导出（import 路径不变）。
+export {
+  DEFAULT_FORK_MAX_CONTEXT_TOKENS,
+  ENGINE_STOP_CODE,
+  ENGINE_STOPPING_CODE,
+  ORG_SWITCH_CODE,
+  ORPHAN_RUN_REASON,
+  REATTACH_MARGIN_MS,
+  RESUME_STARTUP_MAX_MS,
+  RESUME_STARTUP_RUN_MS_PER_MINUTE,
+  RESUME_STARTUP_TOKENS_PER_MINUTE,
+  STARTUP_BASE_MS,
+} from './session-codes.ts';
+export type { SessionPorts, SessionPortsDeps } from './session-types.ts';
+export { scopeSize } from './session-util.ts';
 
 export type { ContinueMode };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** 切号停下的会话交回的失败码（#59）：失败分流 OS1 认它——马上续同一个会话，不算失败、不记重试的账。 */
-export const ORG_SWITCH_CODE = 'org_switch';
-const orgSwitchFailure = (why: string) => ({ code: ORG_SWITCH_CODE, message: why, retryable: true });
-/**
- * 排空到截止停下的会话交回的失败码（drain.ts）：失败分流 KL3 认它——不算失败、不记重试的账，新引擎起来按编号续同一个会话。
- * 引擎在停的那一刻会话被信号杀掉（kill-evidence.ts 对上了）也交这个码。
- */
-export const ENGINE_STOP_CODE = 'engine_stop';
-/** 引擎在排空、这次没起会话（startSession 拒了）：失败分流 ES1 认它——不记账，回去选路（选路这时回「过一会儿再选」）。 */
-export const ENGINE_STOPPING_CODE = 'ENGINE_STOPPING';
-/** 工人起来时收掉上一轮引擎留下、还开着的 runs 行（#157）写的原因。 */
-export const ORPHAN_RUN_REASON =
-  '引擎重启时这一段还没收场：一次性会话不脱开引擎进程跑，上一轮引擎一退它就断了（新引擎起来时收掉了它的 scope），按没跑完收掉';
-
-/** 插头默认等第一帧的时限（adapters 的 DEFAULT_PROCESS_LIMITS.startupMs）。 */
-export const STARTUP_BASE_MS = 180_000;
-/** 续会话等第一帧最多放宽到这么久：再久就不是在读过程记录了。 */
-export const RESUME_STARTUP_MAX_MS = 12 * 60_000;
-/** 上下文每这么多 token 多等一分钟；不知道上下文多大就按上一轮跑了多久，每 10 分钟多等一分钟。 */
-export const RESUME_STARTUP_TOKENS_PER_MINUTE = 40_000;
-export const RESUME_STARTUP_RUN_MS_PER_MINUTE = 10 * 60_000;
 
 /**
  * 续会话（resume、fork）等第一帧的时限，按会话已有的长度放宽：执行体要先把整段过程记录读进来才吐第一帧，会话越长读得越久。
@@ -312,103 +306,6 @@ export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; 
   );
 }
 
-export interface SessionPortsDeps {
-  db: Db;
-  trees: WorkTrees;
-  /** 以会话用户的身份跑命令（生产 scopeExec）。 */
-  exec: UserExec;
-  gh: MirrorGitHub & {
-    commitIdentity(repo: { owner: string; name: string }): Promise<{ name: string; email: string }>;
-  };
-  /** 引擎自己的临时目录（从镜像打的 bundle 落在这里，读进内存就删）。 */
-  tmpDir: string;
-  /** 这台机器给人看的名字（例如「法国」）：只有人能修的（重新登录）要写清去哪台机器。 */
-  machine: string;
-  /** 起 Claude Code 的命令（绝对路径）：reclaude 装在会话用户自己家里。 */
-  claudeCommand(user: SessionUser): string[];
-  /** 起 cursor-agent 的命令（绝对路径）：装在会话用户自己家里，生产用 hosts.ts 的 cursorLaunchCommand 现找版本目录。 */
-  cursorCommand(user: SessionUser): string[];
-  /** 起 grok 的命令（绝对路径）：装在会话用户自己家里，生产用 hosts.ts 的 grokLaunchCommand 先看在不在。 */
-  grokCommand(user: SessionUser): string[];
-  /** 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的文件访问（real/index.ts 的 mirasimDepsFor 生产装配）。 */
-  mirasimConnect(user: SessionUser): MirasimConnect;
-  mirasimLedgerDir(user: SessionUser): string;
-  mirasimLedgerFs(user: SessionUser): LedgerFs;
-  forkMaxContextTokens?: number;
-  /** 会话出网经的代理（FLEET_SESSION_PROXY）：cursor-agent、grok 的会话带上，Claude 不带（hosts.ts）。不给就直连。 */
-  sessionProxy?: string;
-  /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
-  helper?: string;
-  sudo?: readonly string[];
-  /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
-  gitBin?: string;
-  shBin?: string;
-  /** 宿主环境（会话环境只从里面抄一小撮基础变量，见 adapters/env.ts）。 */
-  baseEnv?: Readonly<Record<string, string | undefined>>;
-  /** 起会话的插头，按执行方式给；测试里换成假的（不起真执行体）。没给的用真插头。 */
-  run?: HostRunners;
-  /**
-   * 发给别家之前的卫生检查（和推分支、开 PR 同一套规则：github 包的 assertPublishable，只管真密钥；也只管
-   * fleet-dao 这个仓——别的仓按它们自己的标准，见 packages/github 的 hygiene-scope.ts）。查出来、没扫成都抛
-   * 带码的错（HYGIENE_BLOCKED / HYGIENE_UNSCANNED）。
-   * 开 PR 前验证的会话起之前整份提示词过一遍；没配就不起验证会话（明确报错），不当成查过没事。
-   */
-  screen?: (repo: RepoRef, what: string, texts: { path: string; text: string }[]) => void;
-  stallPolicy?: Partial<StallPolicy>;
-  /** 规则认不出的失败、拿不准的停滞去问 Jev（real/jev-port.ts）；不给就不问，照默认走。 */
-  jev?: JevPort;
-  /** 问一次 Jev 最多等多久，默认 askJev 的 2 秒；超了当没判出来（后台那一问答回来照样记进判断记录）。 */
-  jevTimeoutMs?: number;
-  /** 同一个会话的停滞题多久最多问一次 Jev（看守每分钟判一次，拿不准的区间有半个多小时）。 */
-  stallJevEveryMs?: number;
-  now?: () => Date;
-  /** 看守多久醒一次（心跳、写进度）、多久判一次停滞、进度攒多久写一次、等进程起来最多多久。 */
-  tickMs?: number;
-  stallCheckMs?: number;
-  flushMs?: number;
-  spawnTimeoutMs?: number;
-  /**
-   * 停机排空（drain.ts）：引擎在停时不起新会话（抛 ENGINE_STOPPING，失败分流 ES1 不记账、回去选路）；过了闸的会话登记在它上面，
-   * 交回工作流（或没起来）就撤掉，停机时等它们。不给就不闸（测试、只起一次的工具）。
-   */
-  drain?: EngineDrain;
-  /** 会话被信号杀掉时去哪查证据（kill-evidence.ts）：测试换成假的；不给就读真的 cgroup、发布目录。 */
-  killEvidence?: KillEvidenceDeps;
-  /**
-   * 会话脱开引擎进程（发布不碰在跑的会话）：每个会话一个收发目录 <ioRoot>/<runId>（输入输出走文件、退出码由会话那一侧写），
-   * 引擎重启后照目录接回。不给就照旧接管道（测试、只起一次的工具）：引擎一退会话就断。
-   */
-  ioRoot?: string;
-  /**
-   * 三段（对题 / 动手 / 验收）走 runner 的依赖（#554-4）：`brief.segment` 给定了就调 launchSegment；
-   * 不给就走 Fusion 原链路（其余字段都不动）。生产 Spawner 还没接（#554-2 / #555 那一档）——
-   * 本切片只挂了测试入口；没装 spawner / buildCommand / runs 时，launchSegment 当场 SEGMENT_NOT_WIRED。
-   */
-  segment?: SegmentPortsDepsForSessions;
-  log?: (message: string, fields?: Record<string, unknown>) => void;
-}
-
-export type SessionPorts = {
-  startSession(input: LaunchSessionInput, ctx: PortContext): Promise<StartSessionResult>;
-  awaitSession(input: AwaitSessionInput, ctx: PortContext): Promise<SessionEnd>;
-  stopSession(input: StopSessionInput, ctx: PortContext): Promise<void>;
-} & {
-  /**
-   * 工人起来接活之前（只在这时调）：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，
-   * runs 里还开着的一次性会话那几行收成没跑完（#157），上一轮选路时预占、还没开跑的名额清掉（#757）；回收了几个会话。
-   */
-  reapOrphanSessions(): Promise<number>;
-  /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
-  orgSwitch: OrgSwitchSessions;
-  /** 引擎停机（工人停下之后、关库之前）：放手脱开跑的会话，不停它们、不再写库，新引擎起来接回。回放手的编号。 */
-  releaseDetached(): string[];
-  /**
-   * 排空到截止（drain.ts）：把进程已经起来、还没收场的会话都停下（插头收进程），它们交回 engine_stop，新引擎起来按编号续上；
-   * 交回这一次叫停的会话编号（已经在停的不重复叫停）。
-   */
-  drainStop(why: string): string[];
-};
-
 /**
  * 切号那一刻在跑的 Fusion 会话（#59；接口定义在 real/org-switch.ts）。只管这个工人进程里起的会话：会话都由它起，工人重启时
  * 上一轮留下的已经收掉了。stop 把进程已经起来的停下（它们交回 org_switch，工作流切完续同一个会话）；还在建树、没起进程的不碰：
@@ -487,16 +384,10 @@ interface Live {
 }
 
 const STEP_RANK: Record<string, number> = { pending: 0, in_progress: 1, done: 2 };
-/**
- * 脱开跑的会话过了总时限多久还没人接回就收掉：盖住看守在新工人上重试的等待（心跳超时 + 重试间隔），再留余量。
- * 会话自己的总时限由接回它的看守按原来的起点管；没人接回（工作流没了）时靠这个兜底。
- */
-export const REATTACH_MARGIN_MS = 30 * 60_000;
 const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const PENDING_MAX = 5_000;
 const RECENT_TOOLS = 30;
 const SAYS_KEPT = 12;
-const SHA = /^[0-9a-f]{40}$/;
 const OUTCOME: Record<SessionEnd['outcome'], RunOutcome> = {
   done: 'ok',
   blocked: 'ok',
@@ -519,33 +410,6 @@ export function confirmedSeq(
   const top = Math.max(...seqs);
   const seq = nextSeq === top ? top - 1 : top;
   return seq >= 0 ? seq : undefined;
-}
-
-function asSessionUser(user: string | null | undefined): SessionUser | undefined {
-  return (SESSION_USERS as readonly string[]).includes(user ?? '') ? (user as SessionUser) : undefined;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** 失败信息接上执行体只在 stderr 里说的原话（已经在里面的不重复）：cursor 的认证、额度、网络报错就只有它。 */
-function withRawError(message: string, raw: string | undefined): string {
-  return raw && !message.includes(raw) ? `${message}（执行体原话：${raw}）` : message;
-}
-
-/**
- * 以 MB 计的上限 → 帮手脚本（fleet-agent-scope）认的写法：0 只能写「0」（它和插头的校验都不认「0M」，
- * 2026-09-26 法国第一次真起会话就卡在交换区上限「0M」上），别的写「<整数>M」。
- * 不是非负整数的明确拒：不起会话，也不悄悄取整。
- */
-export function scopeSize(name: string, mb: number): string {
-  if (!Number.isSafeInteger(mb) || mb < 0) {
-    throw new PortError('BAD_INPUT', `会话的资源上限 ${name} 要是非负整数（MB）：${mb}`, {
-      retryable: false,
-    });
-  }
-  return mb === 0 ? '0' : `${mb}M`;
 }
 
 /** 发给别家的材料在卫生检查里叫什么（报错里的位置只有它和行号、规则名，没有值）。 */
@@ -614,14 +478,6 @@ export function screenForOtherVendor(
       retryable: false,
     });
   }
-}
-
-function scopeLimitsOf(r: LaunchSessionInput['resources']): NonNullable<CgroupScope['limits']> {
-  return {
-    memoryHigh: scopeSize('memoryHighMb', r.memoryHighMb),
-    memoryMax: scopeSize('memoryMaxMb', r.memoryMaxMb),
-    memorySwapMax: scopeSize('swapMaxMb', r.swapMaxMb),
-  };
 }
 
 export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
