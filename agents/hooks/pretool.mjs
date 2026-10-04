@@ -7,7 +7,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freshBeforeSubagent, gitCall, gitOk, gitWhy, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
+import {
+  freshBeforeSubagent,
+  gitCall,
+  gitOk,
+  gitWhy,
+  SUBAGENT_DIRECT_MS,
+  SUBAGENT_FETCH_MS,
+} from './fresh-main.mjs';
 import { armForBackground, cleanId, startsBackground, stateDir, touchTool } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
@@ -2113,7 +2120,7 @@ if (isMain()) {
         typeof prop(input, 'cwd') === 'string' && prop(input, 'cwd')
           ? String(prop(input, 'cwd'))
           : process.cwd(),
-      git: gitCall(SUBAGENT_FETCH_MS),
+      git: gitCall(SUBAGENT_FETCH_MS, SUBAGENT_DIRECT_MS),
       okOf: gitOk,
       whyOf: gitWhy,
     });
