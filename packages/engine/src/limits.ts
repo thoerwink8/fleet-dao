@@ -70,14 +70,6 @@ export const FRANCE_USABLE_MB = 11 * 1024;
 /** 平台常驻的四个服务合计（MiB，2026-09-26 实测）：引擎 0.27G、后端 0.09G、Temporal 0.12G、库 0.13G。 */
 export const FRANCE_RESIDENT_MB = 600;
 /**
- * 同一时刻大致有几个会话在跑测试（内存的大头）：Fusion 的估算是法国同时约 3 张单，每张同一时间只一个模型写代码、跑测试
- * （docs/decisions/0002-fusion.md「容量」；design 第四节的「同时跑测试 2–3 份」）。只是容量规划的参考数，不再拿它去除
- * 单会话的内存上限（见 SESSION_MEMORY_MAX_MB 的推导）：总量不超的安全垫现在挪到父节点 fleet-agents.slice 这一层
- * （见 SLICE_MEMORY_MAX_MB），多个会话同时冲高由它兜住，不指望单会话早早卡死自己。
- */
-export const CONCURRENT_SESSIONS = 3;
-
-/**
  * fleet-agents.slice（所有会话共用的父节点）的内存总上限 = 能分给会话的 - 平台常驻服务 = 11264 - 600 = 10664 MiB。
  * cgroup v2 的常见做法是把「总量」管在父节点，子节点（各会话的 scope）只管自己那份、彼此间允许借用空闲内存
  * （kernel 文档 memory.high / memory.max 一节：https://docs.kernel.org/admin-guide/cgroup-v2.html；k8s 的
@@ -190,12 +182,4 @@ export function resolveLimits(partial: Partial<Limits> | null | undefined): Limi
 export function historyAlertLine(limits: Partial<Limits>): number {
   const value = limits.historyAlertEvents;
   return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_LIMITS.historyAlertEvents;
-}
-
-/** 退回重问的次数上限：和 historyAlertLine 一样，这一项加进来之前开工的在途任务记下的那一套里没有它，缺了按现在的默认值。 */
-export function reaskLimit(limits: Partial<Limits>): number {
-  const value = limits.reaskRounds;
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? value
-    : DEFAULT_LIMITS.reaskRounds;
 }

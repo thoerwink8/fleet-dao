@@ -13,8 +13,5 @@
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",
     "zod": "^4.6.5"
-  },
-  "devDependencies": {
-    "@fleet-dao/adapters": "workspace:*"
   }
 }

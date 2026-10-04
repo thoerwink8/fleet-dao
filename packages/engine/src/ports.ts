@@ -27,7 +27,6 @@
 //    会话的临时目录、收发目录，把 runs 里还开着的一次性会话那几行收成没跑完）。工作流被强行终止留下的会话，现在要等工人下一次
 //    起来时这一步才收（每小时对账还没接这一项：#247）。
 
-import type { RiskyFile } from '@fleet-dao/conventions';
 import type { Brief, Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type {
   HostId,
@@ -549,52 +548,6 @@ export interface WaitCiInput extends Scope {
   worktreePath?: string;
 }
 
-// —— 先审后合：改到的地方碰没碰高风险路径、第二意见写回合并闸认的状态（#253）——
-
-export interface CheckHighRiskInput extends Scope {
-  repo: Repo;
-  prNumber: number;
-  /**
-   * 这个项目声明的先审后合清单在仓里的路径（core 的 FusionSetup.riskPathsFile，来自 .fleet/flow.json 的 riskPathsFile）。
-   * 没给 = 项目没声明先审后合的路径，不查、不请第二意见（不当「没碰到」，是「这个项目没有这条路」）。
-   */
-  riskPathsFile?: string;
-}
-
-/** 这个 PR 此刻改到的文件里，落在先审后合路径清单（项目声明的 riskPathsFile，主线上那份）里的。 */
-export interface CheckHighRiskResult {
-  hits: RiskyFile[];
-  /** 项目没声明 riskPathsFile 时的说明（给工作流写进进度）；声明了就没有这个字段。 */
-  note?: string;
-}
-
-export interface PostSecondOpinionInput extends Scope {
-  repo: Repo;
-  prNumber: number;
-  /** 贴在哪个头上：头变了旧状态不算，见 merge-gates.ts 的 checkSecondOpinion。 */
-  head: string;
-  /** 第几轮（1 起）：贴进评论标题，和本机第二意见垫片同一个叫法。 */
-  round: number;
-  hits: RiskyFile[];
-  verdict: 'pass' | 'changes';
-  findings: Finding[];
-  /** 审的会话用了哪个模型：贴进评论说明是谁审的。reused 给了的话这个字段不进评论（没有会话审这一次）。 */
-  model: string;
-  /** 这个项目声明的先审后合清单路径（评论里「清单和理由见」那句要指对地方）：这一步能走到说明 hits 非空，riskPathsFile 一定有。 */
-  riskPathsFile: string;
-  /**
-   * 合并前重跑那一步头变了（合并队列自己把主线并进来）：这一轮没有真审，是沿用 fromHead 上第 round 轮通过的
-   * 结论（新头相对主线的 patch-id 和 fromHead 一样，见 workflows/fusion.ts 的 tryReuseSecondOpinion）。
-   * 给了就贴 verdict:'pass'，评论写清是沿用、不是真审。
-   */
-  reused?: { fromHead: string; round: number };
-}
-
-export interface PostSecondOpinionResult {
-  /** 评论没贴上（卫生检查拦下……）时没有这个字段，调用方只当没贴、不当没查成——状态照样要写上。 */
-  commentUrl?: string;
-}
-
 export interface SyncMainlineInput extends Scope {
   repo: Repo;
   /** 没给（还没开 PR）：并主线的提交说明少写一句，不影响并不并（跟着 github 包的 SyncMainlineInput）。 */
@@ -604,28 +557,6 @@ export interface SyncMainlineInput extends Scope {
   head: string;
   /** 子任务的工作树：并完、推完后由会话用户把它快进到新头（接着返工用）；合并队列没有工作树。 */
   worktreePath?: string;
-}
-
-export interface RunTestsInput extends Scope {
-  repo: Repo;
-  prNumber: number;
-  branch: string;
-  head: string;
-  /**
-   * 这个项目声明的先审后合清单在仓里的路径（core 的 riskPathsFileFor，来自 .fleet/flow.json 的 riskPathsFile）。
-   * 没给 = 项目没声明先审后合的路径：合并闸红了也不查这份清单，不当「只缺 second-opinion」，照真红处理
-   * （不然「还在等第二意见」和「没声明清单」两件事分不清，见 #429）。
-   */
-  riskPathsFile?: string;
-}
-
-export interface PatchIdOfInput extends Scope {
-  repo: Repo;
-  /** 算的时候要在哪棵树里跑 git（子任务自己的工作树；合并前重跑那一步用的是子任务自己这棵，不是合并队列的）。 */
-  worktreePath: string;
-  /** 主线分支名（input.repo.defaultBranch）：先找 merge-base(origin/<主线>, ref) 再从那儿算 diff。 */
-  mainlineBranch: string;
-  ref: string;
 }
 
 export interface MergePrInput extends Scope {
@@ -695,95 +626,7 @@ export interface WriteSpecDocInput extends Scope {
   markdown: string;
 }
 
-export interface SpecDocRef {
-  path: string;
-  commit?: string;
-}
-
-// ---- 开 PR 前验证（docs/decisions/0003-fusion-flow.md 第 5 条第 5 步）
-
-export interface ReadCriteriaInput extends Scope {
-  repo: Repo;
-  /** 需求文档目录（specs/<号>-<短名>）：单子正文里指的那个（core 的 specDirOf 认出来的），不按标题拼。 */
-  specDir: string;
-}
-
-export interface Criteria {
-  /** 读的是哪份：默认分支上的 specs/<号>-<短名>/需求.md。 */
-  path: string;
-  /** 「怎么算做完」逐条原文（core 的 criteriaOf），至少一条。 */
-  criteria: string[];
-}
-
-/** 一轮验证的记录（库里 verify_rounds 一行，同一个 id 整行覆盖）。 */
-export interface VerificationRecord extends Scope {
-  id: string;
-  round: number;
-  /** 送检的头。 */
-  head: string;
-  /** 验证会话（session_runs.id）和它的路由、族。 */
-  runId: string;
-  routeId: string;
-  family: string;
-  authorFamilies: string[];
-  criteria: string[];
-  /** 验证模型交回的原样。 */
-  report: unknown;
-  /** decideVerdict 判的，驳回之前。 */
-  verdict: 'pass' | 'block' | 'invalid';
-  invalidWhy?: string;
-  /** Lead 拿证据驳回的。 */
-  rebuttals: Rebuttal[];
-  /** 驳回之后的结论（没驳回就是 verdict）；作废的不给。 */
-  finalVerdict?: 'pass' | 'block';
-  /** 驳回之后还挡着的，和写进 PR「还欠什么」的备注（看不出的、建议）。 */
-  reasons: string[];
-  notes: string[];
-}
-
-// ---- Fusion 开工前要读的（docs/decisions/0003-fusion-flow.md 第 9 条；specs/214-Fusion工作流/）
-
-/** 这张单现在的标题和正文（库里 tasks 那一行，GitHub 上改了单子正文由接活跟着改）：认需求文档目录用。 */
-export interface TaskRequest {
-  title: string;
-  /** 单子正文去掉进度段（正文空就是标题）。 */
-  rawRequest: string;
-}
-
 // ---- 人、报警、计时
-
-export interface AskHumanInput extends Scope {
-  /** 工作流给的提问编号（库里 asks.id，UUID）：幂等键，同一个编号只发一张卡；人回答时带回来。 */
-  askId: string;
-  question: string;
-  options?: string[];
-  /** 会话里问的就带上是哪一次会话。 */
-  runId?: string;
-  /**
-   * 引擎自己问、带了推荐的（分诊说不清，#259）：按推荐先做、不等回答，库里记成这张单范围内的岔路（scope = task），
-   * 卡片写「已按推荐先做」。推荐的要在 options 里（库约束兜底）。不给就是老样子：发卡等回答。
-   */
-  recommended?: string;
-}
-
-/** 照改完：这几条提问记上 applied_at（#259：他晚到、改选了别的回答，存档点交给 Lead 照改完了）。 */
-export interface MarkAsksAppliedInput extends Scope {
-  askIds: string[];
-}
-
-/** 人闸：请人批准这个子任务进合并队列（飞书卡片 + 驾驶舱待点头，一键批准 / 拒绝）。 */
-export interface RequestApprovalInput extends Scope {
-  /** 工作流给的批准编号（UUID）：幂等键，同一个编号只发一张卡；批准、拒绝时带回来。 */
-  approvalId: string;
-  /** 为什么要人批：release 对外发布、spend 花钱、delete 删数据（认不得的原样给人看）。 */
-  holds: string[];
-  repo: Repo;
-  prNumber: number;
-  /** 批的是这个头；之后头变了（返工、解冲突）要重新批。 */
-  head: string;
-  title: string;
-  summary: string;
-}
 
 export interface RaiseAlertInput extends Scope {
   level: 'stuck' | 'info';

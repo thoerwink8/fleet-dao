@@ -62,9 +62,6 @@ export type EngineGitHub = Pick<
   | 'claims'
 >;
 
-/** 开 PR 的仓（owner、name 够读需求文档、读单子挂的版本）。 */
-type PrRepo = { owner: string; name: string };
-
 export interface GitHubPortsDeps {
   gh: EngineGitHub;
   trees: WorkTrees;
