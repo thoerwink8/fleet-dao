@@ -13,7 +13,8 @@ import {
   users,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
+import { type AppCredentials, createGitHub } from '@fleet-dao/github';
+import { pgLedger } from '@fleet-dao/store';
 import {
   type Client,
   ScheduleAlreadyRunning,
