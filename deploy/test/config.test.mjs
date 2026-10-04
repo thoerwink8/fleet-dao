@@ -465,14 +465,20 @@ test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，
  * （同一份文件里没提到的键照旧留着），patch.versions 整个换掉。深合并只到「文件」这一层，够这里的用例用。
  */
 function profilePair(patchFrance = {}, patchLocal = {}) {
-  const build = (patch) => {
+  // 巡检仓 / 演练仓两边必须是不同的公开值（MUST_DIFFER，#777）：默认就各写一个，本机那份带说明（登记过的差别）
+  const canary = {
+    france: 'acme/patrol',
+    local: { value: 'acme/drill', 说明: '登记过：本机档只接演练仓' },
+  };
+  const build = (patch, side) => {
     const obj = JSON.parse(desiredText({ versions: VERSIONS }));
+    obj.files['engine.env'].FLEET_CANARY_REPO = canary[side];
     for (const [file, keys] of Object.entries(patch.files ?? {}))
       obj.files[file] = { ...obj.files[file], ...keys };
     if (patch.versions) obj.versions = patch.versions;
     return parseDesired(JSON.stringify(obj));
   };
-  return { france: build(patchFrance), local: build(patchLocal) };
+  return { france: build(patchFrance, 'france'), local: build(patchLocal, 'local') };
 }
 
 test('diffProfiles：本机档和法国逐项比，没登记的差别报红，版本没有例外（#451）', () => {
@@ -511,7 +517,7 @@ test('diffProfiles：本机档和法国逐项比，没登记的差别报红，�
       ...Object.values(
         profilePair(
           {},
-          { files: { 'engine.env': { FLEET_CANARY_REPO: { private: fingerprintOf(KEY, 'x', 'y', 'z') } } } },
+          { files: { 'api.env': { FEISHU_APP_SECRET: { private: fingerprintOf(KEY, 'x', 'y', 'z') } } } },
         ),
       ),
     );
@@ -521,10 +527,10 @@ test('diffProfiles：本机档和法国逐项比，没登记的差别报红，�
   // 一边私有一边公开：换了种类，也要登记
   {
     const r = diffProfiles(
-      ...Object.values(profilePair({}, { files: { 'engine.env': { FLEET_CANARY_REPO: '演练仓' } } })),
+      ...Object.values(profilePair({}, { files: { 'api.env': { FEISHU_APP_SECRET: '公开的' } } })),
     );
     assert.equal(r.result, 'drift');
-    assert.match(r.drift[0].title, /FLEET_CANARY_REPO/);
+    assert.match(r.drift[0].title, /FEISHU_APP_SECRET/);
   }
 
   // 一边声明了一个键、另一边没有：也要登记（两边键集合要一样）
@@ -561,6 +567,69 @@ test('diffProfiles：本机档和法国逐项比，没登记的差别报红，�
   }
 });
 
+test('diffProfiles：巡检仓和演练仓两边必须是不同的公开值，一样、私有、空、缺了都报红，写了说明也不例外（#777）', () => {
+  const canary = (france, local) => {
+    const r = diffProfiles(
+      ...Object.values(
+        profilePair(
+          france === undefined ? {} : { files: { 'engine.env': { FLEET_CANARY_REPO: france } } },
+          local === undefined ? {} : { files: { 'engine.env': { FLEET_CANARY_REPO: local } } },
+        ),
+      ),
+    );
+    return { r, must: r.drift.filter((d) => d.scope === 'must-differ') };
+  };
+  assert.deepEqual(canary().r, { result: 'ok', drift: [], unchecked: [] }, '两个不同的公开仓：ok');
+
+  // 故意造出的失败：本机档写成和法国同一个仓（带说明也不放过）
+  {
+    const { r, must } = canary(undefined, { value: 'acme/patrol', 说明: '写了说明也不行' });
+    assert.equal(r.result, 'drift');
+    assert.deepEqual(
+      must.map((d) => [d.file, d.key]),
+      [['engine.env', 'FLEET_CANARY_REPO']],
+    );
+    assert.match(must[0].title, /必须不一样/);
+    assert.match(must[0].body, /两边都是「acme\/patrol」/);
+  }
+  // 大小写不同还是同一个仓（GitHub 仓名不分大小写）
+  {
+    const { must } = canary(undefined, { value: 'ACME/Patrol', 说明: '登记过' });
+    assert.equal(must.length, 1, '只差大小写：同一个仓');
+  }
+  // 任一边是私有值：比不出，报红，不当成不一样
+  {
+    const { must } = canary({ private: fingerprintOf(KEY, 'engine.env', 'FLEET_CANARY_REPO', 'x/y') });
+    assert.equal(must.length, 1);
+    assert.match(must[0].body, /法国写成了私有值/);
+  }
+  {
+    const { must } = canary(
+      { private: null },
+      { private: fingerprintOf(KEY, 'engine.env', 'FLEET_CANARY_REPO', 'x/y') },
+    );
+    assert.equal(must.length, 1, '两边都是私有值：照样报红（这一项不按「各自的凭据」放行）');
+    assert.match(must[0].body, /法国和本机档写成了私有值/);
+  }
+  // 一边是空的：报红
+  {
+    const { must } = canary('', undefined);
+    assert.equal(must.length, 1);
+    assert.match(must[0].body, /法国这一项是空的/);
+  }
+  // 两边都没声明这一项（删掉了）：报红，钉子不会跟着悄悄消失
+  {
+    const pair = profilePair();
+    for (const side of [pair.france, pair.local])
+      side.files['engine.env'] = side.files['engine.env'].filter((d) => d.key !== 'FLEET_CANARY_REPO');
+    const r = diffProfiles(pair.france, pair.local);
+    assert.equal(r.result, 'drift');
+    const must = r.drift.filter((d) => d.scope === 'must-differ');
+    assert.equal(must.length, 1);
+    assert.match(must[0].body, /法国和本机档的期望里没有这一项/);
+  }
+});
+
 test('仓里 deploy/local 和 deploy/france 的期望：差别都登记过了（#451，改一处没登记的这里会红）', () => {
   const franceText = readFileSync(FRANCE_DESIRED_FILE, 'utf8');
   const localText = readFileSync(LOCAL_DESIRED_FILE, 'utf8');
@@ -586,6 +655,18 @@ test('仓里 deploy/local 和 deploy/france 的期望：差别都登记过了（
   assert.deepEqual(
     rVersion.drift.map((d) => [d.scope, d.key]),
     [['versions', 'temporalServer']],
+  );
+
+  // 故意把本机档的演练仓写成法国的巡检仓（#777）：两边是同一个仓，报红
+  const franceRepo = JSON.parse(franceText).files['engine.env'].FLEET_CANARY_REPO.value;
+  assert.ok(franceRepo, '法国的巡检仓是公开值，仓里比得出');
+  const sameRepo = JSON.parse(localText);
+  sameRepo.files['engine.env'].FLEET_CANARY_REPO.value = franceRepo;
+  const rSame = diffProfiles(france, parseDesired(JSON.stringify(sameRepo)));
+  assert.equal(rSame.result, 'drift');
+  assert.deepEqual(
+    rSame.drift.map((d) => [d.scope, d.file, d.key]),
+    [['must-differ', 'engine.env', 'FLEET_CANARY_REPO']],
   );
 });
 

@@ -34,7 +34,7 @@
       "FLEET_CURSOR_VERSIONS_DIR": "/home/{user}/.local/share/cursor-agent/versions",
       "FLEET_CANARY_REPO": {
         "value": "thoerwink8/fleet-dao-canary",
-        "说明": "登记的差别：本机档只接演练仓（specs/451 的「AI 理解」），用的是 #452 需求里写定的演练仓，不是法国的全流程巡检仓；仓名已经公开写在 #452 里，当公开值处理（法国那个巡检仓照旧是私有值、只记指纹）"
+        "说明": "登记的差别：本机档只接演练仓（specs/451 的「AI 理解」），用的是 #452 需求里写定的演练仓，不是法国的全流程巡检仓；仓名已经公开写在 #452 里，当公开值处理。两边不许是同一个仓（#777：法国那边也改成了公开值、换了仓，config.mjs 的 diffProfiles 钉着，两边一样就红）"
       },
       "FLEET_SESSION_PROXY": {
         "value": "http://127.0.0.1:7890",

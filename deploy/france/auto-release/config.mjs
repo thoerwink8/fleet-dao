@@ -46,6 +46,19 @@ export const LOCAL_DESIRED_FILE = fileURLToPath(new URL('../../local/desired-con
  * Node 只写大版本号：france.sh 的前提只要求 /usr/bin/node ≥ 这个数，不是钉死到点号版本。
  */
 export const PINNED_VERSION_KEYS = ['postgresMajor', 'nodeMajor', 'temporalServer', 'temporalCli'];
+/**
+ * 本机档和法国必须不一样的几项（#777）：和 versions 反过来，这几项两边一样就是错，写了「说明」也不例外。
+ * 两边都要写成非空的公开值才比得了：私有值只有指纹、钥匙各在各的机器上，仓里比不出两边一不一样，照红报，不当成不一样。
+ * 比的时候不分大小写（GitHub 的 owner/仓名不分大小写，大小写不同还是同一个仓）；头尾空白 parseDesired 已经拒了。
+ */
+export const MUST_DIFFER = [
+  {
+    file: 'engine.env',
+    key: 'FLEET_CANARY_REPO',
+    what: '法国的巡检仓和本机档的演练仓',
+    why: '两边是同一个仓，两边的引擎会在同一个仓里开单、开 PR，把对方的单当成自己的',
+  },
+];
 /** 发布时照期望写的几份（单元读的环境文件）。france.env 归 france.sh 读，只对账、不在发布时写。 */
 export const APPLY_FILES = ['engine.env', 'api.env', 'release.env'];
 /** 上次照期望写了什么（每份文件里公开的键 → 值）：只有 release.sh 经命令行 apply 写，人别改；认不出就删掉它。 */
@@ -531,6 +544,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
  *   - 两个文件声明的键集合必须一样：一边有一边没有，就是没登记的差别（要写就两边都写，值可以不同）。
  *   - 两边都存在的键：都是私有值（各自的凭据，本来就不共用，比如 GitHub webhook 密钥）不算差别，不用登记；
  *     种类换了（private ↔ public）或都是公开值但值不一样，local 那一条必须有非空的「说明」，没有就是没登记的差别。
+ *   - MUST_DIFFER 列的几项反过来：两边都得是非空的公开值、而且不一样（#777），否则报红（scope 'must-differ'）。
  * 返回 { result: 'ok' | 'drift' | 'unchecked', drift: [{ scope, file?, key, title, body }], unchecked: [...] }。
  */
 export function diffProfiles(france, local) {
@@ -584,7 +598,38 @@ export function diffProfiles(france, local) {
       }
     }
   }
+  for (const m of MUST_DIFFER) {
+    const problem = mustDifferProblem(
+      france.files?.[m.file]?.find((d) => d.key === m.key),
+      local.files?.[m.file]?.find((d) => d.key === m.key),
+    );
+    if (!problem) continue;
+    drift.push({
+      scope: 'must-differ',
+      file: m.file,
+      key: m.key,
+      title: `${m.what}必须不一样：${m.file} 的 ${m.key}`,
+      body: `${problem}：${m.why}（#777）。两份期望 deploy/france/desired-config.json、deploy/local/desired-config.json 都要写成非空的公开值、指向不同的仓，没有「说明」能例外这一条。`,
+    });
+  }
   return { result: drift.length > 0 ? 'drift' : 'ok', drift, unchecked: [] };
+}
+
+/** MUST_DIFFER 的一项：法国、本机档各自的声明（没声明是 undefined）→ 哪里不对（一句话），对的回 null。 */
+function mustDifferProblem(f, l) {
+  const sides = [
+    ['法国', f],
+    ['本机档', l],
+  ];
+  const absent = sides.filter(([, d]) => !d).map(([n]) => n);
+  if (absent.length > 0) return `${absent.join('和')}的期望里没有这一项，比不出两边一不一样`;
+  const hidden = sides.filter(([, d]) => d.kind !== 'public').map(([n]) => n);
+  if (hidden.length > 0) return `${hidden.join('和')}写成了私有值（只有指纹），仓里比不出两边一不一样`;
+  const empty = sides.filter(([, d]) => d.value === '').map(([n]) => n);
+  if (empty.length > 0) return `${empty.join('和')}这一项是空的`;
+  // 头尾空白 parseDesired 已经拒了，这里只管大小写
+  if (f.value.toLowerCase() === l.value.toLowerCase()) return `两边都是「${f.value}」`;
+  return null;
 }
 
 // ── 读法国上的原文（自动发布、france.sh 的读回、命令行共用） ──
