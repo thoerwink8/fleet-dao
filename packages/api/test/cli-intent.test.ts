@@ -169,7 +169,35 @@ describe('fleet-api intent：读', () => {
     const r = await s.run('list');
     expect(r.code).toBe(0);
     expect(r.out).toBe('读成了：没有还没处理的意图');
-    expect(IntentCliListOutput.parse((await s.json('list')).body).intents).toEqual([]);
+    expect(IntentCliListOutput.parse((await s.json('list')).body)).toEqual({
+      ok: true,
+      intents: [],
+      more: false,
+    });
+  });
+
+  it('超过 --limit：写明还有没列的（more），不让人把前几段当成全部', async () => {
+    const s = setup();
+    await seed(s.intents);
+    await s.intents.intakeMessage({
+      messageId: 'om_p',
+      chatId: 'oc_p2p_a',
+      chatKind: 'p2p',
+      source: 'event',
+      msgType: 'text',
+      atBot: false,
+      newSegment: false,
+      sentAt: '2026-10-04T06:10:00.000Z',
+      text: '私聊里随口一句',
+      rawContent: '{"text":"私聊里随口一句"}',
+      senderUserId: IDS.founderA,
+      senderName: '甲',
+    });
+    const cut = IntentCliListOutput.parse((await s.json('list', '--limit', '1')).body);
+    expect(cut.intents.map((i) => i.seq)).toEqual([1]);
+    expect(cut.more).toBe(true);
+    expect((await s.run('list', '--limit', '1')).out).toContain('还有没列的');
+    expect(IntentCliListOutput.parse((await s.json('list', '--limit', '2')).body).more).toBe(false);
   });
 
   it('【故意造出的失败】没有这一段：退出码 1，not_found', async () => {

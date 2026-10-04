@@ -80,7 +80,7 @@ describe('意图存储（Postgres 版）：库里的东西认不出', () => {
           operator: 'root',
           relink: false,
         },
-        // via 不在库里认的取值里：操作记录那一句会被检查约束拒掉
+        // via 不在库里认的取值（audit_via 枚举）里：操作记录那一句会被库拒掉
         {
           actor: { kind: 'engine', id: 'ops:intent' },
           action: 'intent.link',

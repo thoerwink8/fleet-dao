@@ -300,7 +300,12 @@ export const IntentCliFailure = z.object({
   why: z.string(),
 });
 
-export const IntentCliListOutput = z.object({ ok: z.literal(true), intents: z.array(IntentDetailSchema) });
+export const IntentCliListOutput = z.object({
+  ok: z.literal(true),
+  intents: z.array(IntentDetailSchema),
+  /** 还有没列出来的（超过 --limit）：调用方要加大 --limit 再读，不能当成全部。 */
+  more: z.boolean(),
+});
 export const IntentCliShowOutput = z.object({ ok: z.literal(true), intent: IntentDetailSchema });
 export const IntentCliWriteOutput = z.object({
   ok: z.literal(true),

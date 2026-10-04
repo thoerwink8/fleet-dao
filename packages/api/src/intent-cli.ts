@@ -224,7 +224,10 @@ const view = (i: IntentWithMessages) => intentDetail(i.intent, i.messages);
 export async function runIntent(cmd: IntentCommand, deps: IntentCliDeps): Promise<IntentCliResult> {
   switch (cmd.kind) {
     case 'list': {
-      const found = (await deps.intents.list({ status: cmd.status, limit: cmd.limit })).map(view);
+      // 多读一段：看得出还有没列出来的，不让调用方把前 N 段当成全部
+      const read = await deps.intents.list({ status: cmd.status, limit: cmd.limit + 1 });
+      const more = read.length > cmd.limit;
+      const found = read.slice(0, cmd.limit).map(view);
       const scope =
         cmd.status === 'new' ? '还没处理的' : cmd.status === 'all' ? '' : `「${STATUS_WORD[cmd.status]}」的`;
       return {
@@ -233,10 +236,10 @@ export async function runIntent(cmd: IntentCommand, deps: IntentCliDeps): Promis
           found.length === 0
             ? `读成了：没有${scope}意图`
             : [
-                `${scope}意图 ${found.length} 段${found.length === cmd.limit ? `（只列了前 ${cmd.limit} 段）` : ''}：`,
+                `${scope}意图 ${found.length} 段${more ? `（只列了前 ${cmd.limit} 段，还有没列的：加大 --limit 再看）` : ''}：`,
                 ...found.map(describeIntent),
               ].join('\n\n'),
-        json: { ok: true, intents: found },
+        json: { ok: true, intents: found, more },
       };
     }
     case 'show': {
