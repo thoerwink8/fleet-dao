@@ -31,6 +31,7 @@ import { checkCarpoolCap } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
+import { gitNetworkEnv } from './git-env.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
 import {
@@ -475,10 +476,13 @@ export function realPortsFromEnv(
 } {
   const config = realPortsConfigFromEnv(env);
   const { db, close } = createDb({ env: env as Record<string, string | undefined> });
+  // 引擎自己的 git（抓主线、推分支）也经这一档登记的代理出网：本机档 WSL 直连 github.com 时通时不通（Connection reset，
+  // 动手前建工作树就卡在抓主线上，#786 同一个根）；git 认 http(s)_proxy 环境变量，gitEnv 照搬父环境里除凭据外的变量。
+  // 只给 git 这一份环境，引擎进程自己的环境和起会话的环境（只从白名单抄）都不动；法国不登记代理、环境原样。
   const gh = createGitHub({
     ledger: pgLedger(db),
     locker: pgLocker(db),
-    env: env as Record<string, string | undefined>,
+    env: gitNetworkEnv(env as Record<string, string | undefined>, config.sessionProxy),
   });
   const trees = helperWorkTrees({ root: config.workRoot });
   const { claudeCommand, cursorCommand, grokCommand } = agentCommands(config);
@@ -508,6 +512,7 @@ export function realPortsFromEnv(
     exec,
     user: sessionUser,
     reclaude: claudeCommand(sessionUser),
+    proxy: config.sessionProxy,
     onEvent: orgDriftReporter({ db, user: sessionUser, machine: config.machine }),
   });
   const real = createRealPorts({

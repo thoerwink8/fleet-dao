@@ -79,6 +79,32 @@ describe('认出来', () => {
     expect(first?.scopeId).not.toBe(second?.scopeId);
   });
 
+  it('本机档登记了会话代理：org list 写成 /usr/bin/env 带六个代理变量再跑 reclaude（直连 reclaude 服务端时通时不通）；不登记（法国）一个字不加', async () => {
+    await readSessionOrg({ ...deps(), proxy: 'http://127.0.0.1:7890' });
+    await readSessionOrg(deps());
+    const [viaProxy, direct] = rig.calls;
+    expect(viaProxy?.argv.slice(0, 1)).toEqual(['/usr/bin/env']);
+    expect(viaProxy?.argv).toEqual(
+      expect.arrayContaining([
+        'http_proxy=http://127.0.0.1:7890',
+        'https_proxy=http://127.0.0.1:7890',
+        'HTTP_PROXY=http://127.0.0.1:7890',
+        'HTTPS_PROXY=http://127.0.0.1:7890',
+      ]),
+    );
+    expect(viaProxy?.argv.slice(-3)).toEqual([...RECLAUDE, 'org', 'list']);
+    expect(direct?.argv).toEqual([...RECLAUDE, 'org', 'list']);
+  });
+
+  it('【故意造出的失败】会话代理认不出（带账号密码、socks）：读失败写明没跑成，不悄悄改成直连、一次 exec 都不发', async () => {
+    for (const proxy of ['socks5://127.0.0.1:7890', ['http://u', 'ser:p', 'w@127.0.0.1:7890'].join('')]) {
+      const r = await readSessionOrg({ ...deps(), proxy });
+      expect(r.ok).toBe(false);
+      expect(r.ok ? '' : r.why).toContain(`${WHAT}没跑成`);
+    }
+    expect(rig.calls).toHaveLength(0);
+  });
+
   it('退出码 0 却带着 stderr 的话：只看 stdout 里那张表（有带 * 的行就认）', async () => {
     rig.answer({ stdout: orgListText('carpool'), stderr: 'warning: config sync slow' });
     expect(await readSessionOrg(deps())).toEqual({ ok: true, org: 'carpool' });
