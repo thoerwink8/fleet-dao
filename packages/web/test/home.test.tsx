@@ -216,6 +216,27 @@ describe('home（/）：三段流水线图', () => {
     expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
   });
 
+  test('对题没有样本（#761：在对话里做的，runs 里本来就没有）写「不计」；动手、验收没有样本照旧写「还没有跑完的样本」，不写成不计', () => {
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        flow: [
+          { segment: 'scope', inFlight: 0, samples: 0 },
+          { segment: 'manual', inFlight: 0, samples: 0 },
+          { segment: 'verify', inFlight: 0, samples: 0 },
+        ],
+      },
+    });
+    const lanes = Array.from(document.querySelectorAll('[data-flow-lane]'));
+    expect(lanes[0]?.textContent).toContain('在对话里做的，不计耗时');
+    expect(lanes[0]?.textContent).not.toContain('还没有跑完的样本');
+    expect(lanes[1]?.textContent).toContain('还没有跑完的样本');
+    expect(lanes[1]?.textContent).not.toContain('不计');
+    expect(lanes[2]?.textContent).toContain('还没有跑完的样本');
+    expect(lanes[2]?.textContent).not.toContain('不计');
+  });
+
   test('卡片：单号、标题、谁在做、本段待了多久、最近事件；等你拍的有标记和要拍的事', () => {
     renderHome({ status: 'data', data: SAMPLE });
     const doing = document.querySelector('[data-id^="ticket:556"]');

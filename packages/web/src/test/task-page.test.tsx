@@ -208,6 +208,33 @@ describe('【失败】读不到的都写明，不写 0', () => {
     );
   });
 
+  test('对题没有行（#761：在对话里做的，引擎没起会话）：写「不计」和原因，不写「没有这一段的记录」；验收没有行照旧写没有记录', async () => {
+    open('/tasks/t-x', apiWith(detailWith([base])));
+    const box = await panel('三段');
+    const scope = segmentRow(box, 'scope');
+    expect(within(scope).getByText('在对话里做的，不计')).toBeTruthy();
+    expect(within(scope).getByText(/不是没记，是不计/)).toBeTruthy();
+    expect(within(scope).queryByText('没有这一段的记录')).toBeNull();
+    const verify = segmentRow(box, 'verify');
+    expect(within(verify).getByText('没有这一段的记录')).toBeTruthy();
+    expect(within(verify).queryByText(/不计/)).toBeNull();
+    expect(within(segmentRow(box, 'manual')).queryByText(/不计/)).toBeNull();
+  });
+
+  test('对题有引擎起的会话（以后的意图归纳、段记 scope）：照常显示那几笔，段名下写明只含这些、对话里的部分不计', async () => {
+    open(
+      '/tasks/t-x',
+      apiWith(detailWith([base, { ...base, id: 'x-s', segment: 'scope', tier: undefined }])),
+    );
+    const box = await panel('三段');
+    const scope = segmentRow(box, 'scope');
+    expect(within(scope).getByText('1 次')).toBeTruthy();
+    expect(within(scope).getByText('只含引擎起的会话；在对话里做的部分不计')).toBeTruthy();
+    expect(within(scope).queryByText('在对话里做的，不计')).toBeNull();
+    // 动手段不加这句
+    expect(within(segmentRow(box, 'manual')).queryByText(/不计/)).toBeNull();
+  });
+
   test('还在跑的一段：写在跑、已跑多久，用量跑完才有——不算没读到', async () => {
     const { endedAt: _e, outcome: _o, ...live } = base;
     open('/tasks/t-x', apiWith(detailWith([{ ...live, id: 'x-5', costUsd: undefined }])));

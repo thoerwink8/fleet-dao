@@ -24,7 +24,7 @@ import { Maximize2, Minus, Plus } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { formatDuration } from '../../lib/format';
 import { buildFlowLayout, type FlowNodeData, HEADER_H, type LaneInfo, PAD } from '../../lib/home-flow-layout';
-import { segmentHint, segmentLabel } from '../../lib/segments';
+import { SEGMENT_UNMETERED, segmentHint, segmentLabel } from '../../lib/segments';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { RunningCard } from './running-card';
@@ -37,9 +37,13 @@ type MoreNode = Node<Extract<FlowNodeData, { kind: 'more' }>, 'more'>;
 /** 窗口天数写在 flow 的说明里：api 的样本取看板窗口（近 7 天进终态的 + 开着的）。 */
 const SAMPLE_DAYS = 7;
 
-function avgText(stage: HomeFlowStage | undefined): string {
+function avgText(stage: HomeFlowStage | undefined, lane: LaneInfo['key']): string {
   if (!stage) return '不在三段里，没有耗时';
-  if (stage.avgMs === undefined) return '还没有跑完的样本';
+  // 不计的段（对题，#761）没样本是常态不是「还没有」；有样本（引擎起的会话）照常给平均
+  if (stage.avgMs === undefined) {
+    const unmetered = lane === 'none' ? undefined : SEGMENT_UNMETERED[lane];
+    return unmetered ? `${unmetered.short}耗时` : '还没有跑完的样本';
+  }
   return `平均 ${formatDuration(stage.avgMs)} · ${stage.samples} 笔`;
 }
 
@@ -66,7 +70,7 @@ const LaneView = memo(function LaneView({ data }: NodeProps<LaneNode>) {
           className="num truncate text-xs text-muted-foreground"
           title={`样本取近 ${SAMPLE_DAYS} 天看板窗口里跑完的`}
         >
-          {avgText(lane.stage)}
+          {avgText(lane.stage, laneKey)}
         </p>
       </div>
       {total === 0 ? <p className="px-4 pt-4 text-xs text-muted-foreground">这一段现在没有单</p> : null}
