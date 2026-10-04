@@ -23,7 +23,7 @@ import { isTestFile, unitOfTestFile, withSiblings } from './test-split.ts';
 
 /** 键和清单的格式版本：算键的办法、清单的字段一变就加一，旧缓存自然读不到、也不会被当成清单。
  * 2：分台从「包目录 + --shard」换成明确的文件清单（键里的 args 换成 box，清单、交接文件同改）。 */
-export const CACHE_SCHEMA = 2;
+export const CACHE_SCHEMA = 3;
 /** 只有 pull_request 才缓存。 */
 export const PR_EVENT = 'pull_request';
 /** 缓存目录名（放在 $RUNNER_TEMP 下；ci.yml 的 restore/save 用同一个名字）。 */
@@ -211,6 +211,7 @@ export const EXTERNAL_INPUT_FILES: readonly string[] = [
   'docs/ops.md',
   '.github/pull_request_template.md',
   '.gitignore',
+  '.claude/settings.json',
 ];
 /** 测试读的包外目录（整棵）：CI 工作流、装机脚本、agents（skill 和调工具前的钩子）、推前钩子。 */
 export const EXTERNAL_INPUT_DIRS: readonly string[] = ['.github/workflows', 'deploy', 'agents', '.githooks'];

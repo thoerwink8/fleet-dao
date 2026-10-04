@@ -433,14 +433,16 @@ const RERUN =
  * 第 2 件：同步这台机器。fetch 是第 1 件在同一个仓里取远端的结果（没取过是 null，这里用不到：这件在专用检出里取）。
  * 返回一句话。做不成的原因分得清：git 起不来、取不到远端、专用检出建不起来、agents-sync 没做成。
  */
-export function syncFleet({ home, git, sync, fetch = null, now = Date.now() }) {
+export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), seed = null, force = false }) {
   // fetch 是第 1 件在会话所在的仓里取远端的结果。这一件不走它：用的是同步专用的检出，自己在那里面取（见下面）
   void fetch;
   const rec = readRecord(home);
   const recorded = rec.ok && typeof rec.value?.repo === 'string' ? rec.value.repo : null;
+  // 种子：记着的那个检出还在就用它；不在了（老机器、检出挪过）退回调用方给的（bootstrap.mjs 给会话所在的检出）
+  const seedRepo = recorded !== null && existsSync(recorded) ? recorded : (seed ?? recorded);
   const synced = rec.ok && typeof rec.value?.synced?.commit === 'string' ? rec.value.synced.commit : null;
   const stamp = join(home, '.fleet-dao', 'session-sync.ok');
-  const quiet = synced ? quietFor(stamp, now) : null;
+  const quiet = synced && !force ? quietFor(stamp, now) : null;
   if (quiet !== null)
     return `规矩同步：${Math.max(1, Math.round(quiet / 60_000))} 分钟内刚同步成功过（这台同步到 ${short(synced)}），这次没再取远端。`;
 
@@ -457,7 +459,7 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now() }) {
   if (!lock.ok) return `规矩同步没跑：${lock.why}；${lag(g, synced, true)}。`;
 
   try {
-    const prepared = source.prepareSource(home, recorded, { repair: true, deps: { gitFactory: () => git } });
+    const prepared = source.prepareSource(home, seedRepo, { repair: true, deps: { gitFactory: () => git } });
     if (!prepared.ok) return `规矩同步没跑：${prepared.why}；${lag(g, synced, true)}。`;
 
     const origin = String(prepared.head ?? '');
