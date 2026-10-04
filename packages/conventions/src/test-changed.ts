@@ -116,7 +116,9 @@ export function selectTests(changed: readonly string[], graph: PackageGraph | st
   const ciOnly = [
     ...(plan.biome ? ['格式和类型（biome、tsc）'] : []),
     ...(plan.web ? ['演示版打包'] : []),
-    ...(plan.e2e ? ['驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）'] : []),
+    ...(plan.e2e
+      ? ['驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）']
+      : []),
     ...(plan.deploy === 'none'
       ? []
       : [`装机测试（deploy/test/run.sh${plan.deploy === 'ops' ? ' --ops' : ''}）`]),

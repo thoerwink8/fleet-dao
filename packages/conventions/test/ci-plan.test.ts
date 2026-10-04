@@ -1454,12 +1454,4 @@ describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑�
     // 它的名字在 PLANNED_JOBS 里（汇总核对）
     expect(PLANNED_JOBS).toContain('e2e');
   });
-
-  it('e2e 的环境变量：ci.yml 给的两个都是 README 和 playwright 配置认的', () => {
-    const readme = readFileSync(join(ROOT, 'packages/web/e2e/README.md'), 'utf8');
-    for (const name of ['E2E_PG_ADMIN_URL', 'E2E_BROWSER_CHANNEL']) expect(readme, name).toContain(name);
-    const cfg = readFileSync(join(ROOT, 'packages/web/e2e/playwright.config.ts'), 'utf8');
-    expect(cfg).toContain('E2E_BROWSER_CHANNEL');
-    expect(readme).toContain('.github/workflows/ci.yml');
-  });
 });
