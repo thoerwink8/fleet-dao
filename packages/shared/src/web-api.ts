@@ -821,8 +821,6 @@ export const PoolViewSchema = z.object({
 
 export const PoolsResponse = z.object({
   pools: z.array(PoolViewSchema),
-  /** 额度读取还没做：额度那一块整块显示待实现；有它时 unread 不代表读失败。 */
-  quotaNotWired: NotWiredSchema.optional(),
   staleAfterMinutes: z.number().int().positive(),
   asOf: Time,
 });

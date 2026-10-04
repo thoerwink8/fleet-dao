@@ -113,6 +113,12 @@
 
 排队：#194 拼车自动切独享（方案 v2 他已答完，工作量大）、#323 配置进仓对账、#574 #216 #345 剩的、#820 驾驶舱补环境视图。
 
+## 2026-10-04 晚（#76 定时读额度收尾，Opus 子代理）
+
+- **现状查清**：引擎那一半早已合（#677 `quota-read` 每 15 分钟读、读成按池入库、连着两轮没读成或凭据/配置类当场报；#678 每小时对账第三处 `checkQuotaFreshness`；#679 估算类池接用量记录），测试齐。**缺的是驾驶舱**：`api/src/main.ts` 还挂着 `notWired.quota`，额度页在生产上整块是「待实现 · #76」，拼车 5 小时美元窗口根本看不到。
+- **#837（分支 `feat/76-quota-dashboard-wired`）**：去掉额度的「待实现」占位（连同只为它留的 `Deps.notWired`、`PoolsResponse.quotaNotWired`、换模型对话框的 `quotaNotWired` 参数）；额度格的「实读/估算」悬停写读法（`reclaude-carpool` 等）；design 第六节第 4 层、ops（对账提醒怎么处理、`/etc/fleet-dao/quota.json` 进配置清单、「待实现」那段）、adapters 文档跟着写实。
+- **还没做 / 没验证**：法国真机（法国引擎关着，复查 10-15；`/etc/fleet-dao/quota.json` 还没放，要创始人的凭据和机器，放上之前 `quota-read:config` 会一直报）；Grok、Cursor 池在法国怎么读（凭据形态没定，读不到照实报没读成）；「发布时核对 quota.json」10-03 判为重复不做，验收原文改不改等关单时创始人定。#76 不关。
+
 ## 2026-10-04（#574 剩的代码，Opus 子代理分三个 PR：装载 → 选路 → 界面）
 
 - **装载，#716 已合**：发布时目录装完接着装路由两层（`deploy/release.sh` 的 `load_routing` → `packages/db/src/bin/routing.ts` → `runRoutingApply`：读这一版带的 `packages/db/routing.default.json`、只补缺写进两张表、日志写补了几行/保持几个），装不成、读不回、装完 0 行都红、不切版本。测试：`packages/db/test/routing-apply-release.test.ts`（真骨架 + 目录样例装得进、再装已齐；骨架读不到、目录没装都明确失败一行不写）、`deploy/test/release-flow.test.sh`「装路由两层」一段（本机 Git Bash 建不了符号链接，「切到哪一版」那几条只在 CI 上验）。

@@ -89,6 +89,27 @@ describe('额度格', () => {
     expect(screen.getByText('$12.50')).toBeTruthy();
   });
 
+  test('拼车 5 小时美元上限（#76）：写已用和上限的金额、清零时刻、实读，悬停看得到读法 reclaude-carpool', () => {
+    cell({
+      window: '5h',
+      label: 'carpool_5h_usd',
+      unit: 'usd',
+      used: 3.2,
+      limit: 10,
+      utilization: 0.32,
+      resetsAt: at(90),
+      reading: 'measured',
+      source: 'reclaude-carpool',
+      readAt: at(-3),
+    });
+    expect(screen.getByText('$3.20')).toBeTruthy();
+    expect(screen.getByText('/ $10.00', { exact: false })).toBeTruthy();
+    expect(screen.getByText('1 小时 30 分后')).toBeTruthy();
+    const badge = screen.getByText('实读').closest('[data-source]') as HTMLElement;
+    expect(badge.dataset.source).toBe('reclaude-carpool');
+    expect(badge.title).toContain('reclaude-carpool');
+  });
+
   test('没读到清零时间就直说', () => {
     cell({ window: 'points', utilization: 0.4, reading: 'measured', readAt: at(-1) });
     expect(screen.getByText('清零时间没读到')).toBeTruthy();
