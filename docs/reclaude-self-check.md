@@ -1,6 +1,6 @@
 # 防封环境自检：接 reclaude 的机器该查什么
 
-> 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。
+> 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。入口和「某号被封了」的提示词在 [reclaude.md](reclaude.md)。
 > 配套：装法与原理在 `docs/reclaude-in-mirasim.md`。本文讲两件事：先清掉 reclaude 使用前那个 Claude 账号留在本机的 id，再查有没有在产生上报。
 >
 > **脚本在哪**：`deploy/reclaude-old-account-clean.mjs`（本仓）。旧 `machine-check.mjs` 仍在已退役的 ai-gateway-stack。Mirasim 启动器及迁移由本仓 `packages/mirasim-reclaude` 维护，检查用 `pnpm mirasim:migrate --check`；来源验证见配套指南。清账号或删痕迹仍须先获删数据授权，不由迁移器执行。

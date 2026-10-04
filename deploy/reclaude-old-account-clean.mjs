@@ -16,6 +16,7 @@
 //   node deploy/reclaude-old-account-clean.mjs --all-homes --apply
 //   node deploy/reclaude-old-account-clean.mjs --org <编号>           # 干跑被封的号
 //   node deploy/reclaude-old-account-clean.mjs --org <编号> --apply   # 摘掉这个号的邮箱
+// 被封时怎么跑、提示词怎么说，看 docs/reclaude.md。
 //     Linux 上以 root 跑 --all-homes，/etc/passwd 里每个有 .claude 或 .reclaude 的家都扫。
 //     读不到 passwd = 退出码 2（其他用户没扫成，不是「都干净」）。
 //
