@@ -524,13 +524,14 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
     return { task, other, run };
   }
 
-  it('按 task_id 对上的、task_id 没记但单号对上的（兜底）都收，按起跑先后排', async () => {
+  it('按 task_id 对上的、task_id 没记但单号和工作流编号都对上的（兜底）都收，按起跑先后排', async () => {
     const { task, run } = await setup();
     const verify = await run({ segment: 'verify', model: 'gpt-5.6', taskId: task.id, startedAt: ago(MIN) });
     const manual = await run({
       segment: 'manual',
       model: 'opus-5.5',
       issueNumber: 77,
+      workflowId: WF,
       startedAt: ago(9 * MIN),
     });
     const scope = await run({
@@ -556,6 +557,17 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
     const mine = await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: WF });
     const rows = await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF });
     expect(rows.map((r) => r.id)).toEqual([mine]);
+  });
+
+  it('task_id 和工作流编号都没记、只有单号对得上的不收：分不出是哪个仓的，别的仓同号的会话混不进来', async () => {
+    const { task, other, run } = await setup();
+    const orphan = await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77 });
+    expect(await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF })).toEqual([]);
+    // 同一个单号、另一个仓：它的任务详情同样不收这一行
+    expect(
+      await runsOfTask(t.db, { id: other.id, issueNumber: 77, workflowId: 'task:acme/other#77' }),
+    ).toEqual([]);
+    expect((await t.db.select({ id: runs.id }).from(runs)).map((r) => r.id)).toEqual([orphan]);
   });
 
   it('单号对不上、也没 task_id 的不收（巡检、实验这类不属于这张单）', async () => {

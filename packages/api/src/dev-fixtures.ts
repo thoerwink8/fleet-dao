@@ -288,10 +288,11 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         workflowId: 'task:example/canary#13',
       },
       {
-        // 写入那一端还没填 task_id 的一笔：按单号兜底对上（任务详情标明是兜底）
+        // 写入那一端还没填 task_id 的一笔：按单号加工作流编号兜底对上（任务详情标明是兜底）
         id: IDS.seg13verify,
         segment: 'verify',
         issueNumber: 13,
+        workflowId: 'task:example/canary#13',
         model: 'gpt-5.6',
         channel: 'ch-mirasim',
         startedAt: ago(522),
