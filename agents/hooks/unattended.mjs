@@ -21,6 +21,24 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
+/**
+ * 一个会话的无人值守状态（~/.fleet-dao/unattended/<会话号>.json）：readState 认过这几项才当它是状态。
+ * @typedef {{ state: 'on' | 'paused' | 'done', expiresAt: string, idle: number, totalBlocks: number, toolSinceBlock?: boolean, auto?: boolean, since?: string, note?: string, lastBlockAt?: string }} State
+ */
+/** @typedef {{ out: (line: string) => void, err: (line: string) => void, env?: NodeJS.ProcessEnv, now?: number }} CliIo */
+
+/**
+ * 抛出来的东西上的 code（ENOENT 这类）；不是对象就是 undefined。
+ * @param {unknown} e
+ */
+const errCode = (e) => (typeof e === 'object' && e !== null && 'code' in e ? e.code : undefined);
+/**
+ * 抛出来的东西上的 message；不是对象就是 undefined。
+ * @param {unknown} e
+ */
+const messageOf = (e) => (typeof e === 'object' && e !== null && 'message' in e ? e.message : undefined);
+
 export const DEFAULT_HOURS = 8;
 export const MAX_HOURS = 24;
 /** 被挡回去后连着这么多次没调过工具，就放行。 */
@@ -30,57 +48,96 @@ export const MAX_TOTAL_BLOCKS = 80;
 
 const SCRIPT = '~/.fleet-dao/hooks/unattended.mjs';
 
+/**
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [home]
+ */
 export function stateDir(env = process.env, home = homedir()) {
   const o = env.FLEET_UNATTENDED_DIR;
   return typeof o === 'string' && o ? o : join(home, '.fleet-dao', 'unattended');
 }
 
-/** 会话号只许字母数字和 - _：它要拼进文件名，别的字符一律当没有。 */
+/**
+ * 会话号只许字母数字和 - _：它要拼进文件名，别的字符一律当没有。
+ * @param {unknown} id
+ * @returns {string | null}
+ */
 export function cleanId(id) {
   return typeof id === 'string' && /^[\w-]{4,128}$/.test(id) ? id : null;
 }
 
+/**
+ * @param {string} dir
+ * @param {unknown} id
+ */
 function fileFor(dir, id) {
   return join(dir, `${cleanId(id)}.json`);
 }
 
-/** { ok: true, state: 对象 | null（没开） } 或 { ok: false, why }；读不了、认不出都是 ok:false，不当成没开。 */
+/**
+ * { ok: true, state: 对象 | null（没开） } 或 { ok: false, why }；读不了、认不出都是 ok:false，不当成没开。
+ * @param {string} dir
+ * @param {unknown} id
+ * @returns {{ ok: true, state: State | null } | { ok: false, why: string }}
+ */
 export function readState(dir, id) {
   if (!cleanId(id)) return { ok: true, state: null };
+  /** @type {string} */
   let text;
   try {
     text = readFileSync(fileFor(dir, id), 'utf8');
   } catch (err) {
-    if (err?.code === 'ENOENT') return { ok: true, state: null };
-    return { ok: false, why: `读不了状态文件（${err?.code ?? err}）` };
+    if (errCode(err) === 'ENOENT') return { ok: true, state: null };
+    return { ok: false, why: `读不了状态文件（${errCode(err) ?? err}）` };
   }
   try {
+    /** @type {unknown} */
     const s = JSON.parse(text);
     const good =
-      s &&
       typeof s === 'object' &&
+      s !== null &&
+      'state' in s &&
+      typeof s.state === 'string' &&
       ['on', 'paused', 'done'].includes(s.state) &&
-      Number.isFinite(Date.parse(s.expiresAt)) &&
+      'expiresAt' in s &&
+      Number.isFinite(Date.parse(String(s.expiresAt))) &&
+      'idle' in s &&
       Number.isInteger(s.idle) &&
+      'totalBlocks' in s &&
       Number.isInteger(s.totalBlocks);
     if (!good) return { ok: false, why: '状态文件的内容认不出' };
-    return { ok: true, state: s };
+    // 上面逐项核过 state、expiresAt、idle、totalBlocks 才走到这里
+    return { ok: true, state: /** @type {State} */ (s) };
   } catch {
     return { ok: false, why: '状态文件不是合法的 JSON' };
   }
 }
 
+/**
+ * @param {string} dir
+ * @param {unknown} id
+ * @param {object} state
+ */
 function writeState(dir, id, state) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(fileFor(dir, id), `${JSON.stringify(state, null, 2)}\n`);
 }
 
+/**
+ * @param {string} dir
+ * @param {unknown} id
+ */
 function removeState(dir, id) {
   rmSync(fileFor(dir, id), { force: true });
 }
 
+/** @param {string} iso */
 const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
 
+/**
+ * @param {State} state
+ * @param {number} now
+ */
 export function blockReason(state, now) {
   const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
   if (state.auto === true) {
@@ -99,6 +156,8 @@ export function blockReason(state, now) {
 /**
  * Stop 钩子要不要挡。返回 { block: true, reason } 或 { block: false, notice? }（notice 给 systemMessage，只在要说话时有）。
  * 不抛：任何一步出错都放行并写明。
+ * @param {{ dir: string, sessionId: unknown, now?: number }} opts
+ * @returns {{ block: true, reason: string } | { block: false, notice?: string }}
  */
 export function decideStop({ dir, sessionId, now = Date.now() }) {
   try {
@@ -140,12 +199,15 @@ export function decideStop({ dir, sessionId, now = Date.now() }) {
   } catch (err) {
     return {
       block: false,
-      notice: `无人值守的判断自己出错了（${err?.message ?? err}）：这一轮不拦（不能把人困住）。`,
+      notice: `无人值守的判断自己出错了（${messageOf(err) ?? err}）：这一轮不拦（不能把人困住）。`,
     };
   }
 }
 
-/** PreToolUse 调用：开着就记一笔「调了工具」。只在需要改的时候才写；任何错误都吞掉。 */
+/**
+ * PreToolUse 调用：开着就记一笔「调了工具」。只在需要改的时候才写；任何错误都吞掉。
+ * @param {{ dir: string, sessionId: unknown }} opts
+ */
 export function touchTool({ dir, sessionId }) {
   try {
     const r = readState(dir, sessionId);
@@ -163,9 +225,15 @@ export const AUTO_ARM_MINUTES = 30;
  * 这次工具调用是不是起了一件在后台跑的活。后台活是挂在这个会话进程上的：一轮结束、进程一重开它就被杀，
  * 也就没有谁会被它的完成通知叫醒（2026-10-04 上午、下午各丢过一回：#754 的测试和三个监视任务跟着一轮结束一起没了）。
  * Agent（子代理）默认在后台，只有显式 run_in_background:false 才是前台；Monitor、Workflow 本来就是后台；Bash、PowerShell 要显式 true。
+ * @param {unknown} toolName
+ * @param {unknown} toolInput
+ * @returns {boolean}
  */
 export function startsBackground(toolName, toolInput) {
-  const bg = toolInput && typeof toolInput === 'object' ? toolInput.run_in_background : undefined;
+  const bg =
+    typeof toolInput === 'object' && toolInput !== null && 'run_in_background' in toolInput
+      ? toolInput.run_in_background
+      : undefined;
   if (toolName === 'Monitor' || toolName === 'Workflow') return true;
   if (toolName === 'Agent' || toolName === 'Task') return bg !== false;
   if (toolName === 'Bash' || toolName === 'PowerShell') return bg === true;
@@ -177,6 +245,8 @@ export function startsBackground(toolName, toolInput) {
  * 已经开着的：自动开的续期，创始人手动开的（通常更长）一个字不动。状态读不了就不写（不覆盖认不出的东西），返回为什么。
  * 活全收口了跑 done 放行；忘了跑也不会困住人：到期自动关、连着 3 次挡回去没调工具就暂停（decideStop）。
  * 返回 { armed, kept?, why? }；不抛。
+ * @param {{ dir: string, sessionId: unknown, now?: number, minutes?: number }} opts
+ * @returns {{ armed: boolean, kept?: boolean, why?: string }}
  */
 export function armForBackground({ dir, sessionId, now = Date.now(), minutes = AUTO_ARM_MINUTES }) {
   try {
@@ -204,11 +274,15 @@ export function armForBackground({ dir, sessionId, now = Date.now(), minutes = A
     });
     return { armed: true };
   } catch (err) {
-    return { armed: false, why: err?.message ?? String(err) };
+    return { armed: false, why: String(messageOf(err) ?? err) };
   }
 }
 
-/** 开会话钩子读的那一句：这个会话的无人值守开着（上下文被总结、重启之后还知道）；没开、读不了都是空数组。 */
+/**
+ * 开会话钩子读的那一句：这个会话的无人值守开着（上下文被总结、重启之后还知道）；没开、读不了都是空数组。
+ * @param {{ dir: string, sessionId: unknown, now?: number }} opts
+ * @returns {string[]}
+ */
 export function sessionLines({ dir, sessionId, now = Date.now() }) {
   const r = readState(dir, sessionId);
   if (!r.ok) return [`无人值守状态${r.why}：开着的话要重新跑 node ${SCRIPT} on。`];
@@ -227,7 +301,12 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
 
 const USAGE = `用法：node ${SCRIPT} on [--hours N] | done "做完了什么" | needs-you "要他拍什么" | off | status`;
 
-/** 命令行；返回退出码。io = { out, err, env, now }。 */
+/**
+ * 命令行；返回退出码。io = { out, err, env, now }。
+ * @param {string[]} argv
+ * @param {CliIo} io
+ * @returns {number}
+ */
 export function main(argv, io) {
   const env = io.env ?? process.env;
   const now = io.now ?? Date.now();
@@ -303,7 +382,7 @@ export function main(argv, io) {
     io.out(`无人值守${cmd === 'done' ? '收尾' : '暂停'}：${note}。这一轮现在可以结束了。`);
     return 0;
   } catch (err) {
-    io.err(`没做成：${err?.message ?? err}`);
+    io.err(`没做成：${messageOf(err) ?? err}`);
     return 1;
   }
 }
@@ -311,15 +390,15 @@ export function main(argv, io) {
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
 }
 
 if (isMain()) {
   process.exit(
     main(process.argv.slice(2), {
-      out: (s) => process.stdout.write(`${s}\n`),
-      err: (s) => process.stderr.write(`${s}\n`),
+      out: (/** @type {string} */ s) => process.stdout.write(`${s}\n`),
+      err: (/** @type {string} */ s) => process.stderr.write(`${s}\n`),
     }),
   );
 }

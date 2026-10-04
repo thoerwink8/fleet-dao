@@ -2,7 +2,9 @@ name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
 # biome、tsc、apps 里各步、test、web、deploy 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
 # 主线推送跑「上一次主线真绿的头…这次的头」那段累计改动该跑的（基准查不到、认不出路径一律退回全跑）；
-# 区间口径、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 D。
+# 其中这次提交的树和某次成功的 PR 检查测的是同一棵、那次比的基准树也正是上次真绿的头的树时，test、web、deploy 不再重测
+# （同树同结果；对不上、查不到、读不到都照旧全跑并留 ::warning::，lint 仍每轮自己跑）。
+# 区间口径、同树复用、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 C、D。
 #
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
@@ -50,6 +52,7 @@ jobs:
       web: ${{ steps.plan.outputs.web }}
       deploy: ${{ steps.plan.outputs.deploy }}
       deploy_matrix: ${{ steps.plan.outputs.deploy_matrix }}
+      reused: ${{ steps.plan.outputs.reused }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,12 +68,39 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}
         run: echo "sha=$(node packages/conventions/src/bin/main-base.ts ci.yml "$BRANCH")" >> "$GITHUB_OUTPUT"
+      # 主线推送：这次提交的树，和某次成功的 PR 检查测的是不是同一棵、那次比的基准树是不是上面查到的「上次真绿的头」的树？
+      # 是就让下面算计划的那一步把 test、web、deploy 标成「复用，不重测」（同树同结果）；对不上、查不到、读不到都只打 ::warning::，
+      # 照旧按区间全跑。判法在 packages/conventions/src/main-reuse.ts，docs/ci-speedup-plan.md 的 D 有方案。
+      - id: reuse
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
+        run: node packages/conventions/src/bin/main-reuse.ts --base "$MAIN_BASE" --workflow ci.yml >> "$GITHUB_OUTPUT"
+      # PR：留下「这一轮测的是哪棵树、比的基准树是哪棵」，供合并后那一轮的主线查（上一步）。检出的是 GitHub 造的合并提交（HEAD），
+      # 它的第一个父提交是 PR 当时的目标分支头。只留在步骤名里：jobs 接口原样给出步骤名，查它不需要任何写权限；
+      # 名字的写法由 main-reuse.ts 的 claimStepName 定、test/main-reuse.test.ts 核对这里的写法对得上。
+      # 只有这一轮整个运行成功才会被认（main-reuse.ts 查运行的 conclusion）。HEAD 不是两个父提交的合并提交时不留正常的声明（主线那边认不出就不复用）。
+      - id: tested
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          parents=$(git rev-list --parents -n 1 HEAD | wc -w)
+          if [ "$parents" = 3 ]; then
+            echo "claim=tree=$(git rev-parse 'HEAD^{tree}') base=$(git rev-parse 'HEAD^1^{tree}')" >> "$GITHUB_OUTPUT"
+          else
+            echo "claim=无（HEAD 不是合并提交）" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 已测的树 ${{ steps.tested.outputs.claim }}
+        if: github.event_name == 'pull_request'
+        run: echo "这一轮测的是这棵树（合并后主线那一轮据此复用，见 packages/conventions/src/main-reuse.ts）"
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
           MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
-        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE"
+          REUSE: ${{ steps.reuse.outputs.reuse }}
+        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE" --reuse "$REUSE"
 
   # 一堆「装一次依赖、跑一条命令」的小检查，全并进这一个 job（原来 biome、tsc、docs、hygiene 各占一台机器，
   # 各出 25 秒的 checkout + setup-node + pnpm install 固定开销，四台占掉四个并发槽）：一个 PR 的 CI 少占三个并发槽，
@@ -255,7 +285,8 @@ jobs:
   # 参数是子串过滤，交给它清单也不等于它正好跑这些；多跑、少跑都红，没跑成不许当通过。
   # PR 上的结果缓存（packages/conventions/src/ci-cache.ts）：同一个 PR 重推，这一台的输入（分到的文件、源码、依赖、
   # 根配置、环境……）没变、上一轮又全绿，就不再跑 vitest。缓存按 ref 分作用域，PR 的缓存只有这个 PR 自己读得到；
-  # 主线（push）这一轮是自动发布的闸门，一个测试都不许跳：下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
+  # 主线（push）这一轮是自动发布的闸门：它的测试要么真跑，要么复用一次同树的 PR 检查（见 changes 的 reuse 步；
+  # 同树同结果，由 PR 那次真跑背书），不靠这个缓存跳——下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
   # job 照常 success，跳的只是 vitest 那一步；缓存读不到、清单对不上、算不出，一律回来真跑。
   test:
     needs: changes
@@ -538,6 +569,7 @@ jobs:
       # 类型擦除）；镜像换了、自带版本低了就红，不靠运气。
       - env:
           CI_NEEDS: ${{ toJSON(needs) }}
+          CI_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           want=$(node -p "require('./package.json').engines.node.replace(/[^0-9.]/g,'')")

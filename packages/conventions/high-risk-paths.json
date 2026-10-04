@@ -187,6 +187,16 @@
       "why": "CI 汇总 job（必过检查 check）的入口"
     },
     {
+      "path": "packages/conventions/src/main-reuse.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身：主线那一轮认「和某次成功的 PR 检查同树」就不重测 test、web、deploy；判错就是放行没测过的主线提交，也是自动发布的依据"
+    },
+    {
+      "path": "packages/conventions/src/bin/main-reuse.ts",
+      "kind": "碰安全",
+      "why": "CI 的 changes job 在主线推送时查同树复用的入口：现算两棵树、查 PR 的检查，查不到一律不复用"
+    },
+    {
       "path": "packages/conventions/src/test-split.ts",
       "kind": "碰安全",
       "review": "after-merge",

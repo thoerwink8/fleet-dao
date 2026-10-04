@@ -3,7 +3,8 @@ name: debt
 # debt-docs：只看文件的那一半（活文档里推后的话带没带单号），主线推送和每天跑；
 #   查出来的在检查页上列出来，这一步失败也不把 PR 标红（continue-on-error），也别把它设成必过检查。
 # debt-live：看 GitHub 现状的那一半（挂的单号开没开着）。结果随单子开关、随时间变，
-#   只在主线上每天跑、每次合并后跑，查出来的留言到对应的单上（同一条只留一次）。
+#   只在每天的定时任务和手动运行里跑，查出来的留言到对应的单上（同一条只留一次）。
+#   推主线不再起它：合并一密一台机器（实测中位 7 秒），它看的是单子开没开，和这次推的代码没有关系，每天凌晨一次足够。
 # 退出码：没欠账或都留了言 = 0；有落不到单上的 = 1；没查成（读不到 GitHub、留言没留成）= 2。
 # 不在 PR 上跑：只报不挡的检查在 PR 页上永远是绿勾，只添一行噪音；主线推送、每天各一次足够（#654）。
 on:
@@ -31,6 +32,8 @@ jobs:
       - run: node packages/conventions/src/bin/debt-check.ts
         continue-on-error: true
   debt-live:
+    # 推主线不跑（看单子现状的那一半每天一次足够）；schedule、手动运行照旧。
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

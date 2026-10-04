@@ -7,6 +7,8 @@
     "skills/commander/scripts/france-query.mjs",
     "skills/discuss/scripts/second-opinion.mjs",
     "skills/discuss/scripts/tools.mjs",
-    "skills/discuss/scripts/walkthrough.mjs"
+    "skills/discuss/scripts/walkthrough.mjs",
+    "hooks/pretool.mjs",
+    "hooks/unattended.mjs"
   ]
 }
