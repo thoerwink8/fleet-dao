@@ -39,6 +39,7 @@ function rig(over: Partial<SegmentSpawnerDeps> = {}) {
       cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
       grokCommand: (user) => [`/opt/fake/${user}/grok`],
       ...fakeMirasimDeps(),
+      sessionProxy: undefined,
       run,
     }),
     trees: {
