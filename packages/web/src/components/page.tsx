@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
@@ -133,7 +134,10 @@ export function LoadingRows({ rows = 4 }: { rows?: number }) {
   );
 }
 
-/** 查询出错时的一行说明：不编造，写明没查成、哪一块没查成；给了 onRetry 就带一个「重试」按钮。 */
+/**
+ * 查询出错时的一行说明：不编造，写明没查成、哪一块没查成，并带一个「重试」按钮。
+ * 给了 onRetry 就点它；没给（多数页面）= 把眼下所有读失败的查询再读一遍（哪一块挂了就重读哪一块），不用每个页面各接一个 refetch。
+ */
 export function LoadError({
   error,
   what,
@@ -143,6 +147,8 @@ export function LoadError({
   what?: string | undefined;
   onRetry?: (() => void) | undefined;
 }) {
+  const qc = useQueryClient();
+  const retry = onRetry ?? (() => void qc.refetchQueries({ predicate: (q) => q.state.status === 'error' }));
   return (
     <div
       role="alert"
@@ -151,11 +157,9 @@ export function LoadError({
       <span>
         {what ? `${what}没读成` : '没查成'}：{error instanceof Error ? error.message : String(error)}
       </span>
-      {onRetry ? (
-        <Button type="button" size="xs" variant="outline" onClick={onRetry}>
-          重试
-        </Button>
-      ) : null}
+      <Button type="button" size="xs" variant="outline" onClick={retry}>
+        重试
+      </Button>
     </div>
   );
 }
