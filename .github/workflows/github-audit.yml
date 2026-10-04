@@ -4,6 +4,9 @@ name: github-audit
 # 查出来的挂得到单上的留言到那张单上（同一条只留一次），再把这一轮标红，修好才绿。
 # 只在定时和手动时跑：结果随单子开关、随时间变，不进 PR 的必过检查（#87），也不在 PR、主线推送上跑；随时想核就 pnpm github:audit。
 # 退出码：没有断裂 = 0；有断裂 = 1；没查成（读不到 GitHub、留言没留成）= 2。
+# branches：分支体检（#769，packages/conventions/src/branch-hygiene.ts）：判远端每条分支删、留还是等人定，删内容全在主线（或已合并
+# PR）里的、和巡检单上人勾了删的；有产出的列到巡检单上等人勾。只有它要删分支（contents: write），所以和上面分开一个 job；
+# 内容按本地 git 比，检出全部历史。退出码：0 都判了（有等人定的也是 0）；1 有删失败的；2 没查成。随时想看就 pnpm branch:hygiene（只判不删）。
 on:
   schedule:
     - cron: '41 1 * * *'
@@ -28,5 +31,24 @@ jobs:
         with:
           node-version: 22
       - run: node packages/conventions/src/bin/github-audit.ts --comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  branches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/branch-hygiene.ts --delete --board
         env:
           GITHUB_TOKEN: ${{ github.token }}

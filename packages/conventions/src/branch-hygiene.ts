@@ -2,7 +2,8 @@
 // 本机也能手跑 pnpm branch:hygiene。判远端每条分支「删 / 留 / 等人定」，写明理由：
 //   结构上不能碰的（默认分支、受保护、开着的 PR 的头或目标分支）→ 留；巡检单上人勾了删 / 留（勾的就是现在的头）→ 照勾的办；
 //   开着的单或 PR 提到 → 留；有已合并 PR、头就是合并时的 PR 头 → 删（决定 0009）；
-//   其余看有没有产出（branch-git.ts）：没产出、满 14 天没动静 → 删；还不到 14 天 → 留；有产出 → 列到巡检单上等人勾。
+//   其余看有没有产出（branch-git.ts）：没产出、满 14 天没动静 → 删（不满 → 留）；有产出、满 3 天没动静 → 列到巡检单上等人勾
+//   （不满 → 留：还在做）。
 // 改这里之前必须知道：
 // - 删数据是人闸：机器不经人只删「内容全在主线（或已合并 PR）里」的分支。有产出的，人在巡检单上勾了「删」、勾的那个头
 //   就是现在的头才删；判完到删之间头变了也不删（删之前再读一次）。
@@ -15,13 +16,19 @@ import type {
   BranchActivity,
   GitHubBranches,
   GitHubCommenter,
+  GitHubReader,
   OpenThread,
   PullHead,
   RemoteBranch,
 } from './github-api.ts';
 
-/** 满这么多天没动静（最后一次提交、最后一次推送取晚的）才算放下了。 */
+/** 没产出的分支满这么多天没动静（最后一次提交、最后一次推送取晚的）才删：删了不丢东西，等这么久只为不打断刚建了分支的人。 */
 export const STALE_DAYS = 14;
+/**
+ * 有产出的分支满这么多天没动静才列给人定：本仓的会话按小时算、至少 20 分钟推一次，几天没动的就是放下了；
+ * 再短会把还在做的列出来打扰人。
+ */
+export const ASK_DAYS = 3;
 const DAY_MS = 24 * 3_600_000;
 /** 分支体检自己写的东西都带这个记号：带它的正文、评论不算「提到」这条分支（那是机器列的清单，不是有人要用它）。 */
 export const MARK = 'fleet:branch-hygiene';
@@ -65,6 +72,29 @@ export interface BranchCase {
   decision: Decision | undefined;
   content?: ContentFacts | { error: string } | undefined;
   activity?: BranchActivity[] | { error: string } | undefined;
+  /** 分支名里那个号对应的单（只给人定的时候看，不改判决）；只在要列给人定时才读。 */
+  linked?: LinkedIssue | undefined;
+}
+
+/** 分支名里的号（fleet/292-…、feat/554-3-tier）在 GitHub 上是什么。 */
+export type LinkedIssue =
+  | { number: number; title: string; state: 'open' | 'closed'; stateReason: string | null; isPr: boolean }
+  | { number: number; missing: true }
+  | { number: number; error: string };
+
+/** 分支名里像单号的那个数（日期不算）；没有回 undefined。 */
+export function issueNumberIn(branch: string): number | undefined {
+  const m = /(?:^|[/-])(\d{2,5})(?=-|$)/.exec(branch.replace(/\d{4}-\d{2}-\d{2}(?:-\d{4})?/g, ''));
+  return m?.[1] ? Number(m[1]) : undefined;
+}
+
+function linkedStory(l: LinkedIssue | undefined): string {
+  if (!l) return '';
+  if ('error' in l) return `；名字里的 #${l.number} 没查成（${l.error}）`;
+  if ('missing' in l) return `；名字里的 #${l.number} 在 GitHub 上查不到`;
+  const what = l.isPr ? 'PR' : '单';
+  const state = l.state === 'open' ? '还开着' : l.stateReason === 'not_planned' ? '已关（不做了）' : '已关';
+  return `；名字里的 #${l.number} 是${what}「${l.title}」，${state}`;
 }
 
 export interface BranchReport {
@@ -143,7 +173,7 @@ function prStory(c: BranchCase): string {
   return parts.length ? parts.join('；') : '从没开过 PR';
 }
 
-/** 要看内容的那几条：没产出满 14 天删；还新留；有产出等人定；读不到没查成。 */
+/** 要看内容的那几条：没产出满 14 天删；有产出满 3 天等人定；还新的留；读不到没查成。 */
 export function contentVerdict(c: BranchCase, now: Date): Verdict {
   const { content, activity } = c;
   if (content === undefined || 'error' in content) {
@@ -179,10 +209,12 @@ export function contentVerdict(c: BranchCase, now: Date): Verdict {
           .map((f) => `\`${f}\``)
           .join('、')}${out.files.length > 3 ? ' 等' : ''}）`;
   const wip = /\bwip\b/i.test(content.headSubject) ? '；最后一次提交写着 WIP，可能是半成品' : '';
-  if (days < STALE_DAYS) return { kind: 'keep', why: `还在做（${produced}）：${when}${restale}` };
+  if (days < ASK_DAYS) {
+    return { kind: 'keep', why: `还在做（${produced}），不满 ${ASK_DAYS} 天：${when}${restale}` };
+  }
   return {
     kind: 'ask',
-    why: `${produced}；${prStory(c)}；${when}；最后一次提交「${content.headSubject}」${wip}${restale}`,
+    why: `${produced}；${prStory(c)}${linkedStory(c.linked)}；${when}；最后一次提交「${content.headSubject}」${wip}${restale}`,
   };
 }
 
@@ -372,11 +404,16 @@ export function renderBoard(input: BoardInput): string {
 }
 
 export interface HygieneDeps {
-  gh: GitHubBranches & GitHubCommenter;
+  gh: GitHubBranches & GitHubCommenter & Pick<GitHubReader, 'issue'>;
   git: GitExec;
   /** owner/名字。 */
   repo: string;
   now: Date;
+  /** 内容那几样怎么读（默认 branch-git.ts 的，用上面的 git；测试换成假的）。 */
+  facts?: {
+    index(mainSha: string): MainIndex;
+    content(index: MainIndex, headSha: string): ContentFacts;
+  };
 }
 
 export interface HygieneOptions {
@@ -405,6 +442,10 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Promise<HygieneResult> {
   const { gh, git, now } = deps;
+  const facts = deps.facts ?? {
+    index: (sha: string) => mainIndex(git, sha),
+    content: (idx: MainIndex, sha: string) => contentFacts(git, idx, sha),
+  };
   const result: HygieneResult = {
     reports: [],
     deleted: [],
@@ -456,7 +497,7 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
   const mainIdx = () => {
     if (index === undefined) {
       try {
-        index = mainIndex(git, main.sha);
+        index = facts.index(main.sha);
       } catch (e) {
         index = { error: `主线没读成（${errText(e)}）` };
       }
@@ -484,7 +525,7 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
       const idx = mainIdx();
       try {
         if ('error' in idx) throw new Error(idx.error);
-        c.content = contentFacts(git, idx, b.sha);
+        c.content = facts.content(idx, b.sha);
       } catch (e) {
         c.content = { error: errText(e) };
       }
@@ -494,10 +535,31 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
         c.activity = { error: errText(e) };
       }
       verdict = contentVerdict(c, now);
+      const n = issueNumberIn(b.name);
+      if (verdict.kind === 'ask' && n !== undefined) {
+        // 只给人定的时候看：读不到就在理由里照实写「没查成」，不改判决
+        try {
+          const i = await gh.issue(n);
+          c.linked =
+            i === undefined
+              ? { number: n, missing: true }
+              : { number: n, title: i.title, state: i.state, stateReason: i.stateReason, isPr: i.isPr };
+        } catch (e) {
+          c.linked = { number: n, error: errText(e) };
+        }
+        verdict = contentVerdict(c, now);
+      }
     }
     const decision = c.decision?.sha === b.sha ? c.decision : undefined;
     result.reports.push({ name: b.name, sha: b.sha, verdict, who: whoOpened(c, owner), decision });
-    if (verdict.kind === 'unknown') result.notQueried.push(`${b.name}：${verdict.why}`);
+    // 主线没读成的那一条下面统一报一次，不在每条分支上重复
+    if (verdict.kind === 'unknown' && !(index && 'error' in index && c.content && 'error' in c.content)) {
+      result.notQueried.push(`${b.name}：${verdict.why}`);
+    }
+  }
+  if (index && 'error' in index) {
+    const n = result.reports.filter((r) => r.verdict.kind === 'unknown').length;
+    result.notQueried.push(`${index.error}：要看内容的 ${n} 条分支都没判、都没删`);
   }
 
   if (opts.delete) {
