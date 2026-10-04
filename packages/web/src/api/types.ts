@@ -17,6 +17,7 @@ import type {
   DemoLinkSchema,
   DemoLinksResponse,
   DemoScopeSchema,
+  EffortModelSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
@@ -34,7 +35,9 @@ import type {
   QuotaWindowViewSchema,
   ReleaseVersionResponse,
   RepoSchema,
+  RouteEffortSchema,
   RouteSchema,
+  RoutingEffortsResponse,
   RoutingLayerModelSchema,
   RoutingLayerPurposeSchema,
   RoutingLayerRouteSchema,
@@ -51,6 +54,8 @@ import type {
   TimelineResponse,
   UpdateChannelRequest,
   UpdateDemoDefaultRequest,
+  UpdateRouteEffortRequest,
+  UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateStagePolicyRequest,
 } from '@fleet-dao/shared';
@@ -62,6 +67,7 @@ export type {
   QuotaWindowKind,
   ReadingKind,
   RunOutcome,
+  SessionEffort,
   SettingKey,
   StageKind,
   StepState,
@@ -104,6 +110,13 @@ export type RoutingLayerModel = z.infer<typeof RoutingLayerModelSchema>;
 export type RoutingLayerRoute = z.infer<typeof RoutingLayerRouteSchema>;
 export type LivenessVerdict = z.infer<typeof LivenessVerdictSchema>;
 export type LivenessFact = z.infer<typeof LivenessFactSchema>;
+
+/** 每个模型下每条路由起会话的思考档位（#470）。 */
+export type RoutingEfforts = z.infer<typeof RoutingEffortsResponse>;
+export type EffortModel = z.infer<typeof EffortModelSchema>;
+export type RouteEffort = z.infer<typeof RouteEffortSchema>;
+export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
+export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
 
 export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;

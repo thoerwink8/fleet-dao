@@ -13,6 +13,15 @@ const BASE_INPUT = {
   cwd: '/tmp/fake-worktree',
 };
 
+/** 动手段记到谁名下的那几样（#216）。 */
+const OWNER = {
+  taskId: '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69',
+  tier: 'medium' as const,
+  workflowId: 'task:acme/demo#216',
+  prNumber: 7,
+  branch: 'fleet/216-t0a1b2c3d',
+};
+
 describe('one-shot.ts', () => {
   it('happy path：起 → 拿 stdout → 记一笔 runs，落盘 stdout/stderr/result.json', async () => {
     const { deps, calls, recorded, tmpDir, cleanup } = await fakeDeps({
@@ -188,6 +197,72 @@ describe('one-shot.ts', () => {
       await cleanup();
     }
   });
+
+  it('记到谁名下（#216）：单子、派工档、工作流编号、PR、分支开跑那一行和收场那一笔一模一样（收场整行覆盖，不能冲掉开跑写的）', async () => {
+    const { deps, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    try {
+      const r = await runOneShot({ ...BASE_INPUT, issueNumber: 216, ...OWNER }, deps);
+      expect(r.outcome).toBe('done');
+      const owner = { runId: r.runId, segment: 'manual', issueNumber: 216, ...OWNER };
+      expect(started).toEqual([{ ...owner, model: 'fake-model', startedAt: r.startedAt }]);
+      expect(recorded).toHaveLength(1);
+      const { endedAt, outcome, ...opening } = recorded[0] as NonNullable<(typeof recorded)[0]>;
+      expect(opening).toEqual(started[0]);
+      expect([endedAt, outcome]).toEqual([r.endedAt, 'done']);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('没给的（还没开 PR、不在工作流里跑）不写这几列：不拿 0、空串顶', async () => {
+    const { deps, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    try {
+      await runOneShot(BASE_INPUT, deps);
+      for (const row of [started[0], recorded[0]]) {
+        for (const key of ['taskId', 'tier', 'workflowId', 'prNumber', 'branch']) {
+          expect(row).not.toHaveProperty(key);
+        }
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each([
+    ['派工档不在 tier.ts 那三档里', { tier: 'turbo' }, 'tier'],
+    ['验收段带了派工档（只有动手分档）', { segment: 'verify', tier: 'fast' }, 'tier'],
+    ['对题段带了派工档', { segment: 'scope', tier: 'heavyweight' }, 'tier'],
+    ['单子编号不是库里 tasks.id 的样子', { taskId: 'task-1' }, 'taskId'],
+    ['PR 号是 0', { prNumber: 0 }, 'prNumber'],
+    ['分支是空串', { branch: '' }, 'branch'],
+  ])(
+    '【故意造出的失败】%s：写进 runs 之前就报 BAD_RUN_INPUT，不起会话、不留一行、不落盘',
+    async (_what, bad, field) => {
+      const { deps, calls, recorded, started, tmpDir, cleanup } = await fakeDeps({
+        scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+      });
+      try {
+        const input = { ...BASE_INPUT, ...OWNER, runId: 'run-bad', ...bad } as Parameters<
+          typeof runOneShot
+        >[0];
+        const err = await runOneShot(input, deps).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(OneShotError);
+        expect(err).toMatchObject({ code: 'BAD_RUN_INPUT' });
+        expect((err as Error).message).toContain('记账的字段对不上 runs 的约束');
+        expect((err as Error).message).toContain(field);
+        expect(calls).toHaveLength(0);
+        expect(started).toHaveLength(0);
+        expect(recorded).toHaveLength(0);
+        await expect(stat(join(tmpDir, 'run-bad'))).rejects.toThrow();
+      } finally {
+        await cleanup();
+      }
+    },
+  );
 
   it('不许续会话：拿 resumeSessionId 来当场抛', async () => {
     const { deps, cleanup } = await fakeDeps({

@@ -75,16 +75,16 @@ export function modelBracketEffort(model: string): string | undefined {
 }
 
 /**
- * 一条路由能配哪几档。model 是起会话时发给执行体的模型串（路由的 upstream_model，没有就是模型 id）；who 是给人看的执行方式名，
- * 拼进原因里。choices：能配的，从低到高；fixed：配不了，why 说为什么（模型串方括号里已经写了档位的，embedded 是写的那一档）。
+ * 一条路由能配哪几档。model 是起会话时发给执行体的模型串（路由的 upstream_model，没有就是模型 id）。choices：能配的，从低到高；
+ * fixed：配不了，why 说为什么（不带执行方式的名字，驾驶舱自己写在旁边；方括号里已经写了档位的，embedded 是写的那一档）。
  */
 export type RouteEffortChoices =
   | { kind: 'choices'; values: readonly SessionEffort[] }
   | { kind: 'fixed'; why: string; embedded?: string };
 
-export function routeEffortChoices(hostId: HostId, model: string, who: string = hostId): RouteEffortChoices {
+export function routeEffortChoices(hostId: HostId, model: string): RouteEffortChoices {
   const support = HOST_EFFORT_SUPPORT[hostId];
-  if (support.kind === 'none') return { kind: 'fixed', why: `${who}${support.why}` };
+  if (support.kind === 'none') return { kind: 'fixed', why: support.why };
   let embedded: string | undefined;
   try {
     embedded = modelBracketEffort(model);
@@ -99,7 +99,7 @@ export function routeEffortChoices(hostId: HostId, model: string, who: string = 
       ? { kind: 'choices', values: SESSION_EFFORTS }
       : {
           kind: 'fixed',
-          why: `${who} 没有单独的档位参数，模型串 ${model} 不带方括号（是上游目录里的整串，档位已经在名字里）`,
+          why: `没有单独的档位参数，模型串 ${model} 不带方括号（是上游目录里的整串，档位已经在名字里）`,
         };
   }
   return { kind: 'choices', values: support.allowed };
@@ -118,7 +118,7 @@ export function routeEffortProblem(
   if (!isSessionEffort(effort)) {
     return `思考档位（effort）不认识：${JSON.stringify(effort)}（只有 ${SESSION_EFFORTS.join(' / ')}）`;
   }
-  const choices = routeEffortChoices(hostId, model, who);
+  const choices = routeEffortChoices(hostId, model);
   if (choices.kind === 'fixed') {
     if (choices.embedded !== undefined) {
       return choices.embedded === effort

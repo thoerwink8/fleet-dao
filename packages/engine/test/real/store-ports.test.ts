@@ -2,6 +2,7 @@
 // 没接上的执行方式各有去处；库里对不上的明确报错，不当成「没有路由」「记上了」。
 import { randomUUID } from 'node:crypto';
 import {
+  finishRun,
   finishSessionRun,
   getSessionRun,
   markSessionRunStarted,
@@ -10,6 +11,7 @@ import {
   savePoolQuota,
   saveRouteProbe,
   sessionRuns,
+  startRun,
   stepTimings,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -177,6 +179,50 @@ describe('选路', () => {
     expect(!r.ok && r.detail).toContain('续同一个会话');
     // 不续会话就照常换到还有空位的拼车号。
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+
+  it('三段的一次性会话（runs 里开着的行，#157）也占池的空位：两行三段 + 一行 Fusion 的会话占满上限 3，派下一个池；都满了等空位；收了一行又派得动', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    /** 一行 Fusion 的会话 + 两行三段的一次性会话占满这条路由的池，交回动手那一行的编号。 */
+    const fill = async (routeId: string) => {
+      await startedRun(task.id, routeId, 'execute');
+      const manual = randomUUID();
+      const at = new Date(NOW.getTime() - 5 * MIN);
+      await startRun(t.db, { id: manual, segment: 'manual', model: 'opus-5.5', routeId, startedAt: at });
+      await startRun(t.db, { segment: 'verify', model: 'opus-5.5', routeId, startedAt: at });
+      return manual;
+    };
+    const soloManual = await fill('solo');
+    const second = await pick({ stage: 'execute' });
+    expect(second).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(second.ok && second.why).toContain('并发满了（3/3）');
+
+    await fill('carpool');
+    const full = await pick({ stage: 'execute' });
+    expect(full).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!full.ok && full.detail).toContain('在等并发空位');
+
+    await finishRun(t.db, { runId: soloManual, outcome: 'done' }, NOW);
+    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('【故意造出的失败】runs 读不了（把表挪开，查它就报错，和库断在这一步一样）：选路抛错，不当成池空着派出去', async () => {
+    await world(t.db);
+    await t.client.exec('alter table runs rename to runs_unreadable');
+    try {
+      const err = await pick({ stage: 'execute' }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err, '读不了 runs 却回了选路结果').not.toBeNull();
+      // drizzle 外面包了一层「Failed query」，读 runs 报的那句在 cause 里
+      const messages: string[] = [];
+      for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+      expect(messages.join('\n')).toContain('relation "runs" does not exist');
+    } finally {
+      await t.client.exec('alter table runs_unreadable rename to runs');
+    }
   });
 
   it('点名的路由用不了（被避开）：照常选，并写明点名的为什么没用上', async () => {

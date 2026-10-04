@@ -48,6 +48,9 @@ export function createDemoApi(inner: MockApi): FleetApi {
     routing: () => inner.routing(),
     // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
     routingLayers: () => Promise.reject(hidden('路由')),
+    // 思考档位页也只在正式驾驶舱里有：演示版看不到、更改不了。
+    routingEfforts: () => Promise.reject(hidden('思考档位')),
+    updateRouteEffort: () => Promise.reject(hidden('思考档位')),
     updateStagePolicy: (stage, body) => inner.updateStagePolicy(stage, body),
     updateChannel: (channelId, body) => inner.updateChannel(channelId, body),
     pools: () => inner.pools(),

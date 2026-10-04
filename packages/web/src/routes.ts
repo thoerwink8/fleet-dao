@@ -12,6 +12,8 @@ const cockpitOnly = demo
       route('changelog', 'routes/changelog.tsx'),
       // 路由两层每一层现在活着吗（#574）：演示版没有这个模块。
       route('routing', 'routes/routing.tsx'),
+      // 每条路由起会话的思考档位（#470）：演示版没有这个模块，也改不了。
+      route('efforts', 'routes/efforts.tsx'),
       // 第二批页面（P3 之后）：先放占位页。
       route('models', 'routes/soon.tsx', { id: 'soon-models' }),
       route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),

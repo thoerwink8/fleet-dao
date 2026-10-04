@@ -26,7 +26,7 @@ import { createStorePorts } from '../../src/real/store-ports.ts';
 import { createRunSegment } from '../../src/real/task-segment.ts';
 import type { RunSegmentInput, RunSegmentResult, SegmentEvidence } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
-import { fakeTrees, git, MIN, mirror, NOW, orgListRig, world } from './fixtures.ts';
+import { addTask, fakeTrees, git, MIN, mirror, NOW, orgListRig, world } from './fixtures.ts';
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
@@ -220,16 +220,21 @@ function harness(opts: { drainTimeoutMs?: number; switchFails?: () => string | u
     task(name: string) {
       const branch = `fleet/12-${name}${randomUUID().slice(0, 6)}`;
       const worktreePath = ft.trees.treeFor(REPO, branch);
-      const taskId = randomUUID();
+      // runs 开跑那一行就写 task_id（#216），外键到 tasks：这张单在库里得真有一行
+      let taskId: Promise<string> | undefined;
+      const ensureTask = () => {
+        taskId ??= addTask(t.db).then(({ task }) => task.id);
+        return taskId;
+      };
       return {
         branch,
         worktreePath,
         plan: (...acts: Act[]) => plans.set(worktreePath, [...(plans.get(worktreePath) ?? []), ...acts]),
-        run: (route: RouteChoice, interrupted?: string) =>
+        run: async (route: RouteChoice, interrupted?: string) =>
           runSegment(
             {
               schemaVersion: 1,
-              taskId,
+              taskId: await ensureTask(),
               repo: REPO,
               issueNumber: 12,
               route,

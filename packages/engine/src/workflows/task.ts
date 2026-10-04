@@ -463,6 +463,8 @@ class TaskFlow {
             feedback: this.feedback,
             timeoutMinutes: SEGMENT_MINUTES,
             ...(interrupted ? { interrupted } : {}),
+            // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
+            ...(this.prNumber !== null ? { prNumber: this.prNumber } : {}),
           }),
         );
         if (res.ok) return;

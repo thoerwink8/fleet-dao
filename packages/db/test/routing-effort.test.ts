@@ -1,7 +1,8 @@
-// 改一条路由的思考档位（#470，setRoutingEffort）：驾驶舱「改档位」写库的那一步。改了照存、清掉回到没配；
-// 这家不认的、认不出的、方括号里写死了的、路由两层里没挂的、别人刚改过的，都明确拒、一行不写。
+// 路由两层里每条路由的思考档位（#470）：驾驶舱「思考档位」页读的那一份（routingEffortRows）、改档位写库的那一步
+// （setRoutingEffort）。改了照存、清掉回到没配；这家不认的、认不出的、方括号里写死了的、路由两层里没挂的、别人刚改过的，
+// 都明确拒、一行不写。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { setRoutingEffort } from '../src/routing-effort.ts';
+import { routingEffortRows, setRoutingEffort } from '../src/routing-effort.ts';
 import { routingCatalog } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog } from './helpers.ts';
@@ -55,6 +56,33 @@ beforeEach(async () => {
 
 const efforts = async () =>
   Object.fromEntries((await t.db.select().from(routingCatalog)).map((r) => [r.routeId, r.effort]));
+
+describe('读档位（驾驶舱「思考档位」页）', () => {
+  it('挂进路由两层的每条路由一行：按模型、再按模型下的先后，带执行方式、上游模型串、渠道名和配的档位', async () => {
+    await setRoutingEffort(t.db, { modelId: 'opus-4.9', routeId: 'grok', effort: 'medium' });
+    const rows = await routingEffortRows(t.db);
+    expect(rows.map((r) => [r.routeId, r.position, r.hostId, r.upstreamModel, r.effort])).toEqual([
+      ['claude', 0, 'claude-code', 'claude-opus-4-9', null],
+      ['grok', 1, 'grok', 'grok-4.7', 'medium'],
+      ['cursor-whole', 2, 'cursor-agent', 'gpt-5.6-luna-high', null],
+      ['cursor-bracket', 3, 'cursor-agent', 'composer-2.5[fast=true]', null],
+    ]);
+    expect(rows[0]).toMatchObject({
+      modelId: 'opus-4.9',
+      modelName: 'Opus 4.9',
+      family: 'claude',
+      channelId: 'relay',
+      channelName: '中转',
+      poolId: 'relay-a',
+      enabled: true,
+    });
+  });
+
+  it('没挂进路由两层的路由不列（它不会被派，配了也用不上）', async () => {
+    await addRoute(t.db, { id: 'loose', poolId: 'relay-a', modelId: 'claude-fable-5.2', hostId: 'mirasim' });
+    expect((await routingEffortRows(t.db)).map((r) => r.routeId)).not.toContain('loose');
+  });
+});
 
 describe('改档位', () => {
   it('改了照存，回改之前和改之后；清掉（null）回到没配', async () => {

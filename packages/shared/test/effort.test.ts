@@ -40,9 +40,9 @@ describe('一条路由能配哪几档', () => {
       kind: 'choices',
       values: SESSION_EFFORTS,
     });
-    expect(routeEffortChoices('cursor-agent', 'gpt-5.6-luna-high', 'Cursor Agent')).toEqual({
+    expect(routeEffortChoices('cursor-agent', 'gpt-5.6-luna-high')).toEqual({
       kind: 'fixed',
-      why: 'Cursor Agent 没有单独的档位参数，模型串 gpt-5.6-luna-high 不带方括号（是上游目录里的整串，档位已经在名字里）',
+      why: '没有单独的档位参数，模型串 gpt-5.6-luna-high 不带方括号（是上游目录里的整串，档位已经在名字里）',
     });
   });
 
@@ -58,10 +58,13 @@ describe('一条路由能配哪几档', () => {
   });
 
   it('不收档位的执行方式（没接上的 Codex、判断题的接口外壳）配不了', () => {
-    expect(routeEffortChoices('codex', 'gpt-5.6-luna', 'Codex')).toEqual({
+    expect(routeEffortChoices('codex', 'gpt-5.6-luna')).toEqual({
       kind: 'fixed',
-      why: 'Codex引擎还没接上，起不了会话',
+      why: '引擎还没接上，起不了会话',
     });
+    expect(routeEffortProblem('codex', 'gpt-5.6-luna', 'high', 'Codex')).toBe(
+      'Codex 不支持单独传思考档位（effort）"high"：引擎还没接上，起不了会话',
+    );
     expect(routeEffortChoices('api-shell', 'jev-1.13.0')).toMatchObject({ kind: 'fixed' });
   });
 
