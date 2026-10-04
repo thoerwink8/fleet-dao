@@ -16,7 +16,6 @@ import {
 } from './bundle.ts';
 import { type ClaimsGitHub, createClaimsGitHub } from './claims.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
-import { type CloseFacts, type ReadCloseFactsInput, readCloseFacts } from './close-facts.ts';
 import { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 import {
   type ReadRepoFileInput,
@@ -195,11 +194,6 @@ export interface GitHub {
    * 现读）：接活判当前版本和母单子单、fleet-api handover 判能不能交都用它。读不到、认不出抛错，不拿「没挂」「开着」「独立单」顶。
    */
   readIssuePlan(input: ReadIssuePlanInput, ctx?: ActivityContext): Promise<IssuePlan>;
-  /**
-   * 关单对账（#241）要的仓现状（「引擎」机器人现读）：主线上 specs/ 下的文件、开着的单连同子单、最近关掉的单、开着的 PR。
-   * 读不到、认不出、没翻完抛错，不拿「一张都没有」顶。
-   */
-  readCloseFacts(input: ReadCloseFactsInput): Promise<CloseFacts>;
   /** 仓里此刻还开着的里程碑（「引擎」机器人现读）：巡检开单前找巡检仓的当前版本。读不到、没翻完抛错。 */
   readOpenMilestones(input: {
     repo: RepoRef;
@@ -211,9 +205,18 @@ export interface GitHub {
     issueNumber: number;
     signal?: AbortSignal | undefined;
   }): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
+  /**
+   * 一张单的标题、正文（原样，带引擎写的进度段）、开没开着（「引擎」机器人现读）：拼动手的交代用。是 PR 抛 NOT_AN_ISSUE，
+   * 读不到、认不出抛错；正文是空的回空串（空正文是单子的事实，由交代那一侧报「没有可做的需求」）。
+   */
+  readIssue(input: {
+    repo: RepoRef;
+    issueNumber: number;
+    signal?: AbortSignal | undefined;
+  }): Promise<{ number: number; title: string; body: string; state: 'open' | 'closed' }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
-  /** 「认领对得上」这一侧（#348，「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言。 */
+  /** 引擎的通用 GitHub 读写口（「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言（名字沿用 #348 的「claims」）。 */
   claims: ClaimsGitHub;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
   selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;
@@ -324,7 +327,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
     async readOpenMilestones(input) {
       return readOpenMilestones(client, input);
     },
-    readCloseFacts: (input) => readCloseFacts(client, input),
     readGroomFacts: (input) => readGroomFacts(deps, input),
     readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
     async addIssueLabel(input, ctx = {}) {
@@ -332,6 +334,16 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async setIssueMilestone(input, ctx = {}) {
       return setIssueMilestone(deps, input, ctx);
+    },
+    async readIssue(input) {
+      const issue = await readIssue(deps, input.repo, input.issueNumber, input.signal);
+      if (issue.pull_request !== undefined && issue.pull_request !== null) {
+        throw new GitHubError(
+          'NOT_AN_ISSUE',
+          `${repoSlug(input.repo)} #${input.issueNumber} 是 PR，不是 issue`,
+        );
+      }
+      return { number: issue.number, title: issue.title, body: issue.body ?? '', state: issue.state };
     },
     async readIssueState(input) {
       const issue = await readIssue(deps, input.repo, input.issueNumber, input.signal);

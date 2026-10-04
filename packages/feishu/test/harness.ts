@@ -244,6 +244,7 @@ export function taskDetail(o: { state?: TaskDetail['task']['state'] } = {}): Tas
       { id: 's3', index: 3, title: '过期与重发', state: 'waiting_deps', dependsOn: ['s2'], touches: [] },
     ],
     runs: [],
+    segmentRuns: [],
     asks: [],
     usage: summarizeUsage([]),
   });

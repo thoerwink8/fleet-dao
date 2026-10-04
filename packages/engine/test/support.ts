@@ -1,16 +1,13 @@
 // 测试共用（不依赖 vitest，录重放夹具的脚本也用）：可跳时间的 Temporal 测试服务端 + 真的工作流包 + 假端口。
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { bundleWorkflowCode, DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
-import type { EngineJobs } from '../src/activities.ts';
+import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
+import type { EngineJobs, EngineTasks } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
-import type { FusionInput, RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
-import type { SubtaskSpec } from '../src/decisions/types.ts';
 import type { FakeWorld } from '../src/fakes.ts';
 import { bundleEngineWorkflows, createEngineWorker } from '../src/worker.ts';
 
@@ -22,19 +19,6 @@ let bundle: Promise<WorkflowBundle> | undefined;
 export function engineBundle(): Promise<WorkflowBundle> {
   bundle ??= bundleEngineWorkflows(silent as never);
   return bundle;
-}
-
-let verifyBundle: Promise<WorkflowBundle> | undefined;
-/**
- * 开 PR 前验证那一块（src/workflows/verify.ts）的测试宿主工作流（test/fixtures/verify/host.ts）打的包：#214 的工作流
- * 接上之前，靠它在真 Temporal 里跑这一块。
- */
-export function verifyHostBundle(): Promise<WorkflowBundle> {
-  verifyBundle ??= bundleWorkflowCode({
-    workflowsPath: fileURLToPath(new URL('./fixtures/verify/host.ts', import.meta.url)),
-    logger: silent as never,
-  });
-  return verifyBundle;
 }
 
 export function createEnv(): Promise<TestWorkflowEnvironment> {
@@ -74,6 +58,8 @@ export interface WorkerOptions {
   maxCachedWorkflows?: number;
   /** 定时任务要的东西（对账补漏）；不给就是假端口那样，定时任务的活动报 JOB_NOT_CONFIGURED。 */
   jobs?: EngineJobs;
+  /** 任务工作流要的活动；不给就是假端口那样，报 TASK_NOT_CONFIGURED。 */
+  tasks?: EngineTasks;
   /** 换一份工作流包（测试宿主工作流）；不给就是引擎自己的。 */
   workflowBundle?: WorkflowBundle;
 }
@@ -93,12 +79,8 @@ export async function withWorker<T>(
       taskQueue,
       shutdownGraceSeconds: 1,
       maxConcurrentActivities: 40,
-      agentApiUrl: 'http://127.0.0.1:8788',
-      cliBinDir: '/repo/packages/cli/bin',
     },
     ports: world.ports,
-    signAgentToken: (claims) =>
-      `token:${claims.taskId}:${claims.subtaskId ?? '-'}:${claims.runId}:${claims.ttlSeconds}`,
     connection: env.nativeConnection,
     workflowBundle: options.workflowBundle ?? (await engineBundle()),
     ...(options.triage ? { triage: options.triage } : {}),
@@ -106,6 +88,7 @@ export async function withWorker<T>(
     ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
     ...(options.jobs ? { jobs: options.jobs } : {}),
+    ...(options.tasks ? { tasks: options.tasks } : {}),
   });
   return worker.runUntil(fn(taskQueue));
 }
@@ -126,55 +109,6 @@ export function freshRepo(): Repo {
   return { ...REPO, id: `repo-${randomUUID().slice(0, 8)}`, name: `demo-${randomUUID().slice(0, 8)}` };
 }
 
-export function requirementInput(over: Partial<RequirementInput> = {}): RequirementInput {
-  return {
-    schemaVersion: 1,
-    taskId: `task-${randomUUID().slice(0, 8)}`,
-    repo: freshRepo(),
-    issueNumber: 12,
-    title: '登录页加验证码',
-    rawRequest: '给登录页加手机验证码',
-    requestedBy: 'founder',
-    ...over,
-  };
-}
-
-/** Fusion 工作流的输入：单子正文里有指需求文档的那一行（pnpm issue:new 开的单都有），不按标题拼。 */
-export function fusionInput(over: Partial<FusionInput> = {}): FusionInput {
-  return {
-    ...requirementInput(),
-    rawRequest: '给登录页加手机验证码\n\n文档：`specs/12-登录页加验证码/需求.md`',
-    ...over,
-  };
-}
-
-export function spec(key: string, over: Partial<SubtaskSpec> = {}): SubtaskSpec {
-  return {
-    key,
-    index: 0,
-    title: `子任务 ${key}`,
-    touches: [`src/${key}`],
-    dependsOn: [],
-    stage: 'execute',
-    secondOpinion: true,
-    acceptance: [],
-    ...over,
-  };
-}
-
-export function subtaskInput(sub: SubtaskSpec, over: Partial<SubtaskInput> = {}): SubtaskInput {
-  return {
-    schemaVersion: 1,
-    taskId: `task-${randomUUID().slice(0, 8)}`,
-    subtaskId: randomUUID(),
-    repo: freshRepo(),
-    issueNumber: 12,
-    specDir: 'specs/12-登录页加验证码',
-    subtask: sub,
-    ...over,
-  };
-}
-
 /** 真实时间里轮询，直到条件成立（测试服务端在有活动跑着时不跳时间）。 */
 export async function waitUntil(
   check: () => boolean | Promise<boolean>,
@@ -189,27 +123,55 @@ export async function waitUntil(
   }
 }
 
-/** 轮询查询，直到状态满足条件；返回那一刻的状态。 */
-export async function queryUntil<S>(
-  handle: WorkflowHandle,
+/**
+ * 轮询一个读状态的动作，直到状态满足条件；返回那一刻的状态。
+ * 工作流刚起、worker 还没处理完第一个工作流任务时查询会当场失败：这算「还没好」接着等，不当成测试失败；
+ * 等到期还没读成，报错里带上最后一次读失败的原因（不是只剩一句「Failed to query Workflow」）。
+ */
+export async function pollQuery<S>(
+  read: () => Promise<S>,
   check: (status: S) => boolean,
   what: string,
   timeoutMs = 20_000,
 ): Promise<S> {
   let last: S | undefined;
+  let lastError: unknown;
   try {
     await waitUntil(
       async () => {
-        last = (await handle.query('status')) as S;
+        try {
+          last = await read();
+        } catch (error) {
+          lastError = error;
+          return false;
+        }
         return check(last);
       },
       what,
       timeoutMs,
     );
   } catch (error) {
-    throw new Error(`${(error as Error).message}\n最后一次状态：${JSON.stringify(last)}`);
+    throw new Error(`${(error as Error).message}
+最后一次状态：${JSON.stringify(last)}${describeReadFailure(lastError)}`);
   }
   return last as S;
+}
+
+function describeReadFailure(error: unknown): string {
+  if (error === undefined) return '';
+  const cause = error instanceof Error && error.cause instanceof Error ? `（${error.cause.message}）` : '';
+  return `
+最后一次读失败：${error instanceof Error ? error.message : String(error)}${cause}`;
+}
+
+/** 轮询查询，直到状态满足条件；返回那一刻的状态。 */
+export function queryUntil<S>(
+  handle: WorkflowHandle,
+  check: (status: S) => boolean,
+  what: string,
+  timeoutMs = 20_000,
+): Promise<S> {
+  return pollQuery(() => handle.query('status') as Promise<S>, check, what, timeoutMs);
 }
 
 /** 把历史里的载荷（字节）都解成文字拼起来，方便逐字查「有没有某样东西进了历史」。 */

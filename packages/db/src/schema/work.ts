@@ -42,8 +42,8 @@ export const repos = pgTable(
     name: text('name').notNull(),
     defaultBranch: text('default_branch').notNull().default('main'),
     /**
-     * 给人看的测试命令：对账从仓里 .fleet/flow.json 读成、配置里写了测试命令时跟着改成它（建仓时先填个占位）。
-     * 派活不读这一列——起会话、交活核对认的是副本 flow_config 里的 testCommand（项目没写就是没有，这一列的旧值不顶）。
+     * 给人看的测试命令（建仓时先填个占位）。流程配置副本和从仓里的流程配置文件同步它的对账
+     * 在 #556 一起删了，这一列现在只是展示，没有谁会自动改它。
      */
     testCommand: text('test_command').notNull(),
     /**
@@ -51,44 +51,8 @@ export const repos = pgTable(
      * 打开以前就开着的 issue 也不自动派，要人点「交给 fleet」。
      */
     autoDispatchSince: timestamp('auto_dispatch_since', tz),
-    // —— 流程配置的副本（docs/decisions/0003-fusion-flow.md 第 9 条：以仓里的 .fleet/flow.json 为准，这里只是副本）。
-    // 只由引擎的对账写（packages/engine/src/jobs/flow-config.ts），怎么判在 packages/core/src/replica.ts。
-    /** 合并了全组织默认、校验过的整份配置（core 的 FlowConfig）。从没读成过是空。 */
-    flowConfig: jsonb('flow_config').$type<Record<string, unknown>>(),
-    /** project = 仓里有自己的 .fleet/flow.json；org_default = 没有，用的全组织默认（驾驶舱要标出来）。 */
-    flowSource: text('flow_source').$type<'project' | 'org_default'>(),
-    /** 副本读自默认分支的哪个提交。 */
-    flowCommit: text('flow_commit'),
-    /** 最近一次读成、认得出的时刻：派活看它新不新鲜（太旧就停派）。 */
-    flowSyncedAt: timestamp('flow_synced_at', tz),
-    /** 仓里的配置认不出（或全组织默认坏了）的原因：非空就这个项目停派。读成、认得出时清空。 */
-    flowError: text('flow_error'),
-    /** 最近一次去读的时刻（读没读成都记）。 */
-    flowCheckedAt: timestamp('flow_checked_at', tz),
-    /** 最近一次没查成（GitHub 接口出错）的原因：副本不动、不当成「没有这个文件」。下一次读成时清空。 */
-    flowUnread: text('flow_unread'),
   },
-  (t) => [
-    unique('repos_owner_name_unique').on(t.owner, t.name),
-    check(
-      'repos_flow_source_known',
-      sql`${t.flowSource} is null or ${t.flowSource} in ('project', 'org_default')`,
-    ),
-    // 读成过就四样都有，没读成过就都没有：不许出现「有配置、不知道读自哪个提交、什么时候读的」
-    check(
-      'repos_flow_synced_together',
-      sql`(${t.flowSyncedAt} is null) = (${t.flowConfig} is null) and (${t.flowSyncedAt} is null) = (${t.flowSource} is null) and (${t.flowSyncedAt} is null) = (${t.flowCommit} is null)`,
-    ),
-    check(
-      'repos_flow_reasons_not_blank',
-      sql`(${t.flowError} is null or ${t.flowError} <> '') and (${t.flowUnread} is null or ${t.flowUnread} <> '')`,
-    ),
-    // 起会话按副本里的 testCommand 交代、交活按它核对：要么没有，要么是不空的字符串，读的地方不用再猜
-    check(
-      'repos_flow_config_shape',
-      sql`${t.flowConfig} is null or (jsonb_typeof(${t.flowConfig}) = 'object' and (jsonb_typeof(${t.flowConfig} -> 'testCommand') is null or (jsonb_typeof(${t.flowConfig} -> 'testCommand') = 'string' and ${t.flowConfig} ->> 'testCommand' <> '')))`,
-    ),
-  ],
+  (t) => [unique('repos_owner_name_unique').on(t.owner, t.name)],
 );
 
 /** 需求：一张 GitHub issue 一行。 */
@@ -121,21 +85,10 @@ export const tasks = pgTable(
     lastProblem: text('last_problem'),
     /** 由 saveTaskSnapshot 显式写；从没做过快照的任务是空，不是「没变化」。 */
     updatedAt: timestamp('updated_at', tz),
-    /**
-     * 这一轮用的流程配置读自哪（docs/decisions/0003-fusion-flow.md 第 9 条）：project = 仓里的 .fleet/flow.json；
-     * org_default = 仓里没有这个文件，用的全组织默认（驾驶舱要标出来）。Fusion 工作流开工前判完配置、随快照写
-     * （saveTaskSnapshot）；空 = 没记过：还没开工、开工前就停派了，或是旧的需求工作流跑的（它不读流程配置）。
-     * 记的是这一轮开工时用的，仓里后来加了、删了文件不回头改；看仓此刻的是 repos.flow_source。
-     */
-    flowSource: text('flow_source').$type<'project' | 'org_default'>(),
   },
   (t) => [
     unique('tasks_repo_issue_unique').on(t.repoId, t.issueNumber),
     check('tasks_issue_number_positive', sql`${t.issueNumber} > 0`),
-    check(
-      'tasks_flow_source_known',
-      sql`${t.flowSource} is null or ${t.flowSource} in ('project', 'org_default')`,
-    ),
   ],
 );
 
@@ -486,7 +439,7 @@ export const pullRequests = pgTable(
     /** 合并的时刻、合进默认分支的那个提交（squash 的那一个）；没合、没读到是空。 */
     mergedAt: timestamp('merged_at', tz),
     mergeSha: text('merge_sha'),
-    /** 正文挂的单：「需求」栏（没有再看标题）的 #号、关单词（Closes #号），同仓的；和 PR 补贴、合并闸同一个认法。 */
+    /** 正文挂的单：「需求」栏（没有再看标题）的 #号、关单词（Closes #号），同仓的；认法只有一处（conventions 的 linkedIssue）。 */
     issueRefs: integer('issue_refs').array().notNull().default(sql`'{}'::integer[]`),
     /** 正文「修提醒」栏写的提醒（键或编号）。 */
     alertRefs: text('alert_refs').array().notNull().default(sql`'{}'::text[]`),

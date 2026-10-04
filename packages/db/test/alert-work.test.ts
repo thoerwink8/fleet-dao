@@ -1,4 +1,4 @@
-// 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒的跟进单、认领、挂钩的 PR、静默一次读齐；挂跟进单不覆盖人挂的、
+// 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒的跟进单、挂钩的 PR、静默一次读齐；挂跟进单不覆盖人挂的、
 // 换单记操作记录；静默按库的 now 定到期、最长 7 天由约束钉死、撤了记谁撤的。
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
@@ -12,7 +12,6 @@ import {
   readAlertWork,
 } from '../src/queries/alert-work.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
-import { takeClaimRow } from '../src/queries/seat.ts';
 import { alertSilences, auditLog, pullRequests } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, expectViolation, NOW } from './helpers.ts';
@@ -43,33 +42,6 @@ async function pr(
   });
 }
 
-async function claimOn(repoId: string, issueNumber: number, over: { prs?: number[]; engine?: boolean } = {}) {
-  const got = await takeClaimRow(t.db, {
-    repoId,
-    issueNumber,
-    claimId: randomUUID(),
-    ownerKind: over.engine ? 'engine' : 'worker',
-    ownerMachine: over.engine ? null : '本机',
-    ownerLabel: over.engine ? null : '工人A',
-    seatScope: over.engine ? null : 'main',
-    seatTerm: over.engine ? null : 3,
-    state: over.engine ? 'pending_start' : 'claimed',
-    workflowId: over.engine ? `req:acme/x#${issueNumber}` : null,
-    graceMinutes: 120,
-    note: null,
-  });
-  if (!got) throw new Error('认领没抢到');
-  if (over.prs?.length) {
-    await t.db.execute(
-      sql`update issue_claims set pr_numbers = ${sql`array[${sql.join(
-        over.prs.map((n) => sql`${n}`),
-        sql`, `,
-      )}]::integer[]`}, state = 'pr_open' where repo_id = ${repoId} and issue_number = ${issueNumber}`,
-    );
-  }
-  return got.value;
-}
-
 describe('findAlert：按编号或键找', () => {
   it('编号、键都认；处理过的也给；没有是 null', async () => {
     const { id } = await upsertAlert(t.db, {
@@ -86,7 +58,7 @@ describe('findAlert：按编号或键找', () => {
   });
 });
 
-describe('readAlertWork：一批提醒的跟进单、认领、挂钩的 PR、静默一次读齐', () => {
+describe('readAlertWork：一批提醒的跟进单、挂钩的 PR、静默一次读齐', () => {
   it('任务的单是跟进单；另挂的优先；三种挂钩的 PR 都找得到，不相干的不带', async () => {
     const repo = await addRepo(t.db, 'fleet-dao');
     const task = await addTask(t.db, repo.id, { issueNumber: 293 });
@@ -115,8 +87,6 @@ describe('readAlertWork：一批提醒的跟进单、认领、挂钩的 PR、静
         audit: ENGINE,
       }),
     ).toEqual({ result: 'linked', before: null });
-    await claimOn(repo.id, 293, { engine: true });
-    await claimOn(repo.id, 342, { prs: [352] });
     await pr(repo.id, 350, { alertRefs: ['watchdog:job:backup:after-12'] });
     await pr(repo.id, 351, { issueRefs: [342] });
     await pr(repo.id, 352);
@@ -131,11 +101,7 @@ describe('readAlertWork：一批提醒的跟进单、认领、挂钩的 PR、静
     expect(raw.work.map((w) => [w.notificationId, w.issueNumber, w.owner, w.name])).toEqual([
       [taskless.id, 342, 'acme', 'fleet-dao'],
     ]);
-    expect(raw.claims.map((c) => [c.issueNumber, c.ownerKind]).sort()).toEqual([
-      [293, 'engine'],
-      [342, 'worker'],
-    ]);
-    expect(raw.prs.map((p) => p.number)).toEqual([350, 351, 352, 354]);
+    expect(raw.prs.map((p) => p.number)).toEqual([350, 351, 354]);
     expect(raw.now).toBeInstanceOf(Date);
   });
 

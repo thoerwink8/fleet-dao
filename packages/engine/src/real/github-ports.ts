@@ -1,6 +1,5 @@
-// 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；照抄需求 issue 的
-// 类别标签和里程碑）、等 CI、并主线（并完把会话的树快进到新头）、在新头上跑测试（= 等这个头的 CI）、合并、issue 进度、
-// 关单、写需求文档、读需求文档的「怎么算做完」（开 PR 前验证照它逐条问），以及建树（记下主线的头；树等起会话时由会话用户
+// 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；PR 不抄单子的类别标签、
+// 里程碑，#654）、等 CI、并主线（并完把会话的树快进到新头）、关单，以及建树（记下主线的头；树等起会话时由会话
 // 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
@@ -8,14 +7,6 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import {
-  GATE_CONTEXT,
-  parseRiskPaths,
-  type RiskyFile,
-  riskyFiles,
-  SECOND_OPINION_CONTEXT,
-} from '@fleet-dao/conventions';
-import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/types.ts';
 import {
@@ -28,13 +19,11 @@ import {
 } from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
-import { PLAN_LINE_HINT, planLineOf, REQUIREMENT_DOC } from './spec-doc.ts';
 import {
   bundleSince,
   changedFilesAgainst,
   fastForward,
   fetchBundle,
-  patchIdOf as gitPatchIdOf,
   hasCommit,
   headOf,
   headOfIncoming,
@@ -66,6 +55,7 @@ export type EngineGitHub = Pick<
   | 'bundleCommits'
   | 'writeSpecDoc'
   | 'readSpecDoc'
+  | 'readIssue'
   | 'readIssuePlan'
   | 'readRepoFile'
   | 'pullFiles'
@@ -107,29 +97,10 @@ async function withHeartbeat<T>(ctx: PortContext, everyMs: number, fn: () => Pro
 
 type GitHubPorts = Pick<
   EnginePorts,
-  | 'createWorktree'
-  | 'removeWorktree'
-  | 'pushBranch'
-  | 'openPr'
-  | 'waitCi'
-  | 'checkHighRisk'
-  | 'postSecondOpinion'
-  | 'patchIdOf'
-  | 'syncMainline'
-  | 'runTests'
-  | 'mergePr'
-  | 'updateIssueProgress'
-  | 'closeIssue'
-  | 'writeSpecDoc'
-  | 'readCriteria'
+  'createWorktree' | 'removeWorktree' | 'pushBranch' | 'openPr' | 'waitCi' | 'syncMainline' | 'closeIssue'
 >;
 
-/** 需求文档目录：specs/<号>-<短名>（core 的 specDirOf 认出来的样子），别的一律不读。 */
-const SPEC_DIR = /^specs\/\d+-[^/\\\s]+$/;
-
-const DOC_FILE = { requirement: REQUIREMENT_DOC, plan: '方案.md', result: '结果.md' } as const;
-
-function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
+function prBody(body: PrBody): PrBodyInput {
   return {
     ...(body.requirement === undefined ? {} : { requirement: body.requirement }),
     ...(body.subtask === undefined ? {} : { subtask: body.subtask }),
@@ -137,12 +108,8 @@ function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
     verified: body.verified,
     ...(body.owed ? { owed: body.owed } : {}),
     ...(body.risks ? { risks: body.risks } : {}),
-    // 「按推荐先做了」一栏（#259）：漏传了正文里就永远是「无」
+    // 「按推荐先做了」一栏（#259）：漏传了正文里就没有这一栏
     ...(body.assumed ? { assumed: body.assumed } : {}),
-    plan,
-    specs,
-    tier: body.tier,
-    changedFiles: body.changedFiles,
   };
 }
 
@@ -212,45 +179,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     ...(deps.shBin ? { sh: deps.shBin } : {}),
   });
 
-  /** 「对应计划」照主线上那份需求文档里的那一行：读不到、没填都明确报错，不开 PR。 */
-  const planFromDoc = async (repo: PrRepo, path: string, ctx: PortContext): Promise<string> => {
-    const doc = await mapped(() => gh.readSpecDoc({ repo, path, signal: ctx.signal }, ctx));
-    if (!doc) {
-      throw new PortError(
-        'SPEC_PLAN_MISSING',
-        `主线上没有 ${path}：开 PR 要照它写「对应计划」一栏（需求文档还没进主线？）`,
-        { retryable: false },
-      );
-    }
-    const plan = planLineOf(doc.content);
-    if ('error' in plan) {
-      throw new PortError(
-        'SPEC_PLAN_MISSING',
-        `${path} 里${plan.error}：开 PR 的「对应计划」一栏照它写，缺了不开。${PLAN_LINE_HINT}`,
-        { retryable: false },
-      );
-    }
-    return plan.ok;
-  };
-
-  /**
-   * 需求文档跟着这个 PR 才进主线的单（#295）：「对应计划」照单子此刻挂的版本写，没挂写「未排期」（和 pnpm issue:new 写进
-   * 需求文档的那一行同一个写法）。读不到单子由 github 包明确报错，不当成未排期。
-   */
-  const planFromIssue = async (
-    repo: PrRepo,
-    issueNumber: number | undefined,
-    ctx: PortContext,
-  ): Promise<string> => {
-    if (issueNumber === undefined) {
-      throw new PortError('SPEC_PLAN_MISSING', '开 PR 没给单号：「对应计划」要照单子挂的版本写，没法读', {
-        retryable: false,
-      });
-    }
-    const plan = await mapped(() => gh.readIssuePlan({ repo, issueNumber, signal: ctx.signal }, ctx));
-    return plan.milestone?.title ?? '未排期';
-  };
-
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */
   const ownerOrFail = async (dir: string): Promise<SessionUser> => {
     const user = await trees.ownerOf(dir);
@@ -294,35 +222,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     const ff = await fastForward(t, bytes, ref, newHead);
     // ff === 'diverged'：核过之后（上面两行）工作树又变了，极罕见的竞态，一样跳过、不抛，下一轮再试。
     void ff;
-  };
-
-  /**
-   * 这个 PR 此刻改到的文件里，落在先审后合路径清单（riskPathsFile 指的、主线上那份）里的：checkHighRisk 端口和
-   * runTests 里判「合并闸红是不是只缺 second-opinion」共用同一份读法——两处判的得是同一件事，不能各写一份、慢慢走岔。
-   * 清单读不到、翻不完页照抛，不当「没碰到」（和 checkHighRisk 原来的行为一样）。riskPathsFile 由调用方给：两处都是
-   * 项目没声明就不叫这个函数（checkHighRisk、runTests 各自的调用点先判 undefined）。
-   */
-  const readHighRisk = async (
-    repo: PrRepo,
-    prNumber: number,
-    riskPathsFile: string,
-    ctx: PortContext,
-  ): Promise<RiskyFile[]> => {
-    const read = await mapped(() => gh.readRepoFile({ repo, path: riskPathsFile, signal: ctx.signal }));
-    if (read.file.kind !== 'text') {
-      const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
-      throw new PortError(
-        'RISK_PATHS_MISSING',
-        `主线上读不到 ${riskPathsFile}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
-        { retryable: false },
-      );
-    }
-    const list = parseRiskPaths(read.file.text);
-    if (typeof list === 'string') {
-      throw new PortError('RISK_PATHS_INVALID', `${riskPathsFile} 认不出：${list}`, { retryable: false });
-    }
-    const files = await mapped(() => gh.pullFiles({ repo, prNumber, signal: ctx.signal }));
-    return riskyFiles(files, list);
   };
 
   return {
@@ -515,22 +414,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async openPr(input, ctx) {
-      // 需求 issue 的类别标签和里程碑照抄到 PR 上（design 第七节）；读不到 issue 由 github 包明确报错，不当成「没有标签」。
-      // 「对应计划」「specs」两栏必填（#41）：specs 是需求文档的目录，对应计划现读主线上那份需求文档里的那一行。
-      const issueNumber = input.body.requirement;
-      const specs = `${input.body.specs.trim().replace(/\/+$/, '')}/`;
-      if (specs === '/') {
-        throw new PortError(
-          'SPEC_PLAN_MISSING',
-          '开 PR 没给需求文档的目录：「specs」「对应计划」两栏都没法填',
-          {
-            retryable: false,
-          },
-        );
-      }
-      const planLine = input.body.planFromIssue
-        ? await planFromIssue(input.repo, issueNumber, ctx)
-        : await planFromDoc(input.repo, `${specs}${REQUIREMENT_DOC}`, ctx);
       const r = await mapped(() =>
         gh.openPr(
           {
@@ -538,8 +421,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             branch: input.branch,
             head: input.head,
             title: input.title,
-            body: prBody(input.body, planLine, specs),
-            ...(issueNumber === undefined ? {} : { inheritFrom: { issueNumber } }),
+            body: prBody(input.body),
           },
           ctx,
         ),
@@ -558,74 +440,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         await adoptCiHead(input, result.head, ctx);
       }
       return result;
-    },
-
-    async checkHighRisk(input, ctx) {
-      // 项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：这个项目没有先审后合的路径，不查、不请第二意见
-      // （不是「读不到就当没碰到」——是这个项目压根没这条路，比如巡检仓）。
-      const riskPathsFile = input.riskPathsFile;
-      if (riskPathsFile === undefined) {
-        return {
-          hits: [],
-          note: '项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：不查、不请第二意见',
-        };
-      }
-      // 清单读主线上那份（和合并闸同一份判法，PR 改不了自己的门槛，design 第五节）；文件读这个 PR 现在的，带 patch
-      // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」（readHighRisk 和 runTests
-      // 里判「合并闸红是不是只缺 second-opinion」共用同一份读法）。
-      return { hits: await readHighRisk(input.repo, input.prNumber, riskPathsFile, ctx) };
-    },
-
-    async postSecondOpinion(input) {
-      const blocking = input.findings.filter((f) => f.severity === 'blocking');
-      const minor = input.findings.filter((f) => f.severity === 'minor');
-      const description = input.reused
-        ? `第二意见沿用第 ${input.reused.round} 轮（头 ${input.reused.fromHead.slice(0, 7)}）`
-        : input.verdict === 'pass'
-          ? '第二意见通过'
-          : `第二意见：必须改 ${blocking.length} 条`;
-      // 状态是合并闸认的唯一信号：这一步没做成必须抛出去（没权限、GitHub 拒绝……），不能拿评论贴没贴顶，也不能悄悄不贴
-      await mapped(() =>
-        gh.claims.setStatus(input.repo, input.head, {
-          context: SECOND_OPINION_CONTEXT,
-          state: input.verdict === 'pass' ? 'success' : 'failure',
-          description: description.slice(0, 140),
-        }),
-      );
-      const where = `改到了先审后合的地方：${input.hits
-        .map((h) => `${h.file}（${h.kind}${h.note ? `：${h.note}` : ''}）`)
-        .join('、')}（清单和理由见 ${input.riskPathsFile}）`;
-      const lines = [
-        input.reused
-          ? `**第二意见 第 ${input.round} 轮**（沿用第 ${input.reused.round} 轮在 ${input.reused.fromHead.slice(
-              0,
-              7,
-            )} 上的通过；审的头 ${input.head.slice(0, 7)}）：只并了主线，PR 自己的改动没变（patch-id 一样），不再拉一次审查`
-          : `**第二意见 第 ${input.round} 轮**（${input.model}；审的头 ${input.head.slice(0, 7)}）：${
-              input.verdict === 'pass' ? '通过' : `必须改 ${blocking.length} 条`
-            }`,
-        '',
-        where,
-        '',
-        '## 必须改',
-        ...(blocking.length > 0
-          ? blocking.map((f) => `- ${f.file ? `\`${f.file}\` ` : ''}${f.text}`)
-          : ['无']),
-        '## 小毛病',
-        ...(minor.length > 0 ? minor.map((f) => `- ${f.file ? `\`${f.file}\` ` : ''}${f.text}`) : ['无']),
-      ];
-      // 评论被卫生检查拦下、GitHub 一时不通：只记下没贴上，不影响已经写好的状态——合并闸只看状态，评论只是给人看
-      try {
-        const posted = await gh.claims.commentPull(
-          input.repo,
-          input.prNumber,
-          `second-opinion:${input.head}:${input.round}`,
-          lines.join('\n'),
-        );
-        return { commentUrl: posted.url };
-      } catch {
-        return {};
-      }
     },
 
     async syncMainline(input, ctx) {
@@ -675,79 +489,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       return { state: 'clean', head: r.head, conflictFiles: [] };
     },
 
-    async runTests(input, ctx) {
-      // 合之前在最新主线上再跑一遍测试 = 等并好的这个头上的 CI（design：正式测试跑在 GitHub 的机器上）。
-      const ci = ciResultOf(
-        await mapped(() => gh.waitCi({ repo: input.repo, prNumber: input.prNumber, head: input.head }, ctx)),
-      );
-      if (ci.state === 'unknown' || ci.state === 'conflict' || ci.state === 'diverged') {
-        // 没查成、和主线冲突、头被改写了：都不是没过，合并队列这一步（合并前在并好的头上再核一遍）还没接
-        // 并主线自己重试的机制（那一套在 Fusion 流程，见 packages/core/src/flow.ts）；不退回会话，交给失败分流
-        // （重试，再不行挂起）。
-        throw new PortError('CI_UNKNOWN', ci.detail ?? 'CI 没查成', { retryable: true });
-      }
-      // 项目没声明先审后合清单：这个项目没有先审后合的路径，合并闸红了也不查这份清单——不是「读不到就当没碰到」，
-      // 是压根没这条路，不查、也不当成「只缺 second-opinion」（照真红处理，落到下面的正常判法）。
-      if (
-        ci.state === 'red' &&
-        ci.failedChecks.length === 1 &&
-        ci.failedChecks[0] === GATE_CONTEXT &&
-        input.riskPathsFile !== undefined
-      ) {
-        // 合并闸自己是唯一红的检查：这一步（合并前把主线并进分支）本来就会让头变，第二意见还没追上是常见的良性
-        // 情形，不是真测试红（#307/#389 那次真事：白白退回了三轮）。判「是不是」结构化地看两样：这个 PR 真碰了
-        // 先审后合的路径（不然合并闸红另有原因——草稿、认领对不上……——second-opinion 状态压根不该管）、当前头上
-        // second-opinion 这条提交状态的 state 字段（不匹配合并闸自己写的中文描述）。
-        const hits = await readHighRisk(input.repo, input.prNumber, input.riskPathsFile, ctx);
-        if (hits.length > 0) {
-          const so = await mapped(() => gh.claims.latestStatus(input.repo, ci.head, SECOND_OPINION_CONTEXT));
-          if (so === null || so.state === 'pending') {
-            return {
-              passed: false,
-              head: ci.head,
-              summary: `新头上合并闸红，但当前头${so === null ? '还没有' : '还在跑'}第二意见（碰了先审后合的路径：${hits
-                .map((h) => h.file)
-                .join('、')}），不是测试真红`,
-              secondOpinionWait: so === null ? 'missing' : 'pending',
-            };
-          }
-        }
-      }
-      const failed = ci.failedChecks.join('、');
-      return {
-        passed: ci.state === 'green',
-        head: ci.head,
-        summary:
-          ci.state === 'green'
-            ? '新头上的 CI 全绿'
-            : `新头上的 CI 红了：${failed || '（没列出检查名）'}${ci.digest ? `；${ci.digest}` : ''}`,
-      };
-    },
-
-    async patchIdOf(input, ctx) {
-      const user = await ownerOrFail(input.worktreePath);
-      const t = treeAs(input.worktreePath, user, `patch-id-${input.subtaskId ?? input.taskId}`, ctx);
-      return gitPatchIdOf(t, input.mainlineBranch, input.ref);
-    },
-
-    async mergePr(input, ctx) {
-      const r = await mapped(() =>
-        gh.mergePr({ repo: input.repo, prNumber: input.prNumber, expectedHead: input.expectedHead }, ctx),
-      );
-      return r.merged
-        ? { merged: true, mergeCommit: r.mergeCommit }
-        : { merged: false, reason: `${r.reason}: ${r.detail}` };
-    },
-
-    async updateIssueProgress(input, ctx) {
-      await mapped(() =>
-        gh.updateIssueProgress(
-          { repo: input.repo, issueNumber: input.issueNumber, progress: input.progress },
-          ctx,
-        ),
-      );
-    },
-
     async closeIssue(input, ctx) {
       await mapped(() =>
         gh.closeIssue(
@@ -760,52 +501,6 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           ctx,
         ),
       );
-    },
-
-    async readCriteria(input, ctx) {
-      // 开 PR 前验证照默认分支上的需求文档逐条问（开单时写进主线的那份，不读分支上的：写这张单的改不了验收条）。
-      // 目录认不出、文档不在、没有「怎么算做完」或是空的，都明确报错、不可重试（失败分流 VF1 挂起等人补），不拿空清单去验。
-      const dir = input.specDir.trim().replace(/\/+$/, '');
-      if (!SPEC_DIR.test(dir) || dir.split('/').some((seg) => /^\.+$/.test(seg))) {
-        throw new PortError(
-          'SPEC_DOC_MISSING',
-          `需求文档目录认不出：「${input.specDir}」（要是单子正文指的 specs/<号>-<短名>）`,
-          { retryable: false },
-        );
-      }
-      const path = `${dir}/${REQUIREMENT_DOC}`;
-      const doc = await mapped(() => gh.readSpecDoc({ repo: input.repo, path, signal: ctx.signal }, ctx));
-      if (!doc) {
-        throw new PortError(
-          'SPEC_DOC_MISSING',
-          `主线上没有 ${path}：开 PR 前验证要照它的「怎么算做完」逐条核，读不到就不验（需求文档还没进主线？）`,
-          { retryable: false },
-        );
-      }
-      const got = criteriaOf(doc.content);
-      if ('error' in got) {
-        throw new PortError('CRITERIA_MISSING', `${path}：${got.error}，开 PR 前验证没法逐条核`, {
-          retryable: false,
-        });
-      }
-      return { path, criteria: got.ok };
-    },
-
-    async writeSpecDoc(input, ctx) {
-      const path = `${input.specDir.replace(/\/+$/, '')}/${DOC_FILE[input.doc]}`;
-      const r = await mapped(() =>
-        gh.writeSpecDoc(
-          {
-            repo: input.repo,
-            path,
-            content: input.markdown,
-            message: `docs(spec): #${input.issueNumber} ${DOC_FILE[input.doc]}`,
-            signal: ctx.signal,
-          },
-          ctx,
-        ),
-      );
-      return { path: r.path, ...(r.commit ? { commit: r.commit } : {}) };
     },
   };
 }

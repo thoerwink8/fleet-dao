@@ -27,6 +27,8 @@ source "$DEPLOY_DIR/lib/snapshot.sh"
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
 # shellcheck source=lib/profile.sh
 source "$DEPLOY_DIR/lib/profile.sh"
+# shellcheck source=lib/listen.sh
+source "$DEPLOY_DIR/lib/listen.sh"
 # shellcheck source=lib/login-user.sh
 source "$DEPLOY_DIR/lib/login-user.sh"
 # shellcheck source=lib/session-user.sh
@@ -144,9 +146,10 @@ PNPM_BIN=/usr/local/bin/pnpm
 TEMPORAL_ENV=/etc/fleet-dao/temporal.env
 TEMPORAL_CONFIG=/etc/fleet-dao/temporal.yaml
 PG_UNIT=postgresql@$PG_MAJOR-main.service
-# 应用：每一版装在 /srv/fleet-dao-releases/<提交号>（deploy/release.sh）。本机配置从仓里的样例建一次，之后只读不写
+# 应用：每一版装在 /srv/fleet-dao-releases/<提交号>（deploy/release.sh）。本机配置新机器上照仓里的期望建一次（#323），之后由
+# 发布时照期望写（只写期望变了的键，人手改的不改回），本脚本只管属主权限
 RELEASES_DIR=/srv/fleet-dao-releases
-APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← deploy/france/<名>.env.example
+APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← 这一档的期望（deploy/france 或 deploy/local 的 desired-config.json）
 # 随机密钥（文件:键:用途），首次生成后不再动。gateway-token.env 香港也要放同一份（docs/ops.md 第九节）
 APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎签、后端验）"
   "session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie"
@@ -215,6 +218,11 @@ preflight() {
     echo "要 root：sudo bash $0" >&2
     exit 64
   fi
+  # 入口用错了（本机档的机器当法国档装，或者反过来）就停：发布照这台记的档位挑哪一份期望写配置
+  if ! profile_marker_check "$PROFILE_FILE" "$PROFILE"; then
+    red "$PROFILE_WHY：法国用 bash deploy/france.sh，本机档用 bash deploy/local/install.sh；真要换档位，先删掉 $PROFILE_FILE 再跑（发布照它挑哪一份期望写配置，记错了会把别的档位的值写上来）"
+    return 1
+  fi
   local id ver node_major
   id=$(. /etc/os-release && echo "$ID")
   ver=$(. /etc/os-release && echo "$VERSION_ID")
@@ -261,6 +269,8 @@ setup_identity() {
   ensure_dir "$WORK_DIR" root:root 755
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
+  # 记下这台的档位（前提里核过：没记，或记的就是这一档）：发布、自动发布照它挑哪一份期望（#323）
+  put_file "$PROFILE_FILE" root:fleet 640 "$PROFILE"
   # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和旧系统的用户读不到
   ensure_dir /etc/fleet-dao/github root:fleet 750
   ensure_dir /opt/fleet-dao root:root 755
@@ -797,9 +807,12 @@ setup_mirasim_session() {
 
 setup_app_config() {
   step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
-  local name spec file key what content api_ok=1
-  # 样例只在第一次照着建：之后这些文件归人改（填飞书、GitHub 的凭据，选本机起哪些服务），脚本只管属主和权限、
-  # 补样例后来加的键（只补缺）、按「引擎」App 填空着的 webhook 密钥（lib/app-config.sh）
+  local name spec file key what desired api_ok=1
+  # 新机器上照仓里这一档的期望建（#323；本机档是 deploy/local/desired-config.json）：公开的照期望写，私有的空着等人放。
+  # 已经在的不建、不补：之后每一项由发布时照期望写（只写期望变了的键，人手改的不改回），对账报偏离。这里只管属主和权限、
+  # 删掉功能删了还留着的键、按「引擎」App 填空着的 webhook 密钥（lib/app-config.sh）
+  desired=$(profile_desired_file "$DEPLOY_DIR")
+  desired=${desired:-$DEPLOY_DIR/france/desired-config.json}
   for name in "${APP_ENV_FILES[@]}"; do
     file=/etc/fleet-dao/$name.env
     # 目录、符号链接（含断链）判红、跳过：fix_meta 会跟着链接改属主，put_file 会把链接换掉
@@ -809,19 +822,12 @@ setup_app_config() {
     fi
     if [[ -e "$file" ]]; then
       fix_meta "$file" root:fleet 640
-      # 样例后来加的键补上（只补缺，已有的不动）；release.env 不补：它的每一项都要人定
-      if [[ "$name" != release ]]; then add_missing_keys "$file" "$DEPLOY_DIR/france/$name.env.example"; fi
       # 功能删掉了、机器上还留着的键：这里清掉（remove_stale_key 只删这一个键那一行，不碰旁的）
       if [[ "$name" == engine ]]; then
         remove_stale_key "$file" FLEET_SENSITIVE_VALUES_FILE "卫生检查已知敏感值名单机制删掉了"
       fi
-    else
-      # 要人定的键（FLEET_ENGINE_PORTS）建出来是注释掉的，读回判红等人定
-      if content=$(example_for_new_file "$DEPLOY_DIR/france/$name.env.example"); then
-        put_file "$file" root:fleet 640 "$content"
-      else
-        red "建不了 $file：读不了样例 $DEPLOY_DIR/france/$name.env.example"
-      fi
+    elif ! env_from_desired "$file" "$name.env" "$desired" "$CONFIG_CLI"; then
+      if [[ "$name" == api ]]; then api_ok=0; fi
     fi
   done
   if ((api_ok)); then fill_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON"; fi
@@ -1005,6 +1011,7 @@ readback() {
   readback_session_ports
   readback_app_config
   readback_profile_diff
+  readback_profile_marker
   readback_web_upload
   readback_demo_scopes
   readback_auto_release
@@ -1230,6 +1237,18 @@ readback_profile_diff() {
   esac
 }
 
+# 这台记的档位（lib/profile.sh）：发布、自动发布照它挑哪一份期望。和这次跑的对不上，前提那一步就停了；这里只剩还没记（--check
+# 在第一次装之前跑）、记着的就是这一档两种
+readback_profile_marker() {
+  if [[ ! -e "$PROFILE_FILE" && ! -L "$PROFILE_FILE" ]]; then
+    pending "还没记这台的档位（$PROFILE_FILE）：跑一遍装机就记上；没记之前发布按法国档挑期望"
+  elif profile_marker_check "$PROFILE_FILE" "$PROFILE"; then
+    ok "这台记的是「$PROFILE」档（$PROFILE_FILE）：发布、自动发布照这一档的期望写配置、对账"
+  else
+    red "$PROFILE_WHY"
+  fi
+}
+
 # 往香港传静态文件的通路：用发布脚本同一套参数试跑一次 rsync（-n，什么都不传）
 readback_web_upload() {
   if is_local_profile; then
@@ -1398,11 +1417,12 @@ readback_postgres() {
     return 0
   fi
   if pg_isready -q -h 127.0.0.1 -p "$PG_PORT"; then ok "库在 127.0.0.1:$PG_PORT 就绪"; else red "库在 127.0.0.1:$PG_PORT 没就绪"; fi
+  # 只听回环的判法在 lib/listen.sh（deploy/test/listen.test.sh 钉住）：机器没开 IPv6 的，只听 127.0.0.1 一个也是只听本机
   listen=$(ss -Hltn "sport = :$PG_PORT" 2>/dev/null | awk '{ print $4 }' | sort | tr '\n' ' ')
-  if [[ "$listen" == "127.0.0.1:$PG_PORT [::1]:$PG_PORT " ]]; then
+  if listens_loopback_only_on "$PG_PORT" "$listen"; then
     ok "库只听本机：$listen"
   else
-    red "库在听「$listen」，应只听 127.0.0.1 和 ::1"
+    red "库在听「$listen」，应只听 127.0.0.1 和 ::1（回环以外的地址、或一个都没听，都不对）"
   fi
   restart=$(unit_prop "$PG_UNIT" Restart)
   if [[ "$restart" == always ]]; then ok "库的进程没了会被拉起（Restart=always）"; else red "$PG_UNIT 是 Restart=$restart，进程没了就一直躺着"; fi

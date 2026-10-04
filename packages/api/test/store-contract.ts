@@ -1,7 +1,7 @@
 // Store 契约测试：ports.ts 写下的语义，内存版（参照实现）和 Postgres 版都得过同一套。
 // 两个实现各有一个入口文件（store.memory.test.ts / store.pg.test.ts）调 describeStoreContract。
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEV_FLOW_COMMIT, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
+import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
   type GitHubObjectVersion,
@@ -27,6 +27,11 @@ export type MakeStore = (data: Partial<MemoryData>, clock: { now: Date }) => Pro
 
 const OTHER_UUID = '99999999-0000-4000-8000-000000000000';
 const TASKLESS_RUN = 'd0000000-0000-4000-8000-0000000000ff';
+/** 三段流水里不该算进 #13 的两笔：别的仓同号（记了别的仓的工作流编号）、记了别的单的 task_id（单号却也是 13）。 */
+const OTHER_REPO_SEG = 'd1000000-0000-4000-8000-0000000130ff';
+const OTHER_TASK_SEG = 'd1000000-0000-4000-8000-0000000130fe';
+/** #13 已经结束了还开着的一段（没记结束、没记结局）：Store 照原样给，算不算在跑由任务详情判。 */
+const STALE_SEG = 'd1000000-0000-4000-8000-000000013005';
 /** 接活时新建的任务。 */
 const NEW_TASK = 'b0000000-0000-4000-8000-000000000040';
 
@@ -57,6 +62,37 @@ function contractData(): Partial<MemoryData> {
       whyRoute: '帅位会话',
       queuedAt: ago(5),
       startedAt: ago(4),
+    },
+  ];
+  data.segmentRuns = [
+    ...(data.segmentRuns ?? []),
+    {
+      id: OTHER_REPO_SEG,
+      segment: 'manual',
+      issueNumber: 13,
+      model: 'opus-5.5',
+      startedAt: ago(530),
+      endedAt: ago(520),
+      outcome: 'done',
+      workflowId: 'task:example/other#13',
+    },
+    {
+      id: OTHER_TASK_SEG,
+      segment: 'manual',
+      taskId: IDS.task12,
+      issueNumber: 13,
+      model: 'opus-5.5',
+      startedAt: ago(30),
+      endedAt: ago(25),
+      outcome: 'done',
+    },
+    {
+      id: STALE_SEG,
+      segment: 'verify',
+      taskId: IDS.task13,
+      issueNumber: 13,
+      model: 'gpt-5.6',
+      startedAt: ago(505),
     },
   ];
   data.quotaWindows = [
@@ -177,19 +213,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.getRepo('repo-1')).toBeNull();
       });
 
-      it('流程配置副本：样例仓读得到来源和全长提交；没有的仓是 null', async () => {
-        expect(await store.getRepoFlow(IDS.repo)).toEqual({
-          source: 'project',
-          commit: DEV_FLOW_COMMIT,
-          syncedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
-          error: null,
-          unread: null,
-        });
-        expect(DEV_FLOW_COMMIT).toHaveLength(40);
-        expect(await store.getRepoFlow(OTHER_UUID)).toBeNull();
-        expect(await store.getRepoFlow('nope')).toBeNull();
-      });
-
       it('看板上的需求：没结束的和刚结束的，按优先级排；别的仓、看不懂的编号是空', async () => {
         expect((await store.listBoardTasks(IDS.repo)).map((t) => t.id)).toEqual([IDS.task12, IDS.task13]);
         expect(await store.listBoardTasks(OTHER_UUID)).toEqual([]);
@@ -247,6 +270,53 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           undefined,
           undefined,
         ]);
+      });
+
+      it('三段流水：task_id 对上的、task_id 没记但单号对上的（标明兜底）都给，按起跑先后排', async () => {
+        const rows = await store.listSegmentRuns(IDS.task13);
+        expect(rows.map((r) => [r.id, r.segment, r.matchedBy])).toEqual([
+          [IDS.seg13scope, 'scope', 'task'],
+          [IDS.seg13manual1, 'manual', 'task'],
+          [IDS.seg13manual2, 'manual', 'task'],
+          [IDS.seg13verify, 'verify', 'issueNumber'],
+          [STALE_SEG, 'verify', 'task'],
+        ]);
+      });
+
+      it('三段流水不算进来的：别的仓同号（工作流编号不是这张单的）、记了别的单的 task_id；没这张单、编号看不懂是空', async () => {
+        const ids = (await store.listSegmentRuns(IDS.task13)).map((r) => r.id);
+        expect(ids).not.toContain(OTHER_REPO_SEG);
+        expect(ids).not.toContain(OTHER_TASK_SEG);
+        expect((await store.listSegmentRuns(IDS.task12)).map((r) => r.id)).toEqual([OTHER_TASK_SEG]);
+        expect(await store.listSegmentRuns(OTHER_UUID)).toEqual([]);
+        expect(await store.listSegmentRuns('task-13')).toEqual([]);
+      });
+
+      it('三段流水的读数原样读回：派工档、起止、四样 token、花费、PR；没记的不给（不是 0、不是空字符串）', async () => {
+        const rows = await store.listSegmentRuns(IDS.task13);
+        const manual1 = rows.find((r) => r.id === IDS.seg13manual1);
+        expect(manual1).toMatchObject({
+          tier: 'fast',
+          channel: 'ch-mirasim',
+          outcome: 'timeout',
+          failureReason: '30 分钟没交活，按超时收了',
+          inputTokens: 64_000,
+          outputTokens: 5_200,
+          branch: 'fleet/13-readme-time',
+        });
+        expect([manual1?.cacheReadTokens, manual1?.cacheWriteTokens, manual1?.costUsd]).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+        expect(rows.find((r) => r.id === IDS.seg13manual2)).toMatchObject({
+          costUsd: 1.86,
+          prNumber: 39,
+          cacheReadTokens: 1_120_000,
+        });
+        const stale = rows.find((r) => r.id === STALE_SEG);
+        expect([stale?.endedAt, stale?.outcome, stale?.tier]).toEqual([undefined, undefined, undefined]);
+        expect(Date.parse(stale?.startedAt ?? '')).toBe(T0.getTime() - 505 * MIN);
       });
     });
 
@@ -1340,7 +1410,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       const created = (over: Partial<NewAuditEntry> = {}) =>
         audit({ action: 'task.create', target: `task:${NEW_TASK}`, via: 'github', ...over });
 
-      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）和流程配置副本；没有就是 null', async () => {
+      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）；没有就是 null', async () => {
         expect(await store.findRepoByName('Example', 'CANARY')).toEqual({
           id: IDS.repo,
           owner: 'example',
@@ -1348,12 +1418,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           defaultBranch: 'main',
           testCommand: 'pnpm check',
           autoDispatchSince: null,
-          flow: {
-            syncedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
-            error: null,
-            unread: null,
-            testCommand: 'pnpm test:changed',
-          },
         });
         expect(await store.findRepoByName('example', 'other')).toBeNull();
       });

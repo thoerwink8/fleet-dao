@@ -1,4 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src", "test", "flow.default.json"]
+  "include": ["src", "test"]
 }

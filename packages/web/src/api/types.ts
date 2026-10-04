@@ -17,9 +17,12 @@ import type {
   DemoLinkSchema,
   DemoLinksResponse,
   DemoScopeSchema,
+  EffortModelSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
+  LivenessFactSchema,
+  LivenessVerdictSchema,
   MeResponse,
   ModelSchema,
   NotificationLevelSchema,
@@ -30,8 +33,15 @@ import type {
   PoolsResponse,
   PoolViewSchema,
   QuotaWindowViewSchema,
+  ReleaseVersionResponse,
   RepoSchema,
+  RouteEffortSchema,
   RouteSchema,
+  RoutingEffortsResponse,
+  RoutingLayerModelSchema,
+  RoutingLayerPurposeSchema,
+  RoutingLayerRouteSchema,
+  RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
   RunStepsResponse,
@@ -44,6 +54,8 @@ import type {
   TimelineResponse,
   UpdateChannelRequest,
   UpdateDemoDefaultRequest,
+  UpdateRouteEffortRequest,
+  UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateStagePolicyRequest,
 } from '@fleet-dao/shared';
@@ -55,6 +67,7 @@ export type {
   QuotaWindowKind,
   ReadingKind,
   RunOutcome,
+  SessionEffort,
   SettingKey,
   StageKind,
   StepState,
@@ -90,6 +103,21 @@ export type Ban = z.infer<typeof BanSchema>;
 export type UpdateStagePolicyBody = z.input<typeof UpdateStagePolicyRequest>;
 export type UpdateChannelBody = z.input<typeof UpdateChannelRequest>;
 
+/** 路由两层每一层现在活着吗（#574）。 */
+export type RoutingLayers = z.infer<typeof RoutingLayersResponse>;
+export type RoutingLayerPurpose = z.infer<typeof RoutingLayerPurposeSchema>;
+export type RoutingLayerModel = z.infer<typeof RoutingLayerModelSchema>;
+export type RoutingLayerRoute = z.infer<typeof RoutingLayerRouteSchema>;
+export type LivenessVerdict = z.infer<typeof LivenessVerdictSchema>;
+export type LivenessFact = z.infer<typeof LivenessFactSchema>;
+
+/** 每个模型下每条路由起会话的思考档位（#470）。 */
+export type RoutingEfforts = z.infer<typeof RoutingEffortsResponse>;
+export type EffortModel = z.infer<typeof EffortModelSchema>;
+export type RouteEffort = z.infer<typeof RouteEffortSchema>;
+export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
+export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
+
 export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;
 export type QuotaWindowView = z.infer<typeof QuotaWindowViewSchema>;
@@ -110,6 +138,9 @@ export type AuditEntry = z.infer<typeof AuditEntrySchema>;
 export type Settings = z.infer<typeof SettingsResponse>;
 export type Setting = z.infer<typeof SettingSchema>;
 export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
+
+/** /changelog 页「发布 v<N>」的版本号（#725）：ok / blocked / unreadable 三种，见 web-api.ts 的 ReleaseVersionResponse。 */
+export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
 
 export type DemoLinks = z.infer<typeof DemoLinksResponse>;
 export type DemoLink = z.infer<typeof DemoLinkSchema>;

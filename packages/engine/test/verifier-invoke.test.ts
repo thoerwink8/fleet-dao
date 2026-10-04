@@ -6,8 +6,8 @@
 // （只有三种能挡）和第 4 条（读不到 PR 必填栏就明确失败）的钉子。
 
 import { describe, expect, it } from 'vitest';
-import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
-import type { OneShotDeps, SpawnOutcome } from '../src/runner/one-shot.ts';
+import type { RunRecord, RunStart, RunsWriter } from '../src/runner/not-wired.ts';
+import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
   BLOCKER_KINDS,
   type ChooseModelForFamily,
@@ -16,6 +16,7 @@ import {
   type FetchSpec,
   invokeVerifier,
   type ModelFamily,
+  readVerdict,
   type VerifierInvokeInput,
 } from '../src/verifier-invoke.ts';
 
@@ -55,14 +56,18 @@ const MODEL_STDOUT_PASS_WITH_STYLE = [
   'verdict: pass',
 ].join('\n');
 
+const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
+
 const BASE_INPUT: VerifierInvokeInput = {
   prNumber: 42,
   branch: 'feat/x',
   baseSha: 'a'.repeat(40),
-  taskId: 'task-1',
+  taskId: TASK_ID,
+  issueNumber: 12,
+  workflowId: 'task:acme/demo#12',
   what: '要 A',
   howToFinish: ['1. 代码里有 A', '2. 还把 B 留着'],
-  modelFamilyAvoid: 'gpt',
+  modelFamiliesAvoid: ['gpt'],
   round: 1,
 };
 
@@ -74,17 +79,25 @@ const FAKE_DIFF_OK = {
 function fakeOneShot(scripted: SpawnOutcome): {
   oneShot: OneShotDeps;
   recorded: RunRecord[];
+  started: RunStart[];
   spawnedArgv: string[];
+  commands: SpawnCommand[];
 } {
   const spawnedArgv: string[] = [];
+  const commands: SpawnCommand[] = [];
   const recorded: RunRecord[] = [];
+  const started: RunStart[] = [];
   const runs: RunsWriter = {
+    async start(r: RunStart) {
+      started.push(r);
+    },
     async record(r: RunRecord) {
       recorded.push(r);
     },
   };
   const oneShot: OneShotDeps = {
     spawn: async (cmd) => {
+      commands.push(cmd);
       spawnedArgv.push(cmd.argv.join(' '));
       return scripted;
     },
@@ -95,7 +108,7 @@ function fakeOneShot(scripted: SpawnOutcome): {
     runs,
     tmpDir: 'C:/temp/fleet-555-1-test',
   };
-  return { oneShot, recorded, spawnedArgv };
+  return { oneShot, recorded, started, spawnedArgv, commands };
 }
 
 function okFetchDiff(): FetchDiff {
@@ -105,7 +118,7 @@ function okFetchSpec(): FetchSpec {
   return async () => ({ specDir: 'specs/42-做A/' });
 }
 function fixedChoose(
-  map: Partial<Record<ModelFamily, { modelId: string; channel?: string }>>,
+  map: Partial<Record<ModelFamily, { modelId: string; channel?: string; routeId?: string }>>,
 ): ChooseModelForFamily {
   return async (family) => map[family];
 }
@@ -158,7 +171,7 @@ describe('invokeVerifier：happy path', () => {
       return undefined;
     };
     const out = await invokeVerifier(
-      { ...BASE_INPUT, modelFamilyAvoid: 'claude' },
+      { ...BASE_INPUT, modelFamiliesAvoid: ['claude'] },
       {
         oneShot,
         fetchDiff: okFetchDiff(),
@@ -185,7 +198,7 @@ describe('invokeVerifier：happy path', () => {
       return undefined;
     };
     const out = await invokeVerifier(
-      { ...BASE_INPUT, modelFamilyAvoid: 'kimi' },
+      { ...BASE_INPUT, modelFamiliesAvoid: ['kimi'] },
       {
         oneShot,
         fetchDiff: okFetchDiff(),
@@ -210,7 +223,7 @@ describe('invokeVerifier：模型判 fail（三种能挡之一 → problems 必�
       killed: false,
     });
     const out = await invokeVerifier(
-      { ...BASE_INPUT, modelFamilyAvoid: 'gpt' },
+      { ...BASE_INPUT, modelFamiliesAvoid: ['gpt'] },
       {
         oneShot,
         fetchDiff: okFetchDiff(),
@@ -383,5 +396,281 @@ describe('invokeVerifier：故意造红 → 必须明确失败（不许拿「查
     expect(out.pass).toBe(false);
     expect(out.problems.length).toBeGreaterThan(0);
     expect(out.problems.join('\n')).toContain('冷调用没跑成');
+  });
+});
+
+const DEPS = (
+  oneShot: OneShotDeps,
+  choose: ChooseModelForFamily = fixedChoose({ claude: { modelId: 'claude-x' } }),
+) => ({
+  oneShot,
+  fetchDiff: okFetchDiff(),
+  fetchSpec: okFetchSpec(),
+  chooseModelForFamily: choose,
+  cwd: 'C:/work/x',
+});
+
+describe('invokeVerifier：写过这张单的族不止一个、路由编号、会话结局', () => {
+  it('先 gpt 后 claude 写的：两族都跳过，0006 顺序里下一个是 deepseek（前两家不被问）', async () => {
+    const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const asked: ModelFamily[] = [];
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: ['gpt', 'claude'] },
+      DEPS(oneShot, async (family) => {
+        asked.push(family);
+        return family === 'deepseek' ? { modelId: 'ds-x' } : undefined;
+      }),
+    );
+    expect(out.pass).toBe(true);
+    expect(asked).toEqual(['deepseek']);
+    expect(out.session?.family).toBe('deepseek');
+  });
+
+  it('【故意造出的失败】一个作者族都不给 → 输入就不合格，抛出来（不知道该避开谁，不许当成「谁都可以」）', async () => {
+    const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    await expect(invokeVerifier({ ...BASE_INPUT, modelFamiliesAvoid: [] }, DEPS(oneShot))).rejects.toThrow();
+  });
+
+  it('剩下的族全被避开 → 没讨论成，写明一个能换的族都不剩', async () => {
+    const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: [...FAMILY_ORDER] },
+      DEPS(oneShot, async () => ({ modelId: 'never' })),
+    );
+    expect(out.pass).toBe(false);
+    expect(out.problems[0]).toContain('没讨论成');
+    expect(out.problems[0]).toContain('一个能换的族都不剩');
+    expect(out.session).toBeUndefined(); // 没起会话
+  });
+
+  it('选中的路由编号、渠道进 one-shot 的入参（生产 Spawner 靠 routeId 查执行方式和会话用户）；会话结局带回来', async () => {
+    const { oneShot, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(
+      BASE_INPUT,
+      DEPS(
+        oneShot,
+        fixedChoose({ claude: { modelId: 'claude-x', channel: 'pool-a', routeId: 'route-claude-1' } }),
+      ),
+    );
+    expect(commands[0]?.input).toMatchObject({
+      segment: 'verify',
+      routeId: 'route-claude-1',
+      channel: 'pool-a',
+      modelId: 'claude-x',
+    });
+    expect(out.session).toMatchObject({
+      outcome: 'done',
+      family: 'claude',
+      modelId: 'claude-x',
+      routeId: 'route-claude-1',
+    });
+    expect(out.session?.runId).toBeTruthy();
+  });
+
+  it('喂给模型的提示词里三种能挡的开头是真文字，不是没替换的占位符；也说清了手上没有仓库检出', async () => {
+    const { oneShot, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    const prompt = commands[0]?.stdin ?? '';
+    expect(prompt).not.toContain('${');
+    for (const kind of BLOCKER_KINDS) expect(prompt).toContain(`- ${kind}：`);
+    expect(prompt).toContain('没有仓库的检出');
+    expect(prompt).toContain('verdict: pass');
+  });
+});
+
+describe('invokeVerifier：这一次验收记进 runs 挂得上单（#216）', () => {
+  it('开跑那一行、收场那一笔都带 tasks.id、单号、工作流编号、PR 号、分支；验收是冷调用，不带派工档', async () => {
+    const { oneShot, started, recorded } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    const owner = {
+      segment: 'verify',
+      taskId: TASK_ID,
+      issueNumber: 12,
+      workflowId: 'task:acme/demo#12',
+      prNumber: 42,
+      branch: 'feat/x',
+    };
+    expect(started).toEqual([expect.objectContaining(owner)]);
+    expect(recorded).toEqual([expect.objectContaining({ ...owner, outcome: 'done' })]);
+    expect(started[0]).not.toHaveProperty('tier');
+    expect(recorded[0]).not.toHaveProperty('tier');
+  });
+
+  it('不在任务工作流里验的（没给工作流编号）：这一列不写，不拿空串顶', async () => {
+    const { oneShot, recorded } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    const { workflowId: _drop, ...noWorkflow } = BASE_INPUT;
+    await invokeVerifier(noWorkflow, DEPS(oneShot));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).not.toHaveProperty('workflowId');
+    expect(recorded[0]).toMatchObject({ taskId: TASK_ID, issueNumber: 12 });
+  });
+
+  it('【故意造出的失败】没给单号：一进来就报错，不拉 diff、不挑模型、不起会话，runs 里一笔不记', async () => {
+    const { oneShot, started, recorded, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    let diffs = 0;
+    let picks = 0;
+    const { issueNumber: _drop, ...noIssue } = BASE_INPUT;
+    const err = await invokeVerifier(noIssue as VerifierInvokeInput, {
+      oneShot,
+      fetchDiff: async () => {
+        diffs += 1;
+        return FAKE_DIFF_OK;
+      },
+      fetchSpec: okFetchSpec(),
+      chooseModelForFamily: async () => {
+        picks += 1;
+        return { modelId: 'claude-x' };
+      },
+      cwd: 'C:/work/x',
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String((err as Error).message)).toContain('issueNumber');
+    expect([diffs, picks, commands.length, started.length, recorded.length]).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it('【故意造出的失败】taskId 不是库里 tasks.id 的样子（不是 uuid）：一进来就报错、不起会话，免得记一笔挂不上单的', async () => {
+    const { oneShot, started, recorded, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    await expect(invokeVerifier({ ...BASE_INPUT, taskId: 'task-1' }, DEPS(oneShot))).rejects.toThrow(
+      /taskId/,
+    );
+    expect([commands.length, started.length, recorded.length]).toEqual([0, 0, 0]);
+  });
+});
+
+describe('invokeVerifier：结论不自相矛盾、不含糊（拿不准的一律不放行）', () => {
+  it.each([
+    ['verdict: pass', 'pass'],
+    ['verdict: fail', 'fail'],
+    ['  **verdict: pass**  ', 'pass'],
+    ['`verdict: fail`', 'fail'],
+    ['Verdict：PASS。', 'pass'],
+  ])('readVerdict(%j) → %s', (line, want) => {
+    expect(readVerdict(line)).toBe(want);
+  });
+
+  it.each([
+    'verdict: not pass',
+    'verdict: pass or fail',
+    'verdict: pass, fail',
+    'pass',
+    '结论：通过',
+    'verdict:',
+    '',
+  ])('【故意造出的失败】readVerdict(%j) → null（不是固定写法）', (line) => {
+    expect(readVerdict(line)).toBeNull();
+  });
+
+  it('结论行写成「verdict: not pass」→ 冷调用没跑成（judgeVerify 只看有没有 pass 这个词，这里不放）', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', '', 'verdict: not pass'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(false);
+    expect(out.problems[0]).toContain('冷调用没跑成');
+    expect(out.problems[0]).toContain('固定写法');
+  });
+
+  it('写 pass 但问题清单里还有算挡的 → 不过（自相矛盾的结论不放行），问题原样带出', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', `- ${BLOCKER_KINDS[2]}：删库脚本没加确认`, '', 'verdict: pass'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(false);
+    expect(out.problems).toEqual([`${BLOCKER_KINDS[2]}：删库脚本没加确认`]);
+    expect(out.notes).toContain('自相矛盾');
+  });
+
+  it('问题后面的结论行、空行之后的段落不并进问题的文字里（只有紧跟在某一条后面的续行才并回去）', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: [
+        '## 问题',
+        `- ${BLOCKER_KINDS[0]}：单子要 A`,
+        '  代码里没有 A（续行）',
+        '',
+        '补充说明一段话。',
+        '',
+        'verdict: fail',
+      ].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.problems).toEqual([`${BLOCKER_KINDS[0]}：单子要 A 代码里没有 A（续行）`]);
+  });
+
+  it('写 fail 但「## 问题」里一条算挡的都没有（只有风格意见）→ 冷调用没跑成：要人看，不当成过，也不让写代码的会话白改', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', '- 命名不好看', '- 函数太长', '', 'verdict: fail'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(false);
+    expect(out.problems).toHaveLength(1);
+    expect(out.problems[0]).toContain('冷调用没跑成');
+    expect(out.problems[0]).toContain('写了 2 条不算挡的意见');
+  });
+
+  it('写 fail 且「## 问题」整段都没写 → 同样是冷调用没跑成，写明它一条都没写', async () => {
+    const { oneShot } = fakeOneShot({ exitCode: 0, stdout: 'verdict: fail', stderr: '', killed: false });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(false);
+    expect(out.problems[0]).toContain('冷调用没跑成');
+    expect(out.problems[0]).toContain('一条都没写');
+  });
+
+  it('会话没跑成：执行体报的原因码和原话（额度用完）写进问题里，人一眼看得出怎么回事；结局带回来', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'quota',
+      killed: false,
+      facts: { reason: 'quota_exhausted', detail: '这个号的额度用完了', quotaExhausted: true },
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(false);
+    expect(out.problems[0]).toContain('冷调用没跑成');
+    expect(out.problems[0]).toContain('原因码 quota_exhausted');
+    expect(out.problems[0]).toContain('这个号的额度用完了');
+    expect(out.session?.outcome).toBe('failed');
   });
 });

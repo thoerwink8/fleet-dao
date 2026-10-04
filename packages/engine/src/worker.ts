@@ -3,7 +3,6 @@
 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { signAgentToken } from '@fleet-dao/api/agent-token';
 import { Client, Connection } from '@temporalio/client';
 import {
   bundleWorkflowCode,
@@ -12,7 +11,7 @@ import {
   Worker,
   type WorkflowBundle,
 } from '@temporalio/worker';
-import { type AgentTokenClaims, createActivities, type EngineJobs } from './activities.ts';
+import { createActivities, type EngineJobs, type EngineTasks } from './activities.ts';
 import type { EngineActivities } from './activity-options.ts';
 import { createDecide, type Decide, type FailureTriage } from './decisions/index.ts';
 import {
@@ -39,17 +38,12 @@ export interface EngineConfig {
   shutdownGraceSeconds: number;
   /** 同时执行的活动数；会话看守和等 CI 大多在等，真正的并发上限在选路由（账号池空位）那里。 */
   maxConcurrentActivities: number;
-  /** fleet 命令的后端地址，会话环境里的 FLEET_API（驾驶舱后端 fleet 命令接口的监听地址）。没配就起不了会话。 */
-  agentApiUrl: string | null;
-  /** 装着 fleet 命令的目录，放到会话 PATH 最前面。 */
-  cliBinDir: string;
 }
 
 /** 任务书定的默认：法国本机的 Temporal、命名空间 fleet。 */
 export const DEFAULT_ADDRESS = '127.0.0.1:7243';
 export const DEFAULT_NAMESPACE = 'fleet';
 export const DEFAULT_TASK_QUEUE = 'fleet';
-export const DEFAULT_CLI_BIN_DIR = fileURLToPath(new URL('../../cli/bin', import.meta.url));
 
 function positiveInt(raw: string | undefined, fallback: number): number {
   const n = Number(raw);
@@ -63,26 +57,7 @@ export function configFromEnv(env: Record<string, string | undefined> = process.
     taskQueue: env.FLEET_TASK_QUEUE?.trim() || DEFAULT_TASK_QUEUE,
     shutdownGraceSeconds: positiveInt(env.FLEET_SHUTDOWN_GRACE_SECONDS, 30),
     maxConcurrentActivities: positiveInt(env.FLEET_MAX_ACTIVITIES, 40),
-    agentApiUrl: env.FLEET_AGENT_API_URL?.trim() || null,
-    cliBinDir: env.FLEET_CLI_BIN?.trim() || DEFAULT_CLI_BIN_DIR,
   };
-}
-
-/**
- * fleet 通行证用驾驶舱后端的 signAgentToken 签（后端用同一把钥匙验）。钥匙从本机配置 FLEET_AGENT_TOKEN_SECRET 读，没配返回 null。
- */
-export function agentTokenSignerFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): ((claims: AgentTokenClaims) => string) | null {
-  const secret = env.FLEET_AGENT_TOKEN_SECRET;
-  if (!secret) return null;
-  return (claims) =>
-    signAgentToken(secret, {
-      taskId: claims.taskId,
-      subtaskId: claims.subtaskId,
-      runId: claims.runId,
-      ttlSeconds: claims.ttlSeconds,
-    });
 }
 
 export const WORKFLOWS_PATH = fileURLToPath(new URL('./workflows/index.ts', import.meta.url));
@@ -96,8 +71,6 @@ export function bundleEngineWorkflows(logger?: BundleLogger): Promise<WorkflowBu
 export interface CreateEngineWorkerOptions {
   config: EngineConfig;
   ports: EnginePorts;
-  /** 签 fleet 通行证：接驾驶舱后端的 signAgentToken（`@fleet-dao/api/agent-token`，密钥 FLEET_AGENT_TOKEN_SECRET）。 */
-  signAgentToken: (claims: AgentTokenClaims) => string;
   /**
    * 接活之前先收掉上一轮留下的会话（fleet-agent-scope list 再逐个 stop，再清它们的临时目录），返回收了几个会话。
    * 引擎被强杀时会话留在自己的 scope 里；它们的输出管道断了、接不上，工作流会按 SESSION_LOST 续会话重起。
@@ -105,6 +78,8 @@ export interface CreateEngineWorkerOptions {
   reapOrphanSessions?: () => Promise<number>;
   /** 定时任务要的东西（真端口才有）；不给，定时任务的活动明确报 JOB_NOT_CONFIGURED。 */
   jobs?: EngineJobs;
+  /** 任务工作流（#632）要的活动（真端口才有）；不给，那几个活动明确报 TASK_NOT_CONFIGURED。 */
+  tasks?: EngineTasks;
   /** 不给就按 config.address 自己连。 */
   connection?: NativeConnection;
   /** 不给就现打包。 */
@@ -127,15 +102,7 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
     options.log?.(`收掉上一轮留下的会话 ${reaped} 个`);
   }
   const connection = options.connection ?? (await NativeConnection.connect({ address: config.address }));
-  const activities = createActivities(
-    options.ports,
-    {
-      fleetApi: config.agentApiUrl ?? '',
-      cliBinDir: config.cliBinDir,
-      signToken: options.signAgentToken,
-    },
-    options.jobs,
-  );
+  const activities = createActivities(options.ports, options.jobs, options.tasks);
   return Worker.create({
     connection,
     namespace: config.namespace,
@@ -306,6 +273,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let ports: EnginePorts;
   let reapOrphanSessions: (() => Promise<number>) | undefined;
   let jobs: EngineJobs | undefined;
+  let tasks: EngineTasks | undefined;
   let registerJobs: (() => Promise<void>) | undefined;
   let retireSchedules: ((client: Pick<Client, 'schedule'>) => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
@@ -313,19 +281,13 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let control: DrainControl | undefined;
   let stopSessions: (why: string) => string[] = () => [];
   let releaseDetached: () => string[] = () => [];
-  let signAgentToken = agentTokenSignerFromEnv(env);
   if (mode === 'real') {
-    // 真会话里的 fleet 命令要连后端、要通行证：缺一样就不起（起了也只会一个个会话起不来）。
-    const missing = [
-      ...(config.agentApiUrl ? [] : ['FLEET_AGENT_API_URL']),
-      ...(signAgentToken ? [] : ['FLEET_AGENT_TOKEN_SECRET']),
-    ];
-    if (missing.length > 0) throw new Error(`真端口起不来，本机配置缺：${missing.join('、')}`);
     const { realPortsFromEnv } = await import('./real/index.ts');
     const real = realPortsFromEnv(env, { drain, ownSha: ownReleaseSha() });
     ports = real.ports;
     reapOrphanSessions = real.reapOrphanSessions;
     jobs = real.jobs;
+    tasks = real.tasks;
     registerJobs = real.registerJobs;
     retireSchedules = real.retireSchedules;
     close = real.close;
@@ -335,7 +297,6 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     releaseDetached = real.releaseDetached;
   } else {
     ports = createFakeWorld().ports;
-    signAgentToken ??= (claims) => `fake-token.${claims.runId}`;
   }
   const connection = await NativeConnection.connect({ address: config.address });
   let clientConnection: Connection | undefined;
@@ -370,13 +331,12 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       stopControl = control.start();
     }
     const worker = await createEngineWorker({
-      // 假实现不真起会话，fleet 命令的后端地址用不上。
-      config: { ...config, agentApiUrl: config.agentApiUrl ?? 'fake://agent-api' },
+      config,
       ports,
       connection,
-      signAgentToken: signAgentToken as (claims: AgentTokenClaims) => string,
       ...(reapOrphanSessions ? { reapOrphanSessions } : {}),
       ...(jobs ? { jobs } : {}),
+      ...(tasks ? { tasks } : {}),
       log: (message) => console.info(message),
     });
     shutdown = installGracefulShutdown({

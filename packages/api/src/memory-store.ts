@@ -1,23 +1,24 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
-import { type FlowReplica, type IssueClaim, isActiveClaim, UNSYNCED_REPLICA } from '@fleet-dao/core';
-import type {
-  Ban,
-  Channel,
-  Model,
-  Pool,
-  ProgressKind,
-  RealtimeTable,
-  Repo,
-  Route,
-  ScheduleOutcome,
-  SessionRun,
-  StageKind,
-  StagePolicy,
-  Step,
-  Subtask,
-  Task,
+import {
+  type Ban,
+  type Channel,
+  type Model,
+  type Pool,
+  type ProgressKind,
+  type RealtimeTable,
+  type Repo,
+  type Route,
+  type ScheduleOutcome,
+  type SegmentRun,
+  type SessionRun,
+  type StageKind,
+  type StagePolicy,
+  type Step,
+  type Subtask,
+  type Task,
+  taskWorkflowId,
 } from '@fleet-dao/shared';
 import { testRunOf } from './done-check.ts';
 import {
@@ -56,13 +57,13 @@ import {
   type QuotaWindowRecord,
   REPO_NOT_MANAGED,
   type RunPlan,
+  type SegmentRunRecord,
   type SettingRecord,
   type StagePolicyValue,
   type Store,
   type TimelineRecord,
   type User,
 } from './ports.ts';
-import { memorySeatStore } from './seat-store.ts';
 
 export interface ProgressRecord {
   id: string;
@@ -175,17 +176,8 @@ function changesOutboxRow(row: FeishuOutboxRow, next: Partial<FeishuOutboxRow>):
       : value !== before;
   });
 }
-/**
- * repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）和流程配置副本（不填 = 还没同步过，和库里刚加上这几列
- * 一样按停派算）。列仓的接口不带这两样。
- */
-/** 内存里的副本：core 的 FlowReplica，再加上驾驶舱顶栏要的来源和全长提交。没写就当这两列空着。 */
-export type MemoryFlow = FlowReplica & {
-  source?: 'project' | 'org_default' | undefined;
-  commit?: string | undefined;
-};
-
-export type RepoRecord = Repo & { autoDispatchSince?: string | undefined; flow?: MemoryFlow | undefined };
+/** repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）。列仓的接口不带这一样。 */
+export type RepoRecord = Repo & { autoDispatchSince?: string | undefined };
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 export interface MemoryData {
@@ -193,7 +185,10 @@ export interface MemoryData {
   repos: RepoRecord[];
   tasks: Task[];
   subtasks: Subtask[];
+  /** 老流程的会话（库里的 session_runs）。 */
   runs: SessionRun[];
+  /** 三段的流水（库里的 runs 表，名字撞了：这里叫 segmentRuns）。 */
+  segmentRuns: SegmentRun[];
   /** 会话进度：fleet plan 的步骤清单、测试结果都在这里（最近一条 plan 就是现行清单，kind=test 就是测试记录）。 */
   progress: ProgressRecord[];
   asks: AskRecord[];
@@ -223,8 +218,6 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
-  /** 认领（issue_claims），每张单一个（#299）。 */
-  claims: IssueClaim[];
 }
 
 export function emptyData(): MemoryData {
@@ -234,6 +227,7 @@ export function emptyData(): MemoryData {
     tasks: [],
     subtasks: [],
     runs: [],
+    segmentRuns: [],
     progress: [],
     asks: [],
     stateChanges: [],
@@ -258,7 +252,6 @@ export function emptyData(): MemoryData {
     feishuCards: [],
     githubEvents: new Map(),
     credentials: new Map(),
-    claims: [],
   };
 }
 
@@ -286,18 +279,7 @@ const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 /** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
 
-const repoOnly = ({ autoDispatchSince: _switch, flow: _flow, ...repo }: RepoRecord): Repo => repo;
-
-/** 接活要的是 core 的 FlowReplica。来源和提交只给看板，不从这里漏出去。 */
-function coreReplica(flow: MemoryFlow | undefined): FlowReplica {
-  if (!flow) return UNSYNCED_REPLICA;
-  return {
-    syncedAt: flow.syncedAt,
-    error: flow.error,
-    unread: flow.unread,
-    testCommand: flow.testCommand,
-  };
-}
+const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
 
 /** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
 const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
@@ -584,7 +566,6 @@ export function createMemoryStore(
 
   return {
     data,
-    ...memorySeatStore(data, now, audit),
 
     // —— 人 ——
     async getUser(id) {
@@ -667,18 +648,6 @@ export function createMemoryStore(
       const repo = data.repos.find((r) => r.id === id);
       return repo ? repoOnly(repo) : null;
     },
-    async getRepoFlow(repoId) {
-      const repo = data.repos.find((r) => r.id === repoId);
-      if (!repo) return null;
-      const flow = repo.flow;
-      return {
-        source: flow?.source ?? null,
-        commit: flow?.commit ?? null,
-        syncedAt: flow?.syncedAt ?? null,
-        error: flow?.error ?? null,
-        unread: flow?.unread ?? null,
-      };
-    },
     async listBoardTasks(repoId) {
       const cutoff = now().getTime() - RECENT_TERMINAL_MS;
       return data.tasks
@@ -712,6 +681,20 @@ export function createMemoryStore(
     },
     async getRun(id) {
       return data.runs.find((r) => r.id === id) ?? null;
+    },
+    async listSegmentRuns(taskId) {
+      const task = data.tasks.find((t) => t.id === taskId);
+      if (!task) return [];
+      const repo = data.repos.find((r) => r.id === task.repoId);
+      const workflowId = repo ? taskWorkflowId(repo, task.issueNumber) : undefined;
+      return data.segmentRuns
+        .flatMap((r): SegmentRunRecord[] => {
+          if (r.taskId !== undefined) return r.taskId === taskId ? [{ ...r, matchedBy: 'task' }] : [];
+          if (r.issueNumber !== task.issueNumber) return [];
+          if (r.workflowId !== undefined && r.workflowId !== workflowId) return [];
+          return [{ ...r, matchedBy: 'issueNumber' }];
+        })
+        .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
     },
     async getPlans(runIds) {
       const out = new Map<string, RunPlan>();
@@ -1234,7 +1217,6 @@ export function createMemoryStore(
         ? {
             ...repoOnly(repo),
             autoDispatchSince: repo.autoDispatchSince ?? null,
-            flow: coreReplica(repo.flow),
           }
         : null;
     },
@@ -1303,26 +1285,6 @@ export function createMemoryStore(
         at: now().toISOString(),
       });
       audit(entry);
-      // 没派出去过就叫停了：引擎待起的认领跟着放下（#299），和 Postgres 版的 followTaskOnEngineClaim 一样
-      const claim = data.claims.find(
-        (c) => c.repoId === task.repoId && c.issueNumber === task.issueNumber && c.ownerKind === 'engine',
-      );
-      if (claim && isActiveClaim(claim.state)) {
-        const at = now().toISOString();
-        claim.state = 'released';
-        claim.endedAt = at;
-        claim.updatedAt = at;
-        claim.endReason = '任务没派出去过就叫停了';
-        audit({
-          actor: { kind: 'engine', id: 'fusion' },
-          action: 'claim.release',
-          target: `claim:${claim.repoId}#${claim.issueNumber}`,
-          after: { claimId: claim.claimId, owner: 'engine', state: claim.state },
-          reason: claim.endReason,
-          via: 'engine',
-          ok: true,
-        });
-      }
       changed('tasks', task.id);
       return 'ok';
     },

@@ -71,29 +71,8 @@ export interface Repo {
   owner: string;
   name: string;
   defaultBranch: string;
-  /**
-   * 给人看的测试命令（repos.test_command）：对账从仓里 .fleet/flow.json 读成后跟着改成一样的。起会话、交活核对不认它，
-   * 认流程配置副本里的（项目没写就是没有，不拿这一列的旧值顶；packages/core/src/replica.ts）。
-   */
+  /** 给人看的测试命令（repos.test_command）。起会话、交活核对不认它：认每次会话自己带的（SessionRun.testCommand）。 */
   testCommand: string;
-}
-
-/**
- * 拉起一张单的工作流的输入：后端（api 的 RequirementWorkflows.start，起的是 Fusion）照它给，引擎 contract.ts 的
- * FusionInput（和旧的 RequirementInput）在它上面只加可选字段——两边共用这一份，不各写一份。进了工作流历史：以后只许加
- * 可选字段，不许改老字段的意思。
- */
-export interface RequirementStartInput {
-  schemaVersion: 1;
-  /** 库里的 tasks.id。 */
-  taskId: string;
-  repo: Repo;
-  issueNumber: number;
-  title: string;
-  /** 创始人原话（issue 正文去掉进度段；正文空就是标题）。 */
-  rawRequest: string;
-  /** issue 作者的 GitHub 登录名：结果文档里写「提出人」用，本来就公开在 issue 上。 */
-  requestedBy: string;
 }
 
 export interface Task {
@@ -112,11 +91,6 @@ export interface Task {
   specDir?: string;
   /** 做完标准（从需求文档来），fleet task 给会话看。 */
   acceptance?: string[];
-  /**
-   * 这一轮开工时用的流程配置读自哪。project = 仓里自己的文件；org_default = 没有，用的全组织默认。
-   * 不填 = 没记过（还没开工、开工前就停派、或旧工作流）。仓里后来改了文件不回头改这一列。
-   */
-  flowSource?: 'project' | 'org_default';
   createdAt: string;
 }
 
@@ -308,6 +282,55 @@ export interface SessionRun {
   costUsd?: number;
   /** 起会话时交代给它的测试命令（当时的流程配置副本里的），交活核对认它；没有 = 开工时项目没写，或这一项加上之前开的会话。 */
   testCommand?: string;
+}
+
+/** v3 的三段：对题、动手、验收（库里 runs.segment，引擎 RunRecord.segment）。 */
+export type SegmentKind = 'scope' | 'manual' | 'verify';
+/** 派工档（引擎 runner/tier.ts 的 TierEnum）：快档、中档、主力档。只有动手段分档。 */
+export type SegmentTier = 'fast' | 'medium' | 'heavyweight';
+/** 一段跑完的结局（库里 runs.outcome）；还在跑的没有。org_switch = 切号先停下这一段，切完在原分支上重跑（#59）。 */
+export type SegmentOutcome =
+  | 'done'
+  | 'timeout'
+  | 'killed'
+  | 'spawn_failed'
+  | 'admission_blocked'
+  | 'failed'
+  | 'org_switch';
+
+/**
+ * v3 三段里一段跑一次（库里 runs 表的一行）。读不到的字段不给，不当成 0。段名、派工档、结局库里有约束，
+ * 读的一方照样再认一遍（segment-runs.ts 的 readSegmentRun），认不出的明说。
+ */
+export interface SegmentRun {
+  id: string;
+  segment: SegmentKind;
+  /** 需求。写入那一端还没填它的老行按单号兜底对单（任务详情标明是兜底）。 */
+  taskId?: string;
+  issueNumber?: number;
+  /** 路由挑的模型（模型目录的 id）。 */
+  model: string;
+  /** 渠道（channels.id）：花费按它的计费方式分按量、套餐内。 */
+  channel?: string;
+  tier?: SegmentTier;
+  startedAt: string;
+  /** 还在跑的没有（和 outcome 一起空）。 */
+  endedAt?: string;
+  outcome?: SegmentOutcome;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
+  /** 内存峰值（MiB）：只有挂在 cgroup 里的会话读得到，本机不给。 */
+  memoryPeakMb?: number;
+  failureReason?: string;
+  prNumber?: number;
+  branch?: string;
+  /** 三段那条线的工作流编号（taskWorkflowId）。 */
+  workflowId?: string;
+  /** 重跑的是哪一笔。 */
+  retryOf?: string;
 }
 
 export type ProgressKind = 'plan' | 'say' | 'tool' | 'file' | 'test' | 'ask' | 'done' | 'blocked';

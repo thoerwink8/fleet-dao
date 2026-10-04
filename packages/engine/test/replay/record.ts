@@ -2,7 +2,7 @@
 //
 //   node packages/engine/test/replay/record.ts <场景> [场景…]
 //
-// 用假端口把真的工作流跑到有代表性的位置（做完、停在暂停里、挂起、在合并队列里、在等回答……），
+// 用假端口把真的工作流跑到有代表性的位置（做完、停下等人、在等合并……），
 // 把 Temporal 历史存成 test/replay/fixtures/<名字>.json，由 replay.test.ts 拿「现在的代码」重放。
 //
 // 规矩（windsurf-dao#1633）：夹具是过去某一版代码真走过的路。已有的夹具红了，意思是「此刻在途的任务换上新代码会变僵尸」，
@@ -11,41 +11,17 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
-import {
-  type FusionStatus,
-  pauseSignal,
-  type RequirementStatus,
-  requirementWorkflowId,
-  type SubtaskStatus,
-  subtaskWorkflowId,
-  WORKFLOW_TYPES,
-} from '../../src/contract.ts';
-import type { SubtaskSpec } from '../../src/decisions/types.ts';
-import {
-  createFakeWorld,
-  FAKE_BRIEF,
-  FAKE_FLOW_CONFIG,
-  FAKE_ROUTES,
-  type FakeScript,
-  type FakeWorld,
-  fakeHead,
-} from '../../src/fakes.ts';
-import type { RouteChoice } from '../../src/ports.ts';
-import {
-  createEnv,
-  engineBundle,
-  fusionInput,
-  queryUntil,
-  REPO,
-  requirementInput,
-  spec,
-  subtaskInput,
-  waitUntil,
-  withWorker,
-} from '../support.ts';
+import type { EngineJobs, EngineTasks } from '../../src/activities.ts';
+import { WORKFLOW_TYPES } from '../../src/contract.ts';
+import { createFakeWorld, type FakeScript, type FakeWorld } from '../../src/fakes.ts';
+import { type TaskStatus, type TaskWorkflowInput, taskStatusQuery } from '../../src/task-contract.ts';
+import { idleDeps } from '../intake-script.ts';
+import { createEnv, engineBundle, REPO, waitUntil, withWorker } from '../support.ts';
+import { scripted } from '../task-script.ts';
 
 const OUT = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const repo = { ...REPO, id: 'repo-fixture', name: 'fixture' };
@@ -56,317 +32,84 @@ interface Run {
   queue: string;
 }
 /** 返回「夹具名 → 工作流」：跑到想要的位置就返回，那一刻的历史就是夹具。 */
-type Scenario = { script?: Partial<FakeScript>; run(run: Run): Promise<Record<string, WorkflowHandle>> };
+type Scenario = {
+  script?: Partial<FakeScript>;
+  /** 任务工作流要的活动（脚本化的）；不给就是没装。 */
+  tasks?: EngineTasks;
+  /** 定时任务要的东西（脚本化的）；不给就是没装。 */
+  jobs?: EngineJobs;
+  run(run: Run): Promise<Record<string, WorkflowHandle>>;
+};
 
-const startSubtask = ({ env, queue }: Run, key: string, over: Partial<SubtaskSpec> = {}) => {
-  const input = subtaskInput(spec(key, over), {
-    repo,
+/** 任务工作流（#632 S2-4）：驾驶舱后端按这张单起的那一个。 */
+const startTask = ({ env, queue }: Run) => {
+  const input: TaskWorkflowInput = {
+    schemaVersion: 1,
     taskId: 'task-fixture',
-    subtaskId: '00000000-0000-4000-8000-000000000001',
-  });
-  return env.client.workflow.start(WORKFLOW_TYPES.subtask, {
+    repo,
+    issueNumber: 12,
+    title: '给驾驶舱加状态',
+  };
+  return env.client.workflow.start(WORKFLOW_TYPES.task, {
     taskQueue: queue,
-    workflowId: subtaskWorkflowId(input.subtaskId),
+    workflowId: taskWorkflowId(repo, input.issueNumber),
     args: [input],
   });
 };
 
-const startRequirement = ({ env, queue }: Run) => {
-  const input = requirementInput({ repo, taskId: 'task-fixture' });
-  return env.client.workflow.start(WORKFLOW_TYPES.requirement, {
-    taskQueue: queue,
-    workflowId: requirementWorkflowId(repo, input.issueNumber),
-    args: [input],
-  });
-};
-
-const mergeQueue = ({ env }: Run) => env.client.workflow.getHandle(`mq:${repo.owner}/${repo.name}`);
-
-/** 后端从 #214 起给每张单起的 Fusion 工作流（编号和需求工作流同一个）。 */
-const startFusion = ({ env, queue }: Run) => {
-  const input = fusionInput({ repo, taskId: 'task-fixture' });
-  return env.client.workflow.start(WORKFLOW_TYPES.fusion, {
-    taskQueue: queue,
-    workflowId: requirementWorkflowId(repo, input.issueNumber),
-    args: [input],
-  });
-};
-
-/** 开 PR 前验证只派别家：写单的是 claude（Lead）和 kimi（副手），加一条 gpt 族的路由才验得了。 */
-const GPT_ROUTE: RouteChoice = {
-  routeId: 'r4',
-  poolId: 'p4',
-  modelId: 'm3',
-  family: 'gpt',
-  hostId: 'cursor-agent',
-};
-const FUSION_ROUTES = [...FAKE_ROUTES, GPT_ROUTE];
+const taskStatusUntil = (handle: WorkflowHandle, check: (s: TaskStatus) => boolean, what: string) =>
+  waitUntil(async () => check(await handle.query(taskStatusQuery)), what);
 
 const SCENARIOS: Record<string, Scenario> = {
-  // 最顺的一条：写码、推分支开 PR、CI 和第二意见都过、合并队列合上、收树。
-  'subtask-merged': {
-    async run(r) {
-      const handle = await startSubtask(r, 'a');
-      await handle.result();
-      return { 'subtask-merged': handle, 'merge-queue-idle': mergeQueue(r) };
-    },
-  },
-  // 返工一轮：CI 红、第二意见要改，意见回主会话（续同一个会话）改完再验，合上。
-  'subtask-reworked': {
-    script: {
-      ci: (_input, n) =>
-        n === 1 ? { state: 'red', failedChecks: ['test'], digest: '登录测试挂了' } : undefined,
-      review: (_input, n) =>
-        n === 1
-          ? { verdict: 'changes', findings: [{ severity: 'blocking', text: '验证码没设过期时间' }] }
-          : undefined,
-    },
-    async run(r) {
-      const handle = await startSubtask(r, 'a');
-      await handle.result();
-      return { 'subtask-reworked': handle };
-    },
-  },
-  // 合并队列在最新主线上测红了、退回：回主会话修完重新排队，合上。队列这边也录一份。
-  'subtask-merge-returned': {
-    script: { tests: (_input, n) => (n === 1 ? { passed: false, summary: '登录测试挂了' } : undefined) },
-    async run(r) {
-      const handle = await startSubtask(r, 'a');
-      await handle.result();
-      return { 'subtask-merge-returned': handle, 'merge-queue-returned': mergeQueue(r) };
-    },
-  },
-  // 人闸：验证过了，停在等人批准（卡片已发）。
-  'subtask-awaiting-approval': {
-    async run(r) {
-      const handle = await startSubtask(r, 'a', { holds: ['release'] });
-      await queryUntil<SubtaskStatus>(
-        handle,
-        (s) => s.approval?.state === 'pending' && r.world.approvals.length === 1,
-        '在等批准',
-      );
-      return { 'subtask-awaiting-approval': handle };
-    },
-  },
-  // #1633 的原形：停在暂停里、等「继续」信号。工人换代码时重放的正是这种工作流。
-  'subtask-paused': {
-    script: { session: (input, n) => (input.stage === 'execute' && n === 1 ? { hold: true } : {}) },
-    async run(r) {
-      const handle = await startSubtask(r, 'a');
-      await waitUntil(() => r.world.held().length === 1, '写码会话挂着');
-      await handle.signal(pauseSignal, { by: 'recorder' });
-      await queryUntil<SubtaskStatus>(handle, (s) => s.waiting?.kind === 'human', '暂停后在等人');
-      return { 'subtask-paused': handle };
-    },
-  },
-  // 兜底梯走到底：挂起并报警，等人。
-  'subtask-parked': {
-    script: {
-      session: (input) =>
-        input.stage === 'execute'
-          ? { outcome: 'failed', failure: { code: 'PERMISSION_DENIED', message: '没权限', retryable: false } }
-          : {},
-    },
-    async run(r) {
-      const handle = await startSubtask(r, 'a');
-      await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
-      return { 'subtask-parked': handle };
-    },
-  },
-  // 在合并队列里等结果；队列正在新头上跑测试。
-  'subtask-in-merge-queue': {
-    script: { delayMs: { runTests: 3_000 } },
-    async run(r) {
-      const handle = await startSubtask(r, 'a');
-      await queryUntil<SubtaskStatus>(handle, (s) => s.state === 'in_merge_queue', '排进合并队列');
-      await waitUntil(() => r.world.count('runTests') === 1, '队列在跑测试');
-      return { 'subtask-in-merge-queue': handle, 'merge-queue-busy': mergeQueue(r) };
-    },
-  },
-  // 需求走完：分诊 → 需求文档 → 方案 → 两个有依赖的子任务 → 结果文档 → 关单。
-  'requirement-done': {
-    script: {
-      plan: [
-        { key: 'api', title: '后端接口', touches: ['src/api'] },
-        { key: 'page', title: '页面', touches: ['src/page'], dependsOn: ['api'] },
-      ],
-    },
-    async run(r) {
-      const handle = await startRequirement(r);
-      await handle.result();
-      const status = (await handle.query('status')) as RequirementStatus;
-      const child = (key: string) =>
-        r.env.client.workflow.getHandle(status.subtasks.find((s) => s.key === key)?.workflowId ?? '');
-      return {
-        'requirement-done': handle,
-        'requirement-done-api': child('api'),
-        'requirement-done-page': child('page'),
-      };
-    },
-  },
-  // 看不懂，在任务里追问，等回答。
-  'requirement-asking': {
-    script: { triage: () => ({ clear: false, question: '验证码发短信还是邮件？' }) },
-    async run(r) {
-      const handle = await startRequirement(r);
-      await queryUntil<RequirementStatus>(handle, (s) => s.waiting?.askId !== undefined, '在等回答');
-      return { 'requirement-asking': handle };
-    },
-  },
-  // Fusion 走完：Lead 写方案 → 副手干、Lead 验收 → 别家验证 → 开 PR、CI 绿 → Lead 最终审查 → 合并 → 关单。
-  'fusion-done': {
-    script: { routes: FUSION_ROUTES },
-    async run(r) {
-      const handle = await startFusion(r);
-      await handle.result();
-      return { 'fusion-done': handle };
-    },
-  },
-  // Fusion 各处返工一轮：Lead 打回副手一次、别家验证挡一轮（Lead 没驳回）、开了 PR 之后 CI 红一轮，都改完合上。
-  'fusion-reworked': {
-    script: {
-      routes: FUSION_ROUTES,
-      lead: (step, _input, n) =>
-        step === 'accept' && n === 1
-          ? { kind: 'lead-verdict', verdict: 'reject', why: '验证码没做五分钟过期' }
-          : undefined,
-      verify: (input, n) =>
-        n === 1
-          ? {
-              head: input.brief.head ?? '',
-              results: [
-                { criterion: '照原话做完', answer: 'done', evidence: 'src/login/changed.ts 加了验证码' },
-                {
-                  criterion: '有一条故意造出失败的测试',
-                  answer: 'not-done',
-                  evidence: 'test/ 下没有过期验证码的用例',
-                },
-              ],
-              findings: [],
-            }
-          : undefined,
-      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
-    },
-    async run(r) {
-      const handle = await startFusion(r);
-      await handle.result();
-      return { 'fusion-reworked': handle };
-    },
-  },
-  // 单模型模式：没有副手，Lead 自己写，不高风险就不验证，照样最终审查。
-  'fusion-single': {
-    async run(r) {
-      const input = fusionInput({ repo, taskId: 'task-fixture', mode: 'single' });
-      const handle = await r.env.client.workflow.start(WORKFLOW_TYPES.fusion, {
-        taskQueue: r.queue,
-        workflowId: requirementWorkflowId(repo, input.issueNumber),
-        args: [input],
+  // 拉单（#632）：开关全关的一轮，工作流调一个活动就收工。
+  'intake-idle': {
+    jobs: { intake: () => idleDeps() },
+    async run({ env, queue }) {
+      const handle = await env.client.workflow.start(WORKFLOW_TYPES.intake, {
+        taskQueue: queue,
+        workflowId: 'intake-fixture',
+        args: [{ schemaVersion: 1 }],
       });
       await handle.result();
-      return { 'fusion-single': handle };
+      return { 'intake-idle': handle };
     },
   },
-  // Lead 写方案时要问创始人：发卡、等回答。
-  'fusion-asking': {
-    script: {
-      routes: FUSION_ROUTES,
-      session: (input) =>
-        input.brief.lead?.step === 'plan' && !input.resumeSessionId
-          ? { outcome: 'blocked', blocked: { question: '验证码几位？', options: ['4 位', '6 位'] } }
-          : undefined,
-    },
+  // 任务工作流最顺的一条：读交代、动手、推分支开 PR、CI 绿、验收过、挂自动合并、合上、关单、收树。
+  'task-merged': {
+    tasks: scripted().tasks,
     async run(r) {
-      const handle = await startFusion(r);
-      await queryUntil<FusionStatus>(handle, (s) => Boolean(s.waiting?.askId), '在等回答');
-      return { 'fusion-asking': handle };
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-merged': handle };
     },
   },
-  // 副手在写（会话挂着）时点了暂停：停在等「继续」。
-  'fusion-paused': {
-    script: {
-      routes: FUSION_ROUTES,
-      session: (input) => (!input.brief.lead && input.stage === 'execute' ? { hold: true } : undefined),
-    },
+  // 交代不全：一个会话都没起，停着等人补齐点「继续」。
+  'task-parked-brief': {
+    tasks: scripted({
+      brief: () => ({ ok: false, problems: [{ field: '场景', why: '正文里没有「## 场景」一节' }] }),
+    }).tasks,
     async run(r) {
-      const handle = await startFusion(r);
-      await waitUntil(() => r.world.held().length === 1, '副手的会话挂着');
-      await handle.signal(pauseSignal, { by: 'recorder' });
-      await queryUntil<FusionStatus>(handle, (s) => s.waiting?.kind === 'human', '暂停后在等人');
-      return { 'fusion-paused': handle };
+      const handle = await startTask(r);
+      await taskStatusUntil(handle, (s) => s.waiting?.kind === 'human', '交代不全，停下等人');
+      return { 'task-parked-brief': handle };
     },
   },
-  // 流程配置认不出：这张单停派报红，一个会话都不起，挂起等「继续」。
-  'fusion-parked': {
-    script: {
-      routes: FUSION_ROUTES,
-      flow: () => ({
-        replica: {
-          syncedAt: new Date().toISOString(),
-          error: '项目配置 .fleet/flow.json：不是 JSON（提交 0123456）',
-          unread: null,
-          testCommand: null,
-        },
-        source: 'project',
-        config: FAKE_FLOW_CONFIG,
-      }),
-    },
+  // 改到了标准路径：PR 开了、CI 绿了、验收过了，停在挂自动合并之前等创始人（卡片已发）。
+  'task-parked-guarded': {
+    tasks: scripted({ guarded: () => ({ standards: ['AGENTS.md'], highRisk: [] }) }).tasks,
     async run(r) {
-      const handle = await startFusion(r);
-      await queryUntil<FusionStatus>(handle, (s) => s.parked, '停派挂起');
-      return { 'fusion-parked': handle };
+      const handle = await startTask(r);
+      await taskStatusUntil(handle, (s) => s.waiting?.kind === 'human', '改标准，停下等创始人');
+      return { 'task-parked-guarded': handle };
     },
   },
-  // 方案里写了人闸：验证过了、开了 PR、CI 绿、最终审查过了，停在等人批（卡片已发）。
-  'fusion-awaiting-approval': {
-    script: {
-      routes: FUSION_ROUTES,
-      lead: (step) =>
-        step === 'plan'
-          ? {
-              kind: 'lead-plan',
-              head: fakeHead(90),
-              changedFiles: ['specs/12-登录页加验证码/方案.md'],
-              summary: '接短信服务商发验证码',
-              brief: FAKE_BRIEF,
-              small: true,
-              highRisk: false,
-              holds: ['spend'],
-            }
-          : undefined,
-    },
+  // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
+  'task-merging': {
+    tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,
     async run(r) {
-      const handle = await startFusion(r);
-      await queryUntil<FusionStatus>(
-        handle,
-        (s) => s.approval?.state === 'pending' && r.world.approvals.length === 1,
-        '在等批准',
-      );
-      return { 'fusion-awaiting-approval': handle };
-    },
-  },
-  // 在合并队列里等结果；队列正在新头上跑测试。
-  'fusion-in-merge-queue': {
-    script: { routes: FUSION_ROUTES, delayMs: { runTests: 3_000 } },
-    async run(r) {
-      const handle = await startFusion(r);
-      await queryUntil<FusionStatus>(handle, (s) => s.state === 'merging', '排进合并队列');
-      await waitUntil(() => r.world.count('runTests') === 1, '队列在跑测试');
-      return { 'fusion-in-merge-queue': handle };
-    },
-  },
-  // 子任务在写码（会话挂着），需求在调度循环里等。
-  'requirement-running': {
-    script: { session: (input) => (input.stage === 'execute' ? { hold: true } : {}) },
-    async run(r) {
-      const handle = await startRequirement(r);
-      await waitUntil(() => r.world.held().length === 1, '写码会话挂着');
-      const status = await queryUntil<RequirementStatus>(
-        handle,
-        (s) => s.subtasks[0]?.state === 'running',
-        '子任务在写码',
-      );
-      const child = r.env.client.workflow.getHandle(status.subtasks[0]?.workflowId ?? '');
-      return { 'requirement-running': handle, 'requirement-running-main': child };
+      const handle = await startTask(r);
+      await taskStatusUntil(handle, (s) => s.phase === 'merge' && s.waiting?.kind === 'merge', '在等合并');
+      return { 'task-merging': handle };
     },
   },
 };
@@ -399,14 +142,22 @@ for (const name of names) {
   const env = await createEnv();
   try {
     const world = createFakeWorld(scenario.script ?? {});
-    const captured = await withWorker(env, world, async (queue) => {
-      const handles = await scenario.run({ env, world, queue });
-      const out: Record<string, { workflowId: string; json: string }> = {};
-      for (const [fixture, handle] of Object.entries(handles)) {
-        out[fixture] = { workflowId: handle.workflowId, json: historyToJSON(await handle.fetchHistory()) };
-      }
-      return out;
-    });
+    const captured = await withWorker(
+      env,
+      world,
+      async (queue) => {
+        const handles = await scenario.run({ env, world, queue });
+        const out: Record<string, { workflowId: string; json: string }> = {};
+        for (const [fixture, handle] of Object.entries(handles)) {
+          out[fixture] = { workflowId: handle.workflowId, json: historyToJSON(await handle.fetchHistory()) };
+        }
+        return out;
+      },
+      {
+        ...(scenario.tasks ? { tasks: scenario.tasks } : {}),
+        ...(scenario.jobs ? { jobs: scenario.jobs } : {}),
+      },
+    );
     for (const [fixture, { workflowId, json }] of Object.entries(captured)) {
       const file = `${OUT}${fixture}.json`;
       if (existsSync(file)) {

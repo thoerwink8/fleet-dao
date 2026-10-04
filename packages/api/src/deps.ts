@@ -1,5 +1,4 @@
 import type { AlertWorkPort } from './alert-work.ts';
-import type { ClaimStatus } from './claim-status.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
@@ -10,34 +9,23 @@ import type {
   FeishuAuth,
   GitHubEventSink,
   HealthCheck,
-  IssuePlanReader,
   Logger,
-  RequirementWorkflows,
   Store,
   WorkflowControl,
 } from './ports.ts';
+import type { ReleaseSource } from './release-version.ts';
+import type { RoutingEffortsPort } from './routing-efforts.ts';
+import type { RoutingLayersPort } from './routing-layers.ts';
 
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
 export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
-  /** 拉起一张单的工作流（issue 进来之后；起的是 Fusion，见 temporal.ts）。 */
-  requirements: RequirementWorkflows;
-  /**
-   * 读一张 issue 此刻挂在哪个版本、是不是母单子单、开没开着（GitHub 上现读）：接活只派挂在当前版本上的独立单。机器人凭据没读到时是一个读就抛错的
-   * （issue-intake.ts 的 issuePlansUnavailable），不拿「挂在当前版本」顶。
-   */
-  plans: IssuePlanReader;
   changes: ChangeFeed;
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
-  /**
-   * 「认领对得上」（#348，claim-status.ts）：PR 事件进来时现读 PR、按库里的认领贴状态（引擎机器人）。没给（开发环境没接 GitHub）
-   * 的只在投递说明里记「没接」；生产在 main.ts 装上，机器人凭据读不到时 PR 事件在写镜像那一步就如实失败了。
-   */
-  claims?: ClaimStatus | undefined;
   /** 飞书里确认的草稿去开单（开 issue、建任务、拉起工作流）。没接上时用 notWiredDraftOpener：草稿留在待开单。 */
   draftOpener: DraftOpener;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
@@ -49,6 +37,21 @@ export interface Deps {
    * 另写一句「谁在处理没接上」，不拿「没人在修」顶。
    */
   alertWork?: AlertWorkPort | undefined;
+  /**
+   * 路由两层每一层现在活着吗（#574，routing-layers.ts）：驾驶舱「路由」页现算用。没给（开发、内存版没有那两张表）的接口照样回，
+   * 另写一句 unavailable，不拿空列表冒充「都没配」。
+   */
+  routingLayers?: RoutingLayersPort | undefined;
+  /**
+   * 路由两层里每条路由的思考档位（#470，routing-efforts.ts）：驾驶舱「思考档位」页读、改。没给（开发、内存版没有那张表）的
+   * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。
+   */
+  routingEfforts?: RoutingEffortsPort | undefined;
+  /**
+   * /changelog 页「发布 v<N>」定版本号要的两样（release-version.ts）：仓里开着的里程碑（GitHub 现读）、仓根 CHANGELOG.md。
+   * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。
+   */
+  release?: ReleaseSource | undefined;
   /**
    * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。飞书 outbox 的长轮询（feishu-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。

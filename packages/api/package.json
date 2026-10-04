@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./agent-token": "./src/agent-token.ts"
+    "./agent-token": "./src/agent-token.ts",
+    "./whitelist": "./src/whitelist.ts"
   },
   "scripts": {
     "dev": "node --watch src/main.ts"

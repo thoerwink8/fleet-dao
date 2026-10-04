@@ -57,8 +57,8 @@ describe('canary 项怎么判', () => {
       {
         finished: row({
           verdict: 'broken',
-          stage: 'dispatch',
-          why: '断在「派活」：acme/fleet-canary #12 挂起等人',
+          stage: 'implement',
+          why: '断在「动手」（这一步走了 3 分 0 秒）：acme/fleet-canary #12 停下等人：没有可用的路由',
         }),
         running: null,
       },
@@ -67,9 +67,20 @@ describe('canary 项怎么判', () => {
     expect(got).toEqual({
       ok: false,
       code: 'canary_broken',
-      message: '最近一轮（09-27 20:13 有结论）断在「派活」',
-      detail: '断在「派活」：acme/fleet-canary #12 挂起等人',
+      message: '最近一轮（09-27 20:13 有结论）断在「动手」',
+      detail: '断在「动手」（这一步走了 3 分 0 秒）：acme/fleet-canary #12 停下等人：没有可用的路由',
     });
+  });
+
+  it('换成三段任务工作流之前的老几轮（记的是老步骤「派活」）：照样说人话，不露出步骤的英文编号', () => {
+    const got = canaryHealth(
+      {
+        finished: row({ verdict: 'broken', stage: 'dispatch', why: '断在「派活」：挂起等人' }),
+        running: null,
+      },
+      NOW,
+    );
+    expect(got).toMatchObject({ ok: false, message: '最近一轮（09-27 20:13 有结论）断在「派活」' });
   });
 
   it('【故意造出的失败】巡检自己没跑成：红，和「断了」分开说', () => {
@@ -137,7 +148,7 @@ describe('canary 项怎么判', () => {
     expect(scan.BUILTIN_TERMS.length).toBeGreaterThan(0);
     const said = [
       canaryHealth({ finished: row(), running }, NOW),
-      canaryHealth({ finished: row({ verdict: 'broken', stage: 'dispatch', why: 'x' }), running }, NOW),
+      canaryHealth({ finished: row({ verdict: 'broken', stage: 'implement', why: 'x' }), running }, NOW),
       canaryHealth({ finished: row({ verdict: 'not_run', stage: 'open', why: 'x' }), running }, NOW),
       canaryHealth({ finished: row({ endedAt: ago(24 * 60) }), running }, NOW),
       canaryHealth({ finished: null, running }, NOW),
@@ -170,8 +181,8 @@ describe('canary 项读库（真库）', () => {
     });
     await finishCanaryRun(t.db, broken, {
       verdict: 'broken',
-      stage: 'dispatch',
-      why: '断在「派活」：挂起等人',
+      stage: 'verify',
+      why: '断在「验收」：停下等人',
       steps: [],
       at: ago(90),
     });
@@ -187,7 +198,7 @@ describe('canary 项读库（真库）', () => {
     expect(report).toEqual({
       ok: false,
       checks: {
-        canary: { ok: false, code: 'canary_broken', message: '最近一轮（09-27 19:00 有结论）断在「派活」' },
+        canary: { ok: false, code: 'canary_broken', message: '最近一轮（09-27 19:00 有结论）断在「验收」' },
       },
     });
     const pass = await startCanaryRun(t.db, {

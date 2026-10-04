@@ -11,6 +11,11 @@ export const IDS = {
   sub12b: 'c0000000-0000-4000-8000-00000000012b',
   run1: 'd0000000-0000-4000-8000-000000000001',
   run0: 'd0000000-0000-4000-8000-000000000000',
+  // d1 开头：三段的流水（runs 表），都是 #13 的
+  seg13scope: 'd1000000-0000-4000-8000-000000013001',
+  seg13manual1: 'd1000000-0000-4000-8000-000000013002',
+  seg13manual2: 'd1000000-0000-4000-8000-000000013003',
+  seg13verify: 'd1000000-0000-4000-8000-000000013004',
   founderA: 'e0000000-0000-4000-8000-00000000000a',
   founderB: 'e0000000-0000-4000-8000-00000000000b',
   botWorker: 'e0000000-0000-4000-8000-000000009001',
@@ -21,8 +26,6 @@ export const IDS = {
 
 export const DEV_USER_ID = IDS.founderA;
 export const DEV_RUN_ID = IDS.run1;
-/** 样例仓副本读自的提交，40 位全长。看板接口只给前 7 位。 */
-export const DEV_FLOW_COMMIT = 'a'.repeat(40);
 
 export function devFixtures(now: Date): Partial<MemoryData> {
   const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
@@ -54,17 +57,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         owner: 'example',
         name: 'canary',
         defaultBranch: 'main',
-        // 给人看的旧值：派活、交活都不认它，认下面副本里的（生产上对账读成后会把它改成一样的）
         testCommand: 'pnpm check',
-        // 流程配置副本五分钟前刚同步过，读自仓里（生产上由引擎的对账写；超过 45 分钟没同步就停派）
-        flow: {
-          syncedAt: ago(5),
-          error: null,
-          unread: null,
-          testCommand: 'pnpm test:changed',
-          source: 'project',
-          commit: DEV_FLOW_COMMIT,
-        },
       },
     ],
     channels: [
@@ -242,6 +235,78 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         startedAt: ago(12),
         // 起会话时交代的测试命令（当时副本里的），交活核对认它
         testCommand: 'pnpm test:changed',
+      },
+    ],
+    // #13 走的是三段：对题一次、动手两轮（快档；第一轮超时）、验收一次冷调用
+    segmentRuns: [
+      {
+        id: IDS.seg13scope,
+        segment: 'scope',
+        taskId: IDS.task13,
+        issueNumber: 13,
+        model: 'opus-5.5',
+        channel: 'ch-claude',
+        startedAt: ago(598),
+        endedAt: ago(591),
+        outcome: 'done',
+        inputTokens: 18_000,
+        outputTokens: 2_400,
+        cacheReadTokens: 210_000,
+        cacheWriteTokens: 9_000,
+        costUsd: 0.42,
+      },
+      {
+        id: IDS.seg13manual1,
+        segment: 'manual',
+        taskId: IDS.task13,
+        issueNumber: 13,
+        model: 'kimi-k3',
+        channel: 'ch-mirasim',
+        tier: 'fast',
+        startedAt: ago(589),
+        endedAt: ago(559),
+        outcome: 'timeout',
+        failureReason: '30 分钟没交活，按超时收了',
+        // 中继只报输入输出：缓存读写、花费没记到（演示「没读到」不显示成 0）
+        inputTokens: 64_000,
+        outputTokens: 5_200,
+        branch: 'fleet/13-readme-time',
+      },
+      {
+        id: IDS.seg13manual2,
+        segment: 'manual',
+        taskId: IDS.task13,
+        issueNumber: 13,
+        model: 'opus-5.5',
+        channel: 'ch-claude',
+        tier: 'fast',
+        startedAt: ago(556),
+        endedAt: ago(531),
+        outcome: 'done',
+        inputTokens: 41_000,
+        outputTokens: 7_800,
+        cacheReadTokens: 1_120_000,
+        cacheWriteTokens: 52_000,
+        costUsd: 1.86,
+        prNumber: 39,
+        branch: 'fleet/13-readme-time',
+        workflowId: 'task:example/canary#13',
+      },
+      {
+        // 写入那一端还没填 task_id 的一笔：按单号兜底对上（任务详情标明是兜底）
+        id: IDS.seg13verify,
+        segment: 'verify',
+        issueNumber: 13,
+        model: 'gpt-5.6',
+        channel: 'ch-mirasim',
+        startedAt: ago(522),
+        endedAt: ago(514),
+        outcome: 'done',
+        inputTokens: 23_000,
+        outputTokens: 1_100,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        prNumber: 39,
       },
     ],
     progress: [

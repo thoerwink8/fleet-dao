@@ -1,6 +1,6 @@
-// 开 PR 前验证照哪几条问（docs/decisions/0003-fusion-flow.md 第 5 条第 5 步）：这张单的需求文档在哪、「怎么算做完」逐条原文。
-// 需求文档是开单时 pnpm issue:new 写的 specs/<号>-<短名>/需求.md，单子正文里留一行「文档：`specs/<本单号>-<短名>/需求.md`」指着它。
-// 引擎自己开的单（巡检单这类）没有这一行，正文写全了需求：收单时照正文写需求文档，随 PR 进主线（specOf，#295）。
+// 「怎么算做完」逐条原文，和老单里指需求文档的那一行（docs/decisions/0003-fusion-flow.md 第 5 条第 5 步）。
+// #654 起单子正文就是需求（pnpm issue:new 不再写 specs/<号>-<短名>/需求.md、单子里不再留「文档：」那一行）；这一行只在 #654
+// 之前开的老单里还有，引擎照它去读主线上那份需求文档（specDirOf）。
 // 读不到、认不出一律明确报错（error），不拿空清单冒充「没有要验的」。读文件是外壳的事，这里只认文字。
 
 /** 需求文档的文件名（在 specs/<号>-<短名>/ 下）。 */
@@ -11,6 +11,11 @@ const POINTER = /文档\s*[：:]\s*`?\s*(specs\/[^`\s]+?)\/需求\.md\s*`?/;
 const PLACEHOLDER = '<本单号>';
 /** 目录名：specs/<号>-<短名>，短名不许带斜杠、反斜杠、空白。 */
 const SPEC_DIR = /^specs\/(\d+)-([^/\\\s]+)$/;
+
+/** 单子正文里有没有指需求文档的那一行（有，但指错了，specDirOf 才报错；没有，是另一种情形：正文自己写全了需求）。 */
+export function hasSpecPointer(issueBody: string): boolean {
+  return POINTER.test(issueBody);
+}
 
 /** 单子正文指的需求文档目录（例如 specs/213-开PR前验证）。没写、写的不是这张单的、目录名认不出，都回 error。 */
 export function specDirOf(issueBody: string, issueNumber: number): { ok: string } | { error: string } {
@@ -27,57 +32,14 @@ export function specDirOf(issueBody: string, issueNumber: number): { ok: string 
   return { ok: dir };
 }
 
-/** 需求文档目录的短名最多几个字。 */
-const SHORT_NAME_MAX = 20;
-
-/** 照单子标题取需求文档目录的短名：只留字母、数字、汉字，最多 20 个字；一个都不剩写「需求」。同一个标题总是同一个短名。 */
-export function specShortName(title: string): string {
-  const kept = [...title.normalize('NFKC')].filter((ch) => /[\p{L}\p{N}]/u.test(ch));
-  return kept.slice(0, SHORT_NAME_MAX).join('') || '需求';
-}
-
 /** 单子正文当需求文档用之前：去掉 HTML 注释（引擎开单留的标记、模板里的提示）、统一换行、掐头去尾。 */
-function cleanBody(body: string): string {
+export function cleanBody(body: string): string {
   return body
     .replace(/^﻿/, '')
     .replace(/\r\n?/g, '\n')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-}
-
-/**
- * 这张单的需求文档从哪来（Fusion 第 1 步收单）：
- * - 正文里有指需求文档的那一行：照它（specDirOf；写错了、指的是别的单照样报错，不改用正文）。
- * - 没有那一行、正文写全了需求（有写了字的「## 怎么算做完」，#295：巡检单这类引擎自己开的单都是这样）：照收，目录是
- *   specs/<号>-<照标题取的短名>，requirement 是照正文写的需求文档，由 Lead 原样提交进这个目录、随 PR 进主线；开 PR 前验证的
- *   「怎么算做完」读单子正文（bodyCriteria），不读分支上的。
- * - 两样都没有：报错，停下等人补。
- */
-export function specOf(input: {
-  body: string;
-  issueNumber: number;
-  title: string;
-}): { ok: string; requirement?: string } | { error: string } {
-  if (POINTER.test(input.body)) return specDirOf(input.body, input.issueNumber);
-  const text = cleanBody(input.body);
-  const got = criteriaOf(text);
-  if ('error' in got) {
-    return {
-      error: `单子正文里没有指需求文档的那一行（「文档：\`specs/<号>-<短名>/需求.md\`」），正文里也没写全需求（${got.error.replace(/^需求文档里/, '')}）`,
-    };
-  }
-  const title = input.title.replace(/\s+/g, ' ').trim() || `#${input.issueNumber}`;
-  return {
-    ok: `specs/${input.issueNumber}-${specShortName(title)}`,
-    requirement: `# ${title}（#${input.issueNumber}）\n\n${text}\n`,
-  };
-}
-
-/** 单子正文里「怎么算做完」逐条原文（正文写全了需求、没有需求文档的单，开 PR 前验证照它核，#295）。 */
-export function bodyCriteria(body: string): { ok: string[] } | { error: string } {
-  const got = criteriaOf(cleanBody(body));
-  return 'error' in got ? { error: got.error.replace(/^需求文档里/, '单子正文里') } : got;
 }
 
 const HEADING = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;

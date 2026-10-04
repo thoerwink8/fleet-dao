@@ -1,6 +1,7 @@
-// 「认领对得上」这一侧要的 GitHub 读写（#348，都用「引擎」机器人）：现读 PR、列开着的 PR、读头上某个 context 最新的一条提交
-// 状态、贴提交状态（读得到 statuses 写权限才贴）、撤自动合并、关 PR、在 PR 上留言。判法在 @fleet-dao/core 的 judgeClaimMatch，
-// 谁什么时候调在 @fleet-dao/api 的 claim-status.ts。
+// 引擎的通用 GitHub 读写口（都用「引擎」机器人）：现读 PR、列开着的 PR、读头上某个 context 最新的一条提交
+// 状态、贴提交状态（读得到 statuses 写权限才贴）、撤自动合并、关 PR、在 PR 上留言。
+// 文件名里的「claims」是 #348「认领对得上」留下的老名字：认领账 #556 整个删了，judgeClaimMatch 和 claim-status.ts 也都没了，
+// 但这个口是活的——挂自动合并（hourly-reconcile）、读 PR 和贴 cold-verify（task-activities、task-verify）都走它，别当残留删。
 // 改这里之前必须知道：合并闸只认「引擎」机器人贴的那条（@fleet-dao/conventions 的 ENGINE_BOT_LOGIN），所以贴一律用引擎的身份；
 // 没有 statuses 写权限、GitHub 没回权限表，都明确报错，不当成贴上了。
 import { z } from 'zod';

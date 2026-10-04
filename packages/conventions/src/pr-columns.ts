@@ -1,52 +1,29 @@
 // PR 正文里的各栏怎么认（模板 .github/pull_request_template.md 的「**栏名**：值」）。PR 挂了哪张单（「需求」栏，其次
-// 标题）给 claim-status.ts 判要不要贴「认领对得上」用；引擎认 PR 上写的认领号（「认领」栏）、pr-labels 照抄标签、必填栏
-// 提醒（pr-fields.ts）、每天的关单对账都用这一份，认法只有一处。
-// 改这里之前必须知道：#444 起合并闸不再靠这份判「挂没挂单」（认领对得上不再是判红的输入），这份文件已经不在先审后合的
-// 清单里；ENGINE_BOT_LOGIN、CLAIM_MATCH_CONTEXT 两个常量从 merge-gates.ts 搬过来放这——认领这套东西（引擎照样贴状态、
-// 帅位照样认领）还在用它们，和 linkedIssue、prClaimId 放一处更合适。
+// 标题）给 PR 镜像挂单、每天的关单对账用；认法只有一处。
+// 改这里之前必须知道：模板只有四栏（#654），但读 PR 正文时旧模板的栏名（LEGACY_COLUMNS）照样认——合并了的旧 PR 正文里还有
+// 它们，不认的话「修提醒」「需求」这些栏的值会把后面紧跟着的旧栏一起吞进去。
 
-import { CLOSE_COLUMN } from './close-rule.ts';
-import { TIER_COLUMN } from './merge-gates.ts';
-
-export const PLAN_COLUMN = '对应计划';
-export const SPECS_COLUMN = 'specs';
 /** 正文里写对应 issue 的那一栏。 */
 export const ISSUE_COLUMN = '需求';
-/** 正文里写认领号的那一栏（#348）：引擎开的单写「引擎」；本机认领脚本 2026-10-02 删了（#446），本机开的写「无」。 */
-export const CLAIM_COLUMN = '认领';
-/**
- * 引擎机器人按库里的认领贴在 PR 当前头上的提交状态（#299、#348；#444 起合并闸不再等它，只是还在贴）；和 @fleet-dao/core
- * seat.ts 的 CLAIM_STATUS_CONTEXT 是同一个（这个包不依赖 core，后端的测试对着两边）。
- */
-export const CLAIM_MATCH_CONTEXT = '认领对得上';
-/**
- * 只认这个机器人贴的「认领对得上」：「引擎」GitHub App（fleet-dao-engine）的机器人账号。带 [bot] 的名字只有 App 自己有，
- * 别人注册不了；有推送权限的人（本机的 gh 登的是创始人账号）也贴得出同名的状态，所以要看是谁贴的。
- */
-export const ENGINE_BOT_LOGIN = 'fleet-dao-engine[bot]';
 
-/** PR 模板的各栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
-export const PR_COLUMNS = [
-  '做了什么',
-  '怎么验证的',
-  '还欠什么',
-  '按推荐先做了',
-  ISSUE_COLUMN,
-  CLAIM_COLUMN,
-  '修提醒',
-  CLOSE_COLUMN,
-  PLAN_COLUMN,
-  SPECS_COLUMN,
-  TIER_COLUMN,
-  '文档',
-] as const;
-const KNOWN = new Set<string>(PR_COLUMNS.map((c) => c.toLowerCase()));
+/** PR 模板里的栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
+export const PR_COLUMNS = ['做了什么', '怎么验证的', '还欠什么', ISSUE_COLUMN] as const;
+
+/** 有这种情况才多写一行的栏（模板的注释里讲了，不在模板正文里）：按推荐先做了的岔路（#259）、这个 PR 修的提醒。 */
+export const OPTIONAL_COLUMNS = ['按推荐先做了', '修提醒'] as const;
+
+/** 旧模板（#654 前）的栏：只为读旧 PR 的正文时认得出栏的边界，新 PR 不写。 */
+export const LEGACY_COLUMNS = ['认领', '这个 PR 做完就关单', '对应计划', 'specs', '档位', '文档'] as const;
+
+const KNOWN = new Set<string>(
+  [...PR_COLUMNS, ...OPTIONAL_COLUMNS, ...LEGACY_COLUMNS].map((c) => c.toLowerCase()),
+);
 
 /** 「**对应计划**：」「**对应计划：**」：加粗的，冒号在里在外都算一栏的开头。 */
 const BOLD_COLUMN = /^\s*(?:[-*+]\s+)?\*\*\s*([^*：:\n]+?)\s*(?:\*\*\s*[：:]|[：:]\s*\*\*)\s*(.*)$/;
 /** 「对应计划：」：不加粗的只认模板里有的栏名，免得把正文里带冒号的一句话当成新的一栏。 */
 const PLAIN_COLUMN = /^\s*(?:[-*+]\s+)?([^\s*：:][^*：:\n]*?)\s*[：:]\s*(.*)$/;
-/** 小标题是正文分节，上一栏到这里为止：栏写在正文开头时，不截的话后面各节里提到的 specs 路径会被当成这一栏来查。 */
+/** 小标题是正文分节，上一栏到这里为止：栏写在正文开头时，不截的话后面各节里提到的路径会被当成这一栏来查。 */
 const HEADING = /^\s{0,3}#{1,6}(?:\s|$)/;
 
 /** HTML 注释去掉、换行留着（和 markdown.ts 的 stripComments 同一个写法；不引它：它不在先审后合的清单里）。 */
@@ -86,8 +63,8 @@ export function prColumns(body: string): Map<string, string> {
 }
 
 /**
- * 「需求」栏里第一个 #号（不看标题）：pr-fields.ts 提醒「这个 PR 做完就关单」该补哪个 Closes、
- * 关单对账认合并了的 PR 挂的是哪张单，都从这来（#460）；linkedIssue 在这基础上加了标题兜底。
+ * 「需求」栏里第一个 #号（不看标题）：关单对账认合并了的 PR 挂的是哪张单，都从这来（#460）；
+ * linkedIssue 在这基础上加了标题兜底。
  */
 export function issueColumnNumber(body: string): number | undefined {
   const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase());
@@ -104,13 +81,4 @@ export function linkedIssue(body: string, title: string): number | undefined {
   if (fromBody !== undefined) return fromBody;
   const fromTitle = /[(（]\s*#(\d+)\s*[)）]/.exec(title)?.[1];
   return fromTitle ? Number(fromTitle) : undefined;
-}
-
-const CLAIM_ID = /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/i;
-
-/** PR 正文「认领」栏写的认领号（整串，小写）：没有这一栏、栏里没有整串的认领号（只写前 8 位的不算）是 undefined。 */
-export function prClaimId(body: string): string | undefined {
-  const col = prColumns(body).get(CLAIM_COLUMN.toLowerCase());
-  const m = col === undefined ? null : CLAIM_ID.exec(col);
-  return m ? m[0].toLowerCase() : undefined;
 }

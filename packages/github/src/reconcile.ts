@@ -1,8 +1,8 @@
 // 对账与补漏（引擎的定时任务调这里；设计第六节「每小时对账」）：
 // - 重投：GitHub 不自动重投失败的投递。用 App 身份拉投递日志，同一次投递（guid）一次都没成功、后端库里也没有原文的就重投
 //   （重投时编号不变，后端去重认得出）；库里有原文的由后端按原文重放，不再叫 GitHub 重投。
-// - 轮询：按 updated_at 拉 issue、评论、PR，逐条交给后端的同一道门（白名单、去重），漏收的事件这样补回来。
-// - 核对：白名单作者开的开放 issue 都有工作流；合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
+// - 轮询：按 updated_at 拉 PR，逐条交给后端的同一道门（白名单、去重），漏收的事件这样补回来。issue 和评论不收了：单子由引擎自己拉（#632）。
+// - 核对：合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
 //   账上有合并队列的合并记录（C21/C22）。人开的不查这两项：帅位本机开、GitHub 自动合并，没有合并队列这一步。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { z } from 'zod';
@@ -77,8 +77,6 @@ export interface ReconcilerOptions {
   intake: Intake;
   /** 轮询用的投递编号：用后端的 pollDeliveryId，保证和后端的去重账是同一套写法。 */
   pollDeliveryId: (repo: string, kind: string, id: number | string, updatedAt: string) => string;
-  /** 这张 issue 有没有在跑的工作流；引擎按 Temporal 实现。不给就按「库里有这个需求」算。 */
-  hasWorkflow?: ((repo: string, issueNumber: number) => Promise<boolean>) | undefined;
   /**
    * 这几次投递（guid）里，后端库里已经有原文的：它们由后端按原文重放，不再叫 GitHub 重投（不然同一次投递要算两遍、
    * 做两遍）。不给就全都重投。查不成就抛：宁可这一轮不重投，也不盲目重投。
@@ -102,20 +100,7 @@ const Delivery = z.object({
   event: z.string().optional(),
 });
 
-// issue、评论、PR 都原样整条送进门（looseObject 不删别的字段）：后端要用标题、正文、开关状态、建立时刻建任务，
-// 原文也照样落库、能重放。这里只认要用到的几样在不在。
-const IssueItem = z.looseObject({
-  number: z.number(),
-  updated_at: z.string(),
-  pull_request: z.unknown().optional(),
-  user: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable(),
-});
-const CommentItem = z.looseObject({
-  id: z.number(),
-  updated_at: z.string(),
-  issue_url: z.string().optional(),
-  user: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable(),
-});
+// PR 原样整条送进门（looseObject 不删别的字段）：原文也照样落库、能重放。这里只认要用到的几样在不在。
 const PullItem = z.looseObject({
   number: z.number(),
   updated_at: z.string(),
@@ -129,7 +114,6 @@ const PullItem = z.looseObject({
 export interface Reconciler {
   redeliverFailed(since: Date): Promise<ReconcileReport>;
   poll(repoFullName: string, since: Date): Promise<ReconcileReport>;
-  auditOpenIssues(repoFullName: string): Promise<AuditReport>;
   auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
 }
 
@@ -240,46 +224,6 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
         return { sender: { login: bot.login, id: bot.userId, type: 'Bot' } };
       };
       try {
-        const sinceIso = since.toISOString();
-        for await (const page of client.pages({
-          method: 'GET',
-          path: `${base}/issues`,
-          auth,
-          query: { state: 'all', since: sinceIso, sort: 'updated', direction: 'asc', per_page: 100 },
-        })) {
-          const items = z.array(IssueItem).parse(page.data);
-          for (const it of items) {
-            if (it.pull_request) continue; // PR 下面单独拉，拿完整的 PR 对象
-            await ingest(options.pollDeliveryId(slug, 'issue', it.number, it.updated_at), 'issues', {
-              action: 'synced',
-              issue: it,
-              repository,
-              ...(await senderOf('issue', it.number, it.updated_at)),
-            });
-          }
-        }
-        for await (const page of client.pages({
-          method: 'GET',
-          path: `${base}/issues/comments`,
-          auth,
-          query: { since: sinceIso, sort: 'updated', direction: 'asc', per_page: 100 },
-        })) {
-          const items = z.array(CommentItem).parse(page.data);
-          for (const c of items) {
-            // 评论列表里没有 issue 号这一栏，只有 issue_url；只认 GitHub 自己的固定形状，认不出就不带号（引擎会回读）
-            const m = /\/issues\/(\d+)$/.exec(c.issue_url ?? '');
-            // 从没改过的评论，最后动它的就是作者：自家机器人发的关单评论，后端认得出是回声。改过的看不出是谁改的
-            // （可能是有写权限的外人），不带 sender，后端也不会把它当回答
-            const edited = Date.parse(String(c.created_at ?? '')) !== Date.parse(c.updated_at);
-            await ingest(options.pollDeliveryId(slug, 'comment', c.id, c.updated_at), 'issue_comment', {
-              action: 'synced',
-              comment: c,
-              ...(m?.[1] ? { issue: { number: Number(m[1]) } } : {}),
-              repository,
-              ...(c.user && !edited ? { sender: c.user } : {}),
-            });
-          }
-        }
         outer: for await (const page of client.pages({
           method: 'GET',
           path: `${base}/pulls`,
@@ -307,79 +251,6 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
         };
       }
       return { outcome: 'ok', checked, recovered };
-    },
-
-    async auditOpenIssues(repoFullName) {
-      const repo = parseRepoSlug(repoFullName);
-      const slug = repoSlug(repo);
-      const repoId = await ledger.repoId(repo);
-      if (!repoId)
-        return {
-          outcome: 'unscanned',
-          scanned: 0,
-          found: 0,
-          fixed: 0,
-          problems: [],
-          why: `${slug} 不归本系统管`,
-        };
-      let issues: z.infer<typeof IssueItem>[];
-      try {
-        issues = z
-          .array(IssueItem)
-          .parse(
-            await client.all({
-              method: 'GET',
-              path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`,
-              auth: { as: 'engine', repo },
-              query: { state: 'open', per_page: 100 },
-            }),
-          )
-          .filter((i) => !i.pull_request);
-      } catch (err) {
-        return {
-          outcome: 'unscanned',
-          scanned: 0,
-          found: 0,
-          fixed: 0,
-          problems: [],
-          why: `列开放 issue 失败：${why(err)}`,
-        };
-      }
-      const problems: string[] = [];
-      let found = 0;
-      let fixed = 0;
-      let failures = 0;
-      for (const issue of issues) {
-        try {
-          const has = options.hasWorkflow
-            ? await options.hasWorkflow(slug, issue.number)
-            : (await ledger.taskFor(repoId, issue.number)) !== null;
-          if (has) continue;
-          // 没有工作流：重新走一遍门。白名单外的作者会被门挡下（不算问题）；放进来的就是漏掉的，引擎收到会起工作流。
-          // 编号按 issue 的这一版起：同一版每轮都来核对，后端的投递账里也只留一条，不会每轮攒一条被挡下的
-          const res = await options.intake.ingest({
-            deliveryId: options.pollDeliveryId(slug, 'issue-audit', issue.number, issue.updated_at),
-            event: 'issues',
-            payload: { action: 'reconcile', issue, repository: { full_name: slug } },
-            source: 'poll',
-          });
-          if (res.verdict === 'accepted') {
-            found += 1;
-            fixed += 1;
-            problems.push(`#${issue.number} 是白名单作者开的，却没有工作流（已重新送进引擎）`);
-          }
-        } catch (err) {
-          failures += 1;
-          problems.push(`#${issue.number} 没查成：${why(err)}`);
-        }
-      }
-      return {
-        outcome: failures > 0 ? 'partial' : 'ok',
-        scanned: issues.length,
-        found,
-        fixed,
-        problems,
-      };
     },
 
     auditMergedPrs: (repoFullName, since) => auditMergedPrs(deps, repoFullName, since),

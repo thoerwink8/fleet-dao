@@ -1,10 +1,19 @@
 // discuss 技能带的脚本（agents/skills/discuss/scripts/）：ask.mjs 一问一答、second-opinion.mjs 反方和审 PR、walkthrough.mjs、tools.mjs。
 // 在临时家目录里跑，PATH 里只放假的 cursor-agent（或者什么都不放）：不碰真家目录、不出网、不调模型。
 // 重点是这台机器缺东西时（法国上就没有 cursor-agent、Mirasim）要明说缺的是什么，不当成答了、也不当成没事。
-import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,19 +21,74 @@ interface Verdict {
   pass: boolean;
   blocking: number;
 }
+interface Item {
+  text: string;
+  reality: string;
+  category: string;
+  unlabeled: boolean;
+}
+interface Judged {
+  pass: boolean;
+  round: number;
+  blocking: Item[];
+  deferred: Item[];
+  constructed: Item[];
+  minor: string[];
+  claimed: Verdict | null;
+}
+type Parsed =
+  | { ok: true; mustFix: unknown[]; minor: string[]; claimed: Verdict; body: string }
+  | { ok: false; why: string };
+type GhRun = (args: string[]) => string;
+type GitRun = (args: string[]) => string;
+interface PrFile {
+  path: string;
+  previous?: string;
+}
+interface Rule {
+  path: string;
+  afterMerge: boolean;
+}
+interface PendingPr {
+  number: number;
+  title: string;
+  mergedAt: string | null;
+  head: string;
+  mergeCommit: string;
+  files: string[];
+  state: string | null;
+  description: string;
+}
+interface Pending {
+  days: number;
+  afterMergePaths: string[];
+  since: string | null;
+  note?: string;
+  done: PendingPr[];
+  failed: PendingPr[];
+  unreviewed: PendingPr[];
+  problems: string[];
+}
+interface Session {
+  text: string;
+  sessionKey: string;
+  model: string | null;
+  ledgerNote: string;
+  usage: string;
+}
+interface ReviewDeps {
+  gh: GhRun;
+  session: (o: unknown) => Promise<Session>;
+  runs: string;
+}
 interface SecondOpinionLib {
   parseVerdict(text: string): Verdict | null;
   parseCritique(text: string): { agree: boolean; objections: number } | null;
   judgeSnapshot(view: unknown): { status: string; why: string };
   judgeLedger(rows: unknown[], since: number, mustRelay: boolean): { ok: boolean; why: string };
-  prComment(
-    round: number,
-    head: string,
-    model: string,
-    v: Verdict,
-    text: string,
-    postMerge?: boolean,
-  ): string;
+  prComment(o: { judged: Judged; head: string; model: string; body: string; afterMerge?: boolean }): string;
+  parseReview(text: string): Parsed;
+  judgeReview(parsed: Parsed, round: number): Judged;
   stripLocalPaths(text: string, dirs: string[]): string;
   checkPublishable(repo: string, body: string): Promise<void>;
   cursorAgentEnv(
@@ -43,6 +107,39 @@ interface SecondOpinionLib {
     agent: string;
     model: string | null;
   }>;
+  RISK_PATHS_FILE: string;
+  riskRules(text: string): Rule[] | string;
+  afterMergeHits(files: PrFile[], rules: Rule[]): string[];
+  parseNameStatusLog(stdout: string): Array<{ sha: string; date: string; files: PrFile[] }>;
+  prsOfCommitsQuery(shas: string[]): string;
+  classifyAfterMerge(
+    candidates: Array<{ sha: string; hits: string[] }>,
+    repoData: unknown,
+  ): Pick<Pending, 'done' | 'failed' | 'unreviewed' | 'problems'>;
+  pendingAfterMerge(o: {
+    git: GitRun;
+    gh: GhRun;
+    fetchMain?: (() => void) | null;
+    now?: number;
+    days?: number;
+  }): Pending;
+  formatPending(p: Pending): string;
+  takeLock(
+    name: string,
+    why: string,
+    o?: { dir?: string; pid?: number; alive?: (pid: number) => boolean },
+  ): () => void;
+  takeSlot(
+    o: { slot?: number; slotGiven?: boolean },
+    deps?: { dir?: string; pid?: number; alive?: (pid: number) => boolean },
+  ): { slot: number; release: () => void };
+  reviewPr(o: {
+    o: { authorFamily: string; timeoutMin: number; ui: boolean; noPost?: boolean };
+    repo: string;
+    pr: number;
+    log: (s: string) => void;
+    deps: ReviewDeps;
+  }): Promise<number>;
 }
 interface ToolsLib {
   dataDir(home?: string): string;
@@ -429,6 +526,32 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
     expect(r.code).toBe(2);
     expect(r.err).toContain('认不出要审的是哪个仓');
   });
+
+  // 会话是一次性的（#654 F2 之外的另一件，创始人 2026-10-03 要求）：列会话、清旧会话是本机命令，
+  // 这台没装 Mirasim 时照实报「没装」、退出 2，不打印空表冒充「一个会话也没有」。
+  it('--sessions：这台没装 Mirasim 时退出 2，写明没装（不打印空表）', () => {
+    const r = run('second-opinion.mjs', ['--sessions'], { home: temp('home') });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('这台机器没装 Mirasim');
+    expect(r.out).not.toContain('一个会话也没有');
+  });
+
+  it('--stop-stale：这台没装 Mirasim 时退出 2，不报「清掉 0 个」', () => {
+    const r = run('second-opinion.mjs', ['--stop-stale'], { home: temp('home') });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('这台机器没装 Mirasim');
+    expect(r.out).not.toContain('清掉');
+  });
+
+  it('--keep-session 认得出（不是不认识的参数）', () => {
+    // 不带 Mirasim 时不至于报「不认识的参数 --keep-session」；它只影响跑完删不删会话
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'keep', '--author-family', 'gpt', '--keep-session'],
+      { home: temp('home') },
+    );
+    expect(r.err).not.toContain('不认识的参数');
+  });
 });
 
 // 断链修复（本机 2026-09-28 实测）：cursor-agent 在 Windows 上靠父进程环境里 Git Bash 留下的
@@ -522,17 +645,21 @@ describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', 
     expect(so.judgeLedger([], t0, true).ok).toBe(false);
   });
 
-  it('贴 PR 的正文去掉过程话、带着头；本机目录换成仓内相对路径', () => {
-    const c = so.prComment(
-      1,
-      'abcdef1234',
-      'm',
-      { pass: false, blocking: 1 },
-      '我先读规矩……\n## 必须改\n- `a.ts:1` 问题\n结论：必须改 1 条',
+  it('贴 PR 的正文去掉过程话、带着头、第一行是脚本的结论；本机目录换成仓内相对路径', () => {
+    const parsed = so.parseReview(
+      '我先读规矩……\n## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：必须改 1 条',
     );
+    if (!parsed.ok) throw new Error(parsed.why);
+    const c = so.prComment({
+      judged: so.judgeReview(parsed, 1),
+      head: 'abcdef1234',
+      model: 'm',
+      body: parsed.body,
+    });
     expect(c).not.toContain('我先读规矩');
     expect(c).toContain('## 必须改');
-    expect(c).toContain('abcdef1');
+    expect(c).toMatch(/^\*\*第二意见 第 1 轮\*\*（m；审的头 abcdef1）：必须改 1 条\n/);
+    expect(c).toContain('脚本判定');
     expect(so.stripLocalPaths('见 /home/u/w/tree/src/a.ts:3', ['/home/u/w/tree'])).toBe('见 src/a.ts:3');
   });
 
@@ -643,5 +770,593 @@ describe('Claude 讨论端点：只经 reclaude 的无头 JSON', SLOW, () => {
     );
     expect(r.code).toBe(2);
     expect(r.err).toContain('讨论总预算已用完');
+  });
+});
+
+// ---------- 审 PR 走整条路（挡不挡的细则钉在 rules/second-opinion-verdict.rules.test.ts；这里看它真落到状态和评论上） ----------
+
+const g = (cwd: string, ...a: string[]) =>
+  execFileSync(
+    'git',
+    ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...a],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).trim();
+
+/** 假的卫生检查（贴评论前要过它）：只认 LEAKED-TOKEN 这个字串 */
+const FAKE_SCAN = [
+  'export function scanFiles(paths, read) {',
+  "  const text = read(paths[0]).toString('utf8');",
+  "  const findings = text.includes('LEAKED-TOKEN') ? [{ rule: 'token' }] : [];",
+  '  return { binary: [], scanned: paths, findings };',
+  '}',
+  'export function formatFinding(f) { return f.rule; }',
+  '',
+].join('\n');
+
+/** 一个带 origin 的检出：origin 是本地裸仓，main 一个提交，refs/pull/5/head 再多一个提交（PR #5 的头） */
+function prWorld(): { repo: string; head: string } {
+  const root = temp('pr');
+  const origin = join(root, 'origin.git');
+  g(root, 'init', '-q', '--bare', '-b', 'main', origin);
+  const seed = join(root, 'seed');
+  g(root, 'clone', '-q', origin, seed);
+  mkdirSync(join(seed, 'packages', 'hygiene', 'src'), { recursive: true });
+  writeFileSync(join(seed, 'packages', 'hygiene', 'src', 'scan.ts'), FAKE_SCAN);
+  writeFileSync(join(seed, 'a.ts'), 'export const a = 1;\n');
+  g(seed, 'add', '-A');
+  g(seed, 'commit', '-q', '-m', 'base');
+  g(seed, 'push', '-q', 'origin', 'HEAD:main');
+  writeFileSync(join(seed, 'a.ts'), 'export const a = 2;\n');
+  g(seed, 'commit', '-q', '-am', 'change');
+  g(seed, 'push', '-q', 'origin', 'HEAD:refs/pull/5/head');
+  const head = g(seed, 'rev-parse', 'HEAD');
+  const repo = join(root, 'repo');
+  g(root, 'clone', '-q', origin, repo);
+  return { repo, head };
+}
+
+/** 进程内的假 gh：审 PR 要的那几条各回一份固定答案；写出去的（评论、状态）记在 posted，评论正文记在 comment */
+function fakeGh(o: { pr: object; comments?: string[] | 'broken'; statuses?: object[] }) {
+  const posted: string[][] = [];
+  const got = { comment: '' };
+  const gh: GhRun = (a) => {
+    const line = a.join(' ');
+    if (a[0] === 'pr' && a[1] === 'view') return JSON.stringify(o.pr);
+    if (a[0] === 'api' && a[1] === '--paginate') {
+      if (o.comments === 'broken')
+        throw Object.assign(new Error('gh: HTTP 500'), { stderr: 'gh: HTTP 500\n' });
+      return (o.comments ?? []).map((c) => JSON.stringify(c)).join('\n');
+    }
+    if (a[0] === 'api' && a[1] === '-X') {
+      posted.push(a);
+      const at = a.find((x) => x.startsWith('body=@'));
+      if (at) got.comment = readFileSync(at.slice('body=@'.length), 'utf8');
+      return line.includes('/comments') ? 'https://example.invalid/c/1' : '{}';
+    }
+    if (a[0] === 'api') return JSON.stringify(o.statuses ?? []);
+    throw new Error(`假 gh 不认识：${line}`);
+  };
+  return { gh, posted, got };
+}
+
+describe('审 PR 走整条路（假 gh、假会话、真 git）：状态按脚本的判定写，不按审的人的结论', {
+  timeout: 120_000,
+}, () => {
+  const prInfo = (head: string, state = 'OPEN') => ({
+    headRefOid: head,
+    baseRefName: 'main',
+    title: 't',
+    body: '',
+    files: [{ path: 'a.ts' }],
+    state,
+    mergeCommit: state === 'MERGED' ? { oid: 'ad8f8d1aa063670173a310ddecc58d0d21f62090' } : null,
+  });
+  const session =
+    (text: string): ReviewDeps['session'] =>
+    async () => ({ text, sessionKey: 'fake:1', model: 'fake-model', ledgerNote: '假会话', usage: '0 秒' });
+  const o = { authorFamily: 'gpt', timeoutMin: 1, ui: false };
+  const statusPost = (posted: string[][]) => posted.find((a) => a.some((x) => x.includes('/statuses/')));
+  const descOf = (a: string[] | undefined) =>
+    a?.find((x) => x.startsWith('description='))?.slice('description='.length);
+  const review = (mustFix: string, conclusion: string) =>
+    `## 必须改\n- ${mustFix}\n## 小毛病\n无\n结论：${conclusion}`;
+
+  it('【故意造出的失败】审的人结论写「通过」却列了【现实】必须改：退出 1，头上写 failure、评论第一行是脚本的结论', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head) });
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: () => {},
+      deps: {
+        gh: f.gh,
+        session: session(review('【现实】【其他】`a.ts:1` 读不到就回空', '通过')),
+        runs: temp('runs'),
+      },
+    });
+    expect(code).toBe(1);
+    const st = statusPost(f.posted);
+    expect(st).toContain('state=failure');
+    expect(st).toContain(`repos/{owner}/{repo}/statuses/${w.head}`);
+    expect(descOf(st)).toBe('第二意见第 1 轮：必须改 1 条（【现实】【其他】1）');
+    expect(f.got.comment).toMatch(
+      /^\*\*第二意见 第 1 轮\*\*（fake-model；审的头 [0-9a-f]{7}）：必须改 1 条\n/,
+    );
+    expect(f.got.comment).toContain('审的人结论写「通过」');
+    expect(f.got.comment).toContain('这个 PR 之前审完过 0 轮，这是第 1 轮');
+  });
+
+  it('【故意造出的失败】结果格式认不出（没有「必须改」段）：退出 2，不写状态、不贴评论', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head) });
+    const logs: string[] = [];
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: (s) => logs.push(s),
+      deps: { gh: f.gh, session: session('看起来没问题\n结论：通过'), runs: temp('runs') },
+    });
+    expect(code).toBe(2);
+    expect(f.posted).toEqual([]);
+    expect(logs.join('\n')).toContain('没查成：审的结果没有「## 必须改」这一段');
+  });
+
+  it('第 3 轮（PR 上已经贴过两轮结论，头换没换都算）：【现实】【其他】转合并后、写 success，评论里列出来', async () => {
+    const w = prWorld();
+    const prior = '**第二意见 第 1 轮**（m；审的头 abcdef1）：必须改 1 条\n\n## 必须改\n…';
+    const f = fakeGh({
+      pr: prInfo(w.head),
+      comments: [prior, '别的评论', prior.replace('abcdef1', 'bbbbbbb')],
+    });
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: () => {},
+      deps: {
+        gh: f.gh,
+        session: session(review('【现实】【其他】`a.ts:1` 问题', '必须改 1 条')),
+        runs: temp('runs'),
+      },
+    });
+    expect(code).toBe(0);
+    const st = statusPost(f.posted);
+    expect(st).toContain('state=success');
+    expect(descOf(st)).toBe('第二意见通过（第 3 轮；1 条转合并后处理）');
+    expect(f.got.comment).toMatch(/^\*\*第二意见 第 3 轮\*\*/);
+    expect(f.got.comment).toContain('转合并后处理 1 条');
+  });
+
+  it('【故意造出的失败】读不到 PR 上的评论：按第 1 轮算（第 3 轮的宽松不生效），评论里写明轮数没数成', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head), comments: 'broken' });
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: () => {},
+      deps: {
+        gh: f.gh,
+        session: session(review('【现实】【其他】`a.ts:1` 问题', '必须改 1 条')),
+        runs: temp('runs'),
+      },
+    });
+    expect(code).toBe(1);
+    expect(descOf(statusPost(f.posted))).toBe('第二意见第 1 轮：必须改 1 条（【现实】【其他】1）');
+    expect(f.got.comment).toContain('轮数没数成（读不到 PR 上已有的评论：gh: HTTP 500），按第 1 轮算');
+  });
+
+  it('已经合并的 PR 也能审（合并后补审）：没过时退出 1，状态、评论、输出都说开修复 PR 或 revert 合并提交', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head, 'MERGED') });
+    const said: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      said.push(a.map(String).join(' '));
+    });
+    let code: number;
+    try {
+      code = await so.reviewPr({
+        o,
+        repo: w.repo,
+        pr: 5,
+        log: () => {},
+        deps: {
+          gh: f.gh,
+          session: session(review('【现实】【碰安全】`a.ts:1` 令牌打进日志', '必须改 1 条')),
+          runs: temp('runs'),
+        },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(code).toBe(1);
+    expect(descOf(statusPost(f.posted))).toBe(
+      '合并后补审没过第 1 轮：必须改 1 条，开修复 PR 或 revert（【现实】【碰安全】1）',
+    );
+    expect(f.got.comment).toMatch(/^\*\*合并后补审 第 1 轮\*\*/);
+    expect(f.got.comment).toContain('git revert ad8f8d1');
+    expect(said.join('\n')).toContain(
+      '合并后补审没过：开修复 PR，或 git revert ad8f8d1；修复合了跑 --after-merge-resolve 5',
+    );
+  });
+
+  it('关掉了没合并的 PR 不审；通过的写 success', async () => {
+    const w = prWorld();
+    const closed = fakeGh({ pr: prInfo(w.head, 'CLOSED') });
+    await expect(
+      so.reviewPr({
+        o,
+        repo: w.repo,
+        pr: 5,
+        log: () => {},
+        deps: { gh: closed.gh, session: session(''), runs: temp('runs') },
+      }),
+    ).rejects.toThrow('关掉了、没合并');
+    const f = fakeGh({ pr: prInfo(w.head) });
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: () => {},
+      deps: {
+        gh: f.gh,
+        session: session('## 必须改\n无\n## 小毛病\n- `a.ts:1` 名字拼错\n结论：通过'),
+        runs: temp('runs'),
+      },
+    });
+    expect(code).toBe(0);
+    expect(descOf(statusPost(f.posted))).toBe('第二意见通过（第 1 轮）');
+  });
+});
+
+describe('锁按 PR 号：同一 PR 只跑一轮，不同 PR 并行', () => {
+  it('两个不同 PR 的锁互不影响；同一 PR 第二个被拒；放了锁、拿锁的进程死了就能再拿', () => {
+    const dir = temp('locks');
+    const alive = (pid: number) => pid === 100 || pid === 200;
+    const release = so.takeLock('pr5', 'PR #5 另一轮第二意见在跑', { dir, pid: 100, alive });
+    expect(() => so.takeLock('pr6', 'PR #6 另一轮第二意见在跑', { dir, pid: 200, alive })).not.toThrow();
+    expect(() => so.takeLock('pr5', 'PR #5 另一轮第二意见在跑', { dir, pid: 300, alive })).toThrow(
+      'PR #5 另一轮第二意见在跑（进程 100），等它跑完',
+    );
+    release();
+    expect(() => so.takeLock('pr5', 'PR #5 另一轮第二意见在跑', { dir, pid: 300, alive })).not.toThrow();
+    // 陈旧锁：拿着的进程已经不在了，直接盖掉
+    writeFileSync(join(dir, '.lock-pr7'), '99999');
+    expect(() => so.takeLock('pr7', 'x', { dir, pid: 300, alive })).not.toThrow();
+    expect(readFileSync(join(dir, '.lock-pr7'), 'utf8')).toBe('300');
+  });
+
+  it('审查树的位子：没指定就挑第一个空的；四棵都占着照实报；指定的被占就报那一个', () => {
+    const dir = temp('slots');
+    const alive = () => true;
+    expect(so.takeSlot({}, { dir, pid: 1, alive }).slot).toBe(1);
+    expect(so.takeSlot({}, { dir, pid: 2, alive }).slot).toBe(2);
+    expect(() => so.takeSlot({ slot: 1, slotGiven: true }, { dir, pid: 3, alive })).toThrow(
+      '审查树 1 另一轮在用（进程 1），等它跑完',
+    );
+    so.takeSlot({}, { dir, pid: 3, alive });
+    so.takeSlot({}, { dir, pid: 4, alive });
+    expect(() => so.takeSlot({}, { dir, pid: 5, alive })).toThrow('四棵审查树都有人在用');
+    expect(() => so.takeSlot({ slot: 9, slotGiven: true }, { dir, pid: 5, alive })).toThrow(
+      '--slot 只能是 1–4',
+    );
+  });
+});
+
+// ---------- 合并后补审：哪些 PR 待补审（主线清单 + git log + GitHub 的 PR 和状态） ----------
+
+const SHA_A = 'a'.repeat(40);
+const SHA_B = 'b'.repeat(40);
+const SHA_C = 'c'.repeat(40);
+const CI_PLAN = 'packages/conventions/src/ci-plan.ts';
+const BIN_CI_PLAN = 'packages/conventions/src/bin/ci-plan.ts';
+/** 假清单：两条标了先合后审（其中一条比目录规则更具体），两条没标 */
+const LIST = JSON.stringify({
+  paths: [
+    { path: CI_PLAN, kind: '碰安全', why: 'x', review: 'after-merge' },
+    { path: 'packages/conventions/src/bin/', kind: '碰安全', why: 'x' },
+    { path: BIN_CI_PLAN, kind: '碰安全', why: 'x', review: 'after-merge' },
+    { path: 'packages/conventions/src/merge-gate.ts', kind: '碰安全', why: 'x' },
+  ],
+});
+/** git log -z --name-status 的原样输出：A 改了 ci-plan.ts，B 只改 README，C 把 old.ts 改名成 bin/ci-plan.ts */
+const NAME_STATUS = [
+  `\u0001${SHA_A} 2026-10-03T14:20:44Z\0\nM\0${CI_PLAN}\0M\0docs/a.md\0`,
+  `\u0001${SHA_B} 2026-10-02T10:00:00+08:00\0\nM\0README.md\0`,
+  `\u0001${SHA_C} 2026-10-01T10:00:00Z\0\nR100\0old.ts\0${BIN_CI_PLAN}\0`,
+].join('');
+
+function fakeGit(o: { list?: string; intro?: string; log?: string; count?: string }) {
+  const calls: string[][] = [];
+  const git: GitRun = (a) => {
+    calls.push(a);
+    if (a[0] === 'show') {
+      if (o.list === undefined)
+        throw Object.assign(new Error('git show'), {
+          stderr: "fatal: path 'packages/conventions/high-risk-paths.json' does not exist in 'origin/main'\n",
+        });
+      return o.list;
+    }
+    if (a.includes('-S')) return o.intro ?? '';
+    if (a.includes('--name-status')) return o.log ?? '';
+    if (a[0] === 'rev-list') return o.count ?? '0';
+    throw new Error(`假 git 不认识 ${a.join(' ')}`);
+  };
+  return { git, calls };
+}
+
+/** 假的 gh api graphql：按查询里 cN 对应的提交号回给定的 PR 列表（null = GitHub 上没这个提交） */
+function fakeGraphql(bySha: Record<string, object[] | null>) {
+  const calls: string[][] = [];
+  const gh: GhRun = (a) => {
+    calls.push(a);
+    const q = a.find((x) => x.startsWith('query='))?.slice('query='.length) ?? '';
+    const repository: Record<string, unknown> = {};
+    for (const m of q.matchAll(/(c\d+): object\(oid: "([0-9a-f]{40})"\)/g)) {
+      const nodes = bySha[m[2] ?? ''];
+      repository[m[1] ?? ''] = nodes === null ? null : { associatedPullRequests: { nodes: nodes ?? [] } };
+    }
+    return JSON.stringify({ data: { repository } });
+  };
+  return { gh, calls };
+}
+
+const prNode = (
+  number: number,
+  mergeCommit: string,
+  state: string | null,
+  head = String(number).padStart(40, '0'),
+) => ({
+  number,
+  title: `t${number}`,
+  state: 'MERGED',
+  mergedAt: '2026-10-03T10:00:00Z',
+  headRefOid: head,
+  baseRefName: 'main',
+  mergeCommit: { oid: mergeCommit },
+  commits: {
+    nodes: [
+      {
+        commit: {
+          oid: head,
+          status: state === null ? null : { context: { state, description: `${state} desc` } },
+        },
+      },
+    ],
+  },
+});
+const INTRO = `${'d'.repeat(40)} 2026-09-30T16:00:00Z`;
+const NOW = Date.parse('2026-10-04T00:00:00Z');
+
+describe('合并后补审：待补审的怎么算', () => {
+  it('清单：标了 review: after-merge 的认得出；不是 JSON、没有 paths、缺 path、review 写错都读不出', () => {
+    const rules = so.riskRules(LIST);
+    expect(rules).toEqual([
+      { path: CI_PLAN, afterMerge: true },
+      { path: 'packages/conventions/src/bin/', afterMerge: false },
+      { path: BIN_CI_PLAN, afterMerge: true },
+      { path: 'packages/conventions/src/merge-gate.ts', afterMerge: false },
+    ]);
+    expect(so.riskRules('{')).toMatch(/不是合法的 JSON/);
+    expect(so.riskRules('{"paths":[]}')).toMatch(/没有 paths 列表/);
+    expect(so.riskRules('{"paths":[{"kind":"碰安全"}]}')).toMatch(/第 1 条认不出/);
+    expect(so.riskRules('{"paths":[{"path":"a.ts","review":"later"}]}')).toMatch(/review「later」认不出/);
+  });
+
+  it('改到的文件按最具体的那条规则算；改名的旧名字也算', () => {
+    const rules = so.riskRules(LIST);
+    if (typeof rules === 'string') throw new Error(rules);
+    expect(so.afterMergeHits([{ path: CI_PLAN }, { path: 'README.md' }], rules)).toEqual([CI_PLAN]);
+    expect(so.afterMergeHits([{ path: 'packages/conventions/src/merge-gate.ts' }], rules)).toEqual([]);
+    // 目录规则没标、里面更具体的那条标了：按具体的
+    expect(
+      so.afterMergeHits([{ path: BIN_CI_PLAN }, { path: 'packages/conventions/src/bin/ci-box.ts' }], rules),
+    ).toEqual([BIN_CI_PLAN]);
+    expect(so.afterMergeHits([{ path: 'x.ts', previous: CI_PLAN }], rules)).toEqual([CI_PLAN]);
+  });
+
+  it('git log 的输出：每个提交改了哪些文件（改名带旧名字）；【故意造出的失败】认不出就抛，不当成没改', () => {
+    const commits = so.parseNameStatusLog(NAME_STATUS);
+    expect(commits.map((c) => c.sha)).toEqual([SHA_A, SHA_B, SHA_C]);
+    expect(commits[0]?.files).toEqual([{ path: CI_PLAN }, { path: 'docs/a.md' }]);
+    expect(commits[2]?.files).toEqual([{ path: BIN_CI_PLAN, previous: 'old.ts' }]);
+    expect(so.parseNameStatusLog('')).toEqual([]);
+    expect(() => so.parseNameStatusLog('\u0001not-a-sha\0\nM\0a\0')).toThrow(/认不出/);
+    expect(() => so.parseNameStatusLog(`\u0001${SHA_A} 2026-10-03T14:20:44Z\0\nZ\0a\0`)).toThrow(/认不出/);
+    expect(() => so.parseNameStatusLog(`\u0001${SHA_A} 2026-10-03T14:20:44Z\0\nR100\0a\0`)).toThrow(
+      /少了文件名/,
+    );
+  });
+
+  it('对到 PR 上按头上的 second-opinion 分：通过、没过、还没审；对不上 PR 的、GitHub 上没有的记进 problems', () => {
+    const r = so.classifyAfterMerge(
+      [
+        { sha: SHA_A, hits: [CI_PLAN] },
+        { sha: SHA_B, hits: [BIN_CI_PLAN] },
+        { sha: SHA_C, hits: [CI_PLAN] },
+        { sha: 'e'.repeat(40), hits: [CI_PLAN] },
+        { sha: 'f'.repeat(40), hits: [CI_PLAN] },
+      ],
+      {
+        c0: { associatedPullRequests: { nodes: [prNode(10, SHA_A, 'SUCCESS')] } },
+        c1: { associatedPullRequests: { nodes: [prNode(11, SHA_B, 'FAILURE')] } },
+        c2: { associatedPullRequests: { nodes: [prNode(12, SHA_C, null)] } },
+        c3: null,
+        c4: { associatedPullRequests: { nodes: [] } },
+      },
+    );
+    expect(r.done.map((p) => p.number)).toEqual([10]);
+    expect(r.failed.map((p) => [p.number, p.description])).toEqual([[11, 'FAILURE desc']]);
+    expect(r.unreviewed.map((p) => p.number)).toEqual([12]);
+    expect(r.problems).toEqual([
+      'eeeeeee（改到 packages/conventions/src/ci-plan.ts）：GitHub 上找不到这个提交',
+      'fffffff（改到 packages/conventions/src/ci-plan.ts）：找不到合它进主线的 PR（直接推到主线的？没法按 PR 补审）',
+    ]);
+  });
+
+  it('【故意造出的失败】GitHub 回的样子认不出（状态名不认识、头对不上）：抛，不当成没审', () => {
+    const one = (nodes: object[]) =>
+      so.classifyAfterMerge([{ sha: SHA_A, hits: [CI_PLAN] }], { c0: { associatedPullRequests: { nodes } } });
+    expect(() => one([prNode(10, SHA_A, 'WEIRD')])).toThrow(/认不出/);
+    const mismatch = prNode(10, SHA_A, 'SUCCESS');
+    mismatch.headRefOid = '1'.repeat(40);
+    expect(() => one([mismatch])).toThrow(/读不到它的头/);
+    expect(() => so.classifyAfterMerge([{ sha: SHA_A, hits: [CI_PLAN] }], null)).toThrow(/认不出/);
+  });
+
+  it('整条路：主线清单 → 先合后审从哪天起 → git log → GitHub：分出通过的和还没补审的', () => {
+    const git = fakeGit({ list: LIST, intro: INTRO, log: NAME_STATUS, count: '3' });
+    const gh = fakeGraphql({ [SHA_A]: [prNode(10, SHA_A, 'SUCCESS')], [SHA_C]: [prNode(12, SHA_C, null)] });
+    const p = so.pendingAfterMerge({ git: git.git, gh: gh.gh, now: NOW });
+    expect(p.afterMergePaths).toEqual([CI_PLAN, BIN_CI_PLAN]);
+    // 从标记进主线那天起算（比 14 天前晚）
+    expect(p.since).toBe('2026-09-30T16:00:00.000Z');
+    expect(p.done.map((x) => x.number)).toEqual([10]);
+    expect(p.unreviewed.map((x) => [x.number, x.files])).toEqual([[12, [BIN_CI_PLAN]]]);
+    expect(p.failed).toEqual([]);
+    expect(p.problems).toEqual([]);
+    // 只问了碰到先合后审路径的那两个提交，B 没问
+    const q = gh.calls[0]?.find((x) => x.startsWith('query=')) ?? '';
+    expect(q).toContain(SHA_A);
+    expect(q).toContain(SHA_C);
+    expect(q).not.toContain(SHA_B);
+    expect(gh.calls[0]).toContain('owner={owner}');
+    // 14 天前比标记进主线那天晚：按 14 天
+    const later = so.pendingAfterMerge({
+      git: fakeGit({ list: LIST, intro: INTRO, log: '', count: '0' }).git,
+      gh: gh.gh,
+      now: Date.parse('2026-10-20T00:00:00Z'),
+    });
+    expect(later.since).toBe('2026-10-06T00:00:00.000Z');
+    expect(later.unreviewed).toEqual([]);
+  });
+
+  it('主线上的清单还没有先合后审的条目：待补审就是空的（不是没查成），GitHub 一次都不问', () => {
+    const gh = fakeGraphql({});
+    const plain = JSON.stringify({
+      paths: (JSON.parse(LIST) as { paths: Array<Record<string, unknown>> }).paths.map(({ review, ...p }) => {
+        void review;
+        return p;
+      }),
+    });
+    const p = so.pendingAfterMerge({ git: fakeGit({ list: plain }).git, gh: gh.gh, now: NOW });
+    expect(p.note).toContain('还没有标 review: after-merge 的条目');
+    expect(p.unreviewed).toEqual([]);
+    expect(gh.calls).toEqual([]);
+    expect(so.formatPending(p)).toBe('没有合并后待补审的：主线上的清单还没有标 review: after-merge 的条目。');
+  });
+
+  it('【故意造出的失败】读不到主线清单、清单不是 JSON、查不出哪天起、git log 对不上、GitHub 问不成、取不到主线：都抛没查成', () => {
+    const gh = fakeGraphql({});
+    const run = (git: ReturnType<typeof fakeGit>, extra: object = {}) =>
+      so.pendingAfterMerge({ git: git.git, gh: gh.gh, now: NOW, ...extra });
+    expect(() => run(fakeGit({}))).toThrow(
+      /读不到主线上的 packages\/conventions\/high-risk-paths\.json（fatal: path/,
+    );
+    expect(() => run(fakeGit({ list: '{' }))).toThrow(/不是合法的 JSON/);
+    expect(() => run(fakeGit({ list: LIST, intro: '' }))).toThrow(/查不出先合后审是哪天起的/);
+    expect(() => run(fakeGit({ list: LIST, intro: INTRO, log: NAME_STATUS, count: '2' }))).toThrow(
+      /输出认不出/,
+    );
+    const brokenGh: GhRun = () => {
+      throw Object.assign(new Error('gh'), { stderr: 'error connecting to api.github.com\n' });
+    };
+    expect(() =>
+      so.pendingAfterMerge({
+        git: fakeGit({ list: LIST, intro: INTRO, log: NAME_STATUS, count: '3' }).git,
+        gh: brokenGh,
+        now: NOW,
+      }),
+    ).toThrow(/问 GitHub 这几个提交是哪个 PR 合的没成（error connecting to api\.github\.com）/);
+    expect(() =>
+      run(fakeGit({ list: LIST }), {
+        fetchMain: () => {
+          throw new Error('Could not resolve host');
+        },
+      }),
+    ).toThrow(/取主线没成（Could not resolve host）/);
+  });
+
+  it('给人看的那几行：还没补审的带命令，没过的带 resolve 和 revert，都补过了说没有待补审的', () => {
+    const base: Pending = {
+      days: 14,
+      afterMergePaths: [CI_PLAN],
+      since: '2026-09-30T16:00:00.000Z',
+      done: [],
+      failed: [],
+      unreviewed: [],
+      problems: [],
+    };
+    const item = (number: number, extra: Partial<PendingPr> = {}): PendingPr => ({
+      number,
+      title: `t${number}`,
+      mergedAt: '2026-10-03T10:00:00Z',
+      head: '1'.repeat(40),
+      mergeCommit: 'ad8f8d1aa063670173a310ddecc58d0d21f62090',
+      files: [CI_PLAN],
+      state: null,
+      description: '',
+      ...extra,
+    });
+    const text = so.formatPending({
+      ...base,
+      done: [item(10, { state: 'success' })],
+      unreviewed: [item(12)],
+      failed: [item(11, { state: 'failure', description: '合并后补审没过第 1 轮：必须改 1 条' })],
+    });
+    expect(text).toContain('共 3 个，补审通过 1 个');
+    expect(text).toContain(
+      '还没补审 1 个（跑 --after-merge-sweep --author-family <写它的模型族>）：\n- #12 t12（合并于 2026-10-03，改到 packages/conventions/src/ci-plan.ts）',
+    );
+    expect(text).toContain('--after-merge-resolve 11 --by <修复 PR 号>，或 git revert ad8f8d1');
+    expect(so.formatPending({ ...base, done: [item(10, { state: 'success' })] })).toContain('没有待补审的。');
+  });
+});
+
+describe('合并后补审：命令行', SLOW, () => {
+  const gitDir = () => {
+    const bin = tools.findBin('git', process.env);
+    if (!bin) throw new Error('这台机器 PATH 上没有 git');
+    return dirname(bin);
+  };
+
+  it('--after-merge-pending：这台没装 git 报没装；主线上读不到清单退出 2、说读不到，不当成「没有」', () => {
+    let r = run('second-opinion.mjs', ['--after-merge-pending', '--repo', temp('repo')], {
+      home: temp('home'),
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('这台机器没装 git');
+    const repo = temp('repo');
+    g(repo, 'init', '-q', '-b', 'main');
+    writeFileSync(join(repo, 'README.md'), 'x\n');
+    g(repo, 'add', '-A');
+    g(repo, 'commit', '-q', '-m', 'init');
+    g(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    r = run('second-opinion.mjs', ['--after-merge-pending', '--no-fetch', '--repo', repo], {
+      home: temp('home'),
+      path: gitDir(),
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(`读不到主线上的 ${so.RISK_PATHS_FILE}`);
+    expect(r.out).not.toContain('没有合并后待补审的');
+  });
+
+  it('--after-merge-resolve 少了 --by、--by 是它自己：退出 2 说清要什么；--round 不再算数', () => {
+    const repo = temp('repo');
+    let r = run('second-opinion.mjs', ['--after-merge-resolve', '5', '--repo', repo], { home: temp('home') });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('要 --after-merge-resolve <原 PR 号> --by');
+    r = run('second-opinion.mjs', ['--after-merge-resolve', '5', '--by', '5', '--repo', repo], {
+      home: temp('home'),
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('--by 不能是它自己');
+    r = run('second-opinion.mjs', ['--pr', '5', '--high-risk', '--round', '3', '--repo', repo], {
+      home: temp('home'),
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('--round 不再起作用');
   });
 });

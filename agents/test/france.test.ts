@@ -759,6 +759,34 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
   }, 90_000);
 });
 
+describe('路由「在用」按路由两层算（#574）', () => {
+  it('在用 = 路由两层里开着、它的模型排进了某个用途（和 db 的 routesInUse 同一个判法）；不读旧的阶段平铺表', () => {
+    const sql = query.SQL.routes ?? '';
+    expect(sql).not.toMatch(/stage_polic/);
+    expect(sql).toMatch(
+      /exists \(select 1 from routing_catalog rc join routing_purpose_models rpm on rpm\.model_id = rc\.model_id\s+where rc\.route_id = ro\.id and rc\.enabled\) as in_use/,
+    );
+  });
+
+  it('法国库还没有两层那两张表（没跑迁移 0025）：路由那一块明说库查询出错，不拿旧表顶、也不当成「都没在用」，别的块照样有数', () => {
+    const io = fakeIo({
+      psql: (script) => {
+        const names = [...script.matchAll(/^\\echo @@fleet-section (\w+)$/gm)].map((m) => m[1] ?? '');
+        const out = names.map((n) =>
+          n === 'routes'
+            ? `${query.MARK} routes\n${query.ERR} relation "routing_catalog" does not exist`
+            : `${query.MARK} ${n}\n${n === 'db' ? JSON.stringify({ now: AT, readOnly: 'on' }) : n === 'notifications' ? '{"count":0,"rows":[]}' : '[]'}`,
+        );
+        return { status: 0, stdout: out.join('\n'), stderr: 'psql:<stdin>:30: ERROR: …', error: null };
+      },
+    });
+    const s = query.collect(io).sections;
+    expect(s.routes).toEqual({ ok: false, why: '库查询出错：relation "routing_catalog" does not exist' });
+    expect(s.tasks).toEqual({ ok: true, rows: [] });
+    expect(s.orgAudit).toEqual({ ok: true, rows: [] });
+  });
+});
+
 // —— 本机这头：从哪读 ——
 
 describe('登法国的 ssh 名字：从本机配置读，不进仓', () => {

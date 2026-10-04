@@ -12,7 +12,6 @@ import {
   readCatalogFile,
 } from '../src/catalog.ts';
 import type { Db } from '../src/client.ts';
-import { stageCandidates } from '../src/queries/candidates.ts';
 import { STAGE_KINDS } from '../src/schema/enums.ts';
 import {
   auditLog,
@@ -114,12 +113,6 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
       expect(await stageOrder(stage)).toEqual(want);
     }
     expect((await stageOrder('ui')).length).toBe(expected.length - 1);
-    // 关着的照样列在候选表里、带着原因。
-    const execute = await stageCandidates(t.db, 'execute', { now: NOW });
-    expect(execute.candidates.map((c) => [c.routeId, !c.blockers.includes('switched-off')])).toEqual([
-      [GROK_ROUTE, true],
-      ...withoutGrok,
-    ]);
   });
 
   it('装进空库，每张表的行数和样例对得上', async () => {

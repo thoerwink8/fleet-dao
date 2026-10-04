@@ -1,7 +1,6 @@
 // 每个活动的超时、心跳、重试、叫停时等不等它收场：按活动类型分开设，唯一出处在这里（旧系统所有活动共用一个 74 分钟、
 // 没有心跳，工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写。
 
-import type { Repo } from '@fleet-dao/shared';
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type {
   CanaryInput,
@@ -9,7 +8,10 @@ import type {
   GitHubReconcileRun,
   HourlyReconcileInput,
   HourlyReconcileRun,
-  MergeItem,
+  IntakeInput,
+  IntakeRun,
+  QuotaReadInput,
+  QuotaReadRun,
   RouteProbeInput,
   RouteProbeRun,
   WatchdogInput,
@@ -17,33 +19,38 @@ import type {
 } from './contract.ts';
 import type { CanaryState, CanaryStepResult } from './jobs/canary.ts';
 import type { Limits } from './limits.ts';
-import type { EnginePorts, StartSessionInput, StartSessionResult } from './ports.ts';
+import type { EnginePorts } from './ports.ts';
+import type { TaskBriefResult } from './runner/task-brief.ts';
+import {
+  type ArmAutoMergeInput,
+  type ArmAutoMergeResult,
+  type CheckGuardedInput,
+  type ColdVerifyInput,
+  type ColdVerifyResult,
+  type DeliveryRead,
+  type GuardedPaths,
+  MERGE_POLL_MINUTES,
+  type MergeWait,
+  type ReadDeliveryInput,
+  type ReadTaskBriefInput,
+  type RunSegmentInput,
+  type RunSegmentResult,
+  SEGMENT_MINUTES,
+  type WaitMergedInput,
+} from './task-contract.ts';
 
 type PortActivities = {
-  [K in Exclude<keyof EnginePorts, 'startSession'>]: (
-    input: Parameters<EnginePorts[K]>[0],
-  ) => ReturnType<EnginePorts[K]>;
+  [K in keyof EnginePorts]: (input: Parameters<EnginePorts[K]>[0]) => ReturnType<EnginePorts[K]>;
 };
 
-/** 工作流看到的活动。startSession 不带通行证：通行证由 worker 在活动里现签（见 activities.ts）。 */
+/** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
-  startSession(input: StartSessionInput): Promise<StartSessionResult>;
-  /** 引擎自己的活动：经 Temporal 客户端 signalWithStart 把条目排进这个仓的合并队列。 */
-  enqueueMerge(input: { item: MergeItem; limits: Partial<Limits> }): Promise<void>;
-  /**
-   * 引擎自己的活动：撤出信号直接发不出去（队列没在跑）时，经 signalWithStart 送去——顺手把队列拉起来，
-   * 让它记下撤回、挡住晚到的排队（排队的那一下可能还在路上）。
-   */
-  withdrawMerge(input: {
-    repo: Repo;
-    itemId: string;
-    subtaskWorkflowId: string;
-    limits: Partial<Limits>;
-  }): Promise<void>;
   /** 引擎自己的活动：对账补漏跑一轮，结局记进 schedule_runs（jobs/github-reconcile.ts）。 */
   reconcileGitHub(input: GitHubReconcileInput): Promise<GitHubReconcileRun>;
   /** 引擎自己的活动：路由探针跑一轮，每条路由的结论写进 routes、结局记进 schedule_runs（jobs/route-probe.ts）。 */
   probeRoutes(input: RouteProbeInput): Promise<RouteProbeRun>;
+  /** 引擎自己的活动：定时读额度跑一轮，读成的写进 quota_windows、结局记进 schedule_runs（jobs/quota-read.ts）。 */
+  readQuotas(input: QuotaReadInput): Promise<QuotaReadRun>;
   /**
    * 引擎自己的活动：每小时对账跑一轮（工作树残留、两处核对、提醒按条件撤和再推、机器人权限自检），结局记进 schedule_runs
    * （jobs/hourly-reconcile.ts）。
@@ -58,6 +65,23 @@ export type EngineActivities = PortActivities & {
   canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
   /** 引擎自己的活动：看门狗跑一轮（按登记表看各定时任务新不新鲜、推撤提醒），结局记进 schedule_runs（jobs/watchdog.ts）。 */
   watchSchedules(input: WatchdogInput): Promise<WatchdogRun>;
+  /** 引擎自己的活动：拉单跑一轮（读开着开关的仓里该做的单、逐道过关、起任务工作流），结局记进 schedule_runs（jobs/intake.ts）。 */
+  intakeRound(input: IntakeInput): Promise<IntakeRun>;
+  // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
+  /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
+  readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
+  /** 起一次无头动手会话（one-shot）：会话没跑成回 ok:false 和证据，交给失败分流；起不来的基础设施问题抛错。 */
+  runSegment(input: RunSegmentInput): Promise<RunSegmentResult>;
+  /** 读会话交付的东西（工作树现在的头、比起点多几个提交、改了哪些文件）。读不到抛错，不回空。 */
+  readDelivery(input: ReadDeliveryInput): Promise<DeliveryRead>;
+  /** 合并之前的冷验收（换一个不同的族）。没能做出来回 unavailable，不当成没过。 */
+  coldVerify(input: ColdVerifyInput): Promise<ColdVerifyResult>;
+  /** 这个 PR 改到的文件里，哪些是改标准的路径（要创始人同意）、哪些是先审后合的路径。读不到抛错，不当成没碰到。 */
+  checkGuarded(input: CheckGuardedInput): Promise<GuardedPaths>;
+  /** 给 PR 挂上自动合并（squash，只合 expectedHead）。 */
+  armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;
+  /** 等 PR 合并（长轮询，到点回 waiting 由工作流再来一次）。 */
+  waitMerged(input: WaitMergedInput): Promise<MergeWait>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -65,53 +89,45 @@ export type ActivityName = keyof EngineActivities;
 /**
  * quick：毫秒到秒级的记账、选路由、报警——30 秒，丢了 1 分钟内重来。
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
- * setup / watch / ci / tests：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
+ * setup / ci：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
  * job：定时任务的一轮——10 分钟，不重试：每次尝试都记一行 schedule_runs，没跑成的等下一轮（间隔 15 分钟），不在这一轮里补。
  * 路由探针一轮里每条路由最长几分钟（起会话、等回答、没通隔 20 秒再探一次），同时探两条，也在 10 分钟里。
  * 每小时对账一轮最多看 80 棵残留的树（每棵以会话用户跑几条 git），也在 10 分钟里。
  * 看门狗一轮是几条查库、写提醒，秒级；卡住了也在 10 分钟里收场（上一轮没完下一轮跳过，一直卡着后端的看守看得见）。
+ * segment：一次无头会话（动手、冷验收）——限时是会话最长时间加一刻钟收尾，必须心跳；只试一次：会话贵又不幂等，
+ * 活动失败怎么办（重试、换路由、挂起）由工作流按失败分流定，不在 Temporal 这一层自动再起一遍。
+ * poll：长轮询（等合并）——一次最多 MERGE_POLL_MINUTES 分钟加余量，必须心跳；工人丢了重试没有副作用（只读）。
  */
-export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job';
+export type Profile = 'quick' | 'git' | 'setup' | 'ci' | 'job' | 'segment' | 'poll';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   pickRoute: 'quick',
   recordTiming: 'quick',
   saveTaskState: 'quick',
   raiseAlert: 'quick',
-  askHuman: 'quick',
-  taskAsks: 'quick',
-  markAsksApplied: 'quick',
-  requestApproval: 'quick',
-  enqueueMerge: 'quick',
-  withdrawMerge: 'quick',
   authorFamilies: 'quick',
-  recordVerification: 'quick',
-  flowConfig: 'quick',
-  taskRequest: 'quick',
-  readCriteria: 'git',
-  startSession: 'git',
-  stopSession: 'git',
   removeWorktree: 'git',
   pushBranch: 'git',
   openPr: 'git',
-  checkHighRisk: 'git',
-  postSecondOpinion: 'git',
-  patchIdOf: 'git',
   syncMainline: 'git',
-  mergePr: 'git',
-  updateIssueProgress: 'git',
   closeIssue: 'git',
-  writeSpecDoc: 'git',
   createWorktree: 'setup',
-  awaitSession: 'watch',
   waitCi: 'ci',
-  runTests: 'tests',
   reconcileGitHub: 'job',
   probeRoutes: 'job',
+  readQuotas: 'job',
   reconcileHourly: 'job',
   canaryOpen: 'job',
   canaryCheck: 'job',
   watchSchedules: 'job',
+  intakeRound: 'job',
+  readTaskBrief: 'git',
+  runSegment: 'segment',
+  readDelivery: 'git',
+  coldVerify: 'segment',
+  checkGuarded: 'git',
+  armAutoMerge: 'git',
+  waitMerged: 'poll',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */
@@ -125,9 +141,6 @@ export const NON_RETRYABLE_CODES: readonly string[] = [
   'WORKFLOWS_PERMISSION',
   'INVALID_INPUT',
 ];
-
-/** 看守（awaitSession）最多试几次：见 profileOptions 的 watch。 */
-export const WATCH_ATTEMPTS = 12;
 
 function retry(maximumAttempts: number, initialInterval: string, maximumInterval: string): RetryPolicy {
   return {
@@ -156,15 +169,6 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
         heartbeatTimeout,
         retry: retry(3, '5 seconds', '1 minute'),
       };
-    case 'watch':
-      // 会话本身在工人外面跑；看守丢了就重新接上（接不上会回 SESSION_LOST），所以可以重试。
-      // 次数给足：会话脱开引擎跑（real/session-io.ts），每发布、重启一次引擎，看守就随旧进程断一次、在新工人上接回，
-      // 一个长会话赶上几次发布不该把次数用完（用完了工作流会当成这一步丢了、另起会话，原来那个还在跑）
-      return {
-        startToCloseTimeout: `${limits.sessionMinutes} minutes`,
-        heartbeatTimeout,
-        retry: retry(WATCH_ATTEMPTS, '2 seconds', '30 seconds'),
-      };
     case 'ci':
       return {
         startToCloseTimeout: `${limits.ciMinutes} minutes`,
@@ -173,29 +177,22 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
       };
     case 'job':
       return { startToCloseTimeout: '10 minutes', retry: retry(1, '1 second', '1 second') };
-    case 'tests':
+    case 'segment':
       return {
-        startToCloseTimeout: `${limits.testsMinutes} minutes`,
+        startToCloseTimeout: `${SEGMENT_MINUTES + 15} minutes`,
         heartbeatTimeout,
-        retry: retry(2, '5 seconds', '1 minute'),
+        retry: retry(1, '1 second', '1 second'),
+      };
+    case 'poll':
+      return {
+        startToCloseTimeout: `${MERGE_POLL_MINUTES + 5} minutes`,
+        heartbeatTimeout,
+        retry: retry(3, '5 seconds', '1 minute'),
       };
   }
 }
 
-/**
- * 叫停时要等服务端给出结论（活动做完，或者判它超时）才往下走的活动。
- * 不设的活动按 SDK 的实际默认 TRY_CANCEL：叫停时工作流当场往下走，不等活动（1.24 的文档注释说默认是
- * WAIT_CANCELLATION_COMPLETED，不对——不设就编码成 0 = TRY_CANCEL）。
- * 排进合并队列要等：排队的那一下通常在这期间落地，收尾再撤出就撤得掉。它不心跳、收不到叫停，最多等到这次尝试的限时
- * （30 秒，叫停之后服务端不再重试）；服务端判超时时代码可能还卡着、事后才发——那一下由队列记下的撤回挡回去
- * （workflows/subtask.ts 的 sendWithdraw）。
- */
-export const WAIT_FOR_CANCEL: readonly ActivityName[] = ['enqueueMerge'];
-
-/** 一个活动的完整选项：它那一档的超时、心跳、重试，加上叫停时等不等它收场。 */
+/** 一个活动的完整选项：它那一档的超时、心跳、重试。 */
 export function activityOptions(name: ActivityName, limits: Limits): ActivityOptions {
-  const options = profileOptions(ACTIVITY_PROFILE[name], limits);
-  return WAIT_FOR_CANCEL.includes(name)
-    ? { ...options, cancellationType: 'WAIT_CANCELLATION_COMPLETED' }
-    : options;
+  return profileOptions(ACTIVITY_PROFILE[name], limits);
 }

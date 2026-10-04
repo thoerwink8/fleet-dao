@@ -27,7 +27,23 @@ const founderB = { login: 'Founder-B', id: 5555, type: 'User' }; // 白名单里
 const stranger = { login: 'stranger', id: 4242, type: 'User' };
 const workerBot = { login: 'fleet-worker[bot]', id: 9001, type: 'Bot' };
 
-const issueOpened = (user: object, sender: object = user) => ({
+const prOpened = (user: object, sender: object = user) => ({
+  action: 'opened',
+  pull_request: {
+    number: 12,
+    title: '登录页加验证码',
+    state: 'open',
+    user,
+    updated_at: '2026-09-25T07:59:00Z',
+    head: { ref: 'fleet/12-a', repo: REPO },
+    base: { ref: 'main', repo: REPO },
+  },
+  sender,
+  repository: REPO,
+});
+
+/** issue 事件：现在门口不收（单子由引擎每 5 分钟自己拉），只用来验「不处理」。 */
+const issueEvent = (user: object, sender: object = user) => ({
   action: 'opened',
   issue: {
     number: 12,
@@ -45,16 +61,16 @@ const issueOpened = (user: object, sender: object = user) => ({
 describe('GitHub 事件签名', () => {
   it('签名对才收；不对、缺签名、用别的密钥签：401 并留日志，不交给引擎', async () => {
     const h = harness();
-    expect((await deliver(h, 'issues', issueOpened(founderA))).status).toBe(200);
-    expect(await errorCode(await deliver(h, 'issues', issueOpened(founderA), { signature: null }))).toBe(
+    expect((await deliver(h, 'pull_request', prOpened(founderA))).status).toBe(200);
+    expect(await errorCode(await deliver(h, 'pull_request', prOpened(founderA), { signature: null }))).toBe(
       'bad_signature',
     );
     expect(
-      await errorCode(await deliver(h, 'issues', issueOpened(founderA), { signature: 'sha256=00' })),
+      await errorCode(await deliver(h, 'pull_request', prOpened(founderA), { signature: 'sha256=00' })),
     ).toBe('bad_signature');
-    const forged = JSON.stringify(issueOpened(founderA));
+    const forged = JSON.stringify(prOpened(founderA));
     expect(
-      (await deliver(h, 'issues', issueOpened(founderA), { signature: sign(forged, 'guess') })).status,
+      (await deliver(h, 'pull_request', prOpened(founderA), { signature: sign(forged, 'guess') })).status,
     ).toBe(401);
     expect(h.accepted).toHaveLength(1);
     expect(h.logs.filter((l) => l.message.includes('签名不对'))).toHaveLength(3);
@@ -71,28 +87,32 @@ describe('GitHub 事件签名', () => {
 
   it('没配密钥：503（不会无签名放行）', async () => {
     const h = harness({ config: { githubWebhookSecret: null } });
-    expect((await deliver(h, 'issues', issueOpened(founderA))).status).toBe(503);
+    expect((await deliver(h, 'pull_request', prOpened(founderA))).status).toBe(503);
   });
 
   it('香港原样透传：按收到的原始字节验，带缩进、键序随意的原文验得过；被重新序列化过（空格、键序变了）就验不过', async () => {
     const h = harness();
     // GitHub 发来的原文：两格缩进、repository 排在前面。签名是对这份字节算的
-    const original = `{\n  "repository": ${JSON.stringify(REPO)},\n  "action": "opened",\n  "sender": ${JSON.stringify(founderA)},\n  "issue": ${JSON.stringify(issueOpened(founderA).issue)}\n}`;
+    const original = `{\n  "repository": ${JSON.stringify(REPO)},\n  "action": "opened",\n  "sender": ${JSON.stringify(founderA)},\n  "pull_request": ${JSON.stringify(prOpened(founderA).pull_request)}\n}`;
     const signature = sign(original);
-    const ok = await deliver(h, 'issues', null, { body: original, signature });
+    const ok = await deliver(h, 'pull_request', null, { body: original, signature });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ verdict: 'accepted' });
     // 内容一模一样，只是被中间谁解析再序列化了一遍：字节变了，签名就对不上
     const reserialized = JSON.stringify(JSON.parse(original));
     expect(reserialized).not.toBe(original);
-    const bad = await deliver(h, 'issues', null, { body: reserialized, signature, delivery: 'reserialized' });
+    const bad = await deliver(h, 'pull_request', null, {
+      body: reserialized,
+      signature,
+      delivery: 'reserialized',
+    });
     expect(bad.status).toBe(401);
     expect(await errorCode(bad)).toBe('bad_signature');
-    const { action, sender, issue, repository } = JSON.parse(original);
-    const reordered = JSON.stringify({ issue, sender, action, repository });
+    const { action, sender, pull_request, repository } = JSON.parse(original);
+    const reordered = JSON.stringify({ pull_request, sender, action, repository });
     expect(
       (
-        await deliver(h, 'issues', null, {
+        await deliver(h, 'pull_request', null, {
           body: reordered,
           signature: sign(original),
           delivery: 'reordered',
@@ -108,7 +128,7 @@ describe('GitHub 事件签名', () => {
 describe('读不到的请求：明确失败、留日志，不当成「没事件」', () => {
   it('缺投递编号或事件名：400，留日志，不落库', async () => {
     const h = harness();
-    const body = JSON.stringify(issueOpened(founderA));
+    const body = JSON.stringify(prOpened(founderA));
     const res = await h.cockpit.request('/github/webhook', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-hub-signature-256': sign(body) },
@@ -123,7 +143,7 @@ describe('读不到的请求：明确失败、留日志，不当成「没事件�
   it('签名对、请求体却不是 JSON（Content type 选成了表单）：400，留日志，不落库', async () => {
     const h = harness();
     const body = 'payload=%7B%22action%22%3A%22opened%22%7D';
-    const res = await deliver(h, 'issues', null, { body, delivery: 'form-encoded' });
+    const res = await deliver(h, 'pull_request', null, { body, delivery: 'form-encoded' });
     expect(res.status).toBe(400);
     expect(await errorCode(res)).toBe('invalid_json');
     expect(h.logs.some((l) => l.level === 'warn' && l.fields?.deliveryId === 'form-encoded')).toBe(true);
@@ -132,8 +152,8 @@ describe('读不到的请求：明确失败、留日志，不当成「没事件�
 
   it('认得的事件、形状认不出：不收，原因记进库、告警，不交给后面', async () => {
     const h = harness();
-    const broken = { ...issueOpened(founderA), issue: { number: 12, user: founderA } };
-    const res = await deliver(h, 'issues', broken, { delivery: 'broken' });
+    const broken = { ...prOpened(founderA), pull_request: { number: 12, user: founderA } };
+    const res = await deliver(h, 'pull_request', broken, { delivery: 'broken' });
     expect(await res.json()).toMatchObject({ verdict: 'ignored', reason: 'payload_unreadable' });
     expect(await h.store.getDelivery('broken')).toMatchObject({
       status: 'ignored',
@@ -148,17 +168,16 @@ describe('读不到的请求：明确失败、留日志，不当成「没事件�
 describe('原文落库', () => {
   it('放进来的、不收的都记一行：原文、事件、仓、结局和原因；处理完的带上做了什么', async () => {
     const h = harness();
-    await deliver(h, 'issues', issueOpened(founderA), { delivery: 'kept' });
-    await deliver(h, 'issues', issueOpened(stranger), { delivery: 'stranger' });
+    await deliver(h, 'pull_request', prOpened(founderA), { delivery: 'kept' });
+    await deliver(h, 'pull_request', prOpened(stranger), { delivery: 'stranger' });
     expect(await h.store.getDelivery('kept')).toMatchObject({
-      event: 'issues',
+      event: 'pull_request',
       action: 'opened',
       source: 'webhook',
       repo: 'example/canary',
-      versions: [{ object: 'example/canary:issue:12', version: '2026-09-25T07:59:00.000Z', state: 'open' }],
-      payload: issueOpened(founderA),
+      versions: [{ object: 'example/canary:pull:12', version: '2026-09-25T07:59:00.000Z', state: 'open' }],
+      payload: prOpened(founderA),
       status: 'accepted',
-      note: 'task=exists, workflow=dispatch_off',
       attempts: 1,
     });
     expect(await h.store.getDelivery('stranger')).toMatchObject({
@@ -169,7 +188,7 @@ describe('原文落库', () => {
 
   it('重放：按库里的原文再走一遍门（改了名单之后，当初不收的现在收）', async () => {
     const h = harness();
-    await deliver(h, 'issues', issueOpened(stranger), { delivery: 'late' });
+    await deliver(h, 'pull_request', prOpened(stranger), { delivery: 'late' });
     expect((await h.store.getDelivery('late'))?.status).toBe('ignored');
     h.store.data.users.push({
       id: 'e0000000-0000-4000-8000-00000000000c',
@@ -187,38 +206,61 @@ describe('原文落库', () => {
 });
 
 describe('GitHub 事件白名单与去重', () => {
-  it('白名单作者开的单：收下并叫醒；陌生人开的单、评论：不收', async () => {
+  it('白名单作者开的 PR：收下并叫醒；陌生人的 PR、陌生人的审查：不收', async () => {
     const h = harness();
-    const ok = await deliver(h, 'issues', issueOpened(founderA));
+    const ok = await deliver(h, 'pull_request', prOpened(founderA));
     expect(await ok.json()).toMatchObject({ verdict: 'accepted', wake: true });
     expect(h.accepted[0]).toMatchObject({
-      event: 'issues',
+      event: 'pull_request',
       action: 'opened',
       repo: 'example/canary',
       wake: true,
     });
 
-    expect(await (await deliver(h, 'issues', issueOpened(stranger))).json()).toMatchObject({
+    expect(await (await deliver(h, 'pull_request', prOpened(stranger))).json()).toMatchObject({
       verdict: 'ignored',
       reason: 'author_not_whitelisted',
     });
-    const strangerComment = {
-      action: 'created',
-      issue: { number: 12, user: founderA },
-      comment: { id: 1, user: stranger },
+    const strangerReview = {
+      action: 'submitted',
+      review: { user: stranger },
+      pull_request: prOpened(founderA).pull_request,
       sender: stranger,
       repository: REPO,
     };
-    expect(await (await deliver(h, 'issue_comment', strangerComment)).json()).toMatchObject({
+    expect(await (await deliver(h, 'pull_request_review', strangerReview)).json()).toMatchObject({
       verdict: 'ignored',
+      reason: 'author_not_whitelisted',
     });
     expect(h.accepted).toHaveLength(1);
   });
 
+  it('issue、评论的事件不收：记成「不处理的事件」，不落工作（单子由引擎每 5 分钟自己拉，#632）', async () => {
+    const h = harness();
+    const res = await deliver(h, 'issues', issueEvent(founderA), { delivery: 'issue-1' });
+    expect(await res.json()).toMatchObject({ verdict: 'ignored', reason: 'event_not_handled' });
+    const comment = {
+      action: 'created',
+      issue: { number: 12, user: founderA },
+      comment: { id: 1, user: founderA },
+      sender: founderA,
+      repository: REPO,
+    };
+    expect(await (await deliver(h, 'issue_comment', comment)).json()).toMatchObject({
+      verdict: 'ignored',
+      reason: 'event_not_handled',
+    });
+    expect(await h.store.getDelivery('issue-1')).toMatchObject({
+      status: 'ignored',
+      reason: 'event_not_handled',
+    });
+    expect(h.accepted).toEqual([]);
+  });
+
   it('同一个投递编号来两次：只处理一次', async () => {
     const h = harness();
-    await deliver(h, 'issues', issueOpened(founderA), { delivery: 'same' });
-    const again = await deliver(h, 'issues', issueOpened(founderA), { delivery: 'same' });
+    await deliver(h, 'pull_request', prOpened(founderA), { delivery: 'same' });
+    const again = await deliver(h, 'pull_request', prOpened(founderA), { delivery: 'same' });
     expect(await again.json()).toMatchObject({ verdict: 'duplicate' });
     expect(h.accepted).toHaveLength(1);
   });
@@ -230,27 +272,29 @@ describe('GitHub 事件白名单与去重', () => {
         if (fail) throw new Error('库连不上');
       },
     });
-    expect((await deliver(h, 'issues', issueOpened(founderA), { delivery: 'retry-me' })).status).toBe(500);
+    expect((await deliver(h, 'pull_request', prOpened(founderA), { delivery: 'retry-me' })).status).toBe(500);
     expect(await h.store.getDelivery('retry-me')).toMatchObject({
       status: 'failed',
       reason: '库连不上',
-      payload: issueOpened(founderA),
+      payload: prOpened(founderA),
       attempts: 1,
     });
     fail = false;
-    const redelivered = await deliver(h, 'issues', issueOpened(founderA), { delivery: 'retry-me' });
+    const redelivered = await deliver(h, 'pull_request', prOpened(founderA), { delivery: 'retry-me' });
     expect(await redelivered.json()).toMatchObject({ verdict: 'accepted' });
     expect(await h.store.getDelivery('retry-me')).toMatchObject({ status: 'accepted', attempts: 2 });
   });
 
-  it('白名单作者的单被外人编辑：不收并告警；自家机器人的动作只同步镜像不叫醒', async () => {
+  it('白名单作者的 PR 被外人编辑：不收并告警；自家机器人的动作只同步镜像不叫醒', async () => {
     const h = harness();
-    const edited = { ...issueOpened(founderA, stranger), action: 'edited' };
-    expect(await (await deliver(h, 'issues', edited)).json()).toMatchObject({ reason: 'edited_by_outsider' });
+    const edited = { ...prOpened(founderA, stranger), action: 'edited' };
+    expect(await (await deliver(h, 'pull_request', edited)).json()).toMatchObject({
+      reason: 'edited_by_outsider',
+    });
     expect(h.logs.some((l) => l.level === 'warn' && l.fields?.reason === 'edited_by_outsider')).toBe(true);
 
-    const botEdit = { ...issueOpened(founderA, workerBot), action: 'edited' };
-    expect(await (await deliver(h, 'issues', botEdit)).json()).toMatchObject({
+    const botEdit = { ...prOpened(founderA, workerBot), action: 'edited' };
+    expect(await (await deliver(h, 'pull_request', botEdit)).json()).toMatchObject({
       verdict: 'accepted',
       wake: false,
     });
@@ -258,8 +302,8 @@ describe('GitHub 事件白名单与去重', () => {
 
   it('不是本系统管的仓、从 fork 来的 PR：不收', async () => {
     const h = harness();
-    const otherRepo = { ...issueOpened(founderA), repository: { full_name: 'someone/else' } };
-    expect(await (await deliver(h, 'issues', otherRepo)).json()).toMatchObject({
+    const otherRepo = { ...prOpened(founderA), repository: { full_name: 'someone/else' } };
+    expect(await (await deliver(h, 'pull_request', otherRepo)).json()).toMatchObject({
       reason: 'repo_not_managed',
     });
     const forkPr = {
@@ -338,12 +382,12 @@ describe('白名单判定', () => {
   const screen = (event: string, payload: unknown) => screenGithubEvent(event, payload, { repos, whitelist });
 
   it('有数字编号的人只按编号认：同名不同号的冒充者不认', () => {
-    expect(screen('issues', issueOpened(founderA)).accept).toBe(true);
-    expect(screen('issues', issueOpened({ ...founderA, id: 1 })).accept).toBe(false);
+    expect(screen('pull_request', prOpened(founderA)).accept).toBe(true);
+    expect(screen('pull_request', prOpened({ ...founderA, id: 1 })).accept).toBe(false);
   });
 
   it('只登记了登录名的人按登录名认（不分大小写）', () => {
-    expect(screen('issues', issueOpened(founderB)).accept).toBe(true);
+    expect(screen('pull_request', prOpened(founderB)).accept).toBe(true);
   });
 
   it('协作者进不了驾驶舱，但开的单、写的评论照样算白名单作者', () => {
@@ -353,73 +397,56 @@ describe('白名单判定', () => {
     ]);
     const collaborator = { login: 'collab', id: 3003, type: 'User' };
     expect(
-      screenGithubEvent('issues', issueOpened(collaborator), { repos, whitelist: withCollaborator }).accept,
+      screenGithubEvent('pull_request', prOpened(collaborator), { repos, whitelist: withCollaborator })
+        .accept,
     ).toBe(true);
   });
 
   it('机器人只按编号认，而且 type 必须是 Bot：普通账号起个机器人的名字不行', () => {
-    expect(screen('issues', issueOpened(workerBot)).accept).toBe(true);
-    expect(screen('issues', issueOpened({ ...workerBot, type: 'User' })).accept).toBe(false);
-    expect(screen('issues', issueOpened({ ...workerBot, id: 1 })).accept).toBe(false);
+    expect(screen('pull_request', prOpened(workerBot)).accept).toBe(true);
+    expect(screen('pull_request', prOpened({ ...workerBot, type: 'User' })).accept).toBe(false);
+    expect(screen('pull_request', prOpened({ ...workerBot, id: 1 })).accept).toBe(false);
   });
 
   it('补收用的投递编号：同一版本只收一次', () => {
-    expect(pollDeliveryId('Example/Canary', 'issue', 12, '2026-09-25T08:00:00Z')).toBe(
-      'poll:example/canary:issue:12:2026-09-25T08:00:00Z',
+    expect(pollDeliveryId('Example/Canary', 'pull', 5, '2026-09-25T08:00:00Z')).toBe(
+      'poll:example/canary:pull:5:2026-09-25T08:00:00Z',
     );
   });
 
-  it('事件带着的对象版本：issue；评论和它顶新的 issue（PR 上的评论记成 PR）；PR 和它的审查、审查评论', () => {
+  it('事件带着的对象版本：PR 和它的审查、审查评论；issue、评论的事件不再记版本（单子由引擎自己拉）', () => {
     const at = '2026-09-25T08:00:00Z';
     const iso = '2026-09-25T08:00:00.000Z';
-    const later = '2026-09-25T08:01:00Z';
-    expect(
-      versionsOf('issues', { issue: { number: 12, updated_at: at, state: 'open' } }, 'Example/Canary'),
-    ).toEqual([{ object: 'example/canary:issue:12', version: iso, state: 'open' }]);
-    expect(
-      versionsOf(
-        'issue_comment',
-        { comment: { id: 7, updated_at: at }, issue: { number: 12, updated_at: later, state: 'closed' } },
-        'example/canary',
-      ),
-    ).toEqual([
-      { object: 'example/canary:comment:7', version: iso },
-      { object: 'example/canary:issue:12', version: '2026-09-25T08:01:00.000Z', state: 'closed' },
-    ]);
-    const onPr = {
-      comment: { id: 8, updated_at: at },
-      issue: { number: 5, updated_at: at, pull_request: {} },
-    };
-    expect(versionsOf('issue_comment', onPr, 'example/canary').map((v) => v.object)).toEqual([
-      'example/canary:comment:8',
-      'example/canary:pull:5',
-    ]);
-    // 补收拼出来的评论只带 issue 号：只记评论
-    expect(
-      versionsOf(
-        'issue_comment',
-        { comment: { id: 9, updated_at: at }, issue: { number: 12 } },
-        'example/canary',
-      ),
-    ).toEqual([{ object: 'example/canary:comment:9', version: iso }]);
     for (const event of ['pull_request', 'pull_request_review', 'pull_request_review_comment']) {
       expect(
         versionsOf(event, { pull_request: { number: 5, updated_at: at, state: 'closed' } }, 'example/canary'),
         event,
       ).toEqual([{ object: 'example/canary:pull:5', version: iso, state: 'closed' }]);
     }
-    expect(objectKey('Example/Canary', 'issue', 12)).toBe('example/canary:issue:12');
+    expect(
+      versionsOf('issues', { issue: { number: 12, updated_at: at, state: 'open' } }, 'example/canary'),
+    ).toEqual([]);
+    expect(
+      versionsOf(
+        'issue_comment',
+        { comment: { id: 7, updated_at: at }, issue: { number: 12 } },
+        'example/canary',
+      ),
+    ).toEqual([]);
+    expect(objectKey('Example/Canary', 'pull', 5)).toBe('example/canary:pull:5');
   });
 
   it('认不出版本的不记：别的事件、缺 updated_at、时刻读不出、没有仓', () => {
     const at = '2026-09-25T08:00:00Z';
     expect(versionsOf('check_suite', { check_suite: {} }, 'example/canary')).toEqual([]);
-    expect(versionsOf('issues', { issue: { number: 12 } }, 'example/canary')).toEqual([]);
+    expect(versionsOf('pull_request', { pull_request: { number: 5 } }, 'example/canary')).toEqual([]);
     expect(
-      versionsOf('issues', { issue: { number: 12, updated_at: 'yesterday' } }, 'example/canary'),
+      versionsOf('pull_request', { pull_request: { number: 5, updated_at: 'yesterday' } }, 'example/canary'),
     ).toEqual([]);
-    expect(versionsOf('issues', { issue: { number: 12, updated_at: at } }, undefined)).toEqual([]);
-    expect(versionsOf('issues', null, 'example/canary')).toEqual([]);
+    expect(versionsOf('pull_request', { pull_request: { number: 5, updated_at: at } }, undefined)).toEqual(
+      [],
+    );
+    expect(versionsOf('pull_request', null, 'example/canary')).toEqual([]);
   });
 });
 

@@ -23,14 +23,13 @@ export interface IngestedEvent {
   payload: unknown;
 }
 
-/** 叫醒哪条工作流由引擎决定：按 issue 号找需求，按 PR 号或分支找子任务，按头找合并队列。 */
+/** 叫醒哪条工作流由引擎决定：按 PR 号或分支找子任务，按头找合并队列。issue、评论的事件不收了（#556）。 */
 export interface WakeEvent {
   repo: string;
   event: string;
   action?: string | undefined;
   deliveryId: string;
   source: IngestedEvent['source'];
-  issueNumber?: number | undefined;
   prNumbers?: number[] | undefined;
   headSha?: string | undefined;
   headRef?: string | undefined;
@@ -73,7 +72,7 @@ function dateOf(text: string | null | undefined): Date | null | undefined {
 
 /**
  * PR 镜像里给「提醒谁在处理」用的几样：开的时刻、合并的时刻和提交、正文挂的单和修的提醒（@fleet-dao/conventions 的
- * prLinks，和 PR 补贴、合并闸同一个认法）。事件里没带正文（undefined）就不给链接：镜像里的旧值留着。
+ * prLinks，认法只有一处）。事件里没带正文（undefined）就不给链接：镜像里的旧值留着。
  */
 export function mirrorExtras(
   pr: Pick<PullFields, 'created_at' | 'merged_at' | 'merge_commit_sha' | 'title' | 'body'>,
@@ -108,9 +107,6 @@ export function mirrorExtrasOf(
   const p = PullExtras.safeParse(item);
   return p.success ? mirrorExtras(p.data, merged, repo) : {};
 }
-const IssuePayload = z.object({
-  issue: z.object({ number: z.number(), pull_request: z.unknown().optional() }),
-});
 const PrList = z.array(z.object({ number: z.number() })).optional();
 const CheckSuitePayload = z.object({
   check_suite: z.object({ head_sha: z.string(), pull_requests: PrList }),
@@ -224,12 +220,6 @@ export function createEventSink(deps: Deps, waker: WorkflowWaker): EventSink {
       } else if (ev.event === 'pull_request_review' || ev.event === 'pull_request_review_comment') {
         const n = (ev.payload as { pull_request?: { number?: unknown } })?.pull_request?.number;
         if (typeof n === 'number') wake.prNumbers = [n];
-      } else if (ev.event === 'issues' || ev.event === 'issue_comment') {
-        const p = IssuePayload.safeParse(ev.payload);
-        if (p.success) {
-          if (p.data.issue.pull_request) wake.prNumbers = [p.data.issue.number];
-          else wake.issueNumber = p.data.issue.number;
-        }
       } else if (ev.event === 'push') {
         const p = PushPayload.safeParse(ev.payload);
         if (p.success && p.data.ref.startsWith('refs/heads/')) {

@@ -25,17 +25,6 @@ export {
   parseChangePayload,
   startPgChangeFeed,
 } from './changes.ts';
-export {
-  CLAIM_STATUS_ALERT_KEY,
-  type ClaimAlerts,
-  type ClaimRefresh,
-  type ClaimRepo,
-  type ClaimStatus,
-  type ClaimStatusDeps,
-  type ClaimSweepReport,
-  createClaimStatus,
-  type ReassignCloseReport,
-} from './claim-status.ts';
 export { type Config, ConfigError, loadConfig } from './config.ts';
 export { readDeployLagInput } from './deploy-lag.ts';
 export type { Deps } from './deps.ts';
@@ -70,14 +59,6 @@ export {
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
-export {
-  createIssueIntake,
-  githubIssuePlans,
-  type IssueIntake,
-  issuePlansUnavailable,
-  type PendingRestartReport,
-  RetryLaterError,
-} from './issue-intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
 export {
@@ -97,9 +78,7 @@ export {
 } from './reconcile.ts';
 export { createSseRelay, type SseRelay } from './sse.ts';
 export {
-  createTemporalRequirementWorkflows,
   createTemporalWorkflowControl,
   notConnectedTemporal,
   type TemporalClientLike,
-  type WorkflowStarterLike,
 } from './temporal.ts';

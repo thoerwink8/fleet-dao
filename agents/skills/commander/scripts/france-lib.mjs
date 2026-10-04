@@ -591,6 +591,8 @@ export function emptyTotals() {
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
+    // shared 的 usage.ts 给三段的 runs 记「没有排队」的笔数；这页只读会话（session_runs），恒为 0
+    noQueue: 0,
   };
 }
 
@@ -817,6 +819,11 @@ export const ACTION_WORDS = {
   'wait-idle': '在等引擎空闲',
   hold: '人手动切过版本',
   'failed-before': '这个提交发过、没过健康检查',
+  'marker-none': '没有版本标记，不发',
+  'marker-unknown': '版本标记读不到，不发',
+  'marker-not-ancestor': '版本标记不是主线上的提交，不发',
+  'marker-not-newer': '版本标记指的提交不比在用的新，不降级',
+  'engine-unknown': '查不出引擎开没开着，不发',
   'ci-pending': '在等 CI',
   'ci-red': '主线 CI 红',
   'ci-unknown': 'CI 结论读不到',

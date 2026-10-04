@@ -65,12 +65,12 @@ describe('只看状态和耗时（status）', () => {
       expect(x.body).toBe(HIDDEN_TEXT);
       expect(x.title).toMatch(/^(需求 #\d+|有一件事|有东西)?(在等你拍板|卡住了)$|^日报$/);
     }
-    // 谁在处理：阶段、谁、单号照常，认领备注（在那一行里）收起
+    // 谁在处理：阶段、谁、单号照常，那一行（可能带认领备注）收起
     const handled = n.items.flatMap((x) => (x.handling ? [x.handling] : []));
     expect(handled.length).toBeGreaterThan(0);
     for (const h of handled) expect(h.line).toBe(HIDDEN_TEXT);
-    expect(n.items.find((x) => x.handling?.stage === 'claimed')?.handling).toMatchObject({
-      who: '本机/工人A',
+    expect(n.items.find((x) => x.handling?.stage === 'pr_open')?.handling).toMatchObject({
+      who: 'PR #16',
       work: { issueNumber: 17 },
     });
     const a = redactAudit(audit, 'status');

@@ -1,11 +1,10 @@
 // PR 正文挂的单和修的提醒（design 15.3「谁在处理」）：PR 镜像记下来（@fleet-dao/github 的 events.ts，PR 事件和对账补收
 // 走同一处），驾驶舱、看板、`alert show` 据此现算「PR 开着 / 合进主线 / 法国已发布」（提醒派单已经删掉，#445）。
-// 挂的单 = 「需求」栏（没有再看标题）的 #号——和 PR 补贴、#299「认领对得上」同一个认法（pr-labels.ts 的 linkedIssue）——
-// 加上 GitHub 合并时会关的关单词（close-rule.ts 的 closingIssues，和合并闸同一个认法），只算同仓的。
-// 修的提醒 = 「修提醒」栏（.github/pull_request_template.md），写提醒的键或编号。
-import { closingIssues } from './close-rule.ts';
-import { prColumns } from './pr-fields.ts';
-import { linkedIssue } from './pr-labels.ts';
+// 挂的单 = 「需求」栏（没有再看标题）的 #号（认法只有一处，pr-columns.ts 的 linkedIssue）——
+// 加上 GitHub 合并时会关的关单词（closing-issues.ts 的 closingIssues），只算同仓的。
+// 修的提醒 = 「修提醒」栏（模板注释里讲的、有这个情况才多写一行的栏），写提醒的键或编号。
+import { closingIssues } from './closing-issues.ts';
+import { linkedIssue, prColumns } from './pr-columns.ts';
 
 /** PR 模板里写这个 PR 修哪几条提醒的那一栏。 */
 export const FIX_ALERT_COLUMN = '修提醒';

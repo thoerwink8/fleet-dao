@@ -97,6 +97,9 @@ importers:
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
 
   packages/core:
     dependencies:

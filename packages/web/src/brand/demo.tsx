@@ -41,11 +41,5 @@ export const brand: Brand = {
     triage: '判断是哪类活、说没说清、多大、要不要人来拍板',
     ui: '界面类写码；GPT 族不接',
   },
-  flow: {
-    fileName: '自己的流程配置文件',
-    orgName: '组织',
-    orgDefaultDetail:
-      '这个项目没有自己的流程配置文件，这一轮按组织的全组织默认流程配置派（每步模型顺序、验证几轮都用默认的）',
-  },
   repoLink: () => undefined,
 };

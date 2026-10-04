@@ -90,6 +90,8 @@ describe('readGroomFacts：开着的单加全部里程碑', () => {
           title: '登录验证码',
           body: '正文',
           author: 'thoerwink8',
+          authorId: 1,
+          authorType: 'User',
           authorIsBot: false,
           createdAt: '2026-09-01T00:00:00Z',
           updatedAt: '2026-09-02T00:00:00Z',
@@ -101,6 +103,8 @@ describe('readGroomFacts：开着的单加全部里程碑', () => {
           title: '登录验证码',
           body: '正文',
           author: 'thoerwink8',
+          authorId: 1,
+          authorType: 'User',
           authorIsBot: false,
           createdAt: '2026-09-01T00:00:00Z',
           updatedAt: '2026-09-02T00:00:00Z',
@@ -117,6 +121,14 @@ describe('readGroomFacts：开着的单加全部里程碑', () => {
     const { client } = fakeClient({ milestones: [], issues: [issueRow({ user: BOT_USER })] });
     const got = await readGroomFacts({ client, bots }, { repo });
     expect(got.issues[0]?.authorIsBot).toBe(true);
+    // 拉单按白名单认人要数字编号和类型：机器人只按编号认、且类型必须是 Bot
+    expect(got.issues[0]).toMatchObject({ authorId: 9, authorType: 'Bot' });
+  });
+
+  it('账号删了（user 是 null）：作者三项都是 null，不编一个', async () => {
+    const { client } = fakeClient({ milestones: [], issues: [issueRow({ user: null })] });
+    const got = await readGroomFacts({ client, bots }, { repo });
+    expect(got.issues[0]).toMatchObject({ author: null, authorId: null, authorType: null });
   });
 
   it('作者账号删了（user 是 null）：author 是 null，不算机器人', async () => {

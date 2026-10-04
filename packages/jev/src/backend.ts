@@ -1,6 +1,6 @@
 // 判断题后端的接口：旧系统的 Jev 服务（TypeSafe）、经插头起的 Claude 会话都照这一份实现。
 // 后端只管把题问出去、把答案原样交回来；答案在不在题面里、把握够不够、要不要拦，由 ask 统一判（jev.ts）。
-// 后端不抛：出错一律返回 ok:false + 原因。用哪条路由、哪个模型由调度台的「判断」阶段配（backendForRoute）。
+// 后端不抛：出错一律返回 ok:false + 原因。用哪条路由、哪个模型由路由两层里的判断用途配（wiring.ts → backendForRoute）。
 
 export interface BackendQuestion {
   /** 题号（jev_questions.id），答案按它交回。 */

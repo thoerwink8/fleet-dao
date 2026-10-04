@@ -15,8 +15,6 @@ import {
   feishuDrafts,
   feishuFollows,
   feishuOutbox,
-  flowReplicaOf,
-  followTaskOnEngineClaim,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -29,6 +27,7 @@ import {
   quotaWindows,
   repos,
   routes,
+  runsOfTask,
   scheduleHealth,
   searchSpecs,
   sessionRuns,
@@ -49,13 +48,14 @@ import {
   toQuotaWindow,
   toRepo,
   toRoute,
+  toSegmentRun,
   toSessionRun,
   toStagePolicy,
   toSubtask,
   toTask,
   users,
 } from '@fleet-dao/db';
-import type { ProgressKind, Step } from '@fleet-dao/shared';
+import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { testRunOf } from './done-check.ts';
 import {
@@ -100,7 +100,6 @@ import {
   type TimelineRecord,
   type User,
 } from './ports.ts';
-import { pgSeatStore } from './seat-store.ts';
 
 export interface PgStoreOptions {
   now?: () => Date;
@@ -520,8 +519,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   }
 
   return {
-    ...pgSeatStore(db, insertAudit),
-
     // —— 人 ——
     async getUser(id) {
       if (!isUuid(id)) return null;
@@ -620,19 +617,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const [row] = await db.select().from(repos).where(eq(repos.id, id));
       return row ? toRepo(row) : null;
     },
-    async getRepoFlow(id) {
-      if (!isUuid(id)) return null;
-      const [row] = await db.select().from(repos).where(eq(repos.id, id));
-      if (!row) return null;
-      const flow = flowReplicaOf(row);
-      return {
-        source: flow.source,
-        commit: flow.commit,
-        syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
-        error: flow.error,
-        unread: flow.unread,
-      };
-    },
     async listBoardTasks(repoId) {
       if (!isUuid(repoId)) return [];
       const rows = await db
@@ -704,6 +688,24 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(sessionRuns).where(eq(sessionRuns.id, id));
       return row ? toSessionRun(row) : null;
+    },
+    async listSegmentRuns(taskId) {
+      if (!isUuid(taskId)) return [];
+      const [task] = await db
+        .select({ issueNumber: tasks.issueNumber, owner: repos.owner, name: repos.name })
+        .from(tasks)
+        .innerJoin(repos, eq(repos.id, tasks.repoId))
+        .where(eq(tasks.id, taskId));
+      if (!task) return [];
+      const rows = await runsOfTask(db, {
+        id: taskId,
+        issueNumber: task.issueNumber,
+        workflowId: taskWorkflowId(task, task.issueNumber),
+      });
+      return rows.map((r) => ({
+        ...toSegmentRun(r),
+        matchedBy: r.taskId === taskId ? ('task' as const) : ('issueNumber' as const),
+      }));
     },
     async getPlans(runIds) {
       const ids = runIds.filter(isUuid);
@@ -1866,16 +1868,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`))
         .limit(1);
       if (!row) return null;
-      const flow = flowReplicaOf(row);
       return {
         ...toRepo(row),
         autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
-        flow: {
-          syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
-          error: flow.error,
-          unread: flow.unread,
-          testCommand: flow.testCommand,
-        },
       };
     },
     async findTaskByIssue(repoId, issueNumber) {
@@ -1949,11 +1944,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .returning({ id: tasks.id });
         if (stopped.length === 0) return 'not_queued';
         await insertAudit(tx, entry);
-        // 没派出去过就叫停了：引擎待起的认领跟着放下（#299），本机能接着认领
-        await followTaskOnEngineClaim(tx, {
-          taskId,
-          end: { state: 'released', reason: '任务没派出去过就叫停了' },
-        });
         return 'ok';
       });
     },

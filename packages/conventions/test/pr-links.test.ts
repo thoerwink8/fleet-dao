@@ -6,8 +6,8 @@ import { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from '../src/pr-links.ts';
 const TEMPLATE = readFileSync(new URL('../../../.github/pull_request_template.md', import.meta.url), 'utf8');
 
 describe('「修提醒」栏', () => {
-  it('PR 模板里有这一栏（只留模板提示没填的，就是没写）', () => {
-    expect(TEMPLATE).toContain(`**${FIX_ALERT_COLUMN}**：`);
+  it('PR 模板的注释里讲了这一栏（有这个情况才多写一行，#654 起不在模板正文里）；照模板开、没填，就是没写', () => {
+    expect(TEMPLATE).toContain(`「${FIX_ALERT_COLUMN}：」`);
     expect(fixAlertRefs(TEMPLATE)).toEqual([]);
   });
 

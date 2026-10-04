@@ -22,6 +22,20 @@ export const REQUIREMENT_WORKFLOW_TYPE = 'requirementWorkflow';
  */
 export const FUSION_WORKFLOW_TYPE = 'fusionWorkflow';
 
+/**
+ * 三段总调度的任务工作流类型名（#632；specs/632-三段总调度/方案.md）：引擎自己拉单（jobs/intake.ts）起的就是它，一张单一条。
+ * 必须等于引擎 workflows/task.ts 导出的函数名（Temporal 按导出名找工作流）。
+ */
+export const TASK_WORKFLOW_TYPE = 'taskWorkflow';
+
+/**
+ * 一张 issue 一条任务工作流，例如 `task:acme/demo#12`。编号定死、起的时候用 REJECT_DUPLICATE（同一编号不管开着还是已经结束都不许再起），
+ * 同一张单任何时候最多一条：做完的、停下的不会自己重来，要人在驾驶舱点「继续」（发信号）。驾驶舱后端发信号也按这个拼。
+ */
+export function taskWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
+  return `task:${repo.owner}/${repo.name}#${issueNumber}`;
+}
+
 /** 一张 issue 一条工作流（Fusion；在途的旧需求工作流也是这个编号），例如 `req:acme/demo#12`。 */
 export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `req:${repo.owner}/${repo.name}#${issueNumber}`;

@@ -352,7 +352,7 @@ function actionText(step: Step, plan: Plan, ctx: Ctx): string {
       if (step.reroute) {
         return `${first}不原地睡到清零，回去选路等：续同一个会话等这个池${
           ctx.upstreamWait === undefined ? '' : `（约 ${duration(ctx.upstreamWait)}后清零）`
-        }，会话用户切了号就换到切过去的那个池接着干（fork 续上）`;
+        }，会话用户切了号就换到切过去的那个池接着干`;
       }
       if (step.wait) return `${first}等 ${duration(step.delaySeconds)}再试`;
       return `${first}第 ${ctx.used.retries + 1} 次重试，${

@@ -1,40 +1,41 @@
 name: merge-gate
-# 合并闸（#74；#444 起只留四样）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个——不是草稿、
-# 和主线没冲突、改到先审后合的路径（packages/conventions/high-risk-paths.json）时当前头上有通过的 second-opinion；
-# 必填栏只提醒（packages/conventions/src/merge-gate.ts，design 第五节「流程只为快」）。「认领对得上」「写了关单却没带
-# 结果.md」两项 #444 起不再判（缺的由每天的关单对账另外提醒，不再挡合并）。
-# 三处触发：
-# - PR 事件用 pull_request_target：有冲突的 PR 上 pull_request 跑不起来，fork 来的 PR 在 pull_request 里也拿不到写状态的令牌。
-#   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的 plan.md、specs 目录都按 API 现读。
-# - 主线推送：冲突是主线一变才出现的，逐个重算所有开着的 PR。
-# - status 事件：第二意见写上 second-opinion 时逐个重算所有开着的 PR。
+# 合并闸（#74；#444 起只留四样；#555-2 起加一条冷调用；#654 起草稿、冲突交给 GitHub 自己拦）:在 PR 当前头上写提交状态 merge-gate，
+# 「按我们的规矩能不能合」只看它一个——改到先审后合的路径（packages/conventions/high-risk-paths.json）时当前头上有通过的
+# second-opinion、引擎任务 PR 当前头上有通过的 cold-verify（#555，合前一次冷调用）；判法在 packages/conventions/src/merge-gate.ts，
+# design 第五节「流程只为快」。PR 正文没有必填栏了，闸也不看标签、里程碑。
+# 三处触发（#654 起主线推送只在「闸认的东西」变了才触发：冲突不判了，别的主线推送什么都没变）：
+# - PR 事件用 pull_request_target：fork 来的 PR 在 pull_request 里拿不到写状态的令牌。
+#   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的改动文件按 API 现读。
+# - status 事件：第二意见写上 second-opinion、验收那一遍写上 cold-verify 时逐个重算所有开着的 PR。
 #   不按事件里的 sha 只算那一个：下面的排队组只留最新一个，一轮对账贴好几个 PR 时中间的运行被取消，只算最后那个的话前面的就停在旧结论上。
+# - 主线推送且只动了闸认的东西（高风险清单、判法、这份工作流）：已经开着的 PR 上旧的 merge-gate 状态是按旧清单、旧判法算的，
+#   清单加了新路径、判法收紧了，旧的 success 不会自己变——所以把开着的 PR 全重算一遍（第二意见 #656 第 2 轮）。
+#   paths 要盖住判法 import 到的每一个文件，packages/conventions/test/merge-gate-inputs.test.ts 钉着：以后给闸多引一个文件却忘了列在这里会红。
 # 用 GITHUB_TOKEN 写的状态不会再触发 status 事件，不会自己转圈。也能在 Actions 页手动跑（填 PR 号，留空算所有开着的）。
 on:
   pull_request_target:
-    types:
-      [
-        opened,
-        reopened,
-        synchronize,
-        edited,
-        ready_for_review,
-        converted_to_draft,
-        labeled,
-        unlabeled,
-        milestoned,
-        demilestoned,
-      ]
+    # 只在头变了（opened、reopened、synchronize）时重算：草稿、冲突、标签、里程碑、正文都不再是输入（#654），
+    # 它们变了触发的运行多半被下面的排队组顶掉（70 次里 43 次），白占一个检查位
+    types: [opened, reopened, synchronize]
+  status:
   push:
     branches: [main]
-  status:
+    paths:
+      - .github/workflows/merge-gate.yml
+      - packages/conventions/high-risk-paths.json
+      - packages/conventions/src/bin/merge-gate.ts
+      - packages/conventions/src/flow-branch.ts
+      - packages/conventions/src/gh-api.ts
+      - packages/conventions/src/merge-gate.ts
+      - packages/conventions/src/merge-gates.ts
+      - packages/conventions/src/workflow-structure.ts
   workflow_dispatch:
     inputs:
       pr:
         description: PR 号；留空算所有开着的
         required: false
-# PR 事件按 PR 排、新的顶掉旧的；主线推送、第二意见状态、手动运行共用一个组排队（不中途打断，只留最新一个等着），
-# 旧的不会在新的之后写回。另外写回前还会核一遍主线头没变（merge-gate.ts），变了就不写，交给新一轮。
+# PR 事件按 PR 排、新的顶掉旧的；第二意见状态、冷验收状态、手动运行共用一个组排队（不中途打断，只留最新一个等着），
+# 旧的不会在新的之后写回。
 concurrency:
   group: merge-gate-${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || 'all' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
@@ -44,15 +45,24 @@ permissions:
   statuses: write
 jobs:
   merge-gate:
-    if: github.event_name != 'status' || github.event.context == 'second-opinion'
+    if: github.event_name != 'status' || github.event.context == 'second-opinion' || github.event.context == 'cold-verify'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # 默认检出触发分支（pull_request_target 也是主线），高风险清单和判法都用主线上的：PR 改不了自己的门槛
       - uses: actions/checkout@v4
+      # ci.yml 的结构比对（workflow-structure.ts）要解析 YAML：只装 conventions 这一个包的依赖。装的是主线检出里的锁文件和
+      # 主线的代码，不碰 PR 的。这三步都 continue-on-error：装不上（镜像、网络、锁文件坏了）不能让所有 PR 的合并闸一起红，
+      # 只让改 ci.yml 的 PR 判「读不懂」（= 要审）——那边是按需加载 yaml 的，别的 PR 用不到它、照常判。
+      - uses: pnpm/action-setup@v4
+        continue-on-error: true
       - uses: actions/setup-node@v4
+        continue-on-error: true
         with:
           node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @fleet-dao/conventions
+        continue-on-error: true
       # 退出码 2 = 有 PR 没算成或没写上状态（没写上的那个 PR 缺 merge-gate，合不了），同样是红
       - run: node packages/conventions/src/bin/merge-gate.ts
         env:

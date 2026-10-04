@@ -13,6 +13,12 @@ source "$HERE/../lib/common.sh"
 # shellcheck source=../lib/cli-tools.sh
 source "$HERE/../lib/cli-tools.sh"
 
+# 把读回的超时压到最小：这两条用例就是要等它到点（10+15 秒），真等下来光这一项就 25 秒。
+# 压到 2+1 秒还分得开 124（到点叫停）和 137（不理叫停、再过 1 秒被强杀）——强杀延时至少留 1 秒，
+# 不然两个场景在 rc 上分不开。被测代码在函数体里读这两个变量，所以 source 之后再赋值有效。
+CLI_TOOLS_TIMEOUT=2
+CLI_TOOLS_KILL_AFTER=1
+
 if ((EUID != 0)); then
   echo "cli-tools：没跑成：要 root（得建临时用户、以他的身份跑）"
   exit 2
@@ -190,15 +196,15 @@ put_ddgs 'sleep 60'
 t0=$SECONDS
 ddgs_version "$U"
 check "前台卡住：读不成" "$?" 1
-check "原因里带 124（到 10 秒被叫停）" "$(grep -c '退出码 124' <<<"$CLI_TOOL_BAD")" 1
-check "十来秒就返回" "$((SECONDS - t0 <= 13))" 1
+check "原因里带 124（到 $CLI_TOOLS_TIMEOUT 秒被叫停）" "$(grep -c '退出码 124' <<<"$CLI_TOOL_BAD")" 1
+check "叫停就返回（观察窗口按 $CLI_TOOLS_TIMEOUT 秒算，留 3 秒余量）" "$((SECONDS - t0 <= CLI_TOOLS_TIMEOUT + 3))" 1
 put_ddgs "trap '' TERM; sleep 60"
 t0=$SECONDS
 REDS=()
 check_ddgs "$U" 9.16.0 "${DEPS[@]}" >/dev/null
 check "不理叫停：读回判红" "${#REDS[@]}" 1
-check "原因里带 137（不理叫停，再过 5 秒被强杀）" "$(grep -c '退出码 137' <<<"$(last_red)")" 1
-check "二十秒内返回" "$((SECONDS - t0 <= 18))" 1
+check "原因里带 137（不理叫停，再过 $CLI_TOOLS_KILL_AFTER 秒被强杀）" "$(grep -c '退出码 137' <<<"$(last_red)")" 1
+check "强杀就返回（窗口按 超时+强杀延时 算，留 5 秒余量）" "$((SECONDS - t0 <= CLI_TOOLS_TIMEOUT + CLI_TOOLS_KILL_AFTER + 5))" 1
 for _ in 1 2 3 4 5 6 7 8 9 10; do # 被强杀的要一小会儿才收尸
   if ! pgrep -u "$U" >/dev/null; then break; fi
   sleep 0.2

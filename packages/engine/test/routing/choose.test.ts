@@ -162,10 +162,10 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
     expect(chooseRoute(input([], { order: [] }))).toMatchObject({ kind: 'none' });
   });
 
-  it('阶段没配过顺序：不按编号乱挑（旧系统按 id 字典序选中了 Cursor）', () => {
+  it('用途没配过模型顺序：不按编号乱挑（旧系统按 id 字典序选中了 Cursor）', () => {
     const r = chooseRoute(input([route('a')], { configured: false }));
     expect(r.kind).toBe('none');
-    if (r.kind === 'none') expect(r.reason).toContain('还没在调度台上排路由顺序');
+    if (r.kind === 'none') expect(r.reason).toContain('还没配模型顺序');
   });
 
   it('单条开关全关', () => {

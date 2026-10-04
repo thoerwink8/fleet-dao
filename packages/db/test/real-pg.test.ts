@@ -18,6 +18,22 @@ import {
 const url = realTestPgUrl();
 const run = url ? describe : describe.skip;
 
+// CI 上 db 的测试只分到 pg 台（packages/conventions/src/test-split.ts 的 needsPg），那一台一定设了 FLEET_TEST_PG_URL。
+// 在 CI 里没设，说明分台或工作流坏了：这里直接红，不让整份文件悄悄跳过、报告里还算「跑了」。
+describe('真 Postgres 后端在 CI 里不许悄悄跳过', () => {
+  it.runIf(Boolean(process.env.CI) && !url)(
+    'CI 里没给 FLEET_TEST_PG_URL：这台没起 Postgres，真库这几条测不了',
+    () => {
+      throw new Error(
+        'CI 里 db 的测试所在的这台没设 FLEET_TEST_PG_URL（ci.yml 的 matrix.pg 没开？分台把 db 的文件装到了别的台？）',
+      );
+    },
+  );
+  it('本机没设就照 PGlite 走（整份真库的测试跳过）；设了就真连', () => {
+    expect(url === undefined || url.startsWith('postgres')).toBe(true);
+  });
+});
+
 run('真 Postgres 后端（设了 FLEET_TEST_PG_URL 才跑，CI 的 db 分片）', () => {
   it(
     '连接串指着一个连得上的库：连不上当场红，不退回内存库冒充',

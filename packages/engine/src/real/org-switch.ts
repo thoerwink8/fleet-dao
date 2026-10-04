@@ -1,7 +1,9 @@
 // 会话用户切号的真装配（#157、#59）：路由探针每一轮探之前，现读会话用户挂的组织（session-org.ts）、库里两个 Claude 池的额度、
 // 整池暂停和还没结束的 Claude 会话（db 的 sessionOrgFacts），照 jobs/org-switch.ts 判。该切：先让选路停下（读组织回 pending，
-// 选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了会话端口（#59）就把手上跑在 Claude 池上的
-// 会话停下（它们交回 org_switch，切完续同一个会话，换了池 fork 续上），等它们都收场；没接就再数一遍，还有会话就这一轮不切。
+// 选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了停会话的那两样（#59）就把手上跑在 Claude 池上的
+// 会话停下，等它们都收场：三段的一次性会话（oneShots，real/one-shot-sessions.ts）交回 org_switch，任务工作流切完在原分支上
+// 重跑这一段；Fusion 的会话（sessions）交回 org_switch，切完续同一个会话、换了池 fork 续上。哪一种没接，那一种在跑就停不下：
+// 手上有就不切、等它们跑完（#157 的做法），切之前也再数一遍。
 // 然后经 root 帮手的 org-use 切过去（adapters 的 switchSessionOrg：帮手以会话用户读 org list 认出那一类、切、回读核对，
 // 没切成、核对不了都切回原来的），切完记操作记录。这一轮探完，切过去的那个池的路由探通了才算切成（after）。
 // 没切成、切完探针读回不在线、拼车用满却读不到几点恢复：写一条 session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱
@@ -29,8 +31,18 @@ import {
   type SessionOrgControl,
   type SessionOrgEvent,
 } from './session-org.ts';
-import type { OrgSwitchSessions } from './sessions.ts';
 import { POOL_HOLD_PREFIX } from './store-ports.ts';
+
+/**
+ * 切号那一刻在跑的会话（#59），一种会话一份（Fusion 的会话端口、三段的一次性会话登记）。只管这个工人进程里起的：一次性会话不脱开
+ * 引擎跑，Fusion 的会话工人重启时收掉或接回，库里还开着、手上没有的都不是在跑的进程。
+ * stop：把跑在这些账号池上的停下（发信号、不等），交回这一次叫停的编号（已经在停的不重复叫停）。
+ * live：跑在这些账号池上、还没收场的编号，切号要等它们都收场。
+ */
+export interface OrgSwitchSessions {
+  stop(poolIds: ReadonlySet<string>, why: string): string[];
+  live(poolIds: ReadonlySet<string>): string[];
+}
 
 /** 切号没成（帮手没切过去）。下一次切成了、或者不用切了（人切好了、额度变了）撤。 */
 export const ORG_SWITCH_ALERT = `${SESSION_ORG_ALERT_PREFIX}switch`;
@@ -50,7 +62,7 @@ export const ORG_DRIFT_ALERT = `${SESSION_ORG_ALERT_PREFIX}drift`;
 export const ORG_SWITCH_GRACE_MS = 15_000;
 /**
  * 停下手上的会话以后最多等多久它们都收场（#59）：插头收进程几秒，看守每 5 秒看一次、收场后写库。等不齐这一轮就不切：
- * 停下的会话照样续上（还在原来的组织上）。
+ * 停下的照样接着干（还在原来的组织上）。
  */
 export const ORG_DRAIN_TIMEOUT_MS = 120_000;
 export const ORG_DRAIN_POLL_MS = 2_000;
@@ -70,10 +82,15 @@ export interface OrgSwitchWiring {
   /** 这台机器给人看的名字：提醒里写清去哪台机器看。 */
   machine: string;
   /**
-   * 会话端口的切号那两样（real/sessions.ts，#59）：有会话在跑也照切——先停下、等收场、再切，切完它们续上。
-   * 不给就只在手上没有会话时切（#157 的做法）。
+   * Fusion 会话端口的切号那两样（real/sessions.ts，#59）：它的会话在跑也照切——先停下、等收场、再切，切完续上。
+   * 不给就等它的会话跑完再切（#157 的做法）。
    */
   sessions?: OrgSwitchSessions;
+  /**
+   * 三段的一次性会话（动手、验收）的登记（real/one-shot-sessions.ts，#59）：在跑也照切——先停下、等收场、再切，切完任务工作流
+   * 在原分支上重跑这一段。不给就等它们跑完再切（#157）。
+   */
+  oneShots?: OrgSwitchSessions;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
@@ -110,6 +127,19 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     return loadOrgSwitchFacts(w.db, { now: clock(), held });
   }
 
+  // 停会话的：接了哪一种就停得下哪一种（两种都接了，一起停、一起等）
+  const parts = [w.sessions, w.oneShots].filter((s): s is OrgSwitchSessions => s !== undefined);
+  const stopper: OrgSwitchSessions | null =
+    parts.length === 0
+      ? null
+      : {
+          stop: (poolIds, why) => parts.flatMap((s) => s.stop(poolIds, why)),
+          live: (poolIds) => parts.flatMap((s) => s.live(poolIds)),
+        };
+  /** 停不下的在跑会话有几个：哪一种没接，那一种在跑的都停不下，只能等它们跑完。 */
+  const unstoppable = (f: { busy: number; busyOneShot: number }) =>
+    (w.sessions ? 0 : f.busy - f.busyOneShot) + (w.oneShots ? 0 : f.busyOneShot);
+
   /**
    * 切之前把手上跑在 Claude 池上的会话停下，等它们都收场（#59）。登记了、进程还没起来的（还在建树）等它起来再停；
    * 排队很久还没起来的、库里还开着可这个工人手上没有的（上一轮工人留下的，起来时已经收掉了），都不是在跑的进程，不等。
@@ -136,7 +166,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       if (now >= deadline || round >= Math.ceil(timeoutMs / pollMs)) {
         return {
           stopped: [...stopped],
-          problem: `让手上的 Claude 会话停下等了 ${Math.round(timeoutMs / 1000)} 秒，还有 ${live.size} 个没收场、${starting.length} 个还在起，这一轮不切（停下的照样续上）`,
+          problem: `让手上的 Claude 会话停下等了 ${Math.round(timeoutMs / 1000)} 秒，还有 ${live.size} 个没收场、${starting.length} 个还在起，这一轮不切（停下的照样接着干）`,
         };
       }
       await sleep(pollMs);
@@ -156,9 +186,9 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     let touched = false;
     try {
       await sleep(w.graceMs ?? ORG_SWITCH_GRACE_MS);
-      if (w.sessions) {
+      if (stopper) {
         const drained = await drain(
-          w.sessions,
+          stopper,
           poolIds,
           `切号：会话用户从${ORG_NAMES[from]}组织切到${ORG_NAMES[to]}组织，先停下，切完接着干`,
         );
@@ -183,12 +213,15 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
           log('error', '会话用户切号：手上的会话没停齐，这一轮不切', { from, to, problem: drained.problem });
           return null;
         }
-      } else {
-        const again = await facts();
-        if (again.busy > 0) {
-          log('info', '会话用户切号：让选路停下以后又有会话登记了，这一轮不切', { busy: again.busy });
-          return null;
-        }
+      }
+      // 再数一遍：让选路停下以前派出去的，这一会儿登记了。停得下的上面已经停下、收场了；停不下的（没接的那一种）还在就这一轮不切
+      const again = await facts();
+      if (unstoppable(again) > 0) {
+        log('info', '会话用户切号：让选路停下以后又有会话登记了，这一轮不切', {
+          busy: again.busy,
+          busyOneShot: again.busyOneShot,
+        });
+        return null;
       }
       touched = true;
       result = await w.switchOrg(to);
@@ -197,7 +230,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       release();
     }
     const halted =
-      stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切完各自续上）` : '';
+      stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切完各自接着干）` : '';
     if (result.ok) {
       await recordEngineAudit(w.db, {
         action: 'session-org.switch',
@@ -220,7 +253,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       actorId: ACTOR,
       before: { org: from },
       after: { org: to, ...(stopped.length > 0 ? { stopped } : {}) },
-      reason: `${why}${stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切号没成，它们照样续上）` : ''}`,
+      reason: `${why}${stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切号没成，它们照样接着干）` : ''}`,
       ok: false,
       error,
       at: clock(),
@@ -240,12 +273,13 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         // 切不切看现在的真实状态：留着的读数可能是半分钟前的（起点不动：读数刚变、没定下来就这一轮不切）
         w.org.forget();
         const live = await w.org({ by: '切号' });
-        const { pools, busy, poolIds } = await facts();
+        const { pools, busy, busyOneShot, poolIds } = await facts();
         const plan = planOrgSwitch({
           live,
           pools,
           busy,
-          ...(w.sessions ? { canStopRunning: true } : {}),
+          // 手上在跑的都停得下就照切（先停下、切完接着干）；有停不下的（没接的那一种）就等它们跑完
+          ...(stopper && unstoppable({ busy, busyOneShot }) === 0 ? { canStopRunning: true } : {}),
           now: clock(),
         });
         log('info', '会话用户切号：这一轮的判断', { action: plan.action, why: plan.why });

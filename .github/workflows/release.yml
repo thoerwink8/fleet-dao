@@ -1,6 +1,7 @@
 name: release
 # 发布 vN 的收尾（#227 下半，决定 0011 第 4 条）：「发布 vN」PR 合进 main 之后，由这条工作流接手把
 # tag 打好、release 建好、当前 milestone 关好、飞书推一条。可重试、幂等：哪一步已存在就跳那一步、接着走。
+# 打 tag 之前先核这一版对得上版本里程碑（里程碑＝版本）：版本号贴错就在那一步红，tag、release 一样都不动（#593）。
 # 不在这条链上做的：
 #   - 不改仓、不提交（Unreleased 段在 PR 里就要写好）；
 #   - 不排状态机状态文件（状态机 packages/conventions/src/release-notes.ts 是「法」判定，GitHub 上的 tag/release 才是「事实」；
@@ -11,9 +12,11 @@ name: release
 #      没合（merged=false）→ 不动作也不算红（这本来就是合法的「这张发布 PR 不发了」）。
 #   2. workflow_dispatch：给一个 version 输入，照样走；多半是上次「发布 vN」PR 合并之后这条跑挂了，人手动补一轮。
 #
-# 国外停机状态下的「停机 → 等等 → 部署 → 恢复」四步（决定 0011 第 4 条）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine，
-# 即停机在.deploy/france/desired-config.json），所以「停派遣」和「恢复派遣」这两步是说明性的空转，只把状态写进日志；
-# #453 把法国发改成按版本+创始人拍之后，这里才真正接 deploy/france/。
+# 国外停机状态下的「停机 → 等等 → 部署 → 恢复」四步（决定 0011 第 4 条）：这一条工作流**不做**这四步——法国那一侧自己
+# 按版本标记拉（#618）：`deploy/france/auto-release` 每 5 分钟挑版本号最大的 `v<N>` tag（这里刚打的这个）指向的提交，
+# 在签出目录里做「停派活 → 等在跑的收尾 → 部署 → 恢复派活」（复用已有的排空协议 `.drain-request`），引擎关着时那四步
+# 照实写「跳过」。这条工作流只负责把标记打出来（tag → release → milestone → 飞书）；下面两个说明步骤保留，提醒读的人
+# 四步在哪做、为什么不在这里做。
 #
 # 改这里之前必须知道：
 # - 每一小节 step 都做一件事、打一行日志；哪一步挂了从日志一眼看得到。
@@ -142,13 +145,27 @@ jobs:
       - if: steps.invoke.outputs.proceed == 'true'
         run: pnpm install --frozen-lockfile
 
-      # b. 停派遣（说明性空转）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine），派遣已经停着；
-      # 等决定 0011 第 3/4 条把法国发改成「按版本+创始人拍」接了 release.yml 之后，这里才是真的动派遣。
-      - name: 法国派遣已停（说明）
+      # b. 停派遣：这条工作流**不做**——法国那一侧自己按版本标记排空（#618 的「停派活 → 等在跑的收尾 → 部署 → 恢复派活」，
+      # 复用已有的排空协议 .drain-request，引擎关着时照实写「跳过」）。这里只说明在哪儿做，免得读的人以为漏了一步。
+      - name: 停在法国的哪一侧做（说明）
         if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
         run: |
-          echo "法国引擎当前 FLEET_SERVICES=fleet-api（deploy/france/desired-config.json），派遣已停；这里是空转。"
-          echo "等 #453（本机验过再发）把「按版本+创始人拍」接到这条工作流上，这一步才真动。"
+          echo "「停派活 → 等在跑的收尾 → 部署 → 恢复派活」四步由法国那一侧做：deploy/france/auto-release 每 5 分钟挑"
+          echo "版本号最大的 v<N> tag（刚打的 $VERSION）指向的提交，写排空请求、等引擎手上收尾、发、撤请求（#618）。"
+          echo "法国引擎当前 FLEET_SERVICES=fleet-api（deploy/france/desired-config.json），那四步照实写「跳过」，不假装做过。"
+
+      # 打 tag 之前：这一版得是开着的当前版本里程碑（开着的 v<N> 里 N 最小的那张），或者重跑时它已在这次发布合并之后关了。
+      # 对不上（开着的是 v3、这次发成 v1）就在这一步红，tag、release 一样都不动（#593）。判法在
+      # packages/conventions/src/publish-release-logic.ts 的 decideReleaseMilestone，读 GitHub 在 release-milestone.ts。
+      - name: 核这一版对得上版本里程碑（打 tag 之前）
+        if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        run: node packages/conventions/src/bin/release-milestone.ts check
 
       # c. 打 tag：已存在就跳；不存在就打、推。
       - name: 打 tag（已存在就跳）
@@ -307,46 +324,16 @@ jobs:
           fi
           echo "release $VERSION 读回核对过：tag 名、正文都对得上。"
 
-      # e. 关 milestone：读回开放 milestone 里叫 v<N> 的那一张，关它。没开着的那一张不算错（可能已经关过了）。
-      - name: 关 milestone（开放里恰好叫这一版的那一张；对不上 / 撞号都明说）
+      # e. 关 milestone：和打 tag 之前那一步同一份判法——开着的当前版本里程碑是这一版的就关，拿 GitHub 的回包核是不是真关了；
+      #    重跑时它已在这次发布合并之后关了就跳；对不上（版本号贴错、里程碑被删或改名、撞号）一律红，
+      #    不拿「已关里有同名的，多半关过了」放过去（#593：那样开着的 v3 永远不关、整轮报绿）。
+      - name: 关 milestone（开着的当前版本里程碑；对不上 / 撞号都明说）
         if: steps.invoke.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.invoke.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # 开放 milestone 一页一页全翻完（per_page=100 × N，gh api --paginate 顺 link rel=next 翻到最后一页），
-          # 只拿一页的话 100+ 张时会漏目标、误报「已关」（第二意见 2026-10-02）。
-          # 挑哪一张的判定在 packages/conventions/src/publish-release-logic.ts 的 pickOpenMilestone：
-          # ^v<N>([^0-9]|$) 词边界（v1 不撞 v10），撞多张 → error、发起人先看一眼，不拿「第一张」糊弄。
-          MILESTONES_JSON=$(gh api --paginate "repos/${{ github.repository }}/milestones?state=open&per_page=100" | jq -s 'add')
-          export MILESTONES_JSON VERSION_ENV="$VERSION"
-          num=$(node --input-type=module -e "
-            import { pickOpenMilestone } from './packages/conventions/src/publish-release-logic.ts';
-            const list = JSON.parse(process.env.MILESTONES_JSON).map((m) => ({ number: m.number, title: m.title }));
-            const r = pickOpenMilestone(list, process.env.VERSION_ENV);
-            if (r.kind === 'found') { console.log(r.milestone.number); process.exit(0); }
-            if (r.kind === 'none') { console.error(\`::notice::\${r.why}\`); process.exit(0); }
-            console.error(\`::error::\${r.message}\`);
-            for (const m of r.candidates) console.error(\`  #\${m.number}  \${m.title}\`);
-            process.exit(2);
-          ")
-          if [[ -z $num ]]; then
-            # 开放里没找到 → 再核「已关」：以 v<N> 开头 + 词边界、state=closed 里得有一张，不然就是没找到（发起前 milestone 被人删了或改名），
-            # 那会发了一版却没关版本（第二意见 2026-10-02）。
-            CLOSED_ROWS=$(gh api --paginate "repos/${{ github.repository }}/milestones?state=closed&per_page=100" | jq -s 'add')
-            closed_count=$(jq -r --arg v "$VERSION" '[.[] | select(.title | test("^" + $v + "([^0-9]|$)"))] | length' <<<"$CLOSED_ROWS")
-            if [[ $closed_count == 0 ]]; then
-              echo "::error::开放 milestone 里没找到 $VERSION 开头的，已关 milestone 里也没有——这一版（$VERSION）的 milestone 被删了或改名了，"
-              echo "::error::现在 tag 打了、release 建了、却没 milestone 关——发起人上去重建一张同名 milestone 再手动 gh api -X PATCH state=closed。"
-              exit 1
-            fi
-            echo "开放里没找到 $VERSION 开头的那张，已关里有（$closed_count 张）：多半已经被关过了（幂等跳）。"
-            exit 0
-          fi
-          title=$(jq -r --argjson n "$num" '.[] | select(.number == $n).title' <<<"$MILESTONES_JSON")
-          gh api -X PATCH "repos/${{ github.repository }}/milestones/$num" -F state=closed >/dev/null
-          echo "milestone #$num（$title）已关。"
+          RELEASE_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        run: node packages/conventions/src/bin/release-milestone.ts close
 
       # f. 飞书：配了 webhook 就发一条、Release 正文末尾打「<!-- fleet-notified: vN -->」标签记下；配了但没发过一次以上，
       #     按「不在就不再发」幂等（第二意见 2026-10-02：手动重跑、超时要重试都不能让飞书重复收一条）。
@@ -440,9 +427,8 @@ jobs:
           echo "飞书已推一条（release 正文末尾已经把 fleet-notify-attempt 换成 fleet-notified）。"
 
 
-      # g. 恢复派遣（说明性空转：引擎当前就不开派遣）。
-      - name: 法国派遣恢复（说明）
+      # g. 恢复派活：同 b，由法国那一侧做（切完撤掉排空请求，引擎下一眼就接着派；引擎关着时照实写「跳过」）。
+      - name: 恢复派活也由法国那一侧做（说明）
         if: steps.invoke.outputs.proceed == 'true'
         run: |
-          echo "法国派遣本来就不开（FLEET_SERVICES=fleet-api）；这里同样是空转。"
-          echo "等 #453 把法国发按版本+创始人拍接上，这一步才真动。"
+          echo "恢复派活同上：法国那一侧发布切完撤掉排空请求，引擎下一眼就接着派；引擎关着时照实写「跳过」（#618）。"

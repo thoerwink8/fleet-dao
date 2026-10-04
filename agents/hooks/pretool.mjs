@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cleanId, stateDir, touchTool } from './unattended.mjs';
 
 // bash 里反引号是「先把里面当命令跑」（命令替换）：只有单引号里、带引号的 heredoc（<<'EOF'）里才是普通字符。
 // 双引号里、不带引号、不带引号的 heredoc 里出现没转义的反引号，就返回 true。
@@ -1412,9 +1413,11 @@ export function decide(raw, fallbackCwd = '') {
   // -R/--repo 指到 fleet-dao 以外的仓（比如巡检仓 fleet-dao-canary 的验收单）不归 issue:new 管，放行
   const repoFlag = /(?:^|\s)(?:-R|--repo)[\s=]+['"]?([^\s'"]+)/.exec(cmd)?.[1];
   const otherRepo = repoFlag !== undefined && !/(?:^|\/)fleet-dao$/i.test(repoFlag);
+  // 下面这句用法是照 packages/conventions/src/issue-new.ts 的 USAGE 抄的（钩子装到各台机器上单独跑，引用不了仓里的包）：
+  // 开单脚本的参数一改，这里跟着改——#654 删了 --specs 这里漏改过，照着做被拒（agents/test/pretool-bom.test.ts 钉着）。
   if (inFleet && /\bgh\s+issue\s+create\b/.test(cmd) && !otherRepo) {
     return block(
-      'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --milestone <版本全名|v<N>|未排期> --specs`（母单加 --mother，子单加 --parent <母单号>），不直接 gh issue create（会漏类别标签、里程碑、需求文档）。',
+      'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --milestone <版本全名|v<N>|未排期> --title "一句话" --body-file 正文.md`（正文要有写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节；母单加 --mother，子单加 --parent <母单号>，留给本机做的加 --local、开单那一刻就贴），不直接 gh issue create（会漏类别标签、里程碑和正文四节的检查）。',
     );
   }
   // 本机有 Claude 会话在跑时，在本机切号、登录、退出会让所有会话当场断掉（全局规矩「我的机器与模型」）。
@@ -1450,6 +1453,13 @@ if (isMain()) {
   } catch (err) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${err?.code ?? err}），按拦处理\n`);
     process.exit(2);
+  }
+  // 无人值守开着时，记一笔「这个会话调了工具」（Stop 钩子靠它判有没有在干活）；只记不判，出错吞掉，不影响下面的放行或拦下
+  try {
+    const id = cleanId(JSON.parse(raw)?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+    if (id) touchTool({ dir: stateDir(), sessionId: id });
+  } catch {
+    // 输入认不出由下面的 decide 按拦处理
   }
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录
   const verdict = decide(raw, process.cwd());

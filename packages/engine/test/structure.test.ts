@@ -57,9 +57,11 @@ describe('工作流文件的规矩', () => {
       'hello.ts',
       'hourly-reconcile.ts',
       'index.ts',
+      'intake.ts',
       'kit.ts',
+      'quota-read.ts',
       'route-probe.ts',
-      'verify.ts',
+      'task.ts',
       'watchdog.ts',
     ]);
     expect(all.length).toBeGreaterThan(10);

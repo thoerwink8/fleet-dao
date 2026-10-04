@@ -28,6 +28,26 @@ describe('PR 改到的文件（pullFiles）', () => {
     ]);
   });
 
+  it('带上 changes（没有 patch 时靠它分得开二进制和太大）；不是非负整数的不带，不当成 0', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((req) => {
+      if (req.method !== 'GET' || !req.path.endsWith('/pulls/8/files')) return undefined;
+      return json(200, [
+        { filename: 'logo.png', status: 'added', changes: 0 },
+        { filename: 'big.json', status: 'modified', changes: 90210 },
+        { filename: 'odd-1.txt', status: 'modified', changes: -1 },
+        { filename: 'odd-2.txt', status: 'modified', changes: '12' },
+      ]);
+    });
+    const files = await gh.pullFiles({ repo, prNumber: 8 });
+    expect(files).toEqual([
+      { filename: 'logo.png', status: 'added', changes: 0 },
+      { filename: 'big.json', status: 'modified', changes: 90210 },
+      { filename: 'odd-1.txt', status: 'modified' },
+      { filename: 'odd-2.txt', status: 'modified' },
+    ]);
+  });
+
   it('【故意造出的失败】一条认不出（没有 filename）就抛错，不当空文件处理', async () => {
     const { gh, fake } = setup();
     fake.before.push((req) => {

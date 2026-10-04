@@ -1,9 +1,8 @@
 // 选路、报警、提问、人闸、计时、快照接真库（PGlite）：三种结果原样换成端口的；点名、续会话、被暂停的账号池、
 // 没接上的执行方式各有去处；库里对不上的明确报错，不当成「没有路由」「记上了」。
 import { randomUUID } from 'node:crypto';
-import { createRequire } from 'node:module';
 import {
-  asks,
+  finishRun,
   finishSessionRun,
   getSessionRun,
   markSessionRunStarted,
@@ -12,10 +11,9 @@ import {
   savePoolQuota,
   saveRouteProbe,
   sessionRuns,
-  stagePolicyRoutes,
+  startRun,
   stepTimings,
   upsertAlert,
-  verifyRoundsOfTask,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
@@ -24,20 +22,13 @@ import { SLICE_MEMORY_HIGH_MB } from '../../src/limits.ts';
 import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
 import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
-import {
-  createStorePorts,
-  NO_VERIFIER_PREFIX,
-  noVerifierKey,
-  ORG_READ_RETRY_SECONDS,
-  PICK_ROUTE_ACTOR,
-  poolHoldKey,
-} from '../../src/real/store-ports.ts';
+import { createStorePorts, ORG_READ_RETRY_SECONDS, poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
   addGrokRoute,
-  addMirasimRoute,
   addTask,
   CARPOOL_ORG_ID,
+  hangRoutes,
   MIN,
   NOW,
   type OrgListRig,
@@ -75,7 +66,7 @@ const pick = (over: Partial<PickRouteInput> = {}, p = ports()) =>
   );
 
 describe('选路', () => {
-  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
+  it('按路由两层的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
     await world(t.db);
     const r = await pick();
     expect(r).toMatchObject({
@@ -190,19 +181,65 @@ describe('选路', () => {
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
   });
 
+  it('三段的一次性会话（runs 里开着的行，#157）也占池的空位：两行三段 + 一行 Fusion 的会话占满上限 3，派下一个池；都满了等空位；收了一行又派得动', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    /** 一行 Fusion 的会话 + 两行三段的一次性会话占满这条路由的池，交回动手那一行的编号。 */
+    const fill = async (routeId: string) => {
+      await startedRun(task.id, routeId, 'execute');
+      const manual = randomUUID();
+      const at = new Date(NOW.getTime() - 5 * MIN);
+      await startRun(t.db, { id: manual, segment: 'manual', model: 'opus-5.5', routeId, startedAt: at });
+      await startRun(t.db, { segment: 'verify', model: 'opus-5.5', routeId, startedAt: at });
+      return manual;
+    };
+    const soloManual = await fill('solo');
+    const second = await pick({ stage: 'execute' });
+    expect(second).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(second.ok && second.why).toContain('并发满了（3/3）');
+
+    await fill('carpool');
+    const full = await pick({ stage: 'execute' });
+    expect(full).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!full.ok && full.detail).toContain('在等并发空位');
+
+    await finishRun(t.db, { runId: soloManual, outcome: 'done' }, NOW);
+    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('【故意造出的失败】runs 读不了（把表挪开，查它就报错，和库断在这一步一样）：选路抛错，不当成池空着派出去', async () => {
+    await world(t.db);
+    await t.client.exec('alter table runs rename to runs_unreadable');
+    try {
+      const err = await pick({ stage: 'execute' }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err, '读不了 runs 却回了选路结果').not.toBeNull();
+      // drizzle 外面包了一层「Failed query」，读 runs 报的那句在 cause 里
+      const messages: string[] = [];
+      for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
+      expect(messages.join('\n')).toContain('relation "runs" does not exist');
+    } finally {
+      await t.client.exec('alter table runs_unreadable rename to runs');
+    }
+  });
+
   it('点名的路由用不了（被避开）：照常选，并写明点名的为什么没用上', async () => {
     await world(t.db);
     const r = await pick({ preferRouteId: 'solo', avoidPoolIds: ['claude-solo'] });
     expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     expect(r.ok && r.why).toContain('点名的路由这次用不了');
     const unknown = await pick({ preferRouteId: 'nope' });
-    expect(unknown.ok && unknown.why).toContain('不在这个阶段的调度台顺序里');
+    expect(unknown.ok && unknown.why).toContain('不在这个用途的路由两层顺序里');
   });
 
-  it('阶段没排顺序：派不出（不按编号乱挑）', async () => {
+  it('【故意造出的失败】用途没配模型顺序：派不出（不按编号乱挑），写明是没配、不是路由坏了', async () => {
     await world(t.db, { stages: [] });
     const r = await pick({ stage: 'plan' });
     expect(r).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!r.ok && r.detail).toContain('规划阶段还没配模型顺序（路由两层「用途 → 模型」那一层是空的）');
+    expect(!r.ok && r.detail).toContain('路由两层的配置缺口：用途 plan 没配模型顺序');
   });
 
   it('近 7 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {
@@ -257,12 +294,12 @@ describe('选路', () => {
     ).rejects.toMatchObject({ code: 'ROUTING_INPUT' });
   });
 
-  it('关掉的路由（调度台上单条开关）不派', async () => {
+  it('关掉的路由（路由两层里它在模型下的开关）不派，写明关着', async () => {
     await world(t.db);
-    await t.client.query(
-      "update stage_policy_routes set enabled = false where stage = 'triage' and route_id = 'solo'",
-    );
-    expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    await t.client.query("update routing_catalog set enabled = false where route_id = 'solo'");
+    const r = await pick();
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(r.ok && r.why).toContain('这条路由在它的模型下关着（路由两层的开关）');
   });
 
   it('派活时按内存做准入（#219）：父节点增长过大被挡、恢复后又派得动；读不出来不闷头派', async () => {
@@ -708,15 +745,113 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
   });
 });
 
+/** 这个账号池的额度读成了、还宽（5 小时窗、周窗都只用了一成）。 */
+async function roomyQuota(poolId: string) {
+  await savePoolQuota(
+    t.db,
+    {
+      poolId,
+      readAt: new Date(NOW.getTime() - MIN).toISOString(),
+      complete: true,
+      windows: (['5h', '7d'] as const).map((window) => ({
+        poolId,
+        window,
+        label: window === '5h' ? 'five_hour' : 'seven_day',
+        unit: 'percent' as const,
+        utilization: 0.1,
+        reading: 'measured' as const,
+        readAt: new Date(NOW.getTime() - MIN).toISOString(),
+        source: 'test',
+      })),
+    },
+    { now: NOW },
+  );
+}
+
+/** 这条路由探了没通（探针写的结论）：在线由它定，选路当「死」挡掉。 */
+const probeFailed = (routeId: string) =>
+  saveRouteProbe(t.db, { routeId, state: 'failed', at: NOW, detail: '连不上：ECONNREFUSED' });
+
+describe('路由两层选路（#574）：先按用途的模型顺序、再按模型下的路由顺序；死的跳过，不知道的排在活的后面，全死明说派不出', () => {
+  /** 写码：Opus 排第一（下面 solo、carpool 两条），Grok 4.7 排第二（一条）；三条都探通了、额度都读成了还宽。 */
+  async function twoModels() {
+    await world(t.db, { stages: ['execute'] });
+    const { routeId: grok } = await addGrokRoute(t.db, { stages: ['execute'] });
+    await roomyQuota('grok');
+    return { grok };
+  }
+
+  it('第一顺位死了跳到第二：模型下第一条死了先派同模型的第二条，整个模型都死了才派下一个模型', async () => {
+    const { grok } = await twoModels();
+    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    await probeFailed('solo');
+    const second = await pick({ stage: 'execute' });
+    expect(second).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(second.ok && second.why).toContain('写码阶段第 2 条');
+    await probeFailed('carpool');
+    const next = await pick({ stage: 'execute' });
+    expect(next).toMatchObject({ ok: true, route: { routeId: grok, modelId: 'grok-4.7', family: 'grok' } });
+    // 为什么跳过前两条写在理由里：都是探针判不在线
+    expect(next.ok && next.why).toContain('写码阶段第 3 条');
+    expect(next.ok && next.why).toContain('第 1 条 Claude 订阅 · 拼车 · Opus 5.5 · Claude Code：不在线');
+  });
+
+  it('【故意造出的失败】全死：一条都派不出、又等不来，回 waitFor none，原因逐条写明，不拿空的、默认的顶', async () => {
+    const { grok } = await twoModels();
+    for (const routeId of ['solo', 'carpool', grok]) await probeFailed(routeId);
+    const none = await pick({ stage: 'execute' });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    const detail = !none.ok ? none.detail : '';
+    expect(detail).toContain('写码阶段没有能派的路由');
+    for (const n of [1, 2, 3])
+      expect(detail).toMatch(new RegExp(`第 ${n} 条 [^；]*：不在线（探活或熔断判的）`));
+    // 开关全关也一样：死在「关着」上，照样写明
+    await t.client.query(
+      "update routes set alive = true, probe_state = 'ok' where id in ('solo', 'carpool')",
+    );
+    await t.client.query("update routing_catalog set enabled = false where model_id = 'opus-5.5'");
+    const off = await pick({ stage: 'execute' });
+    expect(off).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!off.ok && off.detail).toContain('这条路由在它的模型下关着（路由两层的开关）');
+  });
+
+  it('不知道排后面：排第一的模型额度没读成（unknown），先派读成了的第二个模型；它也死了才派额度未知的，并写明', async () => {
+    const { grok } = await twoModels();
+    // Opus 那两个池的额度从没读成：不挡，但排在读到了的后面
+    await t.client.query("delete from quota_windows where pool_id in ('claude-solo', 'claude-carpool')");
+    await t.client.query(
+      "update pools set last_read_ok_at = null where id in ('claude-solo', 'claude-carpool')",
+    );
+    const live = await pick({ stage: 'execute' });
+    expect(live).toMatchObject({ ok: true, route: { routeId: grok } });
+    expect(live.ok && live.why).toContain('额度未知（没读成或读数过期），排在读到了的后面');
+    await probeFailed(grok);
+    const unknown = await pick({ stage: 'execute' });
+    expect(unknown).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(unknown.ok && unknown.why).toContain('额度未知（没读成或读数过期）');
+  });
+
+  it('用途里排了模型、模型下却一条路由都没有：照实写进原因（配置缺口），不当成路由都坏了', async () => {
+    await world(t.db, { stages: ['execute'] });
+    await t.client.query(
+      "insert into routing_purpose_models (purpose, model_id, position) values ('execute', 'kimi-k3', 5)",
+    );
+    for (const routeId of ['solo', 'carpool']) await probeFailed(routeId);
+    const none = await pick({ stage: 'execute' });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain(
+      '路由两层的配置缺口：模型 kimi-k3 没有路由（routing_catalog 里一条都没有）',
+    );
+  });
+});
+
 describe('流程配置里这一步的模型顺序（Fusion 的 models）', () => {
-  /** 写码阶段：调度台上 Opus 两条排最前（solo、carpool），Cursor Auto 第 9 条，钉住 Kimi k3 的 cursor 路由第 10 条。 */
+  /** 写码：路由两层里 Opus 排最前（下面 solo、carpool），Cursor Auto 第 9 位，Kimi k3（钉住它的 cursor 路由）第 10 位。 */
   async function fusionWorld() {
     await world(t.db, { stages: ['execute'] });
     const auto = (await addCursorRoute(t.db, { stages: ['execute'] })).routeId;
     const kimi = (await addCursorRoute(t.db, { modelId: 'kimi-k3', upstreamModel: 'kimi-k3' })).routeId;
-    await t.db
-      .insert(stagePolicyRoutes)
-      .values({ stage: 'execute', routeId: kimi, position: 10, enabled: true });
+    await hangRoutes(t.db, ['execute'], [kimi], 10);
     // cursor 池的额度也读成了、还宽（额度未知的会排到读到了的后面，这里只看模型顺序）
     await savePoolQuota(
       t.db,
@@ -740,7 +875,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
     return { auto, kimi };
   }
 
-  it('只派配置里这几个模型的路由：先按配置的先后（压过调度台上排在前面的），同一个模型的照调度台的先后', async () => {
+  it('只派配置里这几个模型的路由：先按配置的先后（压过路由两层里排在前面的），同一个模型的照路由两层的先后', async () => {
     const { auto, kimi } = await fusionWorld();
     expect(await pick({ stage: 'execute', models: ['cursor-auto', 'kimi-k3', 'opus-5.5'] })).toMatchObject({
       ok: true,
@@ -754,7 +889,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
       ok: true,
       route: { routeId: 'solo' },
     });
-    // 没带模型顺序的（旧的需求工作流）照调度台走
+    // 没带模型顺序的（三段一条龙）照路由两层走
     expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
   });
 
@@ -765,7 +900,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
     const none = await pick({ stage: 'execute', models: ['deepseek-flash'] });
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });
     expect(!none.ok && none.detail).toContain(
-      '流程配置里这一步的模型（deepseek-flash）在写码阶段的调度台上没有接上的路由',
+      '流程配置里这一步的模型（deepseek-flash）在写码阶段的路由两层顺序里没有接上的路由',
     );
     const empty = await pick({ stage: 'execute', models: [] });
     expect(!empty.ok && empty.detail).toContain('流程配置里这一步的模型（一个都没配）');
@@ -807,117 +942,6 @@ describe('报警、提问、人闸', () => {
         ['wf:park:1', 'alert', task.id],
       ].sort(),
     );
-  });
-
-  it('提问按 askId 只发一张；人闸按 approvalId 只开一张、同时开一条要人拍的提醒', async () => {
-    await world(t.db);
-    const { task } = await addTask(t.db);
-    const p = ports();
-    const askId = randomUUID();
-    await p.askHuman(
-      { taskId: task.id, askId, question: '要不要兼容旧接口？', options: ['要', '不要'] },
-      ctx,
-    );
-    await p.askHuman({ taskId: task.id, askId, question: '要不要兼容旧接口？' }, ctx);
-    expect(await t.db.select().from(asks)).toHaveLength(1);
-    const approvalId = randomUUID();
-    const approval = {
-      taskId: task.id,
-      approvalId,
-      holds: ['release'],
-      repo: { owner: 'acme', name: 'widgets', defaultBranch: 'main', testCommand: 'pnpm check' },
-      prNumber: 7,
-      head: 'a'.repeat(40),
-      title: '发版',
-      summary: '合并即上线',
-    };
-    await p.requestApproval(approval as never, ctx);
-    await p.requestApproval(approval as never, ctx);
-    const cards = (await t.db.select().from(notifications)).filter(
-      (n) => n.dedupeKey === `approval:${approvalId}`,
-    );
-    expect(cards).toHaveLength(1);
-    expect(cards[0]?.level).toBe('decision');
-  });
-
-  it('提问的任务不在库里：照常抛（不假装发出去了）', async () => {
-    await world(t.db);
-    await expect(
-      ports().askHuman({ taskId: randomUUID(), askId: randomUUID(), question: '？' }, ctx),
-    ).rejects.toThrow();
-  });
-
-  it('引擎自己问、带推荐的（分诊说不清，#259）：记成这张单范围内按推荐先做的；读回来空的列不给，照改只记回答了的、时刻不往后挪', async () => {
-    await world(t.db);
-    const { task } = await addTask(t.db);
-    const { task: other } = await addTask(t.db);
-    const p = ports();
-    const withRec = randomUUID();
-    const legacy = randomUUID();
-    await p.askHuman(
-      {
-        taskId: task.id,
-        askId: withRec,
-        question: '验证码几位？',
-        options: ['6 位', '4 位'],
-        recommended: '6 位',
-      },
-      ctx,
-    );
-    await p.askHuman({ taskId: task.id, askId: legacy, question: '要不要兼容旧接口？' }, ctx);
-    await p.askHuman({ taskId: other.id, askId: randomUUID(), question: '别的单问的' }, ctx);
-
-    expect(await p.taskAsks({ taskId: task.id }, ctx)).toEqual([
-      {
-        id: withRec,
-        question: '验证码几位？',
-        options: ['6 位', '4 位'],
-        applied: false,
-        scope: 'task',
-        recommended: '6 位',
-      },
-      { id: legacy, question: '要不要兼容旧接口？', options: [], applied: false },
-    ]);
-
-    // 回答了的那条记上照改；没回答的不记；再记一次时刻不动
-    await t.client.query(
-      "update asks set answer = '4 位', answered_by = 'founder', answered_at = now() where id = $1",
-      [withRec],
-    );
-    await p.markAsksApplied({ taskId: task.id, askIds: [withRec, legacy] }, ctx);
-    const first = (await t.db.select().from(asks)).find((a) => a.id === withRec)?.appliedAt;
-    expect(first).toEqual(NOW);
-    await createStorePorts({
-      db: t.db,
-      now: () => new Date(NOW.getTime() + 60_000),
-      draw: () => 0.5,
-      log: () => {},
-      sessionOrg: onCarpool,
-    }).markAsksApplied({ taskId: task.id, askIds: [withRec] }, ctx);
-    const rows = await p.taskAsks({ taskId: task.id }, ctx);
-    expect(rows.map((r) => [r.id, r.answer, r.applied])).toEqual([
-      [withRec, '4 位', true],
-      [legacy, undefined, false],
-    ]);
-    expect((await t.db.select().from(asks)).find((a) => a.id === withRec)?.appliedAt).toEqual(first);
-  });
-
-  it('【故意造出的失败】读问过的、记照改：任务不在（或编号不是 UUID）报 TASK_NOT_FOUND、不可重试，不当成「一条都没问过」', async () => {
-    await world(t.db);
-    const p = ports();
-    for (const taskId of [randomUUID(), 'not-a-uuid']) {
-      await expect(p.taskAsks({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'TASK_NOT_FOUND',
-        retryable: false,
-      });
-    }
-    await expect(p.markAsksApplied({ taskId: 'not-a-uuid', askIds: [] }, ctx)).rejects.toMatchObject({
-      code: 'TASK_NOT_FOUND',
-      retryable: false,
-    });
-    // 任务在、一条都没问过：是空的（这才是真的没问过）
-    const { task } = await addTask(t.db);
-    expect(await p.taskAsks({ taskId: task.id }, ctx)).toEqual([]);
   });
 });
 
@@ -1080,13 +1104,14 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
       upstreamModel: 'gpt-5.6-luna-high',
     });
     const grok = await addGrokRoute(t.db, { stages: ['verify'] });
-    // 验证阶段的顺序照法国：Luna 第一、Grok 第二，两个 Claude 池在后面（写这张单的族避开）。位置在阶段里不许重，先挪开再排
-    const order = [luna.routeId, grok.routeId, 'solo', 'carpool'];
+    // 验证这个用途的模型顺序照骨架：GPT 5.6 Luna 第一、Grok 4.7 第二，Opus（两个 Claude 池）在后面（写这张单的族避开）。
+    // 位置在一个用途里不许重，先挪开再排
+    const order = ['gpt-5.6-luna', 'grok-4.7', 'opus-5.5'];
     for (const base of [100, 0]) {
-      for (const [i, routeId] of order.entries()) {
+      for (const [i, modelId] of order.entries()) {
         await t.client.query(
-          "update stage_policy_routes set position = $2 where stage = 'verify' and route_id = $1",
-          [routeId, base + i],
+          "update routing_purpose_models set position = $2 where purpose = 'verify' and model_id = $1",
+          [modelId, base + i],
         );
       }
     }
@@ -1128,371 +1153,6 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
     for (const taskId of [task.id, 'task-不是-uuid']) {
       await expect(ports().authorFamilies({ taskId }, ctx)).rejects.toMatchObject({
         code: 'AUTHORS_UNKNOWN',
-        retryable: false,
-      });
-    }
-  });
-
-  it('每一轮的记录：先记验证模型判的，Lead 驳回后改写同一行', async () => {
-    await world(t.db);
-    const { routeId } = await addCursorRoute(t.db);
-    const { task } = await addTask(t.db);
-    const runId = await startedRun(task.id, routeId, 'verify');
-    const record = {
-      taskId: task.id,
-      id: randomUUID(),
-      round: 1,
-      head: 'a'.repeat(40),
-      runId,
-      routeId,
-      family: 'cursor',
-      authorFamilies: ['claude'],
-      criteria: ['过期的验证码登录不了'],
-      report: { head: 'a'.repeat(40), results: [], findings: [] },
-      verdict: 'block' as const,
-      rebuttals: [],
-      finalVerdict: 'block' as const,
-      reasons: ['安全：验证码写进了日志（证据：code.ts 第 12 行）'],
-      notes: [],
-    };
-    await ports().recordVerification(record, ctx);
-    const rebuttal = { target: '验证码写进了日志', evidence: 'code.ts 第 12 行打的是编号' };
-    await ports().recordVerification(
-      { ...record, rebuttals: [rebuttal], finalVerdict: 'pass', reasons: [] },
-      ctx,
-    );
-    const rows = await verifyRoundsOfTask(t.db, task.id);
-    expect(rows).toMatchObject([
-      { id: record.id, verdict: 'block', finalVerdict: 'pass', rebuttals: [rebuttal], invalidWhy: null },
-    ]);
-  });
-
-  it('【故意造出的失败】记录对不上库里的规矩（作废却有结论）：照常抛，不假装记上了', async () => {
-    await world(t.db);
-    const { routeId } = await addCursorRoute(t.db);
-    const { task } = await addTask(t.db);
-    const runId = await startedRun(task.id, routeId, 'verify');
-    await expect(
-      ports().recordVerification(
-        {
-          taskId: task.id,
-          id: randomUUID(),
-          round: 1,
-          head: 'a'.repeat(40),
-          runId,
-          routeId,
-          family: 'cursor',
-          authorFamilies: ['claude'],
-          criteria: ['x'],
-          report: null,
-          verdict: 'invalid',
-          invalidWhy: '审的不是送检的头',
-          rebuttals: [],
-          finalVerdict: 'pass',
-          reasons: [],
-          notes: [],
-        },
-        ctx,
-      ),
-    ).rejects.toThrow();
-    expect(await verifyRoundsOfTask(t.db, task.id)).toEqual([]);
-  });
-});
-
-describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 在法国干完才挂起「没有别家可验」、干等 47 分钟', () => {
-  /** 各步的模型顺序照全组织默认（packages/core/flow.default.json，创始人 2026-09-27 夜拍的）。 */
-  const STEPS = (
-    createRequire(import.meta.url)('@fleet-dao/core/flow.default.json') as {
-      profiles: { default: { steps: { lead: string[]; sidekick: string[]; verify: string[] } } };
-    }
-  ).profiles.default.steps;
-
-  /**
-   * 照法国排（deploy/examples/catalog.example.json）：规划两条 Opus 在前、Grok 垫底；写码、界面 Grok 第一、两条 Opus 在后；
-   * 开 PR 前验证 Cursor 上钉住的 GPT-5.6 Luna 第一、Grok 第二、两条 Opus 在后。DeepSeek Flash（Mirasim）没接上，没有路由。
-   * 各池额度都读成了、都还宽（额度未知的会排到后面，这里只看给验证留一家）。一张需求（#12），还没起过会话。
-   */
-  async function franceWorld() {
-    await world(t.db, { stages: [] });
-    const luna = (await addCursorRoute(t.db, { modelId: 'gpt-5.6-luna', upstreamModel: 'gpt-5.6-luna-high' }))
-      .routeId;
-    const grok = (await addGrokRoute(t.db)).routeId;
-    const stages: [StageKind, string[]][] = [
-      ['plan', ['solo', 'carpool', grok]],
-      ['execute', [grok, 'solo', 'carpool']],
-      ['ui', [grok, 'solo', 'carpool']],
-      ['verify', [luna, grok, 'solo', 'carpool']],
-    ];
-    for (const [stage, ids] of stages) {
-      await t.db
-        .insert(stagePolicyRoutes)
-        .values(ids.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
-    }
-    for (const poolId of ['cursor', 'grok']) {
-      await savePoolQuota(
-        t.db,
-        {
-          poolId,
-          readAt: new Date(NOW.getTime() - MIN).toISOString(),
-          complete: true,
-          windows: (['5h', '7d'] as const).map((window) => ({
-            poolId,
-            window,
-            label: window === '5h' ? 'five_hour' : 'seven_day',
-            unit: 'percent' as const,
-            utilization: 0.1,
-            reading: 'measured' as const,
-            readAt: new Date(NOW.getTime() - MIN).toISOString(),
-            source: 'test',
-          })),
-        },
-        { now: NOW },
-      );
-    }
-    const { task } = await addTask(t.db);
-    return { luna, grok, taskId: task.id };
-  }
-
-  const keep = (uiWork: boolean, spare: string[], otherwise: 'none' | 'any') => ({
-    models: STEPS.verify,
-    uiWork,
-    otherwise,
-    ...(spare.length > 0 ? { spare } : {}),
-  });
-  /** 选副手：和 Fusion 工作流带的一样（界面类的在界面阶段派；Lead 那一族先避开）。 */
-  const sidekick = (taskId: string, ui: boolean, leadFamily = 'claude') =>
-    pick({
-      taskId,
-      stage: ui ? 'ui' : 'execute',
-      models: STEPS.sidekick,
-      ...(ui ? { uiWork: true } : {}),
-      keepVerifier: keep(ui, [leadFamily], 'none'),
-    });
-  /** 开 PR 前验证：和 workflows/verify.ts 一样，整族避开库里查到的写这张单的族。 */
-  const verify = async (taskId: string, ui: boolean) =>
-    pick({
-      taskId,
-      stage: 'verify',
-      models: STEPS.verify,
-      avoidFamilies: (await ports().authorFamilies({ taskId }, ctx)).families,
-      ...(ui ? { uiWork: true } : {}),
-    });
-  const noVerifierAlerts = async () =>
-    (await t.db.select().from(notifications)).filter((n) => n.dedupeKey.startsWith(NO_VERIFIER_PREFIX));
-
-  it('【故意造出的失败】修之前的选法（副手整族避开 Lead、不给验证留一家）：界面单副手派到 Grok，写手成了 claude + grok，验证无路可派', async () => {
-    const { grok, taskId } = await franceWorld();
-    await startedRun(taskId, 'carpool', 'plan');
-    const side = await pick({
-      taskId,
-      stage: 'ui',
-      models: STEPS.sidekick,
-      uiWork: true,
-      avoidFamilies: ['claude'],
-    });
-    expect(side).toMatchObject({ ok: true, route: { routeId: grok } });
-    await startedRun(taskId, grok, 'ui');
-    const none = await verify(taskId, true);
-    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
-    expect(!none.ok && none.detail).toMatch(/^没有别家可验：写这张单的是 claude、grok 族/);
-  });
-
-  it('副手排 DeepSeek Flash、Grok（创始人 09-28 凌晨改拍，#345；这张单没有 Mirasim 路由，落到 Grok）、界面单、Lead 是 claude：副手交派不出、Lead 续自己的会话写，验证派到 Grok；不报警', async () => {
-    const { grok, taskId } = await franceWorld();
-    expect(STEPS.sidekick).toEqual(['deepseek-flash', 'grok-4.7']);
-    await startedRun(taskId, 'carpool', 'plan');
-    const side = await sidekick(taskId, true);
-    expect(side).toMatchObject({ ok: false, waitFor: 'none' });
-    expect(!side.ok && side.detail).toContain(
-      '选它开 PR 前验证就没有别家可派了（写这张单的会是 claude、grok 族）',
-    );
-    // 副手派不出由 Lead 自己干（Fusion 的 leadWork：界面类在界面阶段、续 Lead 的会话、Lead 非派不可）
-    const lead = await pick({
-      taskId,
-      stage: 'ui',
-      models: STEPS.lead,
-      uiWork: true,
-      stickRouteId: 'carpool',
-      keepVerifier: keep(true, [], 'any'),
-    });
-    expect(lead).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
-    await startedRun(taskId, 'carpool', 'ui');
-    expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok, family: 'grok' } });
-    expect(await noVerifierAlerts()).toEqual([]);
-  });
-
-  it('Mirasim 接上、这张单挂了 DeepSeek Flash 路由：界面单副手真派到它（不再交回 Lead 自己写），Grok 还留得住验证', async () => {
-    const { grok, taskId } = await franceWorld();
-    const ds = (await addMirasimRoute(t.db, { stages: ['ui'] })).routeId;
-    await startedRun(taskId, 'carpool', 'plan');
-    const side = await sidekick(taskId, true);
-    expect(side).toMatchObject({ ok: true, route: { routeId: ds, family: 'deepseek' } });
-    await startedRun(taskId, ds, 'ui');
-    // 副手这次用了 deepseek 族，验证整族避开 claude（Lead）、deepseek（副手），落到 Grok——没被「留一家」拦下
-    expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok, family: 'grok' } });
-    expect(await noVerifierAlerts()).toEqual([]);
-  });
-
-  it('非界面单不受影响：副手照旧派 Grok，验证派 Luna', async () => {
-    const { grok, luna, taskId } = await franceWorld();
-    await startedRun(taskId, 'carpool', 'plan');
-    expect(await sidekick(taskId, false)).toMatchObject({ ok: true, route: { routeId: grok } });
-    await startedRun(taskId, grok, 'execute');
-    expect(await verify(taskId, false)).toMatchObject({ ok: true, route: { routeId: luna } });
-  });
-
-  it('Lead 兜底成 Grok（规划阶段的 Opus 派不了）：界面单副手只有 Grok、和 Lead 同族先避开，交回 Lead 自己写；验证由 Opus 验', async () => {
-    const { grok, taskId } = await franceWorld();
-    await t.client.query(
-      "update stage_policy_routes set enabled = false where stage = 'plan' and route_id in ('solo', 'carpool')",
-    );
-    expect(await pick({ taskId, stage: 'plan', models: STEPS.lead })).toMatchObject({
-      ok: true,
-      route: { routeId: grok },
-    });
-    await startedRun(taskId, grok, 'plan');
-    const side = await sidekick(taskId, true, 'grok');
-    expect(side).toMatchObject({ ok: false, waitFor: 'none' });
-    expect(!side.ok && side.detail).toContain('先派别家：Grok 4.7 是 grok 族');
-    const lead = await pick({
-      taskId,
-      stage: 'ui',
-      models: STEPS.lead,
-      uiWork: true,
-      stickRouteId: grok,
-      keepVerifier: keep(true, [], 'any'),
-    });
-    expect(lead).toMatchObject({ ok: true, route: { routeId: grok } });
-    await startedRun(taskId, grok, 'ui');
-    expect(await verify(taskId, true)).toMatchObject({
-      ok: true,
-      route: { family: 'claude', modelId: 'opus-5.5' },
-    });
-    expect(await noVerifierAlerts()).toEqual([]);
-  });
-
-  it('【故意造出的失败】这张单做完没人能验（验证阶段只剩 Luna、又是界面单）：选副手时当场报警，照常派；再选时验证留得下了自己撤', async () => {
-    const { grok, luna, taskId } = await franceWorld();
-    await startedRun(taskId, 'carpool', 'plan');
-    await t.client.query(
-      "update stage_policy_routes set enabled = false where stage = 'verify' and route_id <> $1",
-      [luna],
-    );
-    expect(await sidekick(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok } });
-    const [alarm, ...more] = await noVerifierAlerts();
-    expect(more).toEqual([]);
-    expect(alarm).toMatchObject({
-      dedupeKey: noVerifierKey(taskId),
-      level: 'alert',
-      taskId,
-      title: '需求 #12 做完没人能验：开 PR 前验证派不出别家',
-      resolvedAt: null,
-    });
-    expect(alarm?.body).toContain('写这张单的已经有 claude 族，开 PR 前验证阶段没有能派的路由');
-    expect(alarm?.body).toContain('这张单改到了页面代码，GPT 不验');
-    // 验证阶段的别家接回来了：Lead 验收时再选路，验证留得下，撤掉（写明为什么、谁撤的）
-    await t.client.query("update stage_policy_routes set enabled = true where stage = 'verify'");
-    const lead = await pick({
-      taskId,
-      stage: 'plan',
-      models: STEPS.lead,
-      stickRouteId: 'carpool',
-      keepVerifier: keep(true, [], 'any'),
-    });
-    expect(lead).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
-    const [cleared] = await noVerifierAlerts();
-    expect(cleared?.resolvedBy).toBe(PICK_ROUTE_ACTOR);
-    expect(cleared?.body).toMatch(/^已撤：再选路时给开 PR 前验证留得下别家了/);
-  });
-
-  it('开 PR 前验证派出去了：规划时报的「做完没人能验」跟着撤', async () => {
-    const { grok, luna, taskId } = await franceWorld();
-    await startedRun(taskId, 'carpool', 'plan');
-    await t.client.query(
-      "update stage_policy_routes set enabled = false where stage = 'verify' and route_id <> $1",
-      [luna],
-    );
-    await pick({
-      taskId,
-      stage: 'plan',
-      models: STEPS.lead,
-      stickRouteId: 'carpool',
-      keepVerifier: keep(true, [], 'any'),
-    });
-    expect((await noVerifierAlerts()).map((a) => a.resolvedAt)).toEqual([null]);
-    await t.client.query("update stage_policy_routes set enabled = true where stage = 'verify'");
-    expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok } });
-    const [cleared] = await noVerifierAlerts();
-    expect(cleared?.resolvedBy).toBe(PICK_ROUTE_ACTOR);
-    expect(cleared?.body).toMatch(/^已撤：开 PR 前验证派出去了：Grok 订阅 · Grok 4.7 · Grok 命令行/);
-  });
-
-  it('Lead 续不上原来那条、只剩会让验证没人可派的 Grok：照常派（Lead 非派不可），当场报警', async () => {
-    const { grok, taskId } = await franceWorld();
-    await startedRun(taskId, 'carpool', 'plan');
-    await saveRouteProbe(t.db, { routeId: 'carpool', state: 'failed', at: NOW, detail: '登录失效' });
-    await t.client.query(
-      "update stage_policy_routes set enabled = false where stage = 'plan' and route_id = 'solo'",
-    );
-    const lead = await pick({
-      taskId,
-      stage: 'plan',
-      models: STEPS.lead,
-      stickRouteId: 'carpool',
-      keepVerifier: keep(true, [], 'any'),
-    });
-    expect(lead).toMatchObject({ ok: true, route: { routeId: grok } });
-    const [alarm] = await noVerifierAlerts();
-    expect(alarm?.body).toMatch(
-      /^再派 grok 族的话，写这张单的就有 claude、grok 族，开 PR 前验证阶段没有能派的路由/,
-    );
-  });
-
-  it('【故意造出的失败】这张单一个起过的会话都查不到：判不了验证留不留得下，明确报错（AUTHORS_UNKNOWN、不可重试），不当成谁都能验', async () => {
-    const { taskId } = await franceWorld();
-    await expect(sidekick(taskId, true)).rejects.toMatchObject({ code: 'AUTHORS_UNKNOWN', retryable: false });
-    expect(await noVerifierAlerts()).toEqual([]);
-  });
-});
-
-describe('Fusion 开工前读的：流程配置副本、单子正文', () => {
-  it('流程配置副本原样交出去（时刻换成 ISO）：能不能用由 core 判，这里不补默认值', async () => {
-    const synced = await addTask(t.db, { testCommand: 'pnpm test:changed' });
-    expect(await ports().flowConfig({ taskId: synced.task.id }, ctx)).toEqual({
-      replica: {
-        syncedAt: synced.repo.flowSyncedAt?.toISOString(),
-        error: null,
-        unread: null,
-        testCommand: 'pnpm test:changed',
-      },
-      source: 'project',
-      config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
-    });
-    // 从没同步成过、认不出：照实交出去（core 判停派），不拿空配置顶
-    const never = await addTask(t.db, { flowSyncedAt: null, flowError: '认不出：formatVersion 写成了 9' });
-    expect(await ports().flowConfig({ taskId: never.task.id }, ctx)).toEqual({
-      replica: { syncedAt: null, error: '认不出：formatVersion 写成了 9', unread: null, testCommand: null },
-      source: null,
-      config: null,
-    });
-  });
-
-  it('单子正文：库里这张单现在的标题和正文', async () => {
-    const { task } = await addTask(t.db);
-    expect(await ports().taskRequest({ taskId: task.id }, ctx)).toEqual({
-      title: '登录页加验证码',
-      rawRequest: '登录页加一个手机验证码',
-    });
-  });
-
-  it('【故意造出的失败】任务不在（或编号不是 UUID）：两个都报 TASK_NOT_FOUND、不可重试，不交空的', async () => {
-    for (const taskId of [randomUUID(), 'task-不是-uuid']) {
-      await expect(ports().flowConfig({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'TASK_NOT_FOUND',
-        retryable: false,
-      });
-      await expect(ports().taskRequest({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'TASK_NOT_FOUND',
         retryable: false,
       });
     }

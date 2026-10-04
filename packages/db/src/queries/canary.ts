@@ -1,24 +1,15 @@
-// 全流程巡检（#223）：每一轮的记录（canary_runs），和巡检每一回看那张单时从库里读的事实（任务行、会话、每步耗时、
-// 块和 PR、这张单的工作流报的要人看的提醒、最近一次投递怎么处理的）。判断不在这里：引擎的 jobs/canary.ts 拿这些事实判
-// 走到哪一步、断没断。读不到照抛（调用方记「没查成」），不拿空的顶。
-import { and, asc, desc, eq, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
+// 全流程巡检（#223）：每一轮的记录（canary_runs），和巡检每一回看那张单时从库里读的事实（任务行、runs 记的账、每步耗时、
+// 这张单的任务工作流报的要人看的提醒、最近一轮拉单）。判断不在这里：引擎的 jobs/canary.ts 拿这些事实判走到哪一步、断没断。
+// 读不到照抛（调用方记「没查成」），不拿空的顶。
+import { taskWorkflowId } from '@fleet-dao/shared';
+import { and, asc, desc, eq, gte, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import type { CanaryStage, CanaryVerdict } from '../schema/enums.ts';
-import {
-  canaryRuns,
-  githubEvents,
-  githubEventVersions,
-  notifications,
-  repos,
-  sessionRuns,
-  stepTimings,
-  subtasks,
-  tasks,
-} from '../schema/index.ts';
+import type { CanaryStage, CanaryVerdict, RecordedCanaryStage } from '../schema/enums.ts';
+import { canaryRuns, notifications, repos, runs, scheduleRuns, stepTimings, tasks } from '../schema/index.ts';
 
-/** 巡检一轮的一步：走到的时刻。 */
+/** 巡检一轮的一步：走到的时刻。老的几轮里可能是老步骤（RETIRED_CANARY_STAGES）。 */
 export interface CanaryStep {
-  stage: CanaryStage;
+  stage: RecordedCanaryStage;
   at: string;
 }
 
@@ -31,7 +22,8 @@ export interface CanaryRunRow {
   startedAt: Date;
   endedAt: Date | null;
   verdict: CanaryVerdict | null;
-  stage: CanaryStage;
+  /** 换成三段任务工作流之前的老几轮，这里是老步骤（只读出来给人看）。 */
+  stage: RecordedCanaryStage;
   why: string | null;
   steps: CanaryStep[];
   cleanedAt: Date | null;
@@ -217,11 +209,22 @@ export async function markCanaryCleaned(db: Db, id: number, at: Date): Promise<v
   if (rows.length === 0) throw new Error(`没有这一轮巡检：${id}`);
 }
 
+/** 这张单记进 runs 的账：一共几笔、结束了几笔、动手（manual）几笔、验收（verify）几笔、结束了又记上用量（输入 token）的几笔。 */
+export interface CanaryLedger {
+  total: number;
+  ended: number;
+  manual: number;
+  verify: number;
+  withUsage: number;
+}
+
+const NO_LEDGER: CanaryLedger = { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0 };
+
 /** 巡检看一张单时从库里读到的事实（判断在引擎 jobs/canary.ts）。 */
 export interface CanaryDbFacts {
   /** 巡检仓在库里的样子；不在库里（没受管）是 null。 */
   repo: { id: string; autoDispatchSince: Date | null } | null;
-  /** 这张单的任务行；还没收进来是 null。 */
+  /** 这张单的任务行（拉单起任务工作流之前建的）；还没拉起来是 null。 */
   task: {
     id: string;
     state: (typeof tasks.$inferSelect)['state'];
@@ -229,55 +232,52 @@ export interface CanaryDbFacts {
     lastProblem: string | null;
     updatedAt: Date | null;
   } | null;
-  /** 这张单的会话：一共几次、起来了几次、结束了几次、有用量（输入 token 记上了）的几次。 */
-  sessions: { total: number; started: number; ended: number; withUsage: number };
+  /** 这张单记进 runs 的账（三段每跑一次一笔）；还没有任务行是全 0。 */
+  runs: CanaryLedger;
   /** 这张单记进库的每步耗时有几笔（活动、等待）。 */
   timings: number;
-  /** 这张单的块（Fusion 一张单一块）：PR 号和状态；还没规划出块是 null。 */
-  block: { prNumber: number | null; state: (typeof subtasks.$inferSelect)['state'] } | null;
-  /** 这张单的工作流报的、还开着的提醒（挂起、没做完、工作树没收掉……）。 */
+  /** 这张单的任务工作流报的、还开着的提醒（停下等人……）。 */
   openAlerts: { dedupeKey: string; title: string }[];
-  /** 最近一次带着这张单的投递：怎么处理的（没收、出错、等着的原因，放进来之后做了什么）。 */
-  lastDelivery: {
-    event: string;
-    action: string | null;
-    status: string;
-    reason: string | null;
-    note: string | null;
+  /** 最近一轮拉单（定时任务 intakeJob）：几点开始、结局、原因；一轮都没跑过是 null。收单卡住时看它。 */
+  lastIntake: {
+    startedAt: Date;
+    endedAt: Date | null;
+    outcome: (typeof scheduleRuns.$inferSelect)['outcome'];
+    why: string | null;
   } | null;
 }
 
+/**
+ * since：这一轮巡检开单的时刻。runs 的行没有仓和任务编号，只能按单号加「开单以后起的」认这张单的账——
+ * 别的仓同一个单号、同一段时间里跑的会话会混进来；要认准得让 runs 写上 task_id。
+ * intakeJob：拉单在 scheduled_jobs 里的编号（引擎的 INTAKE_JOB.id）。
+ */
 export async function canaryDbFacts(
   db: Db,
-  input: { owner: string; name: string; issueNumber: number },
+  input: { owner: string; name: string; issueNumber: number; since: Date; intakeJob: string },
 ): Promise<CanaryDbFacts> {
   const [repo] = await db
     .select({ id: repos.id, autoDispatchSince: repos.autoDispatchSince })
     .from(repos)
     .where(and(eq(repos.owner, input.owner), eq(repos.name, input.name)));
-  const object = `${input.owner.toLowerCase()}/${input.name.toLowerCase()}:issue:${input.issueNumber}`;
-  const [delivery] = await db
+  const [intake] = await db
     .select({
-      event: githubEvents.event,
-      action: githubEvents.action,
-      status: githubEvents.status,
-      reason: githubEvents.reason,
-      note: githubEvents.note,
+      startedAt: scheduleRuns.startedAt,
+      endedAt: scheduleRuns.endedAt,
+      outcome: scheduleRuns.outcome,
+      why: scheduleRuns.why,
     })
-    .from(githubEventVersions)
-    .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
-    .where(eq(githubEventVersions.object, object))
-    .orderBy(desc(githubEvents.receivedAt), desc(githubEvents.deliveryId))
+    .from(scheduleRuns)
+    .where(eq(scheduleRuns.job, input.intakeJob))
+    .orderBy(desc(scheduleRuns.startedAt), desc(scheduleRuns.id))
     .limit(1);
-  const lastDelivery = delivery ?? null;
   const noTask: CanaryDbFacts = {
     repo: repo ?? null,
     task: null,
-    sessions: { total: 0, started: 0, ended: 0, withUsage: 0 },
+    runs: NO_LEDGER,
     timings: 0,
-    block: null,
     openAlerts: [],
-    lastDelivery,
+    lastIntake: intake ?? null,
   };
   if (!repo) return noTask;
   const [task] = await db
@@ -291,26 +291,22 @@ export async function canaryDbFacts(
     .from(tasks)
     .where(and(eq(tasks.repoId, repo.id), eq(tasks.issueNumber, input.issueNumber)));
   if (!task) return noTask;
-  const [sessions] = await db
+  const [ledger] = await db
     .select({
       total: sql<number>`count(*)::int`,
-      started: sql<number>`count(${sessionRuns.startedAt})::int`,
-      ended: sql<number>`count(${sessionRuns.endedAt})::int`,
-      withUsage: sql<number>`count(*) filter (where ${sessionRuns.endedAt} is not null and ${sessionRuns.inputTokens} is not null)::int`,
+      ended: sql<number>`count(${runs.endedAt})::int`,
+      manual: sql<number>`count(*) filter (where ${runs.segment} = 'manual')::int`,
+      verify: sql<number>`count(*) filter (where ${runs.segment} = 'verify')::int`,
+      withUsage: sql<number>`count(*) filter (where ${runs.endedAt} is not null and ${runs.inputTokens} is not null)::int`,
     })
-    .from(sessionRuns)
-    .where(eq(sessionRuns.taskId, task.id));
+    .from(runs)
+    .where(and(eq(runs.issueNumber, input.issueNumber), gte(runs.startedAt, input.since)));
   const [timings] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(stepTimings)
     .where(eq(stepTimings.taskId, task.id));
-  const blocks = await db
-    .select({ prNumber: subtasks.prNumber, state: subtasks.state })
-    .from(subtasks)
-    .where(and(eq(subtasks.taskId, task.id), isNull(subtasks.supersededAt)))
-    .orderBy(desc(subtasks.index));
-  // 这张单的工作流报的提醒都以它的编号开头（requirementWorkflowId：req:<owner>/<name>#<号>，后面跟 :park:…、:failed……）
-  const prefix = `req:${input.owner}/${input.name}#${input.issueNumber}:`;
+  // 这张单的任务工作流报的提醒都以它的编号开头（taskWorkflowId：task:<owner>/<name>#<号>，后面跟 :park:<第几次>）
+  const prefix = `${taskWorkflowId(input, input.issueNumber)}:`;
   const openAlerts = await db
     .select({ dedupeKey: notifications.dedupeKey, title: notifications.title })
     .from(notifications)
@@ -319,10 +315,9 @@ export async function canaryDbFacts(
   return {
     repo,
     task,
-    sessions: sessions ?? { total: 0, started: 0, ended: 0, withUsage: 0 },
+    runs: ledger ?? NO_LEDGER,
     timings: timings?.n ?? 0,
-    block: blocks[0] ?? null,
     openAlerts,
-    lastDelivery,
+    lastIntake: intake ?? null,
   };
 }

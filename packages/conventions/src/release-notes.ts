@@ -1,6 +1,6 @@
 // #227：CHANGELOG.md → 版本号、正文、tag 名、milestone 名、飞书消息，发布合并后那一步「记一版」的核心逻辑。
-// 核心解析（splitChangelog、UNRELEASED_HEADING、nextVersion、today、ChangelogSplit、Version）已挪到
-// packages/shared/src/changelog.ts，本文件只做再导出。CLI 那一侧的状态机（FinalizeState、nextState、planFinalize）、
+// 核心解析（splitChangelog、UNRELEASED_HEADING、today、ChangelogSplit、Version）已挪到
+// packages/shared/src/changelog.ts，本文件只做再导出（按「上一版 +1」推版本号的 nextVersion 已删，#725：版本号取当前版本里程碑）。CLI 那一侧的状态机（FinalizeState、nextState、planFinalize）、
 // 状态文件名（FINALIZE_DIR、stateFileName）、飞书正文（feishuBody、releaseBody、namesFor）还留在这里。
 // 这份状态机被 .github/workflows/release.yml 一步步「合法顺序」用（打 tag → 建 release → 关 milestone → 推飞书）；
 // release.yml 自己的「事实」判定（tag、release 在不在、body 对不对、 milestone 开没开）不按这份状态文件走。
@@ -14,7 +14,6 @@
 
 export {
   type ChangelogSplit,
-  nextVersion,
   splitChangelog,
   today,
   UNRELEASED_HEADING,

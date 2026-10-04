@@ -59,12 +59,12 @@ describe('挂着拼车', () => {
     expect(plan.why).toContain('手上还有 2 个 Claude 会话没结束，等跑完再切到独享');
   });
 
-  it('能先把手上的会话停下、切完续上（#59）：有会话在跑也照切，写明停几个', () => {
+  it('能先把手上的会话停下、切完接着干（#59）：有会话在跑也照切，写明停几个', () => {
     const plan = planOrgSwitch(
       facts({ pools: { carpool: pool([full(at(H))]), solo: pool() }, busy: 2, canStopRunning: true }),
     );
     expect(plan).toMatchObject({ action: 'switch', to: 'solo' });
-    expect(plan.why).toContain('手上 2 个 Claude 会话先停下，切完接着干（换了池 fork 续上）');
+    expect(plan.why).toContain('手上 2 个 Claude 会话先停下，切完接着干');
   });
 
   it('读数旧了、清零时刻不知道（选路算「不知道」照派）：不切，等真被拒了再说', () => {

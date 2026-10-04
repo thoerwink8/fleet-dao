@@ -1,6 +1,6 @@
 // 真端口的装配：库（packages/db）、GitHub（packages/github）、会话（packages/adapters 的插头，按执行方式分派：Claude Code、
 // cursor-agent，real/hosts.ts）、工作树（fleet-agent-scope）各一份，拼成 EnginePorts。生产按环境变量装（realPortsFromEnv，
-// 见 deploy/france/engine.env.example）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
+// 见 deploy/france/desired-config.json 的 engine 段，env 样例 #747 删了）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -16,10 +16,11 @@ import {
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
-import type { EngineJobs } from '../activities.ts';
+import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
+import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
 import { canaryJob } from './canary.ts';
 import { drainNotifier } from './drain-alerts.ts';
@@ -32,26 +33,30 @@ import {
   DEFAULT_CURSOR_VERSIONS_DIR,
   DEFAULT_GROK_BIN,
   grokLaunchCommand,
+  hostDrivers,
 } from './hosts.ts';
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
+import { intakeJob } from './intake.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
-import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { oneShotSessions } from './one-shot-sessions.ts';
+import { type OrgSwitchSessions, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { quotaReadJob } from './quota-read.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
+import { realRuns } from './runs-writer.ts';
+import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
-import {
-  createSessionPorts,
-  DEFAULT_FORK_MAX_CONTEXT_TOKENS,
-  type OrgSwitchSessions,
-  type SessionPortsDeps,
-} from './sessions.ts';
+import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
+import { createTaskActivities } from './task-activities.ts';
+import { createRunSegment } from './task-segment.ts';
+import { createColdVerify } from './task-verify.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -164,35 +169,17 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   });
   const ports: EnginePorts = {
     pickRoute: store.pickRoute,
-    askHuman: store.askHuman,
-    taskAsks: store.taskAsks,
-    markAsksApplied: store.markAsksApplied,
-    requestApproval: store.requestApproval,
     raiseAlert: store.raiseAlert,
     recordTiming: store.recordTiming,
     saveTaskState: store.saveTaskState,
     authorFamilies: store.authorFamilies,
-    recordVerification: store.recordVerification,
-    flowConfig: store.flowConfig,
-    taskRequest: store.taskRequest,
-    readCriteria: github.readCriteria,
     createWorktree: github.createWorktree,
     removeWorktree: github.removeWorktree,
     pushBranch: github.pushBranch,
     openPr: github.openPr,
     waitCi: github.waitCi,
-    checkHighRisk: github.checkHighRisk,
-    postSecondOpinion: github.postSecondOpinion,
-    patchIdOf: github.patchIdOf,
     syncMainline: github.syncMainline,
-    runTests: github.runTests,
-    mergePr: github.mergePr,
-    updateIssueProgress: github.updateIssueProgress,
     closeIssue: github.closeIssue,
-    writeSpecDoc: github.writeSpecDoc,
-    startSession: sessions.startSession,
-    awaitSession: sessions.awaitSession,
-    stopSession: sessions.stopSession,
   };
   return {
     ports,
@@ -445,6 +432,8 @@ export function realPortsFromEnv(
   extra: { drain?: EngineDrain; ownSha?: string | null; releasesDir?: string } = {},
 ): RealPorts & {
   jobs: EngineJobs;
+  /** 任务工作流（#632）的真活动：不碰会话的五个、动手会话、冷验收会话。 */
+  tasks: EngineTasks;
   registerJobs(): Promise<void>;
   /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
   retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
@@ -513,14 +502,17 @@ export function realPortsFromEnv(
     ...(extra.drain ? { drain: extra.drain } : {}),
     ...(ioProblem ? {} : { ioRoot: config.sessionIoDir }),
   });
+  // 三段的一次性会话（动手、验收）的登记：切号照它停下跑在 Claude 池上的那一段，切完任务工作流在原分支上重跑（#59）
+  const oneShots = oneShotSessions();
   // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
-  // 先停下、切完续上（#59，换了池 fork 续上），不等它们跑完
+  // 先停下、切完接着干（#59：一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上），不等它们跑完
   const orgSwitch = orgSwitchRound({
     db,
     org: sessionOrg,
     user: sessionUser,
     switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
     sessions: real.orgSwitchSessions,
+    oneShots,
     machine: config.machine,
   });
   const jobs: EngineJobs = {
@@ -544,6 +536,8 @@ export function realPortsFromEnv(
       orgSwitch,
       machine: config.machine,
     }),
+    // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
+    quotaRead: quotaReadJob({ db }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
     // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
     hourlyReconcile: hourlyReconcileJob({
@@ -559,6 +553,50 @@ export function realPortsFromEnv(
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
+    // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲
+    intake: intakeJob({ db, gh }),
+  };
+  const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
+  // 动手会话（#632 S2-4b-2）和冷验收会话（S2-5b）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的
+  // run 函数）；内存准入、会话的资源上限、runs 记账都用生产的那份，两种会话共用同一个 Spawner 装配。
+  const segmentSpawner: SegmentSpawnerDeps = {
+    db,
+    drivers: hostDrivers({
+      claudeCommand,
+      cursorCommand,
+      grokCommand,
+      mirasimConnect: mirasim.connect,
+      mirasimLedgerDir: mirasim.ledgerDir,
+      mirasimLedgerFs: mirasim.ledgerFs,
+    }),
+    trees,
+    baseEnv: env,
+    resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
+    log: taskLog,
+  };
+  const taskRuns = realRuns({ db });
+  const runsDir = join(config.stateDir, 'runs');
+  const tasks: EngineTasks = {
+    ...createTaskActivities({ gh, trees, exec, log: taskLog }),
+    runSegment: createRunSegment({
+      tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
+      spawner: segmentSpawner,
+      runs: taskRuns,
+      memoryAdmission: realMemoryAdmission(),
+      runsDir,
+      sessions: oneShots,
+      log: taskLog,
+    }),
+    coldVerify: createColdVerify({
+      gh,
+      pickRoute: real.ports.pickRoute,
+      spawner: segmentSpawner,
+      runs: taskRuns,
+      memoryAdmission: realMemoryAdmission(),
+      runsDir,
+      sessions: oneShots,
+      log: taskLog,
+    }),
   };
   const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
@@ -571,6 +609,7 @@ export function realPortsFromEnv(
   return {
     ...real,
     jobs,
+    tasks,
     drainControl,
     stateDir: config.stateDir,
     registerJobs: async () => {

@@ -1,22 +1,20 @@
 // 进程入口：两个监听——驾驶舱接口（生产上是法国机器的隧道地址，香港经它访问）与 fleet 命令接口（只本机回环）。
 // 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。
 // - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）+ 真 Temporal（懒连接，Temporal 没起来时
-//   这一步不报错，健康检查会如实报红）。生产必须有。GitHub 事件原文落库、issue 变成任务；
-//   拉起一张单的工作流（Fusion）经同一份 Temporal 连接（连不上时这条投递如实记成出错，由对账重放）；
+//   这一步不报错，健康检查会如实报红）。生产必须有。GitHub 事件原文落库；
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
-//   发给工作流的信号、拉起工作流都只记日志，不接 Temporal。
+//   发给工作流的信号只记日志，不接 Temporal。
 // 飞书确认的草稿去开单（DraftOpener）等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
 // （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import { createDb, type Db } from '@fleet-dao/db';
-import { type ClaimsGitHub, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import { signAgentToken } from './agent-token.ts';
 import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
-import { createClaimStatus } from './claim-status.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import {
@@ -33,14 +31,16 @@ import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
-import { githubIssuePlans, issuePlansUnavailable } from './issue-intake.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
-import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
+import type { GitHubEventSink } from './ports.ts';
+import { type ReleaseSource, repoChangelog } from './release-version.ts';
+import { pgRoutingEfforts } from './routing-efforts.ts';
+import { pgRoutingLayers } from './routing-layers.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { connectTemporal, ENGINE_OFF } from './temporal.ts';
@@ -49,30 +49,31 @@ import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './wa
 const log = jsonLogger();
 
 /**
- * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起
- * （issue 照收），PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
- * 接活判「挂没挂在当前版本」也经这里的「引擎」机器人现读；凭据没读到时一读就抛，接活不派（投递记成出错）。
+ * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
+ * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
+ * 同一份凭据还给 /changelog 的发布版本号读里程碑（release-version.ts，「引擎」机器人）；凭据没读到时那边照实报读不到。
  */
 function githubMirror(db: Db): {
   sink: GitHubEventSink;
-  plans: IssuePlanReader;
-  /** 「认领对得上」要的读写（#348）；凭据没读到时没有（PR 事件在写镜像那一步就如实失败了）。 */
-  claims?: ClaimsGitHub;
   credentialsMissing?: () => Promise<void>;
+  openMilestones: ReleaseSource['openMilestones'];
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
-    return { sink: gh.eventSink({ async wake() {} }), plans: githubIssuePlans(gh), claims: gh.claims };
+    return {
+      sink: gh.eventSink({ async wake() {} }),
+      openMilestones: (repo, signal) => gh.readOpenMilestones({ repo, signal }),
+    };
   } catch (err) {
-    log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收，但不派）', {
-      error: String(err),
-    });
+    log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像', { error: String(err) });
     const missing = githubAppMissing(String(err));
     return {
       sink: missing.sink,
-      plans: issuePlansUnavailable(String(err)),
       credentialsMissing: missing.check,
+      openMilestones: async () => {
+        throw new Error(`GitHub 机器人的凭据没读到（${String(err)}）`);
+      },
     };
   }
 }
@@ -113,20 +114,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       workflows: {
         async signal(workflowId, signal) {
           log.info('（开发）发给工作流的信号', { workflowId, signal: signal.name });
-        },
-      },
-      requirements: {
-        async start(input) {
-          log.info('（开发）拉起工作流', { taskId: input.taskId, issueNumber: input.issueNumber });
-          return 'started';
-        },
-      },
-      // 开发环境不接 GitHub：读不到挂在哪个版本，接活不派（照实失败，不假装挂在当前版本上）
-      plans: {
-        async read(repo, issueNumber) {
-          throw new Error(
-            `开发环境没接 GitHub：读不到 ${repo.owner}/${repo.name}#${issueNumber} 挂在哪个版本`,
-          );
         },
       },
       github: {
@@ -178,15 +165,17 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     feishu,
     demo,
     workflows: temporal.control,
-    requirements: temporal.requirements,
-    plans: github.plans,
     github: github.sink,
-    // PR 事件进来按库里的认领贴「认领对得上」（#348）
-    claims: github.claims ? createClaimStatus({ store, github: github.claims, log }) : undefined,
     draftOpener,
     gatewaySeen,
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
     alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
+    // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
+    routingLayers: pgRoutingLayers(db),
+    // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
+    routingEfforts: pgRoutingEfforts(db, now),
+    // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
+    release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },

@@ -1,24 +1,22 @@
-// 合并闸的判法（design 第五节「流程只为快」，#74；#444 起只留四样）：不是草稿、和主线没冲突、改到的文件碰没碰先审后合
-// 的路径、碰了的当前头上有没有通过的第二意见；PR 正文的档位只做提醒（parseTier 给 pr-fields 用）。纯判断，不碰网络；
-// 读写 GitHub 的在 merge-gate.ts。「认领对得上」「写了关单却没带结果.md」两项 #444 起从判红里去掉（引擎机器人照样贴
-// 「认领对得上」，只是合并闸不再等它；缺结果的由每天的关单对账另外提醒）；ENGINE_BOT_LOGIN、CLAIM_MATCH_CONTEXT 这两个
-// 认领相关的常量搬去了 pr-columns.ts（claim-status.ts 那套认领系统还用得上）。
+// 合并闸的判法（design 第五节「流程只为快」，#74；#444 起只留四样；#654 起草稿、冲突交给 GitHub 自己拦）：改到的文件碰没碰先审后合
+// 的路径、碰了的当前头上有没有通过的第二意见、引擎任务 PR 当前头上有没有通过的冷调用结论。纯判断，不碰网络；读写 GitHub 的在
+// merge-gate.ts。「认领对得上」「写了关单却没带结果.md」两项 #444 起从判红里去掉，「档位」「必填栏」#654 起整个没有了。
 // 三态纪律：读不到、认不出由调用方判「没查成」（退出码 2），不当成「没问题」。
 
-/** 两档（design 第五节「流程只为快」）；后两个是 2026-09-26 之前的三档叫法，照样认。 */
-export const TIERS = ['CI 绿就合', '先审后合', '直接合', '先合后看'] as const;
-export type Tier = (typeof TIERS)[number];
-/** 要第二意见通过才能合的那一档。 */
-export const REVIEW_TIER: Tier = '先审后合';
-export const TIER_COLUMN = '档位';
 /** 本机垫片（将来是引擎）审完写在 PR 当前头上的提交状态。 */
 export const SECOND_OPINION_CONTEXT = 'second-opinion';
+/**
+ * 验收那一遍（合前一次冷调用，#555-2）写在 PR 当前头上的提交状态。**和 second-opinion 分开**：问的不是同一件事
+ * （那条问「这改动值不值得先审」，这条问「单子说要的东西真做了没有」），共用一个 context 会互相盖掉。
+ *
+ * 判法和 second-opinion 一样：合并闸只**读**它——合并闸跑在 CI 里，判法必须确定（同一份代码什么时候跑结果都一样，
+ * design 第五节），所以不能在这里起模型调用。冷调用那一遍在装配侧跑，结论贴成这个 context 的状态，闸只认状态。
+ */
+export const COLD_VERIFY_CONTEXT = 'cold-verify';
+/** 冷调用最多几轮（specs/555-3：默认 1 轮、最多 2 轮）。到顶了还不过就是不过，不许拿第 3 轮盖过去。 */
+export const COLD_VERIFY_MAX_ROUND = 2;
 /** 高风险路径清单在仓里的位置（design 第五节「路径规则放每个仓的配置」）。 */
 export const RISK_PATHS_FILE = 'packages/conventions/high-risk-paths.json';
-
-const TIER_LIST = TIERS.slice(0, 2)
-  .map((t) => `「${t}」`)
-  .join('');
 
 /**
  * 先审后合只有这两种（design 第五节：删改迁移；碰安全——密钥鉴权、CI 工作流和卫生检查、对公网开口子和提权的生产配置）。
@@ -36,8 +34,30 @@ export interface RiskPath {
    * 'migrations'：迁移目录。新加的迁移只建表、加列不算；改了、删了已有的迁移，或新迁移里有删、改已有表列数据的语句才算。
    * meta/ 下是按 SQL 生成的快照，不单独算。
    */
-  mode?: 'migrations';
+  mode?: 'migrations' | 'workflow';
+  /**
+   * 'after-merge'：先合后审（创始人 2026-10-03「1+2+3」第 3 条）。改坏了一条 git revert 就退回、不泄密不提权的那类
+   * （CI 判法：哪些 job 跑、测哪些文件、缓存跳哪些）才能标；合并闸不等第二意见，合并后由 second-opinion.mjs 补审。
+   * 密钥、登录、卫生检查、合并闸自己、对公网开口子的配置不许标——那些改坏了回退不了（泄露了就公开了）。
+   */
+  review?: 'after-merge';
 }
+
+/**
+ * 能标 review: after-merge（先合后审）的路径：只有 CI 判法那几份——改坏了一条 git revert 就退回、不泄密不提权
+ * （决定 0016 第 3 条）。清单里把别的路径标上，读清单直接认不出（判没查成），不是放行；要加一份，改这里，这个文件自己走先审后合。
+ */
+const AFTER_MERGE_ALLOWED: ReadonlySet<string> = new Set([
+  'packages/conventions/src/ci-plan.ts',
+  'packages/conventions/src/bin/ci-plan.ts',
+  'packages/conventions/src/bin/ci-verdict.ts',
+  'packages/conventions/src/test-split.ts',
+  'packages/conventions/src/ci-box.ts',
+  'packages/conventions/src/bin/ci-box.ts',
+  'packages/conventions/src/ci-cache.ts',
+  'packages/conventions/src/bin/ci-cache.ts',
+  'packages/conventions/src/repo.ts',
+]);
 
 /** 读清单：认不出返回一句为什么（调用方判没查成）；空清单也算认不出——一条都没有等于不拦。 */
 export function parseRiskPaths(text: string): RiskPath[] | string {
@@ -70,14 +90,25 @@ export function parseRiskPaths(text: string): RiskPath[] | string {
       return `${at}（${path}）的 kind「${String(item.kind)}」不是${RISK_KINDS.map((k) => `「${k}」`).join('')}之一`;
     }
     if (!item.why.trim()) return `${at}（${path}）没写为什么`;
-    if (item.mode !== undefined && (item.mode !== 'migrations' || !path.endsWith('/'))) {
-      return `${at}（${path}）的 mode 认不出（只有目录能写 "migrations"）`;
+    if (item.review !== undefined && (item.review !== 'after-merge' || item.kind !== '碰安全' || item.mode)) {
+      return `${at}（${path}）的 review 认不出（只有「碰安全」、不带 mode 的条目能写 "after-merge"）`;
+    }
+    if (item.review === 'after-merge' && !AFTER_MERGE_ALLOWED.has(path)) {
+      return `${at}（${path}）不许先合后审：只有 CI 判法那几份能标 "after-merge"（名单在 merge-gates.ts 的 AFTER_MERGE_ALLOWED，改名单本身走先审后合）`;
+    }
+    const dir = path.endsWith('/');
+    if (
+      item.mode !== undefined &&
+      !((item.mode === 'migrations' && dir) || (item.mode === 'workflow' && !dir && /[.]ya?ml$/.test(path)))
+    ) {
+      return `${at}（${path}）的 mode 认不出（目录只能写 "migrations"，单个 .yml 工作流文件只能写 "workflow"）`;
     }
     out.push({
       path,
       kind: item.kind as RiskKind,
       why: item.why.trim(),
-      ...(item.mode === 'migrations' ? { mode: 'migrations' as const } : {}),
+      ...(item.mode === 'migrations' || item.mode === 'workflow' ? { mode: item.mode } : {}),
+      ...(item.review === 'after-merge' ? { review: 'after-merge' as const } : {}),
     });
   }
   return out;
@@ -100,6 +131,10 @@ export interface RiskyFile {
   kind: RiskKind;
   /** 迁移目录里为什么算（新迁移里有哪种语句、或看不到内容）。 */
   note?: string;
+  /** mode 为 workflow、改了已有的工作流：还要读改动前后两份全文做结构比对才知道算不算（合并闸去做），在这之前别当成「算」。 */
+  pending?: true;
+  /** 清单里这条是先合后审（review: after-merge）：合并闸不等第二意见，结论里点名合并后补审。 */
+  afterMerge?: true;
 }
 
 /**
@@ -163,17 +198,30 @@ export function destructiveIn(patch: string | undefined): string | undefined {
   return undefined;
 }
 
-/** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。 */
+/** 改到的文件里落进清单的（改名的新旧名字都算：从高风险目录挪出去也是碰了它）。同一个文件多条规则都沾边时认最具体（路径最长）的那条。 */
 export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPath[]): RiskyFile[] {
   const hits: RiskyFile[] = [];
   const seen = new Set<string>();
   for (const f of files) {
     for (const name of [f.filename, ...(f.previous ? [f.previous] : [])]) {
       if (seen.has(name)) continue;
-      const rule = list.find((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path));
+      const rule = list
+        .filter((r) => (r.path.endsWith('/') ? name.startsWith(r.path) : name === r.path))
+        .sort((a, b) => b.path.length - a.path.length)[0];
       if (!rule) continue;
-      const hit: RiskyFile = { file: name, rule: rule.path, kind: rule.kind };
-      if (rule.mode === 'migrations') {
+      const hit: RiskyFile = {
+        file: name,
+        rule: rule.path,
+        kind: rule.kind,
+        ...(rule.review === 'after-merge' ? { afterMerge: true as const } : {}),
+      };
+      if (rule.mode === 'workflow') {
+        // 只有「改了已有的工作流」才按内容判：要读改动前后两份全文做结构比对（workflow-structure.ts），所以这里只标「待比对」，
+        // 由合并闸读了文件再定。新加、删掉、改名一律算（整个文件都是新的信任面）。
+        if (f.status === 'modified' && name === f.filename) hit.pending = true;
+        else
+          hit.note = `工作流文件${f.status === 'removed' ? '被删' : f.status === 'added' ? '是新加的' : '被改名'}`;
+      } else if (rule.mode === 'migrations') {
         if (name.startsWith(`${rule.path}meta/`)) continue;
         if (f.status === 'added' && name === f.filename) {
           const note = destructiveIn(f.patch);
@@ -190,30 +238,6 @@ export function riskyFiles(files: readonly ChangedFile[], list: readonly RiskPat
   return hits;
 }
 
-export type TierRead = { tier: Tier } | { problem: string };
-
-/** 「档位」一栏：开头是三档之一，后面跟理由（design：档位和理由写进 PR 正文）。 */
-export function parseTier(value: string | undefined): TierRead {
-  if (value === undefined) {
-    return {
-      problem: `正文里认不出「档位」一栏：要写成 档位：CI 绿就合——理由（单独起一行；两档是${TIER_LIST}，见 design 第五节，拿不准写「先审后合」）。`,
-    };
-  }
-  const v = value.replace(/`|\*\*/g, '').trim();
-  if (!v) return { problem: `「档位」一栏是空的：写${TIER_LIST}之一，后面跟理由（拿不准写「先审后合」）。` };
-  const tier = TIERS.find((t) => v.startsWith(t));
-  if (!tier) {
-    return { problem: `「档位」写的「${oneLine(v)}」认不出：开头写${TIER_LIST}之一，后面跟理由。` };
-  }
-  const reason = v.slice(tier.length).replace(/[\s\-—–:：,，;；.。、()（）[\]【】]/g, '');
-  if (!reason) {
-    return {
-      problem: `「档位」只写了「${tier}」没写理由：后面跟一句为什么是这一档，比如 ${tier}——只改测试。`,
-    };
-  }
-  return { tier };
-}
-
 export type StatusState = 'success' | 'failure' | 'error' | 'pending';
 const STATES: readonly string[] = ['success', 'failure', 'error', 'pending'];
 
@@ -223,16 +247,21 @@ export interface SecondOpinion {
 }
 
 /**
- * 从「当前头的合并状态」（GET /commits/{sha}/status，各 context 只留最新一条）里取 second-opinion。
+ * 从「当前头的合并状态」（GET /commits/{sha}/status）里取某个 context 的那一条。second-opinion 和 cold-verify
+ * 形状一样、读法一样，共用这一段：少一套就会有一条读法偷偷不一样（比如多认一个状态名）。
+ *
  * 没有这一条返回 null；读回来的样子认不出返回一句为什么（调用方判没查成）。
  */
-export function secondOpinionFrom(statuses: readonly unknown[]): SecondOpinion | null | string {
+export function statusByContext(
+  statuses: readonly unknown[],
+  context: string,
+): SecondOpinion | null | string {
   let found: SecondOpinion | null = null;
   for (const s of statuses) {
     if (!isObject(s) || typeof s.context !== 'string') return '提交状态里有一条认不出（没有 context）';
-    if (s.context !== SECOND_OPINION_CONTEXT) continue;
+    if (s.context !== context) continue;
     if (typeof s.state !== 'string' || !STATES.includes(s.state)) {
-      return `${SECOND_OPINION_CONTEXT} 的 state「${String(s.state)}」认不出`;
+      return `${context} 的 state「${String(s.state)}」认不出`;
     }
     if (found) continue; // 同一个 context 只该有一条；多了取第一条（GitHub 按新到旧排）
     found = {
@@ -241,6 +270,22 @@ export function secondOpinionFrom(statuses: readonly unknown[]): SecondOpinion |
     };
   }
   return found;
+}
+
+/**
+ * 从「当前头的合并状态」（GET /commits/{sha}/status，各 context 只留最新一条）里取 second-opinion。
+ * 没有这一条返回 null；读回来的样子认不出返回一句为什么（调用方判没查成）。
+ */
+export function secondOpinionFrom(statuses: readonly unknown[]): SecondOpinion | null | string {
+  return statusByContext(statuses, SECOND_OPINION_CONTEXT);
+}
+
+/**
+ * 从同一份提交状态里取冷调用（#555）写下的一条。判法和 secondOpinionFrom 一样：没有 = null（闸判「还没验」），
+ * 认不出 = 一句为什么（闸判没查成，不当成没问题）。
+ */
+export function coldVerifyFrom(statuses: readonly unknown[]): SecondOpinion | null | string {
+  return statusByContext(statuses, COLD_VERIFY_CONTEXT);
 }
 
 /** 改到的先审后合的地方，一句话列出（最多 10 个）。 */
@@ -279,16 +324,64 @@ export function checkSecondOpinion(
   }
 }
 
+/**
+ * 这个 PR 该不该有冷调用（合前验收）的结论。`needed` 为假就是不用验。
+ *
+ * **范围是引擎任务工作流（#632）开的 PR，不是改到先审后合路径的 PR**：验收是三段流程的第三段，由引擎在合之前跑、把结论贴成状态；
+ * 闸要保证的是「引擎的 PR 没验过就合不进去」——不论是引擎自己的顺序出了错、有人手挂了自动合并，还是兜底的对账挂了它。
+ * 人手开的 PR（含碰先审后合路径的）走第二意见那一套，没有引擎替它们验，也就不能要这条状态（要了就永远卡在「还没验」）。
+ * 认「引擎的 PR」靠分支名（flow-branch.ts 的 isFlowBranch）：它防的是引擎的 bug 和漏挂，不防存心绕过的人（那样的人本来就能直接合）。
+ */
+export interface ColdVerifyNeed {
+  needed: boolean;
+  /** 要验时的理由（写给人看）；不用验时是空串。 */
+  why: string;
+}
+
+export function coldVerifyNeed(flowPr: boolean): ColdVerifyNeed {
+  return flowPr
+    ? { needed: true, why: '这是引擎任务工作流开的 PR（分支名 fleet/<单号>-t<8 位>）' }
+    : { needed: false, why: '' };
+}
+
+/**
+ * 验收那一遍（合前一次冷调用，#555-2）的判法。和 checkSecondOpinion 同一套三态纪律，只有两处不同：
+ *
+ * 1. **没有这条状态不是「没问题」**：这条 status 该由装配侧写好才轮到合并闸（规格里「读不到就明确失败」那条），
+ *    闸看到的「没有」只有两种可能——装配侧压根没跑、或写了没写成。两种都不许放行，所以判红的措辞是
+ *    「还没验 / 没验成」而不是第二意见那种「等它写着」。
+ * 2. **error 也算没过**：GitHub 自己把状态写成 error（写的时候网络断在半路之类）时不能当通过。
+ *
+ * 调用方只在需要它的地方问（引擎任务工作流开的 PR，见 coldVerifyNeed）：别的 PR 不验，也就没有这条状态——那是「不用验」，
+ * 不是「没验成」，所以判「要不要验」必须在调用方，不在这里。
+ */
+export function checkColdVerify(head: string, got: SecondOpinion | null, need: ColdVerifyNeed): string[] {
+  if (!need.needed) return [];
+  const at = `当前头 ${head.slice(0, 7)}`;
+  const why = `${need.why}，${at} 上要有通过的 ${COLD_VERIFY_CONTEXT} 状态（specs/555：合之前一次冷调用，换家族验「单子说要的东西真做了没有」）`;
+  if (got === null) {
+    // 没有这条 = 没验成（不是「等它写」）：装配侧要么没跑、要么写了没写成，两种都不放行。
+    return [
+      `还没验：${at} 上没有 ${COLD_VERIFY_CONTEXT} 状态，${why}。冷调用那一遍跑完会把结论写上，合并闸自动重算；推了新提交的，旧头上的不算。`,
+    ];
+  }
+  const desc = got.description ? `：${oneLine(got.description)}` : '';
+  switch (got.state) {
+    case 'success':
+      return [];
+    case 'pending':
+      return [`等验收：${at} 上的 ${COLD_VERIFY_CONTEXT} 还在跑（pending${desc}），${why}。`];
+    default:
+      return [
+        `验收没过：${at} 上的 ${COLD_VERIFY_CONTEXT} 是 ${got.state}${desc}，${why}。按它写的问题改完推上去；第 ${COLD_VERIFY_MAX_ROUND} 轮还不过就得人看（specs/555 第 3 条：默认 1 轮、最多 2 轮）。`,
+      ];
+  }
+}
+
 // —— 合并闸的其余几条和写回 GitHub 的提交状态 ——
 
 /** 合并闸写在 PR 当前头上的提交状态：「按我们的规矩能不能合」的唯一信号。 */
 export const GATE_CONTEXT = 'merge-gate';
-export const DRAFT_PROBLEM = '是草稿：做完了点「Ready for review」，合并闸会自动重算。';
-export const CONFLICT_PROBLEM =
-  '和主线有冲突，合不进去：把最新主线合进来（或 rebase）解掉冲突再推，合并闸会自动重算。';
-export const MERGEABLE_UNKNOWN =
-  'GitHub 还没算完和主线有没有冲突：过一会儿再算（再推一次、改一下正文，或在 Actions 里手动跑 merge-gate）。';
-
 /** 提交状态的 description 上限（GitHub 限 140 个字符）。 */
 export const DESCRIPTION_MAX = 140;
 

@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { closeOpenRuns, getRun, listOpenRuns, runsOfTask, startRun } from '../src/queries/runs.ts';
 import { saveVerifyRound, type VerifyRoundRecord, verifyRoundsOfTask } from '../src/queries/verify.ts';
 import { runs, verifyRounds } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -81,6 +82,27 @@ describe('runs 表本身的约束', () => {
     });
     expect(row?.endedAt).toEqual(NOW);
     expect(row?.outcome).toBe('done');
+  });
+
+  it('派工档：照 tier.ts 的三档收，没记就是 NULL', async () => {
+    const id = randomUUID();
+    await insertRun({ id, segment: 'manual', tier: 'heavyweight', endedAt: NOW, outcome: 'done' });
+    const blank = randomUUID();
+    await insertRun({ id: blank, endedAt: NOW, outcome: 'done' });
+    const rows = await t.db.select({ id: runs.id, tier: runs.tier }).from(runs);
+    expect(Object.fromEntries(rows.map((r) => [r.id, r.tier]))).toEqual({
+      [id]: 'heavyweight',
+      [blank]: null,
+    });
+  });
+
+  it('【失败】派工档写了 tier.ts 之外的字（「主力」「cold」）：库拒收（runs_tier_known）', async () => {
+    for (const tier of ['主力', 'cold', 'Fast']) {
+      await expectViolation(
+        insertRun({ segment: 'manual', tier: tier as 'fast', endedAt: NOW, outcome: 'done' }),
+        'runs_tier_known',
+      );
+    }
   });
 
   it('【失败】segment 写不在 scope|manual|verify 里的值：库拒收（runs_segment_known）', async () => {
@@ -165,6 +187,98 @@ describe('runs 表本身的约束', () => {
     const [row] = await t.db.select().from(runs).where(eq(runs.id, id));
     expect(row?.taskId).toBeNull();
   });
+
+  it('【失败】routeId 指到不存在的路由：外键拒收（runs_route_id_routes_id_fk），免得切号连不到池、漏数在跑的会话', async () => {
+    await expectViolation(insertRun({ routeId: 'nope-r' }), 'runs_route_id_routes_id_fk');
+    const id = randomUUID();
+    await insertRun({ id, routeId: 'kimi-r' });
+    const [row] = await t.db.select().from(runs).where(eq(runs.id, id));
+    expect(row).toMatchObject({ routeId: 'kimi-r', endedAt: null, outcome: null });
+  });
+});
+
+describe('startRun / closeOpenRuns：开跑留一行没结束的，引擎起来时收掉上一轮留下的（#157）', () => {
+  it('开跑那一行带路由、没结束；收场同一个编号整行补完，不多出一行', async () => {
+    const id = randomUUID();
+    await startRun(
+      t.db,
+      {
+        id,
+        segment: 'manual',
+        model: 'kimi-k3',
+        routeId: 'kimi-r',
+        issueNumber: 157,
+        startedAt: ago(5 * MIN),
+      },
+      ago(5 * MIN),
+    );
+    expect(await getRun(t.db, id)).toMatchObject({ routeId: 'kimi-r', endedAt: null, outcome: null });
+    expect((await listOpenRuns(t.db)).map((r) => r.id)).toEqual([id]);
+    await startRun(t.db, {
+      id,
+      segment: 'manual',
+      model: 'kimi-k3',
+      routeId: 'kimi-r',
+      issueNumber: 157,
+      startedAt: ago(5 * MIN),
+      endedAt: NOW,
+      outcome: 'done',
+      inputTokens: 10,
+    });
+    const all = await t.db.select().from(runs).where(eq(runs.id, id));
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ routeId: 'kimi-r', endedAt: NOW, outcome: 'done', inputTokens: 10 });
+    expect(await listOpenRuns(t.db)).toEqual([]);
+  });
+
+  it('还开着的收成 killed、写明为什么、交回编号；收过场的不动；收的时刻早于开跑时刻按开跑时刻收', async () => {
+    const open = randomUUID();
+    const future = randomUUID();
+    const done = randomUUID();
+    await startRun(t.db, {
+      id: open,
+      segment: 'manual',
+      model: 'kimi-k3',
+      routeId: 'kimi-r',
+      startedAt: ago(30 * MIN),
+    });
+    // 时钟回拨：开跑时刻比收的时刻还晚
+    await startRun(t.db, {
+      id: future,
+      segment: 'verify',
+      model: 'kimi-k3',
+      startedAt: new Date(NOW.getTime() + MIN),
+    });
+    await startRun(t.db, {
+      id: done,
+      segment: 'manual',
+      model: 'kimi-k3',
+      startedAt: ago(40 * MIN),
+      endedAt: ago(35 * MIN),
+      outcome: 'done',
+    });
+    const closed = await closeOpenRuns(t.db, { endedAt: NOW, reason: '引擎重启时这一段还没收场' });
+    expect(closed.sort()).toEqual([open, future].sort());
+    expect(await getRun(t.db, open)).toMatchObject({
+      endedAt: NOW,
+      outcome: 'killed',
+      failureReason: '引擎重启时这一段还没收场',
+    });
+    expect((await getRun(t.db, future))?.endedAt).toEqual(new Date(NOW.getTime() + MIN));
+    expect(await getRun(t.db, done)).toMatchObject({
+      endedAt: ago(35 * MIN),
+      outcome: 'done',
+      failureReason: null,
+    });
+    expect(await closeOpenRuns(t.db, { endedAt: NOW, reason: '再收一遍' })).toEqual([]);
+  });
+
+  it('【失败】不写为什么：拒收，一行都不动', async () => {
+    const open = randomUUID();
+    await startRun(t.db, { id: open, segment: 'manual', model: 'kimi-k3', startedAt: ago(MIN) });
+    await expect(closeOpenRuns(t.db, { endedAt: NOW, reason: '  ' })).rejects.toThrow('要写为什么');
+    expect((await getRun(t.db, open))?.endedAt).toBeNull();
+  });
 });
 
 describe('saveVerifyRound：同一次写入两头都落', () => {
@@ -181,6 +295,7 @@ describe('saveVerifyRound：同一次写入两头都落', () => {
       segment: 'verify',
       taskId: task.id,
       model: 'kimi-k3',
+      routeId: 'kimi-r',
       startedAt: NOW,
       endedAt: NOW,
       outcome: 'done',
@@ -299,5 +414,69 @@ describe('runs 表读端：按段查、按 task 查', () => {
       .where(and(eq(runs.taskId, task.id), eq(runs.segment, 'verify')));
     expect(all).toHaveLength(1);
     expect(all[0]?.id).toBe(row.id);
+  });
+
+  it('startRun 带上派工档就记下；不给就是 NULL（没记，不猜）', async () => {
+    const { id } = await startRun(
+      t.db,
+      { segment: 'manual', model: 'kimi-k3', tier: 'fast', startedAt: ago(5 * MIN) },
+      NOW,
+    );
+    const { id: blank } = await startRun(t.db, { segment: 'manual', model: 'kimi-k3' }, NOW);
+    const rows = await t.db.select({ id: runs.id, tier: runs.tier }).from(runs);
+    expect(Object.fromEntries(rows.map((r) => [r.id, r.tier]))).toEqual({ [id]: 'fast', [blank]: null });
+  });
+});
+
+describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
+  const WF = 'task:acme/web#77';
+
+  async function setup() {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 77 });
+    const other = await addTask(t.db, (await addRepo(t.db)).id, { issueNumber: 77 });
+    const run = (over: Parameters<typeof startRun>[1]) => startRun(t.db, over, NOW).then((r) => r.id);
+    return { task, other, run };
+  }
+
+  it('按 task_id 对上的、task_id 没记但单号对上的（兜底）都收，按起跑先后排', async () => {
+    const { task, run } = await setup();
+    const verify = await run({ segment: 'verify', model: 'gpt-5.6', taskId: task.id, startedAt: ago(MIN) });
+    const manual = await run({
+      segment: 'manual',
+      model: 'opus-5.5',
+      issueNumber: 77,
+      startedAt: ago(9 * MIN),
+    });
+    const scope = await run({
+      segment: 'scope',
+      model: 'opus-5.5',
+      taskId: task.id,
+      startedAt: ago(20 * MIN),
+    });
+    const rows = await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF });
+    expect(rows.map((r) => r.id)).toEqual([scope, manual, verify]);
+    expect(rows.find((r) => r.id === manual)?.taskId).toBeNull();
+  });
+
+  it('兜底只认没记 task_id 的：记了别的单的 task_id，哪怕单号一样也不收', async () => {
+    const { task, other, run } = await setup();
+    await run({ segment: 'manual', model: 'opus-5.5', taskId: other.id, issueNumber: 77 });
+    expect(await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF })).toEqual([]);
+  });
+
+  it('兜底的行记了工作流编号、却不是这张单的（别的仓同号）：不收；记的就是这张单的照收', async () => {
+    const { task, run } = await setup();
+    await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: 'task:acme/other#77' });
+    const mine = await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: WF });
+    const rows = await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF });
+    expect(rows.map((r) => r.id)).toEqual([mine]);
+  });
+
+  it('单号对不上、也没 task_id 的不收（巡检、实验这类不属于这张单）', async () => {
+    const { task, run } = await setup();
+    await run({ segment: 'verify', model: 'gpt-5.6', issueNumber: 78 });
+    await run({ segment: 'verify', model: 'gpt-5.6' });
+    expect(await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF })).toEqual([]);
   });
 });
