@@ -75,15 +75,19 @@ describe('buildSessionEnv', () => {
     expect(SESSION_NO_PROXY).toBe('localhost,127.0.0.1,::1');
   });
 
-  it('【故意造出的失败】给的代理认不出（带账号密码、https、socks、没写端口、带路径、乱写）：拒起，不悄悄直连', () => {
+  it('【故意造出的失败】给的代理认不出（带账号密码、https、socks、没写端口、端口出界、带路径、主机认不出、乱写）：拒起，不悄悄直连', () => {
     for (const bad of [
       'http://user:pass@127.0.0.1:7890',
       'http://user@127.0.0.1:7890',
       'https://127.0.0.1:7890',
       'socks5://127.0.0.1:7890',
       'http://127.0.0.1',
+      'http://127.0.0.1:0',
+      'http://127.0.0.1:65536',
       'http://127.0.0.1:7890/pac',
       'http://127.0.0.1:7890/?a=1',
+      'http://[::1]:7890',
+      'http://proxy_1:7890',
       '127.0.0.1:7890',
       '',
     ]) {
@@ -91,7 +95,22 @@ describe('buildSessionEnv', () => {
         '会话的代理要写成 http://主机:端口',
       );
     }
-    expect(() => parseSessionProxy('http://user:pass@127.0.0.1:7890')).toThrow('账号密码会写上命令行');
+    // 报错里不带原值：账号密码会跟着进引擎的日志
+    let message = '';
+    try {
+      parseSessionProxy('http://user:fakesecret@127.0.0.1:7890');
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('带了账号密码');
+    expect(message).not.toContain('fakesecret');
+  });
+
+  it('认的样子、规范成的写法和装机脚本一样（deploy/lib/profile.sh 的 session_proxy_load）：写明的 80 口也认，主机名照小写存', () => {
+    expect(parseSessionProxy('http://127.0.0.1:80')).toBe('http://127.0.0.1:80');
+    expect(parseSessionProxy(' http://Proxy.Local:7890/ ')).toBe('http://proxy.local:7890');
+    // deploy/test/profile.test.sh 拿同一个值核装机脚本那边
+    expect(parseSessionProxy('http://Proxy.Local:07890/')).toBe('http://proxy.local:7890');
   });
 
   it('Claude 会话给了代理就拒起（reclaude 自己管上游和代理，会话经它的本地口出去）', () => {

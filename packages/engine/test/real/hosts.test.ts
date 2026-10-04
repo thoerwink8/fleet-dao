@@ -775,6 +775,18 @@ describe('会话出网经的代理（#731：本机档经 Windows 上的 Clash，
       'FLEET_SESSION_PROXY',
     );
   });
+
+  it('【故意造出的失败】FLEET_SESSION_PROXY 带账号密码：起不来的报错里不带原值（会进引擎的日志）', () => {
+    let message = '';
+    try {
+      realPortsConfigFromEnv({ ...env, FLEET_SESSION_PROXY: 'http://user:fakesecret@127.0.0.1:7890' });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('FLEET_SESSION_PROXY');
+    expect(message).toContain('带了账号密码');
+    expect(message).not.toContain('fakesecret');
+  });
 });
 
 describe('cursor-agent 的驱动', () => {

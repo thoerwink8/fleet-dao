@@ -65,7 +65,7 @@
       },
       "FLEET_SESSION_PROXY": {
         "value": "",
-        "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管）。法国直连，留空＝不经代理；本机档经 Windows 上的 Clash（#731）"
+        "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/profile.sh 照这一档的期望读，不认 root 环境里的同名变量）。法国直连，留空＝不经代理；本机档经 Windows 上的 Clash（#731）"
       }
     },
     "api.env": {

@@ -80,21 +80,23 @@ export const PROXY_ENV_KEYS: readonly string[] = [
 export const SESSION_NO_PROXY = 'localhost,127.0.0.1,::1';
 
 /**
- * 会话出网经的代理认成规范的写法 http://主机:端口；认不出就抛错，写清要什么样子。只认 http、要写端口、不带账号密码和路径：
- * 它要写上起会话的命令行（procs.ts 的 scopeLaunch：sudo 记日志、/proc 里别的用户也读得到），带了账号密码就漏了。
+ * 认的样子、规范成的写法都和装机脚本一样（deploy/lib/profile.sh 的 SESSION_PROXY_RE、session_proxy_load，同一项登记两边读，
+ * 改一边另一边跟着改）：http、主机只有字母数字点横线、写明端口 1–65535，末尾多一个 / 也认。不收账号密码和路径：它要写上
+ * 起会话的命令行（procs.ts 的 scopeLaunch：sudo 记日志、/proc 里别的用户也读得到），带了账号密码就漏了。
  */
+const SESSION_PROXY_SHAPE = /^http:\/\/([A-Za-z0-9.-]+):([0-9]{1,5})\/?$/;
+
+/** 会话出网经的代理认成规范的写法 http://主机:端口；认不出就抛错，写清要什么样子——不带原值，带了账号密码的会跟着进日志。 */
 export function parseSessionProxy(raw: string): string {
-  const shape = `会话的代理要写成 http://主机:端口（不带账号密码、路径），现在是「${raw}」`;
-  let url: URL;
-  try {
-    url = new URL(raw.trim());
-  } catch {
-    throw new Error(shape);
+  const m = SESSION_PROXY_SHAPE.exec(raw.trim());
+  const port = m ? Number(m[2]) : 0;
+  if (!m?.[1] || port < 1 || port > 65535) {
+    const creds = raw.includes('@') ? '：带了账号密码（会写上起会话的命令行），不收' : '';
+    throw new Error(
+      `会话的代理要写成 http://主机:端口（主机只有字母、数字、点、横线，端口 1–65535，不带账号密码、路径；值不打出来）${creds}`,
+    );
   }
-  if (url.protocol !== 'http:' || !url.hostname || !url.port) throw new Error(shape);
-  if (url.username || url.password) throw new Error(`${shape}：账号密码会写上命令行，不收`);
-  if (url.pathname !== '/' || url.search || url.hash) throw new Error(shape);
-  return `http://${url.hostname}:${url.port}`;
+  return `http://${m[1].toLowerCase()}:${port}`;
 }
 
 /** 给了代理时会话里要设的变量（PROXY_ENV_KEYS 那几个）。代理认不出就抛错（parseSessionProxy）。 */

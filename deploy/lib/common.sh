@@ -185,18 +185,6 @@ as_user() { # 用户 命令…
     PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 "$@")
 }
 
-# 以会话用户跑官方安装脚本（lib/grok.sh、lib/cursor-agent.sh）时经的代理（#731）：只认 FLEET_SESSION_PROXY——本机档由
-# deploy/local/install.sh 照 deploy/local/desired-config.json 登记的值给（和引擎给会话的同一个），法国不给、直连。调用者
-# 自己环境里的 http(s)_proxy 一概不带（环境清干净的规矩照旧）。给了就打出 env 要的几个参数（http(s)_proxy 大小写各一份、
-# no_proxy 只放本机回环），一行一个；没给什么都不打；给的不是 http://主机:端口（带账号密码、别的协议）返回 1、什么都不打。
-SESSION_PROXY_RE='^http://[A-Za-z0-9.-]+:[0-9]{1,5}$'
-session_proxy_args() {
-  local p=${FLEET_SESSION_PROXY:-} n=localhost,127.0.0.1,::1
-  if [[ -z "$p" ]]; then return 0; fi
-  if [[ ! "$p" =~ $SESSION_PROXY_RE ]]; then return 1; fi
-  printf '%s\n' "http_proxy=$p" "https_proxy=$p" "HTTP_PROXY=$p" "HTTPS_PROXY=$p" "no_proxy=$n" "NO_PROXY=$n"
-}
-
 # ── 装包 ──
 # 先模拟：要顺带升级机器上已经装着的包就停——那些库旧系统可能正在用。
 # 装的时候关掉 needrestart：它会在装完后自动重启「用了旧库」的服务，那就动到旧系统了。
