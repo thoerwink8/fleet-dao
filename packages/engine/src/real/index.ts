@@ -3,8 +3,8 @@
 // 见 deploy/france/desired-config.json 的 engine 段，env 样例 #747 删了）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   bridgeMirasimConnector,
   type LedgerFs,
@@ -220,9 +220,12 @@ export const DEFAULT_MIRASIM_HOME = '/home/{user}';
  * 桥接脚本（adapters 的 bridge.ts）：默认取和这份正在跑的引擎代码同一个检出里的那一份（和 worker.ts 的
  * DEFAULT_CLI_BIN_DIR 同一个道理——发布是整棵 monorepo 的检出，不是打包过的产物，packages/ 底下各仓还在原位）。
  * 会话用户读得到这份检出（405 那样的发布目录 755，第三节目录表），不用另外装一份。
+ * 路径经 adapters 的 package.json exports 的子路径取（#901 ⑥：原来是 new URL('../../../adapters/src/…')，绕过 exports，
+ * adapters 改目录结构会悄悄断；现在改了目录，exports 一行跟着改，真文件不在 test/real/mirasim-bridge-path.test.ts 当场红）。
+ * 用 createRequire().resolve 而不是 import.meta.resolve：同步、在 vitest 和 node 里行为一样；都返回真实路径（不是 node_modules 里的符号链接）。
  */
-export const DEFAULT_MIRASIM_BRIDGE_SCRIPT = fileURLToPath(
-  new URL('../../../adapters/src/mirasim/bridge.ts', import.meta.url),
+export const DEFAULT_MIRASIM_BRIDGE_SCRIPT = createRequire(import.meta.url).resolve(
+  '@fleet-dao/adapters/mirasim-bridge',
 );
 /** 会话读得到的 node（法国装机脚本、发布脚本到处这么写死，第五节）；桥接不用另外配置。 */
 export const MIRASIM_BRIDGE_NODE = '/usr/bin/node';
