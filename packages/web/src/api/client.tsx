@@ -38,7 +38,6 @@ import type {
   SettingKey,
   Settings,
   StageKind,
-  StagePolicy,
   TaskActionBody,
   TaskDetail,
   Timeline,
@@ -47,7 +46,6 @@ import type {
   UpdatedRouteEffort,
   UpdateRouteEffortBody,
   UpdateSettingBody,
-  UpdateStagePolicyBody,
 } from './types';
 
 export type LiveStatus = 'connecting' | 'open' | 'down';
@@ -80,7 +78,6 @@ export interface FleetApi {
     routeId: string,
     body: UpdateRouteEffortBody,
   ): Promise<UpdatedRouteEffort>;
-  updateStagePolicy(stage: StageKind, body: UpdateStagePolicyBody): Promise<StagePolicy>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
   jobs(): Promise<Jobs>;
@@ -466,7 +463,6 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
   quota_windows: [['pools'], ['routing-layers']],
   channels: [['routing'], ['pools'], ['routing-layers']],
-  stage_policies: [['routing']],
   notifications: [['notifications']],
   audit_log: [['audit']],
   settings: [['settings']],

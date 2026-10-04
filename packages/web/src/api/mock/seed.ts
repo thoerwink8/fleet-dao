@@ -1551,16 +1551,28 @@ export function createSeed(now: number): MockState {
         },
       },
     ],
-    stages: [
-      { stage: 'triage', routeIds: ['r-ca-sonnet', 'r-ds', 'r-rl-kimi'], pinned: false },
-      { stage: 'spec', routeIds: ['r-ca-opus', 'r-rl-opus'], pinned: false },
-      { stage: 'plan', routeIds: ['r-ca-opus', 'r-cb-opus', 'r-rl-opus'], pinned: true },
-      { stage: 'execute', routeIds: execAfter, pinned: false },
-      { stage: 'ui', routeIds: ['r-cb-opus', 'r-rl-opus', 'r-cursor'], pinned: false },
-      { stage: 'review', routeIds: ['r-grok', 'r-rl-gpt', 'r-ca-sonnet'], pinned: false },
-      { stage: 'research', routeIds: ['r-rl-gpt', 'r-grok', 'r-ds'], pinned: false },
-      { stage: 'judge', routeIds: ['r-ca-sonnet', 'r-ds'], pinned: false },
-    ],
+    // 路由两层（#574）：用途 → 模型顺序，模型 → 路由顺序（和真后端那两张表一个形状）。
+    purposes: {
+      triage: ['sonnet-5', 'deepseek-v4.1-flash', 'kimi-k3'],
+      spec: ['opus-5.5'],
+      plan: ['opus-5.5'],
+      execute: ['opus-5.5', 'kimi-k3', 'cursor-auto', 'opus-5'],
+      ui: ['opus-5.5', 'cursor-auto'],
+      review: ['grok-4.7', 'gpt-5.6-luna', 'sonnet-5'],
+      research: ['gpt-5.6-luna', 'grok-4.7', 'deepseek-v4.1-flash'],
+      judge: ['sonnet-5', 'deepseek-v4.1-flash'],
+    },
+    routing: {
+      'opus-5.5': ['r-ca-opus', 'r-cb-opus', 'r-rl-opus'],
+      'sonnet-5': ['r-ca-sonnet'],
+      'opus-5': ['r-ca-opus5'],
+      'fable-5.1': ['r-rl-fable'],
+      'gpt-5.6-luna': ['r-rl-gpt'],
+      'kimi-k3': ['r-rl-kimi'],
+      'deepseek-v4.1-flash': ['r-ds'],
+      'cursor-auto': ['r-cursor'],
+      'grok-4.7': ['r-grok'],
+    },
     // 两条全局禁令写死在 shared/bans.ts；库里只放另外加的（这条是样例）。
     bans: [{ family: 'deepseek', stage: 'ui', reason: '（样例）库里另配的禁令：DeepSeek 暂不进 UI' }],
     quota: [

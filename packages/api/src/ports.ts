@@ -21,7 +21,6 @@ import type {
   SegmentRun,
   SessionRun,
   StageKind,
-  StagePolicy,
   Step,
   Subtask,
   Task,
@@ -261,11 +260,6 @@ export interface TestRunRecord {
 
 export type HistoryItem = z.infer<typeof HistoryResponse>['items'][number];
 
-export interface StagePolicyValue {
-  routeIds: string[];
-  pinned: boolean;
-}
-
 /**
  * 幂等键的状态：
  * - claimed：这次占到了，去执行。token 是这次占用的凭据，记结果、放键都要拿它（被接管后旧凭据就作废）；
@@ -369,16 +363,10 @@ export interface RoutingStore {
   listPools(): Promise<Pool[]>;
   listModels(): Promise<Model[]>;
   listRoutes(): Promise<Route[]>;
-  listStagePolicies(): Promise<StagePolicy[]>;
   /** 库里另配的禁令（两条全局硬禁令写死在 shared/bans.ts，不在这里）。 */
   listBans(): Promise<Ban[]>;
   /** 按（池, 原名 label）排。上游这次没报的窗口也在（带 staleSince），满 24 小时库里才删。 */
   listQuotaWindows(): Promise<QuotaWindowRecord[]>;
-  /** 比较后再改：库里的现值不等于 expected 就不改、返回 conflict。和操作记录同一事务。还没有这一行时现值按「空列表、没钉住」算。 */
-  updateStagePolicy(
-    input: { stage: StageKind; expected: StagePolicyValue; next: StagePolicyValue },
-    audit: NewAuditEntry,
-  ): Promise<'ok' | 'conflict'>;
   setChannelEnabled(
     input: { channelId: string; enabled: boolean },
     audit: NewAuditEntry,

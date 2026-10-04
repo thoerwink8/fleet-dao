@@ -5,8 +5,10 @@
 -- ① 实时：@fleet-dao/shared 的 REALTIME_TABLES 里的表一有写入就 NOTIFY fleet_changes（测试逐表核对这份名单）。
 --    载荷只有表名和 id（一律是文本），例如 {"table":"tasks","id":"…"}，驾驶舱后端收到后按 id 回库里读。
 --    参数一：id 取哪一列；参数二（可选）：载荷里报哪张表，默认就是触发的表。
---    quota_windows 报 pool_id（额度按池刷新）；stage_policy_routes 报成 stage_policies、id 是阶段名（改路由顺序也要刷新）。
+--    quota_windows 报 pool_id（额度按池刷新）。
 --    写错列名当场报错，不会发出 id 为空的通知。UPDATE 改了 id 列时新旧两个 id 都发。
+--    旧的按阶段平铺路由表（stage_policies、stage_policy_routes，#754）不在名单里：没人再写它了，触发器由 0033 摘掉，
+--    当时那两条（报成 stage_policies、id 是阶段名）也不再装。整份从头跑出来的库和升级上来的库一样，没有它们。
 CREATE OR REPLACE FUNCTION fleet_notify_change() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -70,16 +72,6 @@ DROP TRIGGER IF EXISTS asks_notify ON asks;
 --> statement-breakpoint
 CREATE TRIGGER asks_notify AFTER INSERT OR UPDATE OR DELETE ON asks
   FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('id');
---> statement-breakpoint
-DROP TRIGGER IF EXISTS stage_policies_notify ON stage_policies;
---> statement-breakpoint
-CREATE TRIGGER stage_policies_notify AFTER INSERT OR UPDATE OR DELETE ON stage_policies
-  FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('stage');
---> statement-breakpoint
-DROP TRIGGER IF EXISTS stage_policy_routes_notify ON stage_policy_routes;
---> statement-breakpoint
-CREATE TRIGGER stage_policy_routes_notify AFTER INSERT OR UPDATE OR DELETE ON stage_policy_routes
-  FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('stage', 'stage_policies');
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS channels_notify ON channels;
 --> statement-breakpoint

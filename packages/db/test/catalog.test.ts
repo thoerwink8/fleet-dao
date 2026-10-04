@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { windowAppliesTo } from '@fleet-dao/shared';
-import { and, asc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   CATALOG_DEFAULT_PATH,
@@ -12,17 +12,7 @@ import {
   readCatalogFile,
 } from '../src/catalog.ts';
 import type { Db } from '../src/client.ts';
-import { STAGE_KINDS } from '../src/schema/enums.ts';
-import {
-  auditLog,
-  channels,
-  families,
-  models,
-  pools,
-  routes,
-  stagePolicies,
-  stagePolicyRoutes,
-} from '../src/schema/index.ts';
+import { auditLog, channels, families, models, pools, routes } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { NOW } from './helpers.ts';
 
@@ -32,20 +22,8 @@ const exampleText = repoFile(EXAMPLE_PATH);
 const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
-/** TypeSafe 的 Jev：只挂判断阶段，排第一（引擎每次提问按判断阶段排第一、开着的路由起后端，见 packages/jev 的 wiring.ts）。 */
-const JEV_ROUTE = 'jev:jev-1.13:api-shell';
-/** Cursor 上钉住的 GPT-5.6 Luna：只挂开 PR 前的验证，排第一、开着（创始人 2026-09-27 拍，specs/212 方案「真流量」）。 */
-const LUNA_ROUTE = 'cursor:gpt-5.6-luna:cursor-agent';
-/**
- * SuperGrok 的 Grok 4.7（创始人 2026-09-27 拍，specs/266）：验证阶段排在 Luna 后面、开着（碰界面的单 GPT 被挡掉，轮到它）；
- * 写码、界面阶段排第一、开着（副手在这两个阶段派）；别的阶段照 default 挂在最后、关着。
- */
 const GROK_ROUTE = 'grok:grok-4.7:grok';
-/**
- * Mirasim 中转的 DeepSeek Flash（#345，创始人 2026-09-27 拍「mirasim 额度不够，先只开这一条」）：它挂的每个阶段
- * （default、verify、execute、ui）里都是开着的——和 Grok 不一样，不是只在某几个阶段单开。同池的 opus-5.5、
- * gpt-5.6-luna、kimi-k3 仍照旧关着，不受它牵连。
- */
+/** Mirasim 中转的 DeepSeek Flash（#345，创始人 2026-09-27 拍「mirasim 额度不够，先只开这一条」）。 */
 const DEEPSEEK_ROUTE = 'mirasim-relay:deepseek-flash:mirasim';
 
 let t: TestDb;
@@ -59,79 +37,54 @@ beforeEach(async () => {
 
 const load = (config: CatalogConfig = example()) => loadCatalog(t.db, config, { now: NOW, source: 'test' });
 
-/** 目录相关的几张表的全部内容，按主键排好。 */
+/** 目录相关的几张表的全部内容（装载器照旧的依据），按主键排好。 */
 async function catalogRows(db: Db) {
   return {
-    families: await db.select().from(families).orderBy(asc(families.id)),
-    channels: await db.select().from(channels).orderBy(asc(channels.id)),
-    pools: await db.select().from(pools).orderBy(asc(pools.id)),
-    models: await db.select().from(models).orderBy(asc(models.id)),
-    routes: await db.select().from(routes).orderBy(asc(routes.id)),
-    stagePolicies: await db.select().from(stagePolicies).orderBy(asc(stagePolicies.stage)),
-    stagePolicyRoutes: await db
-      .select()
-      .from(stagePolicyRoutes)
-      .orderBy(asc(stagePolicyRoutes.stage), asc(stagePolicyRoutes.position)),
+    families: await db.select().from(families).orderBy(families.id),
+    channels: await db.select().from(channels).orderBy(channels.id),
+    pools: await db.select().from(pools).orderBy(pools.id),
+    models: await db.select().from(models).orderBy(models.id),
+    routes: await db.select().from(routes).orderBy(routes.id),
   };
 }
 
-async function stageOrder(stage: (typeof STAGE_KINDS)[number]) {
-  const rows = await t.db
-    .select()
-    .from(stagePolicyRoutes)
-    .where(eq(stagePolicyRoutes.stage, stage))
-    .orderBy(asc(stagePolicyRoutes.position));
-  return rows.map((r) => [r.routeId, r.enabled]);
-}
-
 describe('示例配置 deploy/examples/catalog.example.json', () => {
-  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），Mirasim 的 DeepSeek Flash 也开着，其余挂在后面关着；开 PR 前验证 Cursor 的 GPT-5.6 Luna 排第一、Grok 4.7 第二，写码、界面 Grok 4.7 排第一，都开着；判断阶段 TypeSafe 在前', async () => {
+  it('装得进空库：族、渠道、账号池、模型、路由都照样例写进去', async () => {
     const result = await load();
-    expect(result.inserted.stages).toEqual([...STAGE_KINDS]);
     const config = example();
-    // Jev 只挂判断阶段、Cursor 的 GPT-5.6 Luna 只挂验证阶段；其余路由按样例里的先后挂在各阶段，开着的是两条 Claude
-    // （独享在前、拼车在后）加 Mirasim 的 DeepSeek Flash（#345，每个挂它的阶段都开着，不像 Grok 只在几个阶段单开）。
-    const expected = config.routes
-      .filter((r) => r.id !== JEV_ROUTE && r.id !== LUNA_ROUTE)
-      .map((r) => [r.id, CLAUDE_ROUTES.includes(r.id) || r.id === DEEPSEEK_ROUTE]);
-    expect(expected.at(-1)).toEqual([GROK_ROUTE, false]);
-    const withoutGrok = expected.filter(([id]) => id !== GROK_ROUTE);
-    for (const stage of STAGE_KINDS) {
-      // ui 单列一份，不挂 GPT（硬禁令，关着也不挂）。judge 照 packages/jev：TypeSafe 开着在前，两条 Claude 关着
-      // （Claude 判断会话接上 fleet-agent-scope 之前 packages/jev 接不了，见 packages/jev/test/catalog-judge.test.ts）。
-      // verify 单列一份：GPT-5.6 Luna 开着在前、Grok 4.7 开着第二，后面照 default。execute、ui 单列：Grok 4.7 开着在前。
-      const want =
-        stage === 'judge'
-          ? [[JEV_ROUTE, true], ...CLAUDE_ROUTES.map((id) => [id, false])]
-          : stage === 'ui'
-            ? [[GROK_ROUTE, true], ...withoutGrok.filter(([id]) => !String(id).includes('gpt'))]
-            : stage === 'verify'
-              ? [[LUNA_ROUTE, true], [GROK_ROUTE, true], ...withoutGrok]
-              : stage === 'execute'
-                ? [[GROK_ROUTE, true], ...withoutGrok]
-                : expected;
-      expect(await stageOrder(stage)).toEqual(want);
-    }
-    expect((await stageOrder('ui')).length).toBe(expected.length - 1);
+    expect(result.inserted.families).toEqual(config.families.map((f) => f.id));
+    expect(result.inserted.channels).toEqual(config.channels.map((c) => c.id));
+    expect(result.inserted.pools).toEqual(config.pools.map((p) => p.id));
+    expect(result.inserted.models).toEqual(config.models.map((m) => m.id));
+    expect(result.inserted.routes).toEqual(config.routes.map((r) => r.id));
+    expect(result.unchanged).toBe(false);
   });
 
   it('装进空库，每张表的行数和样例对得上', async () => {
     const config = example();
     await load();
     const rows = await catalogRows(t.db);
-    const orders = STAGE_KINDS.map((s) => config.stages[s] ?? config.stages.default ?? []);
     expect(Object.fromEntries(Object.entries(rows).map(([kind, list]) => [kind, list.length]))).toEqual({
       families: config.families.length,
       channels: config.channels.length,
       pools: config.pools.length,
       models: config.models.length,
       routes: config.routes.length,
-      stagePolicies: orders.filter((o) => o.length > 0).length,
-      stagePolicyRoutes: orders.reduce((n, o) => n + o.length, 0),
     });
-    // 两边都从样例算，再钉一遍样例本身：9 个阶段都排了；判断阶段 3 条、UI 7 条、开 PR 前验证 9 条（多一条 Cursor 的
-    // GPT-5.6 Luna）、其余 6 个阶段各 8 条（写码阶段单列，条数和 default 一样，只是 Grok 挪到第一）。
-    expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([9, 3 + 7 + 9 + 6 * 8]);
+  });
+
+  it('样例里不再有 stages（旧的按阶段平铺顺序，#754）：谁还写它，装载器明确拒收、说清删哪一段', async () => {
+    expect(exampleText).not.toContain('"stages"');
+    const withStages = JSON.stringify({
+      ...example(),
+      stages: { default: [{ routeId: GROK_ROUTE, enabled: true }] },
+    });
+    // 报的是 stages 这一段，不是笼统一句「认不出的字段」。
+    expect(() => parseCatalog(withStages, EXAMPLE_PATH)).toThrow(
+      /里还有旧的 stages（各阶段的路由顺序）[\s\S]*把这份配置里的整个 stages 那一段删掉再发布/,
+    );
+    // 不含 stages 的那份照常装得进去。
+    await expect(load(example())).resolves.toBeTruthy();
   });
 
   it('两个 Claude 池跑在同一个会话用户下、按组织类型分（法国只留一个会话用户，design 第十节）；同一时刻只有一个在跑，各 4', () => {
@@ -223,9 +176,8 @@ describe('只补缺，跑几遍都一样', () => {
 
     const second = await load();
     expect(second).toEqual({
-      inserted: { families: [], channels: [], pools: [], models: [], routes: [], stages: [] },
+      inserted: { families: [], channels: [], pools: [], models: [], routes: [] },
       filled: [],
-      adoptedStages: [],
       kept: [],
       unchanged: true,
     });
@@ -233,27 +185,9 @@ describe('只补缺，跑几遍都一样', () => {
     expect(await t.db.select().from(auditLog)).toHaveLength(1);
   });
 
-  it('驾驶舱改过的不被覆盖：排序、开关、删掉的、清空的阶段，池的并发、路由的上游名字、渠道开关', async () => {
+  it('驾驶舱改过的不被覆盖：池的并发、路由的上游名字、渠道开关', async () => {
     await load();
     const [solo, carpool] = CLAUDE_ROUTES as [string, string];
-    // execute（样例里 Grok 第一、两条 Claude 第二第三）：两条 Claude 调个个儿，再关掉 Grok。
-    const inExecute = (routeId: string) =>
-      and(eq(stagePolicyRoutes.stage, 'execute'), eq(stagePolicyRoutes.routeId, routeId));
-    expect((await stageOrder('execute')).slice(0, 3)).toEqual([
-      [GROK_ROUTE, true],
-      [solo, true],
-      [carpool, true],
-    ]);
-    await t.db.update(stagePolicyRoutes).set({ position: 99 }).where(inExecute(solo));
-    await t.db.update(stagePolicyRoutes).set({ position: 1 }).where(inExecute(carpool));
-    await t.db.update(stagePolicyRoutes).set({ position: 2 }).where(inExecute(solo));
-    await t.db.update(stagePolicyRoutes).set({ enabled: false }).where(inExecute(GROK_ROUTE));
-    // plan 清空（驾驶舱把这个阶段的路由全摘了），review 只留一条。
-    await t.db.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, 'plan'));
-    await t.db.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, 'review'));
-    await t.db
-      .insert(stagePolicyRoutes)
-      .values({ stage: 'review', routeId: carpool, position: 0, enabled: true });
     await t.db.update(pools).set({ maxConcurrency: 1 }).where(eq(pools.id, 'claude-solo'));
     await t.db.update(routes).set({ upstreamModel: 'claude-opus-5-5[1m]' }).where(eq(routes.id, solo));
     await t.db.update(channels).set({ enabled: false }).where(eq(channels.id, 'cursor'));
@@ -268,32 +202,16 @@ describe('只补缺，跑几遍都一样', () => {
         'channels.cursor.enabled：库里是 false，配置是 true，没动',
         'pools.claude-solo.maxConcurrency：库里是 1，配置是 4，没动',
         `routes.${solo}.upstreamModel：库里是 "claude-opus-5-5[1m]"，配置是 "claude-opus-5-5"，没动`,
-        '阶段 execute：装载器早先排过，之后不再动它，和配置不一样，没动',
       ]),
     );
-    // 摘掉的路由点名出来，不笼统说「改过顺序」。
-    const stageNotes = again.kept.filter((k) => k.startsWith('阶段'));
-    expect(stageNotes).toHaveLength(3);
-    const notCarpool = (example().stages.default ?? []).map((e) => e.routeId).filter((id) => id !== carpool);
-    expect(stageNotes).toContain(
-      `阶段 review：装载器早先排过，之后不再动它，配置里的 ${notCarpool.join('、')} 没挂上（要用就在驾驶舱里加）`,
-    );
-    expect(stageNotes.find((k) => k.startsWith('阶段 plan'))).toContain(`配置里的 ${solo}、${carpool}、`);
+    expect(carpool).toBeTruthy();
   });
 
-  it('库里早先就有的：路由空着的上游名字、池空着的会话用户补上，已有的阶段顺序接手下来不动', async () => {
+  it('库里早先就有的：路由空着的上游名字、池空着的会话用户补上', async () => {
     await load({ ...example(), routes: example().routes.map((r) => ({ ...r, upstreamAliases: [] })) });
-    // 模拟装载器之前手工建的：上游名字、会话用户都空着；execute 阶段有人排过。
+    // 模拟装载器之前手工建的：上游名字、会话用户都空着。
     await t.db.update(routes).set({ upstreamModel: null, upstreamAliases: [] });
     await t.db.update(pools).set({ runAsUser: null, orgKind: null });
-    await t.db
-      .update(stagePolicies)
-      .set({ catalogAppliedAt: null })
-      .where(eq(stagePolicies.stage, 'execute'));
-    await t.db.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, 'execute'));
-    await t.db
-      .insert(stagePolicyRoutes)
-      .values({ stage: 'execute', routeId: 'grok:grok-4.7:grok', position: 0, enabled: true });
 
     const result = await load();
     expect(result.filled).toEqual(
@@ -311,21 +229,10 @@ describe('只补缺，跑几遍都一样', () => {
     expect([auto?.upstreamModel, auto?.upstreamAliases]).toEqual(['auto', ['default']]);
     const [solo] = await t.db.select().from(pools).where(eq(pools.id, 'claude-solo'));
     expect([solo?.runAsUser, solo?.orgKind]).toEqual(['fleet-agent-carpool', 'solo']);
-    // 有人排过的 execute 接手下来，不改；以后也不再动。
-    expect(result.adoptedStages).toEqual(['execute']);
-    expect(await stageOrder('execute')).toEqual([['grok:grok-4.7:grok', true]]);
     expect((await load()).unchanged).toBe(true);
   });
 
-  it('钉住的阶段不排', async () => {
-    await t.db.insert(stagePolicies).values({ stage: 'ui', pinned: true });
-    const result = await load();
-    expect(result.inserted.stages).not.toContain('ui');
-    expect(result.adoptedStages).toEqual(['ui']);
-    expect(await stageOrder('ui')).toEqual([]);
-  });
-
-  it('排过之后配置里新加的路由：路由写进库，已排过的阶段不挂，点名说没挂上', async () => {
+  it('配置里新加的路由：发布时装得进库（要派活还得挂进路由两层）', async () => {
     await load();
     const base = example();
     const extra = {
@@ -333,21 +240,9 @@ describe('只补缺，跑几遍都一样', () => {
       id: 'solo-2',
       hostId: 'mirasim' as const,
     };
-    const result = await load({
-      ...base,
-      routes: [...base.routes, extra],
-      stages: {
-        ...base.stages,
-        default: [...(base.stages.default ?? []), { routeId: 'solo-2', enabled: true }],
-      },
-    });
+    const result = await load({ ...base, routes: [...base.routes, extra] });
     expect(result.inserted.routes).toEqual(['solo-2']);
-    // plan 照 default 排（execute 在样例里单列了，default 新加的不算它的）。
-    expect(base.stages.plan).toBeUndefined();
-    expect(result.kept).toContain(
-      '阶段 plan：装载器早先排过，之后不再动它，配置里的 solo-2 没挂上（要用就在驾驶舱里加）',
-    );
-    expect((await stageOrder('plan')).map(([id]) => id)).not.toContain('solo-2');
+    expect((await load({ ...base, routes: [...base.routes, extra] })).unchanged).toBe(true);
   });
 
   it('会话用户那一列按名字读得回来（session_user 是保留字，裸写会读到连接角色）', async () => {
@@ -387,7 +282,6 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     const message = await failLoad({
       ...base,
       routes: [...base.routes.filter((r) => r.id !== 'grok:grok-4.7:grok'), twin],
-      stages: { default: [{ routeId: 'grok-twin', enabled: false }] },
     });
     expect(message).toContain(
       '路由 grok-twin 和库里的 grok:grok-4.7:grok 是同一条线（grok / grok-4.7 / grok）',
@@ -395,22 +289,9 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     expect(await catalogRows(t.db)).toEqual(before);
   });
 
-  it('GPT 族写成 openai、上游名是 Fable、模型本身是 Fable：一律拒收', async () => {
+  it('模型本身、路由投给上游的名字是 Fable：一律拒收（按阶段判的那几条不再有——先后在路由两层里，没有「哪个阶段」这一说）', async () => {
     const base = example();
-    // GPT 族写成 openai、ui 没单列（用 default，里面挂着 GPT，关着也不行）。
-    const openai: CatalogConfig = {
-      ...base,
-      families: [
-        ...base.families.filter((f) => f.id !== 'gpt'),
-        { id: 'openai', displayName: 'OpenAI', vendor: 'OpenAI' },
-      ],
-      models: base.models.map((m) => (m.family === 'gpt' ? { ...m, family: 'openai' } : m)),
-      stages: { default: base.stages.default ?? [] },
-    };
-    expect(await failLoad(openai)).toContain(
-      'stages.default 的路由 mirasim-relay:gpt-5.6-luna:mirasim 不能用在 ui（没单列这个阶段，用的是 default）：GPT 不做 UI 类活',
-    );
-    // 模型 id 叫 opus、插头发给上游的却是 Fable：哪个阶段都不行。
+    // 模型 id 叫 opus、插头发给上游的却是 Fable。
     const solo = 'claude-solo:opus-5.5:claude-code';
     const fableUpstream: CatalogConfig = {
       ...base,
@@ -465,11 +346,11 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     ).rejects.toThrow(/pools_run_as_user_known/);
   });
 
-  it('写到一半失败（排阶段顺序时库里报错）：前面写进去的族、渠道、池、模型、路由整批回滚', async () => {
+  it('写到一半失败（写账号池时库里报错）：前面写进去的族、渠道整批回滚', async () => {
     await t.client.exec(`
       create function catalog_test_boom() returns trigger language plpgsql as $$
       begin raise exception 'catalog_test_boom'; end $$;
-      create trigger catalog_test_boom before insert on stage_policy_routes
+      create trigger catalog_test_boom before insert on pools
         for each row execute function catalog_test_boom();
     `);
     try {
@@ -477,13 +358,13 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
         () => null,
         (e: unknown) => e as Error,
       );
-      expect(err?.message).toMatch(/^Failed query: insert into "stage_policy_routes"/);
+      expect(err?.message).toMatch(/^Failed query: insert into "pools"/);
       expect(String(err?.cause)).toMatch(/catalog_test_boom/);
       expect(await empty()).toBe(true);
       expect(await t.db.select().from(auditLog)).toEqual([]);
     } finally {
       await t.client.exec(`
-        drop trigger catalog_test_boom on stage_policy_routes;
+        drop trigger catalog_test_boom on pools;
         drop function catalog_test_boom();
       `);
     }
@@ -516,27 +397,21 @@ describe('配置文件缺失或格式错：明确报错，库里一行不写', (
     expect(await fail(readCatalogFile('/x.json', async () => '{ "channels": ['))).toMatch(/不是合法的 JSON/);
     expect(await fail(readCatalogFile('/x.json', async () => ''))).toMatch(/不是合法的 JSON/);
     const empty = await fail(readCatalogFile('/x.json', text({})));
-    for (const part of ['channels', 'pools', 'routes', 'stages']) expect(empty).toContain(`- ${part}：`);
-    const noLists = await fail(readCatalogFile('/x.json', text({ ...example(), pools: [], stages: {} })));
-    expect(noLists).toContain('- pools：');
-    expect(noLists).toContain('至少要有 default 或某个阶段的顺序');
+    for (const part of ['channels', 'pools', 'routes']) expect(empty).toContain(`- ${part}：`);
+    const noPools = await fail(readCatalogFile('/x.json', text({ ...example(), pools: [] })));
+    expect(noPools).toContain('- pools：');
   });
 
-  it('字段写错、阶段名写错、取值不对、id 重复', async () => {
+  it('字段写错、取值不对、id 重复', async () => {
     const base = example();
     const [pool] = base.pools;
     const typo = await fail(
       readCatalogFile(
         '/x.json',
-        text({
-          ...base,
-          pools: [{ ...pool, maxConcurency: 3 }, ...base.pools.slice(1)],
-          stages: { deploy: [] },
-        }),
+        text({ ...base, pools: [{ ...pool, maxConcurency: 3 }, ...base.pools.slice(1)] }),
       ),
     );
     expect(typo).toContain('maxConcurency');
-    expect(typo).toContain('stages');
     expect(
       await fail(
         readCatalogFile('/x.json', text({ ...base, channels: [{ ...base.channels[0], billing: 'free' }] })),
@@ -547,19 +422,15 @@ describe('配置文件缺失或格式错：明确报错，库里一行不写', (
     ).toContain(`routes 里 ${base.routes[0]?.id} 出现了不止一次`);
   });
 
-  it('样例只写错一处引用（判断阶段排第一的路由名）：装载报错、只报这一处，目录七张表和操作记录都是 0 行', async () => {
-    const good = '{ "routeId": "jev:jev-1.13:api-shell", "enabled": true }';
-    expect(exampleText.split(good)).toHaveLength(2);
-    const text = exampleText.replace(good, '{ "routeId": "jev:jev-1.13:api-shel", "enabled": true }');
-    const config = await readCatalogFile('/etc/fleet-dao/catalog.json', async () => text);
-    const message = await fail(load(config));
-    expect(message).toContain('stages.judge 的路由 jev:jev-1.13:api-shel 不存在');
-    expect(message.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
+  it('旧结构那份 stages 还在：明确报错、说清删哪一段，库里一张表都不写', async () => {
+    const withStages = { ...example(), stages: { default: [{ routeId: GROK_ROUTE, enabled: true }] } };
+    const message = await fail(readCatalogFile('/x.json', text(withStages)));
+    expect(message).toContain('里还有旧的 stages（各阶段的路由顺序）');
     expect(Object.values(await catalogRows(t.db)).every((list) => list.length === 0)).toBe(true);
     expect(await t.db.select().from(auditLog)).toEqual([]);
   });
 
-  it('引用了不存在的池、模型、路由：整批不写', async () => {
+  it('引用了不存在的池、模型：整批不写', async () => {
     const base = example();
     const broken: CatalogConfig = {
       ...base,
@@ -567,11 +438,9 @@ describe('配置文件缺失或格式错：明确报错，库里一行不写', (
         ...base.routes,
         { ...(base.routes[0] as CatalogConfig['routes'][number]), id: 'x', poolId: 'nowhere' },
       ],
-      stages: { default: [...(base.stages.default ?? []), { routeId: 'ghost', enabled: true }] },
     };
     const message = await fail(load(broken));
     expect(message).toContain('路由 x 的账号池 nowhere 不存在');
-    expect(message).toContain('stages.default 的路由 ghost 不存在');
     const rows = await catalogRows(t.db);
     expect(Object.values(rows).every((list) => list.length === 0)).toBe(true);
   });

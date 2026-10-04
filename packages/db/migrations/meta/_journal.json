@@ -232,6 +232,13 @@
       "when": 1791082025405,
       "tag": "0032_pool_reservations",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791099782179,
+      "tag": "0033_drop_stage_policy_triggers",
+      "breakpoints": true
     }
   ]
 }

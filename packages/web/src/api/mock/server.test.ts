@@ -199,52 +199,15 @@ describe('假后端：追问', () => {
   });
 });
 
-describe('假后端：调度台', () => {
-  // 路由目录（routing()）不再带阶段顺序（#574）：改阶段顺序的结果直接看假数据
-  const stageOf = (api: ReturnType<typeof fresh>, stage: string) =>
-    api.state().stages.find((s) => s.stage === stage);
-
-  test('按「改之前看到的样子」保存；别人先改了就 409，不悄悄盖掉', async () => {
+describe('假后端：路由两层', () => {
+  // 改阶段顺序那个接口整条删了（#754）：旧的按阶段平铺表没人读，先后看路由两层（routingLayers()）。
+  // 这里钉住「选路照路由两层走」，包括其中一条：UI 用途的模型顺序里没有 GPT，写死的禁令挡着。
+  test('UI 用途的模型顺序里没有 GPT：这条禁令写死在代码里，路由两层里也看不到它', async () => {
     const api = fresh();
-    const seen = structuredClone(stageOf(api, 'review'));
-    if (!seen) throw new Error('没有 review 阶段');
-    const reversed = [...seen.routeIds].reverse();
-    await api.updateStagePolicy('review', {
-      routeIds: reversed,
-      pinned: seen.pinned,
-      expected: { routeIds: seen.routeIds, pinned: seen.pinned },
-    });
-    const stale = await rejects(
-      api.updateStagePolicy('review', {
-        routeIds: seen.routeIds,
-        pinned: true,
-        expected: { routeIds: seen.routeIds, pinned: seen.pinned },
-      }),
-    );
-    expect(stale.status).toBe(409);
-    expect(stale.code).toBe('conflict');
-    expect(stageOf(api, 'review')?.routeIds).toEqual(reversed);
-    const { items } = await api.audit({ target: 'stage:review' });
-    expect(items[0]).toMatchObject({
-      action: 'stage_policy.update',
-      before: { routeIds: seen.routeIds, pinned: seen.pinned },
-      after: { routeIds: reversed, pinned: seen.pinned },
-    });
-  });
-
-  test('UI 阶段放不进 GPT：写死的禁令，422', async () => {
-    const api = fresh();
-    const ui = structuredClone(stageOf(api, 'ui'));
-    if (!ui) throw new Error('没有 ui 阶段');
-    const e = await rejects(
-      api.updateStagePolicy('ui', {
-        routeIds: [...ui.routeIds, 'r-rl-gpt'],
-        pinned: ui.pinned,
-        expected: { routeIds: ui.routeIds, pinned: ui.pinned },
-      }),
-    );
-    expect(e.code).toBe('route_not_allowed');
-    expect(e.message).toContain('GPT 不做 UI 类活');
+    const layers = await api.routingLayers();
+    const ui = layers.purposes.find((p) => p.purpose === 'ui');
+    if (!ui) throw new Error('没有 ui 用途');
+    expect(ui.models.map((m) => m.family)).not.toContain('gpt');
   });
 });
 

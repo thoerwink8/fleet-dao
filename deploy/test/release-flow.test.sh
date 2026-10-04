@@ -557,12 +557,12 @@ runuser() {
   shift 3
   "$@"
 }
-# 读回的桩：装载器这一轮还没跑时按 PG_BEFORE 答，跑过了按 PG_AFTER 答。ok 是账号池 6、路由 9、阶段 8、阶段里挂的路由 58；
+# 读回的桩：装载器这一轮还没跑时按 PG_BEFORE 答，跑过了按 PG_AFTER 答。ok 是账号池 6、路由 9（#754 起不再数旧的按阶段平铺那两张表）；
 # fail 连不上库；garbage 答的不是数；zero-<第几张> 那张表 0 行；grown 多出一个账号池（库被人改了）
 PG_BEFORE=ok
 PG_AFTER=ok
 pg_admin() {
-  local mode=$PG_BEFORE c=(6 9 8 58)
+  local mode=$PG_BEFORE c=(6 9)
   if [[ -s "$FAKE/calls" ]]; then mode=$PG_AFTER; fi
   case $mode in
   fail)
@@ -576,7 +576,7 @@ pg_admin() {
   zero-*) c[${mode#zero-}]=0 ;;
   grown) c[0]=7 ;;
   esac
-  printf '%s|%s|%s|%s|%s\n' "${c[@]}" "$(cat "$FAKE/audit")"
+  printf '%s|%s|%s\n' "${c[@]}" "$(cat "$FAKE/audit")"
 }
 # 迁移的桩照旧，另把「迁移跑过了」记进 order：装载器得排在它后面
 migrate() {
@@ -611,11 +611,11 @@ check "装载器在这一版的目录里跑" "$([[ "$got_cwd" == */releases/"$A"
 check "装载器连的是本机库（unix socket、peer 认证）" "$got_db" "postgres:///fleet /var/run/postgresql fleet"
 check "装载器的话打出来了" "$(said '新写入 pools（6）')" 1
 check "记一处改动，带上读回的行数" \
-  "$(printf '%s\n' "${CHANGES[@]}" | grep -c '^目录装进库（账号池 6、路由 9、阶段 8、阶段里挂的路由 58）$')" 1
+  "$(printf '%s\n' "${CHANGES[@]}" | grep -c '^目录装进库（账号池 6、路由 9）$')" 1
 round same
 do_release "$A" >"$TMP/out"
 check "同一版再发：装载器照样跑，库里一行没改，改动 0 处" "$(loader_runs):${#CHANGES[@]}:${#REDS[@]}" "1:0:0"
-check "同一版再发：说的是已齐" "$(said '目录已齐，这次一行没改（账号池 6、路由 9、阶段 8、阶段里挂的路由 58）')" 1
+check "同一版再发：说的是已齐" "$(said '目录已齐，这次一行没改（账号池 6、路由 9）')" 1
 with_loader "$B"
 before=$(events)
 blocked() { # 说明 红里要有的字 装载器该跑几次：发 B，应当停下、不切、历史不变
@@ -687,7 +687,7 @@ blocked "装载器报错（引用不存在），读回和装之前一样" "目�
 check "装载器报错：它的原话一条条打出来了" "$(said '- stages.judge 的路由 jev:jev-1.13:api-shel 不存在')" 1
 PG_AFTER=grown
 round fail
-blocked "装载器报错，读回库却变了" "；现在 账号池 7、路由 9、阶段 8、阶段里挂的路由 58，到" 1
+blocked "装载器报错，读回库却变了" "；现在 账号池 7、路由 9，到" 1
 check "装载器报错，读回库却变了：说要人看，不说「一行没动」" "$(reds_with '要人看；没切版本'):$(reds_with '一样')" "1:0"
 PG_AFTER=fail
 round fail
@@ -697,19 +697,13 @@ blocked "装完连不上库" "目录装完了，但读不回库 fleet 里目录�
 PG_AFTER=garbage
 round changed
 blocked "装完读回的不是数" "目录装完了，但读不回库 fleet 里目录那几张表的行数" 1
-tables=(账号池 路由 阶段 阶段里挂的路由)
-had=(6 9 8 58)
-for i in 0 1 2; do
+tables=(账号池 路由)
+had=(6 9)
+for i in 0 1; do
   PG_AFTER=zero-$i
   round changed
-  blocked "装完${tables[i]}是 0 行" "库 fleet 里${tables[i]} 0 行（装之前 ${had[i]} 行），引擎派不出活（要人看）；没切版本" 1
+  blocked "装完${tables[i]}是 0 行" "库 fleet 里${tables[i]} 0 行（装之前 ${had[i]} 行），引擎派不出活；没切版本" 1
 done
-PG_AFTER=zero-3
-round changed
-blocked "装完阶段里挂的路由是 0 行" "库 fleet 里阶段里挂的路由 0 行（装之前 58 行），引擎派不出活（阶段排过一次装载器就不再动" 1
-PG_BEFORE=zero-3
-round changed
-blocked "阶段里挂的路由装之前就是 0 行（驾驶舱里摘光的）" "阶段里挂的路由 0 行（装之前 0 行），引擎派不出活（阶段排过一次装载器就不再动：是驾驶舱里摘光的，就去驾驶舱挂上）；没切版本" 1
 PG_BEFORE=ok
 PG_AFTER=ok
 round changed
@@ -775,7 +769,7 @@ R_BEFORE=empty
 R_AFTER=full
 pg_admin() {
   if [[ "$*" != *routing_purpose_models* ]]; then
-    printf '6|9|8|58|0\n'
+    printf '6|9|0\n'
     return 0
   fi
   local mode=$R_BEFORE

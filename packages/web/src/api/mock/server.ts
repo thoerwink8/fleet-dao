@@ -50,8 +50,6 @@ import {
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
-  UpdateStagePolicyRequest,
-  UpdateStagePolicyResponse,
   windowAppliesTo,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -429,15 +427,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     return sv.subtask.touches.some((p) => p.endsWith('.tsx') || p.includes('components/')) ? 'ui' : 'execute';
   }
 
-  /** 按调度台的顺序选第一条能用的路由：在线、不犯禁令、渠道开着、账号池有空位。 */
+  /**
+   * 一个用途按路由两层摊开的先后（照真后端 routeFactsForPurpose：先用途下模型的先后、再模型下路由的先后）：
+   * 关着的、这条用途用不了的都不进（照真后端，开关和禁令在选路那一层判）。
+   */
+  function routeOrderFor(purpose: StageKind): string[] {
+    const modelIds = st.purposes[purpose];
+    if (!modelIds) return [];
+    return modelIds.flatMap((modelId) =>
+      (st.routing[modelId] ?? []).filter(
+        (routeId) => !MOCK_SWITCHED_OFF.has(routeId) && routeProblem(routeId, purpose) === null,
+      ),
+    );
+  }
+
+  /** 按路由两层的先后选第一条能用的路由：在线、不犯禁令、渠道开着、账号池有空位。 */
   function pickRoute(stage: StageKind, avoid: string[] = []): string | undefined {
-    const policy = st.stages.find((p) => p.stage === stage);
-    for (const rid of policy?.routeIds ?? []) {
+    for (const rid of routeOrderFor(stage)) {
       if (avoid.includes(rid)) continue;
       const { route } = routeInfo(rid);
       if (!route?.alive) continue;
       if (!st.channels.find((c) => c.id === route.channelId)?.enabled) continue;
-      if (routeProblem(rid, stage)) continue;
       const pool = st.pools.find((p) => p.id === route.poolId);
       if (pool && poolRunning(pool.id) >= pool.maxConcurrency) continue;
       return rid;
@@ -1186,15 +1196,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async routingLayers() {
       await wait();
       const t = now();
-      // 假数据没有路由两层那两张表：模型 → 路由按路由目录的先后（一个模型的路由各用途共用），用途 → 模型按各阶段那一串里
-      // 模型第一次出现的先后。没配的用途照真后端写成缺口。
+      // 假数据的路由两层就是 st.purposes / st.routing（和真后端那两张表一个形状）：没配的用途照真后端写成缺口。
       const purposes = StageKindSchema.options.map((purpose) => {
-        const policy = st.stages.find((p) => p.stage === purpose);
-        const modelIds = [
-          ...new Set(
-            (policy?.routeIds ?? []).flatMap((id) => st.routes.find((r) => r.id === id)?.modelId ?? []),
-          ),
-        ];
+        const modelIds = st.purposes[purpose] ?? [];
         if (modelIds.length === 0) {
           return {
             purpose,
@@ -1205,8 +1209,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         }
         const models = modelIds.map((modelId) => {
           const model = st.models.find((m) => m.id === modelId);
-          const routes = st.routes
-            .filter((r) => r.modelId === modelId)
+          const routes = (st.routing[modelId] ?? [])
+            .flatMap((routeId) => st.routes.find((r) => r.id === routeId) ?? [])
             .map((r) => mockRouteLiveness(r, purpose, t));
           return {
             modelId,
@@ -1283,32 +1287,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         routeId,
         ...(body.effort === null ? {} : { effort: body.effort }),
       });
-    },
-    async updateStagePolicy(stage, raw) {
-      await wait();
-      const body = UpdateStagePolicyRequest.parse(raw);
-      const problems = body.routeIds
-        .map((id) => routeProblem(id, stage))
-        .filter((p): p is string => p !== null);
-      if (problems.length) throw new ApiError(422, 'route_not_allowed', problems.join('；'), { problems });
-      const current = st.stages.find((p) => p.stage === stage) ?? { stage, routeIds: [], pinned: false };
-      const same =
-        current.pinned === body.expected.pinned &&
-        current.routeIds.join('|') === body.expected.routeIds.join('|');
-      if (!same) throw new ApiError(409, 'conflict', '这个阶段刚被别人改过，刷新后再改', { current });
-      const next = { stage, routeIds: body.routeIds, pinned: body.pinned };
-      st.stages = [...st.stages.filter((p) => p.stage !== stage), next];
-      audit({
-        actor: meActor(),
-        action: 'stage_policy.update',
-        target: `stage:${stage}`,
-        before: body.expected,
-        after: { routeIds: body.routeIds, pinned: body.pinned },
-        via: 'cockpit',
-        ...(body.reason ? { reason: body.reason } : {}),
-      });
-      emit('stage_policies', stage);
-      return UpdateStagePolicyResponse.parse({ stage: next }).stage;
     },
     async updateChannel(channelId, raw) {
       await wait();

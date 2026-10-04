@@ -14,7 +14,6 @@ import {
   type SegmentRun,
   type SessionRun,
   type StageKind,
-  type StagePolicy,
   type Step,
   type Subtask,
   type Task,
@@ -59,7 +58,6 @@ import {
   type RunPlan,
   type SegmentRunRecord,
   type SettingRecord,
-  type StagePolicyValue,
   type Store,
   type TimelineRecord,
   type User,
@@ -198,7 +196,6 @@ export interface MemoryData {
   pools: Pool[];
   models: Model[];
   routes: Route[];
-  stagePolicies: StagePolicy[];
   bans: Ban[];
   /** 按（池, 原名 label）一行，和库的主键一样。 */
   quotaWindows: QuotaWindowRecord[];
@@ -235,7 +232,6 @@ export function emptyData(): MemoryData {
     pools: [],
     models: [],
     routes: [],
-    stagePolicies: [],
     bans: [],
     quotaWindows: [],
     jobs: [],
@@ -261,17 +257,6 @@ export interface MemoryStoreOptions {
 }
 
 const TERMINAL_TASK_STATES: readonly string[] = ['done', 'stopped', 'failed'];
-const STAGE_ORDER: readonly StageKind[] = [
-  'triage',
-  'spec',
-  'plan',
-  'execute',
-  'ui',
-  'review',
-  'verify',
-  'research',
-  'judge',
-];
 /** 时间线默认不放量大的动作流（和 packages/db 的 DEFAULT_TIMELINE_PROGRESS_KINDS 一致）。 */
 const QUIET_PROGRESS_KINDS: readonly ProgressKind[] = ['tool', 'file'];
 const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
@@ -298,14 +283,6 @@ const reclaimable = (e: GitHubDelivery, staleBefore: string) =>
 
 /** 接过来重做：次数加一；从等着接回来的不加（等上一轮不占自动重放的次数）。 */
 const reclaimedAttempts = (e: GitHubDelivery) => e.attempts + (e.status === 'waiting' ? 0 : 1);
-
-function sameValue(a: StagePolicyValue, b: StagePolicyValue): boolean {
-  return (
-    a.pinned === b.pinned &&
-    a.routeIds.length === b.routeIds.length &&
-    a.routeIds.every((id, i) => id === b.routeIds[i])
-  );
-}
 
 function byAtThenId(a: { at: string; id: string }, b: { at: string; id: string }): number {
   return a.at.localeCompare(b.at) || compareIds(a.id, b.id);
@@ -857,11 +834,6 @@ export function createMemoryStore(
     async listRoutes() {
       return [...data.routes].sort((a, b) => a.id.localeCompare(b.id));
     },
-    async listStagePolicies() {
-      return [...data.stagePolicies].sort(
-        (a, b) => STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage),
-      );
-    },
     async listBans() {
       return data.bans;
     },
@@ -869,29 +841,6 @@ export function createMemoryStore(
       return [...data.quotaWindows].sort(
         (a, b) => a.poolId.localeCompare(b.poolId) || a.label.localeCompare(b.label),
       );
-    },
-    async updateStagePolicy({ stage, expected, next }, entry) {
-      const current = data.stagePolicies.find((p) => p.stage === stage) ?? {
-        stage,
-        routeIds: [],
-        pinned: false,
-      };
-      if (!sameValue(current, expected)) return 'conflict';
-      checkAudit(entry);
-      // 关着的仍关着（还挂在新顺序里的）；这次新挂进来的开着。
-      const disabled = (current.disabledRouteIds ?? []).filter((id) => next.routeIds.includes(id));
-      data.stagePolicies = [
-        ...data.stagePolicies.filter((p) => p.stage !== stage),
-        {
-          stage,
-          routeIds: [...next.routeIds],
-          pinned: next.pinned,
-          ...(disabled.length > 0 && { disabledRouteIds: disabled }),
-        },
-      ];
-      audit(entry);
-      changed('stage_policies', stage);
-      return 'ok';
     },
     async setChannelEnabled({ channelId, enabled }, entry) {
       const channel = data.channels.find((ch) => ch.id === channelId);

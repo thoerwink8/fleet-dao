@@ -86,6 +86,10 @@ export async function addRoute(
   });
 }
 
+/**
+ * 往旧的按阶段平铺表（stage_policies / stage_policy_routes）里塞一条顺序。只在「这张表已经没人读了」的用例里用：
+ * 选路、探针都不该理它（#574/#754）。表本身和库里的旧行还在，等只放迁移的那一步删掉（#754 第 2 个 PR）。
+ */
 export async function setStageOrder(
   db: Db,
   stage: (typeof stagePolicies.$inferInsert)['stage'],

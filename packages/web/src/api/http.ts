@@ -16,7 +16,6 @@ import {
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
-  UpdateStagePolicyRequest,
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
@@ -182,17 +181,6 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       send('PUT', apiUrl(R.updateRouteEffort.path, { modelId, routeId }), R.updateRouteEffort.response, {
         body: UpdateRouteEffortRequest.parse(body),
       }),
-    async updateStagePolicy(stage, body) {
-      const res = await send(
-        'PUT',
-        apiUrl(R.updateStagePolicy.path, { stage }),
-        R.updateStagePolicy.response,
-        {
-          body: UpdateStagePolicyRequest.parse(body),
-        },
-      );
-      return res.stage;
-    },
     async updateChannel(channelId, body) {
       await send('PATCH', apiUrl(R.updateChannel.path, { channelId }), R.updateChannel.response, {
         body: UpdateChannelRequest.parse(body),

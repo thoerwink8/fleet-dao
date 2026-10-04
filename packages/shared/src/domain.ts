@@ -235,16 +235,6 @@ export interface RouteProbe {
   detail?: string;
 }
 
-/** 每个阶段类型挂一串有序路由，驾驶舱拖动排序。 */
-export interface StagePolicy {
-  stage: StageKind;
-  routeIds: string[];
-  /** 创始人手动钉住的顺序，AI 帅位不改。 */
-  pinned: boolean;
-  /** routeIds 里关着的那些：照样挂在顺序里，但不派（驾驶舱的开关）。 */
-  disabledRouteIds?: string[];
-}
-
 /** 全局禁令：GPT × UI、Fable × 一切。 */
 export interface Ban {
   family?: string;

@@ -13,7 +13,6 @@ import type {
   Route,
   SegmentRun,
   SessionRun,
-  StagePolicy,
   Subtask,
   Task,
 } from '@fleet-dao/shared';
@@ -29,7 +28,6 @@ import type {
   routes,
   runs,
   sessionRuns,
-  stagePolicies,
   subtasks,
   tasks,
 } from './schema/index.ts';
@@ -150,19 +148,6 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
   });
 
 /** routeIds 按调度台的先后；disabledRouteIds 是其中关着的（必须传：漏传就把关着的全当开着）。 */
-export const toStagePolicy = (
-  r: typeof stagePolicies.$inferSelect,
-  routeIds: string[],
-  disabledRouteIds: string[],
-): StagePolicy =>
-  build<StagePolicy>({
-    stage: r.stage,
-    routeIds,
-    pinned: r.pinned,
-    // 没有关着的就不写这一项（和领域类型里「可选」一致）。
-    disabledRouteIds: disabledRouteIds.length > 0 ? disabledRouteIds : undefined,
-  });
-
 export const toBan = (r: typeof bans.$inferSelect): Ban =>
   build<Ban>({
     family: opt(r.family),

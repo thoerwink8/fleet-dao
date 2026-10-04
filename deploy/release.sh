@@ -51,7 +51,7 @@ AGENT_API=127.0.0.1:8788       # fleet 命令接口（api.env 的 FLEET_AGENT_LI
 TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
 # 迁移连本机库：unix socket + peer 认证（同 api.env；postgres.js 不认连接串里的 ?host=，主机走 PGHOST）
 DB_ENV=(DATABASE_URL=postgres:///fleet PGHOST=/var/run/postgresql PGUSER=fleet)
-# 目录配置（族、渠道、账号池、模型、路由、各阶段顺序）：从保险箱放上来（docs/ops.md 第九节「目录配置」），迁移之后装进库
+# 目录配置（族、渠道、账号池、模型、路由）：从保险箱放上来（docs/ops.md 第九节「目录配置」），迁移之后装进库
 CATALOG=/etc/fleet-dao/catalog.json
 CATALOG_META="root:fleet 640" # 它该有的属主、权限；只有测试会改
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
@@ -762,14 +762,15 @@ migrate() { # 提交号
 
 # ── 目录 ──
 
-# 目录那几张表的读回，一行「账号池|路由|阶段|阶段里挂的路由|装载器最近一笔操作记录的编号」。装载器只在改了库时记一笔
+# 目录那几张表的读回，一行「账号池|路由|装载器最近一笔操作记录的编号」。装载器只在改了库时记一笔
 # （catalog.load），编号只增不减：前后一比就知道这次改没改。读不到、认不出就失败，不当成 0
+# 旧的按阶段平铺那两张表（stage_policies、stage_policy_routes）不数了：装载器不再写它们（#754），
+# 零行不是毛病，拿它判红会让发布白白停下
 catalog_readback() {
   local out
   out=$(pg_admin -d fleet -c "select (select count(*) from pools), (select count(*) from routes),
-    (select count(*) from stage_policies), (select count(*) from stage_policy_routes),
     (select coalesce(max(id), 0) from audit_log where action = 'catalog.load')") || return 1
-  if [[ ! "$out" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then return 1; fi
+  if [[ ! "$out" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ ]]; then return 1; fi
   printf '%s' "$out"
 }
 
@@ -777,16 +778,16 @@ catalog_readback() {
 catalog_words() { # catalog_readback 的一行
   local c=()
   IFS='|' read -r -a c <<<"$1"
-  printf '账号池 %s、路由 %s、阶段 %s、阶段里挂的路由 %s' "${c[0]}" "${c[1]}" "${c[2]}" "${c[3]}"
+  printf '账号池 %s、路由 %s' "${c[0]}" "${c[1]}"
 }
 
 # 装目录：迁移之后、切版本之前，以 fleet 跑这一版的装载器（packages/db/src/bin/catalog.ts）。它只补缺——驾驶舱里改过的不动，
-# 每个阶段只排一次，跑几遍都一样；格式错、引用不存在它整批不写（装不成时这里再读回一次核对，不光信它）。文件不在、属主权限
-# 不对、装不成、读不回，都停下、不切版本（在用的那版不受影响）。装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也判红：
-# 引擎没有它们派不出活
+# 跑几遍都一样；格式错、引用不存在它整批不写（装不成时这里再读回一次核对，不光信它）。文件不在、属主权限
+# 不对、装不成、读不回，都停下、不切版本（在用的那版不受影响）。装完账号池、路由哪张是 0 行也判红：
+# 引擎没有它们派不出活（旧的按阶段平铺那两张表不数也不判了，#754）
 load_catalog() { # 提交号
   local dir=$RELEASES/$1 have before after out rc=0 line first i empty="" counts=() was=()
-  local names=(账号池 路由 阶段 阶段里挂的路由)
+  local names=(账号池 路由)
   step "装目录（$CATALOG → 库 fleet）"
   if [[ ! -f "$dir/packages/db/src/bin/catalog.ts" ]]; then
     ok "这一版没有目录装载器"
@@ -837,18 +838,15 @@ load_catalog() { # 提交号
   fi
   IFS='|' read -r -a counts <<<"$after"
   IFS='|' read -r -a was <<<"$before"
-  for i in 0 1 2 3; do
+  for i in 0 1; do
     if ((counts[i] == 0)); then empty+="${empty:+、}${names[i]} 0 行（装之前 ${was[i]} 行）"; fi
   done
   if [[ -n "$empty" ]]; then
-    # 驾驶舱只摘得掉阶段里挂的路由（池、路由、阶段它删不了）；装载器又只补缺，阶段排过一次就不再动
-    line="要人看"
-    if [[ "$empty" == "${names[3]}"* ]]; then line="阶段排过一次装载器就不再动：是驾驶舱里摘光的，就去驾驶舱挂上"; fi
-    red "装完读回：库 fleet 里${empty}，引擎派不出活（$line）；没切版本"
+    red "装完读回：库 fleet 里${empty}，引擎派不出活；没切版本"
     return 1
   fi
   line=$(catalog_words "$after")
-  if [[ "${before##*|}" == "${counts[4]}" ]]; then
+  if [[ "${before##*|}" == "${counts[2]}" ]]; then
     ok "目录已齐，这次一行没改（$line）"
   else
     changed "目录装进库（$line）"

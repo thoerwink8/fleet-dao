@@ -32,8 +32,6 @@ import {
   searchSpecs,
   sessionRuns,
   settings,
-  stagePolicies,
-  stagePolicyRoutes,
   stateChanges,
   subtaskDeps,
   subtasks,
@@ -50,7 +48,6 @@ import {
   toRoute,
   toSegmentRun,
   toSessionRun,
-  toStagePolicy,
   toSubtask,
   toTask,
   users,
@@ -818,23 +815,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async listRoutes() {
       return (await db.select().from(routes).orderBy(asc(routes.id))).map(toRoute);
     },
-    async listStagePolicies() {
-      const [rows, links] = await Promise.all([
-        db.select().from(stagePolicies).orderBy(asc(stagePolicies.stage)),
-        db
-          .select()
-          .from(stagePolicyRoutes)
-          .orderBy(asc(stagePolicyRoutes.stage), asc(stagePolicyRoutes.position)),
-      ]);
-      return rows.map((r) => {
-        const mine = links.filter((l) => l.stage === r.stage);
-        return toStagePolicy(
-          r,
-          mine.map((l) => l.routeId),
-          mine.filter((l) => !l.enabled).map((l) => l.routeId),
-        );
-      });
-    },
     async listBans() {
       return (await db.select().from(bans).orderBy(asc(bans.id))).map(toBan);
     },
@@ -845,48 +825,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .orderBy(asc(quotaWindows.poolId), asc(quotaWindows.label));
       // 原名、单位、读法在库里不可空；领域类型里是可选的，这里按列补上必填的类型。
       return rows.map((r) => ({ ...toQuotaWindow(r), label: r.label, unit: r.unit, source: r.source }));
-    },
-    async updateStagePolicy({ stage, expected, next }, entry) {
-      return db.transaction(async (tx) => {
-        // 同一阶段的修改排队做。库里还没有这个阶段的行时，for update 锁不住任何东西，靠这把事务级咨询锁。
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`stage_policy:${stage}`}))`);
-        const [row] = await tx
-          .select()
-          .from(stagePolicies)
-          .where(eq(stagePolicies.stage, stage))
-          .for('update');
-        const current = await tx
-          .select({ routeId: stagePolicyRoutes.routeId, enabled: stagePolicyRoutes.enabled })
-          .from(stagePolicyRoutes)
-          .where(eq(stagePolicyRoutes.stage, stage))
-          .orderBy(asc(stagePolicyRoutes.position));
-        const currentIds = current.map((r) => r.routeId);
-        const pinned = row?.pinned ?? false;
-        const same =
-          pinned === expected.pinned &&
-          currentIds.length === expected.routeIds.length &&
-          currentIds.every((id, i) => id === expected.routeIds[i]);
-        if (!same) return 'conflict';
-        await tx
-          .insert(stagePolicies)
-          .values({ stage, pinned: next.pinned })
-          .onConflictDoUpdate({ target: stagePolicies.stage, set: { pinned: next.pinned } });
-        // 排序是删掉重插：每条路由的开关照原样带回去（关着的仍关着）；这次新挂进来的开着。
-        const enabledBefore = new Map(current.map((r) => [r.routeId, r.enabled]));
-        await tx.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, stage));
-        if (next.routeIds.length > 0) {
-          await tx.insert(stagePolicyRoutes).values(
-            next.routeIds.map((routeId, position) => ({
-              stage,
-              routeId,
-              position,
-              enabled: enabledBefore.get(routeId) ?? true,
-            })),
-          );
-        }
-        await insertAudit(tx, entry);
-        return 'ok';
-      });
     },
     async setChannelEnabled({ channelId, enabled }, entry) {
       return db.transaction(async (tx) => {

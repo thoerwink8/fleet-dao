@@ -47,7 +47,6 @@ import type {
   RunStepsResponse,
   SettingSchema,
   SettingsResponse,
-  StagePolicySchema,
   TaskActionRequest,
   TaskDetailResponse,
   TimelineItemSchema,
@@ -57,7 +56,6 @@ import type {
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
-  UpdateStagePolicyRequest,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -98,9 +96,7 @@ export type Channel = z.infer<typeof ChannelSchema>;
 export type Model = z.infer<typeof ModelSchema>;
 export type Route = z.infer<typeof RouteSchema>;
 export type Pool = z.infer<typeof PoolSchema>;
-export type StagePolicy = z.infer<typeof StagePolicySchema>;
 export type Ban = z.infer<typeof BanSchema>;
-export type UpdateStagePolicyBody = z.input<typeof UpdateStagePolicyRequest>;
 export type UpdateChannelBody = z.input<typeof UpdateChannelRequest>;
 
 /** 路由两层每一层现在活着吗（#574）。 */

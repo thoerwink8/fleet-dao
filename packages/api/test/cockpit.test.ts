@@ -11,7 +11,6 @@ import {
   TaskDetailResponse,
   TimelineResponse,
   UpdateSettingResponse,
-  UpdateStagePolicyResponse,
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
@@ -556,119 +555,16 @@ describe('发给工作流的信号', () => {
 });
 
 describe('调度台', () => {
-  it('读路由目录：渠道、池、模型、路由照给；不再带旧的阶段平铺顺序、也不去读它（每个用途的先后在路由两层，#574）', async () => {
+  it('读路由目录：渠道、池、模型、路由照给；不带旧的阶段平铺顺序（每个用途的先后在路由两层，#574）', async () => {
     const h = harness();
     const { cookie } = await h.login();
-    let policyReads = 0;
-    const listStagePolicies = h.store.listStagePolicies.bind(h.store);
-    h.store.listStagePolicies = () => {
-      policyReads += 1;
-      return listStagePolicies();
-    };
     const raw = (await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json()) as Record<
       string,
       unknown
     >;
     expect(raw).not.toHaveProperty('stages');
-    expect(policyReads).toBe(0);
     const body = RoutingResponse.parse(raw);
     expect(body.routes.map((r) => r.id)).toContain('rt-claude-opus');
-  });
-
-  it('改路由顺序：写操作记录（改前、改后、理由）', async () => {
-    const h = harness();
-    const s = await h.login();
-    const res = await h.cockpit.request(
-      '/api/routing/stages/execute',
-      write('PUT', s, {
-        routeIds: ['rt-mirasim-kimi', 'rt-claude-opus'],
-        pinned: true,
-        expected: { routeIds: ['rt-claude-opus', 'rt-mirasim-kimi'], pinned: false },
-        reason: 'Kimi 这周额度多',
-      }),
-    );
-    expect(res.status).toBe(200);
-    expect(UpdateStagePolicyResponse.parse(await res.json()).stage.routeIds).toEqual([
-      'rt-mirasim-kimi',
-      'rt-claude-opus',
-    ]);
-    expect(h.store.data.audit.at(-1)).toMatchObject({
-      actor: { kind: 'user', id: DEV_USER_ID },
-      action: 'stage_policy.update',
-      target: 'stage:execute',
-      before: { routeIds: ['rt-claude-opus', 'rt-mirasim-kimi'], pinned: false },
-      after: { routeIds: ['rt-mirasim-kimi', 'rt-claude-opus'], pinned: true },
-      reason: 'Kimi 这周额度多',
-      via: 'cockpit',
-    });
-  });
-
-  it('别人先改了：409，不悄悄盖掉', async () => {
-    const h = harness();
-    const s = await h.login();
-    const res = await h.cockpit.request(
-      '/api/routing/stages/execute',
-      write('PUT', s, {
-        routeIds: ['rt-claude-opus'],
-        pinned: false,
-        expected: { routeIds: [], pinned: false },
-      }),
-    );
-    expect(res.status).toBe(409);
-    expect(h.store.data.stagePolicies.find((p) => p.stage === 'execute')?.routeIds).toEqual([
-      'rt-claude-opus',
-      'rt-mirasim-kimi',
-    ]);
-  });
-
-  it('硬禁令写死在代码里：库里的 bans 表空了，GPT 照样进不了 UI，Fable（claude 族）哪个阶段都进不了', async () => {
-    const data = devFixtures(T0);
-    data.bans = [];
-    const h = harness({ data });
-    const s = await h.login();
-    const put = (stage: string, routeIds: string[]) =>
-      h.cockpit.request(
-        `/api/routing/stages/${stage}`,
-        write('PUT', s, {
-          routeIds,
-          pinned: false,
-          expected: { routeIds: ['rt-claude-opus'], pinned: true },
-        }),
-      );
-    const gpt = await put('ui', ['rt-mirasim-gpt']);
-    expect(gpt.status).toBe(422);
-    expect(((await gpt.json()) as { error: { message: string } }).error.message).toContain('GPT 不做 UI');
-    for (const stage of ['execute', 'review', 'triage']) {
-      const fable = await put(stage, ['rt-mirasim-fable']);
-      expect(fable.status, stage).toBe(422);
-      expect(((await fable.json()) as { error: { message: string } }).error.message).toContain('不用 Fable');
-    }
-    expect(h.store.data.stagePolicies.find((p) => p.stage === 'ui')?.routeIds).toEqual(['rt-claude-opus']);
-
-    const routing = RoutingResponse.parse(
-      await (await h.cockpit.request('/api/routing', { headers: { cookie: s.cookie } })).json(),
-    );
-    expect(routing.hardBans.map((b) => b.id)).toEqual(['gpt-no-ui', 'no-fable']);
-    expect(routing.bans).toEqual([]);
-  });
-
-  it('库里另配的禁令和硬禁令一起生效；不存在的路由、重复的路由、不存在的阶段都拒', async () => {
-    const h = harness();
-    const s = await h.login();
-    const put = (stage: string, routeIds: string[]) =>
-      h.cockpit.request(
-        `/api/routing/stages/${stage}`,
-        write('PUT', s, {
-          routeIds,
-          pinned: false,
-          expected: { routeIds: ['rt-claude-opus'], pinned: true },
-        }),
-      );
-    const kimi = await put('ui', ['rt-mirasim-kimi']);
-    expect(((await kimi.json()) as { error: { message: string } }).error.message).toContain('Kimi 暂不进 UI');
-    expect(await errorCode(await put('ui', ['rt-nope']))).toBe('route_not_allowed');
-    expect(await errorCode(await put('ui', ['rt-claude-opus', 'rt-claude-opus']))).toBe('invalid_request');
-    expect(await errorCode(await put('cooking', ['rt-claude-opus']))).toBe('stage_not_found');
   });
 
   it('下架渠道：写操作记录；不存在的渠道 404', async () => {
