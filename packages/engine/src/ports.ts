@@ -109,6 +109,11 @@ export interface RouteChoice {
    * 的 orgLadder）。别的池、老历史里没有。
    */
   orgKind?: OrgKind;
+  /**
+   * 选路时给这一段预占上的池的名额（PickRouteInput.reserve，#757，pool_reservations 的编号）：开跑那一行写进去时换成那一行，
+   * 没开跑就收场的由起会话的那一边放掉。没要预占的选路（Fusion、对账）、老历史里没有。
+   */
+  reservationId?: string;
 }
 
 export interface PickRouteInput extends Scope {
@@ -145,6 +150,12 @@ export interface PickRouteInput extends Scope {
    * 不给 = 不管（规划、验证本身、开了 PR 之后、需求工作流、子任务；这张单不验的也不给）。
    */
   keepVerifier?: KeepVerifierRequest;
+  /**
+   * 三段的一段（动手、验收）来选路（#757）：派得出就当场给这张单（taskId，库里的 tasks.id）的这一段预占一个池的名额，交回的
+   * route 带 reservationId；这一段之前预占的作废。预占和数名额在同一把锁下（db 的 pool-runs.ts），几张单同时选路也只放得进
+   * 池的上限那么多：选中的池在这一下被别的单占满了，按新的事实重选。不给 = 不预占（Fusion 起会话自己排队；对账只问派不派得出）。
+   */
+  reserve?: { segment: 'manual' | 'verify' };
 }
 
 /** PickRouteInput.keepVerifier：验证那一步怎么派（流程配置、界面类），留不下时怎么办。 */

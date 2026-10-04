@@ -141,7 +141,8 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     (w.sessions ? 0 : f.busy - f.busyOneShot) + (w.oneShots ? 0 : f.busyOneShot);
 
   /**
-   * 切之前把手上跑在 Claude 池上的会话停下，等它们都收场（#59）。登记了、进程还没起来的（还在建树）等它起来再停；
+   * 切之前把手上跑在 Claude 池上的会话停下，等它们都收场（#59）。登记了、进程还没起来的（还在建树）等它起来再停；三段的一段
+   * 选定了路由、预占着名额还没开跑的（#757，库里 startedAt 为空的那几行）一样等：它们一登记、下一圈就停得下。
    * 排队很久还没起来的、库里还开着可这个工人手上没有的（上一轮工人留下的，起来时已经收掉了），都不是在跑的进程，不等。
    * 交回这一次叫停的会话；等不齐交回原因。
    */
@@ -159,7 +160,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       for (const id of sessions.stop(poolIds, why)) stopped.add(id);
       const live = new Set(sessions.live(poolIds));
       const now = clock().getTime();
-      const starting = (await openOrgRuns(w.db)).filter(
+      const starting = (await openOrgRuns(w.db, new Date(now))).filter(
         (r) => r.startedAt === null && !live.has(r.runId) && now - r.queuedAt.getTime() < ORG_STARTING_MAX_MS,
       );
       if (live.size === 0 && starting.length === 0) return { stopped: [...stopped] };

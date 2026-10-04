@@ -76,6 +76,10 @@ interface Rig {
   dir: string;
   recorded: RunRecord[];
   started: RunStart[];
+  /** 每次开跑带给 runs.start 的预占编号（没带是 undefined）。 */
+  startedWith: (string | undefined)[];
+  /** 收场时放掉的预占编号。 */
+  released: string[];
   specs: HostRunSpec[];
   run: ReturnType<typeof createRunSegment>;
   input: (over?: Partial<RunSegmentInput>) => RunSegmentInput;
@@ -95,6 +99,8 @@ function rig(
   const dir = ft.trees.treeFor(REPO, BRANCH);
   const recorded: RunRecord[] = [];
   const started: RunStart[] = [];
+  const startedWith: (string | undefined)[] = [];
+  const released: string[] = [];
   const specs: HostRunSpec[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -132,11 +138,17 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
-      async start(r) {
+      async start(r, options) {
         started.push(r);
+        startedWith.push(options?.reservationId);
       },
       async record(r) {
         recorded.push(r);
+      },
+    },
+    reservations: {
+      async release(id) {
+        released.push(id);
       },
     },
     runsDir: join(sub, 'runs'),
@@ -169,7 +181,7 @@ function rig(
     timeoutMinutes: 5,
     ...over,
   });
-  return { m, ft, dir, recorded, started, specs, run, input };
+  return { m, ft, dir, recorded, started, startedWith, released, specs, run, input };
 }
 
 /** 假会话干活：在树里写个文件并提交。 */

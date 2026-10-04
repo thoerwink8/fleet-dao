@@ -15,6 +15,9 @@
 //   开跑那一行写不进 runs（#157，one-shot 不起会话）抛 SEGMENT_RUNS_UNWRITABLE，可以重试：是库一时不通，不是配置。
 // - runs 里这一段记到这张单名下（#216）：tasks.id、单号、派工档、工作流编号（和起工作流、驾驶舱读的是同一个 taskWorkflowId）、
 //   分支，开了 PR 的轮次再带 PR 号；记账的字段对不上 runs 的约束，one-shot 不起会话（BAD_RUN_INPUT，按起不来处理）。
+// - 选路时预占的池的名额（input.route.reservationId，#757）：开跑那一行写进去时 runs 那边换掉；没开跑就收场的（路由用不了、
+//   建树失败、内存一直放不下、被叫停、切号停下）收场时在这里放掉，不让池一直显得满。放不掉只记日志：预占最多占
+//   RESERVATION_TTL_MS，到点自己不算。开跑时名额已经没了（预占过期、空位给了别的单）抛 SEGMENT_NO_SLOT，可以重试：重新选路就行。
 // - one-shot 的落盘目录（brief.txt、stdout.txt……）24 小时后由这里顺手清；清不掉只记日志。
 
 import { randomUUID } from 'node:crypto';
@@ -31,12 +34,19 @@ import { manualBriefOf } from '../runner/task-brief.ts';
 import type { RunSegmentInput, RunSegmentResult } from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
+import type { SegmentReservations } from './runs-writer.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
 
 /** 内存放不下时最多等多久（毫秒）、多久再试一次。 */
 export const ADMISSION_WAIT_MS = 10 * 60_000;
 export const ADMISSION_POLL_MS = 30_000;
+/**
+ * 选路给一段预占的池的名额最多占多久（#757，选路时照它写 pool_reservations.expires_at）：要盖住选完路到开跑之间的建树、等内存
+ * （最多 ADMISSION_WAIT_MS），再给排活动、建树留 10 分钟。卡得比这还久就让出来，别的单派得进去；这一段后来真开跑了，
+ * 开跑时按那时的空位重新排，满了不起（NO_SLOT）。
+ */
+export const RESERVATION_TTL_MS = ADMISSION_WAIT_MS + 10 * 60_000;
 /** 会话跑着时多久报一次活着（远小于心跳超时）。 */
 export const SEGMENT_HEARTBEAT_MS = 15_000;
 
@@ -44,6 +54,8 @@ export interface RunSegmentDeps {
   tree: SegmentTreeDeps;
   spawner: SegmentSpawnerDeps;
   runs: RunsWriter;
+  /** 选路时预占的名额（#757）：没开跑就收场的这一段在收场时放掉（runs-writer.ts 的 realReservations）。 */
+  reservations: SegmentReservations;
   memoryAdmission?: MemoryAdmissionDeps;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
@@ -120,21 +132,38 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
   const log = deps.log ?? (() => undefined);
   const spawner = hostSegmentSpawner(deps.spawner);
 
-  const runSegment = async (input: RunSegmentInput, ctx: PortContext): Promise<RunSegmentResult> => {
-    ctx.heartbeat();
-    // 1. 路由 → 会话用户（树要归它）。查不到、没接上都是配置问题，重试没用。
-    let routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>;
+  /** 放掉选路时预占的名额：开跑了的已经换成开跑那一行，放一次什么都不做。放不掉只记日志（到点自己过期）。 */
+  const releaseReservation = async (reservationId: string | undefined) => {
+    if (reservationId === undefined) return;
     try {
-      routeInfo = await resolveSegmentRoute(deps.spawner, input.route.routeId);
+      await deps.reservations.release(reservationId);
     } catch (error) {
-      throw new PortError('SEGMENT_ROUTE_UNUSABLE', message(error), { retryable: false });
+      log('选路时预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
+        reservationId,
+        error: message(error),
+      });
     }
-    // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
-    const ticket = deps.sessions?.enter({ poolId: routeInfo.route.poolId });
+  };
+
+  const runSegment = async (input: RunSegmentInput, ctx: PortContext): Promise<RunSegmentResult> => {
     try {
-      return await run(input, ctx, routeInfo, ticket);
+      ctx.heartbeat();
+      // 1. 路由 → 会话用户（树要归它）。查不到、没接上都是配置问题，重试没用。
+      let routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>;
+      try {
+        routeInfo = await resolveSegmentRoute(deps.spawner, input.route.routeId);
+      } catch (error) {
+        throw new PortError('SEGMENT_ROUTE_UNUSABLE', message(error), { retryable: false });
+      }
+      // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
+      const ticket = deps.sessions?.enter({ poolId: routeInfo.route.poolId });
+      try {
+        return await run(input, ctx, routeInfo, ticket);
+      } finally {
+        ticket?.leave();
+      }
     } finally {
-      ticket?.leave();
+      await releaseReservation(input.route.reservationId);
     }
   };
 
@@ -194,6 +223,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               timeoutMinutes: input.timeoutMinutes,
               routeId: input.route.routeId,
               effort: input.tier.effort,
+              ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
             },
             {
               spawn: (cmd) => spawner({ ...cmd, signal: AbortSignal.any([cmd.signal, stopSignal]) }),
@@ -209,6 +239,10 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
           if (error instanceof OneShotError && error.code === 'RUN_START_FAILED') {
             // 库一时写不进：会话没起，过一会儿再来就行
             throw new PortError('SEGMENT_RUNS_UNWRITABLE', error.message, { retryable: true });
+          }
+          if (error instanceof OneShotError && error.code === 'NO_SLOT') {
+            // 预占的名额过期了、空位已经给了别的单：会话没起，重新选路就行（不是库写不进）
+            throw new PortError('SEGMENT_NO_SLOT', error.message, { retryable: true });
           }
           if (error instanceof OneShotError) {
             throw new PortError('SEGMENT_SPAWN_FAILED', error.message, { retryable: false });

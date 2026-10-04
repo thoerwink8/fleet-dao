@@ -139,6 +139,10 @@ function rig(
   const specs: HostRunSpec[] = [];
   const recorded: RunRecord[] = [];
   const started: RunStart[] = [];
+  /** 每次开跑带给 runs.start 的预占编号（没带是 undefined）。 */
+  const startedWith: (string | undefined)[] = [];
+  /** 收场时放掉的预占编号。 */
+  const released: string[] = [];
   const asked: PickRouteInput[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -195,11 +199,17 @@ function rig(
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     },
     runs: {
-      async start(r) {
+      async start(r, options) {
         started.push(r);
+        startedWith.push(options?.reservationId);
       },
       async record(r) {
         recorded.push(r);
+      },
+    },
+    reservations: {
+      async release(id) {
+        released.push(id);
       },
     },
     runsDir: join(sub, 'runs'),
@@ -225,7 +235,7 @@ function rig(
     round: 1,
     ...over,
   });
-  return { run, input, ft, posted, specs, recorded, started, asked };
+  return { run, input, ft, posted, specs, recorded, started, startedWith, released, asked };
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
