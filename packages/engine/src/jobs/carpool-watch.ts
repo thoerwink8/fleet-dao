@@ -8,7 +8,13 @@
 // - 读不到、认不出明确失败（读数记成 ok:false 带原因，进账本），不当成「没事」：连着两次没读成报警（#76 同一个规矩），Key 失效、回包认不出
 //   当场报；读成了自己撤。
 // - 什么都不用判的时候（挂着拼车、没有恢复条件、没到点读）整轮不碰切号，不白起 reclaude org list。
-import type { OrgKind, ScheduleOutcome } from '@fleet-dao/shared';
+import {
+  type BurnEstimate,
+  type BurnRead,
+  estimateBurn,
+  type OrgKind,
+  type ScheduleOutcome,
+} from '@fleet-dao/shared';
 import type { CarpoolWatchRun } from '../contract.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { CarpoolApiRead } from './carpool-outage.ts';
@@ -40,6 +46,8 @@ export interface WatchPolicy {
   hotRemaining: number;
   /** 离预计恢复时刻不到这么久（或已经过了）算紧。 */
   hotBeforeResetMs: number;
+  /** 挂着拼车、照最近的烧速预计不到这么多分钟用满算紧（和「剩不到 25%」是或的关系，哪个先到算哪个）。 */
+  hotBurnMinutes: number;
   /** 连着这么多次没读成才报警（Key 失效、回包认不出当场报）。 */
   alertAfterFailures: number;
 }
@@ -50,6 +58,7 @@ export const DEFAULT_WATCH_POLICY: Readonly<WatchPolicy> = Object.freeze({
   failBackoffMs: [1 * MIN, 2 * MIN, 5 * MIN],
   hotRemaining: 0.25,
   hotBeforeResetMs: 15 * MIN,
+  hotBurnMinutes: 20,
   alertAfterFailures: 2,
 });
 
@@ -61,6 +70,45 @@ export function trailingFailures(ledger: OrgLedger): number {
     n += 1;
   }
   return n;
+}
+
+/** 连着失败 fails 次之后下一次要等多久（1 → 2 → 5 分钟，封顶）。fails 为 0 不退避。 */
+export function backoffMsFor(fails: number, policy: WatchPolicy = DEFAULT_WATCH_POLICY): number {
+  if (fails <= 0) return 0;
+  return policy.failBackoffMs[Math.min(fails - 1, policy.failBackoffMs.length - 1)] ?? policy.baseMs;
+}
+
+/**
+ * 现在是不是在退避期：末尾连着读失败，且最近一次失败离现在还没到退避的间隔。退避期里谁都不许再砸接口——定时盯读（readSchedule）、
+ * 被拒当场判、切号前后各读一次（real/org-switch.ts）都看它；这时读不到按「读不到」办：不当拼车能用、也不当额度满。
+ * 账本里的读数不按时间排好的不用管：withRead 入库时已按发请求的时刻排好。
+ */
+export function readBackoff(
+  ledger: OrgLedger,
+  now: Date,
+  policy: WatchPolicy = DEFAULT_WATCH_POLICY,
+): { active: false } | { active: true; until: Date; fails: number } {
+  const fails = trailingFailures(ledger);
+  const last = ledger.reads.at(-1);
+  if (fails === 0 || !last) return { active: false };
+  const until = new Date(last.requestedAt.getTime() + backoffMsFor(fails, policy));
+  return now.getTime() < until.getTime() ? { active: true, until, fails } : { active: false };
+}
+
+/** 账本里最近这些读数转成烧速要的样本（读成了、有额度的才算）。 */
+export function burnOfLedger(ledger: OrgLedger, now: Date): BurnEstimate {
+  const samples: BurnRead[] = [];
+  for (const r of ledger.reads) {
+    if (!r.ok || !r.quota) continue;
+    samples.push({
+      requestedAt: r.requestedAt,
+      serverDate: r.serverDate,
+      ageSeconds: r.ageSeconds,
+      usedUsd: r.quota.usedUsd,
+      limitUsd: r.quota.limitUsd,
+    });
+  }
+  return estimateBurn(samples, now);
 }
 
 /**
@@ -79,7 +127,7 @@ export function readSchedule(
   let everyMs = policy.baseMs;
   let why = '平时 5 分钟一次';
   if (fails > 0) {
-    everyMs = policy.failBackoffMs[Math.min(fails - 1, policy.failBackoffMs.length - 1)] ?? policy.baseMs;
+    everyMs = backoffMsFor(fails, policy);
     why = `连着 ${fails} 次没读成，退避`;
   } else {
     const hot = hotReason(ledger, live, now, policy);
@@ -110,6 +158,11 @@ function hotReason(ledger: OrgLedger, live: LiveOrgReading, now: Date, policy: W
       1 - q.usedUsd / q.limitUsd < policy.hotRemaining
     ) {
       return `本人额度剩不到 ${Math.round(policy.hotRemaining * 100)}%`;
+    }
+    // 剩得还多、可烧得快：照最近的烧速预计 20 分钟内用满也提到 1 分钟一次。算不出（读数少、间隔不合理、花费为负）不提，不拿猜的数定
+    const burn = burnOfLedger(ledger, now);
+    if (burn.state === 'known' && burn.minutesLeft !== null && burn.minutesLeft <= policy.hotBurnMinutes) {
+      return `照现在的烧速约 ${Math.ceil(burn.minutesLeft)} 分钟后用满（不到 ${policy.hotBurnMinutes} 分钟）`;
     }
   }
   return null;
