@@ -291,9 +291,10 @@ export default function LoginPage() {
           登录后回到 <span className="num">{next}</span>
         </p>
         {passwordReady ? (
-          <p className="mt-2 text-center text-xs text-muted-foreground">
-            还没设过账密？先用飞书登录，到「设置 →
-            账密登录」里设第一次；飞书进不去时，请管理员在服务器上设（运维文档「账密登录」一节）。
+          <p className="mx-auto mt-2 max-w-xs text-center text-xs text-balance text-muted-foreground">
+            {
+              '还没设过账密？先用飞书登录，到「设置 → 账密登录」里设第一次。飞书进不去时，请管理员在服务器上设。'
+            }
           </p>
         ) : null}
         {/* 演示版是另一个单页（假数据、不用登录），地址由构建配置给（FLEET_DEMO_URL）：整页跳过去，不走站内路由。 */}

@@ -67,6 +67,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
   const origin = opts.origin ?? '';
   const doFetch = opts.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
   let csrf: string | undefined;
+  // 改密码会让后端把这个人所有旧会话作废、只在 PUT 的响应里给这一处换新 Cookie（api/src/credentials.ts）。
+  // 改的这一下正在路上、或刚改完时，页面上别的在途请求（刷新、推送触发的重拉）带着旧 Cookie，回来就是 401：
+  // 那不是「登录过期」，不能因此把人踢去登录页（页面上的提示和刚填的东西全丢）。passwordChanges = 正在改的个数，
+  // sessionEpoch = 已经改成功几次；请求开始时任一不是零 / 之后变了，它回来的 401 就当作旧 Cookie 的尾巴。
+  let passwordChanges = 0;
+  let sessionEpoch = 0;
 
   async function send<S extends z.ZodType>(
     method: string,
@@ -74,6 +80,8 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     schema: S | null,
     { body, csrf: withCsrf = method !== 'GET' }: SendOptions = {},
   ): Promise<z.output<S>> {
+    const epochAtStart = sessionEpoch;
+    const changingAtStart = passwordChanges > 0;
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (withCsrf) {
@@ -101,11 +109,17 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         : new ApiError(res.status, `http_${res.status}`, `后端返回 ${res.status}`);
       // 401 + 这两个 code 是「会话好好的，只是密码输错了」（登录页的账密、设置页的当前密码）：不是登录过期，
       // 不能触发跳登录页——否则设置页输错当前密码会整页跳走，错误提示根本看不到。
-      if (res.status === 401 && !PASSWORD_CHECK_CODES.has(err.code)) opts.onUnauthorized?.();
+      const oldCookieTail = changingAtStart || passwordChanges > 0 || epochAtStart !== sessionEpoch;
+      if (res.status === 401 && !PASSWORD_CHECK_CODES.has(err.code) && !oldCookieTail)
+        opts.onUnauthorized?.();
       if (err.code === 'csrf_token') csrf = undefined;
       throw err;
     }
-    if (!schema) return undefined as z.output<S>;
+    if (!schema) {
+      // 204 这类没有响应体的成功也把（空的）响应体读完：不读的话，浏览器在页面随后的重拉里会把这一条标成「请求中断」（ERR_ABORTED）
+      await res.text().catch(() => undefined);
+      return undefined as z.output<S>;
+    }
     const json: unknown = await res.json();
     const parsed = schema.safeParse(json);
     if (!parsed.success) {
@@ -165,9 +179,15 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     },
     credentials: () => send('GET', apiUrl(R.credentials.path), R.credentials.response),
     async updateCredentials(body) {
-      await send('PUT', apiUrl(R.updateCredentials.path), null, {
-        body: UpdateCredentialsRequest.parse(body),
-      });
+      const parsed = UpdateCredentialsRequest.parse(body);
+      const changesPassword = parsed.newPassword !== undefined;
+      if (changesPassword) passwordChanges += 1;
+      try {
+        await send('PUT', apiUrl(R.updateCredentials.path), null, { body: parsed });
+        if (changesPassword) sessionEpoch += 1;
+      } finally {
+        if (changesPassword) passwordChanges -= 1;
+      }
     },
     async logout() {
       await send('POST', authUrl(AuthRoutes.logout.path), null);

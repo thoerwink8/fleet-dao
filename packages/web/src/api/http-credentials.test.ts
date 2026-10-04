@@ -178,3 +178,54 @@ describe('credentials / updateCredentials', () => {
     expect(calls.some((c) => c.method === 'PUT')).toBe(false);
   });
 });
+
+describe('改密码的当口：旧 Cookie 的在途请求回来是 401，不能把人踢去登录页', () => {
+  /** 一个能手动放行的假 fetch：GET /api/repos 挂着等 release，别的立刻答。 */
+  function racing() {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const revoked = () =>
+      new Response(JSON.stringify({ error: { code: 'session_revoked', message: '会话已作废' } }), {
+        status: 401,
+      });
+    const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (method === 'GET' && url === '/api/me') return new Response(JSON.stringify(ME));
+      if (method === 'PUT') return new Response(null, { status: 204 });
+      if (url === '/api/repos') {
+        await held; // 带着旧 Cookie 发出去的读取，等密码改完才回来
+        return revoked();
+      }
+      return revoked();
+    };
+    return { fn, release };
+  }
+
+  test('【故意造出的失败】PUT 改密码已经成功、在途的旧读取才回 401：不调 onUnauthorized；改完以后新发的请求回 401 照跳', async () => {
+    const onUnauthorized = vi.fn();
+    const { fn, release } = racing();
+    const api = createHttpApi({ fetch: fn, onUnauthorized });
+    const stale = api.repos().catch((e: unknown) => e);
+    await api.updateCredentials({ newPassword: 'a-long-new-password', currentPassword: 'old' });
+    release();
+    expect(await stale).toMatchObject({ status: 401, code: 'session_revoked' });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    // 改完以后才发的请求：用的是新 Cookie，再回 401 就是真的登录过期
+    await api.jobs().catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  test('只改用户名（不动密码、会话没作废）：在途请求回 401 照常算登录过期', async () => {
+    const onUnauthorized = vi.fn();
+    const { fn, release } = racing();
+    const api = createHttpApi({ fetch: fn, onUnauthorized });
+    const stale = api.repos().catch((e: unknown) => e);
+    await api.updateCredentials({ username: 'founder2', currentPassword: 'old' });
+    release();
+    await stale;
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+});

@@ -449,16 +449,17 @@ export function useUpdateSetting() {
   });
 }
 
-/** 设 / 改账密：不管成不成都重拉现状；成了操作记录里多一条（credentials.set / credentials.change）。 */
+/**
+ * 设 / 改账密：成了操作记录里多一条（credentials.set / credentials.change）。不管成不成，所有查询都重拉一遍：
+ * 改密码时页面上在途的读取带的是旧 Cookie、回来是 401（http.ts 已不把它们当登录过期），这些查询要用新 Cookie 再读一次，
+ * 不然页面上留着一堆「没读成」。
+ */
 export function useUpdateCredentials() {
   const api = useApi();
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: UpdateCredentialsBody) => api.updateCredentials(body),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.credentials });
-      qc.invalidateQueries({ queryKey: ['audit'] });
-    },
+    onSettled: () => qc.invalidateQueries(),
   });
 }
 

@@ -82,7 +82,8 @@ test.describe('设置页：账密登录', () => {
       await expect(note).toContainText('作废');
       await shot(page, '10-设置-改完密码');
 
-      // 这个浏览器还登着（会话在这一处换了新 Cookie）
+      // 这个浏览器还登着（会话在这一处换了新 Cookie）。先等请求都落地再刷新，别把还没收尾的那一下 PUT 当成失败请求
+      await page.waitForLoadState('networkidle');
       await page.reload();
       await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
       expect(((await api.get('/api/me')) as { user: { displayName: string } }).user.displayName).toBe(
