@@ -1,6 +1,6 @@
 // 路由两层「这一层现在活着吗」的存法（#574，specs/509 方案第八节）：不另存一列「活着」——那一列会和事实各过各的，
 // 层级一深就变成看着整齐、一条都派不出去（#293 断 47 分钟就是这个形状）。活着由三件事现算，每件事的来源写死在这里；
-// 读成每一层的结论在 routing-layers.ts（驾驶舱看它），选路按同一份候选事实挑（queries/engine.ts 的 routeFactsForPurpose）。
+// 读成每一层的结论在 routing-layers.ts（驾驶舱看它），选路按同一份候选事实挑（queries/engine-route-facts.ts 的 routeFactsForPurpose）。
 //
 // 改这里之前必须知道：
 // - 三件事一个都不能缺：接得上、额度够、没被禁令挡。缺一件，「活着」就是猜的。

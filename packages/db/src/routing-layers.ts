@@ -1,5 +1,5 @@
 // 路由两层的读法（#574）：把 routing_purpose_models / routing_catalog 读成「用途 → 模型 → 路由」，每一层写明现在活着吗、为什么。
-// 选路（queries/engine.ts 的 routeFactsForPurpose）、驾驶舱、探针都按这两张表：先后是用途下模型的先后，再是模型下路由的先后。
+// 选路（queries/engine-route-facts.ts 的 routeFactsForPurpose）、驾驶舱、探针都按这两张表：先后是用途下模型的先后，再是模型下路由的先后。
 // 「接得上、额度够、没被禁令挡」不在这里再判一遍：路由一条条交给 evaluateRoutes（「为什么不能用」只有这一处判法），再由
 // livenessOf 读成三件事。
 // 空的一层是 dead（整层没人，派不出去），不是 live；没配的用途同理，写在 problems 里。
