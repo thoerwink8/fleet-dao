@@ -29,6 +29,8 @@ export interface InboundMessage {
   threadId?: string | undefined;
   /** 毫秒时间戳（飞书的 create_time）；事件里没带是 0。 */
   createTime: number;
+  /** 改过的时刻（飞书的 update_time，只补漏翻历史时才有：SDK 没有「消息被改」的事件）；没改过是 undefined。 */
+  editedAt?: number | undefined;
   /** 机器人发的（包括自己）：不理。 */
   fromBot: boolean;
 }
@@ -86,6 +88,35 @@ export interface FeishuPort {
   updateCard(messageId: string, card: Card): Promise<void>;
   /** 群置顶。 */
   pin(chatId: string, messageId: string): Promise<void>;
+  /** 撤掉自己加过的表情（补漏把「没记成」换成正常）。 */
+  unreact(messageId: string, reactionId: string): Promise<void>;
+  /** 翻一个会话的历史消息（补漏用）：按发出时刻从早到晚，只回 sinceMs 之后的。 */
+  history(req: HistoryRequest): Promise<HistoryPage>;
+}
+
+/** 翻历史：容器是会话，或（在话题里的）话题。 */
+export interface HistoryRequest {
+  /** 会话编号，或要翻的话题编号（container:'thread' 时）。 */
+  containerId: string;
+  /** chat = 按会话翻（话题里的回复也在里面）；thread = 只翻这一个话题（飞书按会话翻只给话题的根消息）。 */
+  container: 'chat' | 'thread';
+  /** 这个会话是私聊还是群：历史接口回的行里没有会话种类（飞书的事件里有），由调用方给。 */
+  chatKind: InboundMessage['chatType'];
+  /** 从这个时刻（毫秒，含）往后翻。 */
+  sinceMs: number;
+  /** 一页几条。 */
+  pageSize?: number;
+  /** 翻下一页的凭据（上一页给的）。 */
+  pageToken?: string;
+}
+
+/** 一页历史：认得出的一条一条（认不出的跳过并计数），按时间从早到晚。 */
+export interface HistoryPage {
+  messages: InboundMessage[];
+  /** 还有更早/更新的没翻完，用这个再翻一页。 */
+  nextPageToken?: string | undefined;
+  /** 飞书回的行里认不出的（缺编号、缺发出时刻、缺原始内容）：不悄悄少算，报出来。 */
+  unrecognized: number;
 }
 
 /**

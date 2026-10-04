@@ -71,6 +71,8 @@ export interface Watch {
   acked(ms: number | null): void;
   /** 收原话的一句处理完：后端存下了没有。 */
   intake(stored: boolean): void;
+  /** 补漏走了一轮：补上了几条（0 = 查了但没有要补的；断了话它自己也在日志里说）。 */
+  backfill(filled: number, failed: number): void;
   /** 确认卡超过 10 秒，计一次。 */
   cardSlow(): void;
   /** 看一次要不要报警、报「通了」（定时器调；测试直接调）。同一时刻只跑一个。 */
@@ -117,6 +119,7 @@ function freshWindow(at: number) {
     board: { ok: 0, failed: 0, totalMs: 0, maxMs: 0 },
     intents: { ok: 0, failed: 0 },
     intake: { stored: 0, failed: 0 },
+    backfill: { rounds: 0, filled: 0, failed: 0 },
     messages: {
       count: 0,
       noAck: 0,
@@ -344,6 +347,12 @@ export function createWatch(deps: WatchDeps): Watch {
       else win.intake.failed += 1;
     },
 
+    backfill(filled, failed) {
+      win.backfill.rounds += 1;
+      win.backfill.filled += filled;
+      win.backfill.failed += failed;
+    },
+
     cardSlow() {
       win.messages.cardSlow += 1;
     },
@@ -389,6 +398,7 @@ export function createWatch(deps: WatchDeps): Watch {
         },
         intents: { ok: w.intents.ok, failed: w.intents.failed, lastOkAt: iso(loops.intents.lastOkAt) },
         intake: { stored: w.intake.stored, failed: w.intake.failed },
+        backfill: { rounds: w.backfill.rounds, filled: w.backfill.filled, failed: w.backfill.failed },
         messages: {
           count: w.messages.count,
           ackAvgMs: avg(w.messages.totalMs, acked),

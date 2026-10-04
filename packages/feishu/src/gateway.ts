@@ -46,12 +46,24 @@ export interface Timing {
   intakeMs: number;
   /** 长轮询待推送、意图卡一次最多等几秒。 */
   outboxWaitSeconds: number;
+  /** 补漏：一轮里一个会话最多翻几页历史（一页 HISTORY_PAGE_SIZE 条）；翻不完下一轮接着翻。 */
+  backfillPages: number;
+  /** 补漏没走通（后端连不上、飞书翻不动）之后隔多久再试。 */
+  backfillRetryMs: number;
 }
 
 export const DEFAULT_TIMING: Timing = {
   intakeMs: 5_000,
   outboxWaitSeconds: 25,
+  backfillPages: 5,
+  backfillRetryMs: 60_000,
 };
+
+/** 补漏时给后端游标留的余量：游标那一刻上的那条可能正好是边界，往前多翻一点不会重（同一条再来后端认重放）。 */
+const CURSOR_SLACK_MS = 5 * 60_000;
+
+/** 一个会话最多补多久以前的话：网关重启、长期断线时，翻一小时前的老账没有意义。 */
+export const BACKFILL_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /** 没存成、等补漏的会话。 */
 export interface MissedChat {
@@ -107,6 +119,8 @@ export interface Gateway {
     marks(): NotStoredMark[];
     recalls(): IntakeRecall[];
   };
+  /** 补漏一轮（起来时、后端从连不上变连得上时、定时；测试直接调）。同时刻只跑一轮。 */
+  backfill(reason: string): Promise<void>;
   readonly stats: Readonly<Record<string, number>>;
   readonly board: Board;
   readonly outbox: Outbox;
@@ -189,6 +203,8 @@ export function createGateway(o: GatewayOptions): Gateway {
   const declined = new Lru<string, string>(1000);
   /** 「已停用」每张旧卡、每个点菜单的人每天只说一次。 */
   const toldDisabled = new Lru<string, string>(1000);
+  /** 上一句原话是不是没存下（后端连不上、超时、5xx）：连着没存下就不每句都触发一次补漏。 */
+  let wasDown = false;
 
   const as = (f: Founder): Acting => ({ openId: f.openId });
 
@@ -288,11 +304,15 @@ export function createGateway(o: GatewayOptions): Gateway {
       outcome = r.status;
       intentSeq = r.intentSeq;
       watch.intake(true);
+      // 后端从连不上变连得上：手上这句子存下了，把之前没存成的也补上
+      if (wasDown && missedChats.size > 0) void backfill('recovered');
+      wasDown = false;
     } catch (err) {
       watch.intake(false);
       // 连不上、超时、后端出错、事件残缺：飞书那边原话还在，补漏能补上；
       // 被拒（4xx）、后端回的认不出、请求过不了约定的，再送也一样，只记原因
       const later = isTransient(err) || err instanceof IntakeShapeError;
+      if (isTransient(err)) wasDown = true;
       count(later ? 'intake_failed' : 'intake_refused');
       log.error(later ? '原话没存成：记下这个会话要补漏' : '原话后端没收下（再送也一样，不补漏）', {
         messageId: msg.messageId,
@@ -355,6 +375,218 @@ export function createGateway(o: GatewayOptions): Gateway {
     }
   }
 
+  // —— 补漏（#553 第 4 条）：没存成的会话，从后端给的游标往后翻飞书历史，按原顺序补送 ——
+
+  /**
+   * 翻一个会话（和它里面没存成的那几个话题）的历史，把认得出的一条条补送给后端。
+   * 返回补上了几条、没补成几条（没补成的不动它的「没记成」标记，下一轮再来）。
+   */
+  async function backfillChat(
+    cursor: { chatId: string; chatKind: MissedChat['chatKind']; sinceMs: number; threadIds: string[] },
+  ): Promise<{ filled: number; failed: number }> {
+    let filled = 0;
+    let failed = 0;
+    // 一个会话翻一遍，里面的话题再各翻一遍（飞书按会话翻只给话题的根消息，话题里的回复要按话题翻）
+    const containers: Array<{ id: string; container: 'chat' | 'thread' }> = [
+      { id: cursor.chatId, container: 'chat' },
+      ...cursor.threadIds.map((id) => ({ id, container: 'thread' as const })),
+    ];
+    for (const c of containers) {
+      let pageToken: string | undefined;
+      for (let page = 0; page < timing.backfillPages; page++) {
+        const got = await o.feishu.history({
+          containerId: c.id,
+          container: c.container,
+          chatKind: cursor.chatKind,
+          sinceMs: cursor.sinceMs,
+          ...(pageToken === undefined ? {} : { pageToken }),
+        });
+        if (got.unrecognized > 0) {
+          count('backfill_unrecognized');
+          log.error('补漏翻到的历史里有认不出的行：跳过这些', {
+            chatId: c.id,
+            container: c.container,
+            count: got.unrecognized,
+          });
+        }
+        // 按发出时刻从早到晚补送，后端按编号认重放
+        for (const msg of [...got.messages].sort((a, b) => a.createTime - b.createTime)) {
+          const one = await backfillOne(msg, cursor.chatKind);
+          if (one === 'filled') filled += 1;
+          else if (one === 'failed') failed += 1;
+        }
+        if (got.nextPageToken === undefined) break;
+        pageToken = got.nextPageToken;
+        if (page + 1 === timing.backfillPages) {
+          // 这一轮翻不完：下一轮接着翻（until 之后，游标由「现在到哪儿」重新算）
+          count('backfill_page_limit');
+          log.warn('补漏一轮翻不完，下一轮接着翻', {
+            chatId: c.id,
+            container: c.container,
+            since: new Date(cursor.sinceMs).toISOString(),
+          });
+        }
+      }
+    }
+    return { filled, failed };
+  }
+
+  /** 补一条：认得出、是创始人的、还没存下的，就送；送成了撤掉那句上的「没记成」，返回结果。 */
+  async function backfillOne(
+    msg: InboundMessage,
+    chatKind: MissedChat['chatKind'],
+  ): Promise<'filled' | 'failed' | 'skipped'> {
+    if (msg.fromBot) return 'skipped';
+    if (!allowedGroups.has(msg.chatId) && chatKind === 'group') return 'skipped';
+    const founder = founders.get(msg.senderId);
+    if (!founder) return 'skipped';
+    let body: ReturnType<typeof toIntake>;
+    try {
+      body = toIntake(msg, 'backfill', { editedAt: msg.editedAt });
+    } catch (err) {
+      // 历史里这一行缺东西：不拿空顶，记下来（下一次翻到还是这样，就还是补不上）
+      count('backfill_shape');
+      log.error('补漏翻到的这条转不成原话（缺发出时刻、类型或原始内容）', {
+        messageId: msg.messageId,
+        chatId: msg.chatId,
+        error: clip(String(err), 300),
+      });
+      return 'skipped';
+    }
+    try {
+      const r = await o.backend.intake(as(founder), body, { timeoutMs: timing.intakeMs });
+      count(`backfill_${r.status}`);
+      const mark = notStoredMarks.get(msg.messageId);
+      if (mark) {
+        // 补上了：把「没记成」撤掉（撤不掉只记一笔，下一轮来这条是重放，不会再撤）
+        await clearNotStored(mark);
+        notStoredMarks.delete(msg.messageId);
+      }
+      return 'filled';
+    } catch (err) {
+      count('backfill_failed');
+      log.error('补漏这一条没补上', {
+        messageId: msg.messageId,
+        chatId: msg.chatId,
+        ...(err instanceof BackendError ? { kind: err.kind, status: err.status, code: err.code } : {}),
+        error: clip(String(err), 300),
+      });
+      return 'failed';
+    }
+  }
+
+  /** 撤掉那双「没记成」的表情。撤不掉（飞书没回 reaction_id、消息撤回了、接口出错）只记一笔。 */
+  async function clearNotStored(mark: NotStoredMark): Promise<void> {
+    if (!mark.reactionId) {
+      count('not_stored_clear_impossible');
+      log.warn('「没记成」撤不掉：飞书当时没回 reaction_id', { messageId: mark.messageId });
+      return;
+    }
+    try {
+      await o.feishu.unreact(mark.messageId, mark.reactionId);
+      count('not_stored_cleared');
+    } catch (err) {
+      count('not_stored_clear_failed');
+      log.warn('「没记成」没撤掉（那条消息可能撤回了）', {
+        messageId: mark.messageId,
+        error: clip(String(err), 300),
+      });
+    }
+  }
+
+  let backfillRun: Promise<void> | null = null;
+  let backfillFailedAt: number | null = null;
+
+  /**
+   * 补漏一轮：问后端每个会话存到哪了、把没存成的那几句翻回来补上、顺带再补一次没转成的撤回。
+   * 同时刻只跑一轮；上一轮没走通的话，退避一段时间再跑。后端连不上就自己记一笔，下一轮再来。
+   */
+  function backfill(reason: string): Promise<void> {
+    if (backfillRun) return backfillRun;
+    if (backfillFailedAt !== null && now() - backfillFailedAt < timing.backfillRetryMs) return Promise.resolve();
+    backfillRun = (async () => {
+      try {
+        await runBackfill(reason);
+        backfillFailedAt = null;
+      } catch (err) {
+        backfillFailedAt = now();
+        count('backfill_failed_round');
+        log.error('补漏这一轮没走通，过一阵再试', {
+          reason,
+          error: clip(String(err), 300),
+        });
+      } finally {
+        backfillRun = null;
+      }
+    })();
+    return backfillRun;
+  }
+
+  async function runBackfill(reason: string): Promise<void> {
+    const startedAt = now();
+    const cursors = await o.backend.intakeCursors(undefined, { timeoutMs: timing.intakeMs });
+    const byChat = new Map(cursors.chats.filter((c) => c.known).map((c) => [c.chatId, c]));
+
+    // 要补的会话：没存成过的（missedChats），全部按后端游标往后翻（后端知道最晚存到哪）
+    const wanted = [...missedChats.values()].map((chat) => ({ chat, cursor: byChat.get(chat.chatId) }));
+    // 没存成过、后端也没游标的（第一句就没存下）：从最早那句往前翻，最多翻 BACKFILL_MAX_AGE_MS
+    const floor = startedAt - BACKFILL_MAX_AGE_MS;
+
+    let filled = 0;
+    let failed = 0;
+    for (const { chat, cursor } of wanted) {
+      const sinceMs = Math.max(
+        floor,
+        Math.min(chat.sinceMs, (cursor?.known ? Date.parse(cursor.lastSentAt) - CURSOR_SLACK_MS : chat.sinceMs)),
+      );
+      try {
+        const one = await backfillChat({
+          chatId: chat.chatId,
+          chatKind: chat.chatKind,
+          sinceMs,
+          threadIds: [...chat.threadIds],
+        });
+        filled += one.filled;
+        failed += one.failed;
+        // 补完了这个会话的账：清掉要补漏的标记（没补上的留下，下一轮再来）
+        missedChats.delete(chat.chatId);
+      } catch (err) {
+        failed += 1;
+        count('backfill_chat_failed');
+        log.error('补漏翻这个会话的历史没翻成，下一轮再来', {
+          chatId: chat.chatId,
+          error: clip(String(err), 300),
+        });
+        // 翻不动就留着，下一轮再来；但整轮按没走通算（退避）
+        throw err;
+      }
+    }
+
+    // 没转成的撤回也再转一次
+    let recalls = 0;
+    for (const [messageId, body] of missedRecalls) {
+      try {
+        await o.backend.intakeRecall(body, { timeoutMs: timing.intakeMs });
+        missedRecalls.delete(messageId);
+        recalls += 1;
+      } catch (err) {
+        log.warn('补转撤回没成，下一轮再来', { messageId, error: clip(String(err), 300) });
+      }
+    }
+
+    watch.backfill(filled, failed);
+    if (filled > 0 || failed > 0 || recalls > 0) {
+      log.info('补漏走完一轮', {
+        reason,
+        chats: wanted.length,
+        filled,
+        failed,
+        recalls,
+        ms: now() - startedAt,
+      });
+    }
+  }
+
   // —— 旧卡上的按钮、私聊菜单：都停用了，回一句说清楚 ——
 
   async function buttonDisabled(evt: InboundCardAction): Promise<void> {
@@ -389,6 +621,7 @@ export function createGateway(o: GatewayOptions): Gateway {
   let boardTimer: NodeJS.Timeout | undefined;
   let watchTimer: NodeJS.Timeout | undefined;
   let heartbeatTimer: NodeJS.Timeout | undefined;
+  let backfillTimer: NodeJS.Timeout | undefined;
   let ticking: Promise<void> | null = null;
   let outboxRun: Promise<void> | null = null;
   let intentCardsRun: Promise<void> | null = null;
@@ -483,17 +716,22 @@ export function createGateway(o: GatewayOptions): Gateway {
         .catch((err) => log.error('意图卡循环停了', { error: String(err) }));
       watchTimer = setInterval(() => void watch.check(), watch.limits.checkEveryMs);
       heartbeatTimer = setInterval(() => watch.heartbeat(), watch.limits.heartbeatMs);
+      // 补漏：起来就翻一遍（重启、长连接断过时丢的话补上），之后每隔 backfillRetryMs 看一眼有没有要补的
+      void backfill('start');
+      backfillTimer = setInterval(() => void backfill('tick'), timing.backfillRetryMs);
     },
 
     async stop(drainMs = 20_000) {
       clearInterval(boardTimer);
       clearInterval(watchTimer);
       clearInterval(heartbeatTimer);
+      clearInterval(backfillTimer);
       life.abort();
       await outboxRun;
       await intentCardsRun;
       await ticking;
       await watch.idle();
+      await backfillRun;
       const left = await inflight.drain(drainMs);
       if (left > 0) log.warn('停机时还有活没做完', { left });
       // 停机前把这一段的心跳也写上：重启时不丢最后几分钟的读数
@@ -506,6 +744,7 @@ export function createGateway(o: GatewayOptions): Gateway {
       marks: () => [...notStoredMarks.values()],
       recalls: () => [...missedRecalls.values()],
     },
+    backfill: (reason) => backfill(reason),
     stats,
     board,
     outbox,

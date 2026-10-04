@@ -18,6 +18,8 @@ import {
   type LarkChannel,
   LoggerLevel,
   type NormalizedMessage,
+  normalize,
+  type RawMessageEvent,
 } from '@larksuiteoapi/node-sdk';
 import type { Logger } from './log.ts';
 import {
@@ -73,6 +75,8 @@ export interface Lark {
 
 const MENU_EVENT = 'application.bot.menu_v6';
 const RECALL_EVENT = 'im.message.recalled_v1';
+/** 翻历史一页几条（飞书上限 50；补漏按顺序一页页翻，够用）。 */
+export const HISTORY_PAGE_SIZE = 50;
 
 export function createLark(opts: LarkOptions): Lark {
   const timeouts = { ...FEISHU_TIMEOUTS, ...opts.timeouts };
@@ -213,6 +217,48 @@ export function createLark(opts: LarkOptions): Lark {
         }),
       );
     },
+
+    async unreact(messageId, reactionId) {
+      await api('撤表情回应', () =>
+        client.im.v1.messageReaction.delete({ path: { message_id: messageId, reaction_id: reactionId } }),
+      );
+    },
+
+    async history(req) {
+      const res = await api('翻会话历史', () =>
+        client.im.v1.message.list({
+          params: {
+            container_id_type: req.container === 'thread' ? 'thread' : 'chat',
+            container_id: req.containerId,
+            // 只要这个时刻之后的（含）：飞书按毫秒时间戳过滤
+            start_time: String(Math.floor(req.sinceMs / 1000)),
+            sort_type: 'ByCreateTimeAsc',
+            page_size: req.pageSize ?? HISTORY_PAGE_SIZE,
+            ...(req.pageToken ? { page_token: req.pageToken } : {}),
+          },
+        }),
+      );
+      const items = res.data?.items ?? [];
+      const messages: InboundMessage[] = [];
+      let unrecognized = 0;
+      for (const item of items) {
+        const msg = await toHistoryInbound(item, req.chatKind, channel.botIdentity?.openId);
+        if (msg) messages.push(msg);
+        else {
+          unrecognized += 1;
+          opts.log.warn('历史里有认不出的一行，跳过（缺编号、会话、发出时刻或原始内容）', {
+            messageId: item.message_id ?? null,
+            chatId: item.chat_id ?? null,
+          });
+        }
+      }
+      const hasMore = res.data?.has_more === true && !!res.data?.page_token;
+      return {
+        messages,
+        ...(hasMore ? { nextPageToken: res.data?.page_token } : {}),
+        unrecognized,
+      };
+    },
   };
 
   return {
@@ -288,6 +334,79 @@ export function toRecall(data: unknown): InboundRecall | null {
   const at = typeof d.recall_time === 'string' ? Number(d.recall_time) : Number.NaN;
   if (!Number.isFinite(at) || at <= 0) return null;
   return { messageId: d.message_id, chatId: d.chat_id, recalledAt: at };
+}
+
+/** 飞书「获取会话历史消息」回的一行（只列用得上的；这是别人的接口，字段可缺）。 */
+export interface HistoryItem {
+  message_id?: string | undefined;
+  chat_id?: string | undefined;
+  msg_type?: string | undefined;
+  create_time?: string | number | undefined;
+  update_time?: string | number | undefined;
+  root_id?: string | undefined;
+  parent_id?: string | undefined;
+  thread_id?: string | undefined;
+  body?: { content?: string | undefined } | undefined;
+  sender?: { id?: string | undefined; sender_type?: string | undefined } | undefined;
+  mentions?: Array<{ id?: string | undefined; name?: string | undefined }> | undefined;
+}
+
+/**
+ * 翻历史翻出来的一行 → 一份和事件同形的「原始事件」：飞书的「获取会话历史消息」给的字段比事件少
+ * （没有 chat_type、没有 mentions 的 key、没有归一化后的文字），这里按它给的拼回去，
+ * 再走 SDK 的 normalize + toInbound——两条路（事件、补漏）存下的原话就一个样。
+ */
+function historyEvent(item: HistoryItem, chatKind: InboundMessage['chatType']): unknown {
+  const mentions = (item.mentions ?? []).map((m, i) => ({
+    // 历史接口给的是「这条消息 @了谁」：只用来算「@了机器人没有」、把 @ 写成 @名字，key 怎么排不影响
+    key: `@_user_${i + 1}`,
+    id: { open_id: m.id ?? '', user_id: '', union_id: '' },
+    name: m.name ?? '',
+  }));
+  return {
+    header: { event_type: 'im.message.receive_v1', event_id: `history:${item.message_id ?? ''}` },
+    event: {
+      sender: {
+        sender_id: { open_id: item.sender?.id ?? '', user_id: '', union_id: '' },
+        sender_type: item.sender?.sender_type ?? 'user',
+      },
+      message: {
+        message_id: item.message_id,
+        chat_id: item.chat_id,
+        chat_type: chatKind,
+        message_type: item.msg_type,
+        content: item.body?.content,
+        create_time: String(item.create_time ?? ''),
+        update_time: String(item.update_time ?? ''),
+        root_id: item.root_id,
+        parent_id: item.parent_id,
+        thread_id: item.thread_id,
+        mentions,
+      },
+    },
+  };
+}
+
+/**
+ * 一行历史 → InboundMessage（走和事件同一套归一化）。缺编号、会话、类型、发出时刻、原始内容的，
+ * 认不出（null），由调用方计数——不悄悄少算，也不拿空串顶。
+ */
+export async function toHistoryInbound(
+  item: HistoryItem,
+  chatKind: InboundMessage['chatType'],
+  botOpenId: string | undefined,
+): Promise<InboundMessage | null> {
+  const at = Number(item.create_time);
+  if (!item.message_id || !item.chat_id || !item.msg_type || !Number.isFinite(at) || at <= 0) return null;
+  if (typeof item.body?.content !== 'string' || !item.body.content) return null;
+  const msg = await normalize(historyEvent(item, chatKind) as RawMessageEvent, {
+    botIdentity: { openId: botOpenId ?? '', name: '' },
+    stripBotMentions: true,
+    includeRaw: true,
+  });
+  const inbound = toInbound(msg, botOpenId);
+  const updated = Number(item.update_time);
+  return Number.isFinite(updated) && updated > at ? { ...inbound, editedAt: updated } : inbound;
 }
 
 export function toAction(evt: CardActionEvent): InboundCardAction {
