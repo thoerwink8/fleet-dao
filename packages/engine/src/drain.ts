@@ -11,6 +11,9 @@
 //   只能在这个进程里等，systemd 那头要 KillMode=mixed（停机信号只给主进程；control-group 会把 SIGTERM 发给每个 sudo，sudo 原样
 //   转给会话，会话当场就死——2026-09-27 19:28:51、20:46:26 两次）。TimeoutStopSec 要盖住宽限加收尾（fleet-engine.service，
 //   test/drain.test.ts 核对）。
+// - 会话有两路登记进来：Fusion 老会话在 real/session-launch.ts（startSession），三段的一次性会话（动手、验收）在
+//   real/one-shot-sessions.ts（enter/leave，#957）。少接一路，排空就看不见那一路、会提前放行；到点停会话也是两路各停各的
+//   （real/index.ts 的 stopSessions）。
 // - 这里只管 AI 会话。等 CI、建树这类活动工人停下时照 Temporal 的规矩取消、到新进程上重试，丢不了干过的活。
 
 /**

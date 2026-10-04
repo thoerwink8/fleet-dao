@@ -32,7 +32,7 @@ import type { RunsWriter } from '../runner/not-wired.ts';
 import { OneShotError, type OneShotResult, runOneShot, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import { renderSegmentPrompt } from '../runner/segment-prompt.ts';
 import { manualBriefOf } from '../runner/task-brief.ts';
-import type { RunSegmentInput, RunSegmentResult } from '../task-contract.ts';
+import { type RunSegmentInput, type RunSegmentResult, SEGMENT_STAGE } from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { SegmentReservations } from './runs-writer.ts';
@@ -155,7 +155,11 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         throw new PortError('SEGMENT_ROUTE_UNUSABLE', errMessage(error), { retryable: false });
       }
       // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
-      const ticket = deps.sessions?.enter({ poolId: routeInfo.route.poolId });
+      const ticket = deps.sessions?.enter({
+        poolId: routeInfo.route.poolId,
+        stage: SEGMENT_STAGE.manual,
+        taskId: input.taskId,
+      });
       try {
         return await run(input, ctx, routeInfo, ticket);
       } finally {
@@ -225,7 +229,10 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
             },
             {
-              spawn: (cmd) => spawner({ ...cmd, signal: AbortSignal.any([cmd.signal, stopSignal]) }),
+              spawn: (cmd) => {
+                ticket?.running();
+                return spawner({ ...cmd, signal: AbortSignal.any([cmd.signal, stopSignal]) });
+              },
               ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
               tmpDir: deps.runsDir,
               runs: deps.runs,

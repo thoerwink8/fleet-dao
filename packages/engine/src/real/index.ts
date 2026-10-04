@@ -557,7 +557,9 @@ export function realPortsFromEnv(
     ...(ioProblem ? {} : { ioRoot: config.sessionIoDir }),
   });
   // 三段的一次性会话（动手、验收）的登记：切号照它停下跑在 Claude 池上的那一段，切完任务工作流在原分支上重跑（#59）
-  const oneShots = oneShotSessions();
+  // 同时登记进发布排空的在途清单（#957）：不接 drain，发布排空看不见动手、验收会话，会提前放行、到点也停不到它们
+  // （test/real/one-shot-drain.test.ts 钉着这一行和下面 stopSessions 里的 oneShots.drainStop）
+  const oneShots = oneShotSessions({ ...(extra.drain ? { drain: extra.drain } : {}) });
   // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
   // 先停下、切完接着干（#59：一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上），不等它们跑完
   // #194：被拒当场判、定时盯读接口那一轮也走它（同一把单飞锁）；读接口给切号前现读，切完当场探切过去的池（和路由探针同一份探法）
@@ -691,7 +693,8 @@ export function realPortsFromEnv(
     readRequest: () => readDrainRequest(drainRequestFile(evidence.releasesDir)),
     releaseLockBusy: () => evidence.releaseLockBusy(),
     ownSha: extra.ownSha ?? null,
-    stopSessions: (why) => real.drainStop(why),
+    // 两路一起停：Fusion 的老会话（接着管道的）、三段的一次性会话（动手、验收，#957）
+    stopSessions: (why) => [...real.drainStop(why), ...oneShots.drainStop(why)],
     notify: drainNotifier({ db, machine: config.machine }),
   };
   return {
