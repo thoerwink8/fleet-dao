@@ -8,8 +8,10 @@
 // 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象、autoMode 不是对象/数组不是数组）就不动，报没做成——不当成空的重写。
 // 仓里的源文件读不到、不合规矩（含 bypassPermissions、autoMode 少了 "$defaults"）也报没查成、没做成，不拿空的顶上。
 // 「源文件里写 bypass 拒收」和「机器上自己设的 bypass 保留」是两件事：前者是把「不用问」推给所有机器，后者是这台自己选的做法。
+// 它的 env 只认 ENV_KEYS 登记的键（现在只有子代理默认模型 CLAUDE_CODE_SUBAGENT_MODEL，决定 0017）：写进同一份设置的 env，
+// 仓里的值每次覆盖（同 defaultMode），机器上 env 里别的变量一个不碰；源文件少写、多写不认得的键、值不合规矩都拒收。
 // 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
-// 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode 这一层（不写 autoMode 就整段不管）。
+// 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode、env 这两层（不写就整段不管）。
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
@@ -47,12 +49,42 @@ export interface ListSpec {
   retiredDeny?: string[];
   /** 不写就整段不管 autoMode（Devin 那份没有这一层；写了但仓里没写 autoMode 时是空的两个数组） */
   autoMode?: AutoModeSpec;
+  /** 设置文件 env 里归本脚本管的几项（键 → 值）；不写就整段不管 env（Devin 那份没有这一层） */
+  env?: Record<string, string>;
 }
 
-/** 仓里 agents/config/claude-permissions.json 认出来的样子 */
+/** 仓里 agents/config/claude-permissions.json 认出来的样子：env 必须有（ENV_KEYS 里的键一个不能少） */
 export interface PermSpec extends ListSpec {
   defaultMode: string;
+  env: Record<string, string>;
 }
+
+/**
+ * 子代理默认模型（code.claude.com/docs/en/model-config、sub-agents）：先后是 调用写的 model > 子代理定义里的 model
+ * （写 inherit 就跟主会话）> 这个变量 > 主会话。所以它只兜住两头都没写的（general-purpose 就是）；Plan、fork 定义里是 inherit、
+ * 照旧跟主会话（主会话可能是创始人自己选的 Fable），claude-code-guide 定义里是 haiku。决定 0017。
+ */
+export const SUBAGENT_MODEL = 'CLAUDE_CODE_SUBAGENT_MODEL';
+
+/**
+ * Opus 或 Sonnet：别名 opus、sonnet，或 claude-opus-5-5、claude-sonnet-5-5 这样的完整 id，可带 [1m]。
+ * Fable、Mythos、Haiku 都不算；inherit、default 也不算（等于不设，子代理就跟主会话走）。决定 0017：子代理只用 Opus 或 Sonnet。
+ */
+export const OPUS_OR_SONNET = /^(?:opus|sonnet|claude-(?:opus|sonnet)-\d+(?:-\d+)*)(?:\[1m\])?$/;
+
+/**
+ * 同步工具管的 env 键和各自的校验（返回不合规矩的原因，合规矩返回 null）。源文件里的 env 必须正好是这几个键：
+ * 少写一个、多写一个这里没登记的都拒收——env 会推给每一台机器，没登记校验的变量不许搭车。
+ */
+const ENV_KEYS: ReadonlyMap<string, (value: string) => string | null> = new Map([
+  [
+    SUBAGENT_MODEL,
+    (value: string) =>
+      OPUS_OR_SONNET.test(value)
+        ? null
+        : `env.${SUBAGENT_MODEL} 是「${value}」：子代理只用 Opus 或 Sonnet（决定 0017），只认 opus、sonnet 或 claude-opus-…、claude-sonnet-… 这样的 id，拒收`,
+  ],
+]);
 
 /**
  * 仓里的源文件里不许写的模式：一台机器上的会话全放开检查，不能靠仓里一份文件推给所有机器。
@@ -105,6 +137,30 @@ function parseAutoMode(v: unknown): AutoModeSpec | string | undefined {
   return out;
 }
 
+/**
+ * 认 env：必须有，必须正好是 ENV_KEYS 登记的那几个键、值都过各自的校验。
+ * 少了子代理默认模型就拒收、不替它补上（同 autoMode 少 "$defaults"）：不写子代理就跟主会话走，主会话可能是 Fable。
+ */
+function parseEnv(v: unknown): Record<string, string> | string {
+  const need = [...ENV_KEYS.keys()].join('、');
+  if (v === undefined) return `env 没写：${need} 要写（子代理默认模型只用 Opus 或 Sonnet，决定 0017）`;
+  if (!isObj(v)) return 'env 不是对象';
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(v)) {
+    const check = ENV_KEYS.get(key);
+    if (check === undefined)
+      return `env.${key} 同步工具不认：env 会推给每一台机器，要加先在 permissions.ts 的 ENV_KEYS 里登记它的校验`;
+    if (typeof value !== 'string') return `env.${key} 不是字符串`;
+    const bad = check(value);
+    if (bad !== null) return bad;
+    out[key] = value;
+  }
+  for (const key of ENV_KEYS.keys())
+    if (!(key in out))
+      return `env.${key} 没写：不写子代理就跟主会话同一个模型，主会话可能是 Fable（决定 0017），拒收`;
+  return out;
+}
+
 /** 认仓里的源文件；home 用来展开 ${HOME}（换成这台的家目录，路径分隔符按这台的平台） */
 export function parsePermissions(text: string, home: string): PermSource {
   let root: unknown;
@@ -128,6 +184,8 @@ export function parsePermissions(text: string, home: string): PermSource {
   if (typeof gotDeny === 'string') return { ok: false, why: gotDeny };
   const auto = parseAutoMode(root.autoMode);
   if (typeof auto === 'string') return { ok: false, why: auto };
+  const env = parseEnv(root.env);
+  if (typeof env === 'string') return { ok: false, why: env };
   const allow = lists.allow as string[];
   const deny = lists.deny as string[];
   const retired = lists.retired as string[];
@@ -150,6 +208,7 @@ export function parsePermissions(text: string, home: string): PermSource {
       retired,
       retiredDeny: gotDeny,
       ...(auto === undefined ? {} : { autoMode: auto }),
+      env,
     },
   };
 }
@@ -203,6 +262,22 @@ function judgeAuto(have: unknown, spec: AutoModeSpec, out: Diff): void {
   }
 }
 
+/**
+ * 机器上 env 那一层和源文件对不上的地方：仓里写的那几项每次覆盖（同 defaultMode），env 里别的变量不归本脚本管、一个不碰、也不计数。
+ * 机器上的值不一样（哪怕也是 Opus 或 Sonnet）算漂移、改回仓里的：子代理默认模型是全队一个规矩，要改先改仓里。
+ */
+function judgeEnv(have: unknown, spec: Record<string, string>, out: Diff): void {
+  if (have !== undefined && !isObj(have)) {
+    out.stuck.push('env 不是对象');
+    return;
+  }
+  const env: Obj = have ?? {};
+  for (const [key, want] of Object.entries(spec)) {
+    if (env[key] === undefined) out.missing.push(`env.${key}（该是 ${want}）`);
+    else if (env[key] !== want) out.drift.push(`env.${key} 是 ${JSON.stringify(env[key])}，该是 ${want}`);
+  }
+}
+
 /** 逐项对：root 是整份设置文件 */
 export function judge(root: unknown, spec: ListSpec): Diff {
   const out: Diff = { missing: [], drift: [], stuck: [], others: 0, bypass: false };
@@ -247,6 +322,7 @@ export function judge(root: unknown, spec: ListSpec): Diff {
     out.others += list.filter((x) => !want.includes(x as string) && !gone.includes(x as string)).length;
   }
   if (spec.autoMode !== undefined) judgeAuto(root.autoMode, spec.autoMode, out);
+  if (spec.env !== undefined) judgeEnv(root.env, spec.env, out);
   return out;
 }
 
@@ -277,11 +353,25 @@ export function merged(root: Obj, spec: ListSpec): Obj {
     }
     next.autoMode = am;
   }
+  if (spec.env !== undefined) {
+    // env 里别的变量（代理、各家自己的开关）一个不碰，只写仓里那几项
+    const env: Obj = isObj(next.env) ? next.env : {};
+    for (const [key, value] of Object.entries(spec.env)) env[key] = value;
+    next.env = env;
+  }
   return next;
 }
 
 /** 报告里补的一句：机器上自己设成 bypassPermissions，本脚本保留它（ok 和 changed 两条路都带） */
 const bypassNote = (d: Diff): string => (d.bypass ? '；这台自己设成 bypassPermissions，保留、没改' : '');
+
+/** 一致时报出 env 里那几项的值（子代理默认模型是哪个，看报告就知道） */
+const envNote = (spec: ListSpec): string =>
+  spec.env === undefined
+    ? ''
+    : `，${Object.entries(spec.env)
+        .map(([key, value]) => `env.${key} 是 ${value}`)
+        .join('、')}`;
 
 /** 查一份 JSON 设置里的 permissions；key 是报告里这一项的名字，noFile 是文件不存在时说的话 */
 export function checkJson(abs: string, key: string, spec: ListSpec, noFile: string): Line[] {
@@ -301,7 +391,7 @@ export function checkJson(abs: string, key: string, spec: ListSpec, noFile: stri
     line(
       'ok',
       key,
-      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在${spec.autoMode === undefined ? '' : `、autoMode ${AUTO_LISTS.map((n) => `${n} ${spec.autoMode?.[n].length ?? 0} 条`).join('、')}都在`}，机器上自己加的 ${d.others} 条没动${bypassNote(d)}`,
+      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在${spec.autoMode === undefined ? '' : `、autoMode ${AUTO_LISTS.map((n) => `${n} ${spec.autoMode?.[n].length ?? 0} 条`).join('、')}都在`}${envNote(spec)}，机器上自己加的 ${d.others} 条没动${bypassNote(d)}`,
     ),
   ];
 }
@@ -362,7 +452,7 @@ export function checkPermissions(ctx: Ctx, src: Sources, skip?: PermSkip): Line[
     relOf(ctx, PERMISSIONS_TARGET.settings).abs,
     key,
     spec.value,
-    '权限（defaultMode、allow、deny、autoMode）没装',
+    '权限（defaultMode、allow、deny、autoMode）和子代理默认模型（env）没装',
   );
 }
 

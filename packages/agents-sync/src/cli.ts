@@ -39,6 +39,8 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
                              和同一份设置的 autoMode（给 auto 模式分类器看的自然语言规则：environment、allow
                              按并集合并、不删机器上自己加的；源文件里少了 "$defaults" 就拒收——没它 Claude Code
                              会把那一类的内置规则整段换掉），
+                             和同一份设置 env 里的子代理默认模型（CLAUDE_CODE_SUBAGENT_MODEL：只认 Opus 或 Sonnet，
+                             每次覆盖，env 里别的变量不碰；源文件少了它或写成别的就拒收，决定 0017），
                              并翻译成 Kimi（config.toml 里一块托管块加默认模式）、Codex（rules/default.rules 里一块托管块）、
                              Devin（config.json 的 permissions）各自的写法；Grok 直接读 Claude 那份，不另写，
                              _tmp/ 加进这台的 git 全局忽略（core.excludesFile 没设过就新建一份；已经指到别的文件，

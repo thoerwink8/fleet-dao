@@ -1,5 +1,5 @@
 {
-  "说明": "本机档（fleet-local，#451）/etc/fleet-dao 下几份环境文件「应该是什么」。和法国用同一份 deploy/france.sh 装（FLEET_PROFILE=local），键集合要和 deploy/france/desired-config.json 一样；这一份存在的意义就是让『本机档和法国哪里不一样』只写在这一处——每一项和法国不一样的地方都在它自己的「说明」里写清为什么，没写说明的差别，node deploy/france/auto-release/config.mjs diff-local 会报红（#451：本机档的差别只许写在这一处）。versions 钉住的几个大版本不许有任何差别，写了说明也不例外。格式和 desired-config.json 相同（读法见 deploy/france/auto-release/config.mjs），改这份不影响本机档装机脚本本身怎么装（那是 deploy/lib/profile.sh 管的）。私有值的指纹要在 fleet-local 上用它自己的 config-fingerprint.key 现算（docs/ops.md 第九节「配置进仓对账」），fingerprint.keyId 是那把钥匙的编号：换机、重装钥匙会跟着变，keyId 和下面记了指纹的私有值要一起重算、重记。GitHub webhook 密钥的指纹 #452 放好本机档自己的 App 后记上了；飞书一对本机档不接，留 null（对账记没查成）。",
+  "说明": "本机档（fleet-local，#451）/etc/fleet-dao 下几份环境文件「应该是什么」。和法国用同一份 deploy/france.sh 装（FLEET_PROFILE=local），键集合要和 deploy/france/desired-config.json 一样；这一份存在的意义就是让『本机档和法国哪里不一样』只写在这一处——每一项和法国不一样的地方都在它自己的「说明」里写清为什么，没写说明的差别，node deploy/france/auto-release/config.mjs diff-local 会报红（#451：本机档的差别只许写在这一处）。versions 钉住的几个大版本不许有任何差别，写了说明也不例外。格式和 desired-config.json 相同（读法见 deploy/france/auto-release/config.mjs），改这份不影响本机档装机脚本本身怎么装（那是 deploy/lib/profile.sh 管的）。私有值的指纹要在 fleet-local 上用它自己的 config-fingerprint.key 现算（docs/ops.md 第十三节「从零建 fleet-local」最后一步），fingerprint.keyId 是那把钥匙的编号：换机、重装钥匙会跟着变，keyId 和记了指纹的私有值要一起重算、重记；还没算的留 null，对账记「没查成」。现在私有值只有 GitHub 机器人的 webhook 密钥，#452 放好本机档自己的 App 后记上了指纹。本机档要一直空着的（飞书一对、隧道对端）不是私有值，登记成公开的空值（value 写空字符串），对账照它比：空着对得上，填了值报不一致。",
   "formatVersion": 1,
   "selfHeal": false,
   "fingerprint": {
@@ -54,15 +54,15 @@
       "PGUSER": "fleet",
       "FLEET_GITHUB_WEBHOOK_SECRET": {
         "private": "382baa0ff9e79491480f1738c9149f3f2a05e1ad0d2a55e5ac5adc4bd187a92a",
-        "说明": "本机档自己的「引擎」App（fleet-local-canary-engine，只装在演练仓上，不和法国共用凭据）设置里的 Webhook secret，france.sh 照 /etc/fleet-dao/github/ 里那份 json 填：私有值，指纹用 fleet-local 自己的指纹钥匙算（#452 2026-10-04 记）。本机没有公网入口，这个 App 的 webhook 关着、引擎靠补拉收单，但后端缺这一项起不来"
+        "说明": "本机档自己的「引擎」App（fleet-local-canary-engine，只装在演练仓上，不和法国共用凭据）设置里的 Webhook secret，deploy/local/install.sh 照 /etc/fleet-dao/github/ 里那份 json 填：私有值，指纹照 docs/ops.md 第十三节「从零建 fleet-local」最后一步用 fleet-local 自己的指纹钥匙算（#452 2026-10-04 记）。本机没有公网入口，这个 App 的 webhook 关着、引擎靠补拉收单，但后端缺这一项起不来"
       },
       "FEISHU_APP_ID": {
-        "private": null,
-        "说明": "登记的差别：本机档不接飞书（没有香港网关），这项留空待配"
+        "value": "",
+        "说明": "登记的差别：本机档不接飞书（没有香港网关，下面 FLEET_FEISHU_LOGIN=off），这项一直留空——空值不是要保密的东西，登记成公开的空值，对账照它比：空着对得上，填了值报不一致（#731；原来写的 private: null 是「还没记指纹」，对账一直记没查成）。法国这项是私有值，只记指纹"
       },
       "FEISHU_APP_SECRET": {
-        "private": null,
-        "说明": "登记的差别：同 FEISHU_APP_ID，本机档不接飞书"
+        "value": "",
+        "说明": "登记的差别：同 FEISHU_APP_ID，本机档不接飞书，登记成留空（公开的空值）"
       },
       "FLEET_FEISHU_LOGIN": {
         "value": "off",

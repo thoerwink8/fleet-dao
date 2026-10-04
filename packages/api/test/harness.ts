@@ -14,6 +14,7 @@ import type { Deps } from '../src/deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { type DraftOpenLimits, type DraftOpenRunner, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
+import { createMemoryIntentStore } from '../src/intent-store.ts';
 import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
 import type { ScryptParams } from '../src/password.ts';
 import { createPgStore } from '../src/pg-store.ts';
@@ -130,6 +131,8 @@ export interface HarnessOptions {
   notWired?: Deps['notWired'];
   /** 飞书网关来没来过的记录（/healthz 的 feishu_gateway）；不给就不记。 */
   gatewaySeen?: Deps['gatewaySeen'];
+  /** 意图存储（#553）；不给就是一份跟着测试时钟走的内存版，null 是没接上。 */
+  intents?: Deps['intents'] | null;
   /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
   alertWork?: Deps['alertWork'];
   /** 路由两层每一层现在活着吗（#574）；不给就是没接上（内存版、开发环境一样）。 */
@@ -175,6 +178,7 @@ function wire<S extends Store>(
     demo: options.demo ?? null,
     ...(options.notWired ? { notWired: options.notWired } : {}),
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
+    ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),

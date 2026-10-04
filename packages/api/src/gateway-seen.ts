@@ -1,6 +1,8 @@
 // 飞书网关最后一次来是什么时候：/healthz 的 feishu_gateway 一项（健康页写「飞书网关」）。
 // 网关（香港）一直在长轮询待推送（一轮最多等 25 秒）、每 30 秒取一次盘面快照；通行证验过的请求进来就记一笔
-// （feishu-routes.ts 的门口），读的时候现算：推送轮询 5 分钟没来就报红。
+// （feishu-routes.ts、intent-routes.ts 的门口），读的时候现算：推送轮询 5 分钟没来就报红。
+// 推送轮询认两条里新的那条：旧的待推送（/feishu/outbox）和意图卡（/feishu/intent-cards，#553 第 4 条）；网关换成只取
+// 意图卡之后旧的那条不再来，不能因此报红。
 // 改这里之前必须知道：
 // - 只记在进程里：后端重启后从起来那一刻算；起来后网关还没来过，报「没查成」（不当成好），网关一般几秒到半分钟就回来。
 // - 会随时间自己变红（网关、隧道、香港出事都算，和这一版好不好无关）：发布脚本只标待处理、不退回
@@ -8,7 +10,7 @@
 // - 公网看得到 /healthz：只说多久没来，不带地址、内部名。src 里只有一处 new PublicHealthError，公开文字的测试造过它。
 // - 网关那边自己也看着（packages/feishu/src/watch.ts）：它调不通后端时自己往飞书群报警；这一项管网关整个没了、它自己报不了的时候。
 //   两边同一个 5 分钟。
-import { FeishuRoutes } from '@fleet-dao/shared';
+import { FeishuRoutes, IntentRoutes } from '@fleet-dao/shared';
 import { PublicHealthError } from './health.ts';
 
 /** 推送轮询这么久没来就报红：和网关自己报警同一个时限（packages/feishu/src/watch.ts 的 WATCH_LIMITS.alertAfterMs）。 */
@@ -51,7 +53,9 @@ export function createGatewaySeen(now: () => Date, silentMs = GATEWAY_SILENT_MS)
 
     async check() {
       const t = now().getTime();
-      const push = last.get(keyOf(FeishuRoutes.outbox));
+      const outbox = last.get(keyOf(FeishuRoutes.outbox));
+      const cards = last.get(keyOf(IntentRoutes.cards));
+      const push = outbox === undefined ? cards : cards === undefined ? outbox : Math.max(outbox, cards);
       const board = last.get(keyOf(FeishuRoutes.board));
       const boardText = board === undefined ? '盘面快照也没来取过' : `盘面快照 ${span(t - board)}前来过`;
       if (push !== undefined && t - push <= silentMs) return `推送轮询 ${span(t - push)}前来过，${boardText}`;
