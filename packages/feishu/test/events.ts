@@ -2,8 +2,8 @@
 // 解析走 SDK 自己的分发器和归一化（和生产同一套），再经 lark.ts 的转换交给网关。
 import { readFileSync } from 'node:fs';
 import { EventDispatcher, LoggerLevel, normalize, normalizeCardAction } from '@larksuiteoapi/node-sdk';
-import { toAction, toInbound, toMenu } from '../src/lark.ts';
-import type { InboundCardAction, InboundMenu, InboundMessage } from '../src/port.ts';
+import { toAction, toInbound, toMenu, toRecall } from '../src/lark.ts';
+import type { InboundCardAction, InboundMenu, InboundMessage, InboundRecall } from '../src/port.ts';
 
 export const BOT = { openId: 'ou_bot', name: 'fleet' };
 export const A = 'ou_founder_a';
@@ -27,11 +27,21 @@ export function messageEvent(o: {
   from?: string;
   chat?: 'p2p' | 'group';
   chatId?: string;
-  /** 群里默认 @了机器人。 */
+  /** 群里默认 @了机器人；私聊里要 @ 得明说。 */
   mentionBot?: boolean;
+  /** @所有人。 */
+  mentionAll?: boolean;
   replyTo?: string;
+  /** 在飞书话题里：话题编号；根消息是 rootId（没给就用 replyTo）。 */
+  thread?: string;
+  rootId?: string;
   id?: string;
   senderType?: string;
+  /** 换消息类型和原始 content（不给就是 text 类型、content 由 text 拼）。 */
+  type?: string;
+  content?: string;
+  /** 毫秒；null = 事件里没带 create_time。 */
+  createTime?: number | null;
 }): Envelope {
   const group = o.chat === 'group';
   const e = fixture(group ? 'message-group-at' : 'message-p2p');
@@ -41,18 +51,34 @@ export function messageEvent(o: {
   if (o.senderType) e.event.sender.sender_type = o.senderType;
   const m = e.event.message;
   m.message_id = id;
-  m.create_time = String(Date.now());
+  if (o.createTime === null) delete m.create_time;
+  else m.create_time = String(o.createTime ?? Date.now());
   if (o.chatId) m.chat_id = o.chatId;
-  const mention = group && (o.mentionBot ?? true);
-  m.content = JSON.stringify({ text: mention ? `@_user_1 ${o.text}` : o.text });
-  if (!mention) delete m.mentions;
-  if (o.replyTo) {
-    m.parent_id = o.replyTo;
-    m.root_id = o.replyTo;
-  } else {
-    delete m.parent_id;
-    delete m.root_id;
-  }
+  const mention = o.mentionBot ?? group;
+  const prefix = `${mention ? '@_user_1 ' : ''}${o.mentionAll ? '@_all ' : ''}`;
+  m.message_type = o.type ?? 'text';
+  m.content = o.content ?? JSON.stringify({ text: `${prefix}${o.text}` });
+  const mentions = fixture('message-group-at').event.message.mentions;
+  m.mentions = [
+    ...(mention ? mentions : []),
+    ...(o.mentionAll ? [{ key: '@_all', id: { union_id: '', user_id: '', open_id: '' }, name: '所有人' }] : []),
+  ];
+  if (m.mentions.length === 0) delete m.mentions;
+  const root = o.rootId ?? o.replyTo;
+  if (o.replyTo) m.parent_id = o.replyTo;
+  else delete m.parent_id;
+  if (root) m.root_id = root;
+  else delete m.root_id;
+  if (o.thread) m.thread_id = o.thread;
+  return e;
+}
+
+export function recallEvent(o: { messageId: string; chatId?: string; recallTime?: number }): Envelope {
+  const e = fixture('recall');
+  e.header.event_id = nextId('evt_recall');
+  e.event.message_id = o.messageId;
+  e.event.chat_id = o.chatId ?? TEAM;
+  e.event.recall_time = String(o.recallTime ?? Date.now());
   return e;
 }
 
@@ -83,6 +109,7 @@ export function menuEvent(o: { key: string; from?: string; eventId?: string }): 
 
 const parser = new EventDispatcher({ loggerLevel: LoggerLevel.error }).register({
   'im.message.receive_v1': async (d: unknown) => d,
+  'im.message.recalled_v1': async (d: unknown) => d,
   'card.action.trigger': async (d: unknown) => d,
   'application.bot.menu_v6': async (d: unknown) => d,
 });
@@ -110,4 +137,10 @@ export async function asMenu(envelope: Envelope): Promise<InboundMenu> {
   const menu = toMenu(await parse(envelope));
   if (!menu) throw new Error('认不出这条菜单事件');
   return menu;
+}
+
+export async function asRecall(envelope: Envelope): Promise<InboundRecall> {
+  const recall = toRecall(await parse(envelope));
+  if (!recall) throw new Error('认不出这条撤回事件');
+  return recall;
 }

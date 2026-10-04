@@ -1,20 +1,44 @@
-// 网关和飞书之间的接口：进来的三种事件（消息、卡片按钮、机器人菜单）与出去的五个动作。
+// 网关和飞书之间的接口：进来的四种事件（消息、撤回、卡片按钮、机器人菜单）与出去的五个动作。
 // 真实现在 lark.ts（官方 SDK 的 Channel），测试用假的。往飞书发东西只能经 FeishuPort，别处不许直接调 SDK。
+
+/** 这条消息 @了谁（飞书事件里的 mentions）。 */
+export interface InboundMention {
+  name?: string | undefined;
+  openId?: string | undefined;
+  isBot: boolean;
+}
 
 export interface InboundMessage {
   messageId: string;
   chatId: string;
   chatType: 'p2p' | 'group';
   senderId: string;
-  /** 归一化后的文字（@机器人 已去掉，@别人 写成 @名字）。 */
+  /** 归一化后的文字（SDK 做的：@机器人 已去掉，@别人 写成 @名字，富文本取文字）。 */
   text: string;
+  /** 飞书的消息类型（text、post、image、file、audio、merge_forward……），认不出的也原样带着。 */
+  msgType: string;
+  /** 飞书给的原始 content（JSON 字符串），一个字没动：留底对账、判同一条消息内容变没变。 */
+  rawContent: string;
   mentionedBot: boolean;
+  mentions: InboundMention[];
   /** 回复的是哪条消息（飞书的 parent_id）。 */
   replyToMessageId?: string | undefined;
-  /** 毫秒时间戳（飞书的 create_time）。 */
+  /** 回复链、话题的根消息（飞书的 root_id）。 */
+  rootId?: string | undefined;
+  /** 飞书话题（thread_id）：同一个话题算同一段意图。 */
+  threadId?: string | undefined;
+  /** 毫秒时间戳（飞书的 create_time）；事件里没带是 0。 */
   createTime: number;
   /** 机器人发的（包括自己）：不理。 */
   fromBot: boolean;
+}
+
+/** 飞书的撤回事件（im.message.recalled_v1）：不带是谁撤的、不带会话种类。 */
+export interface InboundRecall {
+  messageId: string;
+  chatId: string;
+  /** 毫秒时间戳（飞书的 recall_time）。 */
+  recalledAt: number;
 }
 
 export interface InboundCardAction {
@@ -39,6 +63,9 @@ export interface InboundMenu {
 /** 飞书只能改 14 天内发出的消息（更新卡片接口，错误码 230031）。 */
 export const CARD_EDITABLE_MS = 14 * 24 * 60 * 60 * 1000;
 
+/** 晚推来的消息多晚以内照收（lark.ts 给 SDK 的 staleMessageWindowMs）；更早的只能靠补漏翻历史。 */
+export const LATE_DELIVERY_MS = 6 * 60 * 60 * 1000;
+
 export type Card = Record<string, unknown>;
 export type OutMessage = { card: Card } | { text: string };
 export type Target = { chatId: string } | { openId: string };
@@ -50,8 +77,8 @@ export interface Sent {
 }
 
 export interface FeishuPort {
-  /** 给消息加一个表情回应。 */
-  react(messageId: string, emojiType: string): Promise<void>;
+  /** 给消息加一个表情回应；返回飞书给的 reaction_id（撤掉这个表情要用），飞书没给是 undefined。 */
+  react(messageId: string, emojiType: string): Promise<string | undefined>;
   /** uuid 相同的请求飞书 1 小时内只发一条：重试不会重复。拿到 message_id 才算发出。 */
   send(to: Target, message: OutMessage, opts: { uuid: string }): Promise<Sent>;
   reply(messageId: string, message: OutMessage, opts: { uuid: string }): Promise<Sent>;

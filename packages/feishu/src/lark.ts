@@ -1,7 +1,10 @@
 // 飞书官方 SDK（@larksuiteoapi/node-sdk）的 Channel：长连接收事件（服务器不开端口）、自带去重和按会话排队。
 // 往飞书发东西只在这个文件里（test/static.test.ts 查着）：别处经 FeishuPort。
+// 收法（#553 第 4 条）：允许的群里每条都收、不用 @（要飞书开发者后台给应用开「获取群组中所有消息」im:message.group_msg；
+// 没开时飞书只推 @机器人 的和私聊），@所有人 的也收；谁的话存、谁的丢由网关判（gateway.ts），这里只挡别的群。
 // Channel 没管的几处自己补：
-// - 机器人菜单事件 application.bot.menu_v6：注册到 Channel 内部的事件分发器上（它没公开，升级 SDK 后 test/lark.test.ts 会报）；
+// - 机器人菜单事件 application.bot.menu_v6、撤回事件 im.message.recalled_v1：注册到 Channel 内部的事件分发器上
+//   （它没公开，升级 SDK 后 test/lark.test.ts 会报）；
 // - 发消息带 uuid（同一件事重试不重复发）：Channel.send 不带，改用它公开的 rawClient；
 // - 超时：SDK 默认的 HTTP 实例不设超时（实读为 0），飞书接口一挂住，推送和盘面这些串行的活就全停、也不报警。
 //   每次调用自己限时（表情回应 3 秒，其余 10 秒），超时记错误；HTTP 实例上也带同样的上限，挂住的连接会被收掉。
@@ -25,6 +28,8 @@ import {
   type InboundCardAction,
   type InboundMenu,
   type InboundMessage,
+  type InboundRecall,
+  LATE_DELIVERY_MS,
   type OutMessage,
   type Sent,
   type Target,
@@ -36,6 +41,7 @@ export const FEISHU_TIMEOUTS = { reactMs: 3_000, callMs: 10_000 };
 
 export interface InboundHandlers {
   onMessage(msg: InboundMessage): void;
+  onRecall(evt: InboundRecall): void;
   onCardAction(evt: InboundCardAction): void;
   onMenu(evt: InboundMenu): void;
   onReject(evt: { messageId: string; chatId: string; senderId: string; reason: string }): void;
@@ -44,7 +50,7 @@ export interface InboundHandlers {
 export interface LarkOptions {
   appId: string;
   appSecret: string;
-  /** 允许的群（团队群、测试群）；别的群里 @我 一律不理。 */
+  /** 允许的群（团队群、测试群）；别的群里说什么一律不收。 */
   groups: string[];
   log: Logger;
   timeouts?: Partial<typeof FEISHU_TIMEOUTS>;
@@ -66,6 +72,7 @@ export interface Lark {
 }
 
 const MENU_EVENT = 'application.bot.menu_v6';
+const RECALL_EVENT = 'im.message.recalled_v1';
 
 export function createLark(opts: LarkOptions): Lark {
   const timeouts = { ...FEISHU_TIMEOUTS, ...opts.timeouts };
@@ -73,12 +80,13 @@ export function createLark(opts: LarkOptions): Lark {
     appId: opts.appId,
     appSecret: opts.appSecret,
     transport: opts.transport ?? 'websocket',
-    policy: { requireMention: true, dmMode: 'open', groupAllowlist: opts.groups, respondToMentionAll: false },
+    // 群里不要求 @：创始人的每句话都是意图的一部分；@所有人 的照收（只是存，机器人不回话）
+    policy: { requireMention: false, dmMode: 'open', groupAllowlist: opts.groups, respondToMentionAll: true },
     safety: {
       // 不合并连发的消息：两个人在群里前后脚说话，合并会把前一个人的话算到后一个人头上。
       batch: { text: { delayMs: 0 } },
       // 默认 30 分钟前的消息静默丢掉；网关重启或断线期间的消息宁可晚回也不丢。
-      staleMessageWindowMs: 6 * 60 * 60 * 1000,
+      staleMessageWindowMs: LATE_DELIVERY_MS,
     },
     // 卡片表单的输入值（form_value）SDK 的归一化里没有，要从原始事件里取。
     includeRawEvent: true,
@@ -150,7 +158,7 @@ export function createLark(opts: LarkOptions): Lark {
 
   const port: FeishuPort = {
     async react(messageId, emojiType) {
-      await api(
+      const res = await api(
         '加表情回应',
         () =>
           client.im.v1.messageReaction.create({
@@ -160,6 +168,7 @@ export function createLark(opts: LarkOptions): Lark {
         // 回应只有赶在 2 秒内才有用：不重试。
         { retries: 0, timeoutMs: timeouts.reactMs },
       );
+      return res.data?.reaction_id || undefined;
     },
 
     async send(to: Target, message, { uuid }) {
@@ -227,6 +236,17 @@ export function createLark(opts: LarkOptions): Lark {
           // 立刻返回：长连接等这个返回值才回飞书。
           return undefined;
         },
+        [RECALL_EVENT]: (data: unknown) => {
+          const recall = toRecall(data);
+          if (recall) handlers.onRecall(recall);
+          else {
+            // 撤回事件里没有原话：整条记下来也不漏什么
+            opts.log.warn('撤回事件认不出，丢了（补漏时历史接口会再标一次撤回）', {
+              data: JSON.stringify(data).slice(0, 300),
+            });
+          }
+          return undefined;
+        },
       });
     },
 
@@ -237,20 +257,37 @@ export function createLark(opts: LarkOptions): Lark {
 }
 
 export function toInbound(msg: NormalizedMessage, botOpenId: string | undefined): InboundMessage {
-  const raw = msg.raw as { sender?: { sender_type?: string } } | undefined;
+  // includeRawEvent 开着：raw 是 SDK 解出来的事件（header、event 两层摊平），原始 content 在 raw.message.content
+  const raw = msg.raw as { sender?: { sender_type?: string }; message?: { content?: unknown } } | undefined;
   const senderType = raw?.sender?.sender_type;
+  const content = raw?.message?.content;
   return {
     messageId: msg.messageId,
     chatId: msg.chatId,
     chatType: msg.chatType,
     senderId: msg.senderId,
     text: msg.content,
+    msgType: msg.rawContentType,
+    rawContent: typeof content === 'string' ? content : '',
     mentionedBot: msg.mentionedBot,
+    mentions: msg.mentions.map((m) => ({ name: m.name, openId: m.openId, isBot: m.isBot === true })),
     replyToMessageId: msg.replyToMessageId,
+    rootId: msg.rootId,
+    threadId: msg.threadId,
     createTime: msg.createTime,
     fromBot:
       (senderType !== undefined && senderType !== 'user') || (!!botOpenId && msg.senderId === botOpenId),
   };
+}
+
+/** 撤回事件：编号、会话、撤回时刻都得有，少一样就是认不出（null）。 */
+export function toRecall(data: unknown): InboundRecall | null {
+  const d = data as { message_id?: unknown; chat_id?: unknown; recall_time?: unknown } | null;
+  if (!d || typeof d.message_id !== 'string' || !d.message_id || typeof d.chat_id !== 'string' || !d.chat_id)
+    return null;
+  const at = typeof d.recall_time === 'string' ? Number(d.recall_time) : Number.NaN;
+  if (!Number.isFinite(at) || at <= 0) return null;
+  return { messageId: d.message_id, chatId: d.chat_id, recalledAt: at };
 }
 
 export function toAction(evt: CardActionEvent): InboundCardAction {
@@ -307,12 +344,15 @@ function within<T>(ms: number, what: string, work: Promise<T>): Promise<T> {
 
 /**
  * 飞书错误码 → 下一步怎么办。只收有出处的：230031 超 14 天不能改卡、230020 限频（docs/reference/feishu.md 第四节）、
- * 200861 卡片里有 JSON 2.0 不支持的组件（同上，windsurf-dao#1052）；其余归 unknown，原码写进日志。
+ * 200861 卡片里有 JSON 2.0 不支持的组件（同上，windsurf-dao#1052）；230027 缺必要的权限、230002 机器人不在群里
+ * （「获取会话历史消息」接口的错误码表，2026-10-04 查）、99991672 应用没开这项权限（服务端通用错误码）；其余归 unknown，
+ * 原码写进日志。
  */
 function kindOf(code: number | undefined, status: number | undefined): FeishuErrorKind {
   if (code === 230031) return 'too_old';
   if (code === 230020 || status === 429) return 'rate_limited';
   if (code === 200861) return 'format';
+  if (code === 230027 || code === 230002 || code === 99991672) return 'permission';
   if (status === 401 || status === 403) return 'permission';
   if (status !== undefined && status >= 500) return 'unavailable';
   return 'unknown';

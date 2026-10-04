@@ -1,6 +1,6 @@
 // 网关自己看着自己：推送、盘面快照这两条定时活每一轮走没走通、花了多久，收到消息多久回上「收到」。三个出口——
-// - 心跳：每 10 分钟一行「网关心跳」（推了几条、取了几次快照、平均和最慢多久、收到的耗时），走通了也写：日志安静了，
-//   看最近一行心跳就分得清是闲着还是挂了。
+// - 心跳：每 10 分钟一行「网关心跳」（推了几条、取了几次快照、平均和最慢多久、原话存下几句没存成几句、收到的耗时），
+//   走通了也写：日志安静了，看最近一行心跳就分得清是闲着还是挂了。
 // - 报警：两条定时活有一条 5 分钟没走通，用网关自己的飞书连接往团队群发一张报警卡——不经过后端：后端连不上时它写不了提醒。
 //   同一次故障只报一次；在免打扰时段里的等时段过了再报，时段里就通了的不报。
 // - 通了：报过警的，全部连续走通 1 分钟后在那张卡下面回一句、卡改灰。时好时坏的不算通，不来回报。
@@ -69,6 +69,8 @@ export interface Watch {
   pushed(status: PushStatus, ms: number): void;
   /** 一条消息从收到到回上「收到」花了多久；null = 表情和那句「收到」都没回上。 */
   acked(ms: number | null): void;
+  /** 收原话的一句处理完：后端存下了没有。 */
+  intake(stored: boolean): void;
   /** 确认卡超过 10 秒，计一次。 */
   cardSlow(): void;
   /** 看一次要不要报警、报「通了」（定时器调；测试直接调）。同一时刻只跑一个。 */
@@ -114,6 +116,7 @@ function freshWindow(at: number) {
     },
     board: { ok: 0, failed: 0, totalMs: 0, maxMs: 0 },
     intents: { ok: 0, failed: 0 },
+    intake: { stored: 0, failed: 0 },
     messages: {
       count: 0,
       noAck: 0,
@@ -336,6 +339,11 @@ export function createWatch(deps: WatchDeps): Watch {
       if (ms > deps.ackTargetMs) m.slow += 1;
     },
 
+    intake(stored) {
+      if (stored) win.intake.stored += 1;
+      else win.intake.failed += 1;
+    },
+
     cardSlow() {
       win.messages.cardSlow += 1;
     },
@@ -380,6 +388,7 @@ export function createWatch(deps: WatchDeps): Watch {
           lastOkAt: iso(loops.board.lastOkAt),
         },
         intents: { ok: w.intents.ok, failed: w.intents.failed, lastOkAt: iso(loops.intents.lastOkAt) },
+        intake: { stored: w.intake.stored, failed: w.intake.failed },
         messages: {
           count: w.messages.count,
           ackAvgMs: avg(w.messages.totalMs, acked),

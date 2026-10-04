@@ -20,6 +20,8 @@ export interface Call {
   card?: Card;
   uuid?: string;
   emoji?: string;
+  /** react 成功时飞书回的 reaction_id。 */
+  reactionId?: string;
   /** send / reply 成功时飞书回的消息编号。 */
   sentId?: string;
 }
@@ -42,6 +44,7 @@ export class FakeFeishu implements FeishuPort {
   private readonly started = Date.now();
   private readonly byUuid = new Map<string, Sent>();
   private seq = 0;
+  private reactionSeq = 0;
 
   fail(op: Op, ...errors: FeishuError[]): void {
     this.failures[op] = [...(this.failures[op] ?? []), ...errors];
@@ -77,8 +80,18 @@ export class FakeFeishu implements FeishuPort {
     return sent;
   }
 
-  async react(messageId: string, emojiType: string): Promise<void> {
-    await this.step('react', { messageId, emoji: emojiType });
+  async react(messageId: string, emojiType: string): Promise<string | undefined> {
+    const call = await this.step('react', { messageId, emoji: emojiType });
+    this.reactionSeq += 1;
+    call.reactionId = `rx_fake_${this.reactionSeq}`;
+    return call.reactionId;
+  }
+
+  /** 某条消息上现在加过的表情（按加的先后）。 */
+  reactionsOn(messageId: string): string[] {
+    return this.of('react')
+      .filter((c) => c.messageId === messageId && c.reactionId !== undefined)
+      .map((c) => c.emoji ?? '');
   }
 
   async send(to: Target, message: OutMessage, opts: { uuid: string }): Promise<Sent> {
