@@ -173,6 +173,9 @@ describe('起子代理前先把 origin/main 取到最新', () => {
   });
 });
 
+// 每条要起一个真的钩子进程、跑两三条 git（Windows 上慢，本机实测 5 秒多），默认 5 秒的超时太紧
+const SLOW_MS = 30_000;
+
 describe('真的钩子进程：远端取不到时，建工作树的子代理被拦、别的照放行', () => {
   const made: string[] = [];
   afterEach(() => {
@@ -207,13 +210,21 @@ describe('真的钩子进程：远端取不到时，建工作树的子代理被�
     return r;
   };
 
-  it('isolation: worktree 又取不到远端：退出码 2、说清原因', () => {
-    const r = call(worktreeAgent);
-    expect(r.status).toBe(2);
-    expect(r.stderr).toContain('本机取不到远端');
-  });
+  it(
+    'isolation: worktree 又取不到远端：退出码 2、说清原因',
+    () => {
+      const r = call(worktreeAgent);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('本机取不到远端');
+    },
+    SLOW_MS,
+  );
 
-  it('没要工作树：退出码 0', () => {
-    expect(call({ subagent_type: 'Explore', prompt: 'x' }).status).toBe(0);
-  });
+  it(
+    '没要工作树：退出码 0',
+    () => {
+      expect(call({ subagent_type: 'Explore', prompt: 'x' }).status).toBe(0);
+    },
+    SLOW_MS,
+  );
 });
