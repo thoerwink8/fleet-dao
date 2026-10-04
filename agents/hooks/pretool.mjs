@@ -1635,6 +1635,36 @@ function readVerdict(tool, what, input, fallbackCwd) {
 }
 
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
+// 前台等待上限（创始人 2026-10-04「选 1」）：他在我干活时发的话只在两次工具调用的间隙送到，一条前台长等待中间没有间隙，
+// 话就卡在那儿、进程一断还会丢。所以单次前台等待不许超过这个数（无人值守不无人值守都一样，他随时可能插话）；
+// 更长的活用 run_in_background（跑完会重新叫醒我）、或拆成多次短等。后台跑的不受限。
+export const MAX_FOREGROUND_WAIT_SECONDS = 60;
+
+/** 这次调用在前台最多要等几秒：超过上限返回 { seconds, what }，没超过、后台跑的、认不出的都是 null（认不出不当超了拦人）。 */
+export function foregroundWait(toolInput, cmd, kind) {
+  if (toolInput?.run_in_background === true) return null;
+  const t = toolInput?.timeout;
+  if (typeof t === 'number' && Number.isFinite(t) && t > MAX_FOREGROUND_WAIT_SECONDS * 1000) {
+    return { seconds: Math.round(t / 1000), what: `timeout=${t}ms` };
+  }
+  const units = { '': 1, s: 1, m: 60, h: 3600, d: 86400 };
+  if (kind === 'bash') {
+    for (const m of cmd.matchAll(/(?:^|[;&|\n(]|&&|\|\|)\s*sleep\s+(\d+(?:\.\d+)?)([smhd]?)\b/g)) {
+      const seconds = Number(m[1]) * units[m[2] ?? ''];
+      if (seconds > MAX_FOREGROUND_WAIT_SECONDS) return { seconds, what: m[0].trim() };
+    }
+  } else {
+    for (const m of cmd.matchAll(/\bStart-Sleep\b([^;&|\n)]*)/gi)) {
+      const args = m[1];
+      const ms = /-m(?:illiseconds)?\s+(\d+)/i.exec(args);
+      const sec = /-s(?:econds)?\s+(\d+(?:\.\d+)?)/i.exec(args) ?? /^\s+(\d+(?:\.\d+)?)\b/.exec(args);
+      const seconds = ms ? Number(ms[1]) / 1000 : sec ? Number(sec[1]) : 0;
+      if (seconds > MAX_FOREGROUND_WAIT_SECONDS) return { seconds, what: m[0].trim() };
+    }
+  }
+  return null;
+}
+
 export function decide(raw, fallbackCwd = '') {
   let input;
   try {
@@ -1661,6 +1691,12 @@ export function decide(raw, fallbackCwd = '') {
     return block(`fleet-guard：${tool} 的输入里认不出命令（${JSON.stringify(command)}），按拦处理`);
   }
   const cmd = command;
+  const wait = foregroundWait(input?.tool_input ?? input?.toolInput, cmd, kind);
+  if (wait) {
+    return block(
+      `这条调用要在前台等约 ${wait.seconds} 秒（${wait.what}），超过单次上限 ${MAX_FOREGROUND_WAIT_SECONDS} 秒：创始人在这期间发的话要等它跑完才送到我手上，进程一断还会丢。长命令加 run_in_background: true（跑完会重新叫醒你），要等就拆成多次不超过 ${MAX_FOREGROUND_WAIT_SECONDS} 秒的短等；要跑几个小时的活交给 worker.mjs 脱离会话去跑。`,
+    );
+  }
   const rawCwd = String(input?.cwd ?? input?.workspaceRoot ?? fallbackCwd);
   const cwd = rawCwd.split('\\').join('/').toLowerCase();
   const inFleet = cwd.includes('fleet-dao') || /fleet-dao/i.test(cmd);
