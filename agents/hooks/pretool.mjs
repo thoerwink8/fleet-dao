@@ -993,6 +993,10 @@ function redactorAt(pipeline) {
 // 2026-09-30 那次是读 MCP 运行目录的 JSON，里面把飞书 app secret 写在参数里，当时那套遮值只认 40 个字符以上的串，
 // 32 个字符的密钥过去了）。密钥文件那条（上面）只管「输入的路径」，管不到「命令的输出」，所以另立这一段。
 //
+// 得、程序名和 pid 不用管，但下面这几种写法一样把整条命令行打出来，认不出来就等于没有这一段：
+// ps -ef、pgrep -a、pstree -a、top -c、tasklist /v、/proc/<pid>/cmdline、wmic process、Win32_Process、
+// 挑出 CommandLine 那一列、systemctl status（CGroup 一节里每个进程一整行）。
+//
 // 这一段的处理是「拦住、给条明路」，不是「一律不许看」：看进程是调试的日常，不能堵死。要跑就接一条管道
 // 把输出过 redactor（agents/hooks/redact-secrets.mjs，和这条钩子一起装进 ~/.fleet-dao/hooks/）：
 //   ps -ef | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
@@ -1043,11 +1047,83 @@ const PSTREE_ARGS = new Set([...'CHN']);
 const TOP_ARGS = new Set([...'dEenopUu']);
 
 /**
+ * systemctl 的子命令里会打出进程命令行的（systemctl 1 的 man、systemd 254 实测）：
+ * - status：活动状态后面就是 CGroup 一节，每行是「PID 完整命令行」，服务里跑的进程带的口令（--token、-s、连接串）整段打出来；
+ * - show：不写 -p 时打全部属性，其中有 ExecStart（老版本 systemd < 239 写成 ExecStart={ 路径 ; 参数… }，参数一并在里面）、
+ *   ExecMainStartTimestamp、ExecMainPID（MainPID 是主进程的 pid，进程一退就没了，也打）；挑列看的那几种写法另有 COMMANDLINE_COLUMN_RE 管；
+ * - cat：把 unit 文件原样打出来，ExecStart= 那一行连参数一起；dump：内部状态，同样带 ExecStart 和 ExecMain*。
+ * 不打的放行：is-active、is-enabled、is-failed（一个词）、start / stop / restart（动作）、list-units、list-unit-files、
+ * list-dependencies（只有单元名）、enable、mask……「挑一条属性看」（show -p ActiveState）也算只打状态，见下面 execPropertyPicked。
+ */
+const SYSTEMCTL_PRINTS = new Set(['status', 'show', 'cat', 'dump']);
+/** systemctl 的全局选项里吃掉一个值的（systemctl 1）：--property 的 =值 和 -p 的值都在这里认，别的开关不吃后面的词 */
+const SYSTEMCTL_VALUE_LONG = opts('--property');
+/** systemctl 的短选项里吃掉一个值的：-H 主机、-M 容器、-p 属性（-pH、-Hfr 这类紧贴着写的也认） */
+const SYSTEMCTL_VALUE_SHORT = new Set([...'HMp']);
+/** systemctl show 的 -p / --property 后面挑的属性名里，有这些就是命令行（老版本 systemd 的 ExecStart={ 参数… } 也认前缀） */
+const SYSTEMCTL_EXEC_PROP =
+  /^(?:ExecStart|ExecStop|ExecReload|ExecStartPre|ExecStartPost|ExecStopPost|ExecCondition|ExecMainPID|ExecMainStartTimestamp|MainPID)$/i;
+
+/**
+ * systemctl show 挑的这几条属性里有没有带命令行的：挑过（写了 -p / --property）且一条带命令行的都没有，才算「只打状态」放行。
+ * 没挑过（show 后面什么都没写）打印全部属性、里面有 ExecStart，返回 true。属性值跟着 -p 一起写在值里面，按逗号、空格切开看。
+ */
+function showPicksExecProps(args) {
+  const picked = [];
+  let sawP = false;
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value;
+    if (v === '--') break;
+    if (v.startsWith('--property')) {
+      sawP = true;
+      const val = v.includes('=') ? v.slice(v.indexOf('=') + 1) : (args[++i]?.value ?? '');
+      picked.push(...val.split(','));
+      continue;
+    }
+    if (!v.startsWith('-') || v === '-') continue;
+    const at = v.indexOf('p'); // -p 就是挑属性；写成 -tp 也只多认一个 p（systemctl 没有吃值的 t）
+    if (at < 1) continue;
+    sawP = true;
+    const rest = v.slice(at + 1);
+    picked.push(...(rest === '' ? (args[++i]?.value ?? '') : rest).split(','));
+  }
+  // 没挑过属性 = 全部属性都打（里面有 ExecStart）；挑过但一条带命令行的都没有 = 只看状态，放行
+  if (!sawP) return true;
+  return picked.some((p) => SYSTEMCTL_EXEC_PROP.test(p.trim()));
+}
+
+/** systemctl 的整个命令行会不会把进程命令行打出来：不是 systemctl 返回 null；是就返回 { why } */
+function systemctlPrintsCommandLine(args) {
+  // 子命令前面可以写全局选项（systemctl --user status …）：--property 和 -H、-M、-p 各吃一个值，其余开关不吃后面的词
+  let i = 0;
+  while (i < args.length) {
+    const v = args[i].value;
+    if (v === '--') {
+      i++;
+      break;
+    }
+    if (!v.startsWith('-') || v === '-') break;
+    if (v.startsWith('--')) {
+      i += !v.includes('=') && SYSTEMCTL_VALUE_LONG.has(v) ? 2 : 1;
+      continue;
+    }
+    const takes = [...v.slice(1)].findIndex((c) => SYSTEMCTL_VALUE_SHORT.has(c)) === v.length - 2;
+    i += takes ? 2 : 1;
+  }
+  const sub = args[i]?.value.toLowerCase();
+  if (sub === undefined || !SYSTEMCTL_PRINTS.has(sub)) return null;
+  if (sub === 'show' && !showPicksExecProps(args.slice(i + 1))) return null;
+  return {
+    why: `systemctl ${sub} 打出了进程的命令行（${sub === 'status' ? 'CGroup 一节里每个进程一整行' : 'ExecStart= 那一行'})`,
+  };
+}
+
+/**
  * 这条叶子命令会不会把某个进程的命令行打出来：是就返回 { why }（why 是拦下时告诉模型是哪一条），不是返回 null。
  * 只看写死的写法；拿变量当命令、或者把输出再加工一道的看不出来——那是这一段的边界，说清楚比假装拦住了好。
  * 只打进程名和 pid 的放行：tasklist（不带 /v）、Get-Process（不挑 CommandLine）、pgrep（-l 只打进程名，procps-ng 的
  * pgrep.c 里 -l 打的是 CMD、-a 才是整条 cmdline）、pstree（不带 -a）、top（不带 -c，默认只打程序名；~/.toprc 里存了
- * 「显示命令行」的认不出，这也是边界）。
+ * 「显示命令行」的认不出，这也是边界）、systemctl（status / show / cat / dump 之外的子命令只打状态或只报成败）。
  */
 function printsCommandLines(leaf) {
   if (!leaf) return null;
@@ -1068,6 +1144,7 @@ function printsCommandLines(leaf) {
     const full = o.flags.has('c') || o.longs.some((l) => longIs(l, '--cmdline-toggle', '--c'));
     return full ? { why: 'top -c 打出了进程的命令行' } : null;
   }
+  if (leaf.name === 'systemctl') return systemctlPrintsCommandLine(leaf.args);
   // /v 多出来的「窗口标题」一列：cmd 窗口跑着命令时，标题就是「cmd.exe - 那条命令行」。Git Bash 里得写 //v（单斜杠会被当路径改写）
   if (leaf.name === 'tasklist') {
     const verbose = words.some((v) => /^(?:\/\/?|-)v$/i.test(v));
@@ -1249,7 +1326,7 @@ function processBlock(why) {
     [
       `fleet-guard：这条命令${why}，进程的命令行里常常带着别的进程的口令（命令行交给进程之后，它就落在那个进程的命令行里，谁都能读：MCP 服务的 -s <secret>、--token、数据库口令），按拦处理（密钥、令牌、口令的值不进对话）。`,
       REDACT_RECIPE,
-      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、pgrep（-l 只打进程名，不带 -a）、pstree -p（不带 -a）、top（不带 -c）、tasklist（不带 /v）、Get-Process（不挑 CommandLine）。',
+      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、pgrep（-l 只打进程名，不带 -a）、pstree -p（不带 -a）、top（不带 -c）、tasklist（不带 /v）、Get-Process（不挑 CommandLine）、systemctl is-active / show -p ActiveState（挑的这几条属性里没有命令行）。',
     ].join('\n'),
   );
 }
