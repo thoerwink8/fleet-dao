@@ -381,9 +381,12 @@ export function createGateway(o: GatewayOptions): Gateway {
    * 翻一个会话（和它里面没存成的那几个话题）的历史，把认得出的一条条补送给后端。
    * 返回补上了几条、没补成几条（没补成的不动它的「没记成」标记，下一轮再来）。
    */
-  async function backfillChat(
-    cursor: { chatId: string; chatKind: MissedChat['chatKind']; sinceMs: number; threadIds: string[] },
-  ): Promise<{ filled: number; failed: number }> {
+  async function backfillChat(cursor: {
+    chatId: string;
+    chatKind: MissedChat['chatKind'];
+    sinceMs: number;
+    threadIds: string[];
+  }): Promise<{ filled: number; failed: number }> {
     let filled = 0;
     let failed = 0;
     // 一个会话翻一遍，里面的话题再各翻一遍（飞书按会话翻只给话题的根消息，话题里的回复要按话题翻）
@@ -503,7 +506,8 @@ export function createGateway(o: GatewayOptions): Gateway {
    */
   function backfill(reason: string): Promise<void> {
     if (backfillRun) return backfillRun;
-    if (backfillFailedAt !== null && now() - backfillFailedAt < timing.backfillRetryMs) return Promise.resolve();
+    if (backfillFailedAt !== null && now() - backfillFailedAt < timing.backfillRetryMs)
+      return Promise.resolve();
     backfillRun = (async () => {
       try {
         await runBackfill(reason);
@@ -537,7 +541,10 @@ export function createGateway(o: GatewayOptions): Gateway {
     for (const { chat, cursor } of wanted) {
       const sinceMs = Math.max(
         floor,
-        Math.min(chat.sinceMs, (cursor?.known ? Date.parse(cursor.lastSentAt) - CURSOR_SLACK_MS : chat.sinceMs)),
+        Math.min(
+          chat.sinceMs,
+          cursor?.known ? Date.parse(cursor.lastSentAt) - CURSOR_SLACK_MS : chat.sinceMs,
+        ),
       );
       try {
         const one = await backfillChat({
