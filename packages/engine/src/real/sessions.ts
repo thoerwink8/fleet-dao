@@ -50,17 +50,12 @@ import {
   closeOpenRuns,
   finishSessionRun,
   getSessionRun,
-  openAlertsByPrefix,
   requestSessionStop,
-  resolveAlertByKey,
   runProgressFacts,
-  upsertAlert,
 } from '@fleet-dao/db';
 import type { RunOutcome } from '@fleet-dao/shared';
-import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
-import type { JevReply } from '../failure/jev.ts';
+import { judgeStallWithJev, NO_JEV } from '../failure/ask.ts';
 import { judgeStall } from '../failure/stall.ts';
-import type { FailureVerdict, TriageChoice } from '../failure/types.ts';
 import {
   type AwaitSessionInput,
   type PortContext,
@@ -82,6 +77,7 @@ import { createDetached } from './session-detached.ts';
 import { createLaunch } from './session-launch.ts';
 import { createLive, type Live } from './session-live.ts';
 import { createOutput } from './session-output.ts';
+import { createPoolHold } from './session-pool-hold.ts';
 import { createPrepare } from './session-prepare.ts';
 import { createProgress } from './session-progress.ts';
 import { createReattach } from './session-reattach.ts';
@@ -89,7 +85,7 @@ import { createTree } from './session-tree.ts';
 import type { SessionPorts, SessionPortsDeps, SessionShared } from './session-types.ts';
 import { asSessionUser, errorText, withRawError } from './session-util.ts';
 import type { SegmentOutcome } from './sessions-segment.ts';
-import { POOL_HOLD_PREFIX, poolHoldKey } from './store-ports.ts';
+import { POOL_HOLD_PREFIX } from './store-ports.ts';
 
 // 拆出去的模块里的名字，对外仍从这里导出（import 路径不变）。
 export {
@@ -196,6 +192,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const { reattach } = createReattach(shared, { ioDirOf, newLive, onEvent, onRateLimit, removeTmp });
   const { prepareTree, relayFacts } = createPrepare(shared, { treeAs, identityOf });
   const { deliveryCheck, readOutput } = createOutput({ treeAs });
+  const { holdOrRelease } = createPoolHold(shared);
   const { startSession } = createLaunch(shared, {
     treeAs,
     removeTmp,
@@ -300,84 +297,6 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (live.mode !== 'resume') return sessionCost;
     if (live.previousCost === null || live.previousCost === undefined) return undefined;
     return Math.max(0, sessionCost - live.previousCost);
-  }
-
-  /**
-   * 会话结束后：跑通了撤掉整池暂停；失败了过一遍失败分流，认出要人修的整池问题就整池暂停，并定这次算不算路由的账。
-   * 规则认不出的失败在这里问 Jev（活动里问，工作流不问）：回答交回去，由 awaitSession 带给工作流的失败分流。
-   */
-  async function holdOrRelease(
-    live: Live,
-    end: SessionEnd,
-  ): Promise<{ routeOutcome: 'ok' | 'fail' | 'neutral'; jev?: JevReply<TriageChoice> }> {
-    if (end.outcome === 'done' || end.outcome === 'blocked') {
-      // 这个池能跑通了（续会话的试探成了）：撤掉整池暂停。
-      try {
-        const held = await openAlertsByPrefix(db, poolHoldKey(live.poolId));
-        if (held.some((a) => a.dedupeKey === poolHoldKey(live.poolId))) {
-          await resolveAlertByKey(db, { dedupeKey: poolHoldKey(live.poolId), by: 'engine' });
-        }
-      } catch (error) {
-        log('账号池的暂停没撤掉', { poolId: live.poolId, error: errorText(error) });
-      }
-      return { routeOutcome: 'ok' };
-    }
-    if (end.outcome !== 'failed' || !end.failure) return { routeOutcome: 'neutral' };
-    const f = end.failure;
-    let verdict: FailureVerdict;
-    let asked: JevReply<TriageChoice> | undefined;
-    try {
-      ({ verdict, jev: asked } = await triageFailureAsked(
-        {
-          source: `session:${live.stage}`,
-          stage: live.stage,
-          poolId: live.poolId,
-          routeId: live.routeId,
-          hostId: live.hostId,
-          code: f.code,
-          message: f.message,
-          ...(f.httpStatus === undefined ? {} : { httpStatus: f.httpStatus }),
-          ...(f.exitCode === undefined ? {} : { exitCode: f.exitCode }),
-          ...(f.signal === undefined ? {} : { signal: f.signal }),
-          ...(f.transcriptTail ? { transcriptTail: f.transcriptTail } : {}),
-          ...(f.resetsAt ? { resetsAt: f.resetsAt } : {}),
-          machine: deps.machine,
-          runAsUser: live.user,
-          now: clock().toISOString(),
-        },
-        {
-          jev,
-          ...jevTimeout,
-          ctx: {
-            subject: `run:${live.runId}`,
-            about: `任务 ${live.taskId} 的 ${live.stage} 阶段（会话失败）`,
-          },
-        },
-      ));
-    } catch (error) {
-      log('失败分流判不了这次会话（按不算路由账记）', { runId: live.runId, error: errorText(error) });
-      return { routeOutcome: 'neutral' };
-    }
-    const jevPart = asked ? { jev: asked } : {};
-    if (verdict.shared?.scope === 'pool' && verdict.shared.until === undefined) {
-      // 要人修的整池问题：所有任务一起避开这个池，等人修好（或续会话的试探跑通）。规则没写修法的登录失效（AU2 管各家的
-      // 登录），修法照执行方式写：去哪台机器、以哪个会话用户重新登录哪一家。
-      const fix =
-        verdict.humanFix ??
-        (verdict.rule === 'AU2' ? live.driver.loginFix(`「${deps.machine}」`, live.user) : undefined);
-      try {
-        await upsertAlert(db, {
-          dedupeKey: poolHoldKey(live.poolId),
-          level: 'decision',
-          taskId: live.taskId,
-          title: `账号池 ${live.poolId} 整池暂停：${verdict.title}`,
-          body: [fix, verdict.reason].filter(Boolean).join('。'),
-        });
-      } catch (error) {
-        log('账号池暂停没写进库（选路照样会派过去）', { poolId: live.poolId, error: errorText(error) });
-      }
-    }
-    return { routeOutcome: verdict.routeOutcome, ...jevPart };
   }
 
   /**
