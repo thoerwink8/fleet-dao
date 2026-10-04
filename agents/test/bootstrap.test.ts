@@ -18,7 +18,11 @@ interface SyncArgs {
   force: boolean;
 }
 interface Lib {
-  shouldManage(o: { home: string; env?: Record<string, string> }): { manage: boolean; why?: string };
+  shouldManage(o: { home: string; env?: Record<string, string> }): {
+    manage: boolean;
+    why?: string;
+    unreadable?: string;
+  };
   healthReasons(o: { home: string }): Health;
   bootstrap(o: {
     home: string;
@@ -185,6 +189,35 @@ describe('不该管的机器不动手', () => {
       }),
     );
     expect(lib.shouldManage({ home }).manage).toBe(true);
+  });
+
+  it('【故意造出的失败】没有 synced.json 的老机器、设置文件又读不了：明说判不了，不当成「没有旧钩子」静默退出（#829 补审挑出来的）', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bootstrap-'));
+    dirs.push(home);
+    write(join(home, '.claude', 'settings.json'), '{坏了');
+    expect(lib.shouldManage({ home })).toMatchObject({
+      manage: false,
+      unreadable: expect.stringMatching(/读不了/),
+    });
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(out.join('')).toMatch(/引导钩子没核成.*读不了.*pnpm agents:sync/);
+    expect(f.calls).toHaveLength(0);
+    // 真当钩子跑也是这样：退出 0、说出来
+    const r = spawnSync(process.execPath, [HOOK], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/引导钩子没核成/);
+  });
+
+  it('设置文件根本不存在（不是读不了）：和法国会话用户一样不管、不出声', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bootstrap-'));
+    dirs.push(home);
+    expect(lib.shouldManage({ home })).toMatchObject({ manage: false });
+    expect(lib.shouldManage({ home }).unreadable).toBeUndefined();
   });
 
   it('FLEET_BOOTSTRAP=off：哪怕旧也不动', () => {
