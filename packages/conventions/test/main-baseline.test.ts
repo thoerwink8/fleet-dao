@@ -1,10 +1,10 @@
 // 主线「上一次真绿的头」（src/main-baseline.ts）和它的入口（bin/main-base.ts）。
 // 查不到、查不成都得退到全跑，绝不拿空当「上次绿就是这次」。
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { GhApi } from '../src/gh-api.ts';
 import { GREEN_LOOKBACK, lastGreenMainSha } from '../src/main-baseline.ts';
+import { runChild } from './child.ts';
 
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -78,11 +78,10 @@ describe('lastGreenMainSha', () => {
   });
 });
 
-describe('入口 main-base.ts', () => {
+describe('入口 main-base.ts', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/main-base.ts', import.meta.url));
   const go = (args: string[], env: Record<string, string> = {}) =>
-    spawnSync(process.execPath, [bin, ...args], {
-      encoding: 'utf8',
+    runChild(process.execPath, [bin, ...args], {
       env: { ...process.env, GITHUB_TOKEN: '', GITHUB_REPOSITORY: '', ...env },
     });
 

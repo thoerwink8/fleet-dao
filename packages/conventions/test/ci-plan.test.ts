@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -34,6 +33,7 @@ import {
 import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
 import { listTestFiles, parseTimings, type TestBox, TIMINGS_FILE } from '../src/test-split.ts';
+import { runChild } from './child.ts';
 import { memRepo } from './helpers.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -703,12 +703,11 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   });
 });
 
-describe('入口', () => {
+describe('入口', { timeout: 0 }, () => {
   const plan = fileURLToPath(new URL('../src/bin/ci-plan.ts', import.meta.url));
   const verdict = fileURLToPath(new URL('../src/bin/ci-verdict.ts', import.meta.url));
   const run = (bin: string, args: string[], env: Record<string, string> = {}) =>
-    spawnSync(process.execPath, [bin, ...args], {
-      encoding: 'utf8',
+    runChild(process.execPath, [bin, ...args], {
       env: { ...process.env, GITHUB_OUTPUT: '', GITHUB_STEP_SUMMARY: '', ...env },
     });
 
@@ -836,7 +835,7 @@ describe('ci.yml 和这里对得上', () => {
    * 一样红了另外两样照样跑完、各自写出结果，开关说不跑的写 skipped。
    */
   // 每条都起 bash + 几个后台子进程：Windows 本机在别的测试一起跑时一条能到 5–10 秒，默认 5 秒的限时会误红。
-  describe('lint 的并行步（真跑它的脚本）', { timeout: 30_000 }, () => {
+  describe('lint 的并行步（真跑它的脚本）', { timeout: 0 }, () => {
     const doc = parse(yml) as {
       jobs: { lint: { steps: { id?: string; run?: string }[] } };
     };
@@ -860,8 +859,7 @@ describe('ci.yml 和这里对得上', () => {
       chmodSync(pnpm, 0o755);
       const out = join(dir, 'out');
       writeFileSync(out, '');
-      const r = spawnSync('bash', ['-c', script], {
-        encoding: 'utf8',
+      const r = runChild('bash', ['-c', script], {
         env: {
           ...process.env,
           PATH: `${bin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
@@ -921,7 +919,7 @@ describe('ci.yml 和这里对得上', () => {
    * 抠出 deploy 里「给 /etc/skel 瘦身」那一步，配一个假 sudo（照原样执行，命令行含指定片段时假装失败），
    * SKEL 指到临时目录真跑：瘦成、半路失败要挪回去、挪不回去要红。
    */
-  describe('deploy 的 skel 瘦身步（真跑它的脚本）', { timeout: 30_000 }, () => {
+  describe('deploy 的 skel 瘦身步（真跑它的脚本）', { timeout: 0 }, () => {
     const doc = parse(yml) as {
       jobs: { deploy: { steps: { name?: string; if?: unknown; run?: string }[] } };
     };
@@ -946,8 +944,7 @@ describe('ci.yml 和这里对得上', () => {
         ].join('\n'),
       );
       chmodSync(sudo, 0o755);
-      const r = spawnSync('bash', ['-c', step?.run ?? ''], {
-        encoding: 'utf8',
+      const r = runChild('bash', ['-c', step?.run ?? ''], {
         env: {
           ...process.env,
           PATH: `${dir}/bin${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
@@ -987,7 +984,7 @@ describe('ci.yml 和这里对得上', () => {
   });
 
   /** 抠出 lint 里「汇总」那一步的脚本，原样交给 bash 跑：每种红法都造一遍，看退出码和报出来的名字。 */
-  describe('lint 的汇总步（真跑它的脚本）', () => {
+  describe('lint 的汇总步（真跑它的脚本）', { timeout: 0 }, () => {
     const doc = parse(yml) as {
       jobs: { lint: { steps: { name?: string; run?: string }[] } };
     };
@@ -1003,10 +1000,7 @@ describe('ci.yml 和这里对得上', () => {
       HYGIENE_HISTORY: 'success',
     };
     const run = (over: Record<string, string> = {}) =>
-      spawnSync('bash', ['-c', script], {
-        encoding: 'utf8',
-        env: { ...process.env, ...base, ...over },
-      });
+      runChild('bash', ['-c', script], { env: { ...process.env, ...base, ...over } });
 
     it('找得到汇总步和它的脚本（不然下面几条等于没查）', () => {
       expect(script).toContain('set -euo pipefail');

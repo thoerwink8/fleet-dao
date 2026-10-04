@@ -1,6 +1,5 @@
 // CI 测试怎么分台（src/test-split.ts）：列测试文件、按环境的类和能力标记、按耗时装箱。
 // 带【故意造出的失败】的都是「造一份坏的/怪的输入，判定必须拒或必须照样跑」：平时绿着看不出它还在不在拦。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +23,7 @@ import {
   unitOfTestFile,
   withSiblings,
 } from '../src/test-split.ts';
+import { runChild } from './child.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const REPO = fsRepo(ROOT);
@@ -39,16 +39,16 @@ const read = (rel: string) => REPO.read(rel);
 const temporalOf = (files: readonly string[]) =>
   new Set(files.filter((f) => TEMPORAL_MARKER.test(read(f) ?? '')));
 
-describe('列测试文件：和 vitest 自己收的是一份（vitest.config.ts 的 include 就取 TEST_INCLUDE）', () => {
+describe('列测试文件：和 vitest 自己收的是一份（vitest.config.ts 的 include 就取 TEST_INCLUDE）', {
+  timeout: 0,
+}, () => {
   it('枚举出来的正好是 vitest list 列出来的（多一个少一个都红：少了那个测试就没人跑）', () => {
     // 起一个子进程跑 vitest list：本进程正跑着 vitest，自己再拉一个实例会打架。
     // 装着的 vitest 不是测试的输入（版本在缓存键的环境身份里），路径拆开写，免得 ci-plan.test.ts 的扫描器当成「读了包外文件」
     const vitestBin = ['node_modules', 'vitest', 'vitest.mjs'].join('/');
     const out = join(mkdtempSync(join(tmpdir(), 'test-split-')), 'list.json');
-    const r = spawnSync(process.execPath, [join(ROOT, vitestBin), 'list', '--filesOnly', `--json=${out}`], {
+    const r = runChild(process.execPath, [join(ROOT, vitestBin), 'list', '--filesOnly', `--json=${out}`], {
       cwd: ROOT,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
     });
     expect(r.status, r.stderr.slice(0, 500)).toBe(0);
     const listed = (JSON.parse(readFileSync(out, 'utf8')) as { file: string }[])

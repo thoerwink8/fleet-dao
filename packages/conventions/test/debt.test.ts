@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +17,7 @@ import {
 import type { GitHubReader, PlanIssue } from '../src/github-api.ts';
 import { parseMd } from '../src/markdown.ts';
 import { fsRepo } from '../src/repo.ts';
+import { runChild } from './child.ts';
 import { memRepo } from './helpers.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -290,11 +290,13 @@ describe('欠账：必过检查必须确定（#87）', () => {
     ]);
   });
 
-  it('入口不带 --live：真起一个进程、把 fetch 换成一碰就炸的，照样跑完、退出码和进程里一样', () => {
+  // 同步起子进程：不靠 vitest 的 5 秒限时，子进程自带上限（child.ts）
+  it('入口不带 --live：真起一个进程、把 fetch 换成一碰就炸的，照样跑完、退出码和进程里一样', {
+    timeout: 0,
+  }, () => {
     const bin = fileURLToPath(new URL('../src/bin/debt-check.ts', import.meta.url));
     const noNet = `data:text/javascript,globalThis.fetch=()=>{throw new Error('不许出网')}`;
-    const r = spawnSync(process.execPath, ['--import', noNet, bin], {
-      encoding: 'utf8',
+    const r = runChild(process.execPath, ['--import', noNet, bin], {
       env: { ...process.env, GITHUB_TOKEN: '', GH_TOKEN: '', GITHUB_API_URL: 'http://127.0.0.1:9' },
     });
     const expected = checkDebtDocs(fsRepo(ROOT));

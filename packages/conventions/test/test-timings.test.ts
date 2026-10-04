@@ -1,6 +1,5 @@
 // 刷新耗时表（src/test-timings.ts、bin/ci-timings.ts）：从 `gh run view --log` 认出每个测试文件的耗时、和旧表合并、写回仓里。
 // 带【故意造出的失败】的：日志里认不出东西时必须退出 2、不写半张表。
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
 import { medianOfRuns, mergeTimings, parseRunLog, renderTimings } from '../src/test-timings.ts';
+import { runChild } from './child.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
@@ -101,10 +101,10 @@ describe('合并、写回', () => {
   });
 });
 
-describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', () => {
+describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-timings.ts', import.meta.url));
   const tmp = mkdtempSync(join(tmpdir(), 'ci-timings-'));
-  const run = (args: string[]) => spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8' });
+  const run = (args: string[]) => runChild(process.execPath, [bin, ...args]);
 
   it('认得出：写到 --out，格式就是仓里那份的样子', () => {
     const log = join(tmp, 'ok.log');
