@@ -171,7 +171,7 @@ describe('home（/）：四种状态', () => {
     // 状态条
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
     expect(screen.getByText(/12 在线 · 2 探不通/)).toBeTruthy();
-    expect(screen.getByText(/引擎关着/)).toBeTruthy();
+    expect(screen.getByText(/引擎已停用/)).toBeTruthy();
   });
 
   test('verify_pending 卡片的 badge 不是 fail 红色（还没验不显示成失败）', () => {
@@ -317,5 +317,89 @@ describe('home（/）：三段流水线图', () => {
   test('没给重试函数时「重试」照样有：点了重读所有读失败的查询（LoadError 的兜底，#902 D5），不是点了没用的按钮', () => {
     renderHome({ status: 'error', error: new Error('500') });
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+  });
+});
+
+describe('home（/）：引擎那一格（#902 D7）', () => {
+  const engineChip = () =>
+    Array.from(document.querySelectorAll('[data-health-chip]')).find((el) =>
+      el.textContent?.includes('引擎'),
+    );
+  const withEngine = (engine: HomeData['health']['engine']): HomeData => ({
+    ...SAMPLE,
+    health: { ...SAMPLE.health, engine },
+  });
+
+  test('on：写「正常」，不标色', () => {
+    renderHome({ status: 'data', data: withEngine({ state: 'on' }) });
+    expect(engineChip()?.getAttribute('data-health-chip')).toBe('ok');
+    expect(engineChip()?.textContent).toContain('正常');
+  });
+
+  test('down：写「引擎没连上」和原因，标红（bad），绝不写「正常」', () => {
+    renderHome({
+      status: 'data',
+      data: withEngine({ state: 'down', detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' }),
+    });
+    const chip = engineChip();
+    expect(chip?.getAttribute('data-health-chip')).toBe('bad');
+    expect(chip?.className).toContain('border-st-fail');
+    expect(chip?.textContent).toContain('引擎没连上');
+    expect(chip?.textContent).toContain('没有在拉活的引擎工人');
+    expect(chip?.textContent).not.toContain('正常');
+  });
+
+  test('off：写「引擎已停用」，用提示色（warn）不是红', () => {
+    renderHome({ status: 'data', data: withEngine({ state: 'off', detail: '临时调整' }) });
+    expect(engineChip()?.getAttribute('data-health-chip')).toBe('warn');
+    expect(engineChip()?.textContent).toContain('引擎已停用');
+    expect(engineChip()?.className).not.toContain('border-st-fail');
+  });
+
+  test('unknown：写「没查成」，灰虚线，不写正常', () => {
+    renderHome({ status: 'data', data: withEngine({ state: 'unknown' }) });
+    expect(engineChip()?.getAttribute('data-health-chip')).toBe('muted');
+    expect(engineChip()?.textContent).toContain('没查成');
+    expect(engineChip()?.textContent).not.toContain('正常');
+  });
+});
+
+describe('home（/）：窄屏上流水线图竖着叠（#902 D11）', () => {
+  const realRect = Element.prototype.getBoundingClientRect;
+  afterEach(() => {
+    Element.prototype.getBoundingClientRect = realRect;
+  });
+  const narrow = (width: number) => {
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      return {
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: 100,
+        width,
+        height: 100,
+        toJSON() {},
+      } as DOMRect;
+    };
+  };
+
+  test('容器 340 宽（手机）：标成竖叠、没有缩放按钮、三条泳道还在、每张单还是一个节点', () => {
+    narrow(340);
+    renderHome({ status: 'data', data: SAMPLE });
+    expect(document.querySelector('[data-flow-stacked="true"]')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '放大' })).toBeNull();
+    expect(
+      Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) => l.getAttribute('data-flow-lane')),
+    ).toEqual(['scope', 'manual', 'verify']);
+    expect(document.querySelectorAll('[data-id^="ticket:"]').length).toBe(SAMPLE.running.length);
+  });
+
+  test('容器 1200 宽（桌面）：横排、有缩放按钮', () => {
+    narrow(1200);
+    renderHome({ status: 'data', data: SAMPLE });
+    expect(document.querySelector('[data-flow-stacked="false"]')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '放大' })).toBeTruthy();
   });
 });

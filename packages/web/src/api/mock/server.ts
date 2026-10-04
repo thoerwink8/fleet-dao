@@ -168,6 +168,27 @@ function askEffect(a: MAsk, state: TaskState): Ask['effect'] {
   return 'change';
 }
 
+/**
+ * 主页引擎那一格的演示：默认正常；地址上加 ?mockEngine=off / down / unknown 看另外三种（开发、演示版看样子用，真后端不读它）。
+ * 认不出的值按正常算，不报错：它只影响假数据的样子。
+ */
+function mockEngine() {
+  const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockEngine');
+  switch (v) {
+    case 'off':
+      return {
+        state: 'off' as const,
+        detail: '这台机器按设置没开引擎（临时调整）',
+      };
+    case 'down':
+      return { state: 'down' as const, detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' };
+    case 'unknown':
+      return { state: 'unknown' as const, detail: '这台后端没有接引擎探针，没查成' };
+    default:
+      return { state: 'on' as const };
+  }
+}
+
 export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
@@ -1056,7 +1077,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         decisions,
         running,
         done,
-        health: { quota: quotaState, routes: routesState, engine: { state: 'on' } },
+        health: { quota: quotaState, routes: routesState, engine: mockEngine() },
         flow,
         asOf: iso(),
       });

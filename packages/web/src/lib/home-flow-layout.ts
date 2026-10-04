@@ -19,6 +19,9 @@ export const LANE_GAP = 36;
 export const MAX_CARDS = 5;
 export const MIN_ROWS = 2;
 export const MIN_LANE_W = 250;
+/** 竖叠时两条泳道之间留给箭头的高度，和空泳道正文的高度。 */
+export const STACK_GAP = 36;
+export const EMPTY_BODY_H = 36;
 
 export type LaneKey = SegmentKind | 'none';
 
@@ -31,7 +34,7 @@ export interface LaneInfo {
 }
 
 export type FlowNodeData =
-  | { kind: 'lane'; lane: LaneInfo }
+  | { kind: 'lane'; lane: LaneInfo; stacked?: boolean }
   | { kind: 'ticket'; item: HomeRunning }
   | { kind: 'more'; count: number; lane: LaneKey };
 
@@ -58,6 +61,8 @@ export interface FlowLayout {
   edges: FlowEdge[];
   width: number;
   height: number;
+  /** 窄屏上泳道竖着叠（不能横拖）。 */
+  stacked?: boolean;
 }
 
 /** 这张单排在泳道里的先后：等你拍的 → 出问题的 → 本段待得久的。 */
@@ -88,10 +93,69 @@ export function groupLanes(running: readonly HomeRunning[], flow: readonly HomeF
   });
 }
 
-/** 容器宽度 → 一条泳道多宽（装不下 MIN_LANE_W 时保底，画布自己出横向平移）。 */
+/** 容器宽度 → 横排时一条泳道多宽（向下取整，总宽不会超出容器）。 */
 export function laneWidth(containerWidth: number, lanes: number): number {
   const inner = containerWidth - PAD * 2 - LANE_GAP * (lanes - 1);
-  return Math.max(MIN_LANE_W, Math.floor(inner / lanes));
+  return Math.floor(inner / lanes);
+}
+
+/** 横排每条泳道装不下 MIN_LANE_W 就改成竖着叠：手机、窄窗口上不让人横着拖（拖动还和页面竖向滚动抢手势）。 */
+export function isStacked(containerWidth: number, lanes: number): boolean {
+  return laneWidth(containerWidth, lanes) < MIN_LANE_W;
+}
+
+/** 竖叠：泳道一条压一条，每条占满容器宽；空泳道只留一行字的高度。 */
+function buildStackedLayout(lanes: LaneInfo[], containerWidth: number): FlowLayout {
+  const w = Math.max(MIN_LANE_W, containerWidth - PAD * 2);
+  const nodes: FlowNode[] = [];
+  const edges: FlowEdge[] = [];
+  let y = PAD;
+  lanes.forEach((lane, i) => {
+    const cards = lane.items.length * (CARD_H + GAP) + (lane.hidden.length > 0 ? MORE_H + GAP : 0);
+    const laneH = HEADER_H + (cards > 0 ? cards : EMPTY_BODY_H) + GAP;
+    nodes.push({
+      id: `lane:${lane.key}`,
+      type: 'lane',
+      position: { x: PAD, y },
+      width: w,
+      height: laneH,
+      zIndex: 0,
+      data: { kind: 'lane', lane, stacked: true },
+    });
+    lane.items.forEach((item, j) => {
+      nodes.push({
+        id: `ticket:${item.issueNumber}:${item.repo}`,
+        type: 'ticket',
+        position: { x: PAD * 2, y: y + HEADER_H + GAP + j * (CARD_H + GAP) },
+        width: w - PAD * 2,
+        height: CARD_H,
+        zIndex: 1,
+        data: { kind: 'ticket', item },
+      });
+    });
+    if (lane.hidden.length > 0) {
+      nodes.push({
+        id: `more:${lane.key}`,
+        type: 'more',
+        position: { x: PAD * 2, y: y + HEADER_H + GAP + lane.items.length * (CARD_H + GAP) },
+        width: w - PAD * 2,
+        height: MORE_H,
+        zIndex: 1,
+        data: { kind: 'more', count: lane.hidden.length, lane: lane.key },
+      });
+    }
+    const next = lanes[i + 1];
+    if (next && next.key !== 'none') {
+      edges.push({
+        id: `edge:${lane.key}:${next.key}`,
+        source: `lane:${lane.key}`,
+        target: `lane:${next.key}`,
+        animated: lane.items.length + lane.hidden.length > 0,
+      });
+    }
+    y += laneH + STACK_GAP;
+  });
+  return { nodes, edges, width: w + PAD * 2, height: y - STACK_GAP + PAD, stacked: true };
 }
 
 export function buildFlowLayout(
@@ -100,6 +164,7 @@ export function buildFlowLayout(
   containerWidth: number,
 ): FlowLayout {
   const lanes = groupLanes(running, flow);
+  if (isStacked(containerWidth, lanes.length)) return buildStackedLayout(lanes, containerWidth);
   const w = laneWidth(containerWidth, lanes.length);
   const bodyH =
     Math.max(

@@ -61,7 +61,8 @@ describe('/api/home（内存版）', () => {
     // 持续状态：额度有读成也有没读成的、路由有探不通的（fixture 路由全 ok 时 ok；这里 relay 都在线）、引擎开着。
     expect(home.health.quota.state).toBe('ok');
     expect(home.health.routes.state).toBe('ok');
-    expect(home.health.engine.state).toBe('on');
+    // 这个测试装配没有引擎探针：写「没查成」，不冒充正常（引擎那一格的各种状态见下面「引擎那一格」）
+    expect(home.health.engine.state).toBe('unknown');
   });
 
   it('未验不误红：需求卡在 asking 只显示「等你拍」，verify 有排队会话只显示「排队」，都不是 failed', async () => {
@@ -332,7 +333,7 @@ describe('/api/home（PG 版）', () => {
     expect(home.running.map((r) => r.issueNumber)).toEqual([12]);
     expect(home.done.map((d) => d.prNumber)).toEqual([39]);
     expect(home.done[0]?.issueNumber).toBe(13);
-    expect(home.health.engine.state).toBe('on');
+    expect(home.health.engine.state).toBe('unknown');
   });
 
   it('故意造红（PG）：listPendingAsks 读不到就是 500', async () => {
