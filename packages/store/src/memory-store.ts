@@ -678,6 +678,13 @@ export function createMemoryStore(
         })
         .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
     },
+    async listSegmentRunsForTasks(taskIds) {
+      const wanted = new Set(taskIds);
+      return data.segmentRuns
+        .filter((r) => r.taskId !== undefined && wanted.has(r.taskId))
+        .map((r): SegmentRunRecord => ({ ...r, matchedBy: 'task' }))
+        .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
+    },
     async getPlans(runIds) {
       const out = new Map<string, RunPlan>();
       for (const id of runIds) {

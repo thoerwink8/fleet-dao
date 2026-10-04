@@ -12,6 +12,7 @@ import {
   DEMO_STRICT_DEFAULT,
   DemoLinksResponse,
   type DemoScope,
+  flowStages,
   HARD_BANS,
   HomeResponseSchema,
   type HostId,
@@ -44,6 +45,7 @@ import {
   TaskActionRequest,
   TaskDetailResponse,
   TimelineResponse,
+  taskFlow,
   UpdateChannelRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
@@ -913,6 +915,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ),
       ].sort((a, b) => b.since.localeCompare(a.since));
       const TERMINAL_M = new Set(['done', 'stopped', 'failed']);
+      // 三段流水和真后端 buildHome 一个读法：readSegmentRun 读好，再交给 shared 的 taskFlow / flowStages 推
+      const viewsOf = (t: (typeof st.tasks)[number]) =>
+        (t.segmentRuns ?? []).map((r) =>
+          readSegmentRun(
+            {
+              ...r,
+              modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+              billing: st.channels.find((c) => c.id === r.channel)?.billing,
+              matchedBy: 'task',
+            },
+            { taskFinished: TERMINAL_M.has(t.task.state) },
+          ),
+        );
+      const pendingOf = (t: (typeof st.tasks)[number]) => {
+        const asked = t.asks
+          .filter((a) => a.answer === undefined)
+          .sort((a, b) => b.askedAt.localeCompare(a.askedAt))[0];
+        return asked ? { title: asked.question, since: asked.askedAt } : undefined;
+      };
       const running = st.tasks
         .filter((t) => !TERMINAL_M.has(t.task.state))
         .sort((a, b) => a.task.priority - b.task.priority)
@@ -921,20 +942,40 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             (r) => !r.startedAt && !r.endedAt,
           );
           const asking = t.task.state === 'asking';
+          const flow = taskFlow(t.task, viewsOf(t));
+          const decision = pendingOf(t);
+          const waitingReason = asking
+            ? ('founder_decision' as const)
+            : queued
+              ? ('queue' as const)
+              : flow.segment === 'verify_pending'
+                ? ('verify_round' as const)
+                : flow.segment === 'merge'
+                  ? ('merge_queue' as const)
+                  : ('nothing' as const);
+          const waitingSince = asking
+            ? decision?.since
+            : queued
+              ? queued.queuedAt
+              : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                ? flow.stageSince
+                : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,
             repo: repoName(t.task.repoId),
-            segment: null,
-            waitingReason: asking
-              ? ('founder_decision' as const)
-              : queued
-                ? ('queue' as const)
-                : ('nothing' as const),
-            ...(queued ? { waitingSince: queued.queuedAt } : {}),
+            segment: flow.segment,
+            waitingReason,
+            ...(waitingSince ? { waitingSince } : {}),
+            taskSince: t.task.createdAt,
+            ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
+            ...(flow.worker ? { worker: flow.worker } : {}),
+            ...(decision ? { pendingDecision: decision.title } : {}),
+            ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
             link: `/tasks/${t.task.id}`,
           };
         });
+      const flow = flowStages(st.tasks.flatMap(viewsOf), running);
       const done = st.tasks
         .flatMap((t) =>
           t.subtasks
@@ -996,6 +1037,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         running,
         done,
         health: { quota: quotaState, routes: routesState, engine: { state: 'on' } },
+        flow,
         asOf: iso(),
       });
     },

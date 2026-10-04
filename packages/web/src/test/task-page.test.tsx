@@ -90,7 +90,8 @@ describe('三段的单：按段、按模型，每一笔', () => {
 
 describe('老流程的单', () => {
   test('没有三段的流水：照旧是会话时间线和「时间与用量」', async () => {
-    open('/tasks/t-12');
+    // t-12 现在也带三段流水（主页流水线图的演示数据），老流程的样例换成 t-19（只有会话）
+    open('/tasks/t-19');
     expect(await screen.findByRole('heading', { name: '时间与用量' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: '会话时间线' })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: '三段' })).toBeNull();

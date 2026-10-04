@@ -323,7 +323,8 @@ export function useHome(): { data: HomeState } {
   const api = useApi();
   const query = useQuery({ queryKey: ['home'], queryFn: () => api.home() });
   if (query.isPending) return { data: { status: 'loading' } };
-  if (query.error) return { data: { status: 'error', error: query.error } };
+  if (query.error)
+    return { data: { status: 'error', error: query.error, retry: () => void query.refetch() } };
   const data = query.data;
   return {
     data: {
@@ -337,6 +338,7 @@ export function useHome(): { data: HomeState } {
           return { ...d, link: brand.repoLink(repo, 'pull', d.prNumber) };
         }),
         health: data.health,
+        flow: data.flow,
       },
     },
   };

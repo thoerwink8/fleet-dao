@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { cn } from '../lib/utils';
+import { Button } from './ui/button';
 import { Skeleton } from './ui/skeleton';
 
 /** 后台页面的外框：标题、一句说明、右上角的操作。 */
@@ -132,14 +133,29 @@ export function LoadingRows({ rows = 4 }: { rows?: number }) {
   );
 }
 
-/** 查询出错时的一行说明：不编造，写明没查成、哪一块没查成。 */
-export function LoadError({ error, what }: { error: unknown; what?: string | undefined }) {
+/** 查询出错时的一行说明：不编造，写明没查成、哪一块没查成；给了 onRetry 就带一个「重试」按钮。 */
+export function LoadError({
+  error,
+  what,
+  onRetry,
+}: {
+  error: unknown;
+  what?: string | undefined;
+  onRetry?: (() => void) | undefined;
+}) {
   return (
     <div
       role="alert"
-      className="rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-ink-fail"
+      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-ink-fail"
     >
-      {what ? `${what}没读成` : '没查成'}：{error instanceof Error ? error.message : String(error)}
+      <span>
+        {what ? `${what}没读成` : '没查成'}：{error instanceof Error ? error.message : String(error)}
+      </span>
+      {onRetry ? (
+        <Button type="button" size="xs" variant="outline" onClick={onRetry}>
+          重试
+        </Button>
+      ) : null}
     </div>
   );
 }

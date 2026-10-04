@@ -5,7 +5,7 @@
 // - 持续状态条有问题也用提示色，不伪装成失败。
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiProvider } from '../src/api/client';
@@ -67,6 +67,11 @@ const SAMPLE: HomeData = {
       link: '/notifications',
     },
   ],
+  flow: [
+    { segment: 'scope', inFlight: 1, avgMs: 8 * 60_000, samples: 5 },
+    { segment: 'manual', inFlight: 1, avgMs: 41 * 60_000, samples: 4 },
+    { segment: 'verify', inFlight: 1, samples: 0 },
+  ],
   running: [
     {
       issueNumber: 556,
@@ -74,6 +79,10 @@ const SAMPLE: HomeData = {
       repo: 'thoerwink8/fleet-dao',
       segment: 'doing',
       waitingReason: 'nothing',
+      taskSince: '2026-10-02T02:00:00Z',
+      stageSince: '2026-10-02T08:00:00Z',
+      worker: 'Opus 5.5',
+      lastEvent: { text: '动手开跑 · Opus 5.5', at: '2026-10-02T08:00:00Z', tone: 'ok' },
       link: '/home3',
     },
     {
@@ -92,6 +101,7 @@ const SAMPLE: HomeData = {
       segment: 'scoping',
       waitingReason: 'founder_decision',
       waitingSince: '2026-10-01T22:00:00Z',
+      pendingDecision: '要不要先开演练场？',
       link: '/home3',
     },
   ],
@@ -135,6 +145,7 @@ describe('home（/）：四种状态', () => {
       decisions: [],
       running: [],
       done: [],
+      flow: SAMPLE.flow,
     };
     renderHome({ status: 'data', data: empty });
     expect(screen.getByText(/没有要你拍的/)).toBeTruthy();
@@ -153,8 +164,8 @@ describe('home（/）：四种状态', () => {
     expect(screen.getByText('清理：删编排层、删 Fusion')).toBeTruthy();
     expect(screen.getByText('路由配置改两层')).toBeTruthy();
     // 验证 verify_pending 和 founder_decision 可见
-    expect(screen.getByText(/还没验/)).toBeTruthy();
-    expect(screen.getByText(/等你拍/)).toBeTruthy();
+    expect(document.querySelector('[data-running-card="verify_pending"]')?.textContent).toContain('还没验');
+    expect(document.querySelector('[data-running-card="scoping"]')?.textContent).toContain('等你拍');
     // 做完的块
     expect(screen.getByText(/feat\(routing\): 把路由配置拆成两层/)).toBeTruthy();
     // 状态条
@@ -178,5 +189,112 @@ describe('home（/）：四种状态', () => {
       el.textContent?.includes('引擎'),
     );
     expect(chip?.getAttribute('data-health-chip')).toBe('warn');
+  });
+});
+
+function ticket(n: number, over: Partial<HomeData['running'][number]> = {}): HomeData['running'][number] {
+  return {
+    issueNumber: n,
+    title: `第 ${n} 张单`,
+    repo: 'thoerwink8/fleet-dao',
+    segment: 'doing',
+    waitingReason: 'nothing',
+    link: `/tasks/t-${n}`,
+    ...over,
+  };
+}
+
+describe('home（/）：三段流水线图', () => {
+  test('三条泳道固定对题 → 动手 → 验收，头上写在途数和平均耗时；没有样本写「还没有跑完的样本」，不写 0', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    const lanes = Array.from(document.querySelectorAll('[data-flow-lane]'));
+    expect(lanes.map((l) => l.getAttribute('data-flow-lane'))).toEqual(['scope', 'manual', 'verify']);
+    expect(lanes[0]?.textContent).toContain('对题');
+    expect(lanes[0]?.textContent).toContain('平均 8 分钟 · 5 笔');
+    expect(lanes[1]?.textContent).toContain('平均 41 分钟 · 4 笔');
+    expect(lanes[2]?.textContent).toContain('还没有跑完的样本');
+    expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
+  });
+
+  test('卡片：单号、标题、谁在做、本段待了多久、最近事件；等你拍的有标记和要拍的事', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    const doing = document.querySelector('[data-id^="ticket:556"]');
+    expect(doing?.textContent).toContain('#556');
+    expect(doing?.textContent).toContain('Opus 5.5');
+    expect(doing?.textContent).toContain('本段');
+    expect(doing?.textContent).toContain('最近：动手开跑 · Opus 5.5');
+    const asking = document.querySelector('[data-id^="ticket:450"]');
+    expect(asking?.querySelector('[data-needs-founder="true"]')).toBeTruthy();
+    expect(asking?.textContent).toContain('要你拍：要不要先开演练场？');
+    expect(asking?.textContent).toContain('没有进程在跑');
+  });
+
+  test('点卡片进单子详情（链接指向任务页）', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    const link = document.querySelector('[data-id^="ticket:556"] a');
+    expect(link?.getAttribute('href')).toBe('/home3');
+  });
+
+  test('出问题（超时 / 失败）的卡画成 fail 红，和「还没验」「在等」分开', () => {
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: [
+          ticket(1, {
+            lastEvent: { text: '动手超时：30 分钟没交活', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
+          }),
+          ticket(2, { segment: 'verify_pending', waitingReason: 'verify_round' }),
+        ],
+      },
+    });
+    const bad = document.querySelector('[data-id^="ticket:1:"]');
+    expect(bad?.querySelector('[class*="bg-st-fail"]')).toBeTruthy();
+    expect(bad?.textContent).toContain('动手超时：30 分钟没交活');
+    const pending = document.querySelector('[data-id^="ticket:2:"]');
+    expect(pending?.querySelector('[class*="bg-st-fail"]')).toBeNull();
+    expect(pending?.textContent).toContain('等第二意见');
+  });
+
+  test('一条泳道里单子多：只摆前 5 张，多的合成「还有 N 张」，不是丢掉', () => {
+    const running = Array.from({ length: 8 }, (_, i) => ticket(100 + i));
+    renderHome({ status: 'data', data: { ...SAMPLE, running } });
+    expect(document.querySelectorAll('[data-id^="ticket:"]').length).toBe(5);
+    expect(document.querySelector('[data-id="more:manual"]')?.textContent).toContain('还有 3 张');
+  });
+
+  test('超长标题：一行截断、悬停能看全，不撑破卡片', () => {
+    const long = '一个非常非常长的标题'.repeat(12);
+    renderHome({ status: 'data', data: { ...SAMPLE, running: [ticket(7, { title: long })] } });
+    const link = document.querySelector('[data-id^="ticket:7:"] a');
+    expect(link?.getAttribute('title')).toBe(long);
+    const titleEl = Array.from(link?.querySelectorAll('span') ?? []).find((el) => el.textContent === long);
+    expect(titleEl?.className).toContain('truncate');
+  });
+
+  test('推不出在哪一段的单（segment=null）落进「还没分段」泳道，且只在有这样的单时才出现', () => {
+    renderHome({ status: 'data', data: { ...SAMPLE, running: [ticket(9, { segment: null })] } });
+    const lanes = Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) =>
+      l.getAttribute('data-flow-lane'),
+    );
+    expect(lanes).toEqual(['scope', 'manual', 'verify', 'none']);
+    expect(screen.getByText('还没分段')).toBeTruthy();
+    cleanup();
+    renderHome({ status: 'data', data: SAMPLE });
+    expect(document.querySelector('[data-flow-lane="none"]')).toBeNull();
+  });
+
+  test('读不到：写明没读成并带「重试」，点了真的重试；不是空图', () => {
+    const retry = vi.fn();
+    renderHome({ status: 'error', error: new Error('500'), retry });
+    expect(screen.getByText(/主页没读成：500/)).toBeTruthy();
+    expect(document.querySelector('[data-flow-board]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  test('没给重试函数时不画重试按钮（不画点了没用的按钮）', () => {
+    renderHome({ status: 'error', error: new Error('500') });
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
   });
 });

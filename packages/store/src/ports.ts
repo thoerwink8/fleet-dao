@@ -328,6 +328,12 @@ export interface BoardStore {
    * 没这张单（含编号不是 uuid）回空。memory-store.ts 是参照实现。
    */
   listSegmentRuns(taskId: string): Promise<SegmentRunRecord[]>;
+  /**
+   * 一批单的三段流水，一次读完（主页流水线图用，一张张读要几十个往返）。只认 task_id 对得上的行（matchedBy 一律 task）：
+   * task_id 没记的老行不按单号兜底（兜底要逐张单查仓，主页这条路不值得；老单在图上落进「还没分段」）。
+   * 按起跑先后排；不是 uuid 的编号忽略；一张单都没给回空。memory-store.ts 是参照实现。
+   */
+  listSegmentRunsForTasks(taskIds: readonly string[]): Promise<SegmentRunRecord[]>;
   /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
   getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
   lastSay(runId: string): Promise<{ text: string; at: string } | null>;
