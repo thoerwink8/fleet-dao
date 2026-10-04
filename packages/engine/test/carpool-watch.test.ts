@@ -4,10 +4,13 @@ import { describe, expect, it } from 'vitest';
 import type { CarpoolApiRead, CarpoolOutage } from '../src/jobs/carpool-outage.ts';
 import {
   apiFailureAlert,
+  backoffMsFor,
+  burnOfLedger,
   type CarpoolWatchDeps,
   CarpoolWatchFailedError,
   DEFAULT_WATCH_POLICY,
   needsSwitchCheck,
+  readBackoff,
   readSchedule,
   runCarpoolWatchJob,
   trailingFailures,
@@ -75,6 +78,47 @@ describe('这一分钟读不读接口、间隔多少', () => {
     expect(readSchedule(far, solo, T0).everyMs).toBe(5 * MIN);
     expect(readSchedule(led({ outage: outage(10), reads: [ok(-1)] }), solo, T0).everyMs).toBe(MIN);
     expect(readSchedule(led({ outage: outage(-5), reads: [ok(-1)] }), solo, T0).everyMs).toBe(MIN);
+  });
+
+  it('紧：额度剩得多、但照最近的烧速预计 20 分钟内用满，也 1 分钟一次；刚好不到 20 分钟才算', () => {
+    // 9 分钟花 $20（每分钟约 $2.2），最新已用 $40、上限 80 → 还剩 $40 → 约 18 分钟
+    const l = led({ reads: [ok(-10, 20), ok(-5, 30), ok(-1, 40)] });
+    const e = readSchedule(l, carpool, T0);
+    expect(e.everyMs).toBe(MIN);
+    expect(e.why).toContain('烧速');
+    // 同样的钱但花得慢（10 分钟只花 $5）：不提
+    const slow = led({ reads: [ok(-10, 20), ok(-5, 22), ok(-1, 25)] });
+    expect(readSchedule(slow, carpool, T0).everyMs).toBe(5 * MIN);
+  });
+
+  it('【故意造出失败】烧速算不出（读数只有 1 个、花费为负）：不据此提密，也不当成 0 速度——还是平时的节奏', () => {
+    expect(readSchedule(led({ reads: [ok(-1, 70)] }), carpool, T0).everyMs).toBe(MIN); // 剩 12%，走「剩不到 25%」
+    expect(burnOfLedger(led({ reads: [ok(-1, 30)] }), T0).state).toBe('unknown');
+    const negative = led({ reads: [ok(-8, 60), ok(-4, 20), ok(-1, 22)] });
+    expect(burnOfLedger(negative, T0).state).toBe('unknown');
+    expect(readSchedule(negative, carpool, T0).everyMs).toBe(5 * MIN);
+  });
+
+  it('上限不写死：上限是 200、已用 $60（剩 70%）不紧；已用 $160（剩 20%）紧', () => {
+    const quota = (m: number, used: number): CarpoolApiRead => ({
+      ...(ok(m, used) as Extract<CarpoolApiRead, { ok: true }>),
+      quota: { usedUsd: used, limitUsd: 200, resetsAt: at(100), status: 'active' },
+    });
+    expect(readSchedule(led({ reads: [quota(-1, 60)] }), carpool, T0).everyMs).toBe(5 * MIN);
+    expect(readSchedule(led({ reads: [quota(-1, 160)] }), carpool, T0).everyMs).toBe(MIN);
+  });
+
+  it('【故意造出失败】退避期：最近一次失败离现在没到退避间隔就是退避中（读不到按读不到办），过了才不是', () => {
+    const l = led({ reads: [fail(-0.5, 'throttled')] });
+    expect(readBackoff(l, T0)).toMatchObject({ active: true, fails: 1 });
+    expect(readBackoff(l, at(1)).active).toBe(false);
+    const two = led({ reads: [fail(-3), fail(-1)] });
+    expect(readBackoff(two, at(0.5)).active).toBe(true); // 第 2 档 2 分钟：到 +1
+    expect(readBackoff(two, at(1.5)).active).toBe(false);
+    // 读成了就不退避
+    expect(readBackoff(led({ reads: [fail(-1), ok(-0.5)] }), T0).active).toBe(false);
+    expect(backoffMsFor(0)).toBe(0);
+    expect(backoffMsFor(9)).toBe(5 * MIN);
   });
 
   it('【故意造出失败】连着读失败：按 1 → 2 → 5 分钟退避，比「紧」优先——接口在抖，不硬砸', () => {

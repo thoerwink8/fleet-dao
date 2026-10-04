@@ -5,7 +5,12 @@
 // - 认不出（字段缺、时间不是时间）= unreadable，写明原因，不当成「没记过」：引擎读到同样的账本也不切号，驾驶舱得让人看见。
 // - 没接上（开发环境的内存版没有这张表）= unavailable，不拿空冒充「没事」。
 import { type Db, readLatestOrgState } from '@fleet-dao/db';
-import { OrgLedgerViewDocSchema, type OrgSwitchViewSchema } from '@fleet-dao/shared';
+import {
+  type BurnEstimate,
+  estimateBurn,
+  OrgLedgerViewDocSchema,
+  type OrgSwitchViewSchema,
+} from '@fleet-dao/shared';
 import type { z } from 'zod';
 
 export interface OrgSwitchPort {
@@ -23,9 +28,14 @@ export const ORG_SWITCH_NOT_HERE =
   '切号现状没接上：这里是开发环境的内存版，没有切号账本那张表（session_org_state），真库上才有';
 
 type View = z.input<typeof OrgSwitchViewSchema>;
+type Known = Extract<View, { state: 'known' }>;
 
 /** 账本 → 驾驶舱的形状。soloPaused 是设置里的「引擎暂不用独享」（人叫停）。 */
-export function orgSwitchView(row: { doc: unknown; updatedAt: Date } | null, soloPaused: boolean): View {
+export function orgSwitchView(
+  row: { doc: unknown; updatedAt: Date } | null,
+  soloPaused: boolean,
+  now: Date = new Date(),
+): View {
   if (!row) {
     return { state: 'unavailable', why: '引擎还没记过切号现状（还没读过接口、没判过）', soloPaused };
   }
@@ -40,6 +50,28 @@ export function orgSwitchView(row: { doc: unknown; updatedAt: Date } | null, sol
   }
   const d = parsed.data;
   const last = [...d.reads].sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt)).at(-1);
+  // 烧速：挂着独享时本人拼车额度没在花，不算（不显示一个「最近没在花」冒充事实）
+  const burn: Known['burn'] | undefined =
+    d.live === 'solo'
+      ? undefined
+      : toBurnView(
+          estimateBurn(
+            d.reads.flatMap((r) =>
+              r.ok && r.quota
+                ? [
+                    {
+                      requestedAt: new Date(r.requestedAt),
+                      serverDate: r.serverDate ? new Date(r.serverDate) : null,
+                      ageSeconds: r.ageSeconds ?? null,
+                      usedUsd: r.quota.usedUsd,
+                      limitUsd: r.quota.limitUsd,
+                    },
+                  ]
+                : [],
+            ),
+            now,
+          ),
+        );
   return {
     state: 'known',
     live: d.live,
@@ -68,7 +100,19 @@ export function orgSwitchView(row: { doc: unknown; updatedAt: Date } | null, sol
           },
         }
       : {}),
+    ...(burn ? { burn } : {}),
     soloPaused,
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function toBurnView(e: BurnEstimate): Known['burn'] {
+  if (e.state === 'unknown') return { state: 'unknown', why: e.why };
+  return {
+    state: 'known',
+    usdPerMinute: e.usdPerMinute,
+    remainingUsd: e.remainingUsd,
+    minutesLeft: e.minutesLeft,
+    spanMinutes: e.spanMinutes,
   };
 }

@@ -35,6 +35,52 @@ describe('orgSwitchSummary', () => {
     expect(s.headline).toContain('整辆车的官方窗口被用光');
   });
 
+  test('烧速：「按现在的速度约 N 分钟后用满」；20 分钟内用满标黄；最近没在花、已经用满各自明说', () => {
+    const live = { live: 'carpool' as const };
+    const fast = orgSwitchSummary(
+      known({
+        ...live,
+        burn: { state: 'known', usdPerMinute: 2.5, remainingUsd: 40, minutesLeft: 16, spanMinutes: 10 },
+      }),
+    );
+    expect(fast.details.join('')).toContain('按现在的速度约 16 分钟后用满');
+    expect(fast.details.join('')).toContain('每分钟约 $2.50');
+    expect(fast.tone).toBe('stall');
+    const slow = orgSwitchSummary(
+      known({
+        ...live,
+        burn: { state: 'known', usdPerMinute: 0.5, remainingUsd: 40, minutesLeft: 80, spanMinutes: 10 },
+      }),
+    );
+    expect(slow.tone).toBe('ok');
+    const idle = orgSwitchSummary(
+      known({
+        ...live,
+        burn: { state: 'known', usdPerMinute: 0, remainingUsd: 40, minutesLeft: null, spanMinutes: 10 },
+      }),
+    );
+    expect(idle.details.join('')).toContain('没在花');
+    const full = orgSwitchSummary(
+      known({
+        ...live,
+        burn: { state: 'known', usdPerMinute: 1, remainingUsd: 0, minutesLeft: 0, spanMinutes: 10 },
+      }),
+    );
+    expect(full.details.join('')).toContain('已经用满');
+  });
+
+  test('【故意造出失败】烧速算不出：写「还算不出」和原因，不出现「分钟后用满」，也不出现 0 或猜的数', () => {
+    const s = orgSwitchSummary(
+      known({ live: 'carpool', burn: { state: 'unknown', why: '最近 15 分钟里算数的读数只有 1 个' } }),
+    );
+    const text = s.details.join('');
+    expect(text).toContain('烧速还算不出：最近 15 分钟里算数的读数只有 1 个');
+    expect(text).not.toContain('分钟后用满');
+    expect(text).not.toContain('$');
+    // 后端没带烧速（老后端、挂着独享）：这一行整个不出现
+    expect(orgSwitchSummary(known({ live: 'carpool' })).details.join('')).not.toContain('烧速');
+  });
+
   test('切回宽限中：说明新活先不往独享派', () => {
     const s = orgSwitchSummary(known({ backPendingSince: T }));
     expect(s.details.join('')).toContain('新活先不往独享派');

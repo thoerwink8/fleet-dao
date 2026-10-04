@@ -26,7 +26,14 @@ export const OrgLedgerViewDocSchema = z.object({
   whites: z.object({ count: z.number().int().min(0) }),
   reads: z.array(
     z.union([
-      z.object({ ok: z.literal(true), requestedAt: Iso }),
+      z.object({
+        ok: z.literal(true),
+        requestedAt: Iso,
+        // 烧速预估（carpool-burn.ts）要的几项：老账本没有就当这条读数没有额度，不当 0
+        serverDate: Iso.nullable().optional(),
+        ageSeconds: z.number().nullable().optional(),
+        quota: z.object({ usedUsd: z.number(), limitUsd: z.number() }).nullable().optional(),
+      }),
       z.object({ ok: z.literal(false), requestedAt: Iso, why: z.string() }),
     ]),
   ),
