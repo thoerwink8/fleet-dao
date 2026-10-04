@@ -314,8 +314,8 @@ describe('home（/）：三段流水线图', () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  test('没给重试函数时不画重试按钮（不画点了没用的按钮）', () => {
+  test('没给重试函数时「重试」照样有：点了重读所有读失败的查询（LoadError 的兜底，#902 D5），不是点了没用的按钮', () => {
     renderHome({ status: 'error', error: new Error('500') });
-    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
   });
 });

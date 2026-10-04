@@ -151,8 +151,9 @@ describe('【故意造出的失败】没接上、没读成：照实写，不画�
       throw new ApiError(503, 'routing_efforts_unreadable', 'column "effort" does not exist');
     });
     renderApp(<EffortsPage />, { api, route: '/efforts' });
+    // 红字后面带一个「重试」按钮（LoadError，#902 D5），文字只比前面那句
     expect((await screen.findByRole('alert')).textContent).toBe(
-      '思考档位没读成：column "effort" does not exist',
+      '思考档位没读成：column "effort" does not exist重试',
     );
   });
 
