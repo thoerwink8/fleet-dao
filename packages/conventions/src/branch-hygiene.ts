@@ -4,9 +4,13 @@
 //   开着的单或 PR 提到 → 留；有已合并 PR、头就是合并时的 PR 头 → 删（决定 0009）；
 //   其余看有没有产出（branch-git.ts）：没产出、满 14 天没动静 → 删（不满 → 留）；有产出、满 3 天没动静 → 列到巡检单上等人勾
 //   （不满 → 留：还在做）。
+// 有产出里有两类不用再列给人：关掉（没合）的 PR 留下的分支、名字里那张单已经关了的 —— 都满 14 天机器自己删
+// （创始人 2026-10-04 06:45 拍「3选推荐b」：前者删了能在 PR 页面点 Restore 恢复、后者那件事已经结束了）。见 autoReason。
 // 改这里之前必须知道：
 // - 删数据是人闸：机器不经人只删「内容全在主线（或已合并 PR）里」的分支。有产出的，人在巡检单上勾了「删」、勾的那个头
 //   就是现在的头才删；判完到删之间头变了也不删（删之前再读一次）。
+// - 自动删的那两类一律先过 ①②③ 三关（ruleVerdict 里开着的 PR / 巡检单勾了留 / 开着的单或 PR 提到 → 留），再过满 14 天：
+//   判法只在 contentVerdict 里这一处，别在调用方另判一套。
 // - 读不到、认不出一律「没查成」：整份清单（分支、PR、开着的单）读不到这一轮一条不判、一条不删；一条分支的内容或动态读不到，
 //   这一条判「没查成」、不删，别的照判。不拿空冒充「没有」。每条路径在 test/branch-hygiene.test.ts 里有故意造出的失败。
 // - 巡检单正文是人和机器的共用状态（勾选框）：只有带记号的那几行算数，正文每轮按这一轮的判决重写，人勾过的照抄过去。
@@ -73,7 +77,7 @@ export interface BranchCase {
   decision: Decision | undefined;
   content?: ContentFacts | { error: string } | undefined;
   activity?: BranchActivity[] | { error: string } | undefined;
-  /** 分支名里那个号对应的单（只给人定的时候看，不改判决）；只在要列给人定时才读。 */
+  /** 分支名里那个号对应的单：关了的会让判决变成「机器自己删」（#784），所以有产出的分支都要读一次。 */
   linked?: LinkedIssue | undefined;
 }
 
@@ -174,7 +178,31 @@ function prStory(c: BranchCase): string {
   return parts.length ? parts.join('；') : '从没开过 PR';
 }
 
-/** 要看内容的那几条：没产出满 14 天删；有产出满 3 天等人定；还新的留；读不到没查成。 */
+/**
+ * 「有产出」里不必再列给人的两类（创始人 2026-10-04 06:45 拍「3选推荐b」：关掉没合的 PR 留下的分支、名字里那张单已经关了的
+ * 远端分支，满 14 天让机器自己删、不再问他）：是这两类就回一句理由（写进判决），都不是回 undefined。
+ * - 关掉（没合）的 PR 留下的分支：分支头就是那个 PR 最后的头，删了能在 PR 页面点 Restore branch 恢复。头变了就不算
+ *   （和「有已合并 PR、头＝合并时的头」同一个严格度），重新判。
+ * - 名字里的那张单已经关了：那件事已经结束了，分支是它剩下的。
+ * 读不到、认不出一律不算这一类：单没查成、查不到这个号、号其实是个 PR，都回 undefined（不拿「没查成」当「已关」，底线）。
+ * 只对真正有产出（output.kind === 'some'）的用：和主线没有共同祖先的判不了有没有产出，照旧交给人勾。
+ */
+export function autoReason(c: BranchCase): string | undefined {
+  const closed = c.closedPrs.find((p) => p.headSha === c.branch.sha);
+  if (closed) {
+    return `关掉（没合）的 PR #${closed.number} 留下的分支，分支头就是那个 PR 的头 ${short(c.branch.sha)}（删了能在 #${closed.number} 页面点 Restore branch 恢复）`;
+  }
+  const l = c.linked;
+  if (l && !('error' in l) && !('missing' in l) && !l.isPr && l.state === 'closed') {
+    return `分支名里的 #${l.number} 是单「${l.title}」，已关${l.stateReason === 'not_planned' ? '（不做了）' : ''}：那件事已经结束了`;
+  }
+  return undefined;
+}
+
+/**
+ * 要看内容的那几条：没产出满 14 天删；有产出里有两类（autoReason）满 14 天也机器自己删；有产出其余满 3 天等人定；
+ * 还新的留；读不到没查成。
+ */
 export function contentVerdict(c: BranchCase, now: Date): Verdict {
   const { content, activity } = c;
   if (content === undefined || 'error' in content) {
@@ -210,8 +238,23 @@ export function contentVerdict(c: BranchCase, now: Date): Verdict {
           .map((f) => `\`${f}\``)
           .join('、')}${out.files.length > 3 ? ' 等' : ''}）`;
   const wip = /\bwip\b/i.test(content.headSubject) ? '；最后一次提交写着 WIP，可能是半成品' : '';
+  const auto = out.kind === 'some' ? autoReason(c) : undefined;
+  if (auto && days >= STALE_DAYS) {
+    return {
+      kind: 'delete',
+      why: `${auto}；${produced}；满 ${STALE_DAYS} 天没动静，机器自己删（创始人 2026-10-04 拍）；${when}${restale}`,
+      byFounder: false,
+    };
+  }
   if (days < ASK_DAYS) {
     return { kind: 'keep', why: `还在做（${produced}），不满 ${ASK_DAYS} 天：${when}${restale}` };
+  }
+  if (auto) {
+    // 这两类不用列给人：不满天数就留着（理由写明到天数自己删，别让人以为漏了）
+    return {
+      kind: 'keep',
+      why: `${auto}，但不满 ${STALE_DAYS} 天：${when}；满 ${STALE_DAYS} 天机器自己删，不列给人${restale}`,
+    };
   }
   return {
     kind: 'ask',
@@ -346,7 +389,7 @@ export function renderBoard(input: BoardInput): string {
     BOARD_MARKER,
     '这张单由「分支体检」机器人维护（#769；每天一轮，`.github/workflows/github-audit.yml` 的 branches，判法在 `packages/conventions/src/branch-hygiene.ts`），正文每轮重写，只有勾选框算数。',
     '',
-    `**要你定的**：下面每条分支都有主线上没有的改动，满 ${ASK_DAYS} 天没动静，也没有开着的 PR 或单子提到它。勾「删」：下一轮照删（分支头变了就不删、重新列）；勾「留，不再问」：以后不再问（分支头变了才重新判）。想马上执行就在 Actions 里手动跑一次 github-audit。没产出的（改动主线上都有）机器满 ${STALE_DAYS} 天自己删，不列在这里。`,
+    `**要你定的**：下面每条分支都有主线上没有的改动，满 ${ASK_DAYS} 天没动静，也没有开着的 PR 或单子提到它。勾「删」：下一轮照删（分支头变了就不删、重新列）；勾「留，不再问」：以后不再问（分支头变了才重新判）。想马上执行就在 Actions 里手动跑一次 github-audit。没产出的（改动主线上都有）、关掉没合的 PR 留下的、名字里那张单已经关了的：机器满 ${STALE_DAYS} 天自己删，不列在这里。`,
     '',
     `上次跑：${bj(input.now)}（北京时间）。远端 ${reports.length} 条分支：这一轮删了 ${input.deleted.length}、留着 ${count('keep')}、等你定 ${asks.length}、没查成 ${unknown.length}。`,
   ];
@@ -555,8 +598,9 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
       }
       verdict = contentVerdict(c, now);
       const n = issueNumberIn(b.name);
+      // 名字里那个号：只有「等人定」这一档会因为它改判——已关 → 归「机器自己删」（#784），还开着 → 写进给人看的理由。
+      // 判删或判留的档不用读（读了也改不了判决，白花一次 API）。读不到照实写「没查成」，不改判决。
       if (verdict.kind === 'ask' && n !== undefined) {
-        // 只给人定的时候看：读不到就在理由里照实写「没查成」，不改判决
         try {
           const i = await gh.issue(n);
           c.linked =
