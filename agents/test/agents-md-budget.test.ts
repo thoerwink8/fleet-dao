@@ -15,10 +15,11 @@ const TEXT = readFileSync(fileURLToPath(new URL('../../AGENTS.md', import.meta.u
 /**
  * 通用段（推给所有仓）上限：2026-10-03 减脂后约 3970 字，留一点余量（当时定 4100）。
  * 2026-10-04 涨到 4400：创始人放行的改标准 #650（「无人值守」那条补四句，照上面三步压过一遍，仍多约 250 字）合进来后约 4290 字。
- * 同日涨到 4500：创始人放行的改标准 #646（「只对这一次会话说的『怎么干』不记」一条；和「引导落盘」那条重复的半句已删、
- * 例子和理由压过一遍，剩下的都被 rules/session-directives、rules/directive-inbox 钉着）合进来后约 4460 字。
+ * 同日涨到 4600：创始人放行的改标准 #771（Fable 收窄，约 +85 字）和 #646（「只对这一次会话说的『怎么干』不记」一条，约 +165 字；
+ * 和「引导落盘」那条重复的半句已删、例子和理由压过一遍，剩下的都被 rules/session-directives、rules/directive-inbox 钉着）
+ * 都合进来后约 4545 字。
  */
-const GENERAL_MAX = 4500;
+const GENERAL_MAX = 4600;
 /** 本仓段上限：同日减脂后约 4200 字。 */
 const REPO_MAX = 4600;
 
