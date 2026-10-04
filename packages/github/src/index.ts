@@ -136,6 +136,8 @@ export {
 } from './issues.ts';
 export {
   type Ledger,
+  type LockerOptions,
+  lockerOver,
   memoryLedger,
   type PgLockerOptions,
   type PrMirror,

@@ -6,6 +6,7 @@ export * from './dev-fixtures.ts';
 export * from './done-check.ts';
 export * from './feishu-records.ts';
 export * from './github-intake.ts';
+export { pgIdempotencyStore, pgLedger, pgLocker } from './github-pg.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export * from './memory-store.ts';
