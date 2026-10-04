@@ -447,10 +447,9 @@ jobs:
         env:
           BOX_FILE: ${{ steps.box.outputs.box_file }}
         run: |
-          set -uo pipefail
-          echo "cpus=$(node -p 'require("os").availableParallelism()') mem=$(free -m | awk '/Mem:/{print $2}')MB"
+          set +e
           mapfile -t box <"$BOX_FILE"
-          for variant in "w4:--maxWorkers=4" "w6:--maxWorkers=6" "w3:--maxWorkers=3" "w8:--maxWorkers=8" "threads:--pool=threads"; do
+          for variant in "seqA:--config=vitest.seq.config.ts" "base2:--maxWorkers=3" "seqB:--config=vitest.seq.config.ts" "w4:--maxWorkers=4" "w6:--maxWorkers=6"; do
             name=${variant%%:*}; flag=${variant#*:}
             s=$SECONDS
             pnpm exec vitest run "${box[@]}" $flag --reporter=dot >"$RUNNER_TEMP/ab-$name.log" 2>&1
