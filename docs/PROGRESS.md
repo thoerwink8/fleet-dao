@@ -100,6 +100,15 @@ PR-1（#781）、PR-2（#787 #793 #813）已合。PR-4 现在就能做：它不�
 6. #345（可后做）：Mirasim 桌面端新建 SSH 远程连接，目标 `fleet-agent-carpool@<法国地址>`（地址用 `ssh -G contabo` 取，别贴进对话），key 或 agent 认证，点连接；验证 `bash deploy/france.sh --check`。
 7. 要你拍板的（不是外部动作）：#754 删旧路由表（删数据）；#553 PR-5 删飞书四张表（看行数）；#131–#133/#195 个人用还做不做；法国引擎重开（临时调整表第一行，最迟复查 2026-10-15）；#553 拆法（上面第三节）。#34/#78 旧系统退役也在你手上。
 
+## 2026-10-05 #452 本机演练（fleet-local）跑通（Sonnet 5.5 子代理，创始人 10-05 01:30「wsl需要跑通」）
+
+做到哪（02:05）：fleet-local 发到主线 `f07ddb03`、创始人白名单行补上、WSL 会话用户临时切到独享组织（拼车组织 reclaude 回 400「当前绑定账号暂不可用」，见下），grok + claude-solo 两家路由探通；上一轮演练卡在验收的那张单（canary 仓 #38 / PR #39）发「继续」后验收、CI、合并、关单都走完（PR #39 已合并）；第二轮 `drill` 在跑（结论见下一行）。下一步：drill 出结论后贴进 `specs/452-*/结果.md`；#803 的 PR 合了之后在 fleet-local 再发一版并核 `/healthz`；拼车恢复后把会话用户切回拼车。还没验证：drill 退出码 0 的完整输出；`deploy_lag` 绿（要 #903 随下次发布带上、自动发布下一轮收尾）；`.wslconfig` 空闲超时（没有这份文件，本次用 `wsl -d fleet-local --exec sleep infinity` 常驻吊住，Windows 重启后要重跑）。
+- 已做（机器上）：① `/srv/fleet-dao` 快进到主线、`bash deploy/release.sh` 第一次停在目录装载（`/etc/fleet-dao/catalog.json` 里还有旧的 `stages`，装载器不再读它并拒装）→ 备份到 `/root/catalog.json.bak-20261005` 后删掉 `stages` 段（权限 root:fleet 640 没变）→ 第二次发成，在用 `f07ddb035320`，迁移 31 → 35；② `deploy/local/install.sh` 重跑（`fleet-agent-scope` 等带上 #816 的代理）；③ `users` 表补创始人一行（`thoerwink8` / 211872110，`github_events` 转绿）；④ `fleet-agent-scope org-use solo --user fleet-agent-carpool`（WSL 里的会话用户，不是本机主会话）：拼车组织（org 324）现在 `reclaude -p` 回 `400 当前绑定账号暂不可用，系统将自动处理`，引擎按 AU1 记「账号被封」不派，solo 组织（org 5380）`-p` 回 OK、`claude-solo:opus-5.5` 探通；⑤ 手动 `fleet-temporal schedule trigger route-probe` 让探针立刻重探，向卡住的任务发 `taskContinue`。
+- 为什么要两家：验收必须换一家模型，grok 动手后只剩 claude 能验；Cursor 密钥没放、Mirasim 没装，都要创始人。
+- 已修（PR）：#903（#802 自动发布收尾排到读版本标记之前，已合）；#803 本机档 `feishu_gateway` 报未接、发布不去香港取 `/healthz`（分支 `fix/803-local-no-feishu-gateway`）。
+- 机器上还剩的小红：`carpool-cap:registry`（本机档登记拼车并发 2，库里 `claude-carpool` 是 4：要把 `/etc/fleet-dao/catalog.json` 里 `claude-carpool.maxConcurrency` 改 2 再发一版）；`quota.json` 没有（reclaude API Key 本机 09-29 清盘后不在，拼车盯读读不到，`session_org` 项因此红）。
+- 要创始人做（外部动作）：① 拼车组织账号恢复前会话用户留在独享；恢复后在 fleet-local 里 `sudo /usr/local/sbin/fleet-agent-scope org-use carpool --user fleet-agent-carpool` 切回（或告诉我）。② 想让 WSL 不靠常驻进程也不停：`%UserProfile%\.wslconfig` 按本档「WSL 不让它睡」那节改（他自己的 Windows，我没碰）。③ 要用 Cursor 路由：在 cursor.com/dashboard/api 生成密钥，按 ops 第五节「会话用户的 Cursor 密钥」放进去。
+
 ## 2026-10-04 已开着的会话切不到平台额度（只记进度）
 
 会话 `claude:1aedaaec-91ac-4245-a8d5-13d628b767b2`，本机 Mirasim `0.0.411`。做到哪：链查完，这条会话的钉没写上。下一步：没有新的启动器改动（当场切不到平台、又不杀会话，主线已有 #873）。还没验证：真扣费。Mirasim 会自己更新，下面的界面和注入只对 `0.0.411` 这一次成立。
