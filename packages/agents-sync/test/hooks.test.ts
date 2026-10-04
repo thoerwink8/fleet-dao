@@ -376,6 +376,19 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(get(m.home, '.fleet-dao/hooks/pretool.mjs')).toBe(HOOK_FILES['pretool.mjs']);
   });
 
+  it('仓里删了的钩子脚本、机器上还留着（旧的 steer-recover.mjs，2026-10-04 去掉）：查判漂移（多了它），同步后必须被删，别的脚本在', () => {
+    const m = machine();
+    m.apply();
+    put(m.home, '.fleet-dao/hooks/steer-recover.mjs', '// 以前装的补回钩子，仓里已经没有了\n');
+    const drift = m.check();
+    expectKind(drift, SCRIPTS, 'drift');
+    expect(drift.find((l) => l.key === SCRIPTS)?.text).toContain('多了 steer-recover.mjs');
+    expectKind(m.apply(), SCRIPTS, 'changed');
+    expect(existsSync(join(m.home, '.fleet-dao', 'hooks', 'steer-recover.mjs'))).toBe(false);
+    expect(readdirSync(join(m.home, '.fleet-dao', 'hooks')).sort()).toEqual(Object.keys(HOOK_FILES).sort());
+    expect(exitCode(m.check())).toBe(0);
+  });
+
   it('仓里没有 agents/hooks/（检出太旧）：脚本查判没查成、登记照查（缺失），写报没做成，不登记指向空处的命令', () => {
     const m = machine(['claude'], null);
     const checked = m.check();
