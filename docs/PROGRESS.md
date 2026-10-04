@@ -24,6 +24,10 @@
 - 契约对账：`packages/api/test/web-routes-contract.test.ts`（契约↔后端注册的路由，两个方向）、`packages/web/src/api/contract.test.ts`（契约↔前端 http.ts）。
 - 当场修的：D4（设置页留量线两个池都写成「Claude 订阅」）、D5（`LoadError` 没有重试）。其余见缺陷清单和子单：#926（登录页/设置页账密入口，P1）、#928（追问「去答」死胡同，P1）、#930（e2e 进 CI）。#914 合并后已重对一遍主页（流水线图、深色、手机宽度；D2 已随它解决）；react-flow 水印：MIT 不强制显示、去掉要订阅 Pro（花钱），现状保留，写在缺陷清单 D10 交指挥官。
 
+## 2026-10-05 #930 驾驶舱 e2e 进 CI（母单 #902，Sonnet 5.5 子代理，分支 `ci/930-e2e-in-ci`，碰 `ci.yml`、先审后合）
+
+做到哪：`ci-plan.ts` 加了 `e2e` 开关（`touchesE2e`：web、api、db、shared、依赖文件、`ci.yml` 自己；认不出改了什么时也开），`ci.yml` 加了 `e2e` job（容器 postgres:16 + Chromium 按 Playwright 版本缓存、timeout 15 分钟），`check` 的 needs 和 `ciVerdict` 把它算进去（该跑却红/取消/跳过都红），测试在 `packages/conventions/test/ci-plan.test.ts` 末尾。下一步：看 CI 上 Linux 真跑的结果和耗时（写进 PR）、走第二意见、挂自动合并。还没验证：e2e 在 Linux 上是否全绿（只在 Windows 跑过）。
+
 ## 2026-10-05 #928 追问「去答」死胡同 + #939 代码那一半 + D6 清理（Sonnet 5.5 子代理，分支 `worktree-agent-a08e104b44426243b`）
 
 指挥官按 v3 原意选「删追问这条线的代码那一半、不删库表」（库表是创始人的人闸，另有人处理）。做到哪：代码、测试、e2e 全改完、本机跑过（见下「验证」）；下一步：开 PR（`Closes #928`，`Refs #939` 不关——删库表那一半还没做）、CI 绿自动合。

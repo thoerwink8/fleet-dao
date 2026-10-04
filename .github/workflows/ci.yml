@@ -1,8 +1,8 @@
 name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
-# biome、tsc、apps 里各步、test、web、deploy 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
+# biome、tsc、apps 里各步、test、web、e2e、deploy 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
 # 主线推送跑「上一次主线真绿的头…这次的头」那段累计改动该跑的（基准查不到、认不出路径一律退回全跑）；
-# 其中这次提交的树和某次成功的 PR 检查测的是同一棵、那次比的基准树也正是上次真绿的头的树时，test、web、deploy 不再重测
+# 其中这次提交的树和某次成功的 PR 检查测的是同一棵、那次比的基准树也正是上次真绿的头的树时，test、web、e2e、deploy 不再重测
 # （同树同结果；对不上、查不到、读不到都照旧全跑并留 ::warning::，lint 仍每轮自己跑）。
 # 区间口径、同树复用、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 C、D。
 #
@@ -50,6 +50,7 @@ jobs:
       tsc: ${{ steps.plan.outputs.tsc }}
       tests: ${{ steps.plan.outputs.tests }}
       web: ${{ steps.plan.outputs.web }}
+      e2e: ${{ steps.plan.outputs.e2e }}
       deploy: ${{ steps.plan.outputs.deploy }}
       deploy_matrix: ${{ steps.plan.outputs.deploy_matrix }}
       reused: ${{ steps.plan.outputs.reused }}
@@ -479,6 +480,77 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter ./packages/web run build:demo
 
+  # 驾驶舱用户视角 e2e（#930，母单 #902）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端（Vite）+ Chromium，
+  # 站在创始人角度逐页走（packages/web/e2e，README 有跑法）。只在 ci-plan.ts 的 touchesE2e 认的改动（web、api、db、shared、
+  # 依赖和 workspace、本文件）或「认不出改了什么」时开（changes 的 e2e 输出）——它要几分钟、占一个并发槽，不让每个 PR 都多一个长 job。
+  # 红了挡合并：check 的 needs 里有它，ciVerdict 把「本该跑 → success」一并核；跑成功才算过，跳过只在开关说不用跑的时候才算过。
+  # 和 test 的 pg 台一样自己 docker run 起 postgres:16（不用 services：services 要等健康检查，这里放后台、装依赖之后再等）。
+  # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，
+  # 管理连接串指向容器；库名、端口、顺序（1366 只读一遍、1920 带写一遍）都和本机一样。
+  e2e:
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # 一次性 runner 上的一次性容器，只有本机回环连得到：用 trust 认证，连接串里不放密码
+      E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
+      E2E_BROWSER_CHANNEL: chromium
+    steps:
+      - name: 起 postgres:16（后台）
+        run: |
+          set -euo pipefail
+          nohup docker run -d --name fleet-e2e-pg -p 5432:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:16-alpine > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 浏览器缓存按 Playwright 的版本（锁文件里钉住的那一版）：没命中才下 Chromium（约 150M）；系统库（--with-deps）每台新机器都要装
+      - name: Playwright 版本
+        id: pw
+        run: |
+          set -euo pipefail
+          version=$(pnpm --filter @fleet-dao/web exec playwright --version | sed -n 's/^Version \([0-9][0-9.]*\)$/\1/p')
+          if [ -z "$version" ]; then
+            echo "读不到 Playwright 的版本" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: 装 Chromium 和系统库
+        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+      - name: 等 postgres:16 起来
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            if docker exec fleet-e2e-pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          if [ -f "$RUNNER_TEMP/fleet-e2e-pg-start.log" ]; then cat "$RUNNER_TEMP/fleet-e2e-pg-start.log" >&2; fi
+          if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
+          echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
+          exit 1
+      - name: 驾驶舱 e2e
+        run: pnpm --filter @fleet-dao/web e2e
+      # 红了留证据：报告、截图、各进程日志（后端、前端）都在仓根 _tmp/e2e/（公开仓：里面只有 e2e 自己造的假数据）
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-${{ github.run_id }}
+          path: _tmp/e2e/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
   # deploy=all 时切成 3 台并行（ci-plan.ts 的 deployMatrix / DEPLOY_SHARDS，跑 run.sh --shard i/3；一台 100 秒上下，
   # 全套 300 秒上下）；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
@@ -549,12 +621,12 @@ jobs:
             bash deploy/test/run.sh "${args[@]}"
           fi
 
-  # 必过检查。逐个核对：changes 必须绿；lint 该跑的必须绿、本该跳过的必须是跳过；test、web、deploy 本该跑的必须绿、
+  # 必过检查。逐个核对：changes 必须绿；lint 该跑的必须绿、本该跳过的必须是跳过；test、web、e2e、deploy 本该跑的必须绿、
   # 本该跳过的必须是跳过（packages/conventions/src/ci-plan.ts 的 ciVerdict）。
   # lint 里面几步各报各的（哪一步红写在它的 job 日志和最后的汇总步里）；汇总 job 认的是 lint 这个 job 的结论。
   check:
     if: always()
-    needs: [changes, lint, test, web, deploy]
+    needs: [changes, lint, test, web, e2e, deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

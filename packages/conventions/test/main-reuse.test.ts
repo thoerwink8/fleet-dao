@@ -257,6 +257,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
     lint: { result: 'success' },
     test: { result: 'skipped' },
     web: { result: 'skipped' },
+    e2e: { result: 'skipped' },
     deploy: { result: 'skipped' },
     ...over,
   });
@@ -270,6 +271,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
       tests: [],
       testUnits: [],
       web: false,
+      e2e: false,
       deploy: 'none',
       biome: true,
       reused: reuse,
@@ -278,6 +280,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
     expect(planOutputs(r)).toMatchObject({
       tests: '[]',
       web: 'false',
+      e2e: 'false',
       deploy: 'none',
       deploy_matrix: '[]',
       reused: '11',

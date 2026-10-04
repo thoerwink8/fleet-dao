@@ -260,6 +260,7 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     expect(selectTests(['packages/web/src/app.css'], GRAPH).ciOnly).toEqual([
       '格式和类型（biome、tsc）',
       '演示版打包',
+      '驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）',
       '装机测试（deploy/test/run.sh）',
     ]);
     expect(selectTests(['docs/ops.md'], GRAPH).ciOnly).toEqual(['装机测试（deploy/test/run.sh --ops）']);

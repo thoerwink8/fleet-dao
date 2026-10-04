@@ -18,6 +18,7 @@ import {
   AGENTS_UNIT,
   ALWAYS_JOBS,
   ALWAYS_TESTS,
+  applyReuse,
   assignTests,
   type CiPlan,
   ciVerdict,
@@ -568,6 +569,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     lint: { result: 'success', outputs: {} },
     test: { result: 'success', outputs: {} },
     web: { result: 'skipped', outputs: {} },
+    e2e: { result: 'skipped', outputs: {} },
     deploy: { result: 'skipped', outputs: {} },
     ...over,
   });
@@ -648,6 +650,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     const opsOnly: CiPlan = { ...full, deploy: 'ops' };
     const allGreen = {
       web: { result: 'success' },
+      e2e: { result: 'success' },
       tsc: { result: 'success' },
       deploy: { result: 'success' },
     };
@@ -785,6 +788,7 @@ describe('入口', { timeout: 0 }, () => {
       lint: { result: 'success' },
       test: { result: 'skipped' },
       web: { result: 'skipped' },
+      e2e: { result: 'skipped' },
       deploy: { result: 'skipped' },
     };
     expect(run(verdict, [], { CI_NEEDS: JSON.stringify(base) }).status).toBe(0);
@@ -1270,6 +1274,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
         lint: { result: 'success' },
         test: { result: 'success' },
         web: { result: 'success' },
+        e2e: { result: 'success' },
         deploy: { result: 'success' },
       }).ok,
     ).toBe(false);
@@ -1283,5 +1288,170 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     expect(yml).not.toContain("matrix.name == 'db'");
     // 不再有 --shard：每台给的是明确的文件清单
     expect(yml).not.toMatch(/--shard=\d/);
+  });
+});
+
+describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑，红了汇总就红', () => {
+  const needs = (p: CiPlan, over: Record<string, unknown> = {}) => ({
+    changes: { result: 'success', outputs: planOutputs(p) },
+    lint: { result: 'success', outputs: {} },
+    test: { result: p.tests.length > 0 ? 'success' : 'skipped', outputs: {} },
+    web: { result: p.web ? 'success' : 'skipped', outputs: {} },
+    e2e: { result: p.e2e ? 'success' : 'skipped', outputs: {} },
+    deploy: { result: p.deploy === 'none' ? 'skipped' : 'success', outputs: {} },
+    ...over,
+  });
+
+  it('web、api、db、shared、依赖文件、ci.yml 自己的改动：开；输出给下游 job 的开关是字符串 true', () => {
+    for (const f of [
+      'packages/web/src/routes/home.tsx',
+      'packages/web/e2e/specs/01-login.e2e.ts',
+      'packages/api/src/cockpit.ts',
+      'packages/api/test/e2e/prepare.ts',
+      'packages/db/src/catalog.ts',
+      'packages/shared/src/web-api/index.ts',
+      'packages/shared/src/domain.ts',
+      'pnpm-lock.yaml',
+      'package.json',
+      '.github/workflows/ci.yml',
+    ]) {
+      const p = pr(f);
+      expect(p.e2e, f).toBe(true);
+      expect(planOutputs(p).e2e, f).toBe('true');
+    }
+  });
+
+  it('别的改动不开：文档、别的包、deploy/（升了全跑也不开）、别的工作流', () => {
+    for (const f of [
+      'docs/design.md',
+      'packages/conventions/src/ci-plan.ts',
+      'packages/engine/src/index.ts',
+      'packages/cli/src/help.ts',
+      'deploy/france.sh',
+      'biome.json',
+      '.github/workflows/merge-gate.yml',
+    ]) {
+      const p = pr(f);
+      expect(p.e2e, f).toBe(false);
+      expect(planOutputs(p).e2e, f).toBe('false');
+    }
+    // deploy/ 升全跑，但 e2e 不跟着开：全跑的原因和 e2e 认的路径是两回事
+    expect(pr('deploy/france.sh')).toMatchObject({ full: true, e2e: false });
+    // 一起改：有一个文件碰到就开
+    expect(pr('docs/design.md', 'packages/api/src/cockpit.ts').e2e).toBe(true);
+  });
+
+  it('【故意造出的失败】认不出改了什么（非 PR 事件、空改动、依赖图读不出、认不出的路径）：开，不拿「没改什么」冒充可以不跑', () => {
+    for (const event of ['push', 'workflow_dispatch', 'merge_group'])
+      expect(planCi({ event, changed: ['README.md'], graph: graph() }).e2e, event).toBe(true);
+    expect(planCi({ event: 'pull_request', changed: [], graph: graph() }).e2e).toBe(true);
+    expect(planCi({ event: 'pull_request', changed: ['docs/x.md'], graph: '读不出' }).e2e).toBe(true);
+    expect(pr('some-new-top-dir/file.txt').e2e).toBe(true);
+    expect(pr('packages/not-a-package/src/a.ts').e2e).toBe(true);
+  });
+
+  it('同树复用（主线推送）：e2e 跟 test、web、deploy 一起不再重测；复用了却还开着 e2e 的 plan 认不出', () => {
+    const full = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
+    expect(full.e2e).toBe(true);
+    const reuse = { run: 11, pr: 7, tree: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
+    const reused = applyReuse(full, reuse);
+    expect(reused.e2e).toBe(false);
+    expect(ciVerdict(needs(reused), 'push').ok).toBe(true);
+    // 复用的 plan 里 e2e 还是 true：汇总不信
+    const lying = { ...reused, e2e: true };
+    const v = ciVerdict(needs(lying, { e2e: { result: 'success' } }), 'push');
+    expect(v.ok).toBe(false);
+    expect(v.lines.join('\n')).toContain('还有要测的');
+  });
+
+  /**
+   * 【故意造出的失败】e2e 红 → 汇总红。changes 说要跑（碰了 api），job 红了、被取消、被误跳过，汇总都得红并点名；
+   * 反过来 changes 说不用跑，job 却跑了（开关和 if 对不上）也红。
+   */
+  it('【故意造出的失败】e2e 该跑却红了、取消了、被跳过：汇总红，点名 e2e', () => {
+    const p = assigned(pr('packages/api/src/cockpit.ts'));
+    expect(p.e2e, '这条查的场景不成立了').toBe(true);
+    expect(ciVerdict(needs(p)).ok).toBe(true);
+    for (const result of ['failure', 'cancelled', 'skipped']) {
+      const v = ciVerdict(needs(p, { e2e: { result } }));
+      expect(v.ok, result).toBe(false);
+      expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
+    }
+    const missing = needs(p) as Record<string, unknown>;
+    delete missing.e2e;
+    const none = ciVerdict(missing);
+    expect(none.ok).toBe(false);
+    expect(none.lines.join('\n')).toContain('✗ e2e：没有这个 job 的结果');
+  });
+
+  it('e2e 不该跑（没碰那几处）：skipped 才对，跑了反而红；开关输出和 plan 不是同一份也红', () => {
+    const p = assigned(pr('packages/cli/src/help.ts'));
+    expect(p.e2e).toBe(false);
+    expect(ciVerdict(needs(p)).ok).toBe(true);
+    const ran = ciVerdict(needs(p, { e2e: { result: 'success' } }));
+    expect(ran.ok).toBe(false);
+    expect(ran.lines.join('\n')).toContain('✗ e2e：success，本该 skipped');
+    const n = needs(p);
+    n.changes.outputs = { ...n.changes.outputs, e2e: 'true' };
+    const off = ciVerdict(n);
+    expect(off.ok).toBe(false);
+    expect(off.lines.join('\n')).toContain('e2e job 的开关');
+    // plan 缺 e2e 字段（旧的 plan）：认不出，不当成不用跑
+    const old = JSON.parse(planOutputs(p).plan as string) as Record<string, unknown>;
+    delete old.e2e;
+    const m = needs(p);
+    m.changes.outputs = { ...m.changes.outputs, plan: JSON.stringify(old) };
+    expect(ciVerdict(m).ok).toBe(false);
+  });
+
+  it('全跑但没碰 e2e 认的路径（deploy/ 脚本）：e2e 本该 skipped，汇总照 plan 核', () => {
+    const p = assigned(pr('deploy/france.sh'));
+    expect(p).toMatchObject({ full: true, e2e: false });
+    expect(ciVerdict(needs(p)).ok).toBe(true);
+    expect(ciVerdict(needs(p, { e2e: { result: 'success' } })).ok).toBe(false);
+    // 全跑又碰了 e2e 认的路径（shared）：e2e 要跑
+    const withShared = assigned(pr('deploy/france.sh', 'packages/shared/src/domain.ts'));
+    expect(withShared).toMatchObject({ full: true, e2e: true });
+    expect(ciVerdict(needs(withShared, { e2e: { result: 'skipped' } })).ok).toBe(false);
+  });
+
+  it('ci.yml 的 e2e job：只按 changes 的 e2e 开关开、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
+    const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
+    const doc = parse(yml) as {
+      jobs: Record<
+        string,
+        {
+          needs?: unknown;
+          if?: string;
+          'timeout-minutes'?: number;
+          env?: Record<string, string>;
+          steps?: Array<Record<string, unknown>>;
+        }
+      >;
+    };
+    const e2e = doc.jobs.e2e;
+    expect(e2e, 'ci.yml 里没有 e2e job').toBeDefined();
+    expect(e2e?.needs).toBe('changes');
+    expect(e2e?.if).toBe("needs.changes.outputs.e2e == 'true'");
+    expect(e2e?.['timeout-minutes'], '要给总耗时上限').toBeGreaterThan(0);
+    expect(e2e?.['timeout-minutes']).toBeLessThanOrEqual(15);
+    expect(e2e?.env?.E2E_PG_ADMIN_URL).toMatch(/^postgres:\/\/postgres@127\.0\.0\.1:5432\/postgres$/);
+    expect(e2e?.env?.E2E_BROWSER_CHANNEL).toBe('chromium');
+    const steps = e2e?.steps ?? [];
+    const runs = steps.map((s) => String(s.run ?? '')).join('\n');
+    expect(runs).toContain('pnpm --filter @fleet-dao/web e2e');
+    expect(runs).toContain('playwright install --with-deps chromium');
+    expect(runs).toContain('postgres:16');
+    // 红了不吞：没有 job 级或步骤级的 continue-on-error、没有 || true
+    expect(steps.some((s) => 'continue-on-error' in s)).toBe(false);
+    expect(runs).not.toContain('|| true');
+    // 跑 e2e 的那一步本身没有 if（该跑的 job 里它一定跑）
+    const run = steps.find((s) => String(s.run ?? '').includes('pnpm --filter @fleet-dao/web e2e'));
+    expect(run, '找不到跑 e2e 的那一步').toBeDefined();
+    expect(run).not.toHaveProperty('if');
+    // 汇总 job 等它
+    expect(doc.jobs.check?.needs).toContain('e2e');
+    // 它的名字在 PLANNED_JOBS 里（汇总核对）
+    expect(PLANNED_JOBS).toContain('e2e');
   });
 });
