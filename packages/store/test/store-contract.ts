@@ -297,6 +297,22 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.listSegmentRuns('task-13')).toEqual([]);
       });
 
+      it('三段流水按一批单一次读：只认 task_id 对上的（不按单号兜底），按起跑先后排；编号看不懂的忽略，一张单都没给是空', async () => {
+        const rows = await store.listSegmentRunsForTasks([IDS.task13, IDS.task12, 'task-13']);
+        expect(rows.map((r) => [r.id, r.matchedBy])).toEqual([
+          [IDS.seg13scope, 'task'],
+          [IDS.seg13manual1, 'task'],
+          [IDS.seg13manual2, 'task'],
+          [STALE_SEG, 'task'],
+          [OTHER_TASK_SEG, 'task'],
+        ]);
+        // task_id 没记的两行（单号兜底的那笔验收、孤行）这条路不收；别的单的不混进来
+        const only12 = await store.listSegmentRunsForTasks([IDS.task12]);
+        expect(only12.map((r) => r.id)).toEqual([OTHER_TASK_SEG]);
+        expect(await store.listSegmentRunsForTasks([])).toEqual([]);
+        expect(await store.listSegmentRunsForTasks(['task-13', OTHER_UUID])).toEqual([]);
+      });
+
       it('三段流水的读数原样读回：派工档、起止、四样 token、花费、PR；没记的不给（不是 0、不是空字符串）', async () => {
         const rows = await store.listSegmentRuns(IDS.task13);
         const manual1 = rows.find((r) => r.id === IDS.seg13manual1);

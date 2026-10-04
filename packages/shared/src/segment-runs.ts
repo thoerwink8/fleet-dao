@@ -16,6 +16,20 @@ export const SEGMENT_OUTCOMES = [
   'org_switch',
 ] as const satisfies readonly SegmentOutcome[];
 
+/** 三段给人看的名字（驾驶舱页面和主页流水线图的文字都从这里出，不各写一份）。 */
+export const SEGMENT_LABELS: Record<SegmentKind, string> = { scope: '对题', manual: '动手', verify: '验收' };
+
+/** 一段结局给人看的说法。 */
+export const SEGMENT_OUTCOME_LABELS: Record<SegmentOutcome, string> = {
+  done: '完成',
+  timeout: '超时',
+  killed: '被停掉',
+  spawn_failed: '没起来',
+  admission_blocked: '内存满没放行',
+  failed: '失败',
+  org_switch: '切号停下，切完重跑',
+};
+
 /** 进程没起来就结束的两种结局：没有用量读数。 */
 const NOT_STARTED: readonly SegmentOutcome[] = ['spawn_failed', 'admission_blocked'];
 

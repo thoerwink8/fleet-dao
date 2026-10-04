@@ -6,6 +6,7 @@ export * from './changelog.ts';
 export type * from './domain.ts';
 export * from './effort.ts';
 export * from './feishu-api.ts';
+export * from './home-flow.ts';
 export * from './intent-api.ts';
 export * from './org-ledger-doc.ts';
 export * from './quota.ts';

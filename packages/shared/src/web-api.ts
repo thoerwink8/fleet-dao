@@ -1296,13 +1296,13 @@ export const HomeDecisionSchema = z.object({
   link: z.string(),
 });
 
-/** 「在跑的」一张单。segment 还没接上（#556-1+ 落真时补）：现在一律 null，不许按字段猜成失败。 */
+/** 「在跑的」一张单。segment 由三段流水（runs 表）推出，一笔都没记的老单是 null，不许按字段猜成失败。 */
 export const HomeRunningSchema = z.object({
   issueNumber: z.number().int().positive(),
   title: z.string(),
   /** owner/name。 */
   repo: z.string(),
-  /** 卡在哪一段；还没接上（null）。verify_pending 是「合完在等 CI / 等验」，不是失败。 */
+  /** 现在在哪一段；runs 里没有流水可推的是 null。verify_pending = 动手收了、验收还没起，是等，不是失败。 */
   segment: z.enum(['scoping', 'doing', 'verifying', 'verify_pending', 'merge']).nullable(),
   /** 为什么这一刻没进展。nothing = 正常在跑。 */
   waitingReason: z.enum([
@@ -1317,8 +1317,35 @@ export const HomeRunningSchema = z.object({
   ]),
   /** 从什么时候起在等；waitingReason === 'nothing' 时没有。 */
   waitingSince: Time.optional(),
+  /** 单子进库的时刻（「已经多久」的起点）。 */
+  taskSince: Time.optional(),
+  /** 在当前这一段待了多久的起点：这一段正在跑的那笔的开始，或上一笔收场的时刻；runs 里一笔都没有就没有这个键。 */
+  stageSince: Time.optional(),
+  /** 现在谁在做：正在跑的那一笔的模型名；这一刻没有进程在跑（排队、等人、等验）就没有这个键。 */
+  worker: z.string().optional(),
+  /** 在等创始人拍的那件事（要你拍的那块里挂在这张单上的第一条的标题）；没有就没有这个键。 */
+  pendingDecision: z.string().optional(),
+  /** 这张单最近一次事件（最近一笔三段流水的开始或收场）。trouble = 超时 / 失败 / 没起来；wait = 切号、内存满这类停下重跑，不是失败。 */
+  lastEvent: z
+    .object({
+      text: z.string(),
+      at: Time,
+      tone: z.enum(['ok', 'wait', 'trouble']),
+    })
+    .optional(),
   /** 站内路径：任务详情。 */
   link: z.string(),
+});
+
+/**
+ * 三段流水线的一段：在途几张、近期跑完的平均耗时。样本一笔都没有，avgMs 不给（不拿 0 冒充「瞬间完成」）。
+ * 样本 = 看板窗口里的单的、结局是 done 且起止读得出来的三段流水。
+ */
+export const HomeFlowStageSchema = z.object({
+  segment: z.enum(['scope', 'manual', 'verify']),
+  inFlight: z.number().int().nonnegative(),
+  avgMs: z.number().int().nonnegative().optional(),
+  samples: z.number().int().nonnegative(),
 });
 
 /**
@@ -1360,6 +1387,8 @@ export const HomeResponseSchema = z.object({
   running: z.array(HomeRunningSchema),
   done: z.array(HomeDoneSchema),
   health: HomeHealthSchema,
+  /** 三段流水线图头上的数：固定对题 → 动手 → 验收三项，按这个先后。 */
+  flow: z.array(HomeFlowStageSchema).length(3),
   asOf: Time,
 });
 

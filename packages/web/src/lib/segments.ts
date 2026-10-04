@@ -1,6 +1,13 @@
 // 三段（对题 / 动手 / 验收）给人看的说法（#216）。数一律出自 shared：每一笔用后端读好的（readSegmentRun），合计用
 // summarizeUsage 的 bySegment；这里只管名字、颜色和「一项数怎么说」，不另算一遍。
-import type { SegmentKind, SegmentOutcome, SegmentTier, UnreadItem } from '@fleet-dao/shared';
+import {
+  SEGMENT_LABELS,
+  SEGMENT_OUTCOME_LABELS,
+  type SegmentKind,
+  type SegmentOutcome,
+  type SegmentTier,
+  type UnreadItem,
+} from '@fleet-dao/shared';
 import type { TaskDetail } from '../api/types';
 import type { Tone } from './status';
 
@@ -10,7 +17,7 @@ export type SegmentTotals = TaskDetail['usage']['bySegment'][number];
 /** 固定先后：对题 → 动手 → 验收。 */
 export const SEGMENT_ORDER: readonly SegmentKind[] = ['scope', 'manual', 'verify'];
 
-export const segmentLabel: Record<SegmentKind, string> = { scope: '对题', manual: '动手', verify: '验收' };
+export const segmentLabel = SEGMENT_LABELS;
 
 /** 一句话说这一段干什么。 */
 export const segmentHint: Record<SegmentKind, string> = {
@@ -27,15 +34,7 @@ export const tierLabel: Record<SegmentTier, string> = { fast: '快档', medium: 
 /** 只有动手段分档；对题、验收没有派工档是对的，不写「没记」。 */
 export const noTierText: Record<SegmentKind, string> = { scope: '不分档', manual: '没记', verify: '冷调用' };
 
-export const segmentOutcomeLabel: Record<SegmentOutcome, string> = {
-  done: '完成',
-  timeout: '超时',
-  killed: '被停掉',
-  spawn_failed: '没起来',
-  admission_blocked: '内存满没放行',
-  failed: '失败',
-  org_switch: '切号停下，切完重跑',
-};
+export const segmentOutcomeLabel = SEGMENT_OUTCOME_LABELS;
 
 export const segmentOutcomeTone: Record<SegmentOutcome, Tone> = {
   done: 'done',

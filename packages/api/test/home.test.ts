@@ -78,6 +78,159 @@ describe('/api/home（内存版）', () => {
     expect(JSON.stringify(home)).not.toContain('fail');
   });
 
+  describe('三段流水线图（running 的 segment / worker / lastEvent、flow 三格）', () => {
+    const ago = (m: number) => new Date(T0.getTime() - m * 60_000).toISOString();
+    let n = 0;
+    const seg = (
+      h: ReturnType<typeof harness>,
+      row: Omit<MemoryData['segmentRuns'][number], 'id' | 'taskId' | 'model'> &
+        Partial<Pick<MemoryData['segmentRuns'][number], 'taskId' | 'model'>>,
+    ) => {
+      n += 1;
+      h.store.data.segmentRuns.push({
+        id: `d2000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+        taskId: IDS.task12,
+        model: 'opus-5.5',
+        ...row,
+      });
+    };
+    const homeOf = async (h: ReturnType<typeof harness>) =>
+      HomeResponseSchema.parse(await (await getHome(h)).json());
+
+    it('动手那一笔在跑：落在 doing，谁在做是模型名，本段从这一笔开跑起算，最近事件是「动手开跑」', async () => {
+      const h = harness();
+      seg(h, { segment: 'scope', startedAt: ago(40), endedAt: ago(30), outcome: 'done' });
+      seg(h, { segment: 'manual', tier: 'fast', startedAt: ago(12) });
+      const home = await homeOf(h);
+      expect(home.running[0]).toMatchObject({
+        issueNumber: 12,
+        segment: 'doing',
+        waitingReason: 'nothing',
+        worker: 'Opus 5.5',
+        stageSince: ago(12),
+        lastEvent: { text: '动手开跑 · Opus 5.5', at: ago(12), tone: 'ok' },
+      });
+      expect(home.running[0]?.taskSince).toBeDefined();
+    });
+
+    it('动手收了、验收还没起：是 verify_pending，等第二意见，没有人在做，不是失败', async () => {
+      const h = harness();
+      seg(h, { segment: 'scope', startedAt: ago(60), endedAt: ago(50), outcome: 'done' });
+      seg(h, { segment: 'manual', startedAt: ago(48), endedAt: ago(20), outcome: 'done' });
+      const home = await homeOf(h);
+      const r = home.running[0];
+      expect(r).toMatchObject({
+        segment: 'verify_pending',
+        waitingReason: 'verify_round',
+        waitingSince: ago(20),
+        stageSince: ago(20),
+        lastEvent: { tone: 'ok' },
+      });
+      expect(r?.worker).toBeUndefined();
+    });
+
+    it('验收收了：落在 merge，等合并队列；单子自己是合并中也归 merge', async () => {
+      const h = harness();
+      seg(h, { segment: 'verify', startedAt: ago(30), endedAt: ago(10), outcome: 'done' });
+      expect((await homeOf(h)).running[0]).toMatchObject({ segment: 'merge', waitingReason: 'merge_queue' });
+      const h2 = harness();
+      const task = h2.store.data.tasks.find((t) => t.id === IDS.task12);
+      if (!task) throw new Error('样例数据里没有任务');
+      task.state = 'merging';
+      seg(h2, { segment: 'manual', startedAt: ago(30) });
+      expect((await homeOf(h2)).running[0]?.segment).toBe('merge');
+    });
+
+    it('这一段超时了：还在动手段、没人在做、最近事件是 trouble 并带原因；切号停下是 wait 不是失败', async () => {
+      const h = harness();
+      seg(h, {
+        segment: 'manual',
+        startedAt: ago(50),
+        endedAt: ago(20),
+        outcome: 'timeout',
+        failureReason: '30 分钟没交活，按超时收了',
+      });
+      const r = (await homeOf(h)).running[0];
+      expect(r).toMatchObject({
+        segment: 'doing',
+        lastEvent: { text: '动手超时：30 分钟没交活，按超时收了', tone: 'trouble' },
+      });
+      expect(r?.worker).toBeUndefined();
+      const h2 = harness();
+      seg(h2, { segment: 'manual', startedAt: ago(50), endedAt: ago(20), outcome: 'org_switch' });
+      expect((await homeOf(h2)).running[0]?.lastEvent).toMatchObject({ tone: 'wait' });
+    });
+
+    it('一笔流水都没有、状态也推不出（跑着、没排队）：segment 是 null，不猜；排队中的算还没开始对题', async () => {
+      const h = harness();
+      expect((await homeOf(h)).running[0]).toMatchObject({ issueNumber: 12, segment: null });
+      const h2 = harness();
+      const task = h2.store.data.tasks.find((t) => t.id === IDS.task12);
+      if (!task) throw new Error('样例数据里没有任务');
+      task.state = 'queued';
+      expect((await homeOf(h2)).running[0]?.segment).toBe('scoping');
+    });
+
+    it('段名认不出的那一笔不算数：不参与「最近一笔」，也不进平均', async () => {
+      const h = harness();
+      seg(h, { segment: 'scope', startedAt: ago(60), endedAt: ago(50), outcome: 'done' });
+      seg(h, {
+        segment: 'fusion-execute' as 'manual',
+        startedAt: ago(40),
+        endedAt: ago(30),
+        outcome: 'done',
+      });
+      const home = await homeOf(h);
+      expect(home.running[0]?.segment).toBe('doing'); // 按 scope 收了推出来的，不是被那笔怪的带偏
+      // 样例里 #13 的对题（7 分钟）和动手（25 分钟）也在窗口里；怪的那笔不进样本
+      expect(home.flow.map((f) => f.samples)).toEqual([2, 1, 0]);
+    });
+
+    it('要你拍的挂在这张单上：红点要的标题带上；asking 的从提问时刻起算等了多久', async () => {
+      const h = harness({ data: { ...devFixtures(T0), asks: [pendingAsk()] } });
+      const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
+      if (!task) throw new Error('样例数据里没有任务');
+      task.state = 'asking';
+      const r = (await homeOf(h)).running.find((x) => x.issueNumber === 12);
+      expect(r).toMatchObject({
+        waitingReason: 'founder_decision',
+        waitingSince: T0.toISOString(),
+        pendingDecision: expect.stringContaining('验证码短信的模板'),
+      });
+    });
+
+    it('flow 三格：固定对题→动手→验收；在途按泳道数；平均只用 done 且起止读得出的；没有样本不给平均（不是 0）', async () => {
+      const h = harness();
+      seg(h, { segment: 'scope', startedAt: ago(100), endedAt: ago(90), outcome: 'done' });
+      seg(h, {
+        segment: 'scope',
+        taskId: IDS.task13,
+        startedAt: ago(100),
+        endedAt: ago(80),
+        outcome: 'done',
+      });
+      seg(h, { segment: 'manual', startedAt: ago(70), endedAt: ago(40), outcome: 'timeout' });
+      seg(h, { segment: 'manual', startedAt: ago(35) });
+      const home = await homeOf(h);
+      expect(home.flow.map((f) => f.segment)).toEqual(['scope', 'manual', 'verify']);
+      // 样例里 #13 自己还有一笔对题（7 分钟）、动手（25 分钟，另一笔超时）在窗口里：对题 (7+10+20)/3 分钟
+      expect(home.flow[0]).toEqual({ segment: 'scope', inFlight: 0, avgMs: 740_000, samples: 3 });
+      // 动手：超时的两笔和还在跑的一笔都不算样本，只有 #13 那笔 25 分钟；在途 1 张
+      expect(home.flow[1]).toEqual({ segment: 'manual', inFlight: 1, avgMs: 25 * 60_000, samples: 1 });
+      // 验收：#13 那笔 task_id 没记（老行），主页这条路不收 → 没有样本，不给平均
+      expect(home.flow[2]).toEqual({ segment: 'verify', inFlight: 0, samples: 0 });
+      expect(home.flow[2]?.avgMs).toBeUndefined();
+    });
+  });
+
+  it('故意造红：三段流水读不到（listSegmentRunsForTasks 抛错）就是 500，流水线图不拿空图顶', async () => {
+    const h = harness();
+    h.store.listSegmentRunsForTasks = async () => {
+      throw new Error('runs 表读不到');
+    };
+    expect((await getHome(h)).status).toBe(500);
+  });
+
   it('持续状态条：有池快清零显示 tight（不是失败红）；有路由探不通显示 degraded；引擎关着显示 off', async () => {
     const h = harness({ config: { engineOff: true } });
     const claudeWin = h.store.data.quotaWindows.find((w) => w.poolId === 'pool-claude-a' && w.label === '5h');

@@ -27,6 +27,7 @@ import {
   quotaWindows,
   repos,
   routes,
+  runs,
   runsOfTask,
   scheduleHealth,
   searchSpecs,
@@ -724,6 +725,16 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         ...toSegmentRun(r),
         matchedBy: r.taskId === taskId ? ('task' as const) : ('issueNumber' as const),
       }));
+    },
+    async listSegmentRunsForTasks(taskIds) {
+      const ids = taskIds.filter(isUuid);
+      if (ids.length === 0) return [];
+      const rows = await db
+        .select()
+        .from(runs)
+        .where(inArray(runs.taskId, ids))
+        .orderBy(asc(runs.startedAt), asc(runs.createdAt), asc(runs.id));
+      return rows.map((r) => ({ ...toSegmentRun(r), matchedBy: 'task' as const }));
     },
     async getPlans(runIds) {
       const ids = runIds.filter(isUuid);

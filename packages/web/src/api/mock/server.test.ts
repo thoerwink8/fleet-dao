@@ -24,9 +24,13 @@ describe('假后端：任务详情的用量汇总', () => {
   test('和真后端同一个算法：结束的会话进 runs、在跑的进 running，按模型、按阶段各数一遍都对得上', async () => {
     const d = await fresh().task('t-12');
     const { total, byModel, byStage } = d.usage;
-    expect(total.runs + total.running).toBe(d.runs.length);
-    expect(total.running).toBe(d.runs.filter((r) => !r.endedAt).length);
-    expect(byModel.reduce((n, m) => n + m.runs + m.running, 0)).toBe(d.runs.length);
+    // t-12 也有三段流水（主页流水线图的演示数据）：合计 = 老式会话 + 三段各一笔
+    const all = d.runs.length + d.segmentRuns.length;
+    expect(total.runs + total.running).toBe(all);
+    expect(total.running).toBe(
+      d.runs.filter((r) => !r.endedAt).length + d.segmentRuns.filter((r) => r.running).length,
+    );
+    expect(byModel.reduce((n, m) => n + m.runs + m.running, 0)).toBe(all);
     expect(byStage.reduce((n, s) => n + s.runs + s.running, 0)).toBe(d.runs.length);
     expect(byModel.every((m) => m.modelName !== '')).toBe(true);
   });
@@ -35,15 +39,15 @@ describe('假后端：任务详情的用量汇总', () => {
     const d = await fresh().task('t-12');
     const { total } = d.usage;
     expect(total).toMatchObject({
-      runs: 6,
-      running: 1,
+      runs: 7,
+      running: 2,
       missingTokens: 1,
       missingCache: 2,
       missingEquivalent: 2,
     });
     expect(total.cost).toEqual({
       metered: expect.objectContaining({ runs: 1, missing: 0 }),
-      subscription: expect.objectContaining({ runs: 5, missing: 2 }),
+      subscription: expect.objectContaining({ runs: 6, missing: 2 }),
       unknown: { runs: 0, usd: 0, missing: 0 },
     });
     // 会话也带着计费方式（和真后端一样从渠道表读）

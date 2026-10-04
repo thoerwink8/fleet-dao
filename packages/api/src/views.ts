@@ -10,6 +10,7 @@ import {
   type BoardSubtaskSchema,
   type BoardTaskSchema,
   type Channel,
+  flowStages,
   type HomeDecisionSchema,
   type HomeDoneSchema,
   type HomeHealthSchema,
@@ -35,6 +36,7 @@ import {
   type Task,
   type TaskState,
   type TaskUsage,
+  taskFlow,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type {
@@ -441,16 +443,34 @@ export function homeDecisions(input: {
   return items.sort((a, b) => b.since.localeCompare(a.since));
 }
 
+/** 哪张单有什么在等创始人拍：decision 级未处理通知在前、追问在后，各取最新的一条。 */
+export function pendingDecisionByTask(input: {
+  notifications: NotificationRecord[];
+  pendingAsks: AskRecord[];
+}): Map<string, { title: string; since: string }> {
+  const out = new Map<string, { title: string; since: string }>();
+  const put = (taskId: string | undefined, title: string, since: string) => {
+    if (taskId === undefined) return;
+    const prev = out.get(taskId);
+    if (!prev || since > prev.since) out.set(taskId, { title, since });
+  };
+  for (const n of input.notifications) if (n.level === 'decision') put(n.taskId, n.title, n.createdAt);
+  for (const a of input.pendingAsks) put(a.taskId, a.question, a.askedAt);
+  return out;
+}
+
 /**
- * 「在跑的」：没结束的需求（don​​e / stopped / failed 之外），segment 还没接上（#556-1+ 落真时补），一律 null——
- * 「还没验」不许按字段猜成失败。waitingReason 现在只能判两种：有人在等创始人回答（state=asking）→ founder_decision；
- * 正常在跑 / 排队 → nothing / queue（现在有 run 排队没开工的算 queue）。其余（内存、额度、CI、第二意见、合并队列）
- * 等 segment 接上再分；分不出时不猜。
+ * 「在跑的」：没结束的需求（done / stopped / failed 之外）。在哪一段、谁在做、最近一次事件从三段流水推（home-flow.ts 的
+ * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：有人在等创始人回答
+ * （state=asking）→ founder_decision（从追问的提问时刻起算）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
+ * 在合并 → merge_queue；其余 nothing。额度、内存、CI 这几种等 segment 之外的信号才分得出，分不出时不猜。
  */
 export function homeRunning(input: {
   tasks: Task[];
   activeRuns: SessionRun[];
   repoOf: (repoId: string) => { owner: string; name: string } | undefined;
+  segmentRunsOf: (taskId: string) => SegmentRunView[];
+  decisionOf: (taskId: string) => { title: string; since: string } | undefined;
 }): HomeRunning[] {
   const taskIds = new Set(input.tasks.map((t) => t.id));
   const queuedByTask = new Map<string, SessionRun>();
@@ -465,18 +485,36 @@ export function homeRunning(input: {
       const repo = input.repoOf(t.repoId);
       const queued = queuedByTask.get(t.id);
       const asking = t.state === 'asking';
+      const flow = taskFlow(t, input.segmentRunsOf(t.id));
+      const decision = input.decisionOf(t.id);
+      const waitingReason: HomeRunning['waitingReason'] = asking
+        ? 'founder_decision'
+        : queued
+          ? 'queue'
+          : flow.segment === 'verify_pending'
+            ? 'verify_round'
+            : flow.segment === 'merge'
+              ? 'merge_queue'
+              : 'nothing';
+      const waitingSince = asking
+        ? decision?.since
+        : queued
+          ? queued.queuedAt
+          : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+            ? flow.stageSince
+            : undefined;
       return {
         issueNumber: t.issueNumber,
         title: t.title,
         repo: repo ? `${repo.owner}/${repo.name}` : '（仓不在库里）',
-        segment: null,
-        waitingReason: asking
-          ? ('founder_decision' as const)
-          : queued
-            ? ('queue' as const)
-            : ('nothing' as const),
-        // 排队的从进队列算起；asking 的「什么时候开始等」要 stateChanges，这里不猜，先不带。
-        ...(queued ? { waitingSince: queued.queuedAt } : {}),
+        segment: flow.segment,
+        waitingReason,
+        ...(waitingSince ? { waitingSince } : {}),
+        taskSince: t.createdAt,
+        ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
+        ...(flow.worker ? { worker: flow.worker } : {}),
+        ...(decision ? { pendingDecision: decision.title } : {}),
+        ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
         link: `/tasks/${t.id}`,
       };
     });
@@ -581,23 +619,49 @@ export function buildHome(input: {
   pools: z.input<typeof PoolViewSchema>[];
   routes: Route[];
   engineOff: boolean;
+  /** 看板窗口里所有单的三段流水（store.listSegmentRunsForTasks）+ 模型表 / 渠道表（读模型名、计费方式用）。 */
+  segmentRuns: SegmentRunRecord[];
+  models: Model[];
+  channels: Channel[];
   now: Date;
 }): z.input<typeof HomeResponseSchema> {
   const taskById = new Map(input.tasks.map((t) => [t.id, t]));
   const taskByIssue = new Map(input.tasks.map((t) => [`${t.repoId}#${t.issueNumber}`, t]));
   const repoById = new Map(input.repos.map((r) => [r.id, r]));
+  const finishedTaskIds = new Set(
+    input.tasks.filter((t) => TERMINAL_TASK_STATES.has(t.state)).map((t) => t.id),
+  );
+  // 单子结束与否决定「开着的那一笔」算在跑还是没收尾（readSegmentRun 的 taskFinished），所以按这个分两批读
+  const runViews = new Map<string, SegmentRunView[]>();
+  const allViews: SegmentRunView[] = [];
+  for (const taskFinished of [true, false]) {
+    const records = input.segmentRuns.filter(
+      (r) => (r.taskId !== undefined && finishedTaskIds.has(r.taskId)) === taskFinished,
+    );
+    const batch = segmentRunViews(records, { models: input.models, channels: input.channels, taskFinished });
+    batch.forEach((view, i) => {
+      allViews.push(view);
+      const taskId = records[i]?.taskId;
+      if (taskId !== undefined) runViews.set(taskId, [...(runViews.get(taskId) ?? []), view]);
+    });
+  }
+  const decisionByTask = pendingDecisionByTask(input);
   // 「要你拍的」「做完的」可能挂到不在 running 那份清单里的单（做完了的）；反查用全量。这里 tasks 由调用方给全量。
+  const running = homeRunning({
+    tasks: input.tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state)),
+    activeRuns: input.activeRuns,
+    repoOf: (repoId) => repoById.get(repoId),
+    segmentRunsOf: (taskId) => runViews.get(taskId) ?? [],
+    decisionOf: (taskId) => decisionByTask.get(taskId),
+  });
   return {
     decisions: homeDecisions({
       notifications: input.notifications,
       pendingAsks: input.pendingAsks,
       taskOf: (taskId) => taskById.get(taskId),
     }),
-    running: homeRunning({
-      tasks: input.tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state)),
-      activeRuns: input.activeRuns,
-      repoOf: (repoId) => repoById.get(repoId),
-    }),
+    running,
+    flow: flowStages(allViews, running),
     done: homeDone({
       merged: input.merged,
       repoOf: (repoId) => repoById.get(repoId),

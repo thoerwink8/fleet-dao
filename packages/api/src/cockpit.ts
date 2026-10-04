@@ -150,15 +150,19 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     for (const key of missing) deps.log.warn('主页「做完的」反查不到挂的单，只显示 PR 号', { issue: key });
     const taskIds = tasks.map((t) => t.id);
-    const [notifications, pendingAsks, activeRuns, pools, channels, windows, routes] = await Promise.all([
-      store.listNotifications({ status: 'open', limit: 200 }),
-      store.listPendingAsks(),
-      store.listRuns({ taskIds, active: true }),
-      store.listPools(),
-      store.listChannels(),
-      store.listQuotaWindows(),
-      store.listRoutes(),
-    ]);
+    const [notifications, pendingAsks, activeRuns, pools, channels, windows, routes, models, segmentRuns] =
+      await Promise.all([
+        store.listNotifications({ status: 'open', limit: 200 }),
+        store.listPendingAsks(),
+        store.listRuns({ taskIds, active: true }),
+        store.listPools(),
+        store.listChannels(),
+        store.listQuotaWindows(),
+        store.listRoutes(),
+        store.listModels(),
+        // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
+        store.listSegmentRunsForTasks(taskIds),
+      ]);
     const now = deps.now();
     const poolViews = buildPools(
       { pools, channels, windows, routes, activeRuns },
@@ -176,6 +180,9 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         pools: poolViews,
         routes,
         engineOff: config.engineOff,
+        segmentRuns,
+        models,
+        channels,
         now,
       }),
     });
