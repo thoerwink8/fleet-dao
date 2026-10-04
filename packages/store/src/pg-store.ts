@@ -55,6 +55,13 @@ import {
 import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
+  claimedCommandResult,
+  commandKey,
+  commandTarget,
+  judgeExistingCommand,
+  tookOverResult,
+} from './command-logic.ts';
+import {
   ATTEMPT_FREE_STATUS,
   claimedResult,
   judgeCarriers,
@@ -372,7 +379,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     return out;
   }
 
-  const commandKey = (runId: string, key: string) => `fleet:${runId}:${key}`;
   /** 还没做完、而且还是这张凭据占着的那一行。 */
   const heldBy = (key: string, token: string) =>
     and(
@@ -1118,15 +1124,23 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         const at = now();
         const inserted = await db
           .insert(idempotencyKeys)
-          .values({ key: k, action, target: `run:${runId}`, claimedAt: at })
+          .values({ key: k, action, target: commandTarget(runId), claimedAt: at })
           .onConflictDoNothing()
           .returning({ key: idempotencyKeys.key });
-        if (inserted.length > 0) return { status: 'claimed', token: iso(at) };
+        if (inserted.length > 0) return claimedCommandResult(iso(at));
         const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, k));
         if (!row) continue;
-        if (row.action !== action) return { status: 'other-action', action: row.action };
-        if (row.completedAt !== null) return { status: 'done', result: row.result };
-        if (!(row.claimedAt < cutoff)) return { status: 'in-flight', claimedAt: iso(row.claimedAt) };
+        const verdict = judgeExistingCommand(
+          {
+            action: row.action,
+            claimedAt: iso(row.claimedAt),
+            completed: row.completedAt !== null,
+            result: row.result,
+          },
+          action,
+          takeOverBefore,
+        );
+        if (verdict.status !== 'take-over') return verdict;
         // 条件更新是原子的：两个请求同时来接，后一个等前一个提交后重新判条件，claimed_at 已经变新，接不到。
         const taken = await db
           .update(idempotencyKeys)
@@ -1139,7 +1153,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             ),
           )
           .returning({ key: idempotencyKeys.key });
-        if (taken.length > 0) return { status: 'claimed', token: iso(at), tookOver: true };
+        if (taken.length > 0) return tookOverResult(iso(at));
       }
       throw new Error(`幂等键 ${key} 反复被别的请求抢占，稍后再试`);
     },

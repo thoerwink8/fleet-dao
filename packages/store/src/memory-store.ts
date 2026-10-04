@@ -20,6 +20,13 @@ import {
   taskWorkflowId,
 } from '@fleet-dao/shared';
 import {
+  claimedCommandResult,
+  commandKey,
+  commandTarget,
+  judgeExistingCommand,
+  tookOverResult,
+} from './command-logic.ts';
+import {
   assertOutcomeHasReason,
   claimedResult,
   duplicateVersionObject,
@@ -422,7 +429,6 @@ export function createMemoryStore(
     return { steps, updatedAt: record.at };
   }
 
-  const commandKey = (runId: string, key: string) => `fleet:${runId}:${key}`;
   /** 占用凭据就是这次占用的时刻（和库里的 claimed_at 一样）：接管会把它改新，旧凭据就对不上了。 */
   const heldBy = (record: IdempotencyRecord | undefined, token: string): record is IdempotencyRecord =>
     !!record && record.completedAt === undefined && record.claimedAt === token;
@@ -1038,16 +1044,22 @@ export function createMemoryStore(
       const existing = data.idempotency.get(k);
       const at = now().toISOString();
       if (!existing) {
-        data.idempotency.set(k, { action, target: `run:${runId}`, claimedAt: at });
-        return { status: 'claimed', token: at };
+        data.idempotency.set(k, { action, target: commandTarget(runId), claimedAt: at });
+        return claimedCommandResult(at);
       }
-      if (existing.action !== action) return { status: 'other-action', action: existing.action };
-      if (existing.completedAt !== undefined) return { status: 'done', result: existing.result };
-      if (Date.parse(existing.claimedAt) < Date.parse(takeOverBefore)) {
-        existing.claimedAt = at;
-        return { status: 'claimed', token: at, tookOver: true };
-      }
-      return { status: 'in-flight', claimedAt: existing.claimedAt };
+      const verdict = judgeExistingCommand(
+        {
+          action: existing.action,
+          claimedAt: existing.claimedAt,
+          completed: existing.completedAt !== undefined,
+          result: existing.result,
+        },
+        action,
+        takeOverBefore,
+      );
+      if (verdict.status !== 'take-over') return verdict;
+      existing.claimedAt = at;
+      return tookOverResult(at);
     },
     async completeCommand({ runId, key, token }, result) {
       const existing = data.idempotency.get(commandKey(runId, key));
