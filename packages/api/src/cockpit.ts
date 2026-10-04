@@ -16,6 +16,7 @@ import {
   NotificationsResponse,
   PageQuery,
   PoolsResponse,
+  QUOTA_RESERVE_SETTING,
   ReposResponse,
   ResolveNotificationResponse,
   RoutingEffortsResponse,
@@ -55,6 +56,7 @@ import {
   WorkflowUnavailableError,
 } from './ports.ts';
 import { registerReleaseRoutes } from './release-version.ts';
+import { soloReserveView } from './reserve-view.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
@@ -501,22 +503,35 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const now = deps.now();
     // 切号现状（#194）：读不到不拖垮额度页，但要明说没读成（不拿空冒充没事）
     const soloPaused = savedSettings.find((s) => s.key === 'engine.soloPaused')?.value === true;
+    const poolViews = buildPools(
+      { pools, channels, windows, routes, activeRuns },
+      now,
+      config.quotaStaleAfterMs,
+    );
+    // 独享的额度留量线现状（#194 方案 4.8）：选路、切号用同一份判法（shared 的 evaluateReserve）
+    const soloReserve = soloReserveView(
+      poolViews,
+      savedSettings.find((s) => s.key === QUOTA_RESERVE_SETTING)?.value,
+      now,
+    );
+    const reserve = soloReserve ? { soloReserve } : {};
     let orgSwitch: ReturnType<typeof orgSwitchView>;
     if (!deps.orgSwitch) {
-      orgSwitch = { state: 'unavailable', why: ORG_SWITCH_NOT_HERE, soloPaused };
+      orgSwitch = { state: 'unavailable', why: ORG_SWITCH_NOT_HERE, soloPaused, ...reserve };
     } else {
       try {
-        orgSwitch = orgSwitchView(await deps.orgSwitch.read(), soloPaused, now);
+        orgSwitch = orgSwitchView(await deps.orgSwitch.read(), soloPaused, now, soloReserve);
       } catch (error) {
         orgSwitch = {
           state: 'unavailable',
           why: `读切号账本没成：${error instanceof Error ? error.message : String(error)}`,
           soloPaused,
+          ...reserve,
         };
       }
     }
     return reply(c, PoolsResponse, {
-      pools: buildPools({ pools, channels, windows, routes, activeRuns }, now, config.quotaStaleAfterMs),
+      pools: poolViews,
       staleAfterMinutes: Math.round(config.quotaStaleAfterMs / 60_000),
       orgSwitch,
       asOf: now.toISOString(),

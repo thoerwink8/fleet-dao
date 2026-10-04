@@ -34,6 +34,7 @@ import {
   openAlertsByPrefix,
   openPoolRuns,
   type RunSegment,
+  readQuotaReserveSetting,
   recordStepTiming,
   releaseTaskReservation,
   reservePoolSlot,
@@ -408,6 +409,12 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     }
   }
 
+  /** 设置里各渠道的额度留量线原值（没设过 undefined = 内置默认）；认不认得出由选路按池判（shared 的 resolvePoolReserve）。 */
+  async function quotaReserveFor(): Promise<{ setting: unknown }> {
+    const r = await readQuotaReserveSetting(db);
+    return { setting: r.set ? r.value : undefined };
+  }
+
   const planOf = deps.orgPlan ?? ((input) => orgPlanView(db, input));
 
   /**
@@ -544,6 +551,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(live?.ok ? { liveOrg: live.org } : {}),
           ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
           ...(orgPlan ? { orgPlan } : {}),
+          // 各渠道的额度留量线（#194 方案 4.8）：这一步和给验证留一家的那一步同一份；库读不了照抛
+          quotaReserve: await quotaReserveFor(),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
         // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
@@ -766,6 +775,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(live?.ok ? { liveOrg: live.org } : {}),
         ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
         ...(orgPlan ? { orgPlan } : {}),
+        quotaReserve: await quotaReserveFor(),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       });
     },

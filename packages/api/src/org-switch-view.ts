@@ -12,6 +12,7 @@ import {
   type OrgSwitchViewSchema,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
+import type { SoloReserveView } from './reserve-view.ts';
 
 export interface OrgSwitchPort {
   /** 最近一次更新的账本；引擎还没记过为 null。读不到抛。 */
@@ -35,9 +36,16 @@ export function orgSwitchView(
   row: { doc: unknown; updatedAt: Date } | null,
   soloPaused: boolean,
   now: Date = new Date(),
+  soloReserve?: SoloReserveView,
 ): View {
+  const reserve = soloReserve ? { soloReserve } : {};
   if (!row) {
-    return { state: 'unavailable', why: '引擎还没记过切号现状（还没读过接口、没判过）', soloPaused };
+    return {
+      state: 'unavailable',
+      why: '引擎还没记过切号现状（还没读过接口、没判过）',
+      soloPaused,
+      ...reserve,
+    };
   }
   const parsed = OrgLedgerViewDocSchema.safeParse(row.doc);
   if (!parsed.success) {
@@ -46,6 +54,7 @@ export function orgSwitchView(
       state: 'unreadable',
       why: `切号账本认不出（${issue?.path.join('.') || '整份'}：${issue?.message ?? '格式不对'}），引擎也因此不切号，要人看`,
       soloPaused,
+      ...reserve,
     };
   }
   const d = parsed.data;
@@ -102,6 +111,7 @@ export function orgSwitchView(
       : {}),
     ...(burn ? { burn } : {}),
     soloPaused,
+    ...reserve,
     updatedAt: row.updatedAt.toISOString(),
   };
 }

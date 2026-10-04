@@ -61,6 +61,7 @@ export const settingLabel: Record<SettingKey, string> = {
   'notify.quietHours': '飞书免打扰时段',
   'judge.dailyCallLimit': `${brand.terms.judgeQuiz}每天调用上限`,
   'engine.soloPaused': `引擎暂不用${brand.terms.solo}`,
+  'engine.quotaReserve': '各渠道的额度留量线',
 };
 
 function isStage(s: string): s is StageKind {

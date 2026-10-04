@@ -9,6 +9,7 @@ export * from './feishu-api.ts';
 export * from './intent-api.ts';
 export * from './org-ledger-doc.ts';
 export * from './quota.ts';
+export * from './quota-reserve.ts';
 export * from './realtime.ts';
 export * from './segment-runs.ts';
 export * from './usage.ts';

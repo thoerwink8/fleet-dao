@@ -802,6 +802,8 @@ export const PoolViewSchema = z.object({
   /** null = 这个池挂的渠道在库里查不到（数据不一致），计费方式未知——不猜成「套餐内」。 */
   billing: BillingKindSchema.nullable(),
   channelEnabled: z.boolean(),
+  /** Claude 订阅池对应的组织类型（独享 / 拼车）；不是 Claude 订阅池没有。额度页顶上的切号现状按它认出独享池。 */
+  orgKind: z.enum(['solo', 'carpool']).optional(),
   maxConcurrency: z.number().int().min(0),
   /** 正在跑的会话数。 */
   running: z.number().int().min(0),
@@ -824,9 +826,25 @@ export const PoolViewSchema = z.object({
  * unavailable = 没接上（开发、内存版）或引擎还没记过；unreadable = 账本在库里却认不出（引擎也因此不切号，要人看）；
  * known = 读到了。soloPaused 是设置里的「引擎暂不用独享」（人叫停）。
  */
+export const SoloReserveViewSchema = z.object({
+  /** reached = 独享到了留量线；unreadable = 留量线的设置认不出（引擎也因此不派、不切独享）；unknown = 配了线、对应的读数读不到（按额度未知，照派）。 */
+  state: z.enum(['reached', 'unreadable', 'unknown']),
+  why: z.string(),
+});
+
 export const OrgSwitchViewSchema = z.discriminatedUnion('state', [
-  z.object({ state: z.literal('unavailable'), why: z.string(), soloPaused: z.boolean() }),
-  z.object({ state: z.literal('unreadable'), why: z.string(), soloPaused: z.boolean() }),
+  z.object({
+    state: z.literal('unavailable'),
+    why: z.string(),
+    soloPaused: z.boolean(),
+    soloReserve: SoloReserveViewSchema.optional(),
+  }),
+  z.object({
+    state: z.literal('unreadable'),
+    why: z.string(),
+    soloPaused: z.boolean(),
+    soloReserve: SoloReserveViewSchema.optional(),
+  }),
   z.object({
     state: z.literal('known'),
     /** 引擎最近一次读到会话用户挂的组织（拼车 / 独享）；还没读到过为 null。 */
@@ -876,6 +894,8 @@ export const OrgSwitchViewSchema = z.discriminatedUnion('state', [
       ])
       .optional(),
     soloPaused: z.boolean(),
+    /** 独享的额度留量线现状（#194 方案 4.8）：没到线、也没有要说的就没有这一项。 */
+    soloReserve: SoloReserveViewSchema.optional(),
     updatedAt: Time,
   }),
 ]);
@@ -1040,6 +1060,26 @@ export const AuditResponse = z.object({
 
 const HHMM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, '格式是 HH:MM');
 
+/**
+ * 额度留量线的一个比例（#194 方案 4.8）：已用到这个比例，引擎就不再往这个渠道派新活、也不切过去。0–1，不收负数、大于 1、
+ * 不是数字的值。null = 明确不限；不写这个窗口 = 未配置（也是不限）。
+ */
+const ReserveRatioSchema = z.number().min(0, '留量线不能小于 0').max(1, '留量线不能大于 1（100%）');
+export const PoolReserveLinesSchema = z.strictObject({
+  '5h': ReserveRatioSchema.nullable().optional(),
+  '7d': ReserveRatioSchema.nullable().optional(),
+  '7d_model': ReserveRatioSchema.nullable().optional(),
+  month_usd: ReserveRatioSchema.nullable().optional(),
+  points: ReserveRatioSchema.nullable().optional(),
+  period_usd: ReserveRatioSchema.nullable().optional(),
+  other: ReserveRatioSchema.nullable().optional(),
+});
+/** 账号池编号 → 这个池各额度窗的留量线（按池配，池就是额度页上的「渠道」一行）。 */
+export const QuotaReserveSettingSchema = z.record(z.string().min(1), PoolReserveLinesSchema);
+// 窗口种类加了一种、这里漏了，tsc 当场报错
+export const RESERVE_KEYS_MATCH_WINDOWS: Same<keyof z.infer<typeof PoolReserveLinesSchema>, QuotaWindowKind> =
+  true;
+
 /** 驾驶舱能改的全局设置。新增一项就在这里加一行；不在表里的键一律拒收。 */
 export const SETTING_SCHEMAS = {
   /** 同时跑的 AI 会话上限（设计文档第四节：起步 6 个）。 */
@@ -1053,6 +1093,13 @@ export const SETTING_SCHEMAS = {
    * 独享时一键关掉引擎这一路。已经挂着独享时不受影响（该切回照切回）。没设过 = false。
    */
   'engine.soloPaused': z.boolean(),
+  /**
+   * 每个渠道（账号池）的额度留量线（#194 方案 4.8，创始人 2026-10-04：「到了配置额度，这个渠道就不能用了……是全渠道配置项」）：
+   * {池编号: {窗口: 比例 | null}}。已用到线，选路不再派新活到这个池、切号也不切过去。代码里没有任何默认值：起始值在种子文件
+   * packages/db/quota-reserve.default.json（装载器只补缺装进库），之后在驾驶舱改。这个池没写 = 不限（驾驶舱写「未配置」）；
+   * 库里没有这一行 = 种子没装上，明确失败（引擎不派、不切），不当成不限。
+   */
+  'engine.quotaReserve': QuotaReserveSettingSchema,
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

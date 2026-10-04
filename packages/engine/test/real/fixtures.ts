@@ -30,7 +30,9 @@ import {
   scopePrefix,
 } from '@fleet-dao/adapters';
 import {
+  applyQuotaReserveSeed,
   type Db,
+  loadQuotaReserveSeed,
   models,
   pools,
   repos,
@@ -120,6 +122,8 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
     },
     { id: 'relay', channelId: 'mirasim-cloud', maxConcurrency: 3 },
   ]);
+  // 额度留量线：和发布时一样，把种子文件只补缺装进库（线只来自库里，引擎代码里没有默认值；没装上选路一律不派）
+  await applyQuotaReserveSeed(db, await loadQuotaReserveSeed());
   await db.insert(routes).values([
     {
       id: 'solo',

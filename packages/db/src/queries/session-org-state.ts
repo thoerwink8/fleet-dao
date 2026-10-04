@@ -2,6 +2,7 @@
 // 这里只管存、取、拿锁、放锁：
 // - 取：没有这一行回 null（引擎当作「从没切过」）；有就原样给 doc，认不认得出由引擎判，认不出它会明确失败。
 // - 锁：单飞，一次只一个拿着；过期的（引擎做到一半重启没放）下一个能拿；同一个持有人可以重入续期。
+import { QUOTA_RESERVE_SETTING } from '@fleet-dao/shared';
 import { and, desc, eq, isNull, lt, or } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { sessionOrgState, settings } from '../schema/index.ts';
@@ -27,6 +28,18 @@ export async function readSoloPaused(db: Db): Promise<SoloPausedReading> {
     by: row.updatedBy,
     why: `设置 ${SOLO_PAUSED_SETTING} 的值不是 true/false：${JSON.stringify(row.value)}`,
   };
+}
+
+/**
+ * 读各渠道的额度留量线设置（#194 方案 4.8）：没设过 = { set: false }（调用方用内置默认）；设过原样给值，认不认得出由 shared 的
+ * resolvePoolReserve 判（认不出明确失败、不当成不限）。库读不了照抛。
+ */
+export async function readQuotaReserveSetting(
+  db: Db,
+): Promise<{ set: false } | { set: true; value: unknown; since: Date; by: string | null }> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, QUOTA_RESERVE_SETTING));
+  if (!row) return { set: false };
+  return { set: true, value: row.value, since: row.updatedAt, by: row.updatedBy };
 }
 
 export interface OrgStateRow {

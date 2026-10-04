@@ -1,7 +1,13 @@
 // 会话用户切号（#157、#59）要看的和要记的：带组织类型的池（Claude 订阅：拼车、独享）各自的额度窗口现在是什么状态、这些池上还有
 // 哪些没结束的会话；切号、切号后核对、切号停下的会话怎么续上的，记进操作记录（驾驶舱「操作记录」页）。判不判、切不切由引擎定
 // （engine 的 jobs/org-switch.ts）。
-import { type ModelRef, type OrgKind, windowAppliesTo } from '@fleet-dao/shared';
+import {
+  type ModelRef,
+  type OrgKind,
+  type QuotaWindowKind,
+  usedRatioOf,
+  windowAppliesTo,
+} from '@fleet-dao/shared';
 import { and, asc, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
@@ -17,6 +23,12 @@ export const SESSION_ORG_ALERT_PREFIX = 'session-org:';
 
 export interface OrgPoolWindow {
   label: string;
+  /** 归类（5h、7d……）：额度留量线按它配（shared 的 evaluateReserve）。 */
+  window: QuotaWindowKind;
+  /** 模型组窗口的组名；账号级窗口为 null。 */
+  scope: string | null;
+  /** 已用比例（上游给的百分比，或 used / limit），通常 0–1、超额可以大于 1；算不出为 null。 */
+  used: number | null;
   /** 和选路、额度表同一个判法（windowState）。 */
   state: WindowState;
   /** 读数本身说用满了（windowFull），不看新旧。 */
@@ -102,7 +114,15 @@ export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<S
       const applies =
         !w.scope || poolRefs.some((ref) => windowAppliesTo(w, ref, pool.scopeModels ?? undefined) === 'yes');
       if (!applies) continue;
-      windows.push({ label: w.label, state, full: windowFull(w), resetsAt: w.resetsAt });
+      windows.push({
+        label: w.label,
+        window: w.window,
+        scope: w.scope === '' ? null : w.scope,
+        used: usedRatioOf(w),
+        state,
+        full: windowFull(w),
+        resetsAt: w.resetsAt,
+      });
     }
     out.push({ poolId: pool.id, orgKind: pool.orgKind, windows });
   }

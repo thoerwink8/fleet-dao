@@ -3,13 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { blocksFor, type FilterContext, hostUnfit } from '../../src/routing/filter.ts';
 import { groupOf } from '../../src/routing/group.ts';
 import {
+  chooseRoute,
   DEFAULT_ROUTING_POLICY,
   HOST_ABILITIES,
   type RouteFacts,
   type RouteWindow,
   STAGE_NEEDS,
 } from '../../src/routing/index.ts';
-import { at, entry, halfOpenBreaker, NOW, route, win } from './helpers.ts';
+import { at, entry, halfOpenBreaker, input, NOW, route, win } from './helpers.ts';
 
 function ctx(overrides: Partial<FilterContext> = {}): FilterContext {
   return {
@@ -615,5 +616,102 @@ describe('渠道不可用、切回宽限（#194）', () => {
     expect(
       blocksFor(claude('solo'), entry('c', 0), withPlan({ to: 'carpool', at: null, why: 'x' }, 'solo')),
     ).toEqual([]);
+  });
+});
+
+describe('额度留量线（#194 方案 4.8）：线只来自库里的设置，代码里没有默认值', () => {
+  const solo = (windows: RouteWindow[], over: Partial<RouteFacts> = {}) =>
+    route('solo', { orgKind: 'solo', poolId: 'claude-solo', poolName: '独享号', windows, ...over });
+  const five = (used: number, over: Partial<RouteWindow> = {}) =>
+    win({ label: '5h', window: '5h', used, resetsAt: at(3), ...over });
+  const week = (used: number, over: Partial<RouteWindow> = {}) => win({ used, resetsAt: at(72), ...over });
+  const lines = { 'claude-solo': { '5h': 0.8, '7d': 0.7 } };
+  const withLines = (setting: unknown) => ctx({ liveOrg: 'solo', quotaReserve: { setting } });
+
+  it('周窗已用 75%、线 70%：不再派新活，等清零（等得来，写明哪条线、几点清零）', () => {
+    const blocks = blocksFor(solo([five(0.2), week(0.75)]), entry('solo', 0), withLines(lines));
+    expect(blocks.map((b) => [b.code, b.wait])).toEqual([['quota-reserve', 'quota']]);
+    expect(blocks[0]?.text).toContain('独享号周额度用了 75%，到了留量线 70%');
+    expect(blocks[0]?.until).toBe(at(72));
+    expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(72)) });
+  });
+
+  it('5 小时窗到线同样挡；两条都到线一条块里都写；没到线照派', () => {
+    expect(codes(solo([five(0.8), week(0.1)]), withLines(lines))).toEqual(['quota-reserve']);
+    const both = blocksFor(solo([five(0.9), week(0.9)]), entry('solo', 0), withLines(lines));
+    expect(both).toHaveLength(1);
+    expect(both[0]?.text).toContain('5 小时额度');
+    expect(both[0]?.text).toContain('周额度');
+    expect(codes(solo([five(0.79), week(0.69)]), withLines(lines))).toEqual([]);
+  });
+
+  it('这个池库里没写线 = 不限：用 99% 也不被留量线挡（别家、拼车不设线）', () => {
+    // 99% 会被另一条规矩（额度够收尾）挡，这里只看留量线这一条
+    const reserveOnly = (r: RouteFacts, c: FilterContext) => codes(r, c).filter((x) => x === 'quota-reserve');
+    expect(reserveOnly(solo([five(0.99), week(0.99)]), withLines({}))).toEqual([]);
+    expect(reserveOnly(solo([five(0.99), week(0.99)]), withLines({ other: { '5h': 0.1 } }))).toEqual([]);
+    // 明确写 null 也是不限
+    expect(
+      reserveOnly(solo([five(0.99), week(0.99)]), withLines({ 'claude-solo': { '5h': null, '7d': null } })),
+    ).toEqual([]);
+  });
+
+  it('改线马上生效：把周窗线调到 90%，75% 就能派', () => {
+    expect(codes(solo([week(0.75)]), withLines({ 'claude-solo': { '7d': 0.9 } }))).toEqual([]);
+  });
+
+  it('旧读数（stale）已超线照挡；清零时刻不知道：等待时刻为空、按轮询再看', () => {
+    expect(codes(solo([week(0.8, { state: 'stale' })]), withLines(lines))).toEqual(['quota-reserve']);
+    const b = blocksFor(solo([week(0.8, { resetsAt: null })]), entry('solo', 0), withLines(lines));
+    expect(b[0]).toMatchObject({ code: 'quota-reserve', wait: 'quota', until: null });
+    expect(b[0]?.text).toContain('清零时刻不知道');
+  });
+
+  it('【故意造出的失败】库里没有这一行（种子没装上，setting 是 undefined）：每个池都硬挡，不当成不限', () => {
+    for (const r of [solo([week(0.1)]), route('cursor', { poolId: 'cursor-pool' })]) {
+      const blocks = blocksFor(r, entry(r.routeId, 0), withLines(undefined));
+      expect(blocks.map((b) => [b.code, b.wait])).toEqual([['quota-reserve', null]]);
+      expect(blocks[0]?.text).toContain('没装进库');
+    }
+  });
+
+  it('【故意造出的失败】线是负数、大于 1、字符串、整份不是对象：硬挡，写明原因，不当成不限也不当成 0', () => {
+    const bads = [
+      { 'claude-solo': { '7d': -0.2 } },
+      { 'claude-solo': { '7d': 1.5 } },
+      { 'claude-solo': { '7d': 'x' } },
+      'on',
+      [1],
+    ];
+    for (const bad of bads) {
+      const blocks = blocksFor(solo([week(0.1)]), entry('solo', 0), withLines(bad));
+      expect(
+        blocks.map((b) => [b.code, b.wait]),
+        JSON.stringify(bad),
+      ).toEqual([['quota-reserve', null]]);
+      expect(blocks[0]?.text).toContain('读不到或认不出');
+    }
+    // 只有这个池那一项坏了：别的池不受影响
+    expect(
+      codes(route('cursor', { poolId: 'cursor-pool' }), withLines({ 'claude-solo': { '7d': -1 } })),
+    ).toEqual([]);
+  });
+
+  it('读数缺配了线的窗口 / 没给已用多少：额度未知，照现有规矩不挡（不是到线）', () => {
+    expect(codes(solo([five(0.1)]), withLines(lines))).toEqual([]);
+    expect(codes(solo([week(0.1, { used: null })]), withLines(lines))).toEqual([]);
+  });
+
+  it('不给 quotaReserve（老输入、纯函数）：留量线不管；池已经用满另有原因、不重复', () => {
+    expect(codes(solo([week(0.75)]), ctx({ liveOrg: 'solo' }))).toEqual([]);
+    expect(codes(solo([week(0.99)], { blockers: ['quota-exhausted'] }), withLines(lines))).toEqual([
+      'quota-exhausted',
+    ]);
+  });
+
+  it('输入外壳认不出（不是 { setting }）：选路判不了，抛', () => {
+    expect(() => chooseRoute(input([route('a')], { quotaReserve: 'oops' as never }))).toThrow(
+      /额度留量线的输入认不出/,
+    );
   });
 });
