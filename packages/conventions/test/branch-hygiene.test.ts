@@ -11,6 +11,7 @@ import {
   type HygieneDeps,
   issueNumberIn,
   judge,
+  type LinkedIssue,
   MARK,
   mentionPattern,
   parseBoard,
@@ -138,10 +139,11 @@ describe('分支体检：判法（一条分支从上往下，命中就停）', (
   });
 
   it(`有产出、满 ${ASK_DAYS} 天：等人定，理由带产出、PR、最后一次提交；不满：留（还在做）`, () => {
-    const v = judge(bcase({ closedPrs: [{ number: 4, headSha: sha('a') }] }), NOW);
+    // 头对不上的关掉 PR（#784 那两类不算）：照旧等人勾
+    const v = judge(bcase({ closedPrs: [{ number: 4, headSha: sha('b') }] }), NOW);
     expect(v.kind).toBe('ask');
     expect(v.why).toContain('主线上没有的改动 1 个文件（`x.ts`）');
-    expect(v.why).toContain('关掉没合的 PR #4（删了能在 #4 页面点 Restore branch 恢复）');
+    expect(v.why).toContain('关掉没合的 PR #4');
     expect(v.why).toContain('最后一次提交「做了点事」');
     expect(judge(bcase({ content: facts({ headDate: ago(ASK_DAYS - 1) }) }), NOW).kind).toBe('keep');
   });
@@ -156,6 +158,122 @@ describe('分支体检：判法（一条分支从上往下，命中就停）', (
     expect(judge(bcase({ content: { error: '本地没有提交' } }), NOW)).toMatchObject({ kind: 'unknown' });
     expect(judge(bcase({ activity: { error: 'GitHub 回了 502' } }), NOW)).toMatchObject({ kind: 'unknown' });
     expect(judge(bcase({ content: undefined }), NOW)).toMatchObject({ kind: 'unknown' });
+  });
+});
+
+describe('分支体检：满 14 天机器自己删的两类（#784）', () => {
+  const closed = (n: number, headSha: string) => [{ number: n, headSha }];
+  const issue = (
+    state: 'open' | 'closed',
+    extra: Partial<Extract<LinkedIssue, { title: string }>> = {},
+  ): LinkedIssue => ({
+    number: 784,
+    title: '远端分支攒着没人管',
+    state,
+    stateReason: state === 'closed' ? 'completed' : null,
+    isPr: false,
+    ...extra,
+  });
+
+  it('关掉（没合）的 PR 留下的分支、头对得上、满 14 天：删（机器自己），理由带 PR 号和 Restore', () => {
+    const v = judge(bcase({ closedPrs: closed(41, sha('a')) }), NOW);
+    expect(v.kind).toBe('delete');
+    expect(v).toMatchObject({ byFounder: false });
+    expect(v.why).toContain('关掉（没合）的 PR #41 留下的分支');
+    expect(v.why).toContain(`就是那个 PR 的头 ${sha('a').slice(0, 7)}`);
+    expect(v.why).toContain('删了能在 #41 页面点 Restore branch 恢复');
+    expect(v.why).toContain(`满 ${STALE_DAYS} 天没动静，机器自己删`);
+  });
+
+  it('同样但头变了（PR 之后分支又动过）：不删，照旧等人勾', () => {
+    const v = judge(bcase({ closedPrs: closed(41, sha('b')) }), NOW);
+    expect(v.kind).toBe('ask');
+    expect(v.why).toContain('关掉没合的 PR #41');
+    expect(v.why).not.toContain('Restore branch');
+  });
+
+  it('分支名里的单已关、有产出、满 14 天：删（机器自己），理由写明是哪个单', () => {
+    const c = bcase({ branch: { name: 'docs/328-guide', sha: sha('a'), protected: false } });
+    expect(issueNumberIn(c.branch.name)).toBe(328);
+    const v = judge({ ...c, linked: { ...issue('closed'), number: 328 } }, NOW);
+    expect(v).toMatchObject({ kind: 'delete', byFounder: false });
+    expect(v.why).toContain('分支名里的 #328 是单「远端分支攒着没人管」，已关');
+    expect(v.why).toContain('那件事已经结束了');
+    expect(
+      judge({ ...c, linked: { ...issue('closed'), number: 328, stateReason: 'not_planned' } }, NOW).why,
+    ).toContain('已关（不做了）');
+  });
+
+  it('名字里的单还开着：不删，走原来「等人勾」', () => {
+    const v = judge(
+      bcase({ branch: { name: 'feat/784-x', sha: sha('a'), protected: false }, linked: issue('open') }),
+      NOW,
+    );
+    expect(v.kind).toBe('ask');
+    expect(v.why).toContain('1 个文件');
+  });
+
+  it('单没查成、查不到这个号、号其实是 PR：都不算「已关」，不删', () => {
+    const name = 'feat/784-x';
+    const b = { name, sha: sha('a'), protected: false };
+    for (const linked of [
+      { number: 784, error: 'GitHub 回了 502' } as const,
+      { number: 784, missing: true } as const,
+      issue('closed', { isPr: true }) as LinkedIssue,
+    ]) {
+      const v = judge(bcase({ branch: b, linked }), NOW);
+      expect(v.kind).toBe('ask');
+      if ('error' in linked) expect(v.why).toContain('没查成（GitHub 回了 502）');
+    }
+  });
+
+  it('巡检单上勾了留（#784 之前列的）：即使属这两类也不删', () => {
+    const v = judge(
+      bcase({ closedPrs: closed(41, sha('a')), decision: { action: 'keep', sha: sha('a') } }),
+      NOW,
+    );
+    expect(v).toMatchObject({ kind: 'keep' });
+    expect(v.why).toContain('勾了留');
+  });
+
+  it('有开着的单提到它：即使属这两类也不删', () => {
+    const v = judge(
+      bcase({ closedPrs: closed(41, sha('a')), mentions: [{ number: 784, isPr: false }] }),
+      NOW,
+    );
+    expect(v).toMatchObject({ kind: 'keep' });
+    expect(v.why).toContain('开着的 #784 提到它');
+    const withIssue = judge(bcase({ linked: issue('closed'), mentions: [{ number: 9, isPr: true }] }), NOW);
+    expect(withIssue.kind).toBe('keep');
+    expect(withIssue.why).toContain('PR #9 提到它');
+  });
+
+  it(`不满 ${STALE_DAYS} 天：留着（理由写明到天数自己删，别列给人）`, () => {
+    const fresh = { closedPrs: closed(41, sha('a')), content: facts({ headDate: ago(STALE_DAYS - 1) }) };
+    const v = judge(bcase(fresh), NOW);
+    expect(v.kind).toBe('keep');
+    expect(v.why).toContain(`满 ${STALE_DAYS} 天机器自己删，不列给人`);
+    // 刚动过的（不满 3 天）说「还在做」，不说「到天数自己删」
+    const doing = judge(bcase({ ...fresh, content: facts({ headDate: ago(ASK_DAYS - 1) }) }), NOW);
+    expect(doing.kind).toBe('keep');
+    expect(doing.why).toContain('还在做');
+    // 边界：刚好满 14 天就删
+    expect(judge(bcase({ ...fresh, content: facts({ headDate: ago(STALE_DAYS) }) }), NOW).kind).toBe(
+      'delete',
+    );
+  });
+
+  it('和主线没有共同祖先（判不了有没有产出）：不按这两类删，照旧等人勾', () => {
+    const v = judge(
+      bcase({ closedPrs: closed(41, sha('a')), content: facts({ output: { kind: 'unrelated' } }) }),
+      NOW,
+    );
+    expect(v.kind).toBe('ask');
+  });
+
+  it('内容读不到：没查成，不因为属这两类就删', () => {
+    const v = judge(bcase({ closedPrs: closed(41, sha('a')), content: { error: '本地没有提交' } }), NOW);
+    expect(v.kind).toBe('unknown');
   });
 });
 
@@ -408,12 +526,21 @@ function world(): World {
       { name: 'output-old', sha: sha('6'), protected: false },
       { name: 'output-new', sha: sha('7'), protected: false },
       { name: 'fleet/292-f3f3472d3', sha: sha('8'), protected: false },
+      // #784 那两类：关掉没合的 PR 留下的（头对得上 / 头变了）、名字里的单已经关了的 / 还开着的
+      { name: 'closed-pr', sha: sha('c'), protected: false },
+      { name: 'closed-pr-moved', sha: sha('d'), protected: false },
+      { name: 'docs/311-guide', sha: sha('f'), protected: false },
+      { name: 'feat/311-x', sha: sha('g'), protected: false },
     ],
     pulls: [
       pr(11, { merged: true, headRef: 'merged', headSha: sha('1') }),
       pr(12, { state: 'open', headRef: 'open-pr', headSha: sha('2') }),
       // fork 来的同名分支的 PR 不算本仓这条分支的 PR
       pr(13, { state: 'open', headRef: 'output-old', headSha: sha('6'), headRepo: 'fork/r' }),
+      // 关掉没合的：头就是分支现在的头（删了能恢复）
+      pr(15, { headRef: 'closed-pr', headSha: sha('c') }),
+      // 关掉没合的，但分支后来又动过：头对不上，不算那一类
+      pr(16, { headRef: 'closed-pr-moved', headSha: sha('e') }),
     ],
     threads: [
       thread(20, '这张单要用分支 mentioned 上的东西'),
@@ -425,9 +552,20 @@ function world(): World {
       292: {
         number: 292,
         title: '外部看门狗',
-        state: 'closed',
+        state: 'open',
         isPr: false,
         createdAt: ago(40),
+        labels: [],
+        milestone: null,
+        stateReason: null,
+        subIssues: 0,
+      },
+      311: {
+        number: 311,
+        title: '导览文档重写',
+        state: 'closed',
+        isPr: false,
+        createdAt: ago(60),
         labels: [],
         milestone: null,
         stateReason: 'completed',
@@ -440,6 +578,10 @@ function world(): World {
       'output-old': facts(),
       'output-new': facts({ headDate: ago(1) }),
       'fleet/292-f3f3472d3': facts({ authors: ['fleet-dao-agent[bot]'] }),
+      'closed-pr': facts(),
+      'closed-pr-moved': facts(),
+      'docs/311-guide': facts(),
+      'feat/311-x': facts({ headDate: ago(1) }),
     },
   };
 }
@@ -452,9 +594,13 @@ describe('分支体检：整轮', () => {
     const { promise, calls } = run(world());
     const r = await promise;
     expect(kinds(r)).toEqual({
+      'closed-pr': 'delete',
+      'closed-pr-moved': 'ask',
+      'docs/311-guide': 'delete',
       'empty-new': 'keep',
       'empty-old': 'delete',
       'fleet/292-f3f3472d3': 'ask',
+      'feat/311-x': 'keep',
       main: 'keep',
       mentioned: 'keep',
       merged: 'delete',
@@ -466,15 +612,22 @@ describe('分支体检：整轮', () => {
     expect(calls.deleted).toEqual([]);
     expect(calls.created).toEqual([]);
     const fleet = r.reports.find((x) => x.name === 'fleet/292-f3f3472d3');
-    expect(fleet?.verdict.why).toContain('名字里的 #292 是单「外部看门狗」，已关');
+    expect(fleet?.verdict.why).toContain('名字里的 #292 是单「外部看门狗」，还开着');
     expect(fleet?.who).toContain('法国引擎（Fusion，旧流程）');
+    // #784 那两类：头对得上的关掉 PR、名字里的单已关，理由各说清是哪一类
+    expect(r.reports.find((x) => x.name === 'closed-pr')?.verdict.why).toContain(
+      '关掉（没合）的 PR #15 留下的分支',
+    );
+    expect(r.reports.find((x) => x.name === 'docs/311-guide')?.verdict.why).toContain(
+      '分支名里的 #311 是单「导览文档重写」，已关',
+    );
   });
 
   it('--delete：只删判了删的；删之前再读一次头', async () => {
     const { promise, calls } = run(world(), { delete: true });
     const r = await promise;
-    expect(calls.deleted.sort()).toEqual(['empty-old', 'merged']);
-    expect(r.deleted.sort()).toEqual(['empty-old', 'merged']);
+    expect(calls.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
+    expect(r.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
   });
 
   it('判完到删之间头变了：不删，下一轮重判；删的时候已经不在了：记「已不在」', async () => {
@@ -482,16 +635,31 @@ describe('分支体检：整轮', () => {
     w.heads = { merged: sha('9'), 'empty-old': undefined };
     const { promise, calls } = run(w, { delete: true });
     const r = await promise;
-    expect(calls.deleted).toEqual([]);
+    // closed-pr、docs/311-guide 这一轮照删（头没变）
+    expect(calls.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide']);
     expect(r.skipped).toEqual([{ name: 'merged', why: expect.stringContaining('没删，下一轮重判') }]);
     expect(r.gone).toEqual(['empty-old']);
+  });
+
+  it('判完到删之间头变了：#784 那两类也不删（和别的档同一个严格度）', async () => {
+    const w = world();
+    w.heads = { 'closed-pr': sha('9'), 'docs/311-guide': sha('9') };
+    const { promise, calls } = run(w, { delete: true });
+    const r = await promise;
+    expect(calls.deleted.sort()).toEqual(['empty-old', 'merged']);
+    expect(r.skipped.map((s) => s.name).sort()).toEqual(['closed-pr', 'docs/311-guide']);
   });
 
   it('一条删失败：记下来、接着删别的，不当成删了', async () => {
     const { promise } = run(world(), { delete: true, fail: { deleteBranch: new Error('GitHub 回了 500') } });
     const r = await promise;
     expect(r.deleted).toEqual([]);
-    expect(r.failed.map((f) => f.name).sort()).toEqual(['empty-old', 'merged']);
+    expect(r.failed.map((f) => f.name).sort()).toEqual([
+      'closed-pr',
+      'docs/311-guide',
+      'empty-old',
+      'merged',
+    ]);
   });
 
   for (const key of ['defaultBranch', 'branches', 'openPulls', 'openThreads'] as const) {
@@ -523,9 +691,12 @@ describe('分支体检：整轮', () => {
     const r = await promise;
     expect(kinds(r)['empty-old']).toBe('unknown');
     expect(kinds(r)['output-old']).toBe('unknown');
+    // 要看内容的一律没查成：#784 那两类也不删（它们也要看内容才算得上有产出）
+    expect(kinds(r)['closed-pr']).toBe('unknown');
+    expect(kinds(r)['docs/311-guide']).toBe('unknown');
     expect(calls.deleted).toEqual(['merged']);
     expect(r.notQueried).toEqual([
-      expect.stringContaining('主线没读成（git 跑不起来）：要看内容的 5 条分支都没判'),
+      expect.stringContaining('主线没读成（git 跑不起来）：要看内容的 9 条分支都没判'),
     ]);
   });
 
@@ -560,8 +731,12 @@ describe('分支体检：整轮', () => {
     const first = run(w);
     await first.promise;
     expect(first.calls.pullsForHead.sort()).toEqual([
+      'closed-pr',
+      'closed-pr-moved',
+      'docs/311-guide',
       'empty-new',
       'empty-old',
+      'feat/311-x',
       'fleet/292-f3f3472d3',
       'merged',
       'output-new',
@@ -587,8 +762,16 @@ describe('分支体检：整轮', () => {
     // 说给人看的天数就是判法用的那两个（改了天数正文跟着变）
     expect(made?.body).toContain(`满 ${ASK_DAYS} 天没动静`);
     expect(made?.body).toContain(`机器满 ${STALE_DAYS} 天自己删`);
-    expect([...parseBoard(made?.body ?? '').listed].sort()).toEqual(['fleet/292-f3f3472d3', 'output-old']);
-    expect(r.board).toEqual({ number: 900, created: true, newAsks: ['fleet/292-f3f3472d3', 'output-old'] });
+    expect([...parseBoard(made?.body ?? '').listed].sort()).toEqual([
+      'closed-pr-moved',
+      'fleet/292-f3f3472d3',
+      'output-old',
+    ]);
+    expect(r.board).toEqual({
+      number: 900,
+      created: true,
+      newAsks: ['closed-pr-moved', 'fleet/292-f3f3472d3', 'output-old'],
+    });
     expect(calls.comments).toHaveLength(1);
     expect(calls.comments[0]?.body).toContain(`<!-- ${MARK} -->`);
   });
@@ -613,7 +796,13 @@ describe('分支体检：整轮', () => {
     expect(kinds(r)['output-old']).toBe('delete');
     expect(r.reports.find((x) => x.name === 'output-old')?.verdict).toMatchObject({ byFounder: true });
     expect(kinds(r)['fleet/292-f3f3472d3']).toBe('keep');
-    expect(second.calls.deleted.sort()).toEqual(['empty-old', 'merged', 'output-old']);
+    expect(second.calls.deleted.sort()).toEqual([
+      'closed-pr',
+      'docs/311-guide',
+      'empty-old',
+      'merged',
+      'output-old',
+    ]);
     expect(second.calls.created).toEqual([]);
     const updated = second.calls.updated[0]?.body ?? '';
     expect(parseBoard(updated).decisions.get('fleet/292-f3f3472d3')).toEqual({
@@ -621,7 +810,10 @@ describe('分支体检：整轮', () => {
       sha: sha('8'),
     });
     expect(updated).toContain('## 这一轮删掉的');
-    expect(updated).not.toContain('## 等你定');
+    // #784 那两类不再进「等你定」（只出现在「这一轮删掉的」里）；剩下的（头变过的关掉 PR）照旧列着等人勾
+    expect(updated).toContain('## 等你定（1 条）');
+    expect(updated).toContain('`closed-pr-moved`（头');
+    expect(updated).not.toContain('[ ] 删 <!-- fleet:branch-hygiene delete docs/311-guide');
     // 没有新列的：不再留言
     expect(second.calls.comments).toEqual([]);
   });
@@ -634,7 +826,7 @@ describe('分支体检：整轮', () => {
     });
     const r = await promise;
     expect(r.notQueried).toEqual([expect.stringContaining('巡检单没写成（GitHub 回了 403）')]);
-    expect(r.deleted.sort()).toEqual(['empty-old', 'merged']);
+    expect(r.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
   });
 
   it('外人开的带巡检单记号、勾好删的单：不认，一条不照它删；Actions 开的、仓主开的认', async () => {
@@ -656,7 +848,7 @@ describe('分支体检：整轮', () => {
       const { promise, calls } = run(w, { delete: true });
       const r = await promise;
       expect(kinds(r)['output-old']).toBe('ask');
-      expect(calls.deleted.sort()).toEqual(['empty-old', 'merged']);
+      expect(calls.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
       expect(r.notes).toEqual([
         expect.stringContaining('#950 正文带巡检单记号，但不是仓里的人或 Actions 开的：不认'),
       ]);
