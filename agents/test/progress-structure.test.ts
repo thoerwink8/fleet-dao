@@ -51,9 +51,28 @@ const archivedHeadings = (arch: Record<string, string>) =>
         .map((l) => ({ file: f, title: l.slice(3).trimEnd() })),
     );
 
+/**
+ * 引导节里写着办完字样、却会被钩子数进「没处理」的条。钩子只认「已处理」三个字（directiveItems 的判法，这里照它的循环写），
+ * 写成「已办」「已合」「已完成」的条不算处理：开场会一直报一个虚高的数，真要办的被盖住。办完了就标「已处理」或整条搬进归档页。
+ */
+function doneButUnmarked(progress: string): string[] {
+  const lines = progress.split('\n');
+  const at = lines.findIndex((l) => l.trimEnd() === hook.DIRECTIVE_HEADING);
+  if (at < 0) return [];
+  const out: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    const t = l.trim();
+    if (/^#{1,2}\s/.test(t)) break;
+    if (t.startsWith('- ') && !/已处理/.test(t) && /已办|已合|已完成/.test(t)) out.push(t.slice(2, 42));
+  }
+  return out;
+}
+
 /** 返回这份进度文件和归档页对不上的地方；空数组 = 骨架没坏 */
 function problems(progress: string, arch: Record<string, string>): string[] {
   const out: string[] = [];
+  for (const t of doneButUnmarked(progress))
+    out.push(`${PROGRESS} 引导节里「${t}…」写着办完字样却没标「已处理」，钩子会把它数成没处理`);
   for (const h of [hook.TEMP_HEADING, hook.DIRECTIVE_HEADING]) {
     const n = countLine(progress, h);
     if (n !== 1) out.push(`${PROGRESS} 里「${h}」出现 ${n} 次，要正好 1 次（开会话钩子读它）`);
@@ -175,6 +194,26 @@ describe('docs/PROGRESS.md 骨架：钩子读的两节还在、归档对得上',
         'progress-2026-10-03.md': `${arch['progress-2026-10-03.md']}\n${hook.DIRECTIVE_HEADING}\n`,
       };
       expect(problems(progress, inboxMoved).join('\n')).toMatch(/第二个引导节/);
+    },
+    SLOW,
+  );
+
+  it(
+    '【故意造出失败】引导节里写「已办」「已合」却没标「已处理」的条被拦住；标了「已处理」或在别的节的不拦',
+    () => {
+      const at = (extra: string) =>
+        progress.replace(hook.DIRECTIVE_HEADING, `${hook.DIRECTIVE_HEADING}\n\n${extra}`);
+      expect(problems(at('- 2026-10-05 某事——**已办**：PR #1 合了'), arch).join('\n')).toMatch(
+        /写着办完字样却没标「已处理」/,
+      );
+      expect(problems(at('- 2026-10-05 某事——已合 #2'), arch).join('\n')).toMatch(/没标「已处理」/);
+      // 钩子数得出来：这样的条真被它报成「没处理」，所以要拦
+      const repo = repoWith(at('- 2026-10-05 某事——已办'), arch);
+      expect(hook.checkDirectives(repo, GIT).join('\n')).toContain('某事');
+      // 标了「已处理」的不拦
+      expect(problems(at('- 2026-10-05 某事——已办（已处理）'), arch)).toEqual([]);
+      // 引导节之外（别的节里）写「已办」不归这条管
+      expect(problems(`${progress}\n## 别的节\n\n- 已办：这条在别的节\n`, arch)).toEqual([]);
     },
     SLOW,
   );
