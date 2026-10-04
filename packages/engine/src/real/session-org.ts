@@ -15,7 +15,7 @@
 // 读成了的留很短一会儿（SESSION_ORG_TTL_MS），同时来的几次共用一次读。reclaude 更新后首跑会先「Syncing config…」上百秒：一次
 // 读最多等 SESSION_ORG_TIMEOUT_MS；选路只等 waitMs，没读完回 pending（选路按「过一会儿再选」处理），读在后台接着跑完、留下结果。
 import { randomUUID } from 'node:crypto';
-import { redact, type SessionUser } from '@fleet-dao/adapters';
+import { redact, type SessionUser, sessionProxyEnv } from '@fleet-dao/adapters';
 import { currentOrgOf, parseOrgList } from '@fleet-dao/adapters/quota';
 import type { OrgKind } from '@fleet-dao/shared';
 import { type LiveOrgReading, ORG_NAMES } from '../routing/index.ts';
@@ -78,6 +78,12 @@ export interface SessionOrgDeps {
   user: SessionUser;
   /** 起 reclaude 的命令（绝对路径）：和会话、探针同一份，装在会话用户自己家里（real/index.ts 的 claudeCommand）。 */
   reclaude: string[];
+  /**
+   * 出网经的代理（FLEET_SESSION_PROXY，规范成 http://主机:端口；本机档经 Windows 上的 Clash，法国直连不给）：org list 要连
+   * reclaude 的服务端，WSL 里直连时通时不通（context deadline exceeded，读不到组织、Claude 池整轮不探，#786 同一个根）。
+   * 给了就写成 /usr/bin/env 的参数；认不出的代理在这里就抛（parseSessionProxy），不悄悄改成直连。
+   */
+  proxy?: string | undefined;
   now?: () => Date;
   ttlMs?: number;
   timeoutMs?: number;
@@ -93,10 +99,14 @@ export async function readSessionOrg(deps: SessionOrgDeps): Promise<LiveOrgReadi
   const timeoutMs = deps.timeoutMs ?? SESSION_ORG_TIMEOUT_MS;
   let r: UserCommandResult;
   try {
+    // 代理认不出（parseSessionProxy 抛）就当没跑成：不悄悄改成直连（直连正是读不到的原因）
+    const viaProxy = deps.proxy
+      ? ['/usr/bin/env', ...Object.entries(sessionProxyEnv(deps.proxy)).map(([k, v]) => `${k}=${v}`)]
+      : [];
     r = await deps.exec({
       user: deps.user,
       cwd: '/',
-      argv: [...deps.reclaude, 'org', 'list'],
+      argv: [...viaProxy, ...deps.reclaude, 'org', 'list'],
       timeoutMs,
       scopeId: `session-org-${randomUUID().slice(0, 8)}`,
     });
