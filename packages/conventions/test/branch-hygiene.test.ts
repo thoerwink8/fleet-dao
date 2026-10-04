@@ -15,6 +15,8 @@ import {
   MARK,
   mentionPattern,
   parseBoard,
+  REMIND_TRACKING,
+  remindKey,
   renderBoard,
   STALE_DAYS,
 } from '../src/branch-hygiene.ts';
@@ -327,6 +329,7 @@ describe('分支体检：巡检单正文', () => {
       failed: [],
       skipped: [],
       conflicts: [],
+      reminded: new Set(),
       now: NOW,
     });
     expect(body.startsWith(BOARD_MARKER)).toBe(true);
@@ -780,7 +783,8 @@ describe('分支体检：整轮', () => {
     const w = world();
     const first = run(w, { board: true });
     await first.promise;
-    const body = first.calls.created[0]?.body ?? '';
+    // 留言留成后正文又写了一遍（带「提醒过」记号）：下一轮读到的是最后这份
+    const body = first.calls.updated.at(-1)?.body ?? first.calls.created[0]?.body ?? '';
     const ticked = body
       .split('\n')
       .map((l) =>
@@ -827,6 +831,82 @@ describe('分支体检：整轮', () => {
     const r = await promise;
     expect(r.notQueried).toEqual([expect.stringContaining('巡检单没写成（GitHub 回了 403）')]);
     expect(r.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
+  });
+
+  it('【故意造出的失败】#805 正文写成了、提醒留言失败：报没查成、不记「提醒过」；下一轮留言成功，留言里有这几条分支，再下一轮不重复留', async () => {
+    const w = world();
+    const first = run(w, { board: true, fail: { comment: new Error('GitHub 回了 502') } });
+    const r1 = await first.promise;
+    expect(r1.notQueried).toEqual([expect.stringContaining('提醒留言没留成（GitHub 回了 502）')]);
+    expect(first.calls.comments).toEqual([]);
+    const body1 = first.calls.created[0]?.body ?? '';
+    // 正文已经列了这几条（旧办法下一轮就会当成提醒过），但没有「提醒过」记号
+    expect(parseBoard(body1).listed.size).toBe(3);
+    expect(parseBoard(body1).reminded.size).toBe(0);
+    expect(first.calls.updated).toEqual([]);
+
+    w.threads.push(thread(900, body1));
+    const second = run(w, { board: true });
+    const r2 = await second.promise;
+    expect(r2.notQueried).toEqual([]);
+    expect(r2.board?.newAsks).toEqual(['closed-pr-moved', 'fleet/292-f3f3472d3', 'output-old']);
+    expect(second.calls.comments).toHaveLength(1);
+    for (const name of ['closed-pr-moved', 'fleet/292-f3f3472d3', 'output-old']) {
+      expect(second.calls.comments[0]?.body).toContain(`\`${name}\``);
+    }
+    // 留言成了才记上：最后一份正文里三条都带「提醒过」记号
+    const body2 = second.calls.updated.at(-1)?.body ?? '';
+    expect(parseBoard(body2).reminded.size).toBe(3);
+
+    const w3 = world();
+    w3.threads.push(thread(900, body2));
+    const third = run(w3, { board: true });
+    const r3 = await third.promise;
+    expect(r3.board?.newAsks).toEqual([]);
+    expect(third.calls.comments).toEqual([]);
+  });
+
+  it('【故意造出的失败】#805 留言发了、「提醒过」记号没写上：报出来，下一轮会再留一次（多留不漏留）', async () => {
+    const w = world();
+    const first = run(w, { board: true, fail: { updateIssueBody: new Error('GitHub 回了 500') } });
+    const r1 = await first.promise;
+    expect(first.calls.comments).toHaveLength(1);
+    expect(r1.notQueried).toEqual([expect.stringContaining('没记上「提醒过」（GitHub 回了 500）')]);
+    w.threads.push(thread(900, first.calls.created[0]?.body ?? ''));
+    const second = run(w, { board: true });
+    await second.promise;
+    expect(second.calls.comments).toHaveLength(1);
+  });
+
+  it('#805 之前写的旧正文（没有「提醒过」跟踪行）：列过的算提醒过，不一次性再提醒；带跟踪行但没记号的才再提醒', async () => {
+    const w = world();
+    const first = run(w, { board: true });
+    await first.promise;
+    const current = first.calls.updated.at(-1)?.body ?? '';
+    const legacy = current
+      .split('\n')
+      .filter((l) => !l.includes('reminded-tracking'))
+      .join('\n')
+      .replace(/<!-- fleet:branch-hygiene reminded \S+ [0-9a-f]{40} -->/g, '');
+    expect(parseBoard(legacy).tracked).toBe(false);
+    expect(parseBoard(legacy).listed.size).toBe(3);
+    const w2 = world();
+    w2.threads.push(thread(900, legacy));
+    const second = run(w2, { board: true });
+    const r = await second.promise;
+    expect(r.board?.newAsks).toEqual([]);
+    expect(second.calls.comments).toEqual([]);
+  });
+
+  it('「提醒过」记号坏了（名字解不开）的不算数', () => {
+    const body = [
+      BOARD_MARKER,
+      REMIND_TRACKING,
+      `- x <!-- ${MARK} reminded %E0%A4%A ${sha('a')} -->`,
+      `- y <!-- ${MARK} reminded exp%2Fa 1234 -->`,
+      `- z <!-- ${MARK} reminded exp%2Fok ${sha('b')} -->`,
+    ].join('\n');
+    expect([...parseBoard(body).reminded]).toEqual([remindKey('exp/ok', sha('b'))]);
   });
 
   it('外人开的带巡检单记号、勾好删的单：不认，一条不照它删；Actions 开的、仓主开的认', async () => {

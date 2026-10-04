@@ -323,14 +323,37 @@ const DECISION_LINE = new RegExp(
   `^\\s*[-*+] \\[([ xX])\\] .*<!-- ${MARK} (delete|keep) (\\S+) ([0-9a-f]{40}) -->\\s*$`,
 );
 
-/** 读巡检单正文：勾了的（删 / 留）、列过的分支名。同一个头删和留都勾了的不算数，记进 conflicts。 */
+/**
+ * 「提醒过」的记号（#805）：写在等人定那条分支的行里，只有「新列了 N 条」的留言真的留成了才记上。
+ * 不能拿「正文里列过」当提醒过：正文先写、留言后留，留言失败时正文已经列了，下一轮就会误当成提醒过、不再留言。
+ */
+const REMINDED = new RegExp(`<!-- ${MARK} reminded (\\S+) ([0-9a-f]{40}) -->`, 'g');
+/** 带「提醒过」记号的正文才有这行；旧正文（#805 之前写的）没有它，那时列过的就按提醒过算一次（别重复打扰）。 */
+export const REMIND_TRACKING = `<!-- ${MARK} reminded-tracking -->`;
+/** 「提醒过」的键：分支名加头——头变了、重新列给人，就该再提醒一次。 */
+export const remindKey = (name: string, sha: string) => `${name} ${sha}`;
+const remindedMark = (name: string, sha: string) =>
+  `<!-- ${MARK} reminded ${encodeURIComponent(name)} ${sha} -->`;
+
+/** 读巡检单正文：勾了的（删 / 留）、列过的分支名、留言提醒过的（分支加头）。同一个头删和留都勾了的不算数，记进 conflicts。 */
 export function parseBoard(body: string): {
   decisions: Map<string, Decision>;
   listed: Set<string>;
+  /** 留言提醒成功过的 remindKey；只有带 REMIND_TRACKING 的正文才可信（tracked）。 */
+  reminded: Set<string>;
+  tracked: boolean;
   conflicts: string[];
 } {
   const ticks = new Map<string, Map<string, Set<'delete' | 'keep'>>>();
   const listed = new Set<string>();
+  const reminded = new Set<string>();
+  for (const m of body.matchAll(REMINDED)) {
+    try {
+      reminded.add(remindKey(decodeURIComponent(m[1] ?? ''), m[2] ?? ''));
+    } catch {
+      // 记号坏了的不算
+    }
+  }
   for (const line of body.split(/\r?\n/)) {
     const m = DECISION_LINE.exec(line);
     if (!m) continue;
@@ -360,7 +383,7 @@ export function parseBoard(body: string): {
       if (action) decisions.set(name, { action, sha });
     }
   }
-  return { decisions, listed, conflicts };
+  return { decisions, listed, reminded, tracked: body.includes(REMIND_TRACKING), conflicts };
 }
 
 const code = (name: string) => (name.includes('`') ? name : `\`${name}\``);
@@ -373,6 +396,8 @@ export interface BoardInput {
   failed: readonly { name: string; why: string }[];
   skipped: readonly { name: string; why: string }[];
   conflicts: readonly string[];
+  /** 留言提醒成功过的 remindKey（等人定的行上会带记号）。 */
+  reminded: ReadonlySet<string>;
   now: Date;
 }
 
@@ -387,6 +412,7 @@ export function renderBoard(input: BoardInput): string {
   const deletedRows = reports.filter((r) => input.deleted.includes(r.name));
   const head = [
     BOARD_MARKER,
+    REMIND_TRACKING,
     '这张单由「分支体检」机器人维护（#769；每天一轮，`.github/workflows/github-audit.yml` 的 branches，判法在 `packages/conventions/src/branch-hygiene.ts`），正文每轮重写，只有勾选框算数。',
     '',
     `**要你定的**：下面每条分支都有主线上没有的改动，满 ${ASK_DAYS} 天没动静，也没有开着的 PR 或单子提到它。勾「删」：下一轮照删（分支头变了就不删、重新列）；勾「留，不再问」：以后不再问（分支头变了才重新判）。想马上执行就在 Actions 里手动跑一次 github-audit。没产出的（改动主线上都有）、关掉没合的 PR 留下的、名字里那张单已经关了的：机器满 ${STALE_DAYS} 天自己删，不列在这里。`,
@@ -402,7 +428,7 @@ export function renderBoard(input: BoardInput): string {
   let cut = 0;
   for (const r of asks) {
     const row = [
-      `- ${code(r.name)}（头 \`${short(r.sha)}\`）：${r.verdict.why}。谁开的：${r.who}。`,
+      `- ${code(r.name)}（头 \`${short(r.sha)}\`）：${r.verdict.why}。谁开的：${r.who}。${input.reminded.has(remindKey(r.name, r.sha)) ? remindedMark(r.name, r.sha) : ''}`,
       box(false, 'delete', r.name, r.sha),
       box(false, 'keep', r.name, r.sha),
     ].join('\n');
@@ -653,30 +679,55 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
     const asks = result.reports.filter((r) => r.verdict.kind === 'ask');
     const pending = result.reports.some((r) => r.decision !== undefined);
     if (board || asks.length || pending) {
-      const body = renderBoard({
-        reports: result.reports,
-        // 删的时候已经不在了的也算删掉了：巡检单上不再列它
-        deleted: [...result.deleted, ...result.gone],
-        failed: result.failed,
-        skipped: result.skipped,
-        conflicts: parsed.conflicts,
-        now,
-      });
-      const newAsks = asks.filter((r) => !parsed.listed.has(r.name)).map((r) => r.name);
+      // 提醒过没有只认正文里的「提醒过」记号（留言成功才记），不看「列没列过」：留言失败的下一轮照样算新列的（#805）。
+      // 旧正文（没有 REMIND_TRACKING）是这个记号出现之前写的，那时列过的就当提醒过，别一次性全部再提醒一遍。
+      const isReminded = (r: BranchReport) =>
+        parsed.reminded.has(remindKey(r.name, r.sha)) || (!parsed.tracked && parsed.listed.has(r.name));
+      const newAskReports = asks.filter((r) => !isReminded(r));
+      const newAsks = newAskReports.map((r) => r.name);
+      const render = (reminded: ReadonlySet<string>) =>
+        renderBoard({
+          reports: result.reports,
+          // 删的时候已经不在了的也算删掉了：巡检单上不再列它
+          deleted: [...result.deleted, ...result.gone],
+          failed: result.failed,
+          skipped: result.skipped,
+          conflicts: parsed.conflicts,
+          reminded,
+          now,
+        });
+      const remindedNow = new Set(asks.filter(isReminded).map((r) => remindKey(r.name, r.sha)));
+      const body = render(remindedNow);
+      let number = board?.number;
       try {
-        let number = board?.number;
         const created = number === undefined;
         if (number === undefined) number = await gh.createIssue(BOARD_TITLE, body, BOARD_LABELS);
         else if (board?.body !== body) await gh.updateIssueBody(number, body);
         result.board = { number, created, newAsks };
-        if (newAsks.length) {
+      } catch (e) {
+        result.notQueried.push(`巡检单没写成（${errText(e)}）`);
+        return result;
+      }
+      if (newAsks.length) {
+        try {
           await gh.comment(
             number,
             `<!-- ${MARK} -->\n分支体检新列了 ${newAsks.length} 条等你定（勾选框在正文里）：${newAsks.map(code).join('、')}`,
           );
+        } catch (e) {
+          // 不记「提醒过」：正文里这几条没带记号，下一轮照样算新列的、再留一次
+          result.notQueried.push(`新列分支的提醒留言没留成（${errText(e)}），下一轮会再留`);
+          return result;
         }
-      } catch (e) {
-        result.notQueried.push(`巡检单没写成（${errText(e)}）`);
+        try {
+          const after = render(
+            new Set([...remindedNow, ...newAskReports.map((r) => remindKey(r.name, r.sha))]),
+          );
+          if (after !== body) await gh.updateIssueBody(number, after);
+        } catch (e) {
+          // 留言已经发了、记号没写上：下一轮会再留一次（多一条留言，不会漏）
+          result.notQueried.push(`提醒留言发了，但没记上「提醒过」（${errText(e)}），下一轮会再留一次`);
+        }
       }
     }
   }

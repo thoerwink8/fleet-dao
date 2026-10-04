@@ -149,6 +149,10 @@
 
 做到哪：方案写完并过了别家挑错（GPT、Kimi 各一份有效意见；前两轮四家都超 30 秒没答完，已在方案第 7 节照实写），`specs/901-项目瘦身与提速/重构方案.md`。下一步：方案进主线 → 按方案第 5 节的 PR 表依次实施（`packages/conventions/test/package-boundaries.test.ts` 与 shared/util 纯加 → ⑤ → ⑥ → ③ → ① 各包替换，每片一类）。还没验证：方案里的数字来自本机脚本读代码；零安装区（CI 的 changes/check job、agents-sync、mirasim-reclaude、bridge.ts）的清单读自 workflow 和文档，没逐个在无 node_modules 的环境里跑过；`import.meta.resolve` 取桥接脚本在法国真机上的路径没在本机验（只能合并后随部署看）。
 
+## 2026-10-05 #789 + #805 小单（Sonnet 5.5 子代理，PR #924，分支 `fix/789-805-conventions-small`；#857 已在 #919 合并）
+
+做到哪：代码和测试写完、conventions 两个测试文件 60 条过、biome 和 `tsc -b packages/conventions` 过，PR 已开挂自动合并。#789：预检不再猜「起不来」的报错长什么样，改成看「命令真跑到检查了没有」的证据（biome 的 `Checked N files in`、tsc 的 `error TS`），退出码非 0 又没证据就退 2「没查成，先 pnpm install」；启动器文件不在时直接报起不来、不再经 cmd 起一个不存在的路径（那就是 `The system cannot find the path specified.` 退 1 的来源，本机复现过）。#805：「提醒过」改成正文里单独的记号（分支加头），留言成功才记，留言失败下一轮照样再留。下一步：盯 CI。本机 conventions 全包跑时 ci-cache 的 3 条起进程测试超时（负载，和本改动无关），交 CI 判。还没验证：真 GitHub 上巡检单 #784 的下一轮（旧正文没有跟踪行，按「列过的算提醒过」处理一次，之后才按新记号）。
+
 ## 2026-10-05 #901 代码层臃肿审查（Sonnet 5.5 子代理，分支 `slim/901-*`，`Refs #901` 不写 Closes）
 
 做到哪：第一阶段报告（`specs/901-项目瘦身与提速/代码臃肿审查.md`，#904）和第二阶段三片都已合并：S1 #911（-966 行）、S2 #913（-284 行）、S3 #916（约 -230 行），结果表在报告「第二阶段结果」。下一步：报告第七节「需要方案」九条（共用小工具收进 shared、Store 两份实现、web-api.ts 拆分、adapters 的 codex/shell 渠道去留等）要指挥官让别家挑错后再派；第九节的断链单独开单。还没验证：报告第九节的疑似断链（驾驶舱发 `req:` 工作流信号、引擎只认 `task:`）只是读代码推断，没有在真 Temporal 上跑；`elkjs`、`@xyflow/react` 没删（别家在做首页流程图）。
