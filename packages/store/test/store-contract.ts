@@ -203,6 +203,116 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       });
     });
 
+    // 列表的顺序和「交出去的是副本」：两份实现必须一样（#878 #883 #884）。数据都故意把「写入先后」
+    // 摆得和排序规则相反、时刻并列，免得内存版靠写入先后碰巧对上。
+    describe('列表的顺序与副本', () => {
+      const ago = (m: number) => new Date(T0.getTime() - m * MIN).toISOString();
+      const uuid = (n: number) => `e0000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+
+      it('listUsers：按创建时刻、并列再按编号；和写入先后无关', async () => {
+        const u = (n: number, createdAt: string) => ({
+          id: uuid(n),
+          displayName: `人${n}`,
+          role: 'collaborator' as const,
+          active: true,
+          createdAt,
+        });
+        // 写入先后 1、3、2；创建时刻 2 和 3 并列且早于 1：应读回 2、3、1。
+        const fresh = await make({ users: [u(1, ago(1)), u(3, ago(9)), u(2, ago(9))] }, clock);
+        expect((await fresh.store.listUsers()).map((x) => x.id)).toEqual([uuid(2), uuid(3), uuid(1)]);
+      });
+
+      it('listUsers、listBans：交出去的是副本，调用方怎么改都不影响库里', async () => {
+        const users = await store.listUsers();
+        const usersBefore = structuredClone(users);
+        users.reverse();
+        users.push({ id: OTHER_UUID, displayName: '被加的', role: 'bot', active: true });
+        for (const user of users) user.displayName = '被改了';
+        expect(await store.listUsers()).toEqual(usersBefore);
+
+        const bans = await store.listBans();
+        const bansBefore = structuredClone(bans);
+        expect(bansBefore.length).toBeGreaterThan(0);
+        bans.reverse();
+        bans.push({ family: 'x', reason: '被加的' });
+        for (const ban of bans) ban.reason = '被改了';
+        expect(await store.listBans()).toEqual(bansBefore);
+      });
+
+      it('listBans：按写入先后（库里是自增编号）', async () => {
+        const fresh = await make(
+          {
+            ...contractData(),
+            bans: [
+              { family: 'kimi', stage: 'ui', reason: '先写的' },
+              { family: 'kimi', stage: 'judge', reason: '后写的' },
+            ],
+          },
+          clock,
+        );
+        expect((await fresh.store.listBans()).map((b) => b.reason)).toEqual(['先写的', '后写的']);
+      });
+
+      it('listRuns：排队时刻并列时按编号', async () => {
+        const run = (id: string) => ({
+          id,
+          stage: 'judge' as const,
+          routeId: 'rt-claude-opus',
+          whyRoute: '并列',
+          queuedAt: ago(3),
+        });
+        const data = contractData();
+        // 写入先后 b、a，排队时刻相同：应读回 a、b。
+        data.runs = [...(data.runs ?? []), run(uuid(902)), run(uuid(901))];
+        const fresh = await make(data, clock);
+        const tail = (await fresh.store.listRuns({}))
+          .map((r) => r.id)
+          .filter((id) => id.startsWith('e0000000'));
+        expect(tail).toEqual([uuid(901), uuid(902)]);
+      });
+
+      it('listAsks、listPendingAsks：提问时刻并列时按编号', async () => {
+        const ask = (id: string) => ({
+          id,
+          taskId: IDS.task12,
+          question: `并列 ${id}`,
+          options: ['是', '否'],
+          askedAt: ago(2),
+        });
+        const data = contractData();
+        data.asks = [...(data.asks ?? []), ask(uuid(912)), ask(uuid(911))];
+        const fresh = await make(data, clock);
+        const mine = (list: { id: string }[]) =>
+          list.map((a) => a.id).filter((id) => id.startsWith('e0000000'));
+        expect(mine(await fresh.store.listAsks(IDS.task12))).toEqual([uuid(911), uuid(912)]);
+        expect(mine(await fresh.store.listPendingAsks())).toEqual([uuid(911), uuid(912)]);
+      });
+
+      it('listPullRequests：merged 按合并时刻倒序，没读到合并时刻的排最后（不拿更新时刻顶），并列按编号倒序', async () => {
+        const pr = (number: number, over: { mergedAt?: string; updatedAt: string }) => ({
+          repoId: IDS.repo,
+          number,
+          state: 'merged' as const,
+          headRef: `fleet/pr-${number}`,
+          headSha: `sha${number}`,
+          checks: 'success' as const,
+          ...over,
+        });
+        const data = contractData();
+        data.pullRequests = [
+          pr(42, { updatedAt: ago(0) }), // 合并时刻没读到、更新时刻最新：不能排前面
+          pr(41, { mergedAt: ago(20), updatedAt: ago(20) }),
+          pr(43, { updatedAt: ago(30) }), // 同样没读到，编号大的在前
+          pr(40, { mergedAt: ago(10), updatedAt: ago(10) }),
+          pr(44, { mergedAt: ago(10), updatedAt: ago(10) }), // 合并时刻并列，编号大的在前
+        ];
+        const fresh = await make(data, clock);
+        expect((await fresh.store.listPullRequests({ state: 'merged' })).map((p) => p.number)).toEqual([
+          44, 40, 41, 43, 42,
+        ]);
+      });
+    });
+
     describe('仓、需求、子任务、会话', () => {
       it('仓', async () => {
         expect(await store.listRepos()).toEqual([

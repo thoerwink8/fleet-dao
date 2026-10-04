@@ -115,6 +115,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         feishuUnionId: u.feishuUnionId ?? null,
         githubLogin: u.githubLogin ?? null,
         githubId: u.githubId ?? null,
+        // 没给就用库的默认（建库那一刻）；给了就照写，listUsers 的顺序契约要靠它造出不同的创建时刻。
+        ...(u.createdAt !== undefined && { createdAt: new Date(u.createdAt) }),
       })),
     );
   }
