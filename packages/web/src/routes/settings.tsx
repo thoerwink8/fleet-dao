@@ -244,6 +244,33 @@ function QuietHours({ s }: { s: Setting | undefined }) {
   );
 }
 
+/** 引擎暂不用独享（#194 方案 4.8）：创始人自己要大用独享时一键叫停引擎这一路；开关一拨就存，带版本号、进操作记录。 */
+function SoloPaused({ s }: { s: Setting | undefined }) {
+  const current = SETTING_SCHEMAS['engine.soloPaused'].safeParse(s?.value);
+  const on = current.success ? current.data : false;
+  const { save, pending } = useSaveSetting();
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className="text-sm font-medium">{settingLabel['engine.soloPaused']}</div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            开着时：拼车用不了（额度用满、整辆车被用光）也不自动切到独享，Claude
+            的活等拼车恢复或交给别家模型。已经挂着独享的不受影响，拼车恢复照常切回。
+          </p>
+        </div>
+        <Switch
+          checked={on}
+          disabled={pending}
+          onCheckedChange={(next) => save('engine.soloPaused', next, s)}
+          aria-label="引擎暂不用独享"
+        />
+      </div>
+      <SettingMeta s={s} />
+    </div>
+  );
+}
+
 export default function Settings() {
   const theme = useTheme();
   const api = useApi();
@@ -324,6 +351,7 @@ export default function Settings() {
               unit="次 / 天"
               placeholder="没设"
             />
+            <SoloPaused s={find('engine.soloPaused')} />
           </div>
         )}
       </Section>

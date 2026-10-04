@@ -894,4 +894,24 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     const quiet = await put('notify.quietHours', { value: { start: '23:00', end: '08:00' }, version: 0 });
     expect(quiet.status).toBe(200);
   });
+
+  it('「引擎暂不用独享」（#194）：只收 true/false，别的值拒收；改了留记录、额度页的切号现状跟着带上 soloPaused', async () => {
+    const h = harness();
+    const s = await h.login();
+    const put = (body: unknown) =>
+      h.cockpit.request('/api/settings/engine.soloPaused', write('PUT', s, body));
+    expect(await errorCode(await put({ value: 'yes', version: 0 }))).toBe('invalid_request');
+    expect(await errorCode(await put({ value: 1, version: 0 }))).toBe('invalid_request');
+    const ok = await put({ value: true, version: 0, reason: '我自己要大用独享' });
+    expect(UpdateSettingResponse.parse(await ok.json()).setting).toMatchObject({ value: true, version: 1 });
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      action: 'setting.update',
+      target: 'setting:engine.soloPaused',
+      after: true,
+    });
+    const pools = PoolsResponse.parse(
+      await (await h.cockpit.request('/api/pools', { headers: { cookie: s.cookie } })).json(),
+    );
+    expect(pools.orgSwitch).toMatchObject({ soloPaused: true });
+  });
 });

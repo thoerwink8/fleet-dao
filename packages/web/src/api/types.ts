@@ -29,6 +29,7 @@ import type {
   NotificationSchema,
   NotificationsResponse,
   NowItemSchema,
+  OrgSwitchViewSchema,
   PoolSchema,
   PoolsResponse,
   PoolViewSchema,
@@ -116,6 +117,8 @@ export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
 
 export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;
+/** 会话用户切号现状（#194）：额度页顶上一栏。 */
+export type OrgSwitchView = z.infer<typeof OrgSwitchViewSchema>;
 export type QuotaWindowView = z.infer<typeof QuotaWindowViewSchema>;
 
 export type Jobs = z.infer<typeof JobsResponse>;
