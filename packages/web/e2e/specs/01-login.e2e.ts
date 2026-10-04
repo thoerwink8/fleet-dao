@@ -11,19 +11,90 @@ test.describe('登录', () => {
     await shot(page, '01-登录页');
   });
 
-  // 缺陷 D1（#902）：后端的账密登录（POST /auth/password/login，#123）早就有了，/auth/config 也回 passwordLogin:true，
-  // 但登录页只有飞书按钮和开发免登，没有用户名、密码两栏（前端那一半 #120 写明「另一个工人做」，没做）。
-  // 在这个用例变绿之前，创始人在登录页根本登不进去（飞书没配时更是只剩死胡同）。
-  test('登录页有用户名和密码两栏，输对了能进主页', async ({ page, stack, problems }) => {
-    test.fail(true, '缺陷 D1：登录页没有账密入口（specs/902-驾驶舱用户视角e2e/缺陷清单.md）');
+  // 缺陷 D1（#926 已修）：登录页以前只有飞书按钮和开发免登，没有用户名、密码两栏；创始人按剧本登不进去。
+  test('登录页有用户名和密码两栏：输对了回车就进主页，账号菜单写着名字，会话 Cookie 是 HttpOnly', async ({
+    page,
+    context,
+    stack,
+    problems,
+    shot,
+  }) => {
+    for (const s of ['HTTP 401', 'status of 401', 'ERR_ABORTED']) problems.allow(s);
+    // 密码任何时候都不该出现在地址里（任何一次请求的网址、页面网址）
+    const urls: string[] = [];
+    page.on('request', (r) => urls.push(r.url()));
+    await page.goto('/login?next=%2Fquota');
+    const username = page.getByLabel('用户名');
+    const password = page.getByLabel('密码', { exact: true });
+    await expect(username, '登录页要有用户名一栏').toBeVisible();
+    await expect(username, '光标一进页面就在用户名栏').toBeFocused();
+    await expect(username).toHaveAttribute('autocomplete', 'username');
+    await expect(password).toHaveAttribute('autocomplete', 'current-password');
+    await expect(password).toHaveAttribute('type', 'password');
+    await shot(page, '01-登录页-账密');
+    await username.fill(stack.facts.username);
+    await password.fill(stack.facts.password);
+    await password.press('Enter');
+    // next 带回去：登录后落在原来要去的页
+    await expect(page).toHaveURL(/\/quota$/);
+    await page.getByRole('button', { name: '我的账号' }).click();
+    await expect(page.getByRole('menu')).toContainText('创始人甲');
+    const session = (await context.cookies()).find((c) => c.name.includes('session'));
+    expect(session, '登录后要有会话 Cookie').toBeTruthy();
+    expect(session?.httpOnly, '会话 Cookie 不给页面脚本读').toBe(true);
+    expect(
+      urls.some(
+        (u) => u.includes(encodeURIComponent(stack.facts.password)) || u.includes(stack.facts.password),
+      ),
+    ).toBe(false);
+  });
+
+  test('密码输错：页面写「用户名或密码不对」、留在登录页、不发会话、用户名留着密码清空', async ({
+    page,
+    context,
+    stack,
+    problems,
+    shot,
+  }) => {
     for (const s of ['HTTP 401', 'status of 401', 'ERR_ABORTED']) problems.allow(s);
     await page.goto('/login');
-    await expect(page.getByLabel('用户名'), '登录页要有用户名一栏').toBeVisible({ timeout: 5_000 });
     await page.getByLabel('用户名').fill(stack.facts.username);
-    await page.getByLabel('密码').fill(stack.facts.password);
+    await page.getByLabel('密码', { exact: true }).fill('definitely-not-the-password');
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page).toHaveURL('/');
-    await expect(page.getByRole('heading', { name: '主页' })).toBeVisible();
+    await expect(page.getByRole('alert')).toContainText('用户名或密码不对');
+    await expect(page).toHaveURL(/\/login$/);
+    expect((await context.cookies()).some((c) => c.name.includes('session'))).toBe(false);
+    await expect(page.getByLabel('用户名')).toHaveValue(stack.facts.username);
+    await expect(page.getByLabel('密码', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('密码', { exact: true })).toBeFocused();
+    // 不透露账号在不在：换一个不存在的用户名，话一模一样
+    const first = await page.getByRole('alert').innerText();
+    await page.getByLabel('用户名').fill('nobody-here');
+    await page.getByLabel('密码', { exact: true }).fill('definitely-not-the-password');
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('alert')).toHaveText(first);
+    await shot(page, '01-登录页-密码错');
+  });
+
+  test('后端没起来：写读不到后端、说明不是密码的问题（不说密码不对）', async ({ page, stack, problems }) => {
+    // 这一条只在浏览器里拦掉登录请求来模拟，不动真后端
+    for (const s of [
+      'HTTP 401',
+      'status of 401',
+      'ERR_ABORTED',
+      'ERR_CONNECTION_REFUSED',
+      'Failed to load resource',
+    ]) {
+      problems.allow(s);
+    }
+    await page.goto('/login');
+    await page.route('**/auth/password/login', (route) => route.abort('connectionrefused'));
+    await page.getByLabel('用户名').fill(stack.facts.username);
+    await page.getByLabel('密码', { exact: true }).fill('whatever-it-is-1');
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('读不到后端');
+    await expect(page.getByRole('alert')).toContainText('不是密码的问题');
+    await expect(page.getByRole('alert')).not.toContainText('用户名或密码不对');
   });
 
   test('后端说账密登录是开着的（/auth/config）', async ({ stack, request }) => {

@@ -43,7 +43,8 @@ test.describe('其余页面', () => {
     await page.goto('/audit');
     await expect(page.getByRole('heading', { name: '操作记录' })).toBeVisible();
     await expect(page.getByText('登录了驾驶舱').first()).toBeVisible();
-    await expect(page.getByText('credentials.set').first()).toBeVisible();
+    // 动作名翻成白话（lib/audit.ts）：不再露出 credentials.set 这样的代码
+    await expect(page.getByText('设了账密登录').first()).toBeVisible();
     await shot(page, '07-操作记录');
   });
 

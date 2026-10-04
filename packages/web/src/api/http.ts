@@ -10,8 +10,10 @@ import {
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
+  PasswordLoginRequest,
   SSE_EVENTS,
   TaskActionRequest,
+  UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
@@ -20,6 +22,7 @@ import {
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
+import { PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
 import { ApiError, type FleetApi, type LiveStatus } from './client';
 import type { LiveEvent } from './types';
 
@@ -32,6 +35,9 @@ const ES_CLOSED = 2;
 export function sseRetryDelay(attempt: number): number {
   return Math.min(30_000, 1000 * 2 ** attempt);
 }
+
+/** 401 里不代表「没登录或登录过期」的 code（shared/web-api/auth.ts：PasswordLoginRequest、UpdateCredentialsRequest 的注释）。 */
+const PASSWORD_CHECK_CODES: ReadonlySet<string> = new Set(['bad_credentials', 'bad_current_password']);
 
 function fill(path: string, params: Record<string, string> = {}): string {
   return path.replace(/:(\w+)/g, (_, name: string) => {
@@ -93,7 +99,9 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
             parsed.data.error.details,
           )
         : new ApiError(res.status, `http_${res.status}`, `后端返回 ${res.status}`);
-      if (res.status === 401) opts.onUnauthorized?.();
+      // 401 + 这两个 code 是「会话好好的，只是密码输错了」（登录页的账密、设置页的当前密码）：不是登录过期，
+      // 不能触发跳登录页——否则设置页输错当前密码会整页跳走，错误提示根本看不到。
+      if (res.status === 401 && !PASSWORD_CHECK_CODES.has(err.code)) opts.onUnauthorized?.();
       if (err.code === 'csrf_token') csrf = undefined;
       throw err;
     }
@@ -139,6 +147,27 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       });
       csrf = me.csrfToken;
       return me;
+    },
+    async passwordLogin(username, password) {
+      const body = PasswordLoginRequest.safeParse({ username, password });
+      if (!body.success) {
+        // 密码不进错误信息、不进日志：只说哪一栏长度不合
+        throw new ApiError(
+          400,
+          'invalid_request',
+          `用户名最多 ${USERNAME_MAX} 个字符、密码最多 ${PASSWORD_MAX} 个字符，且都不能为空`,
+        );
+      }
+      // 成功是 204 + 会话 Cookie、没有响应体；CSRF 令牌要再读一次 /api/me（me() 里存下）
+      await send('POST', authUrl(AuthRoutes.passwordLogin.path), null, { body: body.data, csrf: false });
+      csrf = undefined;
+      return api.me();
+    },
+    credentials: () => send('GET', apiUrl(R.credentials.path), R.credentials.response),
+    async updateCredentials(body) {
+      await send('PUT', apiUrl(R.updateCredentials.path), null, {
+        body: UpdateCredentialsRequest.parse(body),
+      });
     },
     async logout() {
       await send('POST', authUrl(AuthRoutes.logout.path), null);
