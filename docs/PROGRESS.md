@@ -28,7 +28,7 @@
 - 引擎起来核（done）：`packages/engine/src/real/carpool-cap.ts`，`registerJobs` 里调；对不上、没登记、写坏了、库里没有拼车池推 `carpool-cap:registry`，对上了撤；测试 `test/real/carpool-cap.test.ts`。
 - 对账显示（done）：`db/src/queries/carpool-spend.ts`、`api/src/carpool-reconcile-view.ts`、`shared` 的 `CarpoolReconcileViewSchema`（`PoolsResponse.carpoolReconcile`）、`web/src/components/carpool-reconcile.tsx`（额度页切号现状下面）；只显示、不报警。「差得多」的线是显示用的经验值（差额至少 $2 且至少占接口已用的 25%，`RECONCILE_MIN_GAP_*`），只决定那一句话怎么写，不触发动作；没记到花费的会话按本窗已记会话的平均估，没有已记会话可估就写「说不准」，不往别的设备上猜。
 - 上线前要核（done）：① 盯读账本认不出原来只记「没跑成」、不推 `session-org:ledger`（只有切号那条路推）——已补（`real/carpool-watch.ts`），测试 `test/real/carpool-watch-ledger.test.ts`（账本认不出推提醒、修好撤；库读不了照常抛、不冒充账本认不出）；② 额度配置 `/etc/fleet-dao/quota.json` 是手放的文件、不在期望里（`desired-config` 只管三份环境文件和 `france.env`），所以没法把 `reclaude-carpool` 池补进去；缺它时盯读当场推 `carpool-api`（`test/real/carpool-api.test.ts` 钉着），ops 第九节写明；③ ops 第五节登录步骤补了「设备名额 4 台已满」一句。
-- 方案-v2 第十一节 4.7 行、第 19 条、11.4 已改成「做了」。
+- 方案-v2 第十一节 4.7 行、11.4 已改成「做了」；第 19 条写「部分」：核对不上时选路不往拼车派没做（第二意见第 3 轮转合并后处理），开了未排期单 #896。第二意见：GPT 系（gpt-6-luna）审了 3 轮（第 1 轮 `staleSince` 旧读数不对账、第 2 轮多拼车池读数混算，都已改；第 3 轮过，1 条转合并后即 #896）。PR #894 已合。
 
 ## 2026-10-05 CI 第三轮（创始人 10-04 夜「按照你推荐去做，自我验证，持续优化到最佳」，Sonnet 5.5 子代理）
 
