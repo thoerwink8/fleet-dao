@@ -1,7 +1,9 @@
 // 起一个「stdout 一行一帧」的无头命令行执行体：各家命令行插头共用的起停与回调管道。
 // 解析归各家的读取器；这里只管起进程、逐行交给读取器、按它的判断保活或强杀、把事件和额度读数交给调用方。
+
 import { stat } from 'node:fs/promises';
 import type { ProgressEvent } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { DetachedIo } from './detached.ts';
 import {
   type AgentProcessResult,
@@ -83,7 +85,7 @@ export class CallbackGate {
 
   call(fn: () => unknown): void {
     const settling = guardCallback(fn, (err) => {
-      this.#error ??= err instanceof Error ? err.message : String(err);
+      this.#error ??= errMessage(err);
     });
     if (settling) {
       this.#pending.add(settling);

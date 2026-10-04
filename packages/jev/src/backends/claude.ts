@@ -1,6 +1,7 @@
 // 经插头起一个 Claude Code 会话来答判断题（构建期先用 Opus 5.5，走 Claude 订阅，套餐内）。
 // 会话在一个一次性的空目录里跑，权限 dontAsk（要批准的工具一律拒），不给任何仓库和凭据；答完就收掉目录。
 // 起一次会话要几秒到几十秒，适合分诊、质检、交活核实这类不赶时间的题；飞书这种要秒回的题用 TypeSafe。
+
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,7 @@ import {
   type ClaudeEffort,
   runClaudeCode,
 } from '@fleet-dao/adapters';
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   assertPinnedModel,
   type BackendAnswer,
@@ -155,7 +157,7 @@ export function createClaudeJudgeBackend(options: ClaudeJudgeOptions): JevBacken
         );
         return toResult(report, request, prompt, fail, Date.now() - started);
       } catch (err) {
-        return fail('backend_error', err instanceof Error ? err.message : String(err));
+        return fail('backend_error', errMessage(err));
       } finally {
         if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
       }

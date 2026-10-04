@@ -5,6 +5,7 @@
 // - 读不到就抛（连不上库、语句出错），调用方写明「没查成」，不当成「没人在修」。
 // - 发布记录只在法国上有（readDeployLagInput 读 current 链接和自动发布的状态文件）；别处给 null，core 写明「这里查不了发布」。
 // - 认领账（issue_claims）2026-10-03 起整张删掉（#556，创始人回「选 1」）：这里不再读它，也没有 toIssueClaim 了。
+
 import {
   type AlertHandling,
   type AlertLevel,
@@ -31,6 +32,7 @@ import {
   readDbNow,
 } from '@fleet-dao/db';
 import type { AlertHandlingSchema } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import type { DeployLagInput } from './deploy-lag.ts';
 
@@ -231,6 +233,6 @@ export async function handlingOf(
     }
     return { ok: true, now, byId };
   } catch (err) {
-    return { ok: false, why: `谁在处理没查成：${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, why: `谁在处理没查成：${errMessage(err)}` };
   }
 }
