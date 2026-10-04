@@ -688,7 +688,7 @@ export function carpoolCapProblems(machines) {
  * 仓里有几份机器期望（deploy/<名>/desired-config.json），都得登记在 PROFILE_DESIRED 里（登记了才进上面的加总）：
  * 多出一份没登记的 = 加了一台机器却没把它的并发算进总数，报红。读不了目录抛 ConfigError（没查成，不当成「没多出」）。
  */
-export function unregisteredDesiredFiles(deployDir) {
+export function unregisteredDesiredFiles(deployDir, stat = statSync) {
   let names;
   try {
     names = readdirSync(deployDir);
@@ -701,9 +701,10 @@ export function unregisteredDesiredFiles(deployDir) {
     const rel = `deploy/${name}/desired-config.json`;
     let st;
     try {
-      st = statSync(`${deployDir}/${name}/desired-config.json`);
+      st = stat(`${deployDir}/${name}/desired-config.json`);
     } catch (e) {
-      if (e && e.code === 'ENOENT') continue;
+      // 目录里没有这个文件、或这一项本身是个普通文件（deploy/ 下有 cursor-key.sh 这类脚本，stat 它下面的路径报 ENOTDIR）：不是机器档
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue;
       throw new ConfigError(`读不了 ${rel}：${e instanceof Error ? e.message : String(e)}`);
     }
     if (!st.isFile() || registered.has(rel)) continue;

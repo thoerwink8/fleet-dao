@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -767,12 +768,31 @@ test('拼车并发登记：仓里多出一份没登记的机器档判红，读�
     mkdirSync(join(dir, 'newbox'));
     writeFileSync(join(dir, 'newbox', 'desired-config.json'), '{}');
     mkdirSync(join(dir, 'examples')); // 没有 desired-config.json 的目录不算机器档
+    writeFileSync(join(dir, 'cursor-key.sh'), '#!/bin/sh\n'); // deploy/ 下的脚本（普通文件）也不算，不能因 ENOTDIR 当成没查成
     const r = unregisteredDesiredFiles(dir);
     assert.deepEqual(
       r.map((d) => d.file),
       ['deploy/newbox/desired-config.json'],
     );
     assert.throws(() => unregisteredDesiredFiles(join(dir, '不存在')), ConfigError);
+    // Linux 上 stat「普通文件/desired-config.json」报 ENOTDIR（Windows 报 ENOENT）：照样不算机器档；别的读不了的错照常抛
+    const errno = (code) => Object.assign(new Error(code), { code });
+    const linuxStat = (path) => {
+      if (path.includes('cursor-key.sh')) throw errno('ENOTDIR');
+      return statSync(path);
+    };
+    assert.deepEqual(
+      unregisteredDesiredFiles(dir, linuxStat).map((d) => d.file),
+      ['deploy/newbox/desired-config.json'],
+    );
+    assert.throws(
+      () =>
+        unregisteredDesiredFiles(dir, (path) => {
+          if (path.includes('newbox')) throw errno('EACCES');
+          return statSync(path);
+        }),
+      ConfigError,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
