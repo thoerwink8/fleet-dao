@@ -446,8 +446,8 @@ describe('fleet ask：问他不挡路（#259）', () => {
     const held = { ...sms, question: '短信要开按量付费，用哪家？', hold: 'spend' };
     const res = await ask(h, held);
     expect(res.status).toBe(409);
-    expect(await errorCode(res)).toBe('hold_not_supported');
-    const body = (await res.json()) as { error: { message: string } };
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('hold_not_supported');
     expect(body.error.message).toContain('没加上');
     expect(h.store.data.asks).toHaveLength(1);
     expect(h.store.data.asks[0]).toMatchObject({ scope: 'hold', hold: 'spend' });
