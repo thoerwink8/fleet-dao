@@ -19,6 +19,7 @@
     "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
+    "intents": "node packages/conventions/src/bin/intents.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
