@@ -6,7 +6,9 @@
 // - 写的时候断在回执上（maybeLanded）：键留着「写到一半」，下次重试先回查，找到就补账，找不到且占用已过期才重写（B1）。
 // - 确定没写成（GitHub 明确拒了、回查就失败了）：放键，下次可以重新占。只放自己那一份，已经被别人接过去的不动。
 // - 键由内容推出来（动作 + 目标 + 内容摘要）：同一件事重试一定是同一个键；给 issue 和给 PR 的同一组改动是两个键（B4）。
+
 import { createHash } from 'node:crypto';
+import { errMessage } from '@fleet-dao/shared/util';
 import { GitHubError, isGitHubError, redact } from './errors.ts';
 
 /**
@@ -279,7 +281,7 @@ async function record<T>(store: IdempotencyStore, spec: OnceSpec<T>, value: T): 
     // 东西已经在 GitHub 上了，账没记上：报失败并附上落地的对象，下次重试会按标记找回来补账（不会再写一份）。
     throw new GitHubError(
       'LEDGER_FAILED',
-      `${spec.action} ${spec.target} 已经写成，但幂等账没记上：${redact(err instanceof Error ? err.message : String(err))}`,
+      `${spec.action} ${spec.target} 已经写成，但幂等账没记上：${redact(errMessage(err))}`,
       { retryable: true, details: { key: spec.key, landed: value }, cause: err },
     );
   }

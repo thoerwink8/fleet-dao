@@ -4,6 +4,7 @@
 //   「CI 根本没跑」和「跑了没跑完（超时）」分开报；读不到算没查成，不当零条检查（C16）。
 // - 合并前再核一遍：头没变（C8）、基于最新主线、CI 在这个头上是绿的、能合（UNKNOWN 就重读，C10）；
 //   squash 带 sha 头约束、显式的提交标题与正文（不让 GitHub 用默认拼出关单词，C13）；失败不看文案，重读 mergeable 再分类（C11）。
+import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import {
   type CheckRun,
@@ -631,10 +632,6 @@ function asMemo(v: unknown, head: string): WaitMemo | null {
     startedAt: m.startedAt,
     sawActivityAt: typeof m.sawActivityAt === 'number' ? m.sawActivityAt : null,
   };
-}
-
-function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 // —— 合并 ——

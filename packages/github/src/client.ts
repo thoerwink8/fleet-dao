@@ -6,7 +6,9 @@
 // - POST 断在回执上（网络错、5xx）不自动重试，抛 AMBIGUOUS_WRITE（maybeLanded）：GitHub 那边可能已经建好了，重试交给幂等层先回查。
 // - 次级限流（403/429 + retry-after 或「secondary rate limit」）后，GitHub 要求所有请求都先停，所以用一个全局的 pausedUntil。
 // - 404 不一定是「不存在」：App 没装到这个仓、没权限，GitHub 也回 404（报错里两种都写上）。
+
 import { setTimeout as delay } from 'node:timers/promises';
+import { errMessage } from '@fleet-dao/shared/util';
 import { type MintedToken, signAppJwt, TokenCache } from './app-auth.ts';
 import { type AppCredentials, type AppRole, ROLE_NAMES } from './credentials.ts';
 import { GitHubError, redact } from './errors.ts';
@@ -404,7 +406,7 @@ export class GitHubClient {
         });
       } catch (err) {
         if (req.signal?.aborted) throw req.signal.reason ?? err;
-        const what = err instanceof Error ? err.message : String(err);
+        const what = errMessage(err);
         if (write && req.method === 'POST') {
           throw new GitHubError(
             'AMBIGUOUS_WRITE',
