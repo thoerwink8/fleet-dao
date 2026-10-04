@@ -1,4 +1,4 @@
-import type { AlertWorkPort } from './alert-work.ts';
+import type { AlertWorkPort } from '@fleet-dao/store';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';

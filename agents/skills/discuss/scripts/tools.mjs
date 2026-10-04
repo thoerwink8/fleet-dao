@@ -9,11 +9,18 @@ import { join } from 'node:path';
 /** 这台机器上缺了本机工具（没装、没开、没登录）：这一家问不了，换下一家或照实报 */
 export class NotInstalled extends Error {}
 
+/** @param {string} [home] */
 export function dataDir(home = homedir()) {
   return join(home, '.local', 'share', 'second-opinion');
 }
 
-/** PATH 上找得到这个命令就返回它的路径（Windows 按 PATHEXT 补扩展名） */
+/**
+ * PATH 上找得到这个命令就返回它的路径（Windows 按 PATHEXT 补扩展名）
+ * @param {string} name
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {NodeJS.Platform} [platform]
+ * @returns {string | undefined}
+ */
 export function findBin(name, env = process.env, platform = process.platform) {
   const sep = platform === 'win32' ? ';' : ':';
   const exts =
@@ -33,7 +40,13 @@ export function findBin(name, env = process.env, platform = process.platform) {
   return undefined;
 }
 
-/** 跑一个 PATH 上的命令（Windows 上 cursor-agent 是 .cmd，得经 shell；参数都是固定的简单词，直接拼） */
+/**
+ * 跑一个 PATH 上的命令（Windows 上 cursor-agent 是 .cmd，得经 shell；参数都是固定的简单词，直接拼）
+ * @param {string} name
+ * @param {string[]} args
+ * @param {import('node:child_process').SpawnSyncOptions} [opts]
+ * @returns {import('node:child_process').SpawnSyncReturns<string | Buffer>}
+ */
 export function runTool(name, args, opts = {}) {
   if (process.platform === 'win32') return spawnSync([name, ...args].join(' '), { ...opts, shell: true });
   return spawnSync(name, args, opts);
@@ -46,6 +59,10 @@ export function runTool(name, args, opts = {}) {
 // 经 powershell.exe 起，钩子照样按 bash 判、把工具调用拦掉；真正绕开的办法是题面走 stdin、不要它调工具去读文件
 // （ask.mjs、second-opinion.mjs 都已经这样改）。这个函数留着当多一层保险（摘的是环境变量，不是钩子本身的判断——密钥
 // 路径那些规矩照样生效），起 cursor-agent 的地方都带上，别漏一个，但别指望单靠它就能让读文件的工具调用畅通。
+/**
+ * @param {NodeJS.Platform} [platform]
+ * @param {NodeJS.ProcessEnv} [env]
+ */
 export function cursorAgentEnv(platform = process.platform, env = process.env) {
   if (platform !== 'win32') return env;
   const out = { ...env };
@@ -56,6 +73,8 @@ export function cursorAgentEnv(platform = process.platform, env = process.env) {
 /**
  * cursor-agent 能不能用：装了（PATH 上有）、登录了（status --format json 的 isAuthenticated 是 true）。
  * 返回 null 表示能用，否则是一句为什么（给人看）。
+ * @param {{ env?: NodeJS.ProcessEnv, run?: typeof runTool }} [opts]
+ * @returns {string | null}
  */
 export function cursorAgentProblem({ env = process.env, run = runTool } = {}) {
   if (!findBin('cursor-agent', env))
@@ -67,7 +86,8 @@ export function cursorAgentProblem({ env = process.env, run = runTool } = {}) {
     env: cursorAgentEnv(process.platform, env),
   });
   if (r.error)
-    return `查不了 cursor-agent 登没登录（${r.error.code === 'ETIMEDOUT' ? '30 秒没回' : r.error.message}）`;
+    return `查不了 cursor-agent 登没登录（${'code' in r.error && r.error.code === 'ETIMEDOUT' ? '30 秒没回' : r.error.message}）`;
+  /** @type {unknown} */
   let status;
   try {
     status = JSON.parse(String(r.stdout ?? '').trim());
@@ -75,7 +95,14 @@ export function cursorAgentProblem({ env = process.env, run = runTool } = {}) {
     // 原文不照抄：status 的文字输出里有登录的账号
     return `查不了 cursor-agent 登没登录（status --format json 的输出认不出，退出码 ${r.status}）`;
   }
-  if (status?.isAuthenticated !== true)
+  if (
+    !(
+      typeof status === 'object' &&
+      status !== null &&
+      'isAuthenticated' in status &&
+      status.isAuthenticated === true
+    )
+  )
     return '这台机器上 cursor-agent 没登录（先在这台机器上跑 cursor-agent login）';
   return null;
 }

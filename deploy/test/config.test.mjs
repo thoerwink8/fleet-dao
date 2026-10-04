@@ -275,6 +275,39 @@ test('不一致时报哪份文件要改：默认指仓里的法国期望，本�
   );
 });
 
+test('本机档：私有值对不上、多了一项、标题，也都指本机档那份期望，一处都不提法国那份（#323）', () => {
+  // 私有值改了、engine.env 多一项、release.env 的公开值改了、api.env 写重一行、engine.env 缺一项：五种报警全出
+  const engine = `${ENGINE.replace(`FLEET_CANARY_REPO=${SECRET2}`, 'FLEET_CANARY_REPO=canary-handedit-xyz')}FLEET_EXTRA=1\n`;
+  const over = {
+    'engine.env': { text: engine.replace('FLEET_MACHINE_NAME=法国\n', '') },
+    'api.env': { text: `${API}FLEET_ENV=production\n` },
+    'release.env': { text: 'FLEET_SERVICES=fleet-engine\n' },
+  };
+  for (const desiredPath of [PROFILE_DESIRED.local, LOCAL_DESIRED_FILE]) {
+    const r = judgeConfig(live({ files: files(over), desiredPath }));
+    assert.deepEqual(r.drift.map((d) => d.kind).sort(), [
+      'duplicate',
+      'missing',
+      'private',
+      'undeclared',
+      'value',
+    ]);
+    for (const d of r.drift) {
+      assert.match(d.title, /^本机档配置/, `${d.id} 的标题说的是本机档，不是法国`);
+      assert.ok(!`${d.title}${d.body}`.includes(DESIRED_FILE), `${d.id} 不许指法国那份期望：${d.body}`);
+    }
+    const byKind = Object.fromEntries(r.drift.map((d) => [d.kind, d.body]));
+    for (const kind of ['private', 'undeclared', 'missing', 'value'])
+      assert.ok(byKind[kind].includes(desiredPath), `${kind} 要写清改本机档那份：${byKind[kind]}`);
+    assert.match(byKind.private, /在本机档上以 root 跑/);
+    noValues(r, 'canary-handedit-xyz', SECRET, SECRET2);
+  }
+  // 法国（不传 desiredPath）照旧
+  const france = judgeConfig(live({ files: files(over) }));
+  for (const d of france.drift) assert.match(d.title, /^法国配置/);
+  assert.ok(france.drift.find((d) => d.kind === 'private').body.includes(DESIRED_FILE));
+});
+
 test('私有值不一致：只报「不一致」，结果和报警里搜不到线上的值，也搜不到原来的值', () => {
   const changed = API.replace(SECRET, 'cli_手改成的新密钥');
   const r = judgeConfig(

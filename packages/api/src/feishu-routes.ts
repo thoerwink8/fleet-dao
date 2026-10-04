@@ -25,12 +25,12 @@ import {
   FeishuTaskLookupResponse,
   SETTING_SCHEMAS,
 } from '@fleet-dao/shared';
+import { textHash, wellFormed } from '@fleet-dao/store';
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
 import type { Deps } from './deps.ts';
 import type { DraftOpenRunner } from './draft-opening.ts';
-import { textHash, wellFormed } from './feishu-records.ts';
 import {
   ANSWER_TEXTS,
   beijingDayStart,

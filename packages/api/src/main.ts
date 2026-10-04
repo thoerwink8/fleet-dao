@@ -10,21 +10,30 @@
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
+import {
+  createMemoryStore,
+  createPgStore,
+  DEPLOY_LAG_NOT_HERE,
+  DEV_RUN_ID,
+  DEV_USER_ID,
+  deployFacts,
+  devFixtures,
+  IDS,
+  jsonLogger,
+  pgAlertWork,
+  readDeployLagInput,
+  startDeployLagWatch,
+  withStatementTimeout,
+} from '@fleet-dao/store';
 import { signAgentToken } from './agent-token.ts';
-import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
+import { probeDb } from './db-probe.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
-import {
-  DEPLOY_LAG_NOT_HERE,
-  deployLagCheck,
-  readDeployLagInput,
-  startDeployLagWatch,
-} from './deploy-lag.ts';
+import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
-import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
@@ -36,9 +45,6 @@ import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
-import { jsonLogger } from './log.ts';
-import { createMemoryStore } from './memory-store.ts';
-import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';

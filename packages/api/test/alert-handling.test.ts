@@ -3,9 +3,8 @@
 import { linkAlertWork, pullRequests, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { NotificationsResponse } from '@fleet-dao/shared';
+import { type AlertWorkPort, type DeployLagInput, deployFacts, pgAlertWork } from '@fleet-dao/store';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { type AlertWorkPort, deployFacts, pgAlertWork } from '../src/alert-work.ts';
-import type { DeployLagInput } from '../src/deploy-lag.ts';
 import { type Harness, harness, IDS, pgHarness } from './harness.ts';
 
 let t: TestDb;

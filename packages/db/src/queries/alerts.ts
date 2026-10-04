@@ -1,6 +1,6 @@
 // 提醒（notifications）的对账要用的查询：列出没处理的、按前缀连同已处理的一起列、按条件撤掉（写明谁撤的、为什么，
 // 进操作记录）、只在没有时插一条（再提醒一天一条）、只改还开着的（不把人刚处理掉的又打开）。
-// 报警本身的写法（同一件事一条、再报原地更新）在 engine.ts 的 upsertAlert。
+// 报警本身的写法（同一件事一条、再报原地更新）在 engine-alerts.ts 的 upsertAlert。
 import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, notifications } from '../schema/index.ts';

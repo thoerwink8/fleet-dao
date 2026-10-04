@@ -17,12 +17,12 @@ import {
   subtaskWorkflowId,
   TaskResponse,
 } from '@fleet-dao/shared';
+import { checkDone } from '@fleet-dao/store';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
 import { verifyAgentToken } from './agent-token.ts';
 import type { Deps } from './deps.ts';
-import { checkDone } from './done-check.ts';
 import { ApiError, readJson, reply } from './http.ts';
 import {
   type AgentSession,

@@ -5,7 +5,6 @@
 // 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
-import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/api';
 import {
   alertByKey,
   type Db,
@@ -30,6 +29,7 @@ import {
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, requiredChecksFor } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
@@ -181,8 +181,8 @@ export function hourlyReconcileJob(
     return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
   };
   // 自动合并兜底（#242）要的 GitHub：列 PR 经 claims.openPulls，把作者是不是机器人、自动合并开没开带过来；
-  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读
-  // （现在借 parseRiskPaths 判，TODO(#133)：standard-paths.json 自己的判法落地后换）。
+  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读，
+  // 判法是 conventions 的 parseStandardPaths / standardFiles（认目录、通配、section，和先审后合的 parseRiskPaths 是两份）。
   const standardPathsFile = w.gh.standardPathsFile ?? STANDARD_PATHS_FILE;
   const autoMergeGh: AutoMergeGitHub = w.autoMergeGh ?? {
     async listPrs(repo: RepoRef) {

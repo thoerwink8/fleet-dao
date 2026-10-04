@@ -1,7 +1,7 @@
 // 飞书接口的纯函数：北京时间的「今天」、推送条目的指纹和截断、等待期、猜仓、盘面的额度挑选。
 import { FeishuOutboxItemSchema } from '@fleet-dao/shared';
+import { clip } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { clip } from '../src/feishu-records.ts';
 import {
   beijingDayStart,
   beijingStamp,

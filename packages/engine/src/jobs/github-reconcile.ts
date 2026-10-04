@@ -3,8 +3,9 @@
 // （没有每仓流程配置了，#556）；每天一次的关单对账（#241）#654 删了：关单不再要结果.md，那四种判法的前提都没了。
 // 没跑成、一个仓都没查成、只查了一部分，都照实记成 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）；
 // 驾驶舱「定时任务」页和看门狗按 scheduled_jobs 登记的 expect_every_minutes 看它新不新鲜。
-import type { GitHubReconcileResult } from '@fleet-dao/api';
+
 import type { ScheduleResult } from '@fleet-dao/db';
+import type { GitHubReconcileResult } from '@fleet-dao/store';
 import type { GitHubReconcileRun } from '../contract.ts';
 import { type IssueGroomResult, issueGroomDue } from './issue-groom.ts';
 

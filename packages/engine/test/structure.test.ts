@@ -61,6 +61,12 @@ describe('工作流文件的规矩', () => {
       'kit.ts',
       'quota-read.ts',
       'route-probe.ts',
+      'task-ci.ts',
+      'task-merge.ts',
+      'task-runtime.ts',
+      'task-session.ts',
+      'task-support.ts',
+      'task-verify.ts',
       'task.ts',
       'watchdog.ts',
     ]);

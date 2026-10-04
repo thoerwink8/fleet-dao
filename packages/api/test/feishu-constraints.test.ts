@@ -1,11 +1,9 @@
 // 飞书四张表的库级约束：接口这边按约定先查一遍，但库自己也得拦（换个人写库、手工改数据时照样成立）。
 // 直接写 SQL 造违规：drizzle 的类型挡住的不合写法，只有绕过去才试得出来。库里的记录被改坏时库版怎么读，也在这里造。
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { createPgStore, IDS } from '@fleet-dao/store';
+import { FEISHU_IDS, feishuData, seedPg } from '@fleet-dao/store/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { IDS } from '../src/dev-fixtures.ts';
-import { createPgStore } from '../src/pg-store.ts';
-import { seedPg } from './pg-fixtures.ts';
-import { FEISHU_IDS, feishuData } from './store-contract-feishu.ts';
 
 let t: TestDb;
 beforeAll(async () => {

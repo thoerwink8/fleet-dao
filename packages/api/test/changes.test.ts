@@ -1,7 +1,7 @@
 import { FLEET_CHANGES_CHANNEL, REALTIME_TABLES } from '@fleet-dao/shared';
+import { silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { createChangeHub, PROBE_CHANNEL, parseChangePayload, startPgChangeFeed } from '../src/changes.ts';
-import { silentLogger } from '../src/log.ts';
 import type { FeedEvent, Logger } from '../src/ports.ts';
 import { fakePostgres } from './fake-postgres.ts';
 

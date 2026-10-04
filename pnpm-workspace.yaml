@@ -7,3 +7,9 @@ allowBuilds:
   esbuild: false
   '@swc/core': false
   protobufjs: false
+# drizzle-kit（只在 db 的开发依赖里、只用来生成迁移）带的已弃用 @esbuild-kit/esm-loader 钉死 esbuild 0.18.20，
+# 命中 GHSA-67mh-4wv8-2f99（esbuild <=0.24.2，开发服务器可被任意网页读取）。drizzle-kit 0.31.11 已是最新稳定版、
+# 没有不带它的版本，所以只把这一条依赖路径指到 drizzle-kit 自己用的 esbuild 0.25.4。drizzle-kit 出了不再依赖
+# @esbuild-kit/* 的稳定版就删这条。
+overrides:
+  '@esbuild-kit/core-utils>esbuild': 0.25.4

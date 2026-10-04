@@ -407,6 +407,61 @@ function numbersOf(list: unknown[], keep: (p: Record<string, unknown>) => boolea
     .map((p) => p.number as number);
 }
 
+/** 读事件文件、认出这次要算哪些 PR；认不出返回一句为什么（runMergeGate 和 workflowParseNeeded 共用，两边认的 PR 必须是同一批）。 */
+async function eventTargets(
+  eventName: string | undefined,
+  eventPath: string | undefined,
+  gh: GitHubReads,
+): Promise<number[] | string> {
+  if (!eventName || !eventPath)
+    return '没有 GITHUB_EVENT_NAME 或 GITHUB_EVENT_PATH（合并闸在 GitHub Actions 里跑）';
+  let event: unknown;
+  try {
+    event = JSON.parse(readFileSync(eventPath, 'utf8'));
+  } catch (e) {
+    return `事件文件 ${eventPath} 读不出来（${message(e)}）`;
+  }
+  try {
+    return await targetPrs(eventName, event, gh);
+  } catch (e) {
+    return `认不出这次要算哪些 PR（${message(e)}）`;
+  }
+}
+
+/**
+ * 这次要算的 PR 里，有没有改了已有 ci.yml 的（要把前后两份解析成结构，得装 yaml 依赖）。merge-gate.yml 先问这个、再决定装不装依赖：
+ * 绝大多数 PR 不碰 ci.yml，装依赖那几步（约 8–10 秒、占着一台机器）白做。
+ * 只有「查实了一个都没有」才回 needed=false；认不出事件、读不到文件列表、清单读不出、文件数和 PR 说的对不上，一律 needed=true
+ * （装了依赖，真正的判定那一步照旧自己再 fail loud），不拿「没查成」当「不需要」。判「改没改到 ci.yml」和闸用的是同一个 riskyFiles。
+ */
+export async function workflowParseNeeded(opts: {
+  eventName: string | undefined;
+  eventPath: string | undefined;
+  riskListText: string | undefined;
+  gh: GitHubReads;
+}): Promise<{ needed: boolean; why: string }> {
+  const numbers = await eventTargets(opts.eventName, opts.eventPath, opts.gh);
+  if (typeof numbers === 'string') return { needed: true, why: `没判成这次算哪些 PR：${numbers}` };
+  const riskList = opts.riskListText === undefined ? '读不到' : parseRiskPaths(opts.riskListText);
+  if (typeof riskList === 'string')
+    return { needed: true, why: `先审后合的路径清单 ${RISK_PATHS_FILE} ${riskList}` };
+  for (const n of numbers) {
+    try {
+      const meta = metaOf(await opts.gh.pr(n));
+      if (typeof meta === 'string') return { needed: true, why: `PR #${n} 读回来认不出：${meta}` };
+      if (!meta.open) continue;
+      const files = await opts.gh.files(n);
+      if (files.length !== meta.changedFiles)
+        return { needed: true, why: `PR #${n} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个` };
+      if (riskyFiles(files, riskList).some((h) => h.pending))
+        return { needed: true, why: `PR #${n} 改了已有的工作流，要解析前后两份` };
+    } catch (e) {
+      return { needed: true, why: `PR #${n} 改了哪些文件没读成（${message(e)}）` };
+    }
+  }
+  return { needed: false, why: `${numbers.length} 个 PR 都没有改已有的工作流，不用装 YAML 依赖` };
+}
+
 export async function runMergeGate(opts: {
   eventName: string | undefined;
   eventPath: string | undefined;
@@ -419,20 +474,7 @@ export async function runMergeGate(opts: {
   targetUrl?: string;
 }): Promise<RunResult> {
   const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
-  if (!opts.eventName || !opts.eventPath)
-    return fail('没有 GITHUB_EVENT_NAME 或 GITHUB_EVENT_PATH（合并闸在 GitHub Actions 里跑）');
-  let event: unknown;
-  try {
-    event = JSON.parse(readFileSync(opts.eventPath, 'utf8'));
-  } catch (e) {
-    return fail(`事件文件 ${opts.eventPath} 读不出来（${message(e)}）`);
-  }
-  let numbers: number[] | string;
-  try {
-    numbers = await targetPrs(opts.eventName, event, opts.gh);
-  } catch (e) {
-    return fail(`认不出这次要算哪些 PR（${message(e)}）`);
-  }
+  const numbers = await eventTargets(opts.eventName, opts.eventPath, opts.gh);
   if (typeof numbers === 'string') return fail(numbers);
   if (!opts.write && numbers.length !== 1) return fail('只报不写时一次只算一个 PR（pull_request 事件）');
   if (numbers.length === 0) return { code: 0, lines: ['这次没有要算的 PR。'] };

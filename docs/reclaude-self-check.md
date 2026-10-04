@@ -110,7 +110,7 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 
 ## 3. 绿了之后仍然会红的两件事（不是启动器的问题）
 
-- **会话中途在界面上切「自有 / 平台」**：已经起着的 claude 进程保持起它时的判法，下次重起进程才按新路由。切完想立刻生效，就把那个会话的进程重起一次。
+- **会话中途在界面上切「自有 / 平台」**：启动器下一条消息发出前重读路由，下一回合起生效（不用重起整个 Mirasim），详见 `reclaude-in-mirasim.md` 第 0 节。两个例外要认得：① 进程是以自有额度起的、Mirasim 没把平台网关交给启动器时，当场切平台做不到，启动器会把这条消息退回并报错（「当场切不到平台额度…办法…」），会话和自有额度原样保留，照提示在 Mirasim 里确认选了「平台」后重发，或新开会话；launch.log 里是 `event=refuse-switch`。② 路由索引（`~/.mirasim/plugin-index/*.json` 的 `routes`）里这个会话没有记录，启动器只会按 `route=default` 起，这是 Mirasim 没把选择记下来，不是启动器的事。
 - **服务器（Linux）上装完没重启 Mirasim**：`apply` 改的是 Mirasim 的配置，生效范围是**新起的** claude 进程。
 
 ## 4. 环境纪律

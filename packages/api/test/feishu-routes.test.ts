@@ -12,11 +12,11 @@ import {
   FeishuTaskLookupResponse,
   requirementWorkflowId,
 } from '@fleet-dao/shared';
+import type { MemoryData } from '@fleet-dao/store';
+import { devFixtures, feishuMessageKey, feishuReviseKey } from '@fleet-dao/store';
+import { FEISHU_IDS, feishuData } from '@fleet-dao/store/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { devFixtures } from '../src/dev-fixtures.ts';
-import { feishuMessageKey, feishuReviseKey } from '../src/feishu-records.ts';
 import { ANSWER_TEXTS } from '../src/feishu-views.ts';
-import type { MemoryData } from '../src/memory-store.ts';
 import {
   type DraftOpener,
   DraftOpenerUnavailableError,
@@ -25,7 +25,6 @@ import {
   TableLockedError,
 } from '../src/ports.ts';
 import { errorCode, GATEWAY_PASS, harness, IDS, T0 } from './harness.ts';
-import { FEISHU_IDS, feishuData } from './store-contract-feishu.ts';
 
 const A = 'ou_dev_founder_a';
 const B = 'ou_dev_founder_b';

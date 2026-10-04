@@ -180,18 +180,19 @@ describe('按改动算要跑什么', () => {
     ).toBe(true);
   });
 
-  it('改了 conventions：engine 依赖它，engine 也测（api、github 经 engine 传上来：它们依赖 engine）', () => {
+  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github）', () => {
     expect(units(pr('packages/conventions/src/ci-plan.ts'))).toEqual([
       'api',
       'conventions',
       'engine',
       'github',
+      'store',
     ]);
   });
 
-  it('改了 db：db 和所有依赖它的（engine、api、github、jev）都测，读 db 路由骨架的 agents 也测；pg 的测试单独一台', () => {
+  it('改了 db：db 和所有依赖它的（engine、api、store、github、jev）都测，读 db 路由骨架的 agents 也测；pg 的测试单独一台', () => {
     const p = pr('packages/db/src/schema/index.ts');
-    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'github', 'jev']);
+    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'github', 'jev', 'store']);
     const packed = assigned(p);
     // db 的测试（要真 Postgres）单独一台，不和别的包混在一个 vitest 进程里（FLEET_TEST_PG_URL 一设，全进程都连真库）
     const pg = packed.tests.filter((b) => b.pg);

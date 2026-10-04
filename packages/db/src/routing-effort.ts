@@ -1,6 +1,6 @@
 // 路由两层里每条路由的思考档位（#470）：驾驶舱「思考档位」页经 routingEffortRows 读、经 setRoutingEffort 写
 // routing_catalog.effort。档位是运行时配置、留在库里（决定 0011
-// 第 7 条），不走「改仓库再部署」；引擎起会话时现读（queries/engine.ts 的 routeLaunchFacts），改完下一个会话就照新的。
+// 第 7 条），不走「改仓库再部署」；引擎起会话时现读（queries/engine-launch-facts.ts 的 routeLaunchFacts），改完下一个会话就照新的。
 // 这条路由的执行方式认不认这一档照 shared 的 routeEffortProblem 判（和骨架装载、引擎起会话同一份判法），判不过一行不写、回原因。
 import { type HostId, routeEffortProblem, type SessionEffort } from '@fleet-dao/shared';
 import { and, asc, eq } from 'drizzle-orm';

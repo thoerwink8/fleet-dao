@@ -203,3 +203,4 @@ export {
   type PrBodyInput,
   renderPrBody,
 } from './text.ts';
+export { TOKEN_SCOPES, type TokenScope } from './token-scopes.ts';

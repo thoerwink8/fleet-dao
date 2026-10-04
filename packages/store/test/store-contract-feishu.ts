@@ -1,113 +1,15 @@
 // Store 契约（飞书那一块）：草稿、收到的话的幂等、关注、卡片登记、盘面要的查询、推送的送达状态与回执。
 // 内存版（参照实现）和 Postgres 版过同一套，入口在 store.memory.test.ts / store.pg.test.ts。
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
-import { ANSWER_TEXTS } from '../src/feishu-views.ts';
-import type { MemoryData } from '../src/memory-store.ts';
+import { DEV_USER_ID, IDS } from '../src/dev-fixtures.ts';
+import { clip } from '../src/feishu-records.ts';
 import type { FeishuMessageKey, NewAuditEntry, NewDraft, Store } from '../src/ports.ts';
+import { FEISHU_IDS, feishuData, T0 } from '../src/testing/feishu-fixtures.ts';
 import type { MakeStore, StoreUnderTest } from './store-contract.ts';
 
-export const T0 = new Date('2026-09-25T08:00:00.000Z');
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
 const OTHER_UUID = '99999999-0000-4000-8000-000000000000';
-
-export const FEISHU_IDS = {
-  repo2: 'a0000000-0000-4000-8000-000000000002',
-  task2of12: 'b0000000-0000-4000-8000-000000000212',
-  askOpen: '10000000-0000-4000-8000-000000000001',
-  askAnswered: '10000000-0000-4000-8000-000000000002',
-  askOld: '10000000-0000-4000-8000-000000000003',
-  decision: 'f0000000-0000-4000-8000-000000000002',
-  oldAlert: 'f0000000-0000-4000-8000-000000000003',
-  draft1: '20000000-0000-4000-8000-000000000001',
-  draft2: '20000000-0000-4000-8000-000000000002',
-} as const;
-
-const ago = (ms: number) => new Date(T0.getTime() - ms).toISOString();
-
-/** 样例数据再加：第二个仓（也有 12 号）、三条追问（没答的、刚答的、很久以前答的）、要人拍的通知、很久以前处理掉的报警。 */
-export function feishuData(): Partial<MemoryData> {
-  const data = devFixtures(T0);
-  data.repos = [
-    ...(data.repos ?? []),
-    {
-      id: FEISHU_IDS.repo2,
-      owner: 'example',
-      name: 'another',
-      defaultBranch: 'main',
-      testCommand: 'pnpm test',
-    },
-  ];
-  data.tasks = [
-    ...(data.tasks ?? []),
-    {
-      id: FEISHU_IDS.task2of12,
-      repoId: FEISHU_IDS.repo2,
-      issueNumber: 12,
-      title: '另一个仓的 12 号',
-      rawRequest: '另一个仓的活',
-      requestedBy: IDS.founderB,
-      state: 'queued',
-      priority: 3,
-      acceptance: [],
-      createdAt: ago(30 * MIN),
-    },
-  ];
-  data.asks = [
-    {
-      id: FEISHU_IDS.askOpen,
-      taskId: IDS.task12,
-      runId: IDS.run1,
-      question: '验证码几位？\n4 位还是 6 位',
-      options: ['4 位', '6 位'],
-      askedAt: ago(5 * MIN),
-    },
-    {
-      id: FEISHU_IDS.askAnswered,
-      taskId: IDS.task12,
-      question: '用哪家短信？',
-      options: [],
-      askedAt: ago(60 * MIN),
-      answer: '阿里云',
-      answeredBy: IDS.founderB,
-      answeredAt: ago(50 * MIN),
-    },
-    {
-      id: FEISHU_IDS.askOld,
-      taskId: IDS.task12,
-      question: '很久以前的问题',
-      options: [],
-      askedAt: ago(40 * DAY),
-      answer: '早答了',
-      answeredBy: IDS.founderA,
-      answeredAt: ago(39 * DAY),
-    },
-  ];
-  data.notifications = [
-    ...(data.notifications ?? []),
-    {
-      id: FEISHU_IDS.decision,
-      level: 'decision',
-      title: '要批：发版',
-      body: '第一行\n第二行',
-      taskId: IDS.task12,
-      createdAt: ago(3 * MIN),
-      deliveries: [],
-    },
-    {
-      id: FEISHU_IDS.oldAlert,
-      level: 'alert',
-      title: '旧报警',
-      body: '',
-      createdAt: ago(40 * DAY),
-      resolvedAt: ago(39 * DAY),
-      resolvedBy: IDS.founderA,
-      deliveries: [],
-    },
-  ];
-  return data;
-}
 
 const audit = (over: Partial<NewAuditEntry> = {}): NewAuditEntry => ({
   actor: { kind: 'user', id: DEV_USER_ID },
@@ -540,7 +442,8 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
       });
 
       it('回的话里截断过的 emoji 照样写得进、读得回（半个代理对进 jsonb 会被库拒收）', async () => {
-        const text = ANSWER_TEXTS.askTaken('😀'.repeat(40), '创始人乙');
+        // 和后端「这个问题已经回答过了」那句回话同一个写法（feishu-views.ts 的 ANSWER_TEXTS.askTaken）：截断在 clip 里
+        const text = `这个问题已经回答过了（创始人乙：${clip('😀'.repeat(40), 60)}），这句没有记成新的回答。`;
         const rec = await store.recordFeishuMessage({
           message: msg('om_emoji'),
           result: { kind: 'answer', text },

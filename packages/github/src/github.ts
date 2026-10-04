@@ -93,6 +93,7 @@ import {
 } from './reconcile.ts';
 import { RepoFactsCache } from './repos.ts';
 import { type SyncMainlineInput, type SyncMainlineResult, syncMainline } from './sync.ts';
+import { requiredPermissions } from './token-scopes.ts';
 
 export interface GitHubOptions {
   /** 防重复写的账、PR 镜像：生产用 pgLedger(db)。 */
@@ -125,19 +126,11 @@ export interface GitHubOptions {
 /**
  * 各身份要有的权限（自检用，引擎每小时对账跑一次、缺了报提醒、健康页 github_app 跟着红）。「干活的」只推分支、开 PR；
  * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴「认领对得上」（#299，commit status 要 statuses:write）。
+ * 由 token-scopes.ts 里各用途要的权限取并集算出：令牌实际请求的永远不超过这张表，这张表里的每一项也都有用途在用。
  */
 export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'write'>> = {
-  agent: { contents: 'write', pull_requests: 'write', metadata: 'read' },
-  engine: {
-    contents: 'write',
-    pull_requests: 'write',
-    issues: 'write',
-    administration: 'write',
-    checks: 'read',
-    actions: 'read',
-    statuses: 'write',
-    metadata: 'read',
-  },
+  agent: requiredPermissions('agent'),
+  engine: requiredPermissions('engine'),
 };
 
 export interface SelfCheckItem {

@@ -2,10 +2,10 @@
 // 对外只有一句中性的话（不提仓名、缺哪样权限），提醒的标题只进日志。
 import { GITHUB_APP_ALERT_PREFIX, resolveAlertByKey, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { PublicHealthError, runHealthChecks } from '../src/health.ts';
-import { silentLogger } from '../src/log.ts';
 
 let t: TestDb;
 beforeAll(async () => {
