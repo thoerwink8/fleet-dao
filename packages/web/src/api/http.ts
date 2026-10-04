@@ -180,9 +180,14 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     // 写方法一律 async：请求体校验（.parse）不合约定时要变成被拒的 Promise，不能在返回 Promise 之前同步抛，
     // 否则调用方的 .catch 接不到（#857；http-writes.test.ts 的「不是同步抛」那条钉着）。
     async updateRouteEffort(modelId, routeId, body) {
-      return send('PUT', apiUrl(R.updateRouteEffort.path, { modelId, routeId }), R.updateRouteEffort.response, {
-        body: UpdateRouteEffortRequest.parse(body),
-      });
+      return send(
+        'PUT',
+        apiUrl(R.updateRouteEffort.path, { modelId, routeId }),
+        R.updateRouteEffort.response,
+        {
+          body: UpdateRouteEffortRequest.parse(body),
+        },
+      );
     },
     async updateChannel(channelId, body) {
       await send('PATCH', apiUrl(R.updateChannel.path, { channelId }), R.updateChannel.response, {

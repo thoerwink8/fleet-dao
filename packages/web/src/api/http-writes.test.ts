@@ -218,27 +218,30 @@ describe('写请求：令牌与校验', () => {
       (api: FleetApi) => api.createDemoLink({ modules: ['board'], detail: 'status', expiresInDays: 0 }),
     ],
     [
-      '演示默认范围一个模块都没开',
-      (api: FleetApi) => api.updateDemoDefault({ modules: [], detail: 'status' }),
+      '演示默认范围的详细程度不在约定里',
+      (api: FleetApi) => api.updateDemoDefault({ modules: ['board'], detail: 'everything' as never }),
     ],
     ['换模型没带路由', (api: FleetApi) => api.taskAction('t-1', { action: 'reroute' } as never)],
-  ])('【故意造出的失败】请求体不合约定（%s）：返回被拒的 Promise（不是同步抛），一个写请求都没发出去', async (_name, call) => {
-    const { fn, writes } = fakeFetch(() => respond(OK));
-    // 直接调、不套任何包装：同步抛的话调用方的 .catch 接不到（#857），这里先把「同步抛」单独抓出来判失败。
-    let returned: Promise<unknown> | undefined;
-    let syncThrown: unknown;
-    try {
-      returned = call(createHttpApi({ fetch: fn }));
-    } catch (e) {
-      syncThrown = e;
-    }
-    expect(syncThrown, '写方法同步抛错了，应当返回被拒的 Promise').toBeUndefined();
-    const err = await (returned as Promise<unknown>).then(
-      () => undefined,
-      (e: unknown) => e ?? new Error('被拒但没有错误'),
-    );
-    // 调用方的 .catch 接得到：这就是页面走错误显示的那条路
-    expect(err).toBeInstanceOf(Error);
-    expect(writes()).toEqual([]);
-  });
+  ])(
+    '【故意造出的失败】请求体不合约定（%s）：返回被拒的 Promise（不是同步抛），一个写请求都没发出去',
+    async (_name, call) => {
+      const { fn, writes } = fakeFetch(() => respond(OK));
+      // 直接调、不套任何包装：同步抛的话调用方的 .catch 接不到（#857），这里先把「同步抛」单独抓出来判失败。
+      let returned: Promise<unknown> | undefined;
+      let syncThrown: unknown;
+      try {
+        returned = call(createHttpApi({ fetch: fn }));
+      } catch (e) {
+        syncThrown = e;
+      }
+      expect(syncThrown, '写方法同步抛错了，应当返回被拒的 Promise').toBeUndefined();
+      const err = await (returned as Promise<unknown>).then(
+        () => undefined,
+        (e: unknown) => e ?? new Error('被拒但没有错误'),
+      );
+      // 调用方的 .catch 接得到：这就是页面走错误显示的那条路
+      expect(err).toBeInstanceOf(Error);
+      expect(writes()).toEqual([]);
+    },
+  );
 });

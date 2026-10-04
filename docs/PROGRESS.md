@@ -126,6 +126,10 @@
 
 做到哪：审查报告 `specs/901-项目瘦身与提速/文档与仓体量审查.md` 写完；本文件 209 KB / 800 多行 → 约 80 KB，历史节原样搬进 `docs/archive/`（搬前搬后逐行核过，丢 0 行）；钉骨架的测试 `agents/test/progress-structure.test.ts`、欠账检查跳过 `docs/archive/`、删了没人引用的 `.claude/handoff-2026-09-25.md`。下一步：盯 #910 的 CI 到合并；design/ops 拆分按报告第 4.4 节 P0、P1 起（未开工）。还没验证：合并后下一个新会话开场的钩子输出是否是「创始人引导还有 47 条没处理」且不报临时调整表问题（现在只在临时 git 仓里用真文件验过）。
 
+## 2026-10-05 #857 web 写方法同步抛错（Sonnet 5.5 子代理，分支 `fix/857-web-write-async`）
+
+做到哪：`packages/web/src/api/http.ts` 里 `createDemoLink`、`updateRouteEffort` 改成 async，校验失败返回被拒的 Promise；`http-writes.test.ts` 那条故意造出失败的测试改成不套包装直接调、同步抛就判失败（旧代码下三条红）。单上说的第三个 `updateDemoDefault` 在主线上本来就是 async，没改，只补了一条它的坏请求体用例。web 的 api、demo、page-writes 共 150 条过。还没验证：无。
+
 ## 2026-10-05 #901 代码层臃肿审查（Sonnet 5.5 子代理，分支 `slim/901-*`，`Refs #901` 不写 Closes）
 
 做到哪：第一阶段报告写完（`specs/901-项目瘦身与提速/代码臃肿审查.md`）；第二阶段切片 S1（core / engine / shared 的旧流程死代码）、S2（web 死组件）、S3（engine 死类型）按报告第八节做，每片一个 PR。下一步：S1 → S2 → S3，合并后把实际省的行数补进报告「第二阶段结果」。还没验证：报告第九节的疑似断链（驾驶舱发 `req:` 工作流信号、引擎只认 `task:`）只是读代码推断，没有在真 Temporal 上跑；`elkjs`、`@xyflow/react` 没删（别家在做首页流程图）。
