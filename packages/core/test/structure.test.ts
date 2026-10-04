@@ -26,7 +26,7 @@ describe('core 只放纯判断', () => {
       'criteria.ts',
       'dispatch.ts',
       'index.ts',
-      'seat.ts',
+      'names.ts',
       'verdict.ts',
     ]);
   });

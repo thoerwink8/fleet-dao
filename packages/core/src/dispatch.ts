@@ -1,56 +1,7 @@
-// 派不派一张单（0003 第 2、4、8 条；design 第九节「在哪能做与接活开关」）：接活自动派（后端 packages/api/src/issue-intake.ts，
-// 引擎的对账重放用同一份）和人明说交给引擎（fleet-api handover，packages/api/src/cli.ts）都在这里判。
-// 读库、读 GitHub、起工作流是外壳的事，这里只判。
-// 自动派要过五道：开关开着、issue 是开关打开以后开的（dispatchDecision）、挂在当前版本上（versionGate）、不是母单也不是子单
-// （familyGate）、没贴「本机做」（localGate；后三道合起来是 autoDispatchGate）；交给 fleet 是人替后四道放行，只看这张单此刻的
-// 样子（handoverDecision），开关、流程配置副本那两道外壳照样先查。
-import type { TaskState } from '@fleet-dao/shared';
-
-/** 结束了的任务：接活只在 GitHub 上重开时再拉起一轮。 */
-export const FINISHED_TASK_STATES: readonly TaskState[] = ['done', 'stopped', 'failed'];
-
-export function isFinishedTask(state: TaskState): boolean {
-  return FINISHED_TASK_STATES.includes(state);
-}
-
-// —— 开关这一道 ——
-
-/**
- * 拉不拉起工作流。start = 从没派过（还在排队），拉起；restart = 重开了、任务已经结束或还在排队，再拉起一次
- * （拉起时发现上一轮还在跑，就等它结束）；wait_previous_run = 重开了、上一轮正在做（刚叫停还在收尾，或者引擎
- * 做完正在收工），等它结束再拉起；其余都不拉起。start、restart 还要过版本那一道（versionGate）才真拉起。
- */
-export type DispatchDecision =
-  | 'start'
-  | 'restart'
-  | 'wait_previous_run'
-  | 'dispatch_off'
-  | 'opened_before_switch'
-  | 'created_at_unreadable'
-  | 'in_progress'
-  | 'finished';
-
-/**
- * 「让 AI 接活」开关（repos.auto_dispatch_since）：关着不派；开关打开以前就开着的 issue 不自动派（要人明说交给 fleet，
- * handoverDecision）。开关允许时：还在排队（从没派过）的拉起；已经结束的只在 GitHub 上重开时再拉起一次；重开时上一轮还没结束的，
- * 等它结束。
- */
-export function dispatchDecision(
-  repo: { autoDispatchSince: string | null },
-  issueCreatedAt: string,
-  task: { state: TaskState },
-  reopened: boolean,
-): DispatchDecision {
-  if (repo.autoDispatchSince === null) return 'dispatch_off';
-  const opened = Date.parse(issueCreatedAt);
-  if (!Number.isFinite(opened)) return 'created_at_unreadable';
-  if (opened < Date.parse(repo.autoDispatchSince)) return 'opened_before_switch';
-  if (reopened)
-    return isFinishedTask(task.state) || task.state === 'queued' ? 'restart' : 'wait_previous_run';
-  if (task.state === 'queued') return 'start';
-  if (isFinishedTask(task.state)) return 'finished';
-  return 'in_progress';
-}
+// 引擎拉单（packages/engine/src/jobs/intake.ts）派不派一张单要过的几道：挂在当前版本上（versionGate）、不是母单也不是子单
+// （familyGate）、没贴「本机做」（localGate；三道合起来是 autoDispatchGate）。
+// 原来这里还有「开关、开单时间」那一道（dispatchDecision）和「人明说交给 fleet」（handoverDecision），随旧接活一起删了
+// （#901 审查：只有测试在引用）。读库、读 GitHub、起工作流是外壳的事，这里只判。
 
 // —— 版本这一道 ——
 
@@ -216,48 +167,4 @@ export function autoDispatchGate(plan: IssueMilestones & IssueFamily): AutoDispa
   const local = localGate(plan);
   if (!local.ok) return local;
   return version;
-}
-
-// —— 交给 fleet ——
-
-/** 交给 fleet 时要看的这张 issue 此刻的样子（GitHub 上现读）。 */
-export interface IssueNow {
-  state: 'open' | 'closed';
-  /** 开着、而且是关了又重开的（GitHub 的 state_reason 是 reopened）。 */
-  reopened: boolean;
-  /** 这个号其实是 PR（GitHub 的 issue 接口也回 PR）。 */
-  pullRequest: boolean;
-}
-
-export type HandoverDecision =
-  | { act: 'start' }
-  | { act: 'restart' }
-  | { act: 'noop'; why: string }
-  | { act: 'refuse'; reason: 'pull_request' | 'issue_closed' | 'finished'; why: string };
-
-/**
- * 人明说把一张单交给引擎（fleet-api handover；驾驶舱的「交给 fleet」按钮以后也照这个判）：开关打开以前开的、别的版本的、
- * 未排期的、母单子单、贴了「本机做」的都能交（明着交的不拦）。这里只看任务和 issue 此刻的样子，照接活的老规矩：这个号其实是 PR 的、issue 关着的，拒（关着的哪怕
- * 任务还在跑也拒：关单会叫停它，说「已经在跑」是骗人）；还在排队（从没派过）的拉起；在跑的不重复起；已经结束的只有
- * GitHub 上重开过才再起一轮（和接活「结束的只在重开时再拉起」是同一条），没重开的拒。
- */
-export function handoverDecision(task: { state: TaskState }, issue: IssueNow): HandoverDecision {
-  if (issue.pullRequest) return { act: 'refuse', reason: 'pull_request', why: '这个号是 PR，不是 issue' };
-  if (issue.state === 'closed') {
-    return {
-      act: 'refuse',
-      reason: 'issue_closed',
-      why: 'GitHub 上这张单关着：关着的单不派，要做先在 GitHub 上重开',
-    };
-  }
-  if (task.state !== 'queued' && !isFinishedTask(task.state)) {
-    return { act: 'noop', why: `已经在跑（任务现在是 ${task.state}），不重复起` };
-  }
-  if (task.state === 'queued') return { act: 'start' };
-  if (issue.reopened) return { act: 'restart' };
-  return {
-    act: 'refuse',
-    reason: 'finished',
-    why: `任务已经结束（${task.state}），不重复起：要再做一轮，先在 GitHub 上重开这张单（关了再开），再交一次`,
-  };
 }

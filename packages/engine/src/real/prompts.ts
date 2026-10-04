@@ -572,7 +572,7 @@ export function parsePlan(
 /**
  * 开 PR 前验证的结论文件：先得是 JSON，再过 core 的 checkReport（形状、审的是不是送检的头、「怎么算做完」一条不漏不多不重，
  * 按 criterionKey 对、交回的 criterion 换成清单原文）。对不上回 error，会话端口按「交错了」退回会话照原因重写；过了的定论
- * 照样由工作流经 decide 判（decideVerdict 用的是同一个 checkReport）。
+ * 照样由工作流经 decide 判。
  */
 export function parseVerify(text: string, criteria: readonly string[], head: string): Parsed<VerifyReport> {
   const json = parseJson(text, `${OUT_DIR}/verify.json`);

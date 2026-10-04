@@ -6,5 +6,5 @@ export * from './ask.ts';
 export * from './brief.ts';
 export * from './criteria.ts';
 export * from './dispatch.ts';
-export * from './seat.ts';
+export * from './names.ts';
 export * from './verdict.ts';
