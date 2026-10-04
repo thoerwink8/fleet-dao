@@ -59,14 +59,16 @@ function setup(o: { start?: number; quiet?: QuietHours | null | undefined; board
     at(ms: number) {
       t = base + ms;
     },
-    /** 两条定时活都走通一轮。 */
+    /** 定时活都走通一轮（推送、盘面，和意图卡）。 */
     bothOk() {
       watch.ok('outbox', 20);
       watch.ok('board', 80);
+      watch.ok('intents', 20);
     },
     bothFail() {
       watch.fail('outbox', refused());
       watch.fail('board', refused());
+      watch.fail('intents', refused());
     },
     alerts: () => feishu.of('send').filter((c) => c.to && 'chatId' in c.to && c.to.chatId === TEAM),
   };
@@ -153,7 +155,7 @@ describe('调不通后端报警', () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]?.messageId).toBe(alertId);
     expect(replies[0]?.message).toEqual({
-      text: expect.stringContaining('通了：推送、盘面快照 14:21 起又走通了，断了 21 分钟'),
+      text: expect.stringContaining('通了：推送、盘面快照、意图卡 14:21 起又走通了，断了 21 分钟'),
     });
     const grey = s.feishu.cardOf(alertId);
     expect((grey.header as { template: string }).template).toBe('grey');
@@ -275,6 +277,7 @@ describe('调不通后端报警', () => {
       s.at(ms);
       s.watch.fail('outbox', stall);
       s.watch.ok('board', 60);
+      s.watch.ok('intents', 20);
       await s.watch.check();
     }
     const card = s.feishu.cardOf(s.alerts()[0]?.sentId ?? '');
@@ -289,11 +292,13 @@ describe('调不通后端报警', () => {
     for (let ms = 30 * SEC; ms < 120 * MIN; ms += 30 * SEC) {
       s.at(ms);
       s.watch.ok('outbox', 20);
+      s.watch.ok('intents', 20);
       await s.watch.check();
     }
     expect(s.alerts()).toHaveLength(0);
     s.at(120 * MIN);
     s.watch.ok('outbox', 20);
+    s.watch.ok('intents', 20);
     await s.watch.check();
     expect(titleOf(s.feishu.cardOf(s.alerts()[0]?.sentId ?? ''))).toBe('盘面卡住了：机器人取不到快照');
   });
@@ -332,6 +337,7 @@ describe('心跳', () => {
     s.watch.pushed('dropped', 1);
     s.watch.ok('board', 50);
     s.watch.ok('board', 150);
+    s.watch.ok('intents', 20);
     s.watch.acked(300);
     s.watch.acked(2_500);
     s.watch.acked(null);
@@ -362,6 +368,7 @@ describe('心跳', () => {
             lastOkAt: okAt,
           },
           board: { ok: 2, failed: 1, avgMs: 100, maxMs: 150, lastOkAt: okAt },
+          intents: { ok: 1, failed: 0, lastOkAt: okAt },
           messages: {
             count: 3,
             ackAvgMs: 1_400,
@@ -386,6 +393,7 @@ describe('心跳', () => {
     s.at(19 * MIN + 30 * SEC);
     s.watch.ok('outbox', 25_000);
     s.watch.ok('board', 60);
+    s.watch.ok('intents', 20);
     s.at(20 * MIN);
     s.watch.heartbeat();
     s.at(30 * MIN);
@@ -461,6 +469,11 @@ describe('接上真网关', () => {
     );
     h.backend.on('GET', '/feishu/board', () =>
       healthy ? { body: snapshot() } : apiError(503, 'unavailable', '后端暂时不可用'),
+    );
+    h.backend.on('GET', '/feishu/intent-cards', () =>
+      healthy
+        ? { body: { items: [], asOf: new Date().toISOString() } }
+        : apiError(503, 'unavailable', '后端暂时不可用'),
     );
     h.backend.on('PUT', '/feishu/cards/:messageId', { body: { ok: true } });
     h.gateway.start();
