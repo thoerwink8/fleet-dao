@@ -121,8 +121,8 @@ describe('手动补跑（workflow_dispatch：事件里没有合并时间）', ()
     const { github, calls } = fake({
       milestones: async () => [ms(10, 'v3 三段一条龙', '2026-10-05T02:01:30Z')],
       pulls: [
-        { number: 731, mergedAt: MERGED },
-        { number: 700, mergedAt: '2026-10-04T00:00:00Z' },
+        { number: 731, mergedAt: MERGED, mergeCommitSha: 'a'.repeat(40) },
+        { number: 700, mergedAt: '2026-10-04T00:00:00Z', mergeCommitSha: 'b'.repeat(40) },
       ],
     });
     const r = await releaseMilestone({ mode: 'close', version: 'v3', mergedAt: '', github });

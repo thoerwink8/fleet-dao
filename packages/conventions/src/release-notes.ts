@@ -2,8 +2,8 @@
 // 核心解析（splitChangelog、UNRELEASED_HEADING、today、ChangelogSplit、Version）已挪到
 // packages/shared/src/changelog.ts，本文件只做再导出（按「上一版 +1」推版本号的 nextVersion 已删，#725：版本号取当前版本里程碑）。CLI 那一侧的状态机（FinalizeState、nextState、planFinalize）、
 // 状态文件名（FINALIZE_DIR、stateFileName）、飞书正文（feishuBody、releaseBody、namesFor）还留在这里。
-// 这份状态机被 .github/workflows/release.yml 一步步「合法顺序」用（打 tag → 建 release → 关 milestone → 推飞书）；
-// release.yml 自己的「事实」判定（tag、release 在不在、body 对不对、 milestone 开没开）不按这份状态文件走。
+// 这份状态机写的是「合法顺序」（打 tag → 建 release → 关 milestone → 推飞书）；真跑的收尾（release-finalize.ts）照同一顺序走，
+// 但不读写状态文件：tag、release 在不在、body 对不对、milestone 开没开，每一步现查 GitHub（判定在 publish-release-logic.ts）。
 // 「业务那一侧（bin/changelog-release.ts）、root 那一侧（deploy/bin/finalize-release.sh）」这两个文件名是上一稿方案
 // 留下的、现在并不存在：当时想要一份本机 CLI 加一份 root 机器脚本，重做成 #593（发布 vN 的 PR 合并由 GitHub Actions
 // 收尾，0011 第 4 条）之后这两个都不再要——所以本注释里不再点它们的名。
