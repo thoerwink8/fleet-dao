@@ -68,7 +68,7 @@ export class RepoFactsCache {
     return value;
   }
 
-  /** 某个分支上生效的规则（只要 Metadata: read）。 */
+  /** 某个分支上生效的规则。引擎用单独的 'rules' 令牌（administration:read + metadata:read，见 token-scopes.ts）。 */
   async branchRules(
     repo: RepoRef,
     branch: string,
@@ -82,7 +82,7 @@ export class RepoFactsCache {
     const res = await this.client.request({
       method: 'GET',
       path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/rules/branches/${encRef(branch)}`,
-      auth: { as: role, repo },
+      auth: { as: role, repo, scope: role === 'engine' ? 'rules' : undefined },
       query: { per_page: 100 },
       signal,
     });

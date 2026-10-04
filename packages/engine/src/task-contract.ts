@@ -214,6 +214,12 @@ export interface CheckGuardedInput {
   taskId: string;
   repo: Repo;
   prNumber: number;
+  /**
+   * 人已经看过、点过「继续」的路径（上一次 checkGuarded 回的原样条目）。活动在回的结果里把它们去掉，
+   * 否则人批了之后再查一遍还是同样的结果，永远过不去。工作流只在批准那一刻的头还是现在的头时才传；
+   * 头换了就不传（新的内容要重新批）。老历史里没有这个字段，当作没批过。
+   */
+  approved?: GuardedPaths;
 }
 
 export interface ArmAutoMergeInput {

@@ -668,7 +668,8 @@ export function createMemoryStore(
         .flatMap((r): SegmentRunRecord[] => {
           if (r.taskId !== undefined) return r.taskId === taskId ? [{ ...r, matchedBy: 'task' }] : [];
           if (r.issueNumber !== task.issueNumber) return [];
-          if (r.workflowId !== undefined && r.workflowId !== workflowId) return [];
+          // 工作流编号没记的分不出是哪个仓的：不收（和 Postgres 版同一规矩）
+          if (workflowId === undefined || r.workflowId !== workflowId) return [];
           return [{ ...r, matchedBy: 'issueNumber' }];
         })
         .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));

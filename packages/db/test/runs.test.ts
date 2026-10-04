@@ -257,6 +257,62 @@ describe('startRun / closeOpenRuns：开跑留一行没结束的，引擎起来�
     expect(await listOpenRuns(t.db)).toEqual([]);
   });
 
+  it('已经收场的那一行再收到一次开跑（重放、重试）：endedAt、outcome 和用量原样留着，不被冲回「还在跑」；开跑写的列照旧整行覆盖', async () => {
+    const id = randomUUID();
+    const base = {
+      id,
+      segment: 'manual',
+      model: 'kimi-k3',
+      routeId: 'kimi-r',
+      startedAt: ago(5 * MIN),
+    } as const;
+    await startRun(t.db, { ...base, issueNumber: 157 }, ago(5 * MIN));
+    await startRun(t.db, {
+      ...base,
+      issueNumber: 157,
+      endedAt: NOW,
+      outcome: 'failed',
+      routeOutcome: 'ok',
+      inputTokens: 10,
+      costUsd: 0.5,
+      failureReason: '退出码 1',
+    });
+    // 开跑那一笔又来一次：没带结局、也没带这一次的单号
+    await startRun(t.db, { ...base, tier: 'fast' });
+    expect(await getRun(t.db, id)).toMatchObject({
+      endedAt: NOW,
+      outcome: 'failed',
+      routeOutcome: 'ok',
+      inputTokens: 10,
+      costUsd: 0.5,
+      failureReason: '退出码 1',
+      tier: 'fast',
+      issueNumber: null,
+    });
+    expect(await listOpenRuns(t.db)).toEqual([]);
+    // 给了结局的收场照样覆盖已有的（引擎重启收成 killed 之后，迟到的真结局以它为准）
+    await startRun(t.db, {
+      ...base,
+      endedAt: new Date(NOW.getTime() + MIN),
+      outcome: 'done',
+      routeOutcome: 'ok',
+    });
+    expect(await getRun(t.db, id)).toMatchObject({
+      endedAt: new Date(NOW.getTime() + MIN),
+      outcome: 'done',
+      inputTokens: 10,
+    });
+  });
+
+  it('【失败】收场只给 endedAt 不给 outcome：库的一对空/不空约束仍然拒收，不靠保留旧值蒙混', async () => {
+    const id = randomUUID();
+    await startRun(t.db, { id, segment: 'manual', model: 'kimi-k3', startedAt: ago(MIN) });
+    await expect(
+      startRun(t.db, { id, segment: 'manual', model: 'kimi-k3', startedAt: ago(MIN), endedAt: NOW }),
+    ).rejects.toThrow('写入 runs 失败');
+    expect((await getRun(t.db, id))?.endedAt).toBeNull();
+  });
+
   it('还开着的收成 killed、写明为什么、交回编号、不算路由的账；收过场的不动；收的时刻早于开跑时刻按开跑时刻收', async () => {
     const open = randomUUID();
     const future = randomUUID();
@@ -468,13 +524,14 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
     return { task, other, run };
   }
 
-  it('按 task_id 对上的、task_id 没记但单号对上的（兜底）都收，按起跑先后排', async () => {
+  it('按 task_id 对上的、task_id 没记但单号和工作流编号都对上的（兜底）都收，按起跑先后排', async () => {
     const { task, run } = await setup();
     const verify = await run({ segment: 'verify', model: 'gpt-5.6', taskId: task.id, startedAt: ago(MIN) });
     const manual = await run({
       segment: 'manual',
       model: 'opus-5.5',
       issueNumber: 77,
+      workflowId: WF,
       startedAt: ago(9 * MIN),
     });
     const scope = await run({
@@ -500,6 +557,17 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
     const mine = await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: WF });
     const rows = await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF });
     expect(rows.map((r) => r.id)).toEqual([mine]);
+  });
+
+  it('task_id 和工作流编号都没记、只有单号对得上的不收：分不出是哪个仓的，别的仓同号的会话混不进来', async () => {
+    const { task, other, run } = await setup();
+    const orphan = await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77 });
+    expect(await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF })).toEqual([]);
+    // 同一个单号、另一个仓：它的任务详情同样不收这一行
+    expect(
+      await runsOfTask(t.db, { id: other.id, issueNumber: 77, workflowId: 'task:acme/other#77' }),
+    ).toEqual([]);
+    expect((await t.db.select({ id: runs.id }).from(runs)).map((r) => r.id)).toEqual([orphan]);
   });
 
   it('单号对不上、也没 task_id 的不收（巡检、实验这类不属于这张单）', async () => {

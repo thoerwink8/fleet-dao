@@ -77,8 +77,9 @@ export class RunInputError extends Error {
 type RunRowSure = Omit<RunRow, 'id'> & { id: string };
 
 /**
- * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。再记是整行覆盖：这一次没给的列写回 NULL，
- * 收场补完开跑那一行时要把开跑写过的列（单子、派工档、工作流、PR、分支……）再带一遍。
+ * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。再记时：开跑写的那几列（单子、派工档、工作流、PR、分支……）
+ * 整行覆盖，这一次没给的写回 NULL，收场补完开跑那一行时要把它们再带一遍；收场才有的列（endedAt、outcome、routeOutcome、
+ * 用量、花费、内存峰值、失败原因）没给就保留库里已有的，所以重放的开跑不会把已经收场的那一行冲回「还在跑」。
  */
 export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): Promise<{ id: string }> {
   if (!row.segment) throw new RunInputError('segment 是空的');
@@ -149,8 +150,9 @@ export async function runsOfIssue(db: Db, issueNumber: number): Promise<RunRow[]
 }
 
 /**
- * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号对得上的老行（兜底，调用方要标明）。
- * 单号在几个仓里会重：兜底的行记了工作流编号、却不是这张单的（别的仓同号的单、巡检这类），不收；没记工作流编号的分不出，照收。
+ * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号和工作流编号都对得上的老行（兜底，调用方要标明）。
+ * 单号在几个仓里会重：兜底必须靠工作流编号（带着仓名）认；工作流编号也没记的行分不出是哪个仓的，不收——
+ * 宁可少一行，也不把别的仓同号的单的会话混进这张单。
  * 按起跑先后排。
  */
 export async function runsOfTask(
@@ -166,7 +168,7 @@ export async function runsOfTask(
         and(
           isNull(runs.taskId),
           eq(runs.issueNumber, task.issueNumber),
-          or(isNull(runs.workflowId), eq(runs.workflowId, task.workflowId)),
+          eq(runs.workflowId, task.workflowId),
         ),
       ),
     )
@@ -231,7 +233,20 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
   };
 }
 
+/** 再记时要改的列：收场才有的那几列用 coalesce(新值, 库里已有的)，没给就不清。 */
 function pickRowWithoutId(r: RunRowSure) {
   const { id: _i, createdAt: _c, ...rest } = r;
-  return rest;
+  return {
+    ...rest,
+    endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,
+    outcome: sql`coalesce(${r.outcome}, ${runs.outcome})`,
+    routeOutcome: sql`coalesce(${r.routeOutcome}, ${runs.routeOutcome})`,
+    inputTokens: sql`coalesce(${r.inputTokens}::bigint, ${runs.inputTokens})`,
+    outputTokens: sql`coalesce(${r.outputTokens}::bigint, ${runs.outputTokens})`,
+    cacheReadTokens: sql`coalesce(${r.cacheReadTokens}::bigint, ${runs.cacheReadTokens})`,
+    cacheWriteTokens: sql`coalesce(${r.cacheWriteTokens}::bigint, ${runs.cacheWriteTokens})`,
+    costUsd: sql`coalesce(${r.costUsd}::numeric, ${runs.costUsd})`,
+    memoryPeakMb: sql`coalesce(${r.memoryPeakMb}::integer, ${runs.memoryPeakMb})`,
+    failureReason: sql`coalesce(${r.failureReason}, ${runs.failureReason})`,
+  };
 }

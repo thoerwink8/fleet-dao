@@ -214,7 +214,13 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           (h) => `${h.file}（${h.kind}：${h.rule}${h.note ? `，${h.note}` : ''}）`,
         );
       }
-      return { standards, highRisk };
+      // 人批过的（原样条目对得上）不再拦；没批过的、批了之后才多出来的照拦。
+      const approvedStandards = new Set(input.approved?.standards ?? []);
+      const approvedRisk = new Set(input.approved?.highRisk ?? []);
+      return {
+        standards: standards.filter((s) => !approvedStandards.has(s)),
+        highRisk: highRisk.filter((s) => !approvedRisk.has(s)),
+      };
     },
 
     async armAutoMerge(input: ArmAutoMergeInput, ctx: PortContext): Promise<ArmAutoMergeResult> {

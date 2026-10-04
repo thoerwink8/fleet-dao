@@ -27,9 +27,10 @@ export type MakeStore = (data: Partial<MemoryData>, clock: { now: Date }) => Pro
 
 const OTHER_UUID = '99999999-0000-4000-8000-000000000000';
 const TASKLESS_RUN = 'd0000000-0000-4000-8000-0000000000ff';
-/** 三段流水里不该算进 #13 的两笔：别的仓同号（记了别的仓的工作流编号）、记了别的单的 task_id（单号却也是 13）。 */
+/** 三段流水里不该算进 #13 的三笔：别的仓同号（记了别的仓的工作流编号）、记了别的单的 task_id（单号却也是 13）、task_id 和工作流编号都没记（分不出是哪个仓的）。 */
 const OTHER_REPO_SEG = 'd1000000-0000-4000-8000-0000000130ff';
 const OTHER_TASK_SEG = 'd1000000-0000-4000-8000-0000000130fe';
+const ORPHAN_SEG = 'd1000000-0000-4000-8000-0000000130fd';
 /** #13 已经结束了还开着的一段（没记结束、没记结局）：Store 照原样给，算不算在跑由任务详情判。 */
 const STALE_SEG = 'd1000000-0000-4000-8000-000000013005';
 /** 接活时新建的任务。 */
@@ -75,6 +76,15 @@ function contractData(): Partial<MemoryData> {
       endedAt: ago(520),
       outcome: 'done',
       workflowId: 'task:example/other#13',
+    },
+    {
+      id: ORPHAN_SEG,
+      segment: 'manual',
+      issueNumber: 13,
+      model: 'opus-5.5',
+      startedAt: ago(528),
+      endedAt: ago(524),
+      outcome: 'done',
     },
     {
       id: OTHER_TASK_SEG,
@@ -266,7 +276,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ]);
       });
 
-      it('三段流水：task_id 对上的、task_id 没记但单号对上的（标明兜底）都给，按起跑先后排', async () => {
+      it('三段流水：task_id 对上的、task_id 没记但单号和工作流编号都对上的（标明兜底）都给，按起跑先后排', async () => {
         const rows = await store.listSegmentRuns(IDS.task13);
         expect(rows.map((r) => [r.id, r.segment, r.matchedBy])).toEqual([
           [IDS.seg13scope, 'scope', 'task'],
@@ -277,10 +287,11 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ]);
       });
 
-      it('三段流水不算进来的：别的仓同号（工作流编号不是这张单的）、记了别的单的 task_id；没这张单、编号看不懂是空', async () => {
+      it('三段流水不算进来的：别的仓同号（工作流编号不是这张单的）、task_id 和工作流编号都没记的（分不出是哪个仓）、记了别的单的 task_id；没这张单、编号看不懂是空', async () => {
         const ids = (await store.listSegmentRuns(IDS.task13)).map((r) => r.id);
         expect(ids).not.toContain(OTHER_REPO_SEG);
         expect(ids).not.toContain(OTHER_TASK_SEG);
+        expect(ids).not.toContain(ORPHAN_SEG);
         expect((await store.listSegmentRuns(IDS.task12)).map((r) => r.id)).toEqual([OTHER_TASK_SEG]);
         expect(await store.listSegmentRuns(OTHER_UUID)).toEqual([]);
         expect(await store.listSegmentRuns('task-13')).toEqual([]);
@@ -1081,6 +1092,37 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await polled('poll-v2', '2026-09-25T07:05:00.000Z')).toMatchObject({ status: 'claimed' });
         // 同一版再补收一次：认得出是 poll-v2 带过的
         expect(await polled('poll-v2-again', '2026-09-25T07:05:00.000Z')).toEqual({ status: 'duplicate' });
+      });
+
+      it('同一版的几条补收同时来（编号各不相同）：只有一条占到，别的是 duplicate、不落库——查有没有带过和插入在同一把锁下', async () => {
+        const polled = (id: string) =>
+          store.claimDelivery(delivery(id, { source: 'poll', versions: [ver(V1)] }), {
+            staleBefore: stale(),
+            skipIfSeen: { object: ISSUE, version: V1 },
+          });
+        const ids = Array.from({ length: 8 }, (_, i) => `poll-race-${i}`);
+        const claims = await Promise.all(ids.map(polled));
+        expect(claims.filter((c) => c.status === 'claimed')).toHaveLength(1);
+        expect(claims.filter((c) => c.status === 'duplicate')).toHaveLength(ids.length - 1);
+        const stored = await Promise.all(ids.map((id) => store.getDelivery(id)));
+        expect(stored.filter((d) => d !== null)).toHaveLength(1);
+      });
+
+      it('同一版的补收和 webhook 同时来：补收要么先占到、要么认出 webhook 带过；落库的补收不会有两条', async () => {
+        const [hook, ...polls] = await Promise.all([
+          store.claimDelivery(delivery('guid-race'), { staleBefore: stale() }),
+          ...['poll-a', 'poll-b'].map((id) =>
+            store.claimDelivery(delivery(id, { source: 'poll', versions: [ver(V1)] }), {
+              staleBefore: stale(),
+              skipIfSeen: { object: ISSUE, version: V1 },
+            }),
+          ),
+        ]);
+        // webhook 只按投递编号去重，一定占到
+        expect(hook).toMatchObject({ status: 'claimed', retry: false });
+        expect(polls.filter((c) => c.status === 'claimed').length).toBeLessThanOrEqual(1);
+        const [a, b] = await Promise.all([store.getDelivery('poll-a'), store.getDelivery('poll-b')]);
+        expect([a, b].filter((d) => d !== null).length).toBeLessThanOrEqual(1);
       });
 
       it('门挡掉的那一版不跳过（改了名单、新加了仓之后补收还能再过一次门）；除了「仓不受管」挡掉的，都回 seenBefore（不算补回）', async () => {

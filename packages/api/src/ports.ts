@@ -501,6 +501,7 @@ export interface GitHubStore {
    * skipIfSeen（轮询补收用）：别的投递已经带过这个对象的这一版、而且没被门挡掉（webhook 收过同一版），也是 duplicate、
    * 不落库。门挡掉的那一版不跳过：改了名单、新加了仓之后补收还能再过一次门；陌生人评论顺带的 issue 那一版也照样处理
    * （关单的 webhook 丢了还靠它叫停），只是除了「仓不受管」挡掉的，都回 seenBefore——不算补回。
+   * 带过没有的查和这一条的插在同一个事务里、按（对象，版）加锁：同一版的几条补收同时来、编号各不相同，也只有一条占到。
    */
   claimDelivery(
     delivery: NewGitHubDelivery,

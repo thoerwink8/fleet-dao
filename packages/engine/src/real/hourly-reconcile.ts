@@ -181,8 +181,8 @@ export function hourlyReconcileJob(
     return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
   };
   // 自动合并兜底（#242）要的 GitHub：列 PR 经 claims.openPulls，把作者是不是机器人、自动合并开没开带过来；
-  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读
-  // （现在借 parseRiskPaths 判，TODO(#133)：standard-paths.json 自己的判法落地后换）。
+  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读，
+  // 判法是 conventions 的 parseStandardPaths / standardFiles（认目录、通配、section，和先审后合的 parseRiskPaths 是两份）。
   const standardPathsFile = w.gh.standardPathsFile ?? STANDARD_PATHS_FILE;
   const autoMergeGh: AutoMergeGitHub = w.autoMergeGh ?? {
     async listPrs(repo: RepoRef) {

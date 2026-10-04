@@ -7,10 +7,14 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { EngineTasks } from '../src/activities.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
 import type { PickRouteInput, RouteChoice } from '../src/ports.ts';
+import { localExec } from '../src/real/exec.ts';
+import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
 import {
+  type CheckGuardedInput,
   type RunSegmentResult,
   type TaskRun,
   type TaskStatus,
@@ -264,13 +268,40 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(calls.verify.map((v) => v.round)).toEqual([1, 1]); // 两次都是第 1 轮
   });
 
-  it('改到了标准路径：不挂自动合并，停下等创始人；点「继续」才挂', async () => {
-    const world = createFakeWorld();
-    let released = false;
-    const { tasks, calls } = scripted({
-      guarded: () =>
-        released ? { standards: [], highRisk: [] } : { standards: ['AGENTS.md'], highRisk: [] },
+  // 查路径用真活动（real/task-activities.ts）+ 内存假 GitHub：不靠桩「点了继续就变空」，
+  // 人批了之后能不能放行，由真活动怎么判说了算（#10）。
+  const STANDARDS = JSON.stringify({ paths: [{ path: 'AGENTS.md', section: '通用段', why: '通用段' }] });
+  const RISKS = JSON.stringify({ paths: [{ path: '.github/workflows/', kind: '碰安全', why: 'CI 工作流' }] });
+  function realGuard(prFiles: string[]): {
+    checkGuarded: NonNullable<EngineTasks['checkGuarded']>;
+    seen: CheckGuardedInput[];
+  } {
+    const seen: CheckGuardedInput[] = [];
+    const acts = createTaskActivities({
+      gh: {
+        pullFiles: async () => prFiles.map((filename) => ({ filename, status: 'modified' })),
+        readRepoFile: async (i: { path: string }) => ({
+          defaultBranch: 'main',
+          commit: 'a'.repeat(40),
+          file: { kind: 'text', text: i.path.endsWith('standard-paths.json') ? STANDARDS : RISKS },
+        }),
+      } as unknown as TaskActivitiesDeps['gh'],
+      trees: { ownerOf: async () => null },
+      exec: localExec(),
     });
+    return {
+      seen,
+      checkGuarded: async (i, ctx) => {
+        seen.push(i);
+        return acts.checkGuarded(i, ctx);
+      },
+    };
+  }
+
+  it('改到了标准路径：不挂自动合并，停下等创始人；点「继续」后再查放行、才挂（真活动判）', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted();
+    const guard = realGuard(['AGENTS.md', 'src/a.ts']);
     const run = await withWorker(
       env,
       world,
@@ -279,26 +310,26 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
         const s = await statusUntil(h, parked, '改标准，停下等创始人');
         expect(s.waiting?.detail).toContain('标准路径');
         expect(calls.arm).toBe(0);
-        released = true;
         await h.signal(taskContinueSignal, { by: 'frank', note: '同意' });
         return h.result() as Promise<TaskRun>;
       },
-      { tasks },
+      { tasks: { ...tasks, checkGuarded: guard.checkGuarded } },
     );
     expect(run.outcome).toBe('merged');
     expect(calls.arm).toBe(1);
     expect(world.alerts[0]?.title).toContain('人闸：改标准');
+    // 第一次没带批准；点「继续」后的第二次带着刚才停下来的那一条
+    expect(guard.seen).toHaveLength(2);
+    expect(guard.seen[0]?.approved).toBeUndefined();
+    expect(guard.seen[1]?.approved?.standards).toEqual([
+      'AGENTS.md（AGENTS.md，只有「通用段」这一段算标准）',
+    ]);
   });
 
-  it('碰了先审后合的路径：停下等第二意见；点「继续」后再查一遍', async () => {
+  it('碰了先审后合的路径：停下等第二意见；点「继续」后再查放行（真活动判）', async () => {
     const world = createFakeWorld();
-    let released = false;
-    const { tasks, calls } = scripted({
-      guarded: () =>
-        released
-          ? { standards: [], highRisk: [] }
-          : { standards: [], highRisk: ['.github/workflows/ci.yml'] },
-    });
+    const { tasks, calls } = scripted();
+    const guard = realGuard(['.github/workflows/ci.yml']);
     await withWorker(
       env,
       world,
@@ -306,14 +337,49 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
         const h = await start(q, input());
         await statusUntil(h, parked, '先审后合，停下');
         expect(calls.arm).toBe(0);
-        released = true;
         await h.signal(taskContinueSignal, { by: 'frank' });
         return h.result();
       },
-      { tasks },
+      { tasks: { ...tasks, checkGuarded: guard.checkGuarded } },
     );
-    expect(calls.guarded).toBe(2);
+    expect(guard.seen).toHaveLength(2);
     expect(calls.arm).toBe(1);
+  });
+
+  it('批准只认批准那一刻的头：等合并时头被换了，回去重走后同一条路径要重新批，没批就不挂', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(666);
+    const { tasks, calls } = scripted({
+      arm: (n) =>
+        n === 1
+          ? { armed: false, merged: false, why: 'PR 的头变了', headMoved: moved }
+          : { armed: true, merged: false },
+    });
+    const guard = realGuard(['AGENTS.md']);
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await statusUntil(h, (s) => parked(s) && !!s.waiting?.detail.includes('标准路径'), '改标准，停下');
+        await h.signal(taskContinueSignal, { by: 'frank' }); // 批旧头
+        await statusUntil(
+          h,
+          (s) => parked(s) && !!s.waiting?.detail.includes('头被别人改了'),
+          '头被换，停下',
+        );
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        // 新头上同一条路径：旧头上的批准不算数，必须再停一次；这时一次也还没挂成
+        await statusUntil(h, (s) => parked(s) && !!s.waiting?.detail.includes('标准路径'), '新头上再停下');
+        expect(calls.arm).toBe(1);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks: { ...tasks, checkGuarded: guard.checkGuarded } },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head: moved });
+    expect(calls.arm).toBe(2);
+    expect(guard.seen.map((i) => i.approved !== undefined)).toEqual([false, true, false, true]);
   });
 
   it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」再给一整轮', async () => {
