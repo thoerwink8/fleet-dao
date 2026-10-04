@@ -214,6 +214,10 @@ describe('调工具前那条挂在哪些工具上', () => {
       exec: { command: 'git status', shell_id: 'main' },
       read: { file_path: '/work/repo/README.md' },
       grep: { pattern: 'TODO', path: '/work/repo/src' },
+      Agent: { prompt: '查一下', description: '查' },
+      Task: { prompt: '查一下', description: '查' },
+      Monitor: { command: 'until false; do sleep 1; done' },
+      Workflow: { script: 'x' },
     };
     const names = PRETOOL_MATCHERS.flatMap((m) => m.replace(/^\^\(|\)\$$/g, '').split('|'));
     expect([...names].sort()).toEqual(Object.keys(normal).sort());

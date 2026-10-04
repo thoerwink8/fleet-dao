@@ -1690,6 +1690,8 @@ export function decide(raw, fallbackCwd = '') {
     return block('fleet-guard：钩子输入不是 JSON，按拦处理');
   }
   const tool = input?.tool_name ?? input?.toolName;
+  // 只为记「起了后台活」才登记的工具（main 里已经记过）：这里不判，放行
+  if (typeof tool === 'string' && BACKGROUND_ONLY_TOOLS.has(tool)) return { code: 0 };
   if (typeof tool === 'string' && Object.hasOwn(READ_TOOLS, tool)) {
     return readVerdict(tool, READ_TOOLS[tool], input, fallbackCwd);
   }
