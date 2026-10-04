@@ -7,12 +7,16 @@
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
+//   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
+import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import type { AlertWorkPort } from './alert-work.ts';
+import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
+import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
 import { isCockpitUser } from './session.ts';
@@ -415,6 +419,18 @@ export interface CliDeps {
   readStdin?: () => Promise<string>;
   /** 提醒的处理状态、跟进单、静默（alert 命令用）。不给就是真的：连库，法国上再读发布记录。 */
   openAlertWork?: (url: string, env: CliEnv) => Promise<{ alerts: AlertWorkPort; close(): Promise<void> }>;
+  /** 意图存储（intent 命令用）。不给就是真的：连库。 */
+  openIntents?: (url: string) => Promise<{ intents: IntentStore; close(): Promise<void> }>;
+  /** 读一个文件（intent link 的 --summary-file）。不给就是真的。 */
+  readFile?: (path: string) => Promise<string>;
+}
+
+async function openPgIntents(url: string): Promise<{ intents: IntentStore; close(): Promise<void> }> {
+  const { createDb } = await import('@fleet-dao/db');
+  const { withStatementTimeout } = await import('./pg-store.ts');
+  const { createPgIntentStore } = await import('./intent-store-pg.ts');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  return { intents: createPgIntentStore(db), close };
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -451,6 +467,8 @@ export function processDeps(): CliDeps {
     now: () => new Date(),
     readStdin: readAllStdin,
     openAlertWork: openPgAlertWork,
+    openIntents: openPgIntents,
+    readFile: (path) => readFile(path, 'utf8'),
   };
 }
 
@@ -475,6 +493,7 @@ const USAGES: Record<string, string> = {
   'set-password': USAGE,
   dispatch: DISPATCH_USAGE,
   alert: ALERT_USAGE,
+  intent: INTENT_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -515,8 +534,54 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     }
   }
   if (command === 'alert') return runAlertCommand(rest, deps);
+  if (command === 'intent') return runIntentCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
+}
+
+/**
+ * intent（#553 第 4 条）：带 --json 只往标准输出打一行 JSON（本机 pnpm intents 读），不带打给人看的话；出错也照这个样子打。
+ * 参数先认完再连库（参数不对退出码 2，不连库）；连不上库、库出错退出码 1，绝不打空列表。
+ */
+async function runIntentCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  const json = rest.includes('--json');
+  const fail = (err: IntentCliError) => {
+    if (json) deps.out(JSON.stringify({ ok: false, reason: err.reason, why: err.message }));
+    else deps.err(err.message);
+    return err.exitCode;
+  };
+  let cmd: ReturnType<typeof parseIntentArgs>;
+  try {
+    cmd = parseIntentArgs(rest);
+  } catch (err) {
+    if (err instanceof IntentCliError) return fail(err);
+    throw err;
+  }
+  let opened: { intents: IntentStore; close(): Promise<void> } | undefined;
+  try {
+    const url = (() => {
+      try {
+        return databaseUrl(deps.env);
+      } catch (err) {
+        throw new IntentCliError(err instanceof Error ? err.message : String(err), 'usage');
+      }
+    })();
+    opened = await (deps.openIntents ?? openPgIntents)(url);
+    const readStdin = deps.readStdin ?? readAllStdin;
+    const read = deps.readFile ?? ((path: string) => readFile(path, 'utf8'));
+    const result = await runIntent(cmd, {
+      intents: opened.intents,
+      readSummary: (file) => (file === '-' ? readStdin() : read(file)),
+      operator: operatorName(deps.env),
+    });
+    deps.out(json ? JSON.stringify(result.json) : result.text);
+    return result.code;
+  } catch (err) {
+    if (err instanceof IntentCliError) return fail(err);
+    return fail(new IntentCliError(`没做成：${describeDbError(err)}`, 'error'));
+  } finally {
+    await opened?.close().catch(() => undefined);
+  }
 }
 
 /** 用到才连：参数不对（退出码 2）的不连库。给出一个替身，第一次调方法时才打开真的（方法一律当成异步的）。 */
