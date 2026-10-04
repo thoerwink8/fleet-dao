@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '@fleet-dao/adapters/testing';
 import { describe, expect, it } from 'vitest';
-import { tempDir } from '../../adapters/test/helpers.ts';
 import { artifactName, runtimeSourceHash } from '../src/build.ts';
 
 describe('构建标识', () => {
