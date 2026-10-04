@@ -358,7 +358,7 @@ describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 te
     expect(fb('packages/adapters/test/fixtures/claude-code/x.ndjson')).toEqual({
       units: ['adapters'],
       hubs: ['adapters'],
-      dependents: usersOf('adapters'),
+      dependents: [...usersOf('adapters'), AGENTS_UNIT].sort(),
     });
     expect(fb('packages/nope/src/x.ts')).toEqual({ units: ['nope'], hubs: ['nope'], dependents: [] });
   });
