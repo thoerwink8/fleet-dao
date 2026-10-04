@@ -345,6 +345,53 @@ describe('查改标准和先审后合的路径', () => {
     expect(await check(gh)).toEqual({ standards: [], highRisk: [] });
   });
 
+  describe('人批过的路径（approved）', () => {
+    const lists = async (i: { path: string }) =>
+      i.path.endsWith('standard-paths.json') ? text(STANDARDS) : text(RISKS);
+    const checkWith = (gh: Gh, approved: { standards: string[]; highRisk: string[] }) =>
+      make({ gh }).acts.checkGuarded(
+        { schemaVersion: 1, taskId: 't1', repo: REPO, prNumber: 7, approved },
+        ctx(),
+      );
+    const AGENTS_ENTRY = 'AGENTS.md（AGENTS.md，只有「通用段」这一段算标准）';
+    const CI_ENTRY = '.github/workflows/ci.yml（碰安全：.github/workflows/）';
+
+    it('原样批过的条目放行：两类都批了就都空', async () => {
+      const { gh } = fakeGh({
+        pullFiles: files('AGENTS.md', '.github/workflows/ci.yml'),
+        readRepoFile: lists,
+      });
+      expect(await checkWith(gh, { standards: [AGENTS_ENTRY], highRisk: [CI_ENTRY] })).toEqual({
+        standards: [],
+        highRisk: [],
+      });
+    });
+
+    it('【故意造出的失败】只批了一类 / 批了之后又多出新的路径：没批的照拦，不整个放行', async () => {
+      const both = fakeGh({
+        pullFiles: files('AGENTS.md', '.github/workflows/ci.yml'),
+        readRepoFile: lists,
+      });
+      expect(await checkWith(both.gh, { standards: [AGENTS_ENTRY], highRisk: [] })).toEqual({
+        standards: [],
+        highRisk: [CI_ENTRY],
+      });
+
+      const extra = fakeGh({
+        pullFiles: files('AGENTS.md', 'agents/skills/x/SKILL.md'),
+        readRepoFile: lists,
+      });
+      const got = await checkWith(extra.gh, { standards: [AGENTS_ENTRY], highRisk: [] });
+      expect(got.standards).toEqual(['agents/skills/x/SKILL.md（agents/**/*.md）']);
+    });
+
+    it('【故意造出的失败】批准的条目对不上（批的是别的路径）：照拦', async () => {
+      const { gh } = fakeGh({ pullFiles: files('AGENTS.md'), readRepoFile: lists });
+      const got = await checkWith(gh, { standards: ['别的文件（别的规则）'], highRisk: [] });
+      expect(got.standards).toEqual([AGENTS_ENTRY]);
+    });
+  });
+
   it('【故意造出的失败】清单认不出 / 不是能读的文本 / 读 PR 文件失败：抛明确的错，不当成「没碰到」', async () => {
     const bad = fakeGh({ pullFiles: files('a'), readRepoFile: async () => text('{"paths":[]}') });
     await expect(check(bad.gh)).rejects.toMatchObject({ code: 'GUARD_LIST_INVALID', retryable: false });

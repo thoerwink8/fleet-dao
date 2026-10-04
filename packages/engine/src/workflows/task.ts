@@ -41,6 +41,7 @@ import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
   type AbandonCommand,
+  type GuardedPaths,
   MAX_IMPLEMENT_ROUNDS,
   MAX_VERIFY_ROUNDS,
   MERGE_POLL_MINUTES,
@@ -100,6 +101,8 @@ class TaskFlow {
   private since = '';
   private head: string | null = null;
   private prNumber: number | null = null;
+  /** 人在哪个头上批过哪些路径（点「继续」那一刻记下）；头换了就作废，新的内容要重新批。 */
+  private guardApproval: { head: string; paths: GuardedPaths } | null = null;
   private changedFiles: string[] = [];
   private feedback: string[] = [];
   private readonly families = new Set<string>();
@@ -684,14 +687,18 @@ class TaskFlow {
   /** 碰了「改标准」「先审后合」的路径：停下等人（工作流不绕合并闸、不替创始人同意）。 */
   private async guardedPaths(): Promise<void> {
     const prNumber = this.prNumber;
-    if (prNumber === null) throw new Error('查路径之前还没有 PR');
+    const head = this.head;
+    if (prNumber === null || head === null) throw new Error('查路径之前还没有 PR');
     for (;;) {
+      // 批准只认批准那一刻的头；头换了（有人又推了新提交）就当没批过。
+      const approved = this.guardApproval?.head === head ? this.guardApproval.paths : null;
       const g = await this.step('checkGuarded', () =>
         this.acts.checkGuarded({
           schemaVersion: 1,
           taskId: this.input.taskId,
           repo: this.input.repo,
           prNumber,
+          ...(approved === null ? {} : { approved }),
         }),
       );
       if (g.standards.length > 0) {
@@ -699,6 +706,7 @@ class TaskFlow {
           '改到了标准路径，要创始人同意才挂自动合并（人闸：改标准）',
           `改到：${g.standards.join('、')}。创始人同意后点「继续」；不同意点「放弃」。`,
         );
+        this.approve(head, g, approved);
         continue;
       }
       if (g.highRisk.length > 0) {
@@ -706,10 +714,22 @@ class TaskFlow {
           '碰了先审后合的路径，合并闸要通过第二意见',
           `改到：${g.highRisk.join('、')}。第二意见通过（second-opinion 状态）后点「继续」。`,
         );
+        this.approve(head, g, approved);
         continue;
       }
       return;
     }
+  }
+
+  /** 人点了「继续」（放弃会在 park 里抛出，走不到这儿）：把刚才停下来的那几条记成这个头上已批的，和之前批过的合在一起。 */
+  private approve(head: string, pending: GuardedPaths, before: GuardedPaths | null): void {
+    this.guardApproval = {
+      head,
+      paths: {
+        standards: [...(before?.standards ?? []), ...pending.standards],
+        highRisk: [...(before?.highRisk ?? []), ...pending.highRisk],
+      },
+    };
   }
 
   /**
