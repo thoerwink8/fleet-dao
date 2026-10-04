@@ -116,7 +116,7 @@ export async function syncMainline(
     const facts = await deps.facts.get(repo, 'agent', input.signal);
     const defaultBranch = facts.defaultBranch;
     const url = deps.gitUrl(repo);
-    const token = (await deps.client.installationToken('agent', repo, input.signal)).token;
+    const token = (await deps.client.installationToken('agent', repo, input.signal, 'git')).token;
     const net: GitCall = {
       cwd: mirror,
       env: gitEnv({ base: deps.baseEnv, config: authHeaderConfig(deps.gitHost, token) }),

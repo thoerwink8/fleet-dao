@@ -131,7 +131,16 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/1-new')).toBe(wt.head);
 
     // 用的是「干活的」机器人的令牌
-    expect(fake.calls('POST', /access_tokens$/).map((r) => r.as)).toEqual(['app:agent']);
+    const mints = fake.calls('POST', /access_tokens$/);
+    expect(mints.map((r) => r.as)).toEqual(['app:agent', 'app:agent']);
+    // 读仓信息的 api 令牌 + 交给 git 的令牌：后者只有 contents 写，没有 administration 也没有别的（#11）
+    expect(mints.map((r) => r.body)).toEqual([
+      {
+        repositories: ['widgets'],
+        permissions: { contents: 'read', pull_requests: 'write', metadata: 'read' },
+      },
+      { repositories: ['widgets'], permissions: { contents: 'write', metadata: 'read' } },
+    ]);
     const pushCall = calls.find((c) => c.args[0] === 'push');
     expect(pushCall).toBeDefined();
     for (const c of calls) {

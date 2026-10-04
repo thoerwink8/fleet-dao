@@ -77,11 +77,20 @@ function syncSetup(runner?: GitRunner) {
 
 describe('并主线', { timeout: 60_000 }, () => {
   it('干净并：生成的合并提交两个父提交对，远端读回也对', async () => {
-    const { gh } = syncSetup();
+    const { gh, fake } = syncSetup();
     const branch = makeBranch('task/1-clean', 'b.txt', 'feature\n');
     const mainline = advanceMain('a.txt', 'main moves\n');
     const res = await gh.syncMainline({ repo, prNumber: 1, branch: 'task/1-clean', head: branch.head });
     if (res.state !== 'clean') throw new Error(`期望 clean，实际 ${res.state}`);
+    // 交给 git 的令牌（最后一枚）只有 contents 写：没有 administration，也没有别的（#11）
+    const mints = fake.calls('POST', /access_tokens$/);
+    expect(mints.at(-1)?.body).toEqual({
+      repositories: ['widgets'],
+      permissions: { contents: 'write', metadata: 'read' },
+    });
+    for (const m of mints) {
+      expect(JSON.stringify(m.body)).not.toContain('administration');
+    }
     expect(res).toMatchObject({ merged: true, previousHead: branch.head, mainline });
     expect(res.head).not.toBe(branch.head);
     expect(remoteHead('task/1-clean')).toBe(res.head);

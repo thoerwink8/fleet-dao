@@ -42,6 +42,8 @@ export interface Recorded {
   body: unknown;
   /** 谁发的：agent / engine（安装令牌）、app:agent / app:engine（JWT）、anonymous。 */
   as: string;
+  /** 安装令牌发请求时，这枚令牌被授予的权限（JWT、匿名没有）。 */
+  grants?: Record<string, string> | undefined;
   headers: Headers;
 }
 
@@ -169,7 +171,10 @@ export class FakeGitHub {
   authorOverride: GhUser | null = null;
   private nextNumber = 1;
   private nextId = 1000;
-  private readonly tokens = new Map<string, { role: AppRole; expiresAt: number }>();
+  private readonly tokens = new Map<
+    string,
+    { role: AppRole; expiresAt: number; granted: Record<string, string> }
+  >();
   private readonly now: () => Date;
 
   constructor(now: () => Date = () => new Date()) {
@@ -272,6 +277,8 @@ export class FakeGitHub {
       query: url.searchParams,
       body: text ? JSON.parse(text) : undefined,
       as: this.identify(headers.get('authorization')),
+      grants: this.tokens.get((headers.get('authorization') ?? '').replace(/^(Bearer|token)\s+/i, ''))
+        ?.granted,
       headers,
     };
     this.requests.push(req);
@@ -430,20 +437,36 @@ export class FakeGitHub {
     if (x && m === 'GET') {
       if (!isApp) return this.json(401, { message: 'A JSON web token could not be decoded' });
       if (x[1] !== OWNER || x[2] !== REPO || !this.installed[role]) return this.notFound();
-      return this.json(200, { id: role === 'agent' ? 11 : 22 });
+      return this.json(200, { id: role === 'agent' ? 11 : 22, permissions: this.permissions[role] });
     }
     x = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(path);
     if (x && m === 'POST') {
       if (!isApp) return this.json(401, { message: 'A JSON web token could not be decoded' });
       if (Number(x[1]) !== (role === 'agent' ? 11 : 22)) return this.notFound();
+      // 和真 GitHub 一样：请求体里写了 permissions 就只给这几项（多要装上没有的回 422）；没写才给装上的全部
+      const body = req.body as { permissions?: Record<string, string> } | undefined;
+      const have = this.permissions[role];
+      let granted: Record<string, string> = have;
+      if (body?.permissions) {
+        const rank: Record<string, number> = { read: 1, write: 2, admin: 3 };
+        const over = Object.entries(body.permissions).filter(
+          ([k, lvl]) => (rank[have[k] ?? ''] ?? 0) < (rank[lvl] ?? 99),
+        );
+        if (over.length > 0) {
+          return this.json(422, {
+            message: 'The permissions requested are not granted to this installation.',
+          });
+        }
+        granted = body.permissions;
+      }
       this.tokensMinted += 1;
       const token = `ghs_test${role}${this.tokensMinted}xxxxxxxxxxxxxxxx`;
       const expiresAt = this.now().getTime() + 60 * 60_000;
-      this.tokens.set(token, { role, expiresAt });
+      this.tokens.set(token, { role, expiresAt, granted });
       return this.json(201, {
         token,
         expires_at: new Date(expiresAt).toISOString(),
-        permissions: this.permissions[role],
+        permissions: granted,
       });
     }
     x = /^\/app\/installations\/(\d+)$/.exec(path);
@@ -849,6 +872,14 @@ export class FakeGitHub {
 
     // —— 互动限制 ——
     if (rest === '/interaction-limits') {
+      // 和真 GitHub 一样：要 Administration（读接口至少读、写接口要写），令牌没有就 403
+      const admin = req.grants?.administration;
+      if (m === 'GET' && admin !== 'read' && admin !== 'write') {
+        return this.json(403, { message: 'Resource not accessible by integration' });
+      }
+      if (m === 'PUT' && admin !== 'write') {
+        return this.json(403, { message: 'Resource not accessible by integration' });
+      }
       if (m === 'GET') return this.json(200, this.interaction ?? {});
       if (m === 'PUT') {
         const b = req.body as { limit: string; expiry?: string };
