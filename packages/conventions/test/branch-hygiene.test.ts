@@ -181,6 +181,7 @@ describe('分支体检：认分支名', () => {
     expect(issueNumberIn('tmp-ci-docs2')).toBeUndefined();
     expect(issueNumberIn('notes/requirements-2026-09-30')).toBeUndefined();
     expect(issueNumberIn('docs/progress-2026-10-02-1040')).toBeUndefined();
+    expect(issueNumberIn('feature/2026-10-04-123')).toBeUndefined();
     expect(issueNumberIn('worktree-agent-a22d28a53b8ee8bab')).toBeUndefined();
   });
 });

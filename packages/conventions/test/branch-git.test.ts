@@ -9,11 +9,64 @@ import {
   BranchGitError,
   contentFacts,
   type GitExec,
+  gitFacts,
   type MainIndex,
   mainIndex,
   parseRaw,
 } from '../src/branch-git.ts';
 import { runChild } from './child.ts';
+
+describe('分支体检：本地缺提交时先 git fetch origin 一次（gitFacts）', () => {
+  const MAIN = 'b'.repeat(40);
+  const OTHER = 'c'.repeat(40);
+  /** 假 git：have 里的提交本地有；fetch 成了就把 arrives 里的也算上。 */
+  function fakeGit(opts: { have: string[]; arrives?: string[]; fetch?: 'ok' | 'fail' }) {
+    const have = new Set(opts.have);
+    const calls: string[] = [];
+    const git: GitExec = (args) => {
+      calls.push(args[0] ?? '');
+      if (args[0] === 'cat-file')
+        return { status: have.has((args[2] ?? '').slice(0, 40)) ? 0 : 1, stdout: '', stderr: '' };
+      if (args[0] === 'fetch') {
+        if (opts.fetch === 'fail') return { status: 128, stdout: '', stderr: 'fatal: unable to access' };
+        for (const s of opts.arrives ?? []) have.add(s);
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'ls-tree')
+        return { status: 0, stdout: `100644 blob ${'d'.repeat(40)}\tx.txt\0`, stderr: '' };
+      if (args[0] === 'log') return { status: 0, stdout: '', stderr: '' };
+      throw new Error(`没料到 ${args.join(' ')}`);
+    };
+    return { git, calls };
+  }
+
+  it('本地有：不 fetch', () => {
+    const { git, calls } = fakeGit({ have: [MAIN] });
+    expect(gitFacts(git).index(MAIN).sha).toBe(MAIN);
+    expect(calls).not.toContain('fetch');
+  });
+
+  it('本地没有：fetch 一次，拿到了就接着判', () => {
+    const { git, calls } = fakeGit({ have: [], arrives: [MAIN] });
+    expect(gitFacts(git).index(MAIN).current.get('x.txt')).toBe('d'.repeat(40));
+    expect(calls.filter((c) => c === 'fetch')).toHaveLength(1);
+  });
+
+  it('fetch 没成：抛「git fetch origin 也没成」，一整轮只 fetch 一次', () => {
+    const { git, calls } = fakeGit({ have: [], fetch: 'fail' });
+    const facts = gitFacts(git);
+    expect(() => facts.index(MAIN)).toThrow(
+      /本地没有提交 bbbbbbbbb，git fetch origin 也没成（fatal: unable to access）/,
+    );
+    expect(() => facts.index(OTHER)).toThrow(BranchGitError);
+    expect(calls.filter((c) => c === 'fetch')).toHaveLength(1);
+  });
+
+  it('fetch 成了还是没有（分支刚被强推过）：抛，说清楚', () => {
+    const { git } = fakeGit({ have: [], arrives: [] });
+    expect(() => gitFacts(git).index(MAIN)).toThrow(/git fetch origin 之后也没有/);
+  });
+});
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 

@@ -1,6 +1,6 @@
 // 分支体检（#769）要的「内容」那几样从本地 git 读：分支比主线多出来的改动、这些改动主线历史上有没有过、最后一次提交、提交作者。
-// Actions 里检出全部历史（fetch-depth: 0）；本机先 git fetch origin。只认 GitHub 读回来的 40 位提交号，不认本地的分支名
-// （本地的 origin/<分支> 可能是旧的）。
+// Actions 里检出全部历史（fetch-depth: 0）。只认 GitHub 读回来的 40 位提交号，不认本地的分支名（本地的 origin/<分支> 可能是
+// 旧的）；本地缺这个提交（本机没 fetch、Actions 检出之后主线又合了新的）由 gitFacts 先 git fetch origin 一次再判。
 // 改这里之前必须知道：
 // - 「没产出」是机器不经人自己删分支的依据：只有确定分支上没有主线历史以外的东西才回 none。git 跑不成、读回来认不出一律抛
 //   BranchGitError（调用方记「没查成」、不删），不拿空冒充「没改动」。故意造出的失败在 test/branch-git.test.ts。
@@ -56,15 +56,63 @@ function run(git: GitExec, args: readonly string[], what: string, input?: string
   return r.stdout;
 }
 
-function needCommit(git: GitExec, sha: string): void {
+/** 本地有没有这个提交；git 跑不起来照抛。 */
+function hasCommit(git: GitExec, sha: string): boolean {
   if (!SHA.test(sha)) throw new BranchGitError(`提交号认不出：${sha}`);
   const r = git(['cat-file', '-e', `${sha}^{commit}`]);
   if (r.error) throw new BranchGitError(`查提交 ${sha.slice(0, 9)}：git 跑不起来（${r.error.message}）`);
-  if (r.status !== 0) {
+  return r.status === 0;
+}
+
+function needCommit(git: GitExec, sha: string): void {
+  if (!hasCommit(git, sha)) {
     throw new BranchGitError(
       `本地没有提交 ${sha.slice(0, 9)}：先 git fetch origin（Actions 里要检出全部历史）`,
     );
   }
+}
+
+/** 内容那几样的读法（分支体检整轮用一份）。 */
+export interface FactsReader {
+  index(mainSha: string): MainIndex;
+  content(index: MainIndex, headSha: string): ContentFacts;
+}
+
+/**
+ * 默认的读法：要用的提交本地没有，就 git fetch origin（全部分支）一次再看；fetch 没成、fetch 完还没有（分支刚被强推、
+ * 旧头没了）都抛，说清是哪样。一整轮最多 fetch 一次：GitHub 那边已经先读完了，fetch 拿到的只会更新。
+ */
+export function gitFacts(git: GitExec): FactsReader {
+  let fetched: { ok: true } | { ok: false; why: string } | undefined;
+  const ensure = (sha: string) => {
+    if (hasCommit(git, sha)) return;
+    if (fetched === undefined) {
+      const r = git(['fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
+      fetched = r.error
+        ? { ok: false, why: `git 跑不起来（${r.error.message}）` }
+        : r.status !== 0
+          ? { ok: false, why: r.stderr.trim().split('\n')[0] || `退出码 ${r.status ?? '（被信号杀掉）'}` }
+          : { ok: true };
+    }
+    if (!fetched.ok) {
+      throw new BranchGitError(`本地没有提交 ${sha.slice(0, 9)}，git fetch origin 也没成（${fetched.why}）`);
+    }
+    if (!hasCommit(git, sha)) {
+      throw new BranchGitError(
+        `本地没有提交 ${sha.slice(0, 9)}，git fetch origin 之后也没有（分支可能刚被强推过，下一轮再判）`,
+      );
+    }
+  };
+  return {
+    index(mainSha) {
+      ensure(mainSha);
+      return mainIndex(git, mainSha);
+    },
+    content(index, headSha) {
+      ensure(headSha);
+      return contentFacts(git, index, headSha);
+    },
+  };
 }
 
 /** 一条 --raw -z 的改动：状态（A、D、M、T…）、改完的对象号（删掉的是全 0）、路径。 */

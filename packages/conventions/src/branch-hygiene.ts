@@ -11,7 +11,7 @@
 //   这一条判「没查成」、不删，别的照判。不拿空冒充「没有」。每条路径在 test/branch-hygiene.test.ts 里有故意造出的失败。
 // - 巡检单正文是人和机器的共用状态（勾选框）：只有带记号的那几行算数，正文每轮按这一轮的判决重写，人勾过的照抄过去。
 //   只认仓里的人或 Actions 开的那张（trustedBoard）：公开仓谁都能开一张带记号、勾好删的单。
-import { type ContentFacts, contentFacts, type GitExec, type MainIndex, mainIndex } from './branch-git.ts';
+import { type ContentFacts, type FactsReader, type GitExec, gitFacts, type MainIndex } from './branch-git.ts';
 import { FLOW_BRANCH_PATTERN } from './flow-branch.ts';
 import type {
   BranchActivity,
@@ -83,9 +83,9 @@ export type LinkedIssue =
   | { number: number; missing: true }
   | { number: number; error: string };
 
-/** 分支名里像单号的第一个数（前后是 / 或 -，日期不算）；没有回 undefined。 */
+/** 分支名里像单号的第一个数（前后是 / 或 -；日期和紧跟着日期的那串数字——时刻、序号——不算）；没有回 undefined。 */
 export function issueNumberIn(branch: string): number | undefined {
-  const m = /(?:^|[/-])(\d{1,6})(?=-|$)/.exec(branch.replace(/\d{4}-\d{2}-\d{2}(?:-\d{4})?/g, ''));
+  const m = /(?:^|[/-])(\d{1,6})(?=-|$)/.exec(branch.replace(/\d{4}-\d{2}-\d{2}(?:-\d+)*/g, ''));
   return m?.[1] ? Number(m[1]) : undefined;
 }
 
@@ -410,11 +410,8 @@ export interface HygieneDeps {
   /** owner/名字。 */
   repo: string;
   now: Date;
-  /** 内容那几样怎么读（默认 branch-git.ts 的，用上面的 git；测试换成假的）。 */
-  facts?: {
-    index(mainSha: string): MainIndex;
-    content(index: MainIndex, headSha: string): ContentFacts;
-  };
+  /** 内容那几样怎么读（默认 branch-git.ts 的 gitFacts：缺提交先 fetch 一次，用上面的 git；测试换成假的）。 */
+  facts?: FactsReader;
 }
 
 export interface HygieneOptions {
@@ -451,10 +448,7 @@ export function trustedBoard(t: Pick<OpenThread, 'author' | 'association'>): boo
 
 export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Promise<HygieneResult> {
   const { gh, git, now } = deps;
-  const facts = deps.facts ?? {
-    index: (sha: string) => mainIndex(git, sha),
-    content: (idx: MainIndex, sha: string) => contentFacts(git, idx, sha),
-  };
+  const facts = deps.facts ?? gitFacts(git);
   const result: HygieneResult = {
     reports: [],
     deleted: [],

@@ -1,5 +1,6 @@
 // 分支体检入口（见 ../branch-hygiene.ts）：node packages/conventions/src/bin/branch-hygiene.ts [--delete] [--board] [--report <文件>]
-// pnpm branch:hygiene：只判、只打（每条分支落哪档、为什么、谁开的），一条不删。先 git fetch origin：内容按本地 git 比。
+// pnpm branch:hygiene：只判、只打（每条分支落哪档、为什么、谁开的），一条不删。内容按本地 git 比：要用的提交本地没有，
+// 自己 git fetch origin 一次（../branch-git.ts 的 gitFacts）；fetch 不成照报「没查成」、退出 2，不当没产出。
 // --delete：真删判了「删」的；--board：写巡检单（正文和新列的留言）；--report：把整张表写进这个文件（Markdown）。
 // 在 Actions 里（.github/workflows/github-audit.yml 的 branches）带 --delete --board 跑，整张表另写进运行摘要。
 // 只给定时任务和人手跑用，别接进 PR 的必过检查（#87：必过检查必须确定）。
