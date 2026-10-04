@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { classifyPushFailure, execGit, type GitRunner } from '../src/git.ts';
 import type { GitHubOptions } from '../src/github.ts';
-import { validBranchName } from '../src/push.ts';
+import { fromPushFailure, validBranchName } from '../src/push.ts';
 import { setup, tempDir } from './helpers.ts';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
@@ -498,7 +498,23 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
         branch: 'task/10-wf',
         head: wt.head,
       }),
-    ).rejects.toMatchObject({ code: 'WORKFLOW_PERMISSION', retryable: false });
+    ).rejects.toMatchObject({
+      code: 'WORKFLOW_PERMISSION',
+      retryable: false,
+      // 明确缺哪一项权限、为什么没给、谁来处理（#16）；不静默跳过，远端没有这个分支
+      message: expect.stringMatching(/workflows:write.*有意没给.*要人处理/s),
+      details: { role: 'agent', missingPermission: 'workflows:write' },
+    });
+    expect(remoteHead('task/10-wf')).toBeNull();
+  });
+
+  it('没有 workflows 权限不是随便什么推送失败都报：别的被拒不带 workflows:write 这句', () => {
+    const msg = (kind: Parameters<typeof fromPushFailure>[0]) =>
+      fromPushFailure(kind, 'acme/widgets', 'task/x', { code: 1, stdout: '', stderr: 'boom' }).message;
+    expect(msg('workflow_permission')).toContain('workflows:write');
+    for (const kind of ['rule_rejected', 'auth', 'unknown'] as const) {
+      expect(msg(kind)).not.toContain('workflows');
+    }
   });
 
   // 坏包拿去重试只会再坏一次：一律不可重试，原因要分对（不能归成网络错）

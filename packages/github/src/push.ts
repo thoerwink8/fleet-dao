@@ -537,8 +537,16 @@ export function fromPushFailure(
     case 'workflow_permission':
       return new GitHubError(
         'WORKFLOW_PERMISSION',
-        `推 ${slug} ${branch} 被拒：改动碰了 .github/workflows/，而「干活的」机器人没有 workflows 权限——换多少次都一样，要人处理（${why}）`,
-        { details: { exitCode: res.code } },
+        `推 ${slug} ${branch} 被拒：改动碰了 .github/workflows/，而「干活的」机器人（agent App）缺 Workflows 写权限（workflows:write）——` +
+          `这项权限有意没给（给了它就能改 CI，是放大授权），换多少次都一样，要人处理：由人把这份 workflow 改动推上去，` +
+          `或创始人决定给 agent App 加 Workflows 读写权限（${why}）`,
+        {
+          details: {
+            exitCode: res.code,
+            role: 'agent',
+            missingPermission: 'workflows:write',
+          },
+        },
       );
     case 'rule_rejected':
       return new GitHubError('PUSH_REJECTED', `推 ${slug} ${branch} 被规则集拒了：${why}`, {

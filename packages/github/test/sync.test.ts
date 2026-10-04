@@ -191,7 +191,12 @@ describe('并主线', { timeout: 60_000 }, () => {
     advanceMain('k.txt', 'advance\n');
     await expect(
       gh.syncMainline({ repo, prNumber: 7, branch: 'task/7-wf', head: branch.head }),
-    ).rejects.toMatchObject({ code: 'WORKFLOW_PERMISSION', retryable: false });
+    ).rejects.toMatchObject({
+      code: 'WORKFLOW_PERMISSION',
+      retryable: false,
+      message: expect.stringContaining('workflows:write'),
+      details: { role: 'agent', missingPermission: 'workflows:write' },
+    });
     expect(remoteHead('task/7-wf')).toBe(branch.head);
   });
 
