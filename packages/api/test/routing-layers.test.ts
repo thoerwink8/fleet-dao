@@ -211,12 +211,10 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     expect(full).toMatchObject({ inFlight: running, reserved: 2, maxConcurrency: running + 2 });
     expect(poolFull(full as NonNullable<typeof full>)).toBe(true);
     // 预占过了期：不算
-    await t.db
-      .update(poolReservations)
-      .set({
-        reservedAt: new Date(T0.getTime() - 40 * 60_000),
-        expiresAt: new Date(T0.getTime() - 20 * 60_000),
-      });
+    await t.db.update(poolReservations).set({
+      reservedAt: new Date(T0.getTime() - 40 * 60_000),
+      expiresAt: new Date(T0.getTime() - 20 * 60_000),
+    });
     const lapsed = await route();
     expect(lapsed).toMatchObject({ inFlight: running, reserved: 0 });
     expect(poolFull(lapsed as NonNullable<typeof lapsed>)).toBe(false);
