@@ -319,11 +319,20 @@ describe('先后：往里加一张（addToOrder）', () => {
       order: [5, 3, 9],
       changed: true,
     });
-    if (r.ok) expect(parseOrder(r.description)).toEqual({ ok: true, order: [5, 3, 9], before: '目标：做完。', after: '尾巴' });
+    if (r.ok)
+      expect(parseOrder(r.description)).toEqual({
+        ok: true,
+        order: [5, 3, 9],
+        before: '目标：做完。',
+        after: '尾巴',
+      });
   });
 
   it('插在某张后面：后面的序号顺延；插在最后一张后面就是末尾', () => {
-    expect(addToOrder(desc, 9, 5)).toMatchObject({ ok: true, description: `目标：做完。\n\n${order(5, 9, 3)}\n\n尾巴` });
+    expect(addToOrder(desc, 9, 5)).toMatchObject({
+      ok: true,
+      description: `目标：做完。\n\n${order(5, 9, 3)}\n\n尾巴`,
+    });
     expect(addToOrder(desc, 9, 3)).toMatchObject({ ok: true, order: [5, 3, 9] });
   });
 
@@ -353,10 +362,25 @@ describe('先后：往里加一张（addToOrder）', () => {
   it.each([
     ['标记缺了', '目标：只写了目标', 9, undefined, '说明里没有先后标记'],
     ['标记不成对', '<!-- fleet:order -->\n1. #5', 9, undefined, '先后标记要恰好一对'],
-    ['有一行认不出', '<!-- fleet:order -->\n1. #5 定稿\n<!-- /fleet:order -->', 9, undefined, '先后第 1 行「1. #5 定稿」认不出'],
+    [
+      '有一行认不出',
+      '<!-- fleet:order -->\n1. #5 定稿\n<!-- /fleet:order -->',
+      9,
+      undefined,
+      '先后第 1 行「1. #5 定稿」认不出',
+    ],
     ['插在谁后面，它不在先后里', desc, 9, 7, '#7 不在先后里（现在排的是 #5、#3），插不到它后面'],
-    ['先后空着，插在谁后面都找不到', '<!-- fleet:order -->\n<!-- /fleet:order -->', 9, 7, '#7 不在先后里（现在一张也没排）'],
+    [
+      '先后空着，插在谁后面都找不到',
+      '<!-- fleet:order -->\n<!-- /fleet:order -->',
+      9,
+      7,
+      '#7 不在先后里（现在一张也没排）',
+    ],
   ])('【故意造出的失败】%s：不猜着改，说清为什么', (_name, description, n, after, message) => {
-    expect(addToOrder(description, n, after)).toEqual({ ok: false, problem: expect.stringContaining(message) });
+    expect(addToOrder(description, n, after)).toEqual({
+      ok: false,
+      problem: expect.stringContaining(message),
+    });
   });
 });

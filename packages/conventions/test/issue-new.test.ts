@@ -616,7 +616,9 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
     const api = milestoneApi();
     const parentRoute = (args: string[]): GhResult | undefined => {
       if (args[1] === 'repos/{owner}/{repo}/issues/192') {
-        return ok(JSON.stringify({ number: 192, state: 'open', labels: [{ name: '需求' }, { name: '母单' }] }));
+        return ok(
+          JSON.stringify({ number: 192, state: 'open', labels: [{ name: '需求' }, { name: '母单' }] }),
+        );
       }
       if (args[1] === 'repos/{owner}/{repo}/issues/36') return ok(JSON.stringify({ number: 36, id: 9036 }));
       if (args[1] === '-X' && args[2] === 'POST') return ok('{}');
@@ -656,7 +658,9 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
     const api = milestoneApi([{ number: 8, title: V1_TITLE, description: '目标：只写了目标，忘了先后' }]);
     const { calls, run } = setup({ route: api.route });
     await expect(run(...v1)).rejects.toThrow(
-      unordered('说明里没有先后标记（<!-- fleet:order --> 和 <!-- /fleet:order --> 两行，之间一行一张写「1. #单号」）'),
+      unordered(
+        '说明里没有先后标记（<!-- fleet:order --> 和 <!-- /fleet:order --> 两行，之间一行一张写「1. #单号」）',
+      ),
     );
     expect(calls.map((c) => c.slice(0, 2))).toEqual([
       ['api', LIST],
@@ -678,7 +682,9 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
   it('【故意造出的失败】里程碑说明读不到：单照开，明说没排进，不改说明', async () => {
     const api = milestoneApi(undefined, { read: fail('HTTP 502: Bad Gateway') });
     const { calls, run } = setup({ route: api.route });
-    await expect(run(...v1)).rejects.toThrow(unordered('gh 读里程碑说明失败（退出码 1）：HTTP 502: Bad Gateway'));
+    await expect(run(...v1)).rejects.toThrow(
+      unordered('gh 读里程碑说明失败（退出码 1）：HTTP 502: Bad Gateway'),
+    );
     expect(created(calls)).toBe(true);
     expect(patched(calls)).toBe(false);
   });
@@ -748,7 +754,9 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
   });
 
   it('【故意造出的失败】版本里程碑读回来缺编号：开单前就拦下（开了也排不进去）', async () => {
-    const { calls, run } = setup({ milestones: ok(JSON.stringify([{ title: V1_TITLE, description: V1_DESC }])) });
+    const { calls, run } = setup({
+      milestones: ok(JSON.stringify([{ title: V1_TITLE, description: V1_DESC }])),
+    });
     await expect(run(...v1)).rejects.toThrow('gh 读回来的里程碑「v1 Fusion 接活」认不出（');
     expect(calls).toEqual([['api', LIST]]);
   });

@@ -271,7 +271,8 @@ function parse(argv: readonly string[]): Options {
     const raw = values[flag];
     if (raw === undefined) return undefined;
     const m = /^#?([1-9]\d*)$/.exec(str(raw) ?? '');
-    if (!m?.[1]) throw new Error(`--${flag} 写${what}的号（比如 --${flag} ${example}），「${raw}」认不出。${USAGE}`);
+    if (!m?.[1])
+      throw new Error(`--${flag} 写${what}的号（比如 --${flag} ${example}），「${raw}」认不出。${USAGE}`);
     return Number(m[1]);
   };
   const kind = str(values.kind);
@@ -423,7 +424,9 @@ function versionOf(picked: Picked): MilestoneDetail {
   try {
     return toMilestoneDetail(picked.raw);
   } catch (e) {
-    throw new Error(`gh 读回来的里程碑「${picked.title}」认不出（${message(e)}），单没开：排先后要用它的编号和说明。`);
+    throw new Error(
+      `gh 读回来的里程碑「${picked.title}」认不出（${message(e)}），单没开：排先后要用它的编号和说明。`,
+    );
   }
 }
 
