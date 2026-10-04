@@ -7,6 +7,7 @@
 
 import {
   canaryDbFacts,
+  canaryPullRequestNumber,
   concludeAbandonedCanaryRuns,
   type Db,
   finishCanaryRun,
@@ -179,7 +180,13 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
       },
       async board(taskId, prNumber) {
         const task = await store.getTask(taskId);
-        const pr = task && prNumber !== null ? await store.getPullRequest(task.repoId, prNumber) : null;
+        // 工作流已经不在跑、没拍到过 PR 编号（任务做得快）：从 PR 镜像里按单号找引擎给这张单开的那个 PR，不然这一步永远空着
+        const number =
+          prNumber ??
+          (task
+            ? await canaryPullRequestNumber(w.db, { repoId: task.repoId, issueNumber: task.issueNumber })
+            : null);
+        const pr = task && number !== null ? await store.getPullRequest(task.repoId, number) : null;
         return {
           taskState: task?.state ?? null,
           pr: pr

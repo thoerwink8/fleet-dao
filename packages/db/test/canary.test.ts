@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   canaryDbFacts,
+  canaryPullRequestNumber,
   canaryRunById,
   concludeAbandonedCanaryRuns,
   finishCanaryRun,
@@ -15,7 +16,7 @@ import {
 import { upsertAlert } from '../src/queries/engine.ts';
 import { startRun } from '../src/queries/runs.ts';
 import { finishScheduleRun, registerScheduledJobs, startScheduleRun } from '../src/queries/schedule.ts';
-import { CANARY_STAGE_NAMES, canaryRuns, repos, stepTimings } from '../src/schema/index.ts';
+import { CANARY_STAGE_NAMES, canaryRuns, pullRequests, repos, stepTimings } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, ago, expectViolation, MIN, NOW } from './helpers.ts';
 
@@ -345,6 +346,40 @@ describe('巡检每一回从库里读的事实', () => {
     expect(facts.runs).toEqual({ total: 3, ended: 2, manual: 2, verify: 1, withUsage: 1 });
     expect(facts.timings).toBe(1);
     expect(facts.openAlerts).toEqual([{ dedupeKey: 'task:acme/canary#1:park:1', title: '没有可用的路由' }]);
+  });
+});
+
+describe('canaryPullRequestNumber：任务做得快、工作流已经不在跑时，按单号从 PR 镜像找引擎给这张单开的 PR（#452）', () => {
+  const sha = 'a'.repeat(40);
+  const addPr = (repoId: string, number: number, headRef: string, issueRefs: number[]) =>
+    t.db.insert(pullRequests).values({
+      repoId,
+      number,
+      state: 'merged',
+      headRef,
+      headSha: sha,
+      updatedAt: NOW,
+      issueRefs,
+    });
+
+  it('分支是 fleet/<单号>-t… 且正文挂了这张单：找得到；多个取最新的', async () => {
+    const repo = await addRepo(t.db, 'canary');
+    await addPr(repo.id, 39, 'fleet/38-t01a10807', [38]);
+    await addPr(repo.id, 41, 'fleet/40-t01a10815', [40]);
+    await addPr(repo.id, 43, 'fleet/40-t0000beef', [40]);
+    expect(await canaryPullRequestNumber(t.db, { repoId: repo.id, issueNumber: 40 })).toBe(43);
+    expect(await canaryPullRequestNumber(t.db, { repoId: repo.id, issueNumber: 38 })).toBe(39);
+  });
+
+  it('【故意造出的失败】没有这张单的 PR、分支不是引擎的（人手开的）、挂的是别的单、别的仓同号：一律 null，不拿别的冒充', async () => {
+    const repo = await addRepo(t.db, 'canary');
+    const other = await addRepo(t.db, 'other');
+    await addPr(repo.id, 50, 'feature/by-hand', [40]);
+    await addPr(repo.id, 51, 'fleet/41-t00000001', [40]);
+    await addPr(repo.id, 52, 'fleet/40-t00000002', [41]);
+    await addPr(other.id, 53, 'fleet/40-t00000003', [40]);
+    expect(await canaryPullRequestNumber(t.db, { repoId: repo.id, issueNumber: 40 })).toBeNull();
+    expect(await canaryPullRequestNumber(t.db, { repoId: repo.id, issueNumber: 99 })).toBeNull();
   });
 });
 

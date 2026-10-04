@@ -5,7 +5,40 @@ import { taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import type { CanaryStage, CanaryVerdict, RecordedCanaryStage } from '../schema/enums.ts';
-import { canaryRuns, notifications, repos, runs, scheduleRuns, stepTimings, tasks } from '../schema/index.ts';
+import {
+  canaryRuns,
+  notifications,
+  pullRequests,
+  repos,
+  runs,
+  scheduleRuns,
+  stepTimings,
+  tasks,
+} from '../schema/index.ts';
+
+/**
+ * 引擎任务流程给这张单开的 PR 的编号（分支 fleet/<单号>-t<8 位>，PR 镜像里 issue_refs 带这张单）；没有是 null。
+ * 巡检的「驾驶舱显示」那一步用：任务做得快（两次看之间就开 PR、合并、收尾），任务工作流已经不在跑、看的时候没拍到 PR 编号，
+ * 光靠工作流的查询就永远拿不到 PR、这一步到期限才断（#452 演练实测）。多个取最新的。
+ */
+export async function canaryPullRequestNumber(
+  db: Db,
+  input: { repoId: string; issueNumber: number },
+): Promise<number | null> {
+  const [row] = await db
+    .select({ number: pullRequests.number })
+    .from(pullRequests)
+    .where(
+      and(
+        eq(pullRequests.repoId, input.repoId),
+        sql`${pullRequests.issueRefs} @> array[${input.issueNumber}]::int[]`,
+        sql`starts_with(${pullRequests.headRef}, ${`fleet/${input.issueNumber}-t`})`,
+      ),
+    )
+    .orderBy(desc(pullRequests.number))
+    .limit(1);
+  return row?.number ?? null;
+}
 
 /** 巡检一轮的一步：走到的时刻。老的几轮里可能是老步骤（RETIRED_CANARY_STAGES）。 */
 export interface CanaryStep {
