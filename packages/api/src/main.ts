@@ -31,6 +31,8 @@ import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
+import { createMemoryIntentStore } from './intent-store.ts';
+import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
@@ -110,6 +112,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       now,
       feishu,
       demo,
+      intents: createMemoryIntentStore({ now }),
       health: [],
       workflows: {
         async signal(workflowId, signal) {
@@ -168,6 +171,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     github: github.sink,
     draftOpener,
     gatewaySeen,
+    // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
+    intents: createPgIntentStore(db, { now }),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
     alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）

@@ -2,7 +2,7 @@
 // 对着后端调推送、盘面，通行证验过的才记下；读的时候现算：推送轮询 5 分钟没来报红，后端刚起、网关还没来过是「没查成」
 // （红，不当成好），没配通行证是「未接」。会随时间自己变红，发布脚本只标待处理（health.test.ts 核对名单）。
 import { createBackend } from '@fleet-dao/feishu';
-import { FeishuRoutes } from '@fleet-dao/shared';
+import { FeishuRoutes, IntentRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   createGatewaySeen,
@@ -142,7 +142,32 @@ describe('飞书网关还来不来', () => {
     const seen: GatewaySeen = createGatewaySeen(() => new Date(t));
     seen.saw(FeishuRoutes.message);
     seen.saw(FeishuRoutes.findTasks);
+    seen.saw(IntentRoutes.intakeMessage);
     t += 6 * MIN;
     await expect(seen.check()).rejects.toMatchObject({ code: 'silent' });
+  });
+
+  it('网关换成只长轮询意图卡（#553）：意图卡那条也算推送轮询，旧的待推送不来也不报红；两条都来认新的', async () => {
+    const s = setup();
+    s.at(5 * SEC);
+    const res = await s.h.cockpit.request('/api/feishu/intent-cards?waitSeconds=0', {
+      headers: { authorization: `Bearer ${GATEWAY_PASS}` },
+    });
+    expect(res.status).toBe(200);
+    s.at(4 * MIN);
+    expect(await s.report()).toEqual({
+      status: 200,
+      item: { ok: true, message: '推送轮询 3 分钟前来过，盘面快照也没来取过' },
+    });
+    s.at(9 * MIN);
+    expect(await s.report()).toMatchObject({ status: 503, item: { code: 'silent' } });
+
+    let t = T0.getTime();
+    const seen = createGatewaySeen(() => new Date(t));
+    seen.saw(FeishuRoutes.outbox);
+    t += 4 * MIN;
+    seen.saw(IntentRoutes.cards);
+    t += 2 * MIN;
+    await expect(seen.check()).resolves.toBe('推送轮询 2 分钟前来过，盘面快照也没来取过');
   });
 });

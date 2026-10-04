@@ -14,6 +14,7 @@ import { feishuRoutes } from './feishu-routes.ts';
 import { createGitHubIntake, githubRoutes } from './github.ts';
 import { healthHandler } from './health.ts';
 import { errorBody, errorHandler, notFound } from './http.ts';
+import { intentRoutes } from './intent-routes.ts';
 import { createSseRelay, type SseRelay } from './sse.ts';
 
 /** 驾驶舱和 fleet 命令的请求体都很小；GitHub 事件另有自己的上限。 */
@@ -55,8 +56,9 @@ export function buildApps(deps: Deps, options: BuildOptions = {}): Apps {
   cockpit.use(`${WEB_API_PREFIX}/*`, jsonLimit);
   cockpit.use(`${AUTH_PREFIX}/*`, jsonLimit);
   cockpit.route(AUTH_PREFIX, authRoutes(deps));
-  // 飞书接口挂在驾驶舱接口前面：它们只认网关通行证、按各自的 acting 放行，不走驾驶舱的登录门。
+  // 飞书接口（含意图的五条）挂在驾驶舱接口前面：它们只认网关通行证、按各自的 acting 放行，不走驾驶舱的登录门。
   cockpit.route(WEB_API_PREFIX, feishuRoutes(deps, draftOpening));
+  cockpit.route(WEB_API_PREFIX, intentRoutes(deps));
   cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, relay));
   cockpit.route('/github', githubRoutes(deps, createGitHubIntake(deps)));
 
