@@ -58,6 +58,12 @@ export function carpoolReconcileView(
     };
   }
   const { api, spend } = raw;
+  if (api.staleSince) {
+    return {
+      state: 'unavailable',
+      why: `接口从 ${api.staleSince.toISOString()} 起不再报这个窗口，留着的已用美元是旧数，没法对账`,
+    };
+  }
   if (api.used === null || api.limit === null || !(api.limit > 0)) {
     return { state: 'unavailable', why: '接口这次读数里没有已用美元或上限，没法对账' };
   }

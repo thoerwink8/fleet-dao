@@ -97,6 +97,7 @@ describe('carpoolReconcileView', () => {
     expect(why(view(api(null)))).toContain('没有已用美元或上限');
     expect(why(view(api(10, { limit: null })))).toContain('没有已用美元或上限');
     expect(why(view(api(10, { limit: 0 })))).toContain('没有已用美元或上限');
+    expect(why(view(api(50, { staleSince: new Date(NOW.getTime() - 60_000) })))).toContain('不再报这个窗口');
     expect(why(view(api(10, { resetsAt: null })))).toContain('没给清零时刻');
     expect(why(view(api(10, { resetsAt: new Date(NOW.getTime() - 1) })))).toContain('已经过了清零时刻');
   });
