@@ -1,5 +1,5 @@
 {
-  "_说明": "目录配置样例：族、渠道、账号池、模型、路由、各阶段的路由顺序。真配置放 /etc/fleet-dao/catalog.json（root:fleet 640，不进 git；加密副本在保险箱仓，从那里放上来，见 docs/ops.md 第九节「目录配置」）。发布脚本在迁移之后跑 packages/db/src/bin/catalog.ts 装进库：只补缺，驾驶舱里改过的不覆盖。目录里没有账号、邮箱、组织编号：账号池 id 是代号，账号和凭据在各自的机器配置里。账号池 id 要和额度读取器配置（quota.example.json）的 poolId 一致。以 _ 开头的键是注释。",
+  "_说明": "目录配置样例：族、渠道、账号池、模型、路由。各用途（阶段）用什么先后不在这里——那是路由两层（用途 → 模型、模型 → 路由），骨架在 packages/db/routing.default.json，发布时装进库（#574）；这份配置里原来那段 stages 已经删掉了（#754）。真配置放 /etc/fleet-dao/catalog.json（root:fleet 640，不进 git；加密副本在保险箱仓，从那里放上来，见 docs/ops.md 第九节「目录配置」）。发布脚本在迁移之后跑 packages/db/src/bin/catalog.ts 装进库：只补缺，驾驶舱里改过的不覆盖。目录里没有账号、邮箱、组织编号：账号池 id 是代号，账号和凭据在各自的机器配置里。账号池 id 要和额度读取器配置（quota.example.json）的 poolId 一致。以 _ 开头的键是注释。",
   "families": [
     { "id": "claude", "displayName": "Claude", "vendor": "Anthropic" },
     { "id": "gpt", "displayName": "GPT", "vendor": "OpenAI" },
@@ -155,53 +155,5 @@
       "hostId": "api-shell",
       "upstreamModel": "jev-1.13.0"
     }
-  ],
-  "stages": {
-    "_说明": "各阶段的平铺顺序（旧结构）：选路、路由探针、切号已改读路由两层（用途 → 模型、模型 → 路由，默认骨架 packages/db/routing.default.json，发布时只补缺装进库，#574），判断题后端、驾驶舱换模型对话框、指挥官的法国查询也都改读两层了，没人再按这里的顺序派路由：装载器照旧把它写进 stage_policy_routes，随 #556-4 删库表那一步一起删；下面是当初排它的理由，骨架照它抄。构建期除了判断阶段，都用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：两条都开着；会话用户同一时刻只挂一个组织，没挂着的那个池由引擎按 orgKind 挡掉，不靠这里的排序。其余路由挂在后面，默认关着，装好插头、登录之后再打开——唯一的例外是 mirasim-relay 的 deepseek-flash（#345，创始人 2026-09-27 拍只开这一条）：引擎侧已经打开，法国那边 Mirasim 服务装好、登录、探针探通之前实际派不出去（选路第 1 步会把不在线的路由挡掉）；同池的 opus-5.5、gpt-5.6-luna、kimi-k3 仍照旧关着，不受这条影响。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge：Claude 判断后端接上之前先用 TypeSafe 的 Jev（设计文档第十一节，2026-09-25 定）。判断题后端现在按路由两层里判断用途排第一、不是死的那条路由起（packages/jev 的 resolveJevBackend → backendForRoute，/healthz 的 judge 项同一个判法；骨架里判断用途只排 Jev 1.13），下面 judge 那段（两条 Claude 挂着、关着）是旧结构留下的、没人读；packages/jev 只接得了 TypeSafe。verify（开 PR 前的验证）单列：Cursor 上钉住的 GPT-5.6 Luna 排第一、开着（创始人 2026-09-27 拍，specs/212 方案「真流量」），后面照 default；派哪个模型先看流程配置里验证这一步的模型顺序（packages/core/flow.default.json），同一个模型的几条路由再照这里的先后，写这张单的族（Claude）整族避开，碰界面的单 GPT 由代码挡掉，轮到排第二、开着的 SuperGrok 的 Grok 4.7（创始人 2026-09-27 拍：界面改单用 Grok 4.7，specs/266）。execute、ui 单列：Grok 4.7 排第一、开着（创始人 2026-09-27 拍：副手也用 Grok 4.7；Fusion 的副手在写码阶段派、碰界面的在界面阶段派），后面照 default；Lead 按流程配置里它自己的模型顺序只派 Opus，不受 Grok 排第一影响。每个阶段只在第一次装的时候排，之后装载器不再动它；装进去之后怎么改见 docs/ops.md 第九节「目录配置」。要给某个阶段单排，就加一个以阶段名为键的列表。",
-    "default": [
-      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": true },
-      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false },
-      { "routeId": "grok:grok-4.7:grok", "enabled": false }
-    ],
-    "verify": [
-      { "routeId": "cursor:gpt-5.6-luna:cursor-agent", "enabled": true },
-      { "routeId": "grok:grok-4.7:grok", "enabled": true },
-      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": true },
-      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false }
-    ],
-    "execute": [
-      { "routeId": "grok:grok-4.7:grok", "enabled": true },
-      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": true },
-      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false }
-    ],
-    "ui": [
-      { "routeId": "grok:grok-4.7:grok", "enabled": true },
-      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
-      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": true },
-      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false }
-    ],
-    "judge": [
-      { "routeId": "jev:jev-1.13:api-shell", "enabled": true },
-      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": false },
-      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": false }
-    ]
-  }
+  ]
 }

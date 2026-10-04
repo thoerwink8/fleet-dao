@@ -4,13 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asks, auditLog, feishuDrafts, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import {
-  AskResponse,
-  BoardResponse,
-  TaskDetailResponse,
-  TimelineResponse,
-  UpdateStagePolicyResponse,
-} from '@fleet-dao/shared';
+import { AskResponse, BoardResponse, TaskDetailResponse, TimelineResponse } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
@@ -163,34 +157,6 @@ describe('接口跑在真库上', () => {
     expect(res.status).toBe(200);
     await readUntil(reader, `{"table":"asks","id":"${asked.askId}"}`, buf);
     await reader.cancel();
-  });
-
-  it('阶段策略：按内容比对防并发——改之前被别人改过就 409；改成了留操作记录', async () => {
-    const h = await start();
-    const session = await h.login();
-    const put = (expected: { routeIds: string[]; pinned: boolean }) =>
-      h.cockpit.request(
-        '/api/routing/stages/execute',
-        write('PUT', session, {
-          routeIds: ['rt-claude-opus'],
-          pinned: true,
-          expected,
-          reason: '先只用 Opus',
-        }),
-      );
-    const before = { routeIds: ['rt-claude-opus', 'rt-mirasim-kimi'], pinned: false };
-    const ok = await put(before);
-    expect(ok.status).toBe(200);
-    expect(UpdateStagePolicyResponse.parse(await ok.json()).stage).toEqual({
-      stage: 'execute',
-      routeIds: ['rt-claude-opus'],
-      pinned: true,
-    });
-    expect((await put(before)).status).toBe(409);
-    const audits = await t.db.select().from(auditLog).where(eq(auditLog.action, 'stage_policy.update'));
-    expect(audits.map((a) => ({ target: a.target, via: a.via, ok: a.ok }))).toEqual([
-      { target: 'stage:execute', via: 'cockpit', ok: true },
-    ]);
   });
 
   it('GitHub 事件进来（真库）：PR 事件原文落库、写镜像；同一投递再来不重复；issue 的事件记成不处理、不建任务', async () => {

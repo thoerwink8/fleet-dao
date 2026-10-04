@@ -584,13 +584,6 @@ export const RouteSchema = z.object({
   probe: RouteProbeSchema.optional(),
 });
 
-export const StagePolicySchema = z.object({
-  stage: StageKindSchema,
-  routeIds: z.array(Id),
-  /** 创始人手动钉住的顺序，AI 帅位不改。 */
-  pinned: z.boolean(),
-});
-
 export const BanSchema = z.object({
   family: z.string().optional(),
   modelId: Id.optional(),
@@ -635,24 +628,6 @@ export const RoutingResponse = z.object({
   /** 库里另外配的禁令，和 hardBans 一起生效。 */
   bans: z.array(BanSchema),
 });
-
-const RouteIdList = z
-  .array(Id)
-  .max(50)
-  .refine((ids) => new Set(ids).size === ids.length, { message: '同一条路由不能出现两次' });
-
-/**
- * 改一个阶段的路由顺序。expected 填你改之前看到的样子：别人（或 AI 帅位）先改了就返回 409，刷新后再改，
- * 不会悄悄盖掉别人的改动。
- */
-export const UpdateStagePolicyRequest = z.object({
-  routeIds: RouteIdList,
-  pinned: z.boolean(),
-  expected: z.object({ routeIds: z.array(Id), pinned: z.boolean() }),
-  /** 写进操作记录。 */
-  reason: z.string().max(500).optional(),
-});
-export const UpdateStagePolicyResponse = z.object({ stage: StagePolicySchema });
 
 /** 上架 / 下架一个渠道。 */
 export const UpdateChannelRequest = z.object({
@@ -1299,12 +1274,6 @@ export const WebRoutes = {
     path: '/routing/efforts/:modelId/:routeId',
     request: UpdateRouteEffortRequest,
     response: UpdateRouteEffortResponse,
-  },
-  updateStagePolicy: {
-    method: 'PUT',
-    path: '/routing/stages/:stage',
-    request: UpdateStagePolicyRequest,
-    response: UpdateStagePolicyResponse,
   },
   updateChannel: {
     method: 'PATCH',

@@ -1,37 +1,20 @@
-// 目录装载器：读本机的目录配置（默认 /etc/fleet-dao/catalog.json），把族、渠道、账号池、模型、路由、各阶段的路由顺序
+// 目录装载器：读本机的目录配置（默认 /etc/fleet-dao/catalog.json），把族、渠道、账号池、模型、路由
 // 幂等地写进库。只补缺：库里没有的行插进去，已有的行只填空着的字段；已经有值的、驾驶舱或帅位改过的一概不动，
-// 配置和库里不一样的列进 kept 给人看。阶段顺序每个阶段只排一次（stage_policies.catalog_applied_at），之后怎么改都不覆盖。
+// 配置和库里不一样的列进 kept 给人看。
+// 每个用途用什么先后不再写在这里：那是路由两层（routing-apply.ts 的骨架、routing_purpose_models / routing_catalog，#574）。
 // 配置文件缺失、格式错、引用不存在都明确报错，库里一行不写——不许当成空目录继续。
 import { readFile } from 'node:fs/promises';
-import { type BanSubject, hardBanFor, type RunAsUser, type StageKind } from '@fleet-dao/shared';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { type BanSubject, hardBanFor, type RunAsUser } from '@fleet-dao/shared';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
-import {
-  BILLING_KINDS,
-  HOST_IDS,
-  ORG_KINDS,
-  RETIRED_RUN_AS_USERS,
-  RUN_AS_USERS,
-  STAGE_KINDS,
-} from './schema/enums.ts';
-import {
-  auditLog,
-  channels,
-  families,
-  models,
-  pools,
-  routes,
-  stagePolicies,
-  stagePolicyRoutes,
-} from './schema/index.ts';
+import { BILLING_KINDS, HOST_IDS, ORG_KINDS, RETIRED_RUN_AS_USERS, RUN_AS_USERS } from './schema/enums.ts';
+import { auditLog, channels, families, models, pools, routes } from './schema/index.ts';
 
 export const CATALOG_DEFAULT_PATH = '/etc/fleet-dao/catalog.json';
 
 const Id = z.string().trim().min(1);
 const Text = z.string().trim().min(1);
-
-const StageEntry = z.strictObject({ routeId: Id, enabled: z.boolean() });
 
 /** 停用的会话用户（fleet-agent-dedicated）写进来要明确报错、说清改成什么：法国已经没有这个用户，装进去会话起不来。 */
 const RunAsUserField = z
@@ -90,10 +73,12 @@ export const CatalogSchema = z.strictObject({
       }),
     )
     .min(1),
-  /** default 给没单列的阶段用；单列的阶段整串替换 default。 */
-  stages: z
-    .partialRecord(z.enum(['default', ...STAGE_KINDS]), z.array(StageEntry).min(1))
-    .refine((s) => Object.keys(s).length > 0, '至少要有 default 或某个阶段的顺序'),
+  /**
+   * 旧的按阶段平铺路由顺序（stage_policies / stage_policy_routes）已经没人读（#754）：这份配置里不再有它。
+   * 留着这一项只为让 strictObject 放行到 parseCatalog 里，由那里认出来、报一句说清删哪一段（照 stages 单报一句，
+   * 不然只会得到一句「认不出的字段：stages」，看不出为什么、该改什么）。
+   */
+  stages: z.unknown().optional(),
 });
 
 export type CatalogConfig = z.infer<typeof CatalogSchema>;
@@ -133,7 +118,7 @@ function duplicates(ids: readonly string[]): string[] {
   return [...repeated];
 }
 
-/** 解析并校验目录配置的文本。格式错、同一类里 id 重复、同一阶段里路由重复，都抛 CatalogError。 */
+/** 解析并校验目录配置的文本。格式错、同一类里 id 重复，都抛 CatalogError。 */
 export function parseCatalog(text: string, source = '目录配置'): CatalogConfig {
   let raw: unknown;
   try {
@@ -141,7 +126,8 @@ export function parseCatalog(text: string, source = '目录配置'): CatalogConf
   } catch (e) {
     throw new CatalogError(`${source} 不是合法的 JSON`, [e instanceof Error ? e.message : String(e)]);
   }
-  const parsed = CatalogSchema.safeParse(stripComments(raw));
+  const stripped = stripComments(raw);
+  const parsed = CatalogSchema.safeParse(stripped);
   if (!parsed.success) {
     throw new CatalogError(
       `${source} 格式不对`,
@@ -149,6 +135,14 @@ export function parseCatalog(text: string, source = '目录配置'): CatalogConf
     );
   }
   const config = parsed.data;
+  // 旧的按阶段平铺顺序（#754）：装载器不再写它，配置里留着就当格式错挡下，说清该删哪一段（删了就好，没有别的改法）。
+  if (stripped !== null && typeof stripped === 'object' && 'stages' in stripped) {
+    throw new CatalogError(`${source} 里还有旧的 stages（各阶段的路由顺序）`, [
+      '装载器不再读它：每个用途用什么先后改由路由两层的骨架 packages/db/routing.default.json 装进库（#574），' +
+        '改顺序、开关在法国库里直接改（docs/ops.md 第九节「路由两层」）',
+      '把这份配置里的整个 stages 那一段删掉再发布',
+    ]);
+  }
   const problems: string[] = [];
   for (const [kind, list] of [
     ['families', config.families],
@@ -162,11 +156,6 @@ export function parseCatalog(text: string, source = '目录配置'): CatalogConf
   // 库里（池, 模型, 执行方式）唯一：换个 id 写同一条线，插的时候会被唯一约束挡掉。
   for (const line of duplicates(config.routes.map(routeLine))) {
     problems.push(`routes 里（账号池 / 模型 / 执行方式）${line} 出现了不止一次`);
-  }
-  for (const [stage, entries] of Object.entries(config.stages)) {
-    for (const id of duplicates((entries ?? []).map((e) => e.routeId))) {
-      problems.push(`stages.${stage} 里路由 ${id} 出现了不止一次`);
-    }
   }
   if (problems.length > 0) throw new CatalogError(`${source} 有重复`, problems);
   return config;
@@ -204,13 +193,9 @@ export interface CatalogLoadResult {
     pools: string[];
     models: string[];
     routes: string[];
-    /** 按配置排了初始顺序的阶段。 */
-    stages: StageKind[];
   };
   /** 已有的行上补了空位的字段，例如 routes.opus.upstreamModel。 */
   filled: string[];
-  /** 库里已有顺序（或钉住了）、装载器这次接手下来的阶段：没改顺序，只记下以后不再动它。 */
-  adoptedStages: StageKind[];
   /** 配置里写了、库里已有且不一样、没动的（驾驶舱或帅位改过，或早先装的）。 */
   kept: string[];
   /** 这次库里一行都没改。 */
@@ -296,12 +281,6 @@ export async function loadCatalog(
       if (!known('models', config.models, r.modelId))
         problems.push(`路由 ${r.id} 的模型 ${r.modelId} 不存在`);
     }
-    for (const [stage, entries] of Object.entries(config.stages)) {
-      for (const e of entries ?? []) {
-        if (!known('routes', config.routes, e.routeId))
-          problems.push(`stages.${stage} 的路由 ${e.routeId} 不存在`);
-      }
-    }
     if (problems.length > 0) throw new CatalogError('目录配置里引用了不存在的东西', problems);
 
     for (const r of config.routes) {
@@ -326,18 +305,6 @@ export async function loadCatalog(
       const ban = subject && hardBanFor(subject, undefined);
       if (ban) problems.push(`路由 ${r.id}：${ban.reason}`);
     }
-    for (const stage of STAGE_KINDS) {
-      const key = config.stages[stage] ? stage : 'default';
-      for (const e of config.stages[key] ?? []) {
-        const subject = routeSubject(e.routeId);
-        const ban = subject && hardBanFor(subject, stage);
-        if (ban && !problems.some((p) => p.startsWith(`路由 ${e.routeId}：`))) {
-          problems.push(
-            `stages.${key} 的路由 ${e.routeId} 不能用在 ${stage}${key === stage ? '' : '（没单列这个阶段，用的是 default）'}：${ban.reason}`,
-          );
-        }
-      }
-    }
     if (problems.length > 0) throw new CatalogError('目录配置撞了硬禁令', problems);
 
     const inserted: CatalogLoadResult['inserted'] = {
@@ -346,7 +313,6 @@ export async function loadCatalog(
       pools: [],
       models: [],
       routes: [],
-      stages: [],
     };
     const filled: string[] = [];
     const kept: string[] = [];
@@ -504,55 +470,7 @@ export async function loadCatalog(
       },
     );
 
-    const adoptedStages: StageKind[] = [];
-    for (const stage of STAGE_KINDS) {
-      const entries = config.stages[stage] ?? config.stages.default;
-      if (!entries) continue;
-      await tx.insert(stagePolicies).values({ stage }).onConflictDoNothing({ target: stagePolicies.stage });
-      const [policy] = await tx
-        .select()
-        .from(stagePolicies)
-        .where(eq(stagePolicies.stage, stage))
-        .for('update');
-      const current = await tx
-        .select()
-        .from(stagePolicyRoutes)
-        .where(eq(stagePolicyRoutes.stage, stage))
-        .orderBy(asc(stagePolicyRoutes.position));
-      const sameOrder =
-        current.length === entries.length &&
-        current.every((c, i) => c.routeId === entries[i]?.routeId && c.enabled === entries[i]?.enabled);
-      // 配置里有、这个阶段里没挂上的路由点名出来（例如排过之后配置里新加的）：装载器不再动这个阶段，要用得去驾驶舱加。
-      const missing = entries
-        .filter((e) => !current.some((c) => c.routeId === e.routeId))
-        .map((e) => e.routeId);
-      const why = (base: string) =>
-        missing.length > 0
-          ? `阶段 ${stage}：${base}，配置里的 ${missing.join('、')} 没挂上（要用就在驾驶舱里加）`
-          : `阶段 ${stage}：${base}，和配置不一样，没动`;
-      if (policy?.catalogAppliedAt) {
-        if (!sameOrder) kept.push(why('装载器早先排过，之后不再动它'));
-        continue;
-      }
-      if (policy?.pinned || current.length > 0) {
-        // 库里已经有人排过（或钉住了）：接手下来，这次和以后都不动它。
-        adoptedStages.push(stage);
-        if (!sameOrder) kept.push(why(`库里已有顺序${policy?.pinned ? '（钉住了）' : ''}`));
-      } else {
-        await tx
-          .insert(stagePolicyRoutes)
-          .values(
-            entries.map((e, position) => ({ stage, routeId: e.routeId, position, enabled: e.enabled })),
-          );
-        inserted.stages.push(stage);
-      }
-      await tx.update(stagePolicies).set({ catalogAppliedAt: now }).where(eq(stagePolicies.stage, stage));
-    }
-
-    const unchanged =
-      Object.values(inserted).every((ids) => ids.length === 0) &&
-      filled.length === 0 &&
-      adoptedStages.length === 0;
+    const unchanged = Object.values(inserted).every((ids) => ids.length === 0) && filled.length === 0;
     if (!unchanged) {
       await tx.insert(auditLog).values({
         at: now,
@@ -560,25 +478,24 @@ export async function loadCatalog(
         actorId: 'catalog-loader',
         action: 'catalog.load',
         target: 'catalog',
-        after: { inserted, filled, adoptedStages },
+        after: { inserted, filled },
         reason: `按 ${options.source ?? '目录配置'} 补缺`,
         via: 'engine',
       });
     }
-    return { inserted, filled, adoptedStages, kept, unchanged };
+    return { inserted, filled, kept, unchanged };
   });
 }
 
 /** 给命令行打印的摘要。 */
 export function formatCatalogResult(r: CatalogLoadResult): string {
   const lines: string[] = [];
-  const kinds = ['families', 'channels', 'pools', 'models', 'routes', 'stages'] as const;
+  const kinds = ['families', 'channels', 'pools', 'models', 'routes'] as const;
   for (const kind of kinds) {
     const ids = r.inserted[kind];
     if (ids.length > 0) lines.push(`新写入 ${kind}（${ids.length}）：${ids.join('、')}`);
   }
   if (r.filled.length > 0) lines.push(`补了空位（${r.filled.length}）：${r.filled.join('、')}`);
-  if (r.adoptedStages.length > 0) lines.push(`接手库里已有的阶段顺序：${r.adoptedStages.join('、')}`);
   if (r.unchanged) lines.push('库里已经齐了，这次一行没改');
   for (const note of r.kept) lines.push(`没动：${note}`);
   return lines.join('\n');

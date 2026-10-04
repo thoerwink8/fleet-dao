@@ -26,7 +26,6 @@ import {
   SETTING_SCHEMAS,
   type SettingKey,
   SettingsResponse,
-  StageKindSchema,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -37,8 +36,6 @@ import {
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
-  UpdateStagePolicyRequest,
-  UpdateStagePolicyResponse,
   WebRoutes,
 } from '@fleet-dao/shared';
 import { type Context, Hono } from 'hono';
@@ -473,43 +470,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       routeId,
       ...(result.after === null ? {} : { effort: result.after }),
     });
-  });
-
-  app.put(WebRoutes.updateStagePolicy.path, async (c) => {
-    const stage = StageKindSchema.safeParse(c.req.param('stage'));
-    if (!stage.success) throw new ApiError(404, 'stage_not_found', '没有这个阶段类型');
-    const body = await readJson(c, UpdateStagePolicyRequest);
-    const [routes, models, bans] = await Promise.all([
-      store.listRoutes(),
-      store.listModels(),
-      store.listBans(),
-    ]);
-    const route = routeLookup(routes, models);
-    const problems = body.routeIds
-      .map((id) => routeProblem(id, stage.data, { route, bans, now: deps.now() }))
-      .filter((p): p is string => p !== null);
-    if (problems.length > 0) {
-      throw new ApiError(422, 'route_not_allowed', problems.join('；'), { problems });
-    }
-    const next = { routeIds: body.routeIds, pinned: body.pinned };
-    const result = await store.updateStagePolicy(
-      { stage: stage.data, expected: body.expected, next },
-      {
-        actor: actorOf(c),
-        action: 'stage_policy.update',
-        target: `stage:${stage.data}`,
-        before: body.expected,
-        after: next,
-        reason: body.reason,
-        via: c.get('via'),
-        ok: true,
-      },
-    );
-    if (result === 'conflict') {
-      const current = (await store.listStagePolicies()).find((p) => p.stage === stage.data);
-      throw new ApiError(409, 'conflict', '这个阶段刚被别人改过，刷新后再改', { current });
-    }
-    return reply(c, UpdateStagePolicyResponse, { stage: { stage: stage.data, ...next } });
   });
 
   app.patch(WebRoutes.updateChannel.path, async (c) => {

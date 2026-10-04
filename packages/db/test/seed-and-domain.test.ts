@@ -10,11 +10,9 @@ import {
   toRepo,
   toRoute,
   toSessionRun,
-  toStagePolicy,
   toTask,
 } from '../src/domain-map.ts';
 import { getSubtasks, insertSubtasks } from '../src/queries/subtasks.ts';
-import { STAGE_KINDS } from '../src/schema/enums.ts';
 import {
   bans,
   channels,
@@ -25,7 +23,6 @@ import {
   quotaWindows,
   repos,
   routes,
-  stagePolicies,
   users,
 } from '../src/schema/index.ts';
 import { SEED, seed } from '../src/seed.ts';
@@ -48,9 +45,8 @@ describe('种子', () => {
       families: SEED.families.length,
       models: SEED.models.length,
       channels: SEED.channels.length,
-      stagePolicies: STAGE_KINDS.length,
     });
-    expect(await seed(t.db)).toEqual({ families: 0, models: 0, channels: 0, stagePolicies: 0 });
+    expect(await seed(t.db)).toEqual({ families: 0, models: 0, channels: 0 });
     expect(await t.db.select().from(families)).toHaveLength(SEED.families.length);
   });
 
@@ -68,11 +64,8 @@ describe('种子', () => {
     expect(text).not.toMatch(/[A-Za-z0-9_-]{32,}/);
   });
 
-  it('每个阶段都有一行（空顺序），按量渠道默认关着；全局禁令写在代码里，不进库', async () => {
+  it('按量渠道默认关着；全局禁令写在代码里，不进库', async () => {
     await seed(t.db);
-    expect((await t.db.select().from(stagePolicies)).map((p) => p.stage).sort()).toEqual(
-      [...STAGE_KINDS].sort(),
-    );
     const metered = (await t.db.select().from(channels)).filter((c) => c.billing === 'metered');
     expect(metered.map((c) => c.enabled)).toEqual([false]);
     expect(await t.db.select().from(bans)).toEqual([]);
@@ -238,13 +231,6 @@ describe('库里的行 → 领域对象', () => {
       name: '中转',
       billing: 'subscription',
       enabled: true,
-    });
-    const [policy] = (await t.db.select().from(stagePolicies)).filter((p) => p.stage === 'execute');
-    expect(toStagePolicy(policy as typeof stagePolicies.$inferSelect, ['opus', 'k3'], ['k3'])).toEqual({
-      stage: 'execute',
-      routeIds: ['opus', 'k3'],
-      pinned: false,
-      disabledRouteIds: ['k3'],
     });
   });
 

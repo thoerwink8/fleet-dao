@@ -10,7 +10,7 @@ import type {
   ScheduleOutcome,
   SegmentRun,
   SessionRun,
-  StagePolicy,
+  StageKind,
   Step,
   Subtask,
   Task,
@@ -104,7 +104,13 @@ export interface MockState {
   pools: Pool[];
   models: Model[];
   routes: Route[];
-  stages: StagePolicy[];
+  /**
+   * 路由两层（#574），真后端是 routing_purpose_models / routing_catalog 两张表：每个用途（阶段类型）一串模型，
+   * 每个模型一串路由，越靠前越先用。开关在模型下那一行上、不分用途（关着的不派、探针也不探）。
+   */
+  purposes: Partial<Record<StageKind, string[]>>;
+  /** 模型 → 路由顺序。 */
+  routing: Record<string, string[]>;
   bans: Ban[];
   quota: QuotaWindow[];
   tasks: MTask[];

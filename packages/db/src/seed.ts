@@ -1,9 +1,9 @@
-// 种子：通用的族、模型、渠道类型示例，每个阶段一行空顺序。
-// 不放任何账号信息：账号池、路由、成员、额度都不放（公开仓，账号在机器本地配置）。跑几遍结果都一样。
+// 种子：通用的族、模型、渠道类型示例。不放任何账号信息：账号池、路由、成员、额度都不放（公开仓，账号在机器本地配置）。
+// 跑几遍结果都一样。路由两层的骨架不进这里（由 packages/db/routing.default.json 装，routing-apply.ts）；旧的按阶段平铺
+// 表（stage_policies / stage_policy_routes）没人读了，也不种（#754）。
 // 全局禁令（GPT 不做 UI、不用 Fable）写死在 @fleet-dao/shared 的 bans.ts，不进库；bans 表只放创始人另加的。
 import type { Db } from './client.ts';
-import { STAGE_KINDS } from './schema/enums.ts';
-import { channels, families, models, stagePolicies } from './schema/index.ts';
+import { channels, families, models } from './schema/index.ts';
 
 export const SEED = {
   families: [
@@ -39,9 +39,7 @@ export const SEED = {
 };
 
 /** 写入种子；已存在的行不动。返回这次新写了几行。 */
-export async function seed(
-  db: Db,
-): Promise<Record<'families' | 'models' | 'channels' | 'stagePolicies', number>> {
+export async function seed(db: Db): Promise<Record<'families' | 'models' | 'channels', number>> {
   return db.transaction(async (tx) => {
     const insertedFamilies = await tx
       .insert(families)
@@ -58,16 +56,10 @@ export async function seed(
       .values([...SEED.channels])
       .onConflictDoNothing()
       .returning();
-    const insertedPolicies = await tx
-      .insert(stagePolicies)
-      .values(STAGE_KINDS.map((stage) => ({ stage })))
-      .onConflictDoNothing()
-      .returning();
     return {
       families: insertedFamilies.length,
       models: insertedModels.length,
       channels: insertedChannels.length,
-      stagePolicies: insertedPolicies.length,
     };
   });
 }

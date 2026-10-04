@@ -116,11 +116,6 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         probe: { state: 'ok', at: ago(4), detail: '答上了：OK · 用时 9 秒' },
       },
     ],
-    stagePolicies: [
-      { stage: 'execute', routeIds: ['rt-claude-opus', 'rt-mirasim-kimi'], pinned: false },
-      { stage: 'ui', routeIds: ['rt-claude-opus'], pinned: true },
-      { stage: 'review', routeIds: ['rt-mirasim-gpt'], pinned: false },
-    ],
     // 两条全局禁令写死在 shared/bans.ts，不在这里；库里只放另外加的（这条是样例）。
     bans: [{ family: 'kimi', stage: 'ui', reason: '（样例）库里另配的禁令：Kimi 暂不进 UI' }],
     quotaWindows: [

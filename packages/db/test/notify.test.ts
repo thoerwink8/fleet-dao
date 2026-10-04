@@ -14,8 +14,6 @@ import {
   quotaWindows,
   sessionRuns,
   settings,
-  stagePolicies,
-  stagePolicyRoutes,
   tasks,
 } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -108,21 +106,6 @@ describe('写入即通知 fleet_changes', () => {
       { table: 'session_runs', id: run.id },
       { table: 'session_runs', id: run.id },
       { table: 'session_runs', id: exam.id },
-    ]);
-  });
-
-  it('改路由顺序报成 stage_policies，id 是阶段名', async () => {
-    await catalog(t.db);
-    await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    await freshEars();
-    await t.db
-      .insert(stagePolicyRoutes)
-      .values({ stage: 'execute', routeId: 'r1', position: 0, enabled: true });
-    await t.db.update(stagePolicies).set({ pinned: true }).where(eq(stagePolicies.stage, 'execute'));
-    await settle();
-    expect(heard).toEqual([
-      { table: 'stage_policies', id: 'execute' },
-      { table: 'stage_policies', id: 'execute' },
     ]);
   });
 
@@ -219,9 +202,6 @@ describe('写入即通知 fleet_changes', () => {
       title: '标题',
       summary: '摘要',
     });
-    await t.db
-      .insert(stagePolicyRoutes)
-      .values({ stage: 'execute', routeId: 'r1', position: 0, enabled: true });
     await t.db.insert(settings).values({ key: 'theme', value: 'dusk' });
     await t.db
       .insert(auditLog)
