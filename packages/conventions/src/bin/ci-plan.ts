@@ -9,7 +9,8 @@ import { spawnSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assignTests, planCi, planOutputs, readGraph } from '../ci-plan.ts';
+import { applyReuse, assignTests, planCi, planOutputs, readGraph } from '../ci-plan.ts';
+import { parseReuse } from '../main-reuse.ts';
 import { fsRepo } from '../repo.ts';
 import { listTestFiles, parseTimings, TIMINGS_FILE, unitOfTestFile } from '../test-split.ts';
 
@@ -25,18 +26,22 @@ let event = 'pull_request';
 let base = 'origin/main';
 /** 主线那一轮的基准提交（--main-base）；空 = 没给，主线照旧全跑（退到全跑，绝不静默少跑）。 */
 let mainBase = '';
+/** 主线同树复用（--reuse，main-reuse.ts 那一步的输出，JSON）；空 = 没复用。认不出、树对不上都当没复用，照旧按区间算。 */
+let reuseText = '';
 try {
   const { values } = parseArgs({
     options: {
       event: { type: 'string' },
       base: { type: 'string' },
       'main-base': { type: 'string' },
+      reuse: { type: 'string' },
     },
     strict: true,
   });
   event = values.event ?? event;
   base = values.base ?? base;
   mainBase = values['main-base'] ?? mainBase;
+  reuseText = values.reuse ?? reuseText;
 } catch (e) {
   console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
   process.exit(2);
@@ -77,7 +82,28 @@ const assigned = assignTests(planCi({ event: planEvent, changed, graph: readGrap
   read: (rel) => repo.read(rel),
 });
 if (typeof assigned === 'string') fail(assigned);
-const { plan, packed } = assigned;
+let { plan } = assigned;
+const { packed } = assigned;
+// 同树复用：只在主线推送、给了区间基准时认；这里再核一遍两棵树（main-reuse.ts 那一步核过，这里不信它的输出）。
+// 对不上、认不出一律当没复用：test、web、deploy 照区间全跑，并留 ::warning::。
+if (reuseText.trim() !== '') {
+  const reuse = parseReuse(reuseText);
+  if (event !== 'push' || mainBase === '') {
+    fail('--reuse 只能和 push 事件、--main-base 一起给');
+  } else if (reuse === null) {
+    console.log(`::warning::同树复用的记录认不出（${reuseText.slice(0, 200)}），不复用，照区间全跑`);
+  } else {
+    const headTree = git(['rev-parse', 'HEAD^{tree}']).trim();
+    const baseTree = git(['rev-parse', `${mainBase}^{tree}`]).trim();
+    if (headTree !== reuse.tree || baseTree !== reuse.baseTree) {
+      console.log(
+        `::warning::同树复用的记录和这一轮的检出对不上（树 ${headTree.slice(0, 7)} / 基准树 ${baseTree.slice(0, 7)}，记录是 ${reuse.tree.slice(0, 7)} / ${reuse.baseTree.slice(0, 7)}），不复用，照区间全跑`,
+      );
+    } else {
+      plan = applyReuse(plan, reuse);
+    }
+  }
+}
 if (packed?.timingsProblem)
   console.log(`::warning::${packed.timingsProblem}：测试照样每个都跑，只是分台可能不匀`);
 const outputs = planOutputs(plan);
