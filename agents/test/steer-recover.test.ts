@@ -97,6 +97,14 @@ describe('补回没送到的插话', () => {
     expect(lib.recoverSteers({ home, now: NOW })).toEqual({ lines: [], recovered: 0 });
   });
 
+  it('别的程序塞进会话的整段长提示词不当成创始人的话（真跑 Mirasim 记录时逮到的）', () => {
+    const home = temp();
+    turns(home, 's1', [
+      { steers: [{ text: `【你在改 GitHub 仓库】${'审查任务书。'.repeat(400)}`, at: NOW - 60_000 }] },
+    ]);
+    expect(lib.recoverSteers({ home, now: NOW })).toEqual({ lines: [], recovered: 0 });
+  });
+
   it('【故意造出的失败】落盘记录读不了：说「没查成」，不当成没丢', () => {
     const home = temp();
     turns(home, 's1', [{ steers: [{ text: '丢了的话', at: NOW - 60_000 }] }]);
