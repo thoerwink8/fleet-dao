@@ -35,7 +35,6 @@ import {
   stateChanges,
   subtaskDeps,
   subtasks,
-  TERMINAL_TASK_STATES,
   type TimelineEvent,
   tasks,
   taskTimeline,
@@ -70,6 +69,7 @@ import {
   reclaimMissStatus,
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
+import { isAwaitingOpen, isDraftConfirmed, judgeConfirm } from './draft-logic.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -81,6 +81,7 @@ import {
   withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { ackReasonOf, holdUntilOf, judgeOutboxAck } from './outbox-logic.ts';
 import { nextCursorOf, pageOfSorted } from './paging.ts';
 import {
   type AskRecord,
@@ -111,12 +112,20 @@ import {
   type TimelineRecord,
   type User,
 } from './ports.ts';
+import {
+  autoDispatchAudit,
+  autoDispatchChanged,
+  autoDispatchUnchanged,
+  boardCutoffMs,
+  isAutoDispatchUnchanged,
+  isTerminalTaskState,
+  keepOnBoard,
+} from './task-logic.ts';
 
 export interface PgStoreOptions {
   now?: () => Date;
 }
 
-const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 const opt = <V>(v: V | null): V | undefined => v ?? undefined;
 const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d ? d.toISOString() : undefined);
@@ -634,8 +643,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(tasks)
         .where(eq(tasks.repoId, repoId))
         .orderBy(asc(tasks.priority), asc(tasks.createdAt));
-      const terminal: readonly string[] = TERMINAL_TASK_STATES;
-      const finished = rows.filter((t) => terminal.includes(t.state)).map((t) => t.id);
+      const finished = rows.filter((t) => isTerminalTaskState(t.state)).map((t) => t.id);
       const since =
         finished.length === 0
           ? new Map<string, Date>()
@@ -651,9 +659,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
                   .orderBy(stateChanges.entityId, desc(stateChanges.id))
               ).map((r) => [r.entityId, r.at]),
             );
-      const cutoff = now().getTime() - RECENT_TERMINAL_MS;
+      const cutoff = boardCutoffMs(now().getTime());
       return rows
-        .filter((t) => !terminal.includes(t.state) || (since.get(t.id) ?? t.createdAt).getTime() >= cutoff)
+        .filter((t) => keepOnBoard(t.state, (since.get(t.id) ?? t.createdAt).getTime(), cutoff))
         .map(toTask);
     },
     async getTask(id) {
@@ -1319,7 +1327,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             };
           }
         }
-        if (row.status === 'confirmed')
+        if (isDraftConfirmed(row.status))
           return { status: 'confirmed' as const, draft: await draftOut(tx, row) };
         const at = now();
         const claimed = await tx
@@ -1366,8 +1374,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return db.transaction(async (tx) => {
         const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
         if (!row) return { status: 'not_found' as const };
-        if (row.status === 'confirmed') return { status: 'already' as const, draft: await draftOut(tx, row) };
-        if (row.revision !== revision) return { status: 'changed' as const, draft: await draftOut(tx, row) };
+        const verdict = judgeConfirm(row, revision);
+        if (verdict !== 'proceed') return { status: verdict, draft: await draftOut(tx, row) };
         const at = now();
         const [updated] = await tx
           .update(feishuDrafts)
@@ -1392,7 +1400,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(draftId)) return 'not_pending';
       return db.transaction(async (tx) => {
         const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
-        if (row?.status !== 'confirmed' || row.taskId !== null) return 'not_pending' as const;
+        if (!row || !isAwaitingOpen({ status: row.status, hasTask: row.taskId !== null })) {
+          return 'not_pending' as const;
+        }
         if (!isUuid(taskId)) return 'task_not_found' as const;
         const [task] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId));
         if (!task) return 'task_not_found' as const;
@@ -1650,30 +1660,14 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             .from(feishuOutbox)
             .where(eq(feishuOutbox.id, ack.itemId))
             .for('update');
-          if (!row) {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'unknown_item' });
-            continue;
-          }
-          if (ack.revision > row.revision) {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'future_revision' });
+          const verdict = judgeOutboxAck(row, ack);
+          if (!row || verdict.kind === 'skip') {
+            const why = verdict.kind === 'skip' ? verdict.why : 'unknown_item';
+            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why });
             continue;
           }
           const r = ack.result;
-          const current = ack.revision === row.revision;
-          if (!current && r.status !== 'sent' && r.status !== 'updated') {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-            continue;
-          }
-          // 已经送到过更新一版的卡：旧版本的回执后到（重试、迟到）不能把「送到的卡」退回旧卡。
-          if (
-            !current &&
-            row.deliveredMessageId !== null &&
-            row.deliveredRevision !== null &&
-            ack.revision < row.deliveredRevision
-          ) {
-            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
-            continue;
-          }
+          const current = verdict.current;
           const set: Partial<typeof feishuOutbox.$inferInsert> = {};
           if (r.status === 'sent') {
             Object.assign(set, {
@@ -1707,21 +1701,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             }
           }
           if (current) {
+            const holdUntil = holdUntilOf(r);
             Object.assign(set, {
               ackRevision: ack.revision,
               ackStatus: r.status,
-              ackReason:
-                r.status === 'dropped' || r.status === 'deferred'
-                  ? r.reason
-                  : r.status === 'failed'
-                    ? r.error
-                    : null,
-              holdUntil:
-                r.status === 'deferred'
-                  ? new Date(r.until)
-                  : r.status === 'failed'
-                    ? new Date(r.retryAfter)
-                    : null,
+              ackReason: ackReasonOf(r) ?? null,
+              holdUntil: holdUntil === undefined ? null : new Date(holdUntil),
             });
           }
           // 记下来什么都不变：同一条回执又来了一遍（网关重发、两批叠上），不再记一次（失败次数、送达尝试数都不加）。
@@ -1915,7 +1900,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .for('update');
         if (!row) return 'not_found';
         const before = row.since ? iso(row.since) : null;
-        if ((before !== null) === on) return { changed: false, autoDispatchSince: before };
+        if (isAutoDispatchUnchanged(before, on)) return autoDispatchUnchanged(before);
         const [updated] = await tx
           .update(repos)
           .set({ autoDispatchSince: on ? now() : null })
@@ -1923,12 +1908,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .returning({ since: repos.autoDispatchSince });
         if (!updated) throw new Error(`仓 ${repoId} 锁住了却没改成`);
         const after = updated.since ? iso(updated.since) : null;
-        const auditId = await insertAudit(tx, {
-          ...entry,
-          before: { autoDispatchSince: before },
-          after: { autoDispatchSince: after },
-        });
-        return { changed: true, autoDispatchSince: after, auditId };
+        const auditId = await insertAudit(tx, autoDispatchAudit(entry, before, after));
+        return autoDispatchChanged(after, auditId);
       });
     },
   };

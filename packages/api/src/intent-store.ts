@@ -10,6 +10,7 @@ import type { z } from 'zod';
 import {
   applyEdit,
   bumped,
+  byCardDue,
   cardDueAt,
   contentHash,
   decideSegment,
@@ -21,11 +22,14 @@ import {
   type IntentStatus,
   type IntentWithMessages,
   insertOlderEdit,
+  isCardPending,
   judgeRepeat,
+  NO_SUCH_INTENT,
   orderMessages,
   planAck,
   planDrop,
   planLink,
+  recallConflict,
   type SegmentCandidate,
   type SegmentRule,
 } from './intents.ts';
@@ -333,12 +337,8 @@ export function createMemoryIntentStore(options: { now?: () => Date } = {}): Mem
     async intakeRecall(r) {
       const stored = data.messages.find((m) => m.messageId === r.messageId);
       const tomb = data.recalls.find((x) => x.messageId === r.messageId);
-      if (stored && stored.chatId !== r.chatId) {
-        return { status: 'reused', why: '要撤回的这条原话记在另一个会话里' };
-      }
-      if (tomb && tomb.chatId !== r.chatId) {
-        return { status: 'reused', why: '这个消息编号的撤回已经记在另一个会话里' };
-      }
+      const conflict = recallConflict(stored, tomb, r.chatId);
+      if (conflict !== undefined) return { status: 'reused', why: conflict };
       if (!tomb) data.recalls.push({ ...r, receivedAt: now().toISOString() });
       if (!stored) return { status: 'tombstone' };
       const intent = intentById(stored.intentId);
@@ -371,13 +371,8 @@ export function createMemoryIntentStore(options: { now?: () => Date } = {}): Mem
     async dueCards(limit) {
       const t = now().getTime();
       const pending = data.intents
-        .filter(
-          (i) =>
-            i.card.dueAt !== undefined &&
-            (i.card.shownRev === undefined || i.card.shownRev < i.card.rev) &&
-            (i.card.messageId !== undefined || hasLiveMessage(messagesOf(i.id))),
-        )
-        .sort((a, b) => at(a.card.dueAt ?? '') - at(b.card.dueAt ?? '') || a.seq - b.seq);
+        .filter((i) => isCardPending(i.card, hasLiveMessage(messagesOf(i.id))))
+        .sort(byCardDue);
       const due = pending.filter((i) => at(i.card.dueAt ?? '') <= t);
       const later = pending.find((i) => at(i.card.dueAt ?? '') > t);
       return {
@@ -391,7 +386,7 @@ export function createMemoryIntentStore(options: { now?: () => Date } = {}): Mem
       for (const ack of acks) {
         const intent = data.intents.find((x) => x.id === ack.intentId);
         if (!intent) {
-          report.skipped.push({ intentId: ack.intentId, why: '没有这段意图' });
+          report.skipped.push({ intentId: ack.intentId, why: NO_SUCH_INTENT });
           continue;
         }
         const plan = planAck(intent, ack, now());

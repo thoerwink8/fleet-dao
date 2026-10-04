@@ -215,7 +215,8 @@ jobs:
           start() {
             local name=$1
             shift
-            ("$@" >"$LOGS/$name.log" 2>&1; echo $? >"$LOGS/$name.rc") &
+            # 各自记下跑了几秒（写进下面的分组标题）：三样并行，这一步的墙钟就是最慢那一样，不记就看不出该省哪个
+            ( s=$SECONDS; "$@" >"$LOGS/$name.log" 2>&1; echo $? >"$LOGS/$name.rc"; echo $((SECONDS - s)) >"$LOGS/$name.secs" ) &
           }
           run_tsc() {
             if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
@@ -228,7 +229,7 @@ jobs:
           wait
           for name in "${names[@]}"; do
             rc=$(cat "$LOGS/$name.rc" 2>/dev/null || echo missing)
-            echo "::group::$name（退出码 $rc）"
+            echo "::group::$name（退出码 $rc，$(cat "$LOGS/$name.secs" 2>/dev/null || echo 未知) 秒）"
             cat "$LOGS/$name.log" 2>/dev/null || echo "（没有日志）"
             echo "::endgroup::"
             if [ "$rc" = 0 ]; then echo "$name=success" >>"$GITHUB_OUTPUT"; else echo "::error::$name 没过（退出码 $rc）"; echo "$name=failure" >>"$GITHUB_OUTPUT"; fi

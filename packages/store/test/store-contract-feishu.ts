@@ -750,6 +750,30 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         });
       });
 
+      it('回执的版本只比库里最新新一版也是 future_revision：不记、不改库里的送达', async () => {
+        await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f1', create: true }]);
+        const at = T0.toISOString();
+        expect(
+          await store.ackOutbox(
+            [
+              {
+                itemId: 'ask:a',
+                revision: 2,
+                result: { status: 'sent', messageId: 'om_x', chatId: 'oc_team', sentAt: at },
+              },
+            ],
+            at,
+          ),
+        ).toEqual({
+          applied: 0,
+          skipped: [{ itemId: 'ask:a', revision: 2, why: 'future_revision' }],
+        });
+        expect(
+          (await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f1', create: true }])).get('ask:a')
+            ?.delivered,
+        ).toBeUndefined();
+      });
+
       it('「改了」的卡回执没记过、卡片登记里也没有：只记结果，不编一张送到的卡', async () => {
         await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f1', create: true }]);
         await store.ackOutbox(

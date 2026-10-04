@@ -883,6 +883,12 @@ describe('ci.yml 和这里对得上', () => {
       expect(script).toContain('wait');
     });
 
+    it('每一样的分组标题带上它自己跑了几秒（三样并行，墙钟 = 最慢那样，不记看不出该省哪个）', () => {
+      const { r } = go({ BIOME_WANT: 'true', TSC: 'all' }, []);
+      for (const name of ['biome', 'tsc', 'docs'])
+        expect(r.stdout, name).toMatch(new RegExp(`::group::${name}（退出码 0，\\d+ 秒）`));
+    });
+
     it('三样都绿：三样都写 success，tsc 带上算出来的项目', () => {
       const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'packages/cli packages/core' }, []);
       expect(outputs).toEqual({ biome: 'success', tsc: 'success', docs: 'success' });
