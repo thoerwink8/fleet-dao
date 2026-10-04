@@ -52,7 +52,7 @@ SHARDS=(
   'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use wsl-loopback'
   'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
-NODE_TESTS=(health-page auto-release config)
+NODE_TESTS=(health-page reclaude-old-account-clean auto-release config)
 SPECIAL_UNITS=(lint backup node-tests ports)
 
 usage_error() {
