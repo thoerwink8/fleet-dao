@@ -22,6 +22,7 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { routeLaunchFacts, savePoolQuota } from '@fleet-dao/db';
 import { routeEffortProblem } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
@@ -69,8 +70,6 @@ export interface SegmentSpawnerDeps {
   sudo?: readonly string[];
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
-
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 function sizeArg(name: string, mb: number): string {
   if (!Number.isSafeInteger(mb) || mb < 0) {
@@ -174,7 +173,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       windows,
     }).then(
       () => undefined,
-      (err: unknown) => log('一次性会话读到的额度没记上', { poolId: route.poolId, error: message(err) }),
+      (err: unknown) => log('一次性会话读到的额度没记上', { poolId: route.poolId, error: errMessage(err) }),
     );
   };
 
@@ -260,7 +259,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
               .join('\n'),
           });
         } catch (err) {
-          log('拼车被拒的证据没交给切号', { runId, error: message(err) });
+          log('拼车被拒的证据没交给切号', { runId, error: errMessage(err) });
         }
       }
       return outcome;
@@ -270,7 +269,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
           runId,
           tmpDir,
-          error: message(err),
+          error: errMessage(err),
         });
       });
     }

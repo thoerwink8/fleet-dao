@@ -10,8 +10,10 @@
 //   抛 PoolFullError，这里换成合约的 NoSlotError）。不带路由的（不经选路）照老样子直接写，不数名额——它连不到池。
 // - 预占谁来放：没开跑就收场的那一段（runSegment、coldVerify 收场时调 realReservations 的 release）；开跑了的已经在 start 里
 //   换掉了，放一次什么都不做。
+
 import type { Db, RunInsert } from '@fleet-dao/db';
 import { admitRun, PoolFullError, releaseReservation, startRun as startRunDb } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import {
   NoSlotError,
@@ -41,7 +43,7 @@ export function realRuns(deps: { db: Db }): RunsWriter {
         );
       } catch (error) {
         if (error instanceof PoolFullError) throw new NoSlotError(error.message, { cause: error });
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errMessage(error);
         throw new RunInputError(`runs 开跑那一行写入失败：${message}`, { cause: error });
       }
     },
@@ -110,7 +112,7 @@ async function write(db: Db, row: RunInsert, failed: string): Promise<void> {
   try {
     await startRunDb(db, row);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errMessage(error);
     throw new RunInputError(`${failed}：${message}`, { cause: error });
   }
 }

@@ -5,6 +5,7 @@
 //   france.sh 建它。不对（没建、属主或权限不对）引擎照旧接管道起会话、推提醒——明说「这一版发布还会停会话」，不装作脱开了。
 // - meta.json 只存接回要的：不存环境、通行证（接回不起进程，用不着；它们也不该落盘）。0600，只有引擎读得了。
 // - 认不出的记录不猜：读不成、形状不对就接不回，交回 SESSION_LOST 由工作流续会话（原来的会话按 scope 收掉）。
+
 import { statSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -12,6 +13,7 @@ import { SESSION_USERS, type SessionUser } from '@fleet-dao/adapters';
 import type { Db } from '@fleet-dao/db';
 import { resolveAlertWithReason, upsertAlert } from '@fleet-dao/db';
 import type { StageKind } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type ContinueMode,
   type HostRunSpec,
@@ -42,7 +44,7 @@ export function checkIoRoot(
   try {
     st = statSync(dir);
   } catch (error) {
-    return `收发目录的根 ${dir} 不在或看不了（${error instanceof Error ? error.message : String(error)}）：france.sh 没跑过这一版？`;
+    return `收发目录的根 ${dir} 不在或看不了（${errMessage(error)}）：france.sh 没跑过这一版？`;
   }
   if (!st.isDirectory()) return `收发目录的根 ${dir} 不是目录`;
   if (st.uid !== uid) return `收发目录的根 ${dir} 不归引擎（属主 uid ${st.uid}，引擎是 ${uid}）`;
@@ -133,7 +135,7 @@ export function parseSessionMeta(text: string): SessionMeta {
   try {
     raw = JSON.parse(text);
   } catch (error) {
-    throw new Error(`接回记录不是 JSON（${error instanceof Error ? error.message : String(error)}）`);
+    throw new Error(`接回记录不是 JSON（${errMessage(error)}）`);
   }
   need(typeof raw === 'object' && raw !== null && !Array.isArray(raw), '整体');
   const m = raw as Record<string, unknown>;
@@ -197,6 +199,6 @@ export async function readSessionMeta(dir: string): Promise<{ meta: SessionMeta 
   try {
     return { meta: parseSessionMeta(text) };
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+    return { error: errMessage(error) };
   }
 }

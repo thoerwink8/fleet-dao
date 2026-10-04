@@ -22,6 +22,7 @@ import {
   standardFiles,
 } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
 import { readTaskBrief } from '../runner/task-brief.ts';
@@ -96,7 +97,7 @@ function abortReason(signal: AbortSignal): unknown {
 
 /** GitHub 拒绝挂自动合并、因为 PR 已经满足全部合并条件（没什么可等的）。 */
 function isCleanStatus(error: unknown): boolean {
-  return /clean status/i.test(error instanceof Error ? error.message : String(error));
+  return /clean status/i.test(errMessage(error));
 }
 
 export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
@@ -142,7 +143,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       log('PR 合并了，但补合并记录 / 删分支没成（每小时对账会补记录）', {
         repo: `${repo.owner}/${repo.name}`,
         prNumber,
-        error: error instanceof Error ? error.message : String(error),
+        error: errMessage(error),
       });
       return {};
     }
