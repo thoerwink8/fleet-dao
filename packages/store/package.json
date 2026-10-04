@@ -11,6 +11,7 @@
   "dependencies": {
     "@fleet-dao/core": "workspace:*",
     "@fleet-dao/db": "workspace:*",
+    "@fleet-dao/github": "workspace:*",
     "@fleet-dao/shared": "workspace:*",
     "drizzle-orm": "^0.45.3",
     "zod": "^4.6.5"

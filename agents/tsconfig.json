@@ -2,5 +2,11 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": { "allowJs": true, "checkJs": true },
   "include": ["test"],
-  "files": ["skills/commander/scripts/france-lib.mjs", "skills/commander/scripts/france-query.mjs"]
+  "files": [
+    "skills/commander/scripts/france-lib.mjs",
+    "skills/commander/scripts/france-query.mjs",
+    "skills/discuss/scripts/second-opinion.mjs",
+    "skills/discuss/scripts/tools.mjs",
+    "skills/discuss/scripts/walkthrough.mjs"
+  ]
 }

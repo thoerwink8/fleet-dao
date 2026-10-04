@@ -10,7 +10,13 @@ import { describe, expect, it } from 'vitest';
 const AGENTS = join(import.meta.dirname, '..');
 
 /** 已经纳入严格检查的脚本（相对 agents/）：一个脚本补完类型就加进来，同时加进 tsconfig 的 files。 */
-const CHECKED = ['skills/commander/scripts/france-lib.mjs', 'skills/commander/scripts/france-query.mjs'];
+const CHECKED = [
+  'skills/commander/scripts/france-lib.mjs',
+  'skills/commander/scripts/france-query.mjs',
+  'skills/discuss/scripts/second-opinion.mjs',
+  'skills/discuss/scripts/tools.mjs',
+  'skills/discuss/scripts/walkthrough.mjs',
+];
 
 /** 盖住类型检查的写法：@ts-nocheck、@ts-expect-error、@ts-expect-error，和 JSDoc 里写 any。回命中的那几处。 */
 function suppressions(text: string): string[] {

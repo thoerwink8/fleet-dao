@@ -4,7 +4,7 @@
 // 这张单在库里的事实、每一轮的记录、报警是同一个库（@fleet-dao/db）；任务工作流在不在跑、走到哪一步问这次活动的 Temporal
 // 客户端（taskStatus 查询），收前几轮留下的单发的是驾驶舱「放弃」同一个信号（taskAbandon）；「驾驶舱显示」读的是驾驶舱后端的
 // Store（主页「做完的」那一栏读的同一份：任务行、PR 镜像）。
-import { createPgStore } from '@fleet-dao/api';
+
 import {
   canaryDbFacts,
   concludeAbandonedCanaryRuns,
@@ -20,6 +20,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import { createPgStore } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import {
   CANARY_ACTOR,

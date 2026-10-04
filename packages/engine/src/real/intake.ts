@@ -11,7 +11,6 @@
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
 import { randomUUID } from 'node:crypto';
-import { createPgStore } from '@fleet-dao/api';
 import {
   type Db,
   finishScheduleRun,
@@ -21,7 +20,7 @@ import {
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
-import { actorFor, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
+import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
 import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import type { IntakeDeps } from '../jobs/intake.ts';

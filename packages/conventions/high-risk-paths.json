@@ -75,7 +75,17 @@
     {
       "path": "packages/api/src/github.ts",
       "kind": "碰安全",
-      "why": "对公网开的 GitHub 事件入口：验签名、作者白名单，公开仓陌生人能开单，这是唯一的门"
+      "why": "对公网开的 GitHub 事件入口：验签名，公开仓陌生人能往这里发请求"
+    },
+    {
+      "path": "packages/store/src/github-intake.ts",
+      "kind": "碰安全",
+      "why": "GitHub 事件进门的判法（从 api/src/github.ts 搬来，#865）：作者白名单、fork、受管的仓，公开仓陌生人能开单，这是唯一的门；引擎拉单、对账补漏也走它"
+    },
+    {
+      "path": "packages/store/src/whitelist.ts",
+      "kind": "碰安全",
+      "why": "作者白名单怎么拼、怎么认人（从 api/src/whitelist.ts 搬来，#865）：isTrusted 放松一处，陌生人就能开单、叫醒引擎"
     },
     {
       "path": "packages/github/src/app-auth.ts",
