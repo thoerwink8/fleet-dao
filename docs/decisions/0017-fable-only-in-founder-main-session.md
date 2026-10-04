@@ -44,3 +44,7 @@
 ## 看过、没改的（不冲突）
 
 讲选路、派工、讨论阶段的「不用 Fable」「Fable × 一切」：`docs/design.md` 第三节第 9 条（派工模型）、第九节的禁令表和「讨论」阶段配置、`docs/reference/engine.md` 的换路由校验、`packages/shared/src/domain.ts`、`packages/db/src/seed.ts`、`packages/db/routing.default.json`、`packages/web/src/build/demo-renames.ts`（禁令理由原话的演示版改写）。它们管的都是引擎按路由派的会话，属于上面第 1 条，照旧。`docs/decisions/0002-fusion.md`、`0003-fusion-flow.md` 是历史记录，不改。
+
+## 后续
+
+- 2026-10-04（#785）：第 2 条钉进设置——各机器 `~/.claude/settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL` 设成 `claude-opus-5-5`，由同步工具从 `agents/config/claude-permissions.json` 写过去，源文件不是 Opus 或 Sonnet 就拒收，`agents/test/rules/subagent-model.rules.test.ts` 钉住。它只兜住调用和子代理定义都没写模型的（`general-purpose` 这类），Plan、`fork` 照旧跟主会话、`claude-code-guide` 定义里是 Haiku，所以第 2 条「派的时候写明模型」照旧；详见 `docs/agents-permissions.md`「子代理默认模型」。
