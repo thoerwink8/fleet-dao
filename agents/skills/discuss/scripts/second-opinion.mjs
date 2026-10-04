@@ -51,6 +51,38 @@ import { missingWalkthrough } from './walkthrough.mjs';
 /** @typedef {{ agent?: string | undefined, authorFamily?: string | string[] | undefined, excludeFamily?: string | undefined, ui?: boolean | undefined }} ProfileOptions */
 /** @typedef {{ text: string, sessionKey: string, model: string | null, ledgerNote: string, usage: string, fallbackNote?: string }} SessionResult 一次会话跑完的结果 */
 /** @typedef {(s: string) => void} Log */
+/** @typedef {(args: string[]) => string} GhRun 起 gh（失败抛错、成功回 stdout；测试里换成假的） */
+/**
+ * 从 Mirasim 的 ws 读回来的一帧：按协议文档（adapters.md 第八节）写的字段，用到的地方原来就有显式判断。
+ * @typedef {{ type?: string, state?: { agentsAvailable?: unknown, version?: string }, snapshot?: unknown, patch?: { full?: unknown }, sessionKey?: string, message?: string, sessions?: { sessionKey: string, title?: unknown, runState?: unknown }[], relay?: { usage?: { windows?: { label?: string, usedPercent?: number }[] } } }} Frame
+ */
+/** @typedef {{ phase: string | null, text: string, toolCalls: number, error: string | null, incomplete: boolean, model: string | null, interactions: unknown[], updatedAt: unknown }} SessionView 一帧快照整理出来的会话现状 */
+/** @typedef {{ headRefOid: string, baseRefName: string, title: string, body?: string | null, files?: { path: string }[], state: string, mergeCommit?: { oid?: unknown } | null }} PrInfo gh pr view --json 里用到的那几个字段 */
+/** @typedef {PrInfo & { head: string, tree: string, merged: boolean, mergeCommit: string | null }} PreparedPr 审查树切好之后的 PR */
+/** @typedef {{ head: string, baseRefName: string, title: string, body?: string | null | undefined, files?: { path: string }[] | undefined, merged?: boolean | undefined, mergeCommit?: string | null | undefined }} PromptInfo */
+/** @typedef {{ prompt: string, profile: Profile, workdir: string, timeoutMin: number, log: Log, pollMs?: number, effort?: string | undefined, discussion?: boolean }} SessionOpts runSession 要的 */
+/** @typedef {{ gh: GhRun, session: (opts: SessionOpts) => Promise<SessionResult>, runs: string }} ReviewDeps 审 PR 要的几样（测试换成假的） */
+/**
+ * 命令行参数（args() 整理出来的）。
+ * @typedef {{ timeoutMin: number, ui: boolean, slot: number, pr?: number, repo?: string, roundGiven?: boolean, afterMergePending?: boolean, afterMergeSweep?: boolean, resolve?: number, resolveGiven?: boolean, by?: number, json?: boolean, noFetch?: boolean, slotGiven?: boolean, selftest?: boolean, ping?: boolean, noPost?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string, name?: string, effort?: string, agent?: string, authorFamily?: string, excludeFamily?: string, budgetSec?: number, blind?: boolean, slow?: boolean, highRisk?: boolean, postMerge?: boolean }} Options
+ */
+
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
+const isObjectLike = (v) => typeof v === 'object' && v !== null;
+/**
+ * 抛出来的东西上的 code（ENOENT 这类）；不是对象就是 undefined。
+ * @param {unknown} e
+ */
+const errCode = (e) => (isObjectLike(e) ? e.code : undefined);
+/**
+ * 抛出来的东西上的 message；不是对象就是 undefined。
+ * @param {unknown} e
+ */
+const messageOf = (e) => (isObjectLike(e) ? e.message : undefined);
+
 /** @typedef {{ pass: boolean, blocking: number }} Verdict 审的人最后一行写的结论（挡不挡不看它） */
 /** @typedef {'现实' | '构造'} Reality */
 /** @typedef {'碰安全' | '改数据库' | '其他'} Category */
@@ -589,19 +621,24 @@ export function judgementLines(j, { afterMerge = false, mergeCommit = null, roun
   return out;
 }
 
+/**
+ * @param {Frame | null | undefined} msg
+ * @returns {SessionView | null}
+ */
 function viewOf(msg) {
   const full =
     msg?.type === 'snapshot' ? msg.snapshot : msg?.type === 'session' ? msg.patch?.full : undefined;
-  if (!full || typeof full !== 'object') return null;
+  if (!isObjectLike(full)) return null;
   const phase =
     typeof full.phase === 'string' && full.phase
       ? full.phase
       : typeof full.runState === 'string'
         ? full.runState
         : null;
+  /** @type {string | null} */
   let error = null;
   if (typeof full.error === 'string' && full.error) error = full.error;
-  else if (full.error && typeof full.error.message === 'string') error = full.error.message;
+  else if (isObjectLike(full.error) && typeof full.error.message === 'string') error = full.error.message;
   return {
     phase,
     text: typeof full.text === 'string' ? full.text : '',
@@ -617,16 +654,22 @@ function viewOf(msg) {
 // ---------- 连 Mirasim ----------
 
 class Wire {
+  /** @param {string} url */
   constructor(url) {
+    /** @type {Frame[]} 还没人要的帧 */
     this.queue = [];
+    /** @type {{ pred: (m: Frame) => boolean, ok: (m: Frame | null) => void }[]} 在等某一帧的人 */
     this.waiters = [];
+    /** @type {boolean | null} */
     this.closed = null;
     this.ws = new WebSocket(url);
+    /** @type {Promise<void>} */
     this.opened = new Promise((ok, bad) => {
       this.ws.onopen = () => ok();
       this.ws.onerror = () => bad(new NotChecked('连不上本机 Mirasim 的 ws'));
     });
     this.ws.onmessage = (ev) => {
+      /** @type {Frame} */
       let m;
       try {
         m = JSON.parse(String(ev.data));
@@ -634,7 +677,7 @@ class Wire {
         return;
       }
       const i = this.waiters.findIndex((w) => w.pred(m));
-      if (i >= 0) this.waiters.splice(i, 1)[0].ok(m);
+      if (i >= 0) this.waiters.splice(i, 1)[0]?.ok(m);
       else this.queue.push(m);
     };
     this.ws.onclose = () => {
@@ -642,15 +685,22 @@ class Wire {
       for (const w of this.waiters.splice(0)) w.ok(null);
     };
   }
+  /** @param {Record<string, unknown>} obj */
   send(obj) {
     this.ws.send(JSON.stringify(obj));
   }
-  /** 等一帧；超时或连接断了回 null（调用方判没查成）。 */
+  /**
+   * 等一帧；超时或连接断了回 null（调用方判没查成）。
+   * @param {(m: Frame) => boolean} pred
+   * @param {number} ms
+   * @returns {Promise<Frame | null>}
+   */
   waitFor(pred, ms) {
     const i = this.queue.findIndex(pred);
-    if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0]);
+    if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0] ?? null);
     if (this.closed) return Promise.resolve(null);
     return new Promise((ok) => {
+      /** @type {{ pred: (m: Frame) => boolean, ok: (m: Frame | null) => void }} */
       const w = {
         pred,
         ok: (m) => {
@@ -674,20 +724,23 @@ class Wire {
 }
 
 /** 找在役的那个口：令牌文件按新到旧试，握手拿到 state 帧的才算。没装、没开、一个口都握不上手，都算这台用不了 Mirasim */
+/** @returns {Promise<{ url: string, wire: Wire, state: NonNullable<Frame['state']> }>} */
 async function connect() {
   if (!existsSync(MIRA)) throw new NotInstalled(`这台机器没装 Mirasim（没有 ${MIRA}）`);
   const dir = join(MIRA, 'run');
+  /** @type {string[]} */
   let files;
   try {
     files = readdirSync(dir).filter((f) => /^local-\d+\.token$/.test(f));
   } catch (e) {
-    throw new NotInstalled(`本机 Mirasim 没开（读不到 ${dir}：${e.code ?? e.message}）`);
+    throw new NotInstalled(`本机 Mirasim 没开（读不到 ${dir}：${errCode(e) ?? messageOf(e)}）`);
   }
   if (files.length === 0) throw new NotInstalled(`本机 Mirasim 没开（${dir} 里没有令牌文件）`);
   files.sort((a, b) => statSync(join(dir, b)).mtimeMs - statSync(join(dir, a)).mtimeMs);
+  /** @type {string[]} */
   const tried = [];
   for (const f of files) {
-    const port = /(\d+)/.exec(f)[1];
+    const port = /(\d+)/.exec(f)?.[1] ?? '';
     const token = readFileSync(join(dir, f), 'utf8').trim();
     const url = `ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`;
     const wire = new Wire(url);
@@ -710,6 +763,11 @@ async function connect() {
   throw new NotInstalled(`本机 Mirasim 一个口都没握手成（${tried.join('；')}），多半没开`);
 }
 
+/**
+ * @param {string} url
+ * @param {string} sessionKey
+ * @returns {Promise<SessionView | null>}
+ */
 async function readView(url, sessionKey) {
   const wire = new Wire(url);
   try {
@@ -730,6 +788,10 @@ async function readView(url, sessionKey) {
   }
 }
 
+/**
+ * @param {string} url
+ * @returns {Promise<number | null>}
+ */
 async function relayUsage(url) {
   const wire = new Wire(url);
   try {
@@ -738,7 +800,7 @@ async function relayUsage(url) {
     wire.send({ type: 'getRelay' });
     const m = await wire.waitFor((x) => x.type === 'relay' && Array.isArray(x.relay?.usage?.windows), 15_000);
     const w7 = m?.relay?.usage?.windows?.find((w) => w.label === '7d');
-    return w7 && Number.isFinite(w7.usedPercent) ? w7.usedPercent : null;
+    return w7 && w7.usedPercent !== undefined && Number.isFinite(w7.usedPercent) ? w7.usedPercent : null;
   } catch {
     return null;
   } finally {
@@ -746,14 +808,20 @@ async function relayUsage(url) {
   }
 }
 
+/**
+ * @param {string} uuid
+ * @returns {{ readable: true, rows: LedgerRow[] } | { readable: false, why: string }}
+ */
 function readLedger(uuid) {
   const dir = join(MIRA, 'traffic', uuid);
+  /** @type {string[]} */
   let files;
   try {
     files = readdirSync(dir).filter((f) => /^index-.*\.ndjson$/.test(f));
   } catch (e) {
-    return { readable: false, why: `读不到账本目录（${e.code ?? e.message}）` };
+    return { readable: false, why: `读不到账本目录（${errCode(e) ?? messageOf(e)}）` };
   }
+  /** @type {LedgerRow[]} */
   const rows = [];
   for (const f of files) {
     for (const line of readFileSync(join(dir, f), 'utf8').split('\n')) {
@@ -770,6 +838,13 @@ function readLedger(uuid) {
 
 // ---------- PR ----------
 
+/**
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string} [cwd]
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
 function sh(cmd, args, cwd, env = process.env) {
   return execFileSync(cmd, args, {
     cwd,
@@ -782,7 +857,11 @@ function sh(cmd, args, cwd, env = process.env) {
   }).trim();
 }
 
-/** 审 PR 要的几样（测试换成假的）：gh、起会话、记录和锁放哪。这台没装 gh、git 在这儿报。 */
+/**
+ * 审 PR 要的几样（测试换成假的）：gh、起会话、记录和锁放哪。这台没装 gh、git 在这儿报。
+ * @param {string} repo
+ * @returns {ReviewDeps}
+ */
 function reviewDeps(repo) {
   for (const [bin, forWhat] of [
     ['gh', '取 PR 的信息、贴结论'],
@@ -793,7 +872,15 @@ function reviewDeps(repo) {
   return { gh: (a) => gh(a, repo), session: runSession, runs: RUNS };
 }
 
+/**
+ * @param {string} repo
+ * @param {number} pr
+ * @param {number} slot
+ * @param {GhRun} ghRun
+ * @returns {PreparedPr}
+ */
 function preparePr(repo, pr, slot, ghRun) {
+  /** @type {PrInfo} */
   const info = JSON.parse(
     ghRun(['pr', 'view', String(pr), '--json', 'headRefOid,baseRefName,title,body,files,state,mergeCommit']),
   );
@@ -815,6 +902,7 @@ function preparePr(repo, pr, slot, ghRun) {
     () => sh('git', refs, repo),
     () => sh('git', ['-c', 'http.proxy=', '-c', 'https.proxy=', ...refs], repo, direct),
   ];
+  /** @type {string[]} */
   const errors = [];
   for (const t of tries) {
     try {
@@ -822,7 +910,7 @@ function preparePr(repo, pr, slot, ghRun) {
       errors.length = 0;
       break;
     } catch (e) {
-      errors.push(String(e.stderr ?? e.message).trim());
+      errors.push(String((isObjectLike(e) ? e.stderr : undefined) ?? messageOf(e)).trim());
     }
   }
   if (errors.length) throw new NotChecked(`git fetch 没成：${errors.join('；')}`);
@@ -842,7 +930,13 @@ function preparePr(repo, pr, slot, ghRun) {
   return { ...info, head: got, tree, merged, mergeCommit };
 }
 
-/** 给审的人的题面。挡不挡由脚本按标签判（parseReview / judgeReview），所以每条必须改的两个标签是题面里的硬要求。 */
+/**
+ * 给审的人的题面。挡不挡由脚本按标签判（parseReview / judgeReview），所以每条必须改的两个标签是题面里的硬要求。
+ * @param {number} pr
+ * @param {PromptInfo} info
+ * @param {boolean} ui
+ * @param {boolean} fast
+ */
 export function reviewPrompt(pr, info, ui, fast) {
   const files = (info.files ?? []).map((f) => f.path);
   return [
@@ -890,7 +984,11 @@ export function reviewPrompt(pr, info, ui, fast) {
 
 // ---------- 反方（拍板前的分析） ----------
 
-/** 反方的结论行。认不出 = null。 */
+/**
+ * 反方的结论行。认不出 = null。
+ * @param {unknown} text
+ * @returns {{ agree: boolean, objections: number } | null}
+ */
 export function parseCritique(text) {
   const lines = String(text ?? '')
     .split(/\r?\n/)
@@ -903,6 +1001,7 @@ export function parseCritique(text) {
   return n > 0 ? { agree: false, objections: n } : null;
 }
 
+/** @param {string} question */
 function blindPrompt(question) {
   return [
     '下面是一道设计题。独立给出你的方案：不知道别人怎么想，也不要迎合谁。',
@@ -919,6 +1018,7 @@ function blindPrompt(question) {
   ].join('\n');
 }
 
+/** @param {string} material */
 function critiquePrompt(material) {
   return [
     '你是「反方」：一个全新会话，另一家模型。下面是另一个 AI（总指挥）准备交给创始人拍板的分析和选项。',
@@ -947,13 +1047,15 @@ function critiquePrompt(material) {
   ].join('\n');
 }
 
+/** @param {Options & { text: string }} o */
 async function critique(o) {
   const src = resolve(o.text);
+  /** @type {string} */
   let material;
   try {
     material = readFileSync(src, 'utf8');
   } catch (e) {
-    throw new NotChecked(`读不到 ${src}（${e.code ?? e.message}）`);
+    throw new NotChecked(`读不到 ${src}（${errCode(e) ?? messageOf(e)}）`);
   }
   if (!material.trim()) throw new NotChecked(`${src} 是空的`);
   if (!o.blind) {
@@ -1005,7 +1107,7 @@ async function critique(o) {
     console.log(out);
     process.exitCode = v ? (v.agree ? 0 : 1) : 2;
   } catch (e) {
-    writeFileSync(out, `# 反方：${name}：没查成\n\n- 题面：${src}\n- 原因：${e.message}\n`);
+    writeFileSync(out, `# 反方：${name}：没查成\n\n- 题面：${src}\n- 原因：${messageOf(e)}\n`);
     console.log(out);
     throw e;
   }
