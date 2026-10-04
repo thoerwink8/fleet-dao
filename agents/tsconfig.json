@@ -1,7 +1,6 @@
 {
   "extends": "../tsconfig.base.json",
-  // 技能和钩子的 .mjs 被同步工具原样装到各台机器、纯 node 直接跑（没有编译步骤），所以不能改成 .ts：
-  // 用 JSDoc 类型 + checkJs 在这里过严格检查。一个脚本补完类型就把它（和它 import 的 .mjs）加进 include。
   "compilerOptions": { "allowJs": true, "checkJs": true },
-  "include": ["test", "skills/commander/scripts/france-lib.mjs", "skills/commander/scripts/france-query.mjs"]
+  "include": ["test"],
+  "files": ["skills/commander/scripts/france-lib.mjs", "skills/commander/scripts/france-query.mjs"]
 }
