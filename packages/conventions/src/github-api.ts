@@ -101,13 +101,17 @@ export interface PullHead {
   baseRef: string;
 }
 
-/** 一张开着的单或 PR：标题、正文、评论（分支体检查「有没有被提到」用）。 */
+/** 一张开着的单或 PR：标题、正文、评论（分支体检查「有没有被提到」用）、谁开的（认巡检单用）。 */
 export interface OpenThread {
   number: number;
   isPr: boolean;
   title: string;
   body: string;
   comments: string[];
+  /** 开单的人（login）；账号没了是 null。 */
+  author: string | null;
+  /** 开单的人和仓的关系（OWNER、MEMBER、COLLABORATOR、CONTRIBUTOR、NONE…）。 */
+  association: string;
 }
 
 /** GitHub 动态记录里一条分支的一次推送、新建、删除（/activity）。 */
@@ -125,8 +129,13 @@ export interface GitHubBranches {
   /** 仓的默认分支名。 */
   defaultBranch(): Promise<string>;
   branches(): Promise<RemoteBranch[]>;
-  /** 本仓所有 PR（开着的、关了的、合了的）。 */
-  pulls(): Promise<PullHead[]>;
+  /** 开着的 PR（fork 来的也在内）。 */
+  openPulls(): Promise<PullHead[]>;
+  /**
+   * 头是本仓这条分支的 PR（开着的、关了的、合了的）。按分支查，不一次列全部 PR：全部 PR 一天几十个地涨，
+   * 几个月就翻过 50 页的上限，整轮就读不成了。
+   */
+  pullsForHead(branch: string): Promise<PullHead[]>;
   /** 开着的单和开着的 PR，带标题、正文和全部评论。 */
   openThreads(): Promise<OpenThread[]>;
   /** 这条分支最近的动态（新的在前，最多 100 条）；没有记录是空列表。 */
@@ -344,9 +353,21 @@ export function liveGitHub(
         return { name: r.name, sha, protected: r.protected };
       });
     },
-    async pulls() {
-      const rows = await pages(`/repos/${repo}/pulls?state=all&per_page=100`, 'PR');
-      return rows.map((r) => toPullHead(r));
+    async openPulls() {
+      const rows = await pages(`/repos/${repo}/pulls?state=open&per_page=100`, '开着的 PR');
+      return rows.map((r) => toPullHead(r, '开着的 PR'));
+    },
+    async pullsForHead(branch) {
+      const owner = repo.split('/')[0];
+      const what = ` ${branch} 的 PR`;
+      const rows = await pages(
+        `/repos/${repo}/pulls?state=all&head=${owner}:${encodeURIComponent(branch)}&per_page=100`,
+        what,
+      );
+      const found = rows.map((r) => toPullHead(r, what));
+      // head 过滤要是被 GitHub 忽略了（参数写错、接口变了），回来的就是别的分支的 PR：认不出，不拿它判
+      if (found.some((p) => p.headRef !== branch)) throw new Error(`读${what}，回来的 PR 头不是这条分支`);
+      return found;
     },
     async openThreads() {
       const what = '开着的单和 PR';
@@ -357,8 +378,24 @@ export function liveGitHub(
         if (i.body === undefined) throw new Error(`读${what}，#${i.number} 认不出（body）`);
         // 接口给了评论数且是 0 就不再去读（省一次请求）；给的不是数就照读，不猜。
         const count = isObject(r) && typeof r.comments === 'number' ? r.comments : undefined;
+        // 开单的人认不出就抛：巡检单只认仓里的人或 Actions 开的，猜错了就会照外人写的勾删分支
+        const user = isObject(r) ? r.user : undefined;
+        const author =
+          user === null ? null : isObject(user) && typeof user.login === 'string' ? user.login : undefined;
+        const association = isObject(r) ? r.author_association : undefined;
+        if (author === undefined || typeof association !== 'string') {
+          throw new Error(`读${what}，#${i.number} 认不出（user、author_association）`);
+        }
         const comments = count === 0 ? [] : await readComments(i.number);
-        threads.push({ number: i.number, isPr: i.isPr, title: i.title, body: i.body, comments });
+        threads.push({
+          number: i.number,
+          isPr: i.isPr,
+          title: i.title,
+          body: i.body,
+          comments,
+          author,
+          association,
+        });
       }
       return threads;
     },

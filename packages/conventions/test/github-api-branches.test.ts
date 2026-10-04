@@ -52,6 +52,22 @@ describe('分支体检读 GitHub', () => {
     await expect(client.defaultBranch()).rejects.toThrow(/认不出（default_branch）/);
   });
 
+  it('按分支查 PR：head 带 owner、分支名转义；回来的头不是这条分支（过滤没生效）就抛，不拿别的分支的 PR 判', async () => {
+    const url = `${API}/pulls?state=all&head=o:${encodeURIComponent('feat/x')}&per_page=100`;
+    const ok = gh({ [`GET ${url}`]: () => json([pull()]) });
+    expect((await ok.client.pullsForHead('feat/x')).map((p) => p.number)).toEqual([5]);
+    const wrong = gh({
+      [`GET ${url}`]: () => json([pull({ head: { ref: 'other', sha: SHA, repo: null } })]),
+    });
+    await expect(wrong.client.pullsForHead('feat/x')).rejects.toThrow(/回来的 PR 头不是这条分支/);
+    const open = gh({
+      [`GET ${API}/pulls?state=open&per_page=100`]: () => json([pull({ state: 'open', merged_at: null })]),
+    });
+    expect(await open.client.openPulls()).toEqual([
+      expect.objectContaining({ number: 5, state: 'open', merged: false }),
+    ]);
+  });
+
   it('PR：头、目标分支、合没合；fork 被删了 head.repo 是 null', async () => {
     expect(toPullHead(pull())).toEqual({
       number: 5,
@@ -88,6 +104,8 @@ describe('分支体检读 GitHub', () => {
             milestone: null,
             body: '正文',
             comments: 2,
+            user: { login: 'o' },
+            author_association: 'OWNER',
           },
           {
             number: 2,
@@ -99,15 +117,43 @@ describe('分支体检读 GitHub', () => {
             body: null,
             comments: 0,
             pull_request: {},
+            user: null,
+            author_association: 'NONE',
           },
         ]),
       [`GET ${API}/issues/1/comments?per_page=100`]: () => json([{ body: '评论一' }, { body: '评论二' }]),
     });
     expect(await client.openThreads()).toEqual([
-      { number: 1, isPr: false, title: 'a', body: '正文', comments: ['评论一', '评论二'] },
-      { number: 2, isPr: true, title: 'b', body: '', comments: [] },
+      {
+        number: 1,
+        isPr: false,
+        title: 'a',
+        body: '正文',
+        comments: ['评论一', '评论二'],
+        author: 'o',
+        association: 'OWNER',
+      },
+      { number: 2, isPr: true, title: 'b', body: '', comments: [], author: null, association: 'NONE' },
     ]);
     expect(seen.filter((s) => s.url.includes('/comments'))).toHaveLength(1);
+  });
+
+  it('开单的人认不出（没有 author_association、user 不像账号）：抛，不猜是谁开的（巡检单只认仓里的人开的）', async () => {
+    const row = (extra: Record<string, unknown>) => ({
+      number: 1,
+      title: 'a',
+      state: 'open',
+      created_at: 'x',
+      labels: [],
+      milestone: null,
+      body: '',
+      comments: 0,
+      ...extra,
+    });
+    for (const bad of [{ user: { login: 'o' } }, { user: 'o', author_association: 'OWNER' }]) {
+      const { client } = gh({ [`GET ${API}/issues?state=open&per_page=100`]: () => json([row(bad)]) });
+      await expect(client.openThreads()).rejects.toThrow(/认不出（user、author_association）/);
+    }
   });
 
   it('开着的单的评论读不到：抛（不拿空当没人提到）', async () => {
@@ -123,6 +169,8 @@ describe('分支体检读 GitHub', () => {
             milestone: null,
             body: '',
             comments: 1,
+            user: { login: 'o' },
+            author_association: 'OWNER',
           },
         ]),
       [`GET ${API}/issues/1/comments?per_page=100`]: () => new Response('', { status: 502 }),

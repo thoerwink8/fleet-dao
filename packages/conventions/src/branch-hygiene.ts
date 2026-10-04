@@ -10,6 +10,7 @@
 // - 读不到、认不出一律「没查成」：整份清单（分支、PR、开着的单）读不到这一轮一条不判、一条不删；一条分支的内容或动态读不到，
 //   这一条判「没查成」、不删，别的照判。不拿空冒充「没有」。每条路径在 test/branch-hygiene.test.ts 里有故意造出的失败。
 // - 巡检单正文是人和机器的共用状态（勾选框）：只有带记号的那几行算数，正文每轮按这一轮的判决重写，人勾过的照抄过去。
+//   只认仓里的人或 Actions 开的那张（trustedBoard）：公开仓谁都能开一张带记号、勾好删的单。
 import { type ContentFacts, contentFacts, type GitExec, type MainIndex, mainIndex } from './branch-git.ts';
 import { FLOW_BRANCH_PATTERN } from './flow-branch.ts';
 import type {
@@ -82,9 +83,9 @@ export type LinkedIssue =
   | { number: number; missing: true }
   | { number: number; error: string };
 
-/** 分支名里像单号的那个数（日期不算）；没有回 undefined。 */
+/** 分支名里像单号的第一个数（前后是 / 或 -，日期不算）；没有回 undefined。 */
 export function issueNumberIn(branch: string): number | undefined {
-  const m = /(?:^|[/-])(\d{2,5})(?=-|$)/.exec(branch.replace(/\d{4}-\d{2}-\d{2}(?:-\d{4})?/g, ''));
+  const m = /(?:^|[/-])(\d{1,6})(?=-|$)/.exec(branch.replace(/\d{4}-\d{2}-\d{2}(?:-\d{4})?/g, ''));
   return m?.[1] ? Number(m[1]) : undefined;
 }
 
@@ -440,6 +441,14 @@ export interface HygieneResult {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/**
+ * 认得的巡检单：仓主、组织成员、协作者开的，或 Actions 自己开的（定时任务第一次跑开的那张）。公开仓谁都能开单，
+ * 外人开一张带记号、勾好「删」的单，要是也认，就能借机器的手删掉有产出的分支。改正文只有开单的人和有写权限的人能改。
+ */
+export function trustedBoard(t: Pick<OpenThread, 'author' | 'association'>): boolean {
+  return ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(t.association) || t.author === 'github-actions[bot]';
+}
+
 export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Promise<HygieneResult> {
   const { gh, git, now } = deps;
   const facts = deps.facts ?? {
@@ -457,12 +466,12 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
   };
   let defaultBranch: string;
   let branches: RemoteBranch[];
-  let pulls: PullHead[];
+  let openPulls: PullHead[];
   let threads: OpenThread[];
   try {
     defaultBranch = await gh.defaultBranch();
     branches = await gh.branches();
-    pulls = await gh.pulls();
+    openPulls = await gh.openPulls();
     threads = await gh.openThreads();
   } catch (e) {
     result.notQueried.push(`读不到 GitHub（${errText(e)}），这一轮一条没判、一条没删`);
@@ -476,22 +485,25 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
     return result;
   }
 
-  const boards = threads
-    .filter((t) => !t.isPr && t.body.includes(BOARD_MARKER))
-    .sort((a, b) => a.number - b.number);
+  const marked = threads.filter((t) => !t.isPr && t.body.includes(BOARD_MARKER));
+  const boards = marked.filter(trustedBoard).sort((a, b) => a.number - b.number);
   const board = boards[0];
   if (boards.length > 1) {
     result.notes.push(
       `有 ${boards.length} 张巡检单（${prList(boards.map((b) => b.number))}），用最早的 #${board?.number}；别的关掉`,
     );
   }
+  const fake = marked.filter((t) => !trustedBoard(t)).map((t) => t.number);
+  if (fake.length) {
+    result.notes.push(
+      `${prList(fake)} 正文带巡检单记号，但不是仓里的人或 Actions 开的：不认，上面的勾一个不算`,
+    );
+  }
   const parsed = parseBoard(board?.body ?? '');
   const owner = deps.repo.split('/')[0] ?? '';
-  const ownPulls = pulls.filter((p) => p.headRepo?.toLowerCase() === deps.repo.toLowerCase());
+  const own = (p: PullHead) => p.headRepo?.toLowerCase() === deps.repo.toLowerCase();
   const openBases = new Map<string, number[]>();
-  for (const p of pulls) {
-    if (p.state === 'open') openBases.set(p.baseRef, [...(openBases.get(p.baseRef) ?? []), p.number]);
-  }
+  for (const p of openPulls) openBases.set(p.baseRef, [...(openBases.get(p.baseRef) ?? []), p.number]);
 
   let index: MainIndex | { error: string } | undefined;
   const mainIdx = () => {
@@ -506,21 +518,34 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
   };
 
   for (const b of [...branches].sort((x, y) => x.name.localeCompare(y.name))) {
-    const mine = ownPulls.filter((p) => p.headRef === b.name);
     const c: BranchCase = {
       branch: b,
       isDefault: b.name === defaultBranch,
-      openHeadPrs: mine.filter((p) => p.state === 'open').map((p) => p.number),
+      openHeadPrs: openPulls.filter((p) => own(p) && p.headRef === b.name).map((p) => p.number),
       openBasePrs: openBases.get(b.name) ?? [],
-      mergedExact: mine.find((p) => p.merged && p.headSha === b.sha)?.number,
-      mergedOther: mine.filter((p) => p.merged && p.headSha !== b.sha).map((p) => p.number),
-      closedPrs: mine
-        .filter((p) => p.state === 'closed' && !p.merged)
-        .map((p) => ({ number: p.number, headSha: p.headSha })),
+      mergedExact: undefined,
+      mergedOther: [],
+      closedPrs: [],
       mentions: mentionedBy(b.name, threads, board?.number),
       decision: parsed.decisions.get(b.name),
     };
+    // 结构上就判得了的（默认、受保护、开着的 PR、勾了的、被提到的）不用再按分支查 PR；判不了再查它合过、关过的 PR
     let verdict = ruleVerdict(c);
+    if (!verdict) {
+      try {
+        const mine = (await gh.pullsForHead(b.name)).filter(own);
+        // 两次读之间刚开的 PR 也算开着的（不删它的分支）
+        c.openHeadPrs = mine.filter((p) => p.state === 'open').map((p) => p.number);
+        c.mergedExact = mine.find((p) => p.merged && p.headSha === b.sha)?.number;
+        c.mergedOther = mine.filter((p) => p.merged && p.headSha !== b.sha).map((p) => p.number);
+        c.closedPrs = mine
+          .filter((p) => p.state === 'closed' && !p.merged)
+          .map((p) => ({ number: p.number, headSha: p.headSha }));
+        verdict = ruleVerdict(c);
+      } catch (e) {
+        verdict = { kind: 'unknown', why: `这条分支的 PR 没查成：${errText(e)}` };
+      }
+    }
     if (!verdict) {
       const idx = mainIdx();
       try {

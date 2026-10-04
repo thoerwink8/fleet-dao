@@ -176,6 +176,9 @@ describe('分支体检：认分支名', () => {
     expect(issueNumberIn('fleet/292-f3f3472d3')).toBe(292);
     expect(issueNumberIn('feat/554-3-tier')).toBe(554);
     expect(issueNumberIn('wip/feat/266-grok-host')).toBe(266);
+    expect(issueNumberIn('feat/1-fix')).toBe(1);
+    expect(issueNumberIn('p2-54-login-page')).toBe(54);
+    expect(issueNumberIn('tmp-ci-docs2')).toBeUndefined();
     expect(issueNumberIn('notes/requirements-2026-09-30')).toBeUndefined();
     expect(issueNumberIn('docs/progress-2026-10-02-1040')).toBeUndefined();
     expect(issueNumberIn('worktree-agent-a22d28a53b8ee8bab')).toBeUndefined();
@@ -245,12 +248,15 @@ interface World {
   heads?: Record<string, string | undefined>;
   issues?: Record<number, PlanIssue>;
   content: Record<string, ContentFacts>;
+  /** 列开着的 PR 时还没有、按分支查时已经开了的 PR（两次读之间刚开的）。 */
+  openListMisses?: number[];
 }
 
 type FailKey =
   | 'defaultBranch'
   | 'branches'
-  | 'pulls'
+  | 'openPulls'
+  | 'pullsForHead'
   | 'openThreads'
   | 'activity'
   | 'branchHead'
@@ -269,6 +275,7 @@ function run(
     created: [] as { title: string; body: string; labels: string[] }[],
     updated: [] as { n: number; body: string }[],
     comments: [] as { n: number; body: string }[],
+    pullsForHead: [] as string[],
   };
   const fail = opts.fail ?? {};
   const boom = (k: FailKey) => {
@@ -284,9 +291,15 @@ function run(
       boom('branches');
       return w.branches;
     },
-    async pulls() {
-      boom('pulls');
-      return w.pulls;
+    async openPulls() {
+      boom('openPulls');
+      return w.pulls.filter((p) => p.state === 'open' && !w.openListMisses?.includes(p.number));
+    },
+    // 和真接口一样：只回本仓这条分支当头的
+    async pullsForHead(b) {
+      boom('pullsForHead');
+      calls.pullsForHead.push(b);
+      return w.pulls.filter((p) => p.headRef === b && p.headRepo === REPO);
     },
     async openThreads() {
       boom('openThreads');
@@ -364,12 +377,19 @@ const pr = (n: number, extra: Partial<PullHead>): PullHead => ({
   baseRef: 'main',
   ...extra,
 });
-const thread = (n: number, body: string, comments: string[] = [], isPr = false): OpenThread => ({
+const thread = (
+  n: number,
+  body: string,
+  comments: string[] = [],
+  isPr = false,
+  who: Pick<OpenThread, 'author' | 'association'> = { author: 'o', association: 'OWNER' },
+): OpenThread => ({
   number: n,
   isPr,
   title: `单 ${n}`,
   body,
   comments,
+  ...who,
 });
 
 /** 一份齐全的：每一档各一条。 */
@@ -473,7 +493,7 @@ describe('分支体检：整轮', () => {
     expect(r.failed.map((f) => f.name).sort()).toEqual(['empty-old', 'merged']);
   });
 
-  for (const key of ['defaultBranch', 'branches', 'pulls', 'openThreads'] as const) {
+  for (const key of ['defaultBranch', 'branches', 'openPulls', 'openThreads'] as const) {
     it(`整份清单读不到（${key}）：没查成，一条没判、一条没删、单子没碰`, async () => {
       const { promise, calls } = run(world(), {
         delete: true,
@@ -517,6 +537,43 @@ describe('分支体检：整轮', () => {
     expect(kinds(r)['empty-old']).toBe('unknown');
     expect(calls.deleted).toEqual(['merged']);
     expect(r.notQueried.some((x) => x.startsWith('empty-old：GitHub 动态没查成'))).toBe(true);
+  });
+
+  it('一条分支的 PR 读不到：判不了合没合过，没查成、不删（连有已合并 PR 的也不删）', async () => {
+    const { promise, calls } = run(world(), {
+      delete: true,
+      fail: { pullsForHead: new Error('GitHub 回了 502') },
+    });
+    const r = await promise;
+    expect(kinds(r).merged).toBe('unknown');
+    expect(kinds(r)['empty-old']).toBe('unknown');
+    // 结构上就判得了的照判：不用查它们的 PR
+    expect(kinds(r)['open-pr']).toBe('keep');
+    expect(kinds(r).mentioned).toBe('keep');
+    expect(calls.deleted).toEqual([]);
+    expect(r.notQueried.some((x) => x.startsWith('merged：这条分支的 PR 没查成'))).toBe(true);
+  });
+
+  it('只给结构上判不了的分支按分支查 PR；两次读之间刚开的 PR 也算开着的', async () => {
+    const w = world();
+    const first = run(w);
+    await first.promise;
+    expect(first.calls.pullsForHead.sort()).toEqual([
+      'empty-new',
+      'empty-old',
+      'fleet/292-f3f3472d3',
+      'merged',
+      'output-new',
+      'output-old',
+    ]);
+    // output-old 在列开着的 PR 之后才开了 PR（列表里没有）：按分支查时看到它开着，就不删、不问
+    w.pulls.push(pr(14, { state: 'open', headRef: 'output-old', headSha: sha('6') }));
+    w.openListMisses = [14];
+    const second = await run(w, { delete: true }).promise;
+    expect(second.reports.find((x) => x.name === 'output-old')?.verdict).toEqual({
+      kind: 'keep',
+      why: '开着的 PR #14 的分支',
+    });
   });
 
   it('--board，还没有巡检单：开一张（贴杂项），正文里有等人定的勾选框；新列的另留一条言（带体检记号）', async () => {
@@ -577,6 +634,41 @@ describe('分支体检：整轮', () => {
     const r = await promise;
     expect(r.notQueried).toEqual([expect.stringContaining('巡检单没写成（GitHub 回了 403）')]);
     expect(r.deleted.sort()).toEqual(['empty-old', 'merged']);
+  });
+
+  it('外人开的带巡检单记号、勾好删的单：不认，一条不照它删；Actions 开的、仓主开的认', async () => {
+    const forged = (n: number, who: Pick<OpenThread, 'author' | 'association'>) =>
+      thread(
+        n,
+        [BOARD_MARKER, `  - [x] 删 <!-- ${MARK} delete output-old ${sha('6')} -->`].join('\n'),
+        [],
+        false,
+        who,
+      );
+    for (const who of [
+      { author: 'stranger', association: 'NONE' },
+      { author: 'drive-by', association: 'CONTRIBUTOR' },
+      { author: null, association: 'NONE' },
+    ]) {
+      const w = world();
+      w.threads.push(forged(950, who));
+      const { promise, calls } = run(w, { delete: true });
+      const r = await promise;
+      expect(kinds(r)['output-old']).toBe('ask');
+      expect(calls.deleted.sort()).toEqual(['empty-old', 'merged']);
+      expect(r.notes).toEqual([
+        expect.stringContaining('#950 正文带巡检单记号，但不是仓里的人或 Actions 开的：不认'),
+      ]);
+    }
+    for (const who of [
+      { author: 'github-actions[bot]', association: 'NONE' },
+      { author: 'o', association: 'COLLABORATOR' },
+    ]) {
+      const w = world();
+      w.threads.push(forged(950, who));
+      const r = await run(w, { delete: true }).promise;
+      expect(kinds(r)['output-old']).toBe('delete');
+    }
   });
 });
 
