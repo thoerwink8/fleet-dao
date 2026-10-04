@@ -7,7 +7,9 @@
 // 机器人 × 仓），found = 处理了几个问题（删掉的树、改成要人拍的树、合并 PR 对上的问题、记账不全的
 // PR、撤掉的过时提醒、再推的提醒、权限不对的和撤掉的权限提醒）。一部分没跑成、只查了一部分，照实记 failed / partial，
 // 写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
+
 import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
 import { type AutoMergeCheckDeps, checkAutoMerges } from './auto-merge-check.ts';
@@ -20,7 +22,7 @@ import {
   type ReconcileCheckDeps,
   retireWorkflowAlerts,
 } from './reconcile-checks.ts';
-import { clip, message, type SweepPart } from './reconcile-common.ts';
+import { clip, type SweepPart } from './reconcile-common.ts';
 import { sweepWorktrees, type WorktreeSweepDeps } from './worktree-sweep.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
@@ -90,7 +92,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     before = (await listOpen(deps)).alerts;
   } catch (err) {
     deps.log('warn', '每小时对账：列没处理的提醒没成，工作树照删，和树有关的提醒留到下一轮撤', {
-      error: message(err),
+      error: errMessage(err),
     });
   }
   const trees = await sweepWorktrees(deps, before);
@@ -105,7 +107,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     const now = await listOpen(deps);
     alerts = await sweepAlerts(deps, now.alerts, now.truncated);
   } catch (err) {
-    alerts = { failed: `列没处理的提醒没成：${message(err)}`, scanned: 0, found: 0, unchecked: [] };
+    alerts = { failed: `列没处理的提醒没成：${errMessage(err)}`, scanned: 0, found: 0, unchecked: [] };
   }
   // 权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰
   const apps = await checkGitHubApps(deps);
@@ -122,7 +124,7 @@ export async function runHourlyReconcileJob(deps: HourlyReconcileJobDeps): Promi
   try {
     result = await round(deps);
   } catch (err) {
-    result = { outcome: 'failed', why: `每小时对账没跑成：${message(err)}` };
+    result = { outcome: 'failed', why: `每小时对账没跑成：${errMessage(err)}` };
   }
   await deps.runs.finish(runId, result, deps.now());
   const run: HourlyReconcileRun = {

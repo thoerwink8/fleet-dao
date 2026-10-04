@@ -5,13 +5,13 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type CgroupScope, IO_FILES, type SpawnInfo } from '@fleet-dao/adapters';
 import { getSessionRun } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { AwaitSessionInput } from '../ports.ts';
 import type { HostRunSpec } from './hosts.ts';
 import { readSessionMeta } from './session-io.ts';
 import type { createLive, Live } from './session-live.ts';
 import type { createProgress } from './session-progress.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText } from './session-util.ts';
 
 /** 接回要用到的、别的块造出来的几个函数。 */
 export interface ReattachParts {
@@ -45,7 +45,7 @@ export function createReattach(shared: SessionShared, parts: ReattachParts) {
     try {
       prompt = await readFile(join(dir, IO_FILES.prompt), 'utf8');
     } catch (error) {
-      return { lost: `接不回：提示词文件读不成（${errorText(error)}）` };
+      return { lost: `接不回：提示词文件读不成（${errMessage(error)}）` };
     }
     // 等库、读文件的这一会儿，同一个会话可能已经被别的看守接回了：用那一个
     const known = registry.get(input.runId);

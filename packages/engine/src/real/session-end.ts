@@ -4,6 +4,7 @@
 
 import { judgeRun } from '@fleet-dao/adapters';
 import { runProgressFacts } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { AwaitSessionInput, SessionEnd } from '../ports.ts';
 import type { HostReport } from './hosts.ts';
 import { explainKill, killSignal, scopeOomKills } from './kill-evidence.ts';
@@ -11,7 +12,7 @@ import { ENGINE_STOP_CODE, orgSwitchFailure } from './session-codes.ts';
 import type { Live } from './session-live.ts';
 import type { createOutput } from './session-output.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText, withRawError } from './session-util.ts';
+import { withRawError } from './session-util.ts';
 import type { SegmentOutcome } from './sessions-segment.ts';
 
 const NEEDS = new Set(['human', 'info', 'access', 'other']);
@@ -122,7 +123,7 @@ export function createEnd(shared: SessionShared, parts: ReturnType<typeof create
     try {
       progress = await runProgressFacts(db, live.runId);
     } catch (error) {
-      return failed('delivery_unknown', `会话交没交活没查成（读不到进度）：${errorText(error)}`);
+      return failed('delivery_unknown', `会话交没交活没查成（读不到进度）：${errMessage(error)}`);
     }
     const done = progress?.done ?? null;
     const blocked = progress?.blocked ?? null;

@@ -1,8 +1,8 @@
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { TaskContext } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import { mapped } from './mirror.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText } from './session-util.ts';
 import type { UserTree } from './user-git.ts';
 
 export function createTree(shared: SessionShared) {
@@ -39,7 +39,7 @@ export function createTree(shared: SessionShared) {
       log('会话的临时目录没删掉（工人下次起来时再清）', {
         runId,
         ...(dir ? { dir } : {}),
-        error: errorText(error),
+        error: errMessage(error),
       });
     }
   }
@@ -53,7 +53,7 @@ export function createTree(shared: SessionShared) {
     try {
       dirs = await trees.listTmp();
     } catch (error) {
-      log('上一轮会话留下的临时目录没清成：列不出来', { error: errorText(error) });
+      log('上一轮会话留下的临时目录没清成：列不出来', { error: errMessage(error) });
       return 0;
     }
     const mine = new Set([...registry.keys(), ...keep].map((runId) => trees.tmpFor(runId)));
@@ -64,7 +64,7 @@ export function createTree(shared: SessionShared) {
       try {
         if (!(await trees.remove(dir)).gone) removed += 1;
       } catch (error) {
-        failed.push(`${dir}：${errorText(error)}`);
+        failed.push(`${dir}：${errMessage(error)}`);
       }
     }
     if (failed.length > 0) {

@@ -5,13 +5,13 @@
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getSessionRun } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { HostRunSpec } from './hosts.ts';
 import type { OomCounters } from './kill-evidence.ts';
 import { REATTACH_MARGIN_MS } from './session-codes.ts';
 import { readSessionMeta, type SessionMeta } from './session-io.ts';
 import type { Live } from './session-live.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText } from './session-util.ts';
 
 const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
@@ -60,7 +60,7 @@ export function createDetached(shared: SessionShared) {
     try {
       await rm(dir, { recursive: true, force: true });
     } catch (error) {
-      log('会话的收发目录没删掉（工人下次起来时再清）', { runId, dir, error: errorText(error) });
+      log('会话的收发目录没删掉（工人下次起来时再清）', { runId, dir, error: errMessage(error) });
     }
   }
 
@@ -71,7 +71,7 @@ export function createDetached(shared: SessionShared) {
     try {
       names = await readdir(deps.ioRoot);
     } catch (error) {
-      log('上一轮会话留下的收发目录没清成：列不出来', { dir: deps.ioRoot, error: errorText(error) });
+      log('上一轮会话留下的收发目录没清成：列不出来', { dir: deps.ioRoot, error: errMessage(error) });
       return;
     }
     for (const name of names) {
@@ -79,7 +79,7 @@ export function createDetached(shared: SessionShared) {
       try {
         await rm(join(deps.ioRoot, name), { recursive: true, force: true });
       } catch (error) {
-        log('上一轮会话留下的收发目录没删掉（下次起来再清）', { name, error: errorText(error) });
+        log('上一轮会话留下的收发目录没删掉（下次起来再清）', { name, error: errMessage(error) });
       }
     }
   }
@@ -111,7 +111,7 @@ export function createDetached(shared: SessionShared) {
     try {
       names = await readdir(deps.ioRoot);
     } catch (error) {
-      log('收发目录列不出来，引擎不在时跑完的会话接不回', { dir: deps.ioRoot, error: errorText(error) });
+      log('收发目录列不出来，引擎不在时跑完的会话接不回', { dir: deps.ioRoot, error: errMessage(error) });
       return [];
     }
     const out: string[] = [];

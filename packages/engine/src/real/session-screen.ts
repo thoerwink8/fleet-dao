@@ -2,9 +2,9 @@
 // 从 sessions.ts 拆出来，函数体原样，sessions.ts 原样重新导出。
 
 import type { RepoRef } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import { PortError } from '../ports.ts';
 import type { SessionPortsDeps } from './session-types.ts';
-import { errorText } from './session-util.ts';
 
 /** 发给别家的材料在卫生检查里叫什么（报错里的位置只有它和行号、规则名，没有值）。 */
 export interface Material {
@@ -61,14 +61,14 @@ export function screenForOtherVendor(
         'MATERIAL_BLOCKED',
         where
           ? `${material.what}没过卫生检查，没发给${to}：查出 ${findings.length} 处（${where}）`
-          : `${material.what}没过卫生检查，没发给${to}：${errorText(error)}`,
+          : `${material.what}没过卫生检查，没发给${to}：${errMessage(error)}`,
         { retryable: false, details },
       );
     }
     if (code === 'HYGIENE_UNSCANNED') {
-      throw new PortError(code, errorText(error), { retryable: false, details });
+      throw new PortError(code, errMessage(error), { retryable: false, details });
     }
-    throw new PortError('HYGIENE_UNSCANNED', `${material.what}没扫成，不发给${to}：${errorText(error)}`, {
+    throw new PortError('HYGIENE_UNSCANNED', `${material.what}没扫成，不发给${to}：${errMessage(error)}`, {
       retryable: false,
     });
   }

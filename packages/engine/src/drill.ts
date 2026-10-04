@@ -8,6 +8,7 @@
 //   抢同一个文件（jobs/schedules.ts）。
 // - 每一步的时刻从这一轮的结局里读（CanaryRun 的 startedAt、endedAt、steps）；换版本之前的引擎起的一轮没有这几样，照实说读不到，
 //   不拿 0 顶。
+
 import {
   CANARY_STAGE_NAMES,
   CANARY_VERDICTS,
@@ -15,9 +16,9 @@ import {
   type CanaryVerdict,
   type RecordedCanaryStage,
 } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import { type Client, ScheduleNotFoundError, ScheduleOverlapPolicy } from '@temporalio/client';
 import { CANARY_JOB, CANARY_MAX_MINUTES, spanWords, stepSpans } from './jobs/canary.ts';
-import { message } from './jobs/reconcile-common.ts';
 
 /** 0 通过；1 断了；2 没跑成或没查成。 */
 export type DrillExit = 0 | 1 | 2;
@@ -155,7 +156,7 @@ export async function runDrill(deps: DrillDeps): Promise<DrillExit> {
   try {
     round = await deps.start();
   } catch (err) {
-    deps.print(`没查成：没起成这一轮演练（${message(err)}）`);
+    deps.print(`没查成：没起成这一轮演练（${errMessage(err)}）`);
     return 2;
   }
   const most = `一轮最长 ${CANARY_MAX_MINUTES / 60} 小时`;
@@ -169,7 +170,7 @@ export async function runDrill(deps: DrillDeps): Promise<DrillExit> {
     result = await deps.result(round);
   } catch (err) {
     deps.print(
-      `没查成：这一轮巡检的工作流没给结论就失败了（看一回的活动连着失败，多半是库或 Temporal 出事；库里这一轮停在「在跑」）：${message(err)}`,
+      `没查成：这一轮巡检的工作流没给结论就失败了（看一回的活动连着失败，多半是库或 Temporal 出事；库里这一轮停在「在跑」）：${errMessage(err)}`,
     );
     return 2;
   }

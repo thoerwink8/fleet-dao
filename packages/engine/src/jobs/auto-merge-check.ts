@@ -11,10 +11,12 @@
 //   留给创始人（或照先审后合人自己挂）。
 // - 任务工作流（#632）起的 PR（分支 fleet/<单号>-t<8 位>）不归这里挂：它们的自动合并只由工作流在冷验收通过之后挂；
 //   这里照 CI 绿就挂，会抢在验收之前把没验过的合进主线。判在读文件和清单之前（便宜、也不会因为清单读不出报一堆提醒）。
+
 import { parseStandardPaths, standardFiles } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import { isTaskBranch } from '../task-branch.ts';
-import { clip, message, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
+import { clip, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
 /** 自动合并兜底用的 PR 的样子（claims 的 PullFacts 简化版）。 */
 export interface PrAutoMergeCandidate {
@@ -129,7 +131,7 @@ async function reportFailure(
       link: `https://github.com/${slug}/pull/${prNumber}`,
     });
   } catch (err) {
-    part.unchecked.push(`提醒 ${key} 报不进：${message(err)}`);
+    part.unchecked.push(`提醒 ${key} 报不进：${errMessage(err)}`);
     return;
   }
   part.unchecked.push(`${slug}#${prNumber} ${why}`);
@@ -167,7 +169,7 @@ async function judgeOne(
   }
   const files = await deps.gh.pullFiles(repo, pr.number);
   const text = await deps.gh.readStandardPathsFile(repo).catch((e) => {
-    throw new Error(`读改标准路径清单没成：${message(e)}`);
+    throw new Error(`读改标准路径清单没成：${errMessage(e)}`);
   });
   const parsed = parseStandardPaths(text);
   if (typeof parsed === 'string') {
@@ -208,7 +210,7 @@ export async function checkAutoMerges(deps: AutoMergeCheckDeps): Promise<SweepPa
   try {
     repos = await deps.repos();
   } catch (err) {
-    return { ...part, failed: `列受管的仓没成：${message(err)}` };
+    return { ...part, failed: `列受管的仓没成：${errMessage(err)}` };
   }
   /** 这轮扫到的开着的 PR 的提醒键：不再开着的（合了、关了）撤掉那条提醒。 */
   const seen = new Set<string>();
@@ -218,7 +220,7 @@ export async function checkAutoMerges(deps: AutoMergeCheckDeps): Promise<SweepPa
     try {
       pulls = await deps.gh.listPrs(repo);
     } catch (err) {
-      part.unchecked.push(`${slug}：读开着的 PR 没成：${message(err)}`);
+      part.unchecked.push(`${slug}：读开着的 PR 没成：${errMessage(err)}`);
       continue;
     }
     if (pulls.length > SCAN_LIMIT) {
@@ -232,7 +234,7 @@ export async function checkAutoMerges(deps: AutoMergeCheckDeps): Promise<SweepPa
       try {
         await judgeOne(deps, repo, pr, part);
       } catch (err) {
-        await reportFailure(deps, repo, pr.number, message(err), part);
+        await reportFailure(deps, repo, pr.number, errMessage(err), part);
       }
     }
   }
@@ -241,7 +243,7 @@ export async function checkAutoMerges(deps: AutoMergeCheckDeps): Promise<SweepPa
   try {
     open = await deps.autoMergeAlerts.listOpenByPrefix(AUTO_MERGE_ALERT_PREFIX);
   } catch (err) {
-    part.unchecked.push(`列没处理的提醒没成，自动合并那部分的旧提醒这一轮不撤：${message(err)}`);
+    part.unchecked.push(`列没处理的提醒没成，自动合并那部分的旧提醒这一轮不撤：${errMessage(err)}`);
     return part;
   }
   for (const alert of open) {
@@ -253,7 +255,7 @@ export async function checkAutoMerges(deps: AutoMergeCheckDeps): Promise<SweepPa
         why: '这张 PR 不再开在我们受管的仓里、或这一轮没扫到它，这条提醒撤了',
       });
     } catch (err) {
-      part.unchecked.push(`提醒 ${alert.dedupeKey} 撤不掉：${message(err)}`);
+      part.unchecked.push(`提醒 ${alert.dedupeKey} 撤不掉：${errMessage(err)}`);
     }
   }
   return part;

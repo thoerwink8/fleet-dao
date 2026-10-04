@@ -1,11 +1,11 @@
 import { openAlertsByPrefix, resolveAlertByKey, upsertAlert } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import { triageFailureAsked } from '../failure/ask.ts';
 import type { JevReply } from '../failure/jev.ts';
 import type { FailureVerdict, TriageChoice } from '../failure/types.ts';
 import type { SessionEnd } from '../ports.ts';
 import type { Live } from './session-live.ts';
 import type { SessionShared } from './session-types.ts';
-import { errorText } from './session-util.ts';
 import { poolHoldKey } from './store-ports.ts';
 
 export function createPoolHold(shared: SessionShared) {
@@ -27,7 +27,7 @@ export function createPoolHold(shared: SessionShared) {
           await resolveAlertByKey(db, { dedupeKey: poolHoldKey(live.poolId), by: 'engine' });
         }
       } catch (error) {
-        log('账号池的暂停没撤掉', { poolId: live.poolId, error: errorText(error) });
+        log('账号池的暂停没撤掉', { poolId: live.poolId, error: errMessage(error) });
       }
       return { routeOutcome: 'ok' };
     }
@@ -64,7 +64,7 @@ export function createPoolHold(shared: SessionShared) {
         },
       ));
     } catch (error) {
-      log('失败分流判不了这次会话（按不算路由账记）', { runId: live.runId, error: errorText(error) });
+      log('失败分流判不了这次会话（按不算路由账记）', { runId: live.runId, error: errMessage(error) });
       return { routeOutcome: 'neutral' };
     }
     const jevPart = asked ? { jev: asked } : {};
@@ -83,7 +83,7 @@ export function createPoolHold(shared: SessionShared) {
           body: [fix, verdict.reason].filter(Boolean).join('。'),
         });
       } catch (error) {
-        log('账号池暂停没写进库（选路照样会派过去）', { poolId: live.poolId, error: errorText(error) });
+        log('账号池暂停没写进库（选路照样会派过去）', { poolId: live.poolId, error: errMessage(error) });
       }
     }
     return { routeOutcome: verdict.routeOutcome, ...jevPart };

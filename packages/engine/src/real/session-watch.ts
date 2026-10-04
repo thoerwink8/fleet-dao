@@ -1,6 +1,7 @@
 import { reapSession, type SessionUser } from '@fleet-dao/adapters';
 import { finishSessionRun, getSessionRun, runProgressFacts } from '@fleet-dao/db';
 import type { RunOutcome } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { judgeStallWithJev } from '../failure/ask.ts';
 import { judgeStall } from '../failure/stall.ts';
 import {
@@ -20,7 +21,7 @@ import type { createProgress } from './session-progress.ts';
 import type { createReattach } from './session-reattach.ts';
 import type { createTree } from './session-tree.ts';
 import type { SessionShared } from './session-types.ts';
-import { asSessionUser, errorText } from './session-util.ts';
+import { asSessionUser } from './session-util.ts';
 
 const OUTCOME: Record<SessionEnd['outcome'], RunOutcome> = {
   done: 'ok',
@@ -79,7 +80,7 @@ export function createWatch(shared: SessionShared, parts: WatchParts) {
       if (r.leftovers > 0) return `（旧会话还剩 ${r.leftovers} 个进程没收掉）`;
       return r.found > 0 ? `（收掉了旧会话的 ${r.found} 个进程）` : '';
     } catch (error) {
-      return `（收旧会话时出错：${errorText(error)}）`;
+      return `（收旧会话时出错：${errMessage(error)}）`;
     }
   }
 
@@ -99,7 +100,7 @@ export function createWatch(shared: SessionShared, parts: WatchParts) {
     try {
       pendingAsk = (await runProgressFacts(db, live.runId, { saysLimit: 1 }))?.pendingAsk ?? null;
     } catch (error) {
-      log('停滞判断读不到在等的问题，这一轮不判', { runId: live.runId, error: errorText(error) });
+      log('停滞判断读不到在等的问题，这一轮不判', { runId: live.runId, error: errMessage(error) });
       return;
     }
     const iso = (ms: number) => new Date(ms).toISOString();
@@ -254,7 +255,7 @@ export function createWatch(shared: SessionShared, parts: WatchParts) {
         try {
           await checkStall(live);
         } catch (error) {
-          log('停滞判断出错（这一轮不判）', { runId: live.runId, error: errorText(error) });
+          log('停滞判断出错（这一轮不判）', { runId: live.runId, error: errMessage(error) });
         }
       }
     }
@@ -273,7 +274,7 @@ export function createWatch(shared: SessionShared, parts: WatchParts) {
         outcome: 'failed',
         failure: {
           code: error instanceof PortError ? error.code : 'LAUNCH_FAILED',
-          message: errorText(error),
+          message: errMessage(error),
           machine: deps.machine,
           runAsUser: live.user,
         },
@@ -312,7 +313,7 @@ export function createWatch(shared: SessionShared, parts: WatchParts) {
         ...(contextTokens === undefined ? {} : { contextTokens }),
       });
     } catch (error) {
-      log('会话结局没写进库（工作流记计时时会再写一次）', { runId: live.runId, error: errorText(error) });
+      log('会话结局没写进库（工作流记计时时会再写一次）', { runId: live.runId, error: errMessage(error) });
     }
     if (live.quotaError) log('会话里读到的额度没记上', { poolId: live.poolId, error: live.quotaError });
     return end;
