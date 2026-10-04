@@ -39,6 +39,16 @@ export function withoutProxy(env = process.env) {
 }
 
 /**
+ * 这次失败是不是「几个进程同时在取同一个远端、别人刚把引用更新了」的竞争：
+ * 2026-10-05 同时起十来个子代理时撞到 `cannot lock ref 'refs/remotes/origin/main': is at A but expected B`，
+ * 被误当成取不到远端、拦了子代理——其实 origin/main 刚被别人更新到最新。这种失败原路再取一次就好，不是网络问题。
+ * @param {GitResult} r
+ */
+export function isRefRace(r) {
+  return /cannot lock ref|unable to update local ref/i.test(`${r.stderr ?? ''}${r.stdout ?? ''}`);
+}
+
+/**
  * 取远端：先照环境原样，没成且环境里设着代理，再去掉代理取一次。
  * `git(cwd, args, opts)` 是各钩子注入的 git 跑法；`opts.direct` 为 true 时它要用去掉代理的环境跑。
  * `okOf(r)` 判一次成没成，`whyOf(r)` 说一次为什么没成（各钩子自己的那一份，口径和它们别处一致）。
@@ -50,11 +60,18 @@ export function withoutProxy(env = process.env) {
  * @returns {{ ok: boolean, via: 'env' | 'direct', why: string }}
  */
 export function fetchWithFallback(git, cwd, args, h) {
-  const first = git(cwd, args);
+  /** 同一条路上跑一次；撞上「别的进程刚更新了这个引用」的竞争就原路再来（最多 2 次），不当成网络不通 */
+  const attempt = (/** @type {{ direct?: boolean } | undefined} */ opts) => {
+    let r = opts ? git(cwd, args, opts) : git(cwd, args);
+    for (let i = 0; i < 2 && !h.okOf(r) && isRefRace(r); i += 1)
+      r = opts ? git(cwd, args, opts) : git(cwd, args);
+    return r;
+  };
+  const first = attempt(undefined);
   if (h.okOf(first)) return { ok: true, via: 'env', why: '' };
   const proxied = hasProxy(h.env ?? process.env);
   if (!proxied) return { ok: false, via: 'env', why: h.whyOf(first) };
-  const second = git(cwd, args, { direct: true });
+  const second = attempt({ direct: true });
   if (h.okOf(second)) return { ok: true, via: 'direct', why: '' };
   return {
     ok: false,
