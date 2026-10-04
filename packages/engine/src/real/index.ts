@@ -15,7 +15,8 @@ import {
   switchSessionOrg,
 } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
-import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { assertPublishable, createGitHub } from '@fleet-dao/github';
+import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';

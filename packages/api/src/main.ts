@@ -8,7 +8,7 @@
 // 飞书确认的草稿去开单（DraftOpener）等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
 // （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { createGitHub } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import {
   createMemoryStore,
@@ -21,6 +21,8 @@ import {
   IDS,
   jsonLogger,
   pgAlertWork,
+  pgLedger,
+  pgLocker,
   readDeployLagInput,
   startDeployLagWatch,
   withStatementTimeout,
