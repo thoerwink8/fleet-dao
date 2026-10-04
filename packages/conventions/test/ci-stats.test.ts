@@ -1,6 +1,15 @@
 // 量 CI 的纯计算（src/ci-stats.ts）：读不出的时间要抛，不能当 0 秒冒充「很快」。
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { type JobInput, type RunInput, rowOf, summarize } from '../src/ci-stats.ts';
+import {
+  createdBefore,
+  type JobInput,
+  parseSince,
+  type RunInput,
+  rowOf,
+  summarize,
+} from '../src/ci-stats.ts';
 
 const run = (over: Partial<RunInput> = {}): RunInput => ({
   id: 1,
@@ -40,9 +49,34 @@ describe('rowOf', () => {
     expect(() => rowOf(run(), [{ ...ok, completed_at: null }])).toThrow('completed_at');
     expect(() => rowOf(run(), [{ ...ok, started_at: '昨天' }])).toThrow('started_at');
     expect(() => rowOf(run({ updated_at: '' }), [ok])).toThrow('updated_at');
+    // 没有 run_started_at 不退回 created_at（那会把排队时间算进墙钟）
+    expect(() => rowOf(run({ run_started_at: null }), [ok])).toThrow('run_started_at');
     expect(() => rowOf(run(), [])).toThrow('一个 job 都没跑');
     expect(() => rowOf(run(), [{ ...ok, conclusion: 'skipped' }])).toThrow('一个 job 都没跑');
     expect(() => rowOf(run({ conclusion: null }), [ok])).toThrow('还没跑完');
+  });
+});
+
+describe('--since', () => {
+  it('带时区的时间按时刻比，不按字符串比：+08:00 的 2026-10-05T08:00 就是 UTC 00:00', () => {
+    const since = parseSince('2026-10-05T08:00:00+08:00');
+    expect(since).toBe(Date.parse('2026-10-05T00:00:00Z'));
+    // 字符串比较会判 '2026-10-05T00:30:00Z' < '2026-10-05T08:00:00+08:00' 而漏掉它；按时刻它在截止之后，要留下
+    expect(createdBefore('2026-10-05T00:30:00Z', since as number)).toBe(false);
+    expect(createdBefore('2026-10-04T23:30:00Z', since as number)).toBe(true);
+  });
+
+  it('【故意造出的失败】不是时间的 --since、读不出的创建时间：抛错，不当成「不限」', () => {
+    expect(parseSince('')).toBeUndefined();
+    expect(() => parseSince('昨天')).toThrow('不是时间');
+    expect(() => createdBefore('', 1)).toThrow('created_at');
+  });
+
+  it('【故意造出的失败】入口收到无效的 --since：退出 2、说明不是时间（在读 GitHub 之前就拒）', () => {
+    const bin = fileURLToPath(new URL('../src/bin/ci-stats.ts', import.meta.url));
+    const r = spawnSync(process.execPath, [bin, '--since', '昨天'], { encoding: 'utf8' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--since 不是时间');
   });
 });
 

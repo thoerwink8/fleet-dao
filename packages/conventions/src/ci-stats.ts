@@ -9,7 +9,8 @@ export interface RunInput {
   head_sha: string;
   conclusion: string | null;
   created_at: string;
-  run_started_at?: string | null;
+  /** 必给：缺了或为 null 时 rowOf 报错，不退回 created_at（会把排队时间算进墙钟）。 */
+  run_started_at: string | null;
   updated_at: string;
 }
 
@@ -62,13 +63,26 @@ export function rowOf(run: RunInput, jobs: readonly JobInput[]): RunRow {
     conclusion: run.conclusion,
     wallSec:
       (ms(run.updated_at, `运行 ${run.id} updated_at`) -
-        ms(run.run_started_at ?? run.created_at, `运行 ${run.id} run_started_at`)) /
+        ms(run.run_started_at, `运行 ${run.id} run_started_at`)) /
       1000,
     queueSec: (firstStart - ms(run.created_at, `运行 ${run.id} created_at`)) / 1000,
     machineSec: machine,
     jobs: ran.length,
     perJob,
   };
+}
+
+/** --since 的值转成毫秒；空串 = 不限；不是时间抛错（不静默当成不限）。 */
+export function parseSince(text: string): number | undefined {
+  if (text === '') return undefined;
+  const t = Date.parse(text);
+  if (!Number.isFinite(t)) throw new Error(`--since 不是时间（${text}）`);
+  return t;
+}
+
+/** 这一轮是不是在 --since 之前创建的：按时刻比，不按字符串比（带时区的 ISO 时间字典序会错判）；读不出创建时间抛错。 */
+export function createdBefore(createdAt: string, sinceMs: number): boolean {
+  return ms(createdAt, 'created_at') < sinceMs;
 }
 
 const median = (a: readonly number[]): number => {

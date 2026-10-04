@@ -3,7 +3,7 @@
 // 数字的含义见 ../ci-stats.ts；怎么量见 docs/ci-speedup-plan.md「怎么量」。被取消的轮次不算（没跑完整）。
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { type JobInput, type RunInput, rowOf, summarize } from '../ci-stats.ts';
+import { createdBefore, type JobInput, parseSince, type RunInput, rowOf, summarize } from '../ci-stats.ts';
 
 function fail(why: string): never {
   console.error(`没量成：${why}`);
@@ -37,6 +37,13 @@ if (!/^[\w.-]+\.ya?ml$/.test(opts.workflow)) fail('--workflow 要是工作流文
 if (!/^[\w.-]+\/[\w.-]+$/.test(opts.repo)) fail('--repo 要是 owner/名字');
 if (opts.event !== '' && !/^[a-z_]+$/.test(opts.event)) fail('--event 认不出');
 
+let sinceMs: number | undefined;
+try {
+  sinceMs = parseSince(opts.since);
+} catch (e) {
+  fail(e instanceof Error ? e.message : String(e));
+}
+
 function gh(path: string): unknown {
   let last = '';
   for (let i = 0; i < 3; i++) {
@@ -61,7 +68,12 @@ for (let page = 1; runs.length < opts.n && page <= 10; page++) {
   if (!Array.isArray(body.workflow_runs)) fail('运行列表认不出（没有 workflow_runs）');
   if (body.workflow_runs.length === 0) break;
   for (const r of body.workflow_runs) {
-    if (opts.since && r.created_at < opts.since) continue;
+    // 按时刻比，不按字符串比：--since 带时区（+08:00）时字典序会错判
+    try {
+      if (sinceMs !== undefined && createdBefore(r.created_at, sinceMs)) continue;
+    } catch (e) {
+      fail(`运行 ${r.id}：${e instanceof Error ? e.message : String(e)}`);
+    }
     if (r.conclusion === 'cancelled') continue;
     runs.push(r);
     if (runs.length >= opts.n) break;
