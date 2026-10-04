@@ -24,7 +24,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { OrgKind } from '@fleet-dao/shared';
-import { errMessage } from '@fleet-dao/shared/util';
+import { errMessage, sleep as realSleep } from '@fleet-dao/shared/util';
 import { type CarpoolApiRead, type CarpoolOutage, classifyCarpoolRejection } from '../jobs/carpool-outage.ts';
 import { readNotes } from '../jobs/carpool-read-notes.ts';
 import { readBackoff } from '../jobs/carpool-watch.ts';
@@ -143,7 +143,7 @@ const sameOutage = (a: CarpoolOutage | null, b: CarpoolOutage | null) =>
 
 export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
   const clock = w.now ?? (() => new Date());
-  const sleep = w.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = w.sleep ?? realSleep;
   const log =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const target = `session-user:${w.user}`;

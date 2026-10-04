@@ -14,7 +14,7 @@ import {
   SayRequest,
   TaskResponse,
 } from '@fleet-dao/shared';
-import { errMessage } from '@fleet-dao/shared/util';
+import { errMessage, sleep } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { type BackendCall, CliError, callBackend, EXIT } from './client.ts';
 import { COMMAND_HELP, MAIN_HELP } from './help.ts';
@@ -87,7 +87,7 @@ function connect(io: CliIo): (call: BackendCall) => Promise<unknown> {
         baseUrl: api,
         token,
         fetch: io.fetch,
-        sleep: io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+        sleep: io.sleep ?? sleep,
         onRetry: (message) => io.stderr(`fleet：${message}\n`),
         ...(timing.retryDelaysMs ? { retryDelaysMs: timing.retryDelaysMs } : {}),
         ...(timing.requestMs ? { timeoutMs: timing.requestMs } : {}),
