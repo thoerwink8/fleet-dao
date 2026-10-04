@@ -2,7 +2,6 @@
 // 收 webhook 的 HTTP 入口（验签、读请求体）和 /healthz 的检查在 @fleet-dao/api 的 github.ts；对账补漏、引擎拉单都从这里进同一道门。
 // 改这里之前必须知道：公开仓里陌生人也能开单、评论，这道白名单是唯一的门（design 第三节第 4 条），先审后合
 // （packages/conventions/high-risk-paths.json 登记着这份文件）。
-import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import {
   type GitHubDeliveryOutcome,
@@ -284,7 +283,8 @@ export function createGitHubIntake(deps: GitHubIntakeDeps): GitHubIntake {
         ...(delivery.seenBefore ? { seenBefore: true } : {}),
       };
     } catch (err) {
-      const reason = errMessage(err).slice(0, MAX_REASON_CHARS) || '没带原因';
+      const reason =
+        (err instanceof Error ? err.message : String(err)).slice(0, MAX_REASON_CHARS) || '没带原因';
       // 原文留在库里：重投、补收或对账重放时还能再来
       try {
         await finish(deliveryId, token, { status: 'failed', reason });
