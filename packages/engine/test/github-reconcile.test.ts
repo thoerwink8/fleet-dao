@@ -547,7 +547,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       expect(watchdog.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[5 * 60_000, 4 * 60_000]]);
       expect(watchdog.action).toMatchObject({ workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet-b' });
       const carpoolWatch = await client.schedule.getHandle(CARPOOL_WATCH_SCHEDULE_ID).describe();
-      expect(carpoolWatch.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[60_000, 0]]);
+      expect(carpoolWatch.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[60_000, undefined]]);
       expect(carpoolWatch.action).toMatchObject({
         workflowType: WORKFLOW_TYPES.carpoolWatch,
         taskQueue: 'fleet-b',
