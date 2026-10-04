@@ -6,7 +6,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./quota": "./src/quota/index.ts"
+    "./mirasim-bridge": "./src/mirasim/bridge.ts",
+    "./quota": "./src/quota/index.ts",
+    "./testing": "./test/testing.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*"

@@ -32,11 +32,6 @@
       "file": "packages/agents-sync/src/main.ts",
       "spec": "../../mirasim-reclaude/bin/migrate",
       "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin 当子进程，没有 import；package.json 声明保留作变更边"
-    },
-    {
-      "file": "packages/engine/src/real/index.ts",
-      "spec": "../../../adapters/src/mirasim/bridge.ts",
-      "why": "过渡：#901 ⑥-2 改成 import.meta.resolve(adapters 的 exports 子路径)后删这一条"
     }
   ]
 }
