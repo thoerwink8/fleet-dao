@@ -1,7 +1,6 @@
 // CI 一台测试（src/ci-box.ts）：认矩阵里那一份、跑完核对「实际跑的 == 分到的」。
 // vitest 的位置参数是子串过滤，交给它清单也不等于它正好跑这些——这一步是最后一道。
 // 带【故意造出的失败】的每一条都是造一份对不上的结果，核对必须红并点名：平时绿着看不出它还在不在拦。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseBox, verifyRun } from '../src/ci-box.ts';
 import { CACHE_SCHEMA } from '../src/ci-cache.ts';
+import { runChild } from './child.ts';
 
 const A = 'packages/api/test/a.test.ts';
 const B = 'packages/api/test/b.test.ts';
@@ -146,13 +146,13 @@ describe('跑完核对：实际跑的 == 该跑的', () => {
   });
 });
 
-describe('入口 bin/ci-box.ts', () => {
+describe('入口 bin/ci-box.ts', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-box.ts', import.meta.url));
   const ROOT = fileURLToPath(new URL('../../../', import.meta.url))
     .replace(/\\/g, '/')
     .replace(/\/+$/, '');
   const tmp = mkdtempSync(join(tmpdir(), 'ci-box-'));
-  const run = (args: string[]) => spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8' });
+  const run = (args: string[]) => runChild(process.execPath, [bin, ...args]);
   const report = (files: string[]) => {
     const p = join(tmp, `report-${Math.random().toString(36).slice(2)}.json`);
     writeFileSync(

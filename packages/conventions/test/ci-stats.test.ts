@@ -1,5 +1,4 @@
 // 量 CI 的纯计算（src/ci-stats.ts）：读不出的时间要抛，不能当 0 秒冒充「很快」。
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -10,6 +9,7 @@ import {
   rowOf,
   summarize,
 } from '../src/ci-stats.ts';
+import { runChild } from './child.ts';
 
 const run = (over: Partial<RunInput> = {}): RunInput => ({
   id: 1,
@@ -57,7 +57,7 @@ describe('rowOf', () => {
   });
 });
 
-describe('--since', () => {
+describe('--since', { timeout: 0 }, () => {
   it('带时区的时间按时刻比，不按字符串比：+08:00 的 2026-10-05T08:00 就是 UTC 00:00', () => {
     const since = parseSince('2026-10-05T08:00:00+08:00');
     expect(since).toBe(Date.parse('2026-10-05T00:00:00Z'));
@@ -74,7 +74,7 @@ describe('--since', () => {
 
   it('【故意造出的失败】入口收到无效的 --since：退出 2、说明不是时间（在读 GitHub 之前就拒）', () => {
     const bin = fileURLToPath(new URL('../src/bin/ci-stats.ts', import.meta.url));
-    const r = spawnSync(process.execPath, [bin, '--since', '昨天'], { encoding: 'utf8' });
+    const r = runChild(process.execPath, [bin, '--since', '昨天']);
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('--since 不是时间');
   });

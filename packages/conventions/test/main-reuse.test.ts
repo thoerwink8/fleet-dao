@@ -1,6 +1,5 @@
 // 主线同树复用（src/main-reuse.ts、ci-plan.ts 的 applyReuse / ciVerdict、两个入口、ci.yml 的写法）。
 // 复用 = 少跑，所以每一条「对不上、查不到、读不到」都有一条故意造出的失败：全部必须回到「不复用」，不能当绿。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +19,7 @@ import type { GhApi } from '../src/gh-api.ts';
 import { CLAIM_PREFIX, claimOf, claimStepName, findReuse, parseReuse, reuseOf } from '../src/main-reuse.ts';
 import { fsRepo } from '../src/repo.ts';
 import { listTestFiles, parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
+import { runChild } from './child.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const SHA = 'a'.repeat(40);
@@ -353,15 +353,14 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
   });
 });
 
-describe('入口 ci-plan.ts --reuse', () => {
+describe('入口 ci-plan.ts --reuse', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-plan.ts', import.meta.url));
-  const git = (...a: string[]) => spawnSync('git', a, { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  const git = (...a: string[]) => runChild('git', a, { cwd: ROOT }).stdout.trim();
   const headTree = git('rev-parse', 'HEAD^{tree}');
   const exec = (args: string[]) => {
     const out = join(mkdtempSync(join(tmpdir(), 'ci-reuse-')), 'out');
     writeFileSync(out, '');
-    const r = spawnSync(process.execPath, [bin, ...args], {
-      encoding: 'utf8',
+    const r = runChild(process.execPath, [bin, ...args], {
       env: { ...process.env, GITHUB_OUTPUT: out, GITHUB_STEP_SUMMARY: '' },
     });
     return { ...r, out: readFileSync(out, 'utf8') };
@@ -406,13 +405,10 @@ describe('入口 ci-plan.ts --reuse', () => {
   });
 });
 
-describe('入口 main-reuse.ts', () => {
+describe('入口 main-reuse.ts', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/main-reuse.ts', import.meta.url));
   const exec = (args: string[], env: Record<string, string> = {}) =>
-    spawnSync(process.execPath, [bin, ...args], {
-      encoding: 'utf8',
-      env: { ...process.env, GITHUB_TOKEN: '', ...env },
-    });
+    runChild(process.execPath, [bin, ...args], { env: { ...process.env, GITHUB_TOKEN: '', ...env } });
 
   it('【故意造出的失败】没有基准、基准认不出、没令牌（查不成）：什么都不打到标准输出、退出 0、留 ::warning::——照旧全跑', () => {
     for (const args of [[], ['--base', ''], ['--base', 'HEAD'], ['--base', 'a'.repeat(40)]]) {

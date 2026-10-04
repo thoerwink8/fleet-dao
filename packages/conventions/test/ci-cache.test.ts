@@ -1,6 +1,5 @@
 // PR 的测试结果缓存（src/ci-cache.ts）：键盖没盖住输入、清单怎么核对、什么情况一律回来真跑。
 // 带【故意造出的失败】的几条，每一条都是「造一份坏的输入，判定器必须拒」：平时都绿，看不出判定器还在不在拦，所以得造一次坏的看它红。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,6 +47,7 @@ import {
 import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
 import { listTestFiles, parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
+import { runChild } from './child.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
@@ -772,16 +772,14 @@ describe('写清单：整组全绿才写，每个文件都要有「跑成了」�
 
 // ---- 入口（真起一个进程）
 
-describe('入口 bin/ci-cache.ts', () => {
+// 同步起子进程的用例：不靠 vitest 的 5 秒默认限时（本机满负荷时光起进程就超），子进程自带上限（child.ts）。
+describe('入口 bin/ci-cache.ts', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-cache.ts', import.meta.url));
   const tmp = mkdtempSync(join(tmpdir(), 'ci-cache-'));
   const run = (args: string[]) => {
     const out = join(tmp, `out-${Math.random().toString(36).slice(2)}`);
     writeFileSync(out, '');
-    const r = spawnSync(process.execPath, [bin, ...args], {
-      encoding: 'utf8',
-      env: { ...process.env, GITHUB_OUTPUT: out },
-    });
+    const r = runChild(process.execPath, [bin, ...args], { env: { ...process.env, GITHUB_OUTPUT: out } });
     return { ...r, outputs: readFileSync(out, 'utf8') };
   };
 
