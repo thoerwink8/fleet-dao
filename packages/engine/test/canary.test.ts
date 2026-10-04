@@ -29,6 +29,7 @@ import {
   CANARY_ABANDONED_WHY,
   CANARY_ALERT_KEY,
   CANARY_JOB,
+  CANARY_LEFTOVER_PR_ALERT_KEY,
   CANARY_MAX_MINUTES,
   CANARY_RUN_TIMEOUT_MINUTES,
   CANARY_STAGE_LIMIT_MINUTES,
@@ -46,7 +47,13 @@ import {
   spanWords,
   stepSpans,
 } from '../src/jobs/canary.ts';
-import { canaryJob, canaryRepoFrom, canaryViewOf } from '../src/real/canary.ts';
+import {
+  type CanaryPullsGitHub,
+  canaryJob,
+  canaryRepoFrom,
+  canaryViewOf,
+  closeLeftoverPulls,
+} from '../src/real/canary.ts';
 import { registerEngineJobs } from '../src/real/jobs.ts';
 import { buildTaskBrief } from '../src/runner/task-brief.ts';
 import { useEnv, withWorker } from './helpers.ts';
@@ -455,7 +462,12 @@ interface Harness {
   boardAsked: { taskId: string; prNumber: number | null }[];
   runsFinished: { id: number; result: ScheduleResult }[];
   finished: { id: number; verdict: string; stage: string; why: string | null }[];
-  alerts: { raised: { title: string; body: string }[]; resolved: string[] };
+  alerts: {
+    raised: { title: string; body: string; key?: string }[];
+    resolved: string[];
+    /** 撤掉的每一条带的键（不给键撤的是断了的那条，记 undefined）。 */
+    resolvedKeys: (string | undefined)[];
+  };
   setFacts(f: CanaryDbFacts): void;
   setWorkflow(w: CanaryObservation['workflow'], v?: CanaryView): void;
 }
@@ -465,7 +477,7 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
   const boardAsked: Harness['boardAsked'] = [];
   const runsFinished: Harness['runsFinished'] = [];
   const finishedRows: Harness['finished'] = [];
-  const alerts: Harness['alerts'] = { raised: [], resolved: [] };
+  const alerts: Harness['alerts'] = { raised: [], resolved: [], resolvedKeys: [] };
   let current = facts();
   let wf: CanaryObservation['workflow'] = { state: 'missing' };
   let wfView: CanaryView = view();
@@ -504,6 +516,7 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
       closeIssue: async (n) => {
         calls.push(`close:${n}`);
       },
+      closePulls: async () => [],
       ...gh,
     },
     facts: async () => current,
@@ -523,8 +536,9 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
       raise: async (a) => {
         alerts.raised.push(a);
       },
-      resolve: async (why) => {
+      resolve: async (why, key) => {
         alerts.resolved.push(why);
+        alerts.resolvedKeys.push(key);
       },
     },
     now: () => {
@@ -623,6 +637,111 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
       '收掉了上一轮留下的 #5',
       '上一轮留下的 #9 没收掉：Temporal 连不上',
     ]);
+  });
+
+  /** 留下一张 #5 的 harness：closePulls 由调用方给；cleaned 记在 calls 里。 */
+  function leftoverHarness(
+    closePulls: (n: number, comment: string) => Promise<number[]>,
+    over: Partial<CanaryDeps> = {},
+  ) {
+    const h = harness(
+      {
+        record: {
+          ...harness().deps.record,
+          leftovers: async () => [{ id: 3, issueNumber: 5 }],
+          cleaned: async (id) => {
+            h.calls.push(`cleaned:${id}`);
+          },
+        },
+        ...over,
+      },
+      { issueState: async () => ({ state: 'open', stateReason: null }), closePulls },
+    );
+    return h;
+  }
+
+  it('收前几轮留下的单（#336）：连它开的、还开着的 PR 一起关，备注写明关了哪几个，记下收过了；PR 没关掉的报警（上回推过的）撤掉', async () => {
+    const asked: { n: number; comment: string }[] = [];
+    const h = leftoverHarness(async (n, comment) => {
+      asked.push({ n, comment });
+      return [13, 14];
+    });
+    const r = await openCanaryRound(h.deps);
+    expect(r.done).toBe(false);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.n).toBe(5);
+    expect(asked[0]?.comment).toContain('#5');
+    // 先关单、再关 PR、最后才记收过了
+    expect(h.calls.slice(0, 3)).toEqual(['stop:task:acme/canary#5', 'close:5', 'cleaned:3']);
+    expect(!r.done && r.state.notes).toEqual(['收掉了上一轮留下的 #5（连它开的 PR #13、#14 一起关了）']);
+    expect(h.alerts.resolvedKeys).toEqual([CANARY_LEFTOVER_PR_ALERT_KEY]);
+    expect(h.alerts.raised).toEqual([]);
+  });
+
+  it('留下的单没有 PR（工作流没走到开 PR）：只关单，备注和以前一字不差', async () => {
+    const h = leftoverHarness(async () => []);
+    const r = await openCanaryRound(h.deps);
+    expect(!r.done && r.state.notes).toEqual(['收掉了上一轮留下的 #5']);
+    expect(h.calls).toContain('close:5');
+    expect(h.calls).toContain('cleaned:3');
+  });
+
+  it('【故意造出的失败】关单成了、关 PR 失败：推一条单独的报警（不是断了那条的键）写明哪张单、什么原因，备注写明，不记收过了（下一轮接着关），不挡这一轮开单', async () => {
+    const h = leftoverHarness(async () => {
+      throw new Error('GitHub 回了 403：关 PR 没权限');
+    });
+    const r = await openCanaryRound(h.deps);
+    expect(r.done).toBe(false);
+    expect(h.calls).toContain('close:5');
+    expect(h.calls.some((c) => c.startsWith('cleaned:'))).toBe(false);
+    expect(h.calls.some((c) => c.startsWith('open:'))).toBe(true);
+    expect(!r.done && r.state.notes).toEqual([
+      '上一轮留下的 #5 已关，但它开的 PR 没关掉：GitHub 回了 403：关 PR 没权限',
+    ]);
+    expect(h.alerts.raised).toHaveLength(1);
+    expect(h.alerts.raised[0]).toMatchObject({ key: CANARY_LEFTOVER_PR_ALERT_KEY, taskId: null });
+    expect(h.alerts.raised[0]?.key).not.toBe(CANARY_ALERT_KEY);
+    expect(h.alerts.raised[0]?.body).toContain('#5：GitHub 回了 403：关 PR 没权限');
+    expect(h.alerts.resolved).toEqual([]);
+  });
+
+  it('【故意造出的失败】PR 没关掉、报警也推不出：两件事都写进备注，不当成没事、也不挡这一轮', async () => {
+    const h = leftoverHarness(
+      async () => {
+        throw new Error('关不掉');
+      },
+      {
+        alerts: {
+          raise: async () => {
+            throw new Error('库连不上');
+          },
+          resolve: async () => {},
+        },
+      },
+    );
+    const r = await openCanaryRound(h.deps);
+    expect(r.done).toBe(false);
+    expect(!r.done && r.state.notes).toEqual([
+      '上一轮留下的 #5 已关，但它开的 PR 没关掉：关不掉',
+      'PR 没关掉的报警推不出：库连不上',
+    ]);
+  });
+
+  it('同一轮里别的单没收成（放弃工作流连不上）：PR 那条报警不撤——不能把还没关的当关掉了', async () => {
+    const h = leftoverHarness(async () => [], {
+      workflows: {
+        state: async () => ({ state: 'missing' }),
+        view: async () => view(),
+        stop: async () => {
+          throw new Error('Temporal 连不上');
+        },
+      },
+    });
+    const r = await openCanaryRound(h.deps);
+    expect(r.done).toBe(false);
+    expect(!r.done && r.state.notes).toEqual(['上一轮留下的 #5 没收掉：Temporal 连不上']);
+    expect(h.alerts.resolved).toEqual([]);
+    expect(h.alerts.raised).toEqual([]);
   });
 
   it('【故意造出的失败】上一轮没收尾（工作流没了、一直没结论）：开单前补记成没跑成（schedule_runs 那一行也记 failed），它开成了的单照留下的单收掉', async () => {
@@ -803,6 +922,139 @@ describe('status 查询、巡检仓配置的读法', () => {
   });
 });
 
+// —— 关巡检单开过的 PR（#336）：假的 claims ——
+
+describe('closeLeftoverPulls：关巡检单开过的 PR', () => {
+  type Facts = Awaited<ReturnType<CanaryPullsGitHub['readPull']>>;
+  const facts = (number: number, over: Partial<Facts> = {}): Facts => ({
+    number,
+    nodeId: `N${number}`,
+    state: 'open',
+    merged: false,
+    draft: false,
+    title: `PR ${number}`,
+    body: '',
+    headSha: 'a'.repeat(40),
+    headRef: `fleet/5-t0123abcd`,
+    fromFork: false,
+    author: null,
+    autoMerge: false,
+    ...over,
+  });
+
+  /** 假的 claims：listed 是开着的列表，now 是逐个现读的结果（没给就读成列表里那份）。 */
+  function claimsOf(listed: Facts[], now: Record<number, Facts> = {}, over: Partial<CanaryPullsGitHub> = {}) {
+    const calls: string[] = [];
+    const claims: CanaryPullsGitHub = {
+      openPulls: async () => listed,
+      readPull: async (_repo, n) => {
+        const f = now[n] ?? listed.find((p) => p.number === n);
+        if (!f) throw new Error(`没有 #${n}`);
+        return f;
+      },
+      commentPull: async (_repo, n, key) => {
+        calls.push(`comment:${n}:${key}`);
+        return { created: true } as never;
+      },
+      closePull: async (_repo, n) => {
+        calls.push(`close:${n}`);
+      },
+      ...over,
+    };
+    return { claims, calls };
+  }
+
+  const repo = { owner: 'acme', name: 'canary' };
+
+  it('这张单的引擎分支开着的 PR：留一句说明、关掉，回关了哪几个；别张单的分支、从 fork 来的不碰', async () => {
+    const { claims, calls } = claimsOf([
+      facts(13),
+      facts(14, { headRef: 'fleet/5-t99999999' }),
+      facts(20, { headRef: 'fleet/50-t0123abcd' }), // #50 不是 #5：前缀要带上 -t
+      facts(21, { headRef: 'fleet/6-t0123abcd' }),
+      facts(22, { fromFork: true }),
+      facts(23, { headRef: 'feature/5-t1' }),
+    ]);
+    expect(await closeLeftoverPulls(claims, repo, 5, '收掉')).toEqual([13, 14]);
+    expect(calls).toEqual([
+      'comment:13:canary-leftover:13',
+      'close:13',
+      'comment:14:canary-leftover:14',
+      'close:14',
+    ]);
+  });
+
+  it('没有 PR：什么都不关，回空', async () => {
+    const { claims, calls } = claimsOf([facts(21, { headRef: 'fleet/6-t0123abcd' })]);
+    expect(await closeLeftoverPulls(claims, repo, 5, '收掉')).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('PR 已经合并：不动——列表里没有它（只列开着的），或列出来之后、关之前被合了（现读一遍）', async () => {
+    const { claims, calls } = claimsOf([facts(13), facts(14)], {
+      13: facts(13, { state: 'closed', merged: true }),
+      14: facts(14, { state: 'closed', merged: false }),
+    });
+    expect(await closeLeftoverPulls(claims, repo, 5, '收掉')).toEqual([]);
+    expect(calls).toEqual([]);
+    const none = claimsOf([]);
+    expect(await closeLeftoverPulls(none.claims, repo, 5, '收掉')).toEqual([]);
+    expect(none.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】关不掉：抛出来（调用方报警），不回「关了」；列不出、现读不到同样抛', async () => {
+    const stuck = claimsOf(
+      [facts(13)],
+      {},
+      {
+        closePull: async () => {
+          throw new Error('GitHub 回了 403');
+        },
+      },
+    );
+    await expect(closeLeftoverPulls(stuck.claims, repo, 5, '收掉')).rejects.toThrow('GitHub 回了 403');
+    const noList = claimsOf(
+      [],
+      {},
+      {
+        openPulls: async () => {
+          throw new Error('翻不完页');
+        },
+      },
+    );
+    await expect(closeLeftoverPulls(noList.claims, repo, 5, '收掉')).rejects.toThrow('翻不完页');
+    const noRead = claimsOf(
+      [facts(13)],
+      {},
+      {
+        readPull: async () => {
+          throw new Error('读不到');
+        },
+      },
+    );
+    await expect(closeLeftoverPulls(noRead.claims, repo, 5, '收掉')).rejects.toThrow('读不到');
+    expect(noRead.calls).toEqual([]);
+  });
+
+  it('留说明没留成：不挡关 PR，记一条 warn', async () => {
+    const logs: string[] = [];
+    const { claims, calls } = claimsOf(
+      [facts(13)],
+      {},
+      {
+        commentPull: async () => {
+          throw new Error('评论被限流');
+        },
+      },
+    );
+    expect(
+      await closeLeftoverPulls(claims, repo, 5, '收掉', (level, text) => logs.push(`${level}:${text}`)),
+    ).toEqual([13]);
+    expect(calls).toEqual(['close:13']);
+    expect(logs).toEqual(['warn:巡检收单：给 PR 留说明没留成，照样关']);
+  });
+});
+
 // —— 真库上的装配 ——
 
 describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的）', () => {
@@ -819,6 +1071,14 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
   function fakeGh(over: Partial<Parameters<typeof canaryJob>[0]['gh']> = {}) {
     const calls: string[] = [];
     const gh: Parameters<typeof canaryJob>[0]['gh'] = {
+      claims: {
+        openPulls: async () => [],
+        readPull: async () => {
+          throw new Error('这里不该读 PR');
+        },
+        commentPull: async () => ({ created: true }) as never,
+        closePull: async () => {},
+      },
       readOpenMilestones: async () => [{ number: 1, title: 'v1 巡检' }],
       openIssue: async (input) => {
         calls.push(`open:${input.key}:${input.labels.length}:${input.milestone}`);
