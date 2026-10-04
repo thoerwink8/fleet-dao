@@ -382,6 +382,18 @@ jobs:
           echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
       # 这一台分到哪些测试文件：矩阵里那一份 JSON 过 ci-box.ts 核一遍（名字、文件清单、两个开关），
       # 一行一个写到 BOX_FILE，后面的步骤都按数组展开交给 vitest，不拼进命令行。
+      - name: 实验（不合并）：Temporal 测试服务端下载计时
+        continue-on-error: true
+        working-directory: packages/engine
+        run: |
+          set +e
+          for n in 1 2; do
+            s=$SECONDS
+            node --input-type=module -e 'import { TestWorkflowEnvironment } from "@temporalio/testing"; const e = await TestWorkflowEnvironment.createTimeSkipping(); await e.teardown();' 2>&1 | tail -3
+            echo "TS-DOWNLOAD$n rc=$? secs=$((SECONDS - s))"
+          done
+          ls -la /tmp | grep -i temporal
+          du -sh /tmp/temporal* 2>/dev/null
       - name: 这一台跑哪些文件
         id: box
         env:
@@ -441,22 +453,6 @@ jobs:
           esac
       # 跑完核对「实际跑的测试文件 == 分到的这一台」（命中缓存的：盖住的 + 跑的 == 分到的）：vitest 的位置参数是子串过滤，
       # 交给它清单也不等于它正好跑这些；少跑、多跑都红并点名（底线：没跑成不许当通过）。
-      - name: 实验（不合并）：同一台同一批文件换并行进程数再跑，量秒数
-        if: always()
-        continue-on-error: true
-        env:
-          BOX_FILE: ${{ steps.box.outputs.box_file }}
-        run: |
-          set +e
-          mapfile -t box <"$BOX_FILE"
-          for variant in "seqA:--config=vitest.seq.config.ts" "base2:--maxWorkers=3" "seqB:--config=vitest.seq.config.ts" "w4:--maxWorkers=4" "w6:--maxWorkers=6"; do
-            name=${variant%%:*}; flag=${variant#*:}
-            s=$SECONDS
-            pnpm exec vitest run "${box[@]}" $flag --reporter=dot >"$RUNNER_TEMP/ab-$name.log" 2>&1
-            rc=$?
-            echo "AB $name rc=$rc secs=$((SECONDS - s)) $(grep -E 'Duration' "$RUNNER_TEMP/ab-$name.log" | sed 's/\x1b\[[0-9;]*m//g' | head -1)"
-            grep -E "FAIL|Tests  " "$RUNNER_TEMP/ab-$name.log" | sed 's/\x1b\[[0-9;]*m//g' | head -5
-          done
       - name: 核对这一台跑的 == 分到的
         if: success()
         env:
