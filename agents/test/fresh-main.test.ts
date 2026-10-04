@@ -37,6 +37,7 @@ interface Lib {
   }): { block: true; message: string } | null;
   SUBAGENT_FETCH_MS: number;
   SUBAGENT_DIRECT_MS: number;
+  isRefRace(r: R): boolean;
   gitOk(r: R): boolean;
   gitWhy(r: R): string;
 }
@@ -137,6 +138,45 @@ function repoGit(fetchResults: R[]) {
   };
   return { git, calls };
 }
+
+const raced = (): R => ({
+  status: 1,
+  stdout: '',
+  stderr:
+    "error: cannot lock ref 'refs/remotes/origin/main': is at bd7767ba514b409169f02eb24c008c5e6eb5929d but expected 10e888c85e440094a5228d2dfe6f68be98d5a897\n",
+});
+
+describe('几个进程同时取同一个远端：撞上引用竞争原路再取，不当成网络不通', () => {
+  it('认得出「别的进程刚更新了这个引用」，认不出普通的连不上', () => {
+    expect(lib.isRefRace(raced())).toBe(true);
+    expect(lib.isRefRace(refused())).toBe(false);
+  });
+
+  it('第一次撞竞争、原路再取就成：只在代理那条路上试，不去直连', () => {
+    const s = script([raced(), good()]);
+    expect(lib.fetchWithFallback(s.git, '/r', ['fetch'], h(PROXY))).toEqual({
+      ok: true,
+      via: 'env',
+      why: '',
+    });
+    expect(s.calls.map((c) => c.direct)).toEqual([false, false]);
+  });
+
+  // 故意造出失败：一直撞竞争也不能无限重试，且最后要说清原因，不说成成功
+  it('【故意造出的失败】一直撞竞争：原路最多再试 2 次，再换直连也撞，最终判失败并写明原因', () => {
+    const s = script([raced()]);
+    const r = lib.fetchWithFallback(s.git, '/r', ['fetch'], h(PROXY));
+    expect(r.ok).toBe(false);
+    expect(r.why).toContain('cannot lock ref');
+    expect(s.calls).toHaveLength(6);
+  });
+
+  it('普通的连不上不重试同一条路：直接换直连', () => {
+    const s = script([refused(), good()]);
+    expect(lib.fetchWithFallback(s.git, '/r', ['fetch'], h(PROXY)).via).toBe('direct');
+    expect(s.calls.map((c) => c.direct)).toEqual([false, true]);
+  });
+});
 
 describe('起子代理前取远端的时间预算', () => {
   // 调工具前钩子总共只有 10 秒（targets.ts）：超了钩子被杀，子代理照起、origin/main 却没取成，等于没拦住也没说
