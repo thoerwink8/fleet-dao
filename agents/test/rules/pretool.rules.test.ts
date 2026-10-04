@@ -313,7 +313,9 @@ const secretCases: SecretCase[] = [
   ['Bash', 'cat ~/.claude/*.md', 0],
   ['Bash', 'cat .claude/settings.json', 0],
   ['Bash', 'openssl x509 -in /etc/letsencrypt/live/x/fullchain.pem -noout -enddate', 0],
-  ['Bash', "ssh -i ~/.ssh/fr.key fr 'systemctl status fleet-api'", 0],
+  // 远端跑的命令得挑一条不打印进程命令行的：systemctl status 从 2026-10-03 起归「打印进程命令行」那段管（要接 redactor），
+  // 拿它当「无害的远端命令」会把这条样例变成两段规矩打架。这里只要 ssh -i 的钥匙是拿来用的、不算读，df 够了。
+  ['Bash', "ssh -i ~/.ssh/fr.key fr 'df -h'", 0],
   ['Bash', `cat ~/${RC}-org-switch-last.json`, 0],
   ['Bash', `ls # 注释里写到的不算：cat ~/${RC}/device.json`, 0],
   ['PowerShell', `Test-Path $env:USERPROFILE\\${RC}\\device.json`, 0],
