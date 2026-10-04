@@ -35,23 +35,21 @@ export function createDemoApi(inner: MockApi): FleetApi {
     home: () => inner.home(),
     board: async (repoId) => redactBoard(await inner.board(repoId), detailLevel()),
     task: async (taskId) => redactTaskDetail(await inner.task(taskId), detailLevel()),
-    async timeline(taskId, page) {
-      if (detailLevel() !== 'process') throw hidden('任务的过程');
-      return inner.timeline(taskId, page);
-    },
-    async runSteps(runId) {
-      if (detailLevel() !== 'process') throw hidden('步骤清单');
-      return inner.runSteps(runId);
-    },
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
-    answerAsk: (askId, answer) => inner.answerAsk(askId, answer),
+    async legacyAsks() {
+      need('notifications', '通知');
+      return inner.legacyAsks();
+    },
+    async closeAsk(askId) {
+      need('notifications', '通知');
+      return inner.closeAsk(askId);
+    },
     routing: () => inner.routing(),
     // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
     routingLayers: () => Promise.reject(hidden('路由')),
     // 思考档位页也只在正式驾驶舱里有：演示版看不到、更改不了。
     routingEfforts: () => Promise.reject(hidden('思考档位')),
     updateRouteEffort: () => Promise.reject(hidden('思考档位')),
-    updateChannel: (channelId, body) => inner.updateChannel(channelId, body),
     pools: () => inner.pools(),
     async poolHolds() {
       need('settings', '设置');

@@ -24,6 +24,17 @@
 - 契约对账：`packages/api/test/web-routes-contract.test.ts`（契约↔后端注册的路由，两个方向）、`packages/web/src/api/contract.test.ts`（契约↔前端 http.ts）。
 - 当场修的：D4（设置页留量线两个池都写成「Claude 订阅」）、D5（`LoadError` 没有重试）。其余见缺陷清单和子单：#926（登录页/设置页账密入口，P1）、#928（追问「去答」死胡同，P1）、#930（e2e 进 CI）。#914 合并后已重对一遍主页（流水线图、深色、手机宽度；D2 已随它解决）；react-flow 水印：MIT 不强制显示、去掉要订阅 Pro（花钱），现状保留，写在缺陷清单 D10 交指挥官。
 
+## 2026-10-05 #928 追问「去答」死胡同 + #939 代码那一半 + D6 清理（Sonnet 5.5 子代理，分支 `worktree-agent-a08e104b44426243b`）
+
+指挥官按 v3 原意选「删追问这条线的代码那一半、不删库表」（库表是创始人的人闸，另有人处理）。做到哪：代码、测试、e2e 全改完、本机跑过（见下「验证」）；下一步：开 PR（`Closes #928`，`Refs #939` 不关——删库表那一半还没做）、CI 绿自动合。
+- **主页**：`/api/home` 不再读追问表，「要你拍的」只剩 decision 通知和待批；契约里 `HomeDecision.kind` 去掉 `ask`。
+- **通知中心**：多一块「旧会话留下的提问」（`GET /api/asks/legacy`）：只读、写明「新流程不会再产生，也不会有人收到你的回答」，每条一个「关闭」（`POST /api/asks/:id/close`，同一事务落库 + 操作记录 `ask.close`），没有「回答」。`asking` 单的「回答」按钮和 `AnswerDialog`、`lib/ask.ts`、`useAnswerAsk` 整套删掉。
+- **回答接口**：`POST /api/asks/:id/answer` 一律 409 `asks_not_received`（不存在仍 404、空回答仍 400），不落库、不进操作记录；飞书里回复追问卡也回同一句话、不写库（`legacy-asks.ts`，原 `answer-ask.ts`）。契约里这条留着，因为飞书网关的 `FEISHU_GATEWAY_WEB_ROUTES` 还列着它。
+- **「关闭」怎么落库**：库表没有「已关闭」这一列（加列要迁移），关闭 = 用 `LEGACY_ASK_CLOSED_ANSWER` 这句标记走原来的 `answerAsk`（同事务写库 + 操作记录）。读 `answer` 的地方要认它：`askLate`（任务详情的「回答之后会怎样」）、飞书推送卡的「已处理」文案已认；旧会话若还在跑、再问同一句，会读到这句标记。
+- **D6 三条删掉**（契约、后端路由、前端封装三处一起）：`GET /api/tasks/:id/timeline`（含 `describeTimeline`）、`GET /api/runs/:id/steps`、`PATCH /api/routing/channels/:id`。账密三个接口（D1）没动。没删：store 的 `listTimeline`、`lastSay`、`setChannelEnabled`（及 db 的 `taskTimeline`）现在没有生产调用方，store 契约测试还钉着它们——单独清要动 pg 查询，留作后续；mock 的 `logs`（原来喂时间线）也没动。
+- **e2e**：`02-home` 那条 `test.fail` 换成真断言（主页不放追问）；`06-notifications` 的「回答追问」换成三条（旧追问只读列出、回答接口 409、点「关闭」落库）。
+- 还欠：任务详情接口里的 `asks` 字段现在没有页面读（只剩测试和脱敏代码）；主页决定卡片上的「去答」文案对通知、待批也通用，老追问留下的 decision 通知点过去仍是任务页（首页另一路在改，没碰）；`ActionButtons`（继续、叫停）仍没有页面接。
+
 ## 生效中的临时调整
 
 > 五列：内容｜当时为什么｜谁拍的（原话和日期）｜撤回条件｜最迟复查日期。撤回就删行（git 有历史）。规矩在 `AGENTS.md` 通用段「我拍了板，当场记进项目里记决定的地方」（日期一律 YYYY-MM-DD 北京时间）。

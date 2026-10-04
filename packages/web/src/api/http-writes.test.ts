@@ -54,19 +54,10 @@ const WRITES: Write[] = [
     ok: OK,
   },
   {
-    name: 'answerAsk',
-    call: (api) => api.answerAsk('ask-1', '5 分钟'),
+    name: 'closeAsk（关闭旧追问）',
+    call: (api) => api.closeAsk('ask-1'),
     method: 'POST',
-    url: '/api/asks/ask-1/answer',
-    body: { answer: '5 分钟' },
-    ok: OK,
-  },
-  {
-    name: 'updateChannel',
-    call: (api) => api.updateChannel('ch-1', { enabled: false, reason: '额度用完了' }),
-    method: 'PATCH',
-    url: '/api/routing/channels/ch-1',
-    body: { enabled: false, reason: '额度用完了' },
+    url: '/api/asks/ask-1/close',
     ok: OK,
   },
   {
@@ -200,7 +191,6 @@ describe('写请求：令牌与校验', () => {
   });
 
   test.each([
-    ['回答是空串', (api: FleetApi) => api.answerAsk('ask-1', '')],
     [
       '档位不在约定里',
       (api: FleetApi) => api.updateRouteEffort('m', 'r', { effort: 'ultra' as never, expected: null }),

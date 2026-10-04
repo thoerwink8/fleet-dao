@@ -117,10 +117,9 @@ describe('演示版：数据层', () => {
     }
   });
 
-  test('细节不到「过程」：时间线、步骤清单不给；看板标题按级别收', async () => {
+  test('细节不到「过程」：看板标题按级别收', async () => {
     scope(['board', 'task'], 'titles');
     const api = demoApi();
-    expect(((await api.timeline('t-12').catch((e: unknown) => e)) as ApiError).code).toBe('demo_hidden');
     const board = await api.board('r-orbit');
     expect(board.tasks.every((t) => !t.title.startsWith('需求 #'))).toBe(true);
     expect(board.tasks.flatMap((t) => t.subtasks).every((s) => s.touches.length === 0)).toBe(true);
@@ -181,16 +180,5 @@ describe('演示版：本机记着的口令', () => {
     );
     expect(r?.link).toBe('expired');
     expect(localStorage.getItem(KEY)).toBeNull();
-  });
-});
-
-describe('演示版：任务详情按细节级别收', () => {
-  test('细节不到「过程」：看板标题按级别收、步骤时间线不给数据', async () => {
-    // 任务详情页已删（delete-task-detail），这里剩「数据层按级别收」的半边：
-    // 时间线、步骤清单接口在细节不到「过程」时回 demo_hidden。
-    scope(['board'], 'status');
-    const api = demoApi();
-    expect(((await api.timeline('t-12').catch((e: unknown) => e)) as ApiError).code).toBe('demo_hidden');
-    expect(((await api.runSteps('run-x').catch((e: unknown) => e)) as ApiError).code).toBe('demo_hidden');
   });
 });

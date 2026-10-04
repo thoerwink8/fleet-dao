@@ -15,6 +15,7 @@ import { BackendError, createBackend } from '@fleet-dao/feishu';
 import { AskResponse, FeishuDraftConflictDetails } from '@fleet-dao/shared';
 import { count, eq, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { ASKS_NOT_RECEIVED_WHY } from '../src/legacy-asks.ts';
 import {
   type DraftOpener,
   DraftOpenerUnavailableError,
@@ -22,7 +23,7 @@ import {
   type DraftOpenResult,
 } from '../src/ports.ts';
 import type { Harness } from './harness.ts';
-import { agentRequest, GATEWAY_PASS, IDS, pgHarness, T0 } from './harness.ts';
+import { agentRequest, GATEWAY_PASS, IDS, pgHarness, T0, write } from './harness.ts';
 
 const A = { openId: 'ou_dev_founder_a' };
 const B = { openId: 'ou_dev_founder_b' };
@@ -286,15 +287,25 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
         .where(eq(notificationDeliveries.notificationId, IDS.notification1)),
     ).toContainEqual({ target: 'team', messageId: expect.stringMatching(/^om_push_/) });
 
-    // 卡上点了「阿里云」（驾驶舱接口回答追问）→ 这张卡的下一版是「已回答」，带上次送到的卡，网关原地改 → 回执「改了」→ 不再给。
-    await gateway.answerAsk(A, asked.askId, '阿里云');
+    // 回答追问的接口一律 409 asks_not_received（新流程没有收回答的地方，#928）：网关拿到带 code 的明确错误，库里一行不动。
+    const noReceiver = await rejected(gateway.answerAsk(A, asked.askId, '阿里云'));
+    expect({ status: noReceiver.status, code: noReceiver.code }).toEqual({
+      status: 409,
+      code: 'asks_not_received',
+    });
+    expect((await gateway.outbox(0)).items).toEqual([]);
+    // 在驾驶舱里「关闭」这条旧追问 → 这张卡的下一版是「已处理」，带上次送到的卡，网关原地改 → 回执「改了」→ 不再给。
+    const session = await h.login();
+    expect((await h.cockpit.request(`/api/asks/${asked.askId}/close`, write('POST', session))).status).toBe(
+      200,
+    );
     const next = await gateway.outbox(0);
     expect(next.items).toHaveLength(1);
     expect(next.items[0]).toMatchObject({
       id: askItemId,
       revision: 2,
       status: 'done',
-      doneText: expect.stringContaining('你选了：阿里云（就是推荐的），已生效 · 创始人甲'),
+      doneText: expect.stringContaining('这条旧追问已在驾驶舱关闭，没有回答'),
       delivered: { chatId: 'oc_team', revision: 1 },
     });
     const done = next.items[0];
@@ -384,7 +395,7 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
       draft: { revision: 2, understanding: '加验证码�\n补充：�只做短信' },
     });
 
-    // 回复追问卡作答：回答同样写进操作记录。
+    // 回复追问卡：新流程不再收追问回答（#928），明说、库里不写；半个 emoji 的清洗另由上面草稿那几条验。
     const asked = AskResponse.parse(
       await (
         await h.agent.request(
@@ -411,9 +422,8 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
         chatType: 'group',
         replyToMessageId: 'om_ask_lone',
       }),
-      // 回的和推荐的不一样（多了半个 emoji 换成的 �）：说清下个存档点交给 AI 改
-    ).toMatchObject({ kind: 'answer', text: '已记下：和 AI 先做的不一样，下个存档点交给 AI 改。' });
+    ).toMatchObject({ kind: 'answer', text: ASKS_NOT_RECEIVED_WHY });
     const [ask] = await t.db.select().from(asks).where(eq(asks.id, asked.askId));
-    expect(ask?.answer).toBe('阿里云�');
+    expect(ask?.answer).toBeNull();
   });
 });

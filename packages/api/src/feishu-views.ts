@@ -1,12 +1,13 @@
 // 飞书接口要的样子（shared/feishu-api.ts）：草稿卡、盘面快照、推送条目。纯函数，不碰数据库，测试直接喂数据。
 import { createHash } from 'node:crypto';
-import { ASK_HOLD_NAMES, type LateAnswer, lateAnswer } from '@fleet-dao/core';
+import { ASK_HOLD_NAMES, type LateAnswer } from '@fleet-dao/core';
 import {
   type Channel,
   FEISHU_NOTE_MAX,
   type FeishuBoardSnapshotSchema,
   type FeishuDraftSchema,
   type FeishuOutboxItemSchema,
+  isLegacyAskClosed,
   type Pool,
   type Repo,
   type SessionRun,
@@ -130,31 +131,6 @@ export function draftView(d: DraftRecord, ctx: DraftViewContext): Draft {
 // —— 回复一张卡时回的话（还没接模型理解，答不了的明说）——
 
 export const ANSWER_TEXTS = {
-  askRecorded: '已记下你的回答，AI 会接着干。',
-  /** 按推荐先做了的、另开单的（#259）：回答之后会怎样。 */
-  askRecordedScoped: (
-    ask: Pick<AskRecord, 'scope' | 'recommended'>,
-    answer: string,
-    taskState: TaskState,
-  ): string => {
-    if (ask.scope === 'outside') return '已记下你的回答，记在另开的那张单上。';
-    if (ask.scope === undefined || ask.recommended === undefined) return ANSWER_TEXTS.askRecorded;
-    switch (lateAnswer({ recommended: ask.recommended, answer, applied: false, taskState })) {
-      case 'confirmed':
-        return '已记下：你选的就是 AI 先做的那个，不用改。';
-      case 'follow-up':
-        return '已记下：这张单已经合进去了，会另开一张后续单照你选的改。';
-      case 'recorded':
-        return '已记下：这张单没做成就停了，只记下，重开时照你选的做。';
-      case 'change':
-      case 'applied':
-        return '已记下：和 AI 先做的不一样，下个存档点交给 AI 改。';
-    }
-  },
-  askTaken: (answer: string, by: string | undefined) =>
-    `这个问题已经回答过了（${by ?? '另一位'}：${clip(answer, 60)}），这句没有记成新的回答。`,
-  askMissing:
-    '这张卡对应的追问在库里读不到，这句没有记成回答（已记日志）。打开驾驶舱看这个需求现在有没有要回答的追问。',
   draftConfirmed: (task: { issueNumber: number; repo: string } | undefined) =>
     task
       ? `这张卡已经开成任务 #${task.issueNumber}（${task.repo}），要补充或改需求请在驾驶舱里改。`
@@ -215,6 +191,7 @@ function askStandingLine(ask: AskRecord, taskState: TaskState): string | undefin
 
 /** 回答了的卡片结论（不含谁答的、什么时候）。 */
 function answeredText(ask: AskRecord, late: LateAnswer | undefined): string {
+  if (isLegacyAskClosed(ask.answer)) return '这条旧追问已在驾驶舱关闭，没有回答';
   const answer = clip(ask.answer ?? '', 60);
   if (ask.scope === 'outside') {
     return `你选了：${answer}${ask.followUpIssue ? `，记在 #${ask.followUpIssue} 上` : '，记下了'}`;

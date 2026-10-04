@@ -1,4 +1,4 @@
-// 驾驶舱接口约定（web-api）：任务详情、时间线、步骤，和发给工作流的信号。
+// 驾驶舱接口约定（web-api）：任务详情，和发给工作流的信号。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
 import type { SegmentRunView } from '../segment-runs.ts';
@@ -12,12 +12,11 @@ import {
   SegmentOutcomeSchema,
   SegmentTierSchema,
   StageKindSchema,
-  StepStateSchema,
   TaskStateSchema,
 } from './enums.ts';
-import { Cursor, Id, type Same, Time } from './internal.ts';
+import { Id, type Same, Time } from './internal.ts';
 
-// —— 任务详情、时间线、步骤 ——
+// —— 任务详情 ——
 
 export const TaskSchema = z.object({
   id: Id,
@@ -183,39 +182,6 @@ export const TaskDetailResponse = z.object({
   usage: TaskUsageSchema,
 });
 
-export const TimelineItemSchema = z.object({
-  id: Id,
-  at: Time,
-  /** session = 会话里报的或读出来的；engine = 引擎记的（状态变化等）；person = 人做的操作。 */
-  source: z.enum(['session', 'engine', 'person']),
-  /** ProgressKind 之一，或 state（状态变化）、pause/resume/stop/reroute/answer 这类操作名。 */
-  kind: z.string(),
-  runId: Id.optional(),
-  subtaskId: Id.optional(),
-  /** 一行白话，后端按 kind 和原始内容拼好。 */
-  text: z.string(),
-  detail: z.unknown().optional(),
-});
-
-export const TimelineResponse = z.object({
-  items: z.array(TimelineItemSchema),
-  nextCursor: Cursor.optional(),
-});
-
-export const RunStepSchema = z.object({
-  index: z.number().int().min(0),
-  title: z.string(),
-  state: StepStateSchema,
-});
-
-export const RunStepsResponse = z.object({
-  runId: Id,
-  steps: z.array(RunStepSchema),
-  /** 步骤清单最后一次更新的时刻；没报过就没有。 */
-  updatedAt: Time.optional(),
-  lastSay: z.object({ text: z.string(), at: Time }).optional(),
-});
-
 // —— 发给工作流的信号 ——
 
 export const TaskActionRequest = z.discriminatedUnion('action', [
@@ -232,6 +198,38 @@ export const TaskActionRequest = z.discriminatedUnion('action', [
 ]);
 export const TaskActionResponse = z.object({ ok: z.literal(true) });
 
+// —— 旧会话留下的追问 ——
+// v3 三段流程里没有「AI 追问」这一环（动手会话没有 fleet 令牌、发不出 fleet ask；引擎没有收回答的地方，#928、#939）。
+// 库里还有的追问只来自还没删的旧会话：驾驶舱只读展示、能关闭；回答一律 409（asks_not_received）。
+
+/** 回答追问的请求体。接口只剩飞书网关还在调、一律回 409（没有收信处），形状留着让它们照旧能解析、读到明确的 409。 */
 export const AnswerAskRequest = z.object({ answer: z.string().min(1).max(4000) });
 
 export const AnswerAskResponse = z.object({ ok: z.literal(true) });
+
+/**
+ * 「关闭」一条旧追问时写进 answer 的标记：库表没有「已关闭」这一列（加列要迁移，这件事不值得），关闭就是用这句话把它标成已处理，
+ * 同一事务进操作记录（ask.close）。它不是任何人的回答，读 answer 的地方要认这句。
+ */
+export const LEGACY_ASK_CLOSED_ANSWER = '（旧会话留下的提问，已关闭，没有回答）';
+
+/** 这条追问的 answer 是不是「关闭」写进去的那句标记（不是人的回答，别拿它去算「按推荐先做」的后果）。 */
+export function isLegacyAskClosed(answer: string | undefined): boolean {
+  return answer === LEGACY_ASK_CLOSED_ANSWER;
+}
+
+/** 通知中心里的一条旧追问：只读展示 + 「关闭」。 */
+export const LegacyAskSchema = z.object({
+  id: Id,
+  taskId: Id,
+  question: z.string(),
+  askedAt: Time,
+  /** 来源需求的一句话背景（#12 标题）；单子读不到就没有这个键。 */
+  context: z.string().optional(),
+  /** 站内路径：任务详情。 */
+  link: z.string(),
+});
+
+export const LegacyAsksResponse = z.object({ items: z.array(LegacyAskSchema) });
+
+export const CloseAskResponse = z.object({ ok: z.literal(true) });

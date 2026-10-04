@@ -30,7 +30,6 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { textHash, wellFormed } from '@fleet-dao/store';
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
-import { answerAsk } from './answer-ask.ts';
 import type { Deps } from './deps.ts';
 import type { DraftOpenRunner } from './draft-opening.ts';
 import {
@@ -46,6 +45,7 @@ import {
   pendingOutbox,
 } from './feishu-views.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
+import { ASKS_NOT_RECEIVED_WHY } from './legacy-asks.ts';
 import {
   type Actor,
   type ChangeFeed,
@@ -245,49 +245,6 @@ export function feishuRoutes(deps: Deps, opening: DraftOpenRunner): Hono<FeishuE
     return answerWith(c, message, { kind: 'answer', text: ANSWER_TEXTS.draftMissing });
   }
 
-  /** 回复 AI 追问卡：这句话就是回答（和驾驶舱里回答同一条路，见 answer-ask.ts）。 */
-  async function replyToAskCard(
-    c: Context<FeishuEnv>,
-    founder: CockpitUser,
-    askId: string,
-    fallbackTaskId: string | undefined,
-    text: string,
-    message: FeishuMessageKey,
-  ): Promise<Response> {
-    const ask = await store.getAsk(askId);
-    const result = ask
-      ? await answerAsk(deps, {
-          askId,
-          taskId: ask.taskId,
-          answer: text,
-          by: actorOf(founder),
-          via: 'feishu',
-        })
-      : 'not_found';
-    let said: string = ANSWER_TEXTS.askRecorded;
-    if (result === 'ok' && ask?.scope !== undefined) {
-      // 按推荐先做了的、另开单的（#259）：照这张单现在走到哪说清回答之后会怎样。
-      const task = await store.getTask(ask.taskId);
-      if (task) said = ANSWER_TEXTS.askRecordedScoped(ask, text, task.state);
-      else log.warn('回答已记下，但这条追问的需求读不到，回话没说会怎样生效', { askId, taskId: ask.taskId });
-    } else if (result === 'already_answered') {
-      const now = await store.getAsk(askId);
-      // 自己上一次已经答上了（上次的回应丢了、网关重试）：照样说「记下了」。
-      if (!(now?.answeredBy === founder.id && now.answer === text)) {
-        const by = now?.answeredBy ? (await store.getUser(now.answeredBy))?.displayName : undefined;
-        said = ANSWER_TEXTS.askTaken(now?.answer ?? '', by);
-      }
-    } else if (result === 'not_found') {
-      // 卡片登记记着这条追问，库里却没有：说实话，不回「我还答不了」把人的回答吞掉。
-      log.warn('回复的追问卡对应的追问读不到，这句没有记成回答', {
-        cardMessageId: message.replyToMessageId,
-        askId,
-      });
-      said = ANSWER_TEXTS.askMissing;
-    }
-    return answerWith(c, message, { kind: 'answer', text: said, taskId: ask?.taskId ?? fallbackTaskId });
-  }
-
   /** 飞书进来的话：半个 emoji 换成 �（见 wellFormed），换了就记一笔。 */
   function cleaned(text: string, where: Record<string, unknown>): string {
     const w = wellFormed(text);
@@ -316,7 +273,8 @@ export function feishuRoutes(deps: Deps, opening: DraftOpenRunner): Hono<FeishuE
       return replyToDraftCard(c, founder, card.ref.draftId, text, message);
     }
     if (card?.kind === 'ask' && card.ref.askId !== undefined) {
-      return replyToAskCard(c, founder, card.ref.askId, card.ref.taskId, text, message);
+      // 回复追问卡：新流程不再收追问回答（#928），明说，不写库、不假装记下了（和驾驶舱的回答接口同一句话，legacy-asks.ts）。
+      return answerWith(c, message, { kind: 'answer', text: ASKS_NOT_RECEIVED_WHY, taskId: card.ref.taskId });
     }
     if (card) {
       return answerWith(c, message, { kind: 'answer', text: cardReplyText(card), taskId: card.ref.taskId });

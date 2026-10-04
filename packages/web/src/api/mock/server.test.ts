@@ -1,4 +1,4 @@
-import { REALTIME_TABLES, type SessionRun } from '@fleet-dao/shared';
+import { LEGACY_ASK_CLOSED_ANSWER, REALTIME_TABLES, type SessionRun } from '@fleet-dao/shared';
 import { describe, expect, test } from 'vitest';
 import { ApiError } from '../client';
 import type { LiveEvent } from '../types';
@@ -184,22 +184,26 @@ describe('假后端：发给工作流的信号', () => {
   });
 });
 
-describe('假后端：追问', () => {
-  test('回答后追问变成已回答，需求接着写方案；同一条不能答两次', async () => {
+describe('假后端：旧追问（#928，没有「回答」，只有「关闭」）', () => {
+  test('关闭后追问从清单里消失、标成已处理、进操作记录；同一条不能关两次；不存在的 404', async () => {
     const api = fresh();
-    const before = await api.task('t-15');
-    const ask = before.asks.find((a) => a.status === 'pending');
-    if (!ask) throw new Error('t-15 没有待回答的追问');
-    await api.answerAsk(ask.id, '只取消置顶');
+    const before = await api.legacyAsks();
+    const ask = before.items.find((a) => a.taskId === 't-15');
+    if (!ask) throw new Error('t-15 没有待处理的追问');
+    expect(ask.context).toMatch(/^#\d+ /);
+    expect(ask.link).toBe('/tasks/t-15');
+    await api.closeAsk(ask.id);
+    expect((await api.legacyAsks()).items.map((a) => a.id)).not.toContain(ask.id);
     const after = await api.task('t-15');
     expect(after.asks.find((a) => a.id === ask.id)).toMatchObject({
       status: 'answered',
-      answer: '只取消置顶',
+      answer: LEGACY_ASK_CLOSED_ANSWER,
       answeredBy: 'u-lan',
     });
-    expect(after.task.state).toBe('planning');
-    const again = await rejects(api.answerAsk(ask.id, '再答一次'));
+    expect((await api.audit()).items[0]).toMatchObject({ action: 'ask.close', target: 'task:t-15' });
+    const again = await rejects(api.closeAsk(ask.id));
     expect(again.code).toBe('already_answered');
+    expect((await rejects(api.closeAsk('no-such-ask'))).code).toBe('ask_not_found');
   });
 });
 

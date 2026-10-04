@@ -13,6 +13,7 @@ const ACTION_LABEL: Record<string, string> = {
   'task.stop': '叫停了',
   'task.reroute': '换了路由',
   'ask.answer': '回答了追问',
+  'ask.close': '关闭了旧追问',
   'notification.resolve': '处理了提醒',
   'setting.update': '改了设置',
   'agent.done_rejected': '「做完了」被退回',

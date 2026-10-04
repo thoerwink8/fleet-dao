@@ -18,6 +18,8 @@ import {
   type HostId,
   hardBanFor,
   JobsResponse,
+  LEGACY_ASK_CLOSED_ANSWER,
+  LegacyAsksResponse,
   MeResponse,
   NotificationsResponse,
   POOL_HOLDS_SETTING,
@@ -33,7 +35,6 @@ import {
   RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
-  RunStepsResponse,
   readSegmentRun,
   revocationProblem,
   routeEffortChoices,
@@ -49,9 +50,7 @@ import {
   summarizeUsage,
   TaskActionRequest,
   TaskDetailResponse,
-  TimelineResponse,
   taskFlow,
-  UpdateChannelRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
@@ -1142,36 +1141,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ),
       });
     },
-    async timeline(taskId, p) {
-      await wait();
-      findTask(taskId);
-      const res = page(
-        st.logs.filter((l) => l.taskId === taskId),
-        (l) => l.at,
-        p?.cursor,
-        p?.limit ?? 50,
-      );
-      return TimelineResponse.parse({
-        items: res.items.map(({ taskId: _t, ...rest }) => rest),
-        nextCursor: res.nextCursor,
-      });
-    },
-    async runSteps(runId) {
-      await wait();
-      const owner = st.tasks.flatMap((t) => t.subtasks).find((s) => s.runs.some((r) => r.id === runId));
-      const known = owner || st.tasks.some((t) => t.runs.some((r) => r.id === runId));
-      if (!known) throw new ApiError(404, 'run_not_found', '没有这个会话');
-      // 步骤清单归写码会话；第二意见的会话没报过。
-      if (owner?.runs.find((r) => r.id === runId)?.stage === 'review') {
-        return RunStepsResponse.parse({ runId, steps: [] });
-      }
-      return RunStepsResponse.parse({
-        runId,
-        steps: owner?.steps ?? [],
-        updatedAt: owner?.planUpdatedAt,
-        lastSay: owner?.lastSay,
-      });
-    },
     async taskAction(taskId, raw) {
       await wait();
       const body = TaskActionRequest.parse(raw);
@@ -1242,28 +1211,40 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       });
       emit('tasks', taskId);
     },
-    async answerAsk(askId, answer) {
+    async legacyAsks() {
+      await wait();
+      return LegacyAsksResponse.parse({
+        items: st.tasks.flatMap((tv) =>
+          tv.asks
+            .filter((a) => a.answer === undefined)
+            .map((a) => ({
+              id: a.id,
+              taskId: tv.task.id,
+              question: a.question,
+              askedAt: a.askedAt,
+              context: `#${tv.task.issueNumber} ${tv.task.title}`,
+              link: `/tasks/${tv.task.id}`,
+            })),
+        ),
+      });
+    },
+    async closeAsk(askId) {
       await wait();
       const tv = st.tasks.find((t) => t.asks.some((a) => a.id === askId));
       const ask = tv?.asks.find((a) => a.id === askId);
       if (!tv || !ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-      if (ask.answer !== undefined) throw new ApiError(409, 'already_answered', '这条追问已经有人回答了');
-      ask.answer = answer;
+      if (ask.answer !== undefined) throw new ApiError(409, 'already_answered', '这条追问已经处理过了');
+      ask.answer = LEGACY_ASK_CLOSED_ANSWER;
       ask.answeredBy = st.me.user.id;
       ask.answeredAt = iso();
-      log(tv, { source: 'person', kind: 'answer', text: `回答追问：${answer}` });
       audit({
         actor: meActor(),
-        action: 'ask.answer',
+        action: 'ask.close',
         target: `task:${tv.task.id}`,
-        after: { askId, answer },
+        after: { askId },
         via: 'cockpit',
       });
       emit('asks', askId);
-      if (tv.task.state === 'asking' && tv.asks.every((a) => a.answer !== undefined)) {
-        startRun(tv, undefined, 'plan', pickRoute('plan') ?? 'r-ca-opus', '回答之后接着写方案');
-        setTaskState(tv, 'planning');
-      }
     },
     async routing() {
       await wait();
@@ -1370,22 +1351,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         routeId,
         ...(body.effort === null ? {} : { effort: body.effort }),
       });
-    },
-    async updateChannel(channelId, raw) {
-      await wait();
-      const body = UpdateChannelRequest.parse(raw);
-      const ch = st.channels.find((c) => c.id === channelId);
-      if (!ch) throw new ApiError(404, 'channel_not_found', '没有这个渠道');
-      ch.enabled = body.enabled;
-      audit({
-        actor: meActor(),
-        action: body.enabled ? 'channel.enable' : 'channel.disable',
-        target: `channel:${channelId}`,
-        after: { enabled: body.enabled },
-        via: 'cockpit',
-        ...(body.reason ? { reason: body.reason } : {}),
-      });
-      emit('channels', channelId);
     },
     async pools() {
       await wait();

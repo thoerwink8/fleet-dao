@@ -96,7 +96,7 @@ export const toneIcon: Record<Tone, LucideIcon> = {
 export const taskStateLabel: Record<TaskState, string> = {
   queued: '排队中',
   triaging: '分诊中',
-  asking: '等你回答',
+  asking: '卡在旧追问',
   planning: '写方案',
   running: '在干活',
   merging: '合并中',
@@ -312,7 +312,7 @@ export function describeTask(t: BoardTask, now: number): string {
     case 'triaging':
       return '在分诊：判断是哪类活、说没说清';
     case 'asking':
-      return '在等你回答追问';
+      return '停在旧会话留下的追问上（通知中心里可以关闭）';
     case 'planning':
       return '在写方案';
     case 'running':

@@ -118,13 +118,6 @@ export const RoutingResponse = z.object({
   bans: z.array(BanSchema),
 });
 
-/** 上架 / 下架一个渠道。 */
-export const UpdateChannelRequest = z.object({
-  enabled: z.boolean(),
-  reason: z.string().max(500).optional(),
-});
-export const UpdateChannelResponse = z.object({ ok: z.literal(true) });
-
 // —— 路由两层（#574）：每个用途 → 模型 → 路由，每一层现在活着吗 ——
 // 活不活不存，读的时候按探针、额度、禁令现算（db 的 routing-liveness.ts，判法只在那里）。
 

@@ -11,10 +11,16 @@ function spy() {
 }
 
 describe('推送到缓存：按表名决定重拉什么', () => {
-  test('需求表变了：重拉看板、任务详情、时间线', () => {
+  test('需求表变了：重拉看板、任务详情', () => {
     const { qc, called } = spy();
     applyLiveEvent(qc, { type: 'change', table: 'tasks', id: 't-1' });
-    expect(called()).toEqual(['board', 'task', 'timeline']);
+    expect(called()).toEqual(['board', 'task']);
+  });
+
+  test('追问表变了：旧追问清单跟着重拉（通知中心的「关闭」之后另一台设备也看到）', () => {
+    const { qc, called } = spy();
+    applyLiveEvent(qc, { type: 'change', table: 'asks', id: 'a-1' });
+    expect(called()).toEqual(['board', 'task', keys.legacyAsks.join('/')]);
   });
 
   test('额度窗、渠道变了：路由两层的活不活跟着重拉（额度够不够、渠道开没开都在三件事里）', () => {
@@ -103,10 +109,10 @@ describe('推送攒一小会儿再作废', () => {
       b.push({ type: 'change', table: 'notifications', id: 'n1' });
       expect(called()).toEqual([]);
       vi.advanceTimersByTime(400);
-      expect(called()).toEqual(['board', 'task', 'timeline', 'run-steps', 'notifications']);
+      expect(called()).toEqual(['board', 'task', 'notifications']);
       b.push({ type: 'change', table: 'tasks', id: 't1' });
       vi.advanceTimersByTime(400);
-      expect(called().slice(5)).toEqual(['board', 'task', 'timeline']);
+      expect(called().slice(3)).toEqual(['board', 'task']);
     } finally {
       vi.useRealTimers();
     }

@@ -1,8 +1,8 @@
-import { AskResponse, HistoryResponse, TaskResponse, TimelineResponse } from '@fleet-dao/shared';
+import { AskResponse, HistoryResponse, TaskResponse } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
 import { signPayload } from '../src/tokens.ts';
-import { agentRequest, DEV_RUN_ID, errorCode, harness, IDS, write } from './harness.ts';
+import { agentRequest, DEV_RUN_ID, DEV_USER_ID, errorCode, harness, IDS, write } from './harness.ts';
 
 describe('fleet 令牌', () => {
   it('签出来的能验过；换密钥、改内容、过期、寿命超上限、签发时间在未来都不认', () => {
@@ -476,15 +476,20 @@ describe('fleet ask：问他不挡路（#259）', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('答过了的：再问同一句直接回答案（驾驶舱、飞书、issue 回的都算）', async () => {
+  it('答过了的（库里已有的回答，老数据）：再问同一句直接回答案', async () => {
     const h = harness();
-    const session = await h.login();
     const first = AskResponse.parse(await (await ask(h, sms)).json());
-    const answered = await h.cockpit.request(
-      `/api/asks/${first.askId}/answer`,
-      write('POST', session, { answer: '腾讯云' }),
+    // 驾驶舱的回答接口现在一律 409（#928）：库里的回答只可能是以前留下的，这里直接写库当老数据
+    await h.store.answerAsk(
+      { askId: first.askId, answer: '腾讯云', by: { kind: 'user', id: DEV_USER_ID } },
+      {
+        actor: { kind: 'user', id: DEV_USER_ID },
+        action: 'ask.answer',
+        target: `task:${IDS.task12}`,
+        via: 'cockpit',
+        ok: true,
+      },
     );
-    expect(answered.status).toBe(200);
     expect(AskResponse.parse(await (await ask(h, sms)).json())).toEqual({
       askId: first.askId,
       status: 'answered',
@@ -608,9 +613,8 @@ describe('fleet done 要核实', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('退回要落库：操作记录里有，任务时间线上看得到，不只打日志', async () => {
+  it('退回要落库：操作记录里有，会话进度里也有，不只打日志', async () => {
     const h = harness();
-    const session = await h.login();
     const res = await done(h, { summary: '写完了', testsPassed: true });
     expect(res.status).toBe(422);
     expect(h.store.data.audit.at(-1)).toMatchObject({
@@ -621,13 +625,9 @@ describe('fleet done 要核实', () => {
       ok: false,
       error: 'done_rejected',
     });
-    const timeline = TimelineResponse.parse(
-      await (
-        await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline`, { headers: { cookie: session.cookie } })
-      ).json(),
-    );
-    expect(timeline.items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
-    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过 `pnpm test:changed`');
+    const { items } = await h.store.listTimeline(IDS.task12, { limit: 1 });
+    expect(items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
+    expect(JSON.stringify(items[0]?.payload)).toContain('没查到本次会话跑过 `pnpm test:changed`');
   });
 
   it('带的 PR 还没同步进库：409，过一会儿再交（也落库）', async () => {

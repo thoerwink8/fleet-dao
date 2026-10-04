@@ -22,6 +22,7 @@ import type {
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
+  LegacyAsksResponse,
   LivenessFactSchema,
   LivenessVerdictSchema,
   MeResponse,
@@ -47,14 +48,10 @@ import type {
   RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
-  RunStepsResponse,
   SettingSchema,
   SettingsResponse,
   TaskActionRequest,
   TaskDetailResponse,
-  TimelineItemSchema,
-  TimelineResponse,
-  UpdateChannelRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
@@ -89,9 +86,8 @@ export type NowItem = z.infer<typeof NowItemSchema>;
 export type TaskDetail = z.infer<typeof TaskDetailResponse>;
 export type Run = z.infer<typeof RunSchema>;
 export type Ask = z.infer<typeof AskSchema>;
-export type Timeline = z.infer<typeof TimelineResponse>;
-export type TimelineItem = z.infer<typeof TimelineItemSchema>;
-export type RunSteps = z.infer<typeof RunStepsResponse>;
+export type LegacyAsks = z.infer<typeof LegacyAsksResponse>;
+export type LegacyAsk = LegacyAsks['items'][number];
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;
@@ -100,7 +96,6 @@ export type Model = z.infer<typeof ModelSchema>;
 export type Route = z.infer<typeof RouteSchema>;
 export type Pool = z.infer<typeof PoolSchema>;
 export type Ban = z.infer<typeof BanSchema>;
-export type UpdateChannelBody = z.input<typeof UpdateChannelRequest>;
 
 /** 路由两层每一层现在活着吗（#574）。 */
 export type RoutingLayers = z.infer<typeof RoutingLayersResponse>;
