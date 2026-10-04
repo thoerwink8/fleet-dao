@@ -51,6 +51,8 @@ import { missingWalkthrough } from './walkthrough.mjs';
 /** @typedef {{ agent?: string | undefined, authorFamily?: string | string[] | undefined, excludeFamily?: string | undefined, ui?: boolean | undefined }} ProfileOptions */
 /** @typedef {{ text: string, sessionKey: string, model: string | null, ledgerNote: string, usage: string, fallbackNote?: string }} SessionResult 一次会话跑完的结果 */
 /** @typedef {(s: string) => void} Log */
+/** @typedef {{ context?: unknown, state?: unknown, description?: unknown }} StatusRow GitHub 提交状态的一条 */
+/** @typedef {{ scanFiles: (files: string[], read: (file: string) => Buffer) => { binary: unknown[], scanned: unknown[], findings: unknown[] }, formatFinding: (finding: unknown) => string }} HygieneScan 仓里卫生检查（packages/hygiene/src/scan.ts）用到的两个导出 */
 /** @typedef {(args: string[]) => string} GhRun 起 gh（失败抛错、成功回 stdout；测试里换成假的） */
 /**
  * 从 Mirasim 的 ws 读回来的一帧：按协议文档（adapters.md 第八节）写的字段，用到的地方原来就有显式判断。
@@ -1118,10 +1120,15 @@ async function critique(o) {
 // cursorAgentEnv 挪到 tools.mjs 了（ask.mjs、second-opinion.mjs 两边起 cursor-agent 都要用，见那边的注释）；
 // 这个文件顶部 import 了它、又 re-export 了它，用法不用变。
 
-/** 从 reclaude --output-format json 的结果里取正文；形状认不出就明确失败。 */
+/**
+ * 从 reclaude --output-format json 的结果里取正文；形状认不出就明确失败。
+ * @param {unknown} raw
+ * @returns {string}
+ */
 export function parseReclaudeOutput(raw) {
   const source = String(raw ?? '').trim();
   if (!source) throw new NotChecked('reclaude 退出码 0 但没有输出');
+  /** @type {unknown[]} */
   const values = [];
   try {
     values.push(JSON.parse(source));
@@ -1136,13 +1143,17 @@ export function parseReclaudeOutput(raw) {
       }
     }
   }
+  /**
+   * @param {unknown} value
+   * @returns {string}
+   */
   const textOf = (value) => {
     if (typeof value === 'string') return value.trim();
     if (Array.isArray(value)) {
       const parts = value.map(textOf).filter(Boolean);
       return parts.join('\n').trim();
     }
-    if (!value || typeof value !== 'object') return '';
+    if (!isObjectLike(value)) return '';
     for (const key of ['result', 'text', 'response', 'content', 'output']) {
       const text = textOf(value[key]);
       if (text) return text;
@@ -1158,6 +1169,10 @@ export function parseReclaudeOutput(raw) {
   throw new NotChecked('reclaude JSON 输出格式认不出（缺 result/text/content）');
 }
 
+/**
+ * @param {Pick<SessionOpts, 'prompt' | 'workdir' | 'timeoutMin' | 'log'>} opts
+ * @returns {Promise<SessionResult>}
+ */
 function runClaude({ prompt, workdir, timeoutMin, log }) {
   if (!findBin('reclaude'))
     return Promise.reject(new NotInstalled('这台机器没装 reclaude（PATH 上找不到；Claude 必须经 reclaude）'));
@@ -1179,6 +1194,11 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
       // 执行体提前退出时写 stdin 会 EPIPE，最终以退出码和 stdout 为准。
     });
     child.stdin.end(prompt);
+    /**
+     * @template T
+     * @param {(v: T) => void} fn
+     * @param {T} value
+     */
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -1192,8 +1212,8 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
       },
       Math.max(1, timeoutMin * 60_000),
     );
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
+    child.stdout.on('data', (/** @type {Buffer} */ d) => (out += d));
+    child.stderr.on('data', (/** @type {Buffer} */ d) => (err += d));
     child.on('error', (e) => finish(rejectP, new NotChecked(`reclaude 起不来：${e.message}`)));
     child.on('close', (code) => {
       if (code !== 0)
@@ -1225,9 +1245,17 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
 // 参数、题面从 stdin 喂给它，模型不用调任何工具就能看到题面（cursorAgentEnv() 留着一起用，多一层保险，不影响）。
 // 题面最前面塞一行随机核对码、要求原样抄进答案：退出码 0、有输出，但输出里没有核对码，照样判没查成，不会被
 // 「有输出就算答了」蒙混过去——不管读不到题面的原因是钩子拦的、权限，还是别的。
+/**
+ * @param {Pick<SessionOpts, 'prompt' | 'profile' | 'workdir' | 'timeoutMin' | 'log'>} opts
+ * @returns {Promise<SessionResult>}
+ */
 function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
   const problem = cursorAgentProblem();
   if (problem) return Promise.reject(new NotInstalled(problem));
+  const model = profile.model;
+  // 走 cursor-cli 的几家档案都写了模型；没写就不起（原来会把 null 当参数交给 cursor-agent）
+  if (model === null)
+    return Promise.reject(new NotChecked(`${profile.agent} 的档案没写模型，不知道让 cursor-agent 用哪个`));
   const nonce = randomUUID().slice(0, 8);
   const started = Date.now();
   log(`[0.0s] cursor-agent 起了（${profile.model}，只读，工作目录 ${workdir}）`);
@@ -1242,7 +1270,7 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
       '--workspace',
       workdir,
       '--model',
-      profile.model,
+      model,
     ];
     const child = spawn('cursor-agent', args, {
       cwd: workdir,
@@ -1258,8 +1286,8 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
     );
     let out = '';
     let err = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
+    child.stdout.on('data', (/** @type {Buffer} */ d) => (out += d));
+    child.stderr.on('data', (/** @type {Buffer} */ d) => (err += d));
     const timer = setTimeout(() => {
       child.kill();
       rejectP(new NotChecked(`cursor-agent ${timeoutMin} 分钟没答完，杀掉了`));
@@ -1298,6 +1326,10 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
   });
 }
 
+/**
+ * @param {SessionOpts} opts
+ * @returns {Promise<SessionResult>}
+ */
 async function runSession({
   prompt,
   profile,
@@ -1340,6 +1372,9 @@ async function runSession({
     );
   if (ack.type === 'error') throw new NotChecked(`Mirasim 拒了：${ack.message ?? JSON.stringify(ack)}`);
   const sessionKey = ack.sessionKey;
+  // 协议里 accepted 帧一定带会话号；没带就明说，别拿 undefined 去订阅、读账本
+  if (typeof sessionKey !== 'string' || !sessionKey)
+    throw new NotChecked(`Mirasim 应了、却没给会话号：${JSON.stringify(ack)}`);
   const secs = () => `${((Date.now() - since) / 1000).toFixed(1)}s`;
   log(
     `[${secs()}] 会话 ${sessionKey} 起了（${profile.agent} / ${profile.model} / 路由 ${profile.route ?? '自动'}）`,
@@ -1354,12 +1389,18 @@ async function runSession({
   }
 }
 
+/**
+ * @param {{ profile: Profile, url: string, sessionKey: string, since: number, timeoutMin: number, pollMs: number, log: Log, before: number | null, secs: () => string }} opts
+ * @returns {Promise<SessionResult>}
+ */
 async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs, log, before, secs }) {
   const deadline = since + timeoutMin * 60_000;
   let lastSig = '';
   let lastChange = Date.now();
+  /** @type {string | null} */
   let lastPhase = '';
   let misses = 0;
+  /** @type {SessionView | null} */
   let view = null;
   for (;;) {
     await new Promise((r) => setTimeout(r, pollMs));
@@ -1420,6 +1461,10 @@ async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs
   return { sessionKey, text: view.text, model: view.model, ledgerNote, usage };
 }
 
+/**
+ * @param {string} url
+ * @param {string} sessionKey
+ */
 async function stop(url, sessionKey) {
   const wire = new Wire(url);
   try {
@@ -1437,6 +1482,9 @@ async function stop(url, sessionKey) {
  * 把会话连它的目录和账本一起删掉（Mirasim 的 deleteSession）。第二意见每次都是一次性的：跑完就删，
  * 不留在会话列表里等人来清（创始人 2026-10-03：「在 mirasim 起一个会话，我根本不想看见它，并且我希望随时能清理掉」）。
  * 删之前账本要先读完（traffic/<uuid> 跟会话一起没）。删不掉不当成失败——结论已经拿到了，只如实说一句。
+ * @param {string} url
+ * @param {string} sessionKey
+ * @param {Log | undefined} log
  */
 async function forget(url, sessionKey, log) {
   const wire = new Wire(url);
@@ -1448,20 +1496,25 @@ async function forget(url, sessionKey, log) {
     if (r && r.type === 'error') log?.(`会话 ${sessionKey} 没删掉：${r.message ?? JSON.stringify(r)}`);
     else log?.(`会话 ${sessionKey} 已删（连目录和账本）`);
   } catch (e) {
-    log?.(`会话 ${sessionKey} 没删掉：${e.message}`);
+    log?.(`会话 ${sessionKey} 没删掉：${messageOf(e)}`);
   } finally {
     wire.close();
   }
 }
 
-/** 列本机 Mirasim 的会话（走 listSessions 帧）。读不到就抛，不当成「一个也没有」。 */
+/**
+ * 列本机 Mirasim 的会话（走 listSessions 帧）。读不到就抛，不当成「一个也没有」。
+ * @returns {Promise<NonNullable<Frame['sessions']>>}
+ */
 async function listSessions() {
   const { wire } = await connect();
   try {
     wire.send({ type: 'listSessions' });
     const m = await wire.waitFor((x) => x.type === 'sessions' && Array.isArray(x.sessions), 20_000);
     if (!m) throw new NotChecked('本机 Mirasim 没回会话列表（20 秒）');
-    return m.sessions;
+    const sessions = m.sessions;
+    if (!Array.isArray(sessions)) throw new NotChecked('本机 Mirasim 回的会话列表认不出');
+    return sessions;
   } finally {
     wire.close();
   }
@@ -1476,7 +1529,10 @@ const OUR_SESSION_TITLE = /^(你是 PR #\d+ 的「第二意见」|你是「反�
  */
 let KEEP_SESSION = false;
 
-/** 清掉我们（second-opinion / 反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。 */
+/**
+ * 清掉我们（second-opinion / 反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。
+ * @param {Log} log
+ */
 async function stopStale(log) {
   const { url } = await connect();
   const sessions = await listSessions();
@@ -1488,7 +1544,11 @@ async function stopStale(log) {
 }
 
 /** 贴到 PR 的正文：会话自己的过程话去掉，从「## 必须改」起照原样。 */
-/** 审查意见里本机目录（审查树、仓根）的绝对路径改成仓内相对路径：贴到公开仓的评论里不带本机目录（2026-09-26 #148 的补审评论带出过）。 */
+/**
+ * 审查意见里本机目录（审查树、仓根）的绝对路径改成仓内相对路径：贴到公开仓的评论里不带本机目录（2026-09-26 #148 的补审评论带出过）。
+ * @param {unknown} text
+ * @param {readonly unknown[]} dirs
+ */
 export function stripLocalPaths(text, dirs) {
   let out = String(text);
   for (const d of dirs) {
@@ -1503,6 +1563,7 @@ export function stripLocalPaths(text, dirs) {
 /**
  * 贴到 PR 的评论。第一行的格式别改：POSTED_REVIEW 靠它数轮（「第二意见 第 N 轮」「审的头 七位」「：通过 / 必须改 N 条」）。
  * 结论是脚本的判定，不是审的人自己写的那句；审的人的原文（从「必须改」那一段起）附在后面。
+ * @param {{ judged: Judgement, head: unknown, model: string, body: unknown, afterMerge?: boolean, mergeCommit?: string | null, roundNote?: string, note?: string }} opts
  */
 export function prComment({
   judged,
@@ -1534,7 +1595,12 @@ export function prComment({
 
 /** 贴之前按仓里的卫生检查扫一遍：没扫成、扫出真密钥，一律抛（不贴；账号、组织编号、邮箱、IP 这类标识不算泄漏，
  * 不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。 */
+/**
+ * @param {string} repo
+ * @param {string} body
+ */
 export async function checkPublishable(repo, body) {
+  /** @type {HygieneScan} */
   const scan = await import(pathToFileURL(join(repo, 'packages', 'hygiene', 'src', 'scan.ts')).href);
   const report = scan.scanFiles(['second-opinion.md'], () => Buffer.from(body, 'utf8'));
   if (report.binary.length > 0 || report.scanned.length !== 1) throw new Error('卫生检查没扫成，没贴');
@@ -1542,6 +1608,14 @@ export async function checkPublishable(repo, body) {
     throw new Error(`卫生检查拦下了（${report.findings.map(scan.formatFinding).join('；')}），没贴`);
 }
 
+/**
+ * @param {string} repo
+ * @param {number} pr
+ * @param {string} body
+ * @param {GhRun} ghRun
+ * @param {string} [runs]
+ * @returns {Promise<string>}
+ */
 async function postToPr(repo, pr, body, ghRun, runs = RUNS) {
   await checkPublishable(repo, body);
   mkdirSync(runs, { recursive: true });
@@ -1563,14 +1637,31 @@ async function postToPr(repo, pr, body, ghRun, runs = RUNS) {
   }
 }
 
-/** 这个头上现在的 second-opinion（GitHub 按新到旧排，取第一条）；没有回 undefined。读不到抛。 */
+/**
+ * 这个头上现在的 second-opinion（GitHub 按新到旧排，取第一条）；没有回 undefined。读不到抛。
+ * @param {GhRun} ghRun
+ * @param {string} head
+ * @returns {StatusRow | undefined}
+ */
 function currentSecondOpinion(ghRun, head) {
+  /** @type {unknown} */
   const all = JSON.parse(ghRun(['api', `repos/{owner}/{repo}/commits/${head}/statuses`]) || '[]');
   if (!Array.isArray(all)) throw new NotChecked(`${head.slice(0, 7)} 的提交状态认不出（不是列表）`);
-  return all.find((s) => s?.context === 'second-opinion');
+  /** @type {unknown[]} */
+  const rows = all;
+  return rows.find(
+    /** @returns {s is StatusRow} */
+    (s) => isObjectLike(s) && s.context === 'second-opinion',
+  );
 }
 
-/** 在审的那个头上写提交状态 second-opinion（合并闸在「先审后合」时认它，#74）。头变了旧状态自然不算。 */
+/**
+ * 在审的那个头上写提交状态 second-opinion（合并闸在「先审后合」时认它，#74）。头变了旧状态自然不算。
+ * @param {GhRun} ghRun
+ * @param {string} head
+ * @param {{ state: string, description: string }} status
+ * @param {string | undefined} [url]
+ */
 function setStatus(ghRun, head, { state, description }, url) {
   // 总指挥已经在这个头上放行过（审查跑到一半时放行的），就不拿这一轮的结论盖掉它；结论照样贴在 PR 评论里
   const current = currentSecondOpinion(ghRun, head);
@@ -1600,6 +1691,9 @@ function setStatus(ghRun, head, { state, description }, url) {
  * 这个 PR 之前审完、出了结论几轮：数本脚本贴过的结论评论（不管头变没变，第二意见和合并后补审都算）。
  * 读不到回 { prior: null, why }，调用方按第 1 轮算（宁可多挡）。不数 runs 目录：那里的文件名用的是调用方给的 --round，
  * 同一个头重跑会盖掉；#701 贴了 10 次、每次都写「第 1 轮」。
+ * @param {number} pr
+ * @param {GhRun} ghRun
+ * @returns {{ prior: number | null, why: string }}
  */
 export function reviewRounds(pr, ghRun) {
   try {
@@ -1610,6 +1704,7 @@ export function reviewRounds(pr, ghRun) {
       '--jq',
       '.[] | (.body // "") | @json',
     ]);
+    /** @type {unknown[]} */
     const bodies = String(out)
       .split('\n')
       .filter((l) => l.trim())
@@ -1621,14 +1716,21 @@ export function reviewRounds(pr, ghRun) {
   }
 }
 
-/** 一次命令失败的原因：stderr 第一行（没有就用 message），最多 200 字。 */
+/**
+ * 一次命令失败的原因：stderr 第一行（没有就用 message），最多 200 字。
+ * @param {unknown} e
+ */
 function errText(e) {
-  const s = String(e?.stderr ?? '').trim() || String(e?.message ?? e).trim();
+  const s = String((isObjectLike(e) ? e.stderr : undefined) ?? '').trim() || String(messageOf(e) ?? e).trim();
   const first = s.split(/\r?\n/).find((l) => l.trim()) ?? s;
   return first.length > 200 ? `${first.slice(0, 200)}…` : first;
 }
 
-/** gh 走代理时好时坏（2026-09-25 实测）：先照常，不行再绕开代理直连。 */
+/**
+ * gh 走代理时好时坏（2026-09-25 实测）：先照常，不行再绕开代理直连。
+ * @param {string[]} args
+ * @param {string} [cwd]
+ */
 function gh(args, cwd) {
   const { https_proxy, http_proxy, HTTPS_PROXY, HTTP_PROXY, ...direct } = process.env;
   try {
@@ -1638,7 +1740,10 @@ function gh(args, cwd) {
   }
 }
 
-/** 要审的仓：--repo 给了用它，没给用当前目录所在的 git 检出 */
+/**
+ * 要审的仓：--repo 给了用它，没给用当前目录所在的 git 检出
+ * @param {Options} o
+ */
 function repoOf(o) {
   if (o.repo) return resolve(o.repo);
   try {
