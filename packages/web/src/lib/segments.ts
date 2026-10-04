@@ -39,7 +39,7 @@ export const SEGMENT_UNMETERED: Partial<
 > = {
   scope: {
     short: '在对话里做的，不计',
-    why: '对题是创始人和指挥官在对话里做的，引擎没有起会话，没有耗时和 token 可记；不是没记，是不计。',
+    why: '对题是创始人在对话里和 AI 一起做的，引擎没有起会话，没有耗时和 token 可记；不是没记，是不计。',
     partial: '只含引擎起的会话；在对话里做的部分不计',
   },
 };
