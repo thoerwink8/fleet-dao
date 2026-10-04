@@ -315,5 +315,30 @@ describe('欠账只报告、不挡 PR（创始人 2026-09-26「流程只为快�
     const docs = yml.slice(yml.indexOf('  debt-docs:'), yml.indexOf('  debt-live:'));
     expect(docs).toContain('continue-on-error: true');
     expect(docs).toMatch(/run: node packages\/conventions\/src\/bin\/debt-check\.ts\s*$/m);
+    expect(docs).not.toMatch(/^ {4}if: /m);
+  });
+
+  /** debt-live 这一段的 job 级 if；写法换了（没有 debt-live、没有 if）直接抛，不当成「没限制」。 */
+  function liveCondition(yml: string): string {
+    const at = yml.indexOf('  debt-live:');
+    if (at < 0) throw new Error('debt.yml 里找不到 debt-live：写法换了，这条测试跟着改');
+    const cond = /^ {4}if: (.+)$/m.exec(yml.slice(at))?.[1];
+    if (cond === undefined) throw new Error('debt-live 没有 job 级 if：推主线也会起它');
+    return cond.trim();
+  }
+
+  it('看 GitHub 现状那一半（debt-live）推主线不起，只在每天定时和手动运行里跑；看文件那一半（debt-docs）推主线照跑', () => {
+    const yml = read('.github/workflows/debt.yml');
+    expect(liveCondition(yml)).toBe("github.event_name != 'push'");
+    expect(yml).toMatch(/^ {2}schedule:/m);
+    expect(yml).toMatch(/^ {2}workflow_dispatch:/m);
+  });
+
+  it('【故意造出的失败】debt-live 的 if 被摘掉、或没有 debt-live：抛错，不当成「没限制」', () => {
+    const yml = read('.github/workflows/debt.yml');
+    const noIf = yml.replace(/^ {4}if: github\.event_name != 'push'\n/m, '');
+    expect(noIf).not.toBe(yml);
+    expect(() => liveCondition(noIf)).toThrow('没有 job 级 if');
+    expect(() => liveCondition(yml.replace('  debt-live:', '  debt-liv:'))).toThrow('找不到 debt-live');
   });
 });

@@ -83,6 +83,23 @@
 
 **还在的慢处**（都不到「每轮再省 5 秒以上」的值得做门槛，所以停在这）：lint 29 秒（装依赖 5、tsc 10–17）；改到 ci.yml/ci-plan.ts/deploy/ 的 PR 照旧全跑一遍（约 2 分钟，deploy 是大头）；这类 PR 还要过第二意见（按路径审的那几个文件，ci.yml 的纯提速改动已不用审）。
 
+## 第三轮（创始人 2026-10-04 夜「按照你推荐去做，自我验证，持续优化到最佳」：用的机器越少越好，测试在不损失性能的前提下检测量越少越好）
+
+**起点（2026-10-04 夜实测，最近 60 轮已跑完的 ci.yml，不含被取消的）**：前三轮的验收目标早已达到（一轮 35–121 秒，第一个任务几乎不排队，中位 2–3 秒、最多 58 秒），所以这一轮的目标换成「少占免费档那 20 个并发槽」和「不降低发布背书的前提下缩短主线那一轮」。
+
+| 事件 | 轮数 | 墙钟中位 / 最大 | job 数中位 | 机器分钟 中位 / 合计 |
+|---|---|---|---|---|
+| 主线推送 | 28 | 92 秒 / 157 秒 | 11 | 7.0 / 189 |
+| PR | 32 | 86 秒 / 148 秒 | 10 | 6.8 / 186 |
+
+**怎么量**（`pnpm ci:stats`，只读，用本机登录好的 `gh`）：`pnpm ci:stats --workflow ci.yml --n 60`，可加 `--event push|pull_request`、`--since <ISO 时间>` 只看改动合并之后的轮次、`--workflow merge-gate.yml` 量别的工作流。数据来自 `GET /repos/{r}/actions/workflows/{文件}/runs?status=completed` 和 `GET /actions/runs/{id}/jobs?filter=latest`：墙钟 = `updated_at − run_started_at`；排队 = 第一个 job 的 `started_at − created_at`；机器分钟 = 各 job（不含 skipped）`completed_at − started_at` 之和。被取消的轮次不算；任何一个时间读不出就报错退出 2，不当 0 秒。
+
+**第一块：少占并发槽的两处小改（一个 PR）**
+
+- 合并闸 `merge-gate.yml`：原来每次都装 pnpm、带缓存的 setup-node、`pnpm install --filter`，只为让改了已有 `ci.yml` 的 PR 能解析 YAML。实测 pull_request_target 每轮 job 中位 15 秒（最近 35 轮合计 534 秒）、status 事件 18 秒，其中这几步约 6–10 秒。改成：先 `merge-gate.ts --needs-yaml` 查实「这次要算的 PR 里没有改已有 ci.yml 的」才不装；认不出事件、读不到文件列表、清单读不出、文件数对不上一律装（`workflowParseNeeded`，各配一条故意造出失败的测试）；这一步自己崩了没写出输出，工作流按「不是 false 就装」处理。判定本身（`gatePr`）一个字没改。
+- `debt.yml`：两个 job 是 `debt-docs`（只看文件）和 `debt-live`（读 GitHub 现状、给单子留言）。推主线时 `debt-live` 不再起，只留每天凌晨一次和手动运行：它看的是单子开没开，和这次推的代码无关。实测推主线时这两个 job 各约 7 秒（最近 40 次推送合计 572 秒），去掉后者每次推送少一个 job、少约 7 秒机器时间。
+- 改后实测数字：合并闸那一半要等这个 PR 合进主线才生效（`pull_request_target` 跑的是主线上的工作流），改后的量在下一个 PR 的「第三轮结果」里补，量法同上（`pnpm ci:stats --workflow merge-gate.yml --since <合并时间>`）。
+
 ## D 的细节（方案，待实现）
 
 1. `packages/conventions/src/bin/ci-plan.ts`：`event === 'push'` 时也走 diff——base 不取 `origin/<目标分支>`，而是**上一次主线绿的那次 ci.yml run 的 head_sha**（从 GitHub API 现读，不新存状态）。base 读不到 → 退回全跑 + 明确报警，不当绿。
