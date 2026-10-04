@@ -7,7 +7,7 @@
 
 import { checkReport, outsideBrief, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
-import { errMessage } from '@fleet-dao/shared/util';
+import { errMessage, isRecord } from '@fleet-dao/shared/util';
 import type {
   Finding,
   PlannedSubtask,
@@ -454,8 +454,6 @@ function parseJson(text: string, what: string): Parsed<unknown> {
   }
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((x) => typeof x === 'string');
 

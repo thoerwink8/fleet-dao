@@ -21,7 +21,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { ClaimsGitHub, GitHub } from '@fleet-dao/github';
-import { errMessage } from '@fleet-dao/shared/util';
+import { asRecord, errMessage } from '@fleet-dao/shared/util';
 import { createPgStore } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import {
@@ -52,9 +52,6 @@ export function canaryRepoFrom(raw: string | undefined): { owner: string; name: 
   if (!m?.[1] || !m[2]) return { error: '引擎配置 FLEET_CANARY_REPO 认不出：要写成 owner/name' };
   return { owner: m[1], name: m[2] };
 }
-
-const asRecord = (x: unknown): Record<string, unknown> | null =>
-  x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : null;
 
 const isCount = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 0;
 
