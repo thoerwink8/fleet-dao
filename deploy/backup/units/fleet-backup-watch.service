@@ -1,6 +1,6 @@
-# fleet-dao 磁盘与备份巡检。deploy/backup/install.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。
+# fleet-dao 磁盘巡检。deploy/backup/install.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。
 [Unit]
-Description=fleet-dao 磁盘用量（法国、香港）与备份新鲜度巡检
+Description=fleet-dao 磁盘用量（法国、香港）巡检
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
 Wants=network-online.target
 After=network-online.target postgresql.service wg-quick@wg-fleet.service

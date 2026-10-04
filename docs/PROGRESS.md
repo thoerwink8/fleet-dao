@@ -47,8 +47,10 @@
 
 ## 2026-10-05 四件小事：#761 对题不计、#336 巡检收单连 PR、#339 备份重复卡、删 elkjs（Sonnet 5.5 子代理，一件一个 PR，同时最多 2 个）
 
-- **#761 做完了、PR 待开**（分支 `fix/761-scope-unmetered`）：选了「不计」——对题在创始人和指挥官的对话里做，开单脚本读不到那个会话的起止/模型/token、本机也写不进法国库，凑空行是假数。任务页「三段」对题行写「在对话里做的，不计」和原因，主页对题泳道头写「在对话里做的，不计耗时」；名单和文案在 `packages/web/src/lib/segments.ts` 的 `SEGMENT_UNMETERED`（只有 scope），以后 runs 里有对题行（#553 意图归纳）照常显示并注明只含引擎起的会话；`docs/design.md` 第八节写明。没验证：真库上长什么样。
-- #336、#339、elkjs：还没开始。
+- **#761 已合（PR #940）**：选了「不计」——对题在创始人和指挥官的对话里做，开单脚本读不到那个会话的起止/模型/token、本机也写不进法国库，凑空行是假数。任务页「三段」对题行写「在对话里做的，不计」和原因，主页对题泳道头写「在对话里做的，不计耗时」；名单和文案在 `packages/web/src/lib/segments.ts` 的 `SEGMENT_UNMETERED`（只有 scope），以后 runs 里有对题行（#553 意图归纳）照常显示并注明只含引擎起的会话；`docs/design.md` 第八节写明。没验证：真库上长什么样。
+- **#336 已合（PR #945）**：`cleanLeftovers` 关单后连它开的、还开着的 PR 一起关（`real/canary.ts` 的 `closeLeftoverPulls`）；关不掉推单独报警 `canary:leftover-pr`、不记收过了、下一轮接着关。没验证：真巡检仓上（法国引擎关着）。
+- **#339 做完、PR 待开**（分支 `fix/339-backup-watch-dup`）：删 `deploy/backup/fleet-backup.sh` 的 `watch_fresh`（整段只有「没开跑」这一种），换成每轮顺手撤退役的 `backup.stale:*` 两条；看门狗（`watchdog.test.ts` 已有备份任务「从没跑过」「停了」的测试）仍会报备份停了。不在先审后合清单（`deploy/backup/` 不在 `high-risk-paths.json`），没要第二意见。**还欠（要人做）**：备份脚本不随自动发布走，法国上要重跑一遍 `deploy/backup/install.sh france` 才换成新脚本。
+- elkjs：还没开始。
 
 ## 创始人引导（待处理）
 
