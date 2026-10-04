@@ -1,4 +1,5 @@
-// 全流程巡检的真装配：巡检仓按引擎配置 FLEET_CANARY_REPO（owner/name，写在 /etc/fleet-dao/engine.env，公开仓里不写真值）；
+// 全流程巡检的真装配：巡检仓按引擎配置 FLEET_CANARY_REPO（owner/name，写在 /etc/fleet-dao/engine.env，期望在 deploy/<档>/desired-config.json；
+// 法国和本机档不许是同一个仓，#777）；
 // 开单（同时挂上当前版本）、读单子、关单都是「引擎」机器人（@fleet-dao/github），巡检单的需求写全在正文里（#295）；
 // 这张单在库里的事实、每一轮的记录、报警是同一个库（@fleet-dao/db）；任务工作流在不在跑、走到哪一步问这次活动的 Temporal
 // 客户端（taskStatus 查询），收前几轮留下的单发的是驾驶舱「放弃」同一个信号（taskAbandon）；「驾驶舱显示」读的是驾驶舱后端的

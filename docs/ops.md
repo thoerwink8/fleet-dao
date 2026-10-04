@@ -122,7 +122,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 1. 两台都以 root：`git clone https://github.com/thoerwink8/fleet-dao /srv/fleet-dao`。
 2. 香港：`bash /srv/fleet-dao/deploy/hk.sh`。它照样例建 `hk.env`、打印香港的 WireGuard 公钥。样例里的域名是 `cockpit.example.com`，改成真域名再重跑；域名已经解析到这台的话，证书这一轮就签下来。
-3. 法国：`bash /srv/fleet-dao/deploy/france.sh`。它打印法国的公钥，也建好创始人的登录用户 pilot（放登录公钥、登录 reclaude 见第五节）；`engine.env`、`api.env`、`release.env` 它照仓里的期望建（第九节「配置进仓对账」），私有值只留空位（`release.env` 的 `FLEET_DOMAIN`、`api.env` 的 `FLEET_PUBLIC_URL` 和凭据、`engine.env` 的演练仓），由人填上真的，域名同样改成真的。重建时这些配置直接从保险箱取回（README「密钥和本机配置在哪」）。
+3. 法国：`bash /srv/fleet-dao/deploy/france.sh`。它打印法国的公钥，也建好创始人的登录用户 pilot（放登录公钥、登录 reclaude 见第五节）；`engine.env`、`api.env`、`release.env` 它照仓里的期望建（第九节「配置进仓对账」），私有值只留空位（`release.env` 的 `FLEET_DOMAIN`、`api.env` 的 `FLEET_PUBLIC_URL` 和凭据），由人填上真的，域名同样改成真的。重建时这些配置直接从保险箱取回（README「密钥和本机配置在哪」）。
 4. 互填：香港公钥和 `<香港IP>:4500` 填进法国 `/etc/fleet-dao/france.env`；法国公钥填进香港 `/etc/fleet-dao/hk.env`。
 5. 先重跑香港、再重跑法国：隧道起来，法国读回里 `ping 10.99.0.1` 通；法国这一遍还会经隧道钉住香港 sshd 的主机钥匙。
 6. 发布钥匙：法国 france.sh 打印两把公钥，整行各填进香港 `hk.env`：上传钥匙的填 `FLEET_WEB_UPLOAD_PUBLIC_KEY`，发网关的填 `FLEET_GATEWAY_DEPLOY_PUBLIC_KEY`；重跑香港，再跑法国，读回里「往香港传文件的通路是通的」「香港飞书网关的入口是通的」。
@@ -315,7 +315,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 引擎每 6 小时（北京时间 2、8、14、20 点 26 分，定时任务 `canary`）在巡检仓开一张固定的小单（往 `巡检记录.md` 追加一行），看它跟着三段任务工作流（`taskWorkflow`，#632）走：收单（拉单建了任务行、起了任务工作流）、动手（会话交出提交、推上去、开了 PR）、开 PR 过 CI、验收（冷验收通过）、合并、关单、记账（`runs` 里动手、验收的账都有结局、记上了用量，每步耗时进了库）、驾驶舱显示（驾驶舱后端读到任务做完、PR 镜像里这个 PR 合了、挂的是这张单——主页「做完的」就是这么显示的）。每一步有期限（`packages/engine/src/jobs/canary.ts` 的 `CANARY_STAGE_LIMIT_MINUTES`；等并发空位、等额度的时间不算），一轮最长 5 小时。超时或出事（任务工作流停下等人、没做完、被放弃、单子被关成不做了）推一条卡住报警「全流程巡检断在「<哪一步>」」（`canary:broken`，正文写为什么、这一步走了多久、走到哪了（每一步几点走完、用了多久）、单子在哪），下一轮通过了自己撤。断的那张单留着给人看，下一轮开始时给它的任务工作流发「放弃」、关掉单（不做了）。
 - 巡检单的需求写全在正文里（场景、原话、已知的模块、要什么，最后是写了字的「## 怎么算做完」——拉单要的三栏都在，测试拿真的 `buildTaskBrief` 核过），没有「文档：」那一行、也不在巡检仓里建需求文档。「已知的模块」只写 `巡检记录.md`，分档按它定成快档。开单时就挂上巡检仓的当前版本。
 - 要配齐的（缺一样，这一轮就记没跑成或断在收单、开 PR 过 CI、合并，照写的原因补）：
-  1. 引擎配置 `/etc/fleet-dao/engine.env` 写 `FLEET_CANARY_REPO=<owner>/<巡检仓>`（公开仓里不写真值；仓里的期望 `deploy/france/desired-config.json` 只记它的指纹，换巡检仓照第九节「配置进仓对账」改私有值那条走），引擎下次起来读到；读回 `grep -c '^FLEET_CANARY_REPO=' /etc/fleet-dao/engine.env`。
+  1. 引擎配置 `/etc/fleet-dao/engine.env` 写 `FLEET_CANARY_REPO=<owner>/<巡检仓>`：法国的巡检仓是 `thoerwink8/fleet-dao-canary-fr`，写在仓里的期望 `deploy/france/desired-config.json`（公开值，#777 起；之前是私有值、只记指纹，指的是和本机档演练仓同一个 `fleet-dao-canary`），发布时照期望写上，换巡检仓照第九节「配置进仓对账」改公开值那条走；引擎下次起来读到；读回 `grep -c '^FLEET_CANARY_REPO=' /etc/fleet-dao/engine.env`。**不许和本机档的演练仓（`deploy/local/desired-config.json` 的同一项）是同一个仓**：两边的引擎会在同一个仓里开单、开 PR、把对方的单当成自己的；`config.mjs diff-local`（CI 里 `deploy/test/config.test.mjs` 拿两份真文件跑）两边一样、写成私有值、空着都判红。
   2. 巡检仓受管（在 `repos` 表里）、「让 AI 接活」开着：`fleet-api dispatch <owner>/<巡检仓> on`（第九节），读回 `... dispatch <owner>/<巡检仓> status`。开关是开单之后才打开的，这一轮当场断在收单（拉单不拉开关打开以前开的单）。
   3. 巡检仓有一个一直开着的 `v1 巡检` 里程碑：拉单只拉挂在当前版本上的单，巡检开单时挂它。别关它。
   4. 开巡检单的「引擎」机器人在作者白名单里：`users` 表一行 `role = 'bot'`、`github_id` 是这个 App 的机器人账号编号（只按编号认；本机档用自己的 App，编号和法国的不一样）。不在，拉单不拉，这一轮到期限断在收单。
@@ -716,7 +716,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 （#323：代码已经是先进仓、再由自动发布装到法国，配置照同一个做法——期望进仓、有版本，发布时照期望写上，线上每一轮对账，照 OpenGitOps；做法、比过的几种和出处见 `specs/323-配置进仓对账/方案.md`，和方案不一样的几处见 #323 的 PR）
 
-- 期望在哪：法国 `/etc/fleet-dao` 下 `engine.env`、`api.env`、`release.env`、`france.env` 每一项「应该是什么」写在仓里的 `deploy/france/desired-config.json`（本机档是 `deploy/local/desired-config.json`；这台是哪一档记在 `/etc/fleet-dao/profile`，france.sh 第一次跑时记，没有这份按法国），跟着版本走——对账拿在用的那一版（`current`）里的这一份，发布时照要切到的那一版里的这一份写（下面「发布时照期望写」）。公开的值写原值；私有的值（域名、巡检仓、飞书凭据、webhook 密钥、WireGuard 对端）只写指纹：HMAC-SHA256，钥匙是本机的 `/etc/fleet-dao/config-fingerprint.key`（root:root 600，france.sh 第一次跑时生成，之后不动；保险箱的 `refresh.sh` 连它一起留加密副本），期望里的 `fingerprint.keyId` 是它的编号。私有值本身照旧只在法国和保险箱里。这份期望是先审后合（`packages/conventions/high-risk-paths.json`）。
+- 期望在哪：法国 `/etc/fleet-dao` 下 `engine.env`、`api.env`、`release.env`、`france.env` 每一项「应该是什么」写在仓里的 `deploy/france/desired-config.json`（本机档是 `deploy/local/desired-config.json`；这台是哪一档记在 `/etc/fleet-dao/profile`，france.sh 第一次跑时记，没有这份按法国），跟着版本走——对账拿在用的那一版（`current`）里的这一份，发布时照要切到的那一版里的这一份写（下面「发布时照期望写」）。公开的值写原值；私有的值（域名、飞书凭据、webhook 密钥、WireGuard 对端；巡检仓 #777 起改成公开值，要和本机档的演练仓比出不一样）只写指纹：HMAC-SHA256，钥匙是本机的 `/etc/fleet-dao/config-fingerprint.key`（root:root 600，france.sh 第一次跑时生成，之后不动；保险箱的 `refresh.sh` 连它一起留加密副本），期望里的 `fingerprint.keyId` 是它的编号。私有值本身照旧只在法国和保险箱里。这份期望是先审后合（`packages/conventions/high-risk-paths.json`）。
 - 每一轮对账：自动发布每 5 分钟那一轮最后，拿线上这几份文件跟期望比（`deploy/france/auto-release/config.mjs`，照 systemd 的读法读）：公开的值不对、私有值和指纹对不上、缺了（没写或被注释掉）、写了几行、多出来期望里没有的键，一项一条报警（`auto-release:config:<文件>:<键>`，飞书跟着推），线上的值一律不打印；改回去了，下一轮自己撤。期望读不到、认不出（在用的版本里没有这份、不是 JSON、格式不认识）、指纹钥匙读不到或不是期望记的那一把、私有值还没记指纹，记「没查成」、报一条 `auto-release:config-unchecked`，不当成一致。对账只报警、不改回；改回只在发布时，由期望里的 `selfHeal` 管（下一条），两份期望里都关着，开不开等创始人定。
 - 发布时照期望写：`release.sh` 发布、`--rollback`、自动退回，都在迁移、装目录、装路由两层之后，切版本之前，照要切到的那一版里这一档的期望写 `engine.env`、`api.env`、`release.env`（`france.env` 不写，归 france.sh）；这一版里没有期望（#323 之前的老提交）就不写、照切。
   - 只写「这一版的期望和上次写的不一样」的公开键：期望里新加的、值改了的写上（文件里有就原地改那一行，没有就补在末尾，前一行注释写明说明和照哪一版写的），期望里删掉的、上次写过的那一行删掉。期望没变的不碰——人手改过的（和期望不一致）不改回，对账照旧报警。私有值一概不写，期望里没登记、也没写过的键不碰。
@@ -886,7 +886,7 @@ wsl --install Ubuntu-24.04 --name fleet-local --location D:\srv\fleet-local --no
 
 其余（防火墙 nft 表、会话用户、`fleet-agents.slice`、Temporal、PostgreSQL、pnpm、cursor-agent、grok 命令行、会话用户的 Mirasim、应用的本机配置骨架、自动发布）照装，和法国一样。跳过的每一步在输出里显示「本机档跳过：为什么」（`deploy/lib/profile.sh` 的 `skip_local`，记进「待配」那一类：不算红也不算绿）。
 
-要人才能做的几样，本机档和法国一样报「待配」，不当成装好了：两个 GitHub 机器人的凭据（本机档要用自己的 App，不和法国共用；放好后照上面「从零建 fleet-local」第 6 步记指纹）、会话用户登录 reclaude、grok 登录、目录配置 `catalog.json`。引擎只接演练仓（`engine.env` 的 `FLEET_CANARY_REPO`），配的时候填演练仓，不是法国那个真的全流程巡检仓。
+要人才能做的几样，本机档和法国一样报「待配」，不当成装好了：两个 GitHub 机器人的凭据（本机档要用自己的 App，不和法国共用；放好后照上面「从零建 fleet-local」第 6 步记指纹）、会话用户登录 reclaude、grok 登录、目录配置 `catalog.json`。引擎只接演练仓（`engine.env` 的 `FLEET_CANARY_REPO`），配的时候填演练仓，不是法国那个真的全流程巡检仓（两边不许是同一个仓，`config.mjs diff-local` 钉着，#777）。
 
 本机档和法国的差别只登记在一处：`deploy/local/desired-config.json`（和 `deploy/france/desired-config.json` 同一份格式，读法见 `deploy/france/auto-release/config.mjs`）。两份文件必须声明同一套键；哪个键的值或种类不一样，`deploy/local/desired-config.json` 里那一条必须写「说明」讲清为什么——没写就是「没登记的差别」。两边都是私有值（各自的凭据，本来就不共用）不算差别，不用登记。系统包版本钉死（`versions` 块：PostgreSQL、Node、Temporal 服务端与命令行的大版本）两边必须逐字一样，写了说明也不例外——这几个版本都是同一份 `deploy/france.sh` 装的，理论上不会漂，钉住是为了防手滑。
 
