@@ -20,7 +20,7 @@ import {
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { GitHub } from '@fleet-dao/github';
+import type { ClaimsGitHub, GitHub } from '@fleet-dao/github';
 import { createPgStore } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import {
@@ -99,9 +99,46 @@ export function canaryViewOf(raw: unknown, workflowId: string): CanaryView {
   };
 }
 
+/** closeLeftoverPulls 要的 GitHub 几样（@fleet-dao/github 的 claims）。 */
+export type CanaryPullsGitHub = Pick<ClaimsGitHub, 'openPulls' | 'readPull' | 'commentPull' | 'closePull'>;
+
+/**
+ * 关掉一张巡检单开过的、还开着的 PR（#336）：按引擎分支名 fleet/<单号>-t… 认（taskBranch 的写法），从 fork 来的不认；
+ * 列出来之后逐个现读一遍再关——已经合并或已经关了的不动（列表和关之间被合了也不会去关一个合并了的）。
+ * 留一句为什么的评论是尽力而为（留不成不挡关 PR）；列不出、现读不到、关不掉照抛，不当成关掉了。回关了哪几个。
+ */
+export async function closeLeftoverPulls(
+  claims: CanaryPullsGitHub,
+  repo: { owner: string; name: string },
+  issueNumber: number,
+  comment: string,
+  log: CanaryDeps['log'] = () => {},
+): Promise<number[]> {
+  const prefix = `fleet/${issueNumber}-t`;
+  const mine = (await claims.openPulls(repo)).filter((p) => !p.fromFork && p.headRef.startsWith(prefix));
+  const closed: number[] = [];
+  for (const listed of mine) {
+    const pull = await claims.readPull(repo, listed.number);
+    if (pull.state !== 'open' || pull.merged) continue;
+    try {
+      await claims.commentPull(repo, pull.number, `canary-leftover:${pull.number}`, comment);
+    } catch (err) {
+      log('warn', '巡检收单：给 PR 留说明没留成，照样关', {
+        pull: pull.number,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    await claims.closePull(repo, pull.number);
+    closed.push(pull.number);
+  }
+  return closed;
+}
+
 export interface CanaryWiring {
   db: Db;
-  gh: Pick<GitHub, 'readOpenMilestones' | 'openIssue' | 'readIssueState' | 'closeIssue'>;
+  gh: Pick<GitHub, 'readOpenMilestones' | 'openIssue' | 'readIssueState' | 'closeIssue'> & {
+    claims: CanaryPullsGitHub;
+  };
   /** 引擎配置 FLEET_CANARY_REPO 的原文。 */
   repo: string | undefined;
   now?: () => Date;
@@ -158,6 +195,8 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
         async closeIssue(issueNumber, comment) {
           await w.gh.closeIssue({ repo: need(), issueNumber, reason: 'not_planned', comment });
         },
+        closePulls: (issueNumber, comment) =>
+          closeLeftoverPulls(w.gh.claims, need(), issueNumber, comment, log),
       },
       facts: ({ issueNumber, since }) =>
         canaryDbFacts(w.db, { ...need(), issueNumber, since, intakeJob: INTAKE_JOB.id }),
@@ -202,16 +241,16 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
       alerts: {
         async raise(input) {
           await upsertAlert(w.db, {
-            dedupeKey: CANARY_ALERT_KEY,
+            dedupeKey: input.key ?? CANARY_ALERT_KEY,
             level: 'alert',
             taskId: input.taskId,
             title: input.title,
             body: input.body,
           });
         },
-        async resolve(why) {
+        async resolve(why, key) {
           await resolveAlertWithReason(w.db, {
-            dedupeKey: CANARY_ALERT_KEY,
+            dedupeKey: key ?? CANARY_ALERT_KEY,
             by: CANARY_ACTOR,
             why,
             at: now(),
