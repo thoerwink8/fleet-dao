@@ -285,6 +285,17 @@ setup "$SOLO"
 : >"$S/env"
 run carpool --user fleet-agent-carpool
 expect "法国（没有档位文件）：照常切成" 0 "switched carpool"
+# 诊断（临时）：CI 上读不出代理时，看脚本用的是哪个 node、期望挑的是哪一份、为什么没读成
+{
+  echo "  … 调试：command -v node=$(command -v node 2>&1) PATH=$PATH"
+  echo "  … 调试：对同一份期望直接叫 session_proxy_load"
+  AGENT_SCOPE_DEPLOY=$AGENT_SCOPE_TEST_DEPLOY bash -c '
+    source "$AGENT_SCOPE_DEPLOY/lib/profile.sh"
+    echo "      SESSION_PROXY_NODE=$SESSION_PROXY_NODE PROFILE=${PROFILE:-（未设）}"
+    if [[ -f "$AGENT_SCOPE_TEST_PROFILE_FILE" ]]; then echo "      档位文件=$(<"$AGENT_SCOPE_TEST_PROFILE_FILE")"; else echo "      档位文件不在"; fi
+    if session_proxy_load; then echo "      读到=$SESSION_PROXY"; else echo "      读不到=$SESSION_PROXY_WHY"; fi' 2>&1
+}
+
 if [[ -z "$(proxy_envs)" ]]; then
   pass "法国：reclaude 的环境里一个代理变量都没有（调用者环境里的、FLEET_SESSION_PROXY 都带不进去）"
 else
