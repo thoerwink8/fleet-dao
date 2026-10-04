@@ -477,6 +477,58 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
 }
 
 /**
+ * 创始人最近落盘的话（agents/hooks/prompt-log.mjs 在他每条消息一提交就写进 ~/.fleet-dao/prompt-log/<北京日期>.jsonl）。
+ * 为什么开会话时列出来（创始人 2026-10-04「我发了hi但是好像你视而不见」）：他的话有两种丢法，一种是到了没处理，一种是排队时
+ * 会话进程死了、从头没送到——钩子在提交那一刻就落了盘，新会话开场看一眼这份文件，上一个会话没来得及处理的话就在这里，不靠他重发。
+ * 只列最近 RECENT_MS 以内的最多 RECENT_MAX 条，每条截到 RECENT_CHARS 字；没有文件、没有最近的话都不出声；
+ * 读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
+ */
+export const RECENT_MS = 60 * 60_000;
+export const RECENT_MAX = 5;
+export const RECENT_CHARS = 200;
+
+export function recentPrompts({ home, now = Date.now(), dir = null }) {
+  const base = dir ?? join(home, '.fleet-dao', 'prompt-log');
+  const days = new Set([beijingToday(now), beijingToday(now - RECENT_MS)]);
+  const entries = [];
+  for (const day of days) {
+    const file = join(base, `${day}.jsonl`);
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      return [`创始人落盘的话没读成：${file} 读不了（${err?.code ?? err}）；这个会话没送到的话可能在里面。`];
+    }
+    for (const row of text.split(/\r?\n/)) {
+      if (!row.trim()) continue;
+      try {
+        const e = JSON.parse(row);
+        const at = Date.parse(e?.at);
+        if (
+          typeof e?.prompt === 'string' &&
+          Number.isFinite(at) &&
+          now - at <= RECENT_MS &&
+          at <= now + 60_000
+        )
+          entries.push({ at, prompt: e.prompt });
+      } catch {
+        // 坏的一行跳过：别因为一行坏了就把别的话也藏起来
+      }
+    }
+  }
+  if (entries.length === 0) return [];
+  entries.sort((a, b) => a.at - b.at);
+  const shown = entries.slice(-RECENT_MAX);
+  const hhmm = (ms) => new Date(ms + 8 * 3_600_000).toISOString().slice(11, 16);
+  const cut = (s) => (s.length > RECENT_CHARS ? `${s.slice(0, RECENT_CHARS)}……` : s).replace(/\s+/g, ' ');
+  const said = shown.map((e) => `［${hhmm(e.at)}］${cut(e.prompt)}`).join(' ');
+  return [
+    `创始人最近 ${Math.round(RECENT_MS / 60_000)} 分钟落盘的话（共 ${entries.length} 条，列最后 ${shown.length} 条；上一个会话没来得及处理、或根本没送到的在这里，已经办过的不用再办）：${said}`,
+  ];
+}
+
+/**
  * 第 4 件：合并后待补审（清单里标 review: after-merge 的 CI 判法先合后审，合并后由 discuss 技能的 second-opinion.mjs 补审）。
  * 只在 fleet-dao 自己的检出里查（origin 指向它；和 packages/github/src/hygiene-scope.ts 的 HYGIENE_REPO 是同一个仓）。
  * 查法不在这里另写一份：起 second-opinion.mjs --after-merge-pending --json，硬超时 AFTER_MERGE_MS。脚本优先用同步专用检出里
@@ -574,6 +626,7 @@ export function sessionStart({
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
     ...checkDirectives(cwd, localGit),
+    ...recentPrompts({ home, now }),
     ...sweepWorktrees(cwd, localGit),
     ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),

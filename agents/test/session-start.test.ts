@@ -857,3 +857,71 @@ describe('合并后待补审：只在 fleet-dao 里提醒，没查成不当成�
     expect(hook.AFTER_MERGE_MS).toBe(8_000);
   });
 });
+
+describe('创始人最近落盘的话（上一个会话没送到的，新会话开场能看到）', () => {
+  const NOW = Date.parse('2026-10-04T11:30:00Z');
+  const rec = (dir: string, day: string, rows: unknown[]) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${day}.jsonl`), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+  };
+  const recent = (o: { home: string; now?: number; dir?: string | null }) =>
+    (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts(o);
+
+  it('最近 1 小时内的话列出来，带北京时间；更早的、将来的不列', () => {
+    const home = temp('rp-home');
+    rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', [
+      { at: '2026-10-04T08:00:00Z', prompt: '三个半小时前的话' },
+      { at: '2026-10-04T11:21:00Z', prompt: '你能接收到我这条消息吗？我发了hi' },
+      { at: '2026-10-04T11:29:00Z', prompt: '你改好了没有？' },
+      { at: '2026-10-04T13:00:00Z', prompt: '时钟乱了才会有的将来的话' },
+    ]);
+    const [line] = recent({ home, now: NOW });
+    expect(line).toContain('共 2 条');
+    expect(line).toContain('［19:21］你能接收到我这条消息吗？我发了hi');
+    expect(line).toContain('［19:29］你改好了没有？');
+    expect(line).not.toContain('三个半小时前');
+    expect(line).not.toContain('将来的话');
+  });
+
+  it('跨零点：23:50 的话在 00:10 开会话时还在前一天的文件里，要列出来', () => {
+    const home = temp('rp-home');
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    rec(dir, '2026-10-04', [{ at: '2026-10-04T15:50:00Z', prompt: '北京 23:50 那条' }]);
+    const now = Date.parse('2026-10-04T16:10:00Z'); // 北京 10-05 00:10
+    expect(recent({ home, now })[0]).toContain('北京 23:50 那条');
+  });
+
+  it('只列最后 5 条，每条截到 200 字', () => {
+    const home = temp('rp-home');
+    const rows = Array.from({ length: 8 }, (_, i) => ({
+      at: new Date(NOW - (8 - i) * 60_000).toISOString(),
+      prompt: i === 7 ? 'x'.repeat(500) : `第${i}条`,
+    }));
+    rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', rows);
+    const [line] = recent({ home, now: NOW });
+    expect(line).toContain('共 8 条，列最后 5 条');
+    expect(line).not.toContain('第2条');
+    expect(line).toContain('第3条');
+    expect(line).toContain(`${'x'.repeat(200)}……`);
+    expect(line).not.toContain('x'.repeat(201));
+  });
+
+  it('没有文件、没有最近的话：不出声；坏的一行跳过、不连累别的', () => {
+    const home = temp('rp-home');
+    expect(recent({ home, now: NOW })).toEqual([]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-10-04.jsonl'),
+      `{坏了\n${JSON.stringify({ at: '2026-10-04T11:29:00Z', prompt: '好的那条' })}\n`,
+    );
+    expect(recent({ home, now: NOW })[0]).toContain('好的那条');
+  });
+
+  it('【故意造出的失败】文件在但读不了（那一天的路径是个目录）：明说没读成，不当成「没有话」', () => {
+    const home = temp('rp-home');
+    mkdirSync(join(home, '.fleet-dao', 'prompt-log', '2026-10-04.jsonl'), { recursive: true });
+    const [line] = recent({ home, now: NOW });
+    expect(line).toMatch(/创始人落盘的话没读成.*读不了/);
+  });
+});
