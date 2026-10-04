@@ -874,6 +874,34 @@ test('上一轮的发布没收到结果（那一轮被杀了）：锁还占着�
   assert.match(m.alerts[0].title, /没等到结果/);
 });
 
+test('【故意造出的失败】#802 读数里留着跑到一半的一轮、发布锁空了、一个版本标记都没有：照样收成 failed 并报警（原来永远「在跑」）', async () => {
+  const m = machine();
+  m.tags = '';
+  m.state = {
+    schema: STATE_SCHEMA,
+    attempt: { sha: H1, startedAt: '2026-09-27T07:40:00Z', result: 'running' },
+    alerts: [],
+    resolve: [],
+  };
+  m.releaseBusy = true;
+  // 锁还占着：没有标记也不收尾，照旧等
+  let st = await m.round();
+  assert.equal(st.attempt.result, 'running');
+  assert.equal(st.last.action, 'marker-none');
+  // 锁空了：收尾，在用的不是它，记没成并报警；这一轮仍不发（没有标记）
+  m.releaseBusy = false;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.attempt.result, 'failed');
+  assert.ok(st.attempt.endedAt, '收尾要写结束时间');
+  assert.equal(st.last.action, 'marker-none');
+  assert.deepEqual(releases(m), [], '没有版本标记照样什么都不发');
+  assert.ok(
+    m.alerts.some((a) => /没等到结果/.test(a.title)),
+    '没成要报警',
+  );
+});
+
 test('规矩同步没成：记下、报警，不挡发布；同一个提交不重跑；检出和在用的对不上就不同步', async () => {
   const m = machine();
   m.rules = { code: 1, out: '  ✗ ~/.claude/CLAUDE.md 写不进去\n' };
