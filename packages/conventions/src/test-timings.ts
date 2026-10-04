@@ -30,9 +30,26 @@ export function parseRunLog(text: string): Map<string, number> {
   return out;
 }
 
+/**
+ * 几轮日志各自认出来的耗时，一个文件取中位数（偶数个取偏高的那个，宁可高估不低估）：单轮里某个文件会因机器抖动慢一倍
+ * （2026-10-04 实测 watchdog.test.ts 同一个文件两轮 5.3 秒和 11.7 秒），装箱只该信稳定的那部分。只在一部分轮里出现的文件，
+ * 按出现的那几轮取（全跑的 PR 才带全部文件，按改动跑的轮次只带一部分）。至少要有一轮，没有就返回 undefined（入口退出 2）。
+ */
+export function medianOfRuns(runs: readonly ReadonlyMap<string, number>[]): Map<string, number> | undefined {
+  if (runs.length === 0) return undefined;
+  const all = new Map<string, number[]>();
+  for (const run of runs) for (const [f, ms] of run) all.set(f, [...(all.get(f) ?? []), ms]);
+  const out = new Map<string, number>();
+  for (const [f, values] of all) {
+    const s = [...values].sort((a, b) => a - b);
+    out.set(f, s[Math.floor(s.length / 2)] as number);
+  }
+  return out;
+}
+
 /** 耗时表文件头上那句说明（renderTimings 写进去；test/test-timings.test.ts 核对仓里那份就是它写出来的样子）。 */
 export const TIMINGS_NOTE =
-  'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → 那一轮 vitest 报的毫秒数（4 核运行机上并行跑时量的）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings 从主线最近一轮 ci.yml 的日志刷新，别手改。';
+  'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
 
 /** 写回仓里的样子：说明、来源、按路径排好序的文件表，两格缩进、末尾换行。 */
 export function renderTimings(t: Timings): string {

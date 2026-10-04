@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
-import { mergeTimings, parseRunLog, renderTimings } from '../src/test-timings.ts';
+import { medianOfRuns, mergeTimings, parseRunLog, renderTimings } from '../src/test-timings.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
@@ -49,6 +49,27 @@ describe('从日志认耗时', () => {
 
   it('日志里没有能认的：空表（入口据此退出 2，不写）', () => {
     expect(parseRunLog('changes\tx\tT  hello\n').size).toBe(0);
+  });
+});
+
+describe('几轮取中位数', () => {
+  it('每个文件取各轮的中位数（偶数轮取偏高的）；只在部分轮里出现的按出现的几轮取；一轮的抖动盖不住稳定值', () => {
+    const m = medianOfRuns([
+      new Map([
+        ['a.test.ts', 5000],
+        ['only-first.test.ts', 7],
+      ]),
+      new Map([['a.test.ts', 11000]]),
+      new Map([['a.test.ts', 5200]]),
+    ]);
+    expect(Object.fromEntries(m ?? [])).toEqual({ 'a.test.ts': 5200, 'only-first.test.ts': 7 });
+    expect(
+      Object.fromEntries(medianOfRuns([new Map([['b.test.ts', 10]]), new Map([['b.test.ts', 30]])]) ?? []),
+    ).toEqual({ 'b.test.ts': 30 });
+  });
+
+  it('【故意造出的失败】一轮都没有：返回 undefined（入口据此退出 2），不拿空表冒充', () => {
+    expect(medianOfRuns([])).toBeUndefined();
   });
 });
 
@@ -94,7 +115,33 @@ describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', () =
     const t = parseTimings(readFileSync(out, 'utf8'));
     if (typeof t === 'string') throw new Error(t);
     expect(t.files['packages/engine/test/real/sessions.test.ts']).toBe(27285);
-    expect(t.source).toBe('日志文件 ok.log');
+    expect(t.source).toContain('日志文件 ok.log');
+    expect(t.source).toContain('共 1 轮取中位数');
+  });
+
+  it('重复给 --log-file：取各轮的中位数；其中一轮认不出一个文件就整个退出 2、不写（不悄悄少算一轮）', () => {
+    const line = (ms: number) =>
+      `test (1/2)\tx\t2026-10-04T00:00:00Z  ✓ packages/engine/test/real/sessions.test.ts (28 tests) ${ms}ms`;
+    const logs = [4000, 9000, 4400].map((ms, i) => {
+      const f = join(tmp, `multi-${i}.log`);
+      writeFileSync(f, `${line(ms)}\n`);
+      return f;
+    });
+    const out = join(tmp, 'multi.json');
+    const r = run([...logs.flatMap((f) => ['--log-file', f]), '--out', out]);
+    expect(r.status, r.stderr).toBe(0);
+    const t = parseTimings(readFileSync(out, 'utf8'));
+    if (typeof t === 'string') throw new Error(t);
+    expect(t.files['packages/engine/test/real/sessions.test.ts']).toBe(4400);
+    expect(t.source).toContain('共 3 轮取中位数');
+
+    const empty = join(tmp, 'multi-empty.log');
+    writeFileSync(empty, 'changes\tx\tT  nothing here\n');
+    const out2 = join(tmp, 'multi-never.json');
+    const bad = run(['--log-file', logs[0] as string, '--log-file', empty, '--out', out2]);
+    expect(bad.status).toBe(2);
+    expect(bad.stderr).toContain('multi-empty.log');
+    expect(existsSync(out2)).toBe(false);
   });
 
   it('【故意造出的失败】日志里一个文件都认不出、日志读不到、参数不对：退出 2，不写半张表', () => {
@@ -107,6 +154,7 @@ describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', () =
     expect(existsSync(out)).toBe(false);
     expect(run(['--log-file', join(tmp, '没有这个.log'), '--out', out]).status).toBe(2);
     expect(run(['--weird']).status).toBe(2);
+    expect(run(['--run', 'abc', '--out', out]).status).toBe(2);
     expect(existsSync(out)).toBe(false);
   });
 });
