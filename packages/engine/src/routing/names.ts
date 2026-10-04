@@ -1,5 +1,5 @@
 // 给人看的名字与白话：阶段、执行方式、额度窗、时长、比例。「为什么派给它」一句话由这些拼成。
-import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
+import { type HostId, type OrgKind, quotaWindowName, type StageKind } from '@fleet-dao/shared';
 import type { RouteFacts, RouteWindow } from './types.ts';
 
 export const STAGE_NAMES: Readonly<Record<StageKind, string>> = {
@@ -35,28 +35,9 @@ export function routeLabel(r: Pick<RouteFacts, 'poolName' | 'modelName' | 'hostI
   return `${r.poolName} · ${r.modelName} · ${hostName(r.hostId)}`;
 }
 
-/** 「周额度」「claude 周额度」「5 小时额度」「月额度（auto）」。 */
+/** 「周额度」「claude 周额度」「5 小时额度」「月额度（auto）」。（和驾驶舱、留量线说窗口是同一份，shared 的 quotaWindowName。） */
 export function windowName(w: Pick<RouteWindow, 'window' | 'scope' | 'label'>): string {
-  switch (w.window) {
-    case '5h':
-      return scoped('5 小时额度', w.scope);
-    case '7d':
-      return scoped('周额度', w.scope);
-    case '7d_model':
-      return `${w.scope ?? w.label} 周额度`;
-    case 'month_usd':
-      return scoped('月额度', w.scope);
-    case 'period_usd':
-      return scoped('账期额度', w.scope);
-    case 'points':
-      return scoped('点数额度', w.scope);
-    default:
-      return `额度窗 ${w.label}`;
-  }
-}
-
-function scoped(name: string, scope: string | null): string {
-  return scope ? `${name}（${scope}）` : name;
+  return quotaWindowName(w);
 }
 
 /** 「20 小时」「2 天 3 小时」「40 分钟」。 */

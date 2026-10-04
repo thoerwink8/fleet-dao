@@ -16,6 +16,15 @@ const outageName = (kind: 'E1' | 'E2' | 'E3'): string =>
     E3: `${carpool()}组织本身用不了`,
   })[kind];
 
+/** 独享额度留量线那一行小字（到线、设置认不出、读数判不了各一种说法）。 */
+function reserveLine(r: NonNullable<Extract<OrgSwitchView, { state: 'known' }>['soloReserve']>): string {
+  if (r.state === 'reached') {
+    return `${solo()}额度到了留量线：${r.why}。引擎不再往${solo()}派新活、${carpool()}用不了也不切过去，在跑的不动；线在设置页改`;
+  }
+  if (r.state === 'unreadable') return `${solo()}额度留量线的设置认不出：${r.why}`;
+  return `${solo()}额度留量线判不了，按额度未知照派：${r.why}`;
+}
+
 export type OrgSwitchTone = 'muted' | 'ok' | 'stall' | 'fail';
 
 export interface OrgSwitchSummary {
@@ -36,11 +45,12 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
         `已点「引擎暂不用${solo()}」：${carpool()}用不了也不切${solo()}，Claude 的活等${carpool()}恢复或交给别家模型`,
       ]
     : [];
+  const reserveDetail = v.soloReserve ? [reserveLine(v.soloReserve)] : [];
   if (v.state === 'unavailable') {
-    return { tone: 'muted', headline: `切号现状看不到：${v.why}`, details: paused };
+    return { tone: 'muted', headline: `切号现状看不到：${v.why}`, details: [...paused, ...reserveDetail] };
   }
   if (v.state === 'unreadable') {
-    return { tone: 'fail', headline: v.why, details: paused };
+    return { tone: 'fail', headline: v.why, details: [...paused, ...reserveDetail] };
   }
   const details: string[] = [];
   let tone: OrgSwitchTone = 'ok';
@@ -119,6 +129,17 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
       );
       if (left <= 20) raise('stall');
     }
+  }
+  if (v.soloReserve) {
+    const r = v.soloReserve;
+    if (r.state === 'reached') {
+      // 额度页顶上说清：独享到线了，活等拼车恢复（#194 方案 4.8）
+      headline += `；${solo()}到留量线，活等${carpool()}恢复`;
+      raise('stall');
+    } else if (r.state === 'unreadable') {
+      raise('fail');
+    }
+    details.push(reserveLine(r));
   }
   details.push(...paused);
   if (v.soloPaused) raise('stall');

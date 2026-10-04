@@ -1398,6 +1398,13 @@ export function createSeed(now: number): MockState {
     },
     { key: 'judge.dailyCallLimit', value: null, version: 0 },
     { key: 'engine.soloPaused', value: null, version: 0 },
+    {
+      key: 'engine.quotaReserve',
+      value: {},
+      version: 1,
+      updatedAt: at(-2000),
+      updatedBy: 'seed:quota-reserve.default.json',
+    },
   ];
 
   const state: MockState = {

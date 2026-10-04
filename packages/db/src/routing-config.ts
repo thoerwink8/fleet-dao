@@ -49,7 +49,7 @@ export class RoutingConfigError extends Error {
 }
 
 /** 以 _ 开头的键是注释（例如 _说明），校验前去掉；其余键写错了照样报错。 */
-function stripComments(value: unknown): unknown {
+export function stripComments(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stripComments);
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(

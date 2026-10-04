@@ -5,7 +5,7 @@
 // 三段的一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上）就照切；有停不下的就等它们跑完（#157 的做法）。
 // 明确失败，不当成到点了、不当成切好了：挂的是哪个认不出就不切；拼车用满了却读不到几点恢复（stuck），要人看——读数旧了也
 // 不算恢复（读数旧了在选路里算「不知道」，可在这里当成恢复就会切回去、被拒、再切走，来回折腾）。
-import type { OrgKind, RouteProbeState } from '@fleet-dao/shared';
+import type { OrgKind, ReserveHit, ReserveUnknown, RouteProbeState } from '@fleet-dao/shared';
 import { ORG_NAMES } from '../routing/names.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { CarpoolApiRead, CarpoolRejection } from './carpool-outage.ts';
@@ -19,8 +19,20 @@ export interface OrgWindow {
   resetsAt: Date | null;
 }
 
+/**
+ * 这一类池的额度留量线判过的结果（real/org-plan.ts 按设置和读数算好交来；shared 的 evaluateReserve）。problem 不是 null = 线的设置
+ * 认不出，不当成不限；hits 是到了线的读数；unknown 是配了线却判不了的窗口（读数缺、没给已用多少），按「额度未知」。
+ */
+export interface OrgReserveFacts {
+  problem: string | null;
+  hits: ReserveHit[];
+  unknown: ReserveUnknown[];
+}
+
 export interface OrgPool {
   windows: OrgWindow[];
+  /** 没给 = 没判留量线（老的输入、纯函数测试）；真装配（real/org-plan.ts 的 loadOrgSwitchFacts）一定给。 */
+  reserve?: OrgReserveFacts;
   /** 整池暂停着（pool-hold 那条要人拍还开着：登录失效、封号……）：切过去也派不了。 */
   held: boolean;
 }

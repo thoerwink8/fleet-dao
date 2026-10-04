@@ -5,7 +5,7 @@
 // 1. 挂的是哪个组织认不出 → 不切（和以前一样）；
 // 2. 逐个账号看状态（jobs/org-accounts.ts）：渠道不可用 / 只剩 1 个可用 / 读不到状态 → 不切，同时给出渠道状态和要不要推提醒；
 // 3. 挂着拼车：有「拼车用不了」的证据（被拒当场判出来的、接口说用不了的、库里额度窗口用满的）→ 切独享（当场、不提前、不给宽限）；
-//    人点了「引擎暂不用独享」、独享整池暂停、独享也用满了 → 不切；
+//    人点了「引擎暂不用独享」、独享整池暂停、独享也用满了、独享到了额度留量线（或线的设置认不出）→ 不切（留量线判不了的按「额度未知」仍切）；
 // 4. 挂着独享：有记着的恢复条件 → 只认「被拒之后的真新读数」判恢复（jobs/carpool-outage.ts），再过防抖（jobs/org-switch-guard.ts：
 //    最小停留、白切退避、切回预算、读不到时试探），能切回了：手上没会话马上切；有会话先停派独享、开跑不到 5 分钟的当场停、
 //    其余给宽限 G（方案 4.5，创始人 10-04「按你推荐」= 10 分钟），到点还没完的再停、再切；
@@ -14,7 +14,7 @@
 //
 // 改这里之前必须知道：读不到、认不出、对不上，一律明确的「不切 + 原因」，不当成拼车能用、不当成到点了；每条分支在
 // test/org-decision.test.ts 里有一条故意造出失败的测试。
-import type { OrgKind } from '@fleet-dao/shared';
+import { type OrgKind, reserveHitText, reserveUnknownText } from '@fleet-dao/shared';
 import {
   type CarpoolOutage,
   DEFAULT_RECOVERY_POLICY,
@@ -277,7 +277,24 @@ function onCarpool(
   if (solo.windows.some((w) => w.state === 'exhausted')) {
     return out({ action: 'stay', why: `${head}，独享的额度也用满了，切过去也派不了，等清零` }, ledger);
   }
-  const why = `${head}，切到独享接着干`;
+  // 独享的额度留量线（方案 4.8）：到了线就不切过去（剩下的留给自己用）；线的设置认不出同样不切、不当成不限；
+  // 读数缺窗口、读不到（挂着拼车时独享的读数多半是旧的）按「额度未知」仍切，切过去后第一条读数到线，选路就停派独享（第 17 条）
+  const reserve = solo.reserve;
+  if (reserve?.problem) {
+    const why = `${head}，独享的额度留量线设置认不出（${reserve.problem}），不切过去（不当成不限），等拼车恢复或交给别家模型`;
+    if (fresh) notes.push(`留量线：${why}`);
+    return out({ action: 'stay', why }, ledger);
+  }
+  if (reserve && reserve.hits.length > 0) {
+    const why = `${head}，独享到了留量线（${reserve.hits.map(reserveHitText).join('、')}），不切过去，剩下的留给自己用；Claude 的活等拼车恢复或交给别家模型`;
+    if (fresh) notes.push(`留量线：${why}`);
+    return out({ action: 'stay', why }, ledger);
+  }
+  const unknownNote =
+    reserve && reserve.unknown.length > 0
+      ? `；独享额度留量线判不了（${reserve.unknown.map(reserveUnknownText).join('；')}），按「额度未知」仍切，切过去后第一条读数到线就停派独享`
+      : '';
+  const why = `${head}，切到独享接着干${unknownNote}`;
   if (f.busy > 0 && f.canStopRunning) {
     return out(
       { action: 'switch', to: 'solo', why: `${why}；手上 ${f.busy} 个 Claude 会话先停下，切完接着干` },

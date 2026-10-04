@@ -34,6 +34,7 @@ import {
   ORG_CHANNEL_ALERT,
   ORG_DRIFT_ALERT,
   ORG_LEDGER_ALERT,
+  ORG_RESERVE_ALERT,
   ORG_STUCK_ALERT,
   ORG_SWITCH_ALERT,
   ORG_VERIFY_ALERT,
@@ -940,7 +941,7 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
     expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
     expect(s.helperCalls).toEqual([]);
     expect(s.logs.join('\n')).toContain('引擎暂不用独享');
-    await t.db.update(settings).set({ value: false });
+    await t.client.query(`update settings set value = 'false'::jsonb where key = 'engine.soloPaused'`);
     expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
   });
 
@@ -949,6 +950,128 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
     await t.db.insert(settings).values({ key: 'engine.soloPaused', value: '开' });
     expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
     expect(s.logs.join('\n')).toContain('认不出，按暂停办');
+  });
+
+  describe('额度留量线（#194 方案 4.8）：线只来自库里（种子装的），引擎、驾驶舱读同一份', () => {
+    const reserveAlert = () => alertOf(ORG_RESERVE_ALERT);
+    /** 把独享池的周窗读数改成这个已用比例（读成的时刻是假钟的现在，算新读数）。 */
+    const soloWeek = async (s: { now: () => Date }, used: number) => {
+      const at = new Date(s.now().getTime() - MIN).toISOString();
+      await savePoolQuota(
+        t.db,
+        {
+          poolId: 'claude-solo',
+          readAt: at,
+          complete: true,
+          windows: [
+            {
+              poolId: 'claude-solo',
+              window: '7d',
+              label: 'seven_day',
+              unit: 'percent',
+              utilization: used,
+              reading: 'measured',
+              readAt: at,
+              source: 'test',
+            },
+          ],
+        },
+        { now: s.now() },
+      );
+    };
+    const setLines = (value: unknown) =>
+      t.client.query(`update settings set value = $1::jsonb where key = 'engine.quotaReserve'`, [
+        JSON.stringify(value),
+      ]);
+
+    it('种子装进库的线是 5 小时窗 0.8、周窗 0.7（来自种子文件，不是代码常量）', async () => {
+      const { rows } = await t.client.query<{ value: unknown; updated_by: string }>(
+        `select value, updated_by from settings where key = 'engine.quotaReserve'`,
+      );
+      expect(rows[0]).toEqual({
+        value: { 'claude-solo': { '5h': 0.8, '7d': 0.7 } },
+        updated_by: 'seed:quota-reserve.default.json',
+      });
+    });
+
+    it('【故意造出的失败】独享周窗已用 75%、线 70%：拼车被拒也不切，帮手不调，「留量线」进操作记录；创始人把线调到 90% 就切', async () => {
+      const s = setup();
+      await soloWeek(s, 0.75);
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect((await newAudits('session-org.note')).map((n) => n.reason).join('')).toContain('留量线');
+      expect(s.logs.join('\n')).toContain('独享到了留量线');
+      await setLines({ 'claude-solo': { '5h': 0.8, '7d': 0.9 } });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    });
+
+    it('线清成「不限」（null）或这个池没写：独享用到 99% 也照切', async () => {
+      const s = setup();
+      await soloWeek(s, 0.99);
+      await setLines({ 'claude-solo': { '7d': null } });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    });
+
+    it('【故意造出的失败】库里没有留量线这一行（种子没装上）：不切，报「要人看」，不当成不限；装上了自己撤', async () => {
+      const s = setup();
+      await t.client.query(`delete from settings where key = 'engine.quotaReserve'`);
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(await reserveAlert()).toMatchObject({ level: 'alert', resolvedAt: null });
+      expect((await reserveAlert())?.body).toContain('在库里没有');
+      // 选路同样不派（每个池都硬挡，写明原因）
+      const picked = await s.pick();
+      expect(picked.ok).toBe(false);
+      await setLines({});
+      await t.client.query(
+        `insert into settings (key, value) values ('engine.quotaReserve', '{}'::jsonb) on conflict do nothing`,
+      );
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+      expect((await reserveAlert())?.resolvedAt).not.toBeNull();
+    });
+
+    it('【故意造出的失败】线是负数 / 大于 1 / 字符串 / 整份不是对象：不切、报「要人看」，不当成不限也不当成 0', async () => {
+      const s = setup();
+      for (const bad of [
+        { 'claude-solo': { '7d': -0.5 } },
+        { 'claude-solo': { '7d': 1.5 } },
+        { 'claude-solo': { '7d': 'x' } },
+        'on',
+      ]) {
+        await setLines(bad);
+        expect(
+          await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) }),
+          JSON.stringify(bad),
+        ).toBeNull();
+        expect(await reserveAlert()).toMatchObject({ level: 'alert', resolvedAt: null });
+      }
+      expect(s.helperCalls).toEqual([]);
+    });
+
+    it('读不到独享的周窗读数（额度未知）：照切，切之前不拿空冒充「没到线」，原因里写明', async () => {
+      const s = setup();
+      await t.client.query(`delete from quota_windows where pool_id = 'claude-solo' and label = 'seven_day'`);
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+      const [switched] = await newAudits('session-org.switch');
+      expect(switched?.reason).toContain('额度未知');
+    });
+
+    it('第 17 条：切过去以后第一条读数说独享周窗 75%（线 70%）→ 选路不再派独享；调高线马上又能派', async () => {
+      const s = setup();
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+      expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+      await soloWeek(s, 0.75);
+      const blocked = await s.pick();
+      expect(blocked.ok ? blocked.route.routeId : 'wait').not.toBe('solo');
+      await setLines({ 'claude-solo': { '5h': 0.8, '7d': 0.9 } });
+      expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    });
+
+    it('【故意造出的失败】库里没有留量线时选路一个池都不派，不悄悄当成不限', async () => {
+      const s = setup();
+      await t.client.query(`delete from settings where key = 'engine.quotaReserve'`);
+      expect(await s.pick()).toMatchObject({ ok: false });
+    });
   });
 
   it('【故意造出的失败】切号账本认不出：不切、报「要人看」，不当成空账本；修好了自己撤', async () => {

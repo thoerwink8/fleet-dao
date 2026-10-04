@@ -1,12 +1,13 @@
 // 会话用户切号的总判法（jobs/org-decision.ts，#194 方案 v2 + 创始人 2026-10-04 约 22:30 的账号状态要求）。
 // 每条「不许做」都故意造一次：账号只剩 1 个/0 个/读不到不切；没证据不切；读数旧了不算；人叫停不切；
 // 独享用不了不切；读不到恢复不切回；白切、预算不接着来回；宽限里不往独享派新活。
+import type { ReserveHit } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { CarpoolApiRead, CarpoolOutage } from '../src/jobs/carpool-outage.ts';
 import { type AccountStatus, judgeAccounts, type PoolAccount } from '../src/jobs/org-accounts.ts';
 import { decideOrgSwitch, intentOf, type OrgDecisionFacts } from '../src/jobs/org-decision.ts';
 import { emptyLedger, type OrgLedger } from '../src/jobs/org-ledger.ts';
-import type { OrgPool, OrgWindow } from '../src/jobs/org-switch.ts';
+import type { OrgPool, OrgReserveFacts, OrgWindow } from '../src/jobs/org-switch.ts';
 
 const T0 = new Date('2026-10-04T12:00:00.000Z');
 const MIN = 60_000;
@@ -138,6 +139,86 @@ describe('挂着拼车：什么时候切独享', () => {
       decideOrgSwitch(facts({ rejection: e1(T0), pools: { carpool: pool(), solo: pool([soloFull]) } })).plan
         .action,
     ).toBe('stay');
+  });
+
+  describe('额度留量线（#194 方案 4.8，线只来自库里）', () => {
+    const hit: ReserveHit = {
+      label: 'seven_day',
+      window: '7d',
+      scope: null,
+      used: 0.75,
+      line: 0.7,
+      resetsAt: at(3000).toISOString(),
+    };
+    const soloWith = (reserve: OrgReserveFacts): OrgPool => ({ ...pool(), reserve });
+    const clear: OrgReserveFacts = { problem: null, hits: [], unknown: [] };
+    const run = (reserve: OrgReserveFacts | undefined, over: Partial<OrgDecisionFacts> = {}) =>
+      decideOrgSwitch(
+        facts({
+          rejection: e1(T0),
+          pools: { carpool: pool(), solo: reserve ? soloWith(reserve) : pool() },
+          ...over,
+        }),
+      );
+
+    it('独享没到线：照切；没判留量线（老输入）也照切', () => {
+      expect(run(clear).plan).toMatchObject({ action: 'switch', to: 'solo' });
+      expect(run(undefined).plan).toMatchObject({ action: 'switch', to: 'solo' });
+    });
+
+    it('【故意造出失败】独享到了留量线：拼车被拒也不切，写明「留量线」和哪条线；进操作记录（notes）；恢复条件照记', () => {
+      const d = run({ problem: null, hits: [hit], unknown: [] });
+      expect(d.plan.action).toBe('stay');
+      const why = (d.plan as { why: string }).why;
+      expect(why).toContain('独享到了留量线');
+      expect(why).toContain('周额度用了 75%，到了留量线 70%');
+      expect(d.notes.join('')).toContain('留量线');
+      expect(d.ledger.outage).not.toBeNull();
+      // 同一个用不了、之后各轮不重复记（只有刚发现的那一轮记一笔，不每分钟刷操作记录）
+      const later = decideOrgSwitch(
+        facts({
+          pools: { carpool: pool(), solo: soloWith({ problem: null, hits: [hit], unknown: [] }) },
+          ledger: led({ outage: e1(T0) }),
+        }),
+      );
+      expect(later.plan.action).toBe('stay');
+      expect(later.notes).toEqual([]);
+    });
+
+    it('【故意造出失败】留量线读不到 / 认不出（problem）：不切，写明原因，不当成不限', () => {
+      const d = run({ problem: '设置 engine.quotaReserve 在库里没有', hits: [], unknown: [] });
+      expect(d.plan.action).toBe('stay');
+      expect((d.plan as { why: string }).why).toContain('在库里没有');
+      expect((d.plan as { why: string }).why).toContain('不当成不限');
+      expect(d.notes.join('')).toContain('留量线');
+    });
+
+    it('读不到独享的读数（额度未知）：照切，原因里写明「额度未知」、切过去后第一条读数到线就停派（第 17 条）', () => {
+      const d = run({
+        problem: null,
+        hits: [],
+        unknown: [{ window: '7d', line: 0.7, why: '读数里没有这个窗口' }],
+      });
+      expect(d.plan).toMatchObject({ action: 'switch', to: 'solo' });
+      const why = (d.plan as { why: string }).why;
+      expect(why).toContain('额度未知');
+      expect(why).toContain('第一条读数到线就停派独享');
+    });
+
+    it('线只管独享：拼车那一类就算有到线的读数，切回拼车不受它拦', () => {
+      const d = decideOrgSwitch(
+        facts({
+          live: { ok: true, org: 'solo' },
+          pools: {
+            carpool: { ...pool(), reserve: { problem: null, hits: [hit], unknown: [] } },
+            solo: pool(),
+          },
+          ledger: onSolo(),
+          now: at(0),
+        }),
+      );
+      expect(d.plan.action).not.toBe('stuck');
+    });
   });
 
   it('【故意造出失败】帮手刚失败（退避中）：不切；退避过了才试', () => {

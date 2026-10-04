@@ -81,6 +81,36 @@ describe('orgSwitchSummary', () => {
     expect(orgSwitchSummary(known({ live: 'carpool' })).details.join('')).not.toContain('烧速');
   });
 
+  test('独享到了留量线：顶上说清「独享到留量线，活等拼车恢复」，黄色，小字写哪条线（#194 方案 4.8）', () => {
+    const s = orgSwitchSummary(
+      known({ soloReserve: { state: 'reached', why: '周额度用了 75%，到了留量线 70%' } }),
+    );
+    expect(s.headline).toContain('独享到留量线，活等拼车恢复');
+    expect(s.tone).toBe('stall');
+    expect(s.details.join('')).toContain('周额度用了 75%，到了留量线 70%');
+  });
+
+  test('【故意造出失败】留量线读不到 / 认不出：红、写明原因；读数判不了：只写小字、不变色', () => {
+    const bad = orgSwitchSummary(
+      known({ soloReserve: { state: 'unreadable', why: '设置 engine.quotaReserve 在库里没有' } }),
+    );
+    expect(bad.tone).toBe('fail');
+    expect(bad.details.join('')).toContain('在库里没有');
+    const unknown = orgSwitchSummary(
+      known({ soloReserve: { state: 'unknown', why: '周额度（线 70%）判不了：读数里没有这个窗口' } }),
+    );
+    expect(unknown.tone).toBe('ok');
+    expect(unknown.details.join('')).toContain('按额度未知照派');
+    // 账本读不到时留量线也照样说
+    const noLedger = orgSwitchSummary({
+      state: 'unavailable',
+      why: 'x',
+      soloPaused: false,
+      soloReserve: { state: 'reached', why: '周额度用了 75%，到了留量线 70%' },
+    });
+    expect(noLedger.details.join('')).toContain('到了留量线');
+  });
+
   test('切回宽限中：说明新活先不往独享派', () => {
     const s = orgSwitchSummary(known({ backPendingSince: T }));
     expect(s.details.join('')).toContain('新活先不往独享派');

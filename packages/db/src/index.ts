@@ -27,6 +27,7 @@ export * from './queries/subtasks.ts';
 export * from './queries/timeline.ts';
 export * from './queries/verify.ts';
 export * from './queries/worktrees.ts';
+export * from './quota-reserve-apply.ts';
 export * from './routing-apply.ts';
 export * from './routing-config.ts';
 export * from './routing-effort.ts';

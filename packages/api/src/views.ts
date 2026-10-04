@@ -386,6 +386,7 @@ export function buildPools(
       channelName: channel?.name ?? '未知渠道（库里查不到）',
       billing: channel?.billing ?? null,
       channelEnabled: channel?.enabled ?? false,
+      ...(p.orgKind ? { orgKind: p.orgKind } : {}),
       maxConcurrency: p.maxConcurrency,
       running: running.get(p.id) ?? 0,
       expiresAt: p.expiresAt,

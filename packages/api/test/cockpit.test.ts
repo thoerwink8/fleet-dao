@@ -952,4 +952,34 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     );
     expect(pools.orgSwitch).toMatchObject({ soloPaused: true });
   });
+
+  it('各渠道额度留量线（#194 4.8）：负数、大于 1、非数字、未知窗口都拒收；合法的存下、带版本号、进操作记录、可清成 null（不限）', async () => {
+    const h = harness();
+    const s = await h.login();
+    const put = (body: unknown) =>
+      h.cockpit.request('/api/settings/engine.quotaReserve', write('PUT', s, body));
+    for (const bad of [
+      { p: { '7d': -0.1 } },
+      { p: { '7d': 1.1 } },
+      { p: { '7d': 'x' } },
+      { p: { weekly: 0.5 } },
+      'on',
+      [],
+    ]) {
+      expect(await errorCode(await put({ value: bad, version: 0 })), JSON.stringify(bad)).toBe(
+        'invalid_request',
+      );
+    }
+    const ok = await put({ value: { p: { '5h': 0.8, '7d': null } }, version: 0, reason: '改线' });
+    expect(UpdateSettingResponse.parse(await ok.json()).setting).toMatchObject({
+      value: { p: { '5h': 0.8, '7d': null } },
+      version: 1,
+    });
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      action: 'setting.update',
+      target: 'setting:engine.quotaReserve',
+    });
+    // 版本号对不上（别人先改了）：409，不悄悄覆盖
+    expect((await put({ value: {}, version: 0 })).status).toBe(409);
+  });
 });

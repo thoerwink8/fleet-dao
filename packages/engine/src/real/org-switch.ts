@@ -69,6 +69,8 @@ export const ORG_DRIFT_ALERT = `${SESSION_ORG_ALERT_PREFIX}drift`;
 export const ORG_CHANNEL_ALERT = `${SESSION_ORG_ALERT_PREFIX}channel`;
 /** 过了预计恢复时刻很久还挂在独享上（方案 4.4）。 */
 export const ORG_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}overdue`;
+/** 额度留量线（设置 engine.quotaReserve）库里没有、认不出：引擎对这类池不派、不切，要人看（#194 4.8）。 */
+export const ORG_RESERVE_ALERT = `${SESSION_ORG_ALERT_PREFIX}reserve`;
 /** 切号账本认不出：引擎不切号，要人看（jobs/org-ledger.ts）。 */
 export const ORG_LEDGER_ALERT = `${SESSION_ORG_ALERT_PREFIX}ledger`;
 /**
@@ -449,6 +451,23 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     w.org.forget();
     const live = await w.org({ by: trigger.by });
     const f = await facts();
+    // 额度留量线读不到、认不出（种子没装上、值被人改坏）：要人看，引擎对这类池不派、不切；好了自己撤
+    const reserveProblems = [
+      ...new Set(
+        Object.values(f.pools)
+          .map((p) => p?.reserve?.problem)
+          .filter((p): p is string => typeof p === 'string'),
+      ),
+    ];
+    if (reserveProblems.length > 0) {
+      await alert(
+        ORG_RESERVE_ALERT,
+        '额度留量线读不到或认不出，引擎不派、不切独享',
+        `${reserveProblems.join('；')}。线只存在库里（种子 packages/db/quota-reserve.default.json 由发布时的装载器只补缺装进去，驾驶舱设置页改）；${fix}`,
+      );
+    } else {
+      await settle(ORG_RESERVE_ALERT, '额度留量线读得出、认得出了');
+    }
     const { pause, problem } = await soloPauseOf(w.db);
     if (problem) log('error', '设置「引擎暂不用独享」的值认不出，按暂停办', { problem });
     let rejection: CarpoolOutage | undefined;

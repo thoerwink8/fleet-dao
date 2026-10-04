@@ -2,9 +2,13 @@
 // 等得来的原因带「最早几点能好」，一定晚于现在：那个时刻已经过了（读数、熔断状态慢了一步）就按不知道算，
 // 调用方按轮询间隔再选一次——给一个过去的时刻，等待秒数成了负数，选路循环会空转。
 import {
+  evaluateReserve,
   hardBanFor,
   type OrgKind,
+  type ReserveReading,
   ROUTE_PROBE_EVERY_MINUTES,
+  reserveHitText,
+  resolvePoolReserve,
   routeProbeStaleMinutes,
   type StageKind,
 } from '@fleet-dao/shared';
@@ -57,6 +61,8 @@ export interface FilterContext {
   liveOrgProblem?: string | undefined;
   /** 引擎切号的打算（ChooseRouteInput.orgPlan）：不是挂着的那个组织的池等不等得来按它判。 */
   orgPlan?: OrgPlanView | undefined;
+  /** 各渠道的额度留量线设置原值（ChooseRouteInput.quotaReserve）；不给 = 没判。 */
+  quotaReserve?: { setting: unknown } | undefined;
   /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
   uiWork: boolean;
 }
@@ -86,6 +92,7 @@ export function blocksFor(
   const notLive = orgBlock(route, ctx);
   if (notLive) out.push(notLive);
   out.push(...shortBlocks(route, ctx));
+  out.push(...reserveBlocks(route, ctx));
   return out;
 }
 
@@ -334,6 +341,57 @@ function shortBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
     if (left + EPSILON < need) out.push(shortBlock(route, w, left, need, ctx.now));
   }
   return out;
+}
+
+/**
+ * 额度留量线（#194 方案 4.8，创始人 2026-10-04：「到了配置额度，这个渠道就不能用了……是全渠道配置项」）：这条路由所在的池，
+ * 适用的窗口已用比例到了库里设置的线（线只存在库里，代码里没有默认；这个池没写 = 不限），就不再派新活，等清零或人改线；在跑的不动。
+ * 和「额度够收尾」是两回事：那个是一个活跑得完跑不完，这个是引擎最多用到哪儿、剩下留给自己用。读的是同一份额度读数。
+ * 读数缺窗口、算不出已用多少（额度未知）不挡，和「额度够收尾」一个规矩（rank.ts 把额度未知的排在读到了的后面）；
+ * 线的设置库里没有（种子没装上）、认不出：这个池硬挡、写明原因，不当成不限。池已经用满了（quota-exhausted）另有原因，不重复。
+ */
+function reserveBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
+  if (!ctx.quotaReserve) return [];
+  if (route.blockers.includes('quota-exhausted')) return [];
+  const resolved = resolvePoolReserve(ctx.quotaReserve.setting, { poolId: route.poolId });
+  if (!resolved.ok) {
+    return [
+      hard(
+        'quota-reserve',
+        `${route.poolName}的额度留量线读不到或认不出，不派（不当成不限）：${resolved.why}`,
+      ),
+    ];
+  }
+  const readings: ReserveReading[] = route.windows
+    .filter((w) => w.applies === 'yes')
+    .map((w) => ({
+      label: w.label,
+      window: w.window,
+      scope: w.scope,
+      state: w.state,
+      used: w.used,
+      resetsAt: w.resetsAt,
+    }));
+  const { hits } = evaluateReserve(resolved.lines, readings);
+  if (hits.length === 0) return [];
+  // 全都清零了才放得出来：最早能派 = 到线的这些读数里最晚的清零时刻；有一个不知道就不知道
+  const resets = hits.map((h) => (h.resetsAt === null ? null : Date.parse(h.resetsAt)));
+  const known = resets.every((t): t is number => t !== null);
+  const until = ahead(known ? Math.max(...resets) : null, ctx.now);
+  const when =
+    until !== null
+      ? `${duration(until - ctx.now)}后（${stamp(until)}）清零`
+      : known
+        ? '清零时刻已过，等下一次读数'
+        : '清零时刻不知道';
+  return [
+    {
+      code: 'quota-reserve',
+      text: `${route.poolName}${hits.map(reserveHitText).join('、')}，引擎不再往它派新活（线在驾驶舱设置里改）；${when}`,
+      wait: 'quota',
+      until: until === null ? null : new Date(until).toISOString(),
+    },
+  ];
 }
 
 function needPerTask(w: RouteWindow, policy: RoutingPolicy): number {

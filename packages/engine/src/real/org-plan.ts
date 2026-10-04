@@ -6,13 +6,19 @@
 // 最近几次接口读数）；账号清单（最近一次接口读数里每个组织一个账号，太旧算读不到）；设置里「引擎暂不用独享」。
 
 import { SESSION_USERS } from '@fleet-dao/adapters';
-import { type Db, readSoloPaused, sessionOrgFacts } from '@fleet-dao/db';
-import type { OrgKind } from '@fleet-dao/shared';
+import {
+  type Db,
+  type OrgPoolWindow,
+  readQuotaReserveSetting,
+  readSoloPaused,
+  sessionOrgFacts,
+} from '@fleet-dao/db';
+import { evaluateReserve, type OrgKind, resolvePoolReserve } from '@fleet-dao/shared';
 import type { CarpoolApiRead, CarpoolOutage } from '../jobs/carpool-outage.ts';
 import { type AccountRoster, buildRoster, judgeAccounts } from '../jobs/org-accounts.ts';
 import { decideOrgSwitch, intentOf, type OrgDecision } from '../jobs/org-decision.ts';
 import { type OrgLedger, OrgLedgerError, type SoloPause } from '../jobs/org-ledger.ts';
-import type { OrgPool } from '../jobs/org-switch.ts';
+import type { OrgPool, OrgReserveFacts } from '../jobs/org-switch.ts';
 import type { LiveOrgReading, OrgPlanView } from '../routing/index.ts';
 import { loadLedger } from './org-ledger.ts';
 
@@ -37,18 +43,56 @@ export interface OrgSwitchFactsNow {
   poolIds: Set<string>;
 }
 
+/**
+ * 一个池的额度留量线判一遍（#194 方案 4.8）：设置库里没有（undefined，种子没装上）、认不出 → problem；认得出就按这个池的
+ * 窗口读数判到线了没有，这个池没写线 = 不限。线只来自库里的设置，这里没有任何默认值。
+ */
+export function poolReserve(
+  pool: { poolId: string; windows: readonly OrgPoolWindow[] },
+  setting: unknown,
+): OrgReserveFacts {
+  const resolved = resolvePoolReserve(setting, pool);
+  if (!resolved.ok) return { problem: resolved.why, hits: [], unknown: [] };
+  const verdict = evaluateReserve(
+    resolved.lines,
+    pool.windows.map((w) => ({
+      label: w.label,
+      window: w.window,
+      scope: w.scope,
+      state: w.state,
+      used: w.used,
+      resetsAt: w.resetsAt ? w.resetsAt.toISOString() : null,
+    })),
+  );
+  return { problem: null, hits: verdict.hits, unknown: verdict.unknown };
+}
+
+function mergeReserve(a: OrgReserveFacts | undefined, b: OrgReserveFacts): OrgReserveFacts {
+  if (!a) return b;
+  return {
+    problem: a.problem ?? b.problem,
+    hits: [...a.hits, ...b.hits],
+    unknown: [...a.unknown, ...b.unknown],
+  };
+}
+
 /** held：整池暂停着的池（pool-hold:<池> 那条要人拍还开着）。库读不了照抛。 */
 export async function loadOrgSwitchFacts(
   db: Db,
   options: { now: Date; held: ReadonlySet<string> },
 ): Promise<OrgSwitchFactsNow> {
   const f = await sessionOrgFacts(db, { now: options.now });
+  const reserveSetting = await readQuotaReserveSetting(db);
   const pools: Partial<Record<OrgKind, OrgPool>> = {};
   for (const p of f.pools) {
     const seen = pools[p.orgKind];
     pools[p.orgKind] = {
       windows: [...(seen?.windows ?? []), ...p.windows],
       held: (seen?.held ?? false) || options.held.has(p.poolId),
+      reserve: mergeReserve(
+        seen?.reserve,
+        poolReserve(p, reserveSetting.set ? reserveSetting.value : undefined),
+      ),
     };
   }
   return {
