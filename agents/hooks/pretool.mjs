@@ -1639,12 +1639,20 @@ function readVerdict(tool, what, input, fallbackCwd) {
 // 话就卡在那儿、进程一断还会丢。所以单次前台等待不许超过这个数（无人值守不无人值守都一样，他随时可能插话）；
 // 更长的活用 run_in_background（跑完会重新叫醒我）、或拆成多次短等。后台跑的不受限。
 export const MAX_FOREGROUND_WAIT_SECONDS = 60;
+export const FRAMEWORK_DEFAULT_TIMEOUT_MS = 120_000;
 
 /** 这次调用在前台最多要等几秒：超过上限返回 { seconds, what }，没超过、后台跑的、认不出的都是 null（认不出不当超了拦人）。 */
 export function foregroundWait(toolInput, cmd, kind) {
   if (toolInput?.run_in_background === true) return null;
   const t = toolInput?.timeout;
-  if (typeof t === 'number' && Number.isFinite(t) && t > MAX_FOREGROUND_WAIT_SECONDS * 1000) {
+  // 120000 是框架给没写 timeout 的调用自动补的默认值（#827 合进来当天撞到：钩子把每条普通命令都拦了），
+  // 钩子分不出「没写」和「写了 120000」，只能放过这个数；显式写的 61000~119999、超过 120000 的照拦。
+  if (
+    typeof t === 'number' &&
+    Number.isFinite(t) &&
+    t > MAX_FOREGROUND_WAIT_SECONDS * 1000 &&
+    t !== FRAMEWORK_DEFAULT_TIMEOUT_MS
+  ) {
     return { seconds: Math.round(t / 1000), what: `timeout=${t}ms` };
   }
   const units = { '': 1, s: 1, m: 60, h: 3600, d: 86400 };
