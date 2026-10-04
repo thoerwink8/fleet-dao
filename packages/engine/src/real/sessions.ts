@@ -38,7 +38,6 @@
 // 失败分流；停滞拿不准时问，同一个会话隔 stallJevEveryMs 才再问。只记不拦的题、没判出来的一律照规则走。
 
 import {
-  type DeliveryCheck,
   judgeRun,
   listAgentScopes,
   reapSession,
@@ -46,7 +45,6 @@ import {
   type SessionUser,
   stopScope,
 } from '@fleet-dao/adapters';
-import { PLAN_DOC } from '@fleet-dao/conventions';
 import {
   clearReservations,
   closeOpenRuns,
@@ -69,28 +67,11 @@ import {
   PortError,
   type SessionEnd,
   type SessionHandle,
-  type SessionOutput,
   type StopSessionInput,
 } from '../ports.ts';
 import { type ContinueMode, type HostReport, hostDrivers } from './hosts.ts';
 import { explainKill, killSignal, realKillEvidence, scopeOomKills } from './kill-evidence.ts';
 import type { OrgSwitchSessions } from './org-switch.ts';
-import {
-  type LeadOutputKind,
-  OUTPUT_FILES,
-  type Parsed,
-  parseLeadBrief,
-  parseLeadPlan,
-  parseLeadRebut,
-  parseLeadReview,
-  parseLeadText,
-  parseLeadVerdict,
-  parsePlan,
-  parseRequirementDoc,
-  parseReview,
-  parseTriage,
-  parseVerify,
-} from './prompts.ts';
 import {
   DEFAULT_FORK_MAX_CONTEXT_TOKENS,
   ENGINE_STOP_CODE,
@@ -100,22 +81,15 @@ import {
 import { createDetached } from './session-detached.ts';
 import { createLaunch } from './session-launch.ts';
 import { createLive, type Live } from './session-live.ts';
+import { createOutput } from './session-output.ts';
 import { createPrepare } from './session-prepare.ts';
 import { createProgress } from './session-progress.ts';
 import { createReattach } from './session-reattach.ts';
 import { createTree } from './session-tree.ts';
 import type { SessionPorts, SessionPortsDeps, SessionShared } from './session-types.ts';
-import { asSessionUser, errorText, SHA, withRawError } from './session-util.ts';
+import { asSessionUser, errorText, withRawError } from './session-util.ts';
 import type { SegmentOutcome } from './sessions-segment.ts';
 import { POOL_HOLD_PREFIX, poolHoldKey } from './store-ports.ts';
-import {
-  changedFilesSince,
-  commitsSince,
-  headOf,
-  ownSpan,
-  readFileAs,
-  uncommittedTracked,
-} from './user-git.ts';
 
 // 拆出去的模块里的名字，对外仍从这里导出（import 路径不变）。
 export {
@@ -221,6 +195,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const { flush, onEvent, onRateLimit } = createProgress(shared);
   const { reattach } = createReattach(shared, { ioDirOf, newLive, onEvent, onRateLimit, removeTmp });
   const { prepareTree, relayFacts } = createPrepare(shared, { treeAs, identityOf });
+  const { deliveryCheck, readOutput } = createOutput({ treeAs });
   const { startSession } = createLaunch(shared, {
     treeAs,
     removeTmp,
@@ -317,202 +292,6 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (act && !live.stop) {
       live.stop = { kind: 'stall', rule: verdict.rule, basis: verdict.basis };
       live.abort.abort();
-    }
-  }
-
-  async function deliveryCheck(
-    live: Live,
-  ): Promise<{ check: DeliveryCheck; head?: string; changed: string[] }> {
-    const base = live.baseHead;
-    const target = base ?? '（没给起会话前的头）';
-    const t = treeAs(live.dir, live.user, `done-${live.runId}`);
-    try {
-      const head = await headOf(t);
-      const dirty = await uncommittedTracked(t);
-      if (dirty.length > 0) {
-        return {
-          check: {
-            state: 'not_delivered',
-            target,
-            uncommitted: dirty.length,
-            detail: `工作树里有没提交的已跟踪改动（引擎只推提交，这部分会丢）：${dirty.slice(0, 5).join('；')}`,
-          },
-          head,
-          changed: [],
-        };
-      }
-      if (!base || !SHA.test(base)) {
-        return {
-          check: { state: 'unknown', target, detail: '没给起会话前的头，判不了有没有新提交' },
-          head,
-          changed: [],
-        };
-      }
-      // 并进来的主线不算这一步交的（user-git.ts 的 ownSpan）：只并了主线、自己没写东西的不算交了
-      const span = head === base ? null : await ownSpan(t, base, live.defaultBranch);
-      const commits = span ? await commitsSince(t, span, 50) : [];
-      if (!span || commits.length === 0) {
-        return {
-          check: {
-            state: 'not_delivered',
-            target,
-            newCommits: 0,
-            detail: `起会话前的头 ${base.slice(0, 7)} 之后没有新提交（并进来的主线不算）`,
-          },
-          head,
-          changed: [],
-        };
-      }
-      const changed = await changedFilesSince(t, span);
-      if (changed.length === 0) {
-        return {
-          check: {
-            state: 'not_delivered',
-            target,
-            newCommits: commits.length,
-            hasDiff: false,
-            detail: '有新提交，但除了并进来的主线，和起会话前比没有内容差异',
-          },
-          head,
-          changed,
-        };
-      }
-      return {
-        check: {
-          state: 'delivered',
-          target,
-          newCommits: commits.length,
-          hasDiff: true,
-          uncommitted: 0,
-          detail: `${commits.length} 个新提交，改了 ${changed.length} 个文件`,
-        },
-        head,
-        changed,
-      };
-    } catch (error) {
-      return { check: { state: 'unknown', target, detail: errorText(error) }, changed: [] };
-    }
-  }
-
-  async function readOutput(live: Live): Promise<Parsed<SessionOutput>> {
-    const t = treeAs(live.dir, live.user, `out-${live.runId}`);
-    const read = async (path: string) => {
-      const text = await readFileAs(t, path);
-      return text;
-    };
-    try {
-      switch (live.kind) {
-        case 'triage': {
-          const text = await read(OUTPUT_FILES.triage[0]);
-          if (text === null) return { error: `会话结束了，但没写 ${OUTPUT_FILES.triage[0]}` };
-          const v = parseTriage(text);
-          return 'error' in v ? v : { ok: { kind: 'triage', verdict: v.ok } };
-        }
-        case 'doc': {
-          const text = await read(OUTPUT_FILES.doc[0]);
-          if (text === null) return { error: `会话结束了，但没写 ${OUTPUT_FILES.doc[0]}` };
-          // 「对应计划：」那一行要对得上检出副本里的 plan.md（仓里没有就只要写清）
-          const plan = await read(PLAN_DOC);
-          const v = parseRequirementDoc(text, plan ?? undefined);
-          return 'error' in v ? v : { ok: { kind: 'doc', markdown: v.ok } };
-        }
-        case 'plan': {
-          const [md, json] = await Promise.all([read(OUTPUT_FILES.plan[0]), read(OUTPUT_FILES.plan[1])]);
-          if (md === null || json === null) {
-            return {
-              error: `会话结束了，但没写 ${md === null ? OUTPUT_FILES.plan[0] : OUTPUT_FILES.plan[1]}`,
-            };
-          }
-          const v = parsePlan(md, json);
-          return 'error' in v
-            ? v
-            : { ok: { kind: 'plan', markdown: v.ok.markdown, subtasks: v.ok.subtasks } };
-        }
-        case 'review': {
-          const text = await read(OUTPUT_FILES.review[0]);
-          if (text === null) return { error: `会话结束了，但没写 ${OUTPUT_FILES.review[0]}` };
-          const v = parseReview(text, live.reviewHead ?? '');
-          return 'error' in v ? v : { ok: { kind: 'review', review: v.ok } };
-        }
-        case 'verify': {
-          const text = await read(OUTPUT_FILES.verify[0]);
-          if (text === null) return { error: `会话结束了，但没写结论 ${OUTPUT_FILES.verify[0]}` };
-          const v = parseVerify(text, live.verifyCriteria ?? [], live.reviewHead ?? '');
-          return 'error' in v ? v : { ok: { kind: 'verify', report: v.ok } };
-        }
-        case 'delivery':
-          return { error: '写码会话不读结论文件' };
-        case 'lead-plan':
-        case 'lead-verdict':
-        case 'lead-rebut':
-        case 'lead-brief':
-        case 'lead-review':
-        case 'lead-text':
-          return await readLeadOutput(live, live.kind, read);
-      }
-    } catch (error) {
-      throw new PortError('READ_FAILED', `读会话交回来的结论文件没成：${errorText(error)}`, {
-        retryable: true,
-      });
-    }
-  }
-
-  /**
-   * Lead 这一步交回的：结论文件（按这一步定名）加上工作树的样子。写方案、写结果那两步可以在分支上提交，头和这一步改到的
-   * 文件从提交里读（不信文件里写的）；其余几步只看不改，头动了就算交错了。有没提交的已跟踪改动都算交错了（引擎只推提交）。
-   */
-  async function readLeadOutput(
-    live: Live,
-    kind: LeadOutputKind,
-    read: (path: string) => Promise<string | null>,
-  ): Promise<Parsed<SessionOutput>> {
-    const file = OUTPUT_FILES[kind][0];
-    const text = await read(file);
-    if (text === null) return { error: `会话结束了，但没写结论 ${file}` };
-    const t = treeAs(live.dir, live.user, `lead-${live.runId}`);
-    const head = await headOf(t);
-    const dirty = await uncommittedTracked(t);
-    if (dirty.length > 0) {
-      return {
-        error: `工作树里有没提交的已跟踪改动（引擎只推提交，这部分会丢）：${dirty.slice(0, 5).join('；')}`,
-      };
-    }
-    const base = live.baseHead;
-    if (!base || !SHA.test(base)) return { error: '没给起会话前的头，判不了这一步提交了什么' };
-    const commits = kind === 'lead-plan' || kind === 'lead-review';
-    if (!commits && head !== base) {
-      return {
-        error: `这一步只看不改，头却从 ${base.slice(0, 7)} 变成了 ${head.slice(0, 7)}：用 git reset --hard ${base} 退回起这一步之前的头再交（要改的写进结论里）`,
-      };
-    }
-    // 并进来的主线不算这一步改的（user-git.ts 的 ownSpan）
-    const changedFiles =
-      commits && head !== base ? await changedFilesSince(t, await ownSpan(t, base, live.defaultBranch)) : [];
-    switch (kind) {
-      case 'lead-plan': {
-        const v = parseLeadPlan(text);
-        return 'error' in v ? v : { ok: { kind, head, changedFiles, ...v.ok } };
-      }
-      case 'lead-review': {
-        const v = parseLeadReview(text);
-        return 'error' in v ? v : { ok: { kind, head, changedFiles, ...v.ok } };
-      }
-      case 'lead-verdict': {
-        const v = parseLeadVerdict(text);
-        return 'error' in v ? v : { ok: { kind, ...v.ok } };
-      }
-      case 'lead-rebut': {
-        const v = parseLeadRebut(text);
-        return 'error' in v ? v : { ok: { kind, ...v.ok } };
-      }
-      case 'lead-brief': {
-        const v = parseLeadBrief(text);
-        return 'error' in v ? v : { ok: { kind, ...v.ok } };
-      }
-      case 'lead-text': {
-        const v = parseLeadText(text);
-        return 'error' in v ? v : { ok: { kind, ...v.ok } };
-      }
     }
   }
 
