@@ -486,6 +486,8 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
 export const RECENT_MS = 60 * 60_000;
 export const RECENT_MAX = 5;
 export const RECENT_CHARS = 200;
+/** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记（2026-10-04 实测），列的时候不算创始人的话 */
+const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
 
 export function recentPrompts({ home, now = Date.now(), dir = null }) {
   const base = dir ?? join(home, '.fleet-dao', 'prompt-log');
@@ -507,6 +509,7 @@ export function recentPrompts({ home, now = Date.now(), dir = null }) {
         const at = Date.parse(e?.at);
         if (
           typeof e?.prompt === 'string' &&
+          !SYSTEM_PROMPT.test(e.prompt) &&
           Number.isFinite(at) &&
           now - at <= RECENT_MS &&
           at <= now + 60_000

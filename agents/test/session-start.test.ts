@@ -925,3 +925,28 @@ describe('创始人最近落盘的话（上一个会话没送到的，新会话�
     expect(line).toMatch(/创始人落盘的话没读成.*读不了/);
   });
 });
+
+describe('创始人最近落盘的话：系统消息不算', () => {
+  it('后台任务通知、系统提醒（也走 UserPromptSubmit，落盘时原样记）不列；只剩系统消息就不出声', () => {
+    const NOW = Date.parse('2026-10-04T11:30:00Z');
+    const home = temp('rp-sys');
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    const rows = [
+      { at: '2026-10-04T11:28:00Z', prompt: '<task-notification>\n<task-id>x</task-id>' },
+      { at: '2026-10-04T11:28:30Z', prompt: '<system-reminder>\nfoo' },
+      { at: '2026-10-04T11:29:00Z', prompt: '[SYSTEM NOTIFICATION - NOT USER INPUT]\nbar' },
+    ];
+    writeFileSync(join(dir, '2026-10-04.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    const recent = (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts;
+    expect(recent({ home, now: NOW })).toEqual([]);
+    writeFileSync(
+      join(dir, '2026-10-04.jsonl'),
+      `${rows.map((r) => JSON.stringify(r)).join('\n')}\n${JSON.stringify({ at: '2026-10-04T11:29:30Z', prompt: '创始人真说的话' })}\n`,
+    );
+    const [line] = recent({ home, now: NOW });
+    expect(line).toContain('共 1 条');
+    expect(line).toContain('创始人真说的话');
+    expect(line).not.toContain('task-notification');
+  });
+});
