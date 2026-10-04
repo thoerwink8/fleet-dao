@@ -18,6 +18,11 @@ export const LOOKBACK_MS = 6 * 60 * 60_000;
 export const SHOW_CHARS = 200;
 
 const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
+/**
+ * 真跑 Mirasim 记录时发现：steers 里还会混进别的程序塞给会话的整段提示词（实测一条 3 千多字的审查任务书），
+ * 不是创始人说的。他的插话都是几句话，超过这个长度的不算他的话（也不补进他的落盘记录）。
+ */
+export const MAX_FOUNDER_CHARS = 1500;
 const NOT_CHECKED = '没送到的插话没查成';
 
 /** 读最近几天的落盘记录，返回全部 prompt 文字；读不了（非「没有」）抛出带原因的 Error */
@@ -101,7 +106,10 @@ export function recoverSteers({ home, now = Date.now(), sessionsDir = null, logD
     return { lines: [`${NOT_CHECKED}：${err.message}；你插过的话有没有丢，这次判不了。`], recovered: 0 };
   }
   const lost = steers.filter(
-    (s) => !SYSTEM_PROMPT.test(s.text) && !logged.some((p) => p.includes(s.text.trim())),
+    (s) =>
+      !SYSTEM_PROMPT.test(s.text) &&
+      s.text.length <= MAX_FOUNDER_CHARS &&
+      !logged.some((p) => p.includes(s.text.trim())),
   );
   const done = [];
   const failed = [];
