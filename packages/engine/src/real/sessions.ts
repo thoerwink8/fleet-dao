@@ -1,6 +1,16 @@
 // 引擎端口 → AI 会话：起会话、看守、叫停、收孤儿。按路由的执行方式分派给驱动（real/hosts.ts）：接上了 Claude Code
 // （经 reclaude）和 cursor-agent，都是无头起；别的执行方式明确报 HOST_NOT_WIRED。下面只认驱动交回的同一个形状（HostReport）。
 //
+// 这个文件只做装配（createSessionPorts）：按依赖算出各块共用的 SessionShared，再把下面各块接起来。各块管什么——
+//   session-types.ts 对外类型和 SessionShared；session-codes.ts 失败码、时间常量；session-util.ts 共用小函数；
+//   session-continuation.ts 续会话的方式和等第一帧的时限；session-screen.ts 发给别家前的卫生检查；
+//   session-live.ts 在跑会话的状态（Live）；session-tree.ts 会话用户的工作树句柄、临时目录；
+//   session-detached.ts 脱开跑的会话的收发目录；session-progress.ts 进度事件攒批写库、额度记账；
+//   session-reattach.ts 接回；session-prepare.ts 起会话前备工作树；session-launch.ts 起会话；
+//   session-watch.ts 看守、停滞；session-output.ts 交活核对和结论文件；session-end.ts 结局判定；
+//   session-pool-hold.ts 整池暂停提醒和失败分流；session-lifecycle.ts 叫停、收孤儿、切号、排空、停机放手。
+// 下面几段是整套行为的说明，对应到各块。
+//
 // 起会话：按 runId 幂等（库里 session_runs 一行；叫停过的 runId 不再起）。会话用户：Claude 按账号池定（pools.run_as_user，
 // 它绑着 reclaude 组织）；Cursor 的池不绑，用法国唯一的会话用户（hosts.ts 的 sessionUserOf）。
 // 会话号：Claude 的由我们定；cursor 开新会话的号是它 init 帧里自己起的，开工先记临时号（cursor-pending:<runId>），真号到了
