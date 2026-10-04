@@ -345,7 +345,7 @@ export function renderBoard(input: BoardInput): string {
     BOARD_MARKER,
     '这张单由「分支体检」机器人维护（#769；每天一轮，`.github/workflows/github-audit.yml` 的 branches，判法在 `packages/conventions/src/branch-hygiene.ts`），正文每轮重写，只有勾选框算数。',
     '',
-    `**要你定的**：下面每条分支都有主线上没有的改动，满 ${STALE_DAYS} 天没动静，也没有开着的 PR 或单子提到它。勾「删」：下一轮照删（分支头变了就不删、重新列）；勾「留，不再问」：以后不再问（分支头变了才重新判）。想马上执行就在 Actions 里手动跑一次 github-audit。`,
+    `**要你定的**：下面每条分支都有主线上没有的改动，满 ${ASK_DAYS} 天没动静，也没有开着的 PR 或单子提到它。勾「删」：下一轮照删（分支头变了就不删、重新列）；勾「留，不再问」：以后不再问（分支头变了才重新判）。想马上执行就在 Actions 里手动跑一次 github-audit。没产出的（改动主线上都有）机器满 ${STALE_DAYS} 天自己删，不列在这里。`,
     '',
     `上次跑：${bj(input.now)}（北京时间）。远端 ${reports.length} 条分支：这一轮删了 ${input.deleted.length}、留着 ${count('keep')}、等你定 ${asks.length}、没查成 ${unknown.length}。`,
   ];

@@ -526,6 +526,9 @@ describe('分支体检：整轮', () => {
     const made = calls.created[0];
     expect(made?.labels).toEqual(['杂项']);
     expect(made?.body).toContain(BOARD_MARKER);
+    // 说给人看的天数就是判法用的那两个（改了天数正文跟着变）
+    expect(made?.body).toContain(`满 ${ASK_DAYS} 天没动静`);
+    expect(made?.body).toContain(`机器满 ${STALE_DAYS} 天自己删`);
     expect([...parseBoard(made?.body ?? '').listed].sort()).toEqual(['fleet/292-f3f3472d3', 'output-old']);
     expect(r.board).toEqual({ number: 900, created: true, newAsks: ['fleet/292-f3f3472d3', 'output-old'] });
     expect(calls.comments).toHaveLength(1);
