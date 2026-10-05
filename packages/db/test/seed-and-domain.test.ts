@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   toBan,
@@ -10,9 +10,10 @@ import {
   toRepo,
   toRoute,
   toSessionRun,
+  toSubtask,
   toTask,
 } from '../src/domain-map.ts';
-import { getSubtasks, insertSubtasks } from '../src/queries/subtasks.ts';
+import { insertSubtasks } from '../src/queries/subtasks.ts';
 import {
   bans,
   channels,
@@ -23,6 +24,8 @@ import {
   quotaWindows,
   repos,
   routes,
+  subtaskDeps,
+  subtasks,
   users,
 } from '../src/schema/index.ts';
 import { SEED, seed } from '../src/seed.ts';
@@ -234,7 +237,7 @@ describe('库里的行 → 领域对象', () => {
     });
   });
 
-  it('子任务读回来带 dependsOn', async () => {
+  it('子任务写进去：依赖拆进 subtask_deps，读回来带 dependsOn', async () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
     const a = '11111111-1111-4111-8111-111111111111';
@@ -251,7 +254,20 @@ describe('库里的行 → 领域对象', () => {
         waitingOn: '等接口合并',
       },
     ]);
-    expect(await getSubtasks(t.db, task.id)).toEqual([
+    const deps = await t.db.select().from(subtaskDeps).where(eq(subtaskDeps.taskId, task.id));
+    const rows = await t.db
+      .select()
+      .from(subtasks)
+      .where(eq(subtasks.taskId, task.id))
+      .orderBy(asc(subtasks.index));
+    expect(
+      rows.map((r) =>
+        toSubtask(
+          r,
+          deps.filter((d) => d.subtaskId === r.id).map((d) => d.dependsOnId),
+        ),
+      ),
+    ).toEqual([
       {
         id: a,
         taskId: task.id,

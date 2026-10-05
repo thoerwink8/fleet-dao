@@ -1,5 +1,5 @@
-// 人闸批准：开一条待批（同事务报一条 decision 级报警）、读、记下批或驳回。
-import { and, eq, isNull } from 'drizzle-orm';
+// 人闸批准：开一条待批（同事务报一条 decision 级报警）、读。
+import { eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { approvals } from '../schema/index.ts';
 import { upsertAlert } from './engine-alerts.ts';
@@ -81,23 +81,4 @@ export async function openApproval(
 export async function getApproval(db: Db, id: string): Promise<ApprovalRecord | null> {
   const [row] = await db.select().from(approvals).where(eq(approvals.id, id));
   return row ? mapApproval(row) : null;
-}
-
-export async function decideApproval(
-  db: Db,
-  input: { id: string; decision: 'approved' | 'rejected'; by: string; reason?: string },
-): Promise<'ok' | 'already_decided' | 'not_found'> {
-  const updated = await db
-    .update(approvals)
-    .set({
-      decision: input.decision,
-      decidedBy: input.by,
-      decidedAt: new Date(),
-      reason: input.reason ?? null,
-    })
-    .where(and(eq(approvals.id, input.id), isNull(approvals.decision)))
-    .returning({ id: approvals.id });
-  if (updated.length > 0) return 'ok';
-  const [existing] = await db.select({ id: approvals.id }).from(approvals).where(eq(approvals.id, input.id));
-  return existing ? 'already_decided' : 'not_found';
 }

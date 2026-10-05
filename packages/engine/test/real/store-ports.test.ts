@@ -3,11 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   finishRun,
-  finishSessionRun,
-  getSessionRun,
-  markSessionRunStarted,
   notifications,
-  openSessionRun,
   poolReservations,
   saveOrgState,
   savePoolQuota,
@@ -265,18 +261,13 @@ describe('选路', () => {
     // 独享池的空位占满：三个已开工、没结束的会话。
     const { task } = await addTask(t.db);
     for (let i = 0; i < 3; i++) {
-      await openSessionRun(t.db, {
-        id: randomUUID(),
+      await t.db.insert(sessionRuns).values({
         taskId: task.id,
-        subtaskId: null,
         stage: 'triage',
         routeId: 'solo',
         whyRoute: '占位',
-        branch: null,
         queuedAt: new Date(NOW.getTime() - 10 * MIN),
-        workflowId: null,
         runAsUser: 'fleet-agent-carpool',
-        worktreePath: null,
       });
     }
     await t.db.update(sessionRuns).set({ startedAt: new Date(NOW.getTime() - 5 * MIN) });
@@ -352,29 +343,16 @@ describe('选路', () => {
     await world(t.db);
     const { task } = await addTask(t.db);
     for (let i = 0; i < 3; i++) {
-      const id = randomUUID();
-      await openSessionRun(t.db, {
-        id,
+      // 最后一次失败在一分钟前：还在冷却里（第一次熔断冷却 10 分钟），不是半开。
+      await t.db.insert(sessionRuns).values({
         taskId: task.id,
-        subtaskId: null,
         stage: 'execute',
         routeId: 'solo',
         whyRoute: 'x',
-        branch: null,
         queuedAt: new Date(NOW.getTime() - (10 - i) * MIN),
-        workflowId: null,
         runAsUser: 'fleet-agent-carpool',
-        worktreePath: null,
-      });
-      await markSessionRunStarted(t.db, {
-        id,
         startedAt: new Date(NOW.getTime() - (9 - i) * MIN),
         sessionId: randomUUID(),
-        handle: null,
-      });
-      // 最后一次失败在一分钟前：还在冷却里（第一次熔断冷却 10 分钟），不是半开。
-      await finishSessionRun(t.db, {
-        id,
         outcome: 'failed',
         endedAt: new Date(NOW.getTime() - (3 - i) * MIN),
         routeOutcome: 'fail',
@@ -588,28 +566,20 @@ describe('全熔断只读判定（stageAllOpen）：不写库、不报警', () =
   /** 这条路由连着失败三次。最近一次距现在 lastEndedMinutesAgo 分钟：1 = 还在冷却里，40 = 冷却过了（半开）。 */
   async function tripBreaker(routeId: string, taskId: string, lastEndedMinutesAgo: number) {
     for (let i = 0; i < 3; i++) {
-      const id = randomUUID();
       const ended = new Date(NOW.getTime() - (lastEndedMinutesAgo + (2 - i)) * MIN);
-      await openSessionRun(t.db, {
-        id,
+      await t.db.insert(sessionRuns).values({
         taskId,
-        subtaskId: null,
         stage: 'execute',
         routeId,
         whyRoute: 'x',
-        branch: null,
         queuedAt: new Date(ended.getTime() - 2 * MIN),
-        workflowId: null,
         runAsUser: 'fleet-agent-carpool',
-        worktreePath: null,
-      });
-      await markSessionRunStarted(t.db, {
-        id,
         startedAt: new Date(ended.getTime() - MIN),
         sessionId: randomUUID(),
-        handle: null,
+        outcome: 'failed',
+        endedAt: ended,
+        routeOutcome: 'fail',
       });
-      await finishSessionRun(t.db, { id, outcome: 'failed', endedAt: ended, routeOutcome: 'fail' });
     }
   }
 
@@ -1221,51 +1191,6 @@ describe('计时、快照', () => {
     expect(rows.map((r) => r.kind).sort()).toEqual(['activity', 'wait']);
   });
 
-  it('会话那一笔：看守没写过的由它收尾；看守写过的不改；库里没有这次会话明确报错', async () => {
-    await world(t.db);
-    const { task } = await addTask(t.db);
-    const runId = randomUUID();
-    await openSessionRun(t.db, {
-      id: runId,
-      taskId: task.id,
-      subtaskId: null,
-      stage: 'execute',
-      routeId: 'solo',
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: 'fleet-agent-carpool',
-      worktreePath: null,
-    });
-    const record = {
-      kind: 'session' as const,
-      workflowId: 'sub:x',
-      runId,
-      taskId: task.id,
-      sessionId: '',
-      stage: 'execute' as const,
-      routeId: 'solo',
-      outcome: 'failed' as const,
-      endedAt: new Date(NOW.getTime() + MIN).toISOString(),
-      usage: {},
-      failureCode: 'SPAWN_FAILED',
-    };
-    await ports().recordTiming(record, ctx);
-    expect(await getSessionRun(t.db, runId)).toMatchObject({
-      outcome: 'failed',
-      failureCode: 'SPAWN_FAILED',
-    });
-    await ports().recordTiming({ ...record, outcome: 'ok', failureCode: 'SHOULD_NOT_LAND' }, ctx);
-    expect(await getSessionRun(t.db, runId)).toMatchObject({
-      outcome: 'failed',
-      failureCode: 'SPAWN_FAILED',
-    });
-    await expect(ports().recordTiming({ ...record, runId: randomUUID() }, ctx)).rejects.toMatchObject({
-      code: 'RUN_NOT_FOUND',
-    });
-  });
-
   it('任务快照：任务不在库里明确报错', async () => {
     await world(t.db);
     await expect(
@@ -1316,20 +1241,17 @@ async function oneShotEnded(
 /** 这张单上起过（有开工时刻）的一次会话。 */
 async function startedRun(taskId: string, routeId: string, stage: StageKind) {
   const id = randomUUID();
-  await openSessionRun(t.db, {
+  await t.db.insert(sessionRuns).values({
     id,
     taskId,
-    subtaskId: null,
     stage,
     routeId,
     whyRoute: 'x',
-    branch: null,
     queuedAt: NOW,
-    workflowId: null,
     runAsUser: routeId.startsWith('cursor') ? null : 'fleet-agent-carpool',
-    worktreePath: null,
+    startedAt: NOW,
+    sessionId: `s-${id}`,
   });
-  await markSessionRunStarted(t.db, { id, startedAt: NOW, sessionId: `s-${id}`, handle: null });
   return id;
 }
 

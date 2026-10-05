@@ -1,12 +1,9 @@
-// #259 问创始人不挡路：openEngineAsk 带范围和推荐、单子的提问列表、照改完记 applied_at。
-import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { listTaskAsks, markAsksApplied } from '../src/queries/asks.ts';
-import { openEngineAsk } from '../src/queries/engine.ts';
 import { asks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addRun, addTask, ago, catalog, expectViolation, MIN } from './helpers.ts';
+import { addRepo, addRoute, addRun, addTask, ago, catalog, MIN } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -19,59 +16,13 @@ beforeEach(async () => {
   await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
 });
 
-/** 一个仓、一张需求、一次会话（openEngineAsk 挂 runId 要用）。 */
-async function fixtures() {
+/** 一个仓、一张需求、一次会话。 */
+async function _fixtures() {
   const repo = await addRepo(t.db);
   const task = await addTask(t.db, repo.id);
   const run = await addRun(t.db, { taskId: task.id, routeId: 'r1' });
   return { repo, task, run };
 }
-
-describe('openEngineAsk 带 scope、recommended（#259）', () => {
-  it('scope=task、recommended 在选项里：写进去、读回来对得上', async () => {
-    const { task, run } = await fixtures();
-    const id = randomUUID();
-    const result = await openEngineAsk(t.db, {
-      id,
-      taskId: task.id,
-      runId: run.id,
-      question: '先做哪一块？',
-      options: ['甲', '乙'],
-      recommended: '甲',
-      scope: 'task',
-    });
-    expect(result).toEqual({ created: true, runLinked: true });
-    const [row] = await t.db.select().from(asks).where(eq(asks.id, id));
-    expect(row).toMatchObject({ recommended: '甲', scope: 'task' });
-  });
-
-  it('只给 scope 不给 recommended、或推荐不在选项里：被 asks_scoped_recommendation 拦下', async () => {
-    const { task } = await fixtures();
-    await expectViolation(
-      openEngineAsk(t.db, {
-        id: randomUUID(),
-        taskId: task.id,
-        runId: null,
-        question: '只给了范围',
-        options: ['甲', '乙'],
-        scope: 'task',
-      }),
-      'asks_scoped_recommendation',
-    );
-    await expectViolation(
-      openEngineAsk(t.db, {
-        id: randomUUID(),
-        taskId: task.id,
-        runId: null,
-        question: '推荐不在选项里',
-        options: ['甲', '乙'],
-        recommended: '丙',
-        scope: 'task',
-      }),
-      'asks_scoped_recommendation',
-    );
-  });
-});
 
 describe('listTaskAsks', () => {
   it('按提问先后排序；别的单的不混进来；没填的列是 null', async () => {

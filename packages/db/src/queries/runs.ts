@@ -141,16 +141,6 @@ export async function getRun(db: Db, id: string): Promise<RunRow | null> {
   return row ?? null;
 }
 
-/** 查还没跑的（ended_at 为空的）。 */
-export async function listOpenRuns(db: Db): Promise<RunRow[]> {
-  return db.select().from(runs).where(isNull(runs.endedAt)).orderBy(asc(runs.createdAt));
-}
-
-/** 按 issue 查三段的。 */
-export async function runsOfIssue(db: Db, issueNumber: number): Promise<RunRow[]> {
-  return db.select().from(runs).where(eq(runs.issueNumber, issueNumber)).orderBy(asc(runs.createdAt));
-}
-
 /**
  * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号和工作流编号都对得上的老行（兜底，调用方要标明）。
  * 单号在几个仓里会重：兜底必须靠工作流编号（带着仓名）认；工作流编号也没记的行分不出是哪个仓的，不收——
