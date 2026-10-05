@@ -818,7 +818,7 @@ test('命令行 diff-local：拼车并发超了退出码 1、写明加起来多�
 
 /**
  * 法国期望里「引擎待命」的那一项该有的样子（创始人 2026-10-05：关闭＝进程开着但不接活）：值带 fleet-engine 和 fleet-api，
- * 说明里写清待命是什么、探针的代价、上线要恢复哪几个定时任务，不再留「进程停着」的临时说法。返回哪里不对（空 = 都对）。
+ * 说明里写清待命是什么、探针的代价、上线不用手动恢复定时任务（#1072：定时任务是引擎进程里的定时器），不再留「进程停着」的临时说法。返回哪里不对（空 = 都对）。
  */
 function franceEngineStandbyProblems(desired) {
   const item = desired.files?.['release.env']?.FLEET_SERVICES;
@@ -826,15 +826,17 @@ function franceEngineStandbyProblems(desired) {
   const problems = [];
   if (item.value !== 'fleet-engine fleet-api')
     problems.push(`值是「${item.value}」，不是 fleet-engine fleet-api`);
-  for (const word of ['待命', '路由探针', '2026-10-05', '--unpause', 'canary', 'route-probe']) {
+  for (const word of ['待命', '路由探针', '2026-10-05', '引擎进程里的定时器']) {
     if (!String(item.说明 ?? '').includes(word)) problems.push(`说明里没写「${word}」`);
   }
+  if (String(item.说明 ?? '').includes('--unpause'))
+    problems.push('说明里还留着手动恢复 Temporal 定时任务的 --unpause（#1072 起不用了）');
   if (String(item.说明 ?? '').includes('最迟 2026-10-05 复查'))
     problems.push('说明里还留着「最迟复查」的临时说法');
   return problems;
 }
 
-test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、待命的代价和上线要恢复的定时任务写全；本机档同样带引擎，两边现在一样（创始人 2026-10-05 撤回「进程停着」）', () => {
+test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、待命的代价和「上线不用手动恢复定时任务」写全；本机档同样带引擎，两边现在一样（创始人 2026-10-05 撤回「进程停着」）', () => {
   const france = JSON.parse(readFileSync(FRANCE_DESIRED_FILE, 'utf8'));
   const local = JSON.parse(readFileSync(LOCAL_DESIRED_FILE, 'utf8'));
   assert.deepEqual(franceEngineStandbyProblems(france), []);
@@ -860,8 +862,8 @@ test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、�
   noNote.files['release.env'].FLEET_SERVICES.说明 = '开着';
   assert.equal(
     franceEngineStandbyProblems(noNote).length,
-    6,
-    '说明只写了「开着」：待命、探针代价、日期、unpause、两个定时任务名都缺',
+    4,
+    '说明只写了「开着」：待命、探针代价、日期、定时器说明都缺',
   );
   const oldNote = structuredClone(france);
   oldNote.files['release.env'].FLEET_SERVICES.说明 += '最迟 2026-10-05 复查，没撤回要写明为什么续。';
