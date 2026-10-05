@@ -149,7 +149,8 @@ export interface HookTarget {
  * read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、Cursor 里匹配不到
  * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
  * 第一组还挂了 Agent、Task、Monitor、Workflow：不是要判它们，是起后台活的这一下要记一笔、自动开一个短的无人值守（agents/hooks/unattended.mjs 的
- * armForBackground，创始人 2026-10-04「选 1」），pretool.mjs 见到这几个名字记完就放行。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠无人值守兜底。
+ * armForBackground，创始人 2026-10-04「选 1」），pretool.mjs 见到这几个名字记完就放行。
+ * mcp__mirasim__deliver_artifact、PushNotification 同理：调了它们算「创始人的话送到他手上了」，记一笔清账就放行（unattended.mjs 的 DELIVERY_TOOLS，两边一起改）。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠无人值守兜底。
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
@@ -161,7 +162,8 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
       { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
       {
         event: 'PreToolUse',
-        matcher: 'Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow',
+        matcher:
+          'Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow|mcp__mirasim__deliver_artifact|PushNotification',
         script: 'pretool.mjs',
         timeout: 10,
       },

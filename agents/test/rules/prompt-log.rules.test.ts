@@ -37,7 +37,7 @@ function feed(input: string, env: Record<string, string> = {}) {
   const r = spawnSync(process.execPath, [HOOK], {
     input,
     encoding: 'utf8',
-    env: { ...process.env, FLEET_PROMPT_LOG_DIR: dir, ...env },
+    env: { ...process.env, FLEET_PROMPT_LOG_DIR: dir, FLEET_UNATTENDED_DIR: join(dir, 'unattended'), ...env },
   });
   return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
 }
