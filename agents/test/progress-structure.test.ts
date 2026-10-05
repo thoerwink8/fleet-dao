@@ -1,8 +1,9 @@
-// docs/PROGRESS.md 的骨架（#901 瘦身：历史节归档进 docs/archive/，这个文件只留现在状态）。
-// 为什么要钉：开会话钩子（agents/hooks/session-start.mjs）只认这个文件里两个标题——「## 生效中的临时调整」的表（到期复查）、
-// 「## 创始人引导（待处理）」的条目；标题被改名、被搬进归档页，钩子找不到时是**静默返回空**（等于「没有到期的、没有待办的」），
-// 不会红。所以这里把「两节还在原文件、各一个、钩子读得出来」「归档页里没有这两个标题（否则钩子报「不止一张」）」
-// 「归档目录和归档页对得上（搬走的节找得到）」钉成测试；每一条都配一条故意造出失败的用例。
+// docs/PROGRESS.md 的骨架（2026-10-05 起：进度和创始人引导记在 GitHub 置顶单 #1055，这个文件只剩「生效中的临时调整」表）。
+// 为什么要钉：开会话钩子（agents/hooks/session-start.mjs）只认这个文件里的「## 生效中的临时调整」标题——标题被改名、
+// 被搬进归档页时它是**静默返回空**（等于「没有到期的」），不会红。所以这里把「这一节在原文件、正好一个、表读得出来」
+// 「归档页里没有这个标题（否则钩子报「不止一张」）」「引导节标题不再出现在仓里任何 .md（否则别的仓用的老读法会把它当成待办）」
+// 「指向进度单的那一行还在」钉成测试；每一条都配一条故意造出失败的用例。
+// 搬走前的整份进度原文在 docs/archive/progress-2026-10-05-final.md（一行没删），这里也钉着它还在。
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,6 @@ interface HookLib {
   DIRECTIVE_HEADING: string;
   gitRunner(timeoutMs?: number): Git;
   checkTemporary(cwd: string, git: Git, now?: number): string[];
-  checkDirectives(cwd: string, git: Git): string[];
   parseTempTable(text: string, headingLine: number, today: string): { broken?: string; missing?: string[] };
 }
 
@@ -32,6 +32,7 @@ const hook = (await import(pathToFileURL(join(ROOT, 'agents/hooks/session-start.
 
 const PROGRESS = 'docs/PROGRESS.md';
 const ARCHIVE_DIR = 'docs/archive';
+const FINAL = 'progress-2026-10-05-final.md';
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 const archiveFiles = () =>
   readdirSync(join(ROOT, ARCHIVE_DIR))
@@ -40,58 +41,28 @@ const archiveFiles = () =>
 const archives = () => Object.fromEntries(archiveFiles().map((f) => [f, read(`${ARCHIVE_DIR}/${f}`)]));
 
 const countLine = (text: string, line: string) => text.split('\n').filter((l) => l.trimEnd() === line).length;
-/** 归档页里的节标题（`## ` 开头），不含标题前缀 */
-const archivedHeadings = (arch: Record<string, string>) =>
-  Object.entries(arch)
-    .filter(([f]) => /^progress-2026-\d\d-\d\d\.md$/.test(f))
-    .flatMap(([f, t]) =>
-      t
-        .split('\n')
-        .filter((l) => l.startsWith('## '))
-        .map((l) => ({ file: f, title: l.slice(3).trimEnd() })),
-    );
-
-// 只钉钩子要的结构，不查条目内容（「写着已办却没标已处理」那条内容检查 #934 加的，从没拦下过真问题，
-// 只把一个改两行的进度 PR #1001 拖了 93 分钟，已删）。
 
 /** 返回这份进度文件和归档页对不上的地方；空数组 = 骨架没坏 */
 function problems(progress: string, arch: Record<string, string>): string[] {
   const out: string[] = [];
-  for (const h of [hook.TEMP_HEADING, hook.DIRECTIVE_HEADING]) {
-    const n = countLine(progress, h);
-    if (n !== 1) out.push(`${PROGRESS} 里「${h}」出现 ${n} 次，要正好 1 次（开会话钩子读它）`);
-  }
+  const n = countLine(progress, hook.TEMP_HEADING);
+  if (n !== 1) out.push(`${PROGRESS} 里「${hook.TEMP_HEADING}」出现 ${n} 次，要正好 1 次（开会话钩子读它）`);
   const lines = progress.split('\n');
   const at = lines.findIndex((l) => l.trimEnd() === hook.TEMP_HEADING);
   if (at >= 0) {
     const r = hook.parseTempTable(progress, at + 1, '2026-01-01');
     if (r.broken) out.push(`临时调整表认不出：${r.broken}`);
   }
-  const firstH2 = lines.find((l) => l.startsWith('## '));
-  if (!firstH2?.startsWith('## 现在状态'))
-    out.push(`${PROGRESS} 的第一个「## 」节要是「现在状态」索引，现在是「${firstH2 ?? '没有'}」`);
+  if (!progress.includes('#1055')) out.push(`${PROGRESS} 里没写进度单 #1055（接手的人找不到进度在哪）`);
+  if (countLine(progress, hook.DIRECTIVE_HEADING) > 0)
+    out.push(`${PROGRESS} 里又有了「${hook.DIRECTIVE_HEADING}」：引导记在进度单 #1055，不在这里`);
   for (const [f, t] of Object.entries(arch)) {
-    for (const h of [hook.TEMP_HEADING, hook.DIRECTIVE_HEADING])
-      if (countLine(t, h) > 0)
-        out.push(`${ARCHIVE_DIR}/${f} 里有「${h}」：钩子会当成第二张表 / 第二个引导节`);
-    if (!progress.includes(`docs/archive/${f}`)) out.push(`${PROGRESS} 的归档目录没列 ${ARCHIVE_DIR}/${f}`);
+    if (countLine(t, hook.TEMP_HEADING) > 0)
+      out.push(`${ARCHIVE_DIR}/${f} 里有「${hook.TEMP_HEADING}」：钩子会当成第二张表`);
+    if (countLine(t, hook.DIRECTIVE_HEADING) > 0)
+      out.push(`${ARCHIVE_DIR}/${f} 里有「${hook.DIRECTIVE_HEADING}」：别的仓用的老读法会把它当成待办`);
   }
-  const catalog = new Set(
-    progress
-      .split('\n')
-      .filter((l) => l.startsWith('- '))
-      .map((l) => l.slice(2).trimEnd()),
-  );
-  const archived = archivedHeadings(arch);
-  for (const { file, title } of archived)
-    if (!catalog.has(title)) out.push(`归档目录里找不到 ${file} 的节「${title}」`);
-  const titles = new Set(archived.map((a) => a.title));
-  const afterCatalog = progress.split('\n## 归档目录')[1];
-  if (afterCatalog === undefined) out.push(`${PROGRESS} 没有「## 归档目录」一节`);
-  else
-    for (const l of afterCatalog.split('\n'))
-      if (l.startsWith('- ') && /^- 20\d\d-\d\d-\d\d/.test(l) && !titles.has(l.slice(2).trimEnd()))
-        out.push(`归档目录列了「${l.slice(2).trimEnd()}」，但归档页里没有这一节`);
+  if (!(FINAL in arch)) out.push(`${ARCHIVE_DIR}/${FINAL} 不见了：搬走前的进度原文放在那里`);
   return out;
 }
 
@@ -123,7 +94,7 @@ const GIT = hook.gitRunner(20_000);
 const SLOW = 60_000;
 const NOW = Date.parse('2026-10-05T04:00:00Z');
 
-describe('docs/PROGRESS.md 骨架：钩子读的两节还在、归档对得上', () => {
+describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度记在 #1055', () => {
   const progress = read(PROGRESS);
   const arch = archives();
 
@@ -131,77 +102,57 @@ describe('docs/PROGRESS.md 骨架：钩子读的两节还在、归档对得上',
     expect(problems(progress, arch)).toEqual([]);
   });
 
-  it('归档页真有东西（不是空目录蒙混）：至少四页按日期、一页已处理的引导', () => {
-    expect(
-      archiveFiles().filter((f) => /^progress-2026-\d\d-\d\d\.md$/.test(f)).length,
-    ).toBeGreaterThanOrEqual(4);
+  it('搬走前的进度原文真在归档页里（不是空文件蒙混）：状态、引导、归档目录三节都在', () => {
+    const t = arch[FINAL] ?? '';
+    expect(t).toContain('## 现在状态：在做和下一步');
+    expect(t).toContain('## 创始人引导（待处理，2026-10-05 搬走前原样）');
+    expect(t).toContain('## 归档目录');
+    expect(t.length).toBeGreaterThan(10_000);
     expect(archiveFiles()).toContain('progress-inbox-2026-10.md');
-    expect(archivedHeadings(arch).length).toBeGreaterThanOrEqual(30);
   });
 
   it(
-    '开会话钩子对真文件读得出来：临时调整表认得出、引导节认得出（用真 git grep，不是只看文字）',
+    '开会话钩子对真文件读得出来：临时调整表认得出（用真 git grep，不是只看文字）',
     () => {
       const repo = repoWith(progress, arch);
       const temp = hook.checkTemporary(repo, GIT, NOW);
       expect(temp.filter((l) => /没查成|不止一张|缺列|认不出/.test(l))).toEqual([]);
-      const dir = hook.checkDirectives(repo, GIT);
-      expect(dir.filter((l) => /没查成/.test(l))).toEqual([]);
-      // 引导节真被钩子读到了：有没标「已处理」的条时它会报条数，位置在 docs/PROGRESS.md
-      expect(dir.join('\n')).toMatch(/创始人引导还有 \d+ 条没处理（docs\/PROGRESS\.md:\d+）/);
     },
     SLOW,
   );
 
   it(
-    '【故意造出失败】标题改名、被搬走、搬进归档页都被拦住（钩子自己遇到这些只会静默返回空）',
+    '【故意造出失败】标题改名、被搬进归档页、引导节回到仓里、没指向进度单、归档页丢了原文都被拦住',
     () => {
       const renamed = progress.replace(hook.TEMP_HEADING, '## 临时调整（改过名）');
       expect(problems(renamed, arch).join('\n')).toMatch(/「## 生效中的临时调整」出现 0 次/);
       // 钩子对改名的文件确实静默：这正是要靠这条测试兜的原因
       expect(hook.checkTemporary(repoWith(renamed, arch), GIT, NOW)).toEqual([]);
 
-      const noInbox = progress.replace(hook.DIRECTIVE_HEADING, '## 创始人引导');
-      expect(problems(noInbox, arch).join('\n')).toMatch(/「## 创始人引导（待处理）」出现 0 次/);
-
       const twice = {
         ...arch,
         'progress-2026-10-01.md': `${arch['progress-2026-10-01.md']}\n${hook.TEMP_HEADING}\n`,
       };
-      expect(problems(progress, twice).join('\n')).toMatch(
-        /progress-2026-10-01\.md 里有「## 生效中的临时调整」/,
-      );
+      expect(problems(progress, twice).join('\n')).toMatch(/progress-2026-10-01\.md 里有「## 生效中的临时调整」/);
       expect(hook.checkTemporary(repoWith(progress, twice), GIT, NOW).join('\n')).toMatch(/不止一张/);
 
+      const inboxBack = `${progress.trimEnd()}\n\n${hook.DIRECTIVE_HEADING}\n\n- x\n`;
+      expect(problems(inboxBack, arch).join('\n')).toMatch(/引导记在进度单 #1055，不在这里/);
       const inboxMoved = {
         ...arch,
         'progress-2026-10-03.md': `${arch['progress-2026-10-03.md']}\n${hook.DIRECTIVE_HEADING}\n`,
       };
-      expect(problems(progress, inboxMoved).join('\n')).toMatch(/第二个引导节/);
+      expect(problems(progress, inboxMoved).join('\n')).toMatch(/老读法会把它当成待办/);
+
+      expect(problems(progress.replaceAll('#1055', '#0'), arch).join('\n')).toMatch(/没写进度单 #1055/);
+      const { [FINAL]: _gone, ...without } = arch;
+      expect(problems(progress, without).join('\n')).toMatch(/progress-2026-10-05-final\.md 不见了/);
     },
     SLOW,
   );
 
-  it('【故意造出失败】临时调整表坏了（少了分隔行）、索引不在第一节、归档目录漏列或多列都被拦住', () => {
+  it('【故意造出失败】临时调整表坏了（少了分隔行）被拦住', () => {
     const sep = progress.replace(/\n\|---\|---\|---\|---\|---\|/, '');
     expect(problems(sep, arch).join('\n')).toMatch(/临时调整表认不出/);
-
-    const noIndex = progress.replace('## 现在状态', '## 别的');
-    expect(problems(noIndex, arch).join('\n')).toMatch(/第一个「## 」节要是「现在状态」/);
-
-    const first = archivedHeadings(arch)[0];
-    if (!first) throw new Error('归档页里一个节标题都没有');
-    const dropped = progress.replace(`- ${first.title}\n`, '');
-    expect(problems(dropped, arch).join('\n')).toContain(
-      `归档目录里找不到 ${first.file} 的节「${first.title}」`,
-    );
-
-    const ghost = `${progress.trimEnd()}\n- 2026-01-01 不存在的节\n`;
-    expect(problems(ghost, arch).join('\n')).toMatch(/归档页里没有这一节/);
-
-    const unlisted = { ...arch, 'progress-2026-12-31.md': '# x\n\n## 2026-12-31 新页\n' };
-    expect(problems(progress, unlisted).join('\n')).toMatch(
-      /归档目录没列 docs\/archive\/progress-2026-12-31\.md/,
-    );
   });
 });

@@ -85,10 +85,11 @@ describe('规矩：设计在用户评判的那一层、那个精度上做和验�
  * 没有通道、没有「多久必须落地」。后五条钉住它。
  */
 const PROGRESS_RULES: Record<string, RegExp> = {
-  进度写进进度文件: /进度当场写进进度文件/,
-  给下一个AI看: /下一个接手的 AI 只看得到文件/,
+  进度当场记下来: /进度当场记下来/,
+  给下一个AI看: /下一个接手的 AI 只看得到记下来的/,
+  记在进度单: /fleet-dao 记在 GitHub 置顶单 #1055/,
   放哪要写明: /没有就 `docs\/PROGRESS\.md`/,
-  无人值守每件都落地: /每做完一件就提交、推送、更新进度文件、发我一次/,
+  无人值守每件都落地: /每做完一件就提交、推送、记进度、发我一次/,
   超时拆小: /一件事过了 20 分钟还没有能推的东西，就当场拆小/,
 };
 
@@ -107,26 +108,26 @@ describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', 
   });
 
   it('commander 技能的「报进度」一节也讲了落盘，没有留「只在对话里报」的旧说法', () => {
-    expect(COMMANDER).toMatch(/同时把进度落到文件/);
-    expect(COMMANDER).toMatch(/对话是给现在的他看的，文件是给下一个 AI 看的/);
+    expect(COMMANDER).toMatch(/同时把进度记下来/);
+    expect(COMMANDER).toMatch(/对话是给现在的他看的，记下来的是给下一个 AI 看的/);
     expect(COMMANDER).not.toMatch(/进度就在对话里报/);
   });
 
-  it('【故意造出的失败】把「进度当场写进进度文件」整条删掉：查得出来', () => {
-    const cut = AGENTS.replace(/- 进度当场写进进度文件[^\n]*\n/, '');
+  it('【故意造出的失败】把「进度当场记下来」整条删掉：查得出来', () => {
+    const cut = AGENTS.replace(/- 进度当场记下来[^\n]*\n/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(PROGRESS_RULES, cut)).toEqual(['进度写进进度文件', '给下一个AI看', '放哪要写明']);
+    expect(missing(PROGRESS_RULES, cut)).toEqual(['进度当场记下来', '给下一个AI看', '记在进度单', '放哪要写明']);
   });
 
   it('【故意造出的失败】无人值守那条只剩「做完再说」，落地节奏拿掉：查得出来', () => {
-    const cut = AGENTS.replace(/每做完一件就提交、推送、更新进度文件、发我一次，[^；]*；/, '');
+    const cut = AGENTS.replace(/每做完一件就提交、推送、记进度、发我一次，[^；]*；/, '');
     expect(cut).not.toBe(AGENTS);
     expect(missing(PROGRESS_RULES, cut)).toEqual(['无人值守每件都落地', '超时拆小']);
   });
 
   it('【故意造出的失败】把 commander 退回「进度就在对话里报」：查得出来', () => {
     const cut = COMMANDER.replace(
-      /\*\*同时把进度落到文件\*\*[\s\S]*?对话是给现在的他看的，文件是给下一个 AI 看的。/,
+      /\*\*同时把进度记下来\*\*[\s\S]*?对话是给现在的他看的，记下来的是给下一个 AI 看的。/,
       '进度就在对话里报。',
     );
     expect(cut).not.toBe(COMMANDER);

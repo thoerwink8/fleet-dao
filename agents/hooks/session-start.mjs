@@ -628,6 +628,56 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
   ];
 }
 
+/**
+ * fleet-dao 的创始人引导记在 GitHub 置顶单 #1055（pnpm progress:directive），不在仓里的文件里：这里起
+ * `progress.ts read --pending` 读没处理的几条，硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓仍读自己的
+ * 「## 创始人引导（待处理）」一节，见 checkDirectives）；查不成出一行「没查成」，不挡开会话。
+ * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
+ */
+export const PROGRESS_MS = 8_000;
+const PROGRESS_SCRIPT = join('packages', 'conventions', 'src', 'bin', 'progress.ts');
+const PROGRESS_NOT_CHECKED = '创始人引导（进度单 #1055）没查成';
+
+/** 在仓根起 progress.ts read --pending：{ status, stdout, stderr, error, timeoutMs } */
+export function progressRunner(timeoutMs = PROGRESS_MS) {
+  return (script, repo) => {
+    const r = spawnSync(process.execPath, [script, 'read', '--pending'], {
+      cwd: repo,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
+  };
+}
+
+/** 参数同 checkIdlePrs；返回要说的几行：没有待处理的、不是 fleet-dao 都不出声 */
+export function checkProgressIssue({ cwd, git, run, mirror = null }) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (!ok(top) || !top.stdout.trim()) return [];
+  const root = top.stdout.trim();
+  const url = git(root, ['config', '--get', 'remote.origin.url']);
+  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return [];
+  const script = [mirror, join(root, PROGRESS_SCRIPT)].find((s) => s && existsSync(s));
+  if (!script) return [`${PROGRESS_NOT_CHECKED}：找不到 ${PROGRESS_SCRIPT.replaceAll('\\', '/')}。`];
+  const r = run(script, root);
+  if (r.error || r.status !== 0) return [`${PROGRESS_NOT_CHECKED}：${why(r)}。`];
+  const rows = String(r.stdout)
+    .split(/\r?\n/)
+    .filter((l) => l.trim());
+  const items = rows.map((l) => l.split('\t'));
+  if (items.some((c) => c.length < 3 || !/^\d+$/.test(c[0])))
+    return [`${PROGRESS_NOT_CHECKED}：progress.ts 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
+  if (items.length === 0) return [];
+  const shown = items
+    .slice(0, 5)
+    .map(([id, head, text]) => `${id}（${head.replace(/^【[^】]*】/, '')}）${brief(text.replace(/^原话：/, ''))}`);
+  return [
+    `创始人引导还有 ${items.length} 条没处理（进度单 #1055）：${shown.join('；')}${items.length > 5 ? ' 等' : ''}。先接着办，办完 pnpm progress:done <评论号>；全文 pnpm progress:read。`,
+  ];
+}
+
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
 export function sessionStart({
   cwd,
@@ -640,6 +690,7 @@ export function sessionStart({
   unattendedDir = stateDir(),
   afterMerge = afterMergeRunner(),
   idlePr = idlePrRunner(),
+  progress = progressRunner(),
 }) {
   const here = checkHere(cwd, git);
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
@@ -650,6 +701,12 @@ export function sessionStart({
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
     ...checkDirectives(cwd, localGit),
+    ...checkProgressIssue({
+      cwd,
+      git: localGit,
+      run: progress,
+      mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
+    }),
     ...recentPrompts({ home, now }),
     ...sweepWorktrees(cwd, localGit),
     ...workerLines(home, now),
