@@ -4,19 +4,19 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
 import type { BackendResult } from '../src/backend.ts';
+import { ERROR_NEXT } from '../src/bank.ts';
+import { createJev } from '../src/jev.ts';
+import { DEFAULT_POLICY } from '../src/policy.ts';
+import { defineQuestion, renderPrompt } from '../src/questions.ts';
 import {
   DEDUPE_PAIR,
-  ERROR_NEXT,
   FEISHU_INTENT,
   TRIAGE_CLARITY,
   TRIAGE_GATE,
   TRIAGE_KIND,
   TRIAGE_QUESTIONS,
   TRIAGE_UI,
-} from '../src/bank.ts';
-import { createJev } from '../src/jev.ts';
-import { DEFAULT_POLICY } from '../src/policy.ts';
-import { defineQuestion, renderPrompt } from '../src/questions.ts';
+} from './fixtures.ts';
 import { fakeBackend, HOUR, MODEL, ok } from './helpers.ts';
 
 let t: TestDb;
@@ -262,18 +262,6 @@ describe('真拦中的题漂了：当场退回只记不拦', () => {
     });
   }
 
-  it('考试里漂了也当场退回（不等考完再判，也不怕下一次考试把它洗掉）', async () => {
-    await jevWith().ask(TRIAGE_UI, request, ctx);
-    await setMode('triage-ui', 'enforce');
-    const drifting = fakeBackend(() => ok({ 'triage-ui': ['maybe', 0.99] }));
-    await jevWith(drifting).exam([TRIAGE_UI], request, {
-      runId: 'r1',
-      sampleId: 's1',
-      expect: { 'triage-ui': 'ui' },
-    });
-    expect(await mode()).toBe('shadow');
-  });
-
   it('别的模型漂了不连累钉死的那个：题照旧真拦，不留记录', async () => {
     await jevWith().ask(TRIAGE_UI, request, ctx);
     await setMode('triage-ui', 'enforce');
@@ -417,24 +405,6 @@ describe('每天的上限', () => {
       sample: expect.objectContaining({ tokensEstimated: true, costUsd: expect.any(Number) }),
     });
     expect(thrown?.inputTokens).toBeGreaterThan(0);
-  });
-
-  it('巡检考试另算次数：生产问满了不挡考试，考试按自己的上限数、不占生产的', async () => {
-    await t.db.insert(settings).values([
-      { key: 'judge.dailyCallLimit', value: 1 },
-      { key: 'judge.examDailyCallLimit', value: 2 },
-    ]);
-    const backend = fakeBackend();
-    const jev = jevWith(backend);
-    const exam = async (sampleId: string) =>
-      (await jev.exam([TRIAGE_UI], request, { runId: 'r1', sampleId, expect: { 'triage-ui': 'ui' } }))[0];
-    expect(await jev.ask(TRIAGE_UI, request, ctx)).toMatchObject({ judged: true });
-    expect(await jev.ask(TRIAGE_UI, request, ctx)).toMatchObject({ reason: 'daily_cap' });
-    expect([(await exam('s1'))?.judged, (await exam('s2'))?.judged]).toEqual([true, true]);
-    const capped = await exam('s3');
-    expect(capped).toMatchObject({ judged: false, reason: 'daily_cap' });
-    if (capped && !capped.judged) expect(capped.detail).toContain('因考试每日次数上限没问');
-    expect(backend.calls).toHaveLength(3);
   });
 
   it('订阅内的后端（没有单价）不受花费上限管', async () => {
@@ -759,41 +729,16 @@ describe('写不进库的字与写不进库的时候', () => {
     expect(samples[1]?.refDropped).toContain('circular');
   });
 
-  it('考题编号里有落单的代理项：换成 U+FFFD 照常记进库；补记花费那一行也收得下', async () => {
-    const exam = { runId: 'r1', sampleId: `s${LONE}`, expect: { 'triage-ui': 'ui' } };
-    const [v] = await jevWith().exam([TRIAGE_UI], request, exam);
+  it('subject 里有落单的代理项：换成 U+FFFD 照常记进库；补记花费那一行也收得下', async () => {
+    const lone = { subject: `task:${LONE}` };
+    const v = await jevWith().ask(TRIAGE_UI, request, lone);
     expect(v).toMatchObject({ judged: true });
     const [row] = await rows();
-    expect(row?.subject).toBe(`exam:s${REPLACEMENT}`);
-    expect(row?.sample).toMatchObject({ exam: { runId: 'r1', sampleId: `s${REPLACEMENT}` } });
-    const [lost] = await rejectingAnswers(() => jevWith().exam([TRIAGE_UI], request, exam));
+    expect(row?.subject).toBe(`task:${REPLACEMENT}`);
+    const lost = await rejectingAnswers(() => jevWith().ask(TRIAGE_UI, request, lone));
     expect(lost).toMatchObject({ judged: false, reason: 'store_error' });
     const spendRow = (await rows()).at(-1);
-    expect(spendRow).toMatchObject({ failReason: 'unrecorded', subject: `exam:s${REPLACEMENT}` });
-    expect(spendRow?.sample).toMatchObject({ exam: { runId: 'r1', sampleId: `s${REPLACEMENT}` } });
-  });
-});
-
-describe('考试', () => {
-  it('标准答案记成真值（canary），从不真拦；只问有标准答案的题', async () => {
-    const backend = fakeBackend(() => ok({ 'triage-ui': ['ui', 0.95] }));
-    const jev = jevWith(backend);
-    await jev.ask(TRIAGE_UI, request, ctx);
-    await setMode('triage-ui', 'enforce');
-    const [v] = await jev.exam(TRIAGE_QUESTIONS, request, {
-      runId: 'run-1',
-      sampleId: 'triage-01',
-      expect: { 'triage-ui': 'ui' },
-    });
-    expect(v).toMatchObject({ judged: true, enforced: false, act: 'none' });
-    expect(backend.calls.at(-1)?.questions.map((q) => q.id)).toEqual(['triage-ui']);
-    expect((await rows()).at(-1)).toMatchObject({
-      subject: 'exam:triage-01',
-      shadow: true,
-      truth: 'ui',
-      truthSource: 'canary',
-      sample: expect.objectContaining({ exam: { runId: 'run-1', sampleId: 'triage-01' } }),
-    });
+    expect(spendRow).toMatchObject({ failReason: 'unrecorded', subject: `task:${REPLACEMENT}` });
   });
 });
 

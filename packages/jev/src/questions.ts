@@ -3,17 +3,10 @@
 import { createHash } from 'node:crypto';
 import { type Effect, isEffect } from './effects.ts';
 
-/** 十个接入点（设计文档第十一节的表）。「选哪条路由」不在其中：旧系统里那道题占 64% 的调用、价值最低，不接。 */
+/** 接上的三个接入点（设计文档第十一节）。「选哪条路由」不接：旧系统里那道题占 64% 的调用、价值最低。 */
 export const SITES = {
-  triage: '分诊',
-  dedupe: '查重',
-  'spec-check': '需求文档质检',
-  'delivery-check': '交活核实',
-  'review-grade': '审查意见分级',
   'error-route': '错误分流',
   'stall-check': '停滞预判',
-  'feishu-intent': '飞书消息理解',
-  'daily-digest': '日报挑重点',
   'issue-kind': 'issue 归类',
 } as const;
 export type SiteId = keyof typeof SITES;
@@ -100,7 +93,7 @@ export function checkQuestion(q: QuestionDef): string[] {
   const problems: string[] = [];
   const at = `题 ${q.id}`;
   if (!ID.test(q.id)) problems.push(`${at}：题号要是小写字母、数字、连字符`);
-  if (!(q.site in SITES)) problems.push(`${at}：接入点 ${q.site} 不在十个接入点里`);
+  if (!(q.site in SITES)) problems.push(`${at}：接入点 ${q.site} 不在已接的接入点里`);
   if (!q.title.trim() || !q.instructions.trim()) problems.push(`${at}：题名和题面都要有`);
   if (!q.whenUnsure.trim()) problems.push(`${at}：要写拿不准时的默认走向`);
   if (!(q.confidenceLine > 0 && q.confidenceLine < 1)) problems.push(`${at}：把握线要在 0 和 1 之间`);

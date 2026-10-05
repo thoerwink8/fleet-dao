@@ -1,6 +1,6 @@
-// 题库：十个接入点都有题，每道题写得对，分诊四题能一次问完；不接「选哪条路由」。
+// 题库：引擎真在问的三个接入点都有题，每道题写得对；不接「选哪条路由」。
 import { describe, expect, it } from 'vitest';
-import { BANK, questionsOfSite, TRIAGE_QUESTIONS, TRIAGE_UI } from '../src/bank.ts';
+import { BANK, ISSUE_KIND } from '../src/bank.ts';
 import {
   checkBatch,
   checkQuestion,
@@ -11,22 +11,9 @@ import {
 } from '../src/questions.ts';
 
 describe('题库', () => {
-  it('十个接入点正好是设计文档第十一节那张表，每个都有题', () => {
-    expect(Object.keys(SITES)).toEqual([
-      'triage',
-      'dedupe',
-      'spec-check',
-      'delivery-check',
-      'review-grade',
-      'error-route',
-      'stall-check',
-      'feishu-intent',
-      'daily-digest',
-      'issue-kind',
-    ]);
-    for (const site of Object.keys(SITES) as (keyof typeof SITES)[]) {
-      expect(questionsOfSite(site).length, site).toBeGreaterThan(0);
-    }
+  it('接入点就是引擎真在问的三个，每个都有题', () => {
+    expect(Object.keys(SITES)).toEqual(['error-route', 'stall-check', 'issue-kind']);
+    expect(BANK.map((q) => q.site).sort()).toEqual(Object.keys(SITES).sort());
   });
 
   it('每道题都写得对：题面、选项（带效果和真拦时怎么走）、证据字段、拿不准时的默认走向', () => {
@@ -41,14 +28,9 @@ describe('题库', () => {
     }
   });
 
-  it('分诊四题共用一份证据、可以一次问完', () => {
-    expect(TRIAGE_QUESTIONS.map((q) => q.id)).toEqual(questionsOfSite('triage').map((q) => q.id));
-    expect(checkBatch(TRIAGE_QUESTIONS)).toEqual([]);
-  });
-
   it('写坏的题查得出来', () => {
     const bad = defineQuestion({
-      ...TRIAGE_UI,
+      ...ISSUE_KIND,
       id: 'Bad Id',
       options: [
         { id: 'a', label: 'A', criteria: '甲', effect: 'stop', does: '停' },
@@ -66,31 +48,35 @@ describe('题库', () => {
 
   it('同一次问的几道题，同一个证据字段名字不一样：查得出来', () => {
     const other = defineQuestion({
-      ...TRIAGE_UI,
+      ...ISSUE_KIND,
       id: 'other',
-      evidence: [{ key: 'request', label: '别的名字', required: true }],
+      evidence: [{ key: 'issue', label: '别的名字', required: true }],
     });
-    expect(checkBatch([TRIAGE_UI, other]).join('')).toContain('名字不一样');
+    expect(checkBatch([ISSUE_KIND, other]).join('')).toContain('名字不一样');
   });
 
   it('题目版本：判据或证据字段改一个字 rev 就变；库里存的题面带着每个选项的判据和证据字段', () => {
     const changed = defineQuestion({
-      ...TRIAGE_UI,
-      options: [{ ...TRIAGE_UI.options[0], criteria: '改过的判据' }, TRIAGE_UI.options[1]],
+      ...ISSUE_KIND,
+      options: [
+        { ...ISSUE_KIND.options[0], criteria: '改过的判据' },
+        ISSUE_KIND.options[1],
+        ISSUE_KIND.options[2],
+      ],
     });
-    expect(questionRev(changed)).not.toBe(questionRev(TRIAGE_UI));
-    expect(renderPrompt(TRIAGE_UI)).toContain('- no_ui：');
+    expect(questionRev(changed)).not.toBe(questionRev(ISSUE_KIND));
+    expect(renderPrompt(ISSUE_KIND)).toContain('- feature：');
     // 真拦资格比题面、准确率按 rev 分版本：两边必须一起变，否则只改证据字段时准确率清零、题却照旧真拦。
     const relabeled = defineQuestion({
-      ...TRIAGE_UI,
-      evidence: [{ ...TRIAGE_UI.evidence[0], label: '改过名字' }],
+      ...ISSUE_KIND,
+      evidence: [{ ...ISSUE_KIND.evidence[0], label: '改过名字' }],
     });
-    expect(renderPrompt(relabeled)).not.toBe(renderPrompt(TRIAGE_UI));
-    expect(questionRev(relabeled)).not.toBe(questionRev(TRIAGE_UI));
+    expect(renderPrompt(relabeled)).not.toBe(renderPrompt(ISSUE_KIND));
+    expect(questionRev(relabeled)).not.toBe(questionRev(ISSUE_KIND));
     const optional = defineQuestion({
-      ...TRIAGE_UI,
-      evidence: [{ ...TRIAGE_UI.evidence[0], required: false }],
+      ...ISSUE_KIND,
+      evidence: [{ ...ISSUE_KIND.evidence[0], required: false }],
     });
-    expect(renderPrompt(optional)).not.toBe(renderPrompt(TRIAGE_UI));
+    expect(renderPrompt(optional)).not.toBe(renderPrompt(ISSUE_KIND));
   });
 });

@@ -21,7 +21,7 @@
 - 本机推之前只跑你改到的和新加的测试文件（点名 `npx vitest run <文件…>`，一次一条命令），加格式和类型检查；卫生检查交给推前钩子。不跑 `pnpm test:changed`、不跑整包，其余交给 CI（CI 红了再回来修）。不在本机跑全量 `pnpm check`（几个会话同时跑会拖垮机器）。
 - 后端直接用 Node 22 运行 TypeScript：只写可擦除的类型写法（不用 enum、参数属性、namespace），相对导入带 `.ts` 后缀。
 - 公开仓：账号、组织编号、邮箱、IP 这类标识不算泄漏，不拦。卫生检查（`packages/hygiene`）只拦私钥、令牌、密码这类真密钥，推之前挡（pre-push 钩子；引擎推分支、开单子和 PR 前自己扫）；CI 的 hygiene job 只报不挡。只管 fleet-dao 这一个仓，别的仓按它们自己的标准；认仓写在 `packages/github/src/hygiene-scope.ts`，认不出就报错。真该放行的写进白名单并写明理由。
-- Jev：判断题小模型（TypeSafe 的 System One），代码在 `packages/jev`；见 `docs/design.md` 第十一节。
+- Jev：流程里用来提速的判断环节（TypeSafe 的 System One 答选择题），**不是独立产品**（创始人 2026-10-05「是驾驶舱的流程，而不是独立产品，是服务于整体流程环节的，用来提速」）；代码在 `packages/jev`（引擎和驾驶舱后端都调它，所以留成包），只有错误分流、停滞预判、issue 归类三道题、一律只记不拦；见 `docs/design.md` 第十一节。
 - 改了通用段、`agents/` 下的技能和钩子：合进主线后开会话钩子自己同步到各台机器（经专用检出 `~/.fleet-dao/origin-main`）；要现在同步、看每家结果或第一次装机，跑 `pnpm agents:sync`（`--check` 只读、`--offline` 不取远端）；权限同步见 `docs/agents-permissions.md`；法国跟着自动发布同步（`docs/ops.md` 第九节）。
 - `agents/config/claude-permissions.json` 还管 `autoMode`（随同步装到 `~/.claude/settings.json`）：两个数组都得带 `"$defaults"`，少一个就把那一类内置规则（强推、`curl | bash`、生产发布、防外传）整段换掉，同步工具见到不带就拒收。改它是改标准。
 - 发现问题当场修：已上线的真问题先回退再修；主线坏了（必过检查红）立刻修，修复 PR 写清是哪次合并弄坏的。必过检查分两种（#299）：CI 里跑的必须确定——只看检出来的文件，看单子开关、时间这类外部状态的放进定时任务、只留言不挡 PR；合并闸 `merge-gate` 判红只有两种：改到先审后合路径而当前头上没有通过的 `second-opinion`；引擎任务流程开的 PR（分支 `fleet/<单号>-t<8 位>`）头上没有引擎机器人贴的通过的 `cold-verify`（人手开的 PR 不要）。草稿、冲突 GitHub 自己拦；CI 各项由主线规则集要求必过；别往合并闸里加别的（`merge-gate-inputs.test.ts` 拦）。
