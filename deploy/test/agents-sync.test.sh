@@ -52,11 +52,12 @@ done
 ORIGINAL=$'# 原来的规矩\n- 一条\n'
 printf '%s' "$ORIGINAL" >"$H/.codex/AGENTS.md"
 chown "$U:$U" "$H/.codex/AGENTS.md"
-# 假仓：真的 AGENTS.md 加一个 skill、三个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
+# 假仓：真的 AGENTS.md 和通用段原件（agents/shared-rules.md）加一个 skill、三个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
 # 拦下、settings.json 整份不写——只有 root 读得到，换身份之后才读原件的话，这里就读不到
 R=$T/repo
 mkdir -p "$R/agents/skills/demo" "$R/agents/hooks"
 cp "$REPO/AGENTS.md" "$R/AGENTS.md"
+cp "$REPO/agents/shared-rules.md" "$R/agents/shared-rules.md"
 printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/SKILL.md"
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"

@@ -42,7 +42,7 @@ run() { # 模式 退出码 标准输出 [标准错误]
 printed_has() { grep -cF -- "$1" "$T/printed"; }
 last_red() { if ((${#REDS[@]})); then printf '%s' "${REDS[-1]}"; fi; }
 
-HEAD=$'agents-sync --check（查；alice 的家目录 /home/alice；Linux）\n通用段（AGENTS.md 上半段）\n'
+HEAD=$'agents-sync --check（查；alice 的家目录 /home/alice；Linux）\n通用段（agents/shared-rules.md）\n'
 DRIFT=$'  ✗ ~/.claude/CLAUDE.md：漂移（第 3 行起和仓里不一样）\n'
 TRACE=$'node:internal/modules/cjs/loader:1228\n  throw err;\n  ^\nError: Cannot find module \'/srv/x/main.ts\'\n'
 
