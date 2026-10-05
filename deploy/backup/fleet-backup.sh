@@ -5,7 +5,8 @@
 #   fleet-backup.sh drill   每周：把最近一份从香港取回来，逐个恢复进临时库，核对每张表的行数和各时间列的最新值，删掉临时库
 #   fleet-backup.sh watch   每小时：两台机器的磁盘用量（前两个任务多久没开跑由引擎的看门狗看，这里不重复，#339）
 # 每跑一次在 schedule_runs 记一行（四种结局见 packages/db/src/queries/schedule.ts）；没做成的、查出问题的在 notifications
-# 发报警，好了自动解除。退出码：没做成 1（systemd 隔一会儿重试），其余 0——「查出问题」不算任务失败（docs/reference/deploy.md P12）。
+# 发报警，好了自动解除。退出码：没做成 1（systemd 隔一会儿重试），其余 0——「查出问题」不算任务失败（docs/reference/deploy.md P12）；
+# 但这一轮有报警没发出去（库写不进）也是 1：报警丢了，systemd 再显示成功就没人知道了。
 # 由 deploy/backup/install.sh 装到 /usr/local/lib/fleet-dao/backup/；改这份、再跑一遍装机脚本，别在机器上手改。
 set -uo pipefail
 umask 077
@@ -24,6 +25,8 @@ RUN_UNIT=""
 RUN_NAME=""
 RUN_DONE=0
 CLEANUP=""
+# 这一轮没发出去的报警（标题）：结局照记，但任务退出非 0——备份没做全、报警又写不进库时，systemd 不能显示成功（审查 S6）
+ALERTS_LOST=()
 
 # ── 记账：运行记录与报警 ──
 
@@ -75,6 +78,11 @@ alert_raise() { # 前缀 标题 正文
   return 1
 }
 
+# 发一条报警，没发出去记进 ALERTS_LOST（finish 据此退出非 0）；替 `alert_raise … || true`，报警丢了不能悄悄算没事
+raise_or_note() { # 前缀 标题 正文
+  alert_raise "$@" || ALERTS_LOST+=("$2")
+}
+
 alert_raise_sql() { # 前缀 标题 正文
   bk_sql fleet -v prefix="$1" -v title="$2" -v body="$3" -v run="$RUN_ID" -v link="$BK_LINK" <<'SQL' >/dev/null
 with cur as (
@@ -100,7 +108,9 @@ where starts_with(dedupe_key, :'prefix' || ':') and resolved_at is null;
 SQL
 }
 
-# 收尾：记结局；ok 解除这个任务「没做成」的报警，别的结局发一条（还开着就原地更新）。没做成返回 1。
+# 收尾：记结局；ok 解除这个任务「没做成」的报警，别的结局发一条（还开着就原地更新）。
+# 没做成返回 1；这一轮有报警没发出去（本条或前面的）也返回 1，并往 journal 写一句——不然 partial、一个都没扫到时
+# 报警写不进库，systemd 却显示成功，没人知道备份坏了（审查 S6）。
 finish() { # 结局 扫到 问题 原因
   local outcome=$1 why=$4 title
   run_end "$@" || true
@@ -112,10 +122,14 @@ finish() { # 结局 扫到 问题 原因
     partial) title="${RUN_NAME}有一部分没做成" ;;
     *) title="${RUN_NAME}一个对象都没扫到" ;;
     esac
-    alert_raise "$RUN_JOB:run" "$title" "$why。现场：法国 journalctl -u $RUN_UNIT" || true
+    raise_or_note "$RUN_JOB:run" "$title" "$why。现场：法国 journalctl -u $RUN_UNIT"
     ;;
   esac
   echo "结局 $outcome：${why:-（无）}"
+  if ((${#ALERTS_LOST[@]})); then
+    echo "有 ${#ALERTS_LOST[@]} 条报警没发出去（$(bk_join '；' "${ALERTS_LOST[@]}")）：这一轮按失败退出，免得 systemd 显示成功" >&2
+    return 1
+  fi
   [[ "$outcome" != failed ]]
 }
 
@@ -388,7 +402,7 @@ cmd_drill() {
   if ! restic_ check >/dev/null 2>"$DRILL/err"; then problems+=("香港仓库自检没过：$(tail_of "$DRILL/err")"); fi
   summary="快照 ${snap:0:8}（$when，$age 小时前）：${#BK_DATABASES[@]} 个库恢复并核对了 $verified 个，对不上 $mismatched 个"
   if ((mismatched)); then
-    alert_raise backup.drill:mismatch "恢复演练：恢复出来的和备份时对不上" "$summary。$(bk_join '。' "${details[@]}")" || true
+    raise_or_note backup.drill:mismatch "恢复演练：恢复出来的和备份时对不上" "$summary。$(bk_join '。' "${details[@]}")"
   elif ((verified == ${#BK_DATABASES[@]})); then
     alert_resolve backup.drill:mismatch || true
   fi
@@ -416,8 +430,8 @@ check_disk() { # 机器名 机器键 路径 已用KB 可用KB
   echo "$1 $3：用了 $pct%（已用 $(human "$4")，还剩 $(human "$5")）"
   if ((pct >= FLEET_DISK_ALERT_PERCENT)); then
     WATCH_FOUND=$((WATCH_FOUND + 1))
-    alert_raise "$key" "$1磁盘 $3 用了 $pct%（报警线 $FLEET_DISK_ALERT_PERCENT%）" \
-      "已用 $(human "$4")，还剩 $(human "$5")。线在 $BK_CONFIG 的 FLEET_DISK_ALERT_PERCENT" || true
+    raise_or_note "$key" "$1磁盘 $3 用了 $pct%（报警线 $FLEET_DISK_ALERT_PERCENT%）" \
+      "已用 $(human "$4")，还剩 $(human "$5")。线在 $BK_CONFIG 的 FLEET_DISK_ALERT_PERCENT"
   else
     alert_resolve "$key" || true
   fi
