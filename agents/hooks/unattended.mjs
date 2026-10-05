@@ -16,7 +16,7 @@
 // - 防空转：被挡回去之后，两次挡之间一个工具都没调（PreToolUse 没记到）算「没干活」；连着 3 次就放行并转成 paused，
 //   另有总次数上限；过期时间到了自动关。这几个数不要凭感觉改大——改大等于允许多烧额度。
 // - 钩子里任何一步出错一律放行（只提示），绝不抛、不拦：这里是兜底，不是新的故障点。
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -335,21 +335,53 @@ export function noteFounderPrompt({ dir, sessionId, prompt, now = Date.now() }) 
 }
 
 /**
- * 没欠、读不了、认不出都是 null：这里只管提醒，读不了不当成欠着。
+ * 欠账文件：没有（或会话号认不出、没地方找）是 { ok: true, owed: null }；读不了、不是 JSON、缺 at/preview、时间认不出是
+ * { ok: false, why }——那是坏了，不是「没欠」，调用方要明说（原来一律回 null，「话还没送到」这条提醒悄悄失效，全仓审查第 4 路 S8）。
  * @param {{ dir: string, sessionId: unknown }} opts
- * @returns {Owed | null}
+ * @returns {{ ok: true, owed: Owed | null } | { ok: false, why: string }}
  */
 export function readOwed({ dir, sessionId }) {
+  if (!cleanId(sessionId)) return { ok: true, owed: null };
+  let text;
   try {
-    if (!cleanId(sessionId)) return null;
-    /** @type {unknown} */
-    const o = JSON.parse(readFileSync(owedFile(dir, sessionId), 'utf8'));
-    if (typeof o !== 'object' || o === null || !('at' in o) || !('preview' in o)) return null;
-    if (!Number.isFinite(Date.parse(String(o.at)))) return null;
-    return { at: String(o.at), preview: String(o.preview), nagged: 'nagged' in o && o.nagged === true };
-  } catch {
-    return null;
+    text = readFileSync(owedFile(dir, sessionId), 'utf8');
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return { ok: true, owed: null };
+    return { ok: false, why: `读不了（${errCode(err) ?? messageOf(err) ?? err}）` };
   }
+  /** @type {unknown} */
+  let o;
+  try {
+    o = JSON.parse(text);
+  } catch {
+    return { ok: false, why: '不是 JSON' };
+  }
+  if (typeof o !== 'object' || o === null || !('at' in o) || !('preview' in o))
+    return { ok: false, why: '缺 at 或 preview' };
+  if (!Number.isFinite(Date.parse(String(o.at)))) return { ok: false, why: `时间认不出（${String(o.at)}）` };
+  return {
+    ok: true,
+    owed: { at: String(o.at), preview: String(o.preview), nagged: 'nagged' in o && o.nagged === true },
+  };
+}
+
+/**
+ * 欠账文件坏了：挪到旁边的 .bad（留着查原因，下次不再报同一份），返回一句不拦的提示。挪不动也照样提示。
+ * @param {{ dir: string, sessionId: unknown, why: string }} opts
+ */
+function setAsideOwed({ dir, sessionId, why }) {
+  const file = owedFile(dir, sessionId);
+  let moved = '';
+  try {
+    renameSync(file, `${file}.bad`);
+    moved = `，已挪到 ${file}.bad`;
+  } catch (err) {
+    moved = `，挪不走（${errCode(err) ?? messageOf(err) ?? err}）`;
+  }
+  return (
+    `欠账文件 ${file} 坏了（${why}）${moved}：创始人的话有没有送到他手上核不了。` +
+    '他最近说过话、还没送过东西，就先用 deliver_artifact（没有就 PushNotification）送一句。'
+  );
 }
 
 /** @param {{ dir: string, sessionId: unknown }} opts */
@@ -375,7 +407,7 @@ export function owedLine(owed, now) {
 }
 
 /**
- * 收尾钩子用：挡回去时把欠着的话点名加在前面；放行时清掉（这一轮结束了，最后一条就是答复）。
+ * 收尾钩子用：挡回去时把欠着的话点名加在前面（欠账文件坏了就把「坏了」那句加在前面）；放行时清掉（这一轮结束了，最后一条就是答复）。
  * @param {{ block: true, reason: string } | { block: false, notice?: string }} verdict
  * @param {{ dir: string, sessionId: unknown, now?: number }} opts
  */
@@ -384,15 +416,17 @@ export function withOwed(verdict, { dir, sessionId, now = Date.now() }) {
     clearOwed({ dir, sessionId });
     return verdict;
   }
-  const owed = readOwed({ dir, sessionId });
-  return owed ? { block: true, reason: `${owedLine(owed, now)}\n${verdict.reason}` } : verdict;
+  const r = readOwed({ dir, sessionId });
+  if (!r.ok) return { block: true, reason: `${setAsideOwed({ dir, sessionId, why: r.why })}\n${verdict.reason}` };
+  return r.owed ? { block: true, reason: `${owedLine(r.owed, now)}\n${verdict.reason}` } : verdict;
 }
 
 /**
  * 调工具前钩子用：这次调的是送达类工具就清账；这一轮结束不了（无人值守开着）、话欠了超过 OWED_NAG_MINUTES 又没拦过，
- * 就返回一句话让调用方把这一次工具调用拦下（只拦一次，不困住人）。不抛。
+ * 就返回 { block: true, message } 让调用方把这一次工具调用拦下（只拦一次，不困住人）。
+ * 欠账文件坏了、这一步自己出了错：返回 { block: false, message }，调用方写进 stderr、不拦（不再悄悄回 null，全仓审查第 4 路 S8）。不抛。
  * @param {{ dir: string, sessionId: unknown, tool: unknown, now?: number }} opts
- * @returns {string | null}
+ * @returns {{ block: boolean, message: string } | null}
  */
 export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
   try {
@@ -400,15 +434,24 @@ export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
       clearOwed({ dir, sessionId });
       return null;
     }
-    const owed = readOwed({ dir, sessionId });
+    const read = readOwed({ dir, sessionId });
+    if (!read.ok) return { block: false, message: setAsideOwed({ dir, sessionId, why: read.why }) };
+    const owed = read.owed;
     if (!owed || owed.nagged || now - Date.parse(owed.at) < OWED_NAG_MINUTES * 60_000) return null;
     const r = readState(dir, sessionId);
     if (!r.ok || r.state === null || r.state.state !== 'on' || now > Date.parse(r.state.expiresAt))
       return null;
-    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify({ ...owed, nagged: true })}\n`);
-    return `${owedLine(owed, now)}（这次工具调用先拦下，只拦这一次；送完重发这条命令。）`;
-  } catch {
-    return null;
+    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify({ ...owed, nagged: true })}
+`);
+    return {
+      block: true,
+      message: `${owedLine(owed, now)}（这次工具调用先拦下，只拦这一次；送完重发这条命令。）`,
+    };
+  } catch (err) {
+    return {
+      block: false,
+      message: `「创始人的话还没送到」这条提醒自己出错了（${errCode(err) ?? messageOf(err) ?? err}），这次没核成。`,
+    };
   }
 }
 

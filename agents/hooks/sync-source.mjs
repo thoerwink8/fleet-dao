@@ -17,7 +17,6 @@
 // - 测试：packages/agents-sync/test/sync-source.test.ts（真 git、临时目录）；这条路上每处失败都配一条故意造出来的。
 //
 // 只导出函数和常量，import 的时候不干活：装着它的开会话钩子（~/.fleet-dao/hooks/session-start.mjs）也 import 它。
-import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -30,6 +29,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { gitBroken as broke, gitOk as ranOk, gitRunner, gitWhy as why } from './git-run.mjs';
 
 /** 专用检出放哪：~/.fleet-dao/origin-main（Windows、Linux 一样） */
 export const SYNC_DIR = join('.fleet-dao', 'origin-main');
@@ -37,7 +37,6 @@ export const SYNC_DIR = join('.fleet-dao', 'origin-main');
 export const LOCK_FILE = join('.fleet-dao', 'origin-main.lock');
 /** 拿锁的进程已经不在了，或者锁放了这么久，当成上次崩了留下的 */
 export const LOCK_STALE_MS = 10 * 60_000;
-export const READ_MS = 15_000;
 export const FETCH_MS = 60_000;
 
 const ORIGIN_MAIN = 'refs/remotes/origin/main';
@@ -54,55 +53,8 @@ export function lockFileIn(home) {
   return join(home, LOCK_FILE);
 }
 
-/** git 跑一条命令：{ status, stdout, stderr, error, timeoutMs }。dir 是个目录，git -C 进去跑。 */
-export function gitRunner(timeoutMs = READ_MS) {
-  return (dir, args, opts = {}) => {
-    const timeout = opts.timeoutMs ?? timeoutMs;
-    const r = spawnSync('git', ['-C', dir, ...args], {
-      encoding: 'utf8',
-      timeout,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return {
-      status: r.status,
-      stdout: r.stdout ?? '',
-      stderr: r.stderr ?? '',
-      error: r.error,
-      timeoutMs: timeout,
-    };
-  };
-}
-
-const ranOk = (r) => r.status === 0 && !r.error;
-/**
- * git 自己没跑起来：起不来、超时、没有退出码，或者 Windows 上程序没起来给的那类大退出码（0xC0000xxx）。
- * 和「git 说这里不是仓、没有 origin、没这个 ref」分开：那些 git 是说了话的（0、128 之类的退出码）。
- */
-const broke = (r) =>
-  r.error !== undefined ||
-  typeof r.status !== 'number' ||
-  (r.status !== 0 && r.status !== 128 && r.status > 0x7fffffff);
-
-/**
- * 一条 git 为什么没成：超时、起不来、git 说的第一句，或者 Windows 上程序没起来给的大退出码。
- * （0xC0000135 = 缺 DLL；本机 2026-09-30 撞过，光写十进制看不出来。）
- */
-export function why(r) {
-  if (r.error) {
-    return r.error.code === 'ETIMEDOUT'
-      ? `超过 ${Math.round((r.timeoutMs ?? READ_MS) / 1000)} 秒没完`
-      : `起不来：${r.error.message}`;
-  }
-  const line = `${r.stderr ?? ''}\n${r.stdout ?? ''}`
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .find(Boolean);
-  if (line) return line;
-  if (typeof r.status === 'number' && r.status > 0x7fffffff)
-    return `退出码 ${r.status}（0x${r.status.toString(16).toUpperCase()}，Windows 上程序没起来，多半缺 DLL）`;
-  return `退出码 ${r.status}`;
-}
+/** git 跑一条命令、为什么没成：钩子共用的那一份（git-run.mjs）；pnpm agents:sync（sync-now.ts）和测试从这里拿 */
+export { gitRunner, why };
 
 /** 两个路径说的是不是同一处（Windows 上不认大小写） */
 export function samePath(a, b) {

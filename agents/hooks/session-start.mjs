@@ -21,10 +21,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchWithFallback, withoutProxy } from './fresh-main.mjs';
+import { fetchWithFallback } from './fresh-main.mjs';
+import { gitBroken, gitOk as ok, gitRunner, gitWhy as why } from './git-run.mjs';
+import { logDir } from './prompt-log.mjs';
 import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
-export const FETCH_MS = 15_000;
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
 const ORIGIN_MAIN = 'refs/remotes/origin/main';
@@ -43,20 +44,8 @@ try {
   sourceWhy = err?.message ?? String(err);
 }
 
-/** git 跑一条命令：{ status, stdout, stderr, error } */
-export function gitRunner(timeoutMs = FETCH_MS) {
-  return (cwd, args, opts = {}) => {
-    const r = spawnSync('git', args, {
-      cwd,
-      ...(opts.direct ? { env: withoutProxy() } : {}),
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
-  };
-}
+/** git 跑一条命令：钩子共用的那一份（git-run.mjs）；引导钩子（bootstrap.mjs）和测试从这里拿 */
+export { gitRunner };
 
 /** 用同步专用检出里的 agents-sync 同步这台机器 */
 export function syncRunner(timeoutMs = SYNC_MS) {
@@ -72,34 +61,6 @@ export function syncRunner(timeoutMs = SYNC_MS) {
   };
 }
 
-/** 一次命令为什么没成：超时、起不来，或者输出的第一行 */
-export function why(r) {
-  if (r.error) {
-    if (r.error.code === 'ETIMEDOUT') return `超过 ${Math.round((r.timeoutMs ?? FETCH_MS) / 1000)} 秒没完`;
-    return `起不来：${r.error.message}`;
-  }
-  const first = `${r.stderr ?? ''}\n${r.stdout ?? ''}`
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .find(Boolean);
-  if (first) return first;
-  // Windows 上程序没起来会给 0xC000xxxx 这类很大的退出码（缺 DLL 是 0xC0000135）：光写十进制看不出来
-  if (typeof r.status === 'number' && r.status > 0x7fffffff)
-    return `退出码 ${r.status}（0x${r.status.toString(16).toUpperCase()}，Windows 上程序没起来，多半缺 DLL）`;
-  return `退出码 ${r.status}`;
-}
-
-const ok = (r) => r.status === 0 && !r.error;
-
-/**
- * git 自己没跑起来（起不来、超时、被系统叫停、没有退出码，或者 Windows 上 0xC0000xxx 那一类），
- * 和「git 说这里不是仓」是两回事：git 说话了，不是仓时退出码是 128（或者 0 加一个 false）。前者不能说成后者——
- * 2026-09-30 本机 git 缺 DLL（退出码 3221225781）被说成「不是 git 仓」，把真毛病盖住了。
- */
-export function gitBroken(r) {
-  if (r.error || typeof r.status !== 'number') return true;
-  return r.status !== 0 && r.status !== 128 && r.status > 0x7fffffff;
-}
 const short = (sha) => String(sha).slice(0, 7);
 
 function commonOf(g) {
@@ -498,7 +459,8 @@ export const RECENT_CHARS = 200;
 const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
 
 export function recentPrompts({ home, now = Date.now(), dir = null }) {
-  const base = dir ?? join(home, '.fleet-dao', 'prompt-log');
+  // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份：原来这里不认 FLEET_PROMPT_LOG_DIR（全仓审查第 4 路 R4）
+  const base = dir ?? logDir(process.env, home);
   const days = new Set([beijingToday(now), beijingToday(now - RECENT_MS)]);
   const entries = [];
   for (const day of days) {
@@ -827,12 +789,18 @@ function pidAlive(pid) {
 }
 
 /**
+ * 工人状态目录（相对家目录）。commander 技能的 worker-lib.mjs 另有一份（钩子和技能装在两个目录，互相 import 不了），
+ * agents/test/hooks-shared.test.ts 钉着两边相等。
+ */
+export const WORKERS_REL = join('.fleet-dao', 'workers');
+
+/**
  * 本机独立工人（commander 技能的 worker.mjs 起的，状态在 ~/.fleet-dao/workers/<名字>/meta.json）现在怎样（#1016）。
  * 工人是脱离会话的进程：它被强杀、卡死、做完都不会通知谁，所以由每次开会话都会跑的这里看一眼，不靠工人自己活着来报。
  * 只报要人知道的三种：不在跑了又没交活、跑了很久还没退、做完了没收拾。读不了的记录照实报没查成。
  */
 export function workerLines(home, now = Date.now(), alive = pidAlive) {
-  const root = join(home, '.fleet-dao', 'workers');
+  const root = join(home, WORKERS_REL);
   let names;
   try {
     names = readdirSync(root);
