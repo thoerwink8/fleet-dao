@@ -6,7 +6,7 @@ import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
 import type { Bots } from './deps.ts';
 import { GitHubError } from './errors.ts';
-import { authHeaderConfig, classifyPushFailure, type GitCall, type GitRunner, gitEnv, tail } from './git.ts';
+import { classifyPushFailure, type GitCall, type GitRunner, gitEnv, netGitConfig, tail } from './git.ts';
 import {
   ensureMirror,
   fromGitFailure,
@@ -119,7 +119,7 @@ export async function syncMainline(
     const token = (await deps.client.installationToken('agent', repo, input.signal)).token;
     const net: GitCall = {
       cwd: mirror,
-      env: gitEnv({ base: deps.baseEnv, config: authHeaderConfig(deps.gitHost, token) }),
+      env: gitEnv({ base: deps.baseEnv, config: netGitConfig(deps.gitHost, token, deps.baseEnv) }),
       timeoutMs: NET_TIMEOUT_MS,
     };
     const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv }) };

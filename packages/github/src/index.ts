@@ -82,6 +82,7 @@ export {
   execGit,
   type GitRunner,
   gitEnv,
+  netGitConfig,
 } from './git.ts';
 export {
   createGitHub,

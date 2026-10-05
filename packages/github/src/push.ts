@@ -13,12 +13,12 @@ import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
 import { GitHubError, redact } from './errors.ts';
 import {
-  authHeaderConfig,
   classifyPushFailure,
   type GitCall,
   type GitRun,
   type GitRunner,
   gitEnv,
+  netGitConfig,
   tail,
 } from './git.ts';
 import { guardedByHygiene, redactValues, screenBranchName } from './hygiene-scope.ts';
@@ -127,7 +127,7 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
     const token = (await deps.client.installationToken('agent', repo, input.signal)).token;
     const net: GitCall = {
       cwd: mirror,
-      env: gitEnv({ base: deps.baseEnv, config: authHeaderConfig(deps.gitHost, token) }),
+      env: gitEnv({ base: deps.baseEnv, config: netGitConfig(deps.gitHost, token, deps.baseEnv) }),
       timeoutMs: NET_TIMEOUT_MS,
     };
     const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv }) };

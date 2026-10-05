@@ -5,7 +5,7 @@
 // 一条 core.hooksPath、reference-transaction 钩子、insteadOf 就能把令牌带走。推送在引擎自己的裸仓（镜像）里做，
 // 会话的提交由会话用户打成包（git bundle）交出来、导入镜像：引擎不以自己的身份碰会话的仓（design 十四）。
 import { execFile } from 'node:child_process';
-import { redact } from './errors.ts';
+import { GitHubError, redact } from './errors.ts';
 
 export interface GitRun {
   code: number;
@@ -109,6 +109,40 @@ export function authHeaderConfig(gitHost: string, token: string): [string, strin
     [`http.${prefix}.extraHeader`, ''],
     [`http.${prefix}.extraHeader`, `AUTHORIZATION: basic ${basic}`],
   ];
+}
+
+/**
+ * 引擎连 github.com 出网经的代理（#786）：引擎配置（engine.env，来自这一档期望）里的 FLEET_SESSION_PROXY——本机档是
+ * Windows 上 Clash 的口（WSL 直连 github.com 时通时不通），法国空着＝直连。只认这一项，不认环境里碰巧有的 http_proxy 之类
+ * （同 #731）。认的样子和 packages/adapters/src/env.ts 的 parseSessionProxy、deploy/lib/profile.sh 的 SESSION_PROXY_RE 一样
+ * （同一项登记三边读，改一边另两边跟着改）。写了但认不出就抛错，不悄悄退回直连：那样本机档会在推分支时才时通时不通。
+ * 以一次性配置（http.proxy）给 git，不写进命令行、不落盘。
+ */
+const SESSION_PROXY_SHAPE = /^http:\/\/([A-Za-z0-9.-]+):([0-9]{1,5})\/?$/;
+
+export function sessionProxyConfig(
+  base: Readonly<Record<string, string | undefined>> | undefined,
+): [string, string][] {
+  const raw = (base ?? process.env).FLEET_SESSION_PROXY?.trim();
+  if (!raw) return [];
+  const m = SESSION_PROXY_SHAPE.exec(raw);
+  const port = m ? Number(m[2]) : 0;
+  if (!m?.[1] || port < 1 || port > 65535) {
+    throw new GitHubError(
+      'BAD_SESSION_PROXY',
+      'FLEET_SESSION_PROXY 要写成 http://主机:端口（主机只有字母、数字、点、横线，端口 1–65535，不带账号密码、路径；值不打出来）：不拿直连顶',
+    );
+  }
+  return [['http.proxy', `http://${m[1].toLowerCase()}:${port}`]];
+}
+
+/** 要出网的 git 的一次性配置：机器人令牌的请求头 + 这一档登记的代理（没登记＝直连，一项不加）。 */
+export function netGitConfig(
+  gitHost: string,
+  token: string,
+  base: Readonly<Record<string, string | undefined>> | undefined,
+): [string, string][] {
+  return [...authHeaderConfig(gitHost, token), ...sessionProxyConfig(base)];
 }
 
 export type PushFailure =
