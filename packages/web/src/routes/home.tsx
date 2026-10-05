@@ -7,15 +7,17 @@
 import { CheckCheck, CirclePlay, Hand } from 'lucide-react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
-import { useHome } from '../api/client';
+import { useHome, useNodeHome } from '../api/client';
 import { DecisionCard } from '../components/home/decision-card';
 import { DoneCard } from '../components/home/done-card';
 import { FlowBoard } from '../components/home/flow-board';
 import { HealthStrip } from '../components/home/health-strip';
 import type { HomeData } from '../components/home/types';
+import { RemoteViewProvider, SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { Button } from '../components/ui/button';
+import { useSelectedNodeId } from '../lib/node';
 
 export function meta() {
   return [{ title: brand.title('主页') }];
@@ -24,7 +26,7 @@ export function meta() {
 const MAX_DECISIONS = 3;
 const MAX_DONE = 6;
 
-function HomeBody({ data }: { data: HomeData }) {
+function HomeBody({ data, remote }: { data: HomeData; remote: boolean }) {
   const decisions = data.decisions.slice(0, MAX_DECISIONS);
   const done = data.done.slice(0, MAX_DONE);
   const more = data.decisions.length - decisions.length;
@@ -34,11 +36,14 @@ function HomeBody({ data }: { data: HomeData }) {
       <div className="grid items-start gap-4 2xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)] 2xl:grid-rows-[auto_1fr]">
         <Panel
           title="要你拍的"
-          description="决定、待批。多的去通知中心。"
+          description={remote ? '决定、待批（只读，要去那台上答）。' : '决定、待批。多的去通知中心。'}
           actions={
-            <Button asChild size="sm" variant="ghost" className="h-7">
-              <Link to="/notifications">全部</Link>
-            </Button>
+            // 通知中心读的是本台的库：看远程快照时没有「全部」可去
+            remote ? undefined : (
+              <Button asChild size="sm" variant="ghost" className="h-7">
+                <Link to="/notifications">全部</Link>
+              </Button>
+            )
           }
           className="2xl:col-start-1 2xl:row-start-1"
           bodyClassName="p-3"
@@ -54,11 +59,18 @@ function HomeBody({ data }: { data: HomeData }) {
           )}
           {more > 0 ? (
             <p className="mt-3 px-1 text-xs text-muted-foreground">
-              还有 <span className="num">{more}</span> 条，去
-              <Link to="/notifications" className="underline underline-offset-2">
-                通知中心
-              </Link>
-              看。
+              还有 <span className="num">{more}</span> 条，
+              {remote ? (
+                '要去那台上的通知中心看。'
+              ) : (
+                <>
+                  去
+                  <Link to="/notifications" className="underline underline-offset-2">
+                    通知中心
+                  </Link>
+                  看。
+                </>
+              )}
             </p>
           ) : null}
         </Panel>
@@ -98,15 +110,27 @@ function HomeBody({ data }: { data: HomeData }) {
 }
 
 export default function Home() {
-  const { data: state } = useHome();
+  // 选了远程环境（?node=）就渲染它最近一次推来的快照：同一套组件，只读、链接指向 GitHub、写按钮置灰
+  const nodeId = useSelectedNodeId();
+  const nodeName = useSelectedNodeName();
+  const local = useHome({ enabled: nodeId === null });
+  const remote = useNodeHome(nodeId);
+  const state = nodeId === null ? local.data : remote.data;
 
   return (
     <Page
-      title="主页"
+      title={nodeId === null ? '主页' : `主页 · ${nodeName ?? nodeId}`}
       // 持续状态条放在标题右边：首屏的高度留给要你拍的和流水线，不再单占一行
       actions={state.status === 'data' ? <HealthStrip health={state.data.health} /> : undefined}
       className="max-w-none"
     >
+      {nodeId !== null && remote.node ? (
+        <SnapshotBanner
+          name={remote.node.name}
+          receivedAt={remote.node.receivedAt}
+          reportedAt={remote.node.reportedAt}
+        />
+      ) : null}
       {state.status === 'loading' ? (
         <div className="mt-4">
           <LoadingRows rows={6} />
@@ -120,7 +144,9 @@ export default function Home() {
           <NotBuilt notWired={state.notWired} />
         </div>
       ) : (
-        <HomeBody data={state.data} />
+        <RemoteViewProvider value={nodeId === null ? null : { name: nodeName ?? nodeId }}>
+          <HomeBody data={state.data} remote={nodeId !== null} />
+        </RemoteViewProvider>
       )}
     </Page>
   );

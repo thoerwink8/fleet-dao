@@ -90,6 +90,26 @@ describe('演示版：模块开关', () => {
     );
     expect(await screen.findByText('定时任务的页面')).toBeTruthy();
   });
+
+  test('看板多机的环境切换器演示版没有：顶栏不出切换器，数据层不出 /api/nodes（不露机器名，R10）；带 ?node= 也不变成「只看本台」', async () => {
+    scope(['board', 'schedules']);
+    const api = demoApi();
+    const nodes = vi.spyOn(api, 'nodes');
+    renderApp(
+      <Routes>
+        <Route element={<Shell />}>
+          <Route path="schedules" element={<p>定时任务的页面</p>} />
+        </Route>
+      </Routes>,
+      { api, route: '/schedules?node=wsl' },
+    );
+    expect(await screen.findByText('定时任务的页面')).toBeTruthy();
+    expect(document.querySelector('[data-env-switcher]')).toBeNull();
+    expect(document.querySelector('[data-only-local]')).toBeNull();
+    expect(nodes).not.toHaveBeenCalled();
+    await expect(api.nodes()).rejects.toMatchObject({ code: 'demo_hidden' });
+    await expect(api.node('wsl')).rejects.toMatchObject({ code: 'demo_hidden' });
+  });
 });
 
 describe('演示版：通知里谁在处理', () => {

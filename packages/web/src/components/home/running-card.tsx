@@ -16,11 +16,14 @@ import {
   ShieldQuestion,
   TriangleAlert,
 } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
+import { brand } from '#brand';
 import { formatAgo, formatDuration } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { type Tone, toneBg, toneText } from '../../lib/status';
 import { cn } from '../../lib/utils';
+import { useRemoteView } from '../node-notice';
 import type { HomeRunning } from './types';
 
 const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> = {
@@ -84,9 +87,8 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
     item.segment === null ? SEGMENT_NOT_WIRED : notStarted ? '还没开始对题' : SEGMENT_LABEL[item.segment];
   return (
     <div data-running-card={item.segment} data-needs-founder={founder} className={cn('h-full', className)}>
-      <Link
-        to={item.link}
-        title={item.title}
+      <CardLink
+        item={item}
         className={cn(
           'pointer-events-auto nopan nodrag flex h-full flex-col justify-between gap-1 rounded-lg border bg-card px-3 py-2 text-left shadow-card-edge transition-colors hover:border-border-strong',
           founder && 'border-st-human/50',
@@ -160,7 +162,45 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
         ) : (
           <div className="truncate text-xs text-muted-foreground">最近：还没有三段流水记录</div>
         )}
+      </CardLink>
+    </div>
+  );
+}
+
+/**
+ * 整张卡片是个链接：看本台时进站内的单子详情；看别的环境的快照时站内详情读的是本台的库、对不上，
+ * 改成指向 GitHub 上那张单（新窗口打开），拼不出链接（演示版）就不当链接。
+ */
+function CardLink({
+  item,
+  className,
+  children,
+}: {
+  item: HomeRunning;
+  className: string;
+  children: ReactNode;
+}) {
+  const remote = useRemoteView();
+  if (!remote) {
+    return (
+      <Link to={item.link} title={item.title} className={className}>
+        {children}
       </Link>
+    );
+  }
+  const cut = item.repo.indexOf('/');
+  const href = brand.repoLink(
+    { owner: item.repo.slice(0, cut), name: item.repo.slice(cut + 1) },
+    'issues',
+    item.issueNumber,
+  );
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" title={item.title} className={className}>
+      {children}
+    </a>
+  ) : (
+    <div title={item.title} className={className}>
+      {children}
     </div>
   );
 }

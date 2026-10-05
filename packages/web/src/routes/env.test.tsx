@@ -45,7 +45,9 @@ function envData(
 /** 假后端 + 只换掉 env()：页面的其余读取照常。 */
 function apiWith(data: EnvResponse): MockApi {
   const inner = createMockApi({ live: false });
-  return { ...inner, env: () => Promise.resolve(data) } as MockApi;
+  // 没有远程环境（nodes 空）：这些用例看的是单列的环境页；并排的列在 test/node-switch.test.tsx
+  const nodes = async () => ({ ...(await inner.nodes()), nodes: [] });
+  return { ...inner, env: () => Promise.resolve(data), nodes } as MockApi;
 }
 
 function renderEnv(data: EnvResponse) {
