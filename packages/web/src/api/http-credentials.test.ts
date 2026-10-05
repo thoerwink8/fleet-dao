@@ -11,6 +11,12 @@ const ME = {
   csrfToken: 'tok-1',
   env: { name: '测试机' },
 };
+const CREDS_SET = {
+  hasPassword: true,
+  username: 'founder',
+  passwordChangedAt: null,
+  canSetWithoutCurrent: false,
+};
 const err = (status: number, code: string, message: string, details?: unknown) => ({
   status,
   body: { error: { code, message, ...(details === undefined ? {} : { details }) } },
@@ -220,6 +226,57 @@ describe('改密码的当口：旧 Cookie 的在途请求回来是 401，不能�
     // 改完以后才发的请求：用的是新 Cookie，再回 401 就是真的登录过期
     await api.jobs().catch(() => undefined);
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  test('【故意造出的失败】改密码的 PUT 还在路上时新发的读取：等 PUT 落地、带新 Cookie 再发，不出一条 401（e2e 10-credentials 偶发红）', async () => {
+    let landPut: () => void = () => undefined;
+    const putHeld = new Promise<void>((r) => {
+      landPut = r;
+    });
+    let cookie = 'old';
+    const sent: string[] = [];
+    const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const line = `${init?.method ?? 'GET'} ${String(input)} cookie=${cookie}`;
+      sent.push(line);
+      if (line.startsWith('GET /api/me ')) return new Response(JSON.stringify(ME));
+      if (line.startsWith('PUT ')) {
+        await putHeld;
+        cookie = 'new'; // 响应头里的 Set-Cookie：拿到响应时浏览器已换上新 Cookie
+        return new Response(null, { status: 204 });
+      }
+      return cookie === 'new'
+        ? new Response(JSON.stringify(CREDS_SET))
+        : new Response(JSON.stringify({ error: { code: 'session_revoked', message: '会话已作废' } }), {
+            status: 401,
+          });
+    };
+    const api = createHttpApi({ fetch: fn });
+    const put = api.updateCredentials({ newPassword: 'a-long-new-password', currentPassword: 'old' });
+    await vi.waitFor(() => expect(sent.some((s) => s.startsWith('PUT '))).toBe(true));
+    const read = api.credentials();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent.filter((s) => s.startsWith('GET /api/me/credentials'))).toEqual([]);
+    landPut();
+    await put;
+    await expect(read).resolves.toMatchObject({ hasPassword: true });
+    expect(sent.filter((s) => s.startsWith('GET /api/me/credentials'))).toEqual([
+      'GET /api/me/credentials cookie=new',
+    ]);
+  });
+
+  test('改密码的 PUT 失败（网络断了）：等着的请求照常发出去，不被卡死', async () => {
+    const sent: string[] = [];
+    const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? 'GET';
+      sent.push(`${method} ${String(input)}`);
+      if (method === 'PUT') throw new TypeError('Failed to fetch');
+      return new Response(JSON.stringify(String(input) === '/api/me' ? ME : CREDS_SET));
+    };
+    const api = createHttpApi({ fetch: fn });
+    const put = api.updateCredentials({ newPassword: 'a-long-new-password', currentPassword: 'old' });
+    const read = api.credentials();
+    await expect(put).rejects.toMatchObject({ code: 'network' });
+    await expect(read).resolves.toMatchObject({ hasPassword: true });
   });
 
   test('只改用户名（不动密码、会话没作废）：在途请求回 401 照常算登录过期', async () => {
