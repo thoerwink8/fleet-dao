@@ -345,7 +345,7 @@
     "packages/feishu/test/static.test.ts": 14,
     "packages/feishu/test/watch.test.ts": 1608,
     "packages/github/test/bundle.test.ts": 1261,
-    "packages/github/test/claims.test.ts": 284,
+    "packages/github/test/engine-pulls.test.ts": 284,
     "packages/github/test/client.test.ts": 260,
     "packages/github/test/commit-relation.test.ts": 108,
     "packages/github/test/contents.test.ts": 250,

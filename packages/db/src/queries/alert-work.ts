@@ -1,9 +1,8 @@
 // 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒现算处理状态要的事实（跟进单、挂钩的 PR、静默），
-// 挂跟进单、建和撤静默。判法在 @fleet-dao/core 的 alert-work.ts；把行拼成 core 的样子在 @fleet-dao/api 的 alert-work.ts。
+// 建和撤静默。判法在 @fleet-dao/core 的 alert-work.ts；把行拼成 core 的样子在 @fleet-dao/api 的 alert-work.ts。
 // 改这里之前必须知道：
-// - 挂跟进单两种写法：if_absent（原「提醒派单」开的小单专用，只在没有时写，不覆盖人挂的）、replace（原帅位
-//   `alert claim --issue` 专用，换单记操作记录：原来是哪张、为什么换）。两条调用方都在 #445 删了，函数留着给以后
-//   要挂跟进单的功能用；同一事务里写操作记录。
+// - 跟进单（alert_work）这里只读：挂跟进单的两条路（提醒派单、帅位 `alert claim --issue`）#445 删了，写它的
+//   linkAlertWork 没有调用方，也删了；以后要挂跟进单再加写法。
 // - 静默的到期一律按库的 now() 算（ends_at = now() + 分钟数），不拿各机器的钟；最长 7 天由表约束钉死。
 // - 读不到就抛（连不上库、语句出错），不回空：外壳把它当「没查成」，不当「没人在修」。
 // - 认领账（issue_claims）2026-10-03 起整张删掉（#556，创始人回「选 1」）：这里不再读它、也没有 ClaimRow 了。
@@ -161,82 +160,6 @@ export interface AuditWho {
   actorKind: 'user' | 'ai' | 'engine' | 'agent';
   actorId: string;
   via: 'cockpit' | 'feishu' | 'github' | 'engine' | 'agent';
-}
-
-/**
- * 挂跟进单（#445 起没有产品代码调它了——原「提醒派单」开小单、`alert claim --issue` 换单这两条路都删了，函数留着
- * 给以后的功能用，测试也还拿它搭「已经挂了跟进单」的场景）。if_absent：这条提醒还没有跟进单才写，有了一概不动、
- * 回 kept；replace：换成这一张，和原来一样回 same，不一样的记操作记录（原来是哪张、为什么）。提醒不在回 not_found。
- */
-export async function linkAlertWork(
-  db: Db,
-  input: {
-    notificationId: string;
-    repoId: string;
-    issueNumber: number;
-    source: 'engine' | 'claim';
-    linkedBy: string;
-    note?: string | null | undefined;
-    mode: 'if_absent' | 'replace';
-    audit: AuditWho;
-  },
-): Promise<{
-  result: 'linked' | 'same' | 'kept' | 'not_found';
-  before: { repoId: string; issueNumber: number } | null;
-}> {
-  return db.transaction(async (tx) => {
-    const [alert] = await tx
-      .select({ id: notifications.id })
-      .from(notifications)
-      .where(eq(notifications.id, input.notificationId))
-      .for('update');
-    if (!alert) return { result: 'not_found' as const, before: null };
-    const [existing] = await tx
-      .select()
-      .from(alertWork)
-      .where(eq(alertWork.notificationId, input.notificationId));
-    const before = existing ? { repoId: existing.repoId, issueNumber: existing.issueNumber } : null;
-    if (existing) {
-      if (existing.repoId === input.repoId && existing.issueNumber === input.issueNumber)
-        return { result: 'same' as const, before };
-      if (input.mode === 'if_absent') return { result: 'kept' as const, before };
-    }
-    const values = {
-      notificationId: input.notificationId,
-      repoId: input.repoId,
-      issueNumber: input.issueNumber,
-      source: input.source,
-      linkedBy: input.linkedBy,
-      linkedAt: sql`now()`,
-      note: input.note ?? null,
-    };
-    await tx
-      .insert(alertWork)
-      .values(values)
-      .onConflictDoUpdate({
-        target: alertWork.notificationId,
-        set: {
-          repoId: sql`excluded.repo_id`,
-          issueNumber: sql`excluded.issue_number`,
-          source: sql`excluded.source`,
-          linkedBy: sql`excluded.linked_by`,
-          linkedAt: sql`now()`,
-          note: sql`excluded.note`,
-        },
-      });
-    await tx.insert(auditLog).values({
-      actorKind: input.audit.actorKind,
-      actorId: input.audit.actorId,
-      action: 'alert.link',
-      target: `notification:${input.notificationId}`,
-      before,
-      after: { repoId: input.repoId, issueNumber: input.issueNumber, source: input.source },
-      reason: input.note ?? null,
-      via: input.audit.via,
-      ok: true,
-    });
-    return { result: 'linked' as const, before };
-  });
 }
 
 /** 建一条静默：到期 = 库的 now() + minutes；同一事务记操作记录（alert.silence）。约束不过（前缀太宽、超 7 天）照抛。 */

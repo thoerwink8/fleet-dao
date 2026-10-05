@@ -1,5 +1,5 @@
 // 帅位「开别家模型的会话去干活」的启动器（worker-lib.mjs）：git/gh/pnpm/spawn/进程查杀全部注入假的，
-// home、brief 文件、prompt.txt、meta.json 用真的临时目录（和 seat-claim.test.ts 一个路数）。
+// home、brief 文件、prompt.txt、meta.json 用真的临时目录。
 // 每条失败路径都故意造一遍：工作树已存在、不认识的模型、pnpm install 失败、meta 缺失或损坏、clean 时 PR 没合没关——
 // 都要明说、非 0 退出，不当成没事。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

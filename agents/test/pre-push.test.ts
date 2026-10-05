@@ -1,5 +1,4 @@
 // `.githooks/pre-push` 这个壳：git 给的几行参数原样转交给卫生检查、退出码原样交回。
-// 从 seat-claim.test.ts 搬过来的（#446 把认领账那半删了，这条和认领无关，不能跟着丢）。
 // 判定本身在 packages/hygiene/test/prepush.test.ts（卫生检查）和 packages/conventions/test/prepare-push.test.ts（推前预检）；
 // 这里只钉钩子文件本身怎么接：先卫生检查、再预检，两段的退出码都原样交回，前一段红了后一段不跑。
 import { spawnSync } from 'node:child_process';
