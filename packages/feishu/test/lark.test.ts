@@ -8,7 +8,7 @@ import { createLark, type Lark, sdkDetail } from '../src/lark.ts';
 import { FeishuError } from '../src/port.ts';
 import { A, B, BOT, cardEvent, menuEvent, messageEvent, recallEvent, TEAM } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
-import { memoryLogger, outboxItem, TOKEN, until } from './harness.ts';
+import { memoryLogger, TOKEN, until } from './harness.ts';
 
 interface HttpCall {
   method: string;
@@ -149,8 +149,6 @@ async function start(
     teamChatId: TEAM,
     publicUrl: 'https://cockpit.example.test',
     ackEmoji: 'Get',
-    askBudgetPerDay: 10,
-    boardRefreshMs: 60_000,
   });
   lark.wire(gateway);
   await lark.connect();
@@ -334,25 +332,6 @@ describe('飞书 SDK 这一层', () => {
       { what: '加表情回应', ms: 60 },
       { what: '发消息', ms: 120 },
     ]);
-  });
-
-  it('推送卡发出去时飞书挂住：推送这一轮照样走完（回执 failed，写明超时），不会整个停住', async () => {
-    const s = await start({ 'POST /open-apis/im/v1/messages': hang }, memoryLogger([]), { callMs: 100 });
-    const item = outboxItem();
-    s.backend.on('GET', '/feishu/outbox', {
-      body: { items: [item], quietHours: null, asOf: new Date().toISOString() },
-    });
-    s.backend.on('POST', '/feishu/outbox/acks', { body: { ok: true } });
-    const t0 = Date.now();
-    await s.gateway.outbox.runOnce();
-    expect(Date.now() - t0).toBeLessThan(2_000);
-    const [ack] = s.backend
-      .calls('POST', '/feishu/outbox/acks')
-      .flatMap((r) => (r.body as { acks: never[] }).acks);
-    expect(ack).toMatchObject({
-      itemId: 'ask:1',
-      result: { status: 'failed', error: expect.stringContaining('没回应') },
-    });
   });
 
   it('SDK 报错的日志里没有请求体（发出去的卡片里有创始人的原话），只留定位要的几项', async () => {

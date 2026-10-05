@@ -1,11 +1,9 @@
-// 不跑代码也能查的：往飞书发东西只有一个出口、推送只走推送出口、样例里没有真凭据、
-// 跟别的包约好的名字（请求头、驾驶舱页面）还对得上、时间预算加起来守得住设计目标。
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+// 不跑代码也能查的：往飞书发东西只有一个出口、样例里没有真凭据、
+// 跟别的包约好的名字（请求头）还对得上、时间预算加起来守得住设计目标、#1022 删掉的旧接口不再有人调。
+import { readdirSync, readFileSync } from 'node:fs';
 import * as shared from '@fleet-dao/shared';
-import { FEISHU_GATEWAY_WEB_ROUTES, FEISHU_UNDERSTAND_MS, FeishuRoutes, WebRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { ACTING_HEADER } from '../src/backend.ts';
-import { COCKPIT_PATHS } from '../src/cards.ts';
 import { DEFAULT_TIMING, TARGET_ACK_MS } from '../src/gateway.ts';
 
 const pkg = new URL('../', import.meta.url);
@@ -23,15 +21,7 @@ describe('静态检查', () => {
     expect(touching).toEqual(['lark.ts']);
   });
 
-  it('三类推送 + 关注 + 追问只走推送出口（outbox.ts）：别处不画推送卡、不发超预算提醒', () => {
-    const drawing = sources
-      .filter((s) => /\boutboxCard\(|\bbudgetAlertCard\(/.test(s.text))
-      .map((s) => s.file)
-      .sort();
-    expect(drawing).toEqual(['cards.ts', 'outbox.ts']);
-  });
-
-  it('网关自己的报警（调不通后端）只在看守（watch.ts）里画、发：不混进推送出口，推送出口也不发它', () => {
+  it('网关自己的报警（调不通后端）只在看守（watch.ts）里画、发', () => {
     const drawing = sources
       .filter((s) => /\blinkAlertCard\(/.test(s.text))
       .map((s) => s.file)
@@ -87,30 +77,11 @@ describe('静态检查', () => {
     },
   );
 
-  it('网关要用的驾驶舱接口都在路由表里', () => {
-    for (const name of FEISHU_GATEWAY_WEB_ROUTES) expect(WebRoutes[name]).toBeDefined();
-  });
-
-  it('每条飞书接口都标清了 acting：只有网关自己的后台活（盘面、待推送、回执、登记卡片）不带代表人', () => {
-    const table = Object.entries(FeishuRoutes).map(([name, r]) => [name, r.acting] as const);
-    expect(table.every(([, acting]) => acting === 'required' || acting === 'none')).toBe(true);
-    expect(
-      table
-        .filter(([, acting]) => acting === 'none')
-        .map(([name]) => name)
-        .sort(),
-    ).toEqual(['ackOutbox', 'board', 'outbox', 'putCard']);
-    expect(table).toHaveLength(9);
-  });
-
-  const webRoutes = new URL('../../web/src/routes.ts', pkg);
-  it.skipIf(!existsSync(webRoutes))('卡片直达的驾驶舱页面在前端的路由表里（前端合进来之前跳过）', () => {
-    const routes = read(webRoutes);
-    // overview 常量是 '/'（主页）：主页是 index 路由，不是具名 route('...')
-    expect(COCKPIT_PATHS.overview).toBe('/');
-    expect(routes).toContain("index('routes/home.tsx'");
-    expect(routes).toContain(`route('${COCKPIT_PATHS.notifications.slice(1)}'`);
-    expect(routes).toContain("route('tasks/:taskId'");
+  it('#1022 删掉的旧接口（旧推送、盘面、卡片登记、草稿、查进度、关注）网关源码里一条都不提，shared 里也没有它们的路由表', () => {
+    const retired = /\/feishu\/(outbox|board|cards\/|drafts|follows|tasks|messages)|FeishuRoutes/;
+    const mentioning = sources.filter((s) => retired.test(s.text)).map((s) => s.file);
+    expect(mentioning).toEqual([]);
+    expect((shared as Record<string, unknown>).FeishuRoutes).toBeUndefined();
   });
 
   it('时间预算守得住：转后端 5 秒（方案 5.4）之内回来，「收到」2 秒内加上', () => {
@@ -118,8 +89,6 @@ describe('静态检查', () => {
     expect(DEFAULT_TIMING.intakeMs).toBe(5_000);
     // 「收到」还是 2 秒的目标（design 15.4）：转后端比它慢没关系，表情是另外一步。
     expect(DEFAULT_TIMING.intakeMs).toBeGreaterThanOrEqual(TARGET_ACK_MS);
-    // 后端答应 FEISHU_UNDERSTAND_MS 内回（那条口还在）；网关自己按 5 秒算，别比后端答应的还短。
-    expect(DEFAULT_TIMING.intakeMs).toBeLessThanOrEqual(FEISHU_UNDERSTAND_MS);
   });
 
   it('旧的菜单 event_key 已经从样例配置里删掉（菜单停用了，开发者后台也该删）', () => {
