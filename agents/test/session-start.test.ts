@@ -47,7 +47,9 @@ interface HookLib {
     sync: Sync;
     localGit?: Git;
     now?: number;
+    env?: Record<string, string | undefined>;
   }): string[];
+  RECENT_TOTAL_CHARS: number;
   checkTemporary(cwd: string, git: Git, now?: number): string[];
   checkDirectives(cwd: string, git: Git): string[];
   sweepWorktrees(cwd: string, git: Git, now?: number): string[];
@@ -590,6 +592,38 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（PROGRESS\.md/);
     expect(lines.at(-1)).toMatch(/^规矩同步/);
   });
+
+  it('工人（FLEET_WORKER=1）开场只留规矩同步：不出创始人引导、临时调整、他最近的话、工作树清单、工人状态；不带它的会话照旧都出', () => {
+    const w = world();
+    writeFileSync(
+      join(w.work, 'PROGRESS.md'),
+      `${plan(subagent)}\n## 创始人引导（待处理）\n\n- 04:42 「坏的要删」\n`,
+    );
+    g(w.work, 'add', '-A');
+    g(w.work, 'commit', '-q', '-m', 'progress');
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    // 工人状态目录里放一个不在跑的工人：普通会话会提醒，工人会话不该看到
+    const dir = join(w.home, '.fleet-dao', 'workers', 'gone');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'meta.json'),
+      JSON.stringify({
+        name: 'gone',
+        pid: 2147483000,
+        startedAt: '2026-10-05T01:00:00Z',
+        worktree: '/w/gone',
+      }),
+    );
+    const base = { cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW };
+    const normal = hook.sessionStart({ ...base, env: {} }).join('\n');
+    expect(normal).toContain('创始人引导还有 1 条没处理');
+    expect(normal).toContain('临时调整到了最迟复查日期');
+    expect(normal).toContain('工人 gone');
+
+    const lines = hook.sessionStart({ ...base, env: { FLEET_WORKER: '1' } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^规矩同步/);
+  });
 });
 
 describe('会话所在仓的「创始人引导（待处理）」清单', SLOW, () => {
@@ -1117,7 +1151,7 @@ describe('创始人最近落盘的话（上一个会话没送到的，新会话�
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${day}.jsonl`), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
   };
-  const recent = (o: { home: string; now?: number; dir?: string | null }) =>
+  const recent = (o: { home: string; now?: number; dir?: string | null; sessionId?: string | null }) =>
     (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts(o);
 
   it('最近 1 小时内的话列出来，带北京时间；更早的、将来的不列', () => {
@@ -1144,7 +1178,7 @@ describe('创始人最近落盘的话（上一个会话没送到的，新会话�
     expect(recent({ home, now })[0]).toContain('北京 23:50 那条');
   });
 
-  it('只列最后 5 条，每条截到 200 字', () => {
+  it('不再限最后 5 条：本会话没见过的全列，每条截到 200 字', () => {
     const home = temp('rp-home');
     const rows = Array.from({ length: 8 }, (_, i) => ({
       at: new Date(NOW - (8 - i) * 60_000).toISOString(),
@@ -1152,11 +1186,69 @@ describe('创始人最近落盘的话（上一个会话没送到的，新会话�
     }));
     rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', rows);
     const [line] = recent({ home, now: NOW });
-    expect(line).toContain('共 8 条，列最后 5 条');
-    expect(line).not.toContain('第2条');
-    expect(line).toContain('第3条');
+    expect(line).toContain('共 8 条；');
+    for (const i of [0, 1, 2, 3, 4, 5, 6]) expect(line).toContain(`第${i}条`);
     expect(line).toContain(`${'x'.repeat(200)}……`);
     expect(line).not.toContain('x'.repeat(201));
+  });
+
+  it('总字数封顶：超了留最新的、写明封顶只列几条；再长的最新一条也留着', () => {
+    const home = temp('rp-home');
+    // 每条截断后 200 字 + 前缀，3000 封顶装不下 20 条
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      at: new Date(NOW - (20 - i) * 60_000).toISOString(),
+      prompt: `${String(i).padStart(2, '0')}${'字'.repeat(300)}`,
+    }));
+    rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', rows);
+    const [line] = recent({ home, now: NOW });
+    expect(line).toMatch(/共 20 条，字数封顶只列最新 (\d+) 条/);
+    const shown = Number(/只列最新 (\d+) 条/.exec(line ?? '')?.[1]);
+    expect(shown).toBeGreaterThan(5);
+    expect(shown).toBeLessThan(20);
+    expect(line).toContain('19字'); // 最新的在
+    expect(line).not.toContain('［19:10］00字'); // 最早的被封顶挤掉
+    expect((line ?? '').length).toBeLessThan(hook.RECENT_TOTAL_CHARS + 400);
+  });
+
+  it('本会话自己落盘的话不再列（它早见过）；别的会话的照列', () => {
+    const home = temp('rp-home');
+    rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', [
+      { at: '2026-10-04T11:20:00Z', sessionId: 'other', prompt: '别的会话里他说的话' },
+      { at: '2026-10-04T11:25:00Z', sessionId: 'me', prompt: '本会话里他说过的话' },
+    ]);
+    const line = recent({ home, now: NOW, sessionId: 'me' }).join('\n');
+    expect(line).toContain('别的会话里他说的话');
+    expect(line).not.toContain('本会话里他说过的话');
+    expect(line).toContain('共 1 条');
+  });
+
+  it('机器派的会话的提示不算他的话：第二意见、反方、工人工作树和第二意见树里起的会话（10-05 之前已落盘的也滤掉）；真话不被挤出', () => {
+    const home = temp('rp-home');
+    rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', [
+      { at: '2026-10-04T11:10:00Z', prompt: '创始人真说的话', cwd: 'D:\\frank\\fleet-dao' },
+      {
+        at: '2026-10-04T11:21:00Z',
+        prompt: '你是 PR #1056 的「第二意见」：一个全新会话，独立判断。',
+        cwd: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\second-opinion',
+      },
+      { at: '2026-10-04T11:22:00Z', prompt: '你是「反方」：一个全新会话，另一家模型。', cwd: 'D:\\x' },
+      {
+        at: '2026-10-04T11:23:00Z',
+        prompt: '派活的交代：在 _tmp 写一行 hi',
+        cwd: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\w-speed-a',
+      },
+      {
+        at: '2026-10-04T11:24:00Z',
+        prompt: '第二意见树里的会话说的话',
+        cwd: '/r/.claude/worktrees/second-opinion-2',
+      },
+      { at: '2026-10-04T11:25:00Z', prompt: '创始人又说的一句话', cwd: '/r/.claude/worktrees/939-drop-asks' },
+    ]);
+    const line = recent({ home, now: NOW }).join('\n');
+    expect(line).toContain('共 2 条；');
+    expect(line).toContain('创始人真说的话');
+    expect(line).toContain('创始人又说的一句话');
+    for (const bad of ['第二意见', '反方', '派活的交代', '第二意见树里']) expect(line).not.toContain(bad);
   });
 
   it('没有文件、没有最近的话：不出声；坏的一行跳过、不连累别的', () => {

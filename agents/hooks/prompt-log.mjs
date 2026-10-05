@@ -20,7 +20,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { noteFounderPrompt, stateDir } from './unattended.mjs';
+import { isMachineOpening, isMachineSession, noteFounderPrompt, stateDir } from './unattended.mjs';
 
 /** 落盘目录；测试给 FLEET_PROMPT_LOG_DIR 覆盖。 */
 export function logDir(env = process.env, home = homedir()) {
@@ -90,6 +90,9 @@ export function run({ stdin = '', env = process.env, now = Date.now() } = {}) {
   } catch {
     return { ok: false, why: '入参不是 JSON' };
   }
+  // 机器派的会话（工人、第二意见、反方）的提示不是创始人的话：不落盘，免得开会话列「创始人最近的话」时把真话挤出去
+  if (isMachineSession({ env, cwd: input?.cwd }) || isMachineOpening(input?.prompt))
+    return { ok: true, skipped: true };
   // 顺手记一笔「他的话到了、还没送达」（只写一个状态文件，照旧不出声；为什么要记见 unattended.mjs「创始人的话到了」那段）
   noteFounderPrompt({ dir: stateDir(env), sessionId: input?.session_id, prompt: input?.prompt, now });
   return appendEntry(entryFrom(input, now), { dir: logDir(env), now });

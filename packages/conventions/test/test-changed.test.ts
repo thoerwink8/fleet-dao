@@ -87,10 +87,6 @@ function run(
   return { code, out, err, vitestCalls };
 }
 
-/** 拒跑时打出来让人跑的那条命令里的过滤（缩进开头、`pnpm exec vitest run` 起头的那一行）。 */
-const refusedList = (err: readonly string[]) =>
-  err.flatMap((l) => /^\s+pnpm exec vitest run (.+)$/.exec(l)?.[1]?.split(' ') ?? []);
-
 describe('改了哪些文件', () => {
   it('提交了的（和 origin/main 分叉以来，三个点）+ 暂存 + 没暂存 + 没跟踪，去重排序；-z 原样读中文名和空格', () => {
     const { git, calls } = fakeGit({
@@ -425,8 +421,11 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
   });
 });
 
-describe('要全跑时本机不跑：写明原因和本机先跑的那一条命令，退出码 3（全量交给 CI）', () => {
-  it('【故意造出的情形】要全跑、本机、没带 --all：一个测试都不跑，退出码 3，写明原因、本机先跑的那一条命令、怎么真全跑', () => {
+describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教人单跑对应包，退出码 3（#1066）', () => {
+  /** 拒跑的提示里不许再出现教人单跑的命令。 */
+  const teachesSingleRun = (err: readonly string[]) => err.some((l) => /vitest run/.test(l));
+
+  it('【故意造出的情形】要全跑、本机、没带 --all：一个测试都不跑，退出码 3，写明原因、交给 CI、怎么真全跑；不教单跑对应包', () => {
     const r = run([
       'pnpm-lock.yaml',
       'packages/api/src/cli.ts',
@@ -440,62 +439,50 @@ describe('要全跑时本机不跑：写明原因和本机先跑的那一条命�
     expect(r.out.some((l) => l.startsWith('- pnpm-lock.yaml：'))).toBe(true);
     expect(r.err[0]).toContain('要全跑');
     expect(r.err[0]).toContain('全量交给 CI');
-    // 先跑的就一条命令，照 CI 那套判法：改到的 api（没有包依赖它：#865 之后引擎不再依赖 api）、skill 带上的 agents 和
-    // agents-sync、shared 自己，再加 CI 每次都跑的那两份
-    expect(refusedList(r.err).sort()).toEqual(
-      ['agents/', 'packages/agents-sync/', 'packages/api/', 'packages/shared/', ...ALWAYS_TESTS].sort(),
-    );
-    expect(r.err.filter((l) => /^\s+pnpm exec vitest run /.test(l))).toHaveLength(1);
+    expect(r.err[1]).toContain('其余交给 CI，红了再回来修');
+    expect(teachesSingleRun(r.err)).toBe(false);
+    expect(r.err.join('\n')).not.toContain('单跑');
     expect(r.err).toContain('真要在本机全跑：pnpm test:changed --all');
     expect(r.err.at(-1)).toContain('退出码 3（不是测试没过）');
   });
 
-  it('改了 shared：先跑 shared 自己和 CI 每次都跑的 agents/test/、doc-pointers（#728 就红在 agents/test/ 里）；依赖 shared 的写出来、留给 CI', () => {
+  it('改了 shared：依赖 shared 的写出来、留给 CI 全跑去测；不再给本机先跑的清单', () => {
     const r = run(['packages/shared/src/domain.ts']);
     expect(r.code).toBe(REFUSED_FULL_RUN);
-    const list = refusedList(r.err);
-    expect(list).toContain('agents/test/');
-    expect(list).toContain('packages/conventions/test/doc-pointers.test.ts');
-    expect([...list].sort()).toEqual(['packages/shared/', ...ALWAYS_TESTS].sort());
-    // 依赖 shared 的（依赖图里直接间接依赖它的，加上测试读它们的）一个不少写出来，不塞进本机那条命令；
+    // 依赖 shared 的（依赖图里直接间接依赖它的，加上测试读它们的）一个不少写出来；
     // agents 不在依赖图里，它的测试读 db 的路由骨架（ci-plan.ts 的 TEST_READS），db 依赖 shared，所以也在里面
     const users = [
       ...[...dependentsClosure(graph(), ['shared'])].filter((u) => u !== 'shared'),
       'agents',
     ].sort();
     expect(users.length).toBeGreaterThan(5);
-    expect(r.err).toContain(
-      `依赖 shared 的也要跑——本机不逐个跑，CI 全跑会测到：${users.join('、')}（想先在本机测哪个：pnpm exec vitest run packages/<包>/）`,
-    );
+    expect(r.err).toContain(`依赖 shared 的也要跑——本机不逐个跑，CI 全跑会测到：${users.join('、')}`);
+    expect(r.err.join('\n')).not.toContain('packages/<包>/');
   });
 
-  it('db 和锁文件一起改：db 和依赖它的照 CI 那套判法进本机那条命令（和只改 db 时 test:changed 自己跑的一样），不另列留给 CI 的', () => {
+  it('db 和锁文件一起改：db 和依赖它的本来就在「本机不跑」里，不另列留给 CI 的依赖行', () => {
     const r = run(['pnpm-lock.yaml', 'packages/db/src/schema/index.ts']);
     expect(r.code).toBe(REFUSED_FULL_RUN);
-    const alone = selectTests(['packages/db/src/schema/index.ts'], GRAPH);
-    if (alone.kind !== 'some') throw new Error('只改 db 本该不全跑');
-    expect(refusedList(r.err).sort()).toEqual([...alone.paths].sort());
-    expect(refusedList(r.err)).toEqual(
-      expect.arrayContaining(['packages/db/', 'packages/api/', 'packages/engine/', 'packages/jev/']),
-    );
+    expect(r.vitestCalls).toEqual([]);
     expect(r.err.some((l) => l.startsWith('依赖 '))).toBe(false);
+    expect(teachesSingleRun(r.err)).toBe(false);
   });
 
-  it('只改了根配置：照样不跑、退出码 3；没改到哪个包，先跑的就是 CI 每次都跑的那两份', () => {
+  it('只改了根配置：照样不跑、退出码 3、交给 CI', () => {
     const r = run(['vitest.config.ts']);
     expect(r.code).toBe(REFUSED_FULL_RUN);
     expect(r.vitestCalls).toEqual([]);
-    expect(r.err).toContain(`  pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
+    expect(r.err[1]).toContain('其余交给 CI');
     expect(r.err.some((l) => l.startsWith('依赖 '))).toBe(false);
   });
 
-  it('【故意造出的失败】依赖图读不出：照 CI 全跑（本机拒跑），先跑改到的包和 CI 每次都跑的那两份，写明依赖它的算不出来、不当成没人依赖', () => {
+  it('【故意造出的失败】依赖图读不出：照 CI 全跑（本机拒跑），写明依赖它的算不出来、不当成没人依赖', () => {
     const r = run(['packages/api/src/cli.ts'], { graph: '读不到 packages/api/package.json' });
     expect(r.code).toBe(REFUSED_FULL_RUN);
-    expect(refusedList(r.err).sort()).toEqual(['packages/api/', ...ALWAYS_TESTS].sort());
     expect(r.err).toContain(
       '包依赖图读不出（读不到 packages/api/package.json），依赖改到的包的算不出来：CI 全跑会测到。',
     );
+    expect(teachesSingleRun(r.err)).toBe(false);
   });
 
   it('带 --all：本机全跑（vitest run 不带过滤），退出码照 vitest 的', () => {
@@ -586,9 +573,8 @@ describe('CI 每次都跑的测试：test:changed 给出的清单一定包含（
     const got = new Set(filesOf(list));
     return filesOf(CI_ALWAYS).filter((f) => !got.has(f));
   };
-  /** test:changed 给出的清单：跑了的是交给 vitest 的过滤，拒跑的是它打出来让人跑的那条命令里的。 */
-  const listOf = (r: ReturnType<typeof run>) =>
-    r.vitestCalls.length > 0 ? r.vitestCalls.flatMap((args) => args.slice(1)) : refusedList(r.err);
+  /** test:changed 给出的清单：跑了的是交给 vitest 的过滤；拒跑的什么都不跑、也不再打清单（全量交给 CI，#1066），所以是空的。 */
+  const listOf = (r: ReturnType<typeof run>) => r.vitestCalls.flatMap((args) => args.slice(1));
 
   it('从 ci.yml 读得出来，正好就是 ALWAYS_TESTS（多一份、少一份都红），每一份都跑得到真测试文件', () => {
     expect(CI_ALWAYS.length, 'ci.yml 里一处每次都跑的测试都没读到：这里查的东西不在了').toBeGreaterThan(0);
@@ -603,7 +589,7 @@ describe('CI 每次都跑的测试：test:changed 给出的清单一定包含（
   });
 
   // 每种走法各一个：没改动、只改文档、改一个包、改 skill（只跑选中的）；shared、锁文件、CI 工作流、deploy/、夹具、
-  // 认不出的路径、shared 和别的包一起改、依赖图读不出（拒跑，看它打出来的那条命令）
+  // 认不出的路径、shared 和别的包一起改、依赖图读不出（拒跑：一个测试都不跑，CI 每次都跑的那几份由 CI 自己跑）
   const CASES: { changed: string[]; graph?: string; code: number }[] = [
     { changed: [], code: 0 },
     { changed: ['docs/design.md'], code: 0 },
@@ -623,18 +609,22 @@ describe('CI 每次都跑的测试：test:changed 给出的清单一定包含（
     },
   ];
 
-  it('不管改了什么、跑还是拒跑，给出的清单都跑得到 CI 每次都跑的那几份', () => {
+  it('跑的时候，给出的清单都跑得到 CI 每次都跑的那几份；拒跑的一个测试都不跑（CI 自己跑那几份）', () => {
     for (const c of CASES) {
       const r = run(c.changed, c.graph === undefined ? {} : { graph: c.graph });
       const label = `${c.changed.join(' ') || '（没改动）'}${c.graph === undefined ? '' : `（${c.graph}）`}`;
       expect(r.code, label).toBe(c.code);
+      if (c.code === REFUSED_FULL_RUN) {
+        expect(r.vitestCalls, label).toEqual([]);
+        continue;
+      }
       expect(listOf(r).length, label).toBeGreaterThan(0);
       expect(uncovered(listOf(r)), label).toEqual([]);
     }
   });
 
-  it('【故意造出的失败】从拒跑打出的清单里摘掉 CI 每次都跑的任一份：报出来的正好是那一份的测试文件，不是空、也不是别的', () => {
-    const list = listOf(run(['packages/shared/src/domain.ts']));
+  it('【故意造出的失败】从清单里摘掉 CI 每次都跑的任一份：报出来的正好是那一份的测试文件，不是空、也不是别的', () => {
+    const list = listOf(run(['packages/cli/src/help.ts']));
     expect(uncovered(list)).toEqual([]);
     for (const drop of CI_ALWAYS) {
       const cut = list.filter((p) => p !== drop);

@@ -1,8 +1,8 @@
 // pnpm test:changed 的入口：算这次改了什么、选要跑的测试、交给 vitest 跑（判法和整段流程在 ../test-changed.ts 的 testChanged）。
 //   node packages/conventions/src/bin/test-changed.ts [--all]
 // 只收 --all：跑哪些由改动决定，加过滤会把「改动影响到的」跑漏（要单跑几个文件用 pnpm exec vitest run <路径>）。
-// 判出要全跑（改到根配置、锁文件、shared 这类）时本机不跑，打出本机先跑的那一条命令（同一份判法、只是不升全跑，带上 CI 每次
-// 都跑的那几份）和依赖 shared 这类包、留给 CI 的那些，退出码 3；带 --all 才在本机全跑；
+// 判出要全跑（改到根配置、锁文件、shared 这类）时本机不跑，只写明全量交给 CI、依赖 shared 这类包留给 CI 的那些
+// （不再教人单跑对应包，#1066），退出码 3；带 --all 才在本机全跑；
 // CI 里、引擎起的会话里（环境里有 FLEET_RUN_ID）照旧全跑。
 // 开几个测试进程由 vitest.config.ts 按内存上限算（../test-run.ts）。
 // 真起 vitest 之前先拿本机测试槽：整台机器（几个工作树、几个会话）同时最多 2 个（FLEET_LOCAL_TEST_SLOTS 可调），满了排队、
