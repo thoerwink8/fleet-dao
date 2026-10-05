@@ -53,6 +53,8 @@ describe('约定与实现对得上', () => {
     const { cookie } = await h.login();
     for (const [name, route] of Object.entries(WebRoutes)) {
       if (route.method !== 'GET' || !('response' in route)) continue;
+      // 远程环境的快照要先有环境推来过才有 200：在 node-report.test.ts 里先推再读、按同一份 schema 认
+      if (name === 'node') continue;
       const res = await h.cockpit.request(fill(route.path), { headers: { cookie } });
       expect(res.status, name).toBe(200);
       const parsed = route.response.safeParse(await res.json());

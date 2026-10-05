@@ -2,12 +2,11 @@
 // 不吞；没配推送地址不建、不起循环、不发一个请求；循环一轮做完才排下一轮，停了就不再推。
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { NodeReportSchema } from '@fleet-dao/shared';
+import { NODE_REPORT_HEADER, NodeReportSchema } from '@fleet-dao/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runHealthChecks } from '../src/health.ts';
 import {
   createNodeReporter,
-  NODE_REPORT_HEADER,
   NODE_REPORT_NOT_WIRED,
   type NodeReporterInput,
   nodeReporterFor,
