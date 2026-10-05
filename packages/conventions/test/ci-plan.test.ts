@@ -1078,12 +1078,14 @@ describe('ci.yml 和这里对得上', () => {
     expect(check).toContain('node packages/conventions/src/bin/ci-verdict.ts');
   });
 
-  it('【故意造出的失败】并发组 PR 按号分、推主线按分支分：合过的 PR 改标题正文那一轮（github.ref 是 refs/heads/main）不许挤掉主线的全量', () => {
+  it('【故意造出的失败】并发组 PR 按号分、推主线按分支分、定时轮按事件分：三路互不挤', () => {
     const group = /^concurrency:\n {2}group: (.+)$/m.exec(yml)?.[1];
-    expect(group).toBe(['ci-$', '{{ github.event.pull_request.number || github.ref }}'].join(''));
+    expect(group).toBe(
+      ['ci-$', '{{ github.event.pull_request.number || github.ref }}-$', '{{ github.event_name }}'].join(''),
+    );
   });
 
-  it('【故意造出的失败】只有 PR 上新的一轮挤掉旧的，主线推送不挤掉在跑的全量：挤了的话合并一密一个全绿的提交都没有，自动发布无可发（#362）', () => {
+  it('【故意造出的失败】只有 PR 上新的一轮挤掉旧的，主线推送和定时轮不挤掉在跑的全量：挤了的话合并一密一个全绿的提交都没有，自动发布无可发（#362）；定时轮被主线顶掉的话那一夜的全量回归直接不跑（2026-10-05 第二意见）', () => {
     const cancel = /^concurrency:\n {2}group: .+\n {2}cancel-in-progress: (.+)$/m.exec(yml)?.[1];
     expect(cancel).toBe(['$', "{{ github.event_name == 'pull_request' }}"].join(''));
   });
