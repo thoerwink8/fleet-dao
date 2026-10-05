@@ -20,6 +20,14 @@ import type {
   DemoLinksResponse,
   DemoScopeSchema,
   EffortModelSchema,
+  EnvEngineSchema,
+  EnvFact as EnvFactBase,
+  EnvHealthSchema,
+  EnvPoolsSchema,
+  EnvResponseSchema,
+  EnvScheduleSchema,
+  EnvSessionsSchema,
+  EnvVersionSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
@@ -133,6 +141,17 @@ export type JobView = z.infer<typeof JobViewSchema>;
 
 /** 新主页一屏三块 + 持续状态条（#589）。 */
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
+
+/** 环境页（#820 片 1）：这一台环境现在怎样，每一项各自带「查成了 / 没查成 + 原因」。 */
+export type EnvResponse = z.infer<typeof EnvResponseSchema>;
+/** 一项的成败：ok 带值，没查成带一句给人的原因（不拿空顶）。 */
+export type EnvFact<T> = EnvFactBase<T>;
+export type EnvEngine = z.infer<typeof EnvEngineSchema>;
+export type EnvVersion = z.infer<typeof EnvVersionSchema>;
+export type EnvSessions = z.infer<typeof EnvSessionsSchema>;
+export type EnvPools = z.infer<typeof EnvPoolsSchema>;
+export type EnvHealth = z.infer<typeof EnvHealthSchema>;
+export type EnvSchedule = z.infer<typeof EnvScheduleSchema>;
 
 export type Notifications = z.infer<typeof NotificationsResponse>;
 export type Notification = z.infer<typeof NotificationSchema>;
