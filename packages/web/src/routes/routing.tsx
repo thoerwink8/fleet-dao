@@ -10,6 +10,7 @@ import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useRoutingLayers } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerPurpose, RoutingLayerRoute } from '../api/types';
+import { ChannelStatus } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { StatusChip, StatusDot } from '../components/status';
 import { Badge } from '../components/ui/badge';
@@ -89,6 +90,7 @@ export default function Routing() {
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
       actions={data.purposes.length > 0 ? <Summary purposes={data.purposes} asOf={data.asOf} /> : undefined}
     >
+      <ChannelStatus layers={data} />
       {data.purposes.length === 0 || !selected ? (
         <Panel>
           <Empty

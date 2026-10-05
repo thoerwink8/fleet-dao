@@ -211,3 +211,76 @@ describe('路由页：每一层现在活着吗', () => {
     expect(screen.queryByRole('navigation', { name: '用途' })).toBeNull();
   });
 });
+
+describe('路由页顶部的渠道状态（#1087）', () => {
+  const card = (channelId: string) => {
+    const el = document.querySelector(`[data-channel="${channelId}"]`);
+    if (!(el instanceof HTMLElement)) throw new Error(`页面上没有渠道卡 ${channelId}`);
+    return el;
+  };
+
+  test('目录里每个渠道一张卡，按顺位排；探针报错的渠道标暂不可用、已禁用，写顺延到谁和原因；不露模型串', async () => {
+    renderApp(<RoutingPage />, { route: '/routing' });
+    const list = await screen.findByRole('list', { name: '渠道状态' });
+    const cards = within(list).getAllByRole('listitem');
+    expect(cards.map((c) => c.getAttribute('data-channel')).sort()).toEqual([
+      'ch-claude',
+      'ch-cursor',
+      'ch-ds',
+      'ch-grok',
+      'ch-relay',
+    ]);
+    // 假数据：Cursor 连探两次没通，是唯一暂不可用的；后面的渠道里有能用的，顺延过去
+    const cursor = card('ch-cursor');
+    expect(cursor.getAttribute('data-state')).toBe('down');
+    expect(cursor.textContent).toContain('暂不可用');
+    expect(cursor.textContent).toContain('已禁用');
+    expect(cursor.textContent).toMatch(/选路顺延到「.+」|后面没有能用的渠道了/);
+    expect(cursor.textContent).toContain('连探两次都没通');
+    // 通的渠道亮「通」，写上次探多久前和用时
+    const claude = card('ch-claude');
+    expect(claude.getAttribute('data-state')).toBe('ok');
+    expect(claude.textContent).toContain('通');
+    expect(claude.textContent).toMatch(/4 分钟前探的/);
+    expect(claude.textContent).toContain('用时');
+    // 按量计费的渠道探针不自动探：写明，不画成通也不画成不通
+    expect(card('ch-ds').textContent).toContain('按量计费，不自动探');
+    // 口径
+    expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
+    // 渠道下的上游模型串不露
+    expect(list.textContent).not.toMatch(/Opus 5\.5|grok-4\.7|deepseek-v4\.1-flash/);
+    // 顺位从 1 起，排第一的卡片写着顺位第 1
+    expect(cards[0]?.textContent).toContain('顺位第 1');
+  });
+
+  test('上次探测超过间隔 + 3 分钟：这个渠道改成「检测中断」，不再亮绿灯；别的渠道不受影响', async () => {
+    const base = createMockApi({ live: false });
+    const layers = await base.routingLayers();
+    const old = new Date(Date.now() - 30 * 60_000).toISOString();
+    for (const p of layers.purposes) {
+      for (const m of p.models) {
+        for (const r of m.routes) if (r.channelId === 'ch-claude') r.probedAt = old;
+      }
+    }
+    renderApp(<RoutingPage />, { route: '/routing', api: withLayers(layers) });
+    await screen.findByRole('list', { name: '渠道状态' });
+    const claude = card('ch-claude');
+    expect(claude.getAttribute('data-state')).toBe('interrupted');
+    expect(
+      within(claude).getByText('检测中断：探针超过间隔没更新这个渠道，上次的结论不再当现状', {
+        exact: false,
+      }),
+    ).toBeTruthy();
+    expect(card('ch-grok').getAttribute('data-state')).toBe('ok');
+  });
+
+  test('【故意造出的失败】渠道目录读不到：渠道状态写没读成和原因，不画空列表', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, {
+      routing: () => Promise.reject(new ApiError(503, 'routing_unreadable', '库连不上')),
+    });
+    renderApp(<RoutingPage />, { route: '/routing', api });
+    expect(await screen.findByText('渠道状态没读成：库连不上')).toBeTruthy();
+    expect(screen.queryByRole('list', { name: '渠道状态' })).toBeNull();
+  });
+});
