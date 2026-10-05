@@ -1010,7 +1010,7 @@ async function roomyQuota(poolId: string) {
 const probeFailed = (routeId: string) =>
   saveRouteProbe(t.db, { routeId, state: 'failed', at: NOW, detail: '连不上：ECONNREFUSED' });
 
-describe('路由两层选路（#574）：先按用途的模型顺序、再按模型下的路由顺序；死的跳过，不知道的排在活的后面，全死明说派不出', () => {
+describe('路由两层选路（#574）：先按用途的模型顺序、再按模型下的路由顺序；死的跳过，额度未知的只在同模型内排在读到了的后面，全死明说派不出', () => {
   /** 写码：Opus 排第一（下面 solo、carpool 两条），Grok 4.7 排第二（一条）；三条都探通了、额度都读成了还宽。 */
   async function twoModels() {
     await world(t.db, { stages: ['execute'] });
@@ -1053,20 +1053,32 @@ describe('路由两层选路（#574）：先按用途的模型顺序、再按模
     expect(!off.ok && off.detail).toContain('这条路由在它的模型下关着（路由两层的开关）');
   });
 
-  it('不知道排后面：排第一的模型额度没读成（unknown），先派读成了的第二个模型；它也死了才派额度未知的，并写明', async () => {
+  it('额度未知不让后面的模型插队（#1089）：排第一的模型额度没读成仍先派它，同模型下读成了的渠道排在未知的前面；它下面的渠道都死了才派第二个模型', async () => {
     const { grok } = await twoModels();
-    // Opus 那两个池的额度从没读成：不挡，但排在读到了的后面
+    // Opus 那两个池的额度从没读成：不挡；Grok 额度读成了、还宽，但模型之间严格按先后，照样先派 Opus 排第一的渠道
     await t.client.query("delete from quota_windows where pool_id in ('claude-solo', 'claude-carpool')");
     await t.client.query(
       "update pools set last_read_ok_at = null where id in ('claude-solo', 'claude-carpool')",
     );
-    const live = await pick({ stage: 'execute' });
-    expect(live).toMatchObject({ ok: true, route: { routeId: grok } });
-    expect(live.ok && live.why).toContain('额度未知（没读成或读数过期），排在读到了的后面');
-    await probeFailed(grok);
+    const first = await pick({ stage: 'execute' });
+    expect(first).toMatchObject({ ok: true, route: { routeId: 'solo', modelId: 'opus-5.5' } });
+    expect(first.ok && first.why).toContain('额度未知（没读成或读数过期）');
+    // 微调只在同一个模型的渠道之间：carpool 池额度读成了，排到额度未知的 solo 前面；仍是 Opus，不是 Grok
+    await roomyQuota('claude-carpool');
+    const tuned = await pick({ stage: 'execute' });
+    expect(tuned).toMatchObject({ ok: true, route: { routeId: 'carpool', modelId: 'opus-5.5' } });
+    // 理由里写明：它是人排的第 2 条，第 1 条因额度未知被排到了它后面
+    expect(tuned.ok && tuned.why).toContain('写码阶段第 2 条');
+    expect(tuned.ok && tuned.why).toContain('额度未知（没读成或读数过期），排在读到了的后面');
+    // carpool 死了：同模型里剩下的额度未知的 solo 照样先于 Grok，写明额度未知
+    await probeFailed('carpool');
     const unknown = await pick({ stage: 'execute' });
-    expect(unknown).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(unknown).toMatchObject({ ok: true, route: { routeId: 'solo', modelId: 'opus-5.5' } });
     expect(unknown.ok && unknown.why).toContain('额度未知（没读成或读数过期）');
+    // Opus 下面的渠道都死了，才派第二个模型
+    await probeFailed('solo');
+    const next = await pick({ stage: 'execute' });
+    expect(next).toMatchObject({ ok: true, route: { routeId: grok, modelId: 'grok-4.7' } });
   });
 
   it('用途里排了模型、模型下却一条路由都没有：照实写进原因（配置缺口），不当成路由都坏了', async () => {
@@ -1090,7 +1102,7 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
     const auto = (await addCursorRoute(t.db, { stages: ['execute'] })).routeId;
     const kimi = (await addCursorRoute(t.db, { modelId: 'kimi-k3', upstreamModel: 'kimi-k3' })).routeId;
     await hangRoutes(t.db, ['execute'], [kimi], 10);
-    // cursor 池的额度也读成了、还宽（额度未知的会排到读到了的后面，这里只看模型顺序）
+    // cursor 池的额度也读成了、还宽（额度未知只在同模型内排后面、不跨模型，这里只看模型顺序）
     await savePoolQuota(
       t.db,
       {

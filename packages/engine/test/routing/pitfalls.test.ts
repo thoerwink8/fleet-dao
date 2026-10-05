@@ -135,14 +135,14 @@ describe('R2 改选路逻辑要对每个阶段读回首选', () => {
       research: firstChoice('research', ['shell', 'solo']),
     };
     expect(table).toEqual({
-      triage: 'carpool', // 拼车号周额度快清零：提到接口外壳前面
+      triage: 'shell', // 拼车号周额度快清零，但那是后面的模型：不插到接口外壳前面（#1089）
       judge: 'shell',
-      spec: 'carpool', // 同上
+      spec: 'carpool', // 同一个模型（Opus）的两个渠道之间：拼车号周额度快清零，提到独享号前面
       // 2026-09-27（#59）起重活也派拼车号：法国只留一个会话用户，平时挂的拼车池接全部的活，不再「备池只接轻活」
       plan: 'carpool',
       execute: 'carpool',
       ui: 'solo', // GPT 不做 UI
-      review: 'carpool', // 周额度快清零：提到最前
+      review: 'gpt', // 人排第一的模型先派；拼车号快清零只能在 Opus 的渠道里提前，不插到 GPT 前面
       research: 'solo', // 接口外壳不会读仓库
     });
   });
