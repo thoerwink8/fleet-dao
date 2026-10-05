@@ -61,6 +61,22 @@ describe('NodeReportSchema', () => {
     expect(NodeReportSchema.safeParse(noSha).success).toBe(true);
   });
 
+  it('总开关那一格（#1086）可以没有：升级到有总开关的版本之前推来的旧快照照样收下、读回；有的话形状要对', () => {
+    const report = sampleReport();
+    const { master: _m, ...factsWithoutMaster } = report.env.facts;
+    const old = { ...report, env: { ...report.env, facts: factsWithoutMaster } };
+    expect(NodeReportSchema.safeParse(old).success).toBe(true);
+    // 有这一格但形状不对（why 不认得）仍然拒收，不当成「没有」
+    const bad = {
+      ...report,
+      env: {
+        ...report.env,
+        facts: { ...report.env.facts, master: { ok: true, value: { on: true, why: '?' } } },
+      },
+    };
+    expect(NodeReportSchema.safeParse(bad).success).toBe(false);
+  });
+
   it('【故意造出的失败】认不出的版本、缺版本：拒收，不猜着读', () => {
     expect(NodeReportSchema.safeParse({ ...sampleReport(), schemaVersion: 2 }).success).toBe(false);
     expect(NodeReportSchema.safeParse({ ...sampleReport(), schemaVersion: '1' }).success).toBe(false);

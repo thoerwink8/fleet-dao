@@ -618,6 +618,8 @@ export function useUpdateSetting() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.settings });
       qc.invalidateQueries({ queryKey: keys.poolHolds });
+      // 引擎总开关（engine.master）的状态在环境快照里：顶栏马上跟着变
+      qc.invalidateQueries({ queryKey: keys.env });
     },
   });
 }
@@ -660,7 +662,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   channels: [['routing'], ['pools'], ['routing-layers'], keys.home],
   notifications: [['notifications'], keys.home],
   audit_log: [['audit']],
-  settings: [['settings']],
+  // 引擎总开关（设置 engine.master，#1086）的状态在环境快照里，顶栏常驻显示它：设置一变，环境也跟着重拉
+  settings: [['settings'], keys.env],
   // 别的环境推来了新快照：顶栏切换器和环境页的列表、选中的那个环境的主页和环境页都重拉。
   node_reports: [keys.nodes, ['node']],
 };

@@ -103,7 +103,9 @@ export const EnvResponseSchema = z.object({
   asOf: Time,
   facts: z.object({
     engine: factOf(EnvEngineSchema),
-    master: factOf(EnvMasterSchema),
+    // 可选：别的环境（本机 WSL）升级到有总开关的版本之前推来的快照没有这一格，不能因此整份认不出（旧快照还在 node_reports 里）；
+    // 本台的环境页后端始终会给。页面看到没有就写「这个环境的版本还不带总开关」，不画成开也不画成关。
+    master: factOf(EnvMasterSchema).optional(),
     version: factOf(EnvVersionSchema),
     sessions: factOf(EnvSessionsSchema),
     pools: factOf(EnvPoolsSchema),
