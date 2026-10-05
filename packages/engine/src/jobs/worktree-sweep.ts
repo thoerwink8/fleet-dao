@@ -5,16 +5,18 @@
 // （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
 // 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件就不删，报「要人拍」（删数据要人拍），列出前几个、写明
 // 一共几个。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
-// 改之前必须知道：「在用」只认需求工作流（req:）和它的子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
+// 改之前必须知道：「在用」只认任务工作流（task:）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
 // 里一起认。认漏了还有一道：树里有没结束的会话（session_runs）就不碰。
 // 顺带撤提醒：子任务报的「工作树没收掉」（sub:<子任务>:worktree）、Fusion 报的（req:<仓>#<号>:worktree，按这张需求的
 // Fusion 树认）树不在了、被删了、改成要人拍了就撤；
 // 这里报的「要人拍」（worktree:<仓>/<树>）树没了、清干净删了、又被在跑的任务用上了就撤。
 // 读不了、查不了、删不掉的都记「没查成」写明原因（这一轮不算 ok），不当成没事。
+
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
 import type { StageKind } from '@fleet-dao/shared';
-import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { errMessage } from '@fleet-dao/shared/util';
+import { subtaskWorkflowId, taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
 import type { TreeLeftovers } from '../real/user-git.ts';
 import { STAGE_NAMES } from '../routing/names.ts';
@@ -22,7 +24,6 @@ import {
   type AlertStore,
   clip,
   isStage,
-  message,
   RECONCILE_ACTOR,
   type ReconcileLog,
   type SweepPart,
@@ -179,13 +180,17 @@ interface Sweep {
   deferred: number;
 }
 
-/** 需求工作流在跑，或者它的哪个子任务工作流还在跑（需求收尾时子任务还在撤合并队列、收树）：这张需求的树都算在用。 */
+/**
+ * 这张单的任务工作流在跑，或者它的哪个子任务工作流还在跑（旧的 Fusion 收尾时子任务还在撤合并队列、收树）：这张单的树都算在用。
+ * 任务工作流的树名（<号>-t<8 位>）和子任务的树名同一个样子，认的是 task:<仓>#<号>（#901：以前这里只认已经没有的 req:，
+ * 任务工作流等 CI、等合并时没有开着的会话，树会被当残留删掉）。
+ */
 function issueUse(s: Sweep, repo: Repo, issueNumber: number): Promise<IssueUse> {
   const key = `${repo.owner}/${repo.name}#${issueNumber}`;
   let use = s.uses.get(key);
   if (!use) {
     use = (async () => {
-      const req = requirementWorkflowId(repo, issueNumber);
+      const req = taskWorkflowId(repo, issueNumber);
       const facts = await s.deps.issue({ ...repo, issueNumber });
       if ((await s.deps.workflows.state(req)).state === 'running') return { runningBy: req, facts };
       for (const sub of facts?.subtasks ?? []) {
@@ -256,7 +261,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
   try {
     use = await issueUse(s, repo, tree.issue);
   } catch (err) {
-    return { kind: 'unchecked', why: `${rel} 有没有在跑的任务在用没查成：${message(err)}` };
+    return { kind: 'unchecked', why: `${rel} 有没有在跑的任务在用没查成：${errMessage(err)}` };
   }
   if (use.runningBy) return { kind: 'in-use', by: use.runningBy };
   let live: OpenSessionTree | undefined;
@@ -264,7 +269,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
     s.sessions ??= s.deps.openSessions().then((rows) => new Map(rows.map((r) => [r.path, r])));
     live = (await s.sessions).get(path);
   } catch (err) {
-    return { kind: 'unchecked', why: `${rel} 里有没有没结束的会话没查成（没碰）：${message(err)}` };
+    return { kind: 'unchecked', why: `${rel} 里有没有没结束的会话没查成（没碰）：${errMessage(err)}` };
   }
   if (live) {
     return {
@@ -281,7 +286,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
   try {
     user = await deps.ownerOf(path);
   } catch (err) {
-    return { kind: 'unchecked', why: `${rel} 看不了归谁（没碰）：${message(err)}` };
+    return { kind: 'unchecked', why: `${rel} 看不了归谁（没碰）：${errMessage(err)}` };
   }
   if (!user) return { kind: 'gone' };
   const branch = branchOf(tree);
@@ -290,7 +295,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
     const known = branch ? await deps.prHeads({ ...repo, branch }) : [];
     left = await deps.leftovers(path, user, known, tree.kind === 'scratch');
   } catch (err) {
-    return { kind: 'unchecked', why: `${rel} 里还剩什么没查成（没删）：${message(err)}` };
+    return { kind: 'unchecked', why: `${rel} 里还剩什么没查成（没删）：${errMessage(err)}` };
   }
   const what = describeLeftovers(left);
   if (what.length === 0) {
@@ -299,7 +304,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
     try {
       await deps.remove(path);
     } catch (err) {
-      return { kind: 'unchecked', why: `${rel} 删不掉：${message(err)}` };
+      return { kind: 'unchecked', why: `${rel} 删不掉：${errMessage(err)}` };
     }
     deps.log('info', '每小时对账：删了一棵残留的工作树', { tree: rel });
     return { kind: 'removed' };
@@ -315,7 +320,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
       taskId: use.facts?.taskId ?? null,
     });
   } catch (err) {
-    return { kind: 'unchecked', why: `${rel} 里还有没推的东西，报要人拍没报成：${message(err)}` };
+    return { kind: 'unchecked', why: `${rel} 里还有没推的东西，报要人拍没报成：${errMessage(err)}` };
   }
 }
 
@@ -382,7 +387,7 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
         (await deps.subtaskTrees(subtaskAlerts.map((x) => x.subtaskId))).map((r) => [r.subtaskId, r]),
       );
     } catch (err) {
-      part.unchecked.push(`「工作树没收掉」那几条是哪棵树没查成：${message(err)}`);
+      part.unchecked.push(`「工作树没收掉」那几条是哪棵树没查成：${errMessage(err)}`);
     }
     for (const { alert, subtaskId } of refs ? subtaskAlerts : []) {
       const ref = refs?.get(subtaskId);
@@ -397,7 +402,7 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
         const why = await treeGoneWhy(s, path, rel);
         if (why) await resolveOne(s, alert.dedupeKey, why);
       } catch (err) {
-        part.unchecked.push(`提醒 ${alert.dedupeKey} 没查成：${message(err)}`);
+        part.unchecked.push(`提醒 ${alert.dedupeKey} 没查成：${errMessage(err)}`);
       }
     }
   }
@@ -408,7 +413,7 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
       const why = fusionTreesWhy(s, m[1], m[2], m[3]);
       if (why) await resolveOne(s, alert.dedupeKey, why);
     } catch (err) {
-      part.unchecked.push(`提醒 ${alert.dedupeKey} 没查成：${message(err)}`);
+      part.unchecked.push(`提醒 ${alert.dedupeKey} 没查成：${errMessage(err)}`);
     }
   }
   for (const alert of open) {
@@ -427,7 +432,7 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
               : await treeGoneWhy(s, path, rel);
       if (why) await resolveOne(s, alert.dedupeKey, why);
     } catch (err) {
-      part.unchecked.push(`提醒 ${alert.dedupeKey} 没查成：${message(err)}`);
+      part.unchecked.push(`提醒 ${alert.dedupeKey} 没查成：${errMessage(err)}`);
     }
   }
 }
@@ -454,7 +459,12 @@ export async function sweepWorktrees(
   try {
     top = await deps.listDir(deps.root);
   } catch (err) {
-    return { failed: `工作树的根 ${deps.root} 读不了：${message(err)}`, scanned: 0, found: 0, unchecked: [] };
+    return {
+      failed: `工作树的根 ${deps.root} 读不了：${errMessage(err)}`,
+      scanned: 0,
+      found: 0,
+      unchecked: [],
+    };
   }
   for (const entry of top) {
     if (entry.name === deps.sessionTmpDir && entry.isDir) continue;
@@ -462,7 +472,7 @@ export async function sweepWorktrees(
       try {
         s.part.scanned += (await deps.listDir(`${deps.root}/${entry.name}`)).length;
       } catch (err) {
-        s.part.unchecked.push(`路由探针的目录 ${entry.name} 列不了：${message(err)}`);
+        s.part.unchecked.push(`路由探针的目录 ${entry.name} 列不了：${errMessage(err)}`);
       }
       continue;
     }
@@ -476,7 +486,7 @@ export async function sweepWorktrees(
       trees = await deps.listDir(`${deps.root}/${entry.name}`);
     } catch (err) {
       s.repoDirs.set(entry.name, 'unreadable');
-      s.part.unchecked.push(`${entry.name} 列不了：${message(err)}`);
+      s.part.unchecked.push(`${entry.name} 列不了：${errMessage(err)}`);
       continue;
     }
     s.repoDirs.set(entry.name, 'listed');

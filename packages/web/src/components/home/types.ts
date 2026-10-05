@@ -1,4 +1,4 @@
-// 新主页（/）三块卡片的数据形状：一律从 @fleet-dao/shared 的 web-api.ts（zod）推导，不另写一份（#589）。
+// 新主页（/）三块卡片和三段流水线图的数据形状：一律从 @fleet-dao/shared 的 web-api.ts（zod）推导，不另写一份（#589）。
 // HomeDone 多一个 link：后端不发网址（和 alert-work 一个规矩），由 useHome 按品牌拼好给卡片。
 //
 // 设计规矩（specs/509-需求梳理/流程重做方案.md 第五节）：
@@ -9,6 +9,7 @@
 import type {
   HomeDecisionSchema,
   HomeDoneSchema,
+  HomeFlowStageSchema,
   HomeHealthSchema,
   HomeRunningSchema,
   NotWired,
@@ -24,6 +25,9 @@ export type HomeRunning = z.infer<typeof HomeRunningSchema>;
 /** 「做完的」一篇 PR：合约里的字段 + 前端拼好的链接（演示版不带外链，是 undefined）。 */
 export type HomeDone = z.infer<typeof HomeDoneSchema> & { link: string | undefined };
 
+/** 三段流水线图头上的一格：这一段在途几张、近期平均耗时。 */
+export type HomeFlowStage = z.infer<typeof HomeFlowStageSchema>;
+
 /** 持续状态条（额度、中转、engine_off）。 */
 export type HomeHealth = z.infer<typeof HomeHealthSchema>;
 
@@ -33,6 +37,8 @@ export interface HomeData {
   running: HomeRunning[];
   done: HomeDone[];
   health: HomeHealth;
+  /** 对题 → 动手 → 验收三格（固定三项、按这个先后）。 */
+  flow: HomeFlowStage[];
 }
 
 /**
@@ -41,6 +47,6 @@ export interface HomeData {
  */
 export type HomeState =
   | { status: 'loading' }
-  | { status: 'error'; error: unknown }
+  | { status: 'error'; error: unknown; retry?: () => void }
   | { status: 'notWired'; notWired: NotWired }
   | { status: 'data'; data: HomeData };

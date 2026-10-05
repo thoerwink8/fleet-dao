@@ -43,6 +43,70 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { cursorAgentEnv, cursorAgentProblem, dataDir, findBin, NotInstalled } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
 
+// 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
+// 从 GitHub、Mirasim、git、审的人那里读回来的 JSON，下面按「我们要读的那几个字段」标类型，读不到、对不上的地方原来就有显式判断。
+
+/** @typedef {{ family: string, agent: string, model: string | null, route: 'cloud' | 'local' | null }} Profile 一家执行体（族、起它的方式、模型、走不走中继） */
+/** @typedef {'code' | 'claude' | 'deepseek' | 'grok' | 'kimi' | 'code5' | 'cursor' | 'glm' | 'kimi3' | 'grok-cli' | 'ui'} ProfileName */
+/** @typedef {{ agent?: string | undefined, authorFamily?: string | string[] | undefined, excludeFamily?: string | undefined, ui?: boolean | undefined }} ProfileOptions */
+/** @typedef {{ text: string, sessionKey: string, model: string | null, ledgerNote: string, usage: string, fallbackNote?: string }} SessionResult 一次会话跑完的结果 */
+/** @typedef {(s: string) => void} Log */
+/** @typedef {{ context?: unknown, state?: unknown, description?: unknown }} StatusRow GitHub 提交状态的一条 */
+/** @typedef {{ path: string, afterMerge: boolean }} RiskRule 高风险清单的一条：路径、是不是先合后审 */
+/** @typedef {{ path: string, previous?: string }} ChangedFile 一个提交改到的文件（改名、复制带上旧名字） */
+/** @typedef {{ sha: string, date: string, files: ChangedFile[] }} LoggedCommit */
+/** @typedef {{ sha: string, hits: string[] }} Candidate 碰了先合后审路径的一个主线提交 */
+/** @typedef {{ number: number, title: string, mergedAt: unknown, head: string, mergeCommit: string, files: string[], state: string | null, description: string }} MergedPr 合并后待补审的一个 PR */
+/** @typedef {{ done: MergedPr[], failed: MergedPr[], unreviewed: MergedPr[], problems: string[] }} Classified */
+/** @typedef {Classified & { days: number, afterMergePaths: string[], since: string | null, note?: string }} Pending */
+/** @typedef {{ oid?: unknown, status?: { context?: { state?: unknown, description?: unknown } | null } | null }} StatusCommit */
+/** @typedef {{ number?: unknown, title?: unknown, state?: unknown, mergedAt?: unknown, headRefOid?: unknown, baseRefName?: unknown, mergeCommit?: { oid?: unknown } | null, commits?: { nodes?: { commit?: StatusCommit }[] } }} GraphqlPr GraphQL 里一个 PR 用到的字段 */
+/** @typedef {{ associatedPullRequests?: { nodes?: unknown } } | null | undefined} GraphqlCommit */
+/** @typedef {{ dir?: string | undefined, pid?: number, alive?: (pid: number) => boolean }} LockOptions 只给测试换 */
+/** @typedef {{ number: number, state: string, title: string, headRefOid: string, mergeCommit?: { oid?: unknown } | null }} PrView gh pr view 里用到的几个字段 */
+/** @typedef {{ scanFiles: (files: string[], read: (file: string) => Buffer) => { binary: unknown[], scanned: unknown[], findings: unknown[] }, formatFinding: (finding: unknown) => string }} HygieneScan 仓里卫生检查（packages/hygiene/src/scan.ts）用到的两个导出 */
+/** @typedef {(args: string[]) => string} GhRun 起 gh（失败抛错、成功回 stdout；测试里换成假的） */
+/**
+ * 从 Mirasim 的 ws 读回来的一帧：按协议文档（adapters.md 第八节）写的字段，用到的地方原来就有显式判断。
+ * @typedef {{ type?: string, state?: { agentsAvailable?: unknown, version?: string }, snapshot?: unknown, patch?: { full?: unknown }, sessionKey?: string, message?: string, sessions?: { sessionKey: string, title?: unknown, runState?: unknown }[], relay?: { usage?: { windows?: { label?: string, usedPercent?: number }[] } } }} Frame
+ */
+/** @typedef {{ phase: string | null, text: string, toolCalls: number, error: string | null, incomplete: boolean, model: string | null, interactions: unknown[], updatedAt: unknown }} SessionView 一帧快照整理出来的会话现状 */
+/** @typedef {{ headRefOid: string, baseRefName: string, title: string, body?: string | null, files?: { path: string }[], state: string, mergeCommit?: { oid?: unknown } | null }} PrInfo gh pr view --json 里用到的那几个字段 */
+/** @typedef {Omit<PrInfo, 'mergeCommit'> & { head: string, tree: string, merged: boolean, mergeCommit: string | null }} PreparedPr 审查树切好之后的 PR */
+/** @typedef {{ head: string, baseRefName: string, title: string, body?: string | null | undefined, files?: { path: string }[] | undefined, merged?: boolean | undefined, mergeCommit?: string | null | undefined }} PromptInfo */
+/** @typedef {{ prompt: string, profile: Profile, workdir: string, timeoutMin: number, log: Log, pollMs?: number, effort?: string | undefined, discussion?: boolean }} SessionOpts runSession 要的 */
+/** @typedef {{ gh: GhRun, session: (opts: SessionOpts) => Promise<SessionResult>, runs: string }} ReviewDeps 审 PR 要的几样（测试换成假的） */
+/**
+ * 命令行参数（args() 整理出来的）。
+ * @typedef {{ timeoutMin: number, ui: boolean, slot: number, pr?: number, repo?: string | undefined, roundGiven?: boolean, afterMergePending?: boolean, afterMergeSweep?: boolean, resolve?: number, resolveGiven?: boolean, by?: number, json?: boolean, noFetch?: boolean, slotGiven?: boolean, selftest?: boolean, ping?: boolean, noPost?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string | undefined, name?: string | undefined, effort?: string | undefined, agent?: string | undefined, authorFamily?: string, excludeFamily?: string | undefined, budgetSec?: number, blind?: boolean, slow?: boolean, highRisk?: boolean, postMerge?: boolean }} Options
+ */
+
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
+const isObjectLike = (v) => typeof v === 'object' && v !== null;
+/**
+ * 抛出来的东西上的 code（ENOENT 这类）；不是对象就是 undefined。
+ * @param {unknown} e
+ */
+const errCode = (e) => (isObjectLike(e) ? e.code : undefined);
+/**
+ * 抛出来的东西上的 message；不是对象就是 undefined。
+ * @param {unknown} e
+ */
+const messageOf = (e) => (isObjectLike(e) ? e.message : undefined);
+
+/** @typedef {{ pass: boolean, blocking: number }} Verdict 审的人最后一行写的结论（挡不挡不看它） */
+/** @typedef {'现实' | '构造'} Reality */
+/** @typedef {'碰安全' | '改数据库' | '其他'} Category */
+/** @typedef {{ reality: Reality | null, category: Category | null }} Labels */
+/** @typedef {{ text: string, reality: Reality | null, category: Category | null }} Finding 一条必须改（标签可能没带全） */
+/** @typedef {{ text: string, reality: Reality, category: Category, unlabeled: boolean }} JudgedItem 判过的一条（没带的标签已按【现实】【其他】补上） */
+/** @typedef {{ ok: true, mustFix: Finding[], minor: string[], claimed: Verdict, body: string }} ParsedReview */
+/** @typedef {{ pass: boolean, round: number, blocking: JudgedItem[], deferred: JudgedItem[], constructed: JudgedItem[], minor: string[], claimed: Verdict }} Judgement 脚本按标签和轮数判出来的 */
+/** @typedef {{ afterMerge?: boolean, mergeCommit?: string | null, roundNote?: string }} JudgementOptions */
+
 // ask.mjs 也要用（两边起 cursor-agent 都要摘同几个环境变量）：定义挪去了 tools.mjs 共用，这里转手导出，
 // 别让已经 import { cursorAgentEnv } from './second-opinion.mjs' 的调用方（包括测试）断掉。
 export { cursorAgentEnv } from './tools.mjs';
@@ -51,7 +115,9 @@ const DATA = dataDir();
 const RUNS = join(DATA, 'runs');
 const MIRA = join(homedir(), '.mirasim');
 // 讨论/第二意见共同的厂商族顺序。作者族由调用方显式传入；不能从环境变量或当前进程名猜。
+/** @type {string[]} */
 export const FAMILY_ORDER = ['gpt', 'claude', 'deepseek', 'grok', 'kimi'];
+/** @type {Record<ProfileName, Profile>} */
 const PROFILES = {
   // Mirasim 2026-09-30 的真实 modelRosterCache：codex/gpt-6-luna。
   code: { family: 'gpt', agent: 'codex', model: 'gpt-6-luna', route: 'cloud' },
@@ -71,6 +137,7 @@ const PROFILES = {
   'grok-cli': { family: 'grok', agent: 'cursor-cli', model: 'grok-4.7-medium', route: 'local' },
   ui: { family: 'gemini', agent: 'antigravity', model: 'gemini-3.8-flash-high', route: null },
 };
+/** @type {Record<string, Profile | undefined>} */
 const PROFILE_BY_FAMILY = {
   gpt: PROFILES.code,
   claude: PROFILES.claude,
@@ -88,8 +155,9 @@ class NotChecked extends Error {}
 // 「模型满载」也算连不上（2026-09-26：codex 快照报 done 带 incomplete「Selected model is at capacity」，没换人直接判没查成）。
 export const UNAVAILABLE =
   /\b(502|503|529)\b|no upstream available|Service Unavailable|overloaded|at capacity|try a different model/i;
+/** @param {string} name */
 function pickProfile(name) {
-  const p = PROFILES[name];
+  const p = /** @type {Record<string, Profile | undefined>} */ (PROFILES)[name];
   if (!p)
     throw new NotChecked(
       `不认识的 --agent ${name}（code / claude / deepseek / grok / kimi / code5 / cursor / kimi3 / ui）`,
@@ -97,6 +165,10 @@ function pickProfile(name) {
   return p;
 }
 
+/**
+ * @param {unknown} raw
+ * @param {string} [label]
+ */
 function splitFamilies(raw, label = '--author-family') {
   const values = (Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/))
     .map((s) => String(s).trim().toLowerCase())
@@ -114,6 +186,8 @@ function splitFamilies(raw, label = '--author-family') {
 /**
  * 为讨论和第二意见生成候选链。作者族可传多个；显式执行体也必须经过同族排除。
  * UI 仍固定走 Gemini，且不借此绕过作者族校验。
+ * @param {ProfileOptions} [o]
+ * @returns {Profile[]}
  */
 export function discussionProfiles(o = {}) {
   if (o.authorFamily && o.excludeFamily)
@@ -130,19 +204,35 @@ export function discussionProfiles(o = {}) {
       throw new NotChecked(`不能选与作者同一模型族的执行体：${PROFILES.ui.family}（ui）`);
     return [PROFILES.ui]; // 界面类只给 Gemini，不拿别家顶
   }
-  const candidates = FAMILY_ORDER.filter((family) => !excluded.has(family)).map(
-    (family) => PROFILE_BY_FAMILY[family],
-  );
+  /** @type {Profile[]} */
+  const candidates = [];
+  for (const family of FAMILY_ORDER) {
+    if (excluded.has(family)) continue;
+    const profile = PROFILE_BY_FAMILY[family];
+    // FAMILY_ORDER 里的每一族在 PROFILE_BY_FAMILY 里都有一家；对不上说明有人只改了一边，明说
+    if (!profile)
+      throw new NotChecked(`族 ${family} 没有对应的执行体（FAMILY_ORDER 和 PROFILE_BY_FAMILY 对不上）`);
+    candidates.push(profile);
+  }
   if (candidates.length === 0) throw new NotChecked('作者模型族覆盖全部候选，没有可用的不同模型族');
   return candidates;
 }
 
+/** @param {ProfileOptions} o */
 function prProfiles(o) {
   return discussionProfiles(o);
 }
+/**
+ * @param {Profile[]} chain
+ * @param {Log} log
+ * @param {(p: Profile, remainingMs: number | undefined) => Promise<SessionResult>} run
+ * @param {{ budgetMs?: number | undefined }} [opts]
+ * @returns {Promise<SessionResult & { profile: Profile }>}
+ */
 async function withFallback(chain, log, run, { budgetMs } = {}) {
+  /** @type {string[]} */
   const misses = [];
-  const deadline = Number.isFinite(budgetMs) ? Date.now() + budgetMs : null;
+  const deadline = budgetMs !== undefined && Number.isFinite(budgetMs) ? Date.now() + budgetMs : null;
   for (const p of chain) {
     const who = `${p.agent}/${p.model ?? '服务端默认'}`;
     const remainingMs = deadline === null ? undefined : deadline - Date.now();
@@ -175,7 +265,11 @@ async function withFallback(chain, log, run, { budgetMs } = {}) {
 
 // ---------- 纯函数（--selftest 覆盖） ----------
 
-/** 最后一行结论（审的人自己说的；挡不挡不看它，见 parseReview / judgeReview）。认不出 = null。 */
+/**
+ * 最后一行结论（审的人自己说的；挡不挡不看它，见 parseReview / judgeReview）。认不出 = null。
+ * @param {unknown} text
+ * @returns {Verdict | null}
+ */
 export function parseVerdict(text) {
   const lines = String(text ?? '')
     .split(/\r?\n/)
@@ -189,7 +283,11 @@ export function parseVerdict(text) {
   return n > 0 ? { pass: false, blocking: n } : null;
 }
 
-/** 快照 → 判断。只有 done 才往下核账本。 */
+/**
+ * 快照 → 判断。只有 done 才往下核账本。
+ * @param {{ phase?: unknown, error?: unknown, incomplete?: unknown } | null | undefined} view
+ * @returns {{ status: 'unknown' | 'failed' | 'running' | 'done', why: string }}
+ */
 export function judgeSnapshot(view) {
   if (!view || typeof view.phase !== 'string' || !view.phase)
     return { status: 'unknown', why: '快照里没有 phase' };
@@ -206,10 +304,18 @@ export function judgeSnapshot(view) {
   return { status: 'done', why: phase };
 }
 
-/** 账本行 → 起针后有没有成功调用、有没有没走中继的调用。 */
+/** @typedef {Record<string, unknown>} LedgerRow Mirasim 账本里的一行（读回来的 JSON，字段按用到的几个核） */
+
+/**
+ * 账本行 → 起针后有没有成功调用、有没有没走中继的调用。
+ * @param {LedgerRow[]} rows
+ * @param {number} since
+ * @param {boolean} mustRelay
+ * @returns {{ ok: boolean, why: string }}
+ */
 export function judgeLedger(rows, since, mustRelay) {
   const fresh = rows.filter(
-    (r) => Number.isFinite(Date.parse(r?.ts ?? '')) && Date.parse(r.ts) >= since - 1000,
+    (r) => Number.isFinite(Date.parse(String(r?.ts ?? ''))) && Date.parse(String(r.ts)) >= since - 1000,
   );
   const served = fresh.filter((r) => Number(r.status) >= 200 && Number(r.status) < 300);
   const offRelay = mustRelay ? fresh.filter((r) => r.viaRelay !== true) : [];
@@ -241,18 +347,28 @@ export function judgeLedger(rows, since, mustRelay) {
 
 /** 第 1、2 轮【现实】的必须改都挡；从第 3 轮起只挡【现实】且碰安全或改数据库的，其余写通过、评论里列「转合并后处理」。 */
 export const STRICT_ROUNDS = 2;
-/** 第 3 轮起照样挡的类别：泄露了、删了数据就回不来，不能「先合了再说」。 */
+/**
+ * 第 3 轮起照样挡的类别：泄露了、删了数据就回不来，不能「先合了再说」。
+ * @type {Category[]}
+ */
 export const ALWAYS_BLOCK = ['碰安全', '改数据库'];
+
+/** @type {Category[]} */
+const CATEGORIES = ['碰安全', '改数据库', '其他'];
 
 /** 【…】或 […] 里的标签（一对括号里可以并写几个：【现实·碰安全】）。 */
 const LABEL = /[【[]\s*([^】\]\n]{1,30}?)\s*[】\]]/g;
 
-/** 一段话里的标签：现实性（现实 / 构造）和类别（碰安全 / 改数据库 / 其他）。两样都标了取更严的（现实、碰安全优先）；没标是 null。 */
+/**
+ * 一段话里的标签：现实性（现实 / 构造）和类别（碰安全 / 改数据库 / 其他）。两样都标了取更严的（现实、碰安全优先）；没标是 null。
+ * @param {unknown} text
+ * @returns {Labels}
+ */
 export function labelsOf(text) {
   const reality = new Set();
   const category = new Set();
   for (const m of String(text ?? '').matchAll(LABEL)) {
-    for (const word of m[1].split(/[\s·・、,，|/／+＋&＆<>＜＞]+/)) {
+    for (const word of (m[1] ?? '').split(/[\s·・、,，|/／+＋&＆<>＜＞]+/)) {
       if (word === '现实') reality.add('现实');
       else if (word === '构造') reality.add('构造');
       else if (word === '碰安全' || word === '安全') category.add('碰安全');
@@ -262,11 +378,14 @@ export function labelsOf(text) {
   }
   return {
     reality: reality.has('现实') ? '现实' : reality.has('构造') ? '构造' : null,
-    category: ['碰安全', '改数据库', '其他'].find((c) => category.has(c)) ?? null,
+    category: CATEGORIES.find((c) => category.has(c)) ?? null,
   };
 }
 
-/** 去掉 Markdown 的强调和代码记号，只看字。 */
+/**
+ * 去掉 Markdown 的强调和代码记号，只看字。
+ * @param {unknown} s
+ */
 const plain = (s) =>
   String(s)
     .replace(/[*_`~]/g, '')
@@ -280,12 +399,16 @@ const NONE = /^[（(]?(?:无|没有|暂无|none|n\/a)[)）]?[。.！!]?$/i;
  * 一段（「必须改」或「小毛病」标题下面那几行）→ 一条一条的正文。按列表符号分条：缩进不比第一条深的列表符号起新的一条，
  * 更深的、没有列表符号的行接在上一条后面；第一条之前的几行以冒号结尾的算引子（「有两条：」），别的单算一条（宁可多算，不漏）。
  * 整段没有列表符号就按空行分段。只写了「无」的条不算。
+ * @param {readonly unknown[]} lines
+ * @returns {string[]}
  */
 export function itemsOf(lines) {
   const rows = lines.map((l) => String(l).replace(/\t/g, '    ').replace(/\s+$/, ''));
+  /** @type {string[]} */
   const items = [];
   const first = rows.findIndex((l) => BULLET.test(l));
   if (first < 0) {
+    /** @type {string[]} */
     let cur = [];
     for (const l of [...rows, '']) {
       if (l.trim()) cur.push(l.trim());
@@ -299,18 +422,23 @@ export function itemsOf(lines) {
       .slice(0, first)
       .map((l) => l.trim())
       .filter(Boolean);
-    if (lead.length > 0 && !/[：:]$/.test(lead.at(-1))) items.push(lead.join('\n'));
-    const top = BULLET.exec(rows[first])[1].length;
+    if (lead.length > 0 && !/[：:]$/.test(lead.at(-1) ?? '')) items.push(lead.join('\n'));
+    // first 是 findIndex 找到的、一定能匹配列表符号；?? 只为让类型跟上
+    const top = (BULLET.exec(rows[first] ?? '')?.[1] ?? '').length;
     for (const l of rows.slice(first)) {
       const m = BULLET.exec(l);
-      if (m && m[1].length <= top) items.push(m[2].trim());
+      if (m && (m[1] ?? '').length <= top) items.push((m[2] ?? '').trim());
       else if (l.trim() && items.length > 0) items[items.length - 1] += `\n${l.trim()}`;
     }
   }
   return items.filter((t) => !NONE.test(plain(t.replace(/\n/g, ' '))));
 }
 
-/** 一条必须改的标签：先看第一行，第一行没写的那一样再从整条里找。 */
+/**
+ * 一条必须改的标签：先看第一行，第一行没写的那一样再从整条里找。
+ * @param {string} text
+ * @returns {Labels}
+ */
 function itemLabels(text) {
   const head = labelsOf(String(text).split('\n')[0]);
   const all = labelsOf(text);
@@ -321,16 +449,22 @@ function itemLabels(text) {
  * 审的人交回的正文 → { ok: true, mustFix, minor, claimed, body } 或 { ok: false, why }。
  * 认不出（判没查成、不写通过）的只有：没有「必须改」这一段；最后一行不是结论（多半没写完）；结论说必须改、那一段却一条也读不出。
  * 结论行只当「写完了」的记号和对照：挡不挡看 judgeReview，不看它。
+ * @param {unknown} text
+ * @returns {ParsedReview | { ok: false, why: string }}
  */
 export function parseReview(text) {
   const lines = String(text ?? '').split(/\r?\n/);
+  /** @param {string} l */
   const title = (l) => /^#{1,6}\s+(.*?)\s*$/.exec(plain(l))?.[1] ?? null;
+  /** @param {string} l */
   const isEnd = (l) => title(l) !== null || /^结论\s*[：:]/.test(plain(l));
   // 取最后一个「必须改」标题：前面要是把题面里的输出格式抄了一遍，真正的答案在后面
+  /** @param {string} name */
   const lastTitled = (name) => lines.findLastIndex((l) => title(l)?.startsWith(name) === true);
+  /** @param {number} at */
   const sectionAt = (at) => {
     let end = at + 1;
-    while (end < lines.length && !isEnd(lines[end])) end++;
+    while (end < lines.length && !isEnd(lines[end] ?? '')) end++;
     return lines.slice(at + 1, end);
   };
   const at = lastTitled('必须改');
@@ -357,13 +491,20 @@ export function parseReview(text) {
 /**
  * 判定：【构造】的不挡（挪进小毛病）；第 1、2 轮其余的都挡；第 3 轮起只挡碰安全、改数据库的，其余转合并后处理。
  * 没带标签的按【现实】【其他】算（第 1、2 轮照挡，保守）。round 认不出按第 1 轮。
+ * @param {ParsedReview} parsed
+ * @param {unknown} round
+ * @returns {Judgement}
  */
 export function judgeReview(parsed, round) {
-  const r = Number.isInteger(round) && round >= 1 ? round : 1;
+  const r = typeof round === 'number' && Number.isInteger(round) && round >= 1 ? round : 1;
+  /** @type {JudgedItem[]} */
   const blocking = [];
+  /** @type {JudgedItem[]} */
   const deferred = [];
+  /** @type {JudgedItem[]} */
   const constructed = [];
   for (const f of parsed.mustFix) {
+    /** @type {JudgedItem} */
     const item = {
       text: f.text,
       reality: f.reality ?? '现实',
@@ -389,30 +530,48 @@ export function judgeReview(parsed, round) {
 export const POSTED_REVIEW =
   /^\*\*(?:第二意见|合并后补审) 第 \d+ 轮\*\*（[^）\n]*审的头 [0-9a-f]{7,40}）：(?:通过|必须改 \d+ 条)/;
 
-/** PR 上的评论正文 → 之前审完、出了结论几轮（不管头变没变）。 */
+/**
+ * PR 上的评论正文 → 之前审完、出了结论几轮（不管头变没变）。
+ * @param {readonly unknown[]} bodies
+ */
 export function priorRounds(bodies) {
   return bodies.filter((b) => POSTED_REVIEW.test(String(b ?? '').trimStart())).length;
 }
 
 /** GitHub 提交状态 description 的上限（140 个字符）。 */
 const DESCRIPTION_MAX = 140;
+/**
+ * @param {unknown} s
+ * @param {number} [max]
+ */
 function clip(s, max = DESCRIPTION_MAX) {
   const chars = [...String(s)];
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : String(s);
 }
+/** @param {{ reality: string, category: string }} f */
 const tagOf = (f) => `【${f.reality}】【${f.category}】`;
-/** 「【现实】【碰安全】1、【现实】【其他】2」 */
+/**
+ * 「【现实】【碰安全】1、【现实】【其他】2」
+ * @param {JudgedItem[]} items
+ */
 function tally(items) {
+  /** @type {Map<string, number>} */
   const n = new Map();
   for (const f of items) n.set(tagOf(f), (n.get(tagOf(f)) ?? 0) + 1);
   return [...n].map(([k, v]) => `${k}${v}`).join('、');
 }
+/** @param {unknown} t */
 const firstLine = (t) => {
   const s = plain(String(t).split('\n')[0]);
   return s.length > 200 ? `${s.slice(0, 200)}…` : s;
 };
 
-/** 写到 PR 头上的提交状态（合并闸认 success；description 写清是哪几条挡、为什么）。 */
+/**
+ * 写到 PR 头上的提交状态（合并闸认 success；description 写清是哪几条挡、为什么）。
+ * @param {Judgement} j
+ * @param {boolean} [afterMerge]
+ * @returns {{ state: 'success' | 'failure', description: string }}
+ */
 export function statusText(j, afterMerge = false) {
   const who = afterMerge ? '合并后补审' : '第二意见';
   if (j.pass) {
@@ -435,12 +594,18 @@ export function statusText(j, afterMerge = false) {
   };
 }
 
-/** 评论和记录里的「脚本判定」那几行：哪几条挡、哪几条转合并后、哪几条算构造的，和审的人自己的结论对不上就写出来。 */
+/**
+ * 评论和记录里的「脚本判定」那几行：哪几条挡、哪几条转合并后、哪几条算构造的，和审的人自己的结论对不上就写出来。
+ * @param {Judgement} j
+ * @param {JudgementOptions} [opts]
+ * @returns {string[]}
+ */
 export function judgementLines(j, { afterMerge = false, mergeCommit = null, roundNote = '' } = {}) {
   const rule =
     j.round <= STRICT_ROUNDS
       ? `第 ${j.round} 轮，【现实】的必须改都挡（没带标签的按【现实】【其他】算），【构造】的不挡`
       : `第 ${j.round} 轮（前面已经审完过 ${j.round - 1} 轮），只挡【现实】且碰安全或改数据库的，其余转合并后处理，【构造】的不挡`;
+  /** @param {JudgedItem[]} items */
   const list = (items) =>
     items.map((f) => `  - ${f.unlabeled ? `（没带全标签，按${tagOf(f)}算）` : ''}${firstLine(f.text)}`);
   const out = [`脚本判定（不看审的人最后那句结论）：${rule}。`];
@@ -470,19 +635,24 @@ export function judgementLines(j, { afterMerge = false, mergeCommit = null, roun
   return out;
 }
 
+/**
+ * @param {Frame | null | undefined} msg
+ * @returns {SessionView | null}
+ */
 function viewOf(msg) {
   const full =
     msg?.type === 'snapshot' ? msg.snapshot : msg?.type === 'session' ? msg.patch?.full : undefined;
-  if (!full || typeof full !== 'object') return null;
+  if (!isObjectLike(full)) return null;
   const phase =
     typeof full.phase === 'string' && full.phase
       ? full.phase
       : typeof full.runState === 'string'
         ? full.runState
         : null;
+  /** @type {string | null} */
   let error = null;
   if (typeof full.error === 'string' && full.error) error = full.error;
-  else if (full.error && typeof full.error.message === 'string') error = full.error.message;
+  else if (isObjectLike(full.error) && typeof full.error.message === 'string') error = full.error.message;
   return {
     phase,
     text: typeof full.text === 'string' ? full.text : '',
@@ -498,16 +668,22 @@ function viewOf(msg) {
 // ---------- 连 Mirasim ----------
 
 class Wire {
+  /** @param {string} url */
   constructor(url) {
+    /** @type {Frame[]} 还没人要的帧 */
     this.queue = [];
+    /** @type {{ pred: (m: Frame) => boolean, ok: (m: Frame | null) => void }[]} 在等某一帧的人 */
     this.waiters = [];
+    /** @type {boolean | null} */
     this.closed = null;
     this.ws = new WebSocket(url);
+    /** @type {Promise<void>} */
     this.opened = new Promise((ok, bad) => {
       this.ws.onopen = () => ok();
       this.ws.onerror = () => bad(new NotChecked('连不上本机 Mirasim 的 ws'));
     });
     this.ws.onmessage = (ev) => {
+      /** @type {Frame} */
       let m;
       try {
         m = JSON.parse(String(ev.data));
@@ -515,7 +691,7 @@ class Wire {
         return;
       }
       const i = this.waiters.findIndex((w) => w.pred(m));
-      if (i >= 0) this.waiters.splice(i, 1)[0].ok(m);
+      if (i >= 0) this.waiters.splice(i, 1)[0]?.ok(m);
       else this.queue.push(m);
     };
     this.ws.onclose = () => {
@@ -523,15 +699,22 @@ class Wire {
       for (const w of this.waiters.splice(0)) w.ok(null);
     };
   }
+  /** @param {Record<string, unknown>} obj */
   send(obj) {
     this.ws.send(JSON.stringify(obj));
   }
-  /** 等一帧；超时或连接断了回 null（调用方判没查成）。 */
+  /**
+   * 等一帧；超时或连接断了回 null（调用方判没查成）。
+   * @param {(m: Frame) => boolean} pred
+   * @param {number} ms
+   * @returns {Promise<Frame | null>}
+   */
   waitFor(pred, ms) {
     const i = this.queue.findIndex(pred);
-    if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0]);
+    if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0] ?? null);
     if (this.closed) return Promise.resolve(null);
     return new Promise((ok) => {
+      /** @type {{ pred: (m: Frame) => boolean, ok: (m: Frame | null) => void }} */
       const w = {
         pred,
         ok: (m) => {
@@ -555,20 +738,23 @@ class Wire {
 }
 
 /** 找在役的那个口：令牌文件按新到旧试，握手拿到 state 帧的才算。没装、没开、一个口都握不上手，都算这台用不了 Mirasim */
+/** @returns {Promise<{ url: string, wire: Wire, state: NonNullable<Frame['state']> }>} */
 async function connect() {
   if (!existsSync(MIRA)) throw new NotInstalled(`这台机器没装 Mirasim（没有 ${MIRA}）`);
   const dir = join(MIRA, 'run');
+  /** @type {string[]} */
   let files;
   try {
     files = readdirSync(dir).filter((f) => /^local-\d+\.token$/.test(f));
   } catch (e) {
-    throw new NotInstalled(`本机 Mirasim 没开（读不到 ${dir}：${e.code ?? e.message}）`);
+    throw new NotInstalled(`本机 Mirasim 没开（读不到 ${dir}：${errCode(e) ?? messageOf(e)}）`);
   }
   if (files.length === 0) throw new NotInstalled(`本机 Mirasim 没开（${dir} 里没有令牌文件）`);
   files.sort((a, b) => statSync(join(dir, b)).mtimeMs - statSync(join(dir, a)).mtimeMs);
+  /** @type {string[]} */
   const tried = [];
   for (const f of files) {
-    const port = /(\d+)/.exec(f)[1];
+    const port = /(\d+)/.exec(f)?.[1] ?? '';
     const token = readFileSync(join(dir, f), 'utf8').trim();
     const url = `ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`;
     const wire = new Wire(url);
@@ -591,6 +777,11 @@ async function connect() {
   throw new NotInstalled(`本机 Mirasim 一个口都没握手成（${tried.join('；')}），多半没开`);
 }
 
+/**
+ * @param {string} url
+ * @param {string} sessionKey
+ * @returns {Promise<SessionView | null>}
+ */
 async function readView(url, sessionKey) {
   const wire = new Wire(url);
   try {
@@ -611,6 +802,10 @@ async function readView(url, sessionKey) {
   }
 }
 
+/**
+ * @param {string} url
+ * @returns {Promise<number | null>}
+ */
 async function relayUsage(url) {
   const wire = new Wire(url);
   try {
@@ -619,7 +814,7 @@ async function relayUsage(url) {
     wire.send({ type: 'getRelay' });
     const m = await wire.waitFor((x) => x.type === 'relay' && Array.isArray(x.relay?.usage?.windows), 15_000);
     const w7 = m?.relay?.usage?.windows?.find((w) => w.label === '7d');
-    return w7 && Number.isFinite(w7.usedPercent) ? w7.usedPercent : null;
+    return w7 && w7.usedPercent !== undefined && Number.isFinite(w7.usedPercent) ? w7.usedPercent : null;
   } catch {
     return null;
   } finally {
@@ -627,14 +822,20 @@ async function relayUsage(url) {
   }
 }
 
+/**
+ * @param {string} uuid
+ * @returns {{ readable: true, rows: LedgerRow[] } | { readable: false, why: string }}
+ */
 function readLedger(uuid) {
   const dir = join(MIRA, 'traffic', uuid);
+  /** @type {string[]} */
   let files;
   try {
     files = readdirSync(dir).filter((f) => /^index-.*\.ndjson$/.test(f));
   } catch (e) {
-    return { readable: false, why: `读不到账本目录（${e.code ?? e.message}）` };
+    return { readable: false, why: `读不到账本目录（${errCode(e) ?? messageOf(e)}）` };
   }
+  /** @type {LedgerRow[]} */
   const rows = [];
   for (const f of files) {
     for (const line of readFileSync(join(dir, f), 'utf8').split('\n')) {
@@ -651,6 +852,13 @@ function readLedger(uuid) {
 
 // ---------- PR ----------
 
+/**
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string} [cwd]
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
 function sh(cmd, args, cwd, env = process.env) {
   return execFileSync(cmd, args, {
     cwd,
@@ -663,18 +871,45 @@ function sh(cmd, args, cwd, env = process.env) {
   }).trim();
 }
 
-/** 审 PR 要的几样（测试换成假的）：gh、起会话、记录和锁放哪。这台没装 gh、git 在这儿报。 */
+/**
+ * 审 PR 要的几样（测试换成假的）：gh、起会话、记录和锁放哪。这台没装 gh、git 在这儿报。
+ * @param {string} repo
+ * @returns {ReviewDeps}
+ */
 function reviewDeps(repo) {
-  for (const [bin, forWhat] of [
+  /** @type {[string, string][]} */
+  const needed = [
     ['gh', '取 PR 的信息、贴结论'],
     ['git', '取 PR 的头、切审查树'],
-  ]) {
+  ];
+  for (const [bin, forWhat] of needed) {
     if (!findBin(bin)) throw new NotChecked(`这台机器没装 ${bin}（PATH 上找不到；审 PR 要它${forWhat}）`);
   }
   return { gh: (a) => gh(a, repo), session: runSession, runs: RUNS };
 }
 
+/**
+ * 主检出的根：`git worktree list` 的第一条永远是主检出（子树的注册表都挂在它下面）。
+ * 从主检出里跑就是它自己；从某棵工作树里跑，认出来的也是主检出——审查树按这个根建，不往工作树里套。
+ * @param {string} repo
+ * @returns {string}
+ */
+export function mainCheckout(repo) {
+  const listed = sh('git', ['worktree', 'list', '--porcelain'], repo);
+  const first = listed.split('\n').find((l) => l.startsWith('worktree '));
+  if (!first) throw new NotChecked('认不出主检出在哪：git worktree list 没给出一条');
+  return resolve(first.slice('worktree '.length).trim());
+}
+
+/**
+ * @param {string} repo
+ * @param {number} pr
+ * @param {number} slot
+ * @param {GhRun} ghRun
+ * @returns {PreparedPr}
+ */
 function preparePr(repo, pr, slot, ghRun) {
+  /** @type {PrInfo} */
   const info = JSON.parse(
     ghRun(['pr', 'view', String(pr), '--json', 'headRefOid,baseRefName,title,body,files,state,mergeCommit']),
   );
@@ -696,6 +931,7 @@ function preparePr(repo, pr, slot, ghRun) {
     () => sh('git', refs, repo),
     () => sh('git', ['-c', 'http.proxy=', '-c', 'https.proxy=', ...refs], repo, direct),
   ];
+  /** @type {string[]} */
   const errors = [];
   for (const t of tries) {
     try {
@@ -703,7 +939,7 @@ function preparePr(repo, pr, slot, ghRun) {
       errors.length = 0;
       break;
     } catch (e) {
-      errors.push(String(e.stderr ?? e.message).trim());
+      errors.push(String((isObjectLike(e) ? e.stderr : undefined) ?? messageOf(e)).trim());
     }
   }
   if (errors.length) throw new NotChecked(`git fetch 没成：${errors.join('；')}`);
@@ -712,7 +948,17 @@ function preparePr(repo, pr, slot, ghRun) {
     throw new NotChecked(`取回的头 ${got.slice(0, 7)} 和 PR 现在的头 ${info.headRefOid.slice(0, 7)} 对不上`);
   // 固定一棵树轮着用：Mirasim 把 codex 进程按工作目录留在池里，那个目录删不掉（Windows 报占用）。
   // 每轮切到这次的头、清掉上一轮的改动；node_modules 留着，下一轮装得快。
-  const tree = join(repo, '.claude', 'worktrees', slot === 1 ? 'second-opinion' : `second-opinion-${slot}`);
+  //
+  // 树一律建在**主检出**的 .claude/worktrees/ 下，不建在当前检出：从一棵工作树里调这个脚本（指挥官一边派工、
+  // 一边审 PR 是常事）时，按当前检出算会套出一棵 `…/820-env-page/.claude/worktrees/second-opinion` 的嵌套检出
+  // —— 它带着自己那份 biome.json，biome 整仓扫一遍报「nested root configuration」，把**这台机器上所有会话**
+  // 的推送全拦了；而清扫规则又按名字跳过 `second-opinion*`，谁也收不走它。2026-10-05 实测攒出两棵这种嵌套树。
+  const tree = join(
+    mainCheckout(repo),
+    '.claude',
+    'worktrees',
+    slot === 1 ? 'second-opinion' : `second-opinion-${slot}`,
+  );
   if (!existsSync(tree)) sh('git', ['worktree', 'add', '-q', '--detach', tree, got], repo);
   else {
     sh('git', ['-C', tree, 'checkout', '-q', '--force', '--detach', got], repo);
@@ -723,7 +969,13 @@ function preparePr(repo, pr, slot, ghRun) {
   return { ...info, head: got, tree, merged, mergeCommit };
 }
 
-/** 给审的人的题面。挡不挡由脚本按标签判（parseReview / judgeReview），所以每条必须改的两个标签是题面里的硬要求。 */
+/**
+ * 给审的人的题面。挡不挡由脚本按标签判（parseReview / judgeReview），所以每条必须改的两个标签是题面里的硬要求。
+ * @param {number} pr
+ * @param {PromptInfo} info
+ * @param {boolean} ui
+ * @param {boolean} fast
+ */
 export function reviewPrompt(pr, info, ui, fast) {
   const files = (info.files ?? []).map((f) => f.path);
   return [
@@ -771,7 +1023,11 @@ export function reviewPrompt(pr, info, ui, fast) {
 
 // ---------- 反方（拍板前的分析） ----------
 
-/** 反方的结论行。认不出 = null。 */
+/**
+ * 反方的结论行。认不出 = null。
+ * @param {unknown} text
+ * @returns {{ agree: boolean, objections: number } | null}
+ */
 export function parseCritique(text) {
   const lines = String(text ?? '')
     .split(/\r?\n/)
@@ -784,6 +1040,7 @@ export function parseCritique(text) {
   return n > 0 ? { agree: false, objections: n } : null;
 }
 
+/** @param {string} question */
 function blindPrompt(question) {
   return [
     '下面是一道设计题。独立给出你的方案：不知道别人怎么想，也不要迎合谁。',
@@ -800,6 +1057,7 @@ function blindPrompt(question) {
   ].join('\n');
 }
 
+/** @param {string} material */
 function critiquePrompt(material) {
   return [
     '你是「反方」：一个全新会话，另一家模型。下面是另一个 AI（总指挥）准备交给创始人拍板的分析和选项。',
@@ -828,13 +1086,15 @@ function critiquePrompt(material) {
   ].join('\n');
 }
 
+/** @param {Options & { text: string }} o */
 async function critique(o) {
   const src = resolve(o.text);
+  /** @type {string} */
   let material;
   try {
     material = readFileSync(src, 'utf8');
   } catch (e) {
-    throw new NotChecked(`读不到 ${src}（${e.code ?? e.message}）`);
+    throw new NotChecked(`读不到 ${src}（${errCode(e) ?? messageOf(e)}）`);
   }
   if (!material.trim()) throw new NotChecked(`${src} 是空的`);
   if (!o.blind) {
@@ -886,7 +1146,7 @@ async function critique(o) {
     console.log(out);
     process.exitCode = v ? (v.agree ? 0 : 1) : 2;
   } catch (e) {
-    writeFileSync(out, `# 反方：${name}：没查成\n\n- 题面：${src}\n- 原因：${e.message}\n`);
+    writeFileSync(out, `# 反方：${name}：没查成\n\n- 题面：${src}\n- 原因：${messageOf(e)}\n`);
     console.log(out);
     throw e;
   }
@@ -897,10 +1157,15 @@ async function critique(o) {
 // cursorAgentEnv 挪到 tools.mjs 了（ask.mjs、second-opinion.mjs 两边起 cursor-agent 都要用，见那边的注释）；
 // 这个文件顶部 import 了它、又 re-export 了它，用法不用变。
 
-/** 从 reclaude --output-format json 的结果里取正文；形状认不出就明确失败。 */
+/**
+ * 从 reclaude --output-format json 的结果里取正文；形状认不出就明确失败。
+ * @param {unknown} raw
+ * @returns {string}
+ */
 export function parseReclaudeOutput(raw) {
   const source = String(raw ?? '').trim();
   if (!source) throw new NotChecked('reclaude 退出码 0 但没有输出');
+  /** @type {unknown[]} */
   const values = [];
   try {
     values.push(JSON.parse(source));
@@ -915,13 +1180,17 @@ export function parseReclaudeOutput(raw) {
       }
     }
   }
+  /**
+   * @param {unknown} value
+   * @returns {string}
+   */
   const textOf = (value) => {
     if (typeof value === 'string') return value.trim();
     if (Array.isArray(value)) {
       const parts = value.map(textOf).filter(Boolean);
       return parts.join('\n').trim();
     }
-    if (!value || typeof value !== 'object') return '';
+    if (!isObjectLike(value)) return '';
     for (const key of ['result', 'text', 'response', 'content', 'output']) {
       const text = textOf(value[key]);
       if (text) return text;
@@ -937,6 +1206,10 @@ export function parseReclaudeOutput(raw) {
   throw new NotChecked('reclaude JSON 输出格式认不出（缺 result/text/content）');
 }
 
+/**
+ * @param {Pick<SessionOpts, 'prompt' | 'workdir' | 'timeoutMin' | 'log'>} opts
+ * @returns {Promise<SessionResult>}
+ */
 function runClaude({ prompt, workdir, timeoutMin, log }) {
   if (!findBin('reclaude'))
     return Promise.reject(new NotInstalled('这台机器没装 reclaude（PATH 上找不到；Claude 必须经 reclaude）'));
@@ -958,6 +1231,11 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
       // 执行体提前退出时写 stdin 会 EPIPE，最终以退出码和 stdout 为准。
     });
     child.stdin.end(prompt);
+    /**
+     * @template T
+     * @param {(v: T) => void} fn
+     * @param {T} value
+     */
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -971,8 +1249,8 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
       },
       Math.max(1, timeoutMin * 60_000),
     );
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
+    child.stdout.on('data', (/** @type {Buffer} */ d) => (out += d));
+    child.stderr.on('data', (/** @type {Buffer} */ d) => (err += d));
     child.on('error', (e) => finish(rejectP, new NotChecked(`reclaude 起不来：${e.message}`)));
     child.on('close', (code) => {
       if (code !== 0)
@@ -1004,9 +1282,17 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
 // 参数、题面从 stdin 喂给它，模型不用调任何工具就能看到题面（cursorAgentEnv() 留着一起用，多一层保险，不影响）。
 // 题面最前面塞一行随机核对码、要求原样抄进答案：退出码 0、有输出，但输出里没有核对码，照样判没查成，不会被
 // 「有输出就算答了」蒙混过去——不管读不到题面的原因是钩子拦的、权限，还是别的。
+/**
+ * @param {Pick<SessionOpts, 'prompt' | 'profile' | 'workdir' | 'timeoutMin' | 'log'>} opts
+ * @returns {Promise<SessionResult>}
+ */
 function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
   const problem = cursorAgentProblem();
   if (problem) return Promise.reject(new NotInstalled(problem));
+  const model = profile.model;
+  // 走 cursor-cli 的几家档案都写了模型；没写就不起（原来会把 null 当参数交给 cursor-agent）
+  if (model === null)
+    return Promise.reject(new NotChecked(`${profile.agent} 的档案没写模型，不知道让 cursor-agent 用哪个`));
   const nonce = randomUUID().slice(0, 8);
   const started = Date.now();
   log(`[0.0s] cursor-agent 起了（${profile.model}，只读，工作目录 ${workdir}）`);
@@ -1021,7 +1307,7 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
       '--workspace',
       workdir,
       '--model',
-      profile.model,
+      model,
     ];
     const child = spawn('cursor-agent', args, {
       cwd: workdir,
@@ -1037,8 +1323,8 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
     );
     let out = '';
     let err = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
+    child.stdout.on('data', (/** @type {Buffer} */ d) => (out += d));
+    child.stderr.on('data', (/** @type {Buffer} */ d) => (err += d));
     const timer = setTimeout(() => {
       child.kill();
       rejectP(new NotChecked(`cursor-agent ${timeoutMin} 分钟没答完，杀掉了`));
@@ -1077,6 +1363,10 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
   });
 }
 
+/**
+ * @param {SessionOpts} opts
+ * @returns {Promise<SessionResult>}
+ */
 async function runSession({
   prompt,
   profile,
@@ -1119,6 +1409,9 @@ async function runSession({
     );
   if (ack.type === 'error') throw new NotChecked(`Mirasim 拒了：${ack.message ?? JSON.stringify(ack)}`);
   const sessionKey = ack.sessionKey;
+  // 协议里 accepted 帧一定带会话号；没带就明说，别拿 undefined 去订阅、读账本
+  if (typeof sessionKey !== 'string' || !sessionKey)
+    throw new NotChecked(`Mirasim 应了、却没给会话号：${JSON.stringify(ack)}`);
   const secs = () => `${((Date.now() - since) / 1000).toFixed(1)}s`;
   log(
     `[${secs()}] 会话 ${sessionKey} 起了（${profile.agent} / ${profile.model} / 路由 ${profile.route ?? '自动'}）`,
@@ -1133,12 +1426,18 @@ async function runSession({
   }
 }
 
+/**
+ * @param {{ profile: Profile, url: string, sessionKey: string, since: number, timeoutMin: number, pollMs: number, log: Log, before: number | null, secs: () => string }} opts
+ * @returns {Promise<SessionResult>}
+ */
 async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs, log, before, secs }) {
   const deadline = since + timeoutMin * 60_000;
   let lastSig = '';
   let lastChange = Date.now();
+  /** @type {string | null} */
   let lastPhase = '';
   let misses = 0;
+  /** @type {SessionView | null} */
   let view = null;
   for (;;) {
     await new Promise((r) => setTimeout(r, pollMs));
@@ -1199,6 +1498,10 @@ async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs
   return { sessionKey, text: view.text, model: view.model, ledgerNote, usage };
 }
 
+/**
+ * @param {string} url
+ * @param {string} sessionKey
+ */
 async function stop(url, sessionKey) {
   const wire = new Wire(url);
   try {
@@ -1216,6 +1519,9 @@ async function stop(url, sessionKey) {
  * 把会话连它的目录和账本一起删掉（Mirasim 的 deleteSession）。第二意见每次都是一次性的：跑完就删，
  * 不留在会话列表里等人来清（创始人 2026-10-03：「在 mirasim 起一个会话，我根本不想看见它，并且我希望随时能清理掉」）。
  * 删之前账本要先读完（traffic/<uuid> 跟会话一起没）。删不掉不当成失败——结论已经拿到了，只如实说一句。
+ * @param {string} url
+ * @param {string} sessionKey
+ * @param {Log | undefined} log
  */
 async function forget(url, sessionKey, log) {
   const wire = new Wire(url);
@@ -1227,20 +1533,25 @@ async function forget(url, sessionKey, log) {
     if (r && r.type === 'error') log?.(`会话 ${sessionKey} 没删掉：${r.message ?? JSON.stringify(r)}`);
     else log?.(`会话 ${sessionKey} 已删（连目录和账本）`);
   } catch (e) {
-    log?.(`会话 ${sessionKey} 没删掉：${e.message}`);
+    log?.(`会话 ${sessionKey} 没删掉：${messageOf(e)}`);
   } finally {
     wire.close();
   }
 }
 
-/** 列本机 Mirasim 的会话（走 listSessions 帧）。读不到就抛，不当成「一个也没有」。 */
+/**
+ * 列本机 Mirasim 的会话（走 listSessions 帧）。读不到就抛，不当成「一个也没有」。
+ * @returns {Promise<NonNullable<Frame['sessions']>>}
+ */
 async function listSessions() {
   const { wire } = await connect();
   try {
     wire.send({ type: 'listSessions' });
     const m = await wire.waitFor((x) => x.type === 'sessions' && Array.isArray(x.sessions), 20_000);
     if (!m) throw new NotChecked('本机 Mirasim 没回会话列表（20 秒）');
-    return m.sessions;
+    const sessions = m.sessions;
+    if (!Array.isArray(sessions)) throw new NotChecked('本机 Mirasim 回的会话列表认不出');
+    return sessions;
   } finally {
     wire.close();
   }
@@ -1255,7 +1566,10 @@ const OUR_SESSION_TITLE = /^(你是 PR #\d+ 的「第二意见」|你是「反�
  */
 let KEEP_SESSION = false;
 
-/** 清掉我们（second-opinion / 反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。 */
+/**
+ * 清掉我们（second-opinion / 反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。
+ * @param {Log} log
+ */
 async function stopStale(log) {
   const { url } = await connect();
   const sessions = await listSessions();
@@ -1267,7 +1581,11 @@ async function stopStale(log) {
 }
 
 /** 贴到 PR 的正文：会话自己的过程话去掉，从「## 必须改」起照原样。 */
-/** 审查意见里本机目录（审查树、仓根）的绝对路径改成仓内相对路径：贴到公开仓的评论里不带本机目录（2026-09-26 #148 的补审评论带出过）。 */
+/**
+ * 审查意见里本机目录（审查树、仓根）的绝对路径改成仓内相对路径：贴到公开仓的评论里不带本机目录（2026-09-26 #148 的补审评论带出过）。
+ * @param {unknown} text
+ * @param {readonly unknown[]} dirs
+ */
 export function stripLocalPaths(text, dirs) {
   let out = String(text);
   for (const d of dirs) {
@@ -1282,6 +1600,7 @@ export function stripLocalPaths(text, dirs) {
 /**
  * 贴到 PR 的评论。第一行的格式别改：POSTED_REVIEW 靠它数轮（「第二意见 第 N 轮」「审的头 七位」「：通过 / 必须改 N 条」）。
  * 结论是脚本的判定，不是审的人自己写的那句；审的人的原文（从「必须改」那一段起）附在后面。
+ * @param {{ judged: Judgement, head: unknown, model: string, body: unknown, afterMerge?: boolean, mergeCommit?: string | null, roundNote?: string, note?: string }} opts
  */
 export function prComment({
   judged,
@@ -1313,7 +1632,12 @@ export function prComment({
 
 /** 贴之前按仓里的卫生检查扫一遍：没扫成、扫出真密钥，一律抛（不贴；账号、组织编号、邮箱、IP 这类标识不算泄漏，
  * 不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。 */
+/**
+ * @param {string} repo
+ * @param {string} body
+ */
 export async function checkPublishable(repo, body) {
+  /** @type {HygieneScan} */
   const scan = await import(pathToFileURL(join(repo, 'packages', 'hygiene', 'src', 'scan.ts')).href);
   const report = scan.scanFiles(['second-opinion.md'], () => Buffer.from(body, 'utf8'));
   if (report.binary.length > 0 || report.scanned.length !== 1) throw new Error('卫生检查没扫成，没贴');
@@ -1321,6 +1645,14 @@ export async function checkPublishable(repo, body) {
     throw new Error(`卫生检查拦下了（${report.findings.map(scan.formatFinding).join('；')}），没贴`);
 }
 
+/**
+ * @param {string} repo
+ * @param {number} pr
+ * @param {string} body
+ * @param {GhRun} ghRun
+ * @param {string} [runs]
+ * @returns {Promise<string>}
+ */
 async function postToPr(repo, pr, body, ghRun, runs = RUNS) {
   await checkPublishable(repo, body);
   mkdirSync(runs, { recursive: true });
@@ -1342,14 +1674,31 @@ async function postToPr(repo, pr, body, ghRun, runs = RUNS) {
   }
 }
 
-/** 这个头上现在的 second-opinion（GitHub 按新到旧排，取第一条）；没有回 undefined。读不到抛。 */
+/**
+ * 这个头上现在的 second-opinion（GitHub 按新到旧排，取第一条）；没有回 undefined。读不到抛。
+ * @param {GhRun} ghRun
+ * @param {string} head
+ * @returns {StatusRow | undefined}
+ */
 function currentSecondOpinion(ghRun, head) {
+  /** @type {unknown} */
   const all = JSON.parse(ghRun(['api', `repos/{owner}/{repo}/commits/${head}/statuses`]) || '[]');
   if (!Array.isArray(all)) throw new NotChecked(`${head.slice(0, 7)} 的提交状态认不出（不是列表）`);
-  return all.find((s) => s?.context === 'second-opinion');
+  /** @type {unknown[]} */
+  const rows = all;
+  return rows.find(
+    /** @returns {s is StatusRow} */
+    (s) => isObjectLike(s) && s.context === 'second-opinion',
+  );
 }
 
-/** 在审的那个头上写提交状态 second-opinion（合并闸在「先审后合」时认它，#74）。头变了旧状态自然不算。 */
+/**
+ * 在审的那个头上写提交状态 second-opinion（合并闸在「先审后合」时认它，#74）。头变了旧状态自然不算。
+ * @param {GhRun} ghRun
+ * @param {string} head
+ * @param {{ state: string, description: string }} status
+ * @param {string | undefined} [url]
+ */
 function setStatus(ghRun, head, { state, description }, url) {
   // 总指挥已经在这个头上放行过（审查跑到一半时放行的），就不拿这一轮的结论盖掉它；结论照样贴在 PR 评论里
   const current = currentSecondOpinion(ghRun, head);
@@ -1379,6 +1728,9 @@ function setStatus(ghRun, head, { state, description }, url) {
  * 这个 PR 之前审完、出了结论几轮：数本脚本贴过的结论评论（不管头变没变，第二意见和合并后补审都算）。
  * 读不到回 { prior: null, why }，调用方按第 1 轮算（宁可多挡）。不数 runs 目录：那里的文件名用的是调用方给的 --round，
  * 同一个头重跑会盖掉；#701 贴了 10 次、每次都写「第 1 轮」。
+ * @param {number} pr
+ * @param {GhRun} ghRun
+ * @returns {{ prior: number | null, why: string }}
  */
 export function reviewRounds(pr, ghRun) {
   try {
@@ -1389,6 +1741,7 @@ export function reviewRounds(pr, ghRun) {
       '--jq',
       '.[] | (.body // "") | @json',
     ]);
+    /** @type {unknown[]} */
     const bodies = String(out)
       .split('\n')
       .filter((l) => l.trim())
@@ -1400,14 +1753,21 @@ export function reviewRounds(pr, ghRun) {
   }
 }
 
-/** 一次命令失败的原因：stderr 第一行（没有就用 message），最多 200 字。 */
+/**
+ * 一次命令失败的原因：stderr 第一行（没有就用 message），最多 200 字。
+ * @param {unknown} e
+ */
 function errText(e) {
-  const s = String(e?.stderr ?? '').trim() || String(e?.message ?? e).trim();
+  const s = String((isObjectLike(e) ? e.stderr : undefined) ?? '').trim() || String(messageOf(e) ?? e).trim();
   const first = s.split(/\r?\n/).find((l) => l.trim()) ?? s;
   return first.length > 200 ? `${first.slice(0, 200)}…` : first;
 }
 
-/** gh 走代理时好时坏（2026-09-25 实测）：先照常，不行再绕开代理直连。 */
+/**
+ * gh 走代理时好时坏（2026-09-25 实测）：先照常，不行再绕开代理直连。
+ * @param {string[]} args
+ * @param {string} [cwd]
+ */
 function gh(args, cwd) {
   const { https_proxy, http_proxy, HTTPS_PROXY, HTTP_PROXY, ...direct } = process.env;
   try {
@@ -1417,7 +1777,10 @@ function gh(args, cwd) {
   }
 }
 
-/** 要审的仓：--repo 给了用它，没给用当前目录所在的 git 检出 */
+/**
+ * 要审的仓：--repo 给了用它，没给用当前目录所在的 git 检出
+ * @param {Options} o
+ */
 function repoOf(o) {
   if (o.repo) return resolve(o.repo);
   try {
@@ -1440,19 +1803,23 @@ export const RISK_PATHS_FILE = 'packages/conventions/high-risk-paths.json';
 /**
  * 主线上那份清单 → 每条的路径、是不是先合后审（认最具体的那条要用全部）。认不出回一句为什么（调用方判没查成）：
  * 不是 JSON、没有 paths、有一条没有 path、review 写了 after-merge 以外的东西。
+ * @param {string} text
+ * @returns {RiskRule[] | string}
  */
 export function riskRules(text) {
+  /** @type {unknown} */
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    return `不是合法的 JSON（${e.message}）`;
+    return `不是合法的 JSON（${messageOf(e)}）`;
   }
-  const paths = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.paths : undefined;
+  const paths = isObjectLike(raw) && !Array.isArray(raw) ? raw.paths : undefined;
   if (!Array.isArray(paths) || paths.length === 0) return '没有 paths 列表（或是空的）';
+  /** @type {RiskRule[]} */
   const rules = [];
   for (const [i, item] of paths.entries()) {
-    if (!item || typeof item !== 'object' || typeof item.path !== 'string' || !item.path.trim())
+    if (!isObjectLike(item) || typeof item.path !== 'string' || !item.path.trim())
       return `paths 第 ${i + 1} 条认不出（没有 path）`;
     if (item.review !== undefined && item.review !== 'after-merge')
       return `paths 第 ${i + 1} 条（${item.path}）的 review「${String(item.review)}」认不出`;
@@ -1461,8 +1828,14 @@ export function riskRules(text) {
   return rules;
 }
 
-/** 改到的文件里按「最具体（路径最长）的那条规则」算是先合后审的；改名的新旧名字都算（和合并闸的 riskyFiles 一个判法）。 */
+/**
+ * 改到的文件里按「最具体（路径最长）的那条规则」算是先合后审的；改名的新旧名字都算（和合并闸的 riskyFiles 一个判法）。
+ * @param {readonly ChangedFile[]} files
+ * @param {readonly RiskRule[]} rules
+ * @returns {string[]}
+ */
 export function afterMergeHits(files, rules) {
+  /** @type {string[]} */
   const hits = [];
   for (const f of files) {
     for (const name of [f.path, f.previous]) {
@@ -1476,41 +1849,59 @@ export function afterMergeHits(files, rules) {
   return hits;
 }
 
-/** `git log -z --name-status --format=%x01%H %cI` 的输出 → 每个提交改了哪些文件（改名、复制带上旧名字）。认不出抛。 */
+/**
+ * `git log -z --name-status --format=%x01%H %cI` 的输出 → 每个提交改了哪些文件（改名、复制带上旧名字）。认不出抛。
+ * @param {unknown} stdout
+ * @returns {LoggedCommit[]}
+ */
 export function parseNameStatusLog(stdout) {
+  /** @type {LoggedCommit[]} */
   const commits = [];
   for (const chunk of String(stdout).split('\x01').slice(1)) {
     const cut = chunk.indexOf('\0');
     const header = (cut < 0 ? chunk : chunk.slice(0, cut)).trim();
     const m = /^([0-9a-f]{40}) (\S+)$/.exec(header);
     if (!m) throw new NotChecked(`git log 的输出认不出（提交那一行是「${header.slice(0, 60)}」）`);
+    const [, sha = '', date = ''] = m;
     const tokens = (cut < 0 ? '' : chunk.slice(cut + 1)).split('\0').map((t) => t.replace(/^\n/, ''));
+    /** @type {ChangedFile[]} */
     const files = [];
     for (let i = 0; i < tokens.length; ) {
-      const st = tokens[i];
+      const st = tokens[i] ?? '';
       if (st === '') {
         i++;
         continue;
       }
       if (!/^[ACDMRTUXB]\d*$/.test(st))
-        throw new NotChecked(
-          `git log 的输出认不出（${m[1].slice(0, 7)} 的改动状态是「${st.slice(0, 20)}」）`,
-        );
+        throw new NotChecked(`git log 的输出认不出（${sha.slice(0, 7)} 的改动状态是「${st.slice(0, 20)}」）`);
       const two = st[0] === 'R' || st[0] === 'C';
       const names = tokens.slice(i + 1, i + (two ? 3 : 2));
-      if (names.length !== (two ? 2 : 1) || names.some((n) => !n))
-        throw new NotChecked(`git log 的输出认不出（${m[1].slice(0, 7)} 少了文件名）`);
-      files.push(two ? { path: names[1], previous: names[0] } : { path: names[0] });
-      i += two ? 3 : 2;
+      const [first, second] = names;
+      if (two) {
+        if (names.length !== 2 || !first || !second)
+          throw new NotChecked(`git log 的输出认不出（${sha.slice(0, 7)} 少了文件名）`);
+        files.push({ path: second, previous: first });
+        i += 3;
+      } else {
+        if (names.length !== 1 || !first)
+          throw new NotChecked(`git log 的输出认不出（${sha.slice(0, 7)} 少了文件名）`);
+        files.push({ path: first });
+        i += 2;
+      }
     }
-    commits.push({ sha: m[1], date: m[2], files });
+    commits.push({ sha, date, files });
   }
   return commits;
 }
 
+/** @type {Set<string>} */
 const SO_STATES = new Set(['success', 'failure', 'error', 'pending', 'expected']);
 
-/** 一次问 GitHub：这几个主线提交各是哪个 PR 合进来的、那个 PR 头上的 second-opinion 是什么。 */
+/**
+ * 一次问 GitHub：这几个主线提交各是哪个 PR 合进来的、那个 PR 头上的 second-opinion 是什么。
+ * @param {readonly string[]} shas
+ * @returns {string}
+ */
 export function prsOfCommitsQuery(shas) {
   const pr =
     'number title state mergedAt headRefOid baseRefName mergeCommit { oid } commits(last: 1) { nodes { commit { oid status { context(name: "second-opinion") { state description } } } } }';
@@ -1525,15 +1916,19 @@ export function prsOfCommitsQuery(shas) {
  * 每个碰了先合后审路径的主线提交对到 PR 上（合并提交对得上的优先，其次合进 main 的），按 PR 头上的 second-opinion 分：
  * done（success）、failed（failure：补审没过，等修复或 revert）、unreviewed（没有、pending、error）。对不上 PR 的进 problems。
  * GitHub 回的样子认不出抛 NotChecked。
+ * @param {readonly Candidate[]} candidates
+ * @param {unknown} repoData
+ * @returns {Classified}
  */
 export function classifyAfterMerge(candidates, repoData) {
-  if (!repoData || typeof repoData !== 'object')
-    throw new NotChecked('GitHub 回的 GraphQL 认不出（没有 data.repository）');
+  if (!isObjectLike(repoData)) throw new NotChecked('GitHub 回的 GraphQL 认不出（没有 data.repository）');
+  /** @type {Map<number, MergedPr>} */
   const byPr = new Map();
+  /** @type {string[]} */
   const problems = [];
   candidates.forEach((c, i) => {
     const where = `${c.sha.slice(0, 7)}（改到 ${c.hits.join('、')}）`;
-    const node = repoData[`c${i}`];
+    const node = /** @type {GraphqlCommit} */ (repoData[`c${i}`]);
     if (node == null) {
       problems.push(`${where}：GitHub 上找不到这个提交`);
       return;
@@ -1541,30 +1936,39 @@ export function classifyAfterMerge(candidates, repoData) {
     const nodes = node.associatedPullRequests?.nodes;
     if (!Array.isArray(nodes))
       throw new NotChecked(`GitHub 回的 ${c.sha.slice(0, 7)} 认不出（没有 associatedPullRequests）`);
+    // 下面对每个要用的字段都有显式判断（number、headRefOid、状态），GitHub 回的样子不对就抛 NotChecked
+    const prs = /** @type {(GraphqlPr | null | undefined)[]} */ (nodes);
     const pr =
-      nodes.find((p) => p?.mergeCommit?.oid === c.sha) ??
-      nodes.find((p) => p?.state === 'MERGED' && p?.baseRefName === 'main');
+      prs.find((p) => p?.mergeCommit?.oid === c.sha) ??
+      prs.find((p) => p?.state === 'MERGED' && p?.baseRefName === 'main');
     if (!pr) {
       problems.push(`${where}：找不到合它进主线的 PR（直接推到主线的？没法按 PR 补审）`);
       return;
     }
     const head = pr.commits?.nodes?.[0]?.commit;
-    if (!Number.isInteger(pr.number) || typeof pr.headRefOid !== 'string' || head?.oid !== pr.headRefOid)
-      throw new NotChecked(`GitHub 回的 #${pr.number ?? '?'} 认不出（读不到它的头）`);
+    const number = pr.number;
+    const headOid = pr.headRefOid;
+    if (
+      typeof number !== 'number' ||
+      !Number.isInteger(number) ||
+      typeof headOid !== 'string' ||
+      head?.oid !== headOid
+    )
+      throw new NotChecked(`GitHub 回的 #${number ?? '?'} 认不出（读不到它的头）`);
     const raw = head.status?.context?.state;
     const state = raw == null ? null : String(raw).toLowerCase();
     if (state !== null && !SO_STATES.has(state))
-      throw new NotChecked(`#${pr.number} 头上的 second-opinion 状态「${raw}」认不出`);
-    const seen = byPr.get(pr.number);
+      throw new NotChecked(`#${number} 头上的 second-opinion 状态「${raw}」认不出`);
+    const seen = byPr.get(number);
     if (seen) {
       for (const h of c.hits) if (!seen.files.includes(h)) seen.files.push(h);
       return;
     }
-    byPr.set(pr.number, {
-      number: pr.number,
+    byPr.set(number, {
+      number,
       title: String(pr.title ?? ''),
       mergedAt: pr.mergedAt ?? null,
-      head: pr.headRefOid,
+      head: headOid,
       mergeCommit: typeof pr.mergeCommit?.oid === 'string' ? pr.mergeCommit.oid : c.sha,
       files: [...c.hits],
       state,
@@ -1584,6 +1988,8 @@ export function classifyAfterMerge(candidates, repoData) {
  * 合并后待补审的。git、gh 是起命令的两样（失败抛错、成功回 stdout）；fetchMain 不给就不取远端（开会话钩子刚取过）。
  * 读不到、认不出一律抛 NotChecked（调用方判没查成），不当成「没有待补审的」。主线上的清单还没有 after-merge 的条目时
  * 列表就是空的——那是真没有，不是没查成。
+ * @param {{ git: (args: string[]) => string, gh: GhRun, fetchMain?: (() => void) | null, now?: number, days?: number }} deps
+ * @returns {Pending}
  */
 export function pendingAfterMerge({
   git,
@@ -1608,10 +2014,12 @@ export function pendingAfterMerge({
   const rules = riskRules(listText);
   if (typeof rules === 'string') throw new NotChecked(`主线上的 ${RISK_PATHS_FILE} ${rules}`);
   const afterMergePaths = rules.filter((r) => r.afterMerge).map((r) => r.path);
+  /** @type {Omit<Pending, 'since' | 'note'>} */
   const base = { days, afterMergePaths, done: [], failed: [], unreviewed: [], problems: [] };
   if (afterMergePaths.length === 0)
     return { ...base, since: null, note: '主线上的清单还没有标 review: after-merge 的条目' };
   // 先合后审从哪天起：这个标记第一次出现在主线上的那个提交（-S 列的是标记个数变了的提交，最后一行最早）
+  /** @type {string} */
   let intro;
   try {
     intro = git([
@@ -1632,7 +2040,9 @@ export function pendingAfterMerge({
   if (!Number.isFinite(startedAt))
     throw new NotChecked(`查不出先合后审是哪天起的（git log -S 的输出认不出：「${oldest.slice(0, 60)}」）`);
   const since = new Date(Math.max(now - days * 86_400_000, startedAt)).toISOString();
+  /** @type {string} */
   let logText;
+  /** @type {string} */
   let count;
   try {
     logText = git([
@@ -1661,6 +2071,7 @@ export function pendingAfterMerge({
     .map((c) => ({ ...c, hits: afterMergeHits(c.files, rules) }))
     .filter((c) => c.hits.length > 0);
   if (candidates.length === 0) return { ...base, since };
+  /** @type {unknown} */
   let data;
   try {
     const out = ghRun([
@@ -1682,10 +2093,14 @@ export function pendingAfterMerge({
 }
 
 const SWEEP_HINT = '--after-merge-sweep --author-family <写它的模型族>';
+/** @param {MergedPr} p */
 const prLine = (p) =>
   `- #${p.number} ${p.title}（合并于 ${String(p.mergedAt ?? '?').slice(0, 10)}，改到 ${p.files.join('、')}）`;
 
-/** --after-merge-pending 给人看的那几行。 */
+/**
+ * --after-merge-pending 给人看的那几行。
+ * @param {Pending} p
+ */
 export function formatPending(p) {
   if (p.note) return `没有合并后待补审的：${p.note}。`;
   const out = [
@@ -1707,7 +2122,10 @@ export function formatPending(p) {
   return out.join('\n');
 }
 
-/** 取一次主线（和审 PR 时一样：先照常取，不行再绕开代理直连）。 */
+/**
+ * 取一次主线（和审 PR 时一样：先照常取，不行再绕开代理直连）。
+ * @param {string} repo
+ */
 function fetchMain(repo) {
   const refs = ['fetch', '-q', 'origin', 'main'];
   const { https_proxy, http_proxy, HTTPS_PROXY, HTTP_PROXY, ...direct } = process.env;
@@ -1722,11 +2140,14 @@ function fetchMain(repo) {
   }
 }
 
-/** 起 git、gh 的真家伙（测试换成假的）：失败抛错，成功回 stdout。 */
+/**
+ * 起 git、gh 的真家伙（测试换成假的）：失败抛错，成功回 stdout。
+ * @param {string} repo
+ */
 function realDeps(repo) {
   return {
-    git: (a) => sh('git', a, repo),
-    gh: (a) => {
+    git: (/** @type {string[]} */ a) => sh('git', a, repo),
+    gh: (/** @type {string[]} */ a) => {
       if (!findBin('gh')) throw new Error('这台机器没装 gh（PATH 上找不到）');
       return gh(a, repo);
     },
@@ -1736,20 +2157,27 @@ function realDeps(repo) {
 
 // ---------- 锁：同一个 PR 同时只跑一轮，不同 PR 可以并行（创始人 2026-10-03 晚：原来一把全局锁，不同 PR 也互相排队） ----------
 
-/** 拿着锁的那个进程还在不在（没权限发信号也算在）。 */
+/**
+ * 拿着锁的那个进程还在不在（没权限发信号也算在）。
+ * @param {number} pid
+ */
 function isAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return e?.code === 'EPERM';
+    return errCode(e) === 'EPERM';
   }
 }
 
 /**
  * 拿一把锁（文件 <dir>/.lock-<name>，里面是进程号）：拿着的进程还活着就抛 NotChecked；进程已死的陈旧锁直接盖掉。
  * 返回放锁的函数；进程退出时也放。dir / pid / alive 只给测试换。
+ * @param {string} name
+ * @param {string} why
+ * @param {LockOptions} [opts]
+ * @returns {() => void}
  */
 export function takeLock(name, why, { dir = RUNS, pid = process.pid, alive = isAlive } = {}) {
   mkdirSync(dir, { recursive: true });
@@ -1767,10 +2195,16 @@ export function takeLock(name, why, { dir = RUNS, pid = process.pid, alive = isA
   return release;
 }
 
-/** 每个位子一棵审查树（固定几棵轮着用，见 preparePr）：没指定 --slot 就挑第一个空着的；都被占着照实报。 */
+/**
+ * 每个位子一棵审查树（固定几棵轮着用，见 preparePr）：没指定 --slot 就挑第一个空着的；都被占着照实报。
+ * @param {{ slotGiven?: boolean | undefined, slot: number }} o
+ * @param {LockOptions} [deps]
+ * @returns {{ slot: number, release: () => void }}
+ */
 export function takeSlot(o, deps = {}) {
   if (o.slotGiven && (!Number.isInteger(o.slot) || o.slot < 1 || o.slot > 4))
     throw new NotChecked('--slot 只能是 1–4');
+  /** @type {string[]} */
   const busy = [];
   for (const slot of o.slotGiven ? [o.slot] : [1, 2, 3, 4]) {
     try {
@@ -1780,12 +2214,15 @@ export function takeSlot(o, deps = {}) {
       busy.push(e.message);
     }
   }
-  throw new NotChecked(o.slotGiven ? busy[0] : `四棵审查树都有人在用：${busy.join('；')}`);
+  // 指定了位子就只试过它一个，busy 里只有一条，join 出来就是那一条
+  throw new NotChecked(o.slotGiven ? busy.join('；') : `四棵审查树都有人在用：${busy.join('；')}`);
 }
 
 /**
  * 审一个 PR（开着的、已经合并的都行）：起会话、按标签和轮数判、贴评论、写提交状态。
  * 返回退出码：0 通过、1 必须改、2 没查成（结果格式认不出、状态没写上）；起会话这类没查成抛 NotChecked。
+ * @param {{ o: Options, repo: string, pr: number, log: Log, deps?: ReviewDeps }} opts
+ * @returns {Promise<number>}
  */
 export async function reviewPr({ o, repo, pr, log, deps = reviewDeps(repo) }) {
   const chain = prProfiles(o); // 作者族不对先在这儿报，别等树切好了才说
@@ -1800,6 +2237,10 @@ export async function reviewPr({ o, repo, pr, log, deps = reviewDeps(repo) }) {
   }
 }
 
+/**
+ * @param {{ o: Options, repo: string, pr: number, log: Log, chain: Profile[], slot: number, deps: ReviewDeps }} opts
+ * @returns {Promise<number>}
+ */
 async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
   const info = preparePr(repo, pr, slot, deps.gh);
   const counted = reviewRounds(pr, deps.gh);
@@ -1813,7 +2254,7 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
   mkdirSync(deps.runs, { recursive: true });
   const out = join(deps.runs, `pr${pr}-${info.head.slice(0, 7)}-r${round}.md`);
   log(
-    `PR #${pr} 头 ${info.head.slice(0, 7)}${afterMerge ? `（已合并，合并提交 ${info.mergeCommit.slice(0, 7)}：合并后补审）` : ''}，工作树 ${info.tree}；${roundNote}`,
+    `PR #${pr} 头 ${info.head.slice(0, 7)}${afterMerge ? `（已合并，合并提交 ${String(info.mergeCommit).slice(0, 7)}：合并后补审）` : ''}，工作树 ${info.tree}；${roundNote}`,
   );
   try {
     // 默认快：中等思考强度、只看 diff、不跑测试，和 CI 同时跑（创始人 2026-09-25 定的关卡时间预算）；--slow 才走老的完整审法
@@ -1890,8 +2331,8 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
         );
         log(`贴到了 PR：${url}`);
       } catch (e) {
-        log(`没贴上 PR：${e.message}`);
-        appendFileSync(out, `\n（没贴上 PR：${e.message}）\n`);
+        log(`没贴上 PR：${messageOf(e)}`);
+        appendFileSync(out, `\n（没贴上 PR：${messageOf(e)}）\n`);
       }
       try {
         setStatus(deps.gh, info.head, status, url);
@@ -1905,23 +2346,31 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
     }
     if (afterMerge && !judged.pass)
       console.log(
-        `合并后补审没过：开修复 PR，或 git revert ${info.mergeCommit.slice(0, 7)}；修复合了跑 --after-merge-resolve ${pr} --by <修复 PR 号>`,
+        `合并后补审没过：开修复 PR，或 git revert ${String(info.mergeCommit).slice(0, 7)}；修复合了跑 --after-merge-resolve ${pr} --by <修复 PR 号>`,
       );
     return code;
   } catch (e) {
     writeFileSync(
       out,
-      `# PR #${pr} ${who} 第 ${round} 轮：没查成\n\n- 审的头：${info.head}\n- 原因：${e.message}\n`,
+      `# PR #${pr} ${who} 第 ${round} 轮：没查成\n\n- 审的头：${info.head}\n- 原因：${messageOf(e)}\n`,
     );
     console.log(out);
     throw e;
   }
 }
 
-/** 退出码合起来：有没查成的算 2，否则有必须改的算 1。 */
+/**
+ * 退出码合起来：有没查成的算 2，否则有必须改的算 1。
+ * @param {number} a
+ * @param {number} b
+ */
 const worse = (a, b) => (a === 2 || b === 2 ? 2 : Math.max(a, b));
 
-/** --after-merge-sweep：把还没补审的逐个审一遍（补审没过的不重跑，见本段开头）。 */
+/**
+ * --after-merge-sweep：把还没补审的逐个审一遍（补审没过的不重跑，见本段开头）。
+ * @param {{ o: Options, repo: string, log: Log }} opts
+ * @returns {Promise<number>}
+ */
 async function afterMergeSweep({ o, repo, log }) {
   prProfiles(o); // 作者族先核
   const p = pendingAfterMerge({ ...realDeps(repo), fetchMain: o.noFetch ? null : () => fetchMain(repo) });
@@ -1932,7 +2381,7 @@ async function afterMergeSweep({ o, repo, log }) {
     try {
       code = worse(code, await reviewPr({ o, repo, pr: item.number, log }));
     } catch (e) {
-      log(`#${item.number} 没查成：${e.message}`);
+      log(`#${item.number} 没查成：${messageOf(e)}`);
       code = 2;
     }
   }
@@ -1942,37 +2391,50 @@ async function afterMergeSweep({ o, repo, log }) {
 /**
  * --after-merge-resolve <原 PR> --by <修复或 revert 的 PR>：补审没过的问题已经修好、合进主线，在原 PR 的头上写通过，
  * 待补审清单就不再列它。只认「原 PR 头上是补审没过」「修复 PR 已合并」这两样都对得上的，免得拿它绕过补审。
+ * @param {{ o: Options, repo: string, log: Log, deps?: ReviewDeps | null }} opts
+ * @returns {Promise<number>}
  */
 export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
-  if (!Number.isInteger(o.resolve) || o.resolve <= 0 || !Number.isInteger(o.by) || o.by <= 0)
+  const { resolve: original, by } = o;
+  if (
+    typeof original !== 'number' ||
+    !Number.isInteger(original) ||
+    original <= 0 ||
+    typeof by !== 'number' ||
+    !Number.isInteger(by) ||
+    by <= 0
+  )
     throw new NotChecked('要 --after-merge-resolve <原 PR 号> --by <修复或 revert 的 PR 号>');
-  if (o.resolve === o.by) throw new NotChecked('--by 不能是它自己');
+  if (original === by) throw new NotChecked('--by 不能是它自己');
   const deps = given ?? reviewDeps(repo);
+  /** @param {number} n */
   const view = (n) =>
-    JSON.parse(deps.gh(['pr', 'view', String(n), '--json', 'number,state,title,headRefOid,mergeCommit']));
-  const orig = view(o.resolve);
-  const fix = view(o.by);
+    /** @type {PrView} */ (
+      JSON.parse(deps.gh(['pr', 'view', String(n), '--json', 'number,state,title,headRefOid,mergeCommit']))
+    );
+  const orig = view(original);
+  const fix = view(by);
   if (orig.state !== 'MERGED')
     throw new NotChecked(
-      `#${o.resolve} 不是已合并的 PR（${orig.state}）：没合并的照常审（--pr），不走合并后补审`,
+      `#${original} 不是已合并的 PR（${orig.state}）：没合并的照常审（--pr），不走合并后补审`,
     );
   if (fix.state !== 'MERGED')
-    throw new NotChecked(`#${o.by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
+    throw new NotChecked(`#${by} 还没合并（${fix.state}）：修复或 revert 合进主线之后再记`);
   const current = currentSecondOpinion(deps.gh, orig.headRefOid);
   if (current?.state === 'success') {
-    console.log(`#${o.resolve} 头上的 second-opinion 已经是通过（${current.description}），不用再记`);
+    console.log(`#${original} 头上的 second-opinion 已经是通过（${current.description}），不用再记`);
     return 0;
   }
   if (current?.state !== 'failure')
     throw new NotChecked(
-      `#${o.resolve} 头上的 second-opinion 是「${current?.state ?? '没有'}」，不是补审没过：还没补审的先跑 --after-merge-sweep`,
+      `#${original} 头上的 second-opinion 是「${current?.state ?? '没有'}」，不是补审没过：还没补审的先跑 --after-merge-sweep`,
     );
   const fixAt = String(fix.mergeCommit?.oid ?? '').slice(0, 7);
   let url;
   try {
     url = await postToPr(
       repo,
-      o.resolve,
+      original,
       [
         `**合并后补审：已处理**——补审没过的问题由 #${fix.number}（${fix.title}${fixAt ? `，合并提交 ${fixAt}` : ''}）处理。`,
         '',
@@ -1983,7 +2445,7 @@ export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
     );
     log(`贴到了 PR：${url}`);
   } catch (e) {
-    log(`没贴上 PR：${e.message}`);
+    log(`没贴上 PR：${messageOf(e)}`);
   }
   setStatus(
     deps.gh,
@@ -1991,11 +2453,16 @@ export async function afterMergeResolve({ o, repo, log, deps: given = null }) {
     { state: 'success', description: `合并后补审没过的问题已由 #${fix.number} 处理` },
     url,
   );
-  console.log(`#${o.resolve} 记成已处理（由 #${fix.number}）：头 ${orig.headRefOid.slice(0, 7)} 上写了通过`);
+  console.log(`#${original} 记成已处理（由 #${fix.number}）：头 ${orig.headRefOid.slice(0, 7)} 上写了通过`);
   return 0;
 }
 
+/**
+ * @param {string[]} argv
+ * @returns {Options}
+ */
 function args(argv) {
+  /** @type {Options} */
   const o = { timeoutMin: 45, ui: false, slot: 1 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -2040,7 +2507,13 @@ function args(argv) {
   return o;
 }
 
+/** @param {string} repo */
 async function selftest(repo) {
+  /**
+   * @param {unknown} a
+   * @param {unknown} b
+   * @param {string} what
+   */
   const eq = (a, b, what) => {
     if (JSON.stringify(a) !== JSON.stringify(b))
       throw new Error(`${what}：要 ${JSON.stringify(b)}，得 ${JSON.stringify(a)}`);
@@ -2060,6 +2533,12 @@ async function selftest(repo) {
   eq(judgeSnapshot({}).status, 'unknown', '没有 phase');
   eq(judgeSnapshot({ phase: 'done', error: null }).status, 'done', '真完工');
   const t0 = Date.parse('2026-09-25T10:00:00Z');
+  /**
+   * @param {string} ts
+   * @param {number} status
+   * @param {boolean} viaRelay
+   * @param {string} [upstreamHost]
+   */
   const row = (ts, status, viaRelay, upstreamHost = 'relay') => ({ ts, status, viaRelay, upstreamHost });
   eq(judgeLedger([row('2026-09-25T10:00:05Z', 200, true)], t0, true).ok, true, '中继成功');
   eq(judgeLedger([row('2026-09-25T09:00:00Z', 200, true)], t0, true).ok, false, '只有起针前的行');
@@ -2067,6 +2546,10 @@ async function selftest(repo) {
   eq(judgeLedger([row('2026-09-25T10:00:05Z', 429, true)], t0, true).ok, false, '只有失败行');
   eq(judgeLedger([], t0, true).ok, false, '空账本');
   // 挡不挡由脚本判（规矩钉在 agents/test/rules/second-opinion-verdict.rules.test.ts，这里只抽几条）
+  /**
+   * @param {string} text
+   * @param {number} round
+   */
   const judged = (text, round) => {
     const p = parseReview(text);
     return p.ok ? judgeReview(p, round).pass : null;
@@ -2086,6 +2569,7 @@ async function selftest(repo) {
   eq(judged('## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：通过', 1), false, '审的人说通过也照挡');
   eq(judged('只有一句话\n结论：通过', 1), null, '没有必须改那一段认不出');
   const parsed = parseReview('我先读规矩……\n## 必须改\n- 【现实】【其他】`a.ts:1` 问题\n结论：必须改 1 条');
+  if (!parsed.ok) throw new Error(`贴 PR 的样例解析不出：${parsed.why}`);
   const c = prComment({
     judged: judgeReview(parsed, 1),
     head: 'abcdef1234',
@@ -2101,6 +2585,7 @@ async function selftest(repo) {
   // 卫生检查：扫出真密钥不贴、干净的放行（卫生检查的代码用 repo 里那份；账号、组织编号、邮箱、IP 这类标识不算
   // 泄漏，不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）
   const leakToken = ['ghp', 'Q3mNz8VbTf6RpLc2WdYs5HuXa9GjKe4B'].join('_');
+  /** @param {Promise<unknown>} p */
   const rejects = async (p) =>
     p.then(
       () => false,
@@ -2142,9 +2627,7 @@ async function main() {
     for (const s of list) {
       const ours = OUR_SESSION_TITLE.test(String(s.title ?? '')) ? '第二意见' : '别的';
       console.log(
-        `${s.sessionKey}\t${s.runState ?? '?'}\t${ours}\t${String(s.title ?? '')
-          .split('\n')[0]
-          .slice(0, 40)}`,
+        `${s.sessionKey}\t${s.runState ?? '?'}\t${ours}\t${(String(s.title ?? '').split('\n')[0] ?? '').slice(0, 40)}`,
       );
     }
     return;
@@ -2172,6 +2655,7 @@ async function main() {
     process.exitCode = parseVerdict(r.text)?.pass ? 0 : 2;
     return;
   }
+  /** @type {Log} */
   const log = (s) => console.error(s);
   if (o.roundGiven) log('--round 不再起作用：第几轮由脚本数这个 PR 上已经贴过的结论评论（不管头变没变）');
   // 合并后补审：列、记成已处理都不审东西；要不要 --high-risk 不相干（清单里标 review: after-merge 的本来就是先审后合的路径）
@@ -2195,7 +2679,8 @@ async function main() {
     process.exitCode = 3;
     return;
   }
-  if (o.text) return await critique({ ...o, timeoutMin: o.timeoutMin === 45 ? 0.5 : o.timeoutMin });
+  if (o.text)
+    return await critique({ ...o, text: o.text, timeoutMin: o.timeoutMin === 45 ? 0.5 : o.timeoutMin });
   if (o.afterMergeSweep) {
     const repo = repoOf(o);
     for (const bin of ['git', 'gh'])
@@ -2203,22 +2688,29 @@ async function main() {
     process.exitCode = await afterMergeSweep({ o, repo, log });
     return;
   }
-  if (!Number.isInteger(o.pr) || o.pr <= 0)
+  const pr = o.pr;
+  if (pr === undefined || !Number.isInteger(pr) || pr <= 0)
     throw new NotChecked('要 --pr <号>、--text <文件>，或 --after-merge-pending / --after-merge-sweep');
-  process.exitCode = await reviewPr({ o, repo: repoOf(o), pr: o.pr, log });
+  process.exitCode = await reviewPr({ o, repo: repoOf(o), pr, log });
 }
 
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
 }
 
 // 被测试 import 时不跑
 if (isMain()) {
   main().catch((e) => {
-    console.error(e instanceof NotChecked || e instanceof NotInstalled ? `没查成：${e.message}` : e.stack);
+    console.error(
+      e instanceof NotChecked || e instanceof NotInstalled
+        ? `没查成：${e.message}`
+        : isObjectLike(e)
+          ? e.stack
+          : undefined,
+    );
     process.exitCode = 2;
   });
 }

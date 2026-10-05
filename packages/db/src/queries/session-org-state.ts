@@ -1,0 +1,113 @@
+// 会话用户切号的账本和锁（#194，方案 v2 第六节第 13 条）。账本本体 doc 的形状由引擎认（engine 的 real/org-ledger.ts），
+// 这里只管存、取、拿锁、放锁：
+// - 取：没有这一行回 null（引擎当作「从没切过」）；有就原样给 doc，认不认得出由引擎判，认不出它会明确失败。
+// - 锁：单飞，一次只一个拿着；过期的（引擎做到一半重启没放）下一个能拿；同一个持有人可以重入续期。
+import { QUOTA_RESERVE_SETTING } from '@fleet-dao/shared';
+import { and, desc, eq, isNull, lt, or } from 'drizzle-orm';
+import type { Db } from '../client.ts';
+import { sessionOrgState, settings } from '../schema/index.ts';
+
+/** 设置表里「引擎暂不用独享」那一项的键（值是布尔；驾驶舱设置页改，web-api 的 SETTING_SCHEMAS 里同名）。 */
+export const SOLO_PAUSED_SETTING = 'engine.soloPaused';
+
+export type SoloPausedReading =
+  | { state: 'off' }
+  | { state: 'on'; since: Date; by: string | null }
+  /** 设置的值不是布尔（被人直接改库、旧数据）：认不出，调用方按「暂停」办（保守：不动创始人的独享）并报错。 */
+  | { state: 'unreadable'; since: Date; by: string | null; why: string };
+
+/** 读「引擎暂不用独享」：没设过 = 关；值是 true = 开；其余认不出（不当成关）。库读不了照抛。 */
+export async function readSoloPaused(db: Db): Promise<SoloPausedReading> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, SOLO_PAUSED_SETTING));
+  if (!row) return { state: 'off' };
+  if (row.value === false) return { state: 'off' };
+  if (row.value === true) return { state: 'on', since: row.updatedAt, by: row.updatedBy };
+  return {
+    state: 'unreadable',
+    since: row.updatedAt,
+    by: row.updatedBy,
+    why: `设置 ${SOLO_PAUSED_SETTING} 的值不是 true/false：${JSON.stringify(row.value)}`,
+  };
+}
+
+/**
+ * 读各渠道的额度留量线设置（#194 方案 4.8）：没设过 = { set: false }（调用方用内置默认）；设过原样给值，认不认得出由 shared 的
+ * resolvePoolReserve 判（认不出明确失败、不当成不限）。库读不了照抛。
+ */
+export async function readQuotaReserveSetting(
+  db: Db,
+): Promise<{ set: false } | { set: true; value: unknown; since: Date; by: string | null }> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, QUOTA_RESERVE_SETTING));
+  if (!row) return { set: false };
+  return { set: true, value: row.value, since: row.updatedAt, by: row.updatedBy };
+}
+
+export interface OrgStateRow {
+  doc: unknown;
+  updatedAt: Date;
+  lockHolder: string | null;
+  lockUntil: Date | null;
+}
+
+export async function readOrgState(db: Db, userName: string): Promise<OrgStateRow | null> {
+  const [row] = await db.select().from(sessionOrgState).where(eq(sessionOrgState.userName, userName));
+  if (!row) return null;
+  return { doc: row.doc, updatedAt: row.updatedAt, lockHolder: row.lockHolder, lockUntil: row.lockUntil };
+}
+
+/**
+ * 驾驶舱只读：最近一次更新的那一行（现在只有一个会话用户，一行）。没有 = 引擎还没记过。
+ * 驾驶舱后端不依赖引擎，认不认得出这份账本由它自己的读法判（api 的 org-switch-view.ts）。
+ */
+export async function readLatestOrgState(db: Db): Promise<OrgStateRow | null> {
+  const [row] = await db.select().from(sessionOrgState).orderBy(desc(sessionOrgState.updatedAt)).limit(1);
+  if (!row) return null;
+  return { doc: row.doc, updatedAt: row.updatedAt, lockHolder: row.lockHolder, lockUntil: row.lockUntil };
+}
+
+/** 整份账本写进去（有就换、没有就建）。锁两列不动。 */
+export async function saveOrgState(db: Db, userName: string, doc: unknown, now: Date): Promise<void> {
+  await db
+    .insert(sessionOrgState)
+    .values({ userName, doc, updatedAt: now })
+    .onConflictDoUpdate({ target: sessionOrgState.userName, set: { doc, updatedAt: now } });
+}
+
+/**
+ * 拿切号的锁：成了回 true。没人拿着、锁已过期、或者就是自己拿着的，才拿得到；别人拿着且没过期回 false。
+ * 这一行还没有时先建一行（doc 用 emptyDoc），再抢。
+ */
+export async function takeOrgLock(
+  db: Db,
+  userName: string,
+  options: { holder: string; now: Date; ttlMs: number; emptyDoc: unknown },
+): Promise<boolean> {
+  await db
+    .insert(sessionOrgState)
+    .values({ userName, doc: options.emptyDoc, updatedAt: options.now })
+    .onConflictDoNothing({ target: sessionOrgState.userName });
+  const taken = await db
+    .update(sessionOrgState)
+    .set({ lockHolder: options.holder, lockUntil: new Date(options.now.getTime() + options.ttlMs) })
+    .where(
+      and(
+        eq(sessionOrgState.userName, userName),
+        or(
+          isNull(sessionOrgState.lockHolder),
+          isNull(sessionOrgState.lockUntil),
+          lt(sessionOrgState.lockUntil, options.now),
+          eq(sessionOrgState.lockHolder, options.holder),
+        ),
+      ),
+    )
+    .returning({ userName: sessionOrgState.userName });
+  return taken.length > 0;
+}
+
+/** 放锁：只放自己拿着的（过期后被别人接手了的，别把人家的锁放掉）。 */
+export async function releaseOrgLock(db: Db, userName: string, holder: string): Promise<void> {
+  await db
+    .update(sessionOrgState)
+    .set({ lockHolder: null, lockUntil: null })
+    .where(and(eq(sessionOrgState.userName, userName), eq(sessionOrgState.lockHolder, holder)));
+}

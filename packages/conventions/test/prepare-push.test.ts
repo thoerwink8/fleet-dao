@@ -27,7 +27,11 @@ function run(changed: string[] | Error, over: { fail?: string; missing?: string 
     run(cmd, args) {
       ran.push({ cmd, args: [...args] });
       if (over.missing === cmd) return { status: null, stdout: '', stderr: '', error: new Error('ENOENT') };
-      if (over.fail === cmd) return { status: 1, stdout: '第一行\n第二行\n第三行', stderr: '' };
+      // 真跑到了检查才会有的结果行（biome 的汇总行 / tsc 的 error TS）：判「没过」要看到它
+      if (over.fail === cmd) {
+        const ranMark = cmd === 'biome' ? 'Checked 3 files in 5ms.' : 'a.ts(1,1): error TS2322: x';
+        return { status: 1, stdout: `${ranMark}\n第一行\n第二行\n第三行`, stderr: '' };
+      }
       return { status: 0, stdout: '', stderr: '' };
     },
   });
@@ -84,6 +88,70 @@ describe('推送前预检', () => {
     });
     expect(r.code).toBe(2);
     expect(r.lines.join(' ')).toContain('没查成');
+  });
+
+  it('【故意造出的失败】仓里嵌套着别的检出（biome 报 nested root configuration）：退出码 2，说清是嵌套检出、不是代码没过', () => {
+    const r = preparePush({
+      changed: () => ['packages/conventions/src/plan.ts'],
+      repo: fsRepo(ROOT),
+      graph: () => GRAPH,
+      run: () => ({
+        status: 1,
+        stdout: '',
+        stderr:
+          ".claude/worktrees/x/biome.json configuration ━━━\n\n  × Found a nested root configuration, but there's already a root configuration.\n",
+      }),
+    });
+    const text = r.lines.join('\n');
+    expect(r.code).toBe(2);
+    expect(text).toContain('没查成');
+    expect(text).toContain('嵌套');
+    expect(text).toContain('.claude/worktrees/'); // 给出正确的落点
+    expect(text).not.toContain('pnpm install'); // 不再把人往「装依赖」上带
+  });
+
+  it('【故意造出的失败】#789 新工作树没装依赖：cmd 报「系统找不到指定的路径」退 1、没有检查结果 → 退 2「没查成」，不说格式没过', () => {
+    const r = preparePush({
+      changed: () => ['packages/conventions/src/plan.ts'],
+      repo: fsRepo(ROOT),
+      graph: () => GRAPH,
+      run: () => ({ status: 1, stdout: '', stderr: 'The system cannot find the path specified.\r\n' }),
+    });
+    const text = r.lines.join('\n');
+    expect(r.code).toBe(2);
+    expect(text).toContain('biome 格式检查 没查成');
+    expect(text).toContain('没跑起来');
+    expect(text).toContain('pnpm install');
+    expect(text).toContain('The system cannot find the path specified'); // 原输出带出来，不吞
+    expect(text).not.toContain('没过');
+  });
+
+  it('【故意造出的失败】biome 汇总行写着查了 0 个文件（路径/配置不对）：也是没查成，不是格式没过', () => {
+    const r = preparePush({
+      changed: () => ['packages/conventions/src/plan.ts'],
+      repo: fsRepo(ROOT),
+      graph: () => GRAPH,
+      run: () => ({ status: 1, stdout: 'Checked 0 files in 1779µs. No fixes applied.', stderr: '' }),
+    });
+    expect(r.code).toBe(2);
+    expect(r.lines.join('\n')).toContain('没查成');
+  });
+
+  it('【故意造出的失败】tsc 退 1 但没有 error TS（起不来）：退 2；有 error TS 才是类型没过退 1', () => {
+    const mk = (out: string) =>
+      preparePush({
+        changed: () => ['packages/conventions/src/plan.ts'],
+        repo: fsRepo(ROOT),
+        graph: () => GRAPH,
+        run: (cmd) =>
+          cmd === 'tsc' ? { status: 1, stdout: out, stderr: '' } : { status: 0, stdout: '', stderr: '' },
+      });
+    const broken = mk("'tsc' is not recognized as an internal or external command");
+    expect(broken.code).toBe(2);
+    expect(broken.lines.join('\n')).toContain('tsc 类型检查 没查成');
+    const real = mk('a.ts(1,1): error TS2322: Type string is not assignable to number');
+    expect(real.code).toBe(1);
+    expect(real.lines.join('\n')).toContain('tsc 类型检查 没过');
   });
 
   it('【故意造出的失败】算改动就失败（git 读不到基准）：退出码 2，一个检查都不跑', () => {

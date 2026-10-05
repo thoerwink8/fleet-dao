@@ -2,9 +2,15 @@
 // 等得来的原因带「最早几点能好」，一定晚于现在：那个时刻已经过了（读数、熔断状态慢了一步）就按不知道算，
 // 调用方按轮询间隔再选一次——给一个过去的时刻，等待秒数成了负数，选路循环会空转。
 import {
+  evaluateReserve,
   hardBanFor,
   type OrgKind,
+  poolFull,
+  poolOccupiedText,
+  type ReserveReading,
   ROUTE_PROBE_EVERY_MINUTES,
+  reserveHitText,
+  resolvePoolReserve,
   routeProbeStaleMinutes,
   type StageKind,
 } from '@fleet-dao/shared';
@@ -22,6 +28,7 @@ import { ABILITY_NAMES, HOST_ABILITIES, type RoutingPolicy, STAGE_NEEDS } from '
 import type {
   Block,
   CandidateBlocker,
+  CarpoolRegistryView,
   OrgPlanView,
   RouteFacts,
   RouteWindow,
@@ -57,11 +64,15 @@ export interface FilterContext {
   liveOrgProblem?: string | undefined;
   /** 引擎切号的打算（ChooseRouteInput.orgPlan）：不是挂着的那个组织的池等不等得来按它判。 */
   orgPlan?: OrgPlanView | undefined;
+  /** 各渠道的额度留量线设置原值（ChooseRouteInput.quotaReserve）；不给 = 没判。 */
+  quotaReserve?: { setting: unknown } | undefined;
+  /** 拼车并发登记核对的结论（ChooseRouteInput.carpoolRegistry）；不给 = 没判。 */
+  carpoolRegistry?: CarpoolRegistryView | undefined;
   /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
   uiWork: boolean;
 }
 
-/** 族名比较用的写法：去掉首尾空白、小写（和 core 的 decideVerdict 判同族一个认法）。 */
+/** 族名比较用的写法：去掉首尾空白、小写。 */
 export const familyKey = (family: string): string => family.trim().toLowerCase();
 
 /** 这条路由此刻的全部被挡原因；空数组 = 能派。entry 是它在路由两层顺序里的那一行（任务指定、不在顺序里的没有）。 */
@@ -83,9 +94,12 @@ export function blocksFor(
   if (avoided) out.push(hard('avoided', avoided));
   const spoiled = ctx.spoils?.get(familyKey(route.family));
   if (spoiled) out.push(hard('no-verifier', spoiled));
+  const unregistered = carpoolRegistryBlock(route, ctx);
+  if (unregistered) out.push(unregistered);
   const notLive = orgBlock(route, ctx);
   if (notLive) out.push(notLive);
   out.push(...shortBlocks(route, ctx));
+  out.push(...reserveBlocks(route, ctx));
   return out;
 }
 
@@ -131,26 +145,15 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
     out.push(hard('banned', `犯禁令：${reasons.length > 0 ? reasons.join('、') : '原因没写'}`));
   }
   if (route.blockers.includes('quota-exhausted')) out.push(exhaustedBlock(route, ctx.now));
-  // 候选查询只数已开工的；已选定、还没开工的也占位子，这里再按两者之和判一次。
-  if (route.blockers.includes('no-slot') || occupied(route) >= route.maxConcurrency) {
+  // 判满只有 shared 的 poolFull（在跑 + 已选定还没开工；驾驶舱路由页、换路由选项、候选查询的 no-slot 同一个判法）
+  if (route.blockers.includes('no-slot') || poolFull(route)) {
     const text =
       route.reserved > 0
-        ? `${holders(route)}，上限 ${route.maxConcurrency} 个`
+        ? `${poolOccupiedText(route)}，上限 ${route.maxConcurrency} 个`
         : `${route.inFlight}/${route.maxConcurrency}`;
     out.push({ code: 'no-slot', text: `${route.poolName}并发满了（${text}）`, wait: 'slot', until: null });
   }
   return out;
-}
-
-/** 这个池占着的位子：在跑的 + 已选定还没开工的。 */
-function occupied(route: RouteFacts): number {
-  return route.inFlight + route.reserved;
-}
-
-function holders(route: RouteFacts): string {
-  return route.reserved > 0
-    ? `已经有 ${occupied(route)} 个（在跑 ${route.inFlight} 个、已选定还没开工 ${route.reserved} 个）`
-    : `已经在跑 ${route.inFlight} 个`;
 }
 
 /** 用满的窗口全都清零了才放得出来：所以最早能派 = 这些窗口里最晚的清零时刻；有一个不知道就不知道。 */
@@ -200,6 +203,20 @@ export function hostUnfit(hostId: string, stage: StageKind): string | null {
 }
 
 /**
+ * 拼车并发登记核对不上（#194 方案第六节第 19 条、#896）：登记的数和引擎实际按库里拼车池放行的数对不上（没登记、写坏了、库里没有
+ * 拼车池、核对本身没读成也算），带拼车组织类型的池暂时标「不可用」、一律不派，写明核对出的原因；对上了自己恢复。
+ * 硬挡不是等：要人改配置（目录配置的拼车并发或仓里的登记），改对重启引擎才会好；独享、别家的池不受影响。
+ */
+function carpoolRegistryBlock(route: RouteFacts, ctx: FilterContext): Block | null {
+  const reg = ctx.carpoolRegistry;
+  if (route.orgKind !== 'carpool' || reg === undefined || reg.ok) return null;
+  return hard(
+    'carpool-registry',
+    `${route.poolName}暂不派：拼车并发登记核对不上（${reg.why}），改对后自己恢复；这期间不往拼车池派新活`,
+  );
+}
+
+/**
  * 会话用户同一时刻只挂一个 reclaude 组织（design 第九节）：不是它挂着的那个组织的 Claude 池，派过去会话照样扣挂着的
  * 那个组织，额度账就记错了池。不知道挂的是哪个（读了没读成的带上原话），带组织类型的池一律不派，不拿哪个组织顶。
  * 不是挂着的那个组织的池：引擎打算切过去的（orgPlan，和切号同一个判法）等得来——等切号，任务不挂起（#335：09-27 21:54
@@ -209,6 +226,10 @@ function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
   const kind = route.orgKind;
   if (kind === undefined || kind === null) return null;
   const { liveOrg, liveOrgProblem: problem, orgPlan: plan } = ctx;
+  // 渠道不可用（可用账号 0 个）：不管挂着哪个组织，Claude 订阅的池都不派，写明原因（自己恢复后这一条就没了）
+  if (plan?.channelDown) {
+    return hard('org-not-live', `渠道不可用，${route.poolName}不派：${plan.channelDown}`);
+  }
   if (liveOrg === undefined) {
     return hard(
       'org-not-live',
@@ -217,7 +238,19 @@ function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
         : `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`,
     );
   }
-  if (kind === liveOrg) return null;
+  if (kind === liveOrg) {
+    // 切回拼车的宽限中：现在挂着的这一类新活先不派，等切回（在跑的不动，宽限到点才停）
+    if (plan?.drain === kind) {
+      const at = plan.at === null ? null : ahead(Date.parse(plan.at), ctx.now);
+      return {
+        code: 'org-not-live',
+        text: `${route.poolName}在切回${plan.to ? ORG_NAMES[plan.to] : '另一个'}组织的宽限中，新活先不派（${plan.why}），等切号`,
+        wait: 'org',
+        until: at === null ? null : new Date(at).toISOString(),
+      };
+    }
+    return null;
+  }
   const head = `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
   if (!plan) return hard('org-not-live', head);
   if (plan.to !== kind) return hard('org-not-live', `${head}；引擎现在不打算切过去（${plan.why}）`);
@@ -305,6 +338,10 @@ const EPSILON = 1e-9;
  */
 function shortBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   if (route.blockers.includes('quota-exhausted')) return [];
+  // 拼车池不按「够收尾」挡（#194 方案 4.3，创始人 2026-10-04 约 08:50「拼车要尽可能用完」）：拼车额度不用就作废、还会被同车的人
+  // 用掉，所以用到被拒为止，被拒当场切独享；剩最后一成就不派的话，那点额度用不掉、活还空等（G1 死区）。用满了（exhausted）的照挡，
+  // 上面已经 return。独享、别家照判。
+  if (route.orgKind === 'carpool') return [];
   const out: Block[] = [];
   for (const w of route.windows) {
     if (w.applies !== 'yes' || w.state !== 'ok') continue;
@@ -314,6 +351,57 @@ function shortBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
     if (left + EPSILON < need) out.push(shortBlock(route, w, left, need, ctx.now));
   }
   return out;
+}
+
+/**
+ * 额度留量线（#194 方案 4.8，创始人 2026-10-04：「到了配置额度，这个渠道就不能用了……是全渠道配置项」）：这条路由所在的池，
+ * 适用的窗口已用比例到了库里设置的线（线只存在库里，代码里没有默认；这个池没写 = 不限），就不再派新活，等清零或人改线；在跑的不动。
+ * 和「额度够收尾」是两回事：那个是一个活跑得完跑不完，这个是引擎最多用到哪儿、剩下留给自己用。读的是同一份额度读数。
+ * 读数缺窗口、算不出已用多少（额度未知）不挡，和「额度够收尾」一个规矩（rank.ts 把额度未知的排在读到了的后面）；
+ * 线的设置库里没有（种子没装上）、认不出：这个池硬挡、写明原因，不当成不限。池已经用满了（quota-exhausted）另有原因，不重复。
+ */
+function reserveBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
+  if (!ctx.quotaReserve) return [];
+  if (route.blockers.includes('quota-exhausted')) return [];
+  const resolved = resolvePoolReserve(ctx.quotaReserve.setting, { poolId: route.poolId });
+  if (!resolved.ok) {
+    return [
+      hard(
+        'quota-reserve',
+        `${route.poolName}的额度留量线读不到或认不出，不派（不当成不限）：${resolved.why}`,
+      ),
+    ];
+  }
+  const readings: ReserveReading[] = route.windows
+    .filter((w) => w.applies === 'yes')
+    .map((w) => ({
+      label: w.label,
+      window: w.window,
+      scope: w.scope,
+      state: w.state,
+      used: w.used,
+      resetsAt: w.resetsAt,
+    }));
+  const { hits } = evaluateReserve(resolved.lines, readings);
+  if (hits.length === 0) return [];
+  // 全都清零了才放得出来：最早能派 = 到线的这些读数里最晚的清零时刻；有一个不知道就不知道
+  const resets = hits.map((h) => (h.resetsAt === null ? null : Date.parse(h.resetsAt)));
+  const known = resets.every((t): t is number => t !== null);
+  const until = ahead(known ? Math.max(...resets) : null, ctx.now);
+  const when =
+    until !== null
+      ? `${duration(until - ctx.now)}后（${stamp(until)}）清零`
+      : known
+        ? '清零时刻已过，等下一次读数'
+        : '清零时刻不知道';
+  return [
+    {
+      code: 'quota-reserve',
+      text: `${route.poolName}${hits.map(reserveHitText).join('、')}，引擎不再往它派新活（线在驾驶舱设置里改）；${when}`,
+      wait: 'quota',
+      until: until === null ? null : new Date(until).toISOString(),
+    },
+  ];
 }
 
 function needPerTask(w: RouteWindow, policy: RoutingPolicy): number {

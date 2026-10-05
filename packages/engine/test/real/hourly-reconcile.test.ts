@@ -37,6 +37,8 @@ import {
   type HourlyReconcileWiring,
   hourlyReconcileJob,
   listDirEntries,
+  taskViewOf,
+  temporalWorkflows,
   workflowViewOf,
 } from '../../src/real/hourly-reconcile.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
@@ -142,6 +144,7 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     trees: ft.trees,
     exec: localExec(),
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
+    carpoolRegistry: async () => ({ ok: true }),
     machine: '法国',
     selfCheck: async () => [],
     gitBin: 'git',
@@ -439,22 +442,36 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     },
   );
 
-  it('需求工作流还在跑、或者它的子任务工作流还在收尾：这张需求的树都不碰，「工作树没收掉」也留着', async () => {
+  it('任务工作流还在跑、或者它的子任务工作流还在收尾：这张单的树都不碰，「工作树没收掉」也留着', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login');
     probeDir();
     await alert(`sub:${sub.id}:worktree`);
-    const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    const running = fakeWorkflows({ 'task:acme/widgets#160': { state: 'running' } });
     expect(await runHourlyReconcileJob(deps({ workflows: running.reader }))).toMatchObject({ outcome: 'ok' });
     expect(existsSync(tree.dir)).toBe(true);
     expect((await alertByKey(t.db, `sub:${sub.id}:worktree`))?.resolvedAt).toBeNull();
 
     const finishing = fakeWorkflows({
-      'req:acme/widgets#160': { state: 'closed', status: 'COMPLETED' },
+      'task:acme/widgets#160': { state: 'closed', status: 'COMPLETED' },
       [`sub:${sub.id}`]: { state: 'running' },
     });
     await runHourlyReconcileJob(deps({ workflows: finishing.reader }));
     expect(existsSync(tree.dir)).toBe(true);
+  });
+
+  it('任务工作流（task:）在跑、树里没开着的会话（等 CI、等合并）：任务自己的树 <号>-t<8 位> 不被当残留删掉（#901）', async () => {
+    await work();
+    probeDir();
+    const tree = makeTree('acme_widgets/160-t1234abcd');
+    const running = fakeWorkflows({ 'task:acme/widgets#160': { state: 'running' } });
+    expect(await runHourlyReconcileJob(deps({ workflows: running.reader }))).toMatchObject({ outcome: 'ok' });
+    expect(running.asked).toContain('task:acme/widgets#160');
+    expect(existsSync(tree.dir)).toBe(true);
+    // 对照：旧的 req: 编号在跑（现实里不会有这条工作流）不算在用，这棵干净的树照删——保护认的是 task: 不是 req:
+    const legacy = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    await runHourlyReconcileJob(deps({ workflows: legacy.reader }));
+    expect(existsSync(tree.dir)).toBe(false);
   });
 
   it('工作流都不在跑了、树里却还有没结束的会话（被强行终止留下的、认不出的工作流起的）：不碰，记没查成写明是哪个会话；会话结束了照删', async () => {
@@ -512,8 +529,8 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     const stillOpen = async () =>
       (await alertByKey(t.db, 'req:acme/widgets#160:worktree'))?.resolvedAt === null;
 
-    // Fusion 的编号和需求工作流同一个：还在跑，树不碰、提醒留着
-    const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    // 这张单的任务工作流还在跑：树不碰、提醒留着
+    const running = fakeWorkflows({ 'task:acme/widgets#160': { state: 'running' } });
     await runHourlyReconcileJob(deps({ workflows: running.reader }));
     expect(existsSync(tree.dir)).toBe(true);
     expect(await stillOpen()).toBe(true);
@@ -539,7 +556,7 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     probeDir();
     makeTree('acme_widgets/161-fabcdef12');
     await alert('req:acme/widgets#160:worktree');
-    const other = fakeWorkflows({ 'req:acme/widgets#161': { state: 'running' } });
+    const other = fakeWorkflows({ 'task:acme/widgets#161': { state: 'running' } });
     await runHourlyReconcileJob(deps({ workflows: other.reader }));
     expect((await alertByKey(t.db, 'req:acme/widgets#160:worktree'))?.body).toMatch(
       /^已撤：这张需求的树已经不在了（acme_widgets\/160-f…）/,
@@ -725,6 +742,30 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect((await alertByKey(t.db, 'req:acme/patrol#11:park:1'))?.body).toMatch(
       /^已撤：这一次挂起已经过去了/,
     );
+  });
+
+  it('任务工作流（task:）的挂起提醒：工作流已结束→撤；还停在这一次→不撤；读不到状态→不撤、这一轮记没查成（#901）', async () => {
+    probeDir();
+    const ended = 'task:acme/patrol#11:park:1';
+    const stillParked = 'task:acme/patrol#12:park:1';
+    const unreadable = 'task:acme/patrol#13:park:1';
+    for (const key of [ended, stillParked, unreadable]) await alert(key, { title: '动手 3 轮都没过' });
+    await backdate(stillParked, new Date(Date.now() - 2 * HOUR));
+    const wf = fakeWorkflows(
+      {
+        'task:acme/patrol#11': { state: 'closed', status: 'COMPLETED' },
+        'task:acme/patrol#12': { state: 'running' },
+        'task:acme/patrol#13': { state: 'running' },
+      },
+      // #13 故意不给查询结果：fakeWorkflows 的 view 对没给的抛错，和真实读不了 taskStatus 是同一个效果
+      { 'task:acme/patrol#12': parkedView(new Date(Date.now() - 3 * HOUR)) },
+    );
+    const run = await runHourlyReconcileJob(deps({ workflows: wf.reader }));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain(`提醒 ${unreadable}（挂起）没查成`);
+    expect((await alertByKey(t.db, ended))?.body).toMatch(/^已撤：任务已经不挂着了：工作流已经结束/);
+    expect((await alertByKey(t.db, stillParked))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, unreadable))?.resolvedAt).toBeNull();
   });
 
   it('事件数到线：工作流结束了才撤；需求没做完：状态不再是 failed 才撤；要人批：批了才撤', async () => {
@@ -1222,5 +1263,80 @@ describe('status 查询认不出', () => {
       doing: '写码',
       approval: { approvalId: 'x', state: 'pending' },
     });
+  });
+});
+
+describe('任务工作流的 taskStatus 查询（#901）', () => {
+  it('phase = parked 才算挂着；waiting、doing 原样带出；没有等批准这一项', () => {
+    expect(
+      taskViewOf(
+        {
+          phase: 'parked',
+          doing: '停下等人：交代不全',
+          waiting: {
+            kind: 'human',
+            detail: '交代不全（等「继续」或「放弃」）',
+            since: '2026-10-05T01:00:00.000Z',
+          },
+        },
+        'task:a/b#1',
+      ),
+    ).toEqual({
+      parked: true,
+      waiting: {
+        kind: 'human',
+        detail: '交代不全（等「继续」或「放弃」）',
+        since: '2026-10-05T01:00:00.000Z',
+      },
+      doing: '停下等人：交代不全',
+      approval: null,
+    });
+    expect(
+      taskViewOf({ phase: 'implement', doing: '动手第 1 轮', waiting: null }, 'task:a/b#1'),
+    ).toMatchObject({
+      parked: false,
+      waiting: null,
+    });
+  });
+
+  it('【故意造出的失败】回的是旧 status 的形状（有 parked 没 phase）、null、waiting 形状不对：明确报错，不当成「没挂着」', () => {
+    expect(() => taskViewOf({ parked: true, doing: 'x' }, 'task:a/b#1')).toThrow('没有 phase');
+    expect(() => taskViewOf(null, 'task:a/b#1')).toThrow('认不出');
+    expect(() => taskViewOf({ phase: 'parked', waiting: { kind: 1 } }, 'task:a/b#1')).toThrow(
+      'waiting 认不出',
+    );
+  });
+
+  it('temporalWorkflows.view：task: 编号问 taskStatus，旧的 req:/sub: 编号还问 status；查询失败原样抛', async () => {
+    const asked: [string, string][] = [];
+    const client = {
+      workflow: {
+        getHandle: (id: string) => ({
+          query: async (q: string | { name: string }) => {
+            const name = typeof q === 'string' ? q : q.name;
+            asked.push([id, name]);
+            if (id === 'task:a/b#9') throw new Error('query rejected（故意造的）');
+            return name === 'taskStatus'
+              ? {
+                  phase: 'parked',
+                  doing: '停着',
+                  waiting: { kind: 'human', detail: 'd', since: '2026-10-05T00:00:00Z' },
+                }
+              : { parked: false, waiting: null, doing: '旧的' };
+          },
+        }),
+      },
+    };
+    const reader = temporalWorkflows(client as never);
+    expect((await reader.view('task:a/b#1')).parked).toBe(true);
+    expect((await reader.view('req:a/b#1')).doing).toBe('旧的');
+    expect((await reader.view('sub:x')).parked).toBe(false);
+    await expect(reader.view('task:a/b#9')).rejects.toThrow('query rejected');
+    expect(asked).toEqual([
+      ['task:a/b#1', 'taskStatus'],
+      ['req:a/b#1', 'status'],
+      ['sub:x', 'status'],
+      ['task:a/b#9', 'taskStatus'],
+    ]);
   });
 });

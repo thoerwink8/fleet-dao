@@ -531,7 +531,7 @@ if ((HAVE_NODE)); then
   check "演练：快照清单认不出 → 没做成（不当成没有备份）" "1 failed" "$RC $(ended | cut -d'|' -f1)"
 fi
 
-# 巡检的替身：df、sftp、登记表按 DF_*、SFTP_*、AGE_* 决定
+# 巡检的替身：df、sftp 按 DF_*、SFTP_* 决定（备份多久没开跑不归巡检看，#339：登记表它不读）
 stub_watch() {
   df() { printf '     Used     Avail Mounted on\n%s %s /\n' "${DF_USED:-25}" "${DF_AVAIL:-75}"; }
   sftp() {
@@ -542,7 +542,6 @@ stub_watch() {
     fi
     cat "$HERE/fixtures/sftp-df.txt"
   }
-  bk_sql() { printf 'backup.drill\t10200\t%s\nbackup.nightly\t1560\t%s\n' "${AGE_DRILL:-3600}" "${AGE_NIGHTLY:-3600}"; }
 }
 
 reset_env
@@ -552,8 +551,9 @@ reset_env
   cmd_watch
 ) >"$T/out" 2>&1
 RC=$?
-check "巡检：都正常 → ok，法国一块盘（两个路径同一块）+ 香港一块 + 两个任务" "0 ok|4|0" "$RC $(ended | cut -d'|' -f1-3)"
-check "巡检：都正常 → 解除所有相关报警（去重键都带 backup. 前缀）" \
+check "巡检：都正常 → ok，法国一块盘（两个路径同一块）+ 香港一块" "0 ok|2|0" "$RC $(ended | cut -d'|' -f1-3)"
+# backup.stale:* 两条是 #339 之前巡查推过的、现在退役：每轮顺手撤，已经开着的才不会没人管
+check "巡检：都正常 → 解除所有相关报警（去重键都带 backup. 前缀；含退役的 backup.stale 两条）" \
   "backup.disk:france:/ backup.disk:hk:/ backup.stale:backup.drill backup.stale:backup.nightly backup.watch:run" "$(resolved)"
 
 reset_env
@@ -564,7 +564,7 @@ reset_env
   cmd_watch
 ) >"$T/out" 2>&1
 RC=$?
-check "巡检：法国盘到线 → 查出 1 个问题、任务照样 ok" "0 ok|4|1" "$RC $(ended | cut -d'|' -f1-3)"
+check "巡检：法国盘到线 → 查出 1 个问题、任务照样 ok" "0 ok|2|1" "$RC $(ended | cut -d'|' -f1-3)"
 check "巡检：到线 → 报法国那块盘" backup.disk:france:/ "$(raised)"
 
 reset_env
@@ -575,21 +575,28 @@ reset_env
   cmd_watch
 ) >"$T/out" 2>&1
 RC=$?
-check "巡检：香港连不上 → partial，香港两个路径都算没查成" "0 partial|3|0" "$RC $(ended | cut -d'|' -f1-3)"
+check "巡检：香港连不上 → partial，香港两个路径都算没查成" "0 partial|1|0" "$RC $(ended | cut -d'|' -f1-3)"
 check "巡检：香港连不上 → 原因里说连不上" 2 "$(ended | grep -o '连不上' | wc -l)"
 check "巡检：香港连不上 → 报这一轮没做全，不去解除香港那块盘的报警" "backup.watch:run" "$(raised)"
 check "巡检：香港连不上 → 香港的盘不当成正常" "" "$(resolved | grep -o 'disk:hk:[^ ]*')"
 
+# 【故意造出的失败】定时器不响（每晚备份从没跑过、演练 7 天多没跑）：巡查不再推 backup.stale 的卡、也不去读登记表——
+# 这一件事只由引擎的看门狗报一张（packages/engine/test/watchdog.test.ts：「从没跑过」「停了」两条用的就是备份这几个任务）
 reset_env
+rm -f -- "$T/registry-read"
 (
   stub_books
   stub_watch
-  AGE_NIGHTLY=never AGE_DRILL=700000
+  bk_sql() { # 登记表：从没跑过、过期；巡查要是还读它，就会留下这个记号
+    echo read >>"$T/registry-read"
+    printf 'backup.drill\t10200\t700000\nbackup.nightly\t1560\tnever\n'
+  }
   cmd_watch
 ) >"$T/out" 2>&1
 RC=$?
-check "巡检：每晚备份从没跑过、演练过期 → 两个问题" "0 ok|4|2" "$RC $(ended | cut -d'|' -f1-3)"
-check "巡检：两个都报" "backup.stale:backup.drill backup.stale:backup.nightly" "$(raised)"
+check "巡检：定时器不响 → 巡查照样 ok、只看两块盘（不替看门狗报第二张）" "0 ok|2|0" "$RC $(ended | cut -d'|' -f1-3)"
+check "巡检：定时器不响 → 不推 backup.stale" "" "$(raised | grep -o 'backup.stale[^ ]*')"
+check "巡检：定时器不响 → 不读登记表" no "$([[ -e "$T/registry-read" ]] && echo yes || echo no)"
 
 reset_env
 (
@@ -599,7 +606,7 @@ reset_env
   cmd_watch
 ) >"$T/out" 2>&1
 RC=$?
-check "巡检：登记表读不到 → partial（不当成没过期）" "0 partial|2|0" "$RC $(ended | cut -d'|' -f1-3)"
+check "巡检：库连不上（登记表本来就不读了）→ 磁盘照常查，不因它 partial" "0 ok|2|0" "$RC $(ended | cut -d'|' -f1-3)"
 
 reset_env
 rm -f -- "$BK_CONFIG"

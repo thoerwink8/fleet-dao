@@ -1,0 +1,245 @@
+// 驾驶舱接口约定（web-api）：调度台：路由与阶段策略、路由两层、思考档位。
+// 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
+import { z } from 'zod';
+import type { HostId } from '../domain.ts';
+import { SESSION_EFFORTS } from '../effort.ts';
+import { BillingKindSchema, HostIdSchema, RouteProbeStateSchema, StageKindSchema } from './enums.ts';
+import { Id, Time } from './internal.ts';
+
+// —— 调度台：路由与阶段策略 ——
+
+export const ChannelSchema = z.object({
+  id: Id,
+  name: z.string(),
+  billing: BillingKindSchema,
+  enabled: z.boolean(),
+});
+
+export const ModelSchema = z.object({
+  id: Id,
+  family: z.string(),
+  displayName: z.string(),
+  retiredAt: Time.optional(),
+});
+
+/** 探针多久一轮（design 第九节「路由探针」：Claude 订阅起步 15 分钟，和对账补漏错开）。 */
+export const ROUTE_PROBE_EVERY_MINUTES = 15;
+/** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
+export const ROUTE_PROBE_STALE_MINUTES = 45;
+/**
+ * 按一次的成本放慢的执行方式（design 第九节「路由探针」：贵的放慢）：上一次探通了，隔这么久才再真探；没通的照样每轮探
+ * （没登录、连不上的报错走不到模型，不扣用量）。没列的每轮都探。cursor-agent：一次最小会话约 1.3 万输入 token
+ * （2026-09-27 本机实测），扣的是按月的包含用量、和创始人在编辑器里用的是同一份——每轮都探一个月约 2900 次，2 小时一次约 360 次。
+ * grok：同一个道理——SuperGrok 订阅按周的额度、和创始人在 grok.com 上用的是同一份，一次最小会话光系统提示就一万多输入 token
+ * （法国真跑的过程记录：一次模型调用约 1.5 万输入、其中 1.2 万走缓存）。mirasim：探通即代表真打了一次上游（MS-27，账本要
+ * 见到 2xx），扣的是 Mirasim 那份紧张的中转额度（#345，创始人 2026-09-27「额度不太够」）——15 分钟一轮会一个月探约 2900 次，
+ * 和 cursor-agent、grok 一样放慢到 2 小时。
+ */
+export const ROUTE_PROBE_HOST_EVERY_MINUTES: Readonly<Partial<Record<HostId, number>>> = {
+  'cursor-agent': 120,
+  grok: 120,
+  mirasim: 120,
+};
+
+/** 这种执行方式探通之后隔多久再真探（分钟）。 */
+export function routeProbeEveryMinutes(hostId: string | undefined): number {
+  const slow =
+    hostId === undefined ? undefined : (ROUTE_PROBE_HOST_EVERY_MINUTES as Record<string, number>)[hostId];
+  return slow ?? ROUTE_PROBE_EVERY_MINUTES;
+}
+
+/** 这条路由的结论多久没更新算过期（探针可能停了）：再探的间隔加两轮。每轮都探的就是 ROUTE_PROBE_STALE_MINUTES。 */
+export function routeProbeStaleMinutes(hostId: string | undefined): number {
+  return routeProbeEveryMinutes(hostId) + ROUTE_PROBE_STALE_MINUTES - ROUTE_PROBE_EVERY_MINUTES;
+}
+
+/** 路由探针最近一次的结论（domain.ts 的 RouteProbe）。 */
+export const RouteProbeSchema = z.object({
+  state: RouteProbeStateSchema,
+  at: Time,
+  /** 不是 ok 必须写原因；ok 也带一句（回答、用时）。 */
+  detail: z.string().optional(),
+});
+
+export const RouteSchema = z.object({
+  id: Id,
+  channelId: Id,
+  poolId: Id,
+  modelId: Id,
+  hostId: HostIdSchema,
+  /** 只由探针和熔断写：为真时 probe 一定是 ok（库里有约束）。 */
+  alive: z.boolean(),
+  /** 没有 = 探针还没看过这条路由（上线后第一轮之前），不是离线。 */
+  probe: RouteProbeSchema.optional(),
+});
+
+export const BanSchema = z.object({
+  family: z.string().optional(),
+  modelId: Id.optional(),
+  stage: StageKindSchema.optional(),
+  reason: z.string(),
+});
+
+export const PoolSchema = z.object({
+  id: Id,
+  channelId: Id,
+  maxConcurrency: z.number().int().min(0),
+  expiresAt: Time.optional(),
+});
+
+/**
+ * 一块功能还没做（装配时定，不是跑出来的；和 /healthz 的「未接」同一个做法）：驾驶舱整块显示「待实现」占位，
+ * 写明排在哪个阶段、哪张单，不把「没读到」说成「没查成」「离线」。接上以后后端不再给这一项。
+ */
+export const NotWiredSchema = z.object({
+  /** 这块是什么：额度读数、路由在线状态…… */
+  what: z.string(),
+  /** 排在 plan.md 的哪个阶段，如 P3。 */
+  phase: z.string(),
+  /** 对应的单号。 */
+  issue: z.number().int().positive(),
+  /** 单开在哪个仓（驾驶舱据此链过去）；受管的仓里找不到它就不给，只显示单号。 */
+  issueRepo: z.object({ owner: z.string(), name: z.string() }).optional(),
+});
+export type NotWired = z.infer<typeof NotWiredSchema>;
+
+/**
+ * 路由目录：渠道、账号池、模型、路由和禁令。每个用途按什么先后用哪些路由不在这里——那是路由两层（下面的
+ * RoutingLayersResponse，GET /routing/layers），换模型对话框、路由页都读那一份（#574）。
+ */
+export const RoutingResponse = z.object({
+  channels: z.array(ChannelSchema),
+  pools: z.array(PoolSchema),
+  models: z.array(ModelSchema),
+  routes: z.array(RouteSchema),
+  /** 写死在代码里的全局禁令（bans.ts），驾驶舱只读展示，改不了。 */
+  hardBans: z.array(z.object({ id: z.string(), reason: z.string() })),
+  /** 库里另外配的禁令，和 hardBans 一起生效。 */
+  bans: z.array(BanSchema),
+});
+
+// —— 路由两层（#574）：每个用途 → 模型 → 路由，每一层现在活着吗 ——
+// 活不活不存，读的时候按探针、额度、禁令现算（db 的 routing-liveness.ts，判法只在那里）。
+
+/** live 派得出去；dead 派不出去；unknown 不知道（探针没看过、额度没读成）——不当活，也不当死。 */
+export const LivenessVerdictSchema = z.enum(['live', 'dead', 'unknown']);
+
+/** 接得上、额度够、没被禁令挡里的一件：结论和原因。原因总有：没查成不等于没问题。 */
+export const LivenessFactSchema = z.object({
+  verdict: LivenessVerdictSchema,
+  reason: z.string().min(1),
+});
+
+export const RoutingLayerRouteSchema = z.object({
+  routeId: Id,
+  channelId: Id,
+  /** 渠道目录里的名字；目录里找不到就是渠道编号。 */
+  channelName: z.string(),
+  poolId: Id,
+  hostId: HostIdSchema,
+  /** 这条路由在它的模型下开着吗（关着的照样挂在顺序里，但不派，ban 那一件写「开关关着」）。 */
+  enabled: z.boolean(),
+  /** 三件事合起来：任何一件 dead 就 dead；没有 dead、有 unknown 就 unknown；三件都 live 才 live。 */
+  verdict: LivenessVerdictSchema,
+  connect: LivenessFactSchema,
+  quota: LivenessFactSchema,
+  ban: LivenessFactSchema,
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）。 */
+  probedAt: Time.optional(),
+  /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
+  exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
+  /** 账号池此刻在跑几个、已选定还没开跑几个（#757 预占）、最多几个：两者之和到了上限就是满（shared 的 poolFull），等空位，不算死。 */
+  inFlight: z.number().int().min(0),
+  reserved: z.number().int().min(0),
+  maxConcurrency: z.number().int().min(0),
+});
+
+export const RoutingLayerModelSchema = z.object({
+  modelId: Id,
+  /** 模型目录里的名字；目录里找不到就是模型编号。 */
+  displayName: z.string(),
+  /** 目录里找不到、下面也没有路由时不给。 */
+  family: z.string().optional(),
+  /** 下面有一条 live 就 live；没有 live、有 unknown 就 unknown；全 dead 或一条都没有就 dead。 */
+  verdict: LivenessVerdictSchema,
+  /** 按这个模型下路由的先后。空 = 一条都没有（用途的 problems 里写明）。 */
+  routes: z.array(RoutingLayerRouteSchema),
+});
+
+export const RoutingLayerPurposeSchema = z.object({
+  purpose: StageKindSchema,
+  /** 判法和模型那一层一样：有一个模型 live 就 live。 */
+  verdict: LivenessVerdictSchema,
+  /** 配置上的缺口：这个用途没配模型顺序、某个模型下一条路由都没有。照实写，不当成「没有」。 */
+  problems: z.array(z.string()),
+  /** 按这个用途的模型先后。 */
+  models: z.array(RoutingLayerModelSchema),
+});
+
+export const RoutingLayersResponse = z.object({
+  /** 现算的时刻。 */
+  asOf: Time,
+  /** 每个用途一份，按 StageKind 的先后；unavailable 时为空。 */
+  purposes: z.array(RoutingLayerPurposeSchema),
+  /** 这里读不了路由两层（开发环境的内存版没有这两张表）：写明为什么，不拿空列表冒充「都没配」。 */
+  unavailable: z.string().optional(),
+});
+
+// —— 思考档位（#470）：路由两层里每个模型下的每条路由，起会话想多深 ——
+// 存在库里（routing_catalog.effort，运行时配置，决定 0011 第 7 条）：改了下一个起的会话就照新的，不走改仓库再部署。
+// 能配哪几档照 effort.ts 的 routeEffortChoices（和引擎起会话、骨架装载同一份判法）。
+
+export const SessionEffortSchema = z.enum(SESSION_EFFORTS);
+
+export const RouteEffortSchema = z.object({
+  routeId: Id,
+  channelId: Id,
+  /** 渠道目录里的名字；目录里找不到就是渠道编号。 */
+  channelName: z.string(),
+  poolId: Id,
+  hostId: HostIdSchema,
+  /** 起会话时发给执行体的模型串（路由的上游模型串，没有就是模型编号）：cursor 能不能配看它带不带方括号。 */
+  model: z.string(),
+  /** 这条路由在它的模型下开着吗：关着的也能先配好，开了就照它。 */
+  enabled: z.boolean(),
+  /** 配的档位；没有 = 没配，起会话用 defaultEffort。 */
+  effort: SessionEffortSchema.optional(),
+  /** 能配哪几档，从低到高；配不了时为空，fixed 写为什么。 */
+  choices: z.array(SessionEffortSchema),
+  fixed: z.string().optional(),
+});
+
+export const EffortModelSchema = z.object({
+  modelId: Id,
+  /** 模型目录里的名字；目录里找不到就是模型编号。 */
+  displayName: z.string(),
+  family: z.string().optional(),
+  /** 这个模型下的路由，按路由两层里的先后。 */
+  routes: z.array(RouteEffortSchema),
+});
+
+export const RoutingEffortsResponse = z.object({
+  /** 没配的路由起会话用这一档。 */
+  defaultEffort: SessionEffortSchema,
+  /** 挂进了路由两层的模型（按模型编号排）。unavailable 时为空。 */
+  models: z.array(EffortModelSchema),
+  /** 这里读不了（开发环境的内存版没有路由两层那两张表）：写明为什么，不拿空列表冒充「都没配」。 */
+  unavailable: z.string().optional(),
+});
+
+/**
+ * 改一条路由的思考档位。effort 写 null = 清掉、回到没配（用 defaultEffort）。expected 填改之前看到的（没配写 null）：
+ * 别人先改了就返回 409，刷新后再改，不悄悄盖掉。这条路由的执行方式不认的档返回 422 写明为什么。
+ */
+export const UpdateRouteEffortRequest = z.object({
+  effort: SessionEffortSchema.nullable(),
+  expected: SessionEffortSchema.nullable(),
+  /** 写进操作记录。 */
+  reason: z.string().max(500).optional(),
+});
+export const UpdateRouteEffortResponse = z.object({
+  modelId: Id,
+  routeId: Id,
+  /** 改完的档位；没有 = 没配。 */
+  effort: SessionEffortSchema.optional(),
+});

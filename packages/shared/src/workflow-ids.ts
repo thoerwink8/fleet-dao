@@ -8,21 +8,6 @@ export interface WorkflowRepoRef {
 }
 
 /**
- * 旧的需求工作流的类型名，引擎的 WORKFLOW_TYPES.requirement 就是它。必须等于引擎 workflows/requirement.ts 导出的函数名
- * （Temporal 按导出名找工作流）。后端从 #214 第 3 个 PR 起不再起它（接活一律起 FUSION_WORKFLOW_TYPE），引擎留着它只为
- * 让那之前起的在途任务跑完；整个删掉归 #250。
- */
-export const REQUIREMENT_WORKFLOW_TYPE = 'requirementWorkflow';
-
-/**
- * Fusion 工作流的类型名（docs/decisions/0003-fusion-flow.md 第 5 条：一张单一个 Lead 会话带一个副手，引擎推分支、开 PR、
- * 合并、关单，不直写主线）：后端接活起的就是它（api 的 temporal.ts）。Fusion 模式还是单模型模式（0003 第 7 条）由它开工前
- * 按流程配置副本判，不是另一种工作流。必须等于引擎 workflows/fusion.ts 导出的函数名。工作流编号和旧的需求工作流同一个
- * （requirementWorkflowId）：驾驶舱、fleet 命令的信号照旧按它发；同一张单同一时刻只能有一条在跑，切换那一刻也起不了两条。
- */
-export const FUSION_WORKFLOW_TYPE = 'fusionWorkflow';
-
-/**
  * 三段总调度的任务工作流类型名（#632；specs/632-三段总调度/方案.md）：引擎自己拉单（jobs/intake.ts）起的就是它，一张单一条。
  * 必须等于引擎 workflows/task.ts 导出的函数名（Temporal 按导出名找工作流）。
  */
@@ -30,13 +15,18 @@ export const TASK_WORKFLOW_TYPE = 'taskWorkflow';
 
 /**
  * 一张 issue 一条任务工作流，例如 `task:acme/demo#12`。编号定死、起的时候用 REJECT_DUPLICATE（同一编号不管开着还是已经结束都不许再起），
- * 同一张单任何时候最多一条：做完的、停下的不会自己重来，要人在驾驶舱点「继续」（发信号）。驾驶舱后端发信号也按这个拼。
+ * 同一张单任何时候最多一条：做完的、被放弃的不会自己重来，也收不到信号（驾驶舱「继续」「叫停」发给它回 409 workflow_gone）；
+ * 「继续」只叫得醒还在跑、停着等人的那一条。驾驶舱后端发信号也按这个拼（api/src/temporal.ts 的 taskWorkflowIdForTask），信号名见 task-signals.ts。
  */
 export function taskWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `task:${repo.owner}/${repo.name}#${issueNumber}`;
 }
 
-/** 一张 issue 一条工作流（Fusion；在途的旧需求工作流也是这个编号），例如 `req:acme/demo#12`。 */
+/**
+ * 旧 Fusion 的需求工作流编号，例如 `req:acme/demo#12`。引擎里这条工作流已经没有了，驾驶舱后端也不再往它发信号（#901）；
+ * 只剩每小时对账（engine/src/real/hourly-reconcile.ts）拼它来认「在等旧批准的工作流已经不在了」、把旧提醒撤掉。
+ * 对账那一套旧读法换掉时（#901 查出的同根问题，另开单）这个函数一起删，别在别处新用。
+ */
 export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `req:${repo.owner}/${repo.name}#${issueNumber}`;
 }
@@ -48,16 +38,3 @@ export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number
 export function subtaskWorkflowId(subtaskId: string): string {
   return `sub:${subtaskId}`;
 }
-
-/** 每个仓一条合并队列，例如 `mq:acme/demo`。 */
-export function mergeQueueWorkflowId(repo: WorkflowRepoRef): string {
-  return `mq:${repo.owner}/${repo.name}`;
-}
-
-/**
- * fleet 命令写库之后，只有这几类值得叫醒工作流（会改变走向）；say、plan 只进库，驾驶舱从库里读。
- * 每条都发的话，一个需求二十来个子任务就能把工作流的历史撑到上万条事件，撞上 Temporal 每条执行 1 万个信号的上限后，
- * 连叫停都发不进去。叫醒直接发给会话所属的工作流：子任务的会话发 subtaskWorkflowId，需求自己的会话发需求工作流。
- */
-export const AGENT_EVENT_WAKE_KINDS = ['ask', 'done', 'blocked'] as const;
-export type AgentEventWakeKind = (typeof AGENT_EVENT_WAKE_KINDS)[number];

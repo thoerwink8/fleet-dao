@@ -13,7 +13,8 @@ import {
   users,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
+import { type AppCredentials, createGitHub } from '@fleet-dao/github';
+import { pgLedger } from '@fleet-dao/store';
 import {
   type Client,
   ScheduleAlreadyRunning,
@@ -37,6 +38,7 @@ import type { RetiredSchedule } from '../src/jobs/retired-schedules.ts';
 import { RETIRED_SCHEDULES } from '../src/jobs/retired-schedules.ts';
 import {
   CANARY_SCHEDULE_ID,
+  CARPOOL_WATCH_SCHEDULE_ID,
   deleteRetiredSchedules,
   engineSchedules,
   ensureEngineSchedules,
@@ -412,6 +414,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
       [ROUTE_PROBE_SCHEDULE_ID]: 'created',
       [QUOTA_READ_SCHEDULE_ID]: 'created',
+      [CARPOOL_WATCH_SCHEDULE_ID]: 'created',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
       [CANARY_SCHEDULE_ID]: 'created',
       [WATCHDOG_SCHEDULE_ID]: 'created',
@@ -422,6 +425,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
       [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
       [QUOTA_READ_SCHEDULE_ID]: 'updated',
+      [CARPOOL_WATCH_SCHEDULE_ID]: 'updated',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
       [CANARY_SCHEDULE_ID]: 'updated',
       [WATCHDOG_SCHEDULE_ID]: 'updated',
@@ -434,6 +438,8 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       `update:${ROUTE_PROBE_SCHEDULE_ID}`,
       `create:${QUOTA_READ_SCHEDULE_ID}`,
       `update:${QUOTA_READ_SCHEDULE_ID}`,
+      `create:${CARPOOL_WATCH_SCHEDULE_ID}`,
+      `update:${CARPOOL_WATCH_SCHEDULE_ID}`,
       `create:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `update:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `create:${CANARY_SCHEDULE_ID}`,
@@ -491,7 +497,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     await expect(ensureEngineSchedules(broken.client, 'fleet')).rejects.toThrow('UNAVAILABLE');
   });
 
-  it('真 Temporal 开发服务端：对两遍各只有一个定时任务，对账每 15 分钟、路由探针每 15 分钟错开 7 分钟、每小时对账 41 分起、巡检每 6 小时 26 分起、看门狗每 5 分钟 4 分起、拉单每 5 分钟 3 分起', {
+  it('真 Temporal 开发服务端：对两遍各只有一个定时任务，对账每 15 分钟、路由探针每 15 分钟错开 7 分钟、每小时对账 41 分起、巡检每 6 小时 26 分起、看门狗每 5 分钟 4 分起、拉单每 5 分钟 3 分起、拼车盯读每分钟', {
     timeout: 300_000,
   }, async () => {
     const real = await createRealEnv();
@@ -501,6 +507,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
         [ROUTE_PROBE_SCHEDULE_ID]: 'created',
         [QUOTA_READ_SCHEDULE_ID]: 'created',
+        [CARPOOL_WATCH_SCHEDULE_ID]: 'created',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
         [CANARY_SCHEDULE_ID]: 'created',
         [WATCHDOG_SCHEDULE_ID]: 'created',
@@ -511,6 +518,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
         [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
         [QUOTA_READ_SCHEDULE_ID]: 'updated',
+        [CARPOOL_WATCH_SCHEDULE_ID]: 'updated',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
         [CANARY_SCHEDULE_ID]: 'updated',
         [WATCHDOG_SCHEDULE_ID]: 'updated',
@@ -539,6 +547,12 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       const watchdog = await client.schedule.getHandle(WATCHDOG_SCHEDULE_ID).describe();
       expect(watchdog.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[5 * 60_000, 4 * 60_000]]);
       expect(watchdog.action).toMatchObject({ workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet-b' });
+      const carpoolWatch = await client.schedule.getHandle(CARPOOL_WATCH_SCHEDULE_ID).describe();
+      expect(carpoolWatch.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[60_000, undefined]]);
+      expect(carpoolWatch.action).toMatchObject({
+        workflowType: WORKFLOW_TYPES.carpoolWatch,
+        taskQueue: 'fleet-b',
+      });
       const intake = await client.schedule.getHandle(INTAKE_SCHEDULE_ID).describe();
       expect(intake.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[5 * 60_000, 3 * 60_000]]);
       expect(intake.action).toMatchObject({ workflowType: WORKFLOW_TYPES.intake, taskQueue: 'fleet-b' });

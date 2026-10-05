@@ -6,6 +6,7 @@
 // （读数刚变、引擎没切过号，real/session-org.ts）：Claude 订阅池这一轮也不探、结论照旧，这一轮记 partial、写明为什么。
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
+
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
@@ -14,11 +15,12 @@ import {
   type RouteProbeState,
   routeProbeEveryMinutes,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { RouteProbeRun } from '../contract.ts';
 import { hostName, ORG_NAMES } from '../routing/names.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import type { OrgSwitchRound } from './org-switch.ts';
+import type { OrgSwitchRound, ProbedRoute } from './org-switch.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
 export const ROUTE_PROBE_JOB = {
@@ -105,7 +107,6 @@ export class RouteProbeFailedError extends Error {
   }
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const clip = (text: string, max = ROUTE_PROBE_DETAIL_MAX) =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
 
@@ -197,7 +198,7 @@ async function attemptOf(probe: Prober, t: ProbeTarget): Promise<ProbeAttempt> {
   try {
     return await probe(t);
   } catch (err) {
-    return { kind: 'failed', detail: `探针自己出错，没探成：${message(err)}` };
+    return { kind: 'failed', detail: `探针自己出错，没探成：${errMessage(err)}` };
   }
 }
 
@@ -219,7 +220,7 @@ async function liveOrgOf(deps: RouteProbeJobDeps): Promise<LiveOrgReading> {
   try {
     return await deps.sessionOrg();
   } catch (err) {
-    return { ok: false, why: `读会话用户挂的组织出错：${message(err)}` };
+    return { ok: false, why: `读会话用户挂的组织出错：${errMessage(err)}` };
   }
 }
 
@@ -258,7 +259,7 @@ async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclu
     } catch (err) {
       deps.log('error', '路由探针：整池暂停的报警没写进库（结论照写）', {
         routeId: t.routeId,
-        error: message(err),
+        error: errMessage(err),
       });
     }
   }
@@ -277,7 +278,7 @@ async function switchBefore(deps: RouteProbeJobDeps): Promise<OrgKind | null> {
   try {
     return await deps.orgSwitch.before();
   } catch (err) {
-    deps.log('error', '路由探针：切号这一步出错，这一轮不切', { error: message(err) });
+    deps.log('error', '路由探针：切号这一步出错，这一轮不切', { error: errMessage(err) });
     return null;
   }
 }
@@ -302,7 +303,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   try {
     targets = await deps.targets();
   } catch (err) {
-    return { result: { outcome: 'failed', why: `读路由表没成：${message(err)}` }, online: [] };
+    return { result: { outcome: 'failed', why: `读路由表没成：${errMessage(err)}` }, online: [] };
   }
   if (targets.length === 0) {
     return {
@@ -331,7 +332,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     try {
       await deps.orgSwitch.after(switched, probed);
     } catch (err) {
-      deps.log('error', '路由探针：切号的核对出错', { error: message(err) });
+      deps.log('error', '路由探针：切号的核对出错', { error: errMessage(err) });
     }
   }
   const online: string[] = [];
@@ -364,7 +365,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         org: c.org,
       });
     } catch (err) {
-      unsaved.push(`${c.target.routeId}：${message(err)}`);
+      unsaved.push(`${c.target.routeId}：${errMessage(err)}`);
       continue;
     }
     if (saved === 'route_not_found') {
@@ -416,7 +417,7 @@ export async function runRouteProbeJob(deps: RouteProbeJobDeps): Promise<RoutePr
   try {
     round = await probeRound(deps);
   } catch (err) {
-    round = { result: { outcome: 'failed', why: `路由探针没跑成：${message(err)}` }, online: [] };
+    round = { result: { outcome: 'failed', why: `路由探针没跑成：${errMessage(err)}` }, online: [] };
   }
   const { result } = round;
   await deps.runs.finish(runId, result, deps.now());
@@ -436,4 +437,36 @@ export async function runRouteProbeJob(deps: RouteProbeJobDeps): Promise<RoutePr
   if (run.outcome === 'ok') deps.log('info', '路由探针跑完了', fields);
   else deps.log('warn', '路由探针这一轮没探全', { ...fields, why: run.why });
   return run;
+}
+
+/**
+ * 切号切完当场探一次切过去的那个组织的池（#194 方案 4.3）：只探这一类的路由、各写一条结论，不记 schedule_runs、不再判切号
+ * （调用方就是切号本身）。放慢的、这会儿定不下来没探的不算，和一轮探针里的「真探了的才算读回」同一个口径。读不到路由照抛。
+ */
+export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promise<ProbedRoute[]> {
+  const mine = (await deps.targets()).filter((t) => t.orgKind === kind);
+  const conclusions = await mapLimit(mine, deps.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
+    conclude(deps, t),
+  );
+  const probed: ProbedRoute[] = [];
+  for (const c of conclusions) {
+    if (c.kept || c.unsettled) continue;
+    try {
+      await deps.save({
+        routeId: c.target.routeId,
+        state: c.state,
+        at: c.at,
+        detail: c.detail,
+        org: c.org,
+      });
+    } catch (err) {
+      // 结论没写进库不改探到的结果：核对照探到的算，写不进的下一轮探针会再写
+      deps.log('error', '路由探针（切号后当场探）：结论没写进库', {
+        routeId: c.target.routeId,
+        error: errMessage(err),
+      });
+    }
+    probed.push({ routeId: c.target.routeId, orgKind: c.target.orgKind, state: c.state, detail: c.detail });
+  }
+  return probed;
 }

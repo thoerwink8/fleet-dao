@@ -1,13 +1,15 @@
-import { SETTING_SCHEMAS } from '@fleet-dao/shared';
+import { quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
-import { BellRing, FolderGit2, Info, Palette, SlidersHorizontal } from 'lucide-react';
+import { BellRing, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
 import { brand } from '#brand';
-import { ApiError, errorText, useApi, useMe, useSettings, useUpdateSetting } from '../api/client';
+import { ApiError, errorText, useApi, useMe, usePools, useSettings, useUpdateSetting } from '../api/client';
 import type { Setting, SettingKey } from '../api/types';
+import { CredentialsSection } from '../components/credentials-section';
 import { LoadError, LoadingRows, Page } from '../components/page';
+import { PoolHoldsPanel } from '../components/pool-holds';
 import { useRepo } from '../components/repo-context';
 import { PaletteSwatch } from '../components/shell/palette-swatch';
 import { ModeSwitch } from '../components/shell/topbar';
@@ -18,8 +20,16 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
 import { settingLabel } from '../lib/audit';
+import { poolTitle } from '../lib/catalog';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import {
+  parseReserveInput,
+  reserveInputText,
+  reserveKindsFor,
+  reserveSource,
+  UNLIMITED_WORD,
+} from '../lib/reserve';
 import { isMine, TONES, toneLabel } from '../lib/status';
 import { PALETTES } from '../lib/theme';
 
@@ -244,6 +254,152 @@ function QuietHours({ s }: { s: Setting | undefined }) {
   );
 }
 
+/** 引擎暂不用独享（#194 方案 4.8）：创始人自己要大用独享时一键叫停引擎这一路；开关一拨就存，带版本号、进操作记录。 */
+function SoloPaused({ s }: { s: Setting | undefined }) {
+  const current = SETTING_SCHEMAS['engine.soloPaused'].safeParse(s?.value);
+  const on = current.success ? current.data : false;
+  const { save, pending } = useSaveSetting();
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className="text-sm font-medium">{settingLabel['engine.soloPaused']}</div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {`开着时：${brand.terms.carpool}用不了（额度用满、整辆车被用光）也不自动切到${brand.terms.solo}，Claude 的活等${brand.terms.carpool}恢复或交给别家模型。已经挂着${brand.terms.solo}的不受影响，${brand.terms.carpool}恢复照常切回。`}
+          </p>
+        </div>
+        <Switch
+          checked={on}
+          disabled={pending}
+          onCheckedChange={(next) => save('engine.soloPaused', next, s)}
+          aria-label={settingLabel['engine.soloPaused']}
+        />
+      </div>
+      <SettingMeta s={s} />
+    </div>
+  );
+}
+
+/**
+ * 各渠道的额度留量线（#194 方案 4.8）：每个渠道（账号池）每个额度窗一个「最多用到百分之几」，到了线引擎就不再往这个渠道派新活、
+ * 也不切过去（在跑的不动）。线只存在库里（起始值是发布时装载器从种子文件只补缺装进去的，创始人 2026-10-05：不写死、驾驶舱可配置），
+ * 这里没有任何默认值：留空 = 未配置（不限），写「不限」= 明确不限。存值认不出、库里没有这一项明确说出来，不当成不限；整份一起存，
+ * 带版本号、进操作记录；顶上写这一项现在是种子装的还是人改过的。
+ */
+function QuotaReserve({ s }: { s: Setting | undefined }) {
+  const pools = usePools();
+  const { save, pending } = useSaveSetting();
+  const stored = s && s.version > 0 ? SETTING_SCHEMAS['engine.quotaReserve'].safeParse(s.value) : null;
+  const saved = stored?.success ? stored.data : {};
+  const problem = stored && !stored.success ? issueText(stored.error.issues[0]) : null;
+  const source = reserveSource(s);
+  const rows = (pools.data?.pools ?? []).map((p) => {
+    const mine = saved[p.id] ?? {};
+    return {
+      pool: p,
+      mine,
+      kinds: reserveKindsFor([...new Set(p.windows.map((w) => w.window))], mine),
+    };
+  });
+  const initial = (): Record<string, string> =>
+    Object.fromEntries(
+      rows.flatMap((r) => r.kinds.map((k) => [`${r.pool.id}|${k}`, reserveInputText(r.mine[k])] as const)),
+    );
+  const [draft, setDraft] = useState<Record<string, string>>(initial);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 服务端版本变了、池列表读到了才重置，不跟着输入重置。
+  useEffect(() => setDraft(initial()), [s?.version, pools.data]);
+  const dirty = Object.entries(initial()).some(([k, v]) => (draft[k] ?? v) !== v);
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const next: Record<string, Record<string, number | null>> = {};
+    for (const [poolId, lines] of Object.entries(saved))
+      next[poolId] = { ...lines } as Record<string, number | null>;
+    for (const r of rows) {
+      const lines: Record<string, number | null> = { ...(next[r.pool.id] ?? {}) };
+      for (const k of r.kinds) {
+        const parsed = parseReserveInput(draft[`${r.pool.id}|${k}`] ?? '');
+        if (!parsed.ok) {
+          toast.error('这个值不行', { description: `${poolTitle(r.pool)}：${parsed.why}` });
+          return;
+        }
+        if (parsed.value === undefined) delete lines[k];
+        else lines[k] = parsed.value;
+      }
+      if (Object.keys(lines).length > 0) next[r.pool.id] = lines;
+      else delete next[r.pool.id];
+    }
+    save('engine.quotaReserve', next, s);
+  };
+  return (
+    <form onSubmit={submit} className="rounded-xl border bg-card p-4 md:col-span-2">
+      <div className="text-sm font-medium">{settingLabel['engine.quotaReserve']}</div>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        {`每个渠道每个额度窗「最多用到百分之几」。已用到这条线，引擎不再往这个渠道派新活，${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。留空 = 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线）；写「${UNLIMITED_WORD}」= 明确不限。`}
+      </p>
+      <p className="mt-1 text-xs" data-testid="reserve-source">
+        {source.kind === 'missing' ? (
+          <span className="text-ink-fail" role="alert">
+            {`库里没有留量线：种子没装进库（发布时装载器没跑成？），引擎对所有渠道一律不派、不切，不当成不限。要现在恢复，在下面填好保存即可。`}
+          </span>
+        ) : source.kind === 'seed' ? (
+          <span className="text-muted-foreground">
+            {`现在的线来自种子（发布时装载器装的，还没人在${brand.product}改过）`}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">
+            {`现在的线是人在${brand.product}改过的${source.by ? `（${source.by}）` : ''}，发布时的种子不会覆盖它`}
+          </span>
+        )}
+      </p>
+      {problem ? (
+        <p className="mt-2 text-xs text-ink-fail" role="alert">
+          {`存着的留量线认不出（${problem}），引擎对所有渠道一律不派、不切，不当成不限；保存会整份换掉。`}
+        </p>
+      ) : null}
+      {pools.error ? <LoadError what="渠道列表" error={pools.error} /> : null}
+      {!pools.data ? <LoadingRows rows={1} /> : null}
+      <div className="mt-3 space-y-3">
+        {rows.map((r) => (
+          <div key={r.pool.id}>
+            {/* 拼车和独享两个池同属一个渠道：只写渠道名会出现两行一模一样的「Claude 订阅」，要带上池编号 */}
+            <div className="text-sm">{poolTitle(r.pool)}</div>
+            {r.kinds.length === 0 ? (
+              <p className="text-xs text-muted-foreground">还没读到额度窗，读到以后在这里配。</p>
+            ) : (
+              <div className="mt-1 flex flex-wrap items-center gap-3">
+                {r.kinds.map((k) => {
+                  const id = `reserve-${r.pool.id}-${k}`;
+                  return (
+                    <div key={k} className="flex items-center gap-1.5">
+                      <Label htmlFor={id} className="text-xs text-muted-foreground">
+                        {quotaWindowName({ window: k, label: k })}
+                      </Label>
+                      <Input
+                        id={id}
+                        value={draft[`${r.pool.id}|${k}`] ?? ''}
+                        placeholder="未配置（不限）"
+                        onChange={(e) => setDraft((d) => ({ ...d, [`${r.pool.id}|${k}`]: e.target.value }))}
+                        className="num h-8 w-24"
+                      />
+                      <span className="text-xs text-muted-foreground">%</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex items-center">
+        <Button type="submit" size="sm" className="ml-auto" disabled={pending || !dirty}>
+          保存
+        </Button>
+      </div>
+      {source.kind === 'missing' ? null : <SettingMeta s={s} />}
+    </form>
+  );
+}
+
 export default function Settings() {
   const theme = useTheme();
   const api = useApi();
@@ -324,6 +480,9 @@ export default function Settings() {
               unit="次 / 天"
               placeholder="没设"
             />
+            <SoloPaused s={find('engine.soloPaused')} />
+            <QuotaReserve s={find('engine.quotaReserve')} />
+            <PoolHoldsPanel />
           </div>
         )}
       </Section>
@@ -342,6 +501,18 @@ export default function Settings() {
           </div>
         )}
       </Section>
+
+      {/* 账密只在正式驾驶舱里有：演示版没有登录（也读不到这个接口） */}
+      {api.source === 'demo' ? null : (
+        <Section
+          id="account"
+          icon={KeyRound}
+          title="账密登录"
+          description={`设一个用户名和密码，飞书登录出问题时也进得去${brand.product}。`}
+        >
+          <CredentialsSection />
+        </Section>
+      )}
 
       <Section
         id="repos"
@@ -379,7 +550,7 @@ export default function Settings() {
         </ul>
       </Section>
 
-      <Section id="about" icon={Info} title="关于" description={`${brand.product} v1 的前端。`}>
+      <Section id="about" icon={Info} title="关于" description={`${brand.product}的前端。`}>
         <dl className="grid max-w-md grid-cols-about gap-y-2 text-sm">
           <dt className="text-muted-foreground">数据</dt>
           <dd>
@@ -392,7 +563,7 @@ export default function Settings() {
             {api.source === 'demo'
               ? '访客（演示版不用登录）'
               : me
-                ? `${me.user.displayName}（飞书账号，只放行创始人）`
+                ? `${me.user.displayName}（飞书或账密，只放行创始人）`
                 : '—'}
           </dd>
           {import.meta.env.MODE !== 'demo' ? (

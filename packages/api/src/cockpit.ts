@@ -1,110 +1,162 @@
-// 驾驶舱接口（/api）：看板、任务、步骤、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
+// 驾驶舱接口（/api）：看板、任务、旧追问（只读 + 关闭）、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
 // 读一律从数据库读（不直接查 GitHub；唯一的例外是 /changelog 的发布版本号，现读 GitHub 里程碑，见 release-version.ts）；
 // 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
+
 import {
   AnswerAskRequest,
-  AnswerAskResponse,
   AuditQuery,
   AuditResponse,
   BoardResponse,
+  CloseAskResponse,
   DEFAULT_SESSION_EFFORT,
+  EnvResponseSchema,
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
+  LegacyAsksResponse,
+  type LegacyRead,
   MeResponse,
   NotificationsQuery,
   NotificationsResponse,
-  PageQuery,
+  POOL_HOLDS_SETTING,
+  PoolHoldsResponse,
   PoolsResponse,
+  poolHoldsView,
+  QUOTA_RESERVE_SETTING,
   ReposResponse,
   ResolveNotificationResponse,
   RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
-  RunStepsResponse,
+  revocationProblem,
   SETTING_SCHEMAS,
   type SettingKey,
   SettingsResponse,
+  TASK_SIGNAL_NAMES,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
-  TimelineResponse,
-  UpdateChannelRequest,
-  UpdateChannelResponse,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
+import { DEPLOY_LAG_NOT_HERE, handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
-import { handlingOf, handlingView } from './alert-work.ts';
-import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
+import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
+import {
+  engineFact,
+  engineOffFact,
+  envFacts,
+  poolsFact,
+  readHealth,
+  scheduleFact,
+  versionFact,
+} from './env-view.ts';
+import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
+import { ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY, closeLegacyAsk } from './legacy-asks.ts';
+import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
   type Actor,
   type NewAuditEntry,
   type TaskSignal,
   WorkflowGoneError,
+  WorkflowTargetNotFoundError,
   WorkflowUnavailableError,
 } from './ports.ts';
 import { registerReleaseRoutes } from './release-version.ts';
+import { soloReserveView } from './reserve-view.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
-import { requirementWorkflowIdForTask } from './temporal.ts';
+import { taskWorkflowIdForTask } from './temporal.ts';
 import {
   askLate,
   buildBoard,
   buildHome,
   buildPools,
-  describeTimeline,
   isTaskFinished,
   jobView,
+  legacyAskViews,
   notificationView,
   routeLookup,
-  routeProblem,
   runView,
   segmentRunViews,
   subtaskViews,
   usageView,
 } from './views.ts';
 
+/** 读旧 pool-hold 提醒时最多翻几页没处理的提醒（每页 200 条）；翻不完明说没读全，不拿「没有」顶。 */
+const LEGACY_ALERT_PAGES = 5;
+
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
+
+/** 叫停没写原因时补的一句话：引擎的放弃信号 reason 必填（task-contract.ts 的 AbandonCommand），工作流拿它写状态。 */
+const DEFAULT_STOP_REASON = '驾驶舱上点了叫停';
+
+/** 引擎没有接收处的动作，各自该怎么说（驾驶舱原样显示）。 */
+const UNSUPPORTED_ACTION_WHY = {
+  pause: '任务工作流没有「暂停」：它只会在碰到问题时自己停下等人。想让它别再做，请用「叫停」',
+  reroute: '任务工作流没有「中途换路由」：每一段会话开始前它自己按路由顺序选路。想让它别再做，请用「叫停」',
+} as const;
 
 export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   const { config, store } = deps;
   const app = new Hono<CockpitEnv>();
   app.use('*', requireSession(config, store, deps.now));
 
+  const engineProbe = engineHealthProbe({
+    health: deps.health,
+    engineOff: config.engineOff,
+    log: deps.log,
+    now: deps.now,
+  });
+
   const actorOf = (c: Context<CockpitEnv>): Actor => ({ kind: 'user', id: c.get('user').id });
 
   /**
-   * 先记后做：操作记录写不进就抛错，信号不发。命令按任务发给需求工作流，编号查库拼（requirementWorkflowIdForTask）。
-   * 信号没发成再追加一条 ok=false 的记录（工作流不在了 409、Temporal 没接上或连不上 503、别的 502）；
-   * 这一条也写不进时只能留日志，但不改变返回给人的结果。
+   * 先记后做：操作记录写不进就抛错，信号不发。命令按任务发给任务工作流，编号查库拼（taskWorkflowIdForTask）。
+   * 信号没发成再追加一条 ok=false 的记录（工作流不在了 409、拼不出编号 404、Temporal 没接上或连不上 503、别的 502），
+   * 每一种都给驾驶舱一句人话原因；这一条也写不进时只能留日志，但不改变返回给人的结果。
    */
   async function signalAndAudit(taskId: string, signal: TaskSignal, audit: NewAuditEntry): Promise<void> {
     await store.appendAudit(audit);
     try {
-      const workflowId = await requirementWorkflowIdForTask(store, taskId);
+      const workflowId = await taskWorkflowIdForTask(store, taskId);
       await deps.workflows.signal(workflowId, signal);
     } catch (err) {
       const gone = err instanceof WorkflowGoneError;
       const unavailable = err instanceof WorkflowUnavailableError;
-      const error = gone ? 'workflow_gone' : unavailable ? 'workflow_unavailable' : String(err);
+      const notFound = err instanceof WorkflowTargetNotFoundError;
+      const error = gone
+        ? 'workflow_gone'
+        : unavailable
+          ? 'workflow_unavailable'
+          : notFound
+            ? 'workflow_target_not_found'
+            : String(err);
       try {
         await store.appendAudit({ ...audit, ok: false, error });
       } catch (auditErr) {
         deps.log.error('信号没发成，这条失败记录也没写进去', { taskId, error, auditError: String(auditErr) });
       }
-      if (gone) throw new ApiError(409, 'workflow_gone', '这个任务的工作流已经结束或不存在');
+      if (gone) {
+        throw new ApiError(
+          409,
+          'workflow_gone',
+          '这张单的任务工作流已经结束或不存在（做完了、已被叫停，或引擎还没拉起它），没有谁能收到这个操作',
+        );
+      }
+      if (notFound) throw new ApiError(404, 'workflow_target_not_found', err.message);
       deps.log.error('发信号失败', { taskId, signal: signal.name, error: String(err) });
       if (unavailable) throw new ApiError(503, 'workflow_unavailable', '工作流服务暂时连不上，稍后再试');
       throw new ApiError(502, 'workflow_unreachable', '发给工作流的信号没发出去，稍后再试');
@@ -146,15 +198,20 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     for (const key of missing) deps.log.warn('主页「做完的」反查不到挂的单，只显示 PR 号', { issue: key });
     const taskIds = tasks.map((t) => t.id);
-    const [notifications, pendingAsks, activeRuns, pools, channels, windows, routes] = await Promise.all([
-      store.listNotifications({ status: 'open', limit: 200 }),
-      store.listPendingAsks(),
-      store.listRuns({ taskIds, active: true }),
-      store.listPools(),
-      store.listChannels(),
-      store.listQuotaWindows(),
-      store.listRoutes(),
-    ]);
+    const [notifications, activeRuns, pools, channels, windows, routes, models, segmentRuns, engine] =
+      await Promise.all([
+        store.listNotifications({ status: 'open', limit: 200 }),
+        store.listRuns({ taskIds, active: true }),
+        store.listPools(),
+        store.listChannels(),
+        store.listQuotaWindows(),
+        store.listRoutes(),
+        store.listModels(),
+        // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
+        store.listSegmentRunsForTasks(taskIds),
+        // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
+        engineProbe(),
+      ]);
     const now = deps.now();
     const poolViews = buildPools(
       { pools, channels, windows, routes, activeRuns },
@@ -164,16 +221,64 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, HomeResponseSchema, {
       ...buildHome({
         notifications: notifications.items,
-        pendingAsks,
         tasks,
         activeRuns,
         merged,
         repos,
         pools: poolViews,
         routes,
-        engineOff: config.engineOff,
+        engine,
+        segmentRuns,
+        models,
+        channels,
         now,
       }),
+    });
+  });
+
+  /**
+   * 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」，一项读失败不连累别的项。
+   * 只读、不跨环境、不开口子：读的全是现成的（主页、额度页、定时任务页、/healthz 用的是同一份）。
+   * 引擎那一格沿用主页那一格的探针（开着才真探），不另写一份判法。
+   */
+  app.get(WebRoutes.env.path, async (c) => {
+    const now = deps.now();
+    const engineProbeResult = await engineProbe();
+    const engine = engineProbeResult.state === 'off' ? engineOffFact() : engineFact(engineProbeResult);
+    // 版本那一项只在法国的正式机器上装配（main.ts 的 onFrance）：别处 deps.deployLag 没有，照实写「没查成」
+    const readDeployLag = deps.deployLag;
+    const facts = await envFacts({
+      engine,
+      readSessions: () => store.listRuns({ active: true }),
+      readPools: async () => {
+        const [pools, channels, windows, routes, activeRuns] = await Promise.all([
+          store.listPools(),
+          store.listChannels(),
+          store.listQuotaWindows(),
+          store.listRoutes(),
+          store.listRuns({ active: true }),
+        ]);
+        return poolsFact({
+          pools,
+          channels,
+          windows,
+          routes,
+          activeRuns,
+          now,
+          staleAfterMs: config.quotaStaleAfterMs,
+        });
+      },
+      readSchedule: async () => scheduleFact(await store.listJobs(), now),
+      readVersion: readDeployLag ? async () => versionFact(readDeployLag(), now) : null,
+      versionNotWired: DEPLOY_LAG_NOT_HERE,
+      readHealth: () => readHealth(deps.health, deps.log),
+    });
+    return reply(c, EnvResponseSchema, {
+      name: config.machineName
+        ? { name: config.machineName }
+        : { name: '认不出', problem: '这台后端没配环境名（api.env 的 FLEET_MACHINE_NAME）' },
+      asOf: now.toISOString(),
+      facts,
     });
   });
 
@@ -246,26 +351,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     });
   });
 
-  app.get(WebRoutes.timeline.path, async (c) => {
-    const taskId = c.req.param('taskId');
-    const page = readQuery(c, PageQuery);
-    if (!(await store.getTask(taskId))) throw new ApiError(404, 'task_not_found', '没有这个任务');
-    const { items, nextCursor } = await store.listTimeline(taskId, page);
-    return reply(c, TimelineResponse, {
-      items: items.map((rec) => ({
-        id: rec.id,
-        at: rec.at,
-        source: rec.source,
-        kind: rec.kind,
-        runId: rec.runId,
-        subtaskId: rec.subtaskId,
-        text: describeTimeline(rec),
-        detail: rec.payload,
-      })),
-      nextCursor,
-    });
-  });
-
   app.post(WebRoutes.taskAction.path, async (c) => {
     const taskId = c.req.param('taskId');
     const body = await readJson(c, TaskActionRequest);
@@ -282,41 +367,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const by = c.get('user').id;
     let signal: TaskSignal;
     switch (body.action) {
-      case 'pause':
-        signal = { name: 'pause', by, reason: body.reason };
-        break;
       case 'resume':
-        signal = { name: 'resume', by };
+        signal = { name: TASK_SIGNAL_NAMES.continue, by };
         break;
       case 'stop':
-        signal = { name: 'stop', by, reason: body.reason };
+        signal = { name: TASK_SIGNAL_NAMES.abandon, by, reason: body.reason ?? DEFAULT_STOP_REASON };
         break;
-      case 'reroute': {
-        const running = (await store.listRuns({ taskIds: [taskId], active: true })).filter(
-          (r) => body.subtaskId === undefined || r.subtaskId === body.subtaskId,
-        );
-        const target = running.sort((a, b) =>
-          (b.startedAt ?? b.queuedAt).localeCompare(a.startedAt ?? a.queuedAt),
-        )[0];
-        if (!target) throw new ApiError(409, 'no_active_run', '这个任务现在没有在跑的会话，没法换路由');
-        const [routes, models, bans] = await Promise.all([
-          store.listRoutes(),
-          store.listModels(),
-          store.listBans(),
-        ]);
-        const route = routeLookup(routes, models);
-        const problem = routeProblem(body.routeId, target.stage, { route, bans, now: deps.now() });
-        if (problem) throw new ApiError(422, 'route_not_allowed', problem);
-        if (!route(body.routeId).route?.alive) throw new ApiError(422, 'route_offline', '这条路由现在不在线');
-        signal = {
-          name: 'reroute',
-          by,
-          routeId: body.routeId,
-          subtaskId: target.subtaskId,
-          reason: body.reason,
-        };
-        break;
-      }
+      // 引擎的任务工作流没有「暂停」「中途换路由」的接收处（它只会碰到问题自己停下等人、每一段重新选路）：
+      // 发了也没人收，所以当场回明确的 409，不记操作、不假装发出去了（#901）。要补就先在引擎里接上、再回这里。
+      case 'pause':
+      case 'reroute':
+        throw new ApiError(409, 'action_not_supported', UNSUPPORTED_ACTION_WHY[body.action]);
     }
     const { name: _name, by: _by, ...detail } = signal;
     await signalAndAudit(taskId, signal, {
@@ -331,34 +392,36 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, TaskActionResponse, { ok: true });
   });
 
-  app.get(WebRoutes.runSteps.path, async (c) => {
-    const run = await store.getRun(c.req.param('runId'));
-    if (!run) throw new ApiError(404, 'run_not_found', '没有这个会话');
-    const [plans, lastSay] = await Promise.all([store.getPlans([run.id]), store.lastSay(run.id)]);
-    const plan = plans.get(run.id);
-    return reply(c, RunStepsResponse, {
-      runId: run.id,
-      steps: plan?.steps ?? [],
-      updatedAt: plan?.updatedAt,
-      lastSay: lastSay ?? undefined,
-    });
-  });
-
   app.post(WebRoutes.answerAsk.path, async (c) => {
     const askId = c.req.param('askId');
-    const { answer } = await readJson(c, AnswerAskRequest);
+    await readJson(c, AnswerAskRequest);
+    if (!(await store.getAsk(askId))) throw new ApiError(404, 'ask_not_found', '没有这条追问');
+    // 不落库、不进操作记录：新流程没有收追问回答的地方（#928、#939），落了库也没人读，不能让调用方以为答了有用。
+    throw new ApiError(409, ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY);
+  });
+
+  app.get(WebRoutes.legacyAsks.path, async (c) => {
+    const pending = await store.listPendingAsks();
+    const taskIds = [...new Set(pending.map((a) => a.taskId))];
+    const tasks = new Map(
+      (await Promise.all(taskIds.map((id) => store.getTask(id)))).flatMap((t) => (t ? [[t.id, t]] : [])),
+    );
+    return reply(c, LegacyAsksResponse, { items: legacyAskViews(pending, (id) => tasks.get(id)) });
+  });
+
+  app.post(WebRoutes.closeAsk.path, async (c) => {
+    const askId = c.req.param('askId');
     const ask = await store.getAsk(askId);
     if (!ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    const result = await answerAsk(deps, {
+    const result = await closeLegacyAsk(deps, {
       askId,
       taskId: ask.taskId,
-      answer,
       by: actorOf(c),
       via: c.get('via'),
     });
     if (result === 'not_found') throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    if (result === 'already_answered') throw new ApiError(409, 'already_answered', '这条追问已经有人回答了');
-    return reply(c, AnswerAskResponse, { ok: true });
+    if (result === 'already_answered') throw new ApiError(409, 'already_answered', '这条追问已经处理过了');
+    return reply(c, CloseAskResponse, { ok: true });
   });
 
   // 路由目录。每个用途的先后不在这里给：那是路由两层（下面 routingLayers），旧的阶段平铺表没人读了（#574）
@@ -469,39 +532,96 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     });
   });
 
-  app.patch(WebRoutes.updateChannel.path, async (c) => {
-    const channelId = c.req.param('channelId');
-    const body = await readJson(c, UpdateChannelRequest);
-    const result = await store.setChannelEnabled(
-      { channelId, enabled: body.enabled },
-      {
-        actor: actorOf(c),
-        action: body.enabled ? 'channel.enable' : 'channel.disable',
-        target: `channel:${channelId}`,
-        after: { enabled: body.enabled },
-        reason: body.reason,
-        via: c.get('via'),
-        ok: true,
-      },
-    );
-    if (result === 'not_found') throw new ApiError(404, 'channel_not_found', '没有这个渠道');
-    return reply(c, UpdateChannelResponse, { ok: true });
-  });
-
   app.get(WebRoutes.pools.path, async (c) => {
-    const [pools, channels, windows, routes, activeRuns] = await Promise.all([
+    const [pools, channels, windows, routes, activeRuns, savedSettings] = await Promise.all([
       store.listPools(),
       store.listChannels(),
       store.listQuotaWindows(),
       store.listRoutes(),
       store.listRuns({ active: true }),
+      store.listSettings(),
     ]);
     const now = deps.now();
+    // 切号现状（#194）：读不到不拖垮额度页，但要明说没读成（不拿空冒充没事）
+    const soloPaused = savedSettings.find((s) => s.key === 'engine.soloPaused')?.value === true;
+    const poolViews = buildPools(
+      { pools, channels, windows, routes, activeRuns },
+      now,
+      config.quotaStaleAfterMs,
+    );
+    // 独享的额度留量线现状（#194 方案 4.8）：选路、切号用同一份判法（shared 的 evaluateReserve）
+    const soloReserve = soloReserveView(
+      poolViews,
+      savedSettings.find((s) => s.key === QUOTA_RESERVE_SETTING)?.value,
+      now,
+    );
+    const reserve = soloReserve ? { soloReserve } : {};
+    let orgSwitch: ReturnType<typeof orgSwitchView>;
+    if (!deps.orgSwitch) {
+      orgSwitch = { state: 'unavailable', why: ORG_SWITCH_NOT_HERE, soloPaused, ...reserve };
+    } else {
+      try {
+        orgSwitch = orgSwitchView(await deps.orgSwitch.read(), soloPaused, now, soloReserve);
+      } catch (error) {
+        orgSwitch = {
+          state: 'unavailable',
+          why: `读切号账本没成：${errMessage(error)}`,
+          soloPaused,
+          ...reserve,
+        };
+      }
+    }
+    // 拼车额度对账（#194 方案 4.7）：读不到不拖垮额度页，明说没读成
+    let carpoolReconcile: ReturnType<typeof carpoolReconcileView>;
+    if (!deps.carpoolReconcile) {
+      carpoolReconcile = { state: 'unavailable', why: CARPOOL_RECONCILE_NOT_HERE };
+    } else {
+      try {
+        carpoolReconcile = carpoolReconcileView(await deps.carpoolReconcile.read(), now);
+      } catch (error) {
+        carpoolReconcile = {
+          state: 'unavailable',
+          why: `读拼车对账用的会话花费和额度没成：${errMessage(error)}`,
+        };
+      }
+    }
     return reply(c, PoolsResponse, {
-      pools: buildPools({ pools, channels, windows, routes, activeRuns }, now, config.quotaStaleAfterMs),
+      pools: poolViews,
       staleAfterMinutes: Math.round(config.quotaStaleAfterMs / 60_000),
+      orgSwitch,
+      carpoolReconcile,
       asOf: now.toISOString(),
     });
+  });
+
+  app.get(WebRoutes.poolHolds.path, async (c) => {
+    const now = deps.now();
+    const setting = (await store.listSettings()).find((s) => s.key === POOL_HOLDS_SETTING);
+    // 旧的 pool-hold:<池> 提醒（兼容读法）：读不成明说，不拿「没有旧提醒」顶
+    let legacy: LegacyRead;
+    try {
+      const alerts: NotificationRecord[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < LEGACY_ALERT_PAGES; page += 1) {
+        const got = await store.listNotifications({
+          status: 'open',
+          limit: 200,
+          ...(cursor ? { cursor } : {}),
+        });
+        alerts.push(...got.items);
+        cursor = got.nextCursor;
+        if (!cursor) break;
+      }
+      legacy = cursor
+        ? { ok: false, why: `没处理的提醒超过 ${LEGACY_ALERT_PAGES * 200} 条，旧的 pool-hold 提醒没读全` }
+        : { ok: true, alerts };
+    } catch (error) {
+      legacy = {
+        ok: false,
+        why: `读没处理的提醒没成：${errMessage(error)}`,
+      };
+    }
+    return reply(c, PoolHoldsResponse, poolHoldsView(setting, legacy, now));
   });
 
   app.get(WebRoutes.jobs.path, async (c) => {
@@ -559,6 +679,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const value = valueSchema.safeParse(body.value);
     if (!value.success) throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
     const before = (await settingsView()).find((s) => s.key === key);
+    // 整池暂停：撤回、续期必须写原因（写进操作记录），在落库前这一步拦，不靠页面自觉
+    if (key === POOL_HOLDS_SETTING) {
+      const missing = revocationProblem(before?.value, value.data, body.reason);
+      if (missing) throw new ApiError(400, 'reason_required', missing);
+    }
     const actor = actorOf(c);
     const result = await store.putSetting(
       { key, value: value.data, expectedVersion: body.version, by: actor },

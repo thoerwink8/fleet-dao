@@ -104,13 +104,13 @@ export { guardedByHygiene, HYGIENE_REPO } from './hygiene-scope.ts';
 export {
   CLAIM_RENEW_EVERY_MS,
   CLAIM_STALE_AFTER_MS,
+  type ClaimResult,
   holdLease,
   type IdempotencyStore,
   idempotencyKey,
   type Lease,
   memoryIdempotencyStore,
   once,
-  pgIdempotencyStore,
 } from './idempotency.ts';
 export {
   type InteractionLimitInput,
@@ -134,14 +134,7 @@ export {
   type UpdateIssueProgressResult,
   updateIssueProgress,
 } from './issues.ts';
-export {
-  type Ledger,
-  memoryLedger,
-  type PgLockerOptions,
-  type PrMirror,
-  pgLedger,
-  pgLocker,
-} from './ledger.ts';
+export { type Ledger, type LockerOptions, lockerOver, memoryLedger, type PrMirror } from './ledger.ts';
 export {
   humanPart,
   type IssueProgress,
@@ -203,3 +196,4 @@ export {
   type PrBodyInput,
   renderPrBody,
 } from './text.ts';
+export { TOKEN_SCOPES, type TokenScope } from './token-scopes.ts';

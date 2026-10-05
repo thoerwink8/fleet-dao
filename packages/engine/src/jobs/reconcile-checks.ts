@@ -4,6 +4,7 @@
 // 记账对不上只报、不补：补账要从会话记录重算，不在这里猜。
 // 「开着的单都有着落」那一处（一张单一个需求工作流，要补拉接活）随 Fusion 一起删了（#556）：三段流程的单是任务工作流，
 // 状态只在 Temporal 一份，不靠这一处查；它留下的旧提醒由 retireWorkflowAlerts 撤掉。
+
 import {
   type LedgerSession,
   type MergedPrLedger,
@@ -12,8 +13,9 @@ import {
 } from '@fleet-dao/db';
 import type { MergedPrAuditReport, MergedPrFinding, RepoRef } from '@fleet-dao/github';
 import type { TaskState } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertSweepDeps } from './alert-sweep.ts';
-import { clip, message, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
+import { clip, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
 /** 和提醒对账里的状态说法同一套（jobs/alert-sweep.ts 的 TASK_STATE_WORDS）。 */
 const TASK_STATE_WORDS: Readonly<Record<TaskState, string>> = {
@@ -79,7 +81,7 @@ export async function retireWorkflowAlerts(deps: ReconcileCheckDeps): Promise<Sw
   try {
     listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
   } catch (err) {
-    return { ...part, failed: `列没处理的提醒没成，工作流核对留下的旧提醒这一轮不撤：${message(err)}` };
+    return { ...part, failed: `列没处理的提醒没成，工作流核对留下的旧提醒这一轮不撤：${errMessage(err)}` };
   }
   if (listed.truncated) {
     part.unchecked.push(`没处理的提醒太多，只看了前 ${listed.alerts.length} 条，没看到的旧工作流提醒不撤`);
@@ -105,7 +107,7 @@ async function resolveOne(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: 
       deps.log('info', '每小时对账：撤了一条提醒', { dedupeKey, why });
     }
   } catch (err) {
-    part.unchecked.push(`提醒 ${dedupeKey} 没撤成：${message(err)}`);
+    part.unchecked.push(`提醒 ${dedupeKey} 没撤成：${errMessage(err)}`);
   }
 }
 
@@ -130,7 +132,7 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
   try {
     repos = await deps.repos();
   } catch (err) {
-    return { ...part, failed: `列受管的仓没成：${message(err)}` };
+    return { ...part, failed: `列受管的仓没成：${errMessage(err)}` };
   }
   const since = new Date(deps.now().getTime() - MERGED_PR_LOOKBACK_MS);
   for (const repo of repos) {
@@ -139,7 +141,7 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
     try {
       report = await deps.auditMergedPrs(slug, since);
     } catch (err) {
-      part.unchecked.push(`${slug} 审合并的 PR 没做成：${message(err)}`);
+      part.unchecked.push(`${slug} 审合并的 PR 没做成：${errMessage(err)}`);
       continue;
     }
     part.scanned += report.scanned;
@@ -176,7 +178,7 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
         });
         if (created) deps.log('info', '每小时对账：机器人开的 PR 没经合并队列合', { dedupeKey });
       } catch (err) {
-        part.unchecked.push(`${dedupeKey} 没报成：${message(err)}`);
+        part.unchecked.push(`${dedupeKey} 没报成：${errMessage(err)}`);
       }
     }
   }
@@ -232,7 +234,7 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
       );
     }
   } catch (err) {
-    part.unchecked.push(`列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：${message(err)}`);
+    part.unchecked.push(`列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：${errMessage(err)}`);
   }
   const named = (open ?? []).flatMap((a) => {
     const pr = parseLedgerKey(a.dedupeKey);
@@ -242,7 +244,7 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
   try {
     ledgers = await deps.ledgers({ since: new Date(now.getTime() - MERGED_PR_LOOKBACK_MS), prs: named });
   } catch (err) {
-    return { ...part, failed: `读合了的 PR 和会话记账没成：${message(err)}` };
+    return { ...part, failed: `读合了的 PR 和会话记账没成：${errMessage(err)}` };
   }
 
   const byPr = new Map<string, MergedPrLedger[]>();
@@ -283,7 +285,7 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
       part.found += 1;
       deps.log('info', '每小时对账：合了的 PR 记账不全', { dedupeKey, gaps: lines });
     } catch (err) {
-      part.unchecked.push(`${dedupeKey} 记账不全，报提醒没报成：${message(err)}`);
+      part.unchecked.push(`${dedupeKey} 记账不全，报提醒没报成：${errMessage(err)}`);
     }
   }
 
@@ -321,7 +323,7 @@ export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<Swe
   try {
     pools = await deps.quotaPools(now);
   } catch (err) {
-    return { ...part, failed: `读额度表没成，额度读数新不新鲜这一轮没查：${message(err)}` };
+    return { ...part, failed: `读额度表没成，额度读数新不新鲜这一轮没查：${errMessage(err)}` };
   }
   let open: Set<string> | null = null;
   try {
@@ -333,7 +335,7 @@ export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<Swe
       );
     }
   } catch (err) {
-    part.unchecked.push(`列没处理的提醒没成，额度读数的旧提醒这一轮不撤：${message(err)}`);
+    part.unchecked.push(`列没处理的提醒没成，额度读数的旧提醒这一轮不撤：${errMessage(err)}`);
   }
 
   const overdue = new Set<string>();
@@ -369,7 +371,7 @@ export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<Swe
       part.found += 1;
       deps.log('info', '每小时对账：账号池额度读数过期', { poolId: p.poolId, lastReadOkAt: p.lastReadOkAt });
     } catch (err) {
-      part.unchecked.push(`${dedupeKey} 额度读数过期，报提醒没报成：${message(err)}`);
+      part.unchecked.push(`${dedupeKey} 额度读数过期，报提醒没报成：${errMessage(err)}`);
     }
   }
   for (const dedupeKey of open ?? []) {

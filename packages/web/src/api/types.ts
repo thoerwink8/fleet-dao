@@ -10,17 +10,29 @@ import type {
   BoardResponse,
   BoardSubtaskSchema,
   BoardTaskSchema,
+  CarpoolReconcileViewSchema,
   ChangeEventSchema,
   ChannelSchema,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
+  CredentialsResponse,
   DemoLinkSchema,
   DemoLinksResponse,
   DemoScopeSchema,
   EffortModelSchema,
+  EnvEngineSchema,
+  EnvFact as EnvFactBase,
+  EnvFacts as EnvFactsBase,
+  EnvHealthSchema,
+  EnvPoolsSchema,
+  EnvResponseSchema,
+  EnvScheduleSchema,
+  EnvSessionsSchema,
+  EnvVersionSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
+  LegacyAsksResponse,
   LivenessFactSchema,
   LivenessVerdictSchema,
   MeResponse,
@@ -29,6 +41,8 @@ import type {
   NotificationSchema,
   NotificationsResponse,
   NowItemSchema,
+  OrgSwitchViewSchema,
+  PoolHoldsView,
   PoolSchema,
   PoolsResponse,
   PoolViewSchema,
@@ -44,14 +58,11 @@ import type {
   RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
-  RunStepsResponse,
   SettingSchema,
   SettingsResponse,
   TaskActionRequest,
   TaskDetailResponse,
-  TimelineItemSchema,
-  TimelineResponse,
-  UpdateChannelRequest,
+  UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
@@ -75,6 +86,8 @@ export type {
 
 export type Me = z.infer<typeof MeResponse>;
 export type AuthConfig = z.infer<typeof AuthConfigResponse>;
+export type Credentials = z.infer<typeof CredentialsResponse>;
+export type UpdateCredentialsBody = z.input<typeof UpdateCredentialsRequest>;
 export type Repo = z.infer<typeof RepoSchema>;
 
 export type Board = z.infer<typeof BoardResponse>;
@@ -86,9 +99,8 @@ export type NowItem = z.infer<typeof NowItemSchema>;
 export type TaskDetail = z.infer<typeof TaskDetailResponse>;
 export type Run = z.infer<typeof RunSchema>;
 export type Ask = z.infer<typeof AskSchema>;
-export type Timeline = z.infer<typeof TimelineResponse>;
-export type TimelineItem = z.infer<typeof TimelineItemSchema>;
-export type RunSteps = z.infer<typeof RunStepsResponse>;
+export type LegacyAsks = z.infer<typeof LegacyAsksResponse>;
+export type LegacyAsk = LegacyAsks['items'][number];
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;
@@ -97,7 +109,6 @@ export type Model = z.infer<typeof ModelSchema>;
 export type Route = z.infer<typeof RouteSchema>;
 export type Pool = z.infer<typeof PoolSchema>;
 export type Ban = z.infer<typeof BanSchema>;
-export type UpdateChannelBody = z.input<typeof UpdateChannelRequest>;
 
 /** 路由两层每一层现在活着吗（#574）。 */
 export type RoutingLayers = z.infer<typeof RoutingLayersResponse>;
@@ -114,8 +125,16 @@ export type RouteEffort = z.infer<typeof RouteEffortSchema>;
 export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
 export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
 
+/** 整池暂停的现状（#746）：开关、认不出的、旧提醒、到期没复查的。 */
+export type PoolHolds = PoolHoldsView;
+export type PoolHoldFactView = PoolHoldsView['holds'][number];
+
 export type Pools = z.infer<typeof PoolsResponse>;
 export type PoolView = z.infer<typeof PoolViewSchema>;
+/** 会话用户切号现状（#194）：额度页顶上一栏。 */
+export type OrgSwitchView = z.infer<typeof OrgSwitchViewSchema>;
+/** 拼车额度对账（#194 方案 4.7）：本机记到的花费 vs 接口说的已用。 */
+export type CarpoolReconcileView = z.infer<typeof CarpoolReconcileViewSchema>;
 export type QuotaWindowView = z.infer<typeof QuotaWindowViewSchema>;
 
 export type Jobs = z.infer<typeof JobsResponse>;
@@ -123,6 +142,19 @@ export type JobView = z.infer<typeof JobViewSchema>;
 
 /** 新主页一屏三块 + 持续状态条（#589）。 */
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
+
+/** 环境页（#820 片 1）：这一台环境现在怎样，每一项各自带「查成了 / 没查成 + 原因」。 */
+export type EnvResponse = z.infer<typeof EnvResponseSchema>;
+/** 一整份环境页事实清单里的每一项（后端拼好、前端逐项画）。 */
+export type EnvFacts = EnvFactsBase;
+/** 一项的成败：ok 带值，没查成带一句给人的原因（不拿空顶）。 */
+export type EnvFact<T> = EnvFactBase<T>;
+export type EnvEngine = z.infer<typeof EnvEngineSchema>;
+export type EnvVersion = z.infer<typeof EnvVersionSchema>;
+export type EnvSessions = z.infer<typeof EnvSessionsSchema>;
+export type EnvPools = z.infer<typeof EnvPoolsSchema>;
+export type EnvHealth = z.infer<typeof EnvHealthSchema>;
+export type EnvSchedule = z.infer<typeof EnvScheduleSchema>;
 
 export type Notifications = z.infer<typeof NotificationsResponse>;
 export type Notification = z.infer<typeof NotificationSchema>;

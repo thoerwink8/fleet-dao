@@ -1,11 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": [
-    "src",
-    "test",
-    "../adapters/src/mirasim/wire.ts",
-    "../adapters/test/ws-server.ts",
-    "../adapters/test/helpers.ts",
-    "../adapters/test/fake-agent.ts"
-  ]
+  "include": ["src", "test", "../adapters/src/mirasim/wire.ts"]
 }

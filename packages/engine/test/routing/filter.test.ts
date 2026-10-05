@@ -3,13 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { blocksFor, type FilterContext, hostUnfit } from '../../src/routing/filter.ts';
 import { groupOf } from '../../src/routing/group.ts';
 import {
+  chooseRoute,
   DEFAULT_ROUTING_POLICY,
   HOST_ABILITIES,
   type RouteFacts,
   type RouteWindow,
   STAGE_NEEDS,
 } from '../../src/routing/index.ts';
-import { at, entry, halfOpenBreaker, NOW, route, win } from './helpers.ts';
+import { at, entry, halfOpenBreaker, input, NOW, route, win } from './helpers.ts';
 
 function ctx(overrides: Partial<FilterContext> = {}): FilterContext {
   return {
@@ -550,20 +551,231 @@ describe('拼车号不再是备池（#59：两个会话用户同时跑时的主�
     expect(codes(carpool({ quota: 'unknown', windows: [], inFlight: 1 }))).toEqual([]);
   });
 
-  it('周窗只剩 2% 也不派（一个活要 3%）', () => {
-    expect(codes(carpool({ windows: [win({ used: 0.98 })] }))).toEqual(['quota-short']);
+  it('【#194 方案 4.3】拼车池不按「够收尾」挡：周窗只剩 2%、5 小时窗只剩 5% 也照派，用到被拒为止（死区消失）', () => {
+    expect(codes(carpool({ windows: [win({ used: 0.98 })] }))).toEqual([]);
+    expect(
+      codes(carpool({ windows: [win({ label: '5h', window: '5h', used: 0.95, resetsAt: at(1) })] })),
+    ).toEqual([]);
   });
 
-  it('池级读数过期、但会话里顺手读到的窗口还新：读到了不够就等它清零，不拿活去撞', () => {
+  it('【故意造出的失败】拼车池真用满了（exhausted）仍然挡：不拿活去撞用满的号', () => {
+    expect(codes(carpool({ blockers: ['quota-exhausted'], windows: [win({ used: 1 })] }))).toEqual([
+      'quota-exhausted',
+    ]);
+  });
+
+  it('独享池照旧按「够收尾」判：周窗只剩 2% 不派（一个活要 3%）', () => {
+    const solo = (o: Partial<RouteFacts> = {}) => route('s', { poolName: '独享号', orgKind: 'solo', ...o });
+    expect(codes(solo({ windows: [win({ used: 0.98 })] }), ctx({ liveOrg: 'solo' }))).toEqual([
+      'quota-short',
+    ]);
+  });
+
+  it('独享：池级读数过期、但会话里顺手读到的窗口还新：读到了不够就等它清零，不拿活去撞', () => {
     // 候选查询：池的最近读成超过 30 分钟 → quota unknown；窗口本身是 10 分钟前从会话流里读到的。
     const passive = (used: number) =>
-      carpool({
+      route('s', {
+        poolName: '独享号',
+        orgKind: 'solo',
         quota: 'unknown',
         windows: [win({ label: '5h', window: '5h', used, resetsAt: at(1) }), win({ used: 0.4 })],
       });
-    const short = blocksFor(passive(0.95), entry('c', 0), ctx());
+    const short = blocksFor(passive(0.95), entry('s', 0), ctx({ liveOrg: 'solo' }));
     expect(short.map((b) => b.code)).toEqual(['quota-short']);
     expect(groupOf(short)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
-    expect(codes(passive(0.5))).toEqual([]);
+    expect(codes(passive(0.5), ctx({ liveOrg: 'solo' }))).toEqual([]);
+  });
+});
+
+describe('渠道不可用、切回宽限（#194）', () => {
+  const claude = (kind: 'carpool' | 'solo') => route('c', { poolName: '拼车号', orgKind: kind });
+  const withPlan = (plan: NonNullable<FilterContext['orgPlan']>, liveOrg: 'carpool' | 'solo') => ({
+    ...ctx(),
+    liveOrg,
+    orgPlan: plan,
+  });
+
+  it('【故意造出的失败】渠道不可用：不管挂着哪个，带组织类型的池一律不派，写明原因；不带组织类型的路由不受影响', () => {
+    const plan = { to: null, at: null, why: '不切', channelDown: '没有一个可用账号' };
+    for (const live of ['carpool', 'solo'] as const) {
+      const blocks = blocksFor(claude(live), entry('c', 0), withPlan(plan, live));
+      expect(blocks.map((b) => b.code)).toEqual(['org-not-live']);
+      expect(blocks[0]?.text).toContain('渠道不可用');
+      expect(blocks[0]?.wait).toBeNull();
+    }
+    expect(codes(route('g'))).toEqual([]);
+  });
+
+  it('切回宽限中：挂着的这一类池新活先不派（等切号，任务不挂起）；另一类和没在宽限时的照常', () => {
+    const plan = { to: 'carpool' as const, at: null, why: '切回拼车', drain: 'solo' as const };
+    const drained = blocksFor(claude('solo'), entry('c', 0), withPlan(plan, 'solo'));
+    expect(drained.map((b) => b.code)).toEqual(['org-not-live']);
+    expect(drained[0]?.wait).toBe('org');
+    expect(drained[0]?.text).toContain('宽限');
+    // 没给 drain：照常
+    expect(
+      blocksFor(claude('solo'), entry('c', 0), withPlan({ to: 'carpool', at: null, why: 'x' }, 'solo')),
+    ).toEqual([]);
+  });
+});
+
+describe('额度留量线（#194 方案 4.8）：线只来自库里的设置，代码里没有默认值', () => {
+  const solo = (windows: RouteWindow[], over: Partial<RouteFacts> = {}) =>
+    route('solo', { orgKind: 'solo', poolId: 'claude-solo', poolName: '独享号', windows, ...over });
+  const five = (used: number, over: Partial<RouteWindow> = {}) =>
+    win({ label: '5h', window: '5h', used, resetsAt: at(3), ...over });
+  const week = (used: number, over: Partial<RouteWindow> = {}) => win({ used, resetsAt: at(72), ...over });
+  const lines = { 'claude-solo': { '5h': 0.8, '7d': 0.7 } };
+  const withLines = (setting: unknown) => ctx({ liveOrg: 'solo', quotaReserve: { setting } });
+
+  it('周窗已用 75%、线 70%：不再派新活，等清零（等得来，写明哪条线、几点清零）', () => {
+    const blocks = blocksFor(solo([five(0.2), week(0.75)]), entry('solo', 0), withLines(lines));
+    expect(blocks.map((b) => [b.code, b.wait])).toEqual([['quota-reserve', 'quota']]);
+    expect(blocks[0]?.text).toContain('独享号周额度用了 75%，到了留量线 70%');
+    expect(blocks[0]?.until).toBe(at(72));
+    expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(72)) });
+  });
+
+  it('5 小时窗到线同样挡；两条都到线一条块里都写；没到线照派', () => {
+    expect(codes(solo([five(0.8), week(0.1)]), withLines(lines))).toEqual(['quota-reserve']);
+    const both = blocksFor(solo([five(0.9), week(0.9)]), entry('solo', 0), withLines(lines));
+    expect(both).toHaveLength(1);
+    expect(both[0]?.text).toContain('5 小时额度');
+    expect(both[0]?.text).toContain('周额度');
+    expect(codes(solo([five(0.79), week(0.69)]), withLines(lines))).toEqual([]);
+  });
+
+  it('这个池库里没写线 = 不限：用 99% 也不被留量线挡（别家、拼车不设线）', () => {
+    // 99% 会被另一条规矩（额度够收尾）挡，这里只看留量线这一条
+    const reserveOnly = (r: RouteFacts, c: FilterContext) => codes(r, c).filter((x) => x === 'quota-reserve');
+    expect(reserveOnly(solo([five(0.99), week(0.99)]), withLines({}))).toEqual([]);
+    expect(reserveOnly(solo([five(0.99), week(0.99)]), withLines({ other: { '5h': 0.1 } }))).toEqual([]);
+    // 明确写 null 也是不限
+    expect(
+      reserveOnly(solo([five(0.99), week(0.99)]), withLines({ 'claude-solo': { '5h': null, '7d': null } })),
+    ).toEqual([]);
+  });
+
+  it('改线马上生效：把周窗线调到 90%，75% 就能派', () => {
+    expect(codes(solo([week(0.75)]), withLines({ 'claude-solo': { '7d': 0.9 } }))).toEqual([]);
+  });
+
+  it('旧读数（stale）已超线照挡；清零时刻不知道：等待时刻为空、按轮询再看', () => {
+    expect(codes(solo([week(0.8, { state: 'stale' })]), withLines(lines))).toEqual(['quota-reserve']);
+    const b = blocksFor(solo([week(0.8, { resetsAt: null })]), entry('solo', 0), withLines(lines));
+    expect(b[0]).toMatchObject({ code: 'quota-reserve', wait: 'quota', until: null });
+    expect(b[0]?.text).toContain('清零时刻不知道');
+  });
+
+  it('【故意造出的失败】库里没有这一行（种子没装上，setting 是 undefined）：每个池都硬挡，不当成不限', () => {
+    for (const r of [solo([week(0.1)]), route('cursor', { poolId: 'cursor-pool' })]) {
+      const blocks = blocksFor(r, entry(r.routeId, 0), withLines(undefined));
+      expect(blocks.map((b) => [b.code, b.wait])).toEqual([['quota-reserve', null]]);
+      expect(blocks[0]?.text).toContain('没装进库');
+    }
+  });
+
+  it('【故意造出的失败】线是负数、大于 1、字符串、整份不是对象：硬挡，写明原因，不当成不限也不当成 0', () => {
+    const bads = [
+      { 'claude-solo': { '7d': -0.2 } },
+      { 'claude-solo': { '7d': 1.5 } },
+      { 'claude-solo': { '7d': 'x' } },
+      'on',
+      [1],
+    ];
+    for (const bad of bads) {
+      const blocks = blocksFor(solo([week(0.1)]), entry('solo', 0), withLines(bad));
+      expect(
+        blocks.map((b) => [b.code, b.wait]),
+        JSON.stringify(bad),
+      ).toEqual([['quota-reserve', null]]);
+      expect(blocks[0]?.text).toContain('读不到或认不出');
+    }
+    // 只有这个池那一项坏了：别的池不受影响
+    expect(
+      codes(route('cursor', { poolId: 'cursor-pool' }), withLines({ 'claude-solo': { '7d': -1 } })),
+    ).toEqual([]);
+  });
+
+  it('读数缺配了线的窗口 / 没给已用多少：额度未知，照现有规矩不挡（不是到线）', () => {
+    expect(codes(solo([five(0.1)]), withLines(lines))).toEqual([]);
+    expect(codes(solo([week(0.1, { used: null })]), withLines(lines))).toEqual([]);
+  });
+
+  it('不给 quotaReserve（老输入、纯函数）：留量线不管；池已经用满另有原因、不重复', () => {
+    expect(codes(solo([week(0.75)]), ctx({ liveOrg: 'solo' }))).toEqual([]);
+    expect(codes(solo([week(0.99)], { blockers: ['quota-exhausted'] }), withLines(lines))).toEqual([
+      'quota-exhausted',
+    ]);
+  });
+
+  it('输入外壳认不出（不是 { setting }）：选路判不了，抛', () => {
+    expect(() => chooseRoute(input([route('a')], { quotaReserve: 'oops' as never }))).toThrow(
+      /额度留量线的输入认不出/,
+    );
+  });
+});
+
+describe('拼车并发登记核对不上：不往拼车池派（#896，方案第六节第 19 条）', () => {
+  const car = (over: Partial<RouteFacts> = {}) =>
+    route('car', { orgKind: 'carpool', poolId: 'claude-carpool', poolName: '拼车号', ...over });
+  const solo = (over: Partial<RouteFacts> = {}) =>
+    route('solo', { orgKind: 'solo', poolId: 'claude-solo', poolName: '独享号', ...over });
+  const bad = (why: string) => ctx({ carpoolRegistry: { ok: false, why } });
+
+  it('核对不上：拼车池硬挡、写明核对出的原因；对上了照派', () => {
+    const blocks = blocksFor(car(), entry('car', 0), bad('登记的拼车并发上限是 2，库里拼车池加起来是 4'));
+    expect(blocks.map((b) => [b.code, b.wait])).toEqual([['carpool-registry', null]]);
+    expect(blocks[0]?.text).toContain('拼车号暂不派');
+    expect(blocks[0]?.text).toContain('登记的拼车并发上限是 2，库里拼车池加起来是 4');
+    expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+    expect(codes(car(), ctx({ carpoolRegistry: { ok: true } }))).toEqual([]);
+  });
+
+  it('只管拼车池：独享池、别家的池照派', () => {
+    const c = { ...bad('没登记'), liveOrg: 'solo' as const };
+    expect(codes(solo(), c)).toEqual([]);
+    expect(codes(route('relay'), c)).toEqual([]);
+  });
+
+  it('不给（老输入、纯函数）：不判', () => {
+    expect(codes(car())).toEqual([]);
+  });
+
+  it('选路：拼车排第一、核对不上 → 派给后面的路由，派工理由写明拼车为什么没派；核对对上了又回到拼车', () => {
+    const routes = [car(), route('relay')];
+    const withBad = chooseRoute(
+      input(routes, { liveOrg: 'carpool', carpoolRegistry: { ok: false, why: '没登记' } }),
+    );
+    expect(withBad).toMatchObject({ kind: 'dispatch', routeId: 'relay' });
+    expect(withBad.kind === 'dispatch' && withBad.why).toContain('拼车并发登记核对不上（没登记）');
+    const good = chooseRoute(input(routes, { liveOrg: 'carpool', carpoolRegistry: { ok: true } }));
+    expect(good).toMatchObject({ kind: 'dispatch', routeId: 'car' });
+  });
+
+  it('选路：只剩拼车池又核对不上 → 派不出（none），原因里有登记核对；点名拼车池的路由同样用不了、不偷偷换', () => {
+    const only = chooseRoute(
+      input([car()], { liveOrg: 'carpool', carpoolRegistry: { ok: false, why: '库里没有拼车池' } }),
+    );
+    expect(only.kind).toBe('none');
+    expect(only.kind === 'none' && only.reason).toContain('库里没有拼车池');
+    const named = chooseRoute(
+      input([car(), route('relay')], {
+        liveOrg: 'carpool',
+        taskRouteId: 'car',
+        carpoolRegistry: { ok: false, why: '写坏了' },
+      }),
+    );
+    expect(named.kind).toBe('none');
+    expect(named.kind === 'none' && named.reason).toContain('指定的路由用不了');
+  });
+
+  it('【故意造出的失败】核对的结论认不出（缺 why、不是对象、ok 不是布尔）：选路判不了、抛，不当成对上了', () => {
+    for (const broken of [{ ok: false }, { ok: false, why: '  ' }, 'ok', null, { ok: 'yes' }, {}]) {
+      expect(
+        () => chooseRoute(input([car()], { liveOrg: 'carpool', carpoolRegistry: broken as never })),
+        JSON.stringify(broken),
+      ).toThrow(/拼车并发登记核对的结论认不出/);
+    }
   });
 });

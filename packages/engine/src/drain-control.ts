@@ -8,9 +8,11 @@
 //   不认、照实记日志。
 // - 请求要发的就是这个引擎在跑的版本（切完新引擎起来那一下请求还没撤）：不认。
 // - 提醒只在开始、撤掉时各写一次，不写会变的倒计时（飞书卡片每改一次都算接口调用，design 15.4）；「还剩几分钟」按截止算。
+
 import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type Cordon,
   DRAIN_POLL_MS,
@@ -42,7 +44,6 @@ export type RequestSeen =
   | { kind: 'bad'; why: string };
 
 const SHA = /^[0-9a-f]{40}$/;
-const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const short = (sha: string) => sha.slice(0, 12);
 
 /** 认一份排空请求；哪一项不对都抛，写明是哪一项。 */
@@ -51,7 +52,7 @@ export function parseDrainRequest(text: string): DrainRequest {
   try {
     raw = JSON.parse(text);
   } catch (err) {
-    throw new Error(`不是 JSON（${errorText(err)}）`);
+    throw new Error(`不是 JSON（${errMessage(err)}）`);
   }
   const o = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   if (o.schema !== 1) throw new Error(`schema 应为 1，现在是 ${JSON.stringify(o.schema)}`);
@@ -76,12 +77,12 @@ export async function readDrainRequest(
     text = await readText(file);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { kind: 'none' };
-    return { kind: 'bad', why: `${file} 读不成（${errorText(err)}）` };
+    return { kind: 'bad', why: `${file} 读不成（${errMessage(err)}）` };
   }
   try {
     return { kind: 'ok', request: parseDrainRequest(text) };
   } catch (err) {
-    return { kind: 'bad', why: `${file} 认不出：${errorText(err)}` };
+    return { kind: 'bad', why: `${file} 认不出：${errMessage(err)}` };
   }
 }
 
@@ -193,7 +194,7 @@ export function createDrainControl(deps: DrainControlDeps): DrainControl {
     try {
       await deps.notify(event);
     } catch (err) {
-      deps.log(`排空的提醒没写进去（排空照做）：${errorText(err)}`);
+      deps.log(`排空的提醒没写进去（排空照做）：${errMessage(err)}`);
     }
   };
   let ticking: Promise<void> | null = null;
@@ -205,7 +206,7 @@ export function createDrainControl(deps: DrainControlDeps): DrainControl {
     try {
       seen = await deps.readRequest();
     } catch (err) {
-      seen = { kind: 'bad', why: `读不成（${errorText(err)}）` };
+      seen = { kind: 'bad', why: `读不成（${errMessage(err)}）` };
     }
     let lock: boolean | undefined;
     if (seen.kind !== 'none') {

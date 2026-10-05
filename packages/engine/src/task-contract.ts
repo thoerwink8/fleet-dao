@@ -4,6 +4,12 @@
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
 import type { Repo, StageKind } from '@fleet-dao/shared';
+import {
+  type AbandonCommand,
+  type ContinueCommand,
+  type RouteWakeCommand,
+  TASK_SIGNAL_NAMES,
+} from '@fleet-dao/shared/task-signals';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
@@ -73,20 +79,13 @@ export interface TaskRun {
   verifyRounds: number;
 }
 
-/** 「继续」：停着等人的任务接着走。by 写谁点的，note 是留给下一个看的人的话。 */
-export interface ContinueCommand {
-  by: string;
-  note?: string;
-}
+// 信号的名字和参数形状在 shared/task-signals.ts：驾驶舱后端发信号也从那里拿，两边不各拼一遍（#901）。
+// 路由叫醒（RouteWakeCommand）只有引擎进程自己发（real/route-wake.ts），信号丢了也不会等超过 MAX_ROUTE_WAIT_SECONDS。
+export type { AbandonCommand, ContinueCommand, RouteWakeCommand };
 
-/** 「放弃」：工作流收尾退出（工作树存档后删，PR 和单子不动，由人处理）。 */
-export interface AbandonCommand {
-  by: string;
-  reason: string;
-}
-
-export const taskContinueSignal = defineSignal<[ContinueCommand]>('taskContinue');
-export const taskAbandonSignal = defineSignal<[AbandonCommand]>('taskAbandon');
+export const taskContinueSignal = defineSignal<[ContinueCommand]>(TASK_SIGNAL_NAMES.continue);
+export const taskAbandonSignal = defineSignal<[AbandonCommand]>(TASK_SIGNAL_NAMES.abandon);
+export const taskRouteWakeSignal = defineSignal<[RouteWakeCommand]>(TASK_SIGNAL_NAMES.routeWake);
 export const taskStatusQuery = defineQuery<TaskStatus>('taskStatus');
 
 // ---- 新增的活动（EngineActivities 里的「任务」一组）
@@ -214,6 +213,12 @@ export interface CheckGuardedInput {
   taskId: string;
   repo: Repo;
   prNumber: number;
+  /**
+   * 人已经看过、点过「继续」的路径（上一次 checkGuarded 回的原样条目）。活动在回的结果里把它们去掉，
+   * 否则人批了之后再查一遍还是同样的结果，永远过不去。工作流只在批准那一刻的头还是现在的头时才传；
+   * 头换了就不传（新的内容要重新批）。老历史里没有这个字段，当作没批过。
+   */
+  approved?: GuardedPaths;
 }
 
 export interface ArmAutoMergeInput {

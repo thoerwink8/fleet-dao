@@ -4,7 +4,9 @@
 import type { SessionUser } from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
 import { describeFailure, type UserCommandResult, type UserExec } from './exec.ts';
-import { OUT_DIR } from './prompts.ts';
+
+/** 老会话把结论文件写在工作树的这个目录里（已经没人写了）；树里还留着的别当成「剩着的改动」（DISPOSABLE 里一条）。 */
+export const OUT_DIR = '.fleet-out';
 
 export const GIT = '/usr/bin/git';
 const SH = '/bin/sh';
@@ -176,33 +178,6 @@ export async function hasMainline(t: UserTree, defaultBranch: string): Promise<b
 }
 
 /**
- * ref 相对主线的 patch-id：先找 merge-base(origin/<主线>, ref)，diff 那一段再喂给 `git patch-id --stable`。
- * 判「这段时间是不是只并了主线、PR 自己的改动没变」用（fusion.ts 的 tryReuseSecondOpinion）：树里没有 ref、
- * 没钉主线、git 报错都照抛 PortError，一个字都不吞——调用方按「没查成」处理，不许当成能比。
- */
-export async function patchIdOf(t: UserTree, defaultBranch: string, ref: string): Promise<string> {
-  assertSha(ref, '要算 patch-id 的提交');
-  const baseR = await git(
-    t,
-    ['merge-base', mainlineRef(defaultBranch), ref],
-    `算 ${ref.slice(0, 7)} 和主线的分叉点`,
-  );
-  const base = text(baseR).trim();
-  assertSha(base, '分叉点');
-  const diffR = await git(t, ['diff', base, ref], `算 ${base.slice(0, 7)}..${ref.slice(0, 7)} 的改动`);
-  const idR = await git(t, ['patch-id', '--stable'], '算 patch-id', { stdin: diffR.stdout });
-  const id = text(idR).trim().split(/\s+/)[0];
-  if (!id || !/^[0-9a-f]{40}$/.test(id)) {
-    throw new PortError(
-      'GIT_FAILED',
-      `patch-id 算不出来：「${text(idR).trim() || '（没有输出，可能是空改动）'}」`,
-      { retryable: false },
-    );
-  }
-  return id;
-}
-
-/**
  * 把「主线」钉在树里的一个主线提交上。树是从 bundle 建的、没有远端，git diff origin/main...HEAD 和 pnpm test:changed
  * （和 origin/main 比改了什么，specs/164-会话内存与交活测试/）都靠这个引用；没有它 test:changed 明确报「认不出 origin/main」。
  * 三个点的比法只看分叉点：钉得比分支并进来的主线旧，会把并进来的主线改动也算成这次改的（多跑测试，不会少跑），
@@ -230,13 +205,6 @@ export async function hasCommit(t: UserTree, sha: string): Promise<boolean> {
 export async function checkoutBranch(t: UserTree, branch: string, sha: string): Promise<void> {
   assertSha(sha, '检出的提交');
   await git(t, ['checkout', '-q', '-B', branch, sha], `检出 ${branch}`);
-}
-
-/** 只读的检出（分诊、写文档、审查用）：分离头、清掉上一轮留下的东西。 */
-export async function checkoutDetached(t: UserTree, sha: string): Promise<void> {
-  assertSha(sha, '检出的提交');
-  await git(t, ['checkout', '-q', '--force', '--detach', sha], '检出');
-  await git(t, ['clean', '-q', '-fdx'], '清掉上一轮的文件');
 }
 
 export async function headOf(t: UserTree): Promise<string> {
@@ -328,12 +296,6 @@ export async function commitsSince(t: UserTree, span: OwnSpan, limit = 50): Prom
       '列已提交的',
     ),
   );
-}
-
-/** 这一步的改动统计（并进来的主线不算）。 */
-export async function diffstatSince(t: UserTree, span: OwnSpan, maxLines = 12): Promise<string[]> {
-  assertSha(span.from, '比改动的起点');
-  return lines(await git(t, ['diff', '--stat', span.from, 'HEAD'], '统计改动')).slice(-maxLines);
 }
 
 /**
@@ -545,46 +507,6 @@ export async function mergeInto(
   }
   const message = `${describeGitFailure(what, r)}${undone ? '；没并成的合并已撤掉，树回到并之前' : ''}`;
   throw new PortError('GIT_FAILED', message, { retryable: true, details });
-}
-
-const relativeOnly = (path: string, what: string) => {
-  if (!path || path.startsWith('/') || path.split('/').includes('..')) {
-    throw new PortError('BAD_INPUT', `${what}只认目录里的相对路径：${path}`, { retryable: false });
-  }
-};
-
-/**
- * 把一条规则记进这个仓自己的 .git/info/exclude（不改仓里的 .gitignore）：会话写在工作树里的结论文件（.fleet-out/）
- * 这样就不会被 git add 提交进分支，查「有没有没提交的改动」也看不到它。已经记过的不重复记。
- */
-export async function excludeLocally(t: UserTree, pattern: string): Promise<void> {
-  relativeOnly(pattern, '本地忽略');
-  const script =
-    'f="$(git rev-parse --git-path info/exclude)" && mkdir -p "$(dirname "$f")" && ' +
-    '{ grep -qxF -- "$1" "$f" 2>/dev/null || printf "%s\\n" "$1" >> "$f"; }';
-  const r = await run(t, [t.sh ?? SH, '-c', script, 'sh', pattern]);
-  if (r.code !== 0) {
-    throw new PortError('GIT_FAILED', describeFailure(`把 ${pattern} 记进本地忽略`, r), { retryable: true });
-  }
-}
-
-/** 以会话用户的身份删掉目录里的一个文件（起会话前清掉上一轮留下的结论文件）；本来就没有不算错。 */
-export async function removeFileAs(t: UserTree, path: string): Promise<void> {
-  relativeOnly(path, '删文件');
-  const r = await run(t, [t.sh ?? SH, '-c', 'rm -f -- "$1"', 'sh', path]);
-  if (r.code !== 0)
-    throw new PortError('WRITE_FAILED', describeFailure(`删 ${path}`, r), { retryable: true });
-}
-
-/** 以会话用户的身份读目录里的一个文件；不在回 null（别的错照抛）。 */
-export async function readFileAs(t: UserTree, path: string): Promise<string | null> {
-  if (path.startsWith('/') || path.split('/').includes('..')) {
-    throw new PortError('BAD_INPUT', `只读目录里的相对路径：${path}`, { retryable: false });
-  }
-  const r = await run(t, [t.sh ?? SH, '-c', 'if [ -f "$1" ]; then cat -- "$1"; else exit 3; fi', 'sh', path]);
-  if (r.code === 0) return text(r);
-  if (r.code === 3) return null;
-  throw new PortError('READ_FAILED', describeFailure(`读 ${path}`, r), { retryable: true });
 }
 
 /** 一棵没有在跑的任务在用的树里还剩什么（每小时对账删树之前看，jobs/worktree-sweep.ts）。 */

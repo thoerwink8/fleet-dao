@@ -6,9 +6,9 @@
 // - 写回归纳、开成单、放下和操作记录在同一个事务里：记不下就不改。
 // - 时刻：这里自己写的（收到时刻、卡的到期、写回时刻）一律用传进来的钟，和后端其余部分同一个钟。
 import { auditLog, type Db, intentMessages, intentRecalls, intents } from '@fleet-dao/db';
+import { isUuid } from '@fleet-dao/store';
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { isUuid } from './ids.ts';
 import {
   auditShape,
   type CardAckReport,
@@ -28,10 +28,12 @@ import {
   type IntentWithMessages,
   insertOlderEdit,
   judgeRepeat,
+  NO_SUCH_INTENT,
   orderMessages,
   planAck,
   planDrop,
   planLink,
+  recallConflict,
   type SegmentCandidate,
 } from './intents.ts';
 
@@ -415,12 +417,8 @@ export function createPgIntentStore(db: Db, options: { now?: () => Date } = {}):
           .where(eq(intentMessages.messageId, r.messageId))
           .for('update');
         const [tomb] = await tx.select().from(intentRecalls).where(eq(intentRecalls.messageId, r.messageId));
-        if (stored && stored.chatId !== r.chatId) {
-          return { status: 'reused', why: '要撤回的这条原话记在另一个会话里' } as const;
-        }
-        if (tomb && tomb.chatId !== r.chatId) {
-          return { status: 'reused', why: '这个消息编号的撤回已经记在另一个会话里' } as const;
-        }
+        const conflict = recallConflict(stored, tomb, r.chatId);
+        if (conflict !== undefined) return { status: 'reused', why: conflict } as const;
         if (!tomb) {
           await tx.insert(intentRecalls).values({
             messageId: r.messageId,
@@ -503,7 +501,7 @@ export function createPgIntentStore(db: Db, options: { now?: () => Date } = {}):
             ? await oneIntent(tx, eq(intents.id, ack.intentId), true)
             : undefined;
           if (!intent) {
-            report.skipped.push({ intentId: ack.intentId, why: '没有这段意图' });
+            report.skipped.push({ intentId: ack.intentId, why: NO_SUCH_INTENT });
             continue;
           }
           const plan = planAck(intent, ack, now());

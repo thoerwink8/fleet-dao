@@ -1,5 +1,6 @@
 // 引擎的 Temporal 定时任务（design 第四节：替代旧系统的 systemd 定时器）。引擎每次启动都按这里的声明对一遍：
 // 编号固定，没有就建，有了就按声明更新（保留人手动暂停的状态），重启、重复部署都不会多出第二个。
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type Client,
   ScheduleAlreadyRunning,
@@ -12,6 +13,7 @@ import {
 import type { Workflow } from '@temporalio/common';
 import {
   type CanaryInput,
+  type CarpoolWatchInput,
   type GitHubReconcileInput,
   type HourlyReconcileInput,
   type IntakeInput,
@@ -26,6 +28,7 @@ import {
   CANARY_OFFSET_MINUTES,
   CANARY_RUN_TIMEOUT_MINUTES,
 } from './canary.ts';
+import { CARPOOL_WATCH_EVERY_MINUTES, CARPOOL_WATCH_JOB } from './carpool-watch.ts';
 import { GITHUB_RECONCILE_EVERY_MINUTES, GITHUB_RECONCILE_JOB } from './github-reconcile.ts';
 import {
   HOURLY_RECONCILE_EVERY_MINUTES,
@@ -45,6 +48,7 @@ export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
 export const WATCHDOG_SCHEDULE_ID = WATCHDOG_JOB.id;
 export const INTAKE_SCHEDULE_ID = INTAKE_JOB.id;
 export const QUOTA_READ_SCHEDULE_ID = QUOTA_READ_JOB.id;
+export const CARPOOL_WATCH_SCHEDULE_ID = CARPOOL_WATCH_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -62,6 +66,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const watchdogInput: WatchdogInput = { schemaVersion: 1 };
   const intakeInput: IntakeInput = { schemaVersion: 1 };
   const quotaInput: QuotaReadInput = { schemaVersion: 1 };
+  const carpoolWatchInput: CarpoolWatchInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -133,6 +138,28 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮（额度只看最新读数，补旧的没意义）
         catchupWindow: `${QUOTA_READ_EVERY_MINUTES} minutes`,
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 拼车额度盯读（#194，给切号用）：每分钟起一条，自己按情况定这一分钟真不真读开放接口（平时 5 分钟、紧时 1 分钟）；
+      // 被拒之后到点、切回、切回宽限到点都靠它当场判，不等 15 分钟一轮的路由探针
+      scheduleId: CARPOOL_WATCH_SCHEDULE_ID,
+      spec: { intervals: [{ every: `${CARPOOL_WATCH_EVERY_MINUTES} minutes` }] },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.carpoolWatch,
+        workflowId: CARPOOL_WATCH_SCHEDULE_ID,
+        taskQueue,
+        args: [carpoolWatchInput],
+        // 一轮最多 10 分钟（活动的限时，里面可能含一次切号）；卡死的不拖到下一轮
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完（正在切号、探一次）就跳过这一轮：两轮叠着判会同时切号（锁也挡，这里先不起）
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（每轮都看当时的账本和读数，补旧的没意义）
+        catchupWindow: `${CARPOOL_WATCH_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },
@@ -289,12 +316,8 @@ export async function deleteRetiredSchedules(
       await client.schedule.getHandle(id).delete();
       out[id] = 'deleted';
     } catch (err) {
-      out[id] = err instanceof ScheduleNotFoundError ? 'absent' : { error: describeError(err) };
+      out[id] = err instanceof ScheduleNotFoundError ? 'absent' : { error: errMessage(err) };
     }
   }
   return out;
-}
-
-function describeError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

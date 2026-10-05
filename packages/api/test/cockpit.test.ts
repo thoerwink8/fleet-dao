@@ -2,20 +2,21 @@ import {
   AuditResponse,
   BoardResponse,
   JobsResponse,
+  LEGACY_ASK_CLOSED_ANSWER,
+  LegacyAsksResponse,
   NotificationsResponse,
+  PoolHoldsResponse,
   PoolsResponse,
   RoutingResponse,
-  RunStepsResponse,
-  requirementWorkflowId,
   SettingsResponse,
   TaskDetailResponse,
-  TimelineResponse,
+  taskWorkflowId,
   UpdateSettingResponse,
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { devFixtures } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { devFixtures } from '../src/dev-fixtures.ts';
 import { WorkflowGoneError } from '../src/ports.ts';
 import { DEV_RUN_ID, DEV_USER_ID, errorCode, harness, IDS, T0, write } from './harness.ts';
 
@@ -348,50 +349,10 @@ describe('看板与任务', () => {
     });
   });
 
-  it('时间线：会话报的、人做的都在，按时间倒序，翻页不重不漏', async () => {
-    const h = harness();
-    const session = await h.login();
-    const token = h.agentToken();
-    for (let i = 0; i < 5; i++) {
-      h.clock.now = new Date(h.clock.now.getTime() + 1000);
-      await h.agent.request('/agent/v1/say', {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: `第 ${i} 句` }),
-      });
-    }
-    h.clock.now = new Date(h.clock.now.getTime() + 1000);
-    await h.cockpit.request(
-      `/api/tasks/${IDS.task12}/actions`,
-      write('POST', session, { action: 'pause', reason: '先停一下' }),
-    );
-
-    const seen: string[] = [];
-    let cursor: string | undefined;
-    for (let page = 0; page < 10; page++) {
-      const qs = new URLSearchParams({ limit: '2', ...(cursor ? { cursor } : {}) });
-      const body = TimelineResponse.parse(
-        await (
-          await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline?${qs}`, {
-            headers: { cookie: session.cookie },
-          })
-        ).json(),
-      );
-      seen.push(...body.items.map((i) => i.text));
-      cursor = body.nextCursor;
-      if (!cursor) break;
-    }
-    expect(seen[0]).toBe('暂停：先停一下');
-    expect(seen.slice(1, 6)).toEqual(['第 4 句', '第 3 句', '第 2 句', '第 1 句', '第 0 句']);
-    expect(new Set(seen).size).toBe(seen.length);
-    expect(seen).toContain('正在写验证码过期的测试');
-  });
-
   it('翻页游标看不懂：400 invalid_cursor，不回空页（空页会被当成「后面没有了」）', async () => {
     const h = harness();
     const { cookie } = await h.login();
     for (const path of [
-      `/api/tasks/${IDS.task12}/timeline?cursor=garbage`,
       '/api/audit?cursor=garbage',
       `/api/notifications?status=all&cursor=${encodeURIComponent(`${h.clock.now.toISOString()}|42`)}`,
     ]) {
@@ -400,65 +361,39 @@ describe('看板与任务', () => {
       expect(await errorCode(res)).toBe('invalid_cursor');
     }
   });
-
-  it('会话步骤清单与最近一句进度', async () => {
-    const h = harness();
-    const { cookie } = await h.login();
-    const body = RunStepsResponse.parse(
-      await (await h.cockpit.request(`/api/runs/${DEV_RUN_ID}/steps`, { headers: { cookie } })).json(),
-    );
-    expect(body.steps).toHaveLength(3);
-    expect(body.lastSay?.text).toBe('正在写验证码过期的测试');
-  });
 });
 
 describe('发给工作流的信号', () => {
-  // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成这个需求工作流。
-  const TASK12_WORKFLOW_ID = requirementWorkflowId({ owner: 'example', name: 'canary' }, 12);
+  // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成引擎起的那条任务工作流（task:<仓>#<号>）。
+  // 信号名只有引擎真有人听的两个（继续、放弃）；整条链的钉子在 signal-chain.test.ts。
+  const TASK12_WORKFLOW_ID = taskWorkflowId({ owner: 'example', name: 'canary' }, 12);
 
-  it('暂停、继续、叫停：发给这个任务的工作流，并写操作记录', async () => {
+  it('继续、叫停：发给这个任务的任务工作流，并写操作记录', async () => {
     const h = harness();
     const s = await h.login();
-    for (const action of ['pause', 'resume', 'stop'] as const) {
+    for (const action of ['resume', 'stop'] as const) {
       const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(200);
     }
     expect(h.signals.map((x) => [x.workflowId, x.signal.name])).toEqual([
-      [TASK12_WORKFLOW_ID, 'pause'],
-      [TASK12_WORKFLOW_ID, 'resume'],
-      [TASK12_WORKFLOW_ID, 'stop'],
+      [TASK12_WORKFLOW_ID, 'taskContinue'],
+      [TASK12_WORKFLOW_ID, 'taskAbandon'],
     ]);
     expect(h.signals[0]?.signal).toMatchObject({ by: DEV_USER_ID });
-    expect(h.store.data.audit.slice(-3).map((a) => a.action)).toEqual([
-      'task.pause',
-      'task.resume',
-      'task.stop',
-    ]);
+    expect(h.store.data.audit.slice(-2).map((a) => a.action)).toEqual(['task.resume', 'task.stop']);
   });
 
-  it('换路由：只许换到在线、不犯禁令的路由；目标是在跑的那次会话', async () => {
+  it('暂停、换路由：引擎没有这两个动作，409 action_not_supported，不写操作记录、不发信号', async () => {
     const h = harness();
     const s = await h.login();
-    const post = (body: unknown) =>
-      h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
-    const fable = await post({ action: 'reroute', routeId: 'rt-mirasim-fable' });
-    expect(await errorCode(fable)).toBe('route_not_allowed');
-    const offline = h.store.data.routes.find((r) => r.id === 'rt-mirasim-kimi');
-    if (!offline) throw new Error('样例数据里没有这条路由');
-    offline.alive = false;
-    expect(await errorCode(await post({ action: 'reroute', routeId: 'rt-mirasim-kimi' }))).toBe(
-      'route_offline',
-    );
-    offline.alive = true;
-    const ok = await post({ action: 'reroute', routeId: 'rt-mirasim-kimi', reason: '试试 Kimi' });
-    expect(ok.status).toBe(200);
-    expect(h.signals.at(-1)?.signal).toEqual({
-      name: 'reroute',
-      by: DEV_USER_ID,
-      routeId: 'rt-mirasim-kimi',
-      subtaskId: IDS.sub12a,
-      reason: '试试 Kimi',
-    });
+    const before = h.store.data.audit.length;
+    for (const body of [{ action: 'pause' }, { action: 'reroute', routeId: 'rt-mirasim-kimi' }]) {
+      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
+      expect(res.status, body.action).toBe(409);
+      expect(await errorCode(res)).toBe('action_not_supported');
+    }
+    expect(h.signals).toHaveLength(0);
+    expect(h.store.data.audit.length).toBe(before);
   });
 
   it('任务已结束、工作流不在了：409；先记后做——发起那条在前，没做成再追加一条 ok=false', async () => {
@@ -477,19 +412,13 @@ describe('发给工作流的信号', () => {
     expect(await errorCode(done)).toBe('task_finished');
     const gone = await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      write('POST', s, { action: 'pause' }),
+      write('POST', s, { action: 'resume' }),
     );
     expect(await errorCode(gone)).toBe('workflow_gone');
     expect(h.store.data.audit.slice(-2)).toMatchObject([
-      { action: 'task.pause', target: `task:${IDS.task12}`, ok: true },
-      { action: 'task.pause', target: `task:${IDS.task12}`, ok: false, error: 'workflow_gone' },
+      { action: 'task.resume', target: `task:${IDS.task12}`, ok: true },
+      { action: 'task.resume', target: `task:${IDS.task12}`, ok: false, error: 'workflow_gone' },
     ]);
-    const timeline = TimelineResponse.parse(
-      await (
-        await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline`, { headers: { cookie: s.cookie } })
-      ).json(),
-    );
-    expect(timeline.items.map((i) => i.text)).toContain('暂停没做成：workflow_gone');
   });
 
   it('操作记录写不进：信号不发（故障注入）', async () => {
@@ -498,59 +427,121 @@ describe('发给工作流的信号', () => {
     h.store.appendAudit = async () => {
       throw new Error('库写不进');
     };
-    for (const action of ['pause', 'resume', 'stop']) {
+    for (const action of ['resume', 'stop']) {
       const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(500);
     }
-    const reroute = await h.cockpit.request(
-      `/api/tasks/${IDS.task12}/actions`,
-      write('POST', s, { action: 'reroute', routeId: 'rt-mirasim-kimi' }),
-    );
-    expect(reroute.status).toBe(500);
     expect(h.signals).toHaveLength(0);
   });
+});
 
-  it('回答追问：写库、发 answer 信号、留记录；第二次回答 409', async () => {
-    const h = harness();
-    const s = await h.login();
+describe('旧会话留下的追问（#928：v3 没有 AI 追问这一环，答了没人收）', () => {
+  const pushAsk = (h: ReturnType<typeof harness>, id: string, taskId: string, question = '几位？') =>
     h.store.data.asks.push({
-      id: 'ask-1',
-      taskId: IDS.task12,
+      id,
+      taskId,
       runId: DEV_RUN_ID,
-      question: '几位？',
+      question,
       options: ['4', '6'],
       askedAt: h.clock.now.toISOString(),
     });
+
+  it('回答追问：一律 409 asks_not_received，不落库、不进操作记录、不发信号；调用方不会以为答了有用', async () => {
+    const h = harness();
+    const s = await h.login();
+    pushAsk(h, 'ask-1', IDS.task12);
+    const audits = h.store.data.audit.length;
     const res = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '6' }));
-    expect(res.status).toBe(200);
-    expect(h.store.data.asks.find((a) => a.id === 'ask-1')).toMatchObject({
-      answer: '6',
-      answeredBy: DEV_USER_ID,
-    });
-    expect(h.signals.at(-1)).toEqual({
-      workflowId: TASK12_WORKFLOW_ID,
-      signal: { name: 'answer', by: DEV_USER_ID, askId: 'ask-1', answer: '6' },
-    });
-    expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'ask.answer', target: `task:${IDS.task12}` });
-    const again = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '4' }));
-    expect(await errorCode(again)).toBe('already_answered');
+    expect(res.status).toBe(409);
+    const err = ((await res.json()) as { error: { code: string; message: string } }).error;
+    expect(err.code).toBe('asks_not_received');
+    expect(err.message).toContain('不再收追问回答');
+    expect(h.store.data.asks.find((a) => a.id === 'ask-1')?.answer).toBeUndefined();
+    expect(h.store.data.audit.length).toBe(audits);
+    expect(h.signals).toHaveLength(0);
   });
 
-  it('回答追问指向的任务不在库里：回答照常成功，但拼不出工作流编号、叫醒失败要留日志（不瞎拼、不装成功）', async () => {
+  it('回答追问：没有这条追问仍是 404，回答是空的仍是 400（先于 409 判，不拿 409 盖住别的错）', async () => {
+    const h = harness();
+    const s = await h.login();
+    pushAsk(h, 'ask-1', IDS.task12);
+    expect((await h.cockpit.request('/api/asks/nope/answer', write('POST', s, { answer: '6' }))).status).toBe(
+      404,
+    );
+    expect((await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '' }))).status).toBe(
+      400,
+    );
+  });
+
+  it('列出旧追问：只列没处理的，带「#12 标题」；任务已经不在库里的也列（要能被关掉），只是没有背景', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    pushAsk(h, 'ask-1', IDS.task12, '几位？');
+    pushAsk(h, 'ask-orphan', 'task-does-not-exist', '这条指的任务不在库里了');
+    h.store.data.asks.push({
+      id: 'ask-done',
+      taskId: IDS.task12,
+      runId: DEV_RUN_ID,
+      question: '早就答过的',
+      options: [],
+      askedAt: h.clock.now.toISOString(),
+      answer: '随便',
+    });
+    const body = LegacyAsksResponse.parse(
+      await (await h.cockpit.request('/api/asks/legacy', { headers: { cookie } })).json(),
+    );
+    expect(body.items.map((i) => i.id).sort()).toEqual(['ask-1', 'ask-orphan']);
+    expect(body.items.find((i) => i.id === 'ask-1')?.context).toMatch(/^#12 /);
+    expect(body.items.find((i) => i.id === 'ask-1')?.link).toBe(`/tasks/${IDS.task12}`);
+    expect(body.items.find((i) => i.id === 'ask-orphan')?.context).toBeUndefined();
+  });
+
+  it('关闭：标成已处理（answer 写关闭那句标记）、进操作记录 ask.close、不发信号；列表里没了；再关 409；不存在 404', async () => {
+    const h = harness();
+    const s = await h.login();
+    pushAsk(h, 'ask-1', IDS.task12);
+    const res = await h.cockpit.request('/api/asks/ask-1/close', write('POST', s));
+    expect(res.status).toBe(200);
+    expect(h.store.data.asks.find((a) => a.id === 'ask-1')).toMatchObject({
+      answer: LEGACY_ASK_CLOSED_ANSWER,
+      answeredBy: DEV_USER_ID,
+    });
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      action: 'ask.close',
+      target: `task:${IDS.task12}`,
+      ok: true,
+    });
+    expect(h.signals).toHaveLength(0);
+    const list = LegacyAsksResponse.parse(
+      await (await h.cockpit.request('/api/asks/legacy', { headers: { cookie: s.cookie } })).json(),
+    );
+    expect(list.items).toEqual([]);
+    const again = await h.cockpit.request('/api/asks/ask-1/close', write('POST', s));
+    expect(again.status).toBe(409);
+    expect(await errorCode(again)).toBe('already_answered');
+    expect((await h.cockpit.request('/api/asks/nope/close', write('POST', s))).status).toBe(404);
+  });
+
+  it('关闭的追问在任务详情里不冒充「回答」：不算「按推荐先做」的后果', async () => {
     const h = harness();
     const s = await h.login();
     h.store.data.asks.push({
-      id: 'ask-orphan',
-      taskId: 'task-does-not-exist',
+      id: 'ask-scoped',
+      taskId: IDS.task12,
       runId: DEV_RUN_ID,
-      question: '这条追问指的任务已经不在库里了',
-      options: [],
+      question: '先做哪个？',
+      options: ['甲', '乙'],
       askedAt: h.clock.now.toISOString(),
+      scope: 'task',
+      recommended: '甲',
     });
-    const res = await h.cockpit.request('/api/asks/ask-orphan/answer', write('POST', s, { answer: '随便' }));
-    expect(res.status).toBe(200);
-    expect(h.signals).toHaveLength(0);
-    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('叫醒工作流没成功'))).toBe(true);
+    await h.cockpit.request('/api/asks/ask-scoped/close', write('POST', s));
+    const detail = TaskDetailResponse.parse(
+      await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie: s.cookie } })).json(),
+    );
+    const ask = detail.asks.find((a) => a.id === 'ask-scoped');
+    expect(ask).toMatchObject({ status: 'answered', answer: LEGACY_ASK_CLOSED_ANSWER });
+    expect(ask?.effect).toBeUndefined();
   });
 });
 
@@ -565,24 +556,6 @@ describe('调度台', () => {
     expect(raw).not.toHaveProperty('stages');
     const body = RoutingResponse.parse(raw);
     expect(body.routes.map((r) => r.id)).toContain('rt-claude-opus');
-  });
-
-  it('下架渠道：写操作记录；不存在的渠道 404', async () => {
-    const h = harness();
-    const s = await h.login();
-    const res = await h.cockpit.request(
-      '/api/routing/channels/ch-cursor',
-      write('PATCH', s, { enabled: false }),
-    );
-    expect(res.status).toBe(200);
-    expect(h.store.data.channels.find((c) => c.id === 'ch-cursor')?.enabled).toBe(false);
-    expect(h.store.data.audit.at(-1)).toMatchObject({
-      action: 'channel.disable',
-      target: 'channel:ch-cursor',
-    });
-    expect(
-      (await h.cockpit.request('/api/routing/channels/nope', write('PATCH', s, { enabled: true }))).status,
-    ).toBe(404);
   });
 });
 
@@ -612,6 +585,145 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(raw).not.toHaveProperty('quotaNotWired');
     const pools = PoolsResponse.parse(raw);
     expect(pools.pools.some((p) => p.quotaStatus === 'unread')).toBe(true);
+  });
+
+  it('切号现状（#194）：没接上写 unavailable；接上了读账本；账本认不出写 unreadable；读不到写明没读成，都不拿空冒充没事', async () => {
+    const poolsBody = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolsResponse.parse(await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json());
+    const none = harness();
+    const a = await none.login();
+    expect((await poolsBody(none, a.cookie)).orgSwitch).toMatchObject({
+      state: 'unavailable',
+      soloPaused: false,
+    });
+
+    const doc = {
+      live: 'solo',
+      liveAt: '2026-10-04T12:00:00.000Z',
+      onSoloSince: '2026-10-04T10:00:00.000Z',
+      outage: {
+        kind: 'E1',
+        since: '2026-10-04T10:00:00.000Z',
+        resetsAt: '2026-10-04T14:00:00.000Z',
+        resetsFrom: 'api',
+        evidence: '被拒原文是拼车本人额度那句',
+      },
+      channel: { state: 'ok', since: '2026-10-04T09:00:00.000Z', why: '账号状态正常' },
+      backPending: null,
+      whites: { count: 1 },
+      reads: [
+        { ok: true, requestedAt: '2026-10-04T11:58:00.000Z' },
+        { ok: false, requestedAt: '2026-10-04T11:59:00.000Z', why: '503' },
+      ],
+    };
+    const known = harness({ orgSwitch: { read: async () => ({ doc, updatedAt: T0 }) } });
+    const b = await known.login();
+    expect((await poolsBody(known, b.cookie)).orgSwitch).toMatchObject({
+      state: 'known',
+      live: 'solo',
+      outage: { kind: 'E1', resetsAt: '2026-10-04T14:00:00.000Z', resetsFrom: 'api' },
+      channel: { state: 'ok' },
+      whites: 1,
+      lastRead: { ok: false, why: '503' },
+      soloPaused: false,
+    });
+
+    const garbled = harness({ orgSwitch: { read: async () => ({ doc: { v: 99 }, updatedAt: T0 }) } });
+    const c = await garbled.login();
+    const g = (await poolsBody(garbled, c.cookie)).orgSwitch;
+    expect(g).toMatchObject({ state: 'unreadable' });
+    expect(g && 'why' in g && g.why).toContain('认不出');
+
+    const broken = harness({
+      orgSwitch: {
+        read: async () => {
+          throw new Error('连接断了');
+        },
+      },
+    });
+    const d = await broken.login();
+    const bk = (await poolsBody(broken, d.cookie)).orgSwitch;
+    expect(bk).toMatchObject({ state: 'unavailable' });
+    expect(bk && 'why' in bk && bk.why).toContain('读切号账本没成：连接断了');
+  });
+
+  it('切号现状带烧速（#194 4.1）：挂着拼车、读数够 → 每分钟花多少、还能撑几分钟；读数不够 → 还算不出（不带 0）；挂着独享不算', async () => {
+    const poolsBody = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolsResponse.parse(await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json());
+    const base = {
+      liveAt: '2026-10-04T11:59:00.000Z',
+      onSoloSince: null,
+      outage: null,
+      channel: null,
+      backPending: null,
+      whites: { count: 0 },
+    };
+    const read = (m: number, used: number) => ({
+      ok: true,
+      requestedAt: new Date(T0.getTime() + m * 60_000).toISOString(),
+      quota: { usedUsd: used, limitUsd: 80 },
+    });
+    const view = async (doc: Record<string, unknown>) => {
+      const h = harness({ orgSwitch: { read: async () => ({ doc: { ...base, ...doc }, updatedAt: T0 }) } });
+      const { cookie } = await h.login();
+      return (await poolsBody(h, cookie)).orgSwitch;
+    };
+    const enough = await view({ live: 'carpool', reads: [read(-10, 20), read(-5, 30), read(-1, 38)] });
+    expect(enough).toMatchObject({ state: 'known', burn: { state: 'known', remainingUsd: 42 } });
+    const burn = enough && 'burn' in enough ? enough.burn : undefined;
+    expect(burn?.state === 'known' && Math.round(burn.minutesLeft ?? 0)).toBe(21);
+    // 【故意造出失败】只有 1 个读数：还算不出，不是 0
+    const few = await view({ live: 'carpool', reads: [read(-1, 38)] });
+    expect(few).toMatchObject({ burn: { state: 'unknown' } });
+    expect(JSON.stringify(few)).not.toContain('usdPerMinute');
+    // 【故意造出失败】账本里的读数没带额度（老账本）：算不出
+    const old = await view({ live: 'carpool', reads: [{ ok: true, requestedAt: read(-1, 1).requestedAt }] });
+    expect(old).toMatchObject({ burn: { state: 'unknown' } });
+    // 挂着独享：不带烧速
+    const solo = await view({ live: 'solo', reads: [read(-10, 20), read(-1, 38)] });
+    expect(solo).toMatchObject({ state: 'known', live: 'solo' });
+    expect(solo).not.toHaveProperty('burn');
+  });
+
+  it('拼车额度对账（#194 方案 4.7）：没接上写 unavailable；接上了写两个数；读不到写明没读成，不拿对得上冒充', async () => {
+    const poolsBody = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolsResponse.parse(await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json());
+    const none = harness();
+    const a = await none.login();
+    expect((await poolsBody(none, a.cookie)).carpoolReconcile).toMatchObject({ state: 'unavailable' });
+
+    const known = harness({
+      carpoolReconcile: {
+        read: async () => ({
+          api: {
+            poolId: 'claude-carpool',
+            used: 50,
+            limit: 80,
+            resetsAt: new Date(T0.getTime() + 2 * 3_600_000),
+            readAt: new Date(T0.getTime() - 60_000),
+            staleSince: null,
+            poolsWithWindow: 1,
+          },
+          spend: { sessions: 3, recordedUsd: 10, recorded: 3, unrecorded: 0, unrecordedSwitchStopped: 0 },
+        }),
+      },
+    });
+    const b = await known.login();
+    const view = (await poolsBody(known, b.cookie)).carpoolReconcile;
+    expect(view).toMatchObject({ state: 'known', verdict: 'others', localUsd: 10, apiUsedUsd: 50 });
+    expect(view && 'note' in view && view.note).toContain('多半是别的设备在用');
+
+    const broken = harness({
+      carpoolReconcile: {
+        read: async () => {
+          throw new Error('连接断了');
+        },
+      },
+    });
+    const c = await broken.login();
+    const bk = (await poolsBody(broken, c.cookie)).carpoolReconcile;
+    expect(bk).toMatchObject({ state: 'unavailable' });
+    expect(bk && 'why' in bk && bk.why).toContain('没成：连接断了');
   });
 
   it('路由表带上探针的结论（#129）：在线的带 ok 和时刻，离线的带原因，探针还没看过的不带（不说成离线）', async () => {
@@ -833,5 +945,190 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'setting.update', before: 6, after: 8 });
     const quiet = await put('notify.quietHours', { value: { start: '23:00', end: '08:00' }, version: 0 });
     expect(quiet.status).toBe(200);
+  });
+
+  it('「引擎暂不用独享」（#194）：只收 true/false，别的值拒收；改了留记录、额度页的切号现状跟着带上 soloPaused', async () => {
+    const h = harness();
+    const s = await h.login();
+    const put = (body: unknown) =>
+      h.cockpit.request('/api/settings/engine.soloPaused', write('PUT', s, body));
+    expect(await errorCode(await put({ value: 'yes', version: 0 }))).toBe('invalid_request');
+    expect(await errorCode(await put({ value: 1, version: 0 }))).toBe('invalid_request');
+    const ok = await put({ value: true, version: 0, reason: '我自己要大用独享' });
+    expect(UpdateSettingResponse.parse(await ok.json()).setting).toMatchObject({ value: true, version: 1 });
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      action: 'setting.update',
+      target: 'setting:engine.soloPaused',
+      after: true,
+    });
+    const pools = PoolsResponse.parse(
+      await (await h.cockpit.request('/api/pools', { headers: { cookie: s.cookie } })).json(),
+    );
+    expect(pools.orgSwitch).toMatchObject({ soloPaused: true });
+  });
+
+  it('各渠道额度留量线（#194 4.8）：负数、大于 1、非数字、未知窗口都拒收；合法的存下、带版本号、进操作记录、可清成 null（不限）', async () => {
+    const h = harness();
+    const s = await h.login();
+    const put = (body: unknown) =>
+      h.cockpit.request('/api/settings/engine.quotaReserve', write('PUT', s, body));
+    for (const bad of [
+      { p: { '7d': -0.1 } },
+      { p: { '7d': 1.1 } },
+      { p: { '7d': 'x' } },
+      { p: { weekly: 0.5 } },
+      'on',
+      [],
+    ]) {
+      expect(await errorCode(await put({ value: bad, version: 0 })), JSON.stringify(bad)).toBe(
+        'invalid_request',
+      );
+    }
+    const ok = await put({ value: { p: { '5h': 0.8, '7d': null } }, version: 0, reason: '改线' });
+    expect(UpdateSettingResponse.parse(await ok.json()).setting).toMatchObject({
+      value: { p: { '5h': 0.8, '7d': null } },
+      version: 1,
+    });
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      action: 'setting.update',
+      target: 'setting:engine.quotaReserve',
+    });
+    // 版本号对不上（别人先改了）：409，不悄悄覆盖
+    expect((await put({ value: {}, version: 0 })).status).toBe(409);
+  });
+
+  describe('整池暂停开关（#746，engine.poolHolds）', () => {
+    const hold = (over: Record<string, unknown> = {}) => ({
+      reason: '创始人要大用独享',
+      decidedBy: '「法国暂时不用独享号」2026-09-27',
+      revokeWhen: '创始人说可以用了',
+      reviewBy: '2026-12-31',
+      ...over,
+    });
+    const view = async (h: ReturnType<typeof harness>, cookie: string) =>
+      PoolHoldsResponse.parse(
+        await (await h.cockpit.request('/api/pool-holds', { headers: { cookie } })).json(),
+      );
+
+    it('【故意造出的失败】缺字段、日期假的、多字段都拒收；齐全的存下，带版本号、进操作记录', async () => {
+      const h = harness();
+      const s = await h.login();
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      for (const bad of [
+        { 'claude-solo': hold({ reviewBy: undefined }) },
+        { 'claude-solo': hold({ reason: ' ' }) },
+        { 'claude-solo': hold({ reviewBy: '2026-02-30' }) },
+        { 'claude-solo': hold({ owner: '帅位' }) },
+        'on',
+        null,
+      ]) {
+        expect(await errorCode(await put({ value: bad, version: 0 })), JSON.stringify(bad)).toBe(
+          'invalid_request',
+        );
+      }
+      const ok = await put({ value: { 'claude-solo': hold() }, version: 0 });
+      expect(UpdateSettingResponse.parse(await ok.json()).setting).toMatchObject({ version: 1 });
+      expect(h.store.data.audit.at(-1)).toMatchObject({
+        action: 'setting.update',
+        target: 'setting:engine.poolHolds',
+        after: { 'claude-solo': hold() },
+      });
+      expect((await view(h, s.cookie)).holds.map((x) => x.poolId)).toEqual(['claude-solo']);
+    });
+
+    it('【故意造出的失败】撤回、续期没写原因：400，设置不变；写了原因才撤，原因进操作记录；撤完 /api/pool-holds 没有了', async () => {
+      const h = harness();
+      const s = await h.login();
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      await put({ value: { 'claude-solo': hold(), 'claude-carpool': hold() }, version: 0 });
+      // 撤一个、没写原因
+      expect(await errorCode(await put({ value: { 'claude-carpool': hold() }, version: 1 }))).toBe(
+        'reason_required',
+      );
+      // 续期（改复查日期）没写原因
+      expect(
+        await errorCode(
+          await put({
+            value: { 'claude-solo': hold({ reviewBy: '2027-01-31' }), 'claude-carpool': hold() },
+            version: 1,
+            reason: '  ',
+          }),
+        ),
+      ).toBe('reason_required');
+      expect((await view(h, s.cookie)).holds).toHaveLength(2);
+      const revoked = await put({
+        value: { 'claude-carpool': hold() },
+        version: 1,
+        reason: '创始人 10-05 说独享正常跑',
+      });
+      expect(revoked.status).toBe(200);
+      expect(h.store.data.audit.at(-1)).toMatchObject({
+        target: 'setting:engine.poolHolds',
+        reason: '创始人 10-05 说独享正常跑',
+      });
+      expect((await view(h, s.cookie)).holds.map((x) => x.poolId)).toEqual(['claude-carpool']);
+      // 新建一条不用写原因
+      expect(
+        (await put({ value: { 'claude-carpool': hold(), 'claude-solo': hold() }, version: 2 })).status,
+      ).toBe(200);
+    });
+
+    it('/api/pool-holds：到期标红但还在名单里（不自动撤）；旧的 pool-hold 提醒列出来提示迁成开关；已处理的不算', async () => {
+      const h = harness();
+      const s = await h.login();
+      // 假钟是 2026-09-25 16:00（北京）：9-24 是昨天
+      const yesterday = '2026-09-24';
+      await h.cockpit.request(
+        '/api/settings/engine.poolHolds',
+        write('PUT', s, { value: { 'claude-solo': hold({ reviewBy: yesterday }) }, version: 0 }),
+      );
+      for (const [id, key, resolvedAt] of [
+        ['n-hold-1', 'pool-hold:claude-solo', undefined],
+        ['n-hold-2', 'pool-hold:claude-carpool', undefined],
+        ['n-hold-3', 'pool-hold:old', h.clock.now.toISOString()],
+      ] as const) {
+        h.store.data.notifications.push({
+          id,
+          level: 'decision',
+          title: `账号池 ${key.slice(10)} 整池暂停：登录失效`,
+          body: '占位',
+          createdAt: h.clock.now.toISOString(),
+          dedupeKey: key,
+          deliveries: [],
+          ...(resolvedAt ? { resolvedAt } : {}),
+        });
+      }
+      const v = await view(h, s.cookie);
+      expect(v.holds[0]).toMatchObject({ poolId: 'claude-solo', overdue: true });
+      expect(v.holds[0]?.overdueDays).toBeGreaterThanOrEqual(1);
+      expect(v.legacy.map((l) => [l.poolId, l.alsoSwitched]).sort()).toEqual([
+        ['claude-carpool', false],
+        ['claude-solo', true],
+      ]);
+      expect(v.problems).toEqual([]);
+      expect(v.legacyProblem).toBeUndefined();
+    });
+
+    it('【故意造出的失败】库里存的值认不出（被人直接改库）：/api/pool-holds 明说认不出、所有池按暂停办，不是「没有暂停」；修它也要写原因', async () => {
+      const h = harness();
+      const s = await h.login();
+      h.store.data.settings.push({
+        key: 'engine.poolHolds',
+        value: '停',
+        version: 4,
+        updatedAt: h.clock.now.toISOString(),
+        updatedBy: 'x',
+      });
+      const v = await view(h, s.cookie);
+      expect(v.holdAll).toBe(true);
+      expect(v.problems[0]?.why).toContain('所有账号池按暂停办');
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      expect(await errorCode(await put({ value: {}, version: 4 }))).toBe('reason_required');
+      expect((await put({ value: {}, version: 4, reason: '清掉被改坏的值' })).status).toBe(200);
+      expect((await view(h, s.cookie)).holdAll).toBe(false);
+    });
   });
 });

@@ -6,25 +6,37 @@
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { createGitHub } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
-import { signAgentToken } from './agent-token.ts';
-import { deployFacts, pgAlertWork } from './alert-work.ts';
-import { buildApps } from './app.ts';
-import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
-import { createChangeHub, startPgChangeFeed } from './changes.ts';
-import { ConfigError, engineEnabled, loadConfig } from './config.ts';
-import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import {
+  createMemoryStore,
+  createPgStore,
   DEPLOY_LAG_NOT_HERE,
-  deployLagCheck,
+  DEV_RUN_ID,
+  DEV_USER_ID,
+  deployFacts,
+  devFixtures,
+  IDS,
+  jsonLogger,
+  pgAlertWork,
+  pgLedger,
+  pgLocker,
   readDeployLagInput,
   startDeployLagWatch,
-} from './deploy-lag.ts';
+  withStatementTimeout,
+} from '@fleet-dao/store';
+import { signAgentToken } from './agent-token.ts';
+import { buildApps } from './app.ts';
+import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
+import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
+import { createChangeHub, startPgChangeFeed } from './changes.ts';
+import { ConfigError, engineEnabled, loadConfig } from './config.ts';
+import { probeDb } from './db-probe.ts';
+import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
+import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
-import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { createFeishuAuth } from './feishu.ts';
-import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
+import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
@@ -33,9 +45,7 @@ import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
-import { jsonLogger } from './log.ts';
-import { createMemoryStore } from './memory-store.ts';
-import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
+import { pgOrgSwitch } from './org-switch-view.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
@@ -171,8 +181,14 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
     routingLayers: pgRoutingLayers(db),
+    // 会话用户切号的现状（#194）：引擎落库的切号账本，额度页顶上一行
+    orgSwitch: pgOrgSwitch(db),
+    // 拼车额度对账（#194 方案 4.7）：接口说的已用美元 vs 本机会话记到的花费
+    carpoolReconcile: pgCarpoolReconcile(db),
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
+    // 环境页（#820 片 1）的版本那一项：法国的正式机器读发布目录现算；别处不给，页面写「没查成」
+    ...(onFrance ? { deployLag: () => readDeployLagInput() } : {}),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
     release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     health: serviceHealthChecks({
@@ -185,9 +201,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
       deployLag,
-      feishuGateway: config.feishuGatewayToken
-        ? gatewaySeen
-        : { check: async () => {}, notWired: GATEWAY_NO_PASS },
+      feishuGateway: feishuGatewayPart(config, gatewaySeen),
       // 引擎切号（#157）写的提醒：只有法国的引擎会写，别处一直是好的
       sessionOrg: sessionOrgHealthCheck(db),
       // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有法国的引擎会写

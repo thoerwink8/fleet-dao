@@ -60,6 +60,17 @@ export interface Config {
    * 「引擎关着」就按它显示（持续显示、不伪装成失败）。读不到这项的按开着算（和 engineEnabled 一个判法）。
    */
   engineOff: boolean;
+  /**
+   * 这台机器给人看的名字（FLEET_MACHINE_NAME，和引擎那边同一项）：驾驶舱顶栏徽标和环境页（#820 片 1）用它。
+   * 没配、空白是 null——页面写「认不出」并说明，不拿「法国」这种猜的值冒充。法国写「法国」、本机档写「本机」，
+   * 两份期望（deploy/france|local/desired-config.json）的 api.env 都登记了。
+   */
+  machineName: string | null;
+  /**
+   * FLEET_FEISHU_LOGIN=off：这台不接飞书（本机档：没有香港、没有飞书网关）。这时飞书网关的通行证即使在环境文件里也不认
+   * （feishuGatewayToken 记成 null），健康页的 feishu_gateway 报「未接」而不是一直等一个永远不会来的网关（#803）。
+   */
+  feishuOff: boolean;
 }
 
 export class ConfigError extends Error {
@@ -111,6 +122,15 @@ export function engineEnabled(env: Env): boolean {
   return listed.includes('fleet-engine');
 }
 
+/**
+ * 这台机器给人看的名字（FLEET_MACHINE_NAME）：法国「法国」、本机档「本机」，和引擎读的是同一项。空白、没配是 null，
+ * 上层（环境页、顶栏徽标）照实写「认不出」，不猜成某一台。名字不是要保密的东西，两份期望都当公开值登记。
+ */
+export function machineName(env: Env): string | null {
+  const name = env.FLEET_MACHINE_NAME?.trim();
+  return name ? name : null;
+}
+
 export function loadConfig(env: Env): Config {
   const problems: string[] = [];
   const fleetEnv = parseEnv(env.FLEET_ENV, problems);
@@ -141,7 +161,8 @@ export function loadConfig(env: Env): Config {
   if (!githubWebhookSecret && !dev) problems.push('缺 FLEET_GITHUB_WEBHOOK_SECRET');
 
   let feishu: Config['feishu'] = null;
-  if (feishuLogin(env, problems) === 'off') {
+  const feishuOff = feishuLogin(env, problems) === 'off';
+  if (feishuOff) {
     if (env.FEISHU_APP_ID || env.FEISHU_APP_SECRET) {
       problems.push(
         'FLEET_FEISHU_LOGIN=off（这台不接飞书登录），FEISHU_APP_ID / FEISHU_APP_SECRET 却配了：接不接说不清，二选一（不接就把这两项清空，接就去掉 off）',
@@ -160,15 +181,17 @@ export function loadConfig(env: Env): Config {
   const databaseUrl = env.DATABASE_URL || null;
   if (!databaseUrl && !dev) problems.push('缺 DATABASE_URL（Postgres 连接串）');
 
-  const feishuGatewayToken = env.FLEET_FEISHU_GATEWAY_TOKEN || null;
-  if (feishuGatewayToken !== null) {
-    if (feishuGatewayToken.length < MIN_SECRET_LENGTH) {
+  // 通行证照旧核（写坏了照样拒启动）；只是这台明说不接飞书（off）时不认它：本机档装机照样会生成一份，但没有网关来用
+  const gatewayTokenEnv = env.FLEET_FEISHU_GATEWAY_TOKEN || null;
+  if (gatewayTokenEnv !== null) {
+    if (gatewayTokenEnv.length < MIN_SECRET_LENGTH) {
       problems.push(`FLEET_FEISHU_GATEWAY_TOKEN 太短：至少 ${MIN_SECRET_LENGTH} 个字符`);
     }
-    if (feishuGatewayToken === sessionSecret || feishuGatewayToken === agentTokenSecret) {
+    if (gatewayTokenEnv === sessionSecret || gatewayTokenEnv === agentTokenSecret) {
       problems.push('FLEET_FEISHU_GATEWAY_TOKEN 不能和别的密钥相同');
     }
   }
+  const feishuGatewayToken = feishuOff ? null : gatewayTokenEnv;
 
   const devLoginRequested = env.FLEET_DEV_LOGIN === '1';
   if (devLoginRequested && !dev) problems.push('FLEET_DEV_LOGIN=1 只允许和 FLEET_ENV=development 一起用');
@@ -215,6 +238,8 @@ export function loadConfig(env: Env): Config {
     temporalNamespace,
     fleetTaskQueue,
     engineOff: !engineEnabled(env),
+    feishuOff,
+    machineName: machineName(env),
   };
 }
 

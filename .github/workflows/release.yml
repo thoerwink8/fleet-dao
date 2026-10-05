@@ -46,6 +46,12 @@ concurrency:
 
 jobs:
   finalize:
+    # 绝大多数触发是普通 PR 合进 main（head 不是 release/<…>）：下面 classify 那一步本来就判它 noop、安安静静不动作，
+    # 但要先起一台机器、检出、装 Node 才走到那里（实测每次 12 秒上下、占一个并发槽，近 30 次合计 4 机器分钟）。
+    # 所以在 job 级先挡掉明显不相干的：不是 pull_request（手动补跑照走）时放行；是 pull_request 就必须「已合并 + head 以 release/ 开头」才起。
+    # 只挡 classify 判 noop 的那两种（没合并、head 不带 release/ 前缀）；带 release/ 前缀的一律放进来让 classify 判，
+    # 版本号贴错、base 不对仍在那里明说报红（不被这里遮住）。
+    if: github.event_name != 'pull_request' || (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

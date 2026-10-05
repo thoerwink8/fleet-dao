@@ -16,7 +16,31 @@ import {
   pickPurpose,
   probeStale,
   purposeLine,
+  routeSlots,
 } from './routing';
+
+describe('routeSlots：账号池满不满（#800，和引擎选路同一个判法）', () => {
+  test('池上限 3、1 个在跑、2 个已选定还没开跑：满了，两样各写明（只数在跑的会说 1/3 没满）', () => {
+    const s = routeSlots({ inFlight: 1, reserved: 2, maxConcurrency: 3 });
+    expect(s).toMatchObject({ full: true, occupied: 3 });
+    expect(s.count).toBe('3/3（在跑 1、已选定还没开跑 2）');
+    expect(s.text).toBe('占 3/3（在跑 1、已选定还没开跑 2）');
+  });
+
+  test('没有已选定的：照旧写「在跑 1/3」，没满', () => {
+    const s = routeSlots({ inFlight: 1, reserved: 0, maxConcurrency: 3 });
+    expect(s).toMatchObject({ full: false, occupied: 1, count: '1/3', text: '在跑 1/3' });
+  });
+
+  test('预占过期被收掉（reserved 回到 0）、引擎重启清掉预占后：不再算满', () => {
+    expect(routeSlots({ inFlight: 1, reserved: 2, maxConcurrency: 3 }).full).toBe(true);
+    expect(routeSlots({ inFlight: 1, reserved: 0, maxConcurrency: 3 }).full).toBe(false);
+  });
+
+  test('【故意造出的失败】接口给的数不是非负整数：明确抛，不画成没满', () => {
+    expect(() => routeSlots({ inFlight: 1, reserved: -1, maxConcurrency: 3 })).toThrow(/已选定数/);
+  });
+});
 
 const NOW = Date.parse('2026-10-04T10:00:00Z');
 const ago = (min: number) => new Date(NOW - min * TIME.MIN).toISOString();
@@ -41,6 +65,7 @@ function route(
     ban: fact('live'),
     exhausted: [],
     inFlight: 0,
+    reserved: 0,
     maxConcurrency: 2,
     ...over,
   };

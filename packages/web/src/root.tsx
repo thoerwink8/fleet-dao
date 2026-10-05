@@ -1,3 +1,4 @@
+import { errMessage } from '@fleet-dao/shared/util';
 import { brand } from '#brand';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
@@ -100,11 +101,7 @@ export function ErrorBoundary() {
   const title = isRouteErrorResponse(error)
     ? `${error.status} ${error.statusText}`
     : `${brand.product}出错了`;
-  const detail = isRouteErrorResponse(error)
-    ? String(error.data ?? '')
-    : error instanceof Error
-      ? error.message
-      : String(error);
+  const detail = isRouteErrorResponse(error) ? String(error.data ?? '') : errMessage(error);
   return (
     <main className="grid h-dvh place-items-center bg-background p-6">
       <div className="max-w-md text-center">

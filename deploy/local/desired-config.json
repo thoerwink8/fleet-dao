@@ -30,6 +30,11 @@
       "FLEET_WORK_DIR": "/var/lib/fleet-work",
       "FLEET_ENGINE_STATE_DIR": "/var/lib/fleet-dao/engine",
       "FLEET_CLAUDE_BIN": "/home/{user}/.local/bin/reclaude",
+      "FLEET_CARPOOL_MAX_CONCURRENCY": {
+        "value": "2",
+        "说明": "登记的差别：本机档（WSL 演练台）占拼车总并发 6 里的 2，法国占 4（#194 方案 4.7）；演练台默认不碰独享、拼车只开少量会话。引擎起来时核库里拼车池的并发上限是不是这个数"
+      },
+      "FLEET_CARPOOL_TOTAL_CAP": "6",
       "FLEET_FORK_MAX_CONTEXT_TOKENS": "100000",
       "FLEET_CURSOR_VERSIONS_DIR": "/home/{user}/.local/share/cursor-agent/versions",
       "FLEET_CANARY_REPO": {
@@ -43,6 +48,10 @@
     },
     "api.env": {
       "FLEET_ENV": "production",
+      "FLEET_MACHINE_NAME": {
+        "value": "本机",
+        "说明": "登记的差别：这台给人看的名字不是「法国」（本机档，#451）；驾驶舱顶栏徽标和环境页（#820 片 1）读它（和引擎那份 engine.env 同一项）。名字不算要保密的东西，当公开值"
+      },
       "FLEET_PUBLIC_URL": {
         "value": "https://fleet-local.invalid",
         "说明": "登记的差别：法国这项是私有值（真域名），本机档没有对外入口（没有香港、没有隧道），改成占位地址、当公开值处理，不是要保密的东西；FLEET_ENV=production 两边一样，packages/api/src/config.ts 的 loadConfig 生产模式下强制 https，占位域名也要写 https://"

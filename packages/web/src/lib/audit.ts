@@ -13,12 +13,15 @@ const ACTION_LABEL: Record<string, string> = {
   'task.stop': '叫停了',
   'task.reroute': '换了路由',
   'ask.answer': '回答了追问',
+  'ask.close': '关闭了旧追问',
   'notification.resolve': '处理了提醒',
   'setting.update': '改了设置',
   'agent.done_rejected': '「做完了」被退回',
   'demo.link.create': '发了演示链接',
   'demo.link.revoke': '作废了演示链接',
   'demo.default.update': '改了演示版的默认范围',
+  'credentials.set': '设了账密登录',
+  'credentials.change': '改了账密登录',
   login: `登录了${brand.product}`,
   logout: `退出了${brand.product}`,
   // 引擎一侧的动作（名字以引擎实际写的为准，认不出的原样显示）。
@@ -60,6 +63,9 @@ export const settingLabel: Record<SettingKey, string> = {
   'sessions.maxConcurrent': '同时跑的会话上限',
   'notify.quietHours': '飞书免打扰时段',
   'judge.dailyCallLimit': `${brand.terms.judgeQuiz}每天调用上限`,
+  'engine.soloPaused': `引擎暂不用${brand.terms.solo}`,
+  'engine.quotaReserve': '各渠道的额度留量线',
+  'engine.poolHolds': '整池暂停',
 };
 
 function isStage(s: string): s is StageKind {
@@ -88,6 +94,8 @@ export function targetLabel(
       return `路由 ${id}`;
     case 'setting':
       return id in settingLabel ? `设置「${settingLabel[id as SettingKey]}」` : `设置 ${id}`;
+    case 'user':
+      return '账号的登录方式';
     case 'notification':
       return '一条提醒';
     case 'demo-link':

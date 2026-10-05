@@ -30,7 +30,9 @@ import {
   scopePrefix,
 } from '@fleet-dao/adapters';
 import {
+  applyQuotaReserveSeed,
   type Db,
+  loadQuotaReserveSeed,
   models,
   pools,
   repos,
@@ -43,6 +45,7 @@ import {
 } from '@fleet-dao/db';
 import type { TestDb } from '@fleet-dao/db/testing';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
+import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
 import { type SessionOrgControl, type SessionOrgDeps, sessionOrgReader } from '../../src/real/session-org.ts';
@@ -50,6 +53,33 @@ import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktree
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
 export const MIN = 60_000;
+
+/**
+ * 接口读数的替身（#194，切号接真库的测试用）：本人额度还宽、拼车和独享各一个可用账号；时刻就是传进来的假钟。
+ * 返回类型写成判法认的 CarpoolApiRead（ok 那一支）。
+ */
+export function healthyCarpoolRead(at: Date): Extract<CarpoolApiRead, { ok: true }> {
+  return {
+    ok: true,
+    requestedAt: at,
+    serverDate: at,
+    ageSeconds: null,
+    quota: { usedUsd: 10, limitUsd: 80, resetsAt: new Date(at.getTime() + 180 * MIN), status: 'active' },
+    org: 'ok',
+    accounts: [
+      { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+      { id: 'solo-1', kind: 'solo', hasAssignedAccount: true, expiresAt: null },
+    ],
+  };
+}
+
+/** 本人额度到顶的接口读数（几点恢复由接口说）。 */
+export function fullCarpoolRead(at: Date, resetsAt: Date): Extract<CarpoolApiRead, { ok: true }> {
+  return {
+    ...healthyCarpoolRead(at),
+    quota: { usedUsd: 80, limitUsd: 80, resetsAt, status: 'active' },
+  };
+}
 
 /** 在线的路由必须带着探针的 ok 结论（库里约束 routes_alive_needs_probe_ok）。 */
 export const PROBED_OK = {
@@ -92,6 +122,8 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
     },
     { id: 'relay', channelId: 'mirasim-cloud', maxConcurrency: 3 },
   ]);
+  // 额度留量线：和发布时一样，把种子文件只补缺装进库（线只来自库里，引擎代码里没有默认值；没装上选路一律不派）
+  await applyQuotaReserveSeed(db, await loadQuotaReserveSeed());
   await db.insert(routes).values([
     {
       id: 'solo',

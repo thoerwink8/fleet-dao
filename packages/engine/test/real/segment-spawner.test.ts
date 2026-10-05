@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import type { RateLimitReading, RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
+import type { MemoryPeakDeps } from '../../src/real/memory-peak.ts';
 import {
   hostSegmentSpawner,
   outcomeOfReport,
@@ -91,6 +93,10 @@ function harness(
     unwired?: boolean;
     /** 给了就把会话流里读到的额度记到库里（路由查询照样走 routeFacts）。 */
     db?: Db;
+    /** 拼车池上的会话没成：被拒的证据当场交给谁（#194）。 */
+    onCarpoolRejection?: (rejection: CarpoolRejection) => void;
+    /** 给了就采 scope 的内存峰值（#948）；readText 假的，不碰真 cgroup。 */
+    memoryPeak?: MemoryPeakDeps;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -135,6 +141,8 @@ function harness(
     baseEnv: { PATH: '/usr/bin', GITHUB_TOKEN: 'secret-should-not-pass' },
     resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     ...(opts.db ? { db: opts.db } : {}),
+    ...(opts.memoryPeak ? { memoryPeak: opts.memoryPeak } : {}),
+    ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
   const run: Harness['run'] = (input = {}, timeoutMinutes = 60) =>
@@ -164,6 +172,83 @@ function harness(
     );
   return { calls, adopted, removed, order, recorded, logs, spawn, run };
 }
+
+describe('hostSegmentSpawner · 内存峰值（#948）', () => {
+  const FAKE_PEAK = (readText: MemoryPeakDeps['readText']): MemoryPeakDeps => ({
+    readText,
+    cgroupRoot: '/sys/fs/cgroup',
+    slicePath: 'fleet.slice/fleet-agents.slice',
+    intervalMs: 5,
+  });
+  const afterAWhile = () => new Promise((r) => setTimeout(r, 40));
+
+  it('会话跑着时读到的最大那次进 runs.memory_peak_mb（向上取整成 MB）；读的是这个会话自己的 scope', async () => {
+    const paths: string[] = [];
+    let n = 0;
+    const h = harness({
+      memoryPeak: FAKE_PEAK(async (path) => {
+        paths.push(path);
+        n += 1;
+        return String(n >= 3 ? 300 * 1024 * 1024 + 1 : 100 * 1024 * 1024);
+      }),
+      driverRun: async () => {
+        await afterAWhile();
+        return report();
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    expect(h.recorded[0]?.memoryPeakMb).toBe(301);
+    expect(paths[0]).toBe(
+      `/sys/fs/cgroup/fleet.slice/fleet-agents.slice/fleet-agent-${RUN_ID}.scope/memory.peak`,
+    );
+  });
+
+  it('【故意造出的失败】峰值文件一直不在（没有 cgroup / scope 没建出来）：runs 那一列留空、不写 0，原因进日志和结局', async () => {
+    const h = harness({
+      memoryPeak: FAKE_PEAK(async () => {
+        throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+      }),
+      driverRun: async () => {
+        await afterAWhile();
+        return report();
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    expect(h.recorded[0]).not.toHaveProperty('memoryPeakMb');
+    expect(r.facts?.memoryPeakWhy).toContain('一直不在');
+    expect(h.logs.join('\n')).toContain('会话内存峰值没读到');
+  });
+
+  it('【故意造出的失败】峰值文件在但认不出（不是数字、是 0、读不了）：同样留空、写明原因，不拿 0 或别的数顶', async () => {
+    for (const bad of [
+      async () => 'max\n',
+      async () => '0\n',
+      async () => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      },
+    ]) {
+      const h = harness({
+        memoryPeak: FAKE_PEAK(bad),
+        driverRun: async () => {
+          await afterAWhile();
+          return report();
+        },
+      });
+      const r = await h.run();
+      expect(h.recorded[0]).not.toHaveProperty('memoryPeakMb');
+      expect(r.facts?.memoryPeakWhy).toContain('内存峰值没读成');
+    }
+  });
+
+  it('不给 memoryPeak（没有 cgroup 的开发机、别的测试）：不采、不记原因，那一列照旧留空', async () => {
+    const h = harness();
+    const r = await h.run();
+    expect(h.recorded[0]).not.toHaveProperty('memoryPeakMb');
+    expect(r.facts).not.toHaveProperty('memoryPeakWhy');
+  });
+});
 
 describe('hostSegmentSpawner · 成功', () => {
   it('驱动报告 ok → one-shot 判 done；回答正文当 stdout；用量花费记进 runs', async () => {
@@ -520,5 +605,67 @@ describe('hostSegmentSpawner · 【故意造出的失败】读不到、认不出
       resources: { memoryHighMb: 1, memoryMaxMb: 2, swapMaxMb: 0 },
     });
     await expect(spawn(command())).rejects.toThrow(/没装路由查询/);
+  });
+});
+
+describe('hostSegmentSpawner · 拼车被拒当场交给切号（#194）', () => {
+  const rejectedReport = () =>
+    report({
+      facts: okFacts({
+        quotaExhausted: true,
+        terminal: { isError: true, detail: '拼车 5 小时额度已用完，约 120 分钟后重置' },
+      }),
+      resetsAt: '2099-01-01T00:00:00.000Z',
+      httpStatus: 429,
+    });
+
+  it('拼车池上被拒：把证据（码、状态码、清零时刻、原文）当场交出去；会话结局照旧', async () => {
+    const seen: CarpoolRejection[] = [];
+    const h = harness({
+      route: route({ orgKind: 'carpool' }),
+      driverRun: async () => rejectedReport(),
+      onCarpoolRejection: (r) => void seen.push(r),
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('failed');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ code: 'quota_exhausted', httpStatus: 429 });
+    expect(seen[0]?.resetsAt).toEqual(new Date('2099-01-01T00:00:00.000Z'));
+    expect(seen[0]?.text).toContain('拼车 5 小时额度已用完');
+  });
+
+  it('【故意造出的失败】不是拼车池（独享、别家）的被拒不交；成功的不交；被我们杀掉的不交', async () => {
+    const seen: CarpoolRejection[] = [];
+    for (const [orgKind, driverRun] of [
+      ['solo', async () => rejectedReport()],
+      [null, async () => rejectedReport()],
+      ['carpool', async () => report()],
+      [
+        'carpool',
+        async () =>
+          report({ facts: okFacts({ exitCode: null, killed: 'wall_clock_timeout', terminal: undefined }) }),
+      ],
+    ] as const) {
+      const h = harness({
+        route: route({ orgKind }),
+        driverRun,
+        onCarpoolRejection: (r) => void seen.push(r),
+      });
+      await h.run();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('【故意造出的失败】交证据的那一步抛了：只记日志，会话结局照旧、不抛', async () => {
+    const h = harness({
+      route: route({ orgKind: 'carpool' }),
+      driverRun: async () => rejectedReport(),
+      onCarpoolRejection: () => {
+        throw new Error('切号没接上');
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('failed');
+    expect(h.logs.join(' ')).toContain('拼车被拒的证据没交给切号');
   });
 });

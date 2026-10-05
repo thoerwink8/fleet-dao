@@ -1,55 +1,22 @@
-// 派不派一张单的边界表（0003 第 2、4、8 条；design 第九节「在哪能做与接活开关」）：开关这一道（关着、开关打开以前开的、
-// 排队中、结束的、重开）、版本这一道（只派当前版本：未排期、别的版本、关了的里程碑、认不出版本号都不派）、母单子单这一道
-// （#252 之前母单、子单都不自动派）、本机做这一道（#299 止血：贴了「本机做」的不自动派），人明说交给 fleet（在跑的不重复起、
-// 结束的只有重开过才再起、关着的和 PR 拒）。
+// 派不派一张单的边界表（design 第九节「在哪能做与接活开关」）：版本这一道（只派当前版本：未排期、别的版本、关了的里程碑、
+// 认不出版本号都不派）、母单子单这一道（#252 之前母单、子单都不自动派）、本机做这一道（#299 止血：贴了「本机做」的不自动派）。
+// 「开关、开单时间」和「人明说交给 fleet」两道随旧接活删了（#901 审查：只有测试在引用）。
 import { describe, expect, it } from 'vitest';
 import {
   autoDispatchGate,
   currentVersion,
-  dispatchDecision,
   familyGate,
-  handoverDecision,
   type IssueFamily,
-  type IssueNow,
   localGate,
   type MilestoneRef,
   milestoneVersion,
   versionGate,
 } from '../src/dispatch.ts';
 
-const T0 = Date.parse('2026-09-27T08:00:00.000Z');
-const at = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
-const on = { autoDispatchSince: at(-60) };
-
 const V1: MilestoneRef = { number: 8, title: 'v1 Fusion 接活' };
 const V2: MilestoneRef = { number: 9, title: 'v2 引擎打磨：环节可配、检验制度、经验库' };
 const P1: MilestoneRef = { number: 2, title: 'P1 核心闭环' };
 const BACKLOG: MilestoneRef = { number: 11, title: 'backlog 攒着的' };
-
-describe('开关这一道', () => {
-  it('关着不派；开关以前开的不派；排队中的派；已结束的只在重开时派；在跑的不再派；建立时刻认不出不派', () => {
-    expect(dispatchDecision({ autoDispatchSince: null }, at(0), { state: 'queued' }, false)).toBe(
-      'dispatch_off',
-    );
-    expect(dispatchDecision(on, at(-61), { state: 'queued' }, false)).toBe('opened_before_switch');
-    expect(dispatchDecision(on, at(-60), { state: 'queued' }, false)).toBe('start');
-    expect(dispatchDecision(on, at(0), { state: 'done' }, false)).toBe('finished');
-    expect(dispatchDecision(on, at(0), { state: 'running' }, false)).toBe('in_progress');
-    expect(dispatchDecision(on, 'yesterday', { state: 'queued' }, false)).toBe('created_at_unreadable');
-  });
-
-  it('重开：已结束的、还在排队的再拉起；正在做的等它结束；开关照样先看', () => {
-    expect(dispatchDecision(on, at(0), { state: 'failed' }, true)).toBe('restart');
-    expect(dispatchDecision(on, at(0), { state: 'stopped' }, true)).toBe('restart');
-    expect(dispatchDecision(on, at(0), { state: 'queued' }, true)).toBe('restart');
-    expect(dispatchDecision(on, at(0), { state: 'running' }, true)).toBe('wait_previous_run');
-    expect(dispatchDecision(on, at(0), { state: 'triaging' }, true)).toBe('wait_previous_run');
-    expect(dispatchDecision(on, at(-61), { state: 'failed' }, true)).toBe('opened_before_switch');
-    expect(dispatchDecision({ autoDispatchSince: null }, at(0), { state: 'running' }, true)).toBe(
-      'dispatch_off',
-    );
-  });
-});
 
 describe('版本这一道：当前版本 = 还开着的 v<N> 里程碑里 N 最小的那个', () => {
   it('版本号只认「v<N>」开头：旧的 P 阶段、v1.5、大写 V、没有数字的都认不出', () => {
@@ -198,52 +165,6 @@ describe('本机做这一道（#299 止血：帅位留给本机做的，认领�
     });
     expect(autoDispatchGate({ ...plan, parent: 192, labels: ['本机做'] })).toMatchObject({
       reason: 'sub_issue',
-    });
-  });
-});
-
-describe('交给 fleet：人替开关打开以前、别的版本、未排期那两道放行，任务和 issue 的规矩照旧', () => {
-  const open: IssueNow = { state: 'open', reopened: false, pullRequest: false };
-  const reopened: IssueNow = { state: 'open', reopened: true, pullRequest: false };
-  const closed: IssueNow = { state: 'closed', reopened: false, pullRequest: false };
-
-  it('还在排队（从没派过）、GitHub 上开着：拉起', () => {
-    expect(handoverDecision({ state: 'queued' }, open)).toEqual({ act: 'start' });
-  });
-
-  it('在跑的（哪一步都算）：不重复起；【故意造出的失败】GitHub 上已经关了的，哪怕任务还在跑也拒（关单会叫停它）', () => {
-    for (const state of ['triaging', 'asking', 'planning', 'running', 'merging', 'stalled'] as const) {
-      expect(handoverDecision({ state }, open), state).toMatchObject({ act: 'noop' });
-      expect(handoverDecision({ state }, reopened), state).toMatchObject({ act: 'noop' });
-      expect(handoverDecision({ state }, closed), state).toMatchObject({
-        act: 'refuse',
-        reason: 'issue_closed',
-      });
-    }
-  });
-
-  it('已经结束的：GitHub 上重开过才再起一轮；没重开的拒，写明怎么再做一轮', () => {
-    for (const state of ['done', 'stopped', 'failed'] as const) {
-      expect(handoverDecision({ state }, reopened), state).toEqual({ act: 'restart' });
-      const got = handoverDecision({ state }, open);
-      expect(got, state).toMatchObject({ act: 'refuse', reason: 'finished' });
-      if (got.act !== 'refuse') throw new Error('没重开的结束任务不该再起');
-      expect(got.why).toContain('先在 GitHub 上重开');
-    }
-  });
-
-  it('GitHub 上关着的：不派；这个号其实是 PR：不派', () => {
-    expect(handoverDecision({ state: 'queued' }, closed)).toMatchObject({
-      act: 'refuse',
-      reason: 'issue_closed',
-    });
-    expect(handoverDecision({ state: 'done' }, closed)).toMatchObject({
-      act: 'refuse',
-      reason: 'issue_closed',
-    });
-    expect(handoverDecision({ state: 'queued' }, { ...open, pullRequest: true })).toMatchObject({
-      act: 'refuse',
-      reason: 'pull_request',
     });
   });
 });

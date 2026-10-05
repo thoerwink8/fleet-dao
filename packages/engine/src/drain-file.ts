@@ -4,7 +4,9 @@
 // - 读的人（deploy/release.sh 的 engine_drain_status）拿 pid 和 systemd 的 MainPID 比：对不上就是上一个进程留下的旧文件，不信，
 //   当成「这个引擎不会排空」。所以写不进去不能悄悄算了：记一条日志（同一种错只记一次），发布脚本那边照实说读不到。
 // - 先写临时文件再改名，读的人不会读到半截。
+
 import { rename, writeFile } from 'node:fs/promises';
+import { errMessage } from '@fleet-dao/shared/util';
 import { drainStatus, type EngineDrain } from './drain.ts';
 
 export interface DrainStatusFileOptions {
@@ -47,7 +49,7 @@ export function startDrainStatusFile(o: DrainStatusFileOptions): { flush(): Prom
         if (lastError) o.log?.(`排空状态又写得进 ${o.file} 了`);
         lastError = '';
       } catch (error) {
-        const why = error instanceof Error ? error.message : String(error);
+        const why = errMessage(error);
         if (why !== lastError) {
           lastError = why;
           o.log?.(`排空状态写不进 ${o.file}（发布脚本看不到排空进度，会当成这个引擎不会排空）：${why}`);

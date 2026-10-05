@@ -2,8 +2,6 @@
 // 真端口（real/）、跑流程用的零件（workflows/kit.ts）都还要用，从被删的 decisions/{triage,plan,verify,merge}.ts 搬过来。
 // 只有类型，没有判断逻辑——判断那半边随 Fusion 工作流一起删了。
 
-import type { Limits } from '../limits.ts';
-
 // ---- 返工意见（原 decisions/verify.ts 的 Feedback）
 
 /** 回主会话的一条返工意见。 */
@@ -98,20 +96,6 @@ export interface PlannedSubtask {
   holds?: string[];
 }
 
-/** 校验、规整后的子任务。 */
-export interface SubtaskSpec {
-  key: string;
-  index: number;
-  title: string;
-  touches: string[];
-  dependsOn: string[];
-  stage: SubtaskStage;
-  secondOpinion: boolean;
-  acceptance: string[];
-  /** 人闸标记，规整过（小写、去重、排好序）。老输入没有这个字段 = 没有人闸。 */
-  holds?: string[];
-}
-
 // ---- 合并（原 decisions/merge.ts 的类型）
 
 export interface TestResult {
@@ -132,21 +116,3 @@ export interface MergeOutcome {
   mergeCommit?: string;
   reason?: string;
 }
-
-export type ReturnReason =
-  | 'conflict'
-  | 'tests-red'
-  | 'tests-stale'
-  | 'merge-failed'
-  | 'infra'
-  /**
-   * 合并前重跑，红的结构化地只是「当前头还没有 second-opinion」（tests.secondOpinionWait）：不是测试真红，
-   * 调用方改走请第二意见（或沿用上一轮通过的结论）再看合并闸，不当一次真退回。
-   */
-  | 'second-opinion';
-
-/**
- * 保留给以后恢复用：原本合并队列要用 Limits 里 mergeReturns / reviewRounds 这些。
- * 现在只在类型上对齐，没调用方。
- */
-export type MergeLimits = Pick<Limits, 'mergeReturns' | 'reviewRounds' | 'ciFixRounds' | 'conflictRounds'>;

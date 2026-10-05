@@ -1,12 +1,14 @@
 // 路由两层的读法（#574）：把 routing_purpose_models / routing_catalog 读成「用途 → 模型 → 路由」，每一层写明现在活着吗、为什么。
-// 选路（queries/engine.ts 的 routeFactsForPurpose）、驾驶舱、探针都按这两张表：先后是用途下模型的先后，再是模型下路由的先后。
+// 选路（queries/engine-route-facts.ts 的 routeFactsForPurpose）、驾驶舱、探针都按这两张表：先后是用途下模型的先后，再是模型下路由的先后。
 // 「接得上、额度够、没被禁令挡」不在这里再判一遍：路由一条条交给 evaluateRoutes（「为什么不能用」只有这一处判法），再由
 // livenessOf 读成三件事。
 // 空的一层是 dead（整层没人，派不出去），不是 live；没配的用途同理，写在 problems 里。
 import type { StageKind } from '@fleet-dao/shared';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.ts';
+import { alertByKey } from './queries/alerts.ts';
 import { evaluateRoutes, type RouteCandidate } from './queries/candidates.ts';
+import { CARPOOL_CAP_ALERT } from './queries/carpool-spend.ts';
 import { QUOTA_STALE_AFTER_MS } from './queries/quota.ts';
 import {
   type LivenessVerdict,
@@ -77,9 +79,21 @@ export async function routingLayers(
     .orderBy(asc(routingCatalog.modelId), asc(routingCatalog.position));
   const candidates =
     lower.length === 0 ? [] : await evaluateRoutes(db, purpose, lower, { now, staleAfterMs });
+  // 引擎核「登记的拼车并发上限」对不上时推的提醒开着 = 引擎现在不往拼车池派新活（#896，engine 的 routing/filter.ts 硬挡）：
+  // 拼车池的路由在「禁令与开关」那一件上写明原因。读不了照常抛，不当成没事。
+  const capAlert = lower.some((r) => r.pool.orgKind === 'carpool')
+    ? await alertByKey(db, CARPOOL_CAP_ALERT)
+    : null;
+  const carpoolHold =
+    capAlert && capAlert.resolvedAt === null
+      ? `引擎暂不往拼车池派新活：拼车并发登记核对不上（提醒「${capAlert.title}」开着，改对后自己恢复）`
+      : undefined;
+  const carpoolPools = new Set(lower.filter((r) => r.pool.orgKind === 'carpool').map((r) => r.pool.id));
   const byModel = new Map<string, RoutingRouteView[]>();
   for (const candidate of candidates) {
-    const liveness = livenessOf(candidate);
+    const liveness = livenessOf(candidate, {
+      ...(carpoolHold && carpoolPools.has(candidate.poolId) ? { hold: carpoolHold } : {}),
+    });
     const list = byModel.get(candidate.modelId) ?? [];
     list.push({ candidate, liveness, verdict: routeLiveness(liveness) });
     byModel.set(candidate.modelId, list);

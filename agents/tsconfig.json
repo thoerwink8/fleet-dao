@@ -1,4 +1,15 @@
 {
   "extends": "../tsconfig.base.json",
-  "include": ["test"]
+  "compilerOptions": { "allowJs": true, "checkJs": true },
+  "include": ["test"],
+  "files": [
+    "skills/commander/scripts/france-lib.mjs",
+    "skills/commander/scripts/france-query.mjs",
+    "skills/discuss/scripts/second-opinion.mjs",
+    "skills/discuss/scripts/tools.mjs",
+    "skills/discuss/scripts/walkthrough.mjs",
+    "hooks/pretool.mjs",
+    "hooks/fresh-main.mjs",
+    "hooks/unattended.mjs"
+  ]
 }

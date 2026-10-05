@@ -8,5 +8,5 @@
     "jsx": "react-jsx",
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "scripts", "vite.config.ts", "react-router.config.ts"]
+  "include": ["src", "scripts", "e2e", "vite.config.ts", "react-router.config.ts"]
 }

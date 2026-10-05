@@ -23,6 +23,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
@@ -31,7 +32,7 @@ import type { RunsWriter } from '../runner/not-wired.ts';
 import { OneShotError, type OneShotResult, runOneShot, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import { renderSegmentPrompt } from '../runner/segment-prompt.ts';
 import { manualBriefOf } from '../runner/task-brief.ts';
-import type { RunSegmentInput, RunSegmentResult } from '../task-contract.ts';
+import { type RunSegmentInput, type RunSegmentResult, SEGMENT_STAGE } from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { SegmentReservations } from './runs-writer.ts';
@@ -74,23 +75,6 @@ export interface RunSegmentDeps {
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(signal.reason ?? new Error('被叫停了'));
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason ?? new Error('被叫停了'));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
 /** 删 runsDir 下超过 ttl 的执行目录。不抛：清不掉只记日志，下次再清。 */
 export async function sweepRunDirs(
   runsDir: string,
@@ -103,7 +87,7 @@ export async function sweepRunDirs(
     names = await readdir(runsDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      log('一次性会话的落盘目录读不了，没清', { runsDir, error: message(error) });
+      log('一次性会话的落盘目录读不了，没清', { runsDir, error: errMessage(error) });
     }
     return 0;
   }
@@ -116,7 +100,7 @@ export async function sweepRunDirs(
       await rm(dir, { recursive: true, force: true });
       removed += 1;
     } catch (error) {
-      log('一次性会话的落盘目录没清掉（下次再清）', { dir, error: message(error) });
+      log('一次性会话的落盘目录没清掉（下次再清）', { dir, error: errMessage(error) });
     }
   }
   return removed;
@@ -140,7 +124,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     } catch (error) {
       log('选路时预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
         reservationId,
-        error: message(error),
+        error: errMessage(error),
       });
     }
   };
@@ -153,10 +137,14 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       try {
         routeInfo = await resolveSegmentRoute(deps.spawner, input.route.routeId);
       } catch (error) {
-        throw new PortError('SEGMENT_ROUTE_UNUSABLE', message(error), { retryable: false });
+        throw new PortError('SEGMENT_ROUTE_UNUSABLE', errMessage(error), { retryable: false });
       }
       // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
-      const ticket = deps.sessions?.enter({ poolId: routeInfo.route.poolId });
+      const ticket = deps.sessions?.enter({
+        poolId: routeInfo.route.poolId,
+        stage: SEGMENT_STAGE.manual,
+        taskId: input.taskId,
+      });
       try {
         return await run(input, ctx, routeInfo, ticket);
       } finally {
@@ -226,7 +214,10 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
             },
             {
-              spawn: (cmd) => spawner({ ...cmd, signal: AbortSignal.any([cmd.signal, stopSignal]) }),
+              spawn: (cmd) => {
+                ticket?.running();
+                return spawner({ ...cmd, signal: AbortSignal.any([cmd.signal, stopSignal]) });
+              },
               ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
               tmpDir: deps.runsDir,
               runs: deps.runs,

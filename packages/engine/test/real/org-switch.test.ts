@@ -17,16 +17,27 @@ import {
   openSessionRun,
   routes,
   runs,
+  saveOrgState,
   savePoolQuota,
+  settings,
+  takeOrgLock,
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import type { OrgKind } from '@fleet-dao/shared';
+import { beijingDateOf, type OrgKind } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { runRouteProbeJob } from '../../src/jobs/route-probe.ts';
+import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
+import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
+import { probeOrgNow, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
+import type { OrgSwitchSessions } from '../../src/real/org-switch.ts';
 import {
+  ORG_CHANNEL_ALERT,
   ORG_DRIFT_ALERT,
+  ORG_LEDGER_ALERT,
+  ORG_POOL_HOLD_ALERT,
+  ORG_POOL_HOLD_OVERDUE_ALERT,
+  ORG_RESERVE_ALERT,
   ORG_STUCK_ALERT,
   ORG_SWITCH_ALERT,
   ORG_VERIFY_ALERT,
@@ -35,7 +46,6 @@ import {
 } from '../../src/real/org-switch.ts';
 import { routeProbeJob } from '../../src/real/route-probe.ts';
 import { realRuns } from '../../src/real/runs-writer.ts';
-import type { OrgSwitchSessions } from '../../src/real/sessions.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
 import { type OneShotSpawner, runOneShot } from '../../src/runner/one-shot.ts';
 import {
@@ -72,8 +82,30 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 const H = 60 * MIN;
 const answered = (): FakeRunScript => ({ result: { text: 'OK' } });
 
+/** 接口读数的替身：本人额度还宽、拼车和独享各一个可用账号。每次现读都是新的（时刻跟着假钟走）。 */
+const healthyRead = (at: Date): CarpoolApiRead => ({
+  ok: true,
+  requestedAt: at,
+  serverDate: at,
+  ageSeconds: null,
+  quota: { usedUsd: 10, limitUsd: 80, resetsAt: new Date(at.getTime() + 3 * 60 * MIN), status: 'active' },
+  org: 'ok',
+  accounts: [
+    { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+    { id: 'solo-1', kind: 'solo', hasAssignedAccount: true, expiresAt: null },
+  ],
+});
+
+/** 本人额度到顶的接口读数（几点恢复由接口说）。 */
+const fullRead = (at: Date, resetsAt: Date): CarpoolApiRead => {
+  const ok = healthyRead(at);
+  return ok.ok ? { ...ok, quota: { usedUsd: 80, limitUsd: 80, resetsAt, status: 'active' } } : ok;
+};
+
 function setup(
   over: {
+    /** 接口读数的替身：不给就是两个账号都可用、本人额度还宽。 */
+    api?: (at: Date) => CarpoolApiRead;
     /** 帮手的替身：不给就切成（假 reclaude 跟着改成切过去的那个）。 */
     helper?: (to: OrgKind) => Promise<SwitchSessionOrgResult>;
     probe?: (n: number) => FakeRunScript;
@@ -114,6 +146,9 @@ function setup(
       return { ok: true, changed: true };
     },
     machine: '法国',
+    readApi: async () => (over.api ?? healthyRead)(now()),
+    // 当场触发的切号切完当场探切过去的池（和真装配一样用同一份路由探针）
+    probeNow: (to) => probeOrgNow(job(), to),
     ...(over.sessions ? { sessions: over.sessions } : {}),
     now,
     sleep: async () => {
@@ -143,6 +178,7 @@ function setup(
   });
   return {
     rig,
+    orgSwitch,
     helperCalls,
     picksWhileSwitching,
     logs,
@@ -209,10 +245,11 @@ function fakeSessions(runs: { id: string; poolId: string }[], settle = 1) {
   let polls = 0;
   const stops: { poolIds: string[]; why: string; stopped: string[] }[] = [];
   const sessions: OrgSwitchSessions = {
-    stop(poolIds, why) {
+    stop(poolIds, why, only) {
       const stopped: string[] = [];
       for (const [id, s] of state) {
         if (!poolIds.has(s.poolId) || s.stoppedAtPoll >= 0) continue;
+        if (only && !only(id)) continue;
         s.stoppedAtPoll = polls;
         stopped.push(id);
       }
@@ -230,18 +267,42 @@ function fakeSessions(runs: { id: string; poolId: string }[], settle = 1) {
   return { sessions, stops };
 }
 
-const audits = async () =>
+/** #194 新加的几种记录（恢复条件、渠道状态、顺手发生的事、切回宽限）：单独看，不混进切号、核对这几条老记录里。 */
+const NEW_AUDITS = [
+  'session-org.outage',
+  'session-org.channel',
+  'session-org.note',
+  'session-org.drain',
+  'session-org.limit',
+  'session-org.read-backoff',
+];
+const auditsWhere = async (keep: (action: string) => boolean) =>
   (await t.db.select().from(auditLog))
-    .filter((a) => a.action.startsWith('session-org.'))
+    .filter((a) => a.action.startsWith('session-org.') && keep(a.action))
     .sort((a, b) => a.id - b.id)
-    .map((a) => ({ action: a.action, ok: a.ok, before: a.before, after: a.after, error: a.error }));
+    .map((a) => ({
+      action: a.action,
+      ok: a.ok,
+      before: a.before,
+      after: a.after,
+      error: a.error,
+      reason: a.reason,
+    }));
+const audits = async () =>
+  (await auditsWhere((x) => !NEW_AUDITS.includes(x))).map(({ reason: _r, ...rest }) => rest);
+const newAudits = (action: string) => auditsWhere((x) => x === action);
 const alertOf = async (key: string) =>
   (await t.db.select().from(notifications)).find((n) => n.dedupeKey === key);
 const row = async (id: string) => (await t.db.select().from(routes)).find((r) => r.id === id);
 
 describe('全程：拼车被拒 → 等到没有在跑的会话 → 切独享 → 读回在线 → 到恢复时刻 → 空着时切回 → 读回在线', () => {
   it('操作记录里切号、切回、两次核对都在；每次切都是在没有会话的时候；切完选路跟着走', async () => {
-    const s = setup();
+    // 接口读数跟着假钟走：清零时刻（NOW + 2 小时）之前说本人额度到顶，之后说恢复了
+    const resetsAt = new Date(NOW.getTime() + 2 * H);
+    let exhausted = false;
+    const s = setup({
+      api: (at) => (exhausted && at < resetsAt ? fullRead(at, resetsAt) : healthyRead(at)),
+    });
     // 平时：挂拼车、额度宽，不切；拼车池探通，独享池不探
     await s.round();
     expect(s.helperCalls).toEqual([]);
@@ -250,6 +311,7 @@ describe('全程：拼车被拒 → 等到没有在跑的会话 → 切独享 �
 
     // 拼车的会话被拒（5 小时窗口，2 小时后清零）；还有一个拼车上的会话没结束
     const resets = new Date(NOW.getTime() + 2 * H);
+    exhausted = true;
     await rejected('claude-carpool', s.now(), resets);
     const end = await running('carpool', s.now());
     // 选路不再往拼车派，独享没挂着也派不了：等额度
@@ -299,11 +361,19 @@ describe('全程：拼车被拒 → 等到没有在跑的会话 → 切独享 �
         action: 'session-org.switch',
         ok: true,
         before: { org: 'solo' },
-        after: { org: 'carpool' },
+        // 切回拼车记是确认过的（接口读数连着两次说恢复了）还是试探的
+        after: { org: 'carpool', mode: 'confirmed' },
         error: null,
       },
       { action: 'session-org.verify', ok: true, before: null, after: { org: 'carpool' }, error: null },
     ]);
+    // 新记录：恢复条件（凭什么切、几点恢复）；切走那一刻落的
+    const outage = await newAudits('session-org.outage');
+    expect(outage).toHaveLength(1);
+    expect(outage[0]?.after).toMatchObject({ kind: 'E1' });
+    expect(outage[0]?.reason).toContain('拼车用不了（E1）');
+    // 渠道状态：第一次判就记了一笔「正常」，之后没变就不再记
+    expect((await newAudits('session-org.channel')).map((a) => a.after)).toEqual([{ state: 'ok' }]);
     // 切的那一会儿选路停着（不派、过一会儿再选）
     expect(s.picksWhileSwitching).toHaveLength(2);
     for (const p of s.picksWhileSwitching) {
@@ -355,7 +425,7 @@ describe('【故意造出的失败】', () => {
     ]);
     const alarm = await alertOf(ORG_SWITCH_ALERT);
     expect(alarm).toMatchObject({ level: 'alert', resolvedAt: null, title: '会话用户切号没成：拼车 → 独享' });
-    expect(alarm?.body).toContain('拼车额度用满了');
+    expect(alarm?.body).toContain('拼车本人 5 小时额度用满');
     expect(alarm?.body).toContain('法国');
 
     fail = false;
@@ -470,7 +540,9 @@ describe('【故意造出的失败】', () => {
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
     await s.round();
     expect(s.helperCalls).toEqual([]);
-    expect(s.logs.join('\n')).toContain('独享池整池暂停着');
+    // 独享这一类的池整池暂停 = 独享账号不可用，只剩拼车 1 个可用账号：没得切（创始人 2026-10-04 约 22:30 的规矩）
+    expect(s.logs.join('\n')).toContain('只剩 1 个可用账号');
+    expect(s.logs.join('\n')).toContain('独享账号不可用');
   });
 });
 
@@ -788,5 +860,595 @@ describe('组织临时被切走又切回（#335）：选路、探针、切号按
     // 结论照旧：拼车还是上一轮探通的在线，独享还是「没探」
     expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', probeOrg: 'carpool' });
     expect(await row('solo')).toMatchObject({ probeState: 'skipped', probeOrg: 'carpool' });
+  });
+});
+
+describe('拼车用不了，当场切（#194）：不等路由探针那一轮，切完当场探', () => {
+  const USER = 'fleet-agent-carpool';
+  const rejection = (at: Date) => ({
+    at,
+    code: 'quota_exhausted',
+    text: '拼车 5 小时额度已用完，约 120 分钟后重置',
+  });
+  /** 接口读数的几种账号状态。 */
+  const withAccounts = (
+    at: Date,
+    accounts: { carpool?: boolean | null; solo?: boolean | null },
+  ): CarpoolApiRead => {
+    const r = healthyRead(at);
+    if (!r.ok) return r;
+    const list = [
+      ...(accounts.carpool === undefined
+        ? []
+        : [
+            {
+              id: 'carpool-1',
+              kind: 'carpool' as const,
+              hasAssignedAccount: accounts.carpool,
+              expiresAt: null,
+            },
+          ]),
+      ...(accounts.solo === undefined
+        ? []
+        : [{ id: 'solo-1', kind: 'solo' as const, hasAssignedAccount: accounts.solo, expiresAt: null }]),
+    ];
+    return { ...r, accounts: list };
+  };
+
+  it('被拒当场：不用等探针，立刻切独享、当场探独享、选路马上能派独享；恢复条件和凭什么都进操作记录', async () => {
+    const s = setup();
+    expect(await s.orgSwitch.now({ by: '拼车会话被拒', rejection: rejection(s.now()) })).toBe('solo');
+    expect(s.helperCalls).toEqual(['solo']);
+    // 没跑过一轮探针，独享路由已经探通了（切完当场探）
+    expect(await row('solo')).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    const [switched, verify] = await audits();
+    expect(switched).toMatchObject({ action: 'session-org.switch', ok: true, after: { org: 'solo' } });
+    expect(verify).toMatchObject({ action: 'session-org.verify', ok: true, after: { org: 'solo' } });
+    const [outage] = await newAudits('session-org.outage');
+    expect(outage?.after).toMatchObject({ kind: 'E1', resetsFrom: 'text' });
+    // 接口说本人还有余额、请求却被拒：照被拒办，另记一笔「读数和实际对不上」
+    expect((await newAudits('session-org.note')).map((n) => n.reason).join('')).toContain('接口说本人额度');
+  });
+
+  it('【故意造出的失败】同时来两个当场触发（一批会话一起被拒）：只切一次，帮手只调一次，操作记录里切号只有一条', async () => {
+    const s = setup();
+    const [a, b] = await Promise.all([
+      s.orgSwitch.now({ by: '会话 A 被拒', rejection: rejection(s.now()) }),
+      s.orgSwitch.now({ by: '会话 B 被拒', rejection: rejection(s.now()) }),
+    ]);
+    expect([a, b].filter((x) => x === 'solo')).toHaveLength(1);
+    expect(s.helperCalls).toEqual(['solo']);
+    expect((await audits()).filter((x) => x.action === 'session-org.switch')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】别的进程拿着切号的锁（没过期）：这一次不判、帮手不调；锁过期了才接手', async () => {
+    const s = setup();
+    await takeOrgLock(t.db, USER, {
+      holder: '另一个进程',
+      now: s.now(),
+      ttlMs: 5 * MIN,
+      emptyDoc: serializeLedger(emptyLedger()),
+    });
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+    expect(s.helperCalls).toEqual([]);
+    expect(s.logs.join('\n')).toContain('切号的锁在别的进程手里');
+    s.advance(6 * MIN);
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+  });
+
+  it('【故意造出的失败】设置里开着「引擎暂不用独享」：拼车被拒也不切；关了就切', async () => {
+    const s = setup();
+    await t.db.insert(settings).values({ key: 'engine.soloPaused', value: true, updatedBy: '创始人' });
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+    expect(s.helperCalls).toEqual([]);
+    expect(s.logs.join('\n')).toContain('引擎暂不用独享');
+    await t.client.query(`update settings set value = 'false'::jsonb where key = 'engine.soloPaused'`);
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+  });
+
+  it('【故意造出的失败】设置的值认不出（不是 true/false）：按暂停办，不切', async () => {
+    const s = setup();
+    await t.db.insert(settings).values({ key: 'engine.soloPaused', value: '开' });
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+    expect(s.logs.join('\n')).toContain('认不出，按暂停办');
+  });
+
+  describe('整池暂停开关（#746，设置 engine.poolHolds）：切号照它整池避开，读不出按暂停办并报警，到期标红不自动撤', () => {
+    const hold = (over: Record<string, unknown> = {}) => ({
+      reason: '创始人要大用独享',
+      decidedBy: '「法国暂时不用独享号」2026-09-27',
+      revokeWhen: '创始人说可以用了',
+      reviewBy: '2026-10-30',
+      ...over,
+    });
+    const putHolds = (value: unknown) =>
+      t.client.query(
+        `insert into settings (key, value, updated_by) values ('engine.poolHolds', $1::jsonb, '创始人')
+         on conflict (key) do update set value = excluded.value`,
+        [JSON.stringify(value)],
+      );
+    const open = async (key: string) => {
+      const a = await alertOf(key);
+      return a !== undefined && a.resolvedAt === null;
+    };
+
+    it('【故意造出的失败】独享池开关暂停着：拼车被拒也不切过去；撤了开关（删掉那一项）下一次立刻就切', async () => {
+      const s = setup();
+      await putHolds({ 'claude-solo': hold() });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(s.logs.join('\n')).toContain('独享账号不可用');
+      await putHolds({});
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    });
+
+    it('【故意造出的失败】开关缺字段（读不出）：这个池照样按暂停办、不切；报「要人看」；补全了自己撤', async () => {
+      const s = setup();
+      await putHolds({ 'claude-solo': hold({ reviewBy: undefined }) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(true);
+      expect((await alertOf(ORG_POOL_HOLD_ALERT))?.body).toContain('claude-solo');
+      await putHolds({ 'claude-solo': hold() });
+      await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) });
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(false);
+    });
+
+    it('【故意造出的失败】整份设置认不出（不是对象）：所有池按暂停办、不切，报警', async () => {
+      const s = setup();
+      await putHolds('停');
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(true);
+    });
+
+    it('【故意造出的失败】过了复查日期还开着：报「到期」但不自动撤（开关还在、照样不切）；人改了日期续期才撤掉这条提醒', async () => {
+      const s = setup();
+      const yesterday = beijingDateOf(new Date(s.now().getTime() - 24 * H));
+      await putHolds({ 'claude-solo': hold({ reviewBy: yesterday }) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(await open(ORG_POOL_HOLD_OVERDUE_ALERT)).toBe(true);
+      expect((await alertOf(ORG_POOL_HOLD_OVERDUE_ALERT))?.body).toContain('不会自动撤');
+      const left = await t.client.query<{ value: object }>(
+        `select value from settings where key = 'engine.poolHolds'`,
+      );
+      expect(Object.keys(left.rows[0]?.value ?? {})).toEqual(['claude-solo']);
+      await putHolds({
+        'claude-solo': hold({ reviewBy: beijingDateOf(new Date(s.now().getTime() + 30 * 24 * H)) }),
+      });
+      await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) });
+      expect(await open(ORG_POOL_HOLD_OVERDUE_ALERT)).toBe(false);
+    });
+  });
+
+  describe('额度留量线（#194 方案 4.8）：线只来自库里（种子装的），引擎、驾驶舱读同一份', () => {
+    const reserveAlert = () => alertOf(ORG_RESERVE_ALERT);
+    /** 把独享池的周窗读数改成这个已用比例（读成的时刻是假钟的现在，算新读数）。 */
+    const soloWeek = async (s: { now: () => Date }, used: number) => {
+      const at = new Date(s.now().getTime() - MIN).toISOString();
+      await savePoolQuota(
+        t.db,
+        {
+          poolId: 'claude-solo',
+          readAt: at,
+          complete: true,
+          windows: [
+            {
+              poolId: 'claude-solo',
+              window: '7d',
+              label: 'seven_day',
+              unit: 'percent',
+              utilization: used,
+              reading: 'measured',
+              readAt: at,
+              source: 'test',
+            },
+          ],
+        },
+        { now: s.now() },
+      );
+    };
+    const setLines = (value: unknown) =>
+      t.client.query(`update settings set value = $1::jsonb where key = 'engine.quotaReserve'`, [
+        JSON.stringify(value),
+      ]);
+
+    it('种子装进库的线是 5 小时窗 0.8、周窗 0.7（来自种子文件，不是代码常量）', async () => {
+      const { rows } = await t.client.query<{ value: unknown; updated_by: string }>(
+        `select value, updated_by from settings where key = 'engine.quotaReserve'`,
+      );
+      expect(rows[0]).toEqual({
+        value: { 'claude-solo': { '5h': 0.8, '7d': 0.7 } },
+        updated_by: 'seed:quota-reserve.default.json',
+      });
+    });
+
+    it('【故意造出的失败】独享周窗已用 75%、线 70%：拼车被拒也不切，帮手不调，「留量线」进操作记录；创始人把线调到 90% 就切', async () => {
+      const s = setup();
+      await soloWeek(s, 0.75);
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect((await newAudits('session-org.note')).map((n) => n.reason).join('')).toContain('留量线');
+      expect(s.logs.join('\n')).toContain('独享到了留量线');
+      await setLines({ 'claude-solo': { '5h': 0.8, '7d': 0.9 } });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    });
+
+    it('线清成「不限」（null）或这个池没写：独享用到 99% 也照切', async () => {
+      const s = setup();
+      await soloWeek(s, 0.99);
+      await setLines({ 'claude-solo': { '7d': null } });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    });
+
+    it('【故意造出的失败】库里没有留量线这一行（种子没装上）：不切，报「要人看」，不当成不限；装上了自己撤', async () => {
+      const s = setup();
+      await t.client.query(`delete from settings where key = 'engine.quotaReserve'`);
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(await reserveAlert()).toMatchObject({ level: 'alert', resolvedAt: null });
+      expect((await reserveAlert())?.body).toContain('在库里没有');
+      // 选路同样不派（每个池都硬挡，写明原因）
+      const picked = await s.pick();
+      expect(picked.ok).toBe(false);
+      await setLines({});
+      await t.client.query(
+        `insert into settings (key, value) values ('engine.quotaReserve', '{}'::jsonb) on conflict do nothing`,
+      );
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+      expect((await reserveAlert())?.resolvedAt).not.toBeNull();
+    });
+
+    it('【故意造出的失败】线是负数 / 大于 1 / 字符串 / 整份不是对象：不切、报「要人看」，不当成不限也不当成 0', async () => {
+      const s = setup();
+      for (const bad of [
+        { 'claude-solo': { '7d': -0.5 } },
+        { 'claude-solo': { '7d': 1.5 } },
+        { 'claude-solo': { '7d': 'x' } },
+        'on',
+      ]) {
+        await setLines(bad);
+        expect(
+          await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) }),
+          JSON.stringify(bad),
+        ).toBeNull();
+        expect(await reserveAlert()).toMatchObject({ level: 'alert', resolvedAt: null });
+      }
+      expect(s.helperCalls).toEqual([]);
+    });
+
+    it('读不到独享的周窗读数（额度未知）：照切，切之前不拿空冒充「没到线」，原因里写明', async () => {
+      const s = setup();
+      await t.client.query(`delete from quota_windows where pool_id = 'claude-solo' and label = 'seven_day'`);
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+      const [switched] = await newAudits('session-org.switch');
+      expect(switched?.reason).toContain('额度未知');
+    });
+
+    it('第 17 条：切过去以后第一条读数说独享周窗 75%（线 70%）→ 选路不再派独享；调高线马上又能派', async () => {
+      const s = setup();
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+      expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+      await soloWeek(s, 0.75);
+      const blocked = await s.pick();
+      expect(blocked.ok ? blocked.route.routeId : 'wait').not.toBe('solo');
+      await setLines({ 'claude-solo': { '5h': 0.8, '7d': 0.9 } });
+      expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    });
+
+    it('【故意造出的失败】库里没有留量线时选路一个池都不派，不悄悄当成不限', async () => {
+      const s = setup();
+      await t.client.query(`delete from settings where key = 'engine.quotaReserve'`);
+      expect(await s.pick()).toMatchObject({ ok: false });
+    });
+  });
+
+  it('【故意造出的失败】切号账本认不出：不切、报「要人看」，不当成空账本；修好了自己撤', async () => {
+    const s = setup();
+    await saveOrgState(t.db, USER, { v: 99, garbage: true }, s.now());
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+    expect(s.helperCalls).toEqual([]);
+    expect(await alertOf(ORG_LEDGER_ALERT)).toMatchObject({ level: 'alert', resolvedAt: null });
+    await saveOrgState(t.db, USER, serializeLedger(emptyLedger()), s.now());
+    expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBe('solo');
+    expect((await alertOf(ORG_LEDGER_ALERT))?.resolvedAt).not.toBeNull();
+  });
+
+  it('【故意造出的失败】帮手切号失败：账本记着失败时刻，2 分钟内再来不砸帮手，过了才再试', async () => {
+    let fail = true;
+    const resetsAt = new Date(NOW.getTime() + 2 * H);
+    const s = setup({
+      // 接口一直说本人额度到顶：拼车用不了的条件一直在，每次判都想切
+      api: (at) => fullRead(at, resetsAt),
+      helper: async (to) => {
+        if (fail) {
+          return { ok: false, code: 'failed', exitCode: 1, now: 'carpool', detail: '没切成' };
+        }
+        s.rig.answer(to);
+        return { ok: true, changed: true };
+      },
+    });
+    await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) });
+    expect(s.helperCalls).toEqual(['solo']);
+    s.advance(MIN);
+    fail = false;
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(s.helperCalls).toEqual(['solo']);
+    expect(s.logs.join('\n')).toContain('退避');
+    s.advance(2 * MIN);
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBe('solo');
+    expect(s.helperCalls).toEqual(['solo', 'solo']);
+  });
+
+  describe('切之前逐个查账号状态（创始人 2026-10-04 约 22:30）', () => {
+    it('【故意造出的失败】独享账号被封（接口说没分到账号）、拼车 1 个可用：不切；状态记「只剩 1 个」，拼车照派', async () => {
+      const s = setup({ api: (at) => withAccounts(at, { carpool: true, solo: false }) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(s.logs.join('\n')).toContain('只剩 1 个可用账号');
+      expect((await newAudits('session-org.channel')).map((a) => a.after)).toEqual([{ state: 'single' }]);
+      // 唯一可用的就是挂着的拼车：没有异常，不推提醒
+      expect(await alertOf(ORG_CHANNEL_ALERT)).toBeUndefined();
+    });
+
+    it('【故意造出的失败】拼车账号被封、独享 1 个可用、挂着拼车：不自动切，推「要人看」', async () => {
+      const s = setup({ api: (at) => withAccounts(at, { carpool: false, solo: true }) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      const alarm = await alertOf(ORG_CHANNEL_ALERT);
+      expect(alarm).toMatchObject({ level: 'alert', resolvedAt: null });
+      expect(alarm?.title).toContain('只剩 1 个可用账号');
+    });
+
+    it('【故意造出的失败】两边账号都被封（可用 0 个）：渠道不可用——不切、提醒、操作记录失败一笔、选路不往 Claude 池派；恢复后自己撤', async () => {
+      let api = (at: Date) => withAccounts(at, { carpool: false, solo: false });
+      const s = setup({ api: (at) => api(at) });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      const alarm = await alertOf(ORG_CHANNEL_ALERT);
+      expect(alarm).toMatchObject({ level: 'alert', resolvedAt: null });
+      expect(alarm?.title).toContain('渠道不可用');
+      const [down] = await newAudits('session-org.channel');
+      expect(down).toMatchObject({ ok: false, after: { state: 'unavailable' } });
+      expect(down?.error).toContain('渠道不可用');
+      const picked = await s.pick();
+      expect(picked.ok).toBe(false);
+      expect(!picked.ok && picked.detail).toContain('渠道不可用');
+
+      // 账号恢复：状态自动恢复、提醒自己撤、记一笔
+      api = healthyRead;
+      s.advance(MIN);
+      await s.orgSwitch.now({ by: '定时读接口' });
+      expect((await alertOf(ORG_CHANNEL_ALERT))?.resolvedAt).not.toBeNull();
+      expect((await newAudits('session-org.channel')).map((a) => a.after)).toEqual([
+        { state: 'unavailable' },
+        { state: 'ok' },
+      ]);
+    });
+
+    it('【故意造出的失败】读不到账号状态（接口 503）：不切；刚读不到不报警，读不到满 15 分钟才报；不当成可用', async () => {
+      const s = setup({
+        api: (at) => ({ ok: false, requestedAt: at, code: 'http', why: '503' }),
+      });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+      expect(s.logs.join('\n')).toContain('读不到状态');
+      expect(await alertOf(ORG_CHANNEL_ALERT)).toBeUndefined();
+      s.advance(16 * MIN);
+      await s.orgSwitch.now({ by: '定时读接口' });
+      expect(s.helperCalls).toEqual([]);
+      expect((await alertOf(ORG_CHANNEL_ALERT))?.title).toContain('读不到 Claude 账号的状态');
+    });
+
+    it('【故意造出的失败】接口读成了但没有账号清单（组织接口没读成）：当读不到状态，不切', async () => {
+      const s = setup({
+        api: (at) => {
+          const r = healthyRead(at);
+          return r.ok ? { ...r, org: 'unknown', accounts: undefined as never } : r;
+        },
+      });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
+      expect(s.helperCalls).toEqual([]);
+    });
+  });
+
+  it('切回有宽限：恢复了先停派独享、开跑不到 5 分钟的当场停；老的跑完（或宽限到点）才切回拼车', async () => {
+    // 挂着独享、账本里记着一小时前拼车本人额度用满（半小时前就该恢复）
+    await saveOrgState(
+      t.db,
+      USER,
+      serializeLedger({
+        ...emptyLedger(),
+        outage: {
+          kind: 'E1',
+          since: new Date(NOW.getTime() - 60 * MIN),
+          resetsAt: new Date(NOW.getTime() - 30 * MIN),
+          resetsFrom: 'api',
+          evidence: '接口说本人额度到顶',
+        },
+        onSoloSince: new Date(NOW.getTime() - 59 * MIN),
+      }),
+      NOW,
+    );
+    const old = await running('solo', new Date(NOW.getTime() - 20 * MIN), { started: true });
+    const young = await running('solo', new Date(NOW.getTime() - MIN), { started: true });
+    const fake = fakeSessions([
+      { id: old.id, poolId: 'claude-solo' },
+      { id: young.id, poolId: 'claude-solo' },
+    ]);
+    const s = setup({ sessions: fake.sessions });
+    s.rig.answer('solo');
+    // 第一次新读数说恢复了：还要隔一分钟的第二次确认，不切、不停
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBeNull();
+    expect(fake.stops).toEqual([]);
+    // 第二次也说恢复了：进宽限——只停开跑不到 5 分钟的，老的接着跑；帮手还没调
+    s.advance(2 * MIN);
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBeNull();
+    expect(s.helperCalls).toEqual([]);
+    expect(fake.stops).toHaveLength(1);
+    expect(fake.stops[0]?.stopped).toEqual([young.id]);
+    const [drainRow] = await newAudits('session-org.drain');
+    expect(drainRow?.reason).toContain('先停下了 1 个');
+    // 宽限中：选路不往独享派新活（写明在切回的宽限中）
+    const during = await s.pick();
+    expect(during.ok).toBe(false);
+    expect(!during.ok && during.detail).toContain('宽限');
+    // 宽限里老的跑完了：手上空了，马上切回拼车、当场探通
+    await old(s.now());
+    await young(s.now());
+    s.advance(3 * MIN);
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBe('carpool');
+    expect(s.helperCalls).toEqual(['carpool']);
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+
+  it('切回宽限到点（10 分钟）老会话还没完：停下、切回拼车，各自在拼车上接着干', async () => {
+    await saveOrgState(
+      t.db,
+      USER,
+      serializeLedger({
+        ...emptyLedger(),
+        outage: {
+          kind: 'E1',
+          since: new Date(NOW.getTime() - 60 * MIN),
+          resetsAt: new Date(NOW.getTime() - 30 * MIN),
+          resetsFrom: 'api',
+          evidence: '接口说本人额度到顶',
+        },
+        onSoloSince: new Date(NOW.getTime() - 59 * MIN),
+      }),
+      NOW,
+    );
+    const old = await running('solo', new Date(NOW.getTime() - 20 * MIN), { started: true });
+    const fake = fakeSessions([{ id: old.id, poolId: 'claude-solo' }]);
+    const s = setup({ sessions: fake.sessions });
+    s.rig.answer('solo');
+    await s.orgSwitch.now({ by: '定时读接口' });
+    s.advance(2 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(s.helperCalls).toEqual([]);
+    s.advance(5 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(s.helperCalls).toEqual([]);
+    // 宽限从判恢复那一刻起算，到点还没完：停下 + 切回
+    s.advance(6 * MIN);
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBe('carpool');
+    expect(s.helperCalls).toEqual(['carpool']);
+    expect(fake.stops.flatMap((x) => x.stopped)).toEqual([old.id]);
+  });
+});
+
+describe('读接口的节奏（#194 方案 4.1）：切号前后各现读一次、退避期不砸接口、上限变了和进退避记一笔', () => {
+  const USER = 'fleet-agent-carpool';
+  const failedRead = (at: Date, code: 'throttled' | 'http' | 'network' = 'throttled'): CarpoolApiRead => ({
+    ok: false,
+    requestedAt: at,
+    code,
+    why: code === 'throttled' ? 'HTTP 429' : 'HTTP 503',
+  });
+  /** 账本里先放几条读数（接口那边的历史）。 */
+  const seed = (reads: CarpoolApiRead[], at: Date) =>
+    saveOrgState(t.db, USER, serializeLedger({ ...emptyLedger(), reads }), at);
+  const full = (at: Date) => fullRead(at, new Date(at.getTime() + 2 * H));
+  const counting = (make: (at: Date) => CarpoolApiRead) => {
+    const state = { calls: 0 };
+    return {
+      state,
+      api: (at: Date) => {
+        state.calls += 1;
+        return make(at);
+      },
+    };
+  };
+
+  it('切号前现读一次：手上的读数是旧的、说用满，新读数说有余额——重判后不切（不凭旧读数动手）', async () => {
+    const c = counting(healthyRead);
+    const s = setup({ api: c.api });
+    const stale = full(new Date(s.now().getTime() - 60_000));
+    expect(await s.orgSwitch.now({ by: '定时读接口', read: stale })).toBeNull();
+    expect(c.state.calls).toBe(1);
+    expect(s.helperCalls).toEqual([]);
+  });
+
+  it('切号前、切完各现读一次：旧读数说用满、新读数还是用满 → 切；这一次一共现读了 2 次（切前 1、切完 1）', async () => {
+    const c = counting(full);
+    const s = setup({ api: c.api });
+    const stale = full(new Date(s.now().getTime() - 60_000));
+    expect(await s.orgSwitch.now({ by: '定时读接口', read: stale })).toBe('solo');
+    expect(c.state.calls).toBe(2);
+  });
+
+  it('刚读过（几秒内）的不为了「切前现读」再砸一次：只有切完那 1 次', async () => {
+    const c = counting(full);
+    const s = setup({ api: c.api });
+    expect(await s.orgSwitch.now({ by: '定时读接口', read: full(s.now()) })).toBe('solo');
+    expect(c.state.calls).toBe(1);
+  });
+
+  it('【故意造出失败】退避期里（最近一次读失败不到 1 分钟）：被拒当场判也不去砸接口，按读不到办（账号状态读不到不切）；退避过了才读、才切', async () => {
+    const c = counting(healthyRead);
+    const s = setup({ api: c.api });
+    // 账号清单还是 10 分钟前读成的那份（15 分钟内算数），之后读失败进了退避
+    await seed(
+      [healthyRead(new Date(s.now().getTime() - 10 * MIN)), failedRead(new Date(s.now().getTime() - 30_000))],
+      s.now(),
+    );
+    await s.orgSwitch.now({
+      by: '被拒',
+      rejection: { at: s.now(), code: 'quota_exhausted', text: '拼车 5 小时额度已用完，约 120 分钟后重置' },
+    });
+    expect(c.state.calls).toBe(0);
+    // 最近一次读失败 → 账号状态读不到 → 照现有规矩（方案第六节第 1 条）不切、不当成账号可用；退避过了读成了才切
+    expect(s.helperCalls).toEqual([]);
+    s.advance(2 * MIN);
+    await s.orgSwitch.now({
+      by: '被拒',
+      rejection: { at: s.now(), code: 'quota_exhausted', text: '拼车 5 小时额度已用完，约 120 分钟后重置' },
+    });
+    expect(c.state.calls).toBeGreaterThan(0);
+    expect(s.helperCalls).toEqual(['solo']);
+  });
+
+  it('【故意造出失败】退避期里没有被拒、也没有别的证据：不读、不切；退避过了才读', async () => {
+    const c = counting(healthyRead);
+    const s = setup({ api: c.api });
+    await seed([failedRead(new Date(s.now().getTime() - 30_000))], s.now());
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(c.state.calls).toBe(0);
+    expect(s.helperCalls).toEqual([]);
+    s.advance(2 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(c.state.calls).toBe(1);
+  });
+
+  it('拼车上限变了（80 → 100）：操作记录写一笔「拼车上限从 80 变成 100」；没变不记', async () => {
+    const at = (m: number) => new Date(NOW.getTime() + m * MIN);
+    const s = setup({
+      api: (when) => {
+        const r = healthyRead(when);
+        return r.ok && when.getTime() >= at(10).getTime()
+          ? { ...r, quota: { ...(r.quota as NonNullable<typeof r.quota>), limitUsd: 100 } }
+          : r;
+      },
+    });
+    await seed([healthyRead(at(-10))], s.now());
+    s.advance(10 * MIN - 1);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(await newAudits('session-org.limit')).toEqual([]);
+    s.advance(MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    const [note] = await newAudits('session-org.limit');
+    expect(note?.reason).toContain('拼车上限从 80 变成 100');
+    expect(note).toMatchObject({ ok: true, before: { limitUsd: 80 }, after: { limitUsd: 100 } });
+  });
+
+  it('【故意造出失败】接口 429：进退避，操作记录记一笔（第 1 次、等 1 分钟），不是静默', async () => {
+    const s = setup({ api: (at) => failedRead(at) });
+    await s.orgSwitch.now({ by: '定时读接口' });
+    const [note] = await newAudits('session-org.read-backoff');
+    expect(note).toMatchObject({ ok: false, after: { fails: 1, waitMinutes: 1, code: 'throttled' } });
+    expect(note?.reason).toContain('429');
   });
 });

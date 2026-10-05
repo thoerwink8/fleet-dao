@@ -1,8 +1,10 @@
-import type { AlertWorkPort } from './alert-work.ts';
+import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
+import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { IntentStore } from './intent-store.ts';
+import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
 import type {
   ChangeFeed,
@@ -46,10 +48,25 @@ export interface Deps {
    */
   routingLayers?: RoutingLayersPort | undefined;
   /**
+   * 会话用户切号的现状（#194，org-switch-view.ts）：驾驶舱额度页顶上「挂着独享；拼车预计几点恢复」读它。没给（开发、内存版没有
+   * 那张表）的额度页照样回，另写一句 unavailable，不拿空冒充「没事」。
+   */
+  orgSwitch?: OrgSwitchPort | undefined;
+  /**
+   * 拼车额度对账（#194 方案 4.7，carpool-reconcile-view.ts）：额度页写「这一窗本机记到花了 $X，接口说用了 $Y」。没给（开发、内存版
+   * 没有会话和额度读数那几张表）的额度页照样回，另写一句 unavailable，不拿「对得上」冒充。
+   */
+  carpoolReconcile?: CarpoolReconcilePort | undefined;
+  /**
    * 路由两层里每条路由的思考档位（#470，routing-efforts.ts）：驾驶舱「思考档位」页读、改。没给（开发、内存版没有那张表）的
    * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。
    */
   routingEfforts?: RoutingEffortsPort | undefined;
+  /**
+   * 环境页（#820 片 1）的版本那一项：读法国的发布目录（current 链接 + 状态文件）现算。只在法国的正式机器上装配
+   * （main.ts 的 onFrance）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。
+   */
+  deployLag?: (() => DeployLagInput) | undefined;
   /**
    * /changelog 页「发布 v<N>」定版本号要的两样（release-version.ts）：仓里开着的里程碑（GitHub 现读）、仓根 CHANGELOG.md。
    * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。

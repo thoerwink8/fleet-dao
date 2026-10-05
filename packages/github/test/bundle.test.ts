@@ -44,9 +44,14 @@ function outFile(name: string): string {
 
 describe('从镜像打包', { timeout: 60_000 }, () => {
   it('fetchMainline 抓到远端 main 的头；bundleCommits 打出的包能被另一个空仓 fetch 出同一个头', async () => {
-    const { gh } = bundleSetup();
+    const { gh, fake } = bundleSetup();
     const fetched = await gh.fetchMainline({ repo });
     expect(fetched).toEqual({ head: mainHead, defaultBranch: 'main' });
+    // 只抓取，交给 git 的令牌只读 contents（#11）
+    expect(fake.calls('POST', /access_tokens$/).at(-1)?.body).toEqual({
+      repositories: ['widgets'],
+      permissions: { contents: 'read', metadata: 'read' },
+    });
 
     const outPath = outFile('main');
     const res = await gh.bundleCommits({ repo, tips: [fetched.head], outPath });

@@ -15,12 +15,14 @@
 //   「算不出上限要明确报错、不派」）就是这么定的。
 // - 数读出来了：高水位（MemoryHigh）- current 的余量还放不放得下一份「新会话预留」（SESSION_RESERVE_MB）。
 //   放不下 → wait，等别家收场或内核把它压下去，再选一次。
+
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { SLICE_MEMORY_HIGH_MB } from '../limits.ts';
 
 export const CGROUP_ROOT = '/sys/fs/cgroup';
-/** 会话资源池在 cgroup 树里的位置（和 kill-evidence.ts 的 AGENT_SLICE_PATH 一致；systemd 的层级用「-」连）。 */
+/** 会话资源池在 cgroup 树里的位置（和 deploy/france/fleet-agents.slice 一致；systemd 的层级用「-」连）。 */
 export const AGENT_SLICE_PATH = 'fleet.slice/fleet-agents.slice';
 
 /**
@@ -67,7 +69,7 @@ export async function admitSessionMemory(deps: MemoryAdmissionDeps): Promise<Mem
   try {
     bytes = parseMemoryCurrent(await deps.readText(path));
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMessage(err);
     if (isNotFound(err)) return { kind: 'skip' };
     return { kind: 'readError', detail: `${path} 没读成（${msg}）` };
   }

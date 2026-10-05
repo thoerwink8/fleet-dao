@@ -101,6 +101,7 @@ describe('路由页：每一层现在活着吗', () => {
                   probedAt: iso(-120),
                   exhausted: [{ label: '5h', resetsAt: iso(90) }, { label: '7d' }],
                   inFlight: 2,
+                  reserved: 0,
                   maxConcurrency: 2,
                 },
               ],
@@ -120,6 +121,55 @@ describe('路由页：每一层现在活着吗', () => {
     expect(screen.getByText('这个模型下一条路由都没有：排了它也派不到它')).toBeTruthy();
     expect(screen.getByText('一条路由都没有')).toBeTruthy();
     expect(screen.getByText('模型 kimi-k3 没有路由（routing_catalog 里一条都没有）')).toBeTruthy();
+  });
+
+  test('池满按「在跑 + 已选定还没开跑」判（#800）：上限 3、1 在跑 2 预占 = 满，页面写占 3/3 和各几个；只有 1 个在跑的不满', async () => {
+    const now = Date.now();
+    const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });
+    const slot = (routeId: string, poolId: string, reserved: number) => ({
+      routeId,
+      channelId: 'ch-claude',
+      channelName: 'Claude 订阅',
+      poolId,
+      hostId: 'claude-code' as const,
+      enabled: true,
+      verdict: 'live' as const,
+      connect: fact('live', '探针探通了'),
+      quota: fact('live', '额度读数新、窗口有余'),
+      ban: fact('live', '没有禁令、开关开着'),
+      probedAt: new Date(now - 60_000).toISOString(),
+      exhausted: [],
+      inFlight: 1,
+      reserved,
+      maxConcurrency: 3,
+    });
+    const api = withLayers({
+      asOf: new Date(now).toISOString(),
+      purposes: [
+        {
+          purpose: 'execute',
+          verdict: 'live',
+          problems: [],
+          models: [
+            {
+              modelId: 'opus-5.5',
+              displayName: 'Opus 5.5',
+              family: 'claude',
+              verdict: 'live',
+              routes: [slot('rt-reserved', 'carpool', 2), slot('rt-free', 'solo', 0)],
+            },
+          ],
+        },
+      ],
+    });
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
+    await purposeLinks();
+    const reserved = routeItem('rt-reserved');
+    expect(reserved.textContent).toContain('占 3/3（在跑 1、已选定还没开跑 2）');
+    expect(reserved.textContent).toContain('满了，等空位，不算死');
+    const free = routeItem('rt-free');
+    expect(free.textContent).toContain('在跑 1/3');
+    expect(free.textContent).not.toContain('满了，等空位');
   });
 
   test('网址里点名的用途写错了：照没点名算（先看派不出去的），不留一块空详情', async () => {

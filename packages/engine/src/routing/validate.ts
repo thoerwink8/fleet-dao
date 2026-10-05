@@ -54,6 +54,23 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       throw new RoutingInputError('选路判不了：引擎切号的打算没写为什么');
     }
   }
+  // 留量线设置的外壳认不出就不往下判：拿坏的输入会把该挡的当成不限
+  const qr: unknown = input.quotaReserve;
+  if (qr !== undefined && (typeof qr !== 'object' || qr === null || !('setting' in qr))) {
+    throw new RoutingInputError('选路判不了：额度留量线的输入认不出（要 { setting: 设置原值 }）');
+  }
+  // 拼车登记核对的结论认不出就不往下判：拿坏的结论会把核对不上的当成对上了，照派拼车
+  const cr: unknown = input.carpoolRegistry;
+  if (cr !== undefined) {
+    const ok = typeof cr === 'object' && cr !== null && 'ok' in cr ? cr.ok : undefined;
+    const why = typeof cr === 'object' && cr !== null && 'why' in cr ? cr.why : undefined;
+    const good = ok === true || (ok === false && typeof why === 'string' && why.trim() !== '');
+    if (!good) {
+      throw new RoutingInputError(
+        '选路判不了：拼车并发登记核对的结论认不出（要 { ok: true } 或 { ok: false, why: 写明原因 }）',
+      );
+    }
+  }
   if (trialEnabled) {
     const d = input.draw;
     if (typeof d !== 'number' || !Number.isFinite(d) || d < 0 || d >= 1) {

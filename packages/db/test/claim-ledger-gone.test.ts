@@ -13,7 +13,7 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8').replace(/\r\
 /** 读认领账的人：这些文件里不许再 import / 查 issue_claims。 */
 const READERS = [
   'packages/db/src/queries/alert-work.ts',
-  'packages/api/src/alert-work.ts',
+  'packages/store/src/alert-work.ts',
   'packages/core/src/alert-work.ts',
 ];
 
@@ -36,7 +36,9 @@ describe('规矩：认领账代码不再读它（#556-4 PR-1）', () => {
   });
 
   it('提醒阶段里没有「有人在修」这一档了', () => {
-    const shared = read('packages/shared/src/web-api.ts');
+    // web-api.ts 拆分后（#901 ③）只是入口，ALERT_STAGES 在 web-api/notifications.ts；先确认读到的文件里真有它，不空扫
+    const shared = read('packages/shared/src/web-api/notifications.ts');
+    expect(shared).toMatch(/ALERT_STAGES\s*=/);
     expect(shared).not.toMatch(/ALERT_STAGES[\s\S]{0,300}'claimed'/);
     expect(shared).not.toMatch(/ALERT_STAGES[\s\S]{0,300}'engine_stuck'/);
   });

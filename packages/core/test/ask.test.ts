@@ -1,17 +1,9 @@
-// 单子里问创始人（#259）的边界表：提问合不合格、他晚到的回答怎么算、记数；引擎存档点交给 Lead 照改的、PR 正文「按推荐先做了」。
-// 含故意造出失败的行。
+// 单子里问创始人（#259）的边界表：提问合不合格、他晚到的回答怎么算。含故意造出失败的行。
+// 记数（tallyAsks）、存档点交给 Lead 照改（lateChanges、changeLine）、PR 正文「按推荐先做了」（assumedLines）：
+// Fusion 的东西，#901 审查时只有测试在用，连同它们的测试一起删了。
 import type { TaskState } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import {
-  type AskFacts,
-  assumedLines,
-  changeLine,
-  checkAsk,
-  lateAnswer,
-  lateChanges,
-  type TaskAsk,
-  tallyAsks,
-} from '../src/ask.ts';
+import { checkAsk, lateAnswer } from '../src/ask.ts';
 
 describe('提问合不合格', () => {
   it('这张单范围内的岔路：推荐的排第一个（卡片上的主按钮），前后空白、重复的选项去掉', () => {
@@ -110,120 +102,5 @@ describe('他晚到的回答', () => {
     ['自己写了一句别的（不是选项）也算选了别的', at('都行，你定', 'running'), 'change'],
   ])('%s', (_name, got, want) => {
     expect(got).toBe(want);
-  });
-});
-
-describe('记数：按推荐先走、事后被改（给检验制度用）', () => {
-  it('分开数：按推荐先做的、其中回了推荐的、改选的；超出范围的、老样子的另算', () => {
-    const asks: AskFacts[] = [
-      { scope: 'task', recommended: '6 位' },
-      { scope: 'task', recommended: '6 位', answer: '6 位' },
-      { scope: 'task', recommended: '6 位', answer: '4 位' },
-      { scope: 'hold', recommended: '阿里云', answer: '腾讯云' },
-      { scope: 'outside', recommended: '不改' },
-      {},
-    ];
-    expect(tallyAsks(asks)).toEqual({ assumed: 4, confirmed: 1, changed: 2, outside: 1, legacy: 1 });
-  });
-
-  it('【失败】说是按推荐先做、却没记推荐的：不算进按推荐先做，算老样子（不拿空的冒充推荐）', () => {
-    expect(tallyAsks([{ scope: 'task' }])).toEqual({
-      assumed: 0,
-      confirmed: 0,
-      changed: 0,
-      outside: 0,
-      legacy: 1,
-    });
-  });
-
-  it('库里的一行（TaskAsk）直接能数', () => {
-    expect(tallyAsks([ask({ answer: '4 位' }), ask({ id: 'b' })])).toMatchObject({ assumed: 2, changed: 1 });
-  });
-});
-
-/** 一条按推荐先做了的提问（验证码几位？推荐 6 位）。 */
-const ask = (over: Partial<TaskAsk> = {}): TaskAsk => ({
-  id: 'a',
-  question: '验证码几位？',
-  options: ['6 位', '4 位'],
-  scope: 'task',
-  recommended: '6 位',
-  applied: false,
-  ...over,
-});
-
-describe('存档点交给 Lead 照改的（lateChanges）', () => {
-  it('他改选了别的、还没照改、没另开后续单的才交；交出去还没照改完的不重复交', () => {
-    const asks = [
-      ask({ id: 'changed', answer: '4 位' }),
-      ask({
-        id: 'hold',
-        scope: 'hold',
-        hold: 'spend',
-        recommended: '阿里云',
-        options: ['阿里云', '腾讯云'],
-        answer: '腾讯云',
-      }),
-      ask({ id: 'handed', answer: '4 位' }),
-      ask({ id: 'confirmed', answer: ' 6 位 ' }),
-      ask({ id: 'unanswered' }),
-      ask({ id: 'applied', answer: '4 位', applied: true }),
-      ask({ id: 'follow-up', answer: '4 位', followUpIssue: 301 }),
-      ask({ id: 'outside', scope: 'outside', answer: '4 位' }),
-      { id: 'legacy', question: '要不要？', options: [], applied: false, answer: '要' },
-    ];
-    expect(lateChanges(asks, ['handed']).map((a) => a.id)).toEqual(['changed', 'hold']);
-  });
-
-  it('【失败】说是按推荐先做、却没记推荐的：不当成改选（不拿空的当推荐比）', () => {
-    expect(lateChanges([ask({ recommended: undefined, answer: '4 位' })])).toEqual([]);
-  });
-
-  it('交给 Lead 的那一句：问的什么、按推荐做的哪个、他改选了哪个；碰人闸的标出来', () => {
-    expect(changeLine(ask({ answer: '4 位' }))).toBe(
-      '问「验证码几位？」：按推荐先做的是「6 位」，创始人改选了「4 位」，照「4 位」改',
-    );
-    expect(
-      changeLine(
-        ask({
-          scope: 'hold',
-          hold: 'spend',
-          recommended: '阿里云',
-          options: ['阿里云', '腾讯云'],
-          answer: '腾讯云',
-        }),
-      ),
-    ).toContain('（碰人闸：花钱）');
-  });
-});
-
-describe('PR 正文「按推荐先做了」一栏（assumedLines）', () => {
-  it('按推荐先做了的都列上，写明他回了没有、回了什么；超出范围的写另开的单；老式的不列', () => {
-    expect(
-      assumedLines([
-        ask({ id: '1' }),
-        ask({ id: '2', answer: '6 位' }),
-        ask({ id: '3', answer: '4 位' }),
-        ask({ id: '4', answer: '4 位', applied: true }),
-        ask({ id: '5', scope: 'hold', hold: 'spend', recommended: '阿里云', options: ['阿里云', '腾讯云'] }),
-        ask({ id: '6', scope: 'outside', question: '要不要顺手改注册页？', followUpIssue: 88 }),
-        ask({ id: '7', scope: 'outside', question: '要不要顺手改注册页？' }),
-        { id: '8', question: '老式的提问', options: [], applied: false },
-      ]),
-    ).toEqual([
-      '验证码几位？ → 先按推荐做了「6 位」，创始人还没回',
-      '验证码几位？ → 按推荐做了「6 位」，创始人确认了',
-      '验证码几位？ → 先按推荐做了「6 位」，创始人改选了「4 位」，下个存档点照改',
-      '验证码几位？ → 先按推荐做了「6 位」，创始人改选了「4 位」，已照改',
-      '验证码几位？ → 先按推荐做了「阿里云」（碰人闸：花钱，合并前等他批），创始人还没回',
-      '要不要顺手改注册页？ → 超出这张单的范围，绕开了，另开一张单等创始人拍（#88）',
-      '要不要顺手改注册页？ → 超出这张单的范围，绕开了，另开一张单等创始人拍（对账时开）',
-    ]);
-  });
-
-  it('问题再长也压成一行、截短', () => {
-    const [line] = assumedLines([ask({ question: `第一行\n${'很长'.repeat(50)}` })]);
-    expect(line).not.toContain('\n');
-    expect(line?.indexOf(' → ')).toBeLessThanOrEqual(60);
   });
 });

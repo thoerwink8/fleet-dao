@@ -1568,7 +1568,12 @@ health_gate() { # 提交号 切之前后端的逐项结果
   if has_service fleet-engine; then check_engine || bad=1; fi
   if has_part web || has_part demo; then check_web "$sha" || bad=1; fi
   if has_part gateway && ((GATEWAY_ACTIVATED)); then check_gateway "$sha" || bad=1; fi
-  check_chain
+  # 本机档没有香港，经香港取 /healthz 那一步没东西可取（取不成只会每次发布都多一项 HTTP 000 的待配，#803）；法国照旧
+  if is_local_profile; then
+    skip_local "没有香港：不经香港取 /healthz（健康页那条路本机档没有）"
+  else
+    check_chain
+  fi
   return "$bad"
 }
 

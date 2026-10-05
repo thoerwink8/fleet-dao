@@ -38,7 +38,17 @@ const result = preparePush({
   repo,
   graph: () => readGraph(repo),
   run(name, args) {
-    const p = bin(name) ?? join(root, 'node_modules', '.bin', name);
+    const p = bin(name);
+    // 启动器不在（工作树没装依赖）就别硬起：Windows 上拿不存在的路径经 cmd 起会得到一句「系统找不到指定的路径」
+    // 加退出码 1，看着像检查没过（#789）。当场按「起不来」报。
+    if (p === null) {
+      return {
+        status: null,
+        stdout: '',
+        stderr: '',
+        error: new Error(`node_modules/.bin 里没有 ${name}，这棵工作树没装依赖`),
+      };
+    }
     // 参数是 prepare-push.ts 里写死的（check . / -b 加 ci-plan 给的项目目录），不含用户输入，shell 起 .cmd 安全
     const r = win
       ? spawnSync([`"${p}"`, ...args].join(' '), {

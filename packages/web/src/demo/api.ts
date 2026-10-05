@@ -25,6 +25,10 @@ export function createDemoApi(inner: MockApi): FleetApi {
     authConfig: () => Promise.resolve({ devLogin: false }),
     devLogin: noLogin,
     feishuAccess: noLogin,
+    passwordLogin: noLogin,
+    // 账密只在正式驾驶舱里有：演示版没有这个模块
+    credentials: () => Promise.reject(hidden('账密设置')),
+    updateCredentials: () => Promise.reject(hidden('账密设置')),
     logout: () => Promise.resolve(),
     async me() {
       const me = await inner.me();
@@ -33,26 +37,31 @@ export function createDemoApi(inner: MockApi): FleetApi {
     repos: () => inner.repos(),
     // 演示版路由表里没有新主页（/），这里照样满足接口（将来的演示「项目群」会用）。
     home: () => inner.home(),
+    // 环境页只在正式驾驶舱里有（演示版没有这个模块，导航不给、路由表也不放）：
+    // 它露的是这台机器的环境名、在用的版本、在跑几个会话（R10：演示版不露机器名、版本号、会话数）。
+    env: () => Promise.reject(hidden('环境')),
     board: async (repoId) => redactBoard(await inner.board(repoId), detailLevel()),
     task: async (taskId) => redactTaskDetail(await inner.task(taskId), detailLevel()),
-    async timeline(taskId, page) {
-      if (detailLevel() !== 'process') throw hidden('任务的过程');
-      return inner.timeline(taskId, page);
-    },
-    async runSteps(runId) {
-      if (detailLevel() !== 'process') throw hidden('步骤清单');
-      return inner.runSteps(runId);
-    },
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
-    answerAsk: (askId, answer) => inner.answerAsk(askId, answer),
+    async legacyAsks() {
+      need('notifications', '通知');
+      return inner.legacyAsks();
+    },
+    async closeAsk(askId) {
+      need('notifications', '通知');
+      return inner.closeAsk(askId);
+    },
     routing: () => inner.routing(),
     // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
     routingLayers: () => Promise.reject(hidden('路由')),
     // 思考档位页也只在正式驾驶舱里有：演示版看不到、更改不了。
     routingEfforts: () => Promise.reject(hidden('思考档位')),
     updateRouteEffort: () => Promise.reject(hidden('思考档位')),
-    updateChannel: (channelId, body) => inner.updateChannel(channelId, body),
     pools: () => inner.pools(),
+    async poolHolds() {
+      need('settings', '设置');
+      return inner.poolHolds();
+    },
     async jobs() {
       need('schedules', '定时任务');
       return inner.jobs();

@@ -21,10 +21,10 @@
 | A | 推送前预检：按改动跑 CI 上那几样确定的检查（biome/tsc），红了当场修 | **已合（#688）**，Windows 真推里验过 |
 | B | 合并 CI 小任务（biome/tsc/docs/hygiene 四台并成一个 `lint`） | **已合（#688）**：一个 PR 约 14→11 个任务；各步 continue-on-error + 汇总步核对（保住 #566 的「biome 红不吃掉 tsc」）；汇总脚本被测试真跑。**没在真 GitHub 上跑过**：`lint` 里 working-directory / pnpm/action-setup / setup-node 缓存路径几处，第一次 PR 要盯它起不起得来；`lint` 约 90 秒贴着最慢测试台 87 秒，若成瓶颈把 docs 挪回独立 job |
 | C | 主线只留最新一轮（连续合几个取消前面的） | **不做**（第二轮实测后维持这个结论）：D 的区间口径下每轮主线已经只跑增量，取消前一轮的收益小；而取消会让自动发布闸门（认「这个提交自己那次绿」）断，要先改闸门认「被绿区间覆盖」才能开。真要开，按当时的实测另开单 |
-| D | 主线跑「上次绿…现在」的累计改动 | **前半已合（#688）、主线真跑通过**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动 |
+| D | 主线跑「上次绿…现在」的累计改动 | **前半已合（#688）、主线真跑通过**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动。**同树复用（第三轮，创始人 2026-10-03「全程你拍板」）**：主线这次提交的树和某次成功的 PR 检查测的是同一棵、那次比的基准树又正是「上次真绿的头」的树 → test、web、deploy 不再重测（lint 照跑，check 照出结论）；对不上、查不到、读不到都照旧按区间全跑 + ::warning::，见「D 的细节」第 6 点 |
 | E | PR 的测试分片结果缓存 | **已合（#688）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
 | F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已合（#688），实测 login-user 94→44s**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数后来在 CI 的 ⏱ 行量到：慢的根子是建测试账号时整份拷 `/etc/skel` 里 801M 工具链，瘦身后 login-user 49→3 秒、cli-tools 99→6 秒（#699），分台已按实测重排（#698），见第二轮结果 |
-| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已合**（第二轮）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从主线日志刷新）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
+| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已合**（第二轮）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从最近几轮真跑了测试的 CI 日志取每个文件的中位数刷新，第四轮起，见 `specs/901-项目瘦身与提速/CI耗时实测.md`）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
 | H | 每 job 约 25 秒固定开销（checkout + setup-node + pnpm install） | 待做（在 B 之后逐项量） |
 
 ## 关键事实（都查过，别再重查）
@@ -34,7 +34,7 @@
 - 慢的不是机器，是「红了 → 改 → 重推 → 再跑一遍」这个来回（A 和 E 就是冲它去的）。
 - **主线的 CI 结论是自动发布的闸门**：`deploy/france/auto-release/lib.mjs` 的 `ciVerdict` 读 `head_sha === <标记提交>` 的那次 push run，`success` 才发；`cancelled` 判红。所以「主线只留最新」不能只加 `cancel-in-progress: true`，否则被取消的提交永远没有结论、版本标记正好指向它时整版发不出去。
 - **正确的口径**：每次主线运行的区间是 `[上次真绿的头, 这次的头]`，被取消的轮次不算基准，改动被后一轮的区间吃掉；自动发布改判「这个提交被某个绿区间覆盖过」。方案细节（含 bisect 定位、fail loud 三条路径）见本文件末尾「D 的细节」。
-- GitHub 的缓存**按 ref 分作用域**：PR 跑出来的缓存只有这个 PR 自己的重跑读得到。所以 E 只在 PR 的 test job 上做，**主线那条绝不做**（主线要发布背书，一个测试都不许跳）。
+- GitHub 的缓存**按 ref 分作用域**：PR 跑出来的缓存只有这个 PR 自己的重跑读得到。所以 E 只在 PR 的 test job 上做，**主线那条绝不用这个缓存**（缓存键相同只说明输入没变，不是「这棵树在主线上被测过」）。主线能不重测只有一条路：D 的同树复用——测的是同一棵树、同一个基准区间、那次 PR 检查真跑过且整轮成功，由那次真跑背书；旧结论「主线一个测试都不许跳」据此改为「主线的每个测试要么真跑，要么由同树的成功 PR 检查背书，对不上就全跑」（创始人 2026-10-03「全程你拍板」）。
 
 ## 真实 CI 数字（#688 合进主线后，2026-10-03 主线 ci.yml 一轮 + PR 两轮）
 
@@ -83,13 +83,61 @@
 
 **还在的慢处**（都不到「每轮再省 5 秒以上」的值得做门槛，所以停在这）：lint 29 秒（装依赖 5、tsc 10–17）；改到 ci.yml/ci-plan.ts/deploy/ 的 PR 照旧全跑一遍（约 2 分钟，deploy 是大头）；这类 PR 还要过第二意见（按路径审的那几个文件，ci.yml 的纯提速改动已不用审）。
 
-## D 的细节（方案，待实现）
+## 第三轮（创始人 2026-10-04 夜「按照你推荐去做，自我验证，持续优化到最佳」：用的机器越少越好，测试在不损失性能的前提下检测量越少越好）
+
+**起点（2026-10-04 夜实测，最近 60 轮已跑完的 ci.yml，不含被取消的）**：前三轮的验收目标早已达到（一轮 35–121 秒，第一个任务几乎不排队，中位 2–3 秒、最多 58 秒），所以这一轮的目标换成「少占免费档那 20 个并发槽」和「不降低发布背书的前提下缩短主线那一轮」。
+
+| 事件 | 轮数 | 墙钟中位 / 最大 | job 数中位 | 机器分钟 中位 / 合计 |
+|---|---|---|---|---|
+| 主线推送 | 28 | 92 秒 / 157 秒 | 11 | 7.0 / 189 |
+| PR | 32 | 86 秒 / 148 秒 | 10 | 6.8 / 186 |
+
+**怎么量**（`pnpm ci:stats`，只读，用本机登录好的 `gh`）：`pnpm ci:stats --workflow ci.yml --n 60`，可加 `--event push|pull_request`、`--since <ISO 时间>` 只看改动合并之后的轮次、`--workflow merge-gate.yml` 量别的工作流。数据来自 `GET /repos/{r}/actions/workflows/{文件}/runs?status=completed` 和 `GET /actions/runs/{id}/jobs?filter=latest`：墙钟 = `updated_at − run_started_at`；排队 = 第一个 job 的 `started_at − created_at`；机器分钟 = 各 job（不含 skipped）`completed_at − started_at` 之和。被取消的轮次不算；任何一个时间读不出就报错退出 2，不当 0 秒。
+
+**第一块：少占并发槽的两处小改（一个 PR）**
+
+- 合并闸 `merge-gate.yml`：原来每次都装 pnpm、带缓存的 setup-node、`pnpm install --filter`，只为让改了已有 `ci.yml` 的 PR 能解析 YAML。实测 pull_request_target 每轮 job 中位 15 秒（最近 35 轮合计 534 秒）、status 事件 18 秒，其中这几步约 6–10 秒。改成：先 `merge-gate.ts --needs-yaml` 查实「这次要算的 PR 里没有改已有 ci.yml 的」才不装；认不出事件、读不到文件列表、清单读不出、文件数对不上一律装（`workflowParseNeeded`，各配一条故意造出失败的测试）；这一步自己崩了没写出输出，工作流按「不是 false 就装」处理。判定本身（`gatePr`）一个字没改。
+- `debt.yml`：两个 job 是 `debt-docs`（只看文件）和 `debt-live`（读 GitHub 现状、给单子留言）。推主线时 `debt-live` 不再起，只留每天凌晨一次和手动运行：它看的是单子开没开，和这次推的代码无关。实测推主线时这两个 job 各约 7 秒（最近 40 次推送合计 572 秒），去掉后者每次推送少一个 job、少约 7 秒机器时间。
+- 改后实测数字：合并闸那一半要等这个 PR 合进主线才生效（`pull_request_target` 跑的是主线上的工作流），改后的量在下一个 PR 的「第三轮结果」里补，量法同上（`pnpm ci:stats --workflow merge-gate.yml --since <合并时间>`）。
+
+**第二块：主线同树复用（一个 PR，方案和判法见下面「D 的细节」第 6 点）**：主线这次提交的树和某次成功的 PR 检查测的是同一棵、基准也是上次真绿的头 → test、web、deploy 不重测。命中率实测（最近 49 个主线合并）：树口径 43 个（88%），严格口径 37 个（76%）。改后的实测数字（命中的主线轮次 job 数 / 机器分钟 / 墙钟）合并后用 `pnpm ci:stats --workflow ci.yml --event push --since <合并时间>` 量，写在这里。
+
+**第三块：release 工作流对普通 PR 不起机器 + lint 并行三样各记秒数（#885）**：`release.yml` 每个 PR 合并都触发，普通 PR 要起一台机器、检出、装 Node 才走到 classify 判 noop；近 30 次中位 12 秒、合计 4 机器分钟。job 级 `if` 只挡 classify 本来就判 noop 的两种（没合并、head 不带 `release/`），带 `release/` 的照起（版本号贴错、base 不对仍在 classify 报红）、手动补跑照起；`test/publish.test.ts` 把这句 if 和 `classifyPullRequestClosed` 逐个对。lint 里并行的三样现在各自把秒数写进日志分组标题。
+
+## 第三轮结果（2026-10-04 夜，#876、#881、#885；数字都是 `pnpm ci:stats`、`gh api` 现拉的，量法见上）
+
+| 做的 / 量的 | 改前 | 改后 | 结论 |
+|---|---|---|---|
+| 主线同树复用（#881） | 主线一轮中位 90 秒、11 个 job、7.0 机器分钟（23 轮） | 命中的轮次（#882）：3 个 job、1.0 机器分钟、墙钟 54 秒；未命中的（#881 自己，PR 检查是声明上线前跑的，按预期 warning 后全跑）同改前：15 个 job、13.2 机器分钟、102 秒 | **做了，有效**。命中率按最近 49 个主线合并估：树口径 88%、严格口径 76%；真主线上第一例命中验证过（check 绿，test/web/deploy 为 skipped） |
+| 合并闸只在改了 ci.yml 时装依赖（#876） | pull_request_target 每轮 job 中位 15 秒（35 轮）、status 18、push 12 | 不碰 ci.yml 的 PR：12、8、9 秒（中位 9）；碰 ci.yml 的仍装：13、15 | 每轮省约 6 秒、机器时间 −40%；判定一个字没改 |
+| debt 推主线只留看文件那一半（#876） | 推主线 2 个 job，每个中位 7 秒 | 推主线 1 个 job（5–7 秒） | 每次推送少 1 个 job、少约 7 秒 |
+| release 对普通 PR 不起机器（#885） | 每个合并起 1 个 job，中位 12 秒（30 次合计 4 机器分钟） | 普通 PR 合并起 0 个 job | 每次合并少 1 个 job、约 12 机器秒；合并后看下一个普通 PR 的 release 运行是 skipped |
+| a) tsc 增量缓存 | lint 里并行三样实测（本 PR 的 CI）：biome 6 秒、**tsc 19 秒**、docs 14 秒；整个 lint job 34 秒 | 没做 | **不做**：tsc 是三样里最慢的，但本机量冷 7.1 / 暖（tsbuildinfo 在、全部源文件时间刷新，模拟新检出）1.9 秒，按比例 CI 上 19 秒最多压到约 5 秒，之后最慢的就是 docs 14 秒，lint 这一步最多省 5 秒、再扣缓存取存各约 1–2 秒，净省 3–4 秒，**低于「每轮再省 5 秒」的门槛**；还要给 `tsc -b` 引入「读上一次的类型信息」这条增量路径，底线上是多一个可能假绿的口子。以后 docs 那份（agents 的规则测试）变快、tsc 又成为独占的瓶颈再重开 |
+| b) 分片结果缓存主线写、PR 读 | 现在只有同一个 PR 重推命中 | 没做 | **不做**：结构上首次推送命中 ≈ 0。装箱只装「受影响单元」的测试文件，一个单元受影响就是它的源码闭包里有改动，而缓存键盖住这整个闭包，所以一定和主线上次写的不同；全跑（改根配置、工作流）时键里也盖着根配置和工作流。主线还有 88% 的轮次根本不跑测试（同树复用），本来也写不出新缓存 |
+| c) 每台固定开销 | 文档里写的约 25 秒 | 实测（最近 20 个 PR 轮的各 job 分步中位）：Set up job 1–2、checkout 2、pnpm/action-setup 1、setup-node（含 pnpm 缓存）4、pnpm install 2–4，合计约 10–12 秒/台 | **没有可省的**：每步 1–4 秒、单步都低于 5 秒；去掉 pnpm 缓存冷装，lint 那一台实测下载安装也要 3 秒，净省约 0；少分几台能省机器但会拖墙钟（把每台目标从 50 秒提到 90 秒，8 台降到约 5 台，省约 36 机器秒、最慢一台多约 40 秒），不值 |
+| d) CI 绿到合并的滞后（CLEAN→MERGED） | 最近 30 个已合并 PR：到合并的滞后 | 中位 8 秒、90 分位 28 秒；最大 611 秒是单个离群（没有可查的原因，多半是自动合并开晚了） | **不可压**：这是 GitHub 自动合并自己的延迟（最后一个必过项变绿到合并），不在我们的工作流里；没有 job 在这里等 |
+| e) 第二意见一推送就自动触发 | 现在：开 PR 后由 AI 手动跑 `second-opinion.mjs --pr <号> --high-risk`；实测一轮 30–510 秒（#876 三轮：约 40、510、约 40 秒；#881 一轮；#885 一轮约 30 秒），碰安全的 PR 合并时间基本由它定 | 没改 | **建议，不在这个 PR 做（要改标准）**：做法是加一个调工具后的钩子（`agents/hooks/`），见到 `gh pr create` 或对已有 PR 的 `git push` 成功、且 PR 改到 `high-risk-paths.json` 里没标 `after-merge` 的路径时，后台起 `second-opinion.mjs`，并在头变了时重起。它会改 `agents/` 下的钩子登记和 `agents/test/rules/` 钉子，属于「改标准」，等创始人点头；做成后省下的是「开 PR 到想起来跑」那段（目前我是开完 PR 就手动后台跑，实际没有空等，但换会话、换人这段会丢）。不接 CI：第二意见要本机登录好的 Mirasim，CI 里没有 |
+
+**停的依据**：到这里每一项要么已做、要么「每轮再省不到 5 秒」（tsc 缓存净省 3–4 秒、固定开销每步 1–4 秒、滞后 8 秒且在 GitHub 一侧）、要么「要改标准」（第二意见自动触发）、要么「要花钱」（更大的机器、付费功能：一律没碰）。主线一轮现在的下限是 lint 那台（约 35 秒）加 changes、check，命中同树复用时墙钟 54 秒；PR 一轮 30–90 秒。下一个能想到的办法（把 docs 并进别的 job、web 打包并进 lint、tsc 缓存）每轮都省不到 5 秒或增加假绿口子，按第二轮定下的停的标准不做；谁要重开，先 `pnpm ci:stats` 量。
+
+## 第四轮（母单 #901，创始人 2026-10-05「项目臃肿+ci流程慢」）
+
+数字、做法、量过没接的都在 `specs/901-项目瘦身与提速/CI耗时实测.md`。一句话：全量 PR 最慢的测试台是整轮的 84%，原因是耗时表过期（96 个新文件按 98 毫秒估），刷新后最慢台 87→75 秒；并行进程数、台内排序、Temporal 服务端下载都量了、没有收益；多个会话同时开 PR 时慢的是免费档 20 个并发槽排队和主线复用被「合并前主线又动过」打掉，不是单个 job。
+
+## D 的细节（方案，已实现，见第 6 点）
 
 1. `packages/conventions/src/bin/ci-plan.ts`：`event === 'push'` 时也走 diff——base 不取 `origin/<目标分支>`，而是**上一次主线绿的那次 ci.yml run 的 head_sha**（从 GitHub API 现读，不新存状态）。base 读不到 → 退回全跑 + 明确报警，不当绿。
 2. `.github/workflows/ci.yml`：`changes` job 增加一步查这个 SHA；`concurrency.cancel-in-progress` 改成 `true`（push 也取消）。**注意 `packages/conventions/test/ci-plan.test.ts` 有两条钉子测试钉着这两处，必须一起改。**
 3. `deploy/france/auto-release/lib.mjs` 的 `ciVerdict`：加第二个判据——自己那次是 `cancelled`/没有时，找一次 `success` 且区间覆盖这个提交的运行；覆盖者找不到 → 维持现状（不发、报警）。要在 CI 侧把 base 写到这个 tip 提交的 commit status 里（现有 merge-gate 已经在写 commit status，机制现成，需要 `statuses: write` 权限）。
 4. 红了定位：先重跑一次同区间（偶发），还红再二分。主线 squash-only，一个提交就是一个 PR，`gh api .../commits/<sha>/pulls` 直接拿到 PR 号。
 5. 仍然必须全量：所有 `PATH_RULES` 里 `full` 的那几条（根配置、锁文件、`.github/workflows/`、`packages/shared/`、夹具、`deploy/`、认不出的路径）——区间口径下要对**整段区间的每个文件**跑一遍。
+6. **同树复用（第三轮，已实现）**：主线 changes job 在算计划前跑 `main-reuse.ts`，找一次「树 == 这次主线提交的树、基准树 == 上次真绿的头的树、整轮 success」的 PR 检查，找到就把 test、web、deploy 标成不重测。
+   - **为什么同树同结果**：PR 那一轮按「基准树 → 合并树」这段改动选测试；主线按「上次真绿的头 → 这次提交」这段改动选。两段的两端树都相同，改动文件集就相同，选的测试、分的台、跑的环境（同一份 ci.yml 和 ci-plan.ts，它们就在这棵树里）都相同；那次 PR 整轮 success（check 必过 job 绿）就是这些测试在这棵树上真跑过。
+   - **怎么拿「某次成功的 PR 检查测的是哪棵树」**：PR 的合并提交（refs/pull/N/merge）合并后就没了，事后查不到；所以 PR 那一轮 changes job 里留一个步骤名 `已测的树 tree=<HEAD 的树> base=<HEAD^1 的树>`（HEAD 是 GitHub 造的合并提交，HEAD^1 是 PR 当时的目标分支头），jobs 接口原样给出步骤名，只读令牌就查得到，不需要任何写权限。主线这边：`GET /commits/<sha>/pulls` 找合并出这个提交的 PR（`merge_commit_sha == sha`）→ 它的头 → `GET /actions/workflows/ci.yml/runs?event=pull_request&head_sha=<头>&status=success` → 每次运行的 jobs（`filter=latest`）：`check`、`changes` 各恰好一个且 success，`changes` 里声明恰好一条且两个树都和主线这一轮**自己现算**的（`git rev-parse HEAD^{tree}`、`<基准>^{tree}`）相等。ci-plan 入口还会再核一遍这两棵树。
+   - **什么条件下树相等**：PR 的合并树 = PR 头合进检查当时的目标分支头；主线的 squash 提交 = PR 头应用到合并时的主线头。两者相等就是「PR 检查之后主线没有别的提交进来、或进来的没有改变树」；中间插了别的提交，树不等或基准树不等，就不复用。实测最近 49 个主线合并里 43 个（88%）满足树口径，37 个（76%）连提交号也一致。
+   - **跳过的 job 在发布闸眼里**：发布闸（`deploy/france/auto-release/lib.mjs` 的 `ciVerdict`）只读这次 push 运行的整体 conclusion，job 被 skipped 不影响 success；真正核「该跑的跑了、该跳的跳了」的是 check 里的 `ci-plan.ts ciVerdict`：复用时 plan 带 `reused` 记录，test、web、deploy 必须是 skipped（真跑了或红了反而不过），`reused` 只认 `CI_EVENT=push`，`changes` 的 `reused` 输出必须和 plan 里的运行号一致。所以发布闸不用改，仍认「这个提交自己那次 push 运行 success」，且这次 success 的背后是同树的真跑。
+   - **fail loud 三条路径（每条一条故意造出失败的测试，`test/main-reuse.test.ts`）**：对不上（树、基准树、没有声明、声明多于一条或认不出、check/changes 不是恰好一个成功的 job、PR 没成功过、合并提交对不上 PR）→ 不复用、::warning::、按区间全跑；查不到（没有基准、没有对应 PR）→ 同上；读不到（接口 4xx/5xx、没令牌、回的样子认不出、git 读不了树）→ 同上，绝不当绿。参数不对退出 2。
+   - **信任**：声明由 PR 那轮的代码写，和「PR 的测试由 PR 的代码跑」是同一个信任面；它只在整轮 success 时才被认，且和主线现算的树对得上才用。改 ci.yml 的 PR 本来就要看结构比对、碰信任的要第二意见。
 
 ## 上线的含义
 

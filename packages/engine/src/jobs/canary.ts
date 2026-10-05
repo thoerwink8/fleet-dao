@@ -12,6 +12,7 @@
 //   真的 buildTaskBrief 核过，改正文要让那条测试照样过；「怎么算做完」下面只放验收条，别的话会被当成一条。
 // - 任务工作流走到哪只有 Temporal 一份（taskStatus 查询）；库里的任务行只在开工、停下等人、做完、放弃时写，工作流不在跑了才拿它兜。
 // - 判走到哪一步只在 canaryNext（纯函数），读东西只在 observe。
+
 import { currentVersion } from '@fleet-dao/core';
 import {
   CANARY_MAX_MINUTES,
@@ -26,11 +27,12 @@ import {
   type ScheduleResult,
 } from '@fleet-dao/db';
 import type { TaskState } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CANARY_CHECK_FAILURE_LIMIT, CANARY_POLL_SECONDS } from '../contract.ts';
 import type { TaskPhase } from '../task-contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { clip, message, stamp, type WorkflowState } from './reconcile-common.ts';
+import { clip, stamp, type WorkflowState } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查）。 */
 export const CANARY_JOB = {
@@ -52,6 +54,11 @@ export const CANARY_OFFSET_MINUTES = 26;
 export { CANARY_CHECK_FAILURE_LIMIT, CANARY_MAX_MINUTES, CANARY_POLL_SECONDS, CANARY_RUN_TIMEOUT_MINUTES };
 /** 断了的报警只有一条（同一个键）：下一轮再断原地更新、处理过的重新打开；通过了自己撤。 */
 export const CANARY_ALERT_KEY = 'canary:broken';
+/**
+ * 收前几轮留下的单时，它开的 PR 没关掉的报警（#336）：和断了的报警分开一个键——下一轮通过不该把它撤掉，
+ * 只有这条没收干净的单后来真把 PR 关掉了（或没有 PR 了）才撤。
+ */
+export const CANARY_LEFTOVER_PR_ALERT_KEY = 'canary:leftover-pr';
 /** 撤报警、放弃前几轮留下的任务、记操作记录时的「谁」。 */
 export const CANARY_ACTOR = 'engine:canary';
 /** 一轮最多收掉前几轮留下的几张单（多出来的下一轮接着收）。 */
@@ -504,6 +511,11 @@ export interface CanaryGitHub {
   }): Promise<{ number: number; url: string }>;
   issueState(issueNumber: number): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
   closeIssue(issueNumber: number, comment: string): Promise<void>;
+  /**
+   * 这张单开过的 PR（引擎分支 fleet/<单号>-t…）里还开着的关掉，回关了哪几个：已合并、已关的不动，没有 PR 回空。
+   * 列不出、关不掉照抛（调用方报警，不当成收干净了）。
+   */
+  closePulls(issueNumber: number, comment: string): Promise<number[]>;
 }
 
 export interface CanaryDeps {
@@ -524,9 +536,9 @@ export interface CanaryDeps {
   /** 驾驶舱读到的这张单（后端 Store 的 getTask、getPullRequest）；prNumber 还不知道是 null（只读任务）。 */
   board(taskId: string, prNumber: number | null): Promise<CanaryBoard>;
   alerts: {
-    raise(input: { title: string; body: string; taskId: string | null }): Promise<void>;
-    /** 撤掉断了的那条（没开着的不管）。 */
-    resolve(why: string): Promise<void>;
+    raise(input: { title: string; body: string; taskId: string | null; key?: string }): Promise<void>;
+    /** 撤掉一条（没开着的不管）；不给 key 撤的是断了的那条（CANARY_ALERT_KEY）。 */
+    resolve(why: string, key?: string): Promise<void>;
   };
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -633,7 +645,7 @@ async function concludeAbandoned(deps: CanaryDeps, at: Date): Promise<string[]> 
       at,
     });
   } catch (err) {
-    return [`没补记成没收尾的几轮：${message(err)}`];
+    return [`没补记成没收尾的几轮：${errMessage(err)}`];
   }
   const notes: string[] = [];
   for (const r of lost) {
@@ -642,13 +654,17 @@ async function concludeAbandoned(deps: CanaryDeps, at: Date): Promise<string[]> 
       await deps.runs.finish(r.scheduleRunId, { outcome: 'failed', why: CANARY_ABANDONED_WHY }, at);
       notes.push(`补记了没收尾的一轮${which}：没跑成`);
     } catch (err) {
-      notes.push(`没收尾的一轮${which}补记了，它在 schedule_runs 的那一行没记成没跑成：${message(err)}`);
+      notes.push(`没收尾的一轮${which}补记了，它在 schedule_runs 的那一行没记成没跑成：${errMessage(err)}`);
     }
   }
   return notes;
 }
 
-/** 收掉前几轮留下的单：放弃它的任务工作流、关单（不做了）。收不掉的写进备注，不挡这一轮。 */
+/**
+ * 收掉前几轮留下的单：放弃它的任务工作流、关单（不做了）、连它开的、还开着的 PR 一起关（#336：不关的话巡检仓里 PR 一轮攒一个）。
+ * 收不掉的写进备注，不挡这一轮；关单成了但 PR 没关掉的，推一条单独的报警（CANARY_LEFTOVER_PR_ALERT_KEY）、不记「收过了」，
+ * 下一轮这张单还在留下的单里，接着关；一轮里没有任何一张收不掉才撤这条报警。
+ */
 async function cleanLeftovers(
   deps: CanaryDeps,
   repo: { owner: string; name: string },
@@ -659,11 +675,15 @@ async function cleanLeftovers(
   try {
     left = await deps.record.leftovers(slugOf(repo));
   } catch (err) {
-    return [`没查成前几轮留下的单：${message(err)}`];
+    return [`没查成前几轮留下的单：${errMessage(err)}`];
   }
+  const pullFailures: string[] = [];
+  let anyFailed = false;
+  let tried = 0;
   for (const r of left) {
     if (r.issueNumber === null) continue;
     const n = r.issueNumber;
+    tried += 1;
     try {
       await deps.workflows.stop(
         taskWorkflowId(repo, n),
@@ -676,13 +696,66 @@ async function cleanLeftovers(
           `巡检下一轮开始了（${stamp(at)}），这张是上一轮断了留下的，收掉。断在哪、为什么见 fleet-dao 的驾驶舱（全流程巡检）和当时的卡住报警。`,
         );
       }
-      await deps.record.cleaned(r.id, at);
-      notes.push(`收掉了上一轮留下的 #${n}`);
     } catch (err) {
-      notes.push(`上一轮留下的 #${n} 没收掉：${message(err)}`);
+      anyFailed = true;
+      notes.push(`上一轮留下的 #${n} 没收掉：${errMessage(err)}`);
+      continue;
+    }
+    let closed: number[];
+    try {
+      closed = await deps.github.closePulls(
+        n,
+        `巡检下一轮开始了（${stamp(at)}），这个 PR 是上一轮巡检单 #${n} 断了留下的，随单收掉（不合并）。`,
+      );
+    } catch (err) {
+      anyFailed = true;
+      pullFailures.push(`#${n}：${errMessage(err)}`);
+      notes.push(`上一轮留下的 #${n} 已关，但它开的 PR 没关掉：${errMessage(err)}`);
+      continue;
+    }
+    try {
+      await deps.record.cleaned(r.id, at);
+      notes.push(
+        closed.length > 0
+          ? `收掉了上一轮留下的 #${n}（连它开的 PR ${closed.map((p) => `#${p}`).join('、')} 一起关了）`
+          : `收掉了上一轮留下的 #${n}`,
+      );
+    } catch (err) {
+      anyFailed = true;
+      notes.push(`上一轮留下的 #${n} 没收掉：${errMessage(err)}`);
     }
   }
+  // 留下的单一张都没动过（空的）不碰报警：这条报警对应的单还留着没收干净时，它一定还在名单里
+  if (tried > 0) notes.push(...(await syncLeftoverPullAlert(deps, pullFailures, anyFailed)));
   return notes;
+}
+
+/** 收前几轮留下的单时，PR 没关掉的报警：有就推（同一个键，原地更新），一轮里什么都没收不掉才撤。推不出、撤不掉写进备注。 */
+async function syncLeftoverPullAlert(
+  deps: CanaryDeps,
+  pullFailures: readonly string[],
+  anyFailed: boolean,
+): Promise<string[]> {
+  try {
+    if (pullFailures.length > 0) {
+      await deps.alerts.raise({
+        key: CANARY_LEFTOVER_PR_ALERT_KEY,
+        title: '全流程巡检收掉上一轮留下的单时，没关掉它开的 PR',
+        body: [
+          `巡检仓里这些单已经关了，但它们开的 PR 关不掉（每一轮开头会再试，关掉了这条自己撤）：`,
+          ...pullFailures,
+        ].join('\n'),
+        taskId: null,
+      });
+    } else if (!anyFailed) {
+      await deps.alerts.resolve('上一轮留下的单连带的 PR 都关掉了', CANARY_LEFTOVER_PR_ALERT_KEY);
+    }
+    return [];
+  } catch (err) {
+    return [
+      `${pullFailures.length > 0 ? 'PR 没关掉的报警推不出' : 'PR 没关掉的报警撤不掉'}：${errMessage(err)}`,
+    ];
+  }
 }
 
 /**
@@ -695,7 +768,7 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
   try {
     runId = await deps.runs.start(CANARY_JOB.id, startedAt);
   } catch (err) {
-    throw new CanaryNotRecordedError(`全流程巡检记不上开始：${message(err)}`);
+    throw new CanaryNotRecordedError(`全流程巡检记不上开始：${errMessage(err)}`);
   }
   const repo = 'error' in deps.repo ? null : deps.repo;
   let canaryRunId: number;
@@ -706,7 +779,7 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
       at: startedAt,
     });
   } catch (err) {
-    const why = `全流程巡检记不上这一轮：${message(err)}`;
+    const why = `全流程巡检记不上这一轮：${errMessage(err)}`;
     await deps.runs.finish(runId, { outcome: 'failed', why }, deps.now());
     throw new CanaryNotRecordedError(why);
   }
@@ -737,7 +810,7 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
     }
     milestone = current.milestone;
   } catch (err) {
-    return failed(`读不到巡检仓还开着的里程碑：${message(err)}`);
+    return failed(`读不到巡检仓还开着的里程碑：${errMessage(err)}`);
   }
   let issue: { number: number; url: string };
   try {
@@ -747,7 +820,7 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
       milestone: milestone.number,
     });
   } catch (err) {
-    return failed(`在巡检仓开不了单（挂当前版本「${milestone.title}」）：${message(err)}`);
+    return failed(`在巡检仓开不了单（挂当前版本「${milestone.title}」）：${errMessage(err)}`);
   }
   const at = deps.now().toISOString();
   const state: CanaryState = {
@@ -783,7 +856,7 @@ async function saveProgress(deps: CanaryDeps, state: CanaryState): Promise<void>
     });
   } catch (err) {
     // 进度只给人看：写不进不挡巡检，下一回再写
-    deps.log('warn', '全流程巡检的进度没写进库', { error: message(err) });
+    deps.log('warn', '全流程巡检的进度没写进库', { error: errMessage(err) });
   }
 }
 
@@ -843,12 +916,12 @@ export async function checkCanaryRound(deps: CanaryDeps, state: CanaryState): Pr
     obs = await observe(deps, state);
   } catch (err) {
     const failures = state.checkFailures + 1;
-    deps.log('warn', '全流程巡检这一回没查成', { failures, error: message(err) });
+    deps.log('warn', '全流程巡检这一回没查成', { failures, error: errMessage(err) });
     if (failures < CANARY_CHECK_FAILURE_LIMIT) {
       return { done: false, state: { ...state, checkFailures: failures } };
     }
     const name = CANARY_STAGE_NAMES[state.stage] ?? state.stage;
-    const why = `巡检连着 ${failures} 回没查成（停在「${name}」）：${message(err)}`;
+    const why = `巡检连着 ${failures} 回没查成（停在「${name}」）：${errMessage(err)}`;
     return {
       done: true,
       run: await conclude(deps, base, 'not_run', state.stage, why, state.steps),

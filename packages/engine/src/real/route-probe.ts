@@ -6,6 +6,7 @@
 // Claude 还不存会话记录（每 15 分钟一次，不往会话用户家里攒；cursor 没有这个开关）。
 // 要人修的整池问题（登录失效、设备被撤销、封号、欠费）和会话同一个做法：写 pool-hold:<池> 那条「要人拍」，选路整池避开；
 // 探通了就撤掉它。探的时候顺带读到的额度也记账（和会话一样 complete=false）。
+
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
@@ -27,6 +28,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
 import type { ProbeAttempt, Prober, ProbeTarget, RouteProbeJobDeps } from '../jobs/route-probe.ts';
@@ -54,7 +56,6 @@ export const PROBE_LIMITS = { startupMs: 150_000, wallClockMs: 200_000, idleMs: 
 /** 探针会话只起一个执行体，用不了干活会话那么多内存。 */
 export const PROBE_SCOPE_LIMITS = { memoryHigh: '1024M', memoryMax: '1536M', memorySwapMax: '0' } as const;
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 /** reclaude 没有有效登录时 stderr 里的那一句（之后它开始设备授权、一直等，直到起不来被强杀）。 */
 const RECLAUDE_NO_LOGIN = /^.*no valid login detected.*$/im;
@@ -182,7 +183,7 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
     try {
       if ((await deps.trees.ownerOf(dir)) !== user) await deps.trees.adopt(dir, user);
     } catch (err) {
-      return { kind: 'failed', detail: `探针的工作目录 ${dir} 没交给 ${user}：${message(err)}` };
+      return { kind: 'failed', detail: `探针的工作目录 ${dir} 没交给 ${user}：${errMessage(err)}` };
     }
     const runId = `probe-${randomUUID()}`;
     let report: HostReport;
@@ -211,7 +212,7 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
         deps.onRateLimit ? { onRateLimit: (reading) => deps.onRateLimit?.(t, reading) } : {},
       );
     } catch (err) {
-      return { kind: 'failed', detail: `起会话之前就被拦下了：${message(err)}` };
+      return { kind: 'failed', detail: `起会话之前就被拦下了：${errMessage(err)}` };
     }
     return probeVerdict(report, t, {
       machine: deps.machine,
@@ -303,7 +304,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
         complete: false,
         windows,
       }).catch((err: unknown) =>
-        log('warn', '路由探针读到的额度没记上', { poolId: t.poolId, error: message(err) }),
+        log('warn', '路由探针读到的额度没记上', { poolId: t.poolId, error: errMessage(err) }),
       );
     },
     ...(w.helper ? { helper: w.helper } : {}),

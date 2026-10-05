@@ -4,6 +4,8 @@ import type { ReactNode } from 'react';
 import { brand } from '#brand';
 import { usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
+import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
+import { OrgSwitchBanner } from '../components/org-switch';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { QuotaCell, quotaValue } from '../components/quota';
 import { Badge } from '../components/ui/badge';
@@ -99,6 +101,8 @@ export default function Quota() {
         <LoadingRows rows={6} />
       ) : (
         <>
+          <OrgSwitchBanner view={data.orgSwitch} />
+          <CarpoolReconcileBanner view={data.carpoolReconcile} />
           <div className="grid gap-3 md:grid-cols-3">
             <Callout
               icon={Flame}

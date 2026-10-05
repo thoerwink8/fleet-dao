@@ -83,8 +83,6 @@ export type ReconcileLog = (
   fields?: Record<string, unknown>,
 ) => void;
 
-export const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;

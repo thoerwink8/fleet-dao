@@ -958,6 +958,91 @@ export function createSeed(now: number): MockState {
     },
   ];
 
+  // ---------- 三段流水（主页流水线图的演示数据：十来张在途的单分落在三段里，各有各的样子）----------
+  // 真后端这些行来自引擎写的 runs 表；模拟器不推进它，所以按「现在」固定摆一份。
+  function seg(
+    taskId: string,
+    issue: number,
+    segment: 'scope' | 'manual' | 'verify',
+    model: string,
+    start: number,
+    end?: number,
+    extra: {
+      outcome?: 'done' | 'timeout' | 'failed';
+      reason?: string;
+      tier?: 'fast' | 'medium' | 'heavyweight';
+    } = {},
+  ): NonNullable<MTask['segmentRuns']>[number] {
+    const channel =
+      model.startsWith('kimi') || model.startsWith('gpt')
+        ? 'ch-relay'
+        : model.startsWith('opus') || model.startsWith('sonnet')
+          ? 'ch-claude'
+          : undefined;
+    return {
+      id: `seg-${taskId}-${segment}-${Math.abs(start)}`,
+      segment,
+      taskId,
+      issueNumber: issue,
+      model,
+      ...(channel ? { channel } : {}),
+      ...(extra.tier ? { tier: extra.tier } : {}),
+      startedAt: at(start),
+      ...(end === undefined
+        ? {}
+        : {
+            endedAt: at(end),
+            outcome: extra.outcome ?? 'done',
+            inputTokens: 12_000 + Math.abs(end - start) * 600,
+            outputTokens: 1_800,
+            cacheReadTokens: 150_000,
+            cacheWriteTokens: 6_000,
+            costUsd: 0.3,
+          }),
+      ...(extra.reason ? { failureReason: extra.reason } : {}),
+    };
+  }
+  const addSeg = (taskId: string, rows: NonNullable<MTask['segmentRuns']>) => {
+    const t = tasks.find((x) => x.task.id === taskId);
+    if (t) t.segmentRuns = [...(t.segmentRuns ?? []), ...rows];
+  };
+  addSeg('t-12', [
+    seg('t-12', 12, 'scope', 'opus-5.5', -188, -176),
+    seg('t-12', 12, 'manual', 'opus-5.5', -40, undefined, { tier: 'heavyweight' }),
+  ]);
+  addSeg('t-14', [
+    seg('t-14', 14, 'scope', 'opus-5.5', -150, -141),
+    seg('t-14', 14, 'manual', 'opus-5.5', -138, -52, { tier: 'medium' }),
+    seg('t-14', 14, 'verify', 'gpt-5.6-luna', -6),
+  ]);
+  addSeg('t-15', [seg('t-15', 15, 'scope', 'opus-5.5', -93)]);
+  addSeg('t-16', [
+    seg('t-16', 16, 'scope', 'sonnet-5', -70, -60),
+    seg('t-16', 16, 'manual', 'kimi-k3', -9, undefined, { tier: 'fast' }),
+  ]);
+  addSeg('t-17', [
+    seg('t-17', 17, 'scope', 'opus-5.5', -120, -111),
+    seg('t-17', 17, 'manual', 'kimi-k3', -100, -70, {
+      outcome: 'timeout',
+      reason: '30 分钟没交活，按超时收了',
+      tier: 'fast',
+    }),
+  ]);
+  addSeg('t-20', [
+    seg('t-20', 20, 'scope', 'opus-5.5', -75, -68),
+    seg('t-20', 20, 'manual', 'opus-5.5', -66, -31, { tier: 'heavyweight' }),
+    seg('t-20', 20, 'verify', 'gpt-5.6-luna', -29, -22),
+  ]);
+  addSeg('t-21', [seg('t-21', 21, 'scope', 'sonnet-5', -4)]);
+  addSeg('t-c7', [
+    seg('t-c7', 7, 'scope', 'opus-5.5', -90, -84),
+    seg('t-c7', 7, 'manual', 'opus-5.5', -82, -57, { tier: 'fast' }),
+  ]);
+  addSeg('t-s3', [
+    seg('t-s3', 3, 'scope', 'opus-5.5', -60, -52),
+    seg('t-s3', 3, 'manual', 'cursor-auto', -25, undefined, { tier: 'medium' }),
+  ]);
+
   // ---------- 还没拆出来的子任务 ----------
   const plans: Record<string, PlanTemplate[]> = {
     't-15': [
@@ -1397,6 +1482,14 @@ export function createSeed(now: number): MockState {
       updatedBy: 'u-zhou',
     },
     { key: 'judge.dailyCallLimit', value: null, version: 0 },
+    { key: 'engine.soloPaused', value: null, version: 0 },
+    {
+      key: 'engine.quotaReserve',
+      value: {},
+      version: 1,
+      updatedAt: at(-2000),
+      updatedBy: 'seed:quota-reserve.default.json',
+    },
   ];
 
   const state: MockState = {

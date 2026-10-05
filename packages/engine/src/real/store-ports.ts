@@ -3,11 +3,12 @@
 // 不读旧的阶段平铺表 stage_policy_routes）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
 // （熔断、战绩、半开时在途的试探都是两种会话并起来算：Fusion 的会话和三段的一次性会话，db 的 pool-runs.ts，#758；三段的那一段按
 // 它选路的用途算战绩，task-contract.ts 的 SEGMENT_STAGE）
-// + 被暂停的账号池（pool-hold:<池> 那条没处理的「要人拍」提醒，见 sessions.ts）交给纯函数 chooseRoute，三种结果原样换成
+// + 被暂停的账号池（开关 engine.poolHolds，人拍的；加 pool-hold:<池> 那条没处理的「要人拍」提醒，见 real/pool-holds.ts）交给纯函数
+// chooseRoute，三种结果原样换成
 // 端口的三种：判「死」的（不在线、渠道关了、犯禁令、开关关着……）挡掉、写明原因；额度未知的排在读到了的后面（routing/rank.ts）；
 // 一条都派不出、又等不来，明说派不出（带每条为什么），不拿空的、默认的顶。两层里没有「钉住」，一律按没钉住算。
 // 点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
-// 账号池暂停着时，续会话的那一单照样放过去——它就是看人修好了没有的试探。Fusion 带了流程配置里这一步的模型顺序（models）
+// 账号池被提醒顶着暂停（等人修）时，续会话的那一单照样放过去——它就是看人修好了没有的试探；开关暂停的池一个都不放。Fusion 带了流程配置里这一步的模型顺序（models）
 // 就只派这几个模型的路由、先按配置的先后排（onlyModels），一条都没有明说；人点名的路由不受它限制。
 // 给开 PR 前验证留一家（keepVerifier：Fusion 规划完、开 PR 之前选副手、Lead 换路由）：写这张单的族现从库里查（和 authorFamilies
 // 同一个查询，查不到明确报错），验证那一步的事实也现读（照流程配置里验证的模型、暂停的池同样避开），一起交给 chooseRoute 判；
@@ -31,9 +32,9 @@ import {
   type EndedPoolRun,
   endedPoolRuns,
   finishSessionRun,
-  openAlertsByPrefix,
   openPoolRuns,
   type RunSegment,
+  readQuotaReserveSetting,
   recordStepTiming,
   releaseTaskReservation,
   reservePoolSlot,
@@ -56,6 +57,7 @@ import {
 import {
   type AllOpenCheck,
   type BreakerFacts,
+  type CarpoolRegistryView,
   type ChooseRouteInput,
   type ChooseRouteResult,
   chooseRoute,
@@ -74,12 +76,12 @@ import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
+import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey } from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { RESERVATION_TTL_MS } from './task-segment.ts';
 
-/** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
-export const POOL_HOLD_PREFIX = 'pool-hold:';
-export const poolHoldKey = (poolId: string) => `${POOL_HOLD_PREFIX}${poolId}`;
+// 整池暂停：开关（设置 engine.poolHolds）加旧的 pool-hold:<池> 提醒，读法在 real/pool-holds.ts；这里照旧导出提醒的键给老调用方。
+export { POOL_HOLD_PREFIX, poolHoldKey };
 
 /**
  * 「这张单做完没人能验」（给开 PR 前验证留一家留不下，PickRouteInput.keepVerifier）的提醒：dedupe_key = no-verifier:<任务>。
@@ -98,8 +100,12 @@ export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 
 /** 战绩和熔断看最近几天的会话结局。 */
 export const RECORD_DAYS = 7;
-/** 选路要等时，最多隔这么久再选一次（等额度清零可能要几天：中途人点名换路由、额度提前清零要看得见）。 */
-export const MAX_ROUTE_WAIT_SECONDS = 600;
+/**
+ * 选路要等时，最多隔这么久再选一次（等额度清零可能要几天：中途人点名换路由、额度提前清零要看得见）。
+ * 2 分钟（原来 10 分钟，#194）：现在是兜底——切号切完探通会当场发 taskRouteWake 信号叫醒等路由的活（real/route-wake.ts，方案 4.3），
+ * 信号丢了、没发出去也最多再等这么久就重选；选路只是查库，隔 2 分钟再选一次很便宜。
+ */
+export const MAX_ROUTE_WAIT_SECONDS = 120;
 /** 选路读会话用户挂的组织最多等多久：选路这一步（quick 一档）一次尝试只有 30 秒，还要查库。 */
 export const ORG_READ_WAIT_MS = 15_000;
 /** 组织还没读出来时隔多久再选：平时一读 0.3 秒，慢的是 reclaude 首跑同步配置（上百秒），读在后台接着跑。 */
@@ -134,6 +140,12 @@ export interface StorePortsDeps {
    * 才问。读不了照抛（选路报没查成，不当成不打算切）。测试可换。
    */
   orgPlan?: (input: { live: OrgKind; held: ReadonlySet<string>; now: Date }) => Promise<OrgPlanView>;
+  /**
+   * 拼车并发登记的现核（real/carpool-cap.ts 的 carpoolRegistry().view，#896）：候选里有带拼车组织类型的池才问；核对不上（没登记、
+   * 对不上、写坏了、库里没有拼车池、核对没读成）选路不往拼车池派、写明原因。生产两处装配（createRealPorts 的 RealPortsDeps、
+   * hourlyReconcileJob 的 HourlyReconcileWiring）这一项是必填、漏接过不了类型检查；这里不给 = 没判（单测路由纯函数、不涉及拼车的测试）。
+   */
+  carpoolRegistry?: () => Promise<CarpoolRegistryView>;
   now?: () => Date;
   /** [0, 1) 的随机数，试探用（调度策略开了试探才用得上）。 */
   draw?: () => number;
@@ -349,9 +361,11 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     };
   }
 
-  async function heldPools(): Promise<Set<string>> {
-    const alerts = await openAlertsByPrefix(db, POOL_HOLD_PREFIX);
-    return new Set(alerts.map((a) => a.dedupeKey.slice(POOL_HOLD_PREFIX.length)).filter(Boolean));
+  /** 整池暂停着的池（开关加旧提醒）。开关认不出的按暂停办：这里记一笔，报警由切号那一轮（org-switch）写。库读不了照抛。 */
+  async function heldPools(now: Date): Promise<HeldPools> {
+    const held = await loadHeldPools(db, now);
+    for (const p of held.facts.problems) log('整池暂停的设置认不出，按暂停办', { why: p.why });
+    return held;
   }
 
   /** 写这张单的族（给验证留一家用，和 authorFamilies 同一个查询）：一个都查不到明确报错，不当成谁都能验。 */
@@ -404,6 +418,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     }
   }
 
+  /** 设置里各渠道的额度留量线原值（没设过 undefined = 内置默认）；认不认得出由选路按池判（shared 的 resolvePoolReserve）。 */
+  async function quotaReserveFor(): Promise<{ setting: unknown }> {
+    const r = await readQuotaReserveSetting(db);
+    return { setting: r.set ? r.value : undefined };
+  }
+
+  /** 拼车并发登记核对的结论（#896）：候选里有拼车池才问；没接 carpoolRegistry 就不给（选路不判这一项）。 */
+  async function carpoolRegistryFor(
+    routes: readonly RouteFacts[],
+  ): Promise<{ carpoolRegistry: CarpoolRegistryView } | Record<string, never>> {
+    if (!deps.carpoolRegistry || !routes.some((r) => r.orgKind === 'carpool')) return {};
+    return { carpoolRegistry: await deps.carpoolRegistry() };
+  }
+
   const planOf = deps.orgPlan ?? ((input) => orgPlanView(db, input));
 
   /**
@@ -415,7 +443,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     held: ReadonlySet<string>,
     now: Date,
   ): Promise<OrgPlanView | undefined> {
-    if (!live?.ok || !routes.some((r) => r.orgKind && r.orgKind !== live.org)) return undefined;
+    // 候选里有带组织类型的池就问：不是挂着的那个组织的池要等切号；挂着的这一类也可能在切回的宽限中、或整个渠道不可用（#194）
+    if (!live?.ok || !routes.some((r) => r.orgKind)) return undefined;
     return planOf({ live: live.org, held, now });
   }
 
@@ -501,7 +530,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         const all = await loadStage(input.stage, now);
         // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）
         const facts = input.models ? onlyModels(all, input.models) : all;
-        const held = await heldPools();
+        const holds = await heldPools(now);
+        const held = holds.all;
         // 给开 PR 前验证留一家：写这张单的族（和验证查作者同一个查询）、验证那一步的事实（照流程配置里验证的模型）
         const keep = input.keepVerifier;
         const writers = keep ? await writerFamilies(input.taskId) : [];
@@ -528,9 +558,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
         // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
         const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
+        // 续会话的试探只放过「提醒顶着」的池；开关暂停的池（人拍的）一个都不放，续会话的也换池 fork 续上
         const avoid = (exceptPool?: string) => ({
           routeIds: input.avoidRouteIds,
-          poolIds: [...new Set([...input.avoidPoolIds, ...[...held].filter((p) => p !== exceptPool)])],
+          poolIds: [
+            ...new Set([
+              ...input.avoidPoolIds,
+              ...[...held].filter((p) => p !== exceptPool || holds.switched.has(p)),
+            ]),
+          ],
           modelIds: input.avoidModelIds,
           ...(families.length > 0 ? { families } : {}),
         });
@@ -539,6 +575,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(live?.ok ? { liveOrg: live.org } : {}),
           ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
           ...(orgPlan ? { orgPlan } : {}),
+          // 各渠道的额度留量线（#194 方案 4.8）：这一步和给验证留一家的那一步同一份；库读不了照抛
+          quotaReserve: await quotaReserveFor(),
+          // 拼车并发登记核对（#896）：核对不上选路不往拼车池派；这一步和给验证留一家的那一步同一份
+          ...(await carpoolRegistryFor([...all.routes, ...(verifyAll?.routes ?? [])])),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
         // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
@@ -651,7 +691,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           const stick = known(input.stickRouteId);
           if (!stick) notes.push(missing(input.stickRouteId, '续会话的路由'));
           else {
-            const probing = held.has(stick.poolId);
+            const probing = held.has(stick.poolId) && !holds.switched.has(stick.poolId);
             const r = choose({ ...base, taskRouteId: stick.routeId, avoid: avoid(stick.poolId) });
             if (r.kind === 'dispatch') {
               return dispatched(
@@ -680,7 +720,11 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
         const context = [
           ...notes,
-          ...(held.size > 0 ? [`暂停着、等人处理的账号池：${[...held].join('、')}`] : []),
+          ...(held.size > 0
+            ? [
+                `暂停着的账号池：${[...held].map((p) => (holds.switched.has(p) ? `${p}（开关暂停，只有人撤得掉）` : `${p}（等人处理）`)).join('、')}`,
+              ]
+            : []),
           ...(facts.unwired.length > 0
             ? [`执行方式引擎还没接上、这次没算的：${facts.unwired.join('、')}`]
             : []),
@@ -734,7 +778,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     async stageAllOpen(stage) {
       const now = clock();
       const facts = await loadStage(stage, now);
-      const held = await heldPools();
+      const held = (await heldPools(now)).all;
       // 和选路一样：候选里有带组织类型的池才读。还没读完、这会儿定不下来不是「解了」，抛出去让对账记没查成。
       const live = facts.routes.some((r) => r.orgKind)
         ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS, by: '每小时对账' })
@@ -761,6 +805,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(live?.ok ? { liveOrg: live.org } : {}),
         ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
         ...(orgPlan ? { orgPlan } : {}),
+        quotaReserve: await quotaReserveFor(),
+        ...(await carpoolRegistryFor(facts.routes)),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       });
     },

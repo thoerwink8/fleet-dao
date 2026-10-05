@@ -290,6 +290,7 @@ describe('一轮里带着切号（#157：探之前判、该切就切，探完核
     const h = harness([carpool, solo], answered, {
       sessionOrg: async () => live,
       orgSwitch: {
+        now: async () => null,
         async before() {
           live = ON_SOLO;
           return 'solo';
@@ -321,6 +322,7 @@ describe('一轮里带着切号（#157：探之前判、该切就切，探完核
     const checked: (string | null)[] = [];
     const h = harness([carpool], answered, {
       orgSwitch: {
+        now: async () => null,
         before: async () => null,
         async after(to) {
           checked.push(to);
@@ -334,6 +336,7 @@ describe('一轮里带着切号（#157：探之前判、该切就切，探完核
   it('【故意造出的失败】切号那两步自己抛了：记日志，这一轮照探、照写', async () => {
     const h = harness([carpool], answered, {
       orgSwitch: {
+        now: async () => null,
         before: async () => {
           throw new Error('库连不上');
         },

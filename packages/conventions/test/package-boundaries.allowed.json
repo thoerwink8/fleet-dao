@@ -1,0 +1,37 @@
+{
+  "说明": "package-boundaries.test.ts 的登记名单（放在 json 里，不放进测试源码：测试里写这些路径字面量，ci-plan 的「测试读包外文件」扫描器会把它们当成这个测试在读那些文件）。bare = 零安装区里例外放行的包名引用；cross = src 里跨包的相对路径（写法原文，相对出现它的那个文件）。每条要写 why；登记了、文件里已经没有的，测试会红。",
+  "bare": [
+    {
+      "file": "packages/conventions/src/release-notes.ts",
+      "spec": "@fleet-dao/shared",
+      "why": "发布流程用（release.yml 在 pnpm install 之后才跑它），不在 CI 的 install 之前那几个入口的引用链上"
+    },
+    {
+      "file": "packages/conventions/src/publish-release-logic.ts",
+      "spec": "@fleet-dao/shared",
+      "why": "同上：发布流程用，装过依赖才跑"
+    },
+    {
+      "file": "packages/conventions/src/publish-actions.ts",
+      "spec": "@fleet-dao/shared",
+      "why": "同上：发布流程用，装过依赖才跑"
+    },
+    {
+      "file": "packages/conventions/src/intents.ts",
+      "spec": "@fleet-dao/shared",
+      "why": "pnpm intents 在指挥官本机跑（装过依赖），不在 CI 的 install 之前那几个入口的引用链上"
+    }
+  ],
+  "cross": [
+    {
+      "file": "packages/mirasim-reclaude/src/migrate.ts",
+      "spec": "../../adapters/src/mirasim/wire.ts",
+      "why": "专用同步检出不装 node_modules（docs/reclaude-in-mirasim.md 第 56 行），借 adapters 的零依赖 wire.ts；package.json 声明保留，它是 CI 选测的变更边"
+    },
+    {
+      "file": "packages/agents-sync/src/main.ts",
+      "spec": "../../mirasim-reclaude/bin/migrate",
+      "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin 当子进程，没有 import；package.json 声明保留作变更边"
+    }
+  ]
+}

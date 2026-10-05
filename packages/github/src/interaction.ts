@@ -34,7 +34,8 @@ export async function renewInteractionLimit(
   const { repo } = input;
   const slug = repoSlug(repo);
   const path = `/repos/${enc(repo.owner)}/${enc(repo.name)}/interaction-limits`;
-  const auth = { as: 'engine' as const, repo };
+  // 整个包里只有这里要 Administration：单独换一枚 'admin' 令牌，日常的 engine 令牌不带这项权限
+  const auth = { as: 'engine' as const, repo, scope: 'admin' as const };
   const now = deps.client.now().getTime();
   const read = async () => {
     const res = await deps.client.request({ method: 'GET', path, auth, signal: ctx.signal });

@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
+import { isLockWaitError, silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
+import { probeDb } from '../src/db-probe.ts';
 import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
-import { silentLogger } from '../src/log.ts';
-import { probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
 import type { Logger } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
@@ -200,12 +200,12 @@ describe('健康检查', () => {
     const session = await h.login();
     const res = await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      write('POST', session, { action: 'pause' }),
+      write('POST', session, { action: 'resume' }),
     );
     expect(res.status).toBe(503);
     expect(await errorCode(res)).toBe('workflow_unavailable');
     expect(h.store.data.audit.at(-1)).toMatchObject({
-      action: 'task.pause',
+      action: 'task.resume',
       ok: false,
       error: 'workflow_unavailable',
     });

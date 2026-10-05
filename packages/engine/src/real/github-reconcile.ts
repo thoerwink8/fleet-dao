@@ -1,5 +1,9 @@
 // 对账补漏的真装配：后端的 Store（同一个库）、GitHubIntake（同一道门、同一本投递账）、@fleet-dao/github 的真轮询，
 // 记账用 @fleet-dao/db 的 schedule_runs。
+
+import { type Db, finishScheduleRun, resolveAlertWithReason, startScheduleRun } from '@fleet-dao/db';
+import type { GitHub } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   createGitHubIntake,
   createPgStore,
@@ -7,9 +11,7 @@ import {
   type Logger,
   reconcileGitHub,
   reconcilerOptions,
-} from '@fleet-dao/api';
-import { type Db, finishScheduleRun, resolveAlertWithReason, startScheduleRun } from '@fleet-dao/db';
-import type { GitHub } from '@fleet-dao/github';
+} from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 import { sweepIssueGroom } from '../jobs/issue-groom.ts';
@@ -91,7 +93,7 @@ export function githubReconcileJob(
             if (n > 0) log.info('撤了关单对账留在库里的旧提醒', { retired: n });
           } catch (err) {
             log.warn('撤关单对账的旧提醒没成，下一轮再试', {
-              error: err instanceof Error ? err.message : String(err),
+              error: errMessage(err),
             });
           }
         }

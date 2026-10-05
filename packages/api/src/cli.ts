@@ -10,11 +10,13 @@
 //   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
+
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
+import { errMessage } from '@fleet-dao/shared/util';
+import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
-import type { AlertWorkPort } from './alert-work.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
@@ -274,11 +276,11 @@ export function describeDbError(err: unknown): string {
   for (let i = 0; i < 10 && inner instanceof Error && inner.cause !== undefined; i++) inner = inner.cause;
   const raw = (inner as { code?: unknown } | null | undefined)?.code;
   const code = typeof raw === 'string' && raw !== '' ? raw : undefined;
-  let text = inner instanceof Error ? inner.message : String(inner);
+  let text = errMessage(inner);
   // IPv4、IPv6 都试过、都连不上时 Node 给的是 AggregateError：message 是空的，原因在 errors 里
   if (!text && inner instanceof AggregateError)
     text = inner.errors
-      .map((e: unknown) => (e instanceof Error ? e.message : String(e)))
+      .map((e: unknown) => errMessage(e))
       .filter(Boolean)
       .join('；');
   const detail = code && !text.includes(code) ? `${code}：${text}` : text || code || '没说原因';
@@ -427,7 +429,7 @@ export interface CliDeps {
 
 async function openPgIntents(url: string): Promise<{ intents: IntentStore; close(): Promise<void> }> {
   const { createDb } = await import('@fleet-dao/db');
-  const { withStatementTimeout } = await import('./pg-store.ts');
+  const { withStatementTimeout } = await import('@fleet-dao/store');
   const { createPgIntentStore } = await import('./intent-store-pg.ts');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return { intents: createPgIntentStore(db), close };
@@ -436,7 +438,7 @@ async function openPgIntents(url: string): Promise<{ intents: IntentStore; close
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
   // 到这里才加载库：参数不对时不用连库
   const { createDb } = await import('@fleet-dao/db');
-  const { createPgStore, withStatementTimeout } = await import('./pg-store.ts');
+  const { createPgStore, withStatementTimeout } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return { store: createPgStore(db), close };
 }
@@ -446,9 +448,9 @@ async function openPgAlertWork(
   env: CliEnv,
 ): Promise<{ alerts: AlertWorkPort; close(): Promise<void> }> {
   const { createDb } = await import('@fleet-dao/db');
-  const { withStatementTimeout } = await import('./pg-store.ts');
-  const { deployFacts, pgAlertWork } = await import('./alert-work.ts');
-  const { readDeployLagInput } = await import('./deploy-lag.ts');
+  const { withStatementTimeout } = await import('@fleet-dao/store');
+  const { deployFacts, pgAlertWork } = await import('@fleet-dao/store');
+  const { readDeployLagInput } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   // 发布记录只在法国的正式机器上有（和后端 main.ts 的 deploy_lag 同一个判法：没写 FLEET_ENV 的就是正式的）
   const production = (env.FLEET_ENV ?? 'production') === 'production';
@@ -563,7 +565,7 @@ async function runIntentCommand(rest: readonly string[], deps: CliDeps): Promise
       try {
         return databaseUrl(deps.env);
       } catch (err) {
-        throw new IntentCliError(err instanceof Error ? err.message : String(err), 'usage');
+        throw new IntentCliError(errMessage(err), 'usage');
       }
     })();
     opened = await (deps.openIntents ?? openPgIntents)(url);

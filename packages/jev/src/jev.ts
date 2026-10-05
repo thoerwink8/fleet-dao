@@ -6,9 +6,11 @@
 // 真拦中的题答了题面外的选项、或回话的不是钉死的模型：和这一批判断一起当场退回只记不拦。
 // 只有调用方自己的代码错（题写坏了、没说判的是谁）不记：那种题登记不进库，测试里就该暴露。
 // 不抛：任何出错都变成一个没判出来的 verdict。
+
 import { randomUUID } from 'node:crypto';
 import { sameModel } from '@fleet-dao/adapters';
 import type { Db } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import {
   type BackendRequest,
   type BackendResult,
@@ -112,10 +114,9 @@ function clean(detail: string): string {
   const text = scrubHead(detail, DETAIL_CHARS + 1);
   return text.length > DETAIL_CHARS ? `${cutAt(text, DETAIL_CHARS)}…` : text;
 }
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 /** 库报的错：drizzle 的报错开头是整条 SQL 和参数（截到 500 字就看不见原因了），真正的原因在 cause 里，有就用它。 */
 const dbError = (err: unknown) =>
-  err instanceof Error && err.cause instanceof Error ? err.cause.message : message(err);
+  err instanceof Error && err.cause instanceof Error ? err.cause.message : errMessage(err);
 const isLocal = (reason: NotJudgedReason) => (LOCAL_REASONS as readonly string[]).includes(reason);
 const isDrift = (reason: NotJudgedReason) => (DRIFT_REASONS as readonly string[]).includes(reason);
 
@@ -227,7 +228,7 @@ export function createJev(deps: JevDeps): Jev {
         result = {
           ok: false,
           reason: 'backend_error',
-          detail: `后端抛了异常：${message(err)}`,
+          detail: `后端抛了异常：${errMessage(err)}`,
           latencyMs: 0,
         };
       }

@@ -26,6 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { SLICE_MEMORY_HIGH_MB } from '../limits.ts';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { AGENT_SLICE_PATH, admitSessionMemory, CGROUP_ROOT } from '../real/memory-admission.ts';
@@ -149,6 +150,10 @@ export interface SpawnFacts {
   detail?: string;
   /** 执行体报的原话（认证、额度、网络报错只在 stderr 的那几家）。 */
   rawError?: string;
+  /** 会话 scope 的内存峰值（MB，整数，real/memory-peak.ts 采的 cgroup memory.peak）；没读到不给，不当成 0（#948）。 */
+  memoryPeakMb?: number;
+  /** 没读到内存峰值的原因（白话）：进日志和落盘的 result.json，runs 那一列留空（#948）。 */
+  memoryPeakWhy?: string;
 }
 
 export interface SpawnCommand {
@@ -297,7 +302,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     }
     throw new OneShotError(
       'RUN_START_FAILED',
-      `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${err instanceof Error ? err.message : String(err)}`,
+      `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${errMessage(err)}`,
     );
   }
 
@@ -317,7 +322,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     });
   } catch (err) {
     clearTimeout(killTimer);
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errMessage(err);
     if (switched() && deps.stop) {
       const result: OneShotResult = { ...halted(deps.stop, '会话被停下'), stderrTail: reason.slice(-4096) };
       await settle(runDir, input, result, deps.runs);
@@ -356,7 +361,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     } catch (recordErr) {
       throw new OneShotError(
         'SPAWN_FAILED',
-        `起子进程没起成：${reason}；开跑那一行也没收上（${recordErr instanceof Error ? recordErr.message : String(recordErr)}）`,
+        `起子进程没起成：${reason}；开跑那一行也没收上（${errMessage(recordErr)}）`,
       );
     }
     throw new OneShotError('SPAWN_FAILED', `起子进程没起成：${reason}`);
@@ -422,6 +427,9 @@ async function persistArtifacts(runDir: string, result: OneShotResult): Promise<
     startedAt: result.startedAt,
     endedAt: result.endedAt,
     failureReason: result.failureReason,
+    // 内存峰值（#948）：读到的数，或没读到的原因（runs 那一列没数时在这里看得到为什么）
+    memoryPeakMb: result.facts?.memoryPeakMb,
+    memoryPeakWhy: result.facts?.memoryPeakWhy,
     /** 落盘 TTL：调用方该在这之后清理。 */
     cleanupAfter: SESSION_ARTIFACT_TTL_MS,
   };
@@ -474,6 +482,7 @@ function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
     ...(u?.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
     ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
     ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
+    ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
   };
 }
 

@@ -25,6 +25,7 @@
 // - 结论写 fail 却没有一条属于三种能挡的问题 → 同样是「冷调用没跑成」（要人看，不当成过，也不让写代码的会话白改）
 // - 结论写 pass 但问题清单里还有算挡的 → pass: false（自相矛盾的结论不放行）
 
+import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import type { OneShotDeps, OneShotInput, OneShotResult } from './runner/one-shot.ts';
 import { ONE_SHOT_OUTCOMES, runOneShot } from './runner/one-shot.ts';
@@ -278,7 +279,7 @@ export async function invokeVerifier(
       baseSha: parsed.baseSha,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMessage(err);
     return {
       pass: false,
       problems: [`读不到 diff：${msg}`],
@@ -308,7 +309,7 @@ export async function invokeVerifier(
   try {
     spec = await deps.fetchSpec({ taskId: parsed.taskId });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMessage(err);
     return {
       pass: false,
       problems: [`读不到单子：${msg}`],

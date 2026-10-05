@@ -3,6 +3,8 @@
 import { fileURLToPath } from 'node:url';
 import { auditLog, repos } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { createMemoryStore, createPgStore, devFixtures, IDS } from '@fleet-dao/store';
+import { seedPg } from '@fleet-dao/store/testing';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -15,12 +17,8 @@ import {
   operatorName,
   parseDispatchArgs,
 } from '../src/cli.ts';
-import { devFixtures, IDS } from '../src/dev-fixtures.ts';
-import { createMemoryStore } from '../src/memory-store.ts';
-import { createPgStore } from '../src/pg-store.ts';
 import type { Store } from '../src/ports.ts';
 import { runChild } from './child.ts';
-import { seedPg } from './pg-fixtures.ts';
 
 const T0 = new Date('2026-09-26T07:00:00.000Z');
 const LATER = new Date('2026-09-26T08:30:00.000Z');

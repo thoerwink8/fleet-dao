@@ -5,7 +5,6 @@
 // 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
-import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/api';
 import {
   alertByKey,
   type Db,
@@ -30,12 +29,15 @@ import {
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, requiredChecksFor } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
+import type { CarpoolRegistryView } from '../routing/index.ts';
+import { taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -77,6 +79,32 @@ export function workflowViewOf(raw: unknown, workflowId: string): WorkflowView {
   return { parked: r.parked, waiting, doing: typeof r.doing === 'string' ? r.doing : '', approval };
 }
 
+/**
+ * 任务工作流的 taskStatus 查询（task-contract.ts 的 TaskStatus）→ 对账要用的几样：停着等人（phase = parked）、在等什么、
+ * 在做什么。任务工作流没有「等批准」这一项（approval 恒为 null）。认不出照抛，不当成「没挂着」：对账读错查询名、或工作流
+ * 回的东西变了形，都该报「没查成」，不能悄悄当成「已经不挂着了」把提醒撤掉（#901）。
+ */
+export function taskViewOf(raw: unknown, workflowId: string): WorkflowView {
+  const r = asRecord(raw);
+  if (!r || typeof r.phase !== 'string') {
+    throw new Error(`${workflowId} 的 taskStatus 查询回的东西认不出（没有 phase）`);
+  }
+  let waiting: WorkflowView['waiting'] = null;
+  if (r.waiting !== null && r.waiting !== undefined) {
+    const w = asRecord(r.waiting);
+    if (!w || typeof w.kind !== 'string' || typeof w.detail !== 'string' || typeof w.since !== 'string') {
+      throw new Error(`${workflowId} 的 taskStatus 查询里 waiting 认不出`);
+    }
+    waiting = { kind: w.kind, detail: w.detail, since: w.since };
+  }
+  return {
+    parked: r.phase === 'parked',
+    waiting,
+    doing: typeof r.doing === 'string' ? r.doing : '',
+    approval: null,
+  };
+}
+
 /** 问 Temporal：没有这条工作流是 missing；别的查不了（连不上、没权限）照抛。 */
 export function temporalWorkflows(client: Pick<Client, 'workflow'>): WorkflowReader {
   return {
@@ -92,7 +120,10 @@ export function temporalWorkflows(client: Pick<Client, 'workflow'>): WorkflowRea
       }
     },
     async view(workflowId) {
-      return workflowViewOf(await client.workflow.getHandle(workflowId).query('status'), workflowId);
+      const handle = client.workflow.getHandle(workflowId);
+      // 任务工作流（task:）答的是 taskStatus，旧的需求、子任务工作流答的是 status：按编号前缀选，别拿 status 去问任务工作流
+      if (workflowId.startsWith('task:')) return taskViewOf(await handle.query(taskStatusQuery), workflowId);
+      return workflowViewOf(await handle.query('status'), workflowId);
     },
   };
 }
@@ -128,6 +159,8 @@ export interface HourlyReconcileWiring {
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
   sessionOrg: SessionOrgReader;
+  /** 拼车并发登记的现核（real/carpool-cap.ts，#896）：判阶段派不派得出去和选路同一套，拼车池核对不上也不算派得出去。必填，漏接过不了类型检查。 */
+  carpoolRegistry: () => Promise<CarpoolRegistryView>;
   /** 这台机器给人看的名字（FLEET_MACHINE_NAME）。 */
   machine: string;
   /** GitHub 两个机器人在这些仓上的权限够不够（生产是 createGitHub 的 selfCheck）。 */
@@ -155,7 +188,12 @@ export function hourlyReconcileJob(
   const now = w.now ?? (() => new Date());
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  const store = createStorePorts({ db: w.db, now, sessionOrg: w.sessionOrg });
+  const store = createStorePorts({
+    db: w.db,
+    now,
+    sessionOrg: w.sessionOrg,
+    carpoolRegistry: w.carpoolRegistry,
+  });
   // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去。这时它还会顺手把「全熔断」那条提醒
   // 再报一次（条件确实还在）。这条提醒撤不撤不在这里判，走下面的 stageAllOpen（只读，不写库、不报警）。
   const stageRoutable: HourlyReconcileJobDeps['stageRoutable'] =
@@ -181,8 +219,8 @@ export function hourlyReconcileJob(
     return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
   };
   // 自动合并兜底（#242）要的 GitHub：列 PR 经 claims.openPulls，把作者是不是机器人、自动合并开没开带过来；
-  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读
-  // （现在借 parseRiskPaths 判，TODO(#133)：standard-paths.json 自己的判法落地后换）。
+  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读，
+  // 判法是 conventions 的 parseStandardPaths / standardFiles（认目录、通配、section，和先审后合的 parseRiskPaths 是两份）。
   const standardPathsFile = w.gh.standardPathsFile ?? STANDARD_PATHS_FILE;
   const autoMergeGh: AutoMergeGitHub = w.autoMergeGh ?? {
     async listPrs(repo: RepoRef) {
@@ -271,7 +309,9 @@ export function hourlyReconcileJob(
       async approval(id) {
         const a = await getApproval(w.db, id);
         if (!a) return null;
-        // 子任务发的等子任务工作流；Fusion 发的（没有子任务）等需求工作流（编号和需求工作流同一个）
+        // 子任务发的等子任务工作流；Fusion 发的（没有子任务）等需求工作流（编号和需求工作流同一个）。这两种工作流引擎里都
+        // 已经没有了：旧批准提醒查出来是「不在了」就撤，这里要继续拼旧的 req: 编号才撤得掉，不能换成 task:（任务工作流的
+        // status 查询形状不同，对账读不了会一直记没查成）。#901 查出来的，随提醒对账那一整套旧读法另开单换。
         let waitingWorkflowId: string | null = a.subtaskId ? subtaskWorkflowId(a.subtaskId) : null;
         if (!a.subtaskId) {
           const task = await taskContext(w.db, a.taskId);

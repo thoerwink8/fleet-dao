@@ -1,9 +1,8 @@
 // fleet-api set-password（#120）：只给白名单里的人设；密码读两遍要一致、不从参数传；每条拒绝的路都造一遍。
 import { fileURLToPath } from 'node:url';
+import { createMemoryStore, DEV_USER_ID, devFixtures, IDS } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CliError, type Prompter, parseSetPasswordArgs, setPassword } from '../src/cli.ts';
-import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
-import { createMemoryStore } from '../src/memory-store.ts';
 import { verifyPassword } from '../src/password.ts';
 import { runChild } from './child.ts';
 

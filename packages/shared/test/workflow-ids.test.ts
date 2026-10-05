@@ -2,7 +2,6 @@
 // 任务工作流（#632）的编号定死：同一张单只有这一个编号，REJECT_DUPLICATE 才挡得住重复。
 import { describe, expect, it } from 'vitest';
 import {
-  mergeQueueWorkflowId,
   requirementWorkflowId,
   subtaskWorkflowId,
   TASK_WORKFLOW_TYPE,
@@ -24,7 +23,6 @@ describe('taskWorkflowId', () => {
       taskWorkflowId({ owner: 'acme', name: 'other' }, 12),
       requirementWorkflowId(repo, 12),
       subtaskWorkflowId('abc'),
-      mergeQueueWorkflowId(repo),
     ];
     expect(new Set(ids).size).toBe(ids.length);
   });

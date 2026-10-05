@@ -42,6 +42,7 @@ describe('活动外壳', () => {
         'reconcileGitHub',
         'probeRoutes',
         'readQuotas',
+        'watchCarpool',
         'reconcileHourly',
         'canaryOpen',
         'canaryCheck',

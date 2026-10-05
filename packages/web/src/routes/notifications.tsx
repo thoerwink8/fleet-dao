@@ -1,13 +1,19 @@
-import { Bell, Check, ExternalLink, Send, TriangleAlert } from 'lucide-react';
+import { Bell, Check, ExternalLink, MessageCircleQuestion, Send, TriangleAlert } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
-import { errorText, useAllBoards, useMe, useNotifications, useResolveNotification } from '../api/client';
-import type { Notification, NotificationLevel } from '../api/types';
+import {
+  errorText,
+  useCloseAsk,
+  useLegacyAsks,
+  useMe,
+  useNotifications,
+  useResolveNotification,
+} from '../api/client';
+import type { LegacyAsk, Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RepoLink } from '../components/repo-link';
 import { StatusChip, StatusDot } from '../components/status';
-import { targetOf, useTaskActions } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
@@ -146,21 +152,86 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   );
 }
 
+/**
+ * 旧会话留下的提问（#928）：v3 三段流程里没有 AI 追问这一环，库里还有的这几条只来自还没删的旧会话。
+ * 只读展示 + 「关闭」（落库、进操作记录）：没有「回答」，答了也不会有人收到。
+ */
+function LegacyAsks({ items, now }: { items: LegacyAsk[]; now: number }) {
+  const close = useCloseAsk();
+  const navigate = useNavigate();
+  return (
+    <section
+      data-legacy-asks
+      aria-label="旧会话留下的提问"
+      className="mb-5 overflow-hidden rounded-xl border border-st-human/40 bg-card"
+    >
+      <header className="border-b bg-st-human/6 px-4 py-3">
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+          <MessageCircleQuestion className="size-4 text-ink-human" aria-hidden />
+          旧会话留下的提问
+          <span className="num text-caption font-normal text-muted-foreground">{items.length}</span>
+        </h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          新流程不会再产生这类提问，也不会有人收到你的回答。看过了就关闭它。
+        </p>
+      </header>
+      <ul>
+        {items.map((a) => (
+          <li
+            key={a.id}
+            className="flex flex-col gap-3 border-b px-4 py-3 last:border-b-0 md:flex-row md:items-center"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium leading-snug">{a.question}</p>
+              <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
+                {a.context ? <span>{a.context}</span> : null}
+                <span className="num text-faint" title={formatClock(a.askedAt)}>
+                  {formatAgo(a.askedAt, now)}提的
+                </span>
+              </p>
+            </div>
+            <div className="flex shrink-0 flex-wrap gap-1.5">
+              <Button size="sm" variant="ghost" onClick={() => navigate(a.link)}>
+                打开
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={close.isPending && close.variables === a.id}
+                onClick={() =>
+                  close.mutate(a.id, {
+                    onSuccess: () => toast.success('关闭了', { description: a.question }),
+                    onError: (e) => toast.error('没关掉', { description: errorText(e) }),
+                  })
+                }
+              >
+                <Check />
+                关闭
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default function Notifications() {
   const [params, setParams] = useSearchParams();
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
   const { data, error, isLoading } = useNotifications(status);
-  const { boards } = useAllBoards();
   const { data: me } = useMe();
   const resolve = useResolveNotification();
-  const { trigger } = useTaskActions();
+  const legacy = useLegacyAsks();
   const navigate = useNavigate();
   const now = useNow();
 
   const all = data?.items ?? [];
   const list = all.filter((n) => level === 'all' || n.level === level);
-  const tasks = boards.flatMap((b) => b.tasks);
+  // 旧追问只在「待处理」里、「全部」或「要你拍」那一档下显示（它们本来就是要你看一眼的）
+  const legacyShown =
+    status === 'open' && (level === 'all' || level === 'decision') ? (legacy.data?.items ?? []) : [];
 
   const set = (key: string, value: string | null) => {
     const p = new URLSearchParams(params);
@@ -229,6 +300,8 @@ export default function Notifications() {
         </div>
       </div>
       {error ? <LoadError what="提醒" error={error} /> : null}
+      {legacy.error ? <LoadError what="旧会话留下的提问" error={legacy.error} /> : null}
+      {legacyShown.length > 0 ? <LegacyAsks items={legacyShown} now={now} /> : null}
       {data?.handlingProblem ? (
         <p className="mb-3 text-xs text-ink-fail" role="status">
           {data.handlingProblem}（提醒照常列出，只是看不出谁在处理）
@@ -237,13 +310,15 @@ export default function Notifications() {
       {isLoading ? (
         <LoadingRows rows={5} />
       ) : !data ? null : list.length === 0 ? (
-        <Panel>
-          <Empty
-            icon={Bell}
-            title={status === 'open' ? '没有待处理的提醒' : '这里没有提醒'}
-            hint="要你拍板或有东西卡住时，这里和飞书会同时提醒。"
-          />
-        </Panel>
+        legacyShown.length > 0 ? null : (
+          <Panel>
+            <Empty
+              icon={Bell}
+              title={status === 'open' ? '没有待处理的提醒' : '这里没有提醒'}
+              hint="要你拍板或有东西卡住时，这里和飞书会同时提醒。"
+            />
+          </Panel>
+        )
       ) : (
         <div className="space-y-5">
           {[...groups.entries()].map(([day, items]) => (
@@ -251,7 +326,6 @@ export default function Notifications() {
               <h2 className="mb-2 text-xs font-medium text-muted-foreground">{day}</h2>
               <ul className="overflow-hidden rounded-xl border bg-card">
                 {items.map((n) => {
-                  const task = n.taskId ? tasks.find((t) => t.id === n.taskId) : undefined;
                   const resolved = Boolean(n.resolvedAt);
                   return (
                     <li
@@ -293,11 +367,6 @@ export default function Notifications() {
                         </div>
                       </div>
                       <div className="flex shrink-0 flex-wrap gap-1.5 pl-5 md:pl-0">
-                        {task && task.state === 'asking' ? (
-                          <Button size="sm" onClick={() => trigger('answer', targetOf(task))}>
-                            回答
-                          </Button>
-                        ) : null}
                         {n.link ? (
                           <Button size="sm" variant="ghost" onClick={() => navigate(n.link ?? '/')}>
                             打开

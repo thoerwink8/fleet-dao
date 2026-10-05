@@ -3,8 +3,10 @@
 // 配置和库里不一样的列进 kept 给人看。
 // 每个用途用什么先后不再写在这里：那是路由两层（routing-apply.ts 的骨架、routing_purpose_models / routing_catalog，#574）。
 // 配置文件缺失、格式错、引用不存在都明确报错，库里一行不写——不许当成空目录继续。
+
 import { readFile } from 'node:fs/promises';
 import { type BanSubject, hardBanFor, type RunAsUser } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
@@ -124,7 +126,7 @@ export function parseCatalog(text: string, source = '目录配置'): CatalogConf
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    throw new CatalogError(`${source} 不是合法的 JSON`, [e instanceof Error ? e.message : String(e)]);
+    throw new CatalogError(`${source} 不是合法的 JSON`, [errMessage(e)]);
   }
   const stripped = stripComments(raw);
   const parsed = CatalogSchema.safeParse(stripped);
@@ -171,7 +173,7 @@ export async function readCatalogFile(
     text = await readText(path);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException | undefined)?.code;
-    const why = code === 'ENOENT' ? '文件不存在' : `读不了（${e instanceof Error ? e.message : String(e)}）`;
+    const why = code === 'ENOENT' ? '文件不存在' : `读不了（${errMessage(e)}）`;
     throw new CatalogError(`目录配置 ${path} ${why}；装载器不会当成空目录继续`, []);
   }
   return parseCatalog(text, `目录配置 ${path}`);

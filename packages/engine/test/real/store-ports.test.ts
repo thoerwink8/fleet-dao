@@ -9,6 +9,7 @@ import {
   notifications,
   openSessionRun,
   poolReservations,
+  saveOrgState,
   savePoolQuota,
   saveRouteProbe,
   sessionRuns,
@@ -19,9 +20,11 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
 import { SLICE_MEMORY_HIGH_MB } from '../../src/limits.ts';
 import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
+import { poolHoldAfterProbe } from '../../src/real/route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
 import { createStorePorts, ORG_READ_RETRY_SECONDS, poolHoldKey } from '../../src/real/store-ports.ts';
 import {
@@ -153,6 +156,108 @@ describe('选路', () => {
     const probe = await pick({ stickRouteId: 'solo' });
     expect(probe).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     expect(probe.ok && probe.why).toContain('看修好了没有');
+  });
+
+  describe('整池暂停开关（#746，设置 engine.poolHolds）：选路读它，探针、会话撤不掉它', () => {
+    const hold = (over: Record<string, unknown> = {}) => ({
+      reason: '创始人要大用独享',
+      decidedBy: '「法国暂时不用独享号」2026-09-27',
+      revokeWhen: '创始人说可以用了',
+      reviewBy: '2026-10-30',
+      ...over,
+    });
+    const putHolds = (value: unknown) =>
+      t.client.query(
+        `insert into settings (key, value, updated_by) values ('engine.poolHolds', $1::jsonb, '创始人')
+         on conflict (key) do update set value = excluded.value`,
+        [JSON.stringify(value)],
+      );
+    const alarms = () => t.db.select().from(notifications);
+
+    it('整池避开；续会话的那一单也不放过去（人拍的暂停没有「修好了」这回事）；派不出时写明是开关暂停的', async () => {
+      await world(t.db);
+      await putHolds({ 'claude-solo': hold() });
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      // 续会话的路由在暂停的池上：照常选到别的池（换池 fork 续上），不当试探放过去
+      const stick = await pick({ stickRouteId: 'solo' });
+      expect(stick).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(stick.ok && stick.why).not.toContain('看修好了没有');
+      const none = await pick({ avoidRouteIds: ['carpool'] });
+      expect(none).toMatchObject({ ok: false });
+      expect(!none.ok && none.detail).toContain('claude-solo（开关暂停，只有人撤得掉）');
+    });
+
+    it('【故意造出的失败】探针探通了那个池、会话也跑通：开关还在，选路照样避开', async () => {
+      await world(t.db);
+      await putHolds({ 'claude-solo': hold() });
+      await poolHoldAfterProbe(
+        t.db,
+        { poolId: 'claude-solo', routeId: 'solo' } as unknown as Parameters<typeof poolHoldAfterProbe>[1],
+        { kind: 'answered', detail: '答上了：OK' },
+      );
+      const [row] = (
+        await t.client.query<{ value: Record<string, unknown> }>(
+          `select value from settings where key = 'engine.poolHolds'`,
+        )
+      ).rows;
+      expect(Object.keys(row?.value ?? {})).toEqual(['claude-solo']);
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      const none = await pick({ avoidRouteIds: ['carpool'] });
+      expect(none).toMatchObject({ ok: false });
+    });
+
+    it('【故意造出的失败】缺字段（读不出）：这个池按暂停办，不当成能用；别的池照派', async () => {
+      await world(t.db);
+      await putHolds({ 'claude-solo': hold({ reviewBy: undefined }) });
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      const none = await pick({ avoidRouteIds: ['carpool'] });
+      expect(none).toMatchObject({ ok: false });
+    });
+
+    it('【故意造出的失败】日期不是日历上的一天（2026-02-30）：按暂停办', async () => {
+      await world(t.db);
+      await putHolds({ 'claude-solo': hold({ reviewBy: '2026-02-30' }) });
+      expect(await pick({ avoidRouteIds: ['carpool'] })).toMatchObject({ ok: false });
+    });
+
+    it('【故意造出的失败】整份设置认不出（是个字符串）：所有池都按暂停办，一条都派不出', async () => {
+      await world(t.db);
+      await putHolds('停');
+      const none = await pick();
+      expect(none).toMatchObject({ ok: false });
+      expect(await pick({ stickRouteId: 'solo' })).toMatchObject({ ok: false });
+    });
+
+    it('【故意造出的失败】过了复查日期没人管：照样暂停着（不自动撤），选路仍避开；不写任何报警（报警由切号那一轮写）', async () => {
+      await world(t.db);
+      await putHolds({ 'claude-solo': hold({ reviewBy: '2026-09-01' }) });
+      expect(await pick({ avoidRouteIds: ['carpool'] })).toMatchObject({ ok: false });
+      expect(await pick({ avoidRouteIds: ['carpool'] })).toMatchObject({ ok: false });
+      expect((await alarms()).filter((a) => a.dedupeKey?.startsWith('pool-hold')).length).toBe(0);
+    });
+
+    it('撤回（删掉那一项）后，选路立即恢复派那个池', async () => {
+      await world(t.db);
+      await putHolds({ 'claude-solo': hold() });
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      await putHolds({});
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    });
+
+    it('旧的 pool-hold 提醒照旧读（兼容一版）；和开关一起时开关管续会话的试探', async () => {
+      await world(t.db);
+      await upsertAlert(t.db, {
+        dedupeKey: poolHoldKey('claude-solo'),
+        level: 'decision',
+        taskId: null,
+        title: '账号池 claude-solo 整池暂停',
+        body: '占位',
+      });
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(await pick({ stickRouteId: 'solo' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+      await putHolds({ 'claude-solo': hold() });
+      expect(await pick({ stickRouteId: 'solo' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    });
   });
 
   it('续同一个会话：暂时派不了就等它，不换到别的路由', async () => {
@@ -581,6 +686,35 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     await world(t.db);
     // 真实的样子：独享池挂在独享组织上、拼车池挂在拼车组织上
     await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-solo'`);
+    // 引擎盯读接口记下的账本（#194）：一分钟前读到拼车、独享各一个可用账号——切号的打算（选路按它判等不等切号）要账号状态
+    const at = new Date(NOW.getTime() - MIN);
+    await saveOrgState(
+      t.db,
+      'fleet-agent-carpool',
+      serializeLedger({
+        ...emptyLedger(),
+        reads: [
+          {
+            ok: true,
+            requestedAt: at,
+            serverDate: at,
+            ageSeconds: null,
+            quota: {
+              usedUsd: 10,
+              limitUsd: 80,
+              resetsAt: new Date(NOW.getTime() + 3 * 60 * MIN),
+              status: 'active',
+            },
+            org: 'ok',
+            accounts: [
+              { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+              { id: 'solo-1', kind: 'solo', hasAssignedAccount: true, expiresAt: null },
+            ],
+          },
+        ],
+      }),
+      NOW,
+    );
   });
   const onRig = () => ports(rig.reader());
   /** 派不出的原因里不许带组织编号、邮箱（它会进库、上驾驶舱、上单子）。 */
@@ -808,9 +942,9 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       },
     });
     await expect(pick({ stage: 'execute' }, p)).rejects.toThrow('sessionOrgFacts：连接断了');
-    // 候选里都是挂着的那个组织的池（没有要问打算的）：不问，照常派
+    // 候选里都是挂着的那个组织的池也要问（#194：切回宽限中、渠道不可用都要看打算）：照样报错，不当成「没事」照派
     await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-carpool'`);
-    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    await expect(pick({ stage: 'execute' }, p)).rejects.toThrow('sessionOrgFacts：连接断了');
   });
 
   it('探针在另一个组织挂着时没探的那条（库里 probe_org 是另一个组织）：它的组织挂上以后等下一轮探针，不挂起；探了没通的照样不在线', async () => {

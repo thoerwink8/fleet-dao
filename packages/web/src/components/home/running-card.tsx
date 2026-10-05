@@ -1,29 +1,38 @@
-// 「在跑的」一张卡的骨架：issue 编号、标题、仓、当前这一段、正在等什么、从什么时候起在等。
+// 「在跑的」一张单的卡片（落在三段流水线图的某条泳道里）：单号、标题、谁在做、本段待了多久、在等谁拍什么、最近一次事件。
 //
 // 关键规矩（specs/509 第五节）：
-// - **verify_pending 不画成失败红**。它是「合进去了在等第二意见 / 等 CI 走完」的正常等待，单画一个色
-//   （翼蓝——stall 黄系）和「失败」红分开。
-// - 还在 scoping / doing / verifying 的看作「正常在跑」（run 绿）；等额度、等清空、等合并队列的看作
-//   「在等」（wait 灰）；等创始人拍的（founder_decision）看作「等你」（human 黄）。
+// - **verify_pending 不画成失败红**。它是「动手收了、验收还没起」的正常等待，单画一个色（stall 黄系）和「失败」红分开。
+//   真失败只有最近一次事件是 trouble（超时 / 失败 / 没起来）：那才用 fail 红。
+// - 还在 scoping / doing / verifying 的看作「正常在跑」（run 绿）；等额度、等清空、等合并队列的看作「在等」（wait 灰）；
+//   等创始人拍的（founder_decision 或挂着待拍的事）看作「等你」（human）。
+// - 「等你拍」的点只用 human 色（全站颜色只表达状态；红留给失败），不另造一种红。
 
-import { CircleDashed, CircleDot, Hourglass, MessageCircleQuestion, ShieldQuestion } from 'lucide-react';
+import {
+  Bot,
+  CircleDashed,
+  CircleDot,
+  Hourglass,
+  MessageCircleQuestion,
+  ShieldQuestion,
+  TriangleAlert,
+} from 'lucide-react';
 import { Link } from 'react-router';
-import { formatAgo } from '../../lib/format';
+import { formatAgo, formatDuration } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { type Tone, toneBg, toneText } from '../../lib/status';
 import { cn } from '../../lib/utils';
 import type { HomeRunning } from './types';
 
 const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> = {
-  scoping: '在写需求 / 拆活',
-  doing: '在干活',
-  verifying: '在自己验',
+  scoping: '在对题',
+  doing: '在动手',
+  verifying: '在验收',
   verify_pending: '还没验',
   merge: '在合并队列',
 };
 
-/** segment 还没接上（home-api 现在一律 null）时卡上怎么写：不猜、不画成「卡住了」。 */
-const SEGMENT_NOT_WIRED = '在跑';
+/** segment 推不出（老单、runs 里没有流水）时卡上怎么写：不猜、不画成「卡住了」。 */
+const SEGMENT_NOT_WIRED = '在跑（还没记在哪一段）';
 
 const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   queue: '排队',
@@ -36,12 +45,18 @@ const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   nothing: '在跑',
 };
 
+/** 这张单等着创始人拍：单子自己卡在追问，或要你拍的那块里挂着它的事。 */
+export function needsFounder(item: HomeRunning): boolean {
+  return item.waitingReason === 'founder_decision' || item.pendingDecision !== undefined;
+}
+
 /**
- * segment + waitingReason → 颜色和图标。
+ * segment + waitingReason + 最近事件 → 颜色和图标。
  * 「还没验」（verify_pending / ci / verify_round / merge_queue）单独画：不是 fail 红，也不是「正常在跑」绿。
  */
-function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
-  if (item.waitingReason === 'founder_decision') return { tone: 'human', icon: MessageCircleQuestion };
+export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
+  if (item.lastEvent?.tone === 'trouble') return { tone: 'fail', icon: TriangleAlert };
+  if (needsFounder(item)) return { tone: 'human', icon: MessageCircleQuestion };
   switch (item.segment) {
     case 'verify_pending':
       return { tone: 'stall', icon: ShieldQuestion };
@@ -61,49 +76,91 @@ function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
 export function RunningCard({ item, className }: { item: HomeRunning; className?: string }) {
   const now = useNow();
   const { tone, icon: Icon } = toneOf(item);
-  const waitText = WAIT_LABEL[item.waitingReason];
+  const founder = needsFounder(item);
+  const since = (iso: string) => formatDuration(Math.max(0, now - Date.parse(iso)));
+  // 排在对题一栏、但一笔流水都还没有：是排着队还没开始，不写「在对题」
+  const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !founder;
+  const statusText =
+    item.segment === null ? SEGMENT_NOT_WIRED : notStarted ? '还没开始对题' : SEGMENT_LABEL[item.segment];
   return (
-    <li data-running-card={item.segment} className={cn('block', className)}>
+    <div data-running-card={item.segment} data-needs-founder={founder} className={cn('h-full', className)}>
       <Link
         to={item.link}
-        className="flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors hover:border-border-strong"
+        title={item.title}
+        className={cn(
+          'pointer-events-auto nopan nodrag flex h-full flex-col justify-between gap-1 rounded-lg border bg-card px-3 py-2 text-left shadow-card-edge transition-colors hover:border-border-strong',
+          founder && 'border-st-human/50',
+          tone === 'fail' && 'border-st-fail/50',
+        )}
       >
-        <span
-          className={cn(
-            'mt-1 grid size-6 shrink-0 place-items-center rounded-full',
-            toneBg[tone],
-            toneText[tone],
-          )}
-          aria-hidden
-        >
-          <Icon className="size-3" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="num text-xs font-semibold text-muted-foreground">#{item.issueNumber}</span>
-            <span className="truncate text-sm font-medium">{item.title}</span>
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-            <span className="num">{item.repo}</span>
-            <span aria-hidden>·</span>
-            <span className={toneText[tone]}>
-              {item.segment === null ? SEGMENT_NOT_WIRED : SEGMENT_LABEL[item.segment]}
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              'grid size-5 shrink-0 place-items-center rounded-full',
+              toneBg[tone],
+              toneText[tone],
+            )}
+            aria-hidden
+          >
+            <Icon className="size-3" />
+          </span>
+          <span className="num text-xs font-semibold text-muted-foreground">#{item.issueNumber}</span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{item.title}</span>
+          {founder ? (
+            <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-ink-human">
+              <span className="size-2 rounded-full bg-st-human" aria-hidden />
+              等你
             </span>
-            {item.waitingReason !== 'nothing' ? (
-              <>
-                <span aria-hidden>·</span>
-                <span>{waitText}</span>
-              </>
-            ) : null}
-            {item.waitingSince ? (
-              <>
-                <span aria-hidden>·</span>
-                <span className="num">{formatAgo(item.waitingSince, now)}</span>
-              </>
-            ) : null}
-          </div>
+          ) : null}
         </div>
+
+        <div className="flex items-center gap-x-2 text-xs text-muted-foreground">
+          <Bot className="size-3 shrink-0" aria-hidden />
+          <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
+            {item.worker ?? '没有进程在跑'}
+          </span>
+          {item.stageSince ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="num shrink-0">本段 {since(item.stageSince)}</span>
+            </>
+          ) : null}
+          {item.taskSince ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="num min-w-0 truncate">共 {since(item.taskSince)}</span>
+            </>
+          ) : null}
+        </div>
+
+        <div className="flex items-center gap-x-2 text-xs">
+          <span className={cn('shrink-0 font-medium', toneText[tone])}>{statusText}</span>
+          {item.waitingReason !== 'nothing' ? (
+            <span className="shrink-0 text-muted-foreground">· {WAIT_LABEL[item.waitingReason]}</span>
+          ) : null}
+          {item.waitingSince ? (
+            <span className="num shrink-0 text-muted-foreground">{since(item.waitingSince)}</span>
+          ) : null}
+        </div>
+
+        {founder && item.pendingDecision ? (
+          <div className="truncate text-xs text-ink-human" title={item.pendingDecision}>
+            要你拍：{item.pendingDecision}
+          </div>
+        ) : item.lastEvent ? (
+          <div
+            className={cn(
+              'truncate text-xs',
+              item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : 'text-muted-foreground',
+            )}
+            title={item.lastEvent.text}
+          >
+            最近：{item.lastEvent.text} · <span className="num">{formatAgo(item.lastEvent.at, now)}</span>
+          </div>
+        ) : (
+          <div className="truncate text-xs text-muted-foreground">最近：还没有三段流水记录</div>
+        )}
       </Link>
-    </li>
+    </div>
   );
 }

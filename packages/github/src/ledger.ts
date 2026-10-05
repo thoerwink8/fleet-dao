@@ -1,8 +1,9 @@
-// 这个包在库里读写的东西：幂等账、PR 镜像（pull_requests）、按 owner/name 找仓、按 issue 号找需求。
-// 表结构在 @fleet-dao/db；这里只放 GitHub 这一块要用的几条查询（以后别的包也要用，再挪进 db 包的 queries）。
-// 驾驶舱、fleet done 的核实都只读镜像、不直接查 GitHub，所以镜像写错了人看到的就是错的：写入按 GitHub 的 updated_at 防倒退。
-import { type Db, pullRequests, repos, tasks } from '@fleet-dao/db';
-import { and, eq, sql } from 'drizzle-orm';
+// 这个包要用的账的形状：幂等账、PR 镜像（pull_requests）、按 owner/name 找仓、按 issue 号找需求，和不连库的内存实现、跨工人的锁的逻辑。
+// 这个包是纯 GitHub API 包，不依赖数据库（#901 ⑤）：Postgres 的实现（pgLedger、pgLocker、pgIdempotencyStore）在 @fleet-dao/store 的
+// github-pg.ts，表结构在 @fleet-dao/db。packages/conventions/test/package-layers.test.ts 钉住「github 不许依赖 db、store」。
+// 驾驶舱、fleet done 的核实都只读镜像、不直接查 GitHub，所以镜像写错了人看到的就是错的：写入按 GitHub 的 updated_at 防倒退
+// （Postgres 版和内存版都要照这条）。
+import { sleep } from '@fleet-dao/shared/util';
 import { type Logger, type RepoRef, silentLogger } from './client.ts';
 import { type Locker, memoryLocker } from './deps.ts';
 import { GitHubError } from './errors.ts';
@@ -12,10 +13,9 @@ import {
   type IdempotencyStore,
   type Lease,
   memoryIdempotencyStore,
-  pgIdempotencyStore,
 } from './idempotency.ts';
 
-export interface PgLockerOptions {
+export interface LockerOptions {
   now?: () => Date;
   /** 等锁时两次尝试之间怎么睡（测试给假的）。 */
   sleep?: (ms: number) => Promise<void>;
@@ -27,17 +27,17 @@ export interface PgLockerOptions {
 
 /**
  * 跨工人的锁：锁是幂等账里的一行（action=github.lock，键 gh:lock:<名字>），持锁期间定时续，用完删掉。
+ * 逻辑只依赖幂等账这个接口（账存在哪——Postgres、内存——它不知道），所以和库无关。
  * 改这里之前必须知道：锁不占着库连接。持锁的 fn 里是几次 HTTP（秒到分钟级），还要查库（幂等账、回声）；
  * 要是像事务级 advisory lock 那样一直占着一条连接，fn 查库得再借一条，同时等锁、持锁的一多到连接池上限，
  * 就全在等彼此（PGlite 只有一条连接，一把锁就卡死）。
  * 代价：持锁的工人死了，别人要等它的占用过期（staleAfterMs）才接得过去。同一个进程里抢同一个键的先在进程内排队，不去库里轮询。
  */
-export function pgLocker(db: Db, options: PgLockerOptions = {}): Locker {
-  const store = pgIdempotencyStore(db);
+export function lockerOver(store: IdempotencyStore, options: LockerOptions = {}): Locker {
   const local = memoryLocker();
   const o = {
     now: options.now ?? (() => new Date()),
-    sleep: options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    sleep: options.sleep ?? sleep,
     staleAfterMs: options.staleAfterMs ?? CLAIM_STALE_AFTER_MS,
     renewEveryMs: options.renewEveryMs,
     log: options.log ?? silentLogger,
@@ -62,7 +62,7 @@ async function acquireLock(
   store: IdempotencyStore,
   key: string,
   name: string,
-  o: Required<Omit<PgLockerOptions, 'renewEveryMs'>> & { renewEveryMs: number | undefined },
+  o: Required<Omit<LockerOptions, 'renewEveryMs'>> & { renewEveryMs: number | undefined },
 ): Promise<Lease> {
   const lease = (since: Date) => holdLease(store, { key, now: o.now, renewEveryMs: o.renewEveryMs }, since);
   for (let attempt = 0; ; attempt += 1) {
@@ -128,114 +128,6 @@ export interface Ledger {
   setChecks(repoId: string, number: number, headSha: string, checks: PrChecks): Promise<boolean>;
   /** 这张 issue 有没有对应的需求（有需求 = 工作流起过）。 */
   taskFor(repoId: string, issueNumber: number): Promise<{ id: string; state: string } | null>;
-}
-
-export function pgLedger(db: Db): Ledger {
-  const toMirror = (r: typeof pullRequests.$inferSelect): PrMirror => ({
-    repoId: r.repoId,
-    number: r.number,
-    state: r.state,
-    headRef: r.headRef,
-    headSha: r.headSha,
-    checks: r.checks,
-    updatedAt: r.updatedAt,
-    openedAt: r.openedAt,
-    mergedAt: r.mergedAt,
-    mergeSha: r.mergeSha,
-    links: { issues: r.issueRefs, alerts: r.alertRefs },
-  });
-  return {
-    idempotency: pgIdempotencyStore(db),
-    async repoId(repo) {
-      const [row] = await db
-        .select({ id: repos.id })
-        .from(repos)
-        .where(
-          and(
-            sql`lower(${repos.owner}) = lower(${repo.owner})`,
-            sql`lower(${repos.name}) = lower(${repo.name})`,
-          ),
-        );
-      return row?.id ?? null;
-    },
-    async upsertPullRequest(row) {
-      const written = await db
-        .insert(pullRequests)
-        .values({
-          repoId: row.repoId,
-          number: row.number,
-          state: row.state,
-          headRef: row.headRef,
-          headSha: row.headSha,
-          checks: row.checks ?? 'pending',
-          updatedAt: row.updatedAt,
-          syncedAt: new Date(),
-          openedAt: row.openedAt ?? null,
-          mergedAt: row.mergedAt ?? null,
-          mergeSha: row.mergeSha ?? null,
-          issueRefs: row.links?.issues ?? [],
-          alertRefs: row.links?.alerts ?? [],
-        })
-        .onConflictDoUpdate({
-          target: [pullRequests.repoId, pullRequests.number],
-          set: {
-            state: sql`excluded.state`,
-            headRef: sql`excluded.head_ref`,
-            headSha: sql`excluded.head_sha`,
-            checks: row.checks
-              ? sql`excluded.checks`
-              : sql`case when ${pullRequests.headSha} = excluded.head_sha then ${pullRequests.checks} else 'pending'::pr_checks end`,
-            updatedAt: sql`excluded.updated_at`,
-            syncedAt: sql`excluded.synced_at`,
-            // 这次没读到的（undefined）不改：旧值留着
-            ...(row.openedAt === undefined ? {} : { openedAt: sql`excluded.opened_at` }),
-            ...(row.mergedAt === undefined ? {} : { mergedAt: sql`excluded.merged_at` }),
-            ...(row.mergeSha === undefined ? {} : { mergeSha: sql`excluded.merge_sha` }),
-            ...(row.links === undefined
-              ? {}
-              : { issueRefs: sql`excluded.issue_refs`, alertRefs: sql`excluded.alert_refs` }),
-          },
-          setWhere: sql`${pullRequests.updatedAt} <= excluded.updated_at`,
-        })
-        .returning({ number: pullRequests.number });
-      return written.length > 0 ? 'written' : 'stale';
-    },
-    async getPullRequest(repoId, number) {
-      const [row] = await db
-        .select()
-        .from(pullRequests)
-        .where(and(eq(pullRequests.repoId, repoId), eq(pullRequests.number, number)));
-      return row ? toMirror(row) : null;
-    },
-    async pullRequestsByHead(repoId, headSha) {
-      const rows = await db
-        .select()
-        .from(pullRequests)
-        .where(and(eq(pullRequests.repoId, repoId), eq(pullRequests.headSha, headSha)));
-      return rows.map(toMirror);
-    },
-    async setChecks(repoId, number, headSha, checks) {
-      const rows = await db
-        .update(pullRequests)
-        .set({ checks, syncedAt: new Date() })
-        .where(
-          and(
-            eq(pullRequests.repoId, repoId),
-            eq(pullRequests.number, number),
-            eq(pullRequests.headSha, headSha),
-          ),
-        )
-        .returning({ number: pullRequests.number });
-      return rows.length > 0;
-    },
-    async taskFor(repoId, issueNumber) {
-      const [row] = await db
-        .select({ id: tasks.id, state: tasks.state })
-        .from(tasks)
-        .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
-      return row ?? null;
-    },
-  };
 }
 
 /** 不连库的实现：测试、以及真机验收时不想碰生产库的场合。 */

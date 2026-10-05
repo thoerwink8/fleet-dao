@@ -1,9 +1,8 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { describe, expect, it } from 'vitest';
-import { tempDir } from '../../adapters/test/helpers.ts';
-import { startWsServer } from '../../adapters/test/ws-server.ts';
 import { automaticMigration } from '../src/auto.ts';
 
 describe('同步中的自动迁移', () => {

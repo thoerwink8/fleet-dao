@@ -1,5 +1,6 @@
 // 健康检查：/healthz 逐项探依赖（库、实时推送、Temporal……），任何一项不好就整体 503，如实报红。
 // 对外只说「哪一项、好不好、一句不含内部细节的原因」；错误原文（可能带内部地址）只进日志。
+import { errMessage } from '@fleet-dao/shared/util';
 import type { Context } from 'hono';
 import type { HealthCheck, Logger } from './ports.ts';
 
@@ -63,7 +64,7 @@ export async function runHealthChecks(
       } catch (err) {
         log.warn('健康检查没过', {
           check: name,
-          error: err instanceof Error ? err.message : String(err),
+          error: errMessage(err),
           ...(err instanceof PublicHealthError && err.detail ? { detail: err.detail } : {}),
         });
         return [

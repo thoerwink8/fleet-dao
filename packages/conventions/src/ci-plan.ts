@@ -9,6 +9,7 @@
 // - 测试不只读自己包里的文件（读别的包的源码、夹具，读 docs/ops.md、AGENTS.md、deploy/ 下的脚本）。PATH_RULES 和 TEST_READS
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
 // - 这里判「少跑」等于放行没测过的改动，所以本文件和两个入口都在 high-risk-paths.json 里（先审后合）。
+import { type Reuse, reuseOf } from './main-reuse.ts';
 import type { RepoView } from './repo.ts';
 import {
   type Packed,
@@ -47,8 +48,19 @@ export interface CiPlan {
   tests: TestBox[];
   /** 演示版打包 + 扫产物。 */
   web: boolean;
+  /**
+   * 驾驶舱用户视角 e2e（真 Postgres + 真后端 + 真前端 + Chromium，packages/web/e2e，#930）：一个 job、要几分钟，
+   * 所以不是每个 PR 都跑，只在 touchesE2e 认的那几处改动、或「认不出改了什么」（非 PR 事件、依赖图读不出、空改动、认不出的路径）时开。
+   * 注意它和 full 不同步：全跑是 true 的（deploy/ 脚本、根配置这类升的全跑）不一定开 e2e，见 planCi。
+   */
+  e2e: boolean;
   /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
   deploy: DeployMode;
+  /**
+   * 只有主线推送会有：这一轮的 test、web、deploy 不重测，复用了一次同树、同基准树、成功的 PR 检查（main-reuse.ts 判）。
+   * 有它时 tests 空、web 假、deploy none——汇总 job 据此认「这三个 job 本该跳过」，同时核对它是主线事件上带来的、字段齐全。
+   */
+  reused?: Reuse;
 }
 
 export const DEPLOY_MODES = ['all', 'ops', 'none'] as const;
@@ -106,6 +118,32 @@ export type Rule =
 
 const exact = (p: string) => (f: string) => f === p;
 const under = (p: string) => (f: string) => f.startsWith(p);
+
+/**
+ * 哪些改动要跑驾驶舱 e2e（#930）。
+ *
+ * **2026-10-05 收窄**（创始人「现在全套 e2e 流程太长了，要 300+ 秒，我不认可每个 pr 都要这种流程」，
+ * 按五步法的「删」）：原来碰 `web`/`api`/`db`/`shared` **或**根配置（package.json、锁文件、workspace）
+ * 就开。实测这台 job 364 秒（全仓最长的一块，其余全在 90 秒内），而最近 40 个合并 PR 里碰 `web` 的只有
+ * 6 个、`api` 3 个、`db` 2 个、`shared` 2 个——**拿 17% 的场景罚了 100% 的 PR**。
+ *
+ * 现在只认真正会改变「用户在页面上看到或点到的东西」的那两个包：
+ * - `web`（前端本身）、`api`（它起的真入口、页面读的后端）；
+ * - `.github/workflows/ci.yml` 自己（改了 e2e 的定义就该跑一遍）。
+ * `db` 和 `shared` 不再单独触发：它们各有自己的单测和契约测试把关，e2e 不是替它们兜底的；
+ * 根配置（锁文件、package.json、workspace）同理——「装不装得上依赖」由别的 job 管。
+ * 全量回归有兜底：这些路径的改动由**每天一次的定时轮**在 main 上跑全套（ci.yml 的 schedule）。
+ *
+ * 别的包（core、engine、github……）一如既往不开：每多开一档就是多一个几分钟的 job 占并发槽
+ * （免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
+ */
+export const E2E_PACKAGES: readonly string[] = ['web', 'api'];
+export const E2E_FILES: readonly string[] = ['.github/workflows/ci.yml'];
+export function touchesE2e(f: string): boolean {
+  if (E2E_FILES.includes(f)) return true;
+  const pkg = /^packages\/([^/]+)\//.exec(f)?.[1];
+  return pkg !== undefined && E2E_PACKAGES.includes(pkg);
+}
 
 /** 仓根的配置：改到任何一个，所有包都受影响（PATH_RULES 全跑；ci-cache.ts 的缓存键也认这一份）。 */
 export const ROOT_CONFIG_FILES: readonly string[] = [
@@ -222,7 +260,8 @@ export function readGraph(repo: RepoView): PackageGraph | string {
 export const unitPath = (u: string) => (u === AGENTS_UNIT ? 'agents/' : `packages/${u}/`);
 const unitProject = (u: string) => (u === AGENTS_UNIT ? 'agents' : `packages/${u}`);
 
-function fullPlan(reasons: string[]): CiPlan {
+/** e2e 默认开：升全跑的原因里有「认不出改了什么」时不能拿它冒充可以少跑；只有 planCi 能确定「全跑是因为 deploy/、根配置这类、没碰 e2e 认的路径」时才传 false。 */
+function fullPlan(reasons: string[], e2e = true): CiPlan {
   return {
     full: true,
     reasons,
@@ -231,6 +270,7 @@ function fullPlan(reasons: string[]): CiPlan {
     testUnits: [],
     tests: [],
     web: true,
+    e2e,
     deploy: 'all',
   };
 }
@@ -282,6 +322,8 @@ interface Sorted {
   reasons: string[];
   /** 取最大的：有一条要全套就全套。 */
   deploy: DeployMode;
+  /** 有文件认不出（不在依赖图里的包目录、不在任何规则里的路径）：这次改了什么不确定，e2e 不许当成不用跑。 */
+  unknown: boolean;
 }
 
 function sortChanges(
@@ -296,6 +338,7 @@ function sortChanges(
     readers: new Set(),
     reasons: [],
     deploy: 'none',
+    unknown: false,
   };
   for (const f of changed) {
     const rule = rules.find((r) => r.match(f));
@@ -316,6 +359,7 @@ function sortChanges(
       continue;
     }
     s.fullWhy.push(`${f}：${pkg !== undefined ? `packages/${pkg} 不在依赖图里` : '认不出的路径'}，全跑`);
+    s.unknown = true;
     if (pkg !== undefined) s.hubs.add(pkg);
   }
   return s;
@@ -327,7 +371,9 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
   if (changed.length === 0) return fullPlan(['改动列表是空的：认不出这次改了什么，全跑']);
 
   const s = sortChanges(changed, (pkg) => Object.hasOwn(graph.deps, pkg), rules);
-  if (s.fullWhy.length > 0) return fullPlan(s.fullWhy);
+  // e2e 单独判：全跑的原因（deploy/、根配置、CI 工作流这类）不一定碰 e2e 认的路径；认不出的路径则开（不确定就跑）
+  const e2e = s.unknown || changed.some(touchesE2e);
+  if (s.fullWhy.length > 0) return fullPlan(s.fullWhy, e2e);
 
   const closure = dependentsClosure(graph, s.units);
   const reasons = [...s.reasons];
@@ -343,6 +389,7 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
     testUnits: all,
     tests: [],
     web: closure.has('web'),
+    e2e,
     deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : s.deploy,
   };
 }
@@ -424,6 +471,31 @@ export function assignTests(
   return { plan: { ...plan, tests: packed.boxes, reasons: [...plan.reasons, ...packed.notes] }, packed };
 }
 
+/**
+ * 主线这一轮复用了一次同树的 PR 检查（main-reuse.ts 已经核过树和基准树）：test、web、deploy 不再测。biome、tsc 的开关不动
+ * （lint 本来就每轮自己跑一遍）。plan 先按区间算好、装好箱再交进来：被跳过的是「本来要测的」，不是「什么都不用测」。
+ */
+export function applyReuse(plan: CiPlan, reuse: Reuse): CiPlan {
+  const wasTesting = plan.full
+    ? '全部测试'
+    : `${plan.tests.reduce((n, b) => n + b.files.length, 0)} 个测试文件`;
+  return {
+    ...plan,
+    full: false,
+    testUnits: [],
+    tests: [],
+    web: false,
+    e2e: false,
+    deploy: 'none',
+    reused: reuse,
+    reasons: [
+      ...plan.reasons,
+      `同树复用：这次主线提交的树和 PR #${reuse.pr} 的检查（运行 ${reuse.run}）测的是同一棵、基准也是上次真绿的头；` +
+        `本来要测的（${wasTesting}${plan.web ? '、web' : ''}${plan.e2e ? '、e2e' : ''}${plan.deploy === 'none' ? '' : `、deploy ${plan.deploy}`}）不再重测`,
+    ],
+  };
+}
+
 /** 写进 $GITHUB_OUTPUT 的几行；下游 job 的 if 和汇总 job 都只读这些。
  * lint job 里的 biome、tsc 两步各读自己那一份（`biome`、`tsc`）——job 级的开与不开由 ciVerdict 核，
  * 这两行只管 job 里面哪一步跑。 */
@@ -434,8 +506,11 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
     tsc: plan.tsc === 'all' ? 'all' : plan.tsc.join(' '),
     tests: JSON.stringify(plan.tests),
     web: String(plan.web),
+    e2e: String(plan.e2e),
     deploy: plan.deploy,
     deploy_matrix: JSON.stringify(deployMatrix(plan.deploy)),
+    // 复用的那次 PR 检查的运行号；没复用是空串。汇总 job 核它和 plan 里的是同一份。
+    reused: plan.reused ? String(plan.reused.run) : '',
   };
 }
 
@@ -446,10 +521,15 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
  *   但一个 PR 少占三个并发槽。**这个 job 每次都得跑且绿**：它里面几步各自 continue-on-error、最后一步按各步的
  *   outcome 判红，所以「biome 先红 → tsc 被跳过、类型错没人看见」（#566）不会重演——红了的是 job，不是被跳过的步。
  *   哪一步该跑、哪一步该跳也由那最后一步现核（开关在 changes 的输出里），不靠 job 级的 if。
- * - `test`、`web`、`deploy`：按改动开关，该跑的必须绿、该跳的必须是跳过。
+ * - `test`、`web`、`e2e`、`deploy`：按改动开关，该跑的必须绿、该跳的必须是跳过（e2e 红、取消、被误跳过都不过，#930）。
  * hygiene 现在在 lint 里面，只报不挡（红了不算进 lint 的结论，创始人 2026-09-28 傍晚拍），不在这两份名单里。
  */
-export const PLANNED_JOBS = ['test', 'web', 'deploy'] as const;
+export const PLANNED_JOBS = ['test', 'web', 'e2e', 'deploy'] as const;
+/**
+ * 全跑（plan.full）时必须开的 job：e2e 不在里面——它按 touchesE2e 单独判（全跑的原因是 deploy/ 或根配置时不开），
+ * 开不开由 changes 的 e2e 输出和 plan.e2e 对账（同一份），汇总照 plan.e2e 核 job 的结果。
+ */
+const FULL_JOBS = PLANNED_JOBS.filter((j) => j !== 'e2e');
 export const ALWAYS_JOBS = ['changes', 'lint'] as const;
 
 /**
@@ -482,6 +562,7 @@ function parsePlan(text: unknown): CiPlan | string {
     typeof o.full !== 'boolean' ||
     typeof o.biome !== 'boolean' ||
     typeof o.web !== 'boolean' ||
+    typeof o.e2e !== 'boolean' ||
     !(DEPLOY_MODES as readonly unknown[]).includes(o.deploy) ||
     !Array.isArray(o.tests) ||
     !(o.tsc === 'all' || Array.isArray(o.tsc)) ||
@@ -490,7 +571,15 @@ function parsePlan(text: unknown): CiPlan | string {
     return 'changes 给的 plan 认不出';
   }
   const why = testsProblem(o as CiPlan);
-  return why ?? (o as CiPlan);
+  if (why !== undefined) return why;
+  if ('reused' in o && o.reused !== undefined) {
+    const reused = reuseOf(o.reused);
+    if (reused === null) return 'changes 给的 plan 里 reused（同树复用）字段不齐全';
+    if (o.full || o.testUnits?.length || o.tests?.length || o.web || o.e2e || o.deploy !== 'none')
+      return 'plan 说复用了同树的 PR 检查，却还有要测的 test、web、e2e、deploy';
+    return { ...(o as CiPlan), reused };
+  }
+  return o as CiPlan;
 }
 
 /**
@@ -536,7 +625,7 @@ function testsProblem(plan: CiPlan): string | undefined {
  * 「本该跑 → success、本该不跑 → skipped」，changes、docs 必须 success；有一条不对、认不出，就不通过。
  * hygiene 不在这条判定里（红了不挡，见 ALWAYS_JOBS 的注释），但 ci.yml 仍然 needs 它，check 会等它跑完。
  */
-export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
+export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines: string[] } {
   const lines: string[] = [];
   if (typeof needs !== 'object' || needs === null)
     return { ok: false, lines: ['读不出各 job 的结果（needs）'] };
@@ -559,8 +648,24 @@ export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
   // test job 的矩阵铺的是 outputs.tests：必须和 plan 里核过的那份是同一份
   if (n.changes?.outputs?.tests !== JSON.stringify(plan.tests))
     bad('changes 给 test job 铺矩阵的 tests 和 plan 里的测试台不是同一份');
-  if (plan.full && (PLANNED_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
+  // e2e job 的 if 读的是 outputs.e2e：必须和 plan 里核过的是同一份（不然 job 的开关和汇总核的「本该跑不跑」各说各的）
+  if (n.changes?.outputs?.e2e !== String(plan.e2e))
+    bad('changes 给 e2e job 的开关（outputs.e2e）和 plan 里的 e2e 不是同一份');
+  if (plan.full && (FULL_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
+  // 同树复用（主线推送才有）：test、web、deploy 本该跳过的依据。只认主线事件、且 changes 的输出和 plan 里是同一次运行；
+  // 事件没给（旧调用）、不是 push 都不认——一个 PR 的 plan 不能靠它把测试变成「本该跳过」。
+  const claimedRun = n.changes?.outputs?.reused;
+  if (plan.reused) {
+    if (event !== 'push')
+      bad(`plan 说复用了同树的 PR 检查，但这一轮不是主线推送（事件：${event ?? '没给'}）`);
+    if (claimedRun !== String(plan.reused.run)) bad('changes 的 reused 输出和 plan 里复用的运行号不是同一份');
+    lines.push(
+      `✓ 同树复用：test、web、deploy 复用 PR #${plan.reused.pr} 的检查（运行 ${plan.reused.run}），不重测`,
+    );
+  } else if (typeof claimedRun === 'string' && claimedRun !== '') {
+    bad('changes 给了 reused 输出，plan 里却没有复用的记录');
+  }
   for (const job of PLANNED_JOBS) {
     const want = expected(plan, job) ? 'success' : 'skipped';
     const r = n[job]?.result;

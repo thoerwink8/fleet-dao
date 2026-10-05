@@ -1,10 +1,19 @@
-import { type Channel, hardBanFor, type Model, type Route, type SessionRun } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
-import type { SegmentRunRecord } from '../src/ports.ts';
 import {
-  describeTimeline,
+  type Channel,
+  hardBanFor,
+  LEGACY_ASK_CLOSED_ANSWER,
+  type Model,
+  type Route,
+  type SessionRun,
+} from '@fleet-dao/shared';
+import { describe, expect, it } from 'vitest';
+import type { AskRecord, SegmentRunRecord } from '../src/ports.ts';
+import {
+  askLate,
   findBan,
+  homeDecisions,
   jobView,
+  legacyAskViews,
   routeLookup,
   routeProblem,
   runView,
@@ -100,59 +109,42 @@ describe('库里配的禁令', () => {
   });
 });
 
-describe('时间线白话', () => {
-  it('按种类拼一行；载荷认不出也不崩', () => {
-    const rec = (kind: string, payload?: unknown) => ({
-      id: 'x',
-      at: '2026-09-25T08:00:00Z',
-      source: 'session' as const,
-      kind,
-      payload,
-    });
-    expect(describeTimeline(rec('say', { text: '在写测试' }))).toBe('在写测试');
-    expect(
-      describeTimeline(
-        rec('plan', {
-          steps: [
-            { title: 'a', state: 'done' },
-            { title: '正在写实现', state: 'in_progress' },
-            { title: 'c', state: 'pending' },
-          ],
-        }),
-      ),
-    ).toBe('步骤清单：完成 1/3，正在写实现');
-    expect(describeTimeline(rec('test', { passed: false, command: 'pnpm check' }))).toBe(
-      '跑测试（pnpm check）：没过',
+describe('旧追问的展示（#928）', () => {
+  const ask = (id: string, taskId: string): AskRecord => ({
+    id,
+    taskId,
+    runId: 'r1',
+    question: '几位？',
+    options: ['4', '6'],
+    askedAt: '2026-09-25T08:00:00Z',
+  });
+
+  it('legacyAskViews：带「#号 标题」背景和任务页链接；单子读不到照样给出这一条（要能被关掉），只是没有背景', () => {
+    const views = legacyAskViews([ask('a1', 't1'), ask('a2', 'gone')], (id) =>
+      id === 't1' ? { issueNumber: 12, title: '登录页加验证码' } : undefined,
     );
-    expect(describeTimeline(rec('test', {}))).toBe('跑测试：结果没读到');
-    expect(describeTimeline(rec('state', { entity: 'task', from: 'running', to: 'merging' }))).toBe(
-      '需求状态：running → merging',
-    );
-    expect(describeTimeline(rec('state', { entity: 'subtask', to: 'pending' }))).toBe('子任务建立：pending');
-    expect(describeTimeline(rec('run_queued', { stage: 'execute', whyRoute: '排第一' }))).toBe(
-      '写码排进队列（排第一）',
-    );
-    expect(describeTimeline(rec('run_started', { queueMs: 120_000 }))).toBe('开工（排队 2 分钟）');
-    expect(describeTimeline(rec('run_ended', { outcome: 'stopped' }))).toBe('会话被叫停');
-    expect(describeTimeline(rec('notification', { title: '卡住了' }))).toBe('通知：卡住了');
-    expect(describeTimeline(rec('stop', { reason: '方向错了' }))).toBe('叫停：方向错了');
-    expect(
-      describeTimeline(rec('handover', { reason: '服务器上 root 跑的 fleet-api handover：创始人说交' })),
-    ).toBe('交给 fleet：服务器上 root 跑的 fleet-api handover：创始人说交');
-    expect(describeTimeline(rec('handover', { ok: false, error: 'Temporal 连不上' }))).toBe(
-      '交给 fleet没做成：Temporal 连不上',
-    );
-    expect(describeTimeline(rec('file', 'not-an-object'))).toBe('改文件：（没带路径）');
-    expect(describeTimeline(rec('something-new'))).toBe('something-new');
-    expect(describeTimeline(rec('pause', { ok: false, error: 'workflow_gone' }))).toBe(
-      '暂停没做成：workflow_gone',
-    );
-    expect(describeTimeline(rec('done_rejected', { code: 'done_rejected', reasons: ['a', 'b'] }))).toBe(
-      '交活被退回：a；b',
-    );
-    expect(describeTimeline(rec('done_rejected', { code: 'not_verifiable_yet', reasons: ['x'] }))).toBe(
-      '交活暂时核实不了：x',
-    );
+    expect(views).toEqual([
+      {
+        id: 'a1',
+        taskId: 't1',
+        question: '几位？',
+        askedAt: '2026-09-25T08:00:00Z',
+        context: '#12 登录页加验证码',
+        link: '/tasks/t1',
+      },
+      { id: 'a2', taskId: 'gone', question: '几位？', askedAt: '2026-09-25T08:00:00Z', link: '/tasks/gone' },
+    ]);
+  });
+
+  it('关闭写进去的标记不冒充回答：按推荐先做的追问被关闭后，不算出「回答之后会怎样」', () => {
+    const scoped: AskRecord = { ...ask('a1', 't1'), scope: 'task', recommended: '4' };
+    expect(askLate({ ...scoped, answer: '6' }, 'running')).toBeDefined();
+    expect(askLate({ ...scoped, answer: LEGACY_ASK_CLOSED_ANSWER }, 'running')).toBeUndefined();
+  });
+
+  it('主页「要你拍的」只有通知：没有任何一条叫追问', () => {
+    const decisions = homeDecisions({ notifications: [], taskOf: () => undefined });
+    expect(decisions).toEqual([]);
   });
 });
 

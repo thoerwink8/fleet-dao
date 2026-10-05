@@ -21,7 +21,6 @@ export const TierEnum = z.enum(['fast', 'medium', 'heavyweight']);
 export type Tier = z.infer<typeof TierEnum>;
 
 export const EffortEnum = z.enum(['high', 'medium']);
-export type Effort = z.infer<typeof EffortEnum>;
 
 export const TierDecisionSchema = z.object({
   tier: TierEnum,

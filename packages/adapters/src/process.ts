@@ -2,8 +2,10 @@
 // 「整个会话」= 执行体、它的子孙、它们各自的进程组、带会话标记的进程；放进 scope（fleet-agent-scope）时以 cgroup 为准。
 // 执行体退出后会话里还活着的（后台服务、脱离了进程组的测试）一律收掉：谁起的谁回收，不留孤儿占树。
 // 给了 io（收发目录）就不接管道、改走文件（detached.ts）：会话脱开引擎进程，引擎重启了照样接回（attach）。
+
 import { spawn, spawnSync } from 'node:child_process';
 import { basename, join } from 'node:path';
+import { errMessage } from '@fleet-dao/shared/util';
 import { type DetachedIo, IO_FILES, runDetached, WRAPPER } from './detached.ts';
 import { LineSplitter } from './lines.ts';
 import {
@@ -247,7 +249,7 @@ export function runAgentProcess(
     const timers: NodeJS.Timeout[] = [];
     const reapErrors: string[] = [];
     const record = (err: unknown) => {
-      hookError ??= err instanceof Error ? err.message : String(err);
+      hookError ??= errMessage(err);
     };
 
     const finish = (extra: Partial<AgentProcessResult> = {}) => {
@@ -308,7 +310,7 @@ export function runAgentProcess(
       launch = launchSpec(spec);
     } catch (err) {
       reaped = { stragglers: 0, leftovers: 0 };
-      finish({ spawnError: err instanceof Error ? err.message : String(err) });
+      finish({ spawnError: errMessage(err) });
       return;
     }
     const [bin, ...args] = launch.command;

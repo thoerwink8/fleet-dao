@@ -6,6 +6,8 @@ import { IntentRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   createGatewaySeen,
+  feishuGatewayPart,
+  GATEWAY_FEISHU_OFF,
   GATEWAY_NO_PASS,
   GATEWAY_SILENT_MS,
   type GatewaySeen,
@@ -106,6 +108,34 @@ describe('飞书网关还来不来', () => {
     expect(await s.report()).toEqual({
       status: 503,
       item: { ok: false, code: 'unchecked', message: '没查成：后端起来才 12 秒，意图卡轮询还没来过' },
+    });
+  });
+
+  it('【故意造出的失败】#803 这台明说不接飞书（off）：就算通行证在，这一项也报「未接」，不等一个不会来的网关；没写 off 的照旧查', async () => {
+    const seen = createGatewaySeen(() => T0);
+    const token = 'x'.repeat(40);
+    expect(feishuGatewayPart({ feishuOff: true, feishuGatewayToken: token }, seen)).toEqual({
+      check: expect.any(Function),
+      notWired: GATEWAY_FEISHU_OFF,
+    });
+    expect(feishuGatewayPart({ feishuOff: false, feishuGatewayToken: null }, seen)).toMatchObject({
+      notWired: GATEWAY_NO_PASS,
+    });
+    // 配了通行证又没说 off：查网关来没来（就是 seen 本身），不报「未接」
+    const live = feishuGatewayPart({ feishuOff: false, feishuGatewayToken: token }, seen);
+    expect(live).toBe(seen);
+    expect('notWired' in live).toBe(false);
+    // 走一遍健康页：off 的这台不红（ok、not_wired），不是「没查成」
+    const h = harness({
+      config: { feishuOff: true, feishuGatewayToken: null },
+      health: healthOf(feishuGatewayPart({ feishuOff: true, feishuGatewayToken: token }, seen)),
+    });
+    const res = await h.cockpit.request('/healthz');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as HealthReport).checks.feishu_gateway).toEqual({
+      ok: true,
+      status: 'not_wired',
+      message: GATEWAY_FEISHU_OFF,
     });
   });
 

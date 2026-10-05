@@ -8,8 +8,10 @@
 //   另一个池本来就读不到。照旧留着旧读数、不报警，但这一轮记 partial 写明哪几个池没读，不记成全读到了。
 // - 配置读不到、认不出：这一轮整个没跑成，当场报（key 单独一个），不拿上一次的配置顶。
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
+
 import type { PoolQuotaResult, QuotaConfig, QuotaReport } from '@fleet-dao/adapters/quota';
 import type { PoolQuotaSnapshot, ScheduleResult } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { QuotaReadRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 
@@ -64,8 +66,6 @@ export class QuotaReadFailedError extends Error {
   }
 }
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
 /** 读取器丢过窗口（notes 里写着「没收」）就不算读全。 */
 export const isCompleteRead = (r: Extract<PoolQuotaResult, { ok: true }>): boolean =>
   !r.notes.some((n) => n.includes('没收'));
@@ -78,7 +78,7 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
   try {
     config = await deps.loadConfig();
   } catch (err) {
-    const why = message(err);
+    const why = errMessage(err);
     await deps.raise({
       key: configAlertKey(),
       title: '额度读取没跑：配置读不到',
@@ -163,7 +163,7 @@ export async function runQuotaReadJob(deps: QuotaReadJobDeps): Promise<QuotaRead
   try {
     r = await round(deps);
   } catch (err) {
-    r = { result: { outcome: 'failed', why: `额度读取没跑成：${message(err)}` } };
+    r = { result: { outcome: 'failed', why: `额度读取没跑成：${errMessage(err)}` } };
   }
   const { result } = r;
   await deps.runs.finish(runId, result, deps.now());

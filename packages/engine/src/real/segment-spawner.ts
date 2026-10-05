@@ -22,6 +22,8 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { routeLaunchFacts, savePoolQuota } from '@fleet-dao/db';
 import { routeEffortProblem } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
+import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
 import {
@@ -33,6 +35,7 @@ import {
   type WiredHost,
   wiredHostNames,
 } from './hosts.ts';
+import { type MemoryPeakDeps, type MemoryPeakResult, sampleMemoryPeak } from './memory-peak.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 /** 总时长比 one-shot 的时限早多久到（毫秒）：驱动先收场，one-shot 的时限信号是兜底。 */
@@ -52,13 +55,21 @@ export interface SegmentSpawnerDeps {
   baseEnv: Readonly<Record<string, string | undefined>>;
   /** 一个会话的内存软上限、硬上限、swap 上限（MB）：照 limits.ts 的 SESSION_MEMORY_*，swap 一般给 0。 */
   resources: { memoryHighMb: number; memoryMaxMb: number; swapMaxMb: number };
+  /**
+   * 拼车池上的会话没成（退出码不是 0、不是我们叫停的）：被拒的证据当场交出去（#194 方案 4.3），由切号判是不是「拼车用不了」、
+   * 要不要当场切独享。只发出去、不等：切号要等这一个会话收场，等它会互相卡住。抛了只记日志。
+   */
+  onCarpoolRejection?: (rejection: CarpoolRejection) => void;
+  /**
+   * 会话 scope 的内存峰值怎么读（real/memory-peak.ts 的 productionMemoryPeak）：给了就采、写进 runs.memory_peak_mb（#948）；
+   * 不给（测试、没有 cgroup 的开发机）就不采，那一列留空。
+   */
+  memoryPeak?: MemoryPeakDeps;
   /** 帮手脚本、sudo 前缀（测试里给假帮手）。 */
   helper?: string;
   sudo?: readonly string[];
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
-
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 function sizeArg(name: string, mb: number): string {
   if (!Number.isSafeInteger(mb) || mb < 0) {
@@ -162,7 +173,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       windows,
     }).then(
       () => undefined,
-      (err: unknown) => log('一次性会话读到的额度没记上', { poolId: route.poolId, error: message(err) }),
+      (err: unknown) => log('一次性会话读到的额度没记上', { poolId: route.poolId, error: errMessage(err) }),
     );
   };
 
@@ -200,6 +211,15 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       session: { mode: 'new', id: driver.newSessionId(runId).id },
       purpose: 'work',
     };
+    // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
+    const peak = deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
+    let peakResult: MemoryPeakResult | undefined;
+    const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
+      if (!peak || peakResult) return peakResult;
+      peakResult = await peak.stop();
+      if (peakResult.why !== undefined) log('会话内存峰值没读到', { runId, why: peakResult.why });
+      return peakResult;
+    };
     try {
       const report = await driver.run(spec, {
         signal: cmd.signal,
@@ -207,13 +227,49 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
           : {}),
       });
-      return outcomeOfReport(report);
+      const outcome = outcomeOfReport(report);
+      const measured = await finishPeak();
+      if (measured) {
+        outcome.facts = {
+          ...outcome.facts,
+          ...(measured.mb !== undefined ? { memoryPeakMb: measured.mb } : { memoryPeakWhy: measured.why }),
+        };
+      }
+      if (
+        deps.onCarpoolRejection &&
+        route.orgKind === 'carpool' &&
+        !outcome.killed &&
+        outcome.exitCode !== 0
+      ) {
+        const resets = outcome.facts?.resetsAt ? new Date(outcome.facts.resetsAt) : undefined;
+        try {
+          deps.onCarpoolRejection({
+            at: new Date(),
+            ...(outcome.facts?.quotaExhausted ? { code: 'quota_exhausted' } : {}),
+            ...(outcome.facts?.httpStatus !== undefined ? { httpStatus: outcome.facts.httpStatus } : {}),
+            ...(resets && !Number.isNaN(resets.getTime()) ? { resetsAt: resets } : {}),
+            // 执行体报的原话（reclaude 的「拼车 5 小时额度已用完，约 N 分钟后重置」在终帧里）排在前面：判是哪一种、几点恢复靠它
+            text: [
+              report.facts.terminal?.detail,
+              outcome.facts?.detail,
+              outcome.facts?.rawError,
+              outcome.stderr,
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          });
+        } catch (err) {
+          log('拼车被拒的证据没交给切号', { runId, error: errMessage(err) });
+        }
+      }
+      return outcome;
     } finally {
+      await finishPeak().catch(() => undefined);
       await deps.trees.remove(tmpDir).catch((err: unknown) => {
         log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
           runId,
           tmpDir,
-          error: message(err),
+          error: errMessage(err),
         });
       });
     }

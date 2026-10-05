@@ -4,6 +4,16 @@ import { createHmac } from 'node:crypto';
 import type { TestDb } from '@fleet-dao/db/testing';
 import { resetTestDb } from '@fleet-dao/db/testing';
 import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import {
+  createMemoryStore,
+  createPgStore,
+  DEV_RUN_ID,
+  DEV_USER_ID,
+  devFixtures,
+  IDS,
+  type MemoryData,
+} from '@fleet-dao/store';
+import { seedPg } from '@fleet-dao/store/testing';
 import type { Hono } from 'hono';
 import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
@@ -11,12 +21,9 @@ import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed }
 import type { Config } from '../src/config.ts';
 import type { DemoPublisher } from '../src/demo.ts';
 import type { Deps } from '../src/deps.ts';
-import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { createMemoryIntentStore } from '../src/intent-store.ts';
-import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
 import type { ScryptParams } from '../src/password.ts';
-import { createPgStore } from '../src/pg-store.ts';
 import type {
   ChangeFeed,
   FeedEvent,
@@ -30,7 +37,6 @@ import type {
   WorkflowControl,
 } from '../src/ports.ts';
 import type { SseRelay } from '../src/sse.ts';
-import { seedPg } from './pg-fixtures.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
 
@@ -65,6 +71,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     temporalNamespace: 'fleet',
     fleetTaskQueue: 'fleet',
     engineOff: false,
+    // 环境页和顶栏徽标读它（#820 片 1）：测试里给一个认得出的名字，才看得出「读到了」和「读不到」的差别
+    machineName: '测试机',
+    feishuOff: false,
     ...overrides,
   };
 }
@@ -97,7 +106,7 @@ export interface Harness<S extends Store = Store> {
   config: Config;
   store: S;
   changes: ChangeFeed;
-  /** workflowId 是目标工作流的编号（req:owner/name#issueNumber 或 sub:subtaskId），不是调用方传的原始 taskId。 */
+  /** workflowId 是目标工作流的编号（task:owner/name#issueNumber），不是调用方传的原始 taskId。 */
   signals: { workflowId: string; signal: TaskSignal }[];
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];
@@ -129,6 +138,10 @@ export interface HarnessOptions {
   routingLayers?: Deps['routingLayers'];
   /** 每条路由的思考档位（#470）；不给就是没接上（内存版、开发环境一样）。 */
   routingEfforts?: Deps['routingEfforts'];
+  /** 会话用户切号的现状（#194，额度页顶上一行）；不给就是没接上（内存版、开发环境一样）。 */
+  orgSwitch?: Deps['orgSwitch'];
+  /** 拼车额度对账（#194 方案 4.7）；不给就是没接上。 */
+  carpoolReconcile?: Deps['carpoolReconcile'];
   /** /changelog 发布版本号读里程碑和 CHANGELOG.md 的替身；不给就是没接上（内存版、开发环境一样）。 */
   release?: Deps['release'];
   /**
@@ -171,6 +184,8 @@ function wire<S extends Store>(
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
+    ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
+    ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
     ...(options.release ? { release: options.release } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {

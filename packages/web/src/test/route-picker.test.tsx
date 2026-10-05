@@ -37,6 +37,7 @@ function route(routeId: string, over: Partial<RoutingLayerRoute> = {}): RoutingL
     ban: live('没有禁令、开关开着'),
     exhausted: [],
     inFlight: 0,
+    reserved: 0,
     maxConcurrency: 2,
     ...over,
   };
@@ -142,6 +143,22 @@ describe('换模型的候选按路由两层列', () => {
     expect(byId.get('r-busy')?.blocked).toBeUndefined();
     expect(byId.get('r-busy')?.note).toBe('账号池满 2/2');
     expect(byId.get('r-quota-unknown')?.note).toBe('正在用');
+  });
+
+  test('账号池满按「在跑 + 已选定还没开跑」判（#800，和引擎选路同一个判法）：上限 3、1 在跑 2 预占 = 满，写明各几个；预占没了就不满', () => {
+    const purpose = (over: Partial<RoutingLayerRoute>): RoutingLayerPurpose => ({
+      ...PLAN,
+      models: [model('opus-5.5', 'Opus 5.5', [route('r-pool', { maxConcurrency: 3, ...over })])],
+    });
+    const note = (over: Partial<RoutingLayerRoute>) =>
+      routeOptions(purpose(over), undefined, undefined)[0]?.note;
+    expect(note({ inFlight: 1, reserved: 2 })).toBe('账号池满 3/3（在跑 1、已选定还没开跑 2）');
+    expect(note({ inFlight: 1, reserved: 1 })).toBeUndefined();
+    expect(note({ inFlight: 1, reserved: 0 })).toBeUndefined();
+    // 满了不挡选：引擎照常排队等空位，和只数在跑时一样
+    expect(
+      routeOptions(purpose({ inFlight: 1, reserved: 2 }), undefined, undefined)[0]?.blocked,
+    ).toBeUndefined();
   });
 
   test('对话框里：死的那条点不了、原因写着；排在前面的是两层的顺序', async () => {

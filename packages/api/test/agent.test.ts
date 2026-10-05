@@ -1,16 +1,8 @@
-import {
-  AskResponse,
-  HistoryResponse,
-  requirementWorkflowId,
-  subtaskWorkflowId,
-  TaskResponse,
-  TimelineResponse,
-} from '@fleet-dao/shared';
+import { AskResponse, HistoryResponse, TaskResponse } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
-import { type TaskSignal, WorkflowGoneError, WorkflowUnavailableError } from '../src/ports.ts';
 import { signPayload } from '../src/tokens.ts';
-import { agentRequest, DEV_RUN_ID, errorCode, harness, IDS, write } from './harness.ts';
+import { agentRequest, DEV_RUN_ID, DEV_USER_ID, errorCode, harness, IDS, write } from './harness.ts';
 
 describe('fleet 令牌', () => {
   it('签出来的能验过；换密钥、改内容、过期、寿命超上限、签发时间在未来都不认', () => {
@@ -141,7 +133,7 @@ describe('/agent/v1 的七个动作', () => {
     expect(body.plan.map((s) => s.state)).toEqual(['done', 'in_progress', 'pending']);
   });
 
-  it('plan：整张替换，写进度，不叫醒工作流（只有 ask/done/blocked 才叫醒）；同时两步在进行就 400', async () => {
+  it('plan：整张替换，写进度，不发信号；同时两步在进行就 400', async () => {
     const h = harness();
     const token = h.agentToken();
     const bad = await h.agent.request(
@@ -172,7 +164,7 @@ describe('/agent/v1 的七个动作', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('say 不叫醒工作流，blocked 叫醒（写进度都照常）', async () => {
+  it('say、blocked 只写进度，不发信号（引擎的任务工作流不听 fleet 命令的叫醒，#901）', async () => {
     const h = harness();
     const token = h.agentToken();
     expect(
@@ -184,15 +176,15 @@ describe('/agent/v1 的七个动作', () => {
     );
     expect(blocked.status).toBe(200);
     expect(h.store.data.progress.slice(-2).map((p) => p.kind)).toEqual(['say', 'blocked']);
-    expect(h.signals.map((s) => (s.signal.name === 'agentEvent' ? s.signal.kind : s.signal.name))).toEqual([
-      'blocked',
-    ]);
+    expect(h.signals).toHaveLength(0);
   });
 
-  it('叫醒工作流失败不挡命令，但要留日志', async () => {
+  it('fleet 命令不依赖 Temporal：工作流连不上也照常写库、回 200（根本不去发信号）', async () => {
+    let called = 0;
     const h = harness({
       workflows: {
         async signal() {
+          called += 1;
           throw new Error('temporal 连不上');
         },
       },
@@ -202,7 +194,8 @@ describe('/agent/v1 的七个动作', () => {
       agentRequest(h.agentToken(), 'POST', { reason: '缺短信服务的测试账号', needs: 'access' }),
     );
     expect(res.status).toBe(200);
-    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('叫醒工作流没成功'))).toBe(true);
+    expect(called).toBe(0);
+    expect(h.store.data.progress.at(-1)).toMatchObject({ kind: 'blocked' });
   });
 
   it('history：按关键词翻本仓做过的需求', async () => {
@@ -216,21 +209,10 @@ describe('/agent/v1 的七个动作', () => {
   });
 });
 
-describe('叫醒目标：只有 ask/done/blocked 才发信号，且发给会话所属的工作流', () => {
-  it('say、plan 不发任何信号', async () => {
+describe('fleet 命令一律只写库、不发信号（#901）', () => {
+  // 以前 ask/done/blocked 会给会话所属的工作流发 agentEvent（编号 req:/sub:），引擎的任务工作流不听这个信号，发出去没人收。
+  it('plan、say、blocked、done、ask 都不发任何信号：子任务会话、需求自己的会话都一样', async () => {
     const h = harness();
-    const token = h.agentToken();
-    await h.agent.request('/agent/v1/say', agentRequest(token, 'POST', { text: '写好测试了' }));
-    await h.agent.request(
-      '/agent/v1/plan',
-      agentRequest(token, 'POST', { steps: [{ title: '写实现', state: 'in_progress' }] }),
-    );
-    expect(h.signals).toHaveLength(0);
-  });
-
-  it('子任务会话（session.subtaskId 有值）的 done 直接拼子任务工作流编号 sub:<subtaskId>，不用查库', async () => {
-    const h = harness();
-    const token = h.agentToken(); // 默认样例会话就带 subtaskId: IDS.sub12a
     h.store.data.progress.push({
       id: 'wake-target-test-run',
       runId: DEV_RUN_ID,
@@ -238,21 +220,14 @@ describe('叫醒目标：只有 ask/done/blocked 才发信号，且发给会话�
       kind: 'test',
       payload: { passed: true, command: 'pnpm check' },
     });
-    const res = await h.agent.request(
-      '/agent/v1/done',
-      agentRequest(token, 'POST', { summary: '写完了', testsPassed: true }),
-    );
-    expect(res.status).toBe(200);
-    expect(h.signals).toEqual([
-      {
-        workflowId: subtaskWorkflowId(IDS.sub12a),
-        signal: { name: 'agentEvent', runId: DEV_RUN_ID, kind: 'done' },
-      },
-    ]);
-  });
+    const token = h.agentToken(); // 默认样例会话就带 subtaskId: IDS.sub12a
+    const post = (path: string, body: unknown, t = token) =>
+      h.agent.request(`/agent/v1/${path}`, agentRequest(t, 'POST', body));
+    expect((await post('say', { text: '写好测试了' })).status).toBe(200);
+    expect((await post('plan', { steps: [{ title: '写实现', state: 'in_progress' }] })).status).toBe(200);
+    expect((await post('blocked', { reason: '缺账号', needs: 'access' })).status).toBe(200);
+    expect((await post('done', { summary: '写完了', testsPassed: true })).status).toBe(200);
 
-  it('需求自己的会话（session.subtaskId 没有值）的 ask 查库拼需求工作流编号 req:owner/name#issueNumber', async () => {
-    const h = harness();
     const requirementRunId = 'run-requirement-triage';
     h.store.data.runs.push({
       id: requirementRunId,
@@ -264,24 +239,19 @@ describe('叫醒目标：只有 ask/done/blocked 才发信号，且发给会话�
       startedAt: h.clock.now.toISOString(),
     });
     // 故意不传 subtaskId：这次会话不属于任何子任务（分诊、需求文档、方案这几步都是这样）。
-    const token = signAgentToken(h.config.agentTokenSecret, {
+    const requirementToken = signAgentToken(h.config.agentTokenSecret, {
       taskId: IDS.task12,
       runId: requirementRunId,
       ttlSeconds: 3600,
       now: h.clock.now,
     });
-    const res = await h.agent.request(
-      '/agent/v1/ask',
-      agentRequest(token, 'POST', {
-        question: '要不要支持邮箱验证码？',
-        options: ['要', '不要'],
-        recommend: '不要',
-      }),
+    const res = await post(
+      'ask',
+      { question: '要不要支持邮箱验证码？', options: ['要', '不要'], recommend: '不要' },
+      requirementToken,
     );
     expect(res.status).toBe(200);
-    expect(h.signals).toHaveLength(1);
-    expect(h.signals[0]?.workflowId).toBe(requirementWorkflowId({ owner: 'example', name: 'canary' }, 12));
-    expect(h.signals[0]?.signal).toMatchObject({ name: 'agentEvent', runId: requirementRunId, kind: 'ask' });
+    expect(h.signals).toHaveLength(0);
   });
 });
 
@@ -300,7 +270,7 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       payload: { passed: true, command: 'pnpm check' },
     });
 
-  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条；blocked/done 只叫醒一次（say/plan 不叫醒）；ask 同一句也只开一条', async () => {
+  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条；ask 同一句也只开一条', async () => {
     const h = harness();
     passingTest(h);
     const before = h.store.data.progress.length;
@@ -322,11 +292,7 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       'blocked',
       'done',
     ]);
-    // say、plan 各重试了一次也一个信号都不发；blocked、done 各只发一次（幂等键去重）。
-    expect(h.signals.map((s) => (s.signal.name === 'agentEvent' ? s.signal.kind : s.signal.name))).toEqual([
-      'blocked',
-      'done',
-    ]);
+    expect(h.signals).toHaveLength(0);
 
     const askBody = { question: '几位？', options: ['6 位', '4 位'], recommend: '6 位' };
     const asked = [await post(h, 'ask', askBody, 'key-ask')];
@@ -397,28 +363,25 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
 
   it('同一个键用在别的命令上：409，这次不执行，也不回上一条命令的结果', async () => {
     const h = harness();
-    // say 不叫醒工作流：这里改用 blocked 起手，才能顺带证明「409 不执行」连信号也没多发一条。
     expect((await post(h, 'blocked', { reason: '一', needs: 'access' }, 'key-x')).status).toBe(200);
     const before = h.store.data.progress.length;
     const res = await post(h, 'done', { summary: '写完了', testsPassed: true }, 'key-x');
     expect(res.status).toBe(409);
     expect(await errorCode(res)).toBe('idempotency_key_reused');
     expect(h.store.data.progress).toHaveLength(before);
-    expect(h.signals).toHaveLength(1);
   });
 
   it('上一次卡住、被接管以后才做完：它的回执记不上，第三次重试拿接管那次的结果、不再执行', async () => {
     let release: () => void = () => {};
     let calls = 0;
-    const h = harness({
-      workflows: {
-        async signal() {
-          calls += 1;
-          if (calls === 1) await new Promise<void>((resolve) => (release = resolve));
-        },
-      },
-    });
-    // 用 blocked（叫醒工作流的一类）：靠假 workflows.signal 卡住来模拟「上一次还没做完」，say 不叫醒、卡不住。
+    const h = harness();
+    // 靠让第一次写进度卡住来模拟「上一次还没做完」（以前是卡在发信号上，现在 fleet 命令不发信号了）。
+    const realAppend = h.store.appendProgress.bind(h.store);
+    h.store.appendProgress = async (...args) => {
+      calls += 1;
+      if (calls === 1) await new Promise<void>((resolve) => (release = resolve));
+      return realAppend(...args);
+    };
     const reasons = () =>
       h.store.data.progress
         .filter((p) => p.kind === 'blocked')
@@ -450,7 +413,7 @@ describe('fleet ask：问他不挡路（#259）', () => {
     h.agent.request('/agent/v1/ask', agentRequest(h.agentToken(), 'POST', body));
   const sms = { question: '用哪家短信？', options: ['腾讯云', '阿里云'], recommend: '阿里云' };
 
-  it('这张单范围内的岔路：当场回「已按推荐先做」，不等回答；推荐的排第一个落库；同一句再问复用同一条、只叫醒一次', async () => {
+  it('这张单范围内的岔路：当场回「已按推荐先做」，不等回答；推荐的排第一个落库；同一句再问复用同一条', async () => {
     const h = harness();
     const first = AskResponse.parse(await (await ask(h, sms)).json());
     expect(first).toMatchObject({ status: 'assumed', answer: '阿里云' });
@@ -464,7 +427,7 @@ describe('fleet ask：问他不挡路（#259）', () => {
     const again = AskResponse.parse(await (await ask(h, sms)).json());
     expect(again).toEqual(first);
     expect(h.store.data.asks).toHaveLength(1);
-    expect(h.signals.map((s) => s.signal.name)).toEqual(['agentEvent']);
+    expect(h.signals).toHaveLength(0);
   });
 
   it('超出这张单的范围：回 outside（另开单等他拍，这张单绕开接着做），不给工作流加人闸', async () => {
@@ -475,66 +438,22 @@ describe('fleet ask：问他不挡路（#259）', () => {
     expect(body.status).toBe('outside');
     expect(body.answer).toBeUndefined();
     expect(h.store.data.asks[0]).toMatchObject({ scope: 'outside', recommended: '阿里云' });
-    expect(h.signals.map((s) => s.signal.name)).toEqual(['agentEvent']);
+    expect(h.signals).toHaveLength(0);
   });
 
-  it('碰了人闸：先按推荐做，给这张单的工作流加人闸（合并前等批）；重问同一句再加一次（工作流自己认「已经有了」）', async () => {
+  it('【故意造出的失败】碰了人闸：引擎的任务工作流不能按提问追加人闸，问题记下但明说没加上（409 hold_not_supported），不回「合并前等批」装作拦住了；重问同一句还是 409、不多记一条', async () => {
     const h = harness();
     const held = { ...sms, question: '短信要开按量付费，用哪家？', hold: 'spend' };
-    const body = AskResponse.parse(await (await ask(h, held)).json());
-    expect(body).toMatchObject({ status: 'held', answer: '阿里云' });
-    expect(h.store.data.asks[0]).toMatchObject({ scope: 'hold', hold: 'spend' });
-    const workflowId = requirementWorkflowId({ owner: 'example', name: 'canary' }, 12);
-    const holds = () => h.signals.filter((s) => s.signal.name === 'requireApproval');
-    expect(holds()).toHaveLength(1);
-    expect(holds()[0]).toMatchObject({
-      workflowId,
-      signal: { name: 'requireApproval', holds: ['spend'], by: `session:${DEV_RUN_ID}` },
-    });
-    await ask(h, held);
-    expect(holds()).toHaveLength(2);
-  });
-
-  it('【故意造出的失败】碰了人闸、引擎连不上：问题记下了，但明说人闸没加上（503），不回「合并前等批」装作拦住了；重试加上', async () => {
-    let down = true;
-    const signals: TaskSignal[] = [];
-    const h = harness({
-      workflows: {
-        async signal(_id, signal) {
-          if (down && signal.name === 'requireApproval')
-            throw new WorkflowUnavailableError('Temporal 连不上');
-          signals.push(signal);
-        },
-      },
-    });
-    const held = {
-      ...sms,
-      question: '要不要删掉旧表？',
-      options: ['删', '留着'],
-      recommend: '留着',
-      hold: 'delete',
-    };
     const res = await ask(h, held);
-    expect(res.status).toBe(503);
-    expect(await errorCode(res)).toBe('hold_not_set');
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('hold_not_supported');
+    expect(body.error.message).toContain('没加上');
     expect(h.store.data.asks).toHaveLength(1);
-    down = false;
-    const retry = AskResponse.parse(await (await ask(h, held)).json());
-    expect(retry).toMatchObject({ status: 'held', answer: '留着' });
-    expect(signals.filter((s) => s.name === 'requireApproval')).toHaveLength(1);
+    expect(h.store.data.asks[0]).toMatchObject({ scope: 'hold', hold: 'spend' });
+    expect((await ask(h, held)).status).toBe(409);
     expect(h.store.data.asks).toHaveLength(1);
-  });
-
-  it('碰了人闸、工作流已经结束（这张单不会再合并）：照常回 held，只记日志', async () => {
-    const h = harness({
-      workflows: {
-        async signal(id) {
-          throw new WorkflowGoneError(id);
-        },
-      },
-    });
-    const body = AskResponse.parse(await (await ask(h, { ...sms, hold: 'spend' })).json());
-    expect(body.status).toBe('held');
+    expect(h.signals).toHaveLength(0);
   });
 
   it('【故意造出的失败】没带选项、没带推荐、推荐不在选项里、选项太多、人闸认不出、既超范围又碰人闸：400 ask_incomplete，一条都不记', async () => {
@@ -557,15 +476,20 @@ describe('fleet ask：问他不挡路（#259）', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('答过了的：再问同一句直接回答案（驾驶舱、飞书、issue 回的都算）', async () => {
+  it('答过了的（库里已有的回答，老数据）：再问同一句直接回答案', async () => {
     const h = harness();
-    const session = await h.login();
     const first = AskResponse.parse(await (await ask(h, sms)).json());
-    const answered = await h.cockpit.request(
-      `/api/asks/${first.askId}/answer`,
-      write('POST', session, { answer: '腾讯云' }),
+    // 驾驶舱的回答接口现在一律 409（#928）：库里的回答只可能是以前留下的，这里直接写库当老数据
+    await h.store.answerAsk(
+      { askId: first.askId, answer: '腾讯云', by: { kind: 'user', id: DEV_USER_ID } },
+      {
+        actor: { kind: 'user', id: DEV_USER_ID },
+        action: 'ask.answer',
+        target: `task:${IDS.task12}`,
+        via: 'cockpit',
+        ok: true,
+      },
     );
-    expect(answered.status).toBe(200);
     expect(AskResponse.parse(await (await ask(h, sms)).json())).toEqual({
       askId: first.askId,
       status: 'answered',
@@ -610,13 +534,13 @@ describe('fleet done 要核实', () => {
     return body.error.details.reasons.join('\n');
   }
 
-  it('会话里最后一次测试是绿的：收下（PR 由引擎在会话后开，不要求带），记进度并叫醒工作流', async () => {
+  it('会话里最后一次测试是绿的：收下（PR 由引擎在会话后开，不要求带），记进度（不发信号）', async () => {
     const h = harness();
     testRun(h, true);
     const res = await done(h, { summary: '接口写完了', testsPassed: true });
     expect(res.status).toBe(200);
     expect(h.store.data.progress.at(-1)).toMatchObject({ kind: 'done' });
-    expect(h.signals.at(-1)?.signal).toMatchObject({ name: 'agentEvent', kind: 'done' });
+    expect(h.signals).toHaveLength(0);
   });
 
   it('返工轮次带着已有的 PR 编号、这张 PR 的 CI 全绿：PR 在、分支对也收下（554-2 起判 PR 的 CI，不看会话里跑测试）', async () => {
@@ -689,9 +613,8 @@ describe('fleet done 要核实', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('退回要落库：操作记录里有，任务时间线上看得到，不只打日志', async () => {
+  it('退回要落库：操作记录里有，会话进度里也有，不只打日志', async () => {
     const h = harness();
-    const session = await h.login();
     const res = await done(h, { summary: '写完了', testsPassed: true });
     expect(res.status).toBe(422);
     expect(h.store.data.audit.at(-1)).toMatchObject({
@@ -702,13 +625,9 @@ describe('fleet done 要核实', () => {
       ok: false,
       error: 'done_rejected',
     });
-    const timeline = TimelineResponse.parse(
-      await (
-        await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline`, { headers: { cookie: session.cookie } })
-      ).json(),
-    );
-    expect(timeline.items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
-    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过 `pnpm test:changed`');
+    const { items } = await h.store.listTimeline(IDS.task12, { limit: 1 });
+    expect(items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
+    expect(JSON.stringify(items[0]?.payload)).toContain('没查到本次会话跑过 `pnpm test:changed`');
   });
 
   it('带的 PR 还没同步进库：409，过一会儿再交（也落库）', async () => {

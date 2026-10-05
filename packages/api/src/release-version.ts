@@ -5,10 +5,12 @@
 //   一次一条 GraphQL，只在打开 /changelog、点「发布」时读；限时 READ_TIMEOUT_MS，读不完照「读不到」报。
 // - 读不到（这台后端没接上、受管的仓里没有 fleet-dao、GitHub、CHANGELOG.md）一律回 unreadable 带原因；判法不让发
 //   （一张版本里程碑都没开、CHANGELOG.md 已经有这一版或比它新的）回 blocked 带判法的原话。都不回「上一版 +1」、不回 v1、不回 0。
+
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { type MilestoneRef, releaseVersion } from '@fleet-dao/conventions';
 import { ReleaseVersionResponse, splitChangelog, WebRoutes } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import type { Hono } from 'hono';
 import type { z } from 'zod';
 import type { Deps } from './deps.ts';
@@ -67,7 +69,7 @@ export async function readReleaseVersion(input: ReadReleaseVersionInput): Promis
   try {
     open = await untilAborted(source.openMilestones({ owner: repo.owner, name: repo.name }, signal), signal);
   } catch (e) {
-    const why = timeout.aborted ? `${timeoutMs / 1000} 秒没读完` : text(e);
+    const why = timeout.aborted ? `${timeoutMs / 1000} 秒没读完` : errMessage(e);
     input.log.warn('读 GitHub 上开着的里程碑失败（/changelog 的发布版本号）', { repo: slug, error: why });
     return unreadable(`读 ${slug} 开着的里程碑失败：${why}`);
   }
@@ -76,15 +78,15 @@ export async function readReleaseVersion(input: ReadReleaseVersionInput): Promis
   try {
     released = splitChangelog(await source.changelog()).released;
   } catch (e) {
-    input.log.warn('读不了仓根的 CHANGELOG.md（/changelog 的发布版本号）', { error: text(e) });
-    return unreadable(`读不了这台后端上的仓根 CHANGELOG.md（核已发的版本要用）：${text(e)}`);
+    input.log.warn('读不了仓根的 CHANGELOG.md（/changelog 的发布版本号）', { error: errMessage(e) });
+    return unreadable(`读不了这台后端上的仓根 CHANGELOG.md（核已发的版本要用）：${errMessage(e)}`);
   }
 
   try {
     const { version, milestone, others } = releaseVersion(open, released);
     return { state: 'ok', version, milestone, others, asOf };
   } catch (e) {
-    return { state: 'blocked', why: text(e), asOf };
+    return { state: 'blocked', why: errMessage(e), asOf };
   }
 }
 
@@ -121,8 +123,4 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
       },
     );
   });
-}
-
-function text(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }

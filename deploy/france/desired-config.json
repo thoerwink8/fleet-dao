@@ -51,6 +51,14 @@
         "value": "/home/{user}/.local/bin/reclaude",
         "说明": "reclaude 装在会话用户自己家里，{user} 换成会话用户"
       },
+      "FLEET_CARPOOL_MAX_CONCURRENCY": {
+        "value": "4",
+        "说明": "这台最多同时开几个拼车会话（#194 方案 4.7）：引擎起来时核库里拼车池（catalog.json 里 orgKind 为 carpool 的池）并发上限加起来是不是这个数，对不上推 carpool-cap:registry 提醒。各台（法国、本机档）写的加起来不许超过下面的总上限，配置检查（config.mjs diff-local）核；加一台机器要在它自己的期望里登记。创始人本机固定独享、不拼车，不登记。数值只放在两份期望里，代码里没有默认数（创始人：这类数不许写死、要能配）"
+      },
+      "FLEET_CARPOOL_TOTAL_CAP": {
+        "value": "6",
+        "说明": "拼车并发总上限，各台（deploy/france、deploy/local 的期望）写的要逐字一样；各台 FLEET_CARPOOL_MAX_CONCURRENCY 加起来超过它就红。同号多机同时高频用拼车容易被风控、也免得一台把整窗额度抢光（#194 方案 4.7，建议法国 4、本机 WSL 演练台 2）。引擎自己不读这一项，只有配置检查读"
+      },
       "FLEET_FORK_MAX_CONTEXT_TOKENS": {
         "value": "100000",
         "说明": "换账号池接着干时，上一轮的上下文比这个小才 fork 续，大了开新会话带接力任务书"
@@ -70,6 +78,10 @@
     },
     "api.env": {
       "FLEET_ENV": "production",
+      "FLEET_MACHINE_NAME": {
+        "value": "法国",
+        "说明": "这台机器给人看的名字：驾驶舱顶栏徽标和环境页（#820 片 1）用它，和引擎那份 engine.env 同一项；本机档写「本机」（deploy/local/desired-config.json 登记的差别）。名字不算要保密的东西，当公开值"
+      },
       "FLEET_PUBLIC_URL": {
         "private": "88b74fe7c864848610dc899073d2d233b013b058861bb79a2bc292f1281d37be",
         "说明": "浏览器看到的驾驶舱地址（香港的域名）：私有值"

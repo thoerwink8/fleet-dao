@@ -7,19 +7,29 @@ import {
   BoardResponse,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
+  CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
   DEMO_MODULES,
   DEMO_STRICT_DEFAULT,
   DemoLinksResponse,
   type DemoScope,
+  EnvResponseSchema,
+  flowStages,
   HARD_BANS,
   HomeResponseSchema,
   type HostId,
   hardBanFor,
   JobsResponse,
+  LEGACY_ASK_CLOSED_ANSWER,
+  LegacyAsksResponse,
   MeResponse,
   NotificationsResponse,
+  PASSWORD_MIN_LENGTH,
+  POOL_HOLDS_SETTING,
+  PoolHoldsResponse,
   PoolsResponse,
+  poolFull,
+  poolHoldsView,
   type RealtimeTable,
   ReleaseVersionResponse,
   ReposResponse,
@@ -28,8 +38,8 @@ import {
   RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
-  RunStepsResponse,
   readSegmentRun,
+  revocationProblem,
   routeEffortChoices,
   routeEffortProblem,
   SETTING_SCHEMAS,
@@ -43,8 +53,8 @@ import {
   summarizeUsage,
   TaskActionRequest,
   TaskDetailResponse,
-  TimelineResponse,
-  UpdateChannelRequest,
+  taskFlow,
+  UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
@@ -161,6 +171,27 @@ function askEffect(a: MAsk, state: TaskState): Ask['effect'] {
   return 'change';
 }
 
+/**
+ * 主页引擎那一格的演示：默认正常；地址上加 ?mockEngine=off / down / unknown 看另外三种（开发、演示版看样子用，真后端不读它）。
+ * 认不出的值按正常算，不报错：它只影响假数据的样子。
+ */
+function mockEngine() {
+  const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockEngine');
+  switch (v) {
+    case 'off':
+      return {
+        state: 'off' as const,
+        detail: '这台机器按设置没开引擎（临时调整）',
+      };
+    case 'down':
+      return { state: 'down' as const, detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' };
+    case 'unknown':
+      return { state: 'unknown' as const, detail: '这台后端没有接引擎探针，没查成' };
+    default:
+      return { state: 'on' as const };
+  }
+}
+
 export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
@@ -176,6 +207,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     defaultScope: DemoScope;
     defaultPublished: boolean;
   } = { links: [], defaultScope: DEMO_STRICT_DEFAULT, defaultPublished: false };
+
+  /** 假数据里的账密（只在这个模拟器里存明文，真后端只存哈希）：没设过就是空的。 */
+  const mockCreds: { username?: string; password?: string; changedAt?: string } = {};
 
   const iso = () => new Date(now()).toISOString();
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -221,6 +255,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   }
   function poolRunning(poolId: string): number {
     return allRuns().filter((r) => isRunning(r) && routeInfo(r.routeId).route?.poolId === poolId).length;
+  }
+  /** 已选定还没开跑的（排队中、没结束）：和真后端一样占池的名额（#757 预占）。 */
+  function poolReserved(poolId: string): number {
+    return allRuns().filter(
+      (r) => !r.startedAt && !r.endedAt && routeInfo(r.routeId).route?.poolId === poolId,
+    ).length;
   }
 
   /** 和真后端 routeProblem 同一套判据：先硬禁令，再库里的禁令，再看下架。 */
@@ -319,6 +359,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),
       })),
       inFlight: poolRunning(r.poolId),
+      reserved: poolReserved(r.poolId),
       maxConcurrency: pool?.maxConcurrency ?? 0,
     } as const;
   }
@@ -449,7 +490,15 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       if (!route?.alive) continue;
       if (!st.channels.find((c) => c.id === route.channelId)?.enabled) continue;
       const pool = st.pools.find((p) => p.id === route.poolId);
-      if (pool && poolRunning(pool.id) >= pool.maxConcurrency) continue;
+      if (
+        pool &&
+        poolFull({
+          inFlight: poolRunning(pool.id),
+          reserved: poolReserved(pool.id),
+          maxConcurrency: pool.maxConcurrency,
+        })
+      )
+        continue;
       return rid;
     }
     return undefined;
@@ -853,7 +902,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
     async authConfig() {
       await wait();
-      return AuthConfigResponse.parse({ devLogin: false });
+      return AuthConfigResponse.parse({ devLogin: false, passwordLogin: true });
     },
     async devLogin() {
       await wait();
@@ -862,6 +911,73 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async feishuAccess() {
       await wait();
       return MeResponse.parse(st.me);
+    },
+    async passwordLogin(username, password) {
+      await wait();
+      const c = mockCreds;
+      if (
+        c.password === undefined ||
+        c.username?.toLowerCase() !== username.toLowerCase() ||
+        c.password !== password
+      )
+        throw new ApiError(401, 'bad_credentials', '用户名或密码不对');
+      return MeResponse.parse(st.me);
+    },
+    async credentials() {
+      await wait();
+      return CredentialsResponse.parse({
+        hasPassword: mockCreds.password !== undefined,
+        username: mockCreds.username ?? null,
+        passwordChangedAt: mockCreds.changedAt ?? null,
+        // 假数据没有「飞书登录过几分钟」：没设过就当可以直接设
+        canSetWithoutCurrent: mockCreds.password === undefined,
+      });
+    },
+    async updateCredentials(raw) {
+      await wait();
+      const { username, newPassword, currentPassword } = UpdateCredentialsRequest.parse(raw);
+      // 校验顺序和真后端（api/src/credentials.ts）一致；规则的出处在 api/src/password.ts
+      if (username === undefined && newPassword === undefined)
+        throw new ApiError(400, 'nothing_to_change', '用户名和新密码至少给一样');
+      if (username !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$/.test(username))
+        throw new ApiError(
+          400,
+          'invalid_username',
+          '用户名 3–32 位，字母或数字开头，只能用字母、数字、点、下划线、连字符',
+          {
+            field: 'username',
+          },
+        );
+      if (newPassword !== undefined && [...newPassword.normalize('NFKC')].length < PASSWORD_MIN_LENGTH)
+        throw new ApiError(400, 'weak_password', `密码至少 ${PASSWORD_MIN_LENGTH} 位`, {
+          field: 'newPassword',
+        });
+      const c = mockCreds;
+      if (c.password !== undefined) {
+        if (!currentPassword)
+          throw new ApiError(400, 'current_password_required', '改之前要输入当前密码', {
+            field: 'currentPassword',
+          });
+        if (currentPassword !== c.password)
+          throw new ApiError(401, 'bad_current_password', '当前密码不对', { field: 'currentPassword' });
+      }
+      if (newPassword !== undefined && username === undefined && c.username === undefined)
+        throw new ApiError(400, 'username_required', '第一次设密码要同时设用户名', { field: 'username' });
+      const had = c.password !== undefined;
+      const before = { username: c.username ?? null, hasPassword: had };
+      if (username !== undefined) c.username = username;
+      if (newPassword !== undefined) {
+        c.password = newPassword;
+        c.changedAt = iso();
+      }
+      audit({
+        actor: meActor(),
+        action: had ? 'credentials.change' : 'credentials.set',
+        target: `user:${st.me.user.id}`,
+        before,
+        after: { username: c.username ?? null, passwordChanged: newPassword !== undefined },
+        via: 'cockpit',
+      });
     },
     async logout() {
       await wait();
@@ -913,6 +1029,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ),
       ].sort((a, b) => b.since.localeCompare(a.since));
       const TERMINAL_M = new Set(['done', 'stopped', 'failed']);
+      // 三段流水和真后端 buildHome 一个读法：readSegmentRun 读好，再交给 shared 的 taskFlow / flowStages 推
+      const viewsOf = (t: (typeof st.tasks)[number]) =>
+        (t.segmentRuns ?? []).map((r) =>
+          readSegmentRun(
+            {
+              ...r,
+              modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+              billing: st.channels.find((c) => c.id === r.channel)?.billing,
+              matchedBy: 'task',
+            },
+            { taskFinished: TERMINAL_M.has(t.task.state) },
+          ),
+        );
+      const pendingOf = (t: (typeof st.tasks)[number]) => {
+        const asked = t.asks
+          .filter((a) => a.answer === undefined)
+          .sort((a, b) => b.askedAt.localeCompare(a.askedAt))[0];
+        return asked ? { title: asked.question, since: asked.askedAt } : undefined;
+      };
       const running = st.tasks
         .filter((t) => !TERMINAL_M.has(t.task.state))
         .sort((a, b) => a.task.priority - b.task.priority)
@@ -921,20 +1056,40 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             (r) => !r.startedAt && !r.endedAt,
           );
           const asking = t.task.state === 'asking';
+          const flow = taskFlow(t.task, viewsOf(t));
+          const decision = pendingOf(t);
+          const waitingReason = asking
+            ? ('founder_decision' as const)
+            : queued
+              ? ('queue' as const)
+              : flow.segment === 'verify_pending'
+                ? ('verify_round' as const)
+                : flow.segment === 'merge'
+                  ? ('merge_queue' as const)
+                  : ('nothing' as const);
+          const waitingSince = asking
+            ? decision?.since
+            : queued
+              ? queued.queuedAt
+              : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                ? flow.stageSince
+                : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,
             repo: repoName(t.task.repoId),
-            segment: null,
-            waitingReason: asking
-              ? ('founder_decision' as const)
-              : queued
-                ? ('queue' as const)
-                : ('nothing' as const),
-            ...(queued ? { waitingSince: queued.queuedAt } : {}),
+            segment: flow.segment,
+            waitingReason,
+            ...(waitingSince ? { waitingSince } : {}),
+            taskSince: t.task.createdAt,
+            ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
+            ...(flow.worker ? { worker: flow.worker } : {}),
+            ...(decision ? { pendingDecision: decision.title } : {}),
+            ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
             link: `/tasks/${t.task.id}`,
           };
         });
+      const flow = flowStages(st.tasks.flatMap(viewsOf), running);
       const done = st.tasks
         .flatMap((t) =>
           t.subtasks
@@ -995,13 +1150,57 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         decisions,
         running,
         done,
-        health: { quota: quotaState, routes: routesState, engine: { state: 'on' } },
+        health: { quota: quotaState, routes: routesState, engine: mockEngine() },
+        flow,
         asOf: iso(),
       });
     },
     async board(repoId) {
       await wait();
       return boardOf(repoId);
+    },
+    /**
+     * 环境页（#820 片 1）的假数据：形状照真后端，值取自这份假库。
+     * 引擎那一格跟着 ?mockEngine= 走（和主页同一处），版本一项照实写「没查成」——假后端没有发布目录，不拿 0 冒充。
+     */
+    async env() {
+      await wait();
+      const t = now();
+      const activeRuns = allRuns().filter((r) => r.endedAt === undefined);
+      const byStage: Record<string, number> = {};
+      for (const r of activeRuns) byStage[r.stage] = (byStage[r.stage] ?? 0) + 1;
+      const poolViews = st.pools.map((p) => {
+        const windows = st.quota.filter((w) => w.poolId === p.id);
+        return {
+          running: poolRunning(p.id),
+          quotaStatus:
+            windows.length === 0
+              ? 'unread'
+              : windows.some((w) => t - Date.parse(w.readAt) > STALE_MS)
+                ? 'stale'
+                : 'fresh',
+        };
+      });
+      return EnvResponseSchema.parse({
+        name: { name: '假数据' },
+        asOf: iso(),
+        facts: {
+          engine: { ok: true, value: mockEngine() },
+          version: { ok: false, reason: '假后端没有发布目录，读不到在用版本' },
+          sessions: { ok: true, value: { total: activeRuns.length, byStage } },
+          pools: {
+            ok: true,
+            value: {
+              count: poolViews.length,
+              running: poolViews.reduce((n, p) => n + p.running, 0),
+              unread: poolViews.filter((p) => p.quotaStatus === 'unread').length,
+              stale: poolViews.filter((p) => p.quotaStatus === 'stale').length,
+            },
+          },
+          health: { ok: true, value: { ok: true, total: 9, failing: [], notWired: ['deploy_lag'] } },
+          schedule: { ok: true, value: { status: 'never' } },
+        },
+      });
     },
     async task(taskId) {
       await wait();
@@ -1057,36 +1256,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             }),
           segmentRuns,
         ),
-      });
-    },
-    async timeline(taskId, p) {
-      await wait();
-      findTask(taskId);
-      const res = page(
-        st.logs.filter((l) => l.taskId === taskId),
-        (l) => l.at,
-        p?.cursor,
-        p?.limit ?? 50,
-      );
-      return TimelineResponse.parse({
-        items: res.items.map(({ taskId: _t, ...rest }) => rest),
-        nextCursor: res.nextCursor,
-      });
-    },
-    async runSteps(runId) {
-      await wait();
-      const owner = st.tasks.flatMap((t) => t.subtasks).find((s) => s.runs.some((r) => r.id === runId));
-      const known = owner || st.tasks.some((t) => t.runs.some((r) => r.id === runId));
-      if (!known) throw new ApiError(404, 'run_not_found', '没有这个会话');
-      // 步骤清单归写码会话；第二意见的会话没报过。
-      if (owner?.runs.find((r) => r.id === runId)?.stage === 'review') {
-        return RunStepsResponse.parse({ runId, steps: [] });
-      }
-      return RunStepsResponse.parse({
-        runId,
-        steps: owner?.steps ?? [],
-        updatedAt: owner?.planUpdatedAt,
-        lastSay: owner?.lastSay,
       });
     },
     async taskAction(taskId, raw) {
@@ -1159,28 +1328,40 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       });
       emit('tasks', taskId);
     },
-    async answerAsk(askId, answer) {
+    async legacyAsks() {
+      await wait();
+      return LegacyAsksResponse.parse({
+        items: st.tasks.flatMap((tv) =>
+          tv.asks
+            .filter((a) => a.answer === undefined)
+            .map((a) => ({
+              id: a.id,
+              taskId: tv.task.id,
+              question: a.question,
+              askedAt: a.askedAt,
+              context: `#${tv.task.issueNumber} ${tv.task.title}`,
+              link: `/tasks/${tv.task.id}`,
+            })),
+        ),
+      });
+    },
+    async closeAsk(askId) {
       await wait();
       const tv = st.tasks.find((t) => t.asks.some((a) => a.id === askId));
       const ask = tv?.asks.find((a) => a.id === askId);
       if (!tv || !ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-      if (ask.answer !== undefined) throw new ApiError(409, 'already_answered', '这条追问已经有人回答了');
-      ask.answer = answer;
+      if (ask.answer !== undefined) throw new ApiError(409, 'already_answered', '这条追问已经处理过了');
+      ask.answer = LEGACY_ASK_CLOSED_ANSWER;
       ask.answeredBy = st.me.user.id;
       ask.answeredAt = iso();
-      log(tv, { source: 'person', kind: 'answer', text: `回答追问：${answer}` });
       audit({
         actor: meActor(),
-        action: 'ask.answer',
+        action: 'ask.close',
         target: `task:${tv.task.id}`,
-        after: { askId, answer },
+        after: { askId },
         via: 'cockpit',
       });
       emit('asks', askId);
-      if (tv.task.state === 'asking' && tv.asks.every((a) => a.answer !== undefined)) {
-        startRun(tv, undefined, 'plan', pickRoute('plan') ?? 'r-ca-opus', '回答之后接着写方案');
-        setTaskState(tv, 'planning');
-      }
     },
     async routing() {
       await wait();
@@ -1288,22 +1469,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...(body.effort === null ? {} : { effort: body.effort }),
       });
     },
-    async updateChannel(channelId, raw) {
-      await wait();
-      const body = UpdateChannelRequest.parse(raw);
-      const ch = st.channels.find((c) => c.id === channelId);
-      if (!ch) throw new ApiError(404, 'channel_not_found', '没有这个渠道');
-      ch.enabled = body.enabled;
-      audit({
-        actor: meActor(),
-        action: body.enabled ? 'channel.enable' : 'channel.disable',
-        target: `channel:${channelId}`,
-        after: { enabled: body.enabled },
-        via: 'cockpit',
-        ...(body.reason ? { reason: body.reason } : {}),
-      });
-      emit('channels', channelId);
-    },
     async pools() {
       await wait();
       const t = now();
@@ -1326,6 +1491,16 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         staleAfterMinutes: STALE_MS / 60_000,
         asOf: iso(),
       });
+    },
+    async poolHolds() {
+      await wait();
+      return PoolHoldsResponse.parse(
+        poolHoldsView(
+          st.settings.find((s) => s.key === POOL_HOLDS_SETTING),
+          { ok: true, alerts: st.notifications },
+          new Date(now()),
+        ),
+      );
     },
     async jobs() {
       await wait();
@@ -1386,6 +1561,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const current = st.settings.find((s) => s.key === key) ?? { key, value: null, version: 0 };
       if (current.version !== body.version)
         throw new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改');
+      // 整池暂停：撤回、续期必须写原因（和后端同一条判法）
+      if (key === POOL_HOLDS_SETTING) {
+        const missing = revocationProblem(current.value, value.data, body.reason);
+        if (missing) throw new ApiError(400, 'reason_required', missing);
+      }
       const next = {
         key,
         value: value.data,

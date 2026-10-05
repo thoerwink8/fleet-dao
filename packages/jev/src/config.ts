@@ -4,6 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import type { ClaudeEffort } from '@fleet-dao/adapters';
 import type { HostId } from '@fleet-dao/shared';
+import { isRecord } from '@fleet-dao/shared/util';
 import { checkPinnedModel, type JevBackend } from './backend.ts';
 import { createTypesafeBackend } from './backends/typesafe.ts';
 
@@ -52,8 +53,6 @@ export class JevConfigError extends Error {
 }
 
 const EFFORTS: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
 const isText = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
 const isPositiveInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0;
 /** 以 _ 开头的键留给人写注释（JSON 没有注释）。 */

@@ -2,9 +2,9 @@
 // 另加只有库里才会出的：jsonb 列被改坏了要认不出、明说，不当成空的。
 import { auditLog, intentMessages, intents, users } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { IDS } from '@fleet-dao/store';
 import { asc, eq, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { IDS } from '../src/dev-fixtures.ts';
 import { createPgIntentStore } from '../src/intent-store-pg.ts';
 import { describeIntentStoreContract, said, T0 } from './intent-store-contract.ts';
 

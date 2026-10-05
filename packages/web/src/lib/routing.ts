@@ -1,6 +1,6 @@
 // 路由页（/routing，#574）的白话和先看哪个：活不活由后端现算（db 的 routing-liveness.ts，判法只在那里），这里只管怎么说。
 
-import { routeProbeStaleMinutes } from '@fleet-dao/shared';
+import { poolFull, poolOccupied, routeProbeStaleMinutes } from '@fleet-dao/shared';
 import type {
   LivenessVerdict,
   RoutingLayerModel,
@@ -31,6 +31,25 @@ export function routeTitle(r: Pick<RoutingLayerRoute, 'channelName' | 'poolId'>)
 
 export function routeHost(r: Pick<RoutingLayerRoute, 'hostId'>): string {
   return hostLabel[r.hostId];
+}
+
+/**
+ * 这条路由的账号池占着几个名额、满没满（#800）：在跑的 + 已选定还没开跑的（选路在选定那一刻就预占名额），到上限就是满。
+ * 满不满只有 shared 的 poolFull 一个判法（引擎选路、候选查询同一个）：路由页、换路由选项都经这里，不各写一份。
+ * count：没有已选定的是「1/3」，有的把两样各写明：「3/3（在跑 1、已选定还没开跑 2）」；text 是路由页那一句（加前缀「在跑」「占」）。
+ */
+export function routeSlots(r: Pick<RoutingLayerRoute, 'inFlight' | 'reserved' | 'maxConcurrency'>): {
+  full: boolean;
+  occupied: number;
+  count: string;
+  text: string;
+} {
+  const occupied = poolOccupied(r);
+  const reserved = r.reserved > 0;
+  const count = reserved
+    ? `${occupied}/${r.maxConcurrency}（在跑 ${r.inFlight}、已选定还没开跑 ${r.reserved}）`
+    : `${r.inFlight}/${r.maxConcurrency}`;
+  return { full: poolFull(r), occupied, count, text: `${reserved ? '占' : '在跑'} ${count}` };
 }
 
 export interface FirstLive {

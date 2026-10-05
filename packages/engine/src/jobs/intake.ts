@@ -15,9 +15,8 @@
 // - 交代不全的单只留一次言：留言的幂等键由缺的内容算出来，同一处缺法不会每 5 分钟再留一条；缺的变了才是新的一条。
 // - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条：开关刚打开、一堆单同时合格时，
 //   一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
+
 import { createHash } from 'node:crypto';
-import type { GithubWhitelist } from '@fleet-dao/api/whitelist';
-import { isTrusted } from '@fleet-dao/api/whitelist';
 import {
   autoDispatchGate,
   familyGate,
@@ -28,10 +27,13 @@ import {
   versionGate,
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
+import type { GithubWhitelist } from '@fleet-dao/store';
+import { isTrusted } from '@fleet-dao/store';
 import type { IntakeRun } from '../contract.ts';
 import { type BriefProblem, describeBriefProblems, readTaskBrief } from '../runner/task-brief.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { clip, message } from './reconcile-common.ts';
+import { clip } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查）。 */
 export const INTAKE_JOB = {
@@ -345,7 +347,7 @@ async function intakeRepo(
     listed = await deps.openIssues(repo);
   } catch (err) {
     t.reposFailed += 1;
-    t.unchecked.push(`${slug}：开着的单读不到（${message(err)}）`);
+    t.unchecked.push(`${slug}：开着的单读不到（${errMessage(err)}）`);
     return;
   }
   for (const issue of listed.issues) {
@@ -354,7 +356,7 @@ async function intakeRepo(
       await intakeIssue(deps, repo, since, issue, listed, whitelist, t);
     } catch (err) {
       // 这张单没处理成（现读、留言、起工作流出错）：记下，别的单照做
-      t.unchecked.push(`${slug}#${issue.number}：${message(err)}`);
+      t.unchecked.push(`${slug}#${issue.number}：${errMessage(err)}`);
     }
   }
 }
@@ -369,7 +371,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
   try {
     repos = await deps.repos();
   } catch (err) {
-    return { outcome: 'failed', why: `受管的仓读不到：${message(err)}` };
+    return { outcome: 'failed', why: `受管的仓读不到：${errMessage(err)}` };
   }
   if (repos.length === 0) return { outcome: 'unscanned', why: '库里没有受管的仓' };
   const t: Tally = {
@@ -397,7 +399,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     } catch (err) {
       return {
         outcome: 'failed',
-        why: `白名单或在跑的任务数读不到，这一轮一张单都没拉：${message(err)}`,
+        why: `白名单或在跑的任务数读不到，这一轮一张单都没拉：${errMessage(err)}`,
         scanned: repos.length,
       };
     }
@@ -426,7 +428,7 @@ export async function runIntakeJob(deps: IntakeDeps): Promise<IntakeRun> {
   try {
     result = await round(deps);
   } catch (err) {
-    result = { outcome: 'failed', why: `拉单没跑成：${message(err)}` };
+    result = { outcome: 'failed', why: `拉单没跑成：${errMessage(err)}` };
   }
   await deps.runs.finish(runId, result, deps.now());
   const run: IntakeRun = {

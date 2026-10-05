@@ -1,12 +1,14 @@
 // 演示版的可见范围：游客能看哪些模块、细节看到哪一级。正式驾驶舱发链接时，后端把范围发布成静态文件
 // （<范围目录>/<口令的 SHA-256>.json，默认范围是 default.json），这里只读它：不带任何凭据、不连后端，
 // 所以正式版的后端停了照样能看。读不到、读不懂、过期了，一律退回默认范围；默认范围也读不到就用内置的最严范围。
+
 import {
   DEMO_DEFAULT_SCOPE_FILE,
   DEMO_STRICT_DEFAULT,
   type DemoScope,
   DemoScopeSchema,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 
 export type DemoModule = DemoScope['modules'][number];
 export type DemoDetail = DemoScope['detail'];
@@ -56,7 +58,7 @@ async function readScope(url: string, fetchFn: typeof fetch): Promise<Read> {
       headers: { accept: 'application/json' },
     });
   } catch (e) {
-    return { ok: false, why: 'broken', detail: e instanceof Error ? e.message : String(e) };
+    return { ok: false, why: 'broken', detail: errMessage(e) };
   }
   if (res.status === 404) return { ok: false, why: 'missing', detail: '404' };
   if (!res.ok) return { ok: false, why: 'broken', detail: `HTTP ${res.status}` };

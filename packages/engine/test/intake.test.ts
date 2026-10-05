@@ -1,8 +1,8 @@
 // 拉单（jobs/intake.ts，#632 S2-2）：每一道关各一条「不派」、读不到不当成没有、同一处缺法只留一次言、容量、记账。
 // 每条失败路径都故意造一次：都不许记成 ok，都不许起工作流。
 
-import { githubWhitelist } from '@fleet-dao/api/whitelist';
 import type { ScheduleResult } from '@fleet-dao/db';
+import { githubWhitelist } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import {
   INTAKE_JOB,

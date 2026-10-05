@@ -53,6 +53,7 @@ describe('工作流文件的规矩', () => {
   it('扫到了工作流文件和它们的 import（不是空扫一遍就算过）', () => {
     expect(files.sort()).toEqual([
       'canary.ts',
+      'carpool-watch.ts',
       'github-reconcile.ts',
       'hello.ts',
       'hourly-reconcile.ts',
@@ -61,6 +62,12 @@ describe('工作流文件的规矩', () => {
       'kit.ts',
       'quota-read.ts',
       'route-probe.ts',
+      'task-ci.ts',
+      'task-merge.ts',
+      'task-runtime.ts',
+      'task-session.ts',
+      'task-support.ts',
+      'task-verify.ts',
       'task.ts',
       'watchdog.ts',
     ]);

@@ -1,4 +1,4 @@
-// 防重复写：每个 GitHub 写操作带幂等键，账记在 Postgres 的 idempotency_keys（@fleet-dao/db），不放本机文件——
+// 防重复写：每个 GitHub 写操作带幂等键，账记在 Postgres 的 idempotency_keys（实现在 @fleet-dao/store 的 github-pg.ts），不放本机文件——
 // 换机器、多个工人、从备份恢复后重放都认得出来（旧网关的账是每台机器一份的本地文件，docs/reference/github.md §0 第 7 条）。
 //
 // 流程（once）：占键 → 先回查远端有没有（按正文里的标记、按分支）→ 没有才写 → 记回执。
@@ -6,18 +6,22 @@
 // - 写的时候断在回执上（maybeLanded）：键留着「写到一半」，下次重试先回查，找到就补账，找不到且占用已过期才重写（B1）。
 // - 确定没写成（GitHub 明确拒了、回查就失败了）：放键，下次可以重新占。只放自己那一份，已经被别人接过去的不动。
 // - 键由内容推出来（动作 + 目标 + 内容摘要）：同一件事重试一定是同一个键；给 issue 和给 PR 的同一组改动是两个键（B4）。
+
 import { createHash } from 'node:crypto';
-import {
-  type ClaimResult,
-  claimIdempotencyKey,
-  completeIdempotencyKey,
-  type Db,
-  idempotencyKeys,
-} from '@fleet-dao/db';
-import { and, eq, isNull } from 'drizzle-orm';
+import { errMessage } from '@fleet-dao/shared/util';
 import { GitHubError, isGitHubError, redact } from './errors.ts';
 
-export type { ClaimResult };
+/**
+ * 占键的结果。这个包只认这个接口（IdempotencyStore），账存在哪它不知道：Postgres 版在 @fleet-dao/store 的 github-pg.ts
+ * （#901 ⑤：github 是纯 GitHub API 包，不依赖 db；db 的 claimIdempotencyKey 返回的是结构相同的一份，store 里赋值时 tsc 核对）。
+ */
+export type ClaimResult =
+  /** 占到了：可以去写。 */
+  | { status: 'claimed' }
+  /** 以前写成过：别再写，直接用回执。 */
+  | { status: 'done'; result: unknown; completedAt: Date }
+  /** 别人占着还没写完（或写到一半死了）：先回读外部系统确认，别盲写。 */
+  | { status: 'in-flight'; claimedAt: Date };
 
 /** 占用多久没续就当占着的人死了。续的间隔要远小于它：续不上几次也还来得及。 */
 export const CLAIM_STALE_AFTER_MS = 120_000;
@@ -32,51 +36,6 @@ export interface IdempotencyStore {
   takeOver(key: string, seenClaimedAt: Date, now: Date): Promise<boolean>;
   /** 只读：这个键的账（对账、认回声用）；没有返回 null。 */
   peek(key: string): Promise<{ claimedAt: Date; completedAt: Date | null; result: unknown } | null>;
-}
-
-export function pgIdempotencyStore(db: Db): IdempotencyStore {
-  return {
-    claim: (input, now) => claimIdempotencyKey(db, input, now),
-    complete: (key, result, now) => completeIdempotencyKey(db, key, result, now),
-    async release(key, heldClaimedAt) {
-      const rows = await db
-        .delete(idempotencyKeys)
-        .where(
-          and(
-            eq(idempotencyKeys.key, key),
-            isNull(idempotencyKeys.completedAt),
-            eq(idempotencyKeys.claimedAt, heldClaimedAt),
-          ),
-        )
-        .returning({ key: idempotencyKeys.key });
-      return rows.length > 0;
-    },
-    async peek(key) {
-      const [row] = await db
-        .select({
-          claimedAt: idempotencyKeys.claimedAt,
-          completedAt: idempotencyKeys.completedAt,
-          result: idempotencyKeys.result,
-        })
-        .from(idempotencyKeys)
-        .where(eq(idempotencyKeys.key, key));
-      return row ?? null;
-    },
-    async takeOver(key, seenClaimedAt, now) {
-      const rows = await db
-        .update(idempotencyKeys)
-        .set({ claimedAt: now })
-        .where(
-          and(
-            eq(idempotencyKeys.key, key),
-            isNull(idempotencyKeys.completedAt),
-            eq(idempotencyKeys.claimedAt, seenClaimedAt),
-          ),
-        )
-        .returning({ key: idempotencyKeys.key });
-      return rows.length > 0;
-    },
-  };
 }
 
 /** 只给测试和不连库的场合用：进程一退账就没了。 */
@@ -322,7 +281,7 @@ async function record<T>(store: IdempotencyStore, spec: OnceSpec<T>, value: T): 
     // 东西已经在 GitHub 上了，账没记上：报失败并附上落地的对象，下次重试会按标记找回来补账（不会再写一份）。
     throw new GitHubError(
       'LEDGER_FAILED',
-      `${spec.action} ${spec.target} 已经写成，但幂等账没记上：${redact(err instanceof Error ? err.message : String(err))}`,
+      `${spec.action} ${spec.target} 已经写成，但幂等账没记上：${redact(errMessage(err))}`,
       { retryable: true, details: { key: spec.key, landed: value }, cause: err },
     );
   }

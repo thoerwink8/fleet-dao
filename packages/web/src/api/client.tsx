@@ -13,35 +13,36 @@ import {
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
 import { brand } from '#brand';
 import type { HomeState } from '../components/home/types';
-import { canSee, canSeeDetail } from '../demo/access';
+import { canSee, isDemo } from '../demo/access';
 import type {
   Audit,
   AuthConfig,
   Board,
   CreateDemoLinkBody,
   CreatedDemoLink,
+  Credentials,
   DemoLinks,
   DemoScopeView,
+  EnvResponse,
   HomeResponse,
   Jobs,
+  LegacyAsks,
   LiveEvent,
   Me,
   Notifications,
+  PoolHolds,
   Pools,
   ReleaseVersion,
   Repo,
   Routing,
   RoutingEfforts,
   RoutingLayers,
-  RunSteps,
   Setting,
   SettingKey,
   Settings,
-  StageKind,
   TaskActionBody,
   TaskDetail,
-  Timeline,
-  UpdateChannelBody,
+  UpdateCredentialsBody,
   UpdateDemoDefaultBody,
   UpdatedRouteEffort,
   UpdateRouteEffortBody,
@@ -56,17 +57,32 @@ export interface FleetApi {
   authConfig(): Promise<AuthConfig>;
   devLogin(userId: string): Promise<Me>;
   feishuAccess(code: string): Promise<Me>;
+  /**
+   * 账密登录（#120）：后端成功回 204 + 会话 Cookie，这里随后读一次 /api/me 取 CSRF 令牌，返回登录的人。
+   * 失败抛 ApiError：401 bad_credentials（一律这一句，不区分账号在不在）、429 locked（details.until）。
+   */
+  passwordLogin(username: string, password: string): Promise<Me>;
+  /** 设置页「账密登录」一节：设过没有、用户名、上次改密码的时间、能不能不带当前密码设第一次。 */
+  credentials(): Promise<Credentials>;
+  /** 设 / 改用户名、密码；成功没有返回值。错误的 details.field 指明是哪一栏（见 shared 的 UpdateCredentialsRequest）。 */
+  updateCredentials(body: UpdateCredentialsBody): Promise<void>;
   logout(): Promise<void>;
   me(): Promise<Me>;
   repos(): Promise<{ repos: Repo[] }>;
   /** 新主页（/）的一屏三块 + 持续状态条（#589）。 */
   home(): Promise<HomeResponse>;
+  /**
+   * 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
+   * 只读、不跨环境：读的是本后端自己库里的现成读法（和主页、额度页、/healthz 同一份）。
+   */
+  env(): Promise<EnvResponse>;
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
-  timeline(taskId: string, page?: { cursor?: string | undefined; limit?: number }): Promise<Timeline>;
-  runSteps(runId: string): Promise<RunSteps>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
-  answerAsk(askId: string, answer: string): Promise<void>;
+  /** 旧会话留下的、还没处理的追问（通知中心只读展示，#928）。 */
+  legacyAsks(): Promise<LegacyAsks>;
+  /** 把一条旧追问标成已处理（落库、进操作记录）；没有「回答」：新流程没有收追问回答的地方。 */
+  closeAsk(askId: string): Promise<void>;
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
@@ -78,8 +94,9 @@ export interface FleetApi {
     routeId: string,
     body: UpdateRouteEffortBody,
   ): Promise<UpdatedRouteEffort>;
-  updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
   pools(): Promise<Pools>;
+  /** 整池暂停现状（#746）：开关（到期标红）、认不出的、还靠旧提醒顶着的。新建、撤回走 updateSetting('engine.poolHolds')。 */
+  poolHolds(): Promise<PoolHolds>;
   jobs(): Promise<Jobs>;
   notifications(query?: {
     status?: 'open' | 'all';
@@ -135,21 +152,23 @@ export function useApi(): FleetApi {
 export const keys = {
   me: ['me'] as const,
   authConfig: ['auth-config'] as const,
+  credentials: ['credentials'] as const,
   repos: ['repos'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
-  timeline: (taskId: string) => ['timeline', taskId] as const,
-  runSteps: (runId: string) => ['run-steps', runId] as const,
+  legacyAsks: ['legacy-asks'] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
   pools: ['pools'] as const,
+  poolHolds: ['pool-holds'] as const,
   jobs: ['jobs'] as const,
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
   releaseVersion: ['release-version'] as const,
   demoLinks: ['demo-links'] as const,
+  env: ['env'] as const,
 };
 
 // ---------- 读 ----------
@@ -162,6 +181,19 @@ export function useMe() {
 export function useAuthConfig() {
   const api = useApi();
   return useQuery({ queryKey: keys.authConfig, queryFn: () => api.authConfig(), retry: false });
+}
+
+/** 账密登录的现状。不重试、不缓存：每次进设置页都现读（「10 分钟内飞书登录过」这条随时间变）。 */
+export function useCredentials({ enabled = true }: { enabled?: boolean } = {}) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.credentials,
+    queryFn: () => api.credentials(),
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+    enabled,
+  });
 }
 
 export function useRepos() {
@@ -207,28 +239,6 @@ export function useTaskDetail(taskId: string | undefined) {
   });
 }
 
-/** 时间线按新到旧分页；fetchNextPage 往前翻更早的。 */
-export function useTimeline(taskId: string | undefined) {
-  const api = useApi();
-  return useInfiniteQuery({
-    queryKey: keys.timeline(taskId ?? ''),
-    queryFn: ({ pageParam }) => api.timeline(taskId ?? '', { cursor: pageParam, limit: 100 }),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.nextCursor,
-    // 演示版细节不到「过程」这一级就不读（页面上另说「没开放」）。
-    enabled: Boolean(taskId) && canSeeDetail('process'),
-  });
-}
-
-export function useRunSteps(runId: string | undefined) {
-  const api = useApi();
-  return useQuery({
-    queryKey: keys.runSteps(runId ?? ''),
-    queryFn: () => api.runSteps(runId ?? ''),
-    enabled: Boolean(runId) && canSeeDetail('process'),
-  });
-}
-
 /** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。 */
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
@@ -262,6 +272,12 @@ export function useRoutingEfforts() {
 export function usePools({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({ queryKey: keys.pools, queryFn: () => api.pools(), enabled });
+}
+
+/** 整池暂停现状（#746）：到期是按日期现算的，不靠推送，每分钟重拉；改设置、改提醒时另外作废（useUpdateSetting）。 */
+export function usePoolHolds() {
+  const api = useApi();
+  return useQuery({ queryKey: keys.poolHolds, queryFn: () => api.poolHolds(), refetchInterval: 60_000 });
 }
 
 /** 定时任务不在推送名单里，每 30 秒重拉一次。 */
@@ -316,6 +332,21 @@ export function useReleaseVersion() {
 }
 
 /**
+ * 环境页和多处徽标共用的一次读取（#820 片 1）：这一台环境现在怎样。
+ * 只读、不跨环境。演示版没有这一页（导航不给 module、路由表也不放），所以这里只在正式驾驶舱里取；
+ * 每分钟重拉一次——健康、在跑的会话这些没有实时推送。
+ */
+export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.env,
+    queryFn: () => api.env(),
+    refetchInterval: 60_000,
+    enabled: enabled && !isDemo(),
+  });
+}
+
+/**
  * 新主页（/）的聚合读取：一屏三块（要你拍的 / 在跑的 / 做完的）+ 持续状态条。
  * 后端不发网址（和 alert-work 一个规矩）：done 的跳转链接这里按品牌拼好再给卡片。
  */
@@ -323,7 +354,8 @@ export function useHome(): { data: HomeState } {
   const api = useApi();
   const query = useQuery({ queryKey: ['home'], queryFn: () => api.home() });
   if (query.isPending) return { data: { status: 'loading' } };
-  if (query.error) return { data: { status: 'error', error: query.error } };
+  if (query.error)
+    return { data: { status: 'error', error: query.error, retry: () => void query.refetch() } };
   const data = query.data;
   return {
     data: {
@@ -337,6 +369,7 @@ export function useHome(): { data: HomeState } {
           return { ...d, link: brand.repoLink(repo, 'pull', d.prNumber) };
         }),
         health: data.health,
+        flow: data.flow,
       },
     },
   };
@@ -371,34 +404,24 @@ export function useTaskAction() {
     onSettled: (_d, _e, { taskId }) => {
       qc.invalidateQueries({ queryKey: keys.task(taskId) });
       qc.invalidateQueries({ queryKey: ['board'] });
-      qc.invalidateQueries({ queryKey: keys.timeline(taskId) });
     },
   });
 }
 
-export function useAnswerAsk() {
+/** 旧会话留下的、还没处理的追问（通知中心用）。 */
+export function useLegacyAsks() {
   const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ askId, answer }: { askId: string; answer: string; taskId: string }) =>
-      api.answerAsk(askId, answer),
-    onSettled: (_d, _e, { taskId }) => {
-      qc.invalidateQueries({ queryKey: keys.task(taskId) });
-      qc.invalidateQueries({ queryKey: ['board'] });
-      qc.invalidateQueries({ queryKey: keys.timeline(taskId) });
-    },
-  });
+  return useQuery({ queryKey: keys.legacyAsks, queryFn: () => api.legacyAsks() });
 }
 
-export function useUpdateChannel() {
+export function useCloseAsk() {
   const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ channelId, body }: { channelId: string; body: UpdateChannelBody }) =>
-      api.updateChannel(channelId, body),
+    mutationFn: (askId: string) => api.closeAsk(askId),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.routing });
-      qc.invalidateQueries({ queryKey: keys.pools });
+      qc.invalidateQueries({ queryKey: keys.legacyAsks });
+      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }
@@ -441,7 +464,24 @@ export function useUpdateSetting() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ key, body }: { key: SettingKey; body: UpdateSettingBody }) => api.updateSetting(key, body),
-    onSettled: () => qc.invalidateQueries({ queryKey: keys.settings }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.settings });
+      qc.invalidateQueries({ queryKey: keys.poolHolds });
+    },
+  });
+}
+
+/**
+ * 设 / 改账密：成了操作记录里多一条（credentials.set / credentials.change）。不管成不成，所有查询都重拉一遍：
+ * 改密码时页面上在途的读取带的是旧 Cookie、回来是 401（http.ts 已不把它们当登录过期），这些查询要用新 Cookie 再读一次，
+ * 不然页面上留着一堆「没读成」。
+ */
+export function useUpdateCredentials() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateCredentialsBody) => api.updateCredentials(body),
+    onSettled: () => qc.invalidateQueries(),
   });
 }
 
@@ -453,13 +493,13 @@ export function useUpdateSetting() {
  * 不在名单里的表（定时任务、路由、模型……）没有推送，对应页面靠定时重拉。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
-  tasks: [['board'], ['task'], ['timeline']],
-  subtasks: [['board'], ['task'], ['timeline']],
-  session_runs: [['board'], ['task'], ['timeline'], ['run-steps'], ['pools']],
-  progress_events: [['board'], ['task'], ['timeline'], ['run-steps']],
-  asks: [['board'], ['task'], ['timeline']],
-  // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
-  approvals: [['board'], ['task'], ['timeline']],
+  tasks: [['board'], ['task']],
+  subtasks: [['board'], ['task']],
+  session_runs: [['board'], ['task'], ['pools']],
+  progress_events: [['board'], ['task']],
+  asks: [['board'], ['task'], ['legacy-asks']],
+  // approvals 还没有专门的页面查询键；按它挂在任务 / 子任务上，先失效这两处。
+  approvals: [['board'], ['task']],
   // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
   quota_windows: [['pools'], ['routing-layers']],
   channels: [['routing'], ['pools'], ['routing-layers']],

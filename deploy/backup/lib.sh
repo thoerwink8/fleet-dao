@@ -42,7 +42,7 @@ BK_LINK=/schedules       # 报警点进去看驾驶舱的定时任务页
 BK_JOBS=(
   "backup.nightly|每晚备份（法国的库加密传到香港）|每天 04:10（北京时间）|1560"
   "backup.drill|恢复演练（最近一份备份恢复进临时库核对）|每周日 05:40（北京时间）|10200"
-  "backup.watch|磁盘用量与备份新鲜度（法国、香港）|每小时 17 分|90"
+  "backup.watch|磁盘用量（法国、香港）|每小时 17 分|90"
 )
 BK_CONFIG_KEYS_FRANCE=(FLEET_DISK_ALERT_PERCENT FLEET_DISK_PATHS_FRANCE FLEET_DISK_PATHS_HK)
 BK_CONFIG_KEYS_HK=(FLEET_BACKUP_FRANCE_PUBLIC_KEY)

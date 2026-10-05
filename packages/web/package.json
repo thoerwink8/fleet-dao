@@ -13,7 +13,9 @@
     "dev:demo": "node scripts/demo.ts dev",
     "build": "react-router build",
     "build:demo": "node scripts/demo.ts build",
-    "preview": "vite preview --outDir dist/client"
+    "preview": "vite preview --outDir dist/client",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "e2e:serve": "node e2e/support/serve.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",
@@ -24,7 +26,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "elkjs": "^0.12.0",
     "lucide-react": "^1.48.0",
     "motion": "^13.4.3",
     "radix-ui": "^1.6.7",
@@ -37,6 +38,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@react-router/dev": "^8.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/dom": "^10.4.1",

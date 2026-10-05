@@ -355,6 +355,36 @@ func TestSwitchBothDirectionsKeepsNativeSession(t *testing.T) {
 	}
 }
 
+// 会话是以自有额度起的（Mirasim 没给平台网关）：当场切平台做不到，必须明说，
+// 不能悄悄仍走自有、也不能把整个会话杀掉；切回自有后同一个进程继续用。
+func TestSwitchToPlatformWithoutLiveGatewayRefusesLoudlyAndKeepsSession(t *testing.T) {
+	f := newFixture(t, "local")
+	p := filepath.Join(f.home, "invoked")
+	a := startAppSettings(t, f, `{"env":{"KEEP_ME":"yes"}}`, "MIRASIM_TEST_INVOKED="+p)
+	x := a.turn(t, "first")
+	if x["route"] != "local" {
+		t.Fatal(x)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	f.route(t, "cloud")
+	a.user(t, "must-not-send")
+	r := a.until(t, "result")
+	text, _ := r["result"].(string)
+	if r["is_error"] != true || !strings.Contains(text, "平台") || !strings.Contains(text, "办法") {
+		t.Fatalf("切不过去必须明确报错并说办法：%v", r)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("切平台被拒后仍启动了新进程")
+	}
+	f.route(t, "local")
+	z := a.turn(t, "third")
+	if z["route"] != "local" || z["pid"] != x["pid"] {
+		t.Fatalf("被拒后会话进程应原样保留：%v", z)
+	}
+}
+
 func TestRouteReadFailureNeverStartsTarget(t *testing.T) {
 	for _, kind := range []string{"corrupt", "missing", "unknown"} {
 		t.Run(kind, func(t *testing.T) {

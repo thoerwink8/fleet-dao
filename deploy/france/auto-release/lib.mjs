@@ -10,7 +10,7 @@
 //   绝不退回发主线头——这条是这个切片的全部意义（否则一次误打 tag 或一次 fetch 不对，就又把没确认的提交发上线了）。
 // - 版本号按**数字**排（v10 > v9），不许按字符串排（'v10' < 'v9'）；判定和 packages/conventions/src/publish-release-logic.ts
 //   的 isVersionTag 同一套，测试核对两边写法一致（VERSION_PATTERN_VS_CONVENTIONS）。
-// - 状态文件后端也读（packages/api/src/deploy-lag.ts 按 STATE_SCHEMA 认），改字段两边一起改，那边的测试拿这里造的状态核对。
+// - 状态文件后端也读（packages/store/src/deploy-lag.ts 按 STATE_SCHEMA 认），改字段两边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；INSTALL_PATHS 要盖住 france.sh 读的仓里文件（测试都核对）。
 // - 读不到、认不出的一律记成「没查成」、不发，不拿空、0 当没事（AGENTS.md「底线」）。
 // - 每一轮还拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望（deploy/france/desired-config.json）对账（#323，config.mjs）：
@@ -498,24 +498,25 @@ async function deployStep(io, st, now) {
   }
   st.current = current;
 
+  // 上一轮的发布没收到结果（那一轮被杀了、机器重启了）：发布锁还占着就接着等，空了按现在在用的是谁定成败。
+  // 收尾排在读版本标记之前：一个 v<N> 标记都没有、或标记读不到时下面 markerStep 会让这一轮提前返回，收尾排在它后面就永远走不到
+  // （本机档一直没有版本标记，健康页 deploy_lag 因此永远报「跑了 N 小时还没完」，#802）。
+  let busyWhy = null;
+  if (st.attempt?.result === 'running') {
+    try {
+      busyWhy = (await io.releaseBusy()) ? `上一轮的自动发布（${short(st.attempt.sha)}）还在跑` : null;
+    } catch (e) {
+      busyWhy = `上一轮的自动发布还在不在跑没查成：${why(e)}`;
+    }
+    if (!busyWhy) settleDangling(st, now, current);
+  }
+
   // 版本标记：这一轮发什么全看它。读不到 / 认不出 / 不是主线上的提交：报警、不发主线头（下面 markerStep 收尾）
   const marker = await markerStep(io, st, now, commits);
   if (!marker) return current;
-
-  if (st.attempt?.result === 'running') {
-    // 上一轮的发布没收到结果（那一轮被杀了、机器重启了）：发布锁还占着就接着等，空了按现在在用的是谁定成败
-    let still;
-    try {
-      still = await io.releaseBusy();
-    } catch (e) {
-      act(st, now, 'release-busy', `上一轮的自动发布还在不在跑没查成：${why(e)}`);
-      return current;
-    }
-    if (still) {
-      act(st, now, 'release-busy', `上一轮的自动发布（${short(st.attempt.sha)}）还在跑`);
-      return current;
-    }
-    settleDangling(st, now, current);
+  if (busyWhy) {
+    act(st, now, 'release-busy', busyWhy);
+    return current;
   }
 
   // 在用的就是这个标记指向的提交：这一版已经上过线了，收工
@@ -999,7 +1000,7 @@ async function flushAlerts(io, st) {
 }
 
 /**
- * 在用的相对版本标记在哪儿（读数里「落后几个」按它数，和 /healthz 的 deploy_lag 同一个口径，见 packages/api/src/deploy-lag.ts
+ * 在用的相对版本标记在哪儿（读数里「落后几个」按它数，和 /healthz 的 deploy_lag 同一个口径，见 packages/store/src/deploy-lag.ts
  * 的 lagView）：就是标记那一版 / 比标记新（人手动发过更新的）/ 落后几个 / 数不了。
  */
 function markerLag(st) {

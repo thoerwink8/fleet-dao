@@ -5,6 +5,7 @@
 // - 核对：合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
 //   账上有合并队列的合并记录（C21/C22）。人开的不查这两项：帅位本机开、GitHub 自动合并，没有合并队列这一步。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
+import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
@@ -120,7 +121,6 @@ export interface Reconciler {
 export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconciler {
   const { client, ledger } = deps;
   const log: Logger = deps.log;
-  const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
   return {
     async redeliverFailed(since) {
@@ -152,7 +152,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           if (older || parsed.data.length === 0) break;
         }
       } catch (err) {
-        return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${why(err)}` };
+        return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${errMessage(err)}` };
       }
       const neverOk = [...failed].filter(([guid]) => !ok.has(guid));
       let stored: ReadonlySet<string> = new Set();
@@ -165,7 +165,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           outcome: 'failed',
           checked,
           recovered: 0,
-          why: `查后端库里有没有这些投递失败，这一轮不重投：${why(err)}`,
+          why: `查后端库里有没有这些投递失败，这一轮不重投：${errMessage(err)}`,
         };
       }
       const todo = neverOk.filter(([guid]) => !stored.has(guid));
@@ -187,7 +187,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           });
           recovered += 1;
         } catch (err) {
-          errors.push(`${guid}：${why(err)}`);
+          errors.push(`${guid}：${errMessage(err)}`);
         }
       }
       if (todo.length > 0) log.warn('有投递一直没成功，已重投', { failed: todo.length, recovered });
@@ -247,7 +247,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           outcome: checked > 0 ? 'partial' : 'unscanned',
           checked,
           recovered,
-          why: `轮询 ${slug} 没做完：${why(err)}`,
+          why: `轮询 ${slug} 没做完：${errMessage(err)}`,
         };
       }
       return { outcome: 'ok', checked, recovered };
@@ -269,7 +269,6 @@ export async function auditMergedPrs(
 ): Promise<MergedPrAuditReport> {
   const { client, ledger } = deps;
   const log: Logger = deps.log;
-  const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
   const repo = parseRepoSlug(repoFullName);
   const slug = repoSlug(repo);
   const repoId = await ledger.repoId(repo);
@@ -365,17 +364,17 @@ export async function auditMergedPrs(
               } catch (err) {
                 // 补账失败不能算这个 PR 没查成：补不上并不影响上面已经报出来的绕过合并队列事实，
                 // 下一轮还会再来一次（existing?.completedAt 还是空）。
-                log.warn('补记合并记录失败', { repo: slug, number: item.number, why: why(err) });
+                log.warn('补记合并记录失败', { repo: slug, number: item.number, why: errMessage(err) });
               }
             }
           }
         } catch (err) {
-          note(item.number, 'unchecked', `没查成：${why(err)}`);
+          note(item.number, 'unchecked', `没查成：${errMessage(err)}`);
         }
       }
     }
   } catch (err) {
-    return { outcome: 'unscanned', ...report(), why: `列合并的 PR 失败：${why(err)}` };
+    return { outcome: 'unscanned', ...report(), why: `列合并的 PR 失败：${errMessage(err)}` };
   }
   const result = report();
   if (result.found > 0) {

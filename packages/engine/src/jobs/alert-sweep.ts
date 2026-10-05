@@ -12,7 +12,8 @@
 // 各种提醒谁来撤（改这里之前先对一遍）：
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
 //   工作树那一部分撤（jobs/worktree-sweep.ts）。
-// - <工作流>:park:<n> 挂起：工作流不在跑了、不挂着了、后来又挂起了一次（这条是旧的）就撤；「「<阶段>」没有能用的路由」
+// - <工作流>:park:<n> 挂起（任务工作流报的键是 task:<仓>#<号>:park:<n>，旧的是 req:/sub:；#901 之前这里不认 task:，
+//   任务工作流的挂起提醒永远撤不掉；读它的状态走 taskStatus 查询，real/hourly-reconcile.ts 的 taskViewOf）：工作流不在跑了、不挂着了、后来又挂起了一次（这条是旧的）就撤；「「<阶段>」没有能用的路由」
 //   挂着时路由恢复了，正文开头写一句「路由已经恢复…点继续」（不撤：任务还挂着等人点继续）。
 // - <工作流>:history 事件数到线：工作流结束了就撤。
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
@@ -22,9 +23,10 @@
 //   读不了记没查成，不撤）。
 // - no-verifier:<任务> 这张单做完没人能验（选路给开 PR 前验证留一家留不下时报的）：这张单做完、叫停、没做完了就撤；
 //   验证留得下了、验证派出去了由选路自己撤（real/store-ports.ts）。
-// - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤）、session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、
-//   组织读数定下来了就撤，real/org-switch.ts）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
-//   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、
+// - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤；人拍的暂停不在这里，在设置 engine.poolHolds，只有人撤，#746）、
+//   session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、组织读数定下来了、整池暂停的设置读得出了就撤，
+//   real/org-switch.ts；整池暂停到了复查日期的 session-org:pool-hold-overdue 也在这里：人撤了或续了期才撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
+//   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、canary:leftover-pr（巡检收上一轮留下的单时没关掉它开的 PR，之后一轮把 PR 关掉了就撤，#336）、
 //   watchdog:job:<任务>:…、watchdog:unchecked:<日子>（看门狗 jobs/watchdog.ts：任务按期跑成了、读到登记表了就撤）、
 //   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）、
 //   github-app:<机器人>:<仓>（机器人权限自检 jobs/github-app-check.ts：权限够了就撤）、reconcile:workflow:<任务>（开着的单
@@ -33,9 +35,11 @@
 //   （已删的对账给提问另开单推出来的，#530）如果还开着，不再有代码去撤它们，落进下面「判不了、还没接的」那一档，
 //   只靠 24 小时再推。
 // - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）。
+
 import { type AlertStage, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
 import {
@@ -43,7 +47,6 @@ import {
   beijingDate,
   clip,
   isStage,
-  message,
   notRunningWords,
   RECONCILE_ACTOR,
   type ReconcileLog,
@@ -141,7 +144,7 @@ export function withRouteNote(body: string, note: string | null): string {
 export const RULES: readonly Rule[] = [
   {
     name: '挂起',
-    pattern: /^((?:req|sub):.+):park:\d+$/,
+    pattern: /^((?:task|req|sub):.+):park:\d+$/,
     async judge(deps, alert, m) {
       const wf = m[1] as string;
       const st = await deps.workflows.state(wf);
@@ -328,7 +331,7 @@ async function quietAlerts(c: Ctx, alerts: readonly AlertRow[]): Promise<Set<str
       if (h.stage === 'silenced' || HANDLED_STAGES.includes(h.stage)) quiet.add(id);
     }
   } catch (err) {
-    c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${message(err)}`);
+    c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${errMessage(err)}`);
   }
   return quiet;
 }
@@ -365,7 +368,7 @@ export async function sweepAlerts(
           }
         }
       } catch (err) {
-        c.part.unchecked.push(`提醒 ${alert.dedupeKey}（${rule.name}）没查成：${message(err)}`);
+        c.part.unchecked.push(`提醒 ${alert.dedupeKey}（${rule.name}）没查成：${errMessage(err)}`);
       }
       break;
     }
@@ -380,7 +383,7 @@ export async function sweepAlerts(
     try {
       await remind(c, alert);
     } catch (err) {
-      c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${message(err)}`);
+      c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${errMessage(err)}`);
     }
   }
   // 3. 原来那条已经处理了的再提醒，跟着撤
@@ -391,7 +394,7 @@ export async function sweepAlerts(
     try {
       await resolve(c, alert, '原来那条已经处理了');
     } catch (err) {
-      c.part.unchecked.push(`再提醒 ${alert.dedupeKey} 没撤成：${message(err)}`);
+      c.part.unchecked.push(`再提醒 ${alert.dedupeKey} 没撤成：${errMessage(err)}`);
     }
   }
   return c.part;

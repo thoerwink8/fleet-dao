@@ -4,18 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asks, auditLog, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { AskResponse, BoardResponse, TaskDetailResponse, TimelineResponse } from '@fleet-dao/shared';
+import { AskResponse, BoardResponse, TaskDetailResponse } from '@fleet-dao/shared';
+import { DEPLOY_LAG_NOT_HERE, devFixtures } from '@fleet-dao/store';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
-import { DEPLOY_LAG_NOT_HERE } from '../src/deploy-lag.ts';
-import { devFixtures } from '../src/dev-fixtures.ts';
+import { probeDb } from '../src/db-probe.ts';
 import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
-import { probeDb } from '../src/pg-store.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
@@ -71,16 +70,13 @@ describe('接口跑在真库上', () => {
     // 计费方式从库里的渠道表读：Claude 订阅是套餐内，没记的花费记在套餐内那一栏的没读到
     expect(detail.runs.find((r) => r.id === IDS.run0)?.billing).toBe('subscription');
     expect(detail.usage.total.cost.subscription).toEqual({ runs: 1, usd: 0, missing: 1 });
-    const timeline = TimelineResponse.parse(await get(`/api/tasks/${IDS.task12}/timeline`));
-    expect(timeline.items.length).toBeGreaterThan(0);
     // 登录本身也落了库里的操作记录。
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
   });
 
-  it('fleet 命令带同一个幂等键重试：库里只有一条进度，只叫醒一次', async () => {
+  it('fleet 命令带同一个幂等键重试：库里只有一条进度，不发信号', async () => {
     const h = await start();
-    // blocked 属于 AGENT_EVENT_WAKE_KINDS（会叫醒工作流），say 不会——用它才能证明「幂等键去重连带去重叫醒」
-    // 在真库（不只是内存版）上也成立。
+    // 幂等键去重在真库（不只是内存版）上也成立；fleet 命令只写库、不发信号（#901）。
     const blocked = () =>
       h.agent.request(
         '/agent/v1/blocked',
@@ -98,7 +94,7 @@ describe('接口跑在真库上', () => {
       .from(progressEvents)
       .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'blocked')));
     expect(rows.filter((r) => (r.payload as { reason?: string }).reason === '真库上的一句')).toHaveLength(1);
-    expect(h.signals).toHaveLength(1);
+    expect(h.signals).toHaveLength(0);
   });
 
   it('fleet ask 在真库上：不等回答、当场按推荐先做，范围和推荐落库；别处（飞书、issue）写进库的回答，再问同一句回「答过了」', async () => {
@@ -132,7 +128,7 @@ describe('接口跑在真库上', () => {
     expect(await ask()).toEqual({ askId: first.askId, status: 'answered', answer: '腾讯云' });
   });
 
-  it('SSE：驾驶舱里回答追问 → 库里的触发器发通知 → 打开的页面收到 asks 的变化', async () => {
+  it('SSE：驾驶舱里关闭旧追问 → 库里的触发器发通知 → 打开的页面收到 asks 的变化', async () => {
     const h = await start();
     const session = await h.login();
     const asked = AskResponse.parse(
@@ -149,10 +145,7 @@ describe('接口跑在真库上', () => {
     );
     const { reader } = await openEvents(h, session.cookie);
     const buf = await readUntil(reader, 'event: ready');
-    const res = await h.cockpit.request(
-      `/api/asks/${asked.askId}/answer`,
-      write('POST', session, { answer: '6 位' }),
-    );
+    const res = await h.cockpit.request(`/api/asks/${asked.askId}/close`, write('POST', session));
     expect(res.status).toBe(200);
     await readUntil(reader, `{"table":"asks","id":"${asked.askId}"}`, buf);
     await reader.cancel();

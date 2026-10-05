@@ -26,6 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
@@ -94,7 +95,6 @@ export interface DiffFile {
 
 const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo.owner, name: repo.name });
 const short = (sha: string) => sha.slice(0, 7);
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /**
  * PR 改到的文件 → 喂给验收会话的 unified diff 和文件名单。
@@ -202,7 +202,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     let ticket: OneShotTicket | undefined;
     // 挑中路由时补上切号叫停的信号（挑之前不知道跑在哪个池）
     const oneShot: OneShotDeps = {
-      spawn: (cmd) => spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) }),
+      spawn: (cmd) => {
+        ticket?.running();
+        return spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) });
+      },
       ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
       tmpDir: deps.runsDir,
       runs: deps.runs,
@@ -277,7 +280,11 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           const runId = randomUUID();
           if (deps.sessions) {
             ticket?.leave();
-            ticket = deps.sessions.enter({ poolId: route.poolId });
+            ticket = deps.sessions.enter({
+              poolId: route.poolId,
+              stage: SEGMENT_STAGE.verify,
+              taskId: input.taskId,
+            });
             ticket.attempt(runId);
             oneShot.stop = ticket.signal;
           }
@@ -299,7 +306,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             cwd: dir,
             release: async () => {
               await deps.spawner.trees.remove(dir).catch((error: unknown) => {
-                log('验收会话的空目录没删掉（引擎下次起来时的清理会收）', { dir, error: message(error) });
+                log('验收会话的空目录没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(error) });
               });
             },
           };
@@ -341,7 +348,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         await deps.reservations.release(reservationId).catch((error: unknown) => {
           log('选路时给验收预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
             reservationId,
-            error: message(error),
+            error: errMessage(error),
           });
         });
       }

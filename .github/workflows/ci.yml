@@ -1,8 +1,10 @@
 name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
-# biome、tsc、apps 里各步、test、web、deploy 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
+# biome、tsc、apps 里各步、test、web、e2e、deploy 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
 # 主线推送跑「上一次主线真绿的头…这次的头」那段累计改动该跑的（基准查不到、认不出路径一律退回全跑）；
-# 区间口径、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 D。
+# 其中这次提交的树和某次成功的 PR 检查测的是同一棵、那次比的基准树也正是上次真绿的头的树时，test、web、e2e、deploy 不再重测
+# （同树同结果；对不上、查不到、读不到都照旧全跑并留 ::warning::，lint 仍每轮自己跑）。
+# 区间口径、同树复用、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 C、D。
 #
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
@@ -19,18 +21,28 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
+  # 每夜一轮全量兜底（2026-10-05 加，创始人「不认可每个 pr 都要这种流程」）。e2e 的触发面同一天收窄到
+  # 「只碰 web、api 或 ci.yml 自己」——收窄之后，改 db、shared、锁文件的 PR 不再跑那 364 秒的驾驶舱 e2e。
+  # 全量回归不能就这么没了，落到这里：非 pull_request 事件在 planCi 里一律全跑（含 e2e），所以这一轮会把
+  # 每一样都跑一遍，只是不再挂在每个 PR 上。挑深夜（北京时间约 4 点）避开白天的并发槽。
+  schedule:
+    - cron: '23 20 * * *'
 # 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
 permissions:
   contents: read
-# 并发组 PR 按号分、推主线按分支分，两边不撞：pull_request 事件的 github.ref 是 refs/pull/<N>/merge，push 到 main
-# 是 refs/heads/main。按 PR 号分组更直接，也防着触发类型以后再加回 edited 之类——已经合了的 PR 被编辑触发一轮时，
-# GitHub 给它的 github.ref 会是 refs/heads/main，按 github.ref 分组就会和主线那一轮撞上、把主线的全量挤掉（曾经出过
-# 这个事：主线头上 check 红、自动发布不发，2026-09-27 #283）。
+# 并发组 PR 按号分、推主线按分支分、定时轮再按事件分，三者不撞：pull_request 事件的 github.ref 是 refs/pull/<N>/merge，
+# push 到 main 是 refs/heads/main。按 PR 号分组更直接，也防着触发类型以后再加回 edited 之类——已经合了的 PR 被编辑触发
+# 一轮时，GitHub 给它的 github.ref 会是 refs/heads/main，按 github.ref 分组就会和主线那一轮撞上、把主线的全量挤掉
+# （曾经出过这个事：主线头上 check 红、自动发布不发，2026-09-27 #283）。
 # 只有 PR 上新的一轮挤掉旧的；主线推送不挤掉在跑的那一轮：它跑完，新推送排着（同组只排一个，更新的顶掉更旧的）。
 # 要是也挤，合并比主线全量（3–4 分钟）还密时每一轮都被下一次推送挤成 cancelled，一个全绿的提交都没有，
 # 自动发布往回也找不到能发的（2026-09-27 夜最近 100 次主线 CI 被挤掉 26 次，#362）。
+#
+# 末尾再带上事件名（2026-10-05，第二意见挑出来的）：`schedule` 的 github.ref 也是 refs/heads/main，只按 ref 分组的话
+# 夜跑和主线推送同一组——夜跑排上队后只要推一次主线，它就被顶掉，那一夜的全量回归直接不跑。加上事件名之后
+# schedule 自成一组；PR 那一路仍按 PR 号分（number 先命中，不受影响），主线那一路仍是 ci-refs/heads/main-push。
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # 这次改了什么 → 各 job 的开关。PR 按 git diff origin/<目标分支>...HEAD 算（HEAD 是 GitHub 造的合并提交，比的就是合进去会带进来的改动）；
@@ -48,8 +60,10 @@ jobs:
       tsc: ${{ steps.plan.outputs.tsc }}
       tests: ${{ steps.plan.outputs.tests }}
       web: ${{ steps.plan.outputs.web }}
+      e2e: ${{ steps.plan.outputs.e2e }}
       deploy: ${{ steps.plan.outputs.deploy }}
       deploy_matrix: ${{ steps.plan.outputs.deploy_matrix }}
+      reused: ${{ steps.plan.outputs.reused }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,12 +79,39 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}
         run: echo "sha=$(node packages/conventions/src/bin/main-base.ts ci.yml "$BRANCH")" >> "$GITHUB_OUTPUT"
+      # 主线推送：这次提交的树，和某次成功的 PR 检查测的是不是同一棵、那次比的基准树是不是上面查到的「上次真绿的头」的树？
+      # 是就让下面算计划的那一步把 test、web、deploy 标成「复用，不重测」（同树同结果）；对不上、查不到、读不到都只打 ::warning::，
+      # 照旧按区间全跑。判法在 packages/conventions/src/main-reuse.ts，docs/ci-speedup-plan.md 的 D 有方案。
+      - id: reuse
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
+        run: node packages/conventions/src/bin/main-reuse.ts --base "$MAIN_BASE" --workflow ci.yml >> "$GITHUB_OUTPUT"
+      # PR：留下「这一轮测的是哪棵树、比的基准树是哪棵」，供合并后那一轮的主线查（上一步）。检出的是 GitHub 造的合并提交（HEAD），
+      # 它的第一个父提交是 PR 当时的目标分支头。只留在步骤名里：jobs 接口原样给出步骤名，查它不需要任何写权限；
+      # 名字的写法由 main-reuse.ts 的 claimStepName 定、test/main-reuse.test.ts 核对这里的写法对得上。
+      # 只有这一轮整个运行成功才会被认（main-reuse.ts 查运行的 conclusion）。HEAD 不是两个父提交的合并提交时不留正常的声明（主线那边认不出就不复用）。
+      - id: tested
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          parents=$(git rev-list --parents -n 1 HEAD | wc -w)
+          if [ "$parents" = 3 ]; then
+            echo "claim=tree=$(git rev-parse 'HEAD^{tree}') base=$(git rev-parse 'HEAD^1^{tree}')" >> "$GITHUB_OUTPUT"
+          else
+            echo "claim=无（HEAD 不是合并提交）" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 已测的树 ${{ steps.tested.outputs.claim }}
+        if: github.event_name == 'pull_request'
+        run: echo "这一轮测的是这棵树（合并后主线那一轮据此复用，见 packages/conventions/src/main-reuse.ts）"
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
           MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
-        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE"
+          REUSE: ${{ steps.reuse.outputs.reuse }}
+        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE" --reuse "$REUSE"
 
   # 一堆「装一次依赖、跑一条命令」的小检查，全并进这一个 job（原来 biome、tsc、docs、hygiene 各占一台机器，
   # 各出 25 秒的 checkout + setup-node + pnpm install 固定开销，四台占掉四个并发槽）：一个 PR 的 CI 少占三个并发槽，
@@ -185,7 +226,8 @@ jobs:
           start() {
             local name=$1
             shift
-            ("$@" >"$LOGS/$name.log" 2>&1; echo $? >"$LOGS/$name.rc") &
+            # 各自记下跑了几秒（写进下面的分组标题）：三样并行，这一步的墙钟就是最慢那一样，不记就看不出该省哪个
+            ( s=$SECONDS; "$@" >"$LOGS/$name.log" 2>&1; echo $? >"$LOGS/$name.rc"; echo $((SECONDS - s)) >"$LOGS/$name.secs" ) &
           }
           run_tsc() {
             if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
@@ -198,7 +240,7 @@ jobs:
           wait
           for name in "${names[@]}"; do
             rc=$(cat "$LOGS/$name.rc" 2>/dev/null || echo missing)
-            echo "::group::$name（退出码 $rc）"
+            echo "::group::$name（退出码 $rc，$(cat "$LOGS/$name.secs" 2>/dev/null || echo 未知) 秒）"
             cat "$LOGS/$name.log" 2>/dev/null || echo "（没有日志）"
             echo "::endgroup::"
             if [ "$rc" = 0 ]; then echo "$name=success" >>"$GITHUB_OUTPUT"; else echo "::error::$name 没过（退出码 $rc）"; echo "$name=failure" >>"$GITHUB_OUTPUT"; fi
@@ -255,7 +297,8 @@ jobs:
   # 参数是子串过滤，交给它清单也不等于它正好跑这些；多跑、少跑都红，没跑成不许当通过。
   # PR 上的结果缓存（packages/conventions/src/ci-cache.ts）：同一个 PR 重推，这一台的输入（分到的文件、源码、依赖、
   # 根配置、环境……）没变、上一轮又全绿，就不再跑 vitest。缓存按 ref 分作用域，PR 的缓存只有这个 PR 自己读得到；
-  # 主线（push）这一轮是自动发布的闸门，一个测试都不许跳：下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
+  # 主线（push）这一轮是自动发布的闸门：它的测试要么真跑，要么复用一次同树的 PR 检查（见 changes 的 reuse 步；
+  # 同树同结果，由 PR 那次真跑背书），不靠这个缓存跳——下面缓存的每一步都只在 pull_request 上跑，入口脚本也自己认事件名。
   # job 照常 success，跳的只是 vitest 那一步；缓存读不到、清单对不上、算不出，一律回来真跑。
   test:
     needs: changes
@@ -447,6 +490,77 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter ./packages/web run build:demo
 
+  # 驾驶舱用户视角 e2e（#930，母单 #902）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端（Vite）+ Chromium，
+  # 站在创始人角度逐页走（packages/web/e2e，README 有跑法）。只在 ci-plan.ts 的 touchesE2e 认的改动（web、api、db、shared、
+  # 依赖和 workspace、本文件）或「认不出改了什么」时开（changes 的 e2e 输出）——它要几分钟、占一个并发槽，不让每个 PR 都多一个长 job。
+  # 红了挡合并：check 的 needs 里有它，ciVerdict 把「本该跑 → success」一并核；跑成功才算过，跳过只在开关说不用跑的时候才算过。
+  # 和 test 的 pg 台一样自己 docker run 起 postgres:16（不用 services：services 要等健康检查，这里放后台、装依赖之后再等）。
+  # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，
+  # 管理连接串指向容器；库名、端口、顺序（1366 只读一遍、1920 带写一遍）都和本机一样。
+  e2e:
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # 一次性 runner 上的一次性容器，只有本机回环连得到：用 trust 认证，连接串里不放密码
+      E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
+      E2E_BROWSER_CHANNEL: chromium
+    steps:
+      - name: 起 postgres:16（后台）
+        run: |
+          set -euo pipefail
+          nohup docker run -d --name fleet-e2e-pg -p 5432:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:16-alpine > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 浏览器缓存按 Playwright 的版本（锁文件里钉住的那一版）：没命中才下 Chromium（约 150M）；系统库（--with-deps）每台新机器都要装
+      - name: Playwright 版本
+        id: pw
+        run: |
+          set -euo pipefail
+          version=$(pnpm --filter @fleet-dao/web exec playwright --version | sed -n 's/^Version \([0-9][0-9.]*\)$/\1/p')
+          if [ -z "$version" ]; then
+            echo "读不到 Playwright 的版本" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: 装 Chromium 和系统库
+        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+      - name: 等 postgres:16 起来
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            if docker exec fleet-e2e-pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          if [ -f "$RUNNER_TEMP/fleet-e2e-pg-start.log" ]; then cat "$RUNNER_TEMP/fleet-e2e-pg-start.log" >&2; fi
+          if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
+          echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
+          exit 1
+      - name: 驾驶舱 e2e
+        run: pnpm --filter @fleet-dao/web e2e
+      # 红了留证据：报告、截图、各进程日志（后端、前端）都在仓根 _tmp/e2e/（公开仓：里面只有 e2e 自己造的假数据）
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-${{ github.run_id }}
+          path: _tmp/e2e/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
   # deploy=all 时切成 3 台并行（ci-plan.ts 的 deployMatrix / DEPLOY_SHARDS，跑 run.sh --shard i/3；一台 100 秒上下，
   # 全套 300 秒上下）；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
@@ -517,12 +631,12 @@ jobs:
             bash deploy/test/run.sh "${args[@]}"
           fi
 
-  # 必过检查。逐个核对：changes 必须绿；lint 该跑的必须绿、本该跳过的必须是跳过；test、web、deploy 本该跑的必须绿、
+  # 必过检查。逐个核对：changes 必须绿；lint 该跑的必须绿、本该跳过的必须是跳过；test、web、e2e、deploy 本该跑的必须绿、
   # 本该跳过的必须是跳过（packages/conventions/src/ci-plan.ts 的 ciVerdict）。
   # lint 里面几步各报各的（哪一步红写在它的 job 日志和最后的汇总步里）；汇总 job 认的是 lint 这个 job 的结论。
   check:
     if: always()
-    needs: [changes, lint, test, web, deploy]
+    needs: [changes, lint, test, web, e2e, deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -538,6 +652,7 @@ jobs:
       # 类型擦除）；镜像换了、自带版本低了就红，不靠运气。
       - env:
           CI_NEEDS: ${{ toJSON(needs) }}
+          CI_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           want=$(node -p "require('./package.json').engines.node.replace(/[^0-9.]/g,'')")

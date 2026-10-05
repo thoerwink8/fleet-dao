@@ -65,6 +65,18 @@ export interface GitHubCommenter {
   comment(n: number, body: string): Promise<void>;
 }
 
+/**
+ * 给一张单换挂的里程碑（#995 第 2 条：版本里程碑关之前，把里面还开着的单搬到下一个版本，没有下一个就搬未排期）。
+ * 关里程碑那一步（release-milestone.ts 的 close）用它，所以和 GitHubReleaser 分开写：那是发布收尾专用的几样。
+ */
+export interface GitHubIssueMilestone {
+  /**
+   * 改这张单挂的里程碑：number 挂过去，null 是未排期（GitHub 的里程碑字段清空）。
+   * 回 GitHub 改完之后这张单上挂的里程碑编号（未排期是 null）——调用方拿它核是不是真改了，不拿「没报错」当改好了。
+   */
+  setIssueMilestone(n: number, milestone: number | null): Promise<number | null>;
+}
+
 /** 一张已经合并的 PR：号、合并的时间（ISO）、合进主线的那个提交（squash / merge / rebase 都是 GitHub 给的 merge_commit_sha）。 */
 export interface MergedPull {
   number: number;
@@ -219,7 +231,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter & GitHubReleaser & GitHubBranches {
+): GitHubReader & GitHubCommenter & GitHubReleaser & GitHubBranches & GitHubIssueMilestone {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -428,6 +440,20 @@ export function liveGitHub(
       });
       if (!res.ok) throw failed(res, `在关里程碑 #${n} 时`);
       return toMilestoneDetail(await json(res, `关里程碑 #${n} 的回包`));
+    },
+    async setIssueMilestone(n, milestone) {
+      const res = await get(`/repos/${repo}/issues/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ milestone }),
+      });
+      if (!res.ok) throw failed(res, `在改 #${n} 挂的里程碑时`);
+      const data = await json(res, `改 #${n} 挂的里程碑的回包`);
+      const m = isObject(data) ? data.milestone : undefined;
+      // 未排期：GitHub 回 null（或字段不在）。挂了版本：回包里带编号；认不出就抛，不拿「没报错」当改好了。
+      if (m === null || m === undefined) return null;
+      if (!isObject(m) || typeof m.number !== 'number')
+        throw new Error(`读改 #${n} 挂的里程碑的回包，认不出（milestone）`);
+      return m.number;
     },
     async defaultBranch() {
       const res = await get(`/repos/${repo}`);

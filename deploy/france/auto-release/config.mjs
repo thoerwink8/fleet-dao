@@ -14,6 +14,7 @@ import {
   chmodSync,
   chownSync,
   lstatSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -70,6 +71,11 @@ const APPLIED_LOG_KEEP = 20;
 export const PROFILE_FILE = `${ETC_DIR}/profile`;
 /** 档位 → 这个档位的期望在每一版目录里的位置（#451：本机档的差别只写在 deploy/local 那一份）。 */
 export const PROFILE_DESIRED = { france: DESIRED_FILE, local: 'deploy/local/desired-config.json' };
+/** 这个期望路径是不是本机档那份（仓里的相对位置、绝对路径、Windows 反斜杠都认）。 */
+const isLocalDesired = (path) => {
+  const p = path.replaceAll('\\', '/');
+  return p === PROFILE_DESIRED.local || p.endsWith(`/${PROFILE_DESIRED.local}`);
+};
 
 const KEY_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -395,6 +401,10 @@ export function fingerprintOf(key, file, name, value) {
 export function judgeConfig({ desired, files = {}, key, desiredPath }) {
   const drift = [];
   const unchecked = [];
+  // 报警里「改哪份期望、在哪台上跑命令」都跟着 desiredPath 走（本机档 #451 传的是本机档那份）；没给（老调用方、测试）
+  // 照旧当法国。别在下面再直接写 DESIRED_FILE：本机档的人会照着去改法国那份期望。
+  const wantPath = desiredPath ?? DESIRED_FILE;
+  const host = isLocalDesired(wantPath) ? '本机档' : '法国';
   if (!desired || 'error' in desired) {
     return {
       result: 'unchecked',
@@ -459,8 +469,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
       byKey.set(e.key, list);
     }
     const add = (k, kind, title, body) => drift.push({ id: `${file}:${k}`, file, key: k, kind, title, body });
-    // desiredPath 没给（老调用方、测试）就照旧当法国：不传这个参数时行为不变
-    const fix = `期望在仓里 ${desiredPath ?? DESIRED_FILE}（在用的那一版）：线上是手改的就改回去；真要改期望，改那份文件、合进主线`;
+    const fix = `期望在仓里 ${wantPath}（在用的那一版）：线上是手改的就改回去；真要改期望，改那份文件、合进主线`;
     for (const d of declared) {
       const values = byKey.get(d.key) ?? [];
       const what = d.kind === 'private' ? '私有值' : `期望「${d.value}」`;
@@ -468,7 +477,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
         add(
           d.key,
           'missing',
-          `法国配置缺了一项：${file} 的 ${d.key}`,
+          `${host}配置缺了一项：${file} 的 ${d.key}`,
           `${file} 里没有生效的 ${d.key}（没写，或被注释掉了），${what}。${fix}`,
         );
         continue;
@@ -477,7 +486,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
         add(
           d.key,
           'duplicate',
-          `法国配置写重了：${file} 的 ${d.key}`,
+          `${host}配置写重了：${file} 的 ${d.key}`,
           `${file} 里 ${d.key} 写了 ${values.length} 行（服务里生效的是最后一行，人改了前一行会以为改好了）：删成一行，${what}。`,
         );
         continue;
@@ -488,7 +497,7 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
           add(
             d.key,
             'value',
-            `法国配置和仓里的期望不一致：${file} 的 ${d.key}`,
+            `${host}配置和仓里的期望不一致：${file} 的 ${d.key}`,
             `${file} 的 ${d.key} ${what}，线上现在不是这个值（线上的值不打印）。${fix}。`,
           );
         }
@@ -503,10 +512,10 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
         add(
           d.key,
           'private',
-          `法国配置和仓里的期望不一致：${file} 的 ${d.key}`,
+          `${host}配置和仓里的期望不一致：${file} 的 ${d.key}`,
           `${file} 的 ${d.key} 是私有值，和仓里记的指纹对不上（值不打印）。线上是手改的就照保险箱里那份放回去；` +
-            `真要换成新值：在法国以 root 跑 node ${CONFIG_CLI} fingerprint ${file} ${d.key}，` +
-            `把打印出来的指纹写进 ${DESIRED_FILE}、合进主线。`,
+            `真要换成新值：在${host}上以 root 跑 node ${CONFIG_CLI} fingerprint ${file} ${d.key}，` +
+            `把打印出来的指纹写进 ${wantPath}、合进主线。`,
         );
       }
     }
@@ -516,9 +525,9 @@ export function judgeConfig({ desired, files = {}, key, desiredPath }) {
       add(
         k,
         'undeclared',
-        `法国配置多了一项：${file} 的 ${k}`,
+        `${host}配置多了一项：${file} 的 ${k}`,
         `${file} 里有 ${k}${values.length > 1 ? `（写了 ${values.length} 行）` : ''}，仓里的期望没有这一项（值不打印）。` +
-          `要留着就把它写进 ${DESIRED_FILE}（私有的写指纹）、合进主线；不要就从 ${file} 里删掉。`,
+          `要留着就把它写进 ${wantPath}（私有的写指纹）、合进主线；不要就从 ${file} 里删掉。`,
       );
     }
   }
@@ -605,6 +614,109 @@ export function diffProfiles(france, local) {
     });
   }
   return { result: drift.length > 0 ? 'drift' : 'ok', drift, unchecked: [] };
+}
+
+/**
+ * 拼车并发总上限的登记（#194 方案 4.7）：数值只写在各档的期望里（engine.env 的这两项），代码里不留默认数。
+ * 一台机器一项 own（它自己最多同时开几个拼车会话），两边写的 total（总上限）必须逐字一样；各台 own 加起来不许超过 total。
+ * 引擎起来时拿自己那项（环境变量）核库里拼车池的并发上限（packages/engine/src/real/carpool-cap.ts）。
+ */
+export const CARPOOL_CAP = {
+  file: 'engine.env',
+  own: 'FLEET_CARPOOL_MAX_CONCURRENCY',
+  total: 'FLEET_CARPOOL_TOTAL_CAP',
+};
+const POSITIVE_INT = /^[1-9][0-9]{0,5}$/;
+
+/**
+ * 各台拼车并发登记核一遍。machines 是 [{ name, desired }]，desired 是 parseDesired() 解析好的样子。
+ * 每台都要写成公开的正整数（缺了、私有、空、不是正整数都报红：没登记不当成「不限」），total 每台都写、而且一样，
+ * 各台 own 加起来超过 total 报红。返回 drift 条目（scope 'carpool-cap'），空 = 都对。
+ */
+export function carpoolCapProblems(machines) {
+  const drift = [];
+  const red = (key, title, body) =>
+    drift.push({ scope: 'carpool-cap', file: CARPOOL_CAP.file, key, title, body });
+  const read = (m, key) => {
+    const d = m.desired?.files?.[CARPOOL_CAP.file]?.find((x) => x.key === key);
+    if (!d) return { problem: '期望里没有这一项' };
+    if (d.kind !== 'public') return { problem: '写成了私有值（只有指纹），仓里加不出总数' };
+    if (!POSITIVE_INT.test(d.value)) return { problem: `值「${d.value}」不是正整数` };
+    return { n: Number(d.value) };
+  };
+  const owns = [];
+  const totals = [];
+  for (const m of machines) {
+    const own = read(m, CARPOOL_CAP.own);
+    if (own.problem) {
+      red(
+        CARPOOL_CAP.own,
+        `${m.name}没登记拼车并发上限：${CARPOOL_CAP.file} 的 ${CARPOOL_CAP.own}`,
+        `${own.problem}。每台跑引擎的机器都要在自己那份 desired-config.json 里写下它最多同时开几个拼车会话，加一台机器不登记就加不进总数（#194 方案 4.7）。`,
+      );
+    } else owns.push({ name: m.name, n: own.n });
+    const total = read(m, CARPOOL_CAP.total);
+    if (total.problem) {
+      red(
+        CARPOOL_CAP.total,
+        `${m.name}没登记拼车并发总上限：${CARPOOL_CAP.file} 的 ${CARPOOL_CAP.total}`,
+        `${total.problem}。总上限每台的期望里都要写、而且逐字一样。`,
+      );
+    } else totals.push({ name: m.name, n: total.n });
+  }
+  const distinct = [...new Set(totals.map((t) => t.n))];
+  if (distinct.length > 1) {
+    red(
+      CARPOOL_CAP.total,
+      `各台写的拼车并发总上限不一样：${CARPOOL_CAP.total}`,
+      `${totals.map((t) => `${t.name} ${t.n}`).join('、')}：总上限只有一个数，每台写的要逐字一样。`,
+    );
+  } else if (distinct.length === 1 && owns.length === machines.length) {
+    const sum = owns.reduce((a, o) => a + o.n, 0);
+    if (sum > distinct[0]) {
+      red(
+        CARPOOL_CAP.own,
+        `各台拼车并发加起来超过总上限：${sum} > ${distinct[0]}`,
+        `${owns.map((o) => `${o.name} ${o.n}`).join('、')}：加起来 ${sum}，总上限 ${distinct[0]}。同号多机同时高频用拼车容易被风控、也会一台把整窗额度抢光；要加机器先把别台的数往下调。`,
+      );
+    }
+  }
+  return drift;
+}
+
+/**
+ * 仓里有几份机器期望（deploy/<名>/desired-config.json），都得登记在 PROFILE_DESIRED 里（登记了才进上面的加总）：
+ * 多出一份没登记的 = 加了一台机器却没把它的并发算进总数，报红。读不了目录抛 ConfigError（没查成，不当成「没多出」）。
+ */
+export function unregisteredDesiredFiles(deployDir, stat = statSync) {
+  let names;
+  try {
+    names = readdirSync(deployDir);
+  } catch (e) {
+    throw new ConfigError(`读不了 ${deployDir}：${e instanceof Error ? e.message : String(e)}`);
+  }
+  const registered = new Set(Object.values(PROFILE_DESIRED));
+  const drift = [];
+  for (const name of names.sort()) {
+    const rel = `deploy/${name}/desired-config.json`;
+    let st;
+    try {
+      st = stat(`${deployDir}/${name}/desired-config.json`);
+    } catch (e) {
+      // 目录里没有这个文件、或这一项本身是个普通文件（deploy/ 下有 cursor-key.sh 这类脚本，stat 它下面的路径报 ENOTDIR）：不是机器档
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue;
+      throw new ConfigError(`读不了 ${rel}：${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (!st.isFile() || registered.has(rel)) continue;
+    drift.push({
+      scope: 'carpool-cap',
+      file: rel,
+      key: CARPOOL_CAP.own,
+      title: `${rel} 没登记进 PROFILE_DESIRED：它的拼车并发没算进总上限`,
+      body: '新加的机器档要把期望写进 deploy/france/auto-release/config.mjs 的 PROFILE_DESIRED，才会和别台一起核「加起来不超过总上限」（#194 方案 4.7）。',
+    });
+  }
+  return drift;
 }
 
 /** MUST_DIFFER 的一项：法国、本机档各自的声明（没声明是 undefined）→ 哪里不对（一句话），对的回 null。 */
@@ -1284,7 +1396,7 @@ export async function cli(
       const r = judgeConfig(live);
       const from =
         o.desired ??
-        (live.commit ? `在用的 ${live.commit.slice(0, 12)} 里的 ${DESIRED_FILE}` : '在用的那一版');
+        (live.commit ? `在用的 ${live.commit.slice(0, 12)} 里的 ${live.desiredPath}` : '在用的那一版');
       for (const d of r.drift) io.out(`red ${d.title}：${d.body}`);
       for (const u of r.unchecked) io.out(`pending 配置没查成：${u}`);
       if (r.result === 'ok') io.out(`ok 本机配置和期望（${from}）一致（值不打印）`);
@@ -1300,7 +1412,20 @@ export async function cli(
       if ('error' in franceRaw) throw new ConfigError(`读不到法国的期望：${franceRaw.error}`);
       const localRaw = readText(o.local ?? LOCAL_DESIRED_FILE);
       if ('error' in localRaw) throw new ConfigError(`读不到本机档的期望：${localRaw.error}`);
-      const r = diffProfiles(parseDesired(franceRaw.text), parseDesired(localRaw.text));
+      const franceWant = parseDesired(franceRaw.text);
+      const localWant = parseDesired(localRaw.text);
+      const r = diffProfiles(franceWant, localWant);
+      // 拼车并发总上限（#194 方案 4.7）：各台登记加起来不超过总上限；不给路径时再核仓里没有没登记的机器档
+      r.drift.push(
+        ...carpoolCapProblems([
+          { name: '法国', desired: franceWant },
+          { name: '本机档', desired: localWant },
+        ]),
+        ...(o.france === undefined && o.local === undefined
+          ? unregisteredDesiredFiles(fileURLToPath(new URL('../../', import.meta.url)))
+          : []),
+      );
+      if (r.drift.length > 0 && r.result === 'ok') r.result = 'drift';
       for (const d of r.drift) io.out(`red ${d.title}：${d.body}`);
       for (const u of r.unchecked) io.out(`pending 本机档和法国的期望没比成：${u}`);
       if (r.result === 'ok')

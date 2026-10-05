@@ -37,6 +37,13 @@ describe('读不到时照实说，不冒充「没有」', () => {
     expect(screen.queryByText('没有待处理的提醒')).toBeNull();
   });
 
+  test('通知中心：旧追问没读成，写明没读成、不悄悄少一块（也不挡住上面的提醒）', async () => {
+    renderApp(<NotificationsPage />, { api: failing('legacyAsks') });
+    expect(await screen.findByText(/旧会话留下的提问没读成/)).toBeTruthy();
+    expect(document.querySelector('[data-legacy-asks]')).toBeNull();
+    expect(screen.queryByText(/提醒没读成/)).toBeNull();
+  });
+
   test('定时任务：没读成时不说「还没有定时任务」，失败数写「—」', async () => {
     renderApp(<SchedulesPage />, { api: failing('jobs') });
     expect(await screen.findByText(/定时任务没读成/)).toBeTruthy();
@@ -58,8 +65,8 @@ describe('读不到时照实说，不冒充「没有」', () => {
   });
 });
 
-/** 在测试里直接触发一个快捷操作（换模型、回答追问的对话框）。 */
-function Trigger({ action }: { action: 'reroute' | 'answer' }) {
+/** 在测试里直接触发一个快捷操作（换模型的对话框）。 */
+function Trigger({ action }: { action: 'reroute' }) {
   const { trigger } = useTaskActions();
   const fired = useRef(false);
   useEffect(() => {
@@ -92,12 +99,6 @@ function Trigger({ action }: { action: 'reroute' | 'answer' }) {
 }
 
 describe('对话框里读不到也照实说', () => {
-  test('回答追问：追问没读成，不说「没有待回答的追问」', async () => {
-    renderApp(<Trigger action="answer" />, { api: failing('task') });
-    expect(await screen.findByText(/追问没读成/)).toBeTruthy();
-    expect(screen.queryByText('这个需求现在没有待回答的追问。')).toBeNull();
-  });
-
   test('换模型：路由两层没读成，写明现在没法换', async () => {
     renderApp(<Trigger action="reroute" />, { api: failing('routingLayers') });
     expect(await screen.findByText(/路由没读成，现在没法换/)).toBeTruthy();

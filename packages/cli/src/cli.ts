@@ -1,4 +1,5 @@
 // fleet 命令：解析参数 → 按 agent-api 约定校验 → 调后端 → 用白话打印结果。进程无关，测试直接调 runFleet。（CI 提速验收：量只改代码的 PR 一圈多久）
+
 import { type ParseArgsOptionsConfig, parseArgs } from 'node:util';
 import {
   AgentRoutes,
@@ -13,6 +14,7 @@ import {
   SayRequest,
   TaskResponse,
 } from '@fleet-dao/shared';
+import { errMessage, sleep } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { type BackendCall, CliError, callBackend, EXIT } from './client.ts';
 import { COMMAND_HELP, MAIN_HELP } from './help.ts';
@@ -85,7 +87,7 @@ function connect(io: CliIo): (call: BackendCall) => Promise<unknown> {
         baseUrl: api,
         token,
         fetch: io.fetch,
-        sleep: io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+        sleep: io.sleep ?? sleep,
         onRetry: (message) => io.stderr(`fleet：${message}\n`),
         ...(timing.retryDelaysMs ? { retryDelaysMs: timing.retryDelaysMs } : {}),
         ...(timing.requestMs ? { timeoutMs: timing.requestMs } : {}),
@@ -119,7 +121,7 @@ function parse(
     });
     return { values: parsed.values as Options, positionals: parsed.positionals };
   } catch (err) {
-    throw new CliError(EXIT.usage, `参数不对：${err instanceof Error ? err.message : String(err)}`);
+    throw new CliError(EXIT.usage, `参数不对：${errMessage(err)}`);
   }
 }
 
