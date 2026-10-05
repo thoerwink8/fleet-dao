@@ -13,10 +13,12 @@ import {
   type PackageGraph,
   readGraph,
 } from '../src/ci-plan.ts';
-import { fsRepo } from '../src/repo.ts';
+import { docNeedles, docReaders } from '../src/doc-readers.ts';
+import { fsRepo, type RepoView } from '../src/repo.ts';
 import {
   BASE,
   changedFiles,
+  DOC_POINTERS_TEST,
   ENGINE_SESSION_MARKER,
   type GitRun,
   REFUSED_FULL_RUN,
@@ -61,6 +63,7 @@ function run(
     argv?: string[];
     env?: Record<string, string>;
     graph?: PackageGraph | string;
+    docReaders?: Parameters<typeof testChanged>[0]['docReaders'];
     vitest?: () => VitestResult;
   } = {},
 ) {
@@ -73,6 +76,7 @@ function run(
     env: opts.env ?? {},
     git,
     graph: () => opts.graph ?? GRAPH,
+    docReaders: opts.docReaders,
     vitest: (args) => {
       vitestCalls.push(args);
       return opts.vitest?.() ?? { status: 0 };
@@ -218,13 +222,17 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     return s.kind === 'all' ? 'all' : s.paths;
   };
 
-  it('只改文档（没有受影响的包）：只跑 CI 每个 PR 都跑的文档检查，不全跑、不算失败', () => {
+  it('只改文档（没有受影响的包），没给「谁读文档」的判法：照 CI 每个 PR 都跑的整份，不全跑、不算失败', () => {
     const s = selectTests(
       ['docs/decisions/0002-fusion.md', 'specs/164-会话内存与交活测试/方案.md', 'README.md'],
       GRAPH,
     );
     expect(s).toMatchObject({ kind: 'some', paths: [...ALWAYS_TESTS] });
     expect(vitestArgs(s)).toEqual(['run', ...ALWAYS_TESTS]);
+  });
+
+  it('文档指针检查是 CI 每次都跑的一份（只改文档时本机仍带它）', () => {
+    expect(ALWAYS_TESTS).toContain(DOC_POINTERS_TEST);
   });
 
   it('什么都没改：只跑文档检查（不像 CI 那样把空改动升成全跑：本机没改动是正常的）', () => {
@@ -268,6 +276,152 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
 
   it('基准就是 origin/main（引擎钉在会话树里的也是它）', () => {
     expect(BASE).toBe('origin/main');
+  });
+});
+
+describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/ 整个目录', () => {
+  // 路径拆开写：这个文件自己若写着完整的文档路径，改那份文档时会被它自己选上
+  const D = 'docs';
+  const PROGRESS = `${D}/PROGRESS.md`;
+  const DESIGN = `${D}/design.md`;
+  const ARCHIVE_PAGE = `${D}/archive/progress-2026-09-30.md`;
+  const realReaders = (docs: readonly string[]) => docReaders(fsRepo(ROOT), docs);
+  const ALL = listTestFiles(fsRepo(ROOT));
+  if (typeof ALL === 'string') throw new Error(ALL);
+  /** 交给 vitest 的过滤会跑的测试文件（vitest 的子串过滤）。 */
+  const filesOf = (filters: readonly string[]) => ALL.filter((f) => filters.some((p) => f.includes(p)));
+  const sel = (changed: string[], readers: Parameters<typeof selectTests>[2]) => {
+    const s = selectTests(changed, GRAPH, readers);
+    if (s.kind !== 'some') throw new Error(`只改文档不该全跑：${changed.join(' ')}`);
+    return s;
+  };
+
+  it('改进度文档：跑文档指针检查加读它的几个测试，不是 agents/test/ 的三十个文件', () => {
+    const s = sel([PROGRESS], realReaders);
+    expect(s.paths).toContain(DOC_POINTERS_TEST);
+    expect(s.paths).toContain('agents/test/progress-structure.test.ts');
+    expect(s.paths).toContain('agents/test/session-start.test.ts');
+    expect(s.paths).not.toContain('agents/test/');
+    const files = filesOf(s.paths);
+    expect(files.length).toBeLessThan(10);
+    expect(files.length).toBeLessThan(filesOf(ALWAYS_TESTS).length);
+    expect(s.reasons.join('\n')).toContain('只改文档');
+    expect(s.ciOnly.join('\n')).toContain('agents/test/');
+    expect(vitestArgs(s)).toEqual(['run', ...s.paths]);
+  });
+
+  it('改设计文档、归档页：各自读它们的测试照跑', () => {
+    expect(sel([DESIGN], realReaders).paths).toContain('agents/test/skills.test.ts');
+    expect(sel([ARCHIVE_PAGE], realReaders).paths).toContain('agents/test/progress-structure.test.ts');
+  });
+
+  it('没有测试读的文档（比如目标）：只剩文档指针检查，不拿空清单冒充没事', () => {
+    expect(sel([`${D}/goals.md`], realReaders).paths).toEqual([DOC_POINTERS_TEST]);
+  });
+
+  // 金丝雀：这几份文档确实被这几个测试读着。选择器漏了其中一条，改那份文档的 PR 就绕过了钉着它的测试。
+  const CANARIES: [string, string][] = [
+    [PROGRESS, 'agents/test/progress-structure.test.ts'],
+    [ARCHIVE_PAGE, 'agents/test/progress-structure.test.ts'],
+    [DESIGN, 'agents/test/skills.test.ts'],
+  ];
+  const missedCanaries = (readers: Parameters<typeof selectTests>[2]) =>
+    CANARIES.filter(([doc, test]) => !sel([doc], readers).paths.includes(test)).map(
+      ([doc, test]) => `${doc} → ${test}`,
+    );
+
+  it('金丝雀：读着这几份文档的测试，改文档时都选得到', () => {
+    expect(missedCanaries(realReaders)).toEqual([]);
+  });
+
+  it('【故意造出的失败】选择器什么都没选到：金丝雀正好逐条报出来（改了被读的文档却没选中读它的测试就红）', () => {
+    expect(missedCanaries(() => [])).toEqual(CANARIES.map(([doc, test]) => `${doc} → ${test}`));
+  });
+
+  it('【故意造出的失败】测试源码读不出（没给判法、判法报一句为什么）：退回 CI 每次都跑的整份，不当成没有读它的测试', () => {
+    for (const readers of [undefined, () => '读不到测试文件 x']) {
+      const s = sel([PROGRESS], readers);
+      expect(s.paths).toEqual([...ALWAYS_TESTS]);
+    }
+    expect(sel([PROGRESS], () => '读不到测试文件 x').reasons.join('\n')).toContain('退回 CI 每次都跑的整份');
+  });
+
+  it('文档和代码一起改：不缩，照原来的判法（改到的包 + CI 每次都跑的整份）', () => {
+    const s = sel([PROGRESS, 'packages/cli/src/help.ts'], () => {
+      throw new Error('带代码改动时不该问谁读文档');
+    });
+    expect(s.paths).toContain('packages/cli/');
+    for (const p of ALWAYS_TESTS) expect(s.paths).toContain(p);
+  });
+
+  it('改了读 docs/ops.md 的包（有 deploy 测试）、AGENTS.md：不算只改文档，照原来的判法', () => {
+    for (const f of [`${D}/ops.md`, 'AGENTS.md']) {
+      const s = sel([f], () => {
+        throw new Error('不该问谁读文档');
+      });
+      for (const p of ALWAYS_TESTS) expect(s.paths, f).toContain(p);
+      expect(s.paths.length, f).toBeGreaterThan(ALWAYS_TESTS.length);
+    }
+  });
+
+  it('整段流程：只改进度文档跑的是缩小后的清单、退出码 0；列不出测试文件时照整份跑（不是 0 个、也不是 3）', () => {
+    const r = run([PROGRESS], { docReaders: realReaders });
+    expect(r.code).toBe(0);
+    expect(r.vitestCalls).toHaveLength(1);
+    expect(r.vitestCalls[0]).toContain(DOC_POINTERS_TEST);
+    expect(r.vitestCalls[0]).not.toContain('agents/test/');
+    const broken = run([PROGRESS], { docReaders: () => '列不出测试文件：x' });
+    expect(broken.code).toBe(0);
+    expect(broken.vitestCalls[0]).toEqual(['run', ...ALWAYS_TESTS]);
+  });
+
+  describe('谁读这份文档（doc-readers.ts）', () => {
+    /** 内存里的仓：只有文件内容，目录从路径推。 */
+    const memRepo = (files: Record<string, string>): RepoView => {
+      const names = (dir: string) => {
+        const prefix = dir === '' ? '' : `${dir}/`;
+        const out = new Set<string>();
+        for (const f of Object.keys(files))
+          if (f.startsWith(prefix)) out.add(f.slice(prefix.length).split('/')[0] as string);
+        return out.size === 0 ? undefined : [...out];
+      };
+      return {
+        read: (rel) => files[rel],
+        exists: (rel) => rel in files || names(rel) !== undefined,
+        isDir: (rel) => !(rel in files) && names(rel) !== undefined,
+        list: (rel) => (rel in files ? undefined : names(rel)),
+      };
+    };
+    const base = {
+      'agents/test/a.test.ts': "readFileSync(join(ROOT, 'docs', 'x.md'))",
+      'agents/test/b.test.ts': "read('docs/x.md')",
+      'agents/test/c.test.ts': "read('docs/y.md')",
+      'packages/p/test/d.test.ts': "new URL('../../../docs/archive/z.md', import.meta.url)",
+      'packages/p/test/e.test.ts': "read('README.md')",
+    };
+
+    it('整条路径、一段一段写的 join、上面带斜杠的目录都认；没提到的不选', () => {
+      const repo = memRepo(base);
+      expect(docReaders(repo, ['docs/x.md'])).toEqual(['agents/test/a.test.ts', 'agents/test/b.test.ts']);
+      expect(docReaders(repo, ['docs/archive/other.md'])).toEqual(['packages/p/test/d.test.ts']);
+      expect(docReaders(repo, ['docs/nobody.md'])).toEqual([]);
+    });
+
+    it('仓根下的单个文件（README.md）只认指向仓根的写法，不被「README.md」这个词到处当夹具拖上全部', () => {
+      const repo = memRepo({ ...base, 'packages/p/test/f.test.ts': "read(join(REPO_ROOT, 'README.md'))" });
+      expect(docReaders(repo, ['README.md'])).toEqual(['packages/p/test/f.test.ts']);
+      expect(docNeedles('README.md')).toHaveLength(2);
+    });
+
+    it('【故意造出的失败】列不出测试文件、读不到某个测试文件：返回一句为什么，不返回空清单', () => {
+      expect(docReaders(memRepo({ 'x.md': '' }), ['docs/x.md'])).toMatch(/^列不出测试文件/);
+      const repo = memRepo(base);
+      const unreadable: RepoView = {
+        ...repo,
+        read: (rel) => (rel === 'agents/test/b.test.ts' ? undefined : repo.read(rel)),
+      };
+      expect(docReaders(unreadable, ['docs/x.md'])).toMatch(/^读不到测试文件 agents\/test\/b\.test\.ts/);
+    });
   });
 });
 

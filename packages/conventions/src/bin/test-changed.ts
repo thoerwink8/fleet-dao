@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readGraph } from '../ci-plan.ts';
+import { docReaders } from '../doc-readers.ts';
 import { fsRepo } from '../repo.ts';
 import { type GitRun, testChanged } from '../test-changed.ts';
 import { ENV_HELD, realSlotDeps, runInSlot } from '../test-slots.ts';
@@ -32,6 +33,7 @@ const code = testChanged({
   env: process.env,
   git,
   graph: () => readGraph(repo),
+  docReaders: (docs) => docReaders(repo, docs),
   vitest(args) {
     const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs');
     if (!existsSync(vitest)) return { status: null, error: new Error(`找不到 ${vitest}：先 pnpm install`) };

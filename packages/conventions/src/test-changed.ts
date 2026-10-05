@@ -3,7 +3,9 @@
 // 改动 = 和 origin/main 分叉以来提交了的 + 暂存的 + 没暂存的 + 没跟踪的：会话交活前测的是自己手上的这棵树。
 // 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、夹具、
 // deploy/ 这类改到就全跑）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
-// 「改动落在哪」。两种都带上 CI 每个 PR 都跑的那几份（ci-plan.ts 的 ALWAYS_TESTS），拒跑时也不例外（#740）。
+// 「改动落在哪」。两种都带上 CI 每个 PR 都跑的那几份（ci-plan.ts 的 ALWAYS_TESTS），拒跑时也不例外（#740）；
+// 唯一的例外是整份改动都是文档（docs/、specs/、README.md）：agents/test/ 整个目录一百秒上下，读文档的只有个位数，
+// 所以只带文档指针检查和「源码里写着这些文档路径」的测试（doc-readers.ts），判不出谁读时退回整份。
 // 改这里之前必须知道：原先定的是直接跑 vitest --changed origin/main，实现时发现两个洞，所以改成按包选——
 // ① 基准分支读不到时 vitest 不报错：它调 git 用的 tinyexec 不抛非零退出码，git diff 失败就当「没提交过改动」，只测没提交的，
 //   照样退出 0（本机实测：给个不存在的分支名，它只跑了没提交的那一个测试文件）；
@@ -14,6 +16,7 @@ import {
   ALWAYS_TESTS,
   type Fallback,
   fallbackUnits,
+  PATH_RULES,
   type PackageGraph,
   planCi,
   unitPath,
@@ -102,8 +105,57 @@ function vitestPaths(units: readonly string[]): string[] {
   return [...new Set([...units.map(unitPath), ...ALWAYS_TESTS])];
 }
 
-/** 跑哪些测试：和 CI 按改动跑同一套判法。依赖图读不出（graph 是一句为什么）照 CI 全跑，不少跑。 */
-export function selectTests(changed: readonly string[], graph: PackageGraph | string): TestSelection {
+/** 文档里的指针检查：只改文档时本机也跑它（它读全部文档，CI 每个 PR 都跑）。必须是 ALWAYS_TESTS 里的一份（test-changed.test.ts 核对）。 */
+export const DOC_POINTERS_TEST = 'packages/conventions/test/doc-pointers.test.ts';
+
+/** 读了这些文档的测试文件；读不出时是一句为什么（doc-readers.ts 的 docReaders）。 */
+export type DocReaders = (docs: readonly string[]) => string[] | string;
+
+/** 这份改动全是文档（PATH_RULES 里「不测任何包、不跑装机测试」的那几条：docs/、specs/、README.md、开单表单）。 */
+function onlyDocs(changed: readonly string[]): boolean {
+  return changed.every((f) => {
+    const rule = PATH_RULES.find((r) => r.match(f));
+    return rule !== undefined && 'units' in rule && rule.units.length === 0 && rule.deploy === undefined;
+  });
+}
+
+/**
+ * 只改文档时跑哪些：doc-pointers 加读了这些文档的测试，不带 agents/test/ 整个目录。判法不认的（没传 docReaders、读不出）
+ * 退回 CI 每次都跑的整份——多跑，不少跑。
+ */
+function docOnlySelection(changed: readonly string[], docReaders: DocReaders | undefined): TestSelection {
+  const readers = docReaders?.(changed);
+  if (readers === undefined || typeof readers === 'string') {
+    return {
+      kind: 'some',
+      paths: [...ALWAYS_TESTS],
+      reasons: [
+        readers === undefined
+          ? '只改文档：照 CI 每次都跑的整份（没给「谁读这些文档」的判法）'
+          : `只改文档，但没算出谁读它们（${readers}）：退回 CI 每次都跑的整份`,
+      ],
+      ciOnly: [],
+    };
+  }
+  return {
+    kind: 'some',
+    paths: [...new Set([DOC_POINTERS_TEST, ...readers])],
+    reasons: [
+      `只改文档：跑文档指针检查，加源码里写着这些文档路径的 ${readers.length} 个测试文件${readers.length > 0 ? `（${readers.join('、')}）` : ''}`,
+    ],
+    ciOnly: ['agents/test/ 的其余测试（CI 的 docs 步每个 PR 都跑整个目录，和这些文档无关）'],
+  };
+}
+
+/**
+ * 跑哪些测试：和 CI 按改动跑同一套判法。依赖图读不出（graph 是一句为什么）照 CI 全跑，不少跑。
+ * 只改文档时（docReaders 给了）只跑读这些文档的测试，见 docOnlySelection。
+ */
+export function selectTests(
+  changed: readonly string[],
+  graph: PackageGraph | string,
+  docReaders?: DocReaders,
+): TestSelection {
   if (changed.length === 0) {
     return {
       kind: 'some',
@@ -123,6 +175,10 @@ export function selectTests(changed: readonly string[], graph: PackageGraph | st
       ? []
       : [`装机测试（deploy/test/run.sh${plan.deploy === 'ops' ? ' --ops' : ''}）`]),
   ];
+  if (!plan.full && plan.testUnits.length === 0 && onlyDocs(changed)) {
+    const docs = docOnlySelection(changed, docReaders);
+    return { ...docs, reasons: [...plan.reasons, ...docs.reasons], ciOnly: [...ciOnly, ...docs.ciOnly] };
+  }
   if (!plan.full) return { kind: 'some', paths: vitestPaths(plan.testUnits), reasons: plan.reasons, ciOnly };
   const fallback = fallbackUnits(changed, graph);
   return {
@@ -211,6 +267,8 @@ export interface TestChangedDeps {
   env: Readonly<Record<string, string | undefined>>;
   git: GitRun;
   graph: () => PackageGraph | string;
+  /** 只改文档时谁读这些文档（不给就照 CI 每次都跑的整份）。 */
+  docReaders?: DocReaders | undefined;
   /** 跑 vitest（参数不含 vitest 本身）：回退出码；被信号杀掉 status 是 null；起不来 error 有值。 */
   vitest: (args: string[]) => { status: number | null; signal?: string | null; error?: Error | undefined };
   out: (line: string) => void;
@@ -234,7 +292,7 @@ export function testChanged(deps: TestChangedDeps): number {
     deps.err(`test:changed 没跑成：${e.message}`);
     return 2;
   }
-  const selection = selectTests(changed, deps.graph());
+  const selection = selectTests(changed, deps.graph(), deps.docReaders);
   deps.out(`和 ${BASE} 比改了 ${changed.length} 个文件（含没提交的）`);
   for (const reason of selection.reasons) deps.out(`- ${reason}`);
   if (selection.ciOnly.length > 0) deps.out(`CI 另外还跑（这里不跑）：${selection.ciOnly.join('、')}`);
