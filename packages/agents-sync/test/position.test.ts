@@ -49,6 +49,15 @@ describe('同步位置', SLOW, () => {
     expect(checked[0]?.text).toContain('就是主线最新');
   });
 
+  it('没提交的改动只看 agents/（通用段原件在 agents/shared-rules.md）：仓根 AGENTS.md 改脏了不算', () => {
+    const s = setup();
+    put(s.repo, 'AGENTS.md', '本仓段改了一半\n');
+    expect(s.read()).toMatchObject({ source: { kind: 'git', dirty: false } });
+    put(s.repo, 'agents/shared-rules.md', '通用段改了一半\n');
+    expect(s.read()).toMatchObject({ source: { kind: 'git', dirty: true } });
+    expect(applyPosition(s.read(), [], NOW)[0]?.text).toContain('（agents/ 里有没提交的改动）');
+  });
+
   it('还没记过：查判缺失', () => {
     const s = setup();
     expectKind(checkPosition(s.read()), KEY, 'missing');

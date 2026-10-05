@@ -129,7 +129,7 @@ SESSION_USERS=("$SESSION_USER")
 PILOT_USER=pilot
 PILOT_HOME=/home/pilot
 WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}" "$PILOT_USER")
-# 各家 AI 的全局说明（仓根 AGENTS.md 的通用段）和方法类 skill（agents/skills/）写进这几个用户家里：
+# 各家 AI 的全局说明（agents/shared-rules.md 的通用段）和方法类 skill（agents/skills/）写进这几个用户家里：
 # 同步脚本以各用户自己的身份写（文件归他们），只动标记圈起来的那一块和它清单里记着的 skill（docs/ops.md 第五节）
 AGENT_RULES_USERS=("${SESSION_USERS[@]}" "$PILOT_USER")
 AGENTS_SYNC=$DEPLOY_DIR/../packages/agents-sync/bin/agents-sync
@@ -950,7 +950,7 @@ record_applied() {
 
 # agents_sync（跑同步脚本、把逐行结论记进账）在 lib/agents-sync.sh
 setup_agent_rules() {
-  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
+  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；agents/shared-rules.md 的通用段、agents/skills/）"
   local u
   for u in "${AGENT_RULES_USERS[@]}"; do
     if ! id "$u" >/dev/null 2>&1; then

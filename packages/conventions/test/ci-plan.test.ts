@@ -261,8 +261,10 @@ describe('按改动算要跑什么', () => {
   });
 
   it('测试会读的包外文件：AGENTS.md、docs/ops.md、agents/、PR 模板、.gitignore 各自带上读它的包', () => {
-    // AGENTS.md 要带两家：agents-sync 分发它，agents 的钉子测试读它（agents/test/rules/design-skills.rules.test.ts，#522）；
-    // 只带 agents-sync 的话改通用段的 PR 不测 agents，那条钉子测试根本不跑（主线从 1bff4dbc 起红了 8+ 个提交）
+    // AGENTS.md 要带两家：agents 的字数预算测试量本仓段，agents-sync 核它不再带通用段；
+    // 通用段原件 agents/shared-rules.md 落在 agents/ 那道门里，同样两家都测（钉子测试 agents/test/rules/ 读它，#522）
+    expect(testArgs(pr('agents/shared-rules.md'))).toEqual(['agents/', 'packages/agents-sync/']);
+    expect(pr('agents/shared-rules.md').deploy).toBe('none');
     expect(pr('AGENTS.md')).toMatchObject({
       biome: false,
       deploy: 'none',

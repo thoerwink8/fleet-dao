@@ -85,26 +85,21 @@ describe('规矩：设计在用户评判的那一层、那个精度上做和验�
  * 没有通道、没有「多久必须落地」。后五条钉住它。
  */
 const PROGRESS_RULES: Record<string, RegExp> = {
-  进度文件要落盘: /进度也要落盘，不能只发在对话里/,
-  给下一个AI看: /文件是给\*\*下一个 AI\*\*/,
-  说清没落盘等于没写: /只发在对话里没落盘的进度，等于没写/,
-  放哪要写明: /仓里没这个约定的，在仓根 `docs\/PROGRESS\.md`/,
-  无人值守时同步更新: /同一时刻进度文件也更新到位/,
-  发要送到我手上: /「发」要送到我手上，不是在对话中间写一句[\s\S]{0,80}我只看得到每轮最后一条/,
-  通道有先后: /`deliver_artifact`[\s\S]{0,60}推送通知[\s\S]{0,60}进度文件/,
-  发完接着做: /发完接着做，队列没清空、也没碰到非问我不可的人闸，就不收尾/,
-  二十分钟落一次地:
-    /每 20 分钟（或每 30 次工具调用，先到为准）至少做一遍[\s\S]{0,60}提交并推到远端[\s\S]{0,60}更新进度文件/,
+  进度写进进度文件: /进度当场写进进度文件/,
+  给下一个AI看: /下一个接手的 AI 只看得到文件/,
+  放哪要写明: /没有就 `docs\/PROGRESS\.md`/,
+  无人值守每件都落地: /每做完一件就提交、推送、更新进度文件、发我一次/,
   超时拆小: /一件事过了 20 分钟还没有能推的东西，就当场拆小/,
 };
 
 describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', () => {
-  const AGENTS = readFileSync(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url)), 'utf8').replace(
-    /\r\n/g,
-    '\n',
-  );
+  // 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来，同日精简；「发要送到我手上」那半由 mid-turn-answer.rules.test.ts 和钩子盯）
+  const AGENTS = readFileSync(
+    fileURLToPath(new URL('../../shared-rules.md', import.meta.url)),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
   // commander 技能自己的「报进度」一节也要跟上：它以前写「进度就在对话里报」，
-  // 和通用段「进度也要落盘」直接冲突；只改通用段、不改技能，照技能做的人又断了。
+  // 和通用段「进度要落盘」直接冲突；只改通用段、不改技能，照技能做的人又断了。
   const COMMANDER = read('commander');
 
   it('通用段里这几条都在', () => {
@@ -117,40 +112,16 @@ describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', 
     expect(COMMANDER).not.toMatch(/进度就在对话里报/);
   });
 
-  it('【故意造出的失败】把「进度也要落盘」整条删掉：查得出来', () => {
-    const cut = AGENTS.replace(/- 进度也要落盘，不能只发在对话里[\s\S]*?(?=\n- 我让你无人值守推进时)/, '');
+  it('【故意造出的失败】把「进度当场写进进度文件」整条删掉：查得出来', () => {
+    const cut = AGENTS.replace(/- 进度当场写进进度文件[^\n]*\n/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(PROGRESS_RULES, cut)).toEqual(
-      expect.arrayContaining(['进度文件要落盘', '给下一个AI看', '放哪要写明']),
-    );
+    expect(missing(PROGRESS_RULES, cut)).toEqual(['进度写进进度文件', '给下一个AI看', '放哪要写明']);
   });
 
-  it('【故意造出的失败】只留「发在对话里」，退回改之前那句：查得出来', () => {
-    const cut = AGENTS.replace(
-      /- 我让你无人值守推进时[\s\S]*?(?=\n\n)/,
-      '- 我让你无人值守推进时，每做完一件事就发一次，只发变了的行和要我拍的，不只在最后给总报告；没新进展不刷屏。',
-    );
+  it('【故意造出的失败】无人值守那条只剩「做完再说」，落地节奏拿掉：查得出来', () => {
+    const cut = AGENTS.replace(/每做完一件就提交、推送、更新进度文件、发我一次，[^；]*；/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(PROGRESS_RULES, cut)).toEqual([
-      '无人值守时同步更新',
-      '发要送到我手上',
-      '通道有先后',
-      '发完接着做',
-      '二十分钟落一次地',
-      '超时拆小',
-    ]);
-  });
-
-  it('【故意造出的失败】删掉「送到我手上、发完接着做」那几句，只剩落地节奏：查得出来', () => {
-    const cut = AGENTS.replace(/\*\*「发」要送到我手上[\s\S]*?(?=\*\*不许一个多小时没有东西落地\*\*)/, '');
-    expect(cut).not.toBe(AGENTS);
-    expect(missing(PROGRESS_RULES, cut)).toEqual(['发要送到我手上', '通道有先后', '发完接着做']);
-  });
-
-  it('【故意造出的失败】把「每 20 分钟落一次地、过了拆小」换成「每天至少推一次」：查得出来', () => {
-    const cut = AGENTS.replace(/\*\*不许一个多小时没有东西落地\*\*[\s\S]*?(?=\n\n)/, '每天至少推一次。');
-    expect(cut).not.toBe(AGENTS);
-    expect(missing(PROGRESS_RULES, cut)).toEqual(['二十分钟落一次地', '超时拆小']);
+    expect(missing(PROGRESS_RULES, cut)).toEqual(['无人值守每件都落地', '超时拆小']);
   });
 
   it('【故意造出的失败】把 commander 退回「进度就在对话里报」：查得出来', () => {

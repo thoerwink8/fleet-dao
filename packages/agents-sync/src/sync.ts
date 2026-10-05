@@ -54,16 +54,21 @@ export interface Ctx {
 
 export const code = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? String(err);
 
-/** 读仓里的原件：AGENTS.md 的通用段、agents/skills/。读不到就说清为什么，不拿空的顶上 */
+/** 通用段的原件在仓里的位置（仓根 AGENTS.md 只留本仓段，不然在本仓干活的会话要读两遍） */
+export const SHARED_RULES = 'agents/shared-rules.md';
+
+/** 读仓里的原件：agents/shared-rules.md 的通用段、agents/skills/。读不到就说清为什么，不拿空的顶上 */
 export function readSources(repo: string): { ok: true; value: Sources } | { ok: false; why: string } {
-  let agentsMd: string;
+  let rulesMd: string;
   try {
-    agentsMd = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
+    rulesMd = readFileSync(join(repo, ...SHARED_RULES.split('/')), 'utf8');
   } catch (err) {
-    return { ok: false, why: `读不了仓里的 AGENTS.md（${code(err)}）` };
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT')
+      return { ok: false, why: `仓里没有 ${SHARED_RULES}（检出太旧或不全，或 --repo 指错了）` };
+    return { ok: false, why: `读不了仓里的 ${SHARED_RULES}（${code(err)}）` };
   }
-  const shared = sharedBlock(agentsMd);
-  if (!shared.ok) return { ok: false, why: `仓里的 AGENTS.md：${shared.why}` };
+  const shared = sharedBlock(rulesMd);
+  if (!shared.ok) return { ok: false, why: `仓里的 ${SHARED_RULES}：${shared.why}` };
   const dir = join(repo, 'agents', 'skills');
   let entries: string[];
   try {

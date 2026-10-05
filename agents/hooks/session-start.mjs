@@ -26,7 +26,10 @@ export const FETCH_MS = 15_000;
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
 const ORIGIN_MAIN = 'refs/remotes/origin/main';
-const READ_MAIN = '规矩以 origin/main 的 AGENTS.md 为准（git show origin/main:AGENTS.md）';
+// 规矩在两份文件里：通用段的原件 agents/shared-rules.md（2026-10-05 从仓根 AGENTS.md 挪出来）、仓根 AGENTS.md 的本仓段
+const RULE_FILES = ['AGENTS.md', 'agents/shared-rules.md'];
+const READ_MAIN =
+  '规矩以 origin/main 的为准（git show origin/main:AGENTS.md、git show origin/main:agents/shared-rules.md）';
 
 /** 同步专用的检出、拿它的锁、把它准备好：和 pnpm agents:sync 走同一份（agents/hooks/sync-source.mjs）。
  *  人家是钩子家的脚本，装在 ~/.fleet-dao/hooks/ 里，这里按路径动态加载；加载不了也要照旧说一句，不静默。 */
@@ -135,10 +138,10 @@ export function checkHere(cwd, git) {
       fetch,
     };
   }
-  const differs = g('diff', '--quiet', ORIGIN_MAIN, '--', 'AGENTS.md');
+  const differs = g('diff', '--quiet', ORIGIN_MAIN, '--', ...RULE_FILES);
   if (differs.status === 1)
     return {
-      line: `注意：当前分支 ${branch || '（分离头）'} 的 AGENTS.md 和 origin/main 不一样，${READ_MAIN}。`,
+      line: `注意：当前分支 ${branch || '（分离头）'} 的规矩（AGENTS.md 或 agents/shared-rules.md）和 origin/main 不一样，${READ_MAIN}。`,
       fetch,
     };
   return { line: null, fetch };
