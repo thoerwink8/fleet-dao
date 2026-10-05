@@ -49,7 +49,7 @@ describe('路由表：正式驾驶舱', () => {
     expect(kids.filter((c) => c.path === '*')).toHaveLength(1);
   });
 
-  test('要登录才能看的页都在：主页、任务、额度、定时任务、通知、操作记录、设置、路由、思考档位、演示版、更新日志', async () => {
+  test('要登录才能看的页都在：主页、任务、额度、定时任务、通知、操作记录、设置、路由、思考档位、环境、演示版、更新日志', async () => {
     const pages = insideShell(await table(undefined));
     for (const p of [
       '/',
@@ -61,6 +61,7 @@ describe('路由表：正式驾驶舱', () => {
       '/settings',
       '/routing',
       '/efforts',
+      '/env',
       '/demo-links',
       '/changelog',
     ]) {
@@ -90,7 +91,7 @@ describe('路由表：正式驾驶舱', () => {
 });
 
 describe('路由表：演示版（游客，不登录）', () => {
-  test('没有登录页，也没有只有正式驾驶舱才有的页：发演示链接、更新日志、路由、思考档位、占位页', async () => {
+  test('没有登录页，也没有只有正式驾驶舱才有的页：发演示链接、更新日志、路由、思考档位、环境、占位页', async () => {
     const t = await table('demo');
     expect(flatten(t).some((e) => e.file === 'routes/login.tsx')).toBe(false);
     const pages = insideShell(t);
@@ -99,6 +100,8 @@ describe('路由表：演示版（游客，不登录）', () => {
       '/changelog',
       '/routing',
       '/efforts',
+      // 环境页（#820 片 1）露机器名、在用版本、在跑会话数（R10）：演示版里不放这一页。
+      '/env',
       '/models',
       '/billing',
       '/record',
@@ -130,7 +133,8 @@ describe('路由表：演示版（游客，不登录）', () => {
     const broken = NAV_ITEMS.filter(
       (n) => (n.module !== undefined) !== pages.includes(n.to) && n.to !== '/',
     ).map((n) => n.to);
-    // 主页（/）在演示版里没有页也没有模块：游客进来看到的是「没开放」。其余页：有模块 ⇔ 有路由。
+    // 主页（/）在演示版里另有页（不是这个外壳里的那个 index），所以豁免；其余页：有模块 ⇔ 有路由。
+    // 环境页（#820 片 1）没有 module、演示版路由表里也不放 → 两边都是「没有」，照样对得上。
     expect(broken).toEqual([]);
   });
 

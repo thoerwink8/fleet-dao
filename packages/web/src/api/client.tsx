@@ -13,7 +13,7 @@ import {
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
 import { brand } from '#brand';
 import type { HomeState } from '../components/home/types';
-import { canSee } from '../demo/access';
+import { canSee, isDemo } from '../demo/access';
 import type {
   Audit,
   AuthConfig,
@@ -23,6 +23,7 @@ import type {
   Credentials,
   DemoLinks,
   DemoScopeView,
+  EnvResponse,
   HomeResponse,
   Jobs,
   LegacyAsks,
@@ -70,6 +71,11 @@ export interface FleetApi {
   repos(): Promise<{ repos: Repo[] }>;
   /** 新主页（/）的一屏三块 + 持续状态条（#589）。 */
   home(): Promise<HomeResponse>;
+  /**
+   * 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
+   * 只读、不跨环境：读的是本后端自己库里的现成读法（和主页、额度页、/healthz 同一份）。
+   */
+  env(): Promise<EnvResponse>;
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
@@ -162,6 +168,7 @@ export const keys = {
   settings: ['settings'] as const,
   releaseVersion: ['release-version'] as const,
   demoLinks: ['demo-links'] as const,
+  env: ['env'] as const,
 };
 
 // ---------- 读 ----------
@@ -322,6 +329,21 @@ export function useDemoLinks() {
 export function useReleaseVersion() {
   const api = useApi();
   return useQuery({ queryKey: keys.releaseVersion, queryFn: () => api.releaseVersion() });
+}
+
+/**
+ * 环境页和多处徽标共用的一次读取（#820 片 1）：这一台环境现在怎样。
+ * 只读、不跨环境。演示版没有这一页（导航不给 module、路由表也不放），所以这里只在正式驾驶舱里取；
+ * 每分钟重拉一次——健康、在跑的会话这些没有实时推送。
+ */
+export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.env,
+    queryFn: () => api.env(),
+    refetchInterval: 60_000,
+    enabled: enabled && !isDemo(),
+  });
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   UpdateDemoDefaultRequest,
   UpdateDemoDefaultResponse,
 } from './demo.ts';
+import { EnvResponseSchema } from './env.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
 import {
@@ -64,6 +65,8 @@ export const WebRoutes = {
   repos: { method: 'GET', path: '/repos', response: ReposResponse },
   /** 新主页（/）的一屏三块 + 持续状态条，一个往返聚齐（#589）。 */
   home: { method: 'GET', path: '/home', response: HomeResponseSchema },
+  /** 环境页（#820 片 1）：这一台环境现在怎样，每一项各自带「查成了 / 没查成 + 原因」。只读、不跨环境。 */
+  env: { method: 'GET', path: '/env', response: EnvResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
   taskAction: {

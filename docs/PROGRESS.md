@@ -99,6 +99,11 @@
 
 做到哪：`specs/820-驾驶舱环境视图与中止恢复/方案.md` 写完（best-practice-first 六步，业界对照 8 条带链接和日期，GPT 挑错两轮）。结论：中止/恢复只作用于一个环境、写进该环境自己的库；全局中止 = 新设置 `engine.paused`（无迁移）；单任务 = 新增暂停信号（`phase='paused'`，无迁移），叫停仍是终局；环境视图先做每环境一页只读；切 3 片（片 1 环境页、片 2 全局中止、片 3 单任务暂停）。下一步：指挥官看方案、拍方案里「要创始人定的」五条，再派片 1。还没验证：新信号和 `patched()` 重放（Temporal 测试交 CI）；Windows 浏览器能否打开 WSL 后端；没出界面画面。顺手查实的缺口（方案 §2.3）：三段一次性会话没登记进排空在途清单，发布排空看不见它们，片 2 前置要修，建议指挥官另开单。
 
+## 2026-10-05 #820 片 1 环境页（只读）：后端 + 前端 + e2e（Sonnet 5.5 子代理，分支 feat/820-env-page）
+
+做到哪：片 1 的代码全部写完、推上远端（本分支 4 个提交：2d60bb92 后端、cca6b644 web 类型、fe859a57 前端、439bae87 e2e）。①后端 GET /api/env（packages/api/src/env-view.ts）：六项（引擎、在用版本、在跑的会话、池占用、健康、最近拉单）各自包一层 try/catch，一项读失败只写「没查成 + 原因」；引擎那一格沿用主页探针（home-engine.ts），关着写 ENGINE_OFF_DETAIL 不是红；版本只在法国的正式机器上有（main.ts 的 onFrance），别处写 DEPLOY_LAG_NOT_HERE。②前端：新页 packages/web/src/routes/env.tsx（导航「运转」组，演示版没有）、顶栏环境名徽标（topbar.tsx 的 EnvBadge，读 api.env 的 FLEET_MACHINE_NAME）、主页「引擎」那格已在 #962 改成真读（这次确认过：cockpit.ts 的 home 走同一个 engineProbe()）。③契约三边：FleetApi.env / http.ts / mock/server.ts 都加了；demo/api.ts 的 env 直接回「演示版没开放环境」（R10：露机器名、版本号、会话数）。④**修了一个真 bug**：EnvSessionsSchema.byStage 原来是全量 z.record，后端 sessionsFact 只给真有会话的段，/api/env 一直 500（bad_response_shape）；改成 z.partialRecord。⑤测试：packages/api/test/env-view.test.ts（10 条，含故意让会话读法抛、只那一项红）、packages/web/src/routes/env.test.tsx（4 条，含引擎关着是等待色不是红）、routes.test.ts / demo-mode.test.tsx 钉「演示版没有这一页」、新 e2e packages/web/e2e/specs/07b-env.e2e.ts。下一步：本机把真环境开起来、当用户点一遍、两个视口截图、写 PR。还没验证：真环境页面的画面（本机用 D:\frank\fleet-dao\_tmp\pgbin 的便携 Postgres 18 在 127.0.0.1:55432 起了一套，e2e 正在跑）；法国引擎关着那格的真实数据（只在单测/假后端验过）。
+
+
 ## 2026-10-05 驾驶舱首页恢复流程图（母单 #902，Sonnet 5.5 子代理，分支 `feat/902-home-flow`，PR #914）
 
 做到哪：后端（`/api/home` 补 segment / worker / lastEvent / flow、store 新增批量读三段流水）、前端（react-flow 三泳道流水线图、卡片重做、读不到带重试）、测试、真实画面（1920×1080 / 1366×768 + 对照，在 `_tmp/home-flow/`）、体积和构建时间实测都做完，CI 全绿；下一步：自动合并。还没验证：真库真引擎写的 runs 行上流水线图长什么样（只在内存库、PGlite 和假后端上验过）、深色主题和手机宽度的图；best-practice-first 六步记录（业界对照、代价表、版面验收三问）在 `specs/902-驾驶舱首页流程图/方案.md`。react-flow 代价：全站 js+css gzip 354.8 → 417.5 KB（+62.7 KB，只在首页路由加载），客户端构建 1.73 → 4.54 s。

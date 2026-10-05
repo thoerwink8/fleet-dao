@@ -8,6 +8,7 @@ export * from './web-api/board.ts';
 export * from './web-api/common.ts';
 export * from './web-api/demo.ts';
 export * from './web-api/enums.ts';
+export * from './web-api/env.ts';
 export * from './web-api/home.ts';
 export * from './web-api/jobs.ts';
 export * from './web-api/notifications.ts';
