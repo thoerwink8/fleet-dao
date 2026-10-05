@@ -43,8 +43,8 @@ description: 两件事读它：重大方案拍板前让别家挑错（默认 GPT
 - 接着聊：把上一轮的原话、你的回应和新证据写进新题面再问一次（`ask.mjs` 每次都是新会话，所以上一轮要贴全）。
 - `node $S/second-opinion.mjs --text 材料.md --name 短名 --author-family <族[,族…]> --effort medium [--blind] [--agent <profile>]`
   - `--author-family` 必须显式给出当前作者模型族，可重复传或用逗号分隔：`gpt`、`claude`、`deepseek`、`grok`、`kimi`。缺失或写了未知族直接退出，不从环境变量、会话名或模型字符串猜。
-  - 候选族固定按 `GPT → Claude → DeepSeek → Grok → Kimi` 排序；作者是 GPT 就跳过 GPT，作者是多族就全部跳过。显式 `--agent` 也要经过同族排除，不能手动绕过。
-  - 讨论默认每家最多 30 秒，整轮总预算也为 30 秒；本家超时或端点不可用会停掉当前会话后换下一家。结论已经收到后由本机解析，不因不喜欢结论换家。可用 `--budget-sec` 调整讨论总预算。
+  - 候选族固定按 `GPT → Grok → Claude → DeepSeek → Kimi` 排序（创始人 2026-10-05：「第二意见太慢了，我建议优先gpt6luna，不行就grok」）；作者是 GPT 就跳过 GPT，作者是多族就全部跳过。显式 `--agent` 也要经过同族排除，不能手动绕过。
+  - `--text` 和 `--pr` 同一套等法：一家起了会话后连续 4 分钟（`--stall-min`）没有任何新输出就停掉换下一家，几家加起来整轮上限 15 分钟（`--timeout-min`）；端点不可用也换下一家。结论已经收到后由本机解析，不因不喜欢结论换家。`--text` 想要更短的总预算用 `--budget-sec`。
   - 已接入的真实端点：GPT=`Mirasim/codex/gpt-6-luna`、DeepSeek=`Mirasim/dsh/deepseek-flash`、Kimi=`Mirasim/kimi/kimi-code/k3`、Claude=`reclaude -p --output-format json --effort medium --max-turns 1`。Grok 只在本机/Mirasim 真有执行体和登录态时尝试；端点缺失、未登录或 roster 不含该模型都照实记录并换下一家，不假定按量 API 可用。
 
 ## 审 PR（第二意见）
