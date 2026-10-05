@@ -1,6 +1,7 @@
 import { createMemoryStore } from '../src/memory-store.ts';
 import { describeStoreContract, type MakeStore } from './store-contract.ts';
 import { describeCredentialsStoreContract } from './store-contract-credentials.ts';
+import { describeNodeStoreContract } from './store-contract-nodes.ts';
 
 const make: MakeStore = async (data, clock) => {
   const store = createMemoryStore(data, { now: () => new Date(clock.now) });
@@ -15,3 +16,4 @@ const make: MakeStore = async (data, clock) => {
 
 describeStoreContract('内存版', make);
 describeCredentialsStoreContract('内存版', make);
+describeNodeStoreContract('内存版', make);

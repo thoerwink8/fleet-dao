@@ -12,6 +12,7 @@ import {
   githubEventVersions,
   insertSubtasks,
   models,
+  nodeReports,
   notificationDeliveries,
   notifications,
   pools,
@@ -280,6 +281,19 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       updatedAt: s.updatedAt ? date(s.updatedAt) : new Date(),
       updatedBy: s.updatedBy ?? null,
     });
+  }
+  if (data.nodeReports?.length) {
+    await db.insert(nodeReports).values(
+      data.nodeReports.map((r) => ({
+        nodeId: r.nodeId,
+        displayName: r.displayName,
+        schemaVersion: r.schemaVersion,
+        codeSha: r.codeSha ?? null,
+        reportedAt: date(r.reportedAt),
+        receivedAt: date(r.receivedAt),
+        payload: r.snapshot,
+      })),
+    );
   }
   if (data.jobs?.length) await db.insert(scheduledJobs).values(data.jobs);
   if (data.scheduleRuns?.length) {

@@ -16,6 +16,7 @@ import {
   githubEventVersions,
   idempotencyKeys,
   models,
+  nodeReports,
   notificationDeliveries,
   notifications,
   pools,
@@ -69,6 +70,7 @@ import {
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
 import { nextCursorOf, pageOfSorted } from './paging.ts';
 import type {
   AskRecord,
@@ -79,6 +81,7 @@ import type {
   GitHubObjectVersion,
   JobRecord,
   NewAuditEntry,
+  NodeReportSummary,
   NotificationRecord,
   Page,
   PasswordCredentials,
@@ -112,6 +115,7 @@ const seq15 = (n: number) => String(n).padStart(15, '0');
 type UserRow = typeof users.$inferSelect;
 type AskRow = typeof asks.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type NodeReportRow = typeof nodeReports.$inferSelect;
 
 function toUser(r: UserRow): User {
   return {
@@ -125,6 +129,17 @@ function toUser(r: UserRow): User {
     githubLogin: opt(r.githubLogin),
     githubId: opt(r.githubId),
     sessionVersion: r.sessionVersion,
+  };
+}
+
+function toNodeReportSummary(r: NodeReportRow): NodeReportSummary {
+  return {
+    nodeId: r.nodeId,
+    displayName: r.displayName,
+    schemaVersion: r.schemaVersion,
+    codeSha: opt(r.codeSha),
+    reportedAt: iso(r.reportedAt),
+    receivedAt: iso(r.receivedAt),
   };
 }
 
@@ -796,6 +811,52 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         await insertAudit(tx, entry);
         return 'ok';
       });
+    },
+
+    // —— 别的环境推来的快照 ——
+    async putNodeReport(input) {
+      const { row, snapshot } = nodeReportRow(input);
+      const values = {
+        nodeId: row.nodeId,
+        displayName: row.displayName,
+        schemaVersion: row.schemaVersion,
+        codeSha: row.codeSha ?? null,
+        reportedAt: new Date(row.reportedAt),
+        receivedAt: now(),
+        payload: snapshot,
+      };
+      const { nodeId: _key, ...overwrite } = values;
+      const [written] = await db
+        .insert(nodeReports)
+        .values(values)
+        .onConflictDoUpdate({ target: nodeReports.nodeId, set: overwrite })
+        .returning();
+      if (!written) throw new Error(`node_reports 没写进 ${row.nodeId} 那一行`);
+      return toNodeReportSummary(written);
+    },
+    async listNodeReports() {
+      const rows = await db
+        .select({
+          nodeId: nodeReports.nodeId,
+          displayName: nodeReports.displayName,
+          schemaVersion: nodeReports.schemaVersion,
+          codeSha: nodeReports.codeSha,
+          reportedAt: nodeReports.reportedAt,
+          receivedAt: nodeReports.receivedAt,
+        })
+        .from(nodeReports);
+      // 按字节排（和内存版一样），不随库的排序规则变
+      return rows
+        .map((r) => toNodeReportSummary({ ...r, payload: null }))
+        .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+    },
+    async getNodeReport(nodeId) {
+      const [row] = await db.select().from(nodeReports).where(eq(nodeReports.nodeId, nodeId));
+      if (!row) return null;
+      return {
+        ...toNodeReportSummary(row),
+        snapshot: readNodeSnapshot(row.nodeId, row.schemaVersion, row.payload),
+      };
     },
 
     // —— fleet 命令 ——

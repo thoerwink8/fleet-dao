@@ -50,6 +50,7 @@ import {
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
+import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AgentSession,
@@ -59,6 +60,7 @@ import type {
   GitHubDelivery,
   JobRecord,
   NewAuditEntry,
+  NodeReportRecord,
   NotificationRecord,
   Page,
   PageRequest,
@@ -176,6 +178,8 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
+  /** 别的环境推来的快照（node_reports），一个环境一行。 */
+  nodeReports: NodeReportRecord[];
 }
 
 export function emptyData(): MemoryData {
@@ -205,6 +209,7 @@ export function emptyData(): MemoryData {
     idempotency: new Map(),
     githubEvents: new Map(),
     credentials: new Map(),
+    nodeReports: [],
   };
 }
 
@@ -218,6 +223,9 @@ const QUIET_PROGRESS_KINDS: readonly ProgressKind[] = ['tool', 'file'];
 
 /** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
+
+/** 列环境不带快照本体。 */
+const summaryOf = ({ snapshot: _snapshot, ...summary }: NodeReportRecord) => summary;
 
 const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
 
@@ -748,6 +756,27 @@ export function createMemoryStore(
       audit(entry);
       changed('settings', key);
       return 'ok';
+    },
+
+    // —— 别的环境推来的快照 ——
+    async putNodeReport(input) {
+      const { row, snapshot } = nodeReportRow(input);
+      const next: NodeReportRecord = { ...row, receivedAt: now().toISOString(), snapshot };
+      data.nodeReports = [...data.nodeReports.filter((r) => r.nodeId !== row.nodeId), next];
+      changed('node_reports', row.nodeId);
+      return summaryOf(next);
+    },
+    async listNodeReports() {
+      return [...data.nodeReports].sort((a, b) => compareIds(a.nodeId, b.nodeId)).map(summaryOf);
+    },
+    async getNodeReport(nodeId) {
+      const found = data.nodeReports.find((r) => r.nodeId === nodeId);
+      if (!found) return null;
+      // 和库版一样读回来再认一遍：种子数据、别处直接改的 data 里放了坏的也拦得住
+      return {
+        ...summaryOf(found),
+        snapshot: readNodeSnapshot(found.nodeId, found.schemaVersion, structuredClone(found.snapshot)),
+      };
     },
 
     // —— fleet 命令 ——
