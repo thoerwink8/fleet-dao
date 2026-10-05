@@ -148,8 +148,8 @@ describe('invokeVerifier：happy path', () => {
     expect(out.problems).toEqual([]);
     expect(out.round).toBe(1);
     expect(out.notes ?? '').toContain('claude');
-    // 家族选择顺序：跳过 gpt（avoid），第一家问 gpt 之后的 claude
-    expect(chosen[0]).toBe('claude');
+    // 家族选择顺序：跳过 gpt（avoid），第一家问 gpt 之后的 grok（grok 没有，再问 claude）
+    expect(chosen.slice(0, 2)).toEqual(['grok', 'claude']);
     // runs 记了一笔
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.segment).toBe('verify');
@@ -184,7 +184,11 @@ describe('invokeVerifier：happy path', () => {
     expect(chosen).toEqual(['gpt']); // 第一个问的就是 gpt、claude 跳过了
   });
 
-  it('0006 顺序 + avoid = kimi：应该挑 gpt → claude → deepseek → grok，kimi 不出现', async () => {
+  it('顺序钉死（2026-10-05 起 gpt、grok 在前）', () => {
+    expect([...FAMILY_ORDER]).toEqual(['gpt', 'grok', 'claude', 'deepseek', 'kimi']);
+  });
+
+  it('0006 顺序 + avoid = kimi：应该挑 gpt → grok → claude → deepseek，kimi 不出现', async () => {
     const { oneShot } = fakeOneShot({
       exitCode: 0,
       stdout: MODEL_STDOUT_PASS,
@@ -411,7 +415,7 @@ const DEPS = (
 });
 
 describe('invokeVerifier：写过这张单的族不止一个、路由编号、会话结局', () => {
-  it('先 gpt 后 claude 写的：两族都跳过，0006 顺序里下一个是 deepseek（前两家不被问）', async () => {
+  it('先 gpt 后 claude 写的：两族都跳过，顺序里 grok 没有、下一个是 deepseek（gpt、claude 不被问）', async () => {
     const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
     const asked: ModelFamily[] = [];
     const out = await invokeVerifier(
@@ -422,7 +426,7 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、�
       }),
     );
     expect(out.pass).toBe(true);
-    expect(asked).toEqual(['deepseek']);
+    expect(asked).toEqual(['grok', 'deepseek']);
     expect(out.session?.family).toBe('deepseek');
   });
 

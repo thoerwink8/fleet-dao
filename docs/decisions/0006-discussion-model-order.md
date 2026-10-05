@@ -4,6 +4,7 @@
 - 谁拍的：创始人
 - 状态：已采纳；模型入口的代码改动另走 PR，未因本记录自动宣称已经生效
 - 现状（2026-10-05 回写）：生效。讨论和第二意见的模型顺序以本份为准（`agents/skills/discuss/scripts/second-opinion.mjs` 的 `FAMILY_ORDER`）；0008 已失效。
+- 现状（2026-10-05 起）：顺序改为 **GPT → Grok → Claude → DeepSeek → Kimi**，一家 4 分钟不出声换下一家、整轮上限 15 分钟（`second-opinion.mjs` 和引擎 `verifier-invoke.ts` 的 `FAMILY_ORDER` 同步）。创始人 2026-10-05 约 17:50 原话：「第二意见太慢了，我建议优先gpt6luna，不行就grok」。下面「原话」和「决定」第 1 条是 09-30 当时的顺序，保留作历史。
 - 关联：`agents/skills/discuss/`、`#509` 的三段流程和 Review 设计
 
 ## 原话

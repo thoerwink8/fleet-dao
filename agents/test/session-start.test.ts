@@ -66,6 +66,9 @@ interface HookLib {
     fetch: Fetch | null;
     mirror?: string | null;
   }): string[];
+  PROGRESS_MS: number;
+  progressRunner(timeoutMs?: number): AfterMergeRun;
+  checkProgressIssue(o: { cwd: string; git: Git; run: AfterMergeRun; mirror?: string | null }): string[];
   IDLE_PR_MS: number;
   idlePrRunner(timeoutMs?: number): AfterMergeRun;
   checkIdlePrs(o: {
@@ -1142,6 +1145,82 @@ describe('绿了没挂自动合并的 PR：只在 fleet-dao 里提醒，没查�
     expect(Date.now() - started).toBeLessThan(8_000);
     expect(lines).toEqual(['绿了没挂自动合并的 PR 没查成：超过 1 秒没完。']);
     expect(hook.IDLE_PR_MS).toBe(8_000);
+  });
+});
+
+describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子读它）', SLOW, () => {
+  const SCRIPT = HOOK;
+  function fleetRepo(): string {
+    const dir = repo({});
+    g(dir, 'remote', 'add', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    return dir;
+  }
+  function fakeRun(result: Partial<Result>) {
+    const calls: [string, string][] = [];
+    const run: AfterMergeRun = (script, r) => {
+      calls.push([script, r]);
+      return { status: 0, stdout: '', stderr: '', ...result };
+    };
+    return { run, calls };
+  }
+  const row = (id: number, head: string, text: string) => `${id}\t${head}\t${text}\n`;
+  const check = (dir: string, run: AfterMergeRun, mirror: string | null = SCRIPT) =>
+    hook.checkProgressIssue({ cwd: dir, git, run, mirror });
+
+  it('不是 fleet-dao 的检出、不是 git 仓：不查、不出声', () => {
+    const f = fakeRun({ stdout: row(1, '【创始人引导·待处理】x', '原话：y') });
+    expect(check(world().work, f.run)).toEqual([]);
+    expect(check(temp('plain-progress'), f.run)).toEqual([]);
+    expect(f.calls).toEqual([]);
+  });
+
+  it('有待处理的：一行写条数、评论号、原话开头；没有不出声', () => {
+    const dir = fleetRepo();
+    const f = fakeRun({
+      stdout:
+        row(
+          11,
+          '【创始人引导·待处理】2026-10-05 17:50',
+          '原话：第二意见太慢了，我建议优先gpt6luna，不行就grok',
+        ) + row(12, '【创始人引导·待处理】2026-10-05 17:05', '原话：都按照你推荐'),
+    });
+    const lines = check(dir, f.run);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('创始人引导还有 2 条没处理（进度单 #1055）');
+    expect(lines[0]).toContain('11（2026-10-05 17:50）第二意见太慢了');
+    expect(lines[0]).toContain('pnpm progress:done');
+    expect(f.calls.map(([script]) => script)).toEqual([SCRIPT]);
+    expect(check(dir, fakeRun({ stdout: '' }).run)).toEqual([]);
+  });
+
+  it('【故意造出的失败】脚本退出 2（gh 没成）、超时、输出认不出、找不到脚本：说一行没查成，不当成没有待办', () => {
+    const dir = fleetRepo();
+    expect(check(dir, fakeRun({ status: 2, stderr: 'gh 读 #1055 的评论报错：network down\n' }).run)).toEqual([
+      '创始人引导（进度单 #1055）没查成：gh 读 #1055 的评论报错：network down。',
+    ]);
+    const slow = fakeRun({
+      status: null,
+      error: Object.assign(new Error('spawnSync node ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      timeoutMs: 8_000,
+    });
+    expect(check(dir, slow.run)).toEqual(['创始人引导（进度单 #1055）没查成：超过 8 秒没完。']);
+    expect(check(dir, fakeRun({ stdout: '乱七八糟\n' }).run)[0]).toMatch(/没查成：progress\.ts 的输出认不出/);
+    const f = fakeRun({ stdout: row(1, 'h', 't') });
+    expect(check(dir, f.run, join(dir, 'nope.ts'))).toEqual([
+      '创始人引导（进度单 #1055）没查成：找不到 packages/conventions/src/bin/progress.ts。',
+    ]);
+    expect(f.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】真起脚本、硬超时：到点杀掉、说没查成，不拖着开会话', () => {
+    const dir = fleetRepo();
+    const sleeper = join(temp('progress-sleeper'), 'sleep.mjs');
+    writeFileSync(sleeper, 'setTimeout(() => {}, 20_000);\n');
+    const started = Date.now();
+    const lines = check(dir, hook.progressRunner(1_000), sleeper);
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(lines).toEqual(['创始人引导（进度单 #1055）没查成：超过 1 秒没完。']);
+    expect(hook.PROGRESS_MS).toBe(8_000);
   });
 });
 

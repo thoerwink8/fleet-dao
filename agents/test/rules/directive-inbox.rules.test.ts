@@ -17,10 +17,11 @@ const AGENTS = readFileSync(fileURLToPath(new URL('../../shared-rules.md', impor
 /** 通用段里必须写着的几条，缺了哪条就列出哪条。 */
 const DIRECTIVE_RULES: Record<string, RegExp> = {
   引导和决定要落盘: /我中途给的引导和决定/,
-  追加原话和时间: /把原话和时间追加进/,
-  落进那一节: /「## 创始人引导（待处理）」/,
+  记到进度单: /`pnpm progress:directive "原话" --at "时间"`/,
+  接手先读: /接手先 `pnpm progress:read`/,
+  别的仓的老读法: /「## 创始人引导（待处理）」/,
   会话级指令不记: /不是「这一次怎么干」那种会话级指令/,
-  办完标已处理: /办完标「已处理」/,
+  办完标已处理: /办完 `pnpm progress:done <评论号>`/,
 };
 
 function missing(rules: Record<string, RegExp>, text: string): string[] {
@@ -40,7 +41,7 @@ describe('规矩：创始人引导必须落盘（2026-10-03 补）', () => {
   });
 
   it('【故意造出的失败】把「引导和决定落盘」那半句拿掉：查得出来', () => {
-    const cut = AGENTS.replace(/我中途给的引导和决定[^\n]*办完标「已处理」。/, '');
+    const cut = AGENTS.replace(/我中途给的引导和决定[^\n]*接手先 `pnpm progress:read`。/, '');
     expect(cut).not.toBe(AGENTS);
     expect(missing(DIRECTIVE_RULES, cut)).toEqual(Object.keys(DIRECTIVE_RULES));
   });

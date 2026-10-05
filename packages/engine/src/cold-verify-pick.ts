@@ -39,7 +39,7 @@ export interface FamilyPickResult {
 }
 
 /**
- * 按 0006 的顺序（gpt → claude → deepseek → grok → kimi）、跳过 `avoid`，挑第一家能派的路由。
+ * 按 0006 的顺序（gpt → grok → claude → deepseek → kimi）、跳过 `avoid`，挑第一家能派的路由。
  *
  * `order` 必须由调用方从 `verifier-invoke.ts` 的 `FAMILY_ORDER` 传进来（这里不 import 那一份：这一层不该知道
  * 「冷调用的家族顺序」这个约定，它只按给它的顺序问）。

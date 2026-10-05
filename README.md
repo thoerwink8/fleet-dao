@@ -72,7 +72,7 @@
 | [docs/design.md](docs/design.md) | 为什么这样定；「已定」表是拍板记录 | 改行为的 PR 同时改它 |
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
 | [docs/decisions/](docs/decisions/README.md) | 拍板记录：一个决定一个文件，只增不改；每份头部写状态（生效、被哪份替代、失效），索引在 `docs/decisions/README.md` | 创始人拍板的那一轮，同时改索引 |
-| [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整、创始人引导、做到哪 | 每做完一件 |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整（进度和创始人引导在 GitHub 置顶单 #1055，`pnpm progress:read`） | 有新的临时调整时 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或启动器变了 |

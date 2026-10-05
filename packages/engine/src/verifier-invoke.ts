@@ -7,7 +7,7 @@
 // 三条硬约束（specs/555-验收/需求.md）：
 // 1. **喂三样**：diff + 单子的「要什么」+「怎么算做完」。diff 不由本模块自己拼 `git diff`——**注入**进来
 //    （FetchDiff / FetchSpec），调用方（组装层）自己决定从哪读（GitHub、git 工作树、fake）。
-// 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → claude → deepseek → grok → kimi；
+// 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → grok → claude → deepseek → kimi（2026-10-05 起）；
 //    modelFamiliesAvoid（写过这张单的所有族）要全部跳过。所有不同家族都挑不出 → 明确失败（**没讨论成**），不许
 //    拿默认模型顶上、不许假装 pass。
 // 3. **只有三种能挡**：没做到验收条 / 有证据弄坏原有功能 / 安全或丢数据（specs/555 第 3 条）。
@@ -33,7 +33,7 @@ import type { SegmentVerdict } from './runner/verdict.ts';
 import { judgeVerify } from './runner/verdict.ts';
 
 /** 冷调用 #555-1 的模型家族顺序（docs/decisions/0006-discussion-model-order.md 第 2 条）。 */
-export const FAMILY_ORDER = ['gpt', 'claude', 'deepseek', 'grok', 'kimi'] as const;
+export const FAMILY_ORDER = ['gpt', 'grok', 'claude', 'deepseek', 'kimi'] as const;
 export type ModelFamily = (typeof FAMILY_ORDER)[number];
 
 export const ModelFamilySchema = z.enum(FAMILY_ORDER);

@@ -9,7 +9,7 @@
 | [0003](0003-fusion-flow.md) | Fusion 流程定稿 | 被 0010 替代 |
 | [0004](0004-vps-and-rebuild-prereqs.md) | 换 VPS 与重做之前的前置五件 | 已执行完，历史 |
 | [0005](0005-agent-permissions-loosest.md) | 各家 AI 权限尽量宽松，Claude 保持 auto | 生效 |
-| [0006](0006-discussion-model-order.md) | 讨论与第二意见的模型顺序 GPT → Claude → DeepSeek → Grok → Kimi，全走无头 | 生效 |
+| [0006](0006-discussion-model-order.md) | 讨论与第二意见的模型顺序 GPT → Grok → Claude → DeepSeek → Kimi（2026-10-05 起），全走无头 | 生效 |
 | [0007](0007-new-machine-and-hygiene.md) | 新电脑一键配好、卫生检查不卡流程、规矩自动同步 | 生效 |
 | [0008](0008-discuss-via-grok-4.7.md) | 讨论和第二意见改走本机 Grok 4.7 | 失效（一时情况、自相矛盾），以 0006 为准 |
 | [0009](0009-v3-implementation-plan.md) | v3 实现排期 | 已完成，历史 |

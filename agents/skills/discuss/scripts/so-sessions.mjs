@@ -11,6 +11,8 @@ import {
   MIRA,
   messageOf,
   NotChecked,
+  RETRYABLE_START,
+  RetryableStart,
   Stalled,
 } from './so-common.mjs';
 import { judgeLedger, judgeSnapshot } from './so-verdict.mjs';
@@ -583,7 +585,11 @@ export async function pollSession({
     lastPhase = view.phase;
     const verdict = judgeSnapshot(view);
     if (verdict.status === 'done') break;
-    if (verdict.status === 'failed') throw new NotChecked(`会话 ${sessionKey} ${verdict.why}`);
+    if (verdict.status === 'failed') {
+      if (view.incomplete && view.error && RETRYABLE_START.test(view.error))
+        throw new RetryableStart(`会话 ${sessionKey} ${verdict.why}（启动没成，还没开始审）`);
+      throw new NotChecked(`会话 ${sessionKey} ${verdict.why}`);
+    }
     const sig = `${view.phase}|${view.text.length}|${view.toolCalls}|${view.updatedAt}`;
     if (sig !== lastSig) {
       lastSig = sig;
