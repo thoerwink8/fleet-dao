@@ -136,6 +136,14 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  *
  * 别的包（core、engine、github……）一如既往不开：每多开一档就是多一个几分钟的 job 占并发槽
  * （免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
+ *
+ * **补审要的那条证据：量不出来，样本是 0**（2026-10-05，合并后补审 #1002 的第 2 条）。
+ * 方案 `specs/995-断链统一/方案.md:71` 要求先量「只改 db/shared 的 PR，e2e 抓到过单测漏掉的错没有」。
+ * 实测：e2e 进 CI 是 2026-10-04 20:26（#985），收窄是 2026-10-05 02:48（#1002），中间六小时里跑过 e2e 的
+ * 只有 #985（它自己，改的就是 ci.yml）和 #991（发布，只改 CHANGELOG）——**没有一个只改 db/shared 的 PR**。
+ * 所以这不是「没抓到」，是**没有可比的样本**。要真拿证据，得等上面那轮定时全量跑过几轮之后再看它有没有
+ * 抓到 db/shared 的集成错；抓到了就恢复这一档触发或补针对性测试。量法：逐 PR 看 `gh pr checks <号>` 的
+ * `e2e` 与 `test` 两项状态。
  */
 export const E2E_PACKAGES: readonly string[] = ['web', 'api'];
 export const E2E_FILES: readonly string[] = ['.github/workflows/ci.yml'];
