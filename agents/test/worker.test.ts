@@ -30,6 +30,7 @@ interface WorkerIo {
   env: Record<string, string | undefined>;
   home: string;
   now: () => Date;
+  sleep: (ms: number) => Promise<void>;
   cwd: () => string;
   git: (args: string[], opts?: { cwd?: string }) => RunResult;
   gh: (args: string[], opts?: { cwd?: string }) => RunResult;
@@ -135,6 +136,10 @@ function world() {
     env: { PATH: 'C:\\fake\\path', SOME_VAR: '1', GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_should_never_leak' },
     home,
     now: () => new Date(clock),
+    // 假的等：不真睡，把钟拨过去
+    sleep: async (ms: number) => {
+      clock += ms;
+    },
     cwd: () => repo,
     git: (args, opts) => {
       gitCalls.push({ args, cwd: opts?.cwd });
@@ -1343,5 +1348,50 @@ describe('watch', () => {
     writeFileSync(join(dir, 'meta.json'), '{不是 JSON');
     expect(await w.run(['watch'])).toBe(2);
     expect(w.out[0]).toMatch(/^变化：k6：没查成——/);
+  });
+});
+
+// 创始人 2026-10-05：进度只在当前会话里报——指挥官循环 watch --wait，没变化就等、有变化马上返回
+describe('watch --wait', () => {
+  it('没变化：等到点才返回「还在跑：1」，中间隔一会儿看一次（不是只看一次就傻等）', async () => {
+    const w = world();
+    const dir = w.writeMeta('q1', validMeta(w, 'q1'));
+    writeFileSync(join(dir, 'out.log'), '在改 store\n');
+    w.setRunning(9001, true);
+    for (let i = 0; i < 12; i += 1) w.ghReplies.push(ok('[]'));
+    await w.run(['watch']); // 先报过一次
+    w.out.length = 0;
+    const before = w.ghCalls.length;
+    expect(await w.run(['watch', '--wait', '30'])).toBe(0);
+    expect(w.out).toEqual(['还在跑：1']);
+    expect(w.ghCalls.length - before).toBeGreaterThan(2);
+  });
+
+  it('等的中间工人做完了：马上返回那一行，不等到点', async () => {
+    const w = world();
+    const dir = w.writeMeta('q2', validMeta(w, 'q2'));
+    writeFileSync(join(dir, 'out.log'), '在改 store\n');
+    w.setRunning(9001, true);
+    for (let i = 0; i < 12; i += 1) w.ghReplies.push(ok('[]'));
+    await w.run(['watch']);
+    w.out.length = 0;
+    const realSleep = w.io.sleep;
+    let naps = 0;
+    w.io.sleep = async (ms: number) => {
+      naps += 1;
+      writeFileSync(join(dir, 'out.log'), '在改 store\n完成：PR #7\n');
+      w.setRunning(9001, false);
+      await realSleep(ms);
+    };
+    expect(await w.run(['watch', '--wait', '55'])).toBe(0);
+    expect(w.out).toEqual(['变化：q2 做完了：完成：PR #7', '还在跑：0']);
+    expect(naps).toBe(1);
+  });
+
+  it('【故意造出的失败】--wait 超过 55 秒、不是整数：用法错，退出码 1（单次前台等待不许超过 60 秒）', async () => {
+    for (const bad of ['56', '600', 'abc', '-1', '1.5']) {
+      const w = world();
+      expect(await w.run(['watch', '--wait', bad]), bad).toBe(1);
+    }
   });
 });

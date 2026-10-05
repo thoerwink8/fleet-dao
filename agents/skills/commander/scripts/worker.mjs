@@ -191,6 +191,7 @@ process.exitCode = await runWorker(process.argv.slice(2), {
   env: process.env,
   home: homedir(),
   now: () => new Date(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   cwd: () => process.cwd(),
   git: (args, opts) => run('git', args, { ...opts, env: opts?.env ?? stripProxy(process.env) }),
   gh: (args, opts) => run('gh', args, { ...opts, env: opts?.env ?? stripProxy(process.env) }),
