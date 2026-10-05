@@ -22,13 +22,6 @@ export {
   mirrorChecks,
 } from './checks.ts';
 export {
-  type ClaimsGitHub,
-  type CommitStatusInput,
-  createClaimsGitHub,
-  type LatestStatus,
-  type PullFacts,
-} from './claims.ts';
-export {
   type Auth,
   type GhRequest,
   type GhResponse,
@@ -68,6 +61,13 @@ export {
 } from './credentials.ts';
 export { type ActivityContext, type BotIdentity, type Locker, memoryLocker } from './deps.ts';
 export { type EchoKind, echoKey, echoOf, recordEcho } from './echo.ts';
+export {
+  type ClaimsGitHub,
+  type CommitStatusInput,
+  createClaimsGitHub,
+  type LatestStatus,
+  type PullFacts,
+} from './engine-pulls.ts';
 export { GitHubError, isGitHubError, redact, redactDeep } from './errors.ts';
 export {
   createEventSink,

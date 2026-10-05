@@ -1,4 +1,4 @@
-// 「认领对得上」这一侧的 GitHub 读写（claims.ts，#348）：都用「引擎」机器人。没有 statuses 写权限、权限表读不到都明确报错，
+// 引擎的通用 GitHub 读写口（engine-pulls.ts）：都用「引擎」机器人。没有 statuses 写权限、权限表读不到都明确报错，
 // 不当成贴上了；读头上的状态认得出是谁贴的；撤自动合并、关 PR（分支不动）、在 PR 上留言。
 import { describe, expect, it } from 'vitest';
 import { isGitHubError } from '../src/errors.ts';
@@ -6,7 +6,7 @@ import { repo, setup, sha } from './helpers.ts';
 
 const CTX = '认领对得上';
 
-describe('claims：读 PR', () => {
+describe('engine-pulls：读 PR', () => {
   it('现读一个 PR：正文、头、作者、自动合并开没开；列开着的 PR 不带关了的', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({
@@ -36,7 +36,7 @@ describe('claims：读 PR', () => {
   });
 });
 
-describe('claims：提交状态', () => {
+describe('engine-pulls：提交状态', () => {
   it('以引擎机器人贴；读回最新的一条、认得出是不是引擎贴的', async () => {
     const { gh, fake } = setup();
     expect(await gh.claims.latestStatus(repo, sha('a'), CTX)).toBeNull();
@@ -111,7 +111,7 @@ describe('claims：提交状态', () => {
   });
 });
 
-describe('claims：撤自动合并、关 PR、留言', () => {
+describe('engine-pulls：撤自动合并、关 PR、留言', () => {
   it('撤自动合并；关 PR 不删分支；在 PR 上留言同一个 key 只发一次', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({ head: { ref: 'fix/a', sha: sha('a') }, auto_merge: true });

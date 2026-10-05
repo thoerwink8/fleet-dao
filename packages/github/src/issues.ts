@@ -602,7 +602,7 @@ export async function commentIssue(
 }
 
 /**
- * 在一个 PR 上留一条评论（幂等，按 key 认）：认领作废、强制改派时给旧 PR 留话（#348）。号不是 PR 的抛错，不往 issue 上写。
+ * 在一个 PR 上留一条评论（幂等，按 key 认）：canary 收残留 PR 时留话。号不是 PR 的抛错，不往 issue 上写。
  * issueNumber 填 PR 号（GitHub 眼里 PR 也是一张 issue，评论走同一个接口）。
  */
 export async function commentPull(
