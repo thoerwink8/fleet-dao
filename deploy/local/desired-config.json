@@ -48,6 +48,10 @@
     },
     "api.env": {
       "FLEET_ENV": "production",
+      "FLEET_MACHINE_NAME": {
+        "value": "本机",
+        "说明": "登记的差别：这台给人看的名字不是「法国」（本机档，#451）；驾驶舱顶栏徽标和环境页（#820 片 1）读它（和引擎那份 engine.env 同一项）。名字不算要保密的东西，当公开值"
+      },
       "FLEET_PUBLIC_URL": {
         "value": "https://fleet-local.invalid",
         "说明": "登记的差别：法国这项是私有值（真域名），本机档没有对外入口（没有香港、没有隧道），改成占位地址、当公开值处理，不是要保密的东西；FLEET_ENV=production 两边一样，packages/api/src/config.ts 的 loadConfig 生产模式下强制 https，占位域名也要写 https://"

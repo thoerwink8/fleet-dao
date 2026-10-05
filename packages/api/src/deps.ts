@@ -1,4 +1,4 @@
-import type { AlertWorkPort } from '@fleet-dao/store';
+import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
@@ -65,6 +65,11 @@ export interface Deps {
    * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。
    */
   routingEfforts?: RoutingEffortsPort | undefined;
+  /**
+   * 环境页（#820 片 1）的版本那一项：读法国的发布目录（current 链接 + 状态文件）现算。只在法国的正式机器上装配
+   * （main.ts 的 onFrance）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。
+   */
+  deployLag?: (() => DeployLagInput) | undefined;
   /**
    * /changelog 页「发布 v<N>」定版本号要的两样（release-version.ts）：仓里开着的里程碑（GitHub 现读）、仓根 CHANGELOG.md。
    * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。
