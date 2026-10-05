@@ -1,4 +1,7 @@
-// 分流的行为：梯子怎么往下走、次数怎么封顶、认不出的怎么办、Jev 能碰什么、路由病了和原文重复时怎么跳。全是纯函数，不出网。
+// 分流的行为（#1072 瘦身后）：先认是哪一种打断原因，再按这一种的处置办（classify.ts 顶上那张表）——次数怎么封顶、最长等待怎么封顶、
+// 认不出的怎么办、原文重复怎么停。全是纯函数，不出网。
+// 瘦身前每条规则各有一套梯子（重试 → 换路由 → 换模型 → 挂起，还有避开多久、记哪本账），行为钉在 samples.test.ts 的 150 条真实样本上：
+// 认出的规则、报警、算不算路由的失败一条没变，变的只有「换路由、换模型」那一级没了。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,14 +11,7 @@ import {
   type FailureEvidence,
   type FailurePolicy,
   type FailureVerdict,
-  type JevPort,
-  type JevReply,
-  NO_JEV,
-  routeBreaker,
-  TRIAGE_OPTIONS,
-  type TriageChoice,
-  triageFailure,
-  triageFailureAsked,
+  RULES,
 } from '../../src/failure/index.ts';
 
 const NOW = '2026-09-25T00:00:00.000Z';
@@ -45,266 +41,117 @@ function drive(evidence: FailureEvidence, policy?: Partial<FailurePolicy>, maxSt
   return { trail: verdicts.map((v) => v.action), last: verdicts.at(-1), verdicts };
 }
 
-describe('认不出的：不停下等人，也不无限重试', () => {
-  it('绑路由的一步：有界重试 → 换路由 → 换模型 → 挂起并报警', () => {
-    const { trail, last } = drive(UNKNOWN);
-    expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'swapModel', 'park']);
-    expect(last?.alert).toBe(true);
-    expect(last?.rule).toBe('FB');
-    expect(last?.classifiedAs).toBe('unknown');
+describe('处置表：每一种打断原因怎么办、上限在哪', () => {
+  it('分流只给 retry 和 park 两种动作：没有换路由、换模型这一级，每条规则都归五种之一', () => {
+    const kinds = new Set(RULES.map((r) => r.kind));
+    expect([...kinds].sort()).toEqual(['resume', 'retry', 'rework', 'stop', 'wait']);
+    const samples = JSON.parse(
+      readFileSync(new URL('./fixtures/failure-samples.json', import.meta.url), 'utf8'),
+    ) as { samples: { evidence: FailureEvidence }[] };
+    const actions = new Set(
+      samples.samples.map(
+        (s) => classifyFailure({ source: 'session:execute', now: NOW, ...s.evidence }).action,
+      ),
+    );
+    expect([...actions].sort()).toEqual(['park', 'retry']);
   });
 
-  it('不绑路由的一步（开 PR、查工作流）：重试完就挂起，不去换路由', () => {
-    const { trail } = drive({ source: 'openPr', message: 'something odd happened' });
+  it('retry 临时的（网络、上游出错、进程被杀……）：原路重试两次，退避 15、30 秒，再来就停下报警', () => {
+    const { trail, verdicts, last } = drive(NETWORK);
     expect(trail).toEqual(['retry', 'retry', 'park']);
+    expect(verdicts.slice(0, 2).map((v) => v.delaySeconds)).toEqual([15, 30]);
+    expect(last?.alert).toBe(true);
+    expect(last?.reason).toContain('已重试 2 次');
+  });
+
+  it('retry 里规则自己写了只试一次的（命令超时被杀、进程被杀、会话起不来）：重起一次，再来就停', () => {
+    expect(drive(session({ message: 'Command timed out after 10m' })).trail).toEqual(['retry', 'park']);
+    expect(drive(session({ exitCode: 137 })).trail).toEqual(['retry', 'park']);
+    const { trail, verdicts } = drive(session({ code: 'SPAWN_TIMEOUT', message: '等了 45 秒进程还没起来' }));
+    expect(trail).toEqual(['retry', 'park']);
+    expect(verdicts.every((v) => v.rule === 'ST1')).toBe(true);
+  });
+
+  it('retry 认不出的：同样按临时的办，不无限重试；绑不绑路由都一样', () => {
+    const { trail, last } = drive(UNKNOWN);
+    expect(trail).toEqual(['retry', 'retry', 'park']);
+    expect(last).toMatchObject({ alert: true, rule: 'FB', classifiedAs: 'unknown' });
+    expect(drive({ source: 'openPr', message: 'something odd happened' }).trail).toEqual([
+      'retry',
+      'retry',
+      'park',
+    ]);
   });
 
   it('上限调大调小都封得住，退避翻倍且封顶', () => {
-    const policy = { retryAttempts: 6, routeSwaps: 0, modelSwaps: 0, retryMaxSeconds: 100 };
-    const { trail, verdicts } = drive(UNKNOWN, policy);
+    const { trail, verdicts } = drive(UNKNOWN, { retryAttempts: 6, retryMaxSeconds: 100 });
     expect(trail).toEqual(['retry', 'retry', 'retry', 'retry', 'retry', 'retry', 'park']);
     expect(verdicts.map((v) => v.delaySeconds)).toEqual([15, 30, 60, 100, 100, 100, 0]);
-    expect(drive(UNKNOWN, { retryAttempts: 0, routeSwaps: 0, modelSwaps: 0 }).trail).toEqual(['park']);
+    expect(drive(UNKNOWN, { retryAttempts: 0 }).trail).toEqual(['park']);
   });
 
-  it('端口说重试没用：跳过原路重试，直接换路由', () => {
+  it('端口说重试没用（只对认不出的）：不重试，直接停下报警', () => {
     const v = classifyFailure({ ...UNKNOWN, retryable: false });
-    expect(v.action).toBe('swapRoute');
+    expect(v.action).toBe('park');
     expect(v.reason).toContain('端口说重试没用');
   });
 
-  it('没有任何原文：单独标「缺原因」，照样走兜底梯；没东西可问就不出 Jev 题', () => {
+  it('没有任何原文：单独标「缺原因」，照样按临时的办', () => {
     const v = classifyFailure(session({ code: 'failed' }));
     expect(v.missingReason).toBe(true);
     expect(v.action).toBe('retry');
-    expect(v.jevQuestion).toBeUndefined();
     // 只剩退出码 1 也是缺原因；别的退出码本身就说明了点什么。
     expect(classifyFailure(session({ exitCode: 1 })).missingReason).toBe(true);
     expect(classifyFailure(session({ exitCode: 2 })).missingReason).toBeUndefined();
   });
 
-  it('认不出时出一道 Jev 题：喂全文、只让选能撤回的动作', () => {
-    const long = `boom ${'x'.repeat(5000)} tail-marker`;
-    const v = classifyFailure(session({ code: 'agent_error', message: long, transcriptTail: ['最后一段'] }));
-    expect(v.jevQuestion?.questionId).toBe('failure-triage');
-    expect(v.jevQuestion?.options).toEqual(['retry', 'swapRoute', 'swapModel', 'unclear']);
-    expect(v.jevQuestion?.sample).toContain('tail-marker');
-    expect(v.jevQuestion?.sample).toContain('最后一段');
-    expect(TRIAGE_OPTIONS).not.toContain('park');
+  it('rework 返工（测试红、合并冲突、没交付）：退回会话去改，另记一本账，轮数到顶才停', () => {
+    const conflict = session({ source: 'syncMainline', code: 'MERGE_CONFLICT', routeBound: false });
+    // 基础设施的重试用光了也照样能返工
+    const spent = classifyFailure({ ...conflict, attempts: { retries: 9 } });
+    expect({ action: spent.action, counter: spent.counter }).toEqual({ action: 'retry', counter: 'reworks' });
+    expect(drive(conflict).trail).toEqual(['retry', 'retry', 'park']);
+    expect(drive(session({ code: 'not_delivered' })).trail).toEqual(['retry', 'retry', 'park']);
+    expect(drive(session({ code: 'checks-failed' }), { reworkRounds: 3 }).trail).toEqual([
+      'retry',
+      'retry',
+      'retry',
+      'park',
+    ]);
   });
 
-  it('认得出的不出 Jev 题', () => {
-    expect(classifyFailure(NETWORK).jevQuestion).toBeUndefined();
-    expect(classifyFailure(BANNED).jevQuestion).toBeUndefined();
-  });
-});
-
-describe('Jev 的回答', () => {
-  const answered = (reply: JevReply<TriageChoice>) => classifyFailure({ ...UNKNOWN, jev: reply });
-
-  it('把握够、真拦模式：按它选的那一级开始走梯子', () => {
-    const v = answered({ asked: true, ok: true, choice: 'swapModel', confidence: 0.9, shadow: false });
-    expect({ rule: v.rule, via: v.via, action: v.action, classifiedAs: v.classifiedAs }).toEqual({
-      rule: 'JV',
-      via: 'jev',
-      action: 'swapModel',
-      classifiedAs: 'swapModel',
-    });
-    expect(v.jevQuestion).toBeUndefined();
-  });
-
-  it('选的那一级次数用完，照样往下走到挂起', () => {
-    const v = classifyFailure({
-      ...UNKNOWN,
-      attempts: { modelSwaps: 1 },
-      jev: { asked: true, ok: true, choice: 'swapModel', confidence: 0.9, shadow: false },
-    });
-    expect(v.action).toBe('park');
-  });
-
-  it('把握低、只记不拦、没判出来、看不出、没问：都当没判，走兜底梯并写明原因', () => {
-    const cases: [JevReply<TriageChoice>, string][] = [
-      [{ asked: true, ok: true, choice: 'swapRoute', confidence: 0.4, shadow: false }, '把握 0.4 低于 0.7'],
-      [{ asked: true, ok: true, choice: 'swapRoute', confidence: 0.95, shadow: true }, '只记不拦'],
-      [{ asked: true, ok: false, reason: '超时' }, 'Jev 没判出来（超时）'],
-      [{ asked: true, ok: true, choice: 'unclear', confidence: 0.9, shadow: false }, 'Jev 也看不出来'],
-      [{ asked: false, reason: '没接 Jev，默认不问' }, '没问 Jev'],
-    ];
-    for (const [reply, why] of cases) {
-      const v = answered(reply);
-      expect({ rule: v.rule, action: v.action }).toEqual({ rule: 'FB', action: 'retry' });
-      expect(v.reason).toContain(why);
-    }
-  });
-
-  it('答了题面外的（比如 park）不算数：Jev 选不出挂起', () => {
-    const v = answered({
-      asked: true,
-      ok: true,
-      choice: 'park' as TriageChoice,
-      confidence: 0.99,
-      shadow: false,
-    });
-    expect(v.rule).toBe('FB');
-    expect(v.reason).toContain('题面外');
-  });
-
-  it('规则认得出的，Jev 说什么都不改（尤其是账号池的事）', () => {
-    const v = classifyFailure({
-      ...BANNED,
-      jev: { asked: true, ok: true, choice: 'retry', confidence: 0.99, shadow: false },
-    });
-    expect({ rule: v.rule, action: v.action }).toEqual({ rule: 'AU1', action: 'swapRoute' });
-  });
-});
-
-describe('问 Jev 的那一步（默认不问）', () => {
-  const port = (ask: JevPort['ask']): JevPort => ({ ask });
-
-  it('默认实现不问：结论和兜底梯一样，原因里写明没问', async () => {
-    const v = await triageFailure(UNKNOWN);
-    expect({ rule: v.rule, action: v.action }).toEqual({ rule: 'FB', action: 'retry' });
-    expect(v.reason).toContain('没接 Jev');
-    expect(
-      await NO_JEV.ask({
-        questionId: 'failure-triage',
-        prompt: '',
-        options: [],
-        hints: {},
-        sample: '',
-        confidenceFloor: 0.7,
-      }),
-    ).toEqual({
-      asked: false,
-      reason: '没接 Jev，默认不问',
-    });
-  });
-
-  it('接上 Jev、它有把握：按它的走；认得出的根本不问', async () => {
-    let asked = 0;
-    const jev = port(async () => {
-      asked += 1;
-      return { asked: true, ok: true, choice: 'swapRoute', confidence: 0.9, shadow: false } as never;
-    });
-    expect((await triageFailure(UNKNOWN, { jev })).action).toBe('swapRoute');
-    expect((await triageFailure(NETWORK, { jev })).rule).toBe('NT1');
-    expect(asked).toBe(1);
-  });
-
-  it('问过就把回答一起交回来（会话端口要带给工作流的失败分流）；认得出的不问、没有回答', async () => {
-    const reply: JevReply<TriageChoice> = {
-      asked: true,
-      ok: true,
-      choice: 'swapModel',
-      confidence: 0.9,
-      shadow: true,
-    };
-    const jev = port(async () => reply as never);
-    const unknown = await triageFailureAsked(UNKNOWN, { jev });
-    expect(unknown.jev).toEqual(reply);
-    // 只记不拦：结论和没问一样走兜底梯，原因里写明 Jev 判了什么
-    expect({ rule: unknown.verdict.rule, action: unknown.verdict.action }).toEqual({
-      rule: 'FB',
-      action: 'retry',
-    });
-    expect(unknown.verdict.reason).toContain('Jev 判「swapModel」，这道题还在只记不拦');
-    // 工作流拿着这份回答重判：和活动里判的一模一样，而且不会再出题
-    const replayed = classifyFailure({ ...UNKNOWN, jev: reply });
-    expect(replayed).toEqual(unknown.verdict);
-    expect(replayed.jevQuestion).toBeUndefined();
-    const known = await triageFailureAsked(NETWORK, { jev });
-    expect(known.jev).toBeUndefined();
-    expect(known.verdict.rule).toBe('NT1');
-  });
-
-  it('Jev 抛错或超时：当没判出来，照样走兜底梯', async () => {
-    const throwing = port(async () => {
-      throw new Error('连不上');
-    });
-    const hanging = port(() => new Promise(() => {}));
-    const a = await triageFailure(UNKNOWN, { jev: throwing });
-    const b = await triageFailure(UNKNOWN, { jev: hanging, timeoutMs: 20 });
-    expect([a.action, b.action]).toEqual(['retry', 'retry']);
-    expect(a.reason).toContain('调用出错：连不上');
-    expect(b.reason).toContain('超过 20 毫秒没回');
-  });
-});
-
-describe('认得出的：按各自的梯子走', () => {
-  it('网络不通：重试两次再换路由，不换模型', () => {
-    const { trail, verdicts } = drive(NETWORK);
-    expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'park']);
-    expect(verdicts.slice(0, 2).map((v) => v.delaySeconds)).toEqual([15, 30]);
-    expect(verdicts[2]?.avoid).toEqual({ scope: 'route', shared: false });
-  });
-
-  it('真会话端口的进程迟迟起不来（SPAWN_TIMEOUT）：先原路重起一次，再起不来才换路由，最后挂起', () => {
-    const { trail, verdicts } = drive(session({ code: 'SPAWN_TIMEOUT', message: '等了 45 秒进程还没起来' }));
-    expect(trail[0]).toBe('retry');
-    expect(trail.slice(1, -1).every((a) => a === 'swapRoute')).toBe(true);
-    expect(trail.at(-1)).toBe('park');
-    expect(verdicts.every((v) => v.rule === 'ST1')).toBe(true);
-  });
-
-  it('账号被封：原文说「请稍后重试」也不在同一个池里重试；换池，所有任务避开这个池，报警', () => {
-    const { trail, verdicts } = drive(BANNED);
-    expect(trail).toEqual(['swapRoute', 'swapRoute', 'park']);
-    expect(verdicts[0]?.avoid).toEqual({ scope: 'pool', shared: true });
-    expect(verdicts.every((v) => v.alert)).toBe(true);
-    expect(verdicts[0]?.reason).toBe(
-      '账号被封（account_banned）：换一个账号池，这个池在处理好之前不派，并报警',
-    );
-  });
-
-  it('不绑路由的一步撞上登录失效（比如推送的令牌过期）：没路可换，挂起报警', () => {
-    const v = classifyFailure({ source: 'pushBranch', message: 'HTTP 401 Unauthorized' });
-    expect({ rule: v.rule, action: v.action, alert: v.alert }).toEqual({
-      rule: 'AU2',
-      action: 'park',
-      alert: true,
-    });
-  });
-
-  it('额度用满（不是 Claude 订阅池）：挂起到清零、续同一个会话；等过两次还满才换池；这个池所有任务一起避到清零', () => {
+  it('wait 额度用满（不是 Claude 订阅池）：等到上游给的清零时刻、续同一个会话；等过两次还满就停；等太久（周限）直接停', () => {
     const quota = session({ message: '5 小时额度已用完，约 20 分钟后重置' });
     const { trail, verdicts } = drive(quota);
-    expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'park']);
+    expect(trail).toEqual(['retry', 'retry', 'park']);
     expect(verdicts[0]).toMatchObject({
       delaySeconds: 1200,
       counter: 'retries',
       wait: 'quota',
       resumeSame: true,
+      alert: false,
     });
-    // 等的时候也要让别的任务别再派到这个池：共享的避开给到清零时刻。
-    expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
-    expect(verdicts[0]?.avoid).toBeUndefined();
-    expect(verdicts[2]?.avoid).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
-    expect(verdicts[2]?.resumeSame).toBe(false);
-    expect(verdicts[0]?.alert).toBe(false);
-
     const weekly = classifyFailure(
-      session({
-        message: 'weekly limit reached',
-        resetsAt: '2026-09-29T00:00:00.000Z',
-        attempts: { routeSwaps: 2 },
-      }),
+      session({ message: 'weekly limit reached', resetsAt: '2026-09-29T00:00:00.000Z' }),
     );
     expect(weekly.action).toBe('park');
-    expect(weekly.reason).toContain('太久了');
-
-    const unknownReset = classifyFailure(session({ code: 'quota_exhausted', attempts: { routeSwaps: 2 } }));
+    expect(weekly.reason).toContain('超过最长等待');
+    // 上游没说几点清零：按默认 15 分钟起翻倍
+    const unknownReset = classifyFailure(session({ code: 'quota_exhausted' }));
     expect({ action: unknownReset.action, delay: unknownReset.delaySeconds }).toEqual({
       action: 'retry',
       delay: 900,
     });
+    // 最长等待可调
+    expect(classifyFailure(quota, { waitMaxSeconds: 600 }).action).toBe('park');
   });
 
-  it('额度用满（Claude 订阅池，#59）：不原地睡到清零，马上回去选路、续同一个会话等这条路由；切了号选路就换池接着干', () => {
+  it('wait 额度用满（Claude 订阅池，#59）：不原地睡到清零，马上回去选路、续同一个会话等这条路由；切了号选路就换池接着干', () => {
     for (const orgKind of ['carpool', 'solo'] as const) {
       const quota = session({ message: '拼车 5 小时额度已用完，约 20 分钟后重置', orgKind });
       const { trail, verdicts } = drive(quota);
-      // 回去选路也记重试的账：同一步反复被拒（切回去又被拒）有个头，之后照普通的换池、挂起
-      expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'park']);
+      // 回去选路也记重试的账：同一步反复被拒（切回去又被拒）有个头
+      expect(trail).toEqual(['retry', 'retry', 'park']);
       expect(verdicts[0]).toMatchObject({
         action: 'retry',
         delaySeconds: 0,
@@ -315,19 +162,74 @@ describe('认得出的：按各自的梯子走', () => {
       });
       expect(verdicts[0]?.reason).toContain('不原地睡到清零，回去选路等');
       expect(verdicts[0]?.reason).toContain('约 20 分钟后清零');
-      // 别的任务照样避开这个池到清零（选路按它等、或者切了号派到切过去的那个池）
-      expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
-      expect(verdicts[0]?.avoid).toBeUndefined();
     }
-    // 要等太久（周限）和普通的一样跳过、换池
+    // 要等太久（周限）和普通的一样直接停
     const weekly = classifyFailure(
       session({ message: 'weekly limit reached', resetsAt: '2026-09-29T00:00:00.000Z', orgKind: 'carpool' }),
     );
-    expect(weekly.action).toBe('swapRoute');
-    expect(weekly.reason).toContain('太久了');
+    expect(weekly.action).toBe('park');
+    expect(weekly.reason).toContain('超过最长等待');
   });
 
-  it('设备被撤销（401 device_revoked）单独一类：不当额度用满、不当封号；挂起等人重新登录，整池暂停，写清去哪台机器以谁的身份登录', () => {
+  it('wait 限流、繁忙：上游给了时间就等那么久，没给按默认起翻倍；次数用完停；原文重复不改这条（上游自己给了时间）', () => {
+    const given = classifyFailure(session({ message: '429 Too Many Requests', retryAfterSeconds: 30 }));
+    expect({ rule: given.rule, action: given.action, delay: given.delaySeconds, wait: given.wait }).toEqual({
+      rule: 'RL3',
+      action: 'retry',
+      delay: 30,
+      wait: 'upstream',
+    });
+    expect(classifyFailure(session({ message: '429 Too Many Requests' })).delaySeconds).toBe(60);
+    expect(drive(session({ message: '429 Too Many Requests', retryAfterSeconds: 30 })).trail).toEqual([
+      'retry',
+      'retry',
+      'park',
+    ]);
+    // 按分钟限流只等一次
+    const rpm = drive(session({ message: '429 Quota exceeded for requests per minute' }));
+    expect(rpm.trail).toEqual(['retry', 'park']);
+    expect(rpm.verdicts[0]?.delaySeconds).toBe(60);
+    // 路由繁忙
+    expect(classifyFailure(session({ message: 'Selected model is at capacity' })).rule).toBe('BZ1');
+    expect(drive(session({ message: 'Selected model is at capacity' })).trail).toEqual([
+      'retry',
+      'retry',
+      'park',
+    ]);
+    const repeat = classifyFailure(
+      session({
+        message: '429 Too Many Requests',
+        attempts: { retries: 1 },
+        previousMessage: '429 Too Many Requests',
+      }),
+    );
+    expect(repeat.action).toBe('retry');
+  });
+
+  it('stop 只有人能修的：封号、登录失效、余额不够、配置不对……头一步就停下报警，不重试；整池的事让别的任务也别再派', () => {
+    const { trail, verdicts } = drive(BANNED);
+    expect(trail).toEqual(['park']);
+    expect(verdicts[0]).toMatchObject({ rule: 'AU1', alert: true, routeOutcome: 'neutral' });
+    expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true });
+    expect(verdicts[0]?.reason).toBe('账号被封（account_banned）：挂起并报警');
+    // 路由自己的问题（配置不对、模型不存在）：停下报警，这条路由的失败记进熔断，不让整池暂停
+    const model = classifyFailure(session({ code: 'model_not_found' }));
+    expect({ action: model.action, alert: model.alert, routeOutcome: model.routeOutcome }).toEqual({
+      action: 'park',
+      alert: true,
+      routeOutcome: 'fail',
+    });
+    expect(model.shared).toBeUndefined();
+    // 不绑路由的一步撞上登录失效（比如推送的令牌过期）
+    const v = classifyFailure({ source: 'pushBranch', message: 'HTTP 401 Unauthorized' });
+    expect({ rule: v.rule, action: v.action, alert: v.alert }).toEqual({
+      rule: 'AU2',
+      action: 'park',
+      alert: true,
+    });
+  });
+
+  it('stop 设备被撤销（401 device_revoked）单独一类：不当额度用满、不当封号；停下等人重新登录，写清去哪台机器以谁的身份登录', () => {
     const revoked = session({
       code: 'agent_error',
       message: 'API Error: 401 device_revoked',
@@ -347,24 +249,21 @@ describe('认得出的：按各自的梯子走', () => {
       '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
     );
     expect(v.reason).toContain('要人：在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login');
-    // 重试、换池都不做：梯子只有挂起。
     expect(drive(revoked).trail).toEqual(['park']);
     // 机器、会话用户没报：写明没报，不瞎猜。
     expect(classifyFailure(session({ message: '401 device_revoked' })).humanFix).toBe(
       '在机器（没报）上以会话用户（没报）重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
     );
-    // 生产上见过的另一种说法（400 此设备已被解绑，请在终端重新运行 reclaude 完成登录）归同一类。
     expect(
       classifyFailure(
         session({ message: 'API Error: 400 此设备已被解绑，请在终端重新运行 reclaude 完成登录' }),
       ).rule,
     ).toBe('DV1');
-    // 别的登录失效照旧归 AU2（换池 + 报警），封号照旧归 AU1。
     expect(classifyFailure(session({ message: 'Not logged in · Please run /login' })).rule).toBe('AU2');
     expect(classifyFailure(BANNED).rule).toBe('AU1');
   });
 
-  it('卫生检查拦下了要公开的内容：退回会话去掉再交（记返工账）；同一处连续被拦两次就挂起报警', () => {
+  it('rework 卫生检查拦下了要公开的内容：退回会话去掉再交；同一处连续被拦两次就停；卫生检查没扫成不推、直接停', () => {
     const spots = '卫生检查拦下了要公开的内容：config/app.env:3 github-token';
     const blocked = (over: FailureEvidence = {}) =>
       classifyFailure({
@@ -378,27 +277,20 @@ describe('认得出的：按各自的梯子走', () => {
       });
     // 端口说不可重试也照样退回会话：退回会话不是「原样再推一次」。
     expect(blocked()).toMatchObject({ rule: 'HY1', action: 'retry', counter: 'reworks', delaySeconds: 0 });
-    // 会话改过又交，拦在别处：再退一轮。
     expect(
-      blocked({
-        attempts: { reworks: 1 },
-        previousMessage: '卫生检查拦下了要公开的内容：src/a.ts:9 email',
-      }).action,
+      blocked({ attempts: { reworks: 1 }, previousMessage: '卫生检查拦下了要公开的内容：src/a.ts:9 email' })
+        .action,
     ).toBe('retry');
-    // 同一处又被拦：挂起报警，不再退回。
     const again = blocked({ attempts: { reworks: 1 }, previousMessage: spots });
     expect({ action: again.action, alert: again.alert }).toEqual({ action: 'park', alert: true });
     expect(again.reason).toContain('一字不差');
-    // 返工轮数用完也挂起。
     expect(blocked({ attempts: { reworks: 2 } }).action).toBe('park');
     // 码只认结构化的 code 字段：测试输出里带着这个词不算。
     expect(classifyFailure(session({ message: 'expected HYGIENE_BLOCKED to be thrown' })).rule).not.toBe(
       'HY1',
     );
-  });
 
-  it('卫生检查没扫成：不推、不当成查过没事，挂起报警', () => {
-    const v = classifyFailure({
+    const unscanned = classifyFailure({
       source: 'pushBranch',
       routeBound: false,
       code: 'HYGIENE_UNSCANNED',
@@ -406,62 +298,32 @@ describe('认得出的：按各自的梯子走', () => {
       message: '推之前的卫生检查没扫成：要推的 1a2b3c4 不在扫过的提交里',
       now: NOW,
     });
-    expect({ rule: v.rule, action: v.action, alert: v.alert, counter: v.counter }).toEqual({
+    expect({ rule: unscanned.rule, action: unscanned.action, alert: unscanned.alert }).toEqual({
       rule: 'HY2',
       action: 'park',
       alert: true,
-      counter: null,
     });
-  });
-
-  it('限流：上游给了不长的等待就原地等，没给或太长就换路由并让所有任务避开', () => {
-    const short = classifyFailure(session({ message: '429 Too Many Requests', retryAfterSeconds: 30 }));
-    expect({ action: short.action, delay: short.delaySeconds }).toEqual({ action: 'retry', delay: 30 });
-    const none = classifyFailure(session({ message: '429 Too Many Requests' }));
-    expect(none.action).toBe('swapRoute');
-    expect(none.avoid).toEqual({ scope: 'route', shared: true, until: '2026-09-25T00:10:00.000Z' });
-    const long = classifyFailure(session({ message: '429 Too Many Requests', retryAfterSeconds: 1800 }));
-    expect(long.action).toBe('swapRoute');
-    expect(long.avoid?.until).toBe('2026-09-25T00:30:00.000Z');
-    expect(long.reason).toContain('不原地等');
-    expect(drive(session({ message: '429 Too Many Requests', retryAfterSeconds: 30 })).trail).toEqual([
-      'retry',
-      'retry',
-      'swapRoute',
-      'swapRoute',
-      'park',
-    ]);
-  });
-
-  it('按分钟限流不停账号池：等一分钟，再不行换路由', () => {
-    const { trail, verdicts } = drive(session({ message: '429 Quota exceeded for requests per minute' }));
-    expect(trail).toEqual(['retry', 'swapRoute', 'swapRoute', 'park']);
-    expect(verdicts[0]?.delaySeconds).toBe(60);
-    expect(verdicts.some((v) => v.avoid?.scope === 'pool')).toBe(false);
-  });
-
-  it('命令超时被杀、进程被杀：重起一次，再来就交帅位', () => {
-    expect(drive(session({ message: 'Command timed out after 10m' })).trail).toEqual(['retry', 'park']);
-    expect(drive(session({ exitCode: 137 })).trail).toEqual(['retry', 'park']);
-  });
-
-  it('会话卡住：续一句、再开新会话，然后换模型', () => {
-    expect(drive(session({ code: 'idle_timeout' })).trail).toEqual(['retry', 'retry', 'swapModel', 'park']);
-  });
-
-  it('返工另记一本账：基础设施的重试用光了也照样能返工；返工轮数到顶才挂起', () => {
-    const conflict = session({ source: 'syncMainline', code: 'MERGE_CONFLICT', routeBound: false });
-    const withInfraSpent = classifyFailure({ ...conflict, attempts: { retries: 9 } });
-    expect({ action: withInfraSpent.action, counter: withInfraSpent.counter }).toEqual({
-      action: 'retry',
-      counter: 'reworks',
-    });
-    expect(drive(conflict).trail).toEqual(['retry', 'retry', 'park']);
-    expect(drive(session({ code: 'not_delivered' })).trail).toEqual(['retry', 'retry', 'swapModel', 'park']);
   });
 });
 
-describe('切号停下的（org_switch，#59）', () => {
+describe('同一个原文再犯：重试不会变，直接停', () => {
+  it('和上一次的原文一字不差：重试过一次后不再原路重试，直接停下报警', () => {
+    const again = classifyFailure({
+      ...NETWORK,
+      attempts: { retries: 1 },
+      previousMessage: 'socket hang up',
+    });
+    expect(again.action).toBe('park');
+    expect(again.reason).toContain('一字不差');
+    // 第一次失败没有「上一次」；原文变了也照常重试。
+    expect(classifyFailure({ ...NETWORK, previousMessage: 'socket hang up' }).action).toBe('retry');
+    expect(
+      classifyFailure({ ...NETWORK, attempts: { retries: 1 }, previousMessage: 'fetch failed' }).action,
+    ).toBe('retry');
+  });
+});
+
+describe('resume 切号停下的（org_switch，#59）和发布排空', () => {
   const SWITCH_MESSAGE = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干';
   const SWITCH = session({ code: 'org_switch', retryable: true, message: SWITCH_MESSAGE });
 
@@ -479,16 +341,26 @@ describe('切号停下的（org_switch，#59）', () => {
     expect(v.reason).toContain('马上接着干（不算重试）');
   });
 
-  it('切几次续几次：重试次数用光了、原文和上一次一字不差、路由病了，照样续，不挂起', () => {
+  it('切几次续几次：重试次数用光了、原文和上一次一字不差，照样续，不停下', () => {
     const { trail } = drive(SWITCH, undefined, 10);
     expect(trail).toEqual(Array.from({ length: 10 }, () => 'retry'));
-    const v = classifyFailure({
-      ...SWITCH,
-      attempts: { retries: 99 },
-      previousMessage: SWITCH_MESSAGE,
-      routeHealth: { samples: 20, failureRate: 1 },
-    });
+    const v = classifyFailure({ ...SWITCH, attempts: { retries: 99 }, previousMessage: SWITCH_MESSAGE });
     expect(v).toMatchObject({ action: 'retry', counter: null });
+  });
+
+  it('引擎为发布排空（engine_stopping）、要发新版本先停下（engine_stop）：同样马上续，不记账', () => {
+    for (const [code, rule] of [
+      ['engine_stopping', 'ES1'],
+      ['engine_stop', 'KL3'],
+    ] as const) {
+      const v = classifyFailure(session({ code, retryable: true, message: '引擎在停' }));
+      expect({ rule: v.rule, action: v.action, counter: v.counter, alert: v.alert }).toEqual({
+        rule,
+        action: 'retry',
+        counter: null,
+        alert: false,
+      });
+    }
   });
 
   it('【故意造出的失败】只认插头交来的结构化码：原文里提到 org_switch 不算', () => {
@@ -497,62 +369,23 @@ describe('切号停下的（org_switch，#59）', () => {
   });
 });
 
-describe('路由健康和原文重复', () => {
-  it('这条路由最近真实流量失败率到线：不在它身上原路重试，直接换路由', () => {
-    const v = classifyFailure({ ...NETWORK, routeHealth: { samples: 10, failureRate: 0.7 } });
-    expect(v.action).toBe('swapRoute');
-    expect(v.reason).toContain('这条路由最近 10 次里失败 70%');
-    // 样本不够不算病。
-    expect(classifyFailure({ ...NETWORK, routeHealth: { samples: 5, failureRate: 1 } }).action).toBe('retry');
-  });
-
-  it('熔断结果里的 window 直接当路由健康传进来', () => {
-    const empty = routeBreaker([], { now: NOW, inFlight: 0 });
-    expect(empty.window).toEqual({ samples: 0, failures: 0, failureRate: null });
-    expect(classifyFailure({ ...NETWORK, routeHealth: empty.window }).action).toBe('retry');
-    // 一小时前起的 8 次真实流量：成、败、败交替，没有三连败，失败 5 次（63%）。
-    const minute = (n: number) => new Date(Date.parse(NOW) - (60 - n) * 60_000).toISOString();
-    const results = [0, 1, 2, 3, 4, 5, 6, 7].map((n) => ({
-      at: minute(n),
-      result: n % 3 === 0 ? ('ok' as const) : ('fail' as const),
-    }));
-    const sick = routeBreaker(results, { now: NOW, inFlight: 0 });
-    expect(sick.window).toEqual({ samples: 8, failures: 5, failureRate: 0.625 });
-    expect(classifyFailure({ ...NETWORK, routeHealth: sick.window }).action).toBe('swapRoute');
-  });
-
-  it('和上一次的原文一字不差：重试过一次后不再原路重试', () => {
-    const again = classifyFailure({
-      ...NETWORK,
-      attempts: { retries: 1 },
-      previousMessage: 'socket hang up',
-    });
-    expect(again.action).toBe('swapRoute');
-    expect(again.reason).toContain('一字不差');
-    // 第一次失败没有「上一次」；原文变了也照常重试。
-    expect(classifyFailure({ ...NETWORK, previousMessage: 'socket hang up' }).action).toBe('retry');
-    expect(
-      classifyFailure({ ...NETWORK, attempts: { retries: 1 }, previousMessage: 'fetch failed' }).action,
-    ).toBe('retry');
-  });
-});
-
 describe('证据里的时刻读坏了', () => {
-  it('分流照样给出能撤回的动作（它不能跟着失败），但原因里写明哪项没读成、按默认时长走', () => {
+  it('分流照样给出动作（它不能跟着失败），但原因里写明哪项没读成、按默认时长走', () => {
     const quota = { source: 'session:execute', routeId: 'route-a', message: 'weekly limit reached' };
     const badNow = classifyFailure({ ...quota, now: '昨天' });
     expect(badNow.action).toBe('retry');
-    expect(badNow.shared).toEqual({ scope: 'pool', shared: true });
     expect(badNow.reason).toContain('now 认不出（昨天），不写到期时刻');
 
     const badReset = classifyFailure({ ...quota, now: NOW, resetsAt: 'soon' });
-    expect(badReset.shared?.until).toBe('2026-09-25T00:15:00.000Z');
+    expect(badReset.action).toBe('retry');
+    expect(badReset.delaySeconds).toBe(900);
     expect(badReset.reason).toContain('resetsAt 认不出（soon），按默认时长');
 
     const badAfter = classifyFailure(
       session({ message: '429 Too Many Requests', retryAfterSeconds: Number.NaN }),
     );
-    expect(badAfter.action).toBe('swapRoute');
+    expect(badAfter.action).toBe('retry');
+    expect(badAfter.delaySeconds).toBe(60);
     expect(badAfter.reason).toContain('retryAfterSeconds 认不出（NaN）');
   });
 });
@@ -573,7 +406,7 @@ describe('喂熔断：哪些算路由的失败', () => {
   });
 });
 
-describe('插头没查成的：再起一个会话就可能跑两遍，只挂起报警', () => {
+describe('插头没查成的：再起一个会话就可能跑两遍，只停下报警', () => {
   const launch = (stray?: string) =>
     `起会话没查成：prompt 发出去了，没等到应答${
       stray ? `（收到过一条认不出是冲这一针来的报错：${stray}）` : ''
@@ -586,7 +419,7 @@ describe('插头没查成的：再起一个会话就可能跑两遍，只挂起�
     counter: v?.counter,
   });
 
-  it('起会话没查成：头一步就挂起报警，一次也不原路重派、不换路由；不记路由的失败', () => {
+  it('起会话没查成：头一步就停下报警，一次也不原路重派；不记路由的失败', () => {
     const { trail, last } = drive(session({ hostId: 'mirasim', code: 'launch_unknown', message: launch() }));
     expect(trail).toEqual(['park']);
     expect(parked(last)).toEqual({
@@ -601,16 +434,10 @@ describe('插头没查成的：再起一个会话就可能跑两遍，只挂起�
       session({ hostId: 'mirasim', message: '起会话没查成：没收到 prompt 的应答帧（没查成）' }),
     );
     expect(old.trail).toEqual(['park']);
-    expect(parked(old.last)).toEqual({
-      rule: 'ST2',
-      action: 'park',
-      alert: true,
-      routeOutcome: 'neutral',
-      counter: null,
-    });
+    expect(old.last?.rule).toBe('ST2');
   });
 
-  it('原话里夹着等应答时收到的别的报错：没有码时它们各归各的规则，有 launch_unknown 就压得过（尤其是繁忙 BZ1）', () => {
+  it('原话里夹着等应答时收到的别的报错：没有码时它们各归各的规则，有 launch_unknown 就压得过', () => {
     const cases: [string, string][] = [
       ['Selected model is at capacity', 'BZ1'],
       ['{"type":"error","code":"overloaded_error"}', 'BZ1'],
@@ -631,26 +458,19 @@ describe('插头没查成的：再起一个会话就可能跑两遍，只挂起�
     }
   });
 
-  it('中转没查成：活可能已经交了，不重跑、不换路由，挂起报警；和交付没查成（重查交付）分开', () => {
+  it('中转没查成：活可能已经交了，不重跑，停下报警；和交付没查成（重查交付）分开', () => {
     for (const message of [
       '中转没查成：账本没读成：账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
       '中转没查成：没给账本目录，上游有没有真的干活核实不了',
     ]) {
       const { trail, last } = drive(session({ hostId: 'mirasim', code: 'relay_unknown', message }));
       expect(trail).toEqual(['park']);
-      expect(parked(last)).toEqual({
-        rule: 'DL3',
-        action: 'park',
-        alert: true,
-        routeOutcome: 'neutral',
-        counter: null,
-      });
+      expect(parked(last).rule).toBe('DL3');
     }
     expect(classifyFailure(session({ code: 'delivery_unknown' })).action).toBe('retry');
   });
 
-  it('测试输出里出现这两个码、旧系统那句原文（fleet-dao 自己的测试里满是）：带不带 CI 红的码都判 TS1 返工，不挂起', () => {
-    // 两份真 vitest 失败输出（夹具 X60、X61）；先确认样本里真有这些字样，免得测的是空话
+  it('测试输出里出现这两个码、旧系统那句原文（fleet-dao 自己的测试里满是）：带不带 CI 红的码都判 TS1 返工，不停下', () => {
     const samples = JSON.parse(
       readFileSync(new URL('./fixtures/failure-samples.json', import.meta.url), 'utf8'),
     ) as { samples: { id: string; evidence: FailureEvidence }[] };
@@ -676,26 +496,28 @@ describe('插头没查成的：再起一个会话就可能跑两遍，只挂起�
         });
       }
     }
-    // 插头交来的结构化码照样认：原文里有什么都压得过
     expect(classifyFailure(session({ code: 'launch_unknown', message: output('X60') })).rule).toBe('ST2');
     expect(classifyFailure(session({ code: 'relay_unknown', message: output('X60') })).rule).toBe('DL3');
   });
 });
 
 describe('规则的边界', () => {
-  it('「(not your usage limit)」是服务端临时限流，不是额度用满：换路由，不避开整个账号池', () => {
+  it('「(not your usage limit)」是服务端临时限流，不是额度用满：等一等，不当额度', () => {
     const v = classifyFailure(
       session({ message: 'API Error: Server is temporarily limiting requests (not your usage limit)' }),
     );
-    expect({ rule: v.rule, action: v.action }).toEqual({ rule: 'RL3', action: 'swapRoute' });
-    expect(v.avoid?.scope).toBe('route');
+    expect({ rule: v.rule, action: v.action, wait: v.wait }).toEqual({
+      rule: 'RL3',
+      action: 'retry',
+      wait: 'upstream',
+    });
     // 真用满的说法照样认成额度用满。
     expect(classifyFailure(session({ message: "You've reached your 5-hour usage limit" })).rule).toBe('QT1');
   });
 
   it('GitHub 的限流、校验失败、没权限只认不是会话的步骤；AI 渠道报同样的字按它自己的事处置', () => {
     const inSession = classifyFailure(session({ message: 'API rate limit exceeded' }));
-    expect({ rule: inSession.rule, action: inSession.action }).toEqual({ rule: 'RL3', action: 'swapRoute' });
+    expect(inSession.rule).toBe('RL3');
     const onGithub = classifyFailure({ source: 'openPr', message: 'API rate limit exceeded' });
     expect({ rule: onGithub.rule, action: onGithub.action }).toEqual({ rule: 'RL2', action: 'retry' });
     expect(classifyFailure(session({ message: 'HTTP 422: Validation Failed' })).rule).not.toBe('GH1');
@@ -709,18 +531,8 @@ describe('规则的边界', () => {
       session({ message: 'upstream error, see https://status.example.com/login for details' }),
     );
     expect(v.rule).not.toBe('AU2');
-    expect(v.avoid?.scope).not.toBe('pool');
+    expect(v.shared).toBeUndefined();
     expect(classifyFailure(session({ message: 'Not logged in · Please run /login' })).rule).toBe('AU2');
-  });
-
-  it('模型不存在：只这个任务换模型、报警；不让所有任务一起避开这个模型，这条路由的失败记进熔断', () => {
-    const v = classifyFailure(session({ code: 'model_not_found' }));
-    expect({ action: v.action, alert: v.alert, routeOutcome: v.routeOutcome }).toEqual({
-      action: 'swapModel',
-      alert: true,
-      routeOutcome: 'fail',
-    });
-    expect(v.avoid).toEqual({ scope: 'model', shared: false });
   });
 });
 
@@ -728,21 +540,20 @@ describe('策略参数', () => {
   it('引擎的上限对象可以直接当策略传进来（多出来的字段不管）', () => {
     const v = classifyFailure({ ...UNKNOWN, attempts: { retries: 3 } }, {
       retryAttempts: 5,
+      routeSwaps: 2,
       maxParallel: 3,
     } as Partial<FailurePolicy>);
     expect(v.action).toBe('retry');
     expect(DEFAULT_FAILURE_POLICY.retryAttempts).toBe(2);
   });
 
-  it('给了但不对的报错，不悄悄换成默认值；梯子上的次数可以是 0', () => {
+  it('给了但不对的报错，不悄悄换成默认值；次数可以是 0', () => {
     const bad: [Partial<FailurePolicy>, string][] = [
       [{ retryAttempts: -1 }, '失败分流策略的 retryAttempts 不对：要不小于 0 的整数，给的是 -1'],
-      [{ routeSwaps: 1.5 }, 'routeSwaps 不对：要不小于 0 的整数'],
-      [{ sickRouteMinSamples: 0 }, 'sickRouteMinSamples 不对：要不小于 1 的整数'],
-      [{ sickRouteFailureRate: 1.2 }, 'sickRouteFailureRate 不对：要在 0 到 1 之间（不含 0）'],
-      [{ jevConfidenceFloor: Number.NaN }, 'jevConfidenceFloor 不对：要在 0 到 1 之间'],
+      [{ reworkRounds: 1.5 }, 'reworkRounds 不对：要不小于 0 的整数'],
+      [{ waitMaxSeconds: Number.NaN }, 'waitMaxSeconds 不对：要不小于 0 的数'],
     ];
     for (const [policy, message] of bad) expect(() => classifyFailure(UNKNOWN, policy)).toThrow(message);
-    expect(classifyFailure(UNKNOWN, { retryAttempts: 0 }).action).toBe('swapRoute');
+    expect(classifyFailure(UNKNOWN, { retryAttempts: 0 }).action).toBe('park');
   });
 });

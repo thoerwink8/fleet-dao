@@ -197,8 +197,8 @@ describe('拼车号额度读不到：照派、排在读到了的后面；被拒�
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'solo-opus', trial: null });
   });
 
-  it('被拒：被拒的任务回去选路、等这个池（切了号就换池接着干），别的任务按原文的时间一起避开，过了清零时刻照派', () => {
-    // 2026-09-23 拼车号当场用满的真实原文（失败样本 X03）。Claude 订阅池不原地睡到清零：马上回去选路（QT1 的 orgLadder）。
+  it('被拒：被拒的任务回去选路、等这个池（切了号就换池接着干），别的任务按读数里原文的时间一起避开，过了清零时刻照派', () => {
+    // 2026-09-23 拼车号当场用满的真实原文（失败样本 X03）。Claude 订阅池不原地睡到清零：马上回去选路（QT1 的订阅池那一路）。
     const verdict = classifyFailure({
       source: 'session:triage',
       hostId: 'claude-code',
@@ -215,7 +215,6 @@ describe('拼车号额度读不到：照派、排在读到了的后面；被拒�
       action: 'retry',
       delaySeconds: 0,
       resumeSame: true,
-      shared: { scope: 'pool', shared: true, until },
     });
 
     // 被拒原文记成一条读数（5 小时窗用满、清零取原文，adapters 的 claude-stream 读数就这么记），候选查询随之给出

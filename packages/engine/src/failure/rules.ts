@@ -1,5 +1,6 @@
-// 规则表：认出来的失败 → 按什么梯子处置。每条规则至少有一条样本夹具（test/failure/fixtures/failure-samples.json），
-// 夹具说明出处；只有合成样本的规则在夹具测试里点名列出。
+// 规则表：认出来的失败 → 属于哪一种打断原因（kind），每一种怎么办写在 classify.ts 的 POLICY 表里（#1072 瘦身：一条一条各写一套
+// 梯子、避开范围、记账方式删了，处置只看 kind；这里只管「认」）。每条规则至少有一条样本夹具
+// （test/failure/fixtures/failure-samples.json），夹具说明出处；只有合成样本的规则在夹具测试里点名列出。
 //
 // 认的顺序是三轮，每轮内按表里的先后：
 //   1. 强码：原因码（account_banned、quota_exhausted、TIMEOUT_HEARTBEAT……），含原文里嵌着的 JSON 码——命中即终判；
@@ -12,19 +13,21 @@
 import type { Scan } from './scan.ts';
 
 /**
- * 梯子上的一级。等待类（waitShort、wait、waitRoute）落成 retry 动作，记在重试账上。
- * - retry：原路再试，退避翻倍；
- * - waitShort：上游给了等待时间而且不长，原地等到点；没给或太长就跳过；
- * - wait：等到上游给的时刻；没给按规则的默认等待翻倍；要等太久就跳过（落到挂起）；
- * - waitRoute：不原地睡，马上回去选路、续同一个会话等这条路由（选路按清零时刻隔一会儿再看）；这条路由派不了了
- *   （会话用户切了号）就照常选、换池接着干。要等太久和 wait 一样跳过。
+ * 打断原因的五种（509 §九「重试不判、按表办」：额度满/被切号、进程死/网络断、测试红、同一个原因连续挂 2 次停下报人，
+ * 加上「我们自己停的」「只有人能修的」两种）。每种怎么办见 classify.ts 的 POLICY。
+ * - resume：我们自己要停的（切号、发布排空）：马上接着干，不记账、不设上限、不看上一次的原文；
+ * - wait：上游给了时间的等待（额度清零、限流、繁忙）：等到那个时刻再来，等太久（超过最长等待）就停下报人；
+ * - retry：临时的（网络、上游出错、进程被杀、起不来）：原路重试，退避翻倍，次数用完停下报人；
+ * - rework：返工（测试红、合并冲突、没交付、卫生检查拦下）：退回会话去改，轮数到顶停下报人；
+ * - stop：只有人能修或不能自动再来（登录失效、封号、没权限、配置不对、缺材料……）：停下报警，写清原因。
  */
-export type Rung = 'retry' | 'waitShort' | 'wait' | 'waitRoute' | 'swapRoute' | 'swapModel' | 'park';
+export type Kind = 'resume' | 'wait' | 'retry' | 'rework' | 'stop';
 
 export interface FailureRule {
   id: string;
   /** 白话名，进原因和驾驶舱。 */
   title: string;
+  kind: Kind;
   /** 强码（第 1 轮）。小写。 */
   codes?: readonly string[];
   /**
@@ -42,28 +45,22 @@ export interface FailureRule {
   signals?: readonly string[];
   /** 症状或结局码（第 3 轮）。小写。 */
   weakCodes?: readonly string[];
-  /** 依次尝试，某一级的次数用完就往下走；最后一级总是 park。 */
-  ladder: readonly Rung[];
   /**
-   * 出在 Claude 订阅池（带组织类型的：拼车、独享共用法国唯一的会话用户，同一时刻只有挂着的那个能派，这个池用满了
-   * 引擎切号，#157）时改用这个梯子；不给就照 ladder。
+   * 出在整个账号池或这台机器上（登录失效、封号、余额不够、设备被撤销）：这个池整池暂停，同一个池的别的任务也不该再派过去
+   * （路由探针按它把池暂停，real/route-probe.ts）。
    */
-  orgLadder?: readonly Rung[];
+  hold?: true;
   /**
-   * 重试记哪本账：返工（测试红、冲突、没交付）和基础设施处置分开。free = 不记账、没有次数上限、不看上一次的原文：
-   * 只给我们自己为了别的事停下、停几次就该续几次的（切号，#59）。
+   * 额度用满：等待记成「等账号池额度清零」。出在 Claude 订阅池（带组织类型的：拼车、独享共用法国唯一的会话用户，同一时刻只有
+   * 挂着的那个能派，这个池用满了引擎切号，#157）时不原地睡到清零：马上回去选路等这条路由，切了号就换到切过去的池接着干。
    */
-  budget?: 'infra' | 'rework' | 'free';
+  quota?: true;
   /** 这条规则最多原路重试几次（和策略上限取小）。 */
   maxRetries?: number;
   /** 退避起点（秒）；不给用策略的。 */
   retryBaseSeconds?: number;
-  /** wait 读不出上游时间时，第一次等多久（秒），之后翻倍。 */
+  /** wait 读不出上游时间时，第一次等多久（秒），之后翻倍；不给用策略的退避起点。 */
   defaultWaitSeconds?: number;
-  /** 换路由 / 换模型时避开什么。until：upstream = 上游给的时间（没给用默认冷却），cooldown = 默认冷却，none = 等人处理。 */
-  avoid?: { scope: 'route' | 'pool' | 'model'; shared: boolean; until: 'upstream' | 'cooldown' | 'none' };
-  /** 命中就报警（挂起总是报警）。 */
-  alert?: boolean;
   /** 喂熔断：算不算这条路由的失败。 */
   routeOutcome: 'fail' | 'neutral';
   /** 原路再试时怎么试（接在原因后面）。 */
@@ -75,11 +72,9 @@ export interface FailureRule {
    * 证据没给的写「（没报）」，不瞎猜。
    */
   humanFix?: string;
-  /** 挂起后人点「继续」时续同一个会话（同一条路由）：修的是这台机器或这个池，不是任务本身。 */
+  /** 停下后人点「继续」时续同一个会话（同一条路由）：修的是这台机器或这个池，不是任务本身。 */
   resumeAfterPark?: true;
 }
-
-const TRANSIENT_LADDER: readonly Rung[] = ['retry', 'swapRoute', 'park'];
 
 /** 按分钟限流的原文（RL1）；拼车被拒分流（jobs/carpool-outage.ts）也按它认「不是额度用满」。 */
 export const RL1_TEXT = /\bper[ -]?(?:second|minute|min)\b|\b(?:requests?|tokens?) per\b|每(?:秒|分钟)/i;
@@ -89,15 +84,14 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'EN2',
     title: '在途任务和现在的引擎代码对不上',
+    kind: 'stop',
     codes: ['tmprl1100'],
     text: /TMPRL1100|Nondeterminism error/i,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 下面两条是插头「没查成」（packages/adapters/src/judge.ts）：launch_unknown = prompt 发出去了、没等到本次的应答，
   // 会话可能已经在跑；relay_unknown = 会话说做完了、中转账本没读成，上游有没有真干活核实不了，活可能已经交了。
-  // 原路重试、换路由都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等对账；
+  // 原路重试都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等对账；
   // 是我们没查成，不是路由坏了，不记路由的失败。强码一轮按表的先后认，这两条只排在 EN2（同样只挂起）后面：
   // 原话里常夹着等应答时收到的别的报错（at capacity、overloaded_error、account_banned……），排在繁忙、封号这些规则
   // 后面就会被抢走。反过来，这两个词只认插头交来的 code 字段：测试输出里有这两个词（CI 红时常见）不能把返工判成挂起。
@@ -107,28 +101,26 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'ST2',
     title: '起会话没查成，可能已经在跑',
+    kind: 'stop',
     codes: ['launch_unknown'],
     codeFieldOnly: true,
     text: /^起会话没查成：没收到 prompt 的应答帧/,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
   },
   {
     id: 'DL3',
     title: '中转有没有真干活没查成',
+    kind: 'stop',
     codes: ['relay_unknown'],
     codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 我们自己停的不算失败，也不进路由的失败率（旧系统 236 条 interrupted 里 231 条是自己停的）。
   {
     id: 'OU1',
     title: '我们自己停的，不算失败',
+    kind: 'retry',
     codes: ['aborted', 'interrupted', 'cancelled', 'canceled'],
-    ladder: ['retry', 'park'],
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
   },
@@ -139,11 +131,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'OS1',
     title: '切号：先停下，切过去接着干',
+    kind: 'resume',
     codes: ['org_switch'],
     codeFieldOnly: true,
-    // free 的重试总有次数，挂起那一级走不到；留着是规则表的约定（梯子都以挂起收尾）
-    ladder: ['retry', 'park'],
-    budget: 'free',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '切完在原分支上接着干（一次性会话重跑这一段，Fusion 的会话换了池 fork 续上）',
@@ -153,10 +143,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'ES1',
     title: '引擎在为发布排空，这次没起会话',
+    kind: 'resume',
     codes: ['engine_stopping'],
     codeFieldOnly: true,
-    ladder: ['retry', 'park'],
-    budget: 'free',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '新引擎起来接着派',
@@ -166,27 +155,25 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'KL3',
     title: '要发新版本，先停下、新引擎起来接着干',
+    kind: 'resume',
     codes: ['engine_stop'],
     codeFieldOnly: true,
-    ladder: ['retry', 'park'],
-    budget: 'free',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '新引擎起来按编号续同一个会话',
   },
   // 这台机器的 reclaude 登录被撤销（reclaude 文档「设备被自动撤销」：同号多机同时高频用会触发风控，自动撤销设备，
   // 请求拿到 401 device_revoked；修法只有人在那台机器上、以那个用户重跑 reclaude login）。不是额度用满、也不是封号：
-  // 换池、等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。
+  // 等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。
   // 认的两句都有出处：401 device_revoked 是 reclaude 文档原文（夹具 X05），「此设备已被解绑」是旧系统生产记录（夹具 S05）；
   // 两句在会话流里真实长什么样（插头交来的 detail 怎么拼）还没有真样本。
   {
     id: 'DV1',
     title: '这台机器的 reclaude 登录被撤销',
+    kind: 'stop',
+    hold: true,
     codes: ['device_revoked'],
     text: /此设备已被解绑|device[_ ]revoked/i,
-    ladder: ['park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
     humanFix: '在{machine}上以{user}重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
     resumeAfterPark: true,
@@ -195,17 +182,18 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'AU1',
     title: '账号被封',
+    kind: 'stop',
+    hold: true,
     codes: ['account_banned'],
     text: /当前绑定账号暂不可用|account[_ ]banned/i,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 余额、欠费、订阅权益：只有花钱才回得来，归人闸。不许自动切到按量计费的路由——那是选路的事。
   {
     id: 'QT2',
     title: '余额不够或订阅不含这项',
+    kind: 'stop',
+    hold: true,
     codes: [
       'insufficient_quota',
       'insufficient_balance',
@@ -217,61 +205,51 @@ export const RULES: readonly FailureRule[] = [
     ],
     text: /payment required|insufficient[_ ](?:balance|credits?|quota|funds)|out of credits|credit balance|exceeded your current quota|billing|余额不足|充值|欠费/i,
     statuses: [402],
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 按分钟限流几十秒就恢复；当成额度用满去停账号池，一条报错停过一个挂着 28 条路线的池（旧 failure-class 的真实事故）。
   {
     id: 'RL1',
     title: '按分钟限流',
+    kind: 'wait',
     text: RL1_TEXT,
-    ladder: ['wait', 'swapRoute', 'park'],
     maxRetries: 1,
     defaultWaitSeconds: 60,
-    avoid: { scope: 'route', shared: true, until: 'upstream' },
     routeOutcome: 'fail',
   },
   // 时间窗额度用满（5 小时、周、月）。design 第一节「会话断了接着干」（2026-09-25 拍）：挂起到清零时刻，续上同一个会话，
   // 不开新的；要等太久（超过 waitMaxSeconds，例如周限）才换到别的池（换用户的接续由会话端口定：fork 续或接力任务书）。
   // Claude 订阅池（拼车、独享共用一个会话用户）不原地睡到清零：这个池用满了引擎会切号（#157），睡着的活就一直等到
   // 清零、白放着切过去的那个组织。所以马上回去选路：没切就等这条路由，切了号这条路由派不了，照常选到切过去的那个池接着干
-  // （一次性会话在原分支上重跑这一段，Fusion 的会话 fork 续上；第九节「拼车用完，切独享接着干」，#59）。原先的「备池先换池」
-  // 随两个会话用户作废。
+  // （一次性会话在原分支上重跑这一段，Fusion 的会话 fork 续上；第九节「拼车用完，切独享接着干」，#59）。
   // 两种都把这个池记成「所有任务一起避开到清零」（按上游给的时间）。
   {
     id: 'QT1',
     title: '额度用满',
+    kind: 'wait',
+    quota: true,
     codes: ['quota_exhausted', 'cloud_exhausted', 'usage_limit_reached', 'usage_limit_exceeded'],
     // 「(not your usage limit)」是 Claude Code 在服务端临时限流时自带的一句，说的恰恰不是额度用满：否定句不认。
     text: /(?<!\bnot (?:your |a |the )?)usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit/i,
-    ladder: ['wait', 'swapRoute', 'park'],
-    orgLadder: ['waitRoute', 'swapRoute', 'park'],
     defaultWaitSeconds: 900,
-    avoid: { scope: 'pool', shared: true, until: 'upstream' },
     routeOutcome: 'neutral',
   },
-  // mirasim「自有」档在这台机上没有账号：照原文处方换路由，不是账号失效，不停池。
+  // mirasim「自有」档在这台机上没有账号：原文的处方是换路由（现在由人换，#1072：分流不再自己换路由），不是账号失效，不停池。
   {
     id: 'AU4',
     title: '这台机上没有这个执行体的自有账号',
+    kind: 'stop',
     codes: ['local_no_account'],
     text: /本机没有这个智能体的账号/,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
   // reclaude 只认 Claude Code 自己的流量；别的客户端穿过去会被上报，攒多了设备被解绑、且不能自己恢复。
   {
     id: 'AU3',
     title: 'reclaude 拒了非 Claude Code 客户端',
+    kind: 'stop',
     codes: ['non_cc_client'],
     text: /仅支持 Claude Code 客户端/,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
   // cursor-agent 的认证没过：-p 模式下 stderr 几行、退出 1、没有任何 JSON。法国用 API 密钥认证（创始人 2026-09-27 拍：
@@ -286,10 +264,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'AU5',
     title: 'Cursor 登录失效',
+    kind: 'stop',
+    hold: true,
     text: /run '(?:cursor-)?agent login'|Authentication required to use Cursor Agent|Backend rejected authentication|provided API key is invalid|API key are invalid or expired|Your authentication is invalid/i,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
     humanFix:
       '去 Cursor 后台（cursor.com/dashboard/api）重新生成一把 API 密钥，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」那条命令放进{machine}（{user}家里的 ~/.cursor/fleet-api-key），旧的那把在后台撤掉；然后在驾驶舱点「继续」',
@@ -302,10 +279,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'AU6',
     title: 'Cursor 密钥没放好',
+    kind: 'stop',
+    hold: true,
     text: /Cursor 密钥没放好：[^。⏎\n]*/,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
     humanFix:
       '照原因把{machine}上{user}的 Cursor 密钥放好（docs/ops.md 第五节「会话用户的 Cursor 密钥」：~/.cursor/fleet-api-key 属它自己、600、只有一行密钥、不带换行，重放用那一节的命令）；然后在驾驶舱点「继续」',
@@ -323,10 +299,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'AU7',
     title: 'Grok 登录失效',
+    kind: 'stop',
+    hold: true,
     text: /Not signed in\. |Run `grok login`|grok login --device-code|Auth recovery exhausted/i,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
     humanFix:
       '在{machine}上以{user}跑 grok login --device-code（docs/ops.md 第五节「会话用户的 grok」），在任意设备的浏览器里打开它给的链接、确认那串码；然后在驾驶舱点「继续」',
@@ -336,6 +311,8 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'AU2',
     title: '登录失效',
+    kind: 'stop',
+    hold: true,
     codes: [
       'auth_required',
       'authentication_error',
@@ -353,54 +330,44 @@ export const RULES: readonly FailureRule[] = [
     // 它 stderr 里那句「no valid login detected」就是登录失效，不能按「会话起不来」原路重起。
     text: /not logged in|please run \/login|no valid login detected|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
     statuses: [401],
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'pool', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
   },
   {
     id: 'RG1',
     title: '所在地区不能用',
+    kind: 'stop',
     codes: ['cloud_region_unavailable', 'unsupported_country_region_territory'],
     text: /RegionError|not available in your region/i,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
-  // 原文写了处方就照办（盲设计题拍板 D3）：它说换模型就换模型，不在原路重试。
-  // 满的是这条路上的这个模型，别的路由上的同一个模型不一定满，所以只这个任务避开。
+  // 原文写了处方：它说换个模型。分流不再自己换模型（#1072）：停下报警，由人改路由里的模型；满的是这条路上的这个模型，
+  // 别的路由上的同一个模型不一定满，这条路由的失败记进熔断。
   {
     id: 'MD2',
     title: '上游让换个模型',
+    kind: 'stop',
     text: /try a different model/i,
-    ladder: ['swapModel', 'park'],
-    avoid: { scope: 'model', shared: false, until: 'cooldown' },
     routeOutcome: 'fail',
   },
-  // 模型不存在或已下架：这个任务换模型，并报警好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
-  // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不让所有任务一起避开这个模型；
+  // 模型不存在或已下架：停下报警，好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
+  // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不整池暂停；
   // 这条路由的失败记进熔断，由熔断去下线它。
   // grok 点名的型号它不认：「Couldn't set model '<名字>': Invalid params: "unknown model id". Run 'grok models' to see available
   // models.」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27，grok 1.0.41）。
   {
     id: 'MD1',
     title: '模型不存在或已下架',
+    kind: 'stop',
     codes: ['model_not_found', 'model_unavailable', 'model_retired', 'unrecognized_model'],
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
-    ladder: ['swapModel', 'park'],
-    avoid: { scope: 'model', shared: false, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
-  // 点名的模型和实际回话的不一样：是这条路由的别名配错了（静默的），换路由比换模型准。
+  // 点名的模型和实际回话的不一样：是这条路由的别名配错了（静默的）：停下报警，由人改这条路由。
   {
     id: 'MD3',
     title: '回话的模型不是点名的那个',
+    kind: 'stop',
     codes: ['model_mismatch'],
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
   // 这条路由在这台机上起不来：版本太旧、工作区信任、参数错、模型名重名、二进制不在……重试不会变，所有任务都会撞。
@@ -412,21 +379,17 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'CF1',
     title: '执行方式或路由配置不对',
+    kind: 'stop',
     codes: ['cli_too_old', 'agent_unconfigured', 'unsupported_capability', 'protocol_mismatch'],
     text: /Workspace Trust|if you trust this directory|Failed to trust workspace|ambiguous across providers|requires --verbose|unexpected argument|unknown option|spawn \S+ (?:ENOENT|EACCES)|No such device or address \(os error 6\)/i,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: true, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
   // 提示词拼进命令行参数超了系统上限：只有提示词长的任务撞，别的任务照用这条路由；插头该改成走 stdin 或文件。
   {
     id: 'CF2',
     title: '提示词太长，这条路由的起法塞不下',
+    kind: 'stop',
     text: /\bE2BIG\b/,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: false, until: 'none' },
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 推送身份没有 workflows 权限：换有权限的身份属于改凭据，要人拍（旧系统判成可重试，退避白烧，#1725）。
@@ -434,10 +397,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'PM1',
     title: '没有权限',
+    kind: 'stop',
     codes: ['permission_denied', 'workflows_permission', 'spec_doc_rejected'],
     text: /refusing to allow a GitHub App|without [`']?workflows[`']? permission/i,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 推分支前的卫生检查（packages/hygiene，github 的 pushBranch 推之前扫相对主线新增的行和文件名）拦下了会话交的内容：
@@ -447,10 +409,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'HY1',
     title: '卫生检查拦下了新增内容',
+    kind: 'rework',
     codes: ['hygiene_blocked'],
     codeFieldOnly: true,
-    ladder: ['retry', 'park'],
-    budget: 'rework',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '退回会话把这些内容从提交里拿掉再交',
@@ -460,21 +421,19 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'HY2',
     title: '卫生检查没扫成',
+    kind: 'stop',
     codes: ['hygiene_unscanned'],
     codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 开 PR 前验证要发给别家的材料（「怎么算做完」、方案摘要、改动清单拼成的提示词）没过卫生检查：材料是工作流从需求文档、
-  // 方案、改动里取的，换路由、退回会话都还是它——不发，挂起报警，要人看是误报还是材料里真带了值。
+  // 方案、改动里取的，重试、退回会话都还是它——不发，挂起报警，要人看是误报还是材料里真带了值。
   {
     id: 'HY4',
     title: '发给别家验证的材料没过卫生检查',
+    kind: 'stop',
     codes: ['material_blocked'],
     codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
     humanFix:
       '材料来自需求文档的「怎么算做完」、方案摘要和改动清单：误报就把这一条加进卫生检查的白名单再继续；真带了值就先把它从需求文档或分支里拿掉再继续',
@@ -484,19 +443,17 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'LB1',
     title: '需求 issue 的类别标签不止一个',
+    kind: 'stop',
     codes: ['issue_category_conflict'],
     codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
     humanFix: '在需求 issue 上只留一个类别标签（需求、缺陷、杂项里挑一个），再点「继续」',
   },
   {
     id: 'HM1',
     title: '要人拍板或缺配置',
+    kind: 'stop',
     codes: ['needs_human', 'config_missing'],
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
   },
   // 开 PR 要填「对应计划」（#41 的 pr-fields 缺了就红，正文对不上就只有人改），那一行要从需求文档里取。
@@ -505,10 +462,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'SD1',
     title: '需求文档里没有可用的「对应计划」那一行',
+    kind: 'stop',
     codes: ['spec_plan_missing'],
     codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
     humanFix:
       '在需求文档的「对应计划：」那一行写上 plan.md 的阶段加那一条的原话，比如 P1「工作流」；没有 plan.md 就写「无」',
@@ -519,10 +475,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'VF1',
     title: '开 PR 前验证缺材料（需求文档、「怎么算做完」、作者是哪一族）',
+    kind: 'stop',
     codes: ['spec_doc_missing', 'criteria_missing', 'authors_unknown'],
     codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
     humanFix:
       '在需求 issue 正文里写全「场景」「原话」「已知的模块」「怎么算做完」四栏（「怎么算做完」逐条写上）；老单指着的 specs 需求文档要已经在主线上；作者查不到就看这张单的会话记录，补好再点「继续」',
@@ -531,17 +486,16 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'PM2',
     title: '会话里的操作要人批，没人批',
+    kind: 'stop',
     text: /Permission for this tool use was denied|no approval surface/i,
     transcript: /Permission for this tool use was denied|no approval surface/i,
-    ladder: ['swapRoute', 'park'],
-    avoid: { scope: 'route', shared: false, until: 'none' },
-    alert: true,
     routeOutcome: 'fail',
   },
   // 活动超时、工人重启丢了活动：从检查点重跑，不交人（旧系统落成 UNKNOWN → 没查成 → 等人，fleet 任务 #1608 g1）。
   {
     id: 'EN1',
     title: '引擎这边丢了这一步',
+    kind: 'retry',
     codes: [
       'timeout_start_to_close',
       'timeout_heartbeat',
@@ -552,20 +506,18 @@ export const RULES: readonly FailureRule[] = [
       'exit_lost',
     ],
     text: /StartToClose timeout|活动随旧进程丢失|worker 部署重启|heartbeat timeout/i,
-    ladder: ['retry', 'park'],
     retryBaseSeconds: 5,
     routeOutcome: 'neutral',
     hint: '从检查点接着跑',
   },
   // 下面三条只认不是会话的步骤（开 PR、推分支、查 CI）：AI 渠道报「API rate limit exceeded」说的是它自己限流，
-  // 该换路由，不该按 GitHub 限流原地干等。
+  // 是它自己的限流，按它自己的规则（RL3）等，不按 GitHub 限流（RL2）的写法。
   // 我方请求数据被 GitHub 校验拒了：重试不会变。不许因为 422 当成平台繁忙。
   {
     id: 'GH1',
     title: 'GitHub 拒了请求数据',
+    kind: 'stop',
     text: /Validation Failed/i,
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
     stepsOnly: true,
   },
@@ -573,8 +525,8 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'GH2',
     title: 'GitHub 暂时不让访问',
+    kind: 'wait',
     text: /Resource not accessible by integration/i,
-    ladder: ['wait', 'park'],
     maxRetries: 1,
     defaultWaitSeconds: 300,
     routeOutcome: 'neutral',
@@ -584,8 +536,8 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'RL2',
     title: 'GitHub 限流',
+    kind: 'wait',
     text: /API rate limit exceeded|secondary rate limit/i,
-    ladder: ['wait', 'park'],
     defaultWaitSeconds: 300,
     routeOutcome: 'neutral',
     stepsOnly: true,
@@ -594,10 +546,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'MC1',
     title: '合并冲突',
+    kind: 'rework',
     codes: ['merge_conflict', 'conflicting'],
     text: /mergeable\W{0,3}CONFLICTING|merge conflict|CONFLICT \(content\)|Automatic merge failed/i,
-    ladder: ['retry', 'park'],
-    budget: 'rework',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '先同步最新主线再解冲突',
@@ -608,9 +559,9 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'MC2',
     title: '推送落后于远端',
+    kind: 'retry',
     codes: ['non_fast_forward', 'behind_mainline'],
     text: /non-fast-forward|\(fetch first\)|Updates were rejected because/i,
-    ladder: ['retry', 'park'],
     routeOutcome: 'neutral',
     hint: '先抓远端、并好再推',
   },
@@ -621,19 +572,17 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'MC3',
     title: '推送和远端真分叉了，不是良性前进',
+    kind: 'stop',
     codes: ['diverged'],
-    ladder: ['park'],
-    alert: true,
     routeOutcome: 'neutral',
     hint: '看原因里远端此刻的头，人工核实要不要把它当成分支的新头接着走',
   },
   {
     id: 'TS1',
     title: '测试没过',
+    kind: 'rework',
     codes: ['checks_failed', 'checks-failed', 'tests_failed', 'ci_red', 'ci_failed'],
     text: /契约检查未通过|\bchecks? failed\b|\bTests?\s+\d+\s+failed\b|^# fail [1-9]/im,
-    ladder: ['retry', 'park'],
-    budget: 'rework',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '带上失败的测试和输出',
@@ -642,8 +591,8 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'DL2',
     title: '交付没查成',
+    kind: 'retry',
     codes: ['delivery_unknown'],
-    ladder: ['retry', 'park'],
     routeOutcome: 'neutral',
     hint: '重查交付，不算执行体失败',
   },
@@ -654,10 +603,10 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'KL2',
     title: '内存超限被内核杀掉',
+    kind: 'retry',
     codes: ['oom_killed'],
     codeFieldOnly: true,
     text: /oom[-_ ]?kill|out of memory/i,
-    ladder: ['retry', 'park'],
     maxRetries: 1,
     routeOutcome: 'neutral',
     hint: '从检查点重起；内存到了上限（证据见原因）',
@@ -667,12 +616,12 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'KL4',
     title: '进程被信号杀掉，没查到是谁杀的',
+    kind: 'retry',
     codes: ['signal_unexplained'],
     codeFieldOnly: true,
     text: /\bSIGKILL\b|\bKilled\b/,
     exitCodes: [137, 143],
     signals: ['SIGKILL', 'SIGTERM'],
-    ladder: ['retry', 'park'],
     maxRetries: 1,
     routeOutcome: 'neutral',
     hint: '从检查点重起一次（没查到是谁杀的，不猜）',
@@ -681,31 +630,31 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'KL1',
     title: '命令跑超时被杀',
+    kind: 'retry',
     text: /Command timed out after \d+|\bExit code (?:124|137|143)\b/,
     transcript: /Command timed out after \d+|\bExit code (?:124|137|143)\b/,
-    ladder: ['retry', 'park'],
     maxRetries: 1,
     routeOutcome: 'neutral',
     hint: '接着干，提醒它把长命令放后台或缩小范围',
   },
-  // 没有工具在跑、又长时间没动静：续一句 → 新会话 → 换模型（旧系统判卡死的依据是 360 秒没推进，windsurf-dao#1499）。
+  // 没有工具在跑、又长时间没动静：原路重试（旧系统判卡死的依据是 360 秒没推进，windsurf-dao#1499）。
   {
     id: 'SL1',
     title: '会话卡住不动',
+    kind: 'retry',
     text: /no progress for \d+\s*s\b|turn stalled past|session stalled/i,
     weakCodes: ['idle_timeout', 'stalled', 'session_stalled'],
-    ladder: ['retry', 'swapModel', 'park'],
     routeOutcome: 'fail',
     hint: '续一句提醒它，续不上开新会话',
   },
-  // 起不来：重起一次，再不行换路由（盲设计题有一臂就这么阵亡：codex initialize timed out）。真会话端口的进程迟迟
+  // 起不来：重起一次，再不行停下报警（盲设计题有一臂就这么阵亡：codex initialize timed out）。真会话端口的进程迟迟
   // 起不来（spawn_timeout，不可重试：原地同一个 runId 重试只会报已经起过）也归这里，由工作流换新 runId 原路重起一次。
   {
     id: 'ST1',
     title: '会话起不来',
+    kind: 'retry',
     text: /initialize'? timed out|did not accept the session in time|没收到 state 帧|did not become ready within|session\/new timed out|迟迟没有第一帧/i,
     weakCodes: ['startup_timeout', 'spawn_timeout'],
-    ladder: ['retry', 'swapRoute', 'park'],
     maxRetries: 1,
     routeOutcome: 'fail',
   },
@@ -713,8 +662,8 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'WT1',
     title: '会话总时长到顶',
+    kind: 'retry',
     weakCodes: ['wall_clock_timeout'],
-    ladder: ['retry', 'park'],
     maxRetries: 1,
     routeOutcome: 'neutral',
     hint: '接着上次的进度续一轮',
@@ -722,14 +671,15 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'SM1',
     title: '续会话没续上',
+    kind: 'retry',
     codes: ['session_mismatch'],
-    ladder: ['retry', 'park'],
     routeOutcome: 'neutral',
   },
   // 某条路由对一个任务报繁忙，所有任务一起避开它，过一会儿放一个试探（设计第十二节）。
   {
     id: 'BZ1',
     title: '路由繁忙',
+    kind: 'wait',
     codes: [
       'overloaded',
       'overloaded_error',
@@ -741,31 +691,28 @@ export const RULES: readonly FailureRule[] = [
     ],
     text: /overloaded|容量已满|at capacity|high demand|繁忙|满载/i,
     statuses: [529],
-    ladder: ['swapRoute', 'wait', 'park'],
     defaultWaitSeconds: 60,
-    avoid: { scope: 'route', shared: true, until: 'upstream' },
     routeOutcome: 'fail',
   },
-  // 没写处方的限流：上游给了不长的等待就原地等一次，否则换路由。
+  // 没写处方的限流：上游给了时间就等那么久，没给按默认起翻倍，次数用完停下报警。
   {
     id: 'RL3',
     title: '限流',
+    kind: 'wait',
     codes: ['rate_limited', 'rate_limit_error', 'rate_limit_exceeded', 'too_many_requests'],
     text: /rate[ _-]?limit|too many requests|temporarily limiting requests|限流/i,
     statuses: [429],
-    ladder: ['waitShort', 'swapRoute', 'wait', 'park'],
     defaultWaitSeconds: 60,
-    avoid: { scope: 'route', shared: true, until: 'upstream' },
     routeOutcome: 'fail',
   },
   // 长流半路被掐：续跑同一个会话；不进路由失败率的分母（旧系统据此把一条当天真干出活的路线判死，#1386）。
   {
     id: 'SB1',
     title: '流断了',
+    kind: 'retry',
     codes: ['incomplete', 'prompt_incomplete'],
     text: /stream disconnected|stream closed before|stream (?:ended|broken)|断流|response ended prematurely/i,
     weakCodes: ['timeout'],
-    ladder: TRANSIENT_LADDER,
     routeOutcome: 'neutral',
     hint: '续跑同一个会话',
   },
@@ -773,16 +720,17 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'UP1',
     title: '上游出错',
+    kind: 'retry',
     codes: ['internal_server_error', 'service_unavailable', 'bad_gateway', 'gateway_timeout'],
     text: /internal error|internal server error|server error|bad gateway|service unavailable|gateway timeout/i,
     statuses: [500, 502, 503, 504],
     weakCodes: ['transient'],
-    ladder: TRANSIENT_LADDER,
     routeOutcome: 'fail',
   },
   {
     id: 'NT1',
     title: '网络不通',
+    kind: 'retry',
     codes: [
       'econnreset',
       'econnrefused',
@@ -798,24 +746,22 @@ export const RULES: readonly FailureRule[] = [
       'network',
     ],
     text: /\bE(?:CONNRESET|CONNREFUSED|CONNABORTED|TIMEDOUT|PIPE|AI_AGAIN|NOTFOUND|HOSTUNREACH|NETUNREACH)\b|socket hang up|fetch failed|connection (?:error|reset|refused|closed)|network error|tcp connect error|deadline has elapsed|error sending request|Reconnecting\.\.\.|waiting for network|Failed to reach|连不上|域名解析|建立连接失败/i,
-    ladder: TRANSIENT_LADDER,
     routeOutcome: 'fail',
   },
   {
     id: 'NT2',
     title: '超时',
+    kind: 'retry',
     // \b 挡住 idle_timeout 这类码：它们是症状码，归第 3 轮。
     text: /\btimed out\b|\btimeout\b/i,
-    ladder: TRANSIENT_LADDER,
     routeOutcome: 'fail',
   },
-  // 说做完了但没交付（旧系统一次零产出的假完成一路绿到合并，windsurf-dao#1572）：带着缺什么回会话；再犯换模型。
+  // 说做完了但没交付（旧系统一次零产出的假完成一路绿到合并，windsurf-dao#1572）：带着缺什么回会话；返工轮数用完停下报警。
   {
     id: 'DL1',
     title: '说做完了，但没交付',
+    kind: 'rework',
     weakCodes: ['not_delivered', 'wrong_output'],
-    ladder: ['retry', 'swapModel', 'park'],
-    budget: 'rework',
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
     hint: '告诉它缺什么',
@@ -823,8 +769,8 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'OU2',
     title: '会话被外面停掉了',
+    kind: 'retry',
     weakCodes: ['session_stopped'],
-    ladder: ['retry', 'park'],
     routeOutcome: 'neutral',
   },
 ];
