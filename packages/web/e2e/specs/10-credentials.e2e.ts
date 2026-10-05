@@ -72,6 +72,10 @@ test.describe('设置页：账密登录', () => {
       });
     try {
       await page.goto('/settings');
+      // 先等首轮读取落地（推送连上后攒 400 毫秒的那次全量重拉也算）再改密码：改密码会作废旧会话，那时还带着旧 Cookie
+      // 在路上的读取一律 401——页面会用新 Cookie 再读一次（useUpdateCredentials），但这里会把那一下当成失败请求。
+      // 真人不会在页面打开 0.4 秒内点保存。
+      await page.waitForLoadState('networkidle');
       const form = page.getByRole('form', { name: '改账密' });
       await form.getByLabel('当前密码', { exact: true }).fill(stack.facts.password);
       await form.getByLabel(/^新密码/).fill(NEW_PASSWORD);

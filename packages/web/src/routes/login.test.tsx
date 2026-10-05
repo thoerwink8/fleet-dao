@@ -18,6 +18,7 @@ afterEach(() => {
 const ME: Me = {
   user: { id: 'u-founder', displayName: '创始人', role: 'founder' },
   csrfToken: 'tok-1',
+  env: { name: '测试机' },
 };
 
 const unauthenticated = () => Promise.reject(new ApiError(401, 'unauthenticated', '要先登录'));

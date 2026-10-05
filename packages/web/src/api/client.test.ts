@@ -11,10 +11,34 @@ function spy() {
 }
 
 describe('推送到缓存：按表名决定重拉什么', () => {
-  test('需求表变了：重拉看板、任务详情', () => {
+  test('需求表变了：重拉看板、任务详情、主页', () => {
     const { qc, called } = spy();
     applyLiveEvent(qc, { type: 'change', table: 'tasks', id: 't-1' });
-    expect(called()).toEqual(['board', 'task']);
+    expect(called()).toEqual(['board', 'task', keys.home.join('/')]);
+  });
+
+  test('主页读到的表一变就重拉主页（单子换段、通知来了、审批、三段流水、在跑的会话、额度和渠道），不等刷新页面', () => {
+    const homeTables = [
+      'tasks',
+      'notifications',
+      'approvals',
+      'runs',
+      'session_runs',
+      'quota_windows',
+      'channels',
+    ] as const satisfies readonly RealtimeTable[];
+    for (const table of homeTables) {
+      const { qc, called } = spy();
+      applyLiveEvent(qc, { type: 'change', table, id: 'x' });
+      expect(called(), table).toContain(keys.home.join('/'));
+      expect(called(), `${table} 不该全量重拉`).not.toContain('全部');
+    }
+  });
+
+  test('三段流水 runs 变了：主页的流水线图和任务详情的流水跟着重拉', () => {
+    const { qc, called } = spy();
+    applyLiveEvent(qc, { type: 'change', table: 'runs', id: 'run-1' });
+    expect(called()).toEqual([keys.home.join('/'), 'task']);
   });
 
   test('追问表变了：旧追问清单跟着重拉（通知中心的「关闭」之后另一台设备也看到）', () => {
@@ -30,9 +54,11 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     expect(called()).toEqual([
       keys.pools.join('/'),
       keys.routingLayers.join('/'),
+      keys.home.join('/'),
       keys.routing.join('/'),
       keys.pools.join('/'),
       keys.routingLayers.join('/'),
+      keys.home.join('/'),
     ]);
   });
 
@@ -109,10 +135,10 @@ describe('推送攒一小会儿再作废', () => {
       b.push({ type: 'change', table: 'notifications', id: 'n1' });
       expect(called()).toEqual([]);
       vi.advanceTimersByTime(400);
-      expect(called()).toEqual(['board', 'task', 'notifications']);
+      expect(called()).toEqual(['board', 'task', 'notifications', 'home']);
       b.push({ type: 'change', table: 'tasks', id: 't1' });
       vi.advanceTimersByTime(400);
-      expect(called().slice(3)).toEqual(['board', 'task']);
+      expect(called().slice(4)).toEqual(['board', 'task', 'home']);
     } finally {
       vi.useRealTimers();
     }

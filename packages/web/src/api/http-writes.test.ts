@@ -5,7 +5,11 @@ import { describe, expect, test, vi } from 'vitest';
 import type { FleetApi } from './client';
 import { createHttpApi } from './http';
 
-const ME = { user: { id: 'u-a', displayName: '甲', role: 'founder' }, csrfToken: 'tok-1' };
+const ME = {
+  user: { id: 'u-a', displayName: '甲', role: 'founder' },
+  csrfToken: 'tok-1',
+  env: { name: '测试机' },
+};
 const HEX = 'a'.repeat(64);
 const AT = '2026-10-04T00:00:00Z';
 

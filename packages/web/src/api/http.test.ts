@@ -4,7 +4,11 @@ import { ApiError, type LiveStatus } from './client';
 import { createHttpApi, sseRetryDelay } from './http';
 import type { LiveEvent } from './types';
 
-const ME = { user: { id: 'u-a', displayName: '甲', role: 'founder' }, csrfToken: 'tok-1' };
+const ME = {
+  user: { id: 'u-a', displayName: '甲', role: 'founder' },
+  csrfToken: 'tok-1',
+  env: { name: '测试机' },
+};
 
 interface Call {
   method: string;

@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：登录与当前用户、凭据。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
+import { EnvNameSchema } from './env.ts';
 import { Id, Time } from './internal.ts';
 
 // —— 登录与当前用户 ——
@@ -20,6 +21,11 @@ export const MeResponse = z.object({
   }),
   /** 写操作放进请求头 `X-CSRF-Token`。 */
   csrfToken: z.string(),
+  /**
+   * 这一台环境叫什么（和环境页标题同一项，api.env 的 FLEET_MACHINE_NAME）：顶栏徽标只要这个名字，跟着 /me 一起带回，
+   * 不为它每分钟去拉整份环境页（那一页每次都跑全套健康检查）。没配时照实给「认不出」+ 原因。
+   */
+  env: EnvNameSchema,
 });
 
 /**
