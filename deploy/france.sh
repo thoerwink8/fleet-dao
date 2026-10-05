@@ -55,6 +55,8 @@ source "$DEPLOY_DIR/lib/session-pnpm.sh"
 source "$DEPLOY_DIR/lib/node-cache.sh"
 # shellcheck source=lib/auto-release-state.sh
 source "$DEPLOY_DIR/lib/auto-release-state.sh"
+# shellcheck source=lib/node-report-gate.sh
+source "$DEPLOY_DIR/lib/node-report-gate.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -1044,6 +1046,7 @@ readback() {
   readback_demo_scopes
   readback_auto_release
   readback_proxy_headers
+  readback_node_report_gate
   readback_service_home
 }
 
@@ -1164,6 +1167,32 @@ readback_proxy_headers() {
   leaked*) red "香港把 ${verdict#leaked } 转到了法国：香港 nginx 没清这个头" ;;
   *) pending "从公网请求 $url 没走到法国的临时回显（读到「${out:0:120}」），香港清不清请求头这项没查成" ;;
   esac
+}
+
+# 看板多机的收件口挡不挡得住假通行证（lib/node-report-gate.sh 判回答）：从公网（经香港）带一把假的 X-Fleet-Node-Token
+# POST /api/nodes/report，要回 401。法国还没配 FLEET_NODE_KEYS 时后端回 503：记待配、提示去配，不当成通过。
+readback_node_report_gate() {
+  if is_local_profile; then
+    skip_local "没有香港 nginx、没有对外域名，不从公网查收件口挡不挡得住假通行证（本机档是推的一方，不收快照）"
+    return 0
+  fi
+  local domain out code body rc=0
+  env_get /etc/fleet-dao/release.env FLEET_DOMAIN || rc=$?
+  domain=$APP_ENV_VALUE
+  if ((rc == 2)); then
+    pending "没读到驾驶舱域名（$APP_CONFIG_WHY），收件口挡没挡住假通行证这项没查"
+    return 0
+  fi
+  if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]]; then
+    pending "/etc/fleet-dao/release.env 的 FLEET_DOMAIN 没写或认不出，收件口挡没挡住假通行证这项没查"
+    return 0
+  fi
+  out=$(curl -sS --max-time 15 -X POST -H 'Content-Type: application/json' \
+    -H "X-Fleet-Node-Token: $NODE_REPORT_FAKE_TOKEN" --data '{}' \
+    -w '\n%{http_code}' "https://$domain/api/nodes/report" 2>&1) || out=$'\n000'
+  code=${out##*$'\n'}
+  body=${out%$'\n'*}
+  judge_node_report_gate "$code" "$body"
 }
 
 # 应用的环境文件都在、属主权限对；随机密钥是生成的样子、互不相同（后端要求）。按 systemd 的读法读（lib/app-config.sh

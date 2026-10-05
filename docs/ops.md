@@ -941,3 +941,16 @@ bash deploy/local/install.sh --check                     # 装机读回：跑法
    2026-10-04 这台照这几条加好了两个机器人、演练仓、接活开关（创始人那一行还没有）。
 
 看：`bash deploy/release.sh --check`（在用哪版、服务与健康）、`bash deploy/local/install.sh --check`（机器这一层）、`journalctl -u fleet-engine -u fleet-api`；`deploy/test/run.sh` 能在 `fleet-local` 里跑的都在那里跑（这台是真机、有 root，能测到 Windows 开发机测不到的部分：会话用户、防火墙、systemd 单元）。
+
+### 接上法国看板
+
+要在法国的看板顶栏切着看这台本机：本机每 60 秒把自己的主页、环境页快照推给法国（`packages/api/src/node-reporter.ts`），法国收下存进 `node_reports`（`packages/api/src/node-report.ts`，对公网开的写口 `POST /api/nodes/report`，只认专用通行证）。通行证明文只在生成时显示一次，法国只存它的 sha256，本机存明文。这几步要以 root 在两台机器上手工做，**先法国、后本机**（顺序反了本机会一直被拒，`/healthz` 的 `node_report` 报红）。键写在两份期望里：`FLEET_NODE_KEYS`（`deploy/france/desired-config.json` 的 `api.env`，私有值）、`FLEET_NODE_REPORT_URL` 和 `FLEET_NODE_REPORT_TOKEN`（`deploy/local/desired-config.json` 的 `api.env`，私有值），每个和对面不一样的地方都在各自的「说明」里。
+
+1. 法国生成钥匙：`bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api node-key new local`（和 `set-password` 同一个入口，换成 fleet、带上 `api.env` 连库）。它先写一条操作记录（`node_key.new`，只记哈希前 12 位当指纹）再打印：通行证明文（只显示这一次，别进聊天、仓库、日志）和要贴进 `FLEET_NODE_KEYS` 的那一项 `"local":"<sha256>"`。记不进操作记录就什么都不打印，重跑。参数：环境编号只许小写字母开头、小写字母数字短横线。
+2. 法国放哈希：`/etc/fleet-dao/api.env` 里加 `FLEET_NODE_KEYS={"local":"<sha256>"}`（已有别的环境就接在同一个 JSON 对象里；整行只写一次），重启 `fleet-api`。写错（不是 JSON、值是明文或不够 64 位小写十六进制、和别的密钥相同）后端拒绝启动、报错里不印哈希。
+3. 法国读回：`bash deploy/france.sh --check`，读回里有一条「从公网带一把假的 X-Fleet-Node-Token POST /api/nodes/report」：配好之后要回 401（✓），没配 `FLEET_NODE_KEYS` 时后端回 503、记成待配（不算通过）；回 200/400 判红（假通行证被放进来了）。
+4. 本机放地址和通行证：本机 WSL 的 `/etc/fleet-dao/api.env` 里加 `FLEET_NODE_REPORT_URL=https://<法国看板域名>/api/nodes/report` 和 `FLEET_NODE_REPORT_TOKEN=<第 1 步的明文>`（两项一起配才推，都没配不推；本机直连法国不通时再加 `NODE_USE_ENV_PROXY=1` 和 `HTTPS_PROXY=http://127.0.0.1:7890`，Node 22.21 起认），重启 `fleet-api`。
+5. 读回：本机 `curl -s http://10.99.0.2:8787/healthz` 的 `node_report` 一项是绿的（写着上次推成的时刻）；法国登录后 `/api/nodes` 里 `local` 的 `freshness` 是 `fresh`（收到后 3 分钟内算新鲜，过了是 `stale`，配了钥匙却一次没收到是 `never`）。
+6. 记指纹：两份期望里三个键现在是 `"private": null`（还没记指纹，对账记「没查成」）。第 2、4 步做完后，各用本台自己的指纹钥匙算好指纹，把 `null` 换成指纹再提 PR（算法和钥匙见第九节「配置进仓对账」）。
+
+要换钥匙或撤掉一个环境：重跑第 1 步拿新的一把，在法国 `FLEET_NODE_KEYS` 里换掉哈希（删掉那一项就作废）、本机换 `FLEET_NODE_REPORT_TOKEN`，两台各重启 `fleet-api`。收不到快照时看法国 `journalctl -u fleet-api`：只记环境编号和原因（`node_token_invalid`、`too_frequent`、`reported_at_in_future`……），不记通行证和载荷。

@@ -18,6 +18,7 @@
 # 本机档发布的健康检查不去香港取 /healthz、法国照旧（release-chain，#803）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 本机档 WSL 的回环留在本机、只空出 Windows 上代理的口（wsl-loopback，#731：照 WSL 的样子摆好策略路由真跑，装机第 1 步的装和读回）、
+# france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），
 # 分台名单没漏没重（shards）。
@@ -50,7 +51,7 @@ shard_n=0
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports release-proxy release-chain'
+  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports release-proxy release-chain node-report-gate'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use wsl-loopback temporal-schema'
   'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
