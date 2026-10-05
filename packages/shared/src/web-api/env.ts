@@ -32,6 +32,22 @@ export const EnvEngineSchema = z.object({
   detail: z.string().optional(),
 });
 
+/**
+ * 引擎总开关那一格（#1086，设置 engine.master）：现在开还是关、谁在什么时候改的。
+ * 关着的细分（why）：never_set = 从没设过（默认关）；unreadable = 设置认不出（按关算、写明为什么不拿它当开）；set = 人关的。
+ * WSL 推给法国的快照也带这一格（同一份拼法），法国的环境页看得到那台的总开关。
+ */
+export const EnvMasterSchema = z.object({
+  on: z.boolean(),
+  why: z.enum(['set', 'never_set', 'unreadable']),
+  /** 谁改的（settings 行的 updatedBy）；没设过、认不出没有这一项。 */
+  by: z.string().optional(),
+  /** 什么时候改的（ISO）；没设过、认不出没有这一项。 */
+  at: Time.optional(),
+  /** 一句给人的话（开着/关着、谁什么时候改的；认不出写明原因）。 */
+  detail: z.string(),
+});
+
 /** 在用版本、落后主线没有、最近一次发布。只在正式环境有（法国和本机档都是）；别的环境读不到标记，照实报到 problems / reason。 */
 export const EnvVersionSchema = z.object({
   /** 在用的提交号；还没发布过是 null。 */
@@ -87,6 +103,7 @@ export const EnvResponseSchema = z.object({
   asOf: Time,
   facts: z.object({
     engine: factOf(EnvEngineSchema),
+    master: factOf(EnvMasterSchema),
     version: factOf(EnvVersionSchema),
     sessions: factOf(EnvSessionsSchema),
     pools: factOf(EnvPoolsSchema),
@@ -96,6 +113,7 @@ export const EnvResponseSchema = z.object({
 });
 
 export type EnvEngine = z.infer<typeof EnvEngineSchema>;
+export type EnvMaster = z.infer<typeof EnvMasterSchema>;
 export type EnvVersion = z.infer<typeof EnvVersionSchema>;
 export type EnvSessions = z.infer<typeof EnvSessionsSchema>;
 export type EnvPools = z.infer<typeof EnvPoolsSchema>;

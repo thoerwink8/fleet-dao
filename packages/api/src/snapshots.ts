@@ -10,6 +10,7 @@ import type { EnvResponseSchema, HomeHealthSchema, HomeResponseSchema } from '@f
 import { DEPLOY_LAG_NOT_HERE } from '@fleet-dao/store';
 import type { z } from 'zod';
 import type { Deps } from './deps.ts';
+import { readEngineMaster } from './engine-switch.ts';
 import {
   engineFact,
   engineOffFact,
@@ -138,6 +139,7 @@ export async function readEnvSnapshot(deps: SnapshotDeps): Promise<z.input<typeo
       });
     },
     readSchedule: async () => scheduleFact(await store.listJobs(), now),
+    readMaster: () => readEngineMaster(store),
     readVersion: readDeployLag ? async () => versionFact(readDeployLag(), now) : null,
     versionNotWired: DEPLOY_LAG_NOT_HERE,
     readHealth: () => readHealth(deps.health, deps.log),

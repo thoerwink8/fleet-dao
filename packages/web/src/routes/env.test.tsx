@@ -21,6 +21,17 @@ function envData(
     asOf: '2026-10-05T02:00:00.000Z',
     facts: {
       engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
+      master: {
+        ok: true,
+        value: {
+          on: true,
+          why: 'set',
+          by: 'user:frank',
+          at: '2026-10-05T01:00:00.000Z',
+          detail:
+            '开着（2026-10-05T01:00:00.000Z 由 user:frank 打开）：引擎在接活（只有「让 AI 接活」开着的项目才派）',
+        },
+      },
       version: {
         ok: true,
         value: {
