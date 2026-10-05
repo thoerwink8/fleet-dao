@@ -1,18 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
-import { isLockWaitError, silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
+import { silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
+import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { probeDb } from '../src/db-probe.ts';
-import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
-import type { Logger, Store } from '../src/ports.ts';
+import type { Logger } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
-
-/** 有一张确认了很久的待开单。 */
-const backlogStore = {
-  listDraftsToOpen: async () => [{ id: 'd1', confirmedAt: new Date(0).toISOString() }],
-} as unknown as Pick<Store, 'listDraftsToOpen'>;
 
 describe('健康检查', () => {
   it('没有外部依赖（内存版）：200', async () => {
@@ -49,18 +44,13 @@ describe('健康检查', () => {
     expect(h.logs.some((l) => String(l.fields?.error).includes(internal))).toBe(true);
   });
 
-  /** serviceHealthChecks 的一套：库、实时推送、Temporal、GitHub 事件、判断题都好，只看飞书草稿开单这两项；extra 盖掉默认的几项。 */
-  const services = (
-    draftOpener: { check(): Promise<void>; readonly notWired?: string },
-    extra: Partial<Parameters<typeof serviceHealthChecks>[0]> = {},
-  ) =>
+  /** serviceHealthChecks 的一套：库、实时推送、Temporal、GitHub 事件、判断题都好；extra 盖掉默认的几项。 */
+  const services = (extra: Partial<Parameters<typeof serviceHealthChecks>[0]> = {}) =>
     serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
       temporal: { check: async () => {}, checkEngine: async () => {} },
       githubEvents: async () => {},
-      draftOpener,
-      draftBacklog: draftBacklogCheck(backlogStore, () => new Date()),
       judge: { check: async () => {} },
       deployLag: { check: async () => {} },
       feishuGateway: { check: async () => {} },
@@ -71,21 +61,16 @@ describe('健康检查', () => {
       ...extra,
     });
 
-  it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号，积压也不算坏', async () => {
-    const h = harness({ health: services(notWiredDraftOpener()) });
+  it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号', async () => {
+    const h = harness({ health: services({ canary: { check: async () => {}, notWired: CANARY_NOT_HERE } }) });
     const res = await h.cockpit.request('/healthz');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; checks: Record<string, unknown> };
     expect(body.ok).toBe(true);
-    expect(body.checks.draft_opener).toEqual({
+    expect(body.checks.canary).toEqual({
       ok: true,
       status: 'not_wired',
-      message: '飞书草稿开成 issue 还没接上（#91）',
-    });
-    expect(body.checks.draft_backlog).toEqual({
-      ok: true,
-      status: 'not_wired',
-      message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
+      message: CANARY_NOT_HERE,
     });
   });
 
@@ -99,7 +84,7 @@ describe('健康检查', () => {
       },
     };
     const h = harness({
-      health: services(notWiredDraftOpener(), { temporal: engineDown, engineNotWired: ENGINE_OFF }),
+      health: services({ temporal: engineDown, engineNotWired: ENGINE_OFF }),
     });
     const res = await h.cockpit.request('/healthz');
     expect(res.status).toBe(200);
@@ -116,20 +101,16 @@ describe('健康检查', () => {
         throw new PublicHealthError('engine_offline', '引擎不在线');
       },
     };
-    const report = await runHealthChecks(
-      services(notWiredDraftOpener(), { temporal: engineDown }),
-      silentLogger,
-    );
+    const report = await runHealthChecks(services({ temporal: engineDown }), silentLogger);
     expect(report.ok).toBe(false);
     expect(report.checks.engine).toEqual({ ok: false, code: 'engine_offline', message: '引擎不在线' });
   });
 
-  it('接上以后出错照样红：真实现的 check 抛错、积压太久，整体 503', async () => {
+  it('接上以后出错照样红：真实现的 check 抛错，整体 503', async () => {
     const wired = { check: async () => Promise.reject(new Error('GitHub 连不上 10.0.0.1')) };
-    const report = await runHealthChecks(services(wired), silentLogger);
+    const report = await runHealthChecks(services({ githubEvents: wired.check }), silentLogger);
     expect(report.ok).toBe(false);
-    expect(report.checks.draft_opener).toEqual({ ok: false, code: 'unreachable', message: '连不上' });
-    expect(report.checks.draft_backlog).toMatchObject({ ok: false, code: 'backlog' });
+    expect(report.checks.github_events).toEqual({ ok: false, code: 'unreachable', message: '连不上' });
   });
 
   it('「未接」只认装配时的标记：check 抛的错长得再像（名字、code 叫 not_wired）也照样红，原话不外露', async () => {
@@ -184,7 +165,6 @@ describe('健康检查', () => {
   it('发版脚本里「会随时间自己变红、不退回」的健康项都是后端真报的项（这边改了名，发版脚本的名单跟着改）', () => {
     const script = readFileSync(new URL('../../../deploy/release.sh', import.meta.url), 'utf8');
     const listed = /^DRIFTING_HEALTH_ITEMS="([^"]*)"$/m.exec(script)?.[1]?.trim().split(/\s+/) ?? [];
-    expect(listed).toContain('draft_backlog');
     // 判断题「最近一次调用没成」跟着上游自己变红，和换没换版无关
     expect(listed).toContain('judge');
     // 主线一动就可能落后：自动发布正在追，和这一版好不好无关；少了它，每次发布都可能被它退回
@@ -204,8 +184,6 @@ describe('健康检查', () => {
       feed: { probe: async () => {} },
       temporal: { check: async () => {}, checkEngine: async () => {} },
       githubEvents: async () => {},
-      draftOpener: { check: async () => {} },
-      draftBacklog: async () => {},
       judge: { check: async () => {} },
       deployLag: { check: async () => {} },
       feishuGateway: { check: async () => {} },
@@ -267,37 +245,5 @@ describe('查库限时', () => {
     await expect(probeDb(failing('08006'), 2_000)).rejects.toThrow('Failed query');
     expect(sqlState(new Error('x', { cause: { code: '57014' } }))).toBe('57014');
     expect(sqlState(new Error('没有错误码'))).toBeUndefined();
-  });
-
-  // isLockWaitError：outbox 长轮询联查撞上「等锁」的三种样子（Postgres 自己的两种锁超时，加
-  // 迁移会话被 systemd 发布超时就地杀掉时 postgres.js 的 fatal）。等锁是「有个会话占着锁」，
-  // 不是数据错——不能冒到顶层 500。钉住：这三种都认得出来，并且普通错误不误判（含故意造的）。
-  it('等锁的三种样子都认得出来（57014 语句超时、55P03 等锁超时、迁移被发布超时杀掉的 session terminated）；别的错不认', () => {
-    const failedQuery = (cause: unknown) => new Error('Failed query', { cause });
-    expect(isLockWaitError(failedQuery(Object.assign(new Error('timout'), { code: '57014' })))).toBe(true);
-    expect(isLockWaitError(failedQuery(Object.assign(new Error('lock wait'), { code: '55P03' })))).toBe(true);
-    expect(
-      isLockWaitError(
-        failedQuery(
-          new Error(
-            'X PostgreSQL-backend-error: session terminated: terminating connection due to administrator command',
-          ),
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      isLockWaitError(
-        failedQuery(new Error('postgres-backend-error: connection terminated by administrator')),
-      ),
-    ).toBe(true);
-    // 别的库错、普通错、结构和「等锁」长得像但不是的，都不误判（故意造的失败）。
-    expect(isLockWaitError(failedQuery(Object.assign(new Error('syntax error'), { code: '42601' })))).toBe(
-      false,
-    );
-    expect(isLockWaitError(failedQuery(new Error('duplicate key value violates unique constraint')))).toBe(
-      false,
-    );
-    expect(isLockWaitError(new Error('飞出对话的锅'))).toBe(false);
-    expect(isLockWaitError(null)).toBe(false);
   });
 });

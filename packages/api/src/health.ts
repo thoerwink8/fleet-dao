@@ -83,7 +83,7 @@ export async function runHealthChecks(
 }
 
 /**
- * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）、
+ * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、
  * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线、飞书网关还来不来、会话用户切号有没有要人看的、GitHub 两个机器人的
  * 权限够不够、全流程巡检最近一轮的结论、看门狗自己在不在按期跑。main.ts 用它装配，测试也用它，是同一份代码。
  */
@@ -100,10 +100,6 @@ export function serviceHealthChecks(parts: {
    */
   engineNotWired?: string;
   githubEvents: () => Promise<void>;
-  /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：接了开不了报红；压根没接上（带 notWired）报「未接」。 */
-  draftOpener: { check(): Promise<void>; readonly notWired?: string };
-  /** 最早一张待开单等太久就报红（draft-opening.ts 的 draftBacklogCheck）。 */
-  draftBacklog: () => Promise<void>;
   /** 判断题（judge-health.ts）：没配报「未接」；配置起不来、最近一次真调用没成报红。 */
   judge: { check(): Promise<void>; readonly notWired?: string };
   /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在法国的正式机器上查，别处报「未接」。 */
@@ -129,13 +125,6 @@ export function serviceHealthChecks(parts: {
     { name: 'temporal', check: () => parts.temporal.check() },
     { name: 'engine', check: () => parts.temporal.checkEngine(), ...notWired(parts.engineNotWired) },
     { name: 'github_events', check: parts.githubEvents },
-    { name: 'draft_opener', check: () => parts.draftOpener.check(), ...notWired(parts.draftOpener.notWired) },
-    // 开单压根没接上时积压是必然的，不是坏了；接上以后等太久照样红
-    {
-      name: 'draft_backlog',
-      check: parts.draftBacklog,
-      ...notWired(parts.draftOpener.notWired && `${parts.draftOpener.notWired}：确认了的草稿先留在待开单`),
-    },
     // 最近一次调用没成会随上游自己变红（发版脚本对它只标待处理，见 deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）
     { name: 'judge', check: () => parts.judge.check(), ...notWired(parts.judge.notWired) },
     // 主线一动就可能落后，也会自己变红：发版脚本同样只标待处理、不退回

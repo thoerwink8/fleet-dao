@@ -403,8 +403,6 @@
     "packages/store/test/console-logic.test.ts": 7,
     "packages/store/test/credentials-logic.test.ts": 9,
     "packages/store/test/delivery-logic.test.ts": 11,
-    "packages/store/test/draft-logic.test.ts": 4,
-    "packages/store/test/outbox-logic.test.ts": 8,
     "packages/store/test/paging.test.ts": 9,
     "packages/store/test/store.memory.test.ts": 90,
     "packages/store/test/store.pg.test.ts": 12317,

@@ -13,14 +13,13 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
-import { FeishuRoutes, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import { FLEET_CHANGES_CHANNEL, IntentRoutes } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE, canaryHealthCheck } from '../src/canary-health.ts';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { probeDb } from '../src/db-probe.ts';
 import { deployLagCheck } from '../src/deploy-lag-check.ts';
-import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from '../src/gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
@@ -159,16 +158,6 @@ async function publicFailures(log: Logger) {
       'fleet-dao',
     ),
   );
-  // 飞书草稿开单：没接上；最早一张待开单等太久
-  await run('draft-opener', true, () => notWiredDraftOpener().check());
-  const backlogStore = {
-    listDraftsToOpen: async () => [{ id: 'd1', confirmedAt: new Date(0).toISOString() }],
-  } as unknown as Store;
-  await run(
-    'draft-backlog',
-    true,
-    draftBacklogCheck(backlogStore, () => new Date()),
-  );
   // 判断题：配置起不来（FLEET_JEV_CONFIG 明写的文件不在）；最近一次真调用没成（上游回的原文带着钥匙不对这类话，只进日志）
   await run(
     'judge-config',
@@ -233,10 +222,10 @@ async function publicFailures(log: Logger) {
       () => new Date(),
     ),
   );
-  // 飞书网关：推送轮询太久没来。只有一处 new PublicHealthError，这里造一种；每一种说法都在 gateway-seen.test.ts 用同一份名单扫
+  // 飞书网关：意图卡轮询太久没来。只有一处 new PublicHealthError，这里造一种；每一种说法都在 gateway-seen.test.ts 用同一份名单扫
   let clock = Date.now();
   const seen = createGatewaySeen(() => new Date(clock));
-  seen.saw(FeishuRoutes.outbox);
+  seen.saw(IntentRoutes.cards);
   clock += 10 * 60_000;
   await run('feishu-gateway', true, async () => {
     await seen.check();
@@ -292,8 +281,6 @@ describe('公开的健康报告', () => {
           temporal: { check: async () => {}, checkEngine: async () => {} },
           engineNotWired: ENGINE_OFF,
           githubEvents: async () => {},
-          draftOpener: notWiredDraftOpener(),
-          draftBacklog: async () => {},
           judge: judgeHealthCheck({ db: {} as Db, location: NO_JUDGE }),
           deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
           feishuGateway,
@@ -306,15 +293,12 @@ describe('公开的健康报告', () => {
       );
     const at = new Date();
     const seen = createGatewaySeen(() => at);
-    seen.saw(FeishuRoutes.outbox);
-    seen.saw(FeishuRoutes.board);
+    seen.saw(IntentRoutes.cards);
     const pending = {
       services: await services({ check: async () => {}, notWired: GATEWAY_NO_PASS }),
       noted: await services(seen),
     };
     expect(pending.services.checks.engine).toEqual({ ok: true, status: 'not_wired', message: ENGINE_OFF });
-    expect(pending.services.checks.draft_opener).toMatchObject({ ok: true, status: 'not_wired' });
-    expect(pending.services.checks.draft_backlog).toMatchObject({ ok: true, status: 'not_wired' });
     // 项名叫 judge 不叫 jev：jev 在公开页的禁用词名单上
     expect(pending.services.checks.judge).toMatchObject({ ok: true, status: 'not_wired' });
     expect(pending.services.checks.feishu_gateway).toEqual({
@@ -324,7 +308,7 @@ describe('公开的健康报告', () => {
     });
     expect(pending.noted.checks.feishu_gateway).toEqual({
       ok: true,
-      message: '推送轮询 0 秒前来过，盘面快照 0 秒前来过',
+      message: '意图卡轮询 0 秒前来过',
     });
     const hits = scanReports(scan, pending);
     expect(hits, scan.formatHits(hits)).toEqual([]);

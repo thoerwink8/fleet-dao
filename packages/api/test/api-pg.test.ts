@@ -2,7 +2,7 @@
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { asks, auditLog, feishuDrafts, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
+import { asks, auditLog, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { AskResponse, BoardResponse, TaskDetailResponse } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, devFixtures } from '@fleet-dao/store';
@@ -10,7 +10,6 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { probeDb } from '../src/db-probe.ts';
-import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
@@ -200,11 +199,7 @@ describe('接口跑在真库上', () => {
     expect(await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40))).toHaveLength(0);
   });
 
-  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到如实报红，飞书草稿开单没接上报「未接」；LISTEN 停了实时推送也报红', async () => {
-    const pgStore = () => {
-      if (!current) throw new Error('还没起');
-      return current.store;
-    };
+  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到如实报红，网关还没来过报「没查成」；LISTEN 停了实时推送也报红', async () => {
     const h = await start({
       health: serviceHealthChecks({
         probeDb: () => probeDb(t.db),
@@ -213,8 +208,6 @@ describe('接口跑在真库上', () => {
         },
         temporal: notConnectedTemporal(),
         githubEvents: githubAppMissing('没有 /etc/fleet-dao/github/gh-app-fleet-dao-engine.json').check,
-        draftOpener: notWiredDraftOpener(),
-        draftBacklog: () => draftBacklogCheck(pgStore(), () => new Date(T0))(),
         judge: judgeHealthCheck({
           db: t.db,
           location: { path: join(tmpdir(), 'fleet-api-pg-nowhere', 'jev.json'), explicit: false },
@@ -247,43 +240,18 @@ describe('接口跑在真库上', () => {
           code: 'app_credentials_missing',
           message: 'GitHub 机器人的凭据没读到，PR 和 CI 事件写不进镜像',
         },
-        draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' },
-        draft_backlog: {
-          ok: true,
-          status: 'not_wired',
-          message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
-        },
         judge: { ok: true, status: 'not_wired', message: JUDGE_NOT_WIRED },
         deploy_lag: { ok: true, status: 'not_wired', message: DEPLOY_LAG_NOT_HERE },
         feishu_gateway: {
           ok: false,
           code: 'unchecked',
-          message: '没查成：后端起来才 0 秒，推送轮询还没来过（盘面快照也没来取过）',
+          message: '没查成：后端起来才 0 秒，意图卡轮询还没来过',
         },
         session_org: { ok: true },
         github_app: { ok: true },
         canary: { ok: true, status: 'not_wired', message: CANARY_NOT_HERE },
         watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },
       },
-    });
-    // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。
-    await t.db.insert(feishuDrafts).values({
-      id: '20000000-0000-4000-8000-000000000001',
-      sourceMessageId: 'om_backlog',
-      chatType: 'p2p',
-      rawText: '加个导出按钮',
-      understanding: '加个导出按钮',
-      unsure: true,
-      repoId: IDS.repo,
-      proposedBy: IDS.founderA,
-      status: 'confirmed',
-      confirmedBy: IDS.founderA,
-      confirmedAt: new Date(T0.getTime() - 20 * 60_000),
-    });
-    // 开单没接上时 /healthz 里这一项是「未接」；检查本身在真库上照样查得出积压（接上以后就报这个）
-    await expect(draftBacklogCheck(pgStore(), () => new Date(T0))()).rejects.toMatchObject({
-      code: 'backlog',
-      message: '最早一张待开单已经等了 20 分钟还没开成',
     });
     await h.feed.stop();
     const after = (await (await h.cockpit.request('/healthz')).json()) as { checks: Record<string, unknown> };

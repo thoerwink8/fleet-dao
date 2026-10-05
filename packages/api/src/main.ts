@@ -5,8 +5,6 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
-// 飞书确认的草稿去开单（DraftOpener）等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
-// （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
@@ -37,7 +35,6 @@ import { probeDb } from './db-probe.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
-import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
@@ -134,7 +131,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
         },
       },
-      draftOpener: notWiredDraftOpener(),
     };
     return { deps, close: async () => {} };
   }
@@ -156,7 +152,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   });
   const github = githubMirror(db);
   const store = createPgStore(db, { now });
-  const draftOpener = notWiredDraftOpener();
   // 线上版本跟不跟得上主线：只有法国的正式机器上有发布目录和自动发布；读的时候现算，报警每 5 分钟判一次
   const onFrance = config.env === 'production';
   const deployLag = onFrance
@@ -179,7 +174,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     demo,
     workflows: temporal.control,
     github: github.sink,
-    draftOpener,
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),
@@ -204,8 +198,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       // 这台机器按 release.env 的 FLEET_SERVICES 没开引擎（比如法国 2026-09-29 起临时关了）：engine 项报「未接」，不报红
       ...(engineEnabled(process.env) ? {} : { engineNotWired: ENGINE_OFF }),
       githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
-      draftOpener,
-      draftBacklog: draftBacklogCheck(store, now),
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
       deployLag,
@@ -237,11 +229,10 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
 }
 
 const { deps, close } = await assemble();
-// 给停机时的飞书 outbox 长轮询用（feishu-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
+// 给停机时的意图卡长轮询用（intent-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
 const shutdownController = new AbortController();
 deps.shutdownSignal = shutdownController.signal;
-const { cockpit, agent, draftOpening } = buildApps(deps);
-const stopDraftOpening = draftOpening.start();
+const { cockpit, agent } = buildApps(deps);
 
 let stopping = false;
 const isStopping = () => stopping;
@@ -312,10 +303,9 @@ async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   log.info('收到退出信号，停止接新请求', { signal });
-  stopDraftOpening();
   await gracefulShutdown({
     servers,
-    // 飞书 outbox 的长轮询（feishu-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的
+    // 意图卡的长轮询（intent-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的
     // 结果，不再查库——库要过一会儿（drainMs 之后）才真的关，这一步早一点发，长轮询就不会撞上正在关的库（#364）。
     notifyLongPollers: () => shutdownController.abort(),
     drainMs: DRAIN_MS,

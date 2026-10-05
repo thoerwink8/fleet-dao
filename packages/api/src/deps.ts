@@ -8,7 +8,6 @@ import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
 import type {
   ChangeFeed,
-  DraftOpener,
   FeishuAuth,
   GitHubEventSink,
   HealthCheck,
@@ -29,8 +28,6 @@ export interface Deps {
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
-  /** 飞书里确认的草稿去开单（开 issue、建任务、拉起工作流）。没接上时用 notWiredDraftOpener：草稿留在待开单。 */
-  draftOpener: DraftOpener;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
   /** 飞书网关来没来过：飞书接口的门口验过通行证就记一笔，/healthz 的 feishu_gateway 读它。没给就不记（开发、多数测试）。 */
@@ -76,7 +73,7 @@ export interface Deps {
    */
   release?: ReleaseSource | undefined;
   /**
-   * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。飞书 outbox 的长轮询（feishu-routes.ts）拿它跟请求自己的
+   * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。意图卡的长轮询（intent-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。
    */
   shutdownSignal?: AbortSignal | undefined;
