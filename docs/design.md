@@ -436,7 +436,7 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
 
 ## 九、自由组合的派工模型
 
-> 本节随 #556 重做（路由配置改成两层，「模式 A/B」「在哪能做」这套作废），落地 PR 连带删改，先别照本节做；新做法按 `specs/509-需求梳理/流程重做方案.md` §八。路由两层（#574）已落地：选路、路由探针、切号按「用途 → 模型顺序、模型 → 路由顺序」两张表（`routing_purpose_models`、`routing_catalog`），下面「每个阶段类型挂一串有序的路由」那条已按它改写。每一层现在活着吗（接得上、额度够、没被禁令挡，读的时候现算、不存）在驾驶舱「路由」页（`/routing`，接口 `GET /api/routing/layers`），只读。
+> 本节随 #556 重做（路由配置改成两层，「模式 A/B」「在哪能做」这套作废），落地 PR 连带删改，先别照本节做；新做法按 `specs/509-需求梳理/流程重做方案.md` §八。路由两层（#574）已落地：选路、路由探针、切号按「用途 → 模型顺序、模型 → 路由顺序」两张表（`routing_purpose_models`、`routing_catalog`），下面「每个阶段类型挂一串有序的路由」那条已按它改写。每一层现在活着吗（接得上、额度够、没被禁令挡，读的时候现算、不存）在驾驶舱「路由」页（`/routing`，接口 `GET /api/routing/layers`）。先后和开关也在这页改（母单 #1089）：用途下的模型上移 / 下移（`PUT /api/routing/purposes/:purpose/models/:modelId`）、模型下的渠道上移 / 下移和开关（`PUT /api/routing/models/:modelId/routes/:routeId`）；点之前二次确认，写的时候带「我看到的顺序」（别人先改了回 409），换位置在一个事务里先挪到临时位置躲唯一约束（`packages/db/src/routing-order.ts`），记操作记录（`routing.order.move`、`routing.route.enable`）；选了远程环境、演示版、飞书网关通行证都改不了。
 
 > **2026-10-03 每仓流程配置副本已删（#556）**：原来每个仓一份流程配置 JSON（`.fleet/flow.json`：每步模型顺序、验证几轮、算页面代码的路径；fleet-dao 放全组织默认），对账每 15 分钟同步进 `repos.flow_*` 列，认不出、超过 45 分钟没同步成就停派——那是 Fusion 的做法（`docs/decisions/0003-fusion-flow.md` 第 9、10 条，已被替代）。现在没有每仓流程配置：选路只看路由两层的顺序和禁令（下面「先过滤、再打分」；用途 → 模型 → 渠道两层见 #574），测试命令是 `repos.test_command`（建仓时填），哪些改动算哪一档由 `packages/core/src/dispatch.ts` 判（#632），验收是合之前一次冷调用（#555）。库里 `repos.flow_*` 和 `tasks.flow_source` 两组列已经没人读写，随 #556-4 删库表那一步一起删（删数据，等创始人点头）。
 

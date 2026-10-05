@@ -60,6 +60,9 @@ export function createDemoApi(inner: MockApi): FleetApi {
     // 思考档位页也只在正式驾驶舱里有：演示版看不到、更改不了。
     routingEfforts: () => Promise.reject(hidden('思考档位')),
     updateRouteEffort: () => Promise.reject(hidden('思考档位')),
+    // 路由页改先后和开关：演示版没有路由页，写一律拒（403）。
+    movePurposeModel: () => Promise.reject(hidden('路由')),
+    updateModelRoute: () => Promise.reject(hidden('路由')),
     pools: () => inner.pools(),
     async poolHolds() {
       need('settings', '设置');

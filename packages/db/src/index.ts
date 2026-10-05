@@ -34,5 +34,6 @@ export * from './routing-config.ts';
 export * from './routing-effort.ts';
 export * from './routing-layers.ts';
 export * from './routing-liveness.ts';
+export * from './routing-order.ts';
 export * from './schema/index.ts';
 export * from './seed.ts';

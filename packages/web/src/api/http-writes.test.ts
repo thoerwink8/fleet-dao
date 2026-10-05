@@ -73,6 +73,32 @@ const WRITES: Write[] = [
     ok: { body: { modelId: 'opus-5.5', routeId: 'r-1', effort: 'high' } },
   },
   {
+    name: 'movePurposeModel',
+    call: (api) =>
+      api.movePurposeModel('execute', 'opus-5.5', { direction: 'down', expected: ['opus-5.5', 'kimi-k3'] }),
+    method: 'PUT',
+    url: '/api/routing/purposes/execute/models/opus-5.5',
+    body: { direction: 'down', expected: ['opus-5.5', 'kimi-k3'] },
+    ok: { body: { purpose: 'execute', order: ['kimi-k3', 'opus-5.5'] } },
+  },
+  {
+    name: 'updateModelRoute（上移 / 下移）',
+    call: (api) =>
+      api.updateModelRoute('opus-5.5', 'r-1', { op: 'move', direction: 'up', expected: ['r-0', 'r-1'] }),
+    method: 'PUT',
+    url: '/api/routing/models/opus-5.5/routes/r-1',
+    body: { op: 'move', direction: 'up', expected: ['r-0', 'r-1'] },
+    ok: { body: { modelId: 'opus-5.5', routeId: 'r-1', order: ['r-1', 'r-0'] } },
+  },
+  {
+    name: 'updateModelRoute（开关）',
+    call: (api) => api.updateModelRoute('opus-5.5', 'r-1', { op: 'enable', enabled: false, expected: true }),
+    method: 'PUT',
+    url: '/api/routing/models/opus-5.5/routes/r-1',
+    body: { op: 'enable', enabled: false, expected: true },
+    ok: { body: { modelId: 'opus-5.5', routeId: 'r-1', enabled: false } },
+  },
+  {
     name: 'resolveNotification',
     call: (api) => api.resolveNotification('n-1'),
     method: 'POST',
@@ -198,6 +224,10 @@ describe('写请求：令牌与校验', () => {
     [
       '档位不在约定里',
       (api: FleetApi) => api.updateRouteEffort('m', 'r', { effort: 'ultra' as never, expected: null }),
+    ],
+    [
+      '调先后没带看到的顺序',
+      (api: FleetApi) => api.movePurposeModel('execute', 'opus-5.5', { direction: 'down' } as never),
     ],
     [
       '设置版本号是负数',

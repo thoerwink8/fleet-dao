@@ -52,6 +52,7 @@ import type { GitHubEventSink } from './ports.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
+import { pgRoutingOrder } from './routing-order.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { readEnvSnapshot, readHomeSnapshot } from './snapshots.ts';
@@ -216,6 +217,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     carpoolReconcile: pgCarpoolReconcile(db),
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
+    // 路由两层的先后和开关（母单 #1089）：驾驶舱「路由」页改的就是选路读的那两张表的 position、enabled
+    routingOrder: pgRoutingOrder(db, now),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md

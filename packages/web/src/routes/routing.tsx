@@ -1,5 +1,5 @@
 // 路由页（#574，specs/509 方案第八节「两层的每层都要能一眼看出这条现在活着吗」）：每个用途 → 模型 → 路由，每一层活 / 死 /
-// 不知道和原因。活不活由后端现算（db 的 routing-liveness.ts），这页只读、不改，也不再判一遍。
+// 不知道和原因。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍；先后和开关能改（母单 #1089，components/routing-edit.tsx：点之前二次确认、带看到的顺序防同时改）。
 // 改这里之前必须知道：
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
@@ -12,6 +12,13 @@ import { useRoutingLayers } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerPurpose, RoutingLayerRoute } from '../api/types';
 import { ChannelStatus } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import {
+  MoveButtons,
+  type OrderItem,
+  RouteSwitch,
+  RoutingEditProvider,
+  useRoutingEdit,
+} from '../components/routing-edit';
 import { StatusChip, StatusDot } from '../components/status';
 import { Badge } from '../components/ui/badge';
 import { stageLabel } from '../lib/catalog';
@@ -39,7 +46,7 @@ export function meta() {
 }
 
 const DESCRIPTION =
-  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在活着吗。一条路三件事都过（接得上、额度够、没被禁令挡）才算活；一层里有一条活的，这一层就派得出去。这页只看不改。';
+  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在活着吗。一条路三件事都过（接得上、额度够、没被禁令挡）才算活；一层里有一条活的，这一层就派得出去。每行右边的上移 / 下移和开关能改顺序：模型的先后只管这个用途，渠道的先后和开关管这个模型在所有用途里的样子；改完下一次选路就照新的。';
 
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
@@ -103,7 +110,9 @@ export default function Routing() {
         <div className="grid items-start gap-4 xl:grid-cols-routing">
           <PurposeList purposes={data.purposes} selected={selected.purpose} onPick={reveal} />
           <div ref={detail} className="min-w-0 scroll-mt-4">
-            <PurposeDetail purpose={selected} />
+            <RoutingEditProvider>
+              <PurposeDetail purpose={selected} />
+            </RoutingEditProvider>
           </div>
         </div>
       )}
@@ -188,6 +197,8 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const now = useNow();
   const line = purposeLine(p);
   const first = firstLive(p);
+  const { disabledWhy } = useRoutingEdit();
+  const modelItems: OrderItem[] = p.models.map((m) => ({ id: m.modelId, name: m.displayName }));
   return (
     <Panel
       title={
@@ -200,6 +211,14 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
       description={p.models.length > 0 ? <span className={lineInk(line.tone)}>{line.text}</span> : undefined}
       actions={<StatusChip tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />}
     >
+      {disabledWhy ? (
+        <p
+          role="note"
+          className="mb-3 rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-sub text-muted-foreground"
+        >
+          {disabledWhy}：上移、下移和开关都不能点。
+        </p>
+      ) : null}
       {p.problems.length > 0 ? (
         <ul
           aria-label="配置缺口"
@@ -220,6 +239,8 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
               key={m.modelId}
               model={m}
               index={i}
+              purpose={p.purpose}
+              modelItems={modelItems}
               now={now}
               firstLiveRoute={first?.model === m ? first.route.routeId : undefined}
             />
@@ -238,16 +259,23 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
 function ModelBlock({
   model: m,
   index,
+  purpose,
+  modelItems,
   now,
   firstLiveRoute,
 }: {
   model: RoutingLayerModel;
   index: number;
+  purpose: RoutingLayerPurpose['purpose'];
+  /** 这个用途下此刻画着的模型先后（上移 / 下移带它当「我看到的」）。 */
+  modelItems: OrderItem[];
   now: number;
   firstLiveRoute: string | undefined;
 }) {
+  const edit = useRoutingEdit();
+  const routeItems: OrderItem[] = m.routes.map((r) => ({ id: r.routeId, name: routeTitle(r) }));
   return (
-    <li className="overflow-hidden rounded-lg border">
+    <li className="overflow-hidden rounded-lg border" data-model={m.modelId}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/40 px-3 py-2">
         <span className="num grid size-5 place-items-center rounded-full bg-foreground/10 text-caption font-medium">
           {index + 1}
@@ -256,6 +284,20 @@ function ModelBlock({
         {m.family ? <span className="text-caption text-muted-foreground">{m.family}</span> : null}
         <StatusChip tone={verdictTone[m.verdict]} label={verdictLabel[m.verdict]} />
         <span className="ml-auto text-caption text-muted-foreground">{modelSummary(m)}</span>
+        <MoveButtons
+          label={`${m.displayName}（${stageLabel[purpose]}里的先后）`}
+          canUp={index > 0}
+          canDown={index < modelItems.length - 1}
+          onMove={(direction) =>
+            edit.moveModel({
+              purpose,
+              purposeName: stageLabel[purpose],
+              items: modelItems,
+              index,
+              direction,
+            })
+          }
+        />
       </div>
       {m.routes.length === 0 ? (
         <p className="px-3 py-2.5 text-sub text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>
@@ -266,6 +308,9 @@ function ModelBlock({
               key={r.routeId}
               route={r}
               index={i}
+              modelId={m.modelId}
+              modelName={m.displayName}
+              routeItems={routeItems}
               now={now}
               firstLive={r.routeId === firstLiveRoute}
             />
@@ -279,16 +324,25 @@ function ModelBlock({
 function RouteItem({
   route: r,
   index,
+  modelId,
+  modelName,
+  routeItems,
   now,
   firstLive: isFirst,
 }: {
   route: RoutingLayerRoute;
   index: number;
+  modelId: string;
+  modelName: string;
+  /** 这个模型下此刻画着的渠道先后（上移 / 下移带它当「我看到的」）。 */
+  routeItems: OrderItem[];
   now: number;
   firstLive: boolean;
 }) {
   const stale = probeStale(r, now);
   const slots = routeSlots(r);
+  const edit = useRoutingEdit();
+  const item: OrderItem = { id: r.routeId, name: routeTitle(r) };
   return (
     <li
       data-route={r.routeId}
@@ -315,6 +369,17 @@ function RouteItem({
         <span className="num ml-auto truncate text-micro text-faint" title={r.routeId}>
           {r.routeId}
         </span>
+        <RouteSwitch
+          label={item.name}
+          enabled={r.enabled}
+          onToggle={() => edit.toggleRoute({ modelId, modelName, item, enabled: r.enabled })}
+        />
+        <MoveButtons
+          label={`${item.name}（${modelName} 下的先后）`}
+          canUp={index > 0}
+          canDown={index < routeItems.length - 1}
+          onMove={(direction) => edit.moveRoute({ modelId, modelName, items: routeItems, index, direction })}
+        />
       </div>
       <div className="mt-2 grid gap-x-4 gap-y-2 md:grid-cols-3">
         <Fact label="接得上" fact={r.connect}>

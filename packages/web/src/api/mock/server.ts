@@ -28,6 +28,8 @@ import {
   LEGACY_ASK_CLOSED_ANSWER,
   LegacyAsksResponse,
   MeResponse,
+  MovePurposeModelRequest,
+  MovePurposeModelResponse,
   NodeDetailResponseSchema,
   NodesResponseSchema,
   NotificationsResponse,
@@ -64,6 +66,8 @@ import {
   taskFlow,
   UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
+  UpdateModelRouteRequest,
+  UpdateModelRouteResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
@@ -111,8 +115,8 @@ const STAGE_WORDS: Record<StageKind, string> = {
 };
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
 const STALE_MS = 30 * 60_000;
-/** 路由两层里在它的模型下关着的路由（照仓里默认骨架：中转那条 Opus 关着）。 */
-const MOCK_SWITCHED_OFF = new Set(['r-rl-opus']);
+/** 路由两层里在它的模型下一开始关着的路由（照仓里默认骨架：中转那条 Opus 关着）；每个假后端各拷一份，页面上点开关改的是拷贝。 */
+const MOCK_SWITCHED_OFF_AT_START = new Set(['r-rl-opus']);
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
 
 /** 一层合起来（db 的 routing-liveness.ts layerLiveness）：有一条活就活；没有活、有不知道就不知道；全死或空就死。 */
@@ -208,6 +212,31 @@ function mockNodeMode(): 'fresh' | 'stale' | 'never' | 'off' {
   return v === 'stale' || v === 'never' || v === 'off' ? v : 'fresh';
 }
 
+/** 在一串编号里把 key 上移 / 下移一位（真后端 db 的 routing-order.ts 的假数据版）：看到的先后对不上 409、已在头尾 422、没有 404。 */
+function mockMove(
+  list: readonly string[],
+  key: string,
+  body: { direction: 'up' | 'down'; expected: readonly string[] },
+  where: string,
+  what: string,
+  notFoundCode: string,
+): { before: string[]; after: string[] } {
+  const index = list.indexOf(key);
+  if (index < 0) throw new ApiError(404, notFoundCode, `${where}下没有${what} ${key}`);
+  if (list.length !== body.expected.length || list.some((x, i) => x !== body.expected[i])) {
+    throw new ApiError(409, 'conflict', '先后刚被别人改过，刷新后再改', { current: [...list] });
+  }
+  const other = body.direction === 'up' ? index - 1 : index + 1;
+  if (other < 0 || other >= list.length) {
+    const edge = body.direction === 'up' ? '上' : '下';
+    throw new ApiError(422, 'already_at_edge', `${what} ${key} 已经在${where}的最${edge}面，没处${edge}移了`);
+  }
+  const after = [...list];
+  after[index] = list[other] as string;
+  after[other] = key;
+  return { before: [...list], after };
+}
+
 export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
@@ -230,6 +259,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const queuedAt = new Map<string, number>();
   /** 每条路由配的思考档位（#470）：没有就是没配。种子里一条 Grok 配了 medium，页面上能看到「配过」的样子。 */
   const mockEfforts = new Map<string, SessionEffort>([['r-grok', 'medium']]);
+  /** 在它的模型下关着的路由（母单 #1089 起页面能开关，所以是这个假后端自己的一份）。 */
+  const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
   const demo: {
@@ -363,7 +394,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         )
         .map((b) => b.reason),
     ];
-    const enabled = !MOCK_SWITCHED_OFF.has(r.id);
+    const enabled = !switchedOff.has(r.id);
     const ban =
       banReasons.length > 0
         ? fact('dead', `命中禁令：${banReasons.join('；')}`)
@@ -507,7 +538,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     if (!modelIds) return [];
     return modelIds.flatMap((modelId) =>
       (st.routing[modelId] ?? []).filter(
-        (routeId) => !MOCK_SWITCHED_OFF.has(routeId) && routeProblem(routeId, purpose) === null,
+        (routeId) => !switchedOff.has(routeId) && routeProblem(routeId, purpose) === null,
       ),
     );
   }
@@ -1545,7 +1576,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 poolId: r.poolId,
                 hostId: r.hostId,
                 model: r.modelId,
-                enabled: !MOCK_SWITCHED_OFF.has(r.id),
+                enabled: !switchedOff.has(r.id),
                 ...(effort ? { effort } : {}),
                 choices: choices.kind === 'choices' ? [...choices.values] : [],
                 ...(choices.kind === 'fixed' ? { fixed: choices.why } : {}),
@@ -1586,6 +1617,63 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         routeId,
         ...(body.effort === null ? {} : { effort: body.effort }),
       });
+    },
+    async movePurposeModel(purposeParam, modelId, raw) {
+      await wait();
+      const body = MovePurposeModelRequest.parse(raw);
+      const purpose = StageKindSchema.safeParse(purposeParam);
+      if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
+      const list = st.purposes[purpose.data] ?? [];
+      const order = mockMove(list, modelId, body, `用途 ${purpose.data} `, '模型', 'model_not_found');
+      st.purposes[purpose.data] = order.after;
+      audit({
+        actor: meActor(),
+        action: 'routing.order.move',
+        target: `stage:${purpose.data}`,
+        before: { order: order.before },
+        after: { order: order.after, moved: modelId, direction: body.direction },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return MovePurposeModelResponse.parse({ purpose: purpose.data, order: order.after });
+    },
+    async updateModelRoute(modelId, routeId, raw) {
+      await wait();
+      const body = UpdateModelRouteRequest.parse(raw);
+      const list = st.routing[modelId] ?? [];
+      if (!list.includes(routeId)) {
+        throw new ApiError(404, 'route_not_found', `模型 ${modelId} 下没有路由 ${routeId}（路由两层里没挂）`);
+      }
+      if (body.op === 'enable') {
+        const current = !switchedOff.has(routeId);
+        if (current !== body.expected) {
+          throw new ApiError(409, 'conflict', '这条路由的开关刚被别人改过，刷新后再改', { current });
+        }
+        if (body.enabled) switchedOff.delete(routeId);
+        else switchedOff.add(routeId);
+        audit({
+          actor: meActor(),
+          action: 'routing.route.enable',
+          target: `route:${routeId}`,
+          before: { modelId, enabled: current },
+          after: { modelId, enabled: body.enabled },
+          via: 'cockpit',
+          ...(body.reason ? { reason: body.reason } : {}),
+        });
+        return UpdateModelRouteResponse.parse({ modelId, routeId, enabled: body.enabled });
+      }
+      const order = mockMove(list, routeId, body, `模型 ${modelId} `, '路由', 'route_not_found');
+      st.routing[modelId] = order.after;
+      audit({
+        actor: meActor(),
+        action: 'routing.order.move',
+        target: `model:${modelId}`,
+        before: { order: order.before },
+        after: { order: order.after, moved: routeId, direction: body.direction },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return UpdateModelRouteResponse.parse({ modelId, routeId, order: order.after });
     },
     async pools() {
       await wait();

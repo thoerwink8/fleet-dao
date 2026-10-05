@@ -29,6 +29,8 @@ import type {
   LegacyAsks,
   LiveEvent,
   Me,
+  MovedPurposeModel,
+  MovePurposeModelBody,
   NodeDetail,
   Nodes,
   Notifications,
@@ -47,8 +49,10 @@ import type {
   TaskDetail,
   UpdateCredentialsBody,
   UpdateDemoDefaultBody,
+  UpdatedModelRoute,
   UpdatedRepoDispatch,
   UpdatedRouteEffort,
+  UpdateModelRouteBody,
   UpdateRepoDispatchBody,
   UpdateRouteEffortBody,
   UpdateSettingBody,
@@ -107,6 +111,10 @@ export interface FleetApi {
     routeId: string,
     body: UpdateRouteEffortBody,
   ): Promise<UpdatedRouteEffort>;
+  /** 用途下的一个模型上移 / 下移一位（母单 #1089）：expected 是改之前看到的模型先后，对不上 409，已在最上 / 最下 422。 */
+  movePurposeModel(purpose: string, modelId: string, body: MovePurposeModelBody): Promise<MovedPurposeModel>;
+  /** 模型下的一条渠道上移 / 下移一位，或开 / 关（母单 #1089）：同样带看到的旧值。 */
+  updateModelRoute(modelId: string, routeId: string, body: UpdateModelRouteBody): Promise<UpdatedModelRoute>;
   pools(): Promise<Pools>;
   /** 整池暂停现状（#746）：开关（到期标红）、认不出的、还靠旧提醒顶着的。新建、撤回走 updateSetting('engine.poolHolds')。 */
   poolHolds(): Promise<PoolHolds>;
@@ -527,6 +535,52 @@ export function useUpdateRouteEffort() {
       body: UpdateRouteEffortBody;
     }) => api.updateRouteEffort(modelId, routeId, body),
     onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingEfforts });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/**
+ * 路由页改先后和开关（母单 #1089）。不先改缓存：顺序要等后端比过「我看到的」（别人先改了 409）才算数，
+ * 页面在等的那一下按钮置灰；不管成没成都重拉路由两层，页面上永远是库里现在的顺序。
+ */
+export function useMovePurposeModel() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      purpose,
+      modelId,
+      body,
+    }: {
+      purpose: string;
+      modelId: string;
+      body: MovePurposeModelBody;
+    }) => api.movePurposeModel(purpose, modelId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 改模型下渠道的先后和开关：同上，路由两层和思考档位页（它也按这个先后列）一起重拉。 */
+export function useUpdateModelRoute() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      modelId,
+      routeId,
+      body,
+    }: {
+      modelId: string;
+      routeId: string;
+      body: UpdateModelRouteBody;
+    }) => api.updateModelRoute(modelId, routeId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
       qc.invalidateQueries({ queryKey: keys.routingEfforts });
       qc.invalidateQueries({ queryKey: ['audit'] });
     },

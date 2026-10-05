@@ -1,7 +1,7 @@
 // 第七步：其余页面逐个走一遍（路由、思考档位、定时任务、操作记录、更新日志、演示版、找不到的页面）。
 // 创始人剧本里的「环境视图」：驾驶舱里没有叫这个名字的页面；最接近的是「路由」（每条路现在接得上吗、额度够吗、被禁了吗）
 // 和主页顶上的持续状态条，这里把路由页当它测，并在缺陷清单里记一笔。
-import { expect, test } from '../support/fixtures.ts';
+import { expect, onlyDesktop, test } from '../support/fixtures.ts';
 
 test.describe('其余页面', () => {
   test.beforeEach(async ({ login }) => login());
@@ -19,6 +19,57 @@ test.describe('其余页面', () => {
     // 探通了的 Claude 拼车/独享、Cursor、Grok 在线：至少有「活」的路由
     await expect(page.getByText(/个派得出去/).first()).not.toHaveText(/^0 个派得出去$/);
     await shot(page, '07-路由');
+  });
+
+  test('路由：写码里把 Opus 5.5 上移 → 确认 → 落库、进操作记录、刷新后还是新顺序；再下移放回去', async ({
+    page,
+    api,
+    shot,
+  }, info) => {
+    test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
+    type Layers = { purposes: { purpose: string; models: { modelId: string }[] }[] };
+    const executeOrder = async () =>
+      ((await api.get('/api/routing/layers')) as Layers).purposes
+        .find((p) => p.purpose === 'execute')
+        ?.models.map((m) => m.modelId);
+    // 骨架（routing.default.json）里写码的顺序：Grok → Opus → GPT …
+    const before = await executeOrder();
+    expect(before?.slice(0, 2)).toEqual(['grok-4.7', 'opus-5.5']);
+
+    await page.goto('/routing?purpose=execute');
+    const opus = page.locator('li[data-model="opus-5.5"]');
+    await expect(opus).toBeVisible();
+    await opus.getByRole('button', { name: /写码里的先后） 上移$/ }).click();
+    // 二次确认：写清从什么顺序变成什么顺序，确认前库里没动
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('把「Opus 5.5」在「写码」里上移一位？');
+    expect(await executeOrder()).toEqual(before);
+    await shot(page, '07-路由-调先后确认');
+    await dialog.getByRole('button', { name: '上移' }).click();
+    await expect(dialog).toHaveCount(0);
+
+    // 页面按新顺序重排：Opus 在最前
+    await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'opus-5.5');
+    // 读回来：落库了，进了操作记录（对象是写码用途）
+    await expect.poll(executeOrder).toEqual(['opus-5.5', 'grok-4.7', ...(before ?? []).slice(2)]);
+    const audit = (await api.get('/api/audit?limit=50')) as {
+      items: { action: string; target: string; actor: { kind: string } }[];
+    };
+    expect(audit.items.some((a) => a.action === 'routing.order.move' && a.target === 'stage:execute')).toBe(
+      true,
+    );
+    // 刷新后还是新顺序
+    await page.reload();
+    await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'opus-5.5');
+    await shot(page, '07-路由-调先后后');
+
+    // 放回去（别的用例读的是骨架的顺序）
+    await page
+      .locator('li[data-model="opus-5.5"]')
+      .getByRole('button', { name: /写码里的先后） 下移$/ })
+      .click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '下移' }).click();
+    await expect.poll(executeOrder).toEqual(before);
   });
 
   test('渠道状态：目录里的渠道都显示出来，探得久的渠道变「检测中断」，刚探过的不受影响', async ({
