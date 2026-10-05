@@ -47,6 +47,16 @@ export class Stalled extends NotChecked {
   }
 }
 
+/**
+ * 会话收了尾、但是「启动没成、还没开始审」：快照 done 带 incomplete，死因是中继启动撞上状态库补数据这类可重试的情形
+ * （2026-10-05 #1056：codex 会话 16 秒结束，runDetail「state db backfill is running…waiting up to 30s before retrying
+ * startup initialization」，脚本判没查成换下一家，后面两家又挂着）。withFallback 认这个类：等一等在同一家重试，不先换家。
+ */
+export class RetryableStart extends NotChecked {}
+
+/** 可重试的启动失败的特征（按快照死因文字认；认不出的 incomplete 照旧算没查成）。 */
+export const RETRYABLE_START = /state db backfill is running|before retrying startup initialization/i;
+
 /** 整轮总上限（分钟）：审 PR 和 --text 同一套。创始人 2026-10-05 嫌第二意见太慢，原来 45 分钟 / --text 压成 0.5 分钟。 */
 export const DEFAULT_TIMEOUT_MIN = 15;
 /** 一家起了会话后连续这么多分钟没有任何新输出，就判这家没查成、换下一家（创始人 2026-10-05：不出声就换）。 */

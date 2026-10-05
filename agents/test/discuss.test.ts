@@ -176,7 +176,7 @@ interface ProfilesLib {
     chain: FakeProfile[],
     log: (s: string) => void,
     run: (p: FakeProfile, remainingMs: number | undefined) => Promise<{ text: string }>,
-    opts?: { budgetMs?: number },
+    opts?: { budgetMs?: number; sleep?: (ms: number) => Promise<void> },
   ): Promise<{ text: string; profile: FakeProfile }>;
 }
 interface SessionsLib {
@@ -903,6 +903,86 @@ describe('不出声就换下一家（创始人 2026-10-05：第二意见太慢�
     // 是在 4 分钟之后、不是 10 分钟之后换的
     expect(grokStartedAt).toBeGreaterThan(4 * MIN);
     expect(grokStartedAt).toBeLessThan(5 * MIN);
+  });
+
+  describe('启动没成的 incomplete（#1056：codex 中继撞上状态库补数据，16 秒就收尾、还没开始审）', () => {
+    const BACKFILL =
+      'state db backfill is running at C:\\Users\\Administrator\\.mirasim\\agent-homes\\codex-relay; waiting up to 30s before retrying startup initialization';
+    // 第 N 次起的 codex 会话（会话号尾巴 -N）按 gptAnswers[N-1] 回；grok 一律出结论
+    const setup = (gptAnswers: SessionView[]) => {
+      const c = clock();
+      const logs: string[] = [];
+      const started: string[] = [];
+      const waits: number[] = [];
+      let gptSessions = 0;
+      const io: PollIo = {
+        ...c,
+        readView: async (_url, key) => {
+          if (key.startsWith('codex:')) return gptAnswers[Number(key.split('-').at(-1)) - 1] ?? view();
+          return view({ phase: 'done', text: '结论：通过 grok', updatedAt: 9 });
+        },
+        stop: async () => {},
+        relayUsage: async () => null,
+      };
+      const run = (p: FakeProfile) => {
+        const key = p.agent === 'codex' ? `codex:fake-${++gptSessions}` : `${p.agent}:fake-grok`;
+        started.push(p.family);
+        return sessionsLib.pollSession({
+          profile: p,
+          url: 'ws://fake',
+          sessionKey: key,
+          since: c.now(),
+          timeoutMin: 15,
+          pollMs: 10_000,
+          log: (s) => logs.push(s),
+          before: null,
+          secs: () => NOW(c.now()),
+          stallMin: 4,
+          io,
+        });
+      };
+      const chain = profilesLib.FAMILY_ORDER.slice(0, 2).map(local);
+      const go = () =>
+        profilesLib.withFallback(chain, (s) => logs.push(s), run, {
+          sleep: async (ms) => {
+            waits.push(ms);
+            await c.sleep(ms);
+          },
+        });
+      return { go, logs, started, waits };
+    };
+    const startFailed = (error: string): SessionView =>
+      view({ phase: 'done', incomplete: true, error, updatedAt: 2 });
+
+    it('第一次回「状态库补数据」的 incomplete、第二次出结论：等 30 秒在同一家重试，结论来自 gpt，没换 grok', async () => {
+      const t = setup([startFailed(BACKFILL), view({ phase: 'done', text: '结论：通过 gpt', updatedAt: 3 })]);
+      const r = await t.go();
+      expect(r.profile.family).toBe('gpt');
+      expect(r.text).toBe('结论：通过 gpt');
+      expect(t.started).toEqual(['gpt', 'gpt']);
+      expect(t.waits).toEqual([30_000]);
+      const text = t.logs.join('\n');
+      expect(text).toContain('30 秒后在同一家重试（第 1/2 次）');
+      expect(text).not.toContain('换下一家');
+    });
+
+    it('一直是这种 incomplete：同一家共试 3 次（重试 2 次）、等两个 30 秒，然后才换 grok', async () => {
+      const t = setup([startFailed(BACKFILL), startFailed(BACKFILL), startFailed(BACKFILL)]);
+      const r = await t.go();
+      expect(r.profile.family).toBe('grok');
+      expect(t.started).toEqual(['gpt', 'gpt', 'gpt', 'grok']);
+      expect(t.waits).toEqual([30_000, 30_000]);
+      expect(t.logs.join('\n')).toContain('（第 2/2 次）');
+      expect(t.logs.join('\n')).toContain('没查成');
+    });
+
+    it('认不出的 incomplete（模型满载）照旧算没查成：不重试、直接换 grok', async () => {
+      const t = setup([startFailed('Selected model is at capacity. Please try a different model.')]);
+      const r = await t.go();
+      expect(r.profile.family).toBe('grok');
+      expect(t.started).toEqual(['gpt', 'grok']);
+      expect(t.waits).toEqual([]);
+    });
   });
 
   it('一直有新输出就不算没出声：慢但在写的会话不会被换掉', async () => {
