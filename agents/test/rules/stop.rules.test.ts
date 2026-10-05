@@ -195,7 +195,7 @@ describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
       });
       expect(t.status).toBe(0);
     }
-    // 光看「每次都挡」还可能是空转计数压根没动：直接读状态，证明「调过工具」那一笔确实把空转清零了、也没转成暂停
+    // 光看「每次都挡」还可能是空转计数根本就没动：直接读状态，证明「调过工具」那一笔确实把空转清零了、也没转成暂停
     const s = JSON.parse(readFileSync(join(dir, `${SID}.json`), 'utf8'));
     expect(s.state).toBe('on');
     expect(s.idle).toBe(0);
