@@ -76,10 +76,21 @@ export const INSTALL_PATHS = [
  * 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`，
  * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`，
  * 版本标记读不到 / 不是主线上的提交 `auto-release:marker-unreadable`、`auto-release:marker:<tag>`（决定 0011 第 3 条），
- * 查不出引擎开没开着 `auto-release:engine-unknown`。
+ * 查不出引擎开没开着 `auto-release:engine-unknown`，切上去了但 release.sh 退出码 2（有待配或没查成）`auto-release:pending:<提交号>`，
+ * 状态文件读不出 `auto-release:state-unreadable`。
  */
 export const ALERT_PREFIX = 'auto-release:';
 export const FAILED_PREFIX = `${ALERT_PREFIX}failed:`;
+/**
+ * release.sh 退出码 2（没有红，但有待配或没查成的项）：版本切上去了，可有几项没核成——不当成发成了（审查 S2）。
+ * 一版一条、一直开着：人照日志补上后在驾驶舱手动解除，下一版发成（退出码 0）时自己撤；开着的时候「没成」的报警也不撤。
+ */
+export const PENDING_PREFIX = `${ALERT_PREFIX}pending:`;
+/**
+ * 状态文件读不出、认不出（审查 S4）：上一轮的发布记录（attempt：自动发过没成的不再试）和报警队列都在里面，从空的起就会把
+ * 发过没成的坏提交每轮重发。所以这一轮不发、不覆盖它（留着现场），报这一条；挪走它（下一轮从空的起）时自己撤，修好了手动撤。
+ */
+export const STATE_UNREADABLE_KEY = `${ALERT_PREFIX}state-unreadable`;
 export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
 export const CONFIG_PREFIX = `${ALERT_PREFIX}config:`;
 export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
@@ -92,6 +103,8 @@ export const ENGINE_UNKNOWN_KEY = `${ALERT_PREFIX}engine-unknown`;
 /** release.sh --auto 的两种「这次不发、什么都没动」：另一个发布在跑；引擎不会排空、切之前看到会话在跑。 */
 export const EXIT_RELEASE_BUSY = 75;
 export const EXIT_SESSIONS_BUSY = 76;
+/** release.sh 的「没有红、但有待配或没查成」（deploy/lib/common.sh 的 finish）：切上去了，不算发成。 */
+export const EXIT_RELEASE_PENDING = 2;
 
 const SHA = /^[0-9a-f]{40}$/;
 const SWITCHES = new Set(['release', 'rollback', 'auto-rollback']);
@@ -324,6 +337,8 @@ export function carryOver(prev) {
     main: p.main ?? null,
     mainError: null,
     current: p.current ?? null,
+    /** 发布之后在用哪版没读到（这时 current 还是发之前读到的那版，不拿它冒充发完的样子）；读到了是 null。 */
+    currentError: null,
     ci: p.ci ?? null,
     /**
      * 这一轮要发的版本标记（版本号最大的那个 v<N> tag，且是主线上的提交）：要发的是它指向的提交。
@@ -361,6 +376,97 @@ export async function runOnce(io, prev) {
   await configStep(io, st, io.now());
   await flushAlerts(io, st);
   return st;
+}
+
+/**
+ * 上一轮的状态文件原文 → 接着用的状态。text 为 null 是文件不在（第一次跑、人挪走了）：从空的起。
+ * 不是 JSON、不是对象、格式版本不对：返回 { ok: false, why }——**不从空的起**（审查 S4：从空的起会丢掉「自动发过没成的不再试」，
+ * 坏提交每轮重发），调用方这一轮不发、报警。
+ */
+export function parseState(text) {
+  if (text === null) return { ok: true, prev: null };
+  let prev;
+  try {
+    prev = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, why: `不是 JSON：${why(e)}` };
+  }
+  if (typeof prev !== 'object' || prev === null || Array.isArray(prev)) {
+    return { ok: false, why: '不是一个对象' };
+  }
+  if (prev.schema !== STATE_SCHEMA) {
+    return { ok: false, why: `格式版本是 ${JSON.stringify(prev.schema)}，只认 ${STATE_SCHEMA}` };
+  }
+  return { ok: true, prev };
+}
+
+/**
+ * 跑一轮（入口 fleet-auto-release.mjs 的 main 调它）：读上一轮的状态（io.readState：原文；文件不在回 null；读不了就抛）→ runOnce → 存。
+ * 状态文件读不出、认不出：这一轮不发、不碰状态文件（留着现场，下一轮照样停着），直接报 STATE_UNREADABLE_KEY；
+ * 文件不在（第一次跑，或人照报警把坏的挪走了）：从空的起，顺手撤掉这条报警。
+ * 返回 { ok, line, alertLost }：line 进 journal；alertLost 为 true 是状态读不出、报警也没发出去（入口据此退出非 0）。
+ */
+export async function runRound(io) {
+  let parsed;
+  try {
+    parsed = parseState(await io.readState());
+  } catch (e) {
+    parsed = { ok: false, why: `读不了：${why(e)}` };
+  }
+  if (!parsed.ok) return stateUnreadable(io, parsed.why);
+  const prev = parsed.prev ?? { schema: STATE_SCHEMA, resolveKeys: [STATE_UNREADABLE_KEY] };
+  const st = await runOnce(io, prev);
+  await io.save(st);
+  return { ok: true, line: summary(st), alertLost: false };
+}
+
+async function stateUnreadable(io, whyText) {
+  const said = `自动发布的状态文件 ${STATE_FILE} ${whyText}`;
+  const alert = {
+    key: STATE_UNREADABLE_KEY,
+    title: '自动发布的状态文件读不出，停着不发',
+    body:
+      `${said}。里面记着上一轮发过什么（自动发过没成的不再试）和没发出去的报警，从空的起会把没成的那版每轮重发，所以每一轮都不发、` +
+      `也不覆盖它。在法国以 root 看一眼：能修好就修好（这条手动解除）；修不好就挪走（mv ${STATE_FILE} ${STATE_FILE}.bad），` +
+      '下一轮从空的起、这条自己撤——挪走前先确认在用的版本对（bash /srv/fleet-dao/deploy/release.sh --check）。',
+  };
+  try {
+    await io.alert(alert);
+  } catch (e) {
+    return {
+      ok: false,
+      line: `${said}：这一轮不发、没动状态文件；报警也没发出去：${why(e)}`,
+      alertLost: true,
+    };
+  }
+  return { ok: false, line: `${said}：这一轮不发、没动状态文件，已报警`, alertLost: false };
+}
+
+/**
+ * release.sh 输出的最后几十行 → 一句原因（进状态文件和报警）：有红取红（✗ 开头）；没红取待配和没查成的——结论里
+ * 「待配 / 没查成 N 项：」下面那几行，没有就取过程里 … 开头的；都没有取最后两行。退出码 2 的报警靠它写清是哪几项。
+ */
+export function releaseDetail(lines) {
+  const items = (re) => lines.filter((l) => re.test(l)).map((l) => l.replace(re, '').trim());
+  const reds = items(/^\s*✗\s*/);
+  let pending = [];
+  const head = lines.findLastIndex((l) => /^待配 \/ 没查成 \d+ 项/.test(l));
+  if (head >= 0) {
+    for (const l of lines.slice(head + 1)) {
+      if (!/^\s+- /.test(l)) break;
+      pending.push(l.replace(/^\s+- /, '').trim());
+    }
+  }
+  if (pending.length === 0) pending = items(/^\s*…\s*/);
+  const picked = reds.length ? reds : pending;
+  const text = picked.length
+    ? picked.slice(-3).join('；')
+    : lines
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(-2)
+        .join(' ');
+  return text.slice(0, 600);
 }
 
 function act(st, now, action, detail = '') {
@@ -522,7 +628,8 @@ async function deployStep(io, st, now) {
   // 在用的就是这个标记指向的提交：这一版已经上过线了，收工
   if (current === marker.commit) {
     st.waitingSince = null;
-    resolveLater(st, FAILED_PREFIX);
+    // 在用的这版是退出码 2 切上去的（有待配或没查成）：没核成，「没成」的报警不撤，等下一版发成
+    if (!(st.attempt?.sha === current && st.attempt.pending === true)) resolveLater(st, FAILED_PREFIX);
     act(st, now, 'up-to-date', `在用的 ${short(current)} 就是 ${marker.tag} 那一版`);
     return current;
   }
@@ -678,30 +785,61 @@ async function deployStep(io, st, now) {
     }
     return current;
   }
-  let after = current;
+  // 发完在用哪版：读不到就照实记「没读到」（审查 S7），不拿发之前那版冒充——报警里那句「在用的还是旧版」、规矩同步都靠它。
+  // current 留着发之前读到的那版（它是「上一次读到的」，currentError 写明这次没读到）；返回 undefined，规矩那一半这一轮不做。
+  let after;
   try {
     after = await io.readCurrent();
-  } catch {
-    // 读不到就照发之前的说
+  } catch (e) {
+    st.currentError = `发完在用哪版没读到：${why(e)}`;
   }
-  st.current = after;
+  if (st.currentError === null) st.current = after;
+  const known = st.currentError === null;
+  const pending = r.code === EXIT_RELEASE_PENDING;
   st.attempt = {
     ...st.attempt,
     endedAt: iso(end),
     code: r.code,
     log: r.log ?? '',
-    result: r.code === 0 || r.code === 2 ? 'ok' : 'failed',
+    // result 只说「切上去了没有」（releasable 据此判这一版还试不试）：退出码 2 时 release.sh 没有红、版本确实切上去了，
+    // 记 failed 会把在用的那版当成没成。「没核成」另记 pending，并挂一条一直开着的报警（下面）——不当成发成了。
+    // 不新加一种 result：后端 packages/store/src/deploy-lag.ts 和指挥官的法国视图都按 running/ok/failed 认，多一种整份认不出。
+    result: r.code === 0 || pending ? 'ok' : 'failed',
+    pending,
     detail: r.detail ?? '',
   };
   st.waitingSince = null;
-  if (st.attempt.result === 'ok') {
-    resolveLater(st, FAILED_PREFIX);
-    act(st, end, 'released', `发了 ${short(target)}（退出码 ${r.code}）${via}`);
-    return after;
-  }
-  const where =
-    after === target ? `停在新版 ${short(target)}（没退回：见日志里的红）` : `在用的还是 ${short(after)}`;
   const which = marker.tag ? `${marker.tag}（${short(target)}）` : short(target);
+  const afterNote = known ? '' : `；${st.currentError}`;
+  if (r.code === 0) {
+    resolveLater(st, FAILED_PREFIX);
+    resolveLater(st, PENDING_PREFIX);
+    act(st, end, 'released', `发了 ${short(target)}（退出码 0）${via}${afterNote}`);
+    return known ? after : undefined;
+  }
+  if (pending) {
+    // 切上去了、但有待配或没查成的：一版一条一直开着，「没成」的报警也不撤（没核成的版本不算把之前的问题盖过去）
+    const inUse = known ? `在用的是 ${short(after)}` : st.currentError;
+    raise(
+      st,
+      `${PENDING_PREFIX}${target}`,
+      `自动发布 ${which} 切上去了，但有待配或没查成的项`,
+      `release.sh 退出码 2（没有红，但有待配或没查成）：${r.detail || '没给是哪几项'}。${inUse}。日志：${r.log || '（没拿到路径）'}。` +
+        '这一版不会自动重试；照日志补上（或确认无碍）后在驾驶舱手动解除这条，下一版发成（退出码 0）时它自己撤。',
+    );
+    act(
+      st,
+      end,
+      'released-pending',
+      `发了 ${short(target)}，但 release.sh 退出码 2（${r.detail || '有待配或没查成'}）${via}${afterNote}`,
+    );
+    return known ? after : undefined;
+  }
+  const where = !known
+    ? `${st.currentError}（停在新版还是旧版不知道：在法国看 readlink ${RELEASES}/current）`
+    : after === target
+      ? `停在新版 ${short(target)}（没退回：见日志里的红）`
+      : `在用的还是 ${short(after)}`;
   raise(
     st,
     `${FAILED_PREFIX}${target}`,
@@ -710,8 +848,8 @@ async function deployStep(io, st, now) {
       '这个版本标记和比它旧的不再自动试，等下一个版本标记（或人在法国以 root 重试：' +
       `bash ${CHECKOUT}/deploy/release.sh ${target}）。`,
   );
-  act(st, end, 'release-failed', `${which} 退出码 ${r.code}：${r.detail}`);
-  return after;
+  act(st, end, 'release-failed', `${which} 退出码 ${r.code}：${r.detail}${afterNote}`);
+  return known ? after : undefined;
 }
 
 /**
@@ -1039,6 +1177,7 @@ export function summary(st) {
   } else {
     parts.push('主线头没读到过');
   }
+  if (st.currentError) parts.push(`${st.currentError}（上面的「在用」是发之前读到的）`);
   if (st.mainError) parts.push(`这轮主线没读到：${st.mainError}`);
   if (st.last) parts.push(`这轮：${st.last.action}${st.last.detail ? `（${st.last.detail}）` : ''}`);
   if (st.sequence) {

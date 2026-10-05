@@ -378,6 +378,19 @@ if ((HAVE_NODE)); then
   check "备份：过期的没删成 → 记 partial" "partial|3|0" "$(ended | cut -d'|' -f1-3)"
   check "备份：过期的没删成 → 报警" backup.nightly:run "$(raised)"
 
+  # 【故意造出的失败】过期的没删成（partial）、报警又写不进库：不能退出 0，不然 systemd 显示成功、没人知道（审查 S6）
+  reset_env
+  (
+    stub_books
+    stub_backup 0 1 4
+    alert_raise() { return 1; }
+    cmd_backup
+  ) >"$T/out" 2>&1
+  RC=$?
+  check "备份：partial、报警没发出去 → 退出非 0" 1 "$RC"
+  check "备份：partial、报警没发出去 → 结局照记 partial" "partial|3|0" "$(ended | cut -d'|' -f1-3)"
+  check "备份：partial、报警没发出去 → 日志里说报警没发出去" 1 "$(grep -c '条报警没发出去' "$T/out")"
+
   reset_env
   (
     stub_books
@@ -566,6 +579,19 @@ reset_env
 RC=$?
 check "巡检：法国盘到线 → 查出 1 个问题、任务照样 ok" "0 ok|2|1" "$RC $(ended | cut -d'|' -f1-3)"
 check "巡检：到线 → 报法国那块盘" backup.disk:france:/ "$(raised)"
+
+# 【故意造出的失败】盘到线、报警写不进库：结局照记，但退出非 0（审查 S6）
+reset_env
+(
+  stub_books
+  stub_watch
+  DF_USED=90 DF_AVAIL=10
+  alert_raise() { return 1; }
+  cmd_watch
+) >"$T/out" 2>&1
+RC=$?
+check "巡检：到线、报警写不进库 → 退出非 0、结局照记 ok" "1 ok|2|1" "$RC $(ended | cut -d'|' -f1-3)"
+check "巡检：到线、报警写不进库 → 日志里说报警没发出去" 1 "$(grep -c '条报警没发出去' "$T/out")"
 
 reset_env
 (

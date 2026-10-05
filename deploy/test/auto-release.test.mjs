@@ -26,6 +26,7 @@ import {
   IDLE_WAIT_MS,
   INSTALL_PATHS,
   manualHold,
+  PENDING_PREFIX,
   parseHistory,
   parseMainLog,
   parseVersionTags,
@@ -34,8 +35,11 @@ import {
   publishSequenceSummary,
   RULES_PREFIX,
   RULES_USERS,
+  releaseDetail,
   runOnce,
+  runRound,
   STATE_SCHEMA,
+  STATE_UNREADABLE_KEY,
   summary,
   VERSION_TAG_RE,
 } from '../france/auto-release/lib.mjs';
@@ -1389,4 +1393,165 @@ test('真机上那半边：systemctl 说引擎活着才算开着，认不出的�
   const src = readFileSync(new URL('../france/auto-release/fleet-auto-release.mjs', import.meta.url), 'utf8');
   assert.match(src, /'is-active', 'fleet-engine\.service'/, '和 release.sh 同一个判法');
   assert.match(src, /回的认不出/, '认不出的回要抛，不猜');
+});
+
+// ── 「没查成」不当成功（审查 S2、S4、S7）──
+
+/** 在 machine() 上再打一个版本标记：v<n> → sha，主线上多一个提交，CI 绿。 */
+function nextVersion(m, sha, n, at) {
+  m.main = [[sha, at], ...m.main];
+  m.mainAncestors = [sha, ...m.mainAncestors];
+  m.tags = `v${n} ${sha}  ${T1}\n${m.tags}`;
+  m.ci = runsBody(run(sha, 'completed', 'success', { run_number: 10 + n }));
+}
+
+test('【故意造出的失败】发布脚本退出码 2（切上去了、有待配或没查成）：不当成发成——挂一条一直开着的报警，「没成」的报警不撤，下一版发成才撤（审查 S2）', async () => {
+  const m = machine();
+  // v1（H1）发布没成：留下一条发出去了的「没成」报警
+  m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/1.log', detail: '健康检查没过' };
+  await m.round();
+  assert.ok(m.alerts.some((a) => a.key === `${FAILED_PREFIX}${H1}`));
+  // v2（H2）：发布脚本退出 2
+  nextVersion(m, H2, 2, '2026-09-27T07:50:00Z');
+  m.release = { code: 2, log: '/srv/fleet-dao-releases/.logs/2.log', detail: '香港网关的配置没备齐' };
+  m.t += 5 * MIN;
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release c']);
+  assert.equal(m.current, H2, '版本确实切上去了');
+  assert.equal(st.attempt.result, 'ok', '切上去了：这一版不当成没成、不再自动重试');
+  assert.equal(st.attempt.pending, true, '但记着没核成');
+  assert.equal(st.last.action, 'released-pending', '这一轮不记成「发了」');
+  const pending = m.alerts.find((a) => a.key === `${PENDING_PREFIX}${H2}`);
+  assert.ok(pending, '挂一条「切上去了、有待配或没查成」的报警');
+  assert.match(pending.body, /香港网关的配置没备齐/, '报警里写清是哪几项');
+  assert.match(pending.body, /2\.log/, '报警里带日志路径');
+  assert.deepEqual(m.resolved, [], '「没成」的报警不撤');
+  // 下一轮：在用的就是 v2——照样不撤，pending 那条还开着
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.last.action, 'up-to-date');
+  assert.deepEqual(m.resolved, [], '退出码 2 切上去的版本在用着：「没成」的报警还是不撤');
+  assert.ok(
+    st.alerts.some((a) => a.key === `${PENDING_PREFIX}${H2}` && a.raised),
+    'pending 那条一直开着',
+  );
+  // v3（H3）发成（退出码 0）：两类都撤
+  nextVersion(m, H3, 3, '2026-09-27T08:05:00Z');
+  m.release = { code: 0, log: '/srv/fleet-dao-releases/.logs/3.log', detail: '' };
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.last.action, 'released');
+  assert.deepEqual(m.resolved.sort(), [FAILED_PREFIX, PENDING_PREFIX].sort());
+});
+
+test('【故意造出的失败】发完读不到在用哪版：照实写「没读到」，不拿发之前那版冒充，规矩这一轮不同步（审查 S7）', async () => {
+  const m = machine();
+  m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/1.log', detail: '健康检查没过' };
+  m.io.readCurrent = async () => {
+    if (releases(m).length > 0) throw new Error('读不了 /srv/fleet-dao-releases/current：权限不够');
+    return m.current;
+  };
+  const st = await m.round();
+  const failed = m.alerts.find((a) => a.key === `${FAILED_PREFIX}${H1}`);
+  assert.ok(failed);
+  assert.match(failed.body, /发完在用哪版没读到：读不了 \/srv\/fleet-dao-releases\/current：权限不够/);
+  assert.doesNotMatch(failed.body, /在用的还是/, '不说「在用的还是旧版」——没读到就不知道');
+  assert.match(st.currentError, /没读到/);
+  assert.match(summary(st), /发完在用哪版没读到/);
+  assert.deepEqual(
+    m.calls.filter((c) => c.startsWith('rules')),
+    [],
+    '在用哪版不知道：规矩这一轮不同步',
+  );
+  // 退出码 0 时读不到也照实记，不拿发之前那版当在用的
+  const ok = machine();
+  ok.io.readCurrent = async () => {
+    if (releases(ok).length > 0) throw new Error('readlink 超时');
+    return ok.current;
+  };
+  const st2 = await ok.round();
+  assert.equal(st2.last.action, 'released');
+  assert.match(st2.last.detail, /发完在用哪版没读到：readlink 超时/);
+  assert.equal(st2.currentError, '发完在用哪版没读到：readlink 超时');
+  // 下一轮读到了：currentError 清掉
+  ok.t += 5 * MIN;
+  ok.io.readCurrent = async () => ok.current;
+  const st3 = await ok.round();
+  assert.equal(st3.currentError, null);
+  assert.equal(st3.current, H1);
+});
+
+test('【故意造出的失败】状态文件读不出（不是 JSON、格式版本不对、不是对象、读不了）：这一轮不发、不覆盖、报警；挪走后从空的起、报警自己撤（审查 S4）', async () => {
+  const bad = [
+    ['不是 JSON', async () => '{"schema":1,"attempt":'],
+    ['格式版本不对', async () => '{"schema":99}'],
+    ['不是对象', async () => '[1]'],
+    [
+      '读不了',
+      async () => {
+        throw new Error('EACCES: permission denied');
+      },
+    ],
+  ];
+  for (const [what, read] of bad) {
+    const m = machine();
+    m.io.readState = read;
+    const r = await runRound(m.io);
+    assert.deepEqual(releases(m), [], `${what}：不发`);
+    assert.deepEqual(m.calls, [], `${what}：git、GitHub 都不碰`);
+    assert.equal(m.saved.length, 0, `${what}：不覆盖状态文件（留着现场，下一轮照样停着）`);
+    const a = m.alerts.find((x) => x.key === STATE_UNREADABLE_KEY);
+    assert.ok(a, `${what}：报警`);
+    assert.match(a.body, /mv .*state\.json .*\.bad/, `${what}：报警里写怎么处理`);
+    assert.equal(r.ok, false);
+    assert.equal(r.alertLost, false);
+    assert.match(r.line, /这一轮不发/);
+  }
+  // 库也连不上：报警没发出去，照实返回（入口据此退出非 0）
+  const down = machine();
+  down.io.readState = async () => 'not json';
+  down.dbDown = true;
+  const r = await runRound(down.io);
+  assert.equal(r.alertLost, true);
+  assert.match(r.line, /报警也没发出去/);
+  // 人照报警挪走了（文件不在）：从空的起、照发，撤掉这条
+  const m = machine();
+  m.io.readState = async () => null;
+  const first = await runRound(m.io);
+  assert.equal(first.ok, true);
+  assert.deepEqual(releases(m), ['release b']);
+  assert.ok(m.resolvedKeys.includes(STATE_UNREADABLE_KEY), '从空的起：撤掉「状态文件读不出」');
+  assert.equal(m.saved.at(-1).attempt.result, 'ok', '这一轮存了');
+  // 读得出：接着上一轮的（在用的已经是 v1，不再发）
+  m.calls = [];
+  m.t += 5 * MIN;
+  m.io.readState = async () => JSON.stringify(m.saved.at(-1));
+  const second = await runRound(m.io);
+  assert.equal(second.ok, true);
+  assert.deepEqual(releases(m), []);
+  assert.match(second.line, /up-to-date/);
+});
+
+test('发布脚本的原因：有红取红；退出码 2 取「待配 / 没查成」那几项；都没有取最后两行', () => {
+  assert.equal(releaseDetail(['  ✓ 构建好了', '  ✗ 健康检查没过', '', '== 结论']), '健康检查没过');
+  assert.equal(
+    releaseDetail([
+      '  … 香港网关的配置没备齐',
+      '',
+      '== 结论',
+      '本次改动 1 处：',
+      '  - 切到 bbbbbbbbbbbb',
+      '待配 / 没查成 2 项：',
+      '  - 香港网关的配置没备齐',
+      '  - 演示版没核对',
+    ]),
+    '香港网关的配置没备齐；演示版没核对',
+    '结论里那段，不混进「本次改动」',
+  );
+  assert.equal(
+    releaseDetail(['  … 只在过程里打过', 'x']),
+    '只在过程里打过',
+    '结论被截掉了：取过程里 … 开头的',
+  );
+  assert.equal(releaseDetail(['a', 'b', 'c']), 'b c');
 });

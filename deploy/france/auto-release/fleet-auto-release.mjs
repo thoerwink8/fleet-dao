@@ -16,9 +16,9 @@ import {
   MAIN_HISTORY,
   RELEASES,
   REPO,
-  runOnce,
+  releaseDetail,
+  runRound,
   STATE_FILE,
-  summary,
   VERSION_TAGS_ARGS,
 } from './lib.mjs';
 
@@ -102,9 +102,8 @@ function runRelease(sha, busyOk) {
     child.stderr.on('data', take);
     child.on('error', reject);
     child.on('close', (code) => {
-      const reds = lines.filter((l) => /^\s*✗/.test(l)).map((l) => l.trim().replace(/^✗\s*/, ''));
-      const detail = (reds.length ? reds.slice(-3).join('；') : tail(lines.join('\n'), 2)).slice(0, 600);
-      resolve({ code: code ?? -1, log, detail });
+      // 有红取红；退出码 2（没红、有待配或没查成）取那几项，报警里写清是哪几项（lib.mjs 的 releaseDetail）
+      resolve({ code: code ?? -1, log, detail: releaseDetail(lines) });
     });
   });
 }
@@ -281,18 +280,22 @@ where dedupe_key = :'key' and resolved_at is null;`,
   async save(st) {
     saveState(st);
   },
+  /** 上一轮的状态文件原文；文件不在回 null（第一次跑），别的读不了就抛（lib.mjs 的 runRound 当「读不出」：这一轮不发、报警）。 */
+  async readState() {
+    try {
+      return readFileSync(STATE_FILE, 'utf8');
+    } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      throw e;
+    }
+  },
 };
 
 async function main() {
-  let prev = null;
-  try {
-    prev = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.log(`上一轮的状态读不出来，从空的起：${e.message}`);
-  }
-  const st = await runOnce(realIo, prev);
-  saveState(st);
-  console.log(summary(st));
+  // 状态文件读不出不再从空的起（审查 S4）：runRound 这一轮不发、不覆盖它、报警；报警也没发出去就退出非 0，systemd 里看得到
+  const r = await runRound(realIo);
+  console.log(r.line);
+  if (r.alertLost) process.exitCode = 1;
 }
 
 // 被测试 import 时不跑：只有 systemd 直接起这个文件才跑一轮

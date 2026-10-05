@@ -59,6 +59,8 @@ migrate() {
   MIGRATE_RUNS+=("$1")
   if [[ "${MIG[$1]:-0}" -gt "$DB_MIG" ]]; then DB_MIG=${MIG[$1]}; fi
 }
+# 真的 api_report_before 留一份：「切之前读不到健康报告」那一段用真代码，别的段换成桩
+eval "real_$(declare -f api_report_before)"
 api_report_before() { :; }
 SYNCED=0 # 往香港发过几次静态文件
 PROBED=0   # 试通过几次往香港传静态文件的路
@@ -360,6 +362,65 @@ compare_api_items "$(printf 'database\tok\t\nengine\tok\t\n')" \
 check "本机启用了引擎：切之前好、切之后坏——算这一版的错（真坏的不能放过）" "$?" 1
 check "启用了引擎：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c 'engine 切之前是好的，换了这一版不好了')" 1
 FLEET_SERVICES="$_fs_saved"
+
+echo "== 切版本之前读后端的健康报告：没在跑就空着照切；在跑却读不到（连不上、回的不是健康报告）不切（审查 S1：空的「切之前」会让切之后变红的项被当成「之前就不好」、不退回）"
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+GATE=()
+MIG=()
+DB_MIG=0
+api_healthz_saved=$(declare -f api_healthz)
+has_service_saved=$(declare -f has_service)
+API_UNIT=inactive # systemctl is-active fleet-api.service 答什么
+API_ANSWER=ok     # 驾驶舱接口的 /healthz：ok 答健康报告；down 连不上；garbled 回的不是健康报告（502 的网页）
+has_service() { [[ "$1" == fleet-api ]]; } # 本机启用了后端；FLEET_SERVICES 还是空的，切版本时不去动真的 systemd
+# shellcheck disable=SC2329 # 由 release.sh 里的 api_report_before 间接调用
+systemctl() { # 只换掉「后端在不在跑」这一问；别的照走真的
+  if [[ "$*" == "is-active fleet-api.service" ]]; then
+    echo "$API_UNIT"
+    [[ "$API_UNIT" == active ]]
+    return
+  fi
+  command systemctl "$@"
+}
+api_healthz() {
+  case $API_ANSWER in
+  ok) printf '200\t%s' '{"ok":true,"checks":{"database":{"ok":true}}}' ;;
+  down) return 1 ;;
+  garbled) printf '502\t%s' '<html>502 Bad Gateway</html>' ;;
+  esac
+}
+# shellcheck disable=SC2329 # 由 do_release 间接调用
+api_report_before() { real_api_report_before; }
+real_api_report_before >/dev/null
+check "后端没在跑：空着、不算读不到（返回 0）" "$?" 0
+reset
+do_release "$A" >/dev/null
+check "后端没在跑：照切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
+API_UNIT=active
+check "后端在跑、答得上：逐项给出" "$(real_api_report_before | tr '\t\n' '|;')" "database|ok|;"
+reset
+do_release "$B" >/dev/null
+check "后端在跑、答得上：照切到 B、没有红" "$(current_sha):${#REDS[@]}" "$B:0"
+before=$(events)
+for API_ANSWER in down garbled; do
+  real_api_report_before >/dev/null
+  check "后端在跑却读不到（$API_ANSWER）：返回失败，不拿空的当「切之前」" "$?" 1
+  reset
+  do_release "$C" >/dev/null
+  check "后端在跑却读不到（$API_ANSWER）：不切，还在 B" "$(current_sha)" "$B"
+  check "后端在跑却读不到（$API_ANSWER）：报红说清" \
+    "$(printf '%s\n' "${REDS[@]}" | grep -c '后端在跑，但切版本之前读不到它的健康报告')" 1
+  check "后端在跑却读不到（$API_ANSWER）：历史没变" "$(events)" "$before"
+done
+check "回的不是健康报告：红里写明" "$(printf '%s\n' "${REDS[@]}" | grep -c '健康报告（/healthz 回的不是健康报告（HTTP 502））')" 1
+API_ANSWER=down
+reset
+do_release "$C" >/dev/null
+check "连不上：红里写明是连不上" "$(printf '%s\n' "${REDS[@]}" | grep -c "健康报告（驾驶舱接口 http://$COCKPIT/healthz 连不上）")" 1
+eval "$api_healthz_saved"
+eval "$has_service_saved"
+unset -f systemctl
+api_report_before() { :; }
 
 echo "== 飞书网关：这一版带网关、香港配置齐了才发过去切过去；香港已收下的不再传；配置不齐、这一版没网关都不动香港网关"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
