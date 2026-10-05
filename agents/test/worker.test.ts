@@ -1265,3 +1265,83 @@ describe('工人的输出在说什么（saidOf）', () => {
     expect(lib.saidOf('{ 这不是 JSON')).toBe('{ 这不是 JSON');
   });
 });
+
+// #1016：巡看只说变了的——给定时叫起的巡看会话用，创始人不用来问进度
+describe('watch', () => {
+  const pr = (state: string) =>
+    ok(JSON.stringify([{ number: 88, state, url: 'https://github.com/o/r/pull/88' }]));
+
+  it('第一次见到在跑的工人报一行；状态没变再看就只剩「还在跑：1」', async () => {
+    const w = world();
+    const dir = w.writeMeta('k1', validMeta(w, 'k1'));
+    writeFileSync(join(dir, 'out.log'), '在改 store\n');
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'), ok('[]'));
+    expect(await w.run(['watch'])).toBe(0);
+    expect(w.out.join('\n')).toMatch(/变化：k1 在跑（.*）：在改 store\n还在跑：1$/);
+    w.out.length = 0;
+    expect(await w.run(['watch'])).toBe(0);
+    expect(w.out).toEqual(['还在跑：1']);
+  });
+
+  it('PR 开出来、做完，各报一次：报过的不重报', async () => {
+    const w = world();
+    const dir = w.writeMeta('k2', validMeta(w, 'k2'));
+    writeFileSync(join(dir, 'out.log'), '在改 store\n');
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'), pr('OPEN'), pr('MERGED'), pr('MERGED'));
+    await w.run(['watch']);
+    w.out.length = 0;
+    await w.run(['watch']);
+    expect(w.out.join('\n')).toMatch(/变化：k2 在跑.*PR #88（OPEN）/);
+    w.out.length = 0;
+    writeFileSync(join(dir, 'out.log'), '在改 store\n完成：PR #88\n');
+    w.setRunning(9001, false);
+    await w.run(['watch']);
+    expect(w.out).toEqual(['变化：k2 做完了：完成：PR #88；PR #88（MERGED）', '还在跑：0']);
+    w.out.length = 0;
+    await w.run(['watch']);
+    expect(w.out).toEqual(['还在跑：0']);
+  });
+
+  it('【故意造出的失败】被强杀、没交活：报「不在跑了、也没交活」，不当成做完', async () => {
+    const w = world();
+    const dir = w.writeMeta('k3', validMeta(w, 'k3'));
+    writeFileSync(join(dir, 'out.log'), '改到一半\n');
+    w.setRunning(9001, false);
+    w.ghReplies.push(ok('[]'));
+    await w.run(['watch']);
+    expect(w.out[0]).toBe('变化：k3 不在跑了、也没交活，最后一句：改到一半');
+  });
+
+  it('自己说卡住了：报卡在哪', async () => {
+    const w = world();
+    const dir = w.writeMeta('k4', validMeta(w, 'k4'));
+    writeFileSync(join(dir, 'out.log'), '卡住：人闸——要删表\n');
+    w.setRunning(9001, false);
+    w.ghReplies.push(ok('[]'));
+    await w.run(['watch']);
+    expect(w.out[0]).toBe('变化：k4 卡住了：卡住：人闸——要删表');
+  });
+
+  it('clean 过的不看；一个工人都没有也给「还在跑：0」', async () => {
+    const w = world();
+    expect(await w.run(['watch'])).toBe(0);
+    expect(w.out).toEqual(['还在跑：0']);
+    w.out.length = 0;
+    w.writeMeta('k5', validMeta(w, 'k5', { cleanedAt: '2026-10-05T00:00:00.000Z' }));
+    w.setRunning(9001, false);
+    w.ghReplies.push(ok('[]'));
+    await w.run(['watch']);
+    expect(w.out).toEqual(['还在跑：0']);
+  });
+
+  it('【故意造出的失败】记录读不了：报没查成、退出码 2，不当成没有工人', async () => {
+    const w = world();
+    const dir = join(w.home, '.fleet-dao', 'workers', 'k6');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'meta.json'), '{不是 JSON');
+    expect(await w.run(['watch'])).toBe(2);
+    expect(w.out[0]).toMatch(/^变化：k6：没查成——/);
+  });
+});
