@@ -637,6 +637,7 @@ export function sessionStart({
     ...checkDirectives(cwd, localGit),
     ...recentPrompts({ home, now }),
     ...sweepWorktrees(cwd, localGit),
+    ...workerLines(home, now),
     ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
@@ -713,6 +714,72 @@ function removeShell(dir) {
     // 下面照实看还在不在
   }
   return !existsSync(dir);
+}
+
+/** 独立工人跑了这么久还没退，开会话时提一句（Claude 无头模式做完才出字，不能拿「多久没输出」判）。 */
+export const WORKER_LONG_MS = 3 * 60 * 60_000;
+
+/** 这个 pid 的进程还在不在；判不出来（没权限看）当还在，不把它报成死了。 */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return typeof err === 'object' && err !== null && 'code' in err && err.code === 'EPERM';
+  }
+}
+
+/**
+ * 本机独立工人（commander 技能的 worker.mjs 起的，状态在 ~/.fleet-dao/workers/<名字>/meta.json）现在怎样（#1016）。
+ * 工人是脱离会话的进程：它被强杀、卡死、做完都不会通知谁，所以由每次开会话都会跑的这里看一眼，不靠工人自己活着来报。
+ * 只报要人知道的三种：不在跑了又没交活、跑了很久还没退、做完了没收拾。读不了的记录照实报没查成。
+ */
+export function workerLines(home, now = Date.now(), alive = pidAlive) {
+  const root = join(home, '.fleet-dao', 'workers');
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch {
+    return []; // 这台没起过工人
+  }
+  const lines = [];
+  for (const name of names) {
+    let m;
+    try {
+      m = JSON.parse(readFileSync(join(root, name, 'meta.json'), 'utf8'));
+    } catch (err) {
+      if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') continue;
+      lines.push(`工人 ${name} 的记录没查成（meta.json 读不了或不是 JSON），用 worker.mjs status 看。`);
+      continue;
+    }
+    if (!m || typeof m !== 'object' || m.cleanedAt) continue;
+    if (!Number.isInteger(m.pid)) {
+      lines.push(`工人 ${name} 起的时候没记上进程号，不知道在不在跑：用 worker.mjs status 看。`);
+      continue;
+    }
+    let last = '';
+    try {
+      const rows = readFileSync(String(m.outLog), 'utf8')
+        .split('\n')
+        .filter((l) => l.trim() !== '');
+      last = (rows[rows.length - 1] ?? '').trim();
+    } catch {
+      // 还没有输出
+    }
+    const mins = Math.max(0, Math.round((now - Date.parse(String(m.startedAt))) / 60_000));
+    if (alive(m.pid)) {
+      if (now - Date.parse(String(m.startedAt)) > WORKER_LONG_MS)
+        lines.push(`工人 ${name} 跑了 ${mins} 分钟还没退，看一眼是不是卡住了（worker.mjs status）。`);
+      continue;
+    }
+    if (/^完成/.test(last))
+      lines.push(`工人 ${name} 做完了（${last.slice(0, 60)}），看完结果跑 worker.mjs clean --name ${name}。`);
+    else
+      lines.push(
+        `注意：工人 ${name} 不在跑了、也没交活（最后一句：${last ? last.slice(0, 80) : '没有输出'}）。它的工作树 ${m.worktree} 还在，接着做或 clean 掉。`,
+      );
+  }
+  return lines;
 }
 
 export function sweepWorktrees(cwd, git, now = Date.now()) {

@@ -48,7 +48,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, isAbsolute, join } from 'node:path';
 
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-const MODELS = ['grok', 'codex', 'kimi'];
+const MODELS = ['grok', 'codex', 'kimi', 'claude'];
 /** 思考档位的叫法，和 packages/shared/src/effort.ts 的 SESSION_EFFORTS 一样（测试钉着）。 */
 export const SESSION_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 /** grok、codex 命令行认的档（都没有 max）；总是显式传给模型命令行。 */
@@ -64,12 +64,22 @@ export const ROUTING_DEFAULT_REL = join(
   'routing.default.json',
 );
 /** 不给 --model-id 时按骨架里哪个模型查档位：本机 grok 命令行跑的就是 grok-4.7（法国 grok 那条路由同一个命令行），codex 跑 GPT。 */
-export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna' };
+export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'opus' };
+/**
+ * Claude 工人只许这两族（通用段「我的机器与模型」：机器派的会话、工人永不用 Fable，只用 Opus 或 Sonnet）。
+ * 不给 --model-id 用 opus；给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。
+ */
+export const CLAUDE_DEFAULT_MODEL = 'opus';
+export function claudeModelProblem(modelId) {
+  const id = modelId ?? CLAUDE_DEFAULT_MODEL;
+  if (/^(opus|sonnet)$/.test(id) || /^claude-(opus|sonnet)-[\w.-]+$/.test(id)) return null;
+  return `Claude 工人只用 Opus 或 Sonnet（机器派的会话永不用 Fable）：--model-id 给的是「${id}」，不起。`;
+}
 /** 模型自己要连的 GitHub 域名：让它自己跑的 git/gh 绕开代理直连这几个。 */
 export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.com'];
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
-  start --model grok|codex|kimi --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
+  start --model grok|codex|kimi|claude --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
         [--effort low|medium|high|xhigh，这一次用的；不给照 ~/${ROUTING_DEFAULT_REL.replaceAll('\\', '/')} 给这个模型配的，
         没配是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
                     在主检出的上一级建一棵工作树、起一个别家模型命令行去干活（后台跑，这条命令退出它照跑）
@@ -137,8 +147,8 @@ function nameOf(p) {
 
 function modelOf(p) {
   const v = p.options.get('model');
-  if (!v) throw new UsageError('要带 --model grok|codex|kimi');
-  if (!MODELS.includes(v)) throw new UsageError(`不认识的模型「${v}」：只有 grok、codex、kimi`);
+  if (!v) throw new UsageError('要带 --model grok|codex|kimi|claude');
+  if (!MODELS.includes(v)) throw new UsageError(`不认识的模型「${v}」：只有 grok、codex、kimi、claude`);
   return v;
 }
 
@@ -344,6 +354,8 @@ export function closingBrief({ branch, noShip, noAutomerge }) {
     `4. git push -u origin ${branch}`,
     ...prSteps,
     '8. 不开新 issue，不碰这棵工作树以外的目录、不碰别的检出。',
+    '   碰到四类人闸——对外发布（上线、发版）、花钱（账单会多出一笔的）、删数据、改标准（AGENTS.md 本仓段里',
+    '   「改标准是人闸第四类」列的路径）——就停手：不自己做、不挂自动合并，最后输出「卡住：人闸——<哪一类、卡在哪>」。',
     '9. 如果 git 或 gh 连 GitHub 失败、像是代理问题：命令前加',
     '   env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY 再试一次。',
     '10. 最后单独一行输出：完成：PR #<号>；做不下去就输出：卡住：<原因>',
@@ -404,6 +416,22 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
         '-c',
         `model_reasoning_effort="${effort}"`,
         ...(modelId ? ['--model', modelId] : []),
+      ],
+      stdinFile: promptFile,
+      extraEnv: {},
+    };
+  // Claude 一律经 reclaude 起（通用段）。-p 不带位置参数时从 stdin 读提示词；工作目录由起进程那一步定（没有 --cwd 这个参数）。
+  // 用户级的钩子（pretool.mjs 那几条拦截）在无头模式下照常生效，--dangerously-skip-permissions 只是不弹权限确认。
+  if (model === 'claude')
+    return {
+      command: 'reclaude',
+      args: [
+        '-p',
+        '--dangerously-skip-permissions',
+        '--model',
+        modelId ?? CLAUDE_DEFAULT_MODEL,
+        '--effort',
+        effort,
       ],
       stdinFile: promptFile,
       extraEnv: {},
@@ -524,6 +552,10 @@ async function cmdStart(p, io) {
   const noAutomerge = p.flags.has('no-automerge');
 
   if (model === 'kimi') return fail(io, KIMI_UNSUPPORTED);
+  if (model === 'claude') {
+    const bad = claudeModelProblem(modelId);
+    if (bad) return fail(io, bad);
+  }
 
   // 档位先定：骨架读不到、认不出就不起，什么都还没建
   const picked =

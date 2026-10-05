@@ -587,6 +587,87 @@ describe('start：【故意造出的失败】', () => {
     expect(w.gitCalls).toEqual([]);
   });
 
+  // #1016：长活搬出聊天会话——Claude 工人也走这条独立进程的路
+  it('claude：经 reclaude 起，prompt 走标准输入，默认 opus，带思考档位；收尾交代里有四类人闸那一段', async () => {
+    const w = world();
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 77 });
+    const code = await w.run([
+      'start',
+      '--model',
+      'claude',
+      '--name',
+      'w7',
+      '--brief',
+      brief(w),
+      '--effort',
+      'high',
+    ]);
+    expect(code).toBe(0);
+    const promptFile = join(w.home, '.fleet-dao', 'workers', 'w7', 'prompt.txt');
+    const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
+    expect(spec.command).toBe('reclaude');
+    expect(spec.args).toEqual([
+      '-p',
+      '--dangerously-skip-permissions',
+      '--model',
+      'opus',
+      '--effort',
+      'high',
+    ]);
+    expect(spec.stdinFile).toBe(promptFile);
+    expect(spec.cwd).toBe(join(w.parent, 'fd-w-w7'));
+    const prompt = readFileSync(promptFile, 'utf8');
+    for (const gate of ['对外发布', '花钱', '删数据', '改标准']) expect(prompt, gate).toContain(gate);
+    expect(prompt).toContain('卡住：人闸——');
+  });
+
+  it('claude：--model-id sonnet 透传', async () => {
+    const w = world();
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 78 });
+    const code = await w.run([
+      'start',
+      '--model',
+      'claude',
+      '--name',
+      'w8',
+      '--brief',
+      brief(w),
+      '--model-id',
+      'sonnet',
+      '--effort',
+      'medium',
+    ]);
+    expect(code).toBe(0);
+    expect(must(w.spawnCalls[0], '没有 spawnCalls[0]').args).toContain('sonnet');
+  });
+
+  it('【故意造出的失败】claude 工人要用 Fable（或别的不是 Opus、Sonnet 的型号）：拒起，不碰 git/gh/pnpm/spawn', async () => {
+    for (const id of ['claude-fable-5-1', 'fable', 'haiku', 'gpt-5.6-luna']) {
+      const w = world();
+      const code = await w.run([
+        'start',
+        '--model',
+        'claude',
+        '--name',
+        'w9',
+        '--brief',
+        brief(w),
+        '--model-id',
+        id,
+        '--effort',
+        'high',
+      ]);
+      expect(code, id).not.toBe(0);
+      expect(w.err.join('\n'), id).toContain('只用 Opus 或 Sonnet');
+      expect(w.gitCalls, id).toEqual([]);
+      expect(w.spawnCalls, id).toEqual([]);
+    }
+  });
+
   it('不认识的档位：退出码 1，不碰 git/gh/pnpm/spawn', async () => {
     const w = world();
     const code = await w.run([
