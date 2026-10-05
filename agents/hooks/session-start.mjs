@@ -15,7 +15,7 @@
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -653,16 +653,64 @@ export function sessionStart({
  * 3. 这个树上的提交**一条都不比远端多**（`rev-list HEAD --not --remotes` 是空的）：
  *    多一条就是有没推上去的活，**绝不删**，照实报。（判「远端」不判「origin/main」：
  *    树常常建在某条开着 PR 的分支的头上，那些提交在对应的远端分支上、安全，判 main 会把它们全留下。）
- * 4. **最近 30 分钟没动过**：另一个会话此刻正开着一棵树干活时，它可能刚好是「干净、已推」的
+ * 4. **最近 2 小时没动过**（看树根和它在 git 里的管理目录，见 lastTouched）：另一个会话此刻正开着一棵树干活时，它可能刚好是「干净、已推」的
  *    ——只按前三条就会把它删掉、把人家正在干的事打断。刚建出来、刚提交过的树都不碰。
- *    （代价是刚做完的树要等半小时才收走，而这条命中率低、留着也无害。）
+ *    （代价是刚做完的树要等两小时才收走，而这条命中率低、留着也无害。）
  *
  * 超出这四条的一律不动、也不当成「查成」——2026-10-02 清那 29 棵时，就是靠第 3 条救回了决定 0006
  * （`decision-align` 树里那份决定从没进过主线）。
  */
 
-/** 多久没动过才收走（第 4 条）：另一个会话可能正开着一棵树干活。 */
-export const SWEEP_IDLE_MS = 30 * 60_000;
+/**
+ * 多久没动过才收走（第 4 条）：另一个会话可能正开着一棵树干活。
+ * 2026-10-05 从 30 分钟放到 2 小时：一个会话 PR 合了之后常常接着在同一棵树里切下一条分支，中间隔半小时以上很常见；
+ * 晚两小时收走一棵没用的树没有代价，早收走一棵在用的代价很大（见 lastTouched）。
+ */
+export const SWEEP_IDLE_MS = 2 * 60 * 60_000;
+
+/**
+ * 这棵树最后一次被动是什么时候。只看树根目录的修改时间是错的：在里面改文件、提交、切分支都不动树根那一层，
+ * 一棵正在用的树照样显得「搁了很久」——2026-10-05 审查会话正在用的树就是这么被删成空壳的。
+ * 所以连它在 git 里的管理目录一起看（index 在暂存、提交、切分支时都会重写，HEAD 和 logs/HEAD 记切分支和提交）。
+ * 读不出来返回 null，调用方当「可能在用」留着。
+ */
+function lastTouched(dir, g) {
+  let latest;
+  try {
+    latest = statSync(dir).mtimeMs;
+  } catch {
+    return null;
+  }
+  const admin = g('-C', dir, 'rev-parse', '--absolute-git-dir');
+  if (!ok(admin)) return null;
+  for (const f of ['index', 'HEAD', join('logs', 'HEAD')]) {
+    try {
+      latest = Math.max(latest, statSync(join(admin.stdout.trim(), f)).mtimeMs);
+    } catch {
+      // 没有这份文件（刚建的树可能还没有 logs）不算读不出来
+    }
+  }
+  return latest;
+}
+
+/** 工作树的空壳：目录还在、里面的 .git 没了。在里面跑 git 会顺着往上找到主检出，命令就落在主检出上。 */
+function isShell(dir) {
+  try {
+    return statSync(dir).isDirectory() && !existsSync(join(dir, '.git'));
+  } catch {
+    return false;
+  }
+}
+
+/** 删空壳，删不掉（有进程占着）返回 false。空壳里只会是删树时剩下的东西：能删的树都是干净、提交全在远端的。 */
+function removeShell(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 2 });
+  } catch {
+    // 下面照实看还在不在
+  }
+  return !existsSync(dir);
+}
 
 export function sweepWorktrees(cwd, git, now = Date.now()) {
   const g = (...a) => git(cwd, a);
@@ -685,8 +733,8 @@ export function sweepWorktrees(cwd, git, now = Date.now()) {
     if (resolve(dir) === resolve(rootPath)) continue; // 主检出自己不是「顺手清」的对象
     dirs.push(dir);
   }
-  if (dirs.length === 0) return [];
   const kept = [];
+  const shells = [];
   let removed = 0;
   for (const dir of dirs) {
     const name = basename(dir);
@@ -698,10 +746,8 @@ export function sweepWorktrees(cwd, git, now = Date.now()) {
       else kept.push(name);
       continue;
     }
-    let touched;
-    try {
-      touched = statSync(dir).mtimeMs;
-    } catch {
+    const touched = lastTouched(dir, g);
+    if (touched === null) {
       kept.push(name);
       continue;
     }
@@ -724,9 +770,39 @@ export function sweepWorktrees(cwd, git, now = Date.now()) {
       continue;
     }
     if (ok(g('worktree', 'remove', '--force', dir))) removed += 1;
-    else kept.push(name);
+    else if (isShell(dir)) {
+      // 删到一半（Windows 上别的进程占着里面的文件）：.git 没了、目录还在。留着它，在里面跑的 git 会悄悄落到主检出上。
+      if (removeShell(dir)) removed += 1;
+      else shells.push(name);
+    } else kept.push(name);
+  }
+  // 以前删到一半留下的空壳（git 早不认它们了，上面那一圈看不见）
+  const home = join(rootPath, '.claude', 'worktrees');
+  let entries = [];
+  try {
+    entries = readdirSync(home);
+  } catch {
+    // 没有这个目录
+  }
+  let cleared = 0;
+  for (const name of entries) {
+    const dir = join(home, name);
+    if (dirs.some((d) => resolve(d) === resolve(dir)) || !isShell(dir)) continue;
+    // 刚建的目录先不碰：git worktree add 是先建目录、后写 .git
+    try {
+      if (now - statSync(dir).mtimeMs < SWEEP_IDLE_MS) continue;
+    } catch {
+      continue;
+    }
+    if (removeShell(dir)) cleared += 1;
+    else shells.push(name);
   }
   const lines = [];
+  if (cleared > 0) lines.push(`顺手清掉了 ${cleared} 个以前删到一半留下的工作树空壳。`);
+  if (shells.length > 0)
+    lines.push(
+      `注意：${shells.length} 个工作树空壳删不掉（有进程占着）：${shells.slice(0, 5).join('、')}${shells.length > 5 ? ' …' : ''}。别在里面跑 git——它已经不是工作树，命令会落到主检出上。`,
+    );
   if (removed > 0) lines.push(`顺手清掉了 ${removed} 棵本机没用的工作树（提交都在远端上了）。`);
   if (stale > 0) lines.push(`顺手清掉了 ${stale} 条工作树记录（目录早没了，git worktree prune）。`);
   if (kept.length > 0)

@@ -624,11 +624,11 @@ describe('顺手清 .claude/worktrees/ 里攒着的旧树', SLOW, () => {
     return readdirSync(dir);
   };
 
-  it('提交都在远端上、没有未提交的改动、也搁了半小时：删掉，并说一句', () => {
+  it('提交都在远端上、没有未提交的改动、也搁了两小时：删掉，并说一句', () => {
     const w = world();
     tree(w, 'old-merged');
     expect(listTrees(w)).toContain('old-merged');
-    const lines = hook.sweepWorktrees(w.work, git, Date.now() + 31 * 60_000);
+    const lines = hook.sweepWorktrees(w.work, git, Date.now() + 121 * 60_000);
     expect(listTrees(w)).not.toContain('old-merged');
     expect(lines.join('\n')).toMatch(/清掉了 1 棵/);
   });
@@ -685,10 +685,57 @@ describe('刚动过的树不碰（可能有人正在里面干活）', SLOW, () =
     const lines = hook.sweepWorktrees(w.work, git);
     expect(existsSync(dir)).toBe(true);
     expect(lines.join('\n')).toMatch(/还有 1 棵没清/);
-    // 过了半小时再跑：收走
-    const later = hook.sweepWorktrees(w.work, git, Date.now() + 31 * 60_000);
+    // 过了两小时再跑：收走
+    const later = hook.sweepWorktrees(w.work, git, Date.now() + 121 * 60_000);
     expect(existsSync(dir)).toBe(false);
     expect(later.join('\n')).toMatch(/清掉了 1 棵/);
+  });
+
+  it('【故意造出的失败】树根那一层很久没动、但刚在里面提交过：不收走（2026-10-05 一棵正在用的树就是只看树根被删成空壳的）', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', 'in-use');
+    mkdirSync(join(w.work, '.claude', 'worktrees'), { recursive: true });
+    g(w.work, 'worktree', 'add', '-q', '-b', 'in-use', dir, 'HEAD');
+    g(dir, 'push', '-q', 'origin', 'in-use'); // 提交都在远端上、也没有未提交的改动：前三条全过
+    const old = new Date(Date.now() - 3 * 60 * 60_000);
+    utimesSync(dir, old, old); // 树根三小时没动；管理目录里的 index、HEAD 是刚写的
+    const lines = hook.sweepWorktrees(w.work, git);
+    expect(existsSync(join(dir, '.git'))).toBe(true);
+    expect(lines.join('\n')).toMatch(/还有 1 棵没清.*in-use/s);
+  });
+});
+
+describe('删到一半留下的空壳（目录在、.git 没了）', SLOW, () => {
+  it('搁了两小时以上的空壳：清掉并说一句——留着它，在里面跑的 git 会落到主检出上', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', 'half-gone');
+    mkdirSync(join(dir, 'node_modules'), { recursive: true });
+    writeFileSync(join(dir, 'package.json'), '{}\n');
+    const old = new Date(Date.now() - 3 * 60 * 60_000);
+    utimesSync(dir, old, old);
+    const lines = hook.sweepWorktrees(w.work, git);
+    expect(existsSync(dir)).toBe(false);
+    expect(lines.join('\n')).toMatch(/清掉了 1 个以前删到一半留下的工作树空壳/);
+  });
+
+  it('刚建的没有 .git 的目录：不碰（git worktree add 是先建目录、后写 .git）', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', 'being-made');
+    mkdirSync(dir, { recursive: true });
+    expect(hook.sweepWorktrees(w.work, git)).toEqual([]);
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it('真的工作树（有 .git）不当空壳删', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', 'real');
+    mkdirSync(join(w.work, '.claude', 'worktrees'), { recursive: true });
+    g(w.work, 'worktree', 'add', '-q', '--detach', dir, 'HEAD');
+    writeFileSync(join(dir, 'notes.md'), '没提交的东西\n');
+    const old = new Date(Date.now() - 3 * 60 * 60_000);
+    utimesSync(dir, old, old);
+    hook.sweepWorktrees(w.work, git);
+    expect(existsSync(join(dir, 'notes.md'))).toBe(true);
   });
 });
 
