@@ -5,7 +5,7 @@ import { toRoute } from '../src/domain-map.ts';
 import { routeProbeTargets, saveRouteProbe } from '../src/queries/probe.ts';
 import { channels, models, pools, routes, routingCatalog } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRoute, catalog, MIN, NOW, setRoutingLayers, setStageOrder } from './helpers.ts';
+import { addRoute, catalog, MIN, NOW, setRoutingLayers } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -58,8 +58,6 @@ describe('读：每条路由探得了探不了的事实', () => {
     });
     // relay-opus 在它的模型下关着：不算在用
     await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.routeId, 'relay-opus'));
-    // 旧的平铺表里 relay-opus 开着：在不在用只看路由两层
-    await setStageOrder(t.db, 'review', ['relay-opus']);
 
     const targets = await routeProbeTargets(t.db);
     expect(targets.map((x) => x.routeId)).toEqual(['car', 'k3', 'meter', 'relay-opus']);

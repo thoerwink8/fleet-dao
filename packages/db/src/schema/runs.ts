@@ -18,7 +18,7 @@
 // - route_outcome 是这一次算不算路由的账（ok | fail | neutral），和 session_runs.route_outcome 同一个口径，选路的熔断、战绩
 //   两张表并起来读（queries/pool-runs.ts，#758）。收场时由引擎判好写下（runner/evidence.ts）；还在跑的不许有；空的（老行、
 //   Fusion 验证那一笔流水）按不算账读，不进熔断、战绩。
-// 表名就叫 runs（和 Fusion 的 sessionRuns / verifyRounds 分开：Fusion 那两张老表本切片不动）。
+// 表名就叫 runs（和 Fusion 的 sessionRuns 分开：那张老表还有读方，没删）。
 //
 // pool_reservations（#757）是一段选定路由之后、写下开跑那一行之前预占着的池的名额：一行就是「这张单的这一段已经派到这条
 // 路由上、还在建树或等内存」。怎么占、怎么交接、怎么放都在 queries/pool-runs.ts，别处不写这张表。（和账号池整池暂停的

@@ -260,6 +260,13 @@
       "when": 1791186559834,
       "tag": "0036_node_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791190373186,
+      "tag": "0037_drop_dead_tables",
+      "breakpoints": true
     }
   ]
 }

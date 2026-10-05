@@ -645,6 +645,59 @@ describe('0025：路由两层（只加表、加一条唯一约束，#574）', ()
   );
 });
 
+describe('0037：删八张没人读写的表（只放删表语句）', () => {
+  const target = ordered.findIndex((e) => e.tag.startsWith('0037_'));
+  const DROPPED = [
+    'feishu_cards',
+    'feishu_drafts',
+    'feishu_follows',
+    'feishu_outbox',
+    'session_stops',
+    'stage_policies',
+    'stage_policy_routes',
+    'verify_rounds',
+  ];
+  const exists = async (pg: PGlite, name: string) =>
+    (await pg.query<{ r: string | null }>(`select to_regclass('public.${name}')::text as r`)).rows[0]?.r !==
+    null;
+
+  it(
+    '旧库升级：八张表连旧行一起没了；别的表（session_runs、routes）和它们的行原样在；删过的表读不了',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'relay', 'opus', 'claude-code');
+        insert into stage_policies (stage) values ('execute');
+        insert into stage_policy_routes (stage, route_id, position, enabled) values ('execute', 'r1', 0, true);
+        insert into session_stops (run_id, reason) values (gen_random_uuid(), 'x');
+      `);
+        for (const name of DROPPED) expect(await exists(pg, name), name).toBe(true);
+
+        await runMigration(pg, ordered[target]?.tag ?? '');
+
+        for (const name of DROPPED) expect(await exists(pg, name), name).toBe(false);
+        expect(await exists(pg, 'session_runs')).toBe(true);
+        expect((await pg.query('select id from routes')).rows).toEqual([{ id: 'r1' }]);
+        await expect(pg.query('select * from stage_policy_routes')).rejects.toThrow(/does not exist/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it('【故意造出的失败】schema 里不许再有这八张表，也不许少了 session_runs（它还有读方）', () => {
+    for (const name of DROPPED) expect(schemaTables).not.toContain(name);
+    expect(schemaTables).toContain('session_runs');
+  });
+});
+
 describe('测试库', () => {
   it(
     '两份测试库互相看不见对方的数据',
