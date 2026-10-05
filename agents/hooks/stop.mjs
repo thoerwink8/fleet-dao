@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitOk as ok, gitRunner } from './git-run.mjs';
+import { gitRunner, gitOk as ok } from './git-run.mjs';
 import { cleanId, decideStop, stateDir, withOwed } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */

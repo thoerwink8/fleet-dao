@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { gitBroken as broke, gitOk as ranOk, gitRunner, gitWhy as why } from './git-run.mjs';
+import { gitBroken as broke, gitRunner, gitOk as ranOk, gitWhy as why } from './git-run.mjs';
 
 /** 专用检出放哪：~/.fleet-dao/origin-main（Windows、Linux 一样） */
 export const SYNC_DIR = join('.fleet-dao', 'origin-main');

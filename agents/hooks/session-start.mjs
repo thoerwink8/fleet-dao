@@ -22,7 +22,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchWithFallback } from './fresh-main.mjs';
-import { gitBroken, gitOk as ok, gitRunner, gitWhy as why } from './git-run.mjs';
+import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
 import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
