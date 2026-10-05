@@ -165,7 +165,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     expect(calls.arm).toBe(1); // 第一轮没过，没挂
   });
 
-  it('会话没跑成（模型对不上）：按失败分流换一条路由再来，不在原路硬重', async () => {
+  it('会话没跑成（模型对不上，是路由配置的事）：停下报警等人，不再自动换路由；点「继续」后再来一次', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       segment: async (_i, n) =>
@@ -181,14 +181,24 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     const run = await withWorker(
       env,
       world,
-      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
-      {
-        tasks,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '模型对不上，停下等人');
+        expect(s.waiting?.detail).toContain('回话的模型不是点名的那个');
+        expect(s.lastProblem).toContain('回话的模型不是点名的那个');
+        expect(calls.segment).toHaveLength(1); // 没有自动换路由再来
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
       },
+      { tasks },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.segment.map((s) => s.route.routeId)).toEqual(['r1', 'r2']);
-    // 动手轮数没多算：换路由不是返工
+    expect(calls.segment).toHaveLength(2);
+    expect(world.alerts[0]).toMatchObject({
+      level: 'stuck',
+      title: expect.stringContaining('回话的模型不是点名的那个'),
+    });
+    // 动手轮数没多算：停下等人不是返工
     expect(run.rounds).toBe(1);
   });
 
@@ -872,7 +882,7 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
     expect(world.alerts).toEqual([]);
   });
 
-  it('切号前后同一个失败原文：切号不当「上一次」，照样认出「和上一次一字不差」、不在原路硬重（换路由）', async () => {
+  it('切号前后同一个失败原文：切号不当「上一次」，照样认出「和上一次一字不差」、不在原路硬重（停下等人）', async () => {
     const picks: PickRouteInput[] = [];
     const world = switching([CAR, CAR, SOLO, CAR], picks);
     const WEIRD: RunSegmentResult = {
@@ -887,13 +897,21 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
     const run = await withWorker(
       env,
       world,
-      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      async (q) => {
+        const h = await start(q, input());
+        // 第 3 回（切过去之后）又是同一句：不再原路重试，停下等人（原来是换路由）
+        const s = await statusUntil(h, parked, '同一句原文再犯，停下等人');
+        expect(s.lastProblem).toContain('一字不差');
+        expect(calls.segment).toHaveLength(3);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
       { tasks },
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(4);
-    // 第 3 回（切过去之后）又是同一句：不再原路重试，换路由——避开第 3 回跑的那条
+    // 点「继续」之后重新选路：不粘着、也不避开谁（挂起后计数和避开都清零）
     expect(picks[3]?.stickRouteId).toBeUndefined();
-    expect(picks[3]?.avoidRouteIds).toEqual(['solo']);
+    expect(picks[3]?.avoidRouteIds).toEqual([]);
   });
 });

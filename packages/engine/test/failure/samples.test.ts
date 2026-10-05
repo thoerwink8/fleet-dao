@@ -1,4 +1,6 @@
 // 真实报错样本逐条过一遍规则表：每条样本都要分到对的下一步动作；每条规则都要有样本撑着。
+// 瘦身（#1072）前后这 150 条样本认出的规则、要不要报警、算不算路由的失败一条没变；变的只有「换路由、换模型」那一级没了——
+// 原来第一步是换路由的，现在是等一等（繁忙、限流）或停下报人（要人修的）。
 // 样本里有没有能认出人、账号、机器、组织的东西，由全仓的卫生检查（packages/hygiene）管。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -46,9 +48,9 @@ describe('真实样本逐条分对', () => {
     it(`${s.id}（${s.provenance}）→ ${s.expect.rule} ${s.expect.action}`, () => {
       const v = run(s);
       expect({ rule: v.rule, action: v.action }).toEqual({ rule: s.expect.rule, action: s.expect.action });
-      // 避开的范围：换路由时是这一步的 avoid；等清零、挂起时没有这一步的 avoid，看所有任务一起避开的 shared。
-      if (s.expect.avoid !== undefined) expect((v.avoid ?? v.shared)?.scope).toBe(s.expect.avoid);
-      if (s.expect.until !== undefined) expect((v.avoid ?? v.shared)?.until).toBe(s.expect.until);
+      // 整池暂停（登录失效、封号、余额不够、设备被撤销）：所有任务一起避开，路由探针按它把池暂停。
+      if (s.expect.avoid !== undefined) expect(v.shared?.scope).toBe(s.expect.avoid);
+      if (s.expect.until !== undefined) expect(v.shared?.until).toBe(s.expect.until);
       if (s.expect.alert !== undefined) expect(v.alert).toBe(s.expect.alert);
       if (s.expect.routeOutcome !== undefined) expect(v.routeOutcome).toBe(s.expect.routeOutcome);
       if (s.expect.counter !== undefined) expect(v.counter).toBe(s.expect.counter);
@@ -82,10 +84,13 @@ describe('规则表和夹具对得上', () => {
     expect([...byRule.keys()].filter((id) => !known.has(id))).toEqual([]);
   });
 
-  it('规则编号不重复，梯子都以挂起收尾', () => {
+  it('规则编号不重复，每条规则都归在五种打断原因之一', () => {
     const ids = RULES.map((r) => r.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(RULES.filter((r) => r.ladder.at(-1) !== 'park').map((r) => r.id)).toEqual([]);
+    const kinds = ['resume', 'wait', 'retry', 'rework', 'stop'];
+    expect(RULES.filter((r) => !kinds.includes(r.kind)).map((r) => r.id)).toEqual([]);
+    // 五种都有规则撑着：少了一种就是处置表里有一行从没被用过
+    expect(kinds.filter((k) => !RULES.some((r) => r.kind === k))).toEqual([]);
   });
 
   it('跳过的样本写明了为什么，而且没有混进样本表', () => {
