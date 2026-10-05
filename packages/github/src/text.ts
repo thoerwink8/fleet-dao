@@ -30,8 +30,9 @@ export function neutralizeCloseKeywords(text: string): string {
 }
 
 // —— PR 正文：栏目以仓根 .github/pull_request_template.md 为准。人开的 PR 由 GitHub 套那份模板，引擎开的走这里；
-// 两边栏目对不上，test/text.test.ts 会红。模板只有四栏（#654）：做了什么、怎么验证的、还欠什么、需求；有「按推荐先做了」
-// 「修提醒」这两种情况才多写一行。整篇 14 行以内（设计 §7）。——
+// 模板的栏这里都得有、顺序一样，test/text.test.ts 盯着。模板只有两栏（#1066）：做了什么、需求；引擎另外多写「怎么验证的」
+// 「还欠什么」两栏（它交的验证证据，core 的 verificationLines 生成，人开的 PR 不写）；有「按推荐先做了」「修提醒」这两种情况
+// 才多写一行。整篇 14 行以内（设计 §7）。——
 
 export interface PrBodyInput {
   /** 对应的需求（issue 号）。 */

@@ -143,7 +143,7 @@ export {
   PR_COLUMNS,
   prColumns,
 } from './pr-columns.ts';
-export { annotation, checkPlanValue, PLAN_DOC } from './pr-fields.ts';
+export { annotation } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { releaseVersion } from './publish-actions.ts';
 export { fsRepo, type RepoView } from './repo.ts';

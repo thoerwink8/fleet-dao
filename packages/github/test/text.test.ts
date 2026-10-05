@@ -29,13 +29,13 @@ describe('PR 正文模板', () => {
   /** 栏目标题：行首的「**标题**：」。自己按文字认，不借 renderPrBody 的任何东西。 */
   const columns = (text: string) => [...text.matchAll(/^\*\*([^*\n]+)\*\*：/gm)].map((m) => m[1]);
 
-  it('栏目和仓里的 .github/pull_request_template.md 一样、顺序也一样（四栏，#654）：引擎开的 PR 和人开的长一个样', () => {
+  it('仓里的 .github/pull_request_template.md 的栏（两栏，#1066）引擎开的 PR 都有、顺序一样；引擎多写的「怎么验证的」「还欠什么」是它交的验证证据', () => {
     const template = readFileSync(
       new URL('../../../.github/pull_request_template.md', import.meta.url),
       'utf8',
     );
     const fromTemplate = columns(template);
-    expect(fromTemplate).toEqual(['做了什么', '怎么验证的', '还欠什么', '需求']); // 模板里一栏都没认出来，下面那条就成了拿空的去比
+    expect(fromTemplate).toEqual(['做了什么', '需求']); // 模板里一栏都没认出来，下面那条就成了拿空的去比
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
@@ -44,7 +44,9 @@ describe('PR 正文模板', () => {
       owed: ['过期提示放到子任务 C'],
       risks: ['旧的登录接口还在用'],
     });
-    expect(columns(body)).toEqual(fromTemplate);
+    const fromEngine = columns(body);
+    expect(fromEngine).toEqual(['做了什么', '怎么验证的', '还欠什么', '需求']);
+    expect(fromEngine.filter((c) => fromTemplate.includes(c ?? ''))).toEqual(fromTemplate);
   });
 
   it('14 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {

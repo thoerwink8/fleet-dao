@@ -3,7 +3,8 @@
 // - 没碰改标准路径（standard-paths.json）就当场 gh pr merge --auto --squash。碰先审后合路径的也挂：merge-gate 是必过检查，
 //   没有通过的 second-opinion 合不进去；只多打一行提醒要跑第二意见。
 // - 碰了改标准就不挂，打「人闸：改标准，等创始人同意」；带 --founder-approved 才挂（正文里要有一段含「原话」二字——
-//   贴着他的原话和时间；命令只查这两个字，不做更多猜测）。
+//   贴着他的原话和时间；命令只查这两个字，不做更多猜测）。pnpm pr:open 的入口是 pr-compose.ts 的 prOpenCli：不给 --body-file
+//   时它生成正文（--founder-quote 生成那一段），再交给这里；这里的闸不管正文怎么来的。
 // - 草稿、带 --no-automerge 的不挂（工人领了改标准的活用后者）。
 // - 必挂单（#1052：2026-10-05 起 37 个 PR 没一个挂单，v4 里程碑页上看不出进展）：正文「需求」栏里要读到 Closes #号 / Refs #号
 //   （认法在 pr-columns.ts），而且那张单真在本仓（GitHub 现查）；读不到、单不存在就一个 PR 也不开。确实没有单：
@@ -19,12 +20,21 @@ import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from '.
 import { issueColumnRefs, withIssueColumn } from './pr-columns.ts';
 import { parseCreatedPr } from './publish-actions.ts';
 
-export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> --body-file <正文文件> [--no-issue "<理由>"] [--draft] [--base <分支>] [--founder-approved] [--no-automerge]
+export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-file <正文文件> | 生成正文的参数] [--draft] [--base <分支>] [--no-automerge]
   在要开 PR 的分支上跑（先 git push）。开 PR，没碰改标准路径就当场挂自动合并（squash）。
-  正文「需求」栏要写 Closes #号（这个 PR 做完就关单）或 Refs #号（母单分片、关不了）：读不到、单不存在就不开；
-  挂了单的 PR 顺手挂上那张单的里程碑。
-  --no-issue "<理由>" 确实没有单：理由原样写进「需求」栏（「无：<理由>」）；需求栏已经挂了单就不能再带
-  --founder-approved  改标准、创始人已经同意：正文里要有一段贴着他的原话和时间（含「原话」二字）
+  正文有两种来源：
+  ① --body-file <正文文件>：自己写（只有「做了什么」「需求」两栏，见 .github/pull_request_template.md）
+  ② 不给 --body-file：命令自己生成。「做了什么」取这条分支相对 origin/<base> 的提交说明（多条列成短列表）；「需求」栏写：
+     --closes <号>        这个 PR 做完就关单（可重复）
+     --refs <号>          母单分片、关不了它（可重复）
+     --new-issue "<标题>" 当场开一张单并 Closes 它：要带 --kind 需求|缺陷|杂项、--milestone <版本全名|v<N>|未排期>，缺了不开；
+                          --local 给新单多贴「本机做」
+     --no-issue "<理由>"  确实没有单：理由原样写进「需求」栏（「无：<理由>」）
+     --founder-quote "<原话>" --at "<时间>"  改标准、创始人已经同意：在「需求」栏下面写「人闸：改标准」、再写一段「创始人原话」，
+                          并挂自动合并（等价于 --founder-approved 加手写那一段）
+  需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开；挂了单的 PR 顺手挂上那张单的里程碑。
+  --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
+  --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一段贴着他的原话和时间（含「原话」二字）
   --no-automerge      只开 PR、不挂自动合并`;
 
 export interface OpenDeps {
