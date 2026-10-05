@@ -44,10 +44,14 @@ export const EnvVersionSchema = z.object({
   problems: z.array(z.string()),
 });
 
-/** 在跑几个会话、各自在哪一段。 */
+/**
+ * 在跑几个会话、各自在哪一段。
+ * byStage 只放这一轮真有的那几段（没有在跑会话的段整个不给，不是给 0）：所以是部分映射，不是九段俱全的记录。
+ * 后端 sessionsFact（packages/api/src/env-view.ts）就是这么攒的，页面按有的那几段显示。
+ */
 export const EnvSessionsSchema = z.object({
   total: z.number().int().min(0),
-  byStage: z.record(StageKindSchema, z.number().int().min(0)),
+  byStage: z.partialRecord(StageKindSchema, z.number().int().min(0)),
 });
 
 export const EnvPoolsSchema = z.object({

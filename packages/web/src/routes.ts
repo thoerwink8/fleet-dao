@@ -14,6 +14,8 @@ const cockpitOnly = demo
       route('routing', 'routes/routing.tsx'),
       // 每条路由起会话的思考档位（#470）：演示版没有这个模块，也改不了。
       route('efforts', 'routes/efforts.tsx'),
+      // 环境页（#820 片 1）：这一台环境现在怎样，只读；演示版没有这一页（露机器名、版本号、会话数，R10）。
+      route('env', 'routes/env.tsx'),
       // 第二批页面（P3 之后）：先放占位页。
       route('models', 'routes/soon.tsx', { id: 'soon-models' }),
       route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
