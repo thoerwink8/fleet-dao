@@ -12,31 +12,9 @@
 // - 两次都没成，把两次各自为什么写在一起返回；绝不把「没取成」说成成功（调用方据此明说「没查成」或拦下）。
 // - 只管 fetch，不动工作区、不动本地分支（钩子里改检出太冒险；追平本地 main 另有开会话钩子里的快进）。
 
-import { spawnSync } from 'node:child_process';
+import { hasProxy } from './git-run.mjs';
 
-/** @typedef {{ status: number | null, stdout: string, stderr: string, error?: (Error & { code?: string }) | undefined, timeoutMs?: number }} GitResult 一次 git 命令的结果 */
-
-/** 直连时要从环境里拿掉的变量（大小写、ALL_PROXY 都算） */
-export const PROXY_VARS = [
-  'https_proxy',
-  'http_proxy',
-  'HTTPS_PROXY',
-  'HTTP_PROXY',
-  'all_proxy',
-  'ALL_PROXY',
-];
-
-/** 环境里有没有设代理（任一个非空） */
-export function hasProxy(env = process.env) {
-  return PROXY_VARS.some((k) => typeof env[k] === 'string' && env[k] !== '');
-}
-
-/** 去掉代理变量的环境副本（NO_PROXY 不动：它只说哪些地址不走代理，留着无害） */
-export function withoutProxy(env = process.env) {
-  const out = { ...env };
-  for (const k of PROXY_VARS) delete out[k];
-  return out;
-}
+/** @typedef {import('./git-run.mjs').GitResult} GitResult 一次 git 命令的结果 */
 
 /**
  * 这次失败是不是「几个进程同时在取同一个远端、别人刚把引用更新了」的竞争：
@@ -51,7 +29,7 @@ export function isRefRace(r) {
 /**
  * 取远端：先照环境原样，没成且环境里设着代理，再去掉代理取一次。
  * `git(cwd, args, opts)` 是各钩子注入的 git 跑法；`opts.direct` 为 true 时它要用去掉代理的环境跑。
- * `okOf(r)` 判一次成没成，`whyOf(r)` 说一次为什么没成（各钩子自己的那一份，口径和它们别处一致）。
+ * `okOf(r)` 判一次成没成，`whyOf(r)` 说一次为什么没成（一般就是 git-run.mjs 的 gitOk、gitWhy）。
  * 返回 { ok, via, why }：via 是最后成了（或最后试的）那条路 'env' | 'direct'；ok 为 false 时 why 带两次各自的原因。
  * @param {(cwd: string, args: string[], opts?: { direct?: boolean }) => GitResult} git
  * @param {string} cwd
@@ -121,39 +99,4 @@ export function freshBeforeSubagent(o) {
       '子代理会在旧代码上干活、开出来的 PR 满是冲突。先让网络通了再起（自己跑一遍 git fetch origin 看报什么），' +
       '或者这次不用 isolation: "worktree"、在交代里写明开工第一步先 git fetch origin main 再 git rebase origin/main。',
   };
-}
-
-/** 钩子里跑 git 的一份：opts.direct 为 true 时去掉代理；返回 { status, stdout, stderr, error, timeoutMs } */
-export function gitCall(/** @type {number} */ timeoutMs, /** @type {number} */ directTimeoutMs = timeoutMs) {
-  return (
-    /** @type {string} */ cwd,
-    /** @type {string[]} */ args,
-    /** @type {{ direct?: boolean }} */ opts = {},
-  ) => {
-    const r = spawnSync('git', args, {
-      cwd,
-      ...(opts.direct ? { env: withoutProxy() } : {}),
-      encoding: 'utf8',
-      timeout: opts.direct ? directTimeoutMs : timeoutMs,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
-  };
-}
-
-/** 一次 git 成没成 */
-export const gitOk = (/** @type {GitResult} */ r) => r.status === 0 && !r.error;
-
-/** 一次 git 为什么没成：超时、起不来，或输出的第一行 */
-export function gitWhy(/** @type {GitResult} */ r) {
-  if (r.error) {
-    if (r.error.code === 'ETIMEDOUT') return `超过 ${Math.round((r.timeoutMs ?? 0) / 1000)} 秒没完`;
-    return `起不来：${r.error.message}`;
-  }
-  const first = `${r.stderr ?? ''}\n${r.stdout ?? ''}`
-    .split(/\r?\n/)
-    .map((/** @type {string} */ l) => l.trim())
-    .find(Boolean);
-  return first ?? `退出码 ${r.status}`;
 }

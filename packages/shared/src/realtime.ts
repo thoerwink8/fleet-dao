@@ -18,6 +18,8 @@ export const REALTIME_TABLES = [
   'settings',
   'audit_log',
   'approvals',
+  // 别的环境推来的快照（一个环境一行，id 是 node_id）：看板的环境切换器、环境页并排读它。触发器在 0036。
+  'node_reports',
 ] as const;
 
 export type RealtimeTable = (typeof REALTIME_TABLES)[number];

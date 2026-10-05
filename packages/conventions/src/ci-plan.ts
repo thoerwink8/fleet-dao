@@ -196,6 +196,12 @@ export const PATH_RULES: readonly Rule[] = [
     units: [AGENTS_UNIT, 'agents-sync', 'adapters'],
     why: '钩子由 agents-sync 分发，引擎起 Claude 会话也直接用仓里这份',
   },
+  // conventions 的 intents-host.test.ts 拿登法国的 ssh 名字和法国引擎页（france-lib.mjs，import france-query.mjs）对拍
+  {
+    match: under('agents/skills/commander/scripts/france-'),
+    units: [AGENTS_UNIT, 'agents-sync', 'conventions'],
+    why: 'skill 由 agents-sync 分发；conventions 的测试拿 ssh 名字的判法和它对拍',
+  },
   {
     match: under('agents/'),
     units: [AGENTS_UNIT, 'agents-sync'],

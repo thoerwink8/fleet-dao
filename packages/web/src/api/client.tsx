@@ -202,18 +202,8 @@ export function useRepos() {
   return useQuery({ queryKey: keys.repos, queryFn: () => api.repos(), staleTime: 60_000 });
 }
 
-export function useBoard(repoId: string | undefined) {
-  const api = useApi();
-  return useQuery({
-    queryKey: keys.board(repoId ?? ''),
-    queryFn: () => api.board(repoId ?? ''),
-    enabled: Boolean(repoId),
-    placeholderData: (prev) => prev,
-  });
-}
-
 /**
- * 全部仓的看板（总览、任务清单、⌘K 用）。后端没有「全部任务」接口，按仓各拉一份。
+ * 全部仓的看板（顶栏切换仓的计数、审计页用）。后端没有「全部任务」接口，按仓各拉一份。
  * 有仓没读成时 error 有值、failed 列出是哪几个仓：用的地方要把它说出来，不能把「少了一个仓」当成「没有需求」。
  */
 export function useAllBoards(): { boards: Board[]; isLoading: boolean; error: unknown; failed: Repo[] } {
@@ -511,14 +501,12 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   notifications: [['notifications'], keys.home],
   audit_log: [['audit']],
   settings: [['settings']],
+  // 别的环境推来的快照：看板还没有读它的页面（环境切换器那一片接上 ['nodes']），先不作废任何查询。
+  node_reports: [],
 };
 
 function isRealtimeTable(table: string): table is RealtimeTable {
   return (REALTIME_TABLES as readonly string[]).includes(table);
-}
-
-export function applyLiveEvent(qc: QueryClient, e: LiveEvent) {
-  applyLiveEvents(qc, [e]);
 }
 
 /** 已经挂上「读完再拉一次」的缓存（同一份只挂一次）。 */

@@ -38,36 +38,3 @@ export function StatusDot({ tone, className }: { tone: Tone; className?: string 
     />
   );
 }
-
-/** 进度条；在跑的上面有一道光扫过。 */
-export function ToneBar({
-  value,
-  tone,
-  live,
-  className,
-}: {
-  value: number;
-  tone: Tone;
-  live?: boolean;
-  className?: string;
-}) {
-  const pct = Math.max(0, Math.min(1, value));
-  return (
-    <div
-      className={cn('h-1.5 w-full overflow-hidden rounded-full bg-foreground/[0.08]', className)}
-      role="progressbar"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(pct * 100)}
-    >
-      <div
-        className={cn(
-          'h-full rounded-full transition-[width] duration-700 ease-out',
-          toneBg[tone],
-          live && 'fd-sweep',
-        )}
-        style={{ width: `${pct === 0 ? 0 : Math.max(4, pct * 100)}%` }}
-      />
-    </div>
-  );
-}

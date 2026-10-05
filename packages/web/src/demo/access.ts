@@ -21,14 +21,6 @@ export function canSee(module: DemoModule): boolean {
   return loaded?.scope.modules.includes(module) ?? false;
 }
 
-const LEVELS: Record<DemoDetail, number> = { status: 0, titles: 1, process: 2 };
-
-/** 细节够不够这一级：status = 状态和耗时；titles = 还能看任务标题；process = 步骤清单和过程。 */
-export function canSeeDetail(level: DemoDetail): boolean {
-  if (!isDemo()) return true;
-  return LEVELS[loaded?.scope.detail ?? 'status'] >= LEVELS[level];
-}
-
 export function detailLevel(): DemoDetail {
   if (!isDemo()) return 'process';
   return loaded?.scope.detail ?? 'status';

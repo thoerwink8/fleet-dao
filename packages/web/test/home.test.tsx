@@ -48,7 +48,7 @@ const SAMPLE: HomeData = {
   health: {
     quota: { state: 'tight', detail: '2 个池快清零' },
     routes: { state: 'degraded', detail: '12 在线 · 2 探不通' },
-    engine: { state: 'off', detail: '临时调整 · 到 2026-10-05' },
+    engine: { state: 'off', detail: '这台机器按配置（release.env 的 FLEET_SERVICES）没开引擎' },
   },
   decisions: [
     {
@@ -350,7 +350,10 @@ describe('home（/）：引擎那一格（#902 D7）', () => {
   });
 
   test('off：写「引擎已停用」，用提示色（warn）不是红', () => {
-    renderHome({ status: 'data', data: withEngine({ state: 'off', detail: '临时调整' }) });
+    renderHome({
+      status: 'data',
+      data: withEngine({ state: 'off', detail: '这台机器按配置（release.env 的 FLEET_SERVICES）没开引擎' }),
+    });
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('warn');
     expect(engineChip()?.textContent).toContain('引擎已停用');
     expect(engineChip()?.className).not.toContain('border-st-fail');

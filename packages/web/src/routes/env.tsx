@@ -4,7 +4,7 @@
 // 要做成什么（specs/820-驾驶舱环境视图与中止恢复/方案.md §5 片 1）：
 // - 「回来看一眼」时，一眼看到：引擎在不在、在用哪版、落后主线没有、手上几个会话在跑、池占几个、健康红几项、最近拉单；
 // - 读不到的格子明说「没查成」和原因，不拿空或 0 冒充正常（通用段「底线」）；一项读失败不连累别的项；
-// - 「引擎关着（临时调整）」用等待色，不画成红：红了表示「真坏了要当场修」，关着是创始人拍的临时调整。
+// - 引擎「按配置没开」用等待色，不画成红：红了表示「真坏了要当场修」，按配置关着不是坏了（为什么关不在代码里写死）。
 //
 // 改这里之前必须知道：
 // - 这一页只在正式驾驶舱里（演示版没有这个模块，导航不给 module、路由表也不放）：它露机器名、在用版本、在跑会话数（R10）。
@@ -107,14 +107,14 @@ function Read({
   );
 }
 
-/** 引擎那一格：on / off（临时调整）/ down（真没连上）/ unknown（没查成）四态各说各的。 */
+/** 引擎那一格：on / off（按配置没开）/ down（真没连上）/ unknown（没查成）四态各说各的。 */
 function engineWords(e: EnvEngine): { value: string; sub: string; tone: Tone | undefined } {
   switch (e.state) {
     case 'on':
       return { value: '在跑', sub: e.detail ?? '探到了在拉活的工人', tone: 'done' };
     case 'off':
       return {
-        value: '关着（临时调整）',
+        value: '按配置没开',
         sub: e.detail ?? '按 release.env 的 FLEET_SERVICES 没开',
         tone: 'stall',
       };

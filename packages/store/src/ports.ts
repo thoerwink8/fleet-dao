@@ -8,6 +8,8 @@ import type {
   Channel,
   HistoryResponse,
   Model,
+  NodeReport,
+  NodeSnapshot,
   Pool,
   ProgressKind,
   QuotaWindow,
@@ -130,17 +132,6 @@ export interface AskRecord {
   followUpIssue?: number | undefined;
   /** 他改选了别的，引擎交给主导照改的时刻。 */
   appliedAt?: string | undefined;
-}
-
-/** 时间线上的一条原始记录；后端按 kind 和 payload 拼白话（views.ts 的 describeTimeline）。 */
-export interface TimelineRecord {
-  id: string;
-  at: string;
-  source: 'session' | 'engine' | 'person';
-  kind: string;
-  runId?: string | undefined;
-  subtaskId?: string | undefined;
-  payload?: unknown;
 }
 
 export interface JobRecord {
@@ -335,13 +326,6 @@ export interface BoardStore {
   /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
   getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
   lastSay(runId: string): Promise<{ text: string; at: string } | null>;
-  /**
-   * 一个需求的时间线，按 (at, id) 倒序，游标翻页不重不漏。来源：状态变化（kind=state）、会话排队 / 开工 / 结束
-   * （run_queued / run_started / run_ended）、会话进度（kind 就是 ProgressKind，量大的 tool / file 不放）、
-   * target 是这个需求或它的子任务的操作记录（kind 取 action 最后一段）、挂在这个需求上的通知（notification）。
-   * memory-store.ts 是参照实现。
-   */
-  listTimeline(taskId: string, page: PageRequest): Promise<Page<TimelineRecord>>;
   listAsks(taskId: string): Promise<AskRecord[]>;
   getAsk(id: string): Promise<AskRecord | null>;
   /** 写回答，和操作记录同一事务。已经答过就不改。 */
@@ -606,13 +590,60 @@ export interface IntakeStore {
   ): Promise<AutoDispatchChange | 'not_found'>;
 }
 
-export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore & IntakeStore;
+/** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
+export interface NodeReportSummary {
+  /** 收的一方按对上的通行证认定，不取载荷自报的名字。 */
+  nodeId: string;
+  /** 载荷里的环境名（env.name.name），只用来显示。 */
+  displayName: string;
+  schemaVersion: number;
+  codeSha?: string | undefined;
+  /** 推送方的时钟。 */
+  reportedAt: string;
+  /** 收到的时刻（这个 Store 的钟）：新不新鲜按它算（shared 的 nodeFreshness）。 */
+  receivedAt: string;
+}
+
+export interface NodeReportRecord extends NodeReportSummary {
+  snapshot: NodeSnapshot;
+}
+
+/** 看板多机（全仓审查第 1 路 4.1）：一个环境一行，覆盖写。memory-store.ts 是参照实现。 */
+export interface NodeStore {
+  /**
+   * 覆盖写：这个环境已有的那一行整行换掉，receivedAt 记成此刻（Store 的钟），回写进去的那一行。
+   * nodeId、report 先照 shared 的 NodeIdSchema / NodeReportSchema 校验（多余字段剥掉再存），认不出（坏载荷、
+   * 未知版本）抛 InvalidNodeReportError、什么都不写。
+   */
+  putNodeReport(input: { nodeId: string; report: NodeReport }): Promise<NodeReportSummary>;
+  /** 收到过快照的环境，按 nodeId 排。 */
+  listNodeReports(): Promise<NodeReportSummary[]>;
+  /** 没收到过是 null。库里那份认不出（版本对不上、形状坏了）抛 InvalidNodeReportError，不当成没有。 */
+  getNodeReport(nodeId: string): Promise<NodeReportRecord | null>;
+}
+
+export type Store = UserStore &
+  BoardStore &
+  RoutingStore &
+  OpsStore &
+  AgentStore &
+  GitHubStore &
+  IntakeStore &
+  NodeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
 export class InvalidCursorError extends Error {
   constructor(message = '翻页游标看不懂（被改过，或者不是这个列表的），从第一页重新翻') {
     super(message);
     this.name = 'InvalidCursorError';
+  }
+}
+
+/** 别的环境推来的快照认不出（写进来的、或库里读回来的）。接收方据此回 400，读的一方据此报「没查成」。 */
+export class InvalidNodeReportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidNodeReportError';
   }
 }
 

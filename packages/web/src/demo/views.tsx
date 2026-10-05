@@ -51,13 +51,3 @@ export function NotOpen() {
     </div>
   );
 }
-
-/** 某一块细节没开放（步骤清单、过程……）：照实说「有，但没开放」，不冒充「还没有」。 */
-export function HiddenNote({ what }: { what: string }) {
-  return (
-    <p className="flex items-center gap-2 rounded-lg border border-dashed px-3 py-3 text-xs text-muted-foreground">
-      <EyeOff className="size-3.5 shrink-0" aria-hidden />
-      演示版没开放{what}
-    </p>
-  );
-}

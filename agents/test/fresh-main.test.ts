@@ -43,7 +43,11 @@ interface Lib {
 }
 
 const HOOKS = fileURLToPath(new URL('../hooks/', import.meta.url));
-const lib = (await import(pathToFileURL(join(HOOKS, 'fresh-main.mjs')).href)) as Lib;
+// 代理变量、git 成没成和为什么没成在钩子共用的 git-run.mjs 里，取远端的办法在 fresh-main.mjs 里：两份合起来测
+const lib = {
+  ...(await import(pathToFileURL(join(HOOKS, 'git-run.mjs')).href)),
+  ...(await import(pathToFileURL(join(HOOKS, 'fresh-main.mjs')).href)),
+} as Lib;
 
 const PROXY = { HTTPS_PROXY: 'http://127.0.0.1:59822', HTTP_PROXY: 'http://127.0.0.1:59822' };
 const refused = (): R => ({
