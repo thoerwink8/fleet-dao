@@ -16,6 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { type E2eFacts, parseFacts } from './facts.ts';
+import { E2E_NODE_KEYS } from './node-keys.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(here, '..', '..', '..', '..');
@@ -220,6 +221,8 @@ export async function startStack(): Promise<Stack> {
       FLEET_ENV: 'development',
       // 环境页和顶栏徽标读它（#820 片 1）：e2e 这套在后端前面架上，等于「本机」那一档（deploy/local 的值）
       FLEET_MACHINE_NAME: '本机',
+      // 看板多机（07c）：两个远程环境的通行证哈希，一个推快照、一个配了钥匙从不推（见 support/node-keys.ts）
+      FLEET_NODE_KEYS: E2E_NODE_KEYS,
       DATABASE_URL: facts.dbUrl,
       FLEET_PUBLIC_URL: webOrigin,
       FLEET_COCKPIT_LISTEN: `127.0.0.1:${apiPort}`,

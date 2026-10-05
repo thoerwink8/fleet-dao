@@ -40,6 +40,9 @@ export function createDemoApi(inner: MockApi): FleetApi {
     // 环境页只在正式驾驶舱里有（演示版没有这个模块，导航不给、路由表也不放）：
     // 它露的是这台机器的环境名、在用的版本、在跑几个会话（R10：演示版不露机器名、版本号、会话数）。
     env: () => Promise.reject(hidden('环境')),
+    // 看板多机的切换器也只在正式驾驶舱里有：演示版不出 /api/nodes（R10：不露机器名）。
+    nodes: () => Promise.reject(hidden('环境切换')),
+    node: () => Promise.reject(hidden('环境切换')),
     board: async (repoId) => redactBoard(await inner.board(repoId), detailLevel()),
     task: async (taskId) => redactTaskDetail(await inner.task(taskId), detailLevel()),
     taskAction: (taskId, body) => inner.taskAction(taskId, body),

@@ -242,10 +242,8 @@ describe('仓列表没读成，不冒充「没有仓」', () => {
     expect(await screen.findByText('还没有仓')).toBeTruthy();
   });
 
-  test('顶栏的仓切换：写「仓列表没读成」，不是一直转圈', async () => {
-    renderApp(<Topbar onMenu={() => {}} onSearch={() => {}} />, { api: reposFail() });
-    expect(await screen.findByText('仓列表没读成')).toBeTruthy();
-  });
+  // 顶栏原来的「切换仓」已被环境切换器取代（选了仓什么都不变，是死的），它那条「仓列表没读成」的用例随它删；
+  // 环境切换器读不到远程环境列表时的写法在 node-switch.test.tsx。
 });
 
 describe('推送断了：顶栏照实说，手机上也看得见', () => {

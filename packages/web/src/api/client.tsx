@@ -12,7 +12,7 @@ import {
 } from '@tanstack/react-query';
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
 import { brand } from '#brand';
-import type { HomeState } from '../components/home/types';
+import type { HomeData, HomeState } from '../components/home/types';
 import { canSee, isDemo } from '../demo/access';
 import type {
   Audit,
@@ -29,6 +29,8 @@ import type {
   LegacyAsks,
   LiveEvent,
   Me,
+  NodeDetail,
+  Nodes,
   Notifications,
   PoolHolds,
   Pools,
@@ -83,6 +85,10 @@ export interface FleetApi {
    * 只读、不跨环境：读的是本后端自己库里的现成读法（和主页、额度页、/healthz 同一份）。
    */
   env(): Promise<EnvResponse>;
+  /** 看板多机：本台（名字、引擎）加每个远程环境的新鲜度。演示版没有（不露机器名）。 */
+  nodes(): Promise<Nodes>;
+  /** 一个远程环境最近一次推来的主页、环境页快照加新鲜度（只读展示用）；没推过 404（node_never_reported）。 */
+  node(nodeId: string): Promise<NodeDetail>;
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
@@ -178,6 +184,8 @@ export const keys = {
   demoLinks: ['demo-links'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
+  nodes: ['nodes'] as const,
+  node: (nodeId: string) => ['node', nodeId] as const,
 };
 
 // ---------- 读 ----------
@@ -362,28 +370,87 @@ export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
  * 新主页（/）的聚合读取：一屏三块（要你拍的 / 在跑的 / 做完的）+ 持续状态条。
  * 后端不发网址（和 alert-work 一个规矩）：done 的跳转链接这里按品牌拼好再给卡片。
  */
-export function useHome(): { data: HomeState } {
+export function useHome({ enabled = true }: { enabled?: boolean } = {}): { data: HomeState } {
   const api = useApi();
-  const query = useQuery({ queryKey: keys.home, queryFn: () => api.home() });
-  if (query.isPending) return { data: { status: 'loading' } };
-  if (query.error)
-    return { data: { status: 'error', error: query.error, retry: () => void query.refetch() } };
-  const data = query.data;
+  const query = useQuery({ queryKey: keys.home, queryFn: () => api.home(), enabled });
+  return { data: homeStateOf(query) };
+}
+
+/** 一份主页数据（本台现读的、远程快照里的都一样）按品牌拼好「做完的」的链接。 */
+function homeDataOf(data: HomeResponse): HomeData {
   return {
-    data: {
-      status: 'data',
-      data: {
-        decisions: data.decisions,
-        running: data.running,
-        done: data.done.map((d) => {
-          const cut = d.repo.indexOf('/');
-          const repo = { owner: d.repo.slice(0, cut), name: d.repo.slice(cut + 1) };
-          return { ...d, link: brand.repoLink(repo, 'pull', d.prNumber) };
-        }),
-        health: data.health,
-        flow: data.flow,
-      },
-    },
+    decisions: data.decisions,
+    running: data.running,
+    done: data.done.map((d) => {
+      const cut = d.repo.indexOf('/');
+      const repo = { owner: d.repo.slice(0, cut), name: d.repo.slice(cut + 1) };
+      return { ...d, link: brand.repoLink(repo, 'pull', d.prNumber) };
+    }),
+    health: data.health,
+    flow: data.flow,
+  };
+}
+
+function homeStateOf(query: {
+  isPending: boolean;
+  error: unknown;
+  data: HomeResponse | undefined;
+  refetch: () => unknown;
+}): HomeState {
+  if (query.error) return { status: 'error', error: query.error, retry: () => void query.refetch() };
+  if (query.isPending || !query.data) return { status: 'loading' };
+  return { status: 'data', data: homeDataOf(query.data) };
+}
+
+/**
+ * 看板多机：本台加每个远程环境（本机 WSL）的新鲜度。别的环境推来快照时 node_reports 推送叫它重拉；
+ * 新鲜度按时间变（推送停了没有事件），所以每 30 秒也重拉一次。演示版不读（不露机器名）。
+ */
+export function useNodes() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.nodes,
+    queryFn: () => api.nodes(),
+    refetchInterval: 30_000,
+    enabled: !isDemo(),
+  });
+}
+
+/** 一个远程环境最近一次推来的快照（主页、环境页）。nodeId 为空（选的是本台）时不读。 */
+export function useNode(nodeId: string | null) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.node(nodeId ?? ''),
+    queryFn: () => api.node(nodeId ?? ''),
+    refetchInterval: 30_000,
+    enabled: nodeId !== null && !isDemo(),
+  });
+}
+
+/** 环境页并排的各列：每个收到过快照的远程环境各读一份。 */
+export function useNodeSnapshots(ids: readonly string[]) {
+  const api = useApi();
+  return useQueries({
+    queries: ids.map((id) => ({
+      queryKey: keys.node(id),
+      queryFn: () => api.node(id),
+      refetchInterval: 30_000,
+      enabled: !isDemo(),
+    })),
+  });
+}
+
+/** 选了远程环境时的主页：读那个环境的快照，形状和本台的主页一样。 */
+export function useNodeHome(nodeId: string | null): { data: HomeState; node: NodeDetail | undefined } {
+  const query = useNode(nodeId);
+  return {
+    data: homeStateOf({
+      isPending: query.isPending,
+      error: query.error,
+      data: query.data?.home,
+      refetch: query.refetch,
+    }),
+    node: query.data,
   };
 }
 
@@ -536,8 +603,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   notifications: [['notifications'], keys.home],
   audit_log: [['audit']],
   settings: [['settings']],
-  // 别的环境推来的快照：看板还没有读它的页面（环境切换器那一片接上 ['nodes']），先不作废任何查询。
-  node_reports: [],
+  // 别的环境推来了新快照：顶栏切换器和环境页的列表、选中的那个环境的主页和环境页都重拉。
+  node_reports: [keys.nodes, ['node']],
 };
 
 function isRealtimeTable(table: string): table is RealtimeTable {

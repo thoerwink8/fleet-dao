@@ -2,6 +2,7 @@ import { Database, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { NavLink } from 'react-router';
 import { brand } from '#brand';
 import { useApi, useNotifications } from '../../api/client';
+import { useNodeSelection, withNode } from '../../lib/node';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
@@ -54,9 +55,11 @@ function Item({
   onNavigate?: (() => void) | undefined;
 }) {
   const Icon = item.icon;
+  // 选了远程环境（?node=）时换页不丢掉选择：换到主页、环境页还是看它，换到别的页会整页说明只看得到本台
+  const { nodeId } = useNodeSelection();
   const link = (
     <NavLink
-      to={item.to}
+      to={withNode(item.to, nodeId)}
       end={item.to === '/'}
       onClick={onNavigate}
       className={({ isActive }) =>

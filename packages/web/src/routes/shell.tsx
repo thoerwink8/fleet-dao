@@ -5,6 +5,7 @@ import { brand } from '#brand';
 import { ApiError, errorText, useLiveSync, useMe, useNotifications } from '../api/client';
 import { loginPath } from '../api/index';
 import { LogoMark } from '../components/logo';
+import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
 import { CommandMenu } from '../components/shell/command-menu';
 import { demoBlocked } from '../components/shell/nav';
@@ -16,6 +17,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components
 import { isDemo } from '../demo/access';
 import { DemoBanner, NotOpen } from '../demo/views';
 import { useLocalState } from '../lib/hooks';
+import { useNodeSelection } from '../lib/node';
 import { cn } from '../lib/utils';
 
 function Screen({ children }: { children: ReactNode }) {
@@ -107,6 +109,9 @@ function Frame() {
 
   // 演示版：这一页所在的模块没开放，就不渲染它（它的数据也就不去读）。
   const blocked = demoBlocked(location.pathname);
+  // 看板多机：选了远程环境（?node=）时，只有主页和环境页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
+  const { nodeId } = useNodeSelection();
+  const onlyLocal = !isDemo() && nodeId !== null && !isRemotePage(location.pathname);
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
@@ -123,7 +128,7 @@ function Frame() {
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
           <main className="relative min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-            {blocked ? <NotOpen /> : <Outlet />}
+            {blocked ? <NotOpen /> : onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
           </main>
         </div>
       </div>
