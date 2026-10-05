@@ -997,7 +997,8 @@ describe('合并后待补审：只在 fleet-dao 里提醒，没查成不当成�
 // 第 5 件：绿了没挂自动合并的 PR（pnpm pr:open 的兜底）。查的是 packages/conventions/src/bin/pr-idle.ts，硬超时；
 // gh 没查成、超时、输出认不出都说一行没查成，不当成「没有」，也不挡开会话。
 describe('绿了没挂自动合并的 PR：只在 fleet-dao 里提醒，没查成不当成没有', SLOW, () => {
-  const IDLE = fileURLToPath(new URL('../../packages/conventions/src/bin/pr-idle.ts', import.meta.url));
+  // 替身脚本只要真存在（钩子先看它在不在）；真脚本的判法在 packages/conventions/test/pr-open.test.ts 里测
+  const IDLE = HOOK;
   const fetched: Fetch = { common: null, ok: true, why: '' };
   function fleetRepo(): string {
     const dir = repo({});
