@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 const NOW = new Date('2026-09-28T02:00:00Z');
@@ -40,6 +40,8 @@ interface WorkerIo {
   cwd: () => string;
   git: (args: string[], opts?: NetOpts) => RunResult;
   gh: (args: string[], opts?: NetOpts) => RunResult;
+  /** 巡看并发查 PR 用：signal 一到就收手（返回 error: ABORT_ERR） */
+  ghAsync?: (args: string[], opts?: NetOpts & { signal?: AbortSignal }) => Promise<RunResult>;
   pnpm: (args: string[], opts?: { cwd?: string }) => RunResult;
   spawnDetached: (spec: SpawnSpec) => { pid: number };
   isRunning: (pid: number) => boolean;
@@ -59,6 +61,7 @@ interface WorkerLib {
   safeEnv(env: Record<string, string | undefined>): Record<string, string | undefined>;
   closingBrief(o: { branch: string; noShip: boolean; githubRoute?: { via: string; proxy?: string } }): string;
   saidOf(line: string): string | null;
+  WATCH_SLACK_MS: number;
   runWorker(argv: string[], io: WorkerIo): Promise<number>;
 }
 
@@ -1572,6 +1575,107 @@ describe('watch --wait', () => {
     expect(await w.run(['watch', '--wait', '55'])).toBe(0);
     expect(w.out).toEqual(['变化：q2 做完了：完成：PR #7', '还在跑：0']);
     expect(naps).toBe(1);
+  });
+
+  // 2026-10-05 实测：5 个工人时 --wait 20 到 --wait 45 多次跑了 58 秒以上被前台上限掐掉——看一遍要逐个调 gh，
+  // --wait 只管「睡」不管「看」，第一遍多久都得跑完。这里拿真定时器的假钟：gh 每次 15 秒
+  describe('gh 慢的时候整条命令也不超过 --wait 加一点余量', () => {
+    const GH_MS = 15_000;
+    const NAMES = ['s1', 's2', 's3', 's4', 's5'];
+    const slowWorld = (ghAsync: NonNullable<WorkerIo['ghAsync']>) => {
+      const w = world();
+      for (const n of NAMES) {
+        const dir = w.writeMeta(n, validMeta(w, n));
+        writeFileSync(join(dir, 'out.log'), '在改 store\n');
+      }
+      w.setRunning(9001, true);
+      w.io.now = () => new Date();
+      w.io.sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      // 一次一次排着等的老办法：每次把钟拨过 15 秒
+      w.io.gh = () => {
+        vi.advanceTimersByTime(GH_MS);
+        return ok('[]');
+      };
+      w.io.ghAsync = ghAsync;
+      return w;
+    };
+    /** 跑一条 watch，量它在假钟上花了多久 */
+    const timed = async (w: ReturnType<typeof world>, argv: string[]) => {
+      const start = Date.now();
+      let end = Number.NaN;
+      const p = w.run(argv).then((code) => {
+        end = Date.now();
+        return code;
+      });
+      await vi.advanceTimersByTimeAsync(180_000);
+      return { code: await p, ms: end - start };
+    };
+    const aborted = (): RunResult => ({ status: null, stdout: '', stderr: '', error: 'ABORT_ERR' });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('【故意造出的失败】gh 每次 15 秒、5 个工人、--wait 20：到点返回，没查成的工人逐个明说', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const w = slowWorld(
+        (_args, opts) =>
+          new Promise((resolve) => {
+            const limit = opts?.timeoutMs ?? Number.POSITIVE_INFINITY;
+            if (limit >= GH_MS) {
+              setTimeout(() => resolve(ok('[]')), GH_MS);
+              return;
+            }
+            const t = setTimeout(
+              () => resolve({ status: null, stdout: '', stderr: '', error: 'ETIMEDOUT' }),
+              limit,
+            );
+            opts?.signal?.addEventListener('abort', () => {
+              clearTimeout(t);
+              resolve(aborted());
+            });
+          }),
+      );
+      const { code, ms } = await timed(w, ['watch', '--wait', '20']);
+      expect(ms).toBeLessThanOrEqual(20_000 + lib.WATCH_SLACK_MS);
+      expect(code).toBe(2);
+      for (const n of NAMES) expect(w.out.join('\n')).toMatch(new RegExp(`没查成：${n} 的 PR`));
+      expect(w.out.at(-1)).toBe('还在跑：5');
+    });
+
+    it('【故意造出的失败】gh 卡死不回话：总截止一到就返回，没回来的明说没查成', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const w = slowWorld(
+        (_args, opts) =>
+          new Promise((resolve) => {
+            opts?.signal?.addEventListener('abort', () => resolve(aborted()));
+          }),
+      );
+      const { code, ms } = await timed(w, ['watch', '--wait', '20']);
+      expect(ms).toBeLessThanOrEqual(20_000 + lib.WATCH_SLACK_MS);
+      expect(code).toBe(2);
+      for (const n of NAMES) expect(w.out.join('\n')).toMatch(new RegExp(`没查成：${n} 的 PR`));
+    });
+
+    it('gh 快：照旧隔一会儿看一次，等到点才返回「还在跑：5」', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      let calls = 0;
+      const w = slowWorld(
+        () =>
+          new Promise((resolve) => {
+            calls += 1;
+            setTimeout(() => resolve(ok('[]')), 1_000);
+          }),
+      );
+      await timed(w, ['watch']); // 先报过一次
+      w.out.length = 0;
+      calls = 0;
+      const { code, ms } = await timed(w, ['watch', '--wait', '20']);
+      expect(code).toBe(0);
+      expect(w.out).toEqual(['还在跑：5']);
+      expect(ms).toBeGreaterThanOrEqual(20_000);
+      expect(ms).toBeLessThanOrEqual(20_000 + lib.WATCH_SLACK_MS);
+      expect(calls).toBeGreaterThan(NAMES.length * 2);
+    });
   });
 
   it('【故意造出的失败】--wait 超过 55 秒、不是整数：用法错，退出码 1（单次前台等待不许超过 60 秒）', async () => {

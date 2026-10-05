@@ -42,7 +42,7 @@
 //   launch-result.json，这边读文件而不是读 stdout）。文件里 interpretLaunchResult 认「确认失败」和「不确定」
 //   两种失败：只有确认失败才能说「起不了」，不确定（比如结果文件没读到）要往上抛一个带 .uncertain=true 的
 //   Error，worker-lib.mjs 的 cmdStart 认这个标记、不说「起不了」，把能写的 meta 先写上。
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -82,6 +82,54 @@ function run(command, args, opts = {}) {
     stderr: r.stderr ?? '',
     error: r.error?.code ?? r.error?.message,
   };
+}
+
+/**
+ * 不挡着别的调用的 run：巡看并发查各工人的 PR 用（worker-lib.mjs 的 fillPrs）。回话形状同 run；
+ * 超时 error 是 'ETIMEDOUT'，被 opts.signal 叫停是 'ABORT_ERR'——两种都当场杀掉子进程，不留着拖住这条命令退出。
+ */
+function runAsync(command, args, opts = {}) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let error;
+    let done = false;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      resolve(r);
+    };
+    let child;
+    try {
+      child = spawn(command, args, {
+        cwd: opts.cwd,
+        env: opts.env ?? process.env,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      resolve({ status: null, stdout: '', stderr: '', error: e?.code ?? e?.message });
+      return;
+    }
+    const kill = (why) => {
+      error = why;
+      child.kill();
+    };
+    const onAbort = () => kill('ABORT_ERR');
+    const timer = setTimeout(() => kill('ETIMEDOUT'), opts.timeoutMs ?? TIMEOUT_MS);
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener('abort', onAbort);
+    child.stdout.setEncoding('utf8').on('data', (d) => {
+      stdout += d;
+    });
+    child.stderr.setEncoding('utf8').on('data', (d) => {
+      stderr += d;
+    });
+    child.on('error', (e) => finish({ status: null, stdout, stderr, error: error ?? e.code ?? e.message }));
+    child.on('close', (code) => finish({ status: error ? null : code, stdout, stderr, error }));
+  });
 }
 
 /** pnpm 在这台是 .cmd 套壳，得走 cmd.exe（见文件头第一条）。 */
@@ -196,6 +244,7 @@ process.exitCode = await runWorker(process.argv.slice(2), {
   cwd: () => process.cwd(),
   git: (args, opts) => run('git', args, { ...opts, env: netEnv(opts) }),
   gh: (args, opts) => run('gh', args, { ...opts, env: netEnv(opts) }),
+  ghAsync: (args, opts) => runAsync('gh', args, { ...opts, env: netEnv(opts) }),
   pnpm: (args, opts) => runViaCmd('pnpm', args, opts),
   spawnDetached,
   isRunning,
