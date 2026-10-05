@@ -44,7 +44,7 @@
 //      err.uncertain = true，cmdStart 要认这个标记：不说「起不了」，把能写的 meta 先写上（pid: null，
 //      pidUncertain: true），让 status/stop/clean 之后还找得到这棵工作树，报错里明说
 //      「进程可能已经在跑、没记上」。metaProblem/oneStatus/cmdStop/cmdClean 都跟着认 pidUncertain 这个状态。
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -432,6 +432,11 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
         modelId ?? CLAUDE_DEFAULT_MODEL,
         '--effort',
         effort,
+        // 边做边出日志：默认的文字输出做完才出字，中途 status 只能报「还没有输出」（2026-10-05 第一件真活就是这样，
+        // 创始人问进度时只能去翻它的工作树猜）。stream-json 必须配 --verbose，status 用 saidOf 把事件翻成人话。
+        '--output-format',
+        'stream-json',
+        '--verbose',
       ],
       stdinFile: promptFile,
       extraEnv: {},
@@ -697,6 +702,40 @@ async function cmdStart(p, io) {
 
 // —— status ——
 
+/**
+ * 一行输出在说什么。Claude 工人的输出是 stream-json（一行一个事件，边做边写，不然做完才出字、中途什么都看不见）：
+ * 认出事件就翻成一句人话——在调哪个工具、说了什么、最后的结论；别家模型的输出是普通文字，原样返回。
+ * 认不出的事件返回 null（调用方接着往前找上一行），不拿事件原文冒充一句话。
+ */
+export function saidOf(line) {
+  if (!line.startsWith('{')) return line;
+  let ev;
+  try {
+    ev = JSON.parse(line);
+  } catch {
+    return line; // 只是恰好以 { 开头的普通文字
+  }
+  if (!ev || typeof ev !== 'object') return null;
+  const tail = (text) => {
+    const rows = String(text)
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return rows.at(-1) ?? null;
+  };
+  if (ev.type === 'result') return typeof ev.result === 'string' ? tail(ev.result) : null;
+  if (ev.type !== 'assistant' || !Array.isArray(ev.message?.content)) return null;
+  for (const b of [...ev.message.content].reverse()) {
+    if (b?.type === 'tool_use') {
+      const i = b.input ?? {};
+      const what = i.command ?? i.file_path ?? i.pattern ?? i.description ?? '';
+      return `在调 ${b.name}${what ? `：${String(what).replace(/\s+/g, ' ').slice(0, 80)}` : ''}`;
+    }
+    if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) return tail(b.text);
+  }
+  return null;
+}
+
 function lastMeaningfulLine(file) {
   let text;
   try {
@@ -709,7 +748,16 @@ function lastMeaningfulLine(file) {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
-  return { ok: true, line: lines.at(-1) ?? null };
+  // 从后往前找第一行说得出人话的（stream-json 里夹着认不出的事件）
+  let line = null;
+  for (let i = lines.length - 1; i >= 0 && line === null; i -= 1) line = saidOf(lines[i]);
+  let idleMin = null;
+  try {
+    idleMin = Math.max(0, Math.round((Date.now() - statSync(file).mtimeMs) / 60_000));
+  } catch {
+    // 日志刚被删：不知道多久没动
+  }
+  return { ok: true, line, idleMin };
 }
 
 function prOf(io, m) {
@@ -741,6 +789,7 @@ function oneStatus(io, name, at) {
     effort: m.model === 'kimi' ? null : m.effort,
     elapsedMin,
     lastLine: last.line,
+    idleMin: last.idleMin,
     cleanedAt: m.cleanedAt,
     worktree: m.worktree,
     branch: m.branch,
@@ -764,7 +813,7 @@ function formatStatus(s) {
   return [
     `${s.name}：${s.model}，档位 ${s.effort ?? '不支持'}，${stateText}，从起来到现在 ${s.elapsedMin} 分钟`,
     `  工作树 ${s.worktree}（分支 ${s.branch}）`,
-    `  最后一句输出：${s.lastLine ?? '（还没有输出）'}`,
+    `  最后一句输出：${s.lastLine ?? '（还没有输出）'}${s.running && s.idleMin !== null && s.idleMin !== undefined ? `（${s.idleMin} 分钟前）` : ''}`,
     `  PR：${prText}`,
   ].join('\n');
 }
