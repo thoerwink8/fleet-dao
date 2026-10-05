@@ -3,7 +3,6 @@
 
 import { classifyFailure } from './classify.ts';
 import type { JevAskContext, JevPort, JevQuestion, JevReply } from './jev.ts';
-import { judgeStall, type StallFacts, type StallPolicy, type StallVerdict } from './stall.ts';
 import type { FailureEvidence, FailurePolicy, FailureVerdict, TriageChoice } from './types.ts';
 
 /** 默认实现：不问（没给 Jev 端口时：测试、假端口）。生产的端口在 real/jev-port.ts。 */
@@ -64,14 +63,4 @@ export async function triageFailure(
   options: AskOptions & { policy?: Partial<FailurePolicy> } = {},
 ): Promise<FailureVerdict> {
   return (await triageFailureAsked(evidence, options)).verdict;
-}
-
-export async function judgeStallWithJev(
-  facts: StallFacts,
-  options: AskOptions & { policy?: Partial<StallPolicy> } = {},
-): Promise<StallVerdict> {
-  const first = judgeStall(facts, options.policy);
-  if (!first.jevQuestion) return first;
-  const reply = await askJev(options.jev ?? NO_JEV, first.jevQuestion, options.timeoutMs, options.ctx);
-  return judgeStall({ ...facts, jev: reply }, options.policy);
 }

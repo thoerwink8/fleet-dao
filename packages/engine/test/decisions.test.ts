@@ -9,7 +9,6 @@ import {
   DEFAULT_LIMITS,
   FRANCE_RESIDENT_MB,
   FRANCE_USABLE_MB,
-  historyAlertLine,
   LimitsConfigError,
   resolveLimits,
   SESSION_MEMORY_HIGH_MB,
@@ -56,12 +55,6 @@ describe('上限：读时现算默认值', () => {
       LimitsConfigError,
     );
     expect(() => assertSessionFitsSlice(SESSION_MEMORY_MAX_MB, SLICE_MEMORY_MAX_MB)).not.toThrow();
-  });
-
-  it('事件数报警线：在途任务记下的那一套里没有这一项（它加进来之前开工的），按现在的默认值，不报「报警线 undefined」', () => {
-    const { historyAlertEvents: _missing, ...old } = DEFAULT_LIMITS;
-    expect(historyAlertLine(old)).toBe(DEFAULT_LIMITS.historyAlertEvents);
-    expect(historyAlertLine({ ...old, historyAlertEvents: 20 })).toBe(20);
   });
 });
 

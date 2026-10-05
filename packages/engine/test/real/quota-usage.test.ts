@@ -1,7 +1,7 @@
 // 估算类的池的用量记录接真库（PGlite，real/quota-read.ts 的 sessionUsageSource）：Fusion 的会话和三段的一次性会话都进估算，
 // 没记到花费的不拿 0 顶；runs 读不了明确报错，不拿 Fusion 那一半当全部（#758）。
 import { randomUUID } from 'node:crypto';
-import { finishSessionRun, markSessionRunStarted, openSessionRun, startRun } from '@fleet-dao/db';
+import { sessionRuns, startRun } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sessionUsageSource } from '../../src/real/quota-read.ts';
@@ -23,21 +23,21 @@ const window = { poolId: 'claude-carpool', since: ago(60), until: NOW };
 /** 拼车池上一次 Fusion 的会话：花了 0.4 美元。 */
 async function fusionSession(taskId: string) {
   const id = randomUUID();
-  await openSessionRun(t.db, {
+  await t.db.insert(sessionRuns).values({
     id,
     taskId,
-    subtaskId: null,
     stage: 'execute',
     routeId: 'carpool',
     whyRoute: 'x',
-    branch: null,
     queuedAt: ago(40),
-    workflowId: null,
     runAsUser: 'fleet-agent-carpool',
-    worktreePath: null,
+    startedAt: ago(40),
+    sessionId: `s-${id}`,
+    outcome: 'ok',
+    endedAt: ago(35),
+    inputTokens: 500,
+    costUsd: 0.4,
   });
-  await markSessionRunStarted(t.db, { id, startedAt: ago(40), sessionId: `s-${id}`, handle: null });
-  await finishSessionRun(t.db, { id, outcome: 'ok', endedAt: ago(35), inputTokens: 500, costUsd: 0.4 });
 }
 
 describe('估算类的池的用量记录（sessionUsageSource 接真库）', () => {

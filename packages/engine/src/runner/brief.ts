@@ -1,6 +1,6 @@
 // 「喂什么」：三个段各自的交代（brief）类型 + 把 brief 渲染成一段喂给会话的文字。
 //
-// 借用 ports.ts 的 SessionBrief 里那几样（title / request / acceptance / touches / branch / prNumber / head / specDir），
+// 借用老会话交代里那几样（title / request / acceptance / touches / branch / prNumber / head / specDir），
 // **不带** Fusion 专词：没有 stepName、没有 fusionStage、没有 lead.step（plan / accept / rebut / takeover 这些
 // 是 Fusion 的状态机概念；三段一条龙里每段是独立一次调用，不分步）。
 //

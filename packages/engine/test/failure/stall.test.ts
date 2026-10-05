@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   type JevReply,
   judgeStall,
-  judgeStallWithJev,
   longestRepeat,
   type StallChoice,
   type StallFacts,
@@ -228,26 +227,5 @@ describe('拿不准的留给 Jev', () => {
       expect(v.basis).toContain(why);
       expect(v.jevQuestion).toBeUndefined();
     }
-  });
-
-  it('默认实现不问：结论和没接 Jev 一样', async () => {
-    const v = await judgeStallWithJev(unsure);
-    expect({ state: v.state, rule: v.rule }).toEqual({ state: 'progressing', rule: 'G2' });
-    expect(v.basis).toContain('没接 Jev');
-  });
-
-  it('接上 Jev：拿不准时才问', async () => {
-    let asked = 0;
-    const jev = {
-      ask: async () => {
-        asked += 1;
-        return { asked: true, ok: true, choice: 'looping', confidence: 0.9, shadow: false } as never;
-      },
-    };
-    expect((await judgeStallWithJev(unsure, { jev })).state).toBe('looping');
-    expect(
-      (await judgeStallWithJev(facts(m(10), { lastEventAt: m(9.5), lastStepAt: m(8) }), { jev })).state,
-    ).toBe('progressing');
-    expect(asked).toBe(1);
   });
 });

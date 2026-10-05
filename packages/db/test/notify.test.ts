@@ -8,6 +8,7 @@ import {
   asks,
   auditLog,
   channels,
+  nodeReports,
   notifications,
   pools,
   progressEvents,
@@ -155,6 +156,28 @@ describe('写入即通知 fleet_changes', () => {
     ]);
   });
 
+  it('别的环境推来快照：头一回写、覆盖写各发一条，id 是 node_id（看板的环境切换器靠它刷新）', async () => {
+    await freshEars();
+    const row = {
+      nodeId: 'local',
+      displayName: '本机',
+      schemaVersion: 1,
+      reportedAt: NOW,
+      receivedAt: NOW,
+      payload: {},
+    };
+    await t.db.insert(nodeReports).values(row);
+    await t.db
+      .insert(nodeReports)
+      .values({ ...row, codeSha: 'abc1234' })
+      .onConflictDoUpdate({ target: nodeReports.nodeId, set: { codeSha: 'abc1234' } });
+    await settle();
+    expect(heard).toEqual([
+      { table: 'node_reports', id: 'local' },
+      { table: 'node_reports', id: 'local' },
+    ]);
+  });
+
   it('追问答上了发一条，id 就是追问的 id（等回答的 fleet ask 靠它醒）', async () => {
     await catalog(t.db);
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
@@ -227,6 +250,14 @@ describe('写入即通知 fleet_changes', () => {
       summary: '摘要',
     });
     await t.db.insert(settings).values({ key: 'theme', value: 'dusk' });
+    await t.db.insert(nodeReports).values({
+      nodeId: 'local',
+      displayName: '本机',
+      schemaVersion: 1,
+      reportedAt: NOW,
+      receivedAt: NOW,
+      payload: {},
+    });
     await t.db
       .insert(auditLog)
       .values({ actorKind: 'engine', actorId: 'w1', action: 'x', target: 'task:x', via: 'engine' });
