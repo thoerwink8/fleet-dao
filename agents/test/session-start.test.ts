@@ -64,6 +64,15 @@ interface HookLib {
     fetch: Fetch | null;
     mirror?: string | null;
   }): string[];
+  IDLE_PR_MS: number;
+  idlePrRunner(timeoutMs?: number): AfterMergeRun;
+  checkIdlePrs(o: {
+    cwd: string;
+    git: Git;
+    run: AfterMergeRun;
+    fetch: Fetch | null;
+    mirror?: string | null;
+  }): string[];
 }
 type AfterMergeRun = (script: string, repo: string) => Result;
 
@@ -982,6 +991,122 @@ describe('合并后待补审：只在 fleet-dao 里提醒，没查成不当成�
       '合并后待补审没查成：超过 1 秒没完（自己跑一遍 node agents/skills/discuss/scripts/second-opinion.mjs --after-merge-pending 看原因）。',
     ]);
     expect(hook.AFTER_MERGE_MS).toBe(8_000);
+  });
+});
+
+// 第 5 件：绿了没挂自动合并的 PR（pnpm pr:open 的兜底）。查的是 packages/conventions/src/bin/pr-idle.ts，硬超时；
+// gh 没查成、超时、输出认不出都说一行没查成，不当成「没有」，也不挡开会话。
+describe('绿了没挂自动合并的 PR：只在 fleet-dao 里提醒，没查成不当成没有', SLOW, () => {
+  const IDLE = fileURLToPath(new URL('../../packages/conventions/src/bin/pr-idle.ts', import.meta.url));
+  const fetched: Fetch = { common: null, ok: true, why: '' };
+  function fleetRepo(): string {
+    const dir = repo({});
+    g(dir, 'remote', 'add', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    return dir;
+  }
+  function fakeRun(result: Partial<Result>) {
+    const calls: [string, string][] = [];
+    const run: AfterMergeRun = (script, r) => {
+      calls.push([script, r]);
+      return { status: 0, stdout: '', stderr: '', ...result };
+    };
+    return { run, calls };
+  }
+  const idle = (...numbers: number[]) =>
+    JSON.stringify({ idle: numbers.map((number) => ({ number, title: `t${number}` })) });
+
+  it('不是 fleet-dao 的检出、不是 git 仓：不查、不出声', () => {
+    const w = world();
+    const f = fakeRun({ stdout: idle(1) });
+    expect(hook.checkIdlePrs({ cwd: w.work, git, run: f.run, fetch: fetched, mirror: IDLE })).toEqual([]);
+    expect(hook.checkIdlePrs({ cwd: temp('plain'), git, run: f.run, fetch: null, mirror: IDLE })).toEqual([]);
+    expect(f.calls).toEqual([]);
+  });
+
+  it('有绿了没挂的：一行列 PR 号和怎么挂；没有不出声', () => {
+    const dir = fleetRepo();
+    const f = fakeRun({ stdout: idle(1031, 1032) });
+    const lines = hook.checkIdlePrs({ cwd: dir, git, run: f.run, fetch: fetched, mirror: IDLE });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('绿了没挂自动合并的 PR 2 个：#1031、#1032');
+    expect(lines[0]).toContain('gh pr merge <号> --auto --squash');
+    expect(f.calls.map(([script]) => script)).toEqual([IDLE]);
+    expect(
+      hook.checkIdlePrs({
+        cwd: dir,
+        git,
+        run: fakeRun({ stdout: idle() }).run,
+        fetch: fetched,
+        mirror: IDLE,
+      }),
+    ).toEqual([]);
+  });
+
+  it('【故意造出的失败】gh 没查成（脚本退出 2）、超时、取不到远端：说一行没查成，不当成没有', () => {
+    const dir = fleetRepo();
+    const broken = fakeRun({
+      status: 2,
+      stderr: 'gh pr list 退出码 1：error connecting to api.github.com\n',
+    });
+    expect(hook.checkIdlePrs({ cwd: dir, git, run: broken.run, fetch: fetched, mirror: IDLE })).toEqual([
+      '绿了没挂自动合并的 PR 没查成：gh pr list 退出码 1：error connecting to api.github.com。',
+    ]);
+    const slow = fakeRun({
+      status: null,
+      error: Object.assign(new Error('spawnSync node ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      timeoutMs: 8_000,
+    });
+    expect(hook.checkIdlePrs({ cwd: dir, git, run: slow.run, fetch: fetched, mirror: IDLE })).toEqual([
+      '绿了没挂自动合并的 PR 没查成：超过 8 秒没完。',
+    ]);
+    const offline = fakeRun({ stdout: idle(1) });
+    expect(
+      hook.checkIdlePrs({
+        cwd: dir,
+        git,
+        run: offline.run,
+        fetch: { common: null, ok: false, why: '超过 15 秒没完' },
+        mirror: IDLE,
+      }),
+    ).toEqual(['绿了没挂自动合并的 PR 没查成：取不到远端（超过 15 秒没完）。']);
+    expect(offline.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】输出认不出、少了 idle、找不到脚本：没查成', () => {
+    const dir = fleetRepo();
+    const run = (stdout: string) =>
+      hook.checkIdlePrs({ cwd: dir, git, run: fakeRun({ stdout }).run, fetch: fetched, mirror: IDLE })[0];
+    expect(run('不是 JSON')).toMatch(/^绿了没挂自动合并的 PR 没查成：pr-idle\.ts 的输出认不出/);
+    expect(run('{}')).toMatch(/少了 idle 列表/);
+    expect(run('{"idle":[{"title":"x"}]}')).toMatch(/少了 idle 列表/);
+    const f = fakeRun({ stdout: idle() });
+    const lines = hook.checkIdlePrs({
+      cwd: dir,
+      git,
+      run: f.run,
+      fetch: fetched,
+      mirror: join(dir, 'nope.ts'),
+    });
+    // 镜像里没有就用会话所在检出里的；那里也没有（这个临时仓里没有）就说没查成
+    expect(lines).toEqual(['绿了没挂自动合并的 PR 没查成：找不到 packages/conventions/src/bin/pr-idle.ts。']);
+    expect(f.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】真起脚本、硬超时：到点杀掉、说没查成，不拖着开会话', () => {
+    const dir = fleetRepo();
+    const sleeper = join(temp('idle-sleeper'), 'sleep.mjs');
+    writeFileSync(sleeper, 'setTimeout(() => {}, 20_000);\n');
+    const started = Date.now();
+    const lines = hook.checkIdlePrs({
+      cwd: dir,
+      git,
+      run: hook.idlePrRunner(1_000),
+      fetch: fetched,
+      mirror: sleeper,
+    });
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(lines).toEqual(['绿了没挂自动合并的 PR 没查成：超过 1 秒没完。']);
+    expect(hook.IDLE_PR_MS).toBe(8_000);
   });
 });
 
