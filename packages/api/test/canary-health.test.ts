@@ -83,6 +83,25 @@ describe('canary 项怎么判', () => {
     expect(got).toMatchObject({ ok: false, message: '最近一轮（09-27 20:13 有结论）断在「派活」' });
   });
 
+  it('跳过（巡检仓的「让 AI 接活」关着，#1050）：不红，照实说跳过、没验，不说成通过；跳过的也太旧了：红，说的是「跳过的」', () => {
+    const skipped = row({
+      verdict: 'skipped',
+      stage: 'open',
+      issueNumber: null,
+      why: '跳过：巡检仓的「让 AI 接活」关着',
+    });
+    expect(canaryHealth({ finished: skipped, running: null }, NOW)).toEqual({
+      ok: true,
+      note: '最近一轮 09-27 20:13 跳过：巡检仓的「让 AI 接活」关着，没开单、没验',
+    });
+    const stale = row({ ...skipped, endedAt: new Date(NOW.getTime() - CANARY_STALE_MS - 60_000) });
+    expect(canaryHealth({ finished: stale, running: null }, NOW)).toMatchObject({
+      ok: false,
+      code: 'canary_stale',
+      message: expect.stringContaining('跳过的'),
+    });
+  });
+
   it('【故意造出的失败】巡检自己没跑成：红，和「断了」分开说', () => {
     const got = canaryHealth(
       { finished: row({ verdict: 'not_run', stage: 'open', why: '读不到里程碑' }), running: null },
@@ -157,8 +176,13 @@ describe('canary 项怎么判', () => {
         { finished: null, running: row({ endedAt: null, verdict: null, startedAt: ago(24 * 60) }) },
         NOW,
       ),
+      canaryHealth({ finished: row({ verdict: 'skipped', stage: 'open', why: 'x' }), running }, NOW),
+      canaryHealth(
+        { finished: row({ verdict: 'skipped', stage: 'open', why: 'x', endedAt: ago(24 * 60) }), running },
+        NOW,
+      ),
     ].map((h) => (h.ok ? h.note : h.message));
-    expect(said).toHaveLength(7);
+    expect(said).toHaveLength(9);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });

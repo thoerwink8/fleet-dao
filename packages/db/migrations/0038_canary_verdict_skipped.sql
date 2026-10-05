@@ -1,0 +1,2 @@
+ALTER TABLE "canary_runs" DROP CONSTRAINT "canary_runs_verdict_known";--> statement-breakpoint
+ALTER TABLE "canary_runs" ADD CONSTRAINT "canary_runs_verdict_known" CHECK ("canary_runs"."verdict" is null or "canary_runs"."verdict" in ('pass', 'broken', 'not_run', 'skipped'));

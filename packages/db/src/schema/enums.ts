@@ -112,9 +112,10 @@ export const TERMINAL_TASK_STATES = ['done', 'stopped', 'failed'] as const satis
 
 /**
  * 全流程巡检（#223）一轮的结论：pass 通过；broken 断在哪一步；not_run 巡检自己没跑成（没配、仓读不到、开不了单）。
- * 「没跑成」和「跑了没问题」分开写，不许混。
+ * 「没跑成」和「跑了没问题」分开写，不许混。skipped（#1050）：巡检仓的「让 AI 接活」关着，这一轮开都没开（开了也不会被拉）：
+ * 不是通过、不是断了、也不是巡检自己没跑成——不开单、不推卡住报警、不扫描，原因必须写。
  */
-export const CANARY_VERDICTS = ['pass', 'broken', 'not_run'] as const;
+export const CANARY_VERDICTS = ['pass', 'broken', 'not_run', 'skipped'] as const;
 export type CanaryVerdict = (typeof CANARY_VERDICTS)[number];
 
 /**
