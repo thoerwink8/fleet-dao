@@ -32,18 +32,6 @@ export function useNow(): number {
   );
 }
 
-/**
- * 随时间变的一句话（「已 12 分钟」之类）：每秒按秒表算一次，文字真的变了才让组件重画。
- * 看板上几百张卡各用各的，秒表走一下只重画文字变了的那几张，而不是全部。
- */
-export function useTimeText(render: (now: number) => string): string {
-  return useSyncExternalStore(
-    subscribeClock,
-    () => render(clockNow),
-    () => render(clockNow),
-  );
-}
-
 export function useMediaQuery(query: string): boolean {
   const subscribe = useCallback(
     (cb: () => void) => {
@@ -58,11 +46,6 @@ export function useMediaQuery(query: string): boolean {
     () => window.matchMedia(query).matches,
     () => false,
   );
-}
-
-/** 手机宽度：看板退化成可折叠的树形列表。 */
-export function useIsMobile(): boolean {
-  return useMediaQuery('(max-width: 767px)');
 }
 
 /** 存在浏览器本地的一小块状态（仓、过滤条件这类个人习惯）。 */

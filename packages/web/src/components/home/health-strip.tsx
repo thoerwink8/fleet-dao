@@ -2,7 +2,7 @@
 //
 // 关键规矩（specs/509 第五节）：有问题**持续显示、不伪装成失败**——快清零、有路由探不通、引擎被关
 // 这些都写在条上一目了然，但用 wait / stall 提示色（黄系），不用 fail 红。红了表示「真坏了，要当场修」，
-// 这三件都不是「坏了」——额度本来就会被吃掉、探针本来就会报某些路由不通、引擎关是创始人拍的临时调整。
+// 这三件都不是「坏了」——额度本来就会被吃掉、探针本来就会报某些路由不通、引擎是按配置关的。
 // 把它们画成红就是在伪装失败。反过来，引擎开着却探不到在线的工人（down）是真坏了，红；没查成（unknown）不写成正常。
 
 import { CircleAlert, CircleCheck, CircleDashed, Gauge, Power, Waypoints } from 'lucide-react';
@@ -66,7 +66,7 @@ function kindOfEngine(state: HomeHealth['engine']['state']): Kind {
     case 'on':
       return 'ok';
     case 'off':
-      return 'warn'; // 已停用是创始人拍的临时调整，不是坏了
+      return 'warn'; // 按配置没开，不是坏了
     case 'down':
       return 'bad'; // 开着却没连上：真坏了，红
     case 'unknown':
@@ -80,7 +80,7 @@ function engineWords(engine: HomeHealth['engine']): { label: string; detail: str
     case 'on':
       return { label: '引擎', detail: '正常' };
     case 'off':
-      return { label: '引擎已停用', detail: engine.detail ?? '临时调整' };
+      return { label: '引擎已停用', detail: engine.detail ?? '按配置没开' };
     case 'down':
       return { label: '引擎没连上', detail: engine.detail ?? '探不到在线的工人' };
     case 'unknown':

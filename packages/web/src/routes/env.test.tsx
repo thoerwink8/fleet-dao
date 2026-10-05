@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
-// 做完的标准（方案 §5 片 1）：一项读失败时那一项显示「没查成 + 原因」、别的项不受影响；引擎关着显示「关着（临时调整）」不是红。
+// 做完的标准（方案 §5 片 1）：一项读失败时那一项显示「没查成 + 原因」、别的项不受影响；引擎按配置关着显示「按配置没开」不是红。
 import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
@@ -72,9 +72,9 @@ describe('环境页', () => {
     expect(screen.getByText(/FLEET_MACHINE_NAME/)).toBeTruthy();
   });
 
-  test('引擎关着写「关着（临时调整）」，用等待色，不是红', async () => {
+  test('引擎按配置关着写「按配置没开」，用等待色，不是红', async () => {
     renderEnv(envData({ engine: { ok: true, value: { state: 'off', detail: '按 FLEET_SERVICES 没开' } } }));
-    const value = (await screen.findByText('关着（临时调整）')) as HTMLElement;
+    const value = (await screen.findByText('按配置没开')) as HTMLElement;
     expect(value.className).toContain('text-ink-stall');
     expect(value.className).not.toContain('text-ink-fail');
     // 引擎没连上（down）才用红：两者分开
@@ -98,7 +98,7 @@ describe('环境页', () => {
     // 别的格不受影响：引擎照常在跑、池占用照常给数
     expect(tile('引擎').getByText('在跑')).toBeTruthy();
     expect(tile('池占用').getByText('3 块')).toBeTruthy();
-    // 健康那格：真红了就说红，用红字（这是「真坏了」，和临时调整分开）
+    // 健康那格：真红了就说红，用红字（这是「真坏了」，和按配置关着分开）
     expect(screen.getByText('2 项红')).toBeTruthy();
     expect(screen.getByText(/红：temporal、engine/)).toBeTruthy();
   });
