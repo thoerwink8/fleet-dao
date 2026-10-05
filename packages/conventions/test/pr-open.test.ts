@@ -256,11 +256,10 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
   });
 
   it('只写 Refs（母单分片）也认；Closes 的排前面，里程碑跟着它走', () => {
-    const w = world(
-      [CREATED, ok(), files('a.ts'), ok()],
-      '**需求**：Refs #3\nCloses #9\n',
-      [ok('[false,"v4 统一与验收"]'), ok('[false,"v3"]')],
-    );
+    const w = world([CREATED, ok(), files('a.ts'), ok()], '**需求**：Refs #3\nCloses #9\n', [
+      ok('[false,"v4 统一与验收"]'),
+      ok('[false,"v3"]'),
+    ]);
     expect(w.run()).toBe(0);
     expect(w.asked.map((a) => a[1])).toEqual([
       'repos/{owner}/{repo}/issues/9',

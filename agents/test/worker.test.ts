@@ -59,7 +59,12 @@ interface WorkerLib {
   KIMI_UNSUPPORTED: string;
   mergeNoProxy(env: Record<string, string | undefined>): Record<string, string | undefined>;
   safeEnv(env: Record<string, string | undefined>): Record<string, string | undefined>;
-  closingBrief(o: { branch: string; noShip: boolean; githubRoute?: { via: string; proxy?: string } }): string;
+  closingBrief(o: {
+    branch: string;
+    noShip: boolean;
+    issue?: { number: number; refs: boolean } | { reason: string };
+    githubRoute?: { via: string; proxy?: string };
+  }): string;
   saidOf(line: string): string | null;
   WATCH_SLACK_MS: number;
   runWorker(argv: string[], io: WorkerIo): Promise<number>;
@@ -241,7 +246,14 @@ function world() {
     /** 换掉同步专用检出里的路由骨架（text 是文件原文）；dropSkeleton 删掉它。 */
     skeleton: (text: string) => writeSkeleton(home, text),
     dropSkeleton: () => rmSync(skeletonFile(home)),
-    run: (argv: string[]) => lib.runWorker(argv, io),
+    /** 原样跑，不替 start 补挂单参数（测「缺了拒起」用）。 */
+    runRaw: (argv: string[]) => lib.runWorker(argv, io),
+    /** 跑一条命令；start 没给 --issue / --no-issue / --no-ship 的，补上 --issue 1052（#1052 起 start 缺了就拒起，别的测试不关心这个）。 */
+    run: (argv: string[]) => {
+      const bare =
+        argv[0] === 'start' && !argv.some((a) => a === '--issue' || a === '--no-issue' || a === '--no-ship');
+      return lib.runWorker(bare ? [...argv, '--issue', '1052'] : argv, io);
+    },
   };
 }
 
@@ -454,6 +466,101 @@ describe('start：happy path', () => {
     expect(fast).not.toContain('pnpm format');
     expect(fast).not.toContain('pnpm typecheck');
     expect(fast).toContain('它说「人闸：改标准」就照第 6 条停手');
+  });
+
+  // #1052：2026-10-05 起 37 个 PR 没一个挂单，交代里写死的「不开单」是主因；派活这一步必须说清挂哪张单
+  describe('挂单（--issue / --no-issue 二选一）', () => {
+    const startArgs = (w: ReturnType<typeof world>, extra: string[]) => [
+      'start',
+      '--model',
+      'grok',
+      '--name',
+      'wi',
+      '--brief',
+      brief(w),
+      ...extra,
+    ];
+    const untouched = (w: ReturnType<typeof world>) => {
+      expect(w.gitCalls).toEqual([]);
+      expect(w.pnpmCalls).toEqual([]);
+      expect(w.spawnCalls).toEqual([]);
+    };
+
+    it('故意造出失败：两个都没给，退出码 1、说明缺什么，什么都没建没起', async () => {
+      const w = world();
+      expect(await w.runRaw(startArgs(w, []))).toBe(1);
+      expect(w.err.join('\n')).toContain('--issue');
+      expect(w.err.join('\n')).toContain('--no-issue');
+      untouched(w);
+    });
+
+    it('故意造出失败：两个都给、单号不是正整数、理由是空的、--refs 没配 --issue，都拒起', async () => {
+      for (const extra of [
+        ['--issue', '12', '--no-issue', '没有单'],
+        ['--issue', 'abc'],
+        ['--issue', '0'],
+        ['--no-issue', '   '],
+        ['--refs', '--no-issue', '没有单'],
+        ['--refs'],
+      ]) {
+        const w = world();
+        expect(await w.runRaw(startArgs(w, extra)), extra.join(' ')).toBe(1);
+        untouched(w);
+      }
+    });
+
+    it('--issue：收尾交代写「这个活挂在单 #N」和需求栏 Closes #N，pr:open 不带 --no-issue，不再有「不开单」', async () => {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid: 1 });
+      expect(await w.runRaw(startArgs(w, ['--issue', '#1052']))).toBe(0);
+      const prompt = w.prompt('wi');
+      expect(prompt).toContain('挂在单 #1052 上');
+      expect(prompt).toContain('Closes #1052');
+      expect(prompt).not.toContain('Refs #');
+      expect(prompt).not.toContain('--no-issue');
+      expect(prompt).not.toContain('不开单');
+    });
+
+    it('--issue --refs：母单的分片，交代写 Refs #N、不写 Closes', async () => {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid: 1 });
+      expect(await w.runRaw(startArgs(w, ['--issue', '1016', '--refs']))).toBe(0);
+      const prompt = w.prompt('wi');
+      expect(prompt).toContain('Refs #1016');
+      expect(prompt).not.toContain('Closes #');
+    });
+
+    it('--no-issue "<理由>"：交代里 pr:open 带同一句理由，不写 Closes', async () => {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid: 1 });
+      expect(await w.runRaw(startArgs(w, ['--no-issue', '一行文字修正，不值得开单']))).toBe(0);
+      const prompt = w.prompt('wi');
+      expect(prompt).toContain('--no-issue "一行文字修正，不值得开单"');
+      expect(prompt).not.toContain('Closes #');
+    });
+
+    it('--no-ship 冒烟不开 PR，不要求挂单', async () => {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid: 1 });
+      expect(await w.runRaw(startArgs(w, ['--no-ship']))).toBe(0);
+    });
+
+    it('--no-automerge 的人闸版交代也带挂单那句', async () => {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid: 1 });
+      expect(await w.runRaw(startArgs(w, ['--issue', '77', '--no-automerge']))).toBe(0);
+      expect(w.prompt('wi')).toContain('Closes #77');
+    });
   });
 });
 
