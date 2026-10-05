@@ -2,8 +2,8 @@
 // 新不新鲜（@fleet-dao/db 的 scheduleHealth，驾驶舱「定时任务」页读的同一张表）。最近一次没跑成（failing），或者过了期望间隔
 // 没跑成过（不新鲜：停了、登记了超过期望间隔还从没跑过、一直一个都没扫到）的，往提醒中心推一条卡住报警（飞书照现有的推送发，
 // 一件事一张卡）；恢复了自己撤，正文开头写「已撤：为什么」。
-// 读不到登记表、跑记录：这一轮记没跑成、推一条「看门狗没查成」，不当成都新鲜。推、撤提醒没写进去：这一轮记没跑成，下一轮
-// 照库里的样子重推（不记「推过了」）。
+// 读不到登记表、跑记录：这一轮记没跑成（不当成都新鲜），不另推一条「看门狗没查成」——那条和下面后端看着看门狗的「看门狗没跑成」
+// 是同一件事、写的又是同一个库（#1072 删了）。推、撤提醒没写进去：这一轮记没跑成，下一轮照库里的样子重推（不记「推过了」）。
 // 它自己也登记在表上，但不看自己（这一轮在跑就说明它活着）：它自己停了、没跑成，由后端现算（packages/api 的 watchdog-health.ts：
 // /healthz 的 watchdog 项，后端每 5 分钟看一次、推「看门狗停了」）。
 // 改这里之前必须知道：
@@ -18,7 +18,7 @@ import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { beijingDate, clip, stamp } from './reconcile-common.ts';
+import { clip, stamp } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
 export const WATCHDOG_JOB = {
@@ -36,8 +36,6 @@ export const WATCHDOG_OFFSET_MINUTES = 4;
 export const WATCHDOG_ACTOR = 'engine:watchdog';
 /** 某个定时任务不对的那条：watchdog:job:<任务>:<after-<编号> | no-success>。 */
 export const WATCHDOG_JOB_ALERT_PREFIX = 'watchdog:job:';
-/** 读不到登记表的那条：watchdog:unchecked:<北京日期>（人处理了，当天不再打开）。 */
-export const WATCHDOG_UNCHECKED_PREFIX = 'watchdog:unchecked:';
 /** 提醒点进去看驾驶舱「定时任务」页。 */
 export const WATCHDOG_LINK = '/schedules';
 /** why 最长多少字。 */
@@ -257,48 +255,20 @@ async function attempt<T>(
   }
 }
 
-/** 读不到登记表、跑记录：推一条「看门狗没查成」（北京日期一天一条；人处理了当天不再打开）。 */
-async function raiseUnchecked(deps: WatchdogDeps, why: string, now: Date): Promise<void> {
-  await raiseOnce(deps.alerts, {
-    dedupeKey: `${WATCHDOG_UNCHECKED_PREFIX}${beijingDate(now)}`,
-    title: '看门狗没查成：读不到定时任务的登记表或跑记录',
-    body: [
-      why,
-      "这一轮不知道各定时任务新不新鲜（不当成都新鲜）。库连不连得上看健康页的「数据库」一项；引擎日志：journalctl -u fleet-engine --since '-1h' | grep 看门狗。",
-      '下一轮读到了，这条自己撤。',
-    ].join('\n'),
-  });
-}
-
 async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
   const now = deps.now();
   let health: JobHealth[];
   try {
     health = await deps.health(now);
   } catch (err) {
-    const notes = [`读不到定时任务的登记表或跑记录：${errMessage(err)}`];
-    try {
-      await raiseUnchecked(deps, notes[0] ?? '', now);
-    } catch (e) {
-      notes.push(`「看门狗没查成」这条提醒也没写进去：${errMessage(e)}`);
-    }
-    return { outcome: 'failed', why: clip(notes.join('；'), WATCHDOG_WHY_MAX) };
+    // 这一轮不知道各定时任务新不新鲜（不当成都新鲜，开着的报警一条都不撤）：记没跑成，后端看着看门狗的那一下会报
+    return {
+      outcome: 'failed',
+      why: clip(`读不到定时任务的登记表或跑记录：${errMessage(err)}`, WATCHDOG_WHY_MAX),
+    };
   }
   const s: RoundState = { deps, problems: [] };
   const others = health.filter((h) => h.job.id !== WATCHDOG_JOB.id);
-
-  // 读到了：之前「没查成」的那条撤掉
-  const unchecked = await attempt(s, '列不了「看门狗没查成」的提醒', () =>
-    deps.alerts.openByPrefix(WATCHDOG_UNCHECKED_PREFIX),
-  );
-  for (const a of unchecked.ok ? unchecked.value : []) {
-    await attempt(s, `提醒 ${a.dedupeKey} 没撤掉`, () =>
-      deps.alerts.resolve({
-        dedupeKey: a.dedupeKey,
-        why: `这一轮读到定时任务的登记表了（除了看门狗自己有 ${others.length} 个）`,
-      }),
-    );
-  }
 
   // 每个任务判一遍：要人知道的报（一段一条）；任务自己为这次没跑成报过的不报第二条
   const verdicts = others.map((h) => judgeJob(h, now));

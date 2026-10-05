@@ -1,10 +1,10 @@
-// 失败分流的说法：动作只有四种，类别数 = 动作数（设计第十二节；依据见 docs/reference/errors.md 第 4 节）。
+// 失败分流的说法：下一步动作（#1072 瘦身后只产出 retry、park 两种；swapRoute、swapModel 留在类型里是因为任务工作流的历史和
+// 兜底梯还认它们），处置按「打断原因」分五种写成一张表（classify.ts 的 POLICY；依据 509 §九、docs/decisions/0010 第 7 条）。
 // 本目录全是纯函数：不取时钟、不碰网络和文件，时间由调用方传进来。
 
-import type { JevQuestion, JevReply } from './jev.ts';
-import { type Bound, count, fraction, nonNegative, resolvePolicy } from './policy.ts';
+import { count, nonNegative, resolvePolicy } from './policy.ts';
 
-/** 下一步动作。四个名字和引擎兜底梯的四级一样，可以直接接。 */
+/** 下一步动作。名字和引擎兜底梯一样，可以直接接。分流自己只给 retry 和 park；换路由、换模型由路由熔断和人去做。 */
 export type FailureAction = 'retry' | 'swapRoute' | 'swapModel' | 'park';
 
 /** 这个任务在这一步上已经用掉的处置次数。缺的 = 从没用过。 */
@@ -13,10 +13,12 @@ export interface AttemptCounters {
   retries: number;
   /** 返工：测试红、合并冲突、没交付——和基础设施的重试分开记（windsurf-dao#1755：CI 修复轮吃光审查轮次）。 */
   reworks: number;
+  /** 下面两项分流不再用（没有换路由、换模型这一级了），留着是因为任务工作流的计数和历史里有它们。 */
   routeSwaps: number;
   modelSwaps: number;
 }
 
+/** 问 Jev「认不出的失败怎么办」时的选项（分流本身不再问；real/jev-port.ts 还认这道题的形状）。 */
 export type TriageChoice = 'retry' | 'swapRoute' | 'swapModel' | 'unclear';
 
 /** 一次失败的证据。能给的都给；分类用全文，展示时才截。 */
@@ -33,8 +35,8 @@ export interface FailureEvidence {
   hostId?: string;
   /**
    * 这个池是 Claude 订阅的哪个组织（pools.org_kind：拼车、独享）。带了的额度用满不原地睡到清零（design 第九节
-   * 「拼车用完，切独享接着干」）：两个组织共用一个会话用户，这个池用满了引擎切号，回去选路、切了就换到切过去的池接着干
-   * （QT1 的 orgLadder）。不给 = 不是这种池，照普通的走。
+   * 「拼车用完，切独享接着干」）：两个组织共用一个会话用户，这个池用满了引擎切号，回去选路、切了就换到切过去的池接着干。
+   * 不给 = 不是这种池，照普通的走。
    */
   orgKind?: 'carpool' | 'solo';
   /** 出事的机器（给人看的名字，例如「法国」）和会话用户：只有人能修的（重新登录）要写清去哪台机器、以谁的身份修。 */
@@ -57,24 +59,20 @@ export interface FailureEvidence {
   retryAfterSeconds?: number;
   /** 上游给的恢复时刻（额度窗清零），ISO。 */
   resetsAt?: string;
-  /** 现在，ISO。算「等到几点」「避开到几点」要它；不给就只用默认时长、不写到期时刻。 */
+  /** 现在，ISO。算「等到几点」要它；不给就只用默认时长。 */
   now?: string;
   attempts?: Partial<AttemptCounters>;
-  /** 同一路由最近的真实流量（不含探针）：直接传 routeBreaker 结果里的 window。失败率 null = 窗口里没有真实流量，不算病。 */
-  routeHealth?: { samples: number; failureRate: number | null };
   /** 这一步上一次失败的原文。一字不差再犯 = 重试不会变，不在原路再试（windsurf-dao#1237）。 */
   previousMessage?: string;
-  /** 问过 Jev 才有（见 triageFailure）；没问是 undefined。 */
-  jev?: JevReply<TriageChoice>;
 }
 
-/** 换路由、换模型时要避开的范围。 */
+/** 所有任务一起避开的范围（路由探针把整池暂停用它）。 */
 export interface Avoid {
   /** route = 这一条路由；pool = 整个账号池（额度、封号、登录失效）；model = 这个模型。 */
   scope: 'route' | 'pool' | 'model';
   /** 所有任务一起避开（写进共享的路由 / 账号池状态），不只是这个任务。 */
   shared: boolean;
-  /** 避到几点；没有 = 等人或帅位处理完再放开。 */
+  /** 避到几点；没有 = 等人处理完再放开。 */
   until?: string;
 }
 
@@ -84,12 +82,12 @@ export interface FailureVerdict {
   delaySeconds: number;
   /** 一句白话。 */
   reason: string;
-  /** 命中的规则编号；FB = 认不出走兜底梯，JV = 认不出、按 Jev 的判断走。 */
+  /** 命中的规则编号；FB = 认不出走兜底。 */
   rule: string;
   /** 规则的白话名。 */
   title: string;
-  /** 怎么认出来的：结构化的码、已知原文、只剩状态码或退出码、Jev、兜底。 */
-  via: 'signal' | 'text' | 'generic' | 'jev' | 'fallback';
+  /** 怎么认出来的：结构化的码、已知原文、只剩状态码或退出码、兜底。 */
+  via: 'signal' | 'text' | 'generic' | 'fallback';
   /** 规则的第一选择；和 action 不同说明那一级的次数用完、往下走了。 */
   classifiedAs: FailureAction | 'unknown';
   /** 要不要报警（挂起一定报警）。 */
@@ -101,83 +99,48 @@ export interface FailureVerdict {
    * upstream = 等上游给的别的时间（限流、繁忙、GitHub 暂时不让访问）。
    */
   wait?: 'quota' | 'upstream';
-  /**
-   * 所有任务一起避开的（写进共享的路由 / 账号池状态），和这个任务下一步做什么无关：挂起的也要给——
-   * 设备被撤销时这个任务挂起，同一个池的别的任务也不该再派过去。
-   */
+  /** 整池暂停：同一个池的别的任务也不该再派过去（挂起的也要给——设备被撤销时这个任务挂起，同一个池的别的任务也不该再派）。 */
   shared?: Avoid;
   /** 只有人能修、修法确定时给：写给人看的一句（填好了机器、会话用户）。 */
   humanFix?: string;
   /** 这一步之后（等完、或挂起后人点「继续」）续同一个会话、同一条路由；false = 下一次照常选路。 */
   resumeSame: boolean;
-  avoid?: Avoid;
   /** 喂熔断：fail = 算这条路由的失败；neutral = 不算（我们自己停的、断流、账号池的事、任务自己的问题）。 */
   routeOutcome: 'fail' | 'neutral';
   /** 既没有原文，也没有认得出的码：「缺原因」单独计数，别和「认不出」混在一起（旧系统 82 条这样的没人数）。 */
   missingReason?: true;
-  /** 认不出、又还没问过 Jev 时给：调用方可以拿去问 Jev，再带着回答重判一次。 */
-  jevQuestion?: JevQuestion<TriageChoice>;
 }
 
-/** 上限与时长。前三个与引擎 Limits 同名，可以直接把引擎的上限传进来。 */
+/** 上限与时长：每种打断原因的「总次数 + 最长等待」两个上限都从这里来（509 §九、0010 第 7 条）。 */
 export interface FailurePolicy {
   /** 原路重试几次（引擎 limits.retryAttempts）。 */
   retryAttempts: number;
-  routeSwaps: number;
-  modelSwaps: number;
   /** 返工几轮（设计第五节：审查意见最多 2 轮；返工另记一本账）。 */
   reworkRounds: number;
   /** 退避：从这里起翻倍，封顶 retryMaxSeconds（与引擎兜底梯同一条算法）。 */
   retryBaseSeconds: number;
   retryMaxSeconds: number;
-  /** 上游给的等待不超过这个就原地等，超了先换路由。 */
-  inPlaceWaitMaxSeconds: number;
-  /** 最多等多久：额度要等更久才恢复，就挂起报警，不闷头睡几天。 */
+  /** 最长等待：额度要等更久才恢复，就停下报警，不闷头睡几天。 */
   waitMaxSeconds: number;
-  /** 路由繁忙时所有任务一起避开多久（盲设计题 Grok 臂的起步值 10 分钟）。 */
-  routeCooldownSeconds: number;
-  /** 额度用满又读不出清零时刻时，账号池先避开多久（旧系统账号池暂停的第一档 15 分钟）。 */
-  poolCooldownSeconds: number;
-  /** 路由病了的判据：真实流量至少几条、失败率多少（windsurf-dao#1342：好路由 0–30%，坏路由 52–75%）。 */
-  sickRouteMinSamples: number;
-  sickRouteFailureRate: number;
-  /** Jev 把握度低于它 = 没判出来（旧系统 Jev 的放行线）。 */
-  jevConfidenceFloor: number;
 }
 
 export const DEFAULT_FAILURE_POLICY: Readonly<FailurePolicy> = Object.freeze({
   retryAttempts: 2,
-  routeSwaps: 2,
-  modelSwaps: 1,
   reworkRounds: 2,
   retryBaseSeconds: 15,
   retryMaxSeconds: 600,
-  inPlaceWaitMaxSeconds: 300,
   waitMaxSeconds: 6 * 3600,
-  routeCooldownSeconds: 600,
-  poolCooldownSeconds: 900,
-  sickRouteMinSamples: 8,
-  sickRouteFailureRate: 0.6,
-  jevConfidenceFloor: 0.7,
 });
 
-/** 缺的取默认值，给了但不对的报错。梯子上的次数可以是 0（跳过那一级）。 */
-export function resolveFailurePolicy(partial?: Partial<FailurePolicy>): FailurePolicy {
-  return resolvePolicy('失败分流策略', DEFAULT_FAILURE_POLICY, FAILURE_POLICY_BOUNDS, partial);
-}
-
-const FAILURE_POLICY_BOUNDS: { readonly [K in keyof FailurePolicy]: Bound } = {
+const FAILURE_POLICY_BOUNDS = {
   retryAttempts: count(0),
-  routeSwaps: count(0),
-  modelSwaps: count(0),
   reworkRounds: count(0),
   retryBaseSeconds: nonNegative,
   retryMaxSeconds: nonNegative,
-  inPlaceWaitMaxSeconds: nonNegative,
   waitMaxSeconds: nonNegative,
-  routeCooldownSeconds: nonNegative,
-  poolCooldownSeconds: nonNegative,
-  sickRouteMinSamples: count(1),
-  sickRouteFailureRate: { min: 0, minExclusive: true, max: 1 },
-  jevConfidenceFloor: fraction,
-};
+} as const;
+
+/** 缺的取默认值，给了但不对的报错（引擎的上限对象可以直接传进来，多出来的字段不管）。次数可以是 0（跳过那一级）。 */
+export function resolveFailurePolicy(partial?: Partial<FailurePolicy>): FailurePolicy {
+  return resolvePolicy('失败分流策略', DEFAULT_FAILURE_POLICY, FAILURE_POLICY_BOUNDS, partial);
+}

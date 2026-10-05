@@ -229,7 +229,7 @@ describe('看门狗一轮（真库）', () => {
     expect((await alertOf(key))?.resolvedAt).toEqual(at(5));
   });
 
-  it('【故意造出的失败】读不到登记表、跑记录：这一轮记没跑成、推一条「看门狗没查成」，开着的报警一条都不撤（不当成都新鲜）；读到了自己撤', async () => {
+  it('【故意造出的失败】读不到登记表、跑记录：这一轮记没跑成、写明原因，开着的报警一条都不撤（不当成都新鲜），也不另推「看门狗没查成」（后端看着看门狗的那一下报）', async () => {
     await register({ id: 'route-probe', name: '路由探针' });
     const ok = await run('route-probe', -120, { outcome: 'ok', scanned: 3, found: 0 });
     await runWatchdogJob(deps());
@@ -250,15 +250,13 @@ describe('看门狗一轮（真库）', () => {
     const open = await openAlerts();
     expect(open.map((a) => [a.dedupeKey, a.title])).toEqual([
       [`watchdog:job:route-probe:after-${ok}`, '定时任务「路由探针」停了：超过 45 分钟没跑'],
-      ['watchdog:unchecked:2026-09-27', '看门狗没查成：读不到定时任务的登记表或跑记录'],
     ]);
     expect(logs).toContain('error:看门狗这一轮没跑成');
 
+    // 下一轮读到了：照常判（那条「停了」还不对，原样开着）
     clock = at(10);
-    await runWatchdogJob(deps());
-    const unchecked = await alertOf('watchdog:unchecked:2026-09-27');
-    expect(unchecked?.resolvedBy).toBe('engine:watchdog');
-    expect(firstLine(unchecked?.body)).toBe('已撤：这一轮读到定时任务的登记表了（除了看门狗自己有 1 个）');
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual([`watchdog:job:route-probe:after-${ok}`]);
   });
 
   it('【故意造出的失败】推送没写进去：这一轮记没跑成（写明哪条没写进去），不当成推过了——下一轮照库里的样子重推；撤没写进去也一样', async () => {

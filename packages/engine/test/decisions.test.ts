@@ -74,13 +74,13 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     ...over,
   });
 
-  it('错误码不分大小写、原文也认：额度用满先等清零（续同一个会话），繁忙换路由，丢了的活原路重试', () => {
+  it('错误码不分大小写、原文也认：额度用满先等清零（续同一个会话），繁忙等一等，丢了的活原路重试', () => {
     const quota = nextAction({ failure: failure('quota_exhausted'), limits, routeBound: true });
     expect(quota).toMatchObject({ action: 'retry', wait: 'quota', resumeSame: true, rule: 'QT1' });
-    expect(quota.shared).toEqual({ scope: 'pool' });
     expect(nextAction({ failure: failure('route_busy'), limits, routeBound: true })).toMatchObject({
-      action: 'swapRoute',
-      avoid: 'route',
+      action: 'retry',
+      wait: 'upstream',
+      rule: 'BZ1',
     });
     expect(nextAction({ failure: failure('SESSION_LOST'), limits, routeBound: true })).toMatchObject({
       action: 'retry',
@@ -96,82 +96,40 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(nextAction({ failure: failure('什么鬼'), limits, routeBound: true }).classifiedAs).toBe('unknown');
   });
 
-  it('会话失败带回的 Jev 答案进分流：只记不拦的照兜底梯（理由里写明），真拦有把握的按它走；规则认得出的不看它', () => {
-    const jev = { asked: true, ok: true, choice: 'swapRoute', confidence: 0.9, shadow: true } as const;
-    expect(evidenceOf({ failure: failure('WEIRD'), limits, routeBound: true, context: { jev } }).jev).toEqual(
-      jev,
-    );
-    const shadowed = nextAction({ failure: failure('WEIRD'), limits, routeBound: true, context: { jev } });
-    expect(shadowed).toMatchObject({ action: 'retry', rule: 'FB' });
-    expect(shadowed.reason).toContain('这道题还在只记不拦');
-    const enforced = nextAction({
-      failure: failure('WEIRD'),
-      limits,
-      routeBound: true,
-      context: { jev: { ...jev, shadow: false } },
-    });
-    expect(enforced).toMatchObject({ action: 'swapRoute', rule: 'JV', avoid: 'route' });
-    const known = nextAction({
-      failure: failure('route_busy'),
-      limits,
-      routeBound: true,
-      context: { jev: { ...jev, choice: 'swapModel', shadow: false } },
-    });
-    expect(known).toMatchObject({ action: 'swapRoute', avoid: 'route' });
-    expect(known.rule).not.toBe('JV');
-  });
-
-  it('认不出的从重试爬起：重试 → 换路由 → 换模型 → 挂起，每级额度用完才往下走', () => {
+  it('认不出的从重试爬起：重试两次，次数用完就挂起并报警（没有换路由、换模型这一级）', () => {
     const steps = [
       nextAction({ failure: failure('WEIRD'), limits, routeBound: true }),
+      nextAction({ failure: failure('WEIRD'), counters: { retries: 1 }, limits, routeBound: true }),
       nextAction({ failure: failure('WEIRD'), counters: { retries: 2 }, limits, routeBound: true }),
-      nextAction({
-        failure: failure('WEIRD'),
-        counters: { retries: 2, routeSwaps: 2 },
-        limits,
-        routeBound: true,
-      }),
-      nextAction({
-        failure: failure('WEIRD'),
-        counters: { retries: 2, routeSwaps: 2, modelSwaps: 1 },
-        limits,
-        routeBound: true,
-      }),
     ];
-    expect(steps.map((s) => s.action)).toEqual(['retry', 'swapRoute', 'swapModel', 'park']);
-    expect(steps[0]?.delaySeconds).toBe(15);
-    expect(steps.map((s) => s.counter)).toEqual(['retries', 'routeSwaps', 'modelSwaps', null]);
-    expect(steps.map((s) => s.classifiedAs)).toEqual(['unknown', 'unknown', 'unknown', 'unknown']);
+    expect(steps.map((s) => s.action)).toEqual(['retry', 'retry', 'park']);
+    expect(steps.map((s) => s.delaySeconds)).toEqual([15, 30, 0]);
+    expect(steps.map((s) => s.counter)).toEqual(['retries', 'retries', null]);
+    expect(steps.map((s) => s.classifiedAs)).toEqual(['unknown', 'unknown', 'unknown']);
+    expect(steps[2]?.alert).toBe(true);
   });
 
-  it('上游繁忙、容量满、限流（没给等多久）：先换路由，不是挂起等人（D8、F2）', () => {
+  it('上游繁忙、容量满、限流（没给等多久）：按默认等一等再来，不是挂起等人（D8、F2）', () => {
     for (const code of ['ROUTE_BUSY', 'CAPACITY', 'RATE_LIMITED']) {
-      expect(nextAction({ failure: failure(code), limits, routeBound: true }).action).toBe('swapRoute');
+      expect(nextAction({ failure: failure(code), limits, routeBound: true })).toMatchObject({
+        action: 'retry',
+        wait: 'upstream',
+        delaySeconds: 60,
+      });
     }
   });
 
-  it('端口明说重试没用的，跳过重试；不绑路由的一步只有重试和挂起两级', () => {
-    expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: true }).action).toBe(
-      'swapRoute',
-    );
+  it('端口明说重试没用的（只对认不出的），不重试，直接挂起', () => {
+    expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: true }).action).toBe('park');
     expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: false }).action).toBe('park');
   });
 
-  it('账号池的事：封号换池并报警、换不了就挂起；额度用满在 Claude 订阅池马上回去选路（等切号）；别的换路由只避这条路由', () => {
+  it('账号池的事：封号直接挂起并报警、整池暂停；额度用满在 Claude 订阅池马上回去选路（等切号），别的池等到清零', () => {
     expect(nextAction({ failure: failure('account_banned'), limits, routeBound: true })).toMatchObject({
-      action: 'swapRoute',
-      avoid: 'pool',
+      action: 'park',
       alert: true,
       shared: { scope: 'pool' },
     });
-    expect(
-      nextAction({
-        failure: failure('account_banned'),
-        counters: { routeSwaps: 2 },
-        limits,
-        routeBound: true,
-      }).action,
-    ).toBe('park');
     // Claude 订阅池（带组织类型）：不原地睡到清零，马上回去选路续同一个会话（切了号选路就换池 fork 续上，#59）
     const org = nextAction({
       failure: failure('QUOTA_EXHAUSTED'),
@@ -190,8 +148,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
       },
     });
     expect(org).toMatchObject({ action: 'retry', delaySeconds: 0, wait: 'quota', resumeSame: true });
-    expect(org.shared).toEqual({ scope: 'pool', until: '2026-09-25T00:20:00.000Z' });
-    // 同样的额度用满在别的池：等到清零（上游给的时刻），不换池。
+    // 同样的额度用满在别的池：等到清零（上游给的时刻）。
     const plain = nextAction({
       failure: failure('QUOTA_EXHAUSTED'),
       limits,
@@ -203,13 +160,9 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
       },
     });
     expect(plain).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
-    expect(nextAction({ failure: failure('ROUTE_BUSY'), limits, routeBound: true }).avoid).toBe('route');
-    expect(
-      nextAction({ failure: failure('WEIRD'), counters: { retries: 2 }, limits, routeBound: true }).avoid,
-    ).toBe('route');
   });
 
-  it('设备被撤销：挂起（不换池、不等清零），整池暂停，写明去哪台机器、以谁的身份重跑 reclaude login；人点继续后续同一个会话', () => {
+  it('设备被撤销：挂起（不换池、不等清零），整池暂停，写明去哪台机器、以谁的身份重新登录；人点继续后续同一个会话', () => {
     const next = nextAction({
       failure: { ...failure('agent_error'), message: 'API Error: 401 device_revoked' },
       limits,
@@ -228,7 +181,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     });
     expect(next).toMatchObject({ action: 'park', rule: 'DV1', resumeSame: true, alert: true });
     expect(next.shared).toEqual({ scope: 'pool' });
-    expect(next.humanFix).toContain('在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login');
+    expect(next.humanFix).toContain('在「法国」上以会话用户 fleet-agent-carpool 重跑');
   });
 
   it('要人的直接挂起并报警', () => {
@@ -238,7 +191,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     });
   });
 
-  it('上一次失败的原文一字不差：原路再试不会变，跳过重试', () => {
+  it('上一次失败的原文一字不差：原路再试不会变，直接挂起', () => {
     const again = nextAction({
       failure: { ...failure('agent_error'), message: 'socket hang up' },
       counters: { retries: 1 },
@@ -246,7 +199,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
       routeBound: true,
       context: { previousMessage: 'socket hang up' },
     });
-    expect(again.action).toBe('swapRoute');
+    expect(again.action).toBe('park');
     expect(again.reason).toContain('一字不差');
   });
 

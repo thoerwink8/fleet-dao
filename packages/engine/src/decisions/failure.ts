@@ -1,12 +1,11 @@
-// 失败分流的引擎入口：工作流看到的失败 + 这一步的上下文 → 失败分流（failure/classify.ts：规则表认原因，认不出走兜底梯）
+// 失败分流的引擎入口：工作流看到的失败 + 这一步的上下文 → 失败分流（failure/classify.ts：规则表认原因，按这一种的处置办）
 // → 下一步动作。经 decide 本地活动调，结果进历史；改规则表不会让在途任务重放对不上。
 // 分流自己出错或答非所问（规则表写坏了）也不判死：退回只看次数的兜底梯（重试 → 换路由 → 换模型 → 挂起并报警）。
 
 import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
-import type { JevReply } from '../failure/jev.ts';
-import type { FailureEvidence, FailurePolicy, FailureVerdict, TriageChoice } from '../failure/types.ts';
+import type { FailureEvidence, FailurePolicy, FailureVerdict } from '../failure/types.ts';
 import type { Limits } from '../limits.ts';
 
 export type ActionClass = 'retry' | 'swapRoute' | 'swapModel' | 'park';
@@ -66,11 +65,6 @@ export interface FailureContext {
   runAsUser?: string | undefined;
   /** 工作流里的「现在」（ISO）：算等到几点、避到几点。 */
   now?: string | undefined;
-  /**
-   * 看守活动问回来的 Jev 答案（规则认不出的会话失败才有）。分流只在规则认不出时看它；
-   * 只记不拦、把握不够、没判出来的照兜底梯走。
-   */
-  jev?: JevReply<TriageChoice> | undefined;
 }
 
 export interface FailureInput {
@@ -153,7 +147,6 @@ export function evidenceOf(input: FailureInput): FailureEvidence {
     ...set('machine', c.machine),
     ...set('runAsUser', c.runAsUser),
     ...set('now', c.now),
-    ...set('jev', c.jev),
     attempts: {
       retries: count(counters.retries),
       reworks: count(counters.reworks),
@@ -185,11 +178,7 @@ function usable(v: unknown): v is FailureVerdict {
 }
 
 export function nextAction(input: FailureInput, triage: FailureTriage = classifyFailure): NextAction {
-  const policy: Partial<FailurePolicy> = {
-    retryAttempts: input.limits.retryAttempts,
-    routeSwaps: input.limits.routeSwaps,
-    modelSwaps: input.limits.modelSwaps,
-  };
+  const policy: Partial<FailurePolicy> = { retryAttempts: input.limits.retryAttempts };
   let verdict: unknown;
   let broken: string | null = null;
   try {
@@ -208,7 +197,6 @@ export function nextAction(input: FailureInput, triage: FailureTriage = classify
     classifiedAs: v.classifiedAs,
     delaySeconds: v.delaySeconds,
     reason: v.reason,
-    ...(v.avoid ? { avoid: v.avoid.scope } : {}),
     counter: v.counter,
     ...(v.wait ? { wait: v.wait } : {}),
     resumeSame: v.resumeSame,

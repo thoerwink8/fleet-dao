@@ -17,7 +17,6 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { BackendRequest, BackendResult, JevBackend, JevSetup } from '@fleet-dao/jev';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { classifyFailure } from '../../src/failure/classify.ts';
 import type { JevQuestion } from '../../src/failure/jev.ts';
 import { judgeStall, type StallChoice } from '../../src/failure/stall.ts';
 import type { TriageChoice } from '../../src/failure/types.ts';
@@ -76,14 +75,23 @@ const ready =
     routeId: ROUTE,
   });
 
-/** 规则认不出的一次会话失败出的那道题（引擎自己的题）。 */
-const FAILURE_Q = classifyFailure({
-  source: 'session:execute',
-  stage: 'execute',
-  routeId: 'solo',
-  code: 'agent_error',
-  message: '上游回了一句谁也没见过的话 zq-17',
-}).jevQuestion as JevQuestion<TriageChoice>;
+/**
+ * 规则认不出的一次会话失败的那道题（引擎自己的题）。失败分流不再出这道题、也不再问它（#1072），题库和这条通路还在，
+ * 这里手写一份题面照样核「换成题库的题去问、答案换回引擎的选项」这一段。
+ */
+const FAILURE_Q: JevQuestion<TriageChoice> = {
+  questionId: 'failure-triage',
+  prompt: '一次失败，规则认不出。只看下面的材料，判断下一步怎么做最可能奏效；看不出就选 unclear，不要猜。',
+  options: ['retry', 'swapRoute', 'swapModel', 'unclear'],
+  hints: {
+    retry: '临时故障，原路再试大概率能好',
+    swapRoute: '这条路暂时不行，换一条能跑同一模型的路',
+    swapModel: '这个模型本身不行，换一个模型',
+    unclear: '看不出来',
+  },
+  sample: '出在：session:execute\n阶段：execute\n上游错误原文：\n上游回了一句谁也没见过的话 zq-17',
+  confidenceFloor: 0.7,
+};
 
 /** 有动静、半天没推进、看不出在重复：拿不准，出一道停滞预判题。 */
 const STALL_Q = judgeStall({
