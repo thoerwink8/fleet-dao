@@ -719,6 +719,43 @@ function removeShell(dir) {
 /** 独立工人跑了这么久还没退，开会话时提一句（Claude 无头模式做完才出字，不能拿「多久没输出」判）。 */
 export const WORKER_LONG_MS = 3 * 60 * 60_000;
 
+/**
+ * 工人最后一句说得出人话的输出。Claude 工人的日志是 stream-json（一行一个事件）：结论在 result 事件里，
+ * 说的话在 assistant 事件的 text 里；别家模型是普通文字。和 commander 技能 worker-lib.mjs 的 saidOf 一个意思，
+ * 这里只取「最后说了什么」（判做没做完），不翻工具调用。钩子和技能装在两个目录，没法互相 import，所以各写一份。
+ */
+function workerLastSaid(text) {
+  const rows = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const tail = (t) => {
+    const r = String(t)
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return r[r.length - 1] ?? '';
+  };
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row.startsWith('{')) return row;
+    let ev;
+    try {
+      ev = JSON.parse(row);
+    } catch {
+      return row;
+    }
+    if (ev?.type === 'result' && typeof ev.result === 'string') return tail(ev.result);
+    if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
+      const said = ev.message.content.filter(
+        (b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim(),
+      );
+      if (said.length > 0) return tail(said[said.length - 1].text);
+    }
+  }
+  return '';
+}
+
 /** 这个 pid 的进程还在不在；判不出来（没权限看）当还在，不把它报成死了。 */
 function pidAlive(pid) {
   try {
@@ -759,10 +796,7 @@ export function workerLines(home, now = Date.now(), alive = pidAlive) {
     }
     let last = '';
     try {
-      const rows = readFileSync(String(m.outLog), 'utf8')
-        .split('\n')
-        .filter((l) => l.trim() !== '');
-      last = (rows[rows.length - 1] ?? '').trim();
+      last = workerLastSaid(readFileSync(String(m.outLog), 'utf8'));
     } catch {
       // 还没有输出
     }

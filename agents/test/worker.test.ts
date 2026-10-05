@@ -51,6 +51,7 @@ interface WorkerLib {
   mergeNoProxy(env: Record<string, string | undefined>): Record<string, string | undefined>;
   safeEnv(env: Record<string, string | undefined>): Record<string, string | undefined>;
   closingBrief(o: { branch: string; noShip: boolean }): string;
+  saidOf(line: string): string | null;
   runWorker(argv: string[], io: WorkerIo): Promise<number>;
 }
 
@@ -615,6 +616,9 @@ describe('start：【故意造出的失败】', () => {
       'opus',
       '--effort',
       'high',
+      '--output-format',
+      'stream-json',
+      '--verbose',
     ]);
     expect(spec.stdinFile).toBe(promptFile);
     expect(spec.cwd).toBe(join(w.repo, '.claude', 'worktrees', 'w-w7'));
@@ -1216,5 +1220,48 @@ describe('clean', () => {
     const code = await w.run(['clean', '--name', 'c10', '--force']);
     expect(code).toBe(0);
     expect(w.gitCalls).toHaveLength(2);
+  });
+});
+
+// #1016：Claude 工人边做边出日志（stream-json），status 要把事件翻成人话——第一件真活时中途只能报「还没有输出」
+describe('工人的输出在说什么（saidOf）', () => {
+  const ev = (o: unknown) => JSON.stringify(o);
+
+  it('普通文字（grok、codex 的输出）：原样', () => {
+    expect(lib.saidOf('完成：PR #12')).toBe('完成：PR #12');
+  });
+
+  it('在调工具：说出工具名和命令（截到 80 字）', () => {
+    const line = ev({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'pnpm   test:changed' } }] },
+    });
+    expect(lib.saidOf(line)).toBe('在调 Bash：pnpm test:changed');
+  });
+
+  it('说了话：取最后一行；最后的结论（result 事件）也取最后一行——「完成：PR #号」靠它认', () => {
+    expect(
+      lib.saidOf(
+        ev({
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: '先看类型错误。\n共 5 处。' }] },
+        }),
+      ),
+    ).toBe('共 5 处。');
+    expect(lib.saidOf(ev({ type: 'result', result: 'PR 已合并。\n\n完成：PR #1022' }))).toBe(
+      '完成：PR #1022',
+    );
+  });
+
+  it('【故意造出的失败】认不出的事件（system、工具结果）：返回 null，不拿事件原文冒充一句话', () => {
+    expect(lib.saidOf(ev({ type: 'system', subtype: 'init' }))).toBeNull();
+    expect(
+      lib.saidOf(ev({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } })),
+    ).toBeNull();
+    expect(lib.saidOf(ev({ type: 'result', result: 42 }))).toBeNull();
+  });
+
+  it('恰好以 { 开头、但不是 JSON 的普通文字：原样', () => {
+    expect(lib.saidOf('{ 这不是 JSON')).toBe('{ 这不是 JSON');
   });
 });
