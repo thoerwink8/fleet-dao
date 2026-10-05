@@ -1,11 +1,11 @@
 // 全局 git 忽略：把 `_tmp/` 加进这台机器的 git 全局忽略（core.excludesFile），不管哪个仓、哪怕那个仓自己的
-// .gitignore 漏写了 `_tmp/`，里面的东西都不会被 `git add` 卷进去——AGENTS.md 通用段「放 _tmp/」那条的最后一道网。
+// .gitignore 漏写了 `_tmp/`，里面的东西都不会被 `git add` 卷进去——通用段（agents/shared-rules.md）「放 _tmp/」那条的最后一道网。
 // 读写都指定 --file（ctx.home 下那份 .gitconfig），不用 --global：--global 靠进程环境变量 HOME 找家目录，
 // 测试、`--home` 传了别的目录时会因此摸到真机器的 git 全局配置——这里全程按 ctx.home 走，连 spawn 的子进程也把
 // HOME/USERPROFILE 显式改成 ctx.home，不信环境变量本来是什么。
 // 不抢用户已经在用的文件：core.excludesFile 没设过，才新建一份 ~/.fleet-dao/gitignore_global 归本脚本管，
 // 顺带把 core.excludesFile 指过去；已经指到别的文件，就在那份文件里接管标记圈起来的一小块，其余内容原样留着
-// （和 AGENTS.md 通用段一个思路，但这里没有「原文件不存在这份，整份接管」——全局 gitignore 本来就该是加法，
+// （和通用段的受管块一个思路，但这里没有「原文件不存在这份，整份接管」——全局 gitignore 本来就该是加法，
 // 只加自己这一块，不碰用户已经写的其他忽略规则）。
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';

@@ -52,7 +52,7 @@ export interface SkillTarget {
 }
 
 /**
- * 通用段写进哪几份全局文件。Cursor CLI 没有用户级文件、zcode 被 Mirasim 隔离了家目录，做不到全局，只能靠仓里的 AGENTS.md。
+ * 通用段写进哪几份全局文件。Cursor CLI 没有用户级文件、zcode 被 Mirasim 隔离了家目录，做不到全局，只能靠仓里的 AGENTS.md（fleet-dao 的仓根 AGENTS.md 顶上一行指到 agents/shared-rules.md）。
  * - Claude Code 只认 ~/.claude/CLAUDE.md（不读用户级 AGENTS.md）；Grok、Devin CLI 默认也读这份、都不认 @ 导入，
  *   所以这里放全文，它们俩不另放（~/.grok/AGENTS.md、Devin 的 AGENTS.md 再放一份就读两遍）。
  * - Codex：~/.codex/ 下 AGENTS.override.md 在就只读它（codex-rs/codex-home/src/instructions/mod.rs）。

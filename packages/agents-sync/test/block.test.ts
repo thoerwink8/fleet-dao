@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { BEGIN, blockAt, END, findMarkers, replaceBlock, sharedBlock } from '../src/block.ts';
-import { AGENTS_MD, BLOCK } from './helpers.ts';
+import { SHARED_RULES } from '../src/sync.ts';
+import { BLOCK, SHARED_RULES_MD } from './helpers.ts';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -55,8 +56,8 @@ describe('换块', () => {
 });
 
 describe('仓里的通用段', () => {
-  it('从 AGENTS.md 取出含两行标记的一块', () => {
-    expect(sharedBlock(AGENTS_MD)).toEqual({ ok: true, block: BLOCK });
+  it('从 agents/shared-rules.md 取出含两行标记的一块（标记外的几行不要）', () => {
+    expect(sharedBlock(SHARED_RULES_MD)).toEqual({ ok: true, block: BLOCK });
   });
 
   it('标记不成对、没有标记、标记之间是空的：都给出原因，不拿空的顶上', () => {
@@ -65,8 +66,8 @@ describe('仓里的通用段', () => {
     expect(sharedBlock(`${BEGIN}\n${END}\n`)).toEqual({ ok: false, why: '两行标记之间是空的' });
   });
 
-  it('本仓的 AGENTS.md：标记成对，圈住的是通用段、不含「本仓」那半', () => {
-    const got = sharedBlock(readFileSync(join(REPO, 'AGENTS.md'), 'utf8'));
+  it('本仓的 agents/shared-rules.md：标记成对，圈住的是通用段、不含「本仓」那半', () => {
+    const got = sharedBlock(readFileSync(join(REPO, 'agents', 'shared-rules.md'), 'utf8'));
     expect(got.ok).toBe(true);
     if (!got.ok) return;
     expect(got.block.startsWith(`${BEGIN}\n`)).toBe(true);
@@ -74,5 +75,13 @@ describe('仓里的通用段', () => {
     expect(got.block).toContain('\n## 怎么跟我说话\n');
     expect(got.block).toContain('\n## 我的机器与模型\n');
     expect(got.block).not.toContain('## 本仓');
+  });
+
+  it('本仓的仓根 AGENTS.md 不再带通用段：带了，在本仓干活的会话全局说明一遍、AGENTS.md 又一遍，读两遍', () => {
+    const text = readFileSync(join(REPO, 'AGENTS.md'), 'utf8');
+    expect(findMarkers(text)).toEqual({ kind: 'none' });
+    expect(text).not.toContain('\n## 怎么跟我说话\n');
+    // 没有全局说明的工具（Cursor CLI、zcode）只读仓里的 AGENTS.md：顶上要有指向通用段的一行
+    expect(text).toContain(`\`${SHARED_RULES}\``);
   });
 });

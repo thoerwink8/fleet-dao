@@ -8,18 +8,19 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const AGENTS = readFileSync(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url)), 'utf8').replace(
+// 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来）
+const AGENTS = readFileSync(fileURLToPath(new URL('../../shared-rules.md', import.meta.url)), 'utf8').replace(
   /\r\n/g,
   '\n',
 );
 
 /** 通用段里必须写着的几条，缺了哪条就列出哪条。 */
 const DIRECTIVE_RULES: Record<string, RegExp> = {
-  引导要落盘不是只出现在对话里: /\*\*你的引导必须落盘，不能只出现在对话里\*\*/,
-  当场追加原话和时间: /当场把\*\*我的原话 \+ 时间\*\*追加进 `docs\/PROGRESS\.md`/,
+  引导和决定要落盘: /我中途给的引导和决定/,
+  追加原话和时间: /把原话和时间追加进/,
   落进那一节: /「## 创始人引导（待处理）」/,
-  会话级指令不记: /只管这一次会话怎么干的\*\*不记\*\*/,
-  用完标已处理或删掉: /标「已处理」或删掉，别留着当规矩/,
+  会话级指令不记: /不是「这一次怎么干」那种会话级指令/,
+  办完标已处理: /办完标「已处理」/,
 };
 
 function missing(rules: Record<string, RegExp>, text: string): string[] {
@@ -38,10 +39,9 @@ describe('规矩：创始人引导必须落盘（2026-10-03 补）', () => {
     expect(AGENTS).toMatch(/不是「这一次怎么干」那种会话级指令/);
   });
 
-  it('【故意造出的失败】退回改之前那版：查得出来', () => {
-    // 改之前通用段只有「报进度」和「进度也要落盘」两条，都没有「引导也要落盘」这条。
-    const cut = AGENTS.replace(/\n- \*\*你的引导必须落盘[\s\S]*?只管这一次会话怎么干的\*\*不记\*\*。/, '');
+  it('【故意造出的失败】把「引导和决定落盘」那半句拿掉：查得出来', () => {
+    const cut = AGENTS.replace(/我中途给的引导和决定[^\n]*办完标「已处理」。/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(DIRECTIVE_RULES, cut).length).toBeGreaterThan(0);
+    expect(missing(DIRECTIVE_RULES, cut)).toEqual(Object.keys(DIRECTIVE_RULES));
   });
 });

@@ -1,5 +1,5 @@
 // 欠账检查（#67）：「以后要做」的事必须是一张开着的 issue（design 第三节第 35 条）。分两半（#87：必过检查必须确定）：
-// - 只看文件的（checkDebtDocs，.github/workflows/debt.yml 在主线推送和每天跑，不进 pnpm check）：活文档（AGENTS.md、README.md、
+// - 只看文件的（checkDebtDocs，.github/workflows/debt.yml 在主线推送和每天跑，不进 pnpm check）：活文档（AGENTS.md、README.md、agents/shared-rules.md、
 //   docs/ 下除了 reference/、decisions/、archive/）里推后的话（「以后再做」「先不建」「再定」「留到下一轮」「后面阶段」这类）同一句里要带单号。
 //   不读 GitHub：同一份代码什么时候跑、单子开着还是关了，结果都一样，没网也照常跑。
 // - 看 GitHub 现状的（liveDebt，只在 debt.yml 的定时任务里跑）：挂的单号是不是开着的 issue。查出来留言到对应的单上，
@@ -37,10 +37,11 @@ export const DEFERRAL_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * 查哪些文档：仓根的 AGENTS.md、README.md，docs/ 下（除了 docs/reference/、docs/decisions/、docs/archive/）所有的 .md；
+ * 查哪些文档：仓根的 AGENTS.md、README.md，通用段原件 agents/shared-rules.md（原来在 AGENTS.md 里一起查，2026-10-05 挪出来），
+ * docs/ 下（除了 docs/reference/、docs/decisions/、docs/archive/）所有的 .md；
  * specs/ 是历史记录，不查。docs/archive/ 是 docs/PROGRESS.md 搬走的历史节（#901），写的是当时的「下一步」「待办」，原样保留、不改字。
  */
-export const DEBT_ROOT_DOCS = ['AGENTS.md', 'README.md'] as const;
+export const DEBT_ROOT_DOCS = ['AGENTS.md', 'README.md', 'agents/shared-rules.md'] as const;
 const SKIPPED_DIRS = new Set(['docs/reference', 'docs/decisions', 'docs/archive']);
 
 /** 同仓的单号：`#12`；`windsurf-dao#12`、`owner/repo#12` 是别的仓的，不算。 */

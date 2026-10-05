@@ -220,6 +220,7 @@ describe('欠账：doneSection 认「怎么算做完」那一节（pnpm issue:ne
 const FILES: Record<string, string> = {
   'AGENTS.md': '# 约定\n\n先说结果，再说要我做什么。\n',
   'README.md': '# 仓\n',
+  'agents/shared-rules.md': '# 所有仓通用的规矩\n\n没验证过不说完成。\n',
   'docs/design.md': '# 设计\n\n花费看完账单再定（#37）。\n',
   'docs/reference/old.md': '旧系统这块以后再做。\n',
   // 历史记录不查（#654）：下面两份里推后的话都没带单号，也不报
@@ -233,11 +234,24 @@ describe('欠账（只看文件）：退出码 0 / 1 / 2', () => {
   it('都齐了：0，说清查了几份、几句', () => {
     const r = checkDebtDocs(memRepo(FILES));
     expect(r.code).toBe(0);
-    expect(r.lines).toEqual(['欠账检查（只看文件）过了：3 份文档里 1 句推后的话都带着单号。']);
+    expect(r.lines).toEqual(['欠账检查（只看文件）过了：4 份文档里 1 句推后的话都带着单号。']);
   });
 
   it('docs/reference/、docs/decisions/、docs/archive/、specs/ 不查（旧系统快照、历史决定、搬走的历史进度、历史需求）', () => {
-    expect(debtFiles(memRepo(FILES)).files).toEqual(['AGENTS.md', 'README.md', 'docs/design.md']);
+    expect(debtFiles(memRepo(FILES)).files).toEqual([
+      'AGENTS.md',
+      'README.md',
+      'agents/shared-rules.md',
+      'docs/design.md',
+    ]);
+  });
+
+  it('通用段原件里推后的话没带单号：照样报（通用段挪出 AGENTS.md 后不能漏查）', () => {
+    const r = checkDebtDocs(
+      memRepo({ ...FILES, 'agents/shared-rules.md': '# 所有仓通用的规矩\n\n这条以后再加。\n' }),
+    );
+    expect(r.code).toBe(1);
+    expect(r.lines[0]).toMatch(/^agents\/shared-rules\.md:3 /);
   });
 
   it('有欠账：1，逐条列出', () => {
@@ -253,6 +267,7 @@ describe('欠账（只看文件）：退出码 0 / 1 / 2', () => {
     expect(r.lines).toEqual([
       'AGENTS.md  读不到这份文档',
       'README.md  读不到这份文档',
+      'agents/shared-rules.md  读不到这份文档',
       'docs/  列不出这个目录下的文件，里面的文档没查',
       '没查成：一份文档也没读到。',
     ]);

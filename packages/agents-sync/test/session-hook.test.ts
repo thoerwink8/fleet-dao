@@ -1,6 +1,6 @@
 // 装进去的开会话钩子真跑一遍：agents-sync --apply 装钩子、记下检出 → 主线往前走 → --check 看得见落后几个 →
 // 开会话时钩子快进检出、用检出里的 agents-sync 同步，规矩跟上主线 → 主线上的原件坏了，同步不成，会话里有明确的提醒。
-// 仓是临时拷的一份 fleet-dao（AGENTS.md、agents/、agents-sync 本身），origin 是临时的裸仓；家目录、PATH 都是临时的。
+// 仓是临时拷的一份 fleet-dao（AGENTS.md、agents/（含通用段原件 shared-rules.md）、agents-sync 本身），origin 是临时的裸仓；家目录、PATH 都是临时的。
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
@@ -83,11 +83,12 @@ function machine() {
     return (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
       .additionalContext;
   };
-  /** 从另一份克隆往主线上推一个改了 AGENTS.md 的提交 */
+  /** 从另一份克隆往主线上推一个改了通用段原件（agents/shared-rules.md）的提交 */
   const pushAgents = (edit: (text: string) => string) => {
     const other = join(tempDir('other'), 'clone');
     git(dirname(other), 'clone', '-q', origin, other);
-    writeFileSync(join(other, 'AGENTS.md'), edit(readFileSync(join(other, 'AGENTS.md'), 'utf8')));
+    const file = join(other, 'agents', 'shared-rules.md');
+    writeFileSync(file, edit(readFileSync(file, 'utf8')));
     git(other, 'commit', '-q', '-am', '改规矩');
     git(other, 'push', '-q', 'origin', 'HEAD:main');
   };
@@ -122,13 +123,13 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     const after = m.syncAt(mirror, '--check');
     expect(after.code, after.out).toBe(0);
 
-    // 三分钟内再开会话不再同步；过了三分钟（删掉记号）照常。主线上的 AGENTS.md 标记坏了：同步不成，会话里明说
+    // 三分钟内再开会话不再同步；过了三分钟（删掉记号）照常。主线上的 agents/shared-rules.md 标记坏了：同步不成，会话里明说
     expect(m.session()).toContain('分钟内刚同步成功过');
     rmSync(join(m.home, '.fleet-dao', 'session-sync.ok'));
     m.pushAgents((t) => t.replace(END, ''));
     const broken = m.session();
     expect(broken).toContain('规矩同步没查成');
-    expect(broken).toContain('AGENTS.md');
+    expect(broken).toContain('agents/shared-rules.md');
     expect(broken).toContain('落后主线 1 个提交');
     // 这台的规矩还是上一版，没被坏的原件冲掉
     expect(get(m.home, '.claude/CLAUDE.md')).toContain('- 测试加的一条规矩。');

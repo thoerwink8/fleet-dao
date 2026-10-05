@@ -22,7 +22,11 @@ export const IS_ROOT = process.getuid?.() === 0;
 
 export const SHARED_BODY = '## 怎么跟我说话\n- 说人话。\n\n## 底线\n- 没验证过不说完成。\n';
 export const BLOCK = `${BEGIN}\n\n${SHARED_BODY}\n${END}`;
-export const AGENTS_MD = `# 某仓的约定\n\n上半段通用，下半段只管本仓。\n\n${BLOCK}\n\n## 本仓\n- 本仓自己的规矩。\n`;
+/** 假仓的 agents/shared-rules.md：标记外的几行不同步 */
+export const SHARED_RULES_MD = `# 所有仓通用的规矩\n\n标记外的这几行不同步。\n\n${BLOCK}\n`;
+/** 假仓的 AGENTS.md：只有本仓段、没有标记（同步不读它） */
+export const REPO_AGENTS_MD =
+  '# 某仓的约定\n\n通用的规矩在 agents/shared-rules.md。\n\n## 本仓\n- 本仓自己的规矩。\n';
 
 const made: string[] = [];
 
@@ -74,15 +78,19 @@ export const PERMS_SPEC = {
 };
 export const PERMS_JSON = `${JSON.stringify({ ...PERMS_SPEC, 说明: '测试用' }, null, 2)}\n`;
 
-/** 假仓：AGENTS.md 带通用段；skills 为 null 时没有 agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/，permissions 为 null 时没有权限源文件 */
+/**
+ * 假仓：agents/shared-rules.md 带通用段（rulesMd 为 null 时没有这份），AGENTS.md 只有本仓段；skills 为 null 时没有
+ * agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/，permissions 为 null 时没有权限源文件
+ */
 export function makeRepo(
   skills: Record<string, Record<string, string>> | null,
-  agentsMd = AGENTS_MD,
+  rulesMd: string | null = SHARED_RULES_MD,
   hooks: Record<string, string> | null = HOOK_FILES,
   permissions: string | null = PERMS_JSON,
 ): string {
   const repo = tempDir('repo');
-  put(repo, 'AGENTS.md', agentsMd);
+  put(repo, 'AGENTS.md', REPO_AGENTS_MD);
+  if (rulesMd !== null) put(repo, 'agents/shared-rules.md', rulesMd);
   if (skills !== null) {
     mkdirSync(join(repo, 'agents', 'skills'), { recursive: true });
     for (const [name, files] of Object.entries(skills)) {

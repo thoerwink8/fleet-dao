@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { defineConfig } from 'vitest/config';
 import { applyPosixToolsPath } from './packages/conventions/src/test-posix-path.ts';
 import { testWorkers } from './packages/conventions/src/test-run.ts';
@@ -17,6 +19,9 @@ export default defineConfig({
     // 收哪些测试文件只有一份（test-split.ts 的 TEST_INCLUDE）：CI 的 changes job 不装依赖，要自己在仓里按它枚举
     // （test-split.ts 的 listTestFiles），两边差一个都算错——test/test-split.test.ts 拿 vitest list 核对。
     include: [...TEST_INCLUDE],
+    // 钩子的测试会真起 pretool.mjs、stop.mjs：不隔开的话，它们读写的是跑测试的这个会话自己的无人值守状态
+    // （2026-10-05：一条 pretool 测试把会话里「创始人的话还没送达」那次提醒吃掉了，自己也因此红）。要用真状态目录的测试自己传 env。
+    env: { FLEET_UNATTENDED_DIR: join(tmpdir(), 'fleet-dao-test-unattended') },
     // 不开 passWithNoTests：CI 按改动只跑几个包（packages/conventions/src/ci-plan.ts），路径一个测试都没匹配上要红，不能当通过。
     ...(workers.maxWorkers === undefined ? {} : { maxWorkers: workers.maxWorkers }),
   },

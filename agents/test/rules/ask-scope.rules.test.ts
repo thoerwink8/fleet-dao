@@ -7,19 +7,19 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const AGENTS = readFileSync(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url)), 'utf8').replace(
+// 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来）
+const AGENTS = readFileSync(fileURLToPath(new URL('../../shared-rules.md', import.meta.url)), 'utf8').replace(
   /\r\n/g,
   '\n',
 );
 
 /** 通用段里必须写着的几条，缺了哪条就列出哪条。 */
 const ASK_SCOPE_RULES: Record<string, RegExp> = {
-  四类之外自己定: /其余你自己定，回复里带一句理由/,
-  其余是默认那边不是兜底: /\*\*「其余」是默认的那一边，不是兜底\*\*/,
-  判不准是否碰四类时按碰算: /判不准\*\*是不是\*\*碰四类时按碰算（问）/,
-  判明不碰却问同样是错: /却为了「省得你怪我没问」而问，同样是错/,
-  问了答过的只报不再问: /同类事已经问过一次、我也答过的，往后照那次办、只报不问了/,
-  报进度分两段不混编号: /\*\*要你拍的和你只要知道的，分成两段，各用各的编号\*\*/,
+  四类之外自己定: /其余你自己定、接着做、事后用一行报结果和理由/,
+  四类之外不写成选择题: /不写成选择题/,
+  判不准是否碰四类就问: /判不准碰不碰四类就问/,
+  问了答过的只报不再问: /同类事我答过一次，往后照办、只报不问/,
+  报进度分两段不混编号: /报进度分两段、各自编号/,
 };
 
 function missing(rules: Record<string, RegExp>, text: string): string[] {
@@ -37,28 +37,20 @@ describe('规矩：什么时候停下来问我（2026-10-01 补边界）', () =>
     expect(AGENTS).toMatch(/只有四类：对外发布[\s\S]{0,80}花钱[\s\S]{0,80}删数据；改标准/);
   });
 
-  it('【故意造出的失败】退回改之前那句：查得出来', () => {
-    // 改之前只有「其余你自己定，回复里带一句理由」这半句，反面那半句（不许写成选项来问）没有。
-    const cut = AGENTS.replace(
-      /其余你自己定，回复里带一句理由。\*\*「其余」是默认的那一边[\s\S]*?就是这条的一个例子）。/,
-      '其余你自己定，回复里带一句理由。',
-    );
+  it('【故意造出的失败】退回「拿不准就问」的旧样子：查得出来', () => {
+    // 只留「只有四类」那半句，反面那半句（其余自己定、不写成选择题、答过的只报不问）拿掉。
+    const cut = AGENTS.replace(/其余你自己定、接着做[^\n]*只报不问。/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(ASK_SCOPE_RULES, cut)).toEqual(
-      expect.arrayContaining([
-        '其余是默认那边不是兜底',
-        '判不准是否碰四类时按碰算',
-        '判明不碰却问同样是错',
-        '问了答过的只报不再问',
-      ]),
-    );
+    expect(missing(ASK_SCOPE_RULES, cut)).toEqual([
+      '四类之外自己定',
+      '四类之外不写成选择题',
+      '判不准是否碰四类就问',
+      '问了答过的只报不再问',
+    ]);
   });
 
-  it('【故意造出的失败】把「报进度分两段」那句去掉：查得出来', () => {
-    const cut = AGENTS.replace(
-      /\*\*要你拍的和你只要知道的，分成两段，各用各的编号\*\*[\s\S]*?不要拿同一串编号把「需要你选」和「告诉你一声」混在一起。/,
-      '',
-    );
+  it('【故意造出的失败】把「报进度分两段」那条去掉：查得出来', () => {
+    const cut = AGENTS.replace(/- 报进度分两段、各自编号[^\n]*\n/, '');
     expect(cut).not.toBe(AGENTS);
     expect(missing(ASK_SCOPE_RULES, cut)).toEqual(['报进度分两段不混编号']);
   });

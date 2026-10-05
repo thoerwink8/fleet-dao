@@ -15,7 +15,7 @@ export interface SyncRecord {
   repo: string;
   synced?: {
     commit: string;
-    /** 同步时 AGENTS.md、agents/ 有没有没提交的改动 */
+    /** 同步时 agents/ 有没有没提交的改动 */
     dirty: boolean;
     /** 第一次同步到这个提交的时间 */
     at: string;
@@ -181,7 +181,8 @@ function readSource(repo: string, platform: Platform, git: Git, record: RecordRe
   const head = git(repo, ['rev-parse', '--verify', 'HEAD^{commit}']);
   if (head.status !== 0) return { kind: 'error', why: `${repo} 的 HEAD 读不了（${firstLine(head)}）` };
   const headSha = head.stdout.trim();
-  const status = git(repo, ['status', '--porcelain', '--', 'AGENTS.md', 'agents']);
+  // 同步的原件都在 agents/ 下（通用段在 agents/shared-rules.md，仓根 AGENTS.md 只剩本仓段、不同步）
+  const status = git(repo, ['status', '--porcelain', '--', 'agents']);
   if (status.status !== 0)
     return { kind: 'error', why: `${repo} 的 git status 跑不了（${firstLine(status)}）` };
   const originRead = git(repo, ['rev-parse', '-q', '--verify', `${ORIGIN_MAIN}^{commit}`]);
@@ -232,7 +233,7 @@ export function checkPosition(pos: Position): Line[] {
       ),
     ];
   const notes = [
-    ...(synced.dirty ? ['同步时 AGENTS.md、agents/ 有没提交的改动'] : []),
+    ...(synced.dirty ? ['同步时 agents/ 有没提交的改动'] : []),
     ...(record.value && !samePath(record.value.repo, source.main, pos.platform)
       ? [`记的检出是 ${record.value.repo}`]
       : []),
@@ -289,7 +290,7 @@ export function applyPosition(pos: Position, done: readonly Line[], now: Date): 
       ),
     ];
   }
-  const who = `这台同步到 ${short(source.head)}${source.dirty ? '（AGENTS.md、agents/ 里有没提交的改动）' : ''}`;
+  const who = `这台同步到 ${short(source.head)}${source.dirty ? '（agents/ 里有没提交的改动）' : ''}`;
   const noted = wrote ? `记下了${fixed}` : '记过了';
   const v = verdict(source.headVsMain, source.origin);
   if (v.kind === 'ok') return [line(wrote ? 'changed' : 'ok', key, `${who}，${v.text}；${noted}`)];

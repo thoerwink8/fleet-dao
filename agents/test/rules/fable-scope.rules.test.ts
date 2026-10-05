@@ -11,14 +11,16 @@ import { describe, expect, it } from 'vitest';
 const read = (rel: string) =>
   readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
-const AGENTS = read('../../../AGENTS.md');
+// 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来）
+const AGENTS = read('../../shared-rules.md');
 const COMMANDER = read('../../skills/commander/SKILL.md');
 
 /** 通用段「我的机器与模型」一节里写 Fable 的那一行。认不出这一节、这一节里没有 Fable，都明确报错，不当成空行放过。 */
 function fableLine(text: string): string {
   const start = text.indexOf('\n## 我的机器与模型\n');
   const end = text.indexOf('<!-- fleet-dao:通用段 结束 -->');
-  if (start < 0 || end < start) throw new Error('AGENTS.md 通用段里认不出「## 我的机器与模型」一节');
+  if (start < 0 || end < start)
+    throw new Error('agents/shared-rules.md 通用段里认不出「## 我的机器与模型」一节');
   const line = text
     .slice(start, end)
     .split('\n')
@@ -38,7 +40,6 @@ const FABLE_RULES: Record<string, RegExp> = {
   VPS和WSL上的会话永不用: /VPS 和 WSL 上的会话[^；。]*永不用 Fable/,
   子代理只用Opus或Sonnet: /子代理只用 Opus 或 Sonnet/,
   只在创始人本机主对话里由他自己选: /Fable 只在我本机的主对话里由我自己选/,
-  来历永久与收窄: /创始人 2026-10-03 拍永久，2026-10-04 收窄/,
 };
 
 /** 指挥官技能里派子代理那条必须写着的：不写模型、或用 fork，子代理就跟着主会话用上 Fable。 */

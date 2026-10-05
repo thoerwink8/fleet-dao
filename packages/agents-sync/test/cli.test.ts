@@ -2,6 +2,7 @@
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { BEGIN } from '../src/block.ts';
 import { type Deps, type PasswdEntry, runCli } from '../src/cli.ts';
 import {
   BLOCK,
@@ -98,12 +99,33 @@ describe('退出码', () => {
     expect(run(['--check', '--home', home, '--repo', repo]).code).toBe(0);
   });
 
-  it('仓里的 AGENTS.md 没有通用段：没查成，退出 2，一个字不写', () => {
+  it('【故意造出的失败】仓里的 agents/shared-rules.md 没有通用段标记：没查成，退出 2，一个字不写', () => {
     const home = tempDir('home');
-    const repo = makeRepo({}, '# 没有标记的 AGENTS.md\n');
+    const repo = makeRepo({}, '# 没有标记的 shared-rules.md\n');
     const r = run(['--apply', '--home', home, '--repo', repo]);
     expect(r.code).toBe(2);
     expect(r.err).toContain('没查成');
+    expect(r.err).toContain('agents/shared-rules.md：没有通用段的标记');
+    expect(existsSync(join(home, '.claude'))).toBe(false);
+  });
+
+  it('【故意造出的失败】仓里没有 agents/shared-rules.md（检出太旧，通用段还在 AGENTS.md 里）：查和写都没查成、退出 2，一个字不写', () => {
+    const home = tempDir('home');
+    const repo = makeRepo({}, null);
+    for (const mode of ['--check', '--apply']) {
+      const r = run([mode, '--home', home, '--repo', repo]);
+      expect(r.code, mode).toBe(2);
+      expect(r.err, mode).toContain('仓里没有 agents/shared-rules.md');
+    }
+    expect(existsSync(join(home, '.claude'))).toBe(false);
+  });
+
+  it('【故意造出的失败】标记不成对：报出几个开始、几个结束，退出 2，一个字不写', () => {
+    const home = tempDir('home');
+    const repo = makeRepo({}, `${BEGIN}\n## 底线\n- 一条\n`);
+    const r = run(['--apply', '--home', home, '--repo', repo]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('开始标记 1 个、结束标记 0 个');
     expect(existsSync(join(home, '.claude'))).toBe(false);
   });
 
@@ -197,7 +219,7 @@ describe('--user：替别的用户写', () => {
     const home = aliceHome();
     const repo = makeRepo({});
     const origin = gitify(repo);
-    pushAhead(origin, 'AGENTS.md', '# 主线上新的规矩\n');
+    pushAhead(origin, 'agents/new-rule.md', '# 主线上新的规矩\n');
     git(repo, 'fetch', '-q', 'origin');
     const deps = {
       platform: 'linux' as const,
@@ -279,13 +301,13 @@ describe('仓里的原件在但读不了', () => {
   }
 
   it.skipIf(PLATFORM === 'win32' || IS_ROOT)(
-    '仓里的 AGENTS.md 在但读不了：查和写都没查成，一个文件都不写',
+    '仓里的 agents/shared-rules.md 在但读不了：查和写都没查成，一个文件都不写',
     () => {
       const { home, repo, manifestText } = seeded();
-      const file = join(repo, 'AGENTS.md');
+      const file = join(repo, 'agents', 'shared-rules.md');
       chmodSync(file, 0o000);
       try {
-        expectStopped(home, repo, manifestText, '读不了仓里的 AGENTS.md（');
+        expectStopped(home, repo, manifestText, '读不了仓里的 agents/shared-rules.md（');
       } finally {
         chmodSync(file, 0o644);
       }

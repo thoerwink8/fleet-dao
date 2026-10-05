@@ -5,7 +5,7 @@
 //   - publishReleasePlan：发起端算「这一版叫什么、head 是哪个分支」；发布 PR 的 head 分支名固定长 release/v<N>（发起端和收尾端共用一份正则）。
 // 改这里之前必须知道：
 // - 不查 GitHub、不读仓：这份只是纯判定。读 CHANGELOG 算版本、跑 gh 开 PR、拿到 head 分支名——都在 publish-actions.ts / publish-pr.ts。
-// - 「对外发布」是人闸第一类（AGENTS.md「什么时候停下来问我」；第四类是改标准）：这张 PR 由发起人开（publish-pr.ts 或驾驶舱按钮）、创始人点合并；
+// - 「对外发布」是人闸第一类（通用段 agents/shared-rules.md「什么时候停下来问我」；第四类是改标准）：这张 PR 由发起人开（publish-pr.ts 或驾驶舱按钮）、创始人点合并；
 //   这份不放行任何「AI 替人合并发布 PR」的路径。
 
 /** 发布 PR 的 head 分支名固定长这样：release/v<N>；release.yml 只放行它（#227 下半，0011 第 4 条）。 */

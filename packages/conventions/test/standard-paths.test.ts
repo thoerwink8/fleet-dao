@@ -23,11 +23,19 @@ const real = (): StandardPath[] => {
 };
 
 describe('读清单', () => {
-  it('仓里真实的 standard-paths.json 读得出来（带 section、没有 kind）', () => {
+  it('仓里真实的 standard-paths.json 读得出来（没有 kind）；通用段的原件单列，仓根 AGENTS.md 不在里面', () => {
     const list = real();
     expect(list.length).toBeGreaterThan(3);
-    expect(list.find((r) => r.path === 'AGENTS.md')).toMatchObject({ section: '通用段' });
+    expect(list.map((r) => r.path)).toContain('agents/shared-rules.md');
     expect(list.map((r) => r.path)).toContain('agents/**/*.md');
+    // 通用段 2026-10-05 挪出了仓根 AGENTS.md，那里只剩本仓段，不算标准
+    expect(list.map((r) => r.path)).not.toContain('AGENTS.md');
+  });
+
+  it('section 照样认（清单里眼下没有带 section 的条目，读法留着）', () => {
+    expect(parseStandardPaths('{"paths":[{"path":"a.md","why":"w","section":" 某段 "}]}')).toEqual([
+      { path: 'a.md', why: 'w', section: '某段' },
+    ]);
   });
 
   it('认不出的都回一句为什么（不是空数组）：坏 JSON、没有 paths、空 paths、缺 why、绝对路径、..、反斜杠', () => {
@@ -86,10 +94,11 @@ describe('匹配', () => {
 });
 
 describe('改到的文件里落进清单的', () => {
-  it('真实清单：技能说明、通用段所在文件、钉规矩的测试、清单本身都算；技能脚本和普通代码不算', () => {
+  it('真实清单：技能说明、通用段原件、钉规矩的测试、清单本身都算；技能脚本、仓根 AGENTS.md（只剩本仓段）和普通代码不算', () => {
     const hits = standardFiles(
       [
         file('agents/skills/discuss/SKILL.md'),
+        file('agents/shared-rules.md'),
         file('AGENTS.md'),
         file('agents/test/rules/permissions.test.ts'),
         file('packages/conventions/standard-paths.json'),
@@ -100,13 +109,20 @@ describe('改到的文件里落进清单的', () => {
     );
     expect(hits.map((h) => h.file)).toEqual([
       'agents/skills/discuss/SKILL.md',
-      'AGENTS.md',
+      'agents/shared-rules.md',
       'agents/test/rules/permissions.test.ts',
       'packages/conventions/standard-paths.json',
     ]);
-    // 带 section 的命中把 section 一并带回，由人看是不是只改了非标准的那一段
-    expect(hits.find((h) => h.file === 'AGENTS.md')).toMatchObject({ section: '通用段', rule: 'AGENTS.md' });
+    // 通用段原件命中的是自己那条（理由写的是通用段），不是技能说明的通配
+    expect(hits.find((h) => h.file === 'agents/shared-rules.md')).toMatchObject({
+      rule: 'agents/shared-rules.md',
+    });
     expect(hits[0]).toMatchObject({ rule: 'agents/**/*.md' });
+  });
+
+  it('【故意造出的失败】通用段原件挪出了标准目录（改名到别处）：旧名照样算碰了标准', () => {
+    const hits = standardFiles([file('docs/shared-rules.md', 'agents/shared-rules.md')], real());
+    expect(hits.map((h) => h.file)).toEqual(['agents/shared-rules.md']);
   });
 
   it('改名：新旧名字都算（从标准目录挪出去也是碰了它）；同一个名字只报一次', () => {

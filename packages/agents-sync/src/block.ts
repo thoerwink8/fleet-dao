@@ -1,6 +1,8 @@
-// 通用段的一对标记。仓里 AGENTS.md 和各家的全局文件用的是同一对：标记之间（含标记这两行）是受管的一块，
-// 标记外的内容一概不动。只认整行一模一样的标记（行首行尾的空白和 \r 不算）；改标记文字要连仓里 AGENTS.md 一起改，
+// 通用段的一对标记。仓里 agents/shared-rules.md 和各家的全局文件用的是同一对：标记之间（含标记这两行）是受管的一块，
+// 标记外的内容一概不动。只认整行一模一样的标记（行首行尾的空白和 \r 不算）；改标记文字要连仓里 agents/shared-rules.md 一起改，
 // 已经写到各家文件里的旧标记，新标记认不出——会被当成「没有受管块」再接管一次（先备份）。
+// 开始标记里那句「改 fleet-dao 仓的 AGENTS.md」是通用段挪进 agents/shared-rules.md 之前写的，故意没跟着改：
+// 改了各台机器的全局文件都要整份重新接管一遍；仓根 AGENTS.md 顶上有一行指向新位置。
 export const BEGIN =
   '<!-- fleet-dao:通用段 开始。同步脚本按这对标记整块替换；要改规矩，改 fleet-dao 仓的 AGENTS.md -->';
 export const END = '<!-- fleet-dao:通用段 结束 -->';
@@ -57,7 +59,7 @@ export function replaceBlock(text: string, m: { start: number; end: number }, bl
   return text.slice(0, m.start) + block.replaceAll('\n', eol) + text.slice(m.end);
 }
 
-/** 仓里 AGENTS.md 的通用段（含两行标记，去掉 \r）；标记不成对就说清哪里不对 */
+/** 仓里 agents/shared-rules.md 的通用段（含两行标记，去掉 \r）；标记不成对就说清哪里不对 */
 export function sharedBlock(agentsMd: string): { ok: true; block: string } | { ok: false; why: string } {
   const m = findMarkers(agentsMd);
   if (m.kind === 'none') return { ok: false, why: '没有通用段的标记' };

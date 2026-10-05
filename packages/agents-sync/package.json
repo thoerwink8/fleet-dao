@@ -2,7 +2,7 @@
   "name": "@fleet-dao/agents-sync",
   "version": "0.0.0",
   "private": true,
-  "description": "同步脚本：把 AGENTS.md 的通用段和 agents/skills/ 分发到这台机器上各家 AI 的全局入口，另能查漂移、撤旧仓留下的东西",
+  "description": "同步脚本：把 agents/shared-rules.md 的通用段和 agents/skills/ 分发到这台机器上各家 AI 的全局入口，另能查漂移、撤旧仓留下的东西",
   "type": "module",
   "dependencies": {
     "@fleet-dao/mirasim-reclaude": "workspace:*"

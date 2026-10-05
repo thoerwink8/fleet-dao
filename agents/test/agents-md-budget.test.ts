@@ -1,55 +1,67 @@
-// AGENTS.md 的字数预算：每次会话都会把它整份读进上下文，越长越限制模型（创始人 2026-10-03：「内容好像太多了……提示词写的多限制你」）。
+// 规矩的字数预算：通用段（agents/shared-rules.md，同步进每台机器各家 AI 的全局说明）和仓根 AGENTS.md 的本仓段，
+// 每次会话都会整份读进上下文，越长越限制模型（创始人 2026-10-03：「内容好像太多了……提示词写的多限制你」）。
 // 它从 2026-09-27 的约 6000 字涨到约 11000 字，根子是「每次出事只补一条、从不删」：同一件事在 AGENTS.md、design、ops、技能里各写一份。
 // 超了这条会红。要加规矩，先做三件事再回来看预算：① 这条规矩在别处（design、ops、技能、决定记录）是不是已经有了——有就只留一句指针；
-// ② 命令参数、路径清单、历史沿革（「某日拍了什么」）挪进 docs/，AGENTS.md 只留判据；③ 同一个文件里有没有说同一件事的两处，并成一处。
+// ② 命令参数、路径清单、历史沿革（「某日拍了什么」）挪进 docs/，规矩里只留判据；③ 同一个文件里有没有说同一件事的两处，并成一处。
 // 实在要涨，改这里的数字要写清为什么（改这个文件不算改标准，但请在 PR 里说明）。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const TEXT = readFileSync(fileURLToPath(new URL('../../AGENTS.md', import.meta.url)), 'utf8').replace(
-  /\r\n/g,
-  '\n',
-);
+const read = (rel: string): string =>
+  readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+/** 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来：留在那里，在本仓干活的会话全局说明读一遍、AGENTS.md 又读一遍） */
+const SHARED = read('../shared-rules.md');
+const AGENTS = read('../../AGENTS.md');
 
 /**
- * 通用段（推给所有仓）上限：2026-10-03 减脂后约 3970 字，留一点余量（当时定 4100）。
- * 2026-10-04 涨到 4400：创始人放行的改标准 #650（「无人值守」那条补四句，照上面三步压过一遍，仍多约 250 字）合进来后约 4290 字。
- * 同日涨到 4600：创始人放行的改标准 #771（Fable 收窄，约 +85 字）和 #646（「只对这一次会话说的『怎么干』不记」一条，约 +165 字；
- * 和「引导落盘」那条重复的半句已删、例子和理由压过一遍，剩下的都被 rules/session-directives、rules/directive-inbox 钉着）
- * 都合进来后约 4545 字。
+ * 通用段（推给所有仓）上限。2026-10-05 创始人选定精简版（「都按照你推荐的在做」，约 13:20）：4597 字砍到约 2080 字，
+ * 只留模型自己猜不到的事（他怎么听怎么看、四类人闸、底线、机器和账号的事实），「怎么做」的细则挪去技能说明和决定记录。
+ * 上限跟着压到 2300：以前每次出事补一条、上限跟着涨（4100 → 4400 → 4600 → 4700），涨回去的路在这里堵住。
+ * 要加一条，先删一条，或者把它写成钩子、测试。
  */
-const GENERAL_MAX = 4600;
+const GENERAL_MAX = 2300;
 /** 本仓段上限：同日减脂后约 4200 字。 */
 const REPO_MAX = 4600;
 
-function sections(text: string): { general: string; repo: string } {
+function general(text: string): string {
   const start = text.indexOf('通用段 开始');
   const end = text.indexOf('通用段 结束');
-  const repoAt = text.indexOf('## 本仓（fleet-dao）');
-  if (start < 0 || end < 0 || repoAt < 0)
-    throw new Error('AGENTS.md 里认不出通用段标记或「## 本仓」标题，预算没法算');
-  return { general: text.slice(start, end), repo: text.slice(repoAt) };
+  if (start < 0 || end < start) throw new Error('agents/shared-rules.md 里认不出通用段标记，预算没法算');
+  return text.slice(start, end);
 }
 
-describe('AGENTS.md 字数预算（防膨胀）', () => {
-  const { general, repo } = sections(TEXT);
+function repoPart(text: string): string {
+  const at = text.indexOf('## 本仓（fleet-dao）');
+  if (at < 0) throw new Error('AGENTS.md 里认不出「## 本仓」标题，预算没法算');
+  return text.slice(at);
+}
 
+describe('规矩字数预算（防膨胀）', () => {
   it('通用段不超上限：要加先看有没有别处已有、能不能只留指针', () => {
-    expect(general.length, `通用段 ${general.length} 字，上限 ${GENERAL_MAX}`).toBeLessThanOrEqual(
-      GENERAL_MAX,
-    );
+    const n = general(SHARED).length;
+    expect(n, `通用段 ${n} 字，上限 ${GENERAL_MAX}`).toBeLessThanOrEqual(GENERAL_MAX);
   });
 
   it('本仓段不超上限：命令参数、历史沿革挪进 docs/', () => {
-    expect(repo.length, `本仓段 ${repo.length} 字，上限 ${REPO_MAX}`).toBeLessThanOrEqual(REPO_MAX);
+    const n = repoPart(AGENTS).length;
+    expect(n, `本仓段 ${n} 字，上限 ${REPO_MAX}`).toBeLessThanOrEqual(REPO_MAX);
   });
 
-  it('【故意造出的失败】塞一大段进去：两条都拦得住；认不出标记时明确报错，不当成 0 字', () => {
+  it('仓根 AGENTS.md 不再带通用段：带了就是每次多读一整份', () => {
+    expect(AGENTS).not.toContain('fleet-dao:通用段 开始');
+    expect(AGENTS).not.toContain('fleet-dao:通用段 结束');
+  });
+
+  it('【故意造出的失败】塞一大段进去：两条都拦得住；认不出标记、标题时明确报错，不当成 0 字', () => {
     const fat = '- 多出来的一条规矩。'.repeat(500);
-    const bloated = TEXT.replace('<!-- fleet-dao:通用段 结束 -->', `${fat}\n<!-- fleet-dao:通用段 结束 -->`);
-    expect(sections(bloated).general.length).toBeGreaterThan(GENERAL_MAX);
-    expect(sections(`${TEXT}${fat}`).repo.length).toBeGreaterThan(REPO_MAX);
-    expect(() => sections('# 没有标记的文件')).toThrow(/认不出通用段标记/);
+    const bloated = SHARED.replace(
+      '<!-- fleet-dao:通用段 结束 -->',
+      `${fat}\n<!-- fleet-dao:通用段 结束 -->`,
+    );
+    expect(general(bloated).length).toBeGreaterThan(GENERAL_MAX);
+    expect(repoPart(`${AGENTS}${fat}`).length).toBeGreaterThan(REPO_MAX);
+    expect(() => general('# 没有标记的文件')).toThrow(/认不出通用段标记/);
+    expect(() => repoPart('# 没有本仓标题的文件')).toThrow(/认不出「## 本仓」标题/);
   });
 });

@@ -171,7 +171,17 @@ describe('会话所在的仓（原来的开场核规矩）', SLOW, () => {
     const w = world();
     g(w.work, 'checkout', '-q', '-b', 'feature');
     w.push('v2\n');
-    expect(hook.checkHere(w.work, git).line).toMatch(/当前分支 feature 的 AGENTS\.md 和 origin\/main 不一样/);
+    expect(hook.checkHere(w.work, git).line).toMatch(/当前分支 feature 的规矩（.*）和 origin\/main 不一样/);
+  });
+
+  it('别的分支只有通用段原件（agents/shared-rules.md）和主线不同：一样提醒——只比 AGENTS.md 会漏', () => {
+    const w = world();
+    g(w.work, 'checkout', '-q', '-b', 'feature');
+    mkdirSync(join(w.work, 'agents'), { recursive: true });
+    writeFileSync(join(w.work, 'agents', 'shared-rules.md'), '分支上的通用段\n');
+    g(w.work, 'add', '-A');
+    g(w.work, 'commit', '-q', '-m', 'rules');
+    expect(hook.checkHere(w.work, git).line).toMatch(/和 origin\/main 不一样/);
   });
 
   it('取不到远端：明说没查成', () => {

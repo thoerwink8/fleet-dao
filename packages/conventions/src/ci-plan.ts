@@ -181,13 +181,14 @@ export const PATH_RULES: readonly Rule[] = [
     deploy: 'ops',
     why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它',
   },
-  // AGENTS.md、agents/ 是 agents-sync 的输入，也是 agents 单测的输入：标记成对、skill 格式由 agents-sync 和 agents 的单测读真文件核对，
-  // 通用段自己也被 agents 的钉子测试读（agents/test/rules/design-skills.rules.test.ts 读这几条规矩在不在，#522）；
+  // agents/ 是 agents-sync 的输入，也是 agents 单测的输入：通用段原件 agents/shared-rules.md 标记成对、skill 格式由
+  // agents-sync 和 agents 的单测读真文件核对，通用段自己也被 agents 的钉子测试读（agents/test/rules/ 读这几条规矩在不在，#522）。
+  // 仓根 AGENTS.md 只剩本仓段，照样有两家读它：agents 的字数预算测试量本仓段，agents-sync 核它不再带通用段（带了会读两遍）。
   // deploy/test 的同步测试只验换身份写文件，内容换了结果不变，所以不跑 deploy（纯说明 PR 曾被拖 2 分多钟）。
   {
     match: exact('AGENTS.md'),
     units: [AGENTS_UNIT, 'agents-sync'],
-    why: '通用段由 agents-sync 分发，agents 的测试读它核规矩',
+    why: 'agents 的测试量本仓段字数，agents-sync 核它不再带通用段',
   },
   // 引擎起 Claude 会话经 --settings 直接用仓里这份调工具前的钩子（adapters 的 PRETOOL_SCRIPT），adapters 的测试真跑它
   {
