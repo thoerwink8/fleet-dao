@@ -1,7 +1,8 @@
-// PR 正文的栏（pr-columns.ts）：PR 挂了哪张单、「修提醒」写了什么，都从这认。#654 起模板只有四栏，旧栏名还认（读旧 PR 的正文）。
+// PR 正文的栏（pr-columns.ts）：PR 挂了哪张单、「修提醒」写了什么，都从这认。#1066 起模板只有两栏，旧栏名还认（读旧 PR 的正文）。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  GATE_LINE,
   issueColumnRefs,
   linkedIssue,
   OPTIONAL_COLUMNS,
@@ -13,13 +14,13 @@ import {
 const TEMPLATE = readFileSync(new URL('../../../.github/pull_request_template.md', import.meta.url), 'utf8');
 
 describe('PR 模板的栏（#654）', () => {
-  it('模板里的栏就是 PR_COLUMNS 那四栏，顺序也一样；模板提示里讲的多写栏不在模板正文里', () => {
+  it('模板里的栏就是 PR_COLUMNS 那两栏，顺序也一样；模板提示里讲的多写栏不在模板正文里', () => {
     expect([...prColumns(TEMPLATE).keys()]).toEqual(PR_COLUMNS.map((c) => c.toLowerCase()));
-    expect(PR_COLUMNS).toEqual(['做了什么', '怎么验证的', '还欠什么', '需求']);
+    expect(PR_COLUMNS).toEqual(['做了什么', '需求']);
     for (const c of OPTIONAL_COLUMNS) expect([...prColumns(TEMPLATE).keys()]).not.toContain(c);
   });
 
-  it('照模板开、一个字没填：四栏都在，值都是空的（模板提示不算填了）', () => {
+  it('照模板开、一个字没填：两栏都在，值都是空的（模板提示不算填了）', () => {
     const cols = prColumns(TEMPLATE);
     for (const c of PR_COLUMNS) expect(cols.get(c), c).toBe('');
   });
@@ -122,5 +123,20 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
     const added = withIssueColumn('**做了什么**：x', '无：理由');
     expect(prColumns(added).get('需求')).toBe('无：理由');
     expect(prColumns(added).get('做了什么')).toBe('x');
+  });
+
+  it('withIssueColumn：需求栏下面另起一行的「人闸：改标准」留着，后面的栏也不动', () => {
+    const body =
+      '**做了什么**：x\n\n**需求**：<!-- 提示 -->\n人闸：改标准\n\n**创始人原话**：「可以」（2026-10-05 18:30）\n';
+    const out = withIssueColumn(body, '无：理由');
+    expect(out).toContain(`**需求**：无：理由\n${GATE_LINE}\n`);
+    expect(out).not.toContain('提示');
+    expect(prColumns(out).get('创始人原话')).toBe('「可以」（2026-10-05 18:30）');
+    expect(issueColumnRefs('**需求**：Closes #12\n人闸：改标准\n')).toEqual({ closes: [12], refs: [] });
+  });
+
+  it('旧模板的「怎么验证的」「还欠什么」（#1066 删）读旧 PR 正文时还认得出栏的边界，不吞进需求栏', () => {
+    expect(prColumns('需求：Closes #12\n还欠什么：无').get('需求')).toBe('Closes #12');
+    expect(prColumns('做了什么：x\n怎么验证的：跑了\n需求：Refs #7').get('做了什么')).toBe('x');
   });
 });

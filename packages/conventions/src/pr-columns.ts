@@ -1,20 +1,29 @@
 // PR 正文里的各栏怎么认（模板 .github/pull_request_template.md 的「**栏名**：值」）。PR 挂了哪张单（「需求」栏，其次
 // 标题）给 PR 镜像挂单、每天的关单对账用；认法只有一处。
-// 改这里之前必须知道：模板只有四栏（#654），但读 PR 正文时旧模板的栏名（LEGACY_COLUMNS）照样认——合并了的旧 PR 正文里还有
-// 它们，不认的话「修提醒」「需求」这些栏的值会把后面紧跟着的旧栏一起吞进去。
+// 改这里之前必须知道：模板只有两栏（#654 删到四栏，#1066 再删到两栏），但读 PR 正文时旧模板的栏名（LEGACY_COLUMNS）照样认——
+// 合并了的旧 PR 正文里还有它们，不认的话「修提醒」「需求」这些栏的值会把后面紧跟着的旧栏一起吞进去。
 import { closingIssues } from './closing-issues.ts';
 
 /** 正文里写对应 issue 的那一栏。 */
 export const ISSUE_COLUMN = '需求';
 
 /** PR 模板里的栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
-export const PR_COLUMNS = ['做了什么', '怎么验证的', '还欠什么', ISSUE_COLUMN] as const;
+export const PR_COLUMNS = ['做了什么', ISSUE_COLUMN] as const;
 
 /** 有这种情况才多写一行的栏（模板的注释里讲了，不在模板正文里）：按推荐先做了的岔路（#259）、这个 PR 修的提醒。 */
 export const OPTIONAL_COLUMNS = ['按推荐先做了', '修提醒'] as const;
 
-/** 旧模板（#654 前）的栏：只为读旧 PR 的正文时认得出栏的边界，新 PR 不写。 */
-export const LEGACY_COLUMNS = ['认领', '这个 PR 做完就关单', '对应计划', 'specs', '档位', '文档'] as const;
+/** 旧模板（#1066 前的「怎么验证的」「还欠什么」，#654 前的其余）的栏：只为读旧 PR 的正文时认得出栏的边界，新 PR 不写。 */
+export const LEGACY_COLUMNS = [
+  '怎么验证的',
+  '还欠什么',
+  '认领',
+  '这个 PR 做完就关单',
+  '对应计划',
+  'specs',
+  '档位',
+  '文档',
+] as const;
 
 const KNOWN = new Set<string>(
   [...PR_COLUMNS, ...OPTIONAL_COLUMNS, ...LEGACY_COLUMNS].map((c) => c.toLowerCase()),
@@ -81,7 +90,7 @@ function columnSpans(body: string): ColumnSpan[] {
 
 /**
  * 把「需求」栏整栏换成「**需求**：<value>」（没有这一栏就加在正文末尾）。`pnpm pr:open --no-issue "<理由>"` 把理由
- * 原样写进需求栏用；栏里原来的字（含模板提示）都被换掉，别的栏不动。
+ * 原样写进需求栏用；栏里原来的字（含模板提示）都被换掉，别的栏不动——只有「需求」栏下面另起一行的 GATE_LINE（人闸：改标准）留着。
  */
 export function withIssueColumn(body: string, value: string): string {
   const line = `**${ISSUE_COLUMN}**：${value}`;
@@ -91,9 +100,13 @@ export function withIssueColumn(body: string, value: string): string {
   const lines = text.split('\n');
   let end = span.end;
   while (end > span.start + 1 && !lines[end - 1]?.trim()) end--; // 栏后面隔开下一栏的空行留着
-  lines.splice(span.start, end - span.start, line);
+  const gate = lines.slice(span.start + 1, end).filter((l) => l.trim() === GATE_LINE);
+  lines.splice(span.start, end - span.start, line, ...gate);
   return lines.join('\n');
 }
+
+/** 改标准的 PR 在「需求」栏下面另起一行写这个（人闸第四类）；没有程序读它，给创始人和接手的人看。 */
+export const GATE_LINE = '人闸：改标准';
 
 /** 不是任何真仓的名字：拿它当 closingIssues 的 repo，写明是别的仓的（owner/仓#号）都被挡掉，只剩没写仓名的。 */
 const THIS_REPO = '(本仓)';

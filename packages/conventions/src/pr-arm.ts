@@ -36,8 +36,17 @@ export type Gh = (args: string[]) => RunResult;
 
 /** 真跑 gh：找不到 gh 记成 127，超时、被杀记成 1，都带上原因。 */
 export function liveGh(cwd: string, timeoutMs = 60_000): Gh {
+  return liveCommand('gh', cwd, timeoutMs);
+}
+
+/** 真跑 git（pnpm pr:open 读分支上的提交说明用）：同 liveGh 的三态。 */
+export function liveGit(cwd: string, timeoutMs = 60_000): Gh {
+  return liveCommand('git', cwd, timeoutMs);
+}
+
+function liveCommand(command: string, cwd: string, timeoutMs: number): Gh {
   return (args) => {
-    const r = spawnSync('gh', args, { cwd, encoding: 'utf8', windowsHide: true, timeout: timeoutMs });
+    const r = spawnSync(command, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: timeoutMs });
     if (r.error) {
       const e = r.error as NodeJS.ErrnoException;
       return { code: e.code === 'ENOENT' ? 127 : 1, stdout: r.stdout ?? '', stderr: e.message };
