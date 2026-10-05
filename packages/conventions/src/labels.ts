@@ -58,6 +58,24 @@ export function currentVersion(
 }
 
 /**
+ * 下一个版本：还开着的 v<N> 里程碑里 N 比 from 大的最小的那个（版本号紧挨着的那一版）。
+ * 一个都没有是 null——调用方照「未排期」办（创始人 2026-10-05 拍：#995 第 2 条，关版本里程碑之前把里面还开着的单搬走，
+ * 没有下一个版本就搬未排期）。和 currentVersion 同一份认法（milestoneVersion），不另写正则。
+ */
+export function nextVersion(
+  openMilestones: readonly MilestoneRef[],
+  from: number,
+): { version: number; milestone: MilestoneRef } | null {
+  let best: { version: number; milestone: MilestoneRef } | null = null;
+  for (const m of openMilestones) {
+    const version = milestoneVersion(m.title);
+    if (version === undefined || version <= from) continue;
+    if (best === null || version < best.version) best = { version, milestone: m };
+  }
+  return best;
+}
+
+/**
  * 「过时」标签（照 Kubernetes 的 stale/rotten 两段式，#448）：未排期的单闲置够久先贴这个，人不理再关成「不做了」。
  * 「冻结」标签：贴了这个的单，闲置清理绕开不动（照 Kubernetes 的 frozen）。
  */

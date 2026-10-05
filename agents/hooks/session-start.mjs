@@ -15,9 +15,9 @@
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchWithFallback, withoutProxy } from './fresh-main.mjs';
 import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
@@ -669,24 +669,33 @@ export function sweepWorktrees(cwd, git, now = Date.now()) {
   if (!ok(g('rev-parse', '--is-inside-work-tree'))) return [];
   const top = g('rev-parse', '--show-toplevel');
   if (!ok(top)) return [];
-  const root = join(top.stdout.trim(), '.claude', 'worktrees');
-  let names;
-  try {
-    names = readdirSync(root, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
-  } catch {
-    return []; // 没有这个目录是常态，不出声
+  const rootPath = top.stdout.trim();
+  // 2026-10-05：原来只列 `.claude/worktrees/` 一个目录，建到别处的树（代理自己挑的 `.worktrees/`、
+  // `wt/`）**根本看不见**，于是攒到 60 多棵；那些树里带着各自的 biome.json，biome 整仓扫一遍报
+  // 「nested root configuration」，把这台机器上**所有会话**的推送都拦了。改成问 git 本仓注册了哪些树
+  // ——建在哪都算，不再靠「它应该在哪个目录」这个约定。
+  const listed = g('worktree', 'list', '--porcelain');
+  if (!ok(listed)) return [];
+  const dirs = [];
+  let stale = 0;
+  for (const line of listed.stdout.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const dir = line.slice('worktree '.length).trim();
+    if (!dir) continue;
+    if (resolve(dir) === resolve(rootPath)) continue; // 主检出自己不是「顺手清」的对象
+    dirs.push(dir);
   }
-  if (names.length === 0) return [];
+  if (dirs.length === 0) return [];
   const kept = [];
   let removed = 0;
-  for (const name of names) {
+  for (const dir of dirs) {
+    const name = basename(dir);
     if (/^second-opinion/.test(name)) continue; // discuss 自己的复用树
-    const dir = join(root, name);
     const head = g('-C', dir, 'rev-parse', 'HEAD');
     if (!ok(head)) {
-      kept.push(name);
+      // 注册还在、目录没了：`git worktree prune` 收拾这条记录（它只删管理条目，不动盘上任何东西）。
+      if (ok(g('worktree', 'prune'))) stale += 1;
+      else kept.push(name);
       continue;
     }
     let touched;
@@ -718,11 +727,11 @@ export function sweepWorktrees(cwd, git, now = Date.now()) {
     else kept.push(name);
   }
   const lines = [];
-  if (removed > 0)
-    lines.push(`顺手清掉了 ${removed} 棵本机没用的工作树（.claude/worktrees/，提交都在远端上了）。`);
+  if (removed > 0) lines.push(`顺手清掉了 ${removed} 棵本机没用的工作树（提交都在远端上了）。`);
+  if (stale > 0) lines.push(`顺手清掉了 ${stale} 条工作树记录（目录早没了，git worktree prune）。`);
   if (kept.length > 0)
     lines.push(
-      `注意：.claude/worktrees/ 下还有 ${kept.length} 棵没清（刚动过的、有未提交的改动、或有没推上去的提交）：${kept.slice(0, 5).join('、')}${kept.length > 5 ? ' …' : ''}；看一眼是不是还要，不要了自己删。`,
+      `注意：本仓还有 ${kept.length} 棵没清的工作树（刚动过的、有未提交的改动、或有没推上去的提交）：${kept.slice(0, 5).join('、')}${kept.length > 5 ? ' …' : ''}；看一眼是不是还要，不要了自己删。`,
     );
   return lines;
 }

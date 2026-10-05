@@ -90,6 +90,26 @@ describe('推送前预检', () => {
     expect(r.lines.join(' ')).toContain('没查成');
   });
 
+  it('【故意造出的失败】仓里嵌套着别的检出（biome 报 nested root configuration）：退出码 2，说清是嵌套检出、不是代码没过', () => {
+    const r = preparePush({
+      changed: () => ['packages/conventions/src/plan.ts'],
+      repo: fsRepo(ROOT),
+      graph: () => GRAPH,
+      run: () => ({
+        status: 1,
+        stdout: '',
+        stderr:
+          ".claude/worktrees/x/biome.json configuration ━━━\n\n  × Found a nested root configuration, but there's already a root configuration.\n",
+      }),
+    });
+    const text = r.lines.join('\n');
+    expect(r.code).toBe(2);
+    expect(text).toContain('没查成');
+    expect(text).toContain('嵌套');
+    expect(text).toContain('.claude/worktrees/'); // 给出正确的落点
+    expect(text).not.toContain('pnpm install'); // 不再把人往「装依赖」上带
+  });
+
   it('【故意造出的失败】#789 新工作树没装依赖：cmd 报「系统找不到指定的路径」退 1、没有检查结果 → 退 2「没查成」，不说格式没过', () => {
     const r = preparePush({
       changed: () => ['packages/conventions/src/plan.ts'],
