@@ -828,15 +828,20 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
     return failed(`读不到巡检仓的「让 AI 接活」开关：${errMessage(err)}`);
   }
   if (dispatch === 'off') {
-    const run = await conclude(deps, base, 'skipped', 'open', [CANARY_SKIPPED_WHY, ...notes].join('；'), []);
+    // 先撤、后记：撤不掉就不能当正常跳过结案（健康页会显示「跳过」、旧报警却还开着），这一轮算没跑成，下一轮接着撤
     try {
       await deps.alerts.resolve(
         `全流程巡检 ${stamp(startedAt)} 这一轮因巡检仓的「让 AI 接活」关着而跳过：不再报断链（打开以后巡检接着跑，断了会重新报）`,
       );
     } catch (err) {
-      deps.log('warn', '全流程巡检跳过了这一轮，但撤不掉上一轮断了的报警', { error: errMessage(err) });
+      return failed(
+        `巡检仓的「让 AI 接活」关着，本该跳过这一轮，但上一轮断了留下的报警撤不掉：${errMessage(err)}`,
+      );
     }
-    return { done: true, run };
+    return {
+      done: true,
+      run: await conclude(deps, base, 'skipped', 'open', [CANARY_SKIPPED_WHY, ...notes].join('；'), []),
+    };
   }
   let milestone: { number: number; title: string };
   try {

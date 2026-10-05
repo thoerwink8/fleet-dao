@@ -623,20 +623,18 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     expect(h.calls).toContain('cleaned:3');
   });
 
-  it('跳过时撤不掉上一轮断了的报警：只记 warn，这一轮照样记跳过，不抛（下一轮再撤）', async () => {
-    const logs: string[] = [];
-    const h = harness({
-      repoSwitch: async () => 'off',
-      log: (level, text) => {
-        logs.push(`${level}:${text}`);
-      },
-    });
+  it('【故意造出的失败】跳过时撤不掉上一轮断了的报警：这一轮不能当正常跳过结案（健康页会显示「跳过」、旧报警却还开着），记没跑成、写明原因；不开单', async () => {
+    const h = harness({ repoSwitch: async () => 'off' });
     h.deps.alerts.resolve = async () => {
       throw new Error('库连不上');
     };
     const r = await openCanaryRound(h.deps);
-    expect(r).toMatchObject({ done: true, run: { verdict: 'skipped' } });
-    expect(logs.some((l) => l.startsWith('warn:') && l.includes('撤不掉'))).toBe(true);
+    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open' } });
+    expect(r.done && r.run.why).toContain('撤不掉');
+    expect(r.done && r.run.why).toContain('库连不上');
+    expect(h.finished.map((f) => f.verdict)).toEqual(['not_run']);
+    expect(h.runsFinished[0]?.result.outcome).toBe('failed');
+    expect(h.calls.some((c) => c.startsWith('open:'))).toBe(false);
   });
 
   it('【故意造出的失败】读不到巡检仓的开关：这一轮记没跑成、写明原因，不开单——不当成开着、也不当成关着', async () => {
