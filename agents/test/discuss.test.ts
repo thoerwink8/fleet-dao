@@ -10,10 +10,11 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -108,6 +109,8 @@ interface SecondOpinionLib {
     model: string | null;
   }>;
   RISK_PATHS_FILE: string;
+  /** 主检出的根：审查树按它建，不往工作树里套（2026-10-05，嵌套检出拦了全机推送）。 */
+  mainCheckout(repo: string): string;
   riskRules(text: string): Rule[] | string;
   afterMergeHits(files: PrFile[], rules: Rule[]): string[];
   parseNameStatusLog(stdout: string): Array<{ sha: string; date: string; files: PrFile[] }>;
@@ -519,6 +522,30 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
     });
     expect(r.code).toBe(2);
     expect(r.err).toContain('这台机器没装 gh');
+  });
+
+  it('【故意造出的失败】从工作树里调用：审查树仍建在主检出下，不往工作树里套', () => {
+    // 起因（2026-10-05）：指挥官一边派工一边审 PR，脚本从某棵工作树里跑，审查树就建成了
+    // `…/820-env-page/.claude/worktrees/second-opinion` 的嵌套检出——它带着自己那份 biome.json，
+    // biome 整仓扫一遍报「nested root configuration」，把这台机器上所有会话的推送全拦了；
+    // 清扫规则又按名字跳过 `second-opinion*`，谁也收不走。这条钉住「认主检出、不认当前检出」。
+    const main = temp('main');
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-q', main);
+    // CI 的 runner 上没有全局 git 身份，不带这两行 commit 会以「empty ident name」失败
+    git('-C', main, 'config', 'user.email', 'a@b.c');
+    git('-C', main, 'config', 'user.name', 't');
+    git('-C', main, 'commit', '-q', '--allow-empty', '-m', '底');
+    const sub = join(main, '.claude', 'worktrees', 'w');
+    git('-C', main, 'worktree', 'add', '-q', '--detach', sub, 'HEAD');
+
+    const at = so.mainCheckout(sub);
+    // 比 basename、不比整串：这台机器上 `C:\Users\ADMINI~1` 和 `C:\Users\Administrator` 是同一处的长短两种写法，
+    // 临时目录给的是短名、git 报的是长名，比整串会红在一个和被测逻辑无关的地方（realpathSync 也不归一这两种）。
+    expect(basename(at)).toBe(basename(main));
+    expect(at.replace(/\\/g, '/')).not.toContain('/worktrees/'); // 不往工作树里套
+    expect(statSync(join(at, '.git')).isDirectory()).toBe(true); // 主检出的 .git 是目录；工作树里那份是个文件
   });
 
   it('不给 --repo、当前目录又不是 git 检出：没查成，不猜是哪个仓', () => {
