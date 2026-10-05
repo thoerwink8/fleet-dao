@@ -103,6 +103,12 @@
 
 **如果两个键设了还停**（issue #13291 有人报过这种情况，WSL 新版本改过空闲回收行为）：兜底是「留一个进程在实例里」——`wsl --exec dbus-launch true`（这条起的进程挂在实例的 PID 2 下，能吊住整个发行版；Windows 重启后要重跑一次），或者干脆跑演练那几次**留一个 wsl 窗口开着别关**，实测窗口开着就不回收。备选 `tmux new -d` 也行。这三条都不用改配置、不用 `wsl --shutdown`。
 
+## 2026-10-04 夜（#553 第 4 条 PR-3 退旧飞书流程，分支 `chore/553-retire-feishu-drafts`，PR「退旧飞书流程」）
+
+- **在做**：一个 PR 清掉后端还读写旧飞书四张表（`feishu_drafts` / `feishu_follows` / `feishu_outbox` / `feishu_cards`）和 `idempotency_keys` 里 `feishu-message:` / `feishu-revise:` 那套的代码：后端 9 条旧接口（`feishu-routes.ts`）、卡片视图（`feishu-views.ts`）、草稿开单（`draft-opening.ts`）、健康项 `draft_opener` / `draft_backlog`（`health.ts`、`release.sh` 的漂移名单、健康页标签）、`ports.ts` 的 `FeishuStore` / `DraftOpener`、两份 Store（`memory-store.ts` / `pg-store.ts`）的实现、以及引用的测试；`gateway-seen.ts` 的「网关还在」信号从旧 outbox / 盘面那条改成意图卡长轮询 + 收原话。**不动库**（表定义留着，删表是下一个只放迁移的 PR，先审后合）。引用方一起改掉，不是把删掉的接口加回来。
+- **没碰**（PR-3 的其余部分，方案里还有，但不在这一版）：`packages/feishu`（网关的 `backend.ts` 仍调 `FeishuRoutes` 九条、`board` / `outbox` 两条定时活、`cards.ts` 旧卡）、`packages/shared/src/feishu-api.ts` 的 `FeishuRoutes` 约定、`session.ts` 的网关通行证收窄（先审后合）、design 15.4 / ops 第十二节改写。这些要另开 PR，且得先让网关不再调旧接口。
+- **下一步**：编过、测过、开 PR 挂自动合并；合了再开删表迁移 PR 跑第二意见。
+
 ## 2026-10-04（#777 法国巡检仓和本机演练仓分开，Opus 子代理，PR #838，先审后合）
 
 - **仓里做完的**：`deploy/france/desired-config.json` 的 `engine.env` `FLEET_CANARY_REPO` 从私有值（指纹，据 #777 就是演练仓 `fleet-dao-canary`）改成公开值 `thoerwink8/fleet-dao-canary-fr`；`config.mjs` 的 `diffProfiles` 加 `MUST_DIFFER`：两边这一项必须是非空公开值且不一样（不分大小写），一样、写成私有值、空着、两边都删了都判红（`deploy/test/config.test.mjs` 每种各造一次，外加拿两份真文件把本机档改成法国的值必须红）；`docs/ops.md` 第五节、第九节、第十三节跟着改。

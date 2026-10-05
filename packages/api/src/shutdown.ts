@@ -28,7 +28,7 @@ export interface DrainableServer {
 
 export interface GracefulShutdownOptions {
   servers: readonly DrainableServer[];
-  /** 给长轮询发「要停了」：飞书 outbox 的等待马上醒、不再查库（deps.shutdownSignal，见 feishu-routes.ts）。 */
+  /** 给长轮询发「要停了」：意图卡的长轮询马上醒、不再查库（deps.shutdownSignal，见 intent-routes.ts）。 */
   notifyLongPollers: () => void;
   /** 在途的普通请求等它们做完的上限；到点了不管做完没做完，直接收掉剩下的连接（SSE 这类不会自己结束）。 */
   drainMs: number;

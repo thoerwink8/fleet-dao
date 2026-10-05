@@ -2,7 +2,7 @@
 // 花费 / 内存峰值 / outcome）。本切片不接真库，用这个 NotWired 占位——装配时换成它，**被调到也把整包参数
 // 记下来落盘到本地 JSONL**，并标记 notWired（驾驶舱 / 健康检查读到这个标记就显示「待实现 · #556」，不装成已接上）。
 //
-// 和 packages/api/src/draft-opening.ts 的 notWiredDraftOpener 同一个做法（「未接」和「没查成」分开）。
+// 和 packages/api/src/judge-health.ts 没配判断题时的 notWired 同一个做法（「未接」和「没查成」分开）。
 // 等 #556 的真实 RunsTable 接上，装配处把 notWiredRuns() 换掉即可，合约（zod schema + Record 字段）不动。
 
 import { mkdir, writeFile } from 'node:fs/promises';

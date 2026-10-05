@@ -1,5 +1,5 @@
 // 网关的五条意图接口（shared 的 IntentRoutes，#553 第 4 条），挂在 /api 下：收原话、收撤回、补漏游标、取意图卡、卡的回执。
-// 和 feishu-routes.ts 同一个门：只认网关通行证（checkGatewayPass），按每条的 acting 放行；收原话代表说这句话的那位创始人
+// 和驾驶舱那套接口同一个门：只认网关通行证（checkGatewayPass），按每条的 acting 放行；收原话代表说这句话的那位创始人
 // （actingFounder，不是创始人 403）。门口验过通行证记一笔「网关来过」（/healthz 的 feishu_gateway）。
 // 改这里之前必须知道：
 // - 没记成要让网关看得见：存不进 5xx、认不出 4xx，网关据此在那句话上加「没记成」、之后补漏；绝不在没存成时回 200。

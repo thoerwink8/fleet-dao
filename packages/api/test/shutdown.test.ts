@@ -70,7 +70,7 @@ describe('gracefulShutdown：停机的先后顺序和上限', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
-  /** 拨钟：先让排着的 promise 跑完，拨过去，再跑完一轮（draft-opening.test.ts 同款手法）。 */
+  /** 拨钟：先让排着的 promise 跑完，拨过去，再跑完一轮。 */
   const advance = async (ms: number) => {
     await new Promise((r) => setImmediate(r));
     await vi.advanceTimersByTimeAsync(ms);

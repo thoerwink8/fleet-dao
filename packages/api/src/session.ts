@@ -183,7 +183,7 @@ export function checkCsrf(c: Context, config: Config, sid: string): void {
 
 /**
  * 网关通行证能进的驾驶舱接口：只有 shared 的 FEISHU_GATEWAY_WEB_ROUTES 这几条（都代表某位创始人）。
- * 飞书接口（FeishuRoutes）在 feishu-routes.ts 里逐条按各自的 acting 放行，不经这里。
+ * 网关的意图接口（IntentRoutes）在 intent-routes.ts 里逐条按各自的 acting 放行，不经这里。
  */
 const GATEWAY_WEB_ROUTES = FEISHU_GATEWAY_WEB_ROUTES.map((name) => {
   const route = WebRoutes[name];
