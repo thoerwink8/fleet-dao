@@ -86,7 +86,7 @@ export function prePushCheck(input: PrePushInput): CheckResult {
   const noRemoteRefs =
     git(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes/']).stdout.trim() === '';
   const notes = [
-    ...(scan.binaryHunks > 0 ? [`带 NUL 的 ${scan.binaryHunks} 段是二进制，没看内容、只按文件名判`] : []),
+    ...(scan.binaryHunks > 0 ? [`带 NUL 的 ${scan.binaryHunks} 段去掉 NUL 扫了`] : []),
     ...(noRemoteRefs ? ['本地没记着任何远端分支，整段历史都扫了'] : []),
   ];
   const lines = [
