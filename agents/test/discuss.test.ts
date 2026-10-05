@@ -843,7 +843,7 @@ function prWorld(): { repo: string; head: string } {
 }
 
 /** 进程内的假 gh：审 PR 要的那几条各回一份固定答案；写出去的（评论、状态）记在 posted，评论正文记在 comment */
-function fakeGh(o: { pr: object; comments?: string[] | 'broken'; statuses?: object[] }) {
+function fakeGh(o: { pr: object; comments?: string[] | 'broken'; statuses?: object[] | 'broken' }) {
   const posted: string[][] = [];
   const got = { comment: '' };
   const gh: GhRun = (a) => {
@@ -860,7 +860,11 @@ function fakeGh(o: { pr: object; comments?: string[] | 'broken'; statuses?: obje
       if (at) got.comment = readFileSync(at.slice('body=@'.length), 'utf8');
       return line.includes('/comments') ? 'https://example.invalid/c/1' : '{}';
     }
-    if (a[0] === 'api') return JSON.stringify(o.statuses ?? []);
+    if (a[0] === 'api') {
+      if (o.statuses === 'broken')
+        throw Object.assign(new Error('gh: HTTP 502'), { stderr: 'gh: HTTP 502\n' });
+      return JSON.stringify(o.statuses ?? []);
+    }
     throw new Error(`假 gh 不认识：${line}`);
   };
   return { gh, posted, got };
@@ -1035,6 +1039,89 @@ describe('审 PR 走整条路（假 gh、假会话、真 git）：状态按脚�
     });
     expect(code).toBe(0);
     expect(descOf(statusPost(f.posted))).toBe('第二意见通过（第 1 轮）');
+  });
+
+  // #1003：同一个头 ec120f6 隔 42 秒审了两轮，结论一样，白占一轮，还把轮数推到放宽门槛的第 3 轮。
+  // 同一个头只审一次：头上已有本脚本贴的结论就复用那次的结论和退出码，不起会话、不贴评论、不加轮数。
+  const noSession: ReviewDeps['session'] = async () => {
+    throw new Error('同一个头不该再起审');
+  };
+  const postedOn = (head: string, verdict: string, round = 1) =>
+    `**第二意见 第 ${round} 轮**（m；审的头 ${head.slice(0, 7)}）：${verdict}\n\n## 必须改\n…`;
+
+  it('【故意造出的失败】同一个头已经贴过「必须改」：不起会话、不贴评论，照那次退出 1（重跑撞不出随机的通过）', async () => {
+    const w = prWorld();
+    const f = fakeGh({
+      pr: prInfo(w.head),
+      comments: [postedOn(w.head, '必须改 1 条')],
+      statuses: [
+        { context: 'second-opinion', state: 'failure', description: '第二意见第 1 轮：必须改 1 条' },
+      ],
+    });
+    const logs: string[] = [];
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: (s) => logs.push(s),
+      deps: { gh: f.gh, session: noSession, runs: temp('runs') },
+    });
+    expect(code).toBe(1);
+    expect(f.posted).toEqual([]);
+    expect(logs.join('\n')).toContain(`头 ${w.head.slice(0, 7)} 上已经有本脚本贴的结论`);
+  });
+
+  it('同一个头贴过「通过」但状态没写上：不再审，照那次的结论补写 success、退出 0，不另贴评论', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head), comments: [postedOn(w.head, '通过', 2)] });
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: () => {},
+      deps: { gh: f.gh, session: noSession, runs: temp('runs') },
+    });
+    expect(code).toBe(0);
+    expect(f.posted.filter((a) => a.some((x) => x.includes('/comments')))).toEqual([]);
+    const st = statusPost(f.posted);
+    expect(st).toContain('state=success');
+    expect(st).toContain(`repos/{owner}/{repo}/statuses/${w.head}`);
+    expect(descOf(st)).toMatch(/^第二意见通过（第 2 轮；/);
+  });
+
+  it('【故意造出的失败】复用时读不到头上的提交状态：退出 2，不当通过', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head), comments: [postedOn(w.head, '通过')], statuses: 'broken' });
+    const logs: string[] = [];
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: (s) => logs.push(s),
+      deps: { gh: f.gh, session: noSession, runs: temp('runs') },
+    });
+    expect(code).toBe(2);
+    expect(f.posted).toEqual([]);
+    expect(logs.join('\n')).toContain('gh: HTTP 502');
+  });
+
+  it('头变了才加轮：别的头上贴过一轮，这个新头照常审、是第 2 轮', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head), comments: [postedOn('abcdef1', '必须改 1 条')] });
+    const code = await so.reviewPr({
+      o,
+      repo: w.repo,
+      pr: 5,
+      log: () => {},
+      deps: {
+        gh: f.gh,
+        session: session('## 必须改\n无\n## 小毛病\n无\n结论：通过'),
+        runs: temp('runs'),
+      },
+    });
+    expect(code).toBe(0);
+    expect(f.got.comment).toMatch(/^\*\*第二意见 第 2 轮\*\*/);
+    expect(descOf(statusPost(f.posted))).toBe('第二意见通过（第 2 轮）');
   });
 });
 
