@@ -220,18 +220,17 @@ function inCi(env: Readonly<Record<string, string | undefined>>): boolean {
   return v !== undefined && v !== '' && v !== 'false' && v !== '0';
 }
 
-/** 拒跑时打给人看的：本机先跑的那一条命令、依赖 hubs 的（CI 全跑会测到）、真要全跑怎么说。 */
+/** 拒跑时打给人看的：全量交给 CI、本机只跑改到的测试文件、依赖 hubs 的（CI 全跑会测到）、真要全跑怎么说。 */
 function refuseLines(local: LocalRun): string[] {
   const lines = [
     '要全跑（原因见上面几行：改到了根配置、锁文件、shared 这类），本机不跑全量——几个会话同时全跑会把机器拖满，全量交给 CI。',
-    '本机先跑这一条（和 CI 同一份判法，只是不升成全跑：改到的包和依赖它们的、测试读到改动的，再加 CI 每个 PR 都跑的 docs 那几份）：',
-    `  pnpm exec vitest run ${local.paths.join(' ')}`,
+    '本机只跑你改到的和新加的测试文件，其余交给 CI，红了再回来修。',
   ];
   if (typeof local.dependents === 'string') {
     lines.push(`${local.dependents}：CI 全跑会测到。`);
   } else if (local.dependents.length > 0) {
     lines.push(
-      `依赖 ${local.hubs.join('、')} 的也要跑——本机不逐个跑，CI 全跑会测到：${local.dependents.join('、')}（想先在本机测哪个：pnpm exec vitest run packages/<包>/）`,
+      `依赖 ${local.hubs.join('、')} 的也要跑——本机不逐个跑，CI 全跑会测到：${local.dependents.join('、')}`,
     );
   }
   lines.push('真要在本机全跑：pnpm test:changed --all');
@@ -240,8 +239,8 @@ function refuseLines(local: LocalRun): string[] {
 }
 
 /**
- * 跑不跑、跑什么。只在「判出要全跑、没带 --all、不在 CI、不是引擎会话」时拒跑：写明原因、本机先跑的那一条命令
- * （selection.local）、留给 CI 的那些、真要全跑怎么说，退出码 REFUSED_FULL_RUN。带 --all 就全跑（明说了要）。
+ * 跑不跑、跑什么。只在「判出要全跑、没带 --all、不在 CI、不是引擎会话」时拒跑：写明原因、全量交给 CI、留给 CI 的那些、
+ * 真要全跑怎么说，退出码 REFUSED_FULL_RUN（不再打单跑对应包的命令，#1066）。带 --all 就全跑（明说了要）。
  */
 export function decideRun(input: {
   selection: TestSelection;

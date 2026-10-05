@@ -62,6 +62,7 @@ interface WorkerLib {
   closingBrief(o: {
     branch: string;
     noShip: boolean;
+    noAutomerge?: boolean;
     issue?: { number: number; refs: boolean } | { reason: string };
     githubRoute?: { via: string; proxy?: string };
   }): string;
@@ -466,6 +467,55 @@ describe('start：happy path', () => {
     expect(fast).not.toContain('pnpm format');
     expect(fast).not.toContain('pnpm typecheck');
     expect(fast).toContain('它说「人闸：改标准」就照第 6 条停手');
+  });
+
+  // 派活到合并提速第一片（#1066，2026-10-05 审计：工人 25.5% 的时间在本机整包测试，另有 7% 在盯 CI）
+  describe('收尾交代：本机不跑整包、等后台命令不结束回合、不盯 CI；起的进程带 FLEET_WORKER=1', () => {
+    for (const noAutomerge of [false, true]) {
+      it(`${noAutomerge ? '--no-automerge' : '默认'}：本机只点名跑改到的测试文件，不教 test:changed 和单跑对应包`, () => {
+        const text = lib.closingBrief({
+          branch: 'w/x',
+          noShip: false,
+          noAutomerge,
+          issue: { number: 1066, refs: true },
+        });
+        expect(text).toContain('npx vitest run <文件…>');
+        expect(text).toContain('不跑 pnpm test:changed、不跑整包');
+        expect(text).toContain('CI 红了再回来修');
+        expect(text).not.toContain('改完跑 pnpm test:changed');
+        expect(text).not.toContain('单跑对应包');
+        expect(text).not.toContain('退出码 3');
+      });
+
+      it(`${noAutomerge ? '--no-automerge' : '默认'}：写死等后台命令时不许结束回合（≤55 秒的前台循环），开完 PR 不盯 CI、没有 --watch 的做法`, () => {
+        const text = lib.closingBrief({
+          branch: 'w/x',
+          noShip: false,
+          noAutomerge,
+          issue: { number: 1066, refs: true },
+        });
+        expect(text).toContain('等自己起的后台命令时不许结束这一轮');
+        expect(text).toContain('不超过 55 秒的前台循环');
+        expect(text).toContain('不盯 CI、不 --watch');
+        expect(text).not.toContain('盯到');
+        // 唯一出现 --watch 的地方是「不 --watch」那句
+        expect(text.match(/--watch/g)).toHaveLength(1);
+      });
+    }
+
+    it('起的模型进程环境里带 FLEET_WORKER=1（safeEnv 白名单之外单独给，不靠 process.env 透传）；别的普通变量照旧不传', async () => {
+      for (const model of ['grok', 'claude']) {
+        const w = world();
+        w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+        w.pnpmReplies.push(ok());
+        w.spawnReplies.push({ pid: 7 });
+        await w.run(['start', '--model', model, '--name', `w-env-${model}`, '--brief', brief(w)]);
+        const spec = w.spawnCalls[0];
+        expect(spec?.env.FLEET_WORKER).toBe('1');
+        expect(spec?.env.SOME_VAR).toBeUndefined();
+        expect(spec?.env.GITHUB_PERSONAL_ACCESS_TOKEN).toBeUndefined();
+      }
+    });
   });
 
   // #1052：2026-10-05 起 37 个 PR 没一个挂单，交代里写死的「不开单」是主因；派活这一步必须说清挂哪张单

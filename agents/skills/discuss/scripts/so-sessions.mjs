@@ -314,7 +314,8 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
       cwd: workdir,
       windowsHide: true,
       shell: process.platform === 'win32',
-      env: process.env,
+      // 机器派的会话：开会话和落盘的钩子（session-start.mjs、prompt-log.mjs）认 FLEET_WORKER，不把它的题面当创始人的话落盘
+      env: { ...process.env, FLEET_WORKER: '1' },
     });
     let out = '';
     let err = '';

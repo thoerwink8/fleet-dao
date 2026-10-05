@@ -424,7 +424,7 @@ export function closingBrief({ branch, noShip, noAutomerge, issue, githubRoute =
     ? [
         `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md（${link}），「还欠什么」写「人闸：改标准」；跑 ${open} --no-automerge`,
         '   开 PR。不要挂自动合并、不要跑 gh pr merge：创始人同意之前不能合。',
-        '5. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不等合并、不等创始人回话。',
+        '5. 不盯 CI、不 --watch：只看一次 gh pr checks <PR 号>；红了才改，最多 3 轮；没红就收尾，不等合并、不等创始人回话。',
       ]
     : [
         `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md（${link}），跑 ${open}：它开 PR、当场挂自动合并、`,
@@ -434,8 +434,10 @@ export function closingBrief({ branch, noShip, noAutomerge, issue, githubRoute =
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
     first,
-    '2. 改完跑 pnpm test:changed 要过（退出码 3 时照它打印的命令单跑对应包，不在这台机器上跑全量 pnpm test 或 pnpm check）；',
-    '   格式和类型检查推前钩子会跑。提交信息一句话说清改了什么、为什么。',
+    '2. 本机只跑「你改到的和新加的测试文件」：点名 npx vitest run <文件…>，一次一条命令；再加类型检查和格式（推前钩子会跑）。',
+    '   不跑 pnpm test:changed、不跑整包（本机一次整包要二十多分钟，CI 同一套中位 2.6 分钟），其余交给 CI；CI 红了再回来修。',
+    '   等自己起的后台命令时不许结束这一轮：用不超过 55 秒的前台循环（每次最多等 55 秒，没出结果再来一次）一直等到出结果；',
+    '   不要写「等通知」然后收工——这一轮一结束就等于交活了。提交信息一句话说清改了什么、为什么。',
     `3. git push -u origin ${branch}`,
     ...prSteps,
     '6. 不开新 issue，不碰这棵工作树以外的目录、不碰别的检出。碰到四类人闸——对外发布（上线、发版）、花钱（账单会',
@@ -749,7 +751,12 @@ async function cmdStart(p, io) {
       args: launch.args,
       cwd: worktreeDir,
       // 直连通才让模型自己的 git/gh 绕开代理连 GitHub；走代理时原样给，加 NO_PROXY 就是把它推到不通的直连上。
-      env: { ...(viaProxy ? safeEnv(io.env) : mergeNoProxy(safeEnv(io.env))), ...launch.extraEnv },
+      // FLEET_WORKER=1：开会话钩子见它就只做规矩同步、不注入创始人的事，落盘钩子不记工人的提示（agents/hooks/session-start.mjs、prompt-log.mjs）
+      env: {
+        ...(viaProxy ? safeEnv(io.env) : mergeNoProxy(safeEnv(io.env))),
+        FLEET_WORKER: '1',
+        ...launch.extraEnv,
+      },
       stdinFile: launch.stdinFile,
       outFile: outLog,
       errFile: errLog,

@@ -14,6 +14,7 @@
 //    限时 AFTER_MERGE_MS，超时、网络不通明说没查成，不当成「没有」。
 // 5. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
 //    gh 没查成说一行没查成，不当成「没有」。
+// 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
@@ -24,7 +25,13 @@ import { fileURLToPath } from 'node:url';
 import { fetchWithFallback } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
-import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
+import {
+  cleanId,
+  isMachineOpening,
+  isMachineSession,
+  stateDir,
+  sessionLines as unattendedLines,
+} from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
@@ -449,16 +456,17 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
  * 创始人最近落盘的话（agents/hooks/prompt-log.mjs 在他每条消息一提交就写进 ~/.fleet-dao/prompt-log/<北京日期>.jsonl）。
  * 为什么开会话时列出来（创始人 2026-10-04「我发了hi但是好像你视而不见」）：他的话有两种丢法，一种是到了没处理，一种是排队时
  * 会话进程死了、从头没送到——钩子在提交那一刻就落了盘，新会话开场看一眼这份文件，上一个会话没来得及处理的话就在这里，不靠他重发。
- * 只列最近 RECENT_MS 以内的最多 RECENT_MAX 条，每条截到 RECENT_CHARS 字；没有文件、没有最近的话都不出声；
- * 读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
+ * 列最近 RECENT_MS 以内、本会话还没见过的全部（本会话自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
+ * 封顶（超了留最新的、写明更早的几条没列）；没有文件、没有最近的话都不出声；读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
+ * 机器派的会话（工人、第二意见、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
  */
 export const RECENT_MS = 60 * 60_000;
-export const RECENT_MAX = 5;
 export const RECENT_CHARS = 200;
+export const RECENT_TOTAL_CHARS = 3000;
 /** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记（2026-10-04 实测），列的时候不算创始人的话 */
 const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
 
-export function recentPrompts({ home, now = Date.now(), dir = null }) {
+export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = null }) {
   // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份：原来这里不认 FLEET_PROMPT_LOG_DIR（全仓审查第 4 路 R4）
   const base = dir ?? logDir(process.env, home);
   const days = new Set([beijingToday(now), beijingToday(now - RECENT_MS)]);
@@ -480,6 +488,9 @@ export function recentPrompts({ home, now = Date.now(), dir = null }) {
         if (
           typeof e?.prompt === 'string' &&
           !SYSTEM_PROMPT.test(e.prompt) &&
+          !isMachineOpening(e.prompt) &&
+          !isMachineSession({ env: {}, cwd: e.cwd }) &&
+          !(sessionId && e.sessionId === sessionId) &&
           Number.isFinite(at) &&
           now - at <= RECENT_MS &&
           at <= now + 60_000
@@ -492,12 +503,22 @@ export function recentPrompts({ home, now = Date.now(), dir = null }) {
   }
   if (entries.length === 0) return [];
   entries.sort((a, b) => a.at - b.at);
-  const shown = entries.slice(-RECENT_MAX);
   const hhmm = (ms) => new Date(ms + 8 * 3_600_000).toISOString().slice(11, 16);
   const cut = (s) => (s.length > RECENT_CHARS ? `${s.slice(0, RECENT_CHARS)}……` : s).replace(/\s+/g, ' ');
-  const said = shown.map((e) => `［${hhmm(e.at)}］${cut(e.prompt)}`).join(' ');
+  // 从最新的往回装，装到总字数封顶为止（最新的一条无论多长都留）
+  const shown = [];
+  let used = 0;
+  for (const e of [...entries].reverse()) {
+    const one = `［${hhmm(e.at)}］${cut(e.prompt)}`;
+    if (shown.length > 0 && used + one.length > RECENT_TOTAL_CHARS) break;
+    shown.unshift(one);
+    used += one.length;
+  }
+  const omitted = entries.length - shown.length;
+  const count =
+    omitted > 0 ? `共 ${entries.length} 条，字数封顶只列最新 ${shown.length} 条` : `共 ${entries.length} 条`;
   return [
-    `创始人最近 ${Math.round(RECENT_MS / 60_000)} 分钟落盘的话（共 ${entries.length} 条，列最后 ${shown.length} 条；上一个会话没来得及处理、或根本没送到的在这里，已经办过的不用再办）：${said}`,
+    `创始人最近 ${Math.round(RECENT_MS / 60_000)} 分钟落盘的话（${count}；上一个会话没来得及处理、或根本没送到的在这里，已经办过的不用再办）：${shown.join(' ')}`,
   ];
 }
 
@@ -694,8 +715,13 @@ export function sessionStart({
   afterMerge = afterMergeRunner(),
   idlePr = idlePrRunner(),
   progress = progressRunner(),
+  env = process.env,
 }) {
   const here = checkHere(cwd, git);
+  // 工人（FLEET_WORKER=1，worker-lib.mjs 起的）只要规矩同步：创始人引导、他最近的话、工作树清单、工人状态都是指挥官的事，
+  // 注进工人的开场它会当成自己的活（2026-10-05 审计 N5），还白占 8–11 秒
+  if (env.FLEET_WORKER === '1')
+    return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
   const syncDir = source ? source.syncDirIn(home) : null;
   const mirror = syncDir ? join(syncDir, SO_SCRIPT) : null;
@@ -710,7 +736,7 @@ export function sessionStart({
       run: progress,
       mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
     }),
-    ...recentPrompts({ home, now }),
+    ...recentPrompts({ home, now, sessionId }),
     ...sweepWorktrees(cwd, localGit),
     ...workerLines(home, now),
     ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
