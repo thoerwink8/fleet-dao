@@ -87,7 +87,8 @@ export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检
                     （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
                     CI 绿就合、自动挂上。
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
-  watch                          巡看：只打印上次巡看之后变了的工人（「变化：…」），最后一行「还在跑：N」
+  watch [--wait <秒>]            巡看：只打印上次巡看之后变了的工人（「变化：…」），最后一行「还在跑：N」；
+                                 --wait 没变化就等（最多 55 秒），一有变化马上返回
   stop --name <短名>             杀掉整棵进程树
   clean --name <短名> [--force]  PR 合了或关了（或带 --force）才删工作树和本地分支，日志留着
 退出码：0 好了；1 用法不对；2 没查成、没做成；3 冲突（已经存在、还在跑、PR 没合没关）。`;
@@ -890,12 +891,36 @@ function watchLine(s, st) {
 }
 
 /**
- * 巡看（给定时叫起的巡看会话用，#1016）：每个没 clean 的工人，状态和上次报过的不一样才出一行「变化：…」，
+ * 巡看（指挥官在自己的会话里用，#1016；创始人 2026-10-05：进度只在当前会话里报，不要出现在别的会话）：每个没 clean 的工人，状态和上次报过的不一样才出一行「变化：…」，
  * 并把这次的记进它目录里的 reported.json；最后一行总是「还在跑：N」——只有这一行就是没变化。
- * 工人脱离会话跑，没有谁会被它的完成通知叫醒；巡看替创始人盯着，他不用来问。
+ * 工人脱离会话跑，没有谁会被它的完成通知叫醒；指挥官无人值守时循环跑它，有变化就在对话里报给创始人。
+ * --wait <秒>：没变化就等，最多等这么久（上限 WATCH_WAIT_MAX_SEC：单次前台等待不超过 60 秒，创始人的插话在两次调用之间才送到）；
+ * 一有变化马上返回。等的时候每 WATCH_POLL_MS 看一次，不烧模型额度。
  */
+export const WATCH_WAIT_MAX_SEC = 55;
+export const WATCH_POLL_MS = 10_000;
+
 async function cmdWatch(p, io) {
   if (p.positional.length > 0) throw new UsageError('watch 不收位置参数');
+  const waitArg = p.options.get('wait');
+  const waitSec = waitArg === undefined ? 0 : Number(waitArg);
+  if (!Number.isInteger(waitSec) || waitSec < 0 || waitSec > WATCH_WAIT_MAX_SEC)
+    throw new UsageError(`--wait 要是 0 到 ${WATCH_WAIT_MAX_SEC} 的整数秒，给的是「${waitArg}」`);
+  const deadline = io.now().getTime() + waitSec * 1000;
+  for (;;) {
+    const r = watchOnce(io);
+    if (typeof r === 'number') return r;
+    if (r.lines.length > 0 || r.code !== 0 || r.running === 0 || io.now().getTime() >= deadline) {
+      for (const l of r.lines) io.out(l);
+      io.out(`还在跑：${r.running}`);
+      return r.code;
+    }
+    await io.sleep(Math.min(WATCH_POLL_MS, Math.max(0, deadline - io.now().getTime())));
+  }
+}
+
+/** 看一遍：变了的行、还在跑几个、退出码；工人目录读不了直接返回退出码。变了的当场记进 reported.json。 */
+function watchOnce(io) {
   let names = [];
   try {
     names = readdirSync(workersDir(io.home)).sort();
@@ -903,6 +928,7 @@ async function cmdWatch(p, io) {
     if (e.code !== 'ENOENT') return fail(io, `${workersDir(io.home)} 读不了（${e.code ?? e.message}）`);
   }
   const at = io.now();
+  const lines = [];
   let running = 0;
   let code = 0;
   for (const name of names) {
@@ -919,15 +945,14 @@ async function cmdWatch(p, io) {
       // 没报过，或记录坏了：当没报过，多报一次比漏报好
     }
     if (before === st.key) continue;
-    io.out(`变化：${watchLine(s, st)}`);
+    lines.push(`变化：${watchLine(s, st)}`);
     try {
       writeFileSync(file, `${JSON.stringify({ key: st.key, at: at.toISOString() })}\n`);
     } catch (e) {
       io.err(`${name} 的 reported.json 写不进（${e.code ?? e.message}）：下次巡看会再报一遍`);
     }
   }
-  io.out(`还在跑：${running}`);
-  return code;
+  return { lines, running, code };
 }
 
 async function cmdStop(p, io) {
@@ -1036,7 +1061,7 @@ export async function runWorker(argv, io) {
         io,
       );
     if (cmd === 'status') return await cmdStatus(parseArgs(rest, ['name']), io);
-    if (cmd === 'watch') return await cmdWatch(parseArgs(rest, []), io);
+    if (cmd === 'watch') return await cmdWatch(parseArgs(rest, ['wait']), io);
     if (cmd === 'stop') return await cmdStop(parseArgs(rest, ['name']), io);
     if (cmd === 'clean') return await cmdClean(parseArgs(rest, ['name'], ['force']), io);
     throw new UsageError(`没有「${cmd}」这个命令\n${USAGE}`);
