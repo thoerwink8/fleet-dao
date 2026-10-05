@@ -61,6 +61,8 @@ interface SendOptions {
   body?: unknown;
   /** 写操作默认带 CSRF 令牌；登录前的免登请求（dev-login、飞书免登）没有会话，不带。 */
   csrf?: boolean;
+  /** 改密码的那一下 PUT：它在路上时别的请求先等它落地（拿到新 Cookie）再发。 */
+  rotatesSession?: boolean;
 }
 
 export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
@@ -73,13 +75,18 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
   // sessionEpoch = 已经改成功几次；请求开始时任一不是零 / 之后变了，它回来的 401 就当作旧 Cookie 的尾巴。
   let passwordChanges = 0;
   let sessionEpoch = 0;
+  // 改密码的 PUT 已经发出、还没回来时是它。这期间新发的请求先等它：不等就带着马上作废的旧 Cookie 出门，
+  // 回来是 401，浏览器控制台记一条「Failed to load resource」（e2e 10-credentials 偶发红：推送攒的那次全量重拉
+  // 正好落在 PUT 路上，run 37257542728）。上面的 401 放行只兜 PUT 发出之前就在路上的那些。
+  let rotation: Promise<unknown> | undefined;
 
   async function send<S extends z.ZodType>(
     method: string,
     url: string,
     schema: S | null,
-    { body, csrf: withCsrf = method !== 'GET' }: SendOptions = {},
+    { body, csrf: withCsrf = method !== 'GET', rotatesSession = false }: SendOptions = {},
   ): Promise<z.output<S>> {
+    while (rotation) await rotation.catch(() => undefined);
     const epochAtStart = sessionEpoch;
     const changingAtStart = passwordChanges > 0;
     const headers: Record<string, string> = { Accept: 'application/json' };
@@ -91,10 +98,15 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     const init: RequestInit = { method, headers, credentials: 'same-origin' };
     if (body !== undefined) init.body = JSON.stringify(body);
     let res: Response;
+    let pending: Promise<Response> | undefined;
     try {
-      res = await doFetch(url, init);
+      pending = doFetch(url, init);
+      if (rotatesSession) rotation = pending;
+      res = await pending;
     } catch (err) {
       throw new ApiError(0, 'network', `连不上驾驶舱后端：${errMessage(err)}`);
+    } finally {
+      if (rotation === pending) rotation = undefined;
     }
     if (!res.ok) {
       const raw: unknown = await res.json().catch(() => undefined);
@@ -183,7 +195,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       const changesPassword = parsed.newPassword !== undefined;
       if (changesPassword) passwordChanges += 1;
       try {
-        await send('PUT', apiUrl(R.updateCredentials.path), null, { body: parsed });
+        await send('PUT', apiUrl(R.updateCredentials.path), null, {
+          body: parsed,
+          rotatesSession: changesPassword,
+        });
         if (changesPassword) sessionEpoch += 1;
       } finally {
         if (changesPassword) passwordChanges -= 1;
