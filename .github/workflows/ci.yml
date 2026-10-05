@@ -552,14 +552,15 @@ jobs:
           exit 1
       - name: 驾驶舱 e2e
         run: pnpm --filter @fleet-dao/web e2e
-      # 红了留证据：报告、截图、各进程日志（后端、前端）都在仓根 _tmp/e2e/（公开仓：里面只有 e2e 自己造的假数据）
+      # 总是留：跑过的每个页面的截图（support/fixtures.ts 的 shot 夹具存的）是界面 PR 的截图证据——e2e 盖住的页面以这份为准，
+      # 不用再手工起环境截；红了还有报告、各进程日志（后端、前端）。都在仓根 _tmp/e2e/（公开仓：里面只有 e2e 自己造的假数据）
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
           name: e2e-${{ github.run_id }}
           path: _tmp/e2e/
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
   # deploy=all 时切成 3 台并行（ci-plan.ts 的 deployMatrix / DEPLOY_SHARDS，跑 run.sh --shard i/3；一台 100 秒上下，
