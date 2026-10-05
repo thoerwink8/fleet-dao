@@ -198,6 +198,10 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
       },
       facts: ({ issueNumber, since }) =>
         canaryDbFacts(w.db, { ...need(), issueNumber, since, intakeJob: INTAKE_JOB.id }),
+      async repoSwitch() {
+        const found = await store.findRepoByName(need().owner, need().name);
+        return found === null ? 'missing' : found.autoDispatchSince === null ? 'off' : 'on';
+      },
       workflows: {
         state: (workflowId) => workflows.state(workflowId),
         async view(workflowId) {

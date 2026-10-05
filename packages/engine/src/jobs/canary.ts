@@ -3,7 +3,8 @@
 // （停下等人、工作流没做完、单子被关成不做了）就推一条「卡住报警」，写清断在哪一步、这一步走了多久；下一轮通过了这条自己撤。
 // 一轮 = 开单（openCanaryRound：记开始 → 补记没收尾的几轮、收掉前几轮留下的单 → 找巡检仓的当前版本 → 开单、挂上当前版本）
 // → 每 2 分钟看一回（checkCanaryRound：读库、问 Temporal、要时读 GitHub → canaryNext 判 → 记进库）→ 有结论就收尾。
-// 结论三种：通过、断在哪、没跑成（巡检自己挂了：没配、仓读不到、开不了单、连着查不成）。没跑成的这一轮在 schedule_runs 记
+// 结论四种：通过、断在哪、没跑成（巡检自己挂了：没配、仓读不到、开不了单、连着查不成）、跳过（巡检仓的「让 AI 接活」关着：
+// 不开单、不报警，schedule_runs 记 partial，#1050）。没跑成的这一轮在 schedule_runs 记
 // failed，由看门狗（#203）照登记表报；断了的这一轮巡检自己跑成了，schedule_runs 记 ok、发现 1 个问题，报警由这里推。
 // 立刻跑一轮、等结论、打印每步用时：pnpm drill（../drill.ts，同一个定时任务、同一份代码）。
 // 改这里之前必须知道：
@@ -65,6 +66,12 @@ export const CANARY_ACTOR = 'engine:canary';
 export const CANARY_CLEANUP_LIMIT = 5;
 /** 巡检单要改的文件（巡检仓根上）。 */
 export const CANARY_LOG_FILE = '巡检记录.md';
+/**
+ * 巡检仓的「让 AI 接活」关着时这一轮的结论原因（#1050）：发版之后所有项目默认关着、点开才接活，关着的时候拉单不会拉巡检单，
+ * 开了单也只会断在「收单」、天天报警——所以这一轮不开单，记「跳过」，不推卡住报警。
+ */
+export const CANARY_SKIPPED_WHY =
+  '跳过：巡检仓的「让 AI 接活」关着（拉单不拉巡检单），这一轮没开单、不算断；打开以后下一轮照常跑';
 
 /** 每一步给人看的名字：和健康页同一份（@fleet-dao/db 的 CANARY_STAGE_NAMES，老步骤也认得）。 */
 export { CANARY_STAGE_NAMES };
@@ -526,6 +533,11 @@ export interface CanaryDeps {
   github: CanaryGitHub;
   /** 这张单在库里的事实（@fleet-dao/db 的 canaryDbFacts）；since 是这一轮开单的时刻（认 runs 的账用）。 */
   facts(input: { issueNumber: number; since: Date }): Promise<CanaryDbFacts>;
+  /**
+   * 巡检仓的「让 AI 接活」开关（repos.auto_dispatch_since）现在开着还是关着；仓不在库里（没受管）是 missing。
+   * 读不到照抛：这一轮算没跑成，不当成开着、也不当成关着。
+   */
+  repoSwitch(): Promise<'on' | 'off' | 'missing'>;
   workflows: {
     state(workflowId: string): Promise<WorkflowState>;
     /** 在跑的任务工作流的 taskStatus 查询；认不出、查不了照抛。 */
@@ -571,9 +583,14 @@ export class CanaryNotRecordedError extends Error {
 
 const slugOf = (repo: { owner: string; name: string }) => `${repo.owner}/${repo.name}`;
 
-/** schedule_runs 的结局：巡检自己跑成了（通过、断了）是 ok，没跑成是 failed。 */
+/**
+ * schedule_runs 的结局：巡检自己跑成了（通过、断了）是 ok，没跑成是 failed；跳过记 partial（算按期跑过、看门狗不报，
+ * 但不是 ok：ok 的意思是「查了、没问题」，这一轮什么都没查）。
+ */
 function scheduleResult(verdict: CanaryVerdict, reached: number, why: string | null): ScheduleResult {
   if (verdict === 'not_run') return { outcome: 'failed', why: why ?? '巡检没跑成' };
+  if (verdict === 'skipped')
+    return { outcome: 'partial', why: why ?? CANARY_SKIPPED_WHY, scanned: 0, found: 0 };
   return { outcome: 'ok', scanned: Math.max(1, reached), found: verdict === 'broken' ? 1 : 0 };
 }
 
@@ -624,6 +641,8 @@ async function conclude(
     stage: CANARY_STAGE_NAMES[stage],
   };
   if (verdict === 'pass') deps.log('info', '全流程巡检这一轮通过了', fields);
+  else if (verdict === 'skipped')
+    deps.log('info', '全流程巡检这一轮跳过了（巡检仓的「让 AI 接活」关着）', fields);
   else if (verdict === 'broken') deps.log('warn', '全流程巡检这一轮断了', fields);
   else deps.log('error', '全流程巡检这一轮没跑成', fields);
   return run;
@@ -800,6 +819,30 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
     done: true as const,
     run: await conclude(deps, base, 'not_run', 'open', [...notes, why].join('；'), []),
   });
+  // 开关关着：拉单不会拉巡检单，开了单只会断在「收单」天天报警。不开单、不报警，记「跳过」；上一轮断了留下的那条报警也撤掉
+  // （它多半就是这个原因断的），开着以后再断会重新报。读不到开关不猜：这一轮算没跑成。
+  let dispatch: Awaited<ReturnType<CanaryDeps['repoSwitch']>>;
+  try {
+    dispatch = await deps.repoSwitch();
+  } catch (err) {
+    return failed(`读不到巡检仓的「让 AI 接活」开关：${errMessage(err)}`);
+  }
+  if (dispatch === 'off') {
+    // 先撤、后记：撤不掉就不能当正常跳过结案（健康页会显示「跳过」、旧报警却还开着），这一轮算没跑成，下一轮接着撤
+    try {
+      await deps.alerts.resolve(
+        `全流程巡检 ${stamp(startedAt)} 这一轮因巡检仓的「让 AI 接活」关着而跳过：不再报断链（打开以后巡检接着跑，断了会重新报）`,
+      );
+    } catch (err) {
+      return failed(
+        `巡检仓的「让 AI 接活」关着，本该跳过这一轮，但上一轮断了留下的报警撤不掉：${errMessage(err)}`,
+      );
+    }
+    return {
+      done: true,
+      run: await conclude(deps, base, 'skipped', 'open', [CANARY_SKIPPED_WHY, ...notes].join('；'), []),
+    };
+  }
   let milestone: { number: number; title: string };
   try {
     const current = currentVersion(await deps.github.openMilestones());

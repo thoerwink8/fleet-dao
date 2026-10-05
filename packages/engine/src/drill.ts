@@ -114,6 +114,17 @@ export function drillReport(raw: unknown): { lines: string[]; exitCode: DrillExi
     return { lines: [`这一轮巡检的结局认不出（${run.error}），不知道通没通过`], exitCode: 2 };
   }
   const which = run.canaryRunId === null ? '这一轮' : `第 ${run.canaryRunId} 轮`;
+  // 跳过（#1050）：巡检仓的「让 AI 接活」关着，这一轮没开单、没走任何一步；不是通过（什么都没验），退出码 2，不拿 0 冒充
+  if (run.verdict === 'skipped') {
+    return {
+      lines: [
+        `全流程巡检${which}：跳过（没开单，什么都没验）`,
+        `为什么：${run.why ?? '巡检仓的「让 AI 接活」关着'}`,
+        '要演练：先把巡检仓的「让 AI 接活」打开（fleet-api dispatch <owner>/<巡检仓> on），再 pnpm drill',
+      ],
+      exitCode: 2,
+    };
+  }
   const where = run.issueNumber === null ? '单没开成' : `巡检单 #${run.issueNumber}`;
   const head =
     run.verdict === 'pass'
