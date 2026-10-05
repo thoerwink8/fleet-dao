@@ -34,6 +34,7 @@ import type {
   Pools,
   ReleaseVersion,
   Repo,
+  RepoDispatch,
   Routing,
   RoutingEfforts,
   RoutingLayers,
@@ -44,7 +45,9 @@ import type {
   TaskDetail,
   UpdateCredentialsBody,
   UpdateDemoDefaultBody,
+  UpdatedRepoDispatch,
   UpdatedRouteEffort,
+  UpdateRepoDispatchBody,
   UpdateRouteEffortBody,
   UpdateSettingBody,
 } from './types';
@@ -69,6 +72,10 @@ export interface FleetApi {
   logout(): Promise<void>;
   me(): Promise<Me>;
   repos(): Promise<{ repos: Repo[] }>;
+  /** 每个项目的「让 AI 接活」现在开还是关、什么时候开的（设置页「仓库」一节）。 */
+  repoDispatch(): Promise<{ repos: RepoDispatch[] }>;
+  /** 开、关一个项目的「让 AI 接活」（写操作记录）；本来就是那个状态时 changed=false。没有这个项目 404。演示版只读：直接拒。 */
+  updateRepoDispatch(repoId: string, body: UpdateRepoDispatchBody): Promise<UpdatedRepoDispatch>;
   /** 新主页（/）的一屏三块 + 持续状态条（#589）。 */
   home(): Promise<HomeResponse>;
   /**
@@ -154,6 +161,7 @@ export const keys = {
   authConfig: ['auth-config'] as const,
   credentials: ['credentials'] as const,
   repos: ['repos'] as const,
+  repoDispatch: ['repo-dispatch'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
   legacyAsks: ['legacy-asks'] as const,
@@ -200,6 +208,19 @@ export function useCredentials({ enabled = true }: { enabled?: boolean } = {}) {
 export function useRepos() {
   const api = useApi();
   return useQuery({ queryKey: keys.repos, queryFn: () => api.repos(), staleTime: 60_000 });
+}
+
+/**
+ * 每个项目的「让 AI 接活」开关。命令行 fleet-api dispatch 也能改它、没有推送，所以每 30 秒重拉；
+ * 点开关的那一下自己重拉（useUpdateRepoDispatch）。
+ */
+export function useRepoDispatch() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.repoDispatch,
+    queryFn: () => api.repoDispatch(),
+    refetchInterval: 30_000,
+  });
 }
 
 /**
@@ -447,6 +468,20 @@ export function useResolveNotification() {
   return useMutation({
     mutationFn: (id: string) => api.resolveNotification(id),
     onSettled: () => qc.invalidateQueries({ queryKey: ['notifications'] }),
+  });
+}
+
+/** 开、关一个项目的「让 AI 接活」：不先改缓存，等后端写完（开关和操作记录同一事务）再重拉，页面上永远是库里现在的值。 */
+export function useUpdateRepoDispatch() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoId, body }: { repoId: string; body: UpdateRepoDispatchBody }) =>
+      api.updateRepoDispatch(repoId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
   });
 }
 

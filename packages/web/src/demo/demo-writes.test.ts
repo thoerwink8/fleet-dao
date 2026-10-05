@@ -27,7 +27,7 @@ const code = async (p: Promise<unknown>) => {
 };
 
 describe('演示版：只有正式驾驶舱才有的写，游客一律不行', () => {
-  test('【故意造出的失败】把所有模块都开了也一样：发链接、作废、改默认范围、改思考档位都回 403 demo_hidden，假数据没动', async () => {
+  test('【故意造出的失败】把所有模块都开了也一样：发链接、作废、改默认范围、改思考档位、开关「让 AI 接活」都回 403 demo_hidden，假数据没动', async () => {
     scope(['board', 'task', 'quota', 'schedules', 'notifications', 'audit', 'settings']);
     const inner = createMockApi({ live: false });
     const api = createDemoApi(inner);
@@ -37,6 +37,7 @@ describe('演示版：只有正式驾驶舱才有的写，游客一律不行', (
       () => api.revokeDemoLink('link-1'),
       () => api.updateDemoDefault({ modules: ['board'], detail: 'status' }),
       () => api.updateRouteEffort('opus-5.5', 'r-ca-opus', { effort: 'high', expected: null }),
+      () => api.updateRepoDispatch('r-orbit', { on: false }),
     ]) {
       const err = await code(call());
       expect(err.status).toBe(403);

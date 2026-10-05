@@ -48,6 +48,7 @@ import type {
   PoolViewSchema,
   QuotaWindowViewSchema,
   ReleaseVersionResponse,
+  RepoDispatchResponse,
   RepoSchema,
   RouteEffortSchema,
   RouteSchema,
@@ -64,6 +65,8 @@ import type {
   TaskDetailResponse,
   UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
+  UpdateRepoDispatchRequest,
+  UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
@@ -89,6 +92,10 @@ export type AuthConfig = z.infer<typeof AuthConfigResponse>;
 export type Credentials = z.infer<typeof CredentialsResponse>;
 export type UpdateCredentialsBody = z.input<typeof UpdateCredentialsRequest>;
 export type Repo = z.infer<typeof RepoSchema>;
+/** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
+export type RepoDispatch = z.infer<typeof RepoDispatchResponse>['repos'][number];
+export type UpdateRepoDispatchBody = z.input<typeof UpdateRepoDispatchRequest>;
+export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
 
 export type Board = z.infer<typeof BoardResponse>;
 export type BoardTask = z.infer<typeof BoardTaskSchema>;
