@@ -3,6 +3,7 @@
 - 日期：2026-10-02 上午（北京时间 10:30 前后；落盘提交 `b5dda3f8` 在 10:37。原稿把时间写成「UTC 10:3x / 北京 18:3x」，是把北京时间当成了 UTC，2026-10-02 下午复核时改正）
 - 谁拍的：创始人
 - 状态：已采纳
+- 现状（2026-10-05 回写）：生效。第 4 条「追加」里的派活开关 `engine_dispatch_paused` 没做，发布时停接活、等手头活收完由排空（`packages/engine/src/drain*.ts`）做。
 - 关联：docs/decisions/0009-v3-implementation-plan.md（W3 待拍）、specs/450/453/323/450-454/227，
   deploy/france/desired-config.json，ops.md 第九节「自动发布」，deploy/release.sh
 

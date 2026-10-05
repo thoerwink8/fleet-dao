@@ -3,6 +3,7 @@
 - 日期：2026-10-05（北京时间；创始人回话 08:44 之后）
 - 谁拍的：创始人
 - 状态：已采纳
+- 现状（2026-10-05 回写）：生效。落地表第 2 条已合（#998）；第 1、3 条还没做（#995 开着）。
 - 关联：#995、`specs/995-断链统一/方案.md`、里程碑 #10（v3，已关）、#11（v4）、`packages/conventions/src/github-audit.ts`、`release-milestone.ts`、`release-finalize.ts`、`issue-new.ts`
 
 ## 原话

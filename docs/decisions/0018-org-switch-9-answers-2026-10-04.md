@@ -3,6 +3,7 @@
 - 日期：2026-10-04 06:08（北京时间）
 - 谁拍的：创始人
 - 状态：已采纳
+- 现状（2026-10-05 回写）：生效。「前后接不上的地方」里拼车「怎么归零」他还没答，还悬着。
 - 关联：`specs/194-拼车自动切换/方案-v2.md`（第八节问题清单）、`packages/adapters/src/quota/readers/reclaude.ts`、`docs/design.md` 第九节、`docs/reference/quota.md`、#323、#157、#59
 
 ## 原话
