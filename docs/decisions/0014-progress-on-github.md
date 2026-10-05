@@ -3,6 +3,7 @@
 - 日期：2026-10-03 约 06:40（北京时间）
 - 谁拍的：创始人
 - 状态：已采纳。对账和做法已落地（本提交）；通用段那几句（改标准，PR #650）创始人 2026-10-04 约 08:50 放行后合并，见第 4 条。第 2 条里「做完的关单并带结果文档」这一半已被 0015 替代（结果文档整套删了）
+- 现状（2026-10-05 回写）：生效。第 3 条里的计划快照（`pnpm plan:snapshot`、`plan-snapshot.ts`）已删，按 0015 改成 `pnpm plan` 从 GitHub 现读。
 - 关联：`docs/PROGRESS.md` 2026-10-03 06:55 那节、`docs/decisions/0013-session-directives.md`、`packages/conventions/src/plan-snapshot.ts`
 
 ## 原话
