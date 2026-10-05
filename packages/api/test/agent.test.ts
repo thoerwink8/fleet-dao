@@ -613,7 +613,7 @@ describe('fleet done 要核实', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('退回要落库：操作记录里有，会话进度里也有，不只打日志', async () => {
+  it('退回要落库：操作记录里有（带退回原因），不只打日志', async () => {
     const h = harness();
     const res = await done(h, { summary: '写完了', testsPassed: true });
     expect(res.status).toBe(422);
@@ -625,9 +625,7 @@ describe('fleet done 要核实', () => {
       ok: false,
       error: 'done_rejected',
     });
-    const { items } = await h.store.listTimeline(IDS.task12, { limit: 1 });
-    expect(items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
-    expect(JSON.stringify(items[0]?.payload)).toContain('没查到本次会话跑过 `pnpm test:changed`');
+    expect(JSON.stringify(h.store.data.audit.at(-1))).toContain('没查到本次会话跑过 `pnpm test:changed`');
   });
 
   it('带的 PR 还没同步进库：409，过一会儿再交（也落库）', async () => {

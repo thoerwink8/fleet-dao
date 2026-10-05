@@ -500,48 +500,11 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       });
     });
 
-    describe('时间线', () => {
-      it('会话报的、人做的、状态变化、会话排队都在；倒序；翻页不重不漏；量大的 file / tool 不放', async () => {
-        for (let i = 0; i < 3; i++) {
-          tick();
-          await store.appendProgress(IDS.run1, 'say', { text: `第 ${i} 句` });
-        }
-        await store.appendProgress(IDS.run1, 'file', { path: 'a.ts' });
-        await store.appendAudit(audit({ action: 'task.pause', reason: '先停一下', after: { note: 'x' } }));
-        const seen: { id: string; at: string; kind: string; payload?: unknown }[] = [];
-        let cursor: string | undefined;
-        for (let n = 0; n < 50; n++) {
-          const page = await store.listTimeline(IDS.task12, { cursor, limit: 2 });
-          seen.push(...page.items);
-          cursor = page.nextCursor;
-          if (!cursor) break;
-        }
-        expect(new Set(seen.map((r) => r.id)).size).toBe(seen.length);
-        const sorted = [...seen].sort((a, b) => b.at.localeCompare(a.at) || (a.id < b.id ? 1 : -1));
-        expect(seen.map((r) => r.id)).toEqual(sorted.map((r) => r.id));
-        const says = seen.filter((r) => r.kind === 'say').map((r) => (r.payload as { text: string }).text);
-        expect(says.slice(0, 3)).toEqual(['第 2 句', '第 1 句', '第 0 句']);
-        expect(says).toContain('正在写验证码过期的测试');
-        expect(seen.some((r) => r.kind === 'file')).toBe(false);
-        const pause = seen.find((r) => r.kind === 'pause');
-        expect(pause).toMatchObject({
-          source: 'person',
-          payload: { reason: '先停一下', ok: true, note: 'x' },
-        });
-        expect(seen.some((r) => r.kind === 'run_queued')).toBe(true);
-        expect(seen.some((r) => r.kind === 'state')).toBe(true);
-        expect(seen.some((r) => r.kind === 'notification')).toBe(true);
-      });
-
-      it('没有的需求、看不懂的编号：空', async () => {
-        expect((await store.listTimeline(OTHER_UUID, { limit: 10 })).items).toEqual([]);
-        expect((await store.listTimeline('task-12', { limit: 10 })).items).toEqual([]);
-      });
-
+    describe('翻页游标', () => {
       it('翻页游标看不懂（拼错、改过、编号不合这张列表）：抛 InvalidCursorError，不装成空页', async () => {
         const at = T0.toISOString();
         for (const cursor of ['garbage', '|x', 'not-a-time|1', `${at}|`]) {
-          await expect(store.listTimeline(IDS.task12, { cursor, limit: 5 }), cursor).rejects.toBeInstanceOf(
+          await expect(store.listAudit({ cursor, limit: 5 }), cursor).rejects.toBeInstanceOf(
             InvalidCursorError,
           );
         }
@@ -561,7 +524,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         await store.listAudit({ cursor: first.nextCursor, limit: 1 });
       });
 
-      it('刚好翻完一页整数条：最后一页没有下一页游标；少取一条就有（操作记录、时间线、通知同一个判法）', async () => {
+      it('刚好翻完一页整数条：最后一页没有下一页游标；少取一条就有（操作记录、通知同一个判法）', async () => {
         for (let i = 0; i < 3; i++) {
           tick();
           await store.appendAudit(audit());
@@ -569,9 +532,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         const total = (await store.listAudit({ limit: 500 })).items.length;
         expect((await store.listAudit({ limit: total })).nextCursor).toBeUndefined();
         expect((await store.listAudit({ limit: total - 1 })).nextCursor).toBeDefined();
-        const timeline = (await store.listTimeline(IDS.task12, { limit: 500 })).items.length;
-        expect((await store.listTimeline(IDS.task12, { limit: timeline })).nextCursor).toBeUndefined();
-        expect((await store.listTimeline(IDS.task12, { limit: timeline - 1 })).nextCursor).toBeDefined();
         const notes = (await store.listNotifications({ status: 'all', limit: 500 })).items.length;
         expect((await store.listNotifications({ status: 'all', limit: notes })).nextCursor).toBeUndefined();
         if (notes > 1) {
@@ -678,29 +638,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(questions).not.toContain('推荐的不在选项里？');
         expect(questions).not.toContain('碰了人闸没说哪一类？');
         expect(questions).not.toContain('没碰人闸却带了人闸？');
-      });
-
-      it('新开的追问同一事务记一条 ask 进度；复用那一条时不再记', async () => {
-        const askEvents = async () =>
-          (await store.listTimeline(IDS.task12, { limit: 100 })).items.filter((r) => r.kind === 'ask');
-        const before = (await askEvents()).length;
-        const input = {
-          runId: IDS.run1,
-          taskId: IDS.task12,
-          question: '验证码几位？',
-          options: ['6', '4'],
-          scope: 'task' as const,
-          recommended: '6',
-        };
-        const { ask } = await store.openAsk(input);
-        tick();
-        await store.openAsk(input);
-        const after = await askEvents();
-        expect(after).toHaveLength(before + 1);
-        expect(after[0]).toMatchObject({
-          runId: IDS.run1,
-          payload: { askId: ask.id, question: '验证码几位？' },
-        });
       });
 
       it('回答：写上答案和谁答的，同一事务留操作记录；答过的不改；没有的是 not_found', async () => {
@@ -1626,8 +1563,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         const audits = await store.listAudit({ target: `task:${NEW_TASK}`, limit: 10 });
         expect(audits.items.map((a) => [a.action, a.via])).toEqual([['task.create', 'github']]);
         expect((await store.listAudit({ target: `task:${OTHER_UUID}`, limit: 10 })).items).toEqual([]);
-        const timeline = await store.listTimeline(NEW_TASK, { limit: 10 });
-        expect(timeline.items.some((r) => r.kind === 'state')).toBe(true);
       });
 
       it('建任务时操作记录写不进：任务也不建', async () => {
@@ -1677,10 +1612,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.stopQueuedTask(IDS.task12, stop)).toBe('not_queued');
         expect((await store.getTask(IDS.task12))?.state).toBe('running');
         expect(await store.stopQueuedTask('nope', stop)).toBe('not_queued');
-        const states = (await store.listTimeline(NEW_TASK, { limit: 10 })).items.filter(
-          (r) => r.kind === 'state',
-        );
-        expect(states.map((r) => (r.payload as { to?: string }).to)).toEqual(['stopped', 'queued']);
       });
 
       describe('「让 AI 接活」开关', () => {
