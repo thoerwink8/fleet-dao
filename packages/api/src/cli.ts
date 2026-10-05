@@ -9,6 +9,10 @@
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
 // --all off：把库里所有仓都关上（发版 release.sh 在里程碑新 tag 发布成功后调，#1050）；只许 off，不许一键全开；
 // 逐个仓走上面同一条路，已经关着的不改不记；有一个没关成就整条退出 1，说清哪几个。
+//   engine on|off|status [--reason <原因>]
+// 引擎总开关（设置 engine.master，#1086）：on 打开引擎接活，off 全停（不拉单、不派活、不起干活的会话；探针照跑），
+// status 只看。没设过是关。和按项目的「让 AI 接活」串联：总开关开着、项目的开关也开着才派。发版脚本每次发版成功后
+// 经 engine off 置关（#1050）；本机 WSL 的小版本更新不碰它。
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
@@ -25,6 +29,7 @@ import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@flee
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
+import { describeEngineMaster, readEngineMaster, setEngineMaster } from './engine-switch.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
@@ -42,6 +47,8 @@ export class CliError extends Error {
 
 const USAGE =
   '用法：fleet-api set-password <飞书名或用户 id> [--username <用户名>]（密码从标准输入读，不收参数）';
+const ENGINE_USAGE =
+  '用法：fleet-api engine on|off|status [--reason <原因>]（引擎总开关：on 打开，off 关上，status 只看；没设过是关。开关写进操作记录，本来就是要的状态就不改不记）';
 const NODE_KEY_USAGE =
   '用法：fleet-api node-key new <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；打印一次通行证明文和要贴进 FLEET_NODE_KEYS 的哈希）';
 const DISPATCH_USAGE =
@@ -512,6 +519,71 @@ export async function dispatchAll(input: {
   return `${all.length} 个仓都已关着：\n${lines.join('\n')}`;
 }
 
+// —— engine：引擎总开关（#1086，设置 engine.master）——
+
+export interface EngineArgs {
+  action: 'on' | 'off' | 'status';
+  reason?: string | undefined;
+}
+
+/** 恰好一个动作，可选 --reason <原因>；别的写法一律拒，不猜。 */
+export function parseEngineArgs(argv: readonly string[]): EngineArgs {
+  const [action = '', ...rest] = argv;
+  if (action !== 'on' && action !== 'off' && action !== 'status')
+    throw new CliError(`认不出「${action}」：只收 on、off、status。${ENGINE_USAGE}`, 2);
+  let reason: string | undefined;
+  if (rest.length > 0) {
+    if (rest.length !== 2 || rest[0] !== '--reason' || rest[1] === undefined || rest[1].trim() === '')
+      throw new CliError(`--reason 要写成 --reason <原因>。${ENGINE_USAGE}`, 2);
+    if (action === 'status') throw new CliError(`status 不看原因。${ENGINE_USAGE}`, 2);
+    reason = rest[1].trim();
+    if (reason.length > MAX_REASON)
+      throw new CliError(`--reason 太长（最多 ${MAX_REASON} 个字）。${ENGINE_USAGE}`, 2);
+  }
+  return { action, ...(reason === undefined ? {} : { reason }) };
+}
+
+/** 操作记录没有「服务器上的管理命令」这一种来源：和 dispatch 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
+const OPS_ENGINE = { kind: 'engine', id: 'ops:engine' } as const;
+
+/**
+ * fleet-api engine 本身（#1086）。status 只读打印；on、off 已经是要的状态就不改，不然经 setEngineMaster 改
+ * （putSetting：开关和操作记录同一事务）；版本冲突（刚被别处改过）报出来让重跑。
+ */
+export async function engine(input: { store: Store; args: EngineArgs; operator: string }): Promise<string> {
+  const { store, args, operator } = input;
+  if (args.action === 'status') {
+    const state = await dbStep('没查成：', () => readEngineMaster(store));
+    return `引擎总开关：${describeEngineMaster(state)}`;
+  }
+  const on = args.action === 'on';
+  const change = await dbStep(
+    '没改成（什么都没改）：',
+    () =>
+      setEngineMaster(
+        store,
+        { on, by: OPS_ENGINE },
+        {
+          actor: OPS_ENGINE,
+          reason:
+            args.reason === undefined
+              ? `服务器上 ${operator} 跑的 fleet-api engine ${args.action}`
+              : `${args.reason}（服务器上 ${operator} 跑的 fleet-api engine ${args.action}）`,
+          via: 'engine',
+          ok: true,
+        },
+      ),
+    '。开关和操作记录在同一个事务里，要么都改了、要么都没改：跑 status 看现在是哪样',
+  );
+  if ('conflict' in change)
+    throw new CliError(
+      `没改成：总开关刚被别处改过（现在是「${describeEngineMaster(change.state)}」），再跑一遍或跑 status 核对`,
+    );
+  if (!change.changed)
+    return `没改：总开关本来就${on ? '开着' : '关着'}（现在是「${describeEngineMaster(change.state)}」）`;
+  return `已${on ? '打开' : '关上'}：引擎总开关：${describeEngineMaster(change.state)}`;
+}
+
 /**
  * 谁跑的。bin/fleet-api 换成 fleet 身份之前，把 root（经 sudo 跑的记 sudo 前的用户）放进 FLEET_OPS_OPERATOR；
  * 没经它、直接跑 node 的，记这个进程的用户并写明。
@@ -617,6 +689,7 @@ function databaseUrl(env: CliEnv): string {
 const USAGES: Record<string, string> = {
   'set-password': USAGE,
   dispatch: DISPATCH_USAGE,
+  engine: ENGINE_USAGE,
   'node-key': NODE_KEY_USAGE,
   alert: ALERT_USAGE,
   intent: INTENT_USAGE,
@@ -664,6 +737,16 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
     try {
       deps.out(await dispatch({ store, args, operator: operatorName(deps.env) }));
+      return 0;
+    } finally {
+      await close();
+    }
+  }
+  if (command === 'engine') {
+    const args = parseEngineArgs(rest);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(await engine({ store, args, operator: operatorName(deps.env) }));
       return 0;
     } finally {
       await close();

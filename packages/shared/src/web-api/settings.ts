@@ -114,6 +114,13 @@ export const SETTING_SCHEMAS = {
    * 没设过 = 没有暂停；认不出（整份或某个池的那一项）按暂停办并报警，不当成能用。
    */
   'engine.poolHolds': PoolHoldsSettingSchema,
+  /**
+   * 引擎总开关（#1086，创始人 2026-10-05：「每次更上去处于关闭状态，点击开启，引擎开始运转，ai开始派活」）。
+   * true = 引擎接活；false = 全停：不拉单、不派活、不起任何「干活」的模型会话；探针、路由探针、驾驶舱健康这些看家检查照跑
+   * （同日约 22:40：关着也要能看到渠道是否通）。和按项目的「让 AI 接活」（repos.auto_dispatch_since）是串联：
+   * 总开关关＝全停；总开关开＝只有接活开着的项目才派。没设过 = 关（默认关）；谁在什么时候改的看 settings 行的 updatedBy/updatedAt。
+   */
+  'engine.master': z.boolean(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

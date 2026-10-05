@@ -11,6 +11,7 @@
 import type {
   EnvEngine,
   EnvHealth,
+  EnvMaster,
   EnvPools,
   EnvSchedule,
   EnvSessions,
@@ -19,6 +20,7 @@ import type {
   PoolViewSchema,
   SessionRun,
 } from '@fleet-dao/shared';
+import { describeEngineMaster, type EngineMasterState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type DeployLagInput, type JobRecord, judgeDeployLag } from '@fleet-dao/store';
 import type { z } from 'zod';
@@ -67,6 +69,17 @@ export function engineFact(engine: EngineHealth): EnvFact<EnvEngine> {
  */
 export function engineOffFact(): EnvFact<EnvEngine> {
   return { ok: true, value: { state: 'off', detail: ENGINE_OFF_DETAIL } };
+}
+
+/** 引擎总开关那一格（#1086）：shared 的 EngineMasterState 原样翻成这一页的形状（detail 用同一句给人看的话）。 */
+export function masterFact(state: EngineMasterState): EnvMaster {
+  return {
+    on: state.on,
+    why: state.on ? 'set' : state.why,
+    ...(state.by === undefined ? {} : { by: state.by }),
+    ...(state.at === undefined ? {} : { at: state.at }),
+    detail: describeEngineMaster(state),
+  };
 }
 
 /** 在跑几个会话、各自在哪一段。stage 不在认识的几段里也照数（不丢），页面按 StageKind 显示。 */
@@ -171,6 +184,8 @@ export async function envFacts(input: {
   readSessions: () => Promise<SessionRun[]>;
   readPools: () => Promise<EnvPools>;
   readSchedule: () => Promise<EnvSchedule>;
+  /** 引擎总开关（设置 engine.master）此刻的状态。 */
+  readMaster: () => Promise<EngineMasterState>;
   /** 版本那一项：正式机器给读法，别的环境给 null（写「没查成 + 原因」）。 */
   readVersion: (() => Promise<EnvVersion>) | null;
   /** 版本项没接上时的原因（比如「只在正式环境查」）。 */
@@ -178,13 +193,14 @@ export async function envFacts(input: {
   readHealth: () => Promise<EnvHealth>;
 }): Promise<{
   engine: EnvFact<EnvEngine>;
+  master: EnvFact<EnvMaster>;
   version: EnvFact<EnvVersion>;
   sessions: EnvFact<EnvSessions>;
   pools: EnvFact<EnvPools>;
   health: EnvFact<EnvHealth>;
   schedule: EnvFact<EnvSchedule>;
 }> {
-  const [version, sessions, pools, health, schedule] = await Promise.all([
+  const [version, sessions, pools, health, schedule, master] = await Promise.all([
     input.readVersion
       ? fact('版本', input.readVersion)
       : Promise.resolve(notWired<EnvVersion>(input.versionNotWired)),
@@ -192,6 +208,7 @@ export async function envFacts(input: {
     fact('池占用', input.readPools),
     fact('健康', input.readHealth),
     fact('定时任务', input.readSchedule),
+    fact('引擎总开关', async () => masterFact(await input.readMaster())),
   ]);
-  return { engine: input.engine, version, sessions, pools, health, schedule };
+  return { engine: input.engine, master, version, sessions, pools, health, schedule };
 }

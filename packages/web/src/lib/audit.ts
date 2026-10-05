@@ -69,6 +69,7 @@ export const settingLabel: Record<SettingKey, string> = {
   'engine.soloPaused': `引擎暂不用${brand.terms.solo}`,
   'engine.quotaReserve': '各渠道的额度留量线',
   'engine.poolHolds': '整池暂停',
+  'engine.master': '引擎总开关',
 };
 
 function isStage(s: string): s is StageKind {

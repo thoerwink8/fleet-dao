@@ -15,7 +15,10 @@ import {
   DEMO_STRICT_DEFAULT,
   DemoLinksResponse,
   type DemoScope,
+  describeEngineMaster,
+  ENGINE_MASTER_SETTING,
   EnvResponseSchema,
+  engineMasterOf,
   flowStages,
   HARD_BANS,
   HomeResponseSchema,
@@ -209,6 +212,18 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
   const st = createSeed(now());
+  /** 引擎总开关那一格（设置 engine.master，#1086）：读设置里的值，和后端同一个读法（shared 的 engineMasterOf）。 */
+  const mockMaster = () => {
+    const row = st.settings.find((s) => s.key === ENGINE_MASTER_SETTING);
+    const state = engineMasterOf(row);
+    return {
+      on: state.on,
+      why: state.on ? ('set' as const) : state.why,
+      ...(state.by === undefined ? {} : { by: state.by }),
+      ...(state.at === undefined ? {} : { at: state.at }),
+      detail: describeEngineMaster(state),
+    };
+  };
   const listeners = new Set<(e: LiveEvent) => void>();
   let counter = 0;
   /** 进合并队列的先后。 */
@@ -1235,6 +1250,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         asOf: iso(),
         facts: {
           engine: { ok: true, value: mockEngine() },
+          master: { ok: true, value: mockMaster() },
           version: { ok: false, reason: '假后端没有发布目录，读不到在用版本' },
           sessions: { ok: true, value: { total: activeRuns.length, byStage } },
           pools: {

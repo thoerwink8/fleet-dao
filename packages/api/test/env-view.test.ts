@@ -67,7 +67,7 @@ describe('/api/env（内存版）', () => {
     expect(unnamed.env.problem).toContain('FLEET_MACHINE_NAME');
   });
 
-  it('六项都在：引擎、在用版本、在跑的会话、池占用、健康、最近拉单；每一项各自带 ok', async () => {
+  it('七项都在：引擎、总开关、在用版本、在跑的会话、池占用、健康、最近拉单；每一项各自带 ok', async () => {
     const h = harness({ health: [engineUp] });
     const res = await getEnv(h);
     expect(res.status).toBe(200);
@@ -75,6 +75,7 @@ describe('/api/env（内存版）', () => {
     expect(Object.keys(body.facts).sort()).toEqual([
       'engine',
       'health',
+      'master',
       'pools',
       'schedule',
       'sessions',
@@ -132,6 +133,7 @@ describe('/api/env（内存版）', () => {
       },
       readPools: async () => ({ count: 2, running: 1, unread: 0, stale: 0 }),
       readSchedule: async () => ({ status: 'never' as const }),
+      readMaster: async () => ({ on: false as const, why: 'never_set' as const }),
       readVersion: null,
       versionNotWired: DEPLOY_LAG_NOT_HERE,
       readHealth: async () => ({ ok: true, total: 3, failing: [], notWired: [] }),
@@ -146,6 +148,49 @@ describe('/api/env（内存版）', () => {
     expect(facts.health.ok).toBe(true);
     expect(facts.engine.ok).toBe(true);
     expect(facts.version).toEqual({ ok: false, reason: DEPLOY_LAG_NOT_HERE });
+  });
+
+  it('引擎总开关那一项（#1086）：开着/关着、谁什么时候改的都带；没设过 = 默认关；读库抛了只有这一项红', async () => {
+    const base = {
+      engine: { ok: true as const, value: { state: 'on' as const } },
+      readSessions: async () => [],
+      readPools: async () => ({ count: 0, running: 0, unread: 0, stale: 0 }),
+      readSchedule: async () => ({ status: 'never' as const }),
+      readVersion: null,
+      versionNotWired: DEPLOY_LAG_NOT_HERE,
+      readHealth: async () => ({ ok: true, total: 1, failing: [], notWired: [] }),
+    };
+    const closed = await envFacts({
+      ...base,
+      readMaster: async () => ({
+        on: false as const,
+        why: 'set' as const,
+        by: 'user:frank',
+        at: '2026-10-05T13:00:00.000Z',
+      }),
+    });
+    expect(closed.master).toMatchObject({
+      ok: true,
+      value: { on: false, why: 'set', by: 'user:frank', at: '2026-10-05T13:00:00.000Z' },
+    });
+    if (closed.master.ok) expect(closed.master.value.detail).toContain('关着');
+
+    const neverSet = await envFacts({
+      ...base,
+      readMaster: async () => ({ on: false as const, why: 'never_set' as const }),
+    });
+    expect(neverSet.master).toMatchObject({ ok: true, value: { on: false, why: 'never_set' } });
+    if (neverSet.master.ok) expect(neverSet.master.value.detail).toContain('默认关');
+
+    const broken = await envFacts({
+      ...base,
+      readMaster: async () => {
+        throw new Error('库连不上（测试故意造的）');
+      },
+    });
+    expect(broken.master.ok).toBe(false);
+    if (!broken.master.ok) expect(broken.master.reason).toContain('引擎总开关');
+    expect(broken.engine.ok).toBe(true);
   });
 
   it('故意造出失败：fact() 抓住抛出来的原因并写进那一项；没抛时原样给值', async () => {

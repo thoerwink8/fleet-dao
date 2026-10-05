@@ -36,6 +36,14 @@ function sampleReport(): NodeReport {
       asOf: AT,
       facts: {
         engine: { ok: true, value: { state: 'on' } },
+        master: {
+          ok: true,
+          value: {
+            on: false,
+            why: 'never_set',
+            detail: '关着（从没设过，默认关）：不拉单、不派活、不起干活的会话；探针和健康检查照跑',
+          },
+        },
         version: { ok: false, reason: '没有发布标记' },
         sessions: { ok: true, value: { total: 0, byStage: {} } },
         pools: { ok: true, value: { count: 1, running: 0, unread: 0, stale: 0 } },
