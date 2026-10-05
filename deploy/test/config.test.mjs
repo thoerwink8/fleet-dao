@@ -816,44 +816,56 @@ test('命令行 diff-local：拼车并发超了退出码 1、写明加起来多�
   }
 });
 
-/** 法国期望里「引擎临时关着」的那一项该有的样子：值只有 fleet-api，说明里写清原因、撤回条件、撤回做法、最迟复查日期。返回哪里不对（空 = 都对）。 */
-function franceEngineOffProblems(desired) {
+/**
+ * 法国期望里「引擎待命」的那一项该有的样子（创始人 2026-10-05：关闭＝进程开着但不接活）：值带 fleet-engine 和 fleet-api，
+ * 说明里写清待命是什么、探针的代价、上线要恢复哪几个定时任务，不再留「进程停着」的临时说法。返回哪里不对（空 = 都对）。
+ */
+function franceEngineStandbyProblems(desired) {
   const item = desired.files?.['release.env']?.FLEET_SERVICES;
   if (item === null || typeof item !== 'object') return ['FLEET_SERVICES 没写成带说明的对象'];
   const problems = [];
-  if (item.value !== 'fleet-api') problems.push(`值是「${item.value}」，不是 fleet-api`);
-  for (const word of ['临时', '原因', '撤回条件', '撤回做法', '最迟 2026-10-05']) {
+  if (item.value !== 'fleet-engine fleet-api')
+    problems.push(`值是「${item.value}」，不是 fleet-engine fleet-api`);
+  for (const word of ['待命', '路由探针', '2026-10-05', '--unpause', 'canary', 'route-probe']) {
     if (!String(item.说明 ?? '').includes(word)) problems.push(`说明里没写「${word}」`);
   }
+  if (String(item.说明 ?? '').includes('最迟 2026-10-05 复查'))
+    problems.push('说明里还留着「最迟复查」的临时说法');
   return problems;
 }
 
-test('法国期望里引擎是关着的（FLEET_SERVICES 只有 fleet-api），原因和撤回条件写全；本机档继续带引擎（创始人 2026-09-29，临时）', () => {
+test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、待命的代价和上线要恢复的定时任务写全；本机档同样带引擎，两边现在一样（创始人 2026-10-05 撤回「进程停着」）', () => {
   const france = JSON.parse(readFileSync(FRANCE_DESIRED_FILE, 'utf8'));
   const local = JSON.parse(readFileSync(LOCAL_DESIRED_FILE, 'utf8'));
-  // 撤回这次临时关闭时（改回带 fleet-engine 的值），连这条一起改：让「撤回」是一次看得见的改动，不是悄悄改回去
-  assert.deepEqual(franceEngineOffProblems(france), []);
+  assert.deepEqual(franceEngineStandbyProblems(france), []);
   assert.equal(
     local.files['release.env'].FLEET_SERVICES.value,
-    'fleet-engine fleet-api',
-    '本机演练环境继续带引擎',
+    france.files['release.env'].FLEET_SERVICES.value,
+    '两边的引擎都开着，值一样',
   );
-  assert.match(local.files['release.env'].FLEET_SERVICES.说明, /登记的差别/);
+  assert.doesNotMatch(
+    local.files['release.env'].FLEET_SERVICES.说明,
+    /^登记的差别/,
+    '两边一样了，本机档这一项不再是「登记的差别」',
+  );
 
-  // 故意造出失败：改回旧值、抹掉说明，这个检查都要红（不是摆设）
-  const reverted = structuredClone(france);
-  reverted.files['release.env'].FLEET_SERVICES.value = 'fleet-engine fleet-api';
-  assert.deepEqual(franceEngineOffProblems(reverted), ['值是「fleet-engine fleet-api」，不是 fleet-api']);
+  // 故意造出失败：改回「进程停着」的旧值、抹掉说明、留着旧的临时说法，这个检查都要红（不是摆设）
+  const stopped = structuredClone(france);
+  stopped.files['release.env'].FLEET_SERVICES.value = 'fleet-api';
+  assert.deepEqual(franceEngineStandbyProblems(stopped), ['值是「fleet-api」，不是 fleet-engine fleet-api']);
   const bare = structuredClone(france);
-  bare.files['release.env'].FLEET_SERVICES = 'fleet-api';
-  assert.deepEqual(franceEngineOffProblems(bare), ['FLEET_SERVICES 没写成带说明的对象']);
+  bare.files['release.env'].FLEET_SERVICES = 'fleet-engine fleet-api';
+  assert.deepEqual(franceEngineStandbyProblems(bare), ['FLEET_SERVICES 没写成带说明的对象']);
   const noNote = structuredClone(france);
-  noNote.files['release.env'].FLEET_SERVICES.说明 = '临时关了';
+  noNote.files['release.env'].FLEET_SERVICES.说明 = '开着';
   assert.equal(
-    franceEngineOffProblems(noNote).length,
-    4,
-    '说明只写了「临时」：原因、撤回条件、撤回做法、复查日期都缺',
+    franceEngineStandbyProblems(noNote).length,
+    6,
+    '说明只写了「开着」：待命、探针代价、日期、unpause、两个定时任务名都缺',
   );
+  const oldNote = structuredClone(france);
+  oldNote.files['release.env'].FLEET_SERVICES.说明 += '最迟 2026-10-05 复查，没撤回要写明为什么续。';
+  assert.deepEqual(franceEngineStandbyProblems(oldNote), ['说明里还留着「最迟复查」的临时说法']);
 });
 
 test('命令行 diff-local：不给路径就用仓里两份真文件，退出码分得清一致、不一致、没查成', async () => {
