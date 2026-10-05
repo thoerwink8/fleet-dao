@@ -114,6 +114,24 @@ describe('打印和退出码（drillReport、runDrill）', () => {
     ]);
   });
 
+  it('跳过（巡检仓的「让 AI 接活」关着，#1050）：写明没开单、什么都没验、怎么打开再演练；退出码 2，不拿 0 冒充通过', () => {
+    const report = drillReport({
+      ...PASS,
+      verdict: 'skipped',
+      stage: 'open',
+      issueNumber: null,
+      why: '跳过：巡检仓的「让 AI 接活」关着',
+      endedAt: '2026-10-03T18:26:01.000Z',
+      steps: [],
+    });
+    expect(report.exitCode).toBe(2);
+    expect(report.lines).toEqual([
+      '全流程巡检第 7 轮：跳过（没开单，什么都没验）',
+      '为什么：跳过：巡检仓的「让 AI 接活」关着',
+      '要演练：先把巡检仓的「让 AI 接活」打开（fleet-api dispatch <owner>/<巡检仓> on），再 pnpm drill',
+    ]);
+  });
+
   it('换版本之前的引擎起的一轮（结局里没有每一步的时刻）：照实说读不到，不拿 0 顶；老步骤照样说人话，退出码照结论', () => {
     const report = drillReport({
       runId: 3,
