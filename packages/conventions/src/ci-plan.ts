@@ -120,18 +120,25 @@ const exact = (p: string) => (f: string) => f === p;
 const under = (p: string) => (f: string) => f.startsWith(p);
 
 /**
- * 哪些改动要跑驾驶舱 e2e（#930）：e2e 起的是 packages/api 的真入口、packages/db 的迁移和装载链、packages/web 的前端，
- * 两头对接的契约在 packages/shared；装什么依赖也会变（package.json、锁文件、workspace）；e2e job 自己写在 ci.yml 里。
- * 别的包（core、engine、github……）的改动即使 api 依赖它们也不开：它们各有自己的单测，e2e 不是用来替它们把关的，
- * 每多开一档就是多一个几分钟的 job 占并发槽（免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
+ * 哪些改动要跑驾驶舱 e2e（#930）。
+ *
+ * **2026-10-05 收窄**（创始人「现在全套 e2e 流程太长了，要 300+ 秒，我不认可每个 pr 都要这种流程」，
+ * 按五步法的「删」）：原来碰 `web`/`api`/`db`/`shared` **或**根配置（package.json、锁文件、workspace）
+ * 就开。实测这台 job 364 秒（全仓最长的一块，其余全在 90 秒内），而最近 40 个合并 PR 里碰 `web` 的只有
+ * 6 个、`api` 3 个、`db` 2 个、`shared` 2 个——**拿 17% 的场景罚了 100% 的 PR**。
+ *
+ * 现在只认真正会改变「用户在页面上看到或点到的东西」的那两个包：
+ * - `web`（前端本身）、`api`（它起的真入口、页面读的后端）；
+ * - `.github/workflows/ci.yml` 自己（改了 e2e 的定义就该跑一遍）。
+ * `db` 和 `shared` 不再单独触发：它们各有自己的单测和契约测试把关，e2e 不是替它们兜底的；
+ * 根配置（锁文件、package.json、workspace）同理——「装不装得上依赖」由别的 job 管。
+ * 全量回归有兜底：这些路径的改动由**每天一次的定时轮**在 main 上跑全套（ci.yml 的 schedule）。
+ *
+ * 别的包（core、engine、github……）一如既往不开：每多开一档就是多一个几分钟的 job 占并发槽
+ * （免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
  */
-export const E2E_PACKAGES: readonly string[] = ['web', 'api', 'db', 'shared'];
-export const E2E_FILES: readonly string[] = [
-  '.github/workflows/ci.yml',
-  'package.json',
-  'pnpm-lock.yaml',
-  'pnpm-workspace.yaml',
-];
+export const E2E_PACKAGES: readonly string[] = ['web', 'api'];
+export const E2E_FILES: readonly string[] = ['.github/workflows/ci.yml'];
 export function touchesE2e(f: string): boolean {
   if (E2E_FILES.includes(f)) return true;
   const pkg = /^packages\/([^/]+)\//.exec(f)?.[1];

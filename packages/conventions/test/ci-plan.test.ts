@@ -1291,7 +1291,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
   });
 });
 
-describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑，红了汇总就红', () => {
+describe('驾驶舱 e2e（#930，2026-10-05 收窄）：只在碰到 web、api 时跑，红了汇总就红', () => {
   const needs = (p: CiPlan, over: Record<string, unknown> = {}) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     lint: { result: 'success', outputs: {} },
@@ -1302,23 +1302,37 @@ describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑�
     ...over,
   });
 
-  it('web、api、db、shared、依赖文件、ci.yml 自己的改动：开；输出给下游 job 的开关是字符串 true', () => {
+  it('web、api、ci.yml 自己的改动：开；输出给下游 job 的开关是字符串 true', () => {
     for (const f of [
       'packages/web/src/routes/home.tsx',
       'packages/web/e2e/specs/01-login.e2e.ts',
       'packages/api/src/cockpit.ts',
       'packages/api/test/e2e/prepare.ts',
-      'packages/db/src/catalog.ts',
-      'packages/shared/src/web-api/index.ts',
-      'packages/shared/src/domain.ts',
-      'pnpm-lock.yaml',
-      'package.json',
       '.github/workflows/ci.yml',
     ]) {
       const p = pr(f);
       expect(p.e2e, f).toBe(true);
       expect(planOutputs(p).e2e, f).toBe('true');
     }
+  });
+
+  it('【故意造出的失败】孤立地改 db、shared、锁文件：不开（各有自己的单测把关，e2e 不是替它们兜底的）', () => {
+    for (const f of [
+      'packages/db/src/catalog.ts',
+      'packages/db/migrations/0034_session_org_state.sql',
+      'packages/shared/src/web-api/index.ts',
+      'packages/shared/src/domain.ts',
+      'pnpm-lock.yaml',
+      'package.json',
+      'pnpm-workspace.yaml',
+    ]) {
+      const p = pr(f);
+      expect(p.e2e, f).toBe(false);
+      expect(planOutputs(p).e2e, f).toBe('false');
+    }
+    // 但它们和 web/api 一起改时照旧开（有一个文件碰到就开）
+    expect(pr('packages/db/src/catalog.ts', 'packages/web/src/routes/home.tsx').e2e).toBe(true);
+    expect(pr('pnpm-lock.yaml', 'packages/api/src/cockpit.ts').e2e).toBe(true);
   });
 
   it('别的改动不开：文档、别的包、deploy/（升了全跑也不开）、别的工作流', () => {
@@ -1409,10 +1423,10 @@ describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑�
     expect(p).toMatchObject({ full: true, e2e: false });
     expect(ciVerdict(needs(p)).ok).toBe(true);
     expect(ciVerdict(needs(p, { e2e: { result: 'success' } })).ok).toBe(false);
-    // 全跑又碰了 e2e 认的路径（shared）：e2e 要跑
-    const withShared = assigned(pr('deploy/france.sh', 'packages/shared/src/domain.ts'));
-    expect(withShared).toMatchObject({ full: true, e2e: true });
-    expect(ciVerdict(needs(withShared, { e2e: { result: 'skipped' } })).ok).toBe(false);
+    // 全跑又碰了 e2e 认的路径（api）：e2e 要跑
+    const withApi = assigned(pr('deploy/france.sh', 'packages/api/src/cockpit.ts'));
+    expect(withApi).toMatchObject({ full: true, e2e: true });
+    expect(ciVerdict(needs(withApi, { e2e: { result: 'skipped' } })).ok).toBe(false);
   });
 
   it('ci.yml 的 e2e job：只按 changes 的 e2e 开关开、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
