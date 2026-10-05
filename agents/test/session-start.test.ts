@@ -1144,8 +1144,11 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
     const dir = fleetRepo();
     const f = fakeRun({
       stdout:
-        row(11, '【创始人引导·待处理】2026-10-05 17:50', '原话：第二意见太慢了，我建议优先gpt6luna，不行就grok') +
-        row(12, '【创始人引导·待处理】2026-10-05 17:05', '原话：都按照你推荐'),
+        row(
+          11,
+          '【创始人引导·待处理】2026-10-05 17:50',
+          '原话：第二意见太慢了，我建议优先gpt6luna，不行就grok',
+        ) + row(12, '【创始人引导·待处理】2026-10-05 17:05', '原话：都按照你推荐'),
     });
     const lines = check(dir, f.run);
     expect(lines).toHaveLength(1);

@@ -116,7 +116,12 @@ describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', 
   it('【故意造出的失败】把「进度当场记下来」整条删掉：查得出来', () => {
     const cut = AGENTS.replace(/- 进度当场记下来[^\n]*\n/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(PROGRESS_RULES, cut)).toEqual(['进度当场记下来', '给下一个AI看', '记在进度单', '放哪要写明']);
+    expect(missing(PROGRESS_RULES, cut)).toEqual([
+      '进度当场记下来',
+      '给下一个AI看',
+      '记在进度单',
+      '放哪要写明',
+    ]);
   });
 
   it('【故意造出的失败】无人值守那条只剩「做完再说」，落地节奏拿掉：查得出来', () => {

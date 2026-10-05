@@ -133,7 +133,9 @@ describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度�
         ...arch,
         'progress-2026-10-01.md': `${arch['progress-2026-10-01.md']}\n${hook.TEMP_HEADING}\n`,
       };
-      expect(problems(progress, twice).join('\n')).toMatch(/progress-2026-10-01\.md 里有「## 生效中的临时调整」/);
+      expect(problems(progress, twice).join('\n')).toMatch(
+        /progress-2026-10-01\.md 里有「## 生效中的临时调整」/,
+      );
       expect(hook.checkTemporary(repoWith(progress, twice), GIT, NOW).join('\n')).toMatch(/不止一张/);
 
       const inboxBack = `${progress.trimEnd()}\n\n${hook.DIRECTIVE_HEADING}\n\n- x\n`;

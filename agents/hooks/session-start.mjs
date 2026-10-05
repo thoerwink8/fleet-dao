@@ -672,7 +672,10 @@ export function checkProgressIssue({ cwd, git, run, mirror = null }) {
   if (items.length === 0) return [];
   const shown = items
     .slice(0, 5)
-    .map(([id, head, text]) => `${id}（${head.replace(/^【[^】]*】/, '')}）${brief(text.replace(/^原话：/, ''))}`);
+    .map(
+      ([id, head, text]) =>
+        `${id}（${head.replace(/^【[^】]*】/, '')}）${brief(text.replace(/^原话：/, ''))}`,
+    );
   return [
     `创始人引导还有 ${items.length} 条没处理（进度单 #1055）：${shown.join('；')}${items.length > 5 ? ' 等' : ''}。先接着办，办完 pnpm progress:done <评论号>；全文 pnpm progress:read。`,
   ];
