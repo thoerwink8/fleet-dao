@@ -16,8 +16,6 @@ export const REQUIRED = [
 const EXTRA_LABELS = {
   realtime: '实时推送',
   github_events: 'GitHub 事件',
-  draft_opener: '飞书草稿开单',
-  draft_backlog: '待开单积压',
   judge: '判断题',
   deploy_lag: '跟上主线',
   feishu_gateway: '飞书网关',

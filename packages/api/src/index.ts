@@ -7,7 +7,7 @@ export {
   signAgentToken,
   verifyAgentToken,
 } from './agent-token.ts';
-export { type Apps, type BuildOptions, buildApps } from './app.ts';
+export { type Apps, buildApps } from './app.ts';
 export {
   type ChangeHub,
   createChangeHub,
@@ -21,27 +21,11 @@ export { type Config, ConfigError, loadConfig } from './config.ts';
 export { probeDb } from './db-probe.ts';
 export { deployLagCheck } from './deploy-lag-check.ts';
 export type { Deps } from './deps.ts';
-export {
-  createDraftOpenRunner,
-  DRAFT_BACKLOG_ALERT_MS,
-  DRAFT_OPEN_CALL_LIMIT_MS,
-  DRAFT_OPEN_CONFIRM_WAIT_MS,
-  type DraftOpenLimits,
-  type DraftOpenOutcome,
-  type DraftOpenRunner,
-  draftBacklogCheck,
-  notWiredDraftOpener,
-} from './draft-opening.ts';
 export { createFeishuAuth, FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
-export { feishuRoutes } from './feishu-routes.ts';
 export { githubAppMissing, githubEventsCheck, verifyGithubSignature } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export {
   type ChangeFeed,
-  type DraftOpener,
-  DraftOpenerUnavailableError,
-  type DraftOpenRequest,
-  type DraftOpenResult,
   type FeedEvent,
   type FeishuAuth,
   type FeishuIdentity,
