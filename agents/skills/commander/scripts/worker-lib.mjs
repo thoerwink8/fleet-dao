@@ -85,7 +85,10 @@ export function claudeModelProblem(modelId) {
 export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.com'];
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
-  start --model grok|codex|kimi|claude --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
+  start --model grok|codex|kimi|claude --name <短名> --brief <文件> (--issue <单号> [--refs] | --no-issue "<理由>")
+        [--repo <主检出路径>] [--model-id <型号>]
+        [--issue：这个活挂哪张单，收尾交代里写死「需求」栏 Closes #号；母单的分片加 --refs 写 Refs；
+        --no-issue：确实没有单，理由原样进 PR 需求栏；两个必须给一个，缺了不起（--no-ship 冒烟除外）]
         [--model-id：claude 默认 sonnet，要 Opus 给 opus；Fable 一律拒起]
         [--effort low|medium|high|xhigh，这一次用的；不给照 ~/${ROUTING_DEFAULT_REL.replaceAll('\\', '/')} 给这个模型配的，
         没配是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
@@ -153,6 +156,35 @@ function nameOf(p) {
   if (!NAME_RE.test(v))
     throw new UsageError(`短名「${v}」不行：64 字以内，字母或数字开头，只许字母、数字、点、横线、下划线`);
   return v;
+}
+
+/**
+ * 这个活挂哪张单（#1052：2026-10-05 起 37 个 PR 没一个挂单）：--issue <号>（母单的分片再加 --refs，PR 写 Refs 不写 Closes）
+ * 或 --no-issue "<理由>" 二选一，缺了拒起。--no-ship 的冒烟测试不开 PR，不要求。
+ * 返回 { number, refs } | { reason } | undefined（冒烟且没给）。
+ */
+function issueOf(p, noShip) {
+  const raw = p.options.get('issue');
+  const reason = p.options.get('no-issue');
+  const refs = p.flags.has('refs');
+  if (raw !== undefined && reason !== undefined) throw new UsageError('--issue 和 --no-issue 只能给一个');
+  if (refs && raw === undefined)
+    throw new UsageError('--refs 要和 --issue <号> 一起给（母单的分片 PR 写 Refs 不写 Closes）');
+  if (raw !== undefined) {
+    if (!/^#?[1-9]\d*$/.test(raw))
+      throw new UsageError(`--issue 要给单号（正整数，如 1052），拿到的是「${raw}」`);
+    return { number: Number(raw.replace('#', '')), refs };
+  }
+  if (reason !== undefined) {
+    if (!reason.trim())
+      throw new UsageError('--no-issue 后面要写为什么不挂单（一句话，会原样写进 PR 的「需求」栏）');
+    return { reason: reason.trim() };
+  }
+  if (noShip) return undefined;
+  throw new UsageError(
+    '要带 --issue <单号>（这个活挂哪张单；母单的分片再加 --refs）或 --no-issue "<为什么不挂单>"：' +
+      '不挂单的 PR 在里程碑页上看不出进展（#1052）。缺了不起。',
+  );
 }
 
 function modelOf(p) {
@@ -369,7 +401,7 @@ export function mergeNoProxy(env) {
  * 不能让模型自己挂自动合并把改标准的 PR 合了。跟 noShip 不冲突但没意义一起用（noShip 压根不开 PR），noShip
  * 为真时这条不看。
  */
-export function closingBrief({ branch, noShip, noAutomerge, githubRoute = { via: 'direct' } }) {
+export function closingBrief({ branch, noShip, noAutomerge, issue, githubRoute = { via: 'direct' } }) {
   if (noShip) {
     return [
       '—— 收尾交代 ——',
@@ -377,21 +409,31 @@ export function closingBrief({ branch, noShip, noAutomerge, githubRoute = { via:
       '做完上面的事，最后单独一行只输出：完成',
     ].join('\n');
   }
-  const open = 'pnpm pr:open --title "<标题>" --body-file _tmp/pr-body.md';
+  // 挂单（#1052）：派活时 start 就要给 --issue <号>（母单的分片再加 --refs）或 --no-issue "<理由>"，交代里照给的写死，
+  // 工人不用自己判。pr:open 读不到需求栏的单号、又没带 --no-issue 就拒开，这里只是把话说在前头。
+  const link = issue?.number
+    ? issue.refs
+      ? `「**需求**」栏写 \`Refs #${issue.number}\`（母单的分片，关不了它）`
+      : `「**需求**」栏另起一行写 \`Closes #${issue.number}\`（合并时关单）`
+    : `「**需求**」栏不写单号，开 PR 时加 \`--no-issue ${JSON.stringify(issue?.reason ?? '')}\`（理由会原样写进需求栏）`;
+  const open = `pnpm pr:open --title "<标题>" --body-file _tmp/pr-body.md${issue?.number ? '' : ` --no-issue ${JSON.stringify(issue?.reason ?? '')}`}`;
+  const first = issue?.number
+    ? `1. 照仓根 AGENTS.md 做。这个活挂在单 #${issue.number} 上（已经开好，不要另开）：不另写需求/结果文档、不认领（#446）。`
+    : '1. 照仓根 AGENTS.md 做。这个活确认没有单：不另写需求/结果文档、不认领（#446）。';
   const prSteps = noAutomerge
     ? [
-        `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md，「还欠什么」写「人闸：改标准」；跑 ${open} --no-automerge`,
+        `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md（${link}），「还欠什么」写「人闸：改标准」；跑 ${open} --no-automerge`,
         '   开 PR。不要挂自动合并、不要跑 gh pr merge：创始人同意之前不能合。',
         '5. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不等合并、不等创始人回话。',
       ]
     : [
-        `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md，跑 ${open}：它开 PR、当场挂自动合并；`,
-        '   它说「人闸：改标准」就照第 6 条停手。',
+        `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md（${link}），跑 ${open}：它开 PR、当场挂自动合并、`,
+        '   顺手把 PR 挂上那张单的里程碑；它说「人闸：改标准」就照第 6 条停手。',
         '5. 不盯 CI、不 --watch：自动合并已挂，只看一眼 gh pr checks <PR 号>；红了才改，最多 3 轮，没红就收尾。',
       ];
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
-    '1. 照仓根 AGENTS.md 做。这是本机快马：不开单、不另写需求/结果文档、不认领（#446）。',
+    first,
     '2. 改完跑 pnpm test:changed 要过（退出码 3 时照它打印的命令单跑对应包，不在这台机器上跑全量 pnpm test 或 pnpm check）；',
     '   格式和类型检查推前钩子会跑。提交信息一句话说清改了什么、为什么。',
     `3. git push -u origin ${branch}`,
@@ -620,6 +662,7 @@ async function cmdStart(p, io) {
   const explicitEffort = explicitEffortOf(p);
   const noShip = p.flags.has('no-ship');
   const noAutomerge = p.flags.has('no-automerge');
+  const issue = issueOf(p, noShip);
 
   if (model === 'kimi') return fail(io, KIMI_UNSUPPORTED);
   if (model === 'claude') {
@@ -695,7 +738,7 @@ async function cmdStart(p, io) {
   const errLog = join(dir, 'err.log');
   writeFileSync(
     promptFile,
-    `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip, noAutomerge, githubRoute })}\n`,
+    `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip, noAutomerge, issue, githubRoute })}\n`,
   );
 
   const launch = launchOf(model, { promptFile, worktreeDir, modelId, effort });
@@ -1210,8 +1253,8 @@ export async function runWorker(argv, io) {
       return await cmdStart(
         parseArgs(
           rest,
-          ['model', 'name', 'brief', 'repo', 'model-id', 'effort'],
-          ['no-ship', 'no-automerge'],
+          ['model', 'name', 'brief', 'repo', 'model-id', 'effort', 'issue', 'no-issue'],
+          ['no-ship', 'no-automerge', 'refs'],
         ),
         io,
       );

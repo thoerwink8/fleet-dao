@@ -16,6 +16,8 @@ import {
   LegacyAsksResponse,
   type LegacyRead,
   MeResponse,
+  NodeDetailResponseSchema,
+  NodesResponseSchema,
   NotificationsQuery,
   NotificationsResponse,
   POOL_HOLDS_SETTING,
@@ -51,9 +53,11 @@ import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reco
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
+import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY, closeLegacyAsk } from './legacy-asks.ts';
+import { readNodeDetail, readNodes } from './node-views.ts';
 import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
   type Actor,
@@ -173,6 +177,16 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   app.get(WebRoutes.env.path, async (c) =>
     reply(c, EnvResponseSchema, await readEnvSnapshot(snapshotDeps())),
+  );
+
+  // 看板多机：本台加每个远程环境（登录门后面；推快照的写口在 node-report.ts，那边只认专用通行证）。
+  app.get(WebRoutes.nodes.path, async (c) => {
+    const engine = await engineProbe();
+    return reply(c, NodesResponseSchema, await readNodes(deps, engine));
+  });
+
+  app.get(WebRoutes.node.path, async (c) =>
+    reply(c, NodeDetailResponseSchema, await readNodeDetail(deps, c.req.param('nodeId'))),
   );
 
   app.get(WebRoutes.board.path, async (c) => {
@@ -599,6 +613,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDemoRoutes(app, deps, actorOf);
+  registerDispatchRoutes(app, deps, actorOf);
   registerReleaseRoutes(app, deps);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */

@@ -19,9 +19,11 @@ import {
   UpdateDemoDefaultRequest,
   UpdateDemoDefaultResponse,
 } from './demo.ts';
+import { RepoDispatchResponse, UpdateRepoDispatchRequest, UpdateRepoDispatchResponse } from './dispatch.ts';
 import { EnvResponseSchema } from './env.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
+import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
 import {
   AuditQuery,
   AuditResponse,
@@ -67,6 +69,19 @@ export const WebRoutes = {
   home: { method: 'GET', path: '/home', response: HomeResponseSchema },
   /** 环境页（#820 片 1）：这一台环境现在怎样，每一项各自带「查成了 / 没查成 + 原因」。只读、不跨环境。 */
   env: { method: 'GET', path: '/env', response: EnvResponseSchema },
+  /** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
+  repoDispatch: { method: 'GET', path: '/repos/dispatch', response: RepoDispatchResponse },
+  /** 开、关一个项目的「让 AI 接活」（和命令行 fleet-api dispatch 同一个写入口，记操作记录）；没有这个项目 404。 */
+  updateRepoDispatch: {
+    method: 'PUT',
+    path: '/repos/:repoId/dispatch',
+    request: UpdateRepoDispatchRequest,
+    response: UpdateRepoDispatchResponse,
+  },
+  /** 看板多机：本台加每个远程环境（本机 WSL 等）的新鲜度。收快照的写口（NODE_REPORT_PATH）不在这里：只有别的环境的后端调。 */
+  nodes: { method: 'GET', path: '/nodes', response: NodesResponseSchema },
+  /** 一个远程环境最近一次推来的主页、环境页快照（只读展示用）；没推过 404。 */
+  node: { method: 'GET', path: '/nodes/:nodeId', response: NodeDetailResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
   taskAction: {

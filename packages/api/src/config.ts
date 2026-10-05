@@ -1,8 +1,9 @@
 // 从环境变量读配置（机器本地配置，例如 systemd 的 EnvironmentFile）。密钥、地址只从这里来，不进仓；
 // 缺了或不合规就拒绝启动，并一次列出全部问题。
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { QUOTA_STALE_AFTER_MS } from '@fleet-dao/db';
+import { NodeIdSchema } from '@fleet-dao/shared';
 
 export type FleetEnv = 'production' | 'development' | 'test';
 
@@ -76,6 +77,12 @@ export interface Config {
    * FLEET_NODE_REPORT_TOKEN（那边发的通行证）两项一起配才推，都没配是 null（不推，/healthz 的 node_report 报「未接」）。
    */
   nodeReport: { url: URL; token: string } | null;
+  /**
+   * 收别的环境推来的快照要认的通行证（FLEET_NODE_KEYS，node-report.ts）：环境编号 → 通行证明文的 sha256（64 位十六进制）。
+   * 环境文件里只放哈希、不放明文（明文只在 `fleet-api node-key new` 打印那一次、和推送方的 FLEET_NODE_REPORT_TOKEN 里）。
+   * 没配是 {}——这一台不收快照（写口回 503，不回 401 冒充「通行证不对」）。
+   */
+  nodeKeys: Readonly<Record<string, string>>;
 }
 
 export class ConfigError extends Error {
@@ -219,6 +226,11 @@ export function loadConfig(env: Env): Config {
     [sessionSecret, agentTokenSecret, gatewayTokenEnv],
     problems,
   );
+  const nodeKeys = nodeKeysFrom(
+    env,
+    [sessionSecret, agentTokenSecret, gatewayTokenEnv, nodeReport?.token ?? null],
+    problems,
+  );
 
   if (
     problems.length > 0 ||
@@ -253,6 +265,7 @@ export function loadConfig(env: Env): Config {
     feishuOff,
     machineName: machineName(env),
     nodeReport,
+    nodeKeys,
   };
 }
 
@@ -295,6 +308,62 @@ function nodeReportTarget(
   }
   if (otherSecrets.includes(token)) problems.push('FLEET_NODE_REPORT_TOKEN 不能和别的密钥相同');
   return problems.length > before ? null : { url, token };
+}
+
+/**
+ * 收快照的通行证表（FLEET_NODE_KEYS，形如 {"local":"<sha256 十六进制>"}）：不写、空着 = 不收（{}）。写了就必须是 JSON 对象，
+ * 键是合法的环境编号，值是 64 位小写十六进制（填成明文、写短了都拒启动）；两个环境不许共用一把；哪一把的明文
+ * 和别的密钥（会话、fleet 令牌、网关通行证、本台往外推的通行证）相同也拒——一把钥匙只管一件事。报错只写环境编号，不印哈希。
+ */
+function nodeKeysFrom(
+  env: Env,
+  otherSecrets: readonly (string | null)[],
+  problems: string[],
+): Readonly<Record<string, string>> {
+  const raw = env.FLEET_NODE_KEYS?.trim();
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    problems.push('FLEET_NODE_KEYS 不是合法的 JSON（要写成 {"<环境编号>":"<通行证的 sha256>"}）');
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    problems.push('FLEET_NODE_KEYS 要是一个 JSON 对象：{"<环境编号>":"<通行证的 sha256>"}');
+    return {};
+  }
+  const otherHashes = new Set(
+    otherSecrets.flatMap((s) => (s === null ? [] : [createHash('sha256').update(s).digest('hex')])),
+  );
+  const keys: Record<string, string> = {};
+  const owner = new Map<string, string>();
+  for (const [id, hash] of Object.entries(parsed)) {
+    if (!NodeIdSchema.safeParse(id).success) {
+      problems.push(
+        `FLEET_NODE_KEYS 里的环境编号 ${JSON.stringify(id)} 不合法（小写字母开头，只许小写字母、数字、短横线，最长 40）`,
+      );
+      continue;
+    }
+    if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) {
+      problems.push(
+        `FLEET_NODE_KEYS 里 ${id} 的值要是通行证的 sha256（64 位小写十六进制，用 fleet-api node-key new 生成），不能填明文`,
+      );
+      continue;
+    }
+    if (otherHashes.has(hash)) {
+      problems.push(`FLEET_NODE_KEYS 里 ${id} 的通行证不能和别的密钥相同`);
+      continue;
+    }
+    const taken = owner.get(hash);
+    if (taken !== undefined) {
+      problems.push(`FLEET_NODE_KEYS 里 ${id} 和 ${taken} 用了同一把通行证：每个环境各发各的`);
+      continue;
+    }
+    owner.set(hash, id);
+    keys[id] = hash;
+  }
+  return keys;
 }
 
 /**

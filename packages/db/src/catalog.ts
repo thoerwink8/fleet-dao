@@ -76,7 +76,7 @@ export const CatalogSchema = z.strictObject({
     )
     .min(1),
   /**
-   * 旧的按阶段平铺路由顺序（stage_policies / stage_policy_routes）已经没人读（#754）：这份配置里不再有它。
+   * 旧的按阶段平铺路由顺序（stage_policies / stage_policy_routes，表已删，迁移 0037）早就没人读（#754）：这份配置里不再有它。
    * 留着这一项只为让 strictObject 放行到 parseCatalog 里，由那里认出来、报一句说清删哪一段（照 stages 单报一句，
    * 不然只会得到一句「认不出的字段：stages」，看不出为什么、该改什么）。
    */

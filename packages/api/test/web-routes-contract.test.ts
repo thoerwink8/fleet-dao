@@ -32,8 +32,9 @@ describe('契约 ↔ 后端注册的路由', () => {
 
   it('后端 /api、/auth 下注册的每一条，契约里都有（飞书、意图这类另有约定的前缀除外）', () => {
     const inContract = new Set(contract().map(key));
-    // 飞书网关、意图卡走各自的模块和约定（feishu-routes.ts、intent-routes.ts），不属于驾驶舱前端的契约
-    const own = (p: string) => !/^\/api\/(feishu|intents?|drafts?)(\/|$)/.test(p);
+    // 飞书网关、意图卡走各自的模块和约定（feishu-routes.ts、intent-routes.ts），不属于驾驶舱前端的契约；
+    // 别的环境推快照的写口（POST /api/nodes/report，node-report.ts）只认专用通行证、浏览器不调，也不在 WebRoutes 里
+    const own = (p: string) => !/^\/api\/(feishu|intents?|drafts?|nodes\/report)(\/|$)/.test(p);
     const extra = registered
       .filter(
         (r) =>

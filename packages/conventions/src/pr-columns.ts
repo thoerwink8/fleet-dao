@@ -2,6 +2,7 @@
 // 标题）给 PR 镜像挂单、每天的关单对账用；认法只有一处。
 // 改这里之前必须知道：模板只有四栏（#654），但读 PR 正文时旧模板的栏名（LEGACY_COLUMNS）照样认——合并了的旧 PR 正文里还有
 // 它们，不认的话「修提醒」「需求」这些栏的值会把后面紧跟着的旧栏一起吞进去。
+import { closingIssues } from './closing-issues.ts';
 
 /** 正文里写对应 issue 的那一栏。 */
 export const ISSUE_COLUMN = '需求';
@@ -35,31 +36,79 @@ const stripComments = (text: string) => text.replace(/<!--[\s\S]*?-->/g, (m) => 
  */
 export function prColumns(body: string): Map<string, string> {
   const cols = new Map<string, string>();
-  let current: string | undefined;
+  for (const s of columnSpans(body)) if (!cols.has(s.name)) cols.set(s.name, s.value);
+  return cols;
+}
+
+interface ColumnSpan {
+  name: string;
+  value: string;
+  /** 这一栏占的行：从栏名那行起，到下一栏（或小标题、正文结尾）前一行止（行号从 0 数，end 不含）。 */
+  start: number;
+  end: number;
+}
+
+/** prColumns 和 withIssueColumn 共用的切法：栏的先后、同名的都照出现的顺序全列出来。 */
+function columnSpans(body: string): ColumnSpan[] {
+  const spans: ColumnSpan[] = [];
+  let current: { name: string; start: number } | undefined;
   let buf: string[] = [];
-  const flush = () => {
-    if (current !== undefined && !cols.has(current)) cols.set(current, buf.join('\n').trim());
+  const flush = (end: number) => {
+    if (current) spans.push({ ...current, value: buf.join('\n').trim(), end });
   };
-  for (const line of stripComments(body.replace(/\r\n?/g, '\n')).split('\n')) {
+  const lines = stripComments(body.replace(/\r\n?/g, '\n')).split('\n');
+  lines.forEach((line, i) => {
     if (HEADING.test(line)) {
-      flush();
+      flush(i);
       current = undefined;
       buf = [];
-      continue;
+      return;
     }
     const bold = BOLD_COLUMN.exec(line);
     const plain = bold ? null : PLAIN_COLUMN.exec(line);
     const m = bold ?? (plain?.[1] && KNOWN.has(plain[1].toLowerCase()) ? plain : null);
     if (m?.[1] !== undefined) {
-      flush();
-      current = m[1].trim().toLowerCase();
+      flush(i);
+      current = { name: m[1].trim().toLowerCase(), start: i };
       buf = [m[2] ?? ''];
     } else if (current !== undefined) {
       buf.push(line);
     }
-  }
-  flush();
-  return cols;
+  });
+  flush(lines.length);
+  return spans;
+}
+
+/**
+ * 把「需求」栏整栏换成「**需求**：<value>」（没有这一栏就加在正文末尾）。`pnpm pr:open --no-issue "<理由>"` 把理由
+ * 原样写进需求栏用；栏里原来的字（含模板提示）都被换掉，别的栏不动。
+ */
+export function withIssueColumn(body: string, value: string): string {
+  const line = `**${ISSUE_COLUMN}**：${value}`;
+  const text = body.replace(/\r\n?/g, '\n');
+  const span = columnSpans(text).find((s) => s.name === ISSUE_COLUMN.toLowerCase());
+  if (!span) return `${text.trimEnd()}\n\n${line}\n`;
+  const lines = text.split('\n');
+  let end = span.end;
+  while (end > span.start + 1 && !lines[end - 1]?.trim()) end--; // 栏后面隔开下一栏的空行留着
+  lines.splice(span.start, end - span.start, line);
+  return lines.join('\n');
+}
+
+/** 不是任何真仓的名字：拿它当 closingIssues 的 repo，写明是别的仓的（owner/仓#号）都被挡掉，只剩没写仓名的。 */
+const THIS_REPO = '(本仓)';
+/** 「Refs #12」「refs: #12」：只挂不关的写法（母单分片）；owner/仓#号 不算（# 前面只许空白）。 */
+const REFS = /(?<![\w/])refs?(?:\s*:\s*|\s+)#(\d+)\b/gi;
+
+/**
+ * 「需求」栏里写明挂的单（同仓的，从小到大）：closes 是 GitHub 合并时会关的（认法同 closing-issues.ts，Closes/Fixes/Resolves），
+ * refs 是只挂不关的（Refs #号）。栏里只写「#12」、「无」、只留着模板提示都读不到：开 PR 那一步（pr-open.ts）据此拒开。
+ */
+export function issueColumnRefs(body: string): { closes: number[]; refs: number[] } {
+  const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase()) ?? '';
+  const refs = new Set<number>();
+  for (const m of col.matchAll(REFS)) refs.add(Number(m[1]));
+  return { closes: closingIssues(col, THIS_REPO), refs: [...refs].sort((a, b) => a - b) };
 }
 
 /**

@@ -63,6 +63,11 @@
       "why": "Cookie、飞书登录暂存、fleet 令牌共用的签名"
     },
     {
+      "path": "packages/api/src/node-report.ts",
+      "kind": "碰安全",
+      "why": "对公网开的写口（别的环境推快照，看板多机）：只认专用通行证、挂在登录门之前；放松一处，公网上陌生人就能往库里写东西"
+    },
+    {
       "path": "packages/api/src/agent-token.ts",
       "kind": "碰安全",
       "why": "fleet 令牌的签发和校验"

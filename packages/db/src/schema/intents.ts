@@ -3,8 +3,8 @@
 // 改这里之前必须知道：
 // - 原话原样：intent_messages.text 不截断、不改字；改过的旧版本进 edits，不覆盖；撤回只标 recalled_at，行不删。
 // - AI 归纳只由指挥官在开单时写回（summary_*），永远不进原话；没有法国的归纳会话，所以没有归纳的状态、重试那几列。
-// - 旧的四张飞书表（feishu.ts）连历史一起删（创始人 10-04 拍），删表另走只放迁移的 PR，这里不碰。
-// - 取值表不用 pg 枚举，用文字加检查约束（和 feishu.ts 同一个理由）；值表和约定里的枚举逐一对齐（valuesOf）。
+// - 旧的四张飞书表连历史一起删了（创始人 10-04 拍，迁移 0037）。
+// - 取值表不用 pg 枚举，用文字加检查约束（卡片种类以后还会加，删改检查约束比删枚举值容易）；值表和约定里的枚举逐一对齐（valuesOf）。
 import type { IntentChatKindSchema, IntentMessageSourceSchema, IntentStatusSchema } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {

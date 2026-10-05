@@ -1,7 +1,14 @@
 // PR 正文的栏（pr-columns.ts）：PR 挂了哪张单、「修提醒」写了什么，都从这认。#654 起模板只有四栏，旧栏名还认（读旧 PR 的正文）。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { linkedIssue, OPTIONAL_COLUMNS, PR_COLUMNS, prColumns } from '../src/pr-columns.ts';
+import {
+  issueColumnRefs,
+  linkedIssue,
+  OPTIONAL_COLUMNS,
+  PR_COLUMNS,
+  prColumns,
+  withIssueColumn,
+} from '../src/pr-columns.ts';
 
 const TEMPLATE = readFileSync(new URL('../../../.github/pull_request_template.md', import.meta.url), 'utf8');
 
@@ -76,5 +83,44 @@ describe('PR 挂了哪张单', () => {
   it('【故意造出的失败】「需求」栏只留着模板提示、写「无」：认不出号，不瞎编', () => {
     expect(linkedIssue('**需求**：<!-- 单号 -->', '')).toBeUndefined();
     expect(linkedIssue('**需求**：无', '')).toBeUndefined();
+  });
+});
+
+describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () => {
+  it('Closes / Refs 都读得到，只写「#12」、「无」、模板提示、别的仓的单都读不到', () => {
+    expect(issueColumnRefs('**需求**：Closes #12')).toEqual({ closes: [12], refs: [] });
+    expect(issueColumnRefs('**需求**：\nCloses #12\nRefs #7')).toEqual({ closes: [12], refs: [7] });
+    expect(issueColumnRefs('**需求**：refs: #7')).toEqual({ closes: [], refs: [7] });
+    for (const body of [
+      '**需求**：#12',
+      '**需求**：无',
+      '**需求**：',
+      '**需求**：Closes acme/w#9',
+      '**做了什么**：Closes #12', // 不在需求栏里不算
+      '**需求**：<!-- Closes #号 或 Refs #号 -->',
+    ])
+      expect(issueColumnRefs(body), body).toEqual({ closes: [], refs: [] });
+  });
+
+  it('照模板开、没填：读不到', () => {
+    expect(issueColumnRefs(TEMPLATE)).toEqual({ closes: [], refs: [] });
+  });
+
+  it('模板的说明里讲清了必须挂单、没单怎么写（#1052）：不再是「没有写无」', () => {
+    expect(TEMPLATE).toContain('--no-issue');
+    expect(TEMPLATE).toContain('Refs #号');
+    expect(TEMPLATE).not.toContain('单号，如 #12；没有写「无」');
+  });
+
+  it('withIssueColumn：整栏换掉（含模板提示），别的栏不动；没有这一栏就加在末尾', () => {
+    const body = '**做了什么**：x\n\n**需求**：<!-- 提示 -->\n\n**还欠什么**：无\n';
+    const out = withIssueColumn(body, '无：一行文字修正');
+    expect(prColumns(out).get('需求')).toBe('无：一行文字修正');
+    expect(prColumns(out).get('做了什么')).toBe('x');
+    expect(prColumns(out).get('还欠什么')).toBe('无');
+    expect(out).not.toContain('提示');
+    const added = withIssueColumn('**做了什么**：x', '无：理由');
+    expect(prColumns(added).get('需求')).toBe('无：理由');
+    expect(prColumns(added).get('做了什么')).toBe('x');
   });
 });
