@@ -11,6 +11,7 @@
 // - 只管这个工人进程里起的：一次性会话不脱开引擎跑，上一轮工人留下的 runs 行起来时已经收掉了（sessions.ts 的 reapOrphanSessions）。
 
 import { type EngineDrain, stoppingNote } from '../drain.ts';
+import { type EngineMasterGate, masterOffNote } from '../engine-master.ts';
 import type { OrgSwitchSessions } from './org-switch.ts';
 
 /** 一段的登记：拿着它跑完这一段，收场时 leave。 */
@@ -48,11 +49,16 @@ export interface OneShotSessionsOptions {
    * 生产装配在 real/index.ts 里必须给，#957：不给就会提前放行、把正在动手的单打断）。
    */
   drain?: EngineDrain;
+  /**
+   * 引擎总开关（engine-master.ts，#1086）：关着，这一段登记时信号一开始就是响的、不起会话（和排空同一种拒法，选路那一步
+   * 本来就先挡了；这里是第二道：选路过了、登记前开关才关的那一小段）。不给 = 不闸（只有测试里可以不给，生产装配必须给）。
+   */
+  master?: EngineMasterGate;
   now?: () => Date;
 }
 
 export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSessions {
-  const { drain } = options;
+  const { drain, master } = options;
   const now = options.now ?? (() => new Date());
   const entries = new Map<number, Entry>();
   let seq = 0;
@@ -78,6 +84,9 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
       // runOneShot 当场回 org_switch（一行 runs 记账、没起进程），工作流回去选路、选路回「过一会儿再选」，新引擎起来再派
       const stopping = drain?.stopping();
       if (stopping) entry.ac.abort(new Error(`${stoppingNote(stopping)}；这一段没起会话`));
+      // 引擎总开关关着（#1086）：同一种拒法，这一段不起会话
+      else if (master && !master.isOn())
+        entry.ac.abort(new Error(`${masterOffNote(master.state())}；这一段没起会话`));
       track(idOf(key, entry), entry);
       return {
         signal: entry.ac.signal,

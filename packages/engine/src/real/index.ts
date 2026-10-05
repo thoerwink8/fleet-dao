@@ -14,7 +14,14 @@ import {
   type SessionUser,
   switchSessionOrg,
 } from '@fleet-dao/adapters';
-import { createDb, type Db, scheduleHealth } from '@fleet-dao/db';
+import {
+  createDb,
+  type Db,
+  finishScheduleRun,
+  readEngineMasterRow,
+  scheduleHealth,
+  startScheduleRun,
+} from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
@@ -22,6 +29,7 @@ import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
+import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
@@ -92,6 +100,8 @@ export interface RealPortsDeps {
    * 三段会话登记进排空清单的是 oneShotSessions（下面 realPortsFromEnv），不在这里。
    */
   drain?: EngineDrain;
+  /** 引擎总开关（engine-master.ts，#1086）：关着选路不派（回「过一会儿再选」）。不给就不闸（测试、只起一次的工具）。 */
+  master?: EngineMasterGate;
   /**
    * 拼车并发登记的现核（real/carpool-cap.ts，#896）：选路前问，核对不上不往拼车池派。必填：不给就是拼车池不受登记核对管，
    * 漏接要过不了类型检查，不靠默认。
@@ -115,6 +125,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     sessionOrg: deps.sessionOrg,
     carpoolRegistry: deps.carpoolRegistry,
     ...(deps.drain ? { drain: deps.drain } : {}),
+    ...(deps.master ? { master: deps.master } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.log ? { log: deps.log } : {}),
     // 派活时按内存做准入（#219）：读父节点 fleet-agents.slice 的 memory.current；本机开发没有这层就跳过（skip），不拦。
@@ -412,6 +423,10 @@ export function realPortsFromEnv(
   retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
   /** 每个定时任务最近一轮是几点起的（schedule_runs）；一轮都没有的不在里面。进程内定时器起来时补最近一轮要看（jobs/timers.ts）。 */
   jobLastStartedAt(): Promise<ReadonlyMap<string, Date>>;
+  /** 引擎总开关的闸（#1086）：worker 起来先 refresh 一次、再 start 周期刷新；定时器入口、选路、一次性会话登记读它。 */
+  master: EngineMasterGate;
+  /** 总开关关着、这个定时任务这一轮被跳过：记一条 partial 进 schedule_runs（看门狗不当成「停了」，定时任务页看得到原因）。 */
+  recordSkippedRun(jobId: string, why: string): Promise<void>;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -455,8 +470,14 @@ export function realPortsFromEnv(
   // 拼车并发登记的核对（#194 方案 4.7、#896）：引擎起来核一遍推提醒（registerJobs），选路前、每小时对账判阶段派不派得出去时现核，
   // 对不上拼车池不派新活。同一个对象，「上一次对上没对上」的记忆只有一份。
   const carpoolCap = carpoolRegistry({ db, env, machine: config.machine });
+  // 引擎总开关（#1086）：选路、一次性会话登记、定时器入口三处读同一个闸；起来时 worker 先刷新一次再起周期刷新。读不到按关。
+  const master = createEngineMasterGate({
+    read: () => readEngineMasterRow(db),
+    log: (message) => console.info(message),
+  });
   const real = createRealPorts({
     db,
+    master,
     carpoolRegistry: () => carpoolCap.view(),
     gh,
     trees,
@@ -469,7 +490,8 @@ export function realPortsFromEnv(
   // 三段的一次性会话（动手、验收）的登记：切号照它停下跑在 Claude 池上的那一段，切完任务工作流在原分支上重跑（#59）
   // 同时登记进发布排空的在途清单（#957）：不接 drain，发布排空看不见动手、验收会话，会提前放行、到点也停不到它们
   // （test/real/one-shot-drain.test.ts 钉着这一行和下面 stopSessions 里的 oneShots.drainStop）
-  const oneShots = oneShotSessions({ ...(extra.drain ? { drain: extra.drain } : {}) });
+  // 同时接引擎总开关：关着这一段不起会话（#1086，test/real/one-shot-sessions.test.ts 的「生产装配漏接引擎总开关」钉着这一行）
+  const oneShots = oneShotSessions({ ...(extra.drain ? { drain: extra.drain } : {}), master });
   // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
   // 先停下、切完接着干（#59：一次性会话在原分支上重跑这一段，Fusion 的会话换了池 fork 续上），不等它们跑完
   // #194：被拒当场判、定时盯读接口那一轮也走它（同一把单飞锁）；读接口给切号前现读，切完当场探切过去的池（和路由探针同一份探法）
@@ -627,6 +649,12 @@ export function realPortsFromEnv(
       else console.info(issueKindRegistered.message);
     },
     retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
+    master,
+    recordSkippedRun: async (jobId, why) => {
+      const at = new Date();
+      const id = await startScheduleRun(db, jobId, at);
+      await finishScheduleRun(db, id, { outcome: 'partial', why }, at);
+    },
     jobLastStartedAt: async () =>
       new Map(
         (await scheduleHealth(db)).flatMap((h) =>

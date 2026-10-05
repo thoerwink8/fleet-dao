@@ -26,6 +26,7 @@ import {
 } from './drain.ts';
 import { createDrainControl, type DrainControl, ownReleaseSha } from './drain-control.ts';
 import { startDrainStatusFile } from './drain-file.ts';
+import type { EngineMasterGate } from './engine-master.ts';
 import { createFakeWorld } from './fakes.ts';
 import { engineTimerJobs } from './jobs/engine-timers.ts';
 import { type EngineTimers, realTimerHost, startTimers } from './jobs/timers.ts';
@@ -278,6 +279,8 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let registerJobs: (() => Promise<void>) | undefined;
   let retireSchedules: ((client: Pick<Client, 'schedule'>) => Promise<void>) | undefined;
   let jobLastStartedAt: (() => Promise<ReadonlyMap<string, Date>>) | undefined;
+  let master: EngineMasterGate | undefined;
+  let recordSkippedRun: ((jobId: string, why: string) => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
@@ -292,6 +295,8 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     registerJobs = real.registerJobs;
     retireSchedules = real.retireSchedules;
     jobLastStartedAt = real.jobLastStartedAt;
+    master = real.master;
+    recordSkippedRun = real.recordSkippedRun;
     close = real.close;
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
@@ -306,7 +311,13 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let status: ReturnType<typeof startDrainStatusFile> | undefined;
   let shutdown: ReturnType<typeof installGracefulShutdown> | undefined;
   let stopControl: (() => void) | undefined;
+  let stopMaster: (() => void) | undefined;
   try {
+    // 引擎总开关（#1086）：接活之前先读一次（读不到按关），之后每 5 秒刷新；选路、一次性会话登记读缓存，定时器入口每轮现读
+    if (master) {
+      await master.refresh();
+      stopMaster = master.start();
+    }
     if (registerJobs) {
       // 定时任务只由真端口的工人起：假端口不碰库和 GitHub，起了也没有东西可跑。
       // 先登记：一次都没跑过的也在看门狗的名单上。任一步失败就不起，别让对账悄悄没人跑。
@@ -341,12 +352,16 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       ...(tasks ? { tasks } : {}),
       log: (message) => console.info(message),
     });
-    if (client && jobs) {
+    if (client && jobs && master && recordSkippedRun) {
       // 定时任务的定时器（jobs/timers.ts）：引擎进程里的普通定时器，重启后自己恢复；孤儿会话收完、工人建好之后再起，一起来就能接任务工作流
       const lastRuns = jobLastStartedAt?.();
       timers = startTimers(
         engineTimerJobs({ jobs, client, taskQueue: config.taskQueue }),
-        realTimerHost(async (id) => (lastRuns ? ((await lastRuns).get(id) ?? null) : null)),
+        realTimerHost(
+          async (id) => (lastRuns ? ((await lastRuns).get(id) ?? null) : null),
+          master,
+          recordSkippedRun,
+        ),
       );
       console.info('定时任务的定时器已起');
     }
@@ -368,6 +383,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       console.warn(`停机时这些定时任务的一轮还没完，不等了：${unfinished.join('、')}`);
     }
     stopControl?.();
+    stopMaster?.();
     await status?.flush();
     status?.stop();
     await clientConnection?.close();
