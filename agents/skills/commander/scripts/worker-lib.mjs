@@ -56,6 +56,32 @@ import { fileURLToPath } from 'node:url';
 /** Claude 工人的外壳脚本（和本文件同目录，随技能一起同步到各台机器）。 */
 const SUPERVISE_SCRIPT = fileURLToPath(new URL('./worker-supervise.mjs', import.meta.url));
 
+/**
+ * 发版暂停的标记（#618，release-train.mjs 写、发版收尾时清）：文件在，start 就不起新工人；status、watch、stop、clean 照常。
+ * 标记里是一份 JSON（since、target），读不出来也算暂停（文件在就是有人要暂停，读坏了不能当没有）。
+ */
+export const PAUSE_MARKER_REL = join('.fleet-dao', 'release-train.paused');
+export const pauseMarkerPath = (home) => join(home, PAUSE_MARKER_REL);
+
+/** 暂停中回 { paused: true, why }，没暂停回 { paused: false }；标记读不了（不是「没有」）一律当暂停，原因里写明。 */
+export function readPauseMarker(home) {
+  const file = pauseMarkerPath(home);
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return { paused: false };
+    return { paused: true, why: `暂停标记 ${file} 读不了（${e.code ?? e.message}），按暂停算` };
+  }
+  try {
+    const m = JSON.parse(text);
+    const target = m.target ? `，要发 ${m.target}` : '';
+    return { paused: true, why: `发版暂停中（${m.since ?? '不知道几点'} 起${target}）` };
+  } catch {
+    return { paused: true, why: `发版暂停中（标记 ${file} 内容认不出，按暂停算）` };
+  }
+}
+
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MODELS = ['grok', 'codex', 'kimi', 'claude'];
 /** 思考档位的叫法，和 packages/shared/src/effort.ts 的 SESSION_EFFORTS 一样（测试钉着）。 */
@@ -100,6 +126,7 @@ export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检
                     --no-automerge：开非草稿 PR 但不挂自动合并，正文「还欠什么」栏写「人闸：改标准」，CI 绿了就停
                     （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
                     CI 绿就合、自动挂上。
+                    发版暂停中（release-train.mjs 在 ~/.fleet-dao/release-train.paused 写了标记）不起，退出码 3，说明原因
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
   watch [--wait <秒>] [--until-change]
                                  巡看：只打印上次巡看之后变了的工人（「变化：…」），最后一行「还在跑：N」；
@@ -668,6 +695,12 @@ function worktreeConflict(trees, worktreeDir, branch) {
 
 async function cmdStart(p, io) {
   if (p.positional.length > 0) throw new UsageError('start 不收位置参数');
+  const pause = readPauseMarker(io.home);
+  if (pause.paused)
+    return conflict(
+      io,
+      `${pause.why}：不起新工人。发版收尾后标记会自己清；要现在撤掉：node release-train.mjs abort（status、watch、stop、clean 照常能用）`,
+    );
   const model = modelOf(p);
   const name = nameOf(p);
   const briefArg = p.options.get('brief');
