@@ -1,6 +1,6 @@
 // 引擎进程里的定时器（#1072，替代 Temporal Schedule）：按固定的钟点格子（每 N 分钟、错开 offset 分钟，从 epoch 算起，和
 // 原来 Schedule 的 interval + offset 同一个格子）一轮一轮叫醒各定时任务。语义和原来的 Schedule 一一对应：
-// - 上一轮还没完就跳过这一轮（不叠着跑）：同一个任务同一时刻进程里最多一轮；
+// - 上一轮还没完就跳过这一轮（不叠着跑）：同一个任务同一时刻进程里最多一轮，卡住了也不放开（只记日志、看门狗报），宁可漏一轮不叠着跑；
 // - 停机一阵再起来：只补最近一轮，不把错过的全补一遍——最近一格的钟点在补跑窗口里、且那之后没起过一轮才补，再久就等下一格；
 // - 一轮失败不停掉定时：下一格照样来（没跑成的一轮由各任务自己记进 schedule_runs，看门狗照登记表看）；
 // - 引擎重启后自己恢复：没有「暂停」这个持久状态，也就没有「重启不替人恢复暂停的」那个坑；要停就停引擎、或关项目的开关。
@@ -18,8 +18,11 @@ export interface TimerJob {
   offsetMinutes?: number;
   /** 停机后补最近一轮的窗口（分钟）：最近一格的钟点离现在不超过这么久才补。 */
   catchupMinutes: number;
-  /** 一轮最多等多久（分钟）：到了没回就不再等它、放开「不叠着跑」，下一格照来（在跑的那一轮没人取消，和原来活动超时一样）。 */
-  runTimeoutMinutes: number;
+  /**
+   * 一轮超过多久（分钟）还没回就记一条 error 日志。只记日志、不放开「不叠着跑」：那一轮没人能取消，放开就会在它还在跑时又起一轮
+   * （同一个任务并行：探针同时起两个会话、对账同时写同一批行）。它回来之前下一格一律跳过，看门狗照登记表报「停了」，要人看。
+   */
+  overdueMinutes: number;
   run(): Promise<unknown>;
 }
 
@@ -65,18 +68,18 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
       host.log('info', `定时任务 ${job.id}：上一轮还没完，跳过这一轮（${why}）`);
       return;
     }
-    let timeout: unknown;
+    let overdue: unknown;
     const round = (async () => {
+      overdue = host.setTimeout(
+        () =>
+          host.log(
+            'error',
+            `定时任务 ${job.id}：这一轮超过 ${job.overdueMinutes} 分钟还没回；它回来之前不再起新的一轮（不叠着跑），看门狗会照登记表报，要人看看是卡在哪`,
+          ),
+        job.overdueMinutes * MINUTE_MS,
+      );
       try {
-        await Promise.race([
-          job.run(),
-          new Promise<never>((_, reject) => {
-            timeout = host.setTimeout(
-              () => reject(new Error(`超过 ${job.runTimeoutMinutes} 分钟没回，不再等它`)),
-              job.runTimeoutMinutes * MINUTE_MS,
-            );
-          }),
-        ]);
+        await job.run();
       } catch (error) {
         // 没跑成的一轮各任务自己已经记进 schedule_runs（看门狗照登记表报）；这里只让日志看得见，不停掉定时
         host.log(
@@ -84,7 +87,7 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
           `定时任务 ${job.id} 这一轮没跑成：${error instanceof Error ? error.message : String(error)}`,
         );
       } finally {
-        host.clearTimeout(timeout);
+        host.clearTimeout(overdue);
         inFlight.delete(job.id);
       }
     })();

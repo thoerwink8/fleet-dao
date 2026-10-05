@@ -32,8 +32,8 @@ import {
 import type { TimerJob } from './timers.ts';
 import { runWatchdogJob, WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
-/** 一轮最多等多久：原来每一轮的 Temporal 工作流限时，没改。 */
-const ROUND_TIMEOUT_MINUTES = 15;
+/** 一轮超过多久还没回就记一条 error 日志（原来每一轮的 Temporal 工作流限时；现在到了不取消、也不放开不叠着跑，见 timers.ts）。 */
+const OVERDUE_MINUTES = 15;
 
 function need<K extends keyof EngineJobs>(jobs: EngineJobs, name: K): NonNullable<EngineJobs[K]> {
   const make = jobs[name];
@@ -64,7 +64,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       id: GITHUB_RECONCILE_JOB.id,
       everyMinutes: GITHUB_RECONCILE_EVERY_MINUTES,
       catchupMinutes: GITHUB_RECONCILE_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runGitHubReconcileJob(githubReconcile(client, taskQueue)),
     },
     {
@@ -73,7 +73,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       everyMinutes: ROUTE_PROBE_EVERY_MINUTES,
       offsetMinutes: ROUTE_PROBE_OFFSET_MINUTES,
       catchupMinutes: ROUTE_PROBE_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runRouteProbeJob(routeProbe()),
     },
     {
@@ -82,7 +82,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       everyMinutes: QUOTA_READ_EVERY_MINUTES,
       offsetMinutes: QUOTA_READ_OFFSET_MINUTES,
       catchupMinutes: QUOTA_READ_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runQuotaReadJob(quotaRead()),
     },
     {
@@ -90,7 +90,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       id: CARPOOL_WATCH_JOB.id,
       everyMinutes: CARPOOL_WATCH_EVERY_MINUTES,
       catchupMinutes: CARPOOL_WATCH_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runCarpoolWatchJob(carpoolWatch()),
     },
     {
@@ -99,7 +99,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       everyMinutes: HOURLY_RECONCILE_EVERY_MINUTES,
       offsetMinutes: HOURLY_RECONCILE_OFFSET_MINUTES,
       catchupMinutes: HOURLY_RECONCILE_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runHourlyReconcileJob(hourlyReconcile(client, taskQueue)),
     },
     {
@@ -108,7 +108,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       everyMinutes: CANARY_EVERY_HOURS * 60,
       offsetMinutes: CANARY_OFFSET_MINUTES,
       catchupMinutes: 60,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: async () => {
         await startCanaryWorkflow(client, taskQueue);
       },
@@ -119,7 +119,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       everyMinutes: WATCHDOG_EVERY_MINUTES,
       offsetMinutes: WATCHDOG_OFFSET_MINUTES,
       catchupMinutes: WATCHDOG_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runWatchdogJob(watchdog()),
     },
     {
@@ -128,7 +128,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       everyMinutes: INTAKE_EVERY_MINUTES,
       offsetMinutes: INTAKE_OFFSET_MINUTES,
       catchupMinutes: INTAKE_EVERY_MINUTES,
-      runTimeoutMinutes: ROUND_TIMEOUT_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
       run: () => runIntakeJob(intake(client, taskQueue)),
     },
   ];

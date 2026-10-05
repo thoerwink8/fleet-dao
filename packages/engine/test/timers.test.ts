@@ -67,7 +67,7 @@ function job(over: Partial<TimerJob> & { run: TimerJob['run'] }): TimerJob {
     everyMinutes: 5,
     offsetMinutes: 3,
     catchupMinutes: 5,
-    runTimeoutMinutes: 15,
+    overdueMinutes: 15,
     ...over,
   };
 }
@@ -144,18 +144,21 @@ describe('进程内定时器（startTimers）', () => {
     expect(f.logs.filter((l) => l.startsWith('error:') && l.includes('读库超时'))).toHaveLength(2);
   });
 
-  it('一轮超过限时没回：不再等它、放开「不叠着跑」，下一格照来', async () => {
+  it('一轮超过限时还没回：只记 error 日志，不放开「不叠着跑」——它回来之前下一格照样跳过，回来以后下一格照来', async () => {
     const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
     let calls = 0;
+    let release: () => void = () => {};
     startTimers(
       [
         job({
           everyMinutes: 5,
           offsetMinutes: 3,
-          runTimeoutMinutes: 2,
+          overdueMinutes: 2,
           run: () => {
             calls += 1;
-            return new Promise<void>(() => {});
+            return new Promise<void>((r) => {
+              release = r;
+            });
           },
         }),
       ],
@@ -163,8 +166,13 @@ describe('进程内定时器（startTimers）', () => {
     );
     await f.advanceTo(T0 + 6 * MIN);
     expect(calls).toBe(1);
-    expect(f.logs.some((l) => l.includes('超过 2 分钟没回'))).toBe(true);
-    await f.advanceTo(T0 + 9 * MIN);
+    expect(f.logs.some((l) => l.startsWith('error:') && l.includes('超过 2 分钟还没回'))).toBe(true);
+    // 过了好几格，那一轮还没回：一格都不起新的
+    await f.advanceTo(T0 + 19 * MIN);
+    expect(calls).toBe(1);
+    release();
+    await f.flush();
+    await f.advanceTo(T0 + 23 * MIN);
     expect(calls).toBe(2);
   });
 
@@ -316,7 +324,7 @@ describe('8 个定时任务的登记（engineTimerJobs）', () => {
   it('补跑窗口：都是一格（停机一阵再起来只补最近一轮）；巡检例外，错过的那一轮一小时内补上', () => {
     for (const j of jobs()) {
       expect(j.catchupMinutes, j.id).toBe(j.id === 'canary' ? 60 : j.everyMinutes);
-      expect(j.runTimeoutMinutes, j.id).toBe(15);
+      expect(j.overdueMinutes, j.id).toBe(15);
     }
   });
 
