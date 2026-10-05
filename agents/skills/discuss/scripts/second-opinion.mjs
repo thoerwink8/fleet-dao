@@ -20,6 +20,8 @@
 // agents/test/rules/second-opinion-verdict.rules.test.ts）：每条必须改带【现实】/【构造】和【碰安全】/【改数据库】/【其他】；
 // 【构造】的不挡；第 1、2 轮【现实】的都挡（没带标签的按【现实】【其他】算）；第 3 轮起只挡【现实】且碰安全或改数据库的，
 // 其余写通过、评论里列「转合并后处理」。第几轮 = 这个 PR 上本脚本已经贴过的结论评论数 + 1（不管头变没变）；读不到按第 1 轮算。
+// 同一个头只审一次：头上已有本脚本贴的结论就复用那次的结论和退出码，不起会话、不贴评论（见 postedOnHead），
+// 所以每个头最多一条结论评论，轮数就是审过的不同头的个数（#1003 同一个头隔 42 秒审两轮、轮数被推到第 3 轮）。
 //
 // 退出码：0 通过；1 必须改；2 没查成；3 PR 审查没开（不带 --high-risk）。连不上、没起来、超时、结果格式认不出（没有「必须改」
 // 那一段、最后一行不是结论）、账本对不上、有调用没走中继，一律 2，不当通过。端点没装、没开、未登录、roster 不含模型或超时都
@@ -536,6 +538,41 @@ export const POSTED_REVIEW =
  */
 export function priorRounds(bodies) {
   return bodies.filter((b) => POSTED_REVIEW.test(String(b ?? '').trimStart())).length;
+}
+
+/** 和 POSTED_REVIEW 认同一种第一行，把谁审的、第几轮、审的头、结论拆出来。 */
+const POSTED_PARTS =
+  /^\*\*(第二意见|合并后补审) 第 (\d+) 轮\*\*（[^）\n]*审的头 ([0-9a-f]{7,40})）：(通过|必须改 (\d+) 条)/;
+
+/** @typedef {{ who: string, round: number, pass: boolean, blocking: number, line: string }} PostedVerdict 头上已贴的一条结论 */
+
+/**
+ * 这个头上本脚本已经贴过的结论（有几条取最后一条）；没有回 null。同一个头只审一次：再起一轮只会撞出一次随机的结论，
+ * 还白占一轮、把轮数推到放宽门槛的第 3 轮（#1003 的同一个头 ec120f6 隔 42 秒审了两轮）。这样每个头最多贴一条结论，
+ * priorRounds 数出来的评论数就是审过的不同头的个数。
+ * @param {readonly unknown[]} bodies
+ * @param {string} head 完整的提交号
+ * @returns {PostedVerdict | null}
+ */
+export function postedOnHead(bodies, head) {
+  /** @type {PostedVerdict | null} */
+  let found = null;
+  for (const b of bodies) {
+    const text = String(b ?? '').trimStart();
+    if (!POSTED_REVIEW.test(text)) continue;
+    const m = POSTED_PARTS.exec(text);
+    if (!m) continue;
+    const [line = '', who = '', round = '', abbrev = '', verdict = '', n] = m;
+    if (!head.startsWith(abbrev)) continue;
+    found = {
+      who,
+      round: Number(round),
+      pass: verdict === '通过',
+      blocking: n === undefined ? 0 : Number(n),
+      line: line.replace(/\*\*/g, ''),
+    };
+  }
+  return found;
 }
 
 /** GitHub 提交状态 description 的上限（140 个字符）。 */
@@ -1725,14 +1762,16 @@ function setStatus(ghRun, head, { state, description }, url) {
 }
 
 /**
- * 这个 PR 之前审完、出了结论几轮：数本脚本贴过的结论评论（不管头变没变，第二意见和合并后补审都算）。
+ * 这个 PR 之前审完、出了结论几轮：数本脚本贴过的结论评论（不管头变没变，第二意见和合并后补审都算）；给了 head 顺带找
+ * 这个头上已贴的结论（reused，见 postedOnHead）。
  * 读不到回 { prior: null, why }，调用方按第 1 轮算（宁可多挡）。不数 runs 目录：那里的文件名用的是调用方给的 --round，
  * 同一个头重跑会盖掉；#701 贴了 10 次、每次都写「第 1 轮」。
  * @param {number} pr
  * @param {GhRun} ghRun
- * @returns {{ prior: number | null, why: string }}
+ * @param {string} [head]
+ * @returns {{ prior: number | null, why: string, reused: PostedVerdict | null }}
  */
-export function reviewRounds(pr, ghRun) {
+export function reviewRounds(pr, ghRun, head) {
   try {
     const out = ghRun([
       'api',
@@ -1747,9 +1786,9 @@ export function reviewRounds(pr, ghRun) {
       .filter((l) => l.trim())
       .map((l) => JSON.parse(l));
     if (bodies.some((b) => typeof b !== 'string')) throw new Error('评论正文认不出');
-    return { prior: priorRounds(bodies), why: '' };
+    return { prior: priorRounds(bodies), why: '', reused: head ? postedOnHead(bodies, head) : null };
   } catch (e) {
-    return { prior: null, why: errText(e) };
+    return { prior: null, why: errText(e), reused: null };
   }
 }
 
@@ -2243,7 +2282,8 @@ export async function reviewPr({ o, repo, pr, log, deps = reviewDeps(repo) }) {
  */
 async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
   const info = preparePr(repo, pr, slot, deps.gh);
-  const counted = reviewRounds(pr, deps.gh);
+  const counted = reviewRounds(pr, deps.gh, info.head);
+  if (counted.reused) return reuseVerdict({ o, pr, head: info.head, reused: counted.reused, log, deps });
   const round = (counted.prior ?? 0) + 1;
   const roundNote =
     counted.prior === null
@@ -2357,6 +2397,39 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
     console.log(out);
     throw e;
   }
+}
+
+/**
+ * 同一个头上已经贴过本脚本的结论：不起会话、不贴评论、不加轮数，照那次的结论退出（通过 0、必须改 1）。
+ * 头上的提交状态和那次结论对不上（上次评论贴上了、状态没写上）就照那次结论补写；读不到、写不上退出 2，不当通过。
+ * @param {{ o: Options, pr: number, head: string, reused: PostedVerdict, log: Log, deps: ReviewDeps }} opts
+ * @returns {number}
+ */
+function reuseVerdict({ o, pr, head, reused, log, deps }) {
+  const code = reused.pass ? 0 : 1;
+  const short = head.slice(0, 7);
+  log(
+    `PR #${pr} 头 ${short} 上已经有本脚本贴的结论（${reused.line}）：同一个头不再审、不加轮数，照那次的结论退出 ${code}`,
+  );
+  if (o.noPost) return code;
+  const want = reused.pass ? 'success' : 'failure';
+  try {
+    if (currentSecondOpinion(deps.gh, head)?.state === want) return code;
+  } catch (e) {
+    log(`没查成：读不到 ${short} 上的提交状态（${errText(e)}），不知道那次结论落没落到状态上`);
+    return 2;
+  }
+  const description = reused.pass
+    ? `${reused.who}通过（第 ${reused.round} 轮；照 ${short} 上已贴的结论补写）`
+    : `${reused.who}第 ${reused.round} 轮：必须改 ${reused.blocking} 条（照 ${short} 上已贴的结论补写）`;
+  try {
+    setStatus(deps.gh, head, { state: want, description });
+    log(`提交状态 second-opinion 照已贴的结论补写到了 ${short}：${want}（${description}）`);
+  } catch (e) {
+    log(`提交状态没写上：${errText(e)}`);
+    return 2;
+  }
+  return code;
 }
 
 /**
