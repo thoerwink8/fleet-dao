@@ -9,4 +9,5 @@
 
 | 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |
 |---|---|---|---|---|
-| 法国引擎关闭：不再派单、不接新活，`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 只留 `fleet-api`；期望配置写在 `deploy/france/desired-config.json` 的【临时】段 | 引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%；流程重做前不再让它接活 | 创始人 2026-09-29 叫停引擎、要改成三段一条龙（原话：「要删的东西都要删」）；10-02 拍板「继续关着，到 #452 演练三连跑通 + 你说过那句『开』才再评估」(docs/decisions/0011-…md 第 2 条)；10-03 补：「法国vps很久都没跑了，你随时可以更新，但是我建议v3上线前,法国不要跑流程」（所以法国没有旧代码在跑，能随时发版落迁移；v3 上线前仍不开流程） | 演练过 + 创始人说「开」；撤回做法：改回 `fleet-engine fleet-api`、发布一轮，再把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个 Temporal 定时任务用 `fleet-temporal schedule toggle --unpause` 恢复；原定 10-05 复查，按 0011 第 2 条续到 10-15（#452 还没跑通） | 2026-10-15 |
+
+> 已撤回（2026-10-05）：「法国引擎关闭」（进程停着、`FLEET_SERVICES` 只留 `fleet-api`）。撤回的话：创始人 2026-10-05 约 19:10 对「关闭是进程停着，还是进程开着但不接活（待命）」答「2 3 4 6 7 按照你推荐」（推荐＝待命）。现在的状态是「进程开着、各项目接活开关全关」：法国期望 `FLEET_SERVICES=fleet-engine fleet-api`（`deploy/france/desired-config.json`），新的 `v<N>` 发版后各项目自动回到关（`release.sh`，#1050）。待命的代价（创始人知情同意）：路由探针每 15 分钟起一次最短的模型会话、读额度照转。上线时要在法国以 root 把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个被暂停的 Temporal 定时任务 `--unpause`（见 `docs/ops.md`）。

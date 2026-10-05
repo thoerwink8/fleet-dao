@@ -5,7 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { readLive } from './config.mjs';
+import { readLive, readProfile } from './config.mjs';
 import {
   APPLIED_FILE,
   AUTO_DIR,
@@ -130,6 +130,13 @@ export const realIo = {
       '读主线的提交',
     );
   },
+  /**
+   * 这台跟什么发（#1050）：本机档（WSL）跟主线上 CI 全绿的最新提交（'main'），法国只发版本标记（'tag'）。
+   * 按档位文件 /etc/fleet-dao/profile 定（和配置对账同一个读法，文件不在算法国）；读不出就抛，由 lib.mjs 按 'tag' 档算并记原因。
+   */
+  async readTrack() {
+    return readProfile().profile === 'local' ? 'main' : 'tag';
+  },
   /** 版本标记（`v<N>` tag）：名字、它指的提交、时间。读不到就抛，由 lib.mjs 记成「标记没查成」、这一轮不发。 */
   async readVersionTags() {
     return gitOk(VERSION_TAGS_ARGS, '读版本标记');
@@ -212,7 +219,7 @@ export const realIo = {
   /**
    * 本机有没有在跑引擎（决定 0011 第 4 条的「停派活 → 等收尾 → 部署 → 恢复派活」四步做不做得了）。
    * 和 release.sh 的 `has_service fleet-engine` 同一个判法：看 systemctl 说这个单元活没活
-   * （france 现在 FLEET_SERVICES=fleet-api，没有 fleet-engine，is-active 回的不是 active）。
+   * （FLEET_SERVICES 里没有 fleet-engine 的机器，is-active 回的不是 active）。
    * systemctl 没跑成、回认不出的：抛（调用方这一轮不发、报 engine-unknown），不当成关着也不当成开着。
    * 注：这里说的是「本机跑不跑引擎」，和「让 AI 接活」那个按仓的开关（fleet-api dispatch）不是一回事——
    * 引擎关着时那四步本来就没得做，见 lib.mjs 的 publishSequence。

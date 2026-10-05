@@ -86,18 +86,18 @@
         "说明": "登记的差别：法国这项是私有值（收本机推来的快照要认的通行证哈希表），本机档是推的一方、不收别人的快照，一直留空（公开的空值）：空着对得上，填了值报不一致"
       },
       "FLEET_NODE_REPORT_URL": {
-        "private": null,
+        "private": "6eaf9a75c535e03bda8f8eced827e0e03054a5d540817cc6a69b347de07532d9",
         "说明": "登记的差别：本机档把自己的主页、环境页快照推给法国看板的地址，形如 https://<法国看板域名>/api/nodes/report（地址里有法国真域名，所以是私有值）；法国这项留空。还没记指纹：接上法国看板那一步（docs/ops.md「接上法国看板」）填好后，用 fleet-local 自己的指纹钥匙算好再把 null 换成指纹。和 FLEET_NODE_REPORT_TOKEN 两项要一起配才推，都没配就不推。本机直连法国不通时再在 api.env 加 NODE_USE_ENV_PROXY=1 加 HTTPS_PROXY（packages/api/src/node-reporter.ts 头注）"
       },
       "FLEET_NODE_REPORT_TOKEN": {
-        "private": null,
+        "private": "9365a101dd05c31821f38b19abc37a422a6c812b0edd953bf76c34899c2ef0b7",
         "说明": "登记的差别：本机档往法国推快照带的通行证明文（fleet-api node-key new local 在法国打印的那一串，只显示过一次）：私有值，只记指纹，不进仓、不进聊天。还没记指纹，同 FLEET_NODE_REPORT_URL；法国的 FLEET_NODE_KEYS 里放的是它的 sha256，两边不许是同一个值写在别处"
       }
     },
     "release.env": {
       "FLEET_SERVICES": {
         "value": "fleet-engine fleet-api",
-        "说明": "登记的差别：法国 2026-09-29 起临时只留 fleet-api（创始人要求关闭引擎、不再派单，见法国档这一项的说明）；本机演练环境（fleet-local）继续带引擎，演练要用。法国撤回后这条差别删掉。"
+        "说明": "本机演练环境（fleet-local）带引擎，演练要用；法国 2026-10-05 起也带引擎（待命：各项目「让 AI 接活」发版后默认关，创始人点开才派活），两边现在一样，不再有登记的差别。"
       },
       "FLEET_DOMAIN": {
         "value": "fleet-local.invalid",
