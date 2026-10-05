@@ -71,6 +71,7 @@ import { registerReleaseRoutes } from './release-version.ts';
 import { soloReserveView } from './reserve-view.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
+import { registerRoutingOrderRoutes } from './routing-order.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
@@ -614,6 +615,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerCredentialRoutes(app, deps);
   registerDemoRoutes(app, deps, actorOf);
   registerDispatchRoutes(app, deps, actorOf);
+  registerRoutingOrderRoutes(app, deps, actorOf);
   registerReleaseRoutes(app, deps);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */

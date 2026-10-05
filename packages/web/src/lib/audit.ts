@@ -9,6 +9,8 @@ const ACTION_LABEL: Record<string, string> = {
   'stage_policy.update': '改了路由顺序',
   'channel.enable': '上架了渠道',
   'channel.disable': '下架了渠道',
+  'routing.order.move': '调了路由先后',
+  'routing.route.enable': '开关了路由',
   'task.pause': '暂停了',
   'task.resume': '继续了',
   'task.stop': '叫停了',
@@ -96,6 +98,8 @@ export function targetLabel(
       return `渠道 ${id}`;
     case 'route':
       return `路由 ${id}`;
+    case 'model':
+      return `模型 ${id} 下的路由`;
     case 'setting':
       return id in settingLabel ? `设置「${settingLabel[id as SettingKey]}」` : `设置 ${id}`;
     case 'user':

@@ -18,6 +18,7 @@ import type {
 import type { ReleaseSource } from './release-version.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
+import type { RoutingOrderPort } from './routing-order.ts';
 
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
 export interface Deps {
@@ -62,6 +63,11 @@ export interface Deps {
    * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。
    */
   routingEfforts?: RoutingEffortsPort | undefined;
+  /**
+   * 路由两层的先后和开关（母单 #1089，routing-order.ts）：驾驶舱「路由」页改用途下的模型先后、模型下的渠道先后、渠道开关。没给（开发、内存版
+   * 没有那两张表）的改接口回 503，不当改成了。
+   */
+  routingOrder?: RoutingOrderPort | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
    * （main.ts 的 production；法国和本机档都是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。

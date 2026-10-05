@@ -37,6 +37,8 @@ import type {
   LivenessVerdictSchema,
   MeResponse,
   ModelSchema,
+  MovePurposeModelRequest,
+  MovePurposeModelResponse,
   NodeDetailResponseSchema,
   NodeListItemSchema,
   NodesResponseSchema,
@@ -68,6 +70,8 @@ import type {
   TaskDetailResponse,
   UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
+  UpdateModelRouteRequest,
+  UpdateModelRouteResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
@@ -134,6 +138,13 @@ export type EffortModel = z.infer<typeof EffortModelSchema>;
 export type RouteEffort = z.infer<typeof RouteEffortSchema>;
 export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
 export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
+
+/** 路由页改先后和开关（母单 #1089）：用途下的模型上移 / 下移、模型下的渠道上移 / 下移和开关。 */
+export type MovePurposeModelBody = z.input<typeof MovePurposeModelRequest>;
+export type MovedPurposeModel = z.infer<typeof MovePurposeModelResponse>;
+export type UpdateModelRouteBody = z.input<typeof UpdateModelRouteRequest>;
+export type UpdatedModelRoute = z.infer<typeof UpdateModelRouteResponse>;
+export type MoveDirection = MovePurposeModelBody['direction'];
 
 /** 整池暂停的现状（#746）：开关、认不出的、旧提醒、到期没复查的。 */
 export type PoolHolds = PoolHoldsView;

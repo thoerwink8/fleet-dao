@@ -243,3 +243,53 @@ export const UpdateRouteEffortResponse = z.object({
   /** 改完的档位；没有 = 没配。 */
   effort: SessionEffortSchema.optional(),
 });
+
+// —— 先后和开关（母单 #1089 第二片）：驾驶舱「路由」页改用途下的模型先后、模型下的渠道先后、渠道开关 ——
+// 存在库里（routing_purpose_models.position、routing_catalog.position / enabled，运行时配置）：改完下一次选路就照新的。
+// 都带「我看到的旧值」（expected）：别人先改了就返回 409，刷新后再改，不悄悄盖掉。
+
+export const MoveDirectionSchema = z.enum(['up', 'down']);
+
+/**
+ * 用途下的一个模型上移 / 下移一位。expected 填改之前看到的这个用途下的模型先后（模型编号，从先到后）：
+ * 对不上返回 409（details.current 是库里现在的先后）；已经在最上 / 最下返回 422。
+ */
+export const MovePurposeModelRequest = z.object({
+  direction: MoveDirectionSchema,
+  expected: z.array(Id).min(1),
+  /** 写进操作记录。 */
+  reason: z.string().max(500).optional(),
+});
+export const MovePurposeModelResponse = z.object({
+  purpose: StageKindSchema,
+  /** 改完后这个用途下的模型先后（模型编号，从先到后）。 */
+  order: z.array(Id),
+});
+
+/**
+ * 模型下的一条渠道（路由）：op=move 上移 / 下移一位，expected 是改之前看到的这个模型下的路由先后（路由编号）；
+ * op=enable 开 / 关，expected 是改之前看到的开关。先后和开关都不分用途：哪个用途排了这个模型，都照它。
+ * 别人先改了返回 409（details.current 是库里现在的值），已经在最上 / 最下返回 422。
+ */
+export const UpdateModelRouteRequest = z.discriminatedUnion('op', [
+  z.object({
+    op: z.literal('move'),
+    direction: MoveDirectionSchema,
+    expected: z.array(Id).min(1),
+    reason: z.string().max(500).optional(),
+  }),
+  z.object({
+    op: z.literal('enable'),
+    enabled: z.boolean(),
+    expected: z.boolean(),
+    reason: z.string().max(500).optional(),
+  }),
+]);
+export const UpdateModelRouteResponse = z.object({
+  modelId: Id,
+  routeId: Id,
+  /** op=move：改完后这个模型下的路由先后；op=enable 不给。 */
+  order: z.array(Id).optional(),
+  /** op=enable：改完的开关；op=move 不给。 */
+  enabled: z.boolean().optional(),
+});

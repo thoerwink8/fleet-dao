@@ -140,6 +140,8 @@ export interface HarnessOptions {
   routingLayers?: Deps['routingLayers'];
   /** 每条路由的思考档位（#470）；不给就是没接上（内存版、开发环境一样）。 */
   routingEfforts?: Deps['routingEfforts'];
+  /** 路由两层的先后和开关（母单 #1089）；不给就是没接上（内存版、开发环境一样）。 */
+  routingOrder?: Deps['routingOrder'];
   /** 会话用户切号的现状（#194，额度页顶上一行）；不给就是没接上（内存版、开发环境一样）。 */
   orgSwitch?: Deps['orgSwitch'];
   /** 拼车额度对账（#194 方案 4.7）；不给就是没接上。 */
@@ -186,6 +188,7 @@ function wire<S extends Store>(
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
+    ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
     ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
     ...(options.release ? { release: options.release } : {}),

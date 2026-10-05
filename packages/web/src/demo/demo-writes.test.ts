@@ -27,7 +27,7 @@ const code = async (p: Promise<unknown>) => {
 };
 
 describe('演示版：只有正式驾驶舱才有的写，游客一律不行', () => {
-  test('【故意造出的失败】把所有模块都开了也一样：发链接、作废、改默认范围、改思考档位、开关「让 AI 接活」都回 403 demo_hidden，假数据没动', async () => {
+  test('【故意造出的失败】把所有模块都开了也一样：发链接、作废、改默认范围、改思考档位、调路由先后和开关、开关「让 AI 接活」都回 403 demo_hidden，假数据没动', async () => {
     scope(['board', 'task', 'quota', 'schedules', 'notifications', 'audit', 'settings']);
     const inner = createMockApi({ live: false });
     const api = createDemoApi(inner);
@@ -37,6 +37,16 @@ describe('演示版：只有正式驾驶舱才有的写，游客一律不行', (
       () => api.revokeDemoLink('link-1'),
       () => api.updateDemoDefault({ modules: ['board'], detail: 'status' }),
       () => api.updateRouteEffort('opus-5.5', 'r-ca-opus', { effort: 'high', expected: null }),
+      // 路由页改先后和开关（母单 #1089）：演示版没有路由页，写口一律拒
+      () =>
+        api.movePurposeModel('execute', 'opus-5.5', { direction: 'down', expected: ['opus-5.5', 'kimi-k3'] }),
+      () => api.updateModelRoute('opus-5.5', 'r-ca-opus', { op: 'enable', enabled: false, expected: true }),
+      () =>
+        api.updateModelRoute('opus-5.5', 'r-ca-opus', {
+          op: 'move',
+          direction: 'down',
+          expected: ['r-ca-opus', 'r-cb-opus', 'r-rl-opus'],
+        }),
       () => api.updateRepoDispatch('r-orbit', { on: false }),
     ]) {
       const err = await code(call());

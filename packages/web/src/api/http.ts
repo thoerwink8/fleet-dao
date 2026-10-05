@@ -10,11 +10,13 @@ import {
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
+  MovePurposeModelRequest,
   PasswordLoginRequest,
   SSE_EVENTS,
   TaskActionRequest,
   UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
+  UpdateModelRouteRequest,
   UpdateRepoDispatchRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
@@ -250,6 +252,16 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
           body: UpdateRouteEffortRequest.parse(body),
         },
       );
+    },
+    async movePurposeModel(purpose, modelId, body) {
+      return send('PUT', apiUrl(R.movePurposeModel.path, { purpose, modelId }), R.movePurposeModel.response, {
+        body: MovePurposeModelRequest.parse(body),
+      });
+    },
+    async updateModelRoute(modelId, routeId, body) {
+      return send('PUT', apiUrl(R.updateModelRoute.path, { modelId, routeId }), R.updateModelRoute.response, {
+        body: UpdateModelRouteRequest.parse(body),
+      });
     },
     pools: () => send('GET', apiUrl(R.pools.path), R.pools.response),
     poolHolds: () => send('GET', apiUrl(R.poolHolds.path), R.poolHolds.response),
