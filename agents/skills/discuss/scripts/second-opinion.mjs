@@ -889,6 +889,19 @@ function reviewDeps(repo) {
 }
 
 /**
+ * 主检出的根：`git worktree list` 的第一条永远是主检出（子树的注册表都挂在它下面）。
+ * 从主检出里跑就是它自己；从某棵工作树里跑，认出来的也是主检出——审查树按这个根建，不往工作树里套。
+ * @param {string} repo
+ * @returns {string}
+ */
+export function mainCheckout(repo) {
+  const listed = sh('git', ['worktree', 'list', '--porcelain'], repo);
+  const first = listed.split('\n').find((l) => l.startsWith('worktree '));
+  if (!first) throw new NotChecked('认不出主检出在哪：git worktree list 没给出一条');
+  return resolve(first.slice('worktree '.length).trim());
+}
+
+/**
  * @param {string} repo
  * @param {number} pr
  * @param {number} slot
@@ -935,7 +948,17 @@ function preparePr(repo, pr, slot, ghRun) {
     throw new NotChecked(`取回的头 ${got.slice(0, 7)} 和 PR 现在的头 ${info.headRefOid.slice(0, 7)} 对不上`);
   // 固定一棵树轮着用：Mirasim 把 codex 进程按工作目录留在池里，那个目录删不掉（Windows 报占用）。
   // 每轮切到这次的头、清掉上一轮的改动；node_modules 留着，下一轮装得快。
-  const tree = join(repo, '.claude', 'worktrees', slot === 1 ? 'second-opinion' : `second-opinion-${slot}`);
+  //
+  // 树一律建在**主检出**的 .claude/worktrees/ 下，不建在当前检出：从一棵工作树里调这个脚本（指挥官一边派工、
+  // 一边审 PR 是常事）时，按当前检出算会套出一棵 `…/820-env-page/.claude/worktrees/second-opinion` 的嵌套检出
+  // —— 它带着自己那份 biome.json，biome 整仓扫一遍报「nested root configuration」，把**这台机器上所有会话**
+  // 的推送全拦了；而清扫规则又按名字跳过 `second-opinion*`，谁也收不走它。2026-10-05 实测攒出两棵这种嵌套树。
+  const tree = join(
+    mainCheckout(repo),
+    '.claude',
+    'worktrees',
+    slot === 1 ? 'second-opinion' : `second-opinion-${slot}`,
+  );
   if (!existsSync(tree)) sh('git', ['worktree', 'add', '-q', '--detach', tree, got], repo);
   else {
     sh('git', ['-C', tree, 'checkout', '-q', '--force', '--detach', got], repo);
