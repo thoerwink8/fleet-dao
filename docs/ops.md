@@ -594,21 +594,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   ```
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻（重设会把已经能派的单变成「开关打开以前开的」）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
   这一段是 Fusion 时代的接活逻辑（design 第九节「在哪能做与接活开关」、`docs/decisions/0003-fusion-flow.md` 第 2、8 条），009/010 完成后按三段一条龙改成「对题 → 动手 → 验收」，落地 PR 连带删改；**先别照这段做**（v3 上线前「让 AI 接活」开关一直关着，这段的命令照常不会拉起任何工作流）。看哪些单因为版本、母单子单、本机做、本机认领没派：`sudo -u fleet psql fleet -c "select delivery_id, received_at, note from github_events where note ~ 'workflow=(unscheduled|not_current_version|version_unreadable|mother_ticket|sub_issue|reserved_local|claimed_local)' order by received_at desc limit 20"`。
-- 交给 fleet（design 第九节「在哪能做与接活开关」）：开关打开以前就开着的、挂在别的版本上的、未排期的单，还有母单和子单（#252 之前），自动派不碰，由人明说交给引擎。驾驶舱的「交给 fleet」按钮（#282）做好之前，在法国以 root 跑：
-
-  ```
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api handover <owner>/<仓名> <issue 号> --reason "<谁说的、为什么>" [--founder "<创始人原话>"]
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api handover --help   # 只打印用法
-  ```
-  这段是 Fusion 时代的交单命令（还在排队的拉起 Fusion 工作流、还查本机认领账 `claim.reassign`），009/010 完成后按三段一条龙重写，落地 PR 连带删改；**先别照这段做**（v3 上线前「让 AI 接活」开关一直关着，这个命令会一律拒）。帅位座位整张删掉（#531）后交单只剩运维这一路，没有 `--machine`/`--session`/`--term` 可给——给了在这里就认不出。
-- 认领账和提醒（#299，`specs/299-帅位只一个/方案.md`；帅位座位整张删掉见 #531 —— 接班、租约、任期、交接、驾驶舱帅位栏都不在了，`fleet-api seat …` 整条也不再收）：本机、运维经 ssh 以 root 调同一个管理命令：
-
-  ```
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api claim show <owner>/<仓名> --all
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api claim sweep                # 作废过了宽限期没心跳的本机认领
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api claim --help
-  ```
-  提醒（design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
+- 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
 
   ```
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api alert show                 # 开着的提醒：级别、标题、键
@@ -617,9 +603,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api alert silences --all       # 静默：谁建的、为什么、到几点
   ```
   `alert claim` 已经删掉（#445）：提醒不再等「没人认领 20 分钟」自动开跟进单，也不用认领来标「谁在处理」；`alert show` 的跟进单一栏只显示历史上挂过的（`alert_work` 表还在，只是没有命令能再新挂一条），没挂过的就是「没有」。静默必带到期（最长 7 天）、必带 `--note`（谁拍的、为什么不用处理），只挡 24 小时再提醒、不撤提醒本身；`--term`/`--founder` 随座位整张删掉（#531），给了这些参数在这里就认不出。静默、撤静默各记一条操作记录（`alert.silence`、`alert.unsilence`，target 是 `silence:<静默编号>`）。修复的 PR 如果正文挂了跟进单（需求栏、`Closes #号`），PR 镜像照常记下来，驾驶舱显示「PR 开着 / 合进主线 / 法国已发布」。退出码：0 做成了；1 没做成（库出错、设置认不出）；2 参数不对（不连库）。核对：`runuser -u fleet -- psql -d fleet -Atc "select n.dedupe_key, w.issue_number, w.source, w.linked_by from alert_work w join notifications n on n.id = w.notification_id where n.resolved_at is null"`、`runuser -u fleet -- psql -d fleet -Atc "select match_kind, match, created_by, ends_at, comment from alert_silences where expired_at is null and ends_at > now()"`。
-  认领每张单一行（`issue_claims`）；心跳、过期都用库的时钟。认领宽限期是默认 120 分钟（`setings` 表的 `seat.claimGraceMinutes` 没再用上；`seat.leaseMinutes` 随座位整张删掉，库里的两份设置值为死数据）。认领、报进度、结束、作废各记一条操作记录（`claim.take`、`claim.step`、`claim.pr`、`claim.done`、`claim.release`、`claim.void`；target 是 `claim:<仓的 id>#<单号>`，本机的记成 `ai` 这一类、编号 `<机器名>/<会话或工人>`）。退出码：0 好了；3 不是你的（别人拿着、认领号对不上）；1 没做成（连不上库、库出错）；2 参数不对（不连库）。带 `--json` 只往标准输出打一行 JSON，给本机脚本读。
-  本机这边不再认领：指挥官技能的认领脚本（`claim.mjs`、`doing.mjs`）和推前查认领都删掉了（#446，2026-10-02 创始人批脚本那半），`.githooks/pre-push` 现在只跑卫生检查。本机和引擎的分工只看单上的「本机做」标签，谁在做写在单上一条评论里。作废过了宽限期没心跳的认领不用手动：引擎每轮 GitHub 对账（15 分钟）做，撤自动合并、贴红、留言跟着做，没做成的报提醒 `claim-status:sweep`、下一轮再做；演练时可以手动 `fleet-api claim sweep`。核对某个 PR：`gh api repos/<owner>/<仓>/commits/<头>/statuses --jq '.[] | select(.context=="认领对得上") | [.state,.description,.creator.login] | @tsv' | head -1`。演练（#299 演练那一步）另有一条：`fleet-api claim take <仓> <号> --owner engine --scope drill:<名字>`，只在演练座位下允许，走引擎接活用的同一个库函数抢，不起工作流、待起补起不碰它。
-- 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着的投递原文还在，每轮对账（引擎的定时任务 `github-reconcile`，每 15 分钟）按原文重放：出错的最多自动重放 5 次；等着的（重开时上一轮还没结束、这个项目停派）每轮都重放、不占次数。重放到头的没有手动再推的入口，只在健康检查里报红。引擎抢到了认领、工作流却没起成的（认领「待起」超过 5 分钟），每轮对账另扫一遍补起（#299）：任务还在排队的照认领行里的工作流编号经同一个拉起实现再起，工作流已经在跑的只把认领改成在做；上一轮已经结束的（重开再起那种，还在等的投递会按重开的规矩再起）、开关关了的、GitHub 上关了的放下认领，本机能接着认领。起不成的这一轮记没查全，驾驶舱「定时任务」页 `why` 写「claims：待起的认领 N 张没起成：…」。看还有哪些待起：`sudo -u fleet psql fleet -c "select repo_id, issue_number, updated_at, workflow_id from issue_claims where state = 'pending_start' order by updated_at"`。
+- 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着的投递原文还在，每轮对账（引擎的定时任务 `github-reconcile`，每 15 分钟）按原文重放：出错的最多自动重放 5 次；等着的（重开时上一轮还没结束、这个项目停派）每轮都重放、不占次数。重放到头的没有手动再推的入口，只在健康检查里报红。
 - GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回。
 - 关单对账 #654 删了（原来对账每天顺带扫一遍「做完没关、关了没结果」，判的前提是 结果.md）：它留在提醒中心的四种日报提醒 `close-sweep:<owner>/<仓名>:{due,mother,merged,no-result}`，引擎下一次起来的第一轮由 `retireCloseSweepAlerts` 一次性撤掉（日志：`journalctl -u fleet-engine --since '-2h' | grep 撤了关单对账`）；之后这段连同它的测试可以整个删。
 - 对账每小时顺带一轮单子打标挂版本（design 第七节「标签与里程碑」，#448）：UTC 分钟数 < 15 的那一轮跑（每小时一次，不挑钟点——「新开的一小时内有类别和版本」是相对时长），「引擎」机器人按受管的仓读现状：没有类别标签的新开（或重新打开）issue 问 Jev「issue 归类」题（第十一节），把握够贴需求/缺陷/杂项，把握不够或连不上都不贴（前者进日报，后者记没查成），人摘过的以后不再贴；进门时类别、里程碑都没有的（没走开单脚本漏开的）按创始人开的 / 机器开的分别挂当前版本、留未排期，有类别没里程碑的是有意未排期、不碰；里程碑关了还留着没做完的单挪到（新的）当前版本并留言，没有下一个版本就不挪、记没查成；未排期闲置 `FLEET_ISSUE_GROOM_STALE_DAYS`（默认 30）天贴「过时」，再 `FLEET_ISSUE_GROOM_CLOSE_DAYS`（默认 14）天没动关成「不做了」，贴了「冻结」、母单、已排进当前版本的跳过。这一轮的动静（贴了什么、没把握的、清了哪些）写成一条日报级提醒 `issue-groom:<owner>/<仓名>`，原地更新，不是要人拍的事。当前版本读不出来（没有还开着的 `v<N>` 里程碑）、Jev 没问成、GitHub 写不进去：驾驶舱「定时任务」页那一轮记没查全，`why` 以「单子打标挂版本」开头。日志：`journalctl -u fleet-engine --since '-2h' | grep 单子打标挂版本`。想马上看一遍：`fleet-temporal schedule trigger --schedule-id github-reconcile`（这条不挑北京时间，随手一跑只要落在整点后 15 分钟内就会带上）。PR 不贴类别标签、不挂里程碑（#654 删了 `pr-labels` 工作流：里程碑页的进度只数单子，PR 挂上去会把完成度虚报）。

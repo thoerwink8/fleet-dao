@@ -579,6 +579,11 @@ export interface IntakeStore {
   /** owner/name 不分大小写。 */
   findRepoByName(owner: string, name: string): Promise<IntakeRepo | null>;
   findTaskByIssue(repoId: string, issueNumber: number): Promise<Task | null>;
+  /**
+   * 按一批（仓, issue 号）一次查回对得上的任务（主页「做完的」反查 merged PR 挂的单用，免得一张一张查库）。
+   * 对不上的不回、不报错，调用方自己数缺了哪几张；看不懂的仓编号当作对不上。回的顺序不保证。
+   */
+  findTasksByIssues(refs: readonly { repoId: string; issueNumber: number }[]): Promise<Task[]>;
   /** 按（仓, issue 号）唯一：并发来两次也只建一行，第二次回 created=false 和已有的那行，不写操作记录。新行排在这个仓最后。 */
   createTaskFromIssue(input: NewIssueTask, audit: NewAuditEntry): Promise<{ task: Task; created: boolean }>;
   /** 标题和原话都没变是 unchanged（不写操作记录）。 */
@@ -627,7 +632,7 @@ export interface IngestedEvent {
 
 /**
  * 放进来的每条事件都先交给它：写 PR 镜像、CI 汇总（生产是 @fleet-dao/github 的 eventSink）。
- * issue 和评论之后另由 issue-intake.ts 变成任务、工作流。抛错 = 没处理成，这条投递记成出错。
+ * issue 不在这里变成任务：引擎拉单（@fleet-dao/engine 的 jobs/intake.ts）自己去 GitHub 读。抛错 = 没处理成，这条投递记成出错。
  */
 export interface GitHubEventSink {
   accept(event: IngestedEvent): Promise<void>;

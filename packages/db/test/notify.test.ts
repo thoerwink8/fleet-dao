@@ -12,6 +12,7 @@ import {
   pools,
   progressEvents,
   quotaWindows,
+  runs,
   sessionRuns,
   settings,
   tasks,
@@ -109,6 +110,28 @@ describe('写入即通知 fleet_changes', () => {
     ]);
   });
 
+  it('三段流水开一段、收场都发（主页的流水线图靠它刷新）；不属于任何需求的一段也发', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    await freshEars();
+    const [scope] = await t.db
+      .insert(runs)
+      .values({ segment: 'scope', taskId: task.id, model: 'opus-5.5', startedAt: NOW })
+      .returning();
+    if (!scope) throw new Error('流水没写进去');
+    await t.db.update(runs).set({ endedAt: NOW, outcome: 'done' }).where(eq(runs.id, scope.id));
+    const [patrol] = await t.db
+      .insert(runs)
+      .values({ segment: 'manual', taskId: null, model: 'opus-5.5', startedAt: NOW })
+      .returning();
+    await settle();
+    expect(heard).toEqual([
+      { table: 'runs', id: scope.id },
+      { table: 'runs', id: scope.id },
+      { table: 'runs', id: patrol?.id },
+    ]);
+  });
+
   it('渠道开关、改设置、记操作都发', async () => {
     await catalog(t.db);
     await freshEars();
@@ -182,6 +205,7 @@ describe('写入即通知 fleet_changes', () => {
     const sub = await addSubtask(t.db, task.id);
     const run = await addRun(t.db, { taskId: task.id, subtaskId: sub.id, routeId: 'r1' });
     await t.db.insert(progressEvents).values({ runId: run.id, kind: 'done', payload: null });
+    await t.db.insert(runs).values({ segment: 'manual', taskId: task.id, model: 'opus-5.5', startedAt: NOW });
     await t.db.insert(quotaWindows).values({
       poolId: 'relay-a',
       label: '5h',

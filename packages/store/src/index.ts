@@ -4,7 +4,6 @@ export * from './alert-work.ts';
 export * from './deploy-lag.ts';
 export * from './dev-fixtures.ts';
 export * from './done-check.ts';
-export * from './feishu-records.ts';
 export * from './github-intake.ts';
 export { pgIdempotencyStore, pgLedger, pgLocker } from './github-pg.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
@@ -13,6 +12,7 @@ export * from './memory-store.ts';
 export * from './pg-store.ts';
 export * from './ports.ts';
 export * from './reconcile.ts';
+export * from './well-formed.ts';
 export {
   actorFor,
   GhUser,

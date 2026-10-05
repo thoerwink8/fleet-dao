@@ -3,7 +3,11 @@
 // 就无限刷新），其余失败（无权限 403、后端 500、断网）一律不跳、把错误原样交给页面显示，不吞。
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-const ME = { user: { id: 'u-a', displayName: '甲', role: 'founder' }, csrfToken: 'tok-1' };
+const ME = {
+  user: { id: 'u-a', displayName: '甲', role: 'founder' },
+  csrfToken: 'tok-1',
+  env: { name: '测试机' },
+};
 
 /** 换掉全局的 location 和 fetch：fetch 对 /api/me 回指定的状态。 */
 function setup(at: { pathname: string; search?: string }, reply: { status: number; body?: unknown }) {

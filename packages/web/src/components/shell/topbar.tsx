@@ -21,14 +21,13 @@ import {
   errorText,
   useAllBoards,
   useApi,
-  useEnv,
   useLiveState,
   useMe,
   useNotifications,
   useResolveNotification,
 } from '../../api/client';
 import type { Notification } from '../../api/types';
-import { canSee } from '../../demo/access';
+import { canSee, isDemo } from '../../demo/access';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { noticeLevelMeta, taskTone } from '../../lib/status';
@@ -82,14 +81,15 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
 }
 
 /**
- * 顶栏环境名徽标（#820 片 1，方案 §4.6）：常驻「现在看的是哪一台」——法国还是本机。名字取自 api/env 的
- * FLEET_MACHINE_NAME，读不到就照实写「认不出」，不猜成某一台。点开进环境页。演示版没有这一页，也不显示。
- * 读坏（后端连不上）时不占位、不留空壳：那一格本身就说明不了什么，交给环境页去报原因。
+ * 顶栏环境名徽标（#820 片 1，方案 §4.6）：常驻「现在看的是哪一台」——法国还是本机。名字跟着 /me 带回（后端的
+ * FLEET_MACHINE_NAME），读不到就照实写「认不出」，不猜成某一台；不为一个名字每分钟拉整份环境页（那一页每次都跑全套健康检查）。
+ * 点开进环境页。演示版没有这一页，也不显示。读坏（后端连不上）时不占位、不留空壳：交给环境页去报原因。
  */
 function EnvBadge() {
-  const { data } = useEnv();
-  if (!data) return null;
-  const problem = data.name.problem !== undefined;
+  const { data: me } = useMe();
+  if (!me || isDemo()) return null;
+  const { env } = me;
+  const problem = env.problem !== undefined;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -100,15 +100,13 @@ function EnvBadge() {
             'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border bg-background/60 px-2 text-sub transition-colors hover:border-border-strong sm:flex',
             problem ? 'text-ink-stall' : 'text-muted-foreground',
           )}
-          aria-label={`现在看的是${data.name.name}，打开环境页`}
+          aria-label={`现在看的是${env.name}，打开环境页`}
         >
           <ServerCog className="size-3.5 opacity-70" aria-hidden />
-          <span className="num max-w-24 truncate font-medium">{data.name.name}</span>
+          <span className="num max-w-24 truncate font-medium">{env.name}</span>
         </Link>
       </TooltipTrigger>
-      <TooltipContent>
-        {problem ? data.name.problem : '现在看的是这一台环境；点开看它现在怎样'}
-      </TooltipContent>
+      <TooltipContent>{problem ? env.problem : '现在看的是这一台环境；点开看它现在怎样'}</TooltipContent>
     </Tooltip>
   );
 }

@@ -152,16 +152,17 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   });
   const github = githubMirror(db);
   const store = createPgStore(db, { now });
-  // 线上版本跟不跟得上主线：只有法国的正式机器上有发布目录和自动发布；读的时候现算，报警每 5 分钟判一次
-  const onFrance = config.env === 'production';
-  const deployLag = onFrance
+  // 正式环境（FLEET_ENV=production）：法国和本机档（WSL）都是，不只法国——下面几项在两台上都接着、都判。
+  // 线上版本跟不跟得上主线：正式环境才有发布目录和自动发布；读的时候现算，报警每 5 分钟判一次
+  const production = config.env === 'production';
+  const deployLag = production
     ? { check: deployLagCheck(() => readDeployLagInput(), now) }
     : { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE };
-  const stopDeployLagWatch = onFrance
+  const stopDeployLagWatch = production
     ? startDeployLagWatch({ db, read: () => readDeployLagInput(), now, log })
     : () => {};
   // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
-  const stopWatchdogWatch = onFrance ? startWatchdogWatch({ db, now, log }) : () => {};
+  const stopWatchdogWatch = production ? startWatchdogWatch({ db, now, log }) : () => {};
   // 飞书网关还来不来：飞书接口的门口记，/healthz 读的时候现算；没配通行证网关一律进不来，报「未接」
   const gatewaySeen = createGatewaySeen(now);
   const deps: Deps = {
@@ -177,8 +178,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),
-    // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
-    alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
+    // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
+    alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
     routingLayers: pgRoutingLayers(db),
     // 会话用户切号的现状（#194）：引擎落库的切号账本，额度页顶上一行
@@ -187,31 +188,31 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     carpoolReconcile: pgCarpoolReconcile(db),
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
-    // 环境页（#820 片 1）的版本那一项：法国的正式机器读发布目录现算；别处不给，页面写「没查成」
-    ...(onFrance ? { deployLag: () => readDeployLagInput() } : {}),
+    // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
+    ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
     release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,
       temporal,
-      // 这台机器按 release.env 的 FLEET_SERVICES 没开引擎（比如法国 2026-09-29 起临时关了）：engine 项报「未接」，不报红
+      // 这台机器按 release.env 的 FLEET_SERVICES 没开引擎：engine 项报「未接」，不报红
       ...(engineEnabled(process.env) ? {} : { engineNotWired: ENGINE_OFF }),
       githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
       deployLag,
       feishuGateway: feishuGatewayPart(config, gatewaySeen),
-      // 引擎切号（#157）写的提醒：只有法国的引擎会写，别处一直是好的
+      // 引擎切号（#157）写的提醒：只有这台库上跑着的引擎会写，没开引擎的环境一直是好的
       sessionOrg: sessionOrgHealthCheck(db),
-      // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有法国的引擎会写
+      // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有这台库上跑着的引擎会写
       githubApp: githubAppHealthCheck(db),
-      // 全流程巡检（#223）：引擎每 6 小时在巡检仓跑一轮、结论写进库；只有法国的正式机器上有
-      canary: onFrance
+      // 全流程巡检（#223）：引擎每 6 小时在巡检仓跑一轮、结论写进库；只在正式环境接
+      canary: production
         ? { check: canaryHealthCheck(db, now) }
         : { check: async () => {}, notWired: CANARY_NOT_HERE },
-      // 看门狗（#203）：引擎每 5 分钟跑一轮、记在登记表上；只有法国的正式机器上有
-      watchdog: onFrance
+      // 看门狗（#203）：引擎每 5 分钟跑一轮、记在登记表上；只在正式环境接
+      watchdog: production
         ? { check: watchdogHealthCheck(db, now) }
         : { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
     }),

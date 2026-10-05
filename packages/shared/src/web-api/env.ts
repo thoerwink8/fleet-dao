@@ -26,13 +26,13 @@ export const EnvNameSchema = z.object({
   problem: z.string().min(1).optional(),
 });
 
-/** 引擎那一格：和主页同一个探法（home-engine.ts）。off = 按 FLEET_SERVICES 没开（临时调整，不标红）。 */
+/** 引擎那一格：和主页同一个探法（home-engine.ts）。off = 按配置（FLEET_SERVICES）没开，不标红。 */
 export const EnvEngineSchema = z.object({
   state: z.enum(['on', 'off', 'down', 'unknown']),
   detail: z.string().optional(),
 });
 
-/** 在用版本、落后主线没有、最近一次发布。只在法国的正式机器上有；别的环境读不到标记，照实报到 problems / reason。 */
+/** 在用版本、落后主线没有、最近一次发布。只在正式环境有（法国和本机档都是）；别的环境读不到标记，照实报到 problems / reason。 */
 export const EnvVersionSchema = z.object({
   /** 在用的提交号；还没发布过是 null。 */
   current: z.string().nullable(),

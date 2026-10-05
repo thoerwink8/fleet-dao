@@ -1304,12 +1304,23 @@ api_healthz() {
   printf '%s\t%s' "${out##*$'\n'}" "${out%$'\n'*}"
 }
 
-# 切之前后端的健康报告（后端没在跑就空）：切之后逐项对比，之前好的变坏了才算这一版的错
+# 切之前后端的健康报告：切之后逐项对比，之前好的变坏了才算这一版的错。
+# 后端没在跑（本机没启用、或没起来）：空着、返回 0——切之后的项都按「切之前就不好或第一次起」算，本来就没有可比的。
+# 后端在跑却读不到（连不上、超时、回的不是健康报告）：打印原因、返回 1，调用方判红不切。拿空的「切之前」去比，
+# 切之后变红的项会被当成「之前就不好」、不退回（审查 S1）——读不到不等于没在跑。
 api_report_before() {
-  local got
+  local got code items
   if ! has_service fleet-api || [[ "$(systemctl is-active fleet-api.service 2>/dev/null)" != active ]]; then return 0; fi
-  got=$(api_healthz) || return 0
-  report_items "${got#*$'\t'}" 2>/dev/null || true
+  if ! got=$(api_healthz); then
+    printf '驾驶舱接口 http://%s/healthz 连不上' "$COCKPIT"
+    return 1
+  fi
+  code=${got%%$'\t'*}
+  if [[ "$code" != 200 && "$code" != 503 ]] || ! items=$(report_items "${got#*$'\t'}" 2>/dev/null); then
+    printf '/healthz 回的不是健康报告（HTTP %s）' "$code"
+    return 1
+  fi
+  printf '%s\n' "$items"
 }
 
 # 服务起来后再看一会儿：还在跑、主进程没换、没被重启过，才算起稳了
@@ -1674,7 +1685,10 @@ do_release() { # 要发的提交（空 = 主线最新）
   migrate "$SHA"
   load_catalog "$SHA" || return 1
   load_routing "$SHA" || return 1
-  before=$(api_report_before)
+  if ! before=$(api_report_before); then
+    red "后端在跑，但切版本之前读不到它的健康报告（$before）：没有「切之前」就分不出切之后变红的项是不是这一版弄坏的，不切；后端答得上来了再发"
+    return 1
+  fi
   # 紧挨着切版本：写完到服务换上这一版之间，在跑的旧服务自己重启才会读到新配置，这段越短越好
   apply_config "$SHA" release || return 1
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"

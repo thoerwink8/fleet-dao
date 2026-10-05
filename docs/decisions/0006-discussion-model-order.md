@@ -3,6 +3,7 @@
 - 日期：2026-09-30（本轮，具体时刻未记录）
 - 谁拍的：创始人
 - 状态：已采纳；模型入口的代码改动另走 PR，未因本记录自动宣称已经生效
+- 现状（2026-10-05 回写）：生效。讨论和第二意见的模型顺序以本份为准（`agents/skills/discuss/scripts/second-opinion.mjs` 的 `FAMILY_ORDER`）；0008 已失效。
 - 关联：`agents/skills/discuss/`、`#509` 的三段流程和 Review 设计
 
 ## 原话

@@ -31,9 +31,10 @@ describe('配置', () => {
       teamChatId: 'oc_team',
       testChatId: null,
       ackEmoji: 'Get',
-      askBudgetPerDay: 10,
-      boardRefreshMs: 30_000,
     });
+    // 旧推送、盘面那两项退役了：配置里不再有
+    expect(c).not.toHaveProperty('askBudgetPerDay');
+    expect(c).not.toHaveProperty('boardRefreshMs');
     expect(c.founders).toEqual([
       { openId: 'ou_founder_a', name: '甲' },
       { openId: 'ou_founder_b', name: '乙' },
@@ -55,7 +56,7 @@ describe('配置', () => {
     }
   });
 
-  it('写错了的都拦下：通行证太短、地址带路径、群编号和 open_id 格式不对、重复、数字越界', () => {
+  it('写错了的都拦下：通行证太短、地址带路径、群编号和 open_id 格式不对、重复', () => {
     const p = problems({
       ...GOOD,
       FEISHU_APP_ID: 'app123',
@@ -65,8 +66,6 @@ describe('配置', () => {
       FEISHU_TEAM_CHAT_ID: 'team',
       FEISHU_TEST_CHAT_ID: 'test',
       FEISHU_FOUNDERS: 'founder-a, ou_b, ou_b',
-      FEISHU_ASK_BUDGET_PER_DAY: '0',
-      FEISHU_BOARD_REFRESH_SECONDS: 'soon',
       FEISHU_ACK_EMOJI: '收到',
     });
     expect(p).toEqual([
@@ -79,8 +78,6 @@ describe('配置', () => {
       'FEISHU_FOUNDERS 里「founder-a」不是 open_id（应以 ou_ 开头）',
       'FEISHU_FOUNDERS 里 ou_b 写了两次',
       'FEISHU_ACK_EMOJI 不像飞书的 emoji_type：「收到」',
-      'FEISHU_ASK_BUDGET_PER_DAY 要是 1–200 之间的整数，现在是「0」',
-      'FEISHU_BOARD_REFRESH_SECONDS 要是 5–3600 之间的整数，现在是「soon」',
     ]);
   });
 

@@ -28,7 +28,7 @@ export const TOKEN_SCOPES: Record<AppRole, Partial<Record<TokenScope, Permission
   },
   engine: {
     // 合并（contents + pull_requests 写）、改 issue / 里程碑 / 评论（issues 写）、读 CI（checks、actions 读）、
-    // 贴「认领对得上」（statuses 写，#299）、读分支规则（只要 metadata，见 repos.ts）。没有 administration。
+    // 贴 cold-verify（statuses 写）、读分支规则（只要 metadata，见 repos.ts）。没有 administration。
     api: {
       contents: 'write',
       pull_requests: 'write',

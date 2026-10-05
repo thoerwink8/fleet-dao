@@ -15,18 +15,14 @@ export interface Config {
   backendUrl: string;
   /** 驾驶舱在浏览器里的地址，卡片上「打开驾驶舱」用。 */
   publicUrl: string;
-  /** 团队群：置顶盘面卡、三类推送都发这里。 */
+  /** 团队群：收原话，网关调不通后端的报警也发这里。 */
   teamChatId: string;
-  /** 端到端自测用的测试群：能在里面记任务、问进度，但不放盘面卡、不收推送。 */
+  /** 端到端自测用的测试群：照样收原话，但不收报警。 */
   testChatId: string | null;
   /** 白名单：只替这几位办事，别人礼貌拒绝。 */
   founders: Founder[];
   /** 收到消息先加的表情（飞书 emoji_type）。 */
   ackEmoji: string;
-  /** 每天最多发几张「求人」的卡（要人拍 + AI 追问）；超了只发一张提醒，其余只进驾驶舱。 */
-  askBudgetPerDay: number;
-  /** 盘面快照多久取一次。 */
-  boardRefreshMs: number;
 }
 
 export class ConfigError extends Error {
@@ -76,23 +72,6 @@ export function loadConfig(env: Env): Config {
   if (!/^[A-Za-z0-9_]{1,40}$/.test(ackEmoji))
     problems.push(`FEISHU_ACK_EMOJI 不像飞书的 emoji_type：「${ackEmoji}」`);
 
-  const askBudgetPerDay = intIn(
-    'FEISHU_ASK_BUDGET_PER_DAY',
-    env.FEISHU_ASK_BUDGET_PER_DAY,
-    10,
-    1,
-    200,
-    problems,
-  );
-  const boardRefreshSeconds = intIn(
-    'FEISHU_BOARD_REFRESH_SECONDS',
-    env.FEISHU_BOARD_REFRESH_SECONDS,
-    30,
-    5,
-    3600,
-    problems,
-  );
-
   if (problems.length > 0) throw new ConfigError(problems);
   return {
     appId,
@@ -104,8 +83,6 @@ export function loadConfig(env: Env): Config {
     testChatId,
     founders,
     ackEmoji,
-    askBudgetPerDay,
-    boardRefreshMs: boardRefreshSeconds * 1000,
   };
 }
 
@@ -147,21 +124,4 @@ function baseUrl(name: string, value: string, problems: string[]): string {
     problems.push(`${name} 不是合法地址：「${value}」`);
     return '';
   }
-}
-
-function intIn(
-  name: string,
-  value: string | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-  problems: string[],
-): number {
-  if (value === undefined || value.trim() === '') return fallback;
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < min || n > max) {
-    problems.push(`${name} 要是 ${min}–${max} 之间的整数，现在是「${value}」`);
-    return fallback;
-  }
-  return n;
 }

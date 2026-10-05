@@ -16,7 +16,6 @@ import {
   fetchBranchHead,
   fetchMainline,
 } from './bundle.ts';
-import { type ClaimsGitHub, createClaimsGitHub } from './claims.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 import {
@@ -39,6 +38,7 @@ import {
   type Locker,
   memoryLocker,
 } from './deps.ts';
+import { type ClaimsGitHub, createClaimsGitHub } from './engine-pulls.ts';
 import { GitHubError } from './errors.ts';
 import { createEventSink, type EventSink, type WorkflowWaker } from './events.ts';
 import { execGit, type GitRunner } from './git.ts';
@@ -127,7 +127,7 @@ export interface GitHubOptions {
 
 /**
  * 各身份要有的权限（自检用，引擎每小时对账跑一次、缺了报提醒、健康页 github_app 跟着红）。「干活的」只推分支、开 PR；
- * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴「认领对得上」（#299，commit status 要 statuses:write）。
+ * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴 cold-verify（commit status 要 statuses:write）。
  * 由 token-scopes.ts 里各用途要的权限取并集算出：令牌实际请求的永远不超过这张表，这张表里的每一项也都有用途在用。
  */
 export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'write'>> = {

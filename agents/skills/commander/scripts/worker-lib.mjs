@@ -50,7 +50,7 @@
 //      pidUncertain: true），让 status/stop/clean 之后还找得到这棵工作树，报错里明说
 //      「进程可能已经在跑、没记上」。metaProblem/oneStatus/cmdStop/cmdClean 都跟着认 pidUncertain 这个状态。
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MODELS = ['grok', 'codex', 'kimi', 'claude'];
@@ -374,43 +374,37 @@ export function closingBrief({ branch, noShip, noAutomerge, githubRoute = { via:
       '做完上面的事，最后单独一行只输出：完成',
     ].join('\n');
   }
+  const open = 'pnpm pr:open --title "<标题>" --body-file _tmp/pr-body.md';
   const prSteps = noAutomerge
     ? [
-        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的四栏填；「还欠什么」栏写「人闸：改标准」，不再另写档位栏。',
-        '6. 不要挂自动合并、不要跑 gh pr merge：这条改的是要创始人拍板的标准，他同意之前不能自己合，合并由',
-        '   创始人或帅位在他同意后另外做。',
-        '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不用等合并、不用',
-        '   等创始人回话。',
+        `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md，「还欠什么」写「人闸：改标准」；跑 ${open} --no-automerge`,
+        '   开 PR。不要挂自动合并、不要跑 gh pr merge：创始人同意之前不能合。',
+        '5. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不等合并、不等创始人回话。',
       ]
     : [
-        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的四栏填。',
-        '6. gh pr merge <PR 号> --auto --squash 挂自动合并。',
-        '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
+        `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md，跑 ${open}：它开 PR、当场挂自动合并；`,
+        '   它说「人闸：改标准」就照第 6 条停手。',
+        '5. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
       ];
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
-    '1. 先读仓根的 AGENTS.md，照它的规矩做。这是本机快马：不开单、不另写需求/结果文档、不认领（#446）。',
-    '2. 改完依次跑，都要过：',
-    '   - pnpm test:changed（它说要全跑、退出码 3：照它打印的命令单独跑对应包的测试，不要在这台机器上跑全量',
-    '     pnpm test 或 pnpm check）',
-    '   - pnpm format',
-    '   - pnpm typecheck',
-    '3. 提交信息一句话说清改了什么、为什么。',
-    `4. git push -u origin ${branch}`,
+    '1. 照仓根 AGENTS.md 做。这是本机快马：不开单、不另写需求/结果文档、不认领（#446）。',
+    '2. 改完跑 pnpm test:changed 要过（退出码 3 时照它打印的命令单跑对应包，不在这台机器上跑全量 pnpm test 或 pnpm check）；',
+    '   格式和类型检查推前钩子会跑。提交信息一句话说清改了什么、为什么。',
+    `3. git push -u origin ${branch}`,
     ...prSteps,
-    '8. 不开新 issue，不碰这棵工作树以外的目录、不碰别的检出。',
-    '   碰到四类人闸——对外发布（上线、发版）、花钱（账单会多出一笔的）、删数据、改标准（AGENTS.md 本仓段里',
-    '   「改标准是人闸第四类」列的路径）——就停手：不自己做、不挂自动合并，最后输出「卡住：人闸——<哪一类、卡在哪>」。',
+    '6. 不开新 issue，不碰这棵工作树以外的目录、不碰别的检出。碰到四类人闸——对外发布（上线、发版）、花钱（账单会',
+    '   多出一笔的）、删数据、改标准——就停手：不自己做、不挂自动合并，最后输出「卡住：人闸——<哪一类、卡在哪>」。',
     ...(githubRoute.via === 'proxy'
       ? [
-          '9. 这台机器此刻连 GitHub 只能走代理（环境变量 https_proxy/http_proxy，起你之前实测过直连不通）：git 或 gh',
-          '   连 GitHub 失败时不要去掉代理（直连是不通的），原样重试一次；还不行就输出「卡住：GitHub 连不上——<报错>」。',
+          '7. 这台机器连 GitHub 只能走代理（https_proxy/http_proxy，实测过直连不通）：git 或 gh 连不上时不要去掉代理，',
+          '   原样重试一次；还不行就输出「卡住：GitHub 连不上——<报错>」。',
         ]
       : [
-          '9. 如果 git 或 gh 连 GitHub 失败、像是代理问题：命令前加',
+          '7. git 或 gh 连 GitHub 失败、像是代理问题：命令前加',
           '   env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY 再试一次。',
         ]),
-    '10. 最后单独一行输出：完成：PR #<号>；做不下去就输出：卡住：<原因>',
+    '8. 最后单独一行输出：完成：PR #<号>；做不下去就输出：卡住：<原因>',
   ].join('\n');
 }
 
@@ -578,21 +572,34 @@ const normalizePath = (p) =>
     .toLowerCase();
 
 /**
- * 这棵工作树、这个分支，git 自己的账本里是不是已经占了。回 { ok: true }、{ ok: false, kind: 'conflict', why }
- * （真占了，调用方算冲突，退出码 3），或 { ok: false, kind: 'unknown', why }（list 本身没跑成，查不出，算没查成，退出码 2）。
+ * 从 here（主检出或它的任一棵工作树）找主检出：git worktree list 的第一条永远是主检出。
+ * 回 { ok: true, main, trees }，或 { ok: false, why }（list 没跑成、输出认不出，算没查成，退出码 2；不退回拿 here 冒充）。
  */
-function worktreeConflict(io, repo, worktreeDir, branch) {
-  const r = io.git(['worktree', 'list', '--porcelain'], { cwd: repo });
-  if (r.status !== 0) return { ok: false, kind: 'unknown', why: `git worktree list 没跑成：${reasonOf(r)}` };
+function mainCheckoutOf(io, here) {
+  const r = io.git(['worktree', 'list', '--porcelain'], { cwd: here });
+  if (r.status !== 0) return { ok: false, why: `git worktree list 没跑成：${reasonOf(r)}` };
+  const trees = parseWorktreeList(r.stdout);
+  const main = trees[0]?.path;
+  if (!main)
+    return {
+      ok: false,
+      why: `git worktree list 的输出里认不出主检出（${
+        String(r.stdout ?? '')
+          .trim()
+          .slice(0, 80) || '空的'
+      }）`,
+    };
+  return { ok: true, main: resolve(main), trees };
+}
+
+/** 这棵工作树、这个分支，git 自己的账本里是不是已经占了：回 { ok: true } 或 { ok: false, why }（调用方算冲突，退出码 3）。 */
+function worktreeConflict(trees, worktreeDir, branch) {
   const target = normalizePath(worktreeDir);
   const branchRef = `refs/heads/${branch}`;
-  const hit = parseWorktreeList(r.stdout).find(
-    (e) => normalizePath(e.path) === target || e.branch === branchRef,
-  );
+  const hit = trees.find((e) => normalizePath(e.path) === target || e.branch === branchRef);
   if (!hit) return { ok: true };
   return {
     ok: false,
-    kind: 'conflict',
     why: `已经有一棵工作树占着了：${hit.path}${hit.branch ? `（分支 ${hit.branch}）` : ''}`,
   };
 }
@@ -633,21 +640,25 @@ async function cmdStart(p, io) {
   }
   if (!briefText.trim()) return fail(io, `brief 文件是空的：${briefPath}`);
 
-  const repo = resolvePath(io, p.options.get('repo') ?? io.cwd());
+  const here = resolvePath(io, p.options.get('repo') ?? io.cwd());
   const branch = `w/${name}`;
+
+  const repoCheck = io.git(['rev-parse', '--is-inside-work-tree'], { cwd: here });
+  if (repoCheck.status !== 0) return fail(io, `--repo ${here} 不是 git 检出：${reasonOf(repoCheck)}`);
+
+  const found = mainCheckoutOf(io, here);
+  if (!found.ok) return fail(io, found.why);
+  const repo = found.main;
   // 建在主检出的 .claude/worktrees/ 下（通用段：工作树一律建在那儿）——那里被 .gitignore 忽略、格式检查不扫，
-  // 开会话的清扫也认它；原来建在主检出旁边（fd-w-<名字>），散在仓外没人收。
+  // 开会话的清扫也认它；原来建在主检出旁边（fd-w-<名字>），散在仓外没人收。在某棵工作树里起工人也拼在主检出下，
+  // 不拿当前目录直接拼（那样会在那棵树里再套一棵）。
   const worktreeDir = join(repo, '.claude', 'worktrees', `w-${name}`);
 
-  // 先做本地、不碰子进程的检查（已经存在就不用再去问 git 了），再验 repo、再问 git 账本里占没占。
   if (existsSync(worktreeDir))
     return conflict(io, `工作树已经存在：${worktreeDir}（换个 --name，或者先 clean 掉旧的）`);
 
-  const repoCheck = io.git(['rev-parse', '--is-inside-work-tree'], { cwd: repo });
-  if (repoCheck.status !== 0) return fail(io, `--repo ${repo} 不是 git 检出：${reasonOf(repoCheck)}`);
-
-  const wc = worktreeConflict(io, repo, worktreeDir, branch);
-  if (!wc.ok) return wc.kind === 'conflict' ? conflict(io, wc.why) : fail(io, wc.why);
+  const wc = worktreeConflict(found.trees, worktreeDir, branch);
+  if (!wc.ok) return conflict(io, wc.why);
 
   const routed = pickGithubRoute(io, repo);
   if (!routed.ok) return fail(io, routed.why);

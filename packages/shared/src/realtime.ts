@@ -8,6 +8,8 @@ export const REALTIME_TABLES = [
   'tasks',
   'subtasks',
   'session_runs',
+  // 三段流水（scope / manual / verify，迁移 0023）：主页的流水线图、任务详情的流水读它。触发器在 0035。
+  'runs',
   'progress_events',
   'quota_windows',
   'notifications',

@@ -102,7 +102,7 @@ export function serviceHealthChecks(parts: {
   githubEvents: () => Promise<void>;
   /** 判断题（judge-health.ts）：没配报「未接」；配置起不来、最近一次真调用没成报红。 */
   judge: { check(): Promise<void>; readonly notWired?: string };
-  /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在法国的正式机器上查，别处报「未接」。 */
+  /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在正式环境查，别处报「未接」。 */
   deployLag: { check(): Promise<void>; readonly notWired?: string };
   /** 飞书网关还来不来（gateway-seen.ts）：没配网关通行证报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 没说明的检查是 async () => {}（Promise<void>），换成 undefined 它们就对不上了
@@ -111,10 +111,10 @@ export function serviceHealthChecks(parts: {
   sessionOrg: () => Promise<void>;
   /** GitHub 两个机器人的权限（github-app-health.ts）：引擎每小时对账自检报的缺权限、没查成的提醒还开着就报红。 */
   githubApp: () => Promise<void>;
-  /** 全流程巡检（canary-health.ts，#223）：最近一轮的结论和时间；不在法国的正式机器上报「未接」。 */
+  /** 全流程巡检（canary-health.ts，#223）：最近一轮的结论和时间；不在正式环境报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
   canary: { check(): Promise<void | string>; readonly notWired?: string };
-  /** 看门狗（watchdog-health.ts，#203）：它自己最近一轮几点跑完、有没有过期；不在法国的正式机器上报「未接」。 */
+  /** 看门狗（watchdog-health.ts，#203）：它自己最近一轮几点跑完、有没有过期；不在正式环境报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
   watchdog: { check(): Promise<void | string>; readonly notWired?: string };
 }): HealthCheck[] {

@@ -74,7 +74,7 @@ export function ciHistoryCheck(input: CiHistoryInput): CheckResult {
   const lines = [
     `按提交扫：${base.slice(0, 7)}..${head.slice(0, 7)} 有 ${scan.commits.length} 个提交，逐个看了新增的 ` +
       `${scan.addedLines} 行、文件名、提交说明和作者，查出 ${scan.findings.length} 条` +
-      (scan.binaryHunks > 0 ? `（带 NUL 的 ${scan.binaryHunks} 段是二进制，没看内容、只按文件名判）` : ''),
+      (scan.binaryHunks > 0 ? `（带 NUL 的 ${scan.binaryHunks} 段去掉 NUL 扫了）` : ''),
     ...scan.findings.map(formatFinding),
   ];
   if (scan.findings.length > 0) {

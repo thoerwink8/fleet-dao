@@ -1,5 +1,5 @@
 // 帅位「开别家模型的会话去干活」的启动器（worker-lib.mjs）：git/gh/pnpm/spawn/进程查杀全部注入假的，
-// home、brief 文件、prompt.txt、meta.json 用真的临时目录（和 seat-claim.test.ts 一个路数）。
+// home、brief 文件、prompt.txt、meta.json 用真的临时目录。
 // 每条失败路径都故意造一遍：工作树已存在、不认识的模型、pnpm install 失败、meta 缺失或损坏、clean 时 PR 没合没关——
 // 都要明说、非 0 退出，不当成没事。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -84,6 +84,14 @@ const spawnSupport = (await import(
 
 const ok = (stdout = ''): RunResult => ({ status: 0, stdout, stderr: '' });
 const bad = (stderr: string, status = 1): RunResult => ({ status, stdout: '', stderr });
+/** git worktree list --porcelain 的回话：第一条是主检出（w.repo），其余是已有的工作树。 */
+const listed = (w: { repo: string }, ...trees: string[]): RunResult =>
+  ok(
+    [
+      `worktree ${w.repo}\nHEAD abc\nbranch refs/heads/main`,
+      ...trees.map((t) => `worktree ${t}\nHEAD def`),
+    ].join('\n\n'),
+  );
 /** 取数组第一项、明确它在——比非空断言（!）更安全，比每处都 ?. 更看得清是「就该有一个」。 */
 function must<T>(v: T | undefined, msg: string): T {
   if (v === undefined) throw new Error(msg);
@@ -286,7 +294,7 @@ describe('start：happy path', () => {
   it('grok：git rev-parse、worktree list、fetch、worktree add、pnpm install 按顺序跑完，起 grok，写 meta.json 和 prompt.txt', async () => {
     const w = world();
     const briefFile = brief(w, '在 _tmp/x.txt 写一行 hi');
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok('已经装好了'));
     w.spawnReplies.push({ pid: 4242 });
 
@@ -343,7 +351,7 @@ describe('start：happy path', () => {
     const prompt = w.prompt('w1');
     expect(prompt).toContain('在 _tmp/x.txt 写一行 hi');
     expect(prompt).toContain('收尾交代');
-    expect(prompt).toContain('gh pr create');
+    expect(prompt).toContain('pnpm pr:open');
     expect(w.out.join('\n')).toContain('pid 4242');
     expect(w.out.join('\n')).toContain('档位 high');
   });
@@ -351,7 +359,7 @@ describe('start：happy path', () => {
   it('codex：prompt 走标准输入描述符（不是命令行参数），带 --dangerously-bypass-approvals-and-sandbox 和思考档位；--no-ship 换收尾交代；--model-id 透传', async () => {
     const w = world();
     const briefFile = brief(w);
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 55 });
 
@@ -399,12 +407,12 @@ describe('start：happy path', () => {
     expect(meta.noShip).toBe(true);
     const prompt = w.prompt('w2');
     expect(prompt).toContain('冒烟测试');
-    expect(prompt).not.toContain('gh pr create');
+    expect(prompt).not.toContain('pr:open');
   });
 
   it('--effort 不给、仓里的路由骨架没给这个模型配档位：就是 high，且总是显式传给命令行', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 1 });
     await w.run(['start', '--model', 'grok', '--name', 'w3', '--brief', brief(w)]);
@@ -419,24 +427,30 @@ describe('start：happy path', () => {
     // 创始人 09-28 晚上拍：改标准的活也要能派给别家模型，但改标准是人闸第四类（AGENTS.md），不能让模型自己
     // 挂自动合并把改标准的 PR 合了。
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 1 });
     await w.run(['start', '--model', 'grok', '--name', 'w-gate', '--brief', brief(w), '--no-automerge']);
     const gated = w.prompt('w-gate');
     expect(gated).toContain('人闸：改标准');
     expect(gated).toContain('不要挂自动合并');
-    expect(gated).not.toContain('gh pr merge <PR 号> --auto --squash');
+    expect(gated).toContain('pnpm pr:open');
+    expect(gated).toContain('--no-automerge');
     expect(gated).toContain('四栏'); // #654：PR 模板只剩四栏，不再写「档位」栏
 
     const w2 = world();
-    w2.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w2.gitReplies.push(ok('true'), listed(w2), ok(''), ok(''));
     w2.pnpmReplies.push(ok());
     w2.spawnReplies.push({ pid: 2 });
     await w2.run(['start', '--model', 'grok', '--name', 'w-fast', '--brief', brief(w2)]);
     const fast = w2.prompt('w-fast');
-    expect(fast).toContain('gh pr merge <PR 号> --auto --squash');
-    expect(fast).not.toContain('人闸：改标准');
+    // 开 PR、挂自动合并收成 pnpm pr:open 一步；格式和类型检查推前钩子跑，交代里不再重复
+    expect(fast).toContain('pnpm pr:open');
+    expect(fast).not.toContain('--no-automerge');
+    expect(fast).not.toContain('gh pr create');
+    expect(fast).not.toContain('pnpm format');
+    expect(fast).not.toContain('pnpm typecheck');
+    expect(fast).toContain('它说「人闸：改标准」就照第 6 条停手');
   });
 });
 
@@ -446,7 +460,7 @@ describe('start：GitHub 走哪条路（直连不通就走环境里原有的代�
   it('直连通：照旧——fetch 去代理、模型命令行加 GitHub 的 NO_PROXY、收尾交代教 env -u；meta 记 direct', async () => {
     const w = world();
     w.io.env.https_proxy = PROXY;
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 7 });
 
@@ -478,7 +492,7 @@ describe('start：GitHub 走哪条路（直连不通就走环境里原有的代�
       bad('fatal: unable to access github.com: Failed to connect: Timed out'),
       ok('abc\trefs/heads/main'),
     );
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 8 });
 
@@ -505,7 +519,7 @@ describe('start：GitHub 走哪条路（直连不通就走环境里原有的代�
     const w = world();
     w.io.env.https_proxy = PROXY;
     w.probeReplies.push(bad('direct: Connection timed out'), bad('proxy: Could not connect to 127.0.0.1'));
-    w.gitReplies.push(ok('true'), ok(''));
+    w.gitReplies.push(ok('true'), listed(w));
 
     expect(await w.run(['start', '--model', 'grok', '--name', 'r3', '--brief', brief(w)])).toBe(2);
 
@@ -520,7 +534,7 @@ describe('start：GitHub 走哪条路（直连不通就走环境里原有的代�
   it('【故意造出的失败】直连不通、环境里也没有代理：退出码 2，明说没有代理可走', async () => {
     const w = world();
     w.probeReplies.push(bad('direct: Connection timed out'));
-    w.gitReplies.push(ok('true'), ok(''));
+    w.gitReplies.push(ok('true'), listed(w));
 
     expect(await w.run(['start', '--model', 'grok', '--name', 'r4', '--brief', brief(w)])).toBe(2);
 
@@ -569,7 +583,7 @@ const sharedEffort = (await import(
 describe('start：思考档位照仓里的路由骨架（#470，本机读不到法国库）', () => {
   /** 跑一次 start 到起模型那一步（git、pnpm、spawn 都给成功）。 */
   const started = async (w: ReturnType<typeof world>, args: string[]) => {
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 7 });
     const code = await w.run(['start', ...args, '--brief', brief(w)]);
@@ -696,10 +710,43 @@ describe('start：【故意造出的失败】', () => {
   it('工作树已经存在：拒绝，退出码 3，不跑 git fetch/worktree add', async () => {
     const w = world();
     mkdirSync(join(w.repo, '.claude', 'worktrees', 'w-dup'), { recursive: true }); // 提前占好目录，模拟已经有一棵工作树
+    w.gitReplies.push(ok('true'), listed(w));
     const code = await w.run(['start', '--model', 'grok', '--name', 'dup', '--brief', brief(w)]);
     expect(code).toBe(3);
     expect(w.err.join('\n')).toContain('工作树已经存在');
-    expect(w.gitCalls).toEqual([]); // 本地 fs 检查在问 git 之前就短路，不该碰一次 git
+    expect(w.gitCalls.map((c) => c.args[0])).toEqual(['rev-parse', 'worktree']); // 找完主检出就短路，不 fetch
+  });
+
+  it('【故意造出的失败】在某棵工作树里起（不带 --repo）：新树建在主检出的 .claude/worktrees/ 下，不在当前那棵树里再套一棵', async () => {
+    const w = world();
+    const outer = join(w.repo, '.claude', 'worktrees', 'w-outer');
+    mkdirSync(outer, { recursive: true });
+    w.io.cwd = () => outer;
+    w.gitReplies.push(ok('true'), listed(w, outer), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 31 });
+
+    expect(await w.run(['start', '--model', 'grok', '--name', 'inner', '--brief', brief(w)])).toBe(0);
+
+    const want = join(w.repo, '.claude', 'worktrees', 'w-inner');
+    expect(w.gitCalls[0]?.cwd).toBe(outer);
+    expect(w.gitCalls.find((c) => c.args[1] === 'add')?.args).toEqual([
+      'worktree',
+      'add',
+      '-b',
+      'w/inner',
+      want,
+      'origin/main',
+    ]);
+    expect(w.meta('inner')).toMatchObject({ mainRepo: w.repo, worktree: want });
+  });
+
+  it('【故意造出的失败】git worktree list 的输出认不出主检出：退出码 2，不拿当前目录冒充主检出', async () => {
+    const w = world();
+    w.gitReplies.push(ok('true'), ok(''));
+    expect(await w.run(['start', '--model', 'grok', '--name', 'nolist', '--brief', brief(w)])).toBe(2);
+    expect(w.err.join('\n')).toContain('认不出主检出');
+    expect(w.gitCalls).toHaveLength(2);
   });
 
   it('git worktree list 里已经有这个分支：拒绝，退出码 3', async () => {
@@ -735,7 +782,7 @@ describe('start：【故意造出的失败】', () => {
   // #1016：长活搬出聊天会话——Claude 工人也走这条独立进程的路
   it('claude：经 reclaude 起，prompt 走标准输入，默认 opus，带思考档位；收尾交代里有四类人闸那一段', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 77 });
     const code = await w.run([
@@ -773,7 +820,7 @@ describe('start：【故意造出的失败】', () => {
 
   it('claude：--model-id sonnet 透传', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push({ pid: 78 });
     const code = await w.run([
@@ -857,7 +904,7 @@ describe('start：【故意造出的失败】', () => {
 
   it('git fetch origin main 没成：退出码 2', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), bad('fatal: unable to access'));
+    w.gitReplies.push(ok('true'), listed(w), bad('fatal: unable to access'));
     const code = await w.run(['start', '--model', 'grok', '--name', 'w8', '--brief', brief(w)]);
     expect(code).toBe(2);
     expect(w.err.at(-1)).toContain('git fetch origin main 没成');
@@ -865,18 +912,18 @@ describe('start：【故意造出的失败】', () => {
 
   it('git worktree add 没成：一般失败退出码 2；说已经存在的算冲突退出码 3', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), bad('fatal: no space left on device'));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), bad('fatal: no space left on device'));
     expect(await w.run(['start', '--model', 'grok', '--name', 'w9', '--brief', brief(w)])).toBe(2);
     expect(w.err.at(-1)).toContain('git worktree add 没成');
 
-    w.gitReplies.push(ok('true'), ok(''), ok(''), bad("fatal: 'w/w9' already exists"));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), bad("fatal: 'w/w9' already exists"));
     expect(await w.run(['start', '--model', 'grok', '--name', 'w9', '--brief', brief(w)])).toBe(3);
     expect(w.err.at(-1)).toContain('git worktree add 说已经占了');
   });
 
   it('pnpm install 失败：非 0 退出、说明原因，且提示工作树没删、可以 clean --force', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(bad('ERR_PNPM_OUTDATED_LOCKFILE  lockfile 和 package.json 对不上', 1));
     const code = await w.run(['start', '--model', 'grok', '--name', 'w10', '--brief', brief(w)]);
     expect(code).toBe(2);
@@ -888,7 +935,7 @@ describe('start：【故意造出的失败】', () => {
 
   it('起模型这步 spawn 抛出来：退出码 2，说明工作树和 pnpm install 都已经做完、没删', async () => {
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     w.spawnReplies.push(new Error('spawn grok ENOENT'));
     const code = await w.run(['start', '--model', 'grok', '--name', 'w11', '--brief', brief(w)]);
@@ -902,7 +949,7 @@ describe('start：【故意造出的失败】', () => {
     // 09-28 真活撞过：launch-detached.ps1 其实已经把 grok 起起来了，只是这条链路没能把 pid 确认回来
     // （worker.mjs 那边的坑，细节写在那份文件头）；这种半成功绝不能被说成「起不了」。
     const w = world();
-    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
     const e = Object.assign(new Error('powershell.exe 退出码 1，没读到有效的 launch-result.json'), {
       uncertain: true,

@@ -1587,6 +1587,18 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.findTaskByIssue('nope', 12)).toBeNull();
       });
 
+      it('按一批 issue 一次查回任务：只回对得上的，别的仓、没有的号、看不懂的编号都不回；空批回空', async () => {
+        const found = await store.findTasksByIssues([
+          { repoId: IDS.repo, issueNumber: 12 },
+          { repoId: IDS.repo, issueNumber: 999 },
+          { repoId: OTHER_UUID, issueNumber: 12 },
+          { repoId: 'nope', issueNumber: 12 },
+        ]);
+        expect(found.map((t) => t.id)).toEqual([IDS.task12]);
+        expect(await store.findTasksByIssues([{ repoId: 'nope', issueNumber: 12 }])).toEqual([]);
+        expect(await store.findTasksByIssues([])).toEqual([]);
+      });
+
       it('从 issue 建任务：排队中、排在这个仓最后、记一条状态和操作记录；同一张 issue 再建不建、不记', async () => {
         const first = await store.createTaskFromIssue(issueTask(), created());
         expect(first).toEqual({

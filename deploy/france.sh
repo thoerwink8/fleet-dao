@@ -514,7 +514,53 @@ sql_tool() {
     --plugin postgres12 --ep 127.0.0.1 -p "$PG_PORT" -u temporal "$@"
 }
 
-schema_version() { pg_admin -d "$1" -c 'select curr_version from schema_version' 2>/dev/null || true; }
+# 库里 Temporal 表结构的版本号：打印版本号；还没有版本表打印空、返回 0；连不上库、查询报错、回的认不出返回 1（原因在 stderr）。
+# 先问表在不在（to_regclass），在了再读：不靠「查询报错」认「没有版本表」——连不上库也是报错，当成没有版本表就会对已有的库
+# 跑 setup-schema（审查 S5）。
+schema_version() { # 库
+  local has
+  has=$(pg_admin -d "$1" -c "select to_regclass('schema_version') is not null") || return 1
+  case $has in
+  f) return 0 ;;
+  t) pg_admin -d "$1" -c 'select curr_version from schema_version' ;;
+  *)
+    echo "问版本表在不在，psql 回的认不出：「${has:0:80}」" >&2
+    return 1
+    ;;
+  esac
+}
+
+# 一个库的表结构：没有版本表就先建，再升到这个版本自带的最新；前后版本号一样就是没动。读不到版本号（连不上库）判红、不建不升
+temporal_schema() { # 库 表结构名
+  local db=$1 name=$2 before after log
+  log=$(mktemp)
+  if ! before=$(schema_version "$db" 2>"$log"); then
+    red "读库 $db 的表结构版本没成（连不上库或查询报错，不当成「还没有版本表」）：$(tail -3 "$log" | tr '\n' ' ')"
+    rm -f -- "$log"
+    return 1
+  fi
+  if [[ -z "$before" ]] && ! sql_tool --db "$db" setup-schema -v 0.0 >"$log" 2>&1; then
+    red "给库 $db 建版本表失败：$(tail -3 "$log" | tr '\n' ' ')"
+    rm -f -- "$log"
+    return 1
+  fi
+  if ! sql_tool --db "$db" update-schema --schema-name "$name" >"$log" 2>&1; then
+    red "升级库 $db 的表结构失败：$(tail -3 "$log" | tr '\n' ' ')"
+    rm -f -- "$log"
+    return 1
+  fi
+  if ! after=$(schema_version "$db" 2>"$log"); then
+    red "升级完读库 $db 的表结构版本没成：$(tail -3 "$log" | tr '\n' ' ')"
+    rm -f -- "$log"
+    return 1
+  fi
+  rm -f -- "$log"
+  if [[ "$before" == "$after" ]]; then
+    ok "库 $db 表结构版本 $after"
+  else
+    changed "库 $db 表结构 ${before:-（空）} → $after"
+  fi
+}
 
 # 运维命令行（只连 fleet-dao 这套）。不带调用者的环境，免得 HOME 里的配置或残留的 TEMPORAL_* 变量掺进来
 tcli() { env -i HOME=/root PATH=/usr/bin:/bin /usr/local/bin/fleet-temporal "$@"; }
@@ -530,7 +576,7 @@ json_get() { # JSON 点分路径
 
 setup_temporal() {
   step "Temporal 服务端 $TEMPORAL_SERVER_VERSION（前端 127.0.0.1:$TEMPORAL_FRONTEND_PORT）"
-  local restart=0 db name before after log pids main port i desc ttl want
+  local restart=0 db name pids main port i desc ttl want
   ensure_dir "$TEMPORAL_HOME" root:root 755
   ensure_dir "$TEMPORAL_HOME/bin" root:root 755
   fetch_release "$TEMPORAL_HOME/server-$TEMPORAL_SERVER_VERSION" \
@@ -550,25 +596,7 @@ setup_temporal() {
   for db in temporal temporal_visibility; do
     name=postgresql/v12/temporal
     if [[ "$db" == temporal_visibility ]]; then name=postgresql/v12/visibility; fi
-    before=$(schema_version "$db")
-    log=$(mktemp)
-    if [[ -z "$before" ]] && ! sql_tool --db "$db" setup-schema -v 0.0 >"$log" 2>&1; then
-      red "给库 $db 建版本表失败：$(tail -3 "$log" | tr '\n' ' ')"
-      rm -f -- "$log"
-      return 1
-    fi
-    if ! sql_tool --db "$db" update-schema --schema-name "$name" >"$log" 2>&1; then
-      red "升级库 $db 的表结构失败：$(tail -3 "$log" | tr '\n' ' ')"
-      rm -f -- "$log"
-      return 1
-    fi
-    rm -f -- "$log"
-    after=$(schema_version "$db")
-    if [[ "$before" == "$after" ]]; then
-      ok "库 $db 表结构版本 $after"
-    else
-      changed "库 $db 表结构 ${before:-（空）} → $after"
-    fi
+    temporal_schema "$db" "$name" || return 1
   done
 
   render "$DEPLOY_DIR/france/temporal.yaml" PG_PORT="$PG_PORT" \

@@ -85,7 +85,11 @@ describe('颜色只表达状态', () => {
 });
 
 describe('只看我提的', () => {
-  const me: Me = { user: { id: 'u-lan', displayName: '阿岚', role: 'founder' }, csrfToken: 't' };
+  const me: Me = {
+    user: { id: 'u-lan', displayName: '阿岚', role: 'founder' },
+    csrfToken: 't',
+    env: { name: '测试机' },
+  };
 
   test('提出人填的是用户编号或名字都认', () => {
     expect(isMine('u-lan', me)).toBe(true);

@@ -34,8 +34,6 @@ const gateway = createGateway({
   testChatId: config.testChatId,
   publicUrl: config.publicUrl,
   ackEmoji: config.ackEmoji,
-  askBudgetPerDay: config.askBudgetPerDay,
-  boardRefreshMs: config.boardRefreshMs,
 });
 lark.wire(gateway);
 

@@ -15,9 +15,9 @@ export interface CommitFinding extends Finding {
 export interface HistoryScan {
   /** 扫了的提交，从旧到新。 */
   commits: string[];
-  /** 各个提交新增的行数加起来（不算下面跳过的那些段）。 */
+  /** 各个提交新增的行数加起来。 */
   addedLines: number;
-  /** 带 NUL 的新增段（二进制文件）：内容没看，只按文件名判。单列出来，免得「没看」混进「看了没事」。 */
+  /** 带 NUL 的新增段（二进制文件、UTF-16 存的文本、夹了 NUL 的文本）：去掉 NUL 扫了内容，单列出来报。 */
   binaryHunks: number;
   findings: CommitFinding[];
 }
@@ -41,7 +41,7 @@ const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
  * 取一段提交逐个的内容要跑的三条 git 命令。revs 是 git log 的范围，例如 [<头>, '--not', '--remotes']。
  * 会改输出格式的配置（颜色、外部 diff、textconv、路径前缀、签名显示）都钉死，不受本机 git 配置影响。
  * --text：.gitattributes 标了 -diff / binary、或 core.bigFileThreshold 调低时，git 会把文本文件当二进制只说一句
- * 「Binary files differ」，内容就漏了；强制出文本差异，真二进制（带 NUL 的段）由 scanHistory 跳过、单独计数。
+ * 「Binary files differ」，内容就漏了；强制出文本差异，带 NUL 的段由 scanHistory 去掉 NUL 照扫、单独计数。
  */
 export function historyArgs(revs: readonly string[]): {
   patch: string[];
@@ -133,19 +133,36 @@ export function scanHistory(out: HistoryOutput, options: { allowlist?: readonly 
   for (const commit of new Set([...patches.keys(), ...names.keys()])) {
     if (!order.has(commit))
       throw new Error(`逐个提交的差异和提交清单对不上：${commit.slice(0, 7)} 不在清单里`);
-    // 带 NUL 的段是二进制文件（--text 硬出的），和全仓扫一样不看内容、只按文件名判。
-    const hunks = addedHunks(patches.get(commit) ?? '').filter((h) => {
-      if (!h.text.includes('\0')) return true;
-      binaryHunks += 1;
-      return false;
-    });
+    const patch = patches.get(commit) ?? '';
+    // 有 --text 就不该有这两种；有了说明 git 没把内容交出来，当没扫成。内容行都带 +、-、空格前缀，不会撞上。
+    const hidden = /^(?:Binary files .* differ|GIT binary patch)$/m.exec(patch);
+    if (hidden)
+      throw new Error(`逐个提交的差异认不出：${commit.slice(0, 7)} 有文件只给了「${hidden[0]}」、没给内容`);
+    const hunks = addedHunks(patch);
     addedLines += hunks.reduce((n, h) => n + h.text.split('\n').length, 0);
     const paths = (names.get(commit) ?? '')
       .split('\n')
       .map((p) => p.replace(/\r$/, ''))
       .filter(Boolean)
       .map(unquotePath);
-    for (const f of scanAdded(hunks, paths, { allowlist })) inContent.push({ ...f, commit });
+    const plain = hunks.filter((h) => !h.text.includes('\0'));
+    for (const f of scanAdded(plain, paths, { allowlist })) inContent.push({ ...f, commit });
+    // 带 NUL 的段（真二进制、UTF-16 存的文本、文本里夹了 NUL）照样扫，扫两遍、行号不变：NUL 换成空格（NUL 两边各算
+    // 各的，二进制里的可打印片段）、去掉 NUL（UTF-16 存的 ASCII 每个字后面都夹一个 NUL）。两遍报的同一处只留一条。
+    // 文件名照样传进去（路径里有密钥要遮、不白名单），文件名本身的命中（行号 0）上面已经报过。
+    const withNul = hunks.filter((h) => h.text.includes('\0'));
+    binaryHunks += withNul.length;
+    const variants = withNul.flatMap((h) => [
+      { ...h, text: h.text.replaceAll('\0', ' ') },
+      { ...h, text: h.text.replaceAll('\0', '') },
+    ]);
+    const seen = new Set<string>();
+    for (const f of scanAdded(variants, paths, { allowlist })) {
+      const key = `${f.path}\n${f.line}\n${f.rule}`;
+      if (f.line === 0 || seen.has(key)) continue;
+      seen.add(key);
+      inContent.push({ ...f, commit });
+    }
   }
 
   // 按提交从旧到新排，同一个提交里先内容、后说明和作者（sort 是稳定的）。

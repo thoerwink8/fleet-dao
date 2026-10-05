@@ -62,9 +62,6 @@ export interface InboundMenu {
   key: string;
 }
 
-/** 飞书只能改 14 天内发出的消息（更新卡片接口，错误码 230031）。 */
-export const CARD_EDITABLE_MS = 14 * 24 * 60 * 60 * 1000;
-
 /** 晚推来的消息多晚以内照收（lark.ts 给 SDK 的 staleMessageWindowMs）；更早的只能靠补漏翻历史。 */
 export const LATE_DELIVERY_MS = 6 * 60 * 60 * 1000;
 

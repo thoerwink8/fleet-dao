@@ -1,5 +1,6 @@
 // 网关：收创始人在飞书里说的每一句、原样转给后端存成意图（#553 第 4 条，收原话），发意图卡（intent-cards.ts）；
-// 外加自己看着自己（watch.ts：心跳、调不通后端报警）。旧的推送（outbox.ts）、盘面（board.ts）定时活还在跑。
+// 外加自己看着自己（watch.ts：心跳、调不通后端报警）。旧的推送、盘面定时活和卡片登记随 #1022 删后端接口一起退役：
+// 网关只调 IntentRoutes（shared 的 intent-api.ts），旧的待推送、回执、盘面、卡片登记接口一条都不调（test/static.test.ts 核对）。
 // 收事件的回调一律立刻返回（SDK 按会话排队，回调慢了会挡住后面的人），活放到后台跑。
 // 改这里之前必须知道：
 // - 收谁的：允许的群里只收创始人的，别人说的在入口就丢（不转、不存、不记原文和长度）；私聊里的陌生人一天礼貌拒一次；
@@ -12,13 +13,11 @@
 // - 日志不记原话正文，只记长度；「消息处理完」这几个字香港的 fleet-gateway-deploy status 在数，别改。
 
 import { type Acting, type Backend, BackendError, type IntakeRecall, isTransient } from './backend.ts';
-import { type Board, createBoard } from './board.ts';
 import { ActionValueSchema } from './cards.ts';
 import type { Founder } from './config.ts';
 import { IntakeShapeError, toIntake } from './intake.ts';
 import { createIntentCards } from './intent-cards.ts';
 import type { Logger } from './log.ts';
-import { createOutbox, type Outbox } from './outbox.ts';
 import {
   type FeishuPort,
   type InboundCardAction,
@@ -30,7 +29,6 @@ import {
   type Sent,
   type Target,
 } from './port.ts';
-import { createRegistry, type Registry } from './registry.ts';
 import { Inflight, Lru, uuidFor } from './util.ts';
 import { createWatch, type Watch, type WatchLimits } from './watch.ts';
 import { beijingDay, clip } from './words.ts';
@@ -44,8 +42,8 @@ export const NOT_STORED_EMOJI = 'CrossMark';
 export interface Timing {
   /** 收原话一次最多等后端多久（方案 5.4：5 秒）。 */
   intakeMs: number;
-  /** 长轮询待推送、意图卡一次最多等几秒。 */
-  outboxWaitSeconds: number;
+  /** 长轮询意图卡一次最多等几秒。 */
+  intentCardsWaitSeconds: number;
   /** 补漏：一轮里一个会话最多翻几页历史（一页 HISTORY_PAGE_SIZE 条）；翻不完下一轮接着翻。 */
   backfillPages: number;
   /** 补漏没走通（后端连不上、飞书翻不动）之后隔多久再试。 */
@@ -54,7 +52,7 @@ export interface Timing {
 
 export const DEFAULT_TIMING: Timing = {
   intakeMs: 5_000,
-  outboxWaitSeconds: 25,
+  intentCardsWaitSeconds: 25,
   backfillPages: 5,
   backfillRetryMs: 60_000,
 };
@@ -93,8 +91,6 @@ export interface GatewayOptions {
   testChatId?: string | null;
   publicUrl: string;
   ackEmoji: string;
-  askBudgetPerDay: number;
-  boardRefreshMs: number;
   timing?: Partial<Timing>;
   /** 网关自己看守的时限（watch.ts 的 WATCH_LIMITS）；测试调小。 */
   watch?: Partial<WatchLimits>;
@@ -107,7 +103,7 @@ export interface Gateway {
   onMenu(evt: InboundMenu): void;
   /** SDK 的策略层拦下的消息（不在允许的群）：只计数，不回话。 */
   onReject(evt: { messageId: string; chatId: string; senderId: string; reason: string }): void;
-  /** 开始定时取盘面、长轮询待推送和意图卡，和网关自己的看守（心跳、调不通后端报警）。 */
+  /** 开始长轮询意图卡、定时补漏，和网关自己的看守（心跳、调不通后端报警）。 */
   start(): void;
   /** 停止定时活，最多等 drainMs 让在途的活做完。 */
   stop(drainMs?: number): Promise<void>;
@@ -122,9 +118,6 @@ export interface Gateway {
   /** 补漏一轮（起来时、后端从连不上变连得上时、定时；测试直接调）。同时刻只跑一轮。 */
   backfill(reason: string): Promise<void>;
   readonly stats: Readonly<Record<string, number>>;
-  readonly board: Board;
-  readonly outbox: Outbox;
-  readonly registry: Registry;
   readonly watch: Watch;
 }
 
@@ -153,41 +146,14 @@ export function createGateway(o: GatewayOptions): Gateway {
     });
   });
   const life = new AbortController();
-  const registry = createRegistry({ backend: o.backend, log, inflight });
   const watch = createWatch({
     feishu: o.feishu,
     log,
     now,
     teamChatId: o.teamChatId,
     publicUrl: o.publicUrl,
-    // 免打扰时段只有推送那条从后端带回来：连不上后端时用最近一次拿到的
-    quietHours: () => outbox.quietHours(),
-    boardRefreshMs: o.boardRefreshMs,
     ackTargetMs: TARGET_ACK_MS,
     limits: o.watch,
-  });
-  const board = createBoard({
-    backend: o.backend,
-    feishu: o.feishu,
-    registry,
-    log,
-    now,
-    teamChatId: o.teamChatId,
-    publicUrl: o.publicUrl,
-    watch,
-  });
-  const outbox = createOutbox({
-    backend: o.backend,
-    feishu: o.feishu,
-    registry,
-    log,
-    now,
-    teamChatId: o.teamChatId,
-    founders: new Set(founders.keys()),
-    publicUrl: o.publicUrl,
-    askBudgetPerDay: o.askBudgetPerDay,
-    waitSeconds: timing.outboxWaitSeconds,
-    watch,
   });
   /** 意图卡（#553 第 4 条）：长轮询后端要发、要改的意图卡，回复在那段第一条原话下面、之后原地改。 */
   const intentCards = createIntentCards({
@@ -195,7 +161,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     feishu: o.feishu,
     log,
     now,
-    waitSeconds: timing.outboxWaitSeconds,
+    waitSeconds: timing.intentCardsWaitSeconds,
     watch,
   });
   const seenMenuEvents = new Lru<string, true>(500);
@@ -625,23 +591,10 @@ export function createGateway(o: GatewayOptions): Gateway {
     );
   }
 
-  let boardTimer: NodeJS.Timeout | undefined;
   let watchTimer: NodeJS.Timeout | undefined;
   let heartbeatTimer: NodeJS.Timeout | undefined;
   let backfillTimer: NodeJS.Timeout | undefined;
-  let ticking: Promise<void> | null = null;
-  let outboxRun: Promise<void> | null = null;
   let intentCardsRun: Promise<void> | null = null;
-
-  function tick(): void {
-    if (ticking) return;
-    ticking = board
-      .tick()
-      .catch((err) => log.error('盘面定时活出错', { error: String(err) }))
-      .finally(() => {
-        ticking = null;
-      });
-  }
 
   return {
     onMessage(msg) {
@@ -715,9 +668,6 @@ export function createGateway(o: GatewayOptions): Gateway {
     },
 
     start() {
-      tick();
-      boardTimer = setInterval(tick, o.boardRefreshMs);
-      outboxRun = outbox.run(life.signal).catch((err) => log.error('推送循环停了', { error: String(err) }));
       intentCardsRun = intentCards
         .run(life.signal)
         .catch((err) => log.error('意图卡循环停了', { error: String(err) }));
@@ -729,14 +679,11 @@ export function createGateway(o: GatewayOptions): Gateway {
     },
 
     async stop(drainMs = 20_000) {
-      clearInterval(boardTimer);
       clearInterval(watchTimer);
       clearInterval(heartbeatTimer);
       clearInterval(backfillTimer);
       life.abort();
-      await outboxRun;
       await intentCardsRun;
-      await ticking;
       await watch.idle();
       await backfillRun;
       const left = await inflight.drain(drainMs);
@@ -753,9 +700,6 @@ export function createGateway(o: GatewayOptions): Gateway {
     },
     backfill: (reason) => backfill(reason),
     stats,
-    board,
-    outbox,
-    registry,
     watch,
   };
 }
