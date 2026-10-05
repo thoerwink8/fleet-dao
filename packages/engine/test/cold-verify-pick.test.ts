@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { type FamilyPickDeps, familyPickerFrom, pickFamilyModel } from '../src/cold-verify-pick.ts';
 import type { PickRouteInput, PickRouteResult } from '../src/ports.ts';
 
-const ORDER = ['gpt', 'claude', 'deepseek', 'grok', 'kimi'] as const;
+const ORDER = ['gpt', 'grok', 'claude', 'deepseek', 'kimi'] as const;
 
 /** 记下每个族被问过没；只让 `available` 里的族回路由。 */
 function picker(available: Record<string, string>, asked: string[] = []): FamilyPickDeps {
@@ -20,18 +20,18 @@ function picker(available: Record<string, string>, asked: string[] = []): Family
 }
 
 describe('pickFamilyModel：按 0006 的顺序、跳过写这张单的族', () => {
-  it('avoid=gpt → 第一家问的就是 gpt 之后的 claude', async () => {
+  it('avoid=gpt → 第一家问的就是 gpt 之后的 grok', async () => {
     const asked: string[] = [];
-    const got = await pickFamilyModel(ORDER, 'gpt', picker({ claude: 'claude-x' }, asked));
-    expect(got).toEqual({ modelId: 'claude-x', family: 'claude', channel: 'p-claude' });
-    expect(asked).toEqual(['claude']); // 问到就停，不接着问后面的
+    const got = await pickFamilyModel(ORDER, 'gpt', picker({ grok: 'grok-x' }, asked));
+    expect(got).toEqual({ modelId: 'grok-x', family: 'grok', channel: 'p-grok' });
+    expect(asked).toEqual(['grok']); // 问到就停，不接着问后面的
   });
 
   it('avoid=kimi 且前面的族都没有 → 跳过 kimi、顺序问到 grok', async () => {
     const asked: string[] = [];
     const got = await pickFamilyModel(ORDER, 'kimi', picker({ grok: 'grok-x' }, asked));
     expect(got?.family).toBe('grok');
-    expect(asked).toEqual(['gpt', 'claude', 'deepseek', 'grok']);
+    expect(asked).toEqual(['gpt', 'grok']);
   });
 
   it('顺序里排最前的那一族有得派就一定选它（不看别的族好不好）', async () => {
@@ -56,7 +56,7 @@ describe('pickFamilyModel：故意造出的失败 → 不许拿默认模型顶�
     const asked: string[] = [];
     const got = await pickFamilyModel(ORDER, 'gpt', picker({}, asked));
     expect(got).toBeUndefined();
-    expect(asked).toEqual(['claude', 'deepseek', 'grok', 'kimi']); // gpt 跳过了
+    expect(asked).toEqual(['grok', 'claude', 'deepseek', 'kimi']); // gpt 跳过了
   });
 
   it('【故意造出的失败】只剩写这张单的那一族可用 → 照旧 undefined（宁可没讨论成，不许同族自审）', async () => {

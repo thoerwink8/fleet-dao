@@ -332,7 +332,7 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
 });
 
 describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending；过一会儿再来的不贴 failure', () => {
-  it('写过这张单的族不止一个：全部跳过再选（先 gpt 后 claude 写的 → 验的是 deepseek，前两家压根没被问）', async () => {
+  it('写过这张单的族不止一个：全部跳过再选（先 gpt 后 claude 写的 → 先问 grok 没有、再到 deepseek，gpt、claude 压根没被问）', async () => {
     const asked: string[] = [];
     const r = await runColdVerifyForPr(42, {
       sources: sources({ authors: async () => ['gpt', ' Claude '] }),
@@ -345,7 +345,7 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
       cwd: 'C:/work/x',
     });
     expect(r.status.state).toBe('success');
-    expect(asked).toEqual(['deepseek']);
+    expect(asked).toEqual(['grok', 'deepseek']);
   });
 
   it('【故意造出的失败】一个作者族都没记下 → 贴 failure、不起调用（不知道该避开谁，就没法保证换了家族）', async () => {
