@@ -45,6 +45,7 @@ import {
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
+import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
 import {
   type EnginePorts,
@@ -158,6 +159,11 @@ export interface StorePortsDeps {
    * 新引擎起来再派。不给就不闸。
    */
   drain?: EngineDrain;
+  /**
+   * 引擎总开关（engine-master.ts，#1086）：关着一条都不派，回「过一会儿再选」（开了以后下一次就选得到）。排在排空之后、
+   * 内存准入之前：和排空同一类「现在不该派」的闸。不给就不闸（测试、只起一次的工具）；生产由 real/index.ts 接。
+   */
+  master?: EngineMasterGate;
   /**
    * 派活时按内存做准入（#219）：读父节点 fleet-agents.slice 的 memory.current 看余量放不放得下一个新会话，放不下就等、
    * 读不出来就不派（明确的失败）。本机开发没有 cgroup：文件不存在就跳过准入、照派。生产由 real/index.ts 接
@@ -502,6 +508,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           waitFor: 'slot',
           detail: stoppingNote(stopping),
           retryAfterSeconds: DRAIN_ROUTE_RETRY_SECONDS,
+        };
+      }
+      // 引擎总开关关着（#1086）：不派，和排空同一种回法；开了以后下一次选路就选得到
+      if (deps.master && !deps.master.isOn()) {
+        return {
+          ok: false,
+          waitFor: 'slot',
+          detail: masterOffNote(deps.master.state()),
+          retryAfterSeconds: MASTER_ROUTE_RETRY_SECONDS,
         };
       }
       // 派活时按内存做准入（#219）：父节点 fleet-agents.slice 余量放不下一个新会话就等、读不出来照抛，不闷头派。

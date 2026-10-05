@@ -122,10 +122,34 @@ describe('【故意造出的失败】生产装配漏接排空：real/index.ts �
 
   it('检查本身有牙：把那两处拿掉，同一个检查会红', () => {
     const without = source
-      .replace('oneShotSessions({ ...(extra.drain ? { drain: extra.drain } : {}) })', 'oneShotSessions()')
+      .replace(
+        'oneShotSessions({ ...(extra.drain ? { drain: extra.drain } : {}), master })',
+        'oneShotSessions()',
+      )
       .replace('stopSessions: (why) => oneShots.drainStop(why)', 'stopSessions: () => []');
     expect(without).not.toBe(source);
     expect(without).not.toMatch(/oneShotSessions\(\{[^)]*extra\.drain[^)]*\}\)/);
     expect(without).not.toMatch(/stopSessions:[^\n]*oneShots\.drainStop\(/);
+  });
+});
+
+describe('【故意造出的失败】生产装配漏接引擎总开关（#1086）：real/index.ts 必须把 master 交给选路和一次性会话登记', () => {
+  const source = readFileSync(fileURLToPath(new URL('../../src/real/index.ts', import.meta.url)), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+
+  it('createRealPorts 带着 master（选路读它）、oneShotSessions 带着 master（登记读它）、对外把 master 给 worker（定时器入口读它）', () => {
+    expect(source).toMatch(/createRealPorts\(\{[^}]*\bmaster,/);
+    expect(source).toMatch(/oneShotSessions\(\{[^\n]*\bmaster \}\)/);
+    expect(source).toMatch(/\n\s+master,\n\s+recordSkippedRun:/);
+  });
+
+  it('检查本身有牙：把 master 从任何一处拿掉，同一个检查会红', () => {
+    const noPicker = source.replace(/createRealPorts\(\{(\s*)db,(\s*)master,/, 'createRealPorts({$1db,');
+    expect(noPicker).not.toBe(source);
+    expect(noPicker).not.toMatch(/createRealPorts\(\{[^}]*\bmaster,/);
+    const noEnter = source.replace(', master })', ' })');
+    expect(noEnter).not.toBe(source);
+    expect(noEnter).not.toMatch(/oneShotSessions\(\{[^\n]*\bmaster \}\)/);
   });
 });

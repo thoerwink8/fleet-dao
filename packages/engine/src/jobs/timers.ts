@@ -8,6 +8,8 @@
 // 将来要起第二个引擎进程（多机、蓝绿并起）时，每一轮开头要先抢一把锁（比如 Postgres 咨询锁 pg_try_advisory_lock(任务编号)），
 // 抢不到就跳过这一轮——现在不做，不为没有的需求写代码。
 
+import { type EngineMasterGate, masterOffNote } from '../engine-master.ts';
+
 const MINUTE_MS = 60_000;
 
 export interface TimerJob {
@@ -23,6 +25,11 @@ export interface TimerJob {
    * （同一个任务并行：探针同时起两个会话、对账同时写同一批行）。它回来之前下一格一律跳过，看门狗照登记表报「停了」，要人看。
    */
   overdueMinutes: number;
+  /**
+   * 引擎总开关关着时这个任务这一轮不跑（#1086）：拉单、巡检这类会拉单、派活、起干活会话的任务标它；探针、读额度、看门狗、
+   * 对账这些看家检查不标，关着照跑（创始人 2026-10-05 约 22:40：关着也要能看到渠道通不通）。闸在这里统一判，不在各任务里各加 if。
+   */
+  needsMaster?: boolean;
   run(): Promise<unknown>;
 }
 
@@ -33,14 +40,27 @@ export interface TimerHost {
   /** 这个任务最近一轮是几点起的（schedule_runs）；一轮都没有回 null；读不到抛错（调用方当「不知道」处理，不当 null）。 */
   lastStartedAt(jobId: string): Promise<Date | null>;
   log(level: 'info' | 'warn' | 'error', text: string): void;
+  /**
+   * 引擎总开关（engine-master.ts）：needsMaster 的任务每一轮开头现读一次，关着（含读不到、认不出）就不跑这一轮。
+   * 不给 = 不闸（只有测试里可以不给；生产的 realTimerHost 必须给，由 worker.ts 接）。
+   */
+  master?: Pick<EngineMasterGate, 'refresh' | 'state'>;
+  /** 总开关关着、这一轮被跳过：记一条 partial 进 schedule_runs（看门狗不当成「停了」）。记不上抛，由调用方（runRound）记日志。 */
+  recordSkipped?(jobId: string, why: string): Promise<void>;
 }
 
-export const realTimerHost = (lastStartedAt: TimerHost['lastStartedAt']): TimerHost => ({
+export const realTimerHost = (
+  lastStartedAt: TimerHost['lastStartedAt'],
+  master: NonNullable<TimerHost['master']>,
+  recordSkipped: NonNullable<TimerHost['recordSkipped']>,
+): TimerHost => ({
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   lastStartedAt,
   log: (level, text) => console[level](text),
+  master,
+  recordSkipped,
 });
 
 export interface EngineTimers {
@@ -79,6 +99,20 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
         job.overdueMinutes * MINUTE_MS,
       );
       try {
+        // 引擎总开关（#1086）：拉单、巡检这类要总开关开着才跑；关着（含读不到、认不出）这一轮不跑，记一笔 partial 说明原因
+        if (job.needsMaster && host.master && !(await host.master.refresh())) {
+          const why = `引擎总开关关着，这一轮不跑：${masterOffNote(host.master.state())}`;
+          host.log('info', `定时任务 ${job.id}：${why}`);
+          try {
+            await host.recordSkipped?.(job.id, why);
+          } catch (error) {
+            host.log(
+              'error',
+              `定时任务 ${job.id}：总开关关着跳过这一轮，但没记进 schedule_runs：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          return;
+        }
         await job.run();
       } catch (error) {
         // 没跑成的一轮各任务自己已经记进 schedule_runs（看门狗照登记表报）；这里只让日志看得见，不停掉定时

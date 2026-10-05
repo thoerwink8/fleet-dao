@@ -1,5 +1,7 @@
 // 引擎的 8 个定时任务（design 第四节）：每个任务的钟点格子、补跑窗口、一轮怎么跑，唯一出处在这里；调度本身在 jobs/timers.ts。
 // 任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号；格子是原来 Temporal Schedule 的 interval + offset，没改。
+// 引擎总开关（#1086）关着时只有标了 needsMaster 的两个不跑（拉单、巡检）；其余六个是看家检查（对账、路由探针、读额度、拼车盯读、
+// 每小时对账、看门狗），关着照跑：创始人要关着也看得到渠道通不通。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
 import { CANARY_EVERY_HOURS, CANARY_JOB, CANARY_OFFSET_MINUTES } from './canary.ts';
@@ -109,6 +111,8 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       offsetMinutes: CANARY_OFFSET_MINUTES,
       catchupMinutes: 60,
       overdueMinutes: OVERDUE_MINUTES,
+      // 巡检开一张单、等引擎拉单起任务：总开关关着时拉单不拉，开了单也永远等不到被派，所以关着时这一轮不跑（#1086）
+      needsMaster: true,
       run: async () => {
         await startCanaryWorkflow(client, taskQueue);
       },
@@ -129,6 +133,8 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       offsetMinutes: INTAKE_OFFSET_MINUTES,
       catchupMinutes: INTAKE_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
+      // 总开关关着不拉单、不起任务（#1086）
+      needsMaster: true,
       run: () => runIntakeJob(intake(client, taskQueue)),
     },
   ];

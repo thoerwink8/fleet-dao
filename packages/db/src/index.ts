@@ -11,6 +11,7 @@ export * from './queries/canary.ts';
 export * from './queries/candidates.ts';
 export * from './queries/carpool-spend.ts';
 export * from './queries/engine.ts';
+export * from './queries/engine-master.ts';
 export * from './queries/history.ts';
 export * from './queries/idempotency.ts';
 export * from './queries/intake.ts';

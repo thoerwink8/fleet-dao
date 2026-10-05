@@ -16,6 +16,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { fixedEngineMaster, MASTER_ROUTE_RETRY_SECONDS } from '../../src/engine-master.ts';
 import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
 import { SLICE_MEMORY_HIGH_MB } from '../../src/limits.ts';
 import type { PickRouteInput } from '../../src/ports.ts';
@@ -64,6 +65,35 @@ const pick = (over: Partial<PickRouteInput> = {}, p = ports()) =>
     },
     ctx,
   );
+
+describe('选路：引擎总开关（#1086）', () => {
+  const portsWith = (on: boolean) =>
+    createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: onCarpool,
+      master: fixedEngineMaster(on),
+    });
+
+  it('总开关关着：一条都不派，回「过一会儿再选」（waitFor slot），原因写明总开关；开着照派', async () => {
+    await world(t.db);
+    const closed = await pick({}, portsWith(false));
+    expect(closed).toMatchObject({
+      ok: false,
+      waitFor: 'slot',
+      retryAfterSeconds: MASTER_ROUTE_RETRY_SECONDS,
+    });
+    expect(!closed.ok && closed.detail).toContain('总开关');
+    expect(await pick({}, portsWith(true))).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('不接闸（测试、只起一次的工具）：和以前一样照派', async () => {
+    await world(t.db);
+    expect(await pick()).toMatchObject({ ok: true });
+  });
+});
 
 describe('选路', () => {
   it('按路由两层的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
