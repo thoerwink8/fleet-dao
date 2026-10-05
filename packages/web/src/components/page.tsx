@@ -164,9 +164,3 @@ export function LoadError({
     </div>
   );
 }
-
-/** 有仓的看板没读成：写明是哪几个仓，别让「少了一个仓」看起来像「没有需求」。 */
-export function BoardsError({ failed, error }: { failed: { name: string }[]; error: unknown }) {
-  const what = failed.length ? `仓 ${failed.map((r) => r.name).join('、')} 的需求` : '仓列表';
-  return <LoadError what={what} error={error} />;
-}

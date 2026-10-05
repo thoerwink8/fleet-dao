@@ -40,7 +40,6 @@ import {
   AlertDialogTitle,
 } from './ui/alert-dialog';
 import { Badge } from './ui/badge';
-import { Button } from './ui/button';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './ui/command';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 
@@ -185,33 +184,6 @@ export function useTaskActions(): TaskActionsApi {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('缺少 TaskActionsProvider');
   return ctx;
-}
-
-/** 一排操作按钮（侧边详情、任务详情页用）。 */
-export function ActionButtons({ target, size = 'sm' }: { target: ActionTarget; size?: 'sm' | 'default' }) {
-  const { trigger } = useTaskActions();
-  const list = availableActions(target);
-  if (!list.length) return null;
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {list.map((a) => {
-        const def = ACTIONS[a];
-        const Icon = def.icon;
-        return (
-          <Button
-            key={a}
-            size={size}
-            variant="outline"
-            className={cn(def.danger && 'text-ink-fail hover:text-ink-fail')}
-            onClick={() => trigger(a, target)}
-          >
-            <Icon aria-hidden />
-            {def.label}
-          </Button>
-        );
-      })}
-    </div>
-  );
 }
 
 export interface RouteOption {

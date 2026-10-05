@@ -1,7 +1,11 @@
 import type { RealtimeTable } from '@fleet-dao/shared';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { describe, expect, test, vi } from 'vitest';
-import { applyLiveEvent, applyLiveEvents, createLiveBatcher, keys } from './client';
+import { applyLiveEvents, createLiveBatcher, keys } from './client';
+import type { LiveEvent } from './types';
+
+/** 一条推送单独处理。 */
+const applyOne = (qc: QueryClient, e: LiveEvent) => applyLiveEvents(qc, [e]);
 
 function spy() {
   const qc = new QueryClient();
@@ -13,7 +17,7 @@ function spy() {
 describe('推送到缓存：按表名决定重拉什么', () => {
   test('需求表变了：重拉看板、任务详情、主页', () => {
     const { qc, called } = spy();
-    applyLiveEvent(qc, { type: 'change', table: 'tasks', id: 't-1' });
+    applyOne(qc, { type: 'change', table: 'tasks', id: 't-1' });
     expect(called()).toEqual(['board', 'task', keys.home.join('/')]);
   });
 
@@ -29,7 +33,7 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     ] as const satisfies readonly RealtimeTable[];
     for (const table of homeTables) {
       const { qc, called } = spy();
-      applyLiveEvent(qc, { type: 'change', table, id: 'x' });
+      applyOne(qc, { type: 'change', table, id: 'x' });
       expect(called(), table).toContain(keys.home.join('/'));
       expect(called(), `${table} 不该全量重拉`).not.toContain('全部');
     }
@@ -37,20 +41,20 @@ describe('推送到缓存：按表名决定重拉什么', () => {
 
   test('三段流水 runs 变了：主页的流水线图和任务详情的流水跟着重拉', () => {
     const { qc, called } = spy();
-    applyLiveEvent(qc, { type: 'change', table: 'runs', id: 'run-1' });
+    applyOne(qc, { type: 'change', table: 'runs', id: 'run-1' });
     expect(called()).toEqual([keys.home.join('/'), 'task']);
   });
 
   test('追问表变了：旧追问清单跟着重拉（通知中心的「关闭」之后另一台设备也看到）', () => {
     const { qc, called } = spy();
-    applyLiveEvent(qc, { type: 'change', table: 'asks', id: 'a-1' });
+    applyOne(qc, { type: 'change', table: 'asks', id: 'a-1' });
     expect(called()).toEqual(['board', 'task', keys.legacyAsks.join('/')]);
   });
 
   test('额度窗、渠道变了：路由两层的活不活跟着重拉（额度够不够、渠道开没开都在三件事里）', () => {
     const { qc, called } = spy();
-    applyLiveEvent(qc, { type: 'change', table: 'quota_windows', id: 'pool-a' });
-    applyLiveEvent(qc, { type: 'change', table: 'channels', id: 'ch-a' });
+    applyOne(qc, { type: 'change', table: 'quota_windows', id: 'pool-a' });
+    applyOne(qc, { type: 'change', table: 'channels', id: 'ch-a' });
     expect(called()).toEqual([
       keys.pools.join('/'),
       keys.routingLayers.join('/'),
@@ -65,9 +69,9 @@ describe('推送到缓存：按表名决定重拉什么', () => {
   test('认不出的表、断线重连：全部重拉——宁可多拉，不把漏收当没变化', () => {
     const { qc, called } = spy();
     // 后端比前端先上新表时（部署先后），表名会不在这份名单里。
-    applyLiveEvent(qc, { type: 'change', table: 'some_new_table' as RealtimeTable, id: 'x' });
-    applyLiveEvent(qc, { type: 'resync' });
-    applyLiveEvent(qc, { type: 'ready' });
+    applyOne(qc, { type: 'change', table: 'some_new_table' as RealtimeTable, id: 'x' });
+    applyOne(qc, { type: 'resync' });
+    applyOne(qc, { type: 'ready' });
     expect(called()).toEqual(['全部', '全部', '全部']);
   });
 });
@@ -92,7 +96,7 @@ describe('重拉不打断正在读的：打断了要从头再等一轮', () => {
     me.reads[0]?.done('我');
     await vi.waitFor(() => expect(qc.getQueryData(['me'])).toBe('我'));
 
-    applyLiveEvent(qc, { type: 'ready' });
+    applyOne(qc, { type: 'ready' });
     await settle();
     expect(board.reads).toHaveLength(1);
     expect(board.reads[0]?.signal.aborted).toBe(false);
@@ -111,7 +115,7 @@ describe('重拉不打断正在读的：打断了要从头再等一轮', () => {
     const qc = new QueryClient();
     const board = held(qc, ['board', 'r1']);
     for (const id of ['p1', 'p2', 'p3']) {
-      applyLiveEvent(qc, { type: 'change', table: 'progress_events', id });
+      applyOne(qc, { type: 'change', table: 'progress_events', id });
       await settle();
     }
     expect(board.reads).toHaveLength(1);

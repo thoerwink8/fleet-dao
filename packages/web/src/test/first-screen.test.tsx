@@ -13,7 +13,6 @@ import { TooltipProvider } from '../components/ui/tooltip';
 import HomePage from '../routes/home';
 import Shell from '../routes/shell';
 
-const HINT_KEY = 'fleet-dao.repo-ids';
 const REPOS = ['r-orbit', 'r-canary', 'r-site'];
 
 beforeEach(() => localStorage.clear());
@@ -87,14 +86,12 @@ async function open(api: FleetApi, route: string) {
 }
 
 describe('首屏：读取和确认登录一起发，一轮发完', () => {
-  test('主页（回访）：登录、仓列表、主页、提醒、各仓的看板都在第 1 轮；推送等确认登录后再连；不拉路由', async () => {
-    localStorage.setItem(HINT_KEY, JSON.stringify(REPOS));
+  test('主页：登录、仓列表、主页、提醒都在第 1 轮；推送等确认登录后再连；不拉路由', async () => {
     const w = waved();
     await open(w.api, '/');
     expect(screen.getByText('正在确认登录…')).toBeTruthy();
     expect(w.subscribed).toEqual([]);
-    // 主页自己发 home/me/repos/notifications；壳的顶栏、侧栏、⌘K 拉各仓的看板。
-    for (const call of ['me', 'repos', 'home', 'notifications', ...REPOS.map((r) => `board:${r}`)]) {
+    for (const call of ['me', 'repos', 'home', 'notifications']) {
       expect([call, w.first(call)]).toEqual([call, 1]);
     }
     await w.release();
@@ -106,17 +103,12 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     expect(w.called('routingLayers')).toBe(false);
   });
 
-  test('主页就算本机没记过仓，me、repos、home、notifications 也还是第 1 轮发；各仓的看板等仓列表，第 2 轮', async () => {
+  test('各仓的看板（只给顶栏切换仓的计数）等仓列表回来再拉，不和主页抢第 1 轮', async () => {
     const w = waved();
     await open(w.api, '/');
-    expect(w.first('me')).toBe(1);
-    expect(w.first('repos')).toBe(1);
-    expect(w.first('home')).toBe(1);
-    expect(w.first('notifications')).toBe(1);
-    expect(w.called('board:r-orbit')).toBe(false);
+    for (const r of REPOS) expect(w.called(`board:${r}`)).toBe(false);
     await w.release();
-    expect(w.first('board:r-orbit')).toBe(2);
-    expect(JSON.parse(localStorage.getItem(HINT_KEY) ?? '[]')).toEqual(REPOS);
+    for (const r of REPOS) expect([r, w.first(`board:${r}`)]).toEqual([r, 2]);
   });
 
   test('没登录：页面一直不露出来，推送不连，说要先登录', async () => {

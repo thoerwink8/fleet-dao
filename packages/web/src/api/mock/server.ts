@@ -181,7 +181,7 @@ function mockEngine() {
     case 'off':
       return {
         state: 'off' as const,
-        detail: '这台机器按设置没开引擎（临时调整）',
+        detail: '这台机器按配置（release.env 的 FLEET_SERVICES）没开引擎',
       };
     case 'down':
       return { state: 'down' as const, detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' };
