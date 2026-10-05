@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanId, decideStop, stateDir } from './unattended.mjs';
+import { cleanId, decideStop, stateDir, withOwed } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
 const TEMP_LIKE = /\.(png|jpe?g|gif|json|log|txt)$/i;
@@ -91,7 +91,8 @@ if (isMain()) {
   }
   // 无人值守：先判（它自己防空转，不看 stop_hook_active——我们自己挡回去之后那个标志就一直是真的）
   const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-  const un = decideStop({ dir: stateDir(), sessionId });
+  // withOwed：创始人的话还没送到他手上，挡回去时点名；放行时清账（unattended.mjs「创始人的话到了」那段）
+  const un = withOwed(decideStop({ dir: stateDir(), sessionId }), { dir: stateDir(), sessionId });
   if (un.block) {
     process.stdout.write(JSON.stringify({ decision: 'block', reason: un.reason }) + '\n');
     process.exit(0);

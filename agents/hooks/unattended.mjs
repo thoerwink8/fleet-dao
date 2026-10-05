@@ -278,6 +278,140 @@ export function armForBackground({ dir, sessionId, now = Date.now(), minutes = A
   }
 }
 
+// ── 创始人的话到了、还没有东西送到他手上（创始人 2026-10-05「全都按照你推荐的改」，对「干活中间问话，一次答完并送到手上」那条）──
+// 起因：无人值守或后台活开着时这一轮结束不了，「答案放最后一条」落不了地。2026-10-05 一场会话里他问了一句，答案 11 分钟就齐了，
+// 之后 2 小时只是在每一步开头重说，一次也没单独发给他。
+// 记在 <会话号>.owed.json，和无人值守的状态分开存：他说话的时候可能还没开（后台活晚一步才起）。
+// 三处动它：消息提交钩子（prompt-log.mjs）记；调工具前钩子（pretool.mjs）见到送达类工具就清、过了 OWED_NAG_MINUTES 还欠着就拦一次；
+// 收尾钩子（stop.mjs）放行时清（这一轮结束了，最后一条就是答复）、挡回时在话里点名。
+
+/** 他的话到了之后过这么久还没送达，就在下一次调工具时拦一次。 */
+export const OWED_NAG_MINUTES = 10;
+/** 调了这几个工具算「送到他手上了」。登记在同步工具的 PreToolUse matcher 里（targets.ts），两边要一起改。 */
+export const DELIVERY_TOOLS = new Set(['mcp__mirasim__deliver_artifact', 'PushNotification']);
+
+/** @typedef {{ at: string, preview: string, nagged: boolean }} Owed */
+
+/**
+ * @param {string} dir
+ * @param {unknown} id
+ */
+function owedFile(dir, id) {
+  return join(dir, `${cleanId(id)}.owed.json`);
+}
+
+/**
+ * 是不是他本人说的、要有个回音的话：系统替后台活报的完成通知、上下文总结的开场白不算；「继续」这种几个字的也不算。
+ * @param {unknown} prompt
+ * @returns {prompt is string}
+ */
+export function isFounderPrompt(prompt) {
+  if (typeof prompt !== 'string') return false;
+  const t = prompt.trim();
+  if (t.length < 6) return false;
+  return !/^(<task-notification|<agent-message|\[SYSTEM NOTIFICATION|This session is being continued)/.test(
+    t,
+  );
+}
+
+/**
+ * 消息提交那一刻记一笔。不抛、不出声（调用方是「绝不插话」的 prompt-log.mjs）。
+ * @param {{ dir: string, sessionId: unknown, prompt: unknown, now?: number }} opts
+ */
+export function noteFounderPrompt({ dir, sessionId, prompt, now = Date.now() }) {
+  try {
+    if (!cleanId(sessionId) || !isFounderPrompt(prompt)) return;
+    mkdirSync(dir, { recursive: true });
+    /** @type {Owed} */
+    const owed = {
+      at: new Date(now).toISOString(),
+      preview: prompt.trim().replace(/\s+/g, ' ').slice(0, 40),
+      nagged: false,
+    };
+    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify(owed)}\n`);
+  } catch {
+    // 记不上只是少一次提醒
+  }
+}
+
+/**
+ * 没欠、读不了、认不出都是 null：这里只管提醒，读不了不当成欠着。
+ * @param {{ dir: string, sessionId: unknown }} opts
+ * @returns {Owed | null}
+ */
+export function readOwed({ dir, sessionId }) {
+  try {
+    if (!cleanId(sessionId)) return null;
+    /** @type {unknown} */
+    const o = JSON.parse(readFileSync(owedFile(dir, sessionId), 'utf8'));
+    if (typeof o !== 'object' || o === null || !('at' in o) || !('preview' in o)) return null;
+    if (!Number.isFinite(Date.parse(String(o.at)))) return null;
+    return { at: String(o.at), preview: String(o.preview), nagged: 'nagged' in o && o.nagged === true };
+  } catch {
+    return null;
+  }
+}
+
+/** @param {{ dir: string, sessionId: unknown }} opts */
+export function clearOwed({ dir, sessionId }) {
+  try {
+    if (cleanId(sessionId)) rmSync(owedFile(dir, sessionId), { force: true });
+  } catch {
+    // 清不掉最多多提醒一次
+  }
+}
+
+/**
+ * @param {Owed} owed
+ * @param {number} now
+ */
+export function owedLine(owed, now) {
+  const mins = Math.max(0, Math.round((now - Date.parse(owed.at)) / 60_000));
+  return (
+    `创始人 ${mins} 分钟前说的话（「${owed.preview}…」）还没有东西送到他手上——这一轮结束不了，他等不到「最后一条」。` +
+    '现在就送：是问话，把完整答案一次写清，用 deliver_artifact 发给他（没有就 PushNotification）；是交代，发一行「收到、在做什么」。' +
+    '送过之后接着干，不要在后面每一步开头再重说。'
+  );
+}
+
+/**
+ * 收尾钩子用：挡回去时把欠着的话点名加在前面；放行时清掉（这一轮结束了，最后一条就是答复）。
+ * @param {{ block: true, reason: string } | { block: false, notice?: string }} verdict
+ * @param {{ dir: string, sessionId: unknown, now?: number }} opts
+ */
+export function withOwed(verdict, { dir, sessionId, now = Date.now() }) {
+  if (!verdict.block) {
+    clearOwed({ dir, sessionId });
+    return verdict;
+  }
+  const owed = readOwed({ dir, sessionId });
+  return owed ? { block: true, reason: `${owedLine(owed, now)}\n${verdict.reason}` } : verdict;
+}
+
+/**
+ * 调工具前钩子用：这次调的是送达类工具就清账；这一轮结束不了（无人值守开着）、话欠了超过 OWED_NAG_MINUTES 又没拦过，
+ * 就返回一句话让调用方把这一次工具调用拦下（只拦一次，不困住人）。不抛。
+ * @param {{ dir: string, sessionId: unknown, tool: unknown, now?: number }} opts
+ * @returns {string | null}
+ */
+export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
+  try {
+    if (typeof tool === 'string' && DELIVERY_TOOLS.has(tool)) {
+      clearOwed({ dir, sessionId });
+      return null;
+    }
+    const owed = readOwed({ dir, sessionId });
+    if (!owed || owed.nagged || now - Date.parse(owed.at) < OWED_NAG_MINUTES * 60_000) return null;
+    const r = readState(dir, sessionId);
+    if (!r.ok || r.state === null || r.state.state !== 'on' || now > Date.parse(r.state.expiresAt))
+      return null;
+    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify({ ...owed, nagged: true })}\n`);
+    return `${owedLine(owed, now)}（这次工具调用先拦下，只拦这一次；送完重发这条命令。）`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 开会话钩子读的那一句：这个会话的无人值守开着（上下文被总结、重启之后还知道）；没开、读不了都是空数组。
  * @param {{ dir: string, sessionId: unknown, now?: number }} opts

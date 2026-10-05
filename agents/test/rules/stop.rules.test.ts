@@ -244,6 +244,111 @@ describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
     expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
   });
 
+  // 创始人 2026-10-05「全都按照你推荐的改」：干活中间问话，一次答完并送到手上（起因见 unattended.mjs「创始人的话到了」那段）
+  describe('这一轮结束不了的时候，创始人的话必须送到他手上', () => {
+    const PROMPT_LOG = fileURLToPath(new URL('../../hooks/prompt-log.mjs', import.meta.url));
+    const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
+    const say = (env: NodeJS.ProcessEnv, prompt: string) =>
+      spawnSync(process.execPath, [PROMPT_LOG], {
+        input: JSON.stringify({ session_id: SID, prompt_id: `p-${prompt.length}`, prompt }),
+        encoding: 'utf8',
+        env: { ...env, FLEET_PROMPT_LOG_DIR: temp('plog') },
+      });
+    const tool = (
+      env: NodeJS.ProcessEnv,
+      name: string,
+      input: Record<string, unknown> = { command: 'echo hi' },
+    ) =>
+      spawnSync(process.execPath, [PRETOOL], {
+        input: JSON.stringify({ tool_name: name, tool_input: input, cwd: temp('c'), session_id: SID }),
+        encoding: 'utf8',
+        env,
+      });
+    const owedPath = (dir: string) => join(dir, `${SID}.owed.json`);
+    /** 把欠账的时间往回拨，免得测试真等 10 分钟 */
+    const age = (dir: string, minutes: number) => {
+      const o = JSON.parse(readFileSync(owedPath(dir), 'utf8'));
+      writeFileSync(
+        owedPath(dir),
+        JSON.stringify({ ...o, at: new Date(Date.now() - minutes * 60_000).toISOString() }),
+      );
+    };
+
+    it('他说了话、这一轮被挡回去：挡回的话里点名那句话，并说清怎么送（deliver_artifact / PushNotification）', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      cli(['on'], env);
+      const r = say(env, '这样改合理吗？断链在哪');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe(''); // 消息提交钩子照旧一个字不出
+      const out = JSON.parse(stop(env).stdout.trim());
+      expect(out.decision).toBe('block');
+      expect(out.reason).toContain('这样改合理吗？断链在哪');
+      expect(out.reason).toContain('deliver_artifact');
+      expect(out.reason).toContain('不要在后面每一步开头再重说');
+    });
+
+    it('欠了超过 10 分钟：下一次工具调用被拦一次（退出码 2），再下一次放行——只提醒，不困住人', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      cli(['on'], env);
+      say(env, '这样改合理吗？断链在哪');
+      expect(tool(env, 'Bash').status).toBe(0); // 刚说的，不拦
+      age(dir, 11);
+      const nag = tool(env, 'Bash');
+      expect(nag.status).toBe(2);
+      expect(nag.stderr).toContain('还没有东西送到他手上');
+      expect(tool(env, 'Bash').status).toBe(0);
+    });
+
+    it('调了送达类工具就清账：之后不拦，挡回的话里也不再点名', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      cli(['on'], env);
+      say(env, '这样改合理吗？断链在哪');
+      age(dir, 11);
+      expect(tool(env, 'mcp__mirasim__deliver_artifact', { path: 'D:/x/answer.md' }).status).toBe(0);
+      expect(existsSync(owedPath(dir))).toBe(false);
+      expect(tool(env, 'Bash').status).toBe(0);
+      expect(JSON.parse(stop(env).stdout.trim()).reason).not.toContain('还没有东西送到他手上');
+    });
+
+    it('这一轮正常结束（没开无人值守）：不拦工具，收尾时清账——最后一条就是答复', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      say(env, '这样改合理吗？断链在哪');
+      age(dir, 11);
+      expect(tool(env, 'Bash').status).toBe(0);
+      expect(blocked(stop(env).stdout)).toBe(false);
+      expect(existsSync(owedPath(dir))).toBe(false);
+    });
+
+    it('不算他的话：后台活的完成通知、上下文总结的开场白、「继续」这种几个字的', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      for (const p of [
+        '<task-notification> <task-id>x</task-id>',
+        'This session is being continued from…',
+        '继续',
+      ]) {
+        say(env, p);
+        expect(existsSync(owedPath(dir)), p).toBe(false);
+      }
+    });
+
+    it('故意造出失败：欠账文件坏了——不拦、不崩，当没欠（这里只是提醒，读不了不能变成拦）', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      cli(['on'], env);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(owedPath(dir), '{不是 JSON');
+      expect(tool(env, 'Bash').status).toBe(0);
+      const out = JSON.parse(stop(env).stdout.trim());
+      expect(out.decision).toBe('block');
+      expect(out.reason).not.toContain('还没有东西送到他手上');
+    });
+  });
+
   it('开会话钩子读得到：开着给一句话、暂停给一句话、没开什么都不给', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);

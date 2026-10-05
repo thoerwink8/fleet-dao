@@ -15,7 +15,15 @@ import {
   SUBAGENT_DIRECT_MS,
   SUBAGENT_FETCH_MS,
 } from './fresh-main.mjs';
-import { armForBackground, cleanId, startsBackground, stateDir, touchTool } from './unattended.mjs';
+import {
+  armForBackground,
+  cleanId,
+  DELIVERY_TOOLS,
+  nagIfOwed,
+  startsBackground,
+  stateDir,
+  touchTool,
+} from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2010,7 +2018,8 @@ export function decide(raw, fallbackCwd = '') {
   const input = isObjectLike(parsed) ? parsed : {};
   const tool = input.tool_name ?? input.toolName;
   // 只为记「起了后台活」才登记的工具（main 里已经记过）：这里不判，放行
-  if (typeof tool === 'string' && BACKGROUND_ONLY_TOOLS.has(tool)) return { code: 0 };
+  if (typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool)))
+    return { code: 0 };
   const readKind = typeof tool === 'string' && Object.hasOwn(READ_TOOLS, tool) ? READ_TOOLS[tool] : undefined;
   if (typeof tool === 'string' && readKind !== undefined) {
     return readVerdict(tool, readKind, input, fallbackCwd);
@@ -2105,7 +2114,14 @@ if (isMain()) {
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     const toolInput = prop(input, 'tool_input') ?? prop(input, 'toolInput');
     if (id && startsBackground(tool, toolInput)) armForBackground({ dir: stateDir(), sessionId: id });
-    backgroundOnly = typeof tool === 'string' && BACKGROUND_ONLY_TOOLS.has(tool);
+    backgroundOnly =
+      typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
+    // 创始人的话欠着没送达：送达类工具清账；这一轮结束不了又欠了太久，把这一次调用拦下、只拦一次（unattended.mjs 的 nagIfOwed）
+    const nag = id ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
+    if (nag) {
+      process.stderr.write(`${nag}\n`);
+      process.exit(2);
+    }
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }
