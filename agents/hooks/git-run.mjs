@@ -88,9 +88,7 @@ export function gitBroken(r) {
 export function gitWhy(r) {
   if (r.error) {
     if (r.error.code === 'ETIMEDOUT')
-      return typeof r.timeoutMs === 'number'
-        ? `超过 ${Math.round(r.timeoutMs / 1000)} 秒没完`
-        : '超时没完';
+      return typeof r.timeoutMs === 'number' ? `超过 ${Math.round(r.timeoutMs / 1000)} 秒没完` : '超时没完';
     return `起不来：${r.error.message}`;
   }
   const first = `${r.stderr ?? ''}\n${r.stdout ?? ''}`

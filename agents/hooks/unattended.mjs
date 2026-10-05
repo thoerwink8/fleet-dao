@@ -417,7 +417,8 @@ export function withOwed(verdict, { dir, sessionId, now = Date.now() }) {
     return verdict;
   }
   const r = readOwed({ dir, sessionId });
-  if (!r.ok) return { block: true, reason: `${setAsideOwed({ dir, sessionId, why: r.why })}\n${verdict.reason}` };
+  if (!r.ok)
+    return { block: true, reason: `${setAsideOwed({ dir, sessionId, why: r.why })}\n${verdict.reason}` };
   return r.owed ? { block: true, reason: `${owedLine(r.owed, now)}\n${verdict.reason}` } : verdict;
 }
 
@@ -441,8 +442,11 @@ export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
     const r = readState(dir, sessionId);
     if (!r.ok || r.state === null || r.state.state !== 'on' || now > Date.parse(r.state.expiresAt))
       return null;
-    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify({ ...owed, nagged: true })}
-`);
+    writeFileSync(
+      owedFile(dir, sessionId),
+      `${JSON.stringify({ ...owed, nagged: true })}
+`,
+    );
     return {
       block: true,
       message: `${owedLine(owed, now)}（这次工具调用先拦下，只拦这一次；送完重发这条命令。）`,

@@ -1,7 +1,15 @@
 // 钩子共用的 git 跑法（agents/hooks/git-run.mjs）和几处原来各写一份的口径（全仓审查第 4 路 R3、R4），
 // 以及两处原来吞掉的错（S8：欠账文件坏了悄悄回 null；S9：起子代理前取远端出错整段吞掉）。每条都故意造出失败。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -76,12 +84,16 @@ describe('git-run.mjs：钩子跑 git 只有这一份', () => {
     }
   });
 
-  it('目录不在：git 自己说话（128），不当成「git 没跑起来」', () => {
-    const r = run.gitRunner(20_000)(join(temp('gone'), 'nope'), ['rev-parse', '--is-inside-work-tree']);
-    expect(run.gitOk(r)).toBe(false);
-    expect(r.status).toBe(128);
-    expect(run.gitBroken(r)).toBe(false);
-  }, SLOW_MS);
+  it(
+    '目录不在：git 自己说话（128），不当成「git 没跑起来」',
+    () => {
+      const r = run.gitRunner(20_000)(join(temp('gone'), 'nope'), ['rev-parse', '--is-inside-work-tree']);
+      expect(run.gitOk(r)).toBe(false);
+      expect(r.status).toBe(128);
+      expect(run.gitBroken(r)).toBe(false);
+    },
+    SLOW_MS,
+  );
 
   it('起不来、超时、没退出码、Windows 缺 DLL 的大退出码都算没跑起来，原因说得出', () => {
     const enoent: R = {
@@ -108,19 +120,24 @@ describe('git-run.mjs：钩子跑 git 只有这一份', () => {
     expect(run.gitBroken({ status: 128, stdout: '', stderr: 'fatal: not a git repository' })).toBe(false);
   });
 
-  it('直连那一次用直连的超时，结果里写的是这一次实际用的', () => {
-    const g = run.gitRunner(20_000, 30_000);
-    expect(g(HOOKS, ['--version']).timeoutMs).toBe(20_000);
-    expect(g(HOOKS, ['--version'], { direct: true }).timeoutMs).toBe(30_000);
-    expect(g(HOOKS, ['--version'], { timeoutMs: 25_000 }).timeoutMs).toBe(25_000);
-  }, SLOW_MS);
+  it(
+    '直连那一次用直连的超时，结果里写的是这一次实际用的',
+    () => {
+      const g = run.gitRunner(20_000, 30_000);
+      expect(g(HOOKS, ['--version']).timeoutMs).toBe(20_000);
+      expect(g(HOOKS, ['--version'], { direct: true }).timeoutMs).toBe(30_000);
+      expect(g(HOOKS, ['--version'], { timeoutMs: 25_000 }).timeoutMs).toBe(25_000);
+    },
+    SLOW_MS,
+  );
 });
 
 describe('原来各写一份的口径（R4）', () => {
   it('工人目录：开会话钩子和 commander 技能是同一处', async () => {
     const ss = await load<{ WORKERS_REL: string }>('session-start.mjs');
     const wl = (await import(
-      pathToFileURL(fileURLToPath(new URL('../skills/commander/scripts/worker-lib.mjs', import.meta.url))).href
+      pathToFileURL(fileURLToPath(new URL('../skills/commander/scripts/worker-lib.mjs', import.meta.url)))
+        .href
     )) as { workersDir(home: string): string; ROUTING_DEFAULT_REL: string };
     expect(wl.workersDir('H')).toBe(join('H', ss.WORKERS_REL));
     const src = await load<{ SYNC_DIR: string }>('sync-source.mjs');
@@ -128,7 +145,9 @@ describe('原来各写一份的口径（R4）', () => {
   });
 
   it('开会话列创始人最近的话认 FLEET_PROMPT_LOG_DIR（和落盘那边一样），不只看家目录', async () => {
-    const ss = await load<{ recentPrompts(o: { home: string; now?: number }): string[] }>('session-start.mjs');
+    const ss = await load<{ recentPrompts(o: { home: string; now?: number }): string[] }>(
+      'session-start.mjs',
+    );
     const logs = temp('plog');
     const now = Date.parse('2026-10-05T07:30:00Z');
     writeFileSync(
@@ -179,19 +198,23 @@ describe('欠账文件坏了不再悄悄当没欠（S8）', () => {
     expect(v.reason).toContain('\n接着干');
   });
 
-  it('真的钩子进程：欠账文件坏了，stderr 有提示，照样放行', () => {
-    const dir = broken();
-    const file = join(temp('read'), 'a.txt');
-    writeFileSync(file, 'x');
-    const r = spawnSync(process.execPath, [join(HOOKS, 'pretool.mjs')], {
-      input: JSON.stringify({ tool_name: 'Read', tool_input: { file_path: file }, session_id: ID }),
-      encoding: 'utf8',
-      env: { ...process.env, FLEET_UNATTENDED_DIR: dir },
-      timeout: 20_000,
-    });
-    expect(r.stderr).toContain('坏了（不是 JSON）');
-    expect(r.status).toBe(0);
-  }, SLOW_MS);
+  it(
+    '真的钩子进程：欠账文件坏了，stderr 有提示，照样放行',
+    () => {
+      const dir = broken();
+      const file = join(temp('read'), 'a.txt');
+      writeFileSync(file, 'x');
+      const r = spawnSync(process.execPath, [join(HOOKS, 'pretool.mjs')], {
+        input: JSON.stringify({ tool_name: 'Read', tool_input: { file_path: file }, session_id: ID }),
+        encoding: 'utf8',
+        env: { ...process.env, FLEET_UNATTENDED_DIR: dir },
+        timeout: 20_000,
+      });
+      expect(r.stderr).toContain('坏了（不是 JSON）');
+      expect(r.status).toBe(0);
+    },
+    SLOW_MS,
+  );
 });
 
 describe('起子代理前取远端那一步自己出错，不再整段吞掉（S9）', () => {
