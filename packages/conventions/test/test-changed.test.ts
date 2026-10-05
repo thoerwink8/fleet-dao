@@ -408,7 +408,7 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
     });
 
     it('仓根下的单个文件（README.md）只认指向仓根的写法，不被「README.md」这个词到处当夹具拖上全部', () => {
-      const repo = memRepo({ ...base, 'packages/p/test/f.test.ts': "read(join(ROOT, 'README.md'))" });
+      const repo = memRepo({ ...base, 'packages/p/test/f.test.ts': "read(join(REPO_ROOT, 'README.md'))" });
       expect(docReaders(repo, ['README.md'])).toEqual(['packages/p/test/f.test.ts']);
       expect(docNeedles('README.md')).toHaveLength(2);
     });
