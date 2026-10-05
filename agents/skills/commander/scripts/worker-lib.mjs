@@ -69,12 +69,13 @@ export const ROUTING_DEFAULT_REL = join(
   'routing.default.json',
 );
 /** 不给 --model-id 时按骨架里哪个模型查档位：本机 grok 命令行跑的就是 grok-4.7（法国 grok 那条路由同一个命令行），codex 跑 GPT。 */
-export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'opus' };
+export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet' };
 /**
  * Claude 工人只许这两族（通用段「我的机器与模型」：机器派的会话、工人永不用 Fable，只用 Opus 或 Sonnet）。
- * 不给 --model-id 用 opus；给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。
+ * 不给 --model-id 用 sonnet（创始人 2026-10-05：「派活我推荐sonnet5.5>opus5.5」），要 Opus 显式给 --model-id opus；
+ * 给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。
  */
-export const CLAUDE_DEFAULT_MODEL = 'opus';
+export const CLAUDE_DEFAULT_MODEL = 'sonnet';
 export function claudeModelProblem(modelId) {
   const id = modelId ?? CLAUDE_DEFAULT_MODEL;
   if (/^(opus|sonnet)$/.test(id) || /^claude-(opus|sonnet)-[\w.-]+$/.test(id)) return null;
@@ -85,6 +86,7 @@ export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.co
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
   start --model grok|codex|kimi|claude --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
+        [--model-id：claude 默认 sonnet，要 Opus 给 opus；Fable 一律拒起]
         [--effort low|medium|high|xhigh，这一次用的；不给照 ~/${ROUTING_DEFAULT_REL.replaceAll('\\', '/')} 给这个模型配的，
         没配是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
                     在主检出的 .claude/worktrees/ 下建一棵工作树、起一个模型命令行去干活（后台跑，这条命令退出它照跑）

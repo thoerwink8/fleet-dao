@@ -783,7 +783,7 @@ describe('start：【故意造出的失败】', () => {
   });
 
   // #1016：长活搬出聊天会话——Claude 工人也走这条独立进程的路
-  it('claude：经 reclaude 起，prompt 走标准输入，默认 opus，带思考档位；收尾交代里有四类人闸那一段', async () => {
+  it('claude：经 reclaude 起，prompt 走标准输入，默认 sonnet，带思考档位；收尾交代里有四类人闸那一段', async () => {
     const w = world();
     w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
@@ -807,7 +807,7 @@ describe('start：【故意造出的失败】', () => {
       '-p',
       '--dangerously-skip-permissions',
       '--model',
-      'opus',
+      'sonnet',
       '--effort',
       'high',
       '--output-format',
@@ -821,7 +821,7 @@ describe('start：【故意造出的失败】', () => {
     expect(prompt).toContain('卡住：人闸——');
   });
 
-  it('claude：--model-id sonnet 透传', async () => {
+  it('claude：--model-id opus 透传（默认是 sonnet，要 Opus 得显式给）', async () => {
     const w = world();
     w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
@@ -835,12 +835,14 @@ describe('start：【故意造出的失败】', () => {
       '--brief',
       brief(w),
       '--model-id',
-      'sonnet',
+      'opus',
       '--effort',
       'medium',
     ]);
     expect(code).toBe(0);
-    expect(must(w.spawnCalls[0], '没有 spawnCalls[0]').args).toContain('sonnet');
+    const args = must(w.spawnCalls[0], '没有 spawnCalls[0]').args;
+    expect(args).toContain('opus');
+    expect(args).not.toContain('sonnet');
   });
 
   it('【故意造出的失败】claude 工人要用 Fable（或别的不是 Opus、Sonnet 的型号）：拒起，不碰 git/gh/pnpm/spawn', async () => {
