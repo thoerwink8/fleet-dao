@@ -452,7 +452,7 @@ async function openPgAlertWork(
   const { deployFacts, pgAlertWork } = await import('@fleet-dao/store');
   const { readDeployLagInput } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
-  // 发布记录只在法国的正式机器上有（和后端 main.ts 的 deploy_lag 同一个判法：没写 FLEET_ENV 的就是正式的）
+  // 发布记录只在正式环境有（和后端 main.ts 的 deploy_lag 同一个判法：没写 FLEET_ENV 的就是正式的）
   const production = (env.FLEET_ENV ?? 'production') === 'production';
   return {
     alerts: pgAlertWork(db, () => (production ? deployFacts(readDeployLagInput()) : null)),
