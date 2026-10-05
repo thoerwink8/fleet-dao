@@ -5,7 +5,7 @@
 // 它选路的用途算战绩，task-contract.ts 的 SEGMENT_STAGE）
 // + 被暂停的账号池（开关 engine.poolHolds，人拍的；加 pool-hold:<池> 那条没处理的「要人拍」提醒，见 real/pool-holds.ts）交给纯函数
 // chooseRoute，三种结果原样换成
-// 端口的三种：判「死」的（不在线、渠道关了、犯禁令、开关关着……）挡掉、写明原因；额度未知的排在读到了的后面（routing/rank.ts）；
+// 端口的三种：判「死」的（不在线、渠道关了、犯禁令、开关关着……）挡掉、写明原因；额度未知的在同一个模型的渠道里排在读到了的后面、不跨模型（routing/rank.ts，#1089）；
 // 一条都派不出、又等不来，明说派不出（带每条为什么），不拿空的、默认的顶。两层里没有「钉住」，一律按没钉住算。
 // 点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
 // 账号池被提醒顶着暂停（等人修）时，续会话的那一单照样放过去——它就是看人修好了没有的试探；开关暂停的池一个都不放。Fusion 带了流程配置里这一步的模型顺序（models）
@@ -348,7 +348,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     const unwiredIds = new Set(unwiredRoutes.map((r) => r.routeId));
     return {
       configured: facts.configured,
-      // 路由两层没有「钉住」（#574 的两张表都没这一列）：一律按没钉住算，快清零提前、战绩差往后、额度未知排后照常做。
+      // 路由两层没有「钉住」（#574 的两张表都没这一列）：一律按没钉住算，快清零提前、战绩差往后、额度未知排后照常做（只在同一个模型的渠道之间，模型之间严格按用途里排的先后，#1089）。
       stagePinned: false,
       order: facts.order
         .filter((e) => !unwiredIds.has(e.routeId))
