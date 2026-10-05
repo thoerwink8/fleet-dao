@@ -489,6 +489,33 @@ describe('发布收尾要的两样（release.yml 核里程碑、关里程碑）'
     });
   });
 
+  it('改单挂的里程碑：PATCH milestone=<号>，回改完之后挂的编号；未排期传 null、回 null', async () => {
+    const seen: { url: string; method: string | undefined; body: string }[] = [];
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(input), method: init?.method, body: String(init?.body) });
+      const body = JSON.parse(String(init?.body)) as { milestone: number | null };
+      return json({ number: 45, milestone: body.milestone === null ? null : { number: body.milestone } });
+    }) as typeof fetch;
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.setIssueMilestone(45, 11)).toBe(11);
+    expect(await gh.setIssueMilestone(45, null)).toBeNull();
+    expect(seen).toEqual([
+      { url: `${API}/issues/45`, method: 'PATCH', body: '{"milestone":11}' },
+      { url: `${API}/issues/45`, method: 'PATCH', body: '{"milestone":null}' },
+    ]);
+  });
+
+  it('故意造出的失败：改里程碑 GitHub 回非 2xx、或回包里 milestone 认得不对 → 抛', async () => {
+    const forbidden = (async () => new Response('{}', { status: 403 })) as unknown as typeof fetch;
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: forbidden }).setIssueMilestone(45, 11),
+    ).rejects.toThrow('在改 #45 挂的里程碑时，GitHub 回了 403');
+    const garbled = (async () => json({ milestone: { title: 'v4 下一版' } })) as unknown as typeof fetch;
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: garbled }).setIssueMilestone(45, 11),
+    ).rejects.toThrow('读改 #45 挂的里程碑的回包，认不出（milestone）');
+  });
+
   it('故意造出的失败：关里程碑 GitHub 回非 2xx、或回包认不出 → 抛', async () => {
     const forbidden = (async () => new Response('{}', { status: 403 })) as unknown as typeof fetch;
     await expect(
