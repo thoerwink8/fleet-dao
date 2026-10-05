@@ -75,6 +75,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     machineName: '测试机',
     feishuOff: false,
     nodeReport: null,
+    nodeKeys: {},
     ...overrides,
   };
 }

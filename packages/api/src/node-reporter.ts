@@ -1,5 +1,5 @@
 // 推送方（看板多机，全仓审查第 1 路 PR-4）：这一台把自己的主页、环境页快照（snapshots.ts 的同一份拼法）每 60 秒加抖动
-// POST 给正式环境的看板，带头 X-Fleet-Node-Token。只往外连，不开口子；收的那头另做（PR-3，对公网新开写口，等创始人点头）。
+// POST 给正式环境的看板，带头 X-Fleet-Node-Token。只往外连，不开口子；收的那头在 node-report.ts。
 // 改这里之前必须知道：
 // - 配了 FLEET_NODE_REPORT_URL 和 FLEET_NODE_REPORT_TOKEN 才起（config.ts 的 nodeReport）；没配，/healthz 的 node_report 报「未接」，
 //   不起循环、不发一个请求。
@@ -9,13 +9,16 @@
 // - 代理：Node 自带的 fetch 默认不认 HTTP(S)_PROXY；要走代理就在 api.env 里设 NODE_USE_ENV_PROXY=1 加 HTTPS_PROXY（Node 22.21 起有），
 //   仓里没有 undici，不另做 FLEET_NODE_REPORT_PROXY。
 // - 一轮做完才排下一轮（setTimeout 链，不用 setInterval）：对方慢的时候不会叠着推。
-import { NODE_REPORT_SCHEMA_VERSION, type NodeReport, NodeReportSchema } from '@fleet-dao/shared';
+import {
+  NODE_REPORT_HEADER,
+  NODE_REPORT_SCHEMA_VERSION,
+  type NodeReport,
+  NodeReportSchema,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { PublicHealthError } from './health.ts';
 import type { HealthCheck, Logger } from './ports.ts';
 
-/** 收的一方认通行证看的请求头。 */
-export const NODE_REPORT_HEADER = 'X-Fleet-Node-Token';
 export const NODE_REPORT_EVERY_MS = 60_000;
 /** 每轮在 60 秒上再随机加 0～这么多，几台同时起也不会扎堆。 */
 export const NODE_REPORT_JITTER_MS = 15_000;

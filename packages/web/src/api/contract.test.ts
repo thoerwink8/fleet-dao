@@ -17,6 +17,8 @@ function used(prefix: string): Set<string> {
 
 /** 契约里有、前端（http.ts）没用的：key → 为什么。 */
 const WEB_NOT_USED: Record<string, string> = {
+  nodes: '看板多机的读口（PR-3 先给后端）：顶栏环境切换器（PR-6）接上就从这里删',
+  node: '同上：远程环境的快照，主页、环境页选了远程环境才读（PR-6）',
   answerAsk:
     '回答追问一律 409（新流程没有收回答的地方，#928）：驾驶舱不再调，只剩飞书网关还在用它（FEISHU_GATEWAY_WEB_ROUTES）',
 };

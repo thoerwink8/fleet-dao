@@ -6,15 +6,19 @@
 //   dispatch <owner/仓名> on|off|status
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
+//   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
+//   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
+//   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
 //   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
+import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
-import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE } from '@fleet-dao/shared';
+import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
@@ -35,6 +39,8 @@ export class CliError extends Error {
 
 const USAGE =
   '用法：fleet-api set-password <飞书名或用户 id> [--username <用户名>]（密码从标准输入读，不收参数）';
+const NODE_KEY_USAGE =
+  '用法：fleet-api node-key new <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；打印一次通行证明文和要贴进 FLEET_NODE_KEYS 的哈希）';
 const DISPATCH_USAGE =
   '用法：fleet-api dispatch <owner/仓名> on|off|status（「让 AI 接活」开关：on 打开，off 关上，status 只看）';
 
@@ -212,6 +218,61 @@ export function stdioPrompter(): Prompter & { close(): void } {
     askHidden: (q) => read(q, true),
     close: () => rl?.close(),
   };
+}
+
+// —— node-key：给往这台推快照的环境发通行证 ——
+
+/** node-key 的操作记录：和 set-password 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
+export const NODE_KEY_NEW = 'node_key.new';
+
+/** 只认 `new <环境编号>` 这一种写法；别的子命令、多的参数、带 - 的一律拒，不猜。 */
+export function parseNodeKeyArgs(argv: readonly string[]): { id: string } {
+  const [sub, id, ...extra] = argv;
+  if (sub !== 'new') throw new CliError(NODE_KEY_USAGE, 2);
+  const flag = [id, ...extra].find((a) => a?.startsWith('-'));
+  if (flag !== undefined) throw new CliError(`认不出参数 ${flag.split('=')[0]}。${NODE_KEY_USAGE}`, 2);
+  if (id === undefined || extra.length > 0) throw new CliError(`要恰好一个环境编号。${NODE_KEY_USAGE}`, 2);
+  if (!NodeIdSchema.safeParse(id).success) {
+    throw new CliError(`环境编号「${id}」不合法。${NODE_KEY_USAGE}`, 2);
+  }
+  return { id };
+}
+
+/**
+ * 发一把新通行证：随机 32 字节（43 个字符），哈希是明文的 sha256 十六进制（接收方 node-report.ts 同一个算法）。
+ * 先写操作记录再回明文：记录写不进抛错、什么都不打印。回的文字就是要给人看的全部（明文只有这一份）。
+ */
+export async function newNodeKey(input: {
+  store: Store;
+  id: string;
+  operator: string;
+  token?: (() => string) | undefined;
+}): Promise<string> {
+  const token = (input.token ?? (() => randomBytes(32).toString('base64url')))();
+  const hash = createHash('sha256').update(token).digest('hex');
+  try {
+    await input.store.appendAudit({
+      actor: { kind: 'engine', id: 'ops:node-key' },
+      action: NODE_KEY_NEW,
+      target: `node:${input.id}`,
+      // 只记哈希的前 12 位当指纹：对不上是哪一把时用，拿它还原不出通行证
+      after: { fingerprint: hash.slice(0, 12) },
+      reason: `服务器上 ${input.operator} 跑的 fleet-api node-key new ${input.id}`,
+      via: 'engine',
+      ok: true,
+    });
+  } catch (err) {
+    throw new CliError(`没发成：操作记录写不进（${errMessage(err)}），没有打印通行证`);
+  }
+  return [
+    `环境 ${input.id} 的通行证（只显示这一次，这边不存明文）：`,
+    `  ${token}`,
+    '',
+    `1. 这一台（收的一方）：api.env 的 FLEET_NODE_KEYS 里加这一项（已有别的环境就用逗号接在同一个 JSON 对象里），再重启 fleet-api：`,
+    `  "${input.id}":"${hash}"`,
+    `2. 推送方那一台：api.env 里 FLEET_NODE_REPORT_TOKEN 填上面那串通行证，FLEET_NODE_REPORT_URL 填这一台的 /api/nodes/report 地址，再重启 fleet-api。`,
+    `明文别进聊天、仓库、日志；这一份丢了就重新发一把（旧的从 FLEET_NODE_KEYS 里删掉就作废）。`,
+  ].join('\n');
 }
 
 // —— dispatch：「让 AI 接活」开关 ——
@@ -425,6 +486,8 @@ export interface CliDeps {
   openIntents?: (url: string) => Promise<{ intents: IntentStore; close(): Promise<void> }>;
   /** 读一个文件（intent link 的 --summary-file）。不给就是真的。 */
   readFile?: (path: string) => Promise<string>;
+  /** 生成一把新通行证明文（node-key new 用）。不给就是真随机；测试给固定的。 */
+  newToken?: () => string;
 }
 
 async function openPgIntents(url: string): Promise<{ intents: IntentStore; close(): Promise<void> }> {
@@ -494,6 +557,7 @@ function databaseUrl(env: CliEnv): string {
 const USAGES: Record<string, string> = {
   'set-password': USAGE,
   dispatch: DISPATCH_USAGE,
+  'node-key': NODE_KEY_USAGE,
   alert: ALERT_USAGE,
   intent: INTENT_USAGE,
 };
@@ -530,6 +594,18 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
     try {
       deps.out(await dispatch({ store, args, operator: operatorName(deps.env) }));
+      return 0;
+    } finally {
+      await close();
+    }
+  }
+  if (command === 'node-key') {
+    const args = parseNodeKeyArgs(rest);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(
+        await newNodeKey({ store, id: args.id, operator: operatorName(deps.env), token: deps.newToken }),
+      );
       return 0;
     } finally {
       await close();

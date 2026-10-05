@@ -1,5 +1,5 @@
 // 两个 Hono 应用，分开监听：
-// - cockpit：驾驶舱接口 /api（含飞书网关的 /api/feishu/*）、登录 /auth、GitHub 事件 /github/webhook。
+// - cockpit：驾驶舱接口 /api（含飞书网关的 /api/feishu/*、别的环境推快照的 /api/nodes/report）、登录 /auth、GitHub 事件 /github/webhook。
 //   生产上听 WireGuard 地址，香港经加密通道转进来。
 // - agent：fleet 命令接口 /agent/v1。只听本机回环地址，AI 会话在同一台机器上调；外面够不着。
 import { AGENT_API_PREFIX, AUTH_PREFIX, WEB_API_PREFIX } from '@fleet-dao/shared';
@@ -14,6 +14,7 @@ import { githubRoutes } from './github.ts';
 import { healthHandler } from './health.ts';
 import { errorBody, errorHandler, notFound } from './http.ts';
 import { intentRoutes } from './intent-routes.ts';
+import { nodeReportRoutes } from './node-report.ts';
 import { createSseRelay, type SseRelay } from './sse.ts';
 
 /** 驾驶舱和 fleet 命令的请求体都很小；GitHub 事件另有自己的上限。 */
@@ -43,6 +44,9 @@ export function buildApps(deps: Deps): Apps {
   cockpit.route(AUTH_PREFIX, authRoutes(deps));
   // 飞书网关的意图接口（五条）挂在驾驶舱接口前面：它们只认网关通行证、按各自的 acting 放行，不走驾驶舱的登录门。
   cockpit.route(WEB_API_PREFIX, intentRoutes(deps));
+  // 别的环境推快照的写口（POST /api/nodes/report）：只认专用通行证（X-Fleet-Node-Token）、不认 Cookie，同样挂在登录门前面；
+  // 登录门后面的 GET /api/nodes 不认这个通行证。
+  cockpit.route(WEB_API_PREFIX, nodeReportRoutes(deps));
   cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, relay));
   cockpit.route('/github', githubRoutes(deps, createGitHubIntake(deps)));
 

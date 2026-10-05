@@ -23,6 +23,7 @@ import { RepoDispatchResponse, UpdateRepoDispatchRequest, UpdateRepoDispatchResp
 import { EnvResponseSchema } from './env.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
+import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
 import {
   AuditQuery,
   AuditResponse,
@@ -77,6 +78,10 @@ export const WebRoutes = {
     request: UpdateRepoDispatchRequest,
     response: UpdateRepoDispatchResponse,
   },
+  /** 看板多机：本台加每个远程环境（本机 WSL 等）的新鲜度。收快照的写口（NODE_REPORT_PATH）不在这里：只有别的环境的后端调。 */
+  nodes: { method: 'GET', path: '/nodes', response: NodesResponseSchema },
+  /** 一个远程环境最近一次推来的主页、环境页快照（只读展示用）；没推过 404。 */
+  node: { method: 'GET', path: '/nodes/:nodeId', response: NodeDetailResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
   taskAction: {

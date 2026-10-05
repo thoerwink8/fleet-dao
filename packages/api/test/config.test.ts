@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { APP_SERVICES, ConfigError, engineEnabled, loadConfig } from '../src/config.ts';
@@ -314,5 +315,64 @@ describe('往正式环境的看板推快照（FLEET_NODE_REPORT_URL / _TOKEN）'
       FLEET_NODE_REPORT_TOKEN: TOKEN,
     });
     expect(dev.nodeReport?.url.protocol).toBe('http:');
+  });
+});
+
+describe('收别的环境的快照（FLEET_NODE_KEYS）', () => {
+  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+  const HASH_A = sha('a-node-token-0123456789abcdefghijklmnop');
+  const HASH_B = sha('b-node-token-0123456789abcdefghijklmnop');
+
+  it('不配、空着：{}（不收）；配了：环境编号 → 哈希', () => {
+    expect(loadConfig(PROD).nodeKeys).toEqual({});
+    expect(loadConfig({ ...PROD, FLEET_NODE_KEYS: '  ' }).nodeKeys).toEqual({});
+    expect(loadConfig({ ...PROD, FLEET_NODE_KEYS: '{}' }).nodeKeys).toEqual({});
+    const keys = loadConfig({
+      ...PROD,
+      FLEET_NODE_KEYS: JSON.stringify({ local: HASH_A, 'wsl-2': HASH_B }),
+    }).nodeKeys;
+    expect(keys).toEqual({ local: HASH_A, 'wsl-2': HASH_B });
+  });
+
+  it('【故意造出的失败】不是 JSON、不是对象、编号不合法、值是明文或写短了或大写、两个环境共用一把、和别的密钥相同：拒启动，报错里没有哈希', () => {
+    const bad: [string, string][] = [
+      ['not json', '不是合法的 JSON'],
+      ['["a"]', '要是一个 JSON 对象'],
+      ['"x"', '要是一个 JSON 对象'],
+      [JSON.stringify({ Local: HASH_A }), '环境编号'],
+      [JSON.stringify({ '1a': HASH_A }), '环境编号'],
+      [JSON.stringify({ local: 'plain-token-0123456789abcdefghijklmnopqrstuv' }), '不能填明文'],
+      [JSON.stringify({ local: HASH_A.slice(0, 40) }), '不能填明文'],
+      [JSON.stringify({ local: HASH_A.toUpperCase() }), '不能填明文'],
+      [JSON.stringify({ local: 12 }), '不能填明文'],
+      [JSON.stringify({ a: HASH_A, b: HASH_A }), '用了同一把通行证'],
+      [JSON.stringify({ local: sha(PROD.FLEET_SESSION_SECRET) }), '不能和别的密钥相同'],
+      [JSON.stringify({ local: sha(PROD.FLEET_AGENT_TOKEN_SECRET) }), '不能和别的密钥相同'],
+    ];
+    for (const [value, says] of bad) {
+      const found = problems({ ...PROD, FLEET_NODE_KEYS: value }).join('\n');
+      expect(found, value).toContain(says);
+      expect(found, value).not.toContain(HASH_A);
+    }
+  });
+
+  it('和飞书网关的通行证、本台往外推的通行证相同也拒', () => {
+    const gateway = 'g'.repeat(40);
+    expect(
+      problems({
+        ...PROD,
+        FLEET_FEISHU_GATEWAY_TOKEN: gateway,
+        FLEET_NODE_KEYS: JSON.stringify({ local: sha(gateway) }),
+      }).join(),
+    ).toContain('不能和别的密钥相同');
+    const push = 'p'.repeat(40);
+    expect(
+      problems({
+        ...PROD,
+        FLEET_NODE_REPORT_URL: 'https://board.example.test/api/nodes/report',
+        FLEET_NODE_REPORT_TOKEN: push,
+        FLEET_NODE_KEYS: JSON.stringify({ local: sha(push) }),
+      }).join(),
+    ).toContain('不能和别的密钥相同');
   });
 });
