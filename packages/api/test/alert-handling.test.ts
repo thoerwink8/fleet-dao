@@ -1,6 +1,6 @@
 // 驾驶舱提醒列表的「谁在处理 · 链接 · 多久了」（design 15.3）：读的时候从认领、PR 镜像、发布记录现算（core 的 alertHandling），
 // 没接上、读不到照实写 handlingProblem，不拿「没人在修」顶。拼事实（toAlertWorkFacts）和发布记录（deployFacts）也在这里验。
-import { linkAlertWork, pullRequests, upsertAlert } from '@fleet-dao/db';
+import { alertWork, pullRequests, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { NotificationsResponse } from '@fleet-dao/shared';
 import { type AlertWorkPort, type DeployLagInput, deployFacts, pgAlertWork } from '@fleet-dao/store';
@@ -72,14 +72,13 @@ describe('驾驶舱提醒列表：谁在处理', () => {
       title: '备份没跑成',
       body: '',
     });
-    await linkAlertWork(t.db, {
+    // 挂跟进单的写路 #445 删了，历史行直接插
+    await t.db.insert(alertWork).values({
       notificationId: claimed.id,
       repoId,
       issueNumber: 360,
       source: 'claim',
       linkedBy: '本机/a1',
-      mode: 'replace',
-      audit: { actorKind: 'ai', actorId: '本机/a1', via: 'engine' },
     });
     const fixed = await upsertAlert(t.db, {
       dedupeKey: 'routing:all-open:execute',

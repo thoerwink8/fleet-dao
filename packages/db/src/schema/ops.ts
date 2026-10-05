@@ -513,3 +513,24 @@ export const settings = pgTable(
   },
   (t) => [check('settings_version_positive', sql`${t.version} > 0`)],
 );
+
+/**
+ * 别的环境推来的快照（看板多机，全仓审查第 1 路 4.1）：一个环境一行，再推就整行覆盖，不越积越多。
+ * 落表而不是放内存：法国重启后仍知道「本机上次几点报过、失联多久」，不会把那台从列表里抹掉。
+ * node_id 由收的一方按「哪一把通行证对上了」认定，不信载荷自报的名字；新不新鲜按 received_at（收的一方的钟）算。
+ */
+export const nodeReports = pgTable('node_reports', {
+  nodeId: text('node_id').primaryKey(),
+  /** 载荷里的环境名（env.name.name，例如「本机」），只用来显示。 */
+  displayName: text('display_name').notNull(),
+  /** 快照格式版本（shared 的 NODE_REPORT_SCHEMA_VERSION）；读回来认不出就明确失败。 */
+  schemaVersion: integer('schema_version').notNull(),
+  /** 推送方在用的提交号；读不到就是空，不写假值。 */
+  codeSha: text('code_sha'),
+  /** 推送方的时钟。 */
+  reportedAt: timestamp('reported_at', tz).notNull(),
+  /** 收到的时刻（收的一方的钟）。 */
+  receivedAt: timestamp('received_at', tz).notNull(),
+  /** { home, env }：两份现成的驾驶舱契约原样放。 */
+  payload: jsonb('payload').notNull(),
+});

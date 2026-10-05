@@ -58,11 +58,6 @@ export interface Limits {
   mergeQueueBatch: number;
   /** 合并队列空闲多久就收工（有新条目时会被重新拉起）。 */
   mergeQueueIdleMinutes: number;
-  /**
-   * 一条工作流的事件数到这么多就报一次警（需求、子任务不换历史）。Temporal 每条执行 1 万个信号封顶、事件数 1 万出警告、
-   * 5 万多封死：到那一步连叫停都发不进去，所以在一半之前就要有人知道。
-   */
-  historyAlertEvents: number;
 }
 
 /** 法国 VPS 能分给会话的内存（MiB）：机器约 11.7G，给内核和系统留约 0.7G。 */
@@ -150,7 +145,6 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   mergeWaitMinutes: 360,
   mergeQueueBatch: 50,
   mergeQueueIdleMinutes: 60,
-  historyAlertEvents: 5000,
 });
 
 /**
@@ -173,13 +167,4 @@ export function resolveLimits(partial: Partial<Limits> | null | undefined): Limi
     }
   }
   return out;
-}
-
-/**
- * 工作流事件数的报警线。上限在工作流开头解析一次、记进历史：这一项加进来之前开工的在途任务，记下的那一套里没有它，
- * 读出来是 undefined——那样一比就报「报警线 undefined」。缺了按现在的默认值。
- */
-export function historyAlertLine(limits: Partial<Limits>): number {
-  const value = limits.historyAlertEvents;
-  return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_LIMITS.historyAlertEvents;
 }

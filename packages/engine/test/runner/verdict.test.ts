@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { OneShotResult } from '../../src/runner/one-shot.ts';
-import { judgeManual, judgeScope, judgeVerify } from '../../src/runner/verdict.ts';
+import { judgeVerify } from '../../src/runner/verdict.ts';
 
 function r(over: Partial<OneShotResult>): OneShotResult {
   return {
@@ -17,70 +17,6 @@ function r(over: Partial<OneShotResult>): OneShotResult {
     ...over,
   };
 }
-
-describe('judgeScope', () => {
-  it('done + stdout 非空 → ok', () => {
-    expect(judgeScope(r({})).kind).toBe('ok');
-  });
-  it('done 但 stdout 空 → failed（**不拿空当跑完**）', () => {
-    const v = judgeScope(r({ stdout: '   ' }));
-    expect(v.kind).toBe('failed');
-    expect(v.reason).toMatch(/空|不许/);
-  });
-  it('outcome 不是 done → failed', () => {
-    const v = judgeScope(r({ outcome: 'timeout' }));
-    expect(v.kind).toBe('failed');
-  });
-});
-
-describe('judgeManual', () => {
-  it('done + stdout + PR# + branch + headSha + changedFiles → ok', () => {
-    const v = judgeManual(r({}), {
-      prNumber: 999,
-      branch: 'feat/x',
-      headSha: 'a'.repeat(40),
-      changedFiles: ['a.ts'],
-    });
-    expect(v.kind).toBe('ok');
-  });
-  it('没给 PR# → failed，写明原因', () => {
-    const v = judgeManual(r({}), {
-      branch: 'feat/x',
-      headSha: 'a'.repeat(40),
-      changedFiles: ['a.ts'],
-    });
-    expect(v.kind).toBe('failed');
-    expect(v.reason).toMatch(/PR/);
-  });
-  it('没 branch → failed', () => {
-    const v = judgeManual(r({}), {
-      prNumber: 1,
-      headSha: 'a'.repeat(40),
-      changedFiles: ['a.ts'],
-    });
-    expect(v.kind).toBe('failed');
-    expect(v.reason).toMatch(/branch/);
-  });
-  it('changedFiles 空 → failed（没改任何文件就是没干活）', () => {
-    const v = judgeManual(r({}), {
-      prNumber: 1,
-      branch: 'feat/x',
-      headSha: 'a'.repeat(40),
-      changedFiles: [],
-    });
-    expect(v.kind).toBe('failed');
-    expect(v.reason).toMatch(/changedFiles|没改/);
-  });
-  it('outcome != done → failed（不看 evidence）', () => {
-    const v = judgeManual(r({ outcome: 'killed' }), {
-      prNumber: 1,
-      branch: 'feat/x',
-      headSha: 'a'.repeat(40),
-      changedFiles: ['a.ts'],
-    });
-    expect(v.kind).toBe('failed');
-  });
-});
 
 describe('judgeVerify', () => {
   it('结论行带 pass → ok', () => {

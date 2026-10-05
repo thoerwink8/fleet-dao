@@ -8,6 +8,8 @@ import type {
   Channel,
   HistoryResponse,
   Model,
+  NodeReport,
+  NodeSnapshot,
   Pool,
   ProgressKind,
   QuotaWindow,
@@ -606,13 +608,60 @@ export interface IntakeStore {
   ): Promise<AutoDispatchChange | 'not_found'>;
 }
 
-export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore & IntakeStore;
+/** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
+export interface NodeReportSummary {
+  /** 收的一方按对上的通行证认定，不取载荷自报的名字。 */
+  nodeId: string;
+  /** 载荷里的环境名（env.name.name），只用来显示。 */
+  displayName: string;
+  schemaVersion: number;
+  codeSha?: string | undefined;
+  /** 推送方的时钟。 */
+  reportedAt: string;
+  /** 收到的时刻（这个 Store 的钟）：新不新鲜按它算（shared 的 nodeFreshness）。 */
+  receivedAt: string;
+}
+
+export interface NodeReportRecord extends NodeReportSummary {
+  snapshot: NodeSnapshot;
+}
+
+/** 看板多机（全仓审查第 1 路 4.1）：一个环境一行，覆盖写。memory-store.ts 是参照实现。 */
+export interface NodeStore {
+  /**
+   * 覆盖写：这个环境已有的那一行整行换掉，receivedAt 记成此刻（Store 的钟），回写进去的那一行。
+   * nodeId、report 先照 shared 的 NodeIdSchema / NodeReportSchema 校验（多余字段剥掉再存），认不出（坏载荷、
+   * 未知版本）抛 InvalidNodeReportError、什么都不写。
+   */
+  putNodeReport(input: { nodeId: string; report: NodeReport }): Promise<NodeReportSummary>;
+  /** 收到过快照的环境，按 nodeId 排。 */
+  listNodeReports(): Promise<NodeReportSummary[]>;
+  /** 没收到过是 null。库里那份认不出（版本对不上、形状坏了）抛 InvalidNodeReportError，不当成没有。 */
+  getNodeReport(nodeId: string): Promise<NodeReportRecord | null>;
+}
+
+export type Store = UserStore &
+  BoardStore &
+  RoutingStore &
+  OpsStore &
+  AgentStore &
+  GitHubStore &
+  IntakeStore &
+  NodeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
 export class InvalidCursorError extends Error {
   constructor(message = '翻页游标看不懂（被改过，或者不是这个列表的），从第一页重新翻') {
     super(message);
     this.name = 'InvalidCursorError';
+  }
+}
+
+/** 别的环境推来的快照认不出（写进来的、或库里读回来的）。接收方据此回 400，读的一方据此报「没查成」。 */
+export class InvalidNodeReportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidNodeReportError';
   }
 }
 
@@ -632,7 +681,7 @@ export interface IngestedEvent {
 
 /**
  * 放进来的每条事件都先交给它：写 PR 镜像、CI 汇总（生产是 @fleet-dao/github 的 eventSink）。
- * issue 和评论之后另由 issue-intake.ts 变成任务、工作流。抛错 = 没处理成，这条投递记成出错。
+ * issue 不在这里变成任务：引擎拉单（@fleet-dao/engine 的 jobs/intake.ts）自己去 GitHub 读。抛错 = 没处理成，这条投递记成出错。
  */
 export interface GitHubEventSink {
   accept(event: IngestedEvent): Promise<void>;

@@ -31,7 +31,6 @@ import {
   type Db,
   type EndedPoolRun,
   endedPoolRuns,
-  finishSessionRun,
   openPoolRuns,
   type RunSegment,
   readQuotaReserveSetting,
@@ -838,27 +837,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     },
 
     async recordTiming(input) {
-      if (input.kind === 'session') {
-        // 会话看守（sessions.ts）已经把结局写进 session_runs：那边写过的不改（already_finished）。
-        // 没起来的会话（起会话就失败了）只有这一笔，由它收尾。
-        const r = await finishSessionRun(db, {
-          id: input.runId,
-          outcome: input.outcome,
-          endedAt: new Date(input.endedAt),
-          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-          ...(input.usage.inputTokens === undefined ? {} : { inputTokens: input.usage.inputTokens }),
-          ...(input.usage.outputTokens === undefined ? {} : { outputTokens: input.usage.outputTokens }),
-          ...(input.usage.costUsd === undefined ? {} : { costUsd: input.usage.costUsd }),
-          ...(input.sessionCostUsd === undefined ? {} : { sessionCostUsd: input.sessionCostUsd }),
-          ...(input.failureCode ? { failureCode: input.failureCode } : {}),
-        });
-        if (r === 'not_found') {
-          throw new PortError('RUN_NOT_FOUND', `会话 ${input.runId} 在库里没有（起会话之前就失败了）`, {
-            retryable: false,
-          });
-        }
-        return;
-      }
       const common = {
         workflowId: input.workflowId,
         temporalRunId: input.runId,

@@ -511,6 +511,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   notifications: [['notifications'], keys.home],
   audit_log: [['audit']],
   settings: [['settings']],
+  // 别的环境推来的快照：看板还没有读它的页面（环境切换器那一片接上 ['nodes']），先不作废任何查询。
+  node_reports: [],
 };
 
 function isRealtimeTable(table: string): table is RealtimeTable {

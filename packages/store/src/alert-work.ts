@@ -26,7 +26,6 @@ import {
   type Db,
   expireSilence,
   findAlert,
-  linkAlertWork,
   listSilences,
   readAlertWork,
   readDbNow,
@@ -146,7 +145,6 @@ export interface AlertWorkPort {
   now(): Promise<string>;
   /** 按编号或键找一条提醒（处理没处理都给）；没有是 null。 */
   find(ref: string): Promise<AlertRow | null>;
-  link(input: Parameters<typeof linkAlertWork>[1]): ReturnType<typeof linkAlertWork>;
   createSilence(input: Parameters<typeof createSilence>[1]): Promise<AlertSilence>;
   expireSilence(
     input: Parameters<typeof expireSilence>[1],
@@ -163,7 +161,6 @@ export function pgAlertWork(db: Db, deploy: () => DeployFacts | null): AlertWork
     deploy: async () => deploy(),
     now: async () => iso(await readDbNow(db)),
     find: (ref) => findAlert(db, ref),
-    link: (input) => linkAlertWork(db, input),
     async createSilence(input) {
       return toAlertSilence(await createSilence(db, input));
     },

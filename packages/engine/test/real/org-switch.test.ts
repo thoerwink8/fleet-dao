@@ -11,14 +11,12 @@ import type { SwitchSessionOrgResult } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import {
   auditLog,
-  finishSessionRun,
-  markSessionRunStarted,
   notifications,
-  openSessionRun,
   routes,
   runs,
   saveOrgState,
   savePoolQuota,
+  sessionRuns,
   settings,
   takeOrgLock,
   upsertAlert,
@@ -213,25 +211,23 @@ async function rejected(poolId: string, at: Date, resetsAt: Date | null) {
 async function running(routeId: string, at: Date, options: { started?: boolean } = {}) {
   const { task } = await addTask(t.db);
   const id = randomUUID();
-  await openSessionRun(t.db, {
+  await t.db.insert(sessionRuns).values({
     id,
     taskId: task.id,
-    subtaskId: null,
     stage: 'execute',
     routeId,
     whyRoute: '占位',
-    branch: null,
     queuedAt: at,
-    workflowId: null,
     runAsUser: 'fleet-agent-carpool',
-    worktreePath: null,
+    ...(options.started ? { startedAt: at, sessionId: randomUUID() } : {}),
   });
-  if (options.started) {
-    await markSessionRunStarted(t.db, { id, startedAt: at, sessionId: randomUUID(), handle: null });
-  }
   return Object.assign(
     async (endedAt: Date) => {
-      await finishSessionRun(t.db, { id, outcome: 'ok', endedAt });
+      // 引擎包不直接依赖 drizzle-orm：收场直接写 SQL（收的时刻不早于开工、排队的时刻）。
+      await t.client.query(
+        'update session_runs set outcome = $1, ended_at = greatest($2::timestamptz, coalesce(started_at, queued_at)) where id = $3',
+        ['ok', endedAt.toISOString(), id],
+      );
     },
     { id },
   );

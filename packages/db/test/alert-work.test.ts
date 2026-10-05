@@ -1,5 +1,5 @@
-// 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒的跟进单、挂钩的 PR、静默一次读齐；挂跟进单不覆盖人挂的、
-// 换单记操作记录；静默按库的 now 定到期、最长 7 天由约束钉死、撤了记谁撤的。
+// 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒的跟进单、挂钩的 PR、静默一次读齐；
+// 静默按库的 now 定到期、最长 7 天由约束钉死、撤了记谁撤的。
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -7,12 +7,11 @@ import {
   createSilence,
   expireSilence,
   findAlert,
-  linkAlertWork,
   listSilences,
   readAlertWork,
 } from '../src/queries/alert-work.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
-import { alertSilences, auditLog, pullRequests } from '../src/schema/index.ts';
+import { alertSilences, alertWork, auditLog, pullRequests } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, expectViolation, NOW } from './helpers.ts';
 
@@ -23,7 +22,6 @@ beforeAll(async () => {
 afterAll(() => t.close());
 beforeEach(() => resetTestDb(t));
 
-const ENGINE = { actorKind: 'engine' as const, actorId: 'engine:alert-dispatch', via: 'engine' as const };
 const SEAT = { actorKind: 'ai' as const, actorId: '本机/s1', via: 'engine' as const };
 
 async function pr(
@@ -76,17 +74,14 @@ describe('readAlertWork：一批提醒的跟进单、挂钩的 PR、静默一次
       title: '备份没跑成',
       body: '',
     });
-    expect(
-      await linkAlertWork(t.db, {
-        notificationId: taskless.id,
-        repoId: repo.id,
-        issueNumber: 342,
-        source: 'engine',
-        linkedBy: 'engine:alert-dispatch',
-        mode: 'if_absent',
-        audit: ENGINE,
-      }),
-    ).toEqual({ result: 'linked', before: null });
+    // 挂跟进单没有写法了（#445 删了两条写路），历史行直接插
+    await t.db.insert(alertWork).values({
+      notificationId: taskless.id,
+      repoId: repo.id,
+      issueNumber: 342,
+      source: 'engine',
+      linkedBy: 'engine:alert-dispatch',
+    });
     await pr(repo.id, 350, { alertRefs: ['watchdog:job:backup:after-12'] });
     await pr(repo.id, 351, { issueRefs: [342] });
     await pr(repo.id, 352);
@@ -142,101 +137,6 @@ describe('readAlertWork：一批提醒的跟进单、挂钩的 PR、静默一次
       body: '',
     });
     expect((await readAlertWork(t.db, [a.id])).silences.map((s) => s.id)).toEqual([live.id]);
-  });
-});
-
-describe('linkAlertWork：挂跟进单', () => {
-  it('【故意造出的失败】提醒派单只在没有时挂（if_absent）：人已经挂了别的，不覆盖、回 kept', async () => {
-    const repo = await addRepo(t.db);
-    const a = await upsertAlert(t.db, {
-      dedupeKey: 'deploy-lag:behind',
-      level: 'alert',
-      taskId: null,
-      title: 'x',
-      body: '',
-    });
-    await linkAlertWork(t.db, {
-      notificationId: a.id,
-      repoId: repo.id,
-      issueNumber: 10,
-      source: 'claim',
-      linkedBy: '本机/s1',
-      note: '帅位挂的',
-      mode: 'replace',
-      audit: SEAT,
-    });
-    expect(
-      await linkAlertWork(t.db, {
-        notificationId: a.id,
-        repoId: repo.id,
-        issueNumber: 11,
-        source: 'engine',
-        linkedBy: 'engine:alert-dispatch',
-        mode: 'if_absent',
-        audit: ENGINE,
-      }),
-    ).toEqual({ result: 'kept', before: { repoId: repo.id, issueNumber: 10 } });
-    const raw = await readAlertWork(t.db, [a.id]);
-    expect(raw.work[0]).toMatchObject({ issueNumber: 10, source: 'claim', linkedBy: '本机/s1' });
-  });
-
-  it('帅位换单（replace）：换成新的，操作记录写原来是哪张、为什么；一样的回 same、不另记', async () => {
-    const repo = await addRepo(t.db);
-    const a = await upsertAlert(t.db, {
-      dedupeKey: 'canary:broken',
-      level: 'alert',
-      taskId: null,
-      title: 'x',
-      body: '',
-    });
-    const first = {
-      notificationId: a.id,
-      repoId: repo.id,
-      source: 'engine' as const,
-      linkedBy: 'e',
-      mode: 'if_absent' as const,
-      audit: ENGINE,
-    };
-    await linkAlertWork(t.db, { ...first, issueNumber: 19 });
-    expect(
-      await linkAlertWork(t.db, {
-        ...first,
-        issueNumber: 360,
-        source: 'claim',
-        linkedBy: '本机/s1',
-        note: '巡检单是被测的，修在 fleet-dao 的 #360',
-        mode: 'replace',
-        audit: SEAT,
-      }),
-    ).toEqual({ result: 'linked', before: { repoId: repo.id, issueNumber: 19 } });
-    expect(
-      await linkAlertWork(t.db, { ...first, issueNumber: 360, mode: 'replace', audit: SEAT }),
-    ).toMatchObject({ result: 'same' });
-    const audits = await t.db
-      .select()
-      .from(auditLog)
-      .where(eq(auditLog.target, `notification:${a.id}`));
-    expect(audits.map((x) => [x.action, x.actorId, x.reason])).toEqual([
-      ['alert.link', 'engine:alert-dispatch', null],
-      ['alert.link', '本机/s1', '巡检单是被测的，修在 fleet-dao 的 #360'],
-    ]);
-    expect(audits[1]?.before).toEqual({ repoId: repo.id, issueNumber: 19 });
-  });
-
-  it('【故意造出的失败】提醒不在：回 not_found，什么都不写', async () => {
-    const repo = await addRepo(t.db);
-    expect(
-      await linkAlertWork(t.db, {
-        notificationId: randomUUID(),
-        repoId: repo.id,
-        issueNumber: 1,
-        source: 'engine',
-        linkedBy: 'e',
-        mode: 'if_absent',
-        audit: ENGINE,
-      }),
-    ).toEqual({ result: 'not_found', before: null });
-    expect(await t.db.select().from(auditLog)).toEqual([]);
   });
 });
 

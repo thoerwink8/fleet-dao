@@ -3,7 +3,9 @@
 // 文件命名 *.e2e.ts：不在仓库 vitest 的收录范围里（TEST_INCLUDE 只收 *.test.ts(x)），`pnpm test` 不会误跑它。
 // 两个视口各走一遍（1920×1080 是创始人的大屏、1366×768 是常见笔记本）；改库的用例只在 1920 那一遍里跑，
 // 因为它们动的是同一份库（先走 1366 的只读那一遍，再走 1920 的完整那一遍）。
+// PR 上只走 1920 那一遍，1366 留给每夜全量和主线推送：为什么、怎么判见 support/viewports.ts。
 import { defineConfig } from '@playwright/test';
+import { VIEWPORTS, viewportsFor } from './support/viewports.ts';
 
 const channel = process.env.E2E_BROWSER_CHANNEL?.trim() || 'chrome';
 
@@ -29,8 +31,8 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: [
-    { name: 'laptop-1366', use: { viewport: { width: 1366, height: 768 } } },
-    { name: 'desktop-1920', use: { viewport: { width: 1920, height: 1080 } } },
-  ],
+  projects: viewportsFor(process.env.GITHUB_EVENT_NAME).map((name) => ({
+    name,
+    use: { viewport: VIEWPORTS[name] },
+  })),
 });

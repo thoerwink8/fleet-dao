@@ -11,6 +11,7 @@ export * from './web-api/enums.ts';
 export * from './web-api/env.ts';
 export * from './web-api/home.ts';
 export * from './web-api/jobs.ts';
+export * from './web-api/nodes.ts';
 export * from './web-api/notifications.ts';
 export * from './web-api/pools.ts';
 export * from './web-api/realtime.ts';
