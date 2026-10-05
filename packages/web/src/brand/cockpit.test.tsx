@@ -63,4 +63,9 @@ describe('正式驾驶舱：看得见的名字不带仓名', () => {
     renderApp(<SidebarNav />);
     expect(screen.getByText('驾驶舱').parentElement?.textContent).toBe('驾驶舱');
   });
+
+  test('指挥官：看得见的叫法是「指挥官」，不再写「帅位」（决定 0010）', () => {
+    expect(brand.terms.marshal).toBe('AI 指挥官');
+    expect(brand.terms.marshalShort).toBe('指挥官');
+  });
 });
