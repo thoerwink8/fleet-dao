@@ -98,6 +98,23 @@ export function preparePush(deps: PreparePushDeps): PreparePushResult {
         lines: [...lines, `${step.name} 没查成：${step.cmd} 的依赖没装全（找不到模块）——先 pnpm install`],
       };
     }
+    // biome 撞上「仓里嵌套着别的检出」：biome 按目录找配置，撞见一份没被 .gitignore 忽略的 biome.json 就报
+    // 「a nested root configuration」退 1——整仓扫一遍全红，这台机器上**所有会话**的推送都被拦（2026-10-05
+    // 出过一次：代理把工作树建到仓内 .worktrees/，攒了 60 多份嵌套配置）。这不是「没装依赖」，照着装依赖查
+    // 一圈也找不到东西。工作是自己的工作树建到 .claude/worktrees/ 下（.gitignore 忽略、扫不到），或者把那份
+    // 嵌套检出挪出仓；修完这一条，下面「没跑起来」那一段就不用猜了。
+    if (r.status !== 0 && /nested root configuration/i.test(`${r.stdout}${r.stderr}`)) {
+      const nested = [...`${r.stdout}${r.stderr}`.matchAll(/^\s*!?\s*(.+[\\/])biome\.json/gim)]
+        .map((m) => m[1])
+        .slice(0, 3);
+      return {
+        code: 2,
+        lines: [
+          ...lines,
+          `${step.name} 没查成：仓里嵌套着别的检出（biome 报 nested root configuration）——不是代码没过、也不是缺依赖。${nested.length > 0 ? `在这几处：${nested.join('、')}；` : ''}把工作树建到 .claude/worktrees/ 下（已被忽略），或把那几份挪出仓，再推。`,
+        ],
+      };
+    }
     if (r.status !== 0) {
       const tail = `${r.stdout}${r.stderr}`.trim().split('\n').slice(-40).join('\n');
       // 退出码非 0 但没有「真跑到检查」的证据：命令没跑起来（#789：新建工作树没装依赖时，cmd.exe 报
