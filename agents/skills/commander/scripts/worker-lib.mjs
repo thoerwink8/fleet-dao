@@ -93,7 +93,8 @@ export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检
                     CI 绿就合、自动挂上。
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
   watch [--wait <秒>]            巡看：只打印上次巡看之后变了的工人（「变化：…」），最后一行「还在跑：N」；
-                                 --wait 没变化就等（最多 55 秒），一有变化马上返回
+                                 --wait 没变化就等（最多 55 秒），一有变化马上返回；整条命令不超过
+                                 max(--wait, 10) + 2 秒，到点没查完 PR 的工人报「没查成：…」、退出码 2
   stop --name <短名>             杀掉整棵进程树
   clean --name <短名> [--force]  PR 合了或关了（或带 --force）才删工作树和本地分支，日志留着
 退出码：0 好了；1 用法不对；2 没查成、没做成；3 冲突（已经存在、还在跑、PR 没合没关）。`;
@@ -840,10 +841,14 @@ function lastMeaningfulLine(file) {
 
 /** 查这个工人分支的 PR：照 start 时判出、记在 meta 里的那条路连 GitHub（老记录没有 githubRoute，照旧直连）。 */
 function prOf(io, m) {
-  const r = io.gh(['pr', 'list', '--head', m.branch, '--state', 'all', '--json', 'number,state,url'], {
-    cwd: m.mainRepo,
-    proxy: m.githubRoute === 'proxy',
-  });
+  return prFromResult(io.gh(prArgs(m), prOpts(m)));
+}
+
+const prArgs = (m) => ['pr', 'list', '--head', m.branch, '--state', 'all', '--json', 'number,state,url'];
+const prOpts = (m) => ({ cwd: m.mainRepo, proxy: m.githubRoute === 'proxy' });
+
+/** gh pr list 的回话认成 { ok, rows } 或 { ok: false, why } */
+function prFromResult(r) {
   if (r.status !== 0) return { ok: false, why: reasonOf(r) };
   let rows;
   try {
@@ -856,11 +861,18 @@ function prOf(io, m) {
 }
 
 function oneStatus(io, name, at) {
+  const { s, m } = metaStatus(io, name, at);
+  if (s.ok) s.pr = prOf(io, m);
+  return s;
+}
+
+/** 一个工人除了 PR 以外的状态（读 meta、日志、进程在不在，都是本机的、快）；PR 由调用方另查、填进 s.pr。 */
+function metaStatus(io, name, at) {
   const r = readMeta(io.home, name);
-  if (!r.ok) return { name, ok: false, why: r.why };
+  if (!r.ok) return { s: { name, ok: false, why: r.why }, m: null };
   const m = r.meta;
   const last = lastMeaningfulLine(m.outLog);
-  if (!last.ok) return { name, ok: false, why: last.why };
+  if (!last.ok) return { s: { name, ok: false, why: last.why }, m: null };
   const elapsedMin = Math.max(0, Math.round((at.getTime() - Date.parse(m.startedAt)) / 60_000));
   const base = {
     name,
@@ -873,11 +885,12 @@ function oneStatus(io, name, at) {
     cleanedAt: m.cleanedAt,
     worktree: m.worktree,
     branch: m.branch,
-    pr: prOf(io, m),
+    pr: null,
   };
   // pidUncertain：起的时候没能确认 pid（见文件头），没法调 io.isRunning——那需要一个真 pid，不能瞎猜。
-  if (m.pidUncertain) return { ...base, pidUncertain: true, pidUncertainWhy: m.pidUncertainWhy, pid: null };
-  return { ...base, pidUncertain: false, running: io.isRunning(m.pid), pid: m.pid };
+  if (m.pidUncertain)
+    return { s: { ...base, pidUncertain: true, pidUncertainWhy: m.pidUncertainWhy, pid: null }, m };
+  return { s: { ...base, pidUncertain: false, running: io.isRunning(m.pid), pid: m.pid }, m };
 }
 
 function formatStatus(s) {
@@ -974,9 +987,17 @@ function watchLine(s, st) {
  * 工人脱离会话跑，没有谁会被它的完成通知叫醒；指挥官无人值守时循环跑它，有变化就在对话里报给创始人。
  * --wait <秒>：没变化就等，最多等这么久（上限 WATCH_WAIT_MAX_SEC：单次前台等待不超过 60 秒，创始人的插话在两次调用之间才送到）；
  * 一有变化马上返回。等的时候每 WATCH_POLL_MS 看一次，不烧模型额度。
+ *
+ * 整条命令有一个总截止：max(--wait, WATCH_GH_MS) + WATCH_SLACK_MS（2026-10-05 实测：5 个工人时 --wait 20 到 45 多次跑了
+ * 58 秒以上被前台上限掐掉——原来看一遍要逐个排着调 gh，截止只管「睡」不管「看」，第一遍多久都得跑完）。现在看一遍里的 gh
+ * 并发查、每次带超时，到截止还没回来的不等了；没查成的工人逐个说「没查成」、退出码 2，不当成没变化。
  */
 export const WATCH_WAIT_MAX_SEC = 55;
 export const WATCH_POLL_MS = 10_000;
+/** 巡看里一次 gh 最多等这么久（gh pr list 平时一两秒）；--wait 不到这么久时，第一遍也给够这么久 */
+export const WATCH_GH_MS = 10_000;
+/** 整条命令最多比 max(--wait, WATCH_GH_MS) 多这么久：看一遍到截止前 1 秒收手，剩下的给收尾和输出 */
+export const WATCH_SLACK_MS = 2_000;
 
 async function cmdWatch(p, io) {
   if (p.positional.length > 0) throw new UsageError('watch 不收位置参数');
@@ -984,21 +1005,32 @@ async function cmdWatch(p, io) {
   const waitSec = waitArg === undefined ? 0 : Number(waitArg);
   if (!Number.isInteger(waitSec) || waitSec < 0 || waitSec > WATCH_WAIT_MAX_SEC)
     throw new UsageError(`--wait 要是 0 到 ${WATCH_WAIT_MAX_SEC} 的整数秒，给的是「${waitArg}」`);
-  const deadline = io.now().getTime() + waitSec * 1000;
+  const start = io.now().getTime();
+  const deadline = start + waitSec * 1000;
+  // 每一遍看都得在这之前收手（gh 的超时、没回来就不等，都照它）
+  const lookEnd = start + Math.max(waitSec * 1000, WATCH_GH_MS) + WATCH_SLACK_MS - 1_000;
   for (;;) {
-    const r = watchOnce(io);
+    const lookStart = io.now().getTime();
+    const r = await watchOnce(io, lookEnd);
     if (typeof r === 'number') return r;
-    if (r.lines.length > 0 || r.code !== 0 || r.running === 0 || io.now().getTime() >= deadline) {
+    const now = io.now().getTime();
+    // 下一遍什么时候看：隔 WATCH_POLL_MS，不晚于 --wait 到点，也要按上一遍花的时间留出能看完的余地
+    const nap = Math.min(WATCH_POLL_MS, deadline - now, lookEnd - (now - lookStart) - now);
+    if (r.lines.length > 0 || r.code !== 0 || r.running === 0 || now >= deadline || nap <= 0) {
       for (const l of r.lines) io.out(l);
       io.out(`还在跑：${r.running}`);
       return r.code;
     }
-    await io.sleep(Math.min(WATCH_POLL_MS, Math.max(0, deadline - io.now().getTime())));
+    await io.sleep(nap);
   }
 }
 
-/** 看一遍：变了的行、还在跑几个、退出码；工人目录读不了直接返回退出码。变了的当场记进 reported.json。 */
-function watchOnce(io) {
+/**
+ * 看一遍：变了的行、还在跑几个、退出码；工人目录读不了直接返回退出码。变了的当场记进 reported.json。
+ * 各工人的 PR 并发查（io.ghAsync；外壳没给就退回一个一个的 io.gh），到 lookEnd 还没回来的不等，记成没查成。
+ * PR 没查成的工人单独说一行「没查成：…」、退出码 2，也不记 reported.json（下次查成了照常比）。
+ */
+async function watchOnce(io, lookEnd) {
   let names = [];
   try {
     names = readdirSync(workersDir(io.home)).sort();
@@ -1006,15 +1038,21 @@ function watchOnce(io) {
     if (e.code !== 'ENOENT') return fail(io, `${workersDir(io.home)} 读不了（${e.code ?? e.message}）`);
   }
   const at = io.now();
+  const looks = names.map((name) => ({ name, ...metaStatus(io, name, at) }));
+  const live = looks.filter(({ s }) => !(s.ok && s.cleanedAt));
+  await fillPrs(io, live, lookEnd);
   const lines = [];
   let running = 0;
   let code = 0;
-  for (const name of names) {
-    const s = oneStatus(io, name, at);
-    if (s.ok && s.cleanedAt) continue;
+  for (const { name, s } of live) {
     const st = watchState(s);
     if (!s.ok) code = 2;
     if (st.kind === 'running' || st.kind === 'stuck' || st.kind === 'uncertain') running += 1;
+    if (s.ok && !s.pr.ok) {
+      code = 2;
+      lines.push(`没查成：${name} 的 PR（${s.pr.why}），这次看不出 PR 变没变；${watchLine(s, st)}`);
+      continue;
+    }
     const file = join(stateDir(io.home, name), 'reported.json');
     let before = null;
     try {
@@ -1031,6 +1069,40 @@ function watchOnce(io) {
     }
   }
   return { lines, running, code };
+}
+
+/** 并发查每个工人的 PR，填进 s.pr；到 lookEnd 没回来的、gh 超时的都填成没查成（说清多少秒），不当成「没有 PR」。 */
+async function fillPrs(io, looks, lookEnd) {
+  const asking = looks.filter(({ s }) => s.ok);
+  const ghMs = Math.min(WATCH_GH_MS, lookEnd - io.now().getTime());
+  const late = { ok: false, why: '到巡看的截止还没回话' };
+  if (ghMs < 1_000) {
+    for (const { s } of asking) s.pr = late;
+    return;
+  }
+  const ghAsync = io.ghAsync ?? (async (args, opts) => io.gh(args, opts));
+  const stop = new AbortController();
+  const asks = asking.map(async ({ s, m }) => {
+    let r;
+    try {
+      r = await ghAsync(prArgs(m), { ...prOpts(m), timeoutMs: ghMs, signal: stop.signal });
+    } catch (e) {
+      r = { status: null, stdout: '', stderr: '', error: e?.message ?? String(e) };
+    }
+    if (stop.signal.aborted) return;
+    s.pr =
+      r.error === 'ETIMEDOUT'
+        ? { ok: false, why: `gh 超过 ${Math.round(ghMs / 1000)} 秒没回话` }
+        : prFromResult(r);
+  });
+  let timer;
+  const timeUp = new Promise((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, lookEnd - io.now().getTime()));
+  });
+  await Promise.race([Promise.all(asks), timeUp]);
+  clearTimeout(timer);
+  stop.abort();
+  for (const { s } of asking) if (s.pr === null) s.pr = late;
 }
 
 async function cmdStop(p, io) {
@@ -1114,6 +1186,8 @@ async function cmdClean(p, io) {
  *   git(args, {cwd, proxy?, timeoutMs?}) → {status, stdout, stderr, error?}；proxy 为真时照原样带环境里的代理，
  *     不给或为假时去掉代理直连（见文件头「代理」那条）；timeoutMs 是这次调用的上限（不给用外壳的默认）,
  *   gh(args, {cwd, proxy?, timeoutMs?}) → 同上,
+ *   ghAsync(args, {cwd, proxy?, timeoutMs?, signal?}) → Promise<同上>（可选；巡看并发查 PR 用，signal 叫停时当场杀掉子进程；
+ *     没给就退回 gh 一个一个查）,
  *   pnpm(args, {cwd}) → 同上,
  *   spawnDetached({command, args, cwd, env, stdinFile, outFile, errFile}) → {pid}；确认起不来就抛 Error，
  *     起没起成不确定时（比如中间那步查不到 pid，但也没法排除已经起来了）要在 Error 上标 err.uncertain = true，
