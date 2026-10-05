@@ -1,9 +1,10 @@
 // 能拦不能放：Jev 的结论在类型上就表达不出放行、批准合并、动账号、删除。
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { BANK, type TRIAGE_GATE } from '../src/bank.ts';
+import { BANK } from '../src/bank.ts';
 import { EFFECTS, EFFECTS_CANNOT_RELEASE, type Effect } from '../src/effects.ts';
 import { defineQuestion, type EffectOf } from '../src/questions.ts';
 import type { NotJudged, Verdict } from '../src/verdict.ts';
+import type { TRIAGE_GATE } from './fixtures.ts';
 
 describe('能拦不能放', () => {
   it('效果只有收紧的几种', () => {
@@ -18,7 +19,7 @@ describe('能拦不能放', () => {
   it('类型上：选项挂不了放行一类的效果，调用方拿到的 act 也表达不出放行', () => {
     defineQuestion({
       id: 'bad',
-      site: 'triage',
+      site: 'issue-kind',
       title: '坏题',
       instructions: '？',
       options: [

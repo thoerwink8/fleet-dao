@@ -72,7 +72,7 @@ export function canaryHealth(
       detail: finished.why ?? undefined,
     };
   }
-  if (finished.verdict !== 'pass') {
+  if (finished.verdict !== 'pass' && finished.verdict !== 'skipped') {
     return {
       ok: false,
       code: 'canary_not_run',
@@ -82,12 +82,20 @@ export function canaryHealth(
   }
   const age = now.getTime() - finished.endedAt.getTime();
   if (age > CANARY_STALE_MS) {
+    const hours = Math.floor(age / (60 * 60_000));
     return {
       ok: false,
       code: 'canary_stale',
-      message: `最近一次通过是 ${when}，之后 ${Math.floor(age / (60 * 60_000))} 小时没跑完一轮${inFlight}`,
+      message:
+        finished.verdict === 'skipped'
+          ? `最近一轮是 ${when} 跳过的，之后 ${hours} 小时没跑完一轮${inFlight}`
+          : `最近一次通过是 ${when}，之后 ${hours} 小时没跑完一轮${inFlight}`,
       detail: undefined,
     };
+  }
+  // 跳过（#1050）：巡检仓的「让 AI 接活」关着，故意不跑；不红（关着是创始人定的状态），但照实说这一轮什么都没验
+  if (finished.verdict === 'skipped') {
+    return { ok: true, note: `最近一轮 ${when} 跳过：巡检仓的「让 AI 接活」关着，没开单、没验${inFlight}` };
   }
   const minutes = Math.max(
     1,

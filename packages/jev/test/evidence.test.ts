@@ -1,7 +1,7 @@
 // 证据的小工具：字段合并、缺什么、多什么、摘要、每日上限的「今天」从哪算。
 import { describe, expect, it } from 'vitest';
-import { DELIVERY_MET, FEISHU_INTENT, TRIAGE_KIND, TRIAGE_UI } from '../src/bank.ts';
 import { dayStart, digestEvidence, fieldsOf, missingKeys, unknownKeys } from '../src/evidence.ts';
+import { DELIVERY_MET, FEISHU_INTENT, TRIAGE_KIND, TRIAGE_UI } from './fixtures.ts';
 
 describe('证据', () => {
   it('几道题一起问：字段按第一次出现的顺序去重', () => {

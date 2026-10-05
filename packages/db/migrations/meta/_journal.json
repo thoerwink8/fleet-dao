@@ -267,6 +267,13 @@
       "when": 1791190373186,
       "tag": "0037_drop_dead_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1791198930524,
+      "tag": "0038_canary_verdict_skipped",
+      "breakpoints": true
     }
   ]
 }

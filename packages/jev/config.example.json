@@ -7,7 +7,7 @@
     "timeoutMs": 8000
   },
   "claude": {
-    "_说明": "经插头起 Claude Code 会话来答（构建期先用 Opus 5.5，走 Claude 订阅）。以会话用户起（法国只有一个：fleet-agent-carpool，design 第十节），命令写它家里 reclaude 的绝对路径。",
+    "_说明": "现在没有后端用这一节：Claude 判断路由关着（config.ts 的 CLAUDE_ROUTE_CLOSED），起会话的后端代码已删。只因为机器上的 jev.json 可能还写着它，解析照旧认，别的不读。",
     "command": ["/home/<会话用户>/.local/bin/reclaude"],
     "effort": "low",
     "wallClockMs": 300000
