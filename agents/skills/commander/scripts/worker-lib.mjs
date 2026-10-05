@@ -51,6 +51,10 @@
 //      「进程可能已经在跑、没记上」。metaProblem/oneStatus/cmdStop/cmdClean 都跟着认 pidUncertain 这个状态。
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** Claude 工人的外壳脚本（和本文件同目录，随技能一起同步到各台机器）。 */
+const SUPERVISE_SCRIPT = fileURLToPath(new URL('./worker-supervise.mjs', import.meta.url));
 
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MODELS = ['grok', 'codex', 'kimi', 'claude'];
@@ -97,9 +101,14 @@ export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检
                     （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
                     CI 绿就合、自动挂上。
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
-  watch [--wait <秒>]            巡看：只打印上次巡看之后变了的工人（「变化：…」），最后一行「还在跑：N」；
+  watch [--wait <秒>] [--until-change]
+                                 巡看：只打印上次巡看之后变了的工人（「变化：…」），最后一行「还在跑：N」；
                                  --wait 没变化就等（最多 55 秒），一有变化马上返回；整条命令不超过
-                                 max(--wait, 10) + 2 秒，到点没查完 PR 的工人报「没查成：…」、退出码 2
+                                 max(--wait, 10) + 2 秒，到点没查完 PR 的工人报「没查成：…」、退出码 2；
+                                 在跑、没交活、日志 4 分钟没动的工人报一次「停住 N 分钟：最后在等 …」，30 分钟再报一次「卡住」；
+                                 --until-change：没变化就一直等，--wait 给上限（最多 600 秒，不给就等 600 秒），
+                                 用 run_in_background 起一次、有变化（有 PR 合了、工人交活或掉线、停住）才返回——前台不要用，
+                                 前台单次等待不许超过 55 秒
   stop --name <短名>             杀掉整棵进程树
   clean --name <短名> [--force]  PR 合了或关了（或带 --force）才删工作树和本地分支，日志留着
 退出码：0 好了；1 用法不对；2 没查成、没做成；3 冲突（已经存在、还在跑、PR 没合没关）。`;
@@ -533,6 +542,7 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
       ],
       stdinFile: promptFile,
       extraEnv: {},
+      supervise: true,
     };
   return null;
 }
@@ -564,6 +574,8 @@ function metaProblem(m) {
   if (!EFFORTS.includes(m.effort)) return 'effort 认不出';
   // 老记录（这个字段加上之前 start 的）没有 githubRoute，照当时的做法算直连；有就得认得出，不猜。
   if (m.githubRoute !== undefined && !GITHUB_ROUTES.includes(m.githubRoute)) return 'githubRoute 认不出';
+  // 续跑次数是外壳（worker-supervise.mjs）网关掉线后续跑时写进来的；没有就是没续过
+  if (m.resumes !== undefined && !(Number.isInteger(m.resumes) && m.resumes >= 0)) return 'resumes 认不出';
   if (typeof m.mainRepo !== 'string' || !m.mainRepo) return 'mainRepo 认不出';
   if (typeof m.worktree !== 'string' || !m.worktree) return 'worktree 认不出';
   if (typeof m.branch !== 'string' || !m.branch) return 'branch 认不出';
@@ -744,11 +756,29 @@ async function cmdStart(p, io) {
   );
 
   const launch = launchOf(model, { promptFile, worktreeDir, modelId, effort });
+  // Claude 工人不直接起 reclaude，起外壳 worker-supervise.mjs 由它看着：网关/网络类错误退出就等一等、用同一个会话续跑
+  // （2026-10-05 的 502 一次让 5 个工人同时掉线，#1066）。别家模型照旧直接起。
+  const spawnSpec = launch.supervise
+    ? {
+        command: io.nodePath ?? 'node',
+        args: [
+          SUPERVISE_SCRIPT,
+          '--meta',
+          join(dir, 'meta.json'),
+          '--prompt',
+          promptFile,
+          '--',
+          launch.command,
+          ...launch.args,
+        ],
+        stdinFile: null,
+      }
+    : { command: launch.command, args: launch.args, stdinFile: launch.stdinFile };
   let spawned;
   try {
     spawned = io.spawnDetached({
-      command: launch.command,
-      args: launch.args,
+      command: spawnSpec.command,
+      args: spawnSpec.args,
       cwd: worktreeDir,
       // 直连通才让模型自己的 git/gh 绕开代理连 GitHub；走代理时原样给，加 NO_PROXY 就是把它推到不通的直连上。
       // FLEET_WORKER=1：开会话钩子见它就只做规矩同步、不注入创始人的事，落盘钩子不记工人的提示（agents/hooks/session-start.mjs、prompt-log.mjs）
@@ -757,7 +787,7 @@ async function cmdStart(p, io) {
         FLEET_WORKER: '1',
         ...launch.extraEnv,
       },
-      stdinFile: launch.stdinFile,
+      stdinFile: spawnSpec.stdinFile,
       outFile: outLog,
       errFile: errLog,
     });
@@ -935,6 +965,7 @@ function metaStatus(io, name, at) {
     lastLine: last.line,
     idleMin: last.idleMin,
     cleanedAt: m.cleanedAt,
+    resumes: m.resumes ?? 0,
     worktree: m.worktree,
     branch: m.branch,
     pr: null,
@@ -944,6 +975,9 @@ function metaStatus(io, name, at) {
     return { s: { ...base, pidUncertain: true, pidUncertainWhy: m.pidUncertainWhy, pid: null }, m };
   return { s: { ...base, pidUncertain: false, running: io.isRunning(m.pid), pid: m.pid }, m };
 }
+
+/** 网关/网络掉线后外壳自动续跑过几次（没续过不说）。 */
+const resumeNote = (s) => (s.resumes > 0 ? `，网关掉线后自动续跑了 ${s.resumes} 次` : '');
 
 function formatStatus(s) {
   if (!s.ok) return `${s.name}：没查成——${s.why}`;
@@ -956,7 +990,7 @@ function formatStatus(s) {
     ? `不确定在跑没跑（起的时候没记上 pid：${s.pidUncertainWhy}）`
     : `${s.running ? '在跑' : '已经不在跑了'}${s.cleanedAt ? `（已经 clean 过：${s.cleanedAt}）` : ''}，pid ${s.pid}`;
   return [
-    `${s.name}：${s.model}，档位 ${s.effort ?? '不支持'}，${stateText}，从起来到现在 ${s.elapsedMin} 分钟`,
+    `${s.name}：${s.model}，档位 ${s.effort ?? '不支持'}，${stateText}，从起来到现在 ${s.elapsedMin} 分钟${resumeNote(s)}`,
     `  工作树 ${s.worktree}（分支 ${s.branch}）`,
     `  最后一句输出：${s.lastLine ?? '（还没有输出）'}${s.running && s.idleMin !== null && s.idleMin !== undefined ? `（${s.idleMin} 分钟前）` : ''}`,
     `  PR：${prText}`,
@@ -999,7 +1033,9 @@ async function cmdStatus(p, io) {
 
 // —— 巡看：只说变了的 ——
 
-/** 在跑的工人这么久没往日志里写东西，巡看时算「没动静」报一次。 */
+/** 在跑、没交活的工人这么久没往日志里写东西，巡看时报一次「停住」（2026-10-05 一个工人停了 31.7 分钟才被发现，#1066）。 */
+export const WATCH_STALL_MIN = 4;
+/** 停得更久：30 分钟没动静，再报一次「卡住」。 */
 export const WATCH_STUCK_MIN = 30;
 
 /** 一个工人此刻的状态压成一个词加它的 PR：巡看拿它和上次报过的比，一样就不出声。 */
@@ -1007,25 +1043,31 @@ export function watchState(s) {
   if (!s.ok) return { kind: 'unreadable', key: `unreadable|${s.why}` };
   const pr = s.pr.ok ? s.pr.rows.map((r) => `#${r.number}（${r.state}）`).join('、') : '';
   const last = s.lastLine ?? '';
+  const idle = s.idleMin ?? 0;
   const kind = s.pidUncertain
     ? 'uncertain'
     : s.running
-      ? s.idleMin !== null && s.idleMin !== undefined && s.idleMin >= WATCH_STUCK_MIN
+      ? idle >= WATCH_STUCK_MIN
         ? 'stuck'
-        : 'running'
+        : idle >= WATCH_STALL_MIN && !/^(完成|卡住)/.test(last)
+          ? 'stalled'
+          : 'running'
       : /^完成/.test(last)
         ? 'done'
         : /^卡住/.test(last)
           ? 'blocked'
           : 'dead';
-  return { kind, key: `${kind}|${pr}`, pr, last };
+  // 续跑次数进 key：网关掉线后外壳自动续跑了，指挥官下一次巡看能看到
+  return { kind, key: `${kind}|${pr}${s.resumes > 0 ? `|续${s.resumes}` : ''}`, pr, last };
 }
 
 function watchLine(s, st) {
   if (st.kind === 'unreadable') return `${s.name}：没查成——${s.why}`;
   const pr = st.pr ? `；PR ${st.pr}` : '';
   const last = st.last || '还没有输出';
-  if (st.kind === 'running') return `${s.name} 在跑（${s.model}，${s.elapsedMin} 分钟）：${last}${pr}`;
+  if (st.kind === 'running')
+    return `${s.name} 在跑（${s.model}，${s.elapsedMin} 分钟）${resumeNote(s)}：${last}${pr}`;
+  if (st.kind === 'stalled') return `${s.name} 停住 ${s.idleMin} 分钟：最后在等 ${last}${resumeNote(s)}${pr}`;
   if (st.kind === 'stuck') return `${s.name} 还在跑，但 ${s.idleMin} 分钟没动静，最后在：${last}${pr}`;
   if (st.kind === 'done') return `${s.name} 做完了：${last}${pr}`;
   if (st.kind === 'blocked') return `${s.name} 卡住了：${last}${pr}`;
@@ -1045,6 +1087,8 @@ function watchLine(s, st) {
  * 并发查、每次带超时，到截止还没回来的不等了；没查成的工人逐个说「没查成」、退出码 2，不当成没变化。
  */
 export const WATCH_WAIT_MAX_SEC = 55;
+/** --until-change（后台跑、不占前台）时 --wait 的上限，也是不给 --wait 时等的时长 */
+export const WATCH_UNTIL_CHANGE_MAX_SEC = 600;
 export const WATCH_POLL_MS = 10_000;
 /** 巡看里一次 gh 最多等这么久（gh pr list 平时一两秒）；--wait 不到这么久时，第一遍也给够这么久 */
 export const WATCH_GH_MS = 10_000;
@@ -1054,9 +1098,14 @@ export const WATCH_SLACK_MS = 2_000;
 async function cmdWatch(p, io) {
   if (p.positional.length > 0) throw new UsageError('watch 不收位置参数');
   const waitArg = p.options.get('wait');
-  const waitSec = waitArg === undefined ? 0 : Number(waitArg);
-  if (!Number.isInteger(waitSec) || waitSec < 0 || waitSec > WATCH_WAIT_MAX_SEC)
-    throw new UsageError(`--wait 要是 0 到 ${WATCH_WAIT_MAX_SEC} 的整数秒，给的是「${waitArg}」`);
+  // --until-change：给指挥官用 run_in_background 起一次、等到有变化再回来（不占前台，所以不受 55 秒限制）；不给 --wait 就等满上限
+  const untilChange = p.flags.has('until-change');
+  const waitMax = untilChange ? WATCH_UNTIL_CHANGE_MAX_SEC : WATCH_WAIT_MAX_SEC;
+  const waitSec = waitArg === undefined ? (untilChange ? waitMax : 0) : Number(waitArg);
+  if (!Number.isInteger(waitSec) || waitSec < 0 || waitSec > waitMax)
+    throw new UsageError(
+      `--wait 要是 0 到 ${waitMax} 的整数秒${untilChange ? '' : '（要等得更久，加 --until-change 放到后台跑）'}，给的是「${waitArg}」`,
+    );
   const start = io.now().getTime();
   const deadline = start + waitSec * 1000;
   // 每一遍看都得在这之前收手（gh 的超时、没回来就不等，都照它）
@@ -1099,7 +1148,7 @@ async function watchOnce(io, lookEnd) {
   for (const { name, s } of live) {
     const st = watchState(s);
     if (!s.ok) code = 2;
-    if (st.kind === 'running' || st.kind === 'stuck' || st.kind === 'uncertain') running += 1;
+    if (['running', 'stalled', 'stuck', 'uncertain'].includes(st.kind)) running += 1;
     if (s.ok && !s.pr.ok) {
       code = 2;
       lines.push(`没查成：${name} 的 PR（${s.pr.why}），这次看不出 PR 变没变；${watchLine(s, st)}`);
@@ -1266,7 +1315,7 @@ export async function runWorker(argv, io) {
         io,
       );
     if (cmd === 'status') return await cmdStatus(parseArgs(rest, ['name']), io);
-    if (cmd === 'watch') return await cmdWatch(parseArgs(rest, ['wait']), io);
+    if (cmd === 'watch') return await cmdWatch(parseArgs(rest, ['wait'], ['until-change']), io);
     if (cmd === 'stop') return await cmdStop(parseArgs(rest, ['name']), io);
     if (cmd === 'clean') return await cmdClean(parseArgs(rest, ['name'], ['force']), io);
     throw new UsageError(`没有「${cmd}」这个命令\n${USAGE}`);

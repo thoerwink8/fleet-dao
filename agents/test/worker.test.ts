@@ -2,7 +2,7 @@
 // home、brief 文件、prompt.txt、meta.json 用真的临时目录。
 // 每条失败路径都故意造一遍：工作树已存在、不认识的模型、pnpm install 失败、meta 缺失或损坏、clean 时 PR 没合没关——
 // 都要明说、非 0 退出，不当成没事。
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -940,7 +940,7 @@ describe('start：【故意造出的失败】', () => {
   });
 
   // #1016：长活搬出聊天会话——Claude 工人也走这条独立进程的路
-  it('claude：经 reclaude 起，prompt 走标准输入，默认 sonnet，带思考档位；收尾交代里有四类人闸那一段', async () => {
+  it('claude：经外壳起 reclaude，prompt 走标准输入，默认 sonnet，带思考档位；收尾交代里有四类人闸那一段', async () => {
     const w = world();
     w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
     w.pnpmReplies.push(ok());
@@ -959,8 +959,18 @@ describe('start：【故意造出的失败】', () => {
     expect(code).toBe(0);
     const promptFile = join(w.home, '.fleet-dao', 'workers', 'w7', 'prompt.txt');
     const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
-    expect(spec.command).toBe('reclaude');
-    expect(spec.args).toEqual([
+    // 起的是外壳 worker-supervise.mjs（它看着 reclaude，网关掉线时续跑）；提示词由它读文件、再从标准输入喂给 reclaude
+    expect(spec.command).toBe('node');
+    const dashAt = spec.args.indexOf('--');
+    expect(spec.args[0]).toBe(join(SCRIPTS, 'worker-supervise.mjs'));
+    expect(spec.args.slice(1, dashAt)).toEqual([
+      '--meta',
+      join(w.home, '.fleet-dao', 'workers', 'w7', 'meta.json'),
+      '--prompt',
+      promptFile,
+    ]);
+    expect(spec.args.slice(dashAt + 1)).toEqual([
+      'reclaude',
       '-p',
       '--dangerously-skip-permissions',
       '--model',
@@ -971,7 +981,7 @@ describe('start：【故意造出的失败】', () => {
       'stream-json',
       '--verbose',
     ]);
-    expect(spec.stdinFile).toBe(promptFile);
+    expect(spec.stdinFile).toBeNull();
     expect(spec.cwd).toBe(join(w.repo, '.claude', 'worktrees', 'w-w7'));
     const prompt = readFileSync(promptFile, 'utf8');
     for (const gate of ['对外发布', '花钱', '删数据', '改标准']) expect(prompt, gate).toContain(gate);
@@ -1842,5 +1852,134 @@ describe('watch --wait', () => {
       const w = world();
       expect(await w.run(['watch', '--wait', bad]), bad).toBe(1);
     }
+  });
+});
+
+// #1066：status 看得到外壳续跑了几次；watch 在日志 4 分钟没动时报「停住」；--until-change 给后台长等用
+describe('status / watch：续跑次数、停住、--until-change', () => {
+  const stale = (file: string, minutesAgo: number) => {
+    const t = new Date(Date.now() - minutesAgo * 60_000);
+    utimesSync(file, t, t);
+  };
+  const quiet = (w: ReturnType<typeof world>, name: string, minutesAgo: number, last = '在等测试跑完') => {
+    const dir = w.writeMeta(name, validMeta(w, name));
+    const log = join(dir, 'out.log');
+    writeFileSync(log, `${last}\n`);
+    stale(log, minutesAgo);
+    return { dir, log };
+  };
+
+  it('status：外壳续跑过就写出续了几次；没续过不提', async () => {
+    const w = world();
+    w.writeMeta('r1', validMeta(w, 'r1', { resumes: 2 }));
+    w.writeMeta('r2', validMeta(w, 'r2'));
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'), ok('[]'));
+    await w.run(['status', '--name', 'r1']);
+    await w.run(['status', '--name', 'r2']);
+    expect(w.out[0]).toContain('网关掉线后自动续跑了 2 次');
+    expect(w.out[1]).not.toContain('续跑');
+  });
+
+  it('【故意造出的失败】meta 里 resumes 不是非负整数：认不出，明说没查成', async () => {
+    const w = world();
+    w.writeMeta('r3', validMeta(w, 'r3', { resumes: 'many' }));
+    expect(await w.run(['status', '--name', 'r3'])).toBe(2);
+    expect(w.out.join('\n')).toContain('resumes 认不出');
+  });
+
+  it('watch：在跑、没交活、日志 4 分钟没动：变化行明说「停住 N 分钟：最后在等 …」，报过不重报；3 分钟不算', async () => {
+    const w = world();
+    quiet(w, 'p1', 5);
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'), ok('[]'));
+    expect(await w.run(['watch'])).toBe(0);
+    expect(w.out).toEqual(['变化：p1 停住 5 分钟：最后在等 在等测试跑完', '还在跑：1']);
+    w.out.length = 0;
+    await w.run(['watch']);
+    expect(w.out).toEqual(['还在跑：1']);
+    const w2 = world();
+    quiet(w2, 'p2', 3);
+    w2.setRunning(9001, true);
+    w2.ghReplies.push(ok('[]'));
+    await w2.run(['watch']);
+    expect(w2.out[0]).toMatch(/^变化：p2 在跑/);
+  });
+
+  it('watch：停到 30 分钟另报一次「卡住」（原来的那条保留）', async () => {
+    const w = world();
+    const { log } = quiet(w, 'p3', 5);
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'), ok('[]'));
+    await w.run(['watch']);
+    w.out.length = 0;
+    stale(log, 31);
+    await w.run(['watch']);
+    expect(w.out[0]).toBe('变化：p3 还在跑，但 31 分钟没动静，最后在：在等测试跑完');
+  });
+
+  it('watch：最后一句已经是「完成：」的在跑工人不报停住（马上就退出了）', async () => {
+    const w = world();
+    quiet(w, 'p4', 6, '完成：PR #9');
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'));
+    await w.run(['watch']);
+    expect(w.out[0]).toMatch(/^变化：p4 在跑/);
+  });
+
+  it('watch：外壳续跑次数变了也算变化，会报给指挥官', async () => {
+    const w = world();
+    const { dir } = quiet(w, 'p5', 0);
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'), ok('[]'));
+    await w.run(['watch']);
+    w.out.length = 0;
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify(validMeta(w, 'p5', { resumes: 1 })));
+    await w.run(['watch']);
+    expect(w.out[0]).toContain('网关掉线后自动续跑了 1 次');
+  });
+
+  it('watch --until-change：不给 --wait 也行，没变化一直等；等的中间有变化马上返回（远超 55 秒也不被截断）', async () => {
+    const w = world();
+    const { dir } = quiet(w, 'u1', 0, '在改 store');
+    w.setRunning(9001, true);
+    for (let i = 0; i < 100; i += 1) w.ghReplies.push(ok('[]'));
+    await w.run(['watch']); // 先报过一次
+    w.out.length = 0;
+    const realSleep = w.io.sleep;
+    let naps = 0;
+    w.io.sleep = async (ms: number) => {
+      naps += 1;
+      if (naps === 25) {
+        writeFileSync(join(dir, 'out.log'), '在改 store\n完成：PR #7\n');
+        w.setRunning(9001, false);
+      }
+      await realSleep(ms);
+    };
+    expect(await w.run(['watch', '--until-change'])).toBe(0);
+    expect(w.out).toEqual(['变化：u1 做完了：完成：PR #7', '还在跑：0']);
+    expect(naps).toBe(25); // 25 个 10 秒，远超 55 秒
+  });
+
+  it('watch --until-change --wait 120：没变化等满 120 秒就返回「还在跑：1」', async () => {
+    const w = world();
+    quiet(w, 'u2', 0, '在改 store');
+    w.setRunning(9001, true);
+    for (let i = 0; i < 100; i += 1) w.ghReplies.push(ok('[]'));
+    await w.run(['watch']);
+    w.out.length = 0;
+    const t0 = w.io.now().getTime();
+    expect(await w.run(['watch', '--until-change', '--wait', '120'])).toBe(0);
+    expect(w.out).toEqual(['还在跑：1']);
+    expect(w.io.now().getTime() - t0).toBeGreaterThanOrEqual(120_000);
+  });
+
+  it('【故意造出的失败】--until-change 的 --wait 超过 600 或不是整数：用法错；不带 --until-change 超过 55 照旧用法错', async () => {
+    for (const bad of ['601', 'abc', '-1']) {
+      expect(await world().run(['watch', '--until-change', '--wait', bad]), bad).toBe(1);
+    }
+    const w = world();
+    expect(await w.run(['watch', '--wait', '56'])).toBe(1);
+    expect(w.err.join('\n')).toContain('--until-change');
   });
 });
