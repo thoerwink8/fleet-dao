@@ -576,7 +576,9 @@ async function cmdStart(p, io) {
 
   const repo = resolvePath(io, p.options.get('repo') ?? io.cwd());
   const branch = `w/${name}`;
-  const worktreeDir = join(dirname(repo), `fd-w-${name}`);
+  // 建在主检出的 .claude/worktrees/ 下（通用段：工作树一律建在那儿）——那里被 .gitignore 忽略、格式检查不扫，
+  // 开会话的清扫也认它；原来建在主检出旁边（fd-w-<名字>），散在仓外没人收。
+  const worktreeDir = join(repo, '.claude', 'worktrees', `w-${name}`);
 
   // 先做本地、不碰子进程的检查（已经存在就不用再去问 git 了），再验 repo、再问 git 账本里占没占。
   if (existsSync(worktreeDir))
