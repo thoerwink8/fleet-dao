@@ -23,7 +23,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { BackendResult, JevBackend } from '../src/backend.ts';
-import { ERROR_NEXT, STALL_STATE } from '../src/bank.ts';
+import { ERROR_NEXT } from '../src/bank.ts';
 import {
   backendForRoute,
   CLAUDE_ROUTE_CLOSED,
@@ -334,21 +334,6 @@ describe('/healthz 的 judge 项看什么', () => {
     expect(capped).toMatchObject({ judged: false, reason: 'daily_cap' });
     const health = await judgeHealth(t.db, { ...machine().at, makeBackend: fakeMake() });
     expect(health).toMatchObject({ state: 'failing', call: { reason: 'auth' } });
-  });
-
-  it('考试也是真调用：巡检考题答上了一样算调通', async () => {
-    await ask(
-      fakeBackend(() => failed('network', 'ECONNRESET')),
-      '2026-10-10T01:00:00Z',
-    );
-    await createJev({ db: t.db, backend: fakeBackend(), now: () => new Date('2026-10-10T03:00:00Z') }).exam(
-      [STALL_STATE],
-      { task: '写码', recent: '反复跑同一条测试' },
-      { runId: 'exam-1', sampleId: 's1', expect: { 'stall-state': 'looping' } },
-    );
-    expect(await judgeHealth(t.db, { ...machine().at, makeBackend: fakeMake() })).toMatchObject({
-      state: 'ok',
-    });
   });
 
   it('配置起不来：照样报坏（不去看调用记录）', async () => {

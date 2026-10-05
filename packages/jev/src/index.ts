@@ -1,16 +1,13 @@
-// Jev 判断题服务：题库、提问接口、可换的后端（TypeSafe / Claude 会话）、只记不拦与转真拦、考题。
-// 接上的只有引擎的错误分流、停滞预判两处（packages/engine/src/real/jev-port.ts，先只记不拦），/healthz 的 judge 项看它
-// 接没接、调不调得通（wiring.ts）；design 第十一节表里其余接入点还没接。
+// Jev 判断题：驾驶舱流程里用来提速的一个判断环节，不是独立产品。题库、提问接口、TypeSafe 后端、只记不拦。
+// 调用方只有两个：引擎的错误分流、停滞预判、issue 归类三处（packages/engine/src/real/jev-port.ts、issue-kind-jev.ts），
+// 和 /healthz 的 judge 项（packages/api，看它接没接、调不调得通，wiring.ts）。引擎和 api 互不依赖，所以它留成包，不收进引擎。
 export * from './backend.ts';
-export * from './backends/claude.ts';
 export * from './backends/typesafe.ts';
 export * from './bank.ts';
 export * from './config.ts';
 export * from './effects.ts';
 export * from './evidence.ts';
-export * from './exam.ts';
 export * from './jev.ts';
-export * from './mode.ts';
 export * from './policy.ts';
 export * from './questions.ts';
 export * from './store.ts';
