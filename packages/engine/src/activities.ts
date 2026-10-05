@@ -11,21 +11,13 @@ import {
   checkCanaryRound,
   openCanaryRound,
 } from './jobs/canary.ts';
-import { type CarpoolWatchDeps, CarpoolWatchFailedError, runCarpoolWatchJob } from './jobs/carpool-watch.ts';
-import {
-  GitHubReconcileFailedError,
-  type GitHubReconcileJobDeps,
-  runGitHubReconcileJob,
-} from './jobs/github-reconcile.ts';
-import {
-  HourlyReconcileFailedError,
-  type HourlyReconcileJobDeps,
-  runHourlyReconcileJob,
-} from './jobs/hourly-reconcile.ts';
-import { type IntakeDeps, IntakeFailedError, runIntakeJob } from './jobs/intake.ts';
-import { QuotaReadFailedError, type QuotaReadJobDeps, runQuotaReadJob } from './jobs/quota-read.ts';
-import { RouteProbeFailedError, type RouteProbeJobDeps, runRouteProbeJob } from './jobs/route-probe.ts';
-import { runWatchdogJob, type WatchdogDeps, WatchdogFailedError } from './jobs/watchdog.ts';
+import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
+import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
+import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
+import type { IntakeDeps } from './jobs/intake.ts';
+import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
+import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
+import type { WatchdogDeps } from './jobs/watchdog.ts';
 import {
   type ActivityTiming,
   type EnginePorts,
@@ -181,8 +173,9 @@ function timed(name: string, handler: Handler, record: EnginePorts['recordTiming
 }
 
 /**
- * 定时任务要的东西（真端口才有：库、GitHub）。给的是工厂：发信号、拉起工作流要用这次活动自己的 Temporal 客户端。
- * 不给（假端口）就不跑，活动明确报 JOB_NOT_CONFIGURED——定时任务是真端口那边建的，假端口的工人接到了也不装作跑过。
+ * 定时任务要的东西（真端口才有：库、GitHub）。给的是工厂：拉起工作流、查工作流要用引擎的 Temporal 客户端（jobs/engine-timers.ts
+ * 每一轮现装）。不给（假端口）就不起定时器；真端口缺了哪个，起的时候就明说起不来。只有全流程巡检的依赖还是工作流里的活动用的
+ * （canaryOpen / canaryCheck）：不给，那两个活动明确报 JOB_NOT_CONFIGURED。
  */
 export interface EngineJobs {
   /** taskQueue：这个工人取活的任务队列，补回来的单的工作流（Fusion）起在这里。 */
@@ -231,172 +224,6 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   waitMerged: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
-
-/** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
-async function reconcileGitHub(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.githubReconcile;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装对账补漏（假端口，或真端口没接上库和 GitHub）',
-      {
-        retryable: false,
-      },
-    );
-  }
-  try {
-    const ctx = Context.current();
-    return await runGitHubReconcileJob(make(ctx.client, ctx.info.taskQueue));
-  } catch (error) {
-    if (error instanceof GitHubReconcileFailedError) {
-      throw new PortError('RECONCILE_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
-
-/** 引擎自己的活动：路由探针跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
-async function probeRoutes(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.routeProbe;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装路由探针（假端口，或真端口没接上库和会话）：不装作探过',
-      { retryable: false },
-    );
-  }
-  try {
-    return await runRouteProbeJob(make());
-  } catch (error) {
-    if (error instanceof RouteProbeFailedError) {
-      throw new PortError('ROUTE_PROBE_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
-
-/** 引擎自己的活动：定时读额度跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
-async function readQuotas(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.quotaRead;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装定时读额度（假端口，或真端口没接上库）：不装作读过',
-      { retryable: false },
-    );
-  }
-  try {
-    return await runQuotaReadJob(make());
-  } catch (error) {
-    if (error instanceof QuotaReadFailedError) {
-      throw new PortError('QUOTA_READ_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
-
-/** 引擎自己的活动：拼车盯读跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮一分钟后照来）。 */
-async function watchCarpool(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.carpoolWatch;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装拼车盯读（假端口，或真端口没接上库）：不装作读过',
-      { retryable: false },
-    );
-  }
-  try {
-    return await runCarpoolWatchJob(make());
-  } catch (error) {
-    if (error instanceof CarpoolWatchFailedError) {
-      throw new PortError('CARPOOL_WATCH_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
-
-/** 引擎自己的活动：每小时对账跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮一小时后照来）。 */
-async function reconcileHourly(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.hourlyReconcile;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装每小时对账（假端口，或真端口没接上库和工作树）：不装作对过',
-      { retryable: false },
-    );
-  }
-  try {
-    const ctx = Context.current();
-    return await runHourlyReconcileJob(make(ctx.client, ctx.info.taskQueue));
-  } catch (error) {
-    if (error instanceof HourlyReconcileFailedError) {
-      throw new PortError('HOURLY_RECONCILE_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
-
-/** 引擎自己的活动：看门狗跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 5 分钟后照来）。 */
-async function watchSchedules(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.watchdog;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装看门狗（假端口，或真端口没接上库）：不装作看过',
-      { retryable: false },
-    );
-  }
-  try {
-    return await runWatchdogJob(make());
-  } catch (error) {
-    if (error instanceof WatchdogFailedError) {
-      throw new PortError('WATCHDOG_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
-
-/** 引擎自己的活动：拉单跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 5 分钟后照来）。 */
-async function intakeRound(jobs: EngineJobs): Promise<unknown> {
-  const make = jobs.intake;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装拉单（假端口，或真端口没接上库和 GitHub）：不装作拉过',
-      { retryable: false },
-    );
-  }
-  try {
-    const ctx = Context.current();
-    return await runIntakeJob(make(ctx.client, ctx.info.taskQueue));
-  } catch (error) {
-    if (error instanceof IntakeFailedError) {
-      throw new PortError('INTAKE_FAILED', error.message, {
-        retryable: false,
-        details: { runId: error.runId },
-      });
-    }
-    throw error;
-  }
-}
 
 /** 巡检没装（假端口，或真端口没接上库和 GitHub）：明确报 JOB_NOT_CONFIGURED，不装作巡检过。 */
 function canaryDeps(jobs: EngineJobs): CanaryDeps {
@@ -454,15 +281,8 @@ export function createActivities(
       out[name] = timed(name, port, record);
     }
   }
-  out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
-  out.probeRoutes = timed('probeRoutes', () => probeRoutes(jobs), record);
-  out.readQuotas = timed('readQuotas', () => readQuotas(jobs), record);
-  out.watchCarpool = timed('watchCarpool', () => watchCarpool(jobs), record);
-  out.reconcileHourly = timed('reconcileHourly', () => reconcileHourly(jobs), record);
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
-  out.watchSchedules = timed('watchSchedules', () => watchSchedules(jobs), record);
-  out.intakeRound = timed('intakeRound', () => intakeRound(jobs), record);
   for (const name of TASK_ACTIVITY_NAMES) {
     out[name] = timed(
       name,

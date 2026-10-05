@@ -233,7 +233,8 @@ describe('看门狗自己停了能被发现（真库）', () => {
         resolvedAt: null,
       });
       expect(down?.body.split('\n')[0]).toBe('看门狗 09-27 20:10 之后超过 15 分钟没跑完一轮。');
-      expect(down?.body).toContain('fleet-temporal schedule trigger --schedule-id watchdog');
+      expect(down?.body).toContain('journalctl -u fleet-engine');
+      expect(down?.body).not.toContain('fleet-temporal schedule');
       clock = new Date(NOW.getTime() + 5 * MIN);
       expect(await watchdogWatchOnce({ db: t.db, now })).toBe('same');
 

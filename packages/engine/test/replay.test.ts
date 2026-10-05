@@ -1,8 +1,8 @@
 // 老历史进新代码（windsurf-dao#1633）：拿录好的历史（过去某一版代码真走过的路，test/replay/fixtures/）对「现在的」工作流代码重放。
 // 重放出来的步骤和历史对不上 = 此刻在途的任务（包括停在等人、等合并里的）换上新代码会变僵尸
 // （TMPRL1100：读不了状态、收不了信号，只能终止）。修法是用 patched() 把改动包起来，不许重录夹具让它变绿。
-// 只有任务工作流、拉单工作流的夹具（task-*.json、intake-*.json）：更早的 subtask-/fusion-/requirement-/merge-queue- 夹具连同
-// 它们的工作流一起在 #556-2 删了。
+// 只有任务工作流的夹具（task-*.json）：更早的 subtask-/fusion-/requirement-/merge-queue- 夹具连同它们的工作流一起在 #556-2 删了，
+// 拉单的夹具（intake-idle）随拉单工作流在 #1072 删了（拉单改成引擎进程里的定时器，不再是工作流）。
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Worker } from '@temporalio/worker';
@@ -11,12 +11,10 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { engineBundle } from './support.ts';
 
 const DIR = fileURLToPath(new URL('./replay/fixtures/', import.meta.url));
-const files = readdirSync(DIR).filter(
-  (f) => (f.startsWith('task-') || f.startsWith('intake-')) && f.endsWith('.json'),
-);
+const files = readdirSync(DIR).filter((f) => f.startsWith('task-') && f.endsWith('.json'));
 
 /** 必须有的场景：没有它们，「扫完 0 条」和「一条样本都没扫到」就分不开了。 */
-const REQUIRED = ['task-merged', 'task-parked-brief', 'task-parked-guarded', 'task-merging', 'intake-idle'];
+const REQUIRED = ['task-merged', 'task-parked-brief', 'task-parked-guarded', 'task-merging'];
 
 const HOW =
   '这份历史是过去的代码真走过的路：现在的代码走不出同样的步骤 = 在途的任务会变僵尸。' +

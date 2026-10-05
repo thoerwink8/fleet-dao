@@ -2,23 +2,7 @@
 // 没有心跳，工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写。
 
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
-import type {
-  CanaryInput,
-  CarpoolWatchInput,
-  CarpoolWatchRun,
-  GitHubReconcileInput,
-  GitHubReconcileRun,
-  HourlyReconcileInput,
-  HourlyReconcileRun,
-  IntakeInput,
-  IntakeRun,
-  QuotaReadInput,
-  QuotaReadRun,
-  RouteProbeInput,
-  RouteProbeRun,
-  WatchdogInput,
-  WatchdogRun,
-} from './contract.ts';
+import type { CanaryInput } from './contract.ts';
 import type { CanaryState, CanaryStepResult } from './jobs/canary.ts';
 import type { Limits } from './limits.ts';
 import type { EnginePorts } from './ports.ts';
@@ -47,19 +31,6 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
-  /** 引擎自己的活动：对账补漏跑一轮，结局记进 schedule_runs（jobs/github-reconcile.ts）。 */
-  reconcileGitHub(input: GitHubReconcileInput): Promise<GitHubReconcileRun>;
-  /** 引擎自己的活动：路由探针跑一轮，每条路由的结论写进 routes、结局记进 schedule_runs（jobs/route-probe.ts）。 */
-  probeRoutes(input: RouteProbeInput): Promise<RouteProbeRun>;
-  /** 引擎自己的活动：定时读额度跑一轮，读成的写进 quota_windows、结局记进 schedule_runs（jobs/quota-read.ts）。 */
-  readQuotas(input: QuotaReadInput): Promise<QuotaReadRun>;
-  /** 引擎自己的活动：拼车额度盯读一轮（按情况读接口、交给切号当场判），结局记进 schedule_runs（jobs/carpool-watch.ts）。 */
-  watchCarpool(input: CarpoolWatchInput): Promise<CarpoolWatchRun>;
-  /**
-   * 引擎自己的活动：每小时对账跑一轮（工作树残留、两处核对、提醒按条件撤和再推、机器人权限自检），结局记进 schedule_runs
-   * （jobs/hourly-reconcile.ts）。
-   */
-  reconcileHourly(input: HourlyReconcileInput): Promise<HourlyReconcileRun>;
   /** 引擎自己的活动：全流程巡检开一张单（jobs/canary.ts 的 openCanaryRound）；没跑成的已经记进库，回的是结论。 */
   canaryOpen(input: CanaryInput): Promise<CanaryStepResult>;
   /**
@@ -67,10 +38,6 @@ export type EngineActivities = PortActivities & {
    * taskId 记到任务上，巡检自己看的这几下不能记成巡检单的每步耗时（那是记账那一步要核的）。
    */
   canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
-  /** 引擎自己的活动：看门狗跑一轮（按登记表看各定时任务新不新鲜、推撤提醒），结局记进 schedule_runs（jobs/watchdog.ts）。 */
-  watchSchedules(input: WatchdogInput): Promise<WatchdogRun>;
-  /** 引擎自己的活动：拉单跑一轮（读开着开关的仓里该做的单、逐道过关、起任务工作流），结局记进 schedule_runs（jobs/intake.ts）。 */
-  intakeRound(input: IntakeInput): Promise<IntakeRun>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
   /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
   readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
@@ -94,10 +61,8 @@ export type ActivityName = keyof EngineActivities;
  * quick：毫秒到秒级的记账、选路由、报警——30 秒，丢了 1 分钟内重来。
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
  * setup / ci：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
- * job：定时任务的一轮——10 分钟，不重试：每次尝试都记一行 schedule_runs，没跑成的等下一轮（间隔 15 分钟），不在这一轮里补。
- * 路由探针一轮里每条路由最长几分钟（起会话、等回答、没通隔 20 秒再探一次），同时探两条，也在 10 分钟里。
- * 每小时对账一轮最多看 80 棵残留的树（每棵以会话用户跑几条 git），也在 10 分钟里。
- * 看门狗一轮是几条查库、写提醒，秒级；卡住了也在 10 分钟里收场（上一轮没完下一轮跳过，一直卡着后端的看守看得见）。
+ * job：全流程巡检的开单、看一回——10 分钟，不重试：开单没成的已经记进库、回的是结论，看一回连着没成的由工作流数着（CANARY_CHECK_FAILURE_LIMIT）。
+ * 别的定时任务（对账、探针、读额度、看门狗……）不是活动了（#1072）：引擎的定时器直接跑，一轮的限时在 jobs/engine-timers.ts。
  * segment：一次无头会话（动手、冷验收）——限时是会话最长时间加一刻钟收尾，必须心跳；只试一次：会话贵又不幂等，
  * 活动失败怎么办（重试、换路由、挂起）由工作流按失败分流定，不在 Temporal 这一层自动再起一遍。
  * poll：长轮询（等合并）——一次最多 MERGE_POLL_MINUTES 分钟加余量，必须心跳；工人丢了重试没有副作用（只读）。
@@ -117,15 +82,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   closeIssue: 'git',
   createWorktree: 'setup',
   waitCi: 'ci',
-  reconcileGitHub: 'job',
-  probeRoutes: 'job',
-  readQuotas: 'job',
-  watchCarpool: 'job',
-  reconcileHourly: 'job',
   canaryOpen: 'job',
   canaryCheck: 'job',
-  watchSchedules: 'job',
-  intakeRound: 'job',
   readTaskBrief: 'git',
   runSegment: 'segment',
   readDelivery: 'git',

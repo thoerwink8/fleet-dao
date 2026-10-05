@@ -145,7 +145,7 @@
     "release.env": {
       "FLEET_SERVICES": {
         "value": "fleet-api",
-        "说明": "本机跑哪些应用服务（空格分隔，可选 fleet-engine、fleet-api）。【临时】创始人 2026-09-29 要求关闭法国引擎、不再派单，所以只留 fleet-api（驾驶舱后端）；原因：引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%，流程重做前不再让它接活。撤回条件：新流程演练通过、创始人说重开；撤回做法：改回 fleet-engine fleet-api、发布一轮，再把 canary、route-probe、hourly-reconcile、github-reconcile 四个 Temporal 定时任务用 fleet-temporal schedule toggle --unpause 恢复（引擎重启不会替人恢复暂停的）。最迟 2026-10-05 复查，没撤回要写明为什么续。"
+        "说明": "本机跑哪些应用服务（空格分隔，可选 fleet-engine、fleet-api）。【临时】创始人 2026-09-29 要求关闭法国引擎、不再派单，所以只留 fleet-api（驾驶舱后端）；原因：引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%，流程重做前不再让它接活。撤回条件：新流程演练通过、创始人说重开；撤回做法：改回 fleet-engine fleet-api、发布一轮（定时任务是引擎进程里的定时器，引擎起来自己恢复，不用再手动恢复 Temporal 定时任务，#1072）。最迟 2026-10-05 复查，没撤回要写明为什么续。"
       },
       "FLEET_DOMAIN": {
         "private": "5ecae725bd3e628c733cdb9ca7c58a670f96c0803406e6ce72c78891b1c27024",

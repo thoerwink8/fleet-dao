@@ -1,24 +1,18 @@
 // 每小时对账的一轮外壳（jobs/hourly-reconcile.ts）和工作流：几部分的结局怎么并、记开始和记结局没成、这一轮整个没跑成、
 // 真 Temporal 测试服务端上跑一轮。工作树和提醒各自怎么判在 test/real/hourly-reconcile.test.ts（真库、真 git）。
 // 每条失败路径都故意造一次：都不许记成 ok。
-import { randomUUID } from 'node:crypto';
 import type { ScheduleResult } from '@fleet-dao/db';
-import { WorkflowFailedError } from '@temporalio/client';
-import { ApplicationFailure } from '@temporalio/common';
 import { describe, expect, it } from 'vitest';
-import type { EngineJobs } from '../src/activities.ts';
-import { type HourlyReconcileRun, WORKFLOW_TYPES } from '../src/contract.ts';
-import { createFakeWorld } from '../src/fakes.ts';
 import {
   combineParts,
   HOURLY_RECONCILE_JOB,
+  HourlyReconcileFailedError,
   type HourlyReconcileJobDeps,
   runHourlyReconcileJob,
   WHY_MAX,
 } from '../src/jobs/hourly-reconcile.ts';
 import type { SweepPart } from '../src/jobs/reconcile-common.ts';
 import { describeLeftovers } from '../src/jobs/worktree-sweep.ts';
-import { useEnv, withWorker } from './helpers.ts';
 
 const NOW = new Date('2026-09-26T09:41:00.000Z');
 const ROOT = '/var/lib/fleet-work';
@@ -381,44 +375,15 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
   });
 });
 
-// 起工人、跑一轮在整包一起跑时可能超过默认的 5 秒（和路由探针的用例同一个上限）。
-describe('每小时对账的工作流（真 Temporal 测试服务端）', { timeout: 60_000 }, () => {
-  const env = useEnv();
-
-  async function runOnce(jobs: EngineJobs | undefined): Promise<HourlyReconcileRun> {
-    return withWorker(
-      env(),
-      createFakeWorld(),
-      (taskQueue) =>
-        env().client.workflow.execute(WORKFLOW_TYPES.hourlyReconcile, {
-          taskQueue,
-          workflowId: `hourly-reconcile-${randomUUID()}`,
-          args: [{ schemaVersion: 1 }],
-        }),
-      jobs ? { jobs } : {},
-    );
-  }
-
-  async function failureOf(jobs: EngineJobs | undefined): Promise<ApplicationFailure> {
-    const err = await runOnce(jobs).then(
-      () => null,
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(WorkflowFailedError);
-    let cause = (err as WorkflowFailedError).cause;
-    while (cause && !(cause instanceof ApplicationFailure)) cause = (cause as { cause?: Error }).cause;
-    expect(cause).toBeInstanceOf(ApplicationFailure);
-    return cause as ApplicationFailure;
-  }
-
-  it('一轮跑完：工作流交回这一轮的结局（和记进 schedule_runs 的同一份）', async () => {
+describe('每小时对账的结局和登记', () => {
+  it('一轮跑完：交回这一轮的结局（和记进 schedule_runs 的同一份）', async () => {
     const h = harness();
-    const run = await runOnce({ hourlyReconcile: () => h.deps });
+    const run = await runHourlyReconcileJob(h.deps);
     expect(run).toEqual({ runId: 7, outcome: 'ok', scanned: 1, found: 0 });
     expect(h.finished).toHaveLength(1);
   });
 
-  it('这一轮没跑成：活动报 HOURLY_RECONCILE_FAILED（不重试，下一轮一小时后照来）', async () => {
+  it('这一轮没跑成：抛 HourlyReconcileFailedError、带着原因（下一轮一小时后照来，不在这一轮里补）', async () => {
     const h = harness({
       listDir: async () => {
         throw new Error('EACCES: 故意造的');
@@ -430,16 +395,12 @@ describe('每小时对账的工作流（真 Temporal 测试服务端）', { time
         },
       },
     });
-    const failure = await failureOf({ hourlyReconcile: () => h.deps });
-    expect(failure.type).toBe('HOURLY_RECONCILE_FAILED');
-    expect(failure.nonRetryable).toBe(true);
-    expect(failure.message).toContain('EACCES');
-  });
-
-  it('假端口的工人（没装每小时对账）接到这一轮：明确报 JOB_NOT_CONFIGURED，不回一个空的 ok', async () => {
-    const failure = await failureOf(undefined);
-    expect(failure.type).toBe('JOB_NOT_CONFIGURED');
-    expect(failure.nonRetryable).toBe(true);
+    const err = await runHourlyReconcileJob(h.deps).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(HourlyReconcileFailedError);
+    expect((err as Error).message).toContain('EACCES');
   });
 
   it('登记的名字、频率：每小时对账、连着两轮没跑成才算过期', () => {

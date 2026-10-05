@@ -27,7 +27,8 @@ import {
 import { createDrainControl, type DrainControl, ownReleaseSha } from './drain-control.ts';
 import { startDrainStatusFile } from './drain-file.ts';
 import { createFakeWorld } from './fakes.ts';
-import { ensureEngineSchedules } from './jobs/schedules.ts';
+import { engineTimerJobs } from './jobs/engine-timers.ts';
+import { type EngineTimers, realTimerHost, startTimers } from './jobs/timers.ts';
 import type { EnginePorts } from './ports.ts';
 
 export interface EngineConfig {
@@ -276,6 +277,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let tasks: EngineTasks | undefined;
   let registerJobs: (() => Promise<void>) | undefined;
   let retireSchedules: ((client: Pick<Client, 'schedule'>) => Promise<void>) | undefined;
+  let jobLastStartedAt: (() => Promise<ReadonlyMap<string, Date>>) | undefined;
   let close: () => Promise<void> = async () => {};
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
@@ -289,6 +291,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     tasks = real.tasks;
     registerJobs = real.registerJobs;
     retireSchedules = real.retireSchedules;
+    jobLastStartedAt = real.jobLastStartedAt;
     close = real.close;
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
@@ -298,19 +301,20 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   }
   const connection = await NativeConnection.connect({ address: config.address });
   let clientConnection: Connection | undefined;
+  let client: Client | undefined;
+  let timers: EngineTimers | undefined;
   let status: ReturnType<typeof startDrainStatusFile> | undefined;
   let shutdown: ReturnType<typeof installGracefulShutdown> | undefined;
   let stopControl: (() => void) | undefined;
   try {
     if (registerJobs) {
-      // 定时任务只由真端口的工人建：假端口不碰库和 GitHub，建了也只会一轮轮报 JOB_NOT_CONFIGURED。
-      // 先登记再建：一次都没跑过的也在看门狗的名单上。任一步失败就不起，别让对账悄悄没人跑。
+      // 定时任务只由真端口的工人起：假端口不碰库和 GitHub，起了也没有东西可跑。
+      // 先登记：一次都没跑过的也在看门狗的名单上。任一步失败就不起，别让对账悄悄没人跑。
       await registerJobs();
       clientConnection = await Connection.connect({ address: config.address });
-      const client = new Client({ connection: clientConnection, namespace: config.namespace });
-      const ensured = await ensureEngineSchedules(client, config.taskQueue);
-      console.info(`定时任务已对齐：${JSON.stringify(ensured)}`);
-      // 退役的定时任务（jobs/retired-schedules.ts）：Temporal 上还在的删掉，删不掉不挡这里往下走（real/retire-schedules.ts）。
+      client = new Client({ connection: clientConnection, namespace: config.namespace });
+      // 定时器起之前，把 Temporal 上老的 Schedule（退役的、改由进程内定时器跑的，jobs/retired-schedules.ts）删掉，免得同一个任务
+      // 两边各跑一轮；删不掉不挡这里往下走（real/retire-schedules.ts 报提醒）。
       if (retireSchedules) await retireSchedules(client);
     }
     // 排空状态写给发布脚本看（它拿 pid 和 systemd 的 MainPID 比）：假端口没有状态目录，不写
@@ -337,6 +341,15 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       ...(tasks ? { tasks } : {}),
       log: (message) => console.info(message),
     });
+    if (client && jobs) {
+      // 定时任务的定时器（jobs/timers.ts）：引擎进程里的普通定时器，重启后自己恢复；孤儿会话收完、工人建好之后再起，一起来就能接任务工作流
+      const lastRuns = jobLastStartedAt?.();
+      timers = startTimers(
+        engineTimerJobs({ jobs, client, taskQueue: config.taskQueue }),
+        realTimerHost(async (id) => (lastRuns ? ((await lastRuns).get(id) ?? null) : null)),
+      );
+      console.info('定时任务的定时器已起');
+    }
     shutdown = installGracefulShutdown({
       worker,
       drain,
@@ -349,6 +362,11 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     await worker.run();
   } finally {
     shutdown?.dispose();
+    // 不再起新的一轮，在跑的最多再等一个收尾宽限（和在途活动一样）
+    const unfinished = await timers?.stop(config.shutdownGraceSeconds * 1000);
+    if (unfinished && unfinished.length > 0) {
+      console.warn(`停机时这些定时任务的一轮还没完，不等了：${unfinished.join('、')}`);
+    }
     stopControl?.();
     await status?.flush();
     status?.stop();

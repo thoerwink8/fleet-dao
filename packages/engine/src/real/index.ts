@@ -14,7 +14,7 @@ import {
   type SessionUser,
   switchSessionOrg,
 } from '@fleet-dao/adapters';
-import { createDb, type Db } from '@fleet-dao/db';
+import { createDb, type Db, scheduleHealth } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
@@ -408,8 +408,10 @@ export function realPortsFromEnv(
   /** 任务工作流（#632）的真活动：不碰会话的五个、动手会话、冷验收会话。 */
   tasks: EngineTasks;
   registerJobs(): Promise<void>;
-  /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
+  /** 引擎起来、定时器起之前跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
   retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
+  /** 每个定时任务最近一轮是几点起的（schedule_runs）；一轮都没有的不在里面。进程内定时器起来时补最近一轮要看（jobs/timers.ts）。 */
+  jobLastStartedAt(): Promise<ReadonlyMap<string, Date>>;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -625,6 +627,12 @@ export function realPortsFromEnv(
       else console.info(issueKindRegistered.message);
     },
     retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
+    jobLastStartedAt: async () =>
+      new Map(
+        (await scheduleHealth(db)).flatMap((h) =>
+          h.lastRun ? [[h.job.id, h.lastRun.startedAt] as const] : [],
+        ),
+      ),
     close: async () => {
       await wakeClient
         .close()

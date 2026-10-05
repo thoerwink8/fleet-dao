@@ -1,23 +1,17 @@
 // 路由探针（#129）的一轮：定探不探（插头没接、按量、下架、没阶段开着、会话用户挂着别的组织）、真探、没通隔一会儿再探、
 // 写结论、记结局。读不到路由、写不进库、探针自己出错，每条路径都故意造一次，都不许记成 ok、也不许把路由写成在线。
-import { randomUUID } from 'node:crypto';
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
-import { WorkflowFailedError } from '@temporalio/client';
-import { ApplicationFailure } from '@temporalio/common';
 import { describe, expect, it } from 'vitest';
-import type { EngineJobs } from '../src/activities.ts';
-import { type RouteProbeRun, WORKFLOW_TYPES } from '../src/contract.ts';
-import { createFakeWorld } from '../src/fakes.ts';
 import {
   type ProbeAttempt,
   type Prober,
   planProbe,
   ROUTE_PROBE_JOB,
   ROUTE_PROBE_RETRY_DELAY_MS,
+  RouteProbeFailedError,
   type RouteProbeJobDeps,
   runRouteProbeJob,
 } from '../src/jobs/route-probe.ts';
-import { useEnv, withWorker } from './helpers.ts';
 
 const NOW = new Date('2026-09-26T04:07:00.000Z');
 /** 会话用户此刻挂的组织（真实现以会话用户跑 reclaude org list，认带 * 的那行的类型，real/session-org.ts）。 */
@@ -667,59 +661,26 @@ describe('一轮（runRouteProbeJob，不起 Temporal）', () => {
   });
 });
 
-// 起工人、跑一轮在整包一起跑时可能超过默认的 5 秒（和「你好」工作流的用例同一个上限）。
-describe('路由探针的工作流（真 Temporal 测试服务端）', { timeout: 60_000 }, () => {
-  const env = useEnv();
-
-  async function runOnce(jobs: EngineJobs | undefined): Promise<RouteProbeRun> {
-    return withWorker(
-      env(),
-      createFakeWorld(),
-      (taskQueue) =>
-        env().client.workflow.execute(WORKFLOW_TYPES.routeProbe, {
-          taskQueue,
-          workflowId: `route-probe-${randomUUID()}`,
-          args: [{ schemaVersion: 1 }],
-        }),
-      jobs ? { jobs } : {},
-    );
-  }
-
-  async function failureOf(jobs: EngineJobs | undefined): Promise<ApplicationFailure> {
-    const err = await runOnce(jobs).then(
-      () => null,
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(WorkflowFailedError);
-    let cause = (err as WorkflowFailedError).cause;
-    while (cause && !(cause instanceof ApplicationFailure)) cause = (cause as { cause?: Error }).cause;
-    expect(cause).toBeInstanceOf(ApplicationFailure);
-    return cause as ApplicationFailure;
-  }
-
-  it('一轮跑完：工作流交回这一轮的结局（和记进 schedule_runs 的同一份）', async () => {
+describe('路由探针的结局和登记', () => {
+  it('一轮跑完：交回这一轮的结局（和记进 schedule_runs 的同一份）', async () => {
     const h = harness([carpool, mirasim], answered);
-    const run = await runOnce({ routeProbe: () => h.deps });
+    const run = await runRouteProbeJob(h.deps);
     expect(run).toEqual({ runId: 11, outcome: 'ok', scanned: 2, found: 1, online: [carpool.routeId] });
     expect(h.finished).toHaveLength(1);
   });
 
-  it('这一轮没跑成：活动报 ROUTE_PROBE_FAILED（不重试，下一轮 15 分钟后照来）', async () => {
+  it('这一轮没跑成：抛 RouteProbeFailedError、带着原因（下一轮 15 分钟后照来）', async () => {
     const h = harness([], answered, {
       targets: async () => {
         throw new Error('连不上库');
       },
     });
-    const failure = await failureOf({ routeProbe: () => h.deps });
-    expect(failure.type).toBe('ROUTE_PROBE_FAILED');
-    expect(failure.nonRetryable).toBe(true);
-    expect(failure.message).toContain('连不上库');
-  });
-
-  it('假端口的工人（没装探针）接到这一轮：明确报 JOB_NOT_CONFIGURED，不回一个空的 ok', async () => {
-    const failure = await failureOf(undefined);
-    expect(failure.type).toBe('JOB_NOT_CONFIGURED');
-    expect(failure.nonRetryable).toBe(true);
+    const err = await runRouteProbeJob(h.deps).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RouteProbeFailedError);
+    expect((err as Error).message).toContain('连不上库');
   });
 
   it('登记的名字、频率写的是「路由探针」、每 15 分钟', () => {

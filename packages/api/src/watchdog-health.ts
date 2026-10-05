@@ -143,7 +143,7 @@ export async function watchdogWatchOnce(deps: {
   const body = [
     `${got.message}${got.detail ? `：${got.detail}` : ''}。`,
     '看门狗（引擎的定时任务 watchdog，每 5 分钟一轮）不在按期跑，别的定时任务没跑成、停了就没人推提醒。先看引擎在不在：健康页的「引擎工人」一项、' +
-      "journalctl -u fleet-engine --since '-1h' | grep 看门狗；手动跑一轮：fleet-temporal schedule trigger --schedule-id watchdog。",
+      "journalctl -u fleet-engine --since '-1h' | grep 看门狗；定时器在引擎进程里，引擎起来自己恢复（没有手动触发一轮的命令）。",
     '看门狗按期跑完一轮，这条自己撤。',
   ].join('\n');
   const existing = await alertByKey(deps.db, key);

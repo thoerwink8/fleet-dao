@@ -2,7 +2,6 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
-import { randomUUID } from 'node:crypto';
 import {
   auditLog,
   finishScheduleRun,
@@ -15,22 +14,17 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { WorkflowFailedError } from '@temporalio/client';
-import { ApplicationFailure } from '@temporalio/common';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { EngineJobs } from '../src/activities.ts';
-import { type WatchdogRun, WORKFLOW_TYPES } from '../src/contract.ts';
-import { createFakeWorld } from '../src/fakes.ts';
 import {
   jobIdOfKey,
   runWatchdogJob,
   spokenMinutes,
   WATCHDOG_JOB,
   type WatchdogDeps,
+  WatchdogFailedError,
   watchdogAlertKey,
 } from '../src/jobs/watchdog.ts';
 import { watchdogJob } from '../src/real/watchdog.ts';
-import { useEnv, withWorker } from './helpers.ts';
 
 /** 北京时间 09-27 20:00。 */
 const T0 = new Date('2026-09-27T12:00:00.000Z');
@@ -466,62 +460,28 @@ describe('键和说法', () => {
   });
 });
 
-// 起工人、跑一轮在整包一起跑时可能超过默认的 5 秒（和别的定时任务的用例同一个上限）。
-describe('看门狗的工作流（真 Temporal 测试服务端）', { timeout: 60_000 }, () => {
-  const env = useEnv();
-
-  async function runOnce(jobs: EngineJobs | undefined): Promise<WatchdogRun> {
-    return withWorker(
-      env(),
-      createFakeWorld(),
-      (taskQueue) =>
-        env().client.workflow.execute(WORKFLOW_TYPES.watchdog, {
-          taskQueue,
-          workflowId: `watchdog-${randomUUID()}`,
-          args: [{ schemaVersion: 1 }],
-        }),
-      jobs ? { jobs } : {},
-    );
-  }
-
-  async function failureOf(jobs: EngineJobs | undefined): Promise<ApplicationFailure> {
-    const err = await runOnce(jobs).then(
-      () => null,
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(WorkflowFailedError);
-    let cause = (err as WorkflowFailedError).cause;
-    while (cause && !(cause instanceof ApplicationFailure)) cause = (cause as { cause?: Error }).cause;
-    expect(cause).toBeInstanceOf(ApplicationFailure);
-    return cause as ApplicationFailure;
-  }
-
-  it('一轮跑完：工作流交回这一轮的结局（和记进 schedule_runs 的同一份）', async () => {
+describe('看门狗一轮的结局', () => {
+  it('一轮跑完：交回这一轮的结局（和记进 schedule_runs 的同一份）', async () => {
     await register({ id: 'route-probe', name: '路由探针' });
     await run('route-probe', -120, { outcome: 'ok', scanned: 3, found: 0 });
-    const got = await runOnce({ watchdog: () => deps() });
+    const got = await runWatchdogJob(deps());
     expect(got).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
     expect((await watchdogRuns()).map((r) => r.id)).toEqual([got.runId]);
   });
 
-  it('【故意造出的失败】这一轮没跑成：活动报 WATCHDOG_FAILED（不重试，下一轮 5 分钟后照来）', async () => {
+  it('【故意造出的失败】这一轮没跑成：抛 WatchdogFailedError、带着原因（下一轮 5 分钟后照来）', async () => {
     await register();
-    const failure = await failureOf({
-      watchdog: () =>
-        deps({
-          health: async () => {
-            throw new Error('库连不上');
-          },
-        }),
-    });
-    expect(failure.type).toBe('WATCHDOG_FAILED');
-    expect(failure.nonRetryable).toBe(true);
-    expect(failure.message).toContain('库连不上');
-  });
-
-  it('假端口的工人（没装看门狗）接到这一轮：明确报 JOB_NOT_CONFIGURED，不回一个空的 ok', async () => {
-    const failure = await failureOf(undefined);
-    expect(failure.type).toBe('JOB_NOT_CONFIGURED');
-    expect(failure.nonRetryable).toBe(true);
+    const err = await runWatchdogJob(
+      deps({
+        health: async () => {
+          throw new Error('库连不上');
+        },
+      }),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(WatchdogFailedError);
+    expect((err as Error).message).toContain('库连不上');
   });
 });

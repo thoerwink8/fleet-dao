@@ -1,11 +1,11 @@
 // 一条命令起一次演练（#452「一条命令起一次完整演练」，入口 pnpm drill → bin/drill.ts）：立刻跑一轮全流程巡检——和每 6 小时
-// 那一轮是同一个定时任务（canary）、同一份代码（jobs/canary.ts），不另写一套——等它有结论，打印每一步几点走完、用了多久；
+// 那一轮是同一个工作流（canary）、同一份代码（jobs/canary.ts），不另写一套——等它有结论，打印每一步几点走完、用了多久；
 // 断了照实报停在哪一步、为什么。
-// 退出码：0 通过；1 断了；2 巡检自己没跑成，或这条命令自己没查成（连不上 Temporal、没有这个定时任务、触发了没见它起、
+// 退出码：0 通过；1 断了；2 巡检自己没跑成，或这条命令自己没查成（连不上 Temporal、起不了工作流、
 // 工作流没给结论就失败了、结局认不出）。
 // 改这里之前必须知道：
-// - 起一轮走定时任务的「立刻跑一次」（trigger，重叠策略照 SKIP）：已经有一轮在跑就不另起、接上它等结论——两轮叠着跑会在巡检仓里
-//   抢同一个文件（jobs/schedules.ts）。
+// - 起一轮和引擎的定时器走同一个起法（jobs/canary-start.ts，固定编号）：已经有一轮在跑就不另起、接上它等结论——两轮叠着跑会在
+//   巡检仓里抢同一个文件。演练不再要求引擎的定时器建过什么（#1072 以前要 Temporal 上有这个 Schedule），只要有引擎工人在接活。
 // - 每一步的时刻从这一轮的结局里读（CanaryRun 的 startedAt、endedAt、steps）；换版本之前的引擎起的一轮没有这几样，照实说读不到，
 //   不拿 0 顶。
 
@@ -16,9 +16,10 @@ import {
   type CanaryVerdict,
   type RecordedCanaryStage,
 } from '@fleet-dao/db';
-import { asRecord, errMessage, sleep as realSleep } from '@fleet-dao/shared/util';
-import { type Client, ScheduleNotFoundError, ScheduleOverlapPolicy } from '@temporalio/client';
-import { CANARY_JOB, CANARY_MAX_MINUTES, spanWords, stepSpans } from './jobs/canary.ts';
+import { asRecord, errMessage } from '@fleet-dao/shared/util';
+import type { Client } from '@temporalio/client';
+import { CANARY_MAX_MINUTES, spanWords, stepSpans } from './jobs/canary.ts';
+import { CANARY_WORKFLOW_ID, startCanaryWorkflow } from './jobs/canary-start.ts';
 
 /** 0 通过；1 断了；2 没跑成或没查成。 */
 export type DrillExit = 0 | 1 | 2;
@@ -32,7 +33,7 @@ export interface DrillRound {
 }
 
 export interface DrillDeps {
-  /** 起一轮（已经有一轮在跑就接上它）。连不上 Temporal、没有这个定时任务、触发了一直没见它起：照抛。 */
+  /** 起一轮（已经有一轮在跑就接上它）。连不上 Temporal、起不了工作流：照抛。 */
   start(): Promise<DrillRound>;
   /** 等这一轮的结局（工作流的返回值）。工作流没给结论就失败了：照抛。 */
   result(round: DrillRound): Promise<unknown>;
@@ -177,76 +178,27 @@ export async function runDrill(deps: DrillDeps): Promise<DrillExit> {
 }
 
 /** 起一轮、等结论用到的 Temporal 那几下（真客户端满足它；测试给假的）。 */
-export type DrillClient = Pick<Client, 'schedule' | 'workflow'>;
+export type DrillClient = Pick<Client, 'workflow'>;
 
 export interface TemporalDrillOptions {
   print: (line: string) => void;
-  /** 定时任务编号；默认 canary（jobs/schedules.ts 的 CANARY_SCHEDULE_ID）。 */
-  scheduleId?: string;
-  /** 触发以后多久没见它起一轮算没起成（毫秒）。 */
-  startTimeoutMs?: number;
-  /** 触发以后隔多久看一次起没起（毫秒）。 */
-  pollMs?: number;
+  /** 这个引擎工人取活的任务队列（和引擎同一个：FLEET_TASK_QUEUE，默认 fleet）。 */
+  taskQueue: string;
   /** 等结论时隔多久打印一句「还在等」（毫秒）。 */
   noteEveryMs?: number;
-  sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
 
-/** 真的 Temporal：触发定时任务、认出起的是哪一轮、等它的结局。 */
+/** 真的 Temporal：起一轮巡检的工作流（jobs/canary-start.ts，和引擎的定时器同一个起法）、认出是哪一轮、等它的结局。 */
 export function temporalDrill(client: DrillClient, o: TemporalDrillOptions): Omit<DrillDeps, 'print'> {
-  const scheduleId = o.scheduleId ?? CANARY_JOB.id;
-  const startTimeoutMs = o.startTimeoutMs ?? 60_000;
-  const pollMs = o.pollMs ?? 2_000;
   const noteEveryMs = o.noteEveryMs ?? 10 * 60_000;
-  const sleep = o.sleep ?? realSleep;
   const now = o.now ?? (() => Date.now());
-  const handle = client.schedule.getHandle(scheduleId);
-  const describe = async () => {
-    try {
-      return await handle.describe();
-    } catch (err) {
-      if (err instanceof ScheduleNotFoundError) {
-        throw new Error(
-          `Temporal 上没有定时任务 ${scheduleId}：引擎还没以真端口起过（定时任务是引擎起来时建的）`,
-        );
-      }
-      throw err;
-    }
-  };
   return {
     async start() {
-      const before = await describe();
-      const running = before.info.runningActions.at(-1);
-      if (running) {
-        return {
-          workflowId: running.workflow.workflowId,
-          runId: running.workflow.firstExecutionRunId,
-          attached: true,
-        };
-      }
-      const taken = before.info.numActionsTaken;
-      await handle.trigger(ScheduleOverlapPolicy.SKIP);
-      const deadline = now() + startTimeoutMs;
-      for (;;) {
-        const d = await describe();
-        const fresh =
-          d.info.runningActions.at(-1) ??
-          (d.info.numActionsTaken > taken ? d.info.recentActions.at(-1)?.action : undefined);
-        if (fresh) {
-          return {
-            workflowId: fresh.workflow.workflowId,
-            runId: fresh.workflow.firstExecutionRunId,
-            attached: false,
-          };
-        }
-        if (now() >= deadline) {
-          throw new Error(
-            `触发了定时任务 ${scheduleId}，${Math.round(startTimeoutMs / 1000)} 秒里没见它起一轮（看 fleet-temporal schedule describe --schedule-id ${scheduleId}）`,
-          );
-        }
-        await sleep(pollMs);
-      }
+      const s = await startCanaryWorkflow(client, o.taskQueue);
+      // 已经有一轮在跑：接上它；起的是新的就用起它时给的 run 编号，接上的要问一句才知道是哪一次执行
+      const runId = s.started ? s.handle.firstExecutionRunId : (await s.handle.describe()).runId;
+      return { workflowId: CANARY_WORKFLOW_ID, runId, attached: !s.started };
     },
     async result(round) {
       const since = now();
