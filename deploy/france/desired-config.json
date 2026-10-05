@@ -130,7 +130,7 @@
         "说明": "演示版的可见范围写在这里（france.sh 建的目录），由 fleet-demo-scopes 推到香港"
       },
       "FLEET_NODE_KEYS": {
-        "private": null,
+        "private": "1650843456edc28f4e8c7c6a74b6b3ea06f0e024802bb38ae93cf3e9b072a2c6",
         "说明": "看板多机（全仓审查第 1 路）：收别的环境（本机 WSL）推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值。还没记指纹：第一次在法国跑 fleet-api node-key new local 贴进去之后，用法国自己的指纹钥匙算好再把这里的 null 换成指纹（docs/ops.md「接上法国看板」）。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
       },
       "FLEET_NODE_REPORT_URL": {
