@@ -67,6 +67,6 @@ Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型�
 
 切换不改变正在运行的回合，下一回合才应用；自有起的进程里没有平台网关时当场切平台做不到，启动器退回该消息并明说原因和办法（日志 `event=refuse-switch`），不杀会话、不悄悄仍走自有；第一次从旧安装迁移仍要等所有 Claude 回合空闲。平台令牌/网关失效后由调用方重新建立接入，不用自有额度兜底。
 
-测试 runner 上的 Mac 协议与进程树验证不等于用户 Mac 的 GUI 接入或服务端账单验收。实际完成程度始终以 [进度](PROGRESS.md) 中的证据为准（2026-10-02 那几节的证据已搬到 [归档页](archive/progress-2026-10-02.md)）。
+测试 runner 上的 Mac 协议与进程树验证不等于用户 Mac 的 GUI 接入或服务端账单验收。实际完成程度始终以 [归档页](archive/progress-2026-10-02.md) 里 2026-10-02 那几节的证据和之后的 PR 为准。
 
 诊断日志在 Windows `%LOCALAPPDATA%\reclaude-mirasim\launch.log`、Mac `~/Library/Caches/reclaude-mirasim/launch.log`、Linux `~/.cache/reclaude-mirasim/launch.log`，只记录版本、会话 ID、来源、generation 与失败原因，不记录认证字段，不占 stdout。
