@@ -97,7 +97,7 @@
     "release.env": {
       "FLEET_SERVICES": {
         "value": "fleet-engine fleet-api",
-        "说明": "登记的差别：法国 2026-09-29 起临时只留 fleet-api（创始人要求关闭引擎、不再派单，见法国档这一项的说明）；本机演练环境（fleet-local）继续带引擎，演练要用。法国撤回后这条差别删掉。"
+        "说明": "本机演练环境（fleet-local）带引擎，演练要用；法国 2026-10-05 起也带引擎（待命：各项目「让 AI 接活」发版后默认关，创始人点开才派活），两边现在一样，不再有登记的差别。"
       },
       "FLEET_DOMAIN": {
         "value": "fleet-local.invalid",

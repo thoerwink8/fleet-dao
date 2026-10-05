@@ -863,7 +863,7 @@ async function deployStep(io, st, now) {
  * - 部署 = release.sh 迁移 + 切版本 + 健康检查（不过自动退回）；
  * - 恢复派活 = release.sh 切完撤掉排空请求（引擎下一眼就接着派）+ 新引擎起来接管在跑的会话。
  *
- * 引擎关着时（法国现在 FLEET_SERVICES=fleet-api，没有 fleet-engine；见 deploy/france/desired-config.json）这四步
+ * 引擎关着时（FLEET_SERVICES 里没有 fleet-engine：法国 2026-09-29 到 2026-10-05 关过，之后改成待命、引擎开着；见 deploy/france/desired-config.json）这四步
  * **一步都没跑**：这里照实写「引擎关着，跳过」，返回 engineOn:false——绝不假装做过（AGENTS.md「底线」）。
  * 引擎开着时这四步由 release.sh 真做，结果在它的日志和退出码里（这里不重复判，只说明它在哪）。
  *
