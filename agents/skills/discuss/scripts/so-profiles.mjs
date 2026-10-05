@@ -1,5 +1,5 @@
 // second-opinion.mjs 拆出来的：各家执行体的档案、按作者族排候选、主审连不上换下一家。
-import { NotChecked, Stalled } from './so-common.mjs';
+import { NotChecked, RetryableStart, Stalled } from './so-common.mjs';
 import { NotInstalled } from './tools.mjs';
 
 /** @typedef {import('./so-common.mjs').Profile} Profile */
@@ -114,14 +114,49 @@ export function discussionProfiles(o = {}) {
 export function prProfiles(o) {
   return discussionProfiles(o);
 }
+/** 启动没成、可重试的 incomplete（中继撞上状态库补数据，见 RetryableStart）：同一家等多久、最多重试几次。 */
+const START_RETRY_WAIT_MS = 30_000;
+const MAX_START_RETRIES = 2;
+/** @param {number} ms */
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 跑一家；撞上「启动没成」就等 START_RETRY_WAIT_MS 在同一家重新起会话，最多 MAX_START_RETRIES 次，再不行（或整轮预算不够等了）
+ * 把最后那个错抛回去，由 withFallback 当没查成换下一家。别的错一律原样抛。
+ * @param {Profile} p
+ * @param {string} who
+ * @param {(p: Profile, remainingMs: number | undefined) => Promise<SessionResult>} run
+ * @param {number | undefined} remainingMs
+ * @param {number | null} deadline
+ * @param {Log} log
+ * @param {(ms: number) => Promise<void>} sleep
+ * @returns {Promise<SessionResult>}
+ */
+async function runRetryingStart(p, who, run, remainingMs, deadline, log, sleep) {
+  let left = remainingMs;
+  for (let retry = 0; ; retry++) {
+    try {
+      return await run(p, left);
+    } catch (e) {
+      if (!(e instanceof RetryableStart) || retry >= MAX_START_RETRIES) throw e;
+      if (deadline !== null && deadline - Date.now() <= START_RETRY_WAIT_MS) throw e;
+      log(
+        `${who} 启动没成（${e.message.slice(0, 160)}），${START_RETRY_WAIT_MS / 1000} 秒后在同一家重试（第 ${retry + 1}/${MAX_START_RETRIES} 次）`,
+      );
+      await sleep(START_RETRY_WAIT_MS);
+      left = deadline === null ? undefined : deadline - Date.now();
+    }
+  }
+}
+
 /**
  * @param {Profile[]} chain
  * @param {Log} log
  * @param {(p: Profile, remainingMs: number | undefined) => Promise<SessionResult>} run
- * @param {{ budgetMs?: number | undefined }} [opts]
+ * @param {{ budgetMs?: number | undefined, sleep?: (ms: number) => Promise<void> }} [opts]
  * @returns {Promise<SessionResult & { profile: Profile }>}
  */
-export async function withFallback(chain, log, run, { budgetMs } = {}) {
+export async function withFallback(chain, log, run, { budgetMs, sleep = defaultSleep } = {}) {
   /** @type {string[]} */
   const misses = [];
   const deadline = budgetMs !== undefined && Number.isFinite(budgetMs) ? Date.now() + budgetMs : null;
@@ -133,7 +168,7 @@ export async function withFallback(chain, log, run, { budgetMs } = {}) {
       break;
     }
     try {
-      const r = await run(p, remainingMs);
+      const r = await runRetryingStart(p, who, run, remainingMs, deadline, log, sleep);
       if (misses.length) r.fallbackNote = `主审连不上换了人：${misses.join('；')}`;
       return { ...r, profile: p };
     } catch (e) {
