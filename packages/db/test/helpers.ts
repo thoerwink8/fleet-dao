@@ -14,8 +14,6 @@ import {
   routingCatalog,
   routingPurposeModels,
   sessionRuns,
-  stagePolicies,
-  stagePolicyRoutes,
   subtasks,
   tasks,
 } from '../src/schema/index.ts';
@@ -84,23 +82,6 @@ export async function addRoute(
     upstreamModel: r.upstreamModel ?? null,
     upstreamAliases: r.upstreamAliases ?? [],
   });
-}
-
-/**
- * 往旧的按阶段平铺表（stage_policies / stage_policy_routes）里塞一条顺序。只在「这张表已经没人读了」的用例里用：
- * 选路、探针都不该理它（#574/#754）。表本身和库里的旧行还在，等只放迁移的那一步删掉（#754 第 2 个 PR）。
- */
-export async function setStageOrder(
-  db: Db,
-  stage: (typeof stagePolicies.$inferInsert)['stage'],
-  routeIds: string[],
-) {
-  await db.insert(stagePolicies).values({ stage }).onConflictDoNothing();
-  if (routeIds.length > 0) {
-    await db
-      .insert(stagePolicyRoutes)
-      .values(routeIds.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
-  }
 }
 
 /**

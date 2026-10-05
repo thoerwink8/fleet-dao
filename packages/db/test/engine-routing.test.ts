@@ -20,7 +20,6 @@ import {
   MIN,
   NOW,
   setRoutingLayers,
-  setStageOrder,
 } from './helpers.ts';
 
 let t: TestDb;
@@ -270,10 +269,8 @@ describe('saveTaskSnapshot', () => {
 describe('routeFactsForPurpose（路由两层，#574）', () => {
   const fresh = { reading: 'measured' as const, readAt: ago(MIN) };
 
-  it('【故意造出的失败】用途没配模型顺序：configured=false、problems 写明，不按 id 乱挑；旧的阶段顺序不再算数', async () => {
+  it('【故意造出的失败】用途没配模型顺序：configured=false、problems 写明，不按 id 乱挑', async () => {
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    // 旧的平铺表里给 research 排了它：选路已经不读这张表
-    await setStageOrder(t.db, 'research', ['r1']);
     expect(await routeFactsForPurpose(t.db, 'research', { now: NOW })).toEqual({
       purpose: 'research',
       configured: false,

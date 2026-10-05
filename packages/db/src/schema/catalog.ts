@@ -159,44 +159,6 @@ export const routes = pgTable(
 );
 
 /**
- * 每个阶段类型一行；顺序在 stage_policy_routes。旧的平铺结构（#574 换成下面两张路由两层的表）：没人再按它派路由，
- * 写它读它的代码全删了（#754）——驾驶舱那个改顺序接口、目录装载器、种子、实时推送的名单一起清掉，「换路由」也不再
- * 按它判。这两张表只剩建表语句和库里的旧行，等只放迁移的一步删掉（#754 第 2 个 PR，删数据要创始人点头）；
- * 保留这两条 pgTable 声明就是为了那一步能生成删表迁移（schema-drift.test.ts 逐条比对）。
- */
-export const stagePolicies = pgTable('stage_policies', {
-  stage: stageKind('stage').primaryKey(),
-  /** 创始人手动钉住的顺序，AI 帅位不改。 */
-  pinned: boolean('pinned').notNull().default(false),
-  /** 目录装载器给这个阶段排过初始顺序（或接手了库里已有的顺序）的时刻。有值之后装载器再也不动这个阶段。 */
-  catalogAppliedAt: timestamp('catalog_applied_at', tz),
-});
-
-export const stagePolicyRoutes = pgTable(
-  'stage_policy_routes',
-  {
-    stage: stageKind('stage')
-      .notNull()
-      .references(() => stagePolicies.stage, { onDelete: 'cascade' }),
-    routeId: text('route_id')
-      .notNull()
-      .references(() => routes.id),
-    /** 从 0 起，越小越先用。 */
-    position: integer('position').notNull(),
-    /**
-     * 调度台上这个阶段里的开关：关着的照样挂在顺序里，但不派。
-     * 没有默认值：重写顺序的地方（驾驶舱拖动排序、目录装载器）必须逐条带上，漏带就插不进去，不会悄悄全打开。
-     */
-    enabled: boolean('enabled').notNull(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.stage, t.routeId] }),
-    unique('stage_policy_routes_stage_position_unique').on(t.stage, t.position),
-    check('stage_policy_routes_position_nonneg', sql`${t.position} >= 0`),
-  ],
-);
-
-/**
  * 路由两层的上层「用途 → 模型顺序」（#574，specs/574-路由两层DB）：每个用途（阶段类型）一串模型，越靠前越先用。
  * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine-route-facts.ts 的 routeFactsForPurpose）；发布时由仓里的默认骨架
  * 只补缺装进来（routing-apply.ts）。两层没有「钉住」这一列，选路一律按没钉住算。
