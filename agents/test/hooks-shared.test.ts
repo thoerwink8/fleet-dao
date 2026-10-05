@@ -43,6 +43,9 @@ const pre = await load<{
   ): { block: boolean; message: string } | null;
 }>('pretool.mjs');
 
+/** 起真的 git、node 进程的用例：Windows 上一个 git 要几秒，几组测试并行时默认 5 秒会误红 */
+const SLOW_MS = 30_000;
+
 const made: string[] = [];
 const temp = (name: string) => {
   const d = mkdtempSync(join(tmpdir(), `hooks-shared-${name}-`));
@@ -78,10 +81,15 @@ describe('git-run.mjs：钩子跑 git 只有这一份', () => {
     expect(run.gitOk(r)).toBe(false);
     expect(r.status).toBe(128);
     expect(run.gitBroken(r)).toBe(false);
-  });
+  }, SLOW_MS);
 
   it('起不来、超时、没退出码、Windows 缺 DLL 的大退出码都算没跑起来，原因说得出', () => {
-    const enoent: R = { status: null, stdout: '', stderr: '', error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }) };
+    const enoent: R = {
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }),
+    };
     expect(run.gitBroken(enoent)).toBe(true);
     expect(run.gitWhy(enoent)).toBe('起不来：spawnSync git ENOENT');
     const dll: R = { status: 3221225781, stdout: '', stderr: '' };
@@ -105,7 +113,7 @@ describe('git-run.mjs：钩子跑 git 只有这一份', () => {
     expect(g(HOOKS, ['--version']).timeoutMs).toBe(20_000);
     expect(g(HOOKS, ['--version'], { direct: true }).timeoutMs).toBe(30_000);
     expect(g(HOOKS, ['--version'], { timeoutMs: 25_000 }).timeoutMs).toBe(25_000);
-  });
+  }, SLOW_MS);
 });
 
 describe('原来各写一份的口径（R4）', () => {
@@ -183,7 +191,7 @@ describe('欠账文件坏了不再悄悄当没欠（S8）', () => {
     });
     expect(r.stderr).toContain('坏了（不是 JSON）');
     expect(r.status).toBe(0);
-  }, 30_000);
+  }, SLOW_MS);
 });
 
 describe('起子代理前取远端那一步自己出错，不再整段吞掉（S9）', () => {
