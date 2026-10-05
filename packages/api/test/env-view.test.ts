@@ -2,7 +2,7 @@
 // 语义（怎么分项、读不到怎么写、一项坏不连累别的）在这里按内存版测；契约对账在 web-routes-contract.test.ts。
 // 做完的标准（方案 §5 片 1）：法国和 WSL 两种环境各项分别返回；故意让一项读失败，只那一项写「没查成 + 原因」；
 // 法国引擎关着显示「关着（临时调整）」不是红。
-import { EnvResponseSchema, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
+import { EnvResponseSchema, MeResponse, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { type EnvFact, envFacts, fact } from '../src/env-view.ts';
@@ -52,6 +52,19 @@ describe('/api/env（内存版）', () => {
     const body = EnvResponseSchema.parse(await res.json());
     expect(body.name.name).toBe('认不出');
     expect(body.name.problem).toContain('FLEET_MACHINE_NAME');
+  });
+
+  it('顶栏徽标的名字跟着 /api/me 带回（不为一个名字去拉整份环境页）；没配时同样写「认不出」并给原因', async () => {
+    const getMe = async (h: Pick<Harness, 'cockpit' | 'login'>) => {
+      const { cookie } = await h.login();
+      const res = await h.cockpit.request(WEB_API_PREFIX + WebRoutes.me.path, { headers: { cookie } });
+      expect(res.status).toBe(200);
+      return MeResponse.parse(await res.json());
+    };
+    expect((await getMe(harness())).env).toEqual({ name: '测试机' });
+    const unnamed = await getMe(harness({ config: { machineName: null } }));
+    expect(unnamed.env.name).toBe('认不出');
+    expect(unnamed.env.problem).toContain('FLEET_MACHINE_NAME');
   });
 
   it('六项都在：引擎、在用版本、在跑的会话、池占用、健康、最近拉单；每一项各自带 ok', async () => {

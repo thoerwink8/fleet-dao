@@ -1493,7 +1493,11 @@ export function createSeed(now: number): MockState {
   ];
 
   const state: MockState = {
-    me: { user: { id: 'u-lan', displayName: '阿岚', role: 'founder' }, csrfToken: 'mock-csrf' },
+    me: {
+      user: { id: 'u-lan', displayName: '阿岚', role: 'founder' },
+      csrfToken: 'mock-csrf',
+      env: { name: '假数据' },
+    },
     repos: [
       { id: 'r-orbit', owner: 'acme', name: 'orbit', defaultBranch: 'main', testCommand: 'pnpm check' },
       {

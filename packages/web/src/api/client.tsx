@@ -169,6 +169,7 @@ export const keys = {
   releaseVersion: ['release-version'] as const,
   demoLinks: ['demo-links'] as const,
   env: ['env'] as const,
+  home: ['home'] as const,
 };
 
 // ---------- 读 ----------
@@ -332,7 +333,7 @@ export function useReleaseVersion() {
 }
 
 /**
- * 环境页和多处徽标共用的一次读取（#820 片 1）：这一台环境现在怎样。
+ * 环境页的读取（#820 片 1）：这一台环境现在怎样。顶栏徽标不用它（名字跟着 /me 带回），只有开着环境页时才拉。
  * 只读、不跨环境。演示版没有这一页（导航不给 module、路由表也不放），所以这里只在正式驾驶舱里取；
  * 每分钟重拉一次——健康、在跑的会话这些没有实时推送。
  */
@@ -352,7 +353,7 @@ export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
  */
 export function useHome(): { data: HomeState } {
   const api = useApi();
-  const query = useQuery({ queryKey: ['home'], queryFn: () => api.home() });
+  const query = useQuery({ queryKey: keys.home, queryFn: () => api.home() });
   if (query.isPending) return { data: { status: 'loading' } };
   if (query.error)
     return { data: { status: 'error', error: query.error, retry: () => void query.refetch() } };
@@ -491,19 +492,23 @@ export function useUpdateCredentials() {
  * 推送只说「哪张表的哪一行变了」，前端按表名决定重拉什么。表名单在 shared/realtime.ts：
  * 名单里加了表而这里没写，tsc 当场报错。认不出的表一律全量重拉——宁可多拉一次，也不把「漏收」当成「没变化」。
  * 不在名单里的表（定时任务、路由、模型……）没有推送，对应页面靠定时重拉。
+ * 主页（keys.home）一份读取聚齐了需求、通知、在跑的会话、三段流水、额度和渠道：这几张表哪张变了都要作废它——主页不定时重拉、
+ * 切回窗口也不重拉（root.tsx），漏写一张，那一块就停在打开页面时的样子。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
-  tasks: [['board'], ['task']],
+  tasks: [['board'], ['task'], keys.home],
   subtasks: [['board'], ['task']],
-  session_runs: [['board'], ['task'], ['pools']],
+  session_runs: [['board'], ['task'], ['pools'], keys.home],
+  // 三段流水（scope / manual / verify）：主页的流水线图和任务详情的流水都读它
+  runs: [keys.home, ['task']],
   progress_events: [['board'], ['task']],
   asks: [['board'], ['task'], ['legacy-asks']],
-  // approvals 还没有专门的页面查询键；按它挂在任务 / 子任务上，先失效这两处。
-  approvals: [['board'], ['task']],
-  // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
-  quota_windows: [['pools'], ['routing-layers']],
-  channels: [['routing'], ['pools'], ['routing-layers']],
-  notifications: [['notifications']],
+  // approvals 还没有专门的页面查询键；按它挂在任务 / 子任务上，先失效这两处，主页「要你拍的」也跟着重拉。
+  approvals: [['board'], ['task'], keys.home],
+  // 池本身改了（pools 的触发器，0002）也报成 quota_windows，所以 pools 不单列。
+  quota_windows: [['pools'], ['routing-layers'], keys.home],
+  channels: [['routing'], ['pools'], ['routing-layers'], keys.home],
+  notifications: [['notifications'], keys.home],
   audit_log: [['audit']],
   settings: [['settings']],
 };

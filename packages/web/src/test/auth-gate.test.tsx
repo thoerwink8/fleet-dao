@@ -12,7 +12,11 @@ import { renderApp } from './harness';
 
 afterEach(cleanup);
 
-const ME: Me = { user: { id: 'u-founder', displayName: '创始人', role: 'founder' }, csrfToken: 'tok-1' };
+const ME: Me = {
+  user: { id: 'u-founder', displayName: '创始人', role: 'founder' },
+  csrfToken: 'tok-1',
+  env: { name: '测试机' },
+};
 
 /** 页面本体。 */
 function Page() {

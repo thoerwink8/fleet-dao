@@ -51,11 +51,18 @@ test.describe('环境页', () => {
     await expect(page.getByText('没查成').first()).toBeVisible();
   });
 
-  test('顶栏常驻环境名徽标，点开进环境页', async ({ page }) => {
+  test('顶栏常驻环境名徽标（名字跟着 /api/me 来，不在别的页拉整份 /api/env），点开进环境页', async ({
+    page,
+  }) => {
+    const envReads: string[] = [];
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname === '/api/env') envReads.push(req.url());
+    });
     await page.goto('/');
     const badge = page.locator('[data-env-badge]');
     await expect(badge).toBeVisible();
     await expect(badge).toContainText('本机');
+    expect(envReads, '主页上顶栏徽标不该去拉 /api/env（每次都跑全套健康检查）').toEqual([]);
     await badge.click();
     await expect(page).toHaveURL(/\/env$/);
     await expect(page.getByRole('heading', { name: /本机/ })).toBeVisible();

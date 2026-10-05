@@ -37,6 +37,16 @@ import {
 } from './session.ts';
 import { pkceChallenge, randomToken, safeEqual } from './tokens.ts';
 
+/**
+ * 这一台环境的名字（顶栏徽标用，跟着 /me 带回）：没配就照实给「认不出」+ 原因，不猜成某一台。
+ * 环境页（cockpit.ts 的 /env）标题用的是同一个判法。
+ */
+export function envNameOf(config: Pick<Config, 'machineName'>): z.input<typeof MeResponse>['env'] {
+  return config.machineName
+    ? { name: config.machineName }
+    : { name: '认不出', problem: '这台后端没配环境名（api.env 的 FLEET_MACHINE_NAME）' };
+}
+
 /** 飞书网关的请求没有登录会话，也用不着 CSRF 令牌，给空串。 */
 export function meBody(
   config: Config,
@@ -46,6 +56,7 @@ export function meBody(
   return {
     user: { id: user.id, displayName: user.displayName, role: user.role, avatarUrl: user.avatarUrl },
     csrfToken: session ? csrfTokenFor(config, session.sid) : '',
+    env: envNameOf(config),
   };
 }
 

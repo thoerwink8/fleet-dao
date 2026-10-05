@@ -6,7 +6,11 @@ import { describe, expect, test, vi } from 'vitest';
 import { ApiError } from './client';
 import { createHttpApi } from './http';
 
-const ME = { user: { id: 'u-a', displayName: '甲', role: 'founder' }, csrfToken: 'tok-1' };
+const ME = {
+  user: { id: 'u-a', displayName: '甲', role: 'founder' },
+  csrfToken: 'tok-1',
+  env: { name: '测试机' },
+};
 const err = (status: number, code: string, message: string, details?: unknown) => ({
   status,
   body: { error: { code, message, ...(details === undefined ? {} : { details }) } },
