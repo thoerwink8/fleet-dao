@@ -5,6 +5,9 @@
 // 2. 开了无人值守（unattended.mjs on，创始人 2026-10-03「选 a」）才许拦：输出 decision:block；做完、要他拍板、暂停、过期、
 //    状态读不了、连着没干活，都放行，绝不把人困住。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
+// 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
+// 超时放这么宽只是兜底——挡的是「机器真的卡住了」，不是拿来盖住「一条测试起了太多子进程」：子进程的数量那边已经按规矩需要的最少次数收过（见下面那条）。
+// 同目录的先例：discuss.test.ts 的 SLOW、session-start.test.ts 的 SLOW、progress-structure.test.ts 的 SLOW。
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,6 +16,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const HOOK = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
+
+/** 这份文件每条都起真 node 子进程（本机满载时一个 0.4 秒上下），默认 5 秒太紧：60 秒兜底（同 discuss.test.ts 的 SLOW） */
+const SLOW = { timeout: 60_000 };
 
 const made: string[] = [];
 afterEach(() => {
@@ -55,7 +61,7 @@ function parseSystemMessageOnly(stdout: string): void {
   expect(parsed).toEqual({ systemMessage: expect.any(String) });
 }
 
-describe('规矩：没开无人值守时，Stop 钩子只提醒、不拦、不接着聊', () => {
+describe('规矩：没开无人值守时，Stop 钩子只提醒、不拦、不接着聊', SLOW, () => {
   it('仓根有像临时文件的：退出码 0，systemMessage 提醒，没有 decision、没有 hookSpecificOutput', () => {
     const dir = repoWithStray();
     const r = run(JSON.stringify({ hook_event_name: 'Stop', cwd: dir, stop_hook_active: false }));
@@ -123,7 +129,7 @@ function stop(env: NodeJS.ProcessEnv, extra: Record<string, unknown> = {}) {
 }
 const blocked = (stdout: string) => stdout.includes('"decision":"block"');
 
-describe('规矩：开着无人值守才拦，其余一律放行', () => {
+describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
   it('开着：Stop 输出 decision:block 和怎么结束的办法，退出码仍是 0；stop_hook_active 为真也照样拦（那是我们自己挡出来的）', () => {
     const env = isolatedEnv(temp('state'), SID);
     expect(cli(['on'], env).status).toBe(0);
@@ -166,12 +172,16 @@ describe('规矩：开着无人值守才拦，其余一律放行', () => {
     expect(cli(['status'], env).stdout).toContain('paused');
   });
 
-  it('两次挡之间调过工具（PreToolUse 记了一笔）：不算空转，可以一直挡', () => {
+  it('两次挡之间调过工具（PreToolUse 记了一笔）：不算空转，可以一直挡（证明到连续 3 次空转的阈值之后仍然挡）', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
     cli(['on'], env);
     const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
-    for (let i = 0; i < 6; i += 1) {
+    // 为什么是 4 次：unattended.mjs 的 MAX_IDLE_BLOCKS 是 3，判的是 idle >= 3 才放行，所以「连着没调工具」的第 4 次就会被放行（上一条测的就是它）。
+    // 这条要在「同一位置、但中间调过工具」时仍然挡——挡到第 4 次就正好越过那条阈值：再多是重复同一条证据，只会白起子进程（#718）。
+    // 每条循环起 1 个 Stop + 1 个 PreToolUse 子进程，本机满载时一个 0.4 秒上下，所以次数按规矩需要的最少来。
+    const ROUNDS = 4;
+    for (let i = 0; i < ROUNDS; i += 1) {
       expect(blocked(stop(env).stdout), `第 ${i + 1} 次`).toBe(true);
       const t = spawnSync(process.execPath, [PRETOOL], {
         input: JSON.stringify({
@@ -185,6 +195,11 @@ describe('规矩：开着无人值守才拦，其余一律放行', () => {
       });
       expect(t.status).toBe(0);
     }
+    // 光看「每次都挡」还可能是空转计数压根没动：直接读状态，证明「调过工具」那一笔确实把空转清零了、也没转成暂停
+    const s = JSON.parse(readFileSync(join(dir, `${SID}.json`), 'utf8'));
+    expect(s.state).toBe('on');
+    expect(s.idle).toBe(0);
+    expect(s.totalBlocks).toBe(ROUNDS);
   });
 
   it('故意造出失败：状态文件坏了 / 读不了——放行，并明说是状态读不了（不装作正常收尾，也不困住人）', () => {
