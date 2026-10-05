@@ -12,6 +12,8 @@
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 4. 会话开在 fleet-dao 里时：合并后待补审的 PR（先合后审，创始人 2026-10-03「1+2+3」），有待补审的或没查成才说一行；
 //    限时 AFTER_MERGE_MS，超时、网络不通明说没查成，不当成「没有」。
+// 5. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
+//    gh 没查成说一行没查成，不当成「没有」。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
@@ -615,6 +617,55 @@ export function checkAfterMerge({ cwd, git, run, fetch, mirror = null }) {
   return lines;
 }
 
+/**
+ * 第 5 件：绿了没挂自动合并的 PR（全仓审查第 2 路清单 7 号；pnpm pr:open 是必经那一步，这里只是兜底——法国引擎的
+ * 每小时对账关着）。查法和判路径不在这里另写：起 packages/conventions/src/bin/pr-idle.ts（不带第三方依赖，同步专用检出
+ * 没装 node_modules 也跑得起来），优先用同步专用检出里那份，没有再用会话所在检出里的；硬超时 IDLE_PR_MS。
+ */
+export const IDLE_PR_MS = 8_000;
+const IDLE_SCRIPT = join('packages', 'conventions', 'src', 'bin', 'pr-idle.ts');
+const IDLE_NOT_CHECKED = '绿了没挂自动合并的 PR 没查成';
+
+/** 在仓根起 pr-idle.ts：{ status, stdout, stderr, error, timeoutMs }，超时由 spawnSync 杀掉 */
+export function idlePrRunner(timeoutMs = IDLE_PR_MS) {
+  return (script, repo) => {
+    const r = spawnSync(process.execPath, [script], {
+      cwd: repo,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
+  };
+}
+
+/** 参数同 checkAfterMerge；返回要说的几行：没有、不是 fleet-dao 都不出声 */
+export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (!ok(top) || !top.stdout.trim()) return [];
+  const root = top.stdout.trim();
+  const url = git(root, ['config', '--get', 'remote.origin.url']);
+  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return [];
+  if (fetch && fetch.ok === false) return [`${IDLE_NOT_CHECKED}：取不到远端（${fetch.why}）。`];
+  const script = [mirror, join(root, IDLE_SCRIPT)].find((s) => s && existsSync(s));
+  if (!script) return [`${IDLE_NOT_CHECKED}：找不到 ${IDLE_SCRIPT.replaceAll('\\', '/')}。`];
+  const r = run(script, root);
+  if (r.error || r.status !== 0) return [`${IDLE_NOT_CHECKED}：${why(r)}。`];
+  let p;
+  try {
+    p = JSON.parse(r.stdout);
+  } catch {
+    return [`${IDLE_NOT_CHECKED}：pr-idle.ts 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
+  }
+  if (!Array.isArray(p?.idle) || !p.idle.every((x) => typeof x?.number === 'number'))
+    return [`${IDLE_NOT_CHECKED}：pr-idle.ts 的输出少了 idle 列表。`];
+  if (p.idle.length === 0) return [];
+  return [
+    `绿了没挂自动合并的 PR ${p.idle.length} 个：${prList(p.idle)}（我开的、没碰改标准；挂上：gh pr merge <号> --auto --squash，以后开 PR 用 pnpm pr:open）。`,
+  ];
+}
+
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
 export function sessionStart({
   cwd,
@@ -626,10 +677,12 @@ export function sessionStart({
   sessionId = null,
   unattendedDir = stateDir(),
   afterMerge = afterMergeRunner(),
+  idlePr = idlePrRunner(),
 }) {
   const here = checkHere(cwd, git);
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
-  const mirror = source ? join(source.syncDirIn(home), SO_SCRIPT) : null;
+  const syncDir = source ? source.syncDirIn(home) : null;
+  const mirror = syncDir ? join(syncDir, SO_SCRIPT) : null;
   return [
     ...(here.line ? [here.line] : []),
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
@@ -639,6 +692,13 @@ export function sessionStart({
     ...sweepWorktrees(cwd, localGit),
     ...workerLines(home, now),
     ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
+    ...checkIdlePrs({
+      cwd,
+      git: localGit,
+      run: idlePr,
+      fetch: here.fetch,
+      mirror: syncDir ? join(syncDir, IDLE_SCRIPT) : null,
+    }),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
 }
