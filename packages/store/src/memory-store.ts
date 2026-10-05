@@ -14,7 +14,6 @@ import {
   type SegmentRun,
   type SessionRun,
   type StageKind,
-  type Step,
   type Subtask,
   type Task,
   taskWorkflowId,
@@ -52,6 +51,7 @@ import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
+import { planSteps } from './plan-logic.ts';
 import type {
   AgentSession,
   AskRecord,
@@ -71,7 +71,6 @@ import type {
   SegmentRunRecord,
   SettingRecord,
   Store,
-  TimelineRecord,
   User,
 } from './ports.ts';
 import {
@@ -218,12 +217,6 @@ export interface MemoryStoreOptions {
   onChange?: (table: RealtimeTable, id: string) => void;
 }
 
-/** 时间线默认不放量大的动作流（和 packages/db 的 DEFAULT_TIMELINE_PROGRESS_KINDS 一致）。 */
-const QUIET_PROGRESS_KINDS: readonly ProgressKind[] = ['tool', 'file'];
-
-/** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
-const seq15 = (n: string | number): string => String(n).padStart(15, '0');
-
 /** 列环境不带快照本体。 */
 const summaryOf = ({ snapshot: _snapshot, ...summary }: NodeReportRecord) => summary;
 
@@ -345,14 +338,7 @@ export function createMemoryStore(
   }
 
   function planOf(record: ProgressRecord): RunPlan {
-    const raw = (record.payload as { steps?: unknown }).steps;
-    const steps: Step[] = (Array.isArray(raw) ? raw : [])
-      .filter(
-        (s): s is { title: string; state: Step['state'] } =>
-          typeof s === 'object' && s !== null && typeof s.title === 'string' && typeof s.state === 'string',
-      )
-      .map((s, index) => ({ index, title: s.title, state: s.state }));
-    return { steps, updatedAt: record.at };
+    return { steps: planSteps(record.payload), updatedAt: record.at };
   }
 
   /** 占用凭据就是这次占用的时刻（和库里的 claimed_at 一样）：接管会把它改新，旧凭据就对不上了。 */
@@ -504,107 +490,6 @@ export function createMemoryStore(
       const say = latestProgress(runId, 'say');
       const text = (say?.payload as { text?: unknown } | undefined)?.text;
       return say && typeof text === 'string' ? { text, at: say.at } : null;
-    },
-    async listTimeline(taskId, page) {
-      parseCursor(page.cursor);
-      const task = data.tasks.find((t) => t.id === taskId);
-      if (!task) return { items: [] };
-      const runs = data.runs.filter((r) => r.taskId === taskId);
-      const runOf = new Map(runs.map((r) => [r.id, r]));
-      const targets = new Set([
-        `task:${taskId}`,
-        ...data.subtasks.filter((s) => s.taskId === taskId).map((s) => `subtask:${s.id}`),
-      ]);
-      const ms = (from?: string, to?: string) => (from && to ? Date.parse(to) - Date.parse(from) : undefined);
-      const items: TimelineRecord[] = [
-        ...data.stateChanges
-          .filter((c) => c.taskId === taskId)
-          .map((c) => ({
-            id: `state:${seq15(c.id)}`,
-            at: c.at,
-            source: 'engine' as const,
-            kind: 'state',
-            subtaskId: c.entity === 'subtask' ? c.entityId : undefined,
-            payload: { entity: c.entity, from: c.from, to: c.to },
-          })),
-        ...runs.flatMap((r) => [
-          {
-            id: `run:${r.id}:1-queued`,
-            at: r.queuedAt,
-            source: 'engine' as const,
-            kind: 'run_queued',
-            runId: r.id,
-            subtaskId: r.subtaskId,
-            payload: { stage: r.stage, routeId: r.routeId, whyRoute: r.whyRoute },
-          },
-          ...(r.startedAt
-            ? [
-                {
-                  id: `run:${r.id}:2-started`,
-                  at: r.startedAt,
-                  source: 'engine' as const,
-                  kind: 'run_started',
-                  runId: r.id,
-                  subtaskId: r.subtaskId,
-                  payload: { queueMs: ms(r.queuedAt, r.startedAt) },
-                },
-              ]
-            : []),
-          ...(r.endedAt && r.outcome
-            ? [
-                {
-                  id: `run:${r.id}:3-ended`,
-                  at: r.endedAt,
-                  source: 'engine' as const,
-                  kind: 'run_ended',
-                  runId: r.id,
-                  subtaskId: r.subtaskId,
-                  payload: { outcome: r.outcome, runMs: ms(r.startedAt, r.endedAt) },
-                },
-              ]
-            : []),
-        ]),
-        ...data.progress
-          .filter((p) => runOf.has(p.runId) && !QUIET_PROGRESS_KINDS.includes(p.kind))
-          .map((p) => ({
-            id: `progress:${seq15(p.id)}`,
-            at: p.at,
-            source: 'session' as const,
-            kind: p.kind,
-            runId: p.runId,
-            subtaskId: runOf.get(p.runId)?.subtaskId,
-            payload: p.payload,
-          })),
-        ...data.audit
-          .filter((a) => targets.has(a.target))
-          .map((a) => ({
-            id: `audit:${seq15(a.id)}`,
-            at: a.at,
-            source:
-              a.actor.kind === 'user'
-                ? ('person' as const)
-                : a.actor.kind === 'agent'
-                  ? ('session' as const)
-                  : ('engine' as const),
-            kind: a.action.split('.').at(-1) ?? a.action,
-            payload: {
-              ...(a.after && typeof a.after === 'object' ? a.after : {}),
-              reason: a.reason,
-              ok: a.ok,
-              error: a.error,
-            },
-          })),
-        ...data.notifications
-          .filter((n) => n.taskId === taskId)
-          .map((n) => ({
-            id: `notification:${n.id}`,
-            at: n.createdAt,
-            source: 'engine' as const,
-            kind: 'notification',
-            payload: { level: n.level, title: n.title },
-          })),
-      ];
-      return paginate(items, page);
     },
     async listAsks(taskId) {
       return data.asks

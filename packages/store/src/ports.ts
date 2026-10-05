@@ -134,17 +134,6 @@ export interface AskRecord {
   appliedAt?: string | undefined;
 }
 
-/** 时间线上的一条原始记录；后端按 kind 和 payload 拼白话（views.ts 的 describeTimeline）。 */
-export interface TimelineRecord {
-  id: string;
-  at: string;
-  source: 'session' | 'engine' | 'person';
-  kind: string;
-  runId?: string | undefined;
-  subtaskId?: string | undefined;
-  payload?: unknown;
-}
-
 export interface JobRecord {
   id: string;
   name: string;
@@ -337,13 +326,6 @@ export interface BoardStore {
   /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
   getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
   lastSay(runId: string): Promise<{ text: string; at: string } | null>;
-  /**
-   * 一个需求的时间线，按 (at, id) 倒序，游标翻页不重不漏。来源：状态变化（kind=state）、会话排队 / 开工 / 结束
-   * （run_queued / run_started / run_ended）、会话进度（kind 就是 ProgressKind，量大的 tool / file 不放）、
-   * target 是这个需求或它的子任务的操作记录（kind 取 action 最后一段）、挂在这个需求上的通知（notification）。
-   * memory-store.ts 是参照实现。
-   */
-  listTimeline(taskId: string, page: PageRequest): Promise<Page<TimelineRecord>>;
   listAsks(taskId: string): Promise<AskRecord[]>;
   getAsk(id: string): Promise<AskRecord | null>;
   /** 写回答，和操作记录同一事务。已经答过就不改。 */

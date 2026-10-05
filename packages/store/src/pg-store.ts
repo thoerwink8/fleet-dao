@@ -34,9 +34,7 @@ import {
   stateChanges,
   subtaskDeps,
   subtasks,
-  type TimelineEvent,
   tasks,
-  taskTimeline,
   toBan,
   toChannel,
   toModel,
@@ -50,7 +48,7 @@ import {
   toTask,
   users,
 } from '@fleet-dao/db';
-import { type ProgressKind, type Step, taskWorkflowId } from '@fleet-dao/shared';
+import { type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
@@ -71,7 +69,8 @@ import {
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
-import { nextCursorOf, pageOfSorted } from './paging.ts';
+import { nextCursorOf } from './paging.ts';
+import { planSteps } from './plan-logic.ts';
 import type {
   AskRecord,
   AuditRecord,
@@ -89,7 +88,6 @@ import type {
   RunPlan,
   SettingRecord,
   Store,
-  TimelineRecord,
   User,
 } from './ports.ts';
 import {
@@ -109,8 +107,6 @@ export interface PgStoreOptions {
 const opt = <V>(v: V | null): V | undefined => v ?? undefined;
 const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d ? d.toISOString() : undefined);
-/** 自增编号补零：和 packages/db 时间线事件编号的写法一致（按字面比较就是按数值比较）。 */
-const seq15 = (n: number) => String(n).padStart(15, '0');
 
 type UserRow = typeof users.$inferSelect;
 type AskRow = typeof asks.$inferSelect;
@@ -202,77 +198,6 @@ function toAudit(r: AuditRow): AuditRecord {
     ok: r.ok,
     error: opt(r.error),
   };
-}
-
-function planSteps(payload: unknown): Step[] {
-  const raw =
-    typeof payload === 'object' && payload !== null ? (payload as { steps?: unknown }).steps : undefined;
-  return (Array.isArray(raw) ? raw : [])
-    .filter(
-      (s): s is { title: string; state: Step['state'] } =>
-        typeof s === 'object' && s !== null && typeof s.title === 'string' && typeof s.state === 'string',
-    )
-    .map((s, index) => ({ index, title: s.title, state: s.state }));
-}
-
-/** 库里的时间线事件 → 驾驶舱的时间线记录（操作记录的 after / error 另查补上）。 */
-function timelineRecord(e: TimelineEvent, subtaskOfRun: Map<string, string | null>): TimelineRecord {
-  const base = { id: e.id, at: iso(e.at) };
-  switch (e.type) {
-    case 'state':
-      return {
-        ...base,
-        source: 'engine',
-        kind: 'state',
-        subtaskId: e.entity === 'subtask' ? e.entityId : undefined,
-        payload: { entity: e.entity, from: e.from ?? undefined, to: e.to },
-      };
-    case 'run-queued':
-      return {
-        ...base,
-        source: 'engine',
-        kind: 'run_queued',
-        runId: e.runId,
-        subtaskId: opt(e.subtaskId),
-        payload: { stage: e.stage, routeId: e.routeId, whyRoute: e.whyRoute },
-      };
-    case 'run-started':
-      return {
-        ...base,
-        source: 'engine',
-        kind: 'run_started',
-        runId: e.runId,
-        subtaskId: opt(subtaskOfRun.get(e.runId) ?? null),
-        payload: { queueMs: opt(e.queueMs) },
-      };
-    case 'run-ended':
-      return {
-        ...base,
-        source: 'engine',
-        kind: 'run_ended',
-        runId: e.runId,
-        subtaskId: opt(subtaskOfRun.get(e.runId) ?? null),
-        payload: { outcome: e.outcome, runMs: opt(e.runMs) },
-      };
-    case 'progress':
-      return {
-        ...base,
-        source: 'session',
-        kind: e.kind,
-        runId: e.runId,
-        subtaskId: opt(subtaskOfRun.get(e.runId) ?? null),
-        payload: e.payload,
-      };
-    case 'audit':
-      return {
-        ...base,
-        source: e.actorKind === 'user' ? 'person' : e.actorKind === 'agent' ? 'session' : 'engine',
-        kind: e.action.split('.').at(-1) ?? e.action,
-        payload: { reason: opt(e.reason), ok: e.ok },
-      };
-    case 'notification':
-      return { ...base, source: 'engine', kind: 'notification', payload: { level: e.level, title: e.title } };
-  }
 }
 
 export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
@@ -553,37 +478,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .limit(1);
       const text = (row?.payload as { text?: unknown } | null | undefined)?.text;
       return row && typeof text === 'string' ? { text, at: iso(row.at) } : null;
-    },
-    async listTimeline(taskId, page) {
-      const cursor = parseCursor(page.cursor);
-      if (!isUuid(taskId)) return { items: [] };
-      const timeline = await taskTimeline(db, taskId);
-      if (!timeline) return { items: [] };
-      const subtaskOfRun = new Map(timeline.runs.map((r) => [r.id, r.subtaskId]));
-      // 库给的是按 (at, id) 正序，倒过来就是倒序。
-      const all = timeline.events.map((e) => timelineRecord(e, subtaskOfRun)).reverse();
-      const { items, nextCursor } = pageOfSorted(all, cursor, page.limit);
-      // 操作记录的 after（回答原文、交活被退回的原因……）和 error 库里的时间线不带，按这一页里的编号补上。
-      const auditIds = items.filter((r) => r.id.startsWith('audit:')).map((r) => Number(r.id.slice(6)));
-      if (auditIds.length > 0) {
-        const rows = new Map(
-          (await db.select().from(auditLog).where(inArray(auditLog.id, auditIds))).map((r) => [
-            `audit:${seq15(r.id)}`,
-            r,
-          ]),
-        );
-        for (const item of items) {
-          const row = rows.get(item.id);
-          if (!row) continue;
-          item.payload = {
-            ...(row.after && typeof row.after === 'object' ? row.after : {}),
-            reason: opt(row.reason),
-            ok: row.ok,
-            error: opt(row.error),
-          };
-        }
-      }
-      return { items, nextCursor };
     },
     async listAsks(taskId) {
       if (!isUuid(taskId)) return [];
