@@ -119,6 +119,9 @@ gw_calls() { grep -cE "^($1)( |$)" "$GWD/calls"; } # 某种命令调过几次（
 # 里程碑发版后置关（dispatch_off_on_milestone）换成桩：只记哪一版发布成功后叫了它；它自己的判法在 release-dispatch.test.sh
 OFF_CALLS=()
 dispatch_off_on_milestone() { OFF_CALLS+=("${1:0:1}"); }
+# 引擎总开关发版后置关（engine_off_after_release，#1086）同样换成桩；它自己的判法在 release-engine-off.test.sh
+ENGINE_OFF_CALLS=()
+engine_off_after_release() { ENGINE_OFF_CALLS+=("${1:0:1}"); }
 health_gate() {
   if [[ "${GATE[$1]:-ok}" == ok ]]; then return 0; fi
   red "桩：${1:0:12} 健康检查不过"
@@ -164,6 +167,7 @@ check "报了红" "$((${#REDS[@]} > 0))" 1
 check "历史：C 记成不健康、B 是自动退回的" "$(events)" "a:release b:release c:release c:unhealthy b:auto-rollback "
 check "上一版跳过不健康的 C，是 A" "$(previous_sha)" "$A"
 check "C 没过健康检查：没叫置关判断（只有发布成功才叫；再发 B 那次叫了一次 B，退回 B 不算）" "${OFF_CALLS[*]}" "a b b"
+check "引擎总开关置关和项目开关同一个时机：发布成功才叫，C 没过、退回 B 都不叫" "${ENGINE_OFF_CALLS[*]}" "a b b"
 
 echo "== 一键退回：退到 A；再退一次回到 B（B 健康）"
 reset
