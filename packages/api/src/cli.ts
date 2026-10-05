@@ -4,8 +4,11 @@
 // 密码只从标准输入读，读两遍要一致：终端里不回显；从管道来就读两行。不接受命令行参数传密码（会进 shell 历史和进程列表）。
 // 只能给白名单里的人设（users 表里在用的创始人）；设了之后输错计数和锁清零，操作记录里写一条。
 //   dispatch <owner/仓名> on|off|status
+//   dispatch --all off --reason <原因>
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
+// --all off：把库里所有仓都关上（发版 release.sh 在里程碑新 tag 发布成功后调，#1050）；只许 off，不许一键全开；
+// 逐个仓走上面同一条路，已经关着的不改不记；有一个没关成就整条退出 1，说清哪几个。
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
@@ -42,7 +45,7 @@ const USAGE =
 const NODE_KEY_USAGE =
   '用法：fleet-api node-key new <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；打印一次通行证明文和要贴进 FLEET_NODE_KEYS 的哈希）';
 const DISPATCH_USAGE =
-  '用法：fleet-api dispatch <owner/仓名> on|off|status（「让 AI 接活」开关：on 打开，off 关上，status 只看）';
+  '用法：fleet-api dispatch <owner/仓名> on|off|status（「让 AI 接活」开关：on 打开，off 关上，status 只看）；fleet-api dispatch --all off --reason <原因>（所有仓都关上，原因写进操作记录）';
 
 export interface SetPasswordArgs {
   who: string;
@@ -283,6 +286,29 @@ export interface DispatchArgs {
   owner: string;
   name: string;
   action: DispatchAction;
+  /** 写进操作记录的原因；不给就记「服务器上 <谁> 跑的 fleet-api dispatch <仓> <动作>」。--all 带它来。 */
+  reason?: string | undefined;
+}
+
+export interface DispatchAllArgs {
+  reason: string;
+}
+
+const MAX_REASON = 200;
+
+/** dispatch --all off --reason <原因>：只认这一种写法（三样都要有、不多不少），认不出的一律拒，不猜。 */
+export function parseDispatchAllArgs(argv: readonly string[]): DispatchAllArgs {
+  const rest = argv.slice(1); // argv[0] 是 --all
+  const at = rest.indexOf('--reason');
+  const reason = at < 0 ? undefined : rest[at + 1];
+  const others = rest.filter((_, i) => i !== at && i !== at + 1);
+  if (others.length !== 1 || others[0] !== 'off')
+    throw new CliError(`--all 只能配 off（没有一键全开）。${DISPATCH_USAGE}`, 2);
+  if (reason === undefined || reason.trim() === '' || reason.startsWith('--'))
+    throw new CliError(`--all off 要带 --reason <原因>（写进每个仓的操作记录）。${DISPATCH_USAGE}`, 2);
+  if (reason.length > MAX_REASON)
+    throw new CliError(`--reason 太长（最多 ${MAX_REASON} 个字）。${DISPATCH_USAGE}`, 2);
+  return { reason: reason.trim() };
 }
 
 /** 操作记录里开、关这两件事的名字（定义在 shared：驾驶舱的开关按钮记同一对）；target 是 repo:<仓的编号>。 */
@@ -424,7 +450,10 @@ export async function dispatch(input: {
           actor: OPS_DISPATCH,
           action: on ? AUTO_DISPATCH_ENABLE : AUTO_DISPATCH_DISABLE,
           target,
-          reason: `服务器上 ${operator} 跑的 fleet-api dispatch ${label} ${args.action}`,
+          reason:
+            args.reason === undefined
+              ? `服务器上 ${operator} 跑的 fleet-api dispatch ${label} ${args.action}`
+              : `${args.reason}（服务器上 ${operator} 跑的 fleet-api dispatch ${label} ${args.action}）`,
           via: 'engine',
           ok: true,
         },
@@ -450,6 +479,37 @@ export async function dispatch(input: {
   );
   if (!entry) throw new CliError(`${wrote}读回时库里找不到这条操作记录：跑 status 核对`);
   return `已${on ? '打开' : '关上'}：${describeSwitch(label, back.autoDispatchSince)}\n${describeChange(entry)}`;
+}
+
+/**
+ * fleet-api dispatch --all off：库里每个仓各走一遍上面的 dispatch（同一个写入口、同一个读回），一个仓失败不拦着别的仓，
+ * 最后有失败的就整条抛出、说清哪几个没关成。没有一个仓也算做完（打印说明），但要说出来，不假装关了什么。
+ */
+export async function dispatchAll(input: {
+  store: Store;
+  args: DispatchAllArgs;
+  operator: string;
+}): Promise<string> {
+  const { store, args, operator } = input;
+  const all = await dbStep('没改成：读仓列表时', () => store.listRepos());
+  if (all.length === 0) return '库里一个仓都没有，没有要关的';
+  const lines: string[] = [];
+  const failed: string[] = [];
+  for (const r of all) {
+    try {
+      const one: DispatchArgs = { owner: r.owner, name: r.name, action: 'off', reason: args.reason };
+      lines.push(await dispatch({ store, args: one, operator }));
+    } catch (err) {
+      failed.push(`${r.owner}/${r.name}：${err instanceof CliError ? err.message : errMessage(err)}`);
+    }
+  }
+  if (failed.length > 0) {
+    const done = lines.length > 0 ? `\n已处理的：\n${lines.join('\n')}` : '';
+    throw new CliError(
+      `${all.length} 个仓里 ${failed.length} 个没关成（别的仓已照常处理）：\n${failed.join('\n')}${done}`,
+    );
+  }
+  return `${all.length} 个仓都已关着：\n${lines.join('\n')}`;
 }
 
 /**
@@ -586,6 +646,16 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       return 0;
     } finally {
       prompt.close();
+      await close();
+    }
+  }
+  if (command === 'dispatch' && rest[0] === '--all') {
+    const args = parseDispatchAllArgs(rest);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(await dispatchAll({ store, args, operator: operatorName(deps.env) }));
+      return 0;
+    } finally {
       await close();
     }
   }
