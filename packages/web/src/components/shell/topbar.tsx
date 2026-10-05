@@ -9,6 +9,7 @@ import {
   Monitor,
   Moon,
   Search,
+  ServerCog,
   Settings,
   Sun,
   TriangleAlert,
@@ -20,6 +21,7 @@ import {
   errorText,
   useAllBoards,
   useApi,
+  useEnv,
   useLiveState,
   useMe,
   useNotifications,
@@ -56,6 +58,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
         <Menu />
       </Button>
       <RepoSwitcher />
+      <EnvBadge />
       <button
         type="button"
         onClick={onSearch}
@@ -75,6 +78,38 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
         <UserMenu />
       </div>
     </header>
+  );
+}
+
+/**
+ * 顶栏环境名徽标（#820 片 1，方案 §4.6）：常驻「现在看的是哪一台」——法国还是本机。名字取自 api/env 的
+ * FLEET_MACHINE_NAME，读不到就照实写「认不出」，不猜成某一台。点开进环境页。演示版没有这一页，也不显示。
+ * 读坏（后端连不上）时不占位、不留空壳：那一格本身就说明不了什么，交给环境页去报原因。
+ */
+function EnvBadge() {
+  const { data } = useEnv();
+  if (!data) return null;
+  const problem = data.name.problem !== undefined;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Link
+          to="/env"
+          data-env-badge
+          className={cn(
+            'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border bg-background/60 px-2 text-sub transition-colors hover:border-border-strong sm:flex',
+            problem ? 'text-ink-stall' : 'text-muted-foreground',
+          )}
+          aria-label={`现在看的是${data.name.name}，打开环境页`}
+        >
+          <ServerCog className="size-3.5 opacity-70" aria-hidden />
+          <span className="num max-w-24 truncate font-medium">{data.name.name}</span>
+        </Link>
+      </TooltipTrigger>
+      <TooltipContent>
+        {problem ? data.name.problem : '现在看的是这一台环境；点开看它现在怎样'}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

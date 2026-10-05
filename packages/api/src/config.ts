@@ -61,6 +61,12 @@ export interface Config {
    */
   engineOff: boolean;
   /**
+   * 这台机器给人看的名字（FLEET_MACHINE_NAME，和引擎那边同一项）：驾驶舱顶栏徽标和环境页（#820 片 1）用它。
+   * 没配、空白是 null——页面写「认不出」并说明，不拿「法国」这种猜的值冒充。法国写「法国」、本机档写「本机」，
+   * 两份期望（deploy/france|local/desired-config.json）的 api.env 都登记了。
+   */
+  machineName: string | null;
+  /**
    * FLEET_FEISHU_LOGIN=off：这台不接飞书（本机档：没有香港、没有飞书网关）。这时飞书网关的通行证即使在环境文件里也不认
    * （feishuGatewayToken 记成 null），健康页的 feishu_gateway 报「未接」而不是一直等一个永远不会来的网关（#803）。
    */
@@ -114,6 +120,15 @@ export function engineEnabled(env: Env): boolean {
   const listed = services.split(/\s+/).filter(Boolean);
   if (listed.some((s) => !APP_SERVICES.includes(s))) return true;
   return listed.includes('fleet-engine');
+}
+
+/**
+ * 这台机器给人看的名字（FLEET_MACHINE_NAME）：法国「法国」、本机档「本机」，和引擎读的是同一项。空白、没配是 null，
+ * 上层（环境页、顶栏徽标）照实写「认不出」，不猜成某一台。名字不是要保密的东西，两份期望都当公开值登记。
+ */
+export function machineName(env: Env): string | null {
+  const name = env.FLEET_MACHINE_NAME?.trim();
+  return name ? name : null;
 }
 
 export function loadConfig(env: Env): Config {
@@ -224,6 +239,7 @@ export function loadConfig(env: Env): Config {
     fleetTaskQueue,
     engineOff: !engineEnabled(env),
     feishuOff,
+    machineName: machineName(env),
   };
 }
 

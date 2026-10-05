@@ -78,6 +78,10 @@
     },
     "api.env": {
       "FLEET_ENV": "production",
+      "FLEET_MACHINE_NAME": {
+        "value": "法国",
+        "说明": "这台机器给人看的名字：驾驶舱顶栏徽标和环境页（#820 片 1）用它，和引擎那份 engine.env 同一项；本机档写「本机」（deploy/local/desired-config.json 登记的差别）。名字不算要保密的东西，当公开值"
+      },
       "FLEET_PUBLIC_URL": {
         "private": "88b74fe7c864848610dc899073d2d233b013b058861bb79a2bc292f1281d37be",
         "说明": "浏览器看到的驾驶舱地址（香港的域名）：私有值"

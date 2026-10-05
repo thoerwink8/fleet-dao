@@ -1078,12 +1078,14 @@ describe('ci.yml 和这里对得上', () => {
     expect(check).toContain('node packages/conventions/src/bin/ci-verdict.ts');
   });
 
-  it('【故意造出的失败】并发组 PR 按号分、推主线按分支分：合过的 PR 改标题正文那一轮（github.ref 是 refs/heads/main）不许挤掉主线的全量', () => {
+  it('【故意造出的失败】并发组 PR 按号分、推主线按分支分、定时轮按事件分：三路互不挤', () => {
     const group = /^concurrency:\n {2}group: (.+)$/m.exec(yml)?.[1];
-    expect(group).toBe(['ci-$', '{{ github.event.pull_request.number || github.ref }}'].join(''));
+    expect(group).toBe(
+      ['ci-$', '{{ github.event.pull_request.number || github.ref }}-$', '{{ github.event_name }}'].join(''),
+    );
   });
 
-  it('【故意造出的失败】只有 PR 上新的一轮挤掉旧的，主线推送不挤掉在跑的全量：挤了的话合并一密一个全绿的提交都没有，自动发布无可发（#362）', () => {
+  it('【故意造出的失败】只有 PR 上新的一轮挤掉旧的，主线推送和定时轮不挤掉在跑的全量：挤了的话合并一密一个全绿的提交都没有，自动发布无可发（#362）；定时轮被主线顶掉的话那一夜的全量回归直接不跑（2026-10-05 第二意见）', () => {
     const cancel = /^concurrency:\n {2}group: .+\n {2}cancel-in-progress: (.+)$/m.exec(yml)?.[1];
     expect(cancel).toBe(['$', "{{ github.event_name == 'pull_request' }}"].join(''));
   });
@@ -1291,7 +1293,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
   });
 });
 
-describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑，红了汇总就红', () => {
+describe('驾驶舱 e2e（#930，2026-10-05 收窄）：只在碰到 web、api 时跑，红了汇总就红', () => {
   const needs = (p: CiPlan, over: Record<string, unknown> = {}) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     lint: { result: 'success', outputs: {} },
@@ -1302,23 +1304,37 @@ describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑�
     ...over,
   });
 
-  it('web、api、db、shared、依赖文件、ci.yml 自己的改动：开；输出给下游 job 的开关是字符串 true', () => {
+  it('web、api、ci.yml 自己的改动：开；输出给下游 job 的开关是字符串 true', () => {
     for (const f of [
       'packages/web/src/routes/home.tsx',
       'packages/web/e2e/specs/01-login.e2e.ts',
       'packages/api/src/cockpit.ts',
       'packages/api/test/e2e/prepare.ts',
-      'packages/db/src/catalog.ts',
-      'packages/shared/src/web-api/index.ts',
-      'packages/shared/src/domain.ts',
-      'pnpm-lock.yaml',
-      'package.json',
       '.github/workflows/ci.yml',
     ]) {
       const p = pr(f);
       expect(p.e2e, f).toBe(true);
       expect(planOutputs(p).e2e, f).toBe('true');
     }
+  });
+
+  it('【故意造出的失败】孤立地改 db、shared、锁文件：不开（各有自己的单测把关，e2e 不是替它们兜底的）', () => {
+    for (const f of [
+      'packages/db/src/catalog.ts',
+      'packages/db/migrations/0034_session_org_state.sql',
+      'packages/shared/src/web-api/index.ts',
+      'packages/shared/src/domain.ts',
+      'pnpm-lock.yaml',
+      'package.json',
+      'pnpm-workspace.yaml',
+    ]) {
+      const p = pr(f);
+      expect(p.e2e, f).toBe(false);
+      expect(planOutputs(p).e2e, f).toBe('false');
+    }
+    // 但它们和 web/api 一起改时照旧开（有一个文件碰到就开）
+    expect(pr('packages/db/src/catalog.ts', 'packages/web/src/routes/home.tsx').e2e).toBe(true);
+    expect(pr('pnpm-lock.yaml', 'packages/api/src/cockpit.ts').e2e).toBe(true);
   });
 
   it('别的改动不开：文档、别的包、deploy/（升了全跑也不开）、别的工作流', () => {
@@ -1409,10 +1425,10 @@ describe('驾驶舱 e2e（#930）：只在碰到 web、api、db、shared 时跑�
     expect(p).toMatchObject({ full: true, e2e: false });
     expect(ciVerdict(needs(p)).ok).toBe(true);
     expect(ciVerdict(needs(p, { e2e: { result: 'success' } })).ok).toBe(false);
-    // 全跑又碰了 e2e 认的路径（shared）：e2e 要跑
-    const withShared = assigned(pr('deploy/france.sh', 'packages/shared/src/domain.ts'));
-    expect(withShared).toMatchObject({ full: true, e2e: true });
-    expect(ciVerdict(needs(withShared, { e2e: { result: 'skipped' } })).ok).toBe(false);
+    // 全跑又碰了 e2e 认的路径（api）：e2e 要跑
+    const withApi = assigned(pr('deploy/france.sh', 'packages/api/src/cockpit.ts'));
+    expect(withApi).toMatchObject({ full: true, e2e: true });
+    expect(ciVerdict(needs(withApi, { e2e: { result: 'skipped' } })).ok).toBe(false);
   });
 
   it('ci.yml 的 e2e job：只按 changes 的 e2e 开关开、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {

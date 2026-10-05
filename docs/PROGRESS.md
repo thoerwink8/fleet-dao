@@ -33,6 +33,24 @@
 - **e2e 偶发一次**：发布 PR 第一次跑 e2e 红在 `10-credentials`「改密码」（`/api/me/credentials` 401 被记成控制台错误）；重跑就过了。401 的根子是改密码时旧 Cookie 的尾巴，`http.ts` 里已有专门处理（不踢人），但页面仍把它当错误记下来——偶发，没开单，先记着。
 - **CI 数字（另一路调查）**：小 PR 中位 55 秒、全量不带 e2e 中位 ~90 秒、**带 e2e 370–390 秒**（e2e 一台 364 秒：10 用例 × 2 视口串行）、主线命中复用 48–61 秒；排队平时 3 秒、多会话同时开 PR 时中位 53 秒。**最大的一块钱是 e2e 那 318 秒**（拆两台并行能到 ~180–200 秒）。
 
+## 2026-10-05 断链的另一半：残留工作树为什么清不完（创始人「想问题的断链在哪、一起解决」，PR #1005）
+
+创始人原话：「不只是解决问题，思考问题的断链是哪里出问题了，导致了残留工作树，也一起解决，合理吗？」
+
+本机当时攒了 12 棵工作树（3 棵是同一棵的嵌套）。查到**两个互相咬住的环**，都修在动作必经的那一步：
+
+- **环一：审查树往工作树里套（PR #1005）**。`agents/skills/discuss/scripts/second-opinion.mjs` 把审查树建在
+  `join(repo, '.claude/worktrees/…')`，`repo` 是「当前检出」；指挥官一边派工一边审 PR 时 cwd 就在某棵工作树里，
+  于是套出 `…/820-env-page/.claude/worktrees/second-opinion`。它带着自己那份 `biome.json`，biome 整仓扫一遍报
+  「nested root configuration」，把这台机器上**所有会话**的推送全拦了（#999 就是修这个误诊的）；而清扫规则按名字
+  跳过 `second-opinion*`（刻意复用的审查树），所以它谁也收不走。改成认 `git worktree list` 第一条（主检出）。
+- **环二：有未提交改动的工作树，谁也不认领**。`sweepWorktrees` 的第 2、3 条（有未提交改动 / 有没推的提交就留）
+  是对的——不能删掉别人的活——但留完只在开会话时打一行字，**没有单子接、没有期限**，于是永远留着：
+  本机实测 4 棵（`agent-a43733d98aecf79c9` 等）都是 2026-10-04 的代理死了留下的。处置：能编过/能推的先推上分支
+  保住（`feat/194-pool-reserve`、`fix/786-engine-git-proxy` 各推了一笔），编不过的派工人接着做
+  （`chore/553-retire-feishu-drafts` 归 #990，23 个类型错误的半成品）；确认是已合 PR 的前身（#992 的 squash 前身）
+  才删。清完 12 棵 → 3 棵（两棵是活的会话在用，一棵 `second-opinion` 是刻意复用的）。
+
 ## 2026-10-05 创始人 08:30 那三件的调查结果（#995，PR #996）
 
 - **断链三处**：①没人负责「确认单做完了、关掉它」（`github-audit` 不查「有合并 PR 提到却还开着」）；②版本里程碑关的时候不看里面还剩什么；③没有「新单先查旧单」（会话只拿到单子正文 + AGENTS.md）。
@@ -98,6 +116,11 @@
 ## 2026-10-05 #820 驾驶舱环境视图与中止恢复：方案（母单 #902，Sonnet 5.5 子代理，只出方案、没实施）
 
 做到哪：`specs/820-驾驶舱环境视图与中止恢复/方案.md` 写完（best-practice-first 六步，业界对照 8 条带链接和日期，GPT 挑错两轮）。结论：中止/恢复只作用于一个环境、写进该环境自己的库；全局中止 = 新设置 `engine.paused`（无迁移）；单任务 = 新增暂停信号（`phase='paused'`，无迁移），叫停仍是终局；环境视图先做每环境一页只读；切 3 片（片 1 环境页、片 2 全局中止、片 3 单任务暂停）。下一步：指挥官看方案、拍方案里「要创始人定的」五条，再派片 1。还没验证：新信号和 `patched()` 重放（Temporal 测试交 CI）；Windows 浏览器能否打开 WSL 后端；没出界面画面。顺手查实的缺口（方案 §2.3）：三段一次性会话没登记进排空在途清单，发布排空看不见它们，片 2 前置要修，建议指挥官另开单。
+
+## 2026-10-05 #820 片 1 环境页（只读）：后端 + 前端 + e2e（Sonnet 5.5 子代理，分支 feat/820-env-page）
+
+做到哪：片 1 的代码全部写完、推上远端（本分支 4 个提交：2d60bb92 后端、cca6b644 web 类型、fe859a57 前端、439bae87 e2e）。①后端 GET /api/env（packages/api/src/env-view.ts）：六项（引擎、在用版本、在跑的会话、池占用、健康、最近拉单）各自包一层 try/catch，一项读失败只写「没查成 + 原因」；引擎那一格沿用主页探针（home-engine.ts），关着写 ENGINE_OFF_DETAIL 不是红；版本只在法国的正式机器上有（main.ts 的 onFrance），别处写 DEPLOY_LAG_NOT_HERE。②前端：新页 packages/web/src/routes/env.tsx（导航「运转」组，演示版没有）、顶栏环境名徽标（topbar.tsx 的 EnvBadge，读 api.env 的 FLEET_MACHINE_NAME）、主页「引擎」那格已在 #962 改成真读（这次确认过：cockpit.ts 的 home 走同一个 engineProbe()）。③契约三边：FleetApi.env / http.ts / mock/server.ts 都加了；demo/api.ts 的 env 直接回「演示版没开放环境」（R10：露机器名、版本号、会话数）。④**修了一个真 bug**：EnvSessionsSchema.byStage 原来是全量 z.record，后端 sessionsFact 只给真有会话的段，/api/env 一直 500（bad_response_shape）；改成 z.partialRecord。⑤测试：packages/api/test/env-view.test.ts（10 条，含故意让会话读法抛、只那一项红）、packages/web/src/routes/env.test.tsx（4 条，含引擎关着是等待色不是红）、routes.test.ts / demo-mode.test.tsx 钉「演示版没有这一页」、新 e2e packages/web/e2e/specs/07b-env.e2e.ts。下一步：本机把真环境开起来、当用户点一遍、两个视口截图、写 PR。还没验证：真环境页面的画面（本机用 D:\frank\fleet-dao\_tmp\pgbin 的便携 Postgres 18 在 127.0.0.1:55432 起了一套，e2e 正在跑）；法国引擎关着那格的真实数据（只在单测/假后端验过）。
+
 
 ## 2026-10-05 驾驶舱首页恢复流程图（母单 #902，Sonnet 5.5 子代理，分支 `feat/902-home-flow`，PR #914）
 

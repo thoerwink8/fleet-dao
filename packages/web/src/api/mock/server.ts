@@ -13,6 +13,7 @@ import {
   DEMO_STRICT_DEFAULT,
   DemoLinksResponse,
   type DemoScope,
+  EnvResponseSchema,
   flowStages,
   HARD_BANS,
   HomeResponseSchema,
@@ -1157,6 +1158,49 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async board(repoId) {
       await wait();
       return boardOf(repoId);
+    },
+    /**
+     * 环境页（#820 片 1）的假数据：形状照真后端，值取自这份假库。
+     * 引擎那一格跟着 ?mockEngine= 走（和主页同一处），版本一项照实写「没查成」——假后端没有发布目录，不拿 0 冒充。
+     */
+    async env() {
+      await wait();
+      const t = now();
+      const activeRuns = allRuns().filter((r) => r.endedAt === undefined);
+      const byStage: Record<string, number> = {};
+      for (const r of activeRuns) byStage[r.stage] = (byStage[r.stage] ?? 0) + 1;
+      const poolViews = st.pools.map((p) => {
+        const windows = st.quota.filter((w) => w.poolId === p.id);
+        return {
+          running: poolRunning(p.id),
+          quotaStatus:
+            windows.length === 0
+              ? 'unread'
+              : windows.some((w) => t - Date.parse(w.readAt) > STALE_MS)
+                ? 'stale'
+                : 'fresh',
+        };
+      });
+      return EnvResponseSchema.parse({
+        name: { name: '假数据' },
+        asOf: iso(),
+        facts: {
+          engine: { ok: true, value: mockEngine() },
+          version: { ok: false, reason: '假后端没有发布目录，读不到在用版本' },
+          sessions: { ok: true, value: { total: activeRuns.length, byStage } },
+          pools: {
+            ok: true,
+            value: {
+              count: poolViews.length,
+              running: poolViews.reduce((n, p) => n + p.running, 0),
+              unread: poolViews.filter((p) => p.quotaStatus === 'unread').length,
+              stale: poolViews.filter((p) => p.quotaStatus === 'stale').length,
+            },
+          },
+          health: { ok: true, value: { ok: true, total: 9, failing: [], notWired: ['deploy_lag'] } },
+          schedule: { ok: true, value: { status: 'never' } },
+        },
+      });
     },
     async task(taskId) {
       await wait();

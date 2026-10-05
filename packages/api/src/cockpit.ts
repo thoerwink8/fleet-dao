@@ -9,6 +9,7 @@ import {
   BoardResponse,
   CloseAskResponse,
   DEFAULT_SESSION_EFFORT,
+  EnvResponseSchema,
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
@@ -42,7 +43,7 @@ import {
   WebRoutes,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
+import { DEPLOY_LAG_NOT_HERE, handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { meBody } from './auth.ts';
@@ -50,6 +51,15 @@ import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reco
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
+import {
+  engineFact,
+  engineOffFact,
+  envFacts,
+  poolsFact,
+  readHealth,
+  scheduleFact,
+  versionFact,
+} from './env-view.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY, closeLegacyAsk } from './legacy-asks.ts';
@@ -223,6 +233,52 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         channels,
         now,
       }),
+    });
+  });
+
+  /**
+   * 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」，一项读失败不连累别的项。
+   * 只读、不跨环境、不开口子：读的全是现成的（主页、额度页、定时任务页、/healthz 用的是同一份）。
+   * 引擎那一格沿用主页那一格的探针（开着才真探），不另写一份判法。
+   */
+  app.get(WebRoutes.env.path, async (c) => {
+    const now = deps.now();
+    const engineProbeResult = await engineProbe();
+    const engine = engineProbeResult.state === 'off' ? engineOffFact() : engineFact(engineProbeResult);
+    // 版本那一项只在法国的正式机器上装配（main.ts 的 onFrance）：别处 deps.deployLag 没有，照实写「没查成」
+    const readDeployLag = deps.deployLag;
+    const facts = await envFacts({
+      engine,
+      readSessions: () => store.listRuns({ active: true }),
+      readPools: async () => {
+        const [pools, channels, windows, routes, activeRuns] = await Promise.all([
+          store.listPools(),
+          store.listChannels(),
+          store.listQuotaWindows(),
+          store.listRoutes(),
+          store.listRuns({ active: true }),
+        ]);
+        return poolsFact({
+          pools,
+          channels,
+          windows,
+          routes,
+          activeRuns,
+          now,
+          staleAfterMs: config.quotaStaleAfterMs,
+        });
+      },
+      readSchedule: async () => scheduleFact(await store.listJobs(), now),
+      readVersion: readDeployLag ? async () => versionFact(readDeployLag(), now) : null,
+      versionNotWired: DEPLOY_LAG_NOT_HERE,
+      readHealth: () => readHealth(deps.health, deps.log),
+    });
+    return reply(c, EnvResponseSchema, {
+      name: config.machineName
+        ? { name: config.machineName }
+        : { name: '认不出', problem: '这台后端没配环境名（api.env 的 FLEET_MACHINE_NAME）' },
+      asOf: now.toISOString(),
+      facts,
     });
   });
 

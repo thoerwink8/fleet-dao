@@ -10,6 +10,7 @@ import {
   Route,
   Scale,
   ScrollText,
+  ServerCog,
   Settings,
   Trophy,
   Wallet,
@@ -68,6 +69,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '运转',
     items: [
+      {
+        to: '/env',
+        label: '环境',
+        icon: ServerCog,
+        hint: '这一台环境现在怎样：引擎、在用版本、在跑的会话、池、健康、最近拉单',
+        // 演示版里没有这一页（露机器名、版本号、会话数，R10；路由表里也不放）。
+      },
       {
         to: '/schedules',
         label: '定时任务',

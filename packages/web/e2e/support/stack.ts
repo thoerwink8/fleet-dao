@@ -218,6 +218,8 @@ export async function startStack(): Promise<Stack> {
     {
       ...process.env,
       FLEET_ENV: 'development',
+      // 环境页和顶栏徽标读它（#820 片 1）：e2e 这套在后端前面架上，等于「本机」那一档（deploy/local 的值）
+      FLEET_MACHINE_NAME: '本机',
       DATABASE_URL: facts.dbUrl,
       FLEET_PUBLIC_URL: webOrigin,
       FLEET_COCKPIT_LISTEN: `127.0.0.1:${apiPort}`,

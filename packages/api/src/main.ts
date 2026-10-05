@@ -193,6 +193,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     carpoolReconcile: pgCarpoolReconcile(db),
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
+    // 环境页（#820 片 1）的版本那一项：法国的正式机器读发布目录现算；别处不给，页面写「没查成」
+    ...(onFrance ? { deployLag: () => readDeployLagInput() } : {}),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
     release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     health: serviceHealthChecks({
