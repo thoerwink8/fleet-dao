@@ -22,8 +22,8 @@
 //   被截断）。所以 argumentLine 必须在这边（JS 这层，array 用 windowsCmdLine 拼好）整条拼成一个字符串，
 //   经 JSON 传给 ps1 时就是一个字符串，ps1 那边原样传给 -ArgumentList，不能再拆开成数组。
 // - Start-Process 没有「单独给这次调用设几个环境变量」的参数：本脚本把 io.spawnDetached 拿到的整份
-//   env（worker-lib.mjs 的 safeEnv+mergeNoProxy 算出来的，只有白名单里的标准路径类变量加 NO_PROXY/no_proxy
-//   两个域名——不是 process.env 整个，见下面「安全」那条）整个透传给 ps1，由它在调用 Start-Process 前
+//   env（worker-lib.mjs 的 safeEnv 算出来的，只有白名单里的标准路径类变量和代理变量，直连通时再由 mergeNoProxy
+//   加上 GitHub 的 NO_PROXY/no_proxy——不是 process.env 整个，见下面「安全」那条）整个透传给 ps1，由它在调用 Start-Process 前
 //   Set-Item Env: 逐个设上；传过去时编码成 [{name,value}...] 数组，不是一个普通对象——这台的 Windows
 //   PowerShell 5.1 里 ConvertFrom-Json 转出来的对象属性名不分大小写，env 里同时有 NO_PROXY、no_proxy 两个键
 //   会被当成重复键，直接报错（09-28 撞过），数组没有这个问题。
@@ -57,14 +57,15 @@ const TIMEOUT_MS = 120_000;
  * 冒烟跑下来是 1~2 秒），这个只是给慢盘/杀毒软件扫描新脚本这类偶发情况留的上限，不是正常耗时。 */
 const LAUNCH_TIMEOUT_MS = 20_000;
 
-/** 这台机器的坑：https_proxy/http_proxy 设着时本脚本自己调的 git/gh 连 GitHub 会失败，先去掉代理再调
- *（和帅位交活时手动加的 `env -u` 前缀一个道理）；起的模型命令行不走这个，走 worker-lib.mjs 的 mergeNoProxy。 */
+/** git/gh 连 GitHub 走哪条路由 worker-lib.mjs 判（pickGithubRoute，见那份文件头「代理」）：调用带 proxy: true
+ * 就照原样带环境里的代理，不给或为假就去掉代理直连（和帅位交活时手动加的 `env -u` 前缀一个道理）。 */
 const PROXY_VARS = ['https_proxy', 'http_proxy', 'HTTPS_PROXY', 'HTTP_PROXY'];
 function stripProxy(env) {
   const out = { ...env };
   for (const k of PROXY_VARS) delete out[k];
   return out;
 }
+const netEnv = (opts) => opts?.env ?? (opts?.proxy ? process.env : stripProxy(process.env));
 
 function run(command, args, opts = {}) {
   const r = spawnSync(command, args, {
@@ -72,7 +73,7 @@ function run(command, args, opts = {}) {
     env: opts.env ?? process.env,
     encoding: 'utf8',
     windowsHide: true,
-    timeout: TIMEOUT_MS,
+    timeout: opts.timeoutMs ?? TIMEOUT_MS,
     maxBuffer: 64 * 1024 * 1024,
   });
   return {
@@ -193,8 +194,8 @@ process.exitCode = await runWorker(process.argv.slice(2), {
   now: () => new Date(),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   cwd: () => process.cwd(),
-  git: (args, opts) => run('git', args, { ...opts, env: opts?.env ?? stripProxy(process.env) }),
-  gh: (args, opts) => run('gh', args, { ...opts, env: opts?.env ?? stripProxy(process.env) }),
+  git: (args, opts) => run('git', args, { ...opts, env: netEnv(opts) }),
+  gh: (args, opts) => run('gh', args, { ...opts, env: netEnv(opts) }),
   pnpm: (args, opts) => runViaCmd('pnpm', args, opts),
   spawnDetached,
   isRunning,
