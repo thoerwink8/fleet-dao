@@ -136,6 +136,8 @@ interface SecondOpinionLib {
     o: { slot?: number; slotGiven?: boolean },
     deps?: { dir?: string; pid?: number; alive?: (pid: number) => boolean },
   ): { slot: number; release: () => void };
+  args(argv: string[]): { timeoutMin: number; stallMin: number; budgetSec?: number };
+  discussionBudgetSec(o: { timeoutMin: number; budgetSec?: number }): number;
   reviewPr(o: {
     o: { authorFamily: string; timeoutMin: number; ui: boolean; noPost?: boolean };
     repo: string;
@@ -143,6 +145,54 @@ interface SecondOpinionLib {
     log: (s: string) => void;
     deps: ReviewDeps;
   }): Promise<number>;
+}
+interface FakeProfile {
+  family: string;
+  agent: string;
+  model: string | null;
+  route: 'cloud' | 'local' | null;
+}
+interface SessionView {
+  phase: string | null;
+  text: string;
+  toolCalls: number;
+  error: string | null;
+  incomplete: boolean;
+  model: string | null;
+  interactions: unknown[];
+  updatedAt: unknown;
+}
+interface PollIo {
+  readView(url: string, sessionKey: string): Promise<SessionView | null>;
+  stop(url: string, sessionKey: string): Promise<void>;
+  relayUsage(url: string): Promise<number | null>;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+}
+interface ProfilesLib {
+  FAMILY_ORDER: string[];
+  PROFILES: Record<string, FakeProfile>;
+  withFallback(
+    chain: FakeProfile[],
+    log: (s: string) => void,
+    run: (p: FakeProfile, remainingMs: number | undefined) => Promise<{ text: string }>,
+    opts?: { budgetMs?: number },
+  ): Promise<{ text: string; profile: FakeProfile }>;
+}
+interface SessionsLib {
+  pollSession(o: {
+    profile: FakeProfile;
+    url: string;
+    sessionKey: string;
+    since: number;
+    timeoutMin: number;
+    pollMs: number;
+    log: (s: string) => void;
+    before: number | null;
+    secs: () => string;
+    stallMin?: number;
+    io: PollIo;
+  }): Promise<{ text: string; sessionKey: string }>;
 }
 interface ToolsLib {
   dataDir(home?: string): string;
@@ -162,6 +212,8 @@ interface AskLib {
 const SCRIPTS = fileURLToPath(new URL('../skills/discuss/scripts/', import.meta.url));
 const load = async (name: string) => import(pathToFileURL(join(SCRIPTS, name)).href);
 const so = (await load('second-opinion.mjs')) as SecondOpinionLib;
+const profilesLib = (await load('so-profiles.mjs')) as ProfilesLib;
+const sessionsLib = (await load('so-sessions.mjs')) as SessionsLib;
 const tools = (await load('tools.mjs')) as ToolsLib;
 const walk = (await load('walkthrough.mjs')) as WalkLib;
 const ask = (await load('ask.mjs')) as AskLib;
@@ -717,28 +769,39 @@ describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', 
 });
 
 describe('讨论/第二意见：按作者模型族排除同族', () => {
-  it('作者是 GPT 时跳过 GPT，按固定顺序给出 Claude、DeepSeek、Grok、Kimi', () => {
-    expect(so.discussionProfiles({ authorFamily: 'gpt' }).map((p) => p.family)).toEqual([
+  it('族顺序：gpt（gpt-6-luna）第一，grok 第二，其余排后面兜底（创始人 2026-10-05：第二意见太慢了，优先 gpt6luna，不行就 grok）', () => {
+    expect(profilesLib.FAMILY_ORDER).toEqual(['gpt', 'grok', 'claude', 'deepseek', 'kimi']);
+    expect(so.discussionProfiles({ authorFamily: 'kimi' }).map((p) => p.family)).toEqual([
+      'gpt',
+      'grok',
       'claude',
       'deepseek',
+    ]);
+    expect(so.discussionProfiles({ authorFamily: 'kimi' })[0]?.model).toBe('gpt-6-luna');
+  });
+
+  it('作者是 GPT 时跳过 GPT，grok 顶上第一，再是 Claude、DeepSeek、Kimi', () => {
+    expect(so.discussionProfiles({ authorFamily: 'gpt' }).map((p) => p.family)).toEqual([
       'grok',
+      'claude',
+      'deepseek',
       'kimi',
     ]);
   });
 
-  it('作者是非 GPT 时默认 GPT 首选', () => {
+  it('作者是非 GPT 时默认 GPT 首选、Grok 第二', () => {
     expect(so.discussionProfiles({ authorFamily: 'claude' }).map((p) => p.family)).toEqual([
       'gpt',
-      'deepseek',
       'grok',
+      'deepseek',
       'kimi',
     ]);
   });
 
   it('作者族可以是多个，所有同族都跳过', () => {
     expect(so.discussionProfiles({ authorFamily: 'gpt,deepseek' }).map((p) => p.family)).toEqual([
-      'claude',
       'grok',
+      'claude',
       'kimi',
     ]);
   });
@@ -750,6 +813,165 @@ describe('讨论/第二意见：按作者模型族排除同族', () => {
 
   it('显式指定同作者族的执行体时拒绝，不能靠手点绕过同族排除', () => {
     expect(() => so.discussionProfiles({ authorFamily: 'gpt', agent: 'code' })).toThrow('同一模型族');
+  });
+});
+
+describe('不出声就换下一家（创始人 2026-10-05：第二意见太慢了，优先 gpt6luna，不行就 grok）', () => {
+  const MIN = 60_000;
+  const NOW = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+  // 假钟：sleep 一下钟就走一下，测试不真等 4 分钟
+  const clock = () => {
+    let t = 0;
+    return {
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms;
+      },
+    };
+  };
+  const view = (o: Partial<SessionView> = {}): SessionView => ({
+    phase: 'streaming',
+    text: '',
+    toolCalls: 0,
+    error: null,
+    incomplete: false,
+    model: null,
+    interactions: [],
+    updatedAt: 1,
+    ...o,
+  });
+  // 账本只对走中继的算数；假会话不落账本，两家都按本地路由算
+  const local = (family: string): FakeProfile => ({
+    ...(profilesLib.PROFILES[family === 'gpt' ? 'code' : family] as FakeProfile),
+    route: 'local',
+  });
+
+  it('默认值：整轮总上限 15 分钟、不出声 4 分钟换下一家；--text 不再单独压成 0.5 分钟，和 --pr 同一套规则', () => {
+    const a = so.args([]);
+    expect(a.timeoutMin).toBe(15);
+    expect(a.stallMin).toBe(4);
+    expect(so.args(['--stall-min', '2']).stallMin).toBe(2);
+    expect(so.args(['--timeout-min', '20']).timeoutMin).toBe(20);
+    // --text 的整轮预算：没给 --budget-sec 就是 timeoutMin 那一套（15 分钟），给了照给的
+    expect(so.discussionBudgetSec(a)).toBe(15 * 60);
+    expect(so.discussionBudgetSec(so.args(['--timeout-min', '20']))).toBe(20 * 60);
+    expect(so.discussionBudgetSec(so.args(['--budget-sec', '30']))).toBe(30);
+  });
+
+  it('gpt 起了会话一直不出声：4 分钟（假钟）后停掉它、日志写明换 grok，grok 接着出结论', async () => {
+    const c = clock();
+    const logs: string[] = [];
+    const stopped: string[] = [];
+    let grokStartedAt = -1;
+    let grokPolls = 0;
+    const io: PollIo = {
+      ...c,
+      readView: async (_url, key) => {
+        if (key.startsWith('codex:')) return view({ model: 'gpt-6-luna' }); // 一直是同一帧：没有任何新输出
+        if (grokStartedAt < 0) grokStartedAt = c.now();
+        grokPolls++;
+        return grokPolls < 3
+          ? view({ text: 'x'.repeat(grokPolls * 40), updatedAt: grokPolls })
+          : view({ phase: 'done', text: '结论：通过', updatedAt: grokPolls });
+      },
+      stop: async (_url, key) => void stopped.push(key),
+      relayUsage: async () => null,
+    };
+    const chain = profilesLib.FAMILY_ORDER.slice(0, 2).map(local);
+    const r = await profilesLib.withFallback(
+      chain,
+      (s) => logs.push(s),
+      (p) =>
+        sessionsLib.pollSession({
+          profile: p,
+          url: 'ws://fake',
+          sessionKey: `${p.agent}:fake-${p.family}`,
+          since: c.now(),
+          timeoutMin: 15,
+          pollMs: 10_000,
+          log: (s) => logs.push(s),
+          before: null,
+          secs: () => NOW(c.now()),
+          stallMin: 4,
+          io,
+        }),
+    );
+    expect(r.profile.family).toBe('grok');
+    expect(r.text).toBe('结论：通过');
+    expect(stopped).toEqual(['codex:fake-gpt']);
+    expect(logs.join('\n')).toContain('gpt 4 分钟没出声，换 grok');
+    // 是在 4 分钟之后、不是 10 分钟之后换的
+    expect(grokStartedAt).toBeGreaterThan(4 * MIN);
+    expect(grokStartedAt).toBeLessThan(5 * MIN);
+  });
+
+  it('一直有新输出就不算没出声：慢但在写的会话不会被换掉', async () => {
+    const c = clock();
+    let n = 0;
+    const io: PollIo = {
+      ...c,
+      readView: async () => {
+        n++;
+        // 每 10 秒多一点字，共 30 轮（5 分钟），比 4 分钟还长
+        return n < 30
+          ? view({ text: 'x'.repeat(n), updatedAt: n })
+          : view({ phase: 'done', text: '结论：通过', updatedAt: n });
+      },
+      stop: async () => {
+        throw new Error('不该停');
+      },
+      relayUsage: async () => null,
+    };
+    const r = await sessionsLib.pollSession({
+      profile: local('grok'),
+      url: 'ws://fake',
+      sessionKey: 'grok:fake',
+      since: 0,
+      timeoutMin: 15,
+      pollMs: 10_000,
+      log: () => {},
+      before: null,
+      secs: () => NOW(c.now()),
+      stallMin: 4,
+      io,
+    });
+    expect(r.text).toBe('结论：通过');
+    expect(c.now()).toBeGreaterThan(4 * MIN);
+  });
+
+  it('每家都不出声：逐家 4 分钟换下去，最后一家后面写没有下一家，整轮仍照实报没查成', async () => {
+    const c = clock();
+    const logs: string[] = [];
+    const io: PollIo = {
+      ...c,
+      readView: async () => view(),
+      stop: async () => {},
+      relayUsage: async () => null,
+    };
+    const chain = profilesLib.FAMILY_ORDER.slice(0, 2).map(local);
+    await expect(
+      profilesLib.withFallback(
+        chain,
+        (s) => logs.push(s),
+        (p) =>
+          sessionsLib.pollSession({
+            profile: p,
+            url: 'ws://fake',
+            sessionKey: `${p.agent}:fake-${p.family}`,
+            since: c.now(),
+            timeoutMin: 15,
+            pollMs: 10_000,
+            log: () => {},
+            before: null,
+            secs: () => NOW(c.now()),
+            stallMin: 4,
+            io,
+          }),
+      ),
+    ).rejects.toThrow('候选的几家全没成');
+    const text = logs.join('\n');
+    expect(text).toContain('gpt 4 分钟没出声，换 grok');
+    expect(text).toContain('grok 4 分钟没出声，后面没有下一家了');
   });
 });
 
@@ -932,6 +1154,28 @@ describe('审 PR 走整条路（假 gh、假会话、真 git）：状态按脚�
     expect(code).toBe(2);
     expect(f.posted).toEqual([]);
     expect(logs.join('\n')).toContain('没查成：审的结果没有「## 必须改」这一段');
+  });
+
+  it('整轮总上限：第一家用掉了整轮预算，不再起下一家，照实报没查成（不是每家各给一份 45 分钟）', async () => {
+    const w = prWorld();
+    const f = fakeGh({ pr: prInfo(w.head) });
+    const asked: number[] = [];
+    const slow: ReviewDeps['session'] = async (opts) => {
+      asked.push((opts as { timeoutMin: number }).timeoutMin);
+      await new Promise((r) => setTimeout(r, 300));
+      throw new (await import(pathToFileURL(join(SCRIPTS, 'so-common.mjs')).href)).NotChecked('假的：没答完');
+    };
+    await expect(
+      so.reviewPr({
+        o: { ...o, timeoutMin: 0.004 }, // 0.24 秒
+        repo: w.repo,
+        pr: 5,
+        log: () => {},
+        deps: { gh: f.gh, session: slow, runs: temp('runs') },
+      }),
+    ).rejects.toThrow('总预算已用完');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toBeLessThanOrEqual(0.004);
   });
 
   it('第 3 轮（PR 上已经贴过两轮结论，头换没换都算）：【现实】【其他】转合并后、写 success，评论里列出来', async () => {
