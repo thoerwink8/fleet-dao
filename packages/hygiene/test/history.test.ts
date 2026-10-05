@@ -56,7 +56,7 @@ describe('scanHistory', () => {
     expect(scan('', '', '')).toEqual({ commits: [], addedLines: 0, binaryHunks: 0, findings: [] });
   });
 
-  it('带 NUL 的段是二进制：不看内容、单独计数；同一个提交里别的段照看', () => {
+  it('带 NUL 的段去掉 NUL 照扫、单独计数；同一个提交里别的段照看', () => {
     const patch = [
       mark(A),
       '',
@@ -73,8 +73,38 @@ describe('scanHistory', () => {
       `+令牌 ${token(804)}`,
     ].join('\n');
     const result = scan(patch, [mark(A), '', 'logo.png', 'docs/a.md'].join('\n'), message(A, 'x'));
-    expect(result).toMatchObject({ binaryHunks: 1, addedLines: 1 });
-    expect(result.findings.map(formatFinding)).toEqual(['docs/a.md:1 令牌（提交 aaaaaaa）']);
+    expect(result).toMatchObject({ binaryHunks: 1, addedLines: 3 });
+    // NUL 换空格、去掉 NUL 两遍都命中同一处，只报一条。
+    expect(result.findings.map(formatFinding)).toEqual([
+      'docs/a.md:1 令牌（提交 aaaaaaa）',
+      'logo.png:2 令牌（提交 aaaaaaa）',
+    ]);
+  });
+
+  it('令牌紧贴在 NUL 两边：换空格那遍拆得开，去掉 NUL 那遍拼得起（UTF-16）', () => {
+    const t = token(805);
+    const utf16 = [...`K=${t}`].join('\0');
+    const patch = [
+      mark(A),
+      '',
+      'diff --git a/a.bin b/a.bin',
+      '--- /dev/null',
+      '+++ b/a.bin',
+      '@@ -0,0 +1,2 @@',
+      `+x\0${t}\0y`,
+      `+${utf16}\0`,
+    ].join('\n');
+    const result = scan(patch, [mark(A), '', 'a.bin'].join('\n'), message(A, 'x'));
+    expect(result.findings.map(formatFinding)).toEqual([
+      'a.bin:1 令牌（提交 aaaaaaa）',
+      'a.bin:2 令牌（提交 aaaaaaa）',
+    ]);
+  });
+
+  it('差异里有文件只给了「Binary files … differ」或二进制补丁：没给内容，抛错', () => {
+    const head = `${mark(A)}\n\ndiff --git a/x.bin b/x.bin\nindex 0000000..1111111 100644\n`;
+    for (const line of ['Binary files /dev/null and b/x.bin differ', 'GIT binary patch'])
+      expect(() => scan(`${head}${line}\n`, `${mark(A)}\n\nx.bin\n`, message(A, 'x'))).toThrow('没给内容');
   });
 
   it('认不出、对不上就抛错，不当成扫过没事', () => {

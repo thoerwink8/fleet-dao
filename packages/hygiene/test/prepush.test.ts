@@ -158,20 +158,62 @@ describe('prePushCheck', { timeout: 0 }, () => {
     }
   });
 
-  it('带 NUL 的段是真二进制：不看内容、单独报出来；二进制的密钥文件照样按名字拦', () => {
+  it('带 NUL 的段是真二进制：可打印片段照扫、单独报出来；二进制的密钥文件照样按名字拦', () => {
     fresh();
     const token = ['ghp', pseudoRandom(36, 407)].join('_');
     const blob = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x0a]),
-      Buffer.from(`${token}\n`),
+      Buffer.from(`${token}\0\x02`),
     ]);
     const head = commit({ 'assets/logo.png': blob, 'deploy/cert.p12': blob });
     const result = check(head);
     expect(result.code).toBe(1);
-    expect(result.lines[0]).toContain('（带 NUL 的 2 段是二进制，没看内容、只按文件名判）');
-    expect(result.lines.filter((l) => l.includes('（提交 '))).toEqual([
-      `deploy/cert.p12 密钥文件（提交 ${short(head)}）`,
-    ]);
+    expect(result.lines[0]).toContain('（带 NUL 的 2 段去掉 NUL 扫了）');
+    expect(result.lines.filter((l) => l.includes('（提交 ')).sort()).toEqual(
+      [
+        `assets/logo.png:2 令牌（提交 ${short(head)}）`,
+        `deploy/cert.p12 密钥文件（提交 ${short(head)}）`,
+        `deploy/cert.p12:2 令牌（提交 ${short(head)}）`,
+      ].sort(),
+    );
+    expect(result.lines.join('\n')).not.toContain(token);
+  });
+
+  it('git 只给了「Binary files … differ」没给内容：退出码 2，不当成扫过没事', () => {
+    fresh();
+    const head = commit({ 'docs/ok.md': '没问题\n' });
+    const fake: GitSync = (args) => {
+      const r = gitSync(args);
+      if (!args.includes('-p')) return r;
+      return {
+        ...r,
+        stdout: `${r.stdout}diff --git a/x.bin b/x.bin\nBinary files /dev/null and b/x.bin differ\n`,
+      };
+    };
+    const result = check(head, { git: fake });
+    expect(result.code).toBe(2);
+    expect(result.lines[0]).toContain('没给内容');
+  });
+
+  it('文本里夹了 NUL、UTF-16 存的文本：整段照扫，令牌照拦（全仓审查第 4 路 S3）', () => {
+    fresh();
+    const token = ['ghp', pseudoRandom(36, 408)].join('_');
+    const head = commit({
+      // 样例 .env 不按文件名拦，只靠内容规则：一个 NUL 就让整段不扫的话，这个令牌就推上去了。
+      '.env.example': `A=1\0\nGH_TOKEN=${token}\n`,
+      'src/config.ts': `export const a = '\0';\nexport const t = '${token}';\n`,
+      'docs/utf16.txt': Buffer.from(`GH_TOKEN=${token}\r\n`, 'utf16le'),
+    });
+    const result = check(head);
+    expect(result.code).toBe(1);
+    expect(result.lines).toEqual(
+      expect.arrayContaining([
+        `.env.example:2 令牌（提交 ${short(head)}）`,
+        `docs/utf16.txt:1 令牌（提交 ${short(head)}）`,
+        `src/config.ts:2 令牌（提交 ${short(head)}）`,
+      ]),
+    );
+    expect(result.lines.join('\n')).not.toContain(token);
   });
 
   it('提交说明也会推上去：令牌照拦；作者、提交者的邮箱是标识，不再拦（创始人 2026-09-28 傍晚拍）', () => {
