@@ -78,6 +78,39 @@ export interface RoutingPolicy {
    * 攒够会话用量后换成「该阶段在该池上的 p80 用量」。
    */
   needPerTask: Partial<Record<QuotaWindowKind, number>>;
+  /**
+   * 每个渠道的额度留量（#194 方案 v2 4.8；创始人 2026-10-04 06:08「到了配置额度，这个渠道就不能用了……这个也不只是独享的
+   * 配置，而是全渠道配置项」）。不给 = 没有留量线、所有池照「够收尾」判（接线前的老样子）。
+   */
+  reserve?: ReserveConfig;
+}
+
+/**
+ * 一个渠道（一个额度池：拼车号、独享号、Mirasim 中转……）的留量。
+ * untilRejected：用到被拒为止，不按「够收尾」提前停（拼车：不用就作废、还会被同车的人用掉，方案 4.3）；
+ * stopAt：各种窗口已用到这个比例（0–1）就不再往这个池派，剩下的留给创始人自己用。
+ */
+export interface PoolReserve {
+  untilRejected?: boolean;
+  stopAt?: Partial<Record<QuotaWindowKind, number>>;
+}
+
+/** 留量配置：all 是总配置；pools 按池单独设，没单独设的项回落到总配置（stopAt 按窗口种类逐项合并）。 */
+export interface ReserveConfig {
+  all: PoolReserve;
+  pools?: Readonly<Record<string, PoolReserve>>;
+}
+
+/** 这个池生效的留量（单独设的盖住总配置，没设的回落）；没配留量为 null。 */
+export function poolReserve(config: ReserveConfig | undefined, poolId: string): PoolReserve | null {
+  if (!config) return null;
+  const own = config.pools?.[poolId];
+  const untilRejected = own?.untilRejected ?? config.all.untilRejected;
+  const stopAt = { ...config.all.stopAt, ...own?.stopAt };
+  return {
+    ...(untilRejected === undefined ? {} : { untilRejected }),
+    ...(Object.keys(stopAt).length > 0 ? { stopAt } : {}),
+  };
 }
 
 export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<RoutingPolicy>({
