@@ -19,6 +19,7 @@ import { type Client, ScheduleNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
 import type { GitHubReconcileRun } from '../src/contract.ts';
+import { startCanaryWorkflow } from '../src/jobs/canary-start.ts';
 import {
   GITHUB_RECONCILE_JOB,
   GITHUB_RECONCILE_LOOKBACK_MS,
@@ -36,6 +37,7 @@ import {
 } from '../src/jobs/retired-schedules.ts';
 import { githubReconcileJob, retireCloseSweepAlerts } from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
+import { createRealEnv } from './helpers.ts';
 
 const API = 'https://api.github.test';
 const OWNER = 'example';
@@ -454,5 +456,53 @@ describe('关单对账 #654 删了以后，它留在库里的提醒一次性撤�
     await expect(retireCloseSweepAlerts({ db: broken }, [repo], () => new Date())).rejects.toThrow(
       '连不上库',
     );
+  });
+});
+
+// 要真 Temporal 开发服务端的（CI 里装命令行的那一台就是装在有这个文件的台上，packages/conventions/test/test-split.test.ts 钉着）：
+// 摘出 Temporal 之后，这两件靠的是真服务端的行为，测试服务端和假客户端说明不了。
+describe('定时任务摘出 Temporal 之后，和真 Temporal 开发服务端对一遍（#1072）', { timeout: 300_000 }, () => {
+  it('老的 Schedule（含人手暂停过的）一次删光，再来一遍都是「本来就没有」', async () => {
+    const real = await createRealEnv();
+    try {
+      const { client } = real;
+      for (const r of RETIRED_SCHEDULES) {
+        await client.schedule.create({
+          scheduleId: r.id,
+          spec: { intervals: [{ every: '15 minutes' }] },
+          action: { type: 'startWorkflow', workflowType: 'canaryWorkflow', taskQueue: 'fleet', args: [] },
+          // 法国那四个就是人手暂停着的
+          ...(r.id === 'canary' ? { state: { paused: true } } : {}),
+        });
+      }
+      const first = await deleteRetiredSchedules(client);
+      expect(Object.keys(first).sort()).toEqual(RETIRED_SCHEDULES.map((r) => r.id).sort());
+      expect(Object.values(first).every((v) => v === 'deleted')).toBe(true);
+      // 再来一遍：服务端已经没有它们了（用删的结局说话；schedule.list 走的可见性库有延迟，删完马上列还会列到）
+      const second = await deleteRetiredSchedules(client);
+      expect(Object.values(second).every((v) => v === 'absent')).toBe(true);
+    } finally {
+      await real.teardown();
+    }
+  });
+
+  it('巡检同一时刻只起一轮：已经有一轮在跑，第二次起被 Temporal 拒掉、接上第一轮；那一轮收了，下一次照常起', async () => {
+    const real = await createRealEnv();
+    try {
+      const { client } = real;
+      const first = await startCanaryWorkflow(client, 'fleet-1072');
+      expect(first.started).toBe(true);
+      const again = await startCanaryWorkflow(client, 'fleet-1072');
+      expect(again.started).toBe(false);
+      if (!first.started) throw new Error('第一次该是起了新的一轮');
+      expect((await again.handle.describe()).runId).toBe(first.handle.firstExecutionRunId);
+      // 没有工人接这个队列，那一轮一直是「在跑」；收掉它（相当于一轮走完）之后，同一个编号能再起
+      await first.handle.terminate('测试收尾');
+      const next = await startCanaryWorkflow(client, 'fleet-1072');
+      expect(next.started).toBe(true);
+      if (next.started) await next.handle.terminate('测试收尾');
+    } finally {
+      await real.teardown();
+    }
   });
 });
