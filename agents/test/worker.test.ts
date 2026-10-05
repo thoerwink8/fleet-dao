@@ -97,7 +97,7 @@ function writeSkeleton(home: string, text: string) {
   writeFileSync(skeletonFile(home), text);
 }
 
-/** repo 是一个真实存在的临时目录（不是 git 仓，git/gh/pnpm 全是假的），worktreeDir 是它的兄弟目录 fd-w-<name>。 */
+/** repo 是一个真实存在的临时目录（不是 git 仓，git/gh/pnpm 全是假的），worktreeDir 是它里面的 .claude/worktrees/w-<name>。 */
 function world() {
   const home = mkdtempSync(join(tmpdir(), 'fleet-worker-home-'));
   const parent = mkdtempSync(join(tmpdir(), 'fleet-worker-parent-'));
@@ -212,7 +212,7 @@ const skeletonWith = (models: Record<string, unknown>) =>
 
 /** start 的一份合格 meta：clean/status/stop 的用例不走 start，直接手写一份，省得每次都跑一遍 start 的六步。 */
 function validMeta(w: ReturnType<typeof world>, name: string, over: Record<string, unknown> = {}) {
-  const worktree = join(w.parent, `fd-w-${name}`);
+  const worktree = join(w.repo, '.claude', 'worktrees', `w-${name}`);
   return {
     name,
     model: 'grok',
@@ -265,7 +265,7 @@ describe('start：happy path', () => {
     const code = await w.run(['start', '--model', 'grok', '--name', 'w1', '--brief', briefFile]);
 
     expect(code).toBe(0);
-    const worktreeDir = join(w.parent, 'fd-w-w1');
+    const worktreeDir = join(w.repo, '.claude', 'worktrees', 'w-w1');
     expect(w.gitCalls).toEqual([
       { args: ['rev-parse', '--is-inside-work-tree'], cwd: w.repo },
       { args: ['worktree', 'list', '--porcelain'], cwd: w.repo },
@@ -343,7 +343,7 @@ describe('start：happy path', () => {
     ]);
 
     expect(code).toBe(0);
-    const worktreeDir = join(w.parent, 'fd-w-w2');
+    const worktreeDir = join(w.repo, '.claude', 'worktrees', 'w-w2');
     const promptFile = join(w.home, '.fleet-dao', 'workers', 'w2', 'prompt.txt');
     expect(w.spawnCalls).toHaveLength(1);
     const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
@@ -550,7 +550,7 @@ describe('start：思考档位照仓里的路由骨架（#470，本机读不到�
 describe('start：【故意造出的失败】', () => {
   it('工作树已经存在：拒绝，退出码 3，不跑 git fetch/worktree add', async () => {
     const w = world();
-    mkdirSync(join(w.parent, 'fd-w-dup'), { recursive: true }); // 提前占好目录，模拟已经有一棵工作树
+    mkdirSync(join(w.repo, '.claude', 'worktrees', 'w-dup'), { recursive: true }); // 提前占好目录，模拟已经有一棵工作树
     const code = await w.run(['start', '--model', 'grok', '--name', 'dup', '--brief', brief(w)]);
     expect(code).toBe(3);
     expect(w.err.join('\n')).toContain('工作树已经存在');
@@ -562,7 +562,7 @@ describe('start：【故意造出的失败】', () => {
     w.gitReplies.push(
       ok('true'),
       ok(
-        `worktree ${w.repo}\nHEAD abc\nbranch refs/heads/main\n\nworktree ${join(w.parent, 'fd-w-dup2')}\nHEAD def\nbranch refs/heads/w/dup2\n`,
+        `worktree ${w.repo}\nHEAD abc\nbranch refs/heads/main\n\nworktree ${join(w.repo, '.claude', 'worktrees', 'w-dup2')}\nHEAD def\nbranch refs/heads/w/dup2\n`,
       ),
     );
     const code = await w.run(['start', '--model', 'grok', '--name', 'dup2', '--brief', brief(w)]);
@@ -617,7 +617,7 @@ describe('start：【故意造出的失败】', () => {
       'high',
     ]);
     expect(spec.stdinFile).toBe(promptFile);
-    expect(spec.cwd).toBe(join(w.parent, 'fd-w-w7'));
+    expect(spec.cwd).toBe(join(w.repo, '.claude', 'worktrees', 'w-w7'));
     const prompt = readFileSync(promptFile, 'utf8');
     for (const gate of ['对外发布', '花钱', '删数据', '改标准']) expect(prompt, gate).toContain(gate);
     expect(prompt).toContain('卡住：人闸——');
@@ -771,7 +771,7 @@ describe('start：【故意造出的失败】', () => {
     expect(meta.pidUncertain).toBe(true);
     expect(meta.pidUncertainWhy).toContain('没读到有效的 launch-result.json');
     expect(meta.model).toBe('grok');
-    expect(meta.worktree).toBe(join(w.parent, 'fd-w-w12'));
+    expect(meta.worktree).toBe(join(w.repo, '.claude', 'worktrees', 'w-w12'));
   });
 });
 
@@ -1114,7 +1114,7 @@ describe('clean', () => {
     const code = await w.run(['clean', '--name', 'c1']);
     expect(code).toBe(0);
     expect(w.gitCalls).toEqual([
-      { args: ['worktree', 'remove', join(w.parent, 'fd-w-c1'), '--force'], cwd: w.repo },
+      { args: ['worktree', 'remove', join(w.repo, '.claude', 'worktrees', 'w-c1'), '--force'], cwd: w.repo },
       { args: ['branch', '-D', 'w/c1'], cwd: w.repo },
     ]);
     expect(w.meta('c1').cleanedAt).toBe(NOW.toISOString());
