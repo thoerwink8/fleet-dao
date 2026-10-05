@@ -7,14 +7,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  freshBeforeSubagent,
-  gitCall,
-  gitOk,
-  gitWhy,
-  SUBAGENT_DIRECT_MS,
-  SUBAGENT_FETCH_MS,
-} from './fresh-main.mjs';
+import { freshBeforeSubagent, SUBAGENT_DIRECT_MS, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
+import { gitOk, gitRunner, gitWhy } from './git-run.mjs';
 import {
   armForBackground,
   cleanId,
@@ -2086,6 +2080,42 @@ export function decide(raw, fallbackCwd = '') {
   return { code: 0 };
 }
 
+/**
+ * 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成才拦（fresh-main.mjs 的 freshBeforeSubagent）。
+ * 这一步自己出错不拦，但返回一句不拦的话给调用方写进 stderr：原来整段吞掉，子代理会从旧主线切工作树，没有任何提示（全仓审查第 4 路 S9）。
+ * 输入认不出不算它出错（返回 null），由 decide 按拦处理。
+ * @param {string} raw 钩子的原始输入
+ * @param {{ fresh?: typeof freshBeforeSubagent, cwd?: string }} [deps] 测试换掉取远端那一步
+ * @returns {{ block: boolean, message: string } | null}
+ */
+export function subagentFreshness(raw, { fresh = freshBeforeSubagent, cwd = process.cwd() } = {}) {
+  /** @type {unknown} */
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  try {
+    const given = prop(input, 'cwd');
+    return fresh({
+      tool: prop(input, 'tool_name') ?? prop(input, 'toolName'),
+      toolInput: prop(input, 'tool_input') ?? prop(input, 'toolInput'),
+      cwd: typeof given === 'string' && given ? given : cwd,
+      git: gitRunner(SUBAGENT_FETCH_MS, SUBAGENT_DIRECT_MS),
+      okOf: gitOk,
+      whyOf: gitWhy,
+    });
+  } catch (err) {
+    return {
+      block: false,
+      message:
+        `fleet-guard：起子代理前把 origin/main 取到最新这一步自己出错了（${err instanceof Error ? err.message : String(err)}），没取成、也没拦；` +
+        '子代理的工作树可能从旧主线切，交代里写明开工先 git fetch origin main 再 git rebase origin/main。',
+    };
+  }
+}
+
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -2116,37 +2146,17 @@ if (isMain()) {
     if (id && startsBackground(tool, toolInput)) armForBackground({ dir: stateDir(), sessionId: id });
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
-    // 创始人的话欠着没送达：送达类工具清账；这一轮结束不了又欠了太久，把这一次调用拦下、只拦一次（unattended.mjs 的 nagIfOwed）
+    // 创始人的话欠着没送达：送达类工具清账；这一轮结束不了又欠了太久，把这一次调用拦下、只拦一次（unattended.mjs 的 nagIfOwed）。
+    // 欠账文件坏了、这一步自己出错：只往 stderr 写一句，不拦
     const nag = id ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
-    if (nag) {
-      process.stderr.write(`${nag}\n`);
-      process.exit(2);
-    }
+    if (nag) process.stderr.write(`${nag.message}\n`);
+    if (nag?.block) process.exit(2);
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }
-  // 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成才拦（fresh-main.mjs）。出错吞掉，不影响放行
-  try {
-    /** @type {unknown} */
-    const input = JSON.parse(raw);
-    const stale = freshBeforeSubagent({
-      tool: prop(input, 'tool_name') ?? prop(input, 'toolName'),
-      toolInput: prop(input, 'tool_input') ?? prop(input, 'toolInput'),
-      cwd:
-        typeof prop(input, 'cwd') === 'string' && prop(input, 'cwd')
-          ? String(prop(input, 'cwd'))
-          : process.cwd(),
-      git: gitCall(SUBAGENT_FETCH_MS, SUBAGENT_DIRECT_MS),
-      okOf: gitOk,
-      whyOf: gitWhy,
-    });
-    if (stale) {
-      process.stderr.write(`${stale.message}\n`);
-      process.exit(2);
-    }
-  } catch {
-    // 取不到、认不出都不拦：这一步只是顺手
-  }
+  const fresh = subagentFreshness(raw);
+  if (fresh) process.stderr.write(`${fresh.message}\n`);
+  if (fresh?.block) process.exit(2);
   if (backgroundOnly) process.exit(0);
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录
   const verdict = decide(raw, process.cwd());

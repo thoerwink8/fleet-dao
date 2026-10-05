@@ -497,7 +497,8 @@ export const KIMI_UNSUPPORTED =
 
 // —— 状态目录 ——
 
-const workersDir = (home) => join(home, '.fleet-dao', 'workers');
+/** 和开会话钩子 session-start.mjs 的 WORKERS_REL 同一处（互相 import 不了，agents/test/hooks-shared.test.ts 钉着相等） */
+export const workersDir = (home) => join(home, '.fleet-dao', 'workers');
 const stateDir = (home, name) => join(workersDir(home), name);
 const metaFile = (home, name) => join(stateDir(home, name), 'meta.json');
 

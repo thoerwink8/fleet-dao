@@ -8,30 +8,20 @@
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」，这里只用 JSON 的 decision，免得读不懂输入也拦下收尾
 // （code.claude.com/docs/en/hooks.md「Stop」「Stop decision control」两节，2026-10-03 又核了一遍）。
 // 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开时改出「拦下」或「接着聊」、开着时变得不拦，那边都会红。
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gitRunner, gitOk as ok } from './git-run.mjs';
 import { cleanId, decideStop, stateDir, withOwed } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
 const TEMP_LIKE = /\.(png|jpe?g|gif|json|log|txt)$/i;
 
-/** git 跑一条命令：{ status, stdout, stderr, error }（和 session-start.mjs 的 gitRunner 同一个形状） */
-export function gitRunner(timeoutMs = 5_000) {
-  return (cwd, args) => {
-    const r = spawnSync('git', args, {
-      cwd,
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error };
-  };
-}
+/** 收尾钩子跑 git 的超时：只读本地两条，多等无益 */
+export const STOP_GIT_MS = 5_000;
 
-const ok = (r) => r.status === 0 && !r.error;
+/** git 跑一条命令：钩子共用的那一份（git-run.mjs），测试从这里拿 */
+export { gitRunner };
 
 /** 这个 cwd 所在仓的根目录；不是 git 仓、查不到都是 null（不当错误，静悄悄不提醒） */
 export function repoRoot(cwd, git) {
@@ -101,7 +91,7 @@ if (isMain()) {
   // stop_hook_active：这一轮是别的 Stop 钩子把对话带下去才有的，不重复提醒仓根的临时文件
   if (input?.stop_hook_active !== true) {
     try {
-      const out = stopCheck({ cwd: pickCwd(input), git: gitRunner() });
+      const out = stopCheck({ cwd: pickCwd(input), git: gitRunner(STOP_GIT_MS) });
       if (out) notes.push(out.systemMessage);
     } catch {
       // 钩子自己出错不影响会话收尾：安安静静退出，别把「查不成」搞成「拦下」

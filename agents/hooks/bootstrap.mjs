@@ -17,9 +17,9 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { SYNC_DIR as SYNC_REL } from './sync-source.mjs';
 
 const HOOKS_REL = join('.fleet-dao', 'hooks');
-const SYNC_REL = join('.fleet-dao', 'origin-main');
 const SESSION_SCRIPT = 'session-start.mjs';
 
 const NOW_STYLE = /\/\.fleet-dao\/hooks\/([\w.-]+\.mjs)(?![\w.-])/;
