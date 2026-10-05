@@ -13,7 +13,6 @@ import {
   scopePrefix,
   scopeUnit,
 } from '../src/procs.ts';
-import { createHost } from '../src/shell/tools.ts';
 import { fakeAgent, fixturePath, tempDir } from './helpers.ts';
 
 const onPosix = process.platform !== 'win32';
@@ -171,7 +170,7 @@ describe('生产配置下不进 scope 就不起', () => {
     ).not.toThrow();
   });
 
-  it('接线：起进程、接口外壳的工具在生产配置下没给 scope 都拒', async () => {
+  it('接线：起进程在生产配置下没给 scope 就拒', async () => {
     const saved = { VITEST: process.env.VITEST, FLEET_ENV: process.env.FLEET_ENV };
     delete process.env.VITEST;
     delete process.env.FLEET_ENV;
@@ -188,9 +187,6 @@ describe('生产配置下不进 scope 就不起', () => {
         { onLine: () => {} },
       );
       expect(report.spawnError).toContain('必须进 scope');
-      expect(() =>
-        createHost({ cwd: tempDir(), runId: 'r', env: {}, commandTimeoutMs: 1_000, maxOutputChars: 100 }),
-      ).toThrow('必须进 scope');
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
@@ -299,23 +295,6 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
         .filter((e) => e.action === 'stop')
         .map((e) => e.args),
     ).toContainEqual(['run-s2']);
-  }, 20_000);
-
-  it('接口外壳的读文件经帮手：原样返回（\\r、末尾换行都在），不混进 stderr；读不了时报 stderr', async () => {
-    const cwd = tempDir();
-    const host = createHost({
-      cwd,
-      runId: 'run-h1',
-      env: { PATH: '/usr/bin:/bin', FLEET_FAKE_SCOPE_LOG: log },
-      commandTimeoutMs: 10_000,
-      maxOutputChars: 1_000,
-      scope: scopeOf('run-h1'),
-    });
-    const content = 'a\r\nb\n\n';
-    await host.writeFile('d/x.txt', content);
-    expect(readFileSync(join(cwd, 'd', 'x.txt'), 'utf8')).toBe(content);
-    expect(await host.readFile('d/x.txt')).toBe(content);
-    await expect(host.readFile('nope.txt')).rejects.toThrow('nope.txt');
   }, 20_000);
 
   it('命令没写绝对路径、环境里有白名单以外的变量：不起会话，交报告说没起来', async () => {

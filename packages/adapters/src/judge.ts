@@ -13,7 +13,7 @@ export interface RunFacts {
    */
   launchUnknown?: string;
   killed?: KillReason;
-  /** 进程退出码。不是进程的插头（Mirasim、接口外壳）不带。 */
+  /** 进程退出码。不是进程的插头（Mirasim）不带。 */
   exitCode?: number | null;
   /**
    * 会话脱开引擎跑（走文件）时：会话已经不在了、退出码却没记下来（引擎不在时被强杀、机器重启过）。没有终帧就判 exit_lost
