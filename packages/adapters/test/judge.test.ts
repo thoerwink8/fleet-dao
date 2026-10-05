@@ -90,7 +90,7 @@ describe('judgeRun', () => {
     ).toBe('session_mismatch');
   });
 
-  it('不是进程的插头（Mirasim、接口外壳）：没有退出码也能判，没终帧时说「会话结束」并带上最后的原话', () => {
+  it('不是进程的插头（Mirasim）：没有退出码也能判，没终帧时说「会话结束」并带上最后的原话', () => {
     expect(judgeRun({ terminal: { isError: false, detail: 'done' }, quotaExhausted: false }).outcome).toBe(
       'ok',
     );
