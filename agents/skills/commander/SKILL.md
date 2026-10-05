@@ -47,6 +47,17 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 - **子代理的模型**：派 Claude 子代理（workflow 里起的也算）只用 Sonnet 或 Opus（优先 Sonnet，创始人 2026-10-05「派活我推荐sonnet5.5>opus5.5」），一律写明 `model: "sonnet"`（或 `"opus"`）：设置里的默认（Sonnet 5.5，`docs/agents-permissions.md`「子代理默认模型」）只兜住定义里没写模型的（`general-purpose`），Plan 这类定义里写了 `inherit` 的不写就跟主会话同一个模型，而主会话可能是创始人自己选的 Fable，`claude-code-guide` 不写是 Haiku；用 `fork` 起的总跟主会话同一个模型、写了 `model` 也不管用，主会话在 Fable 上时别用 `fork`。机器派的会话（引擎、工人、路由）、子代理、VPS 和 WSL 上的会话都永不用 Fable，Fable 只在他本机的主对话里由他自己选（`docs/decisions/0017-fable-only-in-founder-main-session.md`）。
 - 本机只做三类：断链急修、要本机资源的、指挥官本职；其余照 `AGENTS.md` 本仓段「本机和法国怎么分活」。
 
+## 发版先暂停
+
+创始人 2026-10-05 约 21:00：「每次发版本时，尽量在感觉要发版本的时候，就先把手头的活暂停。等手头的工作都暂停完，就可以开始发版本。之后按照最优的顺序，把当前的任务清单依次执行下去。」
+
+- 觉得要发版了，先跑 `node $S/release-train.mjs start --sha <提交> --founder-ok "<原话>"`（或 `--tag vN`），别先发再收拾。要等很久，用 `run_in_background` 起。
+- 暂停期间本机 `worker.mjs start` 不起新工人，法国引擎总开关关着。在跑的收尾了才发；到点还有拖后腿的就停下列名单，不硬发。
+- 发版是对外发布：`--founder-ok` 要带创始人这一次发版的原话，没带就拒；上面这段流程规矩不算发版授权。
+- 发完法国默认保持关，开不开由创始人在页面上点；他明说授权开回，才加 `--restore`。
+- 发完它只打印清单初稿，你按这个顺序排再派：挡路的先、被依赖的先、要法国真机验的攒进同一个窗口、再看价值；事件驱动的不排。
+- `release-train.mjs status` 看走到哪；`abort` 撤暂停（还没发就恢复原状，发了就保持关）。
+
 ## 盯到合并
 
 - 谁开的 PR 谁负责到合并：用 `pnpm pr:open` 开（当场挂自动合并，改标准的除外），不盯、不 `--watch`；红了才回来修、冲突了并主线；按 PR 最多 3 轮，超了写清卡在哪、交给创始人。
