@@ -1384,7 +1384,7 @@ compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
     if [[ "$st" == ok ]]; then
       ok "后端报 $k 好"
     elif [[ "$k" == engine ]] && ! has_service fleet-engine; then
-      # 本机没启用引擎（$RELEASE_ENV 的 FLEET_SERVICES 里没有它，比如法国 2026-09-29 起临时关了）：后端报「引擎不在」是预期的；
+      # 本机没启用引擎（$RELEASE_ENV 的 FLEET_SERVICES 里没有它，比如法国 2026-09-29 到 2026-10-05 临时关过）：后端报「引擎不在」是预期的；
       # 没这一条，切之前引擎还好、这一版把它撤掉，就会被当成这一版的错退回
       pending "后端报 engine 不好：$why（本机没启用引擎：$RELEASE_ENV 的 FLEET_SERVICES 里没有 fleet-engine，是预期的，不退回）"
     elif [[ " $DRIFTING_HEALTH_ITEMS " == *" $k "* ]]; then
