@@ -386,7 +386,7 @@ export async function invokeVerifier(
   };
   const who = `家族 ${picked.family}（model ${picked.modelId}）`;
 
-  // verdict 行 = stdout 最后一行非空（与 segments/verify.ts 的形状一致）。
+  // verdict 行 = stdout 最后一行非空（judgeVerify 按这一行判 pass / fail）。
   const lastLineOfStdout =
     oneShotResult.stdout
       .trim()

@@ -150,8 +150,3 @@ export function notWiredRuns(deps: { tmpDir: string; now?: () => Date }): RunsWr
     },
   };
 }
-
-/** 真到 #556 接上前的临时：只是把 RunsWriter 暴露出来过类型。 */
-export function assertRunsWriter(w: RunsWriter): RunsWriter {
-  return w;
-}

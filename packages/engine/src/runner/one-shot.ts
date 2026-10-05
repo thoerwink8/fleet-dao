@@ -27,9 +27,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { errMessage } from '@fleet-dao/shared/util';
-import { SLICE_MEMORY_HIGH_MB } from '../limits.ts';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
-import { AGENT_SLICE_PATH, admitSessionMemory, CGROUP_ROOT } from '../real/memory-admission.ts';
+import { admitSessionMemory } from '../real/memory-admission.ts';
 import type { AnyBrief } from './brief.ts';
 import { routeOutcomeOf } from './evidence.ts';
 import { NoSlotError, type RunRecord, type RunStart, RunStartSchema, type RunsWriter } from './not-wired.ts';
@@ -483,18 +482,6 @@ function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
     ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
     ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
     ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
-  };
-}
-
-/** 生产装配：沿用 real/memory-admission.ts 的真实现。打包到一起方便 main.ts 用。 */
-export function productionMemoryAdmission(overrides: Partial<MemoryAdmissionDeps> = {}): MemoryAdmissionDeps {
-  return {
-    readText: (path) => import('node:fs/promises').then((fs) => fs.readFile(path, 'utf8')),
-    cgroupRoot: CGROUP_ROOT,
-    slicePath: AGENT_SLICE_PATH,
-    sliceHighMb: SLICE_MEMORY_HIGH_MB,
-    reservePerSessionMb: 2048,
-    ...overrides,
   };
 }
 
