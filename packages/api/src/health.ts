@@ -85,7 +85,7 @@ export async function runHealthChecks(
 /**
  * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、
  * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线、飞书网关还来不来、会话用户切号有没有要人看的、GitHub 两个机器人的
- * 权限够不够、全流程巡检最近一轮的结论、看门狗自己在不在按期跑。main.ts 用它装配，测试也用它，是同一份代码。
+ * 权限够不够、全流程巡检最近一轮的结论、看门狗自己在不在按期跑、快照推没推出去。main.ts 用它装配，测试也用它，是同一份代码。
  */
 export function serviceHealthChecks(parts: {
   /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
@@ -117,6 +117,9 @@ export function serviceHealthChecks(parts: {
   /** 看门狗（watchdog-health.ts，#203）：它自己最近一轮几点跑完、有没有过期；不在正式环境报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
   watchdog: { check(): Promise<void | string>; readonly notWired?: string };
+  /** 往正式环境的看板推快照（node-reporter.ts）：没配推送地址报「未接」；配了，连着没推成、第一轮还没推完都报红。 */
+  // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
+  nodeReport: { check(): Promise<void | string>; readonly notWired?: string };
 }): HealthCheck[] {
   return [
     { name: 'database', check: parts.probeDb },
@@ -144,6 +147,12 @@ export function serviceHealthChecks(parts: {
     { name: 'canary', check: () => parts.canary.check(), ...notWired(parts.canary.notWired) },
     // 看门狗停了、没跑成会跟着引擎自己变红（和这一版好不好无关）：发版脚本同样只标待处理、不退回
     { name: 'watchdog', check: () => parts.watchdog.check(), ...notWired(parts.watchdog.notWired) },
+    // 推不成跟着网络、对方自己变红（和这一版好不好无关）：本机档配上推送地址之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加上它
+    {
+      name: 'node_report',
+      check: () => parts.nodeReport.check(),
+      ...notWired(parts.nodeReport.notWired),
+    },
   ];
 }
 

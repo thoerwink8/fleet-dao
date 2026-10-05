@@ -71,6 +71,11 @@ export interface Config {
    * （feishuGatewayToken 记成 null），健康页的 feishu_gateway 报「未接」而不是一直等一个永远不会来的网关（#803）。
    */
   feishuOff: boolean;
+  /**
+   * 把这一台的主页、环境页快照推给正式环境的看板（看板多机，node-reporter.ts）：FLEET_NODE_REPORT_URL（收快照的完整地址）和
+   * FLEET_NODE_REPORT_TOKEN（那边发的通行证）两项一起配才推，都没配是 null（不推，/healthz 的 node_report 报「未接」）。
+   */
+  nodeReport: { url: URL; token: string } | null;
 }
 
 export class ConfigError extends Error {
@@ -208,6 +213,13 @@ export function loadConfig(env: Env): Config {
 
   const { temporalAddress, temporalNamespace, fleetTaskQueue } = temporalSettings(env);
 
+  const nodeReport = nodeReportTarget(
+    env,
+    fleetEnv,
+    [sessionSecret, agentTokenSecret, gatewayTokenEnv],
+    problems,
+  );
+
   if (
     problems.length > 0 ||
     !publicUrl ||
@@ -240,7 +252,49 @@ export function loadConfig(env: Env): Config {
     engineOff: !engineEnabled(env),
     feishuOff,
     machineName: machineName(env),
+    nodeReport,
   };
+}
+
+/**
+ * 推快照的目标（FLEET_NODE_REPORT_URL + FLEET_NODE_REPORT_TOKEN）：两项都空 = 不推；只配一项、地址认不出、生产上不是 https、
+ * 地址里带账号密码、通行证太短或和别的密钥相同，都拒启动（不猜着推、不悄悄不推）。
+ */
+function nodeReportTarget(
+  env: Env,
+  fleetEnv: FleetEnv,
+  otherSecrets: readonly (string | null)[],
+  problems: string[],
+): Config['nodeReport'] {
+  const rawUrl = env.FLEET_NODE_REPORT_URL?.trim() || null;
+  const token = env.FLEET_NODE_REPORT_TOKEN?.trim() || null;
+  if (rawUrl === null && token === null) return null;
+  if (rawUrl === null || token === null) {
+    problems.push(
+      'FLEET_NODE_REPORT_URL 和 FLEET_NODE_REPORT_TOKEN 要一起给（都不给 = 这台不往别的看板推快照）',
+    );
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    problems.push(`FLEET_NODE_REPORT_URL 不是合法地址：${rawUrl}`);
+    return null;
+  }
+  const before = problems.length;
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    problems.push('FLEET_NODE_REPORT_URL 只能是 http(s) 地址');
+  } else if (fleetEnv === 'production' && url.protocol !== 'https:') {
+    problems.push('FLEET_NODE_REPORT_URL 在生产环境必须是 https（通行证走在请求头里）');
+  }
+  if (url.username || url.password)
+    problems.push('FLEET_NODE_REPORT_URL 里不许带账号密码：通行证放 FLEET_NODE_REPORT_TOKEN');
+  if (token.length < MIN_SECRET_LENGTH) {
+    problems.push(`FLEET_NODE_REPORT_TOKEN 太短：至少 ${MIN_SECRET_LENGTH} 个字符`);
+  }
+  if (otherSecrets.includes(token)) problems.push('FLEET_NODE_REPORT_TOKEN 不能和别的密钥相同');
+  return problems.length > before ? null : { url, token };
 }
 
 /**

@@ -25,6 +25,7 @@ import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { type HealthReport, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { judgeHealthCheck } from '../src/judge-health.ts';
+import { createNodeReporter, NODE_REPORT_NOT_WIRED, nodeReportPart } from '../src/node-reporter.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import {
@@ -36,6 +37,7 @@ import {
 import { WATCHDOG_NOT_HERE, watchdogHealthCheck } from '../src/watchdog-health.ts';
 import { fakePostgres } from './fake-postgres.ts';
 import { judgeCatalog, judgeMachine, makeFakeBackend, recordJudgeCall } from './judge-fixture.ts';
+import { sampleSnapshot } from './node-snapshot-fixture.ts';
 
 /** 默认位置上没有的判断题配置（「未接」）。 */
 const NO_JUDGE = { path: join(tmpdir(), 'fleet-public-text-nowhere', 'jev.json'), explicit: false };
@@ -230,6 +232,31 @@ async function publicFailures(log: Logger) {
   await run('feishu-gateway', true, async () => {
     await seen.check();
   });
+  // 推快照（node-reporter.ts 三处）：第一轮还没推完、连着没推成、循环卡住了。对方地址、回体只进日志
+  let nodeClock = Date.now();
+  const nodeReporter = (fetchImpl: typeof fetch) =>
+    createNodeReporter({
+      target: { url: new URL('https://fleet-dao.internal.example/api/nodes/report'), token: 'x'.repeat(40) },
+      snapshot: async () => sampleSnapshot(),
+      codeSha: () => undefined,
+      log,
+      now: () => new Date(nodeClock),
+      fetch: fetchImpl,
+    });
+  const fresh = nodeReporter(async () => new Response(null, { status: 204 }));
+  await run('node-report-not-yet', true, async () => {
+    await fresh.healthCheck.check();
+  });
+  const refused = nodeReporter(async () => new Response('fleet-dao node key rejected', { status: 401 }));
+  await refused.pushOnce();
+  await run('node-report-failing', true, async () => {
+    await refused.healthCheck.check();
+  });
+  await fresh.pushOnce();
+  nodeClock += 60 * 60_000;
+  await run('node-report-stalled', true, async () => {
+    await fresh.healthCheck.check();
+  });
   return { reports, sites };
 }
 
@@ -267,6 +294,9 @@ describe('公开的健康报告', () => {
       // 切号提醒的标题只进日志
       expect(logs.some((l) => l.includes('会话用户切号没成'))).toBe(true);
       expect(JSON.stringify(reports)).not.toContain('切号没成');
+      // 推快照对方的地址、回体只进日志
+      expect(logs.some((l) => l.includes('node key rejected'))).toBe(true);
+      expect(JSON.stringify(reports)).not.toContain('internal.example');
     },
     TEST_DB_TIMEOUT_MS,
   );
@@ -288,6 +318,7 @@ describe('公开的健康报告', () => {
           githubApp: async () => {},
           canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
           watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
+          nodeReport: nodeReportPart(null),
         }),
         silentLogger,
       );
@@ -299,6 +330,11 @@ describe('公开的健康报告', () => {
       noted: await services(seen),
     };
     expect(pending.services.checks.engine).toEqual({ ok: true, status: 'not_wired', message: ENGINE_OFF });
+    expect(pending.services.checks.node_report).toEqual({
+      ok: true,
+      status: 'not_wired',
+      message: NODE_REPORT_NOT_WIRED,
+    });
     // 项名叫 judge 不叫 jev：jev 在公开页的禁用词名单上
     expect(pending.services.checks.judge).toMatchObject({ ok: true, status: 'not_wired' });
     expect(pending.services.checks.feishu_gateway).toEqual({

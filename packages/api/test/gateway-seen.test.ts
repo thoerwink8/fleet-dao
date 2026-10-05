@@ -32,6 +32,7 @@ function healthOf(feishuGateway: Parameters<typeof serviceHealthChecks>[0]['feis
     githubApp: async () => {},
     canary: { check: async () => {} },
     watchdog: { check: async () => {} },
+    nodeReport: { check: async () => {} },
   });
 }
 
