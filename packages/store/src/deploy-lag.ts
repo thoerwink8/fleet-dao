@@ -34,6 +34,11 @@ export const DEPLOY_LAG_LIMITS = {
   behindMs: 90 * 60_000,
   /** 装机脚本（france.sh，要人跑）落后主线这么久报。 */
   systemMs: 24 * 60 * 60_000,
+  /**
+   * 跟主线那一档（本机档，状态里 track 是 main，#1050）两次切换之间最短隔这么久（lib.mjs 的 MINOR_INTERVAL_MS，测试核对一样）：
+   * 这一档的「落后太久」在 behindMs 之外再宽这么多，不然每次都在等间隔的几个小时里报红。
+   */
+  minorIntervalMs: 6 * 60 * 60_000,
 } as const;
 
 const ALERT_PREFIX = 'deploy-lag:';
@@ -63,6 +68,8 @@ export const DeployLagState = z.object({
     .nullable()
     .optional(),
   markerError: z.object({ kind: z.string(), why: z.string(), at: Iso }).nullable().optional(),
+  /** 这台跟什么发：tag 只发版本标记（法国），main 跟主线上 CI 全绿的最新提交（本机档，没有 marker 字段）；老版本的自动发布没写它。 */
+  track: z.enum(['tag', 'main']).nullable().optional(),
   ci: z
     .object({
       sha: Sha,
@@ -393,7 +400,7 @@ function lagOf(
       steady: `${headWord}的 CI ${red ? '没通过' : '结论读不到'}`,
       detail: st.last?.detail ?? '',
     });
-  } else if (lag > L.behindMs) {
+  } else if (lag > L.behindMs + (st.track === 'main' ? L.minorIntervalMs : 0)) {
     add({
       code: 'behind',
       message: `${lagText}、${spoken(lag)}${waitingFor(st)}`,

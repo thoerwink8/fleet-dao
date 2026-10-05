@@ -40,6 +40,11 @@ export const CI_WORKFLOW = '.github/workflows/ci.yml';
  * 比这更早的提交查不到结论，当没查成、跳过——落后这么多，后端早就报红了。
  */
 export const CI_RUNS_PAGE = 100;
+/**
+ * 本机档（WSL）跟主线的小版本更新（#1050，创始人 2026-10-05「2 3 4 6 7 按照你推荐」第 3 点）：两次切换之间最短隔多久。
+ * 引擎每次换版本要先排空、重启，隔得太近就一直在排空。只算 release.sh 的历史里的切换（人手动的、自动退回的也算）。
+ */
+export const MINOR_INTERVAL_MS = 6 * 60 * 60_000;
 /** 提交落到主线这么久还查不到它的 CI 记录：不再当「还没开跑」，记没查成。 */
 export const CI_NO_RUN_MS = 30 * 60_000;
 /**
@@ -346,6 +351,12 @@ export function carryOver(prev) {
      */
     marker: null,
     markerError: null,
+    /**
+     * 这台跟什么发：tag＝只发版本标记（法国）；main＝跟主线上 CI 全绿的最新提交（本机档，#1050，这时没有 marker 这个字段：
+     * 后端数落后按主线头数）。读不出档位时按 tag 档（只发版本标记，不会误跟主线），原因写在 trackError。
+     */
+    track: null,
+    trackError: null,
     hold: null,
     waitingSince: p.waitingSince ?? null,
     busy: null,
@@ -573,6 +584,105 @@ function markerFailed(st, now, kind, whyText, tag = null) {
 }
 
 /**
+ * 这台跟什么发（io.readTrack：法国是 'tag'，本机档是 'main'，真实现按 /etc/fleet-dao/profile 定）。读不出、认不出：按 'tag'
+ * ——只发版本标记，不会误跟主线——原因记进 st.trackError；不为这个停发（档位文件坏了，配置对账那边已经在报）。
+ */
+async function trackStep(io, st) {
+  try {
+    const track = await io.readTrack();
+    if (track !== 'tag' && track !== 'main') throw new Error(`认不出的档「${String(track).slice(0, 20)}」`);
+    st.track = track;
+    st.trackError = null;
+  } catch (e) {
+    st.track = 'tag';
+    st.trackError = `这台按哪个档发没读到（${why(e)}）：按 tag 档，只发版本标记，不会误跟主线`;
+  }
+  return st.track;
+}
+
+/**
+ * 跟主线的那一档（本机档 WSL，#1050）：发主线上 CI 全绿的最新提交，最短隔 MINOR_INTERVAL_MS 切一次；没有版本标记这回事
+ * （st 里不写 marker，后端按主线头数落后，容忍这段间隔）。「按版本发」的判法在 markerStep 那头，法国不走这里。
+ * 其余判法和按版本发一样：上一轮没收到结果先收尾、人手动切过的不跟人抢、发过没成的和比它旧的不再自动试、不降级。
+ * 往回找的是「比在用的新、没被人按住、没被判过没成」的那一段里 CI 全绿的最新一个：主线头的 CI 还在跑或红了，发往回找到的绿的。
+ */
+async function mainTrackStep(io, st, now, { commits, current, busyWhy }) {
+  delete st.marker;
+  delete st.markerError;
+  // 之前按版本发时留下的标记报警不再成立
+  resolveKeyLater(st, MARKER_UNREADABLE_KEY);
+  for (const a of [...st.alerts]) {
+    if (a.key.startsWith(MARKER_PREFIX)) resolveKeyLater(st, a.key);
+  }
+  if (busyWhy) {
+    act(st, now, 'release-busy', busyWhy);
+    return current;
+  }
+  const head = commits[0];
+  if (current === head.sha) {
+    st.waitingSince = null;
+    if (!(st.attempt?.sha === current && st.attempt.pending === true)) resolveLater(st, FAILED_PREFIX);
+    act(st, now, 'up-to-date', `在用的 ${short(current)} 就是主线头`);
+    return current;
+  }
+  let history;
+  try {
+    history = parseHistory(await io.readHistory());
+  } catch (e) {
+    act(st, now, 'history-unreadable', why(e));
+    return current;
+  }
+  const { candidates, hold, failed, stop } = releasable(commits, current, history, st.attempt);
+  if (hold) {
+    st.waitingSince = null;
+    st.hold = hold;
+    act(
+      st,
+      now,
+      'hold',
+      `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交`,
+    );
+    return current;
+  }
+  if (candidates.length === 0) {
+    st.waitingSince = null;
+    act(
+      st,
+      now,
+      'failed-before',
+      failed
+        ? `${short(failed.sha)} ${failed.why}，它和比它旧的不再自动发，等主线出新提交`
+        : '主线上没有比在用的新、又能自动发的提交',
+    );
+    return current;
+  }
+  // 最短间隔：引擎每次换版本都要排空、重启。离上一次切换（含人手动的、自动退回的）不到这么久，这一轮不发；
+  // 放在问 CI 之前，等的这些轮不白问 GitHub
+  const lastSwitch = history.findLast((h) => SWITCHES.has(h.event));
+  if (lastSwitch && now - Date.parse(lastSwitch.at) < MINOR_INTERVAL_MS) {
+    const next = iso(Date.parse(lastSwitch.at) + MINOR_INTERVAL_MS);
+    act(
+      st,
+      now,
+      'interval-wait',
+      `离上一次切换（${lastSwitch.at}）不到 ${MINOR_INTERVAL_MS / 3_600_000} 小时，最早 ${next} 再发；主线上有 ${candidates.length} 个更新的提交在等`,
+    );
+    return current;
+  }
+  const pick = await pickLatestGreen(io, st, now, candidates);
+  if (!pick.target) {
+    if (pick.verdict === 'red') st.waitingSince = null;
+    act(st, now, `ci-${pick.verdict}`, `${pick.detail}${stop ? `；${stop}` : ''}`);
+    return current;
+  }
+  const behind =
+    pick.target.sha === head.sha
+      ? ''
+      : `：主线头 ${short(head.sha)} 的 CI 还没全绿，发往回找到的 CI 全绿的最新提交`;
+  return publishTarget(io, st, now, current, { target: pick.target.sha, via: behind, tag: null });
+}
+
+/**
  * 发布那一半：返回在用的提交号（读到了，含「还没发布过」的 null），读不到返回 undefined（规矩那一半也不做）。
  * 发的不是主线头，是**版本标记**（版本号最大的那个 `v<N>` tag，且它指向的提交是 origin/main 的祖先；决定 0011 第 3 条）。
  * 标记读不到、认不出、不是祖先：明确失败 + 报警，不发主线头。
@@ -616,6 +726,9 @@ async function deployStep(io, st, now) {
     }
     if (!busyWhy) settleDangling(st, now, current);
   }
+
+  // 本机档（WSL）跟主线上 CI 全绿的最新提交；法国（和读不出档位时）只认版本标记
+  if ((await trackStep(io, st)) === 'main') return mainTrackStep(io, st, now, { commits, current, busyWhy });
 
   // 版本标记：这一轮发什么全看它。读不到 / 认不出 / 不是主线上的提交：报警、不发主线头（下面 markerStep 收尾）
   const marker = await markerStep(io, st, now, commits);
@@ -684,9 +797,19 @@ async function deployStep(io, st, now) {
     return current;
   }
   // 要发的：版本标记指向的那个提交（它的 CI 全绿；不是主线头也照发，这正是「按版本发」的意思）
-  const target = pick.target.sha;
-  const via = pick.via ? `：${pick.via}` : '';
+  return publishTarget(io, st, now, current, {
+    target: pick.target.sha,
+    via: pick.via ? `：${pick.via}` : '',
+    tag: marker.tag,
+  });
+}
 
+/**
+ * 发出去（按版本发、跟主线两个档共用）：问发布锁、问引擎开没开着、快进部署检出、存「在发」、跑 release.sh、记结果和报警。
+ * tag 是这一版的版本标记（跟主线档没有，是 null，报警和读数里只写提交号）。返回发完在用的提交号（读不到返回 undefined，
+ * 规矩那一半这一轮不做）；这一轮没发成（锁占着、引擎没查成、检出不让快进、等空闲）返回发之前的 current。
+ */
+async function publishTarget(io, st, now, current, { target, via, tag }) {
   let releaseBusy;
   try {
     releaseBusy = await io.releaseBusy();
@@ -735,7 +858,7 @@ async function deployStep(io, st, now) {
   const waited = st.waitingSince ? now - Date.parse(st.waitingSince) : 0;
   const busyOk = st.waitingSince !== null && waited >= IDLE_WAIT_MS;
 
-  st.sequence = publishSequence({ engineOn, target, tag: marker.tag });
+  st.sequence = publishSequence({ engineOn, target, tag });
 
   const before = st.attempt;
   st.attempt = {
@@ -809,7 +932,7 @@ async function deployStep(io, st, now) {
     detail: r.detail ?? '',
   };
   st.waitingSince = null;
-  const which = marker.tag ? `${marker.tag}（${short(target)}）` : short(target);
+  const which = tag ? `${tag}（${short(target)}）` : short(target);
   const afterNote = known ? '' : `；${st.currentError}`;
   if (r.code === 0) {
     resolveLater(st, FAILED_PREFIX);
@@ -845,7 +968,7 @@ async function deployStep(io, st, now) {
     `${FAILED_PREFIX}${target}`,
     `自动发布 ${which} 没成`,
     `release.sh 退出码 ${r.code}：${r.detail || '没给原因'}。${where}。日志：${r.log || '（没拿到路径）'}。` +
-      '这个版本标记和比它旧的不再自动试，等下一个版本标记（或人在法国以 root 重试：' +
+      `${tag ? '这个版本标记和比它旧的不再自动试，等下一个版本标记' : '这个提交和比它旧的不再自动试，等主线上下一个 CI 全绿的提交'}（或人在法国以 root 重试：` +
       `bash ${CHECKOUT}/deploy/release.sh ${target}）。`,
   );
   act(st, end, 'release-failed', `${which} 退出码 ${r.code}：${r.detail}${afterNote}`);
@@ -963,6 +1086,26 @@ async function pickTarget(io, st, now, marker, stop) {
   if (st.ci?.sha === marker.commit && st.ci.verdict === 'green') {
     return { target: { sha: marker.commit, at: marker.at }, via: '' };
   }
+  const { body, unread } = await readCiBody(io);
+  if (unread) {
+    st.ci = { sha: marker.commit, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
+    return { target: null, verdict: 'unknown', detail: `CI 的结论没查成：${unread}；这一轮不发` };
+  }
+  const v = ciVerdict(body, marker.commit, marker.at, now);
+  st.ci = { sha: marker.commit, verdict: v.verdict, detail: v.detail, checkedAt: iso(now) };
+  if (v.verdict === 'green') {
+    return { target: { sha: marker.commit, at: marker.at }, via: '' };
+  }
+  const lead = v.verdict === 'unknown' ? `没查成：${v.detail}` : v.detail;
+  return {
+    target: null,
+    verdict: v.verdict,
+    detail: `${marker.tag}（${short(marker.commit)}）的 ${lead}${stop ? `；${stop}` : ''}`,
+  };
+}
+
+/** 问一次 GitHub 要主线上 ci.yml 最近的运行：{ body }（认得出的运行列表）或 { unread }（读不到的原因：限流、回的认不出、连不上）。 */
+async function readCiBody(io) {
   let body = null;
   let unread = '';
   try {
@@ -984,20 +1127,36 @@ async function pickTarget(io, st, now, marker, stop) {
   } catch (e) {
     unread = `连不上 GitHub：${why(e)}`;
   }
+  return { body, unread };
+}
+
+/**
+ * 跟主线那一档（mainTrackStep）挑要发的提交：candidates（新的在前）里 CI 全绿的最新一个。一轮只问一次 GitHub，每个候选都从
+ * 这一份里判。一个绿的都没有：结论取最新那个候选的（pending / red / unknown，st.ci 记它），读不到整份也是 unknown——不发、不当成绿。
+ * 返回 { target: { sha, at } } 或 { target: null, verdict, detail }。
+ */
+async function pickLatestGreen(io, st, now, candidates) {
+  const newest = candidates[0];
+  const { body, unread } = await readCiBody(io);
   if (unread) {
-    st.ci = { sha: marker.commit, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
+    st.ci = { sha: newest.sha, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
     return { target: null, verdict: 'unknown', detail: `CI 的结论没查成：${unread}；这一轮不发` };
   }
-  const v = ciVerdict(body, marker.commit, marker.at, now);
-  st.ci = { sha: marker.commit, verdict: v.verdict, detail: v.detail, checkedAt: iso(now) };
-  if (v.verdict === 'green') {
-    return { target: { sha: marker.commit, at: marker.at }, via: '' };
+  let first = null;
+  for (const c of candidates) {
+    const v = ciVerdict(body, c.sha, c.at, now);
+    first ??= v;
+    if (v.verdict === 'green') {
+      st.ci = { sha: c.sha, verdict: 'green', detail: v.detail, checkedAt: iso(now) };
+      return { target: { sha: c.sha, at: c.at } };
+    }
   }
-  const lead = v.verdict === 'unknown' ? `没查成：${v.detail}` : v.detail;
+  st.ci = { sha: newest.sha, verdict: first.verdict, detail: first.detail, checkedAt: iso(now) };
+  const lead = first.verdict === 'unknown' ? `没查成：${first.detail}` : first.detail;
   return {
     target: null,
-    verdict: v.verdict,
-    detail: `${marker.tag}（${short(marker.commit)}）的 ${lead}${stop ? `；${stop}` : ''}`,
+    verdict: first.verdict,
+    detail: `主线最新的 ${short(newest.sha)} 的 ${lead}；往回数 ${candidates.length} 个比在用的新的提交里没有 CI 全绿的`,
   };
 }
 
@@ -1173,7 +1332,8 @@ export function summary(st) {
     const lag =
       st.current === st.main.head ? '跟上了' : idx > 0 ? `落后 ${idx} 个提交` : '不在主线最近的提交里';
     const ci = st.ci?.sha === st.main.head ? `，CI ${st.ci.verdict}` : '';
-    parts.push(`主线头 ${short(st.main.head)}${ci}；在用 ${short(st.current)}，${lag}`);
+    const follow = st.track === 'main' ? '（本机档跟主线：CI 全绿的最新提交，最短 6 小时切一次）' : '';
+    parts.push(`主线头 ${short(st.main.head)}${ci}；在用 ${short(st.current)}，${lag}${follow}`);
   } else {
     parts.push('主线头没读到过');
   }
