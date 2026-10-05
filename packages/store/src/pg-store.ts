@@ -70,25 +70,24 @@ import {
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import { nextCursorOf, pageOfSorted } from './paging.ts';
-import {
-  type AskRecord,
-  type AuditRecord,
-  type AutoDispatchChange,
-  type CommandClaim,
-  type GitHubDelivery,
-  type GitHubObjectVersion,
-  type JobRecord,
-  type NewAuditEntry,
-  type NotificationRecord,
-  type Page,
-  type PasswordCredentials,
-  type PullRequestRecord,
-  type RunPlan,
-  type SettingRecord,
-  type Store,
-  TableLockedError,
-  type TimelineRecord,
-  type User,
+import type {
+  AskRecord,
+  AuditRecord,
+  AutoDispatchChange,
+  CommandClaim,
+  GitHubDelivery,
+  GitHubObjectVersion,
+  JobRecord,
+  NewAuditEntry,
+  NotificationRecord,
+  Page,
+  PasswordCredentials,
+  PullRequestRecord,
+  RunPlan,
+  SettingRecord,
+  Store,
+  TimelineRecord,
+  User,
 } from './ports.ts';
 import {
   autoDispatchAudit,
@@ -113,7 +112,6 @@ const seq15 = (n: number) => String(n).padStart(15, '0');
 type UserRow = typeof users.$inferSelect;
 type AskRow = typeof asks.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
-
 
 function toUser(r: UserRow): User {
   return {
@@ -315,7 +313,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       isNull(idempotencyKeys.completedAt),
       eq(idempotencyKeys.claimedAt, new Date(token)),
     );
-
 
   return {
     // —— 人 ——
@@ -1053,7 +1050,82 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(eq(githubEvents.deliveryId, id));
       return { status: reclaimMissStatus(existing?.status) };
     },
-
+    async finishDelivery(id, token, outcome) {
+      const fields = outcomeFields(outcome);
+      const rows = await db
+        .update(githubEvents)
+        .set({
+          status: fields.status,
+          reason: fields.reason ?? null,
+          note: fields.note ?? null,
+          finishedAt: now(),
+        })
+        .where(
+          and(
+            eq(githubEvents.deliveryId, id),
+            eq(githubEvents.status, 'processing'),
+            eq(githubEvents.claimedAt, new Date(token)),
+          ),
+        )
+        .returning({ id: githubEvents.deliveryId });
+      return rows.length > 0;
+    },
+    async getDelivery(id) {
+      const [row] = await db.select().from(githubEvents).where(eq(githubEvents.deliveryId, id));
+      return row ? toDelivery(row, await versionsOf([id])) : null;
+    },
+    async listUnfinishedDeliveries({ staleBefore, limit }) {
+      const rows = await db
+        .select()
+        .from(githubEvents)
+        .where(reclaimableRow(new Date(staleBefore)))
+        .orderBy(asc(githubEvents.attempts), asc(githubEvents.receivedAt), asc(githubEvents.deliveryId))
+        .limit(limit);
+      const versions = await versionsOf(rows.map((r) => r.deliveryId));
+      return rows.map((r) => toDelivery(r, versions));
+    },
+    async existingDeliveryIds(ids) {
+      if (ids.length === 0) return new Set();
+      const rows = await db
+        .select({ id: githubEvents.deliveryId })
+        .from(githubEvents)
+        .where(inArray(githubEvents.deliveryId, [...ids]));
+      return new Set(rows.map((r) => r.id));
+    },
+    async findSupersedingVersion({ object, version, state, excludeDeliveryId }) {
+      const [row] = await db
+        .select({
+          deliveryId: githubEventVersions.deliveryId,
+          version: githubEventVersions.version,
+          state: githubEventVersions.state,
+        })
+        .from(githubEventVersions)
+        .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
+        .where(
+          and(
+            eq(githubEventVersions.object, object),
+            gt(githubEventVersions.version, new Date(version)),
+            ne(githubEventVersions.state, state),
+            ne(githubEventVersions.deliveryId, excludeDeliveryId),
+            eq(githubEvents.status, 'accepted'),
+          ),
+        )
+        .orderBy(desc(githubEventVersions.version))
+        .limit(1);
+      return row?.state ? { deliveryId: row.deliveryId, version: iso(row.version), state: row.state } : null;
+    },
+    async countStuckDeliveries({ staleBefore, maxAttempts }) {
+      const [row] = await db
+        .select({
+          exhausted: sql<number>`count(*) filter (where ${githubEvents.status} = 'failed' and ${githubEvents.attempts} >= ${maxAttempts})::int`,
+          stale: sql<number>`count(*) filter (where ${githubEvents.status} = 'processing' and ${githubEvents.claimedAt} < ${new Date(staleBefore).toISOString()}::timestamptz)::int`,
+        })
+        .from(githubEvents)
+        .where(inArray(githubEvents.status, ['processing', 'failed']));
+      // 不分组的 count 总有一行：没有就是查询本身出了问题，不许当成「0 条卡住」
+      if (!row) throw new Error('数卡住的 GitHub 投递没读到结果');
+      return { exhausted: row.exhausted, stale: row.stale };
+    },
 
     // —— 接活 ——
     async findRepoByName(owner, name) {
@@ -1238,35 +1310,4 @@ export function sqlState(err: unknown): string | undefined {
     e = (e as { cause?: unknown }).cause;
   }
   return undefined;
-}
-
-/**
- * 这条数据库错误是不是「在等一把锁等到超时 / 等不到」：Postgres 的 57014（语句超时）和 55P03（等锁超时）之外，
- * 迁移会话本身不设锁超时，卡在 DDL 等锁上的迁移会被 systemd 的发布超时就地杀掉，它连接里的 postgres.js
- * 把「session/connection terminated」当成致命错往外抛（X PostgreSQL-backend-error，不带 SQLSTATE）。
- * 三种都是「有个会话占着锁不放」，不是数据或代码的错；归成一类（见 withStatementTimeout 处。
- */
-const LOCK_WAIT_SQLSTATES = new Set(['57014', '55P03']);
-
-/** postgres.js 的致命错前缀（文档：*`X PostgreSQL-backend-error`*），内容原文照抄驱动的 ErroneousSocketError。 */
-const LOCK_WAIT_FATAL_MARKS = ['postgres-backend-error', 'session terminated', 'connection terminated'];
-
-/** 看整串 cause 链（含 Error.cause 外层）有没有「等锁等到死或等到被杀」的记号；全串小写比对。 */
-export function isLockWaitError(err: unknown): boolean {
-  const code = sqlState(err);
-  if (code !== undefined && LOCK_WAIT_SQLSTATES.has(code)) return true;
-  let e: unknown = err;
-  for (let depth = 0; depth < 5 && e !== null && typeof e === 'object'; depth++) {
-    const message = e instanceof Error ? e.message.toLowerCase() : String(e);
-    if (LOCK_WAIT_FATAL_MARKS.some((mark) => message.includes(mark))) return true;
-    e = (e as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
-/** isLockWaitError 命中的原因，写成给日志看的；（isLockWaitError 返回真才对它有意义）。 */
-function lockWaitWhy(err: unknown): string {
-  const code = sqlState(err);
-  if (code !== undefined) return `sqlstate ${code}`;
-  return '连接中断（多半是迁移等不到锁、被发布超时就地杀掉）';
 }

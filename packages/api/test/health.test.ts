@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
-import { isLockWaitError, silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
+import { silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { probeDb } from '../src/db-probe.ts';

@@ -4,6 +4,8 @@
 import type { AskHold, AskScope } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
+  Ban,
+  Channel,
   HistoryResponse,
   Model,
   Pool,
@@ -599,13 +601,7 @@ export interface IntakeStore {
   ): Promise<AutoDispatchChange | 'not_found'>;
 }
 
-export type Store = UserStore &
-  BoardStore &
-  RoutingStore &
-  OpsStore &
-  AgentStore &
-  GitHubStore &
-  IntakeStore;
+export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore & IntakeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
 export class InvalidCursorError extends Error {
