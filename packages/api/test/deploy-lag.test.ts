@@ -382,6 +382,32 @@ describe('判定：读的时候现算', () => {
     expect(DEPLOY_LAG_LIMITS.behindMs).toBeGreaterThan(60 * MIN + 5 * MIN);
     expect(DEPLOY_LAG_LIMITS.systemMs).toBe(24 * 60 * MIN);
   });
+
+  it('跟主线那一档（本机档，track=main，#1050）：落后在「最短切换间隔 6 小时 + 90 分钟」之内不红，过了才红；法国（tag 档）照 90 分钟', async () => {
+    const lib = (await import(/* @vite-ignore */ AUTO_RELEASE_LIB)) as { MINOR_INTERVAL_MS: number };
+    expect(DEPLOY_LAG_LIMITS.minorIntervalMs, '和自动发布的最短间隔是同一个数').toBe(lib.MINOR_INTERVAL_MS);
+    // 没有 marker 字段（跟主线档不写它）：按主线头数；在用 H0 = 落后 2 个、最老的没上线的（H1）等了 100 分钟
+    const follow = (over: Partial<State> = {}) => {
+      const { marker: _no, ...rest } = state({ track: 'main', ...over });
+      return rest as State;
+    };
+    expect(judge(input(H0, follow()))).toEqual({ ok: true, problems: [] });
+    // 最老的没上线的提交等了 7 小时 29 分（< 6 小时 + 90 分钟）：还在正常的等
+    const waited = (ms: number): State['main'] => {
+      const main = state().main as NonNullable<State['main']>;
+      return {
+        ...main,
+        commits: [main.commits[0] as [string, string], [H1, ago(ms)], [H0, ago(ms + 200 * MIN)]],
+      };
+    };
+    expect(judge(input(H0, follow({ main: waited(7 * 60 * MIN + 29 * MIN) }))).ok).toBe(true);
+    const late = judge(input(H0, follow({ main: waited(7 * 60 * MIN + 31 * MIN) })));
+    expect(codes(late)).toEqual(['behind']);
+    // 同样的读数，tag 档（没写 track）照 90 分钟：已经红
+    expect(codes(judge(input(H0, state({ main: waited(2 * 60 * MIN), marker: undefined }))))).toEqual([
+      'behind',
+    ]);
+  });
 });
 
 describe('状态文件：和自动发布写的对得上', () => {

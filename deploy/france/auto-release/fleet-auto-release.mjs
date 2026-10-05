@@ -5,7 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { readLive } from './config.mjs';
+import { readLive, readProfile } from './config.mjs';
 import {
   APPLIED_FILE,
   AUTO_DIR,
@@ -129,6 +129,13 @@ export const realIo = {
       ['log', '--first-parent', `-n${MAIN_HISTORY}`, '--format=%H %cI', 'refs/remotes/origin/main'],
       '读主线的提交',
     );
+  },
+  /**
+   * 这台跟什么发（#1050）：本机档（WSL）跟主线上 CI 全绿的最新提交（'main'），法国只发版本标记（'tag'）。
+   * 按档位文件 /etc/fleet-dao/profile 定（和配置对账同一个读法，文件不在算法国）；读不出就抛，由 lib.mjs 按 'tag' 档算并记原因。
+   */
+  async readTrack() {
+    return readProfile().profile === 'local' ? 'main' : 'tag';
   },
   /** 版本标记（`v<N>` tag）：名字、它指的提交、时间。读不到就抛，由 lib.mjs 记成「标记没查成」、这一轮不发。 */
   async readVersionTags() {
