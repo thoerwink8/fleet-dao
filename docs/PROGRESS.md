@@ -10,4 +10,4 @@
 | 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |
 |---|---|---|---|---|
 
-> 已撤回（2026-10-05）：「法国引擎关闭」（进程停着、`FLEET_SERVICES` 只留 `fleet-api`）。撤回的话：创始人 2026-10-05 约 19:10 对「关闭是进程停着，还是进程开着但不接活（待命）」答「2 3 4 6 7 按照你推荐」（推荐＝待命）。现在的状态是「进程开着、各项目接活开关全关」：法国期望 `FLEET_SERVICES=fleet-engine fleet-api`（`deploy/france/desired-config.json`），新的 `v<N>` 发版后各项目自动回到关（`release.sh`，#1050）。待命的代价（创始人知情同意）：路由探针每 15 分钟起一次最短的模型会话、读额度照转。上线时要在法国以 root 把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个被暂停的 Temporal 定时任务 `--unpause`（见 `docs/ops.md`）。
+> 已撤回（2026-10-05）：「法国引擎关闭」（进程停着、`FLEET_SERVICES` 只留 `fleet-api`）。撤回的话：创始人 2026-10-05 约 19:10 对「关闭是进程停着，还是进程开着但不接活（待命）」答「2 3 4 6 7 按照你推荐」（推荐＝待命）。现在的状态是「进程开着、各项目接活开关全关」：法国期望 `FLEET_SERVICES=fleet-engine fleet-api`（`deploy/france/desired-config.json`），新的 `v<N>` 发版后各项目自动回到关（`release.sh`，#1050）。待命的代价（创始人知情同意）：路由探针每 15 分钟起一次最短的模型会话、读额度照转。上线不用再手动恢复定时任务：它们是引擎进程里的定时器（#1072），起来自己恢复（见 `docs/ops.md`）。

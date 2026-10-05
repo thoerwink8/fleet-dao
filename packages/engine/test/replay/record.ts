@@ -19,7 +19,6 @@ import type { EngineJobs, EngineTasks } from '../../src/activities.ts';
 import { WORKFLOW_TYPES } from '../../src/contract.ts';
 import { createFakeWorld, type FakeScript, type FakeWorld } from '../../src/fakes.ts';
 import { type TaskStatus, type TaskWorkflowInput, taskStatusQuery } from '../../src/task-contract.ts';
-import { idleDeps } from '../intake-script.ts';
 import { createEnv, engineBundle, REPO, waitUntil, withWorker } from '../support.ts';
 import { scripted } from '../task-script.ts';
 
@@ -61,19 +60,6 @@ const taskStatusUntil = (handle: WorkflowHandle, check: (s: TaskStatus) => boole
   waitUntil(async () => check(await handle.query(taskStatusQuery)), what);
 
 const SCENARIOS: Record<string, Scenario> = {
-  // 拉单（#632）：开关全关的一轮，工作流调一个活动就收工。
-  'intake-idle': {
-    jobs: { intake: () => idleDeps() },
-    async run({ env, queue }) {
-      const handle = await env.client.workflow.start(WORKFLOW_TYPES.intake, {
-        taskQueue: queue,
-        workflowId: 'intake-fixture',
-        args: [{ schemaVersion: 1 }],
-      });
-      await handle.result();
-      return { 'intake-idle': handle };
-    },
-  },
   // 任务工作流最顺的一条：读交代、动手、推分支开 PR、CI 绿、验收过、挂自动合并、合上、关单、收树。
   'task-merged': {
     tasks: scripted().tasks,

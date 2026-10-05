@@ -1,8 +1,8 @@
-// 定时对账补漏（#43）：Temporal 定时任务 → 工作流 → 活动 → 后端的 reconcileGitHub（真 Store、真 GitHubIntake、@fleet-dao/github
+// 定时对账补漏（#43）：引擎的定时器 → 一轮（jobs/github-reconcile.ts）→ 后端的 reconcileGitHub（真 Store、真 GitHubIntake、@fleet-dao/github
 // 的真轮询，对着照 GitHub 接口回话的假服务）→ 结局记进 schedule_runs。库是 PGlite 上跑真迁移。
 // 只收 PR 和 CI 的事件：单子由引擎每 5 分钟自己拉，对账不管它们（#632、#556）。
 // 没跑成、没查成、认不出，都要记成明确的结局（failed / unscanned / partial），不记成 ok。
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { generateKeyPairSync } from 'node:crypto';
 import {
   notifications,
   pullRequests,
@@ -15,43 +15,29 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub } from '@fleet-dao/github';
 import { pgLedger } from '@fleet-dao/store';
-import {
-  type Client,
-  ScheduleAlreadyRunning,
-  ScheduleNotFoundError,
-  WorkflowFailedError,
-} from '@temporalio/client';
-import { ApplicationFailure } from '@temporalio/common';
+import { type Client, ScheduleNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
-import { type GitHubReconcileRun, WORKFLOW_TYPES } from '../src/contract.ts';
-import { createFakeWorld } from '../src/fakes.ts';
+import type { GitHubReconcileRun } from '../src/contract.ts';
+import { startCanaryWorkflow } from '../src/jobs/canary-start.ts';
 import {
   GITHUB_RECONCILE_JOB,
   GITHUB_RECONCILE_LOOKBACK_MS,
+  GitHubReconcileFailedError,
   type GitHubReconcileJobDeps,
   runGitHubReconcileJob,
   toScheduleResult,
   withIssueGroom,
 } from '../src/jobs/github-reconcile.ts';
-import type { RetiredSchedule } from '../src/jobs/retired-schedules.ts';
-import { RETIRED_SCHEDULES } from '../src/jobs/retired-schedules.ts';
 import {
-  CANARY_SCHEDULE_ID,
-  CARPOOL_WATCH_SCHEDULE_ID,
   deleteRetiredSchedules,
-  engineSchedules,
-  ensureEngineSchedules,
-  GITHUB_RECONCILE_SCHEDULE_ID,
-  HOURLY_RECONCILE_SCHEDULE_ID,
-  INTAKE_SCHEDULE_ID,
-  QUOTA_READ_SCHEDULE_ID,
-  ROUTE_PROBE_SCHEDULE_ID,
-  WATCHDOG_SCHEDULE_ID,
-} from '../src/jobs/schedules.ts';
+  RETIRED_SCHEDULE_IDS,
+  RETIRED_SCHEDULES,
+  type RetiredSchedule,
+} from '../src/jobs/retired-schedules.ts';
 import { githubReconcileJob, retireCloseSweepAlerts } from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
-import { createRealEnv, useEnv, withWorker } from './helpers.ts';
+import { createRealEnv } from './helpers.ts';
 
 const API = 'https://api.github.test';
 const OWNER = 'example';
@@ -176,35 +162,24 @@ const healthOf = async () => (await scheduleHealth(t.db)).find((h) => h.job.id =
 const pullsOf = async (repoId: string) =>
   (await t.db.select().from(pullRequests)).filter((r) => r.repoId === repoId);
 
-// 起工人、真跑一轮，整包一起跑时一条用例能到 6–7 秒，超过默认的 5 秒（和「你好」工作流的用例同一个上限）。
-describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout: 60_000 }, () => {
-  const env = useEnv();
+describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_000 }, () => {
+  // 对账补漏这一轮不起也不查任务工作流，Temporal 客户端给一个空壳
+  const client = {} as Client;
 
-  async function runOnce(jobs: EngineJobs | undefined): Promise<GitHubReconcileRun> {
-    return withWorker(
-      env(),
-      createFakeWorld(),
-      (taskQueue) =>
-        env().client.workflow.execute(WORKFLOW_TYPES.githubReconcile, {
-          taskQueue,
-          workflowId: `github-reconcile-${randomUUID()}`,
-          args: [{ schemaVersion: 1 }],
-        }),
-      jobs ? { jobs } : {},
-    );
+  async function runOnce(jobs: EngineJobs): Promise<GitHubReconcileRun> {
+    const make = jobs.githubReconcile;
+    if (!make) throw new Error('测试没装对账补漏');
+    return runGitHubReconcileJob(make(client, 'fleet'));
   }
 
-  /** 这一轮在 Temporal 里是怎么失败的：拿到活动报的错误码和原话。 */
-  async function failureOf(jobs: EngineJobs | undefined): Promise<ApplicationFailure> {
+  /** 这一轮是怎么失败的：拿到它抛的错（没跑成的已经记进 schedule_runs）。 */
+  async function failureOf(jobs: EngineJobs): Promise<GitHubReconcileFailedError> {
     const err = await runOnce(jobs).then(
       () => null,
       (e: unknown) => e,
     );
-    expect(err).toBeInstanceOf(WorkflowFailedError);
-    let cause = (err as WorkflowFailedError).cause;
-    while (cause && !(cause instanceof ApplicationFailure)) cause = (cause as { cause?: Error }).cause;
-    expect(cause).toBeInstanceOf(ApplicationFailure);
-    return cause as ApplicationFailure;
+    expect(err).toBeInstanceOf(GitHubReconcileFailedError);
+    return err as GitHubReconcileFailedError;
   }
 
   it('库里缺一个 PR：跑一轮由轮询补上镜像，记一行 ok；再跑一轮不重复', async () => {
@@ -249,7 +224,7 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     expect(await pullsOf(w.repoId)).toHaveLength(0);
   });
 
-  it('对账本身抛错（读库失败）：记成 failed、活动报 RECONCILE_FAILED，定时任务页标「没跑成」', async () => {
+  it('对账本身抛错（读库失败）：记成 failed、这一轮抛 GitHubReconcileFailedError，定时任务页标「没跑成」', async () => {
     const w = await wiring({ pulls: [] });
     const failure = await failureOf({
       githubReconcile: (client, taskQueue) => ({
@@ -259,7 +234,6 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
         },
       }),
     });
-    expect(failure.type).toBe('RECONCILE_FAILED');
     expect(failure.message).toMatch(/读 repos 表超时/);
     const [row] = await runsOf();
     expect(row).toMatchObject({ outcome: 'failed' });
@@ -269,16 +243,9 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
 
   it('记不上开始（定时任务没登记，schedule_runs 的外键不让写）：这一轮失败、不去对账，不装作跑过', async () => {
     const w = await wiring({ pulls: [pull(41, -20)] }, { register: false });
-    const failure = await failureOf({ githubReconcile: w.job });
-    expect(failure.message).toBeTruthy();
+    await expect(runOnce({ githubReconcile: w.job })).rejects.toThrow();
     expect(await runsOf()).toHaveLength(0);
     expect(await pullsOf(w.repoId)).toHaveLength(0);
-  });
-
-  it('假端口的工人（没装对账）接到这一轮：明确报 JOB_NOT_CONFIGURED，不回一个空的 ok', async () => {
-    const failure = await failureOf(undefined);
-    expect(failure.type).toBe('JOB_NOT_CONFIGURED');
-    expect(failure.nonRetryable).toBe(true);
   });
 });
 
@@ -376,193 +343,9 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
   });
 });
 
-describe('定时任务按固定编号建：重启、重复部署不多出第二个', () => {
-  function fakeScheduleClient(existing: boolean, failWith?: Error) {
-    const calls: string[] = [];
-    const updated = new Map<string, unknown>();
-    const client = {
-      schedule: {
-        async create(options: { scheduleId: string }) {
-          calls.push(`create:${options.scheduleId}`);
-          if (failWith) throw failWith;
-          if (existing) throw new ScheduleAlreadyRunning('已经有了', options.scheduleId);
-          return {};
-        },
-        getHandle(id: string) {
-          return {
-            async update(fn: (prev: unknown) => unknown) {
-              calls.push(`update:${id}`);
-              updated.set(
-                id,
-                fn({ state: { paused: true, note: '人停的' }, spec: {}, action: {}, policies: {} }),
-              );
-            },
-          };
-        },
-      },
-    } as unknown as Pick<Client, 'schedule'>;
-    return { client, calls, updated: (id: string) => updated.get(id) };
-  }
-
-  it('登记表和 Temporal 定时任务一一对得上：每个定时任务都登记了（一次没跑过也在看门狗名单上）', () => {
-    expect(engineSchedules('fleet').map((s) => s.scheduleId)).toEqual(ENGINE_JOBS.map((j) => j.id));
-  });
-
-  it('没有就建；已经有了就按声明更新、人手动暂停的照旧停着', async () => {
-    const fresh = fakeScheduleClient(false);
-    expect(await ensureEngineSchedules(fresh.client, 'fleet')).toEqual({
-      [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
-      [ROUTE_PROBE_SCHEDULE_ID]: 'created',
-      [QUOTA_READ_SCHEDULE_ID]: 'created',
-      [CARPOOL_WATCH_SCHEDULE_ID]: 'created',
-      [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
-      [CANARY_SCHEDULE_ID]: 'created',
-      [WATCHDOG_SCHEDULE_ID]: 'created',
-      [INTAKE_SCHEDULE_ID]: 'created',
-    });
-    const again = fakeScheduleClient(true);
-    expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
-      [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
-      [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
-      [QUOTA_READ_SCHEDULE_ID]: 'updated',
-      [CARPOOL_WATCH_SCHEDULE_ID]: 'updated',
-      [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
-      [CANARY_SCHEDULE_ID]: 'updated',
-      [WATCHDOG_SCHEDULE_ID]: 'updated',
-      [INTAKE_SCHEDULE_ID]: 'updated',
-    });
-    expect(again.calls).toEqual([
-      `create:${GITHUB_RECONCILE_SCHEDULE_ID}`,
-      `update:${GITHUB_RECONCILE_SCHEDULE_ID}`,
-      `create:${ROUTE_PROBE_SCHEDULE_ID}`,
-      `update:${ROUTE_PROBE_SCHEDULE_ID}`,
-      `create:${QUOTA_READ_SCHEDULE_ID}`,
-      `update:${QUOTA_READ_SCHEDULE_ID}`,
-      `create:${CARPOOL_WATCH_SCHEDULE_ID}`,
-      `update:${CARPOOL_WATCH_SCHEDULE_ID}`,
-      `create:${HOURLY_RECONCILE_SCHEDULE_ID}`,
-      `update:${HOURLY_RECONCILE_SCHEDULE_ID}`,
-      `create:${CANARY_SCHEDULE_ID}`,
-      `update:${CANARY_SCHEDULE_ID}`,
-      `create:${WATCHDOG_SCHEDULE_ID}`,
-      `update:${WATCHDOG_SCHEDULE_ID}`,
-      `create:${INTAKE_SCHEDULE_ID}`,
-      `update:${INTAKE_SCHEDULE_ID}`,
-    ]);
-    expect(again.updated(GITHUB_RECONCILE_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '15 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.githubReconcile, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
-    // 路由探针：同样每 15 分钟，错开 7 分钟（和对账不在整点挤着起会话）
-    expect(again.updated(ROUTE_PROBE_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '15 minutes', offset: '7 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.routeProbe, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
-    // 每小时对账：每 60 分钟，41 分起（和前两个错开）
-    expect(again.updated(HOURLY_RECONCILE_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '60 minutes', offset: '41 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.hourlyReconcile, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
-    // 全流程巡检：每 6 小时，26 分起（北京时间 2、8、14、20 点 26 分）；一轮工作流最长 5.5 小时，上一轮没完就跳过
-    expect(again.updated(CANARY_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '6 hours', offset: '26 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.canary, taskQueue: 'fleet', workflowRunTimeout: '330 minutes' },
-      policies: { overlap: 'SKIP' },
-    });
-    // 看门狗（#203）：每 5 分钟，4 分起（和对账补漏、路由探针错开），上一轮没完就跳过
-    expect(again.updated(WATCHDOG_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '5 minutes', offset: '4 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
-    // 拉单（#632）：每 5 分钟，3 分起（和上面几个错开），上一轮没完就跳过
-    expect(again.updated(INTAKE_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '5 minutes', offset: '3 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.intake, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
-  });
-
-  it('建的时候出了别的错（连不上、没权限）：原样抛出，引擎起不来要看得见', async () => {
-    const broken = fakeScheduleClient(false, new Error('14 UNAVAILABLE: 连不上'));
-    await expect(ensureEngineSchedules(broken.client, 'fleet')).rejects.toThrow('UNAVAILABLE');
-  });
-
-  it('真 Temporal 开发服务端：对两遍各只有一个定时任务，对账每 15 分钟、路由探针每 15 分钟错开 7 分钟、每小时对账 41 分起、巡检每 6 小时 26 分起、看门狗每 5 分钟 4 分起、拉单每 5 分钟 3 分起、拼车盯读每分钟', {
-    timeout: 300_000,
-  }, async () => {
-    const real = await createRealEnv();
-    try {
-      const { client } = real;
-      expect(await ensureEngineSchedules(client, 'fleet-a')).toEqual({
-        [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
-        [ROUTE_PROBE_SCHEDULE_ID]: 'created',
-        [QUOTA_READ_SCHEDULE_ID]: 'created',
-        [CARPOOL_WATCH_SCHEDULE_ID]: 'created',
-        [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
-        [CANARY_SCHEDULE_ID]: 'created',
-        [WATCHDOG_SCHEDULE_ID]: 'created',
-        [INTAKE_SCHEDULE_ID]: 'created',
-      });
-      await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).pause('人停的');
-      expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
-        [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
-        [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
-        [QUOTA_READ_SCHEDULE_ID]: 'updated',
-        [CARPOOL_WATCH_SCHEDULE_ID]: 'updated',
-        [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
-        [CANARY_SCHEDULE_ID]: 'updated',
-        [WATCHDOG_SCHEDULE_ID]: 'updated',
-        [INTAKE_SCHEDULE_ID]: 'updated',
-      });
-      const d = await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).describe();
-      expect(d.spec.intervals?.map((i) => i.every)).toEqual([15 * 60_000]);
-      expect(d.action).toMatchObject({ workflowType: WORKFLOW_TYPES.githubReconcile, taskQueue: 'fleet-b' });
-      // 第二次是在同一个编号上改（编号固定，建第二个会撞 ScheduleAlreadyRunning），人停的照旧停着
-      expect(d.state.paused).toBe(true);
-      const probe = await client.schedule.getHandle(ROUTE_PROBE_SCHEDULE_ID).describe();
-      expect(probe.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[15 * 60_000, 7 * 60_000]]);
-      expect(probe.action).toMatchObject({ workflowType: WORKFLOW_TYPES.routeProbe, taskQueue: 'fleet-b' });
-      expect(probe.state.paused).toBe(false);
-      const hourly = await client.schedule.getHandle(HOURLY_RECONCILE_SCHEDULE_ID).describe();
-      expect(hourly.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[60 * 60_000, 41 * 60_000]]);
-      expect(hourly.action).toMatchObject({
-        workflowType: WORKFLOW_TYPES.hourlyReconcile,
-        taskQueue: 'fleet-b',
-      });
-      const canary = await client.schedule.getHandle(CANARY_SCHEDULE_ID).describe();
-      expect(canary.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([
-        [6 * 60 * 60_000, 26 * 60_000],
-      ]);
-      expect(canary.action).toMatchObject({ workflowType: WORKFLOW_TYPES.canary, taskQueue: 'fleet-b' });
-      const watchdog = await client.schedule.getHandle(WATCHDOG_SCHEDULE_ID).describe();
-      expect(watchdog.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[5 * 60_000, 4 * 60_000]]);
-      expect(watchdog.action).toMatchObject({ workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet-b' });
-      const carpoolWatch = await client.schedule.getHandle(CARPOOL_WATCH_SCHEDULE_ID).describe();
-      expect(carpoolWatch.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[60_000, undefined]]);
-      expect(carpoolWatch.action).toMatchObject({
-        workflowType: WORKFLOW_TYPES.carpoolWatch,
-        taskQueue: 'fleet-b',
-      });
-      const intake = await client.schedule.getHandle(INTAKE_SCHEDULE_ID).describe();
-      expect(intake.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[5 * 60_000, 3 * 60_000]]);
-      expect(intake.action).toMatchObject({ workflowType: WORKFLOW_TYPES.intake, taskQueue: 'fleet-b' });
-    } finally {
-      await real.teardown();
-    }
-  });
-});
-
 describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#445 删「提醒派单」整层，法国的 alert-dispatch 只能帅位手动暂停）', () => {
+  const ONLY_ALERT_DISPATCH: RetiredSchedule[] = [{ id: 'alert-dispatch', retiredBy: '#445' }];
+
   /** 假的删：每个编号的结局按 byId 给，'ok' 删成、'absent' 回 ScheduleNotFoundError、给个 Error 就是删的时候出了别的错。 */
   function fakeDeleteClient(byId: Record<string, 'ok' | 'absent' | Error>) {
     const calls: string[] = [];
@@ -584,24 +367,37 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
     return { client, calls };
   }
 
-  it('名单目前只有 alert-dispatch（#445 退役的「提醒派单」），两处（这里、看门狗）认同一份', () => {
-    expect(RETIRED_SCHEDULES).toEqual([{ id: 'alert-dispatch', retiredBy: '#445' }]);
+  it('名单：alert-dispatch（#445 退役的「提醒派单」）加上摘出 Temporal 的 8 个定时任务（#1072，任务还在、只删老的 Schedule）；两处（这里、看门狗）认同一份', () => {
+    expect(RETIRED_SCHEDULES[0]).toEqual({ id: 'alert-dispatch', retiredBy: '#445' });
+    // 8 个就是登记表上的 8 个：少一个，Temporal 上那条老 Schedule 就留着和进程内定时器各跑一轮
+    expect(
+      RETIRED_SCHEDULES.filter((s) => s.moved)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(ENGINE_JOBS.map((j) => j.id).sort());
+    expect(RETIRED_SCHEDULES.filter((s) => s.moved).every((s) => s.retiredBy === '#1072')).toBe(true);
+  });
+
+  it('看门狗剔除的只有真退役的（alert-dispatch）；摘出 Temporal 的 8 个任务还在，照看', () => {
+    expect([...RETIRED_SCHEDULE_IDS]).toEqual(['alert-dispatch']);
   });
 
   it('【故意造出的失败】Temporal 上还在：删掉，回 deleted', async () => {
     const { client, calls } = fakeDeleteClient({ 'alert-dispatch': 'ok' });
-    expect(await deleteRetiredSchedules(client)).toEqual({ 'alert-dispatch': 'deleted' });
+    expect(await deleteRetiredSchedules(client, ONLY_ALERT_DISPATCH)).toEqual({
+      'alert-dispatch': 'deleted',
+    });
     expect(calls).toEqual(['alert-dispatch']);
   });
 
   it('【故意造出的失败】Temporal 上本来就没有（ScheduleNotFoundError）：回 absent，不算错、不多做别的事', async () => {
     const { client } = fakeDeleteClient({ 'alert-dispatch': 'absent' });
-    expect(await deleteRetiredSchedules(client)).toEqual({ 'alert-dispatch': 'absent' });
+    expect(await deleteRetiredSchedules(client, ONLY_ALERT_DISPATCH)).toEqual({ 'alert-dispatch': 'absent' });
   });
 
   it('【故意造出的失败】删的时候出了别的错（连不上、没权限）：原文带着报回来，不当成删掉了、不抛出、不挡别的编号', async () => {
     const { client } = fakeDeleteClient({ 'alert-dispatch': new Error('14 UNAVAILABLE: 连不上') });
-    await expect(deleteRetiredSchedules(client)).resolves.toEqual({
+    await expect(deleteRetiredSchedules(client, ONLY_ALERT_DISPATCH)).resolves.toEqual({
       'alert-dispatch': { error: '14 UNAVAILABLE: 连不上' },
     });
   });
@@ -660,5 +456,53 @@ describe('关单对账 #654 删了以后，它留在库里的提醒一次性撤�
     await expect(retireCloseSweepAlerts({ db: broken }, [repo], () => new Date())).rejects.toThrow(
       '连不上库',
     );
+  });
+});
+
+// 要真 Temporal 开发服务端的（CI 里装命令行的那一台就是装在有这个文件的台上，packages/conventions/test/test-split.test.ts 钉着）：
+// 摘出 Temporal 之后，这两件靠的是真服务端的行为，测试服务端和假客户端说明不了。
+describe('定时任务摘出 Temporal 之后，和真 Temporal 开发服务端对一遍（#1072）', { timeout: 300_000 }, () => {
+  it('老的 Schedule（含人手暂停过的）一次删光，再来一遍都是「本来就没有」', async () => {
+    const real = await createRealEnv();
+    try {
+      const { client } = real;
+      for (const r of RETIRED_SCHEDULES) {
+        await client.schedule.create({
+          scheduleId: r.id,
+          spec: { intervals: [{ every: '15 minutes' }] },
+          action: { type: 'startWorkflow', workflowType: 'canaryWorkflow', taskQueue: 'fleet', args: [] },
+          // 法国那四个就是人手暂停着的
+          ...(r.id === 'canary' ? { state: { paused: true } } : {}),
+        });
+      }
+      const first = await deleteRetiredSchedules(client);
+      expect(Object.keys(first).sort()).toEqual(RETIRED_SCHEDULES.map((r) => r.id).sort());
+      expect(Object.values(first).every((v) => v === 'deleted')).toBe(true);
+      // 再来一遍：服务端已经没有它们了（用删的结局说话；schedule.list 走的可见性库有延迟，删完马上列还会列到）
+      const second = await deleteRetiredSchedules(client);
+      expect(Object.values(second).every((v) => v === 'absent')).toBe(true);
+    } finally {
+      await real.teardown();
+    }
+  });
+
+  it('巡检同一时刻只起一轮：已经有一轮在跑，第二次起被 Temporal 拒掉、接上第一轮；那一轮收了，下一次照常起', async () => {
+    const real = await createRealEnv();
+    try {
+      const { client } = real;
+      const first = await startCanaryWorkflow(client, 'fleet-1072');
+      expect(first.started).toBe(true);
+      const again = await startCanaryWorkflow(client, 'fleet-1072');
+      expect(again.started).toBe(false);
+      if (!first.started) throw new Error('第一次该是起了新的一轮');
+      expect((await again.handle.describe()).runId).toBe(first.handle.firstExecutionRunId);
+      // 没有工人接这个队列，那一轮一直是「在跑」；收掉它（相当于一轮走完）之后，同一个编号能再起
+      await first.handle.terminate('测试收尾');
+      const next = await startCanaryWorkflow(client, 'fleet-1072');
+      expect(next.started).toBe(true);
+      if (next.started) await next.handle.terminate('测试收尾');
+    } finally {
+      await real.teardown();
+    }
   });
 });

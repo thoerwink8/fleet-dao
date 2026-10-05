@@ -1,7 +1,7 @@
 // pnpm drill（#452「一条命令起一次完整演练」）：立刻跑一轮全流程巡检、等结论、打印每一步用时，断了照实报停在哪一步、退出码非 0。
 // 打印和退出码拿假的巡检结局核；起一轮、接上在跑的、等结论拿假的 Temporal 客户端核。故意造出的失败：起不来、工作流没给结论、
-// 结局认不出、触发了一直没见它起——都是没查成、退出码 2，不当成通过。
-import { ScheduleNotFoundError, ScheduleOverlapPolicy } from '@temporalio/client';
+// 结局认不出——都是没查成、退出码 2，不当成通过。
+import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import {
   type DrillClient,
@@ -49,7 +49,7 @@ const BROKEN = {
   steps: STEPS_UNTIL_PR,
 };
 
-const ROUND: DrillRound = { workflowId: 'canary-2026-10-03T18:26:00Z', runId: 'run-1', attached: false };
+const ROUND: DrillRound = { workflowId: 'canary', runId: 'run-1', attached: false };
 
 function drill(over: Partial<DrillDeps> = {}): { deps: DrillDeps; printed: string[] } {
   const printed: string[] = [];
@@ -201,124 +201,67 @@ describe('打印和退出码（drillReport、runDrill）', () => {
   });
 });
 
-// —— 真的那一层：触发定时任务、认出起的是哪一轮、等结局（假的 Temporal 客户端）——
+// —— 真的那一层：起一轮（和引擎的定时器同一个起法）、认出是哪一轮、等结局（假的 Temporal 客户端）——
 
-const action = (workflowId: string, runId: string) => ({
-  type: 'startWorkflow' as const,
-  workflow: { workflowId, firstExecutionRunId: runId },
-});
-
-function described(over: { running?: unknown[]; recent?: unknown[]; taken?: number } = {}) {
-  return {
-    info: {
-      runningActions: over.running ?? [],
-      recentActions: over.recent ?? [],
-      numActionsTaken: over.taken ?? 3,
-    },
-  };
-}
-
-/** 假的 Temporal：describe 按顺序回 answers 里的（最后一个一直回），trigger 记下重叠策略，result 记下等的是哪一轮。 */
-function fakeTemporal(answers: (() => unknown)[], result: unknown = PASS) {
+/** 假的 Temporal：start 按 startError 抛或回一个带 run 编号的句柄；getHandle 回的句柄 describe 给在跑的那一次、result 记下等的是哪一轮。 */
+function fakeTemporal(o: { startError?: unknown; running?: string; result?: unknown } = {}) {
   const calls: string[] = [];
-  const triggered: unknown[] = [];
-  let i = 0;
+  const started: { workflowType: string; options: Record<string, unknown> }[] = [];
   const client = {
-    schedule: {
-      getHandle: (id: string) => ({
-        describe: async () => {
-          calls.push(`describe:${id}`);
-          const answer = answers[Math.min(i, answers.length - 1)];
-          i += 1;
-          return answer?.();
-        },
-        trigger: async (overlap: unknown) => {
-          triggered.push(overlap);
-        },
-      }),
-    },
     workflow: {
+      start: async (workflowType: string, options: Record<string, unknown>) => {
+        started.push({ workflowType, options });
+        if (o.startError) throw o.startError;
+        return { firstExecutionRunId: 'run-new' };
+      },
       getHandle: (workflowId: string, runId?: string) => ({
+        describe: async () => {
+          calls.push(`describe:${workflowId}`);
+          return { runId: o.running ?? 'run-old' };
+        },
         result: async () => {
           calls.push(`result:${workflowId}:${runId}`);
-          return result;
+          return o.result ?? PASS;
         },
       }),
     },
   } as unknown as DrillClient;
-  return { client, calls, triggered };
+  return { client, calls, started };
 }
 
-/** 不真睡：睡一下就把钟拨过去。 */
-function fakeClock() {
-  let t = 0;
-  return {
-    now: () => t,
-    sleep: async (ms: number) => {
-      t += ms;
-    },
-  };
-}
+const alreadyRunning = () => new WorkflowExecutionAlreadyStartedError('already', 'canary', 'canaryWorkflow');
 
 describe('起一轮、等结论（temporalDrill，假的 Temporal 客户端）', () => {
-  it('没有在跑的：触发定时任务 canary（重叠策略 SKIP），等到它起来，回它的编号', async () => {
-    const t = fakeTemporal([
-      () => described({ taken: 3 }),
-      () => described({ taken: 3 }),
-      () => described({ taken: 4, running: [action('canary-2026-10-03T18:26:00Z', 'run-9')] }),
-    ]);
-    const drill = temporalDrill(t.client, { print: () => {}, ...fakeClock() });
-    expect(await drill.start()).toEqual({
-      workflowId: 'canary-2026-10-03T18:26:00Z',
-      runId: 'run-9',
-      attached: false,
+  it('没有在跑的：用固定编号 canary 起一条 canaryWorkflow（在跑的会被 Temporal 拒掉），回它的 run 编号', async () => {
+    const t = fakeTemporal();
+    const drill = temporalDrill(t.client, { print: () => {}, taskQueue: 'fleet' });
+    expect(await drill.start()).toEqual({ workflowId: 'canary', runId: 'run-new', attached: false });
+    expect(t.started).toHaveLength(1);
+    expect(t.started[0]?.workflowType).toBe('canaryWorkflow');
+    expect(t.started[0]?.options).toMatchObject({
+      taskQueue: 'fleet',
+      workflowId: 'canary',
+      workflowIdConflictPolicy: 'FAIL',
     });
-    expect(t.triggered).toEqual([ScheduleOverlapPolicy.SKIP]);
-    expect(t.calls.every((c) => c === 'describe:canary')).toBe(true);
   });
 
-  it('触发以后那一轮已经跑完了（不在「在跑」里）：照「最近起过的」认出它', async () => {
-    const t = fakeTemporal([
-      () => described({ taken: 3 }),
-      () => described({ taken: 4, recent: [{ action: action('canary-x', 'run-x') }] }),
-    ]);
-    const drill = temporalDrill(t.client, { print: () => {}, ...fakeClock() });
-    expect(await drill.start()).toMatchObject({ workflowId: 'canary-x', runId: 'run-x', attached: false });
+  it('已经有一轮在跑：接上它（问一句才知道是哪一次执行），不另起（两轮叠着跑会在巡检仓里抢同一个文件）', async () => {
+    const t = fakeTemporal({ startError: alreadyRunning(), running: 'run-old' });
+    const drill = temporalDrill(t.client, { print: () => {}, taskQueue: 'fleet' });
+    expect(await drill.start()).toEqual({ workflowId: 'canary', runId: 'run-old', attached: true });
+    expect(t.calls).toEqual(['describe:canary']);
   });
 
-  it('已经有一轮在跑：接上它，不触发（两轮叠着跑会在巡检仓里抢同一个文件）', async () => {
-    const t = fakeTemporal([() => described({ running: [action('canary-old', 'run-old')] })]);
-    const drill = temporalDrill(t.client, { print: () => {}, ...fakeClock() });
-    expect(await drill.start()).toEqual({ workflowId: 'canary-old', runId: 'run-old', attached: true });
-    expect(t.triggered).toEqual([]);
-  });
-
-  it('【故意造出的失败】Temporal 上没有这个定时任务：照实说引擎还没以真端口起过，不当成「没有在跑的」去触发', async () => {
-    const t = fakeTemporal([
-      () => {
-        throw new ScheduleNotFoundError('schedule not found', 'canary');
-      },
-    ]);
-    const drill = temporalDrill(t.client, { print: () => {}, ...fakeClock() });
-    await expect(drill.start()).rejects.toThrow('Temporal 上没有定时任务 canary');
-    expect(t.triggered).toEqual([]);
-  });
-
-  it('【故意造出的失败】触发了一直没见它起：到时限明确报错，不一直空等', async () => {
-    const t = fakeTemporal([() => described({ taken: 3 })]);
-    const drill = temporalDrill(t.client, {
-      print: () => {},
-      startTimeoutMs: 10_000,
-      pollMs: 2_000,
-      ...fakeClock(),
-    });
-    await expect(drill.start()).rejects.toThrow('10 秒里没见它起一轮');
-    expect(t.triggered).toHaveLength(1);
+  it('【故意造出的失败】起的时候出了别的错（连不上、没权限）：原样抛出，不当成「已经有一轮在跑」', async () => {
+    const t = fakeTemporal({ startError: new Error('UNAVAILABLE') });
+    const drill = temporalDrill(t.client, { print: () => {}, taskQueue: 'fleet' });
+    await expect(drill.start()).rejects.toThrow('UNAVAILABLE');
+    expect(t.calls).toEqual([]);
   });
 
   it('等结论：按编号和这一次的 run 等工作流的返回值', async () => {
-    const t = fakeTemporal([() => described()], BROKEN);
-    const drill = temporalDrill(t.client, { print: () => {}, ...fakeClock() });
+    const t = fakeTemporal({ result: BROKEN });
+    const drill = temporalDrill(t.client, { print: () => {}, taskQueue: 'fleet' });
     expect(await drill.result(ROUND)).toEqual(BROKEN);
     expect(t.calls).toEqual([`result:${ROUND.workflowId}:${ROUND.runId}`]);
   });
