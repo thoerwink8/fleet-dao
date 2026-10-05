@@ -249,9 +249,9 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     expect(real.value.defaultMode).toBe('auto');
   });
 
-  it('子代理默认模型是 Opus 5.5（决定 0017：子代理只用 Opus 或 Sonnet），env 里只有这一项', () => {
+  it('子代理默认模型是 Sonnet 5.5（决定 0017：子代理只用 Sonnet 或 Opus；创始人 2026-10-05 优先 Sonnet），env 里只有这一项', () => {
     if (!real.ok) throw new Error(real.why);
-    expect(real.value.env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
+    expect(real.value.env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5-5' });
   });
 
   it('创始人 2026-09-30 要的最宽松：shell 整个放开、没有 deny，旧的 9 条拒绝只摘不留', () => {
