@@ -1030,7 +1030,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           before: { autoDispatchSince: before ?? null },
           after: { autoDispatchSince: after ?? null },
           via: 'cockpit',
-          reason: body.reason ?? `驾驶舱上点了${body.on ? '开启' : '关闭'}「让 AI 接活」`,
+          reason: body.reason ?? `在页面上点了${body.on ? '开启' : '关闭'}「让 AI 接活」`,
         });
       }
       const since = mockDispatch.get(repoId);
