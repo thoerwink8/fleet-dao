@@ -62,6 +62,7 @@ interface WorkerLib {
   closingBrief(o: {
     branch: string;
     noShip: boolean;
+    noAutomerge?: boolean;
     issue?: { number: number; refs: boolean } | { reason: string };
     githubRoute?: { via: string; proxy?: string };
   }): string;
