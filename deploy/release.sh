@@ -1730,6 +1730,38 @@ dispatch_off_on_milestone() { # 提交号：发布成功之后叫
   changed "发 v$n：所有项目的「让 AI 接活」回到关（要用，到看板或 fleet-api dispatch <仓> on 逐个点开）"
 }
 
+# 每次往法国发版成功后，引擎总开关（设置 engine.master，#1086）回到关（创始人 2026-10-05：「每次更上去处于关闭状态，点击开启，引擎开始运转，
+# ai开始派活」）。和上面项目的「让 AI 接活」是两道：那个只在新里程碑（v<N> tag）时关，这个是法国每次发版都关——总开关关着引擎就什么
+# 都不拉、不派、不起干活的会话，等创始人在驾驶舱环境页点开。本机档（WSL）的小版本更新不动它（保持更新前的状态：WSL 是演练台，
+# 它的总开关创始人开着就一直开着）；人手动 --unmerged 发的也不碰。走 fleet-api engine off（和驾驶舱按钮同一个设置键、同一个写入口，
+# 开着才改、改了记一条操作记录「发版 <提交> 自动置关总开关」；本来就关着不改不记）。没关成判红，不假装关了。
+engine_off_run() { # 提交号 原因
+  (cd -- "$RELEASES/$1" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
+    FLEET_OPS_OPERATOR=release.sh "$NODE" packages/api/src/bin/fleet-api.ts engine off --reason "$2" 2>&1)
+}
+
+engine_off_after_release() { # 提交号：发布成功之后叫
+  local sha=$1 out line rc=0
+  step "发版后引擎总开关回到关"
+  if [[ "${PROFILE:-france}" != france ]]; then
+    ok "这台是本机档（${PROFILE}）：小版本更新不动总开关，保持更新前的状态"
+    return 0
+  fi
+  if [[ "$(marker_get "$sha" on_main)" == 0 ]]; then
+    ok "这一版不在主线上（--unmerged）：不碰总开关"
+    return 0
+  fi
+  if ! out=$(engine_off_run "$sha" "发版 ${sha:0:12} 自动置关总开关（release.sh）"); then rc=1; fi
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then printf '    %s\n' "$line"; fi
+  done <<<"$out"
+  if ((rc)); then
+    red "发了 ${sha:0:12}，但引擎总开关没能关上（原话见上）：它可能还开着，到驾驶舱环境页或 fleet-api engine status 核对；下一次发布会再关"
+    return 1
+  fi
+  changed "发 ${sha:0:12}：引擎总开关回到关（要用，到驾驶舱环境页点开，或 fleet-api engine on）"
+}
+
 # 这次给在跑的会话多少宽限（秒）：--now 不给
 drain_grace() { if ((NOW_MODE)); then echo 0; else echo "$DRAIN_GRACE"; fi; }
 
@@ -1768,6 +1800,7 @@ do_release() { # 要发的提交（空 = 主线最新）
     ok "发布完成：在用 ${SHA:0:12}"
     # 没成的话 red 已记（发布结论红），这里不再让它把脚本停在半路
     dispatch_off_on_milestone "$SHA" || true
+    engine_off_after_release "$SHA" || true
   elif [[ -z "$cur" ]]; then
     mark_unhealthy "$SHA"
     red "${SHA:0:12} 没过健康检查；这是头一版，没有上一版可退"
