@@ -1,6 +1,6 @@
 // 发布收尾七步的编排（release-finalize.ts）：GitHub、飞书全换成内存里的假货，不打真 tag、不建真 Release、不推真飞书。
 import { describe, expect, it } from 'vitest';
-import type { GitHubRelease, MergedPull, MilestoneDetail } from '../src/github-api.ts';
+import type { GitHubRelease, MergedPull, MilestoneDetail, PlanIssue } from '../src/github-api.ts';
 import { feishuAttemptMark, feishuNotifiedMark } from '../src/publish-release-logic.ts';
 import {
   type FinalizeGitHub,
@@ -32,6 +32,8 @@ function fakeGitHub(
     milestones?: MilestoneDetail[];
     pulls?: MergedPull[];
     files?: Record<string, string>;
+    /** 里程碑里还开着的单（关之前要搬走；不给就是空的，那一轮关里程碑不用搬）。 */
+    issues?: PlanIssue[];
     fail?: Partial<Record<keyof FinalizeGitHub, string>>;
     /** 建 Release 时 GitHub 实际存下的正文（模拟「建了但正文没存对」）。 */
     storeBody?: (body: string) => string;
@@ -69,6 +71,25 @@ function fakeGitHub(
       const m = milestones.find((x) => x.number === n);
       if (!m) throw new Error(`没有里程碑 #${n}`);
       return m;
+    },
+    // 关之前把里头还开着的单搬走要用的四样（#995 第 2 条）：这一组测试不打真接口，按 init.issues 给的最简实现。
+    async milestoneIssues(n) {
+      guard('milestoneIssues');
+      return (init.issues ?? []).filter((i) => milestones.find((m) => m.title === i.milestone)?.number === n);
+    },
+    async comments(n) {
+      guard('comments');
+      calls.push(`comments ${n}`);
+      return [];
+    },
+    async comment(n) {
+      guard('comment');
+      calls.push(`comment ${n}`);
+    },
+    async setIssueMilestone(n, milestone) {
+      guard('setIssueMilestone');
+      calls.push(`setIssueMilestone ${n} ${milestone ?? 'null'}`);
+      return milestone;
     },
     async tagCommit(tag) {
       guard('tagCommit');
