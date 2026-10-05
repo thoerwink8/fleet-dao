@@ -74,6 +74,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     // 环境页和顶栏徽标读它（#820 片 1）：测试里给一个认得出的名字，才看得出「读到了」和「读不到」的差别
     machineName: '测试机',
     feishuOff: false,
+    nodeReport: null,
     ...overrides,
   };
 }

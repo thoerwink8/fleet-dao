@@ -262,3 +262,57 @@ describe('接不接飞书登录（FLEET_FEISHU_LOGIN：本机档不接飞书，�
     expect(problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: france }).join()).toContain('缺 FEISHU_APP_ID');
   });
 });
+
+describe('往正式环境的看板推快照（FLEET_NODE_REPORT_URL / _TOKEN）', () => {
+  const URL_OK = 'https://board.example.test/api/nodes/report';
+  const TOKEN = 'n'.repeat(40);
+
+  it('都不配：不推（null）；两项一起配：认出地址和通行证', () => {
+    expect(loadConfig(PROD).nodeReport).toBeNull();
+    expect(
+      loadConfig({ ...PROD, FLEET_NODE_REPORT_URL: ' ', FLEET_NODE_REPORT_TOKEN: '' }).nodeReport,
+    ).toBeNull();
+    const target = loadConfig({
+      ...PROD,
+      FLEET_NODE_REPORT_URL: URL_OK,
+      FLEET_NODE_REPORT_TOKEN: TOKEN,
+    }).nodeReport;
+    expect(target?.url.href).toBe(URL_OK);
+    expect(target?.token).toBe(TOKEN);
+  });
+
+  it('【故意造出的失败】只配一项、地址认不出、生产上用 http、地址带账号密码、通行证太短或和别的密钥相同：拒启动，不猜着推、不悄悄不推', () => {
+    const bad: [Record<string, string>, string][] = [
+      [{ FLEET_NODE_REPORT_URL: URL_OK }, '要一起给'],
+      [{ FLEET_NODE_REPORT_TOKEN: TOKEN }, '要一起给'],
+      [{ FLEET_NODE_REPORT_URL: 'board.example.test', FLEET_NODE_REPORT_TOKEN: TOKEN }, '不是合法地址'],
+      [
+        { FLEET_NODE_REPORT_URL: 'ftp://board.example.test/x', FLEET_NODE_REPORT_TOKEN: TOKEN },
+        '只能是 http(s)',
+      ],
+      [
+        { FLEET_NODE_REPORT_URL: 'http://board.example.test/x', FLEET_NODE_REPORT_TOKEN: TOKEN },
+        '必须是 https',
+      ],
+      [
+        { FLEET_NODE_REPORT_URL: 'https://someone@board.example.test/x', FLEET_NODE_REPORT_TOKEN: TOKEN },
+        '账号密码',
+      ],
+      [{ FLEET_NODE_REPORT_URL: URL_OK, FLEET_NODE_REPORT_TOKEN: 'short' }, 'FLEET_NODE_REPORT_TOKEN 太短'],
+      [
+        { FLEET_NODE_REPORT_URL: URL_OK, FLEET_NODE_REPORT_TOKEN: PROD.FLEET_SESSION_SECRET },
+        '不能和别的密钥相同',
+      ],
+    ];
+    for (const [extra, says] of bad) expect(problems({ ...PROD, ...extra }).join(), says).toContain(says);
+  });
+
+  it('开发环境可以推到 http（本机联调）', () => {
+    const dev = loadConfig({
+      FLEET_ENV: 'development',
+      FLEET_NODE_REPORT_URL: 'http://127.0.0.1:8787/api/nodes/report',
+      FLEET_NODE_REPORT_TOKEN: TOKEN,
+    });
+    expect(dev.nodeReport?.url.protocol).toBe('http:');
+  });
+});

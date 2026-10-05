@@ -58,6 +58,7 @@ describe('健康检查', () => {
       githubApp: async () => {},
       canary: { check: async () => {} },
       watchdog: { check: async () => {} },
+      nodeReport: { check: async () => {} },
       ...extra,
     });
 
@@ -191,6 +192,7 @@ describe('健康检查', () => {
       githubApp: async () => {},
       canary: { check: async () => {} },
       watchdog: { check: async () => {} },
+      nodeReport: { check: async () => {} },
     }).map((c) => c.name);
     for (const name of listed) expect(names, name).toContain(name);
   });

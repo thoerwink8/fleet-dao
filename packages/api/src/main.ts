@@ -40,11 +40,13 @@ import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
+import { engineHealthProbe } from './home-engine.ts';
 import { createMemoryIntentStore } from './intent-store.ts';
 import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
+import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
@@ -52,6 +54,7 @@ import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
+import { readEnvSnapshot, readHomeSnapshot } from './snapshots.ts';
 import { connectTemporal, ENGINE_OFF } from './temporal.ts';
 import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
@@ -104,6 +107,31 @@ const now = () => new Date();
 const feishu = config.feishu ? createFeishuAuth(config.feishu) : null;
 const demo = config.demoDir ? createDirDemoPublisher(config.demoDir) : null;
 
+/**
+ * 往正式环境的看板推快照（看板多机）：配了 FLEET_NODE_REPORT_URL / _TOKEN 才建；拼快照要装好的 deps，所以先建、
+ * 装配完再 start（下面 assemble 之后）。在用的提交号只在正式环境读得到（发布目录），别处不给。
+ */
+let snapshotDeps: Deps | undefined;
+let reporterProbe: ReturnType<typeof engineHealthProbe> | undefined;
+const nodeReporter = nodeReporterFor(config.nodeReport, {
+  snapshot: async () => {
+    if (!snapshotDeps) throw new Error('后端还没装配好');
+    const deps = snapshotDeps;
+    // 自己建一个引擎探针（带 15 秒缓存），不和驾驶舱的共用：一分钟才拼一次
+    reporterProbe ??= engineHealthProbe({ health: deps.health, engineOff: config.engineOff, log, now });
+    const sd = { ...deps, engineProbe: reporterProbe };
+    const [home, env] = await Promise.all([readHomeSnapshot(sd), readEnvSnapshot(sd)]);
+    return { home, env };
+  },
+  codeSha: () => {
+    if (config.env !== 'production') return undefined;
+    const current = readDeployLagInput().current;
+    return 'sha' in current && current.sha !== null ? current.sha : undefined;
+  },
+  log,
+  now,
+});
+
 async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   if (config.databaseUrl === null) {
     // 只有开发环境会走到这里（生产缺 DATABASE_URL 在 loadConfig 就拒绝启动了）。
@@ -120,7 +148,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       feishu,
       demo,
       intents: createMemoryIntentStore({ now }),
-      health: [],
+      health: nodeReporter ? [nodeReporter.healthCheck] : [],
       workflows: {
         async signal(workflowId, signal) {
           log.info('（开发）发给工作流的信号', { workflowId, signal: signal.name });
@@ -215,6 +243,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       watchdog: production
         ? { check: watchdogHealthCheck(db, now) }
         : { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
+      // 往正式环境的看板推快照：没配推送地址报「未接」
+      nodeReport: nodeReportPart(nodeReporter),
     }),
   };
   return {
@@ -230,6 +260,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
 }
 
 const { deps, close } = await assemble();
+snapshotDeps = deps;
+nodeReporter?.start();
 // 给停机时的意图卡长轮询用（intent-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
 const shutdownController = new AbortController();
 deps.shutdownSignal = shutdownController.signal;
@@ -274,6 +306,8 @@ log.info('驾驶舱后端已起', {
   cockpit: `${config.cockpitListen.host}:${config.cockpitListen.port}`,
   agent: `${config.agentListen.host}:${config.agentListen.port}`,
   devLogin: config.devLogin ? DEV_USER_ID : false,
+  // 往哪个看板推快照（只写对方的域名，不写通行证）
+  nodeReport: config.nodeReport ? config.nodeReport.url.origin : false,
   // 给 packages/cli 联调用的令牌：只在内存样例数据下给，对应样例里正在跑的那次会话；密钥是本次启动临时生成的。
   ...(config.env === 'development' && config.databaseUrl === null
     ? {
@@ -304,6 +338,7 @@ async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   log.info('收到退出信号，停止接新请求', { signal });
+  nodeReporter?.stop();
   await gracefulShutdown({
     servers,
     // 意图卡的长轮询（intent-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的

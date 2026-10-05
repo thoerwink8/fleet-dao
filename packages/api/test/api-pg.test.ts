@@ -15,6 +15,7 @@ import { githubAppMissing } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
+import { NODE_REPORT_NOT_WIRED, nodeReportPart } from '../src/node-reporter.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
@@ -224,6 +225,8 @@ describe('接口跑在真库上', () => {
         canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
         // 和 main.ts 在非正式环境的装配一样：看门狗只在正式环境跑
         watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
+        // 和 main.ts 没配推送地址时的装配一样
+        nodeReport: nodeReportPart(null),
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -251,6 +254,7 @@ describe('接口跑在真库上', () => {
         github_app: { ok: true },
         canary: { ok: true, status: 'not_wired', message: CANARY_NOT_HERE },
         watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },
+        node_report: { ok: true, status: 'not_wired', message: NODE_REPORT_NOT_WIRED },
       },
     });
     await h.feed.stop();
