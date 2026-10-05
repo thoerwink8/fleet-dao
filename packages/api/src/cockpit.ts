@@ -43,7 +43,7 @@ import {
   WebRoutes,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { DEPLOY_LAG_NOT_HERE, handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
+import { handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { meBody } from './auth.ts';
@@ -51,15 +51,6 @@ import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reco
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
-import {
-  engineFact,
-  engineOffFact,
-  envFacts,
-  poolsFact,
-  readHealth,
-  scheduleFact,
-  versionFact,
-} from './env-view.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY, closeLegacyAsk } from './legacy-asks.ts';
@@ -77,12 +68,12 @@ import { soloReserveView } from './reserve-view.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
+import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
 import {
   askLate,
   buildBoard,
-  buildHome,
   buildPools,
   isTaskFinished,
   jobView,
@@ -172,115 +163,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, ReposResponse, { repos });
   });
 
-  /**
-   * 新主页（/）的一屏三块 + 持续状态条，一个往返聚齐（#589）。
-   * 为了「要你拍的」「做完的」反查标题，tasks 用全量（不是看板那份 7 天窗口）：各仓的看板需求合起来去重。
-   * 库读不到就任它抛（errorHandler 回 500），不拿「空主页」顶——主页那个形状没有「这块没查成」的位置。
-   */
-  app.get(WebRoutes.home.path, async (c) => {
-    const repos = await store.listRepos();
-    const taskLists = await Promise.all(repos.map((r) => store.listBoardTasks(r.id)));
-    const tasks = [...new Map(taskLists.flat().map((t) => [t.id, t])).values()];
-    // 「做完的」里的单可能早已进了终态、掉出了看板的 7 天窗口：按主页最多用得到的（镜像里 merged PR 挂的单）补回来。
-    const merged = await store.listPullRequests({ state: 'merged', limit: 10 });
-    const missing = new Set<string>();
-    for (const p of merged) {
-      for (const issue of p.issueRefs ?? []) {
-        if (!tasks.some((t) => t.repoId === p.repoId && t.issueNumber === issue)) {
-          const task = await store.findTaskByIssue(p.repoId, issue);
-          if (task) {
-            tasks.push(task);
-          } else {
-            missing.add(`${p.repoId}#${issue}`);
-          }
-        }
-      }
-    }
-    for (const key of missing) deps.log.warn('主页「做完的」反查不到挂的单，只显示 PR 号', { issue: key });
-    const taskIds = tasks.map((t) => t.id);
-    const [notifications, activeRuns, pools, channels, windows, routes, models, segmentRuns, engine] =
-      await Promise.all([
-        store.listNotifications({ status: 'open', limit: 200 }),
-        store.listRuns({ taskIds, active: true }),
-        store.listPools(),
-        store.listChannels(),
-        store.listQuotaWindows(),
-        store.listRoutes(),
-        store.listModels(),
-        // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
-        store.listSegmentRunsForTasks(taskIds),
-        // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
-        engineProbe(),
-      ]);
-    const now = deps.now();
-    const poolViews = buildPools(
-      { pools, channels, windows, routes, activeRuns },
-      now,
-      config.quotaStaleAfterMs,
-    );
-    return reply(c, HomeResponseSchema, {
-      ...buildHome({
-        notifications: notifications.items,
-        tasks,
-        activeRuns,
-        merged,
-        repos,
-        pools: poolViews,
-        routes,
-        engine,
-        segmentRuns,
-        models,
-        channels,
-        now,
-      }),
-    });
-  });
+  // 主页、环境页的拼法在 snapshots.ts（以后别的环境推快照也调同一份）；引擎探针在上面建一次、两页共用它的缓存。
+  // 每次请求现取 deps（不在装配时拍一份），和原来在处理函数里直接读 deps 一样。
+  const snapshotDeps = (): SnapshotDeps => ({ ...deps, engineProbe });
 
-  /**
-   * 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」，一项读失败不连累别的项。
-   * 只读、不跨环境、不开口子：读的全是现成的（主页、额度页、定时任务页、/healthz 用的是同一份）。
-   * 引擎那一格沿用主页那一格的探针（开着才真探），不另写一份判法。
-   */
-  app.get(WebRoutes.env.path, async (c) => {
-    const now = deps.now();
-    const engineProbeResult = await engineProbe();
-    const engine = engineProbeResult.state === 'off' ? engineOffFact() : engineFact(engineProbeResult);
-    // 版本那一项只在法国的正式机器上装配（main.ts 的 onFrance）：别处 deps.deployLag 没有，照实写「没查成」
-    const readDeployLag = deps.deployLag;
-    const facts = await envFacts({
-      engine,
-      readSessions: () => store.listRuns({ active: true }),
-      readPools: async () => {
-        const [pools, channels, windows, routes, activeRuns] = await Promise.all([
-          store.listPools(),
-          store.listChannels(),
-          store.listQuotaWindows(),
-          store.listRoutes(),
-          store.listRuns({ active: true }),
-        ]);
-        return poolsFact({
-          pools,
-          channels,
-          windows,
-          routes,
-          activeRuns,
-          now,
-          staleAfterMs: config.quotaStaleAfterMs,
-        });
-      },
-      readSchedule: async () => scheduleFact(await store.listJobs(), now),
-      readVersion: readDeployLag ? async () => versionFact(readDeployLag(), now) : null,
-      versionNotWired: DEPLOY_LAG_NOT_HERE,
-      readHealth: () => readHealth(deps.health, deps.log),
-    });
-    return reply(c, EnvResponseSchema, {
-      name: config.machineName
-        ? { name: config.machineName }
-        : { name: '认不出', problem: '这台后端没配环境名（api.env 的 FLEET_MACHINE_NAME）' },
-      asOf: now.toISOString(),
-      facts,
-    });
-  });
+  app.get(WebRoutes.home.path, async (c) =>
+    reply(c, HomeResponseSchema, await readHomeSnapshot(snapshotDeps())),
+  );
+
+  app.get(WebRoutes.env.path, async (c) =>
+    reply(c, EnvResponseSchema, await readEnvSnapshot(snapshotDeps())),
+  );
 
   app.get(WebRoutes.board.path, async (c) => {
     const repo = await store.getRepo(c.req.param('repoId'));

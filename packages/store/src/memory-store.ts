@@ -988,6 +988,10 @@ export function createMemoryStore(
     async findTaskByIssue(repoId, issueNumber) {
       return data.tasks.find((t) => t.repoId === repoId && t.issueNumber === issueNumber) ?? null;
     },
+    async findTasksByIssues(refs) {
+      const wanted = new Set(refs.map((r) => `${r.repoId}#${r.issueNumber}`));
+      return data.tasks.filter((t) => wanted.has(`${t.repoId}#${t.issueNumber}`));
+    },
     async createTaskFromIssue(input, entry) {
       const existing = data.tasks.find(
         (t) => t.repoId === input.repoId && t.issueNumber === input.issueNumber,

@@ -579,6 +579,11 @@ export interface IntakeStore {
   /** owner/name 不分大小写。 */
   findRepoByName(owner: string, name: string): Promise<IntakeRepo | null>;
   findTaskByIssue(repoId: string, issueNumber: number): Promise<Task | null>;
+  /**
+   * 按一批（仓, issue 号）一次查回对得上的任务（主页「做完的」反查 merged PR 挂的单用，免得一张一张查库）。
+   * 对不上的不回、不报错，调用方自己数缺了哪几张；看不懂的仓编号当作对不上。回的顺序不保证。
+   */
+  findTasksByIssues(refs: readonly { repoId: string; issueNumber: number }[]): Promise<Task[]>;
   /** 按（仓, issue 号）唯一：并发来两次也只建一行，第二次回 created=false 和已有的那行，不写操作记录。新行排在这个仓最后。 */
   createTaskFromIssue(input: NewIssueTask, audit: NewAuditEntry): Promise<{ task: Task; created: boolean }>;
   /** 标题和原话都没变是 unchanged（不写操作记录）。 */

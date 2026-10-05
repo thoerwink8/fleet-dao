@@ -14,8 +14,8 @@ import type { Logger } from './ports.ts';
 
 /** 法国上各版所在的目录（deploy/release.sh 的 RELEASES）。 */
 export const RELEASES_DIR = '/srv/fleet-dao-releases';
-/** 不在法国的正式机器上（开发、测试）：这一项报「未接」，公网看得到。 */
-export const DEPLOY_LAG_NOT_HERE = '只在法国的正式机器上查';
+/** 不在正式环境（FLEET_ENV=production，法国和本机档都是；开发、测试不是）：这一项报「未接」，公网看得到。 */
+export const DEPLOY_LAG_NOT_HERE = '只在正式环境查';
 
 /**
  * 各种「多久算不对」。自动发布每 5 分钟一轮，有要发的马上发（发布脚本先排空引擎，宽限 10 分钟和构建一起走）；只有不会排空的旧引擎

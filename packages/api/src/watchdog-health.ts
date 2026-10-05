@@ -6,7 +6,7 @@
 // - 一段一条：键是 watchdog-down:<这一段从看门狗哪次跑成之后算>（after-<编号>，从没跑成过是 no-success）；同一段里人点了「处理」的
 //   不再打开，之后看门狗跑成一轮再出事是新的一张卡。标题正文不带「多久了」（每 5 分钟改一次卡，飞书免费版每月 1 万次接口调用）。
 // - 公网看得到 /healthz：对外只说看门狗几点跑完一轮、查了几个、几个没按期跑成，不带任务名和原因原文（原因只进日志和提醒正文）。
-// - 不在法国的正式机器上（开发、测试）报「未接」、不看。这一项跟着看门狗自己变红，发版脚本只标待处理、不退回
+// - 不在正式环境（FLEET_ENV=production，法国和本机档都是）的（开发、测试）报「未接」、不看。这一项跟着看门狗自己变红，发版脚本只标待处理、不退回
 //   （deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 import {
   alertByKey,
@@ -21,8 +21,8 @@ import {
 import { PublicHealthError } from './health.ts';
 import type { Logger } from './ports.ts';
 
-/** 不在法国的正式机器上：这一项报「未接」（公网看得到）。 */
-export const WATCHDOG_NOT_HERE = '只在法国的正式机器上跑';
+/** 不在正式环境：这一项报「未接」（公网看得到）。 */
+export const WATCHDOG_NOT_HERE = '只在正式环境跑';
 /** 「看门狗停了」那条：watchdog-down:<after-<编号> | no-success>。 */
 export const WATCHDOG_DOWN_PREFIX = 'watchdog-down:';
 /** 撤「看门狗停了」、记操作记录时的「谁」；也用它认出哪些是这里自己撤的（同一段里又不对了照样打开）。 */
@@ -160,7 +160,7 @@ export async function watchdogWatchOnce(deps: {
   return 'raised';
 }
 
-/** 后端每 5 分钟看一次看门狗（只在法国的正式机器上起）。这一轮没做成只记日志，下一轮再来。返回停止的函数。 */
+/** 后端每 5 分钟看一次看门狗（只在正式环境起）。这一轮没做成只记日志，下一轮再来。返回停止的函数。 */
 export function startWatchdogWatch(deps: {
   db: Db;
   now: () => Date;

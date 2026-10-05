@@ -212,7 +212,7 @@ describe('接口跑在真库上', () => {
           db: t.db,
           location: { path: join(tmpdir(), 'fleet-api-pg-nowhere', 'jev.json'), explicit: false },
         }),
-        // 和 main.ts 在法国以外的装配一样：没有发布目录、没有自动发布
+        // 和 main.ts 在非正式环境的装配一样：没有发布目录、没有自动发布
         deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
         // 网关刚接上还没来过：没查成，照实报红（gateway-seen.test.ts 另测来过、太久没来）
         feishuGateway: createGatewaySeen(() => new Date(T0)),
@@ -220,9 +220,9 @@ describe('接口跑在真库上', () => {
         sessionOrg: sessionOrgHealthCheck(t.db),
         // 库里真查：没有机器人权限的提醒就是好的（github-app-health.test.ts 另测开着报红）
         githubApp: githubAppHealthCheck(t.db),
-        // 和 main.ts 在法国以外的装配一样：全流程巡检只在法国跑
+        // 和 main.ts 在非正式环境的装配一样：全流程巡检只在正式环境跑
         canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
-        // 和 main.ts 在法国以外的装配一样：看门狗只在法国跑
+        // 和 main.ts 在非正式环境的装配一样：看门狗只在正式环境跑
         watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
       }),
     });

@@ -1148,6 +1148,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
       return row ? toTask(row) : null;
     },
+    async findTasksByIssues(refs) {
+      // 看不懂的仓编号直接当对不上（和 findTaskByIssue 一样），不让它把整条查询弄成类型错误
+      const usable = refs.filter((r) => isUuid(r.repoId));
+      if (usable.length === 0) return [];
+      const rows = await db
+        .select()
+        .from(tasks)
+        .where(
+          or(...usable.map((r) => and(eq(tasks.repoId, r.repoId), eq(tasks.issueNumber, r.issueNumber)))),
+        );
+      return rows.map(toTask);
+    },
     async createTaskFromIssue(input, entry) {
       return db.transaction(async (tx) => {
         const [created] = await tx

@@ -2,9 +2,9 @@
 // 只读、不跨环境、不开口子：读的全是现成的（/healthz 同一份健康检查、主页同一个引擎探针、额度页同一个 buildPools、
 // 定时任务页同一个 jobView、发布对账同一个 deploy-lag）。一项读失败只让那一项写「没查成」，不连累别的项。
 // 改这里之前必须知道：
-// - 引擎那一格沿用主页那一格的判法（home-engine.ts）：off（按 FLEET_SERVICES 没开，临时调整）不是红，down（开着却
+// - 引擎那一格沿用主页那一格的判法（home-engine.ts）：off（按配置没开引擎）不是红，down（开着却
 //   没连上）才是红，unknown（没有探针）不冒充正常。
-// - 版本那一项只在法国的正式机器上有（main.ts 按 onFrance 装配）：别的环境读不到发布目录，照实报「没查成 + 原因」，
+// - 版本那一项只在正式环境有（main.ts 按 production 装配；法国和本机档都是）：别的环境读不到发布目录，照实报「没查成 + 原因」，
 //   不拿空或 0 顶。
 // - 每一项都自己包 try/catch：库、Temporal、发布目录任何一处抛，都只让这一项红，页面照常显示别的项。
 
@@ -45,7 +45,7 @@ export async function fact<T>(what: string, read: () => Promise<T> | T): Promise
   }
 }
 
-/** 没接上的那一项（比如版本只在法国有）：写「没查成 + 原因」，不当成「没有」。 */
+/** 没接上的那一项（比如版本只在正式环境有）：写「没查成 + 原因」，不当成「没有」。 */
 export function notWired<T>(reason: string): EnvFact<T> {
   return { ok: false, reason };
 }
@@ -62,8 +62,8 @@ export function engineFact(engine: EngineHealth): EnvFact<EnvEngine> {
 }
 
 /**
- * 引擎关着的固定说法（和主页那一格同一句）：法国引擎 2026-09-29 起临时关着（`docs/PROGRESS.md` 的「生效中的临时调整」），
- * 环境页照它写「关着（临时调整）」，不是红。
+ * 引擎关着的固定说法（和主页那一格同一句）：这台按配置（release.env 的 FLEET_SERVICES）没开引擎，是「关着」，不是红。
+ * 为什么关、关多久不在代码里写死（那是进度文件里的临时调整，会变），这里只说按配置没开。
  */
 export function engineOffFact(): EnvFact<EnvEngine> {
   return { ok: true, value: { state: 'off', detail: ENGINE_OFF_DETAIL } };
@@ -136,7 +136,7 @@ export function scheduleFact(jobs: readonly JobRecord[], now: Date): EnvSchedule
 }
 
 /**
- * 在用版本、落后主线没有（只法国的正式机器读得到）。读不到发布目录 / 状态文件时 judgeDeployLag 会判「没查成」，
+ * 在用版本、落后主线没有（只正式环境读得到）。读不到发布目录 / 状态文件时 judgeDeployLag 会判「没查成」，
  * 那也照实带进 problems；current/behind 读不出就是 null，页面写「没查成」不写 0。
  */
 export function versionFact(input: DeployLagInput, now: Date): EnvVersion {
@@ -173,7 +173,7 @@ export async function envFacts(input: {
   readSchedule: () => Promise<EnvSchedule>;
   /** 版本那一项：正式机器给读法，别的环境给 null（写「没查成 + 原因」）。 */
   readVersion: (() => Promise<EnvVersion>) | null;
-  /** 版本项没接上时的原因（比如「只在法国的正式机器上有」）。 */
+  /** 版本项没接上时的原因（比如「只在正式环境查」）。 */
   versionNotWired: string;
   readHealth: () => Promise<EnvHealth>;
 }): Promise<{
