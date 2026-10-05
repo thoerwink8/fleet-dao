@@ -259,22 +259,26 @@ export function useTaskDetail(taskId: string | undefined) {
   });
 }
 
-/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。 */
+/**
+ * 路由的在线状态由探针写、不推送，所以定时重拉。探针 15 分钟一轮，但驾驶舱「渠道状态」要看半分钟内的新读数
+ * （#1087），这里 30 秒拉一次（和定时任务、主页近况同档），多页共用同一份缓存。
+ */
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
-  return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000, enabled });
+  return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 30_000, enabled });
 }
 
 /**
- * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每分钟重拉；
- * 额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。enabled 为假时不读（比如换模型的对话框没打开）。
+ * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每 30 秒重拉
+ * （路由页顶部的渠道状态两份一起读，#1087）；额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。
+ * enabled 为假时不读（比如换模型的对话框没打开）。
  */
 export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({
     queryKey: keys.routingLayers,
     queryFn: () => api.routingLayers(),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
     enabled,
   });
 }

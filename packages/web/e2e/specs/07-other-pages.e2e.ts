@@ -21,6 +21,36 @@ test.describe('其余页面', () => {
     await shot(page, '07-路由');
   });
 
+  test('渠道状态：目录里的渠道都显示出来，探得久的渠道变「检测中断」，刚探过的不受影响', async ({
+    page,
+    shot,
+  }) => {
+    await page.goto('/routing');
+    await expect(page.getByRole('heading', { name: '渠道状态' })).toBeVisible();
+    const list = page.getByRole('list', { name: '渠道状态' });
+    // 目录样例里的 5 个渠道一个不少，写的是目录里公开的名字
+    for (const name of [
+      'Claude 订阅',
+      'Mirasim 中转',
+      'Cursor 订阅',
+      'Grok 订阅（Grok Build）',
+      'Jev 判断题',
+    ]) {
+      await expect(list.getByText(name, { exact: true })).toBeVisible();
+    }
+    await expect(list.getByRole('listitem')).toHaveCount(5);
+    // 备库里 Claude 订阅两条在用的路是半小时前探的：超过 15 分钟 + 3 分钟，不拿旧绿灯装没事
+    const claude = list.locator('[data-channel="claude-sub"]');
+    await expect(claude).toHaveAttribute('data-state', 'interrupted');
+    await expect(claude).toContainText('检测中断');
+    // Grok 是 4 分钟前探通的：照常亮「通」
+    const grok = list.locator('[data-channel="xai"]');
+    await expect(grok).toHaveAttribute('data-state', 'ok');
+    await expect(grok).toContainText('通');
+    await expect(page.getByText('绿灯只表示本节点最近一轮抽测通过')).toBeVisible();
+    await shot(page, '07-渠道状态');
+  });
+
   test('思考档位：每个模型的每条路都列出来，来自库里的路由两层', async ({ page, shot }) => {
     await page.goto('/efforts');
     await expect(page.getByRole('heading', { name: '思考档位' })).toBeVisible();
