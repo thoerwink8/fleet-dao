@@ -130,7 +130,7 @@
         "说明": "演示版的可见范围写在这里（france.sh 建的目录），由 fleet-demo-scopes 推到香港"
       },
       "FLEET_NODE_KEYS": {
-        "private": null,
+        "private": "1650843456edc28f4e8c7c6a74b6b3ea06f0e024802bb38ae93cf3e9b072a2c6",
         "说明": "看板多机（全仓审查第 1 路）：收别的环境（本机 WSL）推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值。还没记指纹：第一次在法国跑 fleet-api node-key new local 贴进去之后，用法国自己的指纹钥匙算好再把这里的 null 换成指纹（docs/ops.md「接上法国看板」）。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
       },
       "FLEET_NODE_REPORT_URL": {
@@ -144,8 +144,8 @@
     },
     "release.env": {
       "FLEET_SERVICES": {
-        "value": "fleet-api",
-        "说明": "本机跑哪些应用服务（空格分隔，可选 fleet-engine、fleet-api）。【临时】创始人 2026-09-29 要求关闭法国引擎、不再派单，所以只留 fleet-api（驾驶舱后端）；原因：引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%，流程重做前不再让它接活。撤回条件：新流程演练通过、创始人说重开；撤回做法：改回 fleet-engine fleet-api、发布一轮（定时任务是引擎进程里的定时器，引擎起来自己恢复，不用再手动恢复 Temporal 定时任务，#1072）。最迟 2026-10-05 复查，没撤回要写明为什么续。"
+        "value": "fleet-engine fleet-api",
+        "说明": "本机跑哪些应用服务（空格分隔，可选 fleet-engine、fleet-api）：引擎和驾驶舱后端都开着。引擎开着＝待命：各项目的「让 AI 接活」（repos.auto_dispatch_since）发版后默认全关，创始人在驾驶舱点开才拉单、派活；关着时引擎只收单、显示、不派，但路由探针（每 15 分钟起一个最短的模型会话）和读额度照转——这是创始人 2026-10-05 知情同意的代价。原先【临时】只留 fleet-api（2026-09-29 创始人叫停引擎）的做法已撤回：创始人 2026-10-05 约 19:10 对「关闭是进程停着还是待命」答「2 3 4 6 7 按照你推荐」（推荐：待命）。上线（发布一轮）后，在法国以 root 把 canary、route-probe、hourly-reconcile、github-reconcile 四个 Temporal 定时任务用 fleet-temporal schedule toggle --unpause 恢复（引擎重启不替人恢复暂停的）；新的 v<N> 发版后项目自动回到关由 release.sh 做（docs/ops.md 自动发布一节，#1050）。"
       },
       "FLEET_DOMAIN": {
         "private": "5ecae725bd3e628c733cdb9ca7c58a670f96c0803406e6ce72c78891b1c27024",
