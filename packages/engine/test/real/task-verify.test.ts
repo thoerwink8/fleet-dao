@@ -292,14 +292,16 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     expect(r.posted.at(-1)?.description).toContain('没做到验收条');
   });
 
-  it('写这张单的族不止一个：全部跳过（先 gpt 后 claude 写的 → 验的是 deepseek）', async () => {
+  it('写这张单的族不止一个：全部跳过（先 gpt 后 claude 写的 → grok 没路由，验的是 deepseek）', async () => {
     const r = rig({ picks: { deepseek: okRoute('deepseek') } });
     const got = await r.run(r.input({ authorFamilies: ['gpt', 'claude'] }), ctx());
     expect(got.pass).toBe(true);
-    // 第一个被问的就是 deepseek：gpt、claude 压根没问
-    expect(r.asked).toHaveLength(1);
-    expect(r.asked[0]?.avoidFamilies).not.toContain('deepseek');
-    expect(r.asked[0]?.avoidFamilies).toEqual(expect.arrayContaining(['gpt', 'claude', 'grok', 'kimi']));
+    // 顺序 gpt、grok、claude、deepseek、kimi：gpt、claude 压根没问，先问 grok（没有）再问 deepseek
+    expect(r.asked).toHaveLength(2);
+    expect(r.asked[0]?.avoidFamilies).toEqual(expect.arrayContaining(['gpt', 'claude', 'deepseek', 'kimi']));
+    expect(r.asked[0]?.avoidFamilies).not.toContain('grok');
+    expect(r.asked[1]?.avoidFamilies).not.toContain('deepseek');
+    expect(r.asked[1]?.avoidFamilies).toEqual(expect.arrayContaining(['gpt', 'claude', 'grok', 'kimi']));
   });
 
   it('二进制 / 纯改名的文件（changes 为 0）没有文本 diff：注明一句，不算看不全', async () => {
