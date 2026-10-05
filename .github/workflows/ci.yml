@@ -21,6 +21,12 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
+  # 每夜一轮全量兜底（2026-10-05 加，创始人「不认可每个 pr 都要这种流程」）。e2e 的触发面同一天收窄到
+  # 「只碰 web、api 或 ci.yml 自己」——收窄之后，改 db、shared、锁文件的 PR 不再跑那 364 秒的驾驶舱 e2e。
+  # 全量回归不能就这么没了，落到这里：非 pull_request 事件在 planCi 里一律全跑（含 e2e），所以这一轮会把
+  # 每一样都跑一遍，只是不再挂在每个 PR 上。挑深夜（北京时间约 4 点）避开白天的并发槽。
+  schedule:
+    - cron: '23 20 * * *'
 # 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
 permissions:
   contents: read
