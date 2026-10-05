@@ -17,6 +17,7 @@ import {
 } from '../api/client';
 import type { Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
+import { EngineMasterRelation } from '../components/engine-master';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { useRepo } from '../components/repo-context';
@@ -531,6 +532,8 @@ export default function Settings() {
         title="仓库"
         description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」关着时引擎只收单、不派活，点开启才开始接活。"
       >
+        {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
+        <EngineMasterRelation />
         {reposError ? (
           <div className="mb-3 max-w-xl">
             <LoadError what="仓列表" error={reposError} />

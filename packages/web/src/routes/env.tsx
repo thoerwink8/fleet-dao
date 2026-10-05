@@ -1,4 +1,5 @@
-// 环境页「环境」（#820 片 1，只读）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
+// 环境页「环境」（#820 片 1，只读；顶上多一张能点的「引擎总开关」卡，#1086，见 components/engine-master.tsx）：
+// 这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
 //
 // 只读、不跨环境、不开口子：读的全是本后端自己库里的现成读法（/api/env 一处聚合，见 packages/api/src/env-view.ts）。
 // 要做成什么（specs/820-驾驶舱环境视图与中止恢复/方案.md §5 片 1）：
@@ -26,6 +27,7 @@ import type { ReactNode } from 'react';
 import { brand } from '#brand';
 import { useEnv, useNodeSnapshots, useNodes } from '../api/client';
 import type { EnvEngine, EnvFacts, EnvSchedule, EnvVersion } from '../api/types';
+import { EngineMasterControl } from '../components/engine-master';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatDateTime } from '../lib/format';
@@ -343,6 +345,7 @@ function localSummary(facts: EnvFacts): ReactNode {
   const failing = facts.health.ok ? facts.health.value.failing.length : undefined;
   const unread = [
     facts.engine,
+    ...(facts.master ? [facts.master] : []),
     facts.version,
     facts.sessions,
     facts.pools,
@@ -380,6 +383,8 @@ export default function Env() {
           <LoadError what="远程环境列表" error={nodes.error} onRetry={() => void nodes.refetch()} />
         </div>
       ) : null}
+      {/* 引擎总开关（#1086）：选了远程环境时显示它的状态、只读，写明去那台上操作；本台能点（二次确认、写操作记录） */}
+      <EngineMasterControl />
       <div
         className={cn(
           'grid gap-4',
@@ -452,8 +457,9 @@ export default function Env() {
         })}
       </div>
       <p className="mt-4 text-xs text-muted-foreground">
-        这一页只读：本台的数读的是本后端自己库里的现成读法，远程环境的数是它每分钟推来的快照（新不新鲜按这边收到的时刻算，
-        不信它自己的钟）。写操作（暂停派活、叫停）在片 2、片 3 里做，这一页不给。
+        这一页的数是只读的：本台的数读的是本后端自己库里的现成读法，远程环境的数是它每分钟推来的快照（新不新鲜按这边收到的时刻算，
+        不信它自己的钟）。唯一能点的是上面的「引擎总开关」，且只管本台；其余写操作（暂停派活、叫停）在片 2、片
+        3 里做，这一页不给。
       </p>
     </Page>
   );

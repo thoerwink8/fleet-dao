@@ -24,6 +24,7 @@ import type {
   EnvFact as EnvFactBase,
   EnvFacts as EnvFactsBase,
   EnvHealthSchema,
+  EnvMasterSchema,
   EnvPoolsSchema,
   EnvResponseSchema,
   EnvScheduleSchema,
@@ -160,6 +161,8 @@ export type EnvFacts = EnvFactsBase;
 /** 一项的成败：ok 带值，没查成带一句给人的原因（不拿空顶）。 */
 export type EnvFact<T> = EnvFactBase<T>;
 export type EnvEngine = z.infer<typeof EnvEngineSchema>;
+/** 引擎总开关那一格（#1086，设置 engine.master）：开还是关、谁什么时候改的。 */
+export type EnvMaster = z.infer<typeof EnvMasterSchema>;
 export type EnvVersion = z.infer<typeof EnvVersionSchema>;
 export type EnvSessions = z.infer<typeof EnvSessionsSchema>;
 export type EnvPools = z.infer<typeof EnvPoolsSchema>;

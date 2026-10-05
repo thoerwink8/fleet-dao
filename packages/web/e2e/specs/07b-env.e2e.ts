@@ -2,7 +2,7 @@
 // 页面要能回答「回来看一眼」：引擎在不在、在用哪版、落后主线没有、手上几个会话在跑、池占几个、健康红几项、最近拉单。
 // 做完的标准里「法国引擎关着显示关着（临时调整）不是红」在 e2e 里造不出来（这台后端开着引擎）：那条由
 // packages/api/test/env-view.test.ts 和 packages/web/src/routes/env.test.tsx 钉住；这里走真环境、看真数。
-import { expect, test } from '../support/fixtures.ts';
+import { expect, onlyDesktop, test } from '../support/fixtures.ts';
 
 type Env = {
   name: { name: string; problem?: string };
@@ -70,5 +70,70 @@ test.describe('环境页', () => {
     await page.getByRole('menuitem', { name: /打开环境页/ }).click();
     await expect(page).toHaveURL(/\/env$/);
     await expect(page.getByRole('heading', { name: /本机/ }).first()).toBeVisible();
+  });
+
+  test('引擎总开关（#1086）：顶栏常驻状态，环境页点开（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关；默认是关', async ({
+    page,
+    api,
+    shot,
+  }, info) => {
+    test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
+    type Setting = { key: string; value: unknown; version: number; updatedBy?: string };
+    type Audit = { items: { action: string; target: string; actor: { kind: string; id: string } }[] };
+    const read = async () =>
+      ((await api.get('/api/settings')) as { settings: Setting[] }).settings.find(
+        (s) => s.key === 'engine.master',
+      );
+    // 种子里没设过：默认关
+    expect((await read())?.value, '种子里总开关没设过，默认关').toBeNull();
+
+    await page.goto('/env');
+    const card = page.getByTestId('engine-master');
+    await expect(card.getByTestId('engine-master-state')).toHaveText('关着');
+    await expect(page.getByRole('link', { name: /引擎 关着/ })).toBeVisible();
+    await shot(page, '07b-环境-引擎总开关-关着');
+
+    // 点开启先弹确认；点「先不」什么都不改
+    await card.getByRole('button', { name: '开启引擎总开关' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('开启引擎总开关？');
+    await dialog.getByRole('button', { name: '先不' }).click();
+    expect((await read())?.value).toBeNull();
+
+    await card.getByRole('button', { name: '开启引擎总开关' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '开启', exact: true }).click();
+    await expect(card.getByTestId('engine-master-state')).toHaveText('开着');
+    await expect(page.getByRole('link', { name: /引擎 开着/ })).toBeVisible();
+    await expect(card.getByTestId('engine-master-who')).toContainText('打开');
+    await shot(page, '07b-环境-引擎总开关-开着');
+
+    // 落库了：读回是 true；进了操作记录（谁、改的是 engine.master）
+    await expect.poll(async () => (await read())?.value).toBe(true);
+    const audit = (await api.get('/api/audit?target=setting:engine.master')) as Audit;
+    expect(audit.items.map((a) => [a.action, a.actor.kind])).toContainEqual(['setting.update', 'user']);
+
+    // 换一页（设置页）顶栏的胶囊还在、还是开着；刷新后还开着；再点关闭回到关着
+    await page.goto('/settings');
+    await expect(page.getByRole('link', { name: /引擎 开着/ })).toBeVisible();
+    await expect(page.getByTestId('engine-master-relation')).toContainText('总开关关＝全停');
+    await page.goto('/env');
+    await expect(card.getByTestId('engine-master-state')).toHaveText('开着');
+    await card.getByRole('button', { name: '关闭引擎总开关' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '关闭', exact: true }).click();
+    await expect(card.getByTestId('engine-master-state')).toHaveText('关着');
+    await expect.poll(async () => (await read())?.value).toBe(false);
+  });
+
+  test('【故意造出的失败】未登录写总开关：PUT /api/settings/engine.master 回 401（登录门挡住，不是任何人都能点）', async ({
+    stack,
+    request,
+  }, info) => {
+    test.skip(!onlyDesktop(info), '只验后端接口，跑一遍就够');
+    // request 夹具是独立的、没带登录 Cookie 的请求上下文（登录用的是 context.request）
+    const res = await request.put(`${stack.webOrigin}/api/settings/engine.master`, {
+      headers: { origin: stack.webOrigin },
+      data: { value: true, version: 0 },
+    });
+    expect(res.status()).toBe(401);
   });
 });

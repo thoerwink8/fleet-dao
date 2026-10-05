@@ -33,6 +33,7 @@ import { freshnessNow, nodeAgeText, useNodeSelection, withNode } from '../../lib
 import { noticeLevelMeta } from '../../lib/status';
 import { type ModePref, PALETTES } from '../../lib/theme';
 import { cn } from '../../lib/utils';
+import { EngineMasterBadge } from '../engine-master';
 import { StatusDot } from '../status';
 import { useTheme } from '../theme-provider';
 import { Button } from '../ui/button';
@@ -58,6 +59,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
         <Menu />
       </Button>
       <EnvSwitcher />
+      <EngineMasterBadge />
       <button
         type="button"
         onClick={onSearch}
