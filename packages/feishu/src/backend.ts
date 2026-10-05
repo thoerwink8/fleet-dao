@@ -1,29 +1,10 @@
 // 调驾驶舱后端：经隧道走驾驶舱同一套接口（/api），一律带网关通行证；路由表标 acting=required 的才注明代表哪位创始人。
 // 返回一律按 shared 里的约定校验：形状不对当场报错，不把坏数据往卡片上放。
+// 只调 IntentRoutes（shared 的 intent-api.ts）：旧的九条飞书接口随 #1022 在后端删了，这边调它们的方法也一起删了。
 
 import {
-  AnswerAskRequest,
-  AnswerAskResponse,
   ApiErrorBody,
-  FEISHU_UNDERSTAND_MS,
   type FeishuActing,
-  FeishuBoardSnapshotSchema,
-  type FeishuCardRecordSchema,
-  FeishuConfirmDraftRequest,
-  FeishuConfirmDraftResponse,
-  type FeishuDraftSchema,
-  FeishuFollowRequest,
-  FeishuFollowResponse,
-  FeishuMessageRequest,
-  FeishuMessageResponse,
-  FeishuOkResponse,
-  FeishuOutboxAckRequest,
-  FeishuOutboxResponse,
-  FeishuPutCardRequest,
-  FeishuReviseDraftRequest,
-  FeishuReviseDraftResponse,
-  FeishuRoutes,
-  FeishuTaskLookupResponse,
   IntentCardAckRequest,
   IntentCardAckResponse,
   type IntentCardAckSchema,
@@ -34,11 +15,7 @@ import {
   IntentIntakeRecallRequest,
   IntentIntakeRecallResponse,
   IntentRoutes,
-  TaskActionRequest,
-  TaskActionResponse,
-  TaskDetailResponse,
   WEB_API_PREFIX,
-  WebRoutes,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
@@ -49,17 +26,6 @@ import type { z } from 'zod';
  */
 export const ACTING_HEADER = 'X-Fleet-Acting-Feishu';
 
-export type Draft = z.output<typeof FeishuDraftSchema>;
-export type Understood = z.output<typeof FeishuMessageResponse>;
-export type ConfirmResult = z.output<typeof FeishuConfirmDraftResponse>;
-export type TaskLookup = z.output<typeof FeishuTaskLookupResponse>;
-export type TaskDetail = z.output<typeof TaskDetailResponse>;
-export type BoardSnapshot = z.output<typeof FeishuBoardSnapshotSchema>;
-export type OutboxBatch = z.output<typeof FeishuOutboxResponse>;
-export type OutboxItem = OutboxBatch['items'][number];
-export type OutboxAck = z.input<typeof FeishuOutboxAckRequest>['acks'][number];
-export type CardRecord = z.output<typeof FeishuCardRecordSchema>;
-export type CardKind = CardRecord['kind'];
 /** 意图（#553 第 4 条）：收原话、撤回、补漏游标、意图卡和回执，约定在 shared 的 intent-api.ts。 */
 export type IntakeMessage = z.input<typeof IntentIntakeMessageRequest>;
 export type IntakeResult = z.output<typeof IntentIntakeMessageResponse>;
@@ -143,28 +109,6 @@ export interface CallOptions {
 }
 
 export interface Backend {
-  understand(as: Acting, body: z.input<typeof FeishuMessageRequest>, opts?: CallOptions): Promise<Understood>;
-  reviseDraft(
-    as: Acting,
-    draftId: string,
-    body: z.input<typeof FeishuReviseDraftRequest>,
-    opts?: CallOptions,
-  ): Promise<Draft>;
-  confirmDraft(
-    as: Acting,
-    draftId: string,
-    body: z.input<typeof FeishuConfirmDraftRequest>,
-    opts?: CallOptions,
-  ): Promise<ConfirmResult>;
-  findTasks(as: Acting, issue: number, opts?: CallOptions): Promise<TaskLookup>;
-  task(as: Acting, taskId: string, opts?: CallOptions): Promise<TaskDetail>;
-  stopTask(as: Acting, taskId: string, reason: string): Promise<void>;
-  answerAsk(as: Acting, askId: string, answer: string): Promise<void>;
-  follow(as: Acting, taskId: string, follow: boolean): Promise<boolean>;
-  board(opts?: CallOptions): Promise<BoardSnapshot>;
-  outbox(waitSeconds: number, signal?: AbortSignal): Promise<OutboxBatch>;
-  ackOutbox(acks: OutboxAck[]): Promise<void>;
-  putCard(record: CardRecord): Promise<void>;
   /** 收原话：代表说这句话的那位创始人。没存成（连不上、超时、5xx、被拒）一律抛：调用方据此标「没记成」、标补漏。 */
   intake(as: Acting, body: IntakeMessage, opts?: CallOptions): Promise<IntakeResult>;
   /** 收撤回（飞书的撤回事件不带是谁撤的）。 */
@@ -185,21 +129,11 @@ export interface BackendOptions {
   timeoutMs?: number;
 }
 
-/** 理解一句话：后端答应 FEISHU_UNDERSTAND_MS 内回，网关多给 1 秒（隧道、排队）。 */
-export const UNDERSTAND_WAIT_MS = FEISHU_UNDERSTAND_MS + 1_000;
-
 interface Route {
   method: 'GET' | 'POST' | 'PUT';
   path: string;
   acting: FeishuActing;
 }
-
-/** 驾驶舱接口里网关也调的几条：都代表某位创始人。 */
-const WEB = {
-  task: { method: WebRoutes.task.method, path: WebRoutes.task.path, acting: 'required' },
-  taskAction: { method: WebRoutes.taskAction.method, path: WebRoutes.taskAction.path, acting: 'required' },
-  answerAsk: { method: WebRoutes.answerAsk.method, path: WebRoutes.answerAsk.path, acting: 'required' },
-} as const satisfies Record<string, Route>;
 
 interface Call {
   params?: Record<string, string>;
@@ -298,111 +232,6 @@ export function createBackend(options: BackendOptions): Backend {
   }
 
   return {
-    understand: (as, body, opts) =>
-      call(
-        FeishuRoutes.message,
-        {
-          acting: as,
-          body: FeishuMessageRequest.parse(body),
-          timeoutMs: opts?.timeoutMs ?? UNDERSTAND_WAIT_MS,
-          signal: opts?.signal,
-        },
-        FeishuMessageResponse,
-      ),
-
-    reviseDraft: async (as, draftId, body, opts) =>
-      (
-        await call(
-          FeishuRoutes.reviseDraft,
-          {
-            params: { draftId },
-            acting: as,
-            body: FeishuReviseDraftRequest.parse(body),
-            timeoutMs: opts?.timeoutMs ?? UNDERSTAND_WAIT_MS,
-            signal: opts?.signal,
-          },
-          FeishuReviseDraftResponse,
-        )
-      ).draft,
-
-    confirmDraft: (as, draftId, body, opts) =>
-      call(
-        FeishuRoutes.confirmDraft,
-        {
-          params: { draftId },
-          acting: as,
-          body: FeishuConfirmDraftRequest.parse(body),
-          timeoutMs: opts?.timeoutMs ?? 15_000,
-          signal: opts?.signal,
-        },
-        FeishuConfirmDraftResponse,
-      ),
-
-    findTasks: (as, issue, opts) =>
-      call(
-        FeishuRoutes.findTasks,
-        { acting: as, query: { issue }, timeoutMs: opts?.timeoutMs, signal: opts?.signal },
-        FeishuTaskLookupResponse,
-      ),
-
-    task: (as, taskId, opts) =>
-      call(
-        WEB.task,
-        { params: { taskId }, acting: as, timeoutMs: opts?.timeoutMs, signal: opts?.signal },
-        TaskDetailResponse,
-      ),
-
-    stopTask: async (as, taskId, reason) => {
-      await call(
-        WEB.taskAction,
-        { params: { taskId }, acting: as, body: TaskActionRequest.parse({ action: 'stop', reason }) },
-        TaskActionResponse,
-      );
-    },
-
-    answerAsk: async (as, askId, answer) => {
-      await call(
-        WEB.answerAsk,
-        { params: { askId }, acting: as, body: AnswerAskRequest.parse({ answer }) },
-        AnswerAskResponse,
-      );
-    },
-
-    follow: async (as, taskId, follow) =>
-      (
-        await call(
-          FeishuRoutes.follow,
-          { acting: as, body: FeishuFollowRequest.parse({ taskId, follow }) },
-          FeishuFollowResponse,
-        )
-      ).following,
-
-    board: (opts) =>
-      call(
-        FeishuRoutes.board,
-        { timeoutMs: opts?.timeoutMs, signal: opts?.signal },
-        FeishuBoardSnapshotSchema,
-      ),
-
-    outbox: (waitSeconds, signal) =>
-      call(
-        FeishuRoutes.outbox,
-        { query: { waitSeconds }, timeoutMs: waitSeconds * 1000 + 10_000, signal },
-        FeishuOutboxResponse,
-      ),
-
-    ackOutbox: async (acks) => {
-      await call(FeishuRoutes.ackOutbox, { body: FeishuOutboxAckRequest.parse({ acks }) }, FeishuOkResponse);
-    },
-
-    putCard: async ({ messageId, ...rest }) => {
-      await call(
-        FeishuRoutes.putCard,
-        { params: { messageId }, body: FeishuPutCardRequest.parse(rest) },
-        FeishuOkResponse,
-      );
-    },
-
     intake: (as, body, opts) =>
       call(
         IntentRoutes.intakeMessage,

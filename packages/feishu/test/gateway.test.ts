@@ -701,6 +701,40 @@ describe('意图卡循环起没起', () => {
   });
 });
 
+describe('不再调 #1022 删掉的旧接口', () => {
+  /** 后端已经删了的九条旧飞书接口（旧推送、盘面、卡片登记、草稿、查进度、关注）：照现在的后端回 404。 */
+  const RETIRED: Array<[string, string]> = [
+    ['GET', '/feishu/outbox'],
+    ['POST', '/feishu/outbox/acks'],
+    ['GET', '/feishu/board'],
+    ['PUT', '/feishu/cards/:messageId'],
+    ['POST', '/feishu/messages'],
+    ['POST', '/feishu/drafts/:draftId/revise'],
+    ['POST', '/feishu/drafts/:draftId/confirm'],
+    ['GET', '/feishu/tasks'],
+    ['POST', '/feishu/follows'],
+  ];
+
+  it('起网关跑一轮（意图卡、补漏都走过）：旧接口一次都没调【故意造出的失败：旧路径回 404】', async () => {
+    h = await harness();
+    for (const [method, path] of RETIRED)
+      h.backend.on(method, path, apiError(404, 'not_found', '没有这个接口'));
+    h.backend.on('GET', '/feishu/intent-cards', { body: { items: [], asOf: new Date().toISOString() } });
+    h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
+    h.gateway.start();
+    await until(
+      () =>
+        h.backend.calls('GET', '/feishu/intent-cards').length >= 1 &&
+        h.backend.calls('GET', '/feishu/intake/cursors').length >= 1,
+    );
+    await h.gateway.stop(2_000);
+    const retired = h.backend.requests.filter(
+      (r) => !r.path.startsWith('/feishu/intake/') && r.path !== '/feishu/intent-cards',
+    );
+    expect(retired.map((r) => `${r.method} ${r.path}`)).toEqual([]);
+  });
+});
+
 describe('卡片的字没跑到别处', () => {
   it('「已停用」那句里带上了驾驶舱地址和「只收原话」', async () => {
     h = await harness();
