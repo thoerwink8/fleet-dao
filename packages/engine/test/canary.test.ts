@@ -32,6 +32,7 @@ import {
   CANARY_LEFTOVER_PR_ALERT_KEY,
   CANARY_MAX_MINUTES,
   CANARY_RUN_TIMEOUT_MINUTES,
+  CANARY_SKIPPED_WHY,
   CANARY_STAGE_LIMIT_MINUTES,
   type CanaryBoard,
   type CanaryDeps,
@@ -520,6 +521,7 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
       ...gh,
     },
     facts: async () => current,
+    repoSwitch: async () => 'on',
     workflows: {
       state: async () => wf,
       view: async () => wfView,
@@ -581,6 +583,83 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     expect(h.runsFinished[0]?.result).toMatchObject({ outcome: 'failed' });
     expect(h.runsFinished[0]?.result).toMatchObject({ why: expect.stringContaining('FLEET_CANARY_REPO') });
     expect(h.calls).toEqual([]);
+  });
+
+  it('巡检仓的「让 AI 接活」关着（#1050）：这一轮记「跳过」——不开单、不推卡住报警、schedule_runs 记 partial（看门狗当按期跑过）；上一轮断了留下的那条报警撤掉；前几轮留下的单照收', async () => {
+    const stopped: string[] = [];
+    const h = harness({ repoSwitch: async () => 'off' });
+    h.deps.record.leftovers = async () => [{ id: 3, issueNumber: 9 }];
+    h.deps.workflows.stop = async (id) => {
+      stopped.push(id);
+      return 'sent';
+    };
+    const r = await openCanaryRound(h.deps);
+    expect(r).toMatchObject({
+      done: true,
+      run: {
+        verdict: 'skipped',
+        stage: 'open',
+        issueNumber: null,
+        steps: [],
+        why: expect.stringContaining('跳过'),
+      },
+    });
+    expect(r.done && r.run.why).toContain(CANARY_SKIPPED_WHY);
+    expect(h.finished).toEqual([{ id: 7, verdict: 'skipped', stage: 'open', why: expect.any(String) }]);
+    expect(h.runsFinished[0]?.result).toEqual({
+      outcome: 'partial',
+      why: expect.stringContaining(CANARY_SKIPPED_WHY),
+      scanned: 0,
+      found: 0,
+    });
+    // 一张单都没开、没推报警；断了的那条（不给键）撤掉
+    expect(h.calls.some((c) => c.startsWith('open:'))).toBe(false);
+    expect(h.alerts.raised).toEqual([]);
+    // 先是收前几轮留下的单（PR 都关掉了，撤那条单独的报警），再是撤断了的那条（不给键）
+    expect(h.alerts.resolvedKeys).toEqual([CANARY_LEFTOVER_PR_ALERT_KEY, undefined]);
+    expect(h.alerts.resolved[1]).toContain('跳过');
+    // 前几轮留下的单（收单那一步在跳过之前）照收
+    expect(stopped).toHaveLength(1);
+    expect(h.calls).toContain('cleaned:3');
+  });
+
+  it('【故意造出的失败】跳过时撤不掉上一轮断了的报警：这一轮不能当正常跳过结案（健康页会显示「跳过」、旧报警却还开着），记没跑成、写明原因；不开单', async () => {
+    const h = harness({ repoSwitch: async () => 'off' });
+    h.deps.alerts.resolve = async () => {
+      throw new Error('库连不上');
+    };
+    const r = await openCanaryRound(h.deps);
+    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open' } });
+    expect(r.done && r.run.why).toContain('撤不掉');
+    expect(r.done && r.run.why).toContain('库连不上');
+    expect(h.finished.map((f) => f.verdict)).toEqual(['not_run']);
+    expect(h.runsFinished[0]?.result.outcome).toBe('failed');
+    expect(h.calls.some((c) => c.startsWith('open:'))).toBe(false);
+  });
+
+  it('【故意造出的失败】读不到巡检仓的开关：这一轮记没跑成、写明原因，不开单——不当成开着、也不当成关着', async () => {
+    const h = harness({
+      repoSwitch: async () => {
+        throw new Error('connect ECONNREFUSED');
+      },
+    });
+    const r = await openCanaryRound(h.deps);
+    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open' } });
+    expect(r.done && r.run.why).toContain('读不到巡检仓的「让 AI 接活」开关');
+    expect(h.runsFinished[0]?.result.outcome).toBe('failed');
+    expect(h.calls.some((c) => c.startsWith('open:'))).toBe(false);
+  });
+
+  it('开关开着、或仓不在库里（missing）：照常开单，跟以前一样（仓不在库里由收单那一步断在「巡检仓不在库里」）', async () => {
+    for (const sw of ['on', 'missing'] as const) {
+      const h = harness({ repoSwitch: async () => sw });
+      const r = await openCanaryRound(h.deps);
+      expect(r.done, sw).toBe(false);
+      expect(
+        h.calls.some((c) => c.startsWith('open:')),
+        sw,
+      ).toBe(true);
+    }
   });
 
   it('【故意造出的失败】巡检仓没有当前版本：没跑成、写明要建「v1 巡检」，一张单都不开', async () => {
@@ -1197,6 +1276,52 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
       const health = (await scheduleHealth(t.db, new Date(clock))).find((h) => h.job.id === 'canary');
       expect(health?.status).toBe('ok');
       expect((await latestCanaryRuns(t.db)).finished?.verdict).toBe('broken');
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it(
+    '巡检仓的「让 AI 接活」关着（#1050）：这一轮记「跳过」进库（canary_runs 认 skipped、schedule_runs 记 partial），一张单都不开、没有卡住报警；看门狗当按期跑过；开关打开后下一轮照常开单',
+    async () => {
+      await registerEngineJobs(t.db);
+      await canaryRepo();
+      // 库里就这一个仓：把它的开关关上
+      await t.db.update(repos).set({ autoDispatchSince: null });
+      const { gh, calls } = fakeGh();
+      let clock = T0.getTime();
+      const deps = canaryJob({
+        db: t.db,
+        gh,
+        repo: 'acme/canary',
+        now: () => {
+          clock += 60_000;
+          return new Date(clock);
+        },
+        log: () => {},
+      })(fakeClient('RUNNING'));
+      const skipped = await openCanaryRound(deps);
+      expect(skipped).toMatchObject({
+        done: true,
+        run: { verdict: 'skipped', stage: 'open', issueNumber: null },
+      });
+      expect(calls).toEqual([]);
+      expect((await latestCanaryRuns(t.db)).finished).toMatchObject({
+        verdict: 'skipped',
+        stage: 'open',
+        issueNumber: null,
+        why: expect.stringContaining('跳过'),
+      });
+      expect(await t.db.select().from(notifications)).toEqual([]);
+      const [run] = await t.db.select().from(scheduleRuns);
+      expect(run).toMatchObject({ job: 'canary', outcome: 'partial', scanned: 0, found: 0 });
+      expect(run?.why).toContain('跳过');
+      const health = (await scheduleHealth(t.db, new Date(clock))).find((h) => h.job.id === 'canary');
+      expect(health?.status).toBe('ok');
+      // 打开以后下一轮照常开单
+      await t.db.update(repos).set({ autoDispatchSince: new Date(clock) });
+      const next = await openCanaryRound(deps);
+      expect(next.done).toBe(false);
+      expect(calls).toHaveLength(1);
     },
     TEST_DB_TIMEOUT_MS,
   );

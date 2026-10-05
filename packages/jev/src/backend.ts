@@ -1,4 +1,4 @@
-// 判断题后端的接口：旧系统的 Jev 服务（TypeSafe）、经插头起的 Claude 会话都照这一份实现。
+// 判断题后端的接口：现在只有旧系统的 Jev 服务（TypeSafe）一种实现；Claude 会话那条路由关着（config.ts 的 CLAUDE_ROUTE_CLOSED）。
 // 后端只管把题问出去、把答案原样交回来；答案在不在题面里、把握够不够、要不要拦，由 ask 统一判（jev.ts）。
 // 后端不抛：出错一律返回 ok:false + 原因。用哪条路由、哪个模型由路由两层里的判断用途配（wiring.ts → backendForRoute）。
 

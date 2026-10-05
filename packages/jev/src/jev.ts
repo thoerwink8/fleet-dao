@@ -67,13 +67,6 @@ export interface AskContext {
   signal?: AbortSignal;
 }
 
-/** 巡检考试：每道题的标准答案随答案一起记成真值（canary），考试从不真拦。 */
-export interface ExamContext {
-  runId: string;
-  sampleId: string;
-  expect: Readonly<Record<string, string>>;
-}
-
 export interface JevDeps {
   db: Db;
   backend: JevBackend;
@@ -95,14 +88,12 @@ export interface Jev {
     evidence: EvidenceOf<Q>,
     ctx: AskContext,
   ): Promise<Verdict<Q>>;
-  /** 几道题共用一份证据，一次问完（分诊四题就是这样问）。 */
+  /** 几道题共用一份证据，一次问完。 */
   askAll<const QS extends readonly QuestionDef[]>(
     questions: QS,
     evidence: EvidenceOf<QS[number]>,
     ctx: AskContext,
   ): Promise<VerdictsOf<QS>>;
-  /** 巡检考试：只问 expect 里有标准答案的题。 */
-  exam(questions: readonly QuestionDef[], evidence: EvidenceInput, exam: ExamContext): Promise<Verdict[]>;
 }
 
 const DETAIL_CHARS = 500;
@@ -131,7 +122,6 @@ export function createJev(deps: JevDeps): Jev {
     questions: readonly QuestionDef[],
     evidence: EvidenceInput,
     ctx: AskContext,
-    exam?: ExamContext,
   ): Promise<Verdict[]> {
     const { db, backend } = deps;
     if (questions.length === 0) return [];
@@ -194,15 +184,10 @@ export function createJev(deps: JevDeps): Jev {
         if (problems.length) {
           refuseAll('bad_setting', problems.join('；'));
         } else {
-          const used = await countAskedSince(db, today, { exam: exam !== undefined });
-          const limit = exam ? policy.examDailyCallLimit : policy.dailyCallLimit;
+          const used = await countAskedSince(db, today);
+          const limit = policy.dailyCallLimit;
           if (used + askable.length > limit) {
-            refuseAll(
-              'daily_cap',
-              exam
-                ? `因考试每日次数上限没问：今天考试已经问了 ${used} 道，上限 ${limit}`
-                : `因每日次数上限没问：今天已经问了 ${used} 道，上限 ${limit}`,
-            );
+            refuseAll('daily_cap', `因每日次数上限没问：今天已经问了 ${used} 道，上限 ${limit}`);
           } else if (backend.usdPerMTok !== undefined) {
             const spent = await usdSpentSince(db, today);
             // 宁可早停一问也不超。
@@ -243,15 +228,12 @@ export function createJev(deps: JevDeps): Jev {
       const state = states.get(q.id);
       if (!state) continue;
       const enforceable =
-        !exam &&
-        state.mode === 'enforce' &&
-        state.model === backend.model &&
-        state.prompt === renderPrompt(q);
+        state.mode === 'enforce' && state.model === backend.model && state.prompt === renderPrompt(q);
       const verdict =
         outcome.get(q.id) ??
         (result ? judge(q, state, result, backend, enforceable) : notJudged(q, 'store_error', '没有结果'));
       outcome.set(q.id, verdict);
-      // 漂的是这道题钉死的那个模型（考试里漂也算）：当场退回，不等 reviewModes。别的模型漂了不连累它。
+      // 漂的是这道题钉死的那个模型：当场退回只记不拦。别的模型漂了不连累它。
       if (
         !verdict.judged &&
         isDrift(verdict.reason) &&
@@ -269,7 +251,6 @@ export function createJev(deps: JevDeps): Jev {
           evidence,
           ctx,
           ref,
-          exam,
           batch,
           enforceable,
           backend,
@@ -306,10 +287,6 @@ export function createJev(deps: JevDeps): Jev {
     },
     async askAll(questions, evidence, ctx) {
       return (await run(questions, evidence as EvidenceInput, ctx)) as VerdictsOf<typeof questions>;
-    },
-    async exam(questions, evidence, exam) {
-      const asked = questions.filter((q) => exam.expect[q.id] !== undefined);
-      return run(asked, evidence, { subject: `exam:${exam.sampleId}` }, exam);
     },
   };
 }
@@ -370,7 +347,6 @@ function answerRow(
     ctx: AskContext;
     /** 调用方给的引用，已转成库收得下的样子；转不了的是原因。没给就没有。 */
     ref: { ref: unknown } | { problem: string } | undefined;
-    exam: ExamContext | undefined;
     batch: { id: string; size: number };
     enforceable: boolean;
     backend: JevBackend;
@@ -398,15 +374,13 @@ function answerRow(
     batch: c.batch,
     ...(billed?.estimated ? { tokensEstimated: true } : {}),
     ...(tokens !== undefined && price !== undefined ? { costUsd: usdOf(tokens, price) } : {}),
-    ...(c.exam ? { exam: { runId: wellFormed(c.exam.runId), sampleId: wellFormed(c.exam.sampleId) } } : {}),
     ...(verdict.judged ? {} : { detail: verdict.detail }),
   };
-  const truth = c.exam?.expect[q.id];
   return {
     questionId: q.id,
     askedAt: c.askedAt,
     // subject 是调用方给的、modelVersion 是上游回的，都可能带 NUL（text 列收不下），写库前过一遍。
-    subject: wellFormed(c.exam ? `exam:${c.exam.sampleId}` : c.ctx.subject),
+    subject: wellFormed(c.ctx.subject),
     sample,
     shadow: !c.enforceable,
     ok: answered,
@@ -416,7 +390,6 @@ function answerRow(
     modelVersion: sent && result?.model !== undefined ? wellFormed(result.model) : null,
     latencyMs: sent && result ? result.latencyMs : null,
     inputTokens: tokens ?? null,
-    ...(truth === undefined ? {} : { truth, truthSource: 'canary' as const }),
   };
 }
 
@@ -458,7 +431,6 @@ async function recordSpendOnly(
       batch: s.batch,
       ...(s.tokensEstimated ? { tokensEstimated: true } : {}),
       ...(s.costUsd === undefined ? {} : { costUsd: s.costUsd }),
-      ...(s.exam ? { exam: s.exam } : {}),
       detail,
     };
     const drift = r.failReason && isDrift(r.failReason as NotJudgedReason) ? r.failReason : null;
