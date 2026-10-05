@@ -14,6 +14,7 @@
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
+import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
@@ -223,9 +224,8 @@ export interface DispatchArgs {
   action: DispatchAction;
 }
 
-/** 操作记录里开、关这两件事的名字；target 是 repo:<仓的编号>。 */
-export const AUTO_DISPATCH_ENABLE = 'repo.auto_dispatch.enable';
-export const AUTO_DISPATCH_DISABLE = 'repo.auto_dispatch.disable';
+/** 操作记录里开、关这两件事的名字（定义在 shared：驾驶舱的开关按钮记同一对）；target 是 repo:<仓的编号>。 */
+export { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE };
 
 /** 操作记录没有「服务器上的管理命令」这一种来源：和 set-password 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
 const OPS_DISPATCH = { kind: 'engine', id: 'ops:dispatch' } as const;

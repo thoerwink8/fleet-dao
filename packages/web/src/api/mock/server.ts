@@ -2,6 +2,8 @@
 // 每个返回都按 shared/web-api.ts 校验后才交出去（和真后端的 reply 一样），报错的 code 和白话也照真后端。
 // 页面上的操作会真的改这里的状态并留下操作记录；刷新页面就回到初始盘面。
 import {
+  AUTO_DISPATCH_DISABLE,
+  AUTO_DISPATCH_ENABLE,
   AuditResponse,
   AuthConfigResponse,
   BoardResponse,
@@ -32,6 +34,7 @@ import {
   poolHoldsView,
   type RealtimeTable,
   ReleaseVersionResponse,
+  RepoDispatchResponse,
   ReposResponse,
   type Route,
   RoutingEffortsResponse,
@@ -56,6 +59,8 @@ import {
   taskFlow,
   UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
+  UpdateRepoDispatchRequest,
+  UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
@@ -202,6 +207,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const queuedAt = new Map<string, number>();
   /** 每条路由配的思考档位（#470）：没有就是没配。种子里一条 Grok 配了 medium，页面上能看到「配过」的样子。 */
   const mockEfforts = new Map<string, SessionEffort>([['r-grok', 'medium']]);
+  /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
+  const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
   const demo: {
     links: Omit<DemoLink, 'expired'>[];
     defaultScope: DemoScope;
@@ -989,6 +996,52 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async repos() {
       await wait();
       return ReposResponse.parse({ repos: st.repos });
+    },
+    async repoDispatch() {
+      await wait();
+      return RepoDispatchResponse.parse({
+        repos: st.repos.map((r) => {
+          const since = mockDispatch.get(r.id);
+          return {
+            repoId: r.id,
+            owner: r.owner,
+            name: r.name,
+            on: since !== undefined,
+            ...(since ? { since } : {}),
+          };
+        }),
+      });
+    },
+    async updateRepoDispatch(repoId, raw) {
+      await wait();
+      const body = UpdateRepoDispatchRequest.parse(raw);
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      const before = mockDispatch.get(repoId);
+      const changed = (before !== undefined) !== body.on;
+      if (changed) {
+        const after = body.on ? iso() : undefined;
+        if (after) mockDispatch.set(repoId, after);
+        else mockDispatch.delete(repoId);
+        audit({
+          actor: meActor(),
+          action: body.on ? AUTO_DISPATCH_ENABLE : AUTO_DISPATCH_DISABLE,
+          target: `repo:${repoId}`,
+          before: { autoDispatchSince: before ?? null },
+          after: { autoDispatchSince: after ?? null },
+          via: 'cockpit',
+          reason: body.reason ?? `驾驶舱上点了${body.on ? '开启' : '关闭'}「让 AI 接活」`,
+        });
+      }
+      const since = mockDispatch.get(repoId);
+      return UpdateRepoDispatchResponse.parse({
+        repoId,
+        owner: repo.owner,
+        name: repo.name,
+        on: since !== undefined,
+        ...(since ? { since } : {}),
+        changed,
+      });
     },
     async home() {
       await wait();

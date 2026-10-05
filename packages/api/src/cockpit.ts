@@ -51,6 +51,7 @@ import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reco
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
+import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY, closeLegacyAsk } from './legacy-asks.ts';
@@ -599,6 +600,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDemoRoutes(app, deps, actorOf);
+  registerDispatchRoutes(app, deps, actorOf);
   registerReleaseRoutes(app, deps);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */

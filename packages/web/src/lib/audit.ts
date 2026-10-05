@@ -1,5 +1,6 @@
 // 操作记录的白话：动作名、对象、谁、从哪来。后端只给代码（例如 stage_policy.update、task:xxx），名字在这里翻。
 // 认不出的动作原样显示，不猜。
+import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE } from '@fleet-dao/shared';
 import { brand } from '#brand';
 import type { AuditEntry, BoardTask, Me, SettingKey, StageKind } from '../api/types';
 import { stageLabel } from './catalog';
@@ -22,6 +23,8 @@ const ACTION_LABEL: Record<string, string> = {
   'demo.default.update': '改了演示版的默认范围',
   'credentials.set': '设了账密登录',
   'credentials.change': '改了账密登录',
+  [AUTO_DISPATCH_ENABLE]: '开启了「让 AI 接活」',
+  [AUTO_DISPATCH_DISABLE]: '关闭了「让 AI 接活」',
   login: `登录了${brand.product}`,
   logout: `退出了${brand.product}`,
   // 引擎一侧的动作（名字以引擎实际写的为准，认不出的原样显示）。
