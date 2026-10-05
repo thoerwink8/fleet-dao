@@ -62,6 +62,12 @@ export function createDemoApi(inner: MockApi): FleetApi {
       need('settings', '设置');
       return inner.poolHolds();
     },
+    // 「让 AI 接活」开关：演示版只读（页面上不画开关按钮），写一律拒。
+    async repoDispatch() {
+      need('settings', '设置');
+      return inner.repoDispatch();
+    },
+    updateRepoDispatch: () => Promise.reject(hidden('开关')),
     async jobs() {
       need('schedules', '定时任务');
       return inner.jobs();

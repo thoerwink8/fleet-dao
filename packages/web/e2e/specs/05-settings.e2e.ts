@@ -73,6 +73,64 @@ test.describe('设置页', () => {
     await expect(page.getByText(/暂不用独享|不自动切到独享|引擎暂不用独享/).first()).toBeVisible();
   });
 
+  test('仓库一节「让 AI 接活」：原来关着 → 点开启（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关闭回到关着', async ({
+    page,
+    api,
+    shot,
+  }, info) => {
+    test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
+    type Dispatch = { repos: { repoId: string; on: boolean; since?: string }[] };
+    const read = async () => ((await api.get('/api/repos/dispatch')) as Dispatch).repos;
+    const first = (await read())[0];
+    if (!first) throw new Error('备库里没有仓');
+    expect(first.on, '种子里的仓「让 AI 接活」是关着的').toBe(false);
+
+    await page.goto('/settings');
+    const row = page.getByTestId(`dispatch-${first.repoId}`);
+    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('关着');
+    await expect(row).toContainText('只收单、不派活');
+    await shot(page, '05-设置-仓库-关着');
+
+    // 点开启先弹确认；点「先不」什么都不改
+    await row.getByRole('button', { name: /^开启 / }).click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('的「让 AI 接活」？');
+    await dialog.getByRole('button', { name: '先不' }).click();
+    expect((await read())[0]?.on).toBe(false);
+
+    await row.getByRole('button', { name: /^开启 / }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '开启', exact: true }).click();
+    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('接活中');
+    await expect(row).toContainText('开的');
+    await shot(page, '05-设置-仓库-已开启');
+
+    // 落库了：读回是开着、有开的时刻；进了操作记录（谁、开启）
+    await expect.poll(async () => (await read())[0]).toMatchObject({ on: true });
+    expect((await read())[0]?.since).toBeTruthy();
+    const audit = (await api.get(`/api/audit?target=repo:${first.repoId}`)) as Audit;
+    expect(audit.items.map((a) => [a.action, a.actor.kind])).toContainEqual([
+      'repo.auto_dispatch.enable',
+      'user',
+    ]);
+
+    // 刷新后还开着；再点关闭回到关着，操作记录多一条关闭
+    await page.reload();
+    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('接活中');
+    await row.getByRole('button', { name: /^关闭 / }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '关闭', exact: true }).click();
+    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('关着');
+    await expect.poll(async () => (await read())[0]).toMatchObject({ on: false });
+    const after = (await api.get(`/api/audit?target=repo:${first.repoId}`)) as Audit;
+    expect(after.items.map((a) => a.action)).toContain('repo.auto_dispatch.disable');
+  });
+
+  test('【故意造出的失败】没有这个仓：PUT 回 404 repo_not_found', async ({ api }, info) => {
+    test.skip(!onlyDesktop(info), '只验后端接口，跑一遍就够');
+    const res = await api.send('PUT', '/api/repos/no-such-repo/dispatch', { on: true });
+    expect(res.status).toBe(404);
+    expect((res.json as { error: { code: string } }).error.code).toBe('repo_not_found');
+  });
+
   test('带过期的版本号保存：后端回 409，不悄悄盖掉', async ({ api }, info) => {
     test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
     const cur = await settingOf(api, 'sessions.maxConcurrent');

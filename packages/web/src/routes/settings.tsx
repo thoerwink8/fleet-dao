@@ -5,12 +5,22 @@ import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
 import { brand } from '#brand';
-import { ApiError, errorText, useApi, useMe, usePools, useSettings, useUpdateSetting } from '../api/client';
+import {
+  ApiError,
+  errorText,
+  useApi,
+  useMe,
+  usePools,
+  useRepoDispatch,
+  useSettings,
+  useUpdateSetting,
+} from '../api/client';
 import type { Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { useRepo } from '../components/repo-context';
+import { RepoDispatchControl } from '../components/repo-dispatch';
 import { PaletteSwatch } from '../components/shell/palette-swatch';
 import { ModeSwitch } from '../components/shell/topbar';
 import { StatusDot } from '../components/status';
@@ -406,6 +416,7 @@ export default function Settings() {
   const { data: me } = useMe();
   const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
+  const dispatch = useRepoDispatch();
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
   return (
@@ -518,7 +529,7 @@ export default function Settings() {
         id="repos"
         icon={FolderGit2}
         title="仓库"
-        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。"
+        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」关着时引擎只收单、不派活，点开启才开始接活。"
       >
         {reposError ? (
           <div className="mb-3 max-w-xl">
@@ -528,12 +539,17 @@ export default function Settings() {
             ) : null}
           </div>
         ) : null}
+        {dispatch.error ? (
+          <div className="mb-3 max-w-xl">
+            <LoadError what="「让 AI 接活」开关" error={dispatch.error} />
+          </div>
+        ) : null}
         {reposLoading ? <LoadingRows rows={1} /> : null}
         <ul className="max-w-xl divide-y rounded-xl border bg-card empty:hidden">
           {repos.map((r) => (
-            <li key={r.id} className="flex items-center gap-3 px-4 py-3">
+            <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
               <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1 basis-40">
                 <div className="num truncate text-sm font-medium">
                   {r.owner}/{r.name}
                 </div>
@@ -541,6 +557,11 @@ export default function Settings() {
                   主线 <span className="num">{r.defaultBranch}</span>
                 </div>
               </div>
+              <RepoDispatchControl
+                repoId={r.id}
+                name={`${r.owner}/${r.name}`}
+                row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+              />
             </li>
           ))}
           {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}

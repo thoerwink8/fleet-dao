@@ -15,6 +15,7 @@ import {
   TaskActionRequest,
   UpdateCredentialsRequest,
   UpdateDemoDefaultRequest,
+  UpdateRepoDispatchRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
   WEB_API_PREFIX,
@@ -214,6 +215,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       return me;
     },
     repos: () => send('GET', apiUrl(R.repos.path), R.repos.response),
+    repoDispatch: () => send('GET', apiUrl(R.repoDispatch.path), R.repoDispatch.response),
+    async updateRepoDispatch(repoId, body) {
+      return send('PUT', apiUrl(R.updateRepoDispatch.path, { repoId }), R.updateRepoDispatch.response, {
+        body: UpdateRepoDispatchRequest.parse(body),
+      });
+    },
     home: () => send('GET', apiUrl(R.home.path), R.home.response),
     env: () => send('GET', apiUrl(R.env.path), R.env.response),
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),

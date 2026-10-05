@@ -387,7 +387,7 @@ export function closingBrief({ branch, noShip, noAutomerge, githubRoute = { via:
     : [
         `4. 正文照 .github/pull_request_template.md 的四栏写进 _tmp/pr-body.md，跑 ${open}：它开 PR、当场挂自动合并；`,
         '   它说「人闸：改标准」就照第 6 条停手。',
-        '5. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
+        '5. 不盯 CI、不 --watch：自动合并已挂，只看一眼 gh pr checks <PR 号>；红了才改，最多 3 轮，没红就收尾。',
       ];
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
