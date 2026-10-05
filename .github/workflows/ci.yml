@@ -21,18 +21,28 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
+  # 每夜一轮全量兜底（2026-10-05 加，创始人「不认可每个 pr 都要这种流程」）。e2e 的触发面同一天收窄到
+  # 「只碰 web、api 或 ci.yml 自己」——收窄之后，改 db、shared、锁文件的 PR 不再跑那 364 秒的驾驶舱 e2e。
+  # 全量回归不能就这么没了，落到这里：非 pull_request 事件在 planCi 里一律全跑（含 e2e），所以这一轮会把
+  # 每一样都跑一遍，只是不再挂在每个 PR 上。挑深夜（北京时间约 4 点）避开白天的并发槽。
+  schedule:
+    - cron: '23 20 * * *'
 # 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
 permissions:
   contents: read
-# 并发组 PR 按号分、推主线按分支分，两边不撞：pull_request 事件的 github.ref 是 refs/pull/<N>/merge，push 到 main
-# 是 refs/heads/main。按 PR 号分组更直接，也防着触发类型以后再加回 edited 之类——已经合了的 PR 被编辑触发一轮时，
-# GitHub 给它的 github.ref 会是 refs/heads/main，按 github.ref 分组就会和主线那一轮撞上、把主线的全量挤掉（曾经出过
-# 这个事：主线头上 check 红、自动发布不发，2026-09-27 #283）。
+# 并发组 PR 按号分、推主线按分支分、定时轮再按事件分，三者不撞：pull_request 事件的 github.ref 是 refs/pull/<N>/merge，
+# push 到 main 是 refs/heads/main。按 PR 号分组更直接，也防着触发类型以后再加回 edited 之类——已经合了的 PR 被编辑触发
+# 一轮时，GitHub 给它的 github.ref 会是 refs/heads/main，按 github.ref 分组就会和主线那一轮撞上、把主线的全量挤掉
+# （曾经出过这个事：主线头上 check 红、自动发布不发，2026-09-27 #283）。
 # 只有 PR 上新的一轮挤掉旧的；主线推送不挤掉在跑的那一轮：它跑完，新推送排着（同组只排一个，更新的顶掉更旧的）。
 # 要是也挤，合并比主线全量（3–4 分钟）还密时每一轮都被下一次推送挤成 cancelled，一个全绿的提交都没有，
 # 自动发布往回也找不到能发的（2026-09-27 夜最近 100 次主线 CI 被挤掉 26 次，#362）。
+#
+# 末尾再带上事件名（2026-10-05，第二意见挑出来的）：`schedule` 的 github.ref 也是 refs/heads/main，只按 ref 分组的话
+# 夜跑和主线推送同一组——夜跑排上队后只要推一次主线，它就被顶掉，那一夜的全量回归直接不跑。加上事件名之后
+# schedule 自成一组；PR 那一路仍按 PR 号分（number 先命中，不受影响），主线那一路仍是 ci-refs/heads/main-push。
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # 这次改了什么 → 各 job 的开关。PR 按 git diff origin/<目标分支>...HEAD 算（HEAD 是 GitHub 造的合并提交，比的就是合进去会带进来的改动）；
