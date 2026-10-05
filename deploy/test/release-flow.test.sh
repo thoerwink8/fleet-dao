@@ -373,7 +373,7 @@ has_service_saved=$(declare -f has_service)
 API_UNIT=inactive # systemctl is-active fleet-api.service 答什么
 API_ANSWER=ok     # 驾驶舱接口的 /healthz：ok 答健康报告；down 连不上；garbled 回的不是健康报告（502 的网页）
 has_service() { [[ "$1" == fleet-api ]]; } # 本机启用了后端；FLEET_SERVICES 还是空的，切版本时不去动真的 systemd
-# shellcheck disable=SC2329 # 由 release.sh 里的 api_report_before 间接调用
+# shellcheck disable=SC2317,SC2329 # 由 release.sh 里的 api_report_before 间接调用
 systemctl() { # 只换掉「后端在不在跑」这一问；别的照走真的
   if [[ "$*" == "is-active fleet-api.service" ]]; then
     echo "$API_UNIT"
@@ -389,7 +389,7 @@ api_healthz() {
   garbled) printf '502\t%s' '<html>502 Bad Gateway</html>' ;;
   esac
 }
-# shellcheck disable=SC2329 # 由 do_release 间接调用
+# shellcheck disable=SC2317,SC2329 # 由 do_release 间接调用
 api_report_before() { real_api_report_before; }
 real_api_report_before >/dev/null
 check "后端没在跑：空着、不算读不到（返回 0）" "$?" 0
