@@ -116,6 +116,9 @@ gw() {
   esac
 }
 gw_calls() { grep -cE "^($1)( |$)" "$GWD/calls"; } # 某种命令调过几次（「receive」「receive a」「has|activate」）
+# 里程碑发版后置关（dispatch_off_on_milestone）换成桩：只记哪一版发布成功后叫了它；它自己的判法在 release-dispatch.test.sh
+OFF_CALLS=()
+dispatch_off_on_milestone() { OFF_CALLS+=("${1:0:1}"); }
 health_gate() {
   if [[ "${GATE[$1]:-ok}" == ok ]]; then return 0; fi
   red "桩：${1:0:12} 健康检查不过"
@@ -143,6 +146,7 @@ reset
 do_release "$B" >/dev/null
 check "发 B 之后在用 B" "$(current_sha)" "$B"
 check "上一版是 A" "$(previous_sha)" "$A"
+check "发布成功之后各叫了一次置关判断（A、B）" "${OFF_CALLS[*]}" "a b"
 
 echo "== 同一个提交再发一遍：什么都不变"
 reset
@@ -159,6 +163,7 @@ check "C 不过之后在用的是 B" "$(current_sha)" "$B"
 check "报了红" "$((${#REDS[@]} > 0))" 1
 check "历史：C 记成不健康、B 是自动退回的" "$(events)" "a:release b:release c:release c:unhealthy b:auto-rollback "
 check "上一版跳过不健康的 C，是 A" "$(previous_sha)" "$A"
+check "C 没过健康检查：没叫置关判断（只有发布成功才叫；再发 B 那次叫了一次 B，退回 B 不算）" "${OFF_CALLS[*]}" "a b b"
 
 echo "== 一键退回：退到 A；再退一次回到 B（B 健康）"
 reset

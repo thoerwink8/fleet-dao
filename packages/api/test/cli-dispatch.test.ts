@@ -15,6 +15,7 @@ import {
   describeDbError,
   main,
   operatorName,
+  parseDispatchAllArgs,
   parseDispatchArgs,
 } from '../src/cli.ts';
 import type { Store } from '../src/ports.ts';
@@ -378,6 +379,132 @@ describe('没做成的路：退出码非 0，说清原因', () => {
     expect(t.err.at(-1)).toMatch(
       /^已经改成「开着，自 .+ 起」（操作记录 \d+），但读回开关时连不上库（connect ECONNREFUSED 127\.0\.0\.1:5432）：跑 status 核对$/,
     );
+  });
+});
+
+describe('dispatch --all off：发版后所有仓一起关（#1050）', () => {
+  const REASON = '发版 v4 自动置关';
+  const second = {
+    id: 'repo-second',
+    owner: 'example',
+    name: 'second',
+    defaultBranch: 'main',
+    testCommand: 'pnpm check',
+  };
+  const twoRepos = () => {
+    const t = setup();
+    t.store.data.repos.push({ ...second });
+    return t;
+  };
+  const runAll = (t: ReturnType<typeof setup>, s?: Store) =>
+    main(['dispatch', '--all', 'off', '--reason', REASON], t.deps(s));
+
+  it('参数：只认 --all off --reason <原因>，别的写法一律拒（退出码 2），不连库', async () => {
+    for (const argv of [
+      ['--all'],
+      ['--all', 'on', '--reason', REASON],
+      ['--all', 'status', '--reason', REASON],
+      ['--all', 'off'],
+      ['--all', 'off', '--reason'],
+      ['--all', 'off', '--reason', ''],
+      ['--all', 'off', '--reason', '--force'],
+      ['--all', '--reason', REASON],
+      ['--all', 'off', 'on', '--reason', REASON],
+      ['--all', 'off', '--reason', 'x'.repeat(201)],
+    ]) {
+      let caught: unknown;
+      try {
+        parseDispatchAllArgs(argv);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, argv.join(' ')).toBeInstanceOf(CliError);
+      expect((caught as CliError).exitCode, argv.join(' ')).toBe(2);
+    }
+    expect(parseDispatchAllArgs(['--all', 'off', '--reason', REASON])).toEqual({ reason: REASON });
+    expect(parseDispatchAllArgs(['--all', '--reason', REASON, 'off'])).toEqual({ reason: REASON });
+
+    const t = setup();
+    expect(await main(['dispatch', '--all', 'on', '--reason', REASON], t.deps())).toBe(2);
+    expect(t.err.at(-1)).toContain('--all 只能配 off');
+    expect(t.opened).toEqual([]);
+    expect(t.store.data.audit).toEqual([]);
+  });
+
+  it('开着的都关上，每个仓各记一条操作记录（原因带版本、谁跑的）；已经关着的不改不记', async () => {
+    const t = twoRepos();
+    expect(await t.run(['example/canary', 'on'])).toBe(0);
+    const before = t.store.data.audit.length;
+    // 第二个仓本来就关着
+    expect(await runAll(t)).toBe(0);
+    const added = t.store.data.audit.slice(before);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      actor: { kind: 'engine', id: 'ops:dispatch' },
+      action: AUTO_DISPATCH_DISABLE,
+      target: `repo:${IDS.repo}`,
+      via: 'engine',
+      ok: true,
+      reason: `${REASON}（服务器上 root 跑的 fleet-api dispatch example/canary off）`,
+    });
+    expect(t.since()).toBeUndefined();
+    expect(t.store.data.repos.every((r) => r.autoDispatchSince === undefined)).toBe(true);
+    expect(t.out.at(-1)).toContain('2 个仓都已关着');
+    expect(t.out.at(-1)).toContain('example/second 本来就关着');
+    expect(t.err).toEqual([]);
+
+    // 再跑一遍：什么都不改、不记
+    expect(await runAll(t)).toBe(0);
+    expect(t.store.data.audit).toHaveLength(before + 1);
+  });
+
+  it('两个仓都开着：都关上、各记一条', async () => {
+    const t = twoRepos();
+    await t.run(['example/canary', 'on']);
+    await t.run(['example/second', 'on']);
+    const before = t.store.data.audit.length;
+    expect(await runAll(t)).toBe(0);
+    expect(
+      t.store.data.audit
+        .slice(before)
+        .map((a) => a.target)
+        .sort(),
+    ).toEqual([`repo:${IDS.repo}`, 'repo:repo-second'].sort());
+  });
+
+  it('【故意造出的失败】有一个仓没关成：退出码 1、说清是哪个，别的仓照样关；这个仓没被假装成关了', async () => {
+    const t = twoRepos();
+    await t.run(['example/canary', 'on']);
+    await t.run(['example/second', 'on']);
+    const flaky: Store = {
+      ...t.store,
+      setAutoDispatch: async (input, entry) => {
+        if (input.repoId === 'repo-second')
+          throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+        return t.store.setAutoDispatch(input, entry);
+      },
+    };
+    const printed = t.out.length;
+    expect(await runAll(t, flaky)).toBe(1);
+    expect(t.since()).toBeUndefined();
+    expect(t.store.data.repos.find((r) => r.id === 'repo-second')?.autoDispatchSince).toBeDefined();
+    expect(t.err.at(-1)).toContain('2 个仓里 1 个没关成');
+    expect(t.err.at(-1)).toContain('example/second：没改成：写库时库出错（57014');
+    expect(t.out).toHaveLength(printed);
+  });
+
+  it('【故意造出的失败】连不上库（读仓列表就失败）：退出码 1，不当成「没有要关的」', async () => {
+    const t = twoRepos();
+    expect(await runAll(t, failingStore(t.store, refusedQuery))).toBe(1);
+    expect(t.err.at(-1)).toBe('没改成：读仓列表时连不上库（connect ECONNREFUSED 127.0.0.1:5432）');
+    expect(t.out).toEqual([]);
+  });
+
+  it('库里一个仓都没有：退出码 0，但照实说「一个都没有」，不说关了什么', async () => {
+    const t = setup();
+    t.store.data.repos.length = 0;
+    expect(await runAll(t)).toBe(0);
+    expect(t.out.at(-1)).toBe('库里一个仓都没有，没有要关的');
   });
 });
 
