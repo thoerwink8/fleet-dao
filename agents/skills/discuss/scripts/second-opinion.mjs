@@ -5,14 +5,16 @@
 // 帧协议照 fleet-dao docs/reference/adapters.md 第八节。完工判据借旧仓 windsurf-dao 的 scripts/lib/mirasim-runtime.mjs
 // judgeCompletion：phase 到 done 且没有 error、没有 incomplete；走中继的还要账本里起针后有 2xx 行。
 //
-//   node second-opinion.mjs --pr 50 --high-risk --author-family <族[,族…]> [--repo <检出>] [--ui] [--timeout-min 45] [--slot 2]
+//   node second-opinion.mjs --pr 50 --high-risk --author-family <族[,族…]> [--repo <检出>] [--ui] [--timeout-min 15] [--stall-min 4] [--slot 2]
+//     --timeout-min 是几家加起来的整轮总上限（默认 15）；一家起了会话后连续 --stall-min 分钟（默认 4）没有任何新输出就换下一家。
+//     顺序 gpt（gpt-6-luna）→ grok → 其余兜底（claude、deepseek、kimi）；--text 的等待也是这一套。
 //     已经合进主线的 PR 也能审（合并后补审）：认出是已合并的，评论、状态都写「合并后补审」，没过写明开修复 PR 或 git revert。
 //   node second-opinion.mjs --after-merge-pending [--json] [--no-fetch] [--repo <检出>]
 //     列合并后待补审的：主线上 14 天内合并、改到了清单里标 review: after-merge 的路径、PR 头上还没有通过的 second-opinion。
 //   node second-opinion.mjs --after-merge-sweep --author-family <族[,族…]> [--repo <检出>]：把上面还没补审的逐个审一遍。
 //   node second-opinion.mjs --after-merge-resolve <原 PR 号> --by <修复或 revert 的 PR 号>：补审没过、修复已合，记成已处理。
-//   node second-opinion.mjs --text 分析.md --author-family <族[,族…]> [--name 短名] [--budget-sec 30]
-//     拍板前的反方：按 GPT→Claude→DeepSeek→Grok→Kimi 选不同族，退出码 0 同意 / 1 有异议 / 2 没查成
+//   node second-opinion.mjs --text 分析.md --author-family <族[,族…]> [--name 短名] [--budget-sec 秒，不给就是 --timeout-min 那一套]
+//     拍板前的反方：按 GPT→Grok→Claude→DeepSeek→Kimi 选不同族，退出码 0 同意 / 1 有异议 / 2 没查成
 //   node second-opinion.mjs --selftest [--repo <检出>]
 //   --repo 不给就用当前目录所在的 git 检出。
 //
@@ -49,7 +51,17 @@ import {
   realDeps,
   riskRules,
 } from './so-after-merge.mjs';
-import { errCode, errText, isObjectLike, messageOf, NotChecked, RUNS, sh } from './so-common.mjs';
+import {
+  DEFAULT_STALL_MIN,
+  DEFAULT_TIMEOUT_MIN,
+  errCode,
+  errText,
+  isObjectLike,
+  messageOf,
+  NotChecked,
+  RUNS,
+  sh,
+} from './so-common.mjs';
 import {
   checkPublishable,
   currentSecondOpinion,
@@ -195,6 +207,15 @@ function critiquePrompt(material) {
   ].join('\n');
 }
 
+/**
+ * --text 整轮预算（秒）：没给 --budget-sec 就和 --pr 一样看 --timeout-min（默认 15 分钟）。原来 --text 单独把
+ * 等待压成 0.5 分钟、预算 30 秒，gpt 一次要几分钟就被整轮掐掉（创始人 2026-10-05）。
+ * @param {Pick<Options, 'timeoutMin' | 'budgetSec'>} o
+ */
+export function discussionBudgetSec(o) {
+  return Number(o.budgetSec ?? o.timeoutMin * 60);
+}
+
 /** @param {Options & { text: string }} o */
 async function critique(o) {
   const src = resolve(o.text);
@@ -218,9 +239,9 @@ async function critique(o) {
   const out = join(RUNS, `critique-${name}-${stamp}.md`);
   try {
     const chain = discussionProfiles(o);
-    const budgetSec = Number(o.budgetSec ?? 30);
+    const budgetSec = discussionBudgetSec(o);
     if (!Number.isFinite(budgetSec) || budgetSec <= 0)
-      throw new NotChecked('--budget-sec 必须是正数（讨论默认 30 秒）');
+      throw new NotChecked('--budget-sec 必须是正数（不给就是 --timeout-min 那一套，默认 15 分钟）');
     const budgetMs = budgetSec * 1000;
     const r = await withFallback(
       chain,
@@ -233,6 +254,7 @@ async function critique(o) {
           timeoutMin: Math.min(o.timeoutMin, (remainingMs ?? o.timeoutMin * 60_000) / 60_000),
           log: (s) => console.error(s),
           pollMs: 1_000,
+          stallMin: o.stallMin ?? DEFAULT_STALL_MIN,
           effort: o.effort,
           discussion: true,
         }),
@@ -379,16 +401,22 @@ async function reviewPrLocked({ o, repo, pr, log, chain, slot, deps }) {
   try {
     // 默认快：中等思考强度、只看 diff、不跑测试，和 CI 同时跑（创始人 2026-09-25 定的关卡时间预算）；--slow 才走老的完整审法
     const fast = !o.slow;
-    const r = await withFallback(chain, log, (p) =>
-      deps.session({
-        prompt: reviewPrompt(pr, info, o.ui, fast),
-        profile: p,
-        workdir: info.tree,
-        timeoutMin: o.timeoutMin,
-        log,
-        pollMs: fast ? 2_000 : 10_000,
-        effort: o.effort ?? (fast ? 'medium' : undefined),
-      }),
+    // 整轮总上限：--timeout-min（默认 15 分钟）是几家加起来的，不是每家各给一份；每家再按「不出声就换」（stallMin）自己换下一家
+    const r = await withFallback(
+      chain,
+      log,
+      (p, remainingMs) =>
+        deps.session({
+          prompt: reviewPrompt(pr, info, o.ui, fast),
+          profile: p,
+          workdir: info.tree,
+          timeoutMin: Math.min(o.timeoutMin, (remainingMs ?? o.timeoutMin * 60_000) / 60_000),
+          log,
+          pollMs: fast ? 2_000 : 10_000,
+          stallMin: o.stallMin ?? DEFAULT_STALL_MIN,
+          effort: o.effort ?? (fast ? 'medium' : undefined),
+        }),
+      { budgetMs: o.timeoutMin * 60_000 },
     );
     r.text = stripLocalPaths(r.text, [info.tree, repo]);
     const model = r.model ?? r.profile.model ?? r.profile.agent;
@@ -545,9 +573,9 @@ async function afterMergeSweep({ o, repo, log }) {
  * @param {string[]} argv
  * @returns {Options}
  */
-function args(argv) {
+export function args(argv) {
   /** @type {Options} */
-  const o = { timeoutMin: 45, ui: false, slot: 1 };
+  const o = { timeoutMin: DEFAULT_TIMEOUT_MIN, stallMin: DEFAULT_STALL_MIN, ui: false, slot: 1 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--pr') o.pr = Number(argv[++i]);
@@ -568,6 +596,7 @@ function args(argv) {
       o.slot = Number(argv[++i]);
       o.slotGiven = true;
     } else if (a === '--timeout-min') o.timeoutMin = Number(argv[++i]);
+    else if (a === '--stall-min') o.stallMin = Number(argv[++i]);
     else if (a === '--ui') o.ui = true;
     else if (a === '--selftest') o.selftest = true;
     else if (a === '--ping') o.ping = true;
@@ -763,8 +792,7 @@ async function main() {
     process.exitCode = 3;
     return;
   }
-  if (o.text)
-    return await critique({ ...o, text: o.text, timeoutMin: o.timeoutMin === 45 ? 0.5 : o.timeoutMin });
+  if (o.text) return await critique({ ...o, text: o.text });
   if (o.afterMergeSweep) {
     const repo = repoOf(o);
     for (const bin of ['git', 'gh'])

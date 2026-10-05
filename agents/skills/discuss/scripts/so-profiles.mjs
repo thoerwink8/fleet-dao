@@ -1,5 +1,5 @@
 // second-opinion.mjs 拆出来的：各家执行体的档案、按作者族排候选、主审连不上换下一家。
-import { NotChecked } from './so-common.mjs';
+import { NotChecked, Stalled } from './so-common.mjs';
 import { NotInstalled } from './tools.mjs';
 
 /** @typedef {import('./so-common.mjs').Profile} Profile */
@@ -9,8 +9,10 @@ import { NotInstalled } from './tools.mjs';
 /** @typedef {{ agent?: string | undefined, authorFamily?: string | string[] | undefined, excludeFamily?: string | undefined, ui?: boolean | undefined }} ProfileOptions */
 
 // 讨论/第二意见共同的厂商族顺序。作者族由调用方显式传入；不能从环境变量或当前进程名猜。
+// 创始人 2026-10-05：「第二意见太慢了，我建议优先 gpt6luna，不行就 grok」——gpt 第一、grok 第二，其余排后面只当兜底
+// （当天 #1056 的第二意见 25 分钟：deepseek、grok 起了会话卡在 streaming、没人换，最后 kimi 才出结论）。
 /** @type {string[]} */
-export const FAMILY_ORDER = ['gpt', 'claude', 'deepseek', 'grok', 'kimi'];
+export const FAMILY_ORDER = ['gpt', 'grok', 'claude', 'deepseek', 'kimi'];
 /** @type {Record<ProfileName, Profile>} */
 export const PROFILES = {
   // Mirasim 2026-09-30 的真实 modelRosterCache：codex/gpt-6-luna。
@@ -123,7 +125,7 @@ export async function withFallback(chain, log, run, { budgetMs } = {}) {
   /** @type {string[]} */
   const misses = [];
   const deadline = budgetMs !== undefined && Number.isFinite(budgetMs) ? Date.now() + budgetMs : null;
-  for (const p of chain) {
+  for (const [at, p] of chain.entries()) {
     const who = `${p.agent}/${p.model ?? '服务端默认'}`;
     const remainingMs = deadline === null ? undefined : deadline - Date.now();
     if (remainingMs !== undefined && remainingMs <= 0) {
@@ -140,6 +142,17 @@ export async function withFallback(chain, log, run, { budgetMs } = {}) {
       if (e instanceof NotInstalled) {
         misses.push(`${who}：${e.message}`);
         log(`${who} 用不了（${e.message}），换下一家`);
+        continue;
+      }
+      if (e instanceof Stalled) {
+        // 起了会话、连续 N 分钟没有任何新输出：不等到整轮超时，当场换下一家
+        misses.push(`${who}：${e.message}`);
+        const next = chain[at + 1];
+        log(
+          next
+            ? `${p.family} ${e.minutes} 分钟没出声，换 ${next.family}`
+            : `${p.family} ${e.minutes} 分钟没出声，后面没有下一家了`,
+        );
         continue;
       }
       if (e instanceof NotChecked) {

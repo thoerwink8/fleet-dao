@@ -9,10 +9,10 @@ import { dataDir } from './tools.mjs';
 /** @typedef {{ text: string, sessionKey: string, model: string | null, ledgerNote: string, usage: string, fallbackNote?: string }} SessionResult 一次会话跑完的结果 */
 /** @typedef {(s: string) => void} Log */
 /** @typedef {(args: string[]) => string} GhRun 起 gh（失败抛错、成功回 stdout；测试里换成假的） */
-/** @typedef {{ prompt: string, profile: Profile, workdir: string, timeoutMin: number, log: Log, pollMs?: number, effort?: string | undefined, discussion?: boolean }} SessionOpts runSession 要的 */
+/** @typedef {{ prompt: string, profile: Profile, workdir: string, timeoutMin: number, log: Log, pollMs?: number, stallMin?: number, effort?: string | undefined, discussion?: boolean }} SessionOpts runSession 要的 */
 /**
  * 命令行参数（args() 整理出来的）。
- * @typedef {{ timeoutMin: number, ui: boolean, slot: number, pr?: number, repo?: string | undefined, roundGiven?: boolean, afterMergePending?: boolean, afterMergeSweep?: boolean, resolve?: number, resolveGiven?: boolean, by?: number, json?: boolean, noFetch?: boolean, slotGiven?: boolean, selftest?: boolean, ping?: boolean, noPost?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string | undefined, name?: string | undefined, effort?: string | undefined, agent?: string | undefined, authorFamily?: string, excludeFamily?: string | undefined, budgetSec?: number, blind?: boolean, slow?: boolean, highRisk?: boolean, postMerge?: boolean }} Options
+ * @typedef {{ timeoutMin: number, stallMin?: number, ui: boolean, slot: number, pr?: number, repo?: string | undefined, roundGiven?: boolean, afterMergePending?: boolean, afterMergeSweep?: boolean, resolve?: number, resolveGiven?: boolean, by?: number, json?: boolean, noFetch?: boolean, slotGiven?: boolean, selftest?: boolean, ping?: boolean, noPost?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string | undefined, name?: string | undefined, effort?: string | undefined, agent?: string | undefined, authorFamily?: string, excludeFamily?: string | undefined, budgetSec?: number, blind?: boolean, slow?: boolean, highRisk?: boolean, postMerge?: boolean }} Options
  */
 
 /**
@@ -32,6 +32,25 @@ export const errCode = (e) => (isObjectLike(e) ? e.code : undefined);
 export const messageOf = (e) => (isObjectLike(e) ? e.message : undefined);
 
 export class NotChecked extends Error {}
+
+/**
+ * 会话起了、但连续 N 分钟没有任何新输出：这家判没查成、当场换下一家（withFallback 认这个类，日志写「<家> N 分钟没出声，换 <下一家>」）。
+ */
+export class Stalled extends NotChecked {
+  /**
+   * @param {string} message
+   * @param {number} minutes 连续没出声的分钟数（日志里写的那个数）
+   */
+  constructor(message, minutes) {
+    super(message);
+    this.minutes = minutes;
+  }
+}
+
+/** 整轮总上限（分钟）：审 PR 和 --text 同一套。创始人 2026-10-05 嫌第二意见太慢，原来 45 分钟 / --text 压成 0.5 分钟。 */
+export const DEFAULT_TIMEOUT_MIN = 15;
+/** 一家起了会话后连续这么多分钟没有任何新输出，就判这家没查成、换下一家（创始人 2026-10-05：不出声就换）。 */
+export const DEFAULT_STALL_MIN = 4;
 
 const DATA = dataDir();
 export const RUNS = join(DATA, 'runs');

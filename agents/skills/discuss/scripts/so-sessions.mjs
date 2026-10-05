@@ -4,7 +4,15 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { errCode, isObjectLike, MIRA, messageOf, NotChecked } from './so-common.mjs';
+import {
+  DEFAULT_STALL_MIN,
+  errCode,
+  isObjectLike,
+  MIRA,
+  messageOf,
+  NotChecked,
+  Stalled,
+} from './so-common.mjs';
 import { judgeLedger, judgeSnapshot } from './so-verdict.mjs';
 import { cursorAgentEnv, cursorAgentProblem, findBin, NotInstalled } from './tools.mjs';
 
@@ -456,6 +464,7 @@ export async function runSession({
   timeoutMin,
   log,
   pollMs = 10_000,
+  stallMin = DEFAULT_STALL_MIN,
   effort,
   discussion = false,
 }) {
@@ -500,7 +509,18 @@ export async function runSession({
   );
 
   try {
-    return await pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs, log, before, secs });
+    return await pollSession({
+      profile,
+      url,
+      sessionKey,
+      since,
+      timeoutMin,
+      pollMs,
+      log,
+      before,
+      secs,
+      stallMin,
+    });
   } finally {
     // 一次性会话：成没成、超没超时，跑完一律删掉（账本在 pollSession 里已经读完），不留在会话列表里。
     // --keep-session 是排查用的例外：会话留着，自己去 Mirasim 里看，看完 `--stop-stale` 清掉。
@@ -509,21 +529,49 @@ export async function runSession({
 }
 
 /**
- * @param {{ profile: Profile, url: string, sessionKey: string, since: number, timeoutMin: number, pollMs: number, log: Log, before: number | null, secs: () => string }} opts
+ * 等的那几步（读快照、发停止、读用量、睡一下、看钟）：测试换成假的，用假钟不真等几分钟。
+ * @typedef {{ readView: (url: string, sessionKey: string) => Promise<SessionView | null>, stop: (url: string, sessionKey: string) => Promise<void>, relayUsage: (url: string) => Promise<number | null>, sleep: (ms: number) => Promise<void>, now: () => number }} PollIo
+ */
+/** @type {PollIo} */
+const REAL_IO = {
+  readView,
+  stop,
+  relayUsage,
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: () => Date.now(),
+};
+
+/**
+ * 等一个会话答完。「连续 stallMin 分钟没有任何新输出」就判这家没查成（抛 Stalled，withFallback 当场换下一家）：
+ * 进展 = 阶段、正文长度、工具调用数、updatedAt 任何一样变了。原来这里写死 10 分钟，#1056 当天 deepseek、grok 起了会话就卡在
+ * streaming，一家 8 分钟还没换（创始人 2026-10-05 嫌慢，改成默认 4 分钟、可用 --stall-min 调）。
+ * @param {{ profile: Profile, url: string, sessionKey: string, since: number, timeoutMin: number, pollMs: number, log: Log, before: number | null, secs: () => string, stallMin?: number, io?: PollIo }} opts
  * @returns {Promise<SessionResult>}
  */
-async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs, log, before, secs }) {
+export async function pollSession({
+  profile,
+  url,
+  sessionKey,
+  since,
+  timeoutMin,
+  pollMs,
+  log,
+  before,
+  secs,
+  stallMin = DEFAULT_STALL_MIN,
+  io = REAL_IO,
+}) {
   const deadline = since + timeoutMin * 60_000;
   let lastSig = '';
-  let lastChange = Date.now();
+  let lastChange = io.now();
   /** @type {string | null} */
   let lastPhase = '';
   let misses = 0;
   /** @type {SessionView | null} */
   let view = null;
   for (;;) {
-    await new Promise((r) => setTimeout(r, pollMs));
-    view = await readView(url, sessionKey);
+    await io.sleep(pollMs);
+    view = await io.readView(url, sessionKey);
     if (!view) {
       if (++misses >= Math.max(6, Math.ceil(60_000 / pollMs)))
         throw new NotChecked(`会话 ${sessionKey} 一分钟读不到快照（没查成）`);
@@ -538,17 +586,17 @@ async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs
     const sig = `${view.phase}|${view.text.length}|${view.toolCalls}|${view.updatedAt}`;
     if (sig !== lastSig) {
       lastSig = sig;
-      lastChange = Date.now();
+      lastChange = io.now();
     }
-    const stalled = Date.now() - lastChange > 10 * 60_000;
-    if (stalled || Date.now() > deadline) {
-      await stop(url, sessionKey);
+    const stalled = io.now() - lastChange > stallMin * 60_000;
+    if (stalled || io.now() > deadline) {
+      await io.stop(url, sessionKey);
       const pending = view.interactions.length
         ? `；会话里有 ${view.interactions.length} 个在等人回答的交互`
         : '';
-      throw new NotChecked(
-        `会话 ${sessionKey} ${stalled ? '10 分钟没动静' : `${timeoutMin} 分钟没跑完`}，已发停止${pending}`,
-      );
+      if (stalled)
+        throw new Stalled(`会话 ${sessionKey} ${stallMin} 分钟没出声，已发停止${pending}`, stallMin);
+      throw new NotChecked(`会话 ${sessionKey} ${timeoutMin} 分钟没跑完，已发停止${pending}`);
     }
   }
   if (profile.agent !== 'claude' && profile.model && view.model && view.model !== profile.model) {
@@ -562,7 +610,7 @@ async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs
     i < 10 && profile.route === 'cloud' && !(ledger.readable && judgeLedger(ledger.rows, since, true).ok);
     i++
   ) {
-    await new Promise((r) => setTimeout(r, 1_000));
+    await io.sleep(1_000);
     ledger = readLedger(uuid);
   }
   let ledgerNote;
@@ -574,7 +622,7 @@ async function pollSession({ profile, url, sessionKey, since, timeoutMin, pollMs
   } else {
     ledgerNote = ledger.readable ? judgeLedger(ledger.rows, since, false).why : `不走中继，${ledger.why}`;
   }
-  const after = await relayUsage(url);
+  const after = await io.relayUsage(url);
   const usage =
     before != null && after != null ? `中继 7 天窗 ${before}% → ${after}%` : '中继 7 天窗用量没读到';
   return { sessionKey, text: view.text, model: view.model, ledgerNote, usage };
