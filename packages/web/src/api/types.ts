@@ -37,6 +37,9 @@ import type {
   LivenessVerdictSchema,
   MeResponse,
   ModelSchema,
+  NodeDetailResponseSchema,
+  NodeListItemSchema,
+  NodesResponseSchema,
   NotificationLevelSchema,
   NotificationSchema,
   NotificationsResponse,
@@ -162,6 +165,11 @@ export type EnvSessions = z.infer<typeof EnvSessionsSchema>;
 export type EnvPools = z.infer<typeof EnvPoolsSchema>;
 export type EnvHealth = z.infer<typeof EnvHealthSchema>;
 export type EnvSchedule = z.infer<typeof EnvScheduleSchema>;
+
+/** 看板多机：本台加每个远程环境（本机 WSL 等）的新鲜度；远程环境最近一次推来的主页、环境页快照。 */
+export type Nodes = z.infer<typeof NodesResponseSchema>;
+export type NodeListItem = z.infer<typeof NodeListItemSchema>;
+export type NodeDetail = z.infer<typeof NodeDetailResponseSchema>;
 
 export type Notifications = z.infer<typeof NotificationsResponse>;
 export type Notification = z.infer<typeof NotificationSchema>;

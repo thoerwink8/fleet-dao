@@ -91,7 +91,7 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     await open(w.api, '/');
     expect(screen.getByText('正在确认登录…')).toBeTruthy();
     expect(w.subscribed).toEqual([]);
-    for (const call of ['me', 'repos', 'home', 'notifications']) {
+    for (const call of ['me', 'repos', 'home', 'notifications', 'nodes']) {
       expect([call, w.first(call)]).toEqual([call, 1]);
     }
     await w.release();
@@ -103,12 +103,12 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     expect(w.called('routingLayers')).toBe(false);
   });
 
-  test('各仓的看板（只给顶栏切换仓的计数）等仓列表回来再拉，不和主页抢第 1 轮', async () => {
+  test('顶栏的环境切换器不再为「切换仓」的计数去拉每个仓的看板：主页打开后一个看板都不读', async () => {
     const w = waved();
     await open(w.api, '/');
-    for (const r of REPOS) expect(w.called(`board:${r}`)).toBe(false);
     await w.release();
-    for (const r of REPOS) expect([r, w.first(`board:${r}`)]).toEqual([r, 2]);
+    await w.release();
+    for (const r of REPOS) expect(w.called('board:' + r)).toBe(false);
   });
 
   test('没登录：页面一直不露出来，推送不连，说要先登录', async () => {

@@ -223,6 +223,8 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     },
     home: () => send('GET', apiUrl(R.home.path), R.home.response),
     env: () => send('GET', apiUrl(R.env.path), R.env.response),
+    nodes: () => send('GET', apiUrl(R.nodes.path), R.nodes.response),
+    node: (nodeId) => send('GET', apiUrl(R.node.path, { nodeId }), R.node.response),
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),
     task: (taskId) => send('GET', apiUrl(R.task.path, { taskId }), R.task.response),
     async taskAction(taskId, body) {

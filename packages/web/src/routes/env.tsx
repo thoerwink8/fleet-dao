@@ -24,12 +24,13 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { brand } from '#brand';
-import { useEnv } from '../api/client';
+import { useEnv, useNodeSnapshots, useNodes } from '../api/client';
 import type { EnvEngine, EnvFacts, EnvSchedule, EnvVersion } from '../api/types';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatDateTime } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -205,10 +206,11 @@ function ScheduleTile({ v, now }: { v: EnvSchedule; now: number }) {
   );
 }
 
-function EnvBody({ facts, now }: { facts: EnvFacts; now: number }) {
+/** single：只有本台一列时用宽版（两栏）；几个环境并排时每列窄，六格一路排下来。 */
+function EnvBody({ facts, now, single }: { facts: EnvFacts; now: number; single: boolean }) {
   return (
-    <div className="grid gap-3 lg:grid-cols-2">
-      <div className="grid gap-3 sm:grid-cols-2">
+    <div className={single ? 'grid gap-3 lg:grid-cols-2' : 'grid gap-3'}>
+      <div className={single ? 'grid gap-3 sm:grid-cols-2' : 'grid gap-3'}>
         {facts.engine.ok ? (
           <EngineTile v={facts.engine.value} />
         ) : (
@@ -288,26 +290,56 @@ function EnvBody({ facts, now }: { facts: EnvFacts; now: number }) {
   );
 }
 
-export default function Env() {
-  const { data, error, isLoading } = useEnv();
-  const now = useNow();
+/** 一列的外框：环境名（h2）、本台还是远程、「读于 / 上报于 / 失联多久」、选中时描边。 */
+function EnvColumn({
+  id,
+  name,
+  badge,
+  age,
+  tone,
+  selected,
+  note,
+  children,
+}: {
+  id: string;
+  name: string;
+  badge: string;
+  age: string;
+  tone: 'ok' | 'stale';
+  selected: boolean;
+  note?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      data-env-column={id}
+      data-env-column-state={tone}
+      data-env-selected={selected}
+      className={cn('min-w-0 rounded-2xl border p-4', selected && 'border-brand/60 ring-1 ring-brand/30')}
+    >
+      <header className="mb-3">
+        <h2 className="flex min-w-0 items-center gap-2 text-lg font-semibold tracking-tight">
+          <ServerCog className="size-5 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="min-w-0 truncate">{name}</span>
+          <span className="shrink-0 rounded-full border px-2 py-0.5 text-xs font-normal text-muted-foreground">
+            {badge}
+          </span>
+        </h2>
+        <p
+          data-env-age
+          className={cn('num mt-1 text-xs', tone === 'stale' ? 'text-ink-stall' : 'text-muted-foreground')}
+        >
+          {age}
+        </p>
+        {note ? <p className="mt-1 text-xs text-muted-foreground">{note}</p> : null}
+      </header>
+      <div className={cn(tone === 'stale' && 'opacity-70')}>{children}</div>
+    </section>
+  );
+}
 
-  if (error) {
-    return (
-      <Page title="环境">
-        <LoadError error={error} />
-      </Page>
-    );
-  }
-  if (isLoading || !data) {
-    return (
-      <Page title="环境">
-        <LoadingRows rows={4} />
-      </Page>
-    );
-  }
-
-  const { name, asOf, facts } = data;
+/** 本台那一列顶上的小结：几项没查成、健康几项红。 */
+function localSummary(facts: EnvFacts): ReactNode {
   const failing = facts.health.ok ? facts.health.value.failing.length : undefined;
   const unread = [
     facts.engine,
@@ -317,35 +349,111 @@ export default function Env() {
     facts.health,
     facts.schedule,
   ].filter((f) => !f.ok).length;
+  if (!unread && !failing) return null;
+  return (
+    <>
+      {unread > 0 ? <span className="text-ink-stall">{unread} 项没查成</span> : null}
+      {unread > 0 && failing ? ' · ' : null}
+      {failing ? <span className="text-ink-fail">健康 {failing} 项红</span> : null}
+    </>
+  );
+}
+
+export default function Env() {
+  const local = useEnv();
+  const nodes = useNodes();
+  const { nodeId } = useNodeSelection();
+  const now = useNow();
+  const remote = nodes.data?.nodes ?? [];
+  // 收到过快照的远程环境各读一份；从没收到过的（never）没有快照可读，那一列只写「从没收到过」
+  const received = remote.filter((n) => n.receivedAt !== undefined);
+  const snapshots = useNodeSnapshots(received.map((n) => n.id));
+  const single = remote.length === 0 && !nodes.error;
 
   return (
     <Page
-      title={
-        <span className="flex min-w-0 items-center gap-2">
-          <ServerCog className="size-6 shrink-0 text-muted-foreground" aria-hidden />
-          <span className="min-w-0 truncate">{name.name}</span>
-          <span className="shrink-0 rounded-full border px-2 py-0.5 text-xs font-normal text-muted-foreground">
-            本环境
-          </span>
-        </span>
-      }
-      description={
-        name.problem
-          ? `${name.problem}。这一页只看这一台环境（不跨环境）：引擎在不在、在用哪版、手上几个会话、池占几个、健康红几项、最近拉单。`
-          : '这一台环境现在怎样，一页看全：引擎在不在、在用哪版、落后主线没有、手上几个会话在跑、池占几个、健康红几项、最近一轮拉单。每个数读不到就写「没查成」和原因，不拿空顶。'
-      }
-      actions={
-        <span className="num text-xs text-muted-foreground">
-          {formatAgo(asOf, now)}读
-          {unread > 0 ? <span className="ml-2 text-ink-stall">· {unread} 项没查成</span> : null}
-          {failing ? <span className="ml-2 text-ink-fail">· 健康 {failing} 项红</span> : null}
-        </span>
-      }
+      title="环境"
+      description="每个环境现在怎样，一页并排看全：引擎在不在、在用哪版、落后主线没有、手上几个会话在跑、池占几个、健康红几项、最近一轮拉单。每个数读不到就写「没查成」和原因，不拿空顶；远程环境的数是它自己推来的快照，写明上报于几分钟前，失联了写失联多久。"
     >
-      <EnvBody facts={facts} now={now} />
+      {nodes.error ? (
+        <div className="mb-3">
+          <LoadError what="远程环境列表" error={nodes.error} onRetry={() => void nodes.refetch()} />
+        </div>
+      ) : null}
+      <div
+        className={cn(
+          'grid gap-4',
+          !single && '[grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr))]',
+        )}
+      >
+        {local.error ? (
+          <LoadError what="本台的环境页" error={local.error} onRetry={() => void local.refetch()} />
+        ) : local.isLoading || !local.data ? (
+          <LoadingRows rows={4} />
+        ) : (
+          <EnvColumn
+            id="local"
+            name={local.data.name.name}
+            badge="本台"
+            age={`${formatAgo(local.data.asOf, now)}读`}
+            tone="ok"
+            selected={!single && nodeId === null}
+            note={
+              local.data.name.problem ? (
+                <>
+                  {local.data.name.problem}
+                  {localSummary(local.data.facts) ? <> · {localSummary(local.data.facts)}</> : null}
+                </>
+              ) : (
+                localSummary(local.data.facts)
+              )
+            }
+          >
+            <EnvBody facts={local.data.facts} now={now} single={single} />
+          </EnvColumn>
+        )}
+        {remote.map((n) => {
+          const f = freshnessNow(n, now);
+          const idx = received.findIndex((r) => r.id === n.id);
+          const snap = idx < 0 ? undefined : snapshots[idx];
+          const age = nodeAgeText(n, now);
+          const body =
+            f === 'never' || snap === undefined ? (
+              <p data-env-never className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+                配了通行证，但从没收到过{n.name}的快照：先去那台上把推送接上（docs/ops.md「接上法国看板」）。
+              </p>
+            ) : snap.error ? (
+              <LoadError what={`${n.name}的快照`} error={snap.error} onRetry={() => void snap.refetch()} />
+            ) : snap.data ? (
+              <EnvBody facts={snap.data.env.facts} now={now} single={false} />
+            ) : (
+              <LoadingRows rows={4} />
+            );
+          return (
+            <EnvColumn
+              key={n.id}
+              id={n.id}
+              name={snap?.data?.name ?? n.name}
+              badge="远程"
+              age={f === 'fresh' ? `上报于 ${age}` : age}
+              tone={f === 'fresh' ? 'ok' : 'stale'}
+              selected={nodeId === n.id}
+              note={
+                f === 'stale'
+                  ? '下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
+                  : f === 'fresh'
+                    ? '只读快照：写操作（暂停派活、叫停）要去那台上做。'
+                    : undefined
+              }
+            >
+              {body}
+            </EnvColumn>
+          );
+        })}
+      </div>
       <p className="mt-4 text-xs text-muted-foreground">
-        这一页只读、不跨环境：读的全是本后端自己库里的现成读法。写操作（暂停派活、叫停）在片 2、片 3
-        里做，这一页不给。
+        这一页只读：本台的数读的是本后端自己库里的现成读法，远程环境的数是它每分钟推来的快照（新不新鲜按这边收到的时刻算，
+        不信它自己的钟）。写操作（暂停派活、叫停）在片 2、片 3 里做，这一页不给。
       </p>
     </Page>
   );

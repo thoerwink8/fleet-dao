@@ -12,17 +12,16 @@ import {
   ServerCog,
   Settings,
   Sun,
-  TriangleAlert,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
   errorText,
-  useAllBoards,
   useApi,
   useLiveState,
   useMe,
+  useNodes,
   useNotifications,
   useResolveNotification,
 } from '../../api/client';
@@ -30,10 +29,10 @@ import type { Notification } from '../../api/types';
 import { canSee, isDemo } from '../../demo/access';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
-import { noticeLevelMeta, taskTone } from '../../lib/status';
+import { freshnessNow, nodeAgeText, useNodeSelection, withNode } from '../../lib/node';
+import { noticeLevelMeta } from '../../lib/status';
 import { type ModePref, PALETTES } from '../../lib/theme';
 import { cn } from '../../lib/utils';
-import { useRepo } from '../repo-context';
 import { StatusDot } from '../status';
 import { useTheme } from '../theme-provider';
 import { Button } from '../ui/button';
@@ -51,13 +50,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { PaletteSwatch } from './palette-swatch';
 
 export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void }) {
+  // 选了远程环境：提醒铃铛是本台（法国）的数据，不顶着远程环境的名字露出来
+  const { nodeId } = useNodeSelection();
   return (
     <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel/80 px-3 backdrop-blur md:px-4">
       <Button size="icon" variant="ghost" className="size-8 md:hidden" onClick={onMenu} aria-label="打开导航">
         <Menu />
       </Button>
-      <RepoSwitcher />
-      <EnvBadge />
+      <EnvSwitcher />
       <button
         type="button"
         onClick={onSearch}
@@ -72,7 +72,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
           <Search />
         </Button>
         <LiveIndicator />
-        {canSee('notifications') ? <NotificationBell /> : null}
+        {canSee('notifications') && nodeId === null ? <NotificationBell /> : null}
         <ThemeMenu />
         <UserMenu />
       </div>
@@ -81,104 +81,93 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
 }
 
 /**
- * 顶栏环境名徽标（#820 片 1，方案 §4.6）：常驻「现在看的是哪一台」——法国还是本机。名字跟着 /me 带回（后端的
- * FLEET_MACHINE_NAME），读不到就照实写「认不出」，不猜成某一台；不为一个名字每分钟拉整份环境页（那一页每次都跑全套健康检查）。
- * 点开进环境页。演示版没有这一页，也不显示。读坏（后端连不上）时不占位、不留空壳：交给环境页去报原因。
+ * 顶栏环境切换器（看板多机；替掉原来没用的「切换仓」、合并原来的环境名徽标 #820 片 1）：常驻「现在看的是哪一台」，
+ * 点开列出本台和每个远程环境（本机 WSL）、各自上报于几分钟前或失联多久，选哪个就把它记在网址参数 ?node=（留在当前这一页）。
+ * 本台的名字跟着 /me 带回（后端的 FLEET_MACHINE_NAME），读不到就照实写「认不出」，不猜成某一台；远程环境的列表读不成就在
+ * 下拉里写原因，不当成「没有远程环境」。演示版没有切换器（不露机器名）。
  */
-function EnvBadge() {
+function EnvSwitcher() {
   const { data: me } = useMe();
+  const nodes = useNodes();
+  const { nodeId, select } = useNodeSelection();
+  const navigate = useNavigate();
+  const now = useNow();
   if (!me || isDemo()) return null;
   const { env } = me;
-  const problem = env.problem !== undefined;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Link
-          to="/env"
-          data-env-badge
-          className={cn(
-            'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border bg-background/60 px-2 text-sub transition-colors hover:border-border-strong sm:flex',
-            problem ? 'text-ink-stall' : 'text-muted-foreground',
-          )}
-          aria-label={`现在看的是${env.name}，打开环境页`}
-        >
-          <ServerCog className="size-3.5 opacity-70" aria-hidden />
-          <span className="num max-w-24 truncate font-medium">{env.name}</span>
-        </Link>
-      </TooltipTrigger>
-      <TooltipContent>{problem ? env.problem : '现在看的是这一台环境；点开看它现在怎样'}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-function RepoSwitcher() {
-  const { repo, repos, setRepoId, error: reposError } = useRepo();
-  const { boards, failed } = useAllBoards();
-  const navigate = useNavigate();
-  const countFor = (repoId: string) => {
-    const list = boards.find((b) => b.repo.id === repoId)?.tasks ?? [];
-    return {
-      run: list.filter((t) => taskTone(t) === 'run').length,
-      stuck: list.filter((t) => ['stall', 'fail', 'human'].includes(taskTone(t))).length,
-    };
-  };
+  const remote = nodes.data?.nodes ?? [];
+  const selected = nodeId === null ? undefined : remote.find((n) => n.id === nodeId);
+  const label = nodeId === null ? env.name : (selected?.name ?? nodeId);
+  const state = nodeId === null ? 'fresh' : freshnessNow(selected ?? {}, now);
+  const problem = nodeId === null && env.problem !== undefined;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="h-8 gap-1.5 px-2 text-sub" aria-label="切换仓">
-          <span className="num hidden text-muted-foreground lg:inline">{repo?.owner}/</span>
-          {repo ? (
-            <span className="num max-w-40 truncate font-semibold">{repo.name}</span>
-          ) : reposError ? (
-            <span className="text-ink-fail">仓列表没读成</span>
-          ) : (
-            <span className="num font-semibold">…</span>
+        <Button
+          variant="ghost"
+          data-env-switcher={nodeId ?? 'local'}
+          className={cn(
+            'h-8 shrink-0 gap-1.5 px-2 text-sub',
+            problem || state !== 'fresh' ? 'text-ink-stall' : undefined,
           )}
+          aria-label={`现在看的是${label}，点开切换环境`}
+        >
+          <ServerCog className="size-3.5 opacity-70" aria-hidden />
+          <span className="num max-w-32 truncate font-semibold">{label}</span>
+          {nodeId !== null ? (
+            <span
+              className={cn(
+                'rounded-full border px-1.5 text-micro leading-4 whitespace-nowrap',
+                state === 'fresh' ? 'text-muted-foreground' : 'border-st-stall/50 text-ink-stall',
+              )}
+            >
+              {state === 'fresh' ? '只读' : state === 'stale' ? '失联' : '没数据'}
+            </span>
+          ) : null}
           <ChevronsUpDown className="size-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72">
         <DropdownMenuLabel className="text-xs text-muted-foreground">
-          切换仓（看板按仓显示）
+          切换环境（看板按环境显示）
         </DropdownMenuLabel>
-        {reposError ? (
+        <DropdownMenuItem data-node-item="local" onSelect={() => select(null)}>
+          <span className="num min-w-0 flex-1 truncate">{env.name}</span>
+          <span className="text-xs text-muted-foreground">这台</span>
+          {nodeId === null ? <Check className="size-4" /> : null}
+        </DropdownMenuItem>
+        {nodes.error ? (
           <DropdownMenuItem disabled className="text-xs text-ink-fail">
-            仓列表没读成{repos.length ? '，下面是上次读到的' : ''}：{errorText(reposError)}
+            远程环境没读成：{errorText(nodes.error)}
           </DropdownMenuItem>
         ) : null}
-        {repos.map((r) => {
-          const c = countFor(r.id);
+        {remote.map((n) => {
+          const f = freshnessNow(n, now);
           return (
             <DropdownMenuItem
-              key={r.id}
-              onSelect={() => {
-                setRepoId(r.id);
-                navigate('/');
-              }}
+              key={n.id}
+              data-node-item={n.id}
+              data-node-state={f}
+              onSelect={() => select(n.id)}
+              className={f === 'fresh' ? undefined : 'text-muted-foreground'}
             >
-              <span className="num min-w-0 flex-1 truncate">
-                <span className="text-muted-foreground">{r.owner}/</span>
-                {r.name}
+              <span className="num min-w-0 flex-1 truncate">{n.name}</span>
+              <span className={cn('text-xs', f === 'fresh' ? 'text-muted-foreground' : 'text-ink-stall')}>
+                {nodeAgeText(n, now)}
               </span>
-              {failed.some((f) => f.id === r.id) ? (
-                <span className="text-xs text-ink-fail">没读成</span>
-              ) : null}
-              {c.run ? (
-                <span className="num flex items-center gap-1 text-xs text-muted-foreground">
-                  <StatusDot tone="run" className="size-1.5" />
-                  {c.run}
-                </span>
-              ) : null}
-              {c.stuck ? (
-                <span className="num flex items-center gap-1 text-xs text-ink-stall">
-                  <TriangleAlert className="size-3" />
-                  {c.stuck}
-                </span>
-              ) : null}
-              {r.id === repo?.id ? <Check className="size-4" /> : null}
+              {n.id === nodeId ? <Check className="size-4" /> : null}
             </DropdownMenuItem>
           );
         })}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => navigate(withNode('/env', nodeId))}>
+          <ServerCog />
+          打开环境页（各环境并排）
+        </DropdownMenuItem>
+        {problem ? (
+          <DropdownMenuItem disabled className="text-xs text-ink-stall">
+            {env.problem}
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

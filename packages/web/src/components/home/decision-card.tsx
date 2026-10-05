@@ -6,6 +6,7 @@ import { Link } from 'react-router';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
+import { useRemoteView } from '../node-notice';
 import { Button } from '../ui/button';
 import type { HomeDecision } from './types';
 
@@ -16,6 +17,7 @@ const KIND_META: Record<HomeDecision['kind'], { icon: typeof Send; label: string
 
 export function DecisionCard({ decision, className }: { decision: HomeDecision; className?: string }) {
   const now = useNow();
+  const remote = useRemoteView();
   const meta = KIND_META[decision.kind];
   const Icon = meta.icon;
   return (
@@ -43,12 +45,23 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
           ) : null}
         </div>
       </div>
-      <Button asChild size="sm" variant="outline" className="shrink-0 self-start sm:self-center">
-        <Link to={decision.link}>
-          去答
-          <ArrowRight aria-hidden />
-        </Link>
-      </Button>
+      {remote ? (
+        // 看的是别的环境的快照：这条决定要在那台上答，这里只读，按钮置灰并说明
+        <div className="flex shrink-0 flex-col items-start gap-1 self-start sm:items-end sm:self-center">
+          <Button size="sm" variant="outline" disabled data-remote-disabled>
+            去答
+            <ArrowRight aria-hidden />
+          </Button>
+          <span className="text-caption text-muted-foreground">要去{remote.name}那台上答</span>
+        </div>
+      ) : (
+        <Button asChild size="sm" variant="outline" className="shrink-0 self-start sm:self-center">
+          <Link to={decision.link}>
+            去答
+            <ArrowRight aria-hidden />
+          </Link>
+        </Button>
+      )}
     </li>
   );
 }

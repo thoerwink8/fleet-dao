@@ -25,6 +25,8 @@ import {
   LEGACY_ASK_CLOSED_ANSWER,
   LegacyAsksResponse,
   MeResponse,
+  NodeDetailResponseSchema,
+  NodesResponseSchema,
   NotificationsResponse,
   PASSWORD_MIN_LENGTH,
   POOL_HOLDS_SETTING,
@@ -195,6 +197,12 @@ function mockEngine() {
     default:
       return { state: 'on' as const };
   }
+}
+
+/** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
+function mockNodeMode(): 'fresh' | 'stale' | 'never' | 'off' {
+  const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockNode');
+  return v === 'stale' || v === 'never' || v === 'off' ? v : 'fresh';
 }
 
 export function createMockApi(opts: MockOptions = {}): MockApi {
@@ -1046,7 +1054,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async home() {
       await wait();
       // 和真后端 buildHome 一个拼法（少一些数据源：假后端没有 approvals 表、没有 PR 镜像表）：
-      // decision = decision 级未处理通知（标题里「等你批/等你点头」的算待批）+ 未答追问；
+      // decision = decision 级未处理通知（标题里「等你批/等你点头」的算待批），追问不进（#928）；
       // done = merged 的子任务里有 prNumber 的（模拟器 merge 时给的号），时刻用它状态变化的时刻（没有就用现在）。
       const repoName = (repoId: string) => {
         const r = st.repos.find((x) => x.id === repoId);
@@ -1067,19 +1075,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               link: n.link ?? '/notifications',
             };
           }),
-        ...st.tasks.flatMap((t) =>
-          t.asks
-            .filter((a) => a.answer === undefined)
-            .map((a) => ({
-              kind: 'ask' as const,
-              id: a.id,
-              title: a.question,
-              context: `#${t.task.issueNumber} ${t.task.title}`,
-              since: a.askedAt,
-              // 和真后端 homeDecisions 一样链到任务页
-              link: `/tasks/${t.task.id}`,
-            })),
-        ),
+        // 追问不在「要你拍的」里（#928：v3 没有 AI 追问这一环，旧追问只在通知中心只读展示）：契约里 kind 只有 notification / approval
       ].sort((a, b) => b.since.localeCompare(a.since));
       const TERMINAL_M = new Set(['done', 'stopped', 'failed']);
       // 三段流水和真后端 buildHome 一个读法：readSegmentRun 读好，再交给 shared 的 taskFlow / flowStages 推
@@ -1253,6 +1249,59 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           health: { ok: true, value: { ok: true, total: 9, failing: [], notWired: ['deploy_lag'] } },
           schedule: { ok: true, value: { status: 'never' } },
         },
+      });
+    },
+    /**
+     * 看板多机（切换器）的假数据：一个叫 wsl 的远程环境（本机 WSL）。形状照真后端；快照取自这份假库、环境名换成「本机 WSL」。
+     * 地址上加 ?mockNode=stale（失联 12 分钟）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
+     */
+    async nodes() {
+      await wait();
+      const t = now();
+      const mode = mockNodeMode();
+      const engine = (await api.env()).facts.engine;
+      const remote =
+        mode === 'off'
+          ? []
+          : [
+              mode === 'never'
+                ? { id: 'wsl', name: 'wsl', freshness: 'never' as const }
+                : {
+                    id: 'wsl',
+                    name: '本机 WSL',
+                    freshness: mode === 'stale' ? ('stale' as const) : ('fresh' as const),
+                    receivedAt: new Date(t - (mode === 'stale' ? 12 * 60_000 : 40_000)).toISOString(),
+                    reportedAt: new Date(t - (mode === 'stale' ? 12 * 60_000 : 41_000)).toISOString(),
+                    codeSha: 'a0006685f092154f90b462cc74e8872d32e5',
+                  },
+            ];
+      return NodesResponseSchema.parse({
+        self: {
+          name: '假数据',
+          engine: engine.ok ? engine.value : { state: 'unknown', detail: engine.reason },
+        },
+        nodes: remote,
+      });
+    },
+    async node(nodeId) {
+      await wait();
+      const mode = mockNodeMode();
+      if (nodeId !== 'wsl' || mode === 'off') throw new ApiError(404, 'node_not_found', '没有这个环境');
+      if (mode === 'never')
+        throw new ApiError(404, 'node_never_reported', `环境 ${nodeId} 配了通行证，但一次快照都没推来过`);
+      const t = now();
+      const ago = mode === 'stale' ? 12 * 60_000 : 40_000;
+      const home = await api.home();
+      const env = await api.env();
+      return NodeDetailResponseSchema.parse({
+        id: 'wsl',
+        name: '本机 WSL',
+        freshness: mode === 'stale' ? 'stale' : 'fresh',
+        receivedAt: new Date(t - ago).toISOString(),
+        reportedAt: new Date(t - ago - 1000).toISOString(),
+        codeSha: 'a0006685f092154f90b462cc74e8872d32e5',
+        home: { ...home, running: home.running.slice(0, 2), decisions: home.decisions.slice(0, 1) },
+        env: { ...env, name: { name: '本机 WSL' } },
       });
     },
     async task(taskId) {
