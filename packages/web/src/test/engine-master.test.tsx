@@ -13,7 +13,8 @@ vi.mock('sonner', () => ({ toast, Toaster: () => null }));
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { Setting } from '../api/types';
-import { EngineMasterBadge } from '../components/engine-master';
+import { EngineMasterBadge, EngineMasterRelation } from '../components/engine-master';
+import engineMasterSource from '../components/engine-master.tsx?raw';
 import Env from '../routes/env';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
@@ -87,6 +88,40 @@ describe('顶栏胶囊（EngineMasterBadge）', () => {
     expect(badge.getAttribute('data-engine-master')).toBe('error');
     expect(badge.textContent).not.toContain('开着');
     expect(badge.textContent).not.toContain('关着');
+  });
+});
+
+describe('演示版产物不许出现的词（src/build/scan.ts）', () => {
+  test('顶栏胶囊和设置页说明在演示版里也被打进包：它们的文案（含各种状态下的提示）不含内置禁词；命令名只在环境页的卡里', async () => {
+    const texts: string[] = [];
+    for (const row of [NEVER, ON, OFF]) {
+      const { container, unmount } = renderApp(
+        <>
+          <EngineMasterBadge />
+          <EngineMasterRelation />
+        </>,
+        { api: apiWith(row) as unknown as FleetApi, route: '/settings?node=wsl' },
+      );
+      await screen.findByTestId('engine-master-relation');
+      texts.push(container.textContent ?? '');
+      unmount();
+    }
+    // 远程环境和读不到的提示也走同一份文案：直接扫源码（?raw 由 vite 内联成字符串）。
+    // 去掉注释和 import 行（它们不进产物），剩下的字符串字面量和 JSX 文本都是会进演示包的
+    const shipped = engineMasterSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/^import[\s\S]*?from\s+'[^']+';\s*$/gm, '');
+    texts.push(shipped);
+    const { scanText } = await import('../build/scan');
+    for (const t of texts) expect(scanText('engine-master', t)).toEqual([]);
+  });
+
+  test('检查本身有牙：把命令名写进去，同一个检查会红', async () => {
+    const { scanText } = await import('../build/scan');
+    expect(
+      scanText('x', '（远程环境只读：要开关请去那台上用 fleet-api engine on|off）').length,
+    ).toBeGreaterThan(0);
   });
 });
 

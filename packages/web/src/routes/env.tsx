@@ -1,4 +1,4 @@
-// 环境页「环境」（#820 片 1，只读；顶上多一张能点的「引擎总开关」卡，#1086，见 components/engine-master.tsx）：
+// 环境页「环境」（#820 片 1，只读；顶上多一张能点的「引擎总开关」卡，#1086，见 components/engine-master-card.tsx）：
 // 这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
 //
 // 只读、不跨环境、不开口子：读的全是本后端自己库里的现成读法（/api/env 一处聚合，见 packages/api/src/env-view.ts）。
@@ -27,7 +27,7 @@ import type { ReactNode } from 'react';
 import { brand } from '#brand';
 import { useEnv, useNodeSnapshots, useNodes } from '../api/client';
 import type { EnvEngine, EnvFacts, EnvSchedule, EnvVersion } from '../api/types';
-import { EngineMasterControl } from '../components/engine-master';
+import { EngineMasterControl } from '../components/engine-master-card';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatDateTime } from '../lib/format';
