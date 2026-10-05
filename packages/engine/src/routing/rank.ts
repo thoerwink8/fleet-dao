@@ -1,4 +1,4 @@
-// 排序与微调：按人排的顺序取；钉住的行原地不动；没钉住的按三条微调重排，填回剩下的位置。
+// 排序与微调：按人排的顺序取；钉住的行原地不动；没钉住的在各自模型内按三条微调重排，填回该模型剩下的位置（不跨模型）。
 // 微调（设计 §九 选路第 3 条）：
 //   ① 快清零还没用完的往前提（清零早的在前）；② 战绩明显差的往后放，样本少不动；
 //   ③ 额度未知的排在读到了的后面。
@@ -105,7 +105,15 @@ export function rank(
     }
     return 0;
   };
-  const movable = items.filter((it) => !it.pinned).sort(cmp);
-  // 钉住的留在原位，没钉住的按微调后的先后填进其余位置。
-  return items.map((it) => (it.pinned ? it : (movable.shift() as Ranked)));
+  // 微调只在同一个模型的几个渠道之间排：模型之间严格按用途里排的先后，后面模型的渠道不能插到前面模型前面。
+  // 钉住的留在原位，每个模型里没钉住的按微调后的先后填回这个模型自己剩下的位置。
+  const movableByModel = new Map<string, Ranked[]>();
+  for (const it of items) {
+    if (it.pinned) continue;
+    const list = movableByModel.get(it.route.modelId) ?? [];
+    list.push(it);
+    movableByModel.set(it.route.modelId, list);
+  }
+  for (const list of movableByModel.values()) list.sort(cmp);
+  return items.map((it) => (it.pinned ? it : (movableByModel.get(it.route.modelId)?.shift() as Ranked)));
 }

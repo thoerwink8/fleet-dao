@@ -144,14 +144,14 @@ describe('Cursor 两个桶', () => {
     if (r.kind === 'dispatch') expect(r.why).toContain('月额度（auto）用满');
   });
 
-  it('账期 30 小时后结束、Auto 桶还剩 80%：提到 Claude 前面，先把要作废的用掉', () => {
+  it('账期 30 小时后结束、Auto 桶还剩 80%：它是后面的模型，不插到 Claude 前面（#1089）', () => {
     const soon = cursor('cursor-auto', 'Cursor Auto', 'auto', 0.2);
     soon.windows = [
       win({ label: 'auto_percent', window: 'month_usd', scope: 'auto', used: 0.2, resetsAt: at(30) }),
     ];
     const r = chooseRoute(input([solo(), soon]));
-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'cursor-auto' });
-    if (r.kind === 'dispatch') expect(r.why).toContain('月额度（auto） 30 小时后清零、还剩 80%');
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'solo-opus' });
+    if (r.kind === 'dispatch') expect(r.why).not.toContain('清零');
   });
 });
 

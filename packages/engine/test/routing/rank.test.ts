@@ -149,6 +149,58 @@ describe('拼车号、独享号不分主备（#59 删掉了「备池排在主池
   });
 });
 
+describe('微调只在同一个模型的几个渠道之间生效，模型之间严格按用途里排的先后（#1089）', () => {
+  const A = { modelId: 'model-a' };
+  const B = { modelId: 'model-b' };
+
+  it('第一个模型的渠道额度未知：第二个模型的渠道也不排到它前面', () => {
+    expect(
+      order([
+        route('a1', { ...A, quota: 'unknown' }),
+        route('a2', { ...A, quota: 'unknown' }),
+        route('b1', B),
+        route('b2', B),
+      ]),
+    ).toEqual(['a1', 'a2', 'b1', 'b2']);
+  });
+
+  it('第一个模型的渠道战绩差：第二个模型的渠道也不排到它前面', () => {
+    const bad = { record: { samples: 10, successes: 0 } };
+    expect(
+      order([route('a1', { ...A, ...bad }), route('a2', { ...A, ...bad }), route('b1', B), route('b2', B)]),
+    ).toEqual(['a1', 'a2', 'b1', 'b2']);
+  });
+
+  it('第二个模型的渠道周额度快清零：也不提到第一个模型前面', () => {
+    expect(
+      order([route('a1', A), route('a2', A), weekly('b1', 20, 0.3, B), weekly('b2', 5, 0.3, B)]),
+    ).toEqual(['a1', 'a2', 'b2', 'b1']);
+  });
+
+  it('同一个模型内三条微调照旧生效，且各模型各排各的', () => {
+    const bad = { record: { samples: 10, successes: 0 } };
+    expect(
+      order([
+        route('a1', { ...A, quota: 'unknown' }),
+        route('a2', { ...A, ...bad }),
+        weekly('a3', 20, 0.3, A),
+        route('a4', A),
+        route('b1', { ...B, quota: 'unknown' }),
+        route('b2', B),
+      ]),
+    ).toEqual(['a3', 'a4', 'a2', 'a1', 'b2', 'b1']);
+  });
+
+  it('钉住的在模型内留在原位，没钉住的只在本模型其余位置里重排', () => {
+    expect(
+      order(
+        [route('a1', A), route('a2', { ...A, quota: 'unknown' }), route('a3', A), route('b1', B)],
+        ['a1'],
+      ),
+    ).toEqual(['a1', 'a3', 'a2', 'b1']);
+  });
+});
+
 describe('钉住的不参与任何微调', () => {
   it('钉住的战绩差也不往后放', () => {
     const bad = route('a', { record: { samples: 20, successes: 2 } });
