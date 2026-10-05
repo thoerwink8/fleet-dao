@@ -11,12 +11,17 @@
 //   09-28 用这几个命令行实测确认）。grok 用 --prompt-file（写文件、传文件路径，路径本身没有特殊字符，安全）；
 //   codex exec 不给 PROMPT 位置参数就从标准输入读，用真文件描述符接（stdio[0] 指向 prompt.txt，不用管道）。
 //   kimi 这两条都没有，明说「kimi 没有无人值守模式」、不接，不假装能跑。
-// - 代理的坑（09-28 实测，细节写在 PR 正文）：这台机器 https_proxy/http_proxy 设着时，本脚本自己调的 git/gh
-//   （fetch、worktree、pr list）一律先去掉代理（stripProxy，和帅位交活时手动加的 `env -u` 前缀一个道理，在 worker.mjs
-//   里做）；但起的模型命令行要保留代理去连它自己的后端，只另外把 NO_PROXY/no_proxy 加上 github.com、api.github.com、
-//   codeload.github.com 三个域名（mergeNoProxy），让它自己跑的 git/gh 走代理之外的路连 GitHub——Go 的 net/http、
-//   git 的 libcurl 都认 NO_PROXY。这台机器的沙箱网络只能走代理、没有直连，没法在这台上把 NO_PROXY 对 GitHub 生效
-//   完整实测到底（细节写在 PR 正文），只测过它不会误伤模型自己那条到后端的代理路。
+// - 代理：GitHub 走哪条路不写死，start 在 fetch 之前当场判一次（pickGithubRoute），记进 meta.json 的 githubRoute。
+//   09-28 那会儿是「带代理连 GitHub 会失败、直连通」，10-05 撞上反过来的：github.com 直连超时、带会话里的代理才通，
+//   写死「一律去代理」让工人一个都起不来。所以：先去掉代理 git ls-remote 直连一次（8 秒上限）——
+//   · 通（direct）：照老做法，本脚本自己的 git/gh 去掉代理（worker.mjs 的 stripProxy）；起的模型命令行保留代理去连
+//     它自己的后端，只另外把 NO_PROXY/no_proxy 加上 GITHUB_HOSTS 三个域名（mergeNoProxy），让它自己跑的 git/gh 直连
+//     GitHub（Go 的 net/http、git 的 libcurl 都认 NO_PROXY）；收尾交代教它连不上时加 `env -u …` 去代理重试。
+//   · 不通就带环境里原有的代理再试一次，通（proxy）：谁都不去代理——本脚本的 git/gh 调用带 proxy: true（外壳照原样
+//     传环境），模型命令行不加 NO_PROXY，收尾交代不教它去代理。
+//   · 两条都不通、或直连不通且环境里没有代理：不起，报错里两条各自的原因都写上。
+//   status/watch/clean 查 PR 照 meta 里记的路走（老记录没有这个字段，照当时的做法算直连）；git worktree remove、
+//   branch -D 这些纯本地的不连网，不分路。
 // - 进程用 detached + windowsHide + stdio 指向真文件描述符（不是管道）起，spawn 完立刻 unref：这样 `start` 这条命令
 //   退出之后子进程照样活着；用文件描述符不用 pipe，是因为 pipe 要父进程留着读写端才不出问题，文件描述符不需要。
 // - 状态记在 ~/.fleet-dao/workers/<短名>/（meta.json、out.log、err.log、prompt.txt）：机器本地、不进仓。
@@ -75,7 +80,7 @@ export function claudeModelProblem(modelId) {
   if (/^(opus|sonnet)$/.test(id) || /^claude-(opus|sonnet)-[\w.-]+$/.test(id)) return null;
   return `Claude 工人只用 Opus 或 Sonnet（机器派的会话永不用 Fable）：--model-id 给的是「${id}」，不起。`;
 }
-/** 模型自己要连的 GitHub 域名：让它自己跑的 git/gh 绕开代理直连这几个。 */
+/** 模型自己要连的 GitHub 域名：直连通时让它自己跑的 git/gh 绕开代理直连这几个（走代理时不加，见文件头「代理」）。 */
 export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.com'];
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
@@ -244,7 +249,7 @@ const resolvePath = (io, p) => (isAbsolute(p) ? p : join(io.cwd(), p));
  * 起的模型进程只给这些名字的环境变量（Windows 标准路径类 + Node/pnpm 常用的几个），谁都用得上、谁都不是
  * 密钥。09-28 发现的教训见文件头：这是白名单，不是「挡像密钥的名字」那种黑名单——以后环境里加什么新变量，
  * 默认都不传，要模型真需要了再加名字到这。代理相关的几个（http_proxy 等）单独在 PROXY_ENV_KEYS，因为
- * mergeNoProxy 还要在它们基础上改 NO_PROXY/no_proxy。
+ * 直连通时 mergeNoProxy 还要在它们基础上改 NO_PROXY/no_proxy。
  */
 export const SAFE_ENV_KEYS = [
   'PATH',
@@ -301,6 +306,44 @@ export function safeEnv(env) {
 
 // —— 代理 ——
 
+/** 判「GitHub 走哪条路」那一下 git ls-remote 的上限：直连不通时多半是卡到超时，不能一等两分钟。 */
+export const GITHUB_PROBE_TIMEOUT_MS = 8000;
+const GITHUB_ROUTES = ['direct', 'proxy'];
+
+/** 环境里原有的代理地址（https 优先，大小写都认）；没有回 null。 */
+export function proxyOf(env) {
+  return env.https_proxy || env.HTTPS_PROXY || env.http_proxy || env.HTTP_PROXY || null;
+}
+
+/**
+ * 这台机器此刻连 GitHub 走哪条路（必经的一步：start 在 fetch 之前判一次，记进 meta.json，后面 status/watch/clean
+ * 调 gh 照它走）。先去掉代理直连 git ls-remote 一次（8 秒上限）：通就是 direct（老做法：脚本自己的 git/gh 去代理、
+ * 模型命令行加 GitHub 的 NO_PROXY）；不通就带着环境里原有的代理再试一次：通就是 proxy（谁都不去代理、不加 NO_PROXY）。
+ * 两条都不通、或直连不通且环境里根本没有代理：回 { ok: false, why }，两条各自的报错都写上，调用方不起。
+ */
+export function pickGithubRoute(io, repo) {
+  const probe = (proxy) =>
+    io.git(['ls-remote', 'origin', 'main'], { cwd: repo, proxy, timeoutMs: GITHUB_PROBE_TIMEOUT_MS });
+  const direct = probe(false);
+  if (direct.status === 0) return { ok: true, route: { via: 'direct', proxy: null } };
+  const directWhy = reasonOf(direct);
+  const proxy = proxyOf(io.env);
+  if (!proxy)
+    return {
+      ok: false,
+      why: `连不上 GitHub：去掉代理直连 git ls-remote 不通（${directWhy}），环境里也没有代理（https_proxy/http_proxy 都没设）可走`,
+    };
+  const viaProxy = probe(true);
+  if (viaProxy.status === 0) return { ok: true, route: { via: 'proxy', proxy } };
+  return {
+    ok: false,
+    why: `连不上 GitHub，两条路都不通：去掉代理直连——${directWhy}；走代理 ${proxy}——${reasonOf(viaProxy)}`,
+  };
+}
+
+/** 判出来的路给人看的一行。 */
+const routeLine = (route) => (route.via === 'proxy' ? `GitHub：走代理 ${route.proxy}` : 'GitHub：直连');
+
 /** 保留原有代理不动，只把 NO_PROXY/no_proxy 加上 GITHUB_HOSTS 里没有的几个域名（大小写两份都补，谁都可能只认一种）。 */
 export function mergeNoProxy(env) {
   const out = { ...env };
@@ -323,7 +366,7 @@ export function mergeNoProxy(env) {
  * 不能让模型自己挂自动合并把改标准的 PR 合了。跟 noShip 不冲突但没意义一起用（noShip 压根不开 PR），noShip
  * 为真时这条不看。
  */
-export function closingBrief({ branch, noShip, noAutomerge }) {
+export function closingBrief({ branch, noShip, noAutomerge, githubRoute = { via: 'direct' } }) {
   if (noShip) {
     return [
       '—— 收尾交代 ——',
@@ -358,8 +401,15 @@ export function closingBrief({ branch, noShip, noAutomerge }) {
     '8. 不开新 issue，不碰这棵工作树以外的目录、不碰别的检出。',
     '   碰到四类人闸——对外发布（上线、发版）、花钱（账单会多出一笔的）、删数据、改标准（AGENTS.md 本仓段里',
     '   「改标准是人闸第四类」列的路径）——就停手：不自己做、不挂自动合并，最后输出「卡住：人闸——<哪一类、卡在哪>」。',
-    '9. 如果 git 或 gh 连 GitHub 失败、像是代理问题：命令前加',
-    '   env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY 再试一次。',
+    ...(githubRoute.via === 'proxy'
+      ? [
+          '9. 这台机器此刻连 GitHub 只能走代理（环境变量 https_proxy/http_proxy，起你之前实测过直连不通）：git 或 gh',
+          '   连 GitHub 失败时不要去掉代理（直连是不通的），原样重试一次；还不行就输出「卡住：GitHub 连不上——<报错>」。',
+        ]
+      : [
+          '9. 如果 git 或 gh 连 GitHub 失败、像是代理问题：命令前加',
+          '   env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY 再试一次。',
+        ]),
     '10. 最后单独一行输出：完成：PR #<号>；做不下去就输出：卡住：<原因>',
   ].join('\n');
 }
@@ -370,7 +420,7 @@ export function closingBrief({ branch, noShip, noAutomerge }) {
  * 各模型的无人值守启动方式；kimi 没有可靠的方式，调用方另处理。思考档位总是显式传（不靠模型自己的默认，
  * grok 自己默认 xhigh）：grok 用 --reasoning-effort，codex 用 -c model_reasoning_effort="<档>"（TOML 字符串，
  * 引号是字面量、和 ~/.codex/config.toml 里的键名对得上）。extraEnv 是这个模型必须额外给的环境变量（不从
- * io.env 挑，是我们自己强加的），cmdStart 会把它叠在 safeEnv+mergeNoProxy 算出来的 env 上面。
+ * io.env 挑，是我们自己强加的），cmdStart 会把它叠在 safeEnv（直连通时再加 mergeNoProxy）算出来的 env 上面。
  *
  * grok 的 --no-plan / GROK_FOLDER_TRUST / GROK_ASK_USER_QUESTION（09-28 晚上另一个会话真机撞出来、这边核实
  * 修的）：我们每个工人都是刚 git worktree add 出来的新目录，grok 认成「没被信任」——这不是权限问题（创始人已经
@@ -470,6 +520,8 @@ function metaProblem(m) {
     return 'pid 认不出';
   }
   if (!EFFORTS.includes(m.effort)) return 'effort 认不出';
+  // 老记录（这个字段加上之前 start 的）没有 githubRoute，照当时的做法算直连；有就得认得出，不猜。
+  if (m.githubRoute !== undefined && !GITHUB_ROUTES.includes(m.githubRoute)) return 'githubRoute 认不出';
   if (typeof m.mainRepo !== 'string' || !m.mainRepo) return 'mainRepo 认不出';
   if (typeof m.worktree !== 'string' || !m.worktree) return 'worktree 认不出';
   if (typeof m.branch !== 'string' || !m.branch) return 'branch 认不出';
@@ -597,7 +649,13 @@ async function cmdStart(p, io) {
   const wc = worktreeConflict(io, repo, worktreeDir, branch);
   if (!wc.ok) return wc.kind === 'conflict' ? conflict(io, wc.why) : fail(io, wc.why);
 
-  const fetched = io.git(['fetch', 'origin', 'main'], { cwd: repo });
+  const routed = pickGithubRoute(io, repo);
+  if (!routed.ok) return fail(io, routed.why);
+  const githubRoute = routed.route;
+  const viaProxy = githubRoute.via === 'proxy';
+  io.out(routeLine(githubRoute));
+
+  const fetched = io.git(['fetch', 'origin', 'main'], { cwd: repo, proxy: viaProxy });
   if (fetched.status !== 0) return fail(io, `git fetch origin main 没成：${reasonOf(fetched)}`);
 
   const added = io.git(['worktree', 'add', '-b', branch, worktreeDir, 'origin/main'], { cwd: repo });
@@ -620,7 +678,10 @@ async function cmdStart(p, io) {
   const promptFile = join(dir, 'prompt.txt');
   const outLog = join(dir, 'out.log');
   const errLog = join(dir, 'err.log');
-  writeFileSync(promptFile, `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip, noAutomerge })}\n`);
+  writeFileSync(
+    promptFile,
+    `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip, noAutomerge, githubRoute })}\n`,
+  );
 
   const launch = launchOf(model, { promptFile, worktreeDir, modelId, effort });
   let spawned;
@@ -629,7 +690,8 @@ async function cmdStart(p, io) {
       command: launch.command,
       args: launch.args,
       cwd: worktreeDir,
-      env: { ...mergeNoProxy(safeEnv(io.env)), ...launch.extraEnv },
+      // 直连通才让模型自己的 git/gh 绕开代理连 GitHub；走代理时原样给，加 NO_PROXY 就是把它推到不通的直连上。
+      env: { ...(viaProxy ? safeEnv(io.env) : mergeNoProxy(safeEnv(io.env))), ...launch.extraEnv },
       stdinFile: launch.stdinFile,
       outFile: outLog,
       errFile: errLog,
@@ -657,6 +719,7 @@ async function cmdStart(p, io) {
             outLog,
             errLog,
             noShip,
+            githubRoute: githubRoute.via,
             cleanedAt: null,
           },
           null,
@@ -690,6 +753,7 @@ async function cmdStart(p, io) {
         outLog,
         errLog,
         noShip,
+        githubRoute: githubRoute.via,
         cleanedAt: null,
       },
       null,
@@ -762,9 +826,11 @@ function lastMeaningfulLine(file) {
   return { ok: true, line, idleMin };
 }
 
+/** 查这个工人分支的 PR：照 start 时判出、记在 meta 里的那条路连 GitHub（老记录没有 githubRoute，照旧直连）。 */
 function prOf(io, m) {
   const r = io.gh(['pr', 'list', '--head', m.branch, '--state', 'all', '--json', 'number,state,url'], {
     cwd: m.mainRepo,
+    proxy: m.githubRoute === 'proxy',
   });
   if (r.status !== 0) return { ok: false, why: reasonOf(r) };
   let rows;
@@ -1033,8 +1099,9 @@ async function cmdClean(p, io) {
 /**
  * worker.mjs 的全部逻辑。io：{
  *   env, home, now() → Date, cwd() → string,
- *   git(args, {cwd}) → {status, stdout, stderr, error?},
- *   gh(args, {cwd}) → 同上,
+ *   git(args, {cwd, proxy?, timeoutMs?}) → {status, stdout, stderr, error?}；proxy 为真时照原样带环境里的代理，
+ *     不给或为假时去掉代理直连（见文件头「代理」那条）；timeoutMs 是这次调用的上限（不给用外壳的默认）,
+ *   gh(args, {cwd, proxy?, timeoutMs?}) → 同上,
  *   pnpm(args, {cwd}) → 同上,
  *   spawnDetached({command, args, cwd, env, stdinFile, outFile, errFile}) → {pid}；确认起不来就抛 Error，
  *     起没起成不确定时（比如中间那步查不到 pid，但也没法排除已经起来了）要在 Error 上标 err.uncertain = true，

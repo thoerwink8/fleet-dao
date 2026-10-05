@@ -26,14 +26,20 @@ interface SpawnSpec {
   outFile: string;
   errFile: string;
 }
+/** proxy：true 走环境里原有的代理，不给或 false 是去掉代理直连（外壳 worker.mjs 照这个设环境变量）；timeoutMs：这次调用的上限。 */
+interface NetOpts {
+  cwd?: string;
+  proxy?: boolean;
+  timeoutMs?: number;
+}
 interface WorkerIo {
   env: Record<string, string | undefined>;
   home: string;
   now: () => Date;
   sleep: (ms: number) => Promise<void>;
   cwd: () => string;
-  git: (args: string[], opts?: { cwd?: string }) => RunResult;
-  gh: (args: string[], opts?: { cwd?: string }) => RunResult;
+  git: (args: string[], opts?: NetOpts) => RunResult;
+  gh: (args: string[], opts?: NetOpts) => RunResult;
   pnpm: (args: string[], opts?: { cwd?: string }) => RunResult;
   spawnDetached: (spec: SpawnSpec) => { pid: number };
   isRunning: (pid: number) => boolean;
@@ -51,7 +57,7 @@ interface WorkerLib {
   KIMI_UNSUPPORTED: string;
   mergeNoProxy(env: Record<string, string | undefined>): Record<string, string | undefined>;
   safeEnv(env: Record<string, string | undefined>): Record<string, string | undefined>;
-  closingBrief(o: { branch: string; noShip: boolean }): string;
+  closingBrief(o: { branch: string; noShip: boolean; githubRoute?: { via: string; proxy?: string } }): string;
   saidOf(line: string): string | null;
   runWorker(argv: string[], io: WorkerIo): Promise<number>;
 }
@@ -116,6 +122,12 @@ function world() {
   const ghReplies: RunResult[] = [];
   const pnpmReplies: RunResult[] = [];
   const spawnReplies: ({ pid: number } | Error)[] = [];
+  // start 先判「GitHub 走哪条路」的 git ls-remote 单独一个队列（不进 gitCalls/gitReplies，老用例的顺序不变）；
+  // 队列空了就当通（直连通是老样子）。gitOpts/ghOpts 记每次调用带的完整选项（proxy、timeoutMs）。
+  const probeReplies: RunResult[] = [];
+  const probeCalls: { args: string[]; opts?: NetOpts | undefined }[] = [];
+  const gitOpts: { args: string[]; opts?: NetOpts | undefined }[] = [];
+  const ghOpts: { args: string[]; opts?: NetOpts | undefined }[] = [];
   const running = new Set<number>();
   const killed: number[] = [];
   const killReplies: { ok: boolean; why?: string }[] = [];
@@ -142,11 +154,17 @@ function world() {
     },
     cwd: () => repo,
     git: (args, opts) => {
+      if (args[0] === 'ls-remote') {
+        probeCalls.push({ args, opts });
+        return probeReplies.shift() ?? ok('abc123\trefs/heads/main');
+      }
       gitCalls.push({ args, cwd: opts?.cwd });
+      gitOpts.push({ args, opts });
       return takeReply(gitReplies, `git（${gitCalls.length}：${args.join(' ')}）`);
     },
     gh: (args, opts) => {
       ghCalls.push({ args, cwd: opts?.cwd });
+      ghOpts.push({ args, opts });
       return takeReply(ghReplies, `gh（${ghCalls.length}：${args.join(' ')}）`);
     },
     pnpm: (args, opts) => {
@@ -184,6 +202,10 @@ function world() {
     ghReplies,
     pnpmReplies,
     spawnReplies,
+    probeReplies,
+    probeCalls,
+    gitOpts,
+    ghOpts,
     killReplies,
     running,
     killed,
@@ -415,6 +437,123 @@ describe('start：happy path', () => {
     const fast = w2.prompt('w-fast');
     expect(fast).toContain('gh pr merge <PR 号> --auto --squash');
     expect(fast).not.toContain('人闸：改标准');
+  });
+});
+
+describe('start：GitHub 走哪条路（直连不通就走环境里原有的代理）', () => {
+  const PROXY = 'http://127.0.0.1:59822';
+
+  it('直连通：照旧——fetch 去代理、模型命令行加 GitHub 的 NO_PROXY、收尾交代教 env -u；meta 记 direct', async () => {
+    const w = world();
+    w.io.env.https_proxy = PROXY;
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 7 });
+
+    expect(await w.run(['start', '--model', 'grok', '--name', 'r1', '--brief', brief(w)])).toBe(0);
+
+    expect(w.probeCalls).toHaveLength(1);
+    const probe = must(w.probeCalls[0], '没有 probeCalls[0]');
+    expect(probe.args).toEqual(['ls-remote', 'origin', 'main']);
+    expect(probe.opts?.proxy).toBe(false);
+    expect(probe.opts?.timeoutMs).toBe(8000);
+    const fetch = must(
+      w.gitOpts.find((c) => c.args[0] === 'fetch'),
+      '没有 fetch',
+    );
+    expect(fetch.opts?.proxy).toBe(false);
+    const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
+    expect(spec.env.NO_PROXY?.split(',')).toEqual(expect.arrayContaining(['github.com', 'api.github.com']));
+    expect(spec.env.https_proxy).toBe(PROXY); // 模型自己连后端的代理照留
+    expect(w.prompt('r1')).toContain('env -u https_proxy');
+    expect(w.meta('r1')).toMatchObject({ githubRoute: 'direct' });
+    expect(w.out.join('\n')).toContain('GitHub：直连');
+  });
+
+  it('【故意造出的失败】直连不通、代理通：脚本自己的 git 不去代理，模型命令行不加 GitHub 的 NO_PROXY，收尾交代不教去掉代理；meta 记 proxy', async () => {
+    const w = world();
+    w.io.env.https_proxy = PROXY;
+    w.io.env.NO_PROXY = 'localhost';
+    w.probeReplies.push(
+      bad('fatal: unable to access github.com: Failed to connect: Timed out'),
+      ok('abc\trefs/heads/main'),
+    );
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 8 });
+
+    expect(await w.run(['start', '--model', 'grok', '--name', 'r2', '--brief', brief(w)])).toBe(0);
+
+    expect(w.probeCalls.map((c) => c.opts?.proxy)).toEqual([false, true]);
+    const fetch = must(
+      w.gitOpts.find((c) => c.args[0] === 'fetch'),
+      '没有 fetch',
+    );
+    expect(fetch.opts?.proxy).toBe(true);
+    const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
+    expect(spec.env.https_proxy).toBe(PROXY);
+    expect(spec.env.NO_PROXY).toBe('localhost'); // 原样，不加 GitHub 域名
+    expect(spec.env.no_proxy).toBeUndefined();
+    const prompt = w.prompt('r2');
+    expect(prompt).not.toContain('env -u');
+    expect(prompt).toContain('不要去掉代理');
+    expect(w.meta('r2')).toMatchObject({ githubRoute: 'proxy' });
+    expect(w.out.join('\n')).toContain(`GitHub：走代理 ${PROXY}`);
+  });
+
+  it('【故意造出的失败】直连、代理都不通：退出码 2，两条各自的报错都写出来，不 fetch、不建工作树、不起模型', async () => {
+    const w = world();
+    w.io.env.https_proxy = PROXY;
+    w.probeReplies.push(bad('direct: Connection timed out'), bad('proxy: Could not connect to 127.0.0.1'));
+    w.gitReplies.push(ok('true'), ok(''));
+
+    expect(await w.run(['start', '--model', 'grok', '--name', 'r3', '--brief', brief(w)])).toBe(2);
+
+    const errText = w.err.join('\n');
+    expect(errText).toContain('direct: Connection timed out');
+    expect(errText).toContain('proxy: Could not connect to 127.0.0.1');
+    expect(w.gitCalls.map((c) => c.args[0])).toEqual(['rev-parse', 'worktree']);
+    expect(w.pnpmCalls).toEqual([]);
+    expect(w.spawnCalls).toEqual([]);
+  });
+
+  it('【故意造出的失败】直连不通、环境里也没有代理：退出码 2，明说没有代理可走', async () => {
+    const w = world();
+    w.probeReplies.push(bad('direct: Connection timed out'));
+    w.gitReplies.push(ok('true'), ok(''));
+
+    expect(await w.run(['start', '--model', 'grok', '--name', 'r4', '--brief', brief(w)])).toBe(2);
+
+    const errText = w.err.join('\n');
+    expect(errText).toContain('direct: Connection timed out');
+    expect(errText).toContain('没有代理');
+    expect(w.probeCalls).toHaveLength(1);
+    expect(w.spawnCalls).toEqual([]);
+  });
+
+  it('status 照 meta 里记的路走：proxy 的记录 gh 带代理，老记录（没有 githubRoute）照旧去代理', async () => {
+    const w = world();
+    w.writeMeta('r5', validMeta(w, 'r5', { githubRoute: 'proxy' }));
+    w.writeMeta('r6', validMeta(w, 'r6'));
+    w.ghReplies.push(ok('[]'), ok('[]'));
+    expect(await w.run(['status'])).toBe(0);
+    expect(w.ghOpts.map((c) => c.opts?.proxy)).toEqual([true, false]);
+  });
+
+  it('【故意造出的失败】meta 里的 githubRoute 认不出：没查成，不当成直连', async () => {
+    const w = world();
+    w.writeMeta('r7', validMeta(w, 'r7', { githubRoute: 'vpn' }));
+    expect(await w.run(['status', '--name', 'r7'])).toBe(2);
+    expect(w.out.join('\n')).toContain('githubRoute 认不出');
+  });
+
+  it('clean 照 meta 里记的路查 PR', async () => {
+    const w = world();
+    w.writeMeta('r8', validMeta(w, 'r8', { githubRoute: 'proxy' }));
+    w.ghReplies.push(ok(JSON.stringify([{ number: 1, state: 'MERGED', url: 'u' }])));
+    w.gitReplies.push(ok(), ok());
+    expect(await w.run(['clean', '--name', 'r8'])).toBe(0);
+    expect(w.ghOpts.map((c) => c.opts?.proxy)).toEqual([true]);
   });
 });
 
