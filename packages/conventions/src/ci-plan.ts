@@ -124,6 +124,12 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * 两头对接的契约在 packages/shared；装什么依赖也会变（package.json、锁文件、workspace）；e2e job 自己写在 ci.yml 里。
  * 别的包（core、engine、github……）的改动即使 api 依赖它们也不开：它们各有自己的单测，e2e 不是用来替它们把关的，
  * 每多开一档就是多一个几分钟的 job 占并发槽（免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
+ *
+ * 「只改 db/shared 的 PR，e2e 抓到过单测漏掉的错没有」——**量不出来，样本是 0**（2026-10-05，合并后补审 #1002 要的那条证据）：
+ * e2e 进 CI 是 2026-10-04 20:26（#985），收窄是 2026-10-05 02:48（#1002），中间六小时里跑过 e2e 的只有 #985（它自己，
+ * 改的就是 ci.yml）和 #991（发布，只改 CHANGELOG）——没有一个只改 db/shared 的 PR。所以这不是「没抓到」，
+ * 是**没有可比的样本**。回归网落在每夜的定时全量轮上（ci.yml 的 schedule，同一轮加），db/shared 的改动仍会在那轮跑 e2e；
+ * 要真拿证据，得等定时轮跑过几轮之后再看它有没有抓到 db/shared 的集成错。
  */
 export const E2E_PACKAGES: readonly string[] = ['web', 'api', 'db', 'shared'];
 export const E2E_FILES: readonly string[] = [
