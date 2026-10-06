@@ -2,7 +2,7 @@
 // 起因（创始人 2026-10-05）：子代理的工作树从本地记着的 origin/main 切，本机取不到远端时它停在隔夜的提交上。
 // 这台机器经 reclaude 的本地口（HTTP(S)_PROXY=http://127.0.0.1:59822）出网：先照环境原样取、不改代理，没成才直连再取一次。
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -34,7 +34,10 @@ interface Lib {
     okOf: (r: R) => boolean;
     whyOf: (r: R) => string;
     env?: Record<string, string | undefined>;
+    home?: string;
+    now?: number;
   }): { block: true; message: string } | null;
+  FETCH_QUIET_MS: number;
   SUBAGENT_FETCH_MS: number;
   SUBAGENT_DIRECT_MS: number;
   isRefRace(r: R): boolean;
@@ -128,12 +131,15 @@ const worktreeAgent = { subagent_type: 'general-purpose', isolation: 'worktree',
 const run = (g: Git, tool: unknown, toolInput: unknown, env = PROXY) =>
   lib.freshBeforeSubagent({ tool, toolInput, cwd: '/r', git: g, okOf: lib.gitOk, whyOf: lib.gitWhy, env });
 
-/** rev-parse 说在仓里、有 origin，然后 fetch 按 fetchResults，log 说 origin/main 停在 9 小时前 */
-function repoGit(fetchResults: R[]) {
+/** rev-parse 说在仓里、有 origin，然后 fetch 按 fetchResults，log 说 origin/main 停在 9 小时前。
+ * common 给绝对路径时才会记「取成过」（假 git 回 true 不记，避免写进真家目录）。 */
+function repoGit(fetchResults: R[], common: string | null = null) {
   const calls: string[][] = [];
   let f = 0;
   const git: Git = (_cwd, args) => {
     calls.push(args);
+    if (args[0] === 'rev-parse' && args.includes('--git-common-dir'))
+      return good(common ? `${common}\n` : 'true\n');
     if (args[0] === 'rev-parse') return good('true\n');
     if (args[0] === 'remote') return good('https://example/x.git\n');
     if (args[0] === 'fetch') return fetchResults[Math.min(f++, fetchResults.length - 1)] as R;
@@ -195,6 +201,50 @@ describe('起子代理前先把 origin/main 取到最新', () => {
     const s = repoGit([good()]);
     expect(run(s.git, 'Agent', worktreeAgent)).toBeNull();
     expect(s.calls.find((a) => a[0] === 'fetch')).toEqual(['fetch', '-q', 'origin', 'main']);
+  });
+
+  it('三分钟内这个仓刚取成过：不再取，直接放行；过了再取。取失败不记，下一轮仍取、要建工作树仍拦', () => {
+    const home = mkdtempSync(join(tmpdir(), 'fresh-ok-'));
+    const common = join(home, 'repo.git');
+    const now = Date.now();
+    const go = (results: R[], at: number) => {
+      const s = repoGit(results, common);
+      const out = lib.freshBeforeSubagent({
+        tool: 'Agent',
+        toolInput: worktreeAgent,
+        cwd: '/r',
+        git: s.git,
+        okOf: lib.gitOk,
+        whyOf: lib.gitWhy,
+        env: PROXY,
+        home,
+        now: at,
+      });
+      return { out, fetches: s.calls.filter((a) => a[0] === 'fetch').length };
+    };
+    const first = go([good()], now);
+    expect(first.out).toBeNull();
+    expect(first.fetches).toBe(1);
+    const second = go([refused(), refused()], now + 1_000);
+    expect(second.out).toBeNull();
+    expect(second.fetches).toBe(0);
+
+    const dir = join(home, '.fleet-dao', 'fetch-ok');
+    const stamp = join(dir, readdirSync(dir)[0] ?? '');
+    const old = new Date(now - lib.FETCH_QUIET_MS - 60_000);
+    utimesSync(stamp, old, old);
+    const third = go([good()], now + 2_000);
+    expect(third.fetches).toBe(1);
+
+    rmSync(dir, { recursive: true, force: true });
+    const failed = go([refused(), refused()], now + 3_000);
+    expect(failed.out?.block).toBe(true);
+    expect(failed.fetches).toBe(2);
+    const again = go([refused(), refused()], now + 4_000);
+    expect(again.out?.block).toBe(true);
+    expect(again.fetches).toBe(2);
+    expect(existsSync(dir)).toBe(false);
+    rmSync(home, { recursive: true, force: true });
   });
 
   it('代理被拒、直连成了：放行', () => {

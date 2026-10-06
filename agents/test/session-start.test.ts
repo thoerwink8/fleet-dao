@@ -37,7 +37,11 @@ interface Fetch {
 interface HookLib {
   QUIET_MS: number;
   gitRunner(timeoutMs?: number): Git;
-  checkHere(cwd: string, git: Git): { line: string | null; fetch: Fetch | null };
+  checkHere(
+    cwd: string,
+    git: Git,
+    opts?: { network?: boolean },
+  ): { line: string | null; fetch: Fetch | null };
   syncFleet(o: { home: string; git: Git; sync: Sync; fetch?: Fetch | null; now?: number }): string;
   sessionStart(o: {
     cwd: string;
@@ -46,6 +50,7 @@ interface HookLib {
     sync: Sync;
     localGit?: Git;
     now?: number;
+    sessionId?: string | null;
     env?: Record<string, string | undefined>;
   }): string[];
   RECENT_TOTAL_CHARS: number;
@@ -483,6 +488,136 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(fetches).toHaveLength(1);
     expect(lines[0]).toMatch(/已把 main 快进到最新/);
     expect(lines[1]).toMatch(/已同步到主线最新/);
+  });
+
+  it('network:false 不取远端，只用手里已有的 origin/main', () => {
+    const w = world();
+    w.push('v2\n');
+    const fetches: string[] = [];
+    const counting: Git = (cwd, args) => {
+      if (args[0] === 'fetch') fetches.push(cwd);
+      return git(cwd, args);
+    };
+    expect(hook.checkHere(w.work, counting, { network: false }).line).toBeNull();
+    expect(fetches).toEqual([]);
+  });
+
+  it('三分钟内不再取远端、不再问 GitHub、不再扫工作树；引导对账每轮都做；过了再做。工人不走这扇门', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const log = join(w.home, '.fleet-dao', 'prompt-log');
+    mkdirSync(log, { recursive: true });
+    const now = Date.now();
+    const day = hook.beijingToday(now);
+    writeFileSync(
+      join(log, `${day}.jsonl`),
+      `${JSON.stringify({ at: new Date(now - 5_000).toISOString(), sessionId: 'other', prompt: '上一场没答的话' })}\n`,
+    );
+    const fetches: string[] = [];
+    const lists: string[] = [];
+    let originAsks = 0;
+    const counting: Git = (cwd, args) => {
+      if (args[0] === 'fetch' && cwd === w.work) fetches.push(cwd);
+      return git(cwd, args);
+    };
+    const local: Git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') lists.push(cwd);
+      if (args[0] === 'config' && args[1] === '--get' && args[2] === 'remote.origin.url') originAsks += 1;
+      return git(cwd, args);
+    };
+    const first = hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: counting,
+      localGit: local,
+      sync: fakeSync().sync,
+      now,
+      sessionId: 'me',
+    });
+    expect(fetches).toHaveLength(1);
+    expect(lists).toHaveLength(1);
+    expect(originAsks).toBe(2);
+    expect(first.join('\n')).toContain('上一场没答的话');
+    expect(existsSync(join(w.home, '.fleet-dao', 'fetch-ok'))).toBe(true);
+
+    const second = hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: counting,
+      localGit: local,
+      sync: fakeSync().sync,
+      now: now + 1_000,
+      sessionId: 'me',
+    });
+    expect(fetches).toHaveLength(1);
+    expect(lists).toHaveLength(1);
+    expect(originAsks).toBe(2);
+    expect(second.join('\n')).toContain('上一场没答的话');
+
+    const netDir = join(w.home, '.fleet-dao', 'session-net');
+    const okDir = join(w.home, '.fleet-dao', 'fetch-ok');
+    const old = new Date(now - hook.QUIET_MS - 60_000);
+    for (const dir of [netDir, okDir]) {
+      const stamp = join(dir, readdirSync(dir)[0] ?? '');
+      utimesSync(stamp, old, old);
+    }
+    hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: counting,
+      localGit: local,
+      sync: fakeSync().sync,
+      now: now + 2_000,
+      sessionId: 'me',
+    });
+    expect(fetches).toHaveLength(2);
+    expect(lists).toHaveLength(2);
+
+    const beforeWorker = fetches.length;
+    hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: counting,
+      sync: fakeSync().sync,
+      now: now + 3_000,
+      env: { FLEET_WORKER: '1' },
+    });
+    expect(fetches).toHaveLength(beforeWorker + 1);
+  });
+
+  it('取远端失败也记上这一笔：三分钟内不再连着等超时', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    let fetches = 0;
+    const failing: Git = (cwd, args) => {
+      if (args[0] === 'fetch' && cwd === w.work) {
+        fetches += 1;
+        return { status: 1, stdout: '', stderr: 'no route' };
+      }
+      return git(cwd, args);
+    };
+    const now = Date.now();
+    const first = hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: failing,
+      sync: fakeSync().sync,
+      now,
+    });
+    expect(first.join('\n')).toMatch(/git fetch 失败/);
+    expect(existsSync(join(w.home, '.fleet-dao', 'fetch-ok'))).toBe(false);
+    // 环境里有代理时，同一次取远端会再直连试一次，所以第一次可能是 2 次 fetch；第二轮必须一次都不加
+    const afterFirst = fetches;
+    expect(afterFirst).toBeGreaterThan(0);
+    const second = hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: failing,
+      sync: fakeSync().sync,
+      now: now + 1_000,
+    });
+    expect(fetches).toBe(afterFirst);
+    expect(second.join('\n')).not.toMatch(/git fetch 失败/);
   });
 });
 
