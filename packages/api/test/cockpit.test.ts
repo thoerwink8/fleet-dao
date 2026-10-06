@@ -762,6 +762,47 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(JSON.stringify(routing)).not.toContain('NotWired');
   });
 
+  it('路由表带上渠道近态（#1118）：运行中失败被标 disabled 的渠道带原因和顺到谁，没出过事的渠道没有行', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const at = new Date(T0.getTime() - 10 * 60_000).toISOString();
+    h.store.data.channelStates.push({
+      channelId: 'ch-mirasim',
+      status: 'disabled',
+      reason: '上游断连（已重试 2 次）',
+      failedRouteId: 'rt-mirasim-kimi',
+      fallbackChannelId: 'ch-claude',
+      fallbackModelId: 'opus-5.5',
+      flaggedAt: at,
+      updatedAt: at,
+    });
+    const routing = RoutingResponse.parse(
+      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
+    );
+    expect(routing.channelStates).toEqual([
+      {
+        channelId: 'ch-mirasim',
+        status: 'disabled',
+        reason: '上游断连（已重试 2 次）',
+        failedRouteId: 'rt-mirasim-kimi',
+        fallbackChannelId: 'ch-claude',
+        fallbackModelId: 'opus-5.5',
+        flaggedAt: at,
+        updatedAt: at,
+      },
+    ]);
+  });
+
+  it('【故意造出的失败】渠道近态读不到：路由表整个 500，不给空的顶、不让页面把 disabled 的渠道当成没事', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    h.store.listChannelStates = async () => {
+      throw new Error('channel_states 读不到');
+    };
+    const res = await h.cockpit.request('/api/routing', { headers: { cookie } });
+    expect(res.status).toBe(500);
+  });
+
   it('额度按池判新旧：读成了、但上游的数冻住没前进，也算过期（看 dataAt）', async () => {
     const h = harness();
     const { cookie } = await h.login();

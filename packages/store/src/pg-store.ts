@@ -23,6 +23,7 @@ import {
   progressEvents,
   pullRequests,
   quotaWindows,
+  readChannelStates,
   repos,
   routes,
   runs,
@@ -37,6 +38,7 @@ import {
   tasks,
   toBan,
   toChannel,
+  toChannelState,
   toModel,
   toPool,
   toQuotaWindow,
@@ -513,6 +515,11 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     // —— 调度台 ——
     async listChannels() {
       return (await db.select().from(channels).orderBy(asc(channels.id))).map(toChannel);
+    },
+    async listChannelStates() {
+      return [...(await readChannelStates(db)).values()]
+        .sort((a, b) => a.channelId.localeCompare(b.channelId))
+        .map(toChannelState);
     },
     async listPools() {
       return (await db.select().from(pools).orderBy(asc(pools.id))).map(toPool);

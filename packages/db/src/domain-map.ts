@@ -4,6 +4,7 @@
 import type {
   Ban,
   Channel,
+  ChannelStateRecord,
   Family,
   Model,
   Pool,
@@ -18,6 +19,7 @@ import type {
 } from '@fleet-dao/shared';
 import type {
   bans,
+  channelStates,
   channels,
   families,
   models,
@@ -87,6 +89,19 @@ export const toFamily = (r: typeof families.$inferSelect): Family =>
 
 export const toChannel = (r: typeof channels.$inferSelect): Channel =>
   build<Channel>({ id: r.id, name: r.name, billing: r.billing, enabled: r.enabled });
+
+export const toChannelState = (r: typeof channelStates.$inferSelect): ChannelStateRecord =>
+  build<ChannelStateRecord>({
+    channelId: r.channelId,
+    status: r.status,
+    reason: opt(r.reason),
+    failedRouteId: opt(r.failedRouteId),
+    fallbackChannelId: opt(r.fallbackChannelId),
+    fallbackModelId: opt(r.fallbackModelId),
+    lastProbedAt: isoOpt(r.lastProbedAt),
+    flaggedAt: isoOpt(r.flaggedAt),
+    updatedAt: r.updatedAt.toISOString(),
+  });
 
 export const toPool = (r: typeof pools.$inferSelect): Pool =>
   build<Pool>({

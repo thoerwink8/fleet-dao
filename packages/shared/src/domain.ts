@@ -122,6 +122,27 @@ export interface Channel {
   enabled: boolean;
 }
 
+/**
+ * 渠道近态（channel_states，#1118）：运行中失败被标成 disabled 的渠道、原因、顺到谁。没有这一行的渠道没出过事。
+ * 和 routes.probe_state（一条路由最近一次探针的结论）分开：这是渠道整体现在能不能用。
+ */
+export interface ChannelStateRecord {
+  channelId: string;
+  status: 'ok' | 'disabled';
+  /** disabled 的原因（失败分流的原因，带上游原文摘要）；ok 时可带一句恢复的依据。 */
+  reason?: string;
+  /** 引发 disabled 的那条路由：探针探通它才改回 ok；路由被删了没有。 */
+  failedRouteId?: string;
+  /** 顺到谁：选路派到的下一个渠道和模型；还没派出去（或没有渠道可派）没有。 */
+  fallbackChannelId?: string;
+  fallbackModelId?: string;
+  /** 探针最近一次探过这个渠道下某条路由的时刻；没探过没有。 */
+  lastProbedAt?: string;
+  /** 这一次 disabled 是几点标上的；ok 没有。 */
+  flaggedAt?: string;
+  updatedAt: string;
+}
+
 export interface Pool {
   id: string;
   channelId: string;
