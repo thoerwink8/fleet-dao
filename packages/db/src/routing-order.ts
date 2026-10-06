@@ -2,6 +2,10 @@
 // 存的还是那两张表的 position、enabled（没加列）：选路按它们摊平（routing-layers.ts），改完下一次选路就照新的，不走改仓库再部署。
 // 和 routing-effort.ts 同一个写法：事务里先锁行、再比调用方「看到的旧值」（expected），对不上回 conflict、一行不动；
 // 能传事务进来（驾驶舱后端在同一个事务里再记操作记录）。
+// 为什么锁和读是两条语句：Postgres 在默认的 READ COMMITTED 下，`order by … for update` 若在锁上等过别人，
+// 等到之后会拿「别人提交后的新值」，但行的顺序还是按等之前的旧值排的（官方文档点名的「可能乱序」）。
+// 一条语句里写就会：后到的事务看到的 position 是新的、顺序却是旧的，对 expected 照样「对得上」，两个并发的换位置都成功、互相覆盖。
+// 所以先只锁（等到锁），再另起一条普通读：新语句拿新快照，读到的就是前一个事务提交后的先后。
 // 换位置要小心两张表对 (purpose, position)、(model_id, position) 的唯一约束（不能延后检查）：两行互换不能直接各改一次，
 // 先把其中一行挪到谁都没占的临时位置（这一串里最大的 position + 1），再换，最后落位。position 一直 >= 0。
 import type { StageKind } from '@fleet-dao/shared';
@@ -83,12 +87,18 @@ export interface MovePurposeModelInput {
 export async function movePurposeModel(db: Db, input: MovePurposeModelInput): Promise<MoveResult> {
   const { purpose, modelId, direction } = input;
   return db.transaction(async (tx) => {
-    const rows = await tx
-      .select({ key: routingPurposeModels.modelId, position: routingPurposeModels.position })
+    // 先锁、再另起一条语句读（原因见文件头「为什么锁和读是两条语句」）：不能把 order by 和 for update 写在同一条里。
+    await tx
+      .select({ key: routingPurposeModels.modelId })
       .from(routingPurposeModels)
       .where(eq(routingPurposeModels.purpose, purpose))
       .orderBy(asc(routingPurposeModels.position))
       .for('update');
+    const rows = await tx
+      .select({ key: routingPurposeModels.modelId, position: routingPurposeModels.position })
+      .from(routingPurposeModels)
+      .where(eq(routingPurposeModels.purpose, purpose))
+      .orderBy(asc(routingPurposeModels.position));
     return swapNeighbour(
       rows,
       modelId,
@@ -117,12 +127,18 @@ export interface MoveModelRouteInput {
 export async function moveModelRoute(db: Db, input: MoveModelRouteInput): Promise<MoveResult> {
   const { modelId, routeId, direction } = input;
   return db.transaction(async (tx) => {
-    const rows = await tx
-      .select({ key: routingCatalog.routeId, position: routingCatalog.position })
+    // 先锁、再另起一条语句读（原因见文件头「为什么锁和读是两条语句」）。
+    await tx
+      .select({ key: routingCatalog.routeId })
       .from(routingCatalog)
       .where(eq(routingCatalog.modelId, modelId))
       .orderBy(asc(routingCatalog.position))
       .for('update');
+    const rows = await tx
+      .select({ key: routingCatalog.routeId, position: routingCatalog.position })
+      .from(routingCatalog)
+      .where(eq(routingCatalog.modelId, modelId))
+      .orderBy(asc(routingCatalog.position));
     return swapNeighbour(
       rows,
       routeId,
