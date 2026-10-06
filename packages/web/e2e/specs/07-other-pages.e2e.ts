@@ -32,9 +32,17 @@ test.describe('其余页面', () => {
       ((await api.get('/api/routing/layers')) as Layers).purposes
         .find((p) => p.purpose === 'execute')
         ?.models.map((m) => m.modelId);
-    // 骨架（routing.default.json）里写码的顺序：Grok → Opus → GPT …
+    // 先后以这一刻库里的骨架为准，不把「Grok 后面直接是 Opus」写死：目录后来在中间加了 Sonnet 5.5
+    // （谁排第几由 packages/db/test/routing-two-layer.test.ts 钉）。上移一位就是和上面那个对调。
     const before = await executeOrder();
-    expect(before?.slice(0, 2)).toEqual(['grok-4.7', 'opus-5.5']);
+    const order = before ?? [];
+    const opusAt = order.indexOf('opus-5.5');
+    const above = order[opusAt - 1] ?? '';
+    expect(opusAt).toBeGreaterThan(0);
+    expect(above).not.toBe('');
+    const swapped = order.slice();
+    swapped[opusAt - 1] = 'opus-5.5';
+    swapped[opusAt] = above;
 
     await page.goto('/routing?purpose=execute');
     const opus = page.locator('li[data-model="opus-5.5"]');
@@ -48,10 +56,12 @@ test.describe('其余页面', () => {
     await dialog.getByRole('button', { name: '上移' }).click();
     await expect(dialog).toHaveCount(0);
 
-    // 页面按新顺序重排：Opus 在最前
-    await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'opus-5.5');
+    // 页面按新顺序重排：Opus 和原来上面那个换位
+    const rows = page.locator('li[data-model]');
+    await expect(rows.nth(opusAt - 1)).toHaveAttribute('data-model', 'opus-5.5');
+    await expect(rows.nth(opusAt)).toHaveAttribute('data-model', above);
     // 读回来：落库了，进了操作记录（对象是写码用途）
-    await expect.poll(executeOrder).toEqual(['opus-5.5', 'grok-4.7', ...(before ?? []).slice(2)]);
+    await expect.poll(executeOrder).toEqual(swapped);
     const audit = (await api.get('/api/audit?limit=50')) as {
       items: { action: string; target: string; actor: { kind: string } }[];
     };
@@ -60,7 +70,9 @@ test.describe('其余页面', () => {
     );
     // 刷新后还是新顺序
     await page.reload();
-    await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'opus-5.5');
+    const reloaded = page.locator('li[data-model]');
+    await expect(reloaded.nth(opusAt - 1)).toHaveAttribute('data-model', 'opus-5.5');
+    await expect(reloaded.nth(opusAt)).toHaveAttribute('data-model', above);
     await shot(page, '07-路由-调先后后');
 
     // 放回去（别的用例读的是骨架的顺序）

@@ -154,6 +154,8 @@ describe('默认配置 routing.default.json', () => {
       expect((cfg.purposes[stage] ?? cfg.purposes.default)?.[0], stage).toBe('sonnet-5.5');
     }
     expect(cfg.purposes.execute?.[0]).toBe('grok-4.7');
+    // 写码前三名：Grok、Sonnet、Opus。e2e 只验「上移一位和上面那个对调」，不再抄这份顺序。
+    expect(cfg.purposes.execute?.slice(0, 3)).toEqual(['grok-4.7', 'sonnet-5.5', 'opus-5.5']);
     expect(cfg.purposes.ui?.[0]).toBe('grok-4.7');
     expect(cfg.purposes.verify?.[0]).toBe('gpt-5.6-luna');
     for (const stage of ['default', 'verify', 'execute', 'ui'] as const) {
