@@ -133,7 +133,7 @@ export interface HookTarget {
 /**
  * 钩子装到哪。Claude Code 的用户级钩子在 ~/.claude/settings.json 的 hooks 里（code.claude.com/docs/en/hooks）：
  * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看；Stop 平时只提醒（systemMessage），
- * 退出码恒为 0（Stop 上 exit 2 是「不许停」）。决定 0026 之后 Stop 不再输出 decision:block，开了无人值守也不挡收尾。
+ * 退出码恒为 0（Stop 上 exit 2 是「不许停」）。没开无人值守时 Stop 不输出 decision:block；只有这个会话自己跑了 unattended.mjs on 才挡收尾（决定 0028，推翻 0026 的「收尾不拦」；起后台活不自动开仍是 0026）。
  * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude

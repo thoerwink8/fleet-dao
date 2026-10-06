@@ -21,7 +21,11 @@ export default defineConfig({
     include: [...TEST_INCLUDE],
     // 钩子的测试会真起 pretool.mjs、stop.mjs：不隔开的话，它们读写的是跑测试的这个会话自己的无人值守状态
     // （2026-10-05：一条 pretool 测试把会话里「创始人的话还没送达」那次提醒吃掉了，自己也因此红）。要用真状态目录的测试自己传 env。
-    env: { FLEET_UNATTENDED_DIR: join(tmpdir(), 'fleet-dao-test-unattended') },
+    // 收尾钩子数「在跑的工人」读 ~/.fleet-dao/workers：同样指到临时目录（空 = 没有在跑的工人）。
+    env: {
+      FLEET_UNATTENDED_DIR: join(tmpdir(), 'fleet-dao-test-unattended'),
+      FLEET_WORKERS_DIR: join(tmpdir(), 'fleet-dao-test-workers'),
+    },
     // 不开 passWithNoTests：CI 按改动只跑几个包（packages/conventions/src/ci-plan.ts），路径一个测试都没匹配上要红，不能当通过。
     ...(workers.maxWorkers === undefined ? {} : { maxWorkers: workers.maxWorkers }),
   },

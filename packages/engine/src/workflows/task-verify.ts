@@ -28,7 +28,7 @@ export async function coldVerifyPr(
       rt.verifyRound = 0;
     }
     rt.verifyRound += 1;
-    rt.set('verify', `验收第 ${rt.verifyRound} 轮`);
+    await rt.advance('verify', `验收第 ${rt.verifyRound} 轮`);
     const prNumber: number = rt.prNumber;
     const headSha: string = rt.head;
     const mark = rt.routeWakeMark(); // 叫醒的记号在验之前取，理由见 task-session.ts 的 pickRoute

@@ -13,6 +13,7 @@ import {
   condition,
   isCancellation,
   log,
+  patched,
   setHandler,
   workflowInfo,
 } from '@temporalio/workflow';
@@ -100,6 +101,16 @@ export class TaskRuntime {
     this.status.round = this.round;
     this.status.verifyRound = this.verifyRound;
     this.status.prNumber = this.prNumber;
+  }
+
+  /**
+   * 换阶段：写内存状态，并把阶段落库（running）。只用 set() 的话库里的 phase/doing 停在开头那一句，
+   * 驾驶舱和法国巡查看着像「卡在对题」，其实已经在动手、等 CI 了（#1150 过夜那次）。
+   * 老历史重放时没有这个标记：patched() 为假，不多调那一步活动。
+   */
+  async advance(phase: TaskPhase, doing: string): Promise<void> {
+    this.set(phase, doing);
+    if (patched('mirror-phase')) await this.mirror('running');
   }
 
   guard(): void {

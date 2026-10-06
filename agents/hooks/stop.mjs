@@ -2,14 +2,17 @@
 // 支不支持 Stop 事件看各家自己，不支持就是从来不触发，不影响别的钩子）。
 // 会话收尾时扫一眼仓根，是不是有没跟踪、看着像临时文件的（截图、导出的数据、日志）：通用段那条规矩、截图工具的默认目录
 // 都可能被绕过（别的工具、别家 AI 手滑把这类文件直接写进仓根），这里是兜底提醒，不是强制点。
-// 只提醒、不拦、不删——只用 systemMessage，退出码一律 0。
-// 决定 0026：不再因无人值守或后台活输出 decision:block。决定 0027：不再读、不再清欠账文件。
+// 仓根临时文件那一条只提醒、不拦、不删——只用 systemMessage。
+// 无人值守（决定 0028，创始人 2026-10-07 约 02:27 推翻 0026 的「收尾不拦」）：只有这个会话自己跑过 `unattended.mjs on`
+// 才输出 decision:block（理由里说清继续盯工人、有进展记进度），起子代理、后台活不自动开；放行条件和防死循环的上限见 unattended.mjs。
+// 决定 0026：起后台活不再自动开。决定 0027：不再读、不再清欠账文件。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
-// 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：输出里出现 decision 或 hookSpecificOutput 会红。
+// 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开无人值守时输出里出现 decision 或 hookSpecificOutput 会红。
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitRunner, gitOk as ok } from './git-run.mjs';
+import { cleanId, decideStop, isMachineSession, runningWorkers, stateDir } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
 const TEMP_LIKE = /\.(png|jpe?g|gif|json|log|txt)$/i;
@@ -76,7 +79,23 @@ if (isMain()) {
   } catch {
     // 读不懂输入就当没有能提醒的信息，不出声（这只是个提醒，不是拦截，读不懂不该炸）
   }
+  // 无人值守：只有这个会话自己跑过 `unattended.mjs on` 才挡（决定 0028）；先判，它自己防空转，不看 stop_hook_active
+  // （我们自己挡回去之后那个标志就一直是真的）。机器派的会话（工人、反方）不挡。
   const notes = [];
+  try {
+    const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+    if (sessionId && !isMachineSession({ env: process.env })) {
+      const dir = stateDir();
+      const un = decideStop({ dir, sessionId, running: runningWorkers() });
+      if (un.block) {
+        process.stdout.write(`${JSON.stringify({ decision: 'block', reason: un.reason })}\n`);
+        process.exit(0);
+      }
+      if (un.notice) notes.push(un.notice);
+    }
+  } catch {
+    // 无人值守这一步自己出错：放行，不把「判不出」搞成「拦下」
+  }
   // stop_hook_active：这一轮是别的 Stop 钩子把对话带下去才有的，不重复提醒仓根的临时文件
   if (input?.stop_hook_active !== true) {
     try {

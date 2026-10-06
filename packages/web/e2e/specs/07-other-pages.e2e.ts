@@ -21,7 +21,7 @@ test.describe('其余页面', () => {
     await shot(page, '07-路由');
   });
 
-  test('路由：写码里把 Opus 5.5 上移 → 确认 → 落库、进操作记录、刷新后还是新顺序；再下移放回去', async ({
+  test('路由：写码里把 Sonnet 5.5 上移 → 确认 → 落库、进操作记录、刷新后还是新顺序；再下移放回去', async ({
     page,
     api,
     shot,
@@ -32,36 +32,26 @@ test.describe('其余页面', () => {
       ((await api.get('/api/routing/layers')) as Layers).purposes
         .find((p) => p.purpose === 'execute')
         ?.models.map((m) => m.modelId);
-    // 先后以这一刻库里的骨架为准，不把「Grok 后面直接是 Opus」写死：目录后来在中间加了 Sonnet 5.5
-    // （谁排第几由 packages/db/test/routing-two-layer.test.ts 钉）。上移一位就是和上面那个对调。
+    // 骨架（routing.default.json）里写码的顺序：Grok → Sonnet → Opus …
     const before = await executeOrder();
-    const order = before ?? [];
-    const opusAt = order.indexOf('opus-5.5');
-    const above = order[opusAt - 1] ?? '';
-    expect(opusAt).toBeGreaterThan(0);
-    expect(above).not.toBe('');
-    const swapped = order.slice();
-    swapped[opusAt - 1] = 'opus-5.5';
-    swapped[opusAt] = above;
+    expect(before?.slice(0, 2)).toEqual(['grok-4.7', 'sonnet-5.5']);
 
     await page.goto('/routing?purpose=execute');
-    const opus = page.locator('li[data-model="opus-5.5"]');
-    await expect(opus).toBeVisible();
-    await opus.getByRole('button', { name: /写码里的先后） 上移$/ }).click();
+    const sonnet = page.locator('li[data-model="sonnet-5.5"]');
+    await expect(sonnet).toBeVisible();
+    await sonnet.getByRole('button', { name: /写码里的先后） 上移$/ }).click();
     // 二次确认：写清从什么顺序变成什么顺序，确认前库里没动
     const dialog = page.getByRole('alertdialog');
-    await expect(dialog).toContainText('把「Opus 5.5」在「写码」里上移一位？');
+    await expect(dialog).toContainText('把「Sonnet 5.5」在「写码」里上移一位？');
     expect(await executeOrder()).toEqual(before);
     await shot(page, '07-路由-调先后确认');
     await dialog.getByRole('button', { name: '上移' }).click();
     await expect(dialog).toHaveCount(0);
 
-    // 页面按新顺序重排：Opus 和原来上面那个换位
-    const rows = page.locator('li[data-model]');
-    await expect(rows.nth(opusAt - 1)).toHaveAttribute('data-model', 'opus-5.5');
-    await expect(rows.nth(opusAt)).toHaveAttribute('data-model', above);
+    // 页面按新顺序重排：Sonnet 在最前
+    await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'sonnet-5.5');
     // 读回来：落库了，进了操作记录（对象是写码用途）
-    await expect.poll(executeOrder).toEqual(swapped);
+    await expect.poll(executeOrder).toEqual(['sonnet-5.5', 'grok-4.7', ...(before ?? []).slice(2)]);
     const audit = (await api.get('/api/audit?limit=50')) as {
       items: { action: string; target: string; actor: { kind: string } }[];
     };
@@ -70,14 +60,12 @@ test.describe('其余页面', () => {
     );
     // 刷新后还是新顺序
     await page.reload();
-    const reloaded = page.locator('li[data-model]');
-    await expect(reloaded.nth(opusAt - 1)).toHaveAttribute('data-model', 'opus-5.5');
-    await expect(reloaded.nth(opusAt)).toHaveAttribute('data-model', above);
+    await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'sonnet-5.5');
     await shot(page, '07-路由-调先后后');
 
     // 放回去（别的用例读的是骨架的顺序）
     await page
-      .locator('li[data-model="opus-5.5"]')
+      .locator('li[data-model="sonnet-5.5"]')
       .getByRole('button', { name: /写码里的先后） 下移$/ })
       .click();
     await page.getByRole('alertdialog').getByRole('button', { name: '下移' }).click();

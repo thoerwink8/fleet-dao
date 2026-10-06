@@ -45,7 +45,7 @@ export async function writeSession(
     failedChannel = undefined;
     rt.families.add(route.family);
     rt.attemptSeq += 1;
-    rt.set('implement', `第 ${rt.round} 轮：${route.modelId} 动手`);
+    await rt.advance('implement', `第 ${rt.round} 轮：${route.modelId} 动手`);
     let evidence: SegmentEvidence | null = null;
     let infra: unknown = null;
     try {
