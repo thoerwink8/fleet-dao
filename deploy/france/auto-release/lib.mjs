@@ -642,6 +642,40 @@ function markerFailed(st, now, kind, whyText, tag = null) {
 }
 
 /**
+ * 旧失败过期（#1157）：自动发布没成（attempt.result === 'failed'）之后，人手动切到了比失败那一版**更新**、且健康检查过了的版本——
+ * 那条失败就不再是「现在的问题」：撤「没成」的提醒、在 attempt 上记 supersededBy（被谁取代、什么时候），不删记录（历史留着）。
+ * 不过期的几种（照旧报）：
+ * - 在用的就是失败那一版（它自己没过健康检查或没退回去）——不比它新；
+ * - 在用的比失败那一版旧（退回过）——失败的还在前面等重试；
+ * - 在用的或失败那一版不在读回的主线提交里（没合进主线的手动发布、落后太多）——比不出新旧，不猜；
+ * - 在用的那一版在发布历史里的最后一件事不是切上去 / 退回 / 恢复（最后是 unhealthy、或历史里没有它）——不能证明它健康；
+ * - 发布历史读不出——同上。
+ * 比的是主线上的先后（--first-parent，新的在前）：在用的排在失败那一版前面才算更新。
+ */
+async function supersedeStaleFailure(io, st, now, commits, current) {
+  const a = st.attempt;
+  if (a?.result !== 'failed' || a.supersededBy || typeof current !== 'string') return;
+  if (a.sha === current) return;
+  const cur = commits.findIndex((c) => c.sha === current);
+  const failedAt = commits.findIndex((c) => c.sha === a.sha);
+  if (cur < 0 || failedAt < 0 || cur >= failedAt) return;
+  let history;
+  try {
+    history = parseHistory(await io.readHistory());
+  } catch {
+    return;
+  }
+  let last = '';
+  for (const h of history) if (h.sha === current) last = h.event;
+  if (!HEALTHY_LAST_EVENTS.has(last)) return;
+  st.attempt = { ...a, supersededBy: { sha: current, at: iso(now) } };
+  resolveLater(st, FAILED_PREFIX);
+}
+
+/** 这个提交在发布历史里最后一件事是这几样之一，才算「健康检查过了」（release.sh 切上去后检查没过会记 unhealthy）。 */
+const HEALTHY_LAST_EVENTS = new Set([...SWITCHES, 'recovered']);
+
+/**
  * 发布那一半：返回在用的提交号（读到了，含「还没发布过」的 null），读不到返回 undefined（规矩那一半也不做）。
  * 发的不是主线头，是**版本标记**（版本号最大的那个 `v<N>` tag，且它指向的提交是 origin/main 的祖先；决定 0011 第 3 条）。
  * 标记读不到、认不出、不是祖先：明确失败 + 报警，不发主线头。
@@ -685,6 +719,10 @@ async function deployStep(io, st, now) {
     }
     if (!busyWhy) settleDangling(st, now, current);
   }
+
+  // 人手动切到了比这条失败记录还新的版本：旧失败过期（撤提醒、记被谁取代）。放在版本标记那一步之前：
+  // 标记读不到、或在用的就是标记那一版时下面会提前返回，那两条路也得撤（#1157）。
+  await supersedeStaleFailure(io, st, now, commits, current);
 
   // 版本标记：这一轮发什么全看它。读不到 / 认不出 / 不是主线上的提交：报警、不发主线头（下面 markerStep 收尾）
   const marker = await markerStep(io, st, now, commits);

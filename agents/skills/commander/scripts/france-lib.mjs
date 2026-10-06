@@ -43,7 +43,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 /** @typedef {{ head: string, headAt: string, checkedAt: string, commits: [string, string][] }} MainFacts */
 /** @typedef {{ sha: string, verdict: 'green' | 'red' | 'pending' | 'unknown', detail: string, checkedAt: string }} CiFacts */
 /** @typedef {{ since: string, sha: string, event: string, unmerged: boolean }} HoldFacts */
-/** @typedef {{ sha: string, startedAt: string, endedAt?: string | null, detail?: string | null, result: 'running' | 'ok' | 'failed' }} AttemptFacts */
+/** @typedef {{ sha: string, startedAt: string, endedAt?: string | null, detail?: string | null, result: 'running' | 'ok' | 'failed', supersededBy?: { sha: string, at: string } | null }} AttemptFacts */
 /** @typedef {{ commit?: string | null, at: string, detail: string, result: 'ok' | 'failed' | 'unchecked' }} RulesFacts */
 /** @typedef {{ error: string } | { appliedSha: string, oldestAt?: string | null, behind: number }} SystemFacts */
 /** @typedef {{ action: string, detail: string, at: string }} LastFacts */
@@ -629,6 +629,9 @@ export function autoReleaseProblem(s) {
     );
     if (p) return p;
     if (!ALERT_RESULTS.includes(attempt.result)) return `attempt.result 是 ${JSON.stringify(attempt.result)}`;
+    const by = attempt.supersededBy;
+    if (by !== undefined && by !== null && !(isObj(by) && typeof by.sha === 'string'))
+      return 'attempt.supersededBy 不是 { sha, at } 的样子';
   }
   const rules = s.rules;
   if (rules !== null) {
@@ -1188,7 +1191,8 @@ function releaseFacts(current, auto, at) {
         where: WHERE.releaseLog,
       });
   }
-  if (st.attempt?.result === 'failed')
+  // 失败后人手动切到了更新的版本：自动发布记了 supersededBy（lib.mjs supersedeStaleFailure），旧失败不再是现在的问题（#1157）
+  if (st.attempt?.result === 'failed' && !st.attempt.supersededBy)
     issues.push({
       level: 'bad',
       what: `最近一次自动发布没成（${st.attempt.sha}）${st.attempt.detail ? `：${st.attempt.detail.trim()}` : ''}`,

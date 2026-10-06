@@ -1907,6 +1907,115 @@ test('manualHold：给了 now 就按 24 小时过期；不给 now 老样子（�
   assert.equal(manualHold(h, '2026-09-27T06:30:00Z', since + MANUAL_HOLD_MS), null, '到 24 小时就不按住');
 });
 
+// ── 旧失败过期（#1157）：失败之后人手动切到了更新的版本 ──
+
+/** 版本标记 v1 指着 H1，H1 发布没成；之后主线多了 H2。返回这时的假机器（还没人手动切）。 */
+async function failedThenNewerOnMain() {
+  const m = machine();
+  m.release = { code: 1, log: '/x.log', detail: '目录配置里旧 stages' };
+  await m.round();
+  assert.equal(m.state.attempt.result, 'failed');
+  assert.deepEqual(
+    m.alerts.map((a) => a.key),
+    [`${FAILED_PREFIX}${H1}`],
+  );
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.t += 5 * MIN; // 08:05
+  return m;
+}
+
+test('手动切到比失败那一版还新的版本（健康检查过了）：旧失败被撤、记被谁取代，不再发、也不删记录', async () => {
+  const m = await failedThenNewerOnMain();
+  m.current = H2;
+  m.history += `2026-09-27T08:02:00Z ${H2} release\n`;
+  const st = await m.round();
+  assert.deepEqual(releases(m), [], '版本标记还指着旧的 H1：不降级、不重发');
+  assert.deepEqual(m.resolved, [FAILED_PREFIX], '「没成」的提醒撤掉');
+  assert.equal(st.attempt.result, 'failed', '历史不删');
+  assert.equal(st.attempt.sha, H1);
+  assert.deepEqual(st.attempt.supersededBy, { sha: H2, at: new Date(m.t).toISOString() });
+  assert.deepEqual(st.alerts, [], '待发的报警队列里也没有它了');
+  // 下一轮：不再重复撤
+  m.t += 5 * MIN;
+  const again = await m.round();
+  assert.deepEqual(m.resolved, [FAILED_PREFIX], '只撤一次');
+  assert.equal(again.attempt.supersededBy.sha, H2, '标记留着');
+});
+
+test('旧失败过期也走「在用的就是版本标记那一版」这条路（人手动切到的正是后来打了标记的那一版）', async () => {
+  const m = await failedThenNewerOnMain();
+  m.current = H2;
+  m.history += `2026-09-27T08:02:00Z ${H2} release\n`;
+  m.tags = tagLine('v2', H2, '2026-09-27T08:03:00Z') + tagLine('v1', H1);
+  const st = await m.round();
+  assert.equal(st.last.action, 'up-to-date');
+  assert.equal(st.attempt.supersededBy.sha, H2);
+  assert.deepEqual(m.resolved, [FAILED_PREFIX]);
+});
+
+test('失败的就是在用的那一版（它自己没过健康检查）：不当过期，照报', async () => {
+  const m = await failedThenNewerOnMain();
+  // H1 切上去了、健康检查没过、也没退回（在用的还是它）
+  m.current = H1;
+  m.history += `2026-09-27T08:02:00Z ${H1} release auto\n2026-09-27T08:03:00Z ${H1} unhealthy auto\n`;
+  const st = await m.round();
+  assert.equal(st.attempt.result, 'failed');
+  assert.equal(st.attempt.supersededBy, undefined, '失败记录不标取代：驾驶舱和 france.mjs 照报');
+  // （在用的正好是版本标记那一版时，「没成」的提醒本来就由 up-to-date 那条路按老规矩撤，不归这次改动管）
+});
+
+test('在用的比失败那一版新、但它自己判过不健康（或历史里没有它）：不能证明健康，不过期', async () => {
+  for (const [what, extra] of [
+    ['最后是 unhealthy', `2026-09-27T08:02:00Z ${H2} release\n2026-09-27T08:03:00Z ${H2} unhealthy\n`],
+    ['历史里没有它', ''],
+  ]) {
+    const m = await failedThenNewerOnMain();
+    m.current = H2;
+    m.history += extra;
+    const st = await m.round();
+    assert.equal(st.attempt.supersededBy, undefined, what);
+    assert.deepEqual(m.resolved, [], what);
+  }
+});
+
+test('在用的比失败那一版旧（人退回了更早的）、或在用的不在主线上（手动发的没合进主线的提交）：不过期，照报', async () => {
+  const rolledBack = await failedThenNewerOnMain(); // 在用 H0，比失败的 H1 旧
+  rolledBack.history += `2026-09-27T08:02:00Z ${H0} rollback\n`;
+  let st = await rolledBack.round();
+  assert.equal(st.attempt.supersededBy, undefined, '退回到更旧的');
+  assert.deepEqual(rolledBack.resolved, []);
+
+  const off = await failedThenNewerOnMain();
+  const HX = 'f'.repeat(40);
+  off.current = HX;
+  off.history += `2026-09-27T08:02:00Z ${HX} release unmerged\n`;
+  st = await off.round();
+  assert.equal(st.attempt.supersededBy, undefined, '比不出新旧不猜');
+  assert.deepEqual(off.resolved, []);
+});
+
+test('没有失败记录（或上一次是成的）：行为不变，不撤任何东西', async () => {
+  const m = machine();
+  const first = await m.round(); // 发 H1，成
+  assert.equal(first.attempt.result, 'ok');
+  m.t += 5 * MIN;
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.current = H2;
+  m.history += `2026-09-27T08:02:00Z ${H2} release\n`;
+  const st = await m.round();
+  assert.equal(st.attempt.supersededBy, undefined);
+  assert.deepEqual(m.resolved, []);
+  const empty = machine();
+  empty.state = { schema: STATE_SCHEMA, attempt: null, alerts: [], resolve: [] };
+  empty.current = H1;
+  empty.history += `2026-09-27T07:40:00Z ${H1} release\n`;
+  const es = await empty.round();
+  assert.equal(es.attempt, null);
+  assert.deepEqual(empty.resolved, []);
+});
+
 test('数字照创始人要的：间隔 30 分钟、最多重试 2 次、按住 24 小时（#1121）', () => {
   assert.equal(RETRY_AFTER_MS, 30 * MIN);
   assert.equal(MAX_RETRIES, 2);
