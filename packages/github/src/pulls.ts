@@ -1,9 +1,11 @@
 // PR：开（「干活的」机器人）、等 CI、合并（「引擎」机器人）。
 // - 开 PR 按分支幂等：同一个分支只有一张开着的 PR，重试、回执丢了都回查分支，不会开出第二张（B1）；编号读返回体的 number（B5）。
-// - 等 CI 按必过检查的名字等；冲突态的 PR GitHub 不起 CI，单独认出来交回同步主线（C1）；
+// - 等 CI 按必过检查的名字等，但不把合并闸算进去（checksAwaitedByCi）：它只看冷验收贴没贴上，冷验收在这一步回了绿之后才跑。
+//   冲突态的 PR GitHub 不起 CI，单独认出来交回同步主线（C1）；
 //   「CI 根本没跑」和「跑了没跑完（超时）」分开报；读不到算没查成，不当零条检查（C16）。
-// - 合并前再核一遍：头没变（C8）、基于最新主线、CI 在这个头上是绿的、能合（UNKNOWN 就重读，C10）；
+// - 合并前再核一遍：头没变（C8）、基于最新主线、CI 在这个头上是绿的（这一步含合并闸）、能合（UNKNOWN 就重读，C10）；
 //   squash 带 sha 头约束、显式的提交标题与正文（不让 GitHub 用默认拼出关单词，C13）；失败不看文案，重读 mergeable 再分类（C11）。
+import { GATE_CONTEXT } from '@fleet-dao/conventions';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import {
@@ -363,6 +365,22 @@ export async function requiredChecksFor(
   return rules.requiredChecks;
 }
 
+/**
+ * 等 CI 看的必过检查。合并闸不在里面：它只回答冷验收贴上没有，而冷验收要等这一步回了绿才跑。
+ * 算进去的话，引擎任务的 PR 一开出来闸就是红的「还没验」，等 CI 会当成代码没过打回去返工，验收永远轮不到。
+ * 合不进主线仍由 GitHub 的必过检查拦着；直接合（mergePr）认全套，含这条。
+ */
+export function checksAwaitedByCi(required: readonly string[]): string[] {
+  const checks = required.filter((name) => name !== GATE_CONTEXT);
+  if (checks.length === 0) {
+    throw new GitHubError(
+      'NO_REQUIRED_CHECKS',
+      `主线必过检查里去掉 ${GATE_CONTEXT} 之后没有别的了：等 CI 不看合并闸（它要等冷验收，冷验收在 CI 绿了之后才跑），没有别的检查就判不了代码过没过`,
+    );
+  }
+  return checks;
+}
+
 export async function readCi(
   deps: Deps,
   repo: RepoRef,
@@ -484,7 +502,7 @@ export async function waitCi(
   const confirmRedMs = input.confirmRedMs ?? 20_000;
   const resumed = asMemo(ctx.lastHeartbeat, head);
   const memo: WaitMemo = resumed ?? { head, startedAt: now(), sawActivityAt: null };
-  const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
+  const required = checksAwaitedByCi(await requiredChecksFor(deps, repo, input.checks, ctx.signal));
   let failures = 0;
   let redSeenAt: number | null = null;
   const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;

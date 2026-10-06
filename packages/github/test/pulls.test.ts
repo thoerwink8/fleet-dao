@@ -362,6 +362,43 @@ describe('等 CI', () => {
     });
   });
 
+  /** 合并闸在冷验收之前的样子：提交状态红着，描述以「还没验」开头。 */
+  const gateNotYet = (fake: ReturnType<typeof setup>['fake'], sha: string) => {
+    fake.statuses.push({
+      sha,
+      context: 'merge-gate',
+      state: 'failure',
+      description: '还没验：当前头上没有 cold-verify 状态',
+      updated_at: '2026-10-07T00:00:00.000Z',
+    });
+  };
+
+  it('合并闸红成「还没验」、别的必过检查是绿的：等 CI 算绿（冷验收在这之后才跑，不能当成代码没过）', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = ['check', 'merge-gate'];
+    const pr = fake.addPull({ head: { ref: 'fleet/1150-t01a1127d', sha: A } });
+    fake.addCheck(A, 'check', 'success');
+    gateNotYet(fake, A);
+    expect((await wait(gh, pr.number)).state).toBe('green');
+  });
+
+  it('【故意造出的失败】别的必过检查红了，合并闸同时是「还没验」：仍报那条真失败', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = ['check', 'merge-gate'];
+    const pr = fake.addPull({ head: { ref: 'fleet/1150-t01a1127d', sha: A } });
+    fake.addCheck(A, 'check', 'failure');
+    gateNotYet(fake, A);
+    expect(await wait(gh, pr.number)).toMatchObject({ state: 'red', failedChecks: ['check'] });
+  });
+
+  it('【故意造出的失败】主线必过检查只剩合并闸：等 CI 判不了代码过没过，不当绿', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = ['merge-gate'];
+    const pr = fake.addPull({ head: { ref: 'fleet/1150-t01a1127d', sha: A } });
+    gateNotYet(fake, A);
+    await expect(wait(gh, pr.number)).rejects.toMatchObject({ code: 'NO_REQUIRED_CHECKS' });
+  });
+
   it('C16：检查读不到算「没查成」，不当零条检查', async () => {
     const forbidden = setup();
     const pr = forbidden.fake.addPull({ head: { ref: 'task/1', sha: A } });
@@ -512,6 +549,25 @@ describe('合并', () => {
       const res = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A });
       expect(res).toMatchObject({ merged: false, reason: 'ci_not_green' });
     }
+  });
+
+  it('直接合仍认合并闸：它红着就不合（等 CI 跳过它，是因为验收还没跑；合的时候它必须已经绿）', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = ['check', 'merge-gate'];
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
+    fake.addCheck(A, 'check', 'success');
+    fake.statuses.push({
+      sha: A,
+      context: 'merge-gate',
+      state: 'failure',
+      description: '还没验：当前头上没有 cold-verify 状态',
+      updated_at: '2026-10-07T00:00:00.000Z',
+    });
+    expect(await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A })).toMatchObject({
+      merged: false,
+      reason: 'ci_not_green',
+    });
+    expect(fake.calls('PUT', /\/merge$/)).toHaveLength(0);
   });
 
   it('C10：mergeable 还没算出来就重读，算出来再合；一直算不出来就报可重试', async () => {
