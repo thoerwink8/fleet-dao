@@ -151,6 +151,44 @@ describe('命令行表格', () => {
     expect(text).toContain('cursor：套餐 Ultra，付到 10/16 19:08');
     expect(text).toContain('账号不允许按量计费');
   });
+
+  it('午夜按北京时间显示成 00:30，不出现 24:【故意造出的失败】', () => {
+    const at = '2026-10-04T16:30:00.000Z'; // 北京时间 2026-10-05 00:30
+    const midnight = formatQuotaTable(
+      {
+        startedAt: at,
+        finishedAt: at,
+        results: [
+          {
+            poolId: 'pool',
+            channelId: 'c',
+            reader: 'estimate',
+            startedAt: at,
+            durationMs: 1,
+            ok: true,
+            notes: [],
+            windows: [
+              {
+                poolId: 'pool',
+                window: 'period_usd',
+                label: 'day',
+                unit: 'usd',
+                used: 1,
+                limit: 2,
+                resetsAt: at,
+                reading: 'estimated',
+                readAt: at,
+                source: 'estimate',
+              },
+            ],
+          },
+        ],
+      },
+      { now: new Date(at), timeZone: 'Asia/Shanghai' },
+    );
+    expect(midnight).toContain('10/05 00:30');
+    expect(midnight).not.toContain('24:');
+  });
 });
 
 describe('命令行入口', () => {

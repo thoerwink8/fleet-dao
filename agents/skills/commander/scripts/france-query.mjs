@@ -122,6 +122,7 @@ export const SQL = {
       order by nt.created_at desc
       limit 30) x), '[]'::jsonb))`,
 
+  // 摘除了的（removed_at 不为空，#1140：退役任务）不再是期望，不查：和后端 packages/db 的 scheduleHealth 同一个口径
   jobs: `select coalesce(jsonb_agg(x order by x.id), '[]'::jsonb) from (
     select j.id, j.name, j.schedule, j.expect_every_minutes as every,
       (select jsonb_build_object('started_at', r.started_at, 'ended_at', r.ended_at, 'outcome', r.outcome, 'why', left(r.why, 400))
@@ -130,7 +131,8 @@ export const SQL = {
          from schedule_runs r where r.job = j.id and r.outcome is not null order by r.ended_at desc, r.id desc limit 1) as last_finished,
       (select jsonb_build_object('started_at', r.started_at, 'ended_at', r.ended_at, 'outcome', r.outcome, 'why', left(r.why, 400))
          from schedule_runs r where r.job = j.id and r.outcome in ('ok', 'partial') order by r.ended_at desc, r.id desc limit 1) as last_success
-    from scheduled_jobs j) x`,
+    from scheduled_jobs j
+    where j.removed_at is null) x`,
 
   // in_use：路由两层里开着、它的模型又排进了某个用途（#574）。和 packages/db 的 routing-layers.ts 里 routesInUse 同一个判法
   // （探针只探这些、选路只派这些），那边改了这里跟着改。不读旧的阶段平铺表 stage_policy_routes；库里还没有两层那两张表
