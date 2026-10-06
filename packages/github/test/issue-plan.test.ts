@@ -1,4 +1,4 @@
-// 一张 issue 此刻挂在哪个版本、开没开着、是不是母单或子单（接活判当前版本和母单子单、fleet-api handover 判开没开着）：
+// 一张 issue 此刻挂在哪个版本、开没开着、是不是母单或子单（引擎拉单判当前版本、母单子单、开没开着）：
 // 「引擎」机器人一次 GraphQL 现读，全走假服务。读不到、形状认不出、没翻完一律抛错，不拿「没挂」「不是子单」「开着」顶。
 import { describe, expect, it } from 'vitest';
 import { json, repo, setup } from './helpers.ts';

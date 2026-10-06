@@ -134,7 +134,10 @@ export function screenListed(input: {
     };
   }
   if (opened < Date.parse(input.autoDispatchSince)) {
-    return { reason: 'opened_before_switch', why: '开关打开以前就开着的单不自动派（要人明说交给 fleet）' };
+    return {
+      reason: 'opened_before_switch',
+      why: '开关打开以前就开着的单不自动派（要交给引擎就重开一张新单：挂上当前版本、不贴「本机做」、不是母单也不是子单；驾驶舱「交给 fleet」上线前由指挥官重开）',
+    };
   }
   if (!input.trusted) return { reason: 'untrusted_author', why: '开单人不在白名单里' };
   const version = versionGate({ milestone: issue.milestone, openMilestones: input.openMilestones });

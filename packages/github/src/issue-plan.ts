@@ -1,5 +1,5 @@
-// 一张 issue 此刻挂在哪个版本、开没开着、是不是母单或子单（「引擎」机器人现读，计划以 GitHub 为准）：后端接活判「挂没挂在
-// 当前版本上、是不是母单子单」、fleet-api handover 判「开着没有、重开过没有」都用它（判法在 @fleet-dao/core 的 dispatch.ts，
+// 一张 issue 此刻挂在哪个版本、开没开着、是不是母单或子单（「引擎」机器人现读，计划以 GitHub 为准）：引擎拉单判「挂没挂在
+// 当前版本上、是不是母单子单、开没开着」用它（判法在 @fleet-dao/core 的 dispatch.ts，
 // 0003 第 2、8 条）。一次 GraphQL 查全：REST 的 issue 只在有父单时才带 parent_issue_url、查父单的接口没父单时回 404（和
 // 「没装到这个仓」分不开），GraphQL 的 parent 没有父单是明确的 null。
 // 读不到、形状认不出、没翻完一律抛错（NOT_FOUND、UNEXPECTED_RESPONSE 这类），不拿「没挂里程碑」「不是子单」「开着」顶：

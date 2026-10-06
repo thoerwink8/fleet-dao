@@ -105,7 +105,7 @@ type Env = Record<string, string | undefined>;
 
 /**
  * 连 Temporal 的三样：都有默认值，两个环境都不强制配（和引擎 worker.ts 的 configFromEnv 同一套默认，Temporal 没起来也不挡
- * 后端启动）。后端启动和 fleet-api handover（带着同一份 api.env）都照这里读。
+ * 后端启动）。后端启动照这里读。
  */
 export function temporalSettings(
   env: Env,

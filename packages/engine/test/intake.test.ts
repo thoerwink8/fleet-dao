@@ -161,6 +161,14 @@ describe('screenListed · 列表里就能判的几道', () => {
     expect(screenListed(base)).toBeNull();
   });
 
+  it('开关打开以前开的：写明重开一张新单，不指向已经没有的交接命令', () => {
+    const got = screenListed({ ...base, issue: issue({ createdAt: '2026-09-29T23:59:59.000Z' }) });
+    expect(got?.reason).toBe('opened_before_switch');
+    expect(got?.why).toContain('重开一张新单');
+    expect(got?.why).toContain('指挥官重开');
+    expect(got?.why).not.toContain('fleet-api handover');
+  });
+
   it.each([
     ['开关打开以前开的', { issue: issue({ createdAt: '2026-09-29T23:59:59.000Z' }) }, 'opened_before_switch'],
     ['作者不在白名单', { trusted: false }, 'untrusted_author'],
