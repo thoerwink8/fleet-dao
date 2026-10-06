@@ -174,7 +174,7 @@ check "发布后置关没成：不记红、不连坐整版" "${#REDS[@]}" 0
 check "发布后置关没成：单独记了一条提醒" "${#POST_ALERTS[@]}" 1
 check "发布后置关没成：历史里没有被记成不健康、也没退回" "$(events)" "$before"
 code=$( (
-  finish_hook() { :; }
+  unset -f finish_hook
   finish
 ) >/dev/null 2>&1
   echo $?
@@ -182,7 +182,7 @@ code=$( (
 check "发布后置关没成：结论退出码是 3（和红的 1、待配的 2 分开）" "$code" 3
 POST_ALERTS=()
 code=$( (
-  finish_hook() { :; }
+  unset -f finish_hook
   red "桩：真红"
   post_alert "桩：提醒"
   finish
