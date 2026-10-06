@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { reconcile, sentByFounder } from './founder-inbox.mjs';
 import { fetchWithFallback } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
@@ -487,6 +488,10 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
  * 列最近 RECENT_MS 以内、本会话还没见过的全部（本会话自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
  * 封顶（超了留最新的、写明更早的几条没列）；没有文件、没有最近的话都不出声；读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
  * 机器派的会话（工人、第二意见、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
+ * 第三种丢法（创始人 2026-10-06「你好像没接收到【选方案a】」）：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
+ * Claude Code 从头没收到、prompt-log 里自然也没有。所以再拿 Mirasim 自己记的「发了的账」（founder-inbox.mjs）和这份「收到的账」对一遍，
+ * 发了没收到的单独一行、放前面、叫会话先答。这一段在每一轮开头都跑（Mirasim 每轮都 --resume 起进程，SessionStart 每轮都触发），
+ * 所以上一轮丢的引导下一轮一开头就补上了。
  */
 export const RECENT_MS = 60 * 60_000;
 export const RECENT_CHARS = 200;
@@ -494,11 +499,12 @@ export const RECENT_TOTAL_CHARS = 3000;
 /** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记（2026-10-04 实测），列的时候不算创始人的话 */
 const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
 
-export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = null }) {
+export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = null, env = process.env }) {
   // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份：原来这里不认 FLEET_PROMPT_LOG_DIR（全仓审查第 4 路 R4）
   const base = dir ?? logDir(process.env, home);
   const days = new Set([beijingToday(now), beijingToday(now - RECENT_MS)]);
-  const entries = [];
+  /** 收到的账：Claude Code 真收到过的（哪个会话收的都记） */
+  const received = [];
   for (const day of days) {
     const file = join(base, `${day}.jsonl`);
     let text;
@@ -518,36 +524,59 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
           !SYSTEM_PROMPT.test(e.prompt) &&
           !isMachineOpening(e.prompt) &&
           !isMachineSession({ env: {}, cwd: e.cwd }) &&
-          !(sessionId && e.sessionId === sessionId) &&
           Number.isFinite(at) &&
           now - at <= RECENT_MS &&
           at <= now + 60_000
         )
-          entries.push({ at, prompt: e.prompt });
+          received.push({
+            at,
+            text: e.prompt,
+            sessionId: typeof e.sessionId === 'string' ? e.sessionId : null,
+          });
       } catch {
         // 坏的一行跳过：别因为一行坏了就把别的话也藏起来
       }
     }
   }
-  if (entries.length === 0) return [];
-  entries.sort((a, b) => a.at - b.at);
+  const lines = [];
+  // 发了的账（Mirasim 的会话记录）和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）
+  const sent = sentByFounder({ home, now, env });
+  if (!sent.absent) {
+    for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
+    const { lost } = reconcile(sent.entries, received);
+    if (lost.length > 0) {
+      const shown = packNewestFirst(lost);
+      lines.push(
+        `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${lost.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
+      );
+    }
+  }
+  // 别的会话收到的：本会话自己收到的它早见过，不列
+  const others = received.filter((e) => !(sessionId && e.sessionId === sessionId));
+  if (others.length > 0) {
+    const shown = packNewestFirst(others);
+    lines.push(
+      `创始人最近 ${Math.round(RECENT_MS / 60_000)} 分钟落盘的话（共 ${others.length} 条${shown.omitted}；上一个会话没来得及处理的在这里，已经办过的不用再办）：${shown.items.join(' ')}`,
+    );
+  }
+  return lines;
+}
+
+/** 从最新的往回装，装到总字数封顶为止（最新的一条无论多长都留）；每条截到 RECENT_CHARS 字 */
+function packNewestFirst(entries) {
+  const sorted = [...entries].sort((a, b) => a.at - b.at);
   const hhmm = (ms) => new Date(ms + 8 * 3_600_000).toISOString().slice(11, 16);
   const cut = (s) => (s.length > RECENT_CHARS ? `${s.slice(0, RECENT_CHARS)}……` : s).replace(/\s+/g, ' ');
-  // 从最新的往回装，装到总字数封顶为止（最新的一条无论多长都留）
-  const shown = [];
+  const items = [];
   let used = 0;
-  for (const e of [...entries].reverse()) {
-    const one = `［${hhmm(e.at)}］${cut(e.prompt)}`;
-    if (shown.length > 0 && used + one.length > RECENT_TOTAL_CHARS) break;
-    shown.unshift(one);
+  for (const e of sorted.reverse()) {
+    const one = `［${hhmm(e.at)}］${cut(e.text)}`;
+    if (items.length > 0 && used + one.length > RECENT_TOTAL_CHARS) break;
+    items.unshift(one);
     used += one.length;
   }
-  const omitted = entries.length - shown.length;
-  const count =
-    omitted > 0 ? `共 ${entries.length} 条，字数封顶只列最新 ${shown.length} 条` : `共 ${entries.length} 条`;
-  return [
-    `创始人最近 ${Math.round(RECENT_MS / 60_000)} 分钟落盘的话（${count}；上一个会话没来得及处理、或根本没送到的在这里，已经办过的不用再办）：${shown.join(' ')}`,
-  ];
+  const omitted = sorted.length - items.length;
+  return { items, omitted: omitted > 0 ? `，字数封顶只列最新 ${items.length} 条` : '' };
 }
 
 /**

@@ -1451,3 +1451,152 @@ describe('创始人最近落盘的话：系统消息不算', () => {
     expect(line).not.toContain('task-notification');
   });
 });
+
+describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-log 的「收到的账」对（创始人 10-06「你好像没接收到【选方案a】」）', () => {
+  const NOW = Date.parse('2026-10-06T03:45:00Z'); // 北京 11:45
+  const T = (iso: string) => Date.parse(iso);
+  const recent = (o: { home: string; now?: number; sessionId?: string | null }) =>
+    (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts(o);
+  const received = (home: string, rows: unknown[]) => {
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-10-06.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+  };
+  const mirasim = (
+    home: string,
+    id: string,
+    turns: unknown[],
+    record: unknown = { workdir: 'D:\\frank\\fleet-dao' },
+  ) => {
+    const dir = join(home, '.mirasim', 'sessions', 'claude', id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'record.json'), JSON.stringify(record));
+    writeFileSync(join(dir, 'turns.jsonl'), turns.map((t) => `${JSON.stringify(t)}\n`).join(''));
+  };
+
+  it('一轮被打断时攒着的两条引导丢了：列成单独一行、放最前、叫先答；收到过的提问不算丢', () => {
+    const home = temp('inbox');
+    mirasim(home, 'm1', [
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-06T03:24:48Z'),
+        prompt: 'wsl好像流程关了，你确认下；然后安排优先级多subagent做完',
+        steers: [
+          { text: '选方案a', at: T('2026-10-06T03:31:37Z') },
+          { text: '你好像没接收到【选方案a】，能不能把这个问题修复好', at: T('2026-10-06T03:32:41Z') },
+        ],
+        error: 'Interrupted by user.',
+        incomplete: true,
+      },
+    ]);
+    received(home, [
+      {
+        at: '2026-10-06T03:24:49Z',
+        sessionId: 's1',
+        prompt: 'wsl好像流程关了，你确认下；然后安排优先级多subagent做完',
+      },
+    ]);
+    const lines = recent({ home, now: NOW, sessionId: 's1' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^创始人发了、但 Claude Code 没收到的话/);
+    expect(lines[0]).toContain('共 2 条');
+    expect(lines[0]).toContain('［11:31］选方案a');
+    expect(lines[0]).toContain('［11:32］你好像没接收到【选方案a】');
+    expect(lines[0]).toContain('先答这些');
+    expect(lines[0]).not.toContain('wsl好像流程关了');
+  });
+
+  it('进程还没起来就被打断的提问也算没收到；收到了、但是别的会话收的照旧列在「落盘的话」那行', () => {
+    const home = temp('inbox');
+    mirasim(home, 'm1', [
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-06T03:10:00Z'),
+        prompt: '重新用k3，可以多subagent继续接手',
+        error: null,
+      },
+      { sessionId: 's2', startedAt: T('2026-10-06T03:20:00Z'), prompt: '还剩下什么任务', steers: [] },
+    ]);
+    received(home, [{ at: '2026-10-06T03:20:01Z', sessionId: 's2', prompt: '还剩下什么任务' }]);
+    const lines = recent({ home, now: NOW, sessionId: 'me' });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('没收到的话');
+    expect(lines[0]).toContain('重新用k3');
+    expect(lines[0]).not.toContain('还剩下什么任务');
+    expect(lines[1]).toMatch(/^创始人最近 60 分钟落盘的话（共 1 条/);
+    expect(lines[1]).toContain('还剩下什么任务');
+  });
+
+  it('同一句话发了两次只收到一次：收到的配时间最近的那次；丢的那条他之后原话重发并收到了就不再列，重发之前丢的才列；附图那一行不影响对账', () => {
+    const home = temp('inbox');
+    const turns = (second: string) => [
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-06T03:00:00Z'),
+        prompt: '开工',
+        steers: [
+          { text: '进展怎么样？', at: T('2026-10-06T03:05:00Z') },
+          { text: '进展怎么样？', at: T(second) },
+        ],
+      },
+    ];
+    // 03:05 丢了、03:09 重发收到：不列
+    mirasim(home, 'm1', turns('2026-10-06T03:09:00Z'));
+    received(home, [
+      {
+        at: '2026-10-06T03:00:01Z',
+        sessionId: 's1',
+        prompt: '[The image above is also on disk at: C:\\x.png]\n开工',
+      },
+      { at: '2026-10-06T03:09:02Z', sessionId: 's1', prompt: '进展怎么样？' },
+    ]);
+    expect(recent({ home, now: NOW, sessionId: 's1' })).toEqual([]);
+    // 03:05 收到、03:09 丢了：列 03:09 那条
+    received(home, [
+      { at: '2026-10-06T03:00:01Z', sessionId: 's1', prompt: '开工' },
+      { at: '2026-10-06T03:05:02Z', sessionId: 's1', prompt: '进展怎么样？' },
+    ]);
+    const lines = recent({ home, now: NOW, sessionId: 's1' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('共 1 条');
+    expect(lines[0]).toContain('［11:09］进展怎么样？');
+    expect(lines[0]).not.toContain('11:05');
+  });
+
+  it('不算他的话：斜杠命令、系统消息、机器派会话（工人工作树）里的、1 小时以前的；没有 Mirasim 目录不出声', () => {
+    const home = temp('inbox');
+    mirasim(home, 'm1', [
+      { sessionId: 's1', startedAt: T('2026-10-06T03:30:00Z'), prompt: '/compact' },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-06T03:31:00Z'),
+        prompt: '<task-notification>\n<task-id>x</task-id>',
+      },
+      { sessionId: 's1', startedAt: T('2026-10-06T01:00:00Z'), prompt: '两个多小时前的话' },
+    ]);
+    mirasim(home, 'w1', [{ sessionId: 'w', startedAt: T('2026-10-06T03:40:00Z'), prompt: '派活的交代' }], {
+      workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\w-speed-a',
+    });
+    expect(recent({ home, now: NOW })).toEqual([]);
+    const bare = temp('inbox-bare');
+    received(bare, [{ at: '2026-10-06T03:40:00Z', sessionId: 'x', prompt: '只有收到的账' }]);
+    const lines = recent({ home: bare, now: NOW });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^创始人最近 60 分钟落盘的话/);
+  });
+
+  it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没读全，不当成「没丢」', () => {
+    const home = temp('inbox');
+    const dir = join(home, '.mirasim', 'sessions', 'claude', 'm1');
+    mkdirSync(join(dir, 'turns.jsonl'), { recursive: true }); // 路径是个目录：读不了
+    const lines = recent({ home, now: NOW });
+    expect(lines[0]).toMatch(/创始人在 Mirasim 里发的话没读全：.*读不了/);
+    mirasim(home, 'm2', [{ sessionId: 's', startedAt: T('2026-10-06T03:40:00Z'), prompt: '好的那条' }]);
+    writeFileSync(join(home, '.mirasim', 'sessions', 'claude', 'm2', 'turns.jsonl'), '{坏了\n', {
+      flag: 'a',
+    });
+    const again = recent({ home, now: NOW });
+    expect(again.some((l) => /1 行认不出/.test(l))).toBe(true);
+    expect(again.some((l) => /没收到的话.*好的那条/.test(l))).toBe(true);
+  });
+});
