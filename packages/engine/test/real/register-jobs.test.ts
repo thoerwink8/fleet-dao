@@ -1,7 +1,7 @@
 // 引擎定时任务登记的真装配（#1140）：registerEngineJobs 一边把代码里还在的任务写进登记表，一边把
 // 退役名单（jobs/retired-schedules.ts，不带 moved 的）的登记行摘掉——不摘的话，#445 删掉的任务（alert-dispatch）
 // 的登记行永远留在表上，定时任务页一直标「过期」。库是 PGlite 上跑真迁移。
-import { type JobRow, scheduledJobs } from '@fleet-dao/db';
+import { scheduledJobs } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RETIRED_SCHEDULE_IDS } from '../../src/jobs/retired-schedules.ts';
@@ -16,7 +16,7 @@ beforeEach(async () => {
   await resetTestDb(t);
 });
 
-async function rows(): Promise<JobRow[]> {
+async function rows(): Promise<(typeof scheduledJobs.$inferSelect)[]> {
   return t.db.select().from(scheduledJobs);
 }
 
