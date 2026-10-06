@@ -9,7 +9,10 @@ import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
 type RunRow = typeof scheduleRuns.$inferSelect;
 type JobRow = typeof scheduledJobs.$inferSelect;
 
-/** 引擎启动时按代码里的声明写入（已有的更新名字、计划、期望间隔；登记时刻不动）。没登记的任务记不了运行记录（外键）。 */
+/**
+ * 引擎启动时按代码里的声明写入（已有的更新名字、计划、期望间隔；登记时刻不动；标过摘除的重新回来，摘除清零）。
+ * 没登记的任务记不了运行记录（外键）。
+ */
 export async function registerScheduledJobs(
   db: Db,
   jobs: readonly (typeof scheduledJobs.$inferInsert)[],
@@ -20,9 +23,30 @@ export async function registerScheduledJobs(
       .values(job)
       .onConflictDoUpdate({
         target: scheduledJobs.id,
-        set: { name: job.name, schedule: job.schedule, expectEveryMinutes: job.expectEveryMinutes },
+        set: {
+          name: job.name,
+          schedule: job.schedule,
+          expectEveryMinutes: job.expectEveryMinutes,
+          removedAt: null,
+        },
       });
   }
+}
+
+/**
+ * 把退役任务的登记行标上摘除（#1140）：它不会再跑了，不再是期望，定时任务页和看门狗都不再看（scheduleHealth）。
+ * 只标记不删除：schedule_runs 还挂着外键，历史跑记录也留着；跑记录里不会再有新的行。从没登记过的编号无事发生。
+ */
+export async function unregisterScheduledJobs(
+  db: Db,
+  ids: readonly string[],
+  removedAt: Date = new Date(),
+): Promise<void> {
+  if (ids.length === 0) return;
+  await db
+    .update(scheduledJobs)
+    .set({ removedAt })
+    .where(inArray(scheduledJobs.id, [...ids]));
 }
 
 export async function startScheduleRun(db: Db, job: string, startedAt: Date = new Date()): Promise<number> {
@@ -92,7 +116,10 @@ export interface JobHealth {
 }
 
 export async function scheduleHealth(db: Db, now: Date = new Date()): Promise<JobHealth[]> {
-  const jobs = await db.select().from(scheduledJobs).orderBy(asc(scheduledJobs.id));
+  const jobs = (await db.select().from(scheduledJobs).orderBy(asc(scheduledJobs.id))).filter(
+    // 摘除了的（#1140：退役任务，引擎起来时 unregisterScheduledJobs 标的）不再是期望，不参加新不新鲜的判断
+    (j) => j.removedAt === null,
+  );
   if (jobs.length === 0) return [];
   const ids = jobs.map((j) => j.id);
   const latestPer = (only?: readonly ScheduleOutcome[]) =>

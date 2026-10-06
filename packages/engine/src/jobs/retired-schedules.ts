@@ -8,6 +8,9 @@ import { type Client, ScheduleNotFoundError } from '@temporalio/client';
 // （real/retire-schedules.ts 的 retireEngineSchedules）按它把 Temporal 上还在的删掉；看门狗（real/watchdog.ts）按它把
 // 退役的（不含 moved 的）从「新不新鲜」的判断里剔除（登记表上的行还在，但不会再有新的跑记录，不剔除会被判成「停了」永远报警）。
 // 两处认同一份名单：退役一个定时任务只改这一个文件，不用两处各改一遍。
+// #1140 起：不带 moved 的退役任务，登记表 scheduled_jobs 上的行也由引擎起来时摘掉（real/jobs.ts 的 registerEngineJobs
+// 调 db 的 unregisterScheduledJobs），驾驶舱「定时任务」页不再把它标成「过期」——#445 删「提醒派单」后 alert-dispatch
+// 的登记行一直留在表上，页面标了 9 天「过期」。
 // moved 的那 8 条等法国和本机的引擎都起过一次新版本、Temporal 上删干净之后，可以从名单里去掉。
 export interface RetiredSchedule {
   /** Temporal 的 scheduleId，同时是 scheduled_jobs 登记表上的 job id。 */

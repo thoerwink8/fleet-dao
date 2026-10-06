@@ -36,6 +36,7 @@ const JOB: JobHealth['job'] = {
   schedule: '每 5 分钟',
   expectEveryMinutes: 15,
   registeredAt: ago(30 * 24 * 60),
+  removedAt: null,
 };
 
 function runRow(over: Partial<RunRow> = {}): RunRow {

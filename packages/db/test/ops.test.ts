@@ -9,6 +9,7 @@ import {
   registerScheduledJobs,
   scheduleHealth,
   startScheduleRun,
+  unregisterScheduledJobs,
 } from '../src/queries/schedule.ts';
 import { scheduledJobs } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -121,6 +122,7 @@ describe('定时任务：没跑成 ≠ 没问题', () => {
         schedule: '每 3 小时',
         expectEveryMinutes: 200,
         registeredAt: ago(3 * 24 * 60 * MIN),
+        removedAt: null,
       },
     ]);
     const [health] = await scheduleHealth(t.db, NOW);
@@ -197,6 +199,29 @@ describe('定时任务：没跑成 ≠ 没问题', () => {
     await expect(finishScheduleRun(t.db, 999, { outcome: 'ok', scanned: 1, found: 0 })).rejects.toThrow(
       /999/,
     );
+  });
+
+  describe('摘除退役任务（#1140：alert-dispatch 被 #445 删了，登记行还在，页面标了 9 天「过期」）', () => {
+    it('unregisterScheduledJobs 把登记行标上摘除时刻：scheduleHealth 不再列出它，没摘的照旧；从没登记过的编号无事发生', async () => {
+      await registerScheduledJobs(t.db, [every6h('alert-dispatch'), every6h('canary')]);
+      await unregisterScheduledJobs(t.db, ['alert-dispatch']);
+      expect((await scheduleHealth(t.db, NOW)).map((h) => h.job.id)).toEqual(['canary']);
+      const rows = await t.db.select().from(scheduledJobs);
+      expect(rows.find((r) => r.id === 'alert-dispatch')?.removedAt).not.toBeNull();
+      expect(rows.find((r) => r.id === 'canary')?.removedAt).toBeNull();
+      // 从没登记过的编号：无事发生，不抛
+      await expect(unregisterScheduledJobs(t.db, ['从没登记过的编号'])).resolves.toBeUndefined();
+    });
+
+    it('任务回来了（重新登记）：摘除清零，scheduleHealth 重新列出', async () => {
+      await registerScheduledJobs(t.db, [every6h('alert-dispatch')]);
+      await unregisterScheduledJobs(t.db, ['alert-dispatch']);
+      expect(await scheduleHealth(t.db, NOW)).toEqual([]);
+      await registerScheduledJobs(t.db, [every6h('alert-dispatch')]);
+      const [row] = await t.db.select().from(scheduledJobs);
+      expect(row?.removedAt).toBeNull();
+      expect((await scheduleHealth(t.db, NOW)).map((h) => h.job.id)).toEqual(['alert-dispatch']);
+    });
   });
 });
 
