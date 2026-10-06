@@ -2,6 +2,7 @@ import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
+import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { IntentStore } from './intent-store.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
@@ -78,6 +79,11 @@ export interface Deps {
    * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。
    */
   release?: ReleaseSource | undefined;
+  /**
+   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件 + 起 pnpm release:onekey preflight。
+   * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。
+   */
+  franceRelease?: FranceReleasePort | undefined;
   /**
    * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。意图卡的长轮询（intent-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。

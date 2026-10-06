@@ -30,6 +30,8 @@ import type {
   EnvScheduleSchema,
   EnvSessionsSchema,
   EnvVersionSchema,
+  FrancePreflightResponseSchema,
+  FranceReleaseStateSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
@@ -198,6 +200,11 @@ export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
 
 /** /changelog 页「发布 v<N>」的版本号（#725）：ok / blocked / unreadable 三种，见 web-api.ts 的 ReleaseVersionResponse。 */
 export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
+
+/** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
+export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
+/** /france 页「发版预检」一次一回：done 带输出、退出码；起进程都没起来走 unreadable。 */
+export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
 
 export type DemoLinks = z.infer<typeof DemoLinksResponse>;
 export type DemoLink = z.infer<typeof DemoLinkSchema>;

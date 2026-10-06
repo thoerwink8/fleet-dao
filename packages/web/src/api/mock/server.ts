@@ -19,6 +19,8 @@ import {
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
   engineMasterOf,
+  FrancePreflightResponseSchema,
+  FranceReleaseStateSchema,
   flowStages,
   HARD_BANS,
   HomeResponseSchema,
@@ -1801,6 +1803,20 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         version: 'v3',
         milestone: { number: 3, title: 'v3 三段一条龙' },
         others: [{ number: 4, title: 'v4 看得更清楚' }],
+        asOf: iso(),
+      });
+    },
+    async franceReleaseState() {
+      await wait();
+      // 假数据：这台后端不是法国，装作「没在走」（开发 mock 看到的就是这个；真法国机器装的是正式环境）。
+      return FranceReleaseStateSchema.parse({ state: 'idle', asOf: iso() });
+    },
+    async francePreflight() {
+      await wait();
+      // 假数据不起子进程：装作这台后端没接上 release:onekey（真法国机器才装得上）。
+      return FrancePreflightResponseSchema.parse({
+        state: 'unreadable',
+        why: '这是假后端：开发 mock、演示版没有真的 pnpm release:onekey 可跑；到法国那台的正式驾驶舱才有这颗按钮',
         asOf: iso(),
       });
     },

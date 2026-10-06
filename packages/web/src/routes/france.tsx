@@ -1,5 +1,6 @@
-// 法国总览（#618 第 1 版）：打开驾驶舱的 /france，一眼看到法国环境现在怎样——引擎在不在、在用哪版、健康红几项、定时任务跑得怎么样。
-// 第 1 版只做「看」不做「发」（停派活 / 等收尾 / 部署 / 恢复那四步是 #618 后面的事，这一版不放按钮）。
+// 法国总览（#618）：打开驾驶舱的 /france，一眼看到法国环境现在怎样——引擎在不在、在用哪版、健康红几项、定时任务跑得怎么样。
+// 现已带「发版一键」卡：release-train 此刻的状态 + 「发版预检」按钮（只到预检，命令后端写死 pnpm release:onekey preflight，
+// 不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做）。真发版走 pnpm release:onekey start，不放页面按钮。
 //
 // 数据从哪来：
 // - 这一页全部只读，只调现成的两个接口：/api/env（引擎、版本、健康、最近拉单等 7 项事实）和 /api/jobs（定时任务）。
@@ -20,14 +21,24 @@ import {
   CircleDashed,
   HeartPulse,
   Power,
+  Rocket,
   Tag,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
-import { useEnv, useJobs } from '../api/client';
-import type { EnvEngine, EnvHealth, EnvSchedule, EnvVersion, JobView } from '../api/types';
+import { useEnv, useFrancePreflight, useFranceReleaseState, useJobs } from '../api/client';
+import type {
+  EnvEngine,
+  EnvHealth,
+  EnvSchedule,
+  EnvVersion,
+  FrancePreflightResponse,
+  FranceReleaseState,
+  JobView,
+} from '../api/types';
 import { LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { Button } from '../components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -265,6 +276,115 @@ function rowTone(j: JobView): 'fail' | 'stall' | null {
   return null;
 }
 
+/**
+ * 发版一键卡（#618）：release-train 此刻的状态 + 「发版预检」按钮。
+ * 状态三态：running = 在走；paused = 暂停标记留下来了但一趟不在（孤儿）；idle = 没在走。读不到一律 unreadable，写明原因。
+ * 「发版预检」按钮点下让后端起 pnpm release:onekey preflight（命令后端写死、不收参数），结果分块 show 在下面。
+ */
+function ReleaseCard({
+  release,
+  preflight,
+}: {
+  release: FranceReleaseState;
+  preflight: ReturnType<typeof useFrancePreflight>;
+}) {
+  const result: FrancePreflightResponse | undefined = preflight.data;
+  const releaseTone: Tone | undefined =
+    release.state === 'running' ? 'stall' : release.state === 'paused' ? 'fail' : undefined;
+  return (
+    <>
+      <Read
+        label="发版一键"
+        hint="release-train 此刻在不在走"
+        icon={Rocket}
+        value={
+          release.state === 'running'
+            ? '在走'
+            : release.state === 'paused'
+              ? '暂停标记没人收'
+              : release.state === 'idle'
+                ? '没在走'
+                : '没查成'
+        }
+        tone={releaseTone}
+        sub={
+          release.state === 'running'
+            ? `${release.phase} · ${release.target}${release.marker ? ' · 派活已暂停' : ' · 暂停标记没写'}`
+            : release.state === 'paused'
+              ? '暂停标记在、但一趟的记录不在：之前 abort 没把标记清掉。要发版前先用 pnpm release:onekey abort 收掉它'
+              : release.state === 'idle'
+                ? '要发版前可以点右边「发版预检」按钮核一遍；要真发版走 pnpm release:onekey start'
+                : release.why
+        }
+      >
+        <div className="mt-3">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            disabled={preflight.isPending}
+            onClick={() => preflight.mutate()}
+          >
+            {preflight.isPending ? '预检在跑…' : '发版预检'}
+          </Button>
+        </div>
+      </Read>
+      {preflight.isError ? (
+        <div className="mt-3 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
+          预检请求没发出去：
+          {preflight.error instanceof Error ? preflight.error.message : String(preflight.error)}
+        </div>
+      ) : null}
+      {result ? (
+        <div className="mt-3 rounded-lg border bg-card p-4">
+          {result.state === 'unreadable' ? (
+            <p className="text-sm text-ink-stall">没查成：{result.why}</p>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground">
+                <span className="num">{result.command}</span>
+                {' · '}
+                退出码 {result.code ?? '（没给）'}
+                {result.signal ? `，信号 ${result.signal}` : ''}
+                {' · 跑了 '}
+                {Math.round(result.durationMs / 100) / 10} 秒{result.timedOut ? '（60 秒到点了被杀）' : ''}
+                {result.truncated ? '（输出超 512KB 已截断）' : ''}
+              </p>
+              <div
+                className={
+                  result.code === 0
+                    ? 'mt-2 text-sm font-medium text-ink-done'
+                    : 'mt-2 text-sm font-medium text-ink-fail'
+                }
+              >
+                {result.code === 0 ? '预检过了' : '预检没过（退出码不是 0；看下面输出找哪一项卡住）'}
+              </div>
+              {result.stdout ? (
+                <pre className="mt-3 max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap">
+                  {result.stdout}
+                </pre>
+              ) : null}
+              {result.stderr ? (
+                <>
+                  <p className="mt-3 text-xs font-medium text-ink-stall">
+                    stderr（release-train 的报错 / 没成的行都在这）：
+                  </p>
+                  <pre className="mt-2 max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap">
+                    {result.stderr}
+                  </pre>
+                </>
+              ) : null}
+              {!result.stdout && !result.stderr ? (
+                <p className="mt-3 text-xs text-muted-foreground">这次没产出任何输出。</p>
+              ) : null}
+            </>
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function JobsTable({ jobs, now }: { jobs: readonly JobView[]; now: number }) {
   if (jobs.length === 0) {
     return (
@@ -331,6 +451,8 @@ function JobsTable({ jobs, now }: { jobs: readonly JobView[]; now: number }) {
 export default function France() {
   const env = useEnv();
   const jobs = useJobs();
+  const release = useFranceReleaseState();
+  const preflight = useFrancePreflight();
   const now = useNow();
   const facts = env.data?.facts;
   const jobList = jobs.data?.jobs;
@@ -372,6 +494,22 @@ export default function France() {
                 reason={facts.schedule.reason}
               />
             )}
+          </div>
+
+          <div className="mt-6">
+            <Panel
+              title="发版一键"
+              description="release-train 此刻的状态和「发版一键」的入口：点「发版预检」让这台后端自己起 pnpm release:onekey preflight（命令写死、不收参数，只读不改）；真发版走 pnpm release:onekey start，不在页面上发。"
+              bodyClassName="p-4"
+            >
+              {release.isLoading || !release.data ? (
+                <LoadingRows rows={2} />
+              ) : release.error ? (
+                <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
+              ) : (
+                <ReleaseCard release={release.data} preflight={preflight} />
+              )}
+            </Panel>
           </div>
 
           <div className="mt-6">
@@ -423,7 +561,7 @@ export default function France() {
             <Link to="/schedules" className="mx-1 underline underline-offset-2">
               定时任务
             </Link>
-            页。发版动作（停派活 → 等收尾 → 部署 → 恢复）的入口在 #618 后续片里加，这一版不放。
+            页。「发版一键」只到预检：预检是只读的，它不会暂停、不会发版；真发版走 pnpm release:onekey start。
           </p>
         </>
       )}
