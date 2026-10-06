@@ -9,7 +9,6 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freshBeforeSubagent, SUBAGENT_DIRECT_MS, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy } from './git-run.mjs';
-import { cleanId, DELIVERY_TOOLS, nagIfOwed, stateDir } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -59,8 +58,10 @@ const prop = (o, k) => (isObjectLike(o) ? o[k] : undefined);
  */
 const missingLeaf = () => new TypeError("Cannot read properties of undefined (reading 'name')");
 
-/** 只为记「起了后台活」才登记到这条钩子上的工具：不判、直接放行 */
+/** 只为放行才登记到这条钩子上的工具：decide 不认识这些名字，不放行会被拦。不再记账。 */
 export const BACKGROUND_ONLY_TOOLS = new Set(['Agent', 'Task', 'Monitor', 'Workflow']);
+/** 送达类工具同样只放行。登记在同步工具的 PreToolUse matcher 里（targets.ts），两边要一起改。 */
+export const DELIVERY_TOOLS = new Set(['mcp__mirasim__deliver_artifact', 'PushNotification']);
 
 // bash 里反引号是「先把里面当命令跑」（命令替换）：只有单引号里、带引号的 heredoc（<<'EOF'）里才是普通字符。
 // 双引号里、不带引号、不带引号的 heredoc 里出现没转义的反引号，就返回 true。
@@ -2017,7 +2018,7 @@ export function decide(raw, fallbackCwd = '') {
   /** @type {Record<string, unknown>} */
   const input = isObjectLike(parsed) ? parsed : {};
   const tool = input.tool_name ?? input.toolName;
-  // 只为记「起了后台活」才登记的工具（main 里已经记过）：这里不判，放行
+  // 只为放行才登记的工具：这里不判
   if (typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool)))
     return { code: 0 };
   const readKind = typeof tool === 'string' && Object.hasOwn(READ_TOOLS, tool) ? READ_TOOLS[tool] : undefined;
@@ -2151,16 +2152,11 @@ if (isMain()) {
   try {
     /** @type {unknown} */
     const input = JSON.parse(raw);
-    const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-    // 决定 0026：不再因起后台活自动开无人值守。Agent、Monitor、Workflow 仍登记在这条钩子上，
-    // 见到就放行（decide 不认识它们的名字，不放行会被拦）。
-    const sub = isSubagentCall(input);
+    // 决定 0026：不再因起后台活自动开无人值守。Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，
+    // 见到就放行（decide 不认识它们的名字，不放行会被拦）。决定 0027 起不再读欠账。
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
-    // 送达类工具清账。不再因欠账拦工具（决定 0026）。欠账文件坏了只往 stderr 写一句，不拦。
-    const nag = id && !sub ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
-    if (nag) process.stderr.write(`${nag.message}\n`);
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }

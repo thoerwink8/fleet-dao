@@ -9,11 +9,9 @@
 //   node ~/.fleet-dao/hooks/unattended.mjs off|status|done|needs-you
 //     还认旧的状态文件（清掉、查看）。done / needs-you 不再是「放行收尾」的开关。
 //
-// 改这里之前必须知道（规矩由 agents/test/rules/stop.rules.test.ts、inflight.rules.test.ts 钉住）：
-// - decideStop 永远不拦。旧的状态文件留着也不拦。
-// - armForBackground 不写状态。起子代理、监视、后台命令都不再自动开无人值守。
-// - 钩子里任何一步出错一律放行，绝不抛、不拦。
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+// 决定 0027：空壳函数和欠账账本删了。旧的状态文件留着也不拦收尾。钩子里任何一步出错一律放行，绝不抛、不拦。
+// 规矩由 agents/test/rules/stop.rules.test.ts 钉住。
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,83 +123,6 @@ function removeState(dir, id) {
 const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
 
 /**
- * Stop 钩子要不要挡。返回 { block: true, reason } 或 { block: false, notice? }（notice 给 systemMessage，只在要说话时有）。
- * 不抛：任何一步出错都放行并写明。
- * @param {{ dir: string, sessionId: unknown, now?: number }} opts
- * @returns {{ block: true, reason: string } | { block: false, notice?: string }}
- */
-export function decideStop({ dir, sessionId, now = Date.now() }) {
-  void dir;
-  void sessionId;
-  void now;
-  return { block: false };
-}
-
-/**
- * 这次工具调用是不是起了一件在后台跑的活。后台活是挂在这个会话进程上的：一轮结束、进程一重开它就被杀，
- * 也就没有谁会被它的完成通知叫醒（2026-10-04 上午、下午各丢过一回：#754 的测试和三个监视任务跟着一轮结束一起没了）。
- * Agent（子代理）默认在后台，只有显式 run_in_background:false 才是前台；Monitor、Workflow 本来就是后台；Bash、PowerShell 要显式 true。
- * @param {unknown} toolName
- * @param {unknown} toolInput
- * @returns {boolean}
- */
-export function startsBackground(toolName, toolInput) {
-  const bg =
-    typeof toolInput === 'object' && toolInput !== null && 'run_in_background' in toolInput
-      ? toolInput.run_in_background
-      : undefined;
-  if (toolName === 'Monitor' || toolName === 'Workflow') return true;
-  if (toolName === 'Agent' || toolName === 'Task') return bg !== false;
-  if (toolName === 'Bash' || toolName === 'PowerShell') return bg === true;
-  return false;
-}
-
-/**
- * 决定 0026：不再因后台活写状态、不再挡收尾。保留函数是免得旧调用方抛错；参数不看，一律不写。
- * @param {{ dir: string, sessionId: unknown, now?: number, minutes?: number }} opts
- * @returns {{ armed: boolean, kept?: boolean, why?: string }}
- */
-export function armForBackground({ dir, sessionId, now = Date.now(), minutes }) {
-  void dir;
-  void sessionId;
-  void now;
-  void minutes;
-  return { armed: false, why: '收尾不再因后台活被挡（决定 0026）' };
-}
-
-// ── 创始人的话到了、还没有东西送到他手上 ──
-// 记在 <会话号>.owed.json。消息提交钩子（prompt-log.mjs）记；送达类工具和收尾放行时清掉。
-// 决定 0026 之后收尾不再被按住，这里不再把欠账拼进挡回理由，也不再按分钟数拦工具。
-
-/** 调了这几个工具算「送到他手上了」。登记在同步工具的 PreToolUse matcher 里（targets.ts），两边要一起改。 */
-export const DELIVERY_TOOLS = new Set(['mcp__mirasim__deliver_artifact', 'PushNotification']);
-
-/** @typedef {{ at: string, preview: string, nagged: boolean }} Owed */
-
-/**
- * @param {string} dir
- * @param {unknown} id
- */
-function owedFile(dir, id) {
-  return join(dir, `${cleanId(id)}.owed.json`);
-}
-
-/**
- * 是不是他本人说的、要有个回音的话：系统替后台活报的完成通知、上下文总结的开场白不算；「继续」这种几个字的也不算。
- * @param {unknown} prompt
- * @returns {prompt is string}
- */
-export function isFounderPrompt(prompt) {
-  if (typeof prompt !== 'string') return false;
-  const t = prompt.trim();
-  if (t.length < 6) return false;
-  return (
-    !/^(<task-notification|<agent-message|\[SYSTEM NOTIFICATION|This session is being continued)/.test(t) &&
-    !isMachineOpening(t)
-  );
-}
-
-/**
  * 机器自己起的会话的第一条提示：反方（「你是「反方」」，discuss 技能起的）。
  * 它也走 UserPromptSubmit，不是创始人说的话（2026-10-05 开会话钩子列「创始人最近的话」，真话被这类提示挤出最后 5 条）。
  * @param {unknown} prompt
@@ -221,119 +142,6 @@ const MACHINE_TREE = /[\\/]\.claude[\\/]worktrees[\\/]w-[^\\/]+(?:[\\/]|$)/;
 export function isMachineSession({ env = process.env, cwd } = {}) {
   if (env.FLEET_WORKER === '1') return true;
   return typeof cwd === 'string' && MACHINE_TREE.test(cwd);
-}
-
-/**
- * 消息提交那一刻记一笔。不抛、不出声（调用方是「绝不插话」的 prompt-log.mjs）。
- * @param {{ dir: string, sessionId: unknown, prompt: unknown, now?: number }} opts
- */
-export function noteFounderPrompt({ dir, sessionId, prompt, now = Date.now() }) {
-  try {
-    if (!cleanId(sessionId) || !isFounderPrompt(prompt)) return;
-    mkdirSync(dir, { recursive: true });
-    /** @type {Owed} */
-    const owed = {
-      at: new Date(now).toISOString(),
-      preview: prompt.trim().replace(/\s+/g, ' ').slice(0, 40),
-      nagged: false,
-    };
-    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify(owed)}\n`);
-  } catch {
-    // 记不上只是少一次提醒
-  }
-}
-
-/**
- * 欠账文件：没有（或会话号认不出、没地方找）是 { ok: true, owed: null }；读不了、不是 JSON、缺 at/preview、时间认不出是
- * { ok: false, why }——那是坏了，不是「没欠」，调用方要明说（原来一律回 null，「话还没送到」这条提醒悄悄失效，全仓审查第 4 路 S8）。
- * @param {{ dir: string, sessionId: unknown }} opts
- * @returns {{ ok: true, owed: Owed | null } | { ok: false, why: string }}
- */
-export function readOwed({ dir, sessionId }) {
-  if (!cleanId(sessionId)) return { ok: true, owed: null };
-  let text;
-  try {
-    text = readFileSync(owedFile(dir, sessionId), 'utf8');
-  } catch (err) {
-    if (errCode(err) === 'ENOENT') return { ok: true, owed: null };
-    return { ok: false, why: `读不了（${errCode(err) ?? messageOf(err) ?? err}）` };
-  }
-  /** @type {unknown} */
-  let o;
-  try {
-    o = JSON.parse(text);
-  } catch {
-    return { ok: false, why: '不是 JSON' };
-  }
-  if (typeof o !== 'object' || o === null || !('at' in o) || !('preview' in o))
-    return { ok: false, why: '缺 at 或 preview' };
-  if (!Number.isFinite(Date.parse(String(o.at)))) return { ok: false, why: `时间认不出（${String(o.at)}）` };
-  return {
-    ok: true,
-    owed: { at: String(o.at), preview: String(o.preview), nagged: 'nagged' in o && o.nagged === true },
-  };
-}
-
-/**
- * 欠账文件坏了：挪到旁边的 .bad（留着查原因，下次不再报同一份），返回一句不拦的提示。挪不动也照样提示。
- * @param {{ dir: string, sessionId: unknown, why: string }} opts
- */
-function setAsideOwed({ dir, sessionId, why }) {
-  const file = owedFile(dir, sessionId);
-  let moved = '';
-  try {
-    renameSync(file, `${file}.bad`);
-    moved = `，已挪到 ${file}.bad`;
-  } catch (err) {
-    moved = `，挪不走（${errCode(err) ?? messageOf(err) ?? err}）`;
-  }
-  return (
-    `欠账文件 ${file} 坏了（${why}）${moved}：创始人的话有没有送到他手上核不了。` +
-    '他最近说过话、还没送过东西，就先用 deliver_artifact（没有就 PushNotification）送一句。'
-  );
-}
-
-/** @param {{ dir: string, sessionId: unknown }} opts */
-export function clearOwed({ dir, sessionId }) {
-  try {
-    if (cleanId(sessionId)) rmSync(owedFile(dir, sessionId), { force: true });
-  } catch {
-    // 清不掉最多多提醒一次
-  }
-}
-
-/**
- * 收尾钩子用：放行时清掉欠账（这一轮结束了，最后一条就是答复）。不再把欠账拼进挡回理由。
- * @param {{ block: true, reason: string } | { block: false, notice?: string }} verdict
- * @param {{ dir: string, sessionId: unknown, now?: number }} opts
- */
-export function withOwed(verdict, { dir, sessionId, now = Date.now() }) {
-  void now;
-  if (!verdict.block) clearOwed({ dir, sessionId });
-  return verdict;
-}
-
-/**
- * 调工具前钩子用：送达类工具清账。不再拦工具调用（决定 0026：收尾不再被按住，答案写在这一轮最后一条）。
- * 欠账文件坏了、这一步自己出了错：返回 { block: false, message }，调用方写进 stderr、不拦。不抛。
- * @param {{ dir: string, sessionId: unknown, tool: unknown, now?: number }} opts
- * @returns {{ block: boolean, message: string } | null}
- */
-export function nagIfOwed({ dir, sessionId, tool }) {
-  try {
-    if (typeof tool === 'string' && DELIVERY_TOOLS.has(tool)) {
-      clearOwed({ dir, sessionId });
-      return null;
-    }
-    const read = readOwed({ dir, sessionId });
-    if (!read.ok) return { block: false, message: setAsideOwed({ dir, sessionId, why: read.why }) };
-    return null;
-  } catch (err) {
-    return {
-      block: false,
-      message: `「创始人的话还没送到」这条提醒自己出错了（${errCode(err) ?? messageOf(err) ?? err}），这次没核成。`,
-    };
-  }
 }
 
 /**

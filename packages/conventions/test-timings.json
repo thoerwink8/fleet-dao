@@ -21,7 +21,6 @@
     "agents/test/rules/directive-inbox.rules.test.ts": 7,
     "agents/test/rules/fable-scope.rules.test.ts": 12,
     "agents/test/rules/foreground-wait.rules.test.ts": 77,
-    "agents/test/rules/inflight.rules.test.ts": 410,
     "agents/test/rules/mid-turn-answer.rules.test.ts": 6,
     "agents/test/rules/pretool.rules.test.ts": 604,
     "agents/test/rules/prompt-log.rules.test.ts": 511,

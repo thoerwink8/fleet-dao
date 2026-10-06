@@ -150,7 +150,7 @@ export interface HookTarget {
  * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
  * 第一组还挂了 Agent、Task、Monitor、Workflow：不是要判它们。决定 0026 删掉了「起后台活自动开无人值守」，
  * pretool.mjs 见到这几个名字记完就放行（decide 不认识它们的名字，不放行会被拦）。
- * mcp__mirasim__deliver_artifact、PushNotification 同理：调了它们算「创始人的话送到他手上了」，记一笔清账就放行（unattended.mjs 的 DELIVERY_TOOLS，两边一起改）。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠无人值守兜底。
+ * mcp__mirasim__deliver_artifact、PushNotification 同理：decide 不认识这两个名字，不放行会被拦，所以登记上、见到就放行（pretool.mjs 的 DELIVERY_TOOLS，两边一起改）。决定 0027 起不再为它们记账。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠这条放行。
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
