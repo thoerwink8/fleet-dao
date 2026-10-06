@@ -36,13 +36,6 @@ const errCode = (e) => (typeof e === 'object' && e !== null && 'code' in e ? e.c
  */
 const messageOf = (e) => (typeof e === 'object' && e !== null && 'message' in e ? e.message : undefined);
 
-export const DEFAULT_HOURS = 8;
-export const MAX_HOURS = 24;
-/** 被挡回去后连着这么多次没调过工具，就放行。 */
-export const MAX_IDLE_BLOCKS = 3;
-/** 一次无人值守最多挡这么多次，防别的原因造成的无限循环。 */
-export const MAX_TOTAL_BLOCKS = 80;
-
 const SCRIPT = '~/.fleet-dao/hooks/unattended.mjs';
 
 /**
@@ -132,25 +125,6 @@ function removeState(dir, id) {
 const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
 
 /**
- * @param {State} state
- * @param {number} now
- */
-export function blockReason(state, now) {
-  const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
-  if (state.auto === true) {
-    return (
-      `你起了后台活（子代理、监视、后台命令），这一轮结束它们会跟着会话进程一起被杀、没有谁会被完成通知叫醒，所以先别结束这一轮（自动挡 ${left} 分钟）。` +
-      `继续等它们的结果、接着干；全收口了：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的：node ${SCRIPT} needs-you "要他拍什么"。`
-    );
-  }
-  return (
-    `无人值守开着（还剩约 ${left} 分钟）：不要结束这一轮。还有没做完的事就接着干——先短报一行进度，然后继续调工具；` +
-    `全做完了：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（对外发布、花钱、删数据、改标准）：` +
-    `node ${SCRIPT} needs-you "要他拍什么"，再把问题放在最后一条。`
-  );
-}
-
-/**
  * Stop 钩子要不要挡。返回 { block: true, reason } 或 { block: false, notice? }（notice 给 systemMessage，只在要说话时有）。
  * 不抛：任何一步出错都放行并写明。
  * @param {{ dir: string, sessionId: unknown, now?: number }} opts
@@ -162,23 +136,6 @@ export function decideStop({ dir, sessionId, now = Date.now() }) {
   void now;
   return { block: false };
 }
-
-/**
- * PreToolUse 调用：开着就记一笔「调了工具」。只在需要改的时候才写；任何错误都吞掉。
- * @param {{ dir: string, sessionId: unknown }} opts
- */
-export function touchTool({ dir, sessionId }) {
-  try {
-    const r = readState(dir, sessionId);
-    if (!r.ok || r.state === null || r.state.state !== 'on' || r.state.toolSinceBlock === true) return;
-    writeState(dir, sessionId, { ...r.state, toolSinceBlock: true });
-  } catch {
-    // 记不上最多让这一轮早点被放行，不影响调用
-  }
-}
-
-/** 起了后台活自动开的无人值守开多久（创始人 2026-10-04「选 1」）；再起一个后台活就续到再过这么久。 */
-export const AUTO_ARM_MINUTES = 30;
 
 /**
  * 这次工具调用是不是起了一件在后台跑的活。后台活是挂在这个会话进程上的：一轮结束、进程一重开它就被杀，
@@ -204,7 +161,7 @@ export function startsBackground(toolName, toolInput) {
  * @param {{ dir: string, sessionId: unknown, now?: number, minutes?: number }} opts
  * @returns {{ armed: boolean, kept?: boolean, why?: string }}
  */
-export function armForBackground({ dir, sessionId, now = Date.now(), minutes = AUTO_ARM_MINUTES }) {
+export function armForBackground({ dir, sessionId, now = Date.now(), minutes }) {
   void dir;
   void sessionId;
   void now;
@@ -212,15 +169,10 @@ export function armForBackground({ dir, sessionId, now = Date.now(), minutes = A
   return { armed: false, why: '收尾不再因后台活被挡（决定 0026）' };
 }
 
-// ── 创始人的话到了、还没有东西送到他手上（创始人 2026-10-05「全都按照你推荐的改」，对「干活中间问话，一次答完并送到手上」那条）──
-// 起因：无人值守或后台活开着时这一轮结束不了，「答案放最后一条」落不了地。2026-10-05 一场会话里他问了一句，答案 11 分钟就齐了，
-// 之后 2 小时只是在每一步开头重说，一次也没单独发给他。
-// 记在 <会话号>.owed.json，和无人值守的状态分开存：他说话的时候可能还没开（后台活晚一步才起）。
-// 三处动它：消息提交钩子（prompt-log.mjs）记；调工具前钩子（pretool.mjs）见到送达类工具就清、过了 OWED_NAG_MINUTES 还欠着就拦一次；
-// 收尾钩子（stop.mjs）放行时清（这一轮结束了，最后一条就是答复）、挡回时在话里点名。
+// ── 创始人的话到了、还没有东西送到他手上 ──
+// 记在 <会话号>.owed.json。消息提交钩子（prompt-log.mjs）记；送达类工具和收尾放行时清掉。
+// 决定 0026 之后收尾不再被按住，这里不再把欠账拼进挡回理由，也不再按分钟数拦工具。
 
-/** 他的话到了之后过这么久还没送达，就在下一次调工具时拦一次。 */
-export const OWED_NAG_MINUTES = 10;
 /** 调了这几个工具算「送到他手上了」。登记在同步工具的 PreToolUse matcher 里（targets.ts），两边要一起改。 */
 export const DELIVERY_TOOLS = new Set(['mcp__mirasim__deliver_artifact', 'PushNotification']);
 
@@ -351,50 +303,14 @@ export function clearOwed({ dir, sessionId }) {
 }
 
 /**
- * @param {Owed} owed
- * @param {number} now
- */
-export function owedLine(owed, now) {
-  const mins = Math.max(0, Math.round((now - Date.parse(owed.at)) / 60_000));
-  return (
-    `创始人 ${mins} 分钟前说的话（「${owed.preview}…」）还没有东西送到他手上——这一轮结束不了，他等不到「最后一条」。` +
-    '现在就送：是问话，把完整答案一次写清，用 deliver_artifact 发给他（没有就 PushNotification）；是交代，发一行「收到、在做什么」。' +
-    '送过之后接着干，不要在后面每一步开头再重说。'
-  );
-}
-
-/**
- * 收尾钩子用：挡回去时把欠着的话点名加在前面（欠账文件坏了就把「坏了」那句加在前面）；放行时清掉（这一轮结束了，最后一条就是答复）。
+ * 收尾钩子用：放行时清掉欠账（这一轮结束了，最后一条就是答复）。不再把欠账拼进挡回理由。
  * @param {{ block: true, reason: string } | { block: false, notice?: string }} verdict
  * @param {{ dir: string, sessionId: unknown, now?: number }} opts
  */
 export function withOwed(verdict, { dir, sessionId, now = Date.now() }) {
-  if (!verdict.block) {
-    clearOwed({ dir, sessionId });
-    return verdict;
-  }
-  const r = readOwed({ dir, sessionId });
-  if (!r.ok)
-    return { block: true, reason: `${setAsideOwed({ dir, sessionId, why: r.why })}\n${verdict.reason}` };
-  const owed = r.owed;
-  if (!owed) return verdict;
-  // 同一条欠账只在「第一次挡住收尾」时塞进 reason 顶部；之后每次再把这条放最前，模型就只看见它、看不见别的
-  // （Mirasim 会把每条挡回都重现，于是用户以为模型重说同一句话、忽略了新输入）。第一次过后照旧拦，但用一句短的「账还欠着」带过。
-  if (owed.nagged) return { block: true, reason: verdict.reason };
-  markNagged({ dir, sessionId, owed });
-  return { block: true, reason: `${owedLine(owed, now)}\n${verdict.reason}` };
-}
-
-/**
- * 给欠账文件打上 nagged：下次挡住收尾时不再把这句放最前。写坏了最多多提醒一次，不抛。
- * @param {{ dir: string, sessionId: unknown, owed: Owed }} opts
- */
-function markNagged({ dir, sessionId, owed }) {
-  try {
-    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify({ ...owed, nagged: true })}\n`);
-  } catch {
-    // 只是下次多提醒一次
-  }
+  void now;
+  if (!verdict.block) clearOwed({ dir, sessionId });
+  return verdict;
 }
 
 /**

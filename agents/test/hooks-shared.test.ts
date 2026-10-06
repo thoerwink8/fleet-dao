@@ -191,11 +191,11 @@ describe('欠账文件坏了不再悄悄当没欠（S8）', () => {
     expect(un.nagIfOwed({ dir, sessionId: ID, tool: 'Bash' })).toBeNull();
   });
 
-  it('收尾被挡回时：把「坏了」那句加在前面', () => {
-    const v = un.withOwed({ block: true, reason: '接着干' }, { dir: broken(), sessionId: ID });
-    expect(v.block).toBe(true);
-    expect(v.reason).toMatch(/^欠账文件 .*坏了（不是 JSON）/);
-    expect(v.reason).toContain('\n接着干');
+  it('收尾放行时清掉坏的欠账文件，不拦', () => {
+    const dir = broken();
+    const v = un.withOwed({ block: false }, { dir, sessionId: ID });
+    expect(v).toEqual({ block: false });
+    expect(existsSync(join(dir, `${ID}.owed.json`))).toBe(false);
   });
 
   it(
