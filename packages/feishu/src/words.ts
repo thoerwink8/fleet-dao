@@ -1,17 +1,13 @@
 // 给人看的字：时间、时长、截断都过这里（卡片上的内部代号由 cards.ts 的 checkCard 拦）。
 
 const TZ = 'Asia/Shanghai';
+/** 北京无夏令时，固定 UTC+8。不用 Intl 的 hour12:false：那条交给运行时选小时周期，有的会选 h24，午夜显示成 24:xx。 */
+const BEIJING_OFFSET_MS = 8 * 3_600_000;
 const dayFmt = new Intl.DateTimeFormat('en-CA', {
   timeZone: TZ,
   year: 'numeric',
   month: '2-digit',
   day: '2-digit',
-});
-const clockFmt = new Intl.DateTimeFormat('en-GB', {
-  timeZone: TZ,
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
 });
 
 /** 北京时间的日期，例如 2026-09-25。 */
@@ -21,7 +17,7 @@ export function beijingDay(ms: number): string {
 
 /** 北京时间的「时:分」，例如 14:02。 */
 export function beijingClock(ms: number): string {
-  return clockFmt.format(new Date(ms));
+  return new Date(ms + BEIJING_OFFSET_MS).toISOString().slice(11, 16);
 }
 
 /** 今天的只写时刻，别的日子带上月日：「14:02」「09-24 14:02」。 */
