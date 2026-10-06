@@ -40,6 +40,7 @@ interface TrainIo {
   >;
 }
 interface Train {
+  DEFAULT_LIMITS: Record<string, number>;
   runTrain(argv: string[], io: TrainIo): Promise<number>;
   parseWorkerStatus(out: string): { running: string[]; uncertain: string[]; unreadable: string[] };
   orderFromDescription(d: string): number[];
@@ -218,8 +219,7 @@ function makeWorld() {
     scriptsDir: 'scripts',
     limits: {
       pollMs: 1000,
-      localMs: 3000,
-      prMs: 3000,
+      ciMs: 3000,
       franceMs: 3000,
       mergeMs: 3000,
       tagMs: 3000,
@@ -255,6 +255,22 @@ const stateOf = (home: string) =>
     laggards: string[];
   };
 const text = (lines: string[]) => lines.join('\n');
+/**
+ * 预检那次读到 0 个，之后法国一直有一个会话在跑：等收尾会一直等不到。本机工人、自动合并的 PR 只提示、不等了（母单 #1121），
+ * 挡路的只剩法国会话和主线 CI。
+ */
+const franceBusyAfterPreflight = (w: { sessions: () => Promise<SessionsResult> }) => {
+  let polls = 0;
+  w.sessions = async () => {
+    polls += 1;
+    return polls === 1
+      ? { ok: true, running: 0, rows: [] }
+      : { ok: true, running: 1, rows: [{ repo: 'o/a', n: 5, stage: 'execute' }] };
+  };
+};
+const franceFree = (w: { sessions: () => Promise<SessionsResult> }) => {
+  w.sessions = async () => ({ ok: true, running: 0, rows: [] });
+};
 const releaseCalls = (ssh: string[]) =>
   ssh.filter((c) => c.includes('/deploy/release.sh ') && !c.endsWith('--check'));
 
@@ -262,7 +278,7 @@ describe('暂停标记：worker.mjs start 见标记就拒', () => {
   it('发版暂停期间 start 被拒（退出码 3、说明原因、什么都没起），status 照常', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER; // 等收尾会一直等不到
+    franceBusyAfterPreflight(w); // 等收尾会一直等不到
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(code).toBe(3);
     expect(existsSync(markerFile(home))).toBe(true);
@@ -414,33 +430,58 @@ describe('预检（只读）：不过就什么都不改', () => {
 });
 
 describe('等收尾：到点列出拖后腿的，不硬来', () => {
-  it('本机工人、自动合并的 PR、法国会话到点都没收：停下（退出码 3）、点名列出、标记还在、没发版', async () => {
+  it('各阶段上限（毫秒）：等收尾只有主线 CI 20 分钟、法国会话 13 分钟；本机工人、自动合并的 PR 两项没有上限（只提示不等）', () => {
+    expect(train.DEFAULT_LIMITS).toMatchObject({
+      ciMs: 20 * 60_000,
+      franceMs: 13 * 60_000,
+      preflightMs: 2 * 60_000,
+      pollMs: 30_000,
+    });
+    expect(train.DEFAULT_LIMITS).not.toHaveProperty('localMs');
+    expect(train.DEFAULT_LIMITS).not.toHaveProperty('prMs');
+  });
+
+  it('法国会话到点没收：停下（退出码 3）、点名列出、标记还在、没发版；本机工人、自动合并的 PR 只提示、不算拖后腿', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.workers = RUNNING_WORKER;
     w.prs = [{ number: 77, title: '慢的那个', autoMergeRequest: { enabledAt: 'x' } }];
-    let polls = 0;
-    w.sessions = async () => {
-      polls += 1;
-      // 预检那次是 0 个；之后一直有一个在跑
-      return polls === 1
-        ? { ok: true, running: 0, rows: [] }
-        : { ok: true, running: 1, rows: [{ repo: 'o/a', n: 5, stage: 'execute' }] };
-    };
+    franceBusyAfterPreflight(w);
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(code).toBe(3);
     const err = text(w.err);
     expect(err).toContain('拖后腿');
-    expect(err).toContain('本机工人：w1');
-    expect(err).toContain('#77 慢的那个');
     expect(err).toContain('法国在跑的会话：o/a#5 execute');
+    expect(err).not.toContain('本机工人：w1');
+    expect(err).not.toContain('#77 慢的那个');
+    // 提示打印出来了（打在 out 里），但没当成拖后腿
+    const out = text(w.out);
+    expect(out).toContain('本机工人 1（只提示，不等）');
+    expect(out).toContain('自动合并的 PR 1（只提示，不等）');
+    expect(out).toContain('本机工人：w1');
+    expect(out).toContain('自动合并的 PR：#77 慢的那个');
     expect(releaseCalls(w.sshCalls)).toEqual([]);
     expect(existsSync(markerFile(home))).toBe(true);
     const s = stateOf(home);
     expect(s.status).toBe('blocked');
     expect(s.phase).toBe(3);
-    expect(s.laggards.length).toBe(3);
+    expect(s.laggards.length).toBe(1);
     expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(true); // 暂停已经做了
+  });
+
+  it('【故意造出的失败】本机还有工人在跑、还有挂了自动合并没合的 PR，法国会话已经收完：不等，照样往下发版（只提示）', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.workers = RUNNING_WORKER;
+    w.prs = [{ number: 77, title: '慢的那个', autoMergeRequest: { enabledAt: 'x' } }];
+    franceFree(w);
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
+    expect(code).toBe(0);
+    const out = text(w.out);
+    expect(out).toContain('这几样只提示、不等');
+    expect(out).toContain('本机工人：w1');
+    expect(out).toContain('等收尾：都收完了');
+    expect(releaseCalls(w.sshCalls).length).toBe(1);
   });
 
   it('法国会话数中途读不到：不往下走，到点把「读不到」列为拖后腿（不当成 0）', async () => {
@@ -462,7 +503,7 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
   it('等收尾期间主线 CI 红了：立刻停（不等到点）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER;
+    w.workers = RUNNING_WORKER; // 本机工人只提示、不影响 CI 红了立刻停
     let calls = 0;
     const base = io(home);
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
@@ -485,7 +526,7 @@ describe('abort：恢复原状', () => {
   it('卡住之后 abort：清标记、法国总开关开回暂停前的样子、状态记成已撤销', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER;
+    franceBusyAfterPreflight(w);
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(3);
     expect(w.engineOn).toBe(false);
     expect(existsSync(markerFile(home))).toBe(true);
@@ -504,7 +545,7 @@ describe('abort：恢复原状', () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.engineOn = false;
-    w.workers = RUNNING_WORKER;
+    franceBusyAfterPreflight(w);
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(3);
     expect(text(w.out)).toContain('跳过（引擎总开关本来就关着');
     expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
@@ -611,15 +652,15 @@ describe('整趟走完', () => {
   it('卡住之后同一个目标再跑一次 start 接着走；暂停前的样子不会被现在的「关着」盖掉', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER;
+    franceBusyAfterPreflight(w);
     expect(
       await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER_RESTORE, '--restore'], io(home)),
     ).toBe(3);
     // 换目标：拒
     expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], io(home))).toBe(1);
     expect(text(w.err)).toContain('还没了结');
-    // 工人收了，同一个目标再来
-    w.workers = DONE_WORKER;
+    // 法国会话收了，同一个目标再来
+    franceFree(w);
     w.err.length = 0;
     expect(
       await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER_RESTORE, '--restore'], io(home)),
@@ -706,7 +747,7 @@ describe('status', () => {
     expect(await train.runTrain(['status'], io(home))).toBe(0);
     expect(text(w.out)).toContain('没有发版在走');
     w.out.length = 0;
-    w.workers = RUNNING_WORKER;
+    franceBusyAfterPreflight(w);
     await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     w.out.length = 0;
     expect(await train.runTrain(['status'], io(home))).toBe(0);
@@ -714,7 +755,7 @@ describe('status', () => {
     expect(out).toContain('卡住了');
     expect(out).toContain('第 3 步「等收尾」');
     expect(out).toContain('暂停标记：在');
-    expect(out).toContain('拖后腿：本机工人：w1');
+    expect(out).toContain('拖后腿：法国在跑的会话：o/a#5 execute');
   });
 
   it('状态文件坏了：读不了就明说、退出 2，不覆盖它', async () => {
