@@ -22,9 +22,6 @@ export interface AttemptCounters {
   modelSwaps: number;
 }
 
-/** 问 Jev「认不出的失败怎么办」时的选项（分流本身不再问；real/jev-port.ts 还认这道题的形状）。 */
-export type TriageChoice = 'retry' | 'swapRoute' | 'swapModel' | 'unclear';
-
 /** 一次失败的证据。能给的都给；分类用全文，展示时才截。 */
 export interface FailureEvidence {
   /** 出在哪一步：`session:<阶段>`（AI 会话）、`pushBranch`、`createWorktree`…… */
