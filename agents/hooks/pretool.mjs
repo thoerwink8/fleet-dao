@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freshBeforeSubagent, SUBAGENT_DIRECT_MS, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy } from './git-run.mjs';
+import { cleanId, stateDir, touchTool } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2152,8 +2153,11 @@ if (isMain()) {
   try {
     /** @type {unknown} */
     const input = JSON.parse(raw);
-    // 决定 0026：不再因起后台活自动开无人值守。Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，
+    // 无人值守开着时记一笔「这个会话调了工具」（Stop 钩子靠它判有没有在干活，决定 0028）；只记不判，出错吞掉。
+    // 决定 0026：不因起后台活自动开无人值守（这里只记、不开）。Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，
     // 见到就放行（decide 不认识它们的名字，不放行会被拦）。决定 0027 起不再读欠账。
+    const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+    if (id) touchTool({ dir: stateDir(), sessionId: id });
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
