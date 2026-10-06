@@ -108,7 +108,7 @@ export type FamilyGate = { ok: true } | { ok: false; reason: 'mother_ticket' | '
  */
 export function familyGate(issue: IssueFamily): FamilyGate {
   const later =
-    '要做就重开成挂在当前版本上的独立单（驾驶舱「交给 fleet」上线前由指挥官重开；母单按块带子单等 #252）';
+    '要做就重开成挂在当前版本上的独立单（驾驶舱「交给 fleet」上线前由指挥官重开；母单不带上子单，子单各重开成独立单）';
   if (issue.labels.includes(MOTHER_LABEL) || issue.subIssues > 0) {
     const kids = issue.subIssues > 0 ? `，下面挂着 ${issue.subIssues} 张子单` : '';
     return {

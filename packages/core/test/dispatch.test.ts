@@ -111,10 +111,11 @@ describe('母单、子单这一道（#252 之前：一张单只走一块，母�
       const got = familyGate(mother);
       expect(got, JSON.stringify(mother)).toMatchObject({ ok: false, reason: 'mother_ticket' });
       if (got.ok) throw new Error('母单不该派');
-      expect(got.why).toContain('重开成挂在当前版本上的独立单');
-      expect(got.why).toContain('指挥官重开');
+      expect(got.why).toContain(
+        '要做就重开成挂在当前版本上的独立单（驾驶舱「交给 fleet」上线前由指挥官重开；母单不带上子单，子单各重开成独立单）',
+      );
       expect(got.why).not.toMatch(/fleet-api\s+handover/);
-      expect(got.why).toContain('#252');
+      expect(got.why).not.toContain('#252');
     }
   });
 
@@ -123,6 +124,8 @@ describe('母单、子单这一道（#252 之前：一张单只走一块，母�
     expect(got).toMatchObject({ ok: false, reason: 'sub_issue' });
     if (got.ok) throw new Error('子单不该派');
     expect(got.why).toMatch(/^是 #192 下面的子单/);
+    expect(got.why).toContain('母单不带上子单，子单各重开成独立单');
+    expect(got.why).not.toMatch(/fleet-api\s+handover/);
   });
 
   it('两道合起来：先看版本，再看母单子单；都过了带上按哪个版本派的', () => {
