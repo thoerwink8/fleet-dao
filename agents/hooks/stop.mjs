@@ -3,14 +3,13 @@
 // 会话收尾时扫一眼仓根，是不是有没跟踪、看着像临时文件的（截图、导出的数据、日志）：通用段那条规矩、截图工具的默认目录
 // 都可能被绕过（别的工具、别家 AI 手滑把这类文件直接写进仓根），这里是兜底提醒，不是强制点。
 // 只提醒、不拦、不删——只用 systemMessage，退出码一律 0。
-// 决定 0026：不再因无人值守或后台活输出 decision:block。放行时清掉「话还没送到」的欠账，这一轮的最后一条就是答复。
+// 决定 0026：不再因无人值守或后台活输出 decision:block。决定 0027：不再读、不再清欠账文件。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
 // 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：输出里出现 decision 或 hookSpecificOutput 会红。
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitRunner, gitOk as ok } from './git-run.mjs';
-import { cleanId, stateDir, withOwed } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
 const TEMP_LIKE = /\.(png|jpe?g|gif|json|log|txt)$/i;
@@ -77,9 +76,6 @@ if (isMain()) {
   } catch {
     // 读不懂输入就当没有能提醒的信息，不出声（这只是个提醒，不是拦截，读不懂不该炸）
   }
-  const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-  // 放行并清账：这一轮结束了，最后一条就是答复。不再挡。
-  withOwed({ block: false }, { dir: stateDir(), sessionId });
   const notes = [];
   // stop_hook_active：这一轮是别的 Stop 钩子把对话带下去才有的，不重复提醒仓根的临时文件
   if (input?.stop_hook_active !== true) {

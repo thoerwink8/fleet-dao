@@ -172,7 +172,7 @@ describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', S
     expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
   });
 
-  describe('他说了话：收尾清账，工具不被拦', () => {
+  describe('他说了话也不再写欠账，工具和收尾都不拦（决定 0027）', () => {
     const PROMPT_LOG = fileURLToPath(new URL('../../hooks/prompt-log.mjs', import.meta.url));
     const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
     const say = (env: NodeJS.ProcessEnv, prompt: string) =>
@@ -192,48 +192,24 @@ describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', S
         env,
       });
     const owedPath = (dir: string) => join(dir, `${SID}.owed.json`);
-    const age = (dir: string, minutes: number) => {
-      const o = JSON.parse(readFileSync(owedPath(dir), 'utf8'));
-      writeFileSync(
-        owedPath(dir),
-        JSON.stringify({ ...o, at: new Date(Date.now() - minutes * 60_000).toISOString() }),
-      );
-    };
-    const leaveOn = (dir: string) => {
-      writeFileSync(
-        join(dir, `${SID}.json`),
-        JSON.stringify({
-          state: 'on',
-          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-          idle: 0,
-          totalBlocks: 0,
-          toolSinceBlock: true,
-        }),
-      );
-    };
 
-    it('旧状态还开着、话欠了 11 分钟：工具放行（退出码 0），收尾清账、不拦', () => {
+    it('他说了话：不写欠账文件，工具放行，收尾不拦', () => {
       const dir = temp('state');
       const env = isolatedEnv(dir, SID);
-      leaveOn(dir);
       expect(say(env, '这样改合理吗？断链在哪').status).toBe(0);
-      age(dir, 11);
-      const nag = tool(env, 'Bash');
-      expect(nag.status).toBe(0);
-      expect(nag.stderr).not.toContain('还没有东西送到他手上');
-      expect(blocked(stop(env).stdout)).toBe(false);
       expect(existsSync(owedPath(dir))).toBe(false);
+      expect(tool(env, 'Bash').status).toBe(0);
+      expect(blocked(stop(env).stdout)).toBe(false);
     });
 
-    it('调了送达类工具就清账', () => {
+    it('送达类工具照样放行', () => {
       const dir = temp('state');
       const env = isolatedEnv(dir, SID);
-      say(env, '这样改合理吗？断链在哪');
       expect(tool(env, 'mcp__mirasim__deliver_artifact', { path: 'D:/x/answer.md' }).status).toBe(0);
-      expect(existsSync(owedPath(dir))).toBe(false);
+      expect(tool(env, 'PushNotification', { message: '好了' }).status).toBe(0);
     });
 
-    it('不算他的话：后台活的完成通知、上下文总结的开场白、「继续」这种几个字的', () => {
+    it('不算他的话：后台通知、上下文总结、「继续」，也不写欠账', () => {
       const dir = temp('state');
       const env = isolatedEnv(dir, SID);
       for (const p of [
@@ -246,14 +222,13 @@ describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', S
       }
     });
 
-    it('【故意造出的失败】欠账文件坏了：不拦、不崩', () => {
+    it('【故意造出的失败】旧的坏欠账文件留着：不读、不拦、不崩', () => {
       const dir = temp('state');
       const env = isolatedEnv(dir, SID);
-      leaveOn(dir);
       writeFileSync(owedPath(dir), '{不是 JSON');
-      const nag = tool(env, 'Bash');
-      expect(nag.status).toBe(0);
+      expect(tool(env, 'Bash').status).toBe(0);
       expect(blocked(stop(env).stdout)).toBe(false);
+      expect(existsSync(owedPath(dir))).toBe(true);
     });
   });
 

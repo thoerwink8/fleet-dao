@@ -13,7 +13,6 @@ const SO_SESSIONS = fileURLToPath(new URL('../skills/discuss/scripts/so-sessions
 const un = (await import(
   pathToFileURL(fileURLToPath(new URL('../hooks/unattended.mjs', import.meta.url))).href
 )) as {
-  isFounderPrompt(p: unknown): boolean;
   isMachineOpening(p: unknown): boolean;
   isMachineSession(o?: { env?: Record<string, string | undefined>; cwd?: unknown }): boolean;
 };
@@ -98,12 +97,9 @@ describe('机器会话的判断（落盘和开会话共用 unattended.mjs 这一
     expect(un.isMachineSession({ env: {}, cwd: undefined })).toBe(false);
   });
 
-  it('isFounderPrompt 也不把反方的开场当他的话；真话和长度规矩不变', () => {
+  it('反方的开场认得出，普通句子不算', () => {
     expect(un.isMachineOpening('你是「反方」：…')).toBe(true);
     expect(un.isMachineOpening('你是不是漏了反方')).toBe(false);
-    expect(un.isFounderPrompt('你是「反方」：一个全新会话')).toBe(false);
-    expect(un.isFounderPrompt('进度怎么样，瓶颈在哪里')).toBe(true);
-    expect(un.isFounderPrompt('继续')).toBe(false);
   });
 
   it('反方起的 reclaude 会话带 FLEET_WORKER=1（源码核对：真起 reclaude 要网络和账号，测试不碰）', () => {
