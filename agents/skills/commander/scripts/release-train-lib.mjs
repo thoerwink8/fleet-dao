@@ -29,12 +29,15 @@ export const LOCK_FILE = `${RELEASES}/.lock`;
 /** flock -E：另一个发布占着锁时回这个码（75，同 release.sh 的 EXIT_RELEASE_BUSY）。 */
 const BUSY = 75;
 
-/** 各阶段的上限（毫秒）和轮询间隔；测试里整份换小。方案 4.2：本机 30 分钟、PR 20 分钟、法国 13 分钟（沿用排空上限）。 */
+/**
+ * 各阶段的上限（毫秒）和轮询间隔；测试里整份换小。等收尾只等两样：主线 CI 20 分钟、法国在跑的会话 13 分钟（沿用排空上限）；
+ * 本机在跑的工人、自动合并的 PR 两项只提示不等（创始人 2026-10-06「不合理的想法你自由决定，都改掉」，母单 #1121：它们和法国发版无关，
+ * 会把无关的事卡住；release.sh 自己还会排空一遍）。数值写在 agents/test/release-train.test.ts。
+ */
 export const DEFAULT_LIMITS = {
   preflightMs: 2 * 60_000,
   pauseMs: 60_000,
-  localMs: 30 * 60_000,
-  prMs: 20 * 60_000,
+  ciMs: 20 * 60_000,
   franceMs: 13 * 60_000,
   publishMs: 5 * 60_000,
   mergeMs: 15 * 60_000,
@@ -53,8 +56,8 @@ export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的
   start --tag vN    --founder-ok "<创始人原话>" [--restore]
         发版前先暂停手头的活，再发版，再恢复：
         0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 暂停本机（写标记，worker.mjs start 拒起新工人）
-        → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（本机在跑工人 0、自动合并的 PR 都合了或关了、
-        主线 CI 绿、法国在跑会话 0；各有上限，到点停下列出拖后腿的）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
+        → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（等：主线 CI 绿、法国在跑会话 0，各有上限，到点停下列出拖后腿的；
+        本机在跑的工人、挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
         --sha：ssh 到法国跑 release.sh <提交>；--tag：pnpm publish:pr（要在 release/vN 分支上）→ 等合并 → 等 release.yml 打标记 → 法国自动发布接手
         --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
         --restore：发版后把暂停前开着的总开关、各仓开关原样开回去；--founder-ok 的原话里必须写明授权（含「恢复」「开回」「开引擎」之类的字）；
@@ -333,7 +336,7 @@ async function phasePreflight(io, state) {
   else if (prs.prs.length > 0)
     sayTo(
       io,
-      `预检：挂了自动合并、还没合的 PR ${prs.prs.length} 个（第 3 步会等它们）：${prs.prs.map((p) => `#${p.number}`).join(' ')}`,
+      `预检：挂了自动合并、还没合的 PR ${prs.prs.length} 个（第 3 步只提示、不等它们）：${prs.prs.map((p) => `#${p.number}`).join(' ')}`,
     );
 
   const sessions = await io.runningSessions();
@@ -411,11 +414,15 @@ async function phasePauseFrance(io, state) {
   return { ok: true };
 }
 
-/** 3 等收尾：四样同时满足；各有上限，到点停下列出拖后腿的。 */
+/**
+ * 3 等收尾：等主线 CI 绿、法国在跑的会话 0，各有上限，到点停下列出拖后腿的。本机在跑的工人、自动合并的 PR 只提示（打印出来，
+ * 内容变了再打一次），不挡、不算拖后腿。
+ */
 async function phaseWait(io) {
   const started = io.now().getTime();
   const L = io.limits;
   let lastLine = '';
+  let lastHints = '';
   for (;;) {
     const at = io.now().getTime();
     const status = [];
@@ -427,19 +434,19 @@ async function phaseWait(io) {
           ...w.unreadable.map((n) => `${n}（没查成）`),
         ]
       : [`本机工人读不到：${w.why}`];
-    status.push({ key: '本机工人', held: wHeld, limit: L.localMs });
+    status.push({ key: '本机工人', held: wHeld, hint: true });
 
     const prs = await autoMergePrs(io);
     status.push({
       key: '自动合并的 PR',
       held: prs.ok ? prs.prs.map((p) => `#${p.number} ${p.title}`) : [prs.why],
-      limit: L.prMs,
+      hint: true,
     });
 
     const ci = await mainCi(io);
     if (ci.verdict === 'red')
       return blocked(`主线 CI 红了：${ci.why}。先修主线，再来（同一个目标再跑一次 start）`, [ci.why]);
-    status.push({ key: '主线 CI', held: ci.verdict === 'green' ? [] : [ci.why], limit: L.prMs });
+    status.push({ key: '主线 CI', held: ci.verdict === 'green' ? [] : [ci.why], limit: L.ciMs });
 
     const s = await io.runningSessions();
     status.push({
@@ -452,12 +459,20 @@ async function phaseWait(io) {
       limit: L.franceMs,
     });
 
-    const line = status.map((x) => `${x.key} ${x.held.length}`).join('，');
+    const line = status.map((x) => `${x.key} ${x.held.length}${x.hint ? '（只提示，不等）' : ''}`).join('，');
     if (line !== lastLine) {
       sayTo(io, `等收尾（已 ${minutes(at - started)} 分钟）：${line}`);
       lastLine = line;
     }
-    const open = status.filter((x) => x.held.length > 0);
+    const hints = status
+      .filter((x) => x.hint && x.held.length > 0)
+      .flatMap((x) => x.held.map((h) => `${x.key}：${h}`));
+    const hintText = hints.join('\n');
+    if (hintText !== lastHints) {
+      if (hints.length > 0) sayTo(io, `等收尾：这几样只提示、不等：\n- ${hints.join('\n- ')}`);
+      lastHints = hintText;
+    }
+    const open = status.filter((x) => !x.hint && x.held.length > 0);
     if (open.length === 0) {
       sayTo(io, '等收尾：都收完了');
       return { ok: true };
