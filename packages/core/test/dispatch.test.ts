@@ -113,7 +113,7 @@ describe('母单、子单这一道（#252 之前：一张单只走一块，母�
       if (got.ok) throw new Error('母单不该派');
       expect(got.why).toContain('重开成挂在当前版本上的独立单');
       expect(got.why).toContain('指挥官重开');
-      expect(got.why).not.toContain('fleet-api handover');
+      expect(got.why).not.toMatch(/fleet-api\s+handover/);
       expect(got.why).toContain('#252');
     }
   });
@@ -156,7 +156,7 @@ describe('本机做这一道（#299 止血：帅位留给本机做的，认领�
     expect(got.why).toBe(
       '帅位留给本机做（贴着「本机做」）；要交给引擎，先去掉标签。去掉了仍不拉的（开关打开以前开的），重开一张新单（驾驶舱「交给 fleet」上线前由指挥官重开）',
     );
-    expect(got.why).not.toContain('fleet-api handover');
+    expect(got.why).not.toMatch(/fleet-api\s+handover/);
   });
 
   it('不贴的照派；先看版本、母单子单，再看本机做', () => {

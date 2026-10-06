@@ -166,7 +166,7 @@ describe('screenListed · 列表里就能判的几道', () => {
     expect(got?.reason).toBe('opened_before_switch');
     expect(got?.why).toContain('重开一张新单');
     expect(got?.why).toContain('指挥官重开');
-    expect(got?.why).not.toContain('fleet-api handover');
+    expect(got?.why).not.toMatch(/fleet-api\s+handover/);
   });
 
   it.each([
