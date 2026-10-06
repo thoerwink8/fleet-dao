@@ -1,21 +1,18 @@
-// 无人值守「不中断这一轮」（创始人 2026-10-03「无人值守是让这一轮一直不结束……」「选 a」）。
-// 三处用它：命令行（AI 按创始人的话开关）、Stop 钩子（stop.mjs：开着就把「结束这一轮」挡回去）、PreToolUse 钩子
-// （pretool.mjs：调了工具就记一笔「这一轮在干活」）。开会话钩子也读它，上下文被总结、会话重启之后还知道开着。
+// 无人值守不再靠「挡住收尾」续命（决定 0026，创始人 2026-10-06 17:25「按照你推荐」）。
+// 2026-10-03「选 a」是让这一轮一直不结束。实测挡回去会把「先别结束这一轮」塞进对话，普通会话被按住几小时；
+// 引导（Mirasim 的 steer）要等下一次调模型才塞进来，这一轮不结束，下一轮开头的对账补投也不发生。
+// 一直干改走脱离会话的工人（worker.mjs --detached）。收尾钩子只提醒仓根临时文件，decision 一律不写。
 //
-// 用法（AI 在创始人说「进入无人值守」时跑 on，说「停」时跑 off）：
-//   node ~/.fleet-dao/hooks/unattended.mjs on [--hours 8]      开（最长 24 小时，默认 8）
-//   node ~/.fleet-dao/hooks/unattended.mjs done "做完了什么"    全做完了：放行收尾
-//   node ~/.fleet-dao/hooks/unattended.mjs needs-you "要他拍什么"  碰人闸：放行收尾，把问题放最后一条等他
-//   node ~/.fleet-dao/hooks/unattended.mjs off                  关
-//   node ~/.fleet-dao/hooks/unattended.mjs status
+// 用法：
+//   node ~/.fleet-dao/hooks/unattended.mjs on
+//     不再写状态、不再挡收尾。打印一句：要一直干就起工人。
+//   node ~/.fleet-dao/hooks/unattended.mjs off|status|done|needs-you
+//     还认旧的状态文件（清掉、查看）。done / needs-you 不再是「放行收尾」的开关。
 //
-// 改这里之前必须知道（规矩由 agents/test/rules/stop.rules.test.ts 钉住）：
-// - 状态按会话号存（~/.fleet-dao/unattended/<会话号>.json，会话号来自环境变量 CLAUDE_CODE_SESSION_ID，Stop、PreToolUse 的输入里
-//   同一个号）：同时开着的几个会话、几个仓互不串。会话号拿不到，on 明确失败，不装作开成了。
-// - 只有两种放行带着「没查成」的话：状态读不了 / 写不了（放行是为了不把人困住，但要说清楚是故障，不是正常收尾）。
-// - 防空转：被挡回去之后，两次挡之间一个工具都没调（PreToolUse 没记到）算「没干活」；连着 3 次就放行并转成 paused，
-//   另有总次数上限；过期时间到了自动关。这几个数不要凭感觉改大——改大等于允许多烧额度。
-// - 钩子里任何一步出错一律放行（只提示），绝不抛、不拦：这里是兜底，不是新的故障点。
+// 改这里之前必须知道（规矩由 agents/test/rules/stop.rules.test.ts、inflight.rules.test.ts 钉住）：
+// - decideStop 永远不拦。旧的状态文件留着也不拦。
+// - armForBackground 不写状态。起子代理、监视、后台命令都不再自动开无人值守。
+// - 钩子里任何一步出错一律放行，绝不抛、不拦。
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -160,48 +157,10 @@ export function blockReason(state, now) {
  * @returns {{ block: true, reason: string } | { block: false, notice?: string }}
  */
 export function decideStop({ dir, sessionId, now = Date.now() }) {
-  try {
-    if (!cleanId(sessionId)) return { block: false };
-    const r = readState(dir, sessionId);
-    if (!r.ok) {
-      return {
-        block: false,
-        notice: `无人值守状态${r.why}：这一轮不拦（不能把人困住）；开着的话要重新跑 node ${SCRIPT} on。`,
-      };
-    }
-    const s = r.state;
-    if (s === null || s.state !== 'on') return { block: false };
-    if (now > Date.parse(s.expiresAt)) {
-      removeState(dir, sessionId);
-      return { block: false, notice: `无人值守过期了（到 ${fmt(s.expiresAt)}），已关。` };
-    }
-    // 上一次挡过之后，到这一次之间没调过任何工具：没干活，只回了文字
-    const idle = s.totalBlocks > 0 && !s.toolSinceBlock ? s.idle + 1 : 0;
-    if (idle >= MAX_IDLE_BLOCKS || s.totalBlocks >= MAX_TOTAL_BLOCKS) {
-      const why =
-        idle >= MAX_IDLE_BLOCKS
-          ? `被挡回去 ${MAX_IDLE_BLOCKS} 次都没再干活（没调工具）`
-          : `已经挡了 ${MAX_TOTAL_BLOCKS} 次，到上限`;
-      writeState(dir, sessionId, { ...s, state: 'paused', note: why, idle });
-      return {
-        block: false,
-        notice: `无人值守自动暂停：${why}。有话要创始人定就放最后一条；要接着干请重新跑 node ${SCRIPT} on。`,
-      };
-    }
-    writeState(dir, sessionId, {
-      ...s,
-      idle,
-      totalBlocks: s.totalBlocks + 1,
-      toolSinceBlock: false,
-      lastBlockAt: new Date(now).toISOString(),
-    });
-    return { block: true, reason: blockReason(s, now) };
-  } catch (err) {
-    return {
-      block: false,
-      notice: `无人值守的判断自己出错了（${messageOf(err) ?? err}）：这一轮不拦（不能把人困住）。`,
-    };
-  }
+  void dir;
+  void sessionId;
+  void now;
+  return { block: false };
 }
 
 /**
@@ -241,41 +200,16 @@ export function startsBackground(toolName, toolInput) {
 }
 
 /**
- * 起了后台活：没开无人值守（或已收尾、暂停、过期）就自动开一个 AUTO_ARM_MINUTES 分钟的，这一轮结束会被挡回来；
- * 已经开着的：自动开的续期，创始人手动开的（通常更长）一个字不动。状态读不了就不写（不覆盖认不出的东西），返回为什么。
- * 活全收口了跑 done 放行；忘了跑也不会困住人：到期自动关、连着 3 次挡回去没调工具就暂停（decideStop）。
- * 返回 { armed, kept?, why? }；不抛。
+ * 决定 0026：不再因后台活写状态、不再挡收尾。保留函数是免得旧调用方抛错；参数不看，一律不写。
  * @param {{ dir: string, sessionId: unknown, now?: number, minutes?: number }} opts
  * @returns {{ armed: boolean, kept?: boolean, why?: string }}
  */
 export function armForBackground({ dir, sessionId, now = Date.now(), minutes = AUTO_ARM_MINUTES }) {
-  try {
-    if (!cleanId(sessionId)) return { armed: false, why: '拿不到会话号' };
-    const r = readState(dir, sessionId);
-    if (!r.ok) return { armed: false, why: r.why };
-    const s = r.state;
-    const until = new Date(now + minutes * 60_000).toISOString();
-    if (s !== null && s.state === 'on' && now <= Date.parse(s.expiresAt)) {
-      if (s.auto === true && Date.parse(s.expiresAt) < Date.parse(until)) {
-        writeState(dir, sessionId, { ...s, expiresAt: until });
-        return { armed: false, kept: true };
-      }
-      return { armed: false, kept: true };
-    }
-    writeState(dir, sessionId, {
-      state: 'on',
-      auto: true,
-      since: new Date(now).toISOString(),
-      expiresAt: until,
-      idle: 0,
-      totalBlocks: 0,
-      toolSinceBlock: true,
-      note: '起了后台活，自动开的',
-    });
-    return { armed: true };
-  } catch (err) {
-    return { armed: false, why: String(messageOf(err) ?? err) };
-  }
+  void dir;
+  void sessionId;
+  void now;
+  void minutes;
+  return { armed: false, why: '收尾不再因后台活被挡（决定 0026）' };
 }
 
 // ── 创始人的话到了、还没有东西送到他手上（创始人 2026-10-05「全都按照你推荐的改」，对「干活中间问话，一次答完并送到手上」那条）──
@@ -464,13 +398,12 @@ function markNagged({ dir, sessionId, owed }) {
 }
 
 /**
- * 调工具前钩子用：这次调的是送达类工具就清账；这一轮结束不了（无人值守开着）、话欠了超过 OWED_NAG_MINUTES 又没拦过，
- * 就返回 { block: true, message } 让调用方把这一次工具调用拦下（只拦一次，不困住人）。
- * 欠账文件坏了、这一步自己出了错：返回 { block: false, message }，调用方写进 stderr、不拦（不再悄悄回 null，全仓审查第 4 路 S8）。不抛。
+ * 调工具前钩子用：送达类工具清账。不再拦工具调用（决定 0026：收尾不再被按住，答案写在这一轮最后一条）。
+ * 欠账文件坏了、这一步自己出了错：返回 { block: false, message }，调用方写进 stderr、不拦。不抛。
  * @param {{ dir: string, sessionId: unknown, tool: unknown, now?: number }} opts
  * @returns {{ block: boolean, message: string } | null}
  */
-export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
+export function nagIfOwed({ dir, sessionId, tool }) {
   try {
     if (typeof tool === 'string' && DELIVERY_TOOLS.has(tool)) {
       clearOwed({ dir, sessionId });
@@ -478,20 +411,7 @@ export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
     }
     const read = readOwed({ dir, sessionId });
     if (!read.ok) return { block: false, message: setAsideOwed({ dir, sessionId, why: read.why }) };
-    const owed = read.owed;
-    if (!owed || owed.nagged || now - Date.parse(owed.at) < OWED_NAG_MINUTES * 60_000) return null;
-    const r = readState(dir, sessionId);
-    if (!r.ok || r.state === null || r.state.state !== 'on' || now > Date.parse(r.state.expiresAt))
-      return null;
-    writeFileSync(
-      owedFile(dir, sessionId),
-      `${JSON.stringify({ ...owed, nagged: true })}
-`,
-    );
-    return {
-      block: true,
-      message: `${owedLine(owed, now)}（这次工具调用先拦下，只拦这一次；送完重发这条命令。）`,
-    };
+    return null;
   } catch (err) {
     return {
       block: false,
@@ -507,21 +427,14 @@ export function nagIfOwed({ dir, sessionId, tool, now = Date.now() }) {
  */
 export function sessionLines({ dir, sessionId, now = Date.now() }) {
   const r = readState(dir, sessionId);
-  if (!r.ok) return [`无人值守状态${r.why}：开着的话要重新跑 node ${SCRIPT} on。`];
+  if (!r.ok) return [`无人值守状态${r.why}：收尾不再被挡住，这句只是没查成。`];
   const s = r.state;
   if (s === null || now > Date.parse(s.expiresAt)) return [];
-  if (s.state === 'on') {
-    return [
-      `无人值守开着（到 ${fmt(s.expiresAt)}）：这一轮不要结束，接着干；全做完 node ${SCRIPT} done "…"，要创始人拍板 node ${SCRIPT} needs-you "…"。`,
-    ];
-  }
-  if (s.state === 'paused') {
-    return [`无人值守暂停着（${s.note || '没写原因'}）：创始人要接着干就重新跑 node ${SCRIPT} on。`];
-  }
+  if (s.state === 'paused' && s.note) return [`无人值守暂停过（${s.note}）。这一轮可以结束。`];
   return [];
 }
 
-const USAGE = `用法：node ${SCRIPT} on [--hours N] | done "做完了什么" | needs-you "要他拍什么" | off | status`;
+const USAGE = `用法：node ${SCRIPT} on | done "做完了什么" | needs-you "要他拍什么" | off | status`;
 
 /**
  * 命令行；返回退出码。io = { out, err, env, now }。
@@ -531,13 +444,18 @@ const USAGE = `用法：node ${SCRIPT} on [--hours N] | done "做完了什么" |
  */
 export function main(argv, io) {
   const env = io.env ?? process.env;
-  const now = io.now ?? Date.now();
   const dir = stateDir(env);
   const [cmd, ...rest] = argv;
   const id = cleanId(env.CLAUDE_CODE_SESSION_ID);
   if (!['on', 'done', 'needs-you', 'off', 'status'].includes(cmd ?? '')) {
     io.err(`没做成：${cmd ? `不认识的命令 ${cmd}` : '没给命令'}。${USAGE}`);
     return 2;
+  }
+  if (cmd === 'on') {
+    io.out(
+      '不再挡住这一轮（决定 0026）。要一直干，起脱离会话的工人：worker.mjs start --detached "创始人说了进入无人值守"。这一轮可以结束。',
+    );
+    return 0;
   }
   if (!id) {
     io.err(
@@ -566,30 +484,7 @@ export function main(argv, io) {
       io.out('无人值守已关。');
       return 0;
     }
-    if (cmd === 'on') {
-      let hours = DEFAULT_HOURS;
-      const i = rest.indexOf('--hours');
-      if (i >= 0) hours = Number(rest[i + 1]);
-      if (!Number.isFinite(hours) || hours <= 0 || hours > MAX_HOURS) {
-        io.err(`没做成：--hours 要是 0 到 ${MAX_HOURS} 之间的数，给的是「${rest[i + 1] ?? ''}」。`);
-        return 2;
-      }
-      const expiresAt = new Date(now + hours * 3_600_000).toISOString();
-      writeState(dir, id, {
-        state: 'on',
-        since: new Date(now).toISOString(),
-        expiresAt,
-        idle: 0,
-        totalBlocks: 0,
-        toolSinceBlock: true,
-        note: '',
-      });
-      io.out(
-        `无人值守已开，到 ${fmt(expiresAt)}。这一轮想结束会被挡回来；做完 done、要他拍板 needs-you、他说停就 off。`,
-      );
-      return 0;
-    }
-    // done / needs-you：必须写一句话，逼着说清楚为什么放行
+    // done / needs-you：旧状态文件还在时可以改成收尾或暂停。必须写一句话。
     const note = rest.join(' ').trim();
     if (!note) {
       io.err(`没做成：${cmd} 要写一句话（${cmd === 'done' ? '做完了什么' : '要他拍什么'}）。`);
