@@ -44,7 +44,7 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 - **并发上限**：本机同时跑的工人加子代理不超过 4 个（创始人 2026-10-05 约 19:10 同意从 3 试到 4；桌面黑屏那次是 6–9 个同时跑）。
 - **改到先审后合的路径**（迁移里有删改语句、碰安全，`packages/conventions/high-risk-paths.json`）：合并前要第二家审过，读 `discuss`「审 PR」那节。
 - **界面活**不给 GPT：写和审都换 Grok 或 Claude。
-- **子代理的模型**：派 Claude 子代理（workflow 里起的也算）只用 Sonnet 或 Opus（优先 Sonnet，创始人 2026-10-05「派活我推荐sonnet5.5>opus5.5」），一律写明 `model: "sonnet"`（或 `"opus"`）：设置里的默认（Sonnet 5.5，`docs/agents-permissions.md`「子代理默认模型」）只兜住定义里没写模型的（`general-purpose`），Plan 这类定义里写了 `inherit` 的不写就跟主会话同一个模型，而主会话可能是创始人自己选的 Fable，`claude-code-guide` 不写是 Haiku；用 `fork` 起的总跟主会话同一个模型、写了 `model` 也不管用，主会话在 Fable 上时别用 `fork`。机器派的会话（引擎、工人、路由）、子代理、VPS 和 WSL 上的会话都永不用 Fable，Fable 只在他本机的主对话里由他自己选（`docs/decisions/0017-fable-only-in-founder-main-session.md`）。
+- **子代理的模型**：派 Claude 子代理（workflow 里起的也算）只用 Sonnet 或 Opus（优先 Sonnet，创始人 2026-10-05「派活我推荐sonnet5.5>opus5.5」），一律写明 `model: "sonnet"`（或 `"opus"`）：设置里的默认（Sonnet 5.5，`docs/agents-permissions.md`「子代理默认模型」）只兜住定义里没写模型的（`general-purpose`），Plan 这类定义里写了 `inherit` 的不写就跟主会话同一个模型，而主会话可能是创始人自己选的 Fable，`claude-code-guide` 不写是 Haiku；用 `fork` 起的总跟主会话同一个模型、写了 `model` 也不管用，主会话在 Fable 上时别用 `fork`。机器派的会话（引擎、工人、路由）、子代理、VPS 上的会话都永不用 Fable，Fable 只在他本机的主对话里由他自己选（`docs/decisions/0017-fable-only-in-founder-main-session.md`）。
 - 本机只做三类：断链急修、要本机资源的、指挥官本职；其余照 `AGENTS.md` 本仓段「本机和法国怎么分活」。
 
 ## 发版先暂停

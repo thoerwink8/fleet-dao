@@ -2,8 +2,8 @@
 // 同一批样本）、期望文件认不认得出、私有值的指纹、线上手改了报哪一项、私有值不一致只报「不一致」不带值、期望和钥匙读不到记没查成、
 // 命令行不打印值。仓里那份真的期望文件也在这里过一遍校验，和 france.sh 钉住的几个值对得上。
 // 发布时照期望写（apply，方案第四节）：只写期望变了的键、人手改的不改回、selfHeal 开了才改回并留痕、期望里没有了的删掉、
-// 退回照旧版写回去；期望认不出、线上文件认不出、要写的键写了几行、写后读回不一致、记录认不出、档位认不出，一律不写（写了的改回原样）。
-// 新机器照期望建文件（render）：公开的写值、私有的只留空位。档位文件挑哪一份期望（readProfile、readLive）。
+// 退回照旧版写回去；期望认不出、线上文件认不出、要写的键写了几行、写后读回不一致、记录认不出，一律不写（写了的改回原样）。
+// 新机器照期望建文件（render）：公开的写值、私有的只留空位。
 // 跑法：node --test deploy/test/config.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
 import {
@@ -12,40 +12,31 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import {
   APPLY_FILES,
   applyConfig,
-  CARPOOL_CAP,
   CONFIG_FILES,
   ConfigError,
-  carpoolCapProblems,
   cli,
   DESIRED_FILE,
-  diffProfiles,
   FINGERPRINT_ALGORITHM,
   FRANCE_DESIRED_FILE,
   fingerprintOf,
   judgeConfig,
   keyIdOf,
-  LOCAL_DESIRED_FILE,
-  PROFILE_DESIRED,
   parseApplied,
   parseDesired,
   parseEnv,
   parseFingerprintKey,
   planApply,
   readLive,
-  readProfile,
   renderEnv,
-  unregisteredDesiredFiles,
 } from '../france/auto-release/config.mjs';
 
 const KEY_TEXT = `${'5a'.repeat(32)}\n`;
@@ -146,12 +137,9 @@ test('照 systemd 读环境文件：和 deploy/lib/app-config.sh 的 env_parse �
   );
 });
 
-const VERSIONS = { postgresMajor: '16', nodeMajor: '22', temporalServer: '1.32.0', temporalCli: '1.9.1' };
-
 test('期望文件：认得出的和各种认不出的', () => {
   const ok = parseDesired(desiredText());
   assert.equal(ok.selfHeal, false);
-  assert.equal(ok.versions, null, '没写 versions 就是 null，老的期望文件不用跟着改');
   assert.deepEqual(
     ok.files['engine.env'].map((d) => [d.key, d.kind]),
     [
@@ -160,8 +148,20 @@ test('期望文件：认得出的和各种认不出的', () => {
       ['FLEET_CANARY_REPO', 'private'],
     ],
   );
-  const withVersions = parseDesired(desiredText({ versions: { 说明: '随便写点', ...VERSIONS } }));
-  assert.deepEqual(withVersions.versions, VERSIONS, '说明字段不算进解析出来的版本里');
+  // 撤掉本机档（#1107）之前老版本的期望里有 versions 块：认下不读，不出现在解析结果里（对账读的是在用的那一版）
+  const legacy = parseDesired(
+    desiredText({
+      versions: {
+        说明: '老的',
+        postgresMajor: '16',
+        nodeMajor: '22',
+        temporalServer: '1.32.0',
+        temporalCli: '1.9.1',
+      },
+    }),
+  );
+  assert.equal(legacy.versions, undefined);
+  assert.deepEqual(legacy.files, ok.files);
   const bad = [
     ['不是 JSON', '{', /不是 JSON/],
     ['格式版本不认识', desiredText({ formatVersion: 2 }), /formatVersion/],
@@ -196,27 +196,6 @@ test('期望文件：认得出的和各种认不出的', () => {
       '钥匙编号不对',
       desiredText({ fingerprint: { algorithm: FINGERPRINT_ALGORITHM, keyId: 'xyz' } }),
       /keyId/,
-    ],
-    ['versions 不是对象', desiredText({ versions: '1.32.0' }), /versions 要是一个对象/],
-    [
-      'versions 里有不认识的键',
-      desiredText({ versions: { ...VERSIONS, 别的: '1' } }),
-      /不认识的一项「别的」/,
-    ],
-    [
-      'versions 少了一项（#451：漏一项就比不全）',
-      desiredText({ versions: { postgresMajor: '16' } }),
-      /versions 少了.*nodeMajor/,
-    ],
-    [
-      'versions 的值不是字符串',
-      desiredText({ versions: { ...VERSIONS, nodeMajor: 22 } }),
-      /nodeMajor 要是非空字符串/,
-    ],
-    [
-      'versions 的值是空字符串',
-      desiredText({ versions: { ...VERSIONS, temporalCli: '' } }),
-      /temporalCli 要是非空字符串/,
     ],
   ];
   for (const [what, text, why] of bad) {
@@ -263,24 +242,20 @@ test('线上配置被手改：报出偏离，指明是哪份文件的哪一项�
   noValues(r, '/tmp/手改的', SECRET, SECRET2);
 });
 
-test('不一致时报哪份文件要改：默认指仓里的法国期望，本机档（#451）传了 desiredPath 就指那一份', () => {
+test('不一致时报哪份文件要改：默认指仓里的法国期望，传了 desiredPath（--desired）就指那一份', () => {
   const edited = ENGINE.replace('FLEET_WORK_DIR=/var/lib/fleet-work', 'FLEET_WORK_DIR=/tmp/手改的');
   const withFiles = { files: files({ 'engine.env': { text: edited }, 'api.env': { text: API } }) };
   const france = judgeConfig(live(withFiles));
   assert.match(
     france.drift[0].body,
     new RegExp(`期望在仓里 ${DESIRED_FILE.replaceAll('/', '\\/')}`),
-    '不传 desiredPath（readback_config 不带本机档时的样子）：还是指法国那份，行为不变',
+    '不传 desiredPath：指仓里的法国期望',
   );
-  const local = judgeConfig(live({ ...withFiles, desiredPath: LOCAL_DESIRED_FILE }));
-  assert.match(
-    local.drift[0].body,
-    new RegExp(`期望在仓里 ${LOCAL_DESIRED_FILE.replaceAll('\\', '\\\\').replaceAll('/', '\\/')}`),
-    '传了 desiredPath（readback_config 本机档时的样子）：指本机档那份，不是法国那份',
-  );
+  const given = judgeConfig(live({ ...withFiles, desiredPath: '/tmp/x/desired.json' }));
+  assert.match(given.drift[0].body, /期望在仓里 \/tmp\/x\/desired\.json/, '传了 desiredPath：指那份文件');
 });
 
-test('本机档：私有值对不上、多了一项、标题，也都指本机档那份期望，一处都不提法国那份（#323）', () => {
+test('法国：私有值对不上、多了一项、写重、缺了、公开值不对五种报警，标题都说法国配置、指法国那份期望，线上的值不打印', () => {
   // 私有值改了、engine.env 多一项、release.env 的公开值改了、api.env 写重一行、engine.env 缺一项：五种报警全出
   const engine = `${ENGINE.replace(`FLEET_CANARY_REPO=${SECRET2}`, 'FLEET_CANARY_REPO=canary-handedit-xyz')}FLEET_EXTRA=1\n`;
   const over = {
@@ -288,29 +263,20 @@ test('本机档：私有值对不上、多了一项、标题，也都指本机�
     'api.env': { text: `${API}FLEET_ENV=production\n` },
     'release.env': { text: 'FLEET_SERVICES=fleet-engine\n' },
   };
-  for (const desiredPath of [PROFILE_DESIRED.local, LOCAL_DESIRED_FILE]) {
-    const r = judgeConfig(live({ files: files(over), desiredPath }));
-    assert.deepEqual(r.drift.map((d) => d.kind).sort(), [
-      'duplicate',
-      'missing',
-      'private',
-      'undeclared',
-      'value',
-    ]);
-    for (const d of r.drift) {
-      assert.match(d.title, /^本机档配置/, `${d.id} 的标题说的是本机档，不是法国`);
-      assert.ok(!`${d.title}${d.body}`.includes(DESIRED_FILE), `${d.id} 不许指法国那份期望：${d.body}`);
-    }
-    const byKind = Object.fromEntries(r.drift.map((d) => [d.kind, d.body]));
-    for (const kind of ['private', 'undeclared', 'missing', 'value'])
-      assert.ok(byKind[kind].includes(desiredPath), `${kind} 要写清改本机档那份：${byKind[kind]}`);
-    assert.match(byKind.private, /在本机档上以 root 跑/);
-    noValues(r, 'canary-handedit-xyz', SECRET, SECRET2);
-  }
-  // 法国（不传 desiredPath）照旧
-  const france = judgeConfig(live({ files: files(over) }));
-  for (const d of france.drift) assert.match(d.title, /^法国配置/);
-  assert.ok(france.drift.find((d) => d.kind === 'private').body.includes(DESIRED_FILE));
+  const r = judgeConfig(live({ files: files(over) }));
+  assert.deepEqual(r.drift.map((d) => d.kind).sort(), [
+    'duplicate',
+    'missing',
+    'private',
+    'undeclared',
+    'value',
+  ]);
+  for (const d of r.drift) assert.match(d.title, /^法国配置/);
+  const byKind = Object.fromEntries(r.drift.map((d) => [d.kind, d.body]));
+  for (const kind of ['private', 'undeclared', 'missing', 'value'])
+    assert.ok(byKind[kind].includes(DESIRED_FILE), `${kind} 要写清改法国那份：${byKind[kind]}`);
+  assert.match(byKind.private, /在法国上以 root 跑/);
+  noValues(r, 'canary-handedit-xyz', SECRET, SECRET2);
 });
 
 test('私有值不一致：只报「不一致」，结果和报警里搜不到线上的值，也搜不到原来的值', () => {
@@ -418,40 +384,6 @@ test('私有值还没记指纹、线上文件读不到或认不出：那几项�
   assert.deepEqual(r.unchecked, ['api.env 的 FEISHU_APP_SECRET 是私有值，仓里还没记它的指纹']);
 });
 
-test('本机档不接飞书，飞书一对登记成留空（公开的空值，#731）：线上空着对得上、不记没查成；填了值报不一致，值不打印', () => {
-  const localText = readFileSync(LOCAL_DESIRED_FILE, 'utf8');
-  const want = parseDesired(localText);
-  for (const key of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET']) {
-    const d = want.files['api.env'].find((x) => x.key === key);
-    assert.deepEqual([d.kind, d.value], ['public', ''], `${key}：登记成公开的空值`);
-    assert.match(d.note ?? '', /不接飞书/, `${key}：说明里写清为什么留空`);
-  }
-  // 线上照期望建出来的样子（公开的照期望写、私有的留空位）：飞书一对本来就该空着
-  const liveFiles = Object.fromEntries(CONFIG_FILES.map((f) => [f, { text: renderEnv(want, f, 'x') }]));
-  const judge = (over = {}) =>
-    judgeConfig({
-      desired: { text: localText },
-      files: { ...liveFiles, ...over },
-      key: { error: '这台还没有指纹钥匙' },
-      desiredPath: LOCAL_DESIRED_FILE,
-    });
-  let r = judge();
-  assert.deepEqual(r.drift, []);
-  assert.ok(
-    !r.unchecked.some((u) => u.includes('FEISHU')),
-    `飞书一对按登记留空，不该记没查成：${r.unchecked.join('；')}`,
-  );
-  const filled = liveFiles['api.env'].text.replace(/^FEISHU_APP_ID=$/m, `FEISHU_APP_ID=${SECRET}`);
-  assert.notEqual(filled, liveFiles['api.env'].text, '故意填上值');
-  r = judge({ 'api.env': { text: filled } });
-  assert.equal(r.result, 'drift');
-  assert.deepEqual(
-    r.drift.map((d) => [d.id, d.kind]),
-    [['api.env:FEISHU_APP_ID', 'value']],
-  );
-  noValues(r, SECRET);
-});
-
 test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，法国几份文件都在里面', () => {
   const text = readFileSync(new URL(`../../${DESIRED_FILE}`, import.meta.url), 'utf8');
   const want = parseDesired(text);
@@ -463,357 +395,6 @@ test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，
   assert.equal(engine.FLEET_WORK_DIR, constant('WORK_DIR'), 'FLEET_WORK_DIR 和 france.sh 的 WORK_DIR 一样');
   assert.equal(engine.FLEET_ENGINE_STATE_DIR, constant('ENGINE_STATE_DIR'));
   assert.equal(engine.FLEET_ENGINE_PORTS, 'real');
-});
-
-/**
- * 一对期望：france、local 默认和 desiredText() 一样（含同一份 versions），patch.files 按文件把某几个键换掉
- * （同一份文件里没提到的键照旧留着），patch.versions 整个换掉。深合并只到「文件」这一层，够这里的用例用。
- */
-function profilePair(patchFrance = {}, patchLocal = {}) {
-  // 巡检仓 / 演练仓两边必须是不同的公开值（MUST_DIFFER，#777）：默认就各写一个，本机那份带说明（登记过的差别）
-  const canary = {
-    france: 'acme/patrol',
-    local: { value: 'acme/drill', 说明: '登记过：本机档只接演练仓' },
-  };
-  const build = (patch, side) => {
-    const obj = JSON.parse(desiredText({ versions: VERSIONS }));
-    obj.files['engine.env'].FLEET_CANARY_REPO = canary[side];
-    for (const [file, keys] of Object.entries(patch.files ?? {}))
-      obj.files[file] = { ...obj.files[file], ...keys };
-    if (patch.versions) obj.versions = patch.versions;
-    return parseDesired(JSON.stringify(obj));
-  };
-  return { france: build(patchFrance, 'france'), local: build(patchLocal, 'local') };
-}
-
-test('diffProfiles：本机档和法国逐项比，没登记的差别报红，版本没有例外（#451）', () => {
-  const { france, local } = profilePair();
-  assert.deepEqual(diffProfiles(france, local), { result: 'ok', drift: [], unchecked: [] }, '两份一样：ok');
-
-  // 公开值不一样、本机那份写了说明：登记过的差别，不报
-  {
-    const r = diffProfiles(
-      ...Object.values(
-        profilePair(
-          {},
-          { files: { 'engine.env': { FLEET_MACHINE_NAME: { value: '本机', 说明: '登记过' } } } },
-        ),
-      ),
-    );
-    assert.equal(r.result, 'ok', '写了说明就不算没登记的差别');
-  }
-
-  // 公开值不一样、本机那份没写说明：没登记的差别，报红
-  {
-    const r = diffProfiles(
-      ...Object.values(profilePair({}, { files: { 'engine.env': { FLEET_MACHINE_NAME: '本机' } } })),
-    );
-    assert.equal(r.result, 'drift');
-    assert.deepEqual(
-      r.drift.map((d) => [d.scope, d.file, d.key]),
-      [['files', 'engine.env', 'FLEET_MACHINE_NAME']],
-    );
-    assert.match(r.drift[0].title, /engine\.env 的 FLEET_MACHINE_NAME/);
-  }
-
-  // 两边都是私有值（各自的凭据）：本来就不比、不用登记，哪怕没写说明
-  {
-    const r = diffProfiles(
-      ...Object.values(
-        profilePair(
-          {},
-          { files: { 'api.env': { FEISHU_APP_SECRET: { private: fingerprintOf(KEY, 'x', 'y', 'z') } } } },
-        ),
-      ),
-    );
-    assert.equal(r.result, 'ok', '两边都是私有值，各自的凭据，不需要登记');
-  }
-
-  // 一边私有一边公开：换了种类，也要登记
-  {
-    const r = diffProfiles(
-      ...Object.values(profilePair({}, { files: { 'api.env': { FEISHU_APP_SECRET: '公开的' } } })),
-    );
-    assert.equal(r.result, 'drift');
-    assert.match(r.drift[0].title, /FEISHU_APP_SECRET/);
-  }
-
-  // 一边声明了一个键、另一边没有：也要登记（两边键集合要一样）
-  {
-    const r = diffProfiles(
-      ...Object.values(profilePair({}, { files: { 'engine.env': { FLEET_ONLY_LOCAL: '仅本机' } } })),
-    );
-    assert.equal(r.result, 'drift');
-    assert.deepEqual(
-      r.drift.map((d) => d.key),
-      ['FLEET_ONLY_LOCAL'],
-    );
-  }
-
-  // 故意改一处没登记的版本（比如本机期望里的 Temporal 版本）：版本钉死，报红，写了说明也不例外
-  {
-    const r = diffProfiles(
-      ...Object.values(profilePair({}, { versions: { ...VERSIONS, temporalServer: '1.31.0' } })),
-    );
-    assert.equal(r.result, 'drift');
-    assert.deepEqual(
-      r.drift.map((d) => [d.scope, d.key]),
-      [['versions', 'temporalServer']],
-    );
-    assert.match(r.drift[0].body, /1\.32\.0.*1\.31\.0/);
-  }
-
-  // 两份里至少一份没写 versions：没查成，不当成一致
-  {
-    const noVersions = parseDesired(desiredText());
-    const r = diffProfiles(noVersions, profilePair().local);
-    assert.equal(r.result, 'unchecked');
-    assert.match(r.unchecked[0], /versions/);
-  }
-});
-
-test('diffProfiles：巡检仓和演练仓两边必须是不同的公开值，一样、私有、空、缺了都报红，写了说明也不例外（#777）', () => {
-  const canary = (france, local) => {
-    const r = diffProfiles(
-      ...Object.values(
-        profilePair(
-          france === undefined ? {} : { files: { 'engine.env': { FLEET_CANARY_REPO: france } } },
-          local === undefined ? {} : { files: { 'engine.env': { FLEET_CANARY_REPO: local } } },
-        ),
-      ),
-    );
-    return { r, must: r.drift.filter((d) => d.scope === 'must-differ') };
-  };
-  assert.deepEqual(canary().r, { result: 'ok', drift: [], unchecked: [] }, '两个不同的公开仓：ok');
-
-  // 故意造出的失败：本机档写成和法国同一个仓（带说明也不放过）
-  {
-    const { r, must } = canary(undefined, { value: 'acme/patrol', 说明: '写了说明也不行' });
-    assert.equal(r.result, 'drift');
-    assert.deepEqual(
-      must.map((d) => [d.file, d.key]),
-      [['engine.env', 'FLEET_CANARY_REPO']],
-    );
-    assert.match(must[0].title, /必须不一样/);
-    assert.match(must[0].body, /两边都是「acme\/patrol」/);
-  }
-  // 大小写不同还是同一个仓（GitHub 仓名不分大小写）
-  {
-    const { must } = canary(undefined, { value: 'ACME/Patrol', 说明: '登记过' });
-    assert.equal(must.length, 1, '只差大小写：同一个仓');
-  }
-  // 任一边是私有值：比不出，报红，不当成不一样
-  {
-    const { must } = canary({ private: fingerprintOf(KEY, 'engine.env', 'FLEET_CANARY_REPO', 'x/y') });
-    assert.equal(must.length, 1);
-    assert.match(must[0].body, /法国写成了私有值/);
-  }
-  {
-    const { must } = canary(
-      { private: null },
-      { private: fingerprintOf(KEY, 'engine.env', 'FLEET_CANARY_REPO', 'x/y') },
-    );
-    assert.equal(must.length, 1, '两边都是私有值：照样报红（这一项不按「各自的凭据」放行）');
-    assert.match(must[0].body, /法国和本机档写成了私有值/);
-  }
-  // 一边是空的：报红
-  {
-    const { must } = canary('', undefined);
-    assert.equal(must.length, 1);
-    assert.match(must[0].body, /法国这一项是空的/);
-  }
-  // 两边都没声明这一项（删掉了）：报红，钉子不会跟着悄悄消失
-  {
-    const pair = profilePair();
-    for (const side of [pair.france, pair.local])
-      side.files['engine.env'] = side.files['engine.env'].filter((d) => d.key !== 'FLEET_CANARY_REPO');
-    const r = diffProfiles(pair.france, pair.local);
-    assert.equal(r.result, 'drift');
-    const must = r.drift.filter((d) => d.scope === 'must-differ');
-    assert.equal(must.length, 1);
-    assert.match(must[0].body, /法国和本机档的期望里没有这一项/);
-  }
-});
-
-test('仓里 deploy/local 和 deploy/france 的期望：差别都登记过了（#451，改一处没登记的这里会红）', () => {
-  const franceText = readFileSync(FRANCE_DESIRED_FILE, 'utf8');
-  const localText = readFileSync(LOCAL_DESIRED_FILE, 'utf8');
-  const france = parseDesired(franceText);
-  const r = diffProfiles(france, parseDesired(localText));
-  assert.deepEqual(r, { result: 'ok', drift: [], unchecked: [] }, JSON.stringify(r.drift, null, 2));
-
-  // 故意把本机档里一条登记过的差别，换成另一个没写说明的值：诚实地报红，不是摆设（#451「怎么算做完」要求的用例）
-  const brokenObj = JSON.parse(localText);
-  brokenObj.files['release.env'].FLEET_HK_PARTS = 'gateway'; // 原来是 { value: "", 说明: "..." }
-  const rBroken = diffProfiles(france, parseDesired(JSON.stringify(brokenObj)));
-  assert.equal(rBroken.result, 'drift', '换成没写说明的新值：没登记的差别，报红');
-  assert.deepEqual(
-    rBroken.drift.map((d) => d.key),
-    ['FLEET_HK_PARTS'],
-  );
-
-  // 故意改本机档里的 Temporal 版本，不动说明：版本钉死，报红
-  const brokenVersions = JSON.parse(localText);
-  brokenVersions.versions.temporalServer = '1.0.0';
-  const rVersion = diffProfiles(france, parseDesired(JSON.stringify(brokenVersions)));
-  assert.equal(rVersion.result, 'drift');
-  assert.deepEqual(
-    rVersion.drift.map((d) => [d.scope, d.key]),
-    [['versions', 'temporalServer']],
-  );
-
-  // 故意把本机档的演练仓写成法国的巡检仓（#777）：两边是同一个仓，报红
-  const franceRepo = JSON.parse(franceText).files['engine.env'].FLEET_CANARY_REPO.value;
-  assert.ok(franceRepo, '法国的巡检仓是公开值，仓里比得出');
-  const sameRepo = JSON.parse(localText);
-  sameRepo.files['engine.env'].FLEET_CANARY_REPO.value = franceRepo;
-  const rSame = diffProfiles(france, parseDesired(JSON.stringify(sameRepo)));
-  assert.equal(rSame.result, 'drift');
-  assert.deepEqual(
-    rSame.drift.map((d) => [d.scope, d.file, d.key]),
-    [['must-differ', 'engine.env', 'FLEET_CANARY_REPO']],
-  );
-});
-
-// ── 拼车并发总上限登记（#194 方案 4.7）──
-
-const DEPLOY_DIR = fileURLToPath(new URL('../', import.meta.url));
-
-/** 仓里两份真期望，解析好的样子。 */
-const realMachines = () => [
-  { name: '法国', desired: parseDesired(readFileSync(FRANCE_DESIRED_FILE, 'utf8')) },
-  { name: '本机档', desired: parseDesired(readFileSync(LOCAL_DESIRED_FILE, 'utf8')) },
-];
-/** 把某台某一项换成别的写法（undefined = 删掉这一项）。 */
-function withCap(machines, name, key, spec) {
-  return machines.map((m) => {
-    if (m.name !== name) return m;
-    const list = m.desired.files['engine.env'].filter((d) => d.key !== key);
-    if (spec !== undefined) list.push({ key, ...spec });
-    return { ...m, desired: { ...m.desired, files: { ...m.desired.files, 'engine.env': list } } };
-  });
-}
-const pub = (value) => ({ kind: 'public', value });
-
-test('拼车并发登记：仓里两份期望都登记了、加起来不超过总上限，没有没登记的机器档', () => {
-  const machines = realMachines();
-  assert.deepEqual(carpoolCapProblems(machines), []);
-  assert.deepEqual(unregisteredDesiredFiles(DEPLOY_DIR), []);
-  const own = (n) =>
-    Number(
-      machines.find((m) => m.name === n).desired.files['engine.env'].find((d) => d.key === CARPOOL_CAP.own)
-        .value,
-    );
-  assert.equal(own('法国') + own('本机档') <= 6, true);
-  // diff-local 命令行把它也算进去：真文件现在是一致的
-  return cli(['diff-local'], { out: () => {}, err: () => {} }).then((code) => assert.equal(code, 0));
-});
-
-test('拼车并发登记：加起来超过总上限判红（故意造出失败）', () => {
-  const over = withCap(realMachines(), '法国', CARPOOL_CAP.own, pub('5'));
-  const r = carpoolCapProblems(over);
-  assert.deepEqual(
-    r.map((d) => [d.scope, d.key]),
-    [['carpool-cap', CARPOOL_CAP.own]],
-  );
-  assert.match(r[0].title, /超过总上限：7 > 6/);
-  assert.deepEqual(carpoolCapProblems(withCap(realMachines(), '法国', CARPOOL_CAP.own, pub('4'))), []);
-});
-
-test('拼车并发登记：加一台机器不改登记也判红；没登记、私有、空、不是正整数都判红，不当成「不限」', () => {
-  // 第三台机器登记了 1：4 + 2 + 1 > 6，必须有人把别台往下调
-  const third = [...realMachines(), { name: 'WSL2', desired: realMachines()[1].desired }];
-  const r3 = carpoolCapProblems(withCap(third, 'WSL2', CARPOOL_CAP.own, pub('1')));
-  assert.equal(r3.length, 1);
-  assert.match(r3[0].title, /7 > 6/);
-  // 第三台干脆没登记这一项
-  const missing = carpoolCapProblems(withCap(third, 'WSL2', CARPOOL_CAP.own, undefined));
-  assert.equal(missing.length, 1);
-  assert.match(missing[0].title, /WSL2没登记拼车并发上限/);
-  for (const [spec, why] of [
-    [{ kind: 'private', fp: null }, /私有值/],
-    [pub(''), /不是正整数/],
-    [pub('0'), /不是正整数/],
-    [pub('-1'), /不是正整数/],
-    [pub('四'), /不是正整数/],
-    [pub('2.5'), /不是正整数/],
-  ]) {
-    const r = carpoolCapProblems(withCap(realMachines(), '本机档', CARPOOL_CAP.own, spec));
-    assert.equal(r.length, 1, JSON.stringify(spec));
-    assert.match(r[0].body, why);
-  }
-});
-
-test('拼车并发登记：总上限没写、写成私有、两边不一样都判红', () => {
-  const noTotal = carpoolCapProblems(withCap(realMachines(), '法国', CARPOOL_CAP.total, undefined));
-  assert.equal(noTotal.length, 1);
-  assert.match(noTotal[0].title, /法国没登记拼车并发总上限/);
-  const differ = carpoolCapProblems(withCap(realMachines(), '本机档', CARPOOL_CAP.total, pub('8')));
-  assert.equal(differ.length, 1);
-  assert.match(differ[0].title, /总上限不一样/);
-  const priv = carpoolCapProblems(
-    withCap(realMachines(), '本机档', CARPOOL_CAP.total, { kind: 'private', fp: null }),
-  );
-  assert.equal(priv.length, 1);
-  assert.match(priv[0].body, /私有值/);
-});
-
-test('拼车并发登记：仓里多出一份没登记的机器档判红，读不了目录是没查成', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'fleet-deploy-'));
-  try {
-    for (const rel of Object.values(PROFILE_DESIRED)) {
-      mkdirSync(join(dir, rel.split('/')[1]), { recursive: true });
-      writeFileSync(join(dir, rel.split('/')[1], 'desired-config.json'), '{}');
-    }
-    mkdirSync(join(dir, 'newbox'));
-    writeFileSync(join(dir, 'newbox', 'desired-config.json'), '{}');
-    mkdirSync(join(dir, 'examples')); // 没有 desired-config.json 的目录不算机器档
-    writeFileSync(join(dir, 'cursor-key.sh'), '#!/bin/sh\n'); // deploy/ 下的脚本（普通文件）也不算，不能因 ENOTDIR 当成没查成
-    const r = unregisteredDesiredFiles(dir);
-    assert.deepEqual(
-      r.map((d) => d.file),
-      ['deploy/newbox/desired-config.json'],
-    );
-    assert.throws(() => unregisteredDesiredFiles(join(dir, '不存在')), ConfigError);
-    // Linux 上 stat「普通文件/desired-config.json」报 ENOTDIR（Windows 报 ENOENT）：照样不算机器档；别的读不了的错照常抛
-    const errno = (code) => Object.assign(new Error(code), { code });
-    const linuxStat = (path) => {
-      if (path.includes('cursor-key.sh')) throw errno('ENOTDIR');
-      return statSync(path);
-    };
-    assert.deepEqual(
-      unregisteredDesiredFiles(dir, linuxStat).map((d) => d.file),
-      ['deploy/newbox/desired-config.json'],
-    );
-    assert.throws(
-      () =>
-        unregisteredDesiredFiles(dir, (path) => {
-          if (path.includes('newbox')) throw errno('EACCES');
-          return statSync(path);
-        }),
-      ConfigError,
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('命令行 diff-local：拼车并发超了退出码 1、写明加起来多少', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'fleet-config-'));
-  try {
-    const france = JSON.parse(readFileSync(FRANCE_DESIRED_FILE, 'utf8'));
-    france.files['engine.env'].FLEET_CARPOOL_MAX_CONCURRENCY.value = '5';
-    writeFileSync(join(dir, 'a.json'), JSON.stringify(france));
-    const out = [];
-    const code = await cli(['diff-local', '--france', join(dir, 'a.json'), '--local', LOCAL_DESIRED_FILE], {
-      out: (s) => out.push(s),
-      err: () => {},
-    });
-    assert.equal(code, 1);
-    assert.match(out.join('\n'), /red .*加起来超过总上限：7 > 6/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 /**
@@ -836,20 +417,9 @@ function franceEngineStandbyProblems(desired) {
   return problems;
 }
 
-test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、待命的代价和「上线不用手动恢复定时任务」写全；本机档同样带引擎，两边现在一样（创始人 2026-10-05 撤回「进程停着」）', () => {
+test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、待命的代价和「上线不用手动恢复定时任务」写全（创始人 2026-10-05 撤回「进程停着」）', () => {
   const france = JSON.parse(readFileSync(FRANCE_DESIRED_FILE, 'utf8'));
-  const local = JSON.parse(readFileSync(LOCAL_DESIRED_FILE, 'utf8'));
   assert.deepEqual(franceEngineStandbyProblems(france), []);
-  assert.equal(
-    local.files['release.env'].FLEET_SERVICES.value,
-    france.files['release.env'].FLEET_SERVICES.value,
-    '两边的引擎都开着，值一样',
-  );
-  assert.doesNotMatch(
-    local.files['release.env'].FLEET_SERVICES.说明,
-    /^登记的差别/,
-    '两边一样了，本机档这一项不再是「登记的差别」',
-  );
 
   // 故意造出失败：改回「进程停着」的旧值、抹掉说明、留着旧的临时说法，这个检查都要红（不是摆设）
   const stopped = structuredClone(france);
@@ -868,25 +438,6 @@ test('法国期望里引擎开着待命（FLEET_SERVICES 带 fleet-engine）、�
   const oldNote = structuredClone(france);
   oldNote.files['release.env'].FLEET_SERVICES.说明 += '最迟 2026-10-05 复查，没撤回要写明为什么续。';
   assert.deepEqual(franceEngineStandbyProblems(oldNote), ['说明里还留着「最迟复查」的临时说法']);
-});
-
-test('命令行 diff-local：不给路径就用仓里两份真文件，退出码分得清一致、不一致、没查成', async () => {
-  const r = await cli(['diff-local'], { out: () => {}, err: () => {} });
-  assert.equal(r, 0, '仓里现在这两份应该是一致的（差别都登记过了）');
-  const dir = mkdtempSync(join(tmpdir(), 'fleet-config-'));
-  try {
-    writeFileSync(join(dir, 'a.json'), desiredText({ versions: VERSIONS }));
-    writeFileSync(join(dir, 'b.json'), desiredText({ versions: { ...VERSIONS, nodeMajor: '20' } }));
-    const out = [];
-    const code = await cli(['diff-local', '--france', join(dir, 'a.json'), '--local', join(dir, 'b.json')], {
-      out: (s) => out.push(s),
-      err: () => {},
-    });
-    assert.equal(code, 1);
-    assert.match(out.join('\n'), /red .*版本没钉住一样.*nodeMajor/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test('命令行：算指纹只打印指纹；对账不打印值、退出码分得清一致、不一致、没查成', async () => {
@@ -964,22 +515,14 @@ test('读法国上的原文：在用那一版里的期望、几份环境文件�
     assert.match(got.key.error, /没有/);
     assert.match(got.files['api.env'].error, /没有/);
     assert.equal(got.files['engine.env'].text, ENGINE);
-    assert.equal(
-      got.desiredPath,
-      DESIRED_FILE,
-      '不给 --desired：不一致时指仓里的法国期望，和加本机档之前一样',
-    );
+    assert.equal(got.desiredPath, DESIRED_FILE, '不给 --desired：不一致时指仓里的法国期望');
     got = readLive({
       releases: join(dir, 'releases'),
       etc: join(dir, 'etc'),
       key: join(dir, 'key'),
-      desired: join(dir, 'local-desired.json'),
+      desired: join(dir, 'other-desired.json'),
     });
-    assert.equal(
-      got.desiredPath,
-      join(dir, 'local-desired.json'),
-      '给了 --desired（本机档，#451）：指那份文件，不是法国的',
-    );
+    assert.equal(got.desiredPath, join(dir, 'other-desired.json'), '给了 --desired：指那份文件');
     let canLink = true;
     try {
       symlinkSync(sha, join(dir, 'releases', 'current'));
@@ -999,7 +542,7 @@ test('读法国上的原文：在用那一版里的期望、几份环境文件�
   }
 });
 
-// ── 发布时照期望写（#323 方案第四节）、新机器照期望建文件、档位 ──
+// ── 发布时照期望写（#323 方案第四节）、新机器照期望建文件 ──
 
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -1177,14 +720,12 @@ function applySandbox(live = LIVE) {
   mkdirSync(releases, { recursive: true });
   for (const [f, text] of Object.entries(live)) writeFileSync(join(etc, f), text);
   const state = join(releases, '.config-applied.json');
-  const profile = join(etc, 'profile');
   const readOr = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : '（没有）');
   return {
     dir,
     releases,
     etc,
     state,
-    profile,
     put(sha, text, rel = DESIRED_FILE) {
       const parts = rel.split('/');
       mkdirSync(join(releases, sha, ...parts.slice(0, -1)), { recursive: true });
@@ -1196,7 +737,7 @@ function applySandbox(live = LIVE) {
     run(commit, how = 'release', extra = {}, writeFile = undefined) {
       const lines = [];
       const code = applyConfig(
-        { releases, etc, state, profile, commit, how, ...extra },
+        { releases, etc, state, commit, how, ...extra },
         { out: (s) => lines.push(s), ...(writeFile ? { writeFile } : {}) },
       );
       return { code, lines, text: lines.join('\n') };
@@ -1284,7 +825,7 @@ test('apply：selfHeal 开着把人手改的改回去并留痕（输出、记录
   }
 });
 
-test('apply 写不成就一个字都不写：期望认不出、线上文件认不出或不在、要写的键写了几行、记录认不出、档位认不出', () => {
+test('apply 写不成就一个字都不写：期望认不出、线上文件认不出或不在、要写的键写了几行、记录认不出', () => {
   const cases = [
     ['期望不是 JSON', (s) => s.put(SHA_B, '{'), /bbbbbbbbbbbb 的期望认不出.*不是 JSON/],
     [
@@ -1323,14 +864,6 @@ test('apply 写不成就一个字都不写：期望认不出、线上文件认�
         writeFileSync(s.state, '{"schema":7}');
       },
       /上次照期望写的记录认不出.*schema/,
-    ],
-    [
-      '档位认不出',
-      (s) => {
-        s.put(SHA_B, applyDesired());
-        writeFileSync(s.profile, 'paris\n');
-      },
-      /档位文件 .* 认不出.*paris/,
     ],
   ];
   for (const [what, breakIt, why] of cases) {
@@ -1453,27 +986,20 @@ test('apply --plan 只把写成什么样放进目录（线上、记录都不动�
   }
 });
 
-test('apply：这一版里没有期望（#323 之前的版本）不写、退出 0；期望按档位挑——本机档用 deploy/local 那份', () => {
+test('apply：这一版里没有期望（#323 之前的版本）不写、退出 0；有期望的写下记录', () => {
   const s = applySandbox();
   try {
     mkdirSync(join(s.releases, SHA_A), { recursive: true });
     let r = s.run(SHA_A);
     assert.equal(r.code, 0, r.text);
     assert.match(r.text, /^ok aaaaaaaaaaaa 里没有 deploy\/france\/desired-config\.json/m);
-    assert.match(r.text, /^note 没有档位文件 .*：按法国档/m);
     assert.ok(!existsSync(s.state), '没有期望：记录也不建');
-    writeFileSync(s.profile, 'local\n');
     s.put(SHA_B, applyDesired());
     r = s.run(SHA_B);
     assert.equal(r.code, 0, r.text);
-    assert.match(r.text, /里没有 deploy\/local\/desired-config\.json/, '本机档不拿法国那份写');
-    s.put(SHA_B, applyDesired({ 'engine.env': { FLEET_MACHINE_NAME: '本机' } }), PROFILE_DESIRED.local);
-    r = s.run(SHA_B);
-    assert.equal(r.code, 0, r.text);
     const st = JSON.parse(readFileSync(s.state, 'utf8'));
-    assert.equal(st.profile, 'local');
-    assert.equal(st.desired, 'deploy/local/desired-config.json');
-    assert.equal(st.files['engine.env'].FLEET_MACHINE_NAME, '本机', '记下的是本机档那份期望');
+    assert.equal(st.commit, SHA_B);
+    assert.equal(st.profile, undefined, '记录里不再写档位');
   } finally {
     s.done();
   }
@@ -1515,8 +1041,8 @@ test('命令行 apply：参数不对 64；提交号、事件认不出退出 1、
   assert.match(r.text, /^red --how 只认/m);
 });
 
-test('render：照仓里两份真的期望建新机器的三份文件——公开的照期望写，私有的只留空位，键一个不多一个不少，release.sh 读得懂', () => {
-  for (const path of [FRANCE_DESIRED_FILE, LOCAL_DESIRED_FILE]) {
+test('render：照仓里真的期望建新机器的三份文件——公开的照期望写，私有的只留空位，键一个不多一个不少，release.sh 读得懂', () => {
+  for (const path of [FRANCE_DESIRED_FILE]) {
     const want = parseDesired(readFileSync(path, 'utf8'));
     for (const file of APPLY_FILES) {
       const text = renderEnv(want, file, 'x');
@@ -1557,56 +1083,10 @@ test('命令行 render：打印照期望建的文件；不认识的文件、期�
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /^FLEET_ENV=production$/m);
   assert.match(r.out, /照仓里的期望 deploy\/france\/desired-config\.json 建的/);
-  r = await run('render', 'api.env', '--desired', LOCAL_DESIRED_FILE);
-  assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /^FLEET_PUBLIC_URL=https:\/\/fleet-local\.invalid$/m);
-  assert.match(r.out, /照仓里的期望 deploy\/local\/desired-config\.json 建的/);
   r = await run('render', 'france.env');
   assert.equal(r.code, 2);
   assert.match(r.err, /不认识的文件 france\.env/);
   r = await run('render', 'engine.env', '--desired', join(tmpdir(), 'no-such-desired.json'));
   assert.equal(r.code, 2);
   assert.match(r.err, /读不到期望/);
-});
-
-test('档位：文件不在按法国；写了 local 用本机档那份；认不出、不是普通文件都不猜；对账读法国上的期望也跟着档位走', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'fleet-profile-'));
-  try {
-    const p = join(dir, 'profile');
-    const got = readProfile(p);
-    assert.equal(got.profile, 'france');
-    assert.equal(got.rel, DESIRED_FILE);
-    assert.match(got.note, /没有档位文件/);
-    writeFileSync(p, 'local\n');
-    assert.deepEqual(readProfile(p), {
-      profile: 'local',
-      rel: 'deploy/local/desired-config.json',
-      note: null,
-    });
-    writeFileSync(p, 'france');
-    assert.equal(readProfile(p).profile, 'france');
-    writeFileSync(p, 'local\n\n');
-    assert.equal(readProfile(p).profile, 'local', '末尾几个换行都不算（和 bash 的 $(<文件) 一样）');
-    for (const bad of ['', 'Local\n', ' local\n', 'local\r\n', 'paris\n']) {
-      writeFileSync(p, bad);
-      assert.throws(
-        () => readProfile(p),
-        (e) => e instanceof ConfigError && /认不出/.test(e.message),
-        JSON.stringify(bad),
-      );
-    }
-    mkdirSync(join(dir, 'a-dir'));
-    assert.throws(() => readProfile(join(dir, 'a-dir')), ConfigError, '不是普通文件');
-    const etc = join(dir, 'etc');
-    mkdirSync(etc);
-    writeFileSync(join(etc, 'profile'), 'local\n');
-    let live = readLive({ releases: join(dir, 'releases'), etc, key: join(dir, 'key') });
-    assert.equal(live.desiredPath, PROFILE_DESIRED.local, '本机档：不一致时指本机档那份');
-    writeFileSync(join(etc, 'profile'), 'paris\n');
-    live = readLive({ releases: join(dir, 'releases'), etc, key: join(dir, 'key') });
-    assert.match(live.desired.error, /档位文件 .* 认不出/);
-    assert.equal(judgeConfig(live).result, 'unchecked', '档位认不出：对账记没查成，不当成一致');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

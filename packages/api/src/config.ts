@@ -26,7 +26,7 @@ export interface Config {
   githubWebhookSecret: string | null;
   /**
    * 没配时飞书登录返回 503，登录只剩账密。生产上只有两种情况允许没有：开发环境，或 FLEET_FEISHU_LOGIN=off 明说这台不接飞书登录
-   * （本机档，见 feishuLogin）。
+   * （见 feishuLogin）。
    */
   feishu: { appId: string; appSecret: string } | null;
   /** Postgres 连接串（DATABASE_URL）。生产必须有；开发环境没有就用内存里的样例数据。 */
@@ -63,12 +63,12 @@ export interface Config {
   engineOff: boolean;
   /**
    * 这台机器给人看的名字（FLEET_MACHINE_NAME，和引擎那边同一项）：驾驶舱顶栏徽标和环境页（#820 片 1）用它。
-   * 没配、空白是 null——页面写「认不出」并说明，不拿「法国」这种猜的值冒充。法国写「法国」、本机档写「本机」，
-   * 两份期望（deploy/france|local/desired-config.json）的 api.env 都登记了。
+   * 没配、空白是 null——页面写「认不出」并说明，不拿「法国」这种猜的值冒充。法国写「法国」，
+   * 期望（deploy/france/desired-config.json）的 api.env 登记了。
    */
   machineName: string | null;
   /**
-   * FLEET_FEISHU_LOGIN=off：这台不接飞书（本机档：没有香港、没有飞书网关）。这时飞书网关的通行证即使在环境文件里也不认
+   * FLEET_FEISHU_LOGIN=off：这台不接飞书（没有飞书网关）。这时飞书网关的通行证即使在环境文件里也不认
    * （feishuGatewayToken 记成 null），健康页的 feishu_gateway 报「未接」而不是一直等一个永远不会来的网关（#803）。
    */
   feishuOff: boolean;
@@ -135,8 +135,8 @@ export function engineEnabled(env: Env): boolean {
 }
 
 /**
- * 这台机器给人看的名字（FLEET_MACHINE_NAME）：法国「法国」、本机档「本机」，和引擎读的是同一项。空白、没配是 null，
- * 上层（环境页、顶栏徽标）照实写「认不出」，不猜成某一台。名字不是要保密的东西，两份期望都当公开值登记。
+ * 这台机器给人看的名字（FLEET_MACHINE_NAME）：法国「法国」，和引擎读的是同一项。空白、没配是 null，
+ * 上层（环境页、顶栏徽标）照实写「认不出」，不猜成某一台。名字不是要保密的东西，期望当公开值登记。
  */
 export function machineName(env: Env): string | null {
   const name = env.FLEET_MACHINE_NAME?.trim();
@@ -186,14 +186,14 @@ export function loadConfig(env: Env): Config {
     problems.push('FEISHU_APP_ID 和 FEISHU_APP_SECRET 要一起给');
   } else if (!dev) {
     problems.push(
-      '缺 FEISHU_APP_ID / FEISHU_APP_SECRET（这台确实不接飞书登录的——比如本机档——写 FLEET_FEISHU_LOGIN=off 明说，登录只剩账密）',
+      '缺 FEISHU_APP_ID / FEISHU_APP_SECRET（这台确实不接飞书登录的，写 FLEET_FEISHU_LOGIN=off 明说，登录只剩账密）',
     );
   }
 
   const databaseUrl = env.DATABASE_URL || null;
   if (!databaseUrl && !dev) problems.push('缺 DATABASE_URL（Postgres 连接串）');
 
-  // 通行证照旧核（写坏了照样拒启动）；只是这台明说不接飞书（off）时不认它：本机档装机照样会生成一份，但没有网关来用
+  // 通行证照旧核（写坏了照样拒启动）；只是这台明说不接飞书（off）时不认它：装机照样会生成一份，但没有网关来用
   const gatewayTokenEnv = env.FLEET_FEISHU_GATEWAY_TOKEN || null;
   if (gatewayTokenEnv !== null) {
     if (gatewayTokenEnv.length < MIN_SECRET_LENGTH) {
@@ -367,8 +367,8 @@ function nodeKeysFrom(
 }
 
 /**
- * 驾驶舱接不接飞书登录（FLEET_FEISHU_LOGIN）：不写、空着或 on——接，生产必须配飞书一对；off——这台不接（本机档：没有香港、
- * 没有对外域名，deploy/local/desired-config.json 登记的差别），飞书一对必须空着，登录只剩账密（fleet-api set-password）。
+ * 驾驶舱接不接飞书登录（FLEET_FEISHU_LOGIN）：不写、空着或 on——接，生产必须配飞书一对；off——这台不接（比如没有香港、
+ * 没有对外域名），飞书一对必须空着，登录只剩账密（fleet-api set-password）。
  * 只认这两个写法，写错了拒启动、不猜成哪一种；没写 off、飞书又没配，生产照旧拒启动——不默认放行。
  */
 function feishuLogin(env: Env, problems: string[]): 'on' | 'off' {

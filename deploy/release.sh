@@ -25,11 +25,10 @@ umask 022
 DEPLOY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
-# 本机档（#451、#786）：这一档期望里登记的会话代理（FLEET_SESSION_PROXY）。发布取代码、装依赖原来是直连——本机档
-# WSL 直连 github.com、registry.npmjs.org 时通时不通，发布就卡在取代码上（#786）。profile.sh 只管读期望、挑哪一份
-# 期望按 PROFILE 走，所以下面照这台的档位文件把 PROFILE 定下来（france.sh 是照环境变量定的，发布没有那个环境变量）。
-# shellcheck source=lib/profile.sh
-source "$DEPLOY_DIR/lib/profile.sh"
+# 期望里登记的会话代理（FLEET_SESSION_PROXY，#786）：发布取代码、装依赖经它出网，登记成空＝直连（法国就是这样）。
+# lib/session-proxy.sh 只管读期望（一律读 deploy/france/desired-config.json）。
+# shellcheck source=lib/session-proxy.sh
+source "$DEPLOY_DIR/lib/session-proxy.sh"
 
 REPO_URL=https://github.com/thoerwink8/fleet-dao.git
 RELEASES=${FLEET_RELEASES_DIR:-/srv/fleet-dao-releases} # 只有 deploy/test/release-flow.test.sh 会改它
@@ -84,17 +83,16 @@ ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版�
 # 照期望写本机配置（#323，docs/ops.md 第九节「配置进仓对账」）：切版本之前照这一版的期望写 engine.env、api.env、release.env 里
 # 公开的值，只写这一版的期望和上次写的不一样的键（上次写的记在 CONFIG_STATE），人手改的不改回（期望里 selfHeal 开了才改回）。
 # 怎么算、怎么写、写完读回都在 config.mjs（和自动发布对账同一份读法）；这里先让它算、用本脚本读 release.env 的办法核一遍，再写。
-# 期望按这台的档位挑（CONFIG_PROFILE，france.sh 记）。CONFIG_ETC、CONFIG_PROFILE 只有测试会改
+# CONFIG_ETC 只有测试会改
 CONFIG_CLI=$DEPLOY_DIR/france/auto-release/config.mjs
 CONFIG_ETC=/etc/fleet-dao
-CONFIG_PROFILE=$CONFIG_ETC/profile
 CONFIG_STATE=$RELEASES/.config-applied.json
 CONFIG_REDS=() # config.mjs 这一次说的 red（调用方合成一条红）
 
-# 这一档登记的会话代理（#786）：本机档的 WSL 出网要经 Windows 上 Clash 的 127.0.0.1:7890，法国登记的
-# FLEET_SESSION_PROXY 是空＝直连。发布里有两处要出网、环境都是清干净的——取代码（systemd 临时服务里以 root 跑
+# 期望里登记的会话代理（#786）：法国登记的 FLEET_SESSION_PROXY 是空＝直连；登记成 http://主机:端口 就经它出网。
+# 发布里有两处要出网、环境都是清干净的——取代码（systemd 临时服务里以 root 跑
 # git fetch，环境里只有 HOME）和装依赖（以 fleet 的 env -i 跑 pnpm install），两处都拿不到 /etc/environment 里的
-# 代理，本机档就直连 github.com / registry.npmjs.org，时通时不通：10:19 那次取代码被重置、没发成。只认这一档期望里
+# 代理，所以由这里读期望、显式带上。只认期望里
 # 登记的那一项，不认调用者环境里的同名变量（同 #731）：root 的登录 shell 里碰巧有代理，法国照样直连。
 # 读一次记下来（session_proxy_load 要在当前 shell 里叫，在 $(...) 里叫记不住），读不出就不发（不拿直连顶）。
 SESSION_PROXY_NODE=$NODE # 读期望的 node（config.mjs 要用它算）
@@ -103,32 +101,7 @@ PROXY=()                 # 给 git 的 -c http.proxy=…，直连时是空的
 PROXY_ENVS=()            # 给 pnpm、reclaude 的环境变量（KEY=值），直连时是空的
 PROXY_READY=0            # 1：读过了、可以用（读了直连也算）
 
-# 这台的档位（#431、#323）：照档位文件定 PROFILE，profile.sh 才知道挑哪一份期望读会话代理。文件不在算法国
-# （和 config.mjs 的 readProfile 同一个判法：装档位文件之前的机器都是这样）；读不了、认不出的不当成法国——
-# 本机档拿法国的期望读，就把「本机直连」当成这一档的登记，取代码照样不通，所以这里判红、不猜。
-profile_set() {
-  local got
-  PROFILE=france
-  if [[ ! -e "$CONFIG_PROFILE" && ! -L "$CONFIG_PROFILE" ]]; then return 0; fi
-  if [[ -L "$CONFIG_PROFILE" || ! -f "$CONFIG_PROFILE" ]]; then
-    red "$CONFIG_PROFILE 不是普通文件：认不出这台的档位（照着它挑这一档的期望读会话代理），不敢当法国"
-    return 1
-  fi
-  if ! got=$(<"$CONFIG_PROFILE") 2>/dev/null; then
-    red "读不了 $CONFIG_PROFILE：认不出这台的档位，不敢当法国"
-    return 1
-  fi
-  got=${got%$'\n'}
-  case $got in
-  france | local) PROFILE=$got ;;
-  *)
-    red "$CONFIG_PROFILE 里的档位认不出（只认 france、local）：不敢当法国"
-    return 1
-    ;;
-  esac
-}
-
-# 读这一档登记的会话代理，编译成 git 的参数（PROXY）和要带进命令环境的变量（PROXY_ENVS）。读不成（期望读不出、
+# 读期望里登记的会话代理，编译成 git 的参数（PROXY）和要带进命令环境的变量（PROXY_ENVS）。读不成（期望读不出、
 # 没登记这一项、登记的认不出）判红、返回 1：调用方在前提那一步停下，不带着「拿直连顶」去发版。读一次记下来
 # （session_proxy_load 要在当前 shell 里叫，在 $(...) 里叫记不住），再叫什么都不重读。
 proxy_load() {
@@ -148,7 +121,7 @@ proxy_load() {
   fi
 }
 
-# 要出网的 git：带上这一档登记的代理（-c 要写在子命令前面）。只在取代码这种要出网的地方用——rev-parse、cat-file、
+# 要出网的 git：带上期望里登记的代理（-c 要写在子命令前面）。只在取代码这种要出网的地方用——rev-parse、cat-file、
 # merge-base 这些本地命令不带，看不出区别，也省得把代理写进每一行。限时套在里面、不套在外面：`timeout 300 git_net …`
 # 是错的——timeout 起的是外部命令，看不见 shell 函数（真机上「failed to run command 'git_net'」直接退 127）
 git_net() { # 限时秒数 参数…：和 timeout 一样，把 git 跑起来
@@ -243,8 +216,8 @@ kv_get() { # 文件 键：「键=值」一行一项的文件里这一项的值�
   done <"$1"
 }
 
-# 以 fleet 身份、在给定目录里跑命令（环境清空，同 as_user）。这一档登记的代理要出网时带上（#786：本机档装依赖
-# pnpm install 要连 registry.npmjs.org，直连时通时不通）；法国登记的代理是空，一个字都不加。读代理之前（PROXY_READY=0）
+# 以 fleet 身份、在给定目录里跑命令（环境清空，同 as_user）。期望里登记了代理就在出网时带上（#786：装依赖
+# pnpm install 要连 registry.npmjs.org）；法国登记的代理是空，一个字都不加。读代理之前（PROXY_READY=0）
 # 不带：下面前提那一步读不出会判红、不发版，走到这里就一定是读过了
 as_fleet_in() { # 目录 命令…
   local dir=$1
@@ -277,8 +250,7 @@ preflight() {
       return 1
     fi
   done
-  # 取代码、装依赖经这一档登记的代理（#786）：读不出、认不出就停下——走到取代码那一步才发现不通，白等一轮
-  profile_set || return 1
+  # 取代码、装依赖经期望里登记的代理（#786）：读不出、认不出就停下——走到取代码那一步才发现不通，白等一轮
   proxy_load || return 1
   auto_parts
   ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：$(parts_said)；域名 $FLEET_DOMAIN"
@@ -962,8 +934,7 @@ config_cli() { # 参数…
 # 写不成判红、返回 1：不切版本（本机配置和原来一样）。release.env 变了就重读：这一版照新的起服务、往香港发
 apply_config() { # 提交号 事件（release / rollback / auto-rollback）
   local sha=$1 how=$2 plan out why sum="" parts
-  local -a args=(apply --releases "$RELEASES" --commit "$sha" --how "$how" --etc "$CONFIG_ETC" --state "$CONFIG_STATE"
-    --profile "$CONFIG_PROFILE")
+  local -a args=(apply --releases "$RELEASES" --commit "$sha" --how "$how" --etc "$CONFIG_ETC" --state "$CONFIG_STATE")
   step "照期望写本机配置（${sha:0:12} 的期望 → $CONFIG_ETC）"
   if [[ ! -e "$RELEASES/$sha/deploy/france/desired-config.json" ]]; then
     ok "${sha:0:12} 里没有配置的期望（#323 之前的版本）：不照期望写"
@@ -1581,12 +1552,7 @@ health_gate() { # 提交号 切之前后端的逐项结果
   if has_service fleet-engine; then check_engine || bad=1; fi
   if has_part web || has_part demo; then check_web "$sha" || bad=1; fi
   if has_part gateway && ((GATEWAY_ACTIVATED)); then check_gateway "$sha" || bad=1; fi
-  # 本机档没有香港，经香港取 /healthz 那一步没东西可取（取不成只会每次发布都多一项 HTTP 000 的待配，#803）；法国照旧
-  if is_local_profile; then
-    skip_local "没有香港：不经香港取 /healthz（健康页那条路本机档没有）"
-  else
-    check_chain
-  fi
+  check_chain
   return "$bad"
 }
 
@@ -1667,7 +1633,7 @@ prune() {
 
 # 里程碑发版后「让 AI 接活」回到关（#1050，创始人 2026-10-05：每次更新上去先是关着，看过没问题再点开）。
 # 判「新里程碑」：这一版在主线上已含的最大 v<N> tag 比 DISPATCH_OFF_STATE 里记的大。记在文件里，所以同一个 tag 重跑发布不再关
-# （开过的不会被再关），小版本（主线上 tag 之后的提交、WSL 跟主线）的更新 N 不变、不碰开关。文件不在算 0（装上这一步后头一次发布关一次）。
+# （开过的不会被再关），小版本（主线上 tag 之后的提交）的更新 N 不变、不碰开关。文件不在算 0（装上这一步后头一次发布关一次）。
 # 关的是库里所有仓，走 fleet-api dispatch --all off（和驾驶舱按钮同一个写入口，每个仓记一条操作记录）；
 # 没关成不写记录、判红，下一次发布（或手动重跑）再试——没关成不能算「关着」。人手动 --unmerged 发的不碰开关。
 DISPATCH_OFF_STATE=$RELEASES/.dispatch-off-milestone
@@ -1732,8 +1698,7 @@ dispatch_off_on_milestone() { # 提交号：发布成功之后叫
 
 # 每次往法国发版成功后，引擎总开关（设置 engine.master，#1086）回到关（创始人 2026-10-05：「每次更上去处于关闭状态，点击开启，引擎开始运转，
 # ai开始派活」）。和上面项目的「让 AI 接活」是两道：那个只在新里程碑（v<N> tag）时关，这个是法国每次发版都关——总开关关着引擎就什么
-# 都不拉、不派、不起干活的会话，等创始人在驾驶舱环境页点开。本机档（WSL）的小版本更新不动它（保持更新前的状态：WSL 是演练台，
-# 它的总开关创始人开着就一直开着）；人手动 --unmerged 发的也不碰。走 fleet-api engine off（和驾驶舱按钮同一个设置键、同一个写入口，
+# 都不拉、不派、不起干活的会话，等创始人在驾驶舱环境页点开。人手动 --unmerged 发的也不碰。走 fleet-api engine off（和驾驶舱按钮同一个设置键、同一个写入口，
 # 开着才改、改了记一条操作记录「发版 <提交> 自动置关总开关」；本来就关着不改不记）。没关成判红，不假装关了。
 engine_off_run() { # 提交号 原因
   (cd -- "$RELEASES/$1" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
@@ -1743,10 +1708,6 @@ engine_off_run() { # 提交号 原因
 engine_off_after_release() { # 提交号：发布成功之后叫
   local sha=$1 out line rc=0
   step "发版后引擎总开关回到关"
-  if [[ "${PROFILE:-france}" != france ]]; then
-    ok "这台是本机档（${PROFILE}）：小版本更新不动总开关，保持更新前的状态"
-    return 0
-  fi
   if [[ "$(marker_get "$sha" on_main)" == 0 ]]; then
     ok "这一版不在主线上（--unmerged）：不碰总开关"
     return 0

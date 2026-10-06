@@ -4,7 +4,7 @@
 # reclaude（状态在那个家目录的 .fake-reclaude 下：挂着哪个、org use 这一下怎么表现）。每种没切成的路径都故意造一遍：
 # org list 读不了、认不出、带 * 的不是恰好一行、那一类的组织不是恰好一个、org use 退出码 1 却切了（CC-07）、退出码 0 却没切、
 # 切错了往回切、往回切也没成、切完回读核对不了；输出里一律搜不到组织编号和邮箱。
-# 切号给 reclaude 带的环境（#786）：照这一档期望登记的会话代理带上（本机档是 Clash 的口、法国登记成空＝直连、认不出就不带），
+# 切号给 reclaude 带的环境（#786）：照期望里登记的会话代理带上（登记成空＝直连，法国就是这样；登记了 http://主机:端口就带上它，认不出就不带），
 # 调用者环境里的同名变量一律不认；那几条要 node（照期望读代理，这台没有就记「没跑成」）。
 # 法国真机上以 root 经 setpriv 降成会话用户那一段由 deploy/test/agent-scope.e2e.sh 那一类真机演练看（#157 结果里记）。
 # 用法：bash deploy/test/agent-scope-org-use.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
@@ -32,8 +32,8 @@ cat >"$FAKE" <<'SH'
 #!/usr/bin/env bash
 S=$HOME/.fake-reclaude
 echo "$*" >>"$S/calls"
-# 每一次调用看到的环境里代理相关的几项（#786）：org-use 给 reclaude 的环境是 env -i 清的，本机档要经登记的代理
-# 才连得上，法国一个都不该有。一次调用记一块（$S/env 里一次调用一段），下面只看最后一段
+# 每一次调用看到的环境里代理相关的几项（#786）：org-use 给 reclaude 的环境是 env -i 清的，登记了代理的要经它
+# 才连得上，登记成空（法国）一个都不该有。一次调用记一块（$S/env 里一次调用一段），下面只看最后一段
 if [[ -e "$S/env" ]]; then
   echo "--" >>"$S/env"
   for k in HOME http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY FLEET_SESSION_PROXY; do
@@ -104,10 +104,9 @@ SH
 chmod +x "$FAKE"
 export AGENT_SCOPE_TEST_AS_USER=direct AGENT_SCOPE_TEST_RECLAUDE=$FAKE
 
-# 这一档登记的会话代理（#786）：脚本要 source 仓里 deploy/lib/profile.sh，还要照这台记的档位挑期望，两处都显式给
-# （脚本装到 /usr/local/sbin/，仓里那份只能显式指；档位文件默认在 /etc/fleet-dao/profile，测试机上不能碰）
+# 期望里登记的会话代理（#786）：脚本要 source 仓里 deploy/lib/session-proxy.sh，显式给
+# （脚本装到 /usr/local/sbin/，仓里那份只能显式指）
 export AGENT_SCOPE_TEST_DEPLOY=$HERE/..
-export AGENT_SCOPE_TEST_PROFILE_FILE=$TMP/profile
 
 CARPOOL=1111
 SOLO=2222
@@ -264,9 +263,8 @@ expect "切完回读卡住：到总时限就停，不知道挂的是哪个" 1 "f
 [[ "$(uses)" == 1 ]] || flunk "时间用完就不该再 org use：用了 $(uses) 次"
 unset AGENT_SCOPE_TEST_ORG_BUDGET AGENT_SCOPE_TEST_ORG_RESERVE
 
-echo "== 切号给 reclaude 带的环境：照这一档登记的会话代理（#786）"
-# 本机档（fleet-local）的 WSL 直连 reclaude.ai 不通、要经 Windows 上 Clash 的口；切号给 reclaude 的环境是 env -i 清的，
-# 不带就切不了号（实测 context deadline exceeded）。法国登记的代理是空＝直连，一个代理变量都不许出现。
+echo "== 切号给 reclaude 带的环境：照期望里登记的会话代理（#786）"
+# 登记了代理的，切号给 reclaude 的环境是 env -i 清的，不带就切不了号。法国登记的代理是空＝直连，一个代理变量都不许出现。
 # 桩每一次调用记一段（以 -- 开头），这里只看最后一段（切一次要调 org list 几次）
 last_env() { awk '/^--$/{n=0; buf=""} {if (n++) buf=buf $0 "\n"} END{printf "%s", buf}' "$S/env" 2>/dev/null; }
 # 最后一段里某个变量是什么（没记到就是空）
@@ -280,11 +278,10 @@ proxy_envs() {
 export https_proxy=http://caller-env.invalid:1 http_proxy=http://caller-env.invalid:1
 export FLEET_SESSION_PROXY=http://caller-env.invalid:1
 
-rm -f -- "$TMP/profile"
 setup "$SOLO"
 : >"$S/env"
 run carpool --user fleet-agent-carpool
-expect "法国（没有档位文件）：照常切成" 0 "switched carpool"
+expect "法国（登记成空）：照常切成" 0 "switched carpool"
 if [[ -z "$(proxy_envs)" ]]; then
   pass "法国：reclaude 的环境里一个代理变量都没有（调用者环境里的、FLEET_SESSION_PROXY 都带不进去）"
 else
@@ -301,44 +298,55 @@ else
   flunk "法国：环境不像 env -i 那样只有那几样"
 fi
 
-# 本机档：照 deploy/local/desired-config.json 读出 Clash 的口，http(s)_proxy 大小写各一份 + no_proxy 只放本机回环
+# 期望里登记成 http://127.0.0.1:7890：http(s)_proxy 大小写各一份 + no_proxy 只放本机回环。不动仓里的期望文件：照
+# deploy/france/desired-config.json 改写出一份，放进一棵临时的 deploy 目录（只要读期望用的那两个文件），叫脚本去读它
+desired_with() { # 写出的文件 登记成什么
+  node -e '
+    const fs = require("node:fs");
+    const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    j.files["engine.env"].FLEET_SESSION_PROXY.value = process.argv[3];
+    fs.writeFileSync(process.argv[2], JSON.stringify(j));' "$HERE/../france/desired-config.json" "$1" "$2"
+}
 PROXY_URL=http://127.0.0.1:7890
 NO_PROXY_VALUE=localhost,127.0.0.1,::1
-printf 'local\n' >"$TMP/profile"
-setup "$SOLO"
-: >"$S/env"
-run carpool --user fleet-agent-carpool
-expect "本机档：照常切成" 0 "switched carpool"
-# 六项：大小写各一份，no_proxy/NO_PROXY 只放本机回环（变量名的顺序照 profile.sh 里摆的来）
-got_envs=$(printf '%s\n' \
-  "http_proxy=$(env_of http_proxy)" "https_proxy=$(env_of https_proxy)" \
-  "HTTP_PROXY=$(env_of HTTP_PROXY)" "HTTPS_PROXY=$(env_of HTTPS_PROXY)" \
-  "no_proxy=$(env_of no_proxy)" "NO_PROXY=$(env_of NO_PROXY)")
-want=$(printf 'http_proxy=%s\nhttps_proxy=%s\nHTTP_PROXY=%s\nHTTPS_PROXY=%s\nno_proxy=%s\nNO_PROXY=%s' \
-  "$PROXY_URL" "$PROXY_URL" "$PROXY_URL" "$PROXY_URL" "$NO_PROXY_VALUE" "$NO_PROXY_VALUE")
-if [[ "$got_envs" == "$want" ]]; then
-  pass "本机档：切号给 reclaude 的环境里带上登记的代理（大小写各一份，no_proxy 只放本机回环）"
+FAKE_DEPLOY=$TMP/deploy
+mkdir -p "$FAKE_DEPLOY/lib" "$FAKE_DEPLOY/france/auto-release"
+cp -- "$HERE/../lib/session-proxy.sh" "$FAKE_DEPLOY/lib/"
+cp -- "$HERE/../france/auto-release/config.mjs" "$FAKE_DEPLOY/france/auto-release/"
+if desired_with "$FAKE_DEPLOY/france/desired-config.json" "$PROXY_URL" 2>/dev/null; then
+  setup "$SOLO"
+  : >"$S/env"
+  AGENT_SCOPE_TEST_DEPLOY=$FAKE_DEPLOY run carpool --user fleet-agent-carpool
+  expect "登记成 $PROXY_URL：照常切成" 0 "switched carpool"
+  # 六项：大小写各一份，no_proxy/NO_PROXY 只放本机回环（变量名的顺序照 session-proxy.sh 里摆的来）
+  got_envs=$(printf '%s\n' \
+    "http_proxy=$(env_of http_proxy)" "https_proxy=$(env_of https_proxy)" \
+    "HTTP_PROXY=$(env_of HTTP_PROXY)" "HTTPS_PROXY=$(env_of HTTPS_PROXY)" \
+    "no_proxy=$(env_of no_proxy)" "NO_PROXY=$(env_of NO_PROXY)")
+  want=$(printf 'http_proxy=%s\nhttps_proxy=%s\nHTTP_PROXY=%s\nHTTPS_PROXY=%s\nno_proxy=%s\nNO_PROXY=%s' \
+    "$PROXY_URL" "$PROXY_URL" "$PROXY_URL" "$PROXY_URL" "$NO_PROXY_VALUE" "$NO_PROXY_VALUE")
+  if [[ "$got_envs" == "$want" ]]; then
+    pass "登记了代理：切号给 reclaude 的环境里带上它（大小写各一份，no_proxy 只放本机回环）"
+  else
+    flunk "登记了代理时带的不对：实际「$(tr '\n' ' ' <<<"$got_envs")」，应为「$(tr '\n' ' ' <<<"$want")」"
+  fi
+  if [[ "$(last_env)" == *"caller-env.invalid"* ]]; then
+    flunk "调用者环境里的代理漏进了 reclaude 的环境：「$(last_env | tr '\n' ' ')」"
+  else
+    pass "登记了代理：调用者环境里的代理没漏进去（用的是期望里登记的那个）"
+  fi
 else
-  flunk "本机档带的代理不对：实际「$(tr '\n' ' ' <<<"$got_envs")」，应为「$(tr '\n' ' ' <<<"$want")」"
-fi
-if [[ "$(last_env)" == *"caller-env.invalid"* ]]; then
-  flunk "调用者环境里的代理漏进了 reclaude 的环境：「$(last_env | tr '\n' ' ')」"
-else
-  pass "本机档：调用者环境里的代理没漏进去（用的是期望里登记的那个）"
+  echo "  … 没跑成：这台没有 node，登记了代理那一条没测"
+  skipped=1
 fi
 
 # 【故意造出的失败】登记的代理认不出（格式不对，复用 #763 的校验：只认 http://主机:端口）：读不出就不带。
-# 不动仓里的期望文件：照本机档那份写一份到临时文件、只把这一项改坏，叫脚本用的那一段读它（直接设 SESSION_PROXY_DESIRED；
-# 要在 source 之后设，profile.sh 开头会把这一项清成空）
+# 同样改写一份到临时文件、只把这一项改坏，叫脚本用的那一段读它（直接设 SESSION_PROXY_DESIRED；
+# 要在 source 之后设，session-proxy.sh 开头会把这一项清成空）
 bad=$TMP/bad-desired.json
-if node -e '
-  const fs = require("node:fs");
-  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  j.files["engine.env"].FLEET_SESSION_PROXY.value = "http://user:fakesecret@127.0.0.1:7890";
-  fs.writeFileSync(process.argv[2], JSON.stringify(j));' "$HERE/../local/desired-config.json" "$bad" 2>/dev/null; then
+if desired_with "$bad" "http://user:fakesecret@127.0.0.1:7890" 2>/dev/null; then
   got=$(AGENT_SCOPE_DEPLOY=$HERE/.. BAD=$bad bash -c '
-    source "$AGENT_SCOPE_DEPLOY/lib/profile.sh"
-    PROFILE=local
+    source "$AGENT_SCOPE_DEPLOY/lib/session-proxy.sh"
     SESSION_PROXY_DEPLOY=$AGENT_SCOPE_DEPLOY
     SESSION_PROXY_DESIRED=$BAD
     if session_proxy_load; then echo "带上了：$SESSION_PROXY"; else echo "没读成：$SESSION_PROXY_WHY"; fi' 2>&1)
@@ -349,8 +357,7 @@ if node -e '
   fi
   # 读不出时给 reclaude 的环境里一个代理变量都不带（read_proxy 里就是这么接的：读不着就留空）
   got2=$(AGENT_SCOPE_DEPLOY=$HERE/.. BAD=$bad bash -c '
-    source "$AGENT_SCOPE_DEPLOY/lib/profile.sh"
-    PROFILE=local
+    source "$AGENT_SCOPE_DEPLOY/lib/session-proxy.sh"
     SESSION_PROXY_DEPLOY=$AGENT_SCOPE_DEPLOY
     SESSION_PROXY_DESIRED=$BAD
     if session_proxy_load; then vars=("${SESSION_PROXY_VARS[@]}"); else vars=(); fi
@@ -365,7 +372,6 @@ else
   skipped=1
 fi
 unset https_proxy http_proxy FLEET_SESSION_PROXY
-rm -f -- "$TMP/profile"
 
 if ((fail)); then
   echo "org-use：不通过"

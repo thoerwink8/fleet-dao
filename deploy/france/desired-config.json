@@ -6,13 +6,6 @@
     "algorithm": "hmac-sha256/v1",
     "keyId": "310517c602b7adb85476e5d131cc206b"
   },
-  "versions": {
-    "说明": "本机档（deploy/local/desired-config.json）要和这里逐字一样，两边都由 deploy/france.sh 装（#451：装机脚本一份、两个档位，理论上不会漂）；node config.mjs diff-local 比这个。",
-    "postgresMajor": "16",
-    "nodeMajor": "22",
-    "temporalServer": "1.32.0",
-    "temporalCli": "1.9.1"
-  },
   "files": {
     "engine.env": {
       "FLEET_ENGINE_PORTS": {
@@ -53,11 +46,11 @@
       },
       "FLEET_CARPOOL_MAX_CONCURRENCY": {
         "value": "4",
-        "说明": "这台最多同时开几个拼车会话（#194 方案 4.7）：引擎起来时核库里拼车池（catalog.json 里 orgKind 为 carpool 的池）并发上限加起来是不是这个数，对不上推 carpool-cap:registry 提醒。各台（法国、本机档）写的加起来不许超过下面的总上限，配置检查（config.mjs diff-local）核；加一台机器要在它自己的期望里登记。创始人本机固定独享、不拼车，不登记。数值只放在两份期望里，代码里没有默认数（创始人：这类数不许写死、要能配）"
+        "说明": "这台最多同时开几个拼车会话（#194 方案 4.7）：引擎起来时核库里拼车池（catalog.json 里 orgKind 为 carpool 的池）并发上限加起来是不是这个数，对不上推 carpool-cap:registry 提醒。数值只放在期望里，代码里没有默认数（创始人：这类数不许写死、要能配）"
       },
       "FLEET_CARPOOL_TOTAL_CAP": {
         "value": "6",
-        "说明": "拼车并发总上限，各台（deploy/france、deploy/local 的期望）写的要逐字一样；各台 FLEET_CARPOOL_MAX_CONCURRENCY 加起来超过它就红。同号多机同时高频用拼车容易被风控、也免得一台把整窗额度抢光（#194 方案 4.7，建议法国 4、本机 WSL 演练台 2）。引擎自己不读这一项，只有配置检查读"
+        "说明": "拼车并发总上限（#194 方案 4.7；以前和本机 WSL 演练台的并发加起来不许超过它，那台已撤，现在只是留着的登记，建议法国 4）。引擎自己不读这一项"
       },
       "FLEET_FORK_MAX_CONTEXT_TOKENS": {
         "value": "100000",
@@ -69,18 +62,18 @@
       },
       "FLEET_CANARY_REPO": {
         "value": "thoerwink8/fleet-dao-canary-fr",
-        "说明": "全流程巡检的巡检仓（owner/仓名，docs/ops.md 第五节「全流程巡检」）。不许和本机档的演练仓（deploy/local/desired-config.json 的同一项）是同一个仓：两边的引擎会在同一个仓里开单、开 PR、把对方的单当成自己的（#777，config.mjs 的 diffProfiles 钉着，两边一样就红）。原来这一项是私有值、只记指纹，据 #777 指的就是演练仓 fleet-dao-canary；仓名不算要保密的东西（创始人 2026-09-28：账号、仓名这类标识不算泄漏），改成公开值，仓里才比得出两边一不一样。这个仓要创始人在 GitHub 上建好（公开空仓）、装上法国两个 App、照第五节配好才能用；发布会照这里把它写进 engine.env，在那之前法国引擎关着、巡检暂停，重开后读不到这个仓会记没跑成"
+        "说明": "全流程巡检的巡检仓（owner/仓名，docs/ops.md 第五节「全流程巡检」）。（#777 起是公开值：以前和本机演练仓比两边是不是同一个仓，那台已撤；仓名不算要保密的东西，创始人 2026-09-28：账号、仓名这类标识不算泄漏）。这个仓要创始人在 GitHub 上建好（公开空仓）、装上法国两个 App、照第五节配好才能用；发布会照这里把它写进 engine.env，在那之前法国引擎关着、巡检暂停，重开后读不到这个仓会记没跑成"
       },
       "FLEET_SESSION_PROXY": {
         "value": "",
-        "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/profile.sh 照这一档的期望读，不认 root 环境里的同名变量）。法国直连，留空＝不经代理；本机档经 Windows 上的 Clash（#731）"
+        "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/session-proxy.sh 照期望读，不认 root 环境里的同名变量）。法国直连，留空＝不经代理（#731）"
       }
     },
     "api.env": {
       "FLEET_ENV": "production",
       "FLEET_MACHINE_NAME": {
         "value": "法国",
-        "说明": "这台机器给人看的名字：驾驶舱顶栏徽标和环境页（#820 片 1）用它，和引擎那份 engine.env 同一项；本机档写「本机」（deploy/local/desired-config.json 登记的差别）。名字不算要保密的东西，当公开值"
+        "说明": "这台机器给人看的名字：驾驶舱顶栏徽标和环境页（#820 片 1）用它，和引擎那份 engine.env 同一项。名字不算要保密的东西，当公开值"
       },
       "FLEET_PUBLIC_URL": {
         "private": "88b74fe7c864848610dc899073d2d233b013b058861bb79a2bc292f1281d37be",
@@ -114,7 +107,7 @@
       },
       "FLEET_FEISHU_LOGIN": {
         "value": "on",
-        "说明": "驾驶舱接飞书登录：on（不写也一样）时生产必须配上面飞书一对（packages/api/src/config.ts）；off 只给本机档（deploy/local/desired-config.json）"
+        "说明": "驾驶舱接飞书登录：on（不写也一样）时生产必须配上面飞书一对（packages/api/src/config.ts）；off 只给明说不接飞书的环境"
       },
       "TEMPORAL_ADDRESS": {
         "value": "127.0.0.1:7243",
@@ -131,15 +124,15 @@
       },
       "FLEET_NODE_KEYS": {
         "private": "1650843456edc28f4e8c7c6a74b6b3ea06f0e024802bb38ae93cf3e9b072a2c6",
-        "说明": "看板多机（全仓审查第 1 路）：收别的环境（本机 WSL）推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值。还没记指纹：第一次在法国跑 fleet-api node-key new local 贴进去之后，用法国自己的指纹钥匙算好再把这里的 null 换成指纹（docs/ops.md「接上法国看板」）。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
+        "说明": "看板多机（全仓审查第 1 路）：收别的环境推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值。还没记指纹：第一次在法国跑 fleet-api node-key new local 贴进去之后，用法国自己的指纹钥匙算好再把这里的 null 换成指纹（docs/ops.md「接上法国看板」）。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
       },
       "FLEET_NODE_REPORT_URL": {
         "value": "",
-        "说明": "往别的看板推快照的地址：法国是收的一方、不往外推，留空（公开的空值）；本机档填法国的收件地址（私有值，deploy/local/desired-config.json）"
+        "说明": "往别的看板推快照的地址：法国是收的一方、不往外推，留空（公开的空值）；推送方才填法国的收件地址"
       },
       "FLEET_NODE_REPORT_TOKEN": {
         "value": "",
-        "说明": "往别的看板推快照用的通行证：法国不往外推，留空（公开的空值）；本机档填那把通行证的明文（私有值，deploy/local/desired-config.json）"
+        "说明": "往别的看板推快照用的通行证：法国不往外推，留空（公开的空值）；推送方才填那把通行证的明文"
       }
     },
     "release.env": {

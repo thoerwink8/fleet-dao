@@ -79,7 +79,7 @@ export interface SessionOrgDeps {
   /** 起 reclaude 的命令（绝对路径）：和会话、探针同一份，装在会话用户自己家里（real/index.ts 的 claudeCommand）。 */
   reclaude: string[];
   /**
-   * 出网经的代理（FLEET_SESSION_PROXY，规范成 http://主机:端口；本机档经 Windows 上的 Clash，法国直连不给）：org list 要连
+   * 出网经的代理（FLEET_SESSION_PROXY，规范成 http://主机:端口；法国直连不给）：org list 要连
    * reclaude 的服务端，WSL 里直连时通时不通（context deadline exceeded，读不到组织、Claude 池整轮不探，#786 同一个根）。
    * 给了就写成 /usr/bin/env 的参数；认不出的代理在这里就抛（parseSessionProxy），不悄悄改成直连。
    */

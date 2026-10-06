@@ -205,8 +205,8 @@ export interface RealPortsConfig {
   /** 桥接脚本的绝对路径（会话用户读得到；real/index.ts 的 DEFAULT_MIRASIM_BRIDGE_SCRIPT）。 */
   mirasimBridge: string;
   /**
-   * 会话出网经的代理（FLEET_SESSION_PROXY，规范成 http://主机:端口）：没写、空着是直连（法国），本机档登记的是 Windows 上
-   * Clash 的口（deploy/local/desired-config.json）。cursor-agent、grok 的会话带上，Claude 不带（hosts.ts）。
+   * 会话出网经的代理（FLEET_SESSION_PROXY，规范成 http://主机:端口）：没写、空着是直连（法国）。
+   * cursor-agent、grok 的会话带上，Claude 不带（hosts.ts）。
    */
   sessionProxy?: string;
 }
@@ -240,7 +240,7 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
     problems.push(`FLEET_MIRASIM_BRIDGE 要写绝对路径（现在是 ${rawMirasimBridge}）`);
   }
   const mirasimBridge = rawMirasimBridge || DEFAULT_MIRASIM_BRIDGE_SCRIPT;
-  // 写了却认不出就不起：不悄悄当成直连（本机档直连出不了网，会话会一个个莫名其妙地连不上）
+  // 写了却认不出就不起：不悄悄当成直连（直连出不了网的机器上，会话会一个个莫名其妙地连不上）
   const rawProxy = env.FLEET_SESSION_PROXY?.trim();
   let sessionProxy: string | undefined;
   if (rawProxy) {
@@ -434,7 +434,7 @@ export function realPortsFromEnv(
 } {
   const config = realPortsConfigFromEnv(env);
   const { db, close } = createDb({ env: env as Record<string, string | undefined> });
-  // 引擎自己的 git（抓主线、推分支）也经这一档登记的代理出网：本机档 WSL 直连 github.com 时通时不通（Connection reset，
+  // 引擎自己的 git（抓主线、推分支）也经这一档登记的代理出网：直连 github.com 不通时（Connection reset，
   // 动手前建工作树就卡在抓主线上，#786 同一个根）；git 认 http(s)_proxy 环境变量，gitEnv 照搬父环境里除凭据外的变量。
   // 只给 git 这一份环境，引擎进程自己的环境和起会话的环境（只从白名单抄）都不动；法国不登记代理、环境原样。
   const gh = createGitHub({

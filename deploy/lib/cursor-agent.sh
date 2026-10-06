@@ -11,7 +11,7 @@
 # 退出 0 也不算装成，装完照读回的判法再核一遍。
 # 查：以这个用户的身份照引擎的找法挑出引擎会跑的那一个、跑它的 --version（lib/cursor-agent-version.sh）。
 # france.sh 和 deploy/test/cursor-agent.test.sh 共用；要先 source common.sh（ok、changed、red）、cli-tools.sh（tool_path）和
-# profile.sh（会话代理）。
+# session-proxy.sh（会话代理）。
 
 CURSOR_AGENT_HAVE=""             # cursor_agent_version 读到的版本号
 CURSOR_AGENT_BIN=""              # 引擎会跑的那一个
@@ -22,8 +22,8 @@ CURSOR_AGENT_INSTALL_TIMEOUT=900 # 安装脚本等几秒（要下一百多兆的
 CURSOR_AGENT_PROBE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/cursor-agent-version.sh
 CURSOR_AGENT_VERSION_RE='^[0-9]+\.[0-9][0-9A-Za-z._-]*$' # 和版本目录名一个样子（2026.09.26-dd393fe）
 
-# 以那个用户的身份跑一条命令：环境和 cli-tools.sh 的 as_tool_user 一样清干净，这一档登记了会话代理就带上那几个代理变量
-# （profile.sh 的 session_proxy_load，#731；调用者自己环境里的代理不带）；照 ddgs_version 防卡——不带控制终端
+# 以那个用户的身份跑一条命令：环境和 cli-tools.sh 的 as_tool_user 一样清干净，期望里登记了会话代理就带上那几个代理变量
+# （session-proxy.sh 的 session_proxy_load，#731；调用者自己环境里的代理不带）；照 ddgs_version 防卡——不带控制终端
 # （setsid：不和 root 共用终端，抢终端会被挂起），到点叫停、不理叫停的再过 5 秒强杀（被强杀时 timeout 连自己一起杀掉，
 # 退出码是 137 而不是 124）；标准输出、标准错误落进 root 建的两个文件（不走 $(...) 的管道：他留个后台进程占着写端，
 # 管道就一直等）。返回命令的退出码
@@ -104,7 +104,7 @@ cursor_agent_version() { # 用户 版本目录
 }
 
 # 装 cursor-agent：照引擎的找法找得到能跑的就不动；一个都没有才以这个用户的身份下官方安装脚本、跑它，装完再核一遍。
-# 装着却跑不成、没查成的不重装、不删，只记红（先看清是什么）。这一档登记的会话代理读不出：先判红、不查不装（不拿直连顶）。
+# 装着却跑不成、没查成的不重装、不删，只记红（先看清是什么）。期望里登记的会话代理读不出：先判红、不查不装（不拿直连顶）。
 # 都只记红、不中断装机（一个执行方式不值得停下整台机器的装机），读回还会再判一次
 ensure_cursor_agent() { # 用户 版本目录 安装脚本地址
   local u=$1 dir=$2 url=$3 home tmp rc=0 log

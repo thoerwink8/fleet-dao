@@ -1,5 +1,0 @@
-// fleet-local（本机档）：apt 也要经 Windows 上的代理（/etc/environment、/etc/profile.d 那两份只管交互和登录 shell，
-// 不管 apt-get 这类不经 shell 起的进程）；法国没有这一项（登记过的差别，#451）。放进
-// /etc/apt/apt.conf.d/95local-proxy。
-Acquire::http::Proxy "http://127.0.0.1:7890";
-Acquire::https::Proxy "http://127.0.0.1:7890";

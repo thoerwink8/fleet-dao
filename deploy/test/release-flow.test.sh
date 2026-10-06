@@ -1262,13 +1262,12 @@ else
   FLEET_SERVICES=""
   saved_release_env=$RELEASE_ENV
   CONFIG_ETC=$TMP/etc-apply
-  CONFIG_PROFILE=$CONFIG_ETC/profile
   RELEASE_ENV=$CONFIG_ETC/release.env
   mkdir -p "$CONFIG_ETC"
-  # 这一版的期望：机器名、域名，engine.env 多加的一项（「,"键":"值"」），往香港发几样，放在哪（不给就是法国那份）。
+  # 这一版的期望：机器名、域名，engine.env 多加的一项（「,"键":"值"」），往香港发几样。
   # 起的服务一直是空的：桩里没有单元可装（APP_UNITS 是空的），写了服务名发布脚本自己就认不出
-  put_desired() { # 提交号 机器名 域名 [多加的一项] [往香港发] [位置]
-    local file=$RELEASES/$1/${6:-deploy/france/desired-config.json}
+  put_desired() { # 提交号 机器名 域名 [多加的一项] [往香港发]
+    local file=$RELEASES/$1/deploy/france/desired-config.json
     mkdir -p "$(dirname "$file")"
     printf '{"formatVersion":1,"selfHeal":false,"files":{"engine.env":{"FLEET_MACHINE_NAME":"%s"%s},"api.env":{"FLEET_ENV":"production"},"release.env":{"FLEET_SERVICES":"","FLEET_DOMAIN":"%s","FLEET_HK_PARTS":"%s"},"france.env":{}}}\n' \
       "$2" "${4:-}" "$3" "${5:-}" >"$file"
@@ -1362,10 +1361,6 @@ EOF
   NODE=$TMP/node-expect-fails
   cblocked "写后读回不一致" "照期望写本机配置没写成：写完读回不一致"
   NODE=$REAL_NODE
-  printf 'paris\n' >"$CONFIG_PROFILE"
-  chmod 640 "$CONFIG_PROFILE"
-  cblocked "档位认不出" "档位文件"
-  rm -f -- "$CONFIG_PROFILE"
   reset
   do_release "$D" >"$TMP/out"
   check "都改好了再发 D：切到 D、照期望写上" "$(current_sha):$(has_line release.env FLEET_DOMAIN=d.invalid)" "$D:有"
@@ -1428,17 +1423,6 @@ EOF
   do_release "$E" >"$TMP/out"
   check "这一版没有配置的期望：照常切到 E、不写、没有红" \
     "$(current_sha):$(said '里没有配置的期望（#323 之前的版本）：不照期望写'):${#REDS[@]}" "$E:1:0"
-  # 本机档：照这一版里 deploy/local 那份写，不拿法国那份
-  printf 'local\n' >"$CONFIG_PROFILE"
-  chmod 640 "$CONFIG_PROFILE"
-  Y=$(printf '5%.0s' {1..40})
-  put_desired "$Y" 法国 x2.invalid
-  put_desired "$Y" 本机 fleet-local.invalid "" "" deploy/local/desired-config.json
-  reset
-  do_release "$Y" >"$TMP/out"
-  check "本机档：照 deploy/local 那份写" \
-    "$(current_sha):$(has_line engine.env FLEET_MACHINE_NAME=本机):$(has_line release.env FLEET_DOMAIN=fleet-local.invalid)" "$Y:有:有"
-  rm -f -- "$CONFIG_PROFILE"
   unset REAL_NODE
   RELEASE_ENV=$saved_release_env
   FLEET_HK_PARTS=""

@@ -314,7 +314,7 @@ export interface HostDriverDeps {
   /** 读账本用：引擎自己的进程进不去会话用户的家（750），经这个以他的身份读（real/index.ts 的生产装配）。 */
   mirasimLedgerFs(user: SessionUser): LedgerFs;
   /**
-   * 会话出网经的代理（引擎配置 FLEET_SESSION_PROXY；本机档经 Windows 上的 Clash，法国直连、不给，#731）：cursor-agent、grok
+   * 会话出网经的代理（引擎配置 FLEET_SESSION_PROXY；法国直连、不给，#731）：cursor-agent、grok
    * 的会话带上（它们和会话里跑的命令都认 http(s)_proxy）。Claude 不带：reclaude 自己管上游和代理，会话经它的本地口出去
    * （claude-code/run.ts 的 UPSTREAM_ENV 见到代理变量就拒起）。Mirasim 不是我们起的进程，不涉及。
    * 必须写（直连写 undefined）：起驱动的每一处都得想清楚带不带，漏传一处，那条路上的会话就悄悄直连、出不了网。

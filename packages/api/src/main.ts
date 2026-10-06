@@ -181,7 +181,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   });
   const github = githubMirror(db);
   const store = createPgStore(db, { now });
-  // 正式环境（FLEET_ENV=production）：法国和本机档（WSL）都是，不只法国——下面几项在两台上都接着、都判。
+  // 正式环境（FLEET_ENV=production）：法国是；下面几项都接着、都判。
   // 线上版本跟不跟得上主线：正式环境才有发布目录和自动发布；读的时候现算，报警每 5 分钟判一次
   const production = config.env === 'production';
   const deployLag = production

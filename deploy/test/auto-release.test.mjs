@@ -25,8 +25,6 @@ import {
   FAILED_PREFIX,
   IDLE_WAIT_MS,
   INSTALL_PATHS,
-  MARKER_UNREADABLE_KEY,
-  MINOR_INTERVAL_MS,
   manualHold,
   PENDING_PREFIX,
   parseHistory,
@@ -115,8 +113,6 @@ function machine() {
     mainAncestors: [H1, H0], // 这些提交算「在 origin/main 上」
     mainAncestorsThrow: null,
     engineOnError: null,
-    track: 'tag', // 这台跟什么发：法国 tag（只发版本标记）；本机档 main（跟主线上 CI 全绿的最新提交，#1050）
-    trackThrow: null,
     engineUp: false, // 法国现在 FLEET_SERVICES=fleet-api：引擎关着
     // 配置对账读到的：期望（在用那一版里的）、线上的环境文件、指纹钥匙；configThrow = 读的时候就抛
     config: {
@@ -164,10 +160,6 @@ function machine() {
       m.calls.push(`ancestor ${commit[0]}`);
       if (m.mainAncestorsThrow) throw new Error(m.mainAncestorsThrow);
       return m.mainAncestors.includes(commit);
-    },
-    async readTrack() {
-      if (m.trackThrow) throw new Error(m.trackThrow);
-      return m.track;
     },
     async engineOn() {
       if (m.engineOnError) throw new Error(m.engineOnError);
@@ -1562,150 +1554,4 @@ test('发布脚本的原因：有红取红；退出码 2 取「待配 / 没查�
     '结论被截掉了：取过程里 … 开头的',
   );
   assert.equal(releaseDetail(['a', 'b', 'c']), 'b c');
-});
-
-// ── 跟主线（本机档 WSL，#1050）：发主线上 CI 全绿的最新提交，最短 6 小时切一次；法国（tag 档）不走这里 ──
-
-const LONG_AGO = `2026-09-26T20:00:00Z ${H0} release auto\n`; // 12 小时前自动切到在用的这版：早过了最短间隔
-/** 本机档：主线 H2（头）、H1、H0（在用）；一个版本标记都没有；H2、H1 的 CI 都绿。 */
-function followMain() {
-  const m = machine();
-  m.track = 'main';
-  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
-  m.history = LONG_AGO;
-  m.tags = '';
-  m.ci = runsBody(run(H2, 'completed', 'success'), run(H1, 'completed', 'success'));
-  return m;
-}
-
-test('跟主线档：主线头 CI 全绿 → 发主线头，不读版本标记（一个 tag 都没有也发）；状态里没有 marker 字段、记着 track=main', async () => {
-  const m = followMain();
-  const st = await m.round();
-  assert.deepEqual(releases(m), ['release c']);
-  assert.ok(!m.calls.includes('tags'), '这一档不读版本标记');
-  assert.deepEqual(m.checkouts, [H2], '部署检出快进到要发的那个提交');
-  assert.equal(st.track, 'main');
-  assert.equal(st.trackError, null);
-  assert.equal(JSON.parse(JSON.stringify(st)).marker, undefined, '没有 marker 字段：后端按主线头数落后');
-  assert.equal(st.attempt.result, 'ok');
-  assert.equal(st.last.action, 'released');
-  assert.equal(st.ci.sha, H2);
-  assert.equal(st.rules.commit, H2, '规矩同步跟着发出去的那个提交走');
-  assert.match(summary(st), /本机档跟主线/);
-  // 再来一轮：在用的就是主线头，什么都不动、也不问 GitHub
-  m.t += 5 * MIN;
-  const again = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(again.last.action, 'up-to-date');
-  assert.ok(!m.calls.includes('ci'));
-});
-
-test('跟主线档：主线头 CI 还在跑 → 往回找比在用的新、CI 全绿的最新一个（H1）来发，读数里写明主线头还没绿', async () => {
-  const m = followMain();
-  m.ci = runsBody(run(H2, 'in_progress', null), run(H1, 'completed', 'success'));
-  const st = await m.round();
-  assert.deepEqual(releases(m), ['release b']);
-  assert.equal(st.ci.sha, H1);
-  assert.match(st.last.detail, /主线头 c{12} 的 CI 还没全绿/);
-});
-
-test('跟主线档：离上一次切换不到 6 小时不发（也不白问 GitHub），过了 6 小时才发；人手动切的也算', async () => {
-  const m = followMain();
-  m.history = `2026-09-27T06:05:00Z ${H0} release\n`; // 人在 1 小时 55 分钟前手动切到在用的这版
-  let st = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(st.last.action, 'interval-wait');
-  assert.match(st.last.detail, /最早 2026-09-27T12:05:00\.000Z 再发/);
-  assert.ok(!m.calls.includes('ci'), '等间隔的这些轮不问 GitHub');
-  m.t = Date.parse('2026-09-27T12:06:00Z');
-  m.ci = runsBody(run(H2, 'completed', 'success', { created_at: '2026-09-27T07:59:00Z' }));
-  st = await m.round();
-  assert.deepEqual(releases(m), ['release c']);
-  assert.ok(MINOR_INTERVAL_MS === 6 * 60 * MIN);
-});
-
-test('【故意造出的失败】跟主线档：一个全绿的都没有（红、读不到）→ 不发，记 ci-red / ci-unknown，不当成绿', async () => {
-  const m = followMain();
-  m.ci = runsBody(run(H2, 'completed', 'failure'), run(H1, 'completed', 'failure'));
-  let st = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(st.last.action, 'ci-red');
-  assert.equal(st.ci.verdict, 'red');
-  m.ci = { status: 403, body: '{"message":"API rate limit exceeded"}', rate: '这个钟头还剩 0 次' };
-  m.t += 5 * MIN;
-  st = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(st.last.action, 'ci-unknown');
-  assert.equal(st.ci.verdict, 'unknown');
-});
-
-test('跟主线档：人手动退回之后主线上还没有更新的提交 → 不跟人抢；发过没成（不健康）的提交和比它旧的不再自动试，主线出了更新的才发那个', async () => {
-  const m = followMain();
-  m.history = `2026-09-27T07:59:00Z ${H0} rollback\n`; // 人在主线头合进来之后手动退回到 H0
-  let st = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(st.last.action, 'hold');
-
-  const n = followMain();
-  n.history = `${LONG_AGO}2026-09-26T21:00:00Z ${H2} unhealthy\n`; // 主线头 H2 发过、没过健康检查
-  st = await n.round();
-  assert.deepEqual(releases(n), []);
-  assert.equal(st.last.action, 'failed-before');
-  // 主线又出了 H3：发 H3，H2 和更旧的不再试
-  n.main.unshift([H3, '2026-09-27T07:59:00Z']);
-  n.ci = runsBody(run(H3, 'completed', 'success'));
-  n.t += 5 * MIN;
-  st = await n.round();
-  assert.deepEqual(releases(n), ['release e']);
-});
-
-test('【故意造出的失败】跟主线档：发布没成 → 记报警（这个提交和比它旧的不再自动试），下一轮不重试', async () => {
-  const m = followMain();
-  m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/x.log', detail: '健康检查没过' };
-  let st = await m.round();
-  assert.deepEqual(releases(m), ['release c']);
-  assert.equal(st.attempt.result, 'failed');
-  assert.equal(m.alerts.length, 1);
-  assert.equal(m.alerts[0].key, `${FAILED_PREFIX}${H2}`);
-  assert.match(m.alerts[0].body, /这个提交和比它旧的不再自动试，等主线上下一个 CI 全绿的提交/);
-  m.t += 5 * MIN;
-  st = await m.round();
-  assert.deepEqual(releases(m), [], '没成的不再试（每一轮开头清掉调用记录，这一轮一次都没发）');
-  assert.equal(st.last.action, 'failed-before');
-});
-
-test('【故意造出的失败】tag 档（法国）、读不出档位：只认版本标记——主线头 CI 全绿也不发，不会误跟主线', async () => {
-  for (const [why, setup] of [
-    ['法国档', (m) => (m.track = 'tag')],
-    [
-      '读不出档位',
-      (m) => {
-        m.track = 'main';
-        m.trackThrow = '档位文件读不到';
-      },
-    ],
-    ['档位认不出', (m) => (m.track = 'weird')],
-  ]) {
-    const m = followMain();
-    setup(m);
-    const st = await m.round();
-    assert.deepEqual(releases(m), [], why);
-    assert.equal(st.track, 'tag', why);
-    assert.equal(st.last.action, 'marker-none', why);
-    assert.ok(m.calls.includes('tags'), `${why}：读了版本标记`);
-    if (why !== '法国档') assert.match(st.trackError, /按 tag 档，只发版本标记，不会误跟主线/, why);
-    else assert.equal(st.trackError, null);
-  }
-});
-
-test('从按版本发换成跟主线：之前留下的「版本标记读不到」报警撤掉', async () => {
-  const m = followMain();
-  m.track = 'tag';
-  m.tagsThrow = 'git 没跑成';
-  await m.round();
-  assert.equal(m.alerts.at(-1).key, MARKER_UNREADABLE_KEY);
-  m.track = 'main';
-  m.t += 5 * MIN;
-  await m.round();
-  assert.ok(m.resolvedKeys.includes(MARKER_UNREADABLE_KEY), '切到跟主线档后这条不再成立');
 });

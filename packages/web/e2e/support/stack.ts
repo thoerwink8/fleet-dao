@@ -219,7 +219,7 @@ export async function startStack(): Promise<Stack> {
     {
       ...process.env,
       FLEET_ENV: 'development',
-      // 环境页和顶栏徽标读它（#820 片 1）：e2e 这套在后端前面架上，等于「本机」那一档（deploy/local 的值）
+      // 环境页和顶栏徽标读它（#820 片 1）：e2e 这套在后端前面架上，名字用「本机」（开发机上的样子）
       FLEET_MACHINE_NAME: '本机',
       // 看板多机（07c）：两个远程环境的通行证哈希，一个推快照、一个配了钥匙从不推（见 support/node-keys.ts）
       FLEET_NODE_KEYS: E2E_NODE_KEYS,

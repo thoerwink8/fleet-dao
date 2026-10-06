@@ -1,7 +1,7 @@
 // 钉住通用段「我的机器与模型」里 Fable 那条的测试（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
 // 2026-10-03 #669 把「Fable 不用」改成永久，字面上连创始人自己开的主对话也管；10-04 凌晨指挥官的主会话跑在他自己选的
 // Fable 上，照字面算违规、去问他要不要重启。他 10-04 08:50 回：永久不用指的是机器派单（AI 自动派单用 Fable 太贵），
-// 主对话开 Fable 是他自己定的。决定 0017：机器派的会话（引擎、工人、路由）、子代理、VPS 和 WSL 上的会话永不用 Fable，
+// 主对话开 Fable 是他自己定的。决定 0017：机器派的会话（引擎、工人、路由）、子代理、VPS 上的会话永不用 Fable，
 // 子代理只用 Sonnet 或 Opus（优先 Sonnet，2026-10-05 起），Fable 只在他本机的主对话里由他自己选。下面钉住这几样：通用段改写时不能悄悄丢掉哪一样，
 // 也不能悄悄退回「一律不用」。
 import { readFileSync } from 'node:fs';
@@ -37,7 +37,7 @@ function fableLine(text: string): string {
 const FABLE_RULES: Record<string, RegExp> = {
   机器派的会话永不用: /机器派的会话（引擎、工人、路由）[^；。]*永不用 Fable/,
   子代理永不用: /子代理[^；。]*永不用 Fable/,
-  VPS和WSL上的会话永不用: /VPS 和 WSL 上的会话[^；。]*永不用 Fable/,
+  VPS上的会话永不用: /VPS 上的会话[^；。]*永不用 Fable/,
   子代理只用Sonnet或Opus: /子代理只用 Sonnet 或 Opus（优先 Sonnet）/,
   只在创始人本机主对话里由他自己选: /Fable 只在我本机的主对话里由我自己选/,
 };
@@ -79,12 +79,12 @@ describe('规矩：Fable 只在创始人本机的主对话里由他自己选（�
     expect(missing(FABLE_RULES, fableLine(old))).toEqual(Object.keys(FABLE_RULES));
   });
 
-  it('【故意造出的失败】拿掉其中一样（路由、子代理、VPS 和 WSL、只用 Opus 或 Sonnet、由我自己选）：各自查得出来', () => {
+  it('【故意造出的失败】拿掉其中一样（路由、子代理、VPS、只用 Opus 或 Sonnet、由我自己选）：各自查得出来', () => {
     const line = fableLine(AGENTS);
     const cuts: [from: string, to: string, rule: string][] = [
       ['（引擎、工人、路由）', '（引擎、工人）', '机器派的会话永不用'],
       ['、子代理、', '、', '子代理永不用'],
-      ['、VPS 和 WSL 上的会话', '', 'VPS和WSL上的会话永不用'],
+      ['、VPS 上的会话', '', 'VPS上的会话永不用'],
       ['，子代理只用 Sonnet 或 Opus（优先 Sonnet）', '', '子代理只用Sonnet或Opus'],
       ['由我自己选', '由 AI 选', '只在创始人本机主对话里由他自己选'],
     ];
@@ -99,11 +99,7 @@ describe('规矩：Fable 只在创始人本机的主对话里由他自己选（�
     const line = fableLine(AGENTS);
     const soft = line.replace('永不用 Fable', '少用 Fable');
     expect(soft).not.toBe(line);
-    expect(missing(FABLE_RULES, soft)).toEqual([
-      '机器派的会话永不用',
-      '子代理永不用',
-      'VPS和WSL上的会话永不用',
-    ]);
+    expect(missing(FABLE_RULES, soft)).toEqual(['机器派的会话永不用', '子代理永不用', 'VPS上的会话永不用']);
   });
 
   it('【故意造出的失败】指挥官技能不写子代理的模型（改之前那样）：查得出来', () => {

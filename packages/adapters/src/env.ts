@@ -4,8 +4,8 @@
 // Claude 会话的网络流量经 reclaude 的代理（VPS 实测会话里 git 也带着它的 HTTPS_PROXY），凭据不能过它。
 // TMPDIR 不从宿主抄：宿主的是引擎自己的临时目录（会话用户不一定写得进）。会话的临时目录由起会话的一方给（tmpDir），
 // 每个会话一个、会话结束整个删掉；不给就用系统默认。
-// 代理也不从宿主抄（开发机上用户级的代理、长驻进程带着的旧代理都不算数）：只认起会话的一方显式给的 proxy——本机档登记在
-// engine.env 的 FLEET_SESSION_PROXY（经 Windows 上的 Clash 出网，#731）。Claude 会话不给：reclaude 自己管上游和代理。
+// 代理也不从宿主抄（开发机上用户级的代理、长驻进程带着的旧代理都不算数）：只认起会话的一方显式给的 proxy——登记在
+// engine.env 的 FLEET_SESSION_PROXY（#731）。Claude 会话不给：reclaude 自己管上游和代理。
 import { delimiter, isAbsolute } from 'node:path';
 
 /** 只从宿主环境抄这些。XDG_RUNTIME_DIR 给 systemd-run --user 用；后半截是 Windows 开发机上起 node 必需的系统变量。 */
@@ -80,7 +80,7 @@ export const PROXY_ENV_KEYS: readonly string[] = [
 export const SESSION_NO_PROXY = 'localhost,127.0.0.1,::1';
 
 /**
- * 认的样子、规范成的写法都和装机脚本一样（deploy/lib/profile.sh 的 SESSION_PROXY_RE、session_proxy_load，同一项登记两边读，
+ * 认的样子、规范成的写法都和装机脚本一样（deploy/lib/session-proxy.sh 的 SESSION_PROXY_RE、session_proxy_load，同一项登记两边读，
  * 改一边另一边跟着改）：http、主机只有字母数字点横线、写明端口 1–65535，末尾多一个 / 也认。不收账号密码和路径：它要写上
  * 起会话的命令行（procs.ts 的 scopeLaunch：sudo 记日志、/proc 里别的用户也读得到），带了账号密码就漏了。
  */

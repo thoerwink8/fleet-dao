@@ -1,5 +1,0 @@
-#!/bin/sh
-# fleet-local（本机档）：本机上网要经 Windows 上的代理；法国没有这一项（登记过的差别，#451）。
-# 放进 /etc/profile.d/zz-local-proxy.sh（zz- 前缀让它排在别的 profile.d 脚本后面加载，覆盖它们可能设的代理）。
-export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890
-export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1

@@ -8,8 +8,8 @@
 #   3. 装着却跑不成（退出非 0、解释器没了）、输出认不出、卡住、不理叫停：判红，不重装、不删
 #   4. 装的时候出错（安装脚本失败、下不到、退出 0 却什么都没装、卡住）：只记红、不中断，不算装了
 #   5. 没查成（读不到找的那段、临时目录建不了、查不到这个用户、起不来）：不当成没装、不装
-#   6. 会话代理（#731）：只带这一档期望里登记的——法国登记的是空，一个代理变量都不带（root 环境里的 http(s)_proxy、
-#      FLEET_SESSION_PROXY 都带不进去）；本机档带上 Clash 的口；登记的读不出：不装，装着了也判红、不报绿
+#   6. 会话代理（#731）：只带期望里登记的——法国登记的是空，一个代理变量都不带（root 环境里的 http(s)_proxy、
+#      FLEET_SESSION_PROXY 都带不进去）；登记成 http://127.0.0.1:7890 就带上它；登记的读不出：不装，装着了也判红、不报绿
 # 不出网：官方安装脚本换成假的（照官方的样子先解到 versions/.tmp-…、再挪成 versions/<版本>，~/.local/bin 下链上），
 # 经 file:// 下；$T 下放开关文件让它故意出错。
 # 要 root：得建临时用户、以他的身份跑；要 node（照期望读会话代理）。用法：sudo bash deploy/test/cursor-agent.test.sh。
@@ -20,8 +20,8 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/../lib/common.sh"
 # shellcheck source=../lib/cli-tools.sh
 source "$HERE/../lib/cli-tools.sh"
-# shellcheck source=../lib/profile.sh
-source "$HERE/../lib/profile.sh"
+# shellcheck source=../lib/session-proxy.sh
+source "$HERE/../lib/session-proxy.sh"
 # shellcheck source=../lib/cursor-agent.sh
 source "$HERE/../lib/cursor-agent.sh"
 
@@ -91,7 +91,7 @@ chmod 644 "$T/install.sh"
 install -o "$U" -g "$U" -m 644 /dev/null "$T/proxy.log"
 URL=file://$T/install.sh
 runs() { wc -l <"$T/install.log"; }
-# root 自己环境里的代理（本机档 root 的登录 shell 就有）、碰巧有的 FLEET_SESSION_PROXY：安装脚本只该看到这一档期望里
+# root 自己环境里的代理（root 的登录 shell 里碰巧有）、碰巧有的 FLEET_SESSION_PROXY：安装脚本只该看到期望里
 # 登记的，这几个一个都看不到
 export https_proxy=http://root-only.invalid:1 HTTPS_PROXY=http://root-only.invalid:1
 export FLEET_SESSION_PROXY=http://root-only.invalid:1
@@ -282,7 +282,7 @@ check "起不来：不认成没装" "$?:$CURSOR_AGENT_ABSENT" 1:0
 has "起不来：原因说没跑成、带着报错" "$CURSOR_AGENT_BAD" '以 nobody 的身份找 cursor-agent 没跑成（退出 1）：.+'
 check "没查成的几次都没跑安装脚本" "$(($(runs) - before))" 0
 
-echo "== 6. 会话代理（#731：本机上网要经 Windows 上的 Clash；只认这一档期望里登记的）"
+echo "== 6. 会话代理（#731：只认期望里登记的；法国登记成空＝直连，登记了就带上）"
 rm -rf -- "$V"
 before=$(runs)
 SESSION_PROXY_DESIRED=$T/没有这份.json SESSION_PROXY_STATE=""
@@ -290,12 +290,18 @@ CHANGES=() REDS=()
 ensure_cursor_agent "$U" "$V" "$URL" >/dev/null
 check "【故意造出的失败】登记的会话代理读不出：不装、记红（不拿直连顶）" "$(($(runs) - before)) ${#CHANGES[@]} ${#REDS[@]}" "0 0 1"
 has "读不出：红里写清是会话代理没读成" "$(last_red)" '这一档登记的会话代理没读成（照期望 .*没有这份\.json 出不了 engine\.env'
-SESSION_PROXY_DESIRED="" SESSION_PROXY_STATE="" PROFILE=local
+# 照 deploy/france/desired-config.json 改写出一份，把会话代理登记成 http://127.0.0.1:7890（值从仓里那份现取、不写死别的）
+"$SESSION_PROXY_NODE" -e '
+  const fs = require("node:fs");
+  const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  j.files["engine.env"].FLEET_SESSION_PROXY.value = "http://127.0.0.1:7890";
+  fs.writeFileSync(process.argv[2], JSON.stringify(j));' "$HERE/../france/desired-config.json" "$T/proxied.json"
+SESSION_PROXY_DESIRED=$T/proxied.json SESSION_PROXY_STATE=""
 CHANGES=() REDS=()
 ensure_cursor_agent "$U" "$V" "$URL" >/dev/null
-check "本机档：装上" "${#CHANGES[@]} ${#REDS[@]}" "1 0"
+check "登记了代理：装上" "${#CHANGES[@]} ${#REDS[@]}" "1 0"
 # 【故意造出的失败】的另一面：登记了代理、安装脚本的环境里却没有，这里就红
-check "本机档：安装脚本的环境里带上 deploy/local/desired-config.json 登记的代理（大小写各一份、no_proxy 只放本机回环），root 环境里的没带进去" \
+check "登记了代理：安装脚本的环境里带上它（大小写各一份、no_proxy 只放本机回环），root 环境里的没带进去" \
   "$(tail -1 "$T/proxy.log")" \
   "http://127.0.0.1:7890 http://127.0.0.1:7890 http://127.0.0.1:7890 http://127.0.0.1:7890 localhost,127.0.0.1,::1 localhost,127.0.0.1,::1"
 read -r who home pwd leak self < <(tail -1 "$T/install.log")
@@ -304,7 +310,6 @@ SESSION_PROXY_DESIRED=$T/没有这份.json SESSION_PROXY_STATE=""
 CHANGES=() REDS=()
 ensure_cursor_agent "$U" "$V" "$URL" >/dev/null
 check "【故意造出的失败】装着了、登记的会话代理读不出：照样判红，不拿没经代理查的报绿" "${#CHANGES[@]} ${#REDS[@]}" "0 1"
-unset PROFILE
 SESSION_PROXY_DESIRED="" SESSION_PROXY_STATE=""
 
 if ((fail)); then

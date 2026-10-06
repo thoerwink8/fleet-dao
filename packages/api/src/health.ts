@@ -147,7 +147,7 @@ export function serviceHealthChecks(parts: {
     { name: 'canary', check: () => parts.canary.check(), ...notWired(parts.canary.notWired) },
     // 看门狗停了、没跑成会跟着引擎自己变红（和这一版好不好无关）：发版脚本同样只标待处理、不退回
     { name: 'watchdog', check: () => parts.watchdog.check(), ...notWired(parts.watchdog.notWired) },
-    // 推不成跟着网络、对方自己变红（和这一版好不好无关）：本机档配上推送地址之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加上它
+    // 推不成跟着网络、对方自己变红（和这一版好不好无关）：要接上别的环境之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加上它
     {
       name: 'node_report',
       check: () => parts.nodeReport.check(),
