@@ -1,8 +1,6 @@
 // 失败分流的引擎入口：工作流看到的失败 + 这一步的上下文 → 失败分流（failure/classify.ts：规则表认原因，按这一种的处置办）
 // → 下一步动作。经 decide 本地活动调，结果进历史；改规则表不会让在途任务重放对不上。
 // 分流自己出错或答非所问（规则表写坏了）也不判死：退回只看次数的兜底梯（重试 → 换路由 → 换模型 → 挂起并报警）。
-// 分流判停下、又算这条路由的账（上游断连、被拒、限流、模型找不到……）时，换同一个模型的下一个渠道接着跑（channelFallback，#1118），
-// 换渠道的次数用完才停下报人。
 
 import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -103,8 +101,8 @@ export interface NextAction {
   /** 只有人能修、修法确定时：写给人看的一句。 */
   humanFix?: string;
   /**
-   * 这条路由所在的渠道运行中失败、该换同一个模型的下一个渠道（#1118）：工作流要让选路把这个渠道标成不可用（落 channel_states）再选。
-   * 只在 action 是 swapRoute 且这一步带着渠道编号时才有；老历史里的判断没有。
+   * 只出现在 2026-10-06 之前记下的换渠道判断里（#1118）：工作流重放时让选路把这个渠道标成不可用（落 channel_states）再选。
+   * 新的失败不再设。
    */
   failChannel?: true;
 }
@@ -212,32 +210,7 @@ export function nextAction(input: FailureInput, triage: FailureTriage = classify
     ...(shared ? { shared } : {}),
     ...(v.humanFix ? { humanFix: v.humanFix } : {}),
   };
-  return v.action === 'park' && v.routeOutcome === 'fail' ? channelFallback(input, out) : out;
-}
-
-/**
- * 渠道运行中失败换渠道（#1118）：分流判停下（这条路原路重试用完、或上游直接拒了），而且失败算这条路由的账（routeOutcome fail：
- * 上游断连、被拒、限流、模型找不到……不是我们自己停的、账号池的事、任务自己的问题），就换同一个模型的下一个渠道接着跑，不停下报人。
- * 换渠道次数用完（limits.routeSwaps）就停下报人，原因里写明已经换过几次；这一步不绑路由、或不知道渠道编号的不换。
- * 判断在这里（经 decide 本地活动、结果进历史）：工作流只照 action、failChannel 办，旧历史重放不变。
- */
-function channelFallback(input: FailureInput, parked: NextAction): NextAction {
-  if (!input.routeBound || !input.context?.route?.channelId) return parked;
-  const used = count(input.counters?.routeSwaps);
-  if (used >= input.limits.routeSwaps) {
-    return { ...parked, reason: `${parked.reason}；已换过 ${used} 次渠道仍失败，不再换` };
-  }
-  return {
-    ...parked,
-    action: 'swapRoute',
-    delaySeconds: 0,
-    reason: `${parked.reason}；渠道运行中失败，换同一个模型的下一个渠道（第 ${used + 1}/${input.limits.routeSwaps} 次）`,
-    counter: 'routeSwaps',
-    resumeSame: false,
-    alert: false,
-    avoid: 'route',
-    failChannel: true,
-  };
+  return out;
 }
 
 /** 分流出错时的兜底：只看次数的梯子。端口明说重试没用的跳过重试；不绑路由的只有重试和挂起。 */
