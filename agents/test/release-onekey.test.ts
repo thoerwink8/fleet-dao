@@ -280,13 +280,15 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
   it('过了检查的照原样进 runTrain：写了暂停标记（说明真走到了第 1 步）', async () => {
     const home = freshHome();
     const { io } = makeWorld();
-    // 本机有个说不准的工人，让等收尾卡住，这趟不会走远但够看到「真在走 runTrain」
-    const stuckWorker = 'w1：grok，档位 high，不确定在跑没跑，pid 123\n  工作树 x（分支 y）';
+    // 法国有个会话一直在跑（预检那次读到 0 个，之后 1 个），让等收尾卡住，这趟不会走远但够看到「真在走 runTrain」
+    // （本机工人、自动合并的 PR 只提示不等了，卡不住它）
     const run0 = io(home);
-    const origRun = run0.run;
-    run0.run = (c, a, o) => {
-      if (c === NODE && String(a[0]).endsWith('worker.mjs')) return ok(stuckWorker);
-      return origRun(c, a, o);
+    let polls = 0;
+    run0.runningSessions = async () => {
+      polls += 1;
+      return polls === 1
+        ? { ok: true, running: 0, rows: [] }
+        : { ok: true, running: 1, rows: [{ repo: 'o/a', n: 5, stage: 'execute' }] };
     };
     const code = await onekey.runOnekey(['start', '--sha', SHA, '--founder-ok', FOUNDER], run0);
     // 卡在等收尾（3），但暂停标记已经写了——证明 runTrain 真跑起来了
