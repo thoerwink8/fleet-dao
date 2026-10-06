@@ -137,7 +137,7 @@ expect_value() { # 文件 键 期望的值 说明：按 systemd 的读法读回�
 expect_value "$T/fr-engine.env" FLEET_ENGINE_PORTS real "engine.env 的端口实现照期望写（期望就是人定的那一份）"
 expect_value "$T/fr-engine.env" FLEET_WORK_DIR /var/lib/fleet-work "engine.env 的工作树的根照期望写"
 expect_value "$T/fr-api.env" FLEET_ENV production "api.env 的公开值照期望写"
-expect_value "$T/fr-engine.env" FLEET_CANARY_REPO thoerwink8/fleet-dao-canary-fr "巡检仓（公开值，照期望写）"
+expect_value "$T/fr-engine.env" FLEET_CANARY_REPO thoerwink8/fleet-dao-canary "巡检仓（公开值，照期望写）"
 expect_value "$T/fr-api.env" FLEET_GITHUB_WEBHOOK_SECRET "" "webhook 密钥（私有值）只留空位"
 expect_value "$T/fr-api.env" FEISHU_APP_SECRET "" "飞书密钥（私有值）只留空位"
 expect_value "$T/fr-release.env" FLEET_DOMAIN "" "域名（私有值）只留空位"
