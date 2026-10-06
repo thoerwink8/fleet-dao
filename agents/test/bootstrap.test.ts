@@ -91,6 +91,18 @@ function fakeSync(home: string, fix = true) {
 }
 
 describe('是现在这一代：一个字不说、不同步', () => {
+  it('开会话钩子登记成 Windows 静默启动器，也算现在这一代', () => {
+    const home = currentMachine();
+    const exe = `${home.replaceAll('\\', '/')}/.fleet-dao/bin/quiet-session-start.exe`;
+    write(
+      join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: exe }] }] },
+      }),
+    );
+    expect(lib.healthReasons({ home })).toEqual({ reasons: [] });
+  });
+
   it('登记对、脚本和专用检出一样', () => {
     const home = currentMachine();
     expect(lib.healthReasons({ home })).toEqual({ reasons: [] });

@@ -111,7 +111,14 @@ describe('装', () => {
     ]);
     expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
     expect(s.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }]);
-    expect(m.cmd('pretool.mjs')).toMatch(/^node ".*\/\.fleet-dao\/hooks\/pretool\.mjs"$/);
+    if (PLATFORM === 'win32') {
+      expect(m.cmd('pretool.mjs')).toMatch(/\/\.fleet-dao\/bin\/quiet-pretool\.exe$/);
+      expect(m.cmd('pretool.mjs')).not.toMatch(/[\s"$&|<>]/);
+      expect(existsSync(m.cmd('pretool.mjs'))).toBe(true);
+      expect(existsSync(m.cmd('session-start.mjs'))).toBe(true);
+    } else {
+      expect(m.cmd('pretool.mjs')).toMatch(/^node ".*\/\.fleet-dao\/hooks\/pretool\.mjs"$/);
+    }
     const checked = m.check();
     expectKind(checked, SCRIPTS, 'ok');
     expectKind(checked, SETTINGS, 'ok');
@@ -411,6 +418,23 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
   });
 });
 
+describe('Windows 上不经 cmd 启动', () => {
+  it('没有空格的家目录：命令是单个不带引号的静默启动器；有空格就退回 node 加引号；Linux 始终 node', () => {
+    expect(hookCommand('C:/Users/u', 'win32', 'pretool.mjs')).toBe(
+      'C:/Users/u/.fleet-dao/bin/quiet-pretool.exe',
+    );
+    expect(hookCommand('C:/Users/u', 'win32', 'session-start.mjs')).toBe(
+      'C:/Users/u/.fleet-dao/bin/quiet-session-start.exe',
+    );
+    expect(hookCommand('C:/Users/Ada Lovelace', 'win32', 'stop.mjs')).toBe(
+      'node "C:/Users/Ada Lovelace/.fleet-dao/hooks/stop.mjs"',
+    );
+    expect(hookCommand('/home/u', 'linux', 'prompt-log.mjs')).toBe(
+      'node "/home/u/.fleet-dao/hooks/prompt-log.mjs"',
+    );
+  });
+});
+
 describe('各家：装在哪、没装的说为什么', () => {
   it('没装读这份设置的那几家：跳过，什么都不写；装了的别家逐家说为什么没装钩子', () => {
     const m = machine(['codex', 'pi']);
@@ -435,6 +459,15 @@ describe('各家：装在哪、没装的说为什么', () => {
       script: 'pretool.mjs',
       legacy: false,
     });
+    expect(ownedScript('C:/Users/u/.fleet-dao/bin/quiet-session-start.exe')).toEqual({
+      script: 'session-start.mjs',
+      legacy: false,
+    });
+    expect(ownedScript('C:/Users/u/.fleet-dao/bin/quiet-prompt-log.exe')).toEqual({
+      script: 'prompt-log.mjs',
+      legacy: false,
+    });
+    expect(ownedScript('C:/Users/u/.fleet-dao/bin/quiet-pretool.exe.bak')).toBeNull();
     expect(ownedScript('node C:\\Users\\u\\.local\\share\\fleet-guard\\session-start.mjs')).toEqual({
       script: 'session-start.mjs',
       legacy: true,
