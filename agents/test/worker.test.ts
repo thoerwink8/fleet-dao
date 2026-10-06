@@ -67,6 +67,7 @@ interface WorkerLib {
     githubRoute?: { via: string; proxy?: string };
   }): string;
   saidOf(line: string): string | null;
+  noResultEvent(lines: string[]): boolean;
   WATCH_SLACK_MS: number;
   runWorker(argv: string[], io: WorkerIo): Promise<number>;
 }
@@ -90,6 +91,14 @@ interface SpawnDetachedSupport {
 const spawnSupport = (await import(
   pathToFileURL(join(SCRIPTS, 'spawn-detached-support.mjs')).href
 )) as SpawnDetachedSupport;
+
+interface SpawnDetachedMod {
+  buildLaunchSpec(o: SpawnSpec): { commandLine: string; cwd: string; env: { name: string; value: string }[] };
+  spawnDetached(o: SpawnSpec): { pid: number };
+}
+const spawnDetachedMod = (await import(
+  pathToFileURL(join(SCRIPTS, 'spawn-detached.mjs')).href
+)) as SpawnDetachedMod;
 
 const ok = (stdout = ''): RunResult => ({ status: 0, stdout, stderr: '' });
 const bad = (stderr: string, status = 1): RunResult => ({ status, stdout: '', stderr });
@@ -1298,6 +1307,95 @@ describe('spawn-detached-support.mjs（ETIMEDOUT 那次真活撞出来的修法�
   });
 });
 
+describe('spawn-detached.mjs（WMI 起法：躲开会话的 Job Object，2026-10-06 过夜工人被一起掐死那次的修法）', () => {
+  const baseSpec = {
+    command: 'C:\\Program Files\\nodejs\\node.exe',
+    args: ['-e', 'a&b 50%'],
+    cwd: 'C:\\w',
+    env: { PATH: 'C:\\x', DROPPED: undefined, FLEET_WORKER: '1' } as Record<string, string | undefined>,
+    stdinFile: null as string | null,
+    outFile: 'C:\\w\\out.log',
+    errFile: 'C:\\w\\err.log',
+  };
+
+  it('buildLaunchSpec：命令行转义好、重定向接在后面、没有 stdinFile 就 < NUL；env 变 {name,value} 数组并丢掉 undefined', () => {
+    const spec = spawnDetachedMod.buildLaunchSpec(baseSpec);
+    expect(spec.commandLine).toBe(
+      '^"C:\\Program Files\\nodejs\\node.exe^" ^"-e^" ^"a^&b 50^%^" > "C:\\w\\out.log" 2> "C:\\w\\err.log" < NUL',
+    );
+    expect(spec.cwd).toBe('C:\\w');
+    expect(spec.env).toEqual([
+      { name: 'PATH', value: 'C:\\x' },
+      { name: 'FLEET_WORKER', value: '1' },
+    ]);
+    const withIn = spawnDetachedMod.buildLaunchSpec({ ...baseSpec, stdinFile: 'C:\\w\\prompt.txt' });
+    expect(withIn.commandLine.endsWith('< "C:\\w\\prompt.txt"')).toBe(true);
+  });
+
+  it('【故意造出的失败】重定向路径里有 cmd.exe 会再解释的字符：直接报错，不拼', () => {
+    for (const bad of ['C:\\w%TEMP%\\out.log', 'C:\\w&calc\\out.log', 'C:\\w"x\\out.log']) {
+      expect(() => spawnDetachedMod.buildLaunchSpec({ ...baseSpec, outFile: bad })).toThrow(/cmd\.exe/);
+    }
+  });
+
+  it('launch-detached.ps1 / detach-job-check.ps1：纯 ASCII、没有 BOM（Windows PowerShell 5.1 会把无 BOM 的非 ASCII 当 GBK 读坏）', () => {
+    for (const f of ['launch-detached.ps1', 'detach-job-check.ps1']) {
+      const bytes = readFileSync(join(SCRIPTS, f));
+      expect(bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))).toBe(false);
+      expect(bytes.findIndex((b) => b > 0x7f)).toBe(-1);
+    }
+  });
+
+  it('launch-detached.ps1 用 Win32_Process.Create，不再用 Start-Process（Start-Process 起的进程留在会话的 Job Object 里）', () => {
+    const ps1 = readFileSync(join(SCRIPTS, 'launch-detached.ps1'), 'utf8');
+    const code = ps1
+      .split('\n')
+      .filter((l) => !l.trimStart().startsWith('#'))
+      .join('\n');
+    expect(code).toContain('Win32_Process');
+    expect(code).not.toMatch(/Start-Process|Invoke-Expression/);
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    '真起一次（Windows）：stdin 文件进得去、stdout/stderr 落到文件、pid 是真的、env 只有传进去的（令牌不继承）',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'spawn-detached-'));
+      dirs.push(dir);
+      writeFileSync(join(dir, 'in.txt'), 'hello-stdin');
+      process.env.FLEET_TEST_SECRET_NOT_PASSED = 'leak-me';
+      try {
+        const script =
+          "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(s+'|'+(process.env.FLEET_TEST_SECRET_NOT_PASSED??'unset')+'|'+process.env.FLEET_WORKER);console.error('to-stderr')})";
+        const { pid } = spawnDetachedMod.spawnDetached({
+          command: process.execPath,
+          args: ['-e', script],
+          cwd: dir,
+          env: { ...lib.safeEnv(process.env), FLEET_WORKER: '1' },
+          stdinFile: join(dir, 'in.txt'),
+          outFile: join(dir, 'out.log'),
+          errFile: join(dir, 'err.log'),
+        });
+        expect(pid).toBeGreaterThan(0);
+        let out = '';
+        for (let i = 0; i < 60 && !out.includes('|'); i++) {
+          await new Promise((r) => setTimeout(r, 250));
+          try {
+            out = readFileSync(join(dir, 'out.log'), 'utf8');
+          } catch {
+            // 还没写出来
+          }
+        }
+        expect(out.trim()).toBe('hello-stdin|unset|1');
+        expect(readFileSync(join(dir, 'err.log'), 'utf8').trim()).toBe('to-stderr');
+        expect(readFileSync(join(dir, 'launch-spec.json'), 'utf8')).not.toContain('leak-me');
+      } finally {
+        delete process.env.FLEET_TEST_SECRET_NOT_PASSED;
+      }
+    },
+    30_000,
+  );
+});
+
 describe('mergeNoProxy', () => {
   it('原来没有 NO_PROXY：加上三个 GitHub 域名', () => {
     const out = lib.mergeNoProxy({ FOO: 'bar' });
@@ -1392,6 +1490,36 @@ describe('status', () => {
     expect(text).toContain('已经不在跑了');
     expect(text).toContain('还没有输出');
     expect(text).toContain('PR：没查到（gh: authentication required）');
+  });
+
+  it('已经不在跑、Claude 日志最后一个事件不是 result：提示不是正常收尾（多半被掐了）；有 result 就不提示', async () => {
+    const w = world();
+    const dir = w.writeMeta('s2d', validMeta(w, 's2d'));
+    const ev = (o: unknown) => `${JSON.stringify(o)}\n`;
+    const toolUse = ev({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] },
+    });
+    writeFileSync(join(dir, 'out.log'), toolUse);
+    w.setRunning(9001, false);
+    w.ghReplies.push(ok('[]'));
+    await w.run(['status', '--name', 's2d']);
+    expect(w.out.join('\n')).toContain('日志停在半截、没有 result 事件');
+
+    writeFileSync(join(dir, 'out.log'), toolUse + ev({ type: 'result', result: '完成：PR #1' }));
+    w.ghReplies.push(ok('[]'));
+    w.out.length = 0;
+    await w.run(['status', '--name', 's2d']);
+    expect(w.out.join('\n')).not.toContain('没有 result 事件');
+
+    // 在跑的、别家模型的普通文字日志：都不提示
+    writeFileSync(join(dir, 'out.log'), toolUse);
+    w.setRunning(9001, true);
+    w.ghReplies.push(ok('[]'));
+    w.out.length = 0;
+    await w.run(['status', '--name', 's2d']);
+    expect(w.out.join('\n')).not.toContain('没有 result 事件');
+    expect(lib.noResultEvent(['plain text', 'more'])).toBe(false);
   });
 
   it('kimi 的记录（理论上不会 start 出来，但 status 要认得）：档位标「不支持」', async () => {

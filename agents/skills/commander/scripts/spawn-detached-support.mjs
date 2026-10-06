@@ -11,12 +11,12 @@
 //
 // interpretLaunchResult 认三种结果，绝不能把「不确定」当成「确认起不来」说出去（09-28 真撞过：进程其实已经在
 // 跑，报的却是「起不了」）：
-// - 确认成功：launch-detached.ps1 从 Start-Process 拿到了 pid，写进结果文件。
+// - 确认成功：launch-detached.ps1 从 Win32_Process.Create 拿到了 pid，写进结果文件。
 // - 确认失败（confirmed:true，可以说「起不了」）：powershell.exe 这个进程本身都没能起来（spawnError 有值，
-//   说明 Start-Process 从没被调用过），或者 launch-detached.ps1 自己在结果文件里报了「Start-Process 抛出来
+//   说明 Win32_Process.Create 从没被调用过），或者 launch-detached.ps1 自己在结果文件里报了「Win32_Process.Create 抛出来
 //   了、没拿到 pid」——这两种情况都能证明确实什么都没起来。
 // - 不确定（confirmed:false，绝不能说「起不了」）：除上面两种之外的任何情况——没读到结果文件、结果文件不是
-//   合法 JSON、结果文件里既没有 pid 也没有 error。Start-Process 完全可能已经成功起来了，只是这条链路上更后面
+//   合法 JSON、结果文件里既没有 pid 也没有 error。进程完全可能已经成功起来了，只是这条链路上更后面
 //   的某一步（写结果文件、读结果文件）没能确认给我们看。
 
 /**
@@ -50,13 +50,17 @@ export function interpretLaunchResult({ spawnError, spawnStatus, resultText }) {
     return { ok: true, pid: result.pid };
   }
   if (result && typeof result.error === 'string' && result.error) {
-    return { ok: false, confirmed: true, why: `launch-detached.ps1 里 Start-Process 没成：${result.error}` };
+    return {
+      ok: false,
+      confirmed: true,
+      why: `launch-detached.ps1 里 Win32_Process.Create 没成：${result.error}`,
+    };
   }
   return {
     ok: false,
     confirmed: false,
     why:
-      `powershell.exe 退出码 ${spawnStatus}，没读到有效的 launch-result.json（不确定 Start-Process 成没成，` +
+      `powershell.exe 退出码 ${spawnStatus}，没读到有效的 launch-result.json（不确定进程起没起来，` +
       '进程可能已经在跑、没记上）',
   };
 }
