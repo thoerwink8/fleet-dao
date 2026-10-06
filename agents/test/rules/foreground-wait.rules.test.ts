@@ -61,6 +61,32 @@ describe('前台等待上限', () => {
     expect(run('Bash', { command: 'sleep 100', timeout: 120_000 }).code).toBe(2);
   });
 
+  // 创始人 2026-10-06「这种方式不太正确……把不合理的 subagent 方式改掉」：上限是为了他的话能在两次调用之间送到主会话；
+  // 子代理不和他对话，套上只剩代价（#1118 一个活 143 次调用、25 分钟）。Claude Code 只在子代理里的钩子调用带 agent_id。
+  it('子代理（输入带 agent_id）：前台等多久都放行；主会话的规矩一条不变', () => {
+    const sub = (input: Record<string, unknown>) =>
+      lib.decide(
+        JSON.stringify({ tool_name: 'Bash', tool_input: input, cwd: '/work/other', agent_id: 'a1b2c3' }),
+      );
+    expect(sub({ command: 'sleep 600' }).code).toBe(0);
+    expect(sub({ command: 'pnpm test', timeout: 900_000 }).code).toBe(0);
+    expect(run('Bash', { command: 'sleep 600' }).code).toBe(2);
+  });
+
+  it('【故意造出的失败】agent_id 空着、不是字符串：不算子代理，照主会话拦', () => {
+    for (const bad of ['', '   ', 7, null, true]) {
+      const v = lib.decide(
+        JSON.stringify({
+          tool_name: 'Bash',
+          tool_input: { command: 'sleep 600' },
+          cwd: '/work/other',
+          agent_id: bad,
+        }),
+      );
+      expect(v.code, JSON.stringify(bad)).toBe(2);
+    }
+  });
+
   it('后台跑的不受限：run_in_background 为真，再长的 sleep 和 timeout 都放行', () => {
     expect(run('Bash', { command: 'sleep 600', run_in_background: true }).code).toBe(0);
     expect(run('Bash', { command: 'pnpm test', timeout: 900_000, run_in_background: true }).code).toBe(0);

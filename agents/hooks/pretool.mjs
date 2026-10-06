@@ -1989,6 +1989,20 @@ export function foregroundWait(toolInput, cmd, kind) {
 }
 
 /**
+ * 这次调用是不是子代理（Agent 工具起的）发的：Claude Code 只在子代理里的钩子调用带 agent_id（code.claude.com/docs/en/hooks
+ * 「When running with --agent or inside a subagent」：「Present only when the hook fires inside a subagent call. Use this to
+ * distinguish subagent hook calls from main-thread calls」）。空串、不是字符串都不算，宁可按主会话的规矩多拦一次。
+ * 为什么要分（创始人 2026-10-06「这种方式不太正确……把不合理的 subagent 方式改掉」）：前台等待上限、欠账催送、起后台活自动开无人值守，
+ * 全是为了创始人的话能在两次调用之间送到**主会话**；子代理不和他对话，这几条套在它身上只剩代价——一次跑测试被拆成「后台起 + 每 55 秒
+ * 醒一次看日志」，一个活 143 次调用、25 分钟、31 万 token（2026-10-06 #1118 实测）。密钥护栏、危险命令那些照旧管子代理。
+ * @param {unknown} input
+ */
+export function isSubagentCall(input) {
+  const id = prop(input, 'agent_id');
+  return typeof id === 'string' && id.trim() !== '';
+}
+
+/**
  * @param {string} raw
  * @param {string} [fallbackCwd]
  * @returns {Verdict}
@@ -2029,7 +2043,8 @@ export function decide(raw, fallbackCwd = '') {
     return block(`fleet-guard：${tool} 的输入里认不出命令（${JSON.stringify(command)}），按拦处理`);
   }
   const cmd = command;
-  const wait = foregroundWait(toolInput, cmd, kind);
+  // 子代理不和创始人对话，前台等多久都不影响他的话送达：不设上限（isSubagentCall 的注释）
+  const wait = isSubagentCall(input) ? null : foregroundWait(toolInput, cmd, kind);
   if (wait) {
     return block(
       `这条调用要在前台等约 ${wait.seconds} 秒（${wait.what}），超过单次上限 ${MAX_FOREGROUND_WAIT_SECONDS} 秒：创始人在这期间发的话要等它跑完才送到我手上，进程一断还会丢。长命令加 run_in_background: true（跑完会重新叫醒你），要等就拆成多次不超过 ${MAX_FOREGROUND_WAIT_SECONDS} 秒的短等；要跑几个小时的活交给 worker.mjs 脱离会话去跑。`,
@@ -2147,16 +2162,18 @@ if (isMain()) {
     const input = JSON.parse(raw);
     const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
     if (id) touchTool({ dir: stateDir(), sessionId: id });
+    // 子代理的调用：下面「起后台活自动开无人值守」「欠账催送」都是主会话和创始人之间的事，子代理一律不记不催（isSubagentCall 的注释）
+    const sub = isSubagentCall(input);
     // 起后台活（子代理、监视、后台命令）：自动开一个短的无人值守，这一轮就不能先收尾（unattended.mjs 的 armForBackground）。
     // Agent、Monitor、Workflow 登记到这条钩子上只为了在这儿记一笔，不是要判它们（decide 不认识它们的名字会按拦处理）
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     const toolInput = prop(input, 'tool_input') ?? prop(input, 'toolInput');
-    if (id && startsBackground(tool, toolInput)) armForBackground({ dir: stateDir(), sessionId: id });
+    if (id && !sub && startsBackground(tool, toolInput)) armForBackground({ dir: stateDir(), sessionId: id });
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
     // 创始人的话欠着没送达：送达类工具清账；这一轮结束不了又欠了太久，把这一次调用拦下、只拦一次（unattended.mjs 的 nagIfOwed）。
     // 欠账文件坏了、这一步自己出错：只往 stderr 写一句，不拦
-    const nag = id ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
+    const nag = id && !sub ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
     if (nag) process.stderr.write(`${nag.message}\n`);
     if (nag?.block) process.exit(2);
   } catch {
