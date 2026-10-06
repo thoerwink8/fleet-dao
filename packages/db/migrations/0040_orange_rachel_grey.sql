@@ -1,0 +1,1 @@
+ALTER TABLE "scheduled_jobs" ADD COLUMN "removed_at" timestamp with time zone;

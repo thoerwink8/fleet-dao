@@ -336,6 +336,12 @@ export const scheduledJobs = pgTable(
      * 登记了超过期望间隔还没跑成过的照报（看门狗 #203）。加这一列之前就在的行记的是加列那一刻。
      */
     registeredAt: timestamp('registered_at', tz).notNull().defaultNow(),
+    /**
+     * 摘除时刻（#1140）：任务退役了（代码删掉了，jobs/retired-schedules.ts 的名单），引擎起来时把它的登记行标上这一
+     * 项——登记行是期望，「不该再跑的任务」不再是期望，定时任务页和看门狗都不再看它；历史跑记录留在 schedule_runs
+     * 不动。任务要是回来了（重新登记，registerScheduledJobs），这一项清掉、照常看。
+     */
+    removedAt: timestamp('removed_at', tz),
   },
   (t) => [check('scheduled_jobs_expect_every_positive', sql`${t.expectEveryMinutes} > 0`)],
 );

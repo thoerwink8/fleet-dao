@@ -3,7 +3,8 @@
 // 看门狗本来就该管 ENGINE_JOBS 以外的登记（备份脚本这类外部注册的），不能按「是不是在 ENGINE_JOBS 里」筛——那样会把
 // 这些正常任务也当成「不该看」而漏管。只按名字剔除明确退役了的那几个（jobs/retired-schedules.ts 的共用名单，引擎起来时
 // 删 Temporal 上的 Schedule 用的也是它，见 real/retire-schedules.ts）：退役的任务不会再有新的跑记录，不剔除就会被
-// 永远判成「停了」——它不会再跑，也没人能去处理，只会白占一条卡住报警。
+// 永远判成「停了」——它不会再跑，也没人能去处理，只会白占一条卡住报警。#1140 起引擎起来时还会把它们的登记行从
+// scheduled_jobs 里摘掉（real/jobs.ts），这里的筛选是引擎还没来得及起新版本时的兑底。
 import {
   alertByKey,
   type Db,
