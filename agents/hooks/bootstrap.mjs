@@ -23,6 +23,8 @@ const HOOKS_REL = join('.fleet-dao', 'hooks');
 const SESSION_SCRIPT = 'session-start.mjs';
 
 const NOW_STYLE = /\/\.fleet-dao\/hooks\/([\w.-]+\.mjs)(?![\w.-])/;
+// Windows 上同步改登记成这个（没有空格、不套 cmd，见 agents-sync 的 hookCommand）。两条都算现在这一代
+const QUIET_START = /\/\.fleet-dao\/bin\/quiet-session-start\.exe(?![\w.-])/;
 const LEGACY_STYLE = /\/fleet-guard\/(?:session-start|pretool)\.mjs(?![\w.-])/;
 
 /** 一个目录里所有文件（相对路径 → 内容）；目录不在返回 null，读不了抛 */
@@ -89,7 +91,9 @@ export function healthReasons({ home }) {
   const legacy = s.cmds.filter((c) => LEGACY_STYLE.test(c.command));
   if (legacy.length > 0) reasons.push(`还挂着以前手装在 fleet-guard 目录的钩子（${legacy.length} 条）`);
   const start = s.cmds.some(
-    (c) => c.event === 'SessionStart' && NOW_STYLE.exec(c.command)?.[1] === SESSION_SCRIPT,
+    (c) =>
+      c.event === 'SessionStart' &&
+      (NOW_STYLE.exec(c.command)?.[1] === SESSION_SCRIPT || QUIET_START.test(c.command)),
   );
   if (!start) reasons.push('开会话钩子没登记到 ~/.fleet-dao/hooks/session-start.mjs（旧的位置，或者没有）');
 

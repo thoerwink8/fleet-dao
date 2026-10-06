@@ -3,9 +3,10 @@
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
 // 替别的用户写（--user，法国装机）时开会话那条不登记（HookSkip）：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；
 // 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
+import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName } from './quiet-win.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, lstatOrNull, relOf, type Sources, writeAtomic } from './sync.ts';
 import {
@@ -25,9 +26,15 @@ type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** 设置里登记的命令：node 加脚本的绝对路径（一律 / 分隔、加引号：cmd、PowerShell、bash 都认） */
+/**
+ * 设置里登记的命令。Linux：node 加脚本绝对路径（一律 / 分隔、加引号，bash 认）。
+ * Windows：家目录路径没有 shell 元字符时，改成 ~/.fleet-dao/bin/quiet-<脚本名>.exe 这一个路径、不加引号。
+ * Grok 对这种路径直接 CreateProcess，不再套 cmd（套 cmd 就会闪黑窗口）。有元字符时退回 node 加引号。
+ */
 export function hookCommand(home: string, platform: Platform, script: string): string {
-  return `node "${join(home, placeOn(HOOKS_DIR, platform), script).replaceAll('\\', '/')}"`;
+  const nodeCmd = `node "${join(home, placeOn(HOOKS_DIR, platform), script).replaceAll('\\', '/')}"`;
+  if (platform !== 'win32') return nodeCmd;
+  return bareQuietCommand(home, script) ?? nodeCmd;
 }
 
 /** 这条命令是不是本脚本管的：返回它跑的脚本名、是不是以前手装的那份；不是就返回 null */
@@ -36,6 +43,9 @@ export function ownedScript(command: unknown): { script: string; legacy: boolean
   const c = command.replaceAll('\\', '/');
   const now = /\/\.fleet-dao\/hooks\/([\w.-]+\.mjs)(?![\w.-])/.exec(c);
   if (now?.[1]) return { script: now[1], legacy: false };
+  // quiet-session-start.exe → session-start.mjs。认这个，同步才会把旧的 node "….mjs" 换成它，而不是当成别人的钩子留着
+  const quiet = /\/\.fleet-dao\/bin\/quiet-([\w.-]+)\.exe(?![\w.-])/.exec(c);
+  if (quiet?.[1]) return { script: `${quiet[1]}.mjs`, legacy: false };
   const old = /\/fleet-guard\/(session-start|pretool)\.mjs(?![\w.-])/.exec(c);
   if (old?.[1]) return { script: `${old[1]}.mjs`, legacy: true };
   return null;
@@ -203,6 +213,75 @@ function scriptsKey(ctx: Ctx): { abs: string; key: string } {
   return { abs, key };
 }
 
+const LAUNCHER_KEY = '~/.fleet-dao/bin';
+
+/** 这台要登记成静默启动器的脚本（路径里有 shell 元字符的不在内，那些仍走 node） */
+function launcherScripts(ctx: Ctx, targets: HookTarget[]): string[] {
+  return [
+    ...new Set(
+      targets
+        .flatMap((t) => t.hooks.map((h) => h.script))
+        .filter((script) => hookCommand(ctx.home, ctx.platform, script).endsWith('.exe')),
+    ),
+  ];
+}
+
+function exeBase(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+/** 启动器在不在、是不是不带控制台的程序。Linux、或路径不安全退回 node 时，不报这一行 */
+function checkLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
+  const scripts = launcherScripts(ctx, targets);
+  if (scripts.length === 0) return null;
+  const missing: string[] = [];
+  const bad: string[] = [];
+  for (const script of scripts) {
+    const exe = hookCommand(ctx.home, ctx.platform, script);
+    if (!existsSync(exe)) {
+      missing.push(exeBase(exe));
+      continue;
+    }
+    try {
+      if (!guiSubsystem(readFileSync(exe))) bad.push(exeBase(exe));
+    } catch (err) {
+      return line('unknown', LAUNCHER_KEY, `没查成——读不了（${code(err)}）`);
+    }
+  }
+  if (missing.length) return line('missing', LAUNCHER_KEY, `缺失——没有 ${missing.join('、')}`);
+  if (bad.length) return line('drift', LAUNCHER_KEY, `漂移——${bad.join('、')} 不是不带黑窗口的程序`);
+  return line('ok', LAUNCHER_KEY, '静默启动器都在');
+}
+
+/** 把同一份不带控制台的 exe 按脚本名复制到 ~/.fleet-dao/bin/。编不出就 failed，调用方不要登记指向空处的命令 */
+function installLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
+  const scripts = launcherScripts(ctx, targets);
+  if (scripts.length === 0) return null;
+  try {
+    const bytes = quietExeBytes();
+    const dir = join(ctx.home, '.fleet-dao', 'bin');
+    mkdirSync(dir, { recursive: true });
+    let changed = false;
+    for (const script of scripts) {
+      const name = quietExeName(script);
+      if (name === null) continue;
+      const dest = join(dir, name);
+      const have = existsSync(dest) ? readFileSync(dest) : null;
+      if (have === null || !have.equals(bytes)) {
+        writeFileSync(dest, bytes);
+        changed = true;
+      }
+    }
+    return line(
+      changed ? 'changed' : 'ok',
+      LAUNCHER_KEY,
+      changed ? '装上了不弹黑窗口的启动器' : '静默启动器和仓里的一样',
+    );
+  } catch (err) {
+    return line('failed', LAUNCHER_KEY, `没做成——${code(err)}`);
+  }
+}
+
 function checkScripts(ctx: Ctx, src: Sources): Line {
   const { abs, key } = scriptsKey(ctx);
   if (!src.hooks.ok) return line('unknown', key, `没查成——${src.hooks.why}`);
@@ -248,6 +327,8 @@ export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
     out.push(line('skip', scriptsKey(ctx).key, noneLine()));
   } else {
     out.push(checkScripts(ctx, src));
+    const launchers = checkLaunchers(ctx, targets);
+    if (launchers) out.push(launchers);
     for (const t of targets) out.push(checkSettings(ctx, t));
   }
   return [...out, ...skipLines(skip), ...gapLines(ctx)];
@@ -367,9 +448,15 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
   }
   const scripts = applyScripts(ctx, src);
   out.push(scripts);
+  const launchers = scripts.kind === 'failed' ? null : installLaunchers(ctx, targets);
+  if (launchers) out.push(launchers);
   for (const t of targets) {
     if (scripts.kind === 'failed') {
       out.push(line('failed', relOf(ctx, t.settings).key, '没动——钩子脚本没装上，不登记指向空处的命令'));
+      continue;
+    }
+    if (launchers?.kind === 'failed') {
+      out.push(line('failed', relOf(ctx, t.settings).key, '没动——静默启动器没装上，不登记指向空处的命令'));
       continue;
     }
     const missingScript = t.hooks.find((h) => src.hooks.ok && !src.hooks.tree.has(h.script));

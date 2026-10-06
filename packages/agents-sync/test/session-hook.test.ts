@@ -20,7 +20,7 @@ function copyFleet(): string {
   cpSync(join(ROOT, 'agents'), join(repo, 'agents'), { recursive: true });
   const pkg = join(repo, 'packages', 'agents-sync');
   mkdirSync(pkg, { recursive: true });
-  for (const part of ['bin', 'src', 'package.json']) {
+  for (const part of ['bin', 'src', 'package.json', 'quiet']) {
     cpSync(join(ROOT, 'packages', 'agents-sync', part), join(pkg, part), { recursive: true });
   }
   return repo;
@@ -101,8 +101,13 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     const installed = m.sync('--apply');
     expect(installed.code, installed.out).toBe(0);
     const settings = get(m.home, '.claude/settings.json');
-    expect(settings).toContain('.fleet-dao/hooks/session-start.mjs');
-    expect(settings).toContain('.fleet-dao/hooks/pretool.mjs');
+    if (process.platform === 'win32') {
+      expect(settings).toContain('.fleet-dao/bin/quiet-session-start.exe');
+      expect(settings).toContain('.fleet-dao/bin/quiet-pretool.exe');
+    } else {
+      expect(settings).toContain('.fleet-dao/hooks/session-start.mjs');
+      expect(settings).toContain('.fleet-dao/hooks/pretool.mjs');
+    }
     const clean = m.sync('--check');
     expect(clean.code, clean.out).toBe(0);
     expect(clean.out).toContain('就是主线最新');
