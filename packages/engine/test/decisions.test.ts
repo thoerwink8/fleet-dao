@@ -241,29 +241,30 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
   });
 });
 
-describe('渠道运行中失败：分流判停下又算这条路由的账，就换同一个模型的下一个渠道（#1118）', () => {
+describe('渠道运行中失败：分流判停下就停下报人，不再换同一个模型的下一个渠道', () => {
   const onChannel = {
     route: { routeId: 'r1', poolId: 'p1', modelId: 'm1', hostId: 'claude-code', channelId: 'c1' },
   };
   /** 「回话的模型不是点名的那个」：分流判停下（stop），算这条路由的账（routeOutcome fail）。 */
   const mismatch = failure('model_mismatch');
 
-  it('停下 + 算路由的账 + 知道渠道：换渠道（swapRoute），记一次换路由、不报警、要标渠道不可用；原因写明第几次', () => {
+  it('model_mismatch（停下、算路由的账、知道渠道）：park，不设 failChannel，原因不含「换同一个模型」', () => {
     const next = nextAction({ failure: mismatch, limits, routeBound: true, context: onChannel });
     expect(next).toMatchObject({
-      action: 'swapRoute',
-      avoid: 'route',
-      counter: 'routeSwaps',
-      failChannel: true,
+      action: 'park',
+      alert: true,
+      rule: 'MD3',
       resumeSame: false,
       delaySeconds: 0,
-      alert: false,
-      rule: 'MD3',
+      counter: null,
     });
-    expect(next.reason).toContain('换同一个模型的下一个渠道（第 1/2 次）');
+    expect(next).not.toHaveProperty('failChannel');
+    expect(next.reason).not.toContain('换同一个模型');
+    expect(next.reason).not.toContain('已换过');
   });
 
-  it('原路重试用完（认不出的、算路由的账）：也是换渠道，不是停下报人', () => {
+  it('认不出的失败（WEIRD）：重试次数没用完仍是 retry；用完是 park，不是 swapRoute', () => {
+    expect(limits.retryAttempts).toBe(2);
     const steps = [0, 1, 2].map((retries) =>
       nextAction({
         failure: failure('WEIRD'),
@@ -273,24 +274,29 @@ describe('渠道运行中失败：分流判停下又算这条路由的账，就�
         context: onChannel,
       }),
     );
-    expect(steps.map((s) => s.action)).toEqual(['retry', 'retry', 'swapRoute']);
-    expect(steps[2]?.failChannel).toBe(true);
+    expect(steps.map((s) => s.action)).toEqual(['retry', 'retry', 'park']);
+    expect(steps[2]).not.toHaveProperty('failChannel');
+    expect(steps[2]?.reason).not.toContain('换同一个模型');
+    expect(steps[2]?.reason).not.toContain('已换过');
   });
 
-  it('【故意造出的失败】换渠道的次数用完（所有渠道都试过）：停下报人，原因写明已经换过几次，不再换、不死循环', () => {
+  it('【故意造出的失败】routeSwaps 还没用完：也不再改成换渠道', () => {
+    expect(limits.routeSwaps).toBeGreaterThan(1);
     const next = nextAction({
       failure: mismatch,
-      counters: { routeSwaps: 2 },
+      counters: { routeSwaps: 1 },
       limits,
       routeBound: true,
       context: onChannel,
     });
     expect(next).toMatchObject({ action: 'park', alert: true });
+    expect(next.action).not.toBe('swapRoute');
     expect(next).not.toHaveProperty('failChannel');
-    expect(next.reason).toContain('已换过 2 次渠道仍失败');
+    expect(next.reason).not.toContain('换同一个模型');
+    expect(next.reason).not.toContain('已换过');
   });
 
-  it('不换的：不知道渠道（老历史里的路由没有）、不绑路由、不算路由的账（账号封了、任务自己的问题）都照旧停下', () => {
+  it('不知道渠道、不绑路由、不算路由的账（账号封了）都停下，不设 failChannel', () => {
     expect(nextAction({ failure: mismatch, limits, routeBound: true })).toMatchObject({ action: 'park' });
     expect(
       nextAction({
@@ -313,7 +319,7 @@ describe('渠道运行中失败：分流判停下又算这条路由的账，就�
     expect(banned).not.toHaveProperty('failChannel');
   });
 
-  it('换上的分流不给 routeOutcome（读不出算不算路由的账）：不换，照旧停下，不当成算路由的账', () => {
+  it('换上的分流不给 routeOutcome：照旧停下，不当成该换渠道', () => {
     const triage = () =>
       ({
         action: 'park',

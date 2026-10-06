@@ -6,8 +6,7 @@ import { count, nonNegative, resolvePolicy } from './policy.ts';
 
 /**
  * 下一步动作。名字和引擎兜底梯一样，可以直接接。分流自己只给 retry 和 park；换模型由路由熔断和人去做。
- * 换路由只有一处：分流判停下、又算这条路由的账（routeOutcome fail）时，引擎入口 decisions/failure.ts 的 channelFallback
- * 把它换成「换同一个模型的下一个渠道」（#1118），不在这里判。
+ * 正常分流不再换路由；swapRoute 只剩分流出错时的兜底梯，以及历史里已经记下的判断。
  */
 export type FailureAction = 'retry' | 'swapRoute' | 'swapModel' | 'park';
 
