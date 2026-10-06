@@ -47,6 +47,7 @@ import {
   openCanaryRound,
   spanWords,
   stepSpans,
+  sweepCanaryLeftovers,
 } from '../src/jobs/canary.ts';
 import {
   type CanaryPullsGitHub,
@@ -1131,6 +1132,80 @@ describe('closeLeftoverPulls：关巡检单开过的 PR', () => {
     ).toEqual([13]);
     expect(calls).toEqual(['close:13']);
     expect(logs).toEqual(['warn:巡检收单：给 PR 留说明没留成，照样关']);
+  });
+});
+
+describe('总开关关着跳过的轮次也收前面断轮留下的东西（sweepCanaryLeftovers，#1141）', () => {
+  it('补记没收尾的几轮、收掉留下的单（放弃工作流、关它开的 PR、记收过）、撤断了的报警；不开新单', async () => {
+    const cleaned: number[] = [];
+    const h = harness(
+      {
+        record: {
+          start: async () => 7,
+          progress: async () => true,
+          finish: async () => 'ok',
+          abandon: async () => [{ id: 3, scheduleRunId: 2, issueNumber: 12 }],
+          leftovers: async () => [{ id: 3, issueNumber: 12 }],
+          cleaned: async (id) => {
+            cleaned.push(id);
+          },
+        },
+      },
+      { closePulls: async () => [5] },
+    );
+    const notes = await sweepCanaryLeftovers(h.deps);
+    // 单子默认已是关了的：放弃工作流、关它开的 PR、记收过；不用再关单
+    expect(h.calls).toEqual(['stop:task:acme/canary#12']);
+    expect(cleaned).toEqual([3]);
+    // 没收尾的那轮在 schedule_runs 里补记成没跑成（看门狗照登记表看得见）
+    expect(h.runsFinished).toEqual([{ id: 2, result: { outcome: 'failed', why: CANARY_ABANDONED_WHY } }]);
+    // 撤了两条：留下单连带的 PR 那条（收干净了自己撤）、上一轮断了的那些
+    expect(h.alerts.resolvedKeys).toEqual([CANARY_LEFTOVER_PR_ALERT_KEY, undefined]);
+    expect(notes.join('；')).toContain('收掉了上一轮留下的 #12');
+    // 只收、不开新单：总开关关着拉单不拉，开了单也永远等不到被派
+    expect(h.calls.some((c) => c.startsWith('open:'))).toBe(false);
+  });
+
+  it('收不掉的不抛：关单失败记进备注、不记收过（下一轮接着收）；报警撤不掉也一样', async () => {
+    const cleaned: number[] = [];
+    const h = harness(
+      {
+        record: {
+          start: async () => 7,
+          progress: async () => true,
+          finish: async () => 'ok',
+          abandon: async () => [],
+          leftovers: async () => [{ id: 4, issueNumber: 19 }],
+          cleaned: async (id) => {
+            cleaned.push(id);
+          },
+        },
+        alerts: {
+          raise: async () => {},
+          resolve: async () => {
+            throw new Error('报警库写不进');
+          },
+        },
+      },
+      {
+        issueState: async () => ({ state: 'open', stateReason: null }),
+        closeIssue: async () => {
+          throw new Error('GitHub 回了 403');
+        },
+      },
+    );
+    const notes = await sweepCanaryLeftovers(h.deps);
+    expect(notes.join('；')).toContain('#19 没收掉');
+    expect(notes.join('；')).toContain('上一轮断了的报警撤不掉');
+    expect(cleaned).toEqual([]);
+  });
+
+  it('没配巡检仓（repo 报 error）：没有仓就没单可收，照样把断了的报警撤下', async () => {
+    const h = harness({ repo: { error: '没配巡检仓' } });
+    const notes = await sweepCanaryLeftovers(h.deps);
+    expect(h.calls).toEqual([]);
+    expect(h.alerts.resolvedKeys).toEqual([undefined]);
+    expect(notes).toEqual([]);
   });
 });
 

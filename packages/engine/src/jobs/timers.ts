@@ -31,6 +31,11 @@ export interface TimerJob {
    */
   needsMaster?: boolean;
   run(): Promise<unknown>;
+  /**
+   * 总开关关着、这一轮被跳过之后任务自己要做的收尾（#1141，巡检用它收前面断轮留下的单：补记没收尾的几轮、关单、关 PR、
+   * 撤断了的报警）；抛了只记日志，不挡定时。
+   */
+  onMasterSkip?: () => Promise<void>;
 }
 
 export interface TimerHost {
@@ -109,6 +114,14 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
             host.log(
               'error',
               `定时任务 ${job.id}：总开关关着跳过这一轮，但没记进 schedule_runs：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          try {
+            await job.onMasterSkip?.();
+          } catch (error) {
+            host.log(
+              'error',
+              `定时任务 ${job.id}：总开关关着跳过这一轮，跳过时的收尾没做成：${error instanceof Error ? error.message : String(error)}`,
             );
           }
           return;
