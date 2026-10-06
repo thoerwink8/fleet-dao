@@ -254,23 +254,28 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
     const nestedUnder = (n: number) => ancestors(parents, n).find((a) => here.has(a));
     /** 已关闭的里程碑不校验先后：它关了就不会再动，让里面的旧单指到哪都算数；只有开着的版本才要求每张单都挂进来。 */
     const checkOrder = v.milestone.state === 'open';
-    const ordered = checkOrder
-      ? order.map((n) => {
-          const issue = here.get(n);
-          if (issue === undefined) {
-            throw new PlanProblem(
-              `里程碑「${v.milestone.title}」的先后里有 #${n}，可它不是这个版本里的单（没挂这个里程碑，或者是 PR）：在 GitHub 上把它挂进来，或者从先后里删掉`,
-            );
-          }
-          const under = nestedUnder(n);
-          if (under !== undefined) {
-            throw new PlanProblem(
-              `里程碑「${v.milestone.title}」的先后里有 #${n}，可它是 #${under} 的子单：先后里只排母单和单独的单，子单的先后在母单页面上排`,
-            );
-          }
-          return issue;
-        })
-      : [];
+    const ordered: PlanIssue[] = [];
+    for (const n of order) {
+      const issue = here.get(n);
+      if (issue === undefined) {
+        if (checkOrder) {
+          throw new PlanProblem(
+            `里程碑「${v.milestone.title}」的先后里有 #${n}，可它不是这个版本里的单（没挂这个里程碑，或者是 PR）：在 GitHub 上把它挂进来，或者从先后里删掉`,
+          );
+        }
+        continue;
+      }
+      const under = nestedUnder(n);
+      if (under !== undefined) {
+        if (checkOrder) {
+          throw new PlanProblem(
+            `里程碑「${v.milestone.title}」的先后里有 #${n}，可它是 #${under} 的子单：先后里只排母单和单独的单，子单的先后在母单页面上排`,
+          );
+        }
+        continue;
+      }
+      ordered.push(issue);
+    }
     const unordered = issues.filter((i) => !order.includes(i.number) && nestedUnder(i.number) === undefined);
     const loose = unordered.filter((i) => i.state === 'open');
     if (v.milestone.state === 'open' && loose.length) {
