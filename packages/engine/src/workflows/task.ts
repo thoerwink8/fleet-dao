@@ -185,7 +185,7 @@ class TaskFlow {
       );
       rt.prNumber = pr.prNumber;
     }
-    rt.set('implement', `第 ${rt.round} 轮推上去了，PR #${rt.prNumber}`);
+    await rt.advance('implement', `第 ${rt.round} 轮推上去了，PR #${rt.prNumber}`);
     rt.feedback = [];
     return true;
   }
