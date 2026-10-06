@@ -2,6 +2,11 @@
 // 开会话、续会话时跑；stdout 打一段 JSON，hookSpecificOutput.additionalContext 进会话上下文（Grok 不收开会话钩子的输出）。三件事：
 // 1. 会话所在的仓：取一下远端；在 main 上、没有未提交的改动、落后了就快进；快进不了，或在别的分支上而 AGENTS.md 和主线不同，
 //    提醒一句（#72 撞过：会话读到旧的 AGENTS.md）。不是 git 仓、没有 origin/main 的不出声。
+//    Mirasim 每条消息都 --resume，这一钩子每轮都跑（Claude Code 要求 SessionStart 保持快：
+//    https://code.claude.com/docs/en/hooks ，2026-10-06）。git fetch、问 GitHub、扫工作树和 QUIET_MS 共用一扇门，
+//    记在 ~/.fleet-dao/session-net/：三分钟内做过就跳过，失败也记上一笔，免得断网时每条消息都等满超时。
+//    跳过时仍用手里已有的 origin/main 做本地核对。引导对账、临时调整、仓里的创始人引导、工人状态每轮都做。
+//    工人（FLEET_WORKER=1）不走这扇门，起来就要当前的远端。
 // 2. 这台机器的规矩、技能、钩子、权限：同步脚本另有**一份只归它的检出**（~/.fleet-dao/origin-main，
 //    agents/hooks/sync-source.mjs），永远停在 origin/main 的分离头上，再跑一遍 agents-sync --apply；结论一句话。
 //    在别的仓里开会话也照做。这台机器自己的 fleet-dao 检出在哪、在哪个分支、有没有没提交的改动，都不影响这一件
@@ -11,11 +16,12 @@
 // 3. 会话所在仓的「## 生效中的临时调整」表（通用段「我拍了板」那条）：到了最迟复查日期的、缺列的、日期认不出的
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 4. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
-//    gh 没查成说一行没查成，不当成「没有」。
+//    gh 没查成说一行没查成，不当成「没有」。这一件和进度单 #1055、扫工作树一起走第 1 件的三分钟门。
 // 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -76,24 +82,43 @@ function commonOf(g) {
   return process.platform === 'win32' ? p.toLowerCase() : p;
 }
 
+/** 这个仓「取远端 + 问 GitHub + 扫工作树」的记号。按 git 公共目录分仓，工作树和主检出共用一扇门。 */
+function sessionNetStamp(home, cwd, git) {
+  const g = (...a) => git(cwd, a);
+  const inside = g('rev-parse', '--is-inside-work-tree');
+  if (!ok(inside) || inside.stdout.trim() !== 'true') return null;
+  const common = commonOf(g);
+  if (!common) return null;
+  const key = createHash('sha256').update(common).digest('hex').slice(0, 16);
+  return join(home, '.fleet-dao', 'session-net', key);
+}
+
 /**
  * 第 1 件：会话所在的仓。返回要说的一句（没有就是 null）；取过远端的话，带上这个仓的 git 公共目录和取没取成
- * （会话就开在 fleet-dao 里时，第 2 件不用再取一遍）
+ * （会话就开在 fleet-dao 里时，第 2 件不用再取一遍）。
+ * network 为 false：不取远端，只用手里已有的 origin/main 做本地核对（三分钟门里的那一轮）。
+ * @param {{ network?: boolean }} [opts]
  */
-export function checkHere(cwd, git) {
+export function checkHere(cwd, git, { network = true } = {}) {
   const g = (...a) => git(cwd, a);
   const inside = g('rev-parse', '--is-inside-work-tree');
   // 不是 git 仓的目录不出声；git 自己跑不起来也不在这儿说（第 2 件同步那一句会说清，免得同一个毛病说两遍）
   if (!ok(inside) || inside.stdout.trim() !== 'true') return { line: null, fetch: null };
   const common = commonOf(g);
-  // 先照环境里的代理取（reclaude 的口），没成再直连取一次；两次的原因都带上（fresh-main.mjs）
-  const fetched = fetchWithFallback(git, cwd, ['fetch', '-q', 'origin'], { okOf: ok, whyOf: why });
-  if (!fetched.ok)
-    return {
-      line: `开场核规矩没查成：git fetch 失败（${fetched.why}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
-      fetch: { common, ok: false, why: fetched.why },
-    };
-  const fetch = { common, ok: true, why: '' };
+  /** @type {{ common: string | null, ok: boolean, why: string }} */
+  let fetch;
+  if (!network) {
+    fetch = { common, ok: true, why: '' };
+  } else {
+    // 先照环境里的代理取（reclaude 的口），没成再直连取一次；两次的原因都带上（fresh-main.mjs）
+    const fetched = fetchWithFallback(git, cwd, ['fetch', '-q', 'origin'], { okOf: ok, whyOf: why });
+    if (!fetched.ok)
+      return {
+        line: `开场核规矩没查成：git fetch 失败（${fetched.why}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
+        fetch: { common, ok: false, why: fetched.why },
+      };
+    fetch = { common, ok: true, why: '' };
+  }
   if (!ok(g('rev-parse', '-q', '--verify', ORIGIN_MAIN))) return { line: null, fetch };
   const branch = g('branch', '--show-current').stdout.trim();
   const behind = Number(g('rev-list', '--count', `HEAD..${ORIGIN_MAIN}`).stdout.trim() || '0');
@@ -702,10 +727,16 @@ export function sessionStart({
   progress = progressRunner(),
   env = process.env,
 }) {
-  const here = checkHere(cwd, git);
+  // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上，取远端和问 GitHub 三分钟内只做一次。
+  const worker = env.FLEET_WORKER === '1';
+  const stamp = worker ? null : sessionNetStamp(home, cwd, localGit);
+  const quiet = stamp !== null && quietFor(stamp, now) !== null;
+  const here = checkHere(cwd, git, { network: !quiet });
+  // 失败也记上：断网时下一轮不再把 fetch（15 秒，代理失败再来）和 GitHub 超时重付一遍
+  if (stamp !== null && !quiet) touch(stamp, now);
   // 工人（FLEET_WORKER=1，worker-lib.mjs 起的）只要规矩同步：创始人引导、他最近的话、工作树清单、工人状态都是指挥官的事，
   // 注进工人的开场它会当成自己的活（2026-10-05 审计 N5），还白占 8–11 秒
-  if (env.FLEET_WORKER === '1')
+  if (worker)
     return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
   const syncDir = source ? source.syncDirIn(home) : null;
@@ -714,22 +745,26 @@ export function sessionStart({
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
     ...checkDirectives(cwd, localGit),
-    ...checkProgressIssue({
-      cwd,
-      git: localGit,
-      run: progress,
-      mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
-    }),
+    ...(quiet
+      ? []
+      : checkProgressIssue({
+          cwd,
+          git: localGit,
+          run: progress,
+          mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
+        })),
     ...recentPrompts({ home, now, sessionId }),
-    ...sweepWorktrees(cwd, localGit),
+    ...(quiet ? [] : sweepWorktrees(cwd, localGit)),
     ...workerLines(home, now),
-    ...checkIdlePrs({
-      cwd,
-      git: localGit,
-      run: idlePr,
-      fetch: here.fetch,
-      mirror: syncDir ? join(syncDir, IDLE_SCRIPT) : null,
-    }),
+    ...(quiet
+      ? []
+      : checkIdlePrs({
+          cwd,
+          git: localGit,
+          run: idlePr,
+          fetch: here.fetch,
+          mirror: syncDir ? join(syncDir, IDLE_SCRIPT) : null,
+        })),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
 }
