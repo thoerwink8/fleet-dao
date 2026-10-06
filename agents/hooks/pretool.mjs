@@ -2077,6 +2077,14 @@ export function decide(raw, fallbackCwd = '') {
       'fleet-dao 里不用 git stash：stash 栈所有工作树共用，并行会话会互相拿错改动。临时存改动用 `git diff > 文件` / `git apply 文件`，或先提交到自己分支。',
     );
   }
+  // 2026-10-05 撞过：git reset --hard 把主检出一份还没验证的活回滚丢了。限制 fleet 仓的 Bash/PowerShell
+  // 两条钩子管得着的壳，和「不用 git stash」那条并列。要回滚先提交个工作分支再 reset；
+  // 想放下不要的活用 `git diff > 文件` 或 `git stash push -u -m '<tag>'`（stash 栈的坑见上一条，别合并到它）。
+  if (inFleet && /\bgit\b[^|;&\n]*\sreset\b[^|;&\n]*\s--hard\b/.test(cmd)) {
+    return block(
+      "fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动用 `git stash push -u -m '<tag>'`，或先 `git diff > 文件` 再决定要不要真扔。",
+    );
+  }
   return { code: 0 };
 }
 
