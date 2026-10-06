@@ -21,13 +21,12 @@
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reconcile, sentByFounder } from './founder-inbox.mjs';
-import { fetchWithFallback } from './fresh-main.mjs';
+import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
 import {
@@ -82,14 +81,10 @@ function commonOf(g) {
   return process.platform === 'win32' ? p.toLowerCase() : p;
 }
 
-/** 这个仓「取远端 + 问 GitHub + 扫工作树」的记号。按 git 公共目录分仓，工作树和主检出共用一扇门。 */
+/** 这个仓「问 GitHub + 扫工作树」的记号。取远端成功另记在 fetch-ok（fresh-main.mjs），两扇门按同一个 git 公共目录分仓。 */
 function sessionNetStamp(home, cwd, git) {
-  const g = (...a) => git(cwd, a);
-  const inside = g('rev-parse', '--is-inside-work-tree');
-  if (!ok(inside) || inside.stdout.trim() !== 'true') return null;
-  const common = commonOf(g);
-  if (!common) return null;
-  const key = createHash('sha256').update(common).digest('hex').slice(0, 16);
+  const key = repoStampKey(cwd, git, ok);
+  if (!key) return null;
   return join(home, '.fleet-dao', 'session-net', key);
 }
 
@@ -727,12 +722,16 @@ export function sessionStart({
   progress = progressRunner(),
   env = process.env,
 }) {
-  // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上，取远端和问 GitHub 三分钟内只做一次。
+  // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上。
+  // 问 GitHub、扫工作树看 session-net；git fetch 看 fetch-ok（子代理刚取成过就不再取）。两扇门都是三分钟。
   const worker = env.FLEET_WORKER === '1';
   const stamp = worker ? null : sessionNetStamp(home, cwd, localGit);
   const quiet = stamp !== null && quietFor(stamp, now) !== null;
-  const here = checkHere(cwd, git, { network: !quiet });
-  // 失败也记上：断网时下一轮不再把 fetch（15 秒，代理失败再来）和 GitHub 超时重付一遍
+  const fetchedRecently = !worker && fetchIsFresh({ home, cwd, git: localGit, okOf: ok, now });
+  const doFetch = worker || (!quiet && !fetchedRecently);
+  const here = checkHere(cwd, git, { network: doFetch });
+  if (doFetch && here.fetch?.ok === true) markFetchOk({ home, cwd, git: localGit, okOf: ok, now });
+  // 失败也记上 session-net：断网时下一轮不再把 GitHub 超时重付一遍。fetch-ok 只在取成时记，子代理仍会再试。
   if (stamp !== null && !quiet) touch(stamp, now);
   // 工人（FLEET_WORKER=1，worker-lib.mjs 起的）只要规矩同步：创始人引导、他最近的话、工作树清单、工人状态都是指挥官的事，
   // 注进工人的开场它会当成自己的活（2026-10-05 审计 N5），还白占 8–11 秒

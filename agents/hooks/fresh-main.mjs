@@ -11,7 +11,13 @@
 //   不是代理坏了）：被拒当场就失败，所以第二次直连不会多花多少时间。代理挂着不回话的慢失败，靠每次各自的超时兜住。
 // - 两次都没成，把两次各自为什么写在一起返回；绝不把「没取成」说成成功（调用方据此明说「没查成」或拦下）。
 // - 只管 fetch，不动工作区、不动本地分支（钩子里改检出太冒险；追平本地 main 另有开会话钩子里的快进）。
+// - 同一个仓三分钟内刚取成过就不再取（记在 ~/.fleet-dao/fetch-ok/）。开会话钩子取成功也会记一笔，
+//   接着起的子代理不再各付一次 6 秒。取失败不记：要建工作树的子代理仍拦，下一轮还会再试。
 
+import { createHash } from 'node:crypto';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { hasProxy } from './git-run.mjs';
 
 /** @typedef {import('./git-run.mjs').GitResult} GitResult 一次 git 命令的结果 */
@@ -65,13 +71,82 @@ export function fetchWithFallback(git, cwd, args, h) {
  */
 export const SUBAGENT_FETCH_MS = 6_000;
 export const SUBAGENT_DIRECT_MS = 3_000;
+/** 这个仓刚取成 origin 的有效期。和开会话钩子的 QUIET_MS 一样是 3 分钟。 */
+export const FETCH_QUIET_MS = 3 * 60_000;
+
+/**
+ * 这个仓在记号里用的键。git 公共目录的绝对路径，工作树和主检出是同一扇门。
+ * 假 git 回的不是绝对路径时返回 null：不记记号，每次都照取（测试不会往真家里写）。
+ * @param {string} cwd
+ * @param {(cwd: string, args: string[], opts?: { direct?: boolean }) => GitResult} git
+ * @param {(r: GitResult) => boolean} okOf
+ * @returns {string | null}
+ */
+export function repoStampKey(cwd, git, okOf) {
+  const inside = git(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (!okOf(inside) || String(inside.stdout ?? '').trim() !== 'true') return null;
+  const r = git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (!okOf(r)) return null;
+  const raw = String(r.stdout ?? '').trim();
+  if (!isAbsolute(raw)) return null;
+  const p = resolve(raw);
+  const norm = process.platform === 'win32' ? p.toLowerCase() : p;
+  return createHash('sha256').update(norm).digest('hex').slice(0, 16);
+}
+
+/** @param {string} home @param {string} key */
+export function fetchOkFile(home, key) {
+  return join(home, '.fleet-dao', 'fetch-ok', key);
+}
+
+/**
+ * 文件时间比 now 早一点点也算刚写的（两个钟对不齐）。读不到就是没记过。
+ * @param {string} file
+ * @param {number} now
+ * @param {number} windowMs
+ */
+export function stampIsFresh(file, now, windowMs) {
+  try {
+    const age = now - statSync(file).mtimeMs;
+    return age > -5_000 && age < windowMs;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string} file @param {number} now */
+export function touchStamp(file, now) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${new Date(now).toISOString()}\n`);
+  } catch {
+    // 记不下只是下次再取一次，不影响这次的结论
+  }
+}
+
+/**
+ * @param {{ home: string, cwd: string, git: (cwd: string, args: string[]) => GitResult, okOf: (r: GitResult) => boolean, now?: number }} o
+ */
+export function fetchIsFresh(o) {
+  const key = repoStampKey(o.cwd, o.git, o.okOf);
+  if (!key) return false;
+  return stampIsFresh(fetchOkFile(o.home, key), o.now ?? Date.now(), FETCH_QUIET_MS);
+}
+
+/** @param {{ home: string, cwd: string, git: (cwd: string, args: string[]) => GitResult, okOf: (r: GitResult) => boolean, now?: number }} o */
+export function markFetchOk(o) {
+  const key = repoStampKey(o.cwd, o.git, o.okOf);
+  if (!key) return;
+  touchStamp(fetchOkFile(o.home, key), o.now ?? Date.now());
+}
 
 /**
  * 起子代理（Agent / Task）之前，把 origin/main 取到最新：子代理的工作树从它切（见文件头）。
  * 取成了、不是 Agent/Task、不在 git 仓里、没有 origin：什么都不说（返回 null）。
  * 取不成：要建工作树的（isolation 是 worktree）拦下，说清 origin/main 停在多久以前；不建工作树的不拦（它不从 origin/main 切）。
  * `git(cwd, args, opts)` 同 fetchWithFallback；不抛。
- * @param {{ tool: unknown, toolInput: unknown, cwd: string, git: (cwd: string, args: string[], opts?: { direct?: boolean }) => GitResult, okOf: (r: GitResult) => boolean, whyOf: (r: GitResult) => string, env?: Record<string, string | undefined> }} o
+ * 这个仓三分钟内刚取成过：不再取，直接放行。取失败不记成功。
+ * @param {{ tool: unknown, toolInput: unknown, cwd: string, git: (cwd: string, args: string[], opts?: { direct?: boolean }) => GitResult, okOf: (r: GitResult) => boolean, whyOf: (r: GitResult) => string, env?: Record<string, string | undefined>, home?: string, now?: number }} o
  * @returns {{ block: true, message: string } | null}
  */
 export function freshBeforeSubagent(o) {
@@ -79,12 +154,18 @@ export function freshBeforeSubagent(o) {
   const inside = o.git(o.cwd, ['rev-parse', '--is-inside-work-tree']);
   if (!o.okOf(inside) || String(inside.stdout ?? '').trim() !== 'true') return null;
   if (!o.okOf(o.git(o.cwd, ['remote', 'get-url', 'origin']))) return null;
+  const home = o.home ?? homedir();
+  const now = o.now ?? Date.now();
+  if (fetchIsFresh({ home, cwd: o.cwd, git: o.git, okOf: o.okOf, now })) return null;
   const got = fetchWithFallback(o.git, o.cwd, ['fetch', '-q', 'origin', 'main'], {
     okOf: o.okOf,
     whyOf: o.whyOf,
     ...(o.env ? { env: o.env } : {}),
   });
-  if (got.ok) return null;
+  if (got.ok) {
+    markFetchOk({ home, cwd: o.cwd, git: o.git, okOf: o.okOf, now });
+    return null;
+  }
   const isolation =
     typeof o.toolInput === 'object' && o.toolInput !== null && 'isolation' in o.toolInput
       ? o.toolInput.isolation

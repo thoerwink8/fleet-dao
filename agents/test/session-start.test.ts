@@ -538,6 +538,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(lists).toHaveLength(1);
     expect(originAsks).toBe(2);
     expect(first.join('\n')).toContain('上一场没答的话');
+    expect(existsSync(join(w.home, '.fleet-dao', 'fetch-ok'))).toBe(true);
 
     const second = hook.sessionStart({
       cwd: w.work,
@@ -554,9 +555,12 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(second.join('\n')).toContain('上一场没答的话');
 
     const netDir = join(w.home, '.fleet-dao', 'session-net');
-    const stamp = join(netDir, readdirSync(netDir)[0] ?? '');
+    const okDir = join(w.home, '.fleet-dao', 'fetch-ok');
     const old = new Date(now - hook.QUIET_MS - 60_000);
-    utimesSync(stamp, old, old);
+    for (const dir of [netDir, okDir]) {
+      const stamp = join(dir, readdirSync(dir)[0] ?? '');
+      utimesSync(stamp, old, old);
+    }
     hook.sessionStart({
       cwd: w.work,
       home: w.home,
@@ -601,6 +605,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
       now,
     });
     expect(first.join('\n')).toMatch(/git fetch 失败/);
+    expect(existsSync(join(w.home, '.fleet-dao', 'fetch-ok'))).toBe(false);
     // 环境里有代理时，同一次取远端会再直连试一次，所以第一次可能是 2 次 fetch；第二轮必须一次都不加
     const afterFirst = fetches;
     expect(afterFirst).toBeGreaterThan(0);
