@@ -551,14 +551,18 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
     };
   // Claude 一律经 reclaude 起（通用段）。-p 不带位置参数时从 stdin 读提示词；工作目录由起进程那一步定（没有 --cwd 这个参数）。
   // 用户级的钩子（pretool.mjs 那几条拦截）在无头模式下照常生效，--dangerously-skip-permissions 只是不弹权限确认。
-  if (model === 'claude')
+  // Mirasim 会把 CLAUDE_CODE_SUBAGENT_MODEL 从主会话的模型名继承下来（子代理跟主会话同型号），主会话是 kimi-k3 时工人
+  // 会拿着这个不存在的名字去跑，一开场就报错（2026-10-06 四个工人同这事）。--model 显式给 sonnet/opus 之后，把这个环境变量
+  // 覆盖成同值，免得 generate_session_title 走到主会话的 kimi-k3 再炸一次。
+  if (model === 'claude') {
+    const claudeId = modelId ?? CLAUDE_DEFAULT_MODEL;
     return {
       command: 'reclaude',
       args: [
         '-p',
         '--dangerously-skip-permissions',
         '--model',
-        modelId ?? CLAUDE_DEFAULT_MODEL,
+        claudeId,
         '--effort',
         effort,
         // 边做边出日志：默认的文字输出做完才出字，中途 status 只能报「还没有输出」（2026-10-05 第一件真活就是这样，
@@ -568,9 +572,10 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
         '--verbose',
       ],
       stdinFile: promptFile,
-      extraEnv: {},
+      extraEnv: { CLAUDE_CODE_SUBAGENT_MODEL: claudeId },
       supervise: true,
     };
+  }
   return null;
 }
 
