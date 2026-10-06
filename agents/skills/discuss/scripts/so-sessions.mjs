@@ -653,7 +653,7 @@ async function stop(url, sessionKey) {
 }
 
 /**
- * 把会话连它的目录和账本一起删掉（Mirasim 的 deleteSession）。第二意见每次都是一次性的：跑完就删，
+ * 把会话连它的目录和账本一起删掉（Mirasim 的 deleteSession）。会话每次都是一次性的：跑完就删，
  * 不留在会话列表里等人来清（创始人 2026-10-03：「在 mirasim 起一个会话，我根本不想看见它，并且我希望随时能清理掉」）。
  * 删之前账本要先读完（traffic/<uuid> 跟会话一起没）。删不掉不当成失败——结论已经拿到了，只如实说一句。
  * @param {string} url
@@ -694,8 +694,8 @@ export async function listSessions() {
   }
 }
 
-/** 第二意见跑出来的会话都带这个开头（reviewPrompt / critiquePrompt 的第一句），用来认哪些是我们留下的。 */
-export const OUR_SESSION_TITLE = /^(你是 PR #\d+ 的「第二意见」|你是「反方」)/;
+/** 反方跑出来的会话都带这个开头（critiquePrompt 的第一句），用来认哪些是我们留下的。 */
+export const OUR_SESSION_TITLE = /^你是「反方」/;
 
 /**
  * 跑完删不删会话。默认删（一次性会话，不留在 Mirasim 列表里等人清）；`--keep-session` 留着排查用。
@@ -709,7 +709,7 @@ export function setKeepSession(keep) {
 }
 
 /**
- * 清掉我们（second-opinion / 反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。
+ * 清掉我们（反方）留下的旧会话：只删已经停的（running 的不动，可能正有人等着看）。
  * @param {Log} log
  */
 export async function stopStale(log) {

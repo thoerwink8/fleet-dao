@@ -140,7 +140,7 @@ describe('开着的 PR 由对账兜底挂上自动合并', () => {
     expect(w.resolved).toEqual([
       {
         dedupeKey: `${AUTO_MERGE_ALERT_PREFIX}acme/widgets#88`,
-        why: '改到了改标准的路径，不挂：等创始人同意（或照先审后合人自己挂）',
+        why: '改到了改标准的路径，不挂：等创始人同意',
       },
     ]);
   });

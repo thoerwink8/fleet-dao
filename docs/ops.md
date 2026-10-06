@@ -359,7 +359,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 看：PR 页面的 `cold-verify` 检查——`pending` 是在跑或在等（description 写在等什么），`success` 通过，`failure` 是没过或没验成（description 第一句分得开：「验收没过」是模型挑出了问题，「没验成」是读不到、没有别家模型、会话没跑成）。会话的账在 `runs` 表（`segment = 'verify'`，记到这张单名下）。
 - 工作流停下等人写的原因：diff 太大（超过 24 万字符）、某个文本文件 GitHub 没给 diff、没有别家的路由（写过这张单的族都跳过了）、作者族认不出（路由的族不在 gpt / claude / deepseek / grok / kimi 里，比如 cursor）、会话没跑成（原因码和执行体的原话在第一句里：额度、模型对不上、中转对不上账）、结论写了 fail 却没有一条算挡的问题。修好之后在驾驶舱点「继续」重验；不验了点「放弃」。
 - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机）工作流自己睡一会儿再来，不停下、不报人。
-- **验不了、又确认要合**（已知缺口）：合并闸只认引擎机器人贴的 `cold-verify`，人没有地方点「放行」。办法：仓管理员绕过必过检查合并（合并后不补审），并在单子上留一句为什么；或者关掉这个 PR，把分支改个不是 `fleet/<单号>-t<8 位>` 的名字重开成人手的 PR。
+- **验不了、又确认要合**（已知缺口）：合并闸只认引擎机器人贴的 `cold-verify`，人没有地方点「放行」。办法：仓管理员绕过必过检查合并，并在单子上留一句为什么；或者关掉这个 PR，把分支改个不是 `fleet/<单号>-t<8 位>` 的名字重开成人手的 PR。
 
 退役的定时任务（断链修复：#445 删掉「提醒派单」整层撞上——代码删了，Temporal 上当初建的 Schedule 不会跟着消失，法国的 `alert-dispatch` 当时只能帅位手动 `fleet-temporal schedule toggle --pause` 止血，见 `specs/445-提醒减负/结果.md`；这里补上「引擎起来自己删」这一步。#1072 把 8 个定时任务摘出 Temporal、改成引擎进程里的定时器，它们在 Temporal 上的老 Schedule 也走这一条删）：
 
@@ -714,7 +714,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 （#323：代码已经是先进仓、再由自动发布装到法国，配置照同一个做法——期望进仓、有版本，发布时照期望写上，线上每一轮对账，照 OpenGitOps；做法、比过的几种和出处见 `specs/323-配置进仓对账/方案.md`，和方案不一样的几处见 #323 的 PR）
 
-- 期望在哪：法国 `/etc/fleet-dao` 下 `engine.env`、`api.env`、`release.env`、`france.env` 每一项「应该是什么」写在仓里的 `deploy/france/desired-config.json`，跟着版本走——对账拿在用的那一版（`current`）里的这一份，发布时照要切到的那一版里的这一份写（下面「发布时照期望写」）。公开的值写原值；私有的值（域名、飞书凭据、webhook 密钥、WireGuard 对端；巡检仓 #777 起改成公开值）只写指纹：HMAC-SHA256，钥匙是本机的 `/etc/fleet-dao/config-fingerprint.key`（root:root 600，france.sh 第一次跑时生成，之后不动；保险箱的 `refresh.sh` 连它一起留加密副本），期望里的 `fingerprint.keyId` 是它的编号。私有值本身照旧只在法国和保险箱里。这份期望是先审后合（`packages/conventions/high-risk-paths.json`）。
+- 期望在哪：法国 `/etc/fleet-dao` 下 `engine.env`、`api.env`、`release.env`、`france.env` 每一项「应该是什么」写在仓里的 `deploy/france/desired-config.json`，跟着版本走——对账拿在用的那一版（`current`）里的这一份，发布时照要切到的那一版里的这一份写（下面「发布时照期望写」）。公开的值写原值；私有的值（域名、飞书凭据、webhook 密钥、WireGuard 对端；巡检仓 #777 起改成公开值）只写指纹：HMAC-SHA256，钥匙是本机的 `/etc/fleet-dao/config-fingerprint.key`（root:root 600，france.sh 第一次跑时生成，之后不动；保险箱的 `refresh.sh` 连它一起留加密副本），期望里的 `fingerprint.keyId` 是它的编号。私有值本身照旧只在法国和保险箱里。这份期望和别的改动一样 CI 绿就合（决定 0023）。
 - 每一轮对账：自动发布每 5 分钟那一轮最后，拿线上这几份文件跟期望比（`deploy/france/auto-release/config.mjs`，照 systemd 的读法读）：公开的值不对、私有值和指纹对不上、缺了（没写或被注释掉）、写了几行、多出来期望里没有的键，一项一条报警（`auto-release:config:<文件>:<键>`，飞书跟着推），线上的值一律不打印；改回去了，下一轮自己撤。期望读不到、认不出（在用的版本里没有这份、不是 JSON、格式不认识）、指纹钥匙读不到或不是期望记的那一把、私有值还没记指纹，记「没查成」、报一条 `auto-release:config-unchecked`，不当成一致。对账只报警、不改回；改回只在发布时，由期望里的 `selfHeal` 管（下一条），两份期望里都关着，开不开等创始人定。
 - 发布时照期望写：`release.sh` 发布、`--rollback`、自动退回，都在迁移、装目录、装路由两层之后，切版本之前，照要切到的那一版里这一档的期望写 `engine.env`、`api.env`、`release.env`（`france.env` 不写，归 france.sh）；这一版里没有期望（#323 之前的老提交）就不写、照切。
   - 只写「这一版的期望和上次写的不一样」的公开键：期望里新加的、值改了的写上（文件里有就原地改那一行，没有就补在末尾，前一行注释写明说明和照哪一版写的），期望里删掉的、上次写过的那一行删掉。期望没变的不碰——人手改过的（和期望不一致）不改回，对账照旧报警。私有值一概不写，期望里没登记、也没写过的键不碰。

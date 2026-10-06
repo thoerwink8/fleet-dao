@@ -8,7 +8,7 @@
 // 读不到、判不出、挂不上的照实报警、写进这一轮没查成，不当成挂上了；不再开着的（掉了、合了、关了）那条提醒撤掉。
 // 改这里之前必须知道：
 // - 只挂自动合并，不手动合（`gh pr merge`）——合并闸还没拦住改标准的那份（等 #133），所以碰到改标准路径的 PR 不挂，
-//   留给创始人（或照先审后合人自己挂）。
+//   留给创始人。
 // - 任务工作流（#632）起的 PR（分支 fleet/<单号>-t<8 位>）不归这里挂：它们的自动合并只由工作流在冷验收通过之后挂；
 //   这里照 CI 绿就挂，会抢在验收之前把没验过的合进主线。判在读文件和清单之前（便宜、也不会因为清单读不出报一堆提醒）。
 
@@ -177,7 +177,7 @@ async function judgeOne(
   }
   const risks = standardFiles(files, parsed);
   if (risks.length > 0) {
-    await resolveOne(deps, repo, pr.number, '改到了改标准的路径，不挂：等创始人同意（或照先审后合人自己挂）');
+    await resolveOne(deps, repo, pr.number, '改到了改标准的路径，不挂：等创始人同意');
     deps.log('info', '每小时对账：PR 改到改标准路径，不挂自动合并', {
       repo: `${repo.owner}/${repo.name}`,
       prNumber: pr.number,

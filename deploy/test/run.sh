@@ -234,7 +234,7 @@ run_unit() { # 项目名
   echo "⏱ $unit $((SECONDS - t0)) 秒"
 }
 
-# 先核名单（--ops 也核：#662 第二意见第 2 轮指出这条路原来跳过了它，新加个测试没人跑也不报）。
+# 先核名单（--ops 也核：#662 审查第 2 轮指出这条路原来跳过了它，新加个测试没人跑也不报）。
 check_shard_coverage
 if ((check_shards_only)); then
   finish "分台名单核对通过"

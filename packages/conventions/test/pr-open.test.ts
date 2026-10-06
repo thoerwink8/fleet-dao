@@ -119,20 +119,6 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
     expect(w.text()).toContain('原话');
   });
 
-  it('碰先审后合路径：照样挂，另打一行要跑第二意见', () => {
-    const w = world([CREATED, files('packages/api/src/auth.ts'), ok()]);
-    expect(w.run()).toBe(0);
-    expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
-    expect(w.text()).toContain('second-opinion.mjs --pr 42 --high-risk');
-  });
-
-  it('碰先合后审路径：照样挂，提醒合并后补审', () => {
-    const w = world([CREATED, files('packages/conventions/src/ci-plan.ts'), ok()]);
-    expect(w.run()).toBe(0);
-    expect(w.text()).toContain('先合后审');
-    expect(w.text()).not.toContain('--high-risk');
-  });
-
   it('草稿、--no-automerge：开 PR 不挂', () => {
     const d = world([CREATED, files('a.ts')]);
     expect(d.run('--draft')).toBe(0);

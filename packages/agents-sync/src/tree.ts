@@ -49,7 +49,7 @@ const LF = 0x0a;
 
 /**
  * CRLF 换成 LF：行尾的 \r 不算内容（Windows 检出会把 LF 换成 CRLF）。单独的 \r 留着、算内容：它在终端里能把前面的字盖住，
- * 有人往审过的文件里塞一个，看着一样、字节不一样——所以只去掉紧挨着 \n 的那个（第二意见 #507 第 1 轮指出）。
+ * 有人往审过的文件里塞一个，看着一样、字节不一样——所以只去掉紧挨着 \n 的那个（#507 审查第 1 轮指出）。
  */
 export function crlfToLf(buf: Buffer): Buffer {
   if (!buf.includes(CR)) return buf;

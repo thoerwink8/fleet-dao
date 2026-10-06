@@ -19,10 +19,11 @@
 | [0013](0013-session-directives.md) | 只管这一次会话的话不落盘 | 生效 |
 | [0014](0014-progress-on-github.md) | 进度以 GitHub 为准 | 生效；计划快照被 0015 改成 `pnpm plan` 现读 |
 | [0015](0015-github-one-home.md) | GitHub 上一个事实一个家 | 生效 |
-| [0016](0016-review-gate-structural-and-after-merge.md) | 第二意见有终点：ci.yml 结构比对、CI 判法先合后审 | 生效 |
+| [0016](0016-review-gate-structural-and-after-merge.md) | 第二意见有终点：ci.yml 结构比对、CI 判法先合后审 | 被 0023 替代 |
 | [0017](0017-fable-only-in-founder-main-session.md) | Fable 只在创始人本机主对话里由他自己选 | 生效 |
 | [0018](0018-org-switch-9-answers-2026-10-04.md) | 切号方案 9 条背景的回答 | 生效 |
 | [0019](0019-founder-2026-10-05-five-answers.md) | 10-05 五件：发 v3、删追问库表、不做脱开、5 秒限时、被封号 | 生效 |
 | [0020](0020-founder-2026-10-05-chain-breaks.md) | 断链三条：关单自动收口、里程碑关前搬单、开单先查旧单 | 生效 |
 | [0021](0021-slim-before-replacing-temporal.md) | 引擎先瘦身（定时任务摘出 Temporal、失败规则表、看门狗），不直接换掉 Temporal；B 只放行「只加代码、假环境」 | 生效 |
 | [0022](0022-retire-local-wsl.md) | 撤掉本机 WSL 演练台：机器注销、仓里删本机档机制；往后只剩法国 + 本机指挥官 | 生效 |
+| [0023](0023-drop-second-opinion-gate.md) | 去掉「先审后合」这道合并闸：所有 PR 只看 CI（引擎 PR 的冷验收照旧）；风险是迁移误删表只靠 CI | 生效 |

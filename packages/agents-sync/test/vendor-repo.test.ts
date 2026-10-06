@@ -1,5 +1,5 @@
 // agents/skills-vendor（网上公开的 skill，原样拷进来）：仓里这份真目录照锁文件核得过；和自研的不同名；说明里没漏；
-// 目录、锁文件、格式检查的排除、先审后合的登记这几处连着的东西不能断。核锁本身的每一种「不对」在
+// 目录、锁文件、格式检查的排除这几处连着的东西不能断。核锁本身的每一种「不对」在
 // packages/agents-sync/test/vendor.test.ts 里各造了一次，这里只看仓里的真东西（放在 agents-sync 包里：agents/ 的 tsconfig 只管 test，跨包 import 会让 tsc 报错）。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -70,15 +70,6 @@ describe('第三方 skill（agents/skills-vendor/）', () => {
 });
 
 describe('连着的几处不能断', () => {
-  it('先审后合：agents/skills-vendor/ 和核对它的 vendor.ts 都登记在 high-risk-paths.json（改一个字都要第二意见）', () => {
-    const list = JSON.parse(read('packages/conventions/high-risk-paths.json')) as {
-      paths: { path: string; kind: string }[];
-    };
-    for (const path of ['agents/skills-vendor/', 'packages/agents-sync/src/vendor.ts']) {
-      expect(list.paths.find((p) => p.path === path)?.kind, path).toBe('碰安全');
-    }
-  });
-
   it('格式检查不碰第三方目录（上游的 .ts 不合本仓格式，改了它就破坏「原样」），类型检查本来就只管 test', () => {
     const biome = JSON.parse(read('biome.json')) as { files?: { includes?: string[] } };
     expect(biome.files?.includes).toContain('!agents/skills-vendor');

@@ -1,4 +1,4 @@
-// PR 改到的文件（先审后合按路径判要它，#253）：翻完页、带 patch、认不出的一条抛错（不当空文件处理）。
+// PR 改到的文件（判改没改到标准路径要它，#253）：翻完页、带 patch、认不出的一条抛错（不当空文件处理）。
 import { describe, expect, it } from 'vitest';
 import { json, repo, setup } from './helpers.ts';
 

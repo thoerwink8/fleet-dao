@@ -316,20 +316,20 @@ export function isFounderPrompt(prompt) {
 }
 
 /**
- * 机器自己起的会话的第一条提示：第二意见（「你是 PR #… 的「第二意见」」）和反方（「你是「反方」」，discuss 技能起的）。
- * 它们也走 UserPromptSubmit，不是创始人说的话（2026-10-05 开会话钩子列「创始人最近的话」，真话被这些挤出最后 5 条）。
+ * 机器自己起的会话的第一条提示：反方（「你是「反方」」，discuss 技能起的）。
+ * 它也走 UserPromptSubmit，不是创始人说的话（2026-10-05 开会话钩子列「创始人最近的话」，真话被这类提示挤出最后 5 条）。
  * @param {unknown} prompt
  */
 export function isMachineOpening(prompt) {
-  return typeof prompt === 'string' && /^\s*(你是 PR #\d+ 的「第二意见」|你是「反方」)/.test(prompt);
+  return typeof prompt === 'string' && /^\s*你是「反方」/.test(prompt);
 }
 
-/** 工人（commander 的 worker.mjs 起的）和第二意见的工作树：`.claude/worktrees/w-<名字>`、`.claude/worktrees/second-opinion*` */
-const MACHINE_TREE = /[\\/]\.claude[\\/]worktrees[\\/](?:w-[^\\/]+|second-opinion[^\\/]*)(?:[\\/]|$)/;
+/** 工人（commander 的 worker.mjs 起的）的工作树：`.claude/worktrees/w-<名字>` */
+const MACHINE_TREE = /[\\/]\.claude[\\/]worktrees[\\/]w-[^\\/]+(?:[\\/]|$)/;
 
 /**
- * 这个会话是不是机器派的（工人、第二意见、反方），不是创始人坐在前面的：环境变量 FLEET_WORKER=1（worker-lib.mjs 起工人时设，
- * 第二意见和反方的 reclaude 会话也设）或会话目录在上面那两种工作树里。会话开场、落盘都靠它认。
+ * 这个会话是不是机器派的（工人、反方），不是创始人坐在前面的：环境变量 FLEET_WORKER=1（worker-lib.mjs 起工人时设，
+ * 反方的 reclaude 会话也设）或会话目录在上面那种工作树里。会话开场、落盘都靠它认。
  * @param {{ env?: Record<string, string | undefined>, cwd?: unknown }} [opts]
  */
 export function isMachineSession({ env = process.env, cwd } = {}) {

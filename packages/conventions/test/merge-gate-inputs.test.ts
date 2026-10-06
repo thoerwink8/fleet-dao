@@ -1,10 +1,9 @@
-// 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；design 第五节
-// 「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸 merge-gate 汇总 PR
-// 此刻的状态——PR 本身（分支名、改了哪些文件；#654 起不看草稿、冲突、正文）和当前头上的提交状态（第二意见；#555-2 起
-// 再加一条冷调用的结论）。#555-2 加 cold-verify 时**没有**给合并闸加新的读口子：冷调用的结论和第二意见在同一次
-// statuses 调用里读回来，只是另一个 context——闸里起模型调用会破坏「CI 检查必须确定」这条，所以冷调用在装配侧跑、
-// 结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）这里会红：要加得先改上面那两处的规矩，
-// 再改这里的清单。
+// 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；2026-10-06 拍 #1114 去掉先审后合，
+// 决定 0023；design 第五节「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸
+// merge-gate 汇总 PR 此刻的状态——PR 本身（分支名、开着还是关了；#654 起不看草稿、冲突、正文）和当前头上的提交状态
+// （只剩引擎任务 PR 的冷调用结论，#555-2）。冷调用的结论在同一次 statuses 调用里读回来——闸里起模型调用会破坏
+// 「CI 检查必须确定」这条，所以冷调用在装配侧跑、结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）
+// 这里会红：要加得先改上面那两处的规矩，再改这里的清单。
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,29 +16,23 @@ const gates = src('merge-gates.ts');
 
 /** 合并闸从 GitHub 读、往 GitHub 写的口子（merge-gate.ts 的 GitHubReads），一样一行写清看的是什么。 */
 const ALLOWED_READS: Record<string, string> = {
-  pr: 'PR 本身：当前头、分支名、改了几个文件、开着还是关了（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
-  files: 'PR 改了哪些文件：判改没改到先审后合的路径',
-  statuses:
-    '当前头上的提交状态（逐条的）：第二意见、合前一次冷调用的结论（#555-2，同一份读回来、各认各的 context）',
-  openPrs: '第二意见、冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
-  fileAt:
-    '改了已有的 ci.yml：读改动前（共同祖先）和改动后（当前头）两份全文做结构比对，判这次改动碰没碰信任（创始人 2026-10-03「1+2+3」）',
-  mergeBase: '改动前那份取哪个提交：PR 的改动是对共同祖先算的，比对要用同一个起点',
+  pr: 'PR 本身：当前头、分支名、开着还是关了（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
+  statuses: '当前头上的提交状态（逐条的）：合前一次冷调用的结论（#555-2）',
+  openPrs: '冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
   writeStatus: '写 merge-gate 这一个状态',
 };
 
-/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见（#444 起「认领对得上」不算这里头，合并闸不再等它）、
- * 合前一次冷调用的结论（#555-2：验收那一遍的 verdict，装配侧贴、闸只读，不许闸里起模型调用）。 */
+/** 合并闸认得的提交状态名：自己写的 merge-gate、合前一次冷调用的结论（#555-2：验收那一遍的 verdict，装配侧贴、闸只读，不许闸里起模型调用）。 */
 const ALLOWED_CONTEXTS: Record<string, string> = {
   GATE_CONTEXT: 'merge-gate',
-  SECOND_OPINION_CONTEXT: 'second-opinion',
   COLD_VERIFY_CONTEXT: 'cold-verify',
 };
 
+// 换行统一成 \n：Windows 检出（autocrlf）是 \r\n，下面的字符串替换按 \n 写
 const workflow = readFileSync(
   fileURLToPath(new URL('../../../.github/workflows/merge-gate.yml', import.meta.url)),
   'utf8',
-);
+).replaceAll('\r\n', '\n');
 
 /** merge-gate.yml 的 job 条件没放行 status 事件的那几个状态名（合并闸自己写的 merge-gate 不用放行：写了会自己转圈）。 */
 function missingTriggers(yml: string): string[] {
@@ -100,21 +93,20 @@ function pushPaths(yml: string): string[] {
   return paths as string[];
 }
 
-/** 闸的判定输入：入口文件和它 import 到的所有文件、高风险清单、这份工作流自己；在 push.paths 里漏列的。 */
+/** 闸的判定输入：入口文件和它 import 到的所有文件、这份工作流自己；在 push.paths 里漏列的。 */
 function unwatchedInputs(yml: string): string[] {
   const watched = new Set(pushPaths(yml));
   const inputs = [
     ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
-    'packages/conventions/high-risk-paths.json',
     '.github/workflows/merge-gate.yml',
   ];
   return inputs.filter((f) => !watched.has(f));
 }
 
 describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二意见）', () => {
-  it('闸 import 到的每个文件、高风险清单、工作流自己都在 push.paths 里：它们在主线上一变就重算所有开着的 PR', () => {
+  it('闸 import 到的每个文件、工作流自己都在 push.paths 里：它们在主线上一变就重算所有开着的 PR', () => {
     const inputs = importClosure('packages/conventions/src/bin/merge-gate.ts');
-    expect(inputs.length, '一个文件都没走到：解析错了，不是没有').toBeGreaterThanOrEqual(4);
+    expect(inputs.length, '一个文件都没走到：解析错了，不是没有').toBeGreaterThanOrEqual(3);
     expect(inputs, '格式化报错的 pr-fields 不算闸的输入').not.toContain(
       'packages/conventions/src/pr-fields.ts',
     );
@@ -124,16 +116,9 @@ describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二�
   it('push.paths 里没有多余的：列的每个文件都真是闸的输入', () => {
     const inputs = new Set([
       ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
-      'packages/conventions/high-risk-paths.json',
       '.github/workflows/merge-gate.yml',
     ]);
     expect(pushPaths(workflow).filter((p) => !inputs.has(p))).toEqual([]);
-  });
-
-  it('【故意造出的失败】从 push.paths 里摘掉高风险清单：查得出来', () => {
-    const narrowed = workflow.replace('      - packages/conventions/high-risk-paths.json\n', '');
-    expect(narrowed).not.toBe(workflow);
-    expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/high-risk-paths.json']);
   });
 
   it('【故意造出的失败】闸多 import 了一个文件却没列进 push.paths：查得出来', () => {
@@ -178,24 +163,13 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
   it('合并闸读的每个状态（自己写的 merge-gate 除外）写上来时都会重算：merge-gate.yml 的 if 放行它的 status 事件', () => {
     expect(missingTriggers(workflow)).toEqual([]);
     // 覆盖得全不全由 ALLOWED_CONTEXTS 和 if 现算，不写死几个名字：以后再加一条状态忘了放行，这里照样红。
-    expect(Object.keys(ALLOWED_CONTEXTS).length).toBeGreaterThan(2);
+    expect(Object.keys(ALLOWED_CONTEXTS).length).toBeGreaterThan(1);
   });
 
-  it('【故意造出的失败】merge-gate.yml 不放行 second-opinion：状态贴上来不重算，查得出来', () => {
-    const narrowed = withoutTrigger(workflow, 'second-opinion');
-    expect(narrowed).not.toBe(workflow);
-    expect(missingTriggers(narrowed)).toEqual(['second-opinion']);
-  });
-
-  it('【故意造出的失败】merge-gate.yml 不放行 cold-verify（#555-2 新加的那条）：状态贴上来不重算，查得出来', () => {
+  it('【故意造出的失败】merge-gate.yml 不放行 cold-verify：状态贴上来不重算，查得出来', () => {
     expect(ALLOWED_CONTEXTS.COLD_VERIFY_CONTEXT).toBe('cold-verify');
     const narrowed = withoutTrigger(workflow, 'cold-verify');
     expect(missingTriggers(narrowed)).toEqual(['cold-verify']);
-  });
-
-  it('【故意造出的失败】两条状态都忘了放行：两个名字都报出来（不是只报最后一个）', () => {
-    const narrowed = withoutTrigger(withoutTrigger(workflow, 'cold-verify'), 'second-opinion');
-    expect(missingTriggers(narrowed).sort()).toEqual(['cold-verify', 'second-opinion']);
   });
 
   it('【故意造出的失败】往读写口子里多加一个（比如读单子开没开）：上面那条就红', () => {

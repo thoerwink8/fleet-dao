@@ -274,9 +274,9 @@ export async function openPr(
   };
 }
 
-// —— 改到的文件（先审后合按路径判要它，#253）——
+// —— 改到的文件（判改没改到标准路径要它，#253）——
 
-/** 一个改到的文件：@fleet-dao/conventions 的 riskyFiles 按这个形状判（结构一致就够，这里不引那个包）。 */
+/** 一个改到的文件：@fleet-dao/conventions 的 ChangedFile 按这个形状判（结构一致就够，这里不引那个包）。 */
 export interface PrFile {
   filename: string;
   status: string;
@@ -291,7 +291,7 @@ export interface PrFile {
 const FILES_PER_PAGE = 100;
 const FILES_MAX_PAGES = 30;
 
-/** PR 改到的文件（翻完页，带 patch）：高风险路径按它判，判法在 @fleet-dao/conventions 的 riskyFiles（合并闸同一份）。 */
+/** PR 改到的文件（翻完页，带 patch）：改标准的路径按它判，判法在 @fleet-dao/conventions 的 standardFiles。 */
 export async function pullFiles(
   deps: Deps,
   repo: RepoRef,

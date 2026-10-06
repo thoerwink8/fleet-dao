@@ -3,7 +3,7 @@
 // - vitest 的位置参数是子串过滤，交给它明确的文件清单也不等于它就正好跑这些（装箱时已按名字把会互相拉上的放在一台，
 //   这里是最后一道）：报告里实际跑的文件集合必须正好等于该跑的，多了、少了都红，并写清是哪些——没跑成不许当通过。
 // - 命中 PR 缓存的台（ci-cache.ts）：该跑的 = 交接文件里的 run，缓存盖住的 covered 加 run 必须正好是分到的这一台。
-// - 这里判「这一台跑全了」，和 ci-plan.ts 一样在 high-risk-paths.json 里（先审后合）。
+// - 这里判「这一台跑全了」：判错了就是放行没测过的改动，改它要连测试一起看。
 import { parseState } from './ci-cache.ts';
 import { isTestFile, type TestBox } from './test-split.ts';
 

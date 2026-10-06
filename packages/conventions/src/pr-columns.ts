@@ -36,7 +36,7 @@ const PLAIN_COLUMN = /^\s*(?:[-*+]\s+)?([^\s*：:][^*：:\n]*?)\s*[：:]\s*(.*)$
 /** 小标题是正文分节，上一栏到这里为止：栏写在正文开头时，不截的话后面各节里提到的路径会被当成这一栏来查。 */
 const HEADING = /^\s{0,3}#{1,6}(?:\s|$)/;
 
-/** HTML 注释去掉、换行留着（和 markdown.ts 的 stripComments 同一个写法；不引它：它不在先审后合的清单里）。 */
+/** HTML 注释去掉、换行留着（和 markdown.ts 的 stripComments 同一个写法，不引它）。 */
 const stripComments = (text: string) => text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ''));
 
 /**

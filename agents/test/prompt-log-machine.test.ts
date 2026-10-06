@@ -1,5 +1,5 @@
 // 落盘钩子（agents/hooks/prompt-log.mjs）不记机器派的会话的提示（派活到合并提速第一片，#1066，2026-10-05 审计 N5）：
-// 工人、第二意见、反方的第一条提示也走 UserPromptSubmit，原先全机一起落进「创始人最近的话」，真话被挤出最后 5 条。
+// 工人、反方的第一条提示也走 UserPromptSubmit，原先全机一起落进「创始人最近的话」，真话被挤出最后 5 条。
 // 真 spawn 钩子、喂 stdin，看落下来的文件——和 rules/prompt-log.rules.test.ts 同一种做法（那份不动）。
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
@@ -66,20 +66,17 @@ describe('落盘钩子不记机器派的会话', { timeout: 30_000 }, () => {
     expect(logged()).toEqual([]);
   });
 
-  it('【故意造出的情形】会话目录在 .claude/worktrees/w-<名字> 或 second-opinion* 里：不落盘（Windows 和斜杠两种写法）', () => {
+  it('【故意造出的情形】会话目录在 .claude/worktrees/w-<名字> 里：不落盘（Windows 和斜杠两种写法）', () => {
     for (const [i, cwd] of [
       'D:\\frank\\fleet-dao\\.claude\\worktrees\\w-speed-a',
       '/home/u/fleet-dao/.claude/worktrees/w-speed-a/packages/db',
-      'D:\\frank\\fleet-dao\\.claude\\worktrees\\second-opinion',
-      '/r/.claude/worktrees/second-opinion-2',
     ].entries()) {
       feed({ prompt: `机器的提示 ${i}`, prompt_id: `p${i}`, session_id: 's', cwd });
     }
     expect(logged()).toEqual([]);
   });
 
-  it('【故意造出的情形】第二意见、反方的开场提示（不管会话目录在哪）：不落盘', () => {
-    feed({ prompt: '你是 PR #1056 的「第二意见」：一个全新会话，独立判断。', prompt_id: 'p1', cwd: 'D:\\x' });
+  it('【故意造出的情形】反方的开场提示（不管会话目录在哪）：不落盘', () => {
     feed({ prompt: '你是「反方」：一个全新会话，另一家模型。', prompt_id: 'p2', cwd: 'D:\\x' });
     expect(logged()).toEqual([]);
   });
@@ -91,29 +88,25 @@ describe('落盘钩子不记机器派的会话', { timeout: 30_000 }, () => {
 });
 
 describe('机器会话的判断（落盘和开会话共用 unattended.mjs 这一套）', () => {
-  it('isMachineSession：FLEET_WORKER 必须正好是 1；目录要整段是 w-<名字> 或 second-opinion*，w- 开头的别的目录不算', () => {
+  it('isMachineSession：FLEET_WORKER 必须正好是 1；目录要整段是 w-<名字>，w- 开头的别的目录不算', () => {
     expect(un.isMachineSession({ env: { FLEET_WORKER: '1' } })).toBe(true);
     expect(un.isMachineSession({ env: { FLEET_WORKER: '0' } })).toBe(false);
     expect(un.isMachineSession({ env: {} })).toBe(false);
     expect(un.isMachineSession({ env: {}, cwd: 'D:\\r\\.claude\\worktrees\\w-a' })).toBe(true);
-    expect(un.isMachineSession({ env: {}, cwd: 'D:\\r\\.claude\\worktrees\\second-opinion-3\\x' })).toBe(
-      true,
-    );
     expect(un.isMachineSession({ env: {}, cwd: 'D:\\r\\.claude\\worktrees\\so-order' })).toBe(false);
     expect(un.isMachineSession({ env: {}, cwd: 'D:\\r\\worktrees\\w-a' })).toBe(false);
     expect(un.isMachineSession({ env: {}, cwd: undefined })).toBe(false);
   });
 
-  it('isFounderPrompt 也不把第二意见、反方的开场当他的话；真话和长度规矩不变', () => {
-    expect(un.isMachineOpening('你是 PR #12 的「第二意见」：…')).toBe(true);
+  it('isFounderPrompt 也不把反方的开场当他的话；真话和长度规矩不变', () => {
     expect(un.isMachineOpening('你是「反方」：…')).toBe(true);
-    expect(un.isMachineOpening('你是不是漏了第二意见')).toBe(false);
-    expect(un.isFounderPrompt('你是 PR #12 的「第二意见」：一个全新会话')).toBe(false);
+    expect(un.isMachineOpening('你是不是漏了反方')).toBe(false);
+    expect(un.isFounderPrompt('你是「反方」：一个全新会话')).toBe(false);
     expect(un.isFounderPrompt('进度怎么样，瓶颈在哪里')).toBe(true);
     expect(un.isFounderPrompt('继续')).toBe(false);
   });
 
-  it('第二意见和反方起的 reclaude 会话带 FLEET_WORKER=1（源码核对：真起 reclaude 要网络和账号，测试不碰）', () => {
+  it('反方起的 reclaude 会话带 FLEET_WORKER=1（源码核对：真起 reclaude 要网络和账号，测试不碰）', () => {
     const src = readFileSync(SO_SESSIONS, 'utf8');
     const runClaude = src.slice(src.indexOf('function runClaude'), src.indexOf('function runCursor'));
     expect(runClaude).toMatch(/env:\s*\{\s*\.\.\.process\.env,\s*FLEET_WORKER:\s*'1'\s*\}/);

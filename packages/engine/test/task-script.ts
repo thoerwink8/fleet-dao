@@ -90,7 +90,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       changedFiles: ['packages/web/src/pages/a.tsx'],
     }),
     verify: (_i, n) => ({ pass: true, problems: [], round: n === 1 ? 1 : 2 }),
-    guarded: () => ({ standards: [], highRisk: [] }),
+    guarded: () => ({ standards: [] }),
     arm: () => ({ armed: true, merged: false }),
     merged: () => ({ state: 'merged', mergeCommit: 'abc1234567890' }),
     ...over,

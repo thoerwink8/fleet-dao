@@ -47,7 +47,7 @@ export type EngineActivities = PortActivities & {
   readDelivery(input: ReadDeliveryInput): Promise<DeliveryRead>;
   /** 合并之前的冷验收（换一个不同的族）。没能做出来回 unavailable，不当成没过。 */
   coldVerify(input: ColdVerifyInput): Promise<ColdVerifyResult>;
-  /** 这个 PR 改到的文件里，哪些是改标准的路径（要创始人同意）、哪些是先审后合的路径。读不到抛错，不当成没碰到。 */
+  /** 这个 PR 改到的文件里，哪些是改标准的路径（要创始人同意）。读不到抛错，不当成没碰到。 */
   checkGuarded(input: CheckGuardedInput): Promise<GuardedPaths>;
   /** 给 PR 挂上自动合并（squash，只合 expectedHead）。 */
   armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;

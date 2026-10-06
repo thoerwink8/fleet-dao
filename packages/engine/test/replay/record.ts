@@ -82,7 +82,7 @@ const SCENARIOS: Record<string, Scenario> = {
   },
   // 改到了标准路径：PR 开了、CI 绿了、验收过了，停在挂自动合并之前等创始人（卡片已发）。
   'task-parked-guarded': {
-    tasks: scripted({ guarded: () => ({ standards: ['AGENTS.md'], highRisk: [] }) }).tasks,
+    tasks: scripted({ guarded: () => ({ standards: ['AGENTS.md'] }) }).tasks,
     async run(r) {
       const handle = await startTask(r);
       await taskStatusUntil(handle, (s) => s.waiting?.kind === 'human', '改标准，停下等创始人');

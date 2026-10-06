@@ -1,4 +1,4 @@
-// 任务工作流验收通过之后的两步：查「改标准」「先审后合」的路径（停下等人）、挂自动合并并等合并。
+// 任务工作流验收通过之后的两步：查「改标准」的路径（停下等人）、挂自动合并并等合并。
 //
 // 改这里之前必须知道：
 // - 工作流不绕合并闸、不替创始人同意：碰了标准路径要人点「继续」才往下；批准只认批准那一刻的头（头换了新内容要重新批）。
@@ -8,7 +8,7 @@ import { type GuardedPaths, MERGE_POLL_MINUTES, type MergeWait } from '../task-c
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail } from './task-support.ts';
 
-/** 碰了「改标准」「先审后合」的路径：停下等人（工作流不绕合并闸、不替创始人同意）。 */
+/** 碰了「改标准」的路径：停下等人（工作流不绕合并闸、不替创始人同意）。 */
 export async function guardedPaths(rt: TaskRuntime): Promise<void> {
   const prNumber = rt.prNumber;
   const head = rt.head;
@@ -33,14 +33,6 @@ export async function guardedPaths(rt: TaskRuntime): Promise<void> {
       approve(rt, head, g, approved);
       continue;
     }
-    if (g.highRisk.length > 0) {
-      await rt.park(
-        '碰了先审后合的路径，合并闸要通过第二意见',
-        `改到：${g.highRisk.join('、')}。第二意见通过（second-opinion 状态）后点「继续」。`,
-      );
-      approve(rt, head, g, approved);
-      continue;
-    }
     return;
   }
 }
@@ -49,10 +41,7 @@ export async function guardedPaths(rt: TaskRuntime): Promise<void> {
 function approve(rt: TaskRuntime, head: string, pending: GuardedPaths, before: GuardedPaths | null): void {
   rt.guardApproval = {
     head,
-    paths: {
-      standards: [...(before?.standards ?? []), ...pending.standards],
-      highRisk: [...(before?.highRisk ?? []), ...pending.highRisk],
-    },
+    paths: { standards: [...(before?.standards ?? []), ...pending.standards] },
   };
 }
 

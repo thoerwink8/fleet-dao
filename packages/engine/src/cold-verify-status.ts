@@ -127,5 +127,5 @@ export type WriteColdVerifyStatus = (args: {
   status: ColdVerifyStatus;
 }) => Promise<void>;
 
-/** 状态写在哪个头：GitHub 的提交状态挂在 sha 上，头一变旧状态自然不算（和 second-opinion 同一个规矩）。 */
+/** 状态写在哪个头：GitHub 的提交状态挂在 sha 上，头一变旧状态自然不算。 */
 export type ColdVerifyTarget = { prNumber: number; head: string };

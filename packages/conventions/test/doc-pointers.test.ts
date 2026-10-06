@@ -305,7 +305,7 @@ describe('文档指针：故意不查的', () => {
 
 describe('文档指针：读不到的明确报「没查成」，不当成「没有」', () => {
   // 列目录回 undefined 有两种：不是目录（路径穿过了一个文件，算没有）、是目录却读不到（在不在没查成）。
-  // 读不到不能当成「没有」悄悄吞掉（#162 合并后补审）。
+  // 读不到不能当成「没有」悄悄吞掉（#162 合并后复查）。
   function broken(file: string, lines: string[], breakRepo: (repo: RepoView) => RepoView) {
     const base = BASE[file] ?? '';
     const first = base.split('\n').length;

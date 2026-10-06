@@ -44,7 +44,6 @@ import {
   ROOT_CONFIG_FILES,
   readGraph,
 } from '../src/ci-plan.ts';
-import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
 import { listTestFiles, parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
 import { runChild } from './child.ts';
@@ -960,17 +959,6 @@ describe('ci.yml 的 test job', () => {
     expect((steps[wait] as Step).if).toBe('matrix.pg');
     // 起容器那一步自己不等（拉镜像放后台），也不跑 pg_isready
     expect(steps[start]?.run).not.toContain('pg_isready');
-  });
-
-  it('新文件在先审后合清单里（它们是「决定少跑」的一步，和 ci-plan.ts 同类）', () => {
-    const parsed = parseRiskPaths(readFileSync(join(ROOT, RISK_PATHS_FILE), 'utf8'));
-    if (typeof parsed === 'string') throw new Error(parsed);
-    const listed = parsed.map((r) => r.path);
-    expect(listed).toContain('packages/conventions/src/ci-cache.ts');
-    expect(listed).toContain('packages/conventions/src/bin/ci-cache.ts');
-    expect(listed).toContain('packages/conventions/src/ci-box.ts');
-    expect(listed).toContain('packages/conventions/src/bin/ci-box.ts');
-    expect(listed).toContain('packages/conventions/src/test-split.ts');
   });
 
   it('清单文件名和缓存目录名两边一致（bin 写的、yml 存的是同一个目录）', () => {

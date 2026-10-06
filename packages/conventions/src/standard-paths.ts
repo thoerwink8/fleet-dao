@@ -1,5 +1,4 @@
 // 改标准的路径（人闸第四类，design 第五节「人闸第四类：改标准」）：packages/conventions/standard-paths.json 的读法和匹配。
-// 和先审后合的清单（merge-gates.ts 的 parseRiskPaths / riskyFiles）是两份东西：这份没有 kind、有 section，路径还可以带通配。
 // 纯判断，不碰网络；读不到、认不出由调用方判「没查成」，不当成「没碰到」。
 //
 // 改这里之前必须知道：
@@ -10,7 +9,16 @@
 //   宁可多拦一次，不漏一次改标准。原来唯一带 section 的是仓根 AGENTS.md 的通用段，2026-10-05 通用段挪进
 //   agents/shared-rules.md 后清单里眼下没有带 section 的条目，读法留着（引擎的改标准判定也认它）。
 
-import type { ChangedFile } from './merge-gates.ts';
+/** PR 改到的一个文件（GitHub 的 PR 文件列表里的一条）。 */
+export interface ChangedFile {
+  filename: string;
+  /** added、removed、modified、renamed…… */
+  status: string;
+  /** 改动内容；文件太大时 GitHub 不给。 */
+  patch?: string;
+  /** 改名前的名字。 */
+  previous?: string;
+}
 
 /** 改标准的路径清单在仓里的位置。 */
 export const STANDARD_PATHS_FILE = 'packages/conventions/standard-paths.json';

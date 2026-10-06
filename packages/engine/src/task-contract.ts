@@ -200,12 +200,10 @@ export interface ColdVerifyResult {
   headMoved?: string;
 }
 
-/** 改到了哪些要人拍或要第二意见的路径。两个都空＝合并闸之外没有别的门。 */
+/** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
 export interface GuardedPaths {
   /** 改标准的路径（人闸第四类：要创始人同意才挂自动合并）。 */
   standards: string[];
-  /** 先审后合的路径（合并闸要通过的第二意见）。 */
-  highRisk: string[];
 }
 
 export interface CheckGuardedInput {

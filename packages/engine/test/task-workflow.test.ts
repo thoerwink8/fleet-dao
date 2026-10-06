@@ -281,7 +281,6 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
   // 查路径用真活动（real/task-activities.ts）+ 内存假 GitHub：不靠桩「点了继续就变空」，
   // 人批了之后能不能放行，由真活动怎么判说了算（#10）。
   const STANDARDS = JSON.stringify({ paths: [{ path: 'AGENTS.md', section: '通用段', why: '通用段' }] });
-  const RISKS = JSON.stringify({ paths: [{ path: '.github/workflows/', kind: '碰安全', why: 'CI 工作流' }] });
   function realGuard(prFiles: string[]): {
     checkGuarded: NonNullable<EngineTasks['checkGuarded']>;
     seen: CheckGuardedInput[];
@@ -290,10 +289,10 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     const acts = createTaskActivities({
       gh: {
         pullFiles: async () => prFiles.map((filename) => ({ filename, status: 'modified' })),
-        readRepoFile: async (i: { path: string }) => ({
+        readRepoFile: async () => ({
           defaultBranch: 'main',
           commit: 'a'.repeat(40),
-          file: { kind: 'text', text: i.path.endsWith('standard-paths.json') ? STANDARDS : RISKS },
+          file: { kind: 'text', text: STANDARDS },
         }),
       } as unknown as TaskActivitiesDeps['gh'],
       trees: { ownerOf: async () => null },
@@ -336,7 +335,7 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     ]);
   });
 
-  it('碰了先审后合的路径：停下等第二意见；点「继续」后再查放行（真活动判）', async () => {
+  it('改了 CI 工作流这类路径：不停下，查一次就放行去挂自动合并（先审后合已整层去掉）', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted();
     const guard = realGuard(['.github/workflows/ci.yml']);
@@ -345,14 +344,11 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
       world,
       async (q) => {
         const h = await start(q, input());
-        await statusUntil(h, parked, '先审后合，停下');
-        expect(calls.arm).toBe(0);
-        await h.signal(taskContinueSignal, { by: 'frank' });
         return h.result();
       },
       { tasks: { ...tasks, checkGuarded: guard.checkGuarded } },
     );
-    expect(guard.seen).toHaveLength(2);
+    expect(guard.seen).toHaveLength(1);
     expect(calls.arm).toBe(1);
   });
 

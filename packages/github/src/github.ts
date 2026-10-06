@@ -160,7 +160,7 @@ export interface GitHub {
   fetchBranchHead(input: FetchBranchInput, ctx?: ActivityContext): Promise<FetchBranchResult>;
   openPr(input: OpenPrInput, ctx?: ActivityContext): Promise<OpenPrResult>;
   waitCi(input: WaitCiInput, ctx?: ActivityContext): Promise<CiWaitResult>;
-  /** PR 改到的文件（翻完页、带 patch）：先审后合按路径判要不要等第二意见用它，判法和合并闸同一份（#253）。 */
+  /** PR 改到的文件（翻完页、带 patch）：判「改没改到标准路径」用它（#253）。 */
   pullFiles(input: { repo: RepoRef; prNumber: number; signal?: AbortSignal }): Promise<PrFile[]>;
   mergePr(input: MergePrInput, ctx?: ActivityContext): Promise<MergePrResult>;
   updateIssueProgress(

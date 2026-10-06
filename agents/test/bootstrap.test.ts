@@ -191,7 +191,7 @@ describe('不该管的机器不动手', () => {
     expect(lib.shouldManage({ home }).manage).toBe(true);
   });
 
-  it('【故意造出的失败】没有 synced.json 的老机器、设置文件又读不了：明说判不了，不当成「没有旧钩子」静默退出（#829 补审挑出来的）', () => {
+  it('【故意造出的失败】没有 synced.json 的老机器、设置文件又读不了：明说判不了，不当成「没有旧钩子」静默退出（#829 的审查挑出来的）', () => {
     const home = mkdtempSync(join(tmpdir(), 'bootstrap-'));
     dirs.push(home);
     write(join(home, '.claude', 'settings.json'), '{坏了');

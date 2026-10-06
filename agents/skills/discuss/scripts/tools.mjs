@@ -1,5 +1,5 @@
-// ask.mjs、second-opinion.mjs 共用：数据放哪、这台机器上本机工具在不在、cursor-agent 登没登录。
-// 数据（题面、答案、审查记录）放 ~/.local/share/second-opinion/，不放技能目录：同步见技能目录里多了文件，会把整个目录
+// ask.mjs、second-opinion.mjs（反方）共用：数据放哪、这台机器上本机工具在不在、cursor-agent 登没登录。
+// 数据（题面、答案、讨论记录）放 ~/.local/share/second-opinion/，不放技能目录：同步见技能目录里多了文件，会把整个目录
 // 换回仓里的样子，记录就没了。工具没装、没开、没登录都要说清是哪样（法国上就没有 cursor-agent、Mirasim），不当成答了。
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
@@ -77,8 +77,7 @@ export function cursorAgentEnv(platform = process.platform, env = process.env) {
  * @returns {string | null}
  */
 export function cursorAgentProblem({ env = process.env, run = runTool } = {}) {
-  if (!findBin('cursor-agent', env))
-    return '这台机器没装 cursor-agent（PATH 上找不到）；讨论和 Cursor 那几家的第二意见都要它';
+  if (!findBin('cursor-agent', env)) return '这台机器没装 cursor-agent（PATH 上找不到）；讨论要它';
   const r = run('cursor-agent', ['status', '--format', 'json'], {
     encoding: 'utf8',
     timeout: 30_000,

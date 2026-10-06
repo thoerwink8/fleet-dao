@@ -213,7 +213,7 @@
     },
     "requesting-code-review": {
       "source": "obra/superpowers",
-      "reason": "整个流程是「派一个 code-reviewer 子代理去审」，和创始人 2026-09-28「不再开 Claude 子代理」冲突（那条 2026-10-01 已撤回）；本仓审 PR 走 discuss 技能的第二意见（别家模型）。2026-09-30 逐个文件通读时发现，比创始人 00:08 拍板时列的第一批多出这一个"
+      "reason": "整个流程是「派一个 code-reviewer 子代理去审」，和创始人 2026-09-28「不再开 Claude 子代理」冲突（那条 2026-10-01 已撤回）；本仓 PR 只看 CI。2026-09-30 逐个文件通读时发现，比创始人 00:08 拍板时列的第一批多出这一个"
     },
     "skill-creator": {
       "source": "anthropics/skills",

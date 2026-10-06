@@ -1,4 +1,4 @@
-// second-opinion.mjs 拆出来的：各家执行体的档案、按作者族排候选、主审连不上换下一家。
+// second-opinion.mjs 拆出来的：各家执行体的档案、按作者族排候选、连不上换下一家。
 import { NotChecked, RetryableStart, Stalled } from './so-common.mjs';
 import { NotInstalled } from './tools.mjs';
 
@@ -8,9 +8,9 @@ import { NotInstalled } from './tools.mjs';
 /** @typedef {'code' | 'claude' | 'deepseek' | 'grok' | 'kimi' | 'code5' | 'cursor' | 'glm' | 'kimi3' | 'grok-cli' | 'ui'} ProfileName */
 /** @typedef {{ agent?: string | undefined, authorFamily?: string | string[] | undefined, excludeFamily?: string | undefined, ui?: boolean | undefined }} ProfileOptions */
 
-// 讨论/第二意见共同的厂商族顺序。作者族由调用方显式传入；不能从环境变量或当前进程名猜。
-// 创始人 2026-10-05：「第二意见太慢了，我建议优先 gpt6luna，不行就 grok」——gpt 第一、grok 第二，其余排后面只当兜底
-// （当天 #1056 的第二意见 25 分钟：deepseek、grok 起了会话卡在 streaming、没人换，最后 kimi 才出结论）。
+// 讨论的厂商族顺序。作者族由调用方显式传入；不能从环境变量或当前进程名猜。
+// 创始人 2026-10-05：「太慢了，我建议优先 gpt6luna，不行就 grok」——gpt 第一、grok 第二，其余排后面只当兜底
+// （当天 #1056 的一轮 25 分钟：deepseek、grok 起了会话卡在 streaming、没人换，最后 kimi 才出结论）。
 /** @type {string[]} */
 export const FAMILY_ORDER = ['gpt', 'grok', 'claude', 'deepseek', 'kimi'];
 /** @type {Record<ProfileName, Profile>} */
@@ -42,7 +42,7 @@ const PROFILE_BY_FAMILY = {
   kimi: PROFILES.kimi,
 };
 
-// 主审连不上就换下一家（创始人 2026-09-25：一个渠道不生效，讨论和审查的主体就换）。
+// 连不上就换下一家（创始人 2026-09-25：一个渠道不生效，讨论的对方就换）。
 // 族顺序由 FAMILY_ORDER + PROFILE_BY_FAMILY 唯一决定；审出结论后不因不喜欢结论换人。
 // 「模型满载」也算连不上（2026-09-26：codex 快照报 done 带 incomplete「Selected model is at capacity」，没换人直接判没查成）。
 export const UNAVAILABLE =
@@ -67,7 +67,7 @@ function splitFamilies(raw, label = '--author-family') {
     .filter(Boolean);
   if (values.length === 0)
     throw new NotChecked(
-      `要 ${label} <gpt|claude|deepseek|grok|kimi>：讨论/第二意见不能确认作者模型族（可逗号分隔），不会从环境变量猜`,
+      `要 ${label} <gpt|claude|deepseek|grok|kimi>：讨论不能确认作者模型族（可逗号分隔），不会从环境变量猜`,
     );
   const unknown = values.filter((family) => !FAMILY_ORDER.includes(family));
   if (unknown.length)
@@ -76,7 +76,7 @@ function splitFamilies(raw, label = '--author-family') {
 }
 
 /**
- * 为讨论和第二意见生成候选链。作者族可传多个；显式执行体也必须经过同族排除。
+ * 为讨论生成候选链。作者族可传多个；显式执行体也必须经过同族排除。
  * UI 仍固定走 Gemini，且不借此绕过作者族校验。
  * @param {ProfileOptions} [o]
  * @returns {Profile[]}
@@ -110,10 +110,6 @@ export function discussionProfiles(o = {}) {
   return candidates;
 }
 
-/** @param {ProfileOptions} o */
-export function prProfiles(o) {
-  return discussionProfiles(o);
-}
 /** 启动没成、可重试的 incomplete（中继撞上状态库补数据，见 RetryableStart）：同一家等多久、最多重试几次。 */
 const START_RETRY_WAIT_MS = 30_000;
 const MAX_START_RETRIES = 2;
@@ -169,7 +165,7 @@ export async function withFallback(chain, log, run, { budgetMs, sleep = defaultS
     }
     try {
       const r = await runRetryingStart(p, who, run, remainingMs, deadline, log, sleep);
-      if (misses.length) r.fallbackNote = `主审连不上换了人：${misses.join('；')}`;
+      if (misses.length) r.fallbackNote = `连不上换了人：${misses.join('；')}`;
       return { ...r, profile: p };
     } catch (e) {
       // 候选端点没装、没开、没登录、模型不在 roster、或本轮超时，都换下一家并照实记下。

@@ -1,9 +1,9 @@
-// 任务工作流（workflows/task.ts，#632 S2-4）要的活动里不碰会话的那五个的真实现：读交代、读交付、查改标准和先审后合的路径、
+// 任务工作流（workflows/task.ts，#632 S2-4）要的活动里不碰会话的那五个的真实现：读交代、读交付、查改标准的路径、
 // 挂自动合并、等合并。会话（runSegment）和冷验收（coldVerify）各自在 task-segment.ts、task-verify.ts。
 //
 // 改这里之前必须知道：
 // - 读不到、认不出一律抛错，不拿空冒充没事：清单读不出（不是「文件不在」）、PR 文件列表翻不完、工作树不在、git 没跑成，都抛。
-//   只有「这个仓根本没声明改标准 / 先审后合清单」（文件不在）才当没有。
+//   只有「这个仓根本没声明改标准清单」（文件不在）才当没有。
 // - 合并这一步 GitHub 说了算：自动合并只由 armAutoMerge 在验收通过之后挂（每小时对账的兜底不碰任务分支，jobs/auto-merge-check.ts）。
 //   挂的时候 GitHub 说「已经是 clean」（所有条件都满足了，没什么可等的）就直接合（github 包的 mergePr：核头、核不落后主线、
 //   核 CI 绿），合不了的原样说明原因交工作流停下报人。
@@ -14,10 +14,7 @@
 import type { SessionUser } from '@fleet-dao/adapters';
 import {
   type ChangedFile,
-  parseRiskPaths,
   parseStandardPaths,
-  RISK_PATHS_FILE,
-  riskyFiles,
   STANDARD_PATHS_FILE,
   standardFiles,
 } from '@fleet-dao/conventions';
@@ -170,7 +167,6 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         gh.pullFiles({ repo, prNumber: input.prNumber, signal: ctx.signal }),
       );
       const standardText = await readList(repo, STANDARD_PATHS_FILE, ctx);
-      const riskText = await readList(repo, RISK_PATHS_FILE, ctx);
       let standards: string[] = [];
       if (standardText !== null) {
         const list = parseStandardPaths(standardText);
@@ -183,25 +179,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           (h) => `${h.file}（${h.rule}${h.section ? `，只有「${h.section}」这一段算标准` : ''}）`,
         );
       }
-      let highRisk: string[] = [];
-      if (riskText !== null) {
-        const list = parseRiskPaths(riskText);
-        if (typeof list === 'string') {
-          throw new PortError('GUARD_LIST_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, {
-            retryable: false,
-          });
-        }
-        highRisk = riskyFiles(files, list).map(
-          (h) => `${h.file}（${h.kind}：${h.rule}${h.note ? `，${h.note}` : ''}）`,
-        );
-      }
       // 人批过的（原样条目对得上）不再拦；没批过的、批了之后才多出来的照拦。
       const approvedStandards = new Set(input.approved?.standards ?? []);
-      const approvedRisk = new Set(input.approved?.highRisk ?? []);
-      return {
-        standards: standards.filter((s) => !approvedStandards.has(s)),
-        highRisk: highRisk.filter((s) => !approvedRisk.has(s)),
-      };
+      return { standards: standards.filter((s) => !approvedStandards.has(s)) };
     },
 
     async armAutoMerge(input: ArmAutoMergeInput, ctx: PortContext): Promise<ArmAutoMergeResult> {
