@@ -249,11 +249,17 @@ function world() {
     dropSkeleton: () => rmSync(skeletonFile(home)),
     /** 原样跑，不替 start 补挂单参数（测「缺了拒起」用）。 */
     runRaw: (argv: string[]) => lib.runWorker(argv, io),
-    /** 跑一条命令；start 没给 --issue / --no-issue / --no-ship 的，补上 --issue 1052（#1052 起 start 缺了就拒起，别的测试不关心这个）。 */
+    /** 跑一条命令；start 没给 --issue / --no-issue / --no-ship 的，补上 --issue 1052（#1052 起 start 缺了就拒起，别的测试不关心这个）；
+     *  start 没给 --detached 的，补上一条理由（2026-10-06 起缺了拒起，别的测试不关心这个，单独测它用 runRaw）。 */
     run: (argv: string[]) => {
-      const bare =
-        argv[0] === 'start' && !argv.some((a) => a === '--issue' || a === '--no-issue' || a === '--no-ship');
-      return lib.runWorker(bare ? [...argv, '--issue', '1052'] : argv, io);
+      let args = argv;
+      if (
+        args[0] === 'start' &&
+        !args.some((a) => a === '--issue' || a === '--no-issue' || a === '--no-ship')
+      )
+        args = [...args, '--issue', '1052'];
+      if (args[0] === 'start' && !args.includes('--detached')) args = [...args, '--detached', '测试里要脱离'];
+      return lib.runWorker(args, io);
     },
   };
 }
@@ -518,6 +524,51 @@ describe('start：happy path', () => {
     });
   });
 
+  // 创始人 2026-10-06「我认为不能脱离……你拍板直接做」：脱离会话的工人不显示在 Mirasim 面板里，他看不见；默认改 Agent 子代理，
+  // 起脱离的工人必须说清为什么（--detached "<理由>"），没说清就拒起、什么都不建不起
+  describe('脱离会话要说理由（--detached）', () => {
+    const base = (w: ReturnType<typeof world>, extra: string[]) => [
+      'start',
+      '--model',
+      'grok',
+      '--name',
+      'wd',
+      '--brief',
+      brief(w),
+      '--issue',
+      '1052',
+      ...extra,
+    ];
+
+    it('【故意造出的失败】没给 --detached：退出码 1，话里指向 Agent 子代理，什么都没建没起', async () => {
+      const w = world();
+      expect(await w.runRaw(base(w, []))).toBe(1);
+      expect(w.err.join('\n')).toContain('Agent 工具');
+      expect(w.err.join('\n')).toContain('--detached');
+      expect(w.gitCalls).toEqual([]);
+      expect(w.pnpmCalls).toEqual([]);
+      expect(w.spawnCalls).toEqual([]);
+    });
+
+    it('【故意造出的失败】理由空着、太短：同样拒起', async () => {
+      for (const why of ['', '  ', '嗯']) {
+        const w = world();
+        expect(await w.runRaw(base(w, ['--detached', why])), JSON.stringify(why)).toBe(1);
+        expect(w.spawnCalls).toEqual([]);
+      }
+    });
+
+    it('给了理由：起得来，理由记进这个工人的 meta.json', async () => {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid: 1 });
+      const code = await w.runRaw(base(w, ['--detached', '创始人说了无人值守过夜']));
+      expect(code, w.err.join(' / ')).toBe(0);
+      expect(w.meta('wd').detached).toBe('创始人说了无人值守过夜');
+    });
+  });
+
   // #1052：2026-10-05 起 37 个 PR 没一个挂单，交代里写死的「不开单」是主因；派活这一步必须说清挂哪张单
   describe('挂单（--issue / --no-issue 二选一）', () => {
     const startArgs = (w: ReturnType<typeof world>, extra: string[]) => [
@@ -528,6 +579,8 @@ describe('start：happy path', () => {
       'wi',
       '--brief',
       brief(w),
+      '--detached',
+      '测试里要脱离',
       ...extra,
     ];
     const untouched = (w: ReturnType<typeof world>) => {
