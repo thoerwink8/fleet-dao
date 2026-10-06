@@ -2161,7 +2161,6 @@ if (isMain()) {
     // 送达类工具清账。不再因欠账拦工具（决定 0026）。欠账文件坏了只往 stderr 写一句，不拦。
     const nag = id && !sub ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
     if (nag) process.stderr.write(`${nag.message}\n`);
-    if (nag?.block) process.exit(2);
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }

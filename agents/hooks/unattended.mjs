@@ -36,13 +36,6 @@ const errCode = (e) => (typeof e === 'object' && e !== null && 'code' in e ? e.c
  */
 const messageOf = (e) => (typeof e === 'object' && e !== null && 'message' in e ? e.message : undefined);
 
-export const DEFAULT_HOURS = 8;
-export const MAX_HOURS = 24;
-/** 被挡回去后连着这么多次没调过工具，就放行。 */
-export const MAX_IDLE_BLOCKS = 3;
-/** 一次无人值守最多挡这么多次，防别的原因造成的无限循环。 */
-export const MAX_TOTAL_BLOCKS = 80;
-
 const SCRIPT = '~/.fleet-dao/hooks/unattended.mjs';
 
 /**
@@ -132,25 +125,6 @@ function removeState(dir, id) {
 const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
 
 /**
- * @param {State} state
- * @param {number} now
- */
-export function blockReason(state, now) {
-  const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
-  if (state.auto === true) {
-    return (
-      `你起了后台活（子代理、监视、后台命令），这一轮结束它们会跟着会话进程一起被杀、没有谁会被完成通知叫醒，所以先别结束这一轮（自动挡 ${left} 分钟）。` +
-      `继续等它们的结果、接着干；全收口了：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的：node ${SCRIPT} needs-you "要他拍什么"。`
-    );
-  }
-  return (
-    `无人值守开着（还剩约 ${left} 分钟）：不要结束这一轮。还有没做完的事就接着干——先短报一行进度，然后继续调工具；` +
-    `全做完了：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（对外发布、花钱、删数据、改标准）：` +
-    `node ${SCRIPT} needs-you "要他拍什么"，再把问题放在最后一条。`
-  );
-}
-
-/**
  * Stop 钩子要不要挡。返回 { block: true, reason } 或 { block: false, notice? }（notice 给 systemMessage，只在要说话时有）。
  * 不抛：任何一步出错都放行并写明。
  * @param {{ dir: string, sessionId: unknown, now?: number }} opts
@@ -162,9 +136,6 @@ export function decideStop({ dir, sessionId, now = Date.now() }) {
   void now;
   return { block: false };
 }
-
-/** 起了后台活自动开的无人值守开多久（创始人 2026-10-04「选 1」）；再起一个后台活就续到再过这么久。 */
-export const AUTO_ARM_MINUTES = 30;
 
 /**
  * 这次工具调用是不是起了一件在后台跑的活。后台活是挂在这个会话进程上的：一轮结束、进程一重开它就被杀，
@@ -190,7 +161,7 @@ export function startsBackground(toolName, toolInput) {
  * @param {{ dir: string, sessionId: unknown, now?: number, minutes?: number }} opts
  * @returns {{ armed: boolean, kept?: boolean, why?: string }}
  */
-export function armForBackground({ dir, sessionId, now = Date.now(), minutes = AUTO_ARM_MINUTES }) {
+export function armForBackground({ dir, sessionId, now = Date.now(), minutes }) {
   void dir;
   void sessionId;
   void now;
