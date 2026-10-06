@@ -1208,6 +1208,20 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     );
   });
 
+  it('自动发布记了「被更新的版本取代」（人手动切到了更新的）：旧失败不再报；取代的记录形状不对就是没读到', () => {
+    const failed = { sha: SHA, startedAt: ago(20), endedAt: ago(15), result: 'failed', detail: '旧 stages' };
+    const withBy = (supersededBy: unknown) =>
+      viewOf((s) => {
+        state(s).attempt = { ...failed, supersededBy };
+      });
+    const gone = withBy({ sha: 'cccccccccccc', at: ago(5) });
+    expect(whats(gone, 'bad').join('')).not.toContain('最近一次自动发布没成');
+    has(withBy(null), 'bad', '最近一次自动发布没成');
+    const broken = withBy('不是对象');
+    expect(broken.health.release).toMatchObject({ ok: false });
+    expect(whats(broken, 'unread').join('')).toContain('supersededBy');
+  });
+
   it('没处理的提醒：一条一行，日报只是留意，多于 5 条另起一行说还有几条', () => {
     const v = viewOf((s) => {
       const note = (i: number, level: string) => ({
