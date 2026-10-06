@@ -33,6 +33,19 @@ export const MAIN_HISTORY = 300;
  * 会排空的引擎不等空闲：引擎一直起新会话，60 分钟也等不到（2026-09-27 夜里法国落后主线 9 个提交），排空由发布脚本做。
  */
 export const IDLE_WAIT_MS = 60 * 60_000;
+/**
+ * 发布没成（release.sh 红了、版本没健康）自动重试：隔 30 分钟再发同一版，最多重试 2 次（一共发 3 次），再停下报警（#1121）。
+ * 为什么要重试：没成的多是机器上的一时问题（香港不通、迁移撞上锁、构建超时），原来「发过没成的一律等下一个版本标记」让法国停到有人来
+ * 才发，9-29 起落后 100 多个提交就是这么来的。为什么不无限重试：没成的原因要是不会自己好，一轮轮重启服务、一条条报警比停下更糟。
+ * 健康检查没过的版本（历史里最后是 unhealthy）不重试：那是版本自己的问题，等新提交。
+ */
+export const RETRY_AFTER_MS = 30 * 60_000;
+export const MAX_RETRIES = 2;
+/**
+ * 人手动切过版本后按住不自动发多久：24 小时。为什么过期：原来按住到主线出新提交才松，人切完忘了、或主线一直没新提交，
+ * 自动发布就永远不动（审查只读结论 #1121）；24 小时够人验完、够人在它之前再切一次（再切一次从头算 24 小时）。
+ */
+export const MANUAL_HOLD_MS = 24 * 60 * 60_000;
 /** 只认这个工作流在 main 上那次 push 的结论（其余几个工作流看的是 GitHub 上的现状，不是这份代码好不好）。 */
 export const CI_WORKFLOW = '.github/workflows/ci.yml';
 /**
@@ -77,6 +90,7 @@ export const INSTALL_PATHS = [
  * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`，
  * 版本标记读不到 / 不是主线上的提交 `auto-release:marker-unreadable`、`auto-release:marker:<tag>`（决定 0011 第 3 条），
  * 查不出引擎开没开着 `auto-release:engine-unknown`，切上去了但 release.sh 退出码 2（有待配或没查成）`auto-release:pending:<提交号>`，
+ * 切上去了、健康检查过了、只是发版后置关没成（退出码 3）`auto-release:post-off:<提交号>`，
  * 状态文件读不出 `auto-release:state-unreadable`。
  */
 export const ALERT_PREFIX = 'auto-release:';
@@ -86,6 +100,12 @@ export const FAILED_PREFIX = `${ALERT_PREFIX}failed:`;
  * 一版一条、一直开着：人照日志补上后在驾驶舱手动解除，下一版发成（退出码 0）时自己撤；开着的时候「没成」的报警也不撤。
  */
 export const PENDING_PREFIX = `${ALERT_PREFIX}pending:`;
+/**
+ * release.sh 退出码 3：版本切上去了、健康检查过了（发布成了），只是发版后置关（项目「让 AI 接活」、引擎总开关回到关）没做成。
+ * 不连坐整版（#1121）：result 记 ok、不重试发布，只一版一条提醒，下一版干净地发成（退出码 0）时自己撤。
+ */
+export const POST_OFF_PREFIX = `${ALERT_PREFIX}post-off:`;
+export const EXIT_RELEASE_POST_OFF = 3;
 /**
  * 状态文件读不出、认不出（审查 S4）：上一轮的发布记录（attempt：自动发过没成的不再试）和报警队列都在里面，从空的起就会把
  * 发过没成的坏提交每轮重发。所以这一轮不发、不覆盖它（留着现场），报这一条；挪走它（下一轮从空的起）时自己撤，修好了手动撤。
@@ -230,14 +250,19 @@ export function lastManualSwitch(history) {
   return { since: last.at, sha: last.sha, event: last.event, unmerged: last.tags.includes('unmerged') };
 }
 
+/** 按住到什么时候（人切版本那一刻 + MANUAL_HOLD_MS）。 */
+export const holdUntil = (manual) => iso(Date.parse(manual.since) + MANUAL_HOLD_MS);
+
 /**
  * 人最近一次手动切的版本之后，主线上还没有更新的提交：不自动发——不跟人打架（手动退回了坏版本、合并前在真机上验）。
  * 主线出了新提交（修复、那个 PR 合进来）再接着自动发，那之前合进来的（含人退回掉的那个）一律不自动发（releasable）。
+ * 按住最多 MANUAL_HOLD_MS（24 小时）：给了 now 且切版本那一刻已过 24 小时，就不再按住（#1121，人切完忘了不能把自动发布永远卡着）。
  * 对照：Argo CD 开着自动同步不许手动回滚，要先关自动同步；这里不用关，人切一下就算按住。
  */
-export function manualHold(history, headAt) {
+export function manualHold(history, headAt, now) {
   const last = lastManualSwitch(history);
   if (!last || Date.parse(headAt) > Date.parse(last.since)) return null;
+  if (now !== undefined && Number(now) - Date.parse(last.since) >= MANUAL_HOLD_MS) return null;
   return last;
 }
 
@@ -249,41 +274,73 @@ export function judgedUnhealthy(history, sha) {
 }
 
 /**
+ * 发过没成的那条记录（attempt）的重试计划：tries 是已经发了几次（含第一次）、retryAt 是下次可以再试的时刻（null＝不再试）。
+ * 新记录自带这两个字段；老状态文件里的没成记录没有，按「第 1 次、结束后 30 分钟可重试」算（上线前就卡着的那一版也能重试）。
+ */
+export function retryPlan(attempt) {
+  const tries = Number.isInteger(attempt.tries) && attempt.tries >= 1 ? attempt.tries : 1;
+  if (attempt.retryAt === null || typeof attempt.retryAt === 'string')
+    return { tries, retryAt: attempt.retryAt };
+  const ended = Date.parse(attempt.endedAt ?? attempt.startedAt ?? '');
+  const retryAt = tries <= MAX_RETRIES && !Number.isNaN(ended) ? iso(ended + RETRY_AFTER_MS) : null;
+  return { tries, retryAt };
+}
+
+/** 刚没成的这一次之后的计划：还没重试满就隔 RETRY_AFTER_MS 再试，满了（或版本自己不健康）就不再试。 */
+export function planAfterFailure(tries, endedMs, unhealthy = false) {
+  return { tries, retryAt: !unhealthy && tries <= MAX_RETRIES ? iso(endedMs + RETRY_AFTER_MS) : null };
+}
+
+/**
  * 这个版本标记指着的提交，能不能自动发。返回 candidates（比在用的新、且没被人按住/没被判过没成的那一段，新的在前）、
  * hold（人按住了）、failed（往回看停在哪个发过没成的提交上）。判定和下面三处里最近的一处对齐：
  * - 在用的：主线按 --first-parent 排，排在它前面的都是它的后代。在用的不在主线最近的提交里（还没发布过、落后太多、
  *   没合进主线的），主线上的都算比它新——没合进主线的是人手动发的，由下一条管住。
- * - 人最近一次手动切版本那一刻：那之前合进主线的（含人退回掉的那个）一律不自动发（manualHold）。
- * - 发过没成的：自动发布没成（attempt）、发过没过健康检查（历史里最后是 unhealthy，状态文件丢了也认得）——它和比它旧的
- *   都不再自动试，等下一个版本标记。不往回挑它前面没试过的：没成的原因可能在机器上（香港不通、配置坏了），
- *   往回一个个试就是一轮轮重启服务、一条条报警。
+ * - 人最近一次手动切版本那一刻：那之前合进主线的（含人退回掉的那个）一律不自动发（manualHold），按住 24 小时后过期。
+ * - 发过没成的：自动发布没成（attempt）——隔 30 分钟自动重试、最多重试 2 次（retryPlan），没到点或重试满了就它和比它旧的
+ *   都先不发；发过没过健康检查（历史里最后是 unhealthy，状态文件丢了也认得）——不重试，等新提交。不往回挑它前面没试过的：
+ *   没成的原因可能在机器上（香港不通、配置坏了），往回一个个试就是一轮轮重启服务、一条条报警。
  * 调用方（deployStep）拿这三个分别判：hold 就记 hold；failed 正好是这个标记指着的提交就记 failed-before；
  * candidates 里没有标记指着的提交（比在用的旧、落后太多、读不到）记 marker-not-newer——都不发。
+ * now 是这一轮的时刻（毫秒数）：判按住过期、重试到没到点都用它；不给就当永远没到点（老调用方）。
  */
-export function releasable(commits, current, history, attempt) {
+export function releasable(commits, current, history, attempt, now = Number.NEGATIVE_INFINITY) {
   const at = commits.findIndex((c) => c.sha === current);
   let end = at >= 0 ? at : commits.length;
   let hold = null;
   let stop = '';
   const manual = lastManualSwitch(history);
-  if (manual) {
+  if (manual && !(Number.isFinite(now) && now - Date.parse(manual.since) >= MANUAL_HOLD_MS)) {
     const i = commits.findIndex((c) => Date.parse(c.at) <= Date.parse(manual.since));
     if (i >= 0 && i < end) {
       end = i;
       if (i === 0) hold = manual;
-      stop = `人 ${manual.since} 手动${manual.event === 'rollback' ? '退回' : '切'}版本之前合进来的不自动发`;
+      stop = `人 ${manual.since} 手动${manual.event === 'rollback' ? '退回' : '切'}版本之前合进来的不自动发（到 ${holdUntil(manual)} 为止）`;
     }
   }
   let failed = null;
   for (let i = 0; i < end; i++) {
     const { sha } = commits[i];
     if (attempt?.sha === sha && attempt.result === 'failed') {
-      failed = { sha, why: `自动发过、没成（${attempt.endedAt ?? attempt.startedAt}）` };
-    } else if (judgedUnhealthy(history, sha)) {
-      failed = { sha, why: '发过、没过健康检查' };
-    } else continue;
+      const { tries, retryAt } = retryPlan(attempt);
+      const when = attempt.endedAt ?? attempt.startedAt;
+      if (retryAt !== null && now >= Date.parse(retryAt)) {
+        // 到点了：这一版可以再试（下面还要过「判过不健康」那一关）
+      } else {
+        failed = {
+          sha,
+          retryAt,
+          why:
+            retryAt === null
+              ? `自动发过 ${tries} 次、没成（${when}），不再自动试`
+              : `自动发过、没成（${when}），第 ${tries} 次；${retryAt} 之后自动重试`,
+        };
+      }
+    }
+    if (!failed && judgedUnhealthy(history, sha)) failed = { sha, retryAt: null, why: '发过、没过健康检查' };
+    if (!failed) continue;
     end = i;
-    stop = `${short(sha)} ${failed.why}，它和比它旧的不再自动发`;
+    stop = `${short(sha)} ${failed.why}，它和比它旧的先不自动发`;
     break;
   }
   return { candidates: commits.slice(0, end), hold, failed, stop };
@@ -449,6 +506,7 @@ async function stateUnreadable(io, whyText) {
 export function releaseDetail(lines) {
   const items = (re) => lines.filter((l) => re.test(l)).map((l) => l.replace(re, '').trim());
   const reds = items(/^\s*✗\s*/);
+  const posts = items(/^\s*⚠\s*/); // 退出码 3：发布成了、发版后收尾没成的几项
   let pending = [];
   const head = lines.findLastIndex((l) => /^待配 \/ 没查成 \d+ 项/.test(l));
   if (head >= 0) {
@@ -458,7 +516,7 @@ export function releaseDetail(lines) {
     }
   }
   if (pending.length === 0) pending = items(/^\s*…\s*/);
-  const picked = reds.length ? reds : pending;
+  const picked = reds.length ? reds : posts.length ? posts : pending;
   const text = picked.length
     ? picked.slice(-3).join('；')
     : lines
@@ -642,21 +700,26 @@ async function deployStep(io, st, now) {
     return current;
   }
   // 人按住 / 这个标记指向的提交被判过没成：都不自动发。两个闸先判，免得被下面的 CI 结论盖住原因。
-  const { candidates, hold, failed, stop } = releasable(commits, current, history, st.attempt);
+  const { candidates, hold, failed, stop } = releasable(commits, current, history, st.attempt, Number(now));
   if (hold) {
     st.waitingSince = null;
-    st.hold = hold;
+    st.hold = { ...hold, until: holdUntil(hold) };
     act(
       st,
       now,
       'hold',
-      `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交`,
+      `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交；按住到 ${holdUntil(hold)}（24 小时）为止，过了照发`,
     );
     return current;
   }
   if (failed && failed.sha === marker.commit) {
     st.waitingSince = null;
-    act(st, now, 'failed-before', `${marker.tag} 指向的提交${failed.why}，等下一个版本标记`);
+    act(
+      st,
+      now,
+      'failed-before',
+      `${marker.tag} 指向的提交${failed.why}${failed.retryAt ? '' : '，等下一个版本标记'}`,
+    );
     return current;
   }
   if (candidates.length === 0) {
@@ -748,11 +811,15 @@ async function publishTarget(io, st, now, current, { target, via, tag }) {
   st.sequence = publishSequence({ engineOn, target, tag });
 
   const before = st.attempt;
+  // 同一版上一次没成、这次是重试：次数接着数（第几次发它）；新的一版从 1 起
+  const tries = before?.sha === target && before.result === 'failed' ? retryPlan(before).tries + 1 : 1;
   st.attempt = {
     sha: target,
     startedAt: iso(now),
     endedAt: null,
     result: 'running',
+    tries,
+    retryAt: null,
     busyOk,
     code: null,
     detail: '',
@@ -762,7 +829,7 @@ async function publishTarget(io, st, now, current, { target, via, tag }) {
     st,
     now,
     'releasing',
-    `${busyOk ? `等空闲等了 ${minutes(waited)} 分钟，照发；` : ''}发 ${short(target)}${via}`,
+    `${busyOk ? `等空闲等了 ${minutes(waited)} 分钟，照发；` : ''}${tries > 1 ? `重试第 ${tries - 1} 次：` : ''}发 ${short(target)}${via}`,
   );
   try {
     await io.save(st);
@@ -806,6 +873,22 @@ async function publishTarget(io, st, now, current, { target, via, tag }) {
   if (st.currentError === null) st.current = after;
   const known = st.currentError === null;
   const pending = r.code === EXIT_RELEASE_PENDING;
+  // 退出码 3：切上去了、健康检查过了，只是发版后置关没做成——发布算成，不连坐整版（#1121）
+  const postOff = r.code === EXIT_RELEASE_POST_OFF;
+  let retry = { tries, retryAt: null, note: '' };
+  if (r.code !== 0 && !pending && !postOff) {
+    // 版本自己不健康（历史里最后是 unhealthy，release.sh 已自动退回）不重试：再发一遍还是不健康，只会多重启一轮服务
+    let unhealthy = false;
+    try {
+      unhealthy = judgedUnhealthy(parseHistory(await io.readHistory()), target);
+    } catch {
+      // 历史读不出：照常排重试；下一轮 releasable 读历史时还会再把关
+    }
+    retry = {
+      ...planAfterFailure(tries, Number(end), unhealthy),
+      note: unhealthy ? '（没过健康检查，已自动退回：不重试）' : '',
+    };
+  }
   st.attempt = {
     ...st.attempt,
     endedAt: iso(end),
@@ -814,8 +897,11 @@ async function publishTarget(io, st, now, current, { target, via, tag }) {
     // result 只说「切上去了没有」（releasable 据此判这一版还试不试）：退出码 2 时 release.sh 没有红、版本确实切上去了，
     // 记 failed 会把在用的那版当成没成。「没核成」另记 pending，并挂一条一直开着的报警（下面）——不当成发成了。
     // 不新加一种 result：后端 packages/store/src/deploy-lag.ts 和指挥官的法国视图都按 running/ok/failed 认，多一种整份认不出。
-    result: r.code === 0 || pending ? 'ok' : 'failed',
+    result: r.code === 0 || pending || postOff ? 'ok' : 'failed',
     pending,
+    postOff,
+    tries,
+    retryAt: retry.retryAt,
     detail: r.detail ?? '',
   };
   st.waitingSince = null;
@@ -824,7 +910,29 @@ async function publishTarget(io, st, now, current, { target, via, tag }) {
   if (r.code === 0) {
     resolveLater(st, FAILED_PREFIX);
     resolveLater(st, PENDING_PREFIX);
+    resolveLater(st, POST_OFF_PREFIX);
     act(st, end, 'released', `发了 ${short(target)}（退出码 0）${via}${afterNote}`);
+    return known ? after : undefined;
+  }
+  if (postOff) {
+    // 切上去了、健康检查过了（发布成了）：以前没成的报警可以撤，这一版只挂一条「后置关没成」的提醒（一版一条，下一版干净发成才撤）
+    resolveLater(st, FAILED_PREFIX);
+    resolveLater(st, POST_OFF_PREFIX);
+    const inUse = known ? `在用的是 ${short(after)}` : st.currentError;
+    raise(
+      st,
+      `${POST_OFF_PREFIX}${target}`,
+      `自动发布 ${which} 发成了，但发版后置关没成`,
+      `release.sh 退出码 3（版本已切、健康检查过了，发布本身成了；只是发版后把「让 AI 接活」或引擎总开关回到关没做成）：${r.detail || '没给是哪一步'}。` +
+        `${inUse}。日志：${r.log || '（没拿到路径）'}。这一版不会重发；到驾驶舱环境页（或 fleet-api engine status、fleet-api dispatch <仓> status）` +
+        '核对开关现在是开是关，该关的手动关上。下一版发成（退出码 0）时这条自己撤；日志里若还有待配项也一并看。',
+    );
+    act(
+      st,
+      end,
+      'released-post-off',
+      `发了 ${short(target)}（切上去了、健康检查过了），但发版后置关没成：${r.detail || '没给是哪一步'}${via}${afterNote}`,
+    );
     return known ? after : undefined;
   }
   if (pending) {
@@ -850,15 +958,26 @@ async function publishTarget(io, st, now, current, { target, via, tag }) {
     : after === target
       ? `停在新版 ${short(target)}（没退回：见日志里的红）`
       : `在用的还是 ${short(after)}`;
+  const manualRetry = `人在法国以 root 重试：bash ${CHECKOUT}/deploy/release.sh ${target}`;
+  const retryText = retry.retryAt
+    ? `${RETRY_AFTER_MS / 60_000} 分钟后（${retry.retryAt}）自动重试，已发 ${tries} 次、最多重试 ${MAX_RETRIES} 次`
+    : retry.note
+      ? `${retry.note.replace(/[（）]/g, '')}，这个版本标记和比它旧的不再自动试，等下一个版本标记（或${manualRetry}）`
+      : `已自动发了 ${tries} 次（重试 ${MAX_RETRIES} 次）仍没成，停下：这个版本标记和比它旧的不再自动试，等下一个版本标记（或${manualRetry}）`;
   raise(
     st,
     `${FAILED_PREFIX}${target}`,
-    `自动发布 ${which} 没成`,
-    `release.sh 退出码 ${r.code}：${r.detail || '没给原因'}。${where}。日志：${r.log || '（没拿到路径）'}。` +
-      `这个版本标记和比它旧的不再自动试，等下一个版本标记（或人在法国以 root 重试：` +
-      `bash ${CHECKOUT}/deploy/release.sh ${target}）。`,
+    retry.retryAt
+      ? `自动发布 ${which} 没成（将自动重试）`
+      : `自动发布 ${which} 没成${retry.note ? '' : '，重试也没成，已停下'}`,
+    `release.sh 退出码 ${r.code}：${r.detail || '没给原因'}。${where}。日志：${r.log || '（没拿到路径）'}。${retryText}。`,
   );
-  act(st, end, 'release-failed', `${which} 退出码 ${r.code}：${r.detail}${afterNote}`);
+  act(
+    st,
+    end,
+    'release-failed',
+    `${which} 退出码 ${r.code}：${r.detail}${afterNote}${retry.retryAt ? `；${retry.retryAt} 之后自动重试` : ''}`,
+  );
   return known ? after : undefined;
 }
 
@@ -939,13 +1058,16 @@ export function publishSequenceSummary(seq) {
     .join('；');
 }
 
-/** 上一轮的发布没收到结果、发布锁也空了：按现在在用的是谁定成败（没成的照样不再试）。 */
+/** 上一轮的发布没收到结果、发布锁也空了：按现在在用的是谁定成败（没成的按重试计划来：隔 30 分钟再试，最多 2 次）。 */
 function settleDangling(st, now, current) {
   const a = st.attempt;
   const ok = current === a.sha;
+  const plan = ok ? { tries: a.tries ?? 1, retryAt: null } : planAfterFailure(a.tries ?? 1, Number(now));
   st.attempt = {
     ...a,
     endedAt: iso(now),
+    tries: plan.tries,
+    retryAt: plan.retryAt,
     result: ok ? 'ok' : 'failed',
     detail: ok ? '上一轮没等到结果，现在在用的就是它' : '上一轮的自动发布没等到结果，现在在用的不是它',
   };
@@ -955,7 +1077,7 @@ function settleDangling(st, now, current) {
       `${FAILED_PREFIX}${a.sha}`,
       `自动发布 ${short(a.sha)} 没等到结果`,
       `上一轮跑到一半没了（被杀、机器重启），发布锁已空，在用的是 ${short(current)}、不是它。` +
-        `这个提交和比它旧的不再自动试；日志在 ${RELEASES}/.logs/。要现在重试，在法国以 root 跑 bash ${CHECKOUT}/deploy/release.sh ${a.sha}`,
+        `${plan.retryAt ? `${RETRY_AFTER_MS / 60_000} 分钟后（${plan.retryAt}）自动重试` : '这个提交和比它旧的不再自动试'}；日志在 ${RELEASES}/.logs/。要现在重试，在法国以 root 跑 bash ${CHECKOUT}/deploy/release.sh ${a.sha}`,
     );
   }
 }
