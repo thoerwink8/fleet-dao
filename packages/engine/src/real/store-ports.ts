@@ -10,9 +10,6 @@
 // 点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
 // 账号池被提醒顶着暂停（等人修）时，续会话的那一单照样放过去——它就是看人修好了没有的试探；开关暂停的池一个都不放。Fusion 带了流程配置里这一步的模型顺序（models）
 // 就只派这几个模型的路由、先按配置的先后排（onlyModels），一条都没有明说；人点名的路由不受它限制。
-// 给开 PR 前验证留一家（keepVerifier：Fusion 规划完、开 PR 之前选副手、Lead 换路由）：写这张单的族现从库里查（和 authorFamilies
-// 同一个查询，查不到明确报错），验证那一步的事实也现读（照流程配置里验证的模型、暂停的池同样避开），一起交给 chooseRoute 判；
-// 留不下当场报警 no-verifier:<任务>（报不进去照常抛），留得下、验证派出去了撤掉它。
 // Claude 订阅池只派会话用户此刻真挂着的那个组织的（real/session-org.ts 现读 reclaude org list，不假定）；读不到、认不出，
 // 带组织类型的池一律不派、写明原因，别的池照常派；还没读完（reclaude 首跑同步配置）、这会儿定不下来（读数刚变、引擎没切过
 // 号，#335）就过一会儿再选。不是挂着的那个组织的池：引擎打算切过去的（real/org-plan.ts，和切号同一个判法）算等得来——
@@ -38,24 +35,16 @@ import {
   recordStepTiming,
   releaseTaskReservation,
   reservePoolSlot,
-  resolveAlertWithReason,
   routeFactsForPurpose,
   saveTaskSnapshot,
   setChannelFallback,
-  taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
-import {
-  type EnginePorts,
-  type KeepVerifierRequest,
-  type PickRouteResult,
-  PortError,
-  type RouteChoice,
-} from '../ports.ts';
+import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
 import {
   type AllOpenCheck,
   type BreakerFacts,
@@ -64,7 +53,6 @@ import {
   type ChooseRouteResult,
   chooseRoute,
   stageAllOpen as judgeStageAllOpen,
-  type KeepVerifier,
   type LiveOrgReading,
   type OrgPlanView,
   type RouteFacts,
@@ -84,15 +72,6 @@ import { RESERVATION_TTL_MS } from './task-segment.ts';
 
 // 整池暂停：开关（设置 engine.poolHolds）加旧的 pool-hold:<池> 提醒，读法在 real/pool-holds.ts；这里照旧导出提醒的键给老调用方。
 export { POOL_HOLD_PREFIX, poolHoldKey };
-
-/**
- * 「这张单做完没人能验」（给开 PR 前验证留一家留不下，PickRouteInput.keepVerifier）的提醒：dedupe_key = no-verifier:<任务>。
- * 选路自己撤（再选时验证留得下了、验证派出去了）；这张单不在跑了由每小时对账撤（jobs/alert-sweep.ts）。
- */
-export const NO_VERIFIER_PREFIX = 'no-verifier:';
-export const noVerifierKey = (taskId: string) => `${NO_VERIFIER_PREFIX}${taskId}`;
-/** 选路撤提醒时记的处理人。 */
-export const PICK_ROUTE_ACTOR = 'engine:pick-route';
 
 /**
  * 接上的执行方式（会话端口的驱动清单，real/hosts.ts）：Claude Code（经 reclaude）、cursor-agent。别的执行方式的路由不派，
@@ -375,56 +354,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     return held;
   }
 
-  /** 写这张单的族（给验证留一家用，和 authorFamilies 同一个查询）：一个都查不到明确报错，不当成谁都能验。 */
-  async function writerFamilies(taskId: string): Promise<string[]> {
-    const families = UUID.test(taskId) ? await authorFamiliesOfTask(db, taskId) : [];
-    if (families.length === 0) {
-      throw new PortError(
-        'AUTHORS_UNKNOWN',
-        `任务 ${taskId} 一个起过的会话都查不到：不知道写它的是哪一族，给开 PR 前验证留不留得下别家判不了`,
-        { retryable: false },
-      );
-    }
-    return families;
-  }
-
-  /**
-   * 「这张单做完没人能验」：规划完选副手、Lead 换路由时就报（0003 第 5 条），不等干完几小时走到验证那一步才挂起。
-   * 报不进去照常抛（活动重试），不当成报了。
-   */
-  async function noVerifierAlarm(taskId: string, reason: string, keep: KeepVerifierRequest): Promise<void> {
-    const task = UUID.test(taskId) ? await taskContext(db, taskId) : null;
-    const models = keep.models
-      ? `按流程配置只派 ${keep.models.join('、') || '（一个都没配）'}`
-      : '照路由两层派';
-    await upsertAlert(db, {
-      dedupeKey: noVerifierKey(taskId),
-      level: 'alert',
-      taskId: task ? task.taskId : null,
-      title: `${task ? `需求 #${task.issueNumber} ` : '这张单'}做完没人能验：开 PR 前验证派不出别家`,
-      body: [
-        reason,
-        `验证这一步${models}${keep.uiWork ? '；这张单改到了页面代码，GPT 不验（禁令）' : ''}。`,
-        '现在就补：给开 PR 前验证这个用途排上一个能派的别家模型（路由两层：用途 → 模型、模型 → 路由；在线、不犯禁令、和写这张单的不同族），或者换这张单的副手、Lead；不补的话，干完走到验证那一步会挂起「没有别家可验」。验证留得下了、验证派出去了，选路自己撤这条。',
-      ].join('\n\n'),
-    });
-  }
-
-  /** 撤「这张单做完没人能验」：尽力而为，撤不掉只记一笔（下一次选路、每小时对账再撤），不挡派活。 */
-  async function clearNoVerifier(taskId: string, why: string): Promise<void> {
-    if (!UUID.test(taskId)) return;
-    try {
-      await resolveAlertWithReason(db, {
-        dedupeKey: noVerifierKey(taskId),
-        by: PICK_ROUTE_ACTOR,
-        why,
-        at: clock(),
-      });
-    } catch (error) {
-      log('「做完没人能验」的提醒没撤成（照样派）', { taskId, error: String(error) });
-    }
-  }
-
   /** 设置里各渠道的额度留量线原值（没设过 undefined = 内置默认）；认不认得出由选路按池判（shared 的 resolvePoolReserve）。 */
   async function quotaReserveFor(): Promise<{ setting: unknown }> {
     const r = await readQuotaReserveSetting(db);
@@ -557,15 +486,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         const facts = input.models ? onlyModels(all, input.models) : all;
         const holds = await heldPools(now);
         const held = holds.all;
-        // 给开 PR 前验证留一家：写这张单的族（和验证查作者同一个查询）、验证那一步的事实（照流程配置里验证的模型）
-        const keep = input.keepVerifier;
-        const writers = keep ? await writerFamilies(input.taskId) : [];
-        const verifyAll = keep ? await loadStage('verify', now) : null;
-        const verifyFacts = verifyAll && keep?.models ? onlyModels(verifyAll, keep.models) : verifyAll;
         // 会话用户此刻挂的组织：候选里有带组织类型的池（Claude 订阅）才读。读不到、认不出的原话交给选路，那些池一律不派；
         // 还没读完（reclaude 首跑同步配置）、正在切号（real/org-switch.ts 让选路停下的那十几秒）、读数刚变又没有引擎切号
         // （real/session-org.ts 的起点，#335）不算认不出：过一会儿再选，不悄悄照新读数派，也不挂起等人
-        const live = [...all.routes, ...(verifyAll?.routes ?? [])].some((r) => r.orgKind)
+        const live = all.routes.some((r) => r.orgKind)
           ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS, by: '选路' })
           : null;
         if (live && !live.ok && live.pending) {
@@ -577,8 +501,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           };
         }
         if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池这次不派', { why: live.why });
-        // 引擎切号的打算：这一步和给验证留一家的那一步同一份（两边的 Claude 池都按它判等不等切号）
-        const orgPlan = await orgPlanFor([...all.routes, ...(verifyAll?.routes ?? [])], live, held, now);
+        // 引擎切号的打算：候选里有不是此刻挂着的组织的池才问（和切号同一个判法）
+        const orgPlan = await orgPlanFor(all.routes, live, held, now);
         const known = (id: string) => facts.routes.find((r) => r.routeId === id);
         const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
         // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
@@ -600,33 +524,12 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(live?.ok ? { liveOrg: live.org } : {}),
           ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
           ...(orgPlan ? { orgPlan } : {}),
-          // 各渠道的额度留量线（#194 方案 4.8）：这一步和给验证留一家的那一步同一份；库读不了照抛
+          // 各渠道的额度留量线（#194 方案 4.8）；库读不了照抛
           quotaReserve: await quotaReserveFor(),
-          // 拼车并发登记核对（#896）：核对不上选路不往拼车池派；这一步和给验证留一家的那一步同一份
-          ...(await carpoolRegistryFor([...all.routes, ...(verifyAll?.routes ?? [])])),
+          // 拼车并发登记核对（#896）：核对不上选路不往拼车池派
+          ...(await carpoolRegistryFor(all.routes)),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
-        // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
-        const keepVerifier: KeepVerifier | undefined =
-          keep && verifyFacts
-            ? {
-                writers,
-                verify: {
-                  configured: verifyFacts.configured,
-                  stagePinned: verifyFacts.stagePinned,
-                  order: verifyFacts.order,
-                  routes: verifyFacts.routes,
-                  now: now.toISOString(),
-                  draw: drawn,
-                  avoid: { poolIds: [...held] },
-                  ...orgFacts,
-                  ...(keep.uiWork ? { uiWork: true } : {}),
-                  ...policy,
-                },
-                ...(keep.spare?.length ? { spare: keep.spare } : {}),
-                otherwise: keep.otherwise,
-              }
-            : undefined;
         const base = {
           stage: input.stage,
           configured: facts.configured,
@@ -638,18 +541,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
           ...policy,
-          ...(keepVerifier ? { keepVerifier } : {}),
         } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
-        /** 给验证留一家的结论落库：留不下当场报警（报不进去照常抛，不当成报了），留得下撤掉这张单之前报的。 */
-        const settled = async (r: ChooseRouteResult) => {
-          if (!keep) return;
-          if (r.noVerifier) await noVerifierAlarm(input.taskId, r.noVerifier, keep);
-          else
-            await clearNoVerifier(
-              input.taskId,
-              `再选路时给开 PR 前验证留得下别家了（${STAGE_NAMES[input.stage]}阶段）`,
-            );
-        };
         const notes: string[] = [];
         const missing = (id: string, what: string) =>
           all.unwiredIds.has(id)
@@ -661,12 +553,11 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         const dispatched = async (r: Extract<ChooseRouteResult, { kind: 'dispatch' }>, why: string) => {
           const fact = knownAny(r.routeId);
           if (!fact) throw new PortError('ROUTING_INPUT', `选路派给了事实里没有的路由 ${r.routeId}`);
-          // 先预占（#757）：占不上（SlotTaken）这一次的结论不作数，下面的报警、撤提醒都不做，按新事实重选
+          // 先预占（#757）：占不上（SlotTaken）这一次的结论不作数，下面的全熔断报警也不做，按新事实重选
           const reservationId = reserve
             ? await reserveSlot(input.taskId, reserve.segment, fact, now)
             : undefined;
           if (r.alarm) await allOpenAlarm(input.stage, input.taskId, r.alarm);
-          await settled(r);
           // 顺到谁（#1118）：失败的渠道记下这次派到了哪个渠道、哪个模型（同模型的下一个渠道；这个模型的渠道都用尽才会是别的模型）
           if (input.failedChannel && fact.channelId !== input.failedChannel.channelId) {
             await setChannelFallback(db, {
@@ -675,10 +566,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
               fallbackModelId: fact.modelId,
               now,
             });
-          }
-          // 开 PR 前验证派出去了：规划时报的「做完没人能验」不成立了
-          if (input.stage === 'verify' && families.length > 0) {
-            await clearNoVerifier(input.taskId, `开 PR 前验证派出去了：${routeLabel(fact)}`);
           }
           const route: RouteChoice = {
             routeId: r.routeId,
@@ -742,7 +629,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
               v.blocks.some((b) => b.wait === 'org' || b.wait === 'probe'),
             );
             if (r.kind === 'wait' && !orgWait) {
-              await settled(r);
               return waiting(r, ['续同一个会话，等这条路由']);
             }
             notes.push(
@@ -778,7 +664,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         }
         const r = choose({ ...base, avoid: avoid() });
         if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
-        await settled(r);
         if (r.kind === 'wait') return waiting(r, context);
         return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
       };

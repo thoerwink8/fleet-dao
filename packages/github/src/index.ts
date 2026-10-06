@@ -34,7 +34,6 @@ export {
   repoSlug,
   silentLogger,
 } from './client.ts';
-export { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 export {
   type ReadRepoFileInput,
   type ReadRepoFileResult,

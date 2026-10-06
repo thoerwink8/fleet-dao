@@ -211,39 +211,7 @@ export interface ChooseRouteInput {
   draw?: number;
   now: string;
   policy?: Partial<RoutingPolicy>;
-  /**
-   * 这一步会给这张单加一个写手族（选副手、Lead 换路由）：只派加上它的族之后开 PR 前验证还派得出别家的（0003 第 5 条
-   * 「验证只派别家」）。不给 = 不管（规划、验证本身、开了 PR 之后、需求工作流、子任务）。判法见 choose.ts 的 chooseRoute。
-   */
-  keepVerifier?: KeepVerifier;
 }
-
-/**
- * 给开 PR 前验证留一家要的：写这张单的族、验证那一步此刻的选路输入。每个候选的族，把「写手族 + 它」交给验证那一步现选一次
- * （和 workflows/verify.ts 真验证时同一个 chooseRoute、同一份事实）：派不出的族挡掉（no-verifier），等得来的不算派不出。
- */
-export interface KeepVerifier {
-  /** 已经写过这张单的族（库里这张单起过的会话，和验证查作者同一个查询）。 */
-  writers: string[];
-  /** 开 PR 前验证那一步此刻的选路输入：阶段就是 verify，只派别家的那几族按 writers 加上候选的族现算，不在这里给。 */
-  verify: VerifyProbe;
-  /**
-   * 平时先避开、只在别家都会让验证没人可派时才派的族：副手避开 Lead 那一族（Claude 额度留给 Lead，0002 第 5 条「优先」）。
-   * 别家的候选能派、却都会让验证没人可派，才放行它们——它们本来就在写这张单，不多加一族；别家是没额度、连不上，照旧避开
-   * （副手派不出由 Lead 自己干，0003 第 7 条）。
-   */
-  spare?: string[];
-  /**
-   * 能给验证留一家的都派不出时：none = 交派不出（副手：Lead 自己干，写手族不变，验证照样有人）；any = 照常选，结果带
-   * noVerifier（Lead：非派不可）。写这张单的族已经让验证没人可派（选谁都救不回来）时两种都照常选、带 noVerifier。
-   */
-  otherwise: 'none' | 'any';
-}
-
-/** 开 PR 前验证那一步的选路输入（KeepVerifier.verify）：阶段、只派别家的族由选路现填。 */
-export type VerifyProbe = Omit<ChooseRouteInput, 'stage' | 'avoid' | 'taskRouteId' | 'keepVerifier'> & {
-  avoid?: { routeIds?: string[]; poolIds?: string[]; modelIds?: string[] };
-};
 
 /**
  * 被挡的原因。waitable = 等得来（空位、额度清零、熔断到点）；其余是硬挡，等也等不来。
@@ -259,9 +227,7 @@ export type BlockCode =
   | 'quota-reserve'
   /** 拼车并发登记核对不上：不往拼车池派，对上了自己恢复（#896）。 */
   | 'carpool-registry'
-  | 'org-not-live'
-  /** 选它开 PR 前验证就没有别家可派了（ChooseRouteInput.keepVerifier）。 */
-  | 'no-verifier';
+  | 'org-not-live';
 
 /**
  * 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点 / org 引擎切号（会话用户挂的不是这个池的组织，引擎打算切过去）/
@@ -304,7 +270,7 @@ export type TrialKind =
   /** 候选全都熔断：多半是共用的一层坏了，放最早到点的一条去试探，并报警。 */
   | 'all-open';
 
-export type ChooseRouteResult = (
+export type ChooseRouteResult =
   | {
       kind: 'dispatch';
       routeId: string;
@@ -337,14 +303,7 @@ export type ChooseRouteResult = (
       /** 派不出一律报警：附每条路由被挡的原因。 */
       reason: string;
       verdicts: RouteVerdict[];
-    }
-) & {
-  /**
-   * 给了 keepVerifier、这张单做完却没人能验（写这张单的族已经让验证没人可派，或非派不可的这一步只剩会让验证没人可派的）：
-   * 白话原因。调用方当场报警，不等干完几小时走到验证那一步才挂起「没有别家可验」。验证留得下就没有这一项。
-   */
-  noVerifier?: string;
-};
+    };
 
 /**
  * 这个阶段现在是不是「候选全都熔断」（chooseRoute 走出 trial 'all-open' 的同一条件：没有能派的，

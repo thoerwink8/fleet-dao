@@ -104,14 +104,6 @@ export interface PickRouteInput extends Scope {
    */
   models?: string[];
   /**
-   * 给开 PR 前验证留一家（0003 第 5 条「验证只派别家」）：Fusion 规划完、开 PR 之前，选副手、Lead 换路由这类会给这张单
-   * 加一个写手族的步骤带上。只派加上它的族之后验证那一步还派得出别家的（接上、在线、不犯禁令、不同族，等得来的也算）；
-   * 写这张单的族现从库里查（和验证查作者同一个查询），查不到明确报错。一家都留不下就当场报警「这张单做完没人能验」
-   * （no-verifier:<任务>），不等干完几小时走到验证那一步才挂起；之后验证留得下了、验证派出去了自动撤。
-   * 不给 = 不管（规划、验证本身、开了 PR 之后、需求工作流、子任务；这张单不验的也不给）。
-   */
-  keepVerifier?: KeepVerifierRequest;
-  /**
    * 三段的一段（动手、验收）来选路（#757）：派得出就当场给这张单（taskId，库里的 tasks.id）的这一段预占一个池的名额，交回的
    * route 带 reservationId；这一段之前预占的作废。预占和数名额在同一把锁下（db 的 pool-runs.ts），几张单同时选路也只放得进
    * 池的上限那么多：选中的池在这一下被别的单占满了，按新的事实重选。不给 = 不预占（Fusion 起会话自己排队；对账只问派不派得出）。
@@ -130,23 +122,6 @@ export interface FailedChannel {
   routeId: string;
   modelId: string;
   reason: string;
-}
-
-/** PickRouteInput.keepVerifier：验证那一步怎么派（流程配置、界面类），留不下时怎么办。 */
-export interface KeepVerifierRequest {
-  /** 验证这一步的模型顺序（流程配置，0003 第 9 条）；不给照路由两层。 */
-  models?: string[];
-  /** 验证算不算界面类的活（规划完就知道：任务简报碰没碰页面代码）：GPT 不验。 */
-  uiWork: boolean;
-  /**
-   * 平时先避开、别家的都会让验证没人可派才派的族：副手避开 Lead 那一族（Claude 额度留给 Lead，0002 第 5 条「优先」）。
-   * 它们本来就在写这张单，派它不多加一族；别家只是没额度、连不上的照旧避开（副手派不出由 Lead 自己干，0003 第 7 条）。
-   */
-  spare?: string[];
-  /**
-   * 能给验证留一家的都派不出时：none 交派不出（副手：Lead 自己干，写手族不变）；any 照常选、报警（Lead：非派不可）。
-   */
-  otherwise: 'none' | 'any';
 }
 
 export type PickRouteResult =

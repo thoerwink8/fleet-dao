@@ -1,4 +1,5 @@
-// 题库：引擎真在问的三道题（错误分流、停滞预判、issue 归类）。别的接入点没人调，题就不留（见 docs/design.md 第十一节）。
+// 题库留三道：错误分流、停滞预判、issue 归类。引擎现在只问 issue 归类；前两道留给 jev 自己的测试和样题，引擎不再登记、不再问。
+// 别的接入点没人调，题就不留（见 docs/design.md 第十一节）。
 // 选项的效果只许收紧（见 effects.ts）。每道题至少一个 none 选项；拿不准、没判出来、只记不拦时一律当它不存在，照 whenUnsure 走。
 import { DEFAULT_CONFIDENCE_LINE } from './policy.ts';
 import { defineQuestion, type QuestionDef } from './questions.ts';

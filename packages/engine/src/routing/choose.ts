@@ -12,14 +12,12 @@ import type {
   Block,
   ChooseRouteInput,
   ChooseRouteResult,
-  KeepVerifier,
   RouteFacts,
   RouteVerdict,
   StageRouteEntry,
   TrialKind,
 } from './types.ts';
 import { time, validateInput } from './validate.ts';
-import { verifierGuard } from './verifier.ts';
 
 interface Judged {
   item: Ranked;
@@ -41,9 +39,6 @@ function contextOf(
       poolIds: new Set(input.avoid?.poolIds ?? []),
       modelIds: new Set(input.avoid?.modelIds ?? []),
       families: new Set((input.avoid?.families ?? []).map(familyKey)),
-      // 给验证留一家：先避开的族照旧避开（放不放行在 keepingVerifier 里定），渠道自己挑模型的认不出是哪一家、不派
-      spare: new Set((input.keepVerifier?.spare ?? []).map(familyKey)),
-      routers: input.keepVerifier !== undefined,
     },
     liveOrg: input.liveOrg,
     liveOrgProblem: input.liveOrgProblem,
@@ -71,62 +66,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
   const policy = resolveRoutingPolicy(input.policy);
   const now = validateInput(input, policy.trialEnabled);
   const ctx = contextOf(input, policy, now);
-  return input.keepVerifier ? keepingVerifier(input, ctx, input.keepVerifier) : chooseIn(input, ctx);
-}
-
-/**
- * 给开 PR 前验证留一家（ChooseRouteInput.keepVerifier；verifier.ts 按候选的族现选一次验证那一步）：
- * 1. 写这张单的族已经让验证没人可派：选谁都救不回来，照常选（先避开的族照旧避开），带 noVerifier 让调用方当场报警。
- * 2. 任务指定的路由（续会话、人点名）不挡：换了就续不上会话、人的指令就是要它；它会让验证没人可派也照派，带 noVerifier。
- * 3. 照常选，会让验证没人可派的族挡掉（no-verifier），先避开的族照旧避开：有能派、能等的就是它。
- * 4. 别家的候选能派（或等得来）、却都会让验证没人可派：放行先避开的族再选一次——它们本来就在写这张单，不多加一族。
- *    别家只是没额度、连不上的不放行（副手派不出由 Lead 自己干，0003 第 7 条）。
- * 5. 还是没有：otherwise none 交派不出（副手：Lead 自己干，写手族不变）；any 照常选、带 noVerifier（Lead：非派不可）。
- */
-function keepingVerifier(input: ChooseRouteInput, ctx: FilterContext, keep: KeepVerifier): ChooseRouteResult {
-  const guard = verifierGuard(keep, chooseRoute);
-  const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
-  // 任务指定的路由不按「先避开」挡：续的会话可能正是上一次放行的同族，人点名的就是要它
-  const unspared: FilterContext = { ...ctx, avoid: { ...ctx.avoid, spare: new Set<string>() } };
-  const task = input.taskRouteId === undefined ? null : (factsOf.get(input.taskRouteId) as RouteFacts);
-  const already = guard.left(null);
-  if (already !== null) return { ...chooseIn(input, task ? unspared : ctx), noVerifier: already };
-
-  if (task) {
-    const r = chooseIn(input, unspared);
-    const spoil = r.kind === 'none' ? null : guard.left(task.family);
-    return spoil === null ? r : { ...r, noVerifier: spoil };
-  }
-
-  const spoils = new Map<string, string>();
-  for (const e of input.order) {
-    const family = (factsOf.get(e.routeId) as RouteFacts).family;
-    const key = familyKey(family);
-    if (!spoils.has(key) && guard.left(family) !== null) spoils.set(key, guard.block(family));
-  }
-  const first = chooseIn(input, { ...ctx, spoils });
-  if (first.kind !== 'none') return first;
-  if ((ctx.avoid.spare?.size ?? 0) > 0 && first.verdicts.some(spoiledOnly)) {
-    const second = chooseIn(input, { ...unspared, spoils });
-    if (second.kind === 'dispatch') return { ...second, why: `${second.why}；${SPARED}` };
-    if (second.kind === 'wait') return { ...second, reason: `${second.reason}；${SPARED}` };
-  }
-  if (keep.otherwise === 'none') return first;
-  const any = chooseIn(input, ctx);
-  if (any.kind === 'none') return any;
-  // 派出去的那条（等的话，最先等得来的那条）会让验证没人可派：第 3 步挡掉之后就没有别的能派、能等的了
-  const open = any.verdicts.find((v) => groupOf(v.blocks).kind !== 'hard');
-  const family = any.kind === 'dispatch' ? any.family : (factsOf.get(open?.routeId ?? '')?.family ?? null);
-  const spoil = family === null ? null : guard.left(family);
-  return spoil === null ? any : { ...any, noVerifier: spoil };
-}
-
-const SPARED = '别家的都会让开 PR 前验证没有别家可派，改派写这张单的同族（不多加一族）';
-
-/** 只因为「选它验证就没人可派」挡着：去掉这一条就能派、等得来。 */
-function spoiledOnly(v: RouteVerdict): boolean {
-  if (!v.blocks.some((b) => b.code === 'no-verifier')) return false;
-  return groupOf(v.blocks.filter((b) => b.code !== 'no-verifier')).kind !== 'hard';
+  return chooseIn(input, ctx);
 }
 
 /** 过滤、排序之后怎么选：任务指定的只看它；没配顺序、一条没配派不出；能派的派，全熔断放试探，其余等或派不出。 */

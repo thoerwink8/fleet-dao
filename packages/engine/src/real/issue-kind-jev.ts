@@ -1,6 +1,5 @@
-// issue 归类这道题（#448）问 Jev：题面、把握线、每日上限、记账都走 packages/jev 的题库（bank.ts 的 ISSUE_KIND），
-// 和错误分流、停滞预判（jev-port.ts）并排的一份，不共用那边的 JevPort/JevReply（那套是给「选一条能撤回的动作」设计的
-// choice/effect 抽象，这里只是「选需求/缺陷/杂项之一」，直接吃 Verdict 更直接）。
+// issue 归类这道题（#448）问 Jev：题面、把握线、每日上限、记账都走 packages/jev 的题库（bank.ts 的 ISSUE_KIND）。
+// 引擎还在登记、还在问的只有这一道；错误分流、停滞预判的题留在题库里，引擎不再登记、不再问。
 // 每次问都现找后端（和 /healthz 的 judge 项同一个 resolveJevBackend）：改了 jev.json、路由两层换了判断路由都不用重启。
 // 没接、起不来、没判出来一律交回「没判出来」，不当成「是」也不当成「否」（issue-groom.ts 的 categoryPlan 再判该不该贴）。
 import type { JevKindAnswer, KindLabel } from '@fleet-dao/conventions';
@@ -112,7 +111,7 @@ export async function registerIssueKindQuestion(deps: IssueKindJevDeps): Promise
   }
 }
 
-/** 生产装配（real/index.ts）：和 jev-port.ts 的 engineJevFromEnv 同一套找法（同一份 FLEET_JEV_CONFIG）。 */
+/** 生产装配（real/index.ts）：和 /healthz 的 judge 项同一套找法（同一份 FLEET_JEV_CONFIG）。 */
 export function issueKindJevFromEnv(
   db: Db,
   env: Readonly<Record<string, string | undefined>>,
