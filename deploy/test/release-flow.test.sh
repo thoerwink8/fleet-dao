@@ -158,6 +158,41 @@ do_release "$B" >/dev/null
 check "再发 B：改动 0 处" "${#CHANGES[@]}" 0
 check "再发 B：历史没变" "$(events)" "$before"
 
+echo "== 【故意造出的失败】发布后置关没成（#1121）：版本已切、健康检查已过，发布仍算成——没有红，只单独记一条提醒，结论退出码 3"
+reset
+POST_ALERTS=()
+saved_off_calls=("${OFF_CALLS[@]}")
+real_engine_off_stub=$(declare -f engine_off_after_release)
+engine_off_after_release() {
+  post_alert "桩：${1:0:12} 引擎总开关没能关上"
+  return 1
+}
+before=$(events)
+do_release "$B" >/dev/null
+check "发布后置关没成：在用的还是 B" "$(current_sha)" "$B"
+check "发布后置关没成：不记红、不连坐整版" "${#REDS[@]}" 0
+check "发布后置关没成：单独记了一条提醒" "${#POST_ALERTS[@]}" 1
+check "发布后置关没成：历史里没有被记成不健康、也没退回" "$(events)" "$before"
+code=$( (
+  unset -f finish_hook
+  finish
+) >/dev/null 2>&1
+  echo $?
+)
+check "发布后置关没成：结论退出码是 3（和红的 1、待配的 2 分开）" "$code" 3
+POST_ALERTS=()
+code=$( (
+  unset -f finish_hook
+  red "桩：真红"
+  post_alert "桩：提醒"
+  finish
+) >/dev/null 2>&1
+  echo $?
+)
+check "红和提醒一起有：红优先，退出码 1" "$code" 1
+eval "$real_engine_off_stub"
+OFF_CALLS=("${saved_off_calls[@]}")
+
 echo "== 新版健康检查不过：自动退回上一版，并报红"
 GATE[$C]=bad
 reset

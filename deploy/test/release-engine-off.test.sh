@@ -49,6 +49,7 @@ engine_off_run() {
 }
 reset() {
   REDS=()
+  POST_ALERTS=()
   CHANGES=()
   PENDING=()
   : >"$RUNS_FILE"
@@ -75,15 +76,15 @@ engine_off_after_release "$C2" >/dev/null
 check "没有关" "$(runs)" 0
 check "没有红" "${#REDS[@]}" 0
 
-echo "== 【故意造出的失败】关没成功（库出错）：发布结论判红，原话打出来，返回 1，不记「已关」"
+echo "== 【故意造出的失败】关没成功（库出错）：记「发布后收尾没成」（不是红），原话打出来，返回 1，不记「已关」"
 reset
 STUB_RC=1
 engine_off_after_release "$C1" >"$TMP/out" 2>&1
 rc=$?
 STUB_RC=0
 check "返回 1" "$rc" 1
-check "红了一条" "${#REDS[@]}" 1
-check "红里写明总开关没关上" "$([[ "${REDS[0]:-}" == *"引擎总开关没能关上"* ]] && echo 是 || echo 否)" 是
+check "没有红（不连坐整版）、记了一条发布后收尾没成" "${#REDS[@]}:${#POST_ALERTS[@]}" 0:1
+check "提醒里写明总开关没关上" "$([[ "${POST_ALERTS[0]:-}" == *"引擎总开关没能关上"* ]] && echo 是 || echo 否)" 是
 check "原话打出来了" "$(grep -c 'statement timeout' "$TMP/out")" 1
 check "没有记「回到关」的改动" "${#CHANGES[@]}" 0
 
