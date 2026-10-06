@@ -350,6 +350,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
 - 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空），读开着的单，逐道过关——开关打开以后开的、作者在白名单里、挂在当前版本上、不是母单子单、没贴「本机做」、还没派过、现读一遍还开着、交代齐（`readTaskBrief`）、容量够（同时在跑的任务工作流 ≤ 6，一轮最多起 5 条）——过了的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。
+- 不自动派的：开关打开以前就开着的、挂在别的版本或未排期的、母单和子单、贴了「本机做」的。要交给引擎就重开一张新单：挂上当前版本、不贴「本机做」、不是母单也不是子单；驾驶舱「交给 fleet」按钮还没做（design 第九节，随 #282），在那之前由指挥官重开。去掉「本机做」只对开关打开以后开的、挂在当前版本上的独立单生效，打开以前的去掉了也不拉。
 - 开关全关是正常的空闲：这一轮记 ok、不读 GitHub。在跑的任务数、白名单、开着的单任何一样读不到：这一轮记没跑成（`schedule_runs` 里 `failed` 或 `partial`，看门狗照登记表报），不拿 0 或「没有」顶。
 - 看：`select * from schedule_runs where job = 'intake' order by id desc limit 5`、`journalctl -u fleet-engine --since '-1h' | grep 拉单`。
 - 停：把项目的「让 AI 接活」关掉（不再有 Temporal 的暂停可手动切：定时器在引擎进程里，引擎重启后自己恢复）。引擎整个停了超过 15 分钟看门狗会报「拉单停了」，要停引擎得先说好。
@@ -593,10 +594,11 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
 
   ```
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> status   # 只看：开着还是关着、最近一次谁什么时候开关的
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> on       # 打开：记下此刻，只有这之后新开的、挂在当前版本上的独立 issue 自动派（母单、子单不派）
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> on       # 打开：记下此刻。只有这之后新开的、挂在当前版本上、没贴「本机做」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的不派，要交给引擎就重开一张新单（见上面「拉单」）
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> off      # 关上：设为空，只收单、显示，不派
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch --all off --reason "<原因>"   # 所有仓一起关（发版后 release.sh 自己跑这条，见自动发布一节）；只许 off
   ```
+  打开以后不自动派的（开关打开以前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的），要交给引擎就重开一张新单：挂上当前版本、不贴「本机做」、不是母单也不是子单；驾驶舱「交给 fleet」上线前由指挥官重开。`status` 打印的是同一句（见上面「拉单」）。
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻（重设会把已经能派的单变成「开关打开以前开的」）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
   这一段是 Fusion 时代的接活逻辑（design 第九节「在哪能做与接活开关」、`docs/decisions/0003-fusion-flow.md` 第 2、8 条），009/010 完成后按三段一条龙改成「对题 → 动手 → 验收」，落地 PR 连带删改；**先别照这段做**（v3 上线前「让 AI 接活」开关一直关着，这段的命令照常不会拉起任何工作流）。看哪些单因为版本、母单子单、本机做、本机认领没派：`sudo -u fleet psql fleet -c "select delivery_id, received_at, note from github_events where note ~ 'workflow=(unscheduled|not_current_version|version_unreadable|mother_ticket|sub_issue|reserved_local|claimed_local)' order by received_at desc limit 20"`。
 - 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
