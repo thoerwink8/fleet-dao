@@ -5,7 +5,7 @@
 // git、GitHub、会话、发布脚本、库都换成假的；真机上那一半（真定时器、真发布）合并后在法国装上验，记在引入本文件的 PR 里。
 // 跑法：node --test deploy/test/auto-release.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   DESIRED_FILE,
@@ -23,8 +23,8 @@ import {
   EXIT_RELEASE_BUSY,
   EXIT_SESSIONS_BUSY,
   FAILED_PREFIX,
+  HUMAN_TIER_PATHS,
   IDLE_WAIT_MS,
-  INSTALL_PATHS,
   manualHold,
   PENDING_PREFIX,
   parseHistory,
@@ -41,6 +41,8 @@ import {
   STATE_SCHEMA,
   STATE_UNREADABLE_KEY,
   summary,
+  TIER_PREFIX,
+  TIER_RETRY_MS,
   VERSION_TAG_RE,
 } from '../france/auto-release/lib.mjs';
 
@@ -105,6 +107,8 @@ function machine() {
     release: { code: 0, log: '/srv/fleet-dao-releases/.logs/x.log', detail: '' },
     rules: { code: 0, out: '  ✓ 一致' },
     checkoutHead: null, // null = 和在用的同一个
+    tier: { code: 0, out: '  ✓ 自动档一致' }, // france.sh --auto-tier 的结果
+    tierCalls: 0,
     dbDown: false,
     // 版本标记（决定 0011 第 3 条）：tag 列表原文，和「哪些提交在主线上」两个都换成假的。
     // tagsThrow = 读的时候就抛（git 没跑成）；mainAncestors = null 表示判祖先关系时抛。
@@ -185,6 +189,10 @@ function machine() {
     },
     async checkoutHead() {
       return m.checkoutHead ?? m.current;
+    },
+    async applyAutoTier() {
+      m.tierCalls += 1;
+      return m.tier;
     },
     async syncRules(user) {
       m.calls.push(`rules ${user}`);
@@ -943,6 +951,61 @@ test('规矩同步没成：记下、报警，不挡发布；同一个提交不�
   );
 });
 
+test('装机自动档：发完一版顺带装，成了的提交不重装；没成记下、报警、不挡发布，隔 30 分钟自动再试，成了撤警', async () => {
+  const m = machine();
+  let st = await m.round();
+  assert.equal(st.attempt.result, 'ok');
+  assert.equal(m.tierCalls, 1, '发完版顺带装了自动档');
+  assert.deepEqual({ commit: st.tier.commit, result: st.tier.result }, { commit: H1, result: 'ok' });
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.tierCalls, 1, '同一个提交装成了不重装');
+  assert.equal(m.alerts.length, 0);
+
+  // 【故意造出的失败】新版发完、自动档没装成：发布照样算成，只报警；30 分钟内不重试
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T08:20:30Z') + tagLine('v1', H1);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.tier = { code: 1, out: '  ✗ fleet-auto-release.timer 没在跑\n' };
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.attempt.result, 'ok', '自动档没成不连坐这一版发布');
+  assert.equal(st.attempt.sha, H2);
+  assert.equal(st.tier.result, 'failed');
+  assert.match(st.tier.detail, /没在跑/);
+  assert.deepEqual(
+    m.alerts.map((a) => a.key),
+    [`${TIER_PREFIX}${H2}`],
+  );
+  assert.equal(m.tierCalls, 2);
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.tierCalls, 2, '没成的 30 分钟内不重试');
+  // 过了间隔、这回成了：重试，撤警
+  m.tier = { code: 2, out: '待配 1 项' }; // 退出码 2 = 没红、有待配：算装上了
+  m.t += TIER_RETRY_MS;
+  st = await m.round();
+  assert.equal(m.tierCalls, 3);
+  assert.equal(st.tier.result, 'ok');
+  assert.deepEqual(m.resolved, [TIER_PREFIX]);
+
+  // 检出和在用的不是同一个提交：不乱装
+  const off = machine();
+  off.checkoutHead = H2;
+  await off.round();
+  assert.equal(off.tierCalls, 0);
+  // 脚本起不来（抛）也是没成、不是装成了
+  const boom = machine();
+  boom.io.applyAutoTier = async () => {
+    throw new Error('bash 起不来');
+  };
+  st = await boom.round();
+  assert.equal(st.attempt.result, 'ok');
+  assert.equal(st.tier.result, 'failed');
+  assert.match(st.tier.detail, /bash 起不来/);
+});
+
 test('发之前状态文件写不进去：不发（发到一半这一轮没了，下一轮连发过什么都不知道）', async () => {
   const m = machine();
   m.io.save = async () => {
@@ -1166,21 +1229,98 @@ test('规矩同步给的人和 france.sh 的 AGENT_RULES_USERS 一样', () => {
   assert.deepEqual(RULES_USERS, [sessionUser, pilot]);
 });
 
-test('装机层落后的路径盖住了 france.sh 从仓里读的每个文件', () => {
+// 装机分两档（docs/ops.md 第九节「装机层」）：人工档（lib/human-tier.sh 里的函数，碰防火墙、sudoers、建用户）改了要人重跑、
+// 才让 deploy_lag 红；自动档（下面这份清单）由自动发布顺带跑 france.sh --auto-tier。其余是整套装机才用的（装软件、钉版本），
+// 不在两档里。新加一个被 france.sh 引用的仓里文件，必须在这里登记它属于哪一档，免得悄悄漏了。
+const AUTO_TIER_FILES = [
+  'deploy/france/fleet-agents.slice',
+  'deploy/france/fleet-demo-scopes.sh',
+  'deploy/france/fleet-demo-scopes.service',
+  'deploy/france/fleet-demo-scopes.path',
+  'deploy/france/fleet-demo-scopes.timer',
+  'deploy/france/fleet-auto-release.service',
+  'deploy/france/fleet-auto-release.timer',
+];
+const FULL_RUN_ONLY_FILES = [
+  // source 进来的库
+  'deploy/lib/common.sh',
+  'deploy/lib/snapshot.sh',
+  'deploy/lib/root-exec-check.sh',
+  'deploy/lib/session-proxy.sh',
+  'deploy/lib/listen.sh',
+  'deploy/lib/cli-tools.sh',
+  'deploy/lib/cursor-agent.sh',
+  'deploy/lib/cursor-key.sh',
+  'deploy/lib/grok.sh',
+  'deploy/lib/mirasim.sh',
+  'deploy/lib/agents-sync.sh',
+  'deploy/lib/app-config.sh',
+  'deploy/lib/session-pnpm.sh',
+  'deploy/lib/node-cache.sh',
+  'deploy/lib/auto-release-state.sh',
+  'deploy/lib/node-report-gate.sh',
+  // 整套装机才用的单元和配置样例
+  'deploy/france/fleet-temporal.service',
+  'deploy/france/fleet-mirasim-session.service',
+  'deploy/france/temporal.yaml',
+  'deploy/france/france.env.example',
+  'deploy/france/fleet-temporal-cli.sh',
+  'deploy/france/fleet-engine.service',
+  'deploy/france/fleet-api.service',
+  'deploy/france/bundle-gateway.sh',
+];
+const refsOf = (file) => {
+  const text = readFileSync(new URL(file, import.meta.url), 'utf8');
+  return [...text.matchAll(/\$DEPLOY_DIR\/([A-Za-z0-9_./-]+)/g)]
+    .map((m) => `deploy/${m[1]}`)
+    .filter((r) => !r.startsWith('deploy/..') && !r.endsWith('/'));
+};
+
+test('装机分档没漏没重：france.sh 和 human-tier.sh 引用的每个仓里文件都登记了档，人工档的文件都在 HUMAN_TIER_PATHS 里', () => {
+  const human = refsOf('../lib/human-tier.sh');
+  const all = new Set([...refsOf('../france.sh'), ...human]);
+  assert.ok(all.size > 10, `读到了装机脚本引用的文件（${all.size} 个）`);
+  assert.ok(human.includes('deploy/france/fleet-dao.nft'), '人工档里读得到防火墙规则');
+  assert.ok(human.includes('deploy/france/sudoers-fleet-dao'), '人工档里读得到 sudoers');
+  // france.env.example 只在新机器上建环境文件时读（之后归发布时照期望写），登记在「整套才用」，改它不用人重跑
+  for (const r of human) {
+    assert.ok(
+      HUMAN_TIER_PATHS.includes(r) || FULL_RUN_ONLY_FILES.includes(r),
+      `${r} 是人工档（human-tier.sh 引用）却不在 HUMAN_TIER_PATHS：它改了要人重跑，后端不会标落后`,
+    );
+  }
+  const auto = new Set(AUTO_TIER_FILES);
+  const full = new Set(FULL_RUN_ONLY_FILES);
+  const humanSet = new Set(HUMAN_TIER_PATHS);
+  for (const r of all) {
+    if (r === DESIRED_FILE || /^deploy\/france\/auto-release\//.test(r)) continue; // 配置期望跟着版本走；自动发布副本归自动档
+    const tiers = [humanSet.has(r), auto.has(r), full.has(r)].filter(Boolean).length;
+    assert.equal(tiers, 1, `${r} 要恰好登记在一档里（人工 / 自动 / 整套才用），现在 ${tiers} 档`);
+  }
+  // 登记的文件都真在仓里（改名、删了没同步登记会红）
+  for (const r of [...humanSet, ...auto, ...full]) {
+    assert.ok(existsSync(new URL(`../../${r}`, import.meta.url)), `${r} 登记了档，仓里却没有这个文件`);
+  }
+  assert.ok(humanSet.has('deploy/lib/human-tier.sh'));
+});
+
+test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数里一个都没有', () => {
   const france = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
-  const refs = [...france.matchAll(/\$DEPLOY_DIR\/([A-Za-z0-9_./-]+)/g)].map((m) => `deploy/${m[1]}`);
-  const inside = refs.filter((r) => !r.startsWith('deploy/..') && !r.endsWith('/'));
-  assert.ok(inside.length > 10, `读到了 france.sh 引用的文件（${inside.length} 个）`);
-  const include = INSTALL_PATHS.filter((p) => !p.startsWith(':('));
-  const exclude = INSTALL_PATHS.filter((p) => p.startsWith(':(exclude)')).map((p) => p.slice(10));
-  // 配置的期望跟着版本走（INSTALL_PATHS 特意排除了它）：france.sh 只在新机器上照它建环境文件，之后每一项归发布时照期望写
-  // （#323），改了它不用重跑 france.sh，不算装机层落后
-  assert.ok(exclude.includes(DESIRED_FILE), 'INSTALL_PATHS 排除了配置的期望');
-  for (const r of inside) {
-    if (r === DESIRED_FILE) continue;
-    const covered =
-      include.some((p) => (p.endsWith('/') ? r.startsWith(p) : r === p)) && !exclude.includes(r);
-    assert.ok(covered, `${r} 没被 INSTALL_PATHS 盖住：它改了 france.sh 要重跑，后端却不会标落后`);
+  const body = (name) => new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`, 'm').exec(france)?.[1] ?? '';
+  for (const fn of ['setup_auto_tier', 'setup_slice', 'setup_demo_scopes', 'setup_auto_release']) {
+    const text = body(fn);
+    assert.ok(text.length > 10, `读到了 ${fn}`);
+    assert.doesNotMatch(
+      text,
+      /setup_firewall|setup_sudoers|setup_identity|setup_pilot|ensure_service_user|sudoers|nft |useradd|visudo/,
+      `${fn} 不许碰防火墙、sudoers、建用户`,
+    );
+  }
+  // 自动档入口只调这三个
+  assert.match(body('setup_auto_tier'), /^\s*setup_slice\n\s*setup_demo_scopes\n\s*setup_auto_release\s*$/);
+  // 反过来：人工档的函数都在 human-tier.sh，不在 france.sh 里
+  for (const fn of ['setup_identity', 'setup_pilot', 'setup_sudoers', 'setup_firewall', 'render_firewall']) {
+    assert.equal(body(fn), '', `${fn} 应当写在 deploy/lib/human-tier.sh`);
   }
 });
 

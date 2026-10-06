@@ -1,7 +1,7 @@
 # fleet-dao 自动发布：主线上 CI 全绿的新提交，马上用 deploy/release.sh --auto 发到本机（发布脚本先排空引擎：不起新会话，在跑的
 # 最多再做 10 分钟，到点停下、按编号续上），发完把规矩同步给会话用户；
 # 每一轮的读数写进 /srv/fleet-dao-releases/.auto/state.json（后端的 /healthz 读它）。由 fleet-auto-release.timer 每 5 分钟拉起。
-# deploy/france.sh 装（脚本装到 /usr/local/lib/fleet-dao/auto-release/），别在机器上手改。规矩见 docs/ops.md 第九节「自动发布」。
+# deploy/france.sh 装（脚本装到 /usr/local/lib/fleet-dao/auto-release/；以后每发完一版它自己跑 france.sh --auto-tier 换上新的），别在机器上手改。规矩见 docs/ops.md 第九节「自动发布」。
 # 以 root 跑、不收紧：要起发布（写 /srv、/etc/systemd，起停服务）、替会话用户同步规矩，和手动跑 release.sh 一样。
 [Unit]
 Description=fleet-dao 自动发布（主线上 CI 全绿的新提交发到本机）

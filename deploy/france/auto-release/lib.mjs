@@ -59,18 +59,23 @@ export const VERSION_TAGS_ARGS = [
 /** 规矩同步给谁：和 deploy/france.sh 的 AGENT_RULES_USERS 同一份（会话用户、创始人的登录用户）。 */
 export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
 /**
- * 装机脚本（france.sh）管的仓里文件：主线上这些改了、france.sh 还没重跑，就是装机层落后。它碰防火墙、sudoers，不自动跑，
- * 只标出来。发布脚本自己从每一版里取的（两个应用单元、网关打包脚本）不算。
+ * 装机脚本（france.sh）的「人工档」：碰防火墙、sudoers、建用户的那几个文件。主线上这些改了、france.sh 整套还没重跑，
+ * 才是装机层落后（要人以 root 重跑，不自动）。其余的（自动发布脚本副本、systemd 单元、fleet-agents.slice、演示版可见范围）
+ * 是「自动档」：每发完一版由 tierStep 以 root 跑 `france.sh --auto-tier` 顺带装上，改了不算落后。
+ * 新加碰防火墙 / sudoers / 建用户的步骤，写进 deploy/lib/human-tier.sh，它用到的仓里文件加到这里（测试核对：那个文件
+ * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
  */
-export const INSTALL_PATHS = [
-  'deploy/france.sh',
-  'deploy/lib/',
-  'deploy/france/',
-  ':(exclude)deploy/france/fleet-engine.service',
-  ':(exclude)deploy/france/fleet-api.service',
-  ':(exclude)deploy/france/bundle-gateway.sh',
-  // 配置的期望跟着版本走（对账拿在用那一版里的），改了它不用重跑 france.sh
-  `:(exclude)${DESIRED_FILE}`,
+export const HUMAN_TIER_PATHS = [
+  'deploy/lib/human-tier.sh',
+  'deploy/france/fleet-dao.nft',
+  'deploy/france/fleet-firewall.service',
+  'deploy/france/sudoers-fleet-dao',
+  // sudoers 放行的那个 root 脚本
+  'deploy/france/fleet-agent-scope.sh',
+  // 建用户（会话用户、创始人的登录用户）和防火墙读回、收旧连接用的
+  'deploy/lib/session-user.sh',
+  'deploy/lib/login-user.sh',
+  'deploy/lib/session-ports.sh',
 ];
 /**
  * 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`，
@@ -92,6 +97,10 @@ export const PENDING_PREFIX = `${ALERT_PREFIX}pending:`;
  */
 export const STATE_UNREADABLE_KEY = `${ALERT_PREFIX}state-unreadable`;
 export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
+/** 装机的自动档（france.sh --auto-tier）没装成：一个提交一条，装成了自己撤。 */
+export const TIER_PREFIX = `${ALERT_PREFIX}tier:`;
+/** 自动档没装成，同一个提交最快隔这么久再试一次（脚本幂等，网络、单元一时起不来的多半过会儿就好）。 */
+export const TIER_RETRY_MS = 30 * 60_000;
 export const CONFIG_PREFIX = `${ALERT_PREFIX}config:`;
 export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
 /** 版本标记读不到 / 认不出（git 没跑成、一行认不出、一个 `v<N>` tag 都没有）：这一轮不发，报警等下一轮查成自己撤。 */
@@ -351,6 +360,7 @@ export function carryOver(prev) {
     busy: null,
     attempt: p.attempt ?? null,
     rules: p.rules ?? null,
+    tier: p.tier ?? null,
     system: p.system ?? null,
     config: null,
     /** 发布那一刻四步（停派活/等收尾/部署/恢复派活）这一轮各是什么状态；见 publishSequence。 */
@@ -372,6 +382,7 @@ export async function runOnce(io, prev) {
   const st = carryOver(prev);
   st.ranAt = iso(now);
   const current = await deployStep(io, st, now);
+  if (current !== undefined) await tierStep(io, st, now, current);
   if (current !== undefined) await rulesStep(io, st, now, current);
   await configStep(io, st, io.now());
   await flushAlerts(io, st);
@@ -1030,6 +1041,59 @@ async function systemLayer(io, head) {
 }
 
 /**
+ * 装机的自动档（决定见 docs/ops.md 第九节「装机层」）：在用的版本和检出是同一个提交、这个提交还没装过，就以 root 跑
+ * `france.sh --auto-tier`（自动发布脚本副本、systemd 单元、fleet-agents.slice、演示版可见范围；不碰防火墙、sudoers、用户、钥匙）。
+ * 没成记下、报警，不挡发布；成了的提交不重跑，没成的最快隔 TIER_RETRY_MS 再试。退出码 2（没红、有待配）算装上了。
+ * 先于规矩那一步：规矩同步用的是检出里的脚本，和这里无关，但装机脚本要先到位。
+ */
+async function tierStep(io, st, now, current) {
+  if (!current || typeof io.applyAutoTier !== 'function') return;
+  if (st.tier?.commit === current) {
+    if (st.tier.result === 'ok') return;
+    if (now - Date.parse(st.tier.at) < TIER_RETRY_MS) return;
+  }
+  let head;
+  try {
+    head = await io.checkoutHead();
+  } catch (e) {
+    st.tier = {
+      ...(st.tier ?? {}),
+      result: 'unchecked',
+      detail: `检出在哪个提交没读到：${why(e)}`,
+      at: iso(now),
+    };
+    return;
+  }
+  // 检出和在用的不是同一个提交：脚本不跟着乱装，等两边对上
+  if (head !== current) return;
+  let r;
+  try {
+    r = await io.applyAutoTier();
+  } catch (e) {
+    r = { code: -1, out: why(e) };
+  }
+  if (r.code === 0 || r.code === EXIT_RELEASE_PENDING) {
+    st.tier = { commit: current, at: iso(now), result: 'ok', detail: '' };
+    resolveLater(st, TIER_PREFIX);
+    return;
+  }
+  const lines = String(r.out)
+    .split('\n')
+    .filter((l) => /^\s*[✗…]/.test(l))
+    .slice(0, 3)
+    .map((l) => l.trim());
+  const detail = `退出码 ${r.code}${lines.length ? `，${lines.join('；')}` : `，${why(r.out)}`}`;
+  st.tier = { commit: current, at: iso(now), result: 'failed', detail };
+  raise(
+    st,
+    `${TIER_PREFIX}${current}`,
+    `装机的自动档没装成（${short(current)}）`,
+    `france.sh --auto-tier 没做成：${detail}。发布照常；每隔 30 分钟自动再试，好了这条自己撤。` +
+      `手动：在法国以 root 跑 bash ${CHECKOUT}/deploy/france.sh --auto-tier`,
+  );
+}
+
+/**
  * 规矩那一半：在用的版本和检出是同一个提交、这个提交还没同步过，就以 root 替 RULES_USERS 各跑一遍
  * agents-sync --apply（和 france.sh 最后那步同一条）。没成记下、报警，不挡发布；同一个提交不重跑，检出动了再来。
  */
@@ -1207,6 +1271,11 @@ export function summary(st) {
       ? `规矩同步到 ${short(st.rules.commit)}（${st.rules.result}${st.rules.detail ? `：${st.rules.detail}` : ''}）`
       : '规矩还没同步过',
   );
+  if (st.tier) {
+    parts.push(
+      `装机自动档装到 ${short(st.tier.commit)}（${st.tier.result}${st.tier.detail ? `：${st.tier.detail}` : ''}）`,
+    );
+  }
   parts.push(
     st.system?.error
       ? `装机层没查成：${st.system.error}`

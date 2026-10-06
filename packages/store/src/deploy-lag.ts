@@ -32,7 +32,7 @@ export const DEPLOY_LAG_LIMITS = {
   ciMs: 30 * 60_000,
   /** 其余原因（在等 CI、等空闲、人手动按住）落后这么久报：旧引擎等空闲 60 分钟 + CI、构建、一轮的间隔。 */
   behindMs: 90 * 60_000,
-  /** 装机脚本（france.sh，要人跑）落后主线这么久报。 */
+  /** 装机脚本的人工档（防火墙、sudoers、建用户那几个文件，要人跑 france.sh）落后主线这么久报；自动档不算，发版时自动装。 */
   systemMs: 24 * 60 * 60_000,
 } as const;
 
@@ -91,6 +91,16 @@ export const DeployLagState = z.object({
       detail: z.string(),
     })
     .nullable(),
+  /** 装机的自动档（france.sh --auto-tier，发完版顺带跑）：装到哪个提交、成没成；老版本的自动发布没有这个字段。 */
+  tier: z
+    .object({
+      commit: Sha.optional(),
+      at: Iso,
+      result: z.enum(['ok', 'failed', 'unchecked']),
+      detail: z.string(),
+    })
+    .nullable()
+    .optional(),
   system: z
     .union([
       z.object({ appliedSha: Sha, behind: z.number().int().min(0), oldestAt: Iso.nullable() }),
@@ -266,6 +276,17 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
     });
   }
 
+  // 自动档没装成：自动发布当场报过警（alreadyAlerted）、30 分钟后自己再试，这里只让它进读数
+  if (st.tier?.result === 'failed') {
+    add({
+      code: 'tier_failed',
+      message: '装机的自动档没装成',
+      steady: '装机的自动档没装成',
+      detail: `装到 ${short(st.tier.commit)} 没成：${st.tier.detail}`,
+      alreadyAlerted: true,
+    });
+  }
+
   if (st.system && 'error' in st.system) {
     add({
       code: 'system',
@@ -283,7 +304,7 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
       code: 'system',
       message: `装机脚本落后主线 ${st.system.behind} 个相关提交、${spoken(ago(st.system.oldestAt))}，要人重跑`,
       steady: '装机脚本落后主线，要人重跑',
-      detail: `装到 ${short(st.system.appliedSha)}；在法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（碰防火墙、sudoers，不自动跑）`,
+      detail: `装到 ${short(st.system.appliedSha)}；防火墙、sudoers、建用户那几个文件（deploy/france/auto-release/lib.mjs 的 HUMAN_TIER_PATHS）之后改过：在法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（不自动跑；其余装机步骤发版时自动装）`,
     });
   }
   return done();
