@@ -13,6 +13,7 @@ import type {
   CarpoolReconcileViewSchema,
   ChangeEventSchema,
   ChannelSchema,
+  ChannelStateSchema,
   CreateDemoLinkRequest,
   CreateDemoLinkResponse,
   CredentialsResponse,
@@ -122,6 +123,8 @@ export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;
 export type Channel = z.infer<typeof ChannelSchema>;
+/** 渠道近态（#1118）：运行中失败被标 disabled 的渠道、为什么、顺到谁。 */
+export type ChannelState = z.infer<typeof ChannelStateSchema>;
 export type Model = z.infer<typeof ModelSchema>;
 export type Route = z.infer<typeof RouteSchema>;
 export type Pool = z.infer<typeof PoolSchema>;

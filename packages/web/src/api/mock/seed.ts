@@ -1516,6 +1516,21 @@ export function createSeed(now: number): MockState {
       { id: 'ch-grok', name: 'Grok', billing: 'subscription', enabled: true },
       { id: 'ch-ds', name: 'DeepSeek 接口', billing: 'metered', enabled: true },
     ],
+    // 渠道近态（#1118）：中转站运行中失败被标 disabled，选路顺延到了 Claude 订阅的 Opus 5.5
+    channelStates: [
+      {
+        channelId: 'ch-relay',
+        status: 'disabled',
+        reason:
+          '上游断连（socket hang up，已重试 2 次）；渠道运行中失败，换同一个模型的下一个渠道（第 1/2 次）',
+        failedRouteId: 'r-rl-opus',
+        fallbackChannelId: 'ch-claude',
+        fallbackModelId: 'opus-5.5',
+        flaggedAt: at(-12),
+        lastProbedAt: at(-5),
+        updatedAt: at(-12),
+      },
+    ],
     pools: [
       { id: 'claude-a', channelId: 'ch-claude', maxConcurrency: 5, expiresAt: at(19 * 1440) },
       { id: 'claude-b', channelId: 'ch-claude', maxConcurrency: 1, expiresAt: at(8 * 1440) },

@@ -117,6 +117,7 @@ type SpecialBlocker = 'switched-off' | 'banned' | 'quota-exhausted' | 'no-slot';
 const CANDIDATE_TEXT: Record<Exclude<CandidateBlocker, SpecialBlocker>, string> = {
   offline: '不在线（探活或熔断判的）',
   'channel-disabled': '渠道关了',
+  'channel-failed': '渠道运行中失败，已顺延给下一个渠道（探针探通后恢复）',
   'pool-expired': '订阅过期了',
   'model-retired': '模型已下架',
 };

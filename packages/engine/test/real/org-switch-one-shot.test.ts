@@ -214,6 +214,7 @@ function harness(opts: { drainTimeoutMs?: number; switchFails?: () => string | u
     },
     runs: realRuns({ db: t.db }),
     reservations: realReservations({ db: t.db }),
+    attempts: { async record() {} },
     runsDir: join(root, 'runs'),
     sessions: oneShots,
     heartbeatEveryMs: 5,

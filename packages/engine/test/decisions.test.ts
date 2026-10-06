@@ -240,3 +240,95 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     ).toBe('park');
   });
 });
+
+describe('渠道运行中失败：分流判停下又算这条路由的账，就换同一个模型的下一个渠道（#1118）', () => {
+  const onChannel = {
+    route: { routeId: 'r1', poolId: 'p1', modelId: 'm1', hostId: 'claude-code', channelId: 'c1' },
+  };
+  /** 「回话的模型不是点名的那个」：分流判停下（stop），算这条路由的账（routeOutcome fail）。 */
+  const mismatch = failure('model_mismatch');
+
+  it('停下 + 算路由的账 + 知道渠道：换渠道（swapRoute），记一次换路由、不报警、要标渠道不可用；原因写明第几次', () => {
+    const next = nextAction({ failure: mismatch, limits, routeBound: true, context: onChannel });
+    expect(next).toMatchObject({
+      action: 'swapRoute',
+      avoid: 'route',
+      counter: 'routeSwaps',
+      failChannel: true,
+      resumeSame: false,
+      delaySeconds: 0,
+      alert: false,
+      rule: 'MD3',
+    });
+    expect(next.reason).toContain('换同一个模型的下一个渠道（第 1/2 次）');
+  });
+
+  it('原路重试用完（认不出的、算路由的账）：也是换渠道，不是停下报人', () => {
+    const steps = [0, 1, 2].map((retries) =>
+      nextAction({
+        failure: failure('WEIRD'),
+        counters: { retries },
+        limits,
+        routeBound: true,
+        context: onChannel,
+      }),
+    );
+    expect(steps.map((s) => s.action)).toEqual(['retry', 'retry', 'swapRoute']);
+    expect(steps[2]?.failChannel).toBe(true);
+  });
+
+  it('【故意造出的失败】换渠道的次数用完（所有渠道都试过）：停下报人，原因写明已经换过几次，不再换、不死循环', () => {
+    const next = nextAction({
+      failure: mismatch,
+      counters: { routeSwaps: 2 },
+      limits,
+      routeBound: true,
+      context: onChannel,
+    });
+    expect(next).toMatchObject({ action: 'park', alert: true });
+    expect(next).not.toHaveProperty('failChannel');
+    expect(next.reason).toContain('已换过 2 次渠道仍失败');
+  });
+
+  it('不换的：不知道渠道（老历史里的路由没有）、不绑路由、不算路由的账（账号封了、任务自己的问题）都照旧停下', () => {
+    expect(nextAction({ failure: mismatch, limits, routeBound: true })).toMatchObject({ action: 'park' });
+    expect(
+      nextAction({
+        failure: mismatch,
+        limits,
+        routeBound: true,
+        context: { route: { ...onChannel.route, channelId: undefined } },
+      }).action,
+    ).toBe('park');
+    expect(nextAction({ failure: mismatch, limits, routeBound: false, context: onChannel }).action).toBe(
+      'park',
+    );
+    const banned = nextAction({
+      failure: failure('account_banned'),
+      limits,
+      routeBound: true,
+      context: onChannel,
+    });
+    expect(banned).toMatchObject({ action: 'park', alert: true });
+    expect(banned).not.toHaveProperty('failChannel');
+  });
+
+  it('换上的分流不给 routeOutcome（读不出算不算路由的账）：不换，照旧停下，不当成算路由的账', () => {
+    const triage = () =>
+      ({
+        action: 'park',
+        delaySeconds: 0,
+        reason: '换上的分流说挂起',
+        rule: 'T1',
+        title: '换上的',
+        via: 'signal',
+        classifiedAs: 'park',
+        alert: true,
+        counter: null,
+        resumeSame: false,
+      }) as unknown as FailureVerdict;
+    expect(
+      nextAction({ failure: mismatch, limits, routeBound: true, context: onChannel }, triage).action,
+    ).toBe('park');
+  });
+});

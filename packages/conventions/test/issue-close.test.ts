@@ -259,7 +259,8 @@ describe('pnpm issue:close --superseded-by / --reason：关掉被取代的、不
     const r = await issueClose(['241', '--superseded-by', '999'], w);
     expect(r).toEqual({ outcome: 'closed', number: 241, issueUrl: 'https://github.com/o/r/issues/241' });
     const [close] = closeCalls(w);
-    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not_planned']);
+    // gh 命令行要带空格的 not planned，不是 not_planned（真 gh 对后者报 invalid argument）
+    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not planned']);
     expect(close?.[6]).toContain('被 #999 取代');
     expect(timelineCalls(w)).toEqual([]);
   });
@@ -320,7 +321,7 @@ describe('pnpm issue:close --superseded-by / --reason：关掉被取代的、不
     const r = await issueClose(['241', '--reason', 'not_planned'], w);
     expect(r.outcome).toBe('closed');
     const [close] = closeCalls(w);
-    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not_planned']);
+    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not planned']);
   });
 
   it('--reason 的值不在三种里：拒关，写清只认哪三种', async () => {

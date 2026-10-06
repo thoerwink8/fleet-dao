@@ -116,6 +116,9 @@ export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.co
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
   start --model grok|codex|kimi|claude --name <短名> --brief <文件> (--issue <单号> [--refs] | --no-issue "<理由>")
+        --detached "<为什么必须脱离会话>"
+        [--detached：默认别用这条命令。派活先用 Agent 工具起 Sonnet 子代理——创始人在 Mirasim 面板里看得见、能插手（2026-10-06）；
+        只有创始人说了无人值守、过夜，或活预计超过 40 分钟而他不在线，才脱离；理由必填，写进这个工人的 meta.json]
         [--repo <主检出路径>] [--model-id <型号>]
         [--issue：这个活挂哪张单，收尾交代里写死「需求」栏 Closes #号；母单的分片加 --refs 写 Refs；
         --no-issue：确实没有单，理由原样进 PR 需求栏；两个必须给一个，缺了不起（--no-ship 冒烟除外）]
@@ -698,6 +701,23 @@ function worktreeConflict(trees, worktreeDir, branch) {
 
 // —— start ——
 
+/**
+ * --detached "<理由>"：起脱离会话的工人必须说清为什么（创始人 2026-10-06：「我认为不能脱离」「你拍板直接做」）。
+ * 起因：脱离的工人是独立进程，不显示在 Mirasim 面板里，创始人看不见、没法插手；默认改成 Agent 工具起的 Sonnet 子代理。
+ * 脱离只留给两种：创始人说了无人值守、过夜；或活预计超过 40 分钟而他不在线（子代理活在聊天这一轮里，一轮几十分钟不结束，
+ * 他中途打的字会丢，2026-10-06 查到 14 条引导丢 8 条）。没给理由、理由太短都拒起，退出码 1，话里指向正确的做法。
+ * @param {{ options: Map<string, string> }} p
+ */
+function detachedOf(p) {
+  const why = p.options.get('detached');
+  if (typeof why !== 'string' || why.trim().length < 4)
+    throw new UsageError(
+      '默认不起脱离会话的工人（创始人 2026-10-06：他要在 Mirasim 面板里看得见派出去的活）：派活先用 Agent 工具起 Sonnet 子代理（model: "sonnet"）。' +
+        '确实要脱离——创始人说了无人值守、过夜，或活预计超过 40 分钟而他不在线——再加 --detached "<为什么必须脱离>"。',
+    );
+  return why.trim();
+}
+
 async function cmdStart(p, io) {
   if (p.positional.length > 0) throw new UsageError('start 不收位置参数');
   const pause = readPauseMarker(io.home);
@@ -706,6 +726,7 @@ async function cmdStart(p, io) {
       io,
       `${pause.why}：不起新工人。发版收尾后标记会自己清；要现在撤掉：node release-train.mjs abort（status、watch、stop、clean 照常能用）`,
     );
+  const detached = detachedOf(p);
   const model = modelOf(p);
   const name = nameOf(p);
   const briefArg = p.options.get('brief');
@@ -886,6 +907,7 @@ async function cmdStart(p, io) {
         outLog,
         errLog,
         noShip,
+        detached,
         githubRoute: githubRoute.via,
         cleanedAt: null,
       },
@@ -1347,7 +1369,7 @@ export async function runWorker(argv, io) {
       return await cmdStart(
         parseArgs(
           rest,
-          ['model', 'name', 'brief', 'repo', 'model-id', 'effort', 'issue', 'no-issue'],
+          ['model', 'name', 'brief', 'repo', 'model-id', 'effort', 'issue', 'no-issue', 'detached'],
           ['no-ship', 'no-automerge', 'refs'],
         ),
         io,

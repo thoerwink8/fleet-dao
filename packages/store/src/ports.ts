@@ -6,6 +6,7 @@ import type {
   AuditEntrySchema,
   Ban,
   Channel,
+  ChannelStateRecord,
   HistoryResponse,
   Model,
   NodeReport,
@@ -347,6 +348,8 @@ export interface BoardStore {
 
 export interface RoutingStore {
   listChannels(): Promise<Channel[]>;
+  /** 渠道近态（#1118）：只有运行中失败出过事的渠道有行；读不到抛错，不给空的顶。 */
+  listChannelStates(): Promise<ChannelStateRecord[]>;
   listPools(): Promise<Pool[]>;
   listModels(): Promise<Model[]>;
   listRoutes(): Promise<Route[]>;

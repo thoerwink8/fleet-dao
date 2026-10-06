@@ -911,3 +911,124 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
     expect(picks[3]?.avoidRouteIds).toEqual([]);
   });
 });
+
+describe('任务工作流 · 渠道运行中失败换同一个模型的下一个渠道（#1118）', { timeout: 60_000 }, () => {
+  const via = (channelId: string): RouteChoice => ({
+    routeId: `r-${channelId}`,
+    poolId: `p-${channelId}`,
+    modelId: 'm1',
+    family: 'claude',
+    hostId: 'claude-code',
+    channelId,
+  });
+  /** 回话的模型不对：失败分流判停下、算这条路由的账（MD3）——渠道出事的一种。 */
+  const REJECTED: RunSegmentResult = {
+    ok: false,
+    runId: 'run-x',
+    outcome: 'failed',
+    evidence: { code: 'model_mismatch', message: '回话的不是点名的模型', quotaExhausted: false },
+  };
+  /** 真选路的样子：按顺序派第一个没被避开的渠道；都用尽就派不出（waitFor none）。 */
+  const channelWorld = (channels: string[], picks: PickRouteInput[]) =>
+    createFakeWorld({
+      route: (i) => {
+        picks.push(i);
+        const route = channels.map(via).find((r) => !i.avoidRouteIds.includes(r.routeId));
+        return route
+          ? { ok: true, route, why: '测试' }
+          : { ok: false, waitFor: 'none', detail: '这个模型的渠道都用尽了' };
+      },
+    });
+  /** 前 n 个渠道失败，之后成功。 */
+  const failFirst = (n: number) => async (_i: unknown, call: number) => (call <= n ? REJECTED : OK_SEGMENT);
+
+  it('第一个渠道失败：不停下报人，选路带着失败的渠道换到下一个渠道接着跑（同一个模型、同一棵树），不报警', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2'], picks);
+    const { tasks, calls } = scripted({ segment: failFirst(1) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment.map((s) => s.route.channelId)).toEqual(['c1', 'c2']);
+    expect(calls.segment.every((s) => s.route.modelId === 'm1')).toBe(true);
+    expect(picks[0]?.failedChannel).toBeUndefined();
+    expect(picks[1]).toMatchObject({
+      avoidRouteIds: ['r-c1'],
+      failedChannel: { channelId: 'c1', routeId: 'r-c1', modelId: 'm1' },
+    });
+    expect(picks[1]?.failedChannel?.reason).toContain('回话的不是点名的模型');
+    expect(world.count('createWorktree')).toBe(1);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('【故意造出的失败】换到的渠道也失败：继续往下换第三个，每次都把刚失败的渠道交给选路标掉', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2', 'c3'], picks);
+    const { tasks, calls } = scripted({ segment: failFirst(2) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment.map((s) => s.route.channelId)).toEqual(['c1', 'c2', 'c3']);
+    expect(picks.map((p) => p.failedChannel?.channelId)).toEqual([undefined, 'c1', 'c2']);
+    expect(picks[2]?.avoidRouteIds).toEqual(['r-c1', 'r-c2']);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('【故意造出的失败】全部渠道都失败（只有两个渠道）：第二个失败后选路派不出，停下报人，不死循环；点「继续」才再来', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2'], picks);
+    const { tasks, calls } = scripted({ segment: failFirst(2) });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '渠道都用尽，停下等人');
+        expect(s.waiting?.detail).toContain('没有可用的路由');
+        // 只起过两次会话（c1、c2），停着时没有再空转
+        expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2']);
+        const pickCount = picks.length;
+        await new Promise((r) => setTimeout(r, 300));
+        expect(picks).toHaveLength(pickCount);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(world.alerts[0]).toMatchObject({ level: 'stuck' });
+    // 停下之后点「继续」：计数和避开清零，从头选（c1 又能选）
+    expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2', 'c1']);
+  });
+
+  it('【故意造出的失败】渠道很多但每个都失败：换到次数上限（2 次）就停下报人，原因写明已换过几次，不无限换', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2', 'c3', 'c4', 'c5'], picks);
+    const { tasks, calls } = scripted({ segment: async () => REJECTED });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '换渠道次数用完，停下等人');
+        expect(s.lastProblem).toContain('已换过 2 次渠道仍失败');
+        expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2', 'c3']);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
+        return h.result().catch(() => undefined);
+      },
+      { tasks },
+    );
+    expect(calls.segment).toHaveLength(3);
+  });
+});

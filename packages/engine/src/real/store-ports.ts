@@ -31,6 +31,7 @@ import {
   type Db,
   type EndedPoolRun,
   endedPoolRuns,
+  markChannelDisabled,
   openPoolRuns,
   type RunSegment,
   readQuotaReserveSetting,
@@ -40,6 +41,7 @@ import {
   resolveAlertWithReason,
   routeFactsForPurpose,
   saveTaskSnapshot,
+  setChannelFallback,
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -500,6 +502,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
   return {
     async pickRoute(input): Promise<PickRouteResult> {
+      // 上一次起会话的渠道运行中失败、失败分流判了该换渠道（#1118）：先标 disabled 写原因，下面选路读到就不再选它；标不成照抛
+      if (input.failedChannel) {
+        await markChannelDisabled(db, {
+          channelId: input.failedChannel.channelId,
+          routeId: input.failedChannel.routeId,
+          reason: input.failedChannel.reason,
+          now: clock(),
+        });
+      }
       // 引擎在停（发布、重启）：派出去的会话会被停机截断，先不派；排在最前面，不为一次派不出去的选路查库、读组织
       const stopping = deps.drain?.stopping();
       if (stopping) {
@@ -656,6 +667,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             : undefined;
           if (r.alarm) await allOpenAlarm(input.stage, input.taskId, r.alarm);
           await settled(r);
+          // 顺到谁（#1118）：失败的渠道记下这次派到了哪个渠道、哪个模型（同模型的下一个渠道；这个模型的渠道都用尽才会是别的模型）
+          if (input.failedChannel && fact.channelId !== input.failedChannel.channelId) {
+            await setChannelFallback(db, {
+              channelId: input.failedChannel.channelId,
+              fallbackChannelId: fact.channelId,
+              fallbackModelId: fact.modelId,
+              now,
+            });
+          }
           // 开 PR 前验证派出去了：规划时报的「做完没人能验」不成立了
           if (input.stage === 'verify' && families.length > 0) {
             await clearNoVerifier(input.taskId, `开 PR 前验证派出去了：${routeLabel(fact)}`);
@@ -666,6 +686,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             modelId: r.modelId,
             family: r.family,
             hostId: r.hostId,
+            channelId: fact.channelId,
             ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
             ...(reservationId ? { reservationId } : {}),
           };

@@ -68,6 +68,8 @@ export interface RouteChoice {
    * 的 orgLadder）。别的池、老历史里没有。
    */
   orgKind?: OrgKind;
+  /** 这条路由所在的渠道（routes.channel_id）：失败分流换渠道时标哪个渠道不可用。老历史里没有。 */
+  channelId?: string;
   /**
    * 选路时给这一段预占上的池的名额（PickRouteInput.reserve，#757，pool_reservations 的编号）：开跑那一行写进去时换成那一行，
    * 没开跑就收场的由起会话的那一边放掉。没要预占的选路（Fusion、对账）、老历史里没有。
@@ -115,6 +117,19 @@ export interface PickRouteInput extends Scope {
    * 池的上限那么多：选中的池在这一下被别的单占满了，按新的事实重选。不给 = 不预占（Fusion 起会话自己排队；对账只问派不派得出）。
    */
   reserve?: { segment: 'manual' | 'verify' };
+  /**
+   * 上一次起会话时这个渠道运行中失败、失败分流判了该换渠道（#1118）：选路先在 channel_states 把它标成 disabled（写原因、引发的路由），
+   * 再选；选到了别的渠道就记「顺到谁」。同一个失败重复带无妨（覆盖写）。不给 = 没有这回事。
+   */
+  failedChannel?: FailedChannel;
+}
+
+/** 渠道运行中失败（PickRouteInput.failedChannel）。reason 是失败分流的原因（带上游原文），页面原样显示。 */
+export interface FailedChannel {
+  channelId: string;
+  routeId: string;
+  modelId: string;
+  reason: string;
 }
 
 /** PickRouteInput.keepVerifier：验证那一步怎么派（流程配置、界面类），留不下时怎么办。 */

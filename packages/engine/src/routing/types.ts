@@ -11,6 +11,7 @@ export type CandidateBlocker =
   | 'switched-off'
   | 'offline'
   | 'channel-disabled'
+  | 'channel-failed'
   | 'pool-expired'
   | 'model-retired'
   | 'banned'
@@ -21,6 +22,7 @@ export const CANDIDATE_BLOCKERS: readonly CandidateBlocker[] = [
   'switched-off',
   'offline',
   'channel-disabled',
+  'channel-failed',
   'pool-expired',
   'model-retired',
   'banned',

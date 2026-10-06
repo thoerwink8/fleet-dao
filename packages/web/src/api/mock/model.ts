@@ -2,6 +2,7 @@
 import type {
   Ban,
   Channel,
+  ChannelStateRecord,
   Model,
   Pool,
   QuotaWindow,
@@ -101,6 +102,8 @@ export interface MockState {
   me: Me;
   repos: Repo[];
   channels: Channel[];
+  /** 渠道近态（#1118）：只有运行中失败出过事的渠道有行。 */
+  channelStates: ChannelStateRecord[];
   pools: Pool[];
   models: Model[];
   routes: Route[];
