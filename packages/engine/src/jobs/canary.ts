@@ -778,6 +778,29 @@ async function syncLeftoverPullAlert(
 }
 
 /**
+ * 总开关关着、这一轮被定时器跳过时（jobs/timers.ts 的 needsMaster 闸，#1086）也要做的收尾（#1141）：
+ * 收留单那套只在开单时跑（openCanaryRound），总开关关着巡检从来不跑，上一轮断了的单、PR 和报警就一直挂着——
+ * 这里把它们收掉：补记没收尾的几轮、收前几轮留下的单（放弃任务工作流、关单、关它开着的 PR）、
+ * 撤掉上一轮断了的报警（总开关关着巡检跑不了，报警一直挂着只会让人以为还断着；打开后真断了会重新报）。
+ * 只收、不开新单：总开关关着拉单不拉，开了单也永远等不到被派。收不掉的记进备注返回、不抛：下一轮跳过时接着收。
+ */
+export async function sweepCanaryLeftovers(deps: CanaryDeps): Promise<string[]> {
+  const at = deps.now();
+  const notes = await concludeAbandoned(deps, at);
+  const repo = 'error' in deps.repo ? null : deps.repo;
+  if (repo) notes.push(...(await cleanLeftovers(deps, repo, at)));
+  try {
+    await deps.alerts.resolve(
+      `引擎总开关关着，巡检这一阵不跑：上一轮断了的报警先撤下（打开后下一轮照常，断了会重新报）`,
+    );
+  } catch (err) {
+    notes.push(`上一轮断了的报警撤不掉：${errMessage(err)}`);
+  }
+  if (notes.length > 0) deps.log('info', '总开关关着，巡检跳过这一轮时收了前面断轮留下的东西', { notes });
+  return notes;
+}
+
+/**
  * 开单：记开始 → 补记没收尾的几轮、收前几轮留下的单 → 找巡检仓的当前版本 → 开单、同时挂上当前版本（正文照 #295 写全需求）。
  * 哪一步没成都算这一轮没跑成（写明停在哪）。记开始就失败：抛 CanaryNotRecordedError（这一轮在库里没有记录）。
  */

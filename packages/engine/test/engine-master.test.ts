@@ -168,6 +168,7 @@ function counters() {
     hourly: 0,
     watchdog: 0,
     canaryStarts: 0,
+    canarySweeps: 0,
   };
 }
 
@@ -219,7 +220,18 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
         count.canaryStarts += 1;
       },
     };
-    return real.map((j) => ({ ...j, run: stand[j.id] ?? (async () => {}) }));
+    return real.map((j) => ({
+      ...j,
+      run: stand[j.id] ?? (async () => {}),
+      // 巡检的 onMasterSkip（#1141）会去调 jobs.canary 装依赖收留单；这里换成计数的替身（jobs.canary 是 never）
+      ...(j.id === 'canary'
+        ? {
+            onMasterSkip: async () => {
+              count.canarySweeps += 1;
+            },
+          }
+        : {}),
+    }));
   }
 
   it('关着：拉单、巡检不跑（起会话 0 次），探针和别的看家检查至少各跑一次；被跳过的两个各记一条原因', async () => {
@@ -240,6 +252,8 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
     const skippedJobs = new Set(r.skipped.map((s) => s.jobId));
     expect([...skippedJobs].sort()).toEqual(['canary', 'intake']);
     for (const s of r.skipped) expect(s.why).toContain('总开关');
+    // 总开关关着跳过的轮次也收前面断轮留下的单（#1141）
+    expect(count.canarySweeps).toBeGreaterThanOrEqual(1);
   });
 
   it('对照：开着同样一轮，拉单、巡检都跑了（证明上面那条抓得到「关着还在拉单」）', async () => {
@@ -251,6 +265,7 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
     expect(count.sessions).toBeGreaterThanOrEqual(1);
     expect(count.canaryStarts).toBeGreaterThanOrEqual(1);
     expect(count.probes).toBeGreaterThanOrEqual(1);
+    expect(count.canarySweeps).toBe(0);
     expect(r.skipped).toEqual([]);
   });
 

@@ -4,7 +4,7 @@
 // 每小时对账、看门狗），关着照跑：创始人要关着也看得到渠道通不通。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
-import { CANARY_EVERY_HOURS, CANARY_JOB, CANARY_OFFSET_MINUTES } from './canary.ts';
+import { CANARY_EVERY_HOURS, CANARY_JOB, CANARY_OFFSET_MINUTES, sweepCanaryLeftovers } from './canary.ts';
 import { startCanaryWorkflow } from './canary-start.ts';
 import { CARPOOL_WATCH_EVERY_MINUTES, CARPOOL_WATCH_JOB, runCarpoolWatchJob } from './carpool-watch.ts';
 import {
@@ -115,6 +115,11 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       needsMaster: true,
       run: async () => {
         await startCanaryWorkflow(client, taskQueue);
+      },
+      // 总开关关着跳过的轮次也把前面断轮留下的单、PR 和报警收掉（#1141）：不然这些只在巡检真跑一轮时收，
+      // 关着期间主页一直挂着旧巡检卡、报警一直红。收不掉的记日志、不抛（timers.ts 兼住），下一轮跳过时接着收
+      onMasterSkip: async () => {
+        await sweepCanaryLeftovers(need(jobs, 'canary')(client));
       },
     },
     {

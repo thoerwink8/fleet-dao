@@ -8,7 +8,8 @@ import {
   startCanaryRun,
   startScheduleRun,
 } from '@fleet-dao/db';
-import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import type { EngineMasterState } from '@fleet-dao/shared';
 import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CANARY_STALE_MS, canaryHealth, canaryHealthCheck } from '../src/canary-health.ts';
@@ -39,6 +40,9 @@ function row(over: Partial<CanaryRunRow> = {}): CanaryRunRow {
 }
 
 const running = row({ id: 2, endedAt: null, verdict: null, stage: 'plan', startedAt: ago(5) });
+
+/** 总开关关着的几种样子（#1141）：没设过＝默认关、值认不出＝按关算、人关的＝关着。 */
+const masterOff = (why: 'never_set' | 'unreadable' | 'set') => ({ on: false as const, why });
 
 describe('canary 项怎么判', () => {
   it('最近一轮通过、不旧：好的，带一句几点通过、用了多久；这一轮在跑也写上', () => {
@@ -159,6 +163,32 @@ describe('canary 项怎么判', () => {
     });
   });
 
+  it('总开关关着（#1141）：跳过、不拿断了的旧结论报红，也没跑过什么都不说「最近一轮」；在跑的一轮也没到期限也不说「在跑」', () => {
+    const broken = row({ verdict: 'broken', stage: 'dispatch', why: '断在「派活」：挂起等人' });
+    expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('never_set'))).toEqual({
+      ok: true,
+      note: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 20:13「派活」',
+    });
+    expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('set'))).toMatchObject({
+      ok: true,
+      note: expect.stringContaining('跳过：引擎总开关关着，巡检没跑、没验'),
+    });
+    expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('unreadable'))).toMatchObject({
+      ok: true,
+      note: expect.stringContaining('跳过：引擎总开关的设置认不出，按关算'),
+    });
+    expect(canaryHealth({ finished: null, running: null }, NOW, masterOff('never_set'))).toEqual({
+      ok: true,
+      note: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验',
+    });
+    // 过了时限的没收尾的一轮：关着期间也照实说跳过，不说「巡检自己没收尾」
+    const lost = running;
+    expect(canaryHealth({ finished: broken, running: lost }, NOW, masterOff('never_set'))).toMatchObject({
+      ok: true,
+      note: expect.stringContaining('跳过：'),
+    });
+  });
+
   it('每一种对外的说法都拿演示版打包扫描的名单扫一遍：没有内部名', async () => {
     const scan = (await import(/* @vite-ignore */ SCAN)) as {
       BUILTIN_TERMS: readonly string[];
@@ -181,8 +211,14 @@ describe('canary 项怎么判', () => {
         { finished: row({ verdict: 'skipped', stage: 'open', why: 'x', endedAt: ago(24 * 60) }), running },
         NOW,
       ),
+      canaryHealth(
+        { finished: row({ verdict: 'broken', stage: 'dispatch', why: 'x' }), running: null },
+        NOW,
+        masterOff('never_set'),
+      ),
+      canaryHealth({ finished: null, running: null }, NOW, masterOff('set')),
     ].map((h) => (h.ok ? h.note : h.message));
-    expect(said).toHaveLength(9);
+    expect(said).toHaveLength(11);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });
@@ -210,13 +246,14 @@ describe('canary 项读库（真库）', () => {
       steps: [],
       at: ago(90),
     });
-    const err = await canaryHealthCheck(t.db, () => NOW)().then(
+    const masterOn = async (): Promise<EngineMasterState> => ({ on: true });
+    const err = await canaryHealthCheck(t.db, masterOn, () => NOW)().then(
       () => null,
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(PublicHealthError);
     const report = await runHealthChecks(
-      [{ name: 'canary', check: canaryHealthCheck(t.db, () => NOW) }],
+      [{ name: 'canary', check: canaryHealthCheck(t.db, masterOn, () => NOW) }],
       silentLogger,
     );
     expect(report).toEqual({
@@ -231,8 +268,38 @@ describe('canary 项读库（真库）', () => {
       at: ago(60),
     });
     await finishCanaryRun(t.db, pass, { verdict: 'pass', stage: 'board', why: null, steps: [], at: ago(10) });
-    await expect(canaryHealthCheck(t.db, () => NOW)()).resolves.toBe(
+    await expect(canaryHealthCheck(t.db, masterOn, () => NOW)()).resolves.toBe(
       '最近一轮 09-27 20:20 通过（用时 50 分钟）',
     );
+  });
+
+  it('总开关关着：库里最近一轮就算断了也不红，报跳过和原因；开关开着才照旧红（#1141）', async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [
+      { id: 'canary', name: '全流程巡检', schedule: '每 6 小时', expectEveryMinutes: 780 },
+    ]);
+    const masterOffState = async (): Promise<EngineMasterState> => ({ on: false, why: 'never_set' });
+    const masterOn = async (): Promise<EngineMasterState> => ({ on: true });
+    const broken = await startCanaryRun(t.db, {
+      scheduleRunId: await startScheduleRun(t.db, 'canary', ago(120)),
+      repo: 'acme/fleet-canary',
+      at: ago(120),
+    });
+    await finishCanaryRun(t.db, broken, {
+      verdict: 'broken',
+      stage: 'verify',
+      why: '断在「验收」：停下等人',
+      steps: [],
+      at: ago(90),
+    });
+    await expect(canaryHealthCheck(t.db, masterOffState, () => NOW)()).resolves.toBe(
+      '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 19:00「验收」',
+    );
+    const err = await canaryHealthCheck(t.db, masterOn, () => NOW)().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(PublicHealthError);
+    expect(err).toMatchObject({ code: 'canary_broken' });
   });
 });

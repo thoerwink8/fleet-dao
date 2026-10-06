@@ -2,8 +2,11 @@
 // 通过、而且不太旧：好，带一句「最近一轮 09-27 20:26 通过（用时 43 分钟）」；断了、巡检自己没跑成、太久没跑完一轮、
 // 一轮都还没跑完：红。「没跑成」和「跑了没问题」分开说（design 第六节「断链怎么被发现」第 5 层）。
 // 公网看得到 /healthz：对外只说哪一步、几点，不带仓名、单号和断的原因原文（原因只进日志，细节在卡住报警里）。
+// 引擎总开关关着时（#1086）巡检的定时任务整个不跑（jobs/timers.ts 的 needsMaster 闸）、连跳过的轮次都不写 canary_runs，
+// 这一项认得出「总开关关着＝跳过」：照实说跳过、不拿断了的旧结论报红（#1141）；开关开着、真的断了才红。
 // 不在正式环境（FLEET_ENV=production，法国是）的（开发、测试）报「未接」。这一项跟着巡检的结论自己变红，发版脚本只标待处理、不退回
 // （deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
+
 import {
   CANARY_RUN_TIMEOUT_MINUTES,
   CANARY_STAGE_NAMES,
@@ -11,6 +14,7 @@ import {
   type Db,
   latestCanaryRuns,
 } from '@fleet-dao/db';
+import type { EngineMasterState } from '@fleet-dao/shared';
 import { PublicHealthError } from './health.ts';
 
 /** 不在正式环境：这一项报「未接」（公网看得到）。 */
@@ -27,6 +31,16 @@ function stamp(at: Date): string {
   return `${s.slice(5, 10)} ${s.slice(11, 16)}`;
 }
 
+/** 总开关关着的那一种状态（含为什么关着）。 */
+type MasterOff = Extract<EngineMasterState, { on: false }>;
+
+/** 总开关为什么算关着（#1141）：没设过＝默认关；值认不出＝按关算；人关的＝关着。 */
+function masterOffWords(state: MasterOff): string {
+  if (state.why === 'never_set') return '引擎总开关从没打开过（默认关）';
+  if (state.why === 'unreadable') return '引擎总开关的设置认不出，按关算';
+  return '引擎总开关关着';
+}
+
 export type CanaryHealth =
   | { ok: true; note: string }
   | { ok: false; code: string; message: string; detail: string | undefined };
@@ -39,7 +53,19 @@ export type CanaryHealth =
 export function canaryHealth(
   latest: { finished: CanaryRunRow | null; running: CanaryRunRow | null },
   now: Date,
+  /** 引擎总开关此刻的状态（#1141）；只在关着时给（读法见 canaryHealthCheck）。开着传 undefined，照旧按各轮结论判。 */
+  masterOff?: MasterOff,
 ): CanaryHealth {
+  // 总开关关着：巡检的定时任务整个不跑、跳过的轮次不写 canary_runs，翻到的「最近一轮」可能是很久以前的断结论——
+  // 不拿它报红（#1050 的口径：关着是创始人定的状态，故意不跑不算断），照实说跳过和原因；开关打开后下一轮照常，断了会重新红。
+  if (masterOff && !masterOff.on) {
+    const { finished } = latest;
+    const last =
+      finished?.endedAt && finished.verdict
+        ? `；最近一轮有结论的是 ${stamp(finished.endedAt)}「${CANARY_STAGE_NAMES[finished.stage] ?? finished.stage}」`
+        : '';
+    return { ok: true, note: `跳过：${masterOffWords(masterOff)}，巡检没跑、没验${last}` };
+  }
   const { finished } = latest;
   const running =
     latest.running && (!finished || latest.running.startedAt.getTime() >= finished.startedAt.getTime())
@@ -104,10 +130,18 @@ export function canaryHealth(
   return { ok: true, note: `最近一轮 ${when} 通过（用时 ${minutes} 分钟）${inFlight}` };
 }
 
-/** 健康检查：现读库里最近的两轮；读不到照抛（报「连不上」，不当成没问题）。好的时候带一句说明。 */
-export function canaryHealthCheck(db: Db, now: () => Date = () => new Date()): () => Promise<string> {
+/**
+ * 健康检查：现读库里最近的两轮和引擎总开关（#1141，设置表读不到照抛——报「没查成」，不当成关着、更不当成没问题）；
+ * 读不到照抛（报「连不上」，不当成没问题）。好的时候带一句说明。
+ */
+export function canaryHealthCheck(
+  db: Db,
+  readMaster: () => Promise<EngineMasterState>,
+  now: () => Date = () => new Date(),
+): () => Promise<string> {
   return async () => {
-    const got = canaryHealth(await latestCanaryRuns(db), now());
+    const [latest, master] = await Promise.all([latestCanaryRuns(db), readMaster()]);
+    const got = canaryHealth(latest, now(), master.on ? undefined : master);
     if (!got.ok) throw new PublicHealthError(got.code, got.message, got.detail);
     return got.note;
   };

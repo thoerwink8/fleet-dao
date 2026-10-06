@@ -201,7 +201,7 @@ async function publicFailures(log: Logger) {
     await run('github-app', true, githubAppHealthCheck(judgeDb.db));
     // 全流程巡检：只有一处 new PublicHealthError（说法有几种），这里造一种；每一种说法都在 canary-health.test.ts 用同一份名单扫
     await run('canary', true, async () => {
-      await canaryHealthCheck(judgeDb.db)();
+      await canaryHealthCheck(judgeDb.db, async () => ({ on: true }))();
     });
     // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫
     await run('watchdog', true, async () => {

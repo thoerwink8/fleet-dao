@@ -4,6 +4,7 @@
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
+import type { CanaryDeps } from '../src/jobs/canary.ts';
 import { engineTimerJobs } from '../src/jobs/engine-timers.ts';
 import { latestSlot, startTimers, type TimerHost, type TimerJob } from '../src/jobs/timers.ts';
 import { ENGINE_JOBS } from '../src/real/jobs.ts';
@@ -269,6 +270,86 @@ describe('进程内定时器（startTimers）', () => {
     release();
     expect(await stopping).toEqual([]);
   });
+
+  describe('总开关关着跳过的轮次（needsMaster 闸，#1086）', () => {
+    const offMaster = () => ({
+      refresh: async () => false,
+      state: () => ({ on: false, why: 'never_set' }) as const,
+    });
+
+    it('关着：run 不跑、recordSkipped 记一笔原因、onMasterSkip 做这一跳过的收尾', async () => {
+      const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+      const seen = { ran: 0, swept: 0, skipped: [] as string[] };
+      startTimers(
+        [
+          job({
+            needsMaster: true,
+            run: async () => {
+              seen.ran += 1;
+            },
+            onMasterSkip: async () => {
+              seen.swept += 1;
+            },
+          }),
+        ],
+        {
+          ...f.host,
+          master: offMaster(),
+          recordSkipped: async (id, why) => void seen.skipped.push(`${id}:${why}`),
+        },
+      );
+      await f.advanceTo(T0 + 8 * MIN);
+      expect(seen.ran).toBe(0);
+      expect(seen.swept).toBe(2);
+      expect(seen.skipped).toHaveLength(2);
+      expect(seen.skipped[0]).toContain('总开关');
+    });
+
+    it('【故意造出的失败】onMasterSkip 抛了：只记 error 日志，不停掉定时，下一格照常跳', async () => {
+      const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+      const seen = { skipped: 0 };
+      startTimers(
+        [
+          job({
+            needsMaster: true,
+            run: async () => {},
+            onMasterSkip: async () => {
+              throw new Error('收尾没做成（测试故意造的）');
+            },
+          }),
+        ],
+        { ...f.host, master: offMaster(), recordSkipped: async () => void seen.skipped++ },
+      );
+      await f.advanceTo(T0 + 13 * MIN);
+      expect(seen.skipped).toBe(3);
+      expect(f.logs.filter((l) => l.startsWith('error:') && l.includes('收尾没做成'))).toHaveLength(3);
+    });
+
+    it('开着：不碰 onMasterSkip，run 照跑', async () => {
+      const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+      const seen = { ran: 0, swept: 0, skipped: 0 };
+      startTimers(
+        [
+          job({
+            needsMaster: true,
+            run: async () => {
+              seen.ran += 1;
+            },
+            onMasterSkip: async () => {
+              seen.swept += 1;
+            },
+          }),
+        ],
+        {
+          ...f.host,
+          master: { refresh: async () => true, state: () => ({ on: true }) as const },
+          recordSkipped: async () => void seen.skipped++,
+        },
+      );
+      await f.advanceTo(T0 + 8 * MIN);
+      expect(seen).toEqual({ ran: 2, swept: 0, skipped: 0 });
+    });
+  });
 });
 
 describe('8 个定时任务的登记（engineTimerJobs）', () => {
@@ -359,5 +440,32 @@ describe('8 个定时任务的登记（engineTimerJobs）', () => {
     start.failWith(new Error('14 UNAVAILABLE'));
     const canary = jobs().find((j) => j.id === 'canary');
     await expect(canary?.run()).rejects.toThrow('UNAVAILABLE');
+  });
+
+  it('巡检的 onMasterSkip（#1141）：总开关关着跳过时，用真端口装的依赖收前面断轮留下的东西（sweepCanaryLeftovers）', async () => {
+    const swept: string[] = [];
+    const j = fakeJobs();
+    j.canary = () =>
+      ({
+        repo: { owner: 'acme', name: 'canary' },
+        runs: { start: async () => 1, finish: async () => {} },
+        record: {
+          start: async () => 1,
+          progress: async () => true,
+          finish: async () => 'ok',
+          leftovers: async () => [],
+          abandon: async () => [],
+          cleaned: async () => {},
+        },
+        alerts: { raise: async () => {}, resolve: async (why: string) => void swept.push(`resolve:${why}`) },
+        now: () => new Date(),
+        log: () => {},
+      }) as unknown as CanaryDeps;
+    const canaryTimer = engineTimerJobs({ jobs: j, client, taskQueue: 'fleet' }).find(
+      (x) => x.id === 'canary',
+    );
+    await canaryTimer?.onMasterSkip?.();
+    expect(swept).toHaveLength(1);
+    expect(swept[0]).toContain('总开关');
   });
 });
