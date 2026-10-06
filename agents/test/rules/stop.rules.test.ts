@@ -1,15 +1,14 @@
 // 钉住 Stop 钩子（agents/hooks/stop.mjs）的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
-// 规矩两条，都不能被脚本悄悄改掉：
-// 1. 没开无人值守时只提醒、不拦、不接着聊——不管仓根干不干净、输入好不好，退出码恒为 0，输出里不许有 decision（会拦下 Stop）、
-//    不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
-// 2. 开了无人值守（unattended.mjs on，创始人 2026-10-03「选 a」）才许拦：输出 decision:block；做完、要他拍板、暂停、过期、
-//    状态读不了、连着没干活，都放行，绝不把人困住。
+// 规矩（决定 0026，创始人 2026-10-06 17:25「按照你推荐」）：
+// 1. 只提醒、不拦、不接着聊——不管仓根干不干净、输入好不好、旧的无人值守状态还在不在，退出码恒为 0，
+//    输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
+// 2. `unattended.mjs on` 不再写状态、不再挡收尾，只告诉去起脱离会话的工人。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
 // 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
 // 超时放这么宽只是兜底——挡的是「机器真的卡住了」，不是拿来盖住「一条测试起了太多子进程」：子进程的数量那边已经按规矩需要的最少次数收过（见下面那条）。
 // 同目录的先例：discuss.test.ts 的 SLOW、session-start.test.ts 的 SLOW、progress-structure.test.ts 的 SLOW。
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,123 +128,51 @@ function stop(env: NodeJS.ProcessEnv, extra: Record<string, unknown> = {}) {
 }
 const blocked = (stdout: string) => stdout.includes('"decision":"block"');
 
-describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
-  it('开着：Stop 输出 decision:block 和怎么结束的办法，退出码仍是 0；stop_hook_active 为真也照样拦（那是我们自己挡出来的）', () => {
-    const env = isolatedEnv(temp('state'), SID);
-    expect(cli(['on'], env).status).toBe(0);
-    for (const active of [false, true]) {
-      const r = stop(env, { stop_hook_active: active });
-      expect(r.status).toBe(0);
-      const out = JSON.parse(r.stdout.trim());
-      expect(out.decision).toBe('block');
-      expect(out.reason).toContain('unattended.mjs done');
-      expect(out.reason).toContain('unattended.mjs needs-you');
-    }
-  });
-
-  it('没开、或者开的是别的会话：不拦', () => {
-    const dir = temp('state');
-    expect(cli(['on'], isolatedEnv(dir, 'other-session-0002')).status).toBe(0);
-    expect(blocked(stop(isolatedEnv(dir, SID)).stdout)).toBe(false);
-  });
-
-  it('done、needs-you、off 之后都放行；done 和 needs-you 不写一句话不认', () => {
-    const env = isolatedEnv(temp('state'), SID);
-    for (const cmd of ['done', 'needs-you']) {
-      cli(['on'], env);
-      expect(cli([cmd], env).status).toBe(2);
-      expect(blocked(stop(env).stdout)).toBe(true);
-      expect(cli([cmd, '一句话'], env).status).toBe(0);
-      expect(blocked(stop(env).stdout)).toBe(false);
-    }
-    cli(['on'], env);
-    cli(['off'], env);
-    expect(blocked(stop(env).stdout)).toBe(false);
-  });
-
-  it('故意造出失败：被挡回去后连着 3 次没调工具——放行并转成暂停，写明原因（不无限空转）', () => {
-    const env = isolatedEnv(temp('state'), SID);
-    cli(['on'], env);
-    const results = [1, 2, 3, 4].map(() => stop(env));
-    expect(results.map((r) => blocked(r.stdout))).toEqual([true, true, true, false]);
-    expect(results[3]?.stdout).toContain('自动暂停');
-    expect(cli(['status'], env).stdout).toContain('paused');
-  });
-
-  it('两次挡之间调过工具（PreToolUse 记了一笔）：不算空转，可以一直挡（证明到连续 3 次空转的阈值之后仍然挡）', () => {
+describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', SLOW, () => {
+  it('on 不写状态、退出码 0，Stop 没有 decision；没有会话号也一样', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
-    cli(['on'], env);
-    const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
-    // 为什么是 4 次：unattended.mjs 的 MAX_IDLE_BLOCKS 是 3，判的是 idle >= 3 才放行，所以「连着没调工具」的第 4 次就会被放行（上一条测的就是它）。
-    // 这条要在「同一位置、但中间调过工具」时仍然挡——挡到第 4 次就正好越过那条阈值：再多是重复同一条证据，只会白起子进程（#718）。
-    // 每条循环起 1 个 Stop + 1 个 PreToolUse 子进程，本机满载时一个 0.4 秒上下，所以次数按规矩需要的最少来。
-    const ROUNDS = 4;
-    for (let i = 0; i < ROUNDS; i += 1) {
-      expect(blocked(stop(env).stdout), `第 ${i + 1} 次`).toBe(true);
-      const t = spawnSync(process.execPath, [PRETOOL], {
-        input: JSON.stringify({
-          tool_name: 'Bash',
-          tool_input: { command: 'echo hi' },
-          cwd: temp('c'),
-          session_id: SID,
-        }),
-        encoding: 'utf8',
-        env,
-      });
-      expect(t.status).toBe(0);
-    }
-    // 光看「每次都挡」还可能是空转计数根本就没动：直接读状态，证明「调过工具」那一笔确实把空转清零了、也没转成暂停
-    const s = JSON.parse(readFileSync(join(dir, `${SID}.json`), 'utf8'));
-    expect(s.state).toBe('on');
-    expect(s.idle).toBe(0);
-    expect(s.totalBlocks).toBe(ROUNDS);
-  });
-
-  it('故意造出失败：状态文件坏了 / 读不了——放行，并明说是状态读不了（不装作正常收尾，也不困住人）', () => {
-    const dir = temp('state');
-    const env = isolatedEnv(dir, SID);
-    cli(['on'], env);
-    writeFileSync(join(dir, `${SID}.json`), '{不是 JSON');
-    const bad = stop(env);
-    expect(blocked(bad.stdout)).toBe(false);
-    expect(bad.stdout).toContain('状态文件不是合法的 JSON');
-    writeFileSync(join(dir, `${SID}.json`), JSON.stringify({ state: 'on' }));
-    expect(stop(env).stdout).toContain('内容认不出');
-    rmSync(join(dir, `${SID}.json`));
-    mkdirSync(join(dir, `${SID}.json`)); // 读一个目录：读不了
-    const unreadable = stop(env);
-    expect(blocked(unreadable.stdout)).toBe(false);
-    expect(unreadable.stdout).toContain('读不了状态文件');
-  });
-
-  it('故意造出失败：过期了——放行、删掉状态、说一声', () => {
-    const dir = temp('state');
-    const env = isolatedEnv(dir, SID);
-    cli(['on'], env);
-    const file = join(dir, `${SID}.json`);
-    const s = JSON.parse(readFileSync(file, 'utf8'));
-    writeFileSync(file, JSON.stringify({ ...s, expiresAt: new Date(Date.now() - 1000).toISOString() }));
+    const turned = cli(['on'], env);
+    expect(turned.status).toBe(0);
+    expect(turned.stdout).toContain('0026');
+    expect(turned.stdout).toContain('worker.mjs');
+    expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
+    expect(cli(['on'], isolatedEnv(dir, '')).status).toBe(0);
     const r = stop(env);
+    expect(r.status).toBe(0);
     expect(blocked(r.stdout)).toBe(false);
-    expect(r.stdout).toContain('过期');
-    expect(existsSync(file)).toBe(false);
+    expect(r.stdout).not.toContain('hookSpecificOutput');
   });
 
-  it('故意造出失败：命令行拿不到会话号、不认识的命令、--hours 不合法——都明确失败（退出码非 0），不装作开成了', () => {
+  it('【故意造出的失败】旧状态文件写着开着：Stop 仍不拦，文件也不被改成暂停', () => {
     const dir = temp('state');
-    expect(cli(['on'], isolatedEnv(dir, '')).status).toBe(2);
+    const env = isolatedEnv(dir, SID);
+    const file = join(dir, `${SID}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify({
+        state: 'on',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        idle: 0,
+        totalBlocks: 40,
+        toolSinceBlock: true,
+      }),
+    );
+    const r = stop(env);
+    expect(r.status).toBe(0);
+    expect(blocked(r.stdout)).toBe(false);
+    expect(JSON.parse(readFileSync(file, 'utf8')).state).toBe('on');
+  });
+
+  it('不认识的命令明确失败；没开过就 done，也明确失败，不装作收尾了', () => {
+    const dir = temp('state');
     const env = isolatedEnv(dir, SID);
     expect(cli(['乱来'], env).status).toBe(2);
-    expect(cli(['on', '--hours', '0'], env).status).toBe(2);
-    expect(cli(['on', '--hours', '99'], env).status).toBe(2);
-    expect(cli(['on', '--hours', 'abc'], env).status).toBe(2);
     expect(cli(['done', '没开过'], env).status).toBe(1);
     expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
   });
 
-  // 创始人 2026-10-05「全都按照你推荐的改」：干活中间问话，一次答完并送到手上（起因见 unattended.mjs「创始人的话到了」那段）
-  describe('这一轮结束不了的时候，创始人的话必须送到他手上', () => {
+  describe('他说了话：收尾清账，工具不被拦', () => {
     const PROMPT_LOG = fileURLToPath(new URL('../../hooks/prompt-log.mjs', import.meta.url));
     const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
     const say = (env: NodeJS.ProcessEnv, prompt: string) =>
@@ -265,7 +192,6 @@ describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
         env,
       });
     const owedPath = (dir: string) => join(dir, `${SID}.owed.json`);
-    /** 把欠账的时间往回拨，免得测试真等 10 分钟 */
     const age = (dir: string, minutes: number) => {
       const o = JSON.parse(readFileSync(owedPath(dir), 'utf8'));
       writeFileSync(
@@ -273,53 +199,37 @@ describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
         JSON.stringify({ ...o, at: new Date(Date.now() - minutes * 60_000).toISOString() }),
       );
     };
+    const leaveOn = (dir: string) => {
+      writeFileSync(
+        join(dir, `${SID}.json`),
+        JSON.stringify({
+          state: 'on',
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          idle: 0,
+          totalBlocks: 0,
+          toolSinceBlock: true,
+        }),
+      );
+    };
 
-    it('他说了话、这一轮被挡回去：挡回的话里点名那句话，并说清怎么送（deliver_artifact / PushNotification）', () => {
+    it('旧状态还开着、话欠了 11 分钟：工具放行（退出码 0），收尾清账、不拦', () => {
       const dir = temp('state');
       const env = isolatedEnv(dir, SID);
-      cli(['on'], env);
-      const r = say(env, '这样改合理吗？断链在哪');
-      expect(r.status).toBe(0);
-      expect(r.stdout).toBe(''); // 消息提交钩子照旧一个字不出
-      const out = JSON.parse(stop(env).stdout.trim());
-      expect(out.decision).toBe('block');
-      expect(out.reason).toContain('这样改合理吗？断链在哪');
-      expect(out.reason).toContain('deliver_artifact');
-      expect(out.reason).toContain('不要在后面每一步开头再重说');
-    });
-
-    it('欠了超过 10 分钟：下一次工具调用被拦一次（退出码 2），再下一次放行——只提醒，不困住人', () => {
-      const dir = temp('state');
-      const env = isolatedEnv(dir, SID);
-      cli(['on'], env);
-      say(env, '这样改合理吗？断链在哪');
-      expect(tool(env, 'Bash').status).toBe(0); // 刚说的，不拦
+      leaveOn(dir);
+      expect(say(env, '这样改合理吗？断链在哪').status).toBe(0);
       age(dir, 11);
       const nag = tool(env, 'Bash');
-      expect(nag.status).toBe(2);
-      expect(nag.stderr).toContain('还没有东西送到他手上');
-      expect(tool(env, 'Bash').status).toBe(0);
-    });
-
-    it('调了送达类工具就清账：之后不拦，挡回的话里也不再点名', () => {
-      const dir = temp('state');
-      const env = isolatedEnv(dir, SID);
-      cli(['on'], env);
-      say(env, '这样改合理吗？断链在哪');
-      age(dir, 11);
-      expect(tool(env, 'mcp__mirasim__deliver_artifact', { path: 'D:/x/answer.md' }).status).toBe(0);
-      expect(existsSync(owedPath(dir))).toBe(false);
-      expect(tool(env, 'Bash').status).toBe(0);
-      expect(JSON.parse(stop(env).stdout.trim()).reason).not.toContain('还没有东西送到他手上');
-    });
-
-    it('这一轮正常结束（没开无人值守）：不拦工具，收尾时清账——最后一条就是答复', () => {
-      const dir = temp('state');
-      const env = isolatedEnv(dir, SID);
-      say(env, '这样改合理吗？断链在哪');
-      age(dir, 11);
-      expect(tool(env, 'Bash').status).toBe(0);
+      expect(nag.status).toBe(0);
+      expect(nag.stderr).not.toContain('还没有东西送到他手上');
       expect(blocked(stop(env).stdout)).toBe(false);
+      expect(existsSync(owedPath(dir))).toBe(false);
+    });
+
+    it('调了送达类工具就清账', () => {
+      const dir = temp('state');
+      const env = isolatedEnv(dir, SID);
+      say(env, '这样改合理吗？断链在哪');
+      expect(tool(env, 'mcp__mirasim__deliver_artifact', { path: 'D:/x/answer.md' }).status).toBe(0);
       expect(existsSync(owedPath(dir))).toBe(false);
     });
 
@@ -336,23 +246,20 @@ describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
       }
     });
 
-    it('故意造出失败：欠账文件坏了——不拦、不崩，当没欠（这里只是提醒，读不了不能变成拦）', () => {
+    it('【故意造出的失败】欠账文件坏了：不拦、不崩', () => {
       const dir = temp('state');
       const env = isolatedEnv(dir, SID);
-      cli(['on'], env);
-      mkdirSync(dir, { recursive: true });
+      leaveOn(dir);
       writeFileSync(owedPath(dir), '{不是 JSON');
-      expect(tool(env, 'Bash').status).toBe(0);
-      const out = JSON.parse(stop(env).stdout.trim());
-      expect(out.decision).toBe('block');
-      expect(out.reason).not.toContain('还没有东西送到他手上');
+      const nag = tool(env, 'Bash');
+      expect(nag.status).toBe(0);
+      expect(blocked(stop(env).stdout)).toBe(false);
     });
   });
 
-  it('开会话钩子读得到：开着给一句话、暂停给一句话、没开什么都不给', () => {
+  it('开会话不再塞「这一轮不要结束」；暂停过的只留原因', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
-    // 经子进程调 sessionLines：.mjs 没有类型声明，不在 TS 里直接 import
     const lines = (): string[] => {
       const code = `import { sessionLines } from ${JSON.stringify(UNATTENDED_URL)}; console.log(JSON.stringify(sessionLines({ dir: process.env.FLEET_UNATTENDED_DIR, sessionId: process.env.CLAUDE_CODE_SESSION_ID })));`;
       const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
@@ -360,9 +267,28 @@ describe('规矩：开着无人值守才拦，其余一律放行', SLOW, () => {
       return JSON.parse(r.stdout.trim());
     };
     expect(lines()).toEqual([]);
-    cli(['on'], env);
-    expect(lines().join('')).toContain('无人值守开着');
-    cli(['needs-you', '要花钱'], env);
-    expect(lines().join('')).toContain('暂停着（要花钱）');
+    writeFileSync(
+      join(dir, `${SID}.json`),
+      JSON.stringify({
+        state: 'on',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        idle: 0,
+        totalBlocks: 0,
+      }),
+    );
+    expect(lines()).toEqual([]);
+    writeFileSync(
+      join(dir, `${SID}.json`),
+      JSON.stringify({
+        state: 'paused',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        idle: 0,
+        totalBlocks: 0,
+        note: '要花钱',
+      }),
+    );
+    expect(lines().join('')).toContain('暂停过（要花钱）');
+    expect(lines().join('')).toContain('可以结束');
+    expect(lines().join('')).not.toContain('不要结束');
   });
 });

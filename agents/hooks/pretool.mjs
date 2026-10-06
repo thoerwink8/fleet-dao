@@ -9,15 +9,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freshBeforeSubagent, SUBAGENT_DIRECT_MS, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy } from './git-run.mjs';
-import {
-  armForBackground,
-  cleanId,
-  DELIVERY_TOOLS,
-  nagIfOwed,
-  startsBackground,
-  stateDir,
-  touchTool,
-} from './unattended.mjs';
+import { cleanId, DELIVERY_TOOLS, nagIfOwed, stateDir, touchTool } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2155,24 +2147,20 @@ if (isMain()) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${errCode(err) ?? err}），按拦处理\n`);
     process.exit(2);
   }
-  // 无人值守开着时，记一笔「这个会话调了工具」（Stop 钩子靠它判有没有在干活）；只记不判，出错吞掉，不影响下面的放行或拦下
+  // 旧状态文件还在时记一笔「调了工具」；决定 0026 之后收尾不再读它。出错吞掉。
   let backgroundOnly = false;
   try {
     /** @type {unknown} */
     const input = JSON.parse(raw);
     const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
     if (id) touchTool({ dir: stateDir(), sessionId: id });
-    // 子代理的调用：下面「起后台活自动开无人值守」「欠账催送」都是主会话和创始人之间的事，子代理一律不记不催（isSubagentCall 的注释）
+    // 决定 0026：不再因起后台活自动开无人值守。Agent、Monitor、Workflow 仍登记在这条钩子上，
+    // 见到就放行（decide 不认识它们的名字，不放行会被拦）。
     const sub = isSubagentCall(input);
-    // 起后台活（子代理、监视、后台命令）：自动开一个短的无人值守，这一轮就不能先收尾（unattended.mjs 的 armForBackground）。
-    // Agent、Monitor、Workflow 登记到这条钩子上只为了在这儿记一笔，不是要判它们（decide 不认识它们的名字会按拦处理）
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
-    const toolInput = prop(input, 'tool_input') ?? prop(input, 'toolInput');
-    if (id && !sub && startsBackground(tool, toolInput)) armForBackground({ dir: stateDir(), sessionId: id });
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
-    // 创始人的话欠着没送达：送达类工具清账；这一轮结束不了又欠了太久，把这一次调用拦下、只拦一次（unattended.mjs 的 nagIfOwed）。
-    // 欠账文件坏了、这一步自己出错：只往 stderr 写一句，不拦
+    // 送达类工具清账。不再因欠账拦工具（决定 0026）。欠账文件坏了只往 stderr 写一句，不拦。
     const nag = id && !sub ? nagIfOwed({ dir: stateDir(), sessionId: id, tool }) : null;
     if (nag) process.stderr.write(`${nag.message}\n`);
     if (nag?.block) process.exit(2);

@@ -133,7 +133,7 @@ export interface HookTarget {
 /**
  * 钩子装到哪。Claude Code 的用户级钩子在 ~/.claude/settings.json 的 hooks 里（code.claude.com/docs/en/hooks）：
  * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看；Stop 平时只提醒（systemMessage），
- * 退出码恒为 0（Stop 上 exit 2 是「不许停」）；只有开了无人值守（agents/hooks/unattended.mjs）才输出 decision:block 挡住收尾。
+ * 退出码恒为 0（Stop 上 exit 2 是「不许停」）。决定 0026 之后 Stop 不再输出 decision:block，开了无人值守也不挡收尾。
  * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
@@ -148,8 +148,8 @@ export interface HookTarget {
  * match」）：第一组它一个都匹配不上，所以另登记锚定的一组 ^(exec|read|grep)$（不锚定的 read 会连 notebook_read、
  * read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、Cursor 里匹配不到
  * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
- * 第一组还挂了 Agent、Task、Monitor、Workflow：不是要判它们，是起后台活的这一下要记一笔、自动开一个短的无人值守（agents/hooks/unattended.mjs 的
- * armForBackground，创始人 2026-10-04「选 1」），pretool.mjs 见到这几个名字记完就放行。
+ * 第一组还挂了 Agent、Task、Monitor、Workflow：不是要判它们。决定 0026 删掉了「起后台活自动开无人值守」，
+ * pretool.mjs 见到这几个名字记完就放行（decide 不认识它们的名字，不放行会被拦）。
  * mcp__mirasim__deliver_artifact、PushNotification 同理：调了它们算「创始人的话送到他手上了」，记一笔清账就放行（unattended.mjs 的 DELIVERY_TOOLS，两边一起改）。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠无人值守兜底。
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
  */

@@ -1,8 +1,7 @@
-// 钉住「起了后台活就自动开一个短的无人值守」（改标准：改这个文件要创始人同意，agents/test/rules/ 在清单里）。
-// 规矩（创始人 2026-10-04「选 1」）：子代理、监视、工作流、后台命令都挂在会话进程上，一轮结束、进程一重开就一起被杀，
-// 没有谁会被完成通知叫醒（#754 的测试和三个监视任务就是这么没的）。所以起后台活的那一下，调工具前钩子自动开一个 30 分钟的无人值守，
-// 这一轮想结束会被挡回来；全收口跑 done 放行；忘了跑也不困人（到期、连着 3 次没干活都自动放行）。
-// 脚本改了这条，这里会红；含故意造出的失败：前台子代理不开、手动开的更长的不被缩短、状态认不出不覆盖、认不出的工具名不被拦。
+// 钉住「起了后台活不再自动挡收尾」（决定 0026，创始人 2026-10-06 17:25「按照你推荐」）。
+// 2026-10-04「选 1」曾经：起子代理、监视、后台命令就自动开 30 分钟无人值守，Stop 把收尾挡回去。
+// 那条把普通对话按住几小时，也让引导要等的下一轮对账迟迟不来。现在 armForBackground 不写状态，decideStop 不拦。
+// 认不出的工具名仍按拦处理。改标准：改这个文件要创始人同意。
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -74,75 +73,41 @@ describe('哪些调用算起了后台活', () => {
   });
 });
 
-describe('自动开', () => {
-  const NOW = Date.parse('2026-10-04T12:00:00Z');
+describe('不再自动挡收尾', () => {
+  const NOW = Date.parse('2026-10-06T12:00:00Z');
 
-  it('没开过：开成 auto，30 分钟，Stop 把收尾挡回去，reason 说的是后台活、给 done 命令', () => {
+  it('起了后台活：不写状态，Stop 不拦', () => {
     const dir = tmp();
-    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW })).toEqual({ armed: true });
-    const s = read(dir);
-    expect(s).toMatchObject({ state: 'on', auto: true });
-    expect(Date.parse(s.expiresAt) - NOW).toBe(30 * 60_000);
-    const stop = lib.decideStop({ dir, sessionId: SID, now: NOW + 60_000 });
-    expect(stop.block).toBe(true);
-    expect(stop.reason).toMatch(/后台活/);
-    expect(stop.reason).toMatch(/unattended\.mjs done/);
+    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW })).toEqual({
+      armed: false,
+      why: expect.stringMatching(/0026/),
+    });
+    expect(() => read(dir)).toThrow();
+    expect(lib.decideStop({ dir, sessionId: SID, now: NOW + 60_000 }).block).toBe(false);
   });
 
-  it('跑 done 放行；done 之后再起后台活重新开；暂停的也重新开', () => {
-    const dir = tmp();
-    lib.armForBackground({ dir, sessionId: SID, now: NOW });
-    const f = join(dir, `${SID}.json`);
-    writeFileSync(f, JSON.stringify({ ...read(dir), state: 'done' }));
-    expect(lib.decideStop({ dir, sessionId: SID, now: NOW + 1000 }).block).toBe(false);
-    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW + 2000 }).armed).toBe(true);
-    expect(lib.decideStop({ dir, sessionId: SID, now: NOW + 3000 }).block).toBe(true);
-    writeFileSync(f, JSON.stringify({ ...read(dir), state: 'paused' }));
-    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW + 4000 }).armed).toBe(true);
-  });
-
-  it('再起一个后台活：自动开的续到再过 30 分钟', () => {
-    const dir = tmp();
-    lib.armForBackground({ dir, sessionId: SID, now: NOW });
-    const later = NOW + 20 * 60_000;
-    expect(lib.armForBackground({ dir, sessionId: SID, now: later })).toEqual({ armed: false, kept: true });
-    expect(Date.parse(read(dir).expiresAt) - later).toBe(30 * 60_000);
-  });
-
-  it('【故意造出的失败】创始人手动开的（8 小时）不被缩成 30 分钟，也不改成 auto', () => {
+  it('【故意造出的失败】旧的「开着」状态文件还在：不续期、不改内容，Stop 仍不拦', () => {
     const dir = tmp();
     const eight = new Date(NOW + 8 * 3_600_000).toISOString();
-    writeFileSync(
-      join(dir, `${SID}.json`),
-      JSON.stringify({ state: 'on', expiresAt: eight, idle: 0, totalBlocks: 0, toolSinceBlock: true }),
-    );
-    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW })).toEqual({ armed: false, kept: true });
-    const s = read(dir);
-    expect(s.expiresAt).toBe(eight);
-    expect(s.auto).toBeUndefined();
+    const before = JSON.stringify({
+      state: 'on',
+      expiresAt: eight,
+      idle: 0,
+      totalBlocks: 0,
+      toolSinceBlock: true,
+    });
+    writeFileSync(join(dir, `${SID}.json`), before);
+    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW }).armed).toBe(false);
+    expect(readFileSync(join(dir, `${SID}.json`), 'utf8')).toBe(before);
+    expect(lib.decideStop({ dir, sessionId: SID, now: NOW + 1000 }).block).toBe(false);
   });
 
-  it('【故意造出的失败】状态文件认不出：不覆盖，返回为什么；会话号不合法：不写', () => {
+  it('【故意造出的失败】状态文件认不出：不覆盖', () => {
     const dir = tmp();
     const f = join(dir, `${SID}.json`);
     writeFileSync(f, '{坏了');
-    const r = lib.armForBackground({ dir, sessionId: SID, now: NOW });
-    expect(r.armed).toBe(false);
-    expect(r.why).toMatch(/JSON|读不了|认不出/);
+    expect(lib.armForBackground({ dir, sessionId: SID, now: NOW }).armed).toBe(false);
     expect(readFileSync(f, 'utf8')).toBe('{坏了');
-    expect(lib.armForBackground({ dir, sessionId: '../x', now: NOW })).toMatchObject({ armed: false });
-  });
-
-  it('忘了跑 done 也不困人：30 分钟一到放行；连着 3 次挡回去都没调工具就暂停', () => {
-    const dir = tmp();
-    lib.armForBackground({ dir, sessionId: SID, now: NOW });
-    expect(lib.decideStop({ dir, sessionId: SID, now: NOW + 31 * 60_000 }).block).toBe(false);
-    const dir2 = tmp();
-    lib.armForBackground({ dir: dir2, sessionId: SID, now: NOW });
-    const blocks = [1, 2, 3, 4].map(
-      (i) => lib.decideStop({ dir: dir2, sessionId: SID, now: NOW + i * 1000 }).block,
-    );
-    expect(blocks).toEqual([true, true, true, false]);
   });
 });
 
@@ -159,20 +124,20 @@ describe('真的当钩子跑（pretool.mjs）', () => {
     ['Monitor', { command: 'until false; do sleep 1; done' }],
     ['Agent', { prompt: 'x', description: 'y' }],
     ['Workflow', { script: 'x' }],
-  ])('%s：登记过的非判断类工具——开了无人值守、钩子放行（不会被「认不出工具名」拦下）', (tool, input) => {
+  ])('%s：登记过的非判断类工具——放行，并且不自动开无人值守', (tool, input) => {
     const dir = tmp();
     const r = run(dir, tool, input);
     expect(r.status).toBe(0);
     expect(r.stderr).toBe('');
-    expect(read(dir)).toMatchObject({ state: 'on', auto: true });
+    expect(() => read(dir)).toThrow();
   });
 
-  it('后台命令：照常判（危险的照拦），不危险的放行并开；前台的不开', () => {
+  it('后台命令：照常判（危险的照拦），不危险的放行；前台、后台都不开无人值守', () => {
     const dir = tmp();
     expect(run(dir, 'Bash', { command: 'echo hi' }).status).toBe(0);
     expect(() => read(dir)).toThrow();
     expect(run(dir, 'Bash', { command: 'echo hi', run_in_background: true }).status).toBe(0);
-    expect(read(dir)).toMatchObject({ state: 'on', auto: true });
+    expect(() => read(dir)).toThrow();
   });
 
   it('【故意造出的失败】前台子代理不开；认不出的工具名仍按拦处理（只放行登记过的那几个）', () => {
