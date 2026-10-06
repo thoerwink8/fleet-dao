@@ -215,6 +215,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     record(w.home, w.work, v1);
     expect(hook.syncFleet({ home: w.home, git, sync: fakeSync().sync })).toMatch(/已同步到主线最新/);
     rmSync(join(w.home, '.fleet-dao', 'session-sync.ok'), { force: true });
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.date'), { force: true });
     const v2 = w.push('v2\n');
     const f = fakeSync({
       stdout: [
@@ -260,6 +261,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(f.calls).toHaveLength(1);
     const old = new Date(Date.now() - hook.QUIET_MS - 60_000);
     utimesSync(join(w.home, '.fleet-dao', 'session-sync.ok'), old, old);
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.date'), { force: true });
     hook.syncFleet({ home: w.home, git, sync: f.sync });
     expect(f.calls).toHaveLength(2);
   });
@@ -396,6 +398,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(f.calls).toHaveLength(1);
     writeFileSync(join(w.home, '.fleet-dao', 'synced.json'), '{ 坏了');
     rmSync(join(w.home, '.fleet-dao', 'session-sync.ok'), { force: true });
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.date'), { force: true });
     const f2 = fakeSync();
     const line = hook.syncFleet({ home: w.home, git, sync: f2.sync });
     expect(f2.calls).toHaveLength(1);
@@ -409,6 +412,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     const f = fakeSync();
     hook.syncFleet({ home: w.home, git, sync: f.sync });
     rmSync(join(w.home, '.fleet-dao', 'session-sync.ok'), { force: true });
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.date'), { force: true });
     const before = g(mirrorIn(w.home), 'rev-parse', 'HEAD');
     g(mirrorIn(w.home), 'remote', 'set-url', 'origin', join(w.root, 'nope.git'));
     const f2 = fakeSync();
