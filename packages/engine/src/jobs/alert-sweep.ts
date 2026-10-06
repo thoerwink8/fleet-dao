@@ -34,7 +34,12 @@
 //   历史上 unclaimed:<提醒>:…、stuck:<提醒>:…（已删的「提醒派单」推出来的）、ask-issue:<提问>、ask-answer:<提问>
 //   （已删的对账给提问另开单推出来的，#530）如果还开着，不再有代码去撤它们，落进下面「判不了、还没接的」那一档，
 //   只靠 24 小时再推。
-// - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）。
+// - 判不了、还没接的，24 小时再推一次，开着 3 天没人动就按「过期」撤（过期兜底，下一条）：<工作流>:failure:<规则>（封号、换池接着干这类通报，
+//   条件就是「发生过」，要人知道）。
+// - 过期兜底（EXPIRE_AFTER_MS）：上面所有的判法、工作树那一部分、别处自己会撤的（SELF_RESOLVING_PREFIXES）都不管的提醒——没有谁
+//   能判它还在不在——最近一次被报（updated_at；条件还在的报警者每次再报都会刷新它）过了 3 天，就标「已撤：过期」（写 resolved_at、
+//   谁撤的和原因，记录不删）。要人拍的（level = decision）不在此列：那是等人定的事，不是等条件过去的提醒。真的还在的，
+//   报警者下一次再报会重新打开（upsert 把已处理的重新打开）。新加一种自己会撤的提醒，前缀加进 SELF_RESOLVING_PREFIXES。
 
 import { type AlertStage, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
@@ -65,6 +70,34 @@ export const REMIND_AFTER_MS = 24 * 60 * 60_000;
  * 之前那一次（人点继续以后又挂起了）。留一分钟余量：两个时刻一个是工作流的钟、一个是库的钟。
  */
 export const PARK_MATCH_SLACK_MS = 60_000;
+/** 过期兜底：没有判法的提醒，这么久没被再报过就撤（标「已撤：过期」）。 */
+export const EXPIRE_AFTER_MS = 3 * 24 * 60 * 60_000;
+/**
+ * 别处自己会撤（或只有人撤）的提醒键前缀：过期兜底不碰它们（它们的条件可以一直在好几天，撤了就是把真问题藏起来）。
+ * 清单抄上面「各种提醒谁来撤」那一段；备份脚本的键是 backup.<项>:…（deploy/backup/fleet-backup.sh）。
+ * 新加一种自己会撤的提醒，前缀加这里（packages/engine/test/real/hourly-reconcile.test.ts 对着这份清单造过期用例）。
+ */
+export const SELF_RESOLVING_PREFIXES: readonly string[] = [
+  'pool-hold:',
+  'session-org:',
+  'flow-config:',
+  'deploy-lag:',
+  'auto-release:',
+  'backup',
+  'canary:',
+  'watchdog:',
+  'watchdog-down:',
+  'github-app:',
+  'reconcile:',
+  'quota-read:',
+  'route-wake:',
+  'carpool-cap:',
+  'engine-drain',
+  'engine-session-io',
+  'retired-schedule:',
+  'cursor-pending:',
+  'mirasim-pending:',
+];
 /** 「「<阶段>」没有能用的路由」挂着时，路由恢复了写在正文开头的那一句以它开头（再恢复、再没了按它认出来换掉）。 */
 export const ROUTE_BACK_PREFIX = '路由已经恢复';
 
@@ -248,6 +281,9 @@ export const RULES: readonly Rule[] = [
   },
 ];
 
+/** 别处自己会撤的：过期兜底不碰。 */
+const resolvesItself = (key: string) => SELF_RESOLVING_PREFIXES.some((p) => key.startsWith(p));
+
 /** 工作树那一部分撤的，这里不碰。 */
 const handledByTrees = (key: string) =>
   SUBTASK_TREE_ALERT.test(key) || FUSION_TREE_ALERT.test(key) || key.startsWith(KEEP_ALERT_PREFIX);
@@ -354,9 +390,11 @@ export async function sweepAlerts(
   // 1. 条件没了的撤掉；还在的留着（路由恢复了的改一句正文）
   for (const alert of open) {
     if (alert.dedupeKey.startsWith(REMIND_PREFIX) || handledByTrees(alert.dedupeKey)) continue;
+    let judged = false;
     for (const rule of RULES) {
       const m = rule.pattern.exec(alert.dedupeKey);
       if (!m) continue;
+      judged = true;
       try {
         const verdict = await rule.judge(deps, alert, m);
         if ('resolve' in verdict) await resolve(c, alert, verdict.resolve);
@@ -371,6 +409,21 @@ export async function sweepAlerts(
         c.part.unchecked.push(`提醒 ${alert.dedupeKey}（${rule.name}）没查成：${errMessage(err)}`);
       }
       break;
+    }
+    // 过期兜底：没有判法、别处也不撤的，三天没被再报过就撤
+    if (!judged && alert.level !== 'decision' && !resolvesItself(alert.dedupeKey)) {
+      const idle = deps.now().getTime() - alert.updatedAt.getTime();
+      if (idle > EXPIRE_AFTER_MS) {
+        try {
+          await resolve(
+            c,
+            alert,
+            `过期：这种提醒没有办法自动判断条件还在不在，北京时间 ${stamp(alert.updatedAt)} 报过之后已经 ${duration(idle)} 没被再报，按过期撤了。条件要是还在，报警者下一次再报会重新打开`,
+          );
+        } catch (err) {
+          c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的过期撤销没做成：${errMessage(err)}`);
+        }
+      }
     }
   }
   // 2. 还开着的卡住报警（工作树的也算），超过 24 小时没人处理就再推；有人在处理、静默了的不推

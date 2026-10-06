@@ -991,6 +991,70 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect(gone?.body).toContain('有路由不熔断了');
     expect(gone?.body).toContain('写码有路由不熔断了');
   });
+
+  it('【故意造出的失败】过期兜底：没有判法的提醒 3 天没被再报就撤成「已撤：过期」（记录不删）；有判法的、别处自己撤的、要人拍的、刚被再报的、没满 3 天的都不被误撤', async () => {
+    probeDir();
+    const now = new Date();
+    const old = new Date(now.getTime() - 4 * 24 * HOUR);
+    // 没有任何判法的（已删的「提醒派单」推出来的老键、工作流通报）：该过期
+    await alert('unclaimed:abc:1', { title: '老提醒没人接' });
+    await alert('wf:failure:account-banned', { title: '账号被封了' });
+    // 有判法的：条件还在（mq 工作流在跑、全熔断还在）就留着，再老也不撤
+    await alert('mq:acme/widgets:decide', { title: '合并队列判断出错' });
+    await alert('routing:all-open:execute', { title: '「execute」阶段的路由全都熔断了' });
+    // 别处自己会撤的、要人拍的：不归这条兜底
+    await alert('deploy-lag:2026-10-01', { title: '线上版本跟不上主线' });
+    await alert('auto-release:failed:abc', { title: '自动发布没成' });
+    await alert('backup.stale:nightly', { title: '夜间备份没开跑' });
+    await alert('someone:asks-human', { level: 'decision', title: '等你拍' });
+    for (const key of [
+      'unclaimed:abc:1',
+      'wf:failure:account-banned',
+      'mq:acme/widgets:decide',
+      'routing:all-open:execute',
+      'deploy-lag:2026-10-01',
+      'auto-release:failed:abc',
+      'backup.stale:nightly',
+      'someone:asks-human',
+    ]) {
+      await backdate(key, old);
+    }
+    // 老提醒但刚被再报过（updated_at 是新的）：条件还在，不撤
+    await alert('unclaimed:fresh-again', { title: '老键但刚又报了' });
+    await backdate('unclaimed:fresh-again', old, new Date(now.getTime() - 2 * HOUR));
+    // 没满 3 天
+    await alert('unclaimed:two-days', { title: '才两天' });
+    await backdate('unclaimed:two-days', new Date(now.getTime() - 2 * 24 * HOUR));
+
+    const wf = fakeWorkflows({ 'mq:acme/widgets': { state: 'running' } });
+    const run = await runHourlyReconcileJob(
+      deps({ now: () => now, workflows: wf.reader, stageAllOpen: async () => ({ allOpen: true }) }),
+    );
+    expect(run.outcome).toBe('ok');
+
+    for (const key of ['unclaimed:abc:1', 'wf:failure:account-banned']) {
+      const gone = await alertByKey(t.db, key);
+      expect(gone?.resolvedAt, key).not.toBeNull();
+      expect(gone?.resolvedBy, key).toBe(RECONCILE_ACTOR);
+      expect(gone?.body.startsWith('已撤：过期：'), key).toBe(true);
+    }
+    for (const key of [
+      'mq:acme/widgets:decide',
+      'routing:all-open:execute',
+      'deploy-lag:2026-10-01',
+      'auto-release:failed:abc',
+      'backup.stale:nightly',
+      'someone:asks-human',
+      'unclaimed:fresh-again',
+      'unclaimed:two-days',
+    ]) {
+      const kept = await alertByKey(t.db, key);
+      expect(kept, key).not.toBeNull();
+      expect(kept?.resolvedAt, `${key} 不该被过期兜底撤`).toBeNull();
+    }
+    // 记录都还在（不删）
+    expect(await alertByKey(t.db, 'unclaimed:abc:1')).not.toBeNull();
+  });
 });
 
 describe('没人处理的卡住报警：超过 24 小时再推一次，一天最多一次', { timeout: 60_000 }, () => {
