@@ -691,7 +691,7 @@ function drivers(run: HostRunners, sessionProxy?: string) {
   });
 }
 
-describe('会话出网经的代理（#731：本机档经 Windows 上的 Clash，法国直连）', () => {
+describe('会话出网经的代理（#731：登记了就经代理，法国直连）', () => {
   const PROXY = 'http://127.0.0.1:7890';
   const env = { FLEET_MACHINE_NAME: '本机', DATABASE_URL: 'postgres:///fleet' };
   const proxyKeys = (built: Record<string, string>) =>
@@ -716,7 +716,7 @@ describe('会话出网经的代理（#731：本机档经 Windows 上的 Clash，
       spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: randomUUID() } }),
       {},
     );
-    // 【故意造出的失败】登记了代理、这两家的会话环境里却没有：这里就红（本机档直连出不了网，x.ai 直连 12 秒超时）
+    // 【故意造出的失败】登记了代理、这两家的会话环境里却没有：这里就红（x.ai 直连不通时 12 秒超时）
     for (const input of [grok.specs[0]?.env, cursor.specs[0]?.env]) {
       const { built, envArgs } = launched(input);
       expect(built).toMatchObject({

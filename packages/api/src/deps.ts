@@ -70,7 +70,7 @@ export interface Deps {
   routingOrder?: RoutingOrderPort | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
-   * （main.ts 的 production；法国和本机档都是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。
+   * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。
    */
   deployLag?: (() => DeployLagInput) | undefined;
   /**

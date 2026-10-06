@@ -79,7 +79,7 @@ describe('认出来', () => {
     expect(first?.scopeId).not.toBe(second?.scopeId);
   });
 
-  it('本机档登记了会话代理：org list 写成 /usr/bin/env 带六个代理变量再跑 reclaude（直连 reclaude 服务端时通时不通）；不登记（法国）一个字不加', async () => {
+  it('登记了会话代理：org list 写成 /usr/bin/env 带六个代理变量再跑 reclaude（直连 reclaude 服务端时通时不通）；不登记（法国）一个字不加', async () => {
     await readSessionOrg({ ...deps(), proxy: 'http://127.0.0.1:7890' });
     await readSessionOrg(deps());
     const [viaProxy, direct] = rig.calls;

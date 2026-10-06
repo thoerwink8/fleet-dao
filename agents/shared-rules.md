@@ -38,6 +38,6 @@
 
 ## 我的机器与模型
 - Claude 一律经 reclaude 起；设备上有 Claude 会话在跑时，别在这台设备上 `reclaude org use` 切号：会话会当场全断。
-- GPT 系不做界面类的活（包括审界面）；机器派的会话（引擎、工人、路由）、子代理、VPS 和 WSL 上的会话永不用 Fable，子代理只用 Sonnet 或 Opus（优先 Sonnet）；Fable 只在我本机的主对话里由我自己选。
+- GPT 系不做界面类的活（包括审界面）；机器派的会话（引擎、工人、路由）、子代理、VPS 上的会话永不用 Fable，子代理只用 Sonnet 或 Opus（优先 Sonnet）；Fable 只在我本机的主对话里由我自己选。
 
 <!-- fleet-dao:通用段 结束 -->

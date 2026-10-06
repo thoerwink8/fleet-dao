@@ -1,4 +1,4 @@
-// 引擎自己的 git 出网经会话代理（real/git-env.ts，#786 同一个根）：本机档登记了代理，git 子进程的环境里就带 http(s)_proxy；
+// 引擎自己的 git 出网经会话代理（real/git-env.ts，#786 同一个根）：登记了代理，git 子进程的环境里就带 http(s)_proxy；
 // 法国不登记一个字不加；代理认不出直接抛、不悄悄直连；凭据类变量照旧被 gitEnv 去掉。
 import { gitEnv } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';

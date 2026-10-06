@@ -48,7 +48,7 @@ export const EnvMasterSchema = z.object({
   detail: z.string(),
 });
 
-/** 在用版本、落后主线没有、最近一次发布。只在正式环境有（法国和本机档都是）；别的环境读不到标记，照实报到 problems / reason。 */
+/** 在用版本、落后主线没有、最近一次发布。只在正式环境有（法国是）；别的环境读不到标记，照实报到 problems / reason。 */
 export const EnvVersionSchema = z.object({
   /** 在用的提交号；还没发布过是 null。 */
   current: z.string().nullable(),

@@ -2,7 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 # 应用的本机配置里装机脚本要管的几件事（deploy/lib/app-config.sh），拿临时文件走一遍：
 #   0. 读键和 systemd 同一种读法：缩进、= 两边的空白、引号、转义、注释、CRLF、同一个键写几行取最后一行，逐条造出来比
-#   1. 新机器照仓里的期望建三份环境文件（#323，env_from_desired，拿仓里法国、本机档两份真的期望）：公开的照期望写、私有的
+#   1. 新机器照仓里的期望建三份环境文件（#323，env_from_desired，拿仓里法国那份真的期望）：公开的照期望写、私有的
 #      只留空位、属主权限对；文件已经在不建不补（第二遍零改动）；期望读不到、认不出判红、不建
 #   2. api.env 的 FLEET_GITHUB_WEBHOOK_SECRET：空着才照「引擎」App 的 json 填，第二遍零改动；json 没有、不是 JSON、
 #      值的样子写不进环境文件、这一行被注释掉，都记待配、文件不动；同一个键写了两行判红、不改；读回两边不一致判红；
@@ -117,7 +117,6 @@ echo "== 新机器照仓里的期望建环境文件（#323）"
 REPO=$(cd -- "$HERE/../.." && pwd)
 CLI=$REPO/deploy/france/auto-release/config.mjs
 FRANCE_DESIRED=$REPO/deploy/france/desired-config.json
-LOCAL_DESIRED=$REPO/deploy/local/desired-config.json
 for name in engine api release; do
   call env_from_desired "$T/fr-$name.env" "$name.env" "$FRANCE_DESIRED" "$CLI"
   if ((RC == 0 && ${#REDS[@]} == 0 && ${#CHANGES[@]} == 1)) && [[ "$(stat -c '%U:%G %a' "$T/fr-$name.env")" == "$APP_CONFIG_OWNER 640" ]]; then
@@ -138,13 +137,10 @@ expect_value() { # 文件 键 期望的值 说明：按 systemd 的读法读回�
 expect_value "$T/fr-engine.env" FLEET_ENGINE_PORTS real "engine.env 的端口实现照期望写（期望就是人定的那一份）"
 expect_value "$T/fr-engine.env" FLEET_WORK_DIR /var/lib/fleet-work "engine.env 的工作树的根照期望写"
 expect_value "$T/fr-api.env" FLEET_ENV production "api.env 的公开值照期望写"
-expect_value "$T/fr-engine.env" FLEET_CANARY_REPO thoerwink8/fleet-dao-canary-fr "巡检仓（公开值，#777 起和本机档的演练仓分开）照期望写"
+expect_value "$T/fr-engine.env" FLEET_CANARY_REPO thoerwink8/fleet-dao-canary-fr "巡检仓（公开值，照期望写）"
 expect_value "$T/fr-api.env" FLEET_GITHUB_WEBHOOK_SECRET "" "webhook 密钥（私有值）只留空位"
 expect_value "$T/fr-api.env" FEISHU_APP_SECRET "" "飞书密钥（私有值）只留空位"
 expect_value "$T/fr-release.env" FLEET_DOMAIN "" "域名（私有值）只留空位"
-call env_from_desired "$T/lo-release.env" release.env "$LOCAL_DESIRED" "$CLI"
-expect_value "$T/lo-release.env" FLEET_DOMAIN fleet-local.invalid "本机档：照 deploy/local 那份建（占位域名是公开值）"
-expect_value "$T/lo-release.env" FLEET_HK_PARTS "" "本机档：往香港一样都不发，显式写成空的"
 # 空着的 webhook 密钥那一行，填密钥照样认得（新机器上紧接着就要填）
 printf '{"webhook_secret": "0123456789abcdef0123456789abcdef01234567"}\n' >"$T/new-app.json"
 call fill_webhook_secret "$T/fr-api.env" "$T/new-app.json"
@@ -517,11 +513,11 @@ else
 fi
 # shellcheck disable=SC2016 # 找的就是字面上的 $file、$desired
 if [[ "$setup_body" == *'env_from_desired "$file" "$name.env" "$desired" "$CONFIG_CLI"'* &&
-  "$setup_body" == *'desired=$(profile_desired_file "$DEPLOY_DIR")'* && "$setup_body" != *'.env.example'* &&
+  "$setup_body" == *'desired=$DEPLOY_DIR/france/desired-config.json'* && "$setup_body" != *'.env.example'* &&
   "$setup_body" != *add_missing_keys* ]]; then
-  pass "france.sh 新机器照这一档的期望建环境文件，不照样例、不补键"
+  pass "france.sh 新机器照法国的期望建环境文件，不照样例、不补键"
 else
-  flunk "france.sh 的 setup_app_config 该照这一档的期望建（env_from_desired），不再照样例建、补键"
+  flunk "france.sh 的 setup_app_config 该照法国的期望建（env_from_desired），不再照样例建、补键"
 fi
 
 echo "== 要退役的垫片"

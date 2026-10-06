@@ -5,7 +5,7 @@
 //   不起循环、不发一个请求。
 // - 推不成不吞：每次都记日志（错误原文带地址，只进日志），/healthz 的 node_report 报红，说连着几次没推成、上次推成是多久前。
 //   起来后第一轮还没推完也报「没查成」，不当成好（和 gateway-seen.ts 一个规矩）。
-// - 会随网络、对方自己变红（和这一版好不好无关）：本机档配上之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加 node_report（deploy/，另一片做）。
+// - 会随网络、对方自己变红（和这一版好不好无关）：推送方配上之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加 node_report（deploy/，另一片做）。
 // - 代理：Node 自带的 fetch 默认不认 HTTP(S)_PROXY；要走代理就在 api.env 里设 NODE_USE_ENV_PROXY=1 加 HTTPS_PROXY（Node 22.21 起有），
 //   仓里没有 undici，不另做 FLEET_NODE_REPORT_PROXY。
 // - 一轮做完才排下一轮（setTimeout 链，不用 setInterval）：对方慢的时候不会叠着推。

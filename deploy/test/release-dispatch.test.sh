@@ -87,7 +87,7 @@ check "没有关" "$(runs)" 0
 check "记录没变" "$(state)" 3
 check "改动 0 处" "${#CHANGES[@]}" 0
 
-echo "== 小版本（v3 之后、v4 之前的提交，WSL 跟主线）：不碰开关"
+echo "== 小版本（v3 之后、v4 之前的提交）：不碰开关"
 reset
 dispatch_off_on_milestone "$C2" >/dev/null
 check "没有关" "$(runs)" 0
@@ -107,7 +107,7 @@ dispatch_off_on_milestone "$C4" >/dev/null
 check "没有关" "$(runs)" 0
 check "记录还是 4" "$(state)" 4
 
-echo "== WSL 跳过了 v4 那个提交、直接发更后面的提交：照样认出跨过了 v4（头一次时记录是 v3）"
+echo "== 直接发 v4 之后更后面的提交、跳过了 v4 那个提交：照样认出跨过了 v4（头一次时记录是 v3）"
 printf '3\n' >"$DISPATCH_OFF_STATE"
 reset
 dispatch_off_on_milestone "$C4" >/dev/null

@@ -61,7 +61,7 @@ describe('buildSessionEnv', () => {
     );
   });
 
-  it('给了代理（本机档登记的 FLEET_SESSION_PROXY）：http(s)_proxy 大小写各一份、no_proxy 只放本机回环，都是规范写法', () => {
+  it('给了代理（期望里登记的 FLEET_SESSION_PROXY）：http(s)_proxy 大小写各一份、no_proxy 只放本机回环，都是规范写法', () => {
     const env = buildSessionEnv({ base, fleetApi: 'a', fleetToken: 'b', proxy: 'http://127.0.0.1:7890/' });
     const proxy = 'http://127.0.0.1:7890';
     expect(Object.fromEntries(PROXY_ENV_KEYS.map((k) => [k, env[k]]))).toEqual({
@@ -106,7 +106,7 @@ describe('buildSessionEnv', () => {
     expect(message).not.toContain('fakesecret');
   });
 
-  it('认的样子、规范成的写法和装机脚本一样（deploy/lib/profile.sh 的 session_proxy_load）：写明的 80 口也认，主机名照小写存', () => {
+  it('认的样子、规范成的写法和装机脚本一样（deploy/lib/session-proxy.sh 的 session_proxy_load）：写明的 80 口也认，主机名照小写存', () => {
     expect(parseSessionProxy('http://127.0.0.1:80')).toBe('http://127.0.0.1:80');
     expect(parseSessionProxy(' http://Proxy.Local:7890/ ')).toBe('http://proxy.local:7890');
     // deploy/test/profile.test.sh 拿同一个值核装机脚本那边

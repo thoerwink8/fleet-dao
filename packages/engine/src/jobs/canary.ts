@@ -89,7 +89,7 @@ export const CANARY_STAGE_LIMIT_MINUTES: Readonly<Record<CanaryStage, number>> =
   merge: 30,
   close: 15,
   ledger: 10,
-  // 本机档收不到 GitHub 事件：PR 镜像里的「合了」要等对账补漏（每 15 分钟一轮）补上
+  // 收不到 GitHub 事件时：PR 镜像里的「合了」要等对账补漏（每 15 分钟一轮）补上
   board: 30,
 };
 

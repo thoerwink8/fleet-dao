@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # REDS、PROXY、PROXY_ENVS 这些是给 source 进来的 release.sh 里的函数读写的
-# 本机档发布取代码、装依赖经这一档期望里登记的会话代理（#786）：deploy/release.sh 照 deploy/lib/profile.sh 的
-# session_proxy_load 读这一档的期望（本机档是 Clash 的口、法国登记成空＝直连），编译成两样——git 的
+# 发布取代码、装依赖经期望里登记的会话代理（#786）：deploy/release.sh 照 deploy/lib/session-proxy.sh 的
+# session_proxy_load 读 deploy/france/desired-config.json（登记成空＝直连，法国就是这样；登记成 http://主机:端口
+# 就经它），编译成两样——git 的
 # -c http.proxy=…（fetch_code 用 git_net）和要带进 pnpm 环境的几个变量（as_fleet_in）。每条路径都故意造出来：
-#   1. 本机档登记了代理：取代码的 git 命令行上带 -c http.proxy=http://127.0.0.1:7890；以 fleet 跑的命令里带上
+#   1. 期望里登记了代理（拿法国那份改写出来）：取代码的 git 命令行上带 -c http.proxy=http://127.0.0.1:7890；以 fleet 跑的命令里带上
 #      http_proxy/https_proxy/HTTP_PROXY/HTTPS_PROXY 和 no_proxy/NO_PROXY（只放本机回环）
 #   2. 【故意造出的失败】登记了代理，但期望读不出、没登记这一项、登记的认不出：判红、不拿直连顶
 #   3. 【故意造出的失败】法国（期望登记成空）：命令行和环境里都不许出现任何代理变量（多了就是法国走了代理）
-#   4. 【故意造出的失败】档位文件认不出（不是普通文件、内容认不出）：判红，不猜成法国——猜成本机档拿法国的期望读，
-#      就把「直连」当成这一档的登记，取代码照样不通
-#   5. 调用者（root）环境里碰巧有 http(s)_proxy、FLEET_SESSION_PROXY：一个都带不进去（#731 同一条规矩）
+#   4. 只读一次：再叫不重读
+#   调用者（root）环境里碰巧有 http(s)_proxy、FLEET_SESSION_PROXY：一个都带不进去（#731 同一条规矩，1、3 两段里核）
 # git 和 runuser 换成假的（真命令不带 -c http.proxy、也不出网）：git 把收到的参数记下来、照桩要的回，runuser 把要跑的
 # 命令原样跑起来、把它的环境记下来。不连网、不需要真的 fleet 用户。用法：bash deploy/test/release-proxy.test.sh。
 # 退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-# 照期望读代理要 node（和 profile.test.sh、grok.test.sh 同一个找法）。先找、PATH 再被桩改掉
+# 照期望读代理要 node（和 session-proxy.test.sh、grok.test.sh 同一个找法）。先找、PATH 再被桩改掉
 REAL_NODE=""
 for n in "$(command -v node 2>/dev/null || true)" /opt/hostedtoolcache/node/*/x64/bin/node /usr/bin/node /usr/local/bin/node; do
   if [[ -x "$n" ]]; then
@@ -40,7 +40,6 @@ SESSION_PROXY_NODE=$REAL_NODE
 
 mkdir -p "$RELEASES"
 CONFIG_ETC=$TMP/etc
-CONFIG_PROFILE=$CONFIG_ETC/profile
 RELEASE_ENV=$CONFIG_ETC/release.env
 mkdir -p "$CONFIG_ETC"
 PROXY_URL=http://127.0.0.1:7890
@@ -121,29 +120,20 @@ export STUB_GIT_CALLS=$TMP/git-calls
 export STUB_RUNUSER_ENV=$TMP/runuser-env
 export PATH=$STUB:$PATH
 
-# 期望文件：照一份真的改一项（和 deploy/test/profile.test.sh 同一个写法，值从仓里那份现取、不写死）
-desired() { # 写出的文件 登记成什么（DELETE＝删掉这一项） [哪一份底稿]
+# 期望文件：照一份真的改一项（和 deploy/test/session-proxy.test.sh 同一个写法，值从仓里那份现取、不写死）
+desired() { # 写出的文件 登记成什么（DELETE＝删掉这一项）：底稿是 deploy/france/desired-config.json
   "$REAL_NODE" -e '
     const fs = require("node:fs");
     const j = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
     if (process.argv[2] === "DELETE") delete j.files["engine.env"].FLEET_SESSION_PROXY;
     else j.files["engine.env"].FLEET_SESSION_PROXY.value = process.argv[2];
-    fs.writeFileSync(process.argv[1], JSON.stringify(j));' "$1" "$2" "${3:-$HERE/../local/desired-config.json}"
+    fs.writeFileSync(process.argv[1], JSON.stringify(j));' "$1" "$2" "$HERE/../france/desired-config.json"
 }
-desired "$TMP/local.json" "$PROXY_URL"
-desired "$TMP/france.json" "" "$HERE/../france/desired-config.json"
+desired "$TMP/proxied.json" "$PROXY_URL"
+desired "$TMP/france.json" ""
 
-profile_marker() { # 档位文件里写什么（DELETE＝不放）
-  rm -f -- "$CONFIG_PROFILE"
-  case $1 in
-  DELETE) return 0 ;;
-  *) printf '%s\n' "$1" >"$CONFIG_PROFILE" ;;
-  esac
-  chmod 640 "$CONFIG_PROFILE"
-}
 # 每一段开头都从头读一次：session_proxy_load 读过就记下（SESSION_PROXY_STATE=ok），不改它不会再读
-reload() { # 哪一份期望 [档位文件的写法]
-  profile_marker "${2:-local}"
+reload() { # 哪一份期望
   PROXY_READY=0
   PROXY=()
   PROXY_ENVS=()
@@ -171,11 +161,9 @@ env_of() { grep -E "^$1=" "$STUB_RUNUSER_ENV" 2>/dev/null | tail -1 | cut -d= -f
 export https_proxy=http://caller-env.invalid:1 http_proxy=http://caller-env.invalid:1
 export FLEET_SESSION_PROXY=http://caller-env.invalid:1
 
-echo "== 1. 本机档登记了代理：取代码的 git 命令行、以 fleet 跑的环境都带上它"
+echo "== 1. 期望里登记了代理：取代码的 git 命令行、以 fleet 跑的环境都带上它"
 REDS=()
-reload "$TMP/local.json"
-profile_set >/dev/null 2>&1
-check "档位读成本机档" "$PROFILE" local
+reload "$TMP/proxied.json"
 proxy_load >/dev/null 2>&1
 check "读成了（没有红）" "${#REDS[@]}" 0
 check "git 带的参数" "${PROXY[*]}" "-c http.proxy=$PROXY_URL"
@@ -210,7 +198,7 @@ for bad in "没登记这一项:$TMP/no-item.json" "登记的认不出:$TMP/bad-v
     printf '  ✓ %s：判红、返回非 0（不拿直连顶）\n' "$what"
   fi
   check "$what：记了一笔红" "${#REDS[@]}" 1
-  has "$what：红里说清是这一档的期望没读成、不拿直连顶" "$(last_red)" "不拿直连顶"
+  has "$what：红里说清是登记的会话代理没读成、不拿直连顶" "$(last_red)" "不拿直连顶"
   check "$what：git 那里一个参数都不带（不是空代理，是没读成）" "${PROXY[*]}" ""
   check "$what：环境里一个代理变量都不带" "${PROXY_ENVS[*]}" ""
   lacks "$what：红里不带登记的值（带了账号密码的会进日志）" "$(last_red)" "fakesecret"
@@ -218,7 +206,7 @@ done
 
 echo "== 3. 【故意造出的失败】法国（期望登记成空）：命令行和环境里都不许出现代理"
 REDS=()
-reload "$TMP/france.json" france
+reload "$TMP/france.json"
 if proxy_load >/dev/null 2>&1; then
   printf '  ✓ 照期望读出空＝直连，读成了（不是没读成）\n'
 else
@@ -236,39 +224,9 @@ check "法国（本机 root 环境里有代理）：以 fleet 跑的命令里一
 lacks "法国：调用者环境里的代理没带进去" "$(runuser_env)" "caller-env.invalid"
 check "法国：HOME 照旧（不是把整个环境丢了）" "$(env_of HOME)" "/home/fleet"
 
-echo "== 4. 【故意造出的失败】档位文件认不出：判红，不猜成法国"
-for bad in "写成别的档:paris" "空文件:"; do
-  what=${bad%%:*}
-  REDS=()
-  profile_marker "${bad#*:}"
-  PROXY_READY=0
-  SESSION_PROXY_STATE="" SESSION_PROXY_WHY=""
-  SESSION_PROXY_DESIRED=$TMP/local.json
-  if profile_set >/dev/null 2>&1; then
-    printf '  ✗ %s：该判红、返回非 0，却当成了法国\n' "$what"
-    fail=1
-  else
-    printf '  ✓ %s：判红、返回非 0\n' "$what"
-  fi
-  check "$what：记了一笔红" "${#REDS[@]}" 1
-done
+echo "== 4. 只读一次：再叫不重读（期望换成没有的也照旧）"
 REDS=()
-rm -f -- "$CONFIG_PROFILE"
-ln -s "$TMP" "$CONFIG_PROFILE"
-PROXY_READY=0
-SESSION_PROXY_STATE="" SESSION_PROXY_WHY=""
-if profile_set >/dev/null 2>&1; then
-  printf '  ✗ 不是普通文件（符号链接）：该判红，却当成了法国\n'
-  fail=1
-else
-  printf '  ✓ 不是普通文件（符号链接）：判红、返回非 0\n'
-fi
-check "不是普通文件：记了一笔红" "${#REDS[@]}" 1
-rm -f -- "$CONFIG_PROFILE"
-
-echo "== 5. 只读一次：再叫不重读（期望换成没有的也照旧）"
-REDS=()
-reload "$TMP/local.json"
+reload "$TMP/proxied.json"
 proxy_load >/dev/null 2>&1
 SESSION_PROXY_DESIRED=$TMP/没有这份.json
 if proxy_load >/dev/null 2>&1 && [[ "${PROXY[*]}" == "-c http.proxy=$PROXY_URL" ]]; then

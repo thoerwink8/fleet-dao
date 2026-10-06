@@ -4,9 +4,9 @@
 # 演示版照「上次发的是哪一版」的记录核对（自动发布不发也照样查，坏了要红）、
 # 演示版的可见范围推到香港、公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录）、
 # 健康页的判定、自动发布的判断和流程（auto-release：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动）、
-# 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成；本机档和法国的期望
-# 逐项比、versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
-# 本机档（profile：FLEET_PROFILE 认不认得出、不带就是 france、is_local_profile、skip_local 只进 PENDING）、
+# 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成；
+# versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
+# 会话出网经的代理（session-proxy：只认期望里登记的、读不出不当成直连、认的样子和规范写法，#731）、
 # france.sh 读回自动发布跑得怎么样（auto-release-state：没跑过、读不了、读到了分得清）、
 # 库只听回环的判定（listen：IPv4 回环一个也算，多出别的地址、一个都没读到判不是）、
 # 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
@@ -14,12 +14,10 @@
 # 会话用户的 grok 命令行的装和查、登录态的读回（grok）、会话用户自己的 Mirasim 服务的读回（mirasim，#345；
 # 装、登录要创始人在自己电脑上做，这里只查 ~/.mirasim/run 下的令牌）、Mirasim 常驻单元该不该装、装了活没活
 # （mirasim-session，#424：服务端本体没装待配、不装单元；装了单元不活或 /api/health 不通判红）、
-# 切会话用户挂的 reclaude 组织（agent-scope-org-use）、本机档发布取代码、装依赖经这一档登记的会话代理（release-proxy，#786）、
-# 本机档发布的健康检查不去香港取 /healthz、法国照旧（release-chain，#803）、
+# 切会话用户挂的 reclaude 组织（agent-scope-org-use）、发布取代码、装依赖经期望里登记的会话代理、登记成空就直连（release-proxy，#786）、
 # 里程碑（新 v<N> tag）发布成功后所有项目的「让 AI 接活」回到关、同一 tag 重跑和小版本不碰（release-dispatch，#1050）、
-# 每次往法国发版成功后引擎总开关回到关、本机档（WSL）小版本更新不动它、--unmerged 不碰、没关成判红（release-engine-off，#1086）、
+# 每次往法国发版成功后引擎总开关回到关、--unmerged 不碰、没关成判红（release-engine-off，#1086）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
-# 本机档 WSL 的回环留在本机、只空出 Windows 上代理的口（wsl-loopback，#731：照 WSL 的样子摆好策略路由真跑，装机第 1 步的装和读回）、
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），
@@ -53,8 +51,8 @@ shard_n=0
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports release-proxy release-chain release-dispatch release-engine-off node-report-gate'
-  'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use wsl-loopback temporal-schema'
+  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards session-proxy session-ports release-proxy release-dispatch release-engine-off node-report-gate'
+  'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use temporal-schema'
   'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config)

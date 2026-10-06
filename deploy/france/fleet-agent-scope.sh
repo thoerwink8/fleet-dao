@@ -37,7 +37,6 @@
 # 会话里不许有 GitHub 凭据：推分支、开 PR 由引擎在会话外做，GH_TOKEN 之类一概不放。
 # 降权用 setpriv --init-groups --no-new-privs：systemd-run --uid 在 scope 里不清附加组，会话会带着 root 组（法国实测）；
 # no-new-privs 让会话里的 sudo、setuid 程序都提不了权。
-# shellcheck disable=SC2034 # PROFILE 是给 source 进来的 profile.sh 读的（挑哪一份期望），本文件自己不读
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 SESSION_USERS=(fleet-agent-carpool)
@@ -50,34 +49,25 @@ ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)
 WORK_BASE=${AGENT_SCOPE_TEST_WORK_BASE:-/var/lib/fleet-work}
 # fs.protected_hardlinks 的读取路径，理由同上：测试专用开关，故意不叫 FLEET_*。
 PROTECTED_HARDLINKS_PATH=${AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH:-/proc/sys/fs/protected_hardlinks}
-# 这一档登记的会话代理（#786）：reclaude 出网要经它（本机档的 WSL 直连 reclaude.ai 不通、要经 Windows 上的 Clash），
-# org-use 给 reclaude 的环境是清干净的（env -i），不带上就切不了号（本机档实测：context deadline exceeded）。
-# 怎么读、认的样子、规范成什么写法都在 deploy/lib/profile.sh 的 session_proxy_load 里——和引擎起会话、装机时以会话
+# 期望里登记的会话代理（#786）：reclaude 出网要经它（登记成空＝直连，法国就是这样），
+# org-use 给 reclaude 的环境是清干净的（env -i），登记了代理而不带上就切不了号。
+# 怎么读、认的样子、规范成什么写法都在 deploy/lib/session-proxy.sh 的 session_proxy_load 里——和引擎起会话、装机时以会话
 # 用户跑 grok、cursor-agent 的官方安装脚本同一份读法，这里 source 它、不另写一份。这个脚本装到 /usr/local/sbin/、
 # 和 deploy/ 不在一处，仓里那份的路径只能显式给（测试用 AGENT_SCOPE_TEST_DEPLOY 换）；读不到就不带代理，下面 org list
-# 会照实报连不上，不改判法。哪一份期望照这台记的档位挑（和发布、对账同一个文件），认不出按空处理。
-# 两个测试专用开关，理由同上面几个、故意不叫 FLEET_*。
+# 会照实报连不上，不改判法。
+# 测试专用开关，理由同上面几个、故意不叫 FLEET_*。
 AGENT_SCOPE_DEPLOY=${AGENT_SCOPE_TEST_DEPLOY:-/srv/fleet-dao/deploy}
-PROFILE_FILE=${AGENT_SCOPE_TEST_PROFILE_FILE:-/etc/fleet-dao/profile}
 PROXY_READY=0 # 1：读过了（读到的是空＝直连也算读过了）
-PROXY_VARS=() # 会话用户环境的代理变量（KEY=值）：这一档登记了才有，空＝直连、一个字都不加
+PROXY_VARS=() # 会话用户环境的代理变量（KEY=值）：期望里登记了才有，空＝直连、一个字都不加
 
 read_proxy() {
-  local got
   if ((PROXY_READY)); then return 0; fi
   PROXY_READY=1
   PROXY_VARS=()
-  if [[ ! -r "$AGENT_SCOPE_DEPLOY/lib/profile.sh" ]]; then return 0; fi
-  PROFILE=france
-  if [[ -f "$PROFILE_FILE" && ! -L "$PROFILE_FILE" ]] && got=$(<"$PROFILE_FILE") 2>/dev/null; then
-    got=${got%$'\n'}
-    case $got in
-    france | local) PROFILE=$got ;;
-    esac
-  fi
-  # shellcheck source=../lib/profile.sh
+  if [[ ! -r "$AGENT_SCOPE_DEPLOY/lib/session-proxy.sh" ]]; then return 0; fi
+  # shellcheck source=../lib/session-proxy.sh
   # shellcheck disable=SC1091 # 路径是运行时给的（装到 /usr/local/sbin/，仓里那份的位置由 AGENT_SCOPE_TEST_DEPLOY 换）
-  source "$AGENT_SCOPE_DEPLOY/lib/profile.sh"
+  source "$AGENT_SCOPE_DEPLOY/lib/session-proxy.sh"
   if session_proxy_load; then PROXY_VARS=("${SESSION_PROXY_VARS[@]}"); fi
 }
 # org-use 用的，理由同上、故意不叫 FLEET_*：换 reclaude 的路径（默认会话用户家里的 ~/.local/bin/reclaude）；

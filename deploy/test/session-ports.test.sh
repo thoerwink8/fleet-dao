@@ -8,8 +8,8 @@
 #   2. 强制 syncookie（SYN 洪水下内核就这么做）：别人照样连不上、一个连接都到不了会话用户那头；同一场景拿掉第 4 条规则，
 #      会话用户那头就接到了别人的连接——那条规则挡的是真口子。代价也钉住：这时别人之间连临时口也被复位
 #   3. 读回：规则在全绿；表没装、挡错了人、挡多了都判红；它此刻真在听的口逐个试；查不到会话用户、起不了探针、ss 跑不成
-#      记没查成、不说全绿；本机档不建的 pilot 查不到就跳过、写明，ok 行照打（#731；法国档查不到 pilot、本机档查不到别人、
-#      pilot 在但没以他的身份跑起来，照旧记没查成）；内核里的表被手改过、和文件对不上判出来，文件载不进去、表不在记没查成
+#      记没查成、不说全绿；别的用户查不到、没以他的身份跑起来，都记没查成；内核里的表被手改过、和文件对不上判出来，
+#      文件载不进去、表不在记没查成
 #   4. 规则载上之前就连着的连接（第二意见 #343 第 1 轮）：规则管不到、照样通；读回判红写清是谁；装的时候断掉，断不掉、
 #      ss 跑不成判红；断完读回全绿
 # 不碰宿主的防火墙和连接：全在 unshare --net 起的命名空间里（回环是新的，宿主的 nft 表、连接跟踪都看不到）。
@@ -21,8 +21,6 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY=$(cd -- "$HERE/.." && pwd)
 # shellcheck source=../lib/common.sh
 source "$DEPLOY/lib/common.sh"
-# shellcheck source=../lib/profile.sh
-source "$DEPLOY/lib/profile.sh"
 # shellcheck source=../lib/session-ports.sh
 source "$DEPLOY/lib/session-ports.sh"
 
@@ -245,52 +243,6 @@ inner() { # 会话用户 扮fleet 扮pilot node
   has "别的用户里有查不到的：记没查成" "$out" "… 查不到用户 no-such-user-35"
   lacks "别的用户里有查不到的：不说全绿" "$out" "✓"
   check "别的用户里有查不到的：不判红、只一笔没查成（查得到的照样查了）" "${out##*$'\n'}" "0 1"
-  out=$(
-    PILOT_USER=no-such-user-35
-    check_session_ports "$S" "$F" no-such-user-35 2>&1
-    printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}"
-  )
-  has "法国档查不到 pilot：照旧记没查（只有本机档本来就不建它）" "$out" "… 查不到用户 no-such-user-35，拿他连 $S 的口这一项没查"
-  lacks "法国档查不到 pilot：不说全绿" "$out" "✓"
-  # 本机档不建 pilot（lib/profile.sh 的 profile_skips_user，#731）：查不到它就跳过、写明，不记没查，ok 行照打
-  out=$(
-    PROFILE=local PILOT_USER=no-such-user-35
-    check_session_ports "$S" "$F" no-such-user-35 2>&1
-    printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}"
-  )
-  has "本机档没有 pilot：写明跳过" "$out" "… 本机档跳过：没有 no-such-user-35"
-  lacks "本机档没有 pilot：不记没查" "$out" "没查"
-  has "本机档没有 pilot：查得到的照样查了，ok 行打得出来、只写真试过的人" "$out" "✓ 别的用户（$F）连不上 $S 在本机开的口.*$F 连自己开的临时口照常通"
-  check "本机档没有 pilot：没有红，只一笔「本机档跳过」" "${out##*$'\n'}" "0 1"
-  out=$(
-    PROFILE=local PILOT_USER=$P
-    check_session_ports "$S" no-such-user-36 "$P" 2>&1
-    printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}"
-  )
-  has "本机档查不到的不是 pilot：照旧记没查" "$out" "… 查不到用户 no-such-user-36，拿他连 $S 的口这一项没查"
-  lacks "本机档查不到的不是 pilot：不说全绿" "$out" "✓"
-  out=$(
-    PROFILE=local PILOT_USER=no-such-user-35
-    check_session_ports "$S" no-such-user-35 2>&1
-    printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}"
-  )
-  has "本机档只给了 pilot、又跳过了：一个别的用户都没试，记没查成" "$out" "… 没有能拿来试的别的用户"
-  lacks "本机档一个别的用户都没试：不说全绿" "$out" "✓"
-  check "本机档一个别的用户都没试：不判红" "$(cut -d' ' -f1 <<<"${out##*$'\n'}")" 0
-  out=$(
-    eval "real_try() $(declare -f session_ports_try | tail -n +2)"
-    session_ports_try() {
-      if [[ "$1" == "$P" ]]; then return 2; fi
-      real_try "$@"
-    }
-    PROFILE=local PILOT_USER=$P
-    check_session_ports "$S" "$F" "$P" 2>&1
-    printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}"
-  )
-  has "本机档 pilot 在、但没以他的身份跑起来：照旧记没查成" "$out" "… 没以 $P 的身份跑起来（runuser 没成），他连 $S 的探针这一项没查成"
-  lacks "本机档 pilot 在、但没以他的身份跑起来：不说跳过" "$out" "跳过"
-  lacks "本机档 pilot 在、但没以他的身份跑起来：不说全绿" "$out" "✓"
-  check "本机档 pilot 在、但没以他的身份跑起来：不判红" "$(cut -d' ' -f1 <<<"${out##*$'\n'}")" 0
   out=$(
     session_ports_try() { return 2; }
     check_session_ports "$S" "$F" "$P" 2>&1

@@ -186,7 +186,7 @@ describe('配置', () => {
   });
 });
 
-describe('接不接飞书登录（FLEET_FEISHU_LOGIN：本机档不接飞书，要明说 off）', () => {
+describe('接不接飞书登录（FLEET_FEISHU_LOGIN：不接飞书的要明说 off）', () => {
   const NO_FEISHU: Record<string, string | undefined> = {
     ...PROD,
     FEISHU_APP_ID: undefined,
@@ -248,18 +248,13 @@ describe('接不接飞书登录（FLEET_FEISHU_LOGIN：本机档不接飞书，�
     expect(loadConfig({ ...PROD, FLEET_FEISHU_LOGIN: 'on' }).feishu).toEqual(pair);
   });
 
-  it('仓里登记的期望和这里的判法对得上：本机档是 off（拿它、飞书空着起得来），法国是 on（拿它、飞书空着起不来）', () => {
-    const apiEnvOf = (profile: 'local' | 'france') =>
-      (
-        JSON.parse(
-          readFileSync(new URL(`../../../deploy/${profile}/desired-config.json`, import.meta.url), 'utf8'),
-        ) as { files: { 'api.env': Record<string, { value?: string }> } }
-      ).files['api.env'];
-    const local = apiEnvOf('local').FLEET_FEISHU_LOGIN?.value;
-    const france = apiEnvOf('france').FLEET_FEISHU_LOGIN?.value;
-    expect(local).toBe('off');
+  it('仓里登记的期望和这里的判法对得上：法国是 on（拿它、飞书空着起不来）', () => {
+    const france = (
+      JSON.parse(
+        readFileSync(new URL('../../../deploy/france/desired-config.json', import.meta.url), 'utf8'),
+      ) as { files: { 'api.env': Record<string, { value?: string }> } }
+    ).files['api.env'].FLEET_FEISHU_LOGIN?.value;
     expect(france).toBe('on');
-    expect(loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: local }).feishu).toBeNull();
     expect(problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: france }).join()).toContain('缺 FEISHU_APP_ID');
   });
 });

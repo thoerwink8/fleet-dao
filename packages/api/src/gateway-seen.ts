@@ -16,7 +16,7 @@ export const GATEWAY_SILENT_MS = 5 * 60_000;
 /** 没配网关通行证：网关的请求一律不认，这一项报「未接」（公网看得到）。 */
 export const GATEWAY_NO_PASS = '没配飞书网关的通行证，网关的请求一律不认';
 
-/** 这台明说不接飞书（FLEET_FEISHU_LOGIN=off，本机档）：没有飞书网关，这一项报「未接」（公网看得到）。 */
+/** 这台明说不接飞书（FLEET_FEISHU_LOGIN=off）：没有飞书网关，这一项报「未接」（公网看得到）。 */
 export const GATEWAY_FEISHU_OFF = '这台不接飞书，没有飞书网关';
 
 /**
