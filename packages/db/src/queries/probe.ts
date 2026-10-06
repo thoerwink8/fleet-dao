@@ -5,6 +5,7 @@ import { asc, eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
 import { channels, models, pools, routes } from '../schema/index.ts';
+import { noteRouteProbed } from './channel-fallback.ts';
 
 export interface RouteProbeTarget {
   routeId: string;
@@ -88,16 +89,21 @@ export interface RouteProbeWrite {
  * 路由已经不在了（这一轮当中被删）回 route_not_found；别的出错（约束不让写、库连不上）原样抛出。
  */
 export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved' | 'route_not_found'> {
-  const updated = await db
-    .update(routes)
-    .set({
-      alive: w.state === 'ok',
-      probeState: w.state,
-      probedAt: w.at,
-      probeDetail: w.detail,
-      probeOrg: w.org ?? null,
-    })
-    .where(eq(routes.id, w.routeId))
-    .returning({ id: routes.id });
-  return updated.length > 0 ? 'saved' : 'route_not_found';
+  // 渠道近态（channel_states，#1118）跟着同一个事务：探通了引发 disabled 的那条路由就改回 ok，探针看过的时刻记下
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(routes)
+      .set({
+        alive: w.state === 'ok',
+        probeState: w.state,
+        probedAt: w.at,
+        probeDetail: w.detail,
+        probeOrg: w.org ?? null,
+      })
+      .where(eq(routes.id, w.routeId))
+      .returning({ id: routes.id });
+    if (updated.length === 0) return 'route_not_found';
+    await noteRouteProbed(tx, { routeId: w.routeId, state: w.state, at: w.at });
+    return 'saved';
+  });
 }

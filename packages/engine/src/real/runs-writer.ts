@@ -12,7 +12,14 @@
 //   换掉了，放一次什么都不做。
 
 import type { Db, RunInsert } from '@fleet-dao/db';
-import { admitRun, PoolFullError, releaseReservation, startRun as startRunDb } from '@fleet-dao/db';
+import {
+  admitRun,
+  type ChannelAttemptWrite,
+  PoolFullError,
+  recordChannelAttempt,
+  releaseReservation,
+  startRun as startRunDb,
+} from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import {
@@ -80,6 +87,19 @@ export function realReservations(deps: { db: Db }): SegmentReservations {
   return {
     async release(reservationId) {
       await releaseReservation(deps.db, reservationId);
+    },
+  };
+}
+
+/** 每一次起会话的尝试落库（channel_attempts，#1118）：一次尝试一行，成败都记；写不进抛出去，由调用方决定记日志还是失败。 */
+export interface ChannelAttempts {
+  record(attempt: ChannelAttemptWrite): Promise<void>;
+}
+
+export function realChannelAttempts(deps: { db: Db }): ChannelAttempts {
+  return {
+    async record(attempt) {
+      await recordChannelAttempt(deps.db, attempt);
     },
   };
 }

@@ -274,6 +274,13 @@
       "when": 1791198930524,
       "tag": "0038_canary_verdict_skipped",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1791268243586,
+      "tag": "0039_channel_fallback",
+      "breakpoints": true
     }
   ]
 }

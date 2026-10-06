@@ -73,7 +73,7 @@ import {
   wakeAfterProbeNow,
   wakeAfterProbeRound,
 } from './route-wake.ts';
-import { realReservations, realRuns } from './runs-writer.ts';
+import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
@@ -603,6 +603,7 @@ export function realPortsFromEnv(
       spawner: segmentSpawner,
       runs: taskRuns,
       reservations,
+      attempts: realChannelAttempts({ db }),
       memoryAdmission: realMemoryAdmission(),
       runsDir,
       sessions: oneShots,

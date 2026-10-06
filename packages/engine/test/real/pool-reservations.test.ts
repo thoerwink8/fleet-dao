@@ -140,6 +140,7 @@ function segments(driverRun: (spec: HostRunSpec) => Promise<HostReport> = async 
     },
     runs: realRuns({ db: t.db }),
     reservations: realReservations({ db: t.db }),
+    attempts: { async record() {} },
     runsDir: join(root, 'runs'),
     now: () => new Date(clock),
     heartbeatEveryMs: 5,

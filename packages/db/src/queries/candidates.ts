@@ -4,10 +4,11 @@ import { hardBanFor, poolFull, type StageKind, windowAppliesTo } from '@fleet-da
 import { asc, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { bans, type channels, type models, type pools, quotaWindows, type routes } from '../schema/index.ts';
+import { readChannelStates } from './channel-fallback.ts';
 import { poolDataTimes, poolOccupancy, quotaReadOverdue, type WindowState, windowState } from './quota.ts';
 
 /**
- * switched-off 这条路由在它的模型下关着（路由两层的开关，不分用途）；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
+ * switched-off 这条路由在它的模型下关着（路由两层的开关，不分用途）；offline 探针或熔断判不在线；channel-disabled 渠道关了；channel-failed 渠道运行中失败、被标成 disabled 顺延给下一个渠道（channel_states，探针探通改回）；pool-expired 订阅过期；
  * model-retired 模型已下架；banned 命中禁令（代码里的全局硬禁令 + 库里的 bans）；quota-exhausted 适用的额度窗用满；
  * no-slot 账号池并发满了（等空位，不是坏了）。
  * 额度没读成不算挡：照常可选，但排在读到了的后面（设计 §九 选路第 3 条）。
@@ -16,6 +17,7 @@ export type Blocker =
   | 'switched-off'
   | 'offline'
   | 'channel-disabled'
+  | 'channel-failed'
   | 'pool-expired'
   | 'model-retired'
   | 'banned'
@@ -114,6 +116,8 @@ export async function evaluateRoutes(
   const dataTimes = poolDataTimes(windowRows);
   const dbBans = await db.select().from(bans);
   const occupancy = await poolOccupancy(db, { now });
+  // 渠道近态（#1118）：读不到抛出去（选路因此派不出去、报人），不当成全 ok；没有行的渠道没出过事
+  const channelStateById = await readChannelStates(db, [...new Set(rows.map((r) => r.channel.id))]);
 
   return rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
     // 成员表只和路由在上游的名字比（实际发的模型串 + 别名），不拿模型目录的 id 硬凑。
@@ -174,6 +178,7 @@ export async function evaluateRoutes(
     if (!order.enabled) blockers.push('switched-off');
     if (!route.alive) blockers.push('offline');
     if (!channel.enabled) blockers.push('channel-disabled');
+    if (channelStateById.get(channel.id)?.status === 'disabled') blockers.push('channel-failed');
     if (pool.expiresAt !== null && pool.expiresAt.getTime() <= now.getTime()) blockers.push('pool-expired');
     if (model.retiredAt !== null && model.retiredAt.getTime() <= now.getTime())
       blockers.push('model-retired');

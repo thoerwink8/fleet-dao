@@ -59,6 +59,7 @@ export function layerLiveness(children: readonly LivenessVerdict[]): LivenessVer
 
 const BLOCKER_WORDS: Readonly<Record<string, string>> = {
   'channel-disabled': '渠道关了',
+  'channel-failed': '渠道运行中失败，已顺延给下一个渠道（探针探通后恢复）',
   'pool-expired': '账号池订阅过期了',
   'model-retired': '模型已下架',
 };
