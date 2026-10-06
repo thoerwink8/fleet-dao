@@ -1813,10 +1813,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async francePreflight() {
       await wait();
-      // 假数据不起子进程：装作这台后端没接上 release:onekey（真法国机器才装得上）。
+      // 假数据不起子进程：装作这台后端没接上那一条发布命令（真法国机器才装得上）。
+      // 这份假数据也进演示版的包：话术里别带演示版禁词、真命令名（build/scan.ts）。
       return FrancePreflightResponseSchema.parse({
         state: 'unreadable',
-        why: '这是假后端：开发 mock、演示版没有真的 pnpm release:onekey 可跑；到法国那台的正式驾驶舱才有这颗按钮',
+        why: '这是假后端：这台机器上没装真的发布命令；只读预检和起飞用的正式环境才有这颗按钮',
         asOf: iso(),
       });
     },
