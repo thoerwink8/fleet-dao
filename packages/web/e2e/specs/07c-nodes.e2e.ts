@@ -55,7 +55,10 @@ test.describe('看板多机', () => {
     await wsl.click();
     await expect(page).toHaveURL(/\/\?node=wsl$/);
     await expect(trigger).toContainText(WSL);
-    // 回本台：参数去掉
+    // 回本台：参数去掉。再点开之前先等上一个下拉整个退场：选完一项菜单就算「关了」，但退场动画（约 150 毫秒）这段
+    // 内容还挂在页面上、Radix 的外点关闭监听也还在；这时点触发钮，会被当成「点在菜单外」又立刻关上，
+    // 下拉再也不出来（#1127：快的那一遍必红，慢一点就绿）。
+    await expect(page.locator('[data-slot="dropdown-menu-content"]')).toHaveCount(0);
     await trigger.click();
     await page.locator('[data-node-item="local"]').click();
     await expect(page).toHaveURL(/\/$/);
