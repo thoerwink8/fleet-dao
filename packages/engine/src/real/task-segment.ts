@@ -35,7 +35,7 @@ import { manualBriefOf } from '../runner/task-brief.ts';
 import { type RunSegmentInput, type RunSegmentResult, SEGMENT_STAGE } from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
-import type { SegmentReservations } from './runs-writer.ts';
+import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
 
@@ -57,6 +57,8 @@ export interface RunSegmentDeps {
   runs: RunsWriter;
   /** 选路时预占的名额（#757）：没开跑就收场的这一段在收场时放掉（runs-writer.ts 的 realReservations）。 */
   reservations: SegmentReservations;
+  /** 每一次起会话的尝试落库（channel_attempts，#1118）。 */
+  attempts: ChannelAttempts;
   memoryAdmission?: MemoryAdmissionDeps;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
@@ -115,6 +117,35 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
   const heartbeatEveryMs = deps.heartbeatEveryMs ?? SEGMENT_HEARTBEAT_MS;
   const log = deps.log ?? (() => undefined);
   const spawner = hostSegmentSpawner(deps.spawner);
+
+  /**
+   * 记一次起会话的尝试（channel_attempts，#1118）。会话已经跑完了：这笔记账写不进只记日志、不让跑成的会话白跑
+   * （失败分流照样用 runSegment 回的结局，不靠这张表）。
+   */
+  const noteAttempt = async (
+    input: RunSegmentInput,
+    routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>,
+    fact: { runId?: string; startedAt: Date; error?: { code: string; message: string } },
+  ) => {
+    try {
+      await deps.attempts.record({
+        ...(fact.runId === undefined ? {} : { runId: fact.runId }),
+        taskId: input.taskId,
+        modelId: input.route.modelId,
+        routeId: input.route.routeId,
+        channelId: routeInfo.route.channelId,
+        ...(fact.error ? { errorType: fact.error.code, message: fact.error.message } : {}),
+        startedAt: fact.startedAt,
+        endedAt: now(),
+      });
+    } catch (error) {
+      log('这一次起会话的尝试没记进 channel_attempts（会话本身的结局照常交给工作流）', {
+        taskId: input.taskId,
+        routeId: input.route.routeId,
+        error: errMessage(error),
+      });
+    }
+  };
 
   /** 放掉选路时预占的名额：开跑了的已经换成开跑那一行，放一次什么都不做。放不掉只记日志（到点自己过期）。 */
   const releaseReservation = async (reservationId: string | undefined) => {
@@ -191,8 +222,10 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     const beat = setInterval(() => ctx.heartbeat(), heartbeatEveryMs);
     const started = now().getTime();
     let result: OneShotResult;
+    let attemptStartedAt = now();
     try {
       for (;;) {
+        attemptStartedAt = now();
         try {
           result = await runOneShot(
             {
@@ -236,6 +269,10 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
             throw new PortError('SEGMENT_NO_SLOT', error.message, { retryable: true });
           }
           if (error instanceof OneShotError) {
+            await noteAttempt(input, routeInfo, {
+              startedAt: attemptStartedAt,
+              error: { code: 'spawn_failed', message: error.message },
+            });
             throw new PortError('SEGMENT_SPAWN_FAILED', error.message, { retryable: false });
           }
           throw error;
@@ -258,6 +295,22 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     }
     void sweepRunDirs(deps.runsDir, now(), SESSION_ARTIFACT_TTL_MS, log);
 
+    // 内存放不下没开跑（admission_blocked）不算一次尝试：没轮到任何渠道
+    if (result.outcome !== 'admission_blocked') {
+      const evidence = result.outcome === 'done' ? undefined : segmentEvidence(result);
+      await noteAttempt(input, routeInfo, {
+        runId: result.runId,
+        startedAt: attemptStartedAt,
+        ...(evidence
+          ? {
+              error: {
+                code: evidence.code ?? result.outcome,
+                message: evidence.message ?? `会话没跑成（${result.outcome}）`,
+              },
+            }
+          : {}),
+      });
+    }
     if (result.outcome === 'done') {
       return {
         ok: true,

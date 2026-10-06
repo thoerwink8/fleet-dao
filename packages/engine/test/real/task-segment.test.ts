@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
-import type { RouteLaunchFacts } from '@fleet-dao/db';
+import type { ChannelAttemptWrite, RouteLaunchFacts } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PortContext, PortError } from '../../src/ports.ts';
@@ -81,6 +81,8 @@ interface Rig {
   startedWith: (string | undefined)[];
   /** 收场时放掉的预占编号。 */
   released: string[];
+  /** 每一次起会话的尝试（channel_attempts）。 */
+  attempts: ChannelAttemptWrite[];
   specs: HostRunSpec[];
   run: ReturnType<typeof createRunSegment>;
   input: (over?: Partial<RunSegmentInput>) => RunSegmentInput;
@@ -102,6 +104,7 @@ function rig(
   const started: RunStart[] = [];
   const startedWith: (string | undefined)[] = [];
   const released: string[] = [];
+  const attempts: ChannelAttemptWrite[] = [];
   const specs: HostRunSpec[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
@@ -152,6 +155,11 @@ function rig(
         released.push(id);
       },
     },
+    attempts: {
+      async record(a) {
+        attempts.push(a);
+      },
+    },
     runsDir: join(sub, 'runs'),
     newRunId: () => {
       ids += 1;
@@ -182,7 +190,7 @@ function rig(
     timeoutMinutes: 5,
     ...over,
   });
-  return { m, ft, dir, recorded, started, startedWith, released, specs, run, input };
+  return { m, ft, dir, recorded, started, startedWith, released, attempts, specs, run, input };
 }
 
 /** 假会话干活：在树里写个文件并提交。 */
@@ -423,6 +431,97 @@ describe('结局整理', { timeout: 60_000 }, () => {
     const err = await r.run(r.input(), ctx()).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: 'SEGMENT_SPAWN_FAILED', retryable: false });
     expect((err as Error).message).toContain('sudo 不让用');
+  });
+});
+
+describe('每次起会话的尝试落库（channel_attempts，#1118）', { timeout: 60_000 }, () => {
+  it('跑成：记一行，带 run 编号、单、模型、路由、渠道和起止；没有错误类型', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    await r.run(r.input(), ctx());
+    expect(r.attempts).toHaveLength(1);
+    expect(r.attempts[0]).toMatchObject({
+      runId: 'run-0002',
+      taskId: TASK_ID,
+      modelId: 'claude-opus-5-5',
+      routeId: 'r1',
+      channelId: 'claude-subscription',
+    });
+    expect(r.attempts[0]).not.toHaveProperty('errorType');
+    expect(r.attempts[0]?.endedAt.getTime()).toBeGreaterThanOrEqual(r.attempts[0]?.startedAt.getTime() ?? 0);
+  });
+
+  it('【故意造出的失败】没跑成（额度用满）：记一行，错误类型是会话的原因码，带原文摘要', async () => {
+    const r = rig({
+      driverRun: async () =>
+        report({
+          facts: okFacts({
+            quotaExhausted: true,
+            terminal: { isError: true, detail: 'limit reached' },
+            exitCode: 1,
+          }),
+          rawError: '5-hour limit reached',
+        }),
+    });
+    await r.run(r.input(), ctx());
+    expect(r.attempts).toHaveLength(1);
+    expect(r.attempts[0]).toMatchObject({ runId: 'run-0002', errorType: 'quota_exhausted' });
+    expect(r.attempts[0]?.message).toContain('5-hour limit reached');
+  });
+
+  it('【故意造出的失败】会话起不来（驱动抛错）：照样记一行，错误类型 spawn_failed，抛出的错不变', async () => {
+    const r = rig({
+      driverRun: async () => {
+        throw new Error('sudo 不让用');
+      },
+    });
+    await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'SEGMENT_SPAWN_FAILED' });
+    expect(r.attempts).toHaveLength(1);
+    expect(r.attempts[0]).toMatchObject({ errorType: 'spawn_failed', channelId: 'claude-subscription' });
+    expect(r.attempts[0]?.message).toContain('sudo 不让用');
+  });
+
+  it('【故意造出的失败】开跑那一行写不进 runs：会话没起、没轮到渠道，不记尝试', async () => {
+    const r = rig({
+      deps: {
+        runs: {
+          async start() {
+            throw new Error('runs 开跑那一行写入失败：connection refused');
+          },
+          async record() {
+            throw new Error('没开跑，不该收场');
+          },
+        },
+      },
+    });
+    await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'SEGMENT_RUNS_UNWRITABLE' });
+    expect(r.attempts).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】尝试写不进库：只记日志（写明哪条路由、为什么），会话的结局照常交回，不让跑成的会话白跑', async () => {
+    const logs: { message: string; fields?: Record<string, unknown> | undefined }[] = [];
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+      deps: {
+        attempts: {
+          async record() {
+            throw new Error('connection refused');
+          },
+        },
+        log: (message, fields) => logs.push({ message, fields }),
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.ok).toBe(true);
+    const note = logs.find((l) => l.message.includes('channel_attempts'));
+    expect(note?.fields).toMatchObject({ routeId: 'r1', error: 'connection refused' });
   });
 });
 

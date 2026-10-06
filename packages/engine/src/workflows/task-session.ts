@@ -7,7 +7,7 @@
 // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
 
 import { isCancellation } from '@temporalio/workflow';
-import type { PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
+import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
@@ -37,9 +37,12 @@ export async function writeSession(
   let stick: string | undefined;
   // 这一段上一次被切号停下了（#59）：重跑时告诉新会话树里留着上一次的东西；一直带到这一段跑成（树里的东西一直在）
   let interrupted: string | undefined;
+  // 上一次渠道运行中失败、该换渠道（#1118）：交给下一次选路标成不可用并记顺到谁；选路问过一次就清掉
+  let failedChannel: FailedChannel | undefined;
   for (;;) {
     rt.guard();
-    const route = await pickRoute(rt, avoid, stick);
+    const route = await pickRoute(rt, avoid, stick, failedChannel);
+    failedChannel = undefined;
     rt.families.add(route.family);
     rt.attemptSeq += 1;
     rt.set('implement', `第 ${rt.round} 轮：${route.modelId} 动手`);
@@ -88,6 +91,7 @@ export async function writeSession(
         poolId: route.poolId,
         modelId: route.modelId,
         hostId: route.hostId,
+        ...(route.channelId ? { channelId: route.channelId } : {}),
         ...(route.orgKind ? { orgKind: route.orgKind } : {}),
       },
       ...(evidence?.resetsAt ? { resetsAt: evidence.resetsAt } : {}),
@@ -106,6 +110,17 @@ export async function writeSession(
     } else if (next.action === 'swapRoute' || next.action === 'swapModel') {
       stick = undefined;
       avoid = widen(avoid, route, next.avoid ?? (next.action === 'swapModel' ? 'model' : 'route'));
+      // 渠道运行中失败换渠道（#1118）：新渠道有自己的一轮原路重试，不带上旧渠道用掉的次数和原文；换渠道的次数照记（有上限，不死循环）
+      if (next.failChannel && route.channelId) {
+        failedChannel = {
+          channelId: route.channelId,
+          routeId: route.routeId,
+          modelId: route.modelId,
+          reason: `${next.reason}（上游原文：${failure.message.slice(0, 300)}）`,
+        };
+        counters = { ...counters, retries: 0 };
+        previousMessage = undefined;
+      }
     } else {
       await rt.park(next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason, failure.message);
       counters = ZERO;
@@ -120,7 +135,12 @@ export async function writeSession(
  * 选路：排队（没空位、额度没读成）就隔一会儿再选；一条能用的都没有就停下等人。派得出就当场给动手这一段预占池的名额（#757），
  * 交回的路由带着它进 runSegment：开跑时换成开跑那一行，没开跑就收场的由 runSegment 放掉。
  */
-async function pickRoute(rt: TaskRuntime, avoid: Avoid, stick?: string): Promise<RouteChoice> {
+async function pickRoute(
+  rt: TaskRuntime,
+  avoid: Avoid,
+  stick?: string,
+  failedChannel?: FailedChannel,
+): Promise<RouteChoice> {
   for (;;) {
     rt.guard();
     // 叫醒的记号要在问选路之前取（#194 方案 4.3）：问的这一下读的是切号完成之前的事实，期间到的叫醒要让下面的等待当场醒
@@ -133,6 +153,7 @@ async function pickRoute(rt: TaskRuntime, avoid: Avoid, stick?: string): Promise
         avoidPoolIds: avoid.poolIds,
         avoidModelIds: avoid.modelIds,
         ...(stick ? { stickRouteId: stick } : {}),
+        ...(failedChannel ? { failedChannel } : {}),
         reserve: { segment: 'manual' },
       }),
     );
