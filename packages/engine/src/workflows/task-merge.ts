@@ -55,7 +55,7 @@ export async function armAndWaitMerged(
   const prNumber = rt.prNumber;
   if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
   for (;;) {
-    rt.set('merge', `PR #${prNumber} 挂自动合并，等合并`);
+    await rt.advance('merge', `PR #${prNumber} 挂自动合并，等合并`);
     const head: string = rt.head;
     const armed = await rt.step('armAutoMerge', () =>
       rt.acts.armAutoMerge({ schemaVersion: 1, repo: rt.input.repo, prNumber, expectedHead: head }),

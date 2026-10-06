@@ -146,6 +146,9 @@ export const STAGE_NAMES = {
   research: '调研',
   judge: '判断题',
 };
+/** 任务工作流三段（runs 表的 segment）对哪个阶段：对题 scope、动手 manual、验收 verify。 */
+/** @type {Record<string, string>} */
+const SEGMENT_STAGE = { scope: 'triage', manual: 'execute', verify: 'verify' };
 /** @type {Record<string, string>} */
 export const TASK_STATE_WORDS = {
   queued: '排队中',
@@ -907,12 +910,13 @@ const repoName = (repo) =>
 
 /** @param {RunRow} r */
 function toRun(r) {
+  const stage = r.stage.startsWith('segment:') ? (SEGMENT_STAGE[r.stage.slice(8)] ?? r.stage) : r.stage;
   return {
     key: r.repo && r.n !== null && r.n !== undefined ? taskKey(r.repo, r.n) : null,
     repo: r.repo ?? null,
     n: r.n ?? null,
-    stage: r.stage,
-    stageName: STAGE_NAMES[r.stage] ?? r.stage,
+    stage,
+    stageName: STAGE_NAMES[stage] ?? stage,
     routeId: r.route_id,
     model: r.model ?? null,
     modelName: r.model_name ?? null,

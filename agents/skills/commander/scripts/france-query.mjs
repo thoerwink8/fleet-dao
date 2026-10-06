@@ -89,27 +89,51 @@ export const SQL = {
     where t.state not in ('done', 'stopped', 'failed')
        or coalesce(t.updated_at, t.created_at) > now() - interval '3 days'
        or exists (select 1 from session_runs s where s.task_id = t.id and s.queued_at > now() - interval '3 days')
+       or exists (select 1 from runs r where r.task_id = t.id and r.started_at > now() - interval '3 days')
     order by coalesce(t.updated_at, t.created_at) desc
     limit 300) x`,
 
+  // 两处会话记录：session_runs（老的 Fusion 会话，9 月 29 日以后没新行）和 runs（v3 任务工作流的动手 manual、验收 verify，
+  // 引擎现在只往这张表写）。只读 session_runs 会让在跑的任务看着「手上没有会话」，巡查报「多半停在等人」（#1150 过夜那次）。
+  // runs 没有排队时刻（起会话才记一行），queued_at 用 started_at；它的阶段写成 segment:<段>，本机那头（france-lib 的 toRun）换成阶段名。
   runs: `select coalesce(jsonb_agg(x order by x.queued_at), '[]'::jsonb) from (
-    select rp.owner || '/' || rp.name as repo, t.issue_number as n, s.stage, s.route_id,
-           ro.model_id as model, m.display_name as model_name, ro.host_id as host, ro.pool_id as pool, ch.billing,
-           s.actual_model, s.queued_at, s.started_at, s.ended_at, s.queue_ms, s.run_ms,
-           s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens, s.cost_usd, s.session_cost_usd,
-           s.outcome, s.failure_code, left(s.failure_message, 600) as failure_message,
-           st.index as subtask_index, left(st.title, 120) as subtask_title
-    from session_runs s
-    left join tasks t on t.id = s.task_id
-    left join repos rp on rp.id = t.repo_id
-    left join routes ro on ro.id = s.route_id
-    left join models m on m.id = ro.model_id
-    left join channels ch on ch.id = ro.channel_id
-    left join subtasks st on st.id = s.subtask_id
-    where s.queued_at > now() - interval '3 days' or s.ended_at is null
-       or t.state not in ('done', 'stopped', 'failed')
-       or coalesce(t.updated_at, t.created_at) > now() - interval '3 days'
-    order by s.queued_at desc
+    select * from (
+      select rp.owner || '/' || rp.name as repo, t.issue_number as n, s.stage::text as stage, s.route_id,
+             ro.model_id as model, m.display_name as model_name, ro.host_id as host, ro.pool_id as pool, ch.billing,
+             s.actual_model, s.queued_at, s.started_at, s.ended_at, s.queue_ms, s.run_ms,
+             s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens, s.cost_usd, s.session_cost_usd,
+             s.outcome::text as outcome, s.failure_code, left(s.failure_message, 600) as failure_message,
+             st.index as subtask_index, left(st.title, 120) as subtask_title
+      from session_runs s
+      left join tasks t on t.id = s.task_id
+      left join repos rp on rp.id = t.repo_id
+      left join routes ro on ro.id = s.route_id
+      left join models m on m.id = ro.model_id
+      left join channels ch on ch.id = ro.channel_id
+      left join subtasks st on st.id = s.subtask_id
+      where s.queued_at > now() - interval '3 days' or s.ended_at is null
+         or t.state not in ('done', 'stopped', 'failed')
+         or coalesce(t.updated_at, t.created_at) > now() - interval '3 days'
+      union all
+      select rp.owner || '/' || rp.name as repo, coalesce(t.issue_number, r.issue_number) as n,
+             'segment:' || r.segment as stage,
+             coalesce(r.route_id, '') as route_id,
+             ro.model_id as model, m.display_name as model_name, ro.host_id as host, ro.pool_id as pool, ch.billing,
+             r.model as actual_model, r.started_at as queued_at, r.started_at, r.ended_at,
+             0::bigint as queue_ms, (extract(epoch from r.ended_at - r.started_at) * 1000)::bigint as run_ms,
+             r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.cost_usd, null::numeric as session_cost_usd,
+             r.outcome, null::text as failure_code, left(r.failure_reason, 600) as failure_message,
+             null::integer as subtask_index, null::text as subtask_title
+      from runs r
+      left join tasks t on t.id = r.task_id
+      left join repos rp on rp.id = t.repo_id
+      left join routes ro on ro.id = r.route_id
+      left join models m on m.id = ro.model_id
+      left join channels ch on ch.id = ro.channel_id
+      where r.started_at > now() - interval '3 days' or r.ended_at is null
+         or t.state not in ('done', 'stopped', 'failed')
+         or coalesce(t.updated_at, t.created_at) > now() - interval '3 days') u
+    order by u.queued_at desc
     limit 3000) x`,
 
   notifications: `select jsonb_build_object(

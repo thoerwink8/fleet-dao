@@ -13,7 +13,7 @@ export async function waitForCi(rt: TaskRuntime): Promise<CiStep> {
     throw new Error('等 CI 之前还没有 PR（工作流自己的状态乱了）');
   }
   for (;;) {
-    rt.set('ci', `等 PR #${rt.prNumber} 的 CI`);
+    await rt.advance('ci', `等 PR #${rt.prNumber} 的 CI`);
     const prNumber: number = rt.prNumber;
     const head: string = rt.head;
     const got: CiResult = await rt.waiting('ci', `等 PR #${prNumber} 的 CI`, () =>

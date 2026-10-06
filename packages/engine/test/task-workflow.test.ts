@@ -89,6 +89,13 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     // 挂自动合并在验收通过之后（calls 里先 verify 后 arm）；写给驾驶舱的状态：先 running、最后 done
     expect(world.states[0]).toMatchObject({ state: 'running', issueNumber: 12 });
     expect(world.states.at(-1)).toMatchObject({ state: 'done' });
+    // 换阶段要落库：库里的 phase 跟着走，不停在开头的「brief 读单子和需求文档」（#1150 过夜那次驾驶舱和巡查看着像卡在对题）
+    const phases = world.states.map((s) => s.phase);
+    expect(phases).toEqual(expect.arrayContaining(['implement', 'ci', 'verify', 'merge', 'done']));
+    expect(phases.indexOf('implement')).toBeLessThan(phases.indexOf('ci'));
+    expect(phases.indexOf('ci')).toBeLessThan(phases.indexOf('verify'));
+    expect(phases.indexOf('verify')).toBeLessThan(phases.indexOf('merge'));
+    expect(world.states.slice(0, -1).every((s) => s.state === 'running')).toBe(true);
     expect(world.alerts).toEqual([]);
   });
 

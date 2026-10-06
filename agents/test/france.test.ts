@@ -468,6 +468,12 @@ describe('只读：法国上的查询脚本不许写库、改文件、起停服�
     expect(sqlProblems(query.SQL)).toEqual([]);
   });
 
+  it('会话那一块两处都读：session_runs（老 Fusion）和 runs（任务工作流的动手、验收），只读前者会误报「手上没有会话」', () => {
+    expect(query.SQL.runs).toMatch(/from session_runs s/);
+    expect(query.SQL.runs).toMatch(/from runs r/);
+    expect(query.SQL.tasks).toMatch(/from runs r where r\.task_id = t\.id/);
+  });
+
   it('这两道检查真拦得住：往 SQL 里加一句改库、往脚本里加写文件和起 shell，都被认出来', () => {
     expect(
       sqlProblems({
@@ -1348,6 +1354,31 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
         whats(v).some((w) => w.startsWith(quiet)),
         quiet,
       ).toBe(false);
+  });
+
+  it('任务工作流的会话（runs 表，阶段写成 segment:manual）在跑：算手上有会话、不报「多半停在等人」，阶段认成写码', () => {
+    const v = viewOf((s) => {
+      s.tasks = {
+        ok: true,
+        rows: [
+          {
+            repo: 'o/fleet-dao',
+            n: 22,
+            title: '单 22',
+            state: 'running',
+            phase: 'brief',
+            doing: null,
+            last_problem: null,
+            created_at: ago(500),
+            updated_at: ago(25),
+          },
+        ],
+      };
+      s.runs = { ok: true, rows: [run({ n: 22, stage: 'segment:manual', queued: 10, ended: null })] };
+    });
+    expect(whats(v).some((w) => w.startsWith('#22 '))).toBe(false);
+    expect(JSON.stringify(v)).toContain('写码');
+    expect(JSON.stringify(v)).not.toContain('segment:');
   });
 
   it('会话用户挂的号：看引擎自己记的，取最新的；探针读不出就标出来', () => {
