@@ -442,7 +442,25 @@ export function withOwed(verdict, { dir, sessionId, now = Date.now() }) {
   const r = readOwed({ dir, sessionId });
   if (!r.ok)
     return { block: true, reason: `${setAsideOwed({ dir, sessionId, why: r.why })}\n${verdict.reason}` };
-  return r.owed ? { block: true, reason: `${owedLine(r.owed, now)}\n${verdict.reason}` } : verdict;
+  const owed = r.owed;
+  if (!owed) return verdict;
+  // 同一条欠账只在「第一次挡住收尾」时塞进 reason 顶部；之后每次再把这条放最前，模型就只看见它、看不见别的
+  // （Mirasim 会把每条挡回都重现，于是用户以为模型重说同一句话、忽略了新输入）。第一次过后照旧拦，但用一句短的「账还欠着」带过。
+  if (owed.nagged) return { block: true, reason: verdict.reason };
+  markNagged({ dir, sessionId, owed });
+  return { block: true, reason: `${owedLine(owed, now)}\n${verdict.reason}` };
+}
+
+/**
+ * 给欠账文件打上 nagged：下次挡住收尾时不再把这句放最前。写坏了最多多提醒一次，不抛。
+ * @param {{ dir: string, sessionId: unknown, owed: Owed }} opts
+ */
+function markNagged({ dir, sessionId, owed }) {
+  try {
+    writeFileSync(owedFile(dir, sessionId), `${JSON.stringify({ ...owed, nagged: true })}\n`);
+  } catch {
+    // 只是下次多提醒一次
+  }
 }
 
 /**
