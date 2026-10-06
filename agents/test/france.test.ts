@@ -710,6 +710,26 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
     });
   });
 
+  it('失败记录被更新的版本取代（supersededBy）：原样带回来，本机才知道旧失败已过期（#1157）', () => {
+    const superseded = {
+      ...state(healthy().sections),
+      attempt: {
+        sha: 'dddddddddddddddddddddddddddddddddddddddd',
+        startedAt: ago(900),
+        endedAt: ago(899),
+        result: 'failed',
+        detail: '旧的',
+        supersededBy: { sha: `${SHA}ffff`, at: ago(2) },
+      },
+    };
+    const s = query.collect(fakeIo({ state: () => JSON.stringify(superseded) })).sections;
+    expect(state(s).attempt).toMatchObject({
+      sha: 'dddddddddddd',
+      result: 'failed',
+      supersededBy: { sha: SHA.slice(0, 12), at: ago(2) },
+    });
+  });
+
   it('在用的版本：链接读不了、指的不是提交号，都明说', () => {
     const gone = query.collect(
       fakeIo({

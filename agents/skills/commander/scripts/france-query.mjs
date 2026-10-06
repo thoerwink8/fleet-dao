@@ -417,6 +417,10 @@ export function autoReleaseSection(io) {
         endedAt: rawAttempt.endedAt ?? null,
         result: rawAttempt.result,
         detail: rawAttempt.detail ?? '',
+        // 失败后被更新的版本取代的标记（lib.mjs supersedeStaleFailure，#1157）：漏掉它，本机就一直报已经过期的旧失败
+        ...(isObj(rawAttempt.supersededBy)
+          ? { supersededBy: { ...rawAttempt.supersededBy, sha: sha12(rawAttempt.supersededBy.sha) } }
+          : {}),
       }
     : rawAttempt;
   /**
