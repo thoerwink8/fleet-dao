@@ -11,6 +11,7 @@ export * from './web-api/dispatch.ts';
 export * from './web-api/engine-switch.ts';
 export * from './web-api/enums.ts';
 export * from './web-api/env.ts';
+export * from './web-api/france-release.ts';
 export * from './web-api/home.ts';
 export * from './web-api/jobs.ts';
 export * from './web-api/nodes.ts';

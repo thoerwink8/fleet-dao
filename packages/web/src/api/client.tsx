@@ -24,6 +24,8 @@ import type {
   DemoLinks,
   DemoScopeView,
   EnvResponse,
+  FrancePreflightResponse,
+  FranceReleaseState,
   HomeResponse,
   Jobs,
   LegacyAsks,
@@ -130,6 +132,10 @@ export interface FleetApi {
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
   /** /changelog 页「发布 v<N>」的版本号（#725）：后端现读 GitHub 里程碑，和 pnpm publish:pr 同一份判法。 */
   releaseVersion(): Promise<ReleaseVersion>;
+  /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
+  franceReleaseState(): Promise<FranceReleaseState>;
+  /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
+  francePreflight(): Promise<FrancePreflightResponse>;
   /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
   demoLinks(): Promise<DemoLinks>;
   createDemoLink(body: CreateDemoLinkBody): Promise<CreatedDemoLink>;
@@ -189,6 +195,7 @@ export const keys = {
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
   releaseVersion: ['release-version'] as const,
+  franceReleaseState: ['france-release-state'] as const,
   demoLinks: ['demo-links'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
@@ -361,6 +368,30 @@ export function useDemoLinks() {
 export function useReleaseVersion() {
   const api = useApi();
   return useQuery({ queryKey: keys.releaseVersion, queryFn: () => api.releaseVersion() });
+}
+
+/**
+ * /france 页发版一键（#618）：release-train 此刻的状态（在走 / 暂停 / 没在走 / 读不到）。
+ * 30 秒重拉一次：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
+ * 只有正式驾驶舱才有这一节（演示版不挂 france 这条路由），不查 demo 模块。
+ */
+export function useFranceReleaseState() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceReleaseState,
+    queryFn: () => api.franceReleaseState(),
+    refetchInterval: 30_000,
+    enabled: !isDemo(),
+  });
+}
+
+/**
+ * /france 页「发版预检」按钮（#618）：点下让后端起 pnpm release:onekey preflight。
+ * 命令后端写死、不收参数；最长 60 秒（后端 timeout），前端用 useMutation 不缓存、不作废读。
+ */
+export function useFrancePreflight() {
+  const api = useApi();
+  return useMutation({ mutationFn: () => api.francePreflight() });
 }
 
 /**

@@ -36,6 +36,7 @@ import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { createFeishuAuth } from './feishu.ts';
+import { liveFranceReleasePort } from './france-release.ts';
 import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
@@ -223,6 +224,9 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
     release: { openMilestones: github.openMilestones, changelog: repoChangelog },
+    // /france 页发版一键（#618）：读 ~/.fleet-dao/release-train.*、起 pnpm release:onekey preflight。
+    // 只在正式环境装：开发、内存版起这条命令会在开发者本机的仓里发，会害人以为发的是这台，所以不装、接口回「没接上」。
+    ...(production ? { franceRelease: liveFranceReleasePort(log) } : {}),
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,
