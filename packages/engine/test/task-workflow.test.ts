@@ -482,7 +482,7 @@ describe('任务工作流 · 放弃', { timeout: 60_000 }, () => {
   it('会话在跑时点「放弃」：取消送进会话，工作流收尾退出（存档收树）', async () => {
     const world = createFakeWorld();
     let cancelled = false;
-    const { tasks } = scripted({
+    const { tasks, calls } = scripted({
       segment: (_i, _n, signal) =>
         new Promise((resolve) => {
           const done = () => {
@@ -503,8 +503,8 @@ describe('任务工作流 · 放弃', { timeout: 60_000 }, () => {
       world,
       async (q) => {
         const h = await start(q, input());
-        await waitUntil(() => world.count('createWorktree') > 0, '建了工作树');
-        await statusUntil(h, (s) => s.doing.includes('动手'), '会话在跑');
+        // 等到会话真的起来了才放弃：状态里写着「动手」只说明要起了，活动可能还在排队，那时取消它根本不会跑到会话里（cancelled 永远是假）
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
         await h.signal(taskAbandonSignal, { by: 'frank', reason: '停掉' });
         return h.result() as Promise<TaskRun>;
       },
@@ -512,6 +512,47 @@ describe('任务工作流 · 放弃', { timeout: 60_000 }, () => {
     );
     expect(run.outcome).toBe('abandoned');
     expect(cancelled).toBe(true);
+    expect(world.callsOf('removeWorktree')[0]?.input).toMatchObject({ archive: true });
+  });
+
+  it('放弃的信号在动手那一步落库期间到（还没起会话）：不再起会话，工作流收尾退出（存档收树）', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted();
+    // 「动手」那一步的落库卡住，直到信号送出去：信号到时 cancellable 还没开，它只能被记下来（#706 的竞态）
+    let atMirror: () => void = () => {};
+    const reached = new Promise<void>((r) => {
+      atMirror = r;
+    });
+    let letGo: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      letGo = r;
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await reached;
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '停掉' });
+        letGo();
+        return h.result() as Promise<TaskRun>;
+      },
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          async saveTaskState(snapshot) {
+            if (snapshot.doing.includes('动手')) {
+              atMirror();
+              await gate;
+            }
+            return acts.saveTaskState(snapshot);
+          },
+        }),
+      },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(calls.segment).toHaveLength(0);
     expect(world.callsOf('removeWorktree')[0]?.input).toMatchObject({ archive: true });
   });
 });

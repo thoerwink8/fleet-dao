@@ -179,6 +179,10 @@ export class TaskRuntime {
 
   /** 把一段长活动放进可取消的范围：放弃的信号一到就取消它（活动心跳，收得到），结果抛 Abandoned。 */
   async cancellable<T>(fn: () => Promise<T>): Promise<T> {
+    // 放弃的信号可能在上一个 await（比如换阶段落库）期间就到了：那时还没有可取消的范围，cancelRunning 是空的，
+    // 信号只记了下来；这里不先看一眼，长活动就照常起、再没人去取消它，一直跑到它自己的限时（#706）。
+    // 老历史里这一步没有这道检查：patched() 为假就照旧。
+    if (patched('cancellable-guard')) this.guard();
     const scope = new CancellationScope({ cancellable: true });
     this.cancelRunning = () => scope.cancel();
     try {
