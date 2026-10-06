@@ -9,6 +9,7 @@ import {
   Home,
   Presentation,
   Route,
+  SatelliteDish,
   Scale,
   ScrollText,
   ServerCog,
@@ -77,6 +78,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '运转',
     items: [
+      {
+        to: '/france',
+        label: '法国',
+        icon: SatelliteDish,
+        hint: '法国这台机器现在怎样：引擎、在用版本、落后主线、健康、定时任务',
+        // 演示版里没有这一页（和 /env 同一个 R10 理由：露机器名、版本号、会话数，路由表里也不放）。
+      },
       {
         to: '/env',
         label: '环境',

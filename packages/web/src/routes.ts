@@ -18,6 +18,9 @@ const cockpitOnly = demo
       route('efforts', 'routes/efforts.tsx'),
       // 环境页（#820 片 1）：这一台环境现在怎样，只读；演示版没有这一页（露机器名、版本号、会话数，R10）。
       route('env', 'routes/env.tsx'),
+      // 法国总览（#618 第 1 版）：打开这一页就看到法国环境——引擎、在用版本、健康、定时任务。只读；
+      // 演示版不放（和环境页同一个 R10 理由：露机器名、版本号）。发版动作在 #618 后续片加。
+      route('france', 'routes/france.tsx'),
       // 第二批页面（P3 之后）：先放占位页。
       route('models', 'routes/soon.tsx', { id: 'soon-models' }),
       route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
