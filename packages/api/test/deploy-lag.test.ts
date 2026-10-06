@@ -274,6 +274,21 @@ describe('判定：读的时候现算', () => {
     ).toEqual(['rules']);
   });
 
+  it('装机自动档：没装成红（自动发布报过了，30 分钟后自己再试）；装成了、老状态没有这个字段：绿', () => {
+    const failed = judge(
+      input(
+        H2,
+        state({ tier: { commit: H2, at: ago(MIN), result: 'failed', detail: '退出码 1，✗ timer 没在跑' } }),
+      ),
+    );
+    expect(codes(failed)).toEqual(['tier_failed']);
+    expect(failed.problems[0]?.alreadyAlerted).toBe(true);
+    expect(judge(input(H2, state({ tier: { commit: H2, at: ago(MIN), result: 'ok', detail: '' } }))).ok).toBe(
+      true,
+    );
+    expect(judge(input(H2, state())).ok).toBe(true);
+  });
+
   it('装机脚本：装到哪没读到马上红；落后主线满 24 小时才红（要人跑，不自动）', () => {
     expect(codes(judge(input(H2, state({ system: { error: 'france.sh 装到哪个提交没记' } }))))).toEqual([
       'system',

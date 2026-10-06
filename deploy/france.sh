@@ -13,8 +13,12 @@
 # node 默认的编译缓存目录（先由 root 建好，别的用户替 fleet、pilot、root 放不进编译缓存）。
 # 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
-#   bash deploy/france.sh           装：缺的补上，已有的不动
+#   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
+#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、演示版可见范围的单元和脚本
+#                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
+#                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
+#                                   人工档（lib/human-tier.sh：建用户、防火墙、sudoers）只在整套跑时做。
 set -Eeuo pipefail
 umask 022
 
@@ -57,6 +61,8 @@ source "$DEPLOY_DIR/lib/node-cache.sh"
 source "$DEPLOY_DIR/lib/auto-release-state.sh"
 # shellcheck source=lib/node-report-gate.sh
 source "$DEPLOY_DIR/lib/node-report-gate.sh"
+# shellcheck source=lib/human-tier.sh
+source "$DEPLOY_DIR/lib/human-tier.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -179,8 +185,8 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 DEMO_DIR=/var/lib/fleet-dao/demo
 DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
 DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
-# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交马上发到本机（发布脚本先排空引擎）、发完同步规矩。装的是副本：
-# 主线上改了它，要重跑本脚本才换。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
+# 自动发布（docs/ops.md 第九节「自动发布」）：版本标记指的提交 CI 全绿就发到本机（发布脚本先排空引擎）、发完同步规矩。装的是副本：
+# 主线上改了它，下一轮发完版自动换（--auto-tier）。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
 AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
 # 配置对账（#323，docs/ops.md 第九节「配置进仓对账」）：私有值只把 HMAC 指纹写进仓里的期望，钥匙只在本机（root 600）。
@@ -196,11 +202,13 @@ FLEET_WG_HK_PUBLIC_KEY=""
 FLEET_TEMPORAL_DB_PASSWORD=""
 
 CHECK_ONLY=0
+AUTO_TIER=0
 case "${1:-}" in
 --check) CHECK_ONLY=1 ;;
+--auto-tier) AUTO_TIER=1 ;;
 "") ;;
 *)
-  echo "用法：bash $0 [--check]" >&2
+  echo "用法：bash $0 [--check | --auto-tier]" >&2
   exit 64
   ;;
 esac
@@ -239,49 +247,6 @@ preflight() {
     return 1
   fi
   ok "Ubuntu $ver（$CODENAME），x86_64，cgroup v2，node $(/usr/bin/node --version)"
-}
-
-setup_identity() {
-  step "用户与目录"
-  ensure_service_user fleet /home/fleet
-  ensure_dir /home/fleet fleet:fleet 750
-  # 代码归 root、fleet 只读：以 fleet 身份跑的 AI 会话改不了引擎自己的代码。/srv/fleet-dao 是装机脚本所在的检出，
-  # 应用的各版在 /srv/fleet-dao-releases（发布脚本建，构建完才换成 root 的）
-  ensure_dir /srv/fleet-dao root:root 755
-  ensure_dir "$RELEASES_DIR" root:root 755
-  ensure_dir /var/lib/fleet-dao fleet:fleet 750
-  ensure_dir "$DEMO_DIR" fleet:fleet 750
-  # 引擎自己的临时目录（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）放在这下面，引擎自己建 tmp/、archive/
-  ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750
-  ensure_dir "$SESSION_IO_DIR" fleet:fleet 711
-  # AI 会话的工作树的根：归 root、别人写不进（会话用户没法在路径上塞符号链接）；每棵树由 fleet-agent-scope 建、归会话用户 700
-  ensure_dir "$WORK_DIR" root:root 755
-  ensure_dir /var/log/fleet-dao fleet:fleet 750
-  ensure_dir /etc/fleet-dao root:fleet 750
-  # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和旧系统的用户读不到
-  ensure_dir /etc/fleet-dao/github root:fleet 750
-  ensure_dir /opt/fleet-dao root:root 755
-  local u
-  ensure_pkgs curl # 下会话用户的 reclaude 要它
-  for u in "${SESSION_USERS[@]}"; do
-    ensure_service_user "$u" "/home/$u"
-    ensure_dir "/home/$u" "$u:$u" 750
-    # 引擎起 Claude 会话用的就是它家里这份 reclaude（engine.env 的 {user} 路径）：新机器上没有就装，登录仍由人做（ops 第五节）
-    ensure_user_reclaude "$u" "/home/$u" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
-  done
-  if [[ -e "$ENV_FILE" ]]; then
-    fix_meta "$ENV_FILE" root:fleet 640
-  else
-    put_file "$ENV_FILE" root:fleet 640 "$(<"$DEPLOY_DIR/france/france.env.example")"
-  fi
-}
-
-setup_pilot() {
-  step "创始人的登录用户 $PILOT_USER（经 Mirasim 的 ssh 远程模式登进来；没有 sudo，看得了日志）"
-  # Mirasim 桌面端连进来时在它家里自己装服务端（~/.mirasim-remote，自带 node）：这头要 curl 直接下服务端包
-  # （下不了由桌面端经 scp 传）、tar 和 gzip 解包（Ubuntu 必装的包）；干活要 git 和 ssh 客户端
-  ensure_pkgs git openssh-client curl
-  setup_login_user "$PILOT_USER" "$PILOT_HOME" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
 }
 
 # node 默认的编译缓存目录先由 root 建好（lib/node-cache.sh）：排在第一次以 fleet 跑 node（下面装 pnpm 就会）之前。
@@ -622,83 +587,6 @@ setup_slice() {
   put_file /etc/systemd/system/fleet-agents.slice root:root 644 "$(<"$DEPLOY_DIR/france/fleet-agents.slice")"
   if ((WROTE)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-agents.slice 0
-  # 引擎（fleet）自己建不了系统级 scope，会话还得换成会话用户：给它一个只做这件事的 root 脚本，sudoers 只放行这一个。
-  # polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份。
-  put_file "$AGENT_SCOPE_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-agent-scope.sh")"
-  local tmp
-  tmp=$(mktemp)
-  cp -- "$DEPLOY_DIR/france/sudoers-fleet-dao" "$tmp"
-  # sudoers 写坏了会把 sudo 整个弄瘫：先单独验这一份，过了才放进去
-  if ! visudo -cqf "$tmp" >/dev/null 2>&1; then
-    rm -f -- "$tmp"
-    red "deploy/france/sudoers-fleet-dao 过不了 visudo -c，不装"
-    return 1
-  fi
-  rm -f -- "$tmp"
-  put_file "$SUDOERS_FILE" root:root 440 "$(<"$DEPLOY_DIR/france/sudoers-fleet-dao")"
-  if ! visudo -cq >/dev/null 2>&1; then
-    rm -f -- "$SUDOERS_FILE"
-    red "放进 $SUDOERS_FILE 之后整套 sudoers 验不过，已撤回"
-    return 1
-  fi
-}
-
-# fleet-dao.nft 渲染好的样子放进 RENDERED：setup_firewall 装的就是它，读回拿它比文件。uid 都现查，查不到判红、不往下写
-render_firewall() {
-  local ports fleet_uid session_uid
-  # 模板里挡会话口的规则只写得下一个会话用户（fleet-dao.nft 第二道隔离末尾写了为什么）
-  if ((${#SESSION_USERS[@]} != 1)); then
-    red "会话用户有 ${#SESSION_USERS[@]} 个，deploy/france/fleet-dao.nft 挡会话口的规则只写得下一个：先改规则"
-    return 1
-  fi
-  if ! fleet_uid=$(id -u fleet 2>/dev/null) || ! session_uid=$(id -u "${SESSION_USERS[0]}" 2>/dev/null); then
-    red "查不到 fleet 或 ${SESSION_USERS[0]} 的 uid：nft 表写不出来"
-    return 1
-  fi
-  ports=$(printf '%s, ' "${PROTECTED_PORTS[@]}")
-  render "$DEPLOY_DIR/france/fleet-dao.nft" PORTS="${ports%, }" FLEET_UID="$fleet_uid" SESSION_UID="$session_uid"
-}
-
-setup_firewall() {
-  step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连；会话用户在本机开的口只许它自己连）"
-  # 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
-  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" tmp err file_changed unit_changed
-  if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then
-    if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
-      ok "ufw 已有：$rule"
-    else
-      # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
-      ufw $rule comment 'fleet-dao cockpit api over wireguard' >/dev/null
-      changed "ufw $rule"
-    fi
-  else
-    ok "这台没开 ufw，隧道上不用另外放行"
-  fi
-  # 本机上谁能连 Temporal、库、驾驶舱后端：只许 root 和 fleet（按连接发起方的属主），会话用户连上去就被复位；
-  # 会话用户在回环上开的口（它的 reclaude 代理）只许它自己和 root 连（按应答方的属主，#35）
-  render_firewall
-  tmp=$(mktemp)
-  printf '%s\n' "$RENDERED" >"$tmp"
-  # 规则写错了载不进去：先验这一份，过了才放上去
-  if ! err=$(nft -c -f "$tmp" 2>&1); then
-    rm -f -- "$tmp"
-    red "deploy/france/fleet-dao.nft 渲染后过不了 nft -c：$(head -3 <<<"$err" | tr '\n' ' ')"
-    return 1
-  fi
-  rm -f -- "$tmp"
-  put_file "$NFT_FILE" root:fleet 640 "$RENDERED"
-  file_changed=$WROTE
-  put_file /etc/systemd/system/fleet-firewall.service root:root 644 "$(<"$DEPLOY_DIR/france/fleet-firewall.service")"
-  unit_changed=$WROTE
-  if ((unit_changed)); then systemctl daemon-reload; fi
-  if [[ "$(systemctl is-active fleet-firewall.service 2>/dev/null)" == active ]] && ((file_changed || unit_changed)); then
-    # 表是在一个事务里删了重建的，reload 不会有空窗；restart 会先删表，中间有一小段谁都能连
-    systemctl reload fleet-firewall.service
-    changed "重载 fleet-firewall（nft 表换成新规则）"
-  fi
-  ensure_unit_running fleet-firewall.service 0
-  # 规则只管新连接：表载上之前就连着会话用户的口、由别人发起的连接在这里断掉（lib/session-ports.sh）
-  session_ports_cut "${SESSION_USERS[0]}"
 }
 
 pnpm_want() { /usr/bin/node -p 'require(process.argv[1]).packageManager' "$DEPLOY_DIR/../package.json"; }
@@ -917,8 +805,8 @@ setup_auto_release() {
   ensure_unit_running fleet-auto-release.timer "$unit_changed"
 }
 
-# 本脚本跑完没红：记下装到了哪个提交（检出的 HEAD）。自动发布拿它和主线比，数装机相关的文件后来改过几次，
-# 后端的 /healthz 据此标「装机脚本落后」（这层碰防火墙、sudoers，不自动跑）。同一个提交再跑不改
+# 本脚本整套跑完没红：记下装到了哪个提交（检出的 HEAD）。自动发布拿它和主线比，数人工档那几个文件（HUMAN_TIER_PATHS：
+# 防火墙、sudoers、建用户）后来改过几次，后端的 /healthz 据此标「装机脚本落后」。只记整套跑（自动档 --auto-tier 不记）。同一个提交再跑不改
 record_applied() {
   local head
   if ! head=$(git -C "$DEPLOY_DIR/.." rev-parse HEAD 2>/dev/null) || [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
@@ -1551,8 +1439,50 @@ readback_service_home() {
   fi
 }
 
+# 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤，
+# 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
+setup_auto_tier() {
+  setup_slice
+  setup_demo_scopes
+  setup_auto_release
+}
+
+# 自动档只读回它装的那几样（整套的读回里别的项、状态文件上一轮的结果不归这里管，免得别的毛病让这一档每个提交都判红）
+readback_auto_tier() {
+  step "读回（自动档）"
+  readback_slice
+  local u f
+  for u in fleet-demo-scopes.path fleet-demo-scopes.timer fleet-auto-release.timer; do
+    if [[ "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then red "$u 没在跑"; fi
+  done
+  for f in "${AUTO_RELEASE_FILES[@]}"; do
+    if ! cmp -s -- "$AUTO_RELEASE_LIB/$f" "$DEPLOY_DIR/france/auto-release/$f"; then
+      red "$AUTO_RELEASE_LIB/$f 和仓里的不一样（或没装）"
+    fi
+  done
+  for u in "${DEMO_UNITS[@]}" "${AUTO_RELEASE_UNITS[@]}"; do
+    if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
+  done
+}
+
+auto_tier_main() {
+  step "自动档（不碰防火墙、sudoers、用户、钥匙；整套装机见不带参数的 france.sh）"
+  if ((EUID != 0)); then
+    echo "要 root：sudo bash $0 --auto-tier" >&2
+    exit 64
+  fi
+  if [[ ! -d "$RELEASES_DIR" ]] || ! id fleet >/dev/null 2>&1; then
+    red "这台机器还没整套装过（没有 $RELEASES_DIR 或用户 fleet）：先由人以 root 跑一遍不带参数的 bash $0"
+    finish
+  fi
+  setup_auto_tier
+  readback_auto_tier
+  finish
+}
+
 main() {
   local before=""
+  if ((AUTO_TIER)); then auto_tier_main; fi
   preflight
   if ((CHECK_ONLY == 0)); then
     before=$(snapshot_others)
@@ -1565,6 +1495,7 @@ main() {
     setup_postgres
     setup_temporal
     setup_slice
+    setup_sudoers
     setup_firewall
     setup_pnpm
     setup_session_pnpm

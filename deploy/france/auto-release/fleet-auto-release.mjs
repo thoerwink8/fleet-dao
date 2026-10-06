@@ -1,6 +1,6 @@
 // 自动发布的入口（法国，root）：fleet-auto-release.timer 每 5 分钟经 fleet-auto-release.service 拉起一轮。
-// deploy/france.sh 把这个目录装到 /usr/local/lib/fleet-dao/auto-release/（装的是副本：主线上改了它，要重跑 france.sh 才换，
-// 后端的 /healthz 会标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、会话列表、发布脚本、库。
+// deploy/france.sh 把这个目录装到 /usr/local/lib/fleet-dao/auto-release/（装的是副本：主线上改了它，下一版发完由本入口自己
+// 跑 france.sh --auto-tier 换上，不用人重跑；只有防火墙、sudoers、建用户那几个文件改了才要人重跑，/healthz 才标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、会话列表、发布脚本、库。
 // 手动跑一轮：systemctl start fleet-auto-release（别直接跑本文件：两轮叠着跑会互相盖状态文件）。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
@@ -12,7 +12,7 @@ import {
   CHECKOUT,
   CI_RUNS_PAGE,
   CI_WORKFLOW,
-  INSTALL_PATHS,
+  HUMAN_TIER_PATHS,
   MAIN_HISTORY,
   RELEASES,
   REPO,
@@ -157,8 +157,8 @@ export const realIo = {
     if (applied === '') throw new Error(`${APPLIED_FILE} 认不出（应为 commit=<提交号>）`);
     if (applied === null) return { applied: null, log: '' };
     const log = gitOk(
-      ['log', '--first-parent', '--format=%H %cI', `${applied}..${head}`, '--', ...INSTALL_PATHS],
-      '数装机相关的提交',
+      ['log', '--first-parent', '--format=%H %cI', `${applied}..${head}`, '--', ...HUMAN_TIER_PATHS],
+      '数装机人工档的提交',
     );
     return { applied, log };
   },
@@ -243,6 +243,11 @@ export const realIo = {
   runRelease,
   async checkoutHead() {
     return gitOk(['rev-parse', 'HEAD'], '读部署检出的提交').trim();
+  },
+  /** 装机的自动档：以 root 跑检出里的 france.sh --auto-tier（lib.mjs 的 tierStep）。 */
+  async applyAutoTier() {
+    const r = run('bash', [`${CHECKOUT}/deploy/france.sh`, '--auto-tier'], { timeoutMs: 600_000 });
+    return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
   async syncRules(user) {
     const r = run(NODE, [`${CHECKOUT}/packages/agents-sync/bin/agents-sync`, '--apply', '--user', user], {
