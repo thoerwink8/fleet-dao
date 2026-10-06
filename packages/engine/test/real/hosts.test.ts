@@ -1021,8 +1021,10 @@ describe('Claude Code 的驱动', () => {
 });
 
 describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
-  it('四条现挂的路由都认得出：opus-5.5→claude、gpt-5.6-luna→codex、kimi-k3→pi、deepseek-flash→dsh', () => {
+  it('现挂的路由都认得出：opus-5.5、sonnet-5.5→claude、gpt-5.6-luna→codex、kimi-k3→pi、deepseek-flash→dsh、glm-5.3-flash→zcode', () => {
     expect(mirasimAgentFor('claude-opus-5-5')).toBe('claude');
+    expect(mirasimAgentFor('claude-sonnet-5-5')).toBe('claude');
+    expect(mirasimAgentFor('glm-5.3-flash')).toBe('zcode');
     expect(mirasimAgentFor('gpt-5.6-luna')).toBe('codex');
     expect(mirasimAgentFor('kimi-k3')).toBe('pi');
     expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
@@ -1095,6 +1097,9 @@ describe('Mirasim 的驱动（#345）', () => {
     await driver.run(mirasimSpec({ model: 'kimi-k3' }), {});
     expect(fake.specs[1]).toMatchObject({ agent: 'pi', expectModel: 'kimi-k3' });
     expect(fake.specs[1]).not.toHaveProperty('model');
+    await driver.run(mirasimSpec({ model: 'glm-5.3-flash' }), {});
+    expect(fake.specs[2]).toMatchObject({ agent: 'zcode', model: 'glm-5.3-flash' });
+    expect(fake.specs[2]).not.toHaveProperty('expectModel');
   });
 
   it('模型串这张表认不出：起会话之前就拒（不起插头），和其它认不出的配置一样交回工作流换新 runId', async () => {

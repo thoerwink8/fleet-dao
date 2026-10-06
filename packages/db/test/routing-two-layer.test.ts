@@ -148,6 +148,28 @@ describe('默认配置 routing.default.json', () => {
     expect([...inExample.keys()].filter((id) => !inSkeleton.has(id))).toEqual([]);
   });
 
+  it('创始人 2026-10-06 定的角色：lead 类（default 兜底）Sonnet 5.5 第一、execute 和 ui 仍是 Grok 第一、verify 仍是 GPT luna 第一；GLM 排在写码、验证、界面、兜底的末尾，判断里没有', async () => {
+    const cfg = await loadRoutingConfig();
+    for (const stage of ['default', 'triage', 'spec', 'plan', 'review', 'research'] as const) {
+      expect((cfg.purposes[stage] ?? cfg.purposes.default)?.[0], stage).toBe('sonnet-5.5');
+    }
+    expect(cfg.purposes.execute?.[0]).toBe('grok-4.7');
+    expect(cfg.purposes.ui?.[0]).toBe('grok-4.7');
+    expect(cfg.purposes.verify?.[0]).toBe('gpt-5.6-luna');
+    for (const stage of ['default', 'verify', 'execute', 'ui'] as const) {
+      expect(cfg.purposes[stage]?.at(-1), stage).toBe('glm-5.3-flash');
+    }
+    expect(cfg.purposes.judge).not.toContain('glm-5.3-flash');
+    expect(cfg.models['sonnet-5.5']?.map((r) => [r.routeId, r.enabled])).toEqual([
+      ['claude-solo:sonnet-5.5:claude-code', true],
+      ['claude-carpool:sonnet-5.5:claude-code', true],
+      ['mirasim-relay:sonnet-5.5:mirasim', false],
+    ]);
+    expect(cfg.models['glm-5.3-flash']?.map((r) => [r.routeId, r.enabled])).toEqual([
+      ['mirasim-relay:glm-5.3-flash:mirasim', true],
+    ]);
+  });
+
   it('界面用途里没有 GPT（照旧目录配置）、判断只用 Jev', async () => {
     const cfg = await loadRoutingConfig();
     expect(cfg.purposes.ui?.some((m) => m.startsWith('gpt'))).toBe(false);
