@@ -10,9 +10,7 @@
 //    上次同步成功不到 QUIET_MS 就不再跑：Cursor 讨论一次并行起好几个会话，每个都会触发这个钩子。
 // 3. 会话所在仓的「## 生效中的临时调整」表（通用段「我拍了板」那条）：到了最迟复查日期的、缺列的、日期认不出的
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
-// 4. 会话开在 fleet-dao 里时：合并后待补审的 PR（先合后审，创始人 2026-10-03「1+2+3」），有待补审的或没查成才说一行；
-//    限时 AFTER_MERGE_MS，超时、网络不通明说没查成，不当成「没有」。
-// 5. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
+// 4. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
 //    gh 没查成说一行没查成，不当成「没有」。
 // 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
@@ -487,7 +485,7 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
  * 会话进程死了、从头没送到——钩子在提交那一刻就落了盘，新会话开场看一眼这份文件，上一个会话没来得及处理的话就在这里，不靠他重发。
  * 列最近 RECENT_MS 以内、本会话还没见过的全部（本会话自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
  * 封顶（超了留最新的、写明更早的几条没列）；没有文件、没有最近的话都不出声；读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
- * 机器派的会话（工人、第二意见、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
+ * 机器派的会话（工人、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
  * 第三种丢法（创始人 2026-10-06「你好像没接收到【选方案a】」）：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
  * Claude Code 从头没收到、prompt-log 里自然也没有。所以再拿 Mirasim 自己记的「发了的账」（founder-inbox.mjs）和这份「收到的账」对一遍，
  * 发了没收到的单独一行、放前面、叫会话先答。这一段在每一轮开头都跑（Mirasim 每轮都 --resume 起进程，SessionStart 每轮都触发），
@@ -579,34 +577,8 @@ function packNewestFirst(entries) {
   return { items, omitted: omitted > 0 ? `，字数封顶只列最新 ${items.length} 条` : '' };
 }
 
-/**
- * 第 4 件：合并后待补审（清单里标 review: after-merge 的 CI 判法先合后审，合并后由 discuss 技能的 second-opinion.mjs 补审）。
- * 只在 fleet-dao 自己的检出里查（origin 指向它；和 packages/github/src/hygiene-scope.ts 的 HYGIENE_REPO 是同一个仓）。
- * 查法不在这里另写一份：起 second-opinion.mjs --after-merge-pending --json，硬超时 AFTER_MERGE_MS。脚本优先用同步专用检出里
- * 那份（和这个钩子一样来自 origin/main，旧分支的检出里那份可能还不认这个参数），没有再用会话所在检出里的。
- */
-export const AFTER_MERGE_MS = 8_000;
+/** fleet-dao 自己的检出（origin 指向它；和 packages/github/src/hygiene-scope.ts 的 HYGIENE_REPO 是同一个仓）：只在这里查 PR、进度单 */
 export const FLEET_ORIGIN = /github\.com[:/]+thoerwink8\/fleet-dao(?:\.git)?\/?$/i;
-const SO_SCRIPT = join('agents', 'skills', 'discuss', 'scripts', 'second-opinion.mjs');
-const SO_RUN = 'node agents/skills/discuss/scripts/second-opinion.mjs';
-const AM_NOT_CHECKED = '合并后待补审没查成';
-
-/** 起 second-opinion.mjs 查合并后待补审：{ status, stdout, stderr, error, timeoutMs }，超时由 spawnSync 杀掉 */
-export function afterMergeRunner(timeoutMs = AFTER_MERGE_MS) {
-  return (script, repo) => {
-    const r = spawnSync(
-      process.execPath,
-      [script, '--after-merge-pending', '--json', '--no-fetch', '--repo', repo],
-      {
-        encoding: 'utf8',
-        timeout: timeoutMs,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error, timeoutMs };
-  };
-}
 
 const prList = (items) =>
   items
@@ -615,50 +587,7 @@ const prList = (items) =>
     .join('、') + (items.length > 6 ? ' 等' : '');
 
 /**
- * fetch 是第 1 件在会话所在仓里取远端的结果（取不到时主线上合了什么不知道，直接说没查成，不起脚本）。
- * mirror 是同步专用检出里那份脚本（先试它），再试会话所在检出里的。返回要说的几行：没有待补审的、不是 fleet-dao 都不出声。
- */
-export function checkAfterMerge({ cwd, git, run, fetch, mirror = null }) {
-  const top = git(cwd, ['rev-parse', '--show-toplevel']);
-  if (!ok(top) || !top.stdout.trim()) return [];
-  const root = top.stdout.trim();
-  const url = git(root, ['config', '--get', 'remote.origin.url']);
-  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return [];
-  if (fetch && fetch.ok === false)
-    return [`${AM_NOT_CHECKED}：取不到远端（${fetch.why}），最近合并的 PR 补审了没有不知道。`];
-  const script = [mirror, join(root, SO_SCRIPT)].find((s) => s && existsSync(s));
-  if (!script) return [`${AM_NOT_CHECKED}：找不到 ${SO_SCRIPT.replaceAll('\\', '/')}。`];
-  const r = run(script, root);
-  if (r.error || r.status !== 0)
-    return [
-      `${AM_NOT_CHECKED}：${why(r).replace(/^没查成：/, '')}（自己跑一遍 ${SO_RUN} --after-merge-pending 看原因）。`,
-    ];
-  let p;
-  try {
-    p = JSON.parse(r.stdout);
-  } catch {
-    return [
-      `${AM_NOT_CHECKED}：second-opinion.mjs 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`,
-    ];
-  }
-  if (![p?.unreviewed, p?.failed, p?.problems].every(Array.isArray))
-    return [`${AM_NOT_CHECKED}：second-opinion.mjs 的输出少了 unreviewed、failed 或 problems。`];
-  const lines = [];
-  if (p.unreviewed.length > 0)
-    lines.push(
-      `合并后待补审 ${p.unreviewed.length} 个：${prList(p.unreviewed)}（跑 ${SO_RUN} --after-merge-sweep --author-family <写它的模型族>）。`,
-    );
-  if (p.failed.length > 0)
-    lines.push(
-      `合并后补审没过、等修复或 revert ${p.failed.length} 个：${prList(p.failed)}（修复合了跑 ${SO_RUN} --after-merge-resolve <号> --by <修复 PR 号>）。`,
-    );
-  if (p.problems.length > 0)
-    lines.push(`合并后补审对不上 PR 的提交 ${p.problems.length} 个：${p.problems.slice(0, 2).join('；')}。`);
-  return lines;
-}
-
-/**
- * 第 5 件：绿了没挂自动合并的 PR（全仓审查第 2 路清单 7 号；pnpm pr:open 是必经那一步，这里只是兜底——法国引擎的
+ * 第 4 件：绿了没挂自动合并的 PR（全仓审查第 2 路清单 7 号；pnpm pr:open 是必经那一步，这里只是兜底——法国引擎的
  * 每小时对账关着）。查法和判路径不在这里另写：起 packages/conventions/src/bin/pr-idle.ts（不带第三方依赖，同步专用检出
  * 没装 node_modules 也跑得起来），优先用同步专用检出里那份，没有再用会话所在检出里的；硬超时 IDLE_PR_MS。
  */
@@ -680,7 +609,7 @@ export function idlePrRunner(timeoutMs = IDLE_PR_MS) {
   };
 }
 
-/** 参数同 checkAfterMerge；返回要说的几行：没有、不是 fleet-dao 都不出声 */
+/** 参数：cwd、git、run、fetch（第 1 件取远端的结果）、mirror（同步专用检出里那份脚本）；返回要说的几行：没有、不是 fleet-dao 都不出声 */
 export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
   const top = git(cwd, ['rev-parse', '--show-toplevel']);
   if (!ok(top) || !top.stdout.trim()) return [];
@@ -769,7 +698,6 @@ export function sessionStart({
   now = Date.now(),
   sessionId = null,
   unattendedDir = stateDir(),
-  afterMerge = afterMergeRunner(),
   idlePr = idlePrRunner(),
   progress = progressRunner(),
   env = process.env,
@@ -781,7 +709,6 @@ export function sessionStart({
     return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
   const syncDir = source ? source.syncDirIn(home) : null;
-  const mirror = syncDir ? join(syncDir, SO_SCRIPT) : null;
   return [
     ...(here.line ? [here.line] : []),
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
@@ -796,7 +723,6 @@ export function sessionStart({
     ...recentPrompts({ home, now, sessionId }),
     ...sweepWorktrees(cwd, localGit),
     ...workerLines(home, now),
-    ...checkAfterMerge({ cwd, git: localGit, run: afterMerge, fetch: here.fetch, mirror }),
     ...checkIdlePrs({
       cwd,
       git: localGit,
@@ -816,22 +742,20 @@ export function sessionStart({
  * `.claude/worktrees/` 在 .gitignore 里，所以没有别的东西会管它：开会话钩子是唯一每次都会跑的地方。
  *
  * **只删证据齐全的，删不掉任何独有东西**（这三条全过才删，任一条不成立就跳过、且不报成失败）：
- * 1. 不是那个固定名：`second-opinion*` 是 discuss 技能**故意复用**的审查树（它每轮 git clean 自己管，
- *    而且 Windows 上 Mirasim 的进程占着目录、本来就删不掉）。
- * 2. 没有未提交的改动（含未跟踪文件）：有就说明可能有人的东西在里面。
- * 3. 这个树上的提交**一条都不比远端多**（`rev-list HEAD --not --remotes` 是空的）：
+ * 1. 没有未提交的改动（含未跟踪文件）：有就说明可能有人的东西在里面。
+ * 2. 这个树上的提交**一条都不比远端多**（`rev-list HEAD --not --remotes` 是空的）：
  *    多一条就是有没推上去的活，**绝不删**，照实报。（判「远端」不判「origin/main」：
  *    树常常建在某条开着 PR 的分支的头上，那些提交在对应的远端分支上、安全，判 main 会把它们全留下。）
- * 4. **最近 2 小时没动过**（看树根和它在 git 里的管理目录，见 lastTouched）：另一个会话此刻正开着一棵树干活时，它可能刚好是「干净、已推」的
+ * 3. **最近 2 小时没动过**（看树根和它在 git 里的管理目录，见 lastTouched）：另一个会话此刻正开着一棵树干活时，它可能刚好是「干净、已推」的
  *    ——只按前三条就会把它删掉、把人家正在干的事打断。刚建出来、刚提交过的树都不碰。
  *    （代价是刚做完的树要等两小时才收走，而这条命中率低、留着也无害。）
  *
- * 超出这四条的一律不动、也不当成「查成」——2026-10-02 清那 29 棵时，就是靠第 3 条救回了决定 0006
+ * 超出这三条的一律不动、也不当成「查成」——2026-10-02 清那 29 棵时，就是靠第 2 条救回了决定 0006
  * （`decision-align` 树里那份决定从没进过主线）。
  */
 
 /**
- * 多久没动过才收走（第 4 条）：另一个会话可能正开着一棵树干活。
+ * 多久没动过才收走（第 3 条）：另一个会话可能正开着一棵树干活。
  * 2026-10-05 从 30 分钟放到 2 小时：一个会话 PR 合了之后常常接着在同一棵树里切下一条分支，中间隔半小时以上很常见；
  * 晚两小时收走一棵没用的树没有代价，早收走一棵在用的代价很大（见 lastTouched）。
  */
@@ -1013,7 +937,6 @@ export function sweepWorktrees(cwd, git, now = Date.now()) {
   let removed = 0;
   for (const dir of dirs) {
     const name = basename(dir);
-    if (/^second-opinion/.test(name)) continue; // discuss 自己的复用树
     const head = g('-C', dir, 'rev-parse', 'HEAD');
     if (!ok(head)) {
       // 注册还在、目录没了：`git worktree prune` 收拾这条记录（它只删管理条目，不动盘上任何东西）。

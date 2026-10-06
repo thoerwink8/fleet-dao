@@ -1,7 +1,6 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ghApi } from '../src/gh-api.ts';
 import {
@@ -11,25 +10,13 @@ import {
   gateGitHub,
   gatePr,
   runMergeGate,
-  workflowParseNeeded,
 } from '../src/merge-gate.ts';
-import type { RiskPath } from '../src/merge-gates.ts';
 
 const HEAD = 'a'.repeat(40);
 const MERGE = 'b'.repeat(40);
-const BASE = 'c'.repeat(40);
-const MERGE_BASE = 'd'.repeat(40);
-const RISK: RiskPath[] = [
-  { path: 'deploy/', kind: '碰安全', why: '真机' },
-  { path: 'packages/api/src/auth.ts', kind: '碰安全', why: '登录' },
-  { path: '.github/workflows/', kind: '碰安全', why: '令牌权限' },
-  { path: '.github/workflows/ci.yml', kind: '碰安全', why: '结构比对', mode: 'workflow' },
-];
-const RISK_TEXT = JSON.stringify({ paths: RISK });
 
 interface World {
   pr: Record<string, unknown>;
-  files: string[];
   statuses: unknown[];
   written: { sha: string; state: GateState; description: string; targetUrl?: string }[];
   /** 按方法名故意抛错。 */
@@ -37,12 +24,8 @@ interface World {
   open: Record<string, unknown>[];
   /** 读了几次 PR 本身。 */
   prReads: number;
-  /** 文件全文：键是「路径@提交」；没有的键读回 null（文件在那个提交里不存在）。 */
-  contents: Record<string, string>;
-  /** 共同祖先；不填就是 MERGE_BASE。 */
-  mergeBaseSha: string;
-  /** 改到的文件的状态（默认 modified）。 */
-  status: string;
+  /** 读了几次提交状态。 */
+  statusReads: number;
 }
 
 function world(
@@ -53,23 +36,17 @@ function world(
       number: 80,
       title: '试一下',
       head: { sha: HEAD, ref: 'feat/x' },
-      base: { sha: BASE },
-      changed_files: 1,
       state: 'open',
       ...over.prOver,
     },
-    files: ['docs/x.md'],
     statuses: [],
     written: [],
     broken: {},
     open: [],
     prReads: 0,
-    contents: {},
-    mergeBaseSha: MERGE_BASE,
-    status: 'modified',
+    statusReads: 0,
     ...over,
   };
-  if (over.files && !over.prOver?.changed_files) w.pr.changed_files = over.files.length;
   const boom = (k: keyof GitHubReads) => {
     if (w.broken[k]) throw new Error(w.broken[k]);
   };
@@ -79,20 +56,9 @@ function world(
       w.prReads += 1;
       return { ...w.pr, number: n };
     },
-    async files() {
-      boom('files');
-      return w.files.map((filename) => ({ filename, status: w.status }));
-    },
-    async fileAt(path, ref) {
-      boom('fileAt');
-      return w.contents[`${path}@${ref}`] ?? null;
-    },
-    async mergeBase() {
-      boom('mergeBase');
-      return w.mergeBaseSha;
-    },
     async statuses() {
       boom('statuses');
+      w.statusReads += 1;
       return w.statuses;
     },
     async openPrs() {
@@ -107,21 +73,18 @@ function world(
   return Object.assign(w, { gh });
 }
 
-const deps = (w: { gh: GitHubReads }, riskList: GateDeps['riskList'] = RISK): GateDeps => ({
-  gh: w.gh,
-  riskList,
-});
+const deps = (w: { gh: GitHubReads }): GateDeps => ({ gh: w.gh });
 
-const SO_OK = [{ context: 'second-opinion', state: 'success', description: '通过' }];
 /** #555-2：引擎任务工作流开的 PR 还要有一条通过的冷调用结论（另一个 context，闸只读）。 */
 const CV_OK = [{ context: 'cold-verify', state: 'success', description: '验收通过' }];
 
 describe('合并闸：验收场景', () => {
-  it('① 没改到先审后合的地方 → 通过', async () => {
+  it('① 人手开的 PR → 通过，只看 CI：不读提交状态', async () => {
     const w = world();
     const r = await gatePr(80, deps(w));
     expect(r).toMatchObject({ number: 80, head: HEAD, state: 'success', notChecked: false });
-    expect(r.lines).toEqual(['能合：没改到先审后合的地方。']);
+    expect(r.lines).toEqual(['能合：不是引擎任务 PR，只看 CI。']);
+    expect(w.statusReads).toBe(0);
   });
 
   it('② 草稿、和主线冲突、没标签、没里程碑、正文随便写：闸一概不看（#654，草稿和冲突 GitHub 自己合不了），PR 只读一次', async () => {
@@ -137,78 +100,60 @@ describe('合并闸：验收场景', () => {
     });
     const r = await gatePr(80, deps(w));
     expect(r).toMatchObject({ state: 'success', notChecked: false });
-    expect(r.lines).toEqual(['能合：没改到先审后合的地方。']);
     // GitHub 还在算冲突（mergeable 是 null）也不再等：不轮询
     const unknown = world({ prOver: { mergeable: null } });
     expect((await gatePr(80, deps(unknown))).state).toBe('success');
     expect(unknown.prReads).toBe(1);
   });
 
-  it('③ 改到先审后合的路径、当前头没有第二意见 → 不通过，报出文件；PR 正文写什么都一样（按路径判）', async () => {
-    for (const body of ['先审后合——改部署', '直接合——小改', '']) {
-      const r = await gatePr(80, deps(world({ files: ['deploy/france.sh', 'docs/x.md'], prOver: { body } })));
-      expect(r.state, body).toBe('failure');
-      expect(r.lines[0]).toMatch(
-        /^等第二意见：当前头 aaaaaaa 上还没有 second-opinion 状态，改到了先审后合的地方：deploy\/france\.sh（碰安全）/,
-      );
-    }
-    // 人手开的 PR 不要冷调用的结论：第二意见过了就放行（冷调用只管引擎任务工作流开的 PR）
-    const passed = await gatePr(80, deps(world({ files: ['deploy/france.sh'], statuses: SO_OK })));
-    expect(passed.state).toBe('success');
-    expect(passed.lines[0]).toBe('能合：改到 1 个先审后合的地方，当前头上第二意见已通过。');
-  });
-
-  it('没改到先审后合的地方：正文里怎么写都不等第二意见', async () => {
-    // #654：闸按改动路径判，PR 正文写了什么都不看（模板里也再没有「档位」这一栏）。
-    const r = await gatePr(80, deps(world({ prOver: { body: '**还欠什么**：先审后合——拿不准' } })));
+  it('③ 【#1114 钉住】改到迁移（含 DROP）、ci.yml、鉴权、部署脚本的 PR：合并闸不再要第二意见——没有任何第二意见状态也放行，改了哪些文件闸压根不读', async () => {
+    const w = world({
+      prOver: {
+        changed_files: 4,
+        // 闸读不到、也不看这些：留在 PR 上只为说明场景
+        files: [
+          'packages/db/migrations/0042_drop_x.sql',
+          '.github/workflows/ci.yml',
+          'packages/api/src/auth.ts',
+          'deploy/france.sh',
+        ],
+      },
+      // 老的 second-opinion 状态就算是 failure / pending / 压根没有，也不影响结论
+      statuses: [{ context: 'second-opinion', state: 'failure', description: '旧的状态' }],
+    });
+    const r = await gatePr(80, deps(w));
     expect(r.state).toBe('success');
+    expect(r.notChecked).toBe(false);
+    expect(r.lines.join('\n')).not.toContain('第二意见');
+    expect(w.statusReads).toBe(0);
+    // 读写的口子里没有「读文件」那几个：闸没法看改了哪些文件
+    expect(Object.keys(w.gh).sort()).toEqual(['openPrs', 'pr', 'statuses', 'writeStatus']);
   });
 
-  it('第二意见没过、还在跑 → 不通过', async () => {
-    const at = (state: string) =>
-      gatePr(
-        80,
-        deps(
-          world({ files: ['packages/api/src/auth.ts'], statuses: [{ context: 'second-opinion', state }] }),
-        ),
-      );
-    expect((await at('failure')).lines).toEqual([expect.stringMatching(/^第二意见没过/)]);
-    expect((await at('pending')).lines).toEqual([expect.stringMatching(/^等第二意见：.*还在跑/)]);
+  it('正文里怎么写都一样：闸按分支名认引擎的 PR，不看正文', async () => {
+    for (const body of ['先审后合——改部署', '直接合——小改', '']) {
+      expect((await gatePr(80, deps(world({ prOver: { body } })))).state, body).toBe('success');
+    }
   });
 });
 
-describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调用的结论（cold-verify）也是输入', () => {
+describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调用的结论（cold-verify）是输入', () => {
   /** 引擎任务工作流起的分支（fleet/<单号>-t<8 位>）。 */
   const FLOW = { head: { sha: HEAD, ref: 'fleet/12-t1a2b3c4d' } };
   const flowWorld = (over: Parameters<typeof world>[0] = {}) =>
     world({ ...over, prOver: { ...FLOW, ...over.prOver } });
 
-  it('引擎的 PR、还没有冷调用结论 → 不通过，写明「还没验」和为什么要验（哪怕没碰任何先审后合的路径）', async () => {
+  it('引擎的 PR、还没有冷调用结论 → 不通过，写明「还没验」和为什么要验', async () => {
     const r = await gatePr(80, deps(flowWorld()));
     expect(r.state).toBe('failure');
     expect(r.lines[0]).toMatch(/^还没验：当前头 aaaaaaa 上没有 cold-verify 状态/);
     expect(r.lines[0]).toContain('引擎任务工作流开的 PR');
   });
 
-  it('引擎的 PR、冷调用通过 → 通过；没碰先审后合的路径就不等第二意见', async () => {
+  it('引擎的 PR、冷调用通过 → 通过', async () => {
     const r = await gatePr(80, deps(flowWorld({ statuses: CV_OK })));
     expect(r.state).toBe('success');
-    expect(r.lines[0]).toBe('能合：没改到先审后合的地方，引擎任务 PR 的验收那一遍也通过。');
-  });
-
-  it('引擎的 PR 又碰了先审后合的路径：第二意见和冷调用两条都要，缺哪条报哪条，各认各的 context', async () => {
-    const files = ['deploy/france.sh'];
-    const onlyCv = await gatePr(80, deps(flowWorld({ files, statuses: CV_OK })));
-    expect(onlyCv.state).toBe('failure');
-    expect(onlyCv.lines[0]).toMatch(/^等第二意见：/);
-    const onlySo = await gatePr(80, deps(flowWorld({ files, statuses: SO_OK })));
-    expect(onlySo.state).toBe('failure');
-    expect(onlySo.lines[0]).toContain('没有 cold-verify 状态');
-    const both = await gatePr(80, deps(flowWorld({ files, statuses: [...SO_OK, ...CV_OK] })));
-    expect(both.state).toBe('success');
-    expect(both.lines[0]).toBe(
-      '能合：改到 1 个先审后合的地方，当前头上第二意见已通过，引擎任务 PR 的验收那一遍也通过。',
-    );
+    expect(r.lines[0]).toBe('能合：引擎任务 PR 的验收那一遍通过。');
   });
 
   it('冷调用 pending → 不通过（还在跑，等它）', async () => {
@@ -268,18 +213,16 @@ describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调
     expect(r.lines.join('\n')).toContain('读不到当前头');
   });
 
-  it('人手开的 PR（分支名不是引擎的）：压根不等这条状态——哪怕碰了先审后合的路径，也只要第二意见', async () => {
+  it('人手开的 PR（分支名不是引擎的）：压根不等这条状态，别的 PR 的冷调用结论也不影响它', async () => {
     const r = await gatePr(
       80,
       deps(
         world({
-          files: ['deploy/france.sh'],
-          statuses: [...SO_OK, { context: 'cold-verify', state: 'failure', description: '别的 PR 的结论' }],
+          statuses: [{ context: 'cold-verify', state: 'failure', description: '别的 PR 的结论' }],
         }),
       ),
     );
     expect(r.state).toBe('success');
-    expect(r.lines[0]).toBe('能合：改到 1 个先审后合的地方，当前头上第二意见已通过。');
   });
 
   it('像引擎分支又不是的名字（位数不对、前缀不对）：当人手开的 PR 看', async () => {
@@ -300,50 +243,34 @@ describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调
     expect(r.notChecked).toBe(true);
     expect(r.lines[0]).toMatch(/head.ref 认不出/);
   });
-
-  it('引擎的 PR、先审后合的清单读不到：照样要冷调用结论（要不要验和清单无关），清单那条「没查成」也照样报', async () => {
-    const r = await gatePr(
-      80,
-      deps(flowWorld({ files: ['deploy/france.sh'], statuses: CV_OK }), '不是合法的 JSON'),
-    );
-    expect(r.state).toBe('failure');
-    expect(r.notChecked).toBe(true);
-    expect(r.lines.join('\n')).toContain('没法判改没改到先审后合的地方');
-    const missing = await gatePr(80, deps(flowWorld({ files: ['deploy/france.sh'] }), '不是合法的 JSON'));
-    expect(missing.lines.join('\n')).toContain('没有 cold-verify 状态');
-  });
 });
 
 describe('合并闸：决定结论的读不到、认不出都是「没查成」，写 failure，不当通过', () => {
-  const RISKY = ['deploy/france.sh'];
-  const cases: [string, Parameters<typeof world>[0], GateDeps['riskList'] | undefined, RegExp][] = [
+  const cases: [string, Parameters<typeof world>[0], RegExp][] = [
     [
       'PR 读不到',
       { broken: { pr: 'GitHub 回了 502' } },
-      undefined,
       /^没查成：读不到 PR #80 现在的样子（GitHub 回了 502）/,
     ],
-    ['PR 没有头', { prOver: { head: {} } }, undefined, /head\.sha 认不出/],
-    ['PR 的 state 认不出', { prOver: { state: 'merged' } }, undefined, /state 认不出/],
-    ['改动文件读不到', { broken: { files: '500' } }, undefined, /读不到 PR #80 改了哪些文件（500）/],
-    ['改动文件没读全', { prOver: { changed_files: 3001 } }, undefined, /改了 3001 个文件，只读到 1 个/],
-    ['先审后合的清单读不到', {}, '读不到', /路径清单 .* 读不到/],
+    ['PR 没有头', { prOver: { head: {} } }, /head\.sha 认不出/],
+    ['PR 的 state 认不出', { prOver: { state: 'merged' } }, /state 认不出/],
     [
       '提交状态读不到',
-      { files: RISKY, broken: { statuses: '502' } },
-      undefined,
+      { prOver: { head: { sha: HEAD, ref: 'fleet/12-t1a2b3c4d' } }, broken: { statuses: '502' } },
       /读不到当前头 aaaaaaa 的提交状态（502）/,
     ],
     [
       '提交状态认不出',
-      { files: RISKY, statuses: [{ context: 'second-opinion', state: '通过' }] },
-      undefined,
+      {
+        prOver: { head: { sha: HEAD, ref: 'fleet/12-t1a2b3c4d' } },
+        statuses: [{ context: 'cold-verify', state: '通过' }],
+      },
       /提交状态认不出/,
     ],
   ];
 
-  it.each(cases)('%s', async (_name, over, riskList, line) => {
-    const r = await gatePr(80, deps(world(over), riskList ?? RISK));
+  it.each(cases)('%s', async (_name, over, line) => {
+    const r = await gatePr(80, deps(world(over)));
     expect(r.state).toBe('failure');
     expect(r.notChecked).toBe(true);
     expect(r.lines[0]).toMatch(/^没查成：/);
@@ -353,7 +280,7 @@ describe('合并闸：决定结论的读不到、认不出都是「没查成」�
   it('PR 读回来没有号：没查成', async () => {
     const w = world();
     const gh = { ...w.gh, pr: async () => ({ ...w.pr, number: 'x' }) };
-    const r = await gatePr(80, { ...deps(w), gh });
+    const r = await gatePr(80, { gh });
     expect(r).toMatchObject({ state: 'failure', notChecked: true });
     expect(r.lines[0]).toBe('没查成：PR #80 读回来认不出：number 认不出。');
   });
@@ -361,7 +288,7 @@ describe('合并闸：决定结论的读不到、认不出都是「没查成」�
   it('PR 读回来号不对：没查成', async () => {
     const w = world();
     const gh = { ...w.gh, pr: async () => ({ ...w.pr, number: 81 }) };
-    const r = await gatePr(80, { ...deps(w), gh });
+    const r = await gatePr(80, { gh });
     expect(r.lines[0]).toBe('没查成：要的是 PR #80，读回来的是 #81。');
   });
 });
@@ -372,20 +299,15 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     writeFileSync(path, typeof event === 'string' ? event : JSON.stringify(event));
     return path;
   }
-  const run = (
-    w: { gh: GitHubReads },
-    eventName: string,
-    event: unknown,
-    over: { write?: boolean; risk?: string | undefined } = {},
-  ) =>
+  const run = (w: { gh: GitHubReads }, eventName: string, event: unknown, over: { write?: boolean } = {}) =>
     runMergeGate({
       eventName,
       eventPath: eventFile(event),
-      riskListText: 'risk' in over ? over.risk : RISK_TEXT,
       gh: w.gh,
       write: over.write ?? true,
       targetUrl: 'https://github.com/o/r/actions/runs/1',
     });
+  const FLOW_REF = { head: { sha: HEAD, ref: 'fleet/12-t1a2b3c4d' } };
 
   it('PR 事件：算这一个，写到当前头上（通过也写，带详情链接）', async () => {
     const w = world();
@@ -395,25 +317,23 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
       {
         sha: HEAD,
         state: 'success',
-        description: '能合：没改到先审后合的地方。',
+        description: '能合：不是引擎任务 PR，只看 CI。',
         targetUrl: 'https://github.com/o/r/actions/runs/1',
       },
     ]);
   });
 
   it('不通过也写（failure），退出码 0：算成了、写上了；没查成写 failure、退出码 2', async () => {
-    const waiting = world({ files: ['deploy/france.sh'] });
+    const waiting = world({ prOver: FLOW_REF });
     expect((await run(waiting, 'pull_request_target', { pull_request: { number: 80 } })).code).toBe(0);
     expect(waiting.written[0]).toMatchObject({
       state: 'failure',
-      description: expect.stringMatching(/^等第二意见/),
+      description: expect.stringMatching(/^还没验/),
     });
 
-    const noList = world();
-    expect(
-      (await run(noList, 'pull_request_target', { pull_request: { number: 80 } }, { risk: undefined })).code,
-    ).toBe(2);
-    expect(noList.written[0]).toMatchObject({
+    const broken = world({ prOver: FLOW_REF, broken: { statuses: '502' } });
+    expect((await run(broken, 'pull_request_target', { pull_request: { number: 80 } })).code).toBe(2);
+    expect(broken.written[0]).toMatchObject({
       state: 'failure',
       description: expect.stringMatching(/^没查成/),
     });
@@ -455,18 +375,24 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(closed.written).toEqual([]);
   });
 
-  it('第二意见状态：开着的 PR 全重算（不只事件里那个头的）；别的 context（包括「认领对得上」，#444 起）不算', async () => {
+  it('冷调用状态：开着的 PR 全重算（不只事件里那个头的）；别的 context（含已经去掉的 second-opinion、「认领对得上」）不算', async () => {
     const w = world({ open: [{ number: 80 }, { number: 81 }] });
     // 【故意造出的失败】#351 演练：一轮对账给几个 PR 贴状态，排队组只留最后一次运行、事件里是最后那个 PR 的头——
     // 只算那一个的话，另一个 PR 就一直停在旧结论上；全重算了两个都写上
-    await run(w, 'status', { context: 'second-opinion', sha: MERGE, state: 'success' });
+    await run(w, 'status', { context: 'cold-verify', sha: MERGE, state: 'success' });
     expect(w.written).toHaveLength(2);
     const other = world();
     expect(await run(other, 'status', { context: 'ci', sha: HEAD })).toEqual({
       code: 0,
       lines: ['这次没有要算的 PR。'],
     });
-    // #444：合并闸不再判「认领对得上」，这个状态写上来不用重算了
+    // #1114：second-opinion 不再是闸的输入，这个状态写上来不用重算
+    const old = world({ open: [{ number: 80 }] });
+    expect(await run(old, 'status', { context: 'second-opinion', sha: HEAD, state: 'success' })).toEqual({
+      code: 0,
+      lines: ['这次没有要算的 PR。'],
+    });
+    // #444：合并闸不再判「认领对得上」
     const claimEvent = world({ open: [{ number: 80 }] });
     expect(await run(claimEvent, 'status', { context: '认领对得上', sha: HEAD, state: 'success' })).toEqual({
       code: 0,
@@ -486,10 +412,14 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     const ev = { pull_request: { number: 80 } };
     const ok = world();
     expect((await run(ok, 'pull_request', ev, { write: false })).code).toBe(0);
+    expect((await run(world({ prOver: FLOW_REF }), 'pull_request', ev, { write: false })).code).toBe(1);
     expect(
-      (await run(world({ files: ['deploy/france.sh'] }), 'pull_request', ev, { write: false })).code,
-    ).toBe(1);
-    expect((await run(world({ broken: { files: 'x' } }), 'pull_request', ev, { write: false })).code).toBe(2);
+      (
+        await run(world({ prOver: FLOW_REF, broken: { statuses: 'x' } }), 'pull_request', ev, {
+          write: false,
+        })
+      ).code,
+    ).toBe(2);
     expect(ok.written).toEqual([]);
   });
 
@@ -499,14 +429,13 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
       runMergeGate({
         eventName: undefined,
         eventPath: undefined,
-        riskListText: RISK_TEXT,
         gh: w.gh,
         write: true,
       }),
       run(w, 'pull_request_target', '{不是 json'),
       run(w, 'pull_request_target', { issue: {} }),
       run(w, 'issue_comment', {}),
-      run(world({ broken: { openPrs: '502' } }), 'status', { context: 'second-opinion', sha: HEAD }),
+      run(world({ broken: { openPrs: '502' } }), 'status', { context: 'cold-verify', sha: HEAD }),
       run(w, 'workflow_dispatch', { inputs: { pr: 'x' } }),
       run(w, 'workflow_dispatch', { inputs: { pr: '#80' } }),
       run(world({ broken: { writeStatus: 'GitHub 回了 403' } }), 'pull_request_target', {
@@ -554,37 +483,12 @@ describe('读写 GitHub（假的 fetch）', () => {
       url: 'https://api.example/repos/o/r/pulls/80',
       auth: 'Bearer token-for-test',
     });
-    await gh.writeStatus(HEAD, { state: 'failure', description: '等第二意见', targetUrl: 'https://x' });
+    await gh.writeStatus(HEAD, { state: 'failure', description: '等验收', targetUrl: 'https://x' });
     expect(f.calls.at(-1)).toMatchObject({
       url: `https://api.example/repos/o/r/statuses/${HEAD}`,
       method: 'POST',
-      body: { state: 'failure', context: 'merge-gate', description: '等第二意见', target_url: 'https://x' },
+      body: { state: 'failure', context: 'merge-gate', description: '等验收', target_url: 'https://x' },
     });
-  });
-
-  it('改动文件翻页读全，状态、改动内容、改名前的名字都收；认不出的一条抛', async () => {
-    const page1 = Array.from({ length: 100 }, (_, i) => ({ filename: `f${i}`, status: 'modified' }));
-    const f = fakeFetch((url) =>
-      url.endsWith('&page=1')
-        ? { json: page1 }
-        : {
-            json: [
-              { filename: 'new.ts', status: 'renamed', previous_filename: 'deploy/old.sh', patch: '+x' },
-            ],
-          },
-    );
-    const got = await gateGitHub(ghApi(env, f.fn)).files(80);
-    expect(got).toHaveLength(101);
-    expect(got[100]).toEqual({
-      filename: 'new.ts',
-      status: 'renamed',
-      previous: 'deploy/old.sh',
-      patch: '+x',
-    });
-    const bad = gateGitHub(ghApi(env, fakeFetch(() => ({ json: [{ name: 'x' }] })).fn));
-    await expect(bad.files(80)).rejects.toThrow('没有 filename、status');
-    const notList = gateGitHub(ghApi(env, fakeFetch(() => ({ json: { message: 'x' } })).fn));
-    await expect(notList.files(80)).rejects.toThrow('不是列表');
   });
 
   it('提交状态读逐条的列表，翻页读全；认不出、翻不完都抛', async () => {
@@ -629,281 +533,5 @@ describe('读写 GitHub（假的 fetch）', () => {
       'GitHub 回了 500（GET /contents/x）',
     ]);
     for (const m of errors) expect(m).not.toContain('token-for-test');
-  });
-});
-
-describe('合并闸：ci.yml 按结构比对（改动前后两份全文），不碰信任的改动不用第二意见', () => {
-  const CI = '.github/workflows/ci.yml';
-  const yml = (extra = '', timeout = 10) =>
-    [
-      'name: ci',
-      'on:',
-      '  pull_request:',
-      'permissions:',
-      '  contents: read',
-      'jobs:',
-      '  test:',
-      '    runs-on: ubuntu-latest',
-      `    timeout-minutes: ${timeout}`,
-      '    steps:',
-      '      - uses: actions/checkout@v4',
-      '      - run: pnpm exec vitest run',
-      extra,
-      '  check:',
-      '    needs: [test]',
-      '    if: always()',
-      '    runs-on: ubuntu-latest',
-      '    steps:',
-      '      - run: node ci-verdict.ts',
-      '',
-    ].join('\n');
-  const at = (ref: string) => `${CI}@${ref}`;
-  const ci = (before: string, after: string, over: Partial<World> = {}) =>
-    world({
-      files: [CI],
-      contents: { [at(MERGE_BASE)]: before, [at(HEAD)]: after },
-      ...over,
-    });
-
-  it('只调超时、加一步不碰信任的命令：不要第二意见，能合', async () => {
-    const w = ci(yml(), yml('      - run: echo 多一步', 20));
-    const r = await gatePr(80, deps(w));
-    expect(r.state).toBe('success');
-    expect(r.notChecked).toBe(false);
-  });
-
-  it('【故意造出的失败】碰了信任（加权限、换 action、删检查命令）：要第二意见，没有就等；点名碰了什么', async () => {
-    const cases: [string, string][] = [
-      [yml().replace('contents: read', 'contents: write'), '顶层 permissions'],
-      [yml().replace('actions/checkout@v4', 'evil/x@v1'), 'action'],
-      // 合并闸只报第一处（另有几处写个数）：检查那一步换了，先报的是路标先后
-      [yml().replace('pnpm exec vitest run', 'echo 跳过'), '跑检查'],
-      [yml().replace('if: always()', 'if: false'), 'check 的 if'],
-    ];
-    for (const [after, what] of cases) {
-      const r = await gatePr(80, deps(ci(yml(), after)));
-      expect(r.state, what).toBe('failure');
-      expect(r.lines.join('\n'), what).toContain(what);
-      expect(r.lines.join('\n'), what).toContain('等第二意见');
-    }
-  });
-
-  it('碰了信任但当前头上有通过的第二意见：能合', async () => {
-    const w = ci(yml(), yml().replace('contents: read', 'contents: write'), {
-      statuses: [{ context: 'second-opinion', state: 'success', description: '通过' }],
-    });
-    expect((await gatePr(80, deps(w))).state).toBe('success');
-  });
-
-  it('【故意造出的失败】读不到文件（改动前或改动后）：没查成，审过了也不放行', async () => {
-    const w = world({
-      files: [CI],
-      contents: { [at(HEAD)]: yml() },
-      statuses: [{ context: 'second-opinion', state: 'success', description: '通过' }],
-    });
-    const r = await gatePr(80, deps(w));
-    expect(r.state).toBe('failure');
-    expect(r.notChecked).toBe(true);
-    expect(r.lines.join('\n')).toContain('改动前的那份读不到');
-  });
-
-  it('【故意造出的失败】读不懂的工作流（YAML 坏了）：算碰了', async () => {
-    const r = await gatePr(80, deps(ci(yml(), 'jobs: [: :')));
-    expect(r.state).toBe('failure');
-    expect(r.lines.join('\n')).toContain('读不懂');
-  });
-
-  it('【故意造出的失败】取文件、找共同祖先出错、PR 里没有 base.sha：没查成（退出码 2 那一类），不是没碰', async () => {
-    for (const broken of [{ fileAt: '炸了' }, { mergeBase: '炸了' }]) {
-      const r = await gatePr(80, deps(ci(yml(), yml('', 20), { broken })));
-      expect(r.state).toBe('failure');
-      expect(r.notChecked).toBe(true);
-    }
-    const noBase = world({
-      files: [CI],
-      contents: { [at(MERGE_BASE)]: yml(), [at(HEAD)]: yml('', 20) },
-      prOver: { base: {} },
-    });
-    const r = await gatePr(80, deps(noBase));
-    expect(r.notChecked).toBe(true);
-  });
-
-  it('新加、删掉、改名一律算碰了（整个文件都是新的信任面）', async () => {
-    for (const status of ['added', 'removed']) {
-      const r = await gatePr(80, deps(ci(yml(), yml(), { status })));
-      expect(r.state, status).toBe('failure');
-    }
-  });
-
-  it('同目录的别的工作流（合并闸自己）照旧整个文件都算，不比对', async () => {
-    const w = world({ files: ['.github/workflows/merge-gate.yml'] });
-    expect((await gatePr(80, deps(w))).state).toBe('failure');
-  });
-});
-
-describe('合并闸：先合后审（review: after-merge）不等第二意见，结论里点名合并后补审', () => {
-  const LATER: RiskPath[] = [
-    ...RISK,
-    { path: 'packages/conventions/src/ci-plan.ts', kind: '碰安全', why: 'CI 判法', review: 'after-merge' },
-  ];
-
-  it('只改到先合后审的：能合，结论里写「合并后补审」和要跑的命令', async () => {
-    const r = await gatePr(80, {
-      gh: world({ files: ['packages/conventions/src/ci-plan.ts'] }).gh,
-      riskList: LATER,
-    });
-    expect(r.state).toBe('success');
-    expect(r.lines.join('\n')).toContain('合并后补审：packages/conventions/src/ci-plan.ts');
-    expect(r.lines.join('\n')).toContain('second-opinion.mjs --pr 80');
-  });
-
-  it('【故意造出的失败】同时改到要先审的（deploy/）：照旧等第二意见，先合后审那条不能把它带过去', async () => {
-    const r = await gatePr(80, {
-      gh: world({ files: ['packages/conventions/src/ci-plan.ts', 'deploy/france.sh'] }).gh,
-      riskList: LATER,
-    });
-    expect(r.state).toBe('failure');
-    expect(r.lines.join('\n')).toContain('等第二意见');
-    expect(r.lines.join('\n')).toContain('deploy/france.sh');
-  });
-});
-
-describe('合并闸：只有改了已有 ci.yml 的 PR 才装 YAML 依赖（workflowParseNeeded + merge-gate.yml）', () => {
-  const CI = '.github/workflows/ci.yml';
-  function eventFile(event: unknown): string {
-    const path = join(mkdtempSync(join(tmpdir(), 'fleet-gate-need-')), 'event.json');
-    writeFileSync(path, JSON.stringify(event));
-    return path;
-  }
-  const need = (
-    w: { gh: GitHubReads },
-    eventName = 'pull_request_target',
-    event: unknown = { pull_request: { number: 80 } },
-    riskListText: string | undefined = RISK_TEXT,
-  ) => workflowParseNeeded({ eventName, eventPath: eventFile(event), riskListText, gh: w.gh });
-
-  it('假 PR 事件一：只改了普通文件（没改 ci.yml）→ 不用装', async () => {
-    const r = await need(world({ files: ['docs/x.md', 'packages/cli/src/help.ts'] }));
-    expect(r.needed).toBe(false);
-  });
-
-  it('假 PR 事件二：改了已有的 ci.yml → 要装', async () => {
-    const r = await need(world({ files: ['docs/x.md', CI] }));
-    expect(r.needed).toBe(true);
-    expect(r.why).toContain('改了已有的工作流');
-  });
-
-  it('同目录别的工作流、新加/删掉 ci.yml：闸整份算碰了、不解析前后两份，不用装', async () => {
-    expect((await need(world({ files: ['.github/workflows/merge-gate.yml'] }))).needed).toBe(false);
-    for (const status of ['added', 'removed']) {
-      expect((await need(world({ files: [CI], status }))).needed, status).toBe(false);
-    }
-  });
-
-  it('主线推送、状态事件（开着的 PR 全重算）：只要有一个改了 ci.yml 就装；都没有就不装；已关的不算', async () => {
-    const prs = new Map([
-      [80, ['docs/x.md']],
-      [81, [CI]],
-    ]);
-    const gh: GitHubReads = {
-      ...world().gh,
-      pr: async (n) => ({
-        number: n,
-        head: { sha: HEAD, ref: 'feat/x' },
-        base: { sha: BASE },
-        changed_files: prs.get(n)?.length ?? 0,
-        state: 'open',
-      }),
-      files: async (n) => (prs.get(n) ?? []).map((filename) => ({ filename, status: 'modified' })),
-      openPrs: async () => [...prs.keys()].map((number) => ({ number })),
-    };
-    expect((await need({ gh }, 'push', { ref: 'refs/heads/main' })).needed).toBe(true);
-    prs.delete(81);
-    expect((await need({ gh }, 'push', { ref: 'refs/heads/main' })).needed).toBe(false);
-    const closed = world({ files: [CI], prOver: { state: 'closed' } });
-    expect((await need(closed)).needed).toBe(false);
-  });
-
-  it('【故意造出的失败】没判成的一律要装（不拿「没查成」当「不需要」）：事件认不出、读不到文件列表、读不到 PR、清单读不出、文件数对不上', async () => {
-    const files = world({ files: ['docs/x.md'] });
-    expect((await need(files, 'schedule', {})).needed).toBe(true);
-    expect((await need(files, 'pull_request_target', {})).needed).toBe(true);
-    const ev = { pull_request: { number: 80 } };
-    // 清单读不到（undefined）、认不出（不是 JSON）
-    for (const riskListText of [undefined, '{']) {
-      const r = await workflowParseNeeded({
-        eventName: 'pull_request_target',
-        eventPath: eventFile(ev),
-        riskListText,
-        gh: files.gh,
-      });
-      expect(r.needed, String(riskListText)).toBe(true);
-    }
-    const noFiles = world({ files: ['docs/x.md'] });
-    noFiles.broken.files = '限流';
-    const r = await need(noFiles);
-    expect(r.needed).toBe(true);
-    expect(r.why).toContain('限流');
-    const noPr = world({ files: ['docs/x.md'] });
-    noPr.broken.pr = '502';
-    expect((await need(noPr)).needed).toBe(true);
-    // PR 说改了 3 个文件、只读到 1 个（超过 GitHub 列表上限）：可能漏了 ci.yml
-    const short = world({ files: ['docs/x.md'], prOver: { changed_files: 3 } });
-    expect((await need(short)).needed).toBe(true);
-    const noEvent = await workflowParseNeeded({
-      eventName: 'pull_request_target',
-      eventPath: '/不存在/event.json',
-      riskListText: RISK_TEXT,
-      gh: files.gh,
-    });
-    expect(noEvent.needed).toBe(true);
-  });
-
-  describe('merge-gate.yml 的写法', () => {
-    const yml = readFileSync(
-      fileURLToPath(new URL('../../../.github/workflows/merge-gate.yml', import.meta.url)),
-      'utf8',
-    );
-    const WHEN = "if: steps.yaml.outputs.needed != 'false'";
-    /** 装依赖那两步没按 needed 条件限制、判断步没有 continue-on-error、顺序不对：返回问题；没问题返回空。 */
-    function problems(text: string): string[] {
-      const out: string[] = [];
-      const steps = text.slice(text.indexOf('    steps:')).split(/^ {6}- /m);
-      const find = (needle: string) => steps.find((s) => s.includes(needle));
-      const ask = find('--needs-yaml');
-      if (!ask) return ['没有「先问要不要装」那一步'];
-      if (!/id: yaml\b/.test(ask)) out.push('问的那一步没有 id: yaml');
-      if (!ask.includes('continue-on-error: true'))
-        out.push('问的那一步没有 continue-on-error（它崩了会让所有 PR 的闸一起红）');
-      for (const needle of ['pnpm/action-setup', 'pnpm install']) {
-        const s = find(needle);
-        if (!s) out.push(`没有 ${needle} 那一步`);
-        else if (!s.includes(WHEN)) out.push(`${needle} 没按「不是 false 就装」限制`);
-      }
-      if (text.indexOf('--needs-yaml') > text.indexOf('pnpm install')) out.push('问的那一步排在装依赖之后');
-      return out;
-    }
-
-    it('问一步、装依赖按「不是 false 就装」，真正判的那一步在后面', () => {
-      expect(problems(yml)).toEqual([]);
-      expect(yml.indexOf('bin/merge-gate.ts --needs-yaml')).toBeLessThan(
-        yml.lastIndexOf('node packages/conventions/src/bin/merge-gate.ts\n'),
-      );
-    });
-
-    it('【故意造出的失败】条件写成「== true 才装」（输出没写出来就不装）、去掉条件、判断步没有 continue-on-error：都查得出来', () => {
-      const lenient = yml.replaceAll(
-        "steps.yaml.outputs.needed != 'false'",
-        "steps.yaml.outputs.needed == 'true'",
-      );
-      expect(lenient).not.toBe(yml);
-      expect(problems(lenient).length).toBeGreaterThan(0);
-      const noIf = yml.replaceAll(`      - ${WHEN}\n        `, '      - ');
-      expect(noIf).not.toBe(yml);
-      expect(problems(noIf).length).toBeGreaterThan(0);
-      const noCoe = yml.replace('      - id: yaml\n        continue-on-error: true\n', '      - id: yaml\n');
-      expect(noCoe).not.toBe(yml);
-      expect(problems(noCoe)).toContain('问的那一步没有 continue-on-error（它崩了会让所有 PR 的闸一起红）');
-    });
   });
 });

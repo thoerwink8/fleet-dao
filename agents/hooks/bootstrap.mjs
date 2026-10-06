@@ -70,7 +70,7 @@ export function shouldManage({ home, env = process.env }) {
   const legacy = s.ok && s.cmds.some((c) => LEGACY_STYLE.test(c.command));
   if (synced || legacy) return { manage: true };
   // 设置文件读不了（不是没有）：判不出这台有没有挂旧钩子，不能当成「没有」静默退出——
-  // 没有 synced.json 的老机器恰恰是这一关要管的那类（#829 合并后补审挑出来的）
+  // 没有 synced.json 的老机器恰恰是这一关要管的那类（#829 的审查挑出来的）
   if (!s.ok) return { manage: false, unreadable: `~/.claude/settings.json 读不了（${s.why}）` };
   return {
     manage: false,

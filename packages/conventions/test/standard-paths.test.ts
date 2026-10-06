@@ -1,8 +1,8 @@
 // 改标准的路径清单（standard-paths.json）的读法和匹配：目录、通配、改名；认不出的清单一律报错，不当成「没碰到」。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import type { ChangedFile } from '../src/merge-gates.ts';
 import {
+  type ChangedFile,
   matchesStandardPath,
   parseStandardPaths,
   type StandardPath,
@@ -102,7 +102,7 @@ describe('改到的文件里落进清单的', () => {
         file('AGENTS.md'),
         file('agents/test/rules/permissions.test.ts'),
         file('packages/conventions/standard-paths.json'),
-        file('agents/skills/discuss/scripts/second-opinion.mjs'),
+        file('agents/skills/discuss/scripts/ask.mjs'),
         file('packages/engine/src/workflows/task.ts'),
       ],
       real(),

@@ -1,5 +1,5 @@
 // agents-vendor：第三方 skill（agents/skills-vendor/）的核对和升级辅助。不联网、不自动更新：升级是人手动拷新版进来、
-// 用 diff 看差异、读过之后 rehash 记下审查、改锁文件里的提交号，走先审后合（agents/skills-vendor/README.md）。
+// 用 diff 看差异、读过之后 rehash 记下审查、改锁文件里的提交号，开 PR 等 CI（agents/skills-vendor/README.md）。
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Tree } from './tree.ts';
@@ -16,7 +16,7 @@ export const USAGE = `agents-vendor —— 第三方 skill（agents/skills-vendo
       人读完新版、拷进 agents/skills-vendor/<skill>/ 之后，重算这个 skill 的文件哈希、记下审查人和日期；
       来源仓、提交号、许可证、说明是人手写的，不动
 
-没有自动更新：手动拷新版进来 → diff 看差异 → 逐个文件读 → rehash → 手改锁文件里的提交号、leftOut → 走先审后合。
+没有自动更新：手动拷新版进来 → diff 看差异 → 逐个文件读 → rehash → 手改锁文件里的提交号、leftOut → 开 PR 等 CI。
 `;
 
 export interface Io {

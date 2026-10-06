@@ -1,24 +1,18 @@
-// 挂自动合并的判法（全仓审查第 2 路清单 1、7 号）：PR 改到的文件碰没碰改标准的路径（standard-paths.ts）、先审后合的路径
-// （merge-gates.ts 的 riskyFiles），以及「我开的、检查全绿、没挂自动合并、没碰改标准」的开着的 PR（开会话钩子兜底用）。
-// 判路径不在这里另写：用那两份清单自己的读法和匹配。
+// 挂自动合并的判法（全仓审查第 2 路清单 1、7 号）：PR 改到的文件碰没碰改标准的路径（standard-paths.ts），
+// 以及「我开的、检查全绿、没挂自动合并、没碰改标准」的开着的 PR（开会话钩子兜底用）。
+// 判路径不在这里另写：用清单自己的读法和匹配。
 //
 // 改这里之前必须知道：
 // - 只 import 不带第三方依赖的模块：开会话钩子在同步专用检出（~/.fleet-dao/origin-main，没装 node_modules）里直接
 //   `node` 跑 bin/pr-idle.ts，引了 @fleet-dao/shared 这类工作区包就跑不起来。
 // - 三态：gh 没跑成、输出认不出、文件列表是空的，一律抛错（调用方报「没查成」、非 0 退出），不当成「没碰」「没有」。
-// - 改到的文件从 GitHub 现读（REST 的 PR 文件列表，带改名前的名字和改动内容），和合并闸读的是同一份；不用本地 git diff
+// - 改到的文件从 GitHub 现读（REST 的 PR 文件列表，带改名前的名字和改动内容）；不用本地 git diff
 //   猜（本地的 origin/main 可能旧、分支可能没推全）。
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   type ChangedFile,
-  parseRiskPaths,
-  RISK_PATHS_FILE,
-  type RiskPath,
-  riskyFiles,
-} from './merge-gates.ts';
-import {
   parseStandardPaths,
   STANDARD_PATHS_FILE,
   type StandardPath,
@@ -60,10 +54,9 @@ export const reasonOf = (r: RunResult): string =>
 
 export interface PathLists {
   standard: StandardPath[];
-  risk: RiskPath[];
 }
 
-/** 读仓根的两份清单；读不到、认不出就抛错（一条都判不了，不当成「什么都没碰」）。 */
+/** 读仓根的改标准清单；读不到、认不出就抛错（一条都判不了，不当成「什么都没碰」）。 */
 export function loadPathLists(root: string): PathLists {
   const read = (file: string): string => {
     try {
@@ -74,9 +67,7 @@ export function loadPathLists(root: string): PathLists {
   };
   const standard = parseStandardPaths(read(STANDARD_PATHS_FILE));
   if (typeof standard === 'string') throw new Error(`${STANDARD_PATHS_FILE} 认不出：${standard}`);
-  const risk = parseRiskPaths(read(RISK_PATHS_FILE));
-  if (typeof risk === 'string') throw new Error(`${RISK_PATHS_FILE} 认不出：${risk}`);
-  return { standard, risk };
+  return { standard };
 }
 
 /** 一行 [filename, status, previous_filename, patch] 的 JSON（gh api --jq 吐的那种）→ ChangedFile。 */
@@ -121,19 +112,10 @@ export function prFiles(gh: Gh, pr: number): ChangedFile[] {
 export interface PathVerdict {
   /** 碰到的改标准路径（文件名）。 */
   standard: string[];
-  /** 碰到的先审后合路径（不含先合后审的）。 */
-  review: string[];
-  /** 碰到的先合后审路径（合并后补审）。 */
-  afterMerge: string[];
 }
 
 export function judgePaths(files: readonly ChangedFile[], lists: PathLists): PathVerdict {
-  const risky = riskyFiles(files, lists.risk);
-  return {
-    standard: standardFiles(files, lists.standard).map((h) => h.file),
-    review: risky.filter((h) => !h.afterMerge).map((h) => h.file),
-    afterMerge: risky.filter((h) => h.afterMerge).map((h) => h.file),
-  };
+  return { standard: standardFiles(files, lists.standard).map((h) => h.file) };
 }
 
 export const listOf = (files: readonly string[], max = 3): string =>

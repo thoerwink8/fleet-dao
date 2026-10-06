@@ -1,7 +1,6 @@
 // 开 PR、挂自动合并收成一个必经命令（pnpm pr:open，全仓审查第 2 路清单 1 号）：最近 40 个 PR 里 9 个没挂自动合并、
 // CI 绿了闲着共 3993 秒，兜底的引擎又关着——挂不挂不再靠人记，开 PR 的这一步就判完、挂上。
-// - 没碰改标准路径（standard-paths.json）就当场 gh pr merge --auto --squash。碰先审后合路径的也挂：merge-gate 是必过检查，
-//   没有通过的 second-opinion 合不进去；只多打一行提醒要跑第二意见。
+// - 没碰改标准路径（standard-paths.json）就当场 gh pr merge --auto --squash：CI 绿就合（#1114 起所有 PR 只看 CI）。
 // - 碰了改标准就不挂，打「人闸：改标准，等创始人同意」；带 --founder-approved 才挂（正文里要有一段含「原话」二字——
 //   贴着他的原话和时间；命令只查这两个字，不做更多猜测）。pnpm pr:open 的入口是 pr-compose.ts 的 prOpenCli：不给 --body-file
 //   时它生成正文（--founder-quote 生成那一段），再交给这里；这里的闸不管正文怎么来的。
@@ -46,8 +45,6 @@ export interface OpenDeps {
   out: (line: string) => void;
   err: (line: string) => void;
 }
-
-const SO = 'node agents/skills/discuss/scripts/second-opinion.mjs';
 
 export function prOpen(argv: string[], deps: OpenDeps): number {
   const { out, err } = deps;
@@ -263,12 +260,6 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
     err(`${e instanceof Error ? e.message : String(e)}：没挂自动合并。自己判过没碰改标准路径再跑 ${manual}`);
     return 2;
   }
-  if (verdict.review.length > 0)
-    out(
-      `碰了先审后合的路径（${listOf(verdict.review)}）：要跑第二意见 ${SO} --pr ${pr} --high-risk --author-family <写它的模型族>，过了合并闸才放行。`,
-    );
-  if (verdict.afterMerge.length > 0)
-    out(`碰了先合后审的路径（${listOf(verdict.afterMerge)}）：合并后补审（${SO} --after-merge-sweep）。`);
 
   if (plan.noAutomerge) {
     out(`没挂自动合并（带了 --no-automerge）。`);

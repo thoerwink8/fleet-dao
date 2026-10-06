@@ -1,7 +1,7 @@
 // 第三方 skill（agents/skills-vendor/）：从公开仓原样拷进来的 skill，旁边一份锁文件（vendor.lock.json）记来源仓、
 // 提交号、许可证、每个文件的哈希、谁在哪天审过。分发前照锁文件核一遍：对不上就整体报没查成、不往各家目录里写——
 // 第三方的一个字就是喂给每台机器上每个 AI 的指令，不能让「仓里的文件」和「审过的文件」悄悄不一样。
-// 改这里之前必须知道：这一层不联网、不更新；升级只能手动（拷新版进来、看差异、重算哈希、走先审后合），见 agents/skills-vendor/README.md。
+// 改这里之前必须知道：这一层不联网、不更新；升级只能手动（拷新版进来、看差异、重算哈希、开 PR 等 CI），见 agents/skills-vendor/README.md。
 import { createHash } from 'node:crypto';
 import { type Dirent, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ export const VENDOR_DIR = ['agents', 'skills-vendor'] as const;
 export const LOCK_NAME = 'vendor.lock.json';
 /** 目录里除了各个 skill，只许有这两样 */
 const ALLOWED_TOP_FILES = new Set([LOCK_NAME, 'README.md']);
-/** 收第三方 skill 只认这两种许可证（原文随 skill 一起拷进来）；加一种要改这里、走先审后合 */
+/** 收第三方 skill 只认这两种许可证（原文随 skill 一起拷进来）；加一种要改这里、开 PR 等 CI */
 export const ALLOWED_LICENSES: readonly string[] = ['MIT', 'Apache-2.0'];
 /** skill 目录里顶层要有一份许可证原文（分发时随 skill 一起装到各家，署名才不丢） */
 const LICENSE_FILES = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING'];

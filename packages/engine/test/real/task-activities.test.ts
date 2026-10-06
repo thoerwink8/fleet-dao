@@ -1,4 +1,4 @@
-// 任务工作流里不碰会话的五个真活动（real/task-activities.ts）：读交代、读交付（真 git）、查改标准和先审后合的路径、
+// 任务工作流里不碰会话的五个真活动（real/task-activities.ts）：读交代、读交付（真 git）、查改标准的路径、
 // 挂自动合并（含「GitHub 说已经是 clean」）、等合并（长轮询）。每条读不到、认不出、合不了的路径都故意造一次：
 // 要抛明确的错或明确回「没成」，不拿空冒充没事。
 import { execFileSync } from 'node:child_process';
@@ -298,15 +298,12 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
   });
 });
 
-describe('查改标准和先审后合的路径', () => {
+describe('查改标准的路径', () => {
   const STANDARDS = JSON.stringify({
     paths: [
       { path: 'AGENTS.md', section: '通用段', why: '通用段' },
       { path: 'agents/**/*.md', why: '技能说明' },
     ],
-  });
-  const RISKS = JSON.stringify({
-    paths: [{ path: '.github/workflows/', kind: '碰安全', why: 'CI 工作流' }],
   });
   const text = (t: string) => ({ defaultBranch: 'main', commit: HEAD, file: { kind: 'text', text: t } });
   const missing = { defaultBranch: 'main', commit: HEAD, file: { kind: 'missing' } };
@@ -316,78 +313,56 @@ describe('查改标准和先审后合的路径', () => {
       names.map((filename) => ({ filename, status: 'modified' }));
   const check = (gh: Gh) =>
     make({ gh }).acts.checkGuarded({ schemaVersion: 1, taskId: 't1', repo: REPO, prNumber: 7 }, ctx());
+  const lists = async () => text(STANDARDS);
 
-  it('两份清单都有：通配的技能说明、AGENTS.md（带段）算改标准，CI 工作流算先审后合', async () => {
+  it('通配的技能说明、AGENTS.md（带段）算改标准；CI 工作流这类不再有第二道门', async () => {
     const { gh } = fakeGh({
       pullFiles: files('agents/skills/x/SKILL.md', 'AGENTS.md', '.github/workflows/ci.yml', 'src/a.ts'),
-      readRepoFile: async (i: { path: string }) =>
-        i.path.endsWith('standard-paths.json') ? text(STANDARDS) : text(RISKS),
+      readRepoFile: lists,
     });
-    const got = await check(gh);
-    expect(got.standards).toEqual([
-      'agents/skills/x/SKILL.md（agents/**/*.md）',
-      'AGENTS.md（AGENTS.md，只有「通用段」这一段算标准）',
-    ]);
-    expect(got.highRisk).toEqual(['.github/workflows/ci.yml（碰安全：.github/workflows/）']);
+    expect(await check(gh)).toEqual({
+      standards: [
+        'agents/skills/x/SKILL.md（agents/**/*.md）',
+        'AGENTS.md（AGENTS.md，只有「通用段」这一段算标准）',
+      ],
+    });
   });
 
-  it('什么都没碰：两个都空', async () => {
-    const { gh } = fakeGh({
-      pullFiles: files('src/a.ts'),
-      readRepoFile: async (i: { path: string }) =>
-        i.path.endsWith('standard-paths.json') ? text(STANDARDS) : text(RISKS),
-    });
-    expect(await check(gh)).toEqual({ standards: [], highRisk: [] });
+  it('什么都没碰：空', async () => {
+    const { gh } = fakeGh({ pullFiles: files('src/a.ts'), readRepoFile: lists });
+    expect(await check(gh)).toEqual({ standards: [] });
   });
 
-  it('这个仓没声明这两份清单（文件不在）：都空，不当成读失败', async () => {
+  it('这个仓没声明改标准清单（文件不在）：空，不当成读失败', async () => {
     const { gh } = fakeGh({ pullFiles: files('AGENTS.md'), readRepoFile: async () => missing });
-    expect(await check(gh)).toEqual({ standards: [], highRisk: [] });
+    expect(await check(gh)).toEqual({ standards: [] });
   });
 
   describe('人批过的路径（approved）', () => {
-    const lists = async (i: { path: string }) =>
-      i.path.endsWith('standard-paths.json') ? text(STANDARDS) : text(RISKS);
-    const checkWith = (gh: Gh, approved: { standards: string[]; highRisk: string[] }) =>
+    const checkWith = (gh: Gh, approved: { standards: string[] }) =>
       make({ gh }).acts.checkGuarded(
         { schemaVersion: 1, taskId: 't1', repo: REPO, prNumber: 7, approved },
         ctx(),
       );
     const AGENTS_ENTRY = 'AGENTS.md（AGENTS.md，只有「通用段」这一段算标准）';
-    const CI_ENTRY = '.github/workflows/ci.yml（碰安全：.github/workflows/）';
 
-    it('原样批过的条目放行：两类都批了就都空', async () => {
-      const { gh } = fakeGh({
-        pullFiles: files('AGENTS.md', '.github/workflows/ci.yml'),
-        readRepoFile: lists,
-      });
-      expect(await checkWith(gh, { standards: [AGENTS_ENTRY], highRisk: [CI_ENTRY] })).toEqual({
-        standards: [],
-        highRisk: [],
-      });
+    it('原样批过的条目放行', async () => {
+      const { gh } = fakeGh({ pullFiles: files('AGENTS.md'), readRepoFile: lists });
+      expect(await checkWith(gh, { standards: [AGENTS_ENTRY] })).toEqual({ standards: [] });
     });
 
-    it('【故意造出的失败】只批了一类 / 批了之后又多出新的路径：没批的照拦，不整个放行', async () => {
-      const both = fakeGh({
-        pullFiles: files('AGENTS.md', '.github/workflows/ci.yml'),
-        readRepoFile: lists,
-      });
-      expect(await checkWith(both.gh, { standards: [AGENTS_ENTRY], highRisk: [] })).toEqual({
-        standards: [],
-        highRisk: [CI_ENTRY],
-      });
-
+    it('【故意造出的失败】批了之后又多出新的路径：没批的照拦，不整个放行', async () => {
       const extra = fakeGh({
         pullFiles: files('AGENTS.md', 'agents/skills/x/SKILL.md'),
         readRepoFile: lists,
       });
-      const got = await checkWith(extra.gh, { standards: [AGENTS_ENTRY], highRisk: [] });
+      const got = await checkWith(extra.gh, { standards: [AGENTS_ENTRY] });
       expect(got.standards).toEqual(['agents/skills/x/SKILL.md（agents/**/*.md）']);
     });
 
     it('【故意造出的失败】批准的条目对不上（批的是别的路径）：照拦', async () => {
       const { gh } = fakeGh({ pullFiles: files('AGENTS.md'), readRepoFile: lists });
-      const got = await checkWith(gh, { standards: ['别的文件（别的规则）'], highRisk: [] });
+      const got = await checkWith(gh, { standards: ['别的文件（别的规则）'] });
       expect(got.standards).toEqual([AGENTS_ENTRY]);
     });
   });
@@ -405,13 +380,6 @@ describe('查改标准和先审后合的路径', () => {
       }),
     });
     await expect(check(notFile.gh)).rejects.toMatchObject({ code: 'GUARD_LIST_UNREADABLE' });
-
-    const riskBad = fakeGh({
-      pullFiles: files('a'),
-      readRepoFile: async (i: { path: string }) =>
-        i.path.endsWith('standard-paths.json') ? text(STANDARDS) : text('不是 JSON'),
-    });
-    await expect(check(riskBad.gh)).rejects.toMatchObject({ code: 'GUARD_LIST_INVALID' });
 
     const filesDown = fakeGh({
       pullFiles: async () => {

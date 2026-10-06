@@ -5,13 +5,6 @@
   "files": [
     "skills/commander/scripts/france-lib.mjs",
     "skills/commander/scripts/france-query.mjs",
-    "skills/discuss/scripts/second-opinion.mjs",
-    "skills/discuss/scripts/so-after-merge.mjs",
-    "skills/discuss/scripts/so-common.mjs",
-    "skills/discuss/scripts/so-pr.mjs",
-    "skills/discuss/scripts/so-profiles.mjs",
-    "skills/discuss/scripts/so-sessions.mjs",
-    "skills/discuss/scripts/so-verdict.mjs",
     "skills/discuss/scripts/tools.mjs",
     "skills/discuss/scripts/walkthrough.mjs",
     "hooks/pretool.mjs",

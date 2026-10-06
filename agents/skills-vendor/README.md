@@ -26,7 +26,7 @@
 | skill | 为什么 |
 |---|---|
 | `subagent-driven-development`、`dispatching-parallel-agents`（superpowers） | 整套靠派子代理，和创始人 2026-09-28「不再开 Claude 子代理」冲突（那条临时调整 2026-10-01 已撤回，这两个要不要收另走下面「加一个新的」） |
-| `requesting-code-review`（superpowers） | 流程就是「派一个子代理去审」，同上（那条已撤回）；本仓审 PR 走 `discuss` 技能的第二意见（别家模型）。创始人 2026-09-30 00:08 列的第一批里有它，逐个文件通读时才发现，所以没收 |
+| `requesting-code-review`（superpowers） | 流程就是「派一个子代理去审」，同上（那条已撤回）；本仓 PR 只看 CI。创始人 2026-09-30 00:08 列的第一批里有它，逐个文件通读时才发现，所以没收 |
 | `skill-creator`（anthropics/skills） | 默认流程靠派子代理、用 `claude -p` 循环几百次调 Claude（烧额度），教的描述写法和 `agents/test/skills.test.ts` 的 120 字上限冲突；同上是通读时才发现。本仓写 skill 照 `agents/skills/README.md` |
 | `using-superpowers`、`brainstorming`、`writing-plans`（superpowers） | 会和本仓的规矩抢谁说了算，或和 `best-practice-first`、`discuss` 重叠 |
 
@@ -38,7 +38,7 @@
 
 1. **锁文件**（`vendor.lock.json`）：来源仓、40 位提交号（不写分支、标签）、许可证、每个文件的 sha256、审查人、审查日期。
 2. **分发前核锁，核不过整体不发**：目录里多了、少了、改了任何一个文件，有链接，`SKILL.md` 头上的 `name` 和目录名不一样，许可证不在白名单（只认 MIT、Apache-2.0，白名单写在 `packages/agents-sync/src/vendor.ts`），都是「没查成」。核不过时自研的规矩也一起不同步——宁可停下，不带着没审过的东西往每台机器上发。测试在 `packages/agents-sync/test/vendor.test.ts`（每种「不对」各造一次）和 `packages/agents-sync/test/vendor-repo.test.ts`（看仓里这份真目录）。
-3. **改这里的任何文件都要先审后合**：`packages/conventions/high-risk-paths.json` 登记了这个目录（第二意见通过才能合）；改到 `.md` 还算改标准（`packages/conventions/standard-paths.json` 里的 `agents/**/*.md`），要创始人同意。
+3. **改到 `.md` 算改标准**（`packages/conventions/standard-paths.json` 里的 `agents/**/*.md`），要创始人同意。
 4. **不联网、不自动更新**。升级只能手动，看得见差异。
 5. 许可证原文随 skill 一起分发（MIT 的版权声明、Apache 的 `LICENSE.txt`）。superpowers 那几个上游只在仓根放了一份 `LICENSE`，我们在每个 skill 目录里各拷一份（锁文件的 `added` 里记着），这是这里唯一加的文件。
 
@@ -52,7 +52,7 @@
 2. `node packages/agents-sync/bin/agents-vendor diff <skill 名> --from <上游里那个 skill 的目录>`：列出多了、少了、改了哪几个文件；逐行看用 `git diff --no-index`。
 3. **逐个文件读**：脚本逐行读；扫隐藏字符和双向控制字符（零宽字符、`U+202E` 这类）；看有没有新的联网、写盘、开子代理、要密钥的地方；有新文件先想清楚要不要收（不收的写进 `leftOut`）。
 4. 拷进来，手改 `vendor.lock.json` 里的 `commit`、`commitDate`、`leftOut`、`notes`，然后 `node packages/agents-sync/bin/agents-vendor rehash <skill 名> --reviewed-by <谁> --date <日期>` 重算文件哈希，`agents-vendor verify` 核一遍。
-5. 开 PR，正文写清读了什么、有没有新风险，走先审后合；改到 `.md` 的等创始人同意。
+5. 开 PR，正文写清读了什么、有没有新风险，CI 绿才合；改到 `.md` 的等创始人同意。
 
 ## 怎么加一个新的
 

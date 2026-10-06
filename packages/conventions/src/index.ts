@@ -98,23 +98,13 @@ export {
 export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
-  type ChangedFile,
   COLD_VERIFY_CONTEXT,
   COLD_VERIFY_MAX_ROUND,
   type ColdVerifyNeed,
   checkColdVerify,
   coldVerifyFrom,
   coldVerifyNeed,
-  destructiveIn,
   GATE_CONTEXT,
-  parseRiskPaths,
-  RISK_KINDS,
-  RISK_PATHS_FILE,
-  type RiskKind,
-  type RiskPath,
-  type RiskyFile,
-  riskyFiles,
-  SECOND_OPINION_CONTEXT,
   statusByContext,
 } from './merge-gates.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
@@ -148,6 +138,7 @@ export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { releaseVersion } from './publish-actions.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {
+  type ChangedFile,
   matchesStandardPath,
   parseStandardPaths,
   STANDARD_PATHS_FILE,

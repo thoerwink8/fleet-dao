@@ -16,7 +16,7 @@ export interface Feedback {
   items: string[];
 }
 
-// ---- 同步主线 / CI / 第二意见（原 decisions/verify.ts）
+// ---- 同步主线 / CI（原 decisions/verify.ts）
 
 /** 把最新主线并进分支、推上去之后的结果。clean 也包括「本来就是最新」。 */
 export interface SyncResult {
@@ -79,7 +79,6 @@ export interface TriageVerdict {
 // ---- 方案（原 decisions/plan.ts 的类型）
 
 export type SubtaskStage = 'execute' | 'ui';
-export type Risk = 'low' | 'normal' | 'high';
 
 /** 写方案的会话交出来的一条子任务（未经校验）。 */
 export interface PlannedSubtask {
@@ -89,8 +88,6 @@ export interface PlannedSubtask {
   touches?: string[];
   dependsOn?: string[];
   stage?: SubtaskStage;
-  /** 只有 high 合并前要第二意见（design 第五节：审官默认不要，只留先审后合一档）；没写按 high 算（拿不准按先审后合）。 */
-  risk?: Risk;
   acceptance?: string[];
   /** 人闸：会对外发布（release）、花钱（spend）、删数据（delete）的，合并前要人批。 */
   holds?: string[];
@@ -103,12 +100,6 @@ export interface TestResult {
   /** 测的是哪个头；和要合的头对不上不算数。 */
   head: string;
   summary: string;
-  /**
-   * 红了、且结构化地判定（读当前头上 second-opinion 提交状态的 state 字段，不匹配合并闸的文案）只是合并闸缺
-   * second-opinion——missing 是这个头上还没有这条状态、pending 是还在跑：不算「测试真红」。真正测试红、或
-   * 第二意见真审过判「必须改」都没有这个字段。
-   */
-  secondOpinionWait?: 'missing' | 'pending';
 }
 
 export interface MergeOutcome {

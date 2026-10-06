@@ -8,7 +8,7 @@
 // 改这里之前必须知道：
 // - 测试不只读自己包里的文件（读别的包的源码、夹具，读 docs/ops.md、AGENTS.md、deploy/ 下的脚本）。PATH_RULES 和 TEST_READS
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
-// - 这里判「少跑」等于放行没测过的改动，所以本文件和两个入口都在 high-risk-paths.json 里（先审后合）。
+// - 这里判「少跑」等于放行没测过的改动，改它要连测试一起看。
 import { type Reuse, reuseOf } from './main-reuse.ts';
 import type { RepoView } from './repo.ts';
 import {
@@ -137,7 +137,7 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * 别的包（core、engine、github……）一如既往不开：每多开一档就是多一个几分钟的 job 占并发槽
  * （免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
  *
- * **补审要的那条证据：量不出来，样本是 0**（2026-10-05，合并后补审 #1002 的第 2 条）。
+ * **要补的那条证据：量不出来，样本是 0**（2026-10-05，#1002 合并后复查的第 2 条）。
  * 方案 `specs/995-断链统一/方案.md:71` 要求先量「只改 db/shared 的 PR，e2e 抓到过单测漏掉的错没有」。
  * 实测：e2e 进 CI 是 2026-10-04 20:26（#985），收窄是 2026-10-05 02:48（#1002），中间六小时里跑过 e2e 的
  * 只有 #985（它自己，改的就是 ci.yml）和 #991（发布，只改 CHANGELOG）——**没有一个只改 db/shared 的 PR**。

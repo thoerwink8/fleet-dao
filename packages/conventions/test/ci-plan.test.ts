@@ -31,7 +31,6 @@ import {
   planOutputs,
   readGraph,
 } from '../src/ci-plan.ts';
-import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
 import { listTestFiles, parseTimings, type TestBox, TIMINGS_FILE } from '../src/test-split.ts';
 import { runChild } from './child.ts';
@@ -1146,31 +1145,6 @@ describe('ci.yml 和这里对得上', () => {
     expect(imports[0]).toMatch(
       /^pathToFileURL\(`\$\{process\.env\.TRUSTED\}\/packages\/hygiene\/src\/check\.ts`$/,
     );
-  });
-
-  it('CI 按改动少跑的判法：从两个入口顺着相对导入走到的文件都在先审后合清单里（漏一个，PR 改它就能让测试少跑）', () => {
-    const parsed = parseRiskPaths(readFileSync(join(ROOT, RISK_PATHS_FILE), 'utf8'));
-    if (typeof parsed === 'string') throw new Error(parsed);
-    const covered = (f: string) =>
-      parsed.some((r) => (r.path.endsWith('/') ? f.startsWith(r.path) : f === r.path));
-    // 缓存那两个文件也是「决定少跑」的一步（PR 的测试分片结果缓存）：它们顺着导入走到的文件同样要在清单里
-    const todo = [
-      'packages/conventions/src/bin/ci-plan.ts',
-      'packages/conventions/src/bin/ci-verdict.ts',
-      'packages/conventions/src/bin/ci-cache.ts',
-    ];
-    const seen = new Set<string>();
-    while (todo.length > 0) {
-      const rel = todo.pop() as string;
-      if (seen.has(rel)) continue;
-      seen.add(rel);
-      const text = readFileSync(join(ROOT, rel), 'utf8');
-      for (const m of text.matchAll(/from '(\.{1,2}\/[^']+)'/g)) {
-        todo.push(posix.join(posix.dirname(rel), m[1] as string));
-      }
-    }
-    expect([...seen]).toContain('packages/conventions/src/repo.ts');
-    expect([...seen].filter((f) => !covered(f))).toEqual([]);
   });
 
   it('deploy job：按 changes 给的矩阵铺（all 几台 --shard、ops 一台 --ops），开关空就不开；每一台都真跑、只有全套那几台带 sudo', () => {
