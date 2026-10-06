@@ -264,6 +264,79 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(f.calls).toHaveLength(2);
   });
 
+  it('同一天（北京时间）已同步过：直接跳过，不再起 git、不再起同步', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const f = fakeSync();
+    const NOW = Date.parse('2026-10-05T06:00:00Z'); // 北京 2026-10-05 14:00
+    // 第一次：真跑，并写下「今天已同步过」
+    expect(hook.syncFleet({ home: w.home, git, sync: f.sync, now: NOW })).toMatch(/已同步到主线最新/);
+    expect(f.calls).toHaveLength(1);
+    expect(readFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), 'utf8').trim()).toBe('2026-10-05');
+    // 同一天再开会话（quietFor 已过期）：跳过
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.ok'), { force: true });
+    const later = hook.syncFleet({ home: w.home, git, sync: f.sync, now: NOW + 60 * 60_000 });
+    expect(later).toBe('规矩同步：今天已同步过，这次跳过。');
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('日期文件是昨天：照常跑，并把日期文件改写成今天', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const f = fakeSync();
+    const NOW = Date.parse('2026-10-05T06:00:00Z'); // 北京 2026-10-05
+    mkdirSync(join(w.home, '.fleet-dao'), { recursive: true });
+    writeFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), '2026-10-04\n');
+    expect(hook.syncFleet({ home: w.home, git, sync: f.sync, now: NOW })).toMatch(/已同步到主线最新/);
+    expect(f.calls).toHaveLength(1);
+    expect(readFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), 'utf8').trim()).toBe('2026-10-05');
+  });
+
+  it('同步失败：不写日期文件，下次还会真跑', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const NOW = Date.parse('2026-10-05T06:00:00Z');
+    const bad = fakeSync({
+      status: 1,
+      stdout: '钩子\n  ✗ ~/.claude/settings.json：没动；要人看\n结论：没做成 1\n',
+    });
+    hook.syncFleet({ home: w.home, git, sync: bad.sync, now: NOW });
+    expect(existsSync(join(w.home, '.fleet-dao', 'session-sync.date'))).toBe(false);
+    // 再来一次：因为日期文件不存在，不能走「今天已同步过」那条近路
+    const good = fakeSync();
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.ok'), { force: true });
+    hook.syncFleet({ home: w.home, git, sync: good.sync, now: NOW + 60_000 });
+    expect(good.calls).toHaveLength(1);
+    expect(readFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), 'utf8').trim()).toBe('2026-10-05');
+  });
+
+  it('「今天」按北京时间算：北京 23:59 和 00:01 是两天，跨过零点后不再跳过', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const f = fakeSync();
+    // 北京 2026-10-05 23:59（UTC 15:59）：第一次同步
+    const BEFORE = Date.parse('2026-10-05T15:59:00Z');
+    hook.syncFleet({ home: w.home, git, sync: f.sync, now: BEFORE });
+    expect(readFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), 'utf8').trim()).toBe('2026-10-05');
+    expect(f.calls).toHaveLength(1);
+    // 北京 2026-10-06 00:01（UTC 16:01）：第二天了，不该再跳过
+    rmSync(join(w.home, '.fleet-dao', 'session-sync.ok'), { force: true });
+    const AFTER = Date.parse('2026-10-05T16:01:00Z');
+    hook.syncFleet({ home: w.home, git, sync: f.sync, now: AFTER });
+    expect(f.calls).toHaveLength(2);
+    expect(readFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), 'utf8').trim()).toBe('2026-10-06');
+  });
+
+  it('日期文件读不懂（不是 YYYY-MM-DD、是目录）：当成没记过，照常跑', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const f = fakeSync();
+    mkdirSync(join(w.home, '.fleet-dao'), { recursive: true });
+    writeFileSync(join(w.home, '.fleet-dao', 'session-sync.date'), '垃圾\n');
+    hook.syncFleet({ home: w.home, git, sync: f.sync });
+    expect(f.calls).toHaveLength(1);
+  });
+
   it('同步有没做成的：说出是哪几项、这台落后主线几个；不记「刚同步成功过」', () => {
     const w = world();
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));

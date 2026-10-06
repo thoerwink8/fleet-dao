@@ -393,6 +393,28 @@ function quietFor(stamp, now) {
   }
 }
 
+/**
+ * 同一天（北京时间）已经同步成功过：文件里记的就是今天。Mirasim 经常重启会话，3 分钟的 quietFor 拦不住「同一天
+ * 第二次开会话」，这里再加一层：一天只真跑一趟规矩同步（10.6 秒）、其余会话一句话带过。文件读不懂、不是今天
+ * 都当真跑；内容是上一次同步成功那一刻的北京日期，由 touchDay 写。
+ */
+function syncedToday(file, now) {
+  try {
+    return readFileSync(file, 'utf8').trim() === beijingToday(now);
+  } catch {
+    return false;
+  }
+}
+
+function touchDay(file, now) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${beijingToday(now)}\n`);
+  } catch {
+    // 记不下只是下次多同步一遍，不影响这次的结论
+  }
+}
+
 function touch(stamp, now) {
   try {
     mkdirSync(dirname(stamp), { recursive: true });
@@ -421,6 +443,9 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
   const quiet = synced && !force ? quietFor(stamp, now) : null;
   if (quiet !== null)
     return `规矩同步：${Math.max(1, Math.round(quiet / 60_000))} 分钟内刚同步成功过（这台同步到 ${short(synced)}），这次没再取远端。`;
+  // 同日第二次开会话（Mirasim 重启很常见）：一天只真跑一趟同步，失败后日期文件不会被写上、下次还会重试
+  const dayFile = join(home, '.fleet-dao', 'session-sync.date');
+  if (!force && syncedToday(dayFile, now)) return '规矩同步：今天已同步过，这次跳过。';
 
   if (source === null)
     return `规矩同步没查成：开会话钩子读不了同步专用检出那一段（${sourceWhy}）；${RERUN}，${READ_MAIN}。`;
@@ -441,7 +466,10 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
     const origin = String(prepared.head ?? '');
     const lagText = lag(g, synced, false);
     const r = sync(prepared.dir, home);
-    if (r.status === 0 && !r.error) touch(stamp, now);
+    if (r.status === 0 && !r.error) {
+      touch(stamp, now);
+      touchDay(dayFile, now);
+    }
     const note = sourceNote(prepared);
     const said = describeSync(r, prepared.dir, origin, lagText, note);
     return rec.ok
