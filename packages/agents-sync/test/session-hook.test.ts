@@ -126,6 +126,7 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     // 三分钟内再开会话不再同步；过了三分钟（删掉记号）照常。主线上的 agents/shared-rules.md 标记坏了：同步不成，会话里明说
     expect(m.session()).toContain('分钟内刚同步成功过');
     rmSync(join(m.home, '.fleet-dao', 'session-sync.ok'));
+    rmSync(join(m.home, '.fleet-dao', 'session-sync.date'), { force: true });
     m.pushAgents((t) => t.replace(END, ''));
     const broken = m.session();
     expect(broken).toContain('规矩同步没查成');
