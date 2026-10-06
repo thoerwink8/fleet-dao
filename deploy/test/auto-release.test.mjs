@@ -25,14 +25,18 @@ import {
   FAILED_PREFIX,
   HUMAN_TIER_PATHS,
   IDLE_WAIT_MS,
+  MANUAL_HOLD_MS,
+  MAX_RETRIES,
   manualHold,
   PENDING_PREFIX,
+  POST_OFF_PREFIX,
   parseHistory,
   parseMainLog,
   parseVersionTags,
   pickVersionMarker,
   publishSequence,
   publishSequenceSummary,
+  RETRY_AFTER_MS,
   RULES_PREFIX,
   RULES_USERS,
   releaseDetail,
@@ -184,7 +188,7 @@ function machine() {
     },
     async runRelease(sha, busyOk) {
       m.calls.push(`release ${sha[0]}${busyOk ? ' busy-ok' : ''}`);
-      if (m.release.code === 0 || m.release.code === 2) m.current = sha;
+      if ([0, 2, 3].includes(m.release.code)) m.current = sha;
       return m.release;
     },
     async checkoutHead() {
@@ -1694,4 +1698,217 @@ test('发布脚本的原因：有红取红；退出码 2 取「待配 / 没查�
     '结论被截掉了：取过程里 … 开头的',
   );
   assert.equal(releaseDetail(['a', 'b', 'c']), 'b c');
+});
+
+// ── #1121 第 A 片：发布后置关不连坐、没成自动重试、人手按住 24 小时过期 ──
+
+test('【故意造出的失败】发布后置关没成（退出码 3）：发布算成，不连坐整版——不重发、不记没成，只单独挂一条提醒，下一版干净发成才撤', async () => {
+  const m = machine();
+  // v1（H1）先发布没成：留下一条发出去了的「没成」报警，看 v2 的退出码 3 把它撤掉
+  m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/1.log', detail: '迁移失败' };
+  await m.round();
+  assert.ok(m.alerts.some((a) => a.key === `${FAILED_PREFIX}${H1}`));
+  // v2（H2）：版本切上去了、健康检查过了，只有发版后置关没成
+  nextVersion(m, H2, 2, '2026-09-27T07:50:00Z');
+  m.release = {
+    code: 3,
+    log: '/srv/fleet-dao-releases/.logs/2.log',
+    detail: '发了 cccccccccccc，但引擎总开关没能关上（原话见上）',
+  };
+  m.t += 5 * MIN;
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release c']);
+  assert.equal(m.current, H2, '版本确实切上去了');
+  assert.equal(st.attempt.result, 'ok', '发布成了：不记没成');
+  assert.equal(st.attempt.postOff, true);
+  assert.equal(st.attempt.retryAt, null, '不重试发布');
+  assert.equal(st.last.action, 'released-post-off');
+  const post = m.alerts.find((a) => a.key === `${POST_OFF_PREFIX}${H2}`);
+  assert.ok(post, '单独挂一条「后置关没成」的提醒');
+  assert.match(post.title, /发成了，但发版后置关没成/);
+  assert.match(post.body, /引擎总开关没能关上/, '提醒里写清是哪一步');
+  assert.match(post.body, /2\.log/);
+  assert.ok(!m.alerts.some((a) => a.key === `${FAILED_PREFIX}${H2}`), '没有「没成」的报警');
+  assert.deepEqual(m.resolved, [FAILED_PREFIX], '以前没成的报警撤掉：这次发布是成的');
+  // 之后每一轮：在用的就是 v2，不再发、不重试
+  for (let i = 0; i < 8; i++) {
+    m.t += 30 * MIN;
+    st = await m.round();
+    assert.equal(st.last.action, 'up-to-date');
+  }
+  assert.deepEqual(releases(m), []);
+  assert.ok(
+    st.alerts.some((a) => a.key === `${POST_OFF_PREFIX}${H2}` && a.raised),
+    '提醒一直开着',
+  );
+  // v3 干净发成（退出码 0）：提醒自己撤
+  nextVersion(m, H3, 3, '2026-09-28T07:50:00Z');
+  m.release = { code: 0, log: '', detail: '' };
+  m.t += 30 * MIN;
+  st = await m.round();
+  assert.equal(st.last.action, 'released');
+  assert.ok(m.resolved.includes(POST_OFF_PREFIX));
+});
+
+test('发布脚本的原因：退出码 3 取「发布后收尾没成」那几项（⚠ 开头），不取过程里别的话', () => {
+  assert.equal(
+    releaseDetail([
+      '  ! 提交 aaaaaaaaaaaa 不在主线上（--unmerged）',
+      '  ⚠ 发了 bbbbbbbbbbbb，但引擎总开关没能关上',
+      '  ⚠ 发了 v4，但「让 AI 接活」没能全部关上',
+      '',
+      '== 结论',
+    ]),
+    '发了 bbbbbbbbbbbb，但引擎总开关没能关上；发了 v4，但「让 AI 接活」没能全部关上',
+  );
+  assert.equal(releaseDetail(['  ✗ 健康检查没过', '  ⚠ 置关没成']), '健康检查没过', '有红仍取红');
+});
+
+test('【故意造出的失败】发布没成：隔 30 分钟自动重试、最多重试 2 次（共 3 次），再停下报警；没到点不试，停下后一天也不再试', async () => {
+  const m = machine();
+  m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/r.log', detail: '香港不通' };
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '第 1 次');
+  assert.equal(st.attempt.result, 'failed');
+  assert.equal(st.attempt.tries, 1);
+  assert.equal(st.attempt.retryAt, new Date(T0 + RETRY_AFTER_MS).toISOString(), '记下次可试的时刻');
+  assert.match(m.alerts.at(-1).title, /将自动重试/);
+  // 没到 30 分钟：不试
+  m.t += 29 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), [], '没到点不试');
+  assert.equal(st.last.action, 'failed-before');
+  assert.match(st.last.detail, /自动重试/);
+  // 到点：第 1 次重试（还是没成）
+  m.t += 1 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '到点重试');
+  assert.equal(st.attempt.tries, 2);
+  assert.ok(st.attempt.retryAt, '还有一次重试');
+  // 第 2 次重试（还是没成）：用完了
+  m.t += RETRY_AFTER_MS;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '第二次重试');
+  assert.equal(st.attempt.tries, 1 + MAX_RETRIES);
+  assert.equal(st.attempt.retryAt, null, '重试满了：不再试');
+  const last = m.alerts.at(-1);
+  assert.equal(last.key, `${FAILED_PREFIX}${H1}`);
+  assert.match(last.title, /重试也没成，已停下/);
+  assert.match(last.body, /仍没成，停下/);
+  assert.match(last.body, /r\.log/);
+  // 之后再久也不试
+  for (const wait of [30 * MIN, 6 * 60 * MIN, 24 * 60 * MIN]) {
+    m.t += wait;
+    st = await m.round();
+    assert.deepEqual(releases(m), [], `停下后不再试（过了 ${wait / MIN} 分钟）`);
+    assert.equal(st.last.action, 'failed-before');
+  }
+  // 下一个版本标记照发
+  nextVersion(m, H2, 2, '2026-09-28T07:50:00Z');
+  m.release = { code: 0, log: '', detail: '' };
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release c']);
+  assert.ok(m.resolved.includes(FAILED_PREFIX));
+});
+
+test('重试成了：记成发成、没成的报警撤掉，之后不再发', async () => {
+  const m = machine();
+  m.release = { code: 1, log: '/x.log', detail: '迁移撞上锁' };
+  await m.round();
+  m.release = { code: 0, log: '', detail: '' };
+  m.t += RETRY_AFTER_MS;
+  const st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.equal(st.attempt.result, 'ok');
+  assert.equal(st.attempt.tries, 2);
+  assert.equal(st.last.action, 'released');
+  assert.ok(m.resolved.includes(FAILED_PREFIX));
+  m.t += RETRY_AFTER_MS;
+  await m.round();
+  assert.deepEqual(releases(m), [], '在用的就是它，不再发');
+});
+
+test('【故意造出的失败】健康检查没过的版本不重试（历史里最后是 unhealthy）：那是版本自己的问题，再发一遍只会多重启一轮服务', async () => {
+  const m = machine();
+  m.release = { code: 1, log: '/x.log', detail: '健康检查没过' };
+  // release.sh 发完记「不健康」、退回
+  m.io.runRelease = async (sha, busyOk) => {
+    m.calls.push(`release ${sha[0]}${busyOk ? ' busy-ok' : ''}`);
+    m.history += `${new Date(m.t).toISOString()} ${sha} unhealthy auto\n`;
+    return m.release;
+  };
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.equal(st.attempt.retryAt, null, '不排重试');
+  assert.match(m.alerts.at(-1).body, /不重试/);
+  m.t += 2 * RETRY_AFTER_MS;
+  st = await m.round();
+  assert.deepEqual(releases(m), [], '不重试');
+  assert.equal(st.last.action, 'failed-before');
+});
+
+test('老状态文件里的没成记录（没有 tries、retryAt）：按「第 1 次、结束后 30 分钟可重试」算，卡着的那一版上线后也能重试', async () => {
+  const m = machine();
+  m.state = {
+    schema: STATE_SCHEMA,
+    attempt: {
+      sha: H1,
+      startedAt: '2026-09-27T05:00:00Z',
+      endedAt: '2026-09-27T05:04:00Z',
+      result: 'failed',
+    },
+    alerts: [],
+    resolve: [],
+  };
+  const st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '结束时间早过了 30 分钟：这一轮就重试');
+  assert.equal(st.attempt.tries, 2);
+});
+
+test('【故意造出的失败】人手动切版本后按住 24 小时：没到点不发，过了 24 小时照发', async () => {
+  const m = machine();
+  // 人 07:50 手动退回 H0；标记那一版（H1，07:30 合进来）打在退回之前
+  m.history += `2026-09-27T07:50:00Z ${H0} rollback\n`;
+  const held = Date.parse('2026-09-27T07:50:00Z');
+  m.t = held + 10 * MIN;
+  let st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'hold');
+  assert.equal(st.hold.until, new Date(held + MANUAL_HOLD_MS).toISOString(), '状态里写明按住到什么时候');
+  assert.match(st.last.detail, /24 小时/);
+  // 23 小时 59 分：还按着
+  m.t = held + MANUAL_HOLD_MS - MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'hold');
+  // 过了 24 小时：不再按住，发标记那一版
+  m.t = held + MANUAL_HOLD_MS;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '按住过期后能发');
+  assert.equal(st.hold, null);
+});
+
+test('按住过期只放开「人按住」这一道：标记那一版 CI 红照样不发', async () => {
+  const m = machine();
+  const held = Date.parse('2026-09-27T07:50:00Z');
+  m.history += `2026-09-27T07:50:00Z ${H0} rollback\n`;
+  m.t = held + MANUAL_HOLD_MS + MIN;
+  m.ci = runsBody(run(H1, 'completed', 'failure'));
+  const st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'ci-red');
+});
+
+test('manualHold：给了 now 就按 24 小时过期；不给 now 老样子（主线头比切版本那次新才松）', () => {
+  const h = parseHistory(`2026-09-27T07:00:00Z ${H0} release\n`);
+  const since = Date.parse('2026-09-27T07:00:00Z');
+  assert.equal(manualHold(h, '2026-09-27T06:30:00Z').sha, H0);
+  assert.equal(manualHold(h, '2026-09-27T06:30:00Z', since + MANUAL_HOLD_MS - 1).sha, H0);
+  assert.equal(manualHold(h, '2026-09-27T06:30:00Z', since + MANUAL_HOLD_MS), null, '到 24 小时就不按住');
+});
+
+test('数字照创始人要的：间隔 30 分钟、最多重试 2 次、按住 24 小时（#1121）', () => {
+  assert.equal(RETRY_AFTER_MS, 30 * MIN);
+  assert.equal(MAX_RETRIES, 2);
+  assert.equal(MANUAL_HOLD_MS, 24 * 60 * MIN);
 });

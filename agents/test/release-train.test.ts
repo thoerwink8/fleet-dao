@@ -112,6 +112,7 @@ function makeWorld() {
     franceBad: 0,
     engineOn: true,
     engineStatusFails: false,
+    engineLegacy: false, // 在用的版本还没有 engine 子命令：fleet-api 打用法、退出 1
     sessions: (async () => ({ ok: true, running: 0, rows: [] })) as () => Promise<SessionsResult>,
     repos: [
       { repo: 'o/a', auto_dispatch_since: '2026-10-01T00:00:00Z' },
@@ -178,6 +179,12 @@ function makeWorld() {
     if (cmd.startsWith('flock')) return { status: w.lockBusy ? 75 : 0, stdout: '', stderr: '' };
     if (cmd.endsWith('engine status')) {
       if (w.engineStatusFails) return { status: 1, stdout: '', stderr: '连不上库' };
+      if (w.engineLegacy)
+        return {
+          status: 1,
+          stdout: '',
+          stderr: '不认识的命令 engine\n用法：fleet-api <命令> …\n  set-password …\n',
+        };
       return ok(`引擎总开关：${w.engineOn ? '开着' : '关着'}：说明\n`);
     }
     if (cmd.includes(' engine off ')) {
@@ -551,6 +558,28 @@ describe('整趟走完', () => {
     expect(order).toEqual([30, 10, 20, 40]);
     expect(out).toContain('#99'); // 先后段里写了、但已不在开着的单里
     expect(out).toContain('创始人原话：「发版吧，发完不用开引擎」');
+  });
+
+  // 2026-10-06 第一次发版撞上：法国在用的版本还没有 engine 子命令（总开关 #1086 之后才有），fleet-api 打用法退出 1，
+  // 第 2 步把它当「读不到」停下，发不出去；没有总开关就没有什么要暂停的，当关着、记跳过
+  it('在用的版本还没有引擎总开关（engine 子命令不存在）：第 2 步记跳过，照常发版；连不上库之类照旧算读不到', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.workers = DONE_WORKER;
+    w.engineLegacy = true;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
+    expect(w.err).toEqual([]);
+    expect(code).toBe(0);
+    expect(text(w.out)).toContain('在用的版本还没有引擎总开关');
+    expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
+    expect(w.sshCalls.some((c) => c.includes(`/deploy/release.sh ${SHA}`))).toBe(true);
+    // 【故意造出的失败】真的读不到（连不上库）还是停下
+    const home2 = freshHome();
+    const { w: w2, io: io2 } = makeWorld();
+    w2.workers = DONE_WORKER;
+    w2.engineStatusFails = true;
+    expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io2(home2))).not.toBe(0);
+    expect(text(w2.err)).toContain('总开关读不到');
   });
 
   it('--restore（原话写明授权）：暂停前开着的总开关和仓开关原样开回去，没开着的仓不动', async () => {

@@ -2,7 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # CACHE、DISPATCH_OFF_STATE、DB_ENV 这些是给 source 进来的 release.sh 里的函数读写的
 # deploy/release.sh 的 dispatch_off_on_milestone（#1050）：新的里程碑（v<N> tag）发布成功后，所有项目的「让 AI 接活」回到关；
-# 同一个 tag 重跑不再关；小版本（主线上 tag 之后的提交）不碰开关；没关成判红、不记「已关」。
+# 同一个 tag 重跑不再关；小版本（主线上 tag 之后的提交）不碰开关；没关成记「发布后收尾没成」、不记「已关」。
 # 判「新里程碑」用的是真 git（临时仓里造 c1 打 v3、c2、c3 打 v4、c4），关的那一步（fleet-api dispatch --all off）换成桩，
 # 只记收到的提交号和原因；库、systemd 都不碰。
 # 故意造出来的失败：关没成功（桩退出 1）、读不到 tag（取代码的仓不在）、记录文件被改坏（不是数字）、记录文件写不进。
@@ -63,6 +63,7 @@ dispatch_off_run() {
 }
 reset() {
   REDS=()
+  POST_ALERTS=()
   CHANGES=()
   PENDING=()
   : >"$RUNS_FILE"
@@ -136,13 +137,13 @@ check "没有关" "$(runs)" 0
 check "没写记录" "$(state)" 无
 mark "$C3" 1
 
-echo "== 【故意造出的失败】关没成功：判红、不记「已关」；下一次发布再试，成功了才记"
+echo "== 【故意造出的失败】关没成功：记「发布后收尾没成」、不记「已关」；下一次发布再试，成功了才记"
 reset
 STUB_RC=1
 dispatch_off_on_milestone "$C3" >/dev/null
 check "试了一次" "$(runs)" 1
-check "判红" "$((${#REDS[@]} > 0))" 1
-check "红里说了没全部关上" "$(printf '%s\n' "${REDS[@]}" | grep -c '没能全部关上')" 1
+check "记了发布后收尾没成（不是红，不连坐整版）" "$((${#POST_ALERTS[@]} > 0)):${#REDS[@]}" 1:0
+check "提醒里说了没全部关上" "$(printf '%s\n' "${POST_ALERTS[@]}" | grep -c '没能全部关上')" 1
 check "没记已关" "$(state)" 无
 reset
 STUB_RC=0
@@ -151,44 +152,44 @@ check "再发一遍又试、这次关上" "$(runs)" 1
 check "没有红" "${#REDS[@]}" 0
 check "记下 v4" "$(state)" 4
 
-echo "== 【故意造出的失败】记录文件被改坏（不是数字）：判红、不关，不拿「0」顶"
+echo "== 【故意造出的失败】记录文件被改坏（不是数字）：记「发布后收尾没成」、不关，不拿「0」顶"
 printf '不是数字\n' >"$DISPATCH_OFF_STATE"
 reset
 dispatch_off_on_milestone "$C3" >/dev/null
 check "没有关" "$(runs)" 0
-check "判红" "$((${#REDS[@]} > 0))" 1
+check "记了发布后收尾没成（不是红，不连坐整版）" "$((${#POST_ALERTS[@]} > 0)):${#REDS[@]}" 1:0
 rm -f "$DISPATCH_OFF_STATE"
 
-echo "== 【故意造出的失败】记录文件是符号链接：判红、不关"
+echo "== 【故意造出的失败】记录文件是符号链接：记「发布后收尾没成」、不关"
 echo 3 >"$TMP/elsewhere"
 ln -s "$TMP/elsewhere" "$DISPATCH_OFF_STATE"
 if [[ -L "$DISPATCH_OFF_STATE" ]]; then # Windows 的 Git Bash 里 ln -s 会变成复制，这一段只在真有符号链接的系统上验
   reset
   dispatch_off_on_milestone "$C3" >/dev/null
   check "没有关" "$(runs)" 0
-  check "判红" "$((${#REDS[@]} > 0))" 1
+  check "记了发布后收尾没成（不是红，不连坐整版）" "$((${#POST_ALERTS[@]} > 0)):${#REDS[@]}" 1:0
 else
   echo "  - 这个系统建不了符号链接，这一段不验（CI 的 Linux 上验）"
 fi
 rm -f "$DISPATCH_OFF_STATE"
 
-echo "== 【故意造出的失败】关上了但记录写不进：判红（下一次发布会再关一遍，关着的不改不记）"
+echo "== 【故意造出的失败】关上了但记录写不进：记「发布后收尾没成」（下一次发布会再关一遍，关着的不改不记）"
 reset
 real_state=$DISPATCH_OFF_STATE
 DISPATCH_OFF_STATE=$TMP/no-such-dir/state
 dispatch_off_on_milestone "$C3" >/dev/null
 check "关了一次" "$(runs)" 1
-check "判红" "$((${#REDS[@]} > 0))" 1
+check "记了发布后收尾没成（不是红，不连坐整版）" "$((${#POST_ALERTS[@]} > 0)):${#REDS[@]}" 1:0
 DISPATCH_OFF_STATE=$real_state
 
-echo "== 【故意造出的失败】读不到 tag（取代码的仓不在）：判红、不关，不当成「没有 tag」"
+echo "== 【故意造出的失败】读不到 tag（取代码的仓不在）：记「发布后收尾没成」、不关，不当成「没有 tag」"
 real_cache=$CACHE
 CACHE=$TMP/no-such-repo
 reset
 dispatch_off_on_milestone "$C3" >/dev/null
 check "没有关" "$(runs)" 0
-check "判红" "$((${#REDS[@]} > 0))" 1
-check "红里说了读不到" "$(printf '%s\n' "${REDS[@]}" | grep -c '读不到')" 1
+check "记了发布后收尾没成（不是红，不连坐整版）" "$((${#POST_ALERTS[@]} > 0)):${#REDS[@]}" 1:0
+check "提醒里说了读不到" "$(printf '%s\n' "${POST_ALERTS[@]}" | grep -c '读不到')" 1
 CACHE=$real_cache
 
 if ((fail)); then
