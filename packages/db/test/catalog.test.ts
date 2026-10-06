@@ -143,10 +143,12 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
         windowAppliesTo({ scope: 'claude' }, { id: r.modelId, family: family.get(r.modelId) ?? '' }),
       ]),
     ).toEqual([
+      ['sonnet-5.5', 'yes'],
       ['opus-5.5', 'yes'],
       ['gpt-5.6-luna', 'no'],
       ['kimi-k3', 'no'],
       ['deepseek-flash', 'no'],
+      ['glm-5.3-flash', 'no'],
     ]);
   });
 

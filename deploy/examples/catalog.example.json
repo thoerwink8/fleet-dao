@@ -7,6 +7,7 @@
     { "id": "deepseek", "displayName": "DeepSeek", "vendor": "DeepSeek" },
     { "id": "cursor", "displayName": "Cursor", "vendor": "Anysphere" },
     { "id": "grok", "displayName": "Grok", "vendor": "xAI" },
+    { "id": "glm", "displayName": "GLM", "vendor": "智谱" },
     { "id": "jev", "displayName": "Jev", "vendor": "TypeSafe" }
   ],
   "channels": [
@@ -40,7 +41,7 @@
       "orgKind": "carpool"
     },
     {
-      "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）。引擎已接上这种执行方式（#345），但只有 deepseek-flash 那条路由打开——创始人 2026-09-27 拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash」；opus-5.5、gpt-5.6-luna、kimi-k3 仍关着。法国的 Mirasim 服务装起来、登录、探针探通之前，deepseek-flash 这条在生产目录里也还没打开（这份样例只是新装机的模板，已装过的机器改值要走 docs/ops.md 第九节「目录配置」）。并发 5 是旧系统拍的，没量过。",
+      "_说明": "Mirasim 中转账号：Opus、Sonnet、GPT（codex）、Kimi、DeepSeek、GLM（zcode）都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）。引擎已接上这种执行方式（#345），但只有 deepseek-flash 那条路由打开——创始人 2026-09-27 拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash」；2026-10-06 创始人要接上 glm-5.3-flash，这一条也开着；opus-5.5、sonnet-5.5、gpt-5.6-luna、kimi-k3 仍关着。法国的 Mirasim 服务装起来、登录、探针探通之前，deepseek-flash 这条在生产目录里也还没打开（这份样例只是新装机的模板，已装过的机器改值要走 docs/ops.md 第九节「目录配置」）。并发 5 是旧系统拍的，没量过。",
       "id": "mirasim-relay",
       "channelId": "mirasim",
       "maxConcurrency": 5
@@ -65,15 +66,40 @@
     }
   ],
   "models": [
+    { "id": "sonnet-5.5", "family": "claude", "displayName": "Sonnet 5.5" },
     { "id": "opus-5.5", "family": "claude", "displayName": "Opus 5.5" },
     { "id": "gpt-5.6-luna", "family": "gpt", "displayName": "GPT 5.6 luna" },
     { "id": "kimi-k3", "family": "kimi", "displayName": "Kimi k3" },
     { "id": "deepseek-flash", "family": "deepseek", "displayName": "DeepSeek Flash" },
     { "id": "cursor-auto", "family": "cursor", "displayName": "Cursor Auto" },
     { "id": "grok-4.7", "family": "grok", "displayName": "Grok 4.7" },
+    { "id": "glm-5.3-flash", "family": "glm", "displayName": "GLM 5.3 flash" },
     { "id": "jev-1.13", "family": "jev", "displayName": "Jev 1.13" }
   ],
   "routes": [
+    {
+      "_说明": "reclaude -p --model claude-sonnet-5-5（和 Opus 同一种起法，只换模型串）。创始人 2026-10-06 定法国引擎整晚跑：lead 类用途 Sonnet 5.5 排第一，所以先走订阅池的这两条，经 Mirasim 的那条关着。",
+      "id": "claude-solo:sonnet-5.5:claude-code",
+      "poolId": "claude-solo",
+      "modelId": "sonnet-5.5",
+      "hostId": "claude-code",
+      "upstreamModel": "claude-sonnet-5-5"
+    },
+    {
+      "id": "claude-carpool:sonnet-5.5:claude-code",
+      "poolId": "claude-carpool",
+      "modelId": "sonnet-5.5",
+      "hostId": "claude-code",
+      "upstreamModel": "claude-sonnet-5-5"
+    },
+    {
+      "_说明": "经 Mirasim 起 claude、点名 claude-sonnet-5-5（Mirasim 实测名单里的 claude 执行体，docs/reference/adapters.md 的 MS-30），扣中转额度；关着，同 opus 那条。",
+      "id": "mirasim-relay:sonnet-5.5:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "sonnet-5.5",
+      "hostId": "mirasim",
+      "upstreamModel": "claude-sonnet-5-5"
+    },
     {
       "_说明": "reclaude -p --model claude-opus-5-5，流里回显同名（插头夹具 packages/adapters/test/fixtures/claude-code/cc-opus-edit-bash）。",
       "id": "claude-solo:opus-5.5:claude-code",
@@ -120,6 +146,14 @@
       "modelId": "deepseek-flash",
       "hostId": "mirasim",
       "upstreamModel": "deepseek-flash"
+    },
+    {
+      "_说明": "经 Mirasim 的 zcode 执行体起 GLM，点名 glm-5.3-flash（Mirasim 服务端 0.0.414 的执行体表里 zcode 的模型只有 glm-5.3、glm-5.3-flash，默认就是 glm-5.3-flash；模型串→执行体的对应在 packages/engine/src/real/hosts.ts 的 MIRASIM_AGENT_BY_MODEL）。创始人 2026-10-06 要接上；开关开着，法国的 Mirasim 服务里没有 zcode 或没登录时路由探针会把它探成不在线、不派。",
+      "id": "mirasim-relay:glm-5.3-flash:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "glm-5.3-flash",
+      "hostId": "mirasim",
+      "upstreamModel": "glm-5.3-flash"
     },
     {
       "_说明": "cursor-agent --model auto 吃订阅里的 Auto 桶；额度接口的成员表里 Auto 叫 default（额度读取器夹具 cursor-period-usage-2026-09-24）。",
