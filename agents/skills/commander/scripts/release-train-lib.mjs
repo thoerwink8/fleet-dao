@@ -174,9 +174,15 @@ const gh = (io, args, opts = {}) => io.run('gh', args, { cwd: io.cwd(), timeoutM
 /** 法国上跑一条命令；ssh 没连上、超时、起不了都在 r.error / status 255 / null 里。 */
 const france = (io, command, timeoutMs = 60_000) => io.ssh(command, { timeoutMs });
 
-/** fleet-api engine status → { ok: true, on } 或 { ok: false, why }。 */
+/**
+ * fleet-api engine status → { ok: true, on } 或 { ok: false, why }。
+ * 法国在用的版本还没有 `engine` 子命令（总开关 #1086 之后才有；2026-10-06 第一次发版就撞上：在用 390eca1f，fleet-api 打用法、退出非 0）：
+ * 没有总开关就没有什么要暂停的，当「关着」读（legacy: true），第 2 步记跳过，发完新版本就有了。只认「打了用法」这一种；连不上库之类照旧算读不到。
+ */
 async function engineStatus(io) {
   const r = await france(io, `${FLEET_API} engine status`);
+  if (!didNotRun(r) && r.status !== 0 && /用法：fleet-api/.test(`${r.stdout}\n${r.stderr}`))
+    return { ok: true, on: false, legacy: true, text: '在用的版本还没有引擎总开关（engine 子命令不存在）' };
   if (didNotRun(r) || r.status !== 0) return { ok: false, why: `法国引擎总开关读不到：${tailOf(r)}` };
   const m = /引擎总开关：(开着|关着)/.exec(String(r.stdout));
   if (!m) return { ok: false, why: `法国引擎总开关的回话认不出：${tailOf(r)}` };
@@ -372,7 +378,12 @@ async function phasePauseFrance(io, state) {
   } else if (!now.on) {
     state.before = { master: false, repos: null, recordedAt: iso(io) };
     saveState(io, state);
-    sayTo(io, '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）');
+    sayTo(
+      io,
+      now.legacy
+        ? '暂停法国：跳过（在用的版本还没有引擎总开关，没什么要暂停的；发完这一版就有了）'
+        : '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）',
+    );
     return { ok: true };
   } else {
     const repos = await io.franceRepos();
