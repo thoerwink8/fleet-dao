@@ -103,11 +103,12 @@ export type FamilyGate = { ok: true } | { ok: false; reason: 'mother_ticket' | '
 /**
  * 母单、子单这一道（帅位 2026-09-27 定；#252 做完就改）：引擎现在一张单只走一块，母单按块循环带子单还没做（#252）。开关一开，
  * 母单和它的子单（GitHub 子议题）会各被当成独立的单、各起一条 Fusion，抢同一批文件。所以贴「母单」标签的、下面挂着子单的
- * （结构上就是母单，标签漏贴也算）、挂在别的单下面的子单，自动派一律不派；要做用 fleet-api handover 一张一张明着交。
+ * （结构上就是母单，标签漏贴也算）、挂在别的单下面的子单，自动派一律不派；要做就重开一张新单，挂上当前版本、不贴「本机做」、不是母单也不是子单。
  * #252 做完改成由母单的 Lead 按块带子单：母单派、子单跟着母单走，到时候改这里。
  */
 export function familyGate(issue: IssueFamily): FamilyGate {
-  const later = '要做用 fleet-api handover 一张一张明着交（母单按块带子单等 #252）';
+  const later =
+    '要做就重开一张新单，挂上当前版本、不贴「本机做」、不是母单也不是子单（母单按块带子单等 #252）';
   if (issue.labels.includes(MOTHER_LABEL) || issue.subIssues > 0) {
     const kids = issue.subIssues > 0 ? `，下面挂着 ${issue.subIssues} 张子单` : '';
     return {
@@ -138,8 +139,8 @@ export type LocalGate = { ok: true } | { ok: false; reason: 'reserved_local'; wh
 
 /**
  * 「本机做」这一道（#299 止血，帅位 2026-09-27 定）：开关一开，挂在当前版本上的独立单一开出来（或挪进当前版本）就被接活
- * 派走，帅位要留给本机做的也一样（#293、#299 都这样被接走过）。贴了「本机做」的，自动派一律不派；人明说交（fleet-api handover）
- * 照交，不拦。标签要开单那一刻就贴上（`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。
+ * 派走，帅位要留给本机做的也一样（#293、#299 都这样被接走过）。贴了「本机做」的，自动派一律不派。要交给引擎就重开一张新单，
+ * 挂上当前版本、不贴「本机做」、不是母单也不是子单。标签要开单那一刻就贴上（`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。
  * 认领账 #556 整个删了，webhook 接活也由引擎拉单（packages/engine/src/jobs/intake.ts）替掉：这个标签是唯一挡本机单的地方。
  */
 export function localGate(issue: Pick<IssueFamily, 'labels'>): LocalGate {
@@ -147,7 +148,7 @@ export function localGate(issue: Pick<IssueFamily, 'labels'>): LocalGate {
   return {
     ok: false,
     reason: 'reserved_local',
-    why: `帅位留给本机做（贴着「${LOCAL_LABEL}」）；要交给引擎，先去掉标签再 handover`,
+    why: `帅位留给本机做（贴着「${LOCAL_LABEL}」）；要交给引擎，重开一张新单，挂上当前版本、不贴「${LOCAL_LABEL}」、不是母单也不是子单`,
   };
 }
 

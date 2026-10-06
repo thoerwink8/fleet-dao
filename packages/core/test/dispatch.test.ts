@@ -111,7 +111,7 @@ describe('母单、子单这一道（#252 之前：一张单只走一块，母�
       const got = familyGate(mother);
       expect(got, JSON.stringify(mother)).toMatchObject({ ok: false, reason: 'mother_ticket' });
       if (got.ok) throw new Error('母单不该派');
-      expect(got.why).toContain('fleet-api handover');
+      expect(got.why).toContain('重开一张新单，挂上当前版本、不贴「本机做」、不是母单也不是子单');
       expect(got.why).toContain('#252');
     }
   });
@@ -147,11 +147,13 @@ describe('本机做这一道（#299 止血：帅位留给本机做的，认领�
     expect(localGate({ labels: ['本机'] })).toEqual({ ok: true });
   });
 
-  it('【故意造出的失败】贴了「本机做」、挂在当前版本上的独立单：自动派不派，原因 reserved_local，写明要交给引擎先去掉标签再 handover', () => {
+  it('【故意造出的失败】贴了「本机做」、挂在当前版本上的独立单：自动派不派，原因 reserved_local，写明要重开一张新单交给引擎', () => {
     const got = autoDispatchGate({ ...plan, labels: ['需求', '本机做'] });
     expect(got).toMatchObject({ ok: false, reason: 'reserved_local' });
     if (got.ok) throw new Error('贴了「本机做」的单不该自动派');
-    expect(got.why).toBe('帅位留给本机做（贴着「本机做」）；要交给引擎，先去掉标签再 handover');
+    expect(got.why).toBe(
+      '帅位留给本机做（贴着「本机做」）；要交给引擎，重开一张新单，挂上当前版本、不贴「本机做」、不是母单也不是子单',
+    );
   });
 
   it('不贴的照派；先看版本、母单子单，再看本机做', () => {
