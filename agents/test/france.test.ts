@@ -759,6 +759,13 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
   }, 90_000);
 });
 
+describe('定时任务只查没摘除的（#1140）', () => {
+  it('查询带 removed_at is null：退役摘除的任务不再报「上次跑成是 N 分钟前」，和后端 scheduleHealth 同一个口径', () => {
+    const sql = query.SQL.jobs ?? '';
+    expect(sql).toMatch(/from scheduled_jobs j\s+where j\.removed_at is null\) x/);
+  });
+});
+
 describe('路由「在用」按路由两层算（#574）', () => {
   it('在用 = 路由两层里开着、它的模型排进了某个用途（和 db 的 routesInUse 同一个判法）；不读旧的阶段平铺表', () => {
     const sql = query.SQL.routes ?? '';

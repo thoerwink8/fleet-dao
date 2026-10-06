@@ -44,7 +44,7 @@
 //      grok/codex 自己根本用不上这些——它们要连 GitHub 靠的是 gh 自己存的登录态，不是这个环境变量。
 //      safeEnv() 是白名单（不是「挡像密钥的名字」那种黑名单）：以后这台机器环境里随便加一个新变量，默认就是
 //      不传，不会因为它的名字「看着不像密钥」就漏出去。
-//   2. cmdStart 起模型这步，io.spawnDetached 抛出来的 Error 不一定是「确认起不来」：可能是 Start-Process
+//   2. cmdStart 起模型这步，io.spawnDetached 抛出来的 Error 不一定是「确认起不来」：可能是 Win32_Process.Create
 //      已经真的起来了、只是没能把 pid 传回来（worker.mjs 那边的坑，细节在那份文件头）。这种情况 Error 上会带
 //      err.uncertain = true，cmdStart 要认这个标记：不说「起不了」，把能写的 meta 先写上（pid: null，
 //      pidUncertain: true），让 status/stop/clean 之后还找得到这棵工作树，报错里明说
@@ -957,6 +957,23 @@ export function saidOf(line) {
   return null;
 }
 
+/**
+ * Claude 工人（stream-json）的日志最后一个事件不是 result：说明它没走完正常收尾就没了（被掐、被杀、崩了），不是做完退出的
+ * （2026-10-06 两个过夜工人被会话一起掐掉，日志都是这么戛然而止的）。别家模型的日志是普通文字、认不出事件，回 false 不下结论。
+ */
+export function noResultEvent(lines) {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!lines[i].startsWith('{')) continue;
+    try {
+      const ev = JSON.parse(lines[i]);
+      if (ev && typeof ev === 'object' && typeof ev.type === 'string') return ev.type !== 'result';
+    } catch {
+      // 只是恰好以 { 开头的普通文字，接着往前找
+    }
+  }
+  return false;
+}
+
 function lastMeaningfulLine(file) {
   let text;
   try {
@@ -978,7 +995,7 @@ function lastMeaningfulLine(file) {
   } catch {
     // 日志刚被删：不知道多久没动
   }
-  return { ok: true, line, idleMin };
+  return { ok: true, line, idleMin, noResultEvent: noResultEvent(lines) };
 }
 
 /** 查这个工人分支的 PR：照 start 时判出、记在 meta 里的那条路连 GitHub（老记录没有 githubRoute，照旧直连）。 */
@@ -1024,6 +1041,7 @@ function metaStatus(io, name, at) {
     elapsedMin,
     lastLine: last.line,
     idleMin: last.idleMin,
+    noResultEvent: last.noResultEvent,
     cleanedAt: m.cleanedAt,
     resumes: m.resumes ?? 0,
     worktree: m.worktree,
@@ -1054,6 +1072,11 @@ function formatStatus(s) {
     `  工作树 ${s.worktree}（分支 ${s.branch}）`,
     `  最后一句输出：${s.lastLine ?? '（还没有输出）'}${s.running && s.idleMin !== null && s.idleMin !== undefined ? `（${s.idleMin} 分钟前）` : ''}`,
     `  PR：${prText}`,
+    ...(!s.pidUncertain && !s.running && s.noResultEvent
+      ? [
+          '  注意：日志停在半截、没有 result 事件，不是正常收尾——多半是被掐了（会话被关、进程被杀），不是做完了',
+        ]
+      : []),
   ].join('\n');
 }
 

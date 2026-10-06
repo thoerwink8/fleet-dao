@@ -56,9 +56,10 @@ function relative(ms: number): string {
 function resetText(iso: string | undefined, now: Date, timeZone?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
+  // h23 固定 00–23。hour12:false 交给运行时选周期，有的会选 h24，午夜显示成 24:xx。
   const local = d.toLocaleString('zh-CN', {
     ...(timeZone ? { timeZone } : {}),
-    hour12: false,
+    hourCycle: 'h23',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
