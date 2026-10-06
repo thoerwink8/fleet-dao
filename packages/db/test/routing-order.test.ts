@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { moveModelRoute, movePurposeModel, setRouteEnabled } from '../src/routing-order.ts';
 import { routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
-import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
+import { createTestDb, realTestPgUrl, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog } from './helpers.ts';
 
 let t: TestDb;
@@ -216,6 +216,59 @@ describe('模型下的路由上移 / 下移', () => {
     expect(results.filter((r) => r.ok)).toHaveLength(1);
     expect(results.filter((r) => !r.ok && r.kind === 'conflict')).toHaveLength(1);
   });
+
+  // 上面那条两个调用谁先拿到锁看运气，真库里只在「后到的恰好在前一个提交之前开始等」时才露出乱序（CI 上偶发红过两次）。
+  // 这一条把那个时序钉死：A 改完先不提交，等 B 确实卡在锁上，再让 A 提交。PGlite 只有一条连接，造不出两个事务同时等锁，只在真 Postgres 下跑。
+  it.skipIf(realTestPgUrl() === undefined)(
+    '后到的已经卡在锁上才等到前一个提交：读到的是提交后的先后，回 conflict',
+    async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let moved!: () => void;
+      const aMoved = new Promise<void>((resolve) => {
+        moved = resolve;
+      });
+      const a = t.db.transaction(async (tx) => {
+        const result = await moveModelRoute(tx, {
+          modelId: 'opus-4.9',
+          routeId: 'a',
+          direction: 'down',
+          expected: ['a', 'b', 'c'],
+        });
+        moved();
+        await gate; // 提交前一直握着锁
+        return result;
+      });
+      await aMoved;
+      const b = moveModelRoute(t.db, {
+        modelId: 'opus-4.9',
+        routeId: 'c',
+        direction: 'up',
+        expected: ['a', 'b', 'c'],
+      });
+      // 等 B 真的卡在行锁上（不是睡一觉赌它到了）
+      for (let i = 0; ; i++) {
+        const { rows } = await t.client.query<{ n: number }>(
+          `select count(*)::int as n from pg_stat_activity
+           where datname = current_database() and wait_event_type = 'Lock'`,
+        );
+        if ((rows[0]?.n ?? 0) > 0) break;
+        if (i >= 200) throw new Error('B 一直没卡在锁上：这条用例造不出要测的时序');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      release();
+      const [ra, rb] = await Promise.all([a, b]);
+      expect(ra).toMatchObject({ ok: true, after: ['b', 'a', 'c'] });
+      expect(rb).toEqual({ ok: false, kind: 'conflict', current: ['b', 'a', 'c'] });
+      expect(await routeOrder()).toEqual([
+        ['b', 0],
+        ['a', 1],
+        ['c', 2],
+      ]);
+    },
+  );
 });
 
 describe('路由开关', () => {
