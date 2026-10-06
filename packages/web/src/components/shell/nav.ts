@@ -1,5 +1,6 @@
 import type { LucideIcon } from 'lucide-react';
 import {
+  Activity,
   Bell,
   Boxes,
   Brain,
@@ -51,6 +52,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         label: '路由',
         icon: Route,
         hint: '每个用途排哪些模型、走哪几条路，现在派得出去吗',
+        // 演示版里没有这一页（只在正式驾驶舱建）。
+      },
+      {
+        to: '/routing/status',
+        label: '渠道状态',
+        icon: Activity,
+        hint: '每个渠道一张卡：近 60 次柱条、平均耗时、可用率，点开看 request/response 原文',
         // 演示版里没有这一页（只在正式驾驶舱建）。
       },
       {

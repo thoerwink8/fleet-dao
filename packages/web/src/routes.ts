@@ -12,6 +12,8 @@ const cockpitOnly = demo
       route('changelog', 'routes/changelog.tsx'),
       // 路由两层每一层现在活着吗（#574）：演示版没有这个模块。
       route('routing', 'routes/routing.tsx'),
+      // 渠道状态（#1087）：按供应商聚合的卡，左边看近 60 次柱条、点开看每条的 request/response。
+      route('routing/status', 'routes/routing-status.tsx'),
       // 每条路由起会话的思考档位（#470）：演示版没有这个模块，也改不了。
       route('efforts', 'routes/efforts.tsx'),
       // 环境页（#820 片 1）：这一台环境现在怎样，只读；演示版没有这一页（露机器名、版本号、会话数，R10）。
