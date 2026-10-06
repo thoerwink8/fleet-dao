@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freshBeforeSubagent, SUBAGENT_DIRECT_MS, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy } from './git-run.mjs';
-import { cleanId, DELIVERY_TOOLS, nagIfOwed, stateDir, touchTool } from './unattended.mjs';
+import { cleanId, DELIVERY_TOOLS, nagIfOwed, stateDir } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2147,13 +2147,11 @@ if (isMain()) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${errCode(err) ?? err}），按拦处理\n`);
     process.exit(2);
   }
-  // 旧状态文件还在时记一笔「调了工具」；决定 0026 之后收尾不再读它。出错吞掉。
   let backgroundOnly = false;
   try {
     /** @type {unknown} */
     const input = JSON.parse(raw);
     const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-    if (id) touchTool({ dir: stateDir(), sessionId: id });
     // 决定 0026：不再因起后台活自动开无人值守。Agent、Monitor、Workflow 仍登记在这条钩子上，
     // 见到就放行（decide 不认识它们的名字，不放行会被拦）。
     const sub = isSubagentCall(input);
