@@ -1,5 +1,6 @@
 // 钉住调工具前钩子（agents/hooks/pretool.mjs）拦的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
-// 几条规矩：fleet-dao 里不用 git stash（list、show 放行）；
+// 几条规矩：fleet-dao 里不用 git stash（list、show 放行）；fleet-dao 也不用 git reset --hard
+// （2026-10-05 把主检出还没验证的活丢过；要丢弃改动用 `git stash push -u -m '<tag>'` 或 `git diff > 文件`，其余 reset 紫色放行）；
 // 本机不切号、不登录、不退出（ssh 到别处的放行）；bash 里会被当命令执行的反引号全机都拦（单引号、带引号的 heredoc 里放行，
 // PowerShell 不管）；fleet-dao 开单走 pnpm issue:new；认不出的输入按拦处理；
 // 密钥文件的内容不进对话：碰到密钥路径只放行不读内容的（列目录、看权限、判断在不在），看结构走 secret-shape.mjs，
@@ -49,6 +50,7 @@ const s = `st${'ash'}`;
 const rc = `recl${'aude'}`;
 const bt = '`';
 const create = `cre${'ate'}`;
+const resetHard = `reset --${'hard'}`;
 const F = '/work/fleet-dao';
 const O = '/work/other';
 const RC = `.recl${'aude'}`;
@@ -65,6 +67,16 @@ const cases: Case[] = [
   [`git -C ../wt ${s} pop`, 2, F],
   [`git ${s} list`, 0, F],
   [`git ${s} show -p`, 0, F],
+  [`git ${resetHard}`, 2, F],
+  [`git ${resetHard} origin/main`, 2, F],
+  [`git ${resetHard} HEAD~3`, 2, F],
+  // PowerShell 同一条规矩（钩子对 PowerShell 的 tool_name 也走这判）
+  [`git ${resetHard}`, 2, F, 'PowerShell'],
+  // 没有 --hard、或非 fleet 仓：放行；别的子命令或 checkout -- 不该被这条拦
+  ['git reset HEAD~1', 0, F],
+  ['git reset --soft HEAD~2', 0, F],
+  ['git checkout -- 文件', 0, F],
+  [`git ${resetHard}`, 0, O],
   ['git status && pnpm test', 0, F],
   [`${rc} org use other-org`, 2, O],
   [`echo "${bt}${rc} login${bt}"`, 2, O],
@@ -123,6 +135,20 @@ describe('调工具前钩子拦的规矩', () => {
   it('输入不是 JSON、没有命令：按拦处理', () => {
     expect(lib.decide('不是 JSON').code).toBe(2);
     expect(lib.decide(JSON.stringify({ tool_name: 'Bash', tool_input: {} })).code).toBe(2);
+  });
+
+  it('拦下 git reset --hard 时给的修复建议含 git stash 和保留 diff', () => {
+    const v = lib.decide(
+      JSON.stringify({
+        tool_name: 'Bash',
+        tool_input: { command: `git ${resetHard} origin/main` },
+        cwd: F,
+      }),
+    );
+    expect(v.code).toBe(2);
+    expect(v.message).toContain('git stash push -u');
+    expect(v.message).toContain('git diff > 文件');
+    expect(v.message).toContain('把主检出');
   });
 });
 
