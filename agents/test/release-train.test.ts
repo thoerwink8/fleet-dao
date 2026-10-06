@@ -288,7 +288,19 @@ describe('暂停标记：worker.mjs start 见标记就拒', () => {
       err: (t: string) => err.push(t),
     };
     const started = await workerLib.runWorker(
-      ['start', '--model', 'grok', '--name', 'x', '--brief', 'b.md', '--no-issue', '试'],
+      [
+        'start',
+        '--model',
+        'grok',
+        '--name',
+        'x',
+        '--brief',
+        'b.md',
+        '--no-issue',
+        '试',
+        '--detached',
+        '测试里要脱离',
+      ],
       workerIo,
     );
     expect(started).toBe(3);

@@ -26,3 +26,4 @@
 | [0020](0020-founder-2026-10-05-chain-breaks.md) | 断链三条：关单自动收口、里程碑关前搬单、开单先查旧单 | 生效 |
 | [0021](0021-slim-before-replacing-temporal.md) | 引擎先瘦身（定时任务摘出 Temporal、失败规则表、看门狗），不直接换掉 Temporal；B 只放行「只加代码、假环境」 | 生效 |
 | [0022](0022-retire-local-wsl.md) | 撤掉本机 WSL 演练台：机器注销、仓里删本机档机制；往后只剩法国 + 本机指挥官 | 生效 |
+| [0024](0024-subagent-by-default.md) | 派活默认用 Agent 子代理（Mirasim 面板里看得见）；脱离会话的工人只留无人值守、过夜、超 40 分钟的例外，起它要 `--detached` 理由 | 生效 |
