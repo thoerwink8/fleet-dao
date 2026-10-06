@@ -1,14 +1,15 @@
 // 钉住 Stop 钩子（agents/hooks/stop.mjs）的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
-// 规矩（决定 0026，创始人 2026-10-06 17:25「按照你推荐」）：
-// 1. 只提醒、不拦、不接着聊——不管仓根干不干净、输入好不好、旧的无人值守状态还在不在，退出码恒为 0，
-//    输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
-// 2. `unattended.mjs on` 不再写状态、不再挡收尾，只告诉去起脱离会话的工人。
+// 规矩：
+// 1. 没开无人值守时（没人在这个会话里跑过 `unattended.mjs on`）只提醒、不拦、不接着聊——不管仓根干不干净、输入好不好，
+//    退出码恒为 0，输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
+// 2. 决定 0028（创始人 2026-10-07 约 02:27 推翻 0026 的「这一轮结束、收尾不拦」）：只有这个会话自己跑了 `on` 才挡；
+//    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、空转到上限、工人都收口了都放行。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
 // 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
 // 超时放这么宽只是兜底——挡的是「机器真的卡住了」，不是拿来盖住「一条测试起了太多子进程」：子进程的数量那边已经按规矩需要的最少次数收过（见下面那条）。
 // 同目录的先例：discuss.test.ts 的 SLOW、session-start.test.ts 的 SLOW、progress-structure.test.ts 的 SLOW。
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,9 +39,18 @@ function repoWithStray(): string {
   return dir;
 }
 
-/** 状态目录指到一个空的临时目录、不带会话号：测试不碰真机器上的无人值守状态，也不受跑测试的这个会话自己开没开影响 */
-function isolatedEnv(stateDir: string, sessionId = ''): NodeJS.ProcessEnv {
-  return { ...process.env, FLEET_UNATTENDED_DIR: stateDir, CLAUDE_CODE_SESSION_ID: sessionId };
+/**
+ * 状态目录指到一个空的临时目录、不带会话号：测试不碰真机器上的无人值守状态，也不受跑测试的这个会话自己开没开影响；
+ * 工人目录同理（默认一个空目录 = 没有在跑的工人）；FLEET_WORKER 清掉：在工人会话里跑这份测试时，它不该把 on 当成机器派的会话拒掉。
+ */
+function isolatedEnv(stateDir: string, sessionId = '', workersDir?: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    FLEET_UNATTENDED_DIR: stateDir,
+    FLEET_WORKERS_DIR: workersDir ?? temp('workers-default'),
+    FLEET_WORKER: '',
+    CLAUDE_CODE_SESSION_ID: sessionId,
+  };
 }
 
 function run(stdin: string, cwd?: string, env?: NodeJS.ProcessEnv) {
@@ -128,48 +138,220 @@ function stop(env: NodeJS.ProcessEnv, extra: Record<string, unknown> = {}) {
 }
 const blocked = (stdout: string) => stdout.includes('"decision":"block"');
 
-describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', SLOW, () => {
-  it('on 不写状态、退出码 0，Stop 没有 decision；没有会话号也一样', () => {
-    const dir = temp('state');
-    const env = isolatedEnv(dir, SID);
-    const turned = cli(['on'], env);
-    expect(turned.status).toBe(0);
-    expect(turned.stdout).toContain('0026');
-    expect(turned.stdout).toContain('worker.mjs');
-    expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
-    expect(cli(['on'], isolatedEnv(dir, '')).status).toBe(0);
-    const r = stop(env);
-    expect(r.status).toBe(0);
-    expect(blocked(r.stdout)).toBe(false);
-    expect(r.stdout).not.toContain('hookSpecificOutput');
-  });
-
-  it('【故意造出的失败】旧状态文件写着开着：Stop 仍不拦，文件也不被改成暂停', () => {
-    const dir = temp('state');
-    const env = isolatedEnv(dir, SID);
-    const file = join(dir, `${SID}.json`);
+describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，几种放行，防死循环（决定 0028）', SLOW, () => {
+  const stateFile = (dir: string) => join(dir, `${SID}.json`);
+  const readS = (dir: string) => JSON.parse(readFileSync(stateFile(dir), 'utf8'));
+  /** 直接写一份状态：把「已经挡了很多次」这类要起几十个子进程才到的局面一步摆好 */
+  const seed = (dir: string, extra: Record<string, unknown>) =>
     writeFileSync(
-      file,
+      stateFile(dir),
       JSON.stringify({
         state: 'on',
         expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
         idle: 0,
-        totalBlocks: 40,
+        totalBlocks: 0,
         toolSinceBlock: true,
+        ...extra,
       }),
     );
-    const r = stop(env);
-    expect(r.status).toBe(0);
-    expect(blocked(r.stdout)).toBe(false);
-    expect(JSON.parse(readFileSync(file, 'utf8')).state).toBe('on');
+  /** 登记一个工人：pid 用这个测试进程自己的（一定活着）或一个已经退出的子进程的（一定死了） */
+  const addWorker = (workers: string, name: string, alive: boolean, extra: Record<string, unknown> = {}) => {
+    const pid = alive ? process.pid : (spawnSync(process.execPath, ['-e', '']).pid as number);
+    mkdirSync(join(workers, name), { recursive: true });
+    writeFileSync(join(workers, name, 'meta.json'), JSON.stringify({ name, pid, ...extra }));
+  };
+  const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
+  const pretool = (env: NodeJS.ProcessEnv, toolName: string, toolInput: Record<string, unknown>) =>
+    spawnSync(process.execPath, [PRETOOL], {
+      input: JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: temp('c'), session_id: SID }),
+      encoding: 'utf8',
+      env,
+    });
+
+  it('on 之后：Stop 输出 decision:block，退出码仍是 0；stop_hook_active 为真也照样挡（那是我们自己挡出来的）', () => {
+    const workers = temp('workers');
+    addWorker(workers, 'a', true);
+    const env = isolatedEnv(temp('state'), SID, workers);
+    const turned = cli(['on'], env);
+    expect(turned.status).toBe(0);
+    expect(turned.stdout).toContain('worker.mjs');
+    for (const active of [false, true]) {
+      const r = stop(env, { stop_hook_active: active });
+      expect(r.status).toBe(0);
+      const out = JSON.parse(r.stdout.trim());
+      expect(out.decision).toBe('block');
+    }
   });
 
-  it('不认识的命令明确失败；没开过就 done，也明确失败，不装作收尾了', () => {
+  it('挡住时的理由是具体的：继续盯工人（watch --wait 55）、有进展记进度、别空转，以及怎么放行', () => {
+    const workers = temp('workers');
+    addWorker(workers, 'a', true);
+    const env = isolatedEnv(temp('state'), SID, workers);
+    cli(['on'], env);
+    const reason: string = JSON.parse(stop(env).stdout.trim()).reason;
+    expect(reason).toContain('worker.mjs watch --wait 55');
+    expect(reason).toContain('france.mjs');
+    expect(reason).toContain('progress:note');
+    expect(reason).toContain('别空转');
+    for (const k of ['done', 'needs-you', 'off']) expect(reason).toContain(`unattended.mjs ${k}`);
+    expect(reason).toContain('在跑的工人 1 个');
+  });
+
+  it('一个在跑的工人都没有：理由改成「没有在跑的工人，有活就起、没了就 done」', () => {
+    const env = isolatedEnv(temp('state'), SID);
+    cli(['on'], env);
+    const reason: string = JSON.parse(stop(env).stdout.trim()).reason;
+    expect(reason).toContain('没有在跑的工人');
+    expect(reason).toContain('unattended.mjs done');
+  });
+
+  it('没开、或者开的是别的会话：不挡', () => {
+    const dir = temp('state');
+    expect(cli(['on'], isolatedEnv(dir, 'other-session-0002')).status).toBe(0);
+    expect(blocked(stop(isolatedEnv(dir, SID)).stdout)).toBe(false);
+  });
+
+  it('起子代理、监视、后台命令不自动开：调完 Agent / Monitor / 后台 Bash 之后没有状态文件，Stop 不挡（0026 第 2 条保留）', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
+    expect(pretool(env, 'Agent', { prompt: 'x', subagent_type: 'general-purpose' }).status).toBe(0);
+    expect(pretool(env, 'Monitor', { command: 'sleep 1' }).status).toBe(0);
+    expect(pretool(env, 'Bash', { command: 'echo hi', run_in_background: true }).status).toBe(0);
+    expect(existsSync(stateFile(dir))).toBe(false);
+    expect(blocked(stop(env).stdout)).toBe(false);
+  });
+
+  it('【故意造出的失败】旧版「起后台活自动开」留下的状态文件（auto:true）：不认，不挡', () => {
+    const dir = temp('state');
+    const env = isolatedEnv(dir, SID);
+    seed(dir, { auto: true });
+    expect(blocked(stop(env).stdout)).toBe(false);
+  });
+
+  it('机器派的会话（工人、反方，FLEET_WORKER=1）：on 拒绝，就算有状态文件 Stop 也不挡', () => {
+    const dir = temp('state');
+    const env = { ...isolatedEnv(dir, SID), FLEET_WORKER: '1' };
+    expect(cli(['on'], env).status).toBe(2);
+    expect(existsSync(stateFile(dir))).toBe(false);
+    seed(dir, {});
+    expect(blocked(stop(env).stdout)).toBe(false);
+  });
+
+  it('放行一：done、needs-you、off 之后都放行；done 和 needs-you 不写一句话不认', () => {
+    const env = isolatedEnv(temp('state'), SID);
+    for (const cmd of ['done', 'needs-you']) {
+      cli(['on'], env);
+      expect(cli([cmd], env).status).toBe(2);
+      expect(blocked(stop(env).stdout)).toBe(true);
+      expect(cli([cmd, '一句话'], env).status).toBe(0);
+      expect(blocked(stop(env).stdout)).toBe(false);
+    }
+    cli(['on'], env);
+    cli(['off'], env);
+    expect(blocked(stop(env).stdout)).toBe(false);
+  });
+
+  it('放行二：开着满 12 小时——放行、删掉状态、说一声；--hours 超过 12 不让开', () => {
+    const dir = temp('state');
+    const env = isolatedEnv(dir, SID);
+    expect(cli(['on', '--hours', '13'], env).status).toBe(2);
+    expect(cli(['on', '--hours', '12'], env).status).toBe(0);
+    const s = readS(dir);
+    expect(Date.parse(s.expiresAt) - Date.parse(s.since)).toBe(12 * 3_600_000);
+    seed(dir, { expiresAt: new Date(Date.now() - 1000).toISOString() });
+    const r = stop(env);
+    expect(blocked(r.stdout)).toBe(false);
+    expect(r.stdout).toContain('过期');
+    expect(existsSync(stateFile(dir))).toBe(false);
+  });
+
+  it('放行三（防死循环）：还有工人在跑——连着 19 次没调工具仍挡，第 20 次放行并转暂停、写明原因', () => {
+    const dir = temp('state');
+    const workers = temp('workers');
+    addWorker(workers, 'a', true);
+    const env = isolatedEnv(dir, SID, workers);
+    seed(dir, { idle: 18, totalBlocks: 19, toolSinceBlock: false });
+    expect(blocked(stop(env).stdout)).toBe(true); // 这一次算第 19 次空转
+    expect(readS(dir).idle).toBe(19);
+    const r = stop(env); // 第 20 次
+    expect(blocked(r.stdout)).toBe(false);
+    expect(r.stdout).toContain('自动暂停');
+    expect(r.stdout).toContain('20 次');
+    expect(cli(['status'], env).stdout).toContain('paused');
+  });
+
+  it('放行四：所有工人都做完或掉线——连着 3 次没调工具就放行（没有什么可盯的）；同一局面有工人在跑则仍挡', () => {
+    const dir = temp('state');
+    const empty = temp('workers-none');
+    // 掉线的、clean 过的都不算在跑
+    const gone = temp('workers-gone');
+    addWorker(gone, 'dead', false);
+    addWorker(gone, 'cleaned', true, { cleanedAt: '2026-10-07T00:00:00Z' });
+    const live = temp('workers-live');
+    addWorker(live, 'a', true);
+    for (const w of [empty, gone]) {
+      seed(dir, { idle: 2, totalBlocks: 3, toolSinceBlock: false });
+      const r = stop(isolatedEnv(dir, SID, w));
+      expect(blocked(r.stdout)).toBe(false);
+      expect(r.stdout).toContain('自动暂停');
+      expect(r.stdout).toContain('没有在跑的工人');
+    }
+    seed(dir, { idle: 2, totalBlocks: 3, toolSinceBlock: false });
+    expect(blocked(stop(isolatedEnv(dir, SID, live)).stdout)).toBe(true);
+  });
+
+  it('放行五：挡了 200 次到总上限——放行', () => {
+    const dir = temp('state');
+    const workers = temp('workers');
+    addWorker(workers, 'a', true);
+    seed(dir, { totalBlocks: 200 });
+    const r = stop(isolatedEnv(dir, SID, workers));
+    expect(blocked(r.stdout)).toBe(false);
+    expect(r.stdout).toContain('200 次');
+  });
+
+  it('两次挡之间调过工具（PreToolUse 记了一笔）：不算空转，空转计数清零，继续挡', () => {
+    const dir = temp('state');
+    const workers = temp('workers');
+    addWorker(workers, 'a', true);
+    const env = isolatedEnv(dir, SID, workers);
+    // 已经到了「再空转一次就放行」的边缘；调一个工具就把它救回来
+    seed(dir, { idle: 19, totalBlocks: 20, toolSinceBlock: false });
+    expect(pretool(env, 'Bash', { command: 'echo hi' }).status).toBe(0);
+    expect(readS(dir).toolSinceBlock).toBe(true);
+    expect(blocked(stop(env).stdout)).toBe(true);
+    const s = readS(dir);
+    expect(s.state).toBe('on');
+    expect(s.idle).toBe(0);
+    expect(s.totalBlocks).toBe(21);
+  });
+
+  it('故意造出失败：状态文件坏了 / 读不了——放行，并明说是状态读不了（不装作正常收尾，也不困住人）', () => {
+    const dir = temp('state');
+    const env = isolatedEnv(dir, SID);
+    cli(['on'], env);
+    writeFileSync(stateFile(dir), '{不是 JSON');
+    const bad = stop(env);
+    expect(blocked(bad.stdout)).toBe(false);
+    expect(bad.stdout).toContain('状态文件不是合法的 JSON');
+    writeFileSync(stateFile(dir), JSON.stringify({ state: 'on' }));
+    expect(stop(env).stdout).toContain('内容认不出');
+    rmSync(stateFile(dir));
+    mkdirSync(stateFile(dir)); // 读一个目录：读不了
+    const unreadable = stop(env);
+    expect(blocked(unreadable.stdout)).toBe(false);
+    expect(unreadable.stdout).toContain('读不了状态文件');
+  });
+
+  it('故意造出失败：命令行拿不到会话号、不认识的命令、--hours 不合法——都明确失败（退出码非 0），不装作开成了', () => {
+    const dir = temp('state');
+    expect(cli(['on'], isolatedEnv(dir, '')).status).toBe(2);
+    const env = isolatedEnv(dir, SID);
     expect(cli(['乱来'], env).status).toBe(2);
+    expect(cli(['on', '--hours', '0'], env).status).toBe(2);
+    expect(cli(['on', '--hours', 'abc'], env).status).toBe(2);
     expect(cli(['done', '没开过'], env).status).toBe(1);
-    expect(existsSync(join(dir, `${SID}.json`))).toBe(false);
+    expect(existsSync(stateFile(dir))).toBe(false);
   });
 
   describe('他说了话也不再写欠账，工具和收尾都不拦（决定 0027）', () => {
@@ -232,9 +414,10 @@ describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', S
     });
   });
 
-  it('开会话不再塞「这一轮不要结束」；暂停过的只留原因', () => {
+  it('开会话钩子读得到：开着给一句话（不要结束、继续盯工人）、暂停给一句话、没开什么都不给', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
+    // 经子进程调 sessionLines：.mjs 没有类型声明，不在 TS 里直接 import
     const lines = (): string[] => {
       const code = `import { sessionLines } from ${JSON.stringify(UNATTENDED_URL)}; console.log(JSON.stringify(sessionLines({ dir: process.env.FLEET_UNATTENDED_DIR, sessionId: process.env.CLAUDE_CODE_SESSION_ID })));`;
       const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
@@ -242,28 +425,34 @@ describe('规矩：收尾不再被挡住，on 只指向脱离会话的工人', S
       return JSON.parse(r.stdout.trim());
     };
     expect(lines()).toEqual([]);
-    writeFileSync(
-      join(dir, `${SID}.json`),
-      JSON.stringify({
-        state: 'on',
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-        idle: 0,
-        totalBlocks: 0,
-      }),
-    );
-    expect(lines()).toEqual([]);
-    writeFileSync(
-      join(dir, `${SID}.json`),
-      JSON.stringify({
-        state: 'paused',
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-        idle: 0,
-        totalBlocks: 0,
-        note: '要花钱',
-      }),
-    );
-    expect(lines().join('')).toContain('暂停过（要花钱）');
-    expect(lines().join('')).toContain('可以结束');
-    expect(lines().join('')).not.toContain('不要结束');
+    cli(['on'], env);
+    expect(lines().join('')).toContain('无人值守开着');
+    expect(lines().join('')).toContain('不要结束');
+    expect(lines().join('')).toContain('watch --wait 55');
+    cli(['needs-you', '要花钱'], env);
+    expect(lines().join('')).toContain('暂停着（要花钱）');
+  });
+});
+
+describe('规矩的文字：通用段和 commander 技能说「无人值守时这一轮不结束，盯着工人」（决定 0028）', () => {
+  const read = (rel: string) =>
+    readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+  const SHARED = read('../../shared-rules.md');
+  const SKILL = read('../../skills/commander/SKILL.md');
+  const line = SHARED.split('\n').find((l) => l.startsWith('- 无人值守')) ?? '';
+
+  it('通用段：先 on、起工人、这一轮不结束、watch --wait 55 盯着、前台等待不超过 60 秒、done / needs-you / off', () => {
+    expect(line).toContain('unattended.mjs on');
+    expect(line).toContain('worker.mjs start --detached');
+    expect(line).toContain('这一轮不结束');
+    expect(line).toContain('worker.mjs watch --wait 55');
+    expect(line).toContain('单次前台等待不超过 60 秒');
+    for (const k of ['`done`', '`needs-you`', '`off`']) expect(line).toContain(k);
+  });
+
+  it('commander 技能：起完工人后用 watch --wait 55 一直盯着，旧说法（这一轮就结束、不循环 watch）已删', () => {
+    expect(SKILL).toContain('用 `worker.mjs watch --wait 55` 一直盯着，不结束这一轮');
+    expect(SKILL).not.toContain('起完工人这一轮就结束');
+    expect(SKILL).not.toContain('不要循环 watch');
   });
 });

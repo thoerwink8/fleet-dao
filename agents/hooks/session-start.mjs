@@ -33,8 +33,10 @@ import {
   cleanId,
   isMachineOpening,
   isMachineSession,
+  pidAlive,
   stateDir,
   sessionLines as unattendedLines,
+  WORKERS_REL,
 } from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
@@ -879,21 +881,12 @@ function workerLastSaid(text) {
   return '';
 }
 
-/** 这个 pid 的进程还在不在；判不出来（没权限看）当还在，不把它报成死了。 */
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return typeof err === 'object' && err !== null && 'code' in err && err.code === 'EPERM';
-  }
-}
-
 /**
- * 工人状态目录（相对家目录）。commander 技能的 worker-lib.mjs 另有一份（钩子和技能装在两个目录，互相 import 不了），
+ * 工人状态目录（相对家目录）：定义在 unattended.mjs（收尾钩子数在跑的工人也用它），这里原样再导出。
+ * commander 技能的 worker-lib.mjs 另有一份（钩子和技能装在两个目录，互相 import 不了），
  * agents/test/hooks-shared.test.ts 钉着两边相等。
  */
-export const WORKERS_REL = join('.fleet-dao', 'workers');
+export { WORKERS_REL };
 
 /**
  * 本机独立工人（commander 技能的 worker.mjs 起的，状态在 ~/.fleet-dao/workers/<名字>/meta.json）现在怎样（#1016）。
