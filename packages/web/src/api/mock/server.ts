@@ -1518,6 +1518,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       return RoutingResponse.parse({
         channels: st.channels,
+        channelStates: st.channelStates,
         pools: st.pools,
         models: st.models,
         routes: st.routes,

@@ -105,6 +105,18 @@ function contractData(): Partial<MemoryData> {
       startedAt: ago(505),
     },
   ];
+  data.channelStates = [
+    {
+      channelId: 'ch-mirasim',
+      status: 'disabled',
+      reason: '上游断连（已重试 2 次）',
+      failedRouteId: 'rt-mirasim-kimi',
+      fallbackChannelId: 'ch-claude',
+      fallbackModelId: 'opus-5.5',
+      flaggedAt: ago(30),
+      updatedAt: ago(30),
+    },
+  ];
   data.quotaWindows = [
     ...(data.quotaWindows ?? []),
     {
@@ -689,6 +701,19 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           'ch-claude',
           'ch-cursor',
           'ch-mirasim',
+        ]);
+        // 渠道近态（#1118）：只有运行中失败出过事的渠道有行，库里的和内存里的读回来一个样；时刻没填的不带
+        expect(await store.listChannelStates()).toEqual([
+          {
+            channelId: 'ch-mirasim',
+            status: 'disabled',
+            reason: '上游断连（已重试 2 次）',
+            failedRouteId: 'rt-mirasim-kimi',
+            fallbackChannelId: 'ch-claude',
+            fallbackModelId: 'opus-5.5',
+            flaggedAt: new Date(T0.getTime() - 30 * MIN).toISOString(),
+            updatedAt: new Date(T0.getTime() - 30 * MIN).toISOString(),
+          },
         ]);
         expect((await store.listPools()).map((p) => [p.id, p.lastReadOkAt])).toEqual([
           ['pool-claude-a', new Date(T0.getTime() - 5 * MIN).toISOString()],

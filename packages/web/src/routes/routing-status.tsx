@@ -17,10 +17,11 @@ import type { Route } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { StatusChip, StatusDot } from '../components/status';
 import { Badge } from '../components/ui/badge';
-import { formatAgo } from '../lib/format';
+import { formatAgo, formatClock, formatIn } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
   buildProviderCards,
+  type Failover,
   type ProviderCard,
   summaryLine,
   TICKS_PER_CARD,
@@ -56,13 +57,53 @@ function TickBars({ ticks }: { ticks: readonly Tick[] }) {
   );
 }
 
+/**
+ * 运行中失败的渠道（#1118）：为什么不可用、顺延到谁、下次探测。卡上用紧凑版（原因最多两行），右边详情用完整版。
+ * 「顺延到谁」没有的两种情况分开写：还没派出去（没有新的活触发选路）、没有别的渠道可派。
+ */
+function FailoverNote({ failover, now, compact }: { failover: Failover; now: number; compact?: boolean }) {
+  const next = failover.nextProbeAt;
+  return (
+    <dl
+      data-failover
+      className={cn(
+        'grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-caption',
+        compact ? 'mt-2 text-muted-foreground' : 'mb-3 rounded-md border bg-muted/40 px-3 py-2.5 text-sub',
+      )}
+    >
+      <dt className="text-ink-fail">为什么不可用</dt>
+      <dd data-field="reason" className={cn('min-w-0 break-words', compact && 'line-clamp-2')}>
+        {failover.reason}
+        {failover.flaggedAt ? `（${formatClock(failover.flaggedAt)} 标上的）` : null}
+      </dd>
+      <dt>顺延到谁</dt>
+      <dd data-field="fallback">
+        {failover.fallback
+          ? `${failover.fallback.channelName} · ${failover.fallback.modelName}`
+          : '还没派出去：没有别的渠道可顺延，或还没有新的活来选路'}
+      </dd>
+      <dt>下次探测</dt>
+      <dd data-field="next-probe" className="num">
+        {next
+          ? `${formatClock(next)}（${formatIn(next, now)}）`
+          : `下一轮探针（约每 ${failover.probeEveryMinutes} 分钟一轮）`}
+        {failover.failedRouteId
+          ? ` · 探通 ${failover.failedRouteId} 才恢复`
+          : ' · 探通渠道下任一条路由就恢复'}
+      </dd>
+    </dl>
+  );
+}
+
 function ProviderRow({
   card,
   selected,
+  now,
   onPick,
 }: {
   card: ProviderCard;
   selected: boolean;
+  now: number;
   onPick: () => void;
 }) {
   const tone: Tone =
@@ -107,6 +148,7 @@ function ProviderRow({
             <span className="text-ink-fail">{card.downCount} 条不通</span>
           ) : null}
         </div>
+        {card.failover ? <FailoverNote failover={card.failover} now={now} compact /> : null}
       </button>
     </li>
   );
@@ -164,7 +206,7 @@ function RouteDetailRow({ route }: { route: Route }) {
   );
 }
 
-function Detail({ card }: { card: ProviderCard }) {
+function Detail({ card, now }: { card: ProviderCard; now: number }) {
   const tone: Tone =
     card.current.kind === 'ok'
       ? 'done'
@@ -194,7 +236,8 @@ function Detail({ card }: { card: ProviderCard }) {
       }
       actions={<StatusChip tone={tone} label={card.current.label} />}
     >
-      {card.current.kind !== 'ok' && 'reason' in card.current && card.current.reason ? (
+      {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
+      {!card.failover && card.current.kind !== 'ok' && 'reason' in card.current && card.current.reason ? (
         <p className={cn('mb-3 text-sub', toneText[tone])}>{card.current.reason}</p>
       ) : null}
       <div className="overflow-hidden rounded-lg border">
@@ -290,6 +333,7 @@ export default function RoutingStatus() {
                 key={c.channel.id}
                 card={c}
                 selected={c.channel.id === picked}
+                now={now}
                 onPick={() => {
                   setManualPick(c.channel.id);
                   setParams({ p: c.channel.id }, { replace: true, preventScrollReset: true });
@@ -308,7 +352,7 @@ export default function RoutingStatus() {
         </nav>
         <div className="min-w-0">
           {current ? (
-            <Detail card={current} />
+            <Detail card={current} now={now} />
           ) : (
             <Panel>
               <Empty icon={Activity} title="选一张卡" hint="从左边点一张供应商卡看明细" />

@@ -4,6 +4,7 @@
 import {
   type Ban,
   type Channel,
+  type ChannelStateRecord,
   type Model,
   type Pool,
   type ProgressKind,
@@ -159,6 +160,7 @@ export interface MemoryData {
   /** 需求和子任务的状态变化（库里由触发器写）；建库时没给的，按建单时刻补一条初始状态。 */
   stateChanges: StateChangeRecord[];
   channels: Channel[];
+  channelStates: ChannelStateRecord[];
   pools: Pool[];
   models: Model[];
   routes: Route[];
@@ -193,6 +195,7 @@ export function emptyData(): MemoryData {
     asks: [],
     stateChanges: [],
     channels: [],
+    channelStates: [],
     pools: [],
     models: [],
     routes: [],
@@ -534,6 +537,9 @@ export function createMemoryStore(
     // —— 调度台 ——
     async listChannels() {
       return [...data.channels].sort((a, b) => a.id.localeCompare(b.id));
+    },
+    async listChannelStates() {
+      return [...data.channelStates].sort((a, b) => a.channelId.localeCompare(b.channelId));
     },
     async listPools() {
       return [...data.pools].sort((a, b) => a.id.localeCompare(b.id));

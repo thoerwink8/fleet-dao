@@ -15,6 +15,19 @@ export const ChannelSchema = z.object({
   enabled: z.boolean(),
 });
 
+/** 渠道近态（#1118）：运行中失败被标 disabled 的渠道、为什么、顺到谁、探针什么时候看过。没有这一行的渠道没出过事。 */
+export const ChannelStateSchema = z.object({
+  channelId: Id,
+  status: z.enum(['ok', 'disabled']),
+  reason: z.string().optional(),
+  failedRouteId: Id.optional(),
+  fallbackChannelId: Id.optional(),
+  fallbackModelId: Id.optional(),
+  lastProbedAt: Time.optional(),
+  flaggedAt: Time.optional(),
+  updatedAt: Time,
+});
+
 export const ModelSchema = z.object({
   id: Id,
   family: z.string(),
@@ -109,6 +122,8 @@ export type NotWired = z.infer<typeof NotWiredSchema>;
  */
 export const RoutingResponse = z.object({
   channels: z.array(ChannelSchema),
+  /** 渠道近态（只有出过事的渠道有行）：为什么不可用、顺延到谁。读不到整个接口报错，不给空的顶。 */
+  channelStates: z.array(ChannelStateSchema),
   pools: z.array(PoolSchema),
   models: z.array(ModelSchema),
   routes: z.array(RouteSchema),

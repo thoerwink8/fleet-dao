@@ -6,7 +6,8 @@
 // 表里出现的先后铺成 60 格，每一格还是真结论；真历史接入后换成真历史，形状不变。
 // mock（演示版）仍然走的是同一个函数：它从同一份 routing/routingLayers 拿到渠道和路由。
 
-import type { Channel, Model, Route, RoutingLayers } from '../api/types';
+import { ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from '@fleet-dao/shared';
+import type { Channel, ChannelState, Model, Route, RoutingLayers } from '../api/types';
 import { probeLatency } from './channel-status';
 
 /** 一张供应商卡里的一格：近 60 次中的一次。 */
@@ -18,6 +19,28 @@ export interface Tick {
   at: string;
   /** 一句话（比如「答上了 OK · 用时 9 秒」）；没探到就写。 */
   text: string;
+}
+
+/**
+ * 渠道运行中失败、被标成不可用（channel_states，#1118）：为什么、顺延到谁、探针下次什么时候再看。
+ * 探通引发失败的那条路由之后渠道自己改回，这一块就没有了。
+ */
+export interface Failover {
+  /** 为什么不可用（失败分流的原因，带上游原文摘要）。 */
+  reason: string;
+  /** 几点标上的。 */
+  flaggedAt: string | undefined;
+  /** 引发失败的那条路由（探针探通它渠道才恢复）；已被删了为 undefined。 */
+  failedRouteId: string | undefined;
+  /** 顺延到谁（渠道名和模型名）；还没派出去、或没有别的渠道可顺延为 undefined。 */
+  fallback: { channelName: string; modelName: string } | undefined;
+  /**
+   * 探针下一次大约几点再看引发失败的那条路由：它最近一次结论的时刻加上这种执行方式的探测间隔（上次通了的按
+   * 执行方式放慢的间隔，没通的每轮都探）。算不出（那条路由没探过 / 已被删）为 undefined，页面写「下一轮探针」。
+   */
+  nextProbeAt: string | undefined;
+  /** 探针每隔多久一轮（分钟），给页面解释用。 */
+  probeEveryMinutes: number;
 }
 
 /** 一张供应商卡：左卡那一块。 */
@@ -44,6 +67,8 @@ export interface ProviderCard {
   routes: Route[];
   /** 这个渠道在用吗（已下架 = 渠道自己 enabled 是 false）。 */
   enabled: boolean;
+  /** 运行中失败被标不可用：为什么、顺延到谁、下次探测；没出过事或已恢复为 undefined。 */
+  failover: Failover | undefined;
 }
 
 export const TICKS_PER_CARD = 60;
@@ -115,12 +140,53 @@ function currentOf(routes: readonly Route[], channelEnabled: boolean): ProviderC
   return { kind: 'down', label: '暂不可用', reason };
 }
 
+function failoverOf(
+  state: ChannelState | undefined,
+  routes: readonly Route[],
+  routing: { channels: readonly Channel[]; models: readonly Model[] },
+): Failover | undefined {
+  if (state?.status !== 'disabled') return undefined;
+  const failed = state.failedRouteId ? routes.find((r) => r.id === state.failedRouteId) : undefined;
+  const everyMin = failed
+    ? failed.probe?.state === 'ok'
+      ? routeProbeEveryMinutes(failed.hostId)
+      : ROUTE_PROBE_EVERY_MINUTES
+    : ROUTE_PROBE_EVERY_MINUTES;
+  const nextProbeAt = failed?.probe
+    ? new Date(Date.parse(failed.probe.at) + everyMin * 60_000).toISOString()
+    : undefined;
+  const fallbackChannel = state.fallbackChannelId
+    ? routing.channels.find((c) => c.id === state.fallbackChannelId)
+    : undefined;
+  const fallbackModel = state.fallbackModelId
+    ? routing.models.find((m) => m.id === state.fallbackModelId)
+    : undefined;
+  return {
+    reason: state.reason ?? '（库里没写原因）',
+    flaggedAt: state.flaggedAt,
+    failedRouteId: state.failedRouteId,
+    fallback: state.fallbackChannelId
+      ? {
+          channelName: fallbackChannel?.name ?? state.fallbackChannelId,
+          modelName: fallbackModel?.displayName ?? state.fallbackModelId ?? '',
+        }
+      : undefined,
+    nextProbeAt,
+    probeEveryMinutes: everyMin,
+  };
+}
+
 /**
  * 每个渠道一张卡：近 60 次柱条（同一个渠道下几条路由的最近一次结论，最旧的在最左；
  * 不足 60 次前面用 off 补）、可用率（ok / 已探）、平均耗时（已探里 ok 的「用时 N 秒」平均）。
  */
 export function buildProviderCards(
-  routing: { channels: readonly Channel[]; routes: readonly Route[]; models: readonly Model[] },
+  routing: {
+    channels: readonly Channel[];
+    channelStates: readonly ChannelState[];
+    routes: readonly Route[];
+    models: readonly Model[];
+  },
   _layers: RoutingLayers | undefined,
 ): ProviderCard[] {
   return routing.channels.map((channel): ProviderCard => {
@@ -153,6 +219,21 @@ export function buildProviderCards(
       ...mine.map(tickOf),
     ];
 
+    const failover = failoverOf(
+      routing.channelStates.find((s) => s.channelId === channel.id),
+      routing.routes,
+      routing,
+    );
+    const current: ProviderCard['current'] = !channel.enabled
+      ? currentOf(mine, false)
+      : failover
+        ? {
+            kind: 'down',
+            label: '运行中失败，已顺延',
+            reason: failover.reason,
+          }
+        : currentOf(mine, true);
+
     return {
       channel,
       ticks,
@@ -161,9 +242,10 @@ export function buildProviderCards(
       probedCount,
       availability,
       avgLatencySec,
-      current: currentOf(mine, channel.enabled),
+      current,
       routes: mine,
       enabled: channel.enabled,
+      failover: channel.enabled ? failover : undefined,
     };
   });
 }

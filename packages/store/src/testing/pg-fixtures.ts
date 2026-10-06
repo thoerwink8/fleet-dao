@@ -5,6 +5,7 @@ import {
   asks,
   auditLog,
   bans,
+  channelStates,
   channels,
   type Db,
   families,
@@ -65,6 +66,22 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         probeState: probe?.state ?? null,
         probedAt: probe ? new Date(probe.at) : null,
         probeDetail: probe?.detail ?? null,
+      })),
+    );
+  }
+  // 渠道近态引用渠道、路由、模型：这三样都写完才能写
+  if (data.channelStates?.length) {
+    await db.insert(channelStates).values(
+      data.channelStates.map((s) => ({
+        channelId: s.channelId,
+        status: s.status,
+        reason: s.reason ?? null,
+        failedRouteId: s.failedRouteId ?? null,
+        fallbackChannelId: s.fallbackChannelId ?? null,
+        fallbackModelId: s.fallbackModelId ?? null,
+        lastProbedAt: dateOpt(s.lastProbedAt),
+        flaggedAt: dateOpt(s.flaggedAt),
+        updatedAt: date(s.updatedAt),
       })),
     );
   }
