@@ -3,6 +3,7 @@
 // 读不到的不拿 0 顶、也不当没事：段名认不出、起止缺一头、token 没记到……各记一条「没读到」带原因（unread），
 // 只给认得出的值——认不出的原样写进原因里，不塞进给页面的字段。
 import type { BillingKind, SegmentKind, SegmentOutcome, SegmentTier } from './domain.ts';
+import { type CostEstimate, estimateCostUsd, type ModelPrice, modelPriceOf } from './model-prices.ts';
 
 export const SEGMENT_KINDS = ['scope', 'manual', 'verify'] as const satisfies readonly SegmentKind[];
 export const SEGMENT_TIERS = ['fast', 'medium', 'heavyweight'] as const satisfies readonly SegmentTier[];
@@ -96,6 +97,11 @@ export interface SegmentRunView {
   cacheReadTokens?: number | undefined;
   cacheWriteTokens?: number | undefined;
   costUsd?: number | undefined;
+  /**
+   * 执行体没报花费（订阅制的 Grok、Claude 拼车……）时按模型目录的单价估的（model-prices.ts）：估成了、没有单价、token 没读全
+   * 三种之一。报了花费的、在跑的、进程没起来的没有这一项。
+   */
+  estimate?: CostEstimate | undefined;
   memoryPeakMb?: number | undefined;
   failureReason?: string | undefined;
   prNumber?: number | undefined;
@@ -108,6 +114,8 @@ export interface SegmentRunView {
 export interface SegmentReadContext {
   /** 单子已经结束（done / stopped / failed）：开着的那一段不是在跑，是没记结束。 */
   taskFinished: boolean;
+  /** 模型的单价从哪查；不给就是 model-prices.ts 的目录（测试可换）。 */
+  priceOf?: ((model: string) => ModelPrice | undefined) | undefined;
 }
 
 const TOKEN_NAMES = {
@@ -202,6 +210,12 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     else note('cost', [`花费「${v}」认不出`]);
   }
 
+  // 没报花费、进程起来过的：按目录单价估一个数（页面标「估算」），没有单价、token 没读全的照实写
+  const estimate =
+    !running && costUsd === undefined && !notStarted
+      ? estimateCostUsd(counts, run.model, (ctx.priceOf ?? modelPriceOf)(run.model))
+      : undefined;
+
   // 只有动手段分档（决定 0010 第 3 条）：对题、验收没有派工档是对的，不算没读到
   let tier: SegmentTier | undefined;
   if (isOneOf(SEGMENT_TIERS, run.tier)) tier = run.tier;
@@ -223,6 +237,7 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...counts,
     ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(estimate !== undefined ? { estimate } : {}),
     ...(isCount(run.memoryPeakMb) ? { memoryPeakMb: run.memoryPeakMb } : {}),
     ...(run.failureReason !== undefined ? { failureReason: run.failureReason } : {}),
     ...(run.prNumber !== undefined && Number.isSafeInteger(run.prNumber) && run.prNumber > 0

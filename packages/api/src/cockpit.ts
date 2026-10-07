@@ -39,6 +39,8 @@ import {
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
+  UpdateTaskRoutePinRequest,
+  UpdateTaskRoutePinResponse,
   WebRoutes,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -73,6 +75,7 @@ import { registerRoutingOrderRoutes } from './routing-order.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
+import { TASK_ROUTE_PINS_NOT_HERE, taskRoutePinView } from './task-route-pins.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
 import {
   buildBoard,
@@ -229,6 +232,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       taskFinished: isTaskFinished(task),
     });
     return reply(c, TaskDetailResponse, {
+      routePins: await readRoutePins(task.id),
       task,
       repo,
       subtasks: subtaskViews(task.id, { tasks: [task], subtasks, activeRuns, plans, route }),
@@ -236,6 +240,64 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       segmentRuns,
       usage: usageView(runs, route, segmentRuns),
     });
+  });
+
+  /** 这张单每段指定的模型。没接上、没读成都写在 unavailable 里（单子页照样能看用量），不拿空列表冒充「没指定」。 */
+  async function readRoutePins(taskId: string) {
+    if (!deps.taskRoutePins) return { pins: [], unavailable: TASK_ROUTE_PINS_NOT_HERE };
+    try {
+      return { pins: (await deps.taskRoutePins.list(taskId)).map(taskRoutePinView) };
+    } catch (err) {
+      deps.log.error('按单指定的模型没读成', { taskId, error: fullStack(err) });
+      return { pins: [], unavailable: `没读成：${(err instanceof Error && err.message) || String(err)}` };
+    }
+  }
+
+  // 给一张单的一段指定模型、或清掉（驾驶舱改版 2026-10-07）：直接写库，和操作记录同一事务；引擎下一次给这一段选路就照它，
+  // 在跑的这一轮不打断。单子结束了、模型目录里没有、路由不是这个模型的都拒，库里一行不动。
+  app.put(WebRoutes.updateTaskRoutePin.path, async (c) => {
+    const taskId = c.req.param('taskId');
+    const body = await readJson(c, UpdateTaskRoutePinRequest);
+    if (!deps.taskRoutePins) throw new ApiError(503, 'task_route_pins_not_wired', TASK_ROUTE_PINS_NOT_HERE);
+    const task = await store.getTask(taskId);
+    if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
+    if (isTaskFinished(task)) {
+      throw new ApiError(409, 'task_finished', `任务已经结束（${task.state}），不用再指定模型`);
+    }
+    let result: Awaited<ReturnType<NonNullable<Deps['taskRoutePins']>['set']>>;
+    try {
+      result = await deps.taskRoutePins.set(
+        {
+          taskId,
+          segment: body.segment,
+          modelId: body.modelId,
+          routeId: body.routeId ?? null,
+          setBy: c.get('user').id,
+          setAt: deps.now(),
+          reason: body.reason,
+        },
+        {
+          actor: actorOf(c),
+          action: body.modelId === null ? 'task.routePin.clear' : 'task.routePin.set',
+          target: `task:${taskId}`,
+          reason: body.reason,
+          via: c.get('via'),
+          ok: true,
+        },
+      );
+    } catch (err) {
+      deps.log.error('按单指定的模型没改成', { taskId, error: fullStack(err) });
+      throw new ApiError(
+        503,
+        'task_route_pin_unwritable',
+        (err instanceof Error && err.message) || String(err),
+      );
+    }
+    if (!result.ok) {
+      if (result.kind === 'not_found') throw new ApiError(404, 'task_not_found', result.why);
+      throw new ApiError(422, 'route_pin_invalid', result.why);
+    }
+    return reply(c, UpdateTaskRoutePinResponse, taskRoutePinView(result.after));
   });
 
   app.post(WebRoutes.taskAction.path, async (c) => {

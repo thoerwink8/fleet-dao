@@ -51,6 +51,7 @@ import type {
   Settings,
   TaskActionBody,
   TaskDetail,
+  TaskRoutePin,
   UpdateCredentialsBody,
   UpdateDemoDefaultBody,
   UpdatedModelRoute,
@@ -60,6 +61,7 @@ import type {
   UpdateRepoDispatchBody,
   UpdateRouteEffortBody,
   UpdateSettingBody,
+  UpdateTaskRoutePinBody,
 } from './types';
 
 export type LiveStatus = 'connecting' | 'open' | 'down';
@@ -100,6 +102,8 @@ export interface FleetApi {
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
+  /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
+  updateTaskRoutePin(taskId: string, body: UpdateTaskRoutePinBody): Promise<TaskRoutePin>;
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
@@ -575,6 +579,23 @@ export function useTaskAction() {
     onSettled: (_d, _e, { taskId }) => {
       qc.invalidateQueries({ queryKey: keys.task(taskId) });
       qc.invalidateQueries({ queryKey: ['board'] });
+    },
+  });
+}
+
+/**
+ * 单子页给一段指定模型、或清掉（驾驶舱改版 2026-10-07）。不先改缓存：要等后端核过（模型不在目录、路由不是这个模型的 422，
+ * 单子结束了 409）才算数；不管成没成都重拉这张单，页面上永远是库里现在的指定。
+ */
+export function useUpdateTaskRoutePin() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, body }: { taskId: string; body: UpdateTaskRoutePinBody }) =>
+      api.updateTaskRoutePin(taskId, body),
+    onSettled: (_data, _error, { taskId }) => {
+      qc.invalidateQueries({ queryKey: keys.task(taskId) });
+      qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
 }

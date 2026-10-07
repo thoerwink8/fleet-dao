@@ -81,6 +81,8 @@ import {
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
   UpdateSettingResponse,
+  UpdateTaskRoutePinRequest,
+  UpdateTaskRoutePinResponse,
   windowAppliesTo,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -1444,6 +1446,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         subtasks: tv.subtasks.map(subtaskView),
         runs: runs.map(runView),
         segmentRuns,
+        routePins: { pins: tv.routePins ?? [] },
         // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记，花费按渠道的计费方式分
         usage: summarizeUsage(
           [...runs]
@@ -1460,6 +1463,48 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           segmentRuns,
         ),
       });
+    },
+    async updateTaskRoutePin(taskId, raw) {
+      await wait();
+      const body = UpdateTaskRoutePinRequest.parse(raw);
+      const tv = findTask(taskId);
+      if (TERMINAL.has(tv.task.state)) {
+        throw new ApiError(409, 'task_finished', `任务已经结束（${tv.task.state}），不用再指定模型`);
+      }
+      // 和真后端（db 的 setTaskRoutePin）同样核对：模型在目录里、钉的路由是这个模型的
+      if (body.modelId !== null) {
+        const model = st.models.find((m) => m.id === body.modelId);
+        if (!model) throw new ApiError(422, 'route_pin_invalid', `模型目录里没有「${body.modelId}」`);
+        const route = body.routeId ? st.routes.find((r) => r.id === body.routeId) : undefined;
+        if (body.routeId && route?.modelId !== body.modelId) {
+          throw new ApiError(422, 'route_pin_invalid', `路由「${body.routeId}」不是 ${body.modelId} 的`);
+        }
+      }
+      const before = tv.routePins?.find((p) => p.segment === body.segment);
+      const after = UpdateTaskRoutePinResponse.parse({
+        segment: body.segment,
+        ...(body.modelId ? { modelId: body.modelId } : {}),
+        ...(body.modelId && body.routeId ? { routeId: body.routeId } : {}),
+        setBy: st.me.user.id,
+        setAt: iso(),
+        ...(body.reason?.trim() ? { reason: body.reason.trim() } : {}),
+      });
+      tv.routePins = [...(tv.routePins ?? []).filter((p) => p.segment !== body.segment), after].sort((a, b) =>
+        a.segment.localeCompare(b.segment),
+      );
+      audit({
+        actor: meActor(),
+        action: body.modelId === null ? 'task.routePin.clear' : 'task.routePin.set',
+        target: `task:${taskId}`,
+        before: { segment: body.segment, pin: before ? { modelId: before.modelId ?? null } : null },
+        after: {
+          segment: body.segment,
+          pin: { modelId: after.modelId ?? null, routeId: after.routeId ?? null },
+        },
+        via: 'cockpit',
+      });
+      emit('tasks', taskId);
+      return after;
     },
     async taskAction(taskId, raw) {
       await wait();

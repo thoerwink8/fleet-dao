@@ -16,7 +16,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import type { AuditEntry, Me, Notification, Setting } from '../types';
+import type { AuditEntry, Me, Notification, Setting, TaskRoutePin } from '../types';
 
 export interface MSubtask {
   subtask: Subtask;
@@ -34,6 +34,8 @@ export interface MTask {
   runs: SessionRun[];
   /** 三段的流水（真后端的 runs 表）：走三段的单才有；模拟器不推进它。 */
   segmentRuns?: SegmentRun[];
+  /** 每段指定的模型（真后端的 task_route_pins）。 */
+  routePins?: TaskRoutePin[];
   subtasks: MSubtask[];
   paused: boolean;
 }

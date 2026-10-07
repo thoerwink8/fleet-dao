@@ -139,9 +139,48 @@ function sharePart(billing: Billing, share: CostShare): UsagePart[] {
   return [p];
 }
 
-/** 花费那几段：按量、套餐内、分不清各写各的，没有会话的那种不写。 */
+/** 按目录单价估算那一段怎么说（执行体没报花费时，shared 的 model-prices.ts）。 */
+export const ESTIMATE_TITLE =
+  '执行体没报花费（订阅制的会话），按模型目录里的 API 单价 × token 估的：说明这几轮按 API 价值多少，不是账单多出的钱';
+
+/** 没报花费的那几笔：估成了的写「估算 $x」，没有单价的、token 没读全的各写几笔。都没有就是空的。 */
+export function estimateParts(t: UsageTotals): UsagePart[] {
+  const e = t.estimate;
+  const parts: UsagePart[] = [];
+  if (e.runs) {
+    parts.push({
+      key: 'estimate',
+      label: '估算',
+      value: formatUsd(e.usd),
+      title: `${ESTIMATE_TITLE}（${e.runs} 笔）`,
+    });
+  }
+  if (e.noPrice) {
+    parts.push({
+      key: 'noPrice',
+      missing: e.noPrice === 1 && !e.runs ? '没有单价' : `${e.noPrice} 笔没有单价`,
+      title: '模型目录里没有这个模型的单价，估不了；不当成 0',
+    });
+  }
+  if (e.noTokens) {
+    parts.push({
+      key: 'noTokens',
+      missing: `${e.noTokens} 笔 token 没读全，估不了`,
+      title: '四样 token（输入、输出、缓存读写）缺一样就不估：缺的不拿 0 顶',
+    });
+  }
+  return parts;
+}
+
+/**
+ * 花费那几段：按量、套餐内、分不清各写各的，没有会话的那种不写；执行体没报花费的那几笔接着写估算（或为什么估不了）。
+ * 估成了的时候，各计费方式里整段「花费没读到」已经由「估算」那一段说清了，不再重复写；估不了的照旧写没读到，再写为什么估不了。
+ */
 export function costParts(t: UsageTotals): UsagePart[] {
-  return BILLINGS.flatMap((b) => sharePart(b, t.cost[b]));
+  const estimated = estimateParts(t);
+  const reported = BILLINGS.flatMap((b) => sharePart(b, t.cost[b]));
+  if (!t.estimate.runs) return [...reported, ...estimated];
+  return [...reported.filter((p) => p.missing === undefined), ...estimated];
 }
 
 /** 干活时长那一段（按模型、按阶段的一行用）：时刻认不出的另记，不当成 0 秒。 */

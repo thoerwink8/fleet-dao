@@ -62,6 +62,7 @@ function detail(runs: Run[]): TaskDetail {
     runs,
     segmentRuns: [],
     usage: summarizeUsage(runs.map((r) => ({ ...r, model: r.routeId, modelName: r.modelName }))),
+    routePins: { pins: [] },
   });
 }
 

@@ -20,6 +20,7 @@ import type { ReleaseSource } from './release-version.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 import type { RoutingOrderPort } from './routing-order.ts';
+import type { TaskRoutePinsPort } from './task-route-pins.ts';
 
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
 export interface Deps {
@@ -69,6 +70,11 @@ export interface Deps {
    * 没有那两张表）的改接口回 503，不当改成了。
    */
   routingOrder?: RoutingOrderPort | undefined;
+  /**
+   * 按单指定模型（驾驶舱改版 2026-10-07，task-route-pins.ts）：单子页读、改每段用哪个模型，引擎选路现读同一张表。没给（开发、
+   * 内存版没有那张表）的任务详情写 unavailable、改接口回 503，不拿空列表冒充「没指定」。
+   */
+  taskRoutePins?: TaskRoutePinsPort | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。

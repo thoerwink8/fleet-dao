@@ -32,12 +32,14 @@ import {
   openPoolRuns,
   type RunSegment,
   readQuotaReserveSetting,
+  readTaskRoutePin,
   recordStepTiming,
   releaseTaskReservation,
   reservePoolSlot,
   routeFactsForPurpose,
   saveTaskSnapshot,
   setChannelFallback,
+  type TaskRoutePin,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
@@ -242,6 +244,28 @@ function onlyModels(facts: StageFacts, models: readonly string[]): StageFacts {
     )
     .map((e, position) => ({ ...e, position }));
   return { ...facts, routes, order };
+}
+
+/** 人给这张单这一段指定了模型（task_route_pins，驾驶舱单子页写）：只留这个模型（钉了路由的只留那条）的路由。 */
+function onlyPinned(facts: StageFacts, pin: PinnedModel): StageFacts {
+  const keep = (r: { routeId: string; modelId: string }) =>
+    r.modelId === pin.modelId && (pin.routeId === null || r.routeId === pin.routeId);
+  const routes = facts.routes.filter(keep);
+  const ids = new Set(routes.map((r) => r.routeId));
+  const order = facts.order.filter((e) => ids.has(e.routeId)).map((e, position) => ({ ...e, position }));
+  return { ...facts, routes, order };
+}
+
+/** 有效的指定（清掉了的不算）。 */
+type PinnedModel = { modelId: string; routeId: string | null };
+
+function pinnedOf(pin: TaskRoutePin | null): PinnedModel | null {
+  return pin?.modelId ? { modelId: pin.modelId, routeId: pin.routeId } : null;
+}
+
+/** 指定在原因里怎么说。 */
+function pinLabel(pin: PinnedModel): string {
+  return pin.routeId ? `${pin.modelId}（只走 ${pin.routeId}）` : pin.modelId;
 }
 
 function choose(input: ChooseRouteInput): ChooseRouteResult {
@@ -478,10 +502,21 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         }
       }
       const reserve = input.reserve;
+      // 人给这张单这一段指定的模型（task_route_pins）：只有三段的一段来选路（带 reserve）才有；读不到照抛，不当成没指定
+      let pin: PinnedModel | null = null;
       /** 读一遍事实、选一次。要预占时，选中的池在预占那一下被别的单占满了抛 SlotTaken（这一次的结论不作数）。 */
       const pickOnce = async (): Promise<PickRouteResult> => {
         const now = clock();
-        const all = await loadStage(input.stage, now);
+        const loaded = await loadStage(input.stage, now);
+        // 指定了模型：候选只剩它的路由，点名的、续会话的、照常选的都在这里面挑；一条都派不出就等或停下等人，不悄悄换别的
+        const all = pin ? onlyPinned(loaded, pin) : loaded;
+        if (pin && all.routes.length === 0) {
+          return {
+            ok: false,
+            waitFor: 'none',
+            detail: `人在驾驶舱给这张单指定了 ${pinLabel(pin)}，可它在${STAGE_NAMES[input.stage]}阶段的路由两层里没有接上的路由（不在这个用途的模型顺序里，或执行方式引擎还没接上）：派不出，不换别的模型；去单子页换一个或清掉指定`,
+          };
+        }
         // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）
         const facts = input.models ? onlyModels(all, input.models) : all;
         const holds = await heldPools(now);
@@ -676,23 +711,34 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           { retryable: false },
         );
       }
+      pin = pinnedOf(await readTaskRoutePin(db, input.taskId, reserve.segment));
+      const pinned = pin;
+      const said = (r: PickRouteResult): PickRouteResult => {
+        if (!pinned) return r;
+        const note = `按人指定的 ${pinLabel(pinned)}`;
+        if (r.ok) return { ...r, why: `${note}：${r.why}` };
+        // 派不出、要等：写明是指定的那个模型在等，等的是它、不换别的
+        return r.detail.startsWith('人在驾驶舱')
+          ? r
+          : { ...r, detail: `${note}，只等它、不换别的模型：${r.detail}` };
+      };
       // 这一段又来选路，上一次预占的就作废了（没开跑、也没放掉：起会话那一边放不成、选路这一步被重试过）：不让它把池占满、挡了自己
       await releaseTaskReservation(db, { taskId: input.taskId, segment: reserve.segment });
       const lost: string[] = [];
       for (let round = 1; round <= RESERVE_RACE_ROUNDS; round += 1) {
         try {
-          return await pickOnce();
+          return said(await pickOnce());
         } catch (error) {
           if (!(error instanceof SlotTaken)) throw error;
           lost.push(error.message);
         }
       }
-      return {
+      return said({
         ok: false,
         waitFor: 'slot',
         detail: `连着 ${RESERVE_RACE_ROUNDS} 次，选中的池都在预占那一下被别的单同时占满了（${lost.join('；')}），过一会儿再选`,
         retryAfterSeconds: RESERVE_RACE_RETRY_SECONDS,
-      };
+      });
     },
 
     async stageAllOpen(stage) {

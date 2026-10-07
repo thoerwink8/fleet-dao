@@ -84,6 +84,8 @@ import type {
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
+  UpdateTaskRoutePinRequest,
+  UpdateTaskRoutePinResponse,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -151,6 +153,9 @@ export type EffortModel = z.infer<typeof EffortModelSchema>;
 export type RouteEffort = z.infer<typeof RouteEffortSchema>;
 export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
 export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
+/** 单子页给一段指定模型（驾驶舱改版 2026-10-07）。 */
+export type UpdateTaskRoutePinBody = z.input<typeof UpdateTaskRoutePinRequest>;
+export type TaskRoutePin = z.infer<typeof UpdateTaskRoutePinResponse>;
 
 /** 路由页改先后和开关（母单 #1089）：用途下的模型上移 / 下移、模型下的渠道上移 / 下移和开关。 */
 export type MovePurposeModelBody = z.input<typeof MovePurposeModelRequest>;

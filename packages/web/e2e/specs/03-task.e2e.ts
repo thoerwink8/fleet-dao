@@ -1,4 +1,5 @@
-// 第三步：单子详情和每段耗时（对题 → 动手 → 验收，每段每个模型花了多久、多少 token 和钱）。数都要能和库里的流水对上。
+// 第三步：单子详情和每段耗时（对题 → 动手 → 验收，每段每个模型花了多久、多少 token 和钱；没报花费的按目录单价估）。数都要能和库里的流水对上。
+// 还有「用哪个模型」：动手、验收能指定模型、回到自动，写进库（task_route_pins）。
 import { expect, test } from '../support/fixtures.ts';
 
 test.describe('单子详情', () => {
@@ -43,6 +44,45 @@ test.describe('单子详情', () => {
     await expect(page.getByText('老流程的会话')).toBeVisible();
     await expect(page.getByText('动手').first()).toBeVisible();
     await shot(page, '03-单子详情-在跑的');
+  });
+
+  test('在跑的单 #12：「用哪个模型」能指定、写进库、能回到自动（驾驶舱改版 2026-10-07）', async ({
+    page,
+    stack,
+    api,
+  }) => {
+    const taskId = stack.facts.tasks.running;
+    await page.goto(`/tasks/${taskId}`);
+    const pins = page.locator('section').filter({ has: page.getByRole('heading', { name: '用哪个模型' }) });
+    await expect(pins).toBeVisible();
+    // 对题在对话里做，指定不了；动手、验收没指定过是自动
+    await expect(pins.locator('[data-pin-segment="scope"]')).toContainText('没有模型可指定');
+    await expect(pins.locator('[data-pin-segment="manual"]')).toContainText('自动');
+    // 经接口指定动手用 Opus 5.5：库里记下了，页面读回来是「指定」
+    const set = await api.send('PUT', `/api/tasks/${taskId}/route-pin`, {
+      segment: 'manual',
+      modelId: 'opus-5.5',
+    });
+    expect(set.status).toBe(200);
+    await page.reload();
+    const manual = pins.locator('[data-pin-segment="manual"]');
+    await expect(manual).toContainText('指定 Opus 5.5');
+    // 页面上点「回到自动」：读回来是自动
+    await manual.getByRole('button', { name: '回到自动' }).click();
+    await expect(manual).toContainText('自动');
+    await expect(manual).not.toContainText('指定 Opus 5.5');
+    const after = (await api.get(`/api/tasks/${taskId}`)) as {
+      routePins: { pins: { segment: string; modelId?: string }[] };
+    };
+    expect(after.routePins.pins.find((p) => p.segment === 'manual')?.modelId).toBeUndefined();
+  });
+
+  test('目录里没有单价的模型（#14 动手的 Kimi，没报花费）：花费写「没有单价」，不写 $0', async ({
+    page,
+    stack,
+  }) => {
+    await page.goto(`/tasks/${stack.facts.tasks.stalled}`);
+    await expect(page.locator('[data-estimate-gap]').first()).toContainText('没有「kimi-k3」的单价');
   });
 
   test('从没跑过的单 #16：明说「还没跑过」，不是空白', async ({ page, stack }) => {
