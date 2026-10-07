@@ -80,23 +80,29 @@
 
   /*
    * 专用尺寸：顶栏高、侧栏宽（展开/收起/小屏抽屉）。改这里，整站的壳一起变。
+   * 必须放在 --spacing-* 下：Tailwind v4 的 h-* 只认 --height/--spacing、w-* 只认 --width/--spacing/--container，
+   * 先前写成 --size-* 时 h-topbar、w-sidebar 整个不生效（顶栏塌成 33px、侧栏按字宽缩）。src/test/theme-tokens.test.ts 钉住。
    */
-  --size-topbar: 52px;
-  --size-sidebar: 232px;
-  --size-sidebar-collapsed: 60px;
-  --size-sidebar-sheet: 260px;
+  --spacing-topbar: 52px;
+  --spacing-sidebar: 232px;
+  --spacing-sidebar-collapsed: 60px;
+  --spacing-sidebar-sheet: 260px;
+  /* 弹层列表的最高：max-h-* 只认 --max-height/--height/--spacing，不认 --container。 */
+  --max-height-notifications-list: 360px;
+  --max-height-command-list: 440px;
 
-  /* 内容容器宽度：页面最大宽、设置页左右分栏、各弹层。 */
-  --container-cockpit: 1320px;
+  /*
+   * 内容容器宽度：页面最大宽、各弹层。
+   * 页面最大宽按宽屏铺满定（1920 屏去掉侧栏约 1690 宽，整块用上）；只在 2560 这类超宽屏上才封顶，免得一行字拉得太长。
+   */
+  --container-cockpit: 1840px;
   --container-settings-row: 96px;
   --container-settings-col: 240px;
   --container-quota-table: 860px;
   --container-quota-row: 220px;
   --container-search: 380px;
   --container-notifications: 380px;
-  --container-notifications-list: 360px;
   --container-usage: 340px;
-  --container-command-list: 440px;
   --container-routing-list: 360px;
 
   /* 阴影：卡片描边（亮色下勾下边线）、品牌色圈（额度热）、状态色光圈（完成时一闪）。 */

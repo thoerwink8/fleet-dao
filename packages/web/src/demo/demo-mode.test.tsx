@@ -36,7 +36,8 @@ describe('演示版：模块开关', () => {
     expect(demoBlocked('/')).toBe(true);
     expect(demoBlocked('/schedules')).toBe(true);
     expect(demoBlocked('/demo-links')).toBe(true);
-    expect(demoBlocked('/models')).toBe(true);
+    // 没做的页（/models 等）不在导航里、演示版路由表里也没有：交给 404 页
+    expect(demoBlocked('/models')).toBe(false);
     // 路由页（#574）只在正式驾驶舱有：演示版不列、不渲染，读它的接口也回「没开放」
     expect(demoBlocked('/routing')).toBe(true);
     // 环境页（#820 片 1）在演示版里也没有：导航不给 module，进来看到「没开放」；路由表里也不放它。

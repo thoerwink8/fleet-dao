@@ -2,22 +2,18 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Activity,
   Bell,
-  Boxes,
   Brain,
   CalendarClock,
   Gauge,
+  History,
   Home,
   Presentation,
   Route,
   SatelliteDish,
-  Scale,
   ScrollText,
   ServerCog,
   Settings,
-  Trophy,
-  Wallet,
 } from 'lucide-react';
-import { brand } from '#brand';
 import { canSee, isDemo } from '../../demo/access';
 import type { DemoModule } from '../../demo/scope';
 
@@ -25,13 +21,16 @@ export interface NavItem {
   to: string;
   label: string;
   icon: LucideIcon;
-  /** 第二批页面：现在是占位页。 */
-  soon?: boolean;
   hint: string;
-  /** 演示版里归哪个模块（可见范围逐个开关）。没有 = 演示版里没有这一页（占位页、只有正式版才有的页）。 */
+  /** 演示版里归哪个模块（可见范围逐个开关）。没有 = 演示版里没有这一页（只有正式版才有的页）。 */
   module?: DemoModule;
 }
 
+/**
+ * 侧栏只放做好了的页（驾驶舱改版 2026-10-07）：没做的页（模型目录、账单、战绩、判断题记录）不占导航，
+ * 它们的地址还在、打开写明「还没做」（routes/soon.tsx）。
+ * 分组按创始人回来看一眼的先后：先看盘面和要他拍的，再看调度，再看法国这台机器，最后是管理。
+ */
 export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '盘面',
@@ -42,6 +41,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         icon: Home,
         hint: '一屏三块：要你拍的、在跑的、做完的',
         // 演示版里没有这一页（只在正式驾驶舱建主页）。
+      },
+      {
+        to: '/notifications',
+        label: '通知中心',
+        icon: Bell,
+        hint: '要你拍、卡住报警、日报',
+        module: 'notifications',
       },
     ],
   },
@@ -69,10 +75,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         hint: '每个模型走的每条路起会话想多深：没配用 high，改了下一个会话就照新的',
         // 演示版里没有这一页（只在正式驾驶舱建）。
       },
-      { to: '/models', label: '模型目录', icon: Boxes, soon: true, hint: '各家模型、上下架' },
       { to: '/quota', label: '额度', icon: Gauge, hint: '每个账号池每个时间窗还剩多少', module: 'quota' },
-      { to: '/billing', label: '账单', icon: Wallet, soon: true, hint: '花了多少、值不值' },
-      { to: '/record', label: '战绩', icon: Trophy, soon: true, hint: '每条路由干得怎么样' },
     ],
   },
   {
@@ -82,14 +85,14 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         to: '/france',
         label: '法国',
         icon: SatelliteDish,
-        hint: '法国这台机器现在怎样：引擎、在用版本、落后主线、健康、定时任务',
+        hint: '法国这台机器现在怎样：引擎、在用版本、落后主线、健康、定时任务、发版',
         // 演示版里没有这一页（和 /env 同一个 R10 理由：露机器名、版本号、会话数，路由表里也不放）。
       },
       {
         to: '/env',
         label: '环境',
         icon: ServerCog,
-        hint: '这一台环境现在怎样：引擎、在用版本、在跑的会话、池、健康、最近拉单',
+        hint: '各环境并排比：引擎、在用版本、在跑的会话、池、健康、最近拉单',
         // 演示版里没有这一页（露机器名、版本号、会话数，R10；路由表里也不放）。
       },
       {
@@ -99,19 +102,11 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         hint: '上次跑成、上次结局、失败高亮',
         module: 'schedules',
       },
-      { to: '/judge', label: brand.terms.judgeNav, icon: Scale, soon: true, hint: '判断题的记录与准确率' },
       {
         to: '/changelog',
         label: '更新日志',
         icon: ScrollText,
         hint: '仓根 CHANGELOG.md：还没发版的、已发出去的',
-      },
-      {
-        to: '/notifications',
-        label: '通知中心',
-        icon: Bell,
-        hint: '要你拍、卡住报警、日报',
-        module: 'notifications',
       },
     ],
   },
@@ -119,8 +114,14 @@ export const NAV: { group: string; items: NavItem[] }[] = [
     group: '管理',
     items: [
       { to: '/demo-links', label: '演示版', icon: Presentation, hint: '发演示链接、定游客能看什么' },
-      { to: '/audit', label: '操作记录', icon: ScrollText, hint: '谁在什么时候做了什么', module: 'audit' },
-      { to: '/settings', label: '设置', icon: Settings, hint: '外观、通知、订阅月费', module: 'settings' },
+      { to: '/audit', label: '操作记录', icon: History, hint: '谁在什么时候做了什么', module: 'audit' },
+      {
+        to: '/settings',
+        label: '设置',
+        icon: Settings,
+        hint: '运行设置、仓库、凭据、外观',
+        module: 'settings',
+      },
     ],
   },
 ];
