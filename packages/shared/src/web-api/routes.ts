@@ -51,15 +51,7 @@ import {
   UpdateSettingRequest,
   UpdateSettingResponse,
 } from './settings.ts';
-import {
-  AnswerAskRequest,
-  AnswerAskResponse,
-  CloseAskResponse,
-  LegacyAsksResponse,
-  TaskActionRequest,
-  TaskActionResponse,
-  TaskDetailResponse,
-} from './task.ts';
+import { TaskActionRequest, TaskActionResponse, TaskDetailResponse } from './task.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 
@@ -99,17 +91,6 @@ export const WebRoutes = {
     request: TaskActionRequest,
     response: TaskActionResponse,
   },
-  /** 一律回 409 asks_not_received（#928）：新流程没有收追问回答的地方。只有飞书网关还在调它。 */
-  answerAsk: {
-    method: 'POST',
-    path: '/asks/:askId/answer',
-    request: AnswerAskRequest,
-    response: AnswerAskResponse,
-  },
-  /** 旧会话留下的、还没处理的追问（通知中心只读展示用，#928）。 */
-  legacyAsks: { method: 'GET', path: '/asks/legacy', response: LegacyAsksResponse },
-  /** 把一条旧追问标成已处理（落库、进操作记录 ask.close）；已经处理过回 409。 */
-  closeAsk: { method: 'POST', path: '/asks/:askId/close', response: CloseAskResponse },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
   routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },
   routingEfforts: { method: 'GET', path: '/routing/efforts', response: RoutingEffortsResponse },

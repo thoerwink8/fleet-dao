@@ -2,7 +2,6 @@
 // 只许依赖 shared 和 zod（test/structure.test.ts 盯着）。
 
 export * from './alert-work.ts';
-export * from './ask.ts';
 export * from './brief.ts';
 export * from './criteria.ts';
 export * from './dispatch.ts';

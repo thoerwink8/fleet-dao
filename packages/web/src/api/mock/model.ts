@@ -16,7 +16,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import type { Ask, AuditEntry, Me, Notification, Setting } from '../types';
+import type { AuditEntry, Me, Notification, Setting } from '../types';
 
 export interface MSubtask {
   subtask: Subtask;
@@ -28,24 +28,6 @@ export interface MSubtask {
   lastSay?: { text: string; at: string };
 }
 
-export interface MAsk {
-  id: string;
-  taskId: string;
-  runId?: string;
-  question: string;
-  options: string[];
-  askedAt: string;
-  answer?: string;
-  answeredBy?: string;
-  answeredAt?: string;
-  /** 问他不挡路（#259）：带了范围的是按推荐先做了的，见 shared 的 AskSchema。 */
-  scope?: Ask['scope'];
-  recommended?: string;
-  hold?: Ask['hold'];
-  followUpIssue?: number;
-  appliedAt?: string;
-}
-
 export interface MTask {
   task: Task;
   /** 需求级会话：分诊、写需求文档、写方案。 */
@@ -54,7 +36,6 @@ export interface MTask {
   segmentRuns?: SegmentRun[];
   subtasks: MSubtask[];
   paused: boolean;
-  asks: MAsk[];
 }
 
 /** 时间线的一条（对应真后端的 progress_events + state_changes + 人的操作）。text 已按后端的说法拼好。 */

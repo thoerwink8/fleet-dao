@@ -68,8 +68,7 @@ describe('说明与用法', () => {
   it('fleet --help 列出全部子命令、环境变量和退出码', async () => {
     const r = await fleet(['--help']);
     expect(r.code).toBe(EXIT.ok);
-    for (const cmd of ['task', 'plan', 'say', 'ask', 'history', 'done', 'blocked'])
-      expect(r.out).toContain(cmd);
+    for (const cmd of ['task', 'plan', 'say', 'history', 'done', 'blocked']) expect(r.out).toContain(cmd);
     expect(r.out).toContain('FLEET_API');
     expect(r.out).toContain('退出码');
   });
@@ -222,80 +221,6 @@ describe('say', () => {
     const b = await backend(ok);
     expect((await fleet(['say'], { url: b.url })).code).toBe(EXIT.usage);
     expect((await fleet(['say', '字'.repeat(501)], { url: b.url })).code).toBe(EXIT.usage);
-    expect(b.requests).toEqual([]);
-  });
-});
-
-describe('ask', () => {
-  it('带选项和推荐：后端当场回按推荐先做，打印「别停下等回答」', async () => {
-    const b = await backend(() => ({
-      status: 200,
-      body: { askId: 'A1', status: 'assumed', answer: '5 分钟' },
-    }));
-    const r = await fleet(
-      ['ask', '有效期 5 分钟还是 10 分钟？', '-o', '5 分钟', '--option', '10 分钟', '-r', '5 分钟'],
-      { url: b.url },
-    );
-    expect(r.code).toBe(EXIT.ok);
-    expect(b.requests[0]?.body).toEqual({
-      question: '有效期 5 分钟还是 10 分钟？',
-      options: ['5 分钟', '10 分钟'],
-      recommend: '5 分钟',
-    });
-    expect(r.out).toContain('已按推荐先做：5 分钟（问题编号 A1）');
-    expect(r.out).toContain('别停下等回答');
-  });
-
-  it('超出这张单的范围、碰人闸、创始人回过这一句：各有各的说法', async () => {
-    const replies = [
-      { askId: 'A2', status: 'outside' },
-      { askId: 'A3', status: 'held', answer: '阿里云' },
-      { askId: 'A4', status: 'answered', answer: '6 位' },
-    ];
-    let n = 0;
-    const b = await backend(() => ({ status: 200, body: replies[n++] }));
-    const outside = await fleet(
-      ['ask', '顺手改注册页？', '-o', '改', '-o', '不改', '-r', '不改', '--outside'],
-      {
-        url: b.url,
-      },
-    );
-    expect(b.requests[0]?.body).toMatchObject({ outside: true, recommend: '不改' });
-    expect(outside.out).toContain('另开一张单等创始人拍（问题编号 A2）');
-    const held = await fleet(
-      ['ask', '短信用哪家？', '-o', '阿里云', '-o', '腾讯云', '-r', '阿里云', '--hold', 'spend'],
-      {
-        url: b.url,
-      },
-    );
-    expect(b.requests[1]?.body).toMatchObject({ hold: 'spend' });
-    expect(held.out).toContain('先按推荐做（阿里云），合并前等创始人批');
-    const answered = await fleet(['ask', '验证码几位？', '-o', '4 位', '-o', '6 位', '-r', '4 位'], {
-      url: b.url,
-    });
-    expect(answered.out).toBe('创始人回过这一句：6 位\n');
-  });
-
-  it('【故意造出的失败】后端退回（没带推荐）：退出码 4，原因原样打出来，AI 照着补', async () => {
-    const b = await backend(() => ({
-      status: 400,
-      body: { error: { code: 'ask_incomplete', message: '没写推荐哪个（--recommend，照抄其中一个选项）' } },
-    }));
-    const r = await fleet(['ask', '验证码几位？', '-o', '4 位', '-o', '6 位'], { url: b.url });
-    expect(r.code).toBe(EXIT.rejected);
-    expect(r.err).toContain('没写推荐哪个');
-  });
-
-  it('选项超过 4 个：本地挡下', async () => {
-    const b = await backend(ok);
-    const opts = ['a', 'b', 'c', 'd', 'e'].flatMap((o) => ['-o', o]);
-    expect((await fleet(['ask', '选哪个？', ...opts], { url: b.url })).code).toBe(EXIT.usage);
-    expect(b.requests).toEqual([]);
-  });
-
-  it('不等回答了：--no-wait 这个老写法不认（本地挡下），不会发出一条去等', async () => {
-    const b = await backend(ok);
-    expect((await fleet(['ask', '在吗？', '--no-wait'], { url: b.url })).code).toBe(EXIT.usage);
     expect(b.requests).toEqual([]);
   });
 });

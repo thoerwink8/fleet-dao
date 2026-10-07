@@ -3,9 +3,6 @@
 import { type ParseArgsOptionsConfig, parseArgs } from 'node:util';
 import {
   AgentRoutes,
-  ASK_MAX_OPTIONS,
-  AskRequest,
-  AskResponse,
   BlockedRequest,
   DoneRequest,
   HistoryRequest,
@@ -227,50 +224,6 @@ const COMMANDS: Record<string, Handler> = {
     const res = await call({ method: 'POST', path: AgentRoutes.say.path, body });
     if (values.json) return printJson(io, res);
     io.stdout('已记录。\n');
-  },
-
-  async ask(args, { io, call }) {
-    const { values, positionals } = parse(args, {
-      option: { type: 'string', short: 'o', multiple: true },
-      recommend: { type: 'string', short: 'r' },
-      outside: { type: 'boolean' },
-      hold: { type: 'string' },
-    });
-    const options = values.option;
-    if (options && options.length > ASK_MAX_OPTIONS) {
-      throw new CliError(
-        EXIT.usage,
-        `选项最多 ${ASK_MAX_OPTIONS} 个（现在 ${options.length} 个）：挑出最像样的几个`,
-      );
-    }
-    const body = check(AskRequest, {
-      question: joined(positionals, '问题'),
-      ...(options?.length ? { options } : {}),
-      ...(values.recommend === undefined ? {} : { recommend: values.recommend }),
-      ...(values.outside ? { outside: true } : {}),
-      ...(values.hold === undefined ? {} : { hold: values.hold }),
-    });
-    // 不等回答：后端当场回（按推荐先做、另开单、合并前等批），同一句重试复用同一条追问
-    const raw = await call({ method: 'POST', path: AgentRoutes.ask.path, body });
-    const res = expectShape(AskResponse, raw, '回答');
-    if (values.json) return printJson(io, res);
-    const id = `（问题编号 ${res.askId}）`;
-    switch (res.status) {
-      case 'answered':
-        io.stdout(`创始人回过这一句：${res.answer ?? ''}\n`);
-        return;
-      case 'assumed':
-        io.stdout(
-          `已按推荐先做：${res.answer ?? ''}${id}。别停下等回答；创始人之后改了，下一个存档点会告诉你。交活总结里写上这个假设。\n`,
-        );
-        return;
-      case 'outside':
-        io.stdout(`超出这张单的范围：记下了，另开一张单等创始人拍${id}。这张单绕开它接着做。\n`);
-        return;
-      case 'held':
-        io.stdout(`碰了人闸：先按推荐做（${res.answer ?? ''}），合并前等创始人批${id}。接着做。\n`);
-        return;
-    }
   },
 
   async history(args, { io, call }) {

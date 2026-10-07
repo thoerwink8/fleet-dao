@@ -1,19 +1,16 @@
-// 驾驶舱接口（/api）：看板、任务、旧追问（只读 + 关闭）、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
+// 驾驶舱接口（/api）：看板、任务、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
 // 读一律从数据库读（不直接查 GitHub；唯一的例外是 /changelog 的发布版本号，现读 GitHub 里程碑，见 release-version.ts）；
 // 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
 
 import {
-  AnswerAskRequest,
   AuditQuery,
   AuditResponse,
   BoardResponse,
-  CloseAskResponse,
   DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
-  LegacyAsksResponse,
   type LegacyRead,
   MeResponse,
   NodeDetailResponseSchema,
@@ -57,7 +54,6 @@ import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
-import { ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY, closeLegacyAsk } from './legacy-asks.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
 import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
@@ -78,12 +74,10 @@ import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshot
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
 import {
-  askLate,
   buildBoard,
   buildPools,
   isTaskFinished,
   jobView,
-  legacyAskViews,
   notificationView,
   routeLookup,
   runView,
@@ -214,12 +208,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.task.path, async (c) => {
     const task = await store.getTask(c.req.param('taskId'));
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
-    const [repo, subtasks, runs, segmentRecords, asks, routes, models, channels] = await Promise.all([
+    const [repo, subtasks, runs, segmentRecords, routes, models, channels] = await Promise.all([
       store.getRepo(task.repoId),
       store.listSubtasks([task.id]),
       store.listRuns({ taskIds: [task.id] }),
       store.listSegmentRuns(task.id),
-      store.listAsks(task.id),
       store.listRoutes(),
       store.listModels(),
       store.listChannels(),
@@ -240,22 +233,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       subtasks: subtaskViews(task.id, { tasks: [task], subtasks, activeRuns, plans, route }),
       runs: runs.map((r) => runView(r, route(r.routeId))),
       segmentRuns,
-      asks: asks.map((a) => ({
-        id: a.id,
-        runId: a.runId,
-        question: a.question,
-        options: a.options,
-        askedAt: a.askedAt,
-        status: a.answer === undefined ? ('pending' as const) : ('answered' as const),
-        answer: a.answer,
-        answeredBy: a.answeredBy,
-        answeredAt: a.answeredAt,
-        scope: a.scope,
-        recommended: a.recommended,
-        hold: a.hold,
-        effect: askLate(a, task.state),
-        followUpIssue: a.followUpIssue,
-      })),
       usage: usageView(runs, route, segmentRuns),
     });
   });
@@ -299,38 +276,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       ok: true,
     });
     return reply(c, TaskActionResponse, { ok: true });
-  });
-
-  app.post(WebRoutes.answerAsk.path, async (c) => {
-    const askId = c.req.param('askId');
-    await readJson(c, AnswerAskRequest);
-    if (!(await store.getAsk(askId))) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    // 不落库、不进操作记录：新流程没有收追问回答的地方（#928、#939），落了库也没人读，不能让调用方以为答了有用。
-    throw new ApiError(409, ASKS_NOT_RECEIVED_CODE, ASKS_NOT_RECEIVED_WHY);
-  });
-
-  app.get(WebRoutes.legacyAsks.path, async (c) => {
-    const pending = await store.listPendingAsks();
-    const taskIds = [...new Set(pending.map((a) => a.taskId))];
-    const tasks = new Map(
-      (await Promise.all(taskIds.map((id) => store.getTask(id)))).flatMap((t) => (t ? [[t.id, t]] : [])),
-    );
-    return reply(c, LegacyAsksResponse, { items: legacyAskViews(pending, (id) => tasks.get(id)) });
-  });
-
-  app.post(WebRoutes.closeAsk.path, async (c) => {
-    const askId = c.req.param('askId');
-    const ask = await store.getAsk(askId);
-    if (!ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    const result = await closeLegacyAsk(deps, {
-      askId,
-      taskId: ask.taskId,
-      by: actorOf(c),
-      via: c.get('via'),
-    });
-    if (result === 'not_found') throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    if (result === 'already_answered') throw new ApiError(409, 'already_answered', '这条追问已经处理过了');
-    return reply(c, CloseAskResponse, { ok: true });
   });
 
   // 路由目录。每个用途的先后不在这里给：那是路由两层（下面 routingLayers），旧的阶段平铺表没人读了（#574）

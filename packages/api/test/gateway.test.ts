@@ -113,7 +113,7 @@ describe('飞书网关通行证', () => {
     expect(h.signals).toHaveLength(0);
   });
 
-  it('通行证只放行约定里的驾驶舱接口（查任务、叫停、回答追问）：别的一律 403，什么都不做', async () => {
+  it('通行证只放行约定里的驾驶舱接口（查任务、叫停）：别的一律 403，什么都不做', async () => {
     const h = harness();
     const cases: Array<[string, RequestInit]> = [
       ['/api/me', viaGateway('GET', FOUNDER_A)],

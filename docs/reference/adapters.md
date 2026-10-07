@@ -144,7 +144,7 @@ reclaude -p --output-format stream-json --verbose \
 - **CC-11** 给定长驻进程（Mirasim、编排守护）先起、reclaude 的代理和 CA 后写进 settings，当经它起 claude，应当读到的是新配置：适配器每次 spawn 都显式构造 env，不继承长驻进程启动时的 env。（WD observation「五步」真凶段：16:18 起的进程拿旧 env → `Not logged in`）
 - **CC-12** 给定 `NODE_EXTRA_CA_CERTS` 指向别的 CA，当起 reclaude，应当在体检里判红（这个变量只能指一个文件）。（WD observation「五步」两处退役接线）
 - **CC-13** 给定要换 claude 版本，当起会话，应当以 reclaude 配置目录里 `claude.path` 写的绝对路径为准并校验版本 ≥ 2.1.277（低于它不会在没有 CLAUDE.md 时回退读 AGENTS.md）；手换 reclaude 自带的 CLI 会被 `dl.reclaude.ai/claude-cli/latest` 强制覆盖回去。（WD observation「五步」第 2 步与「别走的弯路」；WD `AGENTS.md` 桥段）
-- **CC-14** 给定无头 claude 会话，当它需要向人提问，应当走 `fleet ask` 命令，不依赖 CLI 自带的提问工具：`-p` 模式下 `AskUserQuestion` 被藏起来，Mirasim 又给 `ask=native`，两种提问工具都没有，而且零报错。（AGS `docs/MIRASIM.md:254-265`；判例 `mirasim-ask-popup-needs-claudeAskTool` 撞 2 次）
+- **CC-14** 给定无头 claude 会话，当它需要向人提问，不依赖 CLI 自带的提问工具（`fleet ask` 已删，#939：要人拍板的报 `fleet blocked`，任务停下等人点继续或放弃）：`-p` 模式下 `AskUserQuestion` 被藏起来，Mirasim 又给 `ask=native`，两种提问工具都没有，而且零报错。（AGS `docs/MIRASIM.md:254-265`；判例 `mirasim-ask-popup-needs-claudeAskTool` 撞 2 次）
 - **CC-15** 给定长会话，当记用量，应当单列 `cache_read_input_tokens`：7d 窗主要是被 cacheRead 吃掉的（一次 113 调用 output 6.3 万、cacheRead 484 万；另一次帅位长会话 cacheRead/output = 428 倍，84% 来自会话历史累积）。（判例 `mirasim-upstream-relay-and-quota-headers`；WD `NEW-MACHINE.md` §5）
 
 **说明书约束（审计时核实，不是旧坑；开发时写成参数单测）**：`-p` + `stream-json` 必带 `--verbose`；不带 prompt 且 stdin 为空会立刻退出 1；`system/init` 不一定是第一行；`api_retry` 最多 10 次（本机实跑）。
@@ -632,7 +632,7 @@ dsh --profile headless "<task>"
 - **ACP-07** 给定任务书写着「提交前先跑 X」，当 X 不在权限白名单里，应当由测试拦下：任务书要求的命令必须都过得了默认策略。（WD `acp-interaction-policy.mjs:63-65`，#1560 g3）
 - **ACP-08** 给定续跑，当按「key 有没有变」判「续上了没有」，应当判错：ACP 每次尝试都换一个新 key（Mirasim 则回同一个 key）；判据是运行时的回执，不是 key 相同。（WD `packages/fleet/src/activities.mjs:734-737`，#1493；判例 `wiring-tests-dont-prove-backend-contract`：单测 71/71 绿，真跑四条腿一条都没用上）
 - **ACP-09** 给定一个 ACP 会话结束，当判「清理干净了」，应当核实进程组（含自立门户的子进程）全部退出、没有幸存者，再释放工作树锁。（WD `acp-runtime.mjs:99-152`；AGS `docs/DECISIONS.md:974-977`）
-- **ACP-10** 给定执行体要问人（cursor 有原生 `cursor/ask_question`，其他家没有），当需要提问，应当有统一入口：旧系统为此注入了一个 MCP 提问工具 `dao_ask_user_question`。新系统用 `fleet ask` 命令替代。（WD `scripts/acp-interaction-mcp.mjs`；WD `docs/evidence/1174-cursor-question.json`）
+- **ACP-10** 给定执行体要问人（cursor 有原生 `cursor/ask_question`，其他家没有），当需要提问，应当有统一入口：旧系统为此注入了一个 MCP 提问工具 `dao_ask_user_question`。新系统不设追问（`fleet ask` 已删，#939）：要人拍板的报 `fleet blocked`。（WD `scripts/acp-interaction-mcp.mjs`；WD `docs/evidence/1174-cursor-question.json`）
 - **ACP-11** 给定 ACP 客户端回错误给执行体，当异常信息里可能带凭据，应当只回固定文案，不把原始异常写到线上。（WD `acp-client.mjs:79-83`）
 
 ---

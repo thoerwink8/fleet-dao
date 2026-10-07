@@ -234,10 +234,6 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: TaskActionRequest.parse(body),
       });
     },
-    legacyAsks: () => send('GET', apiUrl(R.legacyAsks.path), R.legacyAsks.response),
-    async closeAsk(askId) {
-      await send('POST', apiUrl(R.closeAsk.path, { askId }), R.closeAsk.response);
-    },
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),
     routingLayers: () => send('GET', apiUrl(R.routingLayers.path), R.routingLayers.response),
     routingEfforts: () => send('GET', apiUrl(R.routingEfforts.path), R.routingEfforts.response),

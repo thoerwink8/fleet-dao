@@ -58,13 +58,6 @@ const WRITES: Write[] = [
     ok: OK,
   },
   {
-    name: 'closeAsk（关闭旧追问）',
-    call: (api) => api.closeAsk('ask-1'),
-    method: 'POST',
-    url: '/api/asks/ask-1/close',
-    ok: OK,
-  },
-  {
     name: 'updateRouteEffort',
     call: (api) => api.updateRouteEffort('opus-5.5', 'r-1', { effort: 'high', expected: null }),
     method: 'PUT',

@@ -9,8 +9,6 @@ const good = {
   password: 'p',
   tasks: { running: 'a', done: 'b', stalled: 'c', queued: 'd', failed: 'e', asking: 'f' },
   issues: { running: 1, done: 2, stalled: 3, queued: 4, failed: 5, asking: 6 },
-  askId: 'x',
-  askingAskId: 'y',
   approvalNotificationId: 'z',
   alertNotificationId: 'w',
   pools: { carpool: 'c', solo: 's' },
@@ -24,7 +22,7 @@ describe('parseFacts', () => {
     expect(() => parseFacts('备库失败')).toThrow('不是 JSON');
   });
   test('少了字段：说是哪一项', () => {
-    const { askingAskId: _drop, ...bad } = good;
-    expect(() => parseFacts(JSON.stringify(bad))).toThrow('askingAskId');
+    const { alertNotificationId: _drop, ...bad } = good;
+    expect(() => parseFacts(JSON.stringify(bad))).toThrow('alertNotificationId');
   });
 });

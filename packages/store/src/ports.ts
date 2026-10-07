@@ -1,7 +1,6 @@
 // 后端和引擎共用的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。只给后端用的接口（Temporal 信号、飞书登录、健康检查……）在 api/src/ports.ts。
-import type { AskHold, AskScope } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -24,7 +23,6 @@ import type {
   Step,
   Subtask,
   Task,
-  TaskState,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -109,30 +107,6 @@ export interface PageRequest {
 export interface RunPlan {
   steps: Step[];
   updatedAt: string;
-}
-
-export interface AskRecord {
-  id: string;
-  taskId: string;
-  runId?: string | undefined;
-  question: string;
-  /** 带了推荐的，推荐的排第一个。 */
-  options: string[];
-  askedAt: string;
-  answer?: string | undefined;
-  answeredBy?: string | undefined;
-  answeredAt?: string | undefined;
-  /**
-   * 问他不挡路（#259，core 的 ask.ts）：task = 这张单范围内的岔路，按推荐先做；outside = 超出范围，另开单等他拍；
-   * hold = 碰了人闸，先按推荐做、合并前等批。没有 = 引擎自己等人的（只有他本人才有的东西），或这之前的老提问。
-   */
-  scope?: AskScope | undefined;
-  recommended?: string | undefined;
-  hold?: AskHold | undefined;
-  /** 另开的单（超出范围的那张，或改选了别的、原单已经合了开的后续单）。 */
-  followUpIssue?: number | undefined;
-  /** 他改选了别的，引擎交给主导照改的时刻。 */
-  appliedAt?: string | undefined;
 }
 
 export interface JobRecord {
@@ -327,15 +301,6 @@ export interface BoardStore {
   /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
   getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
   lastSay(runId: string): Promise<{ text: string; at: string } | null>;
-  listAsks(taskId: string): Promise<AskRecord[]>;
-  getAsk(id: string): Promise<AskRecord | null>;
-  /** 写回答，和操作记录同一事务。已经答过就不改。 */
-  answerAsk(
-    input: { askId: string; answer: string; by: Actor },
-    audit: NewAuditEntry,
-  ): Promise<'ok' | 'already_answered' | 'not_found'>;
-  /** 全部还没答的追问（新主页「要你拍的」用），按提问先后排。 */
-  listPendingAsks(): Promise<AskRecord[]>;
   /**
    * PR 镜像（新主页「做完的」、将来「在跑的」判合并段用）：state 给了只要那个状态；merged 按 mergedAt 倒序、
    * 其余按 updatedAt 倒序，最多 limit 条（默认 50）。镜像里没有的就给不出——不直接查 GitHub。
@@ -387,22 +352,8 @@ export interface AgentStore {
   getAgentSession(runId: string): Promise<AgentSession | null>;
   /** fleet plan：记一条 kind=plan 的进度，载荷 { steps: [{ title, state }] }（和命令的请求体同形）；最近一条就是现行清单。 */
   savePlan(runId: string, steps: Step[]): Promise<void>;
-  /** 会话主动报的进度（say / ask / done / blocked）或插头读出来的（test / file / tool），进 progress_events。 */
+  /** 会话主动报的进度（say / done / blocked）或插头读出来的（test / file / tool），进 progress_events。 */
   appendProgress(runId: string, kind: ProgressKind, payload: unknown): Promise<void>;
-  /**
-   * 开一条追问。同一会话问过一模一样的一句就复用那一条（created=false），命令重试不会刷屏。
-   * 新开的在同一事务里记一条 kind=ask 的进度（载荷 { askId, question }）：不会有「追问开了、进度没记」，重试也补不回来的半截。
-   */
-  openAsk(input: {
-    runId: string;
-    taskId: string;
-    question: string;
-    /** 推荐的排第一个（core 的 checkAsk 排好了）。 */
-    options: string[];
-    scope: AskScope;
-    recommended: string;
-    hold?: AskHold | undefined;
-  }): Promise<{ ask: AskRecord; created: boolean }>;
   /** 空格分开的每个词都要在标题、原话、需求目录、摘要、结果摘要或改动位置里出现；只找有需求文档索引的需求。 */
   searchHistory(input: { repoId: string; query: string; limit: number }): Promise<HistoryItem[]>;
   getPullRequest(repoId: string, number: number): Promise<PullRequestRecord | null>;

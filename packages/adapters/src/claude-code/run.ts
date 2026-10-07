@@ -22,7 +22,7 @@ import {
 export const MIN_CLAUDE_VERSION = '2.1.277';
 
 /**
- * Claude 的 Bash 工具默认 2 分钟就把命令杀掉：长一点的测试、等回答的 fleet ask 都会被腰斩。
+ * Claude 的 Bash 工具默认 2 分钟就把命令杀掉：长一点的测试都会被腰斩。
  * 会话里默认放宽到 10 分钟，模型自己最多能要到 30 分钟（BASH_DEFAULT_TIMEOUT_MS 生效已在 VPS 实测）。
  */
 export const DEFAULT_BASH_TIMEOUT_MS = 10 * 60_000;

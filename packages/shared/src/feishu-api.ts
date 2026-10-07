@@ -28,7 +28,7 @@ export interface FeishuRoute {
  * 网关通行证能进的驾驶舱接口（都代表某位创始人，acting=required），后端的门（api/src/session.ts）按它放行。
  * 网关已经不调它们了（旧卡上的按钮停用）；收窄通行证、删掉这份是 #553 PR-7 的事（碰鉴权）。
  */
-export const FEISHU_GATEWAY_WEB_ROUTES = ['task', 'taskAction', 'answerAsk'] as const satisfies ReadonlyArray<
+export const FEISHU_GATEWAY_WEB_ROUTES = ['task', 'taskAction'] as const satisfies ReadonlyArray<
   keyof typeof WebRoutes
 >;
 

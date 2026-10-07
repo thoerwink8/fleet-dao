@@ -26,8 +26,6 @@ export const E2eFactsSchema = z.object({
     failed: z.number(),
     asking: z.number(),
   }),
-  askId: z.string(),
-  askingAskId: z.string(),
   approvalNotificationId: z.string(),
   alertNotificationId: z.string(),
   pools: z.object({ carpool: z.string(), solo: z.string() }),

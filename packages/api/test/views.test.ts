@@ -1,19 +1,10 @@
-import {
-  type Channel,
-  hardBanFor,
-  LEGACY_ASK_CLOSED_ANSWER,
-  type Model,
-  type Route,
-  type SessionRun,
-} from '@fleet-dao/shared';
+import { type Channel, hardBanFor, type Model, type Route, type SessionRun } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import type { AskRecord, SegmentRunRecord } from '../src/ports.ts';
+import type { SegmentRunRecord } from '../src/ports.ts';
 import {
-  askLate,
   findBan,
   homeDecisions,
   jobView,
-  legacyAskViews,
   routeLookup,
   routeProblem,
   runView,
@@ -109,40 +100,8 @@ describe('库里配的禁令', () => {
   });
 });
 
-describe('旧追问的展示（#928）', () => {
-  const ask = (id: string, taskId: string): AskRecord => ({
-    id,
-    taskId,
-    runId: 'r1',
-    question: '几位？',
-    options: ['4', '6'],
-    askedAt: '2026-09-25T08:00:00Z',
-  });
-
-  it('legacyAskViews：带「#号 标题」背景和任务页链接；单子读不到照样给出这一条（要能被关掉），只是没有背景', () => {
-    const views = legacyAskViews([ask('a1', 't1'), ask('a2', 'gone')], (id) =>
-      id === 't1' ? { issueNumber: 12, title: '登录页加验证码' } : undefined,
-    );
-    expect(views).toEqual([
-      {
-        id: 'a1',
-        taskId: 't1',
-        question: '几位？',
-        askedAt: '2026-09-25T08:00:00Z',
-        context: '#12 登录页加验证码',
-        link: '/tasks/t1',
-      },
-      { id: 'a2', taskId: 'gone', question: '几位？', askedAt: '2026-09-25T08:00:00Z', link: '/tasks/gone' },
-    ]);
-  });
-
-  it('关闭写进去的标记不冒充回答：按推荐先做的追问被关闭后，不算出「回答之后会怎样」', () => {
-    const scoped: AskRecord = { ...ask('a1', 't1'), scope: 'task', recommended: '4' };
-    expect(askLate({ ...scoped, answer: '6' }, 'running')).toBeDefined();
-    expect(askLate({ ...scoped, answer: LEGACY_ASK_CLOSED_ANSWER }, 'running')).toBeUndefined();
-  });
-
-  it('主页「要你拍的」只有通知：没有任何一条叫追问', () => {
+describe('主页「要你拍的」', () => {
+  it('只有通知：没有任何一条叫追问', () => {
     const decisions = homeDecisions({ notifications: [], taskOf: () => undefined });
     expect(decisions).toEqual([]);
   });

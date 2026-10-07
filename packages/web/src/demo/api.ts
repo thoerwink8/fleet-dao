@@ -46,14 +46,6 @@ export function createDemoApi(inner: MockApi): FleetApi {
     board: async (repoId) => redactBoard(await inner.board(repoId), detailLevel()),
     task: async (taskId) => redactTaskDetail(await inner.task(taskId), detailLevel()),
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
-    async legacyAsks() {
-      need('notifications', '通知');
-      return inner.legacyAsks();
-    },
-    async closeAsk(askId) {
-      need('notifications', '通知');
-      return inner.closeAsk(askId);
-    },
     routing: () => inner.routing(),
     // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
     routingLayers: () => Promise.reject(hidden('路由')),

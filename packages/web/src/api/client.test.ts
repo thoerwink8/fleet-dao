@@ -45,12 +45,6 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     expect(called()).toEqual([keys.home.join('/'), 'task']);
   });
 
-  test('追问表变了：旧追问清单跟着重拉（通知中心的「关闭」之后另一台设备也看到）', () => {
-    const { qc, called } = spy();
-    applyOne(qc, { type: 'change', table: 'asks', id: 'a-1' });
-    expect(called()).toEqual(['board', 'task', keys.legacyAsks.join('/')]);
-  });
-
   test('额度窗、渠道变了：路由两层的活不活跟着重拉（额度够不够、渠道开没开都在三件事里）', () => {
     const { qc, called } = spy();
     applyOne(qc, { type: 'change', table: 'quota_windows', id: 'pool-a' });
