@@ -34,7 +34,7 @@ export const ROUTE_RETRY_SECONDS = 60;
  * （verify）。选路的战绩按它把 runs 里这一段的结局算到这个用途上（real/store-ports.ts）：引擎和路由页读同一份，改一处两边一起变。
  * 对题不经选路，不在这里。界面活按 UI_PURPOSE（ui）。
  */
-export { SEGMENT_STAGE } from '@fleet-dao/shared/flow-purposes';
+export { SEGMENT_STAGE, UI_PURPOSE } from '@fleet-dao/shared/flow-purposes';
 
 export { taskBranch } from './task-branch.ts';
 

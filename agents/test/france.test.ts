@@ -1176,19 +1176,20 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     );
   });
 
-  it('落后主线：最早没发的等了 45 分钟以上才算，等得不久不报；卡在哪一并写上', () => {
+  it('【故意造出的失败】落后主线落了很久也不标异常，读数照旧写落后几个、卡在哪（发布只由按钮发，#1271）', () => {
     const behind = (waited: number) =>
       viewOf((s) => {
         const st = state(s);
         (st.main as Record<string, unknown>).commits = [
           ['dddddddddddd', ago(waited)],
-          [SHA, ago(200)],
+          [SHA, ago(2000)],
         ];
         st.last = { action: 'ci-pending', detail: 'CI 在跑', at: ago(3) };
       });
-    has(behind(50), 'bad', `在用 ${SHA}，落后主线 1 个提交，最早没发的已经等了 50 分钟（在等 CI）`);
-    expect(whats(behind(30), 'bad')).toEqual([]);
-    expect(behind(30).health.release).toMatchObject({ behind: 1 });
+    for (const waited of [30, 50, 1500]) {
+      expect(whats(behind(waited), 'bad'), `等了 ${waited} 分钟`).toEqual([]);
+      expect(behind(waited).health.release).toMatchObject({ behind: 1 });
+    }
   });
 
   it('在用的不在主线最近的提交里：人手动切过的只是留意', () => {

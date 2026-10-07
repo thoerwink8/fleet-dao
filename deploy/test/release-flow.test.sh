@@ -73,6 +73,10 @@ web_reachable() {
     return 1
   fi
 }
+# 删香港上老目录（retire_hk_dir，#1223）和读回（check_retired_dir）换成桩，只数调了几次；真代码在 web-publish.test.sh 里测
+RETIRED_RUNS=0
+retire_hk_dir() { RETIRED_RUNS=$((RETIRED_RUNS + 1)); }
+check_retired_dir() { :; }
 # 香港网关的入口（fleet-gateway-deploy）换成桩：状态从 $GWD 下的文件读，收下、切过去也落在那里（发布脚本多在命令替换里调它，
 # 变量带不回来）；调过什么一行一条记进 $GWD/calls：「命令 提交号头一个字」
 GWD=$TMP/gw
@@ -494,7 +498,7 @@ check "问不通：报红，说是问不到" "$(printf '%s\n' "${REDS[@]}" | gre
 check "问不通：历史没变" "$(events)" "$before"
 rm -f -- "$GWD/down"
 
-echo "== 往香港发哪几样：release.env 里不写就只发网关——静态页不发、也不试通（发了会换掉根地址的演示版，要人明写 web）"
+echo "== 往香港发哪几样：release.env 里不写就只发网关——静态页不发、也不试通（发了会换掉根地址上的东西，要人明写 web）"
 check "脚本里的默认值只有 gateway" "$SCRIPT_HK_PARTS" gateway
 if ((EUID == 0)); then
   # 照样例重建、或者那一行被删掉之后的 release.env：没有 FLEET_HK_PARTS 这一项
@@ -514,11 +518,12 @@ do_release "$E" >/dev/null
 check "在用 E" "$(current_sha)" "$E"
 check "静态文件一次都没发" "$SYNCED" 0
 check "传静态文件的路一次都没试" "$PROBED" 0
+check "只发网关：香港上老的目录也不碰（#1223）" "$RETIRED_RUNS" 0
 check "网关照样发过去" "$(cat "$GWD/current")" "$E"
 FLEET_HK_PARTS="web gateway"
 reset
 do_release "$A" >/dev/null
-check "明写了 web：先试通、再发静态文件" "$PROBED:$SYNCED" "1:1"
+check "明写了 web：先试通、再发静态文件、再核对删掉老目录" "$PROBED:$SYNCED:$RETIRED_RUNS" "1:1:1"
 FLEET_HK_PARTS=""
 SYNCED=0
 reset

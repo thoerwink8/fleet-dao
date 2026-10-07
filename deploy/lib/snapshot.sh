@@ -118,7 +118,7 @@ snapshot_ours() {
   fi
   find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
     sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
-  for d in /srv/fleet-dao /var/lib/fleet-dao /var/lib/fleet-dao/engine /var/lib/fleet-dao/demo /var/lib/fleet-sessions /var/lib/fleet-work /var/log/fleet-dao \
+  for d in /srv/fleet-dao /var/lib/fleet-dao /var/lib/fleet-dao/engine /var/lib/fleet-sessions /var/lib/fleet-work /var/log/fleet-dao \
     /home/fleet /home/fleet-agent-carpool /home/pilot; do
     if [[ -e "$d" ]]; then printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"; fi
   done

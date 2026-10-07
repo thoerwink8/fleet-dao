@@ -30,10 +30,10 @@ LimitNOFILE=65536
 # 后端不起子进程，可以收紧（引擎不行，见 fleet-engine.service）
 NoNewPrivileges=yes
 ProtectSystem=strict
-# 能写的地方：演示版的可见范围（api.env 的 FLEET_DEMO_DIR，france.sh 建）、「发布到法国」按钮的请求目录（人工档装，
-# 见 deploy/lib/human-tier.sh；root 的 path 单元盯着它）。前面的「-」：目录还没建时照样起得来，
-# 只是发不了演示链接、发布按钮置灰（驾驶舱里照实报没配好）。进度目录 /srv/fleet-dao-releases/.train 归 root，后端只读
-ReadWritePaths=-/var/lib/fleet-dao/demo -/var/lib/fleet-dao/release-request
+# 能写的地方：「发布到法国」按钮的请求目录（人工档装，见 deploy/lib/human-tier.sh；root 的 path 单元盯着它）。
+# 前面的「-」：目录还没建时照样起得来，只是发布按钮置灰（驾驶舱里照实报没配好）。
+# 进度目录 /srv/fleet-dao-releases/.train 归 root，后端只读
+ReadWritePaths=-/var/lib/fleet-dao/release-request
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

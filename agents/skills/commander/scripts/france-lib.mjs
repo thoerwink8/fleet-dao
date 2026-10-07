@@ -105,8 +105,6 @@ export const LIMITS = {
   autoReleaseRunning: 60,
   /** 主线头这么久没读到（deploy-lag mainMs）。 */
   mainStale: 20,
-  /** 最早没发的提交等了这么久算落后（帅位的法国巡查）。 */
-  lag: 45,
   /** 装机脚本落后主线这么久要人重跑（deploy-lag systemMs）。 */
   systemBehind: 24 * 60,
   /** 会话跑了这么久还没完（法国巡查）。 */
@@ -1179,13 +1177,7 @@ function releaseFacts(current, auto, at) {
       const newer = st.main.commits[i - 1];
       if (!newer) throw new RangeError(`commits[${i - 1}] 取不到（i 来自 findIndex，不该发生）`);
       view.oldestUnreleasedAt = newer[1];
-      const waited = minutesBetween(view.oldestUnreleasedAt, at);
-      if (fresh && waited > LIMITS.lag)
-        issues.push({
-          level: 'bad',
-          what: `在用 ${current.sha}，落后主线 ${i} 个提交，最早没发的已经等了 ${waited} 分钟${view.waiting ? `（${view.waiting}）` : ''}`,
-          where: WHERE.releaseLog,
-        });
+      // 落后几个提交只是读数、不算异常：发布只由驾驶舱按钮（或发版车）发，没人点就不会上线（决定 0032、#1271）
     } else if (i === 0) view.behind = 0;
     else if (fresh)
       issues.push({
