@@ -325,7 +325,7 @@ async function namesLeftInMerge(t: UserTree): Promise<string[]> {
   if (located.code !== 0) return [];
   const rel = text(located).trim();
   if (!rel) return [];
-  const cat = await run(t, ['/bin/cat', '--', rel]);
+  const cat = await run(t, [t.sh ?? SH, '-c', 'exec cat -- "$1"', 'sh', rel]);
   if (cat.code !== 0) return [];
   return conflictFilesInMergeMessage(text(cat));
 }
