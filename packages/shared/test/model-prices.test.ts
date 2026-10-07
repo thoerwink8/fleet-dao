@@ -1,7 +1,15 @@
 // 按模型目录的单价估花费（驾驶舱改版 2026-10-07：「每个环节花费测不出来」）：执行体没报花费的一笔按 token × 单价估，
 // 页面标「估算」；没有单价写「没有单价」、token 没读全写「估不了」，都不拿 0 顶。报了花费的照用报的，不另估。
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { estimateCostUsd, MODEL_PRICES, type ModelPrice, modelPriceOf } from '../src/model-prices.ts';
+import {
+  estimateCostUsd,
+  MODEL_PRICES,
+  type ModelPrice,
+  modelPriceOf,
+  NO_PRICE_MODELS,
+  noPriceReasonOf,
+} from '../src/model-prices.ts';
 import { readSegmentRun, type SegmentRunFacts } from '../src/segment-runs.ts';
 import { summarizeUsage } from '../src/usage.ts';
 
@@ -27,8 +35,15 @@ describe('估一笔', () => {
   });
 
   it('【故意造出的失败】目录里没有单价：noPrice，写明是哪个模型，不给 0', () => {
-    const got = estimateCostUsd(FULL, 'kimi-k3', undefined);
-    expect(got).toEqual({ kind: 'noPrice', why: '模型目录里没有「kimi-k3」的单价' });
+    const got = estimateCostUsd(FULL, 'no-such-model', undefined);
+    expect(got).toEqual({ kind: 'noPrice', why: '模型目录里没有「no-such-model」的单价' });
+    expect(got).not.toHaveProperty('usd');
+  });
+
+  it('【故意造出的失败】目录里明确写了没有按 token 单价的模型（Cursor Auto）：noPrice，写明原因，不给 0', () => {
+    const got = estimateCostUsd(FULL, 'cursor-auto', modelPriceOf('cursor-auto'));
+    expect(got.kind).toBe('noPrice');
+    expect(got).toMatchObject({ why: expect.stringContaining('按每次实际路由到的那个模型的标价计费') });
     expect(got).not.toHaveProperty('usd');
   });
 
@@ -44,8 +59,83 @@ describe('估一笔', () => {
       expect(p.inputPerMTok, id).toBeGreaterThan(0);
     }
     expect(modelPriceOf('opus-5.5')).toBeDefined();
-    expect(modelPriceOf('glm-5.3-flash')).toBeUndefined();
+    expect(modelPriceOf('cursor-auto')).toBeUndefined();
     expect(modelPriceOf('toString')).toBeUndefined();
+    expect(noPriceReasonOf('toString')).toBeUndefined();
+  });
+
+  it('每一项的出处是官方页，不是第三方汇总（Grok 4.7 换成 xAI 官方页）', () => {
+    const officialHosts = [
+      'platform.claude.com',
+      'developers.openai.com',
+      'docs.x.ai',
+      'platform.kimi.ai',
+      'api-docs.deepseek.com',
+      'docs.z.ai',
+      'cursor.com',
+    ];
+    for (const [id, p] of Object.entries({ ...MODEL_PRICES, ...NO_PRICE_MODELS })) {
+      const source = 'source' in p ? p.source : undefined;
+      if (source === undefined) continue; // 没有官方页的（NO_PRICE_MODELS 里写「查不到官方价」的）不带出处
+      expect(officialHosts, id).toContain(new URL(source).host);
+    }
+    expect(MODEL_PRICES['grok-4.7']?.source).toBe('https://docs.x.ai/developers/models');
+    expect(MODEL_PRICES['grok-4.7']?.note).not.toContain('第三方');
+  });
+
+  it('新补的四家照官方页抄的数（输入 / 输出 / 缓存读 / 缓存写，美元每百万 token）', () => {
+    const row = (id: string) => {
+      const p = MODEL_PRICES[id];
+      return p && [p.inputPerMTok, p.outputPerMTok, p.cacheReadPerMTok, p.cacheWritePerMTok];
+    };
+    expect(row('grok-4.7')).toEqual([2, 6, 0.5, 2]);
+    expect(row('kimi-k3')).toEqual([3, 15, 0.3, 3]);
+    expect(row('deepseek-flash')).toEqual([0.3, 1.2, 0.006, 0.3]);
+    expect(row('glm-5.3-flash')).toEqual([0.15, 0.5, 0.03, 0.15]);
+  });
+
+  it('没有单价的项带原因和查价日期；原因写明白，不是空话', () => {
+    for (const [id, n] of Object.entries(NO_PRICE_MODELS)) {
+      expect(n.reason.length, id).toBeGreaterThan(10);
+      expect(n.checkedAt, id).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(n.source === undefined || n.source.startsWith('https://'), id).toBe(true);
+    }
+    // 没有官方页的那条明说「查不到官方价」，不带出处
+    expect(NO_PRICE_MODELS['jev-1.13']?.reason).toContain('查不到官方价');
+    expect(NO_PRICE_MODELS['jev-1.13']?.source).toBeUndefined();
+  });
+});
+
+/** 模型目录（装进库的默认骨架）里每个模型的 id。 */
+function catalogModelIds(): string[] {
+  const raw = JSON.parse(readFileSync(new URL('../../db/routing.default.json', import.meta.url), 'utf8')) as {
+    models?: Record<string, unknown>;
+  };
+  if (!raw.models || Object.keys(raw.models).length === 0)
+    throw new Error('routing.default.json 里读不到 models');
+  return Object.keys(raw.models);
+}
+
+/** 目录里既没有单价、也没写「没有单价的原因」的模型；一个模型两边都写了也算错（说不清到底有没有价）。 */
+function modelsWithoutPriceEntry(ids: readonly string[]): string[] {
+  return ids.filter((id) => {
+    const priced = modelPriceOf(id) !== undefined;
+    const reasoned = noPriceReasonOf(id) !== undefined;
+    return priced === reasoned;
+  });
+}
+
+describe('单价表对得上模型目录', () => {
+  it('目录里每个模型在单价表里都有一项：有价，或明确写了没有单价的原因', () => {
+    expect(modelsWithoutPriceEntry(catalogModelIds())).toEqual([]);
+  });
+
+  it('【故意造出的失败】目录新加了模型、没补单价：这里红，点名是哪个', () => {
+    expect(modelsWithoutPriceEntry([...catalogModelIds(), 'new-model-9'])).toEqual(['new-model-9']);
+  });
+
+  it('同一个模型不会既有单价又写没有单价的原因（说不清到底有没有价）', () => {
+    expect(Object.keys(NO_PRICE_MODELS).filter((id) => id in MODEL_PRICES)).toEqual([]);
   });
 });
 
