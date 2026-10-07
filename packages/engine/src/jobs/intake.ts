@@ -5,7 +5,8 @@
 // 过关的顺序是先便宜的再贵的（列表里就有的，再多读一次 GitHub 的）：
 //   开关打开以后开的（0003 第 2 条）→ 作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 挂在当前版本上（第 8 条）→
 //   不是母单子单、没贴「本机做」→ 还没派过 → 现读一遍这张单（开着、不是 PR、版本和母单子单再核一遍）→ 没被开着的 PR 的
-//   「需求」栏挂着（#1197：已经有人在做；挂着的贴一次「本机做」、留一句话）→ 交代齐不齐 → 容量。
+//   「需求」栏挂着（#1197：已经有人在做；挂着的贴一次「本机做」、留一句话）→ 正文没写 .github/workflows/ 路径（#1194：
+//   引擎的令牌推不了改工作流的提交，写了的同样贴一次「本机做」、留一句话）→ 交代齐不齐 → 容量。
 // 每一道的判法都是 @fleet-dao/core 的 dispatch.ts 那几个纯函数（versionGate、familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
@@ -18,9 +19,10 @@
 //   一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
 
 import { createHash } from 'node:crypto';
-import { issueColumnRefs, LOCAL_LABEL } from '@fleet-dao/conventions';
+import { issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
 import {
   autoDispatchGate,
+  cleanBody,
   familyGate,
   type IssueFamily,
   type IssueMilestones,
@@ -29,6 +31,7 @@ import {
   versionGate,
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
+import { humanPart } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { GithubWhitelist } from '@fleet-dao/store';
 import { isTrusted } from '@fleet-dao/store';
@@ -102,6 +105,7 @@ export type IntakeSkipReason =
   | 'reserved_local'
   | 'already_dispatched'
   | 'pr_claimed'
+  | 'touches_workflows'
   | 'pull_request'
   | 'closed'
   | 'brief_incomplete'
@@ -179,6 +183,37 @@ export function prClaimedComment(prNumber: number): string {
     `引擎想拉起这张单，可开着的 PR #${prNumber} 的「需求」栏已经挂着它，说明已有人在做，先没派。`,
     '',
     `已给这张单贴了「${LOCAL_LABEL}」，引擎以后不再拉它。要交给引擎做的话，另开一张新单（不要和现有 PR 重复）。`,
+  ].join('\n');
+}
+
+/** 单正文里认「要改工作流」的三节（不含「原话」：创始人的原话里顺口提到路径不算这张单要改它）。 */
+const WORKFLOW_SECTIONS = ['场景', '已知的模块', '怎么算做完'] as const;
+const WORKFLOW_PATH = /\.github\/workflows\/[\w.*-]*/;
+
+/**
+ * 单正文的场景、已知的模块、怎么算做完三节里写到的第一个 `.github/workflows/` 路径；没写回 null。
+ * 引擎的 GitHub 令牌不能推改了工作流的提交（workflows_permission），这种单拉了只会白烧一轮（#1186 烧了约 35 万输入 token）。
+ * 正文不是文字（读不到）就抛：不当成「没写工作流路径」。正文是空的不在这里管（交代齐不齐那一道会留言）。
+ */
+export function workflowPathIn(body: unknown): string | null {
+  if (typeof body !== 'string')
+    throw new Error(`单正文读不到（拿到的是 ${body === null ? 'null' : typeof body}）`);
+  const text = cleanBody(humanPart(body));
+  if (!text) return null;
+  const doc = parseMd('单正文', text);
+  for (const name of WORKFLOW_SECTIONS) {
+    const hit = WORKFLOW_PATH.exec(sectionText(doc, name) ?? '');
+    if (hit) return hit[0];
+  }
+  return null;
+}
+
+/** 单子要改工作流、引擎不拉时留在单子上的话。 */
+export function workflowPathComment(path: string): string {
+  return [
+    `引擎想拉起这张单，可正文里写到了 \`${path}\`：引擎的 GitHub 令牌不能推改了 \`.github/workflows/\` 的提交（workflows_permission），拉了只会白烧一轮后卡在推送，先没派。`,
+    '',
+    `已给这张单贴了「${LOCAL_LABEL}」，留给本机做，引擎以后不再拉它。`,
   ].join('\n');
 }
 
@@ -322,6 +357,16 @@ async function intakeIssue(
   }
   const late = screenPlan(await deps.plan(repo, issue.number));
   if (late) return skip(t, slug, issue.number, late);
+  // 正文要改 .github/workflows/：引擎推不上去，不拉（#1194）。正文读不到就抛，这张单这一轮记没查成
+  const workflowPath = workflowPathIn(issue.body);
+  if (workflowPath !== null) {
+    return holdForLocal(deps, t, repo, issue, {
+      reason: 'touches_workflows',
+      why: `正文写了 ${workflowPath}，引擎推不了改工作流的提交`,
+      key: 'intake-touches-workflows',
+      comment: workflowPathComment(workflowPath),
+    });
+  }
   // 已有开着的 PR 的「需求」栏挂着它：有人在做，别并行再写一遍（#1197，#1182 就是这样和已合的 PR 撞车的）。读不到 PR 列表就抛，
   // 这张单这一轮不拉、记没查成，不当成「没有 PR」
   const prNumber = (await prClaims()).get(issue.number);
