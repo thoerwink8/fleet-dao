@@ -8,7 +8,16 @@ import { expect, test } from '../support/fixtures.ts';
 type Home = {
   health: { engine: { state: 'on' | 'off' | 'down' | 'unknown'; detail?: string } };
   decisions: { kind: string; id: string; title: string; link: string }[];
-  running: { issueNumber: number; title: string; segment: string | null; worker?: string; link: string }[];
+  running: {
+    issueNumber: number;
+    title: string;
+    segment: string | null;
+    worker?: string;
+    link: string;
+    waitingReason: string;
+    pendingDecision?: string;
+    lastEvent?: { tone: 'ok' | 'wait' | 'trouble' };
+  }[];
   done: { prNumber: number; title: string }[];
   flow: { segment: string; inFlight: number; avgMs?: number; samples: number }[];
 };
@@ -137,9 +146,21 @@ test.describe('主页', () => {
     await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(home.running.length);
     await page.getByRole('button', { name: /^只看卡住的/ }).click();
     await expect(page).toHaveURL(/stuck=1/);
-    // #14 动手超时（出问题）留着；#12 正常在动手，藏起来；三段节点还在
-    await expect(card(page, 14)).toHaveCount(1);
-    await expect(card(page, 12)).toHaveCount(0);
+    // 卡住的 = 等你拍（founder_decision 或挂着要你拍的事）、出问题（最近一次事件是 trouble）；按后端给的数据算，不按单号猜
+    const stuck = home.running.filter(
+      (r) =>
+        r.waitingReason === 'founder_decision' ||
+        r.pendingDecision !== undefined ||
+        r.lastEvent?.tone === 'trouble',
+    );
+    expect(
+      stuck.map((r) => r.issueNumber),
+      '#14 动手超时，算卡住',
+    ).toContain(14);
+    expect(stuck.length, '至少藏掉一张正常往前走的').toBeLessThan(home.running.length);
+    await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(stuck.length);
+    for (const r of stuck) await expect(card(page, r.issueNumber)).toHaveCount(1);
+    // 三段节点还在（过滤只藏单子）
     await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
     await page.getByRole('application').focus();
     await page.keyboard.press('?');
