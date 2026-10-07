@@ -232,6 +232,27 @@ export interface Packed {
   notes: string[];
   /** 耗时表读不出（报 ::warning::，照样装箱）。 */
   timingsProblem?: string;
+  /** 要装的文件里耗时表没有的有几个、一共几个（表读不出时没有这一项：不拿 0 冒充「没缺」）。 */
+  timingsGap?: { missing: number; total: number };
+}
+
+/** 要装的文件里表里缺的占比超过这个就提醒刷表（只提醒、不挡）。 */
+export const TIMINGS_MISSING_WARN_RATIO = 0.1;
+
+/**
+ * 耗时表该不该刷了：返回要打的 ::warning:: 正文，不用提醒返回 undefined。
+ * 表读不出（timingsProblem）说的是「没查成」，不是「没缺」；缺的占比严格大于 TIMINGS_MISSING_WARN_RATIO 才提醒。
+ */
+export function timingsStaleWarning(
+  packed: Pick<Packed, 'timingsProblem' | 'timingsGap'>,
+): string | undefined {
+  const cmd = '跑 pnpm ci:timings 刷表（或等定时刷新）';
+  if (packed.timingsProblem !== undefined)
+    return `没查成耗时表缺多少文件（${packed.timingsProblem}）：${cmd}`;
+  const gap = packed.timingsGap;
+  if (gap === undefined) return `没查成耗时表缺多少文件（装箱没给出占比）：${cmd}`;
+  if (gap.total === 0 || gap.missing / gap.total <= TIMINGS_MISSING_WARN_RATIO) return undefined;
+  return `耗时表缺 ${gap.missing}/${gap.total} 个要装的测试文件（${Math.round((gap.missing / gap.total) * 100)}%，超过 ${TIMINGS_MISSING_WARN_RATIO * 100}%），分台会不匀：${cmd}`;
 }
 
 function median(values: readonly number[]): number {
@@ -319,6 +340,7 @@ export function packTests(input: PackInput): Packed | string {
     { pg: true, items: pgItems, bins: 0 },
     { pg: false, items: plainItems, bins: 0 },
   ].filter((c) => c.items.length > 0);
+  const timingsGap = timings ? { missing: unknown.length, total: input.files.length } : undefined;
   if (classes.length === 0) return { boxes: [], notes };
   const total = classes.reduce((s, c) => s + c.items.reduce((t, i) => t + i.ms, 0), 0);
   const k = boxCount(total);
@@ -348,5 +370,5 @@ export function packTests(input: PackInput): Packed | string {
     label: `${i + 1}/${n}${b.pg ? ' · pg' : ''}${b.temporal ? ' · temporal' : ''}`,
     ...b,
   }));
-  return { boxes, notes, ...(timings ? {} : { timingsProblem: input.timings as string }) };
+  return { boxes, notes, ...(timingsGap ? { timingsGap } : { timingsProblem: input.timings as string }) };
 }

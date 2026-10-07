@@ -12,7 +12,13 @@ import { parseArgs } from 'node:util';
 import { applyReuse, assignTests, planCi, planOutputs, readGraph } from '../ci-plan.ts';
 import { parseReuse } from '../main-reuse.ts';
 import { fsRepo } from '../repo.ts';
-import { listTestFiles, parseTimings, TIMINGS_FILE, unitOfTestFile } from '../test-split.ts';
+import {
+  listTestFiles,
+  parseTimings,
+  TIMINGS_FILE,
+  timingsStaleWarning,
+  unitOfTestFile,
+} from '../test-split.ts';
 
 const USAGE = '用法：ci-plan.ts [--event pull_request|push] [--base origin/main|<提交>]';
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -106,6 +112,9 @@ if (reuseText.trim() !== '') {
 }
 if (packed?.timingsProblem)
   console.log(`::warning::${packed.timingsProblem}：测试照样每个都跑，只是分台可能不匀`);
+// 表缺的文件占比超过 10% 也提醒（只提醒、不挡）：判法只看检出来的表和测试文件（#299），不读 GitHub
+const stale = packed && packed.boxes.length > 0 ? timingsStaleWarning(packed) : undefined;
+if (stale !== undefined) console.log(`::warning::${stale}`);
 const outputs = planOutputs(plan);
 
 /** 一台装了哪些单元：「engine 12、api 3」。 */

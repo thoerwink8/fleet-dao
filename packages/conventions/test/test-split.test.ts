@@ -19,7 +19,9 @@ import {
   TARGET_BOX_MS,
   TEMPORAL_MARKER,
   TIMINGS_FILE,
+  TIMINGS_MISSING_WARN_RATIO,
   type Timings,
+  timingsStaleWarning,
   unitOfTestFile,
   withSiblings,
 } from '../src/test-split.ts';
@@ -217,6 +219,67 @@ describe('耗时表：只影响分得匀不匀，绝不影响跑不跑', () => {
   it('一台都没有要跑的文件：空清单（调用方判红，不拿空清单去跑 vitest）', () => {
     const r = packTests({ files: [], universe: [], timings: timings({}), temporal: new Set() });
     expect(r).toEqual({ boxes: [], notes: [] });
+  });
+});
+
+describe('耗时表缺文件超过 10% 就提醒刷表（只提醒、不挡，不改装箱结果）', () => {
+  /** 要装 total 个文件，表里只记前 known 个。 */
+  const packWith = (total: number, known: number) => {
+    const files = Array.from({ length: total }, (_, i) => `p/t${String(i).padStart(3, '0')}.test.ts`);
+    const timings: Timings = {
+      source: 'test',
+      files: Object.fromEntries(files.slice(0, known).map((f) => [f, 1000])),
+    };
+    const r = packTests({ files, universe: files, timings, temporal: new Set() });
+    if (typeof r === 'string') throw new Error(r);
+    return { files, r };
+  };
+
+  it('【故意造出的失败】缺 11/100（>10%）：报警，写明跑 pnpm ci:timings', () => {
+    const { r } = packWith(100, 89);
+    expect(r.timingsGap).toEqual({ missing: 11, total: 100 });
+    const w = timingsStaleWarning(r);
+    expect(w).toContain('11/100');
+    expect(w).toContain('pnpm ci:timings');
+  });
+
+  it('【故意造出的失败】缺 10/100（正好 10%）和 0 个：不报（只有严格超过才报）', () => {
+    expect(TIMINGS_MISSING_WARN_RATIO).toBe(0.1);
+    expect(timingsStaleWarning(packWith(100, 90).r)).toBeUndefined();
+    expect(timingsStaleWarning(packWith(100, 100).r)).toBeUndefined();
+  });
+
+  it('【故意造出的失败】表读不到：报「没查成」，不能当成 0 缺', () => {
+    const files = Array.from({ length: 10 }, (_, i) => `p/t${i}.test.ts`);
+    const r = packTests({ files, universe: files, timings: '读不到 x.json', temporal: new Set() });
+    if (typeof r === 'string') throw new Error(r);
+    expect(r.timingsGap).toBeUndefined();
+    const w = timingsStaleWarning(r);
+    expect(w).toContain('没查成');
+    expect(w).toContain('读不到 x.json');
+    expect(w).toContain('pnpm ci:timings');
+    // 装箱没给占比也一样：没查成，不是没缺
+    expect(timingsStaleWarning({})).toContain('没查成');
+  });
+
+  it('只算这次要装的文件：表里多出来的、没装的不进分母', () => {
+    const files = ['a.test.ts', 'b.test.ts'];
+    const r = packTests({
+      files,
+      universe: [...files, 'z.test.ts'],
+      timings: {
+        source: 'test',
+        files: { 'a.test.ts': 1, 'b.test.ts': 1, 'z.test.ts': 1, 'gone.test.ts': 1 },
+      },
+      temporal: new Set(),
+    });
+    if (typeof r === 'string') throw new Error(r);
+    expect(r.timingsGap).toEqual({ missing: 0, total: 2 });
+  });
+
+  it('不改装箱结果：每个文件照样分到一台', () => {
+    const { files, r } = packWith(100, 50);
+    expect(r.boxes.flatMap((b) => b.files).sort()).toEqual([...files].sort());
   });
 });
 
