@@ -1,0 +1,48 @@
+# 页面截图 1920×1080、1366×768 改前改后
+
+四张都是视口截图（deviceScaleFactor 1），PNG 的 IHDR 宽高就是视口。
+数据是仓里的假后端，不是登录后的法国驾驶舱。改前页面是 cc56a2c8（法国当前在用的那一版）配那一版假数据；改后是本分支页面配现在的假数据。
+假数据里改前的 verify 没排模型，所以改前那格写「没配模型顺序」。这是假数据，不是法国库里的顺序。法国库见下面「PR 正文」。
+
+## 改前 1920×1080
+
+文件：routing-before-1920x1080.png
+IHDR：1920×1080
+sha256：0c21f27fda33d52414ca0aa903b8f8ce9cd609dfd9cc262a22b8e878181cad4b
+用途导航里的名字：分诊、需求文档、方案、写码、UI、第二意见、开 PR 前验证、调研、判断
+
+## 改前 1366×768
+
+文件：routing-before-1366x768.png
+IHDR：1366×768
+sha256：ed226fa1505c24c3521a5eb9c93ec46bd9290fa3915aee1792583dee4ddc8fd8
+用途导航里的名字：同上九个
+
+## 改后 1920×1080
+
+文件：routing-after-1920x1080.png
+IHDR：1920×1080
+sha256：00f2bf375d4d95cf10d5c9fc6c2336f8fa08e00fb33a24733c3ef6de2b93bf09
+用途导航里的名字：对题（在对话里做，不选路）、动手、动手 · 界面、验收、不是流程里的一段、Jev 判断
+验收那一格的用途是 verify。没有分诊、需求文档、方案、调研、第二意见、开 PR 前验证。
+
+## 改后 1366×768
+
+文件：routing-after-1366x768.png
+IHDR：1366×768
+sha256：de3f31cd26b4ef58f6dfd13f3e79591f1e766630557507c0eb9ac05034b5f2b3
+用途导航里的名字：同上。验收那一格的用途是 verify。
+
+# PR 正文
+
+法国库里已有的 verify 顺序会被用上。
+
+发布脚本 deploy/release.sh 的 load_routing 只调 applyRoutingDefault，按用途只补缺。routing_purpose_models 里已经有 purpose='verify' 的行时，这个用途进 purposesKept，不插入、不改顺序。本版起验收按 shared 的 SEGMENT_STAGE.verify 选路，这个值等于页面上叫「验收」的那一格，就是 verify。所以库里原有的 verify 顺序从这一版起被验收用上。一行都没有时，第一次发布按 packages/db/routing.default.json 的 purposes.verify 补上，第一名是 gpt-5.6-luna，后面是 grok-4.7、sonnet-5.5、opus-5.5、kimi-k3、deepseek-flash、cursor-auto、glm-5.3-flash。review 的行不覆盖，验收不再读它。
+
+怎么核：在法国以操作系统用户 fleet 连库 fleet，执行
+
+select model_id, position from routing_purpose_models where purpose = 'verify' order by position;
+
+发布日志里 formatRoutingApplyReport 的原文：已有则是「路由两层已齐，这次一行没改」；缺了才是「补了用途 → 模型 … verify」。
+
+这次没有读到行，不能报库里的模型顺序。当前进程是 uid 993、用户 fleet-agent-carpool：peer 认证报角色 fleet-agent-carpool 不存在；psql -U fleet 被 peer 拒绝；sudo -n 因 no new privileges 不能换用户；TCP 127.0.0.1:5432 拒绝连接；10.99.0.2:8787 连不上；https://hangdao.dpdns.org/api/routing/layers 返回 401。
