@@ -1,22 +1,16 @@
 // @vitest-environment happy-dom
 // 详情页读不到（#1221，照 #1220 单子详情的修法）。QueryClient 的 retry 设成 1（和 root.tsx 一样），
 // 才能看出「404 不重试」是查询自己关的，不是测试外壳关的。
-//
-// 路由逐个看过（routes.ts）。详情 = 按编号读一个东西，404 就是没有这个：
-// - /tasks/:taskId 单子详情：#1220 已修（404 不重试、记住失败）。这次只把记住失败抽到 lib/shown-error.ts，行为不变。
-// - /?node=<编号> 主页上看一个远程环境。接口是 GET /api/nodes/:nodeId，驾驶舱没有 /nodes/:id 这条路由。有毛病，下面修。
-// - /env 里收到过快照的远程列，读的是同一个接口。有毛病，下面修。
-// 不是详情（整页一份列表或单例，没有「没有这个……」）：
-// / 本台主页、/quota、/schedules、/notifications、/audit、/settings、/demo-links、/changelog、
-// /routing、/routing/status（?p= 是在已经读到的列表里挑一个渠道，不是另读一个会 404 的编号）、
-// /efforts、/france、/login、/models、/billing、/record、/judge（占位，soon.tsx）、* 找不到页。
-// /env 的本台列是 GET /api/env，不是按编号。
+// 哪些路由是详情、哪些有毛病，写在 routes/detail-page-pr-body.ts 的 PR 正文里，不写在这里。
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi, keys } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { NodeDetail, Nodes } from '../api/types';
+import { DETAIL_PAGE_PR_BODY } from '../routes/detail-page-pr-body';
 import Env from '../routes/env';
 import Home from '../routes/home';
 import { renderApp } from './harness';
@@ -147,5 +141,46 @@ describe('环境页的远程列', () => {
     expect(await within(column).findByText('引擎')).toBeTruthy();
     // 快照事实里本身有「没读成 0」这种计数，只认这次失败的那句。
     expect(screen.queryByText(/幽灵环境的快照没读成/)).toBeNull();
+  });
+});
+
+/** 从 PR 正文的一条「- `路由` …」里取出路由。 */
+function routeOf(line: string): string {
+  const m = /^- `([^`]+)`/.exec(line);
+  if (!m?.[1]) throw new Error(`清单这条认不出路由：${line}`);
+  return m[1];
+}
+
+describe('PR 正文里的详情页路由清单', () => {
+  test('逐个列出 routes.ts 里的路由，并标出哪些有推送跳骨架和 404 重试', () => {
+    const src = readFileSync(join(process.cwd(), 'packages/web/src/routes.ts'), 'utf8');
+    const declared = [...src.matchAll(/route\(\s*'([^']+)'/g)].flatMap((m) => {
+      const path = m[1];
+      return path === undefined ? [] : [path === '*' ? '*' : `/${path}`];
+    });
+    expect(declared.length).toBeGreaterThan(10);
+    expect(src).toContain("index('routes/home.tsx')");
+
+    expect(DETAIL_PAGE_PR_BODY.startsWith('**做了什么**：')).toBe(true);
+    const bullets = DETAIL_PAGE_PR_BODY.split('\n').filter((l) => l.startsWith('- `'));
+    const routes = bullets.map(routeOf);
+    for (const path of ['/', ...declared]) {
+      expect(routes, path).toContain(path);
+    }
+    expect(routes).toContain('/?node=<编号>');
+    expect(routes).toContain('/nodes/:id');
+
+    const buggy: string[] = [];
+    const clean: string[] = [];
+    for (const line of bullets) {
+      const has = line.includes('有毛病') && !line.includes('没有这个毛病');
+      const none = line.includes('没有这个毛病');
+      expect(has !== none, line).toBe(true);
+      (has ? buggy : clean).push(routeOf(line));
+    }
+    expect(buggy).toEqual(['/?node=<编号>', '/tasks/:taskId', '/env']);
+    expect(clean).toContain('/nodes/:id');
+    expect(DETAIL_PAGE_PR_BODY).toContain('**需求**：#1221');
+    expect(DETAIL_PAGE_PR_BODY).not.toMatch(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#/i);
   });
 });
