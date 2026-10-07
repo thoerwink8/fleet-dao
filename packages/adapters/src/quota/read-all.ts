@@ -149,6 +149,7 @@ async function readPool(
     },
   };
   if (deps.usageRecords) ctx.usageRecords = deps.usageRecords;
+  if (user?.connectMirasim) ctx.connectMirasim = user.connectMirasim;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {

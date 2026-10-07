@@ -1,5 +1,6 @@
 // Mirasim 中转账号：问本机 mirasim-server 一句 getRelay（桌面端显示额度用的就是它），零次上游调用、不花额度。
 // 一份账号额度被所有走中转的路由共扣（5h、7d），另有只扣某一族模型的窗口（7d_claude、7d_fable…），集合不固定。
+import type { MirasimWire } from '../../mirasim/wire.ts';
 import type { Reader, ReaderContext, WebSocketLike } from '../context.ts';
 import type { MirasimRelayConfig, QuotaReading } from '../types.ts';
 import { QuotaReadError } from '../types.ts';
@@ -9,6 +10,8 @@ import { classifyLabel, normalizeStatus } from '../windows.ts';
 const SOURCE = 'mirasim-relay';
 export const DEFAULT_MIRASIM_PORT = 4316;
 const OPEN_TIMEOUT_MS = 8_000;
+/** 经桥接连上之后等 relay 帧的时间。 */
+const RELAY_WAIT_MS = 15_000;
 
 /**
  * 一个窗口的数：优先用点数（used / budget）；点数缺了、百分比还在，就按「已用 + 剩余」认刻度
@@ -181,8 +184,62 @@ async function fetchRelayFrame(ctx: ReaderContext, url: string): Promise<unknown
   });
 }
 
+/**
+ * 经桥接的连接（会话用户的 Mirasim 服务，引擎用户直读令牌、直连回环口都不行，#1284）：发 clientHello、getState、getRelay，
+ * 等 relay 或 error 帧。令牌桥接自己以会话用户的身份读，不经这里。连不上、中途断了、超时都抛，连接一定关。
+ */
+async function fetchRelayFrameViaBridge(ctx: ReaderContext, connect: () => Promise<MirasimWire>) {
+  const connecting = connect();
+  let abortHandler: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    abortHandler = () => reject(new QuotaReadError('timeout', '等桥接连上 Mirasim 超时'));
+    if (ctx.signal.aborted) abortHandler();
+    else ctx.signal.addEventListener('abort', abortHandler, { once: true });
+  });
+  aborted.catch(() => undefined);
+  let wire: MirasimWire;
+  try {
+    wire = await Promise.race([connecting, aborted]);
+  } catch (e) {
+    // 超时放弃了，桥接稍后才连上也要收掉，不留进程
+    void connecting.then(
+      (w) => w.close(),
+      () => undefined,
+    );
+    if (e instanceof QuotaReadError) throw e;
+    throw new QuotaReadError(
+      'unreachable',
+      `经桥接连不上会话用户的 Mirasim：${redact(String((e as Error).message ?? e))}`,
+    );
+  } finally {
+    if (abortHandler) ctx.signal.removeEventListener('abort', abortHandler);
+  }
+  try {
+    wire.send({ type: 'clientHello' });
+    wire.send({ type: 'getState' });
+    wire.send({ type: 'getRelay' });
+    const deadline = Date.now() + RELAY_WAIT_MS;
+    while (!ctx.signal.aborted) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      const frame = await wire.next(Math.min(left, 1_000));
+      if (frame === 'closed') throw new QuotaReadError('unreachable', '桥接没回 relay 帧就断了');
+      if (frame === 'timeout') continue;
+      if (frame.type === 'relay' || frame.type === 'error') return frame;
+    }
+    throw new QuotaReadError('timeout', '等 relay 帧超时');
+  } finally {
+    wire.close();
+  }
+}
+
 export const readMirasimRelay: Reader = async (ctx) => {
   const pool = ctx.pool as MirasimRelayConfig;
+  if (ctx.connectMirasim) {
+    const frame = await fetchRelayFrameViaBridge(ctx, ctx.connectMirasim);
+    const out = readingsFromRelayFrame(frame, { poolId: pool.poolId, fetchedAt: ctx.fetchedAt });
+    return { windows: out.windows, notes: out.notes };
+  }
   const port = pool.port ?? DEFAULT_MIRASIM_PORT;
   const tokenFile = expandHome(pool.tokenFile ?? `~/.mirasim/run/local-${port}.token`, ctx.homeDir);
   let token: string;

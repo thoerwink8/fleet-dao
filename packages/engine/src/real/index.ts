@@ -321,18 +321,24 @@ export async function catAsUser(
   return r.stdout.toString('utf8');
 }
 
-/** 额度读取里凭据在会话用户家里的两种读取器（Cursor、Grok）：引擎用户读不到，经 exec 以会话用户读（#1195）。Mirasim 池要走桥接，不在这里。 */
-export const QUOTA_USER_READERS = ['cursor-dashboard', 'grok-billing'] as const;
+/**
+ * 额度读取里凭据在会话用户家里的三种读取器：引擎用户读不到。Cursor、Grok 经 exec 以会话用户读文件（#1195）；
+ * Mirasim 池的令牌在会话用户家里、口又只许会话用户连，经桥接以会话用户的身份连（#1284，和账本、路由探针同一条路）。
+ */
+export const QUOTA_USER_READERS = ['cursor-dashboard', 'grok-billing', 'mirasim-relay'] as const;
 
 export function quotaAsUser(
   exec: UserExec,
   user: SessionUser,
   home: string,
+  /** 给了就让 mirasim-relay 读取器经桥接连（mirasimDepsFor 的 connect）；不给它就仍读令牌文件、直连，在法国必然 EACCES。 */
+  mirasim?: { connect(user: SessionUser): MirasimConnect },
 ): NonNullable<QuotaReadWiring['asUser']> {
   return {
     readers: QUOTA_USER_READERS,
     readFile: (path) => catAsUser(exec, user, path, 'quota-cat'),
     homeDir: home.replaceAll('{user}', user),
+    ...(mirasim ? { connectMirasim: mirasim.connect(user) } : {}),
   };
 }
 
@@ -579,7 +585,7 @@ export function realPortsFromEnv(
     }),
     // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
     // Cursor、Grok 池的登录文件在会话用户家里，引擎用户读不到：这两种读取器读文件经 exec 以会话用户读（#1195）
-    quotaRead: quotaReadJob({ db, asUser: quotaAsUser(exec, sessionUser, config.mirasimHome) }),
+    quotaRead: quotaReadJob({ db, asUser: quotaAsUser(exec, sessionUser, config.mirasimHome, mirasim) }),
     // 拼车额度盯读（#194）：每分钟起一条，按情况读开放接口、交给切号当场判
     carpoolWatch: carpoolWatchJob({
       db,
