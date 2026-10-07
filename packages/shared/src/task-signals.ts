@@ -12,7 +12,20 @@ export const TASK_SIGNAL_NAMES = {
   routeWake: 'taskRouteWake',
   /** 「暂停」（#820 片 3）：这一张单停在下一个检查点，不起新会话；点「继续」（taskContinue）接着走。 */
   pause: 'taskPause',
+  /** 「现在就换」模型（#1216）：动手会话马上停下，指定的模型（task_route_pins，驾驶舱已写库）在原分支原树上重跑这一段。 */
+  repin: 'taskRepin',
 } as const;
+
+/**
+ * 「现在就换」（#1216）：借「hard 暂停」同一条路把正在跑的动手会话停下，不停在检查点等人，直接回选路、按新指定的模型原分支重跑；
+ * 已做的在分支上接着做，已花的 token 不退。只有动手段（manual）能当场换：验收是冷调用，不在这条路上。
+ * 信号到的时候没有在跑的动手会话（已经收场、在等 CI……）就不理它：新指定本来就在库里，下一次选路照它。
+ */
+export interface RepinCommand {
+  by: string;
+  segment: 'manual';
+  reason?: string;
+}
 
 /**
  * 「暂停」（#820 片 3）：只停这一张单，之后能「继续」（和「放弃」不同，放弃是终局）。by 写谁点的，reason 是为什么停。

@@ -9,7 +9,7 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { EngineTasks } from '../src/activities.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
-import { createFakeWorld, fakeHead } from '../src/fakes.ts';
+import { createFakeWorld, FAKE_ROUTES, fakeHead } from '../src/fakes.ts';
 import type { PickRouteInput, RouteChoice } from '../src/ports.ts';
 import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
@@ -22,6 +22,7 @@ import {
   taskAbandonSignal,
   taskContinueSignal,
   taskPauseSignal,
+  taskRepinSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
@@ -1238,5 +1239,126 @@ describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeou
       },
       { tasks },
     );
+  });
+});
+
+describe('任务工作流 · 现在就换模型（#1216，taskRepin）', { timeout: 60_000 }, () => {
+  const paused = (s: TaskStatus) => s.phase === 'paused';
+  /** 第一次会话挂着，直到放行（或收到取消）；之后的会话直接跑成。 */
+  const gated = () => {
+    const gate = { release: () => {}, aborted: false };
+    const open = new Promise<void>((resolve) => {
+      gate.release = resolve;
+    });
+    const segment = (n: number, signal: AbortSignal): Promise<RunSegmentResult> => {
+      if (n !== 1) return Promise.resolve(OK_SEGMENT);
+      return new Promise((resolve) => {
+        void open.then(() => resolve(OK_SEGMENT));
+        const onAbort = () => {
+          gate.aborted = true;
+          resolve({
+            ok: false,
+            runId: 'r',
+            outcome: 'killed',
+            evidence: { code: 'aborted', message: '被取消', quotaExhausted: false },
+          });
+        };
+        if (signal.aborted) onAbort();
+        signal.addEventListener('abort', onAbort);
+      });
+    };
+    return { gate, segment };
+  };
+  const [FIRST, , SECOND] = FAKE_ROUTES;
+  if (!FIRST || !SECOND) throw new Error('假路由表要至少三条');
+  /** 第一次选路给 r1（m1），之后（人换了模型）给 r3（m2）：模拟选路现读到新指定。 */
+  const repinnedRoutes = (n: number) =>
+    n === 1
+      ? { ok: true as const, route: FIRST, why: '自动' }
+      : { ok: true as const, route: SECOND, why: '人指定的' };
+
+  it('动手会话在跑时发 taskRepin：会话被取消，不停下等人、不报警；回选路、新模型在同一分支同一棵树上重跑，提示里写明被人要求现在就换，轮数不多算', async () => {
+    const world = createFakeWorld({ route: (_i, n) => repinnedRoutes(n) });
+    const { gate, segment } = gated();
+    const { tasks, calls } = scripted({ segment: (_i, n, signal) => segment(n, signal) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
+        await h.signal(taskRepinSignal, { by: 'frank', segment: 'manual', reason: '想试试 Kimi' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(gate.aborted).toBe(true);
+    expect(calls.segment).toHaveLength(2);
+    const [first, second] = calls.segment;
+    // 换了之后下一轮用新模型：第二次选路派到 r3（m2），不是 r1（m1）
+    expect(first?.route).toMatchObject({ routeId: 'r1', modelId: 'm1' });
+    expect(second?.route).toMatchObject({ routeId: 'r3', modelId: 'm2' });
+    expect(world.count('pickRoute')).toBeGreaterThanOrEqual(2);
+    // 同一个分支、同一棵树、同一个起点：已做的从分支上接着做
+    expect(second?.branch).toBe(first?.branch);
+    expect(second?.worktreePath).toBe(first?.worktreePath);
+    expect(second?.baseSha).toBe(first?.baseSha);
+    expect(first?.interrupted).toBeUndefined();
+    expect(second?.interrupted).toBe('被人要求现在就换模型（frank）：想试试 Kimi');
+    expect(world.count('createWorktree')).toBe(1);
+    // 不是暂停：没有停进已暂停、没有报警
+    expect(world.states.map((x) => x.phase)).not.toContain('paused');
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('换的时候重新选路不粘上一条路由、不带避开：不会因为旧路由粘着或旧的避开把新指定的模型派不出', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = createFakeWorld({
+      route: (i, n) => {
+        picks.push(i);
+        return repinnedRoutes(n);
+      },
+    });
+    const { segment } = gated();
+    const { tasks, calls } = scripted({ segment: (_i, n, signal) => segment(n, signal) });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
+        await h.signal(taskRepinSignal, { by: 'frank', segment: 'manual' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(picks.length).toBeGreaterThanOrEqual(2);
+    expect(picks[1]).toMatchObject({ avoidRouteIds: [], avoidPoolIds: [], avoidModelIds: [] });
+    expect(picks[1]?.stickRouteId).toBeUndefined();
+  });
+
+  it('【故意造出的失败】没有在跑的动手会话（停在暂停里）发 taskRepin：不理它，不起新会话、不取消什么；继续后照常做完，只起一次会话', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await h.signal(taskPauseSignal, { by: 'frank' });
+        await statusUntil(h, paused, '停进已暂停');
+        await h.signal(taskRepinSignal, { by: 'frank', segment: 'manual' });
+        // 查询和信号走同一条任务通道：查得到，说明前面的信号已被工作流处理过
+        expect((await statusOf(h)).phase).toBe('paused');
+        expect(calls.segment).toHaveLength(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.segment[0]?.interrupted).toBeUndefined();
   });
 });

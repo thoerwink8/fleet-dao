@@ -22,10 +22,11 @@ import {
   type TaskStatus,
   type TaskWorkflowInput,
   taskPauseSignal,
+  taskRepinSignal,
   taskStatusQuery,
 } from '../../src/task-contract.ts';
 import { createEnv, engineBundle, REPO, waitUntil, withWorker } from '../support.ts';
-import { scripted } from '../task-script.ts';
+import { OK_SEGMENT, scripted } from '../task-script.ts';
 
 const OUT = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const repo = { ...REPO, id: 'repo-fixture', name: 'fixture' };
@@ -117,6 +118,35 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-reworked': handle };
     },
   },
+  // 「现在就换」模型（#1216）：动手会话在跑时收到 taskRepin，会话被取消、回选路重跑，做完。历史里带 patched('task-repin') 的标记和 taskRepin 信号。
+  'task-repinned': (() => {
+    const { tasks, calls } = scripted({
+      segment: (_input, n, signal) =>
+        n !== 1
+          ? Promise.resolve(OK_SEGMENT)
+          : new Promise((resolve) => {
+              const stop = () =>
+                resolve({
+                  ok: false,
+                  runId: 'r',
+                  outcome: 'killed',
+                  evidence: { code: 'aborted', message: '被取消', quotaExhausted: false },
+                });
+              if (signal.aborted) stop();
+              signal.addEventListener('abort', stop);
+            }),
+    });
+    return {
+      tasks,
+      async run(r: Run) {
+        const handle = await startTask(r);
+        await waitUntil(async () => calls.segment.length > 0, '动手会话在跑');
+        await handle.signal(taskRepinSignal, { by: 'recorder', segment: 'manual', reason: '录夹具' });
+        await handle.result();
+        return { 'task-repinned': handle };
+      },
+    };
+  })(),
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
   'task-merging': {
     tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,

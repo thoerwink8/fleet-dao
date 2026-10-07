@@ -265,6 +265,8 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     if (isTaskFinished(task)) {
       throw new ApiError(409, 'task_finished', `任务已经结束（${task.state}），不用再指定模型`);
     }
+    // 「现在就换」（#1216）：能不能换先核，不行回 409、库里一行不动（不先写指定再说发不了）
+    if (body.now) await checkRepinNow(task, body.segment);
     let result: Awaited<ReturnType<NonNullable<Deps['taskRoutePins']>['set']>>;
     try {
       result = await deps.taskRoutePins.set(
@@ -298,8 +300,84 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       if (result.kind === 'not_found') throw new ApiError(404, 'task_not_found', result.why);
       throw new ApiError(422, 'route_pin_invalid', result.why);
     }
+    if (body.now) {
+      // 指定已经写进库（下一次选路照它）；信号没发成时把话说全：指定记下了，只是当场没换成
+      try {
+        await signalAndAudit(
+          taskId,
+          {
+            name: TASK_SIGNAL_NAMES.repin,
+            by: c.get('user').id,
+            segment: 'manual',
+            ...(body.reason ? { reason: body.reason } : {}),
+          },
+          {
+            actor: actorOf(c),
+            action: 'task.repin',
+            target: `task:${taskId}`,
+            after: { segment: body.segment },
+            reason: body.reason,
+            via: c.get('via'),
+            ok: true,
+          },
+        );
+      } catch (err) {
+        if (err instanceof ApiError) {
+          throw new ApiError(
+            err.status,
+            err.code,
+            `新指定已记下（下一次选路起照它），但「现在就换」没成：${err.message}`,
+          );
+        }
+        throw err;
+      }
+    }
     return reply(c, UpdateTaskRoutePinResponse, taskRoutePinView(result.after));
   });
+
+  /**
+   * 「现在就换」的前提（#1216）：只有动手会话能当场停下重跑（验收是冷调用，不在这条路上）；单子要在跑、没被暂停，
+   * 而且库里记着动手这一段正开着（没结束）。哪一条不满足就回 409，原因写给人看。
+   */
+  async function checkRepinNow(
+    task: { id: string; state: string; paused?: string | undefined },
+    segment: 'manual' | 'verify',
+  ): Promise<void> {
+    if (segment !== 'manual') {
+      throw new ApiError(
+        409,
+        'repin_segment_unsupported',
+        '验收这一段不能「现在就换」：验收不在能当场停下重跑的那条路上。去掉「现在就换」只改指定，从下一次选路起生效',
+      );
+    }
+    if (task.state !== 'running') {
+      throw new ApiError(
+        409,
+        'task_not_running',
+        `这张单现在不在跑（${task.state}），没有正在跑的动手会话可换。去掉「现在就换」只改指定，下一次选路起生效`,
+      );
+    }
+    if (task.paused !== undefined) {
+      throw new ApiError(
+        409,
+        'task_paused',
+        `这张单已经暂停了（${task.paused}），没有正在跑的动手会话。去掉「现在就换」只改指定，继续后下一次选路起生效`,
+      );
+    }
+    const open = (await store.listSegmentRuns(task.id)).filter(
+      (r) => r.endedAt === undefined && r.outcome === undefined,
+    );
+    if (!open.some((r) => r.segment === segment)) {
+      const other = [...new Set(open.map((r) => r.segment))];
+      throw new ApiError(
+        409,
+        'segment_not_running',
+        other.length > 0
+          ? `在跑的是「${other.join('、')}」，不是动手这一段，没有正在跑的动手会话可换。去掉「现在就换」只改指定，下一次选路起生效`
+          : '动手这一段现在没有在跑的会话（库里没有开着的一笔）。去掉「现在就换」只改指定，下一次选路起生效',
+      );
+    }
+  }
 
   app.post(WebRoutes.taskAction.path, async (c) => {
     const taskId = c.req.param('taskId');

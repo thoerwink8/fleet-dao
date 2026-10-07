@@ -169,6 +169,24 @@ describe('假后端：发给工作流的信号', () => {
     expect(e.code).toBe('no_active_run');
   });
 
+  test('现在就换（#1216）：动手在跑的 t-12 能换并记 task.repin；【故意造出的失败】验收段、没在跑动手的 t-14 都 409 且指定不动', async () => {
+    const api = fresh();
+    const ok = await api.updateTaskRoutePin('t-12', { segment: 'manual', modelId: 'kimi-k3', now: true });
+    expect(ok).toMatchObject({ segment: 'manual', modelId: 'kimi-k3' });
+    expect((await api.audit()).items.map((i) => i.action)).toContain('task.repin');
+
+    const verify = await rejects(
+      api.updateTaskRoutePin('t-12', { segment: 'verify', modelId: 'grok-4.7', now: true }),
+    );
+    expect([verify.status, verify.code]).toEqual([409, 'repin_segment_unsupported']);
+    const notRunning = await rejects(
+      api.updateTaskRoutePin('t-14', { segment: 'manual', modelId: 'kimi-k3', now: true }),
+    );
+    expect([notRunning.status, notRunning.code]).toEqual([409, 'segment_not_running']);
+    const pins = (await api.task('t-14')).routePins.pins;
+    expect(pins.find((p) => p.segment === 'manual')?.modelId).toBe('kimi-k3'); // 种子里本来就是 Kimi，没被这次改动
+  });
+
   test('每个操作都先留操作记录：谁、做了什么、对哪个需求', async () => {
     const api = fresh();
     await api.taskAction('t-12', { action: 'pause', reason: '先看一下' });
