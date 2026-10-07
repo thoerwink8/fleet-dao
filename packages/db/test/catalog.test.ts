@@ -146,10 +146,15 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
       ['sonnet-5.5', 'yes'],
       ['opus-5.5', 'yes'],
       ['gpt-5.6-luna', 'no'],
-      ['gpt-6.1-sol', 'no'],
+      ['gpt-6-sol', 'no'],
+      ['gpt-6-luna', 'no'],
+      ['gpt-6-astra', 'no'],
+      ['gpt-5.6-sol', 'no'],
+      ['gpt-5.6-terra', 'no'],
       ['kimi-k3', 'no'],
       ['deepseek-flash', 'no'],
       ['glm-5.3-flash', 'no'],
+      ['glm-5.3', 'no'],
     ]);
   });
 

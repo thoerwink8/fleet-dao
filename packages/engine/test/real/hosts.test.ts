@@ -1021,14 +1021,42 @@ describe('Claude Code 的驱动', () => {
 });
 
 describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
-  it('现挂的路由都认得出：opus-5.5、sonnet-5.5→claude、gpt-5.6-luna→codex、kimi-k3→pi、deepseek-flash→dsh、glm-5.3-flash→zcode', () => {
+  it('现挂的路由都认得出：opus-5.5、sonnet-5.5→claude、gpt 各档→codex、kimi-k3→pi、deepseek-flash→dsh、glm-5.3、glm-5.3-flash→zcode', () => {
     expect(mirasimAgentFor('claude-opus-5-5')).toBe('claude');
     expect(mirasimAgentFor('claude-sonnet-5-5')).toBe('claude');
     expect(mirasimAgentFor('glm-5.3-flash')).toBe('zcode');
     expect(mirasimAgentFor('gpt-5.6-luna')).toBe('codex');
-    expect(mirasimAgentFor('gpt-6.1-sol')).toBe('codex');
+    for (const m of ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
+      expect(mirasimAgentFor(m), m).toBe('codex');
+    }
+    expect(mirasimAgentFor('glm-5.3')).toBe('zcode');
     expect(mirasimAgentFor('kimi-k3')).toBe('pi');
     expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
+  });
+
+  // Mirasim 服务端 0.0.425（2026-10-07 在法国读 server.cjs）里各执行体认的模型串。服务端没有 gpt-6.1-sol，只有 gpt-6-sol。
+  const MIRASIM_KNOWN_MODELS: Readonly<Record<string, readonly string[]>> = {
+    codex: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+    zcode: ['glm-5.3', 'glm-5.3-flash'],
+    dsh: ['deepseek-flash'],
+    pi: ['kimi-k3'],
+    claude: ['claude-opus-5-5', 'claude-sonnet-5-5'],
+  };
+  /** 映射里服务端认不出的条目：模型串不在它那个执行体的名单里。 */
+  const unknownToMirasim = (map: Readonly<Record<string, string>>): string[] =>
+    Object.entries(map)
+      .filter(([model, agent]) => !MIRASIM_KNOWN_MODELS[agent]?.includes(model))
+      .map(([model, agent]) => `${model}→${agent}`);
+
+  it('映射里每个模型串都在 Mirasim 服务端认得的名单里（执行体也对得上）', () => {
+    expect(unknownToMirasim(MIRASIM_AGENT_BY_MODEL)).toEqual([]);
+  });
+
+  it('【故意造出的失败】映射里有服务端认不出的模型串（例如 gpt-6.1-sol）、或挂错执行体：报认不出', () => {
+    expect(unknownToMirasim({ ...MIRASIM_AGENT_BY_MODEL, 'gpt-6.1-sol': 'codex' })).toEqual([
+      'gpt-6.1-sol→codex',
+    ]);
+    expect(unknownToMirasim({ 'glm-5.3': 'codex' })).toEqual(['glm-5.3→codex']);
   });
 
   it('插头读到认不出的输出——模型串不在这张表里：明确报错，不落到某个默认执行体上（新路由忘了改这张表会当场炸，不会悄悄派错执行体）【故意造出的失败】', () => {

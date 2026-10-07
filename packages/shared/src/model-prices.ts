@@ -92,14 +92,14 @@ export const MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
     checkedAt: '2026-10-07',
     note: '2026-07-30 降价后的价；OpenAI 不单列写缓存价，按输入价算',
   },
-  'gpt-6.1-sol': {
+  'gpt-6-sol': {
     inputPerMTok: 2,
     outputPerMTok: 10,
     cacheReadPerMTok: 0.1,
     cacheWritePerMTok: 2,
-    source: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol',
+    source: 'https://developers.openai.com/api/docs/models/gpt-6-sol',
     checkedAt: '2026-10-07',
-    note: '标准档价（官方页：缓存输入按输入价的 5% 算；Fast 档 2 倍、Batch/Flex 半价，这里不分）；OpenAI 不单列写缓存价，按输入价算',
+    note: '价沿用原先按「gpt-6.1-sol」这个名字查到的数（目录里实际用的串是 gpt-6-sol，两者是不是同一档没有再核对官方页）；标准档价（官方页：缓存输入按输入价的 5% 算；Fast 档 2 倍、Batch/Flex 半价，这里不分）；OpenAI 不单列写缓存价，按输入价算',
   },
 };
 
@@ -121,6 +121,27 @@ export const NO_PRICE_MODELS: Readonly<Record<string, NoPrice>> = {
     reason:
       'Cursor Auto 按每次实际路由到的那个模型的标价计费，没有固定的按 token 单价（官方页：Auto 按路由到的模型的标价计费）',
     source: 'https://cursor.com/docs/models-and-pricing',
+    checkedAt: '2026-10-07',
+  },
+  // 下面这几个是 Mirasim 服务端 0.0.425 认得、目录样例里新挂的模型（2026-10-07 夜）：没有查过官方价，先不写价、不编。
+  'gpt-6-luna': {
+    reason: '查不到官方价：还没核对官方模型页，不拿别家或第三方汇总的数顶',
+    checkedAt: '2026-10-07',
+  },
+  'gpt-6-astra': {
+    reason: '查不到官方价：还没核对官方模型页，不拿别家或第三方汇总的数顶',
+    checkedAt: '2026-10-07',
+  },
+  'gpt-5.6-sol': {
+    reason: '查不到官方价：还没核对官方模型页，不拿别家或第三方汇总的数顶',
+    checkedAt: '2026-10-07',
+  },
+  'gpt-5.6-terra': {
+    reason: '查不到官方价：还没核对官方模型页，不拿别家或第三方汇总的数顶',
+    checkedAt: '2026-10-07',
+  },
+  'glm-5.3': {
+    reason: '查不到官方价：还没核对官方模型页，不拿别家或第三方汇总的数顶',
     checkedAt: '2026-10-07',
   },
 };

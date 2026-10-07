@@ -216,31 +216,33 @@ describe('默认配置 routing.default.json', () => {
     expect(cfg.purposes.judge).toEqual(['jev-1.13']);
   });
 
-  it('gpt-6.1-sol 暂不进骨架（法国目录配置还没有，发版会被拒装）；目录样例里有它：Mirasim 中转、mirasim 执行方式、族 gpt', async () => {
+  it('gpt-6-sol 暂不进骨架（法国目录配置还没有，发版会被拒装）；目录样例里有它：Mirasim 中转、mirasim 执行方式、族 gpt；旧的错名 gpt-6.1-sol 哪里都没有', async () => {
     const cfg = await loadRoutingConfig();
+    expect(JSON.stringify(cfg)).not.toContain('gpt-6-sol');
     expect(JSON.stringify(cfg)).not.toContain('gpt-6.1-sol');
     const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
-    const route = example.routes.find((r) => r.id === 'mirasim-relay:gpt-6.1-sol:mirasim');
+    const route = example.routes.find((r) => r.id === 'mirasim-relay:gpt-6-sol:mirasim');
     expect([route?.poolId, route?.hostId, route?.modelId, route?.upstreamModel]).toEqual([
       'mirasim-relay',
       'mirasim',
-      'gpt-6.1-sol',
-      'gpt-6.1-sol',
+      'gpt-6-sol',
+      'gpt-6-sol',
     ]);
-    expect(example.models.find((m) => m.id === 'gpt-6.1-sol')?.family).toBe('gpt');
+    expect(example.models.find((m) => m.id === 'gpt-6-sol')?.family).toBe('gpt');
+    expect(JSON.stringify(example)).not.toContain('gpt-6.1-sol');
   });
 
-  it('【故意造出的失败】gpt-6.1-sol 放进界面用途：硬禁令 gpt-no-ui 照拦；验收等别的用途不拦', () => {
+  it('【故意造出的失败】gpt-6-sol 放进界面用途：硬禁令 gpt-no-ui 照拦；验收等别的用途不拦', () => {
     const sol = {
-      id: 'gpt-6.1-sol',
+      id: 'gpt-6-sol',
       family: 'gpt',
-      displayName: 'GPT 6.1 sol',
-      upstreamModel: 'gpt-6.1-sol',
+      displayName: 'GPT 6 sol',
+      upstreamModel: 'gpt-6-sol',
     };
     expect(hardBanFor(sol, 'ui')?.id).toBe('gpt-no-ui');
     expect(hardBanFor(sol, 'verify')).toBeUndefined();
     // 骨架里把它塞进 ui 的话，「界面用途里没有 GPT」那一条的判法会抓到
-    expect(['grok-4.7', 'gpt-6.1-sol'].some((m) => m.startsWith('gpt'))).toBe(true);
+    expect(['grok-4.7', 'gpt-6-sol'].some((m) => m.startsWith('gpt'))).toBe(true);
   });
 
   it('【故意造出的失败】文件读不到：明确报错，不当成空配置', async () => {
