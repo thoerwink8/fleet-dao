@@ -3,10 +3,11 @@
 // 主页「在跑的」卡片、「要你拍的」都链到这里。三段的单读 runs 表的流水（segmentRuns、usage.bySegment）；
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
-import { ArrowLeft, ListChecks } from 'lucide-react';
+import { ArrowLeft, ListChecks, SearchX } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { brand } from '#brand';
-import { useRouting, useTaskDetail } from '../api/client';
+import { isNotFound, useRouting, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RepoLink } from '../components/repo-link';
@@ -122,9 +123,53 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
   );
 }
 
+/** 没有这张单（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。 */
+function Missing({ taskId }: { taskId: string | undefined }) {
+  return (
+    <Panel>
+      <div role="alert">
+        <Empty
+          icon={SearchX}
+          title="没有这张单"
+          hint={
+            <>
+              <span className="block">
+                库里没有编号为「<span className="num">{taskId ?? ''}</span>
+                」的单：可能链接里的编号写错了，或这张单已经不在了。
+              </span>
+              <Button asChild size="sm" variant="outline" className="mt-3">
+                <Link to="/">回主页</Link>
+              </Button>
+            </>
+          }
+        />
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * 页面上该显示的失败：这一次的，或者这张单上一次的。没读到过数据的查询一被重读（实时推送、点重试），React Query 会把
+ * error 清空、退回 pending——不记住上一次的，页面就在「没有这张单」和加载骨架之间来回跳，推送勤就一直在转。读成了才清掉。
+ */
+function useShownError(
+  taskId: string | undefined,
+  detail: { error: unknown; data: TaskDetail | undefined },
+): unknown {
+  const [held, setHeld] = useState<{ taskId: string | undefined; error: unknown } | null>(null);
+  useEffect(() => {
+    if (detail.error) setHeld({ taskId, error: detail.error });
+    else if (detail.data) setHeld(null);
+  }, [taskId, detail.error, detail.data]);
+  if (detail.error) return detail.error;
+  if (detail.data || held?.taskId !== taskId) return undefined;
+  return held?.error;
+}
+
 export default function TaskPage() {
   const { taskId } = useParams();
   const detail = useTaskDetail(taskId);
+  const error = useShownError(taskId, detail);
   const now = useNow();
   if (!canSee('task')) return <NotOpen />;
   const d = detail.data;
@@ -142,8 +187,10 @@ export default function TaskPage() {
       description={d ? <Header d={d} now={now} /> : undefined}
       actions={<Back />}
     >
-      {detail.error ? (
-        <LoadError what="这张单" error={detail.error} />
+      {error && isNotFound(error) ? (
+        <Missing taskId={taskId} />
+      ) : error ? (
+        <LoadError what="这张单" error={error} onRetry={() => void detail.refetch()} />
       ) : !d ? (
         <LoadingRows rows={6} />
       ) : (
