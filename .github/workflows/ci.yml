@@ -491,15 +491,18 @@ jobs:
       - run: pnpm --filter ./packages/web run build:demo
 
   # 驾驶舱用户视角 e2e（#930，母单 #902）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端（Vite）+ Chromium，
-  # 站在创始人角度逐页走（packages/web/e2e，README 有跑法）。只在 ci-plan.ts 的 touchesE2e 认的改动（web、api、db、shared、
-  # 依赖和 workspace、本文件）或「认不出改了什么」时开（changes 的 e2e 输出）——它要几分钟、占一个并发槽，不让每个 PR 都多一个长 job。
+  # 站在创始人角度逐页走（packages/web/e2e，README 有跑法）。
+  # 决定 0029（#1186）：PR 只点改动页。changes 的 e2e 输出是「跑哪些 spec」（ci-plan.ts 的 e2eSpecsFor / e2eOutput）：
+  # `all` = 全套（非 pull_request 事件——每夜 schedule、主线推送——一律是它；改 e2e 夹具、本文件、映射表、映射不到页面的 web 文件也是）；
+  # 空格隔开的 spec 路径 = 只跑这几个；空串 = 这个 PR 不跑 e2e（只改后端等），job 整个跳过，汇总 job（ciVerdict）把它的 skipped 当本该跳过，回归靠每夜全量兜底。
+  # 它要几分钟、占一个并发槽，不让每个 PR 都多一个长 job。
   # 红了挡合并：check 的 needs 里有它，ciVerdict 把「本该跑 → success」一并核；跑成功才算过，跳过只在开关说不用跑的时候才算过。
   # 和 test 的 pg 台一样自己 docker run 起 postgres:16（不用 services：services 要等健康检查，这里放后台、装依赖之后再等）。
   # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，
   # 管理连接串指向容器；库名、端口、顺序（1366 只读一遍、1920 带写一遍）都和本机一样。
   e2e:
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    if: needs.changes.outputs.e2e != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -550,8 +553,19 @@ jobs:
           if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
           echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
           exit 1
+      # E2E_SPECS：all 跑全套；否则是 changes 算出的 spec 路径（相对 packages/web，文件名由 ci-plan.ts 限定成安全字符），原样当参数交给 playwright
       - name: 驾驶舱 e2e
-        run: pnpm --filter @fleet-dao/web e2e
+        env:
+          E2E_SPECS: ${{ needs.changes.outputs.e2e }}
+        run: |
+          set -euo pipefail
+          if [ "$E2E_SPECS" = all ]; then
+            pnpm --filter @fleet-dao/web e2e
+          else
+            echo "只点改动页：$E2E_SPECS"
+            # shellcheck disable=SC2086  # 故意按空格拆成多个 spec 参数
+            pnpm --filter @fleet-dao/web e2e $E2E_SPECS
+          fi
       # 总是留：跑过的每个页面的截图（support/fixtures.ts 的 shot 夹具存的）是界面 PR 的截图证据——e2e 盖住的页面以这份为准，
       # 不用再手工起环境截；红了还有报告、各进程日志（后端、前端）。都在仓根 _tmp/e2e/（公开仓：里面只有 e2e 自己造的假数据）
       - uses: actions/upload-artifact@v4
