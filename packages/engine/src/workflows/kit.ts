@@ -101,3 +101,27 @@ export function failureOf(error: unknown, source: string): FailureInfo {
   }
   return { source, code: 'UNKNOWN', message: String(cause), retryable: null };
 }
+
+/** 活动失败里带的冲突文件名（PortError.details.conflictFiles）；没有就从原文「有冲突：a、b。」里拆。 */
+export function conflictFilesOf(error: unknown, message: string): string[] {
+  const fromDetails = fileList(detailRecord(error)?.conflictFiles);
+  if (fromDetails.length > 0) return fromDetails;
+  const matched = /(?:有冲突|真冲突)：([^。\n]+)/.exec(message);
+  return fileList(matched?.[1]?.split('、'));
+}
+
+function detailRecord(error: unknown): { conflictFiles?: unknown } | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    const record = current as { details?: unknown; cause?: unknown };
+    const first = Array.isArray(record.details) ? record.details[0] : undefined;
+    if (first !== null && typeof first === 'object') return first as { conflictFiles?: unknown };
+    current = record.cause;
+  }
+  return undefined;
+}
+
+function fileList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter((item) => item.length > 0);
+}

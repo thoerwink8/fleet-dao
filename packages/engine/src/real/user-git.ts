@@ -227,6 +227,39 @@ export async function uncommittedTracked(t: UserTree): Promise<string[]> {
 }
 
 /**
+ * 树里还没解完的冲突。两样任一就算：MERGE_HEAD 还在，或 `git diff --check`（含已暂存）看到冲突标记。
+ * 没有就是空数组。查不成就抛，不当成没有——空数组是「查过、没有」，不是「没查成」。
+ */
+export async function unresolvedConflicts(t: UserTree): Promise<string[]> {
+  const left = await mergeLeft(t);
+  if (left !== 'yes' && left !== 'no') {
+    throw new PortError('GIT_FAILED', `有没有没并完的合并没查成（${left.unknown}）`, {
+      retryable: true,
+      details: { user: t.user, dir: t.dir },
+    });
+  }
+  const files = new Set<string>();
+  if (left === 'yes') {
+    const listed = await git(t, ['diff', '--name-only', '--diff-filter=U'], '列没解的冲突');
+    for (const file of lines(listed)) files.add(file);
+  }
+  for (const cached of [false, true]) {
+    const check = await git(t, ['diff', ...(cached ? ['--cached'] : []), '--check'], '查冲突标记', {
+      allow: [2],
+    });
+    if (check.code !== 2) continue;
+    const blob = `${text(check)}\n${check.stderr}`;
+    for (const line of blob.split('\n')) {
+      const matched = /^(.*):\d+: leftover conflict marker$/.exec(line.trim());
+      const file = matched?.[1];
+      if (file) files.add(file);
+    }
+  }
+  if (left === 'yes' && files.size === 0) files.add('（MERGE_HEAD 还在）');
+  return [...files].sort();
+}
+
+/**
  * 这一步（一个会话）自己改了什么，从哪儿比起。会话在树里并过主线（推之前并主线有冲突、退回会话照着 git merge 解；并好了
  * 却没推成、树停在引擎的并提交上），base..HEAD 就把并进来的主线也算成这一步改的：#293 的开 PR 前验证因此把主线上别人改的
  * 页面代码算成这张单改的，按界面类派，没人可派。所以一律先扣掉主线。主线 = 树里钉的 origin/<主线>（pinMainline：建树、
@@ -444,8 +477,9 @@ const MERGE_LEFT_TEXT =
 
 /**
  * 把 sha（引擎取进来的最新主线头）并进当前分支（--no-ff，提交身份用树里设好的「干活的」机器人）。
- * 有冲突（或没跟踪的文件挡着）就撤掉这次合并、树回到并之前的样子，回冲突的文件交给调用方退回会话；
- * 别的失败照抛，不当成冲突、也不当成并好了。
+ * 内容冲突（列出了没合并的文件，并且 MERGE_HEAD 还在）：不撤，冲突标记原样留在树里，回冲突的文件。
+ * 调用方交回会话去解。撤掉的话会话起来看到的是干净的树，不知道冲突在哪（#1303）。
+ * 没跟踪的文件挡着、钩子失败、列不出冲突：照旧撤掉（撤得掉的话），树回到并之前，不当成已经并好。
  * 没并成之后的收拾（列冲突、撤销）自己也可能没成：锁文件被占着时撤销会被同一把锁挡住。报错一律以「并」这一步开头，
  * 收拾哪步没成附在后面，树里留下了什么照实写。git 2.45 及以前写不了索引也会留下 MERGE_HEAD（退出码 1），2.46 起
  * 直接退出、不留（退出码 128）——哪种都照这个写法报，不靠 git 的版本。
@@ -453,7 +487,7 @@ const MERGE_LEFT_TEXT =
 export async function mergeInto(
   t: UserTree,
   sha: string,
-): Promise<{ merged: string } | { conflict: string[] }> {
+): Promise<{ merged: string } | { conflict: string[]; pending: boolean }> {
   assertSha(sha, '要并的提交');
   const bin = t.git ?? GIT;
   const what = `并 ${sha.slice(0, 7)}`;
@@ -471,6 +505,10 @@ export async function mergeInto(
     aborted ||= listed.aborted;
   }
   const left = await mergeLeft(t);
+  // 内容冲突留给会话：MERGE_HEAD 和冲突标记都还在，不再 git merge --abort。
+  if (left === 'yes' && unmerged !== null && unmerged.length > 0) {
+    return { conflict: unmerged, pending: true };
+  }
   let undone = false;
   if (left === 'yes') {
     const abort = await run(t, [bin, 'merge', '--abort']);
@@ -495,7 +533,8 @@ export async function mergeInto(
         : describeGitFailure(what, r);
     throw new PortError('GIT_FAILED', [head, ...after].join('；'), { retryable: !aborted, details });
   }
-  if (unmerged !== null && unmerged.length > 0) return { conflict: unmerged };
+  // 索引里还有没合并的路径、但没有 MERGE_HEAD（合并没进入「正在合并」）：标记还在，同样留给会话。
+  if (unmerged !== null && unmerged.length > 0) return { conflict: unmerged, pending: true };
   const stderr = r.stderr;
   if (/would be overwritten by merge/.test(stderr)) {
     const blocking = stderr
@@ -503,7 +542,11 @@ export async function mergeInto(
       .filter((l) => l.startsWith('\t'))
       .map((l) => l.trim())
       .filter(Boolean);
-    return { conflict: blocking.length > 0 ? blocking : ['（工作树里有文件挡着，没列出是哪几个）'] };
+    // 合并没开始，树里没有冲突标记：会话得自己再并一次。
+    return {
+      conflict: blocking.length > 0 ? blocking : ['（工作树里有文件挡着，没列出是哪几个）'],
+      pending: false,
+    };
   }
   const message = `${describeGitFailure(what, r)}${undone ? '；没并成的合并已撤掉，树回到并之前' : ''}`;
   throw new PortError('GIT_FAILED', message, { retryable: true, details });

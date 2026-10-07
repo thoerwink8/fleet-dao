@@ -43,6 +43,7 @@ import {
   headOf,
   ownSpan,
   type UserTree,
+  unresolvedConflicts,
   worktreeChanges,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
@@ -158,7 +159,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const changedFiles = await changedFilesSince(t, span);
       const commits = await commitsSince(t, span);
       const leftover = await worktreeChanges(t);
-      return { head, commits: commits.length, changedFiles, leftover };
+      const conflicts = await unresolvedConflicts(t);
+      return { head, commits: commits.length, changedFiles, leftover, conflicts };
     },
 
     async checkGuarded(input: CheckGuardedInput, ctx: PortContext): Promise<GuardedPaths> {

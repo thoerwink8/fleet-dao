@@ -75,3 +75,27 @@ export function widen(avoid: Avoid, route: RouteChoice, scope: AvoidScope): Avoi
 export function stripUndefined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 }
+
+/** 推分支并主线撞上冲突，交回会话去解（不在 push 这一步里原地重试）。 */
+export class ConflictHandoff extends Error {
+  readonly files: readonly string[];
+  constructor(files: readonly string[]) {
+    super(`有冲突没解：${files.join('、') || '（没读到冲突文件名）'}`);
+    this.name = 'ConflictHandoff';
+    this.files = files;
+  }
+}
+
+/**
+ * 交回会话的那一句：冲突文件名，加上「解完 git add 并提交」。
+ * 上一轮已经交过（意见里有「解完」）还没解，补上「上一轮没解」。和上一轮原文一样就由调用方挂起。
+ */
+export function conflictHandoffLine(files: readonly string[], previous: readonly string[]): string {
+  const names =
+    files
+      .map((f) => f.trim())
+      .filter(Boolean)
+      .join('、') || '（没读到冲突文件名）';
+  const base = `有冲突没解：${names}。树里留着冲突标记，解完 \`git add\` 并提交`;
+  return previous.some((line) => line.includes('解完')) ? `${base}。上一轮没解` : base;
+}
