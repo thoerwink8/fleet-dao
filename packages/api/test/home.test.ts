@@ -14,34 +14,17 @@ async function getHome(h: Pick<Harness, 'cockpit' | 'login'>) {
   return h.cockpit.request(HOME_PATH, { headers: { cookie } });
 }
 
-/** 一条旧会话留下的未答追问：共享 fixture 不带（agent / 契约 / 飞书 outbox 都按全表条数断言），主页的测试自己种——为了证明主页不再放追问（#928）。 */
-function pendingAsk(): MemoryData['asks'][number] {
-  return {
-    id: 'a0000000-0000-4000-8000-0000000000a1',
-    taskId: IDS.task12,
-    runId: 'd0000000-0000-4000-8000-000000000001',
-    question: '验证码短信的模板用通用模板还是单独报备？单独报备要等一两天审核。',
-    options: ['先用通用模板', '单独报备'],
-    askedAt: T0.toISOString(),
-    scope: 'task',
-    recommended: '先用通用模板',
-  };
-}
-
 describe('/api/home（内存版）', () => {
-  it('三块聚齐：decision（approval 通知，库里有未答的旧追问也不进来）、running（在跑的单）、done（merged PR 反查 issue），health 三格', async () => {
-    const h = harness({ data: { ...devFixtures(T0), asks: [pendingAsk()] } });
+  it('三块聚齐：decision（approval 通知）、running（在跑的单）、done（merged PR 反查 issue），health 三格', async () => {
+    const h = harness({ data: devFixtures(T0) });
     const res = await getHome(h);
     expect(res.status).toBe(200);
     const home = HomeResponseSchema.parse(await res.json());
 
-    // 要你拍的：fixture 里一条 approval 的 decision 通知。库里种了一条未答追问，它不在这里（v3 没有 AI 追问，答了没人收；
-    // 旧追问在通知中心只读展示，#928）：既没有 kind=ask 的，也没有用它的编号、问题原文冒出来的。
+    // 要你拍的：fixture 里一条 approval 的 decision 通知（v3 没有 AI 追问，没有 kind=ask 的）。
     const kinds: string[] = home.decisions.map((d) => d.kind);
     expect(kinds).toContain('approval');
     expect(kinds).not.toContain('ask');
-    expect(home.decisions.some((d) => d.id === pendingAsk().id)).toBe(false);
-    expect(JSON.stringify(home.decisions)).not.toContain('验证码短信的模板');
     const approval = home.decisions.find((d) => d.kind === 'approval');
     expect(approval?.title).toContain('等你批');
     // approval 通知只算一回（不另查 approvals 表重复列）。
@@ -187,8 +170,8 @@ describe('/api/home（内存版）', () => {
       expect(home.flow.map((f) => f.samples)).toEqual([2, 1, 0]);
     });
 
-    it('asking 的单（只有旧会话留下的会是这个状态）：照样标「等你拍」，等的那件事只认 decision 通知，库里的追问不再借它冒出来', async () => {
-      const h = harness({ data: { ...devFixtures(T0), asks: [pendingAsk()] } });
+    it('asking 的单（只有旧会话留下的会是这个状态）：照样标「等你拍」，等的那件事只认 decision 通知', async () => {
+      const h = harness({ data: devFixtures(T0) });
       const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
       if (!task) throw new Error('样例数据里没有任务');
       task.state = 'asking';
@@ -197,8 +180,7 @@ describe('/api/home（内存版）', () => {
         waitingReason: 'founder_decision',
         pendingDecision: expect.stringContaining('等你批'),
       });
-      expect(r?.pendingDecision).not.toContain('验证码短信的模板');
-      // 起点是那条通知的时刻，不是追问的提问时刻（T0）
+      // 起点是那条通知的时刻（不是 T0）
       expect(r?.waitingSince).toBeDefined();
       expect(r?.waitingSince).not.toBe(T0.toISOString());
     });
@@ -326,7 +308,7 @@ async function start(options: HarnessOptions = {}) {
 
 describe('/api/home（PG 版）', () => {
   it('换真库照样聚齐三块：approval 通知认出 dedupeKey、merged PR 按合并时刻、形状过契约', async () => {
-    const h = await start({ data: { ...devFixtures(T0), asks: [pendingAsk()] } });
+    const h = await start({ data: devFixtures(T0) });
     const { cookie } = await h.login();
     const res = await h.cockpit.request(HOME_PATH, { headers: { cookie } });
     expect(res.status).toBe(200);
@@ -337,15 +319,5 @@ describe('/api/home（PG 版）', () => {
     expect(home.done.map((d) => d.prNumber)).toEqual([39]);
     expect(home.done[0]?.issueNumber).toBe(13);
     expect(home.health.engine.state).toBe('unknown');
-  });
-
-  it('故意造红（PG）：主页不再读追问表——旧追问的表读不到，主页照常 200（读追问的是通知中心那条 /api/asks/legacy）', async () => {
-    const h = await start();
-    h.store.listPendingAsks = async () => {
-      throw new Error('asks 表读不到');
-    };
-    const { cookie } = await h.login();
-    const res = await h.cockpit.request(HOME_PATH, { headers: { cookie } });
-    expect(res.status).toBe(200);
   });
 });

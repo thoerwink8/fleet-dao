@@ -229,7 +229,7 @@ VPS 时间线 38 行：completed 10，blocked 21，cancelled 6，terminated 1。
 | session_events | session_id, seq, at, kind（改文件 / 跑测试 / 命令 / 消息）, payload | 插头（读各家命令行的过程记录） | 直播、停滞判断 |
 | ★ progress_steps | session_id, idx, text, state（未开始 / 进行中 / 完成）, updated_at | `fleet plan` | 看板进度条、issue 进度段 |
 | progress_notes | session_id, at, text | `fleet say` | 任务页 |
-| task_questions | requirement_id, session_id, question, answer, answered_by, via, asked_at, answered_at | `fleet ask`、飞书、issue | 任务页、通知 |
+| task_questions | requirement_id, session_id, question, answer, answered_by, via, asked_at, answered_at | 旧系统的 `fleet ask`、飞书、issue（新系统已删，#939） | 任务页、通知 |
 
 **用量、额度、账单**
 

@@ -9,7 +9,7 @@ import { z } from 'zod';
 export const AGENT_API_PREFIX = '/agent/v1';
 
 /**
- * 写动作（plan / say / ask / done / blocked）带这个请求头：同一条命令的几次重试用同一个值。
+ * 写动作（plan / say / done / blocked）带这个请求头：同一条命令的几次重试用同一个值。
  * 后端按「会话 + 键」只执行一次，重试拿到第一次成功的结果，不会把一句话记成两句；没成功的那次不占键，重试会重新执行。
  */
 export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
@@ -28,34 +28,6 @@ export const PlanRequest = z
 
 /** 一句白话进度，例如「正在写验证码过期的测试」。 */
 export const SayRequest = z.object({ text: z.string().min(1).max(500) });
-
-/**
- * 问创始人（#259）：一律带选项和推荐，命令当场返回、不等回答——他多半不在场，问他不许卡住活。
- * 默认是这张单范围内的岔路，按推荐先做；outside = 超出这张单的范围，另开一张单等他拍，这张单绕开它接着做；
- * hold = 碰了人闸四类（release 对外发布、spend 花钱、delete 删数据、standard 改标准），也先按推荐做，合并前等他批。
- * 合不合格由 core 的 checkAsk 判：不合格回 400（ask_incomplete），message 写明怎么补。
- */
-/** 一次提问最多几个选项（飞书卡片一排放得下的按钮数）：命令行本地先挡，后端 core 的 checkAsk 照它判。 */
-export const ASK_MAX_OPTIONS = 4;
-
-export const AskRequest = z.object({
-  question: z.string().min(1).max(2000),
-  /** 至少 2 个、最多 4 个由后端判（core 的 checkAsk，退回时写清怎么补）；这里只挡离谱的大小。 */
-  options: z.array(z.string().min(1).max(200)).max(20).optional(),
-  /** 推荐哪个：照抄其中一个选项。 */
-  recommend: z.string().min(1).max(200).optional(),
-  outside: z.boolean().optional(),
-  hold: z.string().min(1).max(20).optional(),
-});
-export const AskResponse = z.object({
-  askId: z.string(),
-  /**
-   * answered = 这一句创始人已经回过了（同一个会话问过一模一样的），answer 是他的回答；assumed = 按推荐先做，answer 是推荐的；
-   * outside = 另开一张单等他拍，这张单绕开它接着做；held = 先按推荐做（answer），合并前等他批。
-   */
-  status: z.enum(['answered', 'assumed', 'outside', 'held']),
-  answer: z.string().optional(),
-});
 
 /**
  * 交活。后端会核实，不是说了就算：写码的活要有本次会话跑测试的记录、且最后一次是绿的；带了 PR 编号就核对它在本会话分支上、没关掉。
@@ -107,7 +79,6 @@ export const AgentRoutes = {
   task: { method: 'GET', path: '/task', response: TaskResponse },
   plan: { method: 'POST', path: '/plan', request: PlanRequest },
   say: { method: 'POST', path: '/say', request: SayRequest },
-  ask: { method: 'POST', path: '/ask', request: AskRequest, response: AskResponse },
   history: { method: 'POST', path: '/history', request: HistoryRequest, response: HistoryResponse },
   done: { method: 'POST', path: '/done', request: DoneRequest },
   blocked: { method: 'POST', path: '/blocked', request: BlockedRequest },

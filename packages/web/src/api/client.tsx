@@ -28,7 +28,6 @@ import type {
   FranceReleaseState,
   HomeResponse,
   Jobs,
-  LegacyAsks,
   LiveEvent,
   Me,
   MovedPurposeModel,
@@ -98,10 +97,6 @@ export interface FleetApi {
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
-  /** 旧会话留下的、还没处理的追问（通知中心只读展示，#928）。 */
-  legacyAsks(): Promise<LegacyAsks>;
-  /** 把一条旧追问标成已处理（落库、进操作记录）；没有「回答」：新流程没有收追问回答的地方。 */
-  closeAsk(askId: string): Promise<void>;
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
@@ -184,7 +179,6 @@ export const keys = {
   repoDispatch: ['repo-dispatch'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
-  legacyAsks: ['legacy-asks'] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
@@ -530,24 +524,6 @@ export function useTaskAction() {
   });
 }
 
-/** 旧会话留下的、还没处理的追问（通知中心用）。 */
-export function useLegacyAsks() {
-  const api = useApi();
-  return useQuery({ queryKey: keys.legacyAsks, queryFn: () => api.legacyAsks() });
-}
-
-export function useCloseAsk() {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (askId: string) => api.closeAsk(askId),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.legacyAsks });
-      qc.invalidateQueries({ queryKey: ['audit'] });
-    },
-  });
-}
-
 /**
  * 改一条路由的思考档位（#470）。不先改缓存：档位要等后端照这条路由的执行方式判过（不认的 422、别人刚改过 409）才算数，
  * 页面在等的那一下标「改着」；不管成没成都重拉一次，页面上永远是库里现在的值。
@@ -685,7 +661,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   // 三段流水（scope / manual / verify）：主页的流水线图和任务详情的流水都读它
   runs: [keys.home, ['task']],
   progress_events: [['board'], ['task']],
-  asks: [['board'], ['task'], ['legacy-asks']],
+  // asks 表留着（删表要创始人点头，#939），没有读它的页面：变了不用重拉任何东西
+  asks: [],
   // approvals 还没有专门的页面查询键；按它挂在任务 / 子任务上，先失效这两处，主页「要你拍的」也跟着重拉。
   approvals: [['board'], ['task'], keys.home],
   // 池本身改了（pools 的触发器，0002）也报成 quota_windows，所以 pools 不单列。

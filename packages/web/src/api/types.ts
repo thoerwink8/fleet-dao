@@ -2,7 +2,6 @@
 // 后端对每个返回都按同一份定义校验，前端的 HTTP 层也照它解析——字段增删改 web-api.ts，这里自动跟上。
 import type {
   ActivitySchema,
-  AskSchema,
   AuditEntrySchema,
   AuditResponse,
   AuthConfigResponse,
@@ -36,7 +35,6 @@ import type {
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
-  LegacyAsksResponse,
   LivenessFactSchema,
   LivenessVerdictSchema,
   MeResponse,
@@ -116,9 +114,6 @@ export type NowItem = z.infer<typeof NowItemSchema>;
 
 export type TaskDetail = z.infer<typeof TaskDetailResponse>;
 export type Run = z.infer<typeof RunSchema>;
-export type Ask = z.infer<typeof AskSchema>;
-export type LegacyAsks = z.infer<typeof LegacyAsksResponse>;
-export type LegacyAsk = LegacyAsks['items'][number];
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;

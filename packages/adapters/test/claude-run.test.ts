@@ -70,7 +70,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(env.FLEET_API).toBe('http://127.0.0.1:7070');
     expect(env.FLEET_TOKEN).toBe('tok-7');
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
-    // Bash 工具默认 2 分钟就杀命令，长测试和等回答的 fleet ask 都扛不住
+    // Bash 工具默认 2 分钟就杀命令，长测试扛不住
     expect(env.BASH_DEFAULT_TIMEOUT_MS).toBe(String(DEFAULT_BASH_TIMEOUT_MS));
     expect(Number(env.BASH_DEFAULT_TIMEOUT_MS)).toBeGreaterThanOrEqual(6 * 60_000);
     expect(env.BASH_MAX_TIMEOUT_MS).toBe(String(30 * 60_000));

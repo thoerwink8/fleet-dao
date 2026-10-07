@@ -2,9 +2,9 @@
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { asks, auditLog, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
+import { auditLog, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { AskResponse, BoardResponse, TaskDetailResponse } from '@fleet-dao/shared';
+import { BoardResponse, TaskDetailResponse } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, devFixtures } from '@fleet-dao/store';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -25,11 +25,8 @@ import {
   deliverGithub,
   type HarnessOptions,
   IDS,
-  openEvents,
   pgHarness,
-  readUntil,
   T0,
-  write,
 } from './harness.ts';
 
 let t: TestDb;
@@ -96,60 +93,6 @@ describe('接口跑在真库上', () => {
       .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'blocked')));
     expect(rows.filter((r) => (r.payload as { reason?: string }).reason === '真库上的一句')).toHaveLength(1);
     expect(h.signals).toHaveLength(0);
-  });
-
-  it('fleet ask 在真库上：不等回答、当场按推荐先做，范围和推荐落库；别处（飞书、issue）写进库的回答，再问同一句回「答过了」', async () => {
-    const h = await start();
-    const ask = async () =>
-      AskResponse.parse(
-        await (
-          await h.agent.request(
-            '/agent/v1/ask',
-            agentRequest(h.agentToken(), 'POST', {
-              question: '用哪家短信？',
-              options: ['腾讯云', '阿里云'],
-              recommend: '阿里云',
-            }),
-          )
-        ).json(),
-      );
-    const first = await ask();
-    expect(first).toMatchObject({ status: 'assumed', answer: '阿里云' });
-    const [row] = await t.db.select().from(asks).where(eq(asks.id, first.askId));
-    expect(row).toMatchObject({
-      scope: 'task',
-      recommended: '阿里云',
-      options: ['阿里云', '腾讯云'],
-      hold: null,
-    });
-    await t.db
-      .update(asks)
-      .set({ answer: '腾讯云', answeredBy: IDS.founderB, answeredAt: new Date() })
-      .where(eq(asks.id, first.askId));
-    expect(await ask()).toEqual({ askId: first.askId, status: 'answered', answer: '腾讯云' });
-  });
-
-  it('SSE：驾驶舱里关闭旧追问 → 库里的触发器发通知 → 打开的页面收到 asks 的变化', async () => {
-    const h = await start();
-    const session = await h.login();
-    const asked = AskResponse.parse(
-      await (
-        await h.agent.request(
-          '/agent/v1/ask',
-          agentRequest(h.agentToken(), 'POST', {
-            question: '验证码几位？',
-            options: ['6 位', '4 位'],
-            recommend: '6 位',
-          }),
-        )
-      ).json(),
-    );
-    const { reader } = await openEvents(h, session.cookie);
-    const buf = await readUntil(reader, 'event: ready');
-    const res = await h.cockpit.request(`/api/asks/${asked.askId}/close`, write('POST', session));
-    expect(res.status).toBe(200);
-    await readUntil(reader, `{"table":"asks","id":"${asked.askId}"}`, buf);
-    await reader.cancel();
   });
 
   it('GitHub 事件进来（真库）：PR 事件原文落库、写镜像；同一投递再来不重复；issue 的事件记成不处理、不建任务', async () => {

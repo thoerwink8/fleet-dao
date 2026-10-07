@@ -16,10 +16,7 @@ function used(prefix: string): Set<string> {
 }
 
 /** 契约里有、前端（http.ts）没用的：key → 为什么。 */
-const WEB_NOT_USED: Record<string, string> = {
-  answerAsk:
-    '回答追问一律 409（新流程没有收回答的地方，#928）：驾驶舱不再调，只剩飞书网关还在用它（FEISHU_GATEWAY_WEB_ROUTES）',
-};
+const WEB_NOT_USED: Record<string, string> = {};
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch
   feishuLogin: '浏览器整页跳转，不走 fetch',

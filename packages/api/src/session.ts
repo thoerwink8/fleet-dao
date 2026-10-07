@@ -193,7 +193,7 @@ const GATEWAY_WEB_ROUTES = FEISHU_GATEWAY_WEB_ROUTES.map((name) => {
 type TaskAction = z.infer<typeof TaskActionRequest>['action'];
 
 /**
- * 网关能对需求做的动作只有叫停（design 第十四节：通行证只管查任务、叫停、回答追问）。taskAction 是一条路由，
+ * 网关能对需求做的动作只有叫停（design 第十四节：通行证只管查任务、叫停）。taskAction 是一条路由，
  * 按路径放行管不到动作，所以在这里再判：通行证漏了也不能替创始人暂停、继续、换路由。
  */
 const GATEWAY_TASK_ACTIONS: ReadonlySet<TaskAction> = new Set(['stop']);
@@ -233,7 +233,7 @@ export function requireSession(config: Config, store: Store, now: () => Date): M
           throw new ApiError(
             403,
             'gateway_route_not_allowed',
-            '网关通行证只能调飞书接口，和查任务、叫停、回答追问这几条驾驶舱接口',
+            '网关通行证只能调飞书接口，和查任务、叫停这几条驾驶舱接口',
           );
         }
       }

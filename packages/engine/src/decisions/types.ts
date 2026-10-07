@@ -8,10 +8,9 @@
 export interface Feedback {
   /**
    * hygiene = 卫生检查拦下了会话交的内容（密钥、账号编号……），要拿掉；delivery = 交的东西没过引擎的核对
-   * （没提交的改动、空交付……）；ask = 会话 fleet blocked 说要人，退回让它带选项和推荐用 fleet ask 重问（#259）；
-   * answer = 创始人晚到的回答改选了别的，照他选的改（#259，存档点交给 Lead）。
+   * （没提交的改动、空交付……）。
    */
-  kind: 'ci' | 'review' | 'conflict' | 'merge-return' | 'plan' | 'hygiene' | 'delivery' | 'ask' | 'answer';
+  kind: 'ci' | 'review' | 'conflict' | 'merge-return' | 'plan' | 'hygiene' | 'delivery';
   summary: string;
   items: string[];
 }

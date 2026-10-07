@@ -1,8 +1,8 @@
-import { AskResponse, HistoryResponse, TaskResponse } from '@fleet-dao/shared';
+import { HistoryResponse, TaskResponse } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
 import { signPayload } from '../src/tokens.ts';
-import { agentRequest, DEV_RUN_ID, DEV_USER_ID, errorCode, harness, IDS, write } from './harness.ts';
+import { agentRequest, DEV_RUN_ID, errorCode, harness, IDS, write } from './harness.ts';
 
 describe('fleet 令牌', () => {
   it('签出来的能验过；换密钥、改内容、过期、寿命超上限、签发时间在未来都不认', () => {
@@ -210,8 +210,8 @@ describe('/agent/v1 的七个动作', () => {
 });
 
 describe('fleet 命令一律只写库、不发信号（#901）', () => {
-  // 以前 ask/done/blocked 会给会话所属的工作流发 agentEvent（编号 req:/sub:），引擎的任务工作流不听这个信号，发出去没人收。
-  it('plan、say、blocked、done、ask 都不发任何信号：子任务会话、需求自己的会话都一样', async () => {
+  // 以前 done/blocked 会给会话所属的工作流发 agentEvent（编号 req:/sub:），引擎的任务工作流不听这个信号，发出去没人收。
+  it('plan、say、blocked、done 都不发任何信号：子任务会话、需求自己的会话都一样', async () => {
     const h = harness();
     h.store.data.progress.push({
       id: 'wake-target-test-run',
@@ -245,11 +245,7 @@ describe('fleet 命令一律只写库、不发信号（#901）', () => {
       ttlSeconds: 3600,
       now: h.clock.now,
     });
-    const res = await post(
-      'ask',
-      { question: '要不要支持邮箱验证码？', options: ['要', '不要'], recommend: '不要' },
-      requirementToken,
-    );
+    const res = await post('say', { text: '在写需求文档' }, requirementToken);
     expect(res.status).toBe(200);
     expect(h.signals).toHaveLength(0);
   });
@@ -270,7 +266,7 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       payload: { passed: true, command: 'pnpm check' },
     });
 
-  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条；ask 同一句也只开一条', async () => {
+  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条', async () => {
     const h = harness();
     passingTest(h);
     const before = h.store.data.progress.length;
@@ -293,13 +289,6 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       'done',
     ]);
     expect(h.signals).toHaveLength(0);
-
-    const askBody = { question: '几位？', options: ['6 位', '4 位'], recommend: '6 位' };
-    const asked = [await post(h, 'ask', askBody, 'key-ask')];
-    asked.push(await post(h, 'ask', askBody, 'key-ask'));
-    const [a, b] = await Promise.all(asked.map(async (r) => AskResponse.parse(await r.json())));
-    expect(b?.askId).toBe(a?.askId);
-    expect(h.store.data.asks).toHaveLength(1);
   });
 
   it('没带键照常执行（老插头）：两次就是两条', async () => {
@@ -405,96 +394,6 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
     expect(await errorCode(await post(h, 'say', { text: 'x' }, 'k'.repeat(201)))).toBe(
       'invalid_idempotency_key',
     );
-  });
-});
-
-describe('fleet ask：问他不挡路（#259）', () => {
-  const ask = (h: ReturnType<typeof harness>, body: Record<string, unknown>) =>
-    h.agent.request('/agent/v1/ask', agentRequest(h.agentToken(), 'POST', body));
-  const sms = { question: '用哪家短信？', options: ['腾讯云', '阿里云'], recommend: '阿里云' };
-
-  it('这张单范围内的岔路：当场回「已按推荐先做」，不等回答；推荐的排第一个落库；同一句再问复用同一条', async () => {
-    const h = harness();
-    const first = AskResponse.parse(await (await ask(h, sms)).json());
-    expect(first).toMatchObject({ status: 'assumed', answer: '阿里云' });
-    expect(h.store.data.asks).toHaveLength(1);
-    expect(h.store.data.asks[0]).toMatchObject({
-      question: '用哪家短信？',
-      options: ['阿里云', '腾讯云'],
-      scope: 'task',
-      recommended: '阿里云',
-    });
-    const again = AskResponse.parse(await (await ask(h, sms)).json());
-    expect(again).toEqual(first);
-    expect(h.store.data.asks).toHaveLength(1);
-    expect(h.signals).toHaveLength(0);
-  });
-
-  it('超出这张单的范围：回 outside（另开单等他拍，这张单绕开接着做），不给工作流加人闸', async () => {
-    const h = harness();
-    const body = AskResponse.parse(
-      await (await ask(h, { ...sms, question: '注册页也要验证码吗？', outside: true })).json(),
-    );
-    expect(body.status).toBe('outside');
-    expect(body.answer).toBeUndefined();
-    expect(h.store.data.asks[0]).toMatchObject({ scope: 'outside', recommended: '阿里云' });
-    expect(h.signals).toHaveLength(0);
-  });
-
-  it('【故意造出的失败】碰了人闸：引擎的任务工作流不能按提问追加人闸，问题记下但明说没加上（409 hold_not_supported），不回「合并前等批」装作拦住了；重问同一句还是 409、不多记一条', async () => {
-    const h = harness();
-    const held = { ...sms, question: '短信要开按量付费，用哪家？', hold: 'spend' };
-    const res = await ask(h, held);
-    expect(res.status).toBe(409);
-    const body = (await res.json()) as { error: { code: string; message: string } };
-    expect(body.error.code).toBe('hold_not_supported');
-    expect(body.error.message).toContain('没加上');
-    expect(h.store.data.asks).toHaveLength(1);
-    expect(h.store.data.asks[0]).toMatchObject({ scope: 'hold', hold: 'spend' });
-    expect((await ask(h, held)).status).toBe(409);
-    expect(h.store.data.asks).toHaveLength(1);
-    expect(h.signals).toHaveLength(0);
-  });
-
-  it('【故意造出的失败】没带选项、没带推荐、推荐不在选项里、选项太多、人闸认不出、既超范围又碰人闸：400 ask_incomplete，一条都不记', async () => {
-    const h = harness();
-    const bad: Record<string, unknown>[] = [
-      { question: '用哪家短信？' },
-      { question: '用哪家短信？', options: ['阿里云'], recommend: '阿里云' },
-      { question: '用哪家短信？', options: ['阿里云', '腾讯云'] },
-      { question: '用哪家短信？', options: ['阿里云', '腾讯云'], recommend: '华为云' },
-      { question: '用哪家短信？', options: ['甲', '乙', '丙', '丁', '戊'], recommend: '甲' },
-      { ...sms, hold: 'secret' },
-      { ...sms, hold: 'spend', outside: true },
-    ];
-    for (const body of bad) {
-      const res = await ask(h, body);
-      expect(res.status, JSON.stringify(body)).toBe(400);
-      expect(await errorCode(res)).toBe('ask_incomplete');
-    }
-    expect(h.store.data.asks).toHaveLength(0);
-    expect(h.signals).toHaveLength(0);
-  });
-
-  it('答过了的（库里已有的回答，老数据）：再问同一句直接回答案', async () => {
-    const h = harness();
-    const first = AskResponse.parse(await (await ask(h, sms)).json());
-    // 驾驶舱的回答接口现在一律 409（#928）：库里的回答只可能是以前留下的，这里直接写库当老数据
-    await h.store.answerAsk(
-      { askId: first.askId, answer: '腾讯云', by: { kind: 'user', id: DEV_USER_ID } },
-      {
-        actor: { kind: 'user', id: DEV_USER_ID },
-        action: 'ask.answer',
-        target: `task:${IDS.task12}`,
-        via: 'cockpit',
-        ok: true,
-      },
-    );
-    expect(AskResponse.parse(await (await ask(h, sms)).json())).toEqual({
-      askId: first.askId,
-      status: 'answered',
-      answer: '腾讯云',
-    });
   });
 });
 

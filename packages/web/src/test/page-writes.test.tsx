@@ -169,70 +169,15 @@ describe('通知中心：处理了', () => {
   });
 });
 
-describe('通知中心：旧会话留下的提问（#928）——只读 + 关闭，没有「回答」', () => {
-  const first = async (api: MockApi) => {
-    const ask = (await api.legacyAsks()).items[0];
-    if (!ask) throw new Error('假数据里没有待处理的旧追问');
-    return ask;
-  };
-  const rowOf = (question: string) => screen.getByText(question).closest('li') as HTMLElement;
-
-  test('列出旧追问：写明新流程不会再产生、没人收回答；每条有「关闭」，整页没有任何「回答」按钮', async () => {
+describe('通知中心：没有追问', () => {
+  test('整页没有「回答」按钮、没有旧追问区块（#939：追问没有收信处，入口一个不留）', async () => {
     const api = createMockApi({ live: false });
-    const ask = await first(api);
-    renderApp(<NotificationsPage />, { api });
-    await screen.findByText(ask.question);
-    expect(screen.getByText(/新流程不会再产生这类提问，也不会有人收到你的回答/)).toBeTruthy();
-    expect(within(rowOf(ask.question)).getByRole('button', { name: '关闭' })).toBeTruthy();
-    expect(screen.queryAllByRole('button', { name: /^回答/ })).toHaveLength(0);
-  });
-
-  test('点「关闭」：发 closeAsk(追问号)，提示带问题原文；这条从区块里消失', async () => {
-    const api = createMockApi({ live: false });
-    const close = vi.spyOn(api, 'closeAsk');
-    const ask = await first(api);
-    renderApp(<NotificationsPage />, { api });
-    await screen.findByText(ask.question);
-    fireEvent.click(within(rowOf(ask.question)).getByRole('button', { name: '关闭' }));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('关闭了', { description: ask.question }));
-    expect(close).toHaveBeenCalledExactlyOnceWith(ask.id);
-    await waitFor(() => expect(screen.queryByText(ask.question)).toBeNull());
-  });
-
-  test('【故意造出的失败】后端拒了（409 已经处理过）：弹「没关掉」和原因，这条还在，不弹成功', async () => {
-    const api = createMockApi({ live: false });
-    vi.spyOn(api, 'closeAsk').mockRejectedValueOnce(
-      new ApiError(409, 'already_answered', '这条追问已经处理过了'),
-    );
-    const ask = await first(api);
-    renderApp(<NotificationsPage />, { api });
-    await screen.findByText(ask.question);
-    fireEvent.click(within(rowOf(ask.question)).getByRole('button', { name: '关闭' }));
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('没关掉', { description: '这条追问已经处理过了' }),
-    );
-    expect(toast.success).not.toHaveBeenCalled();
-    expect(screen.getByText(ask.question)).toBeTruthy();
-  });
-
-  test('没有旧追问：整个区块不出现', async () => {
-    const api = createMockApi({ live: false });
-    vi.spyOn(api, 'legacyAsks').mockResolvedValue({ items: [] });
     const { container } = renderApp(<NotificationsPage />, { api });
     await waitFor(() => expect(screen.getAllByRole('listitem').length).toBeGreaterThan(0));
+    expect(screen.queryAllByRole('button', { name: /^回答/ })).toHaveLength(0);
     expect(container.querySelector('[data-legacy-asks]')).toBeNull();
-  });
-
-  test('「全部（含已处理）」那一档不显示旧追问区块（它们是待处理的事，不是历史）', async () => {
-    const api = createMockApi({ live: false });
-    const ask = await first(api);
-    const { container } = renderApp(<NotificationsPage />, { api, route: '/notifications?status=all' });
-    await waitFor(() => expect(screen.getAllByRole('listitem').length).toBeGreaterThan(0));
-    expect(container.querySelector('[data-legacy-asks]')).toBeNull();
-    expect(screen.queryByText(ask.question)).toBeNull();
   });
 });
-
 describe('演示版页：发链接、作废、发布默认范围', () => {
   const sendBtn = () => screen.getByRole('button', { name: '发链接' });
   const form = () => formOf(sendBtn());

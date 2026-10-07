@@ -1,6 +1,6 @@
 // 演示版按细节级别收起数据（在交给页面之前就收，页面拿不到的东西就不会被露出去）：
 // status = 只看状态和耗时：需求、子任务的标题换成编号（「需求 #12」「子任务 B」），其余文字一律收起；
-// titles = 还能看标题；原话、改哪些文件、步骤、过程、追问的内容照样收起；
+// titles = 还能看标题；原话、改哪些文件、步骤、过程的内容照样收起；
 // process = 全都能看。
 // 每个函数都返回新对象，不改传进来的（传进来的是假后端的内部状态）。
 import type {
@@ -79,10 +79,6 @@ export function redactTaskDetail(d: TaskDetail, level: DemoDetail): TaskDetail {
     segmentRuns: d.segmentRuns.map((r) => {
       const { branch: _branch, ...rest } = r;
       return r.failureReason === undefined ? rest : { ...rest, failureReason: HIDDEN_TEXT };
-    }),
-    asks: d.asks.map((a) => {
-      const { answer: _a, ...rest } = a;
-      return { ...rest, question: '有一个问题在等拍板（内容没开放）', options: [] };
     }),
   };
 }

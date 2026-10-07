@@ -1,6 +1,5 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
 
-import { type LateAnswer, lateAnswer } from '@fleet-dao/core';
 import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
@@ -18,9 +17,7 @@ import {
   type HomeRunningSchema,
   type HostId,
   hardBanFor,
-  isLegacyAskClosed,
   type JobViewSchema,
-  type LegacyAskSchema,
   type Model,
   type NotificationSchema,
   type Pool,
@@ -36,13 +33,11 @@ import {
   type Subtask,
   summarizeUsage,
   type Task,
-  type TaskState,
   type TaskUsage,
   taskFlow,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type {
-  AskRecord,
   JobRecord,
   NotificationRecord,
   PullRequestRecord,
@@ -53,19 +48,6 @@ import type {
 
 type Activity = z.input<typeof ActivitySchema>;
 type Progress = z.input<typeof ProgressSchema>;
-
-/** 按推荐先做了的（task、hold）这条回答算哪种（core 的 lateAnswer）；没回答的、另开单的、老式的没有。 */
-export function askLate(ask: AskRecord, taskState: TaskState): LateAnswer | undefined {
-  if (ask.answer === undefined || ask.recommended === undefined || isLegacyAskClosed(ask.answer))
-    return undefined;
-  if (ask.scope !== 'task' && ask.scope !== 'hold') return undefined;
-  return lateAnswer({
-    recommended: ask.recommended,
-    answer: ask.answer,
-    applied: ask.appliedAt !== undefined,
-    taskState,
-  });
-}
 
 export const STAGE_WORDS: Record<StageKind, string> = {
   triage: '分诊',
@@ -411,8 +393,7 @@ type HomeHealth = z.input<typeof HomeHealthSchema>;
 
 /**
  * 「要你拍的」：decision 级未处理通知（approvals 未决在写下那一刻就同步开了这么一条，不另查 approvals 表，
- * 免得一件事显示两回），按时刻新到旧。追问不放这里：v3 没有 AI 追问这一环、答了没人收；库里旧会话留下的追问
- * 在通知中心只读展示、可关闭（legacyAskViews，#928）。
+ * 免得一件事显示两回），按时刻新到旧。
  */
 export function homeDecisions(input: {
   notifications: NotificationRecord[];
@@ -432,27 +413,6 @@ export function homeDecisions(input: {
     });
   }
   return items.sort((a, b) => b.since.localeCompare(a.since));
-}
-
-/**
- * 通知中心里的旧追问：库里还没处理的、旧会话留下的提问。只读展示 + 关闭；按提问先后排（最早的最先看到）。
- * 单子读不到不丢这条追问（它还在库里、要能被关掉），只是没有「#12 标题」那句背景。
- */
-export function legacyAskViews(
-  asks: AskRecord[],
-  taskOf: (taskId: string) => { issueNumber: number; title: string } | undefined,
-): z.input<typeof LegacyAskSchema>[] {
-  return asks.map((a) => {
-    const task = taskOf(a.taskId);
-    return {
-      id: a.id,
-      taskId: a.taskId,
-      question: a.question,
-      askedAt: a.askedAt,
-      ...(task ? { context: `#${task.issueNumber} ${task.title}` } : {}),
-      link: `/tasks/${a.taskId}`,
-    };
-  });
 }
 
 /** 哪张单有什么在等创始人拍：decision 级未处理通知，每张单取最新的一条。 */

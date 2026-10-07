@@ -27,8 +27,6 @@ import {
   type HostId,
   hardBanFor,
   JobsResponse,
-  LEGACY_ASK_CLOSED_ANSWER,
-  LegacyAsksResponse,
   MeResponse,
   MovePurposeModelRequest,
   MovePurposeModelResponse,
@@ -81,8 +79,8 @@ import {
 import type { z } from 'zod';
 import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
-import type { Ask, AuditEntry, DemoLink, LiveEvent, TaskState } from '../types';
-import type { MAsk, MLog, MockState, MSubtask, MTask } from './model';
+import type { AuditEntry, DemoLink, LiveEvent } from '../types';
+import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 
 export interface MockOptions {
@@ -174,17 +172,6 @@ function page<T extends { id: string }>(
   return last && start + limit < sorted.length
     ? { items: slice, nextCursor: `${at(last)}|${last.id}` }
     : { items: slice };
-}
-
-/** 按推荐先做了的回答之后会怎样：和真后端（core 的 lateAnswer）同一个判法，假后端不引 core。 */
-function askEffect(a: MAsk, state: TaskState): Ask['effect'] {
-  if (a.answer === undefined || a.recommended === undefined) return undefined;
-  if (a.scope !== 'task' && a.scope !== 'hold') return undefined;
-  if (a.answer.trim() === a.recommended.trim()) return 'confirmed';
-  if (a.appliedAt) return 'applied';
-  if (state === 'done') return 'follow-up';
-  if (state === 'stopped' || state === 'failed') return 'recorded';
-  return 'change';
 }
 
 /**
@@ -1102,7 +1089,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async home() {
       await wait();
       // 和真后端 buildHome 一个拼法（少一些数据源：假后端没有 approvals 表、没有 PR 镜像表）：
-      // decision = decision 级未处理通知（标题里「等你批/等你点头」的算待批），追问不进（#928）；
+      // decision = decision 级未处理通知（标题里「等你批/等你点头」的算待批）；
       // done = merged 的子任务里有 prNumber 的（模拟器 merge 时给的号），时刻用它状态变化的时刻（没有就用现在）。
       const repoName = (repoId: string) => {
         const r = st.repos.find((x) => x.id === repoId);
@@ -1123,7 +1110,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               link: n.link ?? '/notifications',
             };
           }),
-        // 追问不在「要你拍的」里（#928：v3 没有 AI 追问这一环，旧追问只在通知中心只读展示）：契约里 kind 只有 notification / approval
       ].sort((a, b) => b.since.localeCompare(a.since));
       const TERMINAL_M = new Set(['done', 'stopped', 'failed']);
       // 三段流水和真后端 buildHome 一个读法：readSegmentRun 读好，再交给 shared 的 taskFlow / flowStages 推
@@ -1140,10 +1126,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           ),
         );
       const pendingOf = (t: (typeof st.tasks)[number]) => {
-        const asked = t.asks
-          .filter((a) => a.answer === undefined)
-          .sort((a, b) => b.askedAt.localeCompare(a.askedAt))[0];
-        return asked ? { title: asked.question, since: asked.askedAt } : undefined;
+        const asked = st.notifications
+          .filter((n) => !n.resolvedAt && n.level === 'decision' && n.taskId === t.task.id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        return asked ? { title: asked.title, since: asked.createdAt } : undefined;
       };
       const running = st.tasks
         .filter((t) => !TERMINAL_M.has(t.task.state))
@@ -1376,22 +1362,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         subtasks: tv.subtasks.map(subtaskView),
         runs: runs.map(runView),
         segmentRuns,
-        asks: tv.asks.map((a) => ({
-          id: a.id,
-          runId: a.runId,
-          question: a.question,
-          options: a.options,
-          askedAt: a.askedAt,
-          status: a.answer === undefined ? 'pending' : 'answered',
-          answer: a.answer,
-          answeredBy: a.answeredBy,
-          answeredAt: a.answeredAt,
-          scope: a.scope,
-          recommended: a.recommended,
-          hold: a.hold,
-          effect: askEffect(a, tv.task.state),
-          followUpIssue: a.followUpIssue,
-        })),
         // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记，花费按渠道的计费方式分
         usage: summarizeUsage(
           [...runs]
@@ -1478,41 +1448,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...('reason' in body && body.reason ? { reason: body.reason } : {}),
       });
       emit('tasks', taskId);
-    },
-    async legacyAsks() {
-      await wait();
-      return LegacyAsksResponse.parse({
-        items: st.tasks.flatMap((tv) =>
-          tv.asks
-            .filter((a) => a.answer === undefined)
-            .map((a) => ({
-              id: a.id,
-              taskId: tv.task.id,
-              question: a.question,
-              askedAt: a.askedAt,
-              context: `#${tv.task.issueNumber} ${tv.task.title}`,
-              link: `/tasks/${tv.task.id}`,
-            })),
-        ),
-      });
-    },
-    async closeAsk(askId) {
-      await wait();
-      const tv = st.tasks.find((t) => t.asks.some((a) => a.id === askId));
-      const ask = tv?.asks.find((a) => a.id === askId);
-      if (!tv || !ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-      if (ask.answer !== undefined) throw new ApiError(409, 'already_answered', '这条追问已经处理过了');
-      ask.answer = LEGACY_ASK_CLOSED_ANSWER;
-      ask.answeredBy = st.me.user.id;
-      ask.answeredAt = iso();
-      audit({
-        actor: meActor(),
-        action: 'ask.close',
-        target: `task:${tv.task.id}`,
-        after: { askId },
-        via: 'cockpit',
-      });
-      emit('asks', askId);
     },
     async routing() {
       await wait();
