@@ -173,6 +173,31 @@ export const ReleaseCardSchema = z.object({
 
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 
+/**
+ * 「已发布的提交」（#1255，GET /france/released-commits）：更新日志页的只读列表，读法国的发布历史（release.sh 的 .history）。
+ * 发版单位是主线提交（决定 0032），不是里程碑版本；每条写提交号、标题、发于何时、是发布还是回滚。
+ * 整份读不到（没接上、读历史失败）走 unreadable 写原因；某一条的标题读不到，那一条的 title 为 null、titleWhy 写原因，不拿空串顶。
+ */
+export const ReleasedCommitsSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    /** 新的在前。 */
+    commits: z.array(
+      z.object({
+        sha: z.string(),
+        short: z.string(),
+        title: z.string().nullable(),
+        titleWhy: z.string().nullable(),
+        at: Time,
+        event: z.enum(['release', 'rollback', 'auto-rollback']),
+      }),
+    ),
+    asOf: Time,
+  }),
+  z.object({ state: z.literal('unreadable'), why: z.string(), asOf: Time }),
+]);
+export type ReleasedCommits = z.infer<typeof ReleasedCommitsSchema>;
+
 /** 点「确认发布」：只收提交号一个参数，后端核它等于此刻主线头。 */
 export const ReleaseRequestBody = z.object({
   sha: z.string().regex(/^[0-9a-f]{40}$/, '提交号要是完整的 40 位小写十六进制'),

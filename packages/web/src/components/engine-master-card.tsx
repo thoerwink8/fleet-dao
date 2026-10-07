@@ -116,7 +116,8 @@ export function EngineMasterControl() {
           ) : null}
           <p className="mt-2 text-xs text-muted-foreground">
             总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
-            AI 接活」开着的项目才派（在设置 → 仓库里逐个项目开）。每次往法国发版后会自己回到关。
+            AI 接活」开着的项目才派（在设置 →
+            仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
           </p>
         </div>
         {master === null ? null : remote ? (

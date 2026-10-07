@@ -5,12 +5,18 @@
 //   两个提交号有一个没读到，「差几个」算不出就写没查成，不拿 0、空列表或「法国已经是最新」顶。
 // - GitHub 现读（计划和提交以 GitHub 为准，库里没有副本），整张卡限时 READ_TIMEOUT_MS；到时没读完的行照「没查成」报。
 // - 提交号两边都是 40 位全号：法国在用的来自 current 链接，主线头来自 GitHub；比较用全号，不用短号。
+// - 同一份文件里还有更新日志页「已发布的提交」（#1255，GET /api/france/released-commits）：读发布历史里切上去的几条，和发版卡共用同一个读口（ReleaseCardPort.history）。
 // - 「差几个」用 GitHub compare 的 ahead_by；最近 PR 从合并提交的说明（squash 合并末尾的 (#号)）里认，不是 PR 合并的提交只数个数。
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReleaseFactsReader } from '@fleet-dao/github';
-import { type ReleaseCard, ReleaseCardSchema } from '@fleet-dao/shared';
+import {
+  type ReleaseCard,
+  ReleaseCardSchema,
+  type ReleasedCommits,
+  ReleasedCommitsSchema,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
 import type { Hono } from 'hono';
@@ -35,6 +41,8 @@ export interface ReleaseCardPort {
   deployed(): { sha: string | null } | { error: string };
   /** 这个提交最近一次切上去的时间（发布历史）；历史里没记这个提交回 null；读不了抛错。 */
   deployedAt(sha: string): Promise<string | null>;
+  /** 发布历史（release.sh 的 .history）的全文，「已发布的提交」列表（#1255）读它；读不了抛错。没给（开发、内存版）列表写没接上。 */
+  history?(): Promise<string>;
 }
 
 type Card = ReleaseCard;
@@ -367,7 +375,119 @@ export async function buildReleaseCard(input: BuildReleaseCardInput): Promise<Ca
   return { ...rows, action: await buildAction(input, rows) };
 }
 
+/** 「已发布的提交」最多列几条（每条还要去 GitHub 读一次标题，不拉太长）。 */
+export const RELEASED_COMMITS_LIMIT = 20;
+
+type ReleaseEvent = 'release' | 'rollback' | 'auto-rollback';
+const SWITCH_EVENTS: readonly string[] = ['release', 'rollback', 'auto-rollback'];
+
+/**
+ * 发布历史（每行 `时间 提交号 事件 [unmerged]`）里「切上去」的几条，新的在前，最多 limit 条。
+ * unhealthy、recovered 不是切版本；提交号不是 40 位全号、时间认不出的行抛错（不悄悄跳过：历史坏了要看得见）。
+ */
+export function releasedFromHistory(
+  history: string,
+  limit: number = RELEASED_COMMITS_LIMIT,
+): { sha: string; at: string; event: ReleaseEvent }[] {
+  const out: { sha: string; at: string; event: ReleaseEvent }[] = [];
+  for (const raw of history.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const [time, sha, event] = line.split(/\s+/);
+    if (event === undefined || !SWITCH_EVENTS.includes(event)) continue;
+    if (!time || Number.isNaN(Date.parse(time))) {
+      throw new Error(`发布历史里「${line.slice(0, 60)}」的时间认不出`);
+    }
+    if (!sha || !FULL_SHA.test(sha)) {
+      throw new Error(`发布历史里「${line.slice(0, 60)}」的提交号不是 40 位`);
+    }
+    out.push({ sha, at: time, event: event as ReleaseEvent });
+  }
+  return out.reverse().slice(0, limit);
+}
+
+export interface BuildReleasedCommitsInput {
+  port: ReleaseCardPort | undefined;
+  store: Store;
+  now: () => Date;
+  signal?: AbortSignal | undefined;
+  timeoutMs?: number;
+}
+
+/** 更新日志页「已发布的提交」（#1255）：读不到整份写没查成 + 原因；某一条的标题读不到只那一条写原因。 */
+export async function buildReleasedCommits(input: BuildReleasedCommitsInput): Promise<ReleasedCommits> {
+  const asOf = input.now().toISOString();
+  const unreadable = (why: string): ReleasedCommits => ({ state: 'unreadable', why, asOf });
+  const { port } = input;
+  if (!port?.history) {
+    return unreadable('这台后端没接上法国发布历史的读取（开发、内存版）：到法国那台的驾驶舱开才有这一块');
+  }
+  const timeoutMs = input.timeoutMs ?? CARD_READ_TIMEOUT_MS;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
+  const why = (e: unknown) => (timeout.aborted ? `${timeoutMs / 1000} 秒没读完` : errMessage(e));
+  const read = <T>(work: () => Promise<T>): Promise<T> => untilAborted(work(), signal);
+
+  let rows: ReturnType<typeof releasedFromHistory>;
+  try {
+    const text = await read(() => port.history?.() ?? Promise.reject(new Error('没接上')));
+    rows = releasedFromHistory(text);
+  } catch (e) {
+    return unreadable(`读法国发布历史失败：${why(e)}`);
+  }
+
+  let ref: { owner: string; name: string } | undefined;
+  let refWhy: string | null = null;
+  try {
+    const repo = await findSelfRepo(input.store);
+    if (repo === undefined) refWhy = `受管的仓里没有 ${SELF_REPO_NAME}，不知道去哪个仓读提交标题`;
+    else ref = { owner: repo.owner, name: repo.name };
+  } catch (e) {
+    refWhy = `读受管的仓列表没成：${errMessage(e)}`;
+  }
+
+  type Title = { title: string | null; titleWhy: string | null };
+  const titles = new Map<string, Promise<Title>>();
+  const titleOf = (sha: string): Promise<Title> => {
+    let p = titles.get(sha);
+    if (p === undefined) {
+      const repoRef = ref;
+      p = repoRef
+        ? read(() => port.facts.commit(repoRef, sha, signal)).then(
+            (c): Title => ({ title: c.title, titleWhy: null }),
+            (e: unknown): Title => ({ title: null, titleWhy: `读标题失败：${why(e)}` }),
+          )
+        : Promise.resolve<Title>({ title: null, titleWhy: `读标题没成：${refWhy ?? '没有仓'}` });
+      titles.set(sha, p);
+    }
+    return p;
+  };
+  const commits = await Promise.all(
+    rows.map(async (r) => ({
+      sha: r.sha,
+      short: r.sha.slice(0, 12),
+      ...(await titleOf(r.sha)),
+      at: r.at,
+      event: r.event,
+    })),
+  );
+  return { state: 'ok', commits, asOf };
+}
+
 export function registerReleaseCardRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
+  app.get('/france/released-commits', async (c) =>
+    reply(
+      c,
+      ReleasedCommitsSchema,
+      await buildReleasedCommits({
+        port: deps.releaseCard,
+        store: deps.store,
+        now: deps.now,
+        signal: c.req.raw.signal,
+      }),
+    ),
+  );
+
   app.get('/france/release-card', async (c) =>
     reply(
       c,
@@ -405,5 +525,6 @@ export function liveReleaseCardPort(facts: ReleaseFactsReader, dir: string = REL
     facts,
     deployed: () => readDeployLagInput(dir).current,
     deployedAt: async (sha) => deployedAtFromHistory(await readFile(join(dir, '.history'), 'utf8'), sha),
+    history: () => readFile(join(dir, '.history'), 'utf8'),
   };
 }

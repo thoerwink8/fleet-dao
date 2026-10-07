@@ -38,6 +38,7 @@ import type {
   PoolHolds,
   Pools,
   ReleaseCard,
+  ReleasedCommits,
   ReleaseRequestResult,
   ReleaseVersion,
   Repo,
@@ -138,12 +139,14 @@ export interface FleetApi {
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
-  /** /changelog 页「发布 v<N>」的版本号（#725）：后端现读 GitHub 里程碑；已有发布标记的号不当这一版。 */
+  /** 版本号接口（#725）：页面已经不读它（#1255，更新日志页去掉「发布 v<N>」）；后端接口和这一条跟着决定 0032 的片 3 一起删。 */
   releaseVersion(): Promise<ReleaseVersion>;
   /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
   franceReleaseState(): Promise<FranceReleaseState>;
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务，每行各自带没查成的原因。 */
   franceReleaseCard(): Promise<ReleaseCard>;
+  /** /changelog 页「已发布的提交」（#1255）：法国发布历史里切上去的几条，每条提交号、标题、发于何时；读不到写没查成和原因。 */
+  franceReleasedCommits(): Promise<ReleasedCommits>;
   /** /france 页「发布到法国」按钮（#1232）：只收提交号，后端核它等于此刻主线头、写请求文件，法国上 root 的单元接活。 */
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
@@ -206,9 +209,9 @@ export const keys = {
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
-  releaseVersion: ['release-version'] as const,
   franceReleaseState: ['france-release-state'] as const,
   franceReleaseCard: ['france-release-card'] as const,
+  franceReleasedCommits: ['france-released-commits'] as const,
   demoLinks: ['demo-links'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
@@ -439,15 +442,6 @@ export function useDemoLinks() {
 }
 
 /**
- * /changelog 页「发布 v<N>」的版本号：后端现读 GitHub 里程碑（不在推送名单里）。页面打开时读一次，点「发布」时再核一次
- * （changelog.tsx 调 refetch），不靠定时重拉。
- */
-export function useReleaseVersion() {
-  const api = useApi();
-  return useQuery({ queryKey: keys.releaseVersion, queryFn: () => api.releaseVersion() });
-}
-
-/**
  * /france 页发版一键（#618）：release-train 此刻的状态（在走 / 暂停 / 没在走 / 读不到）。
  * 30 秒重拉一次：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
  * 只有正式驾驶舱才有这一节（演示版不挂 france 这条路由），不查 demo 模块。
@@ -472,6 +466,20 @@ export function useFranceReleaseCard() {
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
     refetchInterval: 60_000,
+    enabled: !isDemo(),
+  });
+}
+
+/**
+ * /changelog 页「已发布的提交」（#1255）：读法国发布历史；发了新版会自己变，页面开着每 5 分钟重拉一次。读不到后端也照实显示「没查成」。
+ * 只有正式驾驶舱才有，不查 demo 模块。
+ */
+export function useFranceReleasedCommits() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceReleasedCommits,
+    queryFn: () => api.franceReleasedCommits(),
+    refetchInterval: 300_000,
     enabled: !isDemo(),
   });
 }

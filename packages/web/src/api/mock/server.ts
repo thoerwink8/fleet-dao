@@ -42,6 +42,7 @@ import {
   poolHoldsView,
   type RealtimeTable,
   ReleaseCardSchema,
+  ReleasedCommitsSchema,
   ReleaseRequestResponse,
   ReleaseVersionResponse,
   RepoDispatchResponse,
@@ -2030,6 +2031,39 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           issue: { state: 'ok', number: 1192, title: '引擎每周刷新 CI 测试耗时表', alsoCloses: [] },
         },
         action: mockReleaseAction(),
+        asOf: iso(),
+      });
+    },
+    async franceReleasedCommits() {
+      await wait();
+      // 假数据：法国最近发过的几个主线提交（真数据读法国的发布历史、标题读 GitHub）。
+      const ago = (min: number) => new Date(now() - min * 60_000).toISOString();
+      const rows: [string, string, number, 'release' | 'rollback'][] = [
+        ['6896b3cb4d2e8f0a1b3c5d7e9f1a3b5c7d9e1f3a', '探针每次结论落一条历史 (#1225)', 60 * 5, 'release'],
+        ['5f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6', '路由页：渠道开关改写入口 (#1224)', 60 * 29, 'release'],
+        [
+          '4e0d1c2b3a4958677685a4b3c2d1e0f9a8b7c6d5',
+          '额度读取：改以会话用户身份读 (#1228)',
+          60 * 31,
+          'rollback',
+        ],
+        [
+          '3d9c0b1a2f3847566574a3b2c1d0e9f8a7b6c5d4',
+          '额度读取：两个池读登录文件 (#1220)',
+          60 * 52,
+          'release',
+        ],
+      ];
+      return ReleasedCommitsSchema.parse({
+        state: 'ok',
+        commits: rows.map(([sha, title, min, event]) => ({
+          sha,
+          short: sha.slice(0, 12),
+          title,
+          titleWhy: null,
+          at: ago(min),
+          event,
+        })),
         asOf: iso(),
       });
     },

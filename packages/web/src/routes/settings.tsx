@@ -431,7 +431,7 @@ export default function Settings() {
 
   return (
     <Page title="设置" description="运行设置和仓库开关存在后端，改了写进操作记录；外观只存在这台浏览器里。">
-      {/* 版式（驾驶舱改版 2026-10-07）：按用得多少排——「让 AI 接活」每次发版后都要重新打开，放最前；外观放后面。顶上一排跳转。 */}
+      {/* 版式（驾驶舱改版 2026-10-07）：按用得多少排——「让 AI 接活」是最常动的开关，放最前；外观放后面。顶上一排跳转。 */}
       <nav aria-label="设置分节" className="-mt-2 mb-2 flex flex-wrap gap-1.5">
         {SECTIONS.filter((x) => x.id !== 'account' || api.source !== 'demo').map((x) => (
           <a

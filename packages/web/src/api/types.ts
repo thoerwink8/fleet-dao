@@ -55,6 +55,7 @@ import type {
   PoolViewSchema,
   QuotaWindowViewSchema,
   ReleaseCardSchema,
+  ReleasedCommitsSchema,
   ReleaseRequestResponse,
   ReleaseVersionResponse,
   RepoDispatchResponse,
@@ -215,13 +216,15 @@ export type Settings = z.infer<typeof SettingsResponse>;
 export type Setting = z.infer<typeof SettingSchema>;
 export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
 
-/** /changelog 页「发布 v<N>」的版本号（#725）：ok / blocked / unreadable 三种，见 web-api.ts 的 ReleaseVersionResponse。 */
+/** 版本号接口（#725）的返回：页面已不读（#1255），片 3 随后端接口一起删。 */
 export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
 /** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
+/** /changelog 页「已发布的提交」（#1255）：读法国发布历史，每条提交号、标题、发于何时；读不到整份是 unreadable + 原因。 */
+export type ReleasedCommits = z.infer<typeof ReleasedCommitsSchema>;
 /** 点「确认发布」之后后端回的：请求已写下（接活的是法国上 root 的单元，进度看发版卡）。 */
 export type ReleaseRequestResult = z.infer<typeof ReleaseRequestResponse>;
 /** /france 页「发版预检」一次一回：done 带输出、退出码；起进程都没起来走 unreadable。 */
