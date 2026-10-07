@@ -10,10 +10,12 @@
 import {
   isFlowBranch,
   isTestFile,
+  notPullRequestRun,
   parseStandardPaths,
   STANDARD_PATHS_FILE,
   standardFiles,
   TIMINGS_FILE,
+  TIMINGS_RUN_EVENT,
 } from '@fleet-dao/conventions';
 import type { Db } from '@fleet-dao/db';
 import { finishScheduleRun, startScheduleRun } from '@fleet-dao/db';
@@ -148,7 +150,7 @@ export function ciTimingsGitHub(api: CiTimingsApi): CiTimingsGitHub {
         method: 'GET',
         path: `${base}/actions/workflows/ci.yml/runs`,
         auth,
-        query: { status: 'success', event: 'pull_request', per_page: limit },
+        query: { status: 'success', event: TIMINGS_RUN_EVENT, per_page: limit },
       });
       const data = res.data;
       if (
@@ -164,8 +166,8 @@ export function ciTimingsGitHub(api: CiTimingsApi): CiTimingsGitHub {
         const row = item as { id?: unknown; event?: unknown };
         const id = idOf(row.id, 'ci.yml 运行编号');
         // 只要 PR 触发的全量日志，主线运行不要。列表已按 event 筛过，这里再认一遍：认不出或不是 PR 就没查成，不悄悄混进来。
-        if (row.event !== 'pull_request')
-          notRead(`ci.yml 运行 ${id} 不是 PR 触发的（event=${String(row.event)}）`);
+        const why = notPullRequestRun(id, row.event);
+        if (why !== null) notRead(why);
         return { id };
       });
     },

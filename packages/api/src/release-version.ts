@@ -1,14 +1,19 @@
-// /changelog 页「发布 v<N>」按钮和弹窗的版本号（#725）：和 `pnpm publish:pr` 同一份判法——conventions 的 releaseVersion
-// （当前版本里程碑＝开着的 v<N> 里 N 最小的那张，再拿仓根 CHANGELOG.md 已发的版本核一遍）。这里只调用它，不另写一套。
+// /changelog 页「这一版」和「发布 v<N>」按钮的版本号（#725）。
+// 已发布：仓根 CHANGELOG.md 里的 ## [vN] - 日期（splitChangelog 的 released）。发布收尾打的 git tag 不在这里读，
+// 页面上的「已发布」列表也是同一份标题，不是 tag 列表。
+// 这一版的候选：GitHub 上开着的 v<N> 里程碑里 N 最小的那张（conventions 的 currentVersion，和派活同一条）。
+// 候选已经有发布标记：判成已发布，这一版取下一个还没有标记的号（openMilestonesForChangelog），再交给 releaseVersion
+// 定里程碑。候选自己没有标记就不动，不按「已发布的最大号 +1」猜。
+// pnpm publish:pr 不走这一步：里程碑还开着、标题里却已经有这一版，发起仍然拒绝，指去重跑 release。
 // 改这里之前必须知道：
 // - 驾驶舱接口别处只读库，这一处现读 GitHub：计划以 GitHub 为准，库里没有里程碑的副本（design 第三节「驾驶舱后端」）。
 //   一次一条 GraphQL，只在打开 /changelog、点「发布」时读；限时 READ_TIMEOUT_MS，读不完照「读不到」报。
 // - 读不到（这台后端没接上、受管的仓里没有 fleet-dao、GitHub、CHANGELOG.md）一律回 unreadable 带原因；判法不让发
-//   （一张版本里程碑都没开、CHANGELOG.md 已经有这一版或比它新的）回 blocked 带判法的原话。都不回「上一版 +1」、不回 v1、不回 0。
+//   （一张版本里程碑都没开、CHANGELOG.md 已经发到比这一版还新）回 blocked 带判法的原话。都不回 v1、不回 0。
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { type MilestoneRef, releaseVersion } from '@fleet-dao/conventions';
+import { currentVersion, type MilestoneRef, milestoneVersion, releaseVersion } from '@fleet-dao/conventions';
 import { ReleaseVersionResponse, splitChangelog, WebRoutes } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Hono } from 'hono';
@@ -38,6 +43,33 @@ export interface ReleaseSource {
 /** 这台后端自己那份 CHANGELOG.md：发布目录是整仓（deploy/release.sh 用 git archive 取的），仓根在 packages/api/src 上三层。 */
 export function repoChangelog(): Promise<string> {
   return readFile(fileURLToPath(new URL('../../../CHANGELOG.md', import.meta.url)), 'utf8');
+}
+
+const versionLabel = (n: number) => `v${n}`;
+
+/**
+ * 给更新日志定「这一版」之前，先把已经写进 CHANGELOG 的号从候选里拿掉。
+ * 开着的 v<N> 里 N 最小的那张若已有发布标记，它算已发布；这一版改成下一个还没有标记的号。
+ * 开着的里程碑里有这个号就留那张，没有就补一张同号的（number 用版本号），后面的 releaseVersion 才能定得出。
+ * 候选自己没有标记：原样返回。一张版本里程碑都没有：也原样返回，让 releaseVersion 照旧拒绝。
+ */
+export function openMilestonesForChangelog(
+  open: readonly MilestoneRef[],
+  released: readonly { version: string }[],
+): readonly MilestoneRef[] {
+  const current = currentVersion(open);
+  if (!current) return open;
+  const taken = new Set(released.map((item) => item.version));
+  if (!taken.has(versionLabel(current.version))) return open;
+
+  let n = current.version;
+  while (taken.has(versionLabel(n))) n += 1;
+  const kept = open.filter((milestone) => {
+    const parsed = milestoneVersion(milestone.title);
+    return parsed === undefined || !taken.has(versionLabel(parsed));
+  });
+  if (kept.some((milestone) => milestoneVersion(milestone.title) === n)) return kept;
+  return [...kept, { number: n, title: versionLabel(n) }];
 }
 
 export interface ReadReleaseVersionInput {
@@ -83,7 +115,10 @@ export async function readReleaseVersion(input: ReadReleaseVersionInput): Promis
   }
 
   try {
-    const { version, milestone, others } = releaseVersion(open, released);
+    const { version, milestone, others } = releaseVersion(
+      openMilestonesForChangelog(open, released),
+      released,
+    );
     return { state: 'ok', version, milestone, others, asOf };
   } catch (e) {
     return { state: 'blocked', why: errMessage(e), asOf };

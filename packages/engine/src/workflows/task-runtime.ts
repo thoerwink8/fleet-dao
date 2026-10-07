@@ -26,6 +26,7 @@ import {
   type GuardedPaths,
   PAUSED_BY_HUMAN,
   type PauseCommand,
+  type RepinCommand,
   type TaskPhase,
   type TaskStatus,
   type TaskWait,
@@ -33,11 +34,12 @@ import {
   taskAbandonSignal,
   taskContinueSignal,
   taskPauseSignal,
+  taskRepinSignal,
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../task-contract.ts';
 import { failureOf, iso, judgeRetrying } from './kit.ts';
-import { Abandoned, bump, PausedInterrupt, stripUndefined, ZERO } from './task-support.ts';
+import { Abandoned, bump, PausedInterrupt, RepinInterrupt, stripUndefined, ZERO } from './task-support.ts';
 
 export class TaskRuntime {
   readonly input: TaskWorkflowInput;
@@ -57,6 +59,9 @@ export class TaskRuntime {
   private holding = false;
   /** hard 暂停取消了正在跑的动手会话：cancellable 里看到取消时，分得清是暂停取消的还是别的。 */
   private pauseCancelled = false;
+  /** 「现在就换」取消了正在跑的动手会话（#1216）：cancellable 里看到取消时，分得清是它取消的。 */
+  private repinCancelled = false;
+  private repinReq: RepinCommand | null = null;
 
   // ---- 一张单走到哪了（各阶段读写）
   branch = '';
@@ -100,6 +105,14 @@ export class TaskRuntime {
         this.pauseCancelled = true;
         this.cancelRunning?.();
       }
+    });
+    // 「现在就换」（#1216）：只有正在跑的动手会话能当场停（和 hard 暂停同一条取消的路）；没在跑就不理——新指定已经在库里，下一次选路照它。
+    // hard 暂停已经把这一段取消了、或已经在放弃：不抢。
+    setHandler(taskRepinSignal, (command) => {
+      if (!this.runningPausable || this.pauseCancelled || this.repinCancelled || this.abandon) return;
+      this.repinReq = command;
+      this.repinCancelled = true;
+      this.cancelRunning?.();
     });
     setHandler(taskRouteWakeSignal, () => {
       this.routeWakes += 1;
@@ -151,6 +164,11 @@ export class TaskRuntime {
   /** 暂停的原因怎么写给人看：谁、为什么（没写原因就只写谁）。 */
   pauseNote(command: PauseCommand): string {
     return `${PAUSED_BY_HUMAN}（${command.by}）${command.reason ? `：${command.reason}` : ''}`;
+  }
+
+  /** 「现在就换」停下的这一段重跑时，提示词里写的话：谁、为什么（没写原因就只写谁）。 */
+  repinNote(command: RepinCommand): string {
+    return `被人要求现在就换模型（${command.by}）${command.reason ? `：${command.reason}` : ''}`;
   }
 
   /** 停着等「继续」或「放弃」：库里 phase=paused、state 仍是 running，不报警（不是出了问题），继续后回到原来的阶段。 */
@@ -265,11 +283,17 @@ export class TaskRuntime {
       if (this.pauseCancelled && this.pauseReq && isCancellation(error)) {
         throw new PausedInterrupt(this.pauseReq);
       }
+      // 老历史里没有这一支：patched() 为假就当没有（走不到：老历史没有 taskRepin 信号）
+      if (this.repinCancelled && this.repinReq && isCancellation(error) && patched('task-repin')) {
+        throw new RepinInterrupt(this.repinReq);
+      }
       throw error;
     } finally {
       this.cancelRunning = null;
       this.runningPausable = false;
       this.pauseCancelled = false;
+      this.repinCancelled = false;
+      this.repinReq = null;
     }
   }
 

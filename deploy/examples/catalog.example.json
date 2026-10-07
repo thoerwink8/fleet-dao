@@ -41,7 +41,7 @@
       "orgKind": "carpool"
     },
     {
-      "_说明": "Mirasim 中转账号：Opus、Sonnet、GPT（codex）、Kimi、DeepSeek、GLM（zcode）都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）。引擎已接上这种执行方式（#345），但只有 deepseek-flash 那条路由打开——创始人 2026-09-27 拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash」；2026-10-06 创始人要接上 glm-5.3-flash，这一条也开着；opus-5.5、sonnet-5.5、gpt-5.6-luna、kimi-k3 仍关着。法国的 Mirasim 服务装起来、登录、探针探通之前，deepseek-flash 这条在生产目录里也还没打开（这份样例只是新装机的模板，已装过的机器改值要走 docs/ops.md 第九节「目录配置」）。并发 5 是旧系统拍的，没量过。",
+      "_说明": "Mirasim 中转账号：Opus、Sonnet、GPT（codex）、Kimi、DeepSeek、GLM（zcode）都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）。引擎已接上这种执行方式（#345），但只有 deepseek-flash 那条路由打开——创始人 2026-09-27 拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash」；2026-10-06 创始人要接上 glm-5.3-flash，这一条也开着；opus-5.5、sonnet-5.5、gpt-5.6-luna、kimi-k3 仍关着；2026-10-07 加了 gpt-6.1-sol（验收用，骨架里开着）。法国的 Mirasim 服务装起来、登录、探针探通之前，deepseek-flash 这条在生产目录里也还没打开（这份样例只是新装机的模板，已装过的机器改值要走 docs/ops.md 第九节「目录配置」）。并发 5 是旧系统拍的，没量过。",
       "id": "mirasim-relay",
       "channelId": "mirasim",
       "maxConcurrency": 5
@@ -69,6 +69,7 @@
     { "id": "sonnet-5.5", "family": "claude", "displayName": "Sonnet 5.5" },
     { "id": "opus-5.5", "family": "claude", "displayName": "Opus 5.5" },
     { "id": "gpt-5.6-luna", "family": "gpt", "displayName": "GPT 5.6 luna" },
+    { "id": "gpt-6.1-sol", "family": "gpt", "displayName": "GPT 6.1 sol" },
     { "id": "kimi-k3", "family": "kimi", "displayName": "Kimi k3" },
     { "id": "deepseek-flash", "family": "deepseek", "displayName": "DeepSeek Flash" },
     { "id": "cursor-auto", "family": "cursor", "displayName": "Cursor Auto" },
@@ -130,6 +131,14 @@
       "modelId": "gpt-5.6-luna",
       "hostId": "mirasim",
       "upstreamModel": "gpt-5.6-luna"
+    },
+    {
+      "_说明": "codex 经 Mirasim 起、走中转，点名 gpt-6.1-sol（Mirasim 的 codex 执行体实测能跑，docs/archive/progress-2026-10-01.md 的实测名单）。创始人 2026-10-07：「reviewer默认改成gpt6.1sol 走mirasim渠道」，验收用途排第一；GPT 不做界面，不挂 ui。",
+      "id": "mirasim-relay:gpt-6.1-sol:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "gpt-6.1-sol",
+      "hostId": "mirasim",
+      "upstreamModel": "gpt-6.1-sol"
     },
     {
       "_说明": "经 Mirasim 起 pi、不点名模型，吃服务端默认 kimi-k3，中转账本回显 kimi-k3（见 docs/reference/adapters.md 的 pi 一节）。",

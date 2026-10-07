@@ -190,6 +190,11 @@ export const UpdateTaskRoutePinRequest = z
     modelId: Id.nullable(),
     routeId: Id.nullable().optional(),
     reason: z.string().max(500).optional(),
+    /**
+     * 「现在就换」（#1216）：除了写下指定，还让正在跑的这一段当场停下、按新指定的模型原分支重跑（已做的从分支上接着做，已花的 token 不退）。
+     * 只有动手段能换；单子不在跑、或在跑的不是这一段，回 409 写明原因、什么都不改。不给 = 老样子：下一次选路起生效，在跑的不打断。
+     */
+    now: z.boolean().optional(),
   })
   .refine((b) => !b.routeId || b.modelId, {
     message: '只给路由不给模型不行：清掉指定时 routeId 也要空',

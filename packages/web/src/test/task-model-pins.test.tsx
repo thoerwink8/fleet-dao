@@ -109,6 +109,77 @@ describe('用哪个模型', () => {
   });
 });
 
+describe('现在就换（#1216）', () => {
+  /** #12 动手正在跑 opus-5.5；给动手指定 Kimi（和在跑的不一样）。 */
+  const pinnedKimi = (inner: FleetApi): FleetApi => ({
+    ...inner,
+    task: async (id) => {
+      const d = await inner.task(id);
+      return {
+        ...d,
+        routePins: {
+          pins: [{ segment: 'manual', modelId: 'kimi-k3', setBy: 'u-lan', setAt: new Date().toISOString() }],
+        },
+      } satisfies TaskDetail;
+    },
+  });
+
+  test('动手在跑、指定的和在跑的不一样：先写明代价（已做的从分支上接着做、token 不退），确认后发的是同一条指定加 now', async () => {
+    const inner = createMockApi({ live: false });
+    const sent: UpdateTaskRoutePinBody[] = [];
+    const api: FleetApi = {
+      ...pinnedKimi(inner),
+      updateTaskRoutePin: async (taskId, body) => {
+        sent.push(body);
+        return inner.updateTaskRoutePin(taskId, body);
+      },
+    };
+    open('/tasks/t-12', api);
+    const manual = await row('manual');
+    // 没点之前不发、也不先摆出确认
+    expect(manual.querySelector('[data-repin-confirm]')).toBeNull();
+    fireEvent.click(await within(manual).findByRole('button', { name: '现在就换' }));
+    const confirm = await waitFor(() => {
+      const el = manual.querySelector('[data-repin-confirm]');
+      if (!el) throw new Error('没有摆出确认');
+      return el;
+    });
+    expect(confirm.textContent).toContain('已花的 token 不退');
+    expect(confirm.textContent).toContain('从分支上接着做');
+    expect(sent).toEqual([]);
+    fireEvent.click(within(manual).getByRole('button', { name: '确认现在就换' }));
+    await waitFor(() =>
+      expect(sent).toEqual([{ segment: 'manual', modelId: 'kimi-k3', routeId: null, now: true }]),
+    );
+  });
+
+  test('【故意造出的失败】后端回 409（单子在这一刻不在跑了）：确认条留着、不当成换成了，发的就是那一条', async () => {
+    const inner = createMockApi({ live: false });
+    const sent: UpdateTaskRoutePinBody[] = [];
+    const api: FleetApi = {
+      ...pinnedKimi(inner),
+      updateTaskRoutePin: async (_taskId, body) => {
+        sent.push(body);
+        throw new Error('这张单现在不在跑');
+      },
+    };
+    open('/tasks/t-12', api);
+    const manual = await row('manual');
+    fireEvent.click(await within(manual).findByRole('button', { name: '现在就换' }));
+    fireEvent.click(await within(manual).findByRole('button', { name: '确认现在就换' }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(manual.querySelector('[data-repin-confirm]')).not.toBeNull();
+  });
+
+  test('【故意造出的失败】没有在跑的动手会话（#14 动手上一轮已收场，在跑的是验收）：动手那一行没有「现在就换」；验收那一行也没有', async () => {
+    open('/tasks/t-14', pinnedKimi(createMockApi({ live: false })));
+    const manual = await row('manual');
+    expect(within(manual).queryByRole('button', { name: '现在就换' })).toBeNull();
+    const verify = await row('verify');
+    expect(within(verify).queryByRole('button', { name: '现在就换' })).toBeNull();
+  });
+});
+
 describe('每个环节的花费：没报的按目录单价估', () => {
   test('#14 动手有一笔订阅制没报花费：段那一格写「估算」，那一笔写估算的数；顶上花费写另估多少', async () => {
     open('/tasks/t-14');

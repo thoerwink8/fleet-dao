@@ -207,11 +207,20 @@ async function dispatchSet(io, repo, reason) {
   return { ok: true };
 }
 
-/** 主线头的汇总检查（ci.yml 的 check job，必过检查的汇总）：green / red / pending，读不到 unknown。 */
-async function mainCi(io) {
+/**
+ * 要发的那个提交的汇总检查（ci.yml 的 check job，必过检查的汇总）：green / red / pending，读不到 unknown。
+ * 看要发的提交，不看主线头：主线上自动合并一个接一个进来时，主线头的 CI 每次都被新合并取消重跑，
+ * 「主线头 CI 空下来」永远等不到（2026-10-07 夜等了 21 分钟卡住）；发出去的就是这个提交，它自己绿了就够。
+ * 标签目标在解析出提交之前拿不到号，退回看主线头。
+ */
+function ciRef(state) {
+  return state.target.sha ?? (state.target.kind === 'sha' ? state.target.value : 'main');
+}
+
+async function mainCi(io, ref = 'main') {
   const r = gh(io, [
     'api',
-    'repos/{owner}/{repo}/commits/main/check-runs?per_page=100',
+    `repos/{owner}/{repo}/commits/${ref}/check-runs?per_page=100`,
     '--jq',
     '[.check_runs[] | select(.name=="check") | {status,conclusion}]',
   ]);
@@ -223,10 +232,21 @@ async function mainCi(io) {
     return { verdict: 'unknown', why: `主线 CI 的回话不是 JSON（${e.message}）` };
   }
   if (!Array.isArray(runs)) return { verdict: 'unknown', why: '主线 CI 的回话认不出（不是列表）' };
-  if (runs.length === 0) return { verdict: 'pending', why: '主线头还没有汇总检查（check）的结果' };
-  if (runs.some((x) => x.status !== 'completed')) return { verdict: 'pending', why: '主线头的 CI 还在跑' };
+  if (runs.length === 0)
+    return {
+      verdict: 'pending',
+      why: `${ref === 'main' ? '主线头' : '要发的提交 ' + ref.slice(0, 8)}还没有汇总检查（check）的结果`,
+    };
+  if (runs.some((x) => x.status !== 'completed'))
+    return {
+      verdict: 'pending',
+      why: `${ref === 'main' ? '主线头' : '要发的提交 ' + ref.slice(0, 8)}的 CI 还在跑`,
+    };
   if (runs.every((x) => x.conclusion === 'success')) return { verdict: 'green', why: '' };
-  return { verdict: 'red', why: `主线头的 CI 是红的（${runs.map((x) => x.conclusion).join('、')}）` };
+  return {
+    verdict: 'red',
+    why: `${ref === 'main' ? '主线头' : '要发的提交 ' + ref.slice(0, 8)}的 CI 是红的（${runs.map((x) => x.conclusion).join('、')}）`,
+  };
 }
 
 /** 挂了自动合并、还没合也没关的 PR。 */
@@ -312,7 +332,7 @@ async function phasePreflight(io, state) {
   const problems = [];
   const left = () => Math.max(1000, io.limits.preflightMs - (io.now().getTime() - started));
 
-  const ci = await mainCi(io);
+  const ci = await mainCi(io, ciRef(state));
   if (ci.verdict !== 'green') problems.push(`主线 CI 不是绿的：${ci.why}`);
 
   const lock = io.ssh(`flock -n -E ${BUSY} ${LOCK_FILE} -c true`, { timeoutMs: Math.min(60_000, left()) });
@@ -418,7 +438,7 @@ async function phasePauseFrance(io, state) {
  * 3 等收尾：等主线 CI 绿、法国在跑的会话 0，各有上限，到点停下列出拖后腿的。本机在跑的工人、自动合并的 PR 只提示（打印出来，
  * 内容变了再打一次），不挡、不算拖后腿。
  */
-async function phaseWait(io) {
+async function phaseWait(io, state) {
   const started = io.now().getTime();
   const L = io.limits;
   let lastLine = '';
@@ -443,7 +463,7 @@ async function phaseWait(io) {
       hint: true,
     });
 
-    const ci = await mainCi(io);
+    const ci = await mainCi(io, ciRef(state));
     if (ci.verdict === 'red')
       return blocked(`主线 CI 红了：${ci.why}。先修主线，再来（同一个目标再跑一次 start）`, [ci.why]);
     status.push({ key: '主线 CI', held: ci.verdict === 'green' ? [] : [ci.why], limit: L.ciMs });

@@ -60,6 +60,13 @@ describe('估一笔', () => {
     }
     expect(modelPriceOf('opus-5.5')).toBeDefined();
     expect(modelPriceOf('cursor-auto')).toBeUndefined();
+    // 验收默认模型 GPT 6.1 sol：官方模型页标的价（输入 2、缓存输入 0.1、输出 10），不是第三方汇总
+    expect(modelPriceOf('gpt-6.1-sol')).toMatchObject({
+      inputPerMTok: 2,
+      cacheReadPerMTok: 0.1,
+      outputPerMTok: 10,
+      source: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol',
+    });
     expect(modelPriceOf('toString')).toBeUndefined();
     expect(noPriceReasonOf('toString')).toBeUndefined();
   });
@@ -100,20 +107,26 @@ describe('估一笔', () => {
       expect(n.checkedAt, id).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(n.source === undefined || n.source.startsWith('https://'), id).toBe(true);
     }
-    // 没有官方页的那条明说「查不到官方价」，不带出处
-    expect(NO_PRICE_MODELS['jev-1.13']?.reason).toContain('查不到官方价');
-    expect(NO_PRICE_MODELS['jev-1.13']?.source).toBeUndefined();
   });
 });
 
-/** 模型目录（装进库的默认骨架）里每个模型的 id。 */
+/** 模型目录（装进库的默认骨架）里会被派去跑三段会话的模型 id：出现在 judge 以外的用途里的（judge 只答判断题，不进三段流水）。 */
 function catalogModelIds(): string[] {
   const raw = JSON.parse(readFileSync(new URL('../../db/routing.default.json', import.meta.url), 'utf8')) as {
+    purposes?: Record<string, string[]>;
     models?: Record<string, unknown>;
   };
   if (!raw.models || Object.keys(raw.models).length === 0)
     throw new Error('routing.default.json 里读不到 models');
-  return Object.keys(raw.models);
+  if (!raw.purposes) throw new Error('routing.default.json 里读不到 purposes');
+  const dispatched = new Set(
+    Object.entries(raw.purposes)
+      .filter(([purpose]) => purpose !== 'judge')
+      .flatMap(([, ids]) => ids),
+  );
+  const ids = Object.keys(raw.models).filter((id) => dispatched.has(id));
+  if (ids.length === 0) throw new Error('routing.default.json 里没有被派活的模型');
+  return ids;
 }
 
 /** 目录里既没有单价、也没写「没有单价的原因」的模型；一个模型两边都写了也算错（说不清到底有没有价）。 */
@@ -127,7 +140,11 @@ function modelsWithoutPriceEntry(ids: readonly string[]): string[] {
 
 describe('单价表对得上模型目录', () => {
   it('目录里每个模型在单价表里都有一项：有价，或明确写了没有单价的原因', () => {
-    expect(modelsWithoutPriceEntry(catalogModelIds())).toEqual([]);
+    const ids = catalogModelIds();
+    // 只答判断题的 judge 模型不进三段流水，不要求有单价；被派活的模型一个不少
+    expect(ids).not.toContain('jev-1.13');
+    expect(ids).toEqual(expect.arrayContaining(['opus-5.5', 'kimi-k3', 'cursor-auto']));
+    expect(modelsWithoutPriceEntry(ids)).toEqual([]);
   });
 
   it('【故意造出的失败】目录新加了模型、没补单价：这里红，点名是哪个', () => {

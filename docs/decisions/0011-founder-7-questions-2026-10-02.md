@@ -4,6 +4,7 @@
 - 谁拍的：创始人
 - 状态：已采纳
 - 现状（2026-10-05 回写）：生效。第 4 条「追加」里的派活开关 `engine_dispatch_paused` 没做，发布时停接活、等手头活收完由排空（`packages/engine/src/drain*.ts`）做。
+- 2026-10-07 补：第 3、4 条里「按版本标记（v<N> tag）发」的那一半已被 0032 替代（发版单位改成主线上的一个提交）；暂停派活、手头活收完、部署、接着派活的流程不变。
 - 关联：docs/decisions/0009-v3-implementation-plan.md（W3 待拍）、specs/450/453/323/450-454/227，
   deploy/france/desired-config.json，ops.md 第九节「自动发布」，deploy/release.sh
 

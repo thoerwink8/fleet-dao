@@ -28,6 +28,8 @@
 // - 暂停（#820 片 3，taskPause 信号）只停这一张单、能「继续」：停在检查点（rt.checkpoint，起新会话、选路、起新一步之前），库里 phase=paused、
 //   state 仍是 running，不报警；soft 手上这一段做完，hard 把动手会话取消、继续后在原树原分支上重跑（提示词带「被人暂停」，task-session.ts）。
 //   检查点只在收到信号时才多调活动，老历史重放不受影响（patched('task-pause')，test/replay.test.ts 的夹具）。
+// - 第 2 轮起、动手会话起之前先把最新主线并进任务分支（#1246，task-sync.ts；patched('sync-mainline-before-implement')）：并上了就推、树跟着快进；
+//   并出冲突把文件名记进返工意见交给这一轮的会话；没查成记下照旧往下走。验收前不并（并了头就变）。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
 import { CancellationScope, isCancellation, log, workflowInfo } from '@temporalio/workflow';
@@ -49,6 +51,7 @@ import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
 import { writeSession } from './task-session.ts';
 import { Abandoned } from './task-support.ts';
+import { syncMainlineBeforeImplement } from './task-sync.ts';
 import { coldVerifyPr } from './task-verify.ts';
 
 class TaskFlow {
@@ -132,6 +135,7 @@ class TaskFlow {
     const rt = this.rt;
     rt.set('implement', `动手第 ${rt.round} 轮`);
     const wt = await this.ensureWorktree();
+    await syncMainlineBeforeImplement(rt);
     await writeSession(rt, brief, tier, wt);
 
     const delivery = await rt.step('readDelivery', () =>

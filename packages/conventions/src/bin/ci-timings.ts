@@ -1,9 +1,10 @@
 // 刷新 CI 测试装箱用的耗时表（packages/conventions/test-timings.json，判法在 ../test-timings.ts）：
 //   pnpm ci:timings [--run <ci.yml 的 run 编号>]… [--log-file <存下来的 gh run view --log 输出>]… [--out <写到哪，默认仓里那份>]
 // --run、--log-file 可以重复给：每个文件取各轮的中位数（单轮里一个文件会因机器抖动慢一倍）。
-// 一个都不给：从最近的绿的 ci.yml 运行（PR、主线都算）里取头 5 次真跑了测试台的——主线 88% 的轮次复用同树的 PR 检查、
-// 根本不跑测试，只看主线最近一次会常常取到一轮没有测试日志的。要 gh 登录（连不上 GitHub 先设代理）。写完自己看 git diff 再提交。
-// 退出码 0 = 写好了；2 = 没做成（gh 跑不成、某一轮日志里认不出一个文件、找不到跑过测试的运行、列不出仓里的测试文件）——不写半张表。
+// 一个都不给：从最近的、PR 触发的、绿的 ci.yml 运行里取头 5 次真跑了测试台的（和引擎每周刷新同一条：
+// notPullRequestRun）。主线多半复用同树的 PR 检查、根本不跑测试；列表里混进非 PR 的就没查成，不用这批刷表。
+// 要 gh 登录（连不上 GitHub 先设代理）。写完自己看 git diff 再提交。
+// 退出码 0 = 写好了；2 = 没做成（gh 跑不成、运行列表混进非 PR 的、某一轮日志里认不出一个文件、找不到跑过测试的运行、列不出仓里的测试文件）——不写半张表。
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,11 +15,13 @@ import { listTestFiles, parseTimings, TIMINGS_FILE } from '../test-split.ts';
 import {
   medianOfRuns,
   mergeTimings,
+  notPullRequestRun,
   parseRunLog,
   renderTimings,
   TIMINGS_AUTO_MIN_BOXES,
   TIMINGS_AUTO_RUNS,
   TIMINGS_AUTO_SCAN,
+  TIMINGS_RUN_EVENT,
   timingsSource,
 } from '../test-timings.ts';
 
@@ -50,7 +53,7 @@ try {
   fail(`参数不对（${e instanceof Error ? e.message : String(e)}）`);
 }
 
-/** 不给 --run 时：最近的绿的 ci.yml 运行里，头 TIMINGS_AUTO_RUNS 次有至少 TIMINGS_AUTO_MIN_BOXES 台测试台跑成功的。 */
+/** 不给 --run 时：最近的、PR 触发的、绿的 ci.yml 运行里，头 TIMINGS_AUTO_RUNS 次有至少 TIMINGS_AUTO_MIN_BOXES 台测试台跑成功的。 */
 function pickAutoRuns(): string[] {
   const text = gh([
     'run',
@@ -59,21 +62,30 @@ function pickAutoRuns(): string[] {
     'ci.yml',
     '--status',
     'success',
+    '--event',
+    TIMINGS_RUN_EVENT,
     '--limit',
     String(TIMINGS_AUTO_SCAN),
     '--json',
-    'databaseId',
+    'databaseId,event',
   ]);
-  let list: { databaseId?: unknown }[];
+  let list: { databaseId?: unknown; event?: unknown }[];
   try {
     list = JSON.parse(text);
   } catch {
     fail('gh run list 的输出不是 JSON');
   }
-  const picked: string[] = [];
+  // 列表已按事件筛过。整批认完再往下问测试台：混进非 PR 的（或 event 认不出）就没查成，不用这批刷表。
+  const ids: string[] = [];
   for (const item of list) {
     if (typeof item.databaseId !== 'number') fail('gh run list 给的运行编号认不出');
     const id = String(item.databaseId);
+    const why = notPullRequestRun(id, item.event);
+    if (why !== null) fail(`没查成：${why}`);
+    ids.push(id);
+  }
+  const picked: string[] = [];
+  for (const id of ids) {
     const boxes = gh([
       'run',
       'view',
@@ -89,7 +101,7 @@ function pickAutoRuns(): string[] {
   }
   if (picked.length === 0)
     fail(
-      `最近 ${list.length} 次绿的 ci.yml 运行里没有一次真跑了 ${TIMINGS_AUTO_MIN_BOXES} 台以上的测试台（自己用 --run 指几轮）`,
+      `最近 ${list.length} 次 PR 触发的绿的 ci.yml 运行里没有一次真跑了 ${TIMINGS_AUTO_MIN_BOXES} 台以上的测试台（自己用 --run 指几轮）`,
     );
   return picked;
 }

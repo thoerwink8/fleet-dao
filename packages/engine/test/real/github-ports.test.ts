@@ -793,6 +793,51 @@ describe('并主线', () => {
     ).rejects.toMatchObject({ code: 'HEAD_MOVED', retryable: false });
   });
 
+  it('并出冲突、给了会话的树（#1249）：新主线的提交取进树里、origin/main 钉到新头，会话里 git merge 直接可用；树的头不动', async () => {
+    writeFileSync(join(m.dir, 'b.ts'), 'export const b = 2;\n');
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', 'main moved');
+    const newMain = git(m.dir, 'rev-parse', 'HEAD');
+    const s = setup({
+      syncMainline: () => ({ state: 'conflict', head: m.head, conflictFiles: ['a.ts'], mainline: newMain }),
+    });
+    const dir = await seededTree(s.trees);
+    // 建树时钉的是旧主线（这个夹具没钉：什么都没有也是「树里没有新主线」）
+    expect(git(dir, 'for-each-ref', 'refs/remotes/origin/main')).not.toContain(newMain);
+    expect(git(dir, 'rev-list', '--all')).not.toContain(newMain);
+    const got = await s.ports.syncMainline(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    expect(got).toEqual({ state: 'conflict', head: m.head, conflictFiles: ['a.ts'] });
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(newMain);
+    expect(git(dir, 'cat-file', '-t', newMain)).toBe('commit');
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(m.head);
+  });
+
+  it('【故意造出的失败】并出冲突但新主线取不进树（镜像打包失败）：不抛、不装成已是最新，回 mainlineStale 写明原因，origin/main 仍是旧的', async () => {
+    const s = setup({
+      syncMainline: () => ({
+        state: 'conflict',
+        head: m.head,
+        conflictFiles: ['a.ts'],
+        mainline: 'e'.repeat(40),
+      }),
+      bundleCommits: () => {
+        throw new GitHubError('MIRROR_FAILED', '镜像打包失败了', { retryable: true });
+      },
+    });
+    const dir = await seededTree(s.trees);
+    const before = git(dir, 'for-each-ref', 'refs/remotes/origin/main');
+    const got = await s.ports.syncMainline(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    expect(got).toMatchObject({ state: 'conflict', conflictFiles: ['a.ts'] });
+    expect(got.mainlineStale).toContain('镜像打包失败了');
+    expect(git(dir, 'for-each-ref', 'refs/remotes/origin/main')).toBe(before);
+  });
+
   it('树在旧头之后还有没推的提交：快进不了，明确报 WORKTREE_DIVERGED（要人看），不硬并', async () => {
     writeFileSync(join(m.dir, 'b.ts'), 'export const b = 2;\n');
     git(m.dir, 'add', '.');

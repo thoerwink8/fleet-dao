@@ -4,7 +4,8 @@
 // 改这里之前必须知道：
 // - 只写查得到官方出处的价：每一项带 source（官方页链接）和 checkedAt（查的那天）。查不到官方价、或官方就不按 token 标价的模型
 //   不写进价表，写进 NO_PRICE_MODELS 并写明原因——页面写「没有单价」和原因，不显示 0、不拿别家的价或第三方汇总的数顶。
-//   模型目录（packages/db/routing.default.json）里每个模型必须在两张表里有且只有一项，新加模型没补就红（model-prices.test.ts）。
+//   模型目录（packages/db/routing.default.json）里会被派去跑三段会话的模型（出现在 judge 以外的用途里）必须在两张表里有且只有
+//   一项，新加模型没补就红（model-prices.test.ts）。只答判断题的 judge 模型不进三段流水，不在此列。
 // - 单价是 API 标价（美元 / 百万 token）。订阅、拼车的账单不按它算：估出来的数是「这一轮按 API 价值多少」，用来比各段、各模型
 //   花了多少，不是账单多出的钱（和执行体报的「套餐内折合」同一个意思）。
 // - 只估执行体没报花费的那几笔：报了的照用报的，不另估一遍。
@@ -91,6 +92,15 @@ export const MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
     checkedAt: '2026-10-07',
     note: '2026-07-30 降价后的价；OpenAI 不单列写缓存价，按输入价算',
   },
+  'gpt-6.1-sol': {
+    inputPerMTok: 2,
+    outputPerMTok: 10,
+    cacheReadPerMTok: 0.1,
+    cacheWritePerMTok: 2,
+    source: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol',
+    checkedAt: '2026-10-07',
+    note: '标准档价（官方页：缓存输入按输入价的 5% 算；Fast 档 2 倍、Batch/Flex 半价，这里不分）；OpenAI 不单列写缓存价，按输入价算',
+  },
 };
 
 /** 目录里明确没有按 token 单价的模型：为什么、查的哪一页（查不到官方价就写查不到）、查价的那天。 */
@@ -111,10 +121,6 @@ export const NO_PRICE_MODELS: Readonly<Record<string, NoPrice>> = {
     reason:
       'Cursor Auto 按每次实际路由到的那个模型的标价计费，没有固定的按 token 单价（官方页：Auto 按路由到的模型的标价计费）',
     source: 'https://cursor.com/docs/models-and-pricing',
-    checkedAt: '2026-10-07',
-  },
-  'jev-1.13': {
-    reason: 'Jev 是 TypeSafe 的判断题服务，查不到官方价；它的花费由 Jev 自己按用量记，不进三段流水的估算',
     checkedAt: '2026-10-07',
   },
 };

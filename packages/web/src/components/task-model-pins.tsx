@@ -1,6 +1,8 @@
 // 单子页「用哪个模型」（驾驶舱改版 2026-10-07：「每个任务能点进去随意切换模型」）：动手、验收各一行，下拉选模型（还能钉到一条
 // 渠道），或回到自动。写到库里（task_route_pins），引擎下一次给这一段选路就照它；在跑的这一轮不打断。
+// 动手段多一个「现在就换」（#1216）：指定了和在跑的不一样的模型时出现，点了先写明代价再确认，确认后会话当场停下、原分支接着做。
 // 指定的模型派不出时引擎停下等人、不悄悄换别的：页面在下拉里、在这一行上都照路由两层现算的结论说清（lib/route-pins.ts）。
+import { useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useRoutingLayers, useUpdateTaskRoutePin } from '../api/client';
 import type { TaskDetail } from '../api/types';
@@ -84,6 +86,34 @@ function SegmentRow({
   const busy = update.isPending;
   const locked = finished || Boolean(problem) || d.routePins.unavailable !== undefined;
 
+  // 「现在就换」（#1216）：只有动手段、单子在跑没暂停、这一轮的会话正在跑、而且指定的和在跑的不是同一个模型
+  const canRepin =
+    segment === 'manual' &&
+    pin !== undefined &&
+    !finished &&
+    !locked &&
+    d.task.state === 'running' &&
+    d.task.paused === undefined &&
+    last?.running === true &&
+    pin.modelId !== last.model;
+  const [confirming, setConfirming] = useState(false);
+
+  const repinNow = async () => {
+    if (!pin) return;
+    try {
+      await update.mutateAsync({
+        taskId: d.task.id,
+        body: { segment, modelId: pin.modelId, routeId: pin.routeId ?? null, now: true },
+      });
+      setConfirming(false);
+      toast.success(`${segmentLabel[segment]}正在换成 ${chosen?.name ?? pin.modelId}`, {
+        description: '这一轮已停下，从分支上接着做',
+      });
+    } catch (e) {
+      toast.error('没换成', { description: errorText(e) });
+    }
+  };
+
   const send = async (modelId: string | null, routeId: string | null = null) => {
     try {
       await update.mutateAsync({ taskId: d.task.id, body: { segment, modelId, routeId } });
@@ -158,13 +188,42 @@ function SegmentRow({
           </Select>
         ) : null}
       </div>
-      <div className="md:col-span-2 md:text-right">
+      <div className="flex flex-wrap items-center gap-1 md:col-span-2 md:justify-end">
+        {canRepin ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            data-repin-open
+            onClick={() => setConfirming((v) => !v)}
+          >
+            现在就换
+          </Button>
+        ) : null}
         {pin && !finished ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void send(null)}>
             回到自动
           </Button>
         ) : null}
       </div>
+      {canRepin && confirming ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-3 rounded-md bg-st-stall/10 px-3 py-2 text-sub text-ink-stall md:col-span-11 md:col-start-2"
+          data-repin-confirm
+        >
+          <span className="min-w-0 flex-1">
+            现在就换：正在跑的这一轮马上停下，改用 {chosen?.name ?? pin?.modelId} 在原分支上接着做。
+            这一轮已做的会从分支上接着做，已花的 token 不退。
+          </span>
+          <Button size="sm" disabled={busy} data-repin-go onClick={() => void repinNow()}>
+            确认现在就换
+          </Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+            先不换
+          </Button>
+        </div>
+      ) : null}
       {health && health.verdict !== 'live' ? (
         <p
           role="alert"
@@ -204,7 +263,7 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
       description={
         finished
           ? '这张单已经结束，指定只留作记录。'
-          : '给这张单的动手、验收指定模型：下一次选路起照它，在跑的这一轮不打断。指定的派不出时引擎停下等你，不悄悄换别的。'
+          : '给这张单的动手、验收指定模型：下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」。指定的派不出时引擎停下等你，不悄悄换别的。'
       }
       bodyClassName="px-4 py-1"
       className="mt-4"

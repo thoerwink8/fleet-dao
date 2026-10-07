@@ -18,6 +18,7 @@ import {
   taskAbandonSignal,
   taskContinueSignal,
   taskPauseSignal,
+  taskRepinSignal,
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
@@ -67,11 +68,13 @@ describe('任务工作流听的信号名，和驾驶舱后端发的是同一份'
     expect(taskAbandonSignal.name).toBe(TASK_SIGNAL_NAMES.abandon);
     expect(taskRouteWakeSignal.name).toBe(TASK_SIGNAL_NAMES.routeWake);
     expect(taskPauseSignal.name).toBe(TASK_SIGNAL_NAMES.pause);
+    expect(taskRepinSignal.name).toBe(TASK_SIGNAL_NAMES.repin);
     expect(Object.values(TASK_SIGNAL_NAMES)).toEqual([
       'taskContinue',
       'taskAbandon',
       'taskRouteWake',
       'taskPause',
+      'taskRepin',
     ]);
   });
 
