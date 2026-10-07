@@ -30,7 +30,6 @@
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
     "branch:hygiene": "node packages/conventions/src/bin/branch-hygiene.ts",
     "drill": "node packages/engine/src/bin/drill.ts",
-    "publish:pr": "node packages/conventions/src/bin/publish-pr.ts",
     "release:onekey": "node agents/skills/commander/scripts/release-onekey.mjs",
     "pr:open": "node packages/conventions/src/bin/pr-open.ts"
   },

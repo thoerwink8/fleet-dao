@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { allGreen, type Gh, idlePrs, loadPathLists, type RunResult } from '../src/pr-arm.ts';
-import { prOpen } from '../src/pr-open.ts';
+import { parseCreatedPr, prOpen } from '../src/pr-open.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const ok = (stdout = ''): RunResult => ({ code: 0, stdout, stderr: '' });
@@ -67,6 +67,19 @@ function world(replies: RunResult[], body = BODY, lookups: RunResult[] = [ISSUE_
 }
 
 const verbs = (calls: string[][]) => calls.map((c) => c.slice(0, 2).join(' '));
+
+describe('parseCreatedPr：从 gh 输出认 PR 号', () => {
+  it('正常输出（最后一行是 …/pull/<N>）能认出', () => {
+    const r = parseCreatedPr(
+      'Creating pull request for feat/x into main\n\nhttps://github.com/x/y/pull/123\n',
+    );
+    expect(r).toEqual({ pr: 123, url: 'https://github.com/x/y/pull/123' });
+  });
+
+  it('认不出 PR 号 → 抛错（不拿 0 或空字符串冒充成功）', () => {
+    expect(() => parseCreatedPr('something weird\nno url here\n')).toThrow(/认不出 PR 号/);
+  });
+});
 
 describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
   it('没碰改标准路径：开 PR、查文件、当场挂自动合并（squash）', () => {

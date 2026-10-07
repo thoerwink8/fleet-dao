@@ -52,7 +52,6 @@ import { pgOrgSwitch } from './org-switch-view.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
-import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { pgRoutingOrder } from './routing-order.ts';
@@ -68,7 +67,6 @@ const log = jsonLogger();
 /**
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
- * 同一份凭据还给 /changelog 的发布版本号读里程碑（release-version.ts，「引擎」机器人）；凭据没读到时那边照实报读不到。
  */
 /** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */
 function credentialsMissingFacts(why: string): ReleaseFactsReader {
@@ -88,7 +86,6 @@ function credentialsMissingFacts(why: string): ReleaseFactsReader {
 function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
-  openMilestones: ReleaseSource['openMilestones'];
   releaseFacts: ReleaseFactsReader;
 } {
   try {
@@ -96,7 +93,6 @@ function githubMirror(db: Db): {
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
     return {
       sink: gh.eventSink({ async wake() {} }),
-      openMilestones: (repo, signal) => gh.readOpenMilestones({ repo, signal }),
       releaseFacts: gh.releaseFacts,
     };
   } catch (err) {
@@ -105,9 +101,6 @@ function githubMirror(db: Db): {
     return {
       sink: missing.sink,
       credentialsMissing: missing.check,
-      openMilestones: async () => {
-        throw new Error(`GitHub 机器人的凭据没读到（${String(err)}）`);
-      },
       releaseFacts: credentialsMissingFacts(String(err)),
     };
   }
@@ -242,8 +235,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     taskRoutePins: pgTaskRoutePins(db, now),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
-    // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md
-    release: { openMilestones: github.openMilestones, changelog: repoChangelog },
     // /france 页发版一键（#618）：读 ~/.fleet-dao/release-train.*、起 pnpm release:onekey preflight。
     // 只在正式环境装：开发、内存版起这条命令会在开发者本机的仓里发，会害人以为发的是这台，所以不装、接口回「没接上」。
     ...(production ? { franceRelease: liveFranceReleasePort(log) } : {}),

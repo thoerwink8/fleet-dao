@@ -125,9 +125,6 @@ function makeWorld() {
     releaseExit: 0,
     releaseWritesHistory: 'release',
     checkExit: 0,
-    prState: 'MERGED',
-    tagSha: null as string | null,
-    publishOut: '开了「发布 v5」PR #200：https://example.invalid/pull/200（head release/v5 → main）',
     milestones: [
       {
         title: 'v4 统一',
@@ -156,16 +153,8 @@ function makeWorld() {
           ),
         );
       if (args[0] === 'pr' && args[1] === 'list') return ok(JSON.stringify(w.prs));
-      if (args[0] === 'pr' && args[1] === 'view') return ok(JSON.stringify({ state: w.prState }));
       if (args[0] === 'api' && args[1]?.includes('milestones')) return ok(JSON.stringify(w.milestones));
       if (args[0] === 'issue' && args[1] === 'list') return ok(JSON.stringify(w.issues));
-    }
-    if (command === 'git' && args[0] === 'ls-remote') return ok(w.tagSha ? `${w.tagSha}\t${args[2]}\n` : '');
-    if (command === 'pnpm' && args[0] === 'publish:pr') {
-      w.tagSha = SHA; // 发布 PR 合了，release.yml 打标记（这里一步到位）
-      w.history += `
-2026-10-05T14:30:00Z ${SHA} release`; // 法国自动发布接手，也一步到位
-      return ok(w.publishOut);
     }
     if (command === NODE && String(args[0]).endsWith('worker.mjs')) return ok(w.workers);
     if (command === NODE && String(args[0]).endsWith('france.mjs'))
@@ -227,8 +216,6 @@ function makeWorld() {
       pollMs: 1000,
       ciMs: 3000,
       franceMs: 3000,
-      mergeMs: 3000,
-      tagMs: 3000,
       releaseMs: 3000,
       deployMs: 3000,
       ...limits,
@@ -369,20 +356,23 @@ describe('start 的前置：没带 --founder-ok 不发版', () => {
   it('--founder-ok 是空的也拒', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', '   '], io(home))).toBe(1);
+    expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', '   '], io(home))).toBe(1);
     expect(w.sshCalls).toEqual([]);
   });
 
-  it('--sha 和 --tag 要恰好一个；提交号、版本号写法不对都拒', async () => {
+  it('--sha 必给；提交号写法不对、--tag（决定 0032 起没有了）都拒', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     expect(await train.runTrain(['start', '--founder-ok', FOUNDER], io(home))).toBe(1);
+    expect(text(w.err)).toContain('要给 --sha');
+    expect(await train.runTrain(['start', '--sha', 'zzz', '--founder-ok', FOUNDER], io(home))).toBe(1);
+    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], io(home))).toBe(1);
     expect(
       await train.runTrain(['start', '--sha', SHA, '--tag', 'v5', '--founder-ok', FOUNDER], io(home)),
     ).toBe(1);
-    expect(await train.runTrain(['start', '--sha', 'zzz', '--founder-ok', FOUNDER], io(home))).toBe(1);
-    expect(await train.runTrain(['start', '--tag', 'v5.1', '--founder-ok', FOUNDER], io(home))).toBe(1);
     expect(w.sshCalls).toEqual([]);
+    expect(train.USAGE).not.toContain('--tag vN');
+    expect(train.USAGE).not.toContain('publish:pr');
   });
 
   it('--restore 不再要创始人在原话里写授权（只是还原发版前的样子）：原话只写「发吧」也照走，发完开回', async () => {
@@ -427,7 +417,7 @@ describe('预检（只读）：不过就什么都不改', () => {
     w.ci = 'pending';
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(2);
     w.ci = 'success';
-    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], io(home))).toBe(0);
+    expect(await train.runTrain(['start', '--sha', OLD, '--founder-ok', FOUNDER], io(home))).toBe(0);
   });
 });
 
@@ -886,7 +876,7 @@ describe('整趟走完', () => {
       await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER_RESTORE, '--restore'], io(home)),
     ).toBe(3);
     // 换目标：拒
-    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], io(home))).toBe(1);
+    expect(await train.runTrain(['start', '--sha', OLD, '--founder-ok', FOUNDER], io(home))).toBe(1);
     expect(text(w.err)).toContain('还没了结');
     // 法国会话收了，同一个目标再来
     franceFree(w);
@@ -943,29 +933,6 @@ describe('整趟走完', () => {
     expect(code).toBe(3);
     expect(text(w.err)).toContain('多出了异常');
     expect(existsSync(markerFile(home))).toBe(true);
-  });
-
-  it('--tag：pnpm publish:pr → 等合并 → 标记出现 → 部署核对；发布 PR 被关了没合就停', async () => {
-    const home = freshHome();
-    const { w, io } = makeWorld();
-    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], io(home))).toBe(0);
-    expect(w.calls).toContain('pnpm publish:pr');
-    expect(text(w.out)).toContain('#995');
-    expect(releaseCalls(w.sshCalls)).toEqual([]); // 标记路径不 ssh 跑 release.sh，法国自动发布接手
-
-    const home2 = freshHome();
-    const world2 = makeWorld();
-    world2.w.prState = 'CLOSED';
-    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], world2.io(home2))).toBe(2);
-    expect(text(world2.w.err)).toContain('被关了没合');
-  });
-
-  it('--tag：发布 PR 一直不合：到点停下（卡住），点名 PR', async () => {
-    const home = freshHome();
-    const { w, io } = makeWorld();
-    w.prState = 'OPEN';
-    expect(await train.runTrain(['start', '--tag', 'v5', '--founder-ok', FOUNDER], io(home))).toBe(3);
-    expect(text(w.err)).toContain('PR #200 还没合');
   });
 });
 

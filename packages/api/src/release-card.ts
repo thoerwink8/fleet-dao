@@ -25,9 +25,27 @@ import { type FranceReleasePort, parseTrainState } from './france-release.ts';
 import { reply } from './http.ts';
 import type { Store } from './ports.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
-import { untilAborted } from './release-version.ts';
 import { findSelfRepo, SELF_REPO_NAME } from './self-repo.ts';
 import type { CockpitEnv } from './session.ts';
+
+/** 到时限就不等了：实现不认 signal（不停下来）也照样按读不到报。 */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason);
+    signal.addEventListener('abort', stop, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', stop);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', stop);
+        reject(error);
+      },
+    );
+  });
+}
 
 /** 整张卡最多等多久：页面在等，GitHub 客户端自己的重试不能全让人干等。 */
 export const CARD_READ_TIMEOUT_MS = 12_000;

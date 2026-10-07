@@ -40,9 +40,6 @@ export const DEFAULT_LIMITS = {
   pauseMs: 60_000,
   ciMs: 20 * 60_000,
   franceMs: 13 * 60_000,
-  publishMs: 5 * 60_000,
-  mergeMs: 15 * 60_000,
-  tagMs: 5 * 60_000,
   releaseMs: 15 * 60_000,
   deployMs: 20 * 60_000,
   verifyMs: 5 * 60_000,
@@ -54,12 +51,11 @@ export const PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '�
 
 export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的检出里跑；发版会等很久，用 run_in_background 起）
   start --sha <提交> --founder-ok "<创始人原话>" [--restore]
-  start --tag vN    --founder-ok "<创始人原话>" [--restore]
         发版前先暂停手头的活，再发版，再恢复：
         0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 暂停本机（写标记，worker.mjs start 拒起新工人）
         → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（等：主线 CI 绿、法国在跑会话 0，各有上限，到点停下列出拖后腿的；
         本机在跑的工人、挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
-        --sha：ssh 到法国跑 release.sh <提交>；--tag：pnpm publish:pr（要在 release/vN 分支上）→ 等合并 → 等 release.yml 打标记 → 法国自动发布接手
+        --sha：ssh 到法国跑 release.sh <提交>（发版的单位是主线上的一个提交，决定 0032；不再按版本标记发）
         --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
         发完、健康检查过了，法国按暂停前记下的恢复：总开关和各仓接活开关开着的开回、关着的保持关（写操作记录；开不回去算没成、退出码 2）
         --restore：明写「发完开回去」，和不给一样（默认就恢复，不再要创始人逐次授权）
@@ -140,8 +136,9 @@ const clearMarker = (io) => {
   return was;
 };
 
+/** 老状态文件（决定 0032 之前）可能记着 kind 'tag'：status、abort 照样能显示它，start 不会再接它。 */
 function targetText(t) {
-  return t.kind === 'tag' ? t.value : `${t.value.slice(0, 12)}`;
+  return t.kind === 'sha' ? `${t.value.slice(0, 12)}` : t.value;
 }
 
 // —— 命令行参数 ——
@@ -550,8 +547,7 @@ async function phaseRelease(io, state) {
     return failed('发版是对外发布，必须带 --founder-ok（创始人原话）：没带，不发');
   state.release = { ...(state.release ?? {}), started: true };
   saveState(io, state);
-  if (state.target.kind === 'sha') return releaseBySha(io, state);
-  return releaseByTag(io, state);
+  return releaseBySha(io, state);
 }
 
 async function releaseBySha(io, state) {
@@ -569,79 +565,6 @@ async function releaseBySha(io, state) {
     return { ok: true };
   }
   return failed(`release.sh 退出码 ${r.status}（有红或已退回）：${tailOf(r, 5)}`);
-}
-
-async function releaseByTag(io, state) {
-  const tag = state.target.value;
-  state.release ??= {};
-  const rel = state.release;
-  sayTo(
-    io,
-    `发版：走版本标记 ${tag}（创始人原话：「${state.founderOk}」）。注意：里程碑里没做完的单这一步不会自动挪走（#995 还没做），自己先确认`,
-  );
-  // 标记已经在了（上次接着走）：直接去取它指的提交
-  let sha = await tagSha(io, tag);
-  if (!sha.ok) return failed(sha.why);
-  if (sha.sha === null) {
-    if (rel.pr === undefined) {
-      const r = io.run('pnpm', ['publish:pr'], { cwd: io.cwd(), timeoutMs: io.limits.publishMs });
-      if (didNotRun(r) || r.status !== 0)
-        return failed(`pnpm publish:pr 没成（要在 release/${tag} 分支上跑）：${tailOf(r, 5)}`);
-      const m = /PR #(\d+)/.exec(String(r.stdout));
-      if (!m) return failed(`pnpm publish:pr 的输出里找不到 PR 号：${tailOf(r, 5)}`);
-      rel.pr = Number(m[1]);
-      saveState(io, state);
-      sayTo(io, `发版：开了「发布 ${tag}」PR #${rel.pr}，等它合并`);
-    }
-    const merged = await waitFor(io, io.limits.mergeMs, async () => {
-      const r = gh(io, ['pr', 'view', String(rel.pr), '--json', 'state']);
-      if (didNotRun(r) || r.status !== 0) return { done: false, why: `PR #${rel.pr} 读不到：${tailOf(r)}` };
-      let st;
-      try {
-        st = JSON.parse(String(r.stdout)).state;
-      } catch (e) {
-        return { done: false, why: `PR #${rel.pr} 的回话不是 JSON（${e.message}）` };
-      }
-      if (st === 'MERGED') return { done: true };
-      if (st === 'CLOSED') return { done: true, fatal: `发布 PR #${rel.pr} 被关了没合` };
-      return { done: false, why: `PR #${rel.pr} 还没合（${st}）` };
-    });
-    if (merged.fatal) return failed(merged.fatal);
-    if (!merged.ok)
-      return blocked(`等了 ${minutes(io.limits.mergeMs)} 分钟，发布 PR 还没合：${merged.why}`, [merged.why]);
-    const tagged = await waitFor(io, io.limits.tagMs, async () => {
-      const t = await tagSha(io, tag);
-      if (!t.ok) return { done: false, why: t.why };
-      return t.sha === null ? { done: false, why: `标记 ${tag} 还没出现` } : { done: true, value: t.sha };
-    });
-    if (!tagged.ok)
-      return blocked(`PR 合了，但 ${minutes(io.limits.tagMs)} 分钟内标记 ${tag} 没出现：${tagged.why}`, [
-        tagged.why,
-      ]);
-    sha = { ok: true, sha: tagged.value };
-  }
-  state.target.sha = sha.sha;
-  saveState(io, state);
-  sayTo(io, `发版：标记 ${tag} 指向 ${sha.sha.slice(0, 12)}，等法国自动发布接手`);
-  return { ok: true };
-}
-
-/** 远端的标记指向哪个提交：没有回 { ok: true, sha: null }，连不上回 { ok: false }。 */
-async function tagSha(io, tag) {
-  const r = io.run('git', ['ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`], {
-    cwd: io.cwd(),
-    timeoutMs: 60_000,
-  });
-  if (didNotRun(r) || r.status !== 0) return { ok: false, why: `读不了远端的标记 ${tag}：${tailOf(r)}` };
-  const lines = String(r.stdout)
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  const peeled = lines.find((l) => l.endsWith(`^{}`));
-  const hit = (peeled ?? lines[0])?.split(/\s+/)[0];
-  if (hit === undefined) return { ok: true, sha: null };
-  if (!/^[0-9a-f]{40}$/.test(hit)) return { ok: false, why: `标记 ${tag} 指向的东西认不出` };
-  return { ok: true, sha: hit };
 }
 
 /** 每 pollMs 试一次 check()，done 就回；到点回 { ok: false, why: 最后一次的原因 }。check 回 fatal 立刻带出去。 */
@@ -916,12 +839,10 @@ async function runFrom(io, state) {
 
 async function cmdStart(p, io) {
   const sha = p.options.get('sha');
-  const tag = p.options.get('tag');
-  if ((sha === undefined) === (tag === undefined)) throw new UsageError('--sha 和 --tag 要恰好给一个');
-  if (sha !== undefined && !/^[0-9a-f]{7,40}$/.test(sha))
+  if (sha === undefined)
+    throw new UsageError('要给 --sha <提交>（发版的单位是主线上的一个提交，不再有 --tag）');
+  if (!/^[0-9a-f]{7,40}$/.test(sha))
     throw new UsageError(`--sha 要是十六进制的提交号（7–40 位），给的是「${scrubText(sha)}」`);
-  if (tag !== undefined && !/^v\d+$/.test(tag))
-    throw new UsageError(`--tag 要写成 v<数字>，给的是「${scrubText(tag)}」`);
   const founderOk = p.options.get('founder-ok');
   if (founderOk === undefined || founderOk.trim() === '') {
     warnTo(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带，什么都没做（连暂停都没暂停）');
@@ -929,7 +850,7 @@ async function cmdStart(p, io) {
   }
   // --restore 和不给一样：发完都恢复到发版前（还原不需要创始人逐次授权）；留着只是让老命令行、明写的人不报「不认识的参数」
   const restore = p.flags.has('restore');
-  const target = sha !== undefined ? { kind: 'sha', value: sha } : { kind: 'tag', value: tag };
+  const target = { kind: 'sha', value: sha };
 
   const read = readState(io);
   if (!read.ok) return fail(io, read.why);
@@ -1068,8 +989,7 @@ export async function runTrain(argv, io) {
       return argv.length === 0 ? 1 : 0;
     }
     const [cmd, ...rest] = argv;
-    if (cmd === 'start')
-      return await cmdStart(parseArgs(rest, ['sha', 'tag', 'founder-ok'], ['restore']), io);
+    if (cmd === 'start') return await cmdStart(parseArgs(rest, ['sha', 'founder-ok'], ['restore']), io);
     if (cmd === 'status' || cmd === 'abort') {
       parseArgs(rest, []); // 不收任何参数：多出来的在这里报用法不对
       return await (cmd === 'status' ? cmdStatus(io) : cmdAbort(io));
