@@ -244,10 +244,10 @@ describe('按改动算要跑什么', () => {
   });
 
   it('TEST_READS 直接钉住 api→web、feishu→web；adapters 夹具改动全跑（#984：误删时错误指到这里）', () => {
-    expect(TEST_READS.api).toContain('web');
-    expect(TEST_READS.feishu).toContain('web');
+    expect(TEST_READS.api, 'TEST_READS.api→web').toContain('web');
+    expect(TEST_READS.feishu, 'TEST_READS.feishu→web').toContain('web');
     // db 读 adapters 夹具不在 TEST_READS 里，靠 FIXTURE_PATH 全跑兜住
-    expect(pr('packages/adapters/test/fixtures/claude-code/x.ndjson').full).toBe(true);
+    expect(pr('packages/adapters/test/fixtures/claude-code/x.ndjson').full, 'adapters 夹具全跑').toBe(true);
   });
 
   it('改了 feishu、agents-sync：deploy/test 打包网关、跑同步脚本，要跑 deploy', () => {
