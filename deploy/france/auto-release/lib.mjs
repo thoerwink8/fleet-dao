@@ -73,7 +73,7 @@ export const VERSION_TAGS_ARGS = [
 export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
 /**
  * 装机脚本（france.sh）的「人工档」：碰防火墙、sudoers、建用户的那几个文件。主线上这些改了、france.sh 整套还没重跑，
- * 才是装机层落后（要人以 root 重跑，不自动）。其余的（自动发布脚本副本、systemd 单元、fleet-agents.slice、演示版可见范围）
+ * 才是装机层落后（要人以 root 重跑，不自动）。其余的（自动发布脚本副本、systemd 单元、fleet-agents.slice、清老单元）
  * 是「自动档」：每发完一版由 tierStep 以 root 跑 `france.sh --auto-tier` 顺带装上，改了不算落后。
  * 新加碰防火墙 / sudoers / 建用户的步骤，写进 deploy/lib/human-tier.sh，它用到的仓里文件加到这里（测试核对：那个文件
  * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
@@ -1207,7 +1207,7 @@ async function systemLayer(io, head) {
 
 /**
  * 装机的自动档（决定见 docs/ops.md 第九节「装机层」）：在用的版本和检出是同一个提交、这个提交还没装过，就以 root 跑
- * `france.sh --auto-tier`（自动发布脚本副本、systemd 单元、fleet-agents.slice、演示版可见范围；不碰防火墙、sudoers、用户、钥匙）。
+ * `france.sh --auto-tier`（自动发布脚本副本、systemd 单元、fleet-agents.slice、清掉已删的老单元；不碰防火墙、sudoers、用户、钥匙）。
  * 没成记下、报警，不挡发布；成了的提交不重跑，没成的最快隔 TIER_RETRY_MS 再试。退出码 2（没红、有待配）算装上了。
  * 先于规矩那一步：规矩同步用的是检出里的脚本，和这里无关，但装机脚本要先到位。
  */

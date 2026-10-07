@@ -347,12 +347,6 @@ wait_active() { # 单元 次数
   return 1
 }
 
-# 演示版在香港站点上的路径（法国 release.env、香港 hk.env 的 FLEET_DEMO_PATH，两台写同一个）：一级、以 / 结尾，
-# 不和根上已有的东西撞（前端的 assets/、健康页、转给后端的 /api /auth /github、/healthz）
-demo_path_ok() { # 路径
-  [[ "$1" =~ ^/[a-z0-9][a-z0-9-]*/$ ]] && [[ " /assets/ /health/ /healthz/ /api/ /auth/ /github/ " != *" $1 "* ]]
-}
-
 # 香港站点往法国的连接复用（deploy/hk/nginx-https.conf 的 upstream fleet_dao_api）缺了什么：一样一行，全齐什么都不打印。
 # 要齐的：这个 upstream 在、里面有 keepalive 和 keepalive_timeout，每一处 proxy_pass 都走它。文件读不到、一处 proxy_pass
 # 都没有，也照实打印——认不出不能当成「齐了」。hk.sh 的读回、deploy/test/public-site.test.sh 用它
@@ -385,12 +379,10 @@ site_keepalive_gaps() { # 站点文件
     }' "$1"
 }
 
-# 法国往香港 rrsync 推文件要排队：发布脚本发静态文件、fleet-demo-scopes 推可见范围用的是同一把上传钥匙，香港那头的
-# rrsync 同一时刻只让一个进来，后来的直接被拒（「Another instance of rrsync is already accessing this directory」，
-# rsync 报退出码 12；2026-09-26 发布试通香港时就这样撞上了 fleet-demo-scopes 的推送，没切版本）。france.sh 读回的试跑
-# 也一样。都在法国先拿同一把锁再推；等 HK_RSYNC_WAIT 秒还没轮到就照实失败（75），不硬推。fleet-demo-scopes.sh 单独装、
-# 不引本文件，自己拿同一把锁、整趟推送只排一次（deploy/test/demo-scopes.test.sh 核对是同一把；它的单元开了 ProtectSystem=strict，
-# 靠 ReadWritePaths=/run/lock 才拿得到锁，启动超时也要盖住等锁的时间）。FLEET_HK_RSYNC_LOCK 只给测试换位置用
+# 法国往香港 rrsync 推文件要排队：香港那头的 rrsync 同一时刻只让一个进来，后来的直接被拒
+# （「Another instance of rrsync is already accessing this directory」，rsync 报退出码 12）。发布脚本发静态文件、
+# france.sh 读回的试跑都在法国先拿同一把锁再推；等 HK_RSYNC_WAIT 秒还没轮到就照实失败（75），不硬推。
+# FLEET_HK_RSYNC_LOCK 只给测试换位置用
 HK_RSYNC_LOCK=${FLEET_HK_RSYNC_LOCK:-/run/lock/fleet-dao-hk-rsync.lock}
 HK_RSYNC_WAIT=120
 hk_rsync() { # rsync 参数…

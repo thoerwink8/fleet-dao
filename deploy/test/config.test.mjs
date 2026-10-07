@@ -853,7 +853,7 @@ test('apply 写不成就一个字都不写：期望认不出、线上文件认�
       '要写的键写了几行',
       (s) => {
         s.put(SHA_B, applyDesired({ 'release.env': { FLEET_HK_PARTS: 'gateway web' } }));
-        writeFileSync(join(s.etc, 'release.env'), `${LIVE['release.env']}FLEET_HK_PARTS=demo\n`);
+        writeFileSync(join(s.etc, 'release.env'), `${LIVE['release.env']}FLEET_HK_PARTS=gateway\n`);
       },
       /FLEET_HK_PARTS 写了 2 行/,
     ],
@@ -902,7 +902,7 @@ test('apply：写完读回不一致、写到一半写不进、记录写不进—
     [
       '写进去的读回来不对',
       (path, text) =>
-        plain(path, path.endsWith('release.env') ? text.replace('gateway web', 'gateway demo') : text),
+        plain(path, path.endsWith('release.env') ? text.replace('gateway web', 'web gateway') : text),
       /写完读回不一致：release\.env 改完照 systemd 读回来不对：FLEET_HK_PARTS 不是该有的样子：写过的 engine\.env、release\.env 已改回原样/,
     ],
     [

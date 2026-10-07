@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # deploy/ 的全部检查：语法、shellcheck、自检的违规样本、发布脚本的来回（换版、自动退回、只留几版、飞书网关发不发）、
-# 香港网关入口（fleet-gateway-deploy）、飞书网关打包、静态文件发到香港哪几处（演示版、根地址、可见范围不删）、
-# 演示版照「上次发的是哪一版」的记录核对（自动发布不发也照样查，坏了要红）、
-# 演示版的可见范围推到香港、公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录）、
+# 香港网关入口（fleet-gateway-deploy）、飞书网关打包、静态文件发到香港哪几处（只发根地址）、香港上老的 /demo/ 目录删掉再读回 404（#1223）、
+# 公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录；香港站点对 /demo 一律 404）、老机器上已删的演示版单元停掉删掉（no-demo）、
 # 健康页的判定、自动发布的判断和流程（auto-release：CI 红不发、读不到不发、没成隔 30 分钟自动重试最多 2 次、后置关没成不连坐整版、等空闲、人手动切过按住 24 小时）、
 # 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成；
 # versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
@@ -51,7 +50,7 @@ shard_n=0
 SHARDS=(
   'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards session-proxy session-ports release-proxy node-report-gate'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use temporal-schema'
-  'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
+  'lint session-pnpm no-demo gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request)
 SPECIAL_UNITS=(lint backup node-tests ports)
