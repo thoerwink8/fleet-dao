@@ -43,6 +43,7 @@ import {
   headOf,
   ownSpan,
   type UserTree,
+  unresolvedConflicts,
   worktreeChanges,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
@@ -158,7 +159,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const changedFiles = await changedFilesSince(t, span);
       const commits = await commitsSince(t, span);
       const leftover = await worktreeChanges(t);
-      return { head, commits: commits.length, changedFiles, leftover };
+      // since 是起会话前的头：提交进 HEAD 的冲突标记要和它比。和主线一个字节都不差的文件在 unresolvedConflicts 里剔除。
+      const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
+      return { head, commits: commits.length, changedFiles, leftover, conflicts };
     },
 
     async checkGuarded(input: CheckGuardedInput, ctx: PortContext): Promise<GuardedPaths> {
