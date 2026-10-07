@@ -30,6 +30,7 @@ import {
   planCi,
   planOutputs,
   readGraph,
+  TEST_READS,
 } from '../src/ci-plan.ts';
 import { fsRepo } from '../src/repo.ts';
 import { listTestFiles, parseTimings, type TestBox, TIMINGS_FILE } from '../src/test-split.ts';
@@ -240,6 +241,13 @@ describe('按改动算要跑什么', () => {
     const p = pr('packages/web/src/build/scan.ts');
     expect(p).toMatchObject({ web: true, deploy: 'all' });
     expect(units(p)).toEqual(['api', 'feishu', 'web']);
+  });
+
+  it('TEST_READS 直接钉住 api→web、feishu→web；adapters 夹具改动全跑（#984：误删时错误指到这里）', () => {
+    expect(TEST_READS.api).toContain('web');
+    expect(TEST_READS.feishu).toContain('web');
+    // db 读 adapters 夹具不在 TEST_READS 里，靠 FIXTURE_PATH 全跑兜住
+    expect(pr('packages/adapters/test/fixtures/claude-code/x.ndjson').full).toBe(true);
   });
 
   it('改了 feishu、agents-sync：deploy/test 打包网关、跑同步脚本，要跑 deploy', () => {
