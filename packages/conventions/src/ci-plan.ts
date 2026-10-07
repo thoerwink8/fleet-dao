@@ -817,8 +817,10 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
   // test job 的矩阵铺的是 outputs.tests：必须和 plan 里核过的那份是同一份
   if (n.changes?.outputs?.tests !== JSON.stringify(plan.tests))
     bad('changes 给 test job 铺矩阵的 tests 和 plan 里的测试台不是同一份');
-  // e2e job 的 if 读的是 outputs.e2e：必须和 plan 里核过的是同一份（不然 job 的开关和汇总核的「本该跑不跑」各说各的）
-  if (n.changes?.outputs?.e2e !== e2eOutput(plan.e2e))
+  // e2e job 的 if 读的是 outputs.e2e：必须和 plan 里核过的是同一份（不然 job 的开关和汇总核的「本该跑不跑」各说各的）。
+  // GitHub 不把值为空串的 job 输出放进 needs.<job>.outputs（清单为空时这一项整个没有），所以没有这一项按空串比；
+  // plan 要跑（'all' 或有清单）而输出缺了，照样不等、判红。
+  if ((n.changes?.outputs?.e2e ?? '') !== e2eOutput(plan.e2e))
     bad('changes 给 e2e job 的开关（outputs.e2e）和 plan 里的 e2e 不是同一份');
   if (plan.full && (FULL_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
