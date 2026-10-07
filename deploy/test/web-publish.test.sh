@@ -4,8 +4,8 @@
 # shellcheck disable=SC2016 # 单引号里的 $uri、$args 是 nginx 配置里的字面量，本来就不该展开
 # deploy/release.sh 往香港发静态文件的那一段（release.env 的 FLEET_HK_PARTS 选）：demo 只发演示版到 FLEET_DEMO_PATH、
 # 不碰根地址，演示版下面的可见范围（scopes/）发布不删，发成了当场记下香港上的演示版是哪一版；web 才把驾驶舱整套发到
-# 根地址，而且不碰演示版的目录；两样都发时演示版在前、带版本标记的根地址在后。自动发布不发演示版、只核对。
-# 健康检查照发演示版的记录比：香港上的是不是上次发的那份、深链接回落对不对——在用的是自动发布发的新版时，
+# 根地址，而且不碰演示版的目录；两样都发时演示版在前、带版本标记的根地址在后。
+# 健康检查照发演示版的记录比：香港上的是不是上次发的那份、深链接回落对不对——在用的是后来发的新版时，
 # 它的演示版和香港上的不一样不算错（2026-09-27 拿在用的这一版去比，误报过）。
 # rsync、curl 换成桩（curl 按一个假香港的目录答），其余是 release.sh 里的真代码。
 # 香港站点配置（deploy/hk/nginx-*.conf）的演示版那一段也在这里核对。
@@ -41,14 +41,7 @@ reset() {
 config() { # FLEET_HK_PARTS FLEET_DEMO_PATH：人手动发布（和 --check）的样子
   FLEET_HK_PARTS=$1
   FLEET_DEMO_PATH=$2
-  AUTO=0
-  DEMO_PUBLISH=1
   demo_config_ok >/dev/null
-}
-auto_config() { # FLEET_HK_PARTS FLEET_DEMO_PATH：自动发布（--auto）的样子，走 release.sh 的真 auto_parts
-  config "$1" "$2"
-  AUTO=1
-  auto_parts >/dev/null
 }
 said_line() { grep -cF -- "$1" "$TMP/out"; } # 上一次存进 $TMP/out 的输出里有几行带这段话
 record_is() { # 发演示版的记录里的提交号、路径、首页指纹（没有记录打印「没有」）
@@ -116,12 +109,6 @@ config demo /show/
 check "演示版是按 /demo/ 构建的、现在配的是 /show/：这次不发演示版" "$(dests "$A")" ""
 config web /show/
 check "根地址那一处护着的是现在配的演示版目录" "$(web_plan "$A" | grep -c -- '--exclude=/show/')" 1
-auto_config "web demo" /demo/
-check "自动发布：演示版那一处不发（对外，要人确认），根地址照发" "$(dests "$A")" "/ "
-check "自动发布：根地址那一处照样护着演示版的目录" "$(web_plan "$A" | grep -c -- '--exclude=/demo/')" 1
-check "自动发布：演示版还归发布管——不发，但照样核对" "$(has_part demo && echo 核对)" 核对
-auto_config demo /demo/
-check "自动发布、只配了演示版：一处都不发" "$(dests "$A")" ""
 
 echo "== sync_web 照着发：顺序、源、参数一样；发不出去报红、后面的不发；演示版发成了才记下香港上的是哪一版"
 ONE_AT_A_TIME=0
@@ -177,13 +164,6 @@ sync_web "$A" >/dev/null 2>&1
 check "记录写不进去：报红、停下（根地址不接着发）" \
   "${#REDS[@]}:$(printf '%s\n' "${REDS[@]}" | grep -c '记不下是哪一版'):$(grep -c 'root@10.99.0.1:/$' "$TMP/rsync.log")" "1:1:0"
 rm -rf -- "$DEMO_RECORD" "$DEMO_RECORD.new"
-auto_config "web demo" /demo/
-reset
-: >"$TMP/rsync.log"
-sync_web "$C" >/dev/null
-check "自动发布：只往根上发了一处，演示版的目录没发" "$(grep -c . "$TMP/rsync.log"):$(grep -c 'root@10.99.0.1:/demo/$' "$TMP/rsync.log")" "1:0"
-check "自动发布：不记（香港上的演示版没换）" "$(record_is)" 没有
-check "自动发布：不为演示版记待配（不发是定好的，不是缺配置）" "${#PENDING[@]}" 0
 config demo /show/
 reset
 sync_web "$A" >/dev/null
@@ -345,28 +325,25 @@ else
   check "web：香港对版本标记回 404（比如站点放行的不是法国的隧道地址）：不过" "$?" 1
   check "红里说的是取不到，不当成「在发一个空版本」" "$(printf '%s\n' "${REDS[@]}" | grep -c '从香港取不到')" 1
 
-  echo "== 自动发布之后（2026-09-27 那次误报）：香港上的演示版还是上次人发的 A，在用的是自动发布发的 C"
+  echo "== --check 看演示版（2026-09-27 那次误报）：香港上的演示版还是上次人发的 A，在用的是后来发的 C"
   config "web demo" /demo/
   hk_as "$A" '<html>驾驶舱 a</html>'
   root_as "$C"
   check "场景和那次一样：香港上的演示版首页和在用的 C 的不一样（拿 C 的去比就是那次的红）" \
     "$([[ "$(page_sum /demo/)" != "$(file_sum "$RELEASES/$C/web-demo/index.html")" ]] && echo 不一样)" 不一样
-  for mode in 自动发布 --check; do
-    if [[ "$mode" == 自动发布 ]]; then auto_config "web demo" /demo/; else config "web demo" /demo/; fi
-    reset
-    check_web "$C" >"$TMP/out"
-    check "$mode：通过——香港上的就是上次人发的那份，C 的没发是定好的（对外，要人确认）" "$?:${#REDS[@]}" "0:0"
-    check "$mode：说清香港上的是哪一版" "$(said_line '演示版是上次发的那份（aaaaaaaaaaaa，')" 1
-    check "$mode：列出 C 的演示版还没发、怎么发" "$(said_line 'cccccccccccc 的演示版和香港上的不一样，还没发')" 1
-    check "$mode：不记待配（没发是定好的，不是缺配置）" "${#PENDING[@]}" 0
-  done
+  reset
+  check_web "$C" >"$TMP/out"
+  check "--check：通过——香港上的就是上次人发的那份，C 的没发是定好的（对外，要人确认）" "$?:${#REDS[@]}" "0:0"
+  check "--check：说清香港上的是哪一版" "$(said_line '演示版是上次发的那份（aaaaaaaaaaaa，')" 1
+  check "--check：列出 C 的演示版还没发、怎么发" "$(said_line 'cccccccccccc 的演示版和香港上的不一样，还没发')" 1
+  check "--check：不记待配（没发是定好的，不是缺配置）" "${#PENDING[@]}" 0
 
-  echo "== 自动发布照样核对演示版（原先连核对一起去掉，坏了没人知道）：故意把香港上的演示版弄坏"
-  auto_config "web demo" /demo/
+  echo "== --check 照样核对演示版：故意把香港上的演示版弄坏"
+  config "web demo" /demo/
   printf '<html>被人手改过</html>\n' >"$HKD/demo/index.html"
   reset
   check_web "$C" >/dev/null
-  check "首页被改过：自动发布这一轮也不过（报红，照常退回、报警）" "$?:${#REDS[@]}" "1:1"
+  check "首页被改过：不过（报红，照常退回、报警）" "$?:${#REDS[@]}" "1:1"
   check "红里说清：不是上次发的那份、是哪一版" "$(printf '%s\n' "${REDS[@]}" | grep -c '不是上次发的演示版（aaaaaaaaaaaa，')" 1
   rm -f -- "$HKD/demo/index.html"
   reset

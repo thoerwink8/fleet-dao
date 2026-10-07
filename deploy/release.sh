@@ -9,16 +9,11 @@
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
 #   bash deploy/release.sh --check               只读：在用哪版、有哪几版、服务与健康检查，不改任何东西
 #   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（只用来合并前在真机上验；历史里会标出来）
-#   bash deploy/release.sh <提交号> --auto [--busy-ok]
-#                                                自动发布（fleet-auto-release）用：不发演示版（对外，人闸；只核对香港上的
-#                                                还是上次人发的那份）、历史行带 auto；引擎不会排空（这一版之前的）时切之前
-#                                                有会话在跑就不切（--busy-ok 照切）；这两种「没动」单给退出码
 #   发布、退回加 --now：不给在跑的会话宽限，马上停下（按编号续上）；急修、急退用
 # 要换引擎的版本时先排空（packages/engine/src/drain.ts）：一开始就写排空请求（$DRAIN_REQUEST），引擎马上不起新会话，在跑的最多再做
 # DRAIN_GRACE 秒（和构建一起走），到点没做完的由引擎按切号那一套停下、新引擎起来按编号续上；排空完停引擎，再迁移、切版本。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
-# 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配；
-# 只有 --auto 才有的：75 另一个发布在跑、76 切之前看到会话在跑——这两种什么都没动（构建留着，下次直接用）。
+# 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
 set -Eeuo pipefail
 umask 022
 
@@ -56,16 +51,10 @@ CATALOG_META="root:fleet 640" # 它该有的属主、权限；只有测试会改
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
-AGENT_SCOPE=/usr/local/sbin/fleet-agent-scope # 列 AI 会话（--auto 切之前看有没有会话在跑）；只有测试会换
 AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
 # 香港上的演示版是哪一版：演示版发成了（sync_web）当场记下提交号、时间、路径、首页的 sha256，核对（check_demo）都照它比。
 # 自动发布不发演示版，香港上的就该一直是这里记的那份——拿「在用的这一版」去比，会把「还没发」当成「坏了」（2026-09-27 误报过）
 DEMO_RECORD=$RELEASES/.demo-published
-# 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，调用方据此分得清「没动」和「没成」。自动发布单元 #1258 起不再调 release.sh（只读），这个模式暂时没有调用方
-EXIT_RELEASE_BUSY=75
-EXIT_SESSIONS_BUSY=76
-AUTO=0    # --auto：自动发布起的
-BUSY_OK=0 # --busy-ok：引擎不会排空时（这一版之前的引擎），等空闲到了上限，有会话在跑也切
 NOW_MODE=0 # --now：不给在跑的会话宽限
 # 发布前排空引擎（packages/engine/src/drain.ts、drain-control.ts）。改宽限要和引擎的 RELEASE_GRACE_MS、fleet-engine.service 的
 # TimeoutStopSec 一起改（packages/engine/test/drain.test.ts 核对）。请求只在发布锁占着时算数：这个脚本中途没了，引擎不会一直停着不派
@@ -139,7 +128,6 @@ FLEET_HK_PARTS=$HK_PARTS_DEFAULT
 GATEWAY_ACTIVATED=0 # 这一版的网关这次切过去了没有（没有网关、配置没备齐就是 0，健康检查不查它）
 # 演示版在香港站点上的路径（release.env，默认 /demo/）；和香港 hk.env 的 FLEET_DEMO_PATH 是同一个
 FLEET_DEMO_PATH=""
-DEMO_PUBLISH=1 # 这次发不发演示版：人手动发布发；自动发布（--auto）不发，只核对（auto_parts）
 SHA=""
 ON_MAIN=1
 WEB_KIND=""
@@ -149,20 +137,10 @@ usage() {
 用法（法国，root）：
   bash deploy/release.sh [<提交号>]            发布（不给提交号就发主线最新）
   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（合并前在真机上验）
-  bash deploy/release.sh <提交号> --auto [--busy-ok]
-                                               自动发布用（fleet-auto-release 起，人不用）
   bash deploy/release.sh [<提交号>] --now      发布，不给在跑的会话宽限（马上停下、按编号续上）
   bash deploy/release.sh --rollback [--now]    退回上一版
   bash deploy/release.sh --check               只读：看在用哪版、服务与健康
 EOF
-}
-
-# --auto 这次不发、什么都没动（另一个发布在跑、会话在跑）：照样给出结论，退出码单列
-not_now() { # 退出码 原因
-  drain_withdraw
-  pending "$2"
-  printf '\n== 结论\n这次没发：%s。什么都没动\n' "$2"
-  exit "$1"
 }
 
 # ── 小零件 ──
@@ -172,8 +150,8 @@ short() { # 提交号 没有时显示的字
   if [[ -n "$1" ]]; then printf '%s' "${1:0:12}"; else printf '%s' "$2"; fi
 }
 has_service() { [[ " $FLEET_SERVICES " == *" $1 "* ]]; }
-has_part() { [[ " $FLEET_HK_PARTS " == *" $1 "* ]]; } # 香港上的这一样归发布管：发（自动发布不发演示版）、核对
-sends_demo() { has_part demo && ((DEMO_PUBLISH)); }   # 这次发演示版
+has_part() { [[ " $FLEET_HK_PARTS " == *" $1 "* ]]; } # 香港上的这一样归发布管：发、核对
+sends_demo() { has_part demo; }                        # 这次发演示版
 current_sha() {
   local s
   s=$(readlink -- "$RELEASES/current" 2>/dev/null) || return 0
@@ -198,11 +176,9 @@ last_event() { # 提交号
   if [[ -f "$HISTORY" ]]; then awk -v s="$1" '$2 == s { e = $3 } END { printf "%s", e }' "$HISTORY"; fi
 }
 
-# 自动发布起的（--auto）带 auto：自动发布据此分得清哪次是人手动切的——人最近手动切过、主线上还没有更新的提交，它就不动
 record() { # 提交号 事件
   local tag=""
   if [[ "$(marker_get "$1" on_main)" == 0 ]]; then tag=" unmerged"; fi
-  if ((AUTO)); then tag+=" auto"; fi
   printf '%s %s %s%s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$tag" >>"$HISTORY"
 }
 
@@ -252,30 +228,12 @@ preflight() {
   done
   # 取代码、装依赖经期望里登记的代理（#786）：读不出、认不出就停下——走到取代码那一步才发现不通，白等一轮
   proxy_load || return 1
-  auto_parts
   ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：$(parts_said)；域名 $FLEET_DOMAIN"
   if has_part demo; then ok "演示版在香港站点的 $FLEET_DEMO_PATH"; fi
 }
 
-# 往香港发哪几样，说给人看：自动发布不发的演示版写明只核对
-parts_said() {
-  local p said=""
-  for p in $FLEET_HK_PARTS; do
-    if [[ "$p" == demo ]] && ! sends_demo; then p="demo（只核对、不发）"; fi
-    said+="${said:+ }$p"
-  done
-  printf '%s' "${said:-（都不发）}"
-}
-
-# 自动发布（--auto）不发演示版：演示版是对外的（链接发给了很多人），换它是对外发布，按版本由人确认（人闸，
-# docs/decisions/0003 第 18 条）。香港上的演示版这时不动，但照样核对（check_demo）：它得还是上次人发的那份——往根地址发的
-# 驾驶舱静态文件和它在同一个目录底下，碰坏了要当场知道（原先连核对一起去掉，香港上的演示版就没人看了）。
-# 驾驶舱前端（web）和飞书网关是自家用的，和后端同一版一起跟
-auto_parts() {
-  if ((AUTO == 0)) || ! has_part demo; then return 0; fi
-  DEMO_PUBLISH=0
-  ok "自动发布不发演示版（对外，要人确认）：香港上的演示版这次不动，只核对它还是上次人发的那份"
-}
+# 往香港发哪几样，说给人看
+parts_said() { printf '%s' "${FLEET_HK_PARTS:-（都不发）}"; }
 
 # 演示版在哪个路径：没写取默认 /demo/；不是一级路径、和根上已有的东西撞，报红
 demo_config_ok() { # [release.env 文件]（只用在红里说是哪一份）
@@ -319,38 +277,9 @@ load_release_env() { # 文件
 take_lock() {
   exec 9>>"$RELEASES/.lock"
   if ! flock -n 9; then
-    if ((AUTO)); then not_now "$EXIT_RELEASE_BUSY" "另一个发布正在跑（$RELEASES/.lock）"; fi
     red "另一个发布正在跑（$RELEASES/.lock）"
     return 1
   fi
-}
-
-# 自动发布切之前最后看一眼：引擎有会话在跑就不切（切版本要重启引擎，会话跟着断），构建留着、下一轮直接用。
-# 放在构建之后、迁移之前：构建要几分钟，这一眼离切版本越近，看完又起新会话的空当越小。读不到、认不出会话列表都按「在跑」算。
-# 等空闲到了上限（fleet-auto-release 定的），它带 --busy-ok 来，照切：会话按编号续上（design 第四节「会话断了接着干」）
-auto_gate() {
-  local out busy bad
-  if ((ENGINE_DRAINS)); then
-    ok "自动发布：引擎会排空（不起新会话、在跑的最多再做 $((DRAIN_GRACE / 60)) 分钟），不等空闲"
-    return 0
-  fi
-  if ((BUSY_OK)); then
-    ok "自动发布：等空闲到了上限，引擎有会话在跑也切（会话按编号续上）"
-    return 0
-  fi
-  # 只拿标准输出来认（一行「编号 状态」）；它的报错照样进日志
-  if ! out=$("$AGENT_SCOPE" list); then
-    not_now "$EXIT_SESSIONS_BUSY" "会话在不在跑没查成（$AGENT_SCOPE list 没成，原话见上），按在跑算，这次不切"
-  fi
-  bad=$(awk 'NF && !/^[^ ]+ [a-z-]+$/ { print; exit }' <<<"$out")
-  if [[ -n "$bad" ]]; then
-    not_now "$EXIT_SESSIONS_BUSY" "会话列表认不出（有一行是「${bad:0:80}」），按在跑算，这次不切"
-  fi
-  busy=$(awk 'NF && $2 != "inactive" && $2 != "failed" { printf "%s ", $1 }' <<<"$out")
-  if [[ -n "$busy" ]]; then
-    not_now "$EXIT_SESSIONS_BUSY" "引擎有会话在跑（${busy% }），这次不切；构建留着，下一轮直接用"
-  fi
-  ok "自动发布：引擎没有会话在跑，切"
 }
 
 # ── 排空引擎 ──
@@ -380,7 +309,7 @@ engine_drain_status() { # 引擎主进程号
 }
 
 # 要换引擎的版本（引擎在跑、跑的不是这一版）就写排空请求：引擎认了马上不起新会话。宽限和构建一起走，所以要早写。
-# 引擎认不认 drain.json（会不会排空）也在这里定：不会排空的（这一版之前的引擎），自动发布照旧看会话（auto_gate）
+# 引擎认不认 drain.json（会不会排空）也在这里定：不会排空的（这一版之前的引擎）照旧重启、在跑的会话按编号续上
 drain_request() { # 要切到的提交号 宽限（秒）
   local sha=$1 grace=$2 pid st by=manual now tmp
   ENGINE_DRAINS=0
@@ -393,7 +322,6 @@ drain_request() { # 要切到的提交号 宽限（秒）
   else
     pending "在跑的引擎不会排空：${st#no }。这次切版本照旧重启引擎，在跑的会话会断、新引擎起来按编号续上"
   fi
-  if ((AUTO)); then by=auto; fi
   if [[ "${FUNCNAME[1]:-}" == do_rollback ]]; then by=rollback; fi
   now=$(date -u +%s)
   DRAIN_UNTIL=$((now + grace))
@@ -973,7 +901,6 @@ apply_config() { # 提交号 事件（release / rollback / auto-rollback）
       red "release.env 照期望写上了，重读却没过（原因见上）：没切版本，要人看"
       return 1
     fi
-    auto_parts
     ok "release.env 照期望改了，这一版照新的来：起的服务 ${FLEET_SERVICES:-（无）}；往香港发 $(parts_said)"
   fi
 }
@@ -1090,17 +1017,14 @@ hk_reachable() {
 
 # 照期望写配置要往香港新加的几样（算出来的 release.env 里有、现在没有的），写之前照样试通：发布开头的 hk_reachable 只试了原来那几样
 new_parts_reachable() { # 算出来的 FLEET_HK_PARTS
-  local p parts_added="" old_parts=$FLEET_HK_PARTS old_demo=$DEMO_PUBLISH bad=0
+  local p parts_added="" old_parts=$FLEET_HK_PARTS bad=0
   for p in $1; do
     if ! has_part "$p"; then parts_added+="${parts_added:+ }$p"; fi
   done
   if [[ -z "$parts_added" ]]; then return 0; fi
   FLEET_HK_PARTS=$parts_added
-  # 自动发布不发演示版（auto_parts），新加的 demo 也不用试通
-  if ((AUTO)); then DEMO_PUBLISH=0; fi
   hk_reachable || bad=1
   FLEET_HK_PARTS=$old_parts
-  DEMO_PUBLISH=$old_demo
   return "$bad"
 }
 
@@ -1640,7 +1564,6 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 排空请求在构建之前写：宽限和构建一起走
   drain_request "$SHA" "$(drain_grace)"
   build_release "$SHA"
-  if ((AUTO)); then auto_gate; fi
   cur=$(current_sha)
   hk_reachable || return 1
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
@@ -1829,8 +1752,6 @@ main() {
     --rollback) mode=rollback ;;
     --check) mode=check ;;
     --unmerged) UNMERGED=1 ;;
-    --auto) AUTO=1 ;;
-    --busy-ok) BUSY_OK=1 ;;
     --now) NOW_MODE=1 ;;
     -h | --help)
       usage
@@ -1849,13 +1770,12 @@ main() {
       ;;
     esac
   done
-  if [[ "$mode" != release && (-n "$target" || "$UNMERGED" == 1 || "$AUTO" == 1) ]]; then
+  if [[ "$mode" != release && (-n "$target" || "$UNMERGED" == 1) ]]; then
     usage >&2
     exit 64
   fi
-  # 自动发布只发给定的、主线上的提交；--busy-ok 只跟着 --auto；--now 是人急修、急退用的，不跟 --auto、--check
-  if { ((AUTO)) && [[ -z "$target" || "$UNMERGED" == 1 ]]; } || { ((BUSY_OK)) && ((AUTO == 0)); } ||
-    { ((NOW_MODE)) && { ((AUTO)) || [[ "$mode" == check ]]; }; }; then
+  # --now 是人急修、急退用的，不跟 --check
+  if ((NOW_MODE)) && [[ "$mode" == check ]]; then
     usage >&2
     exit 64
   fi

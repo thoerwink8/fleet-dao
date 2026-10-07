@@ -27,7 +27,7 @@ export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
 export const RELEASE_SH = '/srv/fleet-dao/deploy/release.sh';
 export const HISTORY_FILE = `${RELEASES}/.history`;
 export const LOCK_FILE = `${RELEASES}/.lock`;
-/** flock -E：另一个发布占着锁时回这个码（75，同 release.sh 的 EXIT_RELEASE_BUSY）。 */
+/** flock -E：另一个发布占着锁时回这个码（75，是这里自己给 flock 指定的，release.sh 没有这个码）。 */
 const BUSY = 75;
 
 /**
