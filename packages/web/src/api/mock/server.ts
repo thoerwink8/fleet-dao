@@ -1626,7 +1626,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         target: ROUTE_PROBE_TARGET,
         after: { requestId, routeIds },
         via: 'cockpit',
-        reason: routeIds ? `驾驶舱上点了立即探测（${routeIds.length} 条）` : '驾驶舱上点了全部立即探测',
+        reason: routeIds ? `点了立即探测（${routeIds.length} 条）` : '点了全部立即探测',
       });
       return RouteProbeNowResponse.parse({
         request: {
