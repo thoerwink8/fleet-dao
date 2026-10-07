@@ -1,10 +1,11 @@
 // 每周刷新 CI 测试耗时表（#921 第 1 条）：取最近几轮真跑了测试的 ci.yml 日志，重写 test-timings.json，开一个自己带检查地合的 PR。
 // 取数、合并、写成什么样都复用 conventions 的 ci-timings（parseRunLog / medianOfRuns / mergeTimings / renderTimings），这里只排一轮怎么跑。
 // 改这里之前必须知道：
-// - 这是定时任务，不进 CI（#299：CI 的判定只看检出来的文件）。单子写的 schedules.ts 已随 #1072 撤掉，钟点登记在 engine-timers.ts。
+// - 这是定时任务，不进 CI（#299：CI 的判定只看检出来的文件）。钟点登记在 jobs/schedules.ts，由进程内定时器每周跑一次。
 // - 「真跑了测试」和 `pnpm ci:timings` 同一个取法：最近 40 次绿的 ci.yml（PR 和主线都算）里，头 5 次至少 4 台 `test (` 成功的。
 //   不另加「必须是 pull_request」：主线上一轮真跑了测试的也算，小 PR 只有一两台的不算。
-// - 表的字节和现表一样就不开 PR（开了也是空的）。字节相同但表里仍缺文件时同样不开，缺多少只记日志。
+// - 先按现表的 source 重写再比字节：一样就不开 PR。source 里的日期和运行编号每周都会换，不拿它当「表变了」。
+//   表里仍缺文件、文件和毫秒却没变时同样不开，缺多少只记日志。
 // - 日志读不到、运行列表认不出、一轮都没有、某一轮一个文件都没认出来、量到的文件全都不在仓里：记没查成再抛，不开 PR、不记成功。
 //   耗时表文件还不存在不算没查成，按没有旧表重写并开 PR。
 // - 不标 needsMaster：总开关每次发版都会关（#1086），标了每周这一轮几乎跑不上。这一轮不拉单、不起会话。
@@ -146,13 +147,11 @@ async function refresh(deps: CiTimingsJobDeps): Promise<ScheduleResult> {
   const parsed = parseTimings(head.timingsText ?? undefined);
   if (typeof parsed === 'string') deps.log('warn', `旧表认不出（${parsed}），这次只用新量的`);
   const at = deps.now();
-  const source = timingsSource(names, at);
-  const merged = mergeTimings(
-    typeof parsed === 'string' ? undefined : parsed,
-    measured,
-    head.testFiles,
-    source,
-  );
+  const freshSource = timingsSource(names, at);
+  const old = typeof parsed === 'string' ? undefined : parsed;
+  // source 每周都会换成今天的日期和这周的运行编号。先沿用现表的 source 重写：字节一样就说明文件和毫秒没变，不开 PR。
+  const keptSource = old?.source ?? freshSource;
+  const mergedKept = mergeTimings(old, measured, head.testFiles, keptSource);
   if (measured.size > 0 && [...measured.keys()].every((f) => !head.testFiles.includes(f))) {
     return {
       outcome: 'failed',
@@ -160,14 +159,16 @@ async function refresh(deps: CiTimingsJobDeps): Promise<ScheduleResult> {
       scanned: names.length,
     };
   }
-  const rendered = renderTimings(merged.timings);
-  const missing = head.testFiles.filter((f) => merged.timings.files[f] === undefined);
-  if (head.timingsText !== null && rendered === head.timingsText) {
+  const missing = head.testFiles.filter((f) => mergedKept.timings.files[f] === undefined);
+  if (head.timingsText !== null && renderTimings(mergedKept.timings) === head.timingsText) {
     if (missing.length > 0) {
       deps.log('warn', `耗时表和现表一样，不开 PR；表里还缺 ${missing.length} 个`);
     }
     return { outcome: 'ok', scanned: names.length, found: 0 };
   }
+  const merged =
+    keptSource === freshSource ? mergedKept : mergeTimings(old, measured, head.testFiles, freshSource);
+  const rendered = renderTimings(merged.timings);
   try {
     const pr = await deps.github.openPr({
       title: PR_TITLE,

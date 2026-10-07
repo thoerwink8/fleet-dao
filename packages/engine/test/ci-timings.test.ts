@@ -5,12 +5,12 @@ import type { ScheduleResult } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
   CI_TIMINGS_EVERY_MINUTES,
-  CI_TIMINGS_OFFSET_MINUTES,
   type CiTimingsGitHub,
   type OpenTimingsPrInput,
   runCiTimingsJob,
   timingsSource,
 } from '../src/jobs/ci-timings.ts';
+import { ciTimingsSchedule } from '../src/jobs/schedules.ts';
 import { latestSlot } from '../src/jobs/timers.ts';
 
 const NOW = new Date('2026-10-07T01:00:00Z');
@@ -83,8 +83,11 @@ const SAME = { [A]: 100, [B]: 20 };
 const SAME_SOURCE = timingsSource(['ci.yml run 101', 'ci.yml run 102'], NOW);
 
 describe('每周刷新耗时表', () => {
-  it('每周一 06:00（北京时间）一格', () => {
-    const job = { everyMinutes: CI_TIMINGS_EVERY_MINUTES, offsetMinutes: CI_TIMINGS_OFFSET_MINUTES };
+  it('登记在 schedules.ts：每周一 06:00（北京时间）一格', () => {
+    const job = ciTimingsSchedule(() => Promise.resolve());
+    expect(job.id).toBe('ci-timings');
+    expect(job.everyMinutes).toBe(CI_TIMINGS_EVERY_MINUTES);
+    expect(job.everyMinutes).toBe(7 * 24 * 60);
     const monday = Date.parse('2026-10-05T06:00:00+08:00');
     expect(latestSlot(job, monday)).toBe(monday);
     expect(latestSlot(job, monday - 1)).toBe(monday - 7 * 24 * 60 * 60 * 1000);
@@ -100,16 +103,23 @@ describe('每周刷新耗时表', () => {
     expect(w.opened).toHaveLength(1);
     expect(w.opened[0]?.content).toContain('"packages/engine/test/a.test.ts": 500');
     expect(w.opened[0]?.content).not.toContain(': 100');
+    expect(w.opened[0]?.content).toContain('（2026-10-07）');
+    expect(w.opened[0]?.content).not.toContain('旧的');
     expect(w.opened[0]?.body).not.toMatch(/Closes\s+#/i);
     expect(w.opened[0]?.body).toContain('无：');
     expect(w.opened[0]?.baseCommit).toBe('a'.repeat(40));
     expect(w.finished[0]).toMatchObject({ outcome: 'ok', found: 1 });
   });
 
-  it('表里没缺文件、重写结果和现表相同：不开 PR', async () => {
+  it('表里没缺文件、文件和耗时没变：不开 PR（source 的日期和运行编号每周都会换，不拿它当表变了）', async () => {
+    // 现表是上周的运行编号和日期。这周重写会写成今天的日期、这周的运行编号，整份文本必然和现表不同。
+    const lastWeek = timingsSource(['ci.yml run 1', 'ci.yml run 2'], new Date('2026-09-28T00:00:00Z'));
+    const existing = table(SAME, lastWeek);
+    const rewritten = table(SAME, timingsSource(['ci.yml run 101', 'ci.yml run 102'], NOW));
+    expect(rewritten).not.toBe(existing);
     const w = world({
       logs: { '101': logOf(SAME), '102': logOf(SAME) },
-      timingsText: table(SAME, SAME_SOURCE),
+      timingsText: existing,
     });
     const run = await runCiTimingsJob(w.deps);
     expect(run.outcome).toBe('ok');
