@@ -1,6 +1,6 @@
 ---
 name: commander
-description: 当指挥官（旧称帅位）时读：和创始人讨论需求、写成单和验收、派给引擎或子代理（无人值守、过夜才用脱离的工人）、盯到合并、记决定、报进度。创始人说「你来当指挥官」「接帅位」时也读。
+description: 当指挥官（旧称帅位）时读：和创始人讨论需求、写成单和验收、派给引擎或子代理（无人值守、过夜也用子代理）、盯到合并、记决定、报进度。创始人说「你来当指挥官」「接帅位」时也读。
 ---
 
 # `commander`：指挥官
@@ -14,7 +14,7 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 脚本在本技能 `scripts/` 下，下面写成 `$S`（Claude Code 是 `~/.claude/skills/commander/scripts`，别家是 `~/.agents/skills/commander/scripts`）：
 
 - `node $S/france.mjs [--json]`：经 ssh 只读看法国引擎（在跑的单、版本、异常）。要这台配好登法国的 ssh，别名写进 `~/.fleet-dao/france-ssh`。页面版：`node $S/server.mjs` 起本机页面，看 `/france`。
-- `node $S/worker.mjs start|status|stop|clean|watch`：本机起脱离会话的工人（Claude、Grok、Codex，各用各的工作树）。它不挂在会话上、会话重开照跑，所以**不显示在 Mirasim 面板里**，只在例外时用（见「派活」）；`start` 必须带 `--detached "<为什么必须脱离>"`，缺了拒起。不带参数看用法。
+- `node $S/worker.mjs start|status|stop|clean|watch`：本机起脱离会话的工人（Claude、Grok、Codex，各用各的工作树）。它不挂在会话上、会话重开照跑，所以**不显示在 Mirasim 面板里**，只在创始人明说要脱离时用（决定 0030，见「派活」）；`start` 必须带 `--detached "<为什么必须脱离>"`，缺了拒起。不带参数看用法。
 - `node $S/release-train.mjs start|status|abort`：发版火车，见「发版」。
 
 ## 起步
@@ -23,7 +23,7 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 
 1. `git fetch origin`，规矩和目标从主线读（`git show origin/main:AGENTS.md`、`git show origin/main:docs/goals.md`）；当前版本的先后在里程碑说明 `<!-- fleet:order -->` 和 `<!-- /fleet:order -->` 之间，`pnpm plan` 现读。
 2. `pnpm progress:read`，先办没处理的创始人引导。
-3. 列五样，别凭记忆：等他拍的（最近的单和 PR 上的提问）；开着的 PR（`gh pr list`）；在跑的工人（`node $S/worker.mjs status`）；法国（`node $S/france.mjs`）；飞书里没处理的意图（`pnpm intents`，读不到就说读不到，不说「没有」）。
+3. 列五样，别凭记忆：等他拍的（最近的单和 PR 上的提问）；开着的 PR（`gh pr list`）；在跑的子代理和工人（`node $S/worker.mjs status`）；法国（`node $S/france.mjs`）；飞书里没处理的意图（`pnpm intents`，读不到就说读不到，不说「没有」）。
 4. 照通用段「怎么跟我说话」给他报一次进度。
 
 ## 讨论需求
@@ -36,11 +36,11 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 
 ## 派活
 
-- **默认用 Agent 子代理**（决定 0024：脱离的工人他在 Mirasim 面板里看不见、没法插手）：Agent 工具起 Sonnet 子代理，可一次并行几个，工作树照旧建在主检出的 `.claude/worktrees/` 下。它活在聊天这一轮里，轮次结束或进程重开就跟着死；起它不会自动开无人值守，要提前收尾先让它提交并推分支。每次派活第一句话说清用的是子代理还是脱离的工人。
+- **默认用 Agent 子代理，无人值守、过夜也一样**（决定 0024、0030：脱离的工人他在 Mirasim 面板里看不见、没法插手）：Agent 工具起 Sonnet 子代理，可一次并行几个，工作树照旧建在主检出的 `.claude/worktrees/` 下。它活在聊天这一轮里，轮次结束或进程重开就跟着死；平时要提前收尾先让它提交并推分支，无人值守时这一轮不结束，它就一直活到做完。起它不会自动开无人值守。每次派活第一句话说清用的是子代理还是脱离的工人。
 - **子代理的模型**：派 Claude 子代理只用 Sonnet 或 Opus（优先 Sonnet），一律写明 `model: "sonnet"`（或 `"opus"`）：设置里的默认只兜住定义里没写模型的（`general-purpose`，`docs/agents-permissions.md`「子代理默认模型」），Plan 这类写了 `inherit` 的不写就跟主会话同一个模型，而主会话可能是他自己选的 Fable；用 `fork` 起的总跟主会话同一个模型，写了 `model` 也不管用，主会话在 Fable 上时别用 `fork`。机器派的会话、子代理、VPS 上的会话永不用 Fable（`docs/decisions/0017-fable-only-in-founder-main-session.md`）。
 - **子代理的交代要瘦**（决定 0025：子代理不读通用段，钩子也不套主会话的等待上限）：只要一次汇报（结论、PR 号和状态、没做的和原因），不要求逐步记进度、不要求两段式。要写清：① 第一条「读代码先用 `mcp__codegraph__codegraph_explore`（仓已建索引，没索引的仓先 `codegraph init -y`），少用 grep 加 Read 来回翻」；② 测试、安装、构建前台跑到完，不拆后台、不轮询；③ 单号或要改什么、怎么算做完、跑哪些测试、别碰什么、PR 怎么开、提交和 PR 的署名行；④ 规矩要用到的那几条（Node 22 可擦除类型、`pnpm pr:open`、不关单、最多 3 轮）。
-- **脱离会话的工人（例外）**：只在他说了无人值守、过夜、我不在，或活预计超过 40 分钟而他不在线时用。写一份交代（单号或要改什么、怎么算做完、要跑哪些测试、别碰什么，**必须带上通用段「报进度」那两条**：按那两段格式汇报、进度随做随更落盘到进度单 #1055——工人只读交代不读通用段，交代不写进度就断在工人这一环），`node $S/worker.mjs start --model claude|grok|codex --name <短名> --brief <文件> --issue <单号> --detached "<理由>"`（母单的分片加 `--refs`；确实没有单改 `--no-issue "<理由>"`，二选一；Claude 工人经 reclaude 起、默认 Sonnet，`--model-id opus` 换 Opus，别的型号拒起）。工人改完用 `pnpm pr:open` 开 PR、当场挂自动合并；改标准的加 `--no-automerge`。工人的进度只在这个会话里报，不另起会话、不建定时任务。
-- **无人值守**（决定 0028）：他说了进入无人值守、过夜、我在睡觉，先 `node ~/.fleet-dao/hooks/unattended.mjs on`（只有这个会话自己跑了才挡收尾），起完工人后用 `worker.mjs watch --wait 55` 一直盯着，不结束这一轮，单次前台等待仍不超过 60 秒。工人有进展（PR 开了、做完、卡住）就 `pnpm progress:note` 一句、给他一行；没有新结果不写话、别空转。工人都收口且队列空了跑 `unattended.mjs done "做完了什么"`，要他拍跑 `unattended.mjs needs-you`，他说停跑 `unattended.mjs off`；满 12 小时、连着 20 次没调工具，收尾钩子自己放行。「停住 N 分钟」先看它最后在等什么（`status` 的最后一句），在等 CI、网关重连就再等，真卡死才 `stop` 后改交代重起。
+- **脱离会话的工人（例外）**：只在创始人明说「脱离会话」「起个独立工人」时用（2026-10-07 他说「不应该脱离会话」，决定 0030，无人值守、过夜、超 40 分钟都不再算例外）。写一份交代（单号或要改什么、怎么算做完、要跑哪些测试、别碰什么，**必须带上通用段「报进度」那两条**：按那两段格式汇报、进度随做随更落盘到进度单 #1055——工人只读交代不读通用段，交代不写进度就断在工人这一环），`node $S/worker.mjs start --model claude|grok|codex --name <短名> --brief <文件> --issue <单号> --detached "<理由>"`（母单的分片加 `--refs`；确实没有单改 `--no-issue "<理由>"`，二选一；Claude 工人经 reclaude 起、默认 Sonnet，`--model-id opus` 换 Opus，别的型号拒起）。工人改完用 `pnpm pr:open` 开 PR、当场挂自动合并；改标准的加 `--no-automerge`。工人的进度只在这个会话里报，不另起会话、不建定时任务。
+- **无人值守**（决定 0028、0030）：他说了进入无人值守、过夜、我在睡觉，先 `node ~/.fleet-dao/hooks/unattended.mjs on`（只有这个会话自己跑了才挡收尾），然后照上面的子代理一道派活，不结束这一轮。等子代理的完成通知；要等就起一条 `run_in_background` 的循环或 Monitor，前台单次等待不超过 55 秒。每收到一个完成通知就 `pnpm progress:note` 一句、给他一行，再从队列头派下一件；没有新结果不写话、别空转。子代理都收口且队列空了跑 `unattended.mjs done "做完了什么"`，要他拍跑 `unattended.mjs needs-you`，他说停跑 `unattended.mjs off`；满 12 小时、连着 20 次没调工具，收尾钩子自己放行。子代理停住不动：`SendMessage` 问它卡在哪，真卡死就起新的接着它的工作树干。
 - **按队列派，不干等**（决定 0025）：队列＝当前版本里程碑说明里的先后，减去在做的和等人拍的。每收到一个完成通知就从队头派下一件，并发不超过上限；等通知时做自己能做的（记进度、答他、核 PR、清工作树），不写「还在等」。要等就一条 `run_in_background` 的循环或 Monitor，前台单次不超过 55 秒。队列空了、在跑的为 0 才收尾。Workflow 工具能自动接续，但要他明说「用 workflow」才能起。
 - **并发上限**：本机同时跑的工人加子代理不超过 4 个（创始人 2026-10-05 同意从 3 试到 4；桌面黑屏那次是 6–9 个同时跑）。
 - **界面活**不给 GPT：写和审都换 Grok 或 Claude。
@@ -59,7 +59,7 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 ## 盯到合并
 
 - 谁开的 PR 谁负责到合并：用 `pnpm pr:open` 开（当场挂自动合并，改标准的除外），不盯、不 `--watch`；红了才回来修、冲突了并主线；按 PR 最多 3 轮，超了写清卡在哪、交给创始人。
-- 工人卡住：`worker.mjs status` 看最后一句输出，改交代重起，或自己接手。
+- 工人或子代理卡住：脱离的工人看 `worker.mjs status` 的最后一句输出，改交代重起；子代理用 `SendMessage` 问；都不行就自己接手。
 - 法国：`france.mjs` 的异常先看；急的（主线红、生产坏、数据、泄露、安全）当场修。
 
 ## 报进度
