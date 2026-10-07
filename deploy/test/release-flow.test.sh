@@ -1474,7 +1474,7 @@ EOF
   check "定时器在跑、读数认得出：没有待处理" "${#PENDING[@]}" 0
   check "读数：上一轮什么时候跑的" "$(said '· 上一轮 2026-09-27T01:00:00.000Z')" 1
   check "读数：主线头和它的 CI" "$(said '· 主线头 bbbbbbbbbbbb，CI pending')" 1
-  check "读数：在用的落后几个提交" "$(said '· 在用 aaaaaaaaaaaa，落后 1 个提交')" 1
+  check "读数：在用的落后几个提交" "$(said '· 在用 aaaaaaaaaaaa，落后主线 1 个提交')" 1
   check "读数：这一轮在等 CI" "$(said '· 这轮：ci-pending（CI 在跑（in_progress））')" 1
   check "读数：规矩同步到哪个提交" "$(said '· 规矩同步到 aaaaaaaaaaaa（ok）')" 1
   check "读数：装机脚本装到哪" "$(said '· 装机脚本装到 aaaaaaaaaaaa，之后相关提交 0 个')" 1
