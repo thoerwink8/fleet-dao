@@ -651,6 +651,9 @@ const AUTO_TIER_FILES = [
   'deploy/france/fleet-agents.slice',
   'deploy/france/fleet-auto-release.service',
   'deploy/france/fleet-auto-release.timer',
+  // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
+  'deploy/france/fleet-mirasim-session.service',
+  'deploy/lib/mirasim.sh',
 ];
 const FULL_RUN_ONLY_FILES = [
   // source 进来的库
@@ -663,7 +666,6 @@ const FULL_RUN_ONLY_FILES = [
   'deploy/lib/cursor-agent.sh',
   'deploy/lib/cursor-key.sh',
   'deploy/lib/grok.sh',
-  'deploy/lib/mirasim.sh',
   'deploy/lib/agents-sync.sh',
   'deploy/lib/app-config.sh',
   'deploy/lib/session-pnpm.sh',
@@ -672,7 +674,6 @@ const FULL_RUN_ONLY_FILES = [
   'deploy/lib/node-report-gate.sh',
   // 整套装机才用的单元和配置样例
   'deploy/france/fleet-temporal.service',
-  'deploy/france/fleet-mirasim-session.service',
   'deploy/france/temporal.yaml',
   'deploy/france/france.env.example',
   'deploy/france/fleet-temporal-cli.sh',
@@ -718,7 +719,13 @@ test('装机分档没漏没重：france.sh 和 human-tier.sh 引用的每个仓�
 test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数里一个都没有', () => {
   const france = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
   const body = (name) => new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`, 'm').exec(france)?.[1] ?? '';
-  for (const fn of ['setup_auto_tier', 'setup_slice', 'retire_old_units', 'setup_auto_release']) {
+  for (const fn of [
+    'setup_auto_tier',
+    'setup_slice',
+    'retire_old_units',
+    'setup_auto_release',
+    'setup_mirasim_session',
+  ]) {
     const text = body(fn);
     assert.ok(text.length > 10, `读到了 ${fn}`);
     assert.doesNotMatch(
@@ -727,8 +734,17 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
       `${fn} 不许碰防火墙、sudoers、建用户`,
     );
   }
-  // 自动档入口只调这三个
-  assert.match(body('setup_auto_tier'), /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\s*$/);
+  // 自动档入口只调这四个（Mirasim 常驻单元放最后，#1274；注释行不算）
+  assert.match(
+    body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
+    /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_mirasim_session\s*$/,
+  );
+  // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
+  const france2 = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
+  assert.match(
+    /^readback_auto_tier\(\) \{\n([\s\S]*?)\n\}/m.exec(france2)?.[1] ?? '',
+    /readback_mirasim_session_unit/,
+  );
   // 反过来：人工档的函数都在 human-tier.sh，不在 france.sh 里
   for (const fn of ['setup_identity', 'setup_pilot', 'setup_sudoers', 'setup_firewall', 'render_firewall']) {
     assert.equal(body(fn), '', `${fn} 应当写在 deploy/lib/human-tier.sh`);
