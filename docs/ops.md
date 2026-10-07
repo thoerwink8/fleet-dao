@@ -598,7 +598,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch --all off --reason "<原因>"   # 所有仓一起关（发版后 release.sh 自己跑这条，见自动发布一节）；只许 off
   ```
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻（重设会把已经能派的单变成「开关打开以前开的」）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
-  这一段是 Fusion 时代的接活逻辑（design 第九节「在哪能做与接活开关」、`docs/decisions/0003-fusion-flow.md` 第 2、8 条），009/010 完成后按三段一条龙改成「对题 → 动手 → 验收」，落地 PR 连带删改；**先别照这段做**（v3 上线前「让 AI 接活」开关一直关着，这段的命令照常不会拉起任何工作流）。看哪些单因为版本、母单子单、本机做、本机认领没派：`sudo -u fleet psql fleet -c "select delivery_id, received_at, note from github_events where note ~ 'workflow=(unscheduled|not_current_version|version_unreadable|mother_ticket|sub_issue|reserved_local|claimed_local)' order by received_at desc limit 20"`。
+  这一段是 Fusion 时代的接活逻辑（design 第九节「在哪能做与接活开关」、`docs/decisions/0003-fusion-flow.md` 第 2、8 条），009/010 完成后按三段一条龙改成「对题 → 动手 → 验收」，落地 PR 连带删改；**先别照这段做**（现行的拉单是 `intake` 那条，见第五节；这段是旧 Fusion 的接活逻辑）。看哪些单因为版本、母单子单、本机做、本机认领没派：`sudo -u fleet psql fleet -c "select delivery_id, received_at, note from github_events where note ~ 'workflow=(unscheduled|not_current_version|version_unreadable|mother_ticket|sub_issue|reserved_local|claimed_local)' order by received_at desc limit 20"`。
 - 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
 
   ```
@@ -619,7 +619,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   - 派活不再看流程配置副本（#556 删了）：「让 AI 接活」只剩 `repos.auto_dispatch_since` 一个开关，开着，引擎每 5 分钟拉一次该做的单（`intake` 定时任务，#632）；单的交代不全、没有可用路由，工作流停下等人，提醒里报原因。核对：`sudo -u fleet psql fleet -c "select owner, name, test_command, auto_dispatch_since from repos"`。
   - 带 GitHub 账号的成员：白名单按 `users` 表认 GitHub 作者（有数字编号只按编号认），创始人那一行补上 GitHub 的数字编号和登录名，两个机器人各加一行 `role = 'bot'`（编号是 `<App 的 slug>[bot]` 这个用户的编号，不是 App 的编号）；数字编号用 `gh api users/<登录名>` 查：`sudo -u fleet psql fleet -c "update users set github_id = <编号>, github_login = '<登录名>' where id = '<创始人那一行的 id>' and github_id is null"`、`sudo -u fleet psql fleet -c "insert into users (display_name, role, github_login, github_id) values ('<slug>[bot]', 'bot', '<slug>[bot]', <编号>) on conflict (github_id) do nothing"`。
   - 加完等下一轮对账（每 15 分钟，没有手动触发的命令），已经开着的单这一轮就补进来。
-- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流。打开后按旧 Fusion 会给挂在当前版本上的独立单起 Fusion 工作流（design 第五节、第九节）；009/010 完成后按三段一条龙重写，落地 PR 连带删改；**新流程上线前这个开关保持关着**。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
+- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流。打开后，引擎拉单（第五节「拉单」）只拉开关打开之后开的、挂了当前版本里程碑的单，打开之前的老单不拉，起三段一条龙工作流；fleet-dao 和 fleet-dao-canary 现在已打开（创始人 2026-10-07 过夜放行），每次发版后会被自动置关、发完要重新打开（下面发版置关两条）。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
 
 两台同一份（飞书网关的通行证）：法国生成，原样拷到香港，值不过屏幕。香港那头先落临时名，收到的不是完整的一行通行证（法国那头没读成、传到一半断了、读到的是报错）就不换，原来那份原样留着：
 
