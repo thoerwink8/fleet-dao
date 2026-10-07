@@ -388,7 +388,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
                       <Input
                         id={id}
                         value={draft[`${r.pool.id}|${k}`] ?? ''}
-                        placeholder="未配置（不限）"
+                        placeholder="未配置"
                         onChange={(e) => setDraft((d) => ({ ...d, [`${r.pool.id}|${k}`]: e.target.value }))}
                         className="num h-8 w-24"
                       />
@@ -411,6 +411,15 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
   );
 }
 
+const SECTIONS = [
+  { id: 'repos', label: '仓库和接活' },
+  { id: 'run', label: '运行设置' },
+  { id: 'notify', label: '提醒' },
+  { id: 'account', label: '账密登录' },
+  { id: 'look', label: '外观' },
+  { id: 'about', label: '关于' },
+] as const;
+
 export default function Settings() {
   const theme = useTheme();
   const api = useApi();
@@ -421,50 +430,65 @@ export default function Settings() {
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
   return (
-    <Page title="设置" description="外观只存在这台浏览器里；运行设置存在后端，改了写进操作记录。">
+    <Page title="设置" description="运行设置和仓库开关存在后端，改了写进操作记录；外观只存在这台浏览器里。">
+      {/* 版式（驾驶舱改版 2026-10-07）：按用得多少排——「让 AI 接活」每次发版后都要重新打开，放最前；外观放后面。顶上一排跳转。 */}
+      <nav aria-label="设置分节" className="-mt-2 mb-2 flex flex-wrap gap-1.5">
+        {SECTIONS.filter((x) => x.id !== 'account' || api.source !== 'demo').map((x) => (
+          <a
+            key={x.id}
+            href={`#${x.id}`}
+            className="rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground hover:border-border-strong hover:text-foreground"
+          >
+            {x.label}
+          </a>
+        ))}
+      </nav>
       <Section
-        id="look"
-        icon={Palette}
-        title="外观"
-        description="多套主题色，每套都有深浅两版；切换即时生效，下次打开还是它。"
+        id="repos"
+        icon={FolderGit2}
+        title="仓库"
+        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」关着时引擎只收单、不派活，点开启才开始接活。"
       >
-        <div className="mb-5 max-w-sm">
-          <ModeSwitch />
-        </div>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          {PALETTES.map((p) => (
-            <PaletteSwatch
-              key={p.id}
-              id={p.id}
-              mode={theme.resolvedMode}
-              active={theme.pref.palette === p.id}
-              onPick={theme.setPalette}
-              size="lg"
-            />
+        {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
+        <EngineMasterRelation />
+        {reposError ? (
+          <div className="mb-3 max-w-xl">
+            <LoadError what="仓列表" error={reposError} />
+            {repos.length ? (
+              <p className="mt-1 text-xs text-muted-foreground">下面是上次读到的，可能不全。</p>
+            ) : null}
+          </div>
+        ) : null}
+        {dispatch.error ? (
+          <div className="mb-3 max-w-xl">
+            <LoadError what="「让 AI 接活」开关" error={dispatch.error} />
+          </div>
+        ) : null}
+        {reposLoading ? <LoadingRows rows={1} /> : null}
+        <ul className="max-w-4xl divide-y rounded-xl border bg-card empty:hidden">
+          {repos.map((r) => (
+            <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+              <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
+              <div className="min-w-0 flex-1 basis-40">
+                <div className="num truncate text-sm font-medium">
+                  {r.owner}/{r.name}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  主线 <span className="num">{r.defaultBranch}</span>
+                </div>
+              </div>
+              <RepoDispatchControl
+                repoId={r.id}
+                name={`${r.owner}/${r.name}`}
+                row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+              />
+            </li>
           ))}
-        </div>
-        <div className="mt-5 rounded-xl border bg-card p-4">
-          <div className="mb-2 text-xs text-muted-foreground">
-            看板上颜色只表达状态。当前主题下的七种状态色：
-          </div>
-          <div className="flex flex-wrap gap-x-5 gap-y-2">
-            {TONES.map((t) => (
-              <span key={t} className="inline-flex items-center gap-1.5 text-sm">
-                <StatusDot tone={t} />
-                {toneLabel[t]}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="mt-3 max-w-md">
-          <Row label="减少动效" hint="在跑的卡片不再呼吸、进度条不再扫光">
-            <Switch
-              checked={theme.pref.motion === 'reduced'}
-              onCheckedChange={(on) => theme.setMotion(on ? 'reduced' : 'system')}
-              aria-label="减少动效"
-            />
-          </Row>
-        </div>
+          {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
+          {repos.length === 0 && !reposLoading && !reposError ? (
+            <li className="px-4 py-3 text-sm text-muted-foreground">还没有仓</li>
+          ) : null}
+        </ul>
       </Section>
 
       <Section
@@ -477,7 +501,7 @@ export default function Settings() {
         {!settings.data ? (
           <LoadingRows rows={2} />
         ) : (
-          <div className="grid max-w-3xl gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
             <NumberSetting
               k="sessions.maxConcurrent"
               s={find('sessions.maxConcurrent')}
@@ -527,51 +551,48 @@ export default function Settings() {
       )}
 
       <Section
-        id="repos"
-        icon={FolderGit2}
-        title="仓库"
-        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」关着时引擎只收单、不派活，点开启才开始接活。"
+        id="look"
+        icon={Palette}
+        title="外观"
+        description="多套主题色，每套都有深浅两版；切换即时生效，下次打开还是它。"
       >
-        {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
-        <EngineMasterRelation />
-        {reposError ? (
-          <div className="mb-3 max-w-xl">
-            <LoadError what="仓列表" error={reposError} />
-            {repos.length ? (
-              <p className="mt-1 text-xs text-muted-foreground">下面是上次读到的，可能不全。</p>
-            ) : null}
-          </div>
-        ) : null}
-        {dispatch.error ? (
-          <div className="mb-3 max-w-xl">
-            <LoadError what="「让 AI 接活」开关" error={dispatch.error} />
-          </div>
-        ) : null}
-        {reposLoading ? <LoadingRows rows={1} /> : null}
-        <ul className="max-w-xl divide-y rounded-xl border bg-card empty:hidden">
-          {repos.map((r) => (
-            <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-              <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
-              <div className="min-w-0 flex-1 basis-40">
-                <div className="num truncate text-sm font-medium">
-                  {r.owner}/{r.name}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  主线 <span className="num">{r.defaultBranch}</span>
-                </div>
-              </div>
-              <RepoDispatchControl
-                repoId={r.id}
-                name={`${r.owner}/${r.name}`}
-                row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
-              />
-            </li>
+        <div className="mb-5 max-w-sm">
+          <ModeSwitch />
+        </div>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          {PALETTES.map((p) => (
+            <PaletteSwatch
+              key={p.id}
+              id={p.id}
+              mode={theme.resolvedMode}
+              active={theme.pref.palette === p.id}
+              onPick={theme.setPalette}
+              size="lg"
+            />
           ))}
-          {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
-          {repos.length === 0 && !reposLoading && !reposError ? (
-            <li className="px-4 py-3 text-sm text-muted-foreground">还没有仓</li>
-          ) : null}
-        </ul>
+        </div>
+        <div className="mt-5 rounded-xl border bg-card p-4">
+          <div className="mb-2 text-xs text-muted-foreground">
+            看板上颜色只表达状态。当前主题下的七种状态色：
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
+            {TONES.map((t) => (
+              <span key={t} className="inline-flex items-center gap-1.5 text-sm">
+                <StatusDot tone={t} />
+                {toneLabel[t]}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3 max-w-md">
+          <Row label="减少动效" hint="在跑的卡片不再呼吸、进度条不再扫光">
+            <Switch
+              checked={theme.pref.motion === 'reduced'}
+              onCheckedChange={(on) => theme.setMotion(on ? 'reduced' : 'system')}
+              aria-label="减少动效"
+            />
+          </Row>
+        </div>
       </Section>
 
       <Section id="about" icon={Info} title="关于" description={`${brand.product}的前端。`}>
