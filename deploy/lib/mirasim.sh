@@ -20,6 +20,9 @@ MIRASIM_RUN_DIR='/home/{user}/.mirasim/run'
 
 mirasim_run_dir() { printf '%s' "${MIRASIM_RUN_DIR//\{user\}/$1}"; } # 会话用户
 
+# check_mirasim_session_unit 等 /api/health 的次数（每次间隔 1 秒，只在连接被拒时重试）
+MIRASIM_HEALTH_TRIES=${MIRASIM_HEALTH_TRIES:-15}
+
 # 读回：这个会话用户自己的 Mirasim 服务在不在。只看 <目录>/local-<端口>.token 恰好有一份，不读令牌内容——认不认由路由
 # 探针判（真连一次、问一句 OK）。目录不在、一份都没有：待配（还没装，不是坏了）；不止一份：判红（认不出该用哪份，只该
 # 有一份 Mirasim 服务，可能是重装了一次没清掉旧的）。以那个用户的身份看（和别的读回一个道理：他看得到的才算数）。
@@ -96,8 +99,15 @@ check_mirasim_session_unit() { # 用户 单元名 端口
     red "$unit 没在跑（服务端本体已装）：journalctl -u $unit -n 50 看现场"
     return 0
   fi
-  local health rc=0
-  health=$(curl -fsS --max-time 5 "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
+  # 刚装、刚重启（自动档在单元文件变了时会重启）时 node 还没跑到 listen：连接被拒（curl 退出 7）就再等一会儿，
+  # 别把「还在起」判成红；连上了但不回、超时（退出 28）这类不重试，照实判红
+  local health rc=0 tries
+  for ((tries = 0; tries < MIRASIM_HEALTH_TRIES; tries++)); do
+    rc=0
+    health=$(curl -fsS --max-time 5 "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
+    if ((rc != 7)); then break; fi
+    sleep 1
+  done
   if ((rc != 0)); then
     red "$unit 在跑但 http://127.0.0.1:$port/api/health 连不上或没回（curl 退出 $rc）：$(tail -c 300 <<<"$health")"
     return 0
@@ -107,4 +117,33 @@ check_mirasim_session_unit() { # 用户 单元名 端口
     return 0
   fi
   ok "$unit 在跑，http://127.0.0.1:$port/api/health 回 ok:true"
+}
+
+# 读回：机器上装着的单元文件内容对不对（#1274：单元只在整套装机时装过一次，后来加的 MIRASIM_NO_AGENT_EGRESS=1 一直没落到法国）。
+# 两层：这两个开关一个都不许缺（缺了 Mirasim 出网会借 agent 的代理口，reclaude 守护一死就全断）；整份和仓里模板渲染出来的一样。
+# 服务端本体不在时这轮不装单元，这里什么都不判（待配由 check_mirasim_session_unit 记一笔）。
+MIRASIM_SESSION_UNIT_REQUIRED_LINES=(
+  'Environment=MIRASIM_NO_AGENT_EGRESS=1'
+  'Environment=MIRASIM_ACCOUNT_USAGE_PROBE=0'
+)
+check_mirasim_session_unit_file() { # 用户 已装的单元文件 仓里模板 端口
+  local u=$1 file=$2 tpl=$3 port=$4 line missing=0
+  if ! mirasim_server_installed "$u"; then return 0; fi
+  if [[ ! -f "$file" ]]; then
+    red "$file 不存在（服务端本体已装，常驻单元该装上）：重跑 bash deploy/france.sh --auto-tier"
+    return 0
+  fi
+  for line in "${MIRASIM_SESSION_UNIT_REQUIRED_LINES[@]}"; do
+    if ! grep -qxF -- "$line" "$file"; then
+      red "$file 里缺 $line（Mirasim 出网会借 agent 的代理口，#1274）：重跑 bash deploy/france.sh --auto-tier"
+      missing=1
+    fi
+  done
+  if ((missing)); then return 0; fi
+  render "$tpl" SESSION_USER="$u" MIRASIM_SESSION_PORT="$port" || return 0
+  if cmp -s -- "$file" <(printf '%s\n' "$RENDERED"); then
+    ok "$file 和仓里模板渲染出来的一样"
+  else
+    red "$file 和仓里 $tpl 渲染出来的不一样：重跑 bash deploy/france.sh --auto-tier"
+  fi
 }
