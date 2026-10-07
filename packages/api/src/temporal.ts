@@ -7,14 +7,15 @@
 // 真客户端由 connectTemporal 用 @temporalio/client 的懒连接（Connection.lazy）装配：这一步不连网络，
 // Temporal 没起来时后端照样能起，真正发信号或查健康才会报错。测试一律用假客户端（TemporalClientLike /
 // EnginePollerSource 的最小形状），不碰真网络；connectTemporal 本身没有自动化测试覆盖（要连真 Temporal）。
+
+import { TASK_WORKFLOW_TYPE, taskWorkflowId } from '@fleet-dao/shared';
 import {
   generationLife,
   readTaskGenerations,
   redoTask,
   type SeenLife,
   signalTaskWorkflowId,
-} from '@fleet-dao/engine/jobs/redo';
-import { TASK_WORKFLOW_TYPE, taskWorkflowId } from '@fleet-dao/shared';
+} from '@fleet-dao/shared/task-redo';
 import {
   Client,
   Connection,

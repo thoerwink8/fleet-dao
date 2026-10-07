@@ -39,7 +39,7 @@ export interface Deps {
   store: Store;
   workflows: WorkflowControl;
   /**
-   * 被撤或挂起的任务重做（engine jobs/redo.ts）：同一张单另起一代。没给（开发环境没有 Temporal）时重做回 503，不假装起了。
+   * 被撤或挂起的任务重做（shared/task-redo.ts）：同一张单另起一代。没给（开发环境没有 Temporal）时重做回 503，不假装起了。
    */
   taskRedo?: TaskRedoPort | undefined;
   changes: ChangeFeed;

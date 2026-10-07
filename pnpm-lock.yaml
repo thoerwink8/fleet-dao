@@ -53,9 +53,6 @@ importers:
       '@fleet-dao/db':
         specifier: workspace:*
         version: link:../db
-      '@fleet-dao/engine':
-        specifier: workspace:*
-        version: link:../engine
       '@fleet-dao/github':
         specifier: workspace:*
         version: link:../github

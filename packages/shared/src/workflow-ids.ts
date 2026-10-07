@@ -18,7 +18,7 @@ export const TASK_WORKFLOW_TYPE = 'taskWorkflow';
  * 一张 issue 的任务工作流。第一代是 `task:acme/demo#12`（不带后缀，历史编号照旧能读、能回放）。
  * 被撤掉以后要重做，另起一代：`task:acme/demo#12:r2`（第二代）、`:r3`……不写 `:r1`。
  * 每一代起的时候都用 REJECT_DUPLICATE：同一个编号不管开着还是已经结束都不许再起，所以重做不会盖掉旧代。
- * 接活不会自己重来；驾驶舱「继续」只叫得醒还在跑的那一代，「重做」才另起下一代（engine/src/jobs/redo.ts）。
+ * 接活不会自己重来；驾驶舱「继续」只叫得醒还在跑的那一代，「重做」才另起下一代（shared/src/task-redo.ts）。
  * 工作流代码不拼这个编号（起的时候由外面传入），加代数不用 patched()。
  * 驾驶舱后端发信号也按这个拼（api/src/temporal.ts），信号名见 task-signals.ts。
  */
