@@ -6,22 +6,24 @@ import { expect, onlyDesktop, test } from '../support/fixtures.ts';
 test.describe('其余页面', () => {
   test.beforeEach(async ({ login }) => login());
 
-  test('路由：九个用途都排了模型，在线的路由写「活」、没探过的写「不知道」，不是空白', async ({
+  test('路由：在用的用途都排了模型，在线的路由写「活」、没探过的写「不知道」，不是空白', async ({
     page,
     shot,
   }) => {
     await page.goto('/routing');
     await expect(page.getByRole('heading', { name: '路由' })).toBeVisible();
-    // 用途骨架是发布时装进库的：default / execute / verify / ui / judge 都在
-    await expect(page.getByText('需求文档').first()).toBeVisible();
-    await expect(page.getByText('写码').first()).toBeVisible();
+    // 用途骨架是发布时装进库的：execute / ui / verify / judge。对题不选路，老的环节不列。
+    await expect(page.getByText('在对话里做，不选路')).toBeVisible();
+    await expect(page.getByText('动手', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('验收').first()).toBeVisible();
+    await expect(page.getByText('需求文档')).toHaveCount(0);
     await expect(page.getByText(/派得出去/).first()).toBeVisible();
     // 探通了的 Claude 拼车/独享、Cursor、Grok 在线：至少有「活」的路由
     await expect(page.getByText(/个派得出去/).first()).not.toHaveText(/^0 个派得出去$/);
     await shot(page, '07-路由');
   });
 
-  test('路由：写码里把 Sonnet 5.5 上移 → 确认 → 落库、进操作记录、刷新后还是新顺序；再下移放回去', async ({
+  test('路由：动手里把 Sonnet 5.5 上移 → 确认 → 落库、进操作记录、刷新后还是新顺序；再下移放回去', async ({
     page,
     api,
     shot,
@@ -39,10 +41,10 @@ test.describe('其余页面', () => {
     await page.goto('/routing?purpose=execute');
     const sonnet = page.locator('li[data-model="sonnet-5.5"]');
     await expect(sonnet).toBeVisible();
-    await sonnet.getByRole('button', { name: /写码里的先后） 上移$/ }).click();
+    await sonnet.getByRole('button', { name: /动手里的先后） 上移$/ }).click();
     // 二次确认：写清从什么顺序变成什么顺序，确认前库里没动
     const dialog = page.getByRole('alertdialog');
-    await expect(dialog).toContainText('把「Sonnet 5.5」在「写码」里上移一位？');
+    await expect(dialog).toContainText('把「Sonnet 5.5」在「动手」里上移一位？');
     expect(await executeOrder()).toEqual(before);
     await shot(page, '07-路由-调先后确认');
     await dialog.getByRole('button', { name: '上移' }).click();
@@ -66,7 +68,7 @@ test.describe('其余页面', () => {
     // 放回去（别的用例读的是骨架的顺序）
     await page
       .locator('li[data-model="sonnet-5.5"]')
-      .getByRole('button', { name: /写码里的先后） 下移$/ })
+      .getByRole('button', { name: /动手里的先后） 下移$/ })
       .click();
     await page.getByRole('alertdialog').getByRole('button', { name: '下移' }).click();
     await expect.poll(executeOrder).toEqual(before);

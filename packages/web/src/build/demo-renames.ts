@@ -10,6 +10,10 @@ export const DEMO_RENAMES: readonly (readonly [RegExp, string])[] = [
   // 换成意思一样的样例说法（演示版里照样按这两条禁令拦）。改了那边的原话，demo-renames.test.ts 会红。
   [/GPT 不做 UI 类活/g, 'GPT 族不接界面类的活'],
   [/不用 Fable（创始人定）/g, 'Fable 暂不启用'],
+  // 路由用途的显示名在 shared/flow-purposes.ts，路由页和选路读同一份，正式版必须叫「Jev 判断」。
+  // 演示版改不了这份源头；短名整词进包会被 scan.ts 拦住。换成演示版里判断题那一格的说法。
+  // 改了那边的原话，demo-renames.test.ts 会红。
+  [/Jev 判断/g, '判断题'],
 ];
 
 export function demoRenamed(code: string): string {

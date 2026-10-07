@@ -2,7 +2,7 @@
 // 指定存在库里（task_route_pins），引擎每次给这一段选路时现读：在跑的这一轮不打断，下一次选路就照它；
 // 指定的模型派不出时引擎停下等人、不悄悄换别的——所以页面要在选的时候、选了之后都说清它现在派不派得出。
 // 派不派得出只照后端现算的路由两层（GET /routing/layers，和选路同一份事实），这里不另判。
-import type { SegmentKind } from '@fleet-dao/shared';
+import { routingPurposeLabel, SEGMENT_STAGE, type SegmentKind } from '@fleet-dao/shared';
 import type {
   RoutingLayerModel,
   RoutingLayerRoute,
@@ -17,8 +17,12 @@ import { stageLabel } from './catalog';
 export type RoutedSegment = 'manual' | 'verify';
 export const ROUTED_SEGMENTS: readonly RoutedSegment[] = ['manual', 'verify'];
 
-/** 每段按哪个用途选路：和引擎 task-contract.ts 的 SEGMENT_STAGE 一致（动手按写码、验收按审查）。 */
-export const SEGMENT_PURPOSE: Record<RoutedSegment, StageKind> = { manual: 'execute', verify: 'review' };
+/** 每段按哪个用途选路：和引擎同一份（shared 的 SEGMENT_STAGE：动手按 execute，验收按页面上的「验收」）。 */
+export const SEGMENT_PURPOSE: Record<RoutedSegment, StageKind> = SEGMENT_STAGE;
+
+function purposeName(stage: StageKind): string {
+  return routingPurposeLabel(stage) ?? stageLabel[stage];
+}
 
 /** 「自动」在下拉里的值（Radix 的 Select 不收空串）。 */
 export const AUTO = 'auto';
@@ -59,7 +63,7 @@ export function choicesFor(
   const stage = SEGMENT_PURPOSE[segment];
   if (layers.unavailable) return { problem: `路由两层读不了：${layers.unavailable}` };
   const purpose = layers.purposes.find((p) => p.purpose === stage);
-  if (!purpose) return { problem: `后端回的路由两层里没有「${stageLabel[stage]}」这个用途` };
+  if (!purpose) return { problem: `后端回的路由两层里没有「${purposeName(stage)}」这个用途` };
   return {
     models: purpose.models.map((m) => ({
       modelId: m.modelId,
@@ -87,7 +91,7 @@ export function pinLiveness(
   if (!m) {
     return {
       verdict: 'dead',
-      why: `它不在「${stageLabel[SEGMENT_PURPOSE[segment]]}」用途的路由两层里，引擎派不出`,
+      why: `它不在「${purposeName(SEGMENT_PURPOSE[segment])}」用途的路由两层里，引擎派不出`,
     };
   }
   if (!pin.routeId) return m.liveness;

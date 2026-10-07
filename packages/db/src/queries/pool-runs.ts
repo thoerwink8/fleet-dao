@@ -331,7 +331,7 @@ export type EndedPoolRun = {
       stage: StageKind;
     }
   | {
-      /** 三段的一次性会话：哪一段。按哪个用途算战绩由选路那边定（engine 的 SEGMENT_STAGE：动手按写码、验收按审查）。 */
+      /** 三段的一次性会话：哪一段。按哪个用途算战绩由选路那边定（shared 的 SEGMENT_STAGE：动手按 execute，验收按 verify）。 */
       kind: 'oneShot';
       segment: RunSegment;
     }

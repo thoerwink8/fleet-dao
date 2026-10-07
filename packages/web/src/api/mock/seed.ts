@@ -1673,6 +1673,8 @@ export function createSeed(now: number): MockState {
       execute: ['opus-5.5', 'kimi-k3', 'cursor-auto', 'opus-5'],
       ui: ['opus-5.5', 'cursor-auto'],
       review: ['grok-4.7', 'gpt-5.6-luna', 'sonnet-5'],
+      // 验收按 verify 选路（和路由页「验收」同一格）。顺序照 review 那份样例，好让指定 Grok 的验收还能对上这条路。
+      verify: ['grok-4.7', 'gpt-5.6-luna', 'sonnet-5'],
       research: ['gpt-5.6-luna', 'grok-4.7', 'deepseek-v4.1-flash'],
       judge: ['sonnet-5', 'deepseek-v4.1-flash'],
     },

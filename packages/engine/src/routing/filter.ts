@@ -13,6 +13,7 @@ import {
   resolvePoolReserve,
   routeProbeStaleMinutes,
   type StageKind,
+  UI_PURPOSE,
 } from '@fleet-dao/shared';
 import {
   duration,
@@ -124,7 +125,7 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
       upstreamModel: route.upstreamModel,
       upstreamAliases: route.upstreamAliases,
     },
-    ctx.uiWork ? 'ui' : ctx.stage,
+    ctx.uiWork ? UI_PURPOSE : ctx.stage,
   );
   const reasons = [...route.banReasons];
   if (hardBan && !reasons.includes(hardBan.reason)) reasons.unshift(hardBan.reason);

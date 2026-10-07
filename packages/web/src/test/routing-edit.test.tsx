@@ -36,7 +36,7 @@ const opened = async () => {
 /** 模型头上的「上移 / 下移」：整行的按钮里按名字结尾认（名字里带这个模型和用途）。 */
 const modelButton = (modelId: string, dir: '上移' | '下移') =>
   within(modelBlock(modelId).firstElementChild as HTMLElement).getByRole('button', {
-    name: new RegExp(`写码里的先后） ${dir}$`),
+    name: new RegExp(`动手里的先后） ${dir}$`),
   });
 
 const routeButton = (routeId: string, dir: '上移' | '下移') =>
@@ -64,7 +64,7 @@ describe('路由页：调先后和开关', () => {
 
     fireEvent.click(modelButton('opus-5.5', '下移'));
     const dialog = await screen.findByRole('alertdialog');
-    expect(dialog.textContent).toContain('把「Opus 5.5」在「写码」里下移一位？');
+    expect(dialog.textContent).toContain('把「Opus 5.5」在「动手」里下移一位？');
     expect(dialog.textContent).toContain(
       '从「Opus 5.5 → Kimi k3 → Cursor Auto → Opus 5」变成「Kimi k3 → Opus 5.5 → Cursor Auto → Opus 5」',
     );
