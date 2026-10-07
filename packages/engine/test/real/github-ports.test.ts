@@ -687,6 +687,12 @@ describe('CI 认了新头：工作树跟着并（#307/#389 那次真事补上的
     expect(calls.fetchBranchHead?.[0]).toMatchObject({ branch: BRANCH });
   });
 
+  it('等 CI 不把合并闸算进必过检查：验收（cold-verify）在等 CI 之后，合并闸这时必红', async () => {
+    const { ports, calls } = setup();
+    await ports.waitCi({ taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head }, ctx);
+    expect(calls.waitCi?.[0]).toMatchObject({ prNumber: 101, excludeChecks: ['merge-gate'] });
+  });
+
   it('没给工作树（合并队列没有工作树）：只回查 CI 的结论，不碰工作树、不抓分支', async () => {
     const newHead = commitInMirror('adopted2.ts', 'export const x = 2;\n');
     const { ports, calls } = setup({
