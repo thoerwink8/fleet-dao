@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SKILLS = join(ROOT, 'agents', 'skills');
+const VENDOR = join(ROOT, 'agents', 'skills-vendor');
 const MAX_DESCRIPTION = 120;
 /** 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、Claude Code 内置子代理的类型名。 */
 const NOT_SKILLS = new Set(['fleet-dao', 'sub-agent', 'job-lock', 'general-purpose', 'claude-code-guide']);
@@ -83,7 +84,23 @@ const read = (path: string) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
 const skillNames = readdirSync(SKILLS)
   .filter((name) => statSync(join(SKILLS, name)).isDirectory())
   .sort();
-const files = [join(SKILLS, 'README.md'), ...skillNames.map((name) => join(SKILLS, name, 'SKILL.md'))];
+/** 第三方 skill 的目录名：自研的正文里可以指它们（`chain-first` 指 `systematic-debugging`），指针照样要指得到。 */
+const vendorNames = readdirSync(VENDOR)
+  .filter((name) => statSync(join(VENDOR, name)).isDirectory())
+  .sort();
+/** 同目录 references/ 下的判例、来历也查指针：里面写错路径一样是指向空气。 */
+const references = (name: string): string[] => {
+  const dir = join(SKILLS, name, 'references');
+  return existsSync(dir)
+    ? readdirSync(dir)
+        .filter((f) => f.endsWith('.md'))
+        .map((f) => join(dir, f))
+    : [];
+};
+const files = [
+  join(SKILLS, 'README.md'),
+  ...skillNames.flatMap((name) => [join(SKILLS, name, 'SKILL.md'), ...references(name)]),
+];
 const texts = files.map((file) => {
   const text = read(file);
   return { file: file.slice(ROOT.length).replace(/\\/g, '/'), dir: dirname(file), text, ...split(text) };
@@ -191,7 +208,8 @@ describe('agents/skills 的指针', () => {
       code.filter((c) => WHOLE_KEBAB.test(c) && !NOT_SKILLS.has(c)).map((name) => ({ file, name })),
     );
     expect(refs.length).toBeGreaterThan(0);
-    const missing = refs.filter(({ name }) => !skillNames.includes(name));
+    expect(vendorNames.length).toBeGreaterThan(0);
+    const missing = refs.filter(({ name }) => !skillNames.includes(name) && !vendorNames.includes(name));
     expect(missing.map(({ file, name }) => `${file} → ${name}`)).toEqual([]);
   });
 });

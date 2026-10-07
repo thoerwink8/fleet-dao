@@ -24,7 +24,7 @@ ddgs text -q "关键词" -m 5 -nc -b brave # 指定后端更快
 
 - 库、框架文档：走 context7，不要搜。
 - GitHub 上的内容（私有仓、原始文件、issue、PR）：用 `gh api` / `gh search`，不用网页抓取。
-- **抓一个已知 URL**：先走 fetch MCP（Claude Code 里是 `mcp__fetch__fetch`）：本地直连，拿到的是转成 markdown 的原文，可用 `start_index` / `max_length` 翻页。内置网页抓取（Claude Code 的 WebFetch）给的是小模型读完页面后对提示的回答，不是原文；它取页前还要回连 claude.ai 做域名校验，网络挡这一跳时就卡住。fetch MCP 默认遵守 `robots.txt`，撞 disallow 是站点规则、不是链路故障（搜索引擎的 `/search` 基本都禁，所以它抓不了搜索结果页，那是 `ddgs` 的活）。
+- **抓一个已知 URL**：这台配了 fetch MCP（Claude Code 里是 `mcp__fetch__fetch`，看 `~/.claude.json` 的 `mcpServers` 里有没有）就先用它：本地直连，拿到的是转成 markdown 的原文，可用 `start_index` / `max_length` 翻页。**没配就 `curl -L` 拿原文自己读**，别为这一次装东西，也别把「没配」当成「抓不到」。内置网页抓取（Claude Code 的 WebFetch）给的是小模型读完页面后对提示的回答，不是原文；它取页前还要回连 claude.ai 做域名校验，网络挡这一跳时就卡住，只当对照。fetch MCP 默认遵守 `robots.txt`，撞 disallow 是站点规则、不是链路故障（搜索引擎的 `/search` 基本都禁，所以它抓不了搜索结果页，那是 `ddgs` 的活）。
 - 官方文档站报 `Socket is closed`：先按本机取数路径排查（代理、TLS、网关都可能是来源），不要据此断言站点下线。Claude Code 的文档有两条实测替代路：context7 的 `/websites/code_claude`、镜像仓 `pleaseai/claude-code-docs`。
 
 ## 两条已经死掉的路（别再写进方案）

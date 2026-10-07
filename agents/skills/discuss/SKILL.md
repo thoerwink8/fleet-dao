@@ -32,9 +32,9 @@ description: 重大方案拍板前让别家挑错时读（默认 GPT，没收敛
 
 只写三样：各家一致的、还剩的分歧、推荐哪个。对方的每条意见写明收没收、为什么。讨论是 AI 之间的事，人只拍板。
 
-## 本机工具（引擎接活之前）
+## 本机工具
 
-脚本在本技能的 `scripts/` 目录，下面写成 `$S`（Claude Code 是 `~/.claude/skills/discuss/scripts`，别家是 `~/.agents/skills/discuss/scripts`）；要这台机器上登录好的 Cursor 命令行（`cursor-agent login`）。
+脚本在本技能的 `scripts/` 目录，下面写成 `$S`（Claude Code 是 `~/.claude/skills/discuss/scripts`，别家是 `~/.agents/skills/discuss/scripts`）；`ask.mjs` 要这台机器上装好、登录好的 Cursor 命令行（`cursor-agent login`）。**先查装没装**（`cursor-agent status` 跑得起来）：没装的机器上 `ask.mjs` 直接退出码 2，照实报「这台没装、没讨论成」，别临时拿别的工具或自己再想一遍冒充讨论；反方（`second-opinion.mjs`）走 Mirasim，不要 Cursor。
 
 `node $S/ask.mjs --text 题面.md --round <0|1|2…> [--models gpt] [--limit 45]`
 
