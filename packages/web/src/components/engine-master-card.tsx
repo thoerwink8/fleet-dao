@@ -80,10 +80,10 @@ export function EngineMasterControl() {
     <section
       data-testid="engine-master"
       data-engine-master={master === null ? view.kind : master.on ? 'on' : 'off'}
-      className={cn('mb-4 rounded-2xl border p-4', master?.on === false && 'border-st-stall/40')}
+      className={cn('mb-4 rounded-xl border bg-card p-4', master?.on === false && 'border-st-stall/40')}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
           <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight">
             <Power className="size-4 text-muted-foreground" aria-hidden />
             引擎总开关
@@ -126,6 +126,7 @@ export function EngineMasterControl() {
         ) : (
           <>
             <Button
+              className="shrink-0 self-start"
               variant={target ? 'default' : 'outline'}
               disabled={update.isPending || settings.isLoading}
               onClick={() => setAsking(true)}

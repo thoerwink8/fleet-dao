@@ -109,13 +109,13 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       data-stale={w.stale || undefined}
       data-unknown={!known || undefined}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-caption text-muted-foreground" title={`上游原名：${w.label}`}>
+      {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07） */}
+      {w.scope || w.window === 'other' ? (
+        <div className="mb-1 truncate text-caption text-muted-foreground" title={`上游原名：${w.label}`}>
           {windowTitle(w)}
-        </span>
-        <ReadingBadge w={w} />
-      </div>
-      <div className="mt-1.5 flex items-baseline justify-between gap-2">
+        </div>
+      ) : null}
+      <div className="flex items-baseline justify-between gap-2">
         {w.used !== undefined && w.limit !== undefined ? (
           <span className="num min-w-0 truncate">
             <span className={cn('text-stat-num font-semibold', full && 'text-ink-fail')}>
@@ -137,9 +137,12 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         ) : (
           <span className="text-sub font-medium text-ink-stall">用量没读到</span>
         )}
-        {w.used !== undefined && util !== undefined ? (
-          <span className="num shrink-0 text-xs text-muted-foreground">{formatUtil(util)}</span>
-        ) : null}
+        <span className="flex shrink-0 items-center gap-1.5">
+          {w.used !== undefined && util !== undefined ? (
+            <span className="num text-xs text-muted-foreground">{formatUtil(util)}</span>
+          ) : null}
+          <ReadingBadge w={w} />
+        </span>
       </div>
       <QuotaBar util={util ?? (upstreamFull ? 1 : undefined)} className="mt-1.5" />
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-caption text-muted-foreground">

@@ -254,7 +254,7 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                         ) : (
                           <div
                             className={cn(
-                              'grid h-full min-h-20 place-items-center text-xs',
+                              'grid h-full min-h-10 place-items-center text-xs',
                               p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
                             )}
                           >
