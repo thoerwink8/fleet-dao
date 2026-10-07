@@ -99,7 +99,7 @@ export const MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
     cacheWritePerMTok: 2,
     source: 'https://developers.openai.com/api/docs/models/gpt-6-sol',
     checkedAt: '2026-10-07',
-    note: '价沿用原先按「gpt-6.1-sol」这个名字查到的数（Mirasim 服务端里实际的串是 gpt-6-sol，两者是不是同一档没有再核对官方页）；标准档价（官方页：缓存输入按输入价的 5% 算；Fast 档 2 倍、Batch/Flex 半价，这里不分）；OpenAI 不单列写缓存价，按输入价算',
+    note: '价沿用原先按「gpt-6.1-sol」这个名字查到的数（目录里实际用的串是 gpt-6-sol，两者是不是同一档没有再核对官方页）；标准档价（官方页：缓存输入按输入价的 5% 算；Fast 档 2 倍、Batch/Flex 半价，这里不分）；OpenAI 不单列写缓存价，按输入价算',
   },
 };
 
