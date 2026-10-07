@@ -17,7 +17,7 @@
 //   3 卡住（到点还有拖后腿的，名单已列出；现场没动，要么再跑 start 再等，要么 abort）。
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { scrubText } from './france-lib.mjs';
+import { KIND_TASK_IDLE, scrubText } from './france-lib.mjs';
 import { pauseMarkerPath } from './worker-lib.mjs';
 
 export const STATE_REL = join('.fleet-dao', 'release-train.json');
@@ -336,20 +336,46 @@ async function localWorkers(io) {
   return { ok: true, ...w };
 }
 
-/** france.mjs：{ ok, code, bad, unread, note, text }。退出码 2＝整个没读到。 */
+/**
+ * france.mjs --json：{ ok, code, bad, unread, note, idle, text }。退出码 2＝整个没读到。
+ * 按异常的 `kind` 分类，不匹配文案（#1292）：`task-idle`（单在跑、手上没会话、N 分钟没动）不计入 bad/unread/note，只数进 idle。
+ * 为什么放在这里过滤，而不是验证前先把引擎开回来：发版车第 2 步关引擎、第 7 步才按发版前状态恢复，
+ * 发版前关着的要保持关，验证前开引擎会改变这个决定（并让引擎在验证期间重新接活）。预检基线和验证用同一个函数，口径一致。
+ */
 async function franceHealth(io) {
-  const r = io.run(io.nodePath, [join(io.scriptsDir, 'france.mjs')], { cwd: io.cwd(), timeoutMs: 120_000 });
+  const r = io.run(io.nodePath, [join(io.scriptsDir, 'france.mjs'), '--json'], {
+    cwd: io.cwd(),
+    timeoutMs: 120_000,
+  });
   if (didNotRun(r) || r.status === 2 || (r.status !== 0 && r.status !== 1))
     return { ok: false, why: `france.mjs 没读到法国：${tailOf(r)}` };
-  const m = /断链排查：(\d+) 处异常、(\d+) 处没读到、(\d+) 处留意/.exec(String(r.stdout));
-  if (!m) return { ok: false, why: `france.mjs 的输出里找不到「断链排查：…」那一行：${tailOf(r)}` };
+  let view;
+  try {
+    view = JSON.parse(String(r.stdout));
+  } catch (e) {
+    return { ok: false, why: `france.mjs --json 的输出不是 JSON（${e.message}）：${tailOf(r)}` };
+  }
+  if (!view || !Array.isArray(view.anomalies))
+    return { ok: false, why: `france.mjs --json 的输出里没有 anomalies 列表：${tailOf(r)}` };
+  const count = { bad: 0, unread: 0, note: 0 };
+  const shown = [];
+  let idle = 0;
+  for (const a of view.anomalies) {
+    if (a.kind === KIND_TASK_IDLE) {
+      idle += 1;
+      continue;
+    }
+    if (!(a.level in count))
+      return { ok: false, why: `france.mjs --json 的异常里有认不出的级别 ${JSON.stringify(a.level)}` };
+    count[a.level] += 1;
+    shown.push(`${a.level === 'note' ? '· 留意：' : '⚠ '}${a.what}`);
+  }
   return {
     ok: true,
     code: r.status,
-    bad: Number(m[1]),
-    unread: Number(m[2]),
-    note: Number(m[3]),
-    text: String(r.stdout).trim(),
+    ...count,
+    idle,
+    text: shown.join('\n'),
   };
 }
 
@@ -380,7 +406,7 @@ async function phasePreflight(io, state) {
     state.baseline = { bad: health.bad, unread: health.unread, note: health.note };
     sayTo(
       io,
-      `预检：法国现状 ${health.bad} 处异常、${health.unread} 处没读到、${health.note} 处留意（记作基线，验证时只拦新增）`,
+      `预检：法国现状 ${health.bad} 处异常、${health.unread} 处没读到、${health.note} 处留意（记作基线，验证时只拦新增；另有 ${health.idle} 处「单没动、手上没会话」不计，暂停期必然出现）`,
     );
   }
 
@@ -602,7 +628,10 @@ async function phaseDeploy(io, state) {
   return { ok: true };
 }
 
-/** 6 验证：法国现状比预检基线没有新增异常；总开关读得到。 */
+/**
+ * 6 验证：法国现状比预检基线没有新增异常；总开关读得到。
+ * 「单没动、手上没会话」（kind task-idle）不算：引擎暂停期不派活不起会话，在动手的单必然「没动」，引擎一恢复就消失（#1292）。
+ */
 async function phaseVerify(io, state) {
   const health = await franceHealth(io);
   if (!health.ok) return failed(health.why);
@@ -616,7 +645,7 @@ async function phaseVerify(io, state) {
   if (!eng.ok) return failed(eng.why);
   sayTo(
     io,
-    `验证：法国 ${health.bad} 处异常、${health.unread} 处没读到（预检基线 ${base.bad}、${base.unread}）；${eng.text}`,
+    `验证：法国 ${health.bad} 处异常、${health.unread} 处没读到（预检基线 ${base.bad}、${base.unread}；暂停期「单没动」${health.idle} 处不计）；${eng.text}`,
   );
   return { ok: true };
 }
