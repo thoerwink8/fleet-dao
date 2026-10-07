@@ -1,4 +1,4 @@
-// 定时读额度入库（#76，design 第十节）：一轮 = 记下开始 → 读配置（/etc/fleet-dao/quota.json）→ 每个池读一遍额度
+// 定时读额度入库（#76，design 第十节）：一轮 = 记下开始 → 读配置（这一版自带的 deploy/quota.json）→ 每个池读一遍额度
 // （adapters 的 readAllQuotas）→ 读成的按池写进 quota_windows（savePoolQuota，唯一写入口）→ 读失败的按规矩报警 → 结局记进 schedule_runs。
 // 改这里之前必须知道：
 // - 读失败的池什么都不写：最近读成时刻不动、旧读数留着（「没读成」不能写成「额度是 0」或「没事」）。
@@ -82,7 +82,7 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
     await deps.raise({
       key: configAlertKey(),
       title: '额度读取没跑：配置读不到',
-      body: `额度读取每轮要先读 quota.json，这一轮读不到、认不出：${why}。在它修好之前所有池的额度都不会更新。`,
+      body: `额度读取每轮要先读这一版自带的 deploy/quota.json，这一轮读不到、认不出：${why}。在它修好之前所有池的额度都不会更新。`,
     });
     return { result: { outcome: 'failed', why: `额度配置读不到：${why}` } };
   }

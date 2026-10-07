@@ -1,10 +1,13 @@
-// 读取器配置：哪些账号池存在、凭据在哪，是机器配置，不进 git。
-// 从 FLEET_QUOTA_CONFIG 指的文件读（默认 /etc/fleet-dao/quota.json）；仓里只有 deploy/examples/quota.example.json。
+// 读取器配置：哪些账号池存在、各池凭据文件在哪（只有池名和路径，不是密钥）。写在仓里 deploy/quota.json，随发布的那一版带着（#1289）；
+// 默认读代码所在那一版自带的这份，FLEET_QUOTA_CONFIG 只给命令行和测试换位置。密钥本身（Key 文件、auth.json）仍手放在机器上。
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import type { QuotaConfig, ReaderType, ReadingWindowKind } from './types.ts';
 import { isForbiddenClaudeEnv, isRecord } from './util.ts';
 
-export const DEFAULT_QUOTA_CONFIG_PATH = '/etc/fleet-dao/quota.json';
+export const DEFAULT_QUOTA_CONFIG_PATH = fileURLToPath(
+  new URL('../../../../deploy/quota.json', import.meta.url),
+);
 
 export function quotaConfigPath(env: Record<string, string | undefined> = process.env): string {
   return env.FLEET_QUOTA_CONFIG?.trim() || DEFAULT_QUOTA_CONFIG_PATH;
@@ -211,7 +214,7 @@ export async function loadQuotaConfig(path = quotaConfigPath()): Promise<QuotaCo
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code ?? 'ERR';
     throw new QuotaConfigError([
-      `读不到配置文件 ${path}（${code}）：用 FLEET_QUOTA_CONFIG 指定，样例见 deploy/examples/quota.example.json`,
+      `读不到配置文件 ${path}（${code}）：默认读这一版自带的 deploy/quota.json，换位置用 FLEET_QUOTA_CONFIG`,
     ]);
   }
   let raw: unknown;

@@ -1,5 +1,5 @@
 {
-  "_说明": "目录配置样例：族、渠道、账号池、模型、路由。各用途（阶段）用什么先后不在这里——那是路由两层（用途 → 模型、模型 → 路由），骨架在 packages/db/routing.default.json，发布时装进库（#574）；这份配置里原来那段 stages 已经删掉了（#754）。真配置放 /etc/fleet-dao/catalog.json（root:fleet 640，不进 git；加密副本在保险箱仓，从那里放上来，见 docs/ops.md 第九节「目录配置」）。发布脚本在迁移之后跑 packages/db/src/bin/catalog.ts 装进库：只补缺，驾驶舱里改过的不覆盖。目录里没有账号、邮箱、组织编号：账号池 id 是代号，账号和凭据在各自的机器配置里。账号池 id 要和额度读取器配置（quota.example.json）的 poolId 一致。以 _ 开头的键是注释。",
+  "_说明": "目录配置样例：族、渠道、账号池、模型、路由。各用途（阶段）用什么先后不在这里——那是路由两层（用途 → 模型、模型 → 路由），骨架在 packages/db/routing.default.json，发布时装进库（#574）；这份配置里原来那段 stages 已经删掉了（#754）。真配置放 /etc/fleet-dao/catalog.json（root:fleet 640，不进 git；加密副本在保险箱仓，从那里放上来，见 docs/ops.md 第九节「目录配置」）。发布脚本在迁移之后跑 packages/db/src/bin/catalog.ts 装进库：只补缺，驾驶舱里改过的不覆盖。目录里没有账号、邮箱、组织编号：账号池 id 是代号，账号和凭据在各自的机器配置里。账号池 id 要和额度读取器配置（仓里 deploy/quota.json）的 poolId 一一对上（packages/db/test/catalog.test.ts 钉着）。以 _ 开头的键是注释。",
   "families": [
     { "id": "claude", "displayName": "Claude", "vendor": "Anthropic" },
     { "id": "gpt", "displayName": "GPT", "vendor": "OpenAI" },

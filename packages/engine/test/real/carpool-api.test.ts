@@ -78,12 +78,12 @@ describe('carpoolApiReader：配置读不到、没有拼车池', () => {
     const read = carpoolApiReader({
       now: () => NOW,
       loadConfig: async () => {
-        throw new Error('/etc/fleet-dao/quota.json 不存在');
+        throw new Error('deploy/quota.json 不存在');
       },
     });
     const r = await read();
     expect(r).toMatchObject({ ok: false, code: 'auth' });
-    expect(!r.ok && r.why).toContain('quota.json 不存在');
+    expect(!r.ok && r.why).toContain('deploy/quota.json 不存在');
   });
 
   it('【故意造出失败】配置里没有 reclaude-carpool 池：回 ok:false，写明找不到 Key 文件', async () => {

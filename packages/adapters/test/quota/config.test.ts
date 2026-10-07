@@ -1,6 +1,6 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEFAULT_QUOTA_CONFIG_PATH,
@@ -11,7 +11,7 @@ import {
 } from '../../src/quota/index.ts';
 import { FIXTURES } from './helpers.ts';
 
-const EXAMPLE = join(FIXTURES, '..', '..', '..', '..', '..', 'deploy', 'examples', 'quota.example.json');
+const REPO_QUOTA_CONFIG = join(FIXTURES, '..', '..', '..', '..', '..', 'deploy', 'quota.json');
 
 function problems(raw: unknown): string[] {
   try {
@@ -24,16 +24,22 @@ function problems(raw: unknown): string[] {
 }
 
 describe('配置文件在哪', () => {
-  it('FLEET_QUOTA_CONFIG 优先，没有就用 /etc/fleet-dao/quota.json', () => {
+  it('FLEET_QUOTA_CONFIG 优先，没有就读这一版自带的 deploy/quota.json（不再有手放的 /etc 文件）', () => {
     expect(quotaConfigPath({ FLEET_QUOTA_CONFIG: '/tmp/q.json' })).toBe('/tmp/q.json');
     expect(quotaConfigPath({})).toBe(DEFAULT_QUOTA_CONFIG_PATH);
-    expect(DEFAULT_QUOTA_CONFIG_PATH).toBe('/etc/fleet-dao/quota.json');
+    expect(resolve(DEFAULT_QUOTA_CONFIG_PATH)).toBe(resolve(REPO_QUOTA_CONFIG));
+    expect(DEFAULT_QUOTA_CONFIG_PATH).not.toContain('/etc/fleet-dao');
   });
 });
 
-describe('仓里的样例和校验同步', () => {
-  it('deploy/examples/quota.example.json 过得了校验，六个池一个不少', async () => {
-    const config = await loadQuotaConfig(EXAMPLE);
+describe('仓里的额度配置和校验同步', () => {
+  it('不带环境变量的默认路径读得出来、过得了校验', async () => {
+    const config = await loadQuotaConfig();
+    expect(config.pools.length).toBeGreaterThan(0);
+  });
+
+  it('deploy/quota.json 过得了校验，六个池一个不少', async () => {
+    const config = await loadQuotaConfig(REPO_QUOTA_CONFIG);
     expect(config.pools.map((p) => p.poolId)).toEqual([
       'claude-solo',
       'claude-carpool',
@@ -42,6 +48,29 @@ describe('仓里的样例和校验同步', () => {
       'grok',
       'jev',
     ]);
+  });
+
+  it('凭据路径都是写死的绝对路径：没有占位符，会话用户的文件写它家里的路径', async () => {
+    const text = await readFile(REPO_QUOTA_CONFIG, 'utf8');
+    expect(text).not.toMatch(/<[^>]*>/);
+    const paths = Object.fromEntries(
+      JSON.parse(text).pools.map((p: Record<string, unknown>) => [
+        p.poolId,
+        [
+          p.authFile,
+          p.tokenFile,
+          p.keyFile,
+          (p.command as string[] | undefined)?.[0],
+          (p.usage as { dir?: string } | undefined)?.dir,
+        ],
+      ]),
+    ) as Record<string, (string | undefined)[]>;
+    for (const poolId of ['claude-solo', 'mirasim-relay', 'cursor', 'grok', 'jev']) {
+      const own = (paths[poolId] ?? []).filter((v): v is string => typeof v === 'string');
+      expect(own.length, poolId).toBeGreaterThan(0);
+      for (const v of own) expect(v, poolId).toMatch(/^\/home\/fleet-agent-carpool\//);
+    }
+    expect(paths['claude-carpool']).toContain('/etc/fleet-dao/reclaude-api.key');
   });
 });
 
@@ -119,8 +148,10 @@ describe('读配置文件', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('文件不在：报错并指向样例', async () => {
-    await expect(loadQuotaConfig(join(dir, 'nope.json'))).rejects.toThrowError(/quota\.example\.json/);
+  it('文件不在：报错并写明默认读哪份、怎么换位置', async () => {
+    await expect(loadQuotaConfig(join(dir, 'nope.json'))).rejects.toThrowError(
+      /deploy\/quota\.json[\s\S]*FLEET_QUOTA_CONFIG/,
+    );
   });
 
   it('不是 JSON：报错', async () => {
