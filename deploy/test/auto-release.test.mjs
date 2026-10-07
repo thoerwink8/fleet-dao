@@ -649,10 +649,6 @@ test('规矩同步给的人和 france.sh 的 AGENT_RULES_USERS 一样', () => {
 // 不在两档里。新加一个被 france.sh 引用的仓里文件，必须在这里登记它属于哪一档，免得悄悄漏了。
 const AUTO_TIER_FILES = [
   'deploy/france/fleet-agents.slice',
-  'deploy/france/fleet-demo-scopes.sh',
-  'deploy/france/fleet-demo-scopes.service',
-  'deploy/france/fleet-demo-scopes.path',
-  'deploy/france/fleet-demo-scopes.timer',
   'deploy/france/fleet-auto-release.service',
   'deploy/france/fleet-auto-release.timer',
 ];
@@ -722,7 +718,7 @@ test('装机分档没漏没重：france.sh 和 human-tier.sh 引用的每个仓�
 test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数里一个都没有', () => {
   const france = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
   const body = (name) => new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`, 'm').exec(france)?.[1] ?? '';
-  for (const fn of ['setup_auto_tier', 'setup_slice', 'setup_demo_scopes', 'setup_auto_release']) {
+  for (const fn of ['setup_auto_tier', 'setup_slice', 'retire_old_units', 'setup_auto_release']) {
     const text = body(fn);
     assert.ok(text.length > 10, `读到了 ${fn}`);
     assert.doesNotMatch(
@@ -732,7 +728,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
     );
   }
   // 自动档入口只调这三个
-  assert.match(body('setup_auto_tier'), /^\s*setup_slice\n\s*setup_demo_scopes\n\s*setup_auto_release\s*$/);
+  assert.match(body('setup_auto_tier'), /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\s*$/);
   // 反过来：人工档的函数都在 human-tier.sh，不在 france.sh 里
   for (const fn of ['setup_identity', 'setup_pilot', 'setup_sudoers', 'setup_firewall', 'render_firewall']) {
     assert.equal(body(fn), '', `${fn} 应当写在 deploy/lib/human-tier.sh`);
