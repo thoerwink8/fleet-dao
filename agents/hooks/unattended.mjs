@@ -1,4 +1,4 @@
-// 无人值守：活由脱离会话的工人干（决定 0026），这个会话自己「不结束这一轮」、留着盯工人、收创始人的引导、汇报
+// 无人值守：活由 Agent 子代理干、不脱离会话（决定 0030，替代 0026 的脱离工人），这个会话自己「不结束这一轮」、等子代理的完成通知、收创始人的引导、汇报
 // （决定 0028，创始人 2026-10-07 约 02:27 推翻 0026 里「起完工人这一轮结束、收尾不拦」：「无人值守模式，会话不应该轮次中断」）。
 // 三处用它：命令行（AI 按创始人的话开关）、Stop 钩子（stop.mjs：开着就把「结束这一轮」挡回去）、PreToolUse 钩子
 // （pretool.mjs：调了工具就记一笔「在干活」）。开会话钩子也读它，上下文被总结、会话重启之后还知道开着。
@@ -223,7 +223,7 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
   if (s === null || s.auto === true || now > Date.parse(s.expiresAt)) return [];
   if (s.state === 'on')
     return [
-      `无人值守开着（到 ${fmt(s.expiresAt)}）：这一轮不要结束。继续盯工人（worker.mjs watch --wait 55），有进展就 pnpm progress:note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
+      `无人值守开着（到 ${fmt(s.expiresAt)}）：这一轮不要结束。等子代理的完成通知（不脱离会话，前台单次不超过 55 秒），有进展就 pnpm progress:note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
     ];
   if (s.state === 'paused' && s.note) return [`无人值守暂停着（${s.note}）。这一轮可以结束。`];
   return [];
@@ -239,7 +239,7 @@ export function blockReason(state, now, running) {
   const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
   const watching =
     running === 0
-      ? '现在没有在跑的工人：队列里还有活就起工人（worker.mjs start --detached），没有了就跑 done 收尾。'
+      ? '现在没有在跑的工人（脱离会话的那种；无人值守不再起它）：还有子代理在跑就等它们的完成通知（要等就起 run_in_background 的循环或 Monitor，前台单次不超过 55 秒）；队列里还有活就用 Agent 子代理派（model: "sonnet"）；子代理都收口、队列空了才跑 done 收尾。'
       : '继续盯工人：node ~/.claude/skills/commander/scripts/worker.mjs watch --wait 55（单次前台等待不超过 60 秒；法国那边的活用 france.mjs）。';
   return (
     `无人值守开着（还剩约 ${left} 分钟，在跑的工人 ${running ?? '没数成'} 个）：不要结束这一轮。${watching}` +
@@ -388,7 +388,7 @@ export function main(argv, io) {
         note: '',
       });
       io.out(
-        `无人值守已开，到 ${fmt(expiresAt)}。活交给脱离会话的工人（worker.mjs start --detached "创始人说了进入无人值守"），这个会话留着盯：worker.mjs watch --wait 55，这一轮想结束会被挡回来；做完 done、要他拍板 needs-you、他说停就 off。`,
+        `无人值守已开，到 ${fmt(expiresAt)}。活交给 Agent 子代理（model: "sonnet"），不脱离会话；这个会话留着等它们的完成通知，这一轮想结束会被挡回来；做完 done、要他拍板 needs-you、他说停就 off。`,
       );
       return 0;
     }

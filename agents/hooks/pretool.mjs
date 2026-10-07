@@ -2041,7 +2041,7 @@ export function decide(raw, fallbackCwd = '') {
   const wait = isSubagentCall(input) ? null : foregroundWait(toolInput, cmd, kind);
   if (wait) {
     return block(
-      `这条调用要在前台等约 ${wait.seconds} 秒（${wait.what}），超过单次上限 ${MAX_FOREGROUND_WAIT_SECONDS} 秒：创始人在这期间发的话要等它跑完才送到我手上，进程一断还会丢。长命令加 run_in_background: true（跑完会重新叫醒你），要等就拆成多次不超过 ${MAX_FOREGROUND_WAIT_SECONDS} 秒的短等；要跑几个小时的活交给 worker.mjs 脱离会话去跑。`,
+      `这条调用要在前台等约 ${wait.seconds} 秒（${wait.what}），超过单次上限 ${MAX_FOREGROUND_WAIT_SECONDS} 秒：创始人在这期间发的话要等它跑完才送到我手上，进程一断还会丢。长命令加 run_in_background: true（跑完会重新叫醒你），要等就拆成多次不超过 ${MAX_FOREGROUND_WAIT_SECONDS} 秒的短等；要等几个小时的活，派给 Agent 子代理、自己不在前台等。`,
     );
   }
   const rawCwd = String(input.cwd ?? input.workspaceRoot ?? fallbackCwd);
