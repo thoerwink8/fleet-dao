@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // #556 delete-soon-members：成员占位已删，路由、导航、占位文案三处都不再见 /members；
-// 其他 soon 页（/models 等）保留。演示版的 demoBlocked('/members') 不再读 NAV（NAV 里没有 /members），
-// 交 404；其它 soon 页在演示版没开放时照旧被拦。
+// 其他没做的页（/models 等）地址保留、但驾驶舱改版（2026-10-07）起不进导航。demoBlocked 只读 NAV，不在 NAV 里的都交 404。
+// （演示版路由表里本来就没有这几页。）
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -21,11 +21,11 @@ afterEach(() => {
 });
 
 describe('#556 delete-soon-members：成员占位已从驾驶舱撤下', () => {
-  test('主导航里不再有 /members；其它 soon 页（/models、/billing、/record、/judge）保留', () => {
+  test('主导航里不再有 /members；其它没做的页（/models、/billing、/record、/judge）也不占导航', () => {
     const paths = NAV_ITEMS.map((n) => n.to);
     expect(paths).not.toContain('/members');
     for (const keep of ['/models', '/billing', '/record', '/judge']) {
-      expect(paths).toContain(keep);
+      expect(paths).not.toContain(keep);
     }
   });
 
@@ -40,7 +40,7 @@ describe('#556 delete-soon-members：成员占位已从驾驶舱撤下', () => {
     expect(soonTsx).toMatch(/\/models/);
   });
 
-  test('演示版：/members 从导航消失后 demoBlocked 交 404（不挡）；其它未开放的占位页仍被拦', () => {
+  test('演示版：/members、/models 都不在导航里，demoBlocked 交 404（不挡）', () => {
     // 演示版只开 board。
     setDemoScopeForTest({
       scope: { v: 1, modules: ['board'], detail: 'status' },
@@ -49,7 +49,7 @@ describe('#556 delete-soon-members：成员占位已从驾驶舱撤下', () => {
     expect(visibleNav().flatMap((g) => g.items.map((i) => i.to))).not.toContain('/members');
     // /members 不在 NAV_ITEMS 里，demoBlocked 拿不到 item → 不拦（404 页处理），不许拦
     expect(demoBlocked('/members')).toBe(false);
-    // 还在导航里的 /models 在演示版没开放 → 拦
-    expect(demoBlocked('/models')).toBe(true);
+    // /models 也不在导航里了 → 同样交 404
+    expect(demoBlocked('/models')).toBe(false);
   });
 });

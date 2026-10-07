@@ -27,7 +27,7 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-fil
      --closes <号>        这个 PR 做完就关单（可重复）
      --refs <号>          母单分片、关不了它（可重复）
      --new-issue "<标题>" 当场开一张单并 Closes 它：要带 --kind 需求|缺陷|杂项、--milestone <版本全名|v<N>|未排期>，缺了不开；
-                          --local 给新单多贴「本机做」
+                          开出的单一律贴「本机做」，引擎不拉。--local 仍可加，加了不报错
      --no-issue "<理由>"  确实没有单：理由原样写进「需求」栏（「无：<理由>」）
      --founder-quote "<原话>" --at "<时间>"  改标准、创始人已经同意：在「需求」栏下面写「人闸：改标准」、再写一段「创始人原话」，
                           并挂自动合并（等价于 --founder-approved 加手写那一段）

@@ -1499,6 +1499,18 @@ describe('驾驶舱 e2e（#930；决定 0029、#1186：PR 只点改动页，全�
     const ran = ciVerdict(needs(p, { e2e: { result: 'success' } }));
     expect(ran.ok).toBe(false);
     expect(ran.lines.join('\n')).toContain('✗ e2e：success，本该 skipped');
+    // GitHub 不把空串输出放进 needs（#1204 那次真事：清单为空的 PR，check 判「不是同一份」红了）：没有 e2e 这一项按空串认
+    const omitted = needs(p);
+    const { e2e: _dropped, ...rest } = omitted.changes.outputs;
+    omitted.changes.outputs = rest;
+    const okOmitted = ciVerdict(omitted);
+    expect(okOmitted.ok, okOmitted.lines.join('\n')).toBe(true);
+    // 【故意造出的失败】plan 要跑 e2e，输出却缺了这一项：不能当成空清单放过
+    const wantAll = { ...p, e2e: 'all' as const };
+    const missing = needs(wantAll, { e2e: { result: 'success' } });
+    const { e2e: _gone, ...rest2 } = missing.changes.outputs;
+    missing.changes.outputs = rest2;
+    expect(ciVerdict(missing).ok).toBe(false);
     // 开关输出和 plan 里的清单不是同一份
     for (const wrong of ['all', 'e2e/specs/01-login.e2e.ts']) {
       const n = needs(p);
