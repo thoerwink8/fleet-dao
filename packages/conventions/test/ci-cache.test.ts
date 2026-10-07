@@ -156,14 +156,17 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     ]);
   });
 
-  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 core、agents 读 db），不往上、不顺依赖往下传 TEST_READS', () => {
+  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、feishu 读 web、db 读 core、agents 读 db 和 agents-sync），不往上、不顺依赖往下传 TEST_READS', () => {
     expect(sourceClosure(GRAPH, ['api'])).toEqual(['api', 'db', 'shared', 'web']);
+    // feishu/test/static.test.ts 读 web 的路由表（TEST_READS）；依赖图里 feishu 只依赖 shared，web 来自这一项
+    expect(sourceClosure(GRAPH, ['feishu'])).toContain('web');
     expect(sourceClosure(GRAPH, ['db'])).toEqual(['core', 'db', 'shared']);
     expect(sourceClosure(GRAPH, ['cli'])).toEqual(['cli', 'shared']);
     // engine 依赖 api，但 api 读 web 是 api 测试自己的事：engine 的闭包里不带 web
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');
     // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）；
-    // agents/test/worker.test.ts 读 db 的路由骨架（TEST_READS）。db 读 core 是 db 测试自己的事：agents 的闭包里不带 core
+    // agents/test/worker.test.ts 读 db 的路由骨架，prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（TEST_READS）。
+    // db 读 core 是 db 测试自己的事：agents 的闭包里不带 core
     expect(sourceClosure(GRAPH, ['agents'])).toEqual(['agents-sync', 'db', 'shared']);
   });
 
