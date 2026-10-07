@@ -13,6 +13,8 @@
 //    （2026-10-01 创始人：「我希望每台机器，能在我们改动后，自动就同步，而不是人为提醒」）：主检出停在功能分支上
 //    不再让这台机器停在旧规矩上。那边的检出只被当「种子」读，一个写操作都没有。
 //    上次同步成功不到 QUIET_MS 就不再跑：Cursor 讨论一次并行起好几个会话，每个都会触发这个钩子。
+//    过了这扇门，同一天也再取、再同步。不用日期文件把主线冻到明天（2026-10-07：当天 01:30 同步之后 #1147 到了主线，
+//    后面的会话都跳过，钩子停在旧的 node 命令上）。
 // 3. 会话所在仓的「## 生效中的临时调整」表（通用段「我拍了板」那条）：到了最迟复查日期的、缺列的、日期认不出的
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 4. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
@@ -414,28 +416,6 @@ function quietFor(stamp, now) {
   }
 }
 
-/**
- * 同一天（北京时间）已经同步成功过：文件里记的就是今天。Mirasim 经常重启会话，3 分钟的 quietFor 拦不住「同一天
- * 第二次开会话」，这里再加一层：一天只真跑一趟规矩同步（10.6 秒）、其余会话一句话带过。文件读不懂、不是今天
- * 都当真跑；内容是上一次同步成功那一刻的北京日期，由 touchDay 写。
- */
-function syncedToday(file, now) {
-  try {
-    return readFileSync(file, 'utf8').trim() === beijingToday(now);
-  } catch {
-    return false;
-  }
-}
-
-function touchDay(file, now) {
-  try {
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, `${beijingToday(now)}\n`);
-  } catch {
-    // 记不下只是下次多同步一遍，不影响这次的结论
-  }
-}
-
 function touch(stamp, now) {
   try {
     mkdirSync(dirname(stamp), { recursive: true });
@@ -464,9 +444,6 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
   const quiet = synced && !force ? quietFor(stamp, now) : null;
   if (quiet !== null)
     return `规矩同步：${Math.max(1, Math.round(quiet / 60_000))} 分钟内刚同步成功过（这台同步到 ${short(synced)}），这次没再取远端。`;
-  // 同日第二次开会话（Mirasim 重启很常见）：一天只真跑一趟同步，失败后日期文件不会被写上、下次还会重试
-  const dayFile = join(home, '.fleet-dao', 'session-sync.date');
-  if (!force && syncedToday(dayFile, now)) return '规矩同步：今天已同步过，这次跳过。';
 
   if (source === null)
     return `规矩同步没查成：开会话钩子读不了同步专用检出那一段（${sourceWhy}）；${RERUN}，${READ_MAIN}。`;
@@ -487,10 +464,7 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
     const origin = String(prepared.head ?? '');
     const lagText = lag(g, synced, false);
     const r = sync(prepared.dir, home);
-    if (r.status === 0 && !r.error) {
-      touch(stamp, now);
-      touchDay(dayFile, now);
-    }
+    if (r.status === 0 && !r.error) touch(stamp, now);
     const note = sourceNote(prepared);
     const said = describeSync(r, prepared.dir, origin, lagText, note);
     return rec.ok
