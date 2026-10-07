@@ -134,18 +134,58 @@ describe('默认配置 routing.default.json', () => {
     ]);
   });
 
-  it('和目录配置样例对得上：每条路由在样例里有、且属于这个模型；样例里的路由都在骨架里（一条不漏）', async () => {
-    const cfg = await loadRoutingConfig();
-    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
-    const inExample = new Map(example.routes.map((r) => [r.id, r.modelId]));
-    const inSkeleton = new Map<string, string>();
-    for (const [model, routes] of Object.entries(cfg.models)) {
-      for (const r of routes) {
-        expect(inExample.get(r.routeId), `${r.routeId} 在目录配置样例里没有`).toBe(model);
-        inSkeleton.set(r.routeId, model);
+  // 骨架引用了、目录配置里没有的模型和路由：发版装载器会拒装（法国库的目录配置是人加的，样例先加、法国后加，骨架要等法国有了才能引用）。
+  // 样例比骨架多是允许的（样例里的新模型可以先躺着），骨架比样例多不行。
+  const skeletonProblems = (
+    cfg: Awaited<ReturnType<typeof loadRoutingConfig>>,
+    example: ReturnType<typeof parseCatalog>,
+  ) => {
+    const modelsInExample = new Set(example.models.map((m) => m.id));
+    const routeModel = new Map(example.routes.map((r) => [r.id, r.modelId]));
+    const problems: string[] = [];
+    for (const [purpose, ids] of Object.entries(cfg.purposes)) {
+      for (const id of ids ?? []) {
+        if (!modelsInExample.has(id)) problems.push(`用途 ${purpose} 引用的模型 ${id} 在目录配置里没有`);
       }
     }
-    expect([...inExample.keys()].filter((id) => !inSkeleton.has(id))).toEqual([]);
+    for (const [model, routes] of Object.entries(cfg.models)) {
+      if (!modelsInExample.has(model)) problems.push(`模型 ${model} 在目录配置里没有`);
+      for (const r of routes) {
+        const owner = routeModel.get(r.routeId);
+        if (owner === undefined) problems.push(`路由 ${r.routeId} 在目录配置里没有`);
+        else if (owner !== model)
+          problems.push(`路由 ${r.routeId} 在目录配置里属于 ${owner}，骨架挂在 ${model} 下`);
+      }
+    }
+    return problems;
+  };
+
+  it('骨架引用的每个模型和路由，目录配置样例里都有、且路由属于这个模型', async () => {
+    const cfg = await loadRoutingConfig();
+    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    expect(skeletonProblems(cfg, example)).toEqual([]);
+  });
+
+  it('【故意造出的失败】骨架引用了目录配置里没有的模型或路由：报出来（发版被这个挡过）', async () => {
+    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const cfg = parseRoutingConfig(
+      JSON.stringify({
+        purposes: { default: ['grok-4.7', 'not-in-catalog'] },
+        models: {
+          'grok-4.7': [
+            { routeId: 'grok:grok-4.7:grok', enabled: true },
+            { routeId: 'grok:no-such-route:grok', enabled: true },
+          ],
+          'not-in-catalog': [{ routeId: 'x:not-in-catalog:y', enabled: true }],
+        },
+      }),
+    );
+    expect(skeletonProblems(cfg, example)).toEqual([
+      '用途 default 引用的模型 not-in-catalog 在目录配置里没有',
+      '路由 grok:no-such-route:grok 在目录配置里没有',
+      '模型 not-in-catalog 在目录配置里没有',
+      '路由 x:not-in-catalog:y 在目录配置里没有',
+    ]);
   });
 
   it('创始人 2026-10-06 定的角色：lead 类（default 兜底）Sonnet 5.5 第一、execute 和 ui 仍是 Grok 第一、verify 仍是 GPT luna 第一；GLM 排在写码、验证、界面、兜底的末尾，判断里没有', async () => {
@@ -155,8 +195,7 @@ describe('默认配置 routing.default.json', () => {
     }
     expect(cfg.purposes.execute?.[0]).toBe('grok-4.7');
     expect(cfg.purposes.ui?.[0]).toBe('grok-4.7');
-    expect(cfg.purposes.verify?.[0]).toBe('gpt-6.1-sol');
-    expect(cfg.purposes.verify?.[1]).toBe('gpt-5.6-luna');
+    expect(cfg.purposes.verify?.[0]).toBe('gpt-5.6-luna');
     for (const stage of ['default', 'verify', 'execute', 'ui'] as const) {
       expect(cfg.purposes[stage]?.at(-1), stage).toBe('glm-5.3-flash');
     }
@@ -177,16 +216,9 @@ describe('默认配置 routing.default.json', () => {
     expect(cfg.purposes.judge).toEqual(['jev-1.13']);
   });
 
-  it('创始人 2026-10-07：验收（verify）第一是 GPT 6.1 sol、走 Mirasim 渠道；写码、界面里没有它', async () => {
+  it('gpt-6.1-sol 暂不进骨架（法国目录配置还没有，发版会被拒装）；目录样例里有它：Mirasim 中转、mirasim 执行方式、族 gpt', async () => {
     const cfg = await loadRoutingConfig();
-    expect(cfg.purposes.verify?.[0]).toBe('gpt-6.1-sol');
-    expect(cfg.purposes.execute).not.toContain('gpt-6.1-sol');
-    expect(cfg.purposes.ui).not.toContain('gpt-6.1-sol');
-    expect(cfg.purposes.default).not.toContain('gpt-6.1-sol');
-    expect(cfg.models['gpt-6.1-sol']?.map((r) => [r.routeId, r.enabled])).toEqual([
-      ['mirasim-relay:gpt-6.1-sol:mirasim', true],
-    ]);
-    // 路由在目录样例里：渠道是 Mirasim 中转、执行方式 mirasim、模型串是 gpt-6.1-sol、族 gpt
+    expect(JSON.stringify(cfg)).not.toContain('gpt-6.1-sol');
     const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
     const route = example.routes.find((r) => r.id === 'mirasim-relay:gpt-6.1-sol:mirasim');
     expect([route?.poolId, route?.hostId, route?.modelId, route?.upstreamModel]).toEqual([
