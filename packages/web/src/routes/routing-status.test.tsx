@@ -1,9 +1,13 @@
 // @vitest-environment happy-dom
-// 渠道状态页（#1087）：左边一排供应商卡（近 60 次柱条、平均耗时、可用率），点开看每一条的 request/response。
-import { cleanup, fireEvent, screen, within } from '@testing-library/react';
+// 渠道状态页（#1087；驾驶舱改版 2026-10-07「渠道状态无法探测」）：左栏按顺位排的渠道卡，右边每条路由的最近一次结论、耗时、
+// 时刻、失败原因原文；单条、整个渠道、全部都能「立即探测」，点了马上看到排队 / 探测中，探完自己刷新。
+// 故意造出的失败：引擎关着（按钮置灰、写明）、点了被拒（写明是哪样）、立即探测的记录读不到（写没读成）、运行中失败的渠道顺到谁没有。
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
-import type { Channel, ChannelState, Route, Routing as RoutingShape } from '../api/types';
-import { buildProviderCards, summaryLine } from '../lib/provider-status';
+import { ApiError } from '../api/client';
+import { createMockApi } from '../api/mock/server';
+import type { Channel, ChannelState, Route, RouteProbeStatus } from '../api/types';
+import { failoverOf } from '../lib/provider-status';
 import RoutingStatus from '../routes/routing-status';
 import { renderApp } from '../test/harness';
 
@@ -26,107 +30,18 @@ const route = (id: string, channelId: string, opts: Partial<Route> = {}): Route 
   ...opts,
 });
 
-const shape = (
-  channels: Channel[],
-  routes: Route[],
-  channelStates: ChannelState[] = [],
-  models: RoutingShape['models'] = [],
-): RoutingShape => ({
-  channels,
-  channelStates,
-  pools: [],
-  models,
-  routes,
-  hardBans: [],
-  bans: [],
-});
+const card = (channelId: string) => {
+  const el = document.querySelector(`[data-channel="${channelId}"]`);
+  if (!(el instanceof HTMLElement)) throw new Error(`页面上没有渠道卡 ${channelId}`);
+  return el;
+};
+const routeRow = (routeId: string) => {
+  const el = document.querySelector(`[data-route="${routeId}"]`);
+  if (!(el instanceof HTMLElement)) throw new Error(`页面上没有路由 ${routeId}`);
+  return el;
+};
 
-describe('provider-status：buildProviderCards', () => {
-  test('每个渠道一张卡：近 60 次柱条格子数固定是 60，没探过的格写在最前', () => {
-    const cards = buildProviderCards(
-      shape(
-        [channel('c1', 'Claude 订阅')],
-        [
-          route('r1', 'c1', {
-            probe: { state: 'ok', at: '2026-10-05T01:00:00Z', detail: '答上了 OK · 用时 9 秒' },
-          }),
-        ],
-      ),
-      undefined,
-    );
-    expect(cards).toHaveLength(1);
-    const c = cards[0]!;
-    expect(c.ticks).toHaveLength(60);
-    // 1 条路由：前面 59 格 off，最后 1 格是真结论
-    expect(c.ticks.filter((t) => t.kind === 'off')).toHaveLength(59);
-    expect(c.ticks[59]!.kind).toBe('ok');
-    expect(c.okCount).toBe(1);
-    expect(c.availability).toBe(1);
-    expect(c.avgLatencySec).toBe(9);
-    expect(c.current.kind).toBe('ok');
-  });
-
-  test('有的探通有的探针报错：状态成 partial、可用率按 ok/已探算', () => {
-    const cards = buildProviderCards(
-      shape(
-        [channel('c1', '中转站')],
-        [
-          route('r1', 'c1', {
-            probe: { state: 'ok', at: '2026-10-05T01:00:00Z', detail: '答上了 OK · 用时 8 秒' },
-          }),
-          route('r2', 'c1', {
-            alive: false,
-            probe: { state: 'failed', at: '2026-10-05T01:05:00Z', detail: '等了 150 秒还没起来' },
-          }),
-        ],
-      ),
-      undefined,
-    );
-    const c = cards[0]!;
-    expect(c.current.kind).toBe('partial');
-    expect(c.okCount).toBe(1);
-    expect(c.downCount).toBe(1);
-    expect(c.availability).toBe(0.5);
-    expect(c.avgLatencySec).toBe(8);
-  });
-
-  test('渠道下架：状态 off，不画柱条', () => {
-    const cards = buildProviderCards(shape([channel('c1', 'Cursor', false)], []), undefined);
-    expect(cards[0]!.current.kind).toBe('off');
-    expect(cards[0]!.current.label).toContain('已下架');
-  });
-
-  test('没探过的渠道：状态 unknown，「还没探到」写明原因', () => {
-    const cards = buildProviderCards(shape([channel('c1', 'DeepSeek 接口')], [route('r1', 'c1')]), undefined);
-    const c = cards[0]!;
-    expect(c.current.kind).toBe('unknown');
-    expect(c.current.label).toContain('还没探到');
-    expect(c.availability).toBeUndefined();
-    expect(c.avgLatencySec).toBeUndefined();
-  });
-
-  test('顶部汇总「N / M 正常」：下架的不算，down 的算坏', () => {
-    const cards = buildProviderCards(
-      shape(
-        [channel('c1', 'a'), channel('c2', 'b'), channel('c3', 'off渠道', false)],
-        [
-          route('r1', 'c1', { probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } }),
-          route('r2', 'c2', {
-            alive: false,
-            probe: { state: 'failed', at: '2026-10-05T01:00:00Z', detail: '连不上' },
-          }),
-        ],
-      ),
-      undefined,
-    );
-    const s = summaryLine(cards);
-    expect(s.total).toBe(2);
-    expect(s.ok).toBe(1);
-    expect(s.downNames).toEqual(['b']);
-  });
-});
-
-describe('provider-status：运行中失败的渠道（#1118）', () => {
+describe('运行中失败的渠道（#1118，failoverOf）', () => {
   const failedState = (over: Partial<ChannelState> = {}): ChannelState => ({
     channelId: 'c1',
     status: 'disabled',
@@ -138,132 +53,238 @@ describe('provider-status：运行中失败的渠道（#1118）', () => {
     updatedAt: '2026-10-05T01:10:00Z',
     ...over,
   });
-  const models = [{ id: 'm1', family: 'claude', displayName: 'Opus 5.5' }];
-  const routes = [
-    route('r1', 'c1', { probe: { state: 'ok', at: '2026-10-05T01:00:00Z', detail: '答上了 OK' } }),
-    route('r2', 'c2', { probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } }),
-  ];
-  const channels = [channel('c1', 'Claude 订阅'), channel('c2', '中转站')];
+  const routing = {
+    channels: [channel('c1', 'Claude 订阅'), channel('c2', '中转站')],
+    models: [{ id: 'm1', family: 'claude', displayName: 'Opus 5.5' }],
+  };
 
-  test('disabled 的渠道：状态是「运行中失败，已顺延」，写明为什么、顺延到谁（渠道和模型）、下次探测时间', () => {
-    const [c1, c2] = buildProviderCards(shape(channels, routes, [failedState()], models), undefined);
-    expect(c1?.current).toMatchObject({
-      kind: 'down',
-      label: '运行中失败，已顺延',
-      reason: '上游断连（已重试 2 次）',
-    });
-    expect(c1?.failover).toMatchObject({
+  test('写明为什么、顺延到谁（渠道和模型）、下次探测：引发失败的那条上次通了，按它的间隔算', () => {
+    const routes = [route('r1', 'c1', { probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } })];
+    expect(failoverOf(failedState(), routes, routing)).toMatchObject({
       reason: '上游断连（已重试 2 次）',
       failedRouteId: 'r1',
       fallback: { channelName: '中转站', modelName: 'Opus 5.5' },
-      // 引发失败的 r1 上次通了、claude-code 每 15 分钟一轮：01:00 + 15 分钟
       nextProbeAt: '2026-10-05T01:15:00.000Z',
       probeEveryMinutes: 15,
     });
-    // 别的渠道不受影响
-    expect(c2?.failover).toBeUndefined();
-    expect(c2?.current.kind).toBe('ok');
-    expect(summaryLine([c1, c2].filter((c) => c !== undefined)).downNames).toEqual(['Claude 订阅']);
-  });
-
-  test('按量放慢的执行方式（mirasim，通了隔 2 小时才再探）：下次探测按那个间隔算；上次没通的每轮都探', () => {
     const slow = [
-      route('r1', 'c1', {
-        hostId: 'mirasim',
-        probe: { state: 'ok', at: '2026-10-05T01:00:00Z' },
-      }),
+      route('r1', 'c1', { hostId: 'mirasim', probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } }),
     ];
-    const [ok] = buildProviderCards(shape(channels, slow, [failedState()], models), undefined);
-    expect(ok?.failover).toMatchObject({
+    expect(failoverOf(failedState(), slow, routing)).toMatchObject({
       nextProbeAt: '2026-10-05T03:00:00.000Z',
       probeEveryMinutes: 120,
     });
-    const failing = [
-      route('r1', 'c1', {
-        hostId: 'mirasim',
-        alive: false,
-        probe: { state: 'failed', at: '2026-10-05T01:00:00Z', detail: '连不上' },
-      }),
-    ];
-    const [bad] = buildProviderCards(shape(channels, failing, [failedState()], models), undefined);
-    expect(bad?.failover).toMatchObject({ nextProbeAt: '2026-10-05T01:15:00.000Z', probeEveryMinutes: 15 });
   });
 
-  test('【故意造出的失败】顺到谁还没有、引发的路由探针没看过 / 已被删：照实写没有，不编一个顺延目标或探测时间', () => {
-    const [c1] = buildProviderCards(
-      shape(
-        channels,
-        [route('r1', 'c1')],
-        [failedState({ fallbackChannelId: undefined, fallbackModelId: undefined })],
-        models,
-      ),
-      undefined,
+  test('【故意造出的失败】顺到谁还没有、引发的路由没探过：照实写没有，不编', () => {
+    const got = failoverOf(
+      failedState({ fallbackChannelId: undefined, fallbackModelId: undefined }),
+      [route('r1', 'c1')],
+      routing,
     );
-    expect(c1?.failover).toMatchObject({ fallback: undefined, nextProbeAt: undefined });
-    const [gone] = buildProviderCards(
-      shape(channels, [route('r9', 'c1')], [failedState({ failedRouteId: undefined })], models),
-      undefined,
-    );
-    expect(gone?.failover).toMatchObject({ failedRouteId: undefined, nextProbeAt: undefined });
-  });
-
-  test('已经改回 ok 的渠道（status ok）、已下架的渠道：不显示运行中失败', () => {
-    const [back] = buildProviderCards(
-      shape(channels, routes, [failedState({ status: 'ok', reason: '路由探针探通了 r1，渠道恢复' })], models),
-      undefined,
-    );
-    expect(back?.failover).toBeUndefined();
-    expect(back?.current.kind).toBe('ok');
-    const [off] = buildProviderCards(
-      shape([channel('c1', 'Claude 订阅', false), channels[1] as Channel], routes, [failedState()], models),
-      undefined,
-    );
-    expect(off?.failover).toBeUndefined();
-    expect(off?.current.kind).toBe('off');
+    expect(got).toMatchObject({ fallback: undefined, nextProbeAt: undefined });
+    expect(failoverOf(failedState({ status: 'ok' }), [], routing)).toBeUndefined();
   });
 });
 
-describe('routing-status 页面', () => {
-  test('mock 渲染：左边每张供应商一张卡，点开右边看路由的 request/response 原文', async () => {
+describe('渠道状态页：渠道卡', () => {
+  test('目录里每个渠道一张卡，按顺位排；探针报错的标暂不可用、顺延到谁；按量计费的写明不自动探；不露模型串', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status' });
-    // mock 里有 5 个渠道，每张卡都要在
-    for (const name of ['Claude 订阅', '中转站', 'Cursor', 'Grok', 'DeepSeek 接口']) {
-      expect(await screen.findByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy();
-    }
-    // 顶部汇总「N / M 正常」
-    expect(await screen.findByText(/\/\s*\d+\s*正常/)).toBeTruthy();
-
-    // 点开 Cursor 那张卡，看它的 detail 里那条探针报错的原文
-    fireEvent.click(screen.getByRole('button', { name: /Cursor/ }));
-    const details = await screen.findAllByText(/等了 150 秒还没起来/);
-    expect(details.length).toBeGreaterThanOrEqual(1);
-
-    // 跳到 DeepSeek（按量不探）那张卡：写明按量计费不自动探
-    fireEvent.click(screen.getByRole('button', { name: /DeepSeek 接口/ }));
-    expect((await screen.findAllByText(/按量计费|不自动探|还没探到/)).length).toBeGreaterThanOrEqual(1);
+    const list = await screen.findByRole('list', { name: '渠道状态' });
+    const items = Array.from(list.children) as HTMLElement[];
+    expect(items.map((c) => c.getAttribute('data-channel')).sort()).toEqual([
+      'ch-claude',
+      'ch-cursor',
+      'ch-ds',
+      'ch-grok',
+      'ch-relay',
+    ]);
+    const cursor = card('ch-cursor');
+    expect(cursor.getAttribute('data-state')).toBe('down');
+    expect(cursor.textContent).toContain('暂不可用');
+    expect(cursor.textContent).toContain('连探两次都没通');
+    expect(cursor.textContent).toMatch(/选路顺延到「.+」|后面没有能用的渠道了/);
+    const claude = card('ch-claude');
+    expect(claude.getAttribute('data-state')).toBe('ok');
+    expect(claude.textContent).toMatch(/4 分钟前探的/);
+    expect(card('ch-ds').textContent).toContain('按量计费，不自动探');
+    expect(items[0]?.textContent).toContain('顺位第 1');
+    expect(list.textContent).not.toMatch(/grok-4\.7|deepseek-v4\.1-flash/);
+    expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
   });
 
-  test('mock 里中转站运行中失败被顺延：卡上和详情里都写明为什么不可用、顺延到谁、下次探测', async () => {
+  test('运行中失败（#1118）：中转站卡上写「运行中失败，已顺延」、为什么、顺到谁、下次探测；和路由页同一份判法', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status' });
-    const relay = await screen.findByRole('button', { name: /中转站/ });
+    await screen.findByRole('list', { name: '渠道状态' });
+    const relay = card('ch-relay');
     expect(relay.getAttribute('data-state')).toBe('down');
     expect(within(relay).getByText('运行中失败，已顺延')).toBeTruthy();
     expect(relay.querySelector('[data-field="reason"]')?.textContent).toContain('上游断连');
     expect(relay.querySelector('[data-field="fallback"]')?.textContent).toBe('Claude 订阅 · Opus 5.5');
-    expect(relay.querySelector('[data-field="next-probe"]')?.textContent).toContain('探通 r-rl-opus 才恢复');
-    // 没出过事的渠道没有这一块
-    const claude = await screen.findByRole('button', { name: /^Claude 订阅/ });
-    expect(claude.querySelector('[data-failover]')).toBeNull();
-    // 点开中转站：右边详情也有完整的一份
-    fireEvent.click(relay);
-    const notes = document.querySelectorAll('[data-failover]');
-    expect(notes.length).toBe(2);
+    expect(card('ch-claude').querySelector('[data-failover]')).toBeNull();
   });
 
-  test('六十格柱条：每张卡都要画出 60 根小柱', async () => {
-    renderApp(<RoutingStatus />, { route: '/routing/status' });
-    const claude = await screen.findByRole('button', { name: /^Claude 订阅/ });
-    const bars = claude.querySelectorAll('[role="img"] span');
-    expect(bars).toHaveLength(60);
+  test('上次探测超过间隔 + 3 分钟：这个渠道改成「检测中断」，别的渠道不受影响', async () => {
+    const api = createMockApi({ live: false });
+    const layers = await api.routingLayers();
+    const old = new Date(Date.now() - 30 * 60_000).toISOString();
+    for (const p of layers.purposes) {
+      for (const m of p.models) for (const r of m.routes) if (r.channelId === 'ch-claude') r.probedAt = old;
+    }
+    Object.assign(api, { routingLayers: async () => layers });
+    renderApp(<RoutingStatus />, { route: '/routing/status', api });
+    await screen.findByRole('list', { name: '渠道状态' });
+    expect(card('ch-claude').getAttribute('data-state')).toBe('interrupted');
+    expect(card('ch-claude').textContent).toContain('检测中断');
+    expect(card('ch-grok').getAttribute('data-state')).toBe('ok');
+  });
+});
+
+describe('渠道状态页：每条路由', () => {
+  test('点开 Cursor：最近一次的时刻、耗时、失败原因原文都在，不藏；近 60 次历史留着位置、写明还没落库', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor' });
+    const row = await waitFor(() => routeRow('r-cursor'));
+    expect(row.getAttribute('data-probe')).toBe('failed');
+    expect(row.textContent).toContain('失败原因（原文）');
+    expect(row.textContent).toContain('等了 150 秒还没起来');
+    expect(row.textContent).toContain('最近一次');
+    expect(row.textContent).toContain('耗时');
+    expect(row.querySelector('[data-history="pending"]')?.textContent).toContain('#1196');
+  });
+
+  test('通的路由：耗时取探针原文里的「用时 N 秒」', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
+    const row = await waitFor(() => routeRow('r-ca-opus'));
+    expect(row.textContent).toContain('9 秒');
+    expect(row.textContent).toContain('通过');
+  });
+
+  test('点单条「立即探测」：马上看到排队，引擎接手后探测中，探完结论自己刷新、顶上写探完了', async () => {
+    let t = Date.now();
+    const api = createMockApi({ live: false, now: () => t });
+    const { qc } = renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
+    const row = await waitFor(() => routeRow('r-grok'));
+    const before = row.textContent;
+    fireEvent.click(within(row).getByRole('button', { name: /立即探测/ }));
+    await waitFor(() => expect(routeRow('r-grok').getAttribute('data-probe')).toBe('queued'));
+    expect(routeRow('r-grok').textContent).toContain('排队中');
+    expect(await screen.findByText(/正在探1 条路由/)).toBeTruthy();
+    // 引擎 1.5 秒接手
+    t += 2_000;
+    await act(() => qc.invalidateQueries({ queryKey: ['route-probe'] }));
+    await waitFor(() => expect(routeRow('r-grok').getAttribute('data-probe')).toBe('running'));
+    // 接手 4 秒探完：顶上写探完了，这条的结论换成新的
+    t += 5_000;
+    await act(() => qc.invalidateQueries({ queryKey: ['route-probe'] }));
+    expect(await screen.findByText(/的立即探测探完了：通过 1 · 不通 0/)).toBeTruthy();
+    await waitFor(() => expect(routeRow('r-grok').getAttribute('data-probe')).toBe('ok'));
+    await waitFor(() => expect(routeRow('r-grok').textContent).not.toBe(before));
+    // 操作记录里有点击、接手、探完三条
+    const audit = await api.audit({ target: 'routing:probe' });
+    expect(audit.items.map((a) => a.action).sort()).toEqual([
+      'routing.probe.done',
+      'routing.probe.request',
+      'routing.probe.start',
+    ]);
+  });
+
+  test('「全部立即探测」：每条路由都转排队；按量计费的探完写明照规矩没探，不写成通', async () => {
+    let t = Date.now();
+    const api = createMockApi({ live: false, now: () => t });
+    const { qc } = renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-ds', api });
+    await screen.findByRole('list', { name: '渠道状态' });
+    fireEvent.click(screen.getByRole('button', { name: '全部立即探测' }));
+    await waitFor(() => expect(routeRow('r-ds').getAttribute('data-probe')).toBe('queued'));
+    expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
+    t += 2_000;
+    await act(() => qc.invalidateQueries({ queryKey: ['route-probe'] }));
+    t += 5_000;
+    await act(() => qc.invalidateQueries({ queryKey: ['route-probe'] }));
+    await waitFor(() => expect(routeRow('r-ds').getAttribute('data-probe')).toBe('skipped'));
+    expect(routeRow('r-ds').textContent).toContain('按量计费的渠道不自动探');
+    expect(routeRow('r-ds').textContent).toContain('没真探');
+  });
+});
+
+describe('渠道状态页：探不了要说清是哪样', () => {
+  const statusWith = (engine: RouteProbeStatus['engine']) => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, {
+      routeProbeStatus: async (): Promise<RouteProbeStatus> => ({
+        asOf: new Date().toISOString(),
+        engine,
+        requests: [],
+      }),
+    });
+    return api;
+  };
+
+  test('【故意造出的失败】引擎按配置没开：顶上写明，「全部立即探测」和每条的按钮都置灰', async () => {
+    renderApp(<RoutingStatus />, {
+      route: '/routing/status?p=ch-claude',
+      api: statusWith({ state: 'off', detail: '这台机器按配置没开引擎' }),
+    });
+    expect(await screen.findByText(/引擎按配置没开（这台机器按配置没开引擎）：探不了/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
+    const row = await waitFor(() => routeRow('r-ca-opus'));
+    expect(within(row).getByRole('button', { name: /立即探测/ })).toHaveProperty('disabled', true);
+  });
+
+  test('【故意造出的失败】引擎没连上：写「没连上」，不显示成通', async () => {
+    renderApp(<RoutingStatus />, {
+      route: '/routing/status',
+      api: statusWith({ state: 'down', detail: '任务队列上没有在拉活的引擎工人' }),
+    });
+    expect(await screen.findByText(/引擎没连上（任务队列上没有在拉活的引擎工人）：探不了/)).toBeTruthy();
+  });
+
+  test('【故意造出的失败】点了被后端拒：原话写在顶上，路由不转「探测中」', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, {
+      routeProbeNow: () =>
+        Promise.reject(new ApiError(503, 'engine_down', '探不了：引擎没连上，点了也没人接')),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
+    const row = await waitFor(() => routeRow('r-grok'));
+    fireEvent.click(within(row).getByRole('button', { name: /立即探测/ }));
+    expect(await screen.findByText('没探成：探不了：引擎没连上，点了也没人接')).toBeTruthy();
+    expect(routeRow('r-grok').getAttribute('data-probe')).toBe('ok');
+  });
+
+  test('【故意造出的失败】立即探测的记录读不到：写没读成和原因，按钮置灰，渠道卡照常显示', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, {
+      routeProbeStatus: () =>
+        Promise.reject(new ApiError(503, 'route_probe_unreadable', '立即探测的记录没读成：连不上库')),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status', api });
+    expect(await screen.findByText(/立即探测的记录没读成：.*连不上库/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
+    expect(card('ch-claude')).toBeTruthy();
+  });
+
+  test('点了没人接手（作废）：那条路由写明这次没成和为什么', async () => {
+    const api = createMockApi({ live: false });
+    const requestedAt = new Date(Date.now() + 60_000).toISOString();
+    Object.assign(api, {
+      routeProbeStatus: async (): Promise<RouteProbeStatus> => ({
+        asOf: new Date().toISOString(),
+        engine: { state: 'on' },
+        requests: [
+          {
+            requestId: 'x',
+            requestedAt,
+            by: 'founder',
+            routeIds: ['r-grok'],
+            state: 'expired',
+            why: '点了 10 分钟引擎都没接手，作废了：引擎没在跑，或还没发到带「立即探测」的版本',
+            results: [],
+          },
+        ],
+      }),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
+    const row = await waitFor(() => routeRow('r-grok'));
+    await waitFor(() => expect(row.textContent).toContain('点的立即探测没成：点了 10 分钟引擎都没接手'));
   });
 });

@@ -202,7 +202,7 @@ async function attemptOf(probe: Prober, t: ProbeTarget): Promise<ProbeAttempt> {
   }
 }
 
-interface Conclusion {
+export interface Conclusion {
   target: ProbeTarget;
   state: RouteProbeState;
   detail: string;
@@ -224,7 +224,7 @@ async function liveOrgOf(deps: RouteProbeJobDeps): Promise<LiveOrgReading> {
   }
 }
 
-async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclusion> {
+export async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclusion> {
   // 带组织类型的池（Claude 订阅）探之前现读一次（读成了的留一会儿）：一轮要好几分钟，中途切了号也认得出
   const live = t.orgKind === null ? null : await liveOrgOf(deps);
   // 写进库的「那时挂的组织」：读成了才有；读不到、这会儿定不下来都不写（选路就不会把它当成「另一个组织挂着时没探」）

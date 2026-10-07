@@ -49,6 +49,9 @@ export function createDemoApi(inner: MockApi): FleetApi {
     routing: () => inner.routing(),
     // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
     routingLayers: () => Promise.reject(hidden('路由')),
+    // 渠道状态页的立即探测：演示版没有这一页，读写一律拒（不让演示链接替创始人起探针会话）。
+    routeProbeStatus: () => Promise.reject(hidden('渠道状态')),
+    routeProbeNow: () => Promise.reject(hidden('渠道状态')),
     // 思考档位页也只在正式驾驶舱里有：演示版看不到、更改不了。
     routingEfforts: () => Promise.reject(hidden('思考档位')),
     updateRouteEffort: () => Promise.reject(hidden('思考档位')),

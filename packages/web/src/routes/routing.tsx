@@ -8,9 +8,15 @@ import { Route as RouteIcon, TriangleAlert } from 'lucide-react';
 import { type ReactNode, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { useRoutingLayers } from '../api/client';
-import type { LivenessFact, RoutingLayerModel, RoutingLayerPurpose, RoutingLayerRoute } from '../api/types';
-import { ChannelStatus } from '../components/channel-status';
+import { useRouting, useRoutingLayers } from '../api/client';
+import type {
+  LivenessFact,
+  RoutingLayerModel,
+  RoutingLayerPurpose,
+  RoutingLayerRoute,
+  RoutingLayers,
+} from '../api/types';
+import { ChannelStrip } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import {
   MoveButtons,
@@ -22,6 +28,7 @@ import {
 import { StatusChip, StatusDot } from '../components/status';
 import { Badge } from '../components/ui/badge';
 import { stageLabel } from '../lib/catalog';
+import { buildChannelCards } from '../lib/channel-status';
 import { formatAgo, formatClock, formatIn } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
@@ -46,7 +53,7 @@ export function meta() {
 }
 
 const DESCRIPTION =
-  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在活着吗。一条路三件事都过（接得上、额度够、没被禁令挡）才算活；一层里有一条活的，这一层就派得出去。每行右边的上移 / 下移和开关能改顺序：模型的先后只管这个用途，渠道的先后和开关管这个模型在所有用途里的样子；改完下一次选路就照新的。';
+  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。右边的上移 / 下移和开关改顺序：模型的先后只管这个用途，渠道的先后和开关管这个模型在所有用途里；下一次选路就照新的。';
 
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
@@ -97,7 +104,7 @@ export default function Routing() {
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
       actions={data.purposes.length > 0 ? <Summary purposes={data.purposes} asOf={data.asOf} /> : undefined}
     >
-      <ChannelStatus layers={data} />
+      <ChannelSummary layers={data} />
       {data.purposes.length === 0 || !selected ? (
         <Panel>
           <Empty
@@ -118,6 +125,21 @@ export default function Routing() {
       )}
     </Page>
   );
+}
+
+/** 顶上一行渠道一览（细看、立即探测在渠道状态页）。目录读不到照说没读成，不画空的一行。 */
+function ChannelSummary({ layers }: { layers: RoutingLayers }) {
+  const routing = useRouting();
+  const now = useNow();
+  if (routing.error) {
+    return (
+      <div className="mb-4">
+        <LoadError what="渠道状态" error={routing.error} />
+      </div>
+    );
+  }
+  if (!routing.data) return null;
+  return <ChannelStrip cards={buildChannelCards(routing.data, layers, now)} now={now} />;
 }
 
 function Summary({ purposes, asOf }: { purposes: RoutingLayerPurpose[]; asOf: string }) {
@@ -391,7 +413,13 @@ function RouteItem({
             ) : (
               <>{formatAgo(r.probedAt, now)}探的</>
             )
-          ) : null}
+          ) : null}{' '}
+          <Link
+            to={`/routing/status?p=${encodeURIComponent(r.channelId)}`}
+            className="underline underline-offset-2 hover:text-foreground"
+          >
+            原文、立即探测
+          </Link>
         </Fact>
         <Fact label="额度够" fact={r.quota}>
           {r.exhausted.length > 0

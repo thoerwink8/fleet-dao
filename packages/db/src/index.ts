@@ -21,6 +21,7 @@ export * from './queries/pool-runs.ts';
 export * from './queries/probe.ts';
 export * from './queries/quota.ts';
 export * from './queries/reconcile.ts';
+export * from './queries/route-probe-now.ts';
 export * from './queries/runs.ts';
 export * from './queries/schedule.ts';
 export * from './queries/session-org.ts';

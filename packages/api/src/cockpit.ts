@@ -66,6 +66,7 @@ import {
 } from './ports.ts';
 import { registerReleaseRoutes } from './release-version.ts';
 import { soloReserveView } from './reserve-view.ts';
+import { registerRouteProbeRoutes } from './route-probe-now.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { registerRoutingOrderRoutes } from './routing-order.ts';
@@ -563,6 +564,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerDemoRoutes(app, deps, actorOf);
   registerDispatchRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
+  registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerReleaseRoutes(app, deps);
   registerFranceReleaseRoutes(app, deps);
 

@@ -17,6 +17,7 @@ import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
+import type { RouteProbeNowDeps } from './jobs/route-probe-now.ts';
 import type { WatchdogDeps } from './jobs/watchdog.ts';
 import {
   type ActivityTiming,
@@ -182,6 +183,8 @@ export interface EngineJobs {
   githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
   /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
   routeProbe?: () => RouteProbeJobDeps;
+  /** 驾驶舱的立即探测（jobs/route-probe-now.ts）：每几秒看一眼有没人点、接手、探、回结论。不给就不看。 */
+  routeProbeNow?: () => RouteProbeNowDeps;
   /** 定时读额度（#76）：读配置、读各池额度、读成的写库、读失败的报警。 */
   quotaRead?: () => QuotaReadJobDeps;
   /** 拼车额度盯读（#194，给切号用）：按情况读开放接口、交给切号当场判。 */

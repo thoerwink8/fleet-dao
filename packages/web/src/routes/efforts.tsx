@@ -74,14 +74,26 @@ export default function Efforts() {
           />
         </Panel>
       ) : (
-        <div className="grid items-start gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-          {data.models.map((m) => (
-            <ModelPanel key={m.modelId} model={m} fallback={data.defaultEffort} />
+        // 瀑布流（CSS 多栏）：模型下的路由条数差得多（1 条到 3 条），网格按行对齐会在矮卡下面空出一大块
+        <div className="gap-4 lg:columns-2 2xl:columns-3">
+          {byConfigurable(data.models).map((m) => (
+            <div key={m.modelId} className="mb-4 break-inside-avoid">
+              <ModelPanel model={m} fallback={data.defaultEffort} />
+            </div>
           ))}
         </div>
       )}
     </Page>
   );
+}
+
+/**
+ * 来这页是为了改档位：有路能配的模型排前面（照后端给的先后），一条都配不了的（cursor 整串模型名、判断题小模型、引擎还没接上的）
+ * 放最后，照列、写明为什么配不了，不占最显眼的位置。
+ */
+function byConfigurable(models: EffortModel[]): EffortModel[] {
+  const fixedOnly = (m: EffortModel) => m.routes.length > 0 && m.routes.every((r) => r.fixed !== undefined);
+  return [...models.filter((m) => !fixedOnly(m)), ...models.filter(fixedOnly)];
 }
 
 function Counts({ models, fallback }: { models: EffortModel[]; fallback: SessionEffort }) {
