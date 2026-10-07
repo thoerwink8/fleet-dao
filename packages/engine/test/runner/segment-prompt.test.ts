@@ -29,6 +29,12 @@ describe('动手会话的提示词', () => {
     expect(text).not.toContain('结果.md');
   });
 
+  it('带一句「同模块的历史单和它的 PR 在 specs/ 与该单 Refs 里，先读」（#995 拍 3）：新旧单、有没有需求文档都带', () => {
+    for (const specDir of ['specs/12-驾驶舱状态', undefined]) {
+      expect(render({ specDir })).toContain('同模块的历史单和它的 PR 在 `specs/` 与该单 `Refs` 里，先读');
+    }
+  });
+
   it('老单指着的需求文档在主线上：告诉它别改；需求在单子里的新单没有这一行，也不叫它写需求.md', () => {
     expect(render({ specDir: 'specs/12-驾驶舱状态' })).toContain('已经在主线上，不要改它');
     const fresh = render({ specDir: undefined });

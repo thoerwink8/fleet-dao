@@ -92,6 +92,7 @@ function setup(
     create?: GhResult;
     body?: string;
     route?: (args: string[]) => GhResult | undefined;
+    similar?: NonNullable<Parameters<typeof issueNew>[1]['similar']>;
   } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'fleet-issue-new-'));
@@ -104,7 +105,7 @@ function setup(
     if (args[0] === 'api') return opts.milestones ?? ok(MILESTONES);
     return opts.create ?? ok(`${URL36}\n`);
   };
-  const run = (...argv: string[]) => issueNew(argv, { gh, cwd: root });
+  const run = (...argv: string[]) => issueNew(argv, { gh, cwd: root, similar: opts.similar });
   return { root, calls, run };
 }
 
@@ -803,5 +804,54 @@ describe('开单脚本：gh 出错照实报，不吞', () => {
     const r = await ghRunner(tmpdir(), 'fleet-no-such-gh-command')(['--version']);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain('找不到 fleet-no-such-gh-command 命令');
+  });
+});
+
+describe('开单脚本：开单前查可能重复的单（#995 拍 3）：只提示，不拦', () => {
+  const hit = {
+    number: 353,
+    title: '登录页加验证码（旧）',
+    kind: 'issue' as const,
+    score: 0.8,
+    why: '标题里都有「验证码」',
+  };
+  it('查到像的：单照开，结果里带着它；查的时候拿到的是这张单的标题和正文', async () => {
+    const asked: { title: string; body: string }[] = [];
+    const { calls, run } = setup({
+      similar: async (q) => {
+        asked.push(q);
+        return { found: [hit] };
+      },
+    });
+    const r = await run(...base);
+    expect(r.number).toBe(36);
+    expect(r.similar).toEqual({ found: [hit] });
+    expect(asked).toEqual([{ title: '登录页加验证码', body: BODY }]);
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'create')).toBe(true);
+  });
+
+  it('【故意造出的失败】没查成：单照开，没查成的原因原样带在结果里（不当成没有重复）', async () => {
+    const { run } = setup({ similar: async () => ({ found: [], unchecked: '读开着的单失败' }) });
+    const r = await run(...base);
+    expect(r.number).toBe(36);
+    expect(r.similar).toEqual({ found: [], unchecked: '读开着的单失败' });
+  });
+
+  it('不传就不查（别的调用方、别的测试的 gh 调用不多一次）：结果里没有 similar', async () => {
+    const { run } = setup();
+    expect((await run(...base)).similar).toBeUndefined();
+  });
+
+  it('正文不合格（缺「怎么算做完」）：先拒开，连查都不查', async () => {
+    let asked = 0;
+    const { run } = setup({
+      body: '没有任何小节',
+      similar: async () => {
+        asked += 1;
+        return { found: [] };
+      },
+    });
+    await expect(run(...base)).rejects.toThrow();
+    expect(asked).toBe(0);
   });
 });
