@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { TaskDetail, UpdateTaskRoutePinBody } from '../api/types';
+import { estimateParts } from '../lib/usage';
 import TaskPage from '../routes/task';
 import { renderApp } from './harness';
 
@@ -194,18 +195,26 @@ describe('每个环节的花费：没报的按目录单价估', () => {
     expect(screen.getByText(/另估 \$0\.12/)).toBeTruthy();
   });
 
-  test('【故意造出的失败】目录里没有单价的模型（Kimi）：写「没有单价」，不写 $0', async () => {
+  test('【故意造出的失败】Kimi 有单价了，但这一笔缓存读写没读到：写「估不了」和缺哪几样，不写 $0、不写「没有单价」', async () => {
     open('/tasks/t-c9');
     const run = await waitFor(() => {
       const el = document.querySelector('[data-run="seg-c9-2"]');
       if (!el) throw new Error('每一笔里没有 Kimi 那一笔');
       return el;
     });
-    expect(run.querySelector('[data-estimate-gap]')?.textContent).toContain(
-      '模型目录里没有「kimi-k3」的单价，估不了',
-    );
+    expect(run.querySelector('[data-estimate-gap]')?.textContent).toContain('没读到缓存读、缓存写，估不了');
     const manual = document.querySelector('[data-segment="manual"] [data-model="kimi-k3"]');
-    expect(manual?.textContent).toContain('没有单价');
+    expect(manual?.textContent).toContain('估不了');
+    expect(manual?.textContent).not.toContain('没有单价');
     expect(manual?.textContent).not.toContain('$0.00');
+  });
+
+  test('【故意造出的失败】目录里写明没有按 token 单价的模型（Cursor Auto）：合计写「没有单价」，不写 $0', () => {
+    const parts = estimateParts({ estimate: { runs: 0, usd: 0, noPrice: 1, noTokens: 0 } } as Parameters<
+      typeof estimateParts
+    >[0]);
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toMatchObject({ key: 'noPrice', missing: '没有单价' });
+    expect(JSON.stringify(parts)).not.toContain('$0');
   });
 });

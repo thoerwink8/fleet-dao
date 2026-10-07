@@ -110,12 +110,14 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  * 不再往下传——依赖读的那个包的，并不读被读的文件）。
  * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu/test/static.test.ts 读 web 的路由表；
  * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）；
- * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）。
+ * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
+ * shared/test/model-prices.test.ts 读 db 的路由骨架 routing.default.json（目录里每个模型在单价表里都得有一项，#1215）。
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
   feishu: ['web'],
   db: ['core'],
+  shared: ['db'],
   [AGENTS_UNIT]: ['db', 'agents-sync'],
 };
 

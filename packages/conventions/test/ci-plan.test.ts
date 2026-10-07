@@ -195,9 +195,9 @@ describe('按改动算要跑什么', () => {
     ]);
   });
 
-  it('改了 db：db 和所有依赖它的（engine、api、store、jev）都测，读 db 路由骨架的 agents 也测；pg 的测试单独一台。github 不在里面（#901 ⑤：它不再依赖 db，改 db 不用重测它）', () => {
+  it('改了 db：db 和所有依赖它的（engine、api、store、jev）都测，读 db 路由骨架的 agents、shared 也测；pg 的测试单独一台。github 不在里面（#901 ⑤：它不再依赖 db，改 db 不用重测它）', () => {
     const p = pr('packages/db/src/schema/index.ts');
-    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'jev', 'store']);
+    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'jev', 'shared', 'store']);
     expect(units(p)).not.toContain('github');
     const packed = assigned(p);
     // db 的测试（要真 Postgres）单独一台，不和别的包混在一个 vitest 进程里（FLEET_TEST_PG_URL 一设，全进程都连真库）
@@ -346,7 +346,10 @@ describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 te
 
   it('shared 和 db 一起改：db 照 planCi 带上依赖它的，shared 只算自己；已经在 units 里的不在 dependents 里重复', () => {
     const r = fb('packages/shared/src/domain.ts', 'packages/db/src/schema/index.ts');
-    expect(r.units).toEqual([...pr('packages/db/src/schema/index.ts').testUnits, 'shared'].sort());
+    // shared 的测试读 db 的路由骨架（TEST_READS），所以改 db 本来就带上 shared：这里只核对不重复
+    expect(r.units).toEqual(
+      [...new Set([...pr('packages/db/src/schema/index.ts').testUnits, 'shared'])].sort(),
+    );
     expect(r.dependents).toEqual(usersOf('shared').filter((u) => !r.units.includes(u)));
     expect(r.dependents).not.toContain('db');
   });

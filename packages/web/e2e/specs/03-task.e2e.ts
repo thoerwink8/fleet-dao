@@ -77,12 +77,12 @@ test.describe('单子详情', () => {
     expect(after.routePins.pins.find((p) => p.segment === 'manual')?.modelId).toBeUndefined();
   });
 
-  test('目录里没有单价的模型（#14 动手的 Kimi，没报花费）：花费写「没有单价」，不写 $0', async ({
+  test('没报花费、缓存读写也没读到的一笔（#14 动手的 Kimi，有单价但 token 不全）：花费写「估不了」和原因，不写 $0', async ({
     page,
     stack,
   }) => {
     await page.goto(`/tasks/${stack.facts.tasks.stalled}`);
-    await expect(page.locator('[data-estimate-gap]').first()).toContainText('没有「kimi-k3」的单价');
+    await expect(page.locator('[data-estimate-gap]').first()).toContainText('没读到缓存读、缓存写，估不了');
   });
 
   test('从没跑过的单 #16：明说「还没跑过」，不是空白', async ({ page, stack }) => {
