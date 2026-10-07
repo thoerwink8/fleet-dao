@@ -91,6 +91,11 @@ export function familyPickerFrom(
    * 后者才是做不出来。pickRouteForFamily 只回 undefined，这个信息不然就丢了。
    */
   onNotPicked?: (family: string, why: Extract<PickRouteResult, { ok: false }>) => void,
+  /**
+   * 这张单是界面活（改到了页面代码，或没认出是不是）：每次问选路都带上 `uiWork`，硬禁令 gpt-no-ui 起作用，
+   * GPT 族回「没有能派的」、顺序往下问下一家。不带 = 非界面单，照旧。
+   */
+  uiWork = false,
 ): (taskId: string) => FamilyPickDeps {
   const all = order.map((f) => f.trim()).filter((f) => f !== '');
   return (taskId) => ({
@@ -104,6 +109,7 @@ export function familyPickerFrom(
         avoidRouteIds: [],
         avoidPoolIds: [],
         avoidModelIds: [],
+        ...(uiWork ? { uiWork: true } : {}),
       });
       if (!got.ok) {
         onNotPicked?.(want, got);
