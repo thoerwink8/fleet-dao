@@ -12,10 +12,15 @@ import { TooltipProvider } from '../components/ui/tooltip';
 
 export function renderApp<A extends FleetApi = MockApi>(
   ui: ReactElement,
-  opts: { api?: A; route?: string } = {},
+  opts: { api?: A; route?: string; retry?: false | 1 } = {},
 ): RenderResult & { api: A; qc: QueryClient } {
   const api = opts.api ?? (createMockApi({ live: false }) as FleetApi as A);
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
+  // retry: 1 对齐 root.tsx 的全局默认（再加 retryDelay: 0，测试不用等那一秒）。不传保持不重试。
+  const qc = new QueryClient({
+    defaultOptions: {
+      queries: { retry: opts.retry ?? false, ...(opts.retry ? { retryDelay: 0 } : {}), staleTime: 0 },
+    },
+  });
   const view = render(
     <MemoryRouter initialEntries={[opts.route ?? '/']}>
       <QueryClientProvider client={qc}>

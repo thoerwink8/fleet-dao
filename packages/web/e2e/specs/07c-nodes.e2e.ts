@@ -112,10 +112,16 @@ test.describe('看板多机', () => {
     await shot(page, '07c-失联');
   });
 
-  test('配了钥匙却从没收到过快照的环境：主页明说没读成和原因，不画空数据', async ({ page, problems }) => {
+  test('配了钥匙却从没收到过快照的环境（404）：写「没有这个环境」和回主页，不画空数据、不给重试', async ({
+    page,
+    problems,
+  }) => {
     problems.allow('/api/nodes/idle');
     await page.goto('/?node=idle');
-    await expect(page.getByRole('alert').first()).toContainText('一次快照都没推来过');
+    const alert = page.getByRole('alert').first();
+    await expect(alert).toContainText('没有这个环境');
+    await expect(alert.getByRole('link', { name: '回主页' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0);
     await expect(page.locator('[data-snapshot-banner]')).toHaveCount(0);
   });
 

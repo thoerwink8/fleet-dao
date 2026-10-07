@@ -15,16 +15,20 @@
 // 改这里之前必须知道：
 // - 这一页只在正式驾驶舱里（演示版没有这个模块，导航不给 module、路由表也不放）：它露机器名、在用版本、在跑会话数（R10）。
 
-import { ServerCog } from 'lucide-react';
+import { SearchX, ServerCog } from 'lucide-react';
 import type { CSSProperties, ReactNode } from 'react';
+import { Link } from 'react-router';
 import { brand } from '#brand';
-import { useEnv, useNodeSnapshots, useNodes } from '../api/client';
+import { isNotFound, useEnv, useNodeSnapshots, useNodes } from '../api/client';
+import type { NodeDetail, NodeListItem } from '../api/types';
 import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
-import { LoadError, LoadingRows, Page } from '../components/page';
+import { Empty, LoadError, LoadingRows, Page } from '../components/page';
+import { Button } from '../components/ui/button';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
+import { useShownError } from '../lib/shown-error';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -99,6 +103,93 @@ function EnvColumn({
   );
 }
 
+/** 这一列的快照 404：没有这个环境，给回主页的路，不给「重试」。 */
+function MissingSnapshot({ nodeId }: { nodeId: string }) {
+  return (
+    <div role="alert">
+      <Empty
+        icon={SearchX}
+        title="没有这个环境"
+        hint={
+          <>
+            <span className="block">
+              库里没有编号为「<span className="num">{nodeId}</span>
+              」的环境：可能链接里的编号写错了，或这个环境已经不在了。
+            </span>
+            <Button asChild size="sm" variant="outline" className="mt-3">
+              <Link to="/">回主页</Link>
+            </Button>
+          </>
+        }
+      />
+    </div>
+  );
+}
+
+/** 远程环境的一列。快照按编号读，404 不重试；推送重读不清掉上一次的失败。 */
+function RemoteColumn({
+  n,
+  snap,
+  now,
+  selected,
+  look,
+}: {
+  n: NodeListItem;
+  snap: { error: unknown; data: NodeDetail | undefined; refetch: () => unknown } | undefined;
+  now: number;
+  selected: boolean;
+  look: 'row';
+}) {
+  const f = freshnessNow(n, now);
+  const error = useShownError(n.id, { error: snap?.error, data: snap?.data });
+  const age = nodeAgeText(n, now);
+  const body =
+    f === 'never' || snap === undefined ? (
+      <Whole>
+        <p data-env-never className="text-sm text-muted-foreground">
+          配了通行证，但从没收到过{n.name}
+          的快照：先去那台上把推送接上（docs/ops.md「接上法国看板」）。
+        </p>
+      </Whole>
+    ) : error && isNotFound(error) ? (
+      <Whole>
+        <MissingSnapshot nodeId={n.id} />
+      </Whole>
+    ) : error ? (
+      <Whole>
+        <LoadError what={`${n.name}的快照`} error={error} onRetry={() => void snap.refetch()} />
+      </Whole>
+    ) : snap.data ? (
+      <div className={cn('contents', f !== 'fresh' && '[&>*]:opacity-70')}>
+        {factCells({ facts: snap.data.env.facts, now, kind: 'env', look })}
+      </div>
+    ) : (
+      <Whole>
+        <LoadingRows rows={4} />
+      </Whole>
+    );
+  return (
+    <EnvColumn
+      id={n.id}
+      name={snap?.data?.name ?? n.name}
+      badge="远程"
+      age={f === 'fresh' ? `上报于 ${age}` : age}
+      tone={f === 'fresh' ? 'ok' : 'stale'}
+      selected={selected}
+      single={false}
+      note={
+        f === 'stale'
+          ? '下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
+          : f === 'fresh'
+            ? '只读快照：写操作（暂停派活、叫停）要去那台上做。'
+            : undefined
+      }
+    >
+      {body}
+    </EnvColumn>
+  );
+}
+
 /** 一列里占满六行的那一块（没收到快照、读失败、在读）：并排时跨六行，单列时照常。 */
 function Whole({ children }: { children: ReactNode }) {
   const style: CSSProperties = { gridRow: `span ${FACT_ROWS}` };
@@ -165,51 +256,16 @@ export default function Env() {
           </EnvColumn>
         )}
         {remote.map((n) => {
-          const f = freshnessNow(n, now);
           const idx = received.findIndex((r) => r.id === n.id);
-          const snap = idx < 0 ? undefined : snapshots[idx];
-          const age = nodeAgeText(n, now);
-          const body =
-            f === 'never' || snap === undefined ? (
-              <Whole>
-                <p data-env-never className="text-sm text-muted-foreground">
-                  配了通行证，但从没收到过{n.name}
-                  的快照：先去那台上把推送接上（docs/ops.md「接上法国看板」）。
-                </p>
-              </Whole>
-            ) : snap.error ? (
-              <Whole>
-                <LoadError what={`${n.name}的快照`} error={snap.error} onRetry={() => void snap.refetch()} />
-              </Whole>
-            ) : snap.data ? (
-              <div className={cn('contents', f !== 'fresh' && '[&>*]:opacity-70')}>
-                {factCells({ facts: snap.data.env.facts, now, kind: 'env', look })}
-              </div>
-            ) : (
-              <Whole>
-                <LoadingRows rows={4} />
-              </Whole>
-            );
           return (
-            <EnvColumn
+            <RemoteColumn
               key={n.id}
-              id={n.id}
-              name={snap?.data?.name ?? n.name}
-              badge="远程"
-              age={f === 'fresh' ? `上报于 ${age}` : age}
-              tone={f === 'fresh' ? 'ok' : 'stale'}
+              n={n}
+              snap={idx < 0 ? undefined : snapshots[idx]}
+              now={now}
               selected={nodeId === n.id}
-              single={false}
-              note={
-                f === 'stale'
-                  ? '下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
-                  : f === 'fresh'
-                    ? '只读快照：写操作（暂停派活、叫停）要去那台上做。'
-                    : undefined
-              }
-            >
-              {body}
-            </EnvColumn>
+              look={look}
+            />
           );
         })}
       </div>
