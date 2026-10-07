@@ -9,8 +9,8 @@ import type { HomeFlowStage, HomeHealth, HomeRunning } from './types';
 // 画布（React Flow + ELK）按需加载：手机上只用树形列表，不必下载它。
 const BoardCanvas = lazy(() => import('./board/board-canvas').then((m) => ({ default: m.BoardCanvas })));
 
-/** 画布高度：宽屏上把「在跑的」那块撑到首屏底边（标题区和面板头约 13rem），再矮也留 32rem 看得清。 */
-const CANVAS_HEIGHT = 'max(32rem, calc(100dvh - 13rem))';
+/** 画布高度：宽屏上把「在跑的」那块撑到首屏底边（顶栏、标题区和面板头约 14rem），再矮也留 32rem 看得清。 */
+const CANVAS_HEIGHT = 'max(32rem, calc(100dvh - 14rem))';
 
 function BoardSkeleton() {
   return (
