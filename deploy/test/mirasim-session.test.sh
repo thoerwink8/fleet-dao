@@ -64,6 +64,8 @@ has "ExecStart 带上端口、只听回环、不开浏览器、不进 IM" "$REND
   'ExecStart=.*--port 54321 --host 127\.0\.0\.1 --no-open --no-im --workdir /home/fleet-mirasim-fake'
 has "经它起的 grok 不认目录信任（不然不加载 AGENTS.md、还弹「信不信」）" "$RENDERED" '^Environment=GROK_FOLDER_TRUST=0$'
 has "经它起的 grok 不给反问选择题（没人答会干等）" "$RENDERED" '^Environment=GROK_ASK_USER_QUESTION=0$'
+has "Mirasim 出网不借 agent 的代理（settings 里的 reclaude 代理口一死就全断，#1274；P39、Q21）" "$RENDERED" '^Environment=MIRASIM_NO_AGENT_EGRESS=1$'
+has "Mirasim 不跑它自带的账号额度探针（Q21）" "$RENDERED" '^Environment=MIRASIM_ACCOUNT_USAGE_PROBE=0$'
 has "起不来会重试（on-failure）" "$RENDERED" '^Restart=on-failure$'
 has "不进 fleet-agents.slice（平台常驻服务，不占会话额度）" "$RENDERED" 'MemoryHigh=|MemoryMax='
 
