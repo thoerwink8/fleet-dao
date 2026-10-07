@@ -161,9 +161,9 @@ function EnvSwitcher() {
           );
         })}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => navigate(withNode('/env', nodeId))}>
+        <DropdownMenuItem onSelect={() => navigate(withNode('/france', nodeId))}>
           <ServerCog />
-          打开环境页（各环境并排）
+          打开法国页
         </DropdownMenuItem>
         {problem ? (
           <DropdownMenuItem disabled className="text-xs text-ink-stall">

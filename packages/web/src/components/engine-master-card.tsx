@@ -50,7 +50,7 @@ export function EngineMasterControl() {
         body: {
           value: target,
           version: row?.version ?? 0,
-          reason: `驾驶舱环境页上点了${verb}引擎总开关`,
+          reason: `法国页上点了${verb}引擎总开关`,
         },
       },
       {
@@ -78,6 +78,7 @@ export function EngineMasterControl() {
 
   return (
     <section
+      id="engine-master"
       data-testid="engine-master"
       data-engine-master={master === null ? view.kind : master.on ? 'on' : 'off'}
       className={cn('mb-4 rounded-xl border bg-card p-4', master?.on === false && 'border-st-stall/40')}

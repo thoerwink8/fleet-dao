@@ -1,4 +1,4 @@
-// 看板多机：顶栏环境切换器、切到远程环境看它推来的快照、失联、其余页的说明、环境页并排。
+// 看板多机：顶栏环境切换器、切到远程环境看它推来的快照、失联、其余页的说明、法国页并排。
 // 后端起的时候带了两把通行证（support/node-keys.ts）：wsl 推过快照；idle 配了钥匙从不推（看板上是「从没收到过」）。
 // 快照是用例自己经公开的写口（POST /api/nodes/report，头 X-Fleet-Node-Token）推的：内容取这台后端自己的 /api/home、/api/env，
 // 只把环境名换成「演练 WSL」，和真的 WSL 推来的是同一个形状（后端按 shared 的 NodeReportSchema 校验，形状不对会回 400、这里当场红）。
@@ -141,11 +141,12 @@ test.describe('看板多机', () => {
     await expect(page.locator('[data-only-local]')).toHaveCount(0);
   });
 
-  test('环境页：本台、演练 WSL、idle 三列并排；WSL 那列写上报于，idle 那列写从没收到过', async ({
+  test('法国页：本台、演练 WSL、idle 三列并排；WSL 那列写上报于，idle 那列写从没收到过', async ({
     page,
     shot,
   }) => {
     await page.goto('/env');
+    await expect(page).toHaveURL(/\/france$/);
     const cols = page.locator('[data-env-column]');
     await expect(cols).toHaveCount(3);
     expect(await cols.evaluateAll((els) => els.map((e) => e.getAttribute('data-env-column')))).toEqual([

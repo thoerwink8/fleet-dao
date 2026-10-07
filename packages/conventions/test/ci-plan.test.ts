@@ -1366,13 +1366,17 @@ describe('驾驶舱 e2e（#930；决定 0029、#1186：PR 只点改动页，全�
       'packages/web/src/lib/utils.test.ts',
       'packages/web/src/test/harness.tsx',
       'packages/web/e2e/README.md',
-      'packages/web/src/routes/france.tsx',
       'packages/web/src/routes/soon.tsx',
     ]) {
       const p = pr(f);
       expect(p.e2e, f).toEqual([]);
       expect(planOutputs(p).e2e, f).toBe('');
     }
+    // 法国页现在有 spec 点它（环境页并进来，#1217）：改它要跑 07b、07c，不再是空清单
+    expect(pr('packages/web/src/routes/france.tsx').e2e).toEqual([
+      `${SPECS}07b-env.e2e.ts`,
+      `${SPECS}07c-nodes.e2e.ts`,
+    ]);
     expect(pr('packages/api/src/cockpit.ts', 'packages/api/src/db.ts').e2e).toEqual([]);
     // 空清单和别的页面一起改：只剩别的页面
     expect(pr('packages/api/src/cockpit.ts', 'packages/web/src/routes/login.tsx').e2e).toEqual([

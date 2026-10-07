@@ -222,9 +222,9 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   { files: [`${W}components/credentials-section.tsx`], specs: [spec('10-credentials')] },
   // 通知中心（06）；08 站内跳到它造后端断开
   { files: [`${W}routes/notifications.tsx`], specs: [spec('06-notifications'), spec('08-backend-down')] },
-  // 环境页（07b、07c 并排看多机）
+  // 法国页（环境页并进来，#1217；07b、07c 看六项事实和并排看多机）；env.tsx 只剩 /env 的转址
   {
-    files: [`${W}routes/env.tsx`, `${W}components/engine-master-card.tsx`],
+    files: [`${W}routes/france.tsx`, `${W}routes/env.tsx`, `${W}components/engine-master-card.tsx`],
     specs: [spec('07b-env'), spec('07c-nodes')],
   },
   // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、演示链接、找不到的页面
@@ -256,8 +256,8 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [`${W}routes/audit.tsx`, `${W}lib/audit.ts`],
     specs: [spec('05-settings'), spec('07-other-pages'), spec('10-credentials')],
   },
-  // 法国总览和占位页：没有任何 spec 点它们（specs 里没有 goto），改它们不跑 e2e，靠每夜全量里别页的回归兜底
-  { files: [`${W}routes/france.tsx`, `${W}routes/soon.tsx`], specs: [] },
+  // 占位页：没有任何 spec 点它们（specs 里没有 goto），改它们不跑 e2e，靠每夜全量里别页的回归兜底
+  { files: [`${W}routes/soon.tsx`], specs: [] },
 ];
 
 /** 夹具、配置、备库：e2e 自己的地基，改了就是全套。 */

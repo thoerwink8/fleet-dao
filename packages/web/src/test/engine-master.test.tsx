@@ -15,7 +15,7 @@ import { createMockApi, type MockApi } from '../api/mock/server';
 import type { Setting } from '../api/types';
 import { EngineMasterBadge, EngineMasterRelation } from '../components/engine-master';
 import engineMasterSource from '../components/engine-master.tsx?raw';
-import Env from '../routes/env';
+import France from '../routes/france';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
 
@@ -133,7 +133,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
       value: true,
       version: 1,
     } as never);
-    renderApp(<Env />, { api: api as unknown as FleetApi, route: '/env' });
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('关着'));
     expect(within(card).getByTestId('engine-master-note').textContent).toContain('默认关');
@@ -158,7 +158,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
       value: false,
       version: 4,
     } as never);
-    renderApp(<Env />, { api: api as unknown as FleetApi, route: '/env' });
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('开着'));
     expect(within(card).getByTestId('engine-master-who').textContent).toContain('frank');
@@ -176,7 +176,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
   test('点「先不」：什么都不写', async () => {
     const api = apiWith(NEVER);
     const update = vi.spyOn(api, 'updateSetting');
-    renderApp(<Env />, { api: api as unknown as FleetApi, route: '/env' });
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     fireEvent.click(await screen.findByRole('button', { name: '开启引擎总开关' }));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
@@ -188,7 +188,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     vi.spyOn(api, 'updateSetting').mockRejectedValue(
       new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改'),
     );
-    renderApp(<Env />, { api: api as unknown as FleetApi, route: '/env' });
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     fireEvent.click(await screen.findByRole('button', { name: '开启引擎总开关' }));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '开启' }));
@@ -203,7 +203,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     api.settings = async () => {
       throw new ApiError(500, 'internal', '库连不上（测试故意造的）');
     };
-    renderApp(<Env />, { api: api as unknown as FleetApi, route: '/env' });
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('没查成'));
     expect(within(card).getByTestId('engine-master-note').textContent).toContain('库连不上');
@@ -233,7 +233,7 @@ describe('选了远程环境（?node=）：只读、写明去那台上操作', (
   });
 
   test('远程环境的快照里总开关开着：显示状态、不给按钮，写明用 fleet-api engine on|off', async () => {
-    renderApp(<Env />, { api: remoteWith(fact(true)) as unknown as FleetApi, route: '/env?node=wsl' });
+    renderApp(<France />, { api: remoteWith(fact(true)) as unknown as FleetApi, route: '/france?node=wsl' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('开着'));
     expect(within(card).queryByRole('button')).toBeNull();
@@ -241,7 +241,7 @@ describe('选了远程环境（?node=）：只读、写明去那台上操作', (
   });
 
   test('远程环境升级前推来的旧快照没有这一格：写「还不带引擎总开关」，不猜成开也不猜成关', async () => {
-    renderApp(<Env />, { api: remoteWith(undefined) as unknown as FleetApi, route: '/env?node=wsl' });
+    renderApp(<France />, { api: remoteWith(undefined) as unknown as FleetApi, route: '/france?node=wsl' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() =>
       expect(within(card).getByTestId('engine-master-note').textContent).toContain('还不带'),

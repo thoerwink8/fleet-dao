@@ -11,7 +11,7 @@ import { ApiError, type FleetApi, keys } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { NodeDetail, Nodes } from '../api/types';
 import { DETAIL_PAGE_PR_BODY } from '../routes/detail-page-pr-body';
-import Env from '../routes/env';
+import France from '../routes/france';
 import Home from '../routes/home';
 import { renderApp } from './harness';
 
@@ -98,14 +98,14 @@ describe('主页上看一个远程环境（/?node=）', () => {
   });
 });
 
-describe('环境页的远程列', () => {
+describe('法国页的远程列（原环境页，#1217 并进来）', () => {
   test('【故意造出的失败】没有这个环境（404）：这一列写「没有这个环境」和编号、给回主页；不重试；推送重读也不跳回骨架', async () => {
     let calls = 0;
     const api = apiWithNode(async () => {
       calls += 1;
       throw new ApiError(404, 'node_not_found', '没有这个环境');
     });
-    const { qc } = open(<Env />, '/env', api);
+    const { qc } = open(<France />, '/france', api);
     expect(await screen.findByText('没有这个环境')).toBeTruthy();
     expect(await screen.findByRole('heading', { name: /假数据/ })).toBeTruthy();
     const alert = screen.getByRole('alert');
@@ -131,7 +131,7 @@ describe('环境页的远程列', () => {
       const detail = await inner.node('wsl');
       return { ...detail, id, name: '幽灵环境' };
     });
-    open(<Env />, '/env', api);
+    open(<France />, '/france', api);
     expect(await screen.findByText(/幽灵环境的快照没读成：库连不上/)).toBeTruthy();
     expect(calls).toBe(2);
     expect(skeleton()).toBeNull();

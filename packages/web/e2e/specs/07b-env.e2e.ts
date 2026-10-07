@@ -1,5 +1,5 @@
-// 第七步之后：环境页（#820 片 1）。这一页只读，不跨环境：数据全来自本后端 /api/env（和主页、额度页、/healthz 同一份读法）。
-// 页面要能回答「回来看一眼」：引擎在不在、在用哪版、落后主线没有、手上几个会话在跑、池占几个、健康红几项、最近拉单。
+// 法国页（环境页并进来，#1217）。六项事实只读，数据来自本后端 /api/env（和主页、额度页、/healthz 同一份读法）。
+// 这套 e2e 起后端时配了两把远程通行证，所以这一页是本台加远程并排；只有一台不画对照列由页面测试钉住。
 // 做完的标准里「法国引擎关着显示关着（临时调整）不是红」在 e2e 里造不出来（这台后端开着引擎）：那条由
 // packages/api/test/env-view.test.ts 和 packages/web/src/routes/env.test.tsx 钉住；这里走真环境、看真数。
 import { expect, onlyDesktop, test } from '../support/fixtures.ts';
@@ -18,13 +18,20 @@ type Env = {
   };
 };
 
-test.describe('环境页', () => {
+test.describe('法国页', () => {
   test.beforeEach(async ({ login }) => login());
 
-  test('这一台环境一页看全：标题是环境名，六格都在，和后端 /api/env 对得上', async ({ page, api, shot }) => {
+  test('这一台一页看全：旧地址转到法国页，侧栏只有法国，本台六格和后端 /api/env 对得上', async ({
+    page,
+    api,
+    shot,
+  }) => {
     const env = (await api.get('/api/env')) as Env;
     await page.goto('/env');
-    // 看板多机之后这一页是每个环境一列并排：这里只看本台那一列（别的环境的列在 07c）
+    await expect(page).toHaveURL(/\/france$/);
+    await expect(page.locator('aside').getByRole('link', { name: '法国', exact: true })).toBeVisible();
+    await expect(page.locator('aside').getByRole('link', { name: '环境', exact: true })).toHaveCount(0);
+    // 这套配了远程通行证，所以是并排：这里只看本台那一列（别的环境的列在 07c）
     const local = page.locator('[data-env-column="local"]');
     // 标题就是这一台的名字（FLEET_MACHINE_NAME，e2e 这套起后端时写的「本机」）
     expect(env.name.name).toBe('本机');
@@ -46,7 +53,7 @@ test.describe('环境页', () => {
     api,
   }) => {
     const env = (await api.get('/api/env')) as Env;
-    await page.goto('/env');
+    await page.goto('/france');
     const local = page.locator('[data-env-column="local"]');
     // 这台后端不是法国的正式机器（FLEET_ENV=development）：版本那一项一定是「没查成」，页面照实写，不写 0
     expect(env.facts.version.ok).toBe(false);
@@ -54,7 +61,7 @@ test.describe('环境页', () => {
     await expect(local.getByText('没查成').first()).toBeVisible();
   });
 
-  test('顶栏常驻环境切换器（本台的名字跟着 /api/me 来，不在别的页拉整份 /api/env），下拉里能进环境页', async ({
+  test('顶栏常驻环境切换器（本台的名字跟着 /api/me 来，不在别的页拉整份 /api/env），下拉里能进法国页', async ({
     page,
   }) => {
     const envReads: string[] = [];
@@ -67,12 +74,12 @@ test.describe('环境页', () => {
     await expect(switcher).toContainText('本机');
     expect(envReads, '主页上顶栏切换器不该去拉 /api/env（每次都跑全套健康检查）').toEqual([]);
     await switcher.click();
-    await page.getByRole('menuitem', { name: /打开环境页/ }).click();
-    await expect(page).toHaveURL(/\/env$/);
+    await page.getByRole('menuitem', { name: /打开法国页/ }).click();
+    await expect(page).toHaveURL(/\/france$/);
     await expect(page.getByRole('heading', { name: /本机/ }).first()).toBeVisible();
   });
 
-  test('引擎总开关（#1086）：顶栏常驻状态，环境页点开（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关；默认是关', async ({
+  test('引擎总开关（#1086）：顶栏常驻状态，法国页点开（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关；默认是关', async ({
     page,
     api,
     shot,
@@ -87,7 +94,7 @@ test.describe('环境页', () => {
     // 种子里没设过：默认关
     expect((await read())?.value, '种子里总开关没设过，默认关').toBeNull();
 
-    await page.goto('/env');
+    await page.goto('/france');
     const card = page.getByTestId('engine-master');
     await expect(card.getByTestId('engine-master-state')).toHaveText('关着');
     await expect(page.getByRole('link', { name: /引擎 关着/ })).toBeVisible();
@@ -116,7 +123,7 @@ test.describe('环境页', () => {
     await page.goto('/settings');
     await expect(page.getByRole('link', { name: /引擎 开着/ })).toBeVisible();
     await expect(page.getByTestId('engine-master-relation')).toContainText('总开关关＝全停');
-    await page.goto('/env');
+    await page.goto('/france');
     await expect(card.getByTestId('engine-master-state')).toHaveText('开着');
     await card.getByRole('button', { name: '关闭引擎总开关' }).click();
     await page.getByRole('alertdialog').getByRole('button', { name: '关闭', exact: true }).click();

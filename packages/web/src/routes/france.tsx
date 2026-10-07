@@ -1,35 +1,50 @@
-// 法国总览（#618）：打开驾驶舱的 /france，一眼看到法国环境现在怎样——引擎在不在、在用哪版、健康红几项、定时任务跑得怎么样、发版走到哪。
+// 法国页（#618 的总览 + #820 的对照 + #1086 的总开关，#1217 合成一页）：本机 WSL 撤了以后只剩法国一台，
+// 侧栏只留「法国」。一页里有本台六项事实、引擎总开关、定时任务、发版。多一台机器时六项按台并排（对照表的写法）。
+// 旧地址 /env 由 routes/env.tsx 转到这里。
+//
 // 「发版一键」只到预检：命令后端写死 pnpm release:onekey preflight，不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做。
 // 真发版：点「发版」卡里的「发布到法国」（#1232，components/release-card.tsx；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
 //
-// 数据从哪来：
-// - 这一页全部只读，只调现成的接口：/api/env（六项事实，和环境页同一份）、/api/jobs（定时任务）、发版状态和预检。
-// - 在法国真机的驾驶舱上打开，看到的就是法国；在本地开发 / 演示 mock 上打开，看到的是这台后端自己的数（这一页不替用户跨机器读）。
+// 数据从哪来（不新开接口）：
+// - /api/env（本台六项事实）、/api/jobs（定时任务）、发版状态和预检、/api/nodes（远程环境列表和快照，多台时并排）。
+// - 在法国真机的驾驶舱上打开，本台就是法国；在本地开发 / 演示 mock 上打开，本台是这台后端自己的数。
 // - 每一项都按后端给的 ok / reason 两态如实画：读不到就写「没查成 + 原因」，不拿 0 或假 ok 冒充（仓的底线）。
 //
-// 版式（驾驶舱改版 2026-10-07）：六项事实一行排完（1366 屏两行）；下面左边定时任务表（出问题的排前面）、右边发版，
-// 1920×1080 一屏看全。原来四张高卡片 + 一整行宽的发版卡 + 表从上往下堆，定时任务要往下翻才看得到。
-// 六格怎么画在 components/env-facts.tsx（和环境页共用）。
+// 版式：只有一台时六格排成卡片（不画对照列）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
+// 下面左边定时任务表（出问题的排前面）、右边发版。六格怎么画在 components/env-facts.tsx。
 
-import { ArrowRight, Rocket } from 'lucide-react';
+import { ArrowRight, Rocket, SearchX, ServerCog } from 'lucide-react';
+import type { CSSProperties, ReactNode } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
 import {
+  isNotFound,
   useEnv,
   useFrancePreflight,
   useFranceReleaseCard,
   useFranceReleaseState,
   useJobs,
+  useNodeSnapshots,
+  useNodes,
 } from '../api/client';
-import type { FrancePreflightResponse, FranceReleaseState, JobView } from '../api/types';
-import { factCells } from '../components/env-facts';
-import { LoadError, LoadingRows, Page, Panel } from '../components/page';
+import type {
+  FrancePreflightResponse,
+  FranceReleaseState,
+  JobView,
+  NodeDetail,
+  NodeListItem,
+} from '../api/types';
+import { EngineMasterControl } from '../components/engine-master-card';
+import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
+import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { ReleaseCardBody } from '../components/release-card';
 import { Button } from '../components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { outcomeText } from '../lib/schedule';
+import { useShownError } from '../lib/shown-error';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -227,44 +242,250 @@ function JobsTable({ jobs, now }: { jobs: readonly JobView[]; now: number }) {
   );
 }
 
+/**
+ * 对照表的一列（多台时才画）：环境名、本台还是远程、读于 / 上报于 / 失联多久、选中时描边。
+ * 这一列占父网格的 1 + 6 行（subgrid），六格各落一行，和别的列同一项横着对齐。
+ */
+function EnvColumn({
+  id,
+  name,
+  badge,
+  age,
+  tone,
+  selected,
+  note,
+  children,
+}: {
+  id: string;
+  name: string;
+  badge: string;
+  age: string;
+  tone: 'ok' | 'stale';
+  selected: boolean;
+  note?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      data-env-column={id}
+      data-env-column-state={tone}
+      data-env-selected={selected}
+      className={cn(
+        'row-span-7 grid min-w-0 grid-rows-subgrid gap-0 overflow-hidden rounded-xl border bg-card shadow-card-edge',
+        selected && 'border-brand/60 ring-1 ring-brand/30',
+      )}
+    >
+      <header className="px-4 py-3">
+        <h2 className="flex min-w-0 items-center gap-2 text-strong font-semibold tracking-tight">
+          <ServerCog className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="min-w-0 truncate">{name}</span>
+          <span className="shrink-0 rounded-full border px-2 py-0.5 text-xs font-normal text-muted-foreground">
+            {badge}
+          </span>
+        </h2>
+        <p
+          data-env-age
+          className={cn('num mt-1 text-xs', tone === 'stale' ? 'text-ink-stall' : 'text-muted-foreground')}
+        >
+          {age}
+        </p>
+        {note ? <p className="mt-0.5 text-xs text-muted-foreground">{note}</p> : null}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+/** 一列里占满六行的那一块（没收到快照、读失败、在读）。 */
+function Whole({ children }: { children: ReactNode }) {
+  const style: CSSProperties = { gridRow: `span ${FACT_ROWS}` };
+  return (
+    <div className="border-t p-4" style={style}>
+      {children}
+    </div>
+  );
+}
+
+/** 这一列的快照 404：没有这个环境，给回主页的路，不给「重试」（#1221）。 */
+function MissingSnapshot({ nodeId }: { nodeId: string }) {
+  return (
+    <div role="alert">
+      <Empty
+        icon={SearchX}
+        title="没有这个环境"
+        hint={
+          <>
+            <span className="block">
+              库里没有编号为「<span className="num">{nodeId}</span>
+              」的环境：可能链接里的编号写错了，或这个环境已经不在了。
+            </span>
+            <Button asChild size="sm" variant="outline" className="mt-3">
+              <Link to="/">回主页</Link>
+            </Button>
+          </>
+        }
+      />
+    </div>
+  );
+}
+
+/** 远程环境的一列。快照按编号读，404 不重试；推送重读不清掉上一次的失败（#1221）。 */
+function RemoteColumn({
+  n,
+  snap,
+  now,
+  selected,
+  look,
+}: {
+  n: NodeListItem;
+  snap: { error: unknown; data: NodeDetail | undefined; refetch: () => unknown } | undefined;
+  now: number;
+  selected: boolean;
+  look: 'row';
+}) {
+  const f = freshnessNow(n, now);
+  const error = useShownError(n.id, { error: snap?.error, data: snap?.data });
+  const age = nodeAgeText(n, now);
+  const body =
+    f === 'never' || snap === undefined ? (
+      <Whole>
+        <p data-env-never className="text-sm text-muted-foreground">
+          配了通行证，但从没收到过{n.name}
+          的快照：先去那台上把推送接上（docs/ops.md「接上法国看板」）。
+        </p>
+      </Whole>
+    ) : error && isNotFound(error) ? (
+      <Whole>
+        <MissingSnapshot nodeId={n.id} />
+      </Whole>
+    ) : error ? (
+      <Whole>
+        <LoadError what={`${n.name}的快照`} error={error} onRetry={() => void snap.refetch()} />
+      </Whole>
+    ) : snap.data ? (
+      <div className={cn('contents', f !== 'fresh' && '[&>*]:opacity-70')}>
+        {factCells({ facts: snap.data.env.facts, now, kind: 'env', look })}
+      </div>
+    ) : (
+      <Whole>
+        <LoadingRows rows={4} />
+      </Whole>
+    );
+  return (
+    <EnvColumn
+      id={n.id}
+      name={snap?.data?.name ?? n.name}
+      badge="远程"
+      age={f === 'fresh' ? `上报于 ${age}` : age}
+      tone={f === 'fresh' ? 'ok' : 'stale'}
+      selected={selected}
+      note={
+        f === 'stale'
+          ? '下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
+          : f === 'fresh'
+            ? '只读快照：写操作（暂停派活、叫停）要去那台上做。'
+            : undefined
+      }
+    >
+      {body}
+    </EnvColumn>
+  );
+}
+
 export default function France() {
   const env = useEnv();
+  const nodes = useNodes();
   const jobs = useJobs();
   const release = useFranceReleaseState();
   const card = useFranceReleaseCard();
   const preflight = useFrancePreflight();
+  const { nodeId } = useNodeSelection();
   const now = useNow();
   const facts = env.data?.facts;
   const jobList = jobs.data?.jobs;
   const failed = jobList?.filter((j) => j.lastRun?.outcome === 'failed').length ?? 0;
   const warn = jobList?.filter((j) => rowTone(j) === 'stall').length ?? 0;
+  const remote = nodes.data?.nodes ?? [];
+  // 收到过快照的远程环境各读一份；从没收到过的（never）没有快照可读，那一列只写「从没收到过」
+  const received = remote.filter((n) => n.receivedAt !== undefined);
+  const snapshots = useNodeSnapshots(received.map((n) => n.id));
+  // 列表还没回来时先别画：不然会先按「一台」画出卡片，有远程时再跳成对照列。
+  const nodesPending = nodes.isPending && nodes.data === undefined;
+  // 只有一台（列表读成了、一台远程都没有）不画对照列。读列表失败也不画空的对照列，本台改用卡片，上面写明没读成。
+  const comparing = remote.length > 0;
+  const look = 'row' as const;
 
   return (
     <Page
       title="法国"
-      description="法国这台机器现在怎样：引擎、在用版本、健康、定时任务、发版。读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。"
-      actions={
-        <Button asChild size="sm" variant="ghost">
-          <Link to="/env">
-            各环境并排看
-            <ArrowRight />
-          </Link>
-        </Button>
-      }
+      description="本台的六项事实、引擎总开关、定时任务、发版。读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
     >
-      {env.error ? (
+      <EngineMasterControl />
+      {nodes.error ? (
         <div className="mb-3">
-          <LoadError what="法国环境" error={env.error} onRetry={() => void env.refetch()} />
+          <LoadError what="远程环境列表" error={nodes.error} onRetry={() => void nodes.refetch()} />
         </div>
       ) : null}
-      {env.isLoading || !env.data || !facts ? (
+      {env.error ? (
+        <div className="mb-3">
+          <LoadError what="本台" error={env.error} onRetry={() => void env.refetch()} />
+        </div>
+      ) : null}
+      {nodesPending || env.isLoading || !env.data || !facts ? (
         env.error ? null : (
           <LoadingRows rows={2} />
         )
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
-          {factCells({ facts, now, kind: 'france', look: 'tile', jobCount: jobList?.length })}
+      ) : comparing ? (
+        <div
+          data-env-columns={1 + remote.length}
+          className="grid gap-x-4 gap-y-0"
+          style={{ gridTemplateColumns: `repeat(${1 + remote.length}, minmax(0, 1fr))` }}
+        >
+          <EnvColumn
+            id="local"
+            name={env.data.name.name}
+            badge="本台"
+            age={`${formatAgo(env.data.asOf, now)}读`}
+            tone="ok"
+            selected={nodeId === null}
+            note={
+              env.data.name.problem ? (
+                <>
+                  {env.data.name.problem}
+                  {factsSummary(facts) ? <> · {factsSummary(facts)}</> : null}
+                </>
+              ) : (
+                factsSummary(facts)
+              )
+            }
+          >
+            {factCells({ facts, now, kind: 'env', look, jobCount: jobList?.length })}
+          </EnvColumn>
+          {remote.map((n) => {
+            const idx = received.findIndex((r) => r.id === n.id);
+            return (
+              <RemoteColumn
+                key={n.id}
+                n={n}
+                snap={idx < 0 ? undefined : snapshots[idx]}
+                now={now}
+                selected={nodeId === n.id}
+                look={look}
+              />
+            );
+          })}
         </div>
+      ) : (
+        <>
+          <p className="mb-3 text-sm text-muted-foreground" data-machine-name>
+            本台「<span>{env.data.name.name}</span>」· {formatAgo(env.data.asOf, now)}读
+            {env.data.name.problem ? <> · {env.data.name.problem}</> : null}
+            {factsSummary(facts) ? <> · {factsSummary(facts)}</> : null}
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+            {factCells({ facts, now, kind: 'france', look: 'tile', jobCount: jobList?.length })}
+          </div>
+        </>
       )}
 
       <div className="mt-4 grid items-start gap-4 xl:grid-cols-3">
