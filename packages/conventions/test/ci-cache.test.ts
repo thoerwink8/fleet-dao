@@ -165,7 +165,8 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     // engine 依赖 api，但 api 读 web 是 api 测试自己的事：engine 的闭包里不带 web
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');
     // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）；
-    // agents/test/worker.test.ts 读 db 的路由骨架（TEST_READS）。db 读 core 是 db 测试自己的事：agents 的闭包里不带 core
+    // agents/test/worker.test.ts 读 db 的路由骨架，prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（TEST_READS）。
+    // db 读 core 是 db 测试自己的事：agents 的闭包里不带 core
     expect(sourceClosure(GRAPH, ['agents'])).toEqual(['agents-sync', 'db', 'shared']);
   });
 
