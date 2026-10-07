@@ -1,12 +1,20 @@
-// 引擎的 8 个定时任务（design 第四节）：每个任务的钟点格子、补跑窗口、一轮怎么跑，唯一出处在这里；调度本身在 jobs/timers.ts。
-// 任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号；格子是原来 Temporal Schedule 的 interval + offset，没改。
-// 引擎总开关（#1086）关着时只有标了 needsMaster 的两个不跑（拉单、巡检）；其余六个是看家检查（对账、路由探针、读额度、拼车盯读、
-// 每小时对账、看门狗），关着照跑：创始人要关着也看得到渠道通不通。
+// 引擎的 9 个定时任务（design 第四节；#921 起多一个每周刷新耗时表）：每个任务的钟点格子、补跑窗口、一轮怎么跑，唯一出处在这里；
+// 调度本身在 jobs/timers.ts。任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号。原来 8 个的格子是 Temporal Schedule 的
+// interval + offset，没改；耗时表是新的，周一 06:00（北京时间）。单子里写的 schedules.ts 已随 #1072 撤掉，新任务登记在这里。
+// 引擎总开关（#1086）关着时只有标了 needsMaster 的两个不跑（拉单、巡检）。看家检查关着照跑。每周刷新耗时表也不标：它不拉单、
+// 不起会话，而总开关每次发版都会关，标了就几乎刷不上。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
 import { CANARY_EVERY_HOURS, CANARY_JOB, CANARY_OFFSET_MINUTES, sweepCanaryLeftovers } from './canary.ts';
 import { startCanaryWorkflow } from './canary-start.ts';
 import { CARPOOL_WATCH_EVERY_MINUTES, CARPOOL_WATCH_JOB, runCarpoolWatchJob } from './carpool-watch.ts';
+import {
+  CI_TIMINGS_EVERY_MINUTES,
+  CI_TIMINGS_JOB,
+  CI_TIMINGS_OFFSET_MINUTES,
+  CI_TIMINGS_OVERDUE_MINUTES,
+  runCiTimingsJob,
+} from './ci-timings.ts';
 import {
   GITHUB_RECONCILE_EVERY_MINUTES,
   GITHUB_RECONCILE_JOB,
@@ -59,6 +67,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const hourlyReconcile = need(jobs, 'hourlyReconcile');
   const watchdog = need(jobs, 'watchdog');
   const intake = need(jobs, 'intake');
+  const ciTimings = need(jobs, 'ciTimings');
   // 巡检的活动在工作流里跑，依赖不在这里装；但没装齐要在起的时候就发现，别等到工作流里的活动才报
   need(jobs, 'canary');
   return [
@@ -141,6 +150,15 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       // 总开关关着不拉单、不起任务（#1086）
       needsMaster: true,
       run: () => runIntakeJob(intake(client, taskQueue)),
+    },
+    {
+      // 每周刷新 CI 测试耗时表（#921）。不标 needsMaster：见文件头。
+      id: CI_TIMINGS_JOB.id,
+      everyMinutes: CI_TIMINGS_EVERY_MINUTES,
+      offsetMinutes: CI_TIMINGS_OFFSET_MINUTES,
+      catchupMinutes: CI_TIMINGS_EVERY_MINUTES,
+      overdueMinutes: CI_TIMINGS_OVERDUE_MINUTES,
+      run: () => runCiTimingsJob(ciTimings()),
     },
   ];
 }

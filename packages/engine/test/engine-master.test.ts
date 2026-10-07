@@ -1,4 +1,4 @@
-// 引擎总开关的闸（#1086，engine-master.ts）：缓存怎么读、读不到按关；和「闸门测试」——总开关关着、把 8 个定时任务各跑一轮，
+// 引擎总开关的闸（#1086，engine-master.ts）：缓存怎么读、读不到按关；和「闸门测试」——总开关关着、把定时任务各跑一轮，
 // 起模型会话的次数是 0、看家检查（探针等）至少各跑一次；开着时同样一轮，拉单、巡检跑了，对照证明这条测试抓得到「关着还在拉单」。
 // 用假的钟和假的 setTimeout（和 timers.test.ts 同一套），不真等、不碰库、不起会话。
 import { describe, expect, it } from 'vitest';
@@ -186,6 +186,7 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       canary: never,
       watchdog: never,
       intake: never,
+      ciTimings: never,
     } as unknown as EngineJobs;
   };
   const client = { workflow: { start: async () => ({}), getHandle: () => ({}) } } as never;

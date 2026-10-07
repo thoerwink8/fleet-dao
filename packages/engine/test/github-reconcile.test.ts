@@ -369,12 +369,13 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
 
   it('名单：alert-dispatch（#445 退役的「提醒派单」）加上摘出 Temporal 的 8 个定时任务（#1072，任务还在、只删老的 Schedule）；两处（这里、看门狗）认同一份', () => {
     expect(RETIRED_SCHEDULES[0]).toEqual({ id: 'alert-dispatch', retiredBy: '#445' });
-    // 8 个就是登记表上的 8 个：少一个，Temporal 上那条老 Schedule 就留着和进程内定时器各跑一轮
-    expect(
-      RETIRED_SCHEDULES.filter((s) => s.moved)
-        .map((s) => s.id)
-        .sort(),
-    ).toEqual(ENGINE_JOBS.map((j) => j.id).sort());
+    const moved = RETIRED_SCHEDULES.filter((s) => s.moved)
+      .map((s) => s.id)
+      .sort();
+    // 摘出来的 8 个就是当初在 Temporal 上的那 8 个。少一个，老 Schedule 就留着和进程内定时器各跑一轮。
+    // ci-timings（#921）从没进过 Temporal，只在登记表上，不进这份删除名单。
+    expect(moved).toHaveLength(8);
+    expect([...moved, 'ci-timings'].sort()).toEqual(ENGINE_JOBS.map((j) => j.id).sort());
     expect(RETIRED_SCHEDULES.filter((s) => s.moved).every((s) => s.retiredBy === '#1072')).toBe(true);
   });
 
