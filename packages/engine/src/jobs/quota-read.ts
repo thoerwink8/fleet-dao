@@ -9,6 +9,7 @@
 // - 配置读不到、认不出：这一轮整个没跑成，当场报（key 单独一个），不拿上一次的配置顶。
 // - 配置 notRead 里的池不读（没有这种数据）。每轮撤掉它们的 quota-read 提醒，不留着报错。
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
+// - 渠道模型名册（#1302）是可选的一步：到了间隔才读，读失败只记在名册自己的表里。它抛了、没读成，都不改这一轮额度的结局，也不另报额度提醒。
 
 import type { PoolQuotaResult, QuotaConfig, QuotaReport } from '@fleet-dao/adapters/quota';
 import type { PoolQuotaSnapshot, ScheduleResult } from '@fleet-dao/db';
@@ -55,7 +56,24 @@ export interface QuotaReadJobDeps {
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * 渠道模型名册（#1302）。没接上就跳过（老的测试、还没接线的进程）。
+   * 到点才读；读和记都失败也不改额度这一轮的结局。
+   */
+  modelRoster?: {
+    due(now: Date): Promise<boolean>;
+    read(): Promise<readonly ChannelModelRosterResult[]>;
+    save(
+      results: readonly ChannelModelRosterResult[],
+      now: Date,
+    ): Promise<{ unstored: { channelId: string; error: string }[] }>;
+  };
 }
+
+/** 名册一步的结果。跟 adapters 的读法、db 的写入同一形状，这里不依赖那两个包的类型。 */
+export type ChannelModelRosterResult =
+  | { ok: true; channelId: string; models: readonly string[] }
+  | { ok: false; channelId: string; error: { code: string; message: string } };
 
 /** 这一轮整个没跑成（配置读不到、读取整体抛了）：结局已记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
 export class QuotaReadFailedError extends Error {
@@ -73,8 +91,27 @@ export const isCompleteRead = (r: Extract<PoolQuotaResult, { ok: true }>): boole
 
 type Round = { result: ScheduleResult };
 
+/** 名册自己消化错误。额度已经按原样记完之前、或配置还没读，都不让这一步把整轮打成失败。 */
+async function readModelRosters(deps: QuotaReadJobDeps, now: Date): Promise<void> {
+  const step = deps.modelRoster;
+  if (!step) return;
+  try {
+    if (!(await step.due(now))) return;
+    const results = await step.read();
+    const saved = await step.save(results, now);
+    const failed = results.filter((r) => !r.ok).map((r) => `${r.channelId}（${r.error.code}）`);
+    const unstored = saved.unstored.map((u) => `${u.channelId}：${u.error}`);
+    if (failed.length > 0 || unstored.length > 0) {
+      deps.log('warn', '渠道模型表这一轮没读全', { failed, unstored });
+    }
+  } catch (err) {
+    deps.log('error', '渠道模型表这一轮没记上', { error: errMessage(err) });
+  }
+}
+
 async function round(deps: QuotaReadJobDeps): Promise<Round> {
   const now = deps.now();
+  await readModelRosters(deps, now);
   let config: QuotaConfig;
   try {
     config = await deps.loadConfig();

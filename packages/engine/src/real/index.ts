@@ -642,6 +642,8 @@ export function realPortsFromEnv(
     machine: config.machine,
     ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
   });
+  // 额度读取和模型名册共用这一份会话用户身份：二进制和 Mirasim 口都在它家里。
+  const quotaUser = quotaAsUser(exec, sessionUser, config.mirasimHome, mirasim, config.sessionProxy);
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({
       db,
@@ -663,9 +665,23 @@ export function realPortsFromEnv(
     }),
     // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警。
     // Cursor、Grok 的登录文件、Mirasim 的桥接、独享组织的 reclaude 都在会话用户那边：经 quotaAsUser 以它的身份读、起。
+    // 同一轮里顺手读四个渠道的模型名册（#1302，六小时一次）：命令是各家执行体的前缀，读取器自己加 models。
     quotaRead: quotaReadJob({
       db,
-      asUser: quotaAsUser(exec, sessionUser, config.mirasimHome, mirasim, config.sessionProxy),
+      asUser: quotaUser,
+      ...(quotaUser.runCommand
+        ? {
+            modelRoster: {
+              commands: {
+                cursor: cursorCommand(sessionUser),
+                grok: grokCommand(sessionUser),
+              },
+              runCommand: quotaUser.runCommand,
+              ...(quotaUser.workDir ? { workDir: quotaUser.workDir } : {}),
+              ...(quotaUser.connectMirasim ? { connectMirasim: quotaUser.connectMirasim } : {}),
+            },
+          }
+        : {}),
     }),
     // 拼车额度盯读（#194）：每分钟起一条，按情况读开放接口、交给切号当场判
     carpoolWatch: carpoolWatchJob({

@@ -302,6 +302,13 @@
       "when": 1791367166382,
       "tag": "0042_cuddly_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1791402749284,
+      "tag": "0043_lowly_stark_industries",
+      "breakpoints": true
     }
   ]
 }

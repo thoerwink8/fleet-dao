@@ -8,11 +8,14 @@
 // - 估算类的池的用量记录（usageRecords）读这个池路由上的会话，Fusion 的（session_runs）和三段的一次性会话（runs）都算（db 的
 //   pool-runs.ts，#758）；runs 读不了照抛（这个池没读成），不拿 Fusion 那一半当全部。没记到花费的会话不进记录（不拿 0 冒充），
 //   估算读取器对「一条记录都没有」自己写「0 只是下限」。池自己配了日账目录（usage）的不走这里。
+import type { MirasimWire } from '@fleet-dao/adapters';
+import { readChannelModelRosters } from '@fleet-dao/adapters/model-roster';
 import {
   loadQuotaConfig,
   productionQuotaIo,
   type QuotaDeps,
   type QuotaIo,
+  type RunCommand,
   readAllQuotas,
   type UsageRecord,
   type UsageSource,
@@ -20,10 +23,13 @@ import {
 import {
   type Db,
   finishScheduleRun,
+  MODEL_ROSTER_CHANNELS,
+  modelRosterDue,
   type PoolRunUsage,
   poolLastReadOk,
   poolRunUsage,
   resolveAlertByKey,
+  saveChannelModelReads,
   savePoolQuota,
   startScheduleRun,
   upsertAlert,
@@ -41,6 +47,20 @@ export interface QuotaReadWiring {
   io?: QuotaIo;
   /** 凭据在会话用户家里的读取器改经它读文件（real/index.ts 的 quotaAsUser）。不给就都用引擎自己的身份读。 */
   asUser?: QuotaDeps['asUser'];
+  /**
+   * 渠道模型名册（#1302）。给了才在额度这一轮里顺手读；命令是各家执行体的启动前缀，读取器自己在后面加 models。
+   * 不给就只读额度（测试、还没接线的进程）。
+   */
+  modelRoster?: {
+    commands: {
+      cursor: readonly string[];
+      grok: readonly string[];
+    };
+    runCommand: RunCommand;
+    env?: Record<string, string | undefined>;
+    workDir?: () => Promise<string>;
+    connectMirasim?: () => Promise<MirasimWire>;
+  };
 }
 
 /** 会话用量转成估算读取器要的记录：花费为空的会话跳过（它没记到钱，按 0 算就是编数）。 */
@@ -72,6 +92,7 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
   const now = w.now ?? (() => new Date());
   const log: QuotaReadJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
+  const roster = w.modelRoster;
   return () => ({
     loadConfig: w.loadConfig ?? (() => loadQuotaConfig()),
     read: (config) =>
@@ -101,5 +122,22 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
     },
     now,
     log,
+    ...(roster
+      ? {
+          modelRoster: {
+            due: (at: Date) => modelRosterDue(w.db, at),
+            read: () =>
+              readChannelModelRosters({
+                channels: MODEL_ROSTER_CHANNELS,
+                commands: roster.commands,
+                runCommand: roster.runCommand,
+                ...(roster.env ? { env: roster.env } : {}),
+                ...(roster.workDir ? { workDir: roster.workDir } : {}),
+                ...(roster.connectMirasim ? { connectMirasim: roster.connectMirasim } : {}),
+              }),
+            save: (results, at) => saveChannelModelReads(w.db, results, at),
+          },
+        }
+      : {}),
   });
 }

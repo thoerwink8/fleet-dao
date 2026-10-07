@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./mirasim-bridge": "./src/mirasim/bridge.ts",
     "./quota": "./src/quota/index.ts",
+    "./model-roster": "./src/model-roster/index.ts",
     "./testing": "./test/testing.ts"
   },
   "dependencies": {
