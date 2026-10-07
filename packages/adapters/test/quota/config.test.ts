@@ -38,7 +38,7 @@ describe('仓里的额度配置和校验同步', () => {
     expect(config.pools.length).toBeGreaterThan(0);
   });
 
-  it('deploy/quota.json 过得了校验；五个池在读，jev 不配（没有日账）', async () => {
+  it('deploy/quota.json 过得了校验；五个池在读，jev 写在 notRead（没有日账）', async () => {
     const config = await loadQuotaConfig(REPO_QUOTA_CONFIG);
     expect(config.pools.map((p) => p.poolId)).toEqual([
       'claude-solo',
@@ -47,9 +47,9 @@ describe('仓里的额度配置和校验同步', () => {
       'cursor',
       'grok',
     ]);
+    expect(config.notRead?.map((p) => p.poolId)).toEqual(['jev']);
+    expect(config.notRead?.[0]?.why).toContain('没有旧系统的日账');
     const text = await readFile(REPO_QUOTA_CONFIG, 'utf8');
-    expect(text).toContain('"_jev不配"');
-    // 说明里会点出旧目录的名字；真正不许的是还有池配着那条用量。
     const raw = JSON.parse(text) as { pools: { usage?: unknown; poolId?: string }[] };
     expect(raw.pools.map((p) => p.poolId)).not.toContain('jev');
     expect(raw.pools.every((p) => p.usage === undefined)).toBe(true);
@@ -134,6 +134,15 @@ describe('配置校验：一次列全，不撞到第一个就停', () => {
       'pools[0].windows[0].unit 要是 usd 或 points',
       'pools[0].windows[0].periodHours 要是正数',
     ]);
+  });
+
+  it('【故意造出的失败】同一个池既在 pools 里又写进 notRead：配置不认', () => {
+    expect(
+      problems({
+        pools: [{ poolId: 'jev', channelId: 'jev', reader: 'mirasim-relay' }],
+        notRead: [{ poolId: 'jev', why: '没有日账' }],
+      }),
+    ).toEqual(['notRead[0].poolId jev 已经在 pools 里，不能又写不读']);
   });
 
   it('_ 开头的键当注释放行；空的 pools 不行', () => {

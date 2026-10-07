@@ -199,10 +199,18 @@ export type PoolConfig =
   | GrokBillingConfig
   | EstimateConfig;
 
+/** 目录里有、但这份不读的池。why 写明为什么没有这种数据。 */
+export interface QuotaNotRead {
+  poolId: string;
+  why: string;
+}
+
 export interface QuotaConfig {
   /** 每个池的默认超时；池上的 timeoutMs 优先。 */
   timeoutMs?: number;
   pools: PoolConfig[];
+  /** 不读的池。读取器不跑它们，开着的旧提醒按这份撤。 */
+  notRead?: QuotaNotRead[];
 }
 
 /* ---------------- 用量记录（估算的输入） ---------------- */

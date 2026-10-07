@@ -7,6 +7,7 @@
 // - 「这台机器当前挂的不是这个组织」（not_current）不算失败：Claude 额度只能读当前挂着的那个组织，读取器不切号，
 //   另一个池本来就读不到。照旧留着旧读数、不报警，但这一轮记 partial 写明哪几个池没读，不记成全读到了。
 // - 配置读不到、认不出：这一轮整个没跑成，当场报（key 单独一个），不拿上一次的配置顶。
+// - 配置 notRead 里的池不读（没有这种数据）。每轮撤掉它们的 quota-read 提醒，不留着报错。
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
 
 import type { PoolQuotaResult, QuotaConfig, QuotaReport } from '@fleet-dao/adapters/quota';
@@ -87,6 +88,7 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
     return { result: { outcome: 'failed', why: `额度配置读不到：${why}` } };
   }
   await deps.resolve(configAlertKey());
+  for (const skip of config.notRead ?? []) await deps.resolve(poolAlertKey(skip.poolId));
 
   if (config.pools.length === 0) {
     return { result: { outcome: 'unscanned', why: '额度配置里一个池都没有' } };

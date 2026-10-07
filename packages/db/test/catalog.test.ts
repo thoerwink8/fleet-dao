@@ -115,7 +115,9 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
       quotaOnly: [],
       catalogOnly: ['jev@jev'],
     });
-    expect(repoFile('deploy/quota.json')).toContain('没有旧系统的日账');
+    const notRead = (quota as { notRead?: { poolId: string; why: string }[] }).notRead ?? [];
+    expect(notRead.map((p) => p.poolId)).toEqual(['jev']);
+    expect(notRead[0]?.why).toContain('没有旧系统的日账');
   });
 
   it('【故意造出失败】额度配置少一个目录里有的池（或多一个目录里没有的池），对照就判红', () => {

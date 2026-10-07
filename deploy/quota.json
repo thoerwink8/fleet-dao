@@ -1,6 +1,12 @@
 {
-  "_说明": "额度读取器的配置（#1289）：读哪些池、各池凭据文件放在哪（只有池名和文件路径，不是密钥本身）。随发布的那一版带着，引擎的 quota-read 直接读它所在那一版的这份（packages/adapters/src/quota/config.ts 的默认路径），不再有手放的 /etc/fleet-dao/quota.json；FLEET_QUOTA_CONFIG 只给命令行和测试换位置。写在这里的池，poolId 要和目录配置（deploy/catalog.json）的账号池 id 对上，packages/db/test/catalog.test.ts 钉着，多一个或少一个不是下面写明的例外就红。密钥本身（Key 文件、各家 auth.json）仍然手放在机器上，不进仓；凭据缺失时该池如实报「读不到」（no_credentials），不会因此少读池。凭据在会话用户 fleet-agent-carpool 家里的，路径写它家里的绝对路径。以 _ 开头的键是注释。",
-  "_jev不配": "目录里有 jev 池，这里不配。新系统没有旧系统的日账：会话用户家里没有 ~/.dao（也就没有 ~/.dao/judge-spend），packages/jev 把每次花费写进库里的 jev_answers，不写按日的 token 文件。配上那个目录，引擎用户每轮都报 no_usage_source（家目录 750，它连「目录不存在」都看不成，只会看到 EACCES）。每天花多少由 packages/jev 的 dailyUsdCap 自己停调用，不靠额度读取器。",
+  "_说明": "额度读取器的配置（#1289）：读哪些池、各池凭据文件放在哪（只有池名和文件路径，不是密钥本身）。随发布的那一版带着，引擎的 quota-read 直接读它所在那一版的这份（packages/adapters/src/quota/config.ts 的默认路径），不再有手放的 /etc/fleet-dao/quota.json；FLEET_QUOTA_CONFIG 只给命令行和测试换位置。写在 pools 里的池，poolId 要和目录配置（deploy/catalog.json）的账号池 id 对上，packages/db/test/catalog.test.ts 钉着，多一个或少一个不是 notRead 里写明的例外就红。不读的池写在 notRead（要有 poolId 和 why）：读取器不跑，开着的旧提醒按这份撤。密钥本身（Key 文件、各家 auth.json）仍然手放在机器上，不进仓；凭据缺失时该池如实报「读不到」（no_credentials），不会因此少读池。凭据在会话用户 fleet-agent-carpool 家里的，路径写它家里的绝对路径。以 _ 开头的键是注释。",
+  "notRead": [
+    {
+      "_说明": "目录里有这个池，pools 里不配。花费不在日账文件里。",
+      "poolId": "jev",
+      "why": "新系统没有旧系统的日账：会话用户家里没有 ~/.dao（也就没有 ~/.dao/judge-spend），packages/jev 把每次花费写进库里的 jev_answers，不写按日的 token 文件。配上那个目录，引擎用户每轮都报 no_usage_source（家目录 750，它连「目录不存在」都看不成，只会看到 EACCES）。每天花多少由 packages/jev 的 dailyUsdCap 自己停调用，不靠额度读取器。"
+    }
+  ],
   "timeoutMs": 30000,
   "pools": [
     {
