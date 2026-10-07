@@ -2,7 +2,7 @@
 // （france-sessions-query.mjs / france-sessions-lib.mjs）。
 // ssh、gh、git、pnpm、node 子进程、睡眠全部是假的（假时钟：sleep 只是把时间往前拨）；home 用真的临时目录，状态文件和暂停标记是真文件。
 // 真跑的那条路（release-train.mjs 外壳里的 ssh）在这里一次都不碰。故意造的失败：没带 --founder-ok、等收尾超时、法国读不到会话数、
-// 发完版历史末行是 unhealthy、--restore 没有授权。
+// 发完版历史末行是 unhealthy、发完恢复发版前的开关不成功（总开关开不回、仓开关开不回、没记发版前的状态）。
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,7 +58,6 @@ interface Train {
     }[];
     missing: number[];
   };
-  restoreAuthorized(text: string): boolean;
   USAGE: string;
 }
 interface WorkerLib {
@@ -87,7 +86,7 @@ const franceQuery = (await load('france-query.mjs')) as { PSQL: string[] };
 
 const SHA = 'ab12cd34'.repeat(5);
 const OLD = '0123abcd'.repeat(5);
-const FOUNDER = '发版吧，发完不用开引擎';
+const FOUNDER = '发版吧';
 const FOUNDER_RESTORE = '发吧，发完恢复引擎和各仓开关';
 const NODE = 'node-fake';
 const RUNNING_WORKER =
@@ -114,6 +113,9 @@ function makeWorld() {
     engineOn: true,
     engineStatusFails: false,
     engineLegacy: false, // 在用的版本还没有 engine 子命令：fleet-api 打用法、退出 1
+    engineOnFails: false, // engine on 没成（连不上库）
+    engineOnSticks: false, // engine on 说成了、读回来还是关着
+    dispatchFails: false, // dispatch <仓> on 没成
     sessions: (async () => ({ ok: true, running: 0, rows: [] })) as () => Promise<SessionsResult>,
     repos: [
       { repo: 'o/a', auto_dispatch_since: '2026-10-01T00:00:00Z' },
@@ -193,10 +195,14 @@ function makeWorld() {
       return ok('已关');
     }
     if (cmd.includes(' engine on ')) {
-      w.engineOn = true;
+      if (w.engineOnFails) return { status: 1, stdout: '', stderr: 'could not connect to database' };
+      if (!w.engineOnSticks) w.engineOn = true;
       return ok('已开');
     }
-    if (cmd.includes(' dispatch ')) return ok('已开');
+    if (cmd.includes(' dispatch ')) {
+      if (w.dispatchFails) return { status: 1, stdout: '', stderr: '库出错' };
+      return ok('已开');
+    }
     if (cmd.endsWith('release.sh --check')) return { status: w.checkExit, stdout: '', stderr: '' };
     if (cmd.includes('/deploy/release.sh ')) {
       const sha = cmd.split(' ').at(-1);
@@ -379,18 +385,14 @@ describe('start 的前置：没带 --founder-ok 不发版', () => {
     expect(w.sshCalls).toEqual([]);
   });
 
-  it('--restore 的原话里没写明授权：拒；写了「不用恢复」也算没授权', async () => {
+  it('--restore 不再要创始人在原话里写授权（只是还原发版前的样子）：原话只写「发吧」也照走，发完开回', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', '发吧', '--restore'], io(home))).toBe(
-      1,
+      0,
     );
-    expect(
-      await train.runTrain(['start', '--sha', SHA, '--founder-ok', '发吧，不用恢复', '--restore'], io(home)),
-    ).toBe(1);
-    expect(w.sshCalls).toEqual([]);
-    expect(train.restoreAuthorized('发完恢复各仓开关')).toBe(true);
-    expect(train.restoreAuthorized('发完不要开回去')).toBe(false);
+    expect(w.engineOn).toBe(true);
+    expect(train.USAGE).not.toContain('必须写明授权');
   });
 });
 
@@ -616,7 +618,7 @@ describe('abort：恢复原状', () => {
 });
 
 describe('整趟走完', () => {
-  it('--sha：预检→暂停→等收尾→发版→等部署→验证→恢复→清单；发版在关总开关之后，发完保持关', async () => {
+  it('--sha：预检→暂停→等收尾→发版→等部署→验证→恢复→清单；发版在关总开关之后，发完恢复到发版前（原来开着，开回）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.workers = DONE_WORKER;
@@ -628,8 +630,13 @@ describe('整趟走完', () => {
     expect(i(`/deploy/release.sh ${SHA}`)).toBeGreaterThan(i(' engine off '));
     expect(w.sshCalls.some((c) => c.endsWith('release.sh --check'))).toBe(true);
     expect(existsSync(markerFile(home))).toBe(false); // 发完清了
-    expect(w.engineOn).toBe(false); // 默认保持关
-    expect(w.sshCalls.some((c) => c.includes(' engine on '))).toBe(false);
+    expect(w.engineOn).toBe(true); // 发版前开着，发完默认开回（不用 --restore、不用授权）
+    expect(i(' engine on ')).toBeGreaterThan(i(`/deploy/release.sh ${SHA}`)); // 发完才开
+    expect(
+      w.sshCalls.some((c) => c.includes('engine on --reason') && c.includes('发版后恢复发版前的状态')),
+    ).toBe(true);
+    expect(w.sshCalls.some((c) => c.endsWith('dispatch o/a on'))).toBe(true); // 发版前开着的仓
+    expect(w.sshCalls.some((c) => c.includes('dispatch o/b'))).toBe(false); // 发版前关着的仓不动
     expect(stateOf(home).status).toBe('done');
     const out = text(w.out);
     expect(out).toContain('清单（v4 统一，开着 4 张）');
@@ -637,7 +644,138 @@ describe('整趟走完', () => {
     const order = [...out.matchAll(/^(\d+)\. #(\d+)/gm)].map((m) => Number(m[2]));
     expect(order).toEqual([30, 10, 20, 40]);
     expect(out).toContain('#99'); // 先后段里写了、但已不在开着的单里
-    expect(out).toContain('创始人原话：「发版吧，发完不用开引擎」');
+    expect(out).toContain('创始人原话：「发版吧」');
+  });
+
+  it('发版前总开关就关着：发完仍关着，不去开（也不去碰各仓开关）', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.workers = DONE_WORKER;
+    w.engineOn = false;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
+    expect(code).toBe(0);
+    expect(w.engineOn).toBe(false);
+    expect(w.sshCalls.some((c) => c.includes(' engine on '))).toBe(false);
+    expect(w.sshCalls.some((c) => c.includes(' dispatch '))).toBe(false);
+    expect(text(w.out)).toContain('发版前就关着，保持关');
+  });
+
+  it('发版前总开关就关着、发布过程中被人开了：不盖人的操作，不再关回去', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.engineOn = false;
+    const base = io(home);
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      ssh: (c) => {
+        const r = base.ssh(c);
+        if (c.includes('/deploy/release.sh ') && !c.endsWith('--check')) w.engineOn = true;
+        return r;
+      },
+    });
+    expect(code).toBe(0);
+    expect(w.engineOn).toBe(true);
+    expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
+    expect(text(w.out)).toContain('发版期间有人开了');
+  });
+
+  it('【故意造出的失败】发完恢复不成（engine on 失败）：没成（退出码 2），写明发版已经发出去了，不说「已开回」；同一个目标再跑一次 start 只重试这一步', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.engineOnFails = true;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
+    expect(code).toBe(2);
+    const err = text(w.err);
+    expect(err).toContain('恢复没成');
+    expect(err).toContain('发版已经发出去了');
+    expect(err).toContain('could not connect to database');
+    expect(err).toContain('只重试这一步');
+    expect(text(w.out)).not.toContain('总开关已开回');
+    const s = stateOf(home);
+    expect(s.status).toBe('failed');
+    expect(s.phase).toBe(7);
+    expect(w.engineOn).toBe(false);
+    expect(releaseCalls(w.sshCalls).length).toBe(1);
+    // 库回来了：同一个目标再跑，从恢复这一步接着走，不再发一遍版
+    w.engineOnFails = false;
+    w.err.length = 0;
+    expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(0);
+    expect(w.engineOn).toBe(true);
+    expect(releaseCalls(w.sshCalls).length).toBe(1);
+    expect(stateOf(home).status).toBe('done');
+  });
+
+  it('【故意造出的失败】engine on 说成了、读回来总开关还是关着：没成，不信「成了」', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.engineOnSticks = true;
+    expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(2);
+    expect(text(w.err)).toContain('读回来总开关还是关着');
+    expect(stateOf(home).status).toBe('failed');
+  });
+
+  it('【故意造出的失败】发版前开着的仓开不回去（dispatch on 失败）：没成，点名是哪个仓；总开关照样开回', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.dispatchFails = true;
+    expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(2);
+    expect(text(w.err)).toContain('o/a 的「让 AI 接活」开不回去');
+    expect(w.engineOn).toBe(true); // 一项没成不拦着别的项
+    expect(stateOf(home).phase).toBe(7);
+  });
+
+  it('【故意造出的失败】恢复那一步读不到总开关：没成，不猜着开或关', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let releaseDone = false;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      ssh: (c) => {
+        if (c.includes('/deploy/release.sh ') && !c.endsWith('--check')) releaseDone = true;
+        // 发完版、验证之后（第 7 步）才读不到：用 --check 之后的第二次 engine status
+        if (
+          releaseDone &&
+          c.endsWith('engine status') &&
+          w.sshCalls.filter((x) => x.endsWith('engine status')).length >= 3
+        )
+          return { status: 1, stdout: '', stderr: 'could not connect to database' };
+        return base.ssh(c);
+      },
+    });
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('恢复没成');
+    expect(w.sshCalls.some((c) => c.includes(' engine on '))).toBe(false);
+  });
+
+  it('【故意造出的失败】进度记录里没有发版前的开关状态（before 缺）：恢复不猜，没成', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    // 停在第 7 步（恢复）、before 是空的进度记录（比如旧版本留下的）：同一个目标再跑 start 接着走
+    mkdirSync(join(home, '.fleet-dao'), { recursive: true });
+    writeFileSync(
+      join(home, '.fleet-dao', 'release-train.json'),
+      JSON.stringify({
+        schema: 1,
+        status: 'failed',
+        phase: 7,
+        startedAt: '2026-10-05T14:00:00.000Z',
+        updatedAt: '2026-10-05T14:10:00.000Z',
+        target: { kind: 'sha', value: SHA, sha: SHA },
+        founderOk: FOUNDER,
+        restore: false,
+        before: null,
+        baseline: null,
+        marker: false,
+        laggards: [],
+        release: { started: true },
+      }),
+    );
+    w.engineOn = false;
+    expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(2);
+    expect(text(w.err)).toContain('没记下发版前的开关状态');
+    expect(w.sshCalls.some((c) => c.includes(' engine on '))).toBe(false);
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
 
   // 2026-10-06 第一次发版撞上：法国在用的版本还没有 engine 子命令（总开关 #1086 之后才有），fleet-api 打用法退出 1，
@@ -662,7 +800,7 @@ describe('整趟走完', () => {
     expect(text(w2.err)).toContain('总开关读不到');
   });
 
-  it('--restore（原话写明授权）：暂停前开着的总开关和仓开关原样开回去，没开着的仓不动', async () => {
+  it('--restore（明写）：和默认一样，暂停前开着的总开关和仓开关原样开回去，没开着的仓不动', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     const code = await train.runTrain(
@@ -675,7 +813,7 @@ describe('整趟走完', () => {
     expect(w.sshCalls.some((c) => c.includes('dispatch o/b'))).toBe(false);
   });
 
-  it('暂停前总开关就关着（跳过）：--restore 也不去开', async () => {
+  it('暂停前总开关就关着（跳过）：--restore 也不去开（关着的保持关）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.engineOn = false;
@@ -951,5 +1089,31 @@ describe('法国在跑会话数的只读查询', () => {
       kind: 'ssh-failed',
     });
     expect(await run('console.log("乱的")')).toMatchObject({ ok: false, kind: 'bad-json' });
+  });
+});
+
+describe('release.sh 发完不再置关（决定 0032 第 4 条、#1256）', () => {
+  const releaseSh = readFileSync(fileURLToPath(new URL('../../deploy/release.sh', import.meta.url)), 'utf8');
+  /** 发完置关那两层留下的痕迹：函数、命令、记录文件。 */
+  const AUTO_OFF_TRACES = [
+    'engine_off_after_release',
+    'dispatch_off_on_milestone',
+    'engine_off_run',
+    'dispatch_off_run',
+    '.dispatch-off-milestone',
+    'fleet-api.ts engine',
+    'fleet-api.ts dispatch',
+  ];
+  const tracesIn = (text: string) => AUTO_OFF_TRACES.filter((x) => text.includes(x));
+  it('release.sh 里没有「发完一律置关总开关」「发 v<N> 版置关接活开关」这两层：函数、命令、记录文件都不在', () => {
+    expect(tracesIn(releaseSh)).toEqual([]);
+  });
+  it('【故意造出的失败】放回一个发完置关的调用或命令：检查抓得到', () => {
+    expect(tracesIn(`${releaseSh}\nengine_off_after_release "$SHA" || true\n`)).toEqual([
+      'engine_off_after_release',
+    ]);
+    expect(tracesIn(`${releaseSh}\n"$NODE" packages/api/src/bin/fleet-api.ts engine off\n`)).toEqual([
+      'fleet-api.ts engine',
+    ]);
   });
 });

@@ -14,8 +14,8 @@
 // - 打断预检靠的是 release-train-lib 里 runFrom 打出来的固定字样「—— 第 1 步」（PHASES[1]＝「暂停本机」）。
 //   它要是改了，这里就拦不住，预检过后会真的写暂停标记——agents/test/release-onekey.test.ts 里
 //   有一条盯住「拦截生效、且没写暂停标记」，字样改动会当场红。
-// - start/status/abort 全是透传 runTrain：这里不加新行为，不替它把关（它在 founder-ok、restore 授权
-//   上各有一道槛；这里先拦只为更早给中文说法，双保险而不是替代）。
+// - start/status/abort 全是透传 runTrain：这里不加新行为，不替它把关（它在 founder-ok 上有一道槛；
+//   这里先拦只为更早给中文说法，双保险而不是替代）。
 // - 退出码照 runTrain：0 做完了；1 用法不对或被拒；2 没做成；3 卡住。preflight 没过回 2
 //   （什么都没改，不算卡住，回 2 不回 3）。
 import { existsSync, rmSync } from 'node:fs';
@@ -288,7 +288,7 @@ export async function runOnekey(argv, io) {
     }
     say(
       io,
-      `一键发版：目标 ${p.tag ?? `提交 ${String(p.sha).slice(0, 12)}`}，先把本机和法国手头的活暂停，收尾后${p.restore ? '发版并按授权恢复' : '发版（法国发完保持关，开不开页面上说了算）'}。下面接入 release-train：`,
+      `一键发版：目标 ${p.tag ?? `提交 ${String(p.sha).slice(0, 12)}`}，先把本机和法国手头的活暂停，收尾后发版，发完恢复发版前的开关（开着的开回、关着的保持关）。下面接入 release-train：`,
     );
     return runTrain(toTrainArgv(p), io);
   }

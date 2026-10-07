@@ -61,7 +61,7 @@ AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数�
 # 香港上的演示版是哪一版：演示版发成了（sync_web）当场记下提交号、时间、路径、首页的 sha256，核对（check_demo）都照它比。
 # 自动发布不发演示版，香港上的就该一直是这里记的那份——拿「在用的这一版」去比，会把「还没发」当成「坏了」（2026-09-27 误报过）
 DEMO_RECORD=$RELEASES/.demo-published
-# 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，自动发布据此分得清「没动」和「没成」（没成的隔 30 分钟自动重试、最多 2 次；退出码 3＝发布成了、只是发版后置关没成）
+# 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，自动发布据此分得清「没动」和「没成」（没成的隔 30 分钟自动重试、最多 2 次；退出码 3＝发布成了、只是发布后的收尾（post_alert）没成；#1256 之后发版不再有置关这一步，暂时没有调用方）
 EXIT_RELEASE_BUSY=75
 EXIT_SESSIONS_BUSY=76
 AUTO=0    # --auto：自动发布起的
@@ -481,7 +481,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
     git -C "$CACHE" remote add origin "$REPO_URL"
     echo "  · 建了取代码用的裸仓 $CACHE"
   fi
-  # 版本 tag（v<N>）一起取：发完判「这一版带不带新的里程碑」要用（dispatch_off_on_milestone）
+  # 版本 tag（v<N>）一起取（自动发布按 tag 找要发的版本用；#1257、#1258 删版本标记那一层时一起收）
   if ! out=$(git_net 300 -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' \
     '+refs/tags/v*:refs/tags/v*' 2>&1); then
     red "从 $REPO_URL 取主线失败：$(tail -2 <<<"$out" | tr '\n' ' ')"
@@ -1631,98 +1631,6 @@ prune() {
   done
 }
 
-# 里程碑发版后「让 AI 接活」回到关（#1050，创始人 2026-10-05：每次更新上去先是关着，看过没问题再点开）。
-# 判「新里程碑」：这一版在主线上已含的最大 v<N> tag 比 DISPATCH_OFF_STATE 里记的大。记在文件里，所以同一个 tag 重跑发布不再关
-# （开过的不会被再关），小版本（主线上 tag 之后的提交）的更新 N 不变、不碰开关。文件不在算 0（装上这一步后头一次发布关一次）。
-# 关的是库里所有仓，走 fleet-api dispatch --all off（和驾驶舱按钮同一个写入口，每个仓记一条操作记录）；
-# 没关成不写记录、记一条「发布后收尾没成」（post_alert，退出码 3，不连坐整版），下一次发布（或手动重跑）再试——没关成不能算「关着」。人手动 --unmerged 发的不碰开关。
-DISPATCH_OFF_STATE=$RELEASES/.dispatch-off-milestone
-
-# 这一版在主线上已含的最大里程碑号（v<N> 里的 N）：打印数字；一个 tag 都没有就什么都不打印；读不了返回 1
-milestone_of() { # 提交号
-  local tags
-  if ! tags=$(git -C "$CACHE" tag --merged "$1" --list 'v*' 2>&1); then
-    printf '%s' "$tags"
-    return 1
-  fi
-  awk 'BEGIN { max = -1 } /^v[0-9]+$/ { n = substr($0, 2) + 0; if (n > max) max = n } END { if (max >= 0) print max }' <<<"$tags"
-}
-
-# 以 fleet 跑这一版的 fleet-api dispatch --all off（和 load_catalog 一样连本机库）；测试换成桩
-dispatch_off_run() { # 提交号 原因
-  (cd -- "$RELEASES/$1" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
-    FLEET_OPS_OPERATOR=release.sh "$NODE" packages/api/src/bin/fleet-api.ts dispatch --all off --reason "$2" 2>&1)
-}
-
-dispatch_off_on_milestone() { # 提交号：发布成功之后叫
-  local sha=$1 n last=0 saved out line rc=0
-  step "里程碑发版后「让 AI 接活」回到关"
-  if [[ "$(marker_get "$sha" on_main)" == 0 ]]; then
-    ok "这一版不在主线上（--unmerged）：不碰开关"
-    return 0
-  fi
-  if ! n=$(milestone_of "$sha"); then
-    post_alert "读不到 ${sha:0:12} 带哪个 v<N> tag（$n）：「让 AI 接活」没动，判不出这次要不要回到关；查完重发一遍"
-    return 1
-  fi
-  if [[ -z "$n" ]]; then
-    ok "${sha:0:12} 不含任何 v<N> tag：不碰开关"
-    return 0
-  fi
-  if [[ -e "$DISPATCH_OFF_STATE" || -L "$DISPATCH_OFF_STATE" ]]; then
-    if [[ -L "$DISPATCH_OFF_STATE" || ! -f "$DISPATCH_OFF_STATE" ]] || ! saved=$(<"$DISPATCH_OFF_STATE") 2>/dev/null ||
-      [[ ! "$saved" =~ ^[0-9]+$ ]]; then
-      post_alert "$DISPATCH_OFF_STATE 读不了或不是一个数字：判不出 v$n 关过没有，「让 AI 接活」没动；要人看（确认后删掉它重发）"
-      return 1
-    fi
-    last=$((10#$saved))
-  fi
-  if ((n <= last)); then
-    ok "v$n 发版时已经回到关过（记到 v$last）：不再关，现在是开是关保持原样"
-    return 0
-  fi
-  if ! out=$(dispatch_off_run "$sha" "发版 v$n 自动置关（release.sh ${sha:0:12}）"); then rc=1; fi
-  while IFS= read -r line; do
-    if [[ -n "$line" ]]; then printf '    %s\n' "$line"; fi
-  done <<<"$out"
-  if ((rc)); then
-    post_alert "发了 v$n，但「让 AI 接活」没能全部关上（原话见上；没记「已关」，下一次发布或重发会再试）"
-    return 1
-  fi
-  if ! { printf '%s\n' "$n" >"$DISPATCH_OFF_STATE.tmp" && mv -T -- "$DISPATCH_OFF_STATE.tmp" "$DISPATCH_OFF_STATE"; } 2>/dev/null; then
-    post_alert "所有仓都关上了，但写不进 $DISPATCH_OFF_STATE：下一次发布会再关一遍（关着的不改不记）"
-    return 1
-  fi
-  changed "发 v$n：所有项目的「让 AI 接活」回到关（要用，到看板或 fleet-api dispatch <仓> on 逐个点开）"
-}
-
-# 每次往法国发版成功后，引擎总开关（设置 engine.master，#1086）回到关（创始人 2026-10-05：「每次更上去处于关闭状态，点击开启，引擎开始运转，
-# ai开始派活」）。和上面项目的「让 AI 接活」是两道：那个只在新里程碑（v<N> tag）时关，这个是法国每次发版都关——总开关关着引擎就什么
-# 都不拉、不派、不起干活的会话，等创始人在驾驶舱环境页点开。人手动 --unmerged 发的也不碰。走 fleet-api engine off（和驾驶舱按钮同一个设置键、同一个写入口，
-# 开着才改、改了记一条操作记录「发版 <提交> 自动置关总开关」；本来就关着不改不记）。没关成记一条「发布后收尾没成」（post_alert，退出码 3，不连坐整版），不假装关了。
-engine_off_run() { # 提交号 原因
-  (cd -- "$RELEASES/$1" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
-    FLEET_OPS_OPERATOR=release.sh "$NODE" packages/api/src/bin/fleet-api.ts engine off --reason "$2" 2>&1)
-}
-
-engine_off_after_release() { # 提交号：发布成功之后叫
-  local sha=$1 out line rc=0
-  step "发版后引擎总开关回到关"
-  if [[ "$(marker_get "$sha" on_main)" == 0 ]]; then
-    ok "这一版不在主线上（--unmerged）：不碰总开关"
-    return 0
-  fi
-  if ! out=$(engine_off_run "$sha" "发版 ${sha:0:12} 自动置关总开关（release.sh）"); then rc=1; fi
-  while IFS= read -r line; do
-    if [[ -n "$line" ]]; then printf '    %s\n' "$line"; fi
-  done <<<"$out"
-  if ((rc)); then
-    post_alert "发了 ${sha:0:12}，但引擎总开关没能关上（原话见上）：它可能还开着，到驾驶舱环境页或 fleet-api engine status 核对；下一次发布会再关"
-    return 1
-  fi
-  changed "发 ${sha:0:12}：引擎总开关回到关（要用，到驾驶舱环境页点开，或 fleet-api engine on）"
-}
-
 # 这次给在跑的会话多少宽限（秒）：--now 不给
 drain_grace() { if ((NOW_MODE)); then echo 0; else echo "$DRAIN_GRACE"; fi; }
 
@@ -1759,9 +1667,8 @@ do_release() { # 要发的提交（空 = 主线最新）
       changed "历史里把 ${SHA:0:12} 记回健康（之前判过不健康，这次健康检查过了）"
     fi
     ok "发布完成：在用 ${SHA:0:12}"
-    # 版本已切、健康检查已过：发布已经成了。置关没成只记 post_alert（结论里单列、退出码 3），不记红、不连坐整版（#1121）
-    dispatch_off_on_milestone "$SHA" || true
-    engine_off_after_release "$SHA" || true
+    # 发完不碰引擎总开关和各项目的「让 AI 接活」（决定 0032 第 4 条、#1256）：发版前后的开关状态由发版车（release-train）和驾驶舱按钮的
+    # 接活脚本（deploy/france/release-request）记下、发完照记下的恢复；直接跑 release.sh（自动发布、手动）本来就没暂停过它们，原样留着。
   elif [[ -z "$cur" ]]; then
     mark_unhealthy "$SHA"
     red "${SHA:0:12} 没过健康检查；这是头一版，没有上一版可退"

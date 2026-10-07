@@ -55,7 +55,7 @@ const ciBody = (over = {}) =>
   });
 
 /** 假 io：记下每一次写和每一条命令；默认全部顺利。over 里的同名项盖掉默认。 */
-function fakeIo(over = {}) {
+function fakeIo(over = {}, opts = {}) {
   let clock = T0;
   const log = {
     out: [],
@@ -102,6 +102,11 @@ function fakeIo(over = {}) {
         master = 'off';
         return { status: 0, stdout: '', stderr: '' };
       }
+      if (args.startsWith('engine on')) {
+        if (opts.onFails) return { status: 1, stdout: '', stderr: 'could not connect to database' };
+        if (!opts.onSticks) master = 'on'; // onSticks：说成了但读回来还是关着
+        return { status: 0, stdout: '', stderr: '' };
+      }
       return { status: 1, stdout: '', stderr: '认不出的命令' };
     },
     sessions: async () => ({ ok: true, running: [] }),
@@ -142,7 +147,10 @@ function assertRefused(code, log, needle) {
 
 // —— 顺利的一趟 ——
 
-test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这个提交、验证、发完保持关，founderOk 带「驾驶舱点击发布」和点的人、时间', async () => {
+const engineOns = (log) => log.fleetApi.filter((a) => a.startsWith('engine on'));
+const engineOffs = (log) => log.fleetApi.filter((a) => a.startsWith('engine off'));
+
+test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这个提交、验证、发完恢复到发版前（原来开着，开回），founderOk 带「驾驶舱点击发布」和点的人、时间', async () => {
   const { io, log } = fakeIo();
   assert.equal(await runRequest(io), EXIT.done);
   assert.deepEqual(log.release, [SHA]);
@@ -151,6 +159,14 @@ test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这�
   assert.equal(log.markers, 1);
   assert.equal(log.cleared, 1);
   assert.ok(log.fleetApi.some((a) => a.startsWith('engine off --reason')));
+  assert.equal(engineOns(log).length, 1, '发完开回一次');
+  assert.match(
+    engineOns(log)[0],
+    /engine on --reason '发版后恢复发版前的状态/,
+    '原因写明是发版后恢复（进操作记录）',
+  );
+  assert.ok(log.fleetApi.indexOf(engineOns(log)[0]) > log.fleetApi.indexOf(engineOffs(log)[0]), '先关、后开');
+  assert.equal(log.out.filter((l) => l.includes('总开关已开回')).length, 1);
   const phases = [...new Set(log.states.map((s) => s.phase))];
   assert.deepEqual(
     phases,
@@ -161,20 +177,22 @@ test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这�
   assert.equal(final.status, 'done');
   assert.equal(final.schema, 1);
   assert.deepEqual(final.target, { kind: 'sha', value: SHA, sha: SHA });
-  assert.equal(final.restore, false);
+  assert.equal(final.restore, true);
   assert.equal(final.marker, false);
   assert.equal(final.founderOk, `${FOUNDER_WORD} ${REQ_AT} 创始人`);
   assert.equal(final.release.started, true);
   assert.equal(log.lasts.at(-1).outcome, 'accepted');
 });
 
-test('引擎本来就关着：跳过暂停，不再 off 一遍，照样发', async () => {
+test('引擎本来就关着：跳过暂停，不再 off 一遍，照样发；发完仍关着（不替创始人开）', async () => {
   const { io, log, setMaster } = fakeIo();
   setMaster('off');
   assert.equal(await runRequest(io), EXIT.done);
-  assert.equal(log.fleetApi.filter((a) => a.startsWith('engine off')).length, 0);
+  assert.equal(engineOffs(log).length, 0);
+  assert.equal(engineOns(log).length, 0, '发版前就关着，发完不去开');
   assert.equal(log.markers, 0);
   assert.deepEqual(log.release, [SHA]);
+  assert.equal(log.states.at(-1).before.master, false);
 });
 
 test('在用的版本还没有引擎总开关子命令（打用法）：当关着读，照样发', async () => {
@@ -386,6 +404,7 @@ test('【故意造出的失败】发布历史末行是 unhealthy：没成；末�
   });
   assert.equal(await runRequest(a.io), EXIT.failed);
   assert.match(a.log.states.at(-1).why, /unhealthy/);
+  assert.equal(engineOns(a.log).length, 0, '没过健康检查不恢复');
   const b = fakeIo({
     historyLast: async () => ({ ok: true, line: `2026-10-07T12:10:00Z ${'b'.repeat(40)} release` }),
   });
@@ -403,8 +422,9 @@ test('【故意造出的失败】release.sh --check 有红：没成', async () =
   assert.match(log.states.at(-1).why, /--check 有红/);
 });
 
-test('发完引擎总开关又是开着（不该）：关回去，不替创始人开', async () => {
+test('发版前就关着、发布过程中被人开了：不再关回去，也不再开（发完按发版前记的，关着的保持关，不盖人的操作）', async () => {
   const { io, log, setMaster } = fakeIo();
+  setMaster('off');
   const base = io.runRelease;
   io.runRelease = async (sha) => {
     const r = await base(sha);
@@ -412,8 +432,103 @@ test('发完引擎总开关又是开着（不该）：关回去，不替创始�
     return r;
   };
   assert.equal(await runRequest(io), EXIT.done);
-  assert.equal(log.fleetApi.filter((a) => a.startsWith('engine off')).length, 2, '发完又关了一次');
-  assert.equal(log.fleetApi.filter((a) => a.startsWith('engine on')).length, 0, '从不替创始人开');
+  assert.equal(engineOffs(log).length, 0, '没有再关');
+  assert.equal(engineOns(log).length, 0, '没有再开');
+  assert.ok(log.out.some((l) => l.includes('发版期间有人开了')));
+});
+
+test('发版前开着、发布过程中被人先开回了：不重复开，算做完', async () => {
+  const { io, log, setMaster } = fakeIo();
+  const base = io.runRelease;
+  io.runRelease = async (sha) => {
+    const r = await base(sha);
+    setMaster('on');
+    return r;
+  };
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOns(log).length, 0, '已经是开着，不再写一条重复的操作记录');
+});
+
+test('【故意造出的失败】发完恢复不成（engine on 失败）：没成，退出码 2，页面上是红的，写明发版已经发出去了、要到环境页点开，不当成成功', async () => {
+  const { io, log } = fakeIo({}, { onFails: true });
+  assert.equal(await runRequest(io), EXIT.failed);
+  const last = log.states.at(-1);
+  assert.equal(last.status, 'failed');
+  assert.equal(last.phase, 7);
+  assert.equal(last.release.started, true);
+  assert.match(last.why, /恢复没成/);
+  assert.match(last.why, /发版已经发出去了/);
+  assert.match(last.why, /could not connect to database/);
+  assert.ok(!log.out.some((l) => l.includes('总开关已开回')), '没有说「已开回」');
+  assert.ok(log.err.some((l) => l.includes('恢复没成')));
+});
+
+test('【故意造出的失败】engine on 说成了、读回来总开关还是关着：恢复没成，不信「成了」', async () => {
+  const { io, log } = fakeIo({}, { onSticks: true });
+  assert.equal(await runRequest(io), EXIT.failed);
+  assert.match(log.states.at(-1).why, /读回来总开关还是关着/);
+});
+
+test('【故意造出的失败】恢复那一步读不到总开关：没成，不猜着开或关', async () => {
+  const { io, log } = fakeIo();
+  const base = io.fleetApi;
+  io.fleetApi = async (args) => {
+    // 发完之后（已经发过版、走到第 7 步）读总开关读不到
+    if (args === 'engine status' && log.release.length > 0 && log.states.at(-1)?.phase === 7)
+      return { status: 1, stdout: '', stderr: 'could not connect to database' };
+    return base(args);
+  };
+  assert.equal(await runRequest(io), EXIT.failed);
+  const last = log.states.at(-1);
+  assert.equal(last.phase, 7);
+  assert.match(last.why, /恢复没成/);
+  assert.equal(engineOns(log).length, 0);
+});
+
+test('【故意造出的失败】进度记录里没有发版前的总开关状态（before 缺）：恢复不猜，没成', async () => {
+  const { io, log } = fakeIo();
+  const base = io.writeState;
+  io.writeState = (s) => {
+    if (s.phase === 7) s.before = null;
+    base(s);
+  };
+  assert.equal(await runRequest(io), EXIT.failed);
+  assert.match(log.states.at(-1).why, /没记下发版前的总开关状态/);
+  assert.equal(engineOns(log).length, 0);
+});
+
+test('发版没过健康检查（历史末行 unhealthy）：不恢复，引擎还关着等人看（只在健康检查过了才开回）', async () => {
+  const { io, log } = fakeIo({
+    historyLast: async () => ({ ok: true, line: `2026-10-07T12:10:00Z ${SHA} unhealthy` }),
+  });
+  assert.equal(await runRequest(io), EXIT.failed);
+  assert.equal(engineOns(log).length, 0);
+});
+
+test('上一回点发布停在「卡住」（会话没收完、引擎是我们关的）：再点一次，发版前开着的带过来，发完照样开回，不当成「本来就关着」', async () => {
+  const { io, log } = fakeIo({ sessions: async () => ({ ok: true, running: ['s1'] }) });
+  assert.equal(await runRequest(io), EXIT.blocked);
+  const stuck = JSON.parse(JSON.stringify(log.states.at(-1)));
+  assert.equal(stuck.before.master, true);
+  // 第二回：会话收完了；进度记录是上一回停下的那份；引擎还是关着（上一回关的）
+  io.sessions = async () => ({ ok: true, running: [] });
+  io.readState = () => ({ ok: true, state: stuck });
+  log.fleetApi.length = 0;
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOffs(log).length, 0, '已经是关的，不再关');
+  assert.equal(engineOns(log).length, 1, '发完开回');
+  assert.equal(log.states.at(-1).before.master, true);
+});
+
+test('【故意造出的失败】上一回是做完了的（done）、这一回引擎发版前是关着：不带上一回的「开着」，发完保持关', async () => {
+  const { io, log, setMaster } = fakeIo();
+  io.readState = () => ({
+    ok: true,
+    state: { schema: 1, status: 'done', phase: 8, before: { master: true, repos: null }, target: {} },
+  });
+  setMaster('off');
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOns(log).length, 0);
 });
 
 // —— 读请求文件（真文件系统）——

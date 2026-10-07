@@ -1,6 +1,6 @@
 // 驾驶舱「发布到法国」按钮的接活（法国，root）：驾驶舱后端（fleet，没有 root）只往 /var/lib/fleet-dao/release-request/request.json 写一份请求，
 // root 的 fleet-release-request.path 盯着它，起 fleet-release-request.service 跑这里：核请求 → 走一趟和 release-train 同样的发版
-// （暂停法国引擎总开关、等在跑的会话收尾、release.sh <提交>、验证、发完保持关）→ 进度写进 /srv/fleet-dao-releases/.train/release-train.json
+// （暂停法国引擎总开关、等在跑的会话收尾、release.sh <提交>、验证、发完恢复到发版前）→ 进度写进 /srv/fleet-dao-releases/.train/release-train.json
 // （和 agents/skills/commander/scripts/release-train-lib.mjs 同一个格式，驾驶舱的 /france 页读它）。
 // 这是人工档（deploy/lib/human-tier.sh）：装一次要创始人在法国以 root 跑 france.sh。deploy/france.sh 把本目录装到
 // /usr/local/lib/fleet-dao/release-request/（装的是副本；这里依赖同级的 ../auto-release/lib.mjs 判 CI，它由自动档装在 /usr/local/lib/fleet-dao/auto-release/）。
@@ -212,7 +212,7 @@ function newState(io, req) {
     updatedAt: iso(io),
     target: { kind: 'sha', value: req.sha },
     founderOk: `${FOUNDER_WORD} ${req.at} ${req.by}`,
-    restore: false,
+    restore: true, // 发完一律恢复到发版前（决定 0032 第 4 条、#1256）：开着的开回、关着的保持关
     before: null,
     baseline: null,
     marker: false,
@@ -249,6 +249,15 @@ async function engineOff(io, reason) {
   return { ok: true };
 }
 
+async function engineOn(io, reason) {
+  const r = await io.fleetApi(`engine on --reason ${shq(reason)}`, io.limits.stepMs);
+  if (r.status !== 0) return { ok: false, why: `fleet-api engine on 没成：${tail(r.stderr || r.stdout)}` };
+  const back = await engineRead(io);
+  if (!back.ok) return { ok: false, why: `开回去之后读不回总开关：${back.why}` };
+  if (!back.on) return { ok: false, why: 'engine on 说成了，读回来总开关还是关着' };
+  return { ok: true };
+}
+
 const say = (io, text) => io.out(text);
 
 async function phasePauseLocal(io) {
@@ -259,6 +268,15 @@ async function phasePauseLocal(io) {
 async function phasePauseFrance(io, state) {
   const now = await engineRead(io);
   if (!now.ok) return failed(now.why);
+  if (state.before?.master === true && !now.on) {
+    // 上一回点发布停在「卡住」或「没成」、总开关是我们关的：发版前开着的已经记在上一回的进度记录里（runRequest 带过来的），
+    // 别拿现在的「关着」盖掉它，不然这一回发完会把本来开着的引擎当成「本来就关着」留在关
+    io.writeMarker({ since: iso(io), target: state.target.value.slice(0, 12), by: 'release-request' });
+    state.marker = true;
+    io.writeState(state);
+    say(io, '暂停法国：总开关已经是关的（上一回停下时关的），发版前是开着的，已记');
+    return { ok: true };
+  }
   if (!now.on) {
     state.before = { master: false, repos: null, recordedAt: iso(io) };
     io.writeState(state);
@@ -362,21 +380,43 @@ async function phaseVerify(io) {
   return { ok: true };
 }
 
-/** 7 恢复：清暂停标记；引擎总开关发完保持关（不替创始人开），开着就关回去。 */
+/**
+ * 7 恢复：清暂停标记；引擎总开关按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：发版前开着的开回、关着的保持关。
+ * 开回去经 fleet-api engine on（写操作记录，原因写明是发版后恢复）。没恢复成（读不到、开不回去、读回来还是关着）是「没成」：
+ * 状态记 failed、页面上红、退出码 2，不当成成功；发版已经发出去了（后端见在用的已是它就不收第二次点击），所以到环境页点开总开关。
+ * 各仓「让 AI 接活」开关这个脚本没有暂停过、release.sh 也不再动它们，进度记录里 repos 记 null，原样留着。
+ */
 async function phaseRestore(io, state) {
   io.clearMarker();
   state.marker = false;
   io.writeState(state);
-  const eng = await engineRead(io);
-  if (!eng.ok) return failed(eng.why);
-  if (eng.on) {
-    const off = await engineOff(
-      io,
-      `发版后默认保持关（驾驶舱点击发布，目标 ${state.target.value.slice(0, 12)}）`,
+  const before = state.before;
+  if (before === null || before === undefined || typeof before.master !== 'boolean') {
+    return failed(
+      '恢复没成：第 2 步没记下发版前的总开关状态（before 缺），不敢猜着开或关；发版已经发出去了，到驾驶舱环境页核对总开关',
     );
-    if (!off.ok) return failed(off.why);
   }
-  say(io, '恢复：法国引擎总开关保持关，要开到驾驶舱环境页点开');
+  const eng = await engineRead(io);
+  if (!eng.ok) return failed(`恢复没成（发版已经发出去了）：${eng.why}`);
+  if (!before.master) {
+    say(
+      io,
+      `恢复：法国引擎总开关发版前就关着，保持关${eng.on ? '（现在是开着的：发版期间有人开了，没动）' : ''}`,
+    );
+    return { ok: true };
+  }
+  if (!eng.on) {
+    const on = await engineOn(
+      io,
+      `发版后恢复发版前的状态（驾驶舱点击发布，目标 ${state.target.value.slice(0, 12)}）`,
+    );
+    if (!on.ok) {
+      return failed(
+        `恢复没成：发版已经发出去了，但发版前开着的引擎总开关没能开回：${on.why}。到驾驶舱环境页点开，或 fleet-api engine on`,
+      );
+    }
+  }
+  say(io, '恢复：法国引擎总开关已开回（发版前开着）');
   return { ok: true };
 }
 
@@ -424,6 +464,12 @@ export async function runRequest(io) {
   if (why !== null) return refuse(io, req, why);
 
   const state = newState(io, req);
+  // 上一回停在「卡住」「没成」、发版前总开关是开着的：带过来（见 phasePauseFrance）；做完的、撤销的不带，这一回重新读
+  const prevRead = io.readState();
+  const prev = prevRead.ok ? prevRead.state : null;
+  if ((prev?.status === 'blocked' || prev?.status === 'failed') && prev.before?.master === true) {
+    state.before = prev.before;
+  }
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   for (let p = 0; p < PHASE_FUNCS.length; p++) {
