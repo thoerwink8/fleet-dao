@@ -14,7 +14,14 @@ const DIR = fileURLToPath(new URL('./replay/fixtures/', import.meta.url));
 const files = readdirSync(DIR).filter((f) => f.startsWith('task-') && f.endsWith('.json'));
 
 /** 必须有的场景：没有它们，「扫完 0 条」和「一条样本都没扫到」就分不开了。 */
-const REQUIRED = ['task-merged', 'task-parked-brief', 'task-parked-guarded', 'task-merging', 'task-paused'];
+const REQUIRED = [
+  'task-merged',
+  'task-parked-brief',
+  'task-parked-guarded',
+  'task-merging',
+  'task-paused',
+  'task-reworked',
+];
 
 const HOW =
   '这份历史是过去的代码真走过的路：现在的代码走不出同样的步骤 = 在途的任务会变僵尸。' +

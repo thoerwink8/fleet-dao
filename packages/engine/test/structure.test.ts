@@ -61,6 +61,7 @@ describe('工作流文件的规矩', () => {
       'task-runtime.ts',
       'task-session.ts',
       'task-support.ts',
+      'task-sync.ts',
       'task-verify.ts',
       'task.ts',
     ]);
