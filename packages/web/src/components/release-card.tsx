@@ -1,9 +1,23 @@
 // /france 页的「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个（最近合进去的 PR）、最近做完的一个任务。
 // 只读展示：每一行各自带「查成了 / 没查成 + 原因」，没查成的行写明原因，不拿空、0 或「已是最新」顶。
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
+import { Link } from 'react-router';
+import { toast } from 'sonner';
+import { errorText, useFranceRelease } from '../api/client';
 import type { ReleaseCard } from '../api/types';
 import { formatAgo } from '../lib/format';
 import { cn } from '../lib/utils';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
+import { Button } from './ui/button';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -48,6 +62,15 @@ function CiBadge({ ci }: { ci: Ci }) {
 }
 
 export function ReleaseCardBody({ card, now }: { card: ReleaseCard; now: number }) {
+  return (
+    <div>
+      <ReleaseRows card={card} now={now} />
+      <ReleaseAction card={card} now={now} />
+    </div>
+  );
+}
+
+function ReleaseRows({ card, now }: { card: ReleaseCard; now: number }) {
   const { mainline, deployed, gap, lastDone } = card;
   return (
     <dl className="divide-y">
@@ -139,5 +162,153 @@ export function ReleaseCardBody({ card, now }: { card: ReleaseCard; now: number 
         )}
       </Row>
     </dl>
+  );
+}
+
+type Last = ReleaseCard['action']['last'];
+
+/** 最近一次点击的结果一句话：读不到写没查成 + 原因，不当成没点过。 */
+function lastLine(last: Last, now: number): { text: string; tone: 'ok' | 'warn' | 'fail' | 'plain' } | null {
+  const when = last.at ? `（${formatAgo(last.at, now)}）` : '';
+  switch (last.state) {
+    case 'none':
+      return null;
+    case 'pending':
+      return { text: '发布请求已提交，等法国接活（接活后这里显示进度）', tone: 'warn' };
+    case 'refused':
+      return { text: `上一次被法国拒了${when}：${last.why ?? '（没写原因）'}。现场没动`, tone: 'fail' };
+    case 'running':
+      return { text: `发版在走：${last.phase ?? ''} · ${last.target ?? ''}${when}`, tone: 'warn' };
+    case 'blocked':
+      return { text: `发版卡住了：${last.phase ?? ''}${when}。${last.why ?? ''}`, tone: 'warn' };
+    case 'failed':
+      return { text: `发版没成：${last.phase ?? ''}${when}。${last.why ?? ''}`, tone: 'fail' };
+    case 'done':
+      return { text: `上一趟发完了：${last.target ?? ''}${when}。引擎总开关保持关`, tone: 'ok' };
+    case 'aborted':
+      return { text: `上一趟被撤销了：${last.target ?? ''}${when}`, tone: 'plain' };
+    case 'unreadable':
+      return { text: `上一次的结果没查成：${last.why ?? ''}`, tone: 'warn' };
+  }
+}
+
+/**
+ * 「发布到法国」按钮（#1232）：点开弹窗写明要发的提交、CI 是绿的、会带上哪几个 PR、引擎总开关发完保持关；点「确认发布」才发，
+ * 后端核它等于此刻主线头、记操作记录、写请求文件，法国上 root 的单元接活。不能点（CI 不绿、已有发版在走、没装接活单元……）就置灰并写原因。
+ */
+function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
+  const release = useFranceRelease();
+  const [asking, setAsking] = useState(false);
+  const { action, mainline, gap } = card;
+  const head = mainline.state === 'ok' ? mainline.commit : null;
+  const ready = action.state === 'ready' && head !== null;
+  const last = lastLine(action.last, now);
+  const confirm = () => {
+    if (head === null) return;
+    release.mutate(head.sha, {
+      onSuccess: () => {
+        setAsking(false);
+        toast.success(`已提交发布请求：${head.short}`, {
+          description: '法国接活后，发版卡里显示进度；发完引擎总开关保持关。',
+        });
+      },
+      onError: (e) => {
+        setAsking(false);
+        toast.error('没能提交发布请求', { description: errorText(e) });
+      },
+    });
+  };
+  return (
+    <div className="mt-3 space-y-2 border-t pt-3" data-release-action={action.state}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          disabled={!ready || release.isPending}
+          onClick={() => setAsking(true)}
+          aria-label="发布到法国"
+        >
+          {release.isPending ? '正在提交…' : '发布到法国'}
+        </Button>
+        {ready && head ? (
+          <span className="text-xs text-muted-foreground">发主线最新的 {head.short}</span>
+        ) : null}
+      </div>
+      {action.state === 'blocked' ? (
+        <ul className="space-y-0.5 text-xs text-ink-stall" data-release-reasons>
+          {action.reasons.map((r) => (
+            <li key={r}>{r}</li>
+          ))}
+        </ul>
+      ) : null}
+      {last ? (
+        <p
+          data-release-last={action.last.state}
+          className={cn(
+            'text-xs',
+            last.tone === 'ok' && 'text-ink-done',
+            last.tone === 'warn' && 'text-ink-stall',
+            last.tone === 'fail' && 'text-ink-fail',
+            last.tone === 'plain' && 'text-muted-foreground',
+          )}
+        >
+          {last.text}
+          {action.last.state === 'done' ? (
+            <>
+              {' '}
+              要开去{' '}
+              <Link to="/env" className="underline underline-offset-2">
+                环境页
+              </Link>{' '}
+              点开。
+            </>
+          ) : null}
+        </p>
+      ) : null}
+      <AlertDialog open={asking && head !== null} onOpenChange={setAsking}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>发布到法国？</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm">
+                <p>
+                  要发的提交：
+                  <span className="num rounded bg-muted px-1.5 py-0.5 text-xs">{head?.short}</span>{' '}
+                  {head?.title}
+                </p>
+                <p className="text-ink-done">主线 CI 是绿的。</p>
+                {gap.state === 'ahead' ? (
+                  <div>
+                    <p>会带上 {gap.count} 个提交，最近合进去的 PR：</p>
+                    <ul className="mt-1 space-y-0.5 text-xs">
+                      {gap.prs.map((p) => (
+                        <li key={p.number}>
+                          <span className="num text-muted-foreground">#{p.number}</span> {p.title}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多
+                  13 分钟），再发版、验证；发完引擎总开关保持关，要开到环境页点开。
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                confirm();
+              }}
+            >
+              确认发布
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
   );
 }

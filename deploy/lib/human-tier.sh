@@ -134,3 +134,52 @@ setup_firewall() {
   # 规则只管新连接：表载上之前就连着会话用户的口、由别人发起的连接在这里断掉（lib/session-ports.sh）
   session_ports_cut "${SESSION_USERS[0]}"
 }
+
+# 驾驶舱「发布到法国」按钮的接活（人工档，不在自动档里）：驾驶舱后端（fleet，没有 root）往 $RELEASE_REQUEST_DIR 写一份请求文件，
+# root 的 fleet-release-request.path 盯着它、起 fleet-release-request.service 走一趟发版（核请求、暂停、等收尾、release.sh、验证、发完保持关）。
+# 为什么是人工档：这是一个由 fleet 写的文件触发 root 跑发布的口子，装它等于给「驾驶舱上点一下就能让 root 发版」开了路，要创始人在法国自己跑一次整套 france.sh。
+# 接活脚本把请求只当数据读（认不出的、提交号不对的、不是主线祖先的、CI 不绿的、已有发版在走的一律拒），进度写在 root 的 $TRAIN_DIR（fleet 写不进）。
+# 要在 setup_auto_release 之后装：接活脚本用同级的 ../auto-release/lib.mjs 判 CI。
+setup_release_request() {
+  step "驾驶舱「发布到法国」按钮的接活（请求目录 $RELEASE_REQUEST_DIR 归 fleet，进度目录 $TRAIN_DIR 归 root；root 的 path 单元接活）"
+  local f u unit_changed=0
+  ensure_dir "$RELEASE_REQUEST_DIR" fleet:fleet 750
+  ensure_dir "$TRAIN_DIR" root:root 755
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  ensure_dir "$RELEASE_REQUEST_LIB" root:root 755
+  for f in "${RELEASE_REQUEST_FILES[@]}"; do
+    put_file "$RELEASE_REQUEST_LIB/$f" root:root 644 "$(<"$DEPLOY_DIR/france/release-request/$f")"
+  done
+  for u in "${RELEASE_REQUEST_UNITS[@]}"; do
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/france/$u")"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running fleet-release-request.path "$unit_changed"
+}
+
+# 读回：path 单元在等、副本和仓里一样、请求目录和进度目录的属主权限对（驾驶舱按「单元文件在不在」判装没装，所以这里一项不对都判红）
+readback_release_request() {
+  local f u spec path want have bad=0
+  if [[ "$(systemctl is-active fleet-release-request.path 2>/dev/null)" != active ]]; then
+    red "fleet-release-request.path 没在跑：驾驶舱上点「发布到法国」不会有人接"
+  fi
+  for f in "${RELEASE_REQUEST_FILES[@]}"; do
+    if ! cmp -s -- "$RELEASE_REQUEST_LIB/$f" "$DEPLOY_DIR/france/release-request/$f"; then
+      red "$RELEASE_REQUEST_LIB/$f 和仓里的不一样（或没装）：重跑本脚本"
+    fi
+  done
+  for u in "${RELEASE_REQUEST_UNITS[@]}"; do
+    if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）：重跑本脚本"; fi
+  done
+  for spec in "$RELEASE_REQUEST_DIR fleet:fleet 750" "$TRAIN_DIR root:root 755" "$RELEASE_REQUEST_LIB root:root 755"; do
+    path=${spec%% *}
+    want=${spec#* }
+    have=$(stat -c '%U:%G %a' -- "$path" 2>/dev/null) || have="不存在"
+    if [[ "$have" != "$want" ]]; then
+      red "$path 是「$have」，应为 $want"
+      bad=1
+    fi
+  done
+  if ((bad == 0)); then ok "发布请求的目录和接活脚本的属主、权限都对"; fi
+}

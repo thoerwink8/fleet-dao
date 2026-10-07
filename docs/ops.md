@@ -714,6 +714,16 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
   同日夜里：本来只看主线头，头的 CI 没跑完这一轮就整轮跳过。十几个工人陆续合 PR，主线隔几分钟换一个头，主线的全量 CI 要 3–4 分钟，新推送还会把上一个提交在跑的 CI 挤掉（`cancelled`），每一轮看到的头都在跑 CI——22:55、23:00 两轮，头后面的提交早已全绿，照样整轮跳过，合并越密越发不出去。当时改成沿主线往回发最新的全绿提交（持续交付「发最新的绿构建」，Google SRE 书「Release Engineering」；Chromium 的 LKGR）。
   **2026-10-02 再改**（`specs/618-发布按版本停派/需求.md`，决定 0011 第 3、4 条）：创始人拍「法国发布按版本、创始人确认」，废除「主线每 merge 自动发布到法国」；「往回找最新的全绿提交」这一半跟着废掉——发哪一版由版本标记（`v<N>` tag）定，标记读不到 / 不是主线上的提交就明确失败、报警，绝不退回发主线头；发布那一刻的「停派活 → 等在跑的收尾 → 部署 → 恢复派活」四步接在已有的排空协议上（不新加开关），引擎关着时四步照实写「跳过」。
 
+### 驾驶舱「发布到法国」按钮（人工档，#1232）
+
+创始人在驾驶舱「法国」页的「发版」卡上点「发布到法国」（弹窗里写明要发的提交、CI 绿、带哪几个 PR、引擎总开关发完保持关），就是「对外发布」那一道人闸的同意（创始人 2026-10-07 约 19:30 在对话里同意这个设计）；这一点击在操作记录里记一条（谁、哪个提交、原话「驾驶舱点击发布」，动作 `release.request`）。
+- 后端（fleet，没有 root）只收一个参数「提交号」，核它等于此刻主线头、主线 CI 是绿的、法国在用的不是它、没有发版在走，然后往 `/var/lib/fleet-dao/release-request/request.json` 写一份 `{v,sha,at,by}`，**自己不起任何带 root 的进程**。请求目录归 fleet（750），`fleet-api.service` 的 `ReadWritePaths` 放行它。
+- root 的 `fleet-release-request.path`（`PathExists=` 请求文件）拉起 `fleet-release-request.service`（以 root 跑 `/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs`，源在 `deploy/france/release-request/`）。脚本把请求只当数据读：符号链接、超 1024 字节、键不对、提交号不是完整 40 位小写十六进制、不是主线的祖先、发布锁被占着或进度记录说有发版在走（进程还活着）、主线 CI 不是绿的或读不到，一律拒，原因写进 `/srv/fleet-dao-releases/.train/last-request.json`（驾驶舱读它告诉点的人），不动进度记录。读完马上删请求文件。
+- 过了核对就走一趟和 `release-train` 同样的发版：暂停法国引擎总开关 → 等在跑的会话收尾（最多 13 分钟，到点卡住，再点一次从头走）→ 部署检出快进、`release.sh <提交>` → 等发布历史末行是它 → `release.sh --check` → 验证 → 发完**保持关**（要开到驾驶舱环境页点开）。进度写进 `/srv/fleet-dao-releases/.train/release-train.json`（和 `release-train.json` 同一个格式，`.train` 归 root、后端只读，页面读它）。
+- 装：**人工档**（`deploy/lib/human-tier.sh` 的 `setup_release_request`，不在自动档里）：要创始人（或指挥官经创始人同意）在法国以 root 跑一次不带参数的 `bash /srv/fleet-dao/deploy/france.sh`。装之前驾驶舱的按钮置灰、写「法国还没装发版接活单元」（后端看 `/etc/systemd/system/fleet-release-request.path`、`/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs` 和请求目录是否都在）；装完后四个仓里文件改了要人重跑（`HUMAN_TIER_PATHS` 登记了，后端 `/healthz` 才标「装机脚本落后」）。
+- 看：`journalctl -u fleet-release-request -n 100`；`cat /srv/fleet-dao-releases/.train/release-train.json`、`last-request.json`；停：`systemctl disable --now fleet-release-request.path`（请求写了没人接，页面的按钮读不到接活的会提示）。
+- 测试：`deploy/test/release-request.test.mjs`（每个拒绝路径一条故意造出失败的测试、单元路径权限读回）。
+
 ### 配置进仓对账
 
 （#323：代码已经是先进仓、再由自动发布装到法国，配置照同一个做法——期望进仓、有版本，发布时照期望写上，线上每一轮对账，照 OpenGitOps；做法、比过的几种和出处见 `specs/323-配置进仓对账/方案.md`，和方案不一样的几处见 #323 的 PR）

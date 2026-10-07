@@ -154,6 +154,8 @@ export interface HarnessOptions {
   franceRelease?: Deps['franceRelease'];
   /** /france 页「发版」卡（#1231）读 GitHub 和发布目录的替身；不给就是没接上（内存版、开发环境一样）。 */
   releaseCard?: Deps['releaseCard'];
+  /** 「发布到法国」按钮写请求文件的替身（#1232）；不给就是没接上。 */
+  releaseRequest?: Deps['releaseRequest'];
   /**
    * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
    * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
@@ -201,6 +203,7 @@ function wire<S extends Store>(
     ...(options.release ? { release: options.release } : {}),
     ...(options.franceRelease ? { franceRelease: options.franceRelease } : {}),
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
+    ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

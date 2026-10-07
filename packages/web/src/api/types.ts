@@ -55,6 +55,7 @@ import type {
   PoolViewSchema,
   QuotaWindowViewSchema,
   ReleaseCardSchema,
+  ReleaseRequestResponse,
   ReleaseVersionResponse,
   RepoDispatchResponse,
   RepoSchema,
@@ -221,6 +222,8 @@ export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
 /** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
+/** 点「确认发布」之后后端回的：请求已写下（接活的是法国上 root 的单元，进度看发版卡）。 */
+export type ReleaseRequestResult = z.infer<typeof ReleaseRequestResponse>;
 /** /france 页「发版预检」一次一回：done 带输出、退出码；起进程都没起来走 unreadable。 */
 export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
 

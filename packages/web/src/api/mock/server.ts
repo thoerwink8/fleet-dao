@@ -42,6 +42,7 @@ import {
   poolHoldsView,
   type RealtimeTable,
   ReleaseCardSchema,
+  ReleaseRequestResponse,
   ReleaseVersionResponse,
   RepoDispatchResponse,
   ReposResponse,
@@ -272,6 +273,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const mockCreds: { username?: string; password?: string; changedAt?: string } = {};
 
   const iso = () => new Date(now()).toISOString();
+  // 「发布到法国」按钮的假状态：默认能点；浏览器里 localStorage 的 mockRelease 写 blocked 就是接活单元没装的样子（截图用）
+  const releaseMock: {
+    last: {
+      state: string;
+      target: string | null;
+      at: string | null;
+      why: string | null;
+      phase: string | null;
+    };
+  } = {
+    last: { state: 'none', target: null, at: null, why: null, phase: null },
+  };
+  const mockReleaseAction = () => {
+    const blocked = typeof localStorage !== 'undefined' && localStorage.getItem('mockRelease') === 'blocked';
+    return {
+      state: blocked ? 'blocked' : 'ready',
+      reasons: blocked ? ['法国还没装发版接活单元（要在法国以管理员身份跑一次整套装机脚本）'] : [],
+      installed: !blocked,
+      last: releaseMock.last,
+    };
+  };
   const nextId = (p: string) => `${p}-${++st.seq}`;
   const wait = () =>
     opts.latencyMs
@@ -1963,8 +1985,21 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           pr: { number: 1230, title: '刷新 CI 测试耗时表', mergedAt: ago(12) },
           issue: { state: 'ok', number: 1192, title: '引擎每周刷新 CI 测试耗时表', alsoCloses: [] },
         },
+        action: mockReleaseAction(),
         asOf: iso(),
       });
+    },
+    async franceRelease(sha) {
+      await wait();
+      if (mockReleaseAction().state !== 'ready') throw new Error('现在不能发（假后端的按钮是置灰的）');
+      releaseMock.last = {
+        state: 'running',
+        target: `提交 ${sha.slice(0, 12)}`,
+        at: iso(),
+        why: null,
+        phase: '第 2 步「暂停法国」',
+      };
+      return ReleaseRequestResponse.parse({ requested: true, sha, at: iso() });
     },
     async francePreflight() {
       await wait();

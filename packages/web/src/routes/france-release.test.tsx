@@ -95,6 +95,8 @@ describe('/france 页发版一键卡', () => {
     renderWith({
       release: {
         state: 'running',
+        status: 'running',
+        why: null,
         phase: '第 4 步「发版」',
         target: '提交 abcdef123456',
         marker: true,
