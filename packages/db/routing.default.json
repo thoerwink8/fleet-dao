@@ -12,6 +12,7 @@
       "glm-5.3-flash"
     ],
     "verify": [
+      "gpt-6-sol",
       "gpt-5.6-luna",
       "grok-4.7",
       "sonnet-5.5",
@@ -55,7 +56,7 @@
     "grok-4.7": [{ "routeId": "grok:grok-4.7:grok", "enabled": true }],
     "glm-5.3-flash": [{ "routeId": "mirasim-relay:glm-5.3-flash:mirasim", "enabled": true }],
     "jev-1.13": [{ "routeId": "jev:jev-1.13:api-shell", "enabled": true }],
-    "gpt-6-sol": [{ "routeId": "mirasim-relay:gpt-6-sol:mirasim", "enabled": false }],
+    "gpt-6-sol": [{ "routeId": "mirasim-relay:gpt-6-sol:mirasim", "enabled": true }],
     "gpt-6-luna": [{ "routeId": "mirasim-relay:gpt-6-luna:mirasim", "enabled": false }],
     "gpt-6-astra": [{ "routeId": "mirasim-relay:gpt-6-astra:mirasim", "enabled": false }],
     "gpt-5.6-sol": [{ "routeId": "mirasim-relay:gpt-5.6-sol:mirasim", "enabled": false }],

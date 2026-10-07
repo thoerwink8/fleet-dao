@@ -195,7 +195,8 @@ describe('默认配置 routing.default.json', () => {
     }
     expect(cfg.purposes.execute?.[0]).toBe('grok-4.7');
     expect(cfg.purposes.ui?.[0]).toBe('grok-4.7');
-    expect(cfg.purposes.verify?.[0]).toBe('gpt-5.6-luna');
+    // 创始人 2026-10-07 睡前：reviewer 默认 gpt-6-sol（走 mirasim）；luna 退到第二
+    expect(cfg.purposes.verify?.slice(0, 2)).toEqual(['gpt-6-sol', 'gpt-5.6-luna']);
     for (const stage of ['default', 'verify', 'execute', 'ui'] as const) {
       expect(cfg.purposes[stage]?.at(-1), stage).toBe('glm-5.3-flash');
     }
@@ -216,12 +217,16 @@ describe('默认配置 routing.default.json', () => {
     expect(cfg.purposes.judge).toEqual(['jev-1.13']);
   });
 
-  it('gpt-6-sol 在骨架 models 里挂着、关着、不进任何用途；目录里有它：Mirasim 中转、mirasim 执行方式、族 gpt；旧的错名 gpt-6.1-sol 哪里都没有', async () => {
+  it('gpt-6-sol（创始人 2026-10-07：reviewer 默认走 mirasim）在骨架里开着、只进 verify 且排第一、不进界面和动手；目录里有它：Mirasim 中转、mirasim 执行方式、族 gpt；旧的错名 gpt-6.1-sol 哪里都没有', async () => {
     const cfg = await loadRoutingConfig();
     expect(cfg.models['gpt-6-sol']?.map((r) => [r.routeId, r.enabled])).toEqual([
-      ['mirasim-relay:gpt-6-sol:mirasim', false],
+      ['mirasim-relay:gpt-6-sol:mirasim', true],
     ]);
-    expect(Object.values(cfg.purposes).flat()).not.toContain('gpt-6-sol');
+    expect(cfg.purposes.verify?.[0]).toBe('gpt-6-sol');
+    const usedIn = Object.entries(cfg.purposes)
+      .filter(([, order]) => order.includes('gpt-6-sol'))
+      .map(([purpose]) => purpose);
+    expect(usedIn).toEqual(['verify']);
     expect(JSON.stringify(cfg)).not.toContain('gpt-6.1-sol');
     const example = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
     const route = example.routes.find((r) => r.id === 'mirasim-relay:gpt-6-sol:mirasim');
