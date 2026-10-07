@@ -31,15 +31,17 @@ import { type GitHub, type RepoRef, readCi, requiredChecksFor } from '@fleet-dao
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
+import { WORKFLOW_TYPES } from '../contract.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
-import { taskStatusQuery } from '../task-contract.ts';
+import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { PROBE_DIR } from './route-probe.ts';
+import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { treeLeftovers } from './user-git.ts';
@@ -154,7 +156,7 @@ export const STANDARD_PATHS_FILE = 'packages/conventions/standard-paths.json';
 export interface HourlyReconcileWiring {
   db: Db;
   /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
-  gh: Pick<GitHub, 'auditMergedPrs'> & AutoMergeWiringGitHub;
+  gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState'> & AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
@@ -179,6 +181,43 @@ export interface HourlyReconcileWiring {
   /** 测试用：换掉自动合并兜底那部分的 GitHub / 提醒；不给就照 wiring 的 gh 装。 */
   autoMergeGh?: AutoMergeGitHub;
   autoMergeAlerts?: HourlyReconcileJobDeps['autoMergeAlerts'];
+  /** 测试用：换掉「单已关就撤任务」那部分的 Temporal / GitHub 口子；不给就用真的（问 Temporal 在跑的任务工作流、现读单状态）。 */
+  closedIssueTasks?: HourlyReconcileJobDeps['closedIssueTasks'];
+}
+
+/** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
+const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
+
+/** 「单已关就撤任务」的真口子：在跑的任务工作流问 Temporal 的可见性，单状态经「引擎」机器人现读，放弃走现成的 taskAbandonSignal。 */
+function temporalClosedIssueTasks(
+  client: Pick<Client, 'workflow' | 'connection'>,
+  gh: Pick<GitHub, 'readIssueState'>,
+): HourlyReconcileJobDeps['closedIssueTasks'] {
+  return {
+    async runningTaskWorkflowIds() {
+      const ids: string[] = [];
+      for await (const info of client.workflow.list({
+        query: `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`,
+      })) {
+        ids.push(info.workflowId);
+      }
+      return ids;
+    },
+    async issueState(repo, issueNumber) {
+      return (await gh.readIssueState({ repo, issueNumber })).state;
+    },
+    async abandon(workflowId, command) {
+      try {
+        await client.connection.withDeadline(Date.now() + ABANDON_SIGNAL_TIMEOUT_MS, () =>
+          client.workflow.getHandle(workflowId).signal(taskAbandonSignal, command),
+        );
+        return 'sent';
+      } catch (err) {
+        if (isWorkflowGone(err)) return 'gone';
+        throw err;
+      }
+    },
+  };
 }
 
 /** 给 EngineJobs.hourlyReconcile 用的工厂。 */
@@ -320,6 +359,7 @@ export function hourlyReconcileJob(
         return { decision: a.decision, decidedBy: a.decidedBy, waitingWorkflowId };
       },
       workflows: w.workflows ?? temporalWorkflows(client),
+      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh),
       stageRoutable,
       stageAllOpen,
       handling,
