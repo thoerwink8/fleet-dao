@@ -90,7 +90,17 @@ function makeWorld() {
     if (command === NODE && String(args[0]).endsWith('france.mjs'))
       return {
         status: w.franceHealthExit,
-        stdout: `法国引擎 · 现在\n断链排查：${w.franceBad} 处异常、0 处没读到、2 处留意\n`,
+        stdout: JSON.stringify({
+          anomalies: [
+            ...Array.from({ length: w.franceBad }, (_, i) => ({
+              level: 'bad',
+              what: `异常 ${i}`,
+              where: 'x',
+            })),
+            { level: 'note', what: '留意 1', where: 'x' },
+            { level: 'note', what: '留意 2', where: 'x' },
+          ],
+        }),
         stderr: '',
       };
     return { status: 127, stdout: '', stderr: `假世界不认识这条命令：${line}` };

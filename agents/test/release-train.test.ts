@@ -110,6 +110,7 @@ function makeWorld() {
     lockBusy: false,
     franceHealthExit: 0,
     franceBad: 0,
+    franceExtra: [] as { level: string; what: string; where: string; kind?: string }[], // 额外的异常，带不带 kind 都行
     engineOn: true,
     engineStatusFails: false,
     engineLegacy: false, // 在用的版本还没有 engine 子命令：fleet-api 打用法、退出 1
@@ -160,7 +161,18 @@ function makeWorld() {
     if (command === NODE && String(args[0]).endsWith('france.mjs'))
       return {
         status: w.franceHealthExit,
-        stdout: `法国引擎 · 现在\n断链排查：${w.franceBad} 处异常、0 处没读到、2 处留意\n`,
+        stdout: JSON.stringify({
+          anomalies: [
+            ...Array.from({ length: w.franceBad }, (_, i) => ({
+              level: 'bad',
+              what: `异常 ${i}`,
+              where: 'x',
+            })),
+            { level: 'note', what: '留意 1', where: 'x' },
+            { level: 'note', what: '留意 2', where: 'x' },
+            ...w.franceExtra,
+          ],
+        }),
         stderr: '',
       };
     return { status: 127, stdout: '', stderr: `假世界不认识这条命令：${line}` };
@@ -932,6 +944,129 @@ describe('整趟走完', () => {
     });
     expect(code).toBe(3);
     expect(text(w.err)).toContain('多出了异常');
+    expect(existsSync(markerFile(home))).toBe(true);
+  });
+
+  // #1292：暂停期单必然「没动」，按异常类别 kind 过滤，不看文案
+  const idleIssue = {
+    level: 'bad',
+    what: '#1287 29 分钟没动，手上也没有会话（在干活 · implement）：多半停在等人或等一个派不出的路由',
+    where: 'x',
+    kind: 'task-idle',
+  };
+
+  it('暂停期多出「单没动、手上没会话」（kind task-idle）：第 6 步照过，发版车走完恢复本机', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceBad = 1;
+          w.franceExtra =
+            healthCalls === 1 ? [] : [idleIssue, { ...idleIssue, level: 'note', what: '#9 70 分钟没动' }];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(0);
+    expect(healthCalls).toBe(2);
+    expect(text(w.err)).not.toContain('多出了异常');
+    expect(existsSync(markerFile(home))).toBe(false);
+  });
+
+  it('只看 kind、不看文案：别的异常哪怕文案也写「没动」，没有 kind 照拦', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceExtra =
+            healthCalls === 1
+              ? []
+              : [{ level: idleIssue.level, what: idleIssue.what, where: idleIssue.where }];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(3);
+    expect(text(w.err)).toContain('多出了异常');
+    expect(text(w.err)).toContain('29 分钟没动');
+    expect(existsSync(markerFile(home))).toBe(true);
+  });
+
+  it('暂停期同时多出「没动」和一条别的异常：别的那条照拦（「没动」不计，别的计）', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceExtra =
+            healthCalls === 1
+              ? [idleIssue] // 预检时就有一条「没动」：基线口径和验证一致，不给新增异常留空位
+              : [idleIssue, { level: 'bad', what: '规矩同步没成：x', where: 'y' }];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(3);
+    expect(text(w.err)).toContain('多出了异常');
+    expect(text(w.err)).toContain('规矩同步没成');
+    expect(text(w.err)).not.toContain('29 分钟没动');
+  });
+
+  it('新增的是「没读到」：照拦', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceExtra = healthCalls === 1 ? [] : [{ level: 'unread', what: '没读到：库（x）', where: 'y' }];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(3);
+    expect(text(w.err)).toContain('多出了异常');
+  });
+
+  it('【故意造出的失败】france.mjs --json 输出不是 JSON：验证是「没成」，不当没异常放过', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          if (healthCalls === 2)
+            return { status: 0, stdout: '断链排查：0 处异常、0 处没读到、0 处留意', stderr: '' };
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('不是 JSON');
     expect(existsSync(markerFile(home))).toBe(true);
   });
 });

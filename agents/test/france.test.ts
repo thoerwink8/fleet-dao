@@ -1404,6 +1404,12 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     has(v, 'bad', '#21 卡住了：派不出路由');
     has(v, 'bad', '#22 25 分钟没动，手上也没有会话（在干活 · fusion:x）：多半停在等人或等一个派不出的路由');
     has(v, 'note', '#24 70 分钟没动');
+    // 稳定类别（#1292）：发版车按它过滤，不匹配文案；其他异常不带这个类别
+    const kindOf = (prefix: string) =>
+      (v.anomalies as { what: string; kind?: string }[]).find((a) => a.what.startsWith(prefix))?.kind;
+    expect(kindOf('#22 ')).toBe('task-idle');
+    expect(kindOf('#24 ')).toBe('task-idle');
+    expect(kindOf('#21 ')).toBeUndefined();
     for (const quiet of ['#23 ', '#25 ', '#26 '])
       expect(
         whats(v).some((w) => w.startsWith(quiet)),

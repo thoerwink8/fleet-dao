@@ -86,7 +86,12 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  * @typedef {{ runs: number, running: number, notStarted: number, inputTokens: number, outputTokens: number, missingTokens: number, cacheReadTokens: number, cacheWriteTokens: number, missingCache: number, inputEquivalent: number, missingEquivalent: number, costUsd: number, missingCost: number, cost: { metered: CostShare, subscription: CostShare, unknown: CostShare }, estimate: { runs: number, usd: number, noPrice: number, noTokens: number }, queueMs: number, runMs: number, missingTime: number, noQueue: number }} Totals
  */
 
-/** @typedef {{ level: 'bad' | 'note', what: string, where: string }} Issue */
+/**
+ * 异常的类别（可选，稳定的英文名，给程序按类别过滤用，不要去匹配 what 的文案）。现在只有一种：
+ * `task-idle`＝单在跑、手上没有会话、N 分钟没动。引擎总开关关着（发版车暂停期）时它必然出现，开回来就消失。
+ * @typedef {{ level: 'bad' | 'note', what: string, where: string, kind?: 'task-idle' }} Issue
+ */
+export const KIND_TASK_IDLE = 'task-idle';
 
 export const ENV_NAME = 'FLEET_FRANCE_SSH';
 /** 页面开着时多久从法国读一次。没人看就不读（不白连 ssh）。 */
@@ -1227,13 +1232,15 @@ export function buildView(snapshot) {
   /**
    * @param {string} what
    * @param {string} where
+   * @param {Issue['kind']} [kind]
    */
-  const bad = (what, where) => issues.push({ level: 'bad', what, where });
+  const bad = (what, where, kind) => issues.push({ level: 'bad', what, where, ...(kind ? { kind } : {}) });
   /**
    * @param {string} what
    * @param {string} where
+   * @param {Issue['kind']} [kind]
    */
-  const note = (what, where) => issues.push({ level: 'note', what, where });
+  const note = (what, where, kind) => issues.push({ level: 'note', what, where, ...(kind ? { kind } : {}) });
 
   // 没读到的块：库的几块常是同一个原因，并成一条
   /** 没读到的那一块的原因（读到了的没有）。 */
@@ -1452,9 +1459,9 @@ export function buildView(snapshot) {
         const idle = `#${t.n} ${quiet} 分钟没动，手上也没有会话（${t.stateName}${t.phase ? ` · ${t.phase}` : ''}）`;
         if (S.runs.ok && t.openRuns === 0) {
           if (t.state === 'running' && quiet > LIMITS.taskIdle)
-            bad(`${idle}：多半停在等人或等一个派不出的路由`, WHERE.task(t.repo, t.n));
+            bad(`${idle}：多半停在等人或等一个派不出的路由`, WHERE.task(t.repo, t.n), KIND_TASK_IDLE);
           else if (t.state !== 'running' && t.state !== 'asking' && quiet > LIMITS.taskQuiet)
-            note(idle, WHERE.task(t.repo, t.n));
+            note(idle, WHERE.task(t.repo, t.n), KIND_TASK_IDLE);
         }
       }
     }
