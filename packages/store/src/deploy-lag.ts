@@ -1,9 +1,12 @@
-// 线上版本跟不跟得上主线：/healthz 的 deploy_lag 一项，和后端的「跟不上主线」报警。读的时候现算——法国的 current 链接
-// （在用哪版），加自动发布（deploy/france/auto-release）每一轮写的状态文件（主线头和最近的提交、CI、最近一次自动发布、
+// 线上读数跟不跟得上、查没查成：/healthz 的 deploy_lag 一项，和后端的「线上版本跟不上主线」报警。读的时候现算——法国的 current 链接
+// （在用哪版），加自动发布单元（deploy/france/auto-release，只读不发）每一轮写的状态文件（主线头和最近的提交、CI、
 // 规矩同步到哪、装机脚本装到哪）。判法只这一份：健康检查和报警都调 judgeDeployLag。规矩见 docs/ops.md 第九节「自动发布」。
 // 改这里之前必须知道：
+// - 发布只走驾驶舱按钮（决定 0032）：落后主线几个提交只是数（驾驶舱「落后主线 N 个提交」，env-view 的 versionFact 数），**不算毛病**——
+//   没人去发它，报警只会天天挂着。这里只报读数没查成（单元没报到、主线头读不到、在用的读不到、状态文件认不出）、规矩同步和装机自动档没成、
+//   装机脚本的人工档落后（要人跑）。
 // - 状态文件的字段跟 deploy/france/auto-release/lib.mjs 走（STATE_SCHEMA）；test/deploy-lag.test.ts 拿那边真跑出来的状态核对。
-// - 这一项会随时间自己变红（主线一动就可能落后），发布脚本只把它标待处理、不退回（deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
+// - 这一项会随时间自己变红（单元停了），发布脚本只把它标待处理、不退回（deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 // - 公网看得到 /healthz：对外的话不带提交号、路径、内部名；细节只进日志和报警正文。报警只用不带时长的话，
 //   免得每 5 分钟改一次卡片（飞书免费版每月 1 万次接口调用，design 15.4）。
 import { readFileSync, readlinkSync } from 'node:fs';
@@ -17,21 +20,12 @@ export const RELEASES_DIR = '/srv/fleet-dao-releases';
 /** 不在正式环境（FLEET_ENV=production，法国是；开发、测试不是）：这一项报「未接」，公网看得到。 */
 export const DEPLOY_LAG_NOT_HERE = '只在正式环境查';
 
-/**
- * 各种「多久算不对」。自动发布每 5 分钟一轮，有要发的马上发（发布脚本先排空引擎，宽限 10 分钟和构建一起走）；只有不会排空的旧引擎
- * 才等空闲，最多 60 分钟（lib.mjs 的 IDLE_WAIT_MS）。
- */
+/** 各种「多久算不对」。自动发布单元每 5 分钟读一轮。 */
 export const DEPLOY_LAG_LIMITS = {
-  /** 自动发布这么久没跑一轮：定时器停了、没装、跑崩了。 */
+  /** 自动发布单元这么久没跑一轮：定时器停了、没装、跑崩了。 */
   reportMs: 20 * 60_000,
-  /** 一轮里的发布跑了这么久还没完。 */
-  runningMs: 60 * 60_000,
   /** 主线头这么久没读到（取不到 GitHub）。 */
   mainMs: 20 * 60_000,
-  /** 主线头的 CI 红、结论读不到，落后这么久报。 */
-  ciMs: 30 * 60_000,
-  /** 其余原因（在等 CI、等空闲、人手动按住）落后这么久报：旧引擎等空闲 60 分钟 + CI、构建、一轮的间隔。 */
-  behindMs: 90 * 60_000,
   /** 装机脚本的人工档（防火墙、sudoers、建用户那几个文件，要人跑 france.sh）落后主线这么久报；自动档不算，发版时自动装。 */
   systemMs: 24 * 60 * 60_000,
 } as const;
@@ -54,33 +48,12 @@ export const DeployLagState = z.object({
     })
     .nullable(),
   mainError: z.string().nullable(),
-  /**
-   * 这一轮要发的版本标记（决定 0011 第 3 条）：版本号最大的那个 `v<N>` tag 且它指向的提交在 origin/main 上。
-   * 读不到、认不出、不是主线上的提交时是 null，原因在 markerError——**发的一直是它，不是主线头**。
-   */
-  marker: z
-    .object({ tag: z.string(), commit: Sha, at: Iso, taggedAt: Iso.optional(), checkedAt: Iso })
-    .nullable()
-    .optional(),
-  markerError: z.object({ kind: z.string(), why: z.string(), at: Iso }).nullable().optional(),
   ci: z
     .object({
       sha: Sha,
       verdict: z.enum(['green', 'red', 'pending', 'unknown']),
       detail: z.string(),
       checkedAt: Iso,
-    })
-    .nullable(),
-  hold: z.object({ since: Iso, sha: Sha, event: z.string(), unmerged: z.boolean() }).nullable(),
-  waitingSince: Iso.nullable(),
-  attempt: z
-    .object({
-      sha: Sha,
-      startedAt: Iso,
-      endedAt: Iso.nullable().optional(),
-      result: z.enum(['running', 'ok', 'failed']),
-      detail: z.string().optional(),
-      log: z.string().optional(),
     })
     .nullable(),
   rules: z
@@ -114,8 +87,8 @@ export type DeployLagState = z.infer<typeof DeployLagState>;
 export interface DeployLagInput {
   /** 在用的提交号；还没发布过是 null。 */
   current: { sha: string | null } | { error: string };
-  /** 在用的那版不在状态里的主线最近提交里时，它的完成标记说它在不在主线上；没读、读不到是 null。 */
-  currentOnMain: boolean | null;
+  /** 在用的那版切上去的时刻（发布历史 .history 里它最近一次切上去）；没有记录、读不出是 null（拿不准，不猜）。 */
+  deployedAt?: string | null;
   state: DeployLagState | { error: string };
 }
 
@@ -127,7 +100,7 @@ export interface DeployLagProblem {
   steady: string;
   /** 只进日志和 release.sh --check。 */
   detail: string;
-  /** 自动发布那边已经当场报过警的（发布没成、规矩同步没成）：这边不再报一遍。 */
+  /** 自动发布单元那边已经当场报过警的（规矩同步没成、装机自动档没成）：这边不再报一遍。 */
   alreadyAlerted: boolean;
 }
 
@@ -146,28 +119,6 @@ export function spoken(ms: number): string {
   if (h < 48) return m % 60 ? `${h} 小时 ${m % 60} 分钟` : `${h} 小时`;
   return h % 24 ? `${Math.floor(h / 24)} 天 ${h % 24} 小时` : `${Math.floor(h / 24)} 天`;
 }
-
-/** 这一轮自动发布卡在哪（对外的一句，括号里）。 */
-function waitingFor(st: DeployLagState): string {
-  switch (st.last?.action) {
-    case 'ci-pending':
-      return '（在等 CI）';
-    case 'wait-idle':
-      return '（在等引擎空闲）';
-    case 'hold':
-      return '（人手动切过版本，等下一个版本标记）';
-    case 'release-busy':
-    case 'releasing':
-      return '（在发）';
-    case 'engine-unknown':
-      return '（查不出引擎开没开着）';
-    default:
-      return '';
-  }
-}
-
-/** 这几样是「版本标记没查成、这一轮不发」：自动发布当场已经报过警（alreadyAlerted），这里只标出来。 */
-const MARKER_STUCK_ACTIONS = new Set(['marker-none', 'marker-unknown', 'marker-not-ancestor']);
 
 /** 判一次。now 由调用方给（测试好造）；input 由 readDeployLagInput 读，测试直接造。 */
 export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdict {
@@ -190,18 +141,9 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
   }
   const st = input.state;
 
-  // 自动发布还在不在跑：一轮里在发，就按发布本身的时限算；否则 20 分钟没报到就是停了
-  const running = st.attempt?.result === 'running' ? ago(st.attempt.startedAt) : null;
-  let fresh = true;
-  if (running !== null && running > L.runningMs) {
-    add({
-      code: 'stuck',
-      message: `自动发布跑了 ${spoken(running)}还没完`,
-      steady: '自动发布跑了太久还没完',
-      detail: `在发 ${short(st.attempt?.sha)}，${st.attempt?.startedAt} 开始`,
-    });
-  } else if (running === null && ago(st.ranAt) > L.reportMs) {
-    fresh = false;
+  // 自动发布单元还在不在跑：20 分钟没报到就是停了（停了的时候主线头自然也旧，不再多报一条）
+  const stale = ago(st.ranAt) > L.reportMs;
+  if (stale) {
     add({
       code: 'stale',
       message: `没查成：自动发布 ${spoken(ago(st.ranAt))}没报到`,
@@ -210,15 +152,13 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
     });
   }
   if (!st.main) {
-    fresh = false;
     add({
       code: 'unchecked',
       message: '没查成：主线头还没读到过',
       steady: '主线头还没读到过',
       detail: st.mainError ?? '',
     });
-  } else if (fresh && ago(st.main.checkedAt) > L.mainMs) {
-    fresh = false;
+  } else if (!stale && ago(st.main.checkedAt) > L.mainMs) {
     add({
       code: 'unchecked',
       message: `没查成：主线头 ${spoken(ago(st.main.checkedAt))}没读到`,
@@ -227,7 +167,6 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
     });
   }
 
-  let current: string | null | undefined;
   if ('error' in input.current) {
     add({
       code: 'unchecked',
@@ -236,27 +175,7 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
       detail: input.current.error,
     });
   } else if (input.current.sha === null) {
-    add({ code: 'behind', message: '还没发布过', steady: '还没发布过', detail: '' });
-  } else {
-    current = input.current.sha;
-  }
-
-  // 主线读数是新的才数落后几个：读数旧了上面已经报了「没查成」，拿旧读数数出来的不作数
-  if (current && st.main && fresh) {
-    const view = lagView(st, current);
-    if (view) lagOf(view.st, current, input.currentOnMain, t, add, view.since);
-  }
-
-  // 版本标记没查成（决定 0011 第 3 条）：没标记就不发主线头，所以它卡住 = 线上停在旧版本、等创始人拍下一版。
-  // 自动发布当场已经报过一次（alreadyAlerted），这里不再报一遍，只让它进读数。
-  if (fresh && st.marker === null && st.markerError && MARKER_STUCK_ACTIONS.has(st.last?.action ?? '')) {
-    add({
-      code: 'marker',
-      message: `没查成：版本标记读不到（${st.markerError.kind === 'not-ancestor' ? '不是主线上的提交' : '没有或认不出'}）`,
-      steady: '版本标记读不到（没有标记就不发）',
-      detail: `${st.markerError.why}；这一轮 ${st.last?.action ?? '（没记）'}`,
-      alreadyAlerted: true,
-    });
+    add({ code: 'not_released', message: '还没发布过', steady: '还没发布过', detail: '' });
   }
 
   if (st.rules?.result === 'failed') {
@@ -276,7 +195,7 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
     });
   }
 
-  // 自动档没装成：自动发布当场报过警（alreadyAlerted）、30 分钟后自己再试，这里只让它进读数
+  // 自动档没装成：自动发布单元当场报过警（alreadyAlerted）、30 分钟后自己再试，这里只让它进读数
   if (st.tier?.result === 'failed') {
     add({
       code: 'tier_failed',
@@ -310,121 +229,7 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
   return done();
 }
 
-/**
- * 数「落后」拿什么当头。按版本发之后（决定 0011 第 3 条），线上该跟的是版本标记指的提交，不是主线头——合进主线的提交在
- * 下一个「发布 vN」之前本来就不上线，拿主线头数会一直红。
- * - 状态里有 marker：以它指的提交为头数，从标记打上那一刻起算时间（since）；在用的就是它、或比它新（人手动发过更新的）：没落后；
- * - marker 是 null：版本标记没查成，上面 marker 那一条已经报了，这里不拿主线头充数（返回 null）；
- * - 状态里没有 marker 这个字段：老版本的自动发布写的，照老办法按主线头数（since 为 null）。
- */
-function lagView(st: DeployLagState, current: string): { st: DeployLagState; since: number | null } | null {
-  const main = st.main;
-  if (!main) return null;
-  if (st.marker === undefined) return { st, since: null };
-  if (st.marker === null) return null;
-  const marker = st.marker;
-  const markerAt = main.commits.findIndex(([sha]) => sha === marker.commit);
-  const currentAt = main.commits.findIndex(([sha]) => sha === current);
-  if (markerAt < 0) {
-    // 标记指的提交比这段主线读数还老：在用的在这段里就是比它新、没落后；不在，照老办法认（没合进主线 / 落后太多）
-    return currentAt >= 0 ? null : { st, since: null };
-  }
-  if (currentAt >= 0 && currentAt <= markerAt) return null;
-  return {
-    st: {
-      ...st,
-      main: { ...main, head: marker.commit, headAt: marker.at, commits: main.commits.slice(markerAt) },
-    },
-    since: Date.parse(marker.taggedAt ?? marker.at),
-  };
-}
-
-function lagOf(
-  st: DeployLagState,
-  current: string,
-  onMain: boolean | null,
-  t: number,
-  add: (p: Omit<DeployLagProblem, 'alreadyAlerted'> & { alreadyAlerted?: boolean }) => void,
-  since: number | null = null,
-): void {
-  const L = DEPLOY_LAG_LIMITS;
-  const main = st.main;
-  if (!main) return;
-  const idx = main.commits.findIndex(([sha]) => sha === current);
-  if (idx === 0) return;
-  if (idx < 0) {
-    if (onMain === false) {
-      const since = st.hold?.since;
-      if (since && t - Date.parse(since) <= L.behindMs) return;
-      add({
-        code: 'unmerged',
-        message: `在用的是没合进主线的提交${since ? `，已 ${spoken(t - Date.parse(since))}` : ''}`,
-        steady: '在用的是没合进主线的提交',
-        detail: `在用 ${short(current)}（合并前在真机上验的？）：PR 合进来后自动发布会换上主线的版本`,
-      });
-    } else if (onMain === true) {
-      add({
-        code: 'far',
-        message: `落后主线超过 ${main.commits.length} 个提交`,
-        steady: '落后主线太多',
-        detail: `在用 ${short(current)}，主线头 ${short(main.head)}`,
-      });
-    } else {
-      add({
-        code: 'unchecked',
-        message: '没查成：认不出在用的版本在主线上的哪儿',
-        steady: '认不出在用的版本在主线上的哪儿',
-        detail: `在用 ${short(current)}，它的完成标记读不到`,
-      });
-    }
-    return;
-  }
-  const behind = idx;
-  const oldest = main.commits[idx - 1]?.[1] ?? main.headAt;
-  // 按版本发：从标记打上那一刻起算；老办法（按主线头）：从最老的没上线的提交合进来算。人手动按住的，从按住那一刻起算（给人留出修的时间）
-  const from = Math.max(since ?? Date.parse(oldest), st.hold ? Date.parse(st.hold.since) : 0);
-  const lag = t - from;
-  const byVersion = since !== null;
-  const lagText = byVersion ? `落后最新版本 ${behind} 个提交` : `落后主线 ${behind} 个提交`;
-  const headWord = byVersion ? '最新版本' : '主线最新提交';
-  const attempt = st.attempt;
-  const last = st.last?.action;
-  // 最近一次自动发布没成、那个提交比在用的新：主线头的 CI 没跑完时，自动发布发的是往回找到的全绿提交，不一定是主线头
-  const failedAt = attempt?.result === 'failed' ? main.commits.findIndex(([sha]) => sha === attempt.sha) : -1;
-  if (attempt && failedAt >= 0 && failedAt < idx) {
-    add({
-      code: 'failed',
-      message: `${lagText}：最近一次自动发布没成`,
-      steady: '最近一次自动发布没成',
-      detail: `发 ${short(attempt.sha)} 没成：${attempt.detail ?? ''}；日志 ${attempt.log || '（没拿到）'}`,
-      alreadyAlerted: true,
-    });
-  } else if (last === 'checkout-blocked') {
-    add({
-      code: 'checkout',
-      message: `${lagText}：部署脚本的检出跟不上主线`,
-      steady: '部署脚本的检出跟不上主线',
-      detail: st.last?.detail ?? '',
-    });
-  } else if ((last === 'ci-red' || last === 'ci-unknown') && lag > L.ciMs) {
-    const red = last === 'ci-red';
-    add({
-      code: 'ci',
-      message: `${lagText}、${spoken(lag)}：${headWord}的 CI ${red ? '没通过' : '结论读不到'}`,
-      steady: `${headWord}的 CI ${red ? '没通过' : '结论读不到'}`,
-      detail: st.last?.detail ?? '',
-    });
-  } else if (lag > L.behindMs) {
-    add({
-      code: 'behind',
-      message: `${lagText}、${spoken(lag)}${waitingFor(st)}`,
-      steady: `${byVersion ? '落后最新版本' : '落后主线'}太久${waitingFor(st)}`,
-      detail: `在用 ${short(current)}，${byVersion ? '版本标记指的' : '主线头'} ${short(main.head)}；这一轮：${last ?? '（没记）'} ${st.last?.detail ?? ''}`,
-    });
-  }
-}
-
-/** 读法国上的现状：current 链接、状态文件，在用的不在主线最近的提交里时再读它的完成标记。读不到的照实带上原因。 */
+/** 读法国上的现状：current 链接、状态文件、发布历史里在用那版切上去的时刻。读不到的照实带上原因。 */
 export function readDeployLagInput(dir: string = RELEASES_DIR): DeployLagInput {
   let current: DeployLagInput['current'];
   try {
@@ -453,17 +258,29 @@ export function readDeployLagInput(dir: string = RELEASES_DIR): DeployLagInput {
           : `状态文件读不出来：${String(err)}`,
     };
   }
-  let currentOnMain: boolean | null = null;
-  const sha = 'sha' in current ? current.sha : null;
-  if (sha && !('error' in state) && state.main && !state.main.commits.some(([s]) => s === sha)) {
+  let deployedAt: string | null = null;
+  if ('sha' in current && current.sha) {
     try {
-      const m = /^on_main=([01])$/m.exec(readFileSync(join(dir, sha, '.fleet-release'), 'utf8'));
-      currentOnMain = m ? m[1] === '1' : null;
+      deployedAt = deployedAtFromHistory(readFileSync(join(dir, '.history'), 'utf8'), current.sha);
     } catch {
-      currentOnMain = null;
+      deployedAt = null;
     }
   }
-  return { current, currentOnMain, state };
+  return { current, deployedAt, state };
+}
+
+/** 发布历史（release.sh 的 .history：每行 `时间 提交号 事件 [unmerged]`）里这个提交最近一次切上去的时间；没有记录回 null，时间认不出抛。 */
+export function deployedAtFromHistory(history: string, sha: string): string | null {
+  let at: string | null = null;
+  for (const raw of history.split(/\r?\n/)) {
+    const [time, got, event] = raw.trim().split(/\s+/);
+    if (got !== sha || !time) continue;
+    // 切上去的三种事件；unhealthy、recovered 不是切版本
+    if (event === 'release' || event === 'rollback' || event === 'auto-rollback') at = time;
+  }
+  if (at !== null && Number.isNaN(Date.parse(at)))
+    throw new Error(`发布历史里「${at.slice(0, 40)}」不是时间`);
+  return at;
 }
 
 function errno(err: unknown): string | undefined {

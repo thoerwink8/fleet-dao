@@ -730,6 +730,26 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
     });
   });
 
+  it('【故意造出的失败】自动发布单元不发版以后（#1258）写的状态里没有 hold、waitingSince、attempt：照样认得，版本块有数；老状态带着这三项也认得', () => {
+    const slim = healthy();
+    const st = state(slim.sections);
+    for (const k of ['hold', 'waitingSince', 'attempt']) delete st[k];
+    expect(lib.parseSnapshot(JSON.stringify(slim)).ok).toBe(true);
+    expect(lib.buildView(parsed(slim)).health.release).toMatchObject({
+      ok: true,
+      current: SHA,
+      behind: 0,
+      hold: null,
+      waitingSince: null,
+      attempt: null,
+    });
+    // 老状态（带着这三项）：和以前一样
+    expect(lib.parseSnapshot(JSON.stringify(healthy())).ok).toBe(true);
+    // 三项里有认不出的（不是 undefined、null）照样挡
+    st.waitingSince = '不是时间';
+    expect(lib.buildView(parsed(slim)).health.release).toMatchObject({ ok: false });
+  });
+
   it('在用的版本：链接读不了、指的不是提交号，都明说', () => {
     const gone = query.collect(
       fakeIo({

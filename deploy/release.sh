@@ -61,7 +61,7 @@ AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数�
 # 香港上的演示版是哪一版：演示版发成了（sync_web）当场记下提交号、时间、路径、首页的 sha256，核对（check_demo）都照它比。
 # 自动发布不发演示版，香港上的就该一直是这里记的那份——拿「在用的这一版」去比，会把「还没发」当成「坏了」（2026-09-27 误报过）
 DEMO_RECORD=$RELEASES/.demo-published
-# 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，自动发布据此分得清「没动」和「没成」（没成的隔 30 分钟自动重试、最多 2 次；退出码 3＝发布成了、只是发布后的收尾（post_alert）没成；#1256 之后发版不再有置关这一步，暂时没有调用方）
+# 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，调用方据此分得清「没动」和「没成」。自动发布单元 #1258 起不再调 release.sh（只读），这个模式暂时没有调用方
 EXIT_RELEASE_BUSY=75
 EXIT_SESSIONS_BUSY=76
 AUTO=0    # --auto：自动发布起的
@@ -481,9 +481,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
     git -C "$CACHE" remote add origin "$REPO_URL"
     echo "  · 建了取代码用的裸仓 $CACHE"
   fi
-  # 版本 tag（v<N>）一起取（自动发布按 tag 找要发的版本用；#1257、#1258 删版本标记那一层时一起收）
-  if ! out=$(git_net 300 -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' \
-    '+refs/tags/v*:refs/tags/v*' 2>&1); then
+  if ! out=$(git_net 300 -C "$CACHE" fetch -q --prune origin '+refs/heads/main:refs/remotes/origin/main' 2>&1); then
     red "从 $REPO_URL 取主线失败：$(tail -2 <<<"$out" | tr '\n' ' ')"
     return 1
   fi
@@ -1755,15 +1753,15 @@ do_check() {
   health_gate "$cur" "" || true
 }
 
-# 自动发布的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮干了什么、规矩同步到哪、
+# 自动发布单元（只读）的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮读到了什么、规矩同步到哪、
 # 装机脚本装到哪。跟不跟得上主线的判定在后端 /healthz 的 deploy_lag 一项（下面健康检查里逐项列出）
 check_auto_release() {
   local out line
   step "自动发布"
   if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" == active ]]; then
-    ok "fleet-auto-release.timer 在跑（每 5 分钟看一轮主线）"
+    ok "fleet-auto-release.timer 在跑（每 5 分钟读一轮主线，只读不发）"
   else
-    pending "fleet-auto-release.timer 没在跑：不会自动跟上主线（装：bash /srv/fleet-dao/deploy/france.sh）"
+    pending "fleet-auto-release.timer 没在跑：落后几个的读数不会更新（装：bash /srv/fleet-dao/deploy/france.sh）"
   fi
   if [[ ! -f "$AUTO_STATE" ]]; then
     pending "还没有自动发布的读数（$AUTO_STATE）"
