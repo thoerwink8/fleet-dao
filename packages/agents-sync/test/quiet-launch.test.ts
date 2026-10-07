@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
 import { applyHooks } from '../src/hooks.ts';
+import { type ReplaceOps, replaceExe } from '../src/quiet-win.ts';
 import { cleanup, ctxFor, makeRepo, PLATFORM, sources, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
@@ -309,5 +310,64 @@ describe('静默启动器不分配控制台', () => {
     expect(ran.status, ran.stderr).toBe(7);
     expect(ran.stdout).toBe('OUTabc');
     expect(ran.stderr).toBe('ERRabc');
+  });
+});
+
+// 2026-10-07 本机同步换启动器报 EBUSY：钩子一直在跑，Windows 不让覆盖正在运行的 exe，同步「没做成」，新启动器（quiet-node）装不上。
+describe('换启动器：正被运行的 exe 先改名再写', () => {
+  const fake = (busy: boolean, leftovers: string[] = []) => {
+    const calls: string[] = [];
+    let first = true;
+    const ops: ReplaceOps = {
+      write: (p) => {
+        calls.push(`write ${p}`);
+        if (busy && first) {
+          first = false;
+          throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+        }
+      },
+      rename: (a, b) => calls.push(`rename ${a} -> ${b}`),
+      remove: (p) => calls.push(`remove ${p}`),
+      list: () => leftovers,
+    };
+    return { ops, calls };
+  };
+  const dest = join('C:', 'h', '.fleet-dao', 'bin', 'quiet-stop.exe');
+  const dir = join('C:', 'h', '.fleet-dao', 'bin');
+
+  it('没被占用：直接写', () => {
+    const { ops, calls } = fake(false);
+    expect(replaceExe(dest, Buffer.from('x'), ops, 1)).toBe('written');
+    expect(calls).toEqual([`write ${dest}`]);
+  });
+
+  it('【故意造出的失败】被占用（EBUSY）：旧的改名成 .old-<时间>，再写新的，不报没做成', () => {
+    const { ops, calls } = fake(true);
+    expect(replaceExe(dest, Buffer.from('x'), ops, 42)).toBe('swapped');
+    expect(calls).toEqual([
+      `write ${dest}`,
+      `rename ${dest} -> ${join(dir, 'quiet-stop.exe.old-42')}`,
+      `write ${dest}`,
+    ]);
+  });
+
+  it('上次留下的 .old-* 先清掉；别的启动器的不碰', () => {
+    const { ops, calls } = fake(false, ['quiet-stop.exe.old-1', 'quiet-pretool.exe.old-1', 'quiet-stop.exe']);
+    replaceExe(dest, Buffer.from('x'), ops, 2);
+    expect(calls).toEqual([`remove ${join(dir, 'quiet-stop.exe.old-1')}`, `write ${dest}`]);
+  });
+
+  it('别的错（比如没权限写目录以外的 ENOENT）原样抛，调用方记没做成', () => {
+    const ops: ReplaceOps = {
+      write: () => {
+        throw Object.assign(new Error('nope'), { code: 'ENOENT' });
+      },
+      rename: () => {
+        throw new Error('不该改名');
+      },
+      remove: () => {},
+      list: () => [],
+    };
+    expect(() => replaceExe(dest, Buffer.from('x'), ops, 3)).toThrow('nope');
   });
 });

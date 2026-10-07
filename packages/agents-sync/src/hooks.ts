@@ -3,10 +3,10 @@
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
 // 替别的用户写（--user，法国装机）时开会话那条不登记（HookSkip）：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；
 // 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
-import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName } from './quiet-win.ts';
+import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName, replaceExe } from './quiet-win.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, lstatOrNull, relOf, type Sources, writeAtomic } from './sync.ts';
 import {
@@ -276,7 +276,7 @@ function installLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
       const dest = join(dir, name);
       const have = existsSync(dest) ? readFileSync(dest) : null;
       if (have === null || !have.equals(bytes)) {
-        writeFileSync(dest, bytes);
+        replaceExe(dest, bytes);
         changed = true;
       }
     }
