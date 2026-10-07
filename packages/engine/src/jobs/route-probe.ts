@@ -47,15 +47,25 @@ export type ProbeTarget = RouteProbeTarget;
  * 真探一次的结果。answered = 答上了；quota = 额度用满被拒——登录、组织、上游都通，额度另有额度那一套挡（选路按额度
  * 等清零），不当成离线（离线在选路里是硬挡，任务会挂起等人点「继续」）；failed = 没探通。
  */
+/** 这一次真探量到的东西。没探、或探针没拿到，对应字段不给（写入时按空落库，不当 0、不当空串）。 */
+interface ProbeCapture {
+  /** 耗时（毫秒）。量到 0 是用时不到 1 毫秒，照给。 */
+  durationMs?: number | null;
+  /** 发出去的请求原文。 */
+  requestText?: string | null;
+  /** 响应原文。 */
+  responseText?: string | null;
+}
+
 export type ProbeAttempt =
-  | { kind: 'answered'; detail: string }
-  | { kind: 'quota'; detail: string }
-  | {
+  | ({ kind: 'answered'; detail: string } & ProbeCapture)
+  | ({ kind: 'quota'; detail: string } & ProbeCapture)
+  | ({
       kind: 'failed';
       detail: string;
       /** 要人修的整池问题（登录失效、设备被撤销、封号、欠费）：同一轮里不再试，整池暂停、推「要人拍」。 */
       poolHold?: { title: string; body: string };
-    };
+    } & ProbeCapture);
 
 /** 一种执行方式的探法：起一次最小会话、问一句。不许抛——抛了按「探针自己出错」记成没探通。 */
 export type Prober = (target: ProbeTarget) => Promise<ProbeAttempt>;
@@ -86,6 +96,12 @@ export interface RouteProbeJobDeps {
     at: Date;
     detail: string;
     org: OrgKind | null;
+    /** 没真探、没量到为 null，不当 0。 */
+    durationMs: number | null;
+    /** 没发出请求为 null。 */
+    requestText: string | null;
+    /** 没拿到响应为 null。 */
+    responseText: string | null;
   }): Promise<'saved' | 'route_not_found'>;
   /** 一条路由真探完（写库之前）：真实现里接整池暂停的报警和撤销。抛了只记日志，不改结论。 */
   afterProbe?(target: ProbeTarget, attempt: ProbeAttempt): Promise<void>;
@@ -213,6 +229,24 @@ interface Conclusion {
   kept?: boolean;
   /** 会话用户挂的组织这会儿定不下来：不写库，上一次的结论照旧（在不在线照库里那样算）。 */
   unsettled?: boolean;
+  /** 没真探、没量到为 null。同一轮重试只留最终那一次的耗时和原文，第一次的原因已经写进 detail。 */
+  durationMs: number | null;
+  requestText: string | null;
+  responseText: string | null;
+}
+
+const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
+
+function captureOf(attempt: ProbeAttempt): {
+  durationMs: number | null;
+  requestText: string | null;
+  responseText: string | null;
+} {
+  return {
+    durationMs: attempt.durationMs ?? null,
+    requestText: attempt.requestText ?? null,
+    responseText: attempt.responseText ?? null,
+  };
 }
 
 /** 会话用户此刻挂的组织：读法约好了不抛，万一抛了也按认不出记（写明原因），不让整轮垮掉。 */
@@ -232,16 +266,26 @@ async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclu
   const plan = planProbe(t, deps.probers, live, deps.now());
   if ('kept' in plan) {
     deps.log('info', '路由探针：还没到再探的时候，结论照旧', { routeId: t.routeId, detail: plan.kept });
-    return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), org, kept: true };
+    return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), org, kept: true, ...NO_CAPTURE };
   }
   if ('unsettled' in plan) {
     deps.log('warn', '路由探针：会话用户挂的组织这会儿定不下来，Claude 池这一轮不探、结论照旧', {
       routeId: t.routeId,
       detail: plan.unsettled,
     });
-    return { target: t, state: 'skipped', detail: plan.unsettled, at: deps.now(), org, unsettled: true };
+    return {
+      target: t,
+      state: 'skipped',
+      detail: plan.unsettled,
+      at: deps.now(),
+      org,
+      unsettled: true,
+      ...NO_CAPTURE,
+    };
   }
-  if (!('probe' in plan)) return { target: t, state: plan.state, detail: plan.detail, at: deps.now(), org };
+  if (!('probe' in plan)) {
+    return { target: t, state: plan.state, detail: plan.detail, at: deps.now(), org, ...NO_CAPTURE };
+  }
   let attempt = await attemptOf(plan.probe, t);
   if (attempt.kind === 'failed' && !attempt.poolHold) {
     const first = attempt.detail;
@@ -269,6 +313,7 @@ async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclu
     detail: clip(attempt.detail),
     at: deps.now(),
     org,
+    ...captureOf(attempt),
   };
 }
 
@@ -363,6 +408,9 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         at: c.at,
         detail: c.detail,
         org: c.org,
+        durationMs: c.durationMs,
+        requestText: c.requestText,
+        responseText: c.responseText,
       });
     } catch (err) {
       unsaved.push(`${c.target.routeId}：${errMessage(err)}`);
@@ -458,6 +506,9 @@ export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promi
         at: c.at,
         detail: c.detail,
         org: c.org,
+        durationMs: c.durationMs,
+        requestText: c.requestText,
+        responseText: c.responseText,
       });
     } catch (err) {
       // 结论没写进库不改探到的结果：核对照探到的算，写不进的下一轮探针会再写

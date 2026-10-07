@@ -83,6 +83,31 @@ export interface ProbeContext {
  */
 const PROBE_ANSWER = /^ok$/i;
 
+/** 响应原文：回答、插头收下的报错、stderr 里还没被前两段盖住的部分。一段都没有就是没拿到。 */
+function responseTextOf(report: HostReport): string | null {
+  const parts = [report.answer, report.rawError, report.stderrTail].flatMap((part) => {
+    const trimmed = part?.trim();
+    return trimmed ? [trimmed] : [];
+  });
+  const kept = parts.filter(
+    (part, i) => !parts.some((other, j) => j !== i && other.length > part.length && other.includes(part)),
+  );
+  return kept.length > 0 ? kept.join('\n') : null;
+}
+
+/** 有报告才算真探过：耗时照插头量的（含 0），请求就是问出去的那一句，响应是原文。 */
+function probeCapture(report: HostReport): {
+  durationMs: number;
+  requestText: string;
+  responseText: string | null;
+} {
+  return {
+    durationMs: report.wallMs,
+    requestText: PROBE_PROMPT,
+    responseText: responseTextOf(report),
+  };
+}
+
 /**
  * 一次探针会话的报告（各家整理成的同一个形状）→ 结论。答上了、整句只回 OK 才算通；额度用满被拒算通（quota）；其余按
  * 失败分流的同一张规则表认出是什么事（登录失效、设备被撤销……），要人修的整池问题带上 poolHold。
@@ -90,11 +115,13 @@ const PROBE_ANSWER = /^ok$/i;
 export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeContext): ProbeAttempt {
   const verdict = judgeRun(report.facts);
   const text = (report.answer ?? '').trim();
+  const captured = probeCapture(report);
   if (verdict.outcome === 'ok') {
     if (!PROBE_ANSWER.test(text)) {
       return {
         kind: 'failed',
         detail: `回答认不出（要的是只回 OK）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
+        ...captured,
       };
     }
     const secs = Math.max(1, Math.round(report.wallMs / 1000));
@@ -102,6 +129,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
     return {
       kind: 'answered',
       detail: `答上了：${clip(text, 40)} · 用时 ${secs} 秒${cost === undefined ? '' : ` · 按 API 价折合 $${cost.toFixed(3)}`}`,
+      ...captured,
     };
   }
   // 执行体最后说的话；reclaude 没登录的那一句在整段 stderr 里找（它后面还会打几行，可能挤出最后三行）。
@@ -137,6 +165,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
       detail: withoutQueries(
         `额度用满被拒（登录、组织、上游都通，派不派按额度等清零）：${verdict.detail}${report.resetsAt ? ` · ${report.resetsAt} 清零` : ''}${said && !verdict.detail.includes(said) ? `（原文：${clip(said, 200)}）` : ''}`,
       ),
+      ...captured,
     };
   }
   const what = !cls || cls.via === 'fallback' ? verdict.detail : `${cls.title}：${verdict.detail}`;
@@ -152,6 +181,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
     ...(hold && cls
       ? { poolHold: { title: cls.title, body: withoutQueries([fix, cls.reason].filter(Boolean).join('。')) } }
       : {}),
+    ...captured,
   };
 }
 

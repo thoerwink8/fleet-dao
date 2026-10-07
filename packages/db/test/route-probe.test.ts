@@ -2,7 +2,13 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { toRoute } from '../src/domain-map.ts';
-import { routeProbeTargets, saveRouteProbe } from '../src/queries/probe.ts';
+import {
+  ROUTE_PROBE_HISTORY_KEEP,
+  ROUTE_PROBE_HISTORY_TEXT_MAX,
+  readRouteProbeHistory,
+  routeProbeTargets,
+  saveRouteProbe,
+} from '../src/queries/probe.ts';
 import { channels, models, pools, routes, routingCatalog } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog, MIN, NOW, setRoutingLayers } from './helpers.ts';
@@ -180,10 +186,191 @@ describe('写：一条路由的结论', () => {
     expect(await routeRow('car')).toMatchObject({ alive: false, probeState: null });
   });
 
+  it('路由已经没了：不写历史', async () => {
+    expect(await saveRouteProbe(t.db, { routeId: 'gone', state: 'ok', at: NOW, detail: '答上了：OK' })).toBe(
+      'route_not_found',
+    );
+    expect(await readRouteProbeHistory(t.db, 'gone', 10)).toEqual([]);
+  });
+
   it('读出来的模型下架时刻、渠道开关照库里的', async () => {
     await t.db.update(models).set({ retiredAt: NOW }).where(eq(models.id, 'opus-5.5'));
     await t.db.update(channels).set({ enabled: false }).where(eq(channels.id, 'claude-subscription'));
     const [car] = await routeProbeTargets(t.db);
     expect(car).toMatchObject({ modelRetiredAt: NOW, channelEnabled: false });
+  });
+});
+
+describe('探针历史', () => {
+  beforeEach(async () => {
+    await addRoute(t.db, {
+      id: 'car',
+      channelId: 'claude-subscription',
+      poolId: 'claude-carpool',
+      modelId: 'opus-5.5',
+      alive: false,
+    });
+  });
+
+  const at = (n: number) => new Date(NOW.getTime() + n * 1000);
+
+  it('三态都写得进、读得回；没给的耗时和原文是空，不是 0 或空串', async () => {
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: at(1),
+      detail: '答上了：OK',
+      durationMs: 1500,
+      requestText: '问一句',
+      responseText: 'OK',
+    });
+    await saveRouteProbe(t.db, { routeId: 'car', state: 'failed', at: at(2), detail: '连不上' });
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'skipped',
+      at: at(3),
+      detail: '按规矩不探',
+      durationMs: 0,
+    });
+    await saveRouteProbe(t.db, { routeId: 'car', state: 'not_wired', at: at(4), detail: '插头没接' });
+
+    const all = await readRouteProbeHistory(t.db, 'car', 10);
+    expect(all.map((row) => row.result)).toEqual(['not_probed', 'not_probed', 'failed', 'passed']);
+    expect(all[0]).toMatchObject({
+      failureReason: '插头没接',
+      durationMs: null,
+      requestText: null,
+      responseText: null,
+    });
+    expect(all[1]).toMatchObject({ failureReason: '按规矩不探', durationMs: 0 });
+    expect(all[2]).toMatchObject({
+      failureReason: '连不上',
+      durationMs: null,
+      requestText: null,
+      responseText: null,
+    });
+    expect(all[3]).toMatchObject({
+      result: 'passed',
+      failureReason: null,
+      durationMs: 1500,
+      requestText: '问一句',
+      responseText: 'OK',
+    });
+    expect(await readRouteProbeHistory(t.db, 'car', 2)).toEqual(all.slice(0, 2));
+  });
+
+  it('超过 60 条只留最近的；更早写进去的、以及别的路由，都不被这轮裁掉不该裁的', async () => {
+    await addRoute(t.db, {
+      id: 'other',
+      channelId: 'api-metered',
+      poolId: 'metered',
+      modelId: 'kimi-k3',
+      alive: false,
+    });
+    await saveRouteProbe(t.db, { routeId: 'other', state: 'failed', at: NOW, detail: '别的路由' });
+    for (let i = 1; i <= ROUTE_PROBE_HISTORY_KEEP + 1; i++) {
+      await saveRouteProbe(t.db, {
+        routeId: 'car',
+        state: 'ok',
+        at: at(i),
+        detail: '答上了：OK',
+        durationMs: i,
+      });
+    }
+    const kept = await readRouteProbeHistory(t.db, 'car', ROUTE_PROBE_HISTORY_KEEP + 10);
+    expect(kept).toHaveLength(ROUTE_PROBE_HISTORY_KEEP);
+    expect(kept.map((row) => row.durationMs)).toEqual(
+      Array.from({ length: ROUTE_PROBE_HISTORY_KEEP }, (_, i) => ROUTE_PROBE_HISTORY_KEEP + 1 - i),
+    );
+    expect(await readRouteProbeHistory(t.db, 'other', 10)).toMatchObject([
+      { result: 'failed', failureReason: '别的路由' },
+    ]);
+
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: new Date(NOW.getTime() - 1000),
+      detail: '这条更早',
+      durationMs: 0,
+    });
+    const afterOld = await readRouteProbeHistory(t.db, 'car', ROUTE_PROBE_HISTORY_KEEP + 10);
+    expect(afterOld).toHaveLength(ROUTE_PROBE_HISTORY_KEEP);
+    expect(afterOld.some((row) => row.durationMs === 0)).toBe(false);
+    expect(afterOld[0]?.durationMs).toBe(ROUTE_PROBE_HISTORY_KEEP + 1);
+  });
+
+  it('同一事务：写成功时路由和历史一起在；约束拒了就一起退回', async () => {
+    expect(
+      await saveRouteProbe(t.db, {
+        routeId: 'car',
+        state: 'ok',
+        at: NOW,
+        detail: '答上了：OK',
+        durationMs: 10,
+      }),
+    ).toBe('saved');
+    expect(await routeRow('car')).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(await readRouteProbeHistory(t.db, 'car', 10)).toMatchObject([
+      { result: 'passed', durationMs: 10 },
+    ]);
+
+    await expect(
+      saveRouteProbe(t.db, {
+        routeId: 'car',
+        state: 'skipped',
+        at: at(1),
+        detail: '不探',
+        org: 'enterprise' as never,
+      }),
+    ).rejects.toThrow();
+    expect(await routeRow('car')).toMatchObject({ alive: true, probeState: 'ok', probeOrg: null });
+    expect(await readRouteProbeHistory(t.db, 'car', 10)).toHaveLength(1);
+
+    await expect(
+      saveRouteProbe(t.db, {
+        routeId: 'car',
+        state: 'failed',
+        at: at(2),
+        detail: '耗时是负的',
+        durationMs: -1,
+      }),
+    ).rejects.toThrow();
+    expect(await routeRow('car')).toMatchObject({ alive: true, probeState: 'ok', probeDetail: '答上了：OK' });
+    const left = await readRouteProbeHistory(t.db, 'car', 10);
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatchObject({ result: 'passed', durationMs: 10 });
+  });
+
+  it('请求和响应超长就截断，并标明原文多长', async () => {
+    const raw = `错${'x'.repeat(ROUTE_PROBE_HISTORY_TEXT_MAX)}`;
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: NOW,
+      detail: '连不上',
+      requestText: raw,
+      responseText: raw,
+    });
+    const [row] = await readRouteProbeHistory(t.db, 'car', 1);
+    for (const text of [row?.requestText, row?.responseText]) {
+      expect(text?.startsWith('错')).toBe(true);
+      expect(text).toContain('已截断');
+      expect(text).toContain(`原文 ${raw.length} 字`);
+      expect(text?.length).toBeLessThanOrEqual(ROUTE_PROBE_HISTORY_TEXT_MAX);
+      expect(text).not.toBe(raw);
+    }
+  });
+
+  it('【故意造出的失败】历史表读不到：抛错，不回空数组冒充没有历史', async () => {
+    expect(await readRouteProbeHistory(t.db, 'car', 10)).toEqual([]);
+    await t.client.exec('alter table route_probe_history rename to route_probe_history_unreadable');
+    try {
+      await expect(readRouteProbeHistory(t.db, 'car', 10)).rejects.toThrow(/读不到/);
+      const err = await readRouteProbeHistory(t.db, 'car', 10).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain('route_probe_history');
+    } finally {
+      await t.client.exec('alter table route_probe_history_unreadable rename to route_probe_history');
+    }
   });
 });

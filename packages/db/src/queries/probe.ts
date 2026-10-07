@@ -1,11 +1,24 @@
 // 路由探针（design 第九节「路由探针」）：读每条路由探得了探不了的事实，写一条路由的结论。
 // routes.alive 只由探针和熔断写：这里是探针那一半。库里约束 alive 为真时结论必须是 ok，不许拿默认值、手改冒充在线。
 import type { BillingKind, HostId, OrgKind, RouteProbeState } from '@fleet-dao/shared';
-import { asc, eq } from 'drizzle-orm';
+import { errMessage } from '@fleet-dao/shared/util';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
-import { channels, models, pools, routes } from '../schema/index.ts';
+import {
+  channels,
+  models,
+  pools,
+  type RouteProbeHistoryResult,
+  routeProbeHistory,
+  routes,
+} from '../schema/index.ts';
 import { noteRouteProbed } from './channel-fallback.ts';
+
+/** 每条路由留下的历史条数：渠道状态页的柱条就是这么多格。 */
+export const ROUTE_PROBE_HISTORY_KEEP = 60;
+/** 请求原文、响应原文、失败原因的长度上限。超了截断，并在末尾标明原文多长。 */
+export const ROUTE_PROBE_HISTORY_TEXT_MAX = 4_000;
 
 export interface RouteProbeTarget {
   routeId: string;
@@ -82,13 +95,54 @@ export interface RouteProbeWrite {
    * 不给按 null 写（老的调用方）：不留上一次的，免得这个结论配上别的时候读到的组织。
    */
   org?: OrgKind | null;
+  /**
+   * 这一次真探的耗时（毫秒）。没探、探针没量到，不给或给 null：历史里写空，不当 0。
+   * 0 是量到了、用时不到 1 毫秒，照记。
+   */
+  durationMs?: number | null;
+  /** 发出去的请求原文。没发出去不给或给 null。超长截断并标注。 */
+  requestText?: string | null;
+  /** 响应原文。没拿到不给或给 null。超长截断并标注。 */
+  responseText?: string | null;
+}
+
+export interface RouteProbeHistoryRow {
+  id: number;
+  routeId: string;
+  probedAt: Date;
+  result: RouteProbeHistoryResult;
+  durationMs: number | null;
+  failureReason: string | null;
+  requestText: string | null;
+  responseText: string | null;
+}
+
+/** ok → 通过；failed → 不通；not_wired、skipped → 没探（这一轮没真探）。 */
+function historyResultOf(state: RouteProbeState): RouteProbeHistoryResult {
+  if (state === 'ok') return 'passed';
+  if (state === 'failed') return 'failed';
+  return 'not_probed';
+}
+
+function clipProbeText(text: string): string {
+  if (text.length <= ROUTE_PROBE_HISTORY_TEXT_MAX) return text;
+  const mark = `…（已截断，原文 ${text.length} 字）`;
+  const keep = Math.max(0, ROUTE_PROBE_HISTORY_TEXT_MAX - mark.length);
+  return `${text.slice(0, keep)}${mark}`;
+}
+
+function clipOrNull(text: string | null | undefined): string | null {
+  if (text == null) return null;
+  return clipProbeText(text);
 }
 
 /**
  * 写一条路由的结论：只有 ok 让它在线，其余一律不在线（alive、结论、那时挂的组织在同一条语句里写，不会一半）。
- * 路由已经不在了（这一轮当中被删）回 route_not_found；别的出错（约束不让写、库连不上）原样抛出。
+ * 同一事务里追加一条历史，并把这条路由多出来的旧历史裁到最近 60 条。路由更新、历史、渠道近态一起成功或一起退回。
+ * 路由已经不在了（这一轮当中被删）回 route_not_found，不写历史；别的出错（约束不让写、库连不上）原样抛出。
  */
 export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved' | 'route_not_found'> {
+  const result = historyResultOf(w.state);
   // 渠道近态（channel_states，#1118）跟着同一个事务：探通了引发 disabled 的那条路由就改回 ok，探针看过的时刻记下
   return db.transaction(async (tx) => {
     const updated = await tx
@@ -103,7 +157,64 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       .where(eq(routes.id, w.routeId))
       .returning({ id: routes.id });
     if (updated.length === 0) return 'route_not_found';
+    await tx.insert(routeProbeHistory).values({
+      routeId: w.routeId,
+      probedAt: w.at,
+      result,
+      durationMs: w.durationMs ?? null,
+      // 通过没有失败原因。不通、没探用这条结论的原因；超长同样截断。
+      failureReason: result === 'passed' ? null : clipProbeText(w.detail),
+      requestText: clipOrNull(w.requestText),
+      responseText: clipOrNull(w.responseText),
+    });
+    await tx.execute(sql`
+      delete from route_probe_history
+      where route_id = ${w.routeId}
+        and id not in (
+          select id from route_probe_history
+          where route_id = ${w.routeId}
+          order by probed_at desc, id desc
+          limit ${ROUTE_PROBE_HISTORY_KEEP}
+        )
+    `);
     await noteRouteProbed(tx, { routeId: w.routeId, state: w.state, at: w.at });
     return 'saved';
   });
+}
+
+/**
+ * 一条路由最近的历史，新的在前（同一时刻后写入的在前）。条数必须是正整数。
+ * 查询成功但一条都没有：回空数组（这条路由还没写下过结论）。
+ * 库读不到（连不上、表不在、语句出错）：抛错，说明是哪条路由，不回空数组冒充没有历史。
+ */
+export async function readRouteProbeHistory(
+  db: Db,
+  routeId: string,
+  limit: number,
+): Promise<RouteProbeHistoryRow[]> {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(`读探针历史的条数必须是正整数，收到 ${String(limit)}`);
+  }
+  try {
+    const rows = await db
+      .select({
+        id: routeProbeHistory.id,
+        routeId: routeProbeHistory.routeId,
+        probedAt: routeProbeHistory.probedAt,
+        result: routeProbeHistory.result,
+        durationMs: routeProbeHistory.durationMs,
+        failureReason: routeProbeHistory.failureReason,
+        requestText: routeProbeHistory.requestText,
+        responseText: routeProbeHistory.responseText,
+      })
+      .from(routeProbeHistory)
+      .where(eq(routeProbeHistory.routeId, routeId))
+      .orderBy(desc(routeProbeHistory.probedAt), desc(routeProbeHistory.id))
+      .limit(limit);
+    return rows;
+  } catch (err) {
+    throw new Error(`读不到路由 ${routeId} 的探针历史（route_probe_history）：${errMessage(err)}`, {
+      cause: err,
+    });
+  }
 }
