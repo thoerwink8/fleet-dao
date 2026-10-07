@@ -127,6 +127,7 @@ export {
 } from './plan-view.ts';
 export {
   ISSUE_COLUMN,
+  issueColumnRefs,
   LEGACY_COLUMNS,
   linkedIssue,
   OPTIONAL_COLUMNS,

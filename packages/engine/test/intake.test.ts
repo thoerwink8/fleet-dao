@@ -16,9 +16,11 @@ import {
   MAX_RUNNING_TASKS,
   MAX_STARTS_PER_ROUND,
   MERGE_GATE_REQUIRES_COLD_VERIFY,
+  prClaimedIssues,
   runIntakeJob,
   screenListed,
   screenPlan,
+  workflowPathIn,
 } from '../src/jobs/intake.ts';
 
 const NOW = new Date('2026-10-02T14:00:00.000Z');
@@ -89,13 +91,22 @@ interface Harness {
   finished: { id: number; result: ScheduleResult }[];
   logs: { level: string; text: string }[];
   planReads: number[];
+  /** 贴了「本机做」的单号。 */
+  localMarked: number[];
 }
 
 /** 一个仓、一张齐全的好单、什么都没派过：改哪一项就能看那一道关。 */
 function harness(
   over: Partial<IntakeDeps> = {},
-  data: { issues?: IntakeIssue[]; plans?: Record<number, IntakePlan>; dispatched?: number[] } = {},
+  data: {
+    issues?: IntakeIssue[];
+    plans?: Record<number, IntakePlan>;
+    dispatched?: number[];
+    /** 开着的 PR 的「需求」栏挂着的单：单号 → PR 号。 */
+    prClaims?: Record<number, number>;
+  } = {},
 ): Harness {
+  const localMarked: number[] = [];
   const started: Harness['started'] = [];
   const comments: Harness['comments'] = [];
   const finished: Harness['finished'] = [];
@@ -118,6 +129,12 @@ function harness(
     },
     async dispatched(_repo, n) {
       return data.dispatched?.includes(n) ?? false;
+    },
+    async openPrClaims() {
+      return new Map(Object.entries(data.prClaims ?? {}).map(([n, pr]) => [Number(n), pr]));
+    },
+    async markLocal({ issueNumber }) {
+      localMarked.push(issueNumber);
     },
     async readSpecDoc() {
       return null;
@@ -151,7 +168,7 @@ function harness(
     },
     ...over,
   };
-  return { deps, started, comments, finished, logs, planReads };
+  return { deps, started, comments, finished, logs, planReads, localMarked };
 }
 
 describe('screenListed · 列表里就能判的几道', () => {
@@ -245,6 +262,146 @@ describe('runIntakeJob · 一轮', () => {
     ]);
     expect(run).toMatchObject({ runId: 7, outcome: 'ok', scanned: 2, found: 1 });
     expect(h.finished).toEqual([{ id: 7, result: { outcome: 'ok', scanned: 2, found: 1 } }]);
+  });
+
+  it('被开着的 PR 的「需求」栏挂着的单 → 不起，留一句话、贴一次「本机做」；同一个 PR 再来一轮不重复留言', async () => {
+    const h = harness({}, { prClaims: { 12: 40 } });
+    const first = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]).toMatchObject({ issueNumber: 12, key: 'intake-pr-claimed:40' });
+    expect(h.comments[0]?.body).toContain('#40');
+    expect(first).toMatchObject({ outcome: 'ok', found: 1 }); // 留的那条言算处理了的
+    await runIntakeJob(h.deps);
+    expect(h.comments).toHaveLength(1); // 幂等键挡住了第二条
+    expect(h.started).toEqual([]);
+  });
+
+  it('没有 PR 挂着它（别的单被挂着不相干）→ 照拉，不贴标签', async () => {
+    const h = harness({}, { prClaims: { 99: 41 } });
+    await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(1);
+    expect(h.localMarked).toEqual([]);
+    expect(h.comments).toEqual([]);
+  });
+
+  it('先留言再贴标签：留言失败 → 标签没贴、这张记没查成；标签失败 → 记没查成，下一轮留言幂等、只重贴', async () => {
+    const noComment = harness(
+      {
+        async comment() {
+          throw new Error('评论接口 502');
+        },
+      },
+      { prClaims: { 12: 40 } },
+    );
+    const a = await runIntakeJob(noComment.deps);
+    expect(noComment.localMarked).toEqual([]);
+    expect(a.outcome).toBe('partial');
+    expect(a.why).toContain('评论接口 502');
+
+    const noLabel = harness(
+      {
+        async markLocal() {
+          throw new Error('标签接口 502');
+        },
+      },
+      { prClaims: { 12: 40 } },
+    );
+    const b = await runIntakeJob(noLabel.deps);
+    expect(noLabel.started).toEqual([]);
+    expect(b.outcome).toBe('partial');
+    expect(b.why).toContain('标签接口 502');
+  });
+
+  it('正文的「已知的模块」写了 .github/workflows/ 路径 → 不起，留一句话、贴一次「本机做」，不读 PR 列表（#1194）', async () => {
+    const body = BODY.replace(
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '- `.github/workflows/ci.yml`：CI 工作流',
+    );
+    let prRead = 0;
+    const h = harness(
+      {
+        async openPrClaims() {
+          prRead += 1;
+          return new Map();
+        },
+      },
+      { issues: [issue({ body })] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.key).toBe('intake-touches-workflows');
+    expect(h.comments[0]?.body).toContain('.github/workflows/ci.yml');
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(prRead).toBe(0);
+    await runIntakeJob(h.deps);
+    expect(h.comments).toHaveLength(1); // 再来一轮不重复留言
+  });
+
+  it('场景、怎么算做完里写了工作流路径也算；只在「原话」里提到不算（照拉）', async () => {
+    const inScene = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: BODY.replace('创始人要在驾驶舱', '要改 .github/workflows/ 下的 ci.yml，创始人要在驾驶舱'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inScene.deps);
+    expect(inScene.started).toEqual([]);
+    expect(inScene.localMarked).toEqual([12]);
+
+    const inCriteria = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: BODY.replace('1. 页面上能看到', '1. `.github/workflows/ci.yml` 里有一步；页面上能看到'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inCriteria.deps);
+    expect(inCriteria.started).toEqual([]);
+
+    const inQuote = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: BODY.replace(
+              '「我回来打开驾驶舱',
+              '「顺口说一句 .github/workflows/ci.yml 慢。我回来打开驾驶舱',
+            ),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inQuote.deps);
+    expect(inQuote.started).toHaveLength(1);
+    expect(inQuote.localMarked).toEqual([]);
+  });
+
+  it('workflowPathIn：没写返回 null；正文不是文字（读不到）抛错，不当成没写（故意造出失败）', () => {
+    expect(workflowPathIn(BODY)).toBeNull();
+    expect(workflowPathIn('')).toBeNull();
+    expect(() => workflowPathIn(undefined)).toThrow(/读不到/);
+    expect(() => workflowPathIn(null)).toThrow(/读不到/);
+  });
+
+  it('正文读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（partial）', async () => {
+    const h = harness({}, { issues: [issue({ body: null as unknown as string })] });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(h.comments).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('单正文读不到');
   });
 
   it('登记的是 5 分钟一轮、连着三轮没跑成才过期', () => {
@@ -487,6 +644,31 @@ describe('runIntakeJob · 【故意造出的失败】读不到的不当成没有
     expect(run.outcome).toBe('partial');
     expect(run.why).toContain('acme/other');
     expect(h.started).toHaveLength(1);
+  });
+
+  it('读不到开着的 PR 列表 → 这张单这一轮不拉、不贴标签、不留言，记没查成（不当成「没有 PR」）', async () => {
+    const h = harness({
+      async openPrClaims() {
+        throw new Error('PR 列表翻不完');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(h.comments).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('PR 列表翻不完');
+  });
+
+  it('prClaimedIssues：Closes 和 Refs 都算，只看「需求」栏，同一张单取号最小的 PR', () => {
+    const claimed = prClaimedIssues([
+      { number: 50, body: '**做了什么**：x\n\n**需求**：Refs #7' },
+      { number: 40, body: '**做了什么**：顺带提到 #8\n\n**需求**：Closes #7' },
+      { number: 60, body: '没有栏' },
+    ]);
+    expect(claimed.get(7)).toBe(40);
+    expect(claimed.has(8)).toBe(false);
+    expect(claimed.size).toBe(1);
   });
 
   it('一张单现读失败 → 这张记没查成（partial），别的单照拉', async () => {
