@@ -363,6 +363,19 @@ export async function requiredChecksFor(
   return rules.requiredChecks;
 }
 
+/** 必过检查里去掉不在这一步等的；去完一条不剩就报错，不当绿（零条检查不当绿）。 */
+function withoutExcluded(repo: RepoRef, required: readonly string[], exclude?: readonly string[]): string[] {
+  if (!exclude?.length) return [...required];
+  const left = required.filter((name) => !exclude.includes(name));
+  if (left.length === 0) {
+    throw new GitHubError(
+      'NO_REQUIRED_CHECKS',
+      `${repoSlug(repo)} 的必过检查（${required.join('、')}）去掉不在这一步等的（${exclude.join('、')}）之后一条不剩：没法判 CI 绿（零条检查不当绿）`,
+    );
+  }
+  return left;
+}
+
 export async function readCi(
   deps: Deps,
   repo: RepoRef,
@@ -422,6 +435,12 @@ export interface WaitCiInput {
   head: string;
   /** 必过检查的名字；不给就读主线规则集里的。 */
   checks?: readonly string[] | undefined;
+  /**
+   * 从必过检查里去掉这些名字再判（不管名字是调用方给的还是读主线规则集读到的）。引擎任务 PR 的合并闸（merge-gate）
+   * 要等冷验收贴了通过的 cold-verify 才会绿，而冷验收排在「等 CI」之后：等 CI 这一步把它算进来，验收前它必红，
+   * 会被误判成「CI 红了」白返工一轮。去掉之后一条不剩仍然不当绿（NO_REQUIRED_CHECKS，零条检查不当绿）。
+   */
+  excludeChecks?: readonly string[] | undefined;
   /** 总等多久，默认 30 分钟。 */
   timeoutMs?: number | undefined;
   /** 这么久一个检查、一个工作流都没出现，判「CI 根本没跑」，默认 5 分钟。 */
@@ -484,7 +503,11 @@ export async function waitCi(
   const confirmRedMs = input.confirmRedMs ?? 20_000;
   const resumed = asMemo(ctx.lastHeartbeat, head);
   const memo: WaitMemo = resumed ?? { head, startedAt: now(), sawActivityAt: null };
-  const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
+  const required = withoutExcluded(
+    repo,
+    await requiredChecksFor(deps, repo, input.checks, ctx.signal),
+    input.excludeChecks,
+  );
   let failures = 0;
   let redSeenAt: number | null = null;
   const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
