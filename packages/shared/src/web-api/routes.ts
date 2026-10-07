@@ -37,6 +37,9 @@ import { ReleaseVersionResponse } from './release.ts';
 import {
   MovePurposeModelRequest,
   MovePurposeModelResponse,
+  RouteProbeNowRequest,
+  RouteProbeNowResponse,
+  RouteProbeStatusResponse,
   RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
@@ -94,6 +97,15 @@ export const WebRoutes = {
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
   routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },
   routingEfforts: { method: 'GET', path: '/routing/efforts', response: RoutingEffortsResponse },
+  /** 立即探测的现状（驾驶舱改版 2026-10-07）：最近点过的、引擎接没接、每条的结论，加上引擎此刻在不在。 */
+  routeProbeStatus: { method: 'GET', path: '/routing/probe', response: RouteProbeStatusResponse },
+  /** 立即探测：routeIds 不给 = 全部路由。引擎关着、没连上回 409 / 503 写明是哪样，不记成点过。 */
+  routeProbeNow: {
+    method: 'POST',
+    path: '/routing/probe',
+    request: RouteProbeNowRequest,
+    response: RouteProbeNowResponse,
+  },
   updateRouteEffort: {
     method: 'PUT',
     path: '/routing/efforts/:modelId/:routeId',

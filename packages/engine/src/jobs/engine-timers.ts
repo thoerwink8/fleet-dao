@@ -31,6 +31,7 @@ import {
   ROUTE_PROBE_OFFSET_MINUTES,
   runRouteProbeJob,
 } from './route-probe.ts';
+import { routeProbeLock } from './route-probe-now.ts';
 import type { TimerJob } from './timers.ts';
 import { runWatchdogJob, WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
@@ -76,7 +77,8 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       offsetMinutes: ROUTE_PROBE_OFFSET_MINUTES,
       catchupMinutes: ROUTE_PROBE_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
-      run: () => runRouteProbeJob(routeProbe()),
+      // 和驾驶舱的立即探测共用一把锁（route-probe-now.ts）：同一时刻最多一轮在探
+      run: () => routeProbeLock.run(() => runRouteProbeJob(routeProbe())),
     },
     {
       // 定时读额度入库（#76）

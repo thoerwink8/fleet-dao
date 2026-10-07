@@ -22,6 +22,7 @@ import {
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
   flowStages,
+  foldRouteProbeRequests,
   HARD_BANS,
   HomeResponseSchema,
   type HostId,
@@ -43,7 +44,13 @@ import {
   ReleaseVersionResponse,
   RepoDispatchResponse,
   ReposResponse,
+  ROUTE_PROBE_ACTION,
+  ROUTE_PROBE_TARGET,
   type Route,
+  RouteProbeNowRequest,
+  RouteProbeNowResponse,
+  type RouteProbeResult,
+  RouteProbeStatusResponse,
   RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
@@ -279,6 +286,81 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   function audit(e: Omit<AuditEntry, 'id' | 'at' | 'ok'> & { ok?: boolean }) {
     st.audit.unshift({ id: nextId('a'), at: iso(), ok: true, ...e });
     emit('audit_log', st.audit[0]?.id ?? '');
+  }
+  /** 立即探测的操作记录（和真后端一样从 audit 里取 routing:probe 的）。 */
+  function mockProbeRows() {
+    return st.audit
+      .filter((a) => a.target === ROUTE_PROBE_TARGET)
+      .map((a) => ({
+        at: new Date(a.at),
+        action: a.action,
+        actorId: a.actor.id,
+        after: a.after,
+        ok: a.ok,
+        error: a.error ?? null,
+      }));
+  }
+  /**
+   * 假引擎：点了 1.5 秒接手、接手 4 秒探完（真引擎每 5 秒看一眼，探一条要十几秒到几十秒）。结论照真探针的规矩：
+   * 按量计费、模型下架、关着的不探（写明为什么），其余照这条路由现在的样子再下一次结论（时刻换成现在）。
+   */
+  function advanceMockProbes() {
+    const t = now();
+    const { requests } = foldRouteProbeRequests(mockProbeRows(), new Date(t));
+    for (const r of requests) {
+      const requestedAt = Date.parse(r.requestedAt);
+      if (r.state === 'queued' && t - requestedAt >= 1500) {
+        audit({
+          actor: engine,
+          action: ROUTE_PROBE_ACTION.start,
+          target: ROUTE_PROBE_TARGET,
+          after: { requestId: r.requestId },
+          via: 'engine',
+        });
+      }
+      if (r.state === 'running' && r.startedAt && t - Date.parse(r.startedAt) >= 4000) {
+        const ids = r.routeIds ?? st.routes.map((x) => x.id);
+        const results = ids.map((id): RouteProbeResult => {
+          const route = st.routes.find((x) => x.id === id);
+          if (!route)
+            return { routeId: id, outcome: 'gone', detail: '库里没有这条路由（可能刚被删了）', at: iso() };
+          const channel = st.channels.find((c) => c.id === route.channelId);
+          const model = st.models.find((m) => m.id === route.modelId);
+          const skip = (detail: string): RouteProbeResult => {
+            route.probe = { state: 'skipped', at: iso(), detail };
+            route.alive = false;
+            return { routeId: id, outcome: 'skipped', detail, at: iso() };
+          };
+          if (channel?.billing === 'metered')
+            return skip('按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）');
+          if (model?.retiredAt && Date.parse(model.retiredAt) <= t)
+            return skip(`模型「${model.displayName}」已下架，不探`);
+          if (switchedOff.has(id))
+            return skip(
+              '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
+            );
+          const failed = route.probe?.state === 'failed';
+          const sec = failed ? 41 : 6 + Math.floor(rand() * 12);
+          const detail = failed ? (route.probe?.detail ?? '没探通') : `答上了：OK · 用时 ${sec} 秒`;
+          route.probe = { state: failed ? 'failed' : 'ok', at: iso(), detail };
+          route.alive = !failed;
+          return {
+            routeId: id,
+            outcome: failed ? 'failed' : 'ok',
+            detail,
+            at: iso(),
+            durationMs: sec * 1000,
+          };
+        });
+        audit({
+          actor: engine,
+          action: ROUTE_PROBE_ACTION.done,
+          target: ROUTE_PROBE_TARGET,
+          after: { requestId: r.requestId, results },
+          via: 'engine',
+        });
+      }
+    }
   }
   function log(tv: MTask, entry: Omit<MLog, 'id' | 'at' | 'taskId'>) {
     const l: MLog = { id: nextId('log'), at: iso(), taskId: tv.task.id, ...entry };
@@ -1523,6 +1605,40 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         };
       });
       return RoutingEffortsResponse.parse({ defaultEffort: DEFAULT_SESSION_EFFORT, models });
+    },
+    async routeProbeStatus() {
+      await wait();
+      advanceMockProbes();
+      const { requests } = foldRouteProbeRequests(mockProbeRows(), new Date(now()));
+      return RouteProbeStatusResponse.parse({ asOf: iso(), engine: { state: 'on' }, requests });
+    },
+    async routeProbeNow(raw) {
+      await wait();
+      const body = RouteProbeNowRequest.parse(raw);
+      const missing = (body.routeIds ?? []).filter((id) => !st.routes.some((r) => r.id === id));
+      if (missing.length > 0)
+        throw new ApiError(404, 'route_not_found', `没有这条路由：${missing.join('、')}`);
+      const requestId = nextId('probe');
+      const routeIds = body.routeIds ? [...new Set(body.routeIds)] : null;
+      audit({
+        actor: meActor(),
+        action: ROUTE_PROBE_ACTION.request,
+        target: ROUTE_PROBE_TARGET,
+        after: { requestId, routeIds },
+        via: 'cockpit',
+        reason: routeIds ? `驾驶舱上点了立即探测（${routeIds.length} 条）` : '驾驶舱上点了全部立即探测',
+      });
+      return RouteProbeNowResponse.parse({
+        request: {
+          requestId,
+          requestedAt: iso(),
+          by: st.me.user.id,
+          ...(routeIds ? { routeIds } : {}),
+          state: 'queued',
+          results: [],
+        },
+        engine: { state: 'on' },
+      });
     },
     async updateRouteEffort(modelId, routeId, raw) {
       await wait();

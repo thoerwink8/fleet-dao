@@ -14,6 +14,7 @@ export * from './pool-slots.ts';
 export * from './quota.ts';
 export * from './quota-reserve.ts';
 export * from './realtime.ts';
+export * from './route-probe-now.ts';
 export * from './segment-runs.ts';
 export * from './task-signals.ts';
 export * from './usage.ts';

@@ -12,6 +12,7 @@ import {
   FeishuAccessRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
+  RouteProbeNowRequest,
   SSE_EVENTS,
   TaskActionRequest,
   UpdateCredentialsRequest,
@@ -237,6 +238,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),
     routingLayers: () => send('GET', apiUrl(R.routingLayers.path), R.routingLayers.response),
     routingEfforts: () => send('GET', apiUrl(R.routingEfforts.path), R.routingEfforts.response),
+    routeProbeStatus: () => send('GET', apiUrl(R.routeProbeStatus.path), R.routeProbeStatus.response),
+    async routeProbeNow(body) {
+      return send('POST', apiUrl(R.routeProbeNow.path), R.routeProbeNow.response, {
+        body: RouteProbeNowRequest.parse(body),
+      });
+    },
     // 写方法一律 async：请求体校验（.parse）不合约定时要变成被拒的 Promise，不能在返回 Promise 之前同步抛，
     // 否则调用方的 .catch 接不到（#857；http-writes.test.ts 的「不是同步抛」那条钉着）。
     async updateRouteEffort(modelId, routeId, body) {

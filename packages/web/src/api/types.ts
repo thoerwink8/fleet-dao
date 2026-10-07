@@ -58,6 +58,11 @@ import type {
   RepoDispatchResponse,
   RepoSchema,
   RouteEffortSchema,
+  RouteProbeNowRequest,
+  RouteProbeNowResponse,
+  RouteProbeRequestSchema,
+  RouteProbeResultSchema,
+  RouteProbeStatusResponse,
   RouteSchema,
   RoutingEffortsResponse,
   RoutingLayerModelSchema,
@@ -132,6 +137,13 @@ export type RoutingLayerModel = z.infer<typeof RoutingLayerModelSchema>;
 export type RoutingLayerRoute = z.infer<typeof RoutingLayerRouteSchema>;
 export type LivenessVerdict = z.infer<typeof LivenessVerdictSchema>;
 export type LivenessFact = z.infer<typeof LivenessFactSchema>;
+
+/** 渠道状态页的立即探测（驾驶舱改版 2026-10-07）：最近点过的、引擎接没接、每条的结论。 */
+export type RouteProbeStatus = z.infer<typeof RouteProbeStatusResponse>;
+export type RouteProbeRequest = z.infer<typeof RouteProbeRequestSchema>;
+export type RouteProbeResult = z.infer<typeof RouteProbeResultSchema>;
+export type RouteProbeNowBody = z.input<typeof RouteProbeNowRequest>;
+export type RouteProbeNowResult = z.infer<typeof RouteProbeNowResponse>;
 
 /** 每个模型下每条路由起会话的思考档位（#470）。 */
 export type RoutingEfforts = z.infer<typeof RoutingEffortsResponse>;

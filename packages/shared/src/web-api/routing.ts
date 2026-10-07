@@ -308,3 +308,66 @@ export const UpdateModelRouteResponse = z.object({
   /** op=enable：改完的开关；op=move 不给。 */
   enabled: z.boolean().optional(),
 });
+
+// —— 立即探测（驾驶舱改版，创始人 2026-10-07「渠道状态无法探测」）——
+// 点一下「立即探测」= 记一条操作记录（routing.probe.request）；引擎每几秒看一眼操作记录，接手时记 routing.probe.start，
+// 探完记 routing.probe.done（带每条路由的结论）。状态不另存：读的时候从这三种记录现算（shared 的 route-probe-now.ts）。
+
+/** 一条路由这一次的结论：探针的四种，加上 unsettled（会话用户挂的组织这会儿定不下来，没探）、gone（路由已经不在了）。 */
+export const RouteProbeOutcomeSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped', 'unsettled', 'gone']);
+
+export const RouteProbeResultSchema = z.object({
+  routeId: Id,
+  outcome: RouteProbeOutcomeSchema,
+  /** 原文：通了是回答和用时，不通是探针写的原因（原样，不改写）。 */
+  detail: z.string(),
+  at: Time,
+  /** 这一次从起探到下结论用了多久（毫秒，含没通时隔一会儿再探的那一次）；没真探（跳过、没接）不给。 */
+  durationMs: z.number().int().nonnegative().optional(),
+});
+
+/**
+ * queued = 记下了、引擎还没接手；running = 引擎接手了在探；done = 探完了（每条的结论在 results）；
+ * failed = 引擎接手了但这一轮没跑成，或接手太久没回结果（why 写原因）；expired = 太久没人接手，作废（引擎也不再接）。
+ */
+export const RouteProbeRequestStateSchema = z.enum(['queued', 'running', 'done', 'failed', 'expired']);
+
+export const RouteProbeRequestSchema = z.object({
+  requestId: z.string().min(1),
+  requestedAt: Time,
+  /** 谁点的。 */
+  by: z.string(),
+  /** 点的是哪几条；不给 = 全部路由。 */
+  routeIds: z.array(Id).optional(),
+  state: RouteProbeRequestStateSchema,
+  startedAt: Time.optional(),
+  finishedAt: Time.optional(),
+  /** failed、expired 的原因；queued 太久时的提醒。 */
+  why: z.string().optional(),
+  results: z.array(RouteProbeResultSchema),
+});
+
+/** 引擎此刻在不在（和主页「引擎」那一格同一个探法）：off = 按配置没开，down = 没连上，unknown = 没查成。 */
+export const RouteProbeEngineSchema = z.object({
+  state: z.enum(['on', 'off', 'down', 'unknown']),
+  detail: z.string().optional(),
+});
+
+export const RouteProbeStatusResponse = z.object({
+  asOf: Time,
+  engine: RouteProbeEngineSchema,
+  /** 最近的立即探测，新的在前。 */
+  requests: z.array(RouteProbeRequestSchema),
+  /** 没接上（开发环境内存版）：整块写这一句，不拿空列表冒充「没人点过」。 */
+  unavailable: z.string().optional(),
+});
+
+/** routeIds 不给 = 全部路由。 */
+export const RouteProbeNowRequest = z.object({
+  routeIds: z.array(Id).min(1).max(200).optional(),
+  reason: z.string().max(500).optional(),
+});
+export const RouteProbeNowResponse = z.object({
+  request: RouteProbeRequestSchema,
+  engine: RouteProbeEngineSchema,
+});

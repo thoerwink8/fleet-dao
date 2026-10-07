@@ -163,3 +163,19 @@ describe('【故意造出的失败】没接上、没读成：照实写，不画�
     expect(await screen.findByText('路由两层里一条路由都没有')).toBeTruthy();
   });
 });
+
+describe('思考档位页：先后（驾驶舱改版 2026-10-07）', () => {
+  test('有路能配的模型排前面，一条都配不了的（cursor 整串、判断题小模型、没接上的）放最后，照列、写明为什么', async () => {
+    renderApp(<EffortsPage />, { route: '/efforts' });
+    await opened();
+    const order = Array.from(document.querySelectorAll('[data-model]')).map((el) =>
+      el.getAttribute('data-model'),
+    );
+    const fixedOnly = ['cursor-auto', 'deepseek-v4.1-flash', 'gpt-5.6-luna'];
+    const firstFixed = order.findIndex((id) => fixedOnly.includes(id ?? ''));
+    expect(firstFixed).toBeGreaterThan(0);
+    // 配不了的都在能配的后面
+    expect(order.slice(firstFixed).every((id) => fixedOnly.includes(id ?? ''))).toBe(true);
+    expect(row('r-cursor').textContent).toContain('配不了');
+  });
+});

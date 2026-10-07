@@ -66,6 +66,26 @@ const WRITES: Write[] = [
     ok: { body: { modelId: 'opus-5.5', routeId: 'r-1', effort: 'high' } },
   },
   {
+    name: 'routeProbeNow',
+    call: (api) => api.routeProbeNow({ routeIds: ['r-1'] }),
+    method: 'POST',
+    url: '/api/routing/probe',
+    body: { routeIds: ['r-1'] },
+    ok: {
+      body: {
+        request: {
+          requestId: 'q-1',
+          requestedAt: AT,
+          by: 'u-a',
+          routeIds: ['r-1'],
+          state: 'queued',
+          results: [],
+        },
+        engine: { state: 'on' },
+      },
+    },
+  },
+  {
     name: 'movePurposeModel',
     call: (api) =>
       api.movePurposeModel('execute', 'opus-5.5', { direction: 'down', expected: ['opus-5.5', 'kimi-k3'] }),

@@ -19,6 +19,9 @@ import {
   type Db,
   finishScheduleRun,
   readEngineMasterRow,
+  recordRouteProbeDone,
+  recordRouteProbeStart,
+  routeProbeAuditRows,
   scheduleHealth,
   startScheduleRun,
 } from '@fleet-dao/db';
@@ -31,6 +34,7 @@ import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
+import { routeProbeLock } from '../jobs/route-probe-now.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
@@ -534,6 +538,16 @@ export function realPortsFromEnv(
     }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok、Mirasim）、同一个工作树的根（探针目录在它下面）
     routeProbe,
+    // 驾驶舱的立即探测：和定时那一轮同一份探法、同一把锁，接手、探完各记一条操作记录
+    routeProbeNow: () => ({
+      rows: (since) => routeProbeAuditRows(db, since),
+      start: (requestId, at) => recordRouteProbeStart(db, requestId, at),
+      done: (input) => recordRouteProbeDone(db, input),
+      probe: routeProbe,
+      lock: routeProbeLock,
+      now: () => new Date(),
+      log: (level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}),
+    }),
     // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
     quotaRead: quotaReadJob({ db }),
     // 拼车额度盯读（#194）：每分钟起一条，按情况读开放接口、交给切号当场判

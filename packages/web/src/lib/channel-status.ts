@@ -4,8 +4,16 @@
 // 这里只显示，不改选路。没排进任何用途的渠道（干粉）探针不花额度去探，卡片照列、写「没在配的路由里，未探」。
 
 import { routeProbeEveryMinutes } from '@fleet-dao/shared';
-import type { Channel, Model, Route, RoutingLayerRoute, RoutingLayers } from '../api/types';
+import type {
+  Channel,
+  ChannelState as ChannelStateRow,
+  Model,
+  Route,
+  RoutingLayerRoute,
+  RoutingLayers,
+} from '../api/types';
 import { TIME } from './format';
+import { type Failover, failoverOf } from './provider-status';
 import type { Tone } from './status';
 
 /** 探针的结论超过「探测间隔 + 这么多分钟」还没更新，卡片就改成「检测中断」（mirastatus 同一个口径：不拿旧绿灯掩盖中断）。 */
@@ -47,6 +55,8 @@ export interface ChannelCard {
   activeRoutes: number;
   /** 暂不可用时的顺延说明：顺延到谁，或后面没有能用的了。 */
   fallback?: string;
+  /** 运行中失败被标不可用（#1118）：为什么、顺延到谁、下次探测；没出过事或已恢复没有。 */
+  failover?: Failover;
 }
 
 const LATENCY = /用时\s*(\d+)\s*秒/;
@@ -122,7 +132,13 @@ function clip(text: string): string {
  * layers 来自 GET /routing/layers，routing 来自 GET /routing（目录里的渠道名单、每条路探针写的 detail）。
  */
 export function buildChannelCards(
-  routing: { channels: readonly Channel[]; routes: readonly Route[]; models: readonly Model[] },
+  routing: {
+    channels: readonly Channel[];
+    routes: readonly Route[];
+    models: readonly Model[];
+    /** 渠道近态（#1118）：运行中失败被标不可用的渠道；不给当没有。 */
+    channelStates?: readonly ChannelStateRow[];
+  },
   layers: RoutingLayers,
   now: number,
 ): ChannelCard[] {
@@ -210,11 +226,24 @@ export function buildChannelCards(
       reason = clip(firstUnknown.connect.reason);
     }
 
-    if (interrupted) {
+    // 运行中失败被标不可用（#1118）：探针的结论还没来得及改，干活那边已经撞上了；探通引发失败的那条路由才改回
+    const failover = failoverOf(
+      routing.channelStates?.find((s) => s.channelId === channel.id),
+      routing.routes,
+      routing,
+    );
+    if (failover) {
+      state = 'down';
+      label = '运行中失败，已顺延';
+      tone = 'fail';
+      reason = clip(failover.reason);
+    }
+    if (interrupted && !failover) {
       label = '检测中断';
       tone = 'stall';
     }
     return {
+      ...(failover ? { failover } : {}),
       channel,
       state,
       interrupted,
@@ -239,7 +268,8 @@ export function buildChannelCards(
   // 顺延：探针报错暂不可用的渠道，选路顺延到后面第一个还能用的渠道（只显示，选路另有判法）
   const usable = (c: ChannelCard) => !c.interrupted && (c.state === 'ok' || c.state === 'partial');
   const withFallback = ranked.map((c, i): ChannelCard => {
-    if (c.state !== 'down' || c.interrupted) return c;
+    // 运行中失败的渠道顺到谁是选路真派过的（failover.fallback），不再按顺位猜一个
+    if (c.state !== 'down' || c.interrupted || c.failover) return c;
     const next = ranked.slice(i + 1).find(usable);
     return {
       ...c,

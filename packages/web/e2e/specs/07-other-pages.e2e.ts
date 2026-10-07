@@ -76,7 +76,7 @@ test.describe('其余页面', () => {
     page,
     shot,
   }) => {
-    await page.goto('/routing');
+    await page.goto('/routing/status');
     await expect(page.getByRole('heading', { name: '渠道状态' })).toBeVisible();
     const list = page.getByRole('list', { name: '渠道状态' });
     // 目录样例里的 5 个渠道一个不少，写的是目录里公开的名字

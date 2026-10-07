@@ -10,7 +10,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useRef, useSyncExternalStore } from 'react';
 import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
 import { canSee, isDemo } from '../demo/access';
@@ -40,6 +40,9 @@ import type {
   ReleaseVersion,
   Repo,
   RepoDispatch,
+  RouteProbeNowBody,
+  RouteProbeNowResult,
+  RouteProbeStatus,
   Routing,
   RoutingEfforts,
   RoutingLayers,
@@ -100,6 +103,10 @@ export interface FleetApi {
   routing(): Promise<Routing>;
   /** 路由两层每一层现在活着吗（#574）：用途 → 模型 → 路由，读的时候现算。 */
   routingLayers(): Promise<RoutingLayers>;
+  /** 立即探测的现状：最近点过的、引擎接没接、每条的结论，加上引擎此刻在不在。 */
+  routeProbeStatus(): Promise<RouteProbeStatus>;
+  /** 立即探测：routeIds 不给 = 全部路由。引擎关着 409、没连上 503（消息写明是哪样）。 */
+  routeProbeNow(body: RouteProbeNowBody): Promise<RouteProbeNowResult>;
   /** 每个模型下每条路由起会话的思考档位（#470）。 */
   routingEfforts(): Promise<RoutingEfforts>;
   /** 改一条路由的思考档位：effort 写 null = 回到没配（默认档）；expected 是改之前看到的，对不上 409。 */
@@ -182,6 +189,7 @@ export const keys = {
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
+  routeProbe: ['route-probe'] as const,
   pools: ['pools'] as const,
   poolHolds: ['pool-holds'] as const,
   jobs: ['jobs'] as const,
@@ -289,6 +297,53 @@ export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {})
     queryFn: () => api.routingLayers(),
     refetchInterval: 30_000,
     enabled,
+  });
+}
+
+/**
+ * 立即探测的现状（渠道状态页）：有在排队、在探的，每 3 秒重拉一次，看到探完就把路由目录和路由两层也重拉（探完的结论写在
+ * 路由上）；没有在探的每 30 秒一次。
+ */
+export function useRouteProbeStatus() {
+  const api = useApi();
+  const qc = useQueryClient();
+  const settled = useRef<Set<string> | null>(null);
+  const query = useQuery({
+    queryKey: keys.routeProbe,
+    queryFn: () => api.routeProbeStatus(),
+    refetchInterval: (q) =>
+      q.state.data?.requests.some((r) => r.state === 'queued' || r.state === 'running') ? 3_000 : 30_000,
+  });
+  const data = query.data;
+  useEffect(() => {
+    if (!data) return;
+    const finished = new Set(
+      data.requests.filter((r) => r.state !== 'queued' && r.state !== 'running').map((r) => r.requestId),
+    );
+    const before = settled.current;
+    settled.current = finished;
+    // 第一次拿到时不算「刚探完」；之后多出来的（这一眼才探完的）才叫路由重拉
+    if (before && [...finished].some((id) => !before.has(id))) {
+      qc.invalidateQueries({ queryKey: keys.routing });
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
+    }
+  }, [data, qc]);
+  return query;
+}
+
+/** 点「立即探测」：成了马上重拉现状（页面立刻看到排队）；没成的错误原样交给页面（引擎关着、没连上各有一句话）。 */
+export function useRouteProbeNow() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RouteProbeNowBody) => api.routeProbeNow(body),
+    onSuccess: (result) => {
+      qc.setQueryData<RouteProbeStatus>(keys.routeProbe, (old) =>
+        old ? { ...old, engine: result.engine, requests: [result.request, ...old.requests] } : old,
+      );
+      qc.invalidateQueries({ queryKey: keys.routeProbe });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
   });
 }
 

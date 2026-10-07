@@ -29,6 +29,7 @@ import { startDrainStatusFile } from './drain-file.ts';
 import type { EngineMasterGate } from './engine-master.ts';
 import { createFakeWorld } from './fakes.ts';
 import { engineTimerJobs } from './jobs/engine-timers.ts';
+import { type RouteProbeNowPoller, startRouteProbeRequests } from './jobs/route-probe-now.ts';
 import { type EngineTimers, realTimerHost, startTimers } from './jobs/timers.ts';
 import type { EnginePorts } from './ports.ts';
 
@@ -312,6 +313,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let shutdown: ReturnType<typeof installGracefulShutdown> | undefined;
   let stopControl: (() => void) | undefined;
   let stopMaster: (() => void) | undefined;
+  let probeNow: RouteProbeNowPoller | undefined;
   try {
     // 引擎总开关（#1086）：接活之前先读一次（读不到按关），之后每 5 秒刷新；选路、一次性会话登记读缓存，定时器入口每轮现读
     if (master) {
@@ -364,6 +366,11 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
         ),
       );
       console.info('定时任务的定时器已起');
+      // 驾驶舱的立即探测：每几秒看一眼有没人点（总开关关着也看：探针是看家检查）
+      if (jobs.routeProbeNow) {
+        probeNow = startRouteProbeRequests(jobs.routeProbeNow);
+        console.info('立即探测已起');
+      }
     }
     shutdown = installGracefulShutdown({
       worker,
@@ -384,6 +391,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     }
     stopControl?.();
     stopMaster?.();
+    probeNow?.stop();
     await status?.flush();
     status?.stop();
     await clientConnection?.close();
