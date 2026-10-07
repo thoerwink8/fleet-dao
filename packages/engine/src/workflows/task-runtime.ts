@@ -38,7 +38,7 @@ import {
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../task-contract.ts';
-import { conflictFilesOf, failureOf, iso, judgeRetrying } from './kit.ts';
+import { conflictFilesOf, conflictPendingOf, failureOf, iso, judgeRetrying } from './kit.ts';
 import {
   Abandoned,
   bump,
@@ -357,7 +357,12 @@ export class TaskRuntime {
         // 合并冲突不在这一步里原地重试：第二次原文必一字不差，会直接挂起，会话根本看不到冲突。
         // 老历史没有这个标记，照旧交给失败分流（重试这一步，再不行挂起）。
         if (failure.code.toLowerCase() === 'merge_conflict' && patched('conflict-handoff-keeps-tree')) {
-          throw new ConflictHandoff(conflictFilesOf(error, failure.message));
+          // 合并还没开始（没跟踪的文件挡着）没有冲突标记：原反馈里有要并的提交，不能改写成「树里留着冲突标记」。
+          const pending = conflictPendingOf(error, failure.message);
+          throw new ConflictHandoff(conflictFilesOf(error, failure.message), {
+            pending,
+            instruction: pending ? null : failure.message,
+          });
         }
         const next = await this.classify(failure, counters, false, { previousMessage });
         previousMessage = failure.message;

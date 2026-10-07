@@ -31,7 +31,8 @@
 // - 第 2 轮起、动手会话起之前先把最新主线并进任务分支（#1246，task-sync.ts；patched('sync-mainline-before-implement')）：并上了就推、树跟着快进；
 //   并出冲突把文件名记进返工意见交给这一轮的会话；没查成记下照旧往下走。验收前不并（并了头就变）。
 // - 推分支并主线撞上内容冲突（MERGE_CONFLICT，patched('conflict-handoff-keeps-tree')）：不在 push 这一步里原地重试。
-//   树里留着合并的冲突标记，交回下一轮动手会话；交回时 MERGE_HEAD 还在或 git diff --check 还有冲突标记，不算交活、不推。
+//   内容冲突：树里留着合并的冲突标记，交回下一轮动手会话。合并还没开始（没跟踪的文件挡着）：原反馈留着，让会话自己 git merge 那个提交。
+//   交回时 MERGE_HEAD 还在，或 git diff --check（工作区、暂存区，或这次提交进 HEAD 的）还有冲突标记，不算交活、不推。
 //   上一轮没解就在反馈里补一句；反馈和上一轮一字不差才挂起，提醒里写冲突文件和工作树路径。老历史没有这个标记，照旧在 step 里重试。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
@@ -178,7 +179,9 @@ class TaskFlow {
         }),
       );
     } catch (error) {
-      if (error instanceof ConflictHandoff) return this.conflictStillThere(wt, error.files);
+      if (error instanceof ConflictHandoff) {
+        return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
+      }
       throw error;
     }
     rt.head = pushed.head;
@@ -209,10 +212,17 @@ class TaskFlow {
     return true;
   }
 
-  /** 冲突还在：交给下一轮会话。反馈和上一轮一字不差就挂起，提醒里写冲突文件和树的位置。 */
-  private async conflictStillThere(wt: Worktree, files: readonly string[]): Promise<boolean> {
+  /**
+   * 冲突还在：交给下一轮会话。反馈和上一轮一字不差就挂起，提醒里写冲突文件和树的位置。
+   * blocked 有值：合并没开始，用原反馈（含要并的提交），不说树里留着冲突标记。
+   */
+  private async conflictStillThere(
+    wt: Worktree,
+    files: readonly string[],
+    blocked?: string | null,
+  ): Promise<boolean> {
     const rt = this.rt;
-    const line = conflictHandoffLine(files, rt.feedback);
+    const line = conflictHandoffLine(files, rt.feedback, blocked);
     if (rt.feedback.includes(line)) {
       const names = files.join('、') || '（没读到冲突文件名）';
       const where = `冲突文件：${names}。工作树：${wt.path}`;

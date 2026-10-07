@@ -385,7 +385,7 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(err).toMatchObject({
       code: 'MERGE_CONFLICT',
       retryable: false,
-      details: { mainline: main, conflictFiles: ['a.ts'] },
+      details: { mainline: main, conflictFiles: ['a.ts'], pending: true },
     });
     expect((err as Error).message).toContain('解完 `git add` 并提交');
     expect((err as Error).message).toContain('a.ts');
@@ -413,9 +413,11 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(err).toMatchObject({
       code: 'MERGE_CONFLICT',
       retryable: false,
-      details: { mainline: main, conflictFiles: ['b.ts'] },
+      details: { mainline: main, conflictFiles: ['b.ts'], pending: false },
     });
     expect((err as Error).message).toContain('b.ts');
+    expect((err as Error).message).toContain(`git merge ${main}`);
+    expect((err as Error).message).not.toContain('树里留着冲突标记');
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
     expect(readFileSync(join(dir, 'b.ts'), 'utf8')).toBe('// 会话的草稿\n');
     expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);

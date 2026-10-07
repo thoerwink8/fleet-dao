@@ -79,23 +79,41 @@ export function stripUndefined<T extends object>(o: T): T {
 /** 推分支并主线撞上冲突，交回会话去解（不在 push 这一步里原地重试）。 */
 export class ConflictHandoff extends Error {
   readonly files: readonly string[];
-  constructor(files: readonly string[]) {
+  /** false：合并没开始，树里没有这次的冲突标记。instruction 是原反馈（含要并的提交）。 */
+  readonly pending: boolean;
+  readonly instruction: string | null;
+  constructor(files: readonly string[], options: { pending?: boolean; instruction?: string | null } = {}) {
     super(`有冲突没解：${files.join('、') || '（没读到冲突文件名）'}`);
     this.name = 'ConflictHandoff';
     this.files = files;
+    this.pending = options.pending ?? true;
+    this.instruction = options.instruction ?? null;
   }
 }
 
 /**
- * 交回会话的那一句：冲突文件名，加上「解完 git add 并提交」。
- * 上一轮已经交过（意见里有「解完」）还没解，补上「上一轮没解」。和上一轮原文一样就由调用方挂起。
+ * 交回会话的那一句。
+ * 树里留着标记：冲突文件名，加上「解完 git add 并提交」。
+ * 合并还没开始（blocked 是原反馈）：原句留着，里面有要并的提交。不改写成「树里留着冲突标记」。
+ * 上一轮已经交过同一句还没解，补上「上一轮没解」。和上一轮原文一样就由调用方挂起。
  */
-export function conflictHandoffLine(files: readonly string[], previous: readonly string[]): string {
+export function conflictHandoffLine(
+  files: readonly string[],
+  previous: readonly string[],
+  blocked?: string | null,
+): string {
   const names =
     files
       .map((f) => f.trim())
       .filter(Boolean)
       .join('、') || '（没读到冲突文件名）';
+  if (blocked != null) {
+    const base =
+      blocked.trim() ||
+      `有冲突没解：${names}。合并还没开始，树里没有冲突标记。在树里 git merge 目标提交，解掉冲突、提交后再交`;
+    const noted = `${base}。上一轮没解`;
+    return previous.includes(base) || previous.includes(noted) ? noted : base;
+  }
   const base = `有冲突没解：${names}。树里留着冲突标记，解完 \`git add\` 并提交`;
   return previous.some((line) => line.includes('解完')) ? `${base}。上一轮没解` : base;
 }

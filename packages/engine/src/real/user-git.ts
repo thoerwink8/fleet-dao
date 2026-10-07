@@ -226,11 +226,42 @@ export async function uncommittedTracked(t: UserTree): Promise<string[]> {
   return lines(await git(t, ['status', '--porcelain', '--untracked-files=no'], '看有没有没提交的改动'));
 }
 
+/** `git diff --check` 报出的冲突标记文件。行尾空白之类别的告警不算。 */
+function conflictMarkerFiles(check: UserCommandResult): string[] {
+  const blob = `${text(check)}\n${check.stderr}`;
+  const files: string[] = [];
+  for (const line of blob.split('\n')) {
+    const matched = /^(.*):\d+: leftover conflict marker$/.exec(line.trim());
+    const file = matched?.[1];
+    if (file) files.push(file);
+  }
+  return files;
+}
+
 /**
- * 树里还没解完的冲突。两样任一就算：MERGE_HEAD 还在，或 `git diff --check`（含已暂存）看到冲突标记。
- * 没有就是空数组。查不成就抛，不当成没有——空数组是「查过、没有」，不是「没查成」。
+ * 这个文件在 HEAD 和钉住的主线上是不是同一个内容。主线原样带进来的（里面碰巧有一行七个等号）不算这次没解。
+ * 查不成就抛，不当成「和主线一样」——那会把真没解的放过去。
  */
-export async function unresolvedConflicts(t: UserTree): Promise<string[]> {
+async function sameAsMainline(t: UserTree, mainline: string, file: string): Promise<boolean> {
+  const r = await git(t, ['diff', '--quiet', mainline, 'HEAD', '--', file], `比 ${file} 和主线`, {
+    allow: [1],
+  });
+  return r.code === 0;
+}
+
+/**
+ * 树里还没解完的冲突。任一就算：MERGE_HEAD 还在；工作区或暂存区 `git diff --check` 看到冲突标记；
+ * 或者这次提交进 HEAD 的文件里还有（`git diff --check <起点> HEAD`）。最后一种是会话没删标记、直接
+ * `git add` 并提交：MERGE_HEAD 没了，工作区和暂存区的 diff 都是空的，标记却已经进了提交。
+ * 起点用起会话前的头，不用 ownSpan 的 from：from 有时是带冲突标记的 merge-tree，再和 HEAD 比就看不出标记还在。
+ * 和钉住的主线一个字节都不差的文件不算（主线自己带进来的）。没有就是空数组。查不成就抛，不当成没有。
+ */
+export async function unresolvedConflicts(
+  t: UserTree,
+  committed: { since: string; mainline: string },
+): Promise<string[]> {
+  assertSha(committed.since, '比冲突标记的起点');
+  assertSha(committed.mainline, '主线');
   const left = await mergeLeft(t);
   if (left !== 'yes' && left !== 'no') {
     throw new PortError('GIT_FAILED', `有没有没并完的合并没查成（${left.unknown}）`, {
@@ -248,11 +279,18 @@ export async function unresolvedConflicts(t: UserTree): Promise<string[]> {
       allow: [2],
     });
     if (check.code !== 2) continue;
-    const blob = `${text(check)}\n${check.stderr}`;
-    for (const line of blob.split('\n')) {
-      const matched = /^(.*):\d+: leftover conflict marker$/.exec(line.trim());
-      const file = matched?.[1];
-      if (file) files.add(file);
+    for (const file of conflictMarkerFiles(check)) files.add(file);
+  }
+  const committedCheck = await git(
+    t,
+    ['diff', '--check', committed.since, 'HEAD'],
+    '查这次提交里的冲突标记',
+    { allow: [2] },
+  );
+  if (committedCheck.code === 2) {
+    for (const file of conflictMarkerFiles(committedCheck)) {
+      if (await sameAsMainline(t, committed.mainline, file)) continue;
+      files.add(file);
     }
   }
   if (left === 'yes' && files.size === 0) files.add('（MERGE_HEAD 还在）');
