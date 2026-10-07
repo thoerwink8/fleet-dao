@@ -23,6 +23,10 @@ import {
   type CiPlan,
   ciVerdict,
   dependentsClosure,
+  E2E_PAGE_MAP,
+  E2E_SPEC_DIR,
+  e2eRuns,
+  e2eSpecsFor,
   fallbackUnits,
   PATH_RULES,
   type PackageGraph,
@@ -572,7 +576,8 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
 
 describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的跳过了', () => {
   // 汇总核的是 changes 给的 plan + 矩阵里的那份台：和入口同一条路（planCi → assignTests），不然「有单元没装箱」会被判成该跳过
-  const plan = assigned(pr('packages/conventions/src/ci-plan.ts'));
+  // 不用 ci-plan.ts 本身：改它（映射表）会让 e2e 全套，这里要的是 e2e 不跑的那一份
+  const plan = assigned(pr('packages/conventions/src/repo.ts'));
   const needs = (over: Record<string, unknown> = {}, p: CiPlan = plan) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     lint: { result: 'success', outputs: {} },
@@ -1277,142 +1282,263 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
   });
 });
 
-describe('驾驶舱 e2e（#930，2026-10-05 收窄）：只在碰到 web、api 时跑，红了汇总就红', () => {
+describe('驾驶舱 e2e（#930；决定 0029、#1186：PR 只点改动页，全量留给每夜）：输出是 spec 清单，红了汇总就红', () => {
   const needs = (p: CiPlan, over: Record<string, unknown> = {}) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     lint: { result: 'success', outputs: {} },
     test: { result: p.tests.length > 0 ? 'success' : 'skipped', outputs: {} },
     web: { result: p.web ? 'success' : 'skipped', outputs: {} },
-    e2e: { result: p.e2e ? 'success' : 'skipped', outputs: {} },
+    e2e: { result: e2eRuns(p.e2e) ? 'success' : 'skipped', outputs: {} },
     deploy: { result: p.deploy === 'none' ? 'skipped' : 'success', outputs: {} },
     ...over,
   });
+  const SPECS = 'packages/web/e2e/specs/';
+  const ALL_SPEC_FILES = readdirSync(join(ROOT, SPECS))
+    .filter((n) => n.endsWith('.e2e.ts'))
+    .sort();
 
-  it('web、api、ci.yml 自己的改动：开；输出给下游 job 的开关是字符串 true', () => {
+  it('改一个页面文件：清单只含那页的 spec（不是全套）；输出是相对 packages/web 的路径、空格隔开', () => {
+    const p = pr('packages/web/src/routes/notifications.tsx');
+    expect(p.e2e).toEqual([`${SPECS}06-notifications.e2e.ts`, `${SPECS}08-backend-down.e2e.ts`]);
+    expect(planOutputs(p).e2e).toBe('e2e/specs/06-notifications.e2e.ts e2e/specs/08-backend-down.e2e.ts');
+    // 登录页只有登录那个 spec
+    expect(pr('packages/web/src/routes/login.tsx').e2e).toEqual([`${SPECS}01-login.e2e.ts`]);
+    // 页面私有的组件跟着它的页面走；目录前缀整个认
+    expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).toContain(`${SPECS}02-home.e2e.ts`);
+    expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).not.toContain(
+      `${SPECS}06-notifications.e2e.ts`,
+    );
+    // 改到的 spec 文件自己：只跑它
+    expect(pr(`${SPECS}05-settings.e2e.ts`).e2e).toEqual([`${SPECS}05-settings.e2e.ts`]);
+    // 两页一起改：清单是并集、去重、排好序
+    const two = pr('packages/web/src/routes/login.tsx', 'packages/web/src/routes/notifications.tsx').e2e;
+    expect(two).toEqual([...new Set(two as string[])].sort());
+    expect(two).toContain(`${SPECS}01-login.e2e.ts`);
+    expect(two).toContain(`${SPECS}06-notifications.e2e.ts`);
+  });
+
+  it('改 e2e 夹具（support/）、playwright 配置、e2e 的备库、ci.yml、映射表本身（ci-plan.ts）：全套', () => {
     for (const f of [
-      'packages/web/src/routes/home.tsx',
-      'packages/web/e2e/specs/01-login.e2e.ts',
-      'packages/api/src/cockpit.ts',
+      'packages/web/e2e/support/fixtures.ts',
+      'packages/web/e2e/support/viewports.ts',
+      'packages/web/e2e/playwright.config.ts',
       'packages/api/test/e2e/prepare.ts',
       '.github/workflows/ci.yml',
+      'packages/conventions/src/ci-plan.ts',
     ]) {
       const p = pr(f);
-      expect(p.e2e, f).toBe(true);
-      expect(planOutputs(p).e2e, f).toBe('true');
+      expect(p.e2e, f).toBe('all');
+      expect(planOutputs(p).e2e, f).toBe('all');
     }
+    // 和一个页面一起改：全套盖过清单
+    expect(pr('packages/web/src/routes/login.tsx', 'packages/web/e2e/support/stack.ts').e2e).toBe('all');
   });
 
-  it('【故意造出的失败】孤立地改 db、shared、锁文件：不开（各有自己的单测把关，e2e 不是替它们兜底的）', () => {
+  it('映射不到页面的 web 改动（共享组件、样式、路由骨架、壳、包配置）：全套，不拿「没映射」冒充不用跑', () => {
     for (const f of [
-      'packages/db/src/catalog.ts',
-      'packages/db/migrations/0034_session_org_state.sql',
-      'packages/shared/src/web-api/index.ts',
-      'packages/shared/src/domain.ts',
-      'pnpm-lock.yaml',
-      'package.json',
-      'pnpm-workspace.yaml',
+      'packages/web/src/app.css',
+      'packages/web/src/routes.ts',
+      'packages/web/src/root.tsx',
+      'packages/web/src/routes/shell.tsx',
+      'packages/web/src/components/page.tsx',
+      'packages/web/src/components/ui/button.tsx',
+      'packages/web/src/lib/format.ts',
+      'packages/web/src/api/client.tsx',
+      'packages/web/package.json',
+      'packages/web/vite.config.ts',
+      // 不是 spec 的合规名字（含奇怪字符）：不原样交给 playwright，走全套
+      'packages/web/e2e/specs/x y.e2e.ts',
     ]) {
-      const p = pr(f);
-      expect(p.e2e, f).toBe(false);
-      expect(planOutputs(p).e2e, f).toBe('false');
+      expect(pr(f).e2e, f).toBe('all');
     }
-    // 但它们和 web/api 一起改时照旧开（有一个文件碰到就开）
-    expect(pr('packages/db/src/catalog.ts', 'packages/web/src/routes/home.tsx').e2e).toBe(true);
-    expect(pr('pnpm-lock.yaml', 'packages/api/src/cockpit.ts').e2e).toBe(true);
+    // 一个映射得到、一个映射不到：全套
+    expect(pr('packages/web/src/routes/login.tsx', 'packages/web/src/app.css').e2e).toBe('all');
   });
 
-  it('别的改动不开：文档、别的包、deploy/（升了全跑也不开）、别的工作流', () => {
+  it('只改 api（含 api 的测试）、只改 web 的测试文件和 .md、改的页面没有 spec 盖着：空清单，输出空串', () => {
+    for (const f of [
+      'packages/api/src/cockpit.ts',
+      'packages/api/test/health.test.ts',
+      'packages/web/src/routes/login.test.tsx',
+      'packages/web/src/lib/utils.test.ts',
+      'packages/web/src/test/harness.tsx',
+      'packages/web/e2e/README.md',
+      'packages/web/src/routes/france.tsx',
+      'packages/web/src/routes/soon.tsx',
+    ]) {
+      const p = pr(f);
+      expect(p.e2e, f).toEqual([]);
+      expect(planOutputs(p).e2e, f).toBe('');
+    }
+    expect(pr('packages/api/src/cockpit.ts', 'packages/api/src/db.ts').e2e).toEqual([]);
+    // 空清单和别的页面一起改：只剩别的页面
+    expect(pr('packages/api/src/cockpit.ts', 'packages/web/src/routes/login.tsx').e2e).toEqual([
+      `${SPECS}01-login.e2e.ts`,
+    ]);
+  });
+
+  it('改到的 spec 文件被删了：不再点名它（playwright 找不到文件会红）；删了又只改这一个就是空清单', () => {
+    const gone = `${SPECS}99-gone.e2e.ts`;
+    const exists = (rel: string) => rel !== gone;
+    expect(e2eSpecsFor([gone], exists)).toEqual([]);
+    expect(e2eSpecsFor([gone, `${SPECS}01-login.e2e.ts`], exists)).toEqual([`${SPECS}01-login.e2e.ts`]);
+    const p = planCi({ event: 'pull_request', changed: [gone], graph: graph(), specExists: exists });
+    expect(p.e2e).toEqual([]);
+  });
+
+  it('映射表自检：每条的文件都在仓里、每个 spec 都在 specs/ 里；每个 spec 至少有一页指向它', () => {
+    const seen = new Set<string>();
+    for (const entry of E2E_PAGE_MAP) {
+      expect(entry.files.length).toBeGreaterThan(0);
+      for (const f of entry.files) {
+        expect(existsSync(join(ROOT, f)), `映射表里的 ${f} 不在仓里`).toBe(true);
+        if (f.endsWith('/')) expect(statSync(join(ROOT, f)).isDirectory(), f).toBe(true);
+      }
+      for (const s of entry.specs) {
+        expect(s.startsWith(E2E_SPEC_DIR), s).toBe(true);
+        expect(existsSync(join(ROOT, s)), `映射表里的 ${s} 不在 specs/ 里`).toBe(true);
+        seen.add(s);
+      }
+    }
+    // 新加了 spec 却忘了接进映射表：改那一页的 PR 不会点到它（只有每夜才跑），这里拦住
+    // 例外：09-logout 测的是壳的账号菜单，壳（shell.tsx、topbar）不在表里——壳的改动本来就按「映射不到」走全套
+    const SHELL_ONLY = ['09-logout.e2e.ts'];
+    for (const n of ALL_SPEC_FILES.filter((x) => !SHELL_ONLY.includes(x)))
+      expect(seen.has(`${SPECS}${n}`), `${n} 没有任何页面指向它`).toBe(true);
+    // 同一个文件不在两条里（两条说法打架）
+    const files = E2E_PAGE_MAP.flatMap((e) => e.files);
+    expect(new Set(files).size).toBe(files.length);
+  });
+
+  it('【故意造出的失败】认不出改了什么（非 PR 事件、空改动、依赖图读不出、认不出的路径）：全套，不拿「没改什么」冒充可以不跑', () => {
+    // 每夜（schedule）、主线推送、手动：一行不改，照旧全套
+    for (const event of ['push', 'schedule', 'workflow_dispatch', 'merge_group'])
+      expect(planCi({ event, changed: ['README.md'], graph: graph() }).e2e, event).toBe('all');
+    expect(
+      planCi({ event: 'schedule', changed: ['packages/api/src/cockpit.ts'], graph: graph() }).e2e,
+      '每夜轮即使改动只碰 api 也是全套',
+    ).toBe('all');
+    expect(planCi({ event: 'pull_request', changed: [], graph: graph() }).e2e).toBe('all');
+    expect(planCi({ event: 'pull_request', changed: ['docs/x.md'], graph: '读不出' }).e2e).toBe('all');
+    expect(pr('some-new-top-dir/file.txt').e2e).toBe('all');
+    expect(pr('packages/not-a-package/src/a.ts').e2e).toBe('all');
+    // 认不出的路径和只改 api 一起：全套盖过空清单
+    expect(pr('some-new-top-dir/file.txt', 'packages/api/src/cockpit.ts').e2e).toBe('all');
+  });
+
+  it('别的改动不开：文档、别的包、db、shared、根配置、deploy/（升了全跑也不开）、别的工作流', () => {
     for (const f of [
       'docs/design.md',
-      'packages/conventions/src/ci-plan.ts',
       'packages/engine/src/index.ts',
       'packages/cli/src/help.ts',
+      'packages/db/src/catalog.ts',
+      'packages/shared/src/domain.ts',
+      'pnpm-lock.yaml',
       'deploy/france.sh',
       'biome.json',
       '.github/workflows/merge-gate.yml',
     ]) {
       const p = pr(f);
-      expect(p.e2e, f).toBe(false);
-      expect(planOutputs(p).e2e, f).toBe('false');
+      expect(p.e2e, f).toEqual([]);
+      expect(planOutputs(p).e2e, f).toBe('');
     }
     // deploy/ 升全跑，但 e2e 不跟着开：全跑的原因和 e2e 认的路径是两回事
-    expect(pr('deploy/france.sh')).toMatchObject({ full: true, e2e: false });
-    // 一起改：有一个文件碰到就开
-    expect(pr('docs/design.md', 'packages/api/src/cockpit.ts').e2e).toBe(true);
-  });
-
-  it('【故意造出的失败】认不出改了什么（非 PR 事件、空改动、依赖图读不出、认不出的路径）：开，不拿「没改什么」冒充可以不跑', () => {
-    for (const event of ['push', 'workflow_dispatch', 'merge_group'])
-      expect(planCi({ event, changed: ['README.md'], graph: graph() }).e2e, event).toBe(true);
-    expect(planCi({ event: 'pull_request', changed: [], graph: graph() }).e2e).toBe(true);
-    expect(planCi({ event: 'pull_request', changed: ['docs/x.md'], graph: '读不出' }).e2e).toBe(true);
-    expect(pr('some-new-top-dir/file.txt').e2e).toBe(true);
-    expect(pr('packages/not-a-package/src/a.ts').e2e).toBe(true);
+    expect(pr('deploy/france.sh')).toMatchObject({ full: true, e2e: [] });
+    // 一起改：页面的清单照出
+    expect(pr('docs/design.md', 'packages/web/src/routes/login.tsx').e2e).toEqual([
+      `${SPECS}01-login.e2e.ts`,
+    ]);
   });
 
   it('同树复用（主线推送）：e2e 跟 test、web、deploy 一起不再重测；复用了却还开着 e2e 的 plan 认不出', () => {
     const full = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
-    expect(full.e2e).toBe(true);
+    expect(full.e2e).toBe('all');
     const reuse = { run: 11, pr: 7, tree: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
     const reused = applyReuse(full, reuse);
-    expect(reused.e2e).toBe(false);
+    expect(reused.e2e).toEqual([]);
     expect(ciVerdict(needs(reused), 'push').ok).toBe(true);
-    // 复用的 plan 里 e2e 还是 true：汇总不信
-    const lying = { ...reused, e2e: true };
+    // 复用的 plan 里 e2e 还有清单：汇总不信
+    const lying = { ...reused, e2e: 'all' as const };
     const v = ciVerdict(needs(lying, { e2e: { result: 'success' } }), 'push');
     expect(v.ok).toBe(false);
     expect(v.lines.join('\n')).toContain('还有要测的');
+    const lying2 = { ...reused, e2e: [`${SPECS}01-login.e2e.ts`] };
+    expect(ciVerdict(needs(lying2, { e2e: { result: 'success' } }), 'push').ok).toBe(false);
   });
 
   /**
-   * 【故意造出的失败】e2e 红 → 汇总红。changes 说要跑（碰了 api），job 红了、被取消、被误跳过，汇总都得红并点名；
+   * 【故意造出的失败】e2e 红 → 汇总红。changes 说要跑（碰了页面），job 红了、被取消、被误跳过，汇总都得红并点名；
    * 反过来 changes 说不用跑，job 却跑了（开关和 if 对不上）也红。
    */
-  it('【故意造出的失败】e2e 该跑却红了、取消了、被跳过：汇总红，点名 e2e', () => {
-    const p = assigned(pr('packages/api/src/cockpit.ts'));
-    expect(p.e2e, '这条查的场景不成立了').toBe(true);
-    expect(ciVerdict(needs(p)).ok).toBe(true);
-    for (const result of ['failure', 'cancelled', 'skipped']) {
-      const v = ciVerdict(needs(p, { e2e: { result } }));
-      expect(v.ok, result).toBe(false);
-      expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
+  it('【故意造出的失败】e2e 该跑却红了、取消了、被跳过：汇总红，点名 e2e（清单和全套都一样）', () => {
+    for (const p of [
+      assigned(pr('packages/web/src/routes/login.tsx')),
+      assigned(pr('packages/web/e2e/support/stack.ts')),
+    ]) {
+      expect(e2eRuns(p.e2e), '这条查的场景不成立了').toBe(true);
+      expect(ciVerdict(needs(p)).ok).toBe(true);
+      for (const result of ['failure', 'cancelled', 'skipped']) {
+        const v = ciVerdict(needs(p, { e2e: { result } }));
+        expect(v.ok, result).toBe(false);
+        expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
+      }
+      const missing = needs(p) as Record<string, unknown>;
+      delete missing.e2e;
+      const none = ciVerdict(missing);
+      expect(none.ok).toBe(false);
+      expect(none.lines.join('\n')).toContain('✗ e2e：没有这个 job 的结果');
     }
-    const missing = needs(p) as Record<string, unknown>;
-    delete missing.e2e;
-    const none = ciVerdict(missing);
-    expect(none.ok).toBe(false);
-    expect(none.lines.join('\n')).toContain('✗ e2e：没有这个 job 的结果');
   });
 
-  it('e2e 不该跑（没碰那几处）：skipped 才对，跑了反而红；开关输出和 plan 不是同一份也红', () => {
-    const p = assigned(pr('packages/cli/src/help.ts'));
-    expect(p.e2e).toBe(false);
-    expect(ciVerdict(needs(p)).ok).toBe(true);
+  it('清单为空（本该跳过）：skipped 才对、汇总绿；跑了反而红；开关输出和 plan 不是同一份也红', () => {
+    const p = assigned(pr('packages/api/src/cockpit.ts'));
+    expect(p.e2e).toEqual([]);
+    const ok = ciVerdict(needs(p));
+    expect(ok.ok, ok.lines.join('\n')).toBe(true);
+    expect(ok.lines.join('\n')).toContain('✓ e2e：skipped');
     const ran = ciVerdict(needs(p, { e2e: { result: 'success' } }));
     expect(ran.ok).toBe(false);
     expect(ran.lines.join('\n')).toContain('✗ e2e：success，本该 skipped');
-    const n = needs(p);
-    n.changes.outputs = { ...n.changes.outputs, e2e: 'true' };
-    const off = ciVerdict(n);
-    expect(off.ok).toBe(false);
-    expect(off.lines.join('\n')).toContain('e2e job 的开关');
-    // plan 缺 e2e 字段（旧的 plan）：认不出，不当成不用跑
-    const old = JSON.parse(planOutputs(p).plan as string) as Record<string, unknown>;
-    delete old.e2e;
-    const m = needs(p);
-    m.changes.outputs = { ...m.changes.outputs, plan: JSON.stringify(old) };
-    expect(ciVerdict(m).ok).toBe(false);
+    // GitHub 不把空串输出放进 needs（#1204 那次真事：清单为空的 PR，check 判「不是同一份」红了）：没有 e2e 这一项按空串认
+    const omitted = needs(p);
+    const { e2e: _dropped, ...rest } = omitted.changes.outputs;
+    omitted.changes.outputs = rest;
+    const okOmitted = ciVerdict(omitted);
+    expect(okOmitted.ok, okOmitted.lines.join('\n')).toBe(true);
+    // 【故意造出的失败】plan 要跑 e2e，输出却缺了这一项：不能当成空清单放过
+    const wantAll = { ...p, e2e: 'all' as const };
+    const missing = needs(wantAll, { e2e: { result: 'success' } });
+    const { e2e: _gone, ...rest2 } = missing.changes.outputs;
+    missing.changes.outputs = rest2;
+    expect(ciVerdict(missing).ok).toBe(false);
+    // 开关输出和 plan 里的清单不是同一份
+    for (const wrong of ['all', 'e2e/specs/01-login.e2e.ts']) {
+      const n = needs(p);
+      n.changes.outputs = { ...n.changes.outputs, e2e: wrong };
+      const off = ciVerdict(n);
+      expect(off.ok, wrong).toBe(false);
+      expect(off.lines.join('\n')).toContain('e2e job 的开关');
+    }
+    // plan 缺 e2e 字段（旧的 plan）、或还是旧的 true/false：认不出，不当成不用跑
+    for (const bad of [undefined, true, false, 'some', [1]]) {
+      const old = JSON.parse(planOutputs(p).plan as string) as Record<string, unknown>;
+      if (bad === undefined) delete old.e2e;
+      else old.e2e = bad;
+      const m = needs(p);
+      m.changes.outputs = { ...m.changes.outputs, plan: JSON.stringify(old) };
+      expect(ciVerdict(m).ok, String(bad)).toBe(false);
+    }
   });
 
   it('全跑但没碰 e2e 认的路径（deploy/ 脚本）：e2e 本该 skipped，汇总照 plan 核', () => {
     const p = assigned(pr('deploy/france.sh'));
-    expect(p).toMatchObject({ full: true, e2e: false });
+    expect(p).toMatchObject({ full: true, e2e: [] });
     expect(ciVerdict(needs(p)).ok).toBe(true);
     expect(ciVerdict(needs(p, { e2e: { result: 'success' } })).ok).toBe(false);
-    // 全跑又碰了 e2e 认的路径（api）：e2e 要跑
-    const withApi = assigned(pr('deploy/france.sh', 'packages/api/src/cockpit.ts'));
-    expect(withApi).toMatchObject({ full: true, e2e: true });
-    expect(ciVerdict(needs(withApi, { e2e: { result: 'skipped' } })).ok).toBe(false);
+    // 全跑又碰了页面：e2e 要跑（只跑那一页）
+    const withPage = assigned(pr('deploy/france.sh', 'packages/web/src/routes/login.tsx'));
+    expect(withPage).toMatchObject({ full: true, e2e: [`${SPECS}01-login.e2e.ts`] });
+    expect(ciVerdict(needs(withPage, { e2e: { result: 'skipped' } })).ok).toBe(false);
   });
 
   it('ci.yml 的 e2e job：只按 changes 的 e2e 开关开、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
@@ -1432,7 +1558,7 @@ describe('驾驶舱 e2e（#930，2026-10-05 收窄）：只在碰到 web、api �
     const e2e = doc.jobs.e2e;
     expect(e2e, 'ci.yml 里没有 e2e job').toBeDefined();
     expect(e2e?.needs).toBe('changes');
-    expect(e2e?.if).toBe("needs.changes.outputs.e2e == 'true'");
+    expect(e2e?.if, '清单为空（输出空串）就整个跳过').toBe("needs.changes.outputs.e2e != ''");
     expect(e2e?.['timeout-minutes'], '要给总耗时上限').toBeGreaterThan(0);
     expect(e2e?.['timeout-minutes']).toBeLessThanOrEqual(15);
     expect(e2e?.env?.E2E_PG_ADMIN_URL).toMatch(/^postgres:\/\/postgres@127\.0\.0\.1:5432\/postgres$/);
@@ -1449,6 +1575,13 @@ describe('驾驶舱 e2e（#930，2026-10-05 收窄）：只在碰到 web、api �
     const run = steps.find((s) => String(s.run ?? '').includes('pnpm --filter @fleet-dao/web e2e'));
     expect(run, '找不到跑 e2e 的那一步').toBeDefined();
     expect(run).not.toHaveProperty('if');
+    // 清单经环境变量交给 shell（不把表达式插进脚本）：all 跑全套，否则把清单当参数传给 playwright
+    expect((run?.env as Record<string, string> | undefined)?.E2E_SPECS).toBe(
+      '${{ needs.changes.outputs.e2e }}',
+    );
+    expect(String(run?.run)).not.toContain('${{');
+    expect(String(run?.run)).toContain('"$E2E_SPECS" = all');
+    expect(String(run?.run)).toContain('pnpm --filter @fleet-dao/web e2e $E2E_SPECS');
     // 汇总 job 等它
     expect(doc.jobs.check?.needs).toContain('e2e');
     // 它的名字在 PLANNED_JOBS 里（汇总核对）
