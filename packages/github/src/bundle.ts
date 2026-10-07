@@ -134,6 +134,74 @@ export async function fetchBranchHead(
   });
 }
 
+export interface ReadFileDiffInput {
+  repo: RepoRef;
+  /** 基线（三点比较：`基线...头`，和 PR 在 GitHub 上显示的一样只看分叉点之后头这边改的）。 */
+  baseSha: string;
+  headSha: string;
+  /** 要看的路径（改名的给改名前后两个，git 才认得出是改名）。 */
+  paths: string[];
+  signal?: AbortSignal | undefined;
+}
+
+export interface ReadFileDiffResult {
+  /** 从第一个 `@@` 起的 unified patch（和 GitHub 接口给的 patch 一个形状，没有 `diff --git`、`---`、`+++` 头）；没有文本改动是空串。 */
+  patch: string;
+}
+
+/**
+ * 从引擎镜像里读一个文件的 diff（GitHub 的 PR 文件接口遇到大文件不给 patch，验收用它补）。
+ * 基线、头都得已经在镜像里（先 fetchMainline、fetchBranchHead）；不在报 COMMIT_NOT_FOUND，读不出报 GIT_FAILED，不回空串顶替。
+ */
+export async function readFileDiff(
+  deps: Pick<MirrorReadDeps, 'git' | 'mirrorRoot' | 'baseEnv'>,
+  input: ReadFileDiffInput,
+): Promise<ReadFileDiffResult> {
+  const { repo } = input;
+  const slug = repoSlug(repo);
+  assertSafeRev(input.baseSha, '基线');
+  assertSafeRev(input.headSha, '头');
+  if (input.paths.length === 0) throw new GitHubError('BAD_INPUT', '至少要给一个路径');
+  const mirror = mirrorPath(deps.mirrorRoot, repo);
+  return withMirrorLock(mirror, async () => {
+    await ensureMirror(deps, mirror);
+    const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv }), timeoutMs: 120_000 };
+    const git: Git = (args, call) => deps.git(args, call);
+    for (const [what, rev] of [
+      ['基线', input.baseSha],
+      ['头', input.headSha],
+    ] as const) {
+      if ((await git(['cat-file', '-e', `${rev}^{commit}`], local)).code !== 0) {
+        throw new GitHubError(
+          'COMMIT_NOT_FOUND',
+          `镜像里没有${what}提交 ${rev.slice(0, 12)}，读不了文件的 diff`,
+          {
+            details: { rev },
+          },
+        );
+      }
+    }
+    const res = await git(
+      [
+        '-c',
+        'core.quotePath=false',
+        'diff',
+        '--no-color',
+        '--no-ext-diff',
+        '--no-textconv',
+        '-M',
+        `${input.baseSha}...${input.headSha}`,
+        '--',
+        ...input.paths,
+      ],
+      local,
+    );
+    if (res.code !== 0) throw fromGitFailure('读文件的 diff', slug, res);
+    const at = res.stdout.search(/^@@ /m);
+    return { patch: at < 0 ? '' : res.stdout.slice(at).replace(/\n+$/, '') };
+  });
+}
+
 export interface BundleCommitsInput {
   repo: RepoRef;
   /** 要打进包里的提交（必须已经在镜像里，不在就是调用方的错：先 fetchMainline 或推过它）。 */

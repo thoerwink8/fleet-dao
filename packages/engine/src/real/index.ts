@@ -85,7 +85,7 @@ import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from 
 import { createStorePorts } from './store-ports.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
-import { createColdVerify } from './task-verify.ts';
+import { createColdVerify, mirrorFileDiff } from './task-verify.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -756,6 +756,8 @@ export function realPortsFromEnv(
     }),
     coldVerify: createColdVerify({
       gh,
+      // 文件接口不给 patch 的大文件，用引擎镜像里的 git 补读（#1308）
+      fileDiff: mirrorFileDiff(gh),
       pickRoute: real.ports.pickRoute,
       spawner: segmentSpawner,
       runs: taskRuns,

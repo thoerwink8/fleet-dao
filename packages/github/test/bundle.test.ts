@@ -204,6 +204,64 @@ describe('从镜像打包', { timeout: 60_000 }, () => {
   });
 });
 
+describe('读镜像里一个文件的 diff（验收补读大文件，#1308）', { timeout: 60_000 }, () => {
+  it('基线...头 的 patch 从第一个 @@ 起，没有 diff --git 头；只含点名的路径；改名给前后两个路径', async () => {
+    const { gh } = bundleSetup();
+    const base = (await gh.fetchMainline({ repo })).head;
+    const path = join(root, `rd-${Math.random().toString(36).slice(2, 7)}`);
+    git(root, 'clone', '-q', remote, path);
+    git(path, 'checkout', '-q', '-b', 'task/read-diff');
+    writeFileSync(join(path, 'README.md'), 'hello\nworld\n');
+    writeFileSync(join(path, 'other.txt'), 'other\n');
+    git(path, 'add', '-A');
+    git(path, 'commit', '-q', '-m', 'edit');
+    git(path, 'push', '-q', 'origin', 'HEAD:task/read-diff');
+    const head = git(path, 'rev-parse', 'HEAD');
+    await gh.fetchBranchHead({ repo, branch: 'task/read-diff' });
+
+    const got = await gh.readFileDiff({ repo, baseSha: base, headSha: head, paths: ['README.md'] });
+    expect(got.patch.startsWith('@@ ')).toBe(true);
+    expect(got.patch).toContain('+world');
+    expect(got.patch).not.toContain('diff --git');
+    expect(got.patch).not.toContain('other');
+  });
+
+  it('没有文本改动的路径回空串（由调用方判读不到，不是这里替它说没事）', async () => {
+    const { gh } = bundleSetup();
+    const base = (await gh.fetchMainline({ repo })).head;
+    const got = await gh.readFileDiff({ repo, baseSha: base, headSha: base, paths: ['README.md'] });
+    expect(got).toEqual({ patch: '' });
+  });
+
+  it('【故意造出的失败】头不在镜像里：报 COMMIT_NOT_FOUND，不回空串', async () => {
+    const { gh } = bundleSetup();
+    const base = (await gh.fetchMainline({ repo })).head;
+    await expect(
+      gh.readFileDiff({ repo, baseSha: base, headSha: 'e'.repeat(40), paths: ['README.md'] }),
+    ).rejects.toMatchObject({ code: 'COMMIT_NOT_FOUND' });
+  });
+
+  it('【故意造出的失败】不是提交号的基线 / 没给路径：拒收', async () => {
+    const { gh } = bundleSetup();
+    await expect(
+      gh.readFileDiff({ repo, baseSha: '--output=x', headSha: 'e'.repeat(40), paths: ['a'] }),
+    ).rejects.toMatchObject({ code: 'BAD_INPUT' });
+    await expect(
+      gh.readFileDiff({ repo, baseSha: 'e'.repeat(40), headSha: 'e'.repeat(40), paths: [] }),
+    ).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+
+  it('【故意造出的失败】git diff 自己失败：报 GIT_FAILED，不回空串', async () => {
+    const runner: GitRunner = async (args, call) =>
+      args.includes('diff') ? { code: 128, stdout: '', stderr: 'fatal: bad revision' } : execGit(args, call);
+    const { gh } = setup({ git: runner, gitUrl: () => remote, gitHost: 'https://github.com/', env: {} });
+    const base = (await gh.fetchMainline({ repo })).head;
+    await expect(
+      gh.readFileDiff({ repo, baseSha: base, headSha: base, paths: ['README.md'] }),
+    ).rejects.toMatchObject({ code: 'GIT_FAILED' });
+  });
+});
+
 /** 起一个分支、在远端上写一个提交（模拟推被拒时远端此刻的状态）。 */
 function pushBranchCommit(branch: string, file: string, content: string): string {
   const path = join(root, `br-${branch.replace(/\//g, '-')}-${Math.random().toString(36).slice(2, 7)}`);

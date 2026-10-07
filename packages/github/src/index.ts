@@ -12,6 +12,9 @@ export {
   fetchBranchHead,
   fetchMainline,
   type MirrorReadDeps,
+  type ReadFileDiffInput,
+  type ReadFileDiffResult,
+  readFileDiff,
 } from './bundle.ts';
 export {
   type CheckVerdict,

@@ -15,6 +15,9 @@ import {
   type FetchMainlineResult,
   fetchBranchHead,
   fetchMainline,
+  type ReadFileDiffInput,
+  type ReadFileDiffResult,
+  readFileDiff,
 } from './bundle.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import {
@@ -158,6 +161,8 @@ export interface GitHub {
   bundleCommits(input: BundleCommitsInput, ctx?: ActivityContext): Promise<BundleCommitsResult>;
   /** 抓一个分支此刻在远端的头（不认镜像里旧引用还在不在，重新问一次）：推被拒时认领远端新头用。 */
   fetchBranchHead(input: FetchBranchInput, ctx?: ActivityContext): Promise<FetchBranchResult>;
+  /** 从镜像读一个文件的 `基线...头` diff（PR 文件接口对大文件不给 patch 时验收补读用；基线、头要已在镜像里）。 */
+  readFileDiff(input: ReadFileDiffInput, ctx?: ActivityContext): Promise<ReadFileDiffResult>;
   openPr(input: OpenPrInput, ctx?: ActivityContext): Promise<OpenPrResult>;
   waitCi(input: WaitCiInput, ctx?: ActivityContext): Promise<CiWaitResult>;
   /** PR 改到的文件（翻完页、带 patch）：判「改没改到标准路径」用它（#253）。 */
@@ -300,6 +305,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async fetchBranchHead(input, ctx = {}) {
       return fetchBranchHead(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async readFileDiff(input, ctx = {}) {
+      return readFileDiff(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
     },
     async writeSpecDoc(input, ctx = {}) {
       return writeSpecDoc(deps, { ...input, signal: input.signal ?? ctx.signal });
