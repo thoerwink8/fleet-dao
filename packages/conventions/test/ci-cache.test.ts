@@ -156,8 +156,10 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     ]);
   });
 
-  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 core、agents 读 db），不往上、不顺依赖往下传 TEST_READS', () => {
+  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、feishu 读 web、db 读 core、agents 读 db 和 agents-sync），不往上、不顺依赖往下传 TEST_READS', () => {
     expect(sourceClosure(GRAPH, ['api'])).toEqual(['api', 'db', 'shared', 'web']);
+    // feishu/test/static.test.ts 读 web 的路由表（TEST_READS）；依赖图里 feishu 只依赖 shared，web 来自这一项
+    expect(sourceClosure(GRAPH, ['feishu'])).toContain('web');
     expect(sourceClosure(GRAPH, ['db'])).toEqual(['core', 'db', 'shared']);
     expect(sourceClosure(GRAPH, ['cli'])).toEqual(['cli', 'shared']);
     // engine 依赖 api，但 api 读 web 是 api 测试自己的事：engine 的闭包里不带 web
