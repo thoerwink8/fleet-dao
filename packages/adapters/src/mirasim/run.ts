@@ -547,7 +547,14 @@ export function mirasimRunFacts(report: MirasimRunReport): RunFacts {
   const error = report.session.state.error;
   const words = report.watchError ?? error;
   const launch = report.launchError;
+  // 因模型对不上被停的：把点名的和读回的两个串一起交给判定（读回的是服务端快照里的 model，不是我们猜的）
+  const observed = report.session.state.model;
+  const modelMismatch =
+    report.killed?.reason === 'model_mismatch' && report.expectModel && observed
+      ? { kind: 'model' as const, expected: report.expectModel, observed }
+      : undefined;
   return {
+    ...(modelMismatch ? { mismatch: modelMismatch } : {}),
     ...(launch ? (report.launchUnknown ? { launchUnknown: launch } : { spawnError: launch }) : {}),
     ...(report.killed ? { killed: report.killed.reason } : {}),
     ...(terminal ? { terminal } : {}),
