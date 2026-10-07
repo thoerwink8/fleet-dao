@@ -284,17 +284,23 @@ export function isNotFound(err: unknown): boolean {
 }
 
 /**
- * 一张单的详情。404（没有这张单）不重试：重试只会让页面多转一会儿圈。别的失败照全局默认重试一次。
- * 页面要自己记住上一次的失败（routes/task.tsx）：没读到过数据的查询一被实时推送叫去重读，React Query 会把它的
- * error 清空、退回 pending，页面就从「没有这张单」跳回加载骨架，推送来得勤就一直在转。
+ * 按编号读一份详情（一张单、一个远程环境）：404 不重试，重试也不会有。别的失败照全局默认重试一次
+ * （root.tsx 的 retry: 1；failureCount 从 0 起，只有第一次失败时才再试）。
+ * 页面还要记住上一次的失败（lib/shown-error.ts）：没读到过数据的查询一被实时推送叫去重读，React Query 会把
+ * error 清空、退回 pending，不记住就从「没有这个……」跳回加载骨架。
  */
+function retryUnlessMissing(failures: number, err: unknown): boolean {
+  return !isNotFound(err) && failures < 1;
+}
+
+/** 一张单的详情。404 不重试、页面记住失败，见 retryUnlessMissing。 */
 export function useTaskDetail(taskId: string | undefined) {
   const api = useApi();
   return useQuery({
     queryKey: keys.task(taskId ?? ''),
     queryFn: () => api.task(taskId ?? ''),
     enabled: Boolean(taskId),
-    retry: (failures, err) => !isNotFound(err) && failures < 1,
+    retry: retryUnlessMissing,
   });
 }
 
@@ -561,7 +567,10 @@ export function useNodes() {
   });
 }
 
-/** 一个远程环境最近一次推来的快照（主页、环境页）。nodeId 为空（选的是本台）时不读。 */
+/**
+ * 一个远程环境最近一次推来的快照（主页 ?node=、环境页的远程列）。nodeId 为空（选的是本台）时不读。
+ * 没有这个环境是 404，不重试（retryUnlessMissing）；页面自己记住失败，推送重读不跳回骨架。
+ */
 export function useNode(nodeId: string | null) {
   const api = useApi();
   return useQuery({
@@ -569,10 +578,11 @@ export function useNode(nodeId: string | null) {
     queryFn: () => api.node(nodeId ?? ''),
     refetchInterval: 30_000,
     enabled: nodeId !== null && !isDemo(),
+    retry: retryUnlessMissing,
   });
 }
 
-/** 环境页并排的各列：每个收到过快照的远程环境各读一份。 */
+/** 环境页并排的各列：每个收到过快照的远程环境各读一份。404 同样不重试。 */
 export function useNodeSnapshots(ids: readonly string[]) {
   const api = useApi();
   return useQueries({
@@ -581,12 +591,18 @@ export function useNodeSnapshots(ids: readonly string[]) {
       queryFn: () => api.node(id),
       refetchInterval: 30_000,
       enabled: !isDemo(),
+      retry: retryUnlessMissing,
     })),
   });
 }
 
-/** 选了远程环境时的主页：读那个环境的快照，形状和本台的主页一样。 */
-export function useNodeHome(nodeId: string | null): { data: HomeState; node: NodeDetail | undefined } {
+/** 选了远程环境时的主页：读那个环境的快照，形状和本台的主页一样。error 是这一次查询的，重读时会被清掉，页面要另记。 */
+export function useNodeHome(nodeId: string | null): {
+  data: HomeState;
+  node: NodeDetail | undefined;
+  error: unknown;
+  refetch: () => unknown;
+} {
   const query = useNode(nodeId);
   return {
     data: homeStateOf({
@@ -596,6 +612,8 @@ export function useNodeHome(nodeId: string | null): { data: HomeState; node: Nod
       refetch: query.refetch,
     }),
     node: query.data,
+    error: query.error,
+    refetch: () => query.refetch(),
   };
 }
 

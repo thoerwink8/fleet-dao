@@ -184,10 +184,13 @@ describe('选了远程环境：主页', () => {
     expect(switcher().textContent).toContain('失联');
   });
 
-  test('【故意造出的失败】配了通行证却从没收到过快照：主页明说没读成和原因，不拿空数据冒充', async () => {
+  test('【故意造出的失败】配了通行证却从没收到过快照（404）：写「没有这个环境」和回主页，不重试、不拿空数据冒充', async () => {
     await mount(apiFor('never'), '/?node=wsl');
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('一次快照都没推来过');
+    expect(alert.textContent).toContain('没有这个环境');
+    expect(alert.textContent).toContain('wsl');
+    expect(within(alert).getByRole('link', { name: '回主页' }).getAttribute('href')).toBe('/');
+    expect(within(alert).queryByRole('button', { name: '重试' })).toBeNull();
     expect(document.querySelector('[data-snapshot-banner]')).toBeNull();
   });
 
