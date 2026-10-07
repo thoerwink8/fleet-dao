@@ -592,7 +592,7 @@ GATE=()
 MIG=()
 DB_MIG=0
 FLEET_HK_PARTS="" # 不碰香港（网关那几段另测）
-CATALOG=$TMP/catalog.json
+# 目录配置是各版自己带的 deploy/catalog.json（$CATALOG_FILE，相对这一版的目录），不读 /etc 下的任何文件（#1286）
 # 装载器的桩放在「这一版的 node」的位置。发布脚本以 env -i 起它，环境里只剩库连接，所以桩要的东西都在它自己的目录里：
 # mode 定它这次怎么答（changed 装进去了、same 已齐、别的就报错），calls 每次记一行「参数|当前目录|库连接」，
 # audit 是装载器最近一笔操作记录的编号（装进去时加一），读回的桩照它答；order 记迁移、装载器谁先跑，
@@ -656,10 +656,11 @@ migrate() {
   if [[ "${MIG[$1]:-0}" -gt "$DB_MIG" ]]; then DB_MIG=${MIG[$1]}; fi
   echo "migrate ${1:0:1}" >>"$FAKE/order"
 }
-with_loader() { # 提交号：构建这一版（桩），带上目录装载器
+with_loader() { # 提交号：构建这一版（桩），带上目录装载器和这一版自己的目录配置
   build_release "$1" >/dev/null
-  mkdir -p "$RELEASES/$1/packages/db/src/bin"
+  mkdir -p "$RELEASES/$1/packages/db/src/bin" "$RELEASES/$1/deploy"
   : >"$RELEASES/$1/packages/db/src/bin/catalog.ts"
+  printf '{}\n' >"$RELEASES/$1/$CATALOG_FILE"
 }
 loader_runs() { if [[ -f "$FAKE/calls" ]]; then grep -c . "$FAKE/calls"; else echo 0; fi; }
 round() { # 装载器这一轮怎么答；清掉上一轮的记录
@@ -669,15 +670,12 @@ round() { # 装载器这一轮怎么答；清掉上一轮的记录
 }
 said() { grep -cF -- "$1" "$TMP/out"; }           # 这一轮的输出里有几行带这些字
 reds_with() { printf '%s\n' "${REDS[@]}" | grep -cF -- "$1"; }
-printf '{}\n' >"$CATALOG"
-chmod 640 "$CATALOG"
-CATALOG_META=$(stat -c '%U:%G %a' -- "$CATALOG") # 桩机上没有 fleet 组：该有的属主、权限按这台上造出来的算
 with_loader "$A"
 round changed
 do_release "$A" >"$TMP/out"
 check "装进去了：切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
 IFS='|' read -r got_args got_cwd got_db <"$FAKE/calls"
-check "装载器收到的：这一版的命令、真文件的路径" "$got_args" "packages/db/src/bin/catalog.ts $CATALOG"
+check "装载器收到的：这一版的命令、这一版自己带的目录配置的路径（相对这一版的目录）" "$got_args" "packages/db/src/bin/catalog.ts deploy/catalog.json"
 # 只比结尾：Windows 上的 Git Bash 清空环境后，同一个临时目录会换一种写法
 check "装载器在这一版的目录里跑" "$([[ "$got_cwd" == */releases/"$A" ]] && echo 是 || echo "不是（$got_cwd）")" 是
 check "装载器连的是本机库（unix socket、peer 认证）" "$got_db" "postgres:///fleet /var/run/postgresql fleet"
@@ -697,56 +695,30 @@ blocked() { # 说明 红里要有的字 装载器该跑几次：发 B，应当�
   check "$1：历史没变" "$(events)" "$before"
   check "$1：装载器跑了 $3 次" "$(loader_runs)" "$3"
 }
-mv -- "$CATALOG" "$TMP/catalog.saved"
+BCAT=$RELEASES/$B/$CATALOG_FILE # B 这一版自带的目录配置
+mv -- "$BCAT" "$TMP/catalog.saved"
 round changed
-blocked "文件不在" "没有 $CATALOG：先从保险箱放上来" 0
-mkdir -- "$CATALOG"
-chmod 640 "$CATALOG"
+blocked "这一版没带目录配置" "这一版没带 $CATALOG_FILE" 0
+mkdir -- "$BCAT"
 round changed
-blocked "放成了目录" "$CATALOG 不是普通文件" 0
-rmdir -- "$CATALOG"
-mv -- "$TMP/catalog.saved" "$CATALOG"
-chmod 644 "$CATALOG"
-if [[ "$(stat -c '%U:%G %a' -- "$CATALOG")" == "$CATALOG_META" ]]; then
-  echo "  … 没跑成：这台改不了文件权限（chmod 不生效），「权限不对」没测"
-  skipped=1
-else
-  round changed
-  blocked "权限不对（644）" "应为 $CATALOG_META；没切版本" 0
-fi
-chmod 640 "$CATALOG"
-if ((EUID == 0)); then
-  chown 65534 -- "$CATALOG" # nobody：属主换成别人，权限不变
-  round changed
-  blocked "属主不对（换成别的用户）" "应为 $CATALOG_META；没切版本" 0
-  chown 0 -- "$CATALOG"
-else
-  echo "  … 没跑成：「属主不对」要 root 才造得出来（chown 成别人）"
-  skipped=1
-fi
-mv -- "$CATALOG" "$TMP/catalog.real"
-ln -s -- "$TMP/catalog.real" "$CATALOG"
-if [[ ! -L "$CATALOG" ]]; then
+blocked "这一版的目录配置是个目录" "这一版的 $CATALOG_FILE 不是普通文件" 0
+rmdir -- "$BCAT"
+ln -s -- "$TMP/catalog.saved" "$BCAT"
+if [[ ! -L "$BCAT" ]]; then
   echo "  … 没跑成：这台建不了符号链接，「是符号链接」没测"
   skipped=1
 else
   round changed
   blocked "是符号链接" "是符号链接，不读" 0
 fi
-rm -f -- "$CATALOG"
-mv -- "$TMP/catalog.real" "$CATALOG"
-# 读不到属主权限（stat 失败）：桩只对 $CATALOG 失败，别的文件照常；这一轮完就撤掉
-stat() {
-  if [[ "${*: -1}" == "$CATALOG" ]]; then return 1; fi
-  command stat "$@"
-}
-check "stat 的桩：只有读 $CATALOG 失败，别的文件照常" \
-  "$(stat -c %a -- "$CATALOG" >/dev/null 2>&1 && echo 读到 || echo 读不到):$(stat -c %a -- "$FAKE/node" >/dev/null 2>&1 && echo 读到 || echo 读不到)" \
-  "读不到:读到"
-round changed
-blocked "读不到属主权限（stat 失败）" "$CATALOG 是「读不到」，应为 $CATALOG_META；没切版本" 0
-unset -f stat
-check "stat 的桩撤掉了" "$(stat -c %a -- "$CATALOG" >/dev/null 2>&1 && echo 读到 || echo 读不到)" 读到
+rm -f -- "$BCAT"
+mv -- "$TMP/catalog.saved" "$BCAT"
+# 【故意造出的失败】发布脚本里不再出现 /etc/fleet-dao/catalog.json：目录配置只认这一版自己带的（删保险箱那一层，#1286）。
+# 拿一份带着旧路径的脚本跑同一条检查，说明这条抓得到
+check "release.sh 里没有 /etc/fleet-dao/catalog.json" \
+  "$(grep -cF -- '/etc/fleet-dao/catalog.json' "$HERE/../release.sh")" 0
+check "（反例）带着旧路径的脚本，这条检查抓得到" \
+  "$(printf 'CATALOG=/etc/fleet-dao/catalog.json\n' | grep -cF -- '/etc/fleet-dao/catalog.json')" 1
 PG_BEFORE=fail
 round changed
 blocked "装之前连不上库" "装目录之前读不到库 fleet 里目录那几张表的行数" 0
@@ -861,8 +833,9 @@ pg_admin() {
 }
 with_loaders() { # 提交号：构建这一版（桩），带上目录、路由两层两个装载器
   build_release "$1" >/dev/null
-  mkdir -p "$RELEASES/$1/packages/db/src/bin"
+  mkdir -p "$RELEASES/$1/packages/db/src/bin" "$RELEASES/$1/deploy"
   : >"$RELEASES/$1/packages/db/src/bin/catalog.ts"
+  printf '{}\n' >"$RELEASES/$1/$CATALOG_FILE"
   : >"$RELEASES/$1/packages/db/src/bin/routing.ts"
 }
 routing_runs() { if [[ -f "$RFAKE/calls" ]]; then grep -c . "$RFAKE/calls"; else echo 0; fi; }
@@ -936,8 +909,9 @@ check "路由两层都齐了再发 B：切到 B、没有红" "$(current_sha):${#
 check "发 B：先装目录、再装路由两层，装的时候还没切版本（current 还指着 A）" "$(tr '\n' '|' <"$RFAKE/order")" \
   "catalog current=$A|routing current=$A|"
 build_release "$C" >/dev/null # 老提交：带目录装载器，没有路由两层装载器
-mkdir -p "$RELEASES/$C/packages/db/src/bin"
+mkdir -p "$RELEASES/$C/packages/db/src/bin" "$RELEASES/$C/deploy"
 : >"$RELEASES/$C/packages/db/src/bin/catalog.ts"
+printf '{}\n' >"$RELEASES/$C/$CATALOG_FILE"
 rround changed
 do_release "$C" >"$TMP/out"
 check "这一版没有路由两层装载器：照常切到 C" "$(current_sha)" "$C"

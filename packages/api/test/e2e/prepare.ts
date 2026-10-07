@@ -7,7 +7,7 @@
 //
 // 改这里之前必须知道：
 // - 目录（族、渠道、账号池、模型、路由）、路由两层骨架、额度留量线都走发布时同一条装载链（目录配置样例
-//   deploy/examples/catalog.example.json → routing.default.json → quota-reserve.default.json），页面上看到的池和路由
+//   deploy/catalog.json → routing.default.json → quota-reserve.default.json），页面上看到的池和路由
 //   就是线上那一套名字；任务、会话、提醒这些「业务数据」用 store 的 devFixtures 打底，编号对到目录里的真名字上，再补 e2e 要看的几样：
 //   各池的额度读数、切号账本（要有几次接口读数，额度页才算得出「约 N 分钟后用满」）、几张不同状态的单、几条不同级别的提醒。
 // - 数据全部假的（名字、编号、额度都不对应真实账号）。
@@ -37,7 +37,7 @@ import { hashPassword } from '../../src/password.ts';
 export const E2E_USERNAME = 'founder.a';
 export const E2E_PASSWORD = 'e2e-correct-horse-battery';
 
-const CATALOG_EXAMPLE = new URL('../../../../deploy/examples/catalog.example.json', import.meta.url);
+const CATALOG_EXAMPLE = new URL('../../../../deploy/catalog.json', import.meta.url);
 
 /** 备库产出的编号：web 的 e2e 照它找页面、核对数据。 */
 export interface E2eFacts {
@@ -165,7 +165,7 @@ export async function prepare(env: Record<string, string | undefined> = process.
 
     // 目录、路由两层骨架、额度留量线：和发布一样的装载链，只补缺。
     await loadCatalog(db, parseCatalog(readFileSync(CATALOG_EXAMPLE, 'utf8'), '目录配置样例'), {
-      source: 'e2e:catalog.example.json',
+      source: 'e2e:deploy/catalog.json',
     });
     await runRoutingApply(db);
     await applyQuotaReserveSeed(db, await loadQuotaReserveSeed(QUOTA_RESERVE_DEFAULT_PATH));

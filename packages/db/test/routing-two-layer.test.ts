@@ -162,12 +162,12 @@ describe('默认配置 routing.default.json', () => {
 
   it('骨架引用的每个模型和路由，目录配置样例里都有、且路由属于这个模型', async () => {
     const cfg = await loadRoutingConfig();
-    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const example = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
     expect(skeletonProblems(cfg, example)).toEqual([]);
   });
 
   it('【故意造出的失败】骨架引用了目录配置里没有的模型或路由：报出来（发版被这个挡过）', async () => {
-    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const example = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
     const cfg = parseRoutingConfig(
       JSON.stringify({
         purposes: { default: ['grok-4.7', 'not-in-catalog'] },
@@ -216,11 +216,14 @@ describe('默认配置 routing.default.json', () => {
     expect(cfg.purposes.judge).toEqual(['jev-1.13']);
   });
 
-  it('gpt-6-sol 暂不进骨架（法国目录配置还没有，发版会被拒装）；目录样例里有它：Mirasim 中转、mirasim 执行方式、族 gpt；旧的错名 gpt-6.1-sol 哪里都没有', async () => {
+  it('gpt-6-sol 在骨架 models 里挂着、关着、不进任何用途；目录里有它：Mirasim 中转、mirasim 执行方式、族 gpt；旧的错名 gpt-6.1-sol 哪里都没有', async () => {
     const cfg = await loadRoutingConfig();
-    expect(JSON.stringify(cfg)).not.toContain('gpt-6-sol');
+    expect(cfg.models['gpt-6-sol']?.map((r) => [r.routeId, r.enabled])).toEqual([
+      ['mirasim-relay:gpt-6-sol:mirasim', false],
+    ]);
+    expect(Object.values(cfg.purposes).flat()).not.toContain('gpt-6-sol');
     expect(JSON.stringify(cfg)).not.toContain('gpt-6.1-sol');
-    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const example = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
     const route = example.routes.find((r) => r.id === 'mirasim-relay:gpt-6-sol:mirasim');
     expect([route?.poolId, route?.hostId, route?.modelId, route?.upstreamModel]).toEqual([
       'mirasim-relay',
@@ -230,6 +233,27 @@ describe('默认配置 routing.default.json', () => {
     ]);
     expect(example.models.find((m) => m.id === 'gpt-6-sol')?.family).toBe('gpt');
     expect(JSON.stringify(example)).not.toContain('gpt-6.1-sol');
+  });
+
+  it('目录里每个没排进任何用途的模型（先「可选」的）：骨架 models 里有它，目录里它的每条路由都在、且全部关着（新补的不改现有派活，#1286）', async () => {
+    const cfg = await loadRoutingConfig();
+    const catalog = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
+    const dispatched = new Set(Object.values(cfg.purposes).flat());
+    const problems: string[] = [];
+    for (const m of catalog.models) {
+      if (dispatched.has(m.id)) continue;
+      const inSkeleton = cfg.models[m.id];
+      if (!inSkeleton) {
+        problems.push(`模型 ${m.id} 没排进任何用途，骨架 models 里也没有`);
+        continue;
+      }
+      const want = catalog.routes.filter((r) => r.modelId === m.id).map((r) => r.id);
+      if (JSON.stringify([...want].sort()) !== JSON.stringify(inSkeleton.map((r) => r.routeId).sort()))
+        problems.push(`模型 ${m.id} 在骨架里挂的路由和目录里不一样`);
+      for (const r of inSkeleton)
+        if (r.enabled) problems.push(`路由 ${r.routeId} 开着，但模型 ${m.id} 不在任何用途里`);
+    }
+    expect(problems).toEqual([]);
   });
 
   it('【故意造出的失败】gpt-6-sol 放进界面用途：硬禁令 gpt-no-ui 照拦；验收等别的用途不拦', () => {
@@ -314,7 +338,7 @@ describe('默认配置 routing.default.json', () => {
 
   it('仓里骨架写了的思考档位，这条路由的执行方式都认（按目录配置样例里的执行方式、上游模型串判）', async () => {
     const cfg = await loadRoutingConfig();
-    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const example = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
     const byId = new Map(example.routes.map((r) => [r.id, r]));
     const problems: string[] = [];
     for (const routes of Object.values(cfg.models)) {

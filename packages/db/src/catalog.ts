@@ -1,10 +1,11 @@
-// 目录装载器：读本机的目录配置（默认 /etc/fleet-dao/catalog.json），把族、渠道、账号池、模型、路由
+// 目录装载器：读仓里的目录配置（默认 deploy/catalog.json，跟着版本走，#1286），把族、渠道、账号池、模型、路由
 // 幂等地写进库。只补缺：库里没有的行插进去，已有的行只填空着的字段；已经有值的、驾驶舱或帅位改过的一概不动，
 // 配置和库里不一样的列进 kept 给人看。
 // 每个用途用什么先后不再写在这里：那是路由两层（routing-apply.ts 的骨架、routing_purpose_models / routing_catalog，#574）。
 // 配置文件缺失、格式错、引用不存在都明确报错，库里一行不写——不许当成空目录继续。
 
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { type BanSubject, hardBanFor, type RunAsUser } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, isNull, sql } from 'drizzle-orm';
@@ -13,7 +14,8 @@ import type { Db } from './client.ts';
 import { BILLING_KINDS, HOST_IDS, ORG_KINDS, RETIRED_RUN_AS_USERS, RUN_AS_USERS } from './schema/enums.ts';
 import { auditLog, channels, families, models, pools, routes } from './schema/index.ts';
 
-export const CATALOG_DEFAULT_PATH = '/etc/fleet-dao/catalog.json';
+/** 目录配置的默认位置：这一版自己带的 deploy/catalog.json（不是 /etc 下的一份）。 */
+export const CATALOG_DEFAULT_PATH = fileURLToPath(new URL('../../../deploy/catalog.json', import.meta.url));
 
 const Id = z.string().trim().min(1);
 const Text = z.string().trim().min(1);
@@ -179,7 +181,7 @@ export async function readCatalogFile(
   return parseCatalog(text, `目录配置 ${path}`);
 }
 
-/** 配置文件的路径：命令行第一个参数 > 环境变量 FLEET_CATALOG > 默认 /etc/fleet-dao/catalog.json。 */
+/** 配置文件的路径：命令行第一个参数 > 环境变量 FLEET_CATALOG > 默认（这一版自带的 deploy/catalog.json）。 */
 export function catalogPath(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,

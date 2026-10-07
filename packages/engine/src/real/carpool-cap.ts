@@ -58,7 +58,7 @@ export function judgeCarpoolCap(input: {
     return {
       ok: false,
       code: 'no_carpool_pool',
-      why: `库里没有带组织类型 carpool 的池（目录配置 catalog.json 没装上、或拼车池没配 orgKind）：登记了拼车并发 ${registered}，但引擎手上没有拼车池可核`,
+      why: `库里没有带组织类型 carpool 的池（目录配置 deploy/catalog.json 没装上、或拼车池没配 orgKind）：登记了拼车并发 ${registered}，但引擎手上没有拼车池可核`,
     };
   }
   const actual = input.pools.reduce((sum, p) => sum + p.maxConcurrency, 0);
@@ -66,7 +66,7 @@ export function judgeCarpoolCap(input: {
     return {
       ok: false,
       code: 'mismatch',
-      why: `登记的拼车并发上限是 ${registered}，库里拼车池（${input.pools.map((p) => `${p.poolId} ${p.maxConcurrency}`).join('、')}）加起来是 ${actual}：引擎按库里的数放行，两边对不上。改目录配置 catalog.json 里拼车池的 maxConcurrency 重新装、或改仓里的登记（要同时过「各台加起来不超过总上限」的配置检查）`,
+      why: `登记的拼车并发上限是 ${registered}，库里拼车池（${input.pools.map((p) => `${p.poolId} ${p.maxConcurrency}`).join('、')}）加起来是 ${actual}：引擎按库里的数放行，两边对不上。改目录配置 deploy/catalog.json 里拼车池的 maxConcurrency 重新装、或改仓里的登记（要同时过「各台加起来不超过总上限」的配置检查）`,
     };
   }
   return { ok: true, registered, poolIds: input.pools.map((p) => p.poolId) };

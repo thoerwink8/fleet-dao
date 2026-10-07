@@ -10,7 +10,7 @@ import { routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { seed } from '../src/seed.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 
-const EXAMPLE_PATH = 'deploy/examples/catalog.example.json';
+const EXAMPLE_PATH = 'deploy/catalog.json';
 const example = () =>
   parseCatalog(readFileSync(new URL(`../../../${EXAMPLE_PATH}`, import.meta.url), 'utf8'), EXAMPLE_PATH);
 

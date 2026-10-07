@@ -479,7 +479,7 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     for (const must of [
       'AGENTS.md', // join(REPO, 'AGENTS.md')
       'docs/ops.md', // repoFile('docs/ops.md')
-      'deploy/examples/catalog.example.json', // repoFile(EXAMPLE_PATH)
+      'deploy/catalog.json', // repoFile(EXAMPLE_PATH)
       'deploy/lib/snapshot.sh', // join(dirname(…), '..', …)
       'deploy/release.sh', // new URL('../../../deploy/release.sh', …)
       'packages/web/src/build/scan.ts',

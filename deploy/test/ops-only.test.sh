@@ -37,9 +37,9 @@ if [[ -z "$PORT" ]] || ! grep -qw -- "$PORT" "$OPS"; then
   echo "ops-only：没跑成"
   exit 2
 fi
-PLACE_LINE="france/etc/fleet-dao/catalog.json.age | ssh <法国> '"
+PLACE_LINE="ssh <法国> 'cat /etc/fleet-dao/gateway-token.env' | ssh <香港> '"
 if [[ "$(grep -cF -- "$PLACE_LINE" "$OPS")" != 1 ]]; then
-  echo "  … 没跑成：docs/ops.md 里放目录配置那一行不是恰好一行"
+  echo "  … 没跑成：docs/ops.md 里放网关通行证那一行不是恰好一行"
   echo "ops-only：没跑成"
   exit 2
 fi
@@ -59,7 +59,7 @@ run_ops "$TMP/ops-no-port.md"
 check "退出码" "$RC" 1
 check "说了缺哪个端口" "$(grep -c "端口表里没有.* $PORT\b" "$OUT" | tr -d ' ')" 1
 
-echo "== 放目录配置那一行删掉：红（place-file 没跑成）"
+echo "== 放网关通行证那一行删掉：红（place-file 没跑成）"
 grep -vF -- "$PLACE_LINE" "$OPS" >"$TMP/ops-no-place.md"
 run_ops "$TMP/ops-no-place.md"
 check "退出码" "$RC" 2

@@ -1,14 +1,14 @@
 // 路由两层的默认骨架（packages/db/routing.default.json）里判断用途照 packages/jev 排：引擎每次提问都取判断用途排第一、
 // 不是死的那条路由起后端（wiring.ts 的 resolveJevBackend → backendForRoute），所以判断用途下开着的每一条都得是这里起得了的。
 // 两层里开关跟着路由走、不分用途：Opus 一排进判断用途，它开着的 Claude 路由就跟着排进来，而 Claude 判断后端还没接上。
-// 路由的执行方式、上游型号照目录样例（deploy/examples/catalog.example.json，发布时先装它、再装骨架）。
+// 路由的执行方式、上游型号照目录配置（deploy/catalog.json，发布时先装它、再装骨架）。
 import { readFileSync } from 'node:fs';
 import { loadRoutingConfig, parseCatalog } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import { backendForRoute, CLAUDE_ROUTE_CLOSED, type JudgeRoute, parseJevConfig } from '../src/config.ts';
 
 const repoFile = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
-const EXAMPLE = 'deploy/examples/catalog.example.json';
+const EXAMPLE = 'deploy/catalog.json';
 const catalog = parseCatalog(repoFile(EXAMPLE), EXAMPLE);
 // 机器配置照 packages/jev 自己的样例；钥匙换成假的，不读真文件。TypeSafe 后端在测试里不出网（没注入 fetch 就拒）。
 const config = parseJevConfig(JSON.parse(repoFile('packages/jev/config.example.json')));

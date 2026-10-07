@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const BIN = fileURLToPath(new URL('../src/bin/catalog.ts', import.meta.url));
-const EXAMPLE = fileURLToPath(new URL('../../../deploy/examples/catalog.example.json', import.meta.url));
+const EXAMPLE = fileURLToPath(new URL('../../../deploy/catalog.json', import.meta.url));
 /** 起一个 node 要装载 zod、drizzle，机器忙时几秒。 */
 const SPAWN_MS = 60_000;
 

@@ -17,7 +17,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../s
 import { NOW } from './helpers.ts';
 
 const repoFile = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
-const EXAMPLE_PATH = 'deploy/examples/catalog.example.json';
+const EXAMPLE_PATH = 'deploy/catalog.json';
 const exampleText = repoFile(EXAMPLE_PATH);
 const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 
@@ -61,7 +61,7 @@ async function catalogRows(db: Db) {
   };
 }
 
-describe('示例配置 deploy/examples/catalog.example.json', () => {
+describe('目录配置 deploy/catalog.json（发布时装进库的真文件）', () => {
   it('装得进空库：族、渠道、账号池、模型、路由都照样例写进去', async () => {
     const result = await load();
     const config = example();
@@ -178,6 +178,7 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
       ['gpt-5.6-terra', 'no'],
       ['kimi-k3', 'no'],
       ['deepseek-flash', 'no'],
+      ['deepseek-v4-pro', 'no'],
       ['glm-5.3-flash', 'no'],
       ['glm-5.3', 'no'],
     ]);
@@ -417,7 +418,7 @@ describe('配置文件缺失或格式错：明确报错，库里一行不写', (
 
   it('文件不在、读不了', async () => {
     const missing = Object.assign(new Error('no such file'), { code: 'ENOENT' });
-    expect(await fail(readCatalogFile('/etc/fleet-dao/catalog.json', () => Promise.reject(missing)))).toMatch(
+    expect(await fail(readCatalogFile('/srv/x/deploy/catalog.json', () => Promise.reject(missing)))).toMatch(
       /catalog\.json 文件不存在；装载器不会当成空目录继续/,
     );
     const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
@@ -484,6 +485,9 @@ describe('命令行', () => {
     expect(catalogPath(['/tmp/a.json'], { FLEET_CATALOG: '/tmp/b.json' })).toBe('/tmp/a.json');
     expect(catalogPath([], { FLEET_CATALOG: '/tmp/b.json' })).toBe('/tmp/b.json');
     expect(catalogPath([], {})).toBe(CATALOG_DEFAULT_PATH);
-    expect(CATALOG_DEFAULT_PATH).toBe('/etc/fleet-dao/catalog.json');
+    // 默认读这一版自带的 deploy/catalog.json，不再是 /etc 下的一份（#1286）；那个文件真在、真能解析
+    expect(CATALOG_DEFAULT_PATH.replaceAll('\\', '/')).toMatch(/\/deploy\/catalog\.json$/);
+    expect(CATALOG_DEFAULT_PATH).not.toContain('/etc/fleet-dao');
+    expect(readFileSync(CATALOG_DEFAULT_PATH, 'utf8')).toBe(exampleText);
   });
 });

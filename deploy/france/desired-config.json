@@ -46,7 +46,7 @@
       },
       "FLEET_CARPOOL_MAX_CONCURRENCY": {
         "value": "4",
-        "说明": "这台最多同时开几个拼车会话（#194 方案 4.7）：引擎起来时核库里拼车池（catalog.json 里 orgKind 为 carpool 的池）并发上限加起来是不是这个数，对不上推 carpool-cap:registry 提醒。数值只放在期望里，代码里没有默认数（创始人：这类数不许写死、要能配）"
+        "说明": "这台最多同时开几个拼车会话（#194 方案 4.7）：引擎起来时核库里拼车池（deploy/catalog.json 里 orgKind 为 carpool 的池）并发上限加起来是不是这个数，对不上推 carpool-cap:registry 提醒。数值只放在期望里，代码里没有默认数（创始人：这类数不许写死、要能配）"
       },
       "FLEET_CARPOOL_TOTAL_CAP": {
         "value": "6",

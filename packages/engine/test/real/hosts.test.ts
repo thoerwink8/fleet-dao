@@ -1032,15 +1032,23 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     expect(mirasimAgentFor('glm-5.3')).toBe('zcode');
     expect(mirasimAgentFor('kimi-k3')).toBe('pi');
     expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
+    expect(mirasimAgentFor('deepseek-v4-pro')).toBe('dsh');
+  });
+
+  it('法国没装本体的执行体（gemini、antigravity、qwen）的模型串不在映射里：认不出就明确报错，不落到默认执行体上', () => {
+    for (const m of ['gemini-3.1-pro-preview', 'gemini-3.8-flash-medium', 'qwen3-coder-plus']) {
+      expect(() => mirasimAgentFor(m), m).toThrow('Mirasim 认不出这个模型该起哪个执行体');
+    }
   });
 
   // Mirasim 服务端 0.0.425（2026-10-07 在法国读 server.cjs）里各执行体认的模型串。服务端没有 gpt-6.1-sol，只有 gpt-6-sol。
   const MIRASIM_KNOWN_MODELS: Readonly<Record<string, readonly string[]>> = {
     codex: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
     zcode: ['glm-5.3', 'glm-5.3-flash'],
-    dsh: ['deepseek-flash'],
+    dsh: ['deepseek-flash', 'deepseek-v4-pro'],
     pi: ['kimi-k3'],
-    claude: ['claude-opus-5-5', 'claude-sonnet-5-5'],
+    // claude 执行体：docs/reference/adapters.md MS-30 实测过的 7 个里去掉 fable（机器派的会话永不用 Fable）
+    claude: ['claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-opus-4-8'],
   };
   /** 映射里服务端认不出的条目：模型串不在它那个执行体的名单里。 */
   const unknownToMirasim = (map: Readonly<Record<string, string>>): string[] =>

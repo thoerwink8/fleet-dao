@@ -1,6 +1,6 @@
 // 本机的判断题接没接、接了用哪个后端、调不调得通（wiring.ts）：引擎每次提问和 /healthz 的 judge 项都走这一份。
 // 「未接」只有默认位置上没有配置文件一种；别的读不成都要报坏（不许当成没配悄悄不问），每条都故意造一次。
-// 库照发布时的做法装：先装仓里的目录样例（deploy/examples/catalog.example.json），再把路由两层的默认骨架
+// 库照发布时的做法装：先装仓里的目录配置（deploy/catalog.json），再把路由两层的默认骨架
 // （packages/db/routing.default.json）只补缺装进去——判断用途只排 Jev 1.13，它下面一条 TypeSafe 的路由、开着。
 import type { Stats } from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -36,7 +36,7 @@ import { jevConfigPresence, judgeHealth, resolveJevBackend } from '../src/wiring
 import { fakeBackend, MODEL, ok } from './helpers.ts';
 
 const repoFile = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
-const EXAMPLE = 'deploy/examples/catalog.example.json';
+const EXAMPLE = 'deploy/catalog.json';
 const JEV_ROUTE = 'jev:jev-1.13:api-shell';
 const KEY_VALUE = 'k-wiring-test-value-7f3a';
 

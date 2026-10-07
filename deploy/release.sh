@@ -45,9 +45,8 @@ AGENT_API=127.0.0.1:8788       # fleet 命令接口（api.env 的 FLEET_AGENT_LI
 TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
 # 迁移连本机库：unix socket + peer 认证（同 api.env；postgres.js 不认连接串里的 ?host=，主机走 PGHOST）
 DB_ENV=(DATABASE_URL=postgres:///fleet PGHOST=/var/run/postgresql PGUSER=fleet)
-# 目录配置（族、渠道、账号池、模型、路由）：从保险箱放上来（docs/ops.md 第九节「目录配置」），迁移之后装进库
-CATALOG=/etc/fleet-dao/catalog.json
-CATALOG_META="root:fleet 640" # 它该有的属主、权限；只有测试会改
+# 目录配置（族、渠道、账号池、模型、路由）是仓里的 deploy/catalog.json，跟着版本走：迁移之后装这一版自己带的那份进库（docs/ops.md 第九节「目录配置」）
+CATALOG_FILE=deploy/catalog.json # 相对这一版的目录
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
@@ -665,33 +664,29 @@ catalog_words() { # catalog_readback 的一行
   printf '账号池 %s、路由 %s' "${c[0]}" "${c[1]}"
 }
 
-# 装目录：迁移之后、切版本之前，以 fleet 跑这一版的装载器（packages/db/src/bin/catalog.ts）。它只补缺——驾驶舱里改过的不动，
-# 跑几遍都一样；格式错、引用不存在它整批不写（装不成时这里再读回一次核对，不光信它）。文件不在、属主权限
-# 不对、装不成、读不回，都停下、不切版本（在用的那版不受影响）。装完账号池、路由哪张是 0 行也判红：
+# 装目录：迁移之后、切版本之前，以 fleet 跑这一版的装载器（packages/db/src/bin/catalog.ts），装这一版自己带的目录配置
+# （deploy/catalog.json，跟着版本走，不读 /etc 下的任何文件）。它只补缺——驾驶舱里改过的不动，
+# 跑几遍都一样；格式错、引用不存在它整批不写（装不成时这里再读回一次核对，不光信它）。这一版没带目录配置、
+# 装不成、读不回，都停下、不切版本（在用的那版不受影响）。装完账号池、路由哪张是 0 行也判红：
 # 引擎没有它们派不出活（旧的按阶段平铺那两张表不数也不判了，#754）
 load_catalog() { # 提交号
-  local dir=$RELEASES/$1 have before after out rc=0 line first i empty="" counts=() was=()
+  local dir=$RELEASES/$1 before after out rc=0 line first i empty="" counts=() was=()
   local names=(账号池 路由)
-  step "装目录（$CATALOG → 库 fleet）"
+  step "装目录（这一版的 $CATALOG_FILE → 库 fleet）"
   if [[ ! -f "$dir/packages/db/src/bin/catalog.ts" ]]; then
     ok "这一版没有目录装载器"
     return 0
   fi
-  if [[ -L "$CATALOG" ]]; then
-    red "$CATALOG 是符号链接，不读：放成普通文件（$CATALOG_META，见 docs/ops.md 第九节「目录配置」）；没切版本"
+  if [[ -L "$dir/$CATALOG_FILE" ]]; then
+    red "这一版的 $CATALOG_FILE 是符号链接，不读；没切版本"
     return 1
   fi
-  if [[ ! -e "$CATALOG" ]]; then
-    red "没有 $CATALOG：先从保险箱放上来（docs/ops.md 第九节「目录配置」）再发布；没切版本"
+  if [[ ! -e "$dir/$CATALOG_FILE" ]]; then
+    red "这一版没带 $CATALOG_FILE（目录配置跟着版本走，docs/ops.md 第九节「目录配置」；比这更老的版本把它放在服务器上，那样的老版本不再能直接发）；没切版本"
     return 1
   fi
-  have=$(stat -c '%U:%G %a' -- "$CATALOG" 2>/dev/null) || have="读不到"
-  if [[ ! -f "$CATALOG" ]]; then
-    red "$CATALOG 不是普通文件（$have）：放成普通文件、$CATALOG_META；没切版本"
-    return 1
-  fi
-  if [[ "$have" != "$CATALOG_META" ]]; then
-    red "$CATALOG 是「$have」，应为 $CATALOG_META；没切版本"
+  if [[ ! -f "$dir/$CATALOG_FILE" ]]; then
+    red "这一版的 $CATALOG_FILE 不是普通文件；没切版本"
     return 1
   fi
   if ! before=$(catalog_readback); then
@@ -699,7 +694,7 @@ load_catalog() { # 提交号
     return 1
   fi
   out=$(cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
-    "$NODE" packages/db/src/bin/catalog.ts "$CATALOG" 2>&1) || rc=$?
+    "$NODE" packages/db/src/bin/catalog.ts "$CATALOG_FILE" 2>&1) || rc=$?
   while IFS= read -r line; do
     if [[ -n "$line" ]]; then printf '    %s\n' "$line"; fi
   done <<<"$out"

@@ -22,7 +22,7 @@ import {
 export const JUDGE_MODEL = 'jev-1.13.0';
 export const JUDGE_ROUTE = 'jev:jev-1.13:api-shell';
 const repoFile = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
-const EXAMPLE = 'deploy/examples/catalog.example.json';
+const EXAMPLE = 'deploy/catalog.json';
 
 export async function judgeCatalog(db: Db): Promise<void> {
   await seed(db);
