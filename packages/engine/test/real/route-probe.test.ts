@@ -6,7 +6,14 @@
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { notifications, quotaWindows, routes, scheduleRuns, toRoute } from '@fleet-dao/db';
+import {
+  notifications,
+  quotaWindows,
+  readRouteProbeHistory,
+  routes,
+  scheduleRuns,
+  toRoute,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
@@ -159,6 +166,31 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
     expect((await row('solo'))?.probeDetail).toContain('会话用户现在挂的是拼车组织');
     expect(await row('luna')).toMatchObject({ alive: false, probeState: 'not_wired' });
     expect((await row('luna'))?.probeDetail).toContain('Codex');
+
+    const carpoolHistory = await readRouteProbeHistory(t.db, 'carpool', 10);
+    expect(carpoolHistory[0]).toMatchObject({
+      result: 'passed',
+      durationMs: 1,
+      requestText: PROBE_PROMPT,
+      responseText: 'OK',
+      failureReason: null,
+    });
+    const soloHistory = await readRouteProbeHistory(t.db, 'solo', 10);
+    expect(soloHistory[0]).toMatchObject({
+      result: 'not_probed',
+      durationMs: null,
+      requestText: null,
+      responseText: null,
+    });
+    expect(soloHistory[0]?.failureReason).toContain('拼车');
+    const lunaHistory = await readRouteProbeHistory(t.db, 'luna', 10);
+    expect(lunaHistory[0]).toMatchObject({
+      result: 'not_probed',
+      durationMs: null,
+      requestText: null,
+      responseText: null,
+    });
+    expect(lunaHistory[0]?.failureReason).toContain('Codex');
 
     const runs = (await t.db.select().from(scheduleRuns)).filter((r) => r.job === ROUTE_PROBE_JOB.id);
     expect(runs.map((r) => [r.outcome, r.scanned, r.found])).toEqual([['ok', 3, 2]]);
