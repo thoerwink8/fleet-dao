@@ -21,7 +21,7 @@
       "keyFile": "/etc/fleet-dao/reclaude-api.key"
     },
     {
-      "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
+      "_说明": "（Mirasim 池要走桥接，另一单，#1195 不做。）Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
       "poolId": "mirasim-relay",
       "channelId": "mirasim",
       "name": "Mirasim 中转账号",
@@ -30,6 +30,7 @@
       "tokenFile": "/home/<服务用户>/.mirasim/run/local-4316.token"
     },
     {
+      "_说明": "Cursor 订阅（#1195）。引擎读它的登录文件时以会话用户的身份读（文件在会话用户家里，引擎用户进不去），所以 authFile 写会话用户家里的绝对路径（法国是 /home/fleet-agent-carpool/ 下）。读的是 cursor-agent 浏览器登录落下的 auth.json（要有 accessToken）；法国 cursor-agent 用的是 API 密钥文件 ~/.cursor/fleet-api-key，是另一个文件、Dashboard 认不认这把密钥没核实；没有 auth.json 时这个池如实报「读不到」，不当成 0。",
       "poolId": "cursor",
       "channelId": "cursor",
       "name": "Cursor 订阅",
@@ -37,6 +38,7 @@
       "authFile": "/home/<服务用户>/.config/cursor/auth.json"
     },
     {
+      "_说明": "Grok 订阅（#1195）。同样以会话用户的身份读登录文件（grok login 落下的，grok 自己续期）；不写 authFile 就默认读会话用户家里 ~/.grok/ 下的 auth.json。令牌过期读取器不自己续，报「要让 grok 自己续一下」。",
       "poolId": "grok",
       "channelId": "xai",
       "name": "Grok 订阅（Grok Build）",

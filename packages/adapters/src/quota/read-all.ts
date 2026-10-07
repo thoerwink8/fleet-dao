@@ -125,6 +125,7 @@ async function readPool(
   }
   const timeoutMs = pool.timeoutMs ?? config.timeoutMs ?? DEFAULT_TIMEOUT_MS[pool.reader] ?? 20_000;
   const controller = new AbortController();
+  const user = deps.asUser?.readers.includes(pool.reader) ? deps.asUser : undefined;
   const ctx: ReaderContext = {
     pool,
     fetchedAt,
@@ -132,11 +133,11 @@ async function readPool(
     signal: controller.signal,
     fetch: deps.fetch,
     runCommand: deps.runCommand,
-    readFile: deps.readFile,
+    readFile: user?.readFile ?? deps.readFile,
     listDir: deps.listDir,
     openWebSocket: deps.openWebSocket,
     workDir: deps.workDir,
-    homeDir: deps.homeDir,
+    homeDir: user?.homeDir ?? deps.homeDir,
     env: deps.env,
     shared<T>(key: string, fn: () => Promise<T>): Promise<T> {
       let p = shared.get(key) as Promise<T> | undefined;

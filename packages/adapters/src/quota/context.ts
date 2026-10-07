@@ -76,6 +76,16 @@ export interface QuotaDeps extends QuotaIo {
   usageRecords?: UsageSource;
   /** 换掉某种读取器（测试用假的；以后某家换了读法也从这里接）。 */
   readers?: Partial<Record<ReaderType, Reader>>;
+  /**
+   * 这几种读取器的凭据在别的用户家里（引擎用户进不去会话用户的家）：它们读文件改用这里的 readFile（以那个用户的身份读），
+   * 配置里的 ~ 展开到这里的 homeDir；其余读取器照旧用上面的 readFile、homeDir（例如拼车的 Key 文件引擎自己读得到）。
+   * 读不到要抛错，不许回空串。
+   */
+  asUser?: {
+    readers: readonly ReaderType[];
+    readFile: (path: string) => Promise<string>;
+    homeDir: string;
+  };
 }
 
 export interface ReaderOutput {

@@ -3,6 +3,8 @@
 // 改这里之前必须知道：
 // - 读取用的是引擎进程自己的身份和家目录（productionQuotaIo）：要会话用户的登录态才读得到的池（独享组织的 /usage）读不到时
 //   报 not_current / no_credentials，由 jobs/quota-read.ts 按规矩处理（not_current 不报警、凭据类当场报），不在这里绕。
+//   例外：Cursor、Grok 两个池的登录文件在会话用户家里，引擎用户进不去，这两种读取器读文件经 asUser（exec 以会话用户 cat，
+//   real/index.ts 的 quotaAsUser，#1195）；其余池（拼车的 Key 文件、Mirasim 的令牌）照旧用引擎自己的身份。Mirasim 池要走桥接，不在这里。
 // - 估算类的池的用量记录（usageRecords）读这个池路由上的会话，Fusion 的（session_runs）和三段的一次性会话（runs）都算（db 的
 //   pool-runs.ts，#758）；runs 读不了照抛（这个池没读成），不拿 Fusion 那一半当全部。没记到花费的会话不进记录（不拿 0 冒充），
 //   估算读取器对「一条记录都没有」自己写「0 只是下限」。池自己配了日账目录（usage）的不走这里。
@@ -10,6 +12,7 @@ import {
   loadQuotaConfig,
   productionQuotaIo,
   type QuotaDeps,
+  type QuotaIo,
   readAllQuotas,
   type UsageRecord,
   type UsageSource,
@@ -34,6 +37,10 @@ export interface QuotaReadWiring {
   /** 测试用：换掉读配置、读额度的外部能力。 */
   loadConfig?: QuotaReadJobDeps['loadConfig'];
   quotaDeps?: QuotaDeps;
+  /** 测试用：换掉引擎自己的外部能力（真进程、真网络、真文件）。 */
+  io?: QuotaIo;
+  /** 凭据在会话用户家里的读取器改经它读文件（real/index.ts 的 quotaAsUser）。不给就都用引擎自己的身份读。 */
+  asUser?: QuotaDeps['asUser'];
 }
 
 /** 会话用量转成估算读取器要的记录：花费为空的会话跳过（它没记到钱，按 0 算就是编数）。 */
@@ -70,7 +77,12 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
     read: (config) =>
       readAllQuotas(
         config,
-        w.quotaDeps ?? { ...productionQuotaIo(), now, usageRecords: sessionUsageSource(w.db) },
+        w.quotaDeps ?? {
+          ...(w.io ?? productionQuotaIo()),
+          now,
+          usageRecords: sessionUsageSource(w.db),
+          ...(w.asUser ? { asUser: w.asUser } : {}),
+        },
       ),
     save: (snapshot, at) => savePoolQuota(w.db, snapshot, { now: at }),
     lastReadOk: (ids) => poolLastReadOk(w.db, ids),
