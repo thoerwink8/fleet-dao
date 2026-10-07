@@ -21,6 +21,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
 import { type MilestoneDetail, toMilestoneDetail } from './github-api.ts';
+import type { SimilarReport } from './issue-similar.ts';
 import {
   isKindLabel,
   KIND_LABELS,
@@ -43,6 +44,11 @@ export interface IssueNewDeps {
   gh: Gh;
   /** --body-file 相对哪个目录（pnpm 跑脚本时是 INIT_CWD，也就是敲命令的地方）。 */
   cwd: string;
+  /**
+   * 开单前查「有没有可能重复的单」（issue-similar.ts 的 similarIssues，#995 拍 3）：入口传，测试不传就不查。
+   * 只提示：它不抛、不拦开单，读不到就在报告里写「没查成」。
+   */
+  similar?: ((q: { title: string; body: string }) => Promise<SimilarReport>) | undefined;
 }
 
 export interface IssueNewResult {
@@ -56,6 +62,8 @@ export interface IssueNewResult {
   local?: true | undefined;
   /** 排进了版本的先后（挂版本的母单、单独的单）：排在第几位（从 1 数）、先后里一共几张。 */
   order?: { position: number; count: number } | undefined;
+  /** 开单前查的可能重复的单（deps.similar 给了才有）；只提示，开单不受它影响。 */
+  similar?: SimilarReport | undefined;
 }
 
 export const USAGE =
@@ -179,6 +187,9 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     );
   }
 
+  // 开单之前查（开出来的新单不会和自己比）；只提示、不拦，查不动也往下开
+  const similar = await deps.similar?.({ title: o.title, body });
+
   const picked = o.milestone === UNSCHEDULED ? undefined : await resolveMilestone(deps.gh, o.milestone);
   const milestone = picked?.title ?? UNSCHEDULED;
   // 要排进版本先后的：挂版本（v<N> 开头）、不是子单（子单在母单页面上排，不进这层）；未排期、旧的 P 阶段没有先后
@@ -224,7 +235,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     version === undefined
       ? undefined
       : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
-  return { number, url, milestone, parent, local, order };
+  return { number, url, milestone, parent, local, order, similar };
 }
 
 interface Options {
