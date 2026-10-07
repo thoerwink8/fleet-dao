@@ -43,6 +43,7 @@ import { canaryJob } from './canary.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
+import { ciTimingsJob } from './ci-timings.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
@@ -576,6 +577,8 @@ export function realPortsFromEnv(
     watchdog: watchdogJob({ db }),
     // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲
     intake: intakeJob({ db, gh }),
+    // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
+    ciTimings: ciTimingsJob({ db, github: gh }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 动手会话（#632 S2-4b-2）和冷验收会话（S2-5b）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的

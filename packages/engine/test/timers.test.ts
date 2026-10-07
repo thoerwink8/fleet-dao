@@ -1,5 +1,6 @@
 // 引擎进程里的定时器（#1072，jobs/timers.ts）：钟点格子、不叠着跑、停机后只补最近一轮、一轮失败不停定时、重启后自己恢复；
-// 和 8 个定时任务的登记（jobs/engine-timers.ts）：格子是原来 Temporal Schedule 的 interval + offset，没改。
+// 和 9 个定时任务的登记（jobs/engine-timers.ts）：原来 8 个的格子是 Temporal Schedule 的 interval + offset，没改；
+// 耗时表是 #921 新加的，周一 06:00（北京时间）。
 // 用假的钟和假的 setTimeout，不真等。
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
@@ -352,7 +353,7 @@ describe('进程内定时器（startTimers）', () => {
   });
 });
 
-describe('8 个定时任务的登记（engineTimerJobs）', () => {
+describe('9 个定时任务的登记（engineTimerJobs）', () => {
   const never = () => {
     throw new Error('这里不该被叫');
   };
@@ -365,6 +366,7 @@ describe('8 个定时任务的登记（engineTimerJobs）', () => {
     canary: never,
     watchdog: never,
     intake: never,
+    ciTimings: never,
   });
   const start = vi_fn();
   function vi_fn() {
@@ -385,11 +387,11 @@ describe('8 个定时任务的登记（engineTimerJobs）', () => {
   const client = { workflow: { start: start.fn, getHandle: () => ({}) } } as never;
   const jobs = () => engineTimerJobs({ jobs: fakeJobs(), client, taskQueue: 'fleet' });
 
-  it('和登记表（scheduled_jobs 的那 8 个）一一对得上、顺序一样', () => {
+  it('和登记表（scheduled_jobs）一一对得上、顺序一样', () => {
     expect(jobs().map((j) => j.id)).toEqual(ENGINE_JOBS.map((j) => j.id));
   });
 
-  it('格子就是原来 Temporal Schedule 的 interval + offset：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3', () => {
+  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3、耗时表每周一 06:00（北京时间）', () => {
     expect(jobs().map((j) => [j.id, j.everyMinutes, j.offsetMinutes ?? 0])).toEqual([
       ['github-reconcile', 15, 0],
       ['route-probe', 15, 7],
@@ -399,13 +401,15 @@ describe('8 个定时任务的登记（engineTimerJobs）', () => {
       ['canary', 360, 26],
       ['watchdog', 5, 4],
       ['intake', 5, 3],
+      ['ci-timings', 7 * 24 * 60, 3 * 24 * 60 + 22 * 60],
     ]);
   });
 
   it('补跑窗口：都是一格（停机一阵再起来只补最近一轮）；巡检例外，错过的那一轮一小时内补上', () => {
     for (const j of jobs()) {
       expect(j.catchupMinutes, j.id).toBe(j.id === 'canary' ? 60 : j.everyMinutes);
-      expect(j.overdueMinutes, j.id).toBe(15);
+      // 耗时表要下日志，超时线是 60 分钟；其余仍是原来的 15 分钟
+      expect(j.overdueMinutes, j.id).toBe(j.id === 'ci-timings' ? 60 : 15);
     }
   });
 

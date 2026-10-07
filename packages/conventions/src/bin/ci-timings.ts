@@ -11,14 +11,18 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { fsRepo } from '../repo.ts';
 import { listTestFiles, parseTimings, TIMINGS_FILE } from '../test-split.ts';
-import { medianOfRuns, mergeTimings, parseRunLog, renderTimings } from '../test-timings.ts';
+import {
+  medianOfRuns,
+  mergeTimings,
+  parseRunLog,
+  renderTimings,
+  TIMINGS_AUTO_MIN_BOXES,
+  TIMINGS_AUTO_RUNS,
+  TIMINGS_AUTO_SCAN,
+  timingsSource,
+} from '../test-timings.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
-/** 不给 --run 时取几轮、最多往回翻几次运行找。 */
-const AUTO_RUNS = 5;
-const AUTO_SCAN = 40;
-/** 一轮至少有几台测试台才算「真跑了测试」（按改动跑的小 PR 只有一两台，量到的文件太少、不值得混进来）。 */
-const AUTO_MIN_BOXES = 4;
 
 function fail(why: string): never {
   console.error(`耗时表没刷新：${why}`);
@@ -46,7 +50,7 @@ try {
   fail(`参数不对（${e instanceof Error ? e.message : String(e)}）`);
 }
 
-/** 不给 --run 时：最近的绿的 ci.yml 运行里，头 AUTO_RUNS 次有至少 AUTO_MIN_BOXES 台测试台跑成功的。 */
+/** 不给 --run 时：最近的绿的 ci.yml 运行里，头 TIMINGS_AUTO_RUNS 次有至少 TIMINGS_AUTO_MIN_BOXES 台测试台跑成功的。 */
 function pickAutoRuns(): string[] {
   const text = gh([
     'run',
@@ -56,7 +60,7 @@ function pickAutoRuns(): string[] {
     '--status',
     'success',
     '--limit',
-    String(AUTO_SCAN),
+    String(TIMINGS_AUTO_SCAN),
     '--json',
     'databaseId',
   ]);
@@ -80,12 +84,12 @@ function pickAutoRuns(): string[] {
       '[.jobs[] | select((.name | startswith("test (")) and .conclusion == "success")] | length',
     ]);
     if (!/^\d+\s*$/.test(boxes)) fail(`运行 ${id} 的测试台数认不出：${boxes.trim().slice(0, 80)}`);
-    if (Number(boxes) >= AUTO_MIN_BOXES) picked.push(id);
-    if (picked.length === AUTO_RUNS) break;
+    if (Number(boxes) >= TIMINGS_AUTO_MIN_BOXES) picked.push(id);
+    if (picked.length === TIMINGS_AUTO_RUNS) break;
   }
   if (picked.length === 0)
     fail(
-      `最近 ${list.length} 次绿的 ci.yml 运行里没有一次真跑了 ${AUTO_MIN_BOXES} 台以上的测试台（自己用 --run 指几轮）`,
+      `最近 ${list.length} 次绿的 ci.yml 运行里没有一次真跑了 ${TIMINGS_AUTO_MIN_BOXES} 台以上的测试台（自己用 --run 指几轮）`,
     );
   return picked;
 }
@@ -116,7 +120,10 @@ for (const l of logs) {
 }
 const measured = medianOfRuns(perRun);
 if (measured === undefined) fail('一轮日志都没有');
-const source = `${logs.map((l) => l.name).join('、')}，共 ${logs.length} 轮取中位数（${new Date().toISOString().slice(0, 10)}）`;
+const source = timingsSource(
+  logs.map((l) => l.name),
+  new Date(),
+);
 
 const existing = listTestFiles(fsRepo(root));
 if (typeof existing === 'string') fail(existing);

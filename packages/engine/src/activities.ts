@@ -12,6 +12,7 @@ import {
   openCanaryRound,
 } from './jobs/canary.ts';
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
+import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
@@ -200,6 +201,8 @@ export interface EngineJobs {
   watchdog?: () => WatchdogDeps;
   /** 拉单（#632）：读开着开关的仓里该做的单、起任务工作流（起工作流、数在跑的用这次活动的 Temporal 客户端；taskQueue 同上）。 */
   intake?: (client: Client, taskQueue: string) => IntakeDeps;
+  /** 每周刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
+  ciTimings?: () => CiTimingsJobDeps;
 }
 
 /**

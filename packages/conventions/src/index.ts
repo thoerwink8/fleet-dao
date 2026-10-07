@@ -147,3 +147,14 @@ export {
   standardFiles,
 } from './standard-paths.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';
+export { isTestFile, parseTimings, TIMINGS_FILE, type Timings } from './test-split.ts';
+export {
+  medianOfRuns,
+  mergeTimings,
+  parseRunLog,
+  renderTimings,
+  TIMINGS_AUTO_MIN_BOXES,
+  TIMINGS_AUTO_RUNS,
+  TIMINGS_AUTO_SCAN,
+  timingsSource,
+} from './test-timings.ts';
