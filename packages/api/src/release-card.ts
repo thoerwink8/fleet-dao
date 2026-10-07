@@ -18,7 +18,7 @@ import {
   ReleasedCommitsSchema,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
+import { deployedAtFromHistory, RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { type FranceReleasePort, parseTrainState } from './france-release.ts';
@@ -506,19 +506,8 @@ export function registerReleaseCardRoutes(app: Hono<CockpitEnv>, deps: Deps): vo
 
 // —— 生产装配（main.ts 挂）用到的真实现 ——
 
-/** 发布历史（release.sh 的 .history：每行 `时间 提交号 事件 [unmerged]`）里这个提交最近一次切上去的时间；没有记录回 null。 */
-export function deployedAtFromHistory(history: string, sha: string): string | null {
-  let at: string | null = null;
-  for (const raw of history.split(/\r?\n/)) {
-    const [time, got, event] = raw.trim().split(/\s+/);
-    if (got !== sha || !time) continue;
-    // 切上去的三种事件；unhealthy、recovered 不是切版本
-    if (event === 'release' || event === 'rollback' || event === 'auto-rollback') at = time;
-  }
-  if (at !== null && Number.isNaN(Date.parse(at)))
-    throw new Error(`发布历史里「${at.slice(0, 40)}」不是时间`);
-  return at;
-}
+// deployedAtFromHistory 在 @fleet-dao/store（readDeployLagInput 也要读它）；这里照旧从本文件出口，调用方不用改
+export { deployedAtFromHistory };
 
 export function liveReleaseCardPort(facts: ReleaseFactsReader, dir: string = RELEASES_DIR): ReleaseCardPort {
   return {

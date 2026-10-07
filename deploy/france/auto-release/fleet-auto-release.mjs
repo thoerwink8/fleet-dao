@@ -1,8 +1,9 @@
-// 自动发布的入口（法国，root）：fleet-auto-release.timer 每 5 分钟经 fleet-auto-release.service 拉起一轮。
+// 自动发布单元的入口（法国，root）：fleet-auto-release.timer 每 5 分钟经 fleet-auto-release.service 拉起一轮。
+// 它现在只读不发（决定 0032、#1258）：发布走驾驶舱按钮。这里不调 release.sh。
 // deploy/france.sh 把这个目录装到 /usr/local/lib/fleet-dao/auto-release/（装的是副本：主线上改了它，下一版发完由本入口自己
-// 跑 france.sh --auto-tier 换上，不用人重跑；只有防火墙、sudoers、建用户那几个文件改了才要人重跑，/healthz 才标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、会话列表、发布脚本、库。
+// 跑 france.sh --auto-tier 换上，不用人重跑；只有防火墙、sudoers、建用户那几个文件改了才要人重跑，/healthz 才标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、库。
 // 手动跑一轮：systemctl start fleet-auto-release（别直接跑本文件：两轮叠着跑会互相盖状态文件）。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { readLive } from './config.mjs';
@@ -16,10 +17,8 @@ import {
   MAIN_HISTORY,
   RELEASES,
   REPO,
-  releaseDetail,
   runRound,
   STATE_FILE,
-  VERSION_TAGS_ARGS,
 } from './lib.mjs';
 
 const NODE = '/usr/bin/node';
@@ -54,13 +53,6 @@ function gitOk(args, what, opts) {
   return r.stdout;
 }
 
-function isAncestor(a, b) {
-  const r = git(['merge-base', '--is-ancestor', a, b]);
-  if (r.code === 0) return true;
-  if (r.code === 1) return false;
-  throw new Error(`比不出 ${a.slice(0, 12)} 和 ${b.slice(0, 12)} 谁在前：${tail(r.stderr)}`);
-}
-
 /** 以 fleet 经本机 socket 连库 fleet（peer 认证，和备份任务一样）；值一律用 -v 传、SQL 里写 :'名字'，由 psql 加引号。 */
 function sql(text, vars) {
   const args = [
@@ -86,65 +78,18 @@ function saveState(st) {
   renameSync(tmp, STATE_FILE);
 }
 
-/** 跑 release.sh <提交> --auto：它自己交给 systemd 跑、这边跟着读日志；留最后几十行找原因，日志路径从第一行取。 */
-function runRelease(sha, busyOk) {
-  return new Promise((resolve, reject) => {
-    const args = [`${CHECKOUT}/deploy/release.sh`, sha, '--auto', ...(busyOk ? ['--busy-ok'] : [])];
-    const child = spawn('bash', args, { cwd: '/', stdio: ['ignore', 'pipe', 'pipe'] });
-    let log = '';
-    let lines = [];
-    const take = (d) => {
-      const text = String(d);
-      if (!log) log = /日志 (\/\S+?\.log)/.exec(text)?.[1] ?? '';
-      lines = [...lines, ...text.split('\n')].slice(-60);
-    };
-    child.stdout.on('data', take);
-    child.stderr.on('data', take);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      // 有红取红；退出码 2（没红、有待配或没查成）取那几项，报警里写清是哪几项（lib.mjs 的 releaseDetail）
-      resolve({ code: code ?? -1, log, detail: releaseDetail(lines) });
-    });
-  });
-}
-
 export const realIo = {
   now: () => new Date(),
   async readMain() {
-    // 连 tag 一起取：这一轮发哪个版本全看版本标记（v<N> tag），没取到 tag 会当成「一个标记都没有」明确失败——
-    // 不是「没有标记就发主线」（决定 0011 第 3 条）。带 --no-tags 的老写法在这里就是错的。
+    // 只取主线：不取 tag（--no-tags）——读数不看版本标记，仓上有没有 tag 都一样
     gitOk(
-      [
-        'fetch',
-        '--quiet',
-        '--prune',
-        'origin',
-        '+refs/heads/main:refs/remotes/origin/main',
-        '+refs/tags/*:refs/tags/*',
-      ],
-      '从 GitHub 取主线和版本标记',
+      ['fetch', '--quiet', '--prune', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
+      '从 GitHub 取主线',
       { timeoutMs: 180_000 },
     );
     return gitOk(
       ['log', '--first-parent', `-n${MAIN_HISTORY}`, '--format=%H %cI', 'refs/remotes/origin/main'],
       '读主线的提交',
-    );
-  },
-  /** 版本标记（`v<N>` tag）：名字、它指的提交、时间。读不到就抛，由 lib.mjs 记成「标记没查成」、这一轮不发。 */
-  async readVersionTags() {
-    return gitOk(VERSION_TAGS_ARGS, '读版本标记');
-  },
-  /**
-   * 这个提交是不是 origin/main 的祖先（`git merge-base --is-ancestor` 退出码 0 是、1 不是、别的算没查成）。
-   * 只把上一次 readMain 取回来的 refs/remotes/origin/main 当真，不再取一次 GitHub（一轮一次）。
-   */
-  async isAncestorOfMain(commit) {
-    if (!SHA.test(commit)) throw new Error(`认不出的提交号「${String(commit).slice(0, 60)}」`);
-    const r = git(['merge-base', '--is-ancestor', commit, 'refs/remotes/origin/main']);
-    if (r.code === 0) return true;
-    if (r.code === 1) return false;
-    throw new Error(
-      `比不出 ${commit.slice(0, 12)} 和 origin/main 谁在前（git 退出码 ${r.code}）：${tail(r.stderr || r.stdout)}`,
     );
   },
   async readSystem(head) {
@@ -173,15 +118,7 @@ export const realIo = {
     if (!SHA.test(target)) throw new Error(`${RELEASES}/current 指着认不出的「${target.slice(0, 60)}」`);
     return target;
   },
-  async readHistory() {
-    try {
-      return readFileSync(`${RELEASES}/.history`, 'utf8');
-    } catch (e) {
-      if (e.code === 'ENOENT') return '';
-      throw e;
-    }
-  },
-  /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次，候选都从这一份里判。 */
+  /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次。 */
   async ciRuns() {
     const workflow = CI_WORKFLOW.split('/').pop();
     const url =
@@ -203,44 +140,6 @@ export const realIo = {
         : `这个钟头还剩 ${left} 次${reset ? `，${new Date(reset * 1000).toISOString()} 恢复` : ''}`;
     return { status: res.status, body: await res.text(), rate };
   },
-  async releaseBusy() {
-    const r = run('flock', ['-n', `${RELEASES}/.lock`, 'true'], { timeoutMs: 10_000 });
-    if (r.code === 0) return false;
-    if (r.code === 1) return true;
-    throw new Error(`flock 退出码 ${r.code}：${tail(r.stderr)}`);
-  },
-  /**
-   * 本机有没有在跑引擎（决定 0011 第 4 条的「停派活 → 等收尾 → 部署 → 恢复派活」四步做不做得了）。
-   * 和 release.sh 的 `has_service fleet-engine` 同一个判法：看 systemctl 说这个单元活没活
-   * （FLEET_SERVICES 里没有 fleet-engine 的机器，is-active 回的不是 active）。
-   * systemctl 没跑成、回认不出的：抛（调用方这一轮不发、报 engine-unknown），不当成关着也不当成开着。
-   * 注：这里说的是「本机跑不跑引擎」，和「让 AI 接活」那个按仓的开关（fleet-api dispatch）不是一回事——
-   * 引擎关着时那四步本来就没得做，见 lib.mjs 的 publishSequence。
-   */
-  async engineOn() {
-    const r = run('systemctl', ['is-active', 'fleet-engine.service'], { timeoutMs: 10_000 });
-    const state = r.stdout.trim();
-    if (state === 'active' || state === 'activating' || state === 'reloading') return true;
-    if (['inactive', 'failed', 'deactivating', 'unknown', 'not-found'].includes(state)) return false;
-    throw new Error(
-      `systemctl is-active fleet-engine.service 回的认不出（退出码 ${r.code}、回「${state.slice(0, 40)}」）：${tail(r.stderr)}`,
-    );
-  },
-  async prepareCheckout(sha) {
-    try {
-      const dirty = gitOk(['status', '--porcelain', '--untracked-files=no'], '看部署检出有没有改动').trim();
-      if (dirty) return { ok: false, why: `部署检出 ${CHECKOUT} 有没提交的改动：${tail(dirty, 3)}` };
-      const at = gitOk(['rev-parse', 'HEAD'], '读部署检出的提交').trim();
-      if (at === sha || isAncestor(sha, at)) return { ok: true };
-      if (!isAncestor(at, sha))
-        return { ok: false, why: `部署检出在 ${at.slice(0, 12)}，和主线分叉了（不是主线上的祖先）` };
-      gitOk(['merge', '--ff-only', '--quiet', sha], `把部署检出快进到 ${sha.slice(0, 12)}`);
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, why: e instanceof Error ? e.message : String(e) };
-    }
-  },
-  runRelease,
   async checkoutHead() {
     return gitOk(['rev-parse', 'HEAD'], '读部署检出的提交').trim();
   },
@@ -285,7 +184,7 @@ where dedupe_key = :'key' and resolved_at is null;`,
   async save(st) {
     saveState(st);
   },
-  /** 上一轮的状态文件原文；文件不在回 null（第一次跑），别的读不了就抛（lib.mjs 的 runRound 当「读不出」：这一轮不发、报警）。 */
+  /** 上一轮的状态文件原文；文件不在回 null（第一次跑），别的读不了就抛（lib.mjs 的 runRound 当「读不出」：这一轮什么都不做、报警）。 */
   async readState() {
     try {
       return readFileSync(STATE_FILE, 'utf8');
@@ -297,7 +196,7 @@ where dedupe_key = :'key' and resolved_at is null;`,
 };
 
 async function main() {
-  // 状态文件读不出不再从空的起（审查 S4）：runRound 这一轮不发、不覆盖它、报警；报警也没发出去就退出非 0，systemd 里看得到
+  // 状态文件读不出不再从空的起（审查 S4）：runRound 这一轮什么都不做、不覆盖它、报警；报警也没发出去就退出非 0，systemd 里看得到
   const r = await runRound(realIo);
   console.log(r.line);
   if (r.alertLost) process.exitCode = 1;

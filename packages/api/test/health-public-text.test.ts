@@ -218,7 +218,6 @@ async function publicFailures(log: Logger) {
     deployLagCheck(
       () => ({
         current: { sha: null },
-        currentOnMain: null,
         state: { error: '/srv/fleet-dao-releases/.auto 读不到' },
       }),
       () => new Date(),

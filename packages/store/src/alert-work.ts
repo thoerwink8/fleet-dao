@@ -117,22 +117,26 @@ export function toAlertWorkFacts(raw: AlertWorkRaw): AlertWorkFacts[] {
 
 /**
  * 法国的发布记录 → core 的 DeployFacts：在用的版本（current 链接）、主线最近的提交（自动发布的状态文件，新的在前）、
- * 状态文件这一轮的时刻；最近一次发布就是在用的这版而且成了，它结束的时刻就是切上去的时刻。读不到的照实带原因。
+ * 状态文件这一轮的时刻、在用的这版切上去的时刻（发布历史 .history，readDeployLagInput 读；读不到是 null）。读不到的照实带原因。
  */
 export function deployFacts(input: DeployLagInput): DeployFacts {
   if ('error' in input.current) return { ok: false, why: input.current.error };
   if (input.current.sha === null) return { ok: false, why: '法国上还没发布过（没有 current 链接）' };
   if ('error' in input.state) return { ok: false, why: input.state.error };
-  const { main, attempt, ranAt } = input.state;
+  const { main, ranAt } = input.state;
   if (!main)
     return {
       ok: false,
       why: `自动发布这一轮没读到主线${input.state.mainError ? `：${input.state.mainError}` : ''}`,
     };
   const sha = input.current.sha;
-  const deployedAt =
-    attempt && attempt.sha === sha && attempt.result === 'ok' && attempt.endedAt ? attempt.endedAt : null;
-  return { ok: true, currentSha: sha, commits: main.commits, checkedAt: ranAt, deployedAt };
+  return {
+    ok: true,
+    currentSha: sha,
+    commits: main.commits,
+    checkedAt: ranAt,
+    deployedAt: input.deployedAt ?? null,
+  };
 }
 
 /** 驾驶舱、fleet-api alert（只借来读静默）、每小时对账（谁在处理，判 24 小时要不要再推）读提醒处理状态的那一个口子（原来提醒派单也读，#445 删掉了）。 */
