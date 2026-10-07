@@ -50,7 +50,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 /** @typedef {{ checkedAt: string, result: string, drift: string[], unchecked: string[] }} ConfigFacts */
 /**
  * 自动发布的读数（deploy/france/auto-release/lib.mjs 写的状态文件，france-query.mjs 带回来）。
- * @typedef {{ schema: 1, ranAt: string, main: MainFacts | null, mainError: string | null, ci: CiFacts | null, hold: HoldFacts | null, waitingSince: string | null, attempt: AttemptFacts | null, rules: RulesFacts | null, system: SystemFacts | null, last: LastFacts | null, config?: ConfigFacts | null }} AutoReleaseState
+ * @typedef {{ schema: 1, ranAt: string, main: MainFacts | null, mainError: string | null, ci: CiFacts | null, hold?: HoldFacts | null, waitingSince?: string | null, attempt?: AttemptFacts | null, rules: RulesFacts | null, system: SystemFacts | null, last: LastFacts | null, config?: ConfigFacts | null }} AutoReleaseState
  */
 
 /**
@@ -614,13 +614,14 @@ export function autoReleaseProblem(s) {
     if (p) return p;
     if (!CI_VERDICTS.includes(ci.verdict)) return `ci.verdict 是 ${JSON.stringify(ci.verdict)}`;
   }
-  if (s.hold !== null) {
+  // hold、waitingSince、attempt 是单元还会发版时写的；#1258 起新状态里没有这三项（undefined），老状态里有，两种都认
+  if (s.hold != null) {
     const p = shapeProblem(s.hold, { since: 'iso', sha: 'str', event: 'str', unmerged: 'bool' }, 'hold');
     if (p) return p;
   }
-  if (s.waitingSince !== null && !isIso(s.waitingSince)) return 'waitingSince 不是时间';
+  if (s.waitingSince != null && !isIso(s.waitingSince)) return 'waitingSince 不是时间';
   const attempt = s.attempt;
-  if (attempt !== null) {
+  if (attempt != null) {
     if (!isObj(attempt)) return 'attempt 不是对象';
     const p = shapeProblem(
       attempt,
@@ -1125,9 +1126,9 @@ function releaseFacts(current, auto, at) {
     mainError: st.mainError,
     ranAt: st.ranAt,
     ci: st.ci,
-    hold: st.hold,
-    waitingSince: st.waitingSince,
-    attempt: st.attempt,
+    hold: st.hold ?? null,
+    waitingSince: st.waitingSince ?? null,
+    attempt: st.attempt ?? null,
     rules: st.rules,
     system: st.system,
     last: st.last ? { ...st.last, actionName: ACTION_WORDS[st.last.action] ?? st.last.action } : null,

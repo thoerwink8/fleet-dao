@@ -1,6 +1,6 @@
-// 线上版本跟不跟得上主线（deploy-lag.ts）：每一种「不对」和「没查成」各造一次，读的时候现算；对外的话拿演示版打包扫描的
-// 同一份名单扫；状态文件拿自动发布（deploy/france/auto-release/lib.mjs）真跑一轮造出来的核对，两边字段对得上；
-// 报警开一条、说法不变不改、好了解除，自动发布当场报过的不重报。
+// 线上读数跟不跟得上（deploy-lag.ts）：每一种「不对」和「没查成」各造一次，读的时候现算；落后主线几个提交不算毛病（发布只走驾驶舱按钮，0032）；
+// 对外的话拿演示版打包扫描的同一份名单扫；状态文件拿自动发布单元（deploy/france/auto-release/lib.mjs）真跑一轮造出来的核对，两边字段对得上；
+// 报警开一条、说法不变不改、好了解除，自动发布单元当场报过的不重报。
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,8 +30,8 @@ const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
 
 type State = DeployLagState;
 /**
- * 一份刚跑完的状态：主线头 H2（10 分钟前合进来）、前面 H1（100 分钟前）、H0（5 小时前）。在用 H1 = 落后 1 个、最老的没上线的
- * 等了 10 分钟；在用 H0 = 落后 2 个、最老的没上线的（H1）等了 100 分钟。在用的由各条自己给。
+ * 一份刚跑完的状态：主线头 H2（10 分钟前合进来）、前面 H1（100 分钟前）、H0（5 小时前）。在用 H1 = 落后 1 个；在用 H0 = 落后 2 个。
+ * 在用的由各条自己给。
  */
 function state(over: Partial<State> = {}): State {
   return {
@@ -49,9 +49,6 @@ function state(over: Partial<State> = {}): State {
     },
     mainError: null,
     ci: { sha: H2, verdict: 'green', detail: 'CI 全绿', checkedAt: ago(2 * MIN) },
-    hold: null,
-    waitingSince: null,
-    attempt: null,
     rules: { commit: H2, at: ago(2 * MIN), result: 'ok', detail: '' },
     system: { appliedSha: H0, behind: 0, oldestAt: null },
     last: { action: 'up-to-date', detail: '', at: ago(2 * MIN) },
@@ -60,11 +57,8 @@ function state(over: Partial<State> = {}): State {
 }
 /** 同一份主线读数，只换「什么时候读到的」。 */
 const mainAt = (checkedAt: string) => ({ ...(state().main as NonNullable<State['main']>), checkedAt });
-const input = (
-  current: string | null,
-  st: State | { error: string } = state(),
-  onMain: boolean | null = null,
-) => ({ current: { sha: current }, currentOnMain: onMain, state: st }) satisfies DeployLagInput;
+const input = (current: string | null, st: State | { error: string } = state()) =>
+  ({ current: { sha: current }, state: st }) satisfies DeployLagInput;
 const codes = (v: DeployLagVerdict) => v.problems.map((p) => p.code);
 const judge = (i: DeployLagInput) => judgeDeployLag(i, NOW);
 
@@ -73,91 +67,20 @@ describe('判定：读的时候现算', () => {
     expect(judge(input(H2))).toEqual({ ok: true, problems: [] });
   });
 
-  it('落后但在正常的等（等 CI、等空闲，最老的没上线的提交还没等满 90 分钟）：绿', () => {
-    expect(judge(input(H1, state({ last: { action: 'wait-idle', detail: '', at: ago(MIN) } }))).ok).toBe(
-      true,
-    );
-  });
-
-  it('落后超过 90 分钟：红，写明落后几个、多久（从最老的没上线的提交合进来算）、卡在哪', () => {
-    const st = state({ last: { action: 'wait-idle', detail: '17', at: ago(MIN) } });
-    const v = judge(input(H0, st));
-    expect(codes(v)).toEqual(['behind']);
-    expect(v.problems[0]?.message).toBe('落后主线 2 个提交、1 小时 40 分钟（在等引擎空闲）');
-    expect(v.problems[0]?.steady).toBe('落后主线太久（在等引擎空闲）');
-  });
-
-  it('最近一次自动发布没成：马上红，标「自动发布那边报过了」', () => {
-    const st = state({
-      attempt: {
-        sha: H2,
-        startedAt: ago(20 * MIN),
-        endedAt: ago(15 * MIN),
-        result: 'failed',
-        detail: '迁移失败',
-      },
-      last: { action: 'failed-before', detail: '', at: ago(MIN) },
-    });
-    const v = judge(input(H1, st));
-    expect(codes(v)).toEqual(['failed']);
-    expect(v.problems[0]?.alreadyAlerted).toBe(true);
-    expect(v.problems[0]?.detail).toContain('迁移失败');
-  });
-
-  it('没成的是往回找到的那个（主线头的 CI 没跑完，发的是更早的全绿提交）：照样马上红；比在用的旧的没成不算', () => {
-    const failedAt = (sha: string) =>
-      state({
-        attempt: {
-          sha,
-          startedAt: ago(20 * MIN),
-          endedAt: ago(15 * MIN),
-          result: 'failed',
-          detail: '迁移失败',
-        },
-        last: { action: 'ci-pending', detail: '', at: ago(MIN) },
-      });
-    // 在用 H0，发 H1（不是主线头 H2）没成
-    const v = judge(input(H0, failedAt(H1)));
-    expect(codes(v)).toEqual(['failed']);
-    expect(v.problems[0]?.detail).toContain('迁移失败');
-    // 在用 H1，没成的 H0 比它旧：不是现在的事，照落后多久判（才落后 10 分钟，绿）
-    expect(judge(input(H1, failedAt(H0))).ok).toBe(true);
-  });
-
-  it('部署检出跟不上：马上红；CI 红、CI 结论读不到：落后满 30 分钟红', () => {
+  it('【故意造出的失败】落后主线几个提交、落了好几个钟头：照样绿（发布只走驾驶舱按钮，没人去发它，报警只会天天挂着）', () => {
+    // 在用 H0：落后 2 个、最早没上线的已经等了 100 分钟；以前超过 90 分钟就红
+    expect(judge(input(H0)).ok).toBe(true);
+    // 在用的不在主线最近的提交里（没合进主线的、落后太多的）也不是毛病
+    expect(judge(input('d'.repeat(40))).ok).toBe(true);
+    // 主线头的 CI 红、这一轮卡在什么上：以前的「CI 红」「部署检出」「在发」那些，状态里已经没有这些字段，也不报
     expect(
-      codes(judge(input(H1, state({ last: { action: 'checkout-blocked', detail: 'x', at: ago(MIN) } })))),
-    ).toEqual(['checkout']);
-    for (const action of ['ci-red', 'ci-unknown']) {
-      const last = { action, detail: '', at: ago(MIN) };
-      expect(judge(input(H1, state({ last }))).ok, `${action}：才落后 10 分钟`).toBe(true);
-      const v = judge(input(H0, state({ last })));
-      expect(codes(v), action).toEqual(['ci']);
-      expect(v.problems[0]?.message).toMatch(action === 'ci-red' ? /没通过/ : /读不到/);
-    }
-  });
-
-  it('人手动按住（退回、合并前验）：从按住那一刻起算，给人留出修的时间', () => {
-    const hold = { since: ago(10 * MIN), sha: H0, event: 'rollback', unmerged: false };
-    expect(judge(input(H0, state({ hold, last: { action: 'hold', detail: '', at: ago(MIN) } }))).ok).toBe(
-      true,
-    );
-    const long = { ...hold, since: ago(100 * MIN) };
-    const v = judge(input(H0, state({ hold: long, last: { action: 'hold', detail: '', at: ago(MIN) } })));
-    expect(codes(v)).toEqual(['behind']);
-    expect(v.problems[0]?.message).toContain('人手动切过版本');
-  });
-
-  it('在用的不在主线最近的提交里：没合进主线的（按住不久绿、久了红）、在主线上但落后太多、认不出', () => {
-    const pr = 'd'.repeat(40);
-    const hold = { since: ago(30 * MIN), sha: pr, event: 'release', unmerged: true };
-    expect(judge(input(pr, state({ hold }), false)).ok).toBe(true);
-    expect(codes(judge(input(pr, state({ hold: { ...hold, since: ago(120 * MIN) } }), false)))).toEqual([
-      'unmerged',
-    ]);
-    expect(codes(judge(input(pr, state(), false)))).toEqual(['unmerged']);
-    expect(codes(judge(input(pr, state(), true)))).toEqual(['far']);
-    expect(codes(judge(input(pr, state(), null)))).toEqual(['unchecked']);
+      judge(
+        input(
+          H0,
+          state({ ci: { sha: H2, verdict: 'red', detail: 'CI 结论是 failure', checkedAt: ago(MIN) } }),
+        ),
+      ).ok,
+    ).toBe(true);
   });
 
   it('没查成的每一种：状态读不到、自动发布没报到、主线头读不到或没读到过、在用的读不到', () => {
@@ -169,98 +92,15 @@ describe('判定：读的时候现算', () => {
     expect(codes(blind)).toEqual(['unchecked']);
     expect(blind.problems[0]?.detail).toBe('git fetch 失败');
     expect(codes(judge(input(H2, state({ main: null }))))).toEqual(['unchecked']);
-    expect(
-      codes(judgeDeployLag({ current: { error: 'EACCES' }, currentOnMain: null, state: state() }, NOW)),
-    ).toEqual(['unchecked']);
-    expect(codes(judge(input(null)))).toEqual(['behind']);
+    expect(codes(judgeDeployLag({ current: { error: 'EACCES' }, state: state() }, NOW))).toEqual([
+      'unchecked',
+    ]);
+    expect(codes(judge(input(null)))).toEqual(['not_released']);
   });
 
   it('读数旧了（没报到、主线头读不到）：不拿旧读数数落后几个', () => {
     const v = judge(input(H0, state({ ranAt: ago(3 * 60 * MIN), main: mainAt(ago(3 * 60 * MIN)) })));
     expect(codes(v)).toEqual(['stale']);
-  });
-
-  it('版本标记读不到（决定 0011 第 3 条）：标出来、写明「没有标记就不发」，自动发布那边报过了不重报', () => {
-    const stuck = state({
-      marker: null,
-      markerError: { kind: 'none', why: '一个 v<N> 版本标记都没有', at: ago(MIN) },
-      last: { action: 'marker-none', detail: '', at: ago(MIN) },
-    });
-    const v = judge(input(H0, stuck));
-    expect(codes(v)).toEqual(['marker']);
-    expect(v.problems[0]?.alreadyAlerted).toBe(true);
-    expect(v.problems[0]?.steady).toBe('版本标记读不到（没有标记就不发）');
-    expect(v.problems[0]?.detail).toContain('一个 v<N> 版本标记都没有');
-    // 不是祖先的那一种：对外说清是「不是主线上的提交」
-    const notAncestor = state({
-      marker: null,
-      markerError: { kind: 'not-ancestor', why: 'v2 指向的提交不是 origin/main 的祖先', at: ago(MIN) },
-      last: { action: 'marker-not-ancestor', detail: '', at: ago(MIN) },
-    });
-    expect(judge(input(H0, notAncestor)).problems[0]?.message).toContain('不是主线上的提交');
-    // 标记正常（这一轮只是在等 CI）：不报这一条
-    expect(
-      codes(
-        judge(input(H0, state({ marker: { tag: 'v1', commit: H2, at: ago(MIN), checkedAt: ago(MIN) } }))),
-      ),
-    ).toEqual([]);
-  });
-
-  describe('按版本发（决定 0011 第 3 条）：线上该跟的是版本标记，不是主线头', () => {
-    const marker = (commit: string, taggedAgo: number) => ({
-      tag: 'v3',
-      commit,
-      at: ago(taggedAgo),
-      taggedAt: ago(taggedAgo),
-      checkedAt: ago(2 * MIN),
-    });
-
-    it('主线往前走了、标记没动，在用的就是标记那一版：绿（合进主线的提交在下一版之前本来就不上线）', () => {
-      // 主线头 H2 是 10 分钟前合的，标记还指着 5 小时前的 H0；在用 H0。按老办法数这是「落后 2 个、100 分钟」，会一直红
-      expect(judge(input(H0, state({ marker: marker(H0, 300 * MIN) }))).ok).toBe(true);
-    });
-
-    it('在用的比标记还新（人手动发过更新的）：绿，不当落后', () => {
-      expect(judge(input(H1, state({ marker: marker(H0, 300 * MIN) }))).ok).toBe(true);
-    });
-
-    it('在用的比标记老：从标记打上那一刻起算，满 90 分钟才红；说法是「落后最新版本」，不拿主线头数', () => {
-      // 标记指着 H1（主线头 H2 之前的一个），在用 H0：差 1 个提交
-      expect(judge(input(H0, state({ marker: marker(H1, 30 * MIN) }))).ok).toBe(true);
-      const v = judge(input(H0, state({ marker: marker(H1, 100 * MIN) })));
-      expect(codes(v)).toEqual(['behind']);
-      expect(v.problems[0]?.message).toBe('落后最新版本 1 个提交、1 小时 40 分钟');
-      expect(v.problems[0]?.steady).toBe('落后最新版本太久');
-      expect(v.problems[0]?.message).not.toContain('主线');
-    });
-
-    it('【故意造出的失败】标记没查成（null）：不拿主线头充数去数落后——只报标记那一条', () => {
-      // 在用 H0 比主线头老 300 分钟：按老办法会多出一条 behind；按版本发，标记没查成时线上就该停着，不是落后
-      const v = judge(
-        input(
-          H0,
-          state({
-            marker: null,
-            markerError: { kind: 'none', why: '一个 v<N> 版本标记都没有', at: ago(MIN) },
-            last: { action: 'marker-none', detail: '', at: ago(MIN) },
-          }),
-        ),
-      );
-      expect(codes(v)).toEqual(['marker']);
-    });
-
-    it('状态里没有 marker 这个字段（老版本自动发布写的）：照老办法按主线头数', () => {
-      const old = state();
-      expect('marker' in old).toBe(false);
-      expect(codes(judge(input(H0, old)))).toEqual(['behind']);
-    });
-  });
-
-  it('一轮里在发：按发布本身的时限（60 分钟）算，不当成没报到；超了报「跑了太久」', () => {
-    const running = (m: number) =>
-      state({ ranAt: ago(m * MIN), attempt: { sha: H2, startedAt: ago(m * MIN), result: 'running' } });
-    expect(judge(input(H2, running(30))).ok).toBe(true);
-    expect(codes(judge(input(H2, running(70))))).toEqual(['stuck']);
   });
 
   it('规矩同步没成（自动发布那边报过了）、规矩同步到哪没读到：红', () => {
@@ -309,32 +149,17 @@ describe('判定：读的时候现算', () => {
       scanText(file: string, text: string, terms: readonly string[]): { term: string }[];
     };
     expect(scan.BUILTIN_TERMS.length).toBeGreaterThan(0);
-    const pr = 'd'.repeat(40);
     const cases: DeployLagInput[] = [
       input(H2, { error: '/srv/fleet-dao-releases/.auto/state.json 读不到' }),
       input(H2, state({ ranAt: ago(25 * MIN) })),
-      input(
-        H2,
-        state({ attempt: { sha: H2, startedAt: ago(70 * MIN), result: 'running' }, ranAt: ago(70 * MIN) }),
-      ),
       input(H2, state({ main: null, mainError: 'fatal: unable to access https://github.com/x/y' })),
       input(H2, state({ main: mainAt(ago(30 * MIN)) })),
-      { current: { error: 'EACCES /srv/fleet-dao-releases/current' }, currentOnMain: null, state: state() },
+      { current: { error: 'EACCES /srv/fleet-dao-releases/current' }, state: state() },
       input(null),
-      input(pr, state(), false),
-      input(pr, state(), true),
-      input(pr, state(), null),
       input(
-        H1,
-        state({ attempt: { sha: H2, startedAt: ago(9 * MIN), result: 'failed', log: '/srv/x.log' } }),
+        H2,
+        state({ tier: { commit: H2, at: ago(MIN), result: 'failed', detail: '退出码 1，✗ /srv/x 没装上' } }),
       ),
-      input(
-        H1,
-        state({ last: { action: 'checkout-blocked', detail: '/srv/fleet-dao 有改动', at: ago(MIN) } }),
-      ),
-      input(H0, state({ last: { action: 'ci-red', detail: '', at: ago(MIN) } })),
-      input(H0, state({ last: { action: 'ci-unknown', detail: '', at: ago(MIN) } })),
-      input(H0, state({ last: { action: 'hold', detail: '', at: ago(MIN) } })),
       input(
         H2,
         state({ rules: { commit: H2, at: ago(MIN), result: 'failed', detail: 'fleet-agent-carpool' } }),
@@ -356,20 +181,7 @@ describe('判定：读的时候现算', () => {
     }
     // 每一种代码都造到了：新加一种要补进上面
     expect([...seen].sort()).toEqual(
-      [
-        'behind',
-        'checkout',
-        'ci',
-        'failed',
-        'far',
-        'rules',
-        'rules_failed',
-        'stale',
-        'stuck',
-        'system',
-        'unchecked',
-        'unmerged',
-      ].sort(),
+      ['not_released', 'rules', 'rules_failed', 'stale', 'system', 'tier_failed', 'unchecked'].sort(),
     );
   });
 
@@ -393,34 +205,29 @@ describe('判定：读的时候现算', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('阈值：落后报警晚于「等空闲的上限 + 一轮」，装机层按天算', () => {
-    expect(DEPLOY_LAG_LIMITS.behindMs).toBeGreaterThan(60 * MIN + 5 * MIN);
+  it('阈值：单元和主线头 20 分钟没报到算停了（比 5 分钟一轮宽松），装机层按天算；没有「落后多久报警」这一档', () => {
+    expect(DEPLOY_LAG_LIMITS.reportMs).toBe(20 * MIN);
+    expect(DEPLOY_LAG_LIMITS.mainMs).toBe(20 * MIN);
     expect(DEPLOY_LAG_LIMITS.systemMs).toBe(24 * 60 * MIN);
+    expect('behindMs' in DEPLOY_LAG_LIMITS).toBe(false);
   });
 });
 
-describe('状态文件：和自动发布写的对得上', () => {
+describe('状态文件：和自动发布单元写的对得上', () => {
   it(
-    '自动发布真跑几轮（发了、等空闲、发布没成、规矩没成）写出来的状态，这边都认得，判得出来',
+    '单元真跑几轮（落后、规矩没成、驾驶舱按钮发完规矩成了）写出来的状态，这边都认得，判得出来；仓上没有任何 v<N> 标记',
     async () => {
       const lib = (await import(/* @vite-ignore */ AUTO_RELEASE_LIB)) as {
         runOnce(io: unknown, prev: unknown): Promise<unknown>;
         STATE_SCHEMA: number;
-        EXIT_SESSIONS_BUSY: number;
       };
-      const t = { now: Date.parse('2026-09-27T08:00:00Z'), current: H0 as string, release: 0 };
-      // 版本标记（决定 0011 第 3 条）：这一段拿真跑出来的状态核对字段，所以标记也得给——不然连不上发。
-      // git for-each-ref 的真样子：轻量 tag 的第三段是空的，名字和时间之间两个空格（lib.mjs 的 parseVersionTags 只认这个样子）
-      const tags = (sha: string, tag = 'v1') => `${tag} ${sha}  2026-09-27T07:31:00Z\n`;
+      const t = { now: Date.parse('2026-09-27T08:00:00Z'), current: H0 as string };
       const io = {
         now: () => new Date(t.now),
-        readMain: async () => `${H1} 2026-09-27T07:30:00Z\n${H0} 2026-09-27T06:00:00Z`,
-        readVersionTags: async () => tags(H1),
-        isAncestorOfMain: async (c: string) => c === H1 || c === H0,
-        engineOn: async () => false, // 法国现在 FLEET_SERVICES=fleet-api：引擎关着
+        readMain: async () => `${H1} 2026-09-27T07:30:00Z
+${H0} 2026-09-27T06:00:00Z`,
         readSystem: async () => ({ applied: H0, log: '' }),
         readCurrent: async () => t.current,
-        readHistory: async () => '',
         ciRuns: async () => ({
           status: 200,
           body: JSON.stringify({
@@ -437,63 +244,50 @@ describe('状态文件：和自动发布写的对得上', () => {
             ],
           }),
         }),
-        releaseBusy: async () => false,
-        prepareCheckout: async () => ({ ok: true }),
-        runRelease: async (sha: string) => {
-          if (t.release === 0) t.current = sha;
-          return { code: t.release, log: '/srv/x.log', detail: t.release ? '健康检查没过' : '' };
-        },
         checkoutHead: async () => t.current,
         syncRules: async () => ({ code: 1, out: '  ✗ 写不进去' }),
         alert: async () => {},
         resolve: async () => {},
+        resolveKey: async () => {},
         save: async () => {},
       };
       expect(lib.STATE_SCHEMA).toBe(1);
-      // 在跑的引擎不会排空、有会话在跑：发布脚本退出 76，这一轮等空闲
-      t.release = lib.EXIT_SESSIONS_BUSY;
-      const waiting = await lib.runOnce(io, null);
-      t.release = 1;
-      t.now += 5 * MIN;
-      const failed = await lib.runOnce(io, waiting);
-      t.release = 0;
       const roundTrip = (s: unknown) => DeployLagState.parse(JSON.parse(JSON.stringify(s)));
-      const w = roundTrip(waiting);
-      expect(w.last?.action).toBe('wait-idle');
-      expect(w.marker?.tag).toBe('v1');
-      expect(w.marker?.commit).toBe(H1);
-      const f = roundTrip(failed);
-      expect(f.attempt?.result).toBe('failed');
-      // 第一轮在等空闲时，在用的 H0 和检出对得上，规矩同步了一次（没成）
-      expect(codes(judgeDeployLag(input(H0, f), new Date(t.now)))).toEqual(['failed', 'rules_failed']);
-      // 发成了、规矩没成
-      const other = { ...io, readMain: async () => `${H2} 2026-09-27T08:02:00Z\n${H1} 2026-09-27T07:30:00Z` };
-      other.readVersionTags = async () => tags(H2, 'v2');
-      other.isAncestorOfMain = async (c: string) => c === H2 || c === H1 || c === H0;
-      other.ciRuns = async () => ({
-        status: 200,
-        body: JSON.stringify({
-          workflow_runs: [
-            {
-              head_sha: H2,
-              event: 'push',
-              head_branch: 'main',
-              path: '.github/workflows/ci.yml',
-              status: 'completed',
-              conclusion: 'success',
-              run_number: 2,
-            },
-          ],
-        }),
-      });
+      // 在用 H0、主线头 H1（落后 1 个）：规矩同步没成。落后不算毛病，只有规矩那一条
+      const first = await lib.runOnce(io, null);
+      const f = roundTrip(first);
+      expect(f.last?.action).toBe('behind');
+      expect(f.main?.head).toBe(H1);
+      expect(f.ci?.verdict).toBe('green');
+      expect(codes(judgeDeployLag(input(H0, f), new Date(t.now)))).toEqual(['rules_failed']);
+      // 驾驶舱按钮发了 H1、规矩这回成了：全绿
+      t.current = H1;
       t.now += 5 * MIN;
-      const done = roundTrip(await lib.runOnce(other, failed));
-      expect(done.attempt?.result).toBe('ok');
-      expect(done.rules?.result).toBe('failed');
-      expect(codes(judgeDeployLag(input(H2, done), new Date(t.now)))).toEqual(['rules_failed']);
+      const ok = { ...io, syncRules: async () => ({ code: 0, out: '  ✓ 一致' }) };
+      const second = roundTrip(await lib.runOnce(ok, first));
+      expect(second.last?.action).toBe('up-to-date');
+      expect(second.rules?.result).toBe('ok');
+      expect(judgeDeployLag(input(H1, second), new Date(t.now))).toEqual({ ok: true, problems: [] });
+      // 以前按标记发时写的那几样，新状态里一样都没有
+      for (const k of ['marker', 'markerError', 'attempt', 'hold', 'waitingSince'])
+        expect(k in (second as object), k).toBe(false);
     },
     TEST_DB_TIMEOUT_MS,
   );
+
+  it('老单元写的状态（带 marker、attempt、hold、waitingSince）这边也认得：多出来的字段不管', () => {
+    const old = {
+      ...state(),
+      marker: { tag: 'v3', commit: H1, at: ago(MIN), checkedAt: ago(MIN) },
+      markerError: null,
+      attempt: { sha: H1, startedAt: ago(20 * MIN), result: 'failed', detail: '迁移失败' },
+      hold: null,
+      waitingSince: null,
+    };
+    const parsed = DeployLagState.parse(old);
+    // 老状态里的「发布没成」不再让这边报红（发布不归这个单元了）
+    expect(judge(input(H0, parsed)).ok).toBe(true);
+  });
 });
 
 describe('读法国上的现状', () => {
@@ -520,21 +314,42 @@ describe('读法国上的现状', () => {
     expect(codes(judge(got))).toContain('unchecked');
   });
 
-  it.runIf(canLink)('current 指着谁、在用的不在主线最近的提交里时读它的完成标记', () => {
-    const d = join(dir, 'real');
-    const pr = 'd'.repeat(40);
-    mkdirSync(join(d, '.auto'), { recursive: true });
-    mkdirSync(join(d, pr));
-    writeFileSync(join(d, pr, '.fleet-release'), `commit=${pr}\non_main=0\n`);
-    writeFileSync(join(d, '.auto', 'state.json'), JSON.stringify(state()));
-    symlinkSync(pr, join(d, 'current'));
-    const got = readDeployLagInput(d);
-    expect(got.current).toEqual({ sha: pr });
-    expect(got.currentOnMain).toBe(false);
-    rmSync(join(d, 'current'));
-    symlinkSync('not-a-sha', join(d, 'current'));
-    expect(readDeployLagInput(d).current).toEqual({ error: expect.stringContaining('认不出') });
-  });
+  it.runIf(canLink)(
+    'current 指着谁、发布历史里这个提交最近一次切上去的时刻；历史没有、读不出就是 null',
+    () => {
+      const d = join(dir, 'real');
+      const pr = 'd'.repeat(40);
+      mkdirSync(join(d, '.auto'), { recursive: true });
+      mkdirSync(join(d, pr));
+      writeFileSync(join(d, '.auto', 'state.json'), JSON.stringify(state()));
+      symlinkSync(pr, join(d, 'current'));
+      // 没有 .history：不猜
+      let got = readDeployLagInput(d);
+      expect(got.current).toEqual({ sha: pr });
+      expect(got.deployedAt).toBeNull();
+      writeFileSync(
+        join(d, '.history'),
+        `2026-10-06T03:00:00Z ${pr} release
+2026-10-06T03:30:00Z ${pr} unhealthy
+2026-10-06T04:00:00Z ${pr} rollback
+`,
+      );
+      got = readDeployLagInput(d);
+      expect(got.deployedAt).toBe('2026-10-06T04:00:00Z');
+      // 时间认不出：不猜，也不拖垮别的读数
+      writeFileSync(
+        join(d, '.history'),
+        `坏时间 ${pr} release
+`,
+      );
+      got = readDeployLagInput(d);
+      expect(got.deployedAt).toBeNull();
+      expect(got.state).not.toHaveProperty('error');
+      rmSync(join(d, 'current'));
+      symlinkSync('not-a-sha', join(d, 'current'));
+      expect(readDeployLagInput(d).current).toEqual({ error: expect.stringContaining('认不出') });
+    },
+  );
 });
 
 describe('「跟不上主线」报警', () => {
@@ -568,8 +383,8 @@ describe('「跟不上主线」报警', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.dedupeKey).toBe(first?.dedupeKey);
     expect(rows[0]?.title).toContain('装机脚本装到哪没读到');
-    // 只剩自动发布那边报过的（发布没成）：这边解除自己的
-    current = input(H1, state({ attempt: { sha: H2, startedAt: ago(9 * MIN), result: 'failed' } }));
+    // 只剩自动发布单元那边报过的（装机自动档没成）：这边解除自己的
+    current = input(H1, state({ tier: { commit: H1, at: ago(9 * MIN), result: 'failed', detail: 'x' } }));
     await watchOnce(deps);
     expect(await open()).toEqual([]);
     // 好了再坏：新开一条（新的一件事发新卡）
