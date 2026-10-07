@@ -161,31 +161,6 @@ do_release "$B" >/dev/null
 check "再发 B：改动 0 处" "${#CHANGES[@]}" 0
 check "再发 B：历史没变" "$(events)" "$before"
 
-echo "== 【故意造出的失败】发布后的收尾提醒（post_alert，#1121）：不记红，结论退出码是 3；红和提醒一起有，红优先"
-# 发完置关删了（#1256），release.sh 里暂时没有谁调 post_alert；这条出口留着，直接调它核对结论的退出码
-reset
-POST_ALERTS=()
-code=$( (
-  unset -f finish_hook
-  post_alert "桩：提醒"
-  finish
-) >/dev/null 2>&1
-  echo $?
-)
-check "只有提醒、没有红：结论退出码是 3（和红的 1、待配的 2 分开）" "$code" 3
-POST_ALERTS=()
-code=$( (
-  unset -f finish_hook
-  red "桩：真红"
-  post_alert "桩：提醒"
-  finish
-) >/dev/null 2>&1
-  echo $?
-)
-check "红和提醒一起有：红优先，退出码 1" "$code" 1
-reset
-POST_ALERTS=()
-
 echo "== 新版健康检查不过：自动退回上一版，并报红"
 GATE[$C]=bad
 reset
@@ -1479,7 +1454,7 @@ EOF
   check "定时器在跑、读数认得出：没有待处理" "${#PENDING[@]}" 0
   check "读数：上一轮什么时候跑的" "$(said '· 上一轮 2026-09-27T01:00:00.000Z')" 1
   check "读数：主线头和它的 CI" "$(said '· 主线头 bbbbbbbbbbbb，CI pending')" 1
-  check "读数：在用的落后几个提交" "$(said '· 在用 aaaaaaaaaaaa，落后 1 个提交')" 1
+  check "读数：在用的落后几个提交" "$(said '· 在用 aaaaaaaaaaaa，落后主线 1 个提交')" 1
   check "读数：这一轮在等 CI" "$(said '· 这轮：ci-pending（CI 在跑（in_progress））')" 1
   check "读数：规矩同步到哪个提交" "$(said '· 规矩同步到 aaaaaaaaaaaa（ok）')" 1
   check "读数：装机脚本装到哪" "$(said '· 装机脚本装到 aaaaaaaaaaaa，之后相关提交 0 个')" 1

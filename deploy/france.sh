@@ -193,7 +193,7 @@ TRAIN_DIR=$RELEASES_DIR/.train
 RELEASE_REQUEST_LIB=/usr/local/lib/fleet-dao/release-request
 RELEASE_REQUEST_FILES=(lib.mjs fleet-release-request.mjs)
 RELEASE_REQUEST_UNITS=(fleet-release-request.service fleet-release-request.path)
-# 自动发布（docs/ops.md 第九节「自动发布」）：版本标记指的提交 CI 全绿就发到本机（发布脚本先排空引擎）、发完同步规矩。装的是副本：
+# 自动发布单元（docs/ops.md 第九节「自动发布」）：只读不发（0032）——读主线头、它的 CI、在用版本、落后几个；发完版（驾驶舱按钮）后顺带装自动档、同步规矩。装的是副本：
 # 主线上改了它，下一轮发完版自动换（--auto-tier）。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
 AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
@@ -820,10 +820,10 @@ readback_retired_units() {
   if ((bad == 0)); then ok "已删的演示版单元和脚本都不在了（#1223）"; fi
 }
 
-# 自动发布：定时器每 5 分钟拉起一轮（deploy/france/auto-release），以 root 跑 release.sh --auto、替会话用户同步规矩。
+# 自动发布单元：定时器每 5 分钟拉起一轮（deploy/france/auto-release），只读不发；发完版后以 root 跑 france.sh --auto-tier、替会话用户同步规矩。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑：检出它自己会快进，主线上一个坏提交不该把自动发布本身弄坏
 setup_auto_release() {
-  step "自动发布（主线上 CI 全绿的新提交马上发到本机，发布脚本先排空引擎；发完同步规矩；读数在 $AUTO_DIR）"
+  step "自动发布单元（只读：主线头、CI、在用版本、落后几个；发完版后装自动档、同步规矩；读数在 $AUTO_DIR；发布走驾驶舱按钮）"
   local f u unit_changed=0
   ensure_dir "$AUTO_DIR" root:root 755
   ensure_dir /usr/local/lib/fleet-dao root:root 755
@@ -927,7 +927,7 @@ readback() {
 readback_auto_release() {
   local f
   if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" != active ]]; then
-    red "fleet-auto-release.timer 没在跑：主线上的新提交不会自动发到本机"
+    red "fleet-auto-release.timer 没在跑：落后几个的读数不会更新，发完版也不会装自动档、同步规矩"
   fi
   for f in "${AUTO_RELEASE_FILES[@]}"; do
     if ! cmp -s -- "$AUTO_RELEASE_LIB/$f" "$DEPLOY_DIR/france/auto-release/$f"; then

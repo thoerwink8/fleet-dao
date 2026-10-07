@@ -31,7 +31,6 @@ describe('驾驶舱提醒列表：谁在处理', () => {
   it('接上了：每条带现算的处理状态——没人在修；本机认领了跟进单；PR 正文「修提醒」栏写了它、合了、法国已发布', async () => {
     const deploy: DeployLagInput = {
       current: { sha: SHA('b') },
-      currentOnMain: null,
       state: {
         schema: 1,
         ranAt: new Date().toISOString(),
@@ -46,9 +45,6 @@ describe('驾驶舱提醒列表：谁在处理', () => {
         },
         mainError: null,
         ci: null,
-        hold: null,
-        waitingSince: null,
-        attempt: null,
         rules: null,
         system: null,
         last: null,
@@ -152,50 +148,51 @@ describe('发布记录 → core 的 DeployFacts', () => {
       },
       mainError: null,
       ci: null,
-      hold: null,
-      waitingSince: null,
-      attempt: {
-        sha: SHA('b'),
-        startedAt: '2026-09-27T11:10:00.000Z',
-        endedAt: '2026-09-27T11:20:00.000Z',
-        result: 'ok',
-      },
       rules: null,
       system: null,
       last: null,
       ...over,
     }) as Extract<DeployLagInput['state'], { schema: 1 }>;
 
-  it('在用的版本、主线列表、这一轮的时刻；最近一次发布就是它而且成了：切上去的时刻', () => {
-    expect(deployFacts({ current: { sha: SHA('b') }, currentOnMain: null, state: state() })).toEqual({
+  it('在用的版本、主线列表、这一轮的时刻；发布历史里有它切上去的时刻就带上，没有（或没读到）是 null', () => {
+    expect(
+      deployFacts({
+        current: { sha: SHA('b') },
+        deployedAt: '2026-09-27T11:20:00.000Z',
+        state: state(),
+      }),
+    ).toEqual({
       ok: true,
       currentSha: SHA('b'),
       commits: [[SHA('b'), '2026-09-27T11:00:00.000Z']],
       checkedAt: '2026-09-27T12:00:00.000Z',
       deployedAt: '2026-09-27T11:20:00.000Z',
     });
-    const other = deployFacts({
-      current: { sha: SHA('b') },
-      currentOnMain: null,
-      state: state({ attempt: { sha: SHA('c'), startedAt: 'x', endedAt: null, result: 'running' } }),
+    expect(deployFacts({ current: { sha: SHA('b') }, state: state() })).toMatchObject({
+      ok: true,
+      deployedAt: null,
     });
-    expect(other).toMatchObject({ ok: true, deployedAt: null });
+    expect(deployFacts({ current: { sha: SHA('b') }, deployedAt: null, state: state() })).toMatchObject({
+      ok: true,
+      deployedAt: null,
+    });
   });
 
   it('【故意造出的失败】读不到链接、状态文件、主线：ok=false 带原因，不当成「没发布」', () => {
-    expect(
-      deployFacts({ current: { error: '读不了 current：EACCES' }, currentOnMain: null, state: state() }),
-    ).toEqual({ ok: false, why: '读不了 current：EACCES' });
-    expect(deployFacts({ current: { sha: null }, currentOnMain: null, state: state() })).toMatchObject({
+    expect(deployFacts({ current: { error: '读不了 current：EACCES' }, state: state() })).toEqual({
+      ok: false,
+      why: '读不了 current：EACCES',
+    });
+    expect(deployFacts({ current: { sha: null }, state: state() })).toMatchObject({
       ok: false,
     });
-    expect(
-      deployFacts({ current: { sha: SHA('b') }, currentOnMain: null, state: { error: '状态文件认不出' } }),
-    ).toEqual({ ok: false, why: '状态文件认不出' });
+    expect(deployFacts({ current: { sha: SHA('b') }, state: { error: '状态文件认不出' } })).toEqual({
+      ok: false,
+      why: '状态文件认不出',
+    });
     expect(
       deployFacts({
         current: { sha: SHA('b') },
-        currentOnMain: null,
         state: state({ main: null, mainError: '取不到 GitHub' }),
       }),
     ).toEqual({ ok: false, why: '自动发布这一轮没读到主线：取不到 GitHub' });

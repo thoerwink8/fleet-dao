@@ -6,13 +6,10 @@
 
 # ── 结论记账 ──
 # 每个动作落三种结论之一：改了（CHANGES）、红（REDS）、待配或没查成（PENDING）。
-# 退出码：有红 1；没红但有「发布后置动作没成」3；没红没后置、有待配 2；全绿 0。
+# 退出码：有红 1；没红、有待配 2；全绿 0。
 CHANGES=()
 REDS=()
 PENDING=()
-# 只有发布脚本（release.sh）用：版本已切、健康检查已过之后的收尾动作没做成（#1256 之前是发版后置关开关；现在暂时没有调用方，留着这个出口给以后的收尾动作用）。它不是红——发布本身成了，
-# 不能让它把整版连坐成「没成」（#1121）；单独列、单独退出码 3，由自动发布单独报一条提醒
-POST_ALERTS=()
 # 不计入退出码、但结论里要单列的：别家单元的 P02 问题；其中会话或服务身份改得了的，是会话上线前必须清零的
 OTHERS=()
 MUSTCLEAR=()
@@ -38,10 +35,6 @@ pending() {
   PENDING+=("$*")
   printf '  … %s\n' "$*"
 }
-post_alert() {
-  POST_ALERTS+=("$*")
-  printf '  ⚠ %s\n' "$*"
-}
 
 finish() {
   # 调用方要在出结论之前收尾的（release.sh：撤排空请求、把停下的引擎起回来）定义 finish_hook；出错退出也走这里
@@ -64,16 +57,11 @@ finish() {
     printf '会话上线前必须清零 %d 项（别家单元，但 fleet 或会话用户改得了、又被 root 执行；不计入退出码）：\n' "${#MUSTCLEAR[@]}"
     printf '  - %s\n' "${MUSTCLEAR[@]}"
   fi
-  if ((${#POST_ALERTS[@]})); then
-    printf '发布成了，但发布后的收尾动作没成 %d 项：\n' "${#POST_ALERTS[@]}"
-    printf '  - %s\n' "${POST_ALERTS[@]}"
-  fi
   if ((${#REDS[@]})); then
     printf '红 %d 项：\n' "${#REDS[@]}"
     printf '  - %s\n' "${REDS[@]}"
     exit 1
   fi
-  if ((${#POST_ALERTS[@]})); then exit 3; fi
   if ((${#PENDING[@]})); then exit 2; fi
   echo '全绿'
   exit 0
