@@ -1,12 +1,15 @@
 // @vitest-environment happy-dom
-// 环境页（#820 片 1）：这一台环境现在怎样，一项一个「查成了 / 没查成 + 原因」。
-// 做完的标准（方案 §5 片 1）：一项读失败时那一项显示「没查成 + 原因」、别的项不受影响；引擎按配置关着显示「按配置没开」不是红。
+// 法国页上的六项事实（原环境页 #820 片 1，#1217 并进来）：一项一个「查成了 / 没查成 + 原因」。
+// 做完的标准：一项读失败时那一项显示「没查成 + 原因」、别的项不受影响；引擎按配置关着显示「按配置没开」不是红。
+// 旧地址 /env 转到 /france。
 import { cleanup, screen, within } from '@testing-library/react';
+import { Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { EnvResponse } from '../api/types';
-import Env from '../routes/env';
+import EnvRedirect from '../routes/env';
+import France from '../routes/france';
 import { renderApp } from '../test/harness';
 
 afterEach(cleanup);
@@ -62,16 +65,24 @@ function apiWith(data: EnvResponse): MockApi {
 }
 
 function renderEnv(data: EnvResponse) {
-  return renderApp(<Env />, { api: apiWith(data) as unknown as FleetApi, route: '/env' });
+  return renderApp(<France />, { api: apiWith(data) as unknown as FleetApi, route: '/france' });
 }
 
-/** 找一格的成败。 */
-const tile = (name: string) => within(screen.getByText(name).closest('[data-env-fact]') as HTMLElement);
+/** 找一格的成败（只有一台时是卡片，挂 data-france-fact）。 */
+const tile = (name: string) => within(screen.getByText(name).closest('[data-france-fact]') as HTMLElement);
+
+function Where() {
+  const loc = useLocation();
+  return <p data-testid="where">{`${loc.pathname}${loc.search}${loc.hash}`}</p>;
+}
 
 describe('环境页', () => {
   test('标题是这一台的名字；六格都在；引擎开着写「在跑」', async () => {
     renderEnv(envData());
-    expect(await screen.findByRole('heading', { name: /法国/ })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '法国' })).toBeTruthy();
+    // 标题一渲染就在，六格要等本台数据和环境列表都回来（列表没回来前先不画，免得先卡片后对照列闪一下）。
+    await screen.findByText('引擎');
+    expect(document.querySelectorAll('[data-env-column]').length).toBe(0);
     for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
       expect(screen.getByText(label)).toBeTruthy();
     }
@@ -81,7 +92,7 @@ describe('环境页', () => {
     renderEnv(
       envData({}, { name: '认不出', problem: '这台后端没配环境名（api.env 的 FLEET_MACHINE_NAME）' }),
     );
-    expect(await screen.findByRole('heading', { name: /认不出/ })).toBeTruthy();
+    expect(await screen.findByText('认不出')).toBeTruthy();
     expect(screen.getByText(/FLEET_MACHINE_NAME/)).toBeTruthy();
   });
 
@@ -119,5 +130,20 @@ describe('环境页', () => {
   test('版本读不到（非法国正式机器）：那一格写「没查成 + 原因」，不拿 0 冒充', async () => {
     renderEnv(envData({ version: { ok: false, reason: '只在法国的正式机器上查' } }));
     expect(await screen.findByText('只在法国的正式机器上查')).toBeTruthy();
+  });
+
+  test('旧地址 /env 转到 /france，查询串和 hash 留着', async () => {
+    renderApp(
+      <>
+        <Where />
+        <Routes>
+          <Route path="env" element={<EnvRedirect />} />
+          <Route path="france" element={<p>到了法国页</p>} />
+        </Routes>
+      </>,
+      { route: '/env?node=wsl#engine-master' },
+    );
+    expect(await screen.findByText('到了法国页')).toBeTruthy();
+    expect(screen.getByTestId('where').textContent).toBe('/france?node=wsl#engine-master');
   });
 });

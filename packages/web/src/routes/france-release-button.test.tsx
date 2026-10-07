@@ -149,7 +149,7 @@ describe('/france 页「发布到法国」按钮', () => {
     expect(((await button()) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  test('最近一次的结果：等法国接、被拒（带原因）、做完（写总开关保持关并指去环境页）', async () => {
+  test('最近一次的结果：等法国接、被拒（带原因）、做完（写总开关保持关并指去这一页的总开关）', async () => {
     const pending = { ...NONE, state: 'pending' } as const;
     setup(card({ state: 'blocked', reasons: ['上一份发布请求还没被法国接走'], last: pending }));
     expect(await screen.findByText(/发布请求已提交，等法国接活/)).toBeTruthy();
@@ -184,7 +184,9 @@ describe('/france 页「发布到法国」按钮', () => {
     );
     const done = await screen.findByText(/上一趟发完了/);
     expect(done.textContent).toContain('引擎总开关保持关');
-    expect(within(done).getByRole('link', { name: '环境页' }).getAttribute('href')).toBe('/env');
+    expect(within(done).getByRole('link', { name: '引擎总开关' }).getAttribute('href')).toBe(
+      '#engine-master',
+    );
   });
 
   test('最近一次的结果读不到：写没查成 + 原因，不当成没点过', async () => {

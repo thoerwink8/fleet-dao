@@ -97,6 +97,8 @@ function apiWith(envD: EnvResponse, jobsD?: Jobs | { error: Error }): MockApi {
   return {
     ...inner,
     env: () => Promise.resolve(envD),
+    // 这些用例看的是只有一台：不画对照列。两台并排的在下面另写。
+    nodes: async () => ({ ...(await inner.nodes()), nodes: [] }),
     jobs:
       jobsD && 'error' in jobsD
         ? () => Promise.reject(jobsD.error)
@@ -200,5 +202,85 @@ describe('法国总览页', () => {
     // 四格照常显示
     expect(tile('引擎').getByText('在跑')).toBeTruthy();
     expect(tile('健康').getByText('没红的')).toBeTruthy();
+  });
+});
+
+describe('法国页：一台不画对照列，两台并排', () => {
+  test('只有一台：六项是卡片，不画对照列；总开关、定时任务、发版都在这一页', async () => {
+    renderFrance(envData(), jobsData());
+    expect(await screen.findByRole('heading', { name: '法国' })).toBeTruthy();
+    expect(screen.getByTestId('engine-master')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /定时任务/ })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '发版' })).toBeTruthy();
+    // 标题和总开关一渲染就在；六格要等本台数据和环境列表都回来，回来之前不画对照列。
+    await screen.findByText('引擎');
+    expect(document.querySelector('[data-env-columns]')).toBeNull();
+    expect(document.querySelectorAll('[data-env-column]').length).toBe(0);
+    expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
+  });
+
+  test('两台时并排：本台和远程各一列，六格都在，不画成单台卡片', async () => {
+    const inner = createMockApi({ live: false });
+    const api = {
+      ...inner,
+      env: () => Promise.resolve(envData()),
+      nodes: async () => ({
+        ...(await inner.nodes()),
+        nodes: [
+          {
+            id: 'wsl',
+            name: '本机 WSL',
+            freshness: 'fresh' as const,
+            receivedAt: new Date().toISOString(),
+            reportedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+      jobs: () => Promise.resolve(jobsData()),
+    } as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    await screen.findByRole('heading', { name: /本机 WSL/ });
+    const cols = document.querySelectorAll('[data-env-column]');
+    expect(Array.from(cols).map((c) => c.getAttribute('data-env-column'))).toEqual(['local', 'wsl']);
+    expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
+    expect(document.querySelector('[data-france-fact]')).toBeNull();
+    for (const col of cols) {
+      for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
+        expect(within(col as HTMLElement).getByText(label)).toBeTruthy();
+      }
+    }
+  });
+
+  test('【故意造出的失败】两台并排时远程快照没读成：那一列写原因、不画空格子，本台六格照常', async () => {
+    const inner = createMockApi({ live: false });
+    const api = {
+      ...inner,
+      env: () => Promise.resolve(envData()),
+      nodes: async () => ({
+        ...(await inner.nodes()),
+        nodes: [
+          {
+            id: 'wsl',
+            name: '本机 WSL',
+            freshness: 'fresh' as const,
+            receivedAt: new Date().toISOString(),
+            reportedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+      node: async () => {
+        throw new Error('快照读不了（测试故意造的）');
+      },
+      jobs: () => Promise.resolve(jobsData()),
+    } as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    const wsl = (await screen.findByRole('heading', { name: /本机 WSL/ })).closest(
+      '[data-env-column]',
+    ) as HTMLElement;
+    expect(await within(wsl).findByText(/快照读不了（测试故意造的）/)).toBeTruthy();
+    expect(wsl.querySelector('[data-env-fact]')).toBeNull();
+    const local = document.querySelector('[data-env-column="local"]') as HTMLElement;
+    expect(within(local).getByText('在跑')).toBeTruthy();
+    expect(local.querySelectorAll('[data-env-fact]').length).toBe(6);
   });
 });

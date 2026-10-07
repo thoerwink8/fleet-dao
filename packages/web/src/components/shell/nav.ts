@@ -11,7 +11,6 @@ import {
   Route,
   SatelliteDish,
   ScrollText,
-  ServerCog,
   Settings,
 } from 'lucide-react';
 import { canSee, isDemo } from '../../demo/access';
@@ -85,14 +84,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         to: '/france',
         label: '法国',
         icon: SatelliteDish,
-        hint: '法国这台机器现在怎样：引擎、在用版本、落后主线、健康、定时任务、发版',
-        // 演示版里没有这一页（和 /env 同一个 R10 理由：露机器名、版本号、会话数，路由表里也不放）。
-      },
-      {
-        to: '/env',
-        label: '环境',
-        icon: ServerCog,
-        hint: '各环境并排比：引擎、在用版本、在跑的会话、池、健康、最近拉单',
+        hint: '本台六项事实、引擎总开关、定时任务、发版；多一台机器时按台并排',
         // 演示版里没有这一页（露机器名、版本号、会话数，R10；路由表里也不放）。
       },
       {

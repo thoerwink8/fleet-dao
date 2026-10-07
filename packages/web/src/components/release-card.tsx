@@ -1,7 +1,6 @@
 // /france 页的「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个（最近合进去的 PR）、最近做完的一个任务。
 // 只读展示：每一行各自带「查成了 / 没查成 + 原因」，没查成的行写明原因，不拿空、0 或「已是最新」顶。
 import { type ReactNode, useState } from 'react';
-import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { errorText, useFranceRelease } from '../api/client';
 import type { ReleaseCard } from '../api/types';
@@ -256,11 +255,11 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
           {action.last.state === 'done' ? (
             <>
               {' '}
-              要开去{' '}
-              <Link to="/env" className="underline underline-offset-2">
-                环境页
-              </Link>{' '}
-              点开。
+              要开就点这一页的{' '}
+              <a href="#engine-master" className="underline underline-offset-2">
+                引擎总开关
+              </a>
+              。
             </>
           ) : null}
         </p>
@@ -291,7 +290,7 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
                 ) : null}
                 <p className="text-xs text-muted-foreground">
                   点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多
-                  13 分钟），再发版、验证；发完引擎总开关保持关，要开到环境页点开。
+                  13 分钟），再发版、验证；发完引擎总开关保持关，要开就点这一页的引擎总开关。
                 </p>
               </div>
             </AlertDialogDescription>

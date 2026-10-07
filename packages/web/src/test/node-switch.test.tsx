@@ -11,7 +11,8 @@ import { createMockApi } from '../api/mock/server';
 import type { NodeDetail, Nodes } from '../api/types';
 import { ThemeProvider } from '../components/theme-provider';
 import { TooltipProvider } from '../components/ui/tooltip';
-import Env from '../routes/env';
+import EnvRedirect from '../routes/env';
+import France from '../routes/france';
 import HomePage from '../routes/home';
 import Shell from '../routes/shell';
 
@@ -78,7 +79,8 @@ async function mount(api: FleetApi, route: string) {
               <Routes>
                 <Route element={<Shell />}>
                   <Route index element={<HomePage />} />
-                  <Route path="env" element={<Env />} />
+                  <Route path="france" element={<France />} />
+                  <Route path="env" element={<EnvRedirect />} />
                   <Route path="quota" element={<p>额度页本体</p>} />
                   <Route path="settings" element={<p>设置页本体</p>} />
                 </Route>
@@ -115,13 +117,13 @@ describe('顶栏环境切换器', () => {
   });
 
   test('选「本机 WSL」：网址带上 ?node=wsl、留在当前页；再选本台就去掉', async () => {
-    await mount(apiFor('fresh'), '/env');
+    await mount(apiFor('fresh'), '/france');
     const menu = await openSwitcher();
     fireEvent.click(menu.querySelector('[data-node-item="wsl"]') as HTMLElement);
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(where()).toBe('/env?node=wsl');
+    expect(where()).toBe('/france?node=wsl');
     expect(switcher().getAttribute('aria-label')).toContain('现在看的是本机 WSL');
     fireEvent.keyDown(switcher(), { key: 'Enter' });
     fireEvent.click(
@@ -130,7 +132,14 @@ describe('顶栏环境切换器', () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(where()).toBe('/env');
+    expect(where()).toBe('/france');
+  });
+
+  test('旧地址 /env 转到法国页，?node= 留着，不换成「只看得到本台」', async () => {
+    await mount(apiFor('fresh'), '/env?node=wsl');
+    await waitFor(() => expect(where()).toBe('/france?node=wsl'));
+    expect(screen.queryByText(/这一页只看得到/)).toBeNull();
+    expect(await screen.findByRole('heading', { name: /本机 WSL/ })).toBeTruthy();
   });
 
   test('读不到远程环境列表：下拉里写原因，不当成「没有远程环境」；本台照常能看', async () => {
@@ -230,16 +239,16 @@ describe('选了远程环境：其余页', () => {
 
   test('侧栏换页不丢选择：在主页点「环境」，网址还带 ?node=wsl', async () => {
     await mount(apiFor('fresh'), '/?node=wsl');
-    const link = (await screen.findAllByRole('link', { name: /环境/ })).find((a) =>
-      a.getAttribute('href')?.startsWith('/env'),
+    const link = (await screen.findAllByRole('link', { name: /^法国/ })).find((a) =>
+      a.getAttribute('href')?.startsWith('/france'),
     ) as HTMLElement;
-    expect(link.getAttribute('href')).toBe('/env?node=wsl');
+    expect(link.getAttribute('href')).toBe('/france?node=wsl');
   });
 });
 
-describe('环境页：每个环境一列并排', () => {
+describe('法国页：每个环境一列并排', () => {
   test('本台一列、本机 WSL 一列；远程那列写「上报于」、新鲜；选中的那列描边', async () => {
-    await mount(apiFor('fresh'), '/env?node=wsl');
+    await mount(apiFor('fresh'), '/france?node=wsl');
     await screen.findByRole('heading', { name: /本机 WSL/ });
     const cols = document.querySelectorAll('[data-env-column]');
     expect(Array.from(cols).map((c) => c.getAttribute('data-env-column'))).toEqual(['local', 'wsl']);
@@ -259,7 +268,7 @@ describe('环境页：每个环境一列并排', () => {
   });
 
   test('失联的那一列写「失联 12 分钟」、标成失联色并说明是最后一次报的样子', async () => {
-    await mount(apiFor('stale'), '/env');
+    await mount(apiFor('stale'), '/france');
     await screen.findByRole('heading', { name: /本机 WSL/ });
     const wsl = document.querySelector('[data-env-column="wsl"]') as HTMLElement;
     expect(wsl.getAttribute('data-env-column-state')).toBe('stale');
@@ -268,16 +277,18 @@ describe('环境页：每个环境一列并排', () => {
   });
 
   test('配了通行证、从没收到过的那一列明说没收到过，不画空格子', async () => {
-    await mount(apiFor('never'), '/env');
+    await mount(apiFor('never'), '/france');
     await screen.findByRole('heading', { name: /wsl/ });
     const wsl = document.querySelector('[data-env-column="wsl"]') as HTMLElement;
     expect(wsl.querySelector('[data-env-never]')?.textContent).toContain('从没收到过');
     expect(wsl.querySelector('[data-env-fact]')).toBeNull();
   });
 
-  test('没有远程环境时就是原来的一列宽版，没有「并排」', async () => {
-    await mount(apiFor('off'), '/env');
-    await screen.findByRole('heading', { name: /假数据/ });
-    expect(document.querySelectorAll('[data-env-column]').length).toBe(1);
+  test('没有远程环境时不画对照列', async () => {
+    await mount(apiFor('off'), '/france');
+    await screen.findByRole('heading', { name: '法国' });
+    expect(document.querySelector('[data-env-columns]')).toBeNull();
+    expect(document.querySelectorAll('[data-env-column]').length).toBe(0);
+    expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
   });
 });

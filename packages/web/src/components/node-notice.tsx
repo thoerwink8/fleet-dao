@@ -1,5 +1,5 @@
 // 看板多机：选了远程环境（?node=）时页面上要说清的几句话。
-// - 能看远程快照的只有主页和环境页（REMOTE_PAGES）；其余页的数据全是本台的，整页换成一句明说，不顶着远程环境的名字显示本台的数据。
+// - 能看远程快照的只有主页和法国页（REMOTE_PAGES）；其余页的数据全是本台的，整页换成一句明说，不顶着远程环境的名字显示本台的数据。
 // - 看快照的页面顶上一条「<名字> <时间> 报的，只读」；失联、没收到过的换成醒目的一句，不拿旧数据当现在的。
 import { CloudOff, Eye, ServerCog } from 'lucide-react';
 import { createContext, type ReactNode, useContext } from 'react';
@@ -10,8 +10,11 @@ import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { cn } from '../lib/utils';
 import { Button } from './ui/button';
 
-/** 选了远程环境时还能看的页：主页（那个环境的快照）和环境页（各环境并排）。 */
-export const REMOTE_PAGES: readonly string[] = ['/', '/env'];
+/**
+ * 选了远程环境时还能看的页：主页（那个环境的快照）和法国页（各台并排）。
+ * /env 是法国页的旧地址，要留在这里：选了远程时外壳才会把这一页渲染出来，重定向才走得成。
+ */
+export const REMOTE_PAGES: readonly string[] = ['/', '/france', '/env'];
 
 export const isRemotePage = (pathname: string): boolean => REMOTE_PAGES.includes(pathname);
 
@@ -60,7 +63,7 @@ export function OnlyLocalNotice() {
         <p className="text-base font-semibold">这一页只看得到{local}的数据</p>
         <p className="text-sm text-muted-foreground">
           现在选的是{nodeName}。额度、路由、定时任务、设置、操作记录、任务详情这些页面读的是{local}自己的库，
-          {nodeName}的请去那台上看；能看{nodeName}的只有主页和环境页。
+          {nodeName}的请去那台上看；能看{nodeName}的只有主页和法国页。
         </p>
         <Button size="sm" onClick={() => select(null)}>
           切回{local}
