@@ -148,13 +148,13 @@ describe('单价表对得上模型目录', () => {
     expect(modelsWithoutPriceEntry(ids)).toEqual([]);
   });
 
-  it('目录配置样例里的每个模型（除只答判断题的 Jev）也都有一项：有价，或写明没有单价的原因', () => {
-    const example = JSON.parse(
-      readFileSync(new URL('../../../deploy/examples/catalog.example.json', import.meta.url), 'utf8'),
+  it('目录配置（deploy/catalog.json）里的每个模型（除只答判断题的 Jev）也都有一项：有价，或写明没有单价的原因', () => {
+    const catalog = JSON.parse(
+      readFileSync(new URL('../../../deploy/catalog.json', import.meta.url), 'utf8'),
     ) as { models?: { id: string }[] };
-    if (!example.models?.length) throw new Error('catalog.example.json 里读不到 models');
-    const ids = example.models.map((m) => m.id).filter((id) => id !== 'jev-1.13');
-    expect(ids).toEqual(expect.arrayContaining(['gpt-6-sol', 'glm-5.3']));
+    if (!catalog.models?.length) throw new Error('deploy/catalog.json 里读不到 models');
+    const ids = catalog.models.map((m) => m.id).filter((id) => id !== 'jev-1.13');
+    expect(ids).toEqual(expect.arrayContaining(['gpt-6-sol', 'glm-5.3', 'haiku-4.5', 'grok-4.6']));
     expect(modelsWithoutPriceEntry(ids)).toEqual([]);
   });
 

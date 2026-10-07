@@ -1,5 +1,5 @@
 {
-  "_说明": "路由两层的默认骨架（#574，specs/509 方案第八节）：purposes 是「用途 → 模型顺序」，models 是「模型 → 路由顺序」，加一个能跑某个模型的新渠道，只在这个模型下加一项。路由写 routes.id（渠道:账号池:执行方式 拼出来的那个，和目录配置 deploy/examples/catalog.example.json 一致），一条路由只属于它自己的模型。enabled 是这条路由在它的模型下的开关、不分用途：关着的照样挂着，不派、探针也不探。发布时只补缺装进库（deploy/release.sh 的 load_routing，库里已有的用途、模型不覆盖），选路、路由探针、切号都按库里那两张表（#574），不读旧的 stage_policy_routes；骨架的开关照旧目录配置里「开过的」那几条（Grok 4.7 在 execute、ui、verify 里是开着的，所以这里开着；default 里它排倒数第二）。创始人 2026-10-06 定的角色（法国引擎整晚跑）：lead 类用途（default 兜底的 triage、spec、plan、review、research）Sonnet 5.5 排第一，execute、ui 仍是 Grok 4.7 第一，verify 仍是 GPT 5.6 luna 第一（等法国目录配置加上 gpt-6-sol 后再加回，只进 verify、不进 execute、ui；创始人 2026-10-07 睡前：reviewer 默认 gpt-6-sol 走 mirasim。骨架引用的模型和路由法国库里必须有，否则发版装载器拒装，所以目录配置先加、骨架后加）；Sonnet 5.5 在这三个用途里排在 Opus 5.5 前面；GLM 5.3 flash（Mirasim 的 zcode 执行体）加在 default、verify、execute、ui 的末尾，开关开着。硬禁令（GPT 不做界面、不用 Fable）由代码管，不写在这里：ui 的模型顺序里没有 GPT 是照旧目录配置抄的。judge 先只用 TypeSafe 的 Jev（设计文档第十一节）：旧配置里 judge 挂着两条关着的 Claude，两层里开关跟着路由走、不分用途，要保持 judge 不用 Claude 就不把 Opus 和 Sonnet、也不把 GLM 排进它的模型顺序。每条路由还能写 effort（思考档位，#470：low / medium / high / xhigh / max，这条路由的执行方式不认的装进库时报错）：不写 = 没配，起会话用 high（创始人 2026-09-28 拍的默认），所以这里一条都没写；它是这条路由的上限，按改动面分的快档只会往下压。档位是运行时配置、以库里为准（驾驶舱改，决定 0011 第 7 条）：这里的值只在模型第一次装进库时写进去；本机指挥官起工人（worker.mjs）读的是这份文件（读不到法国库）。页面和接口只列 execute、ui、verify、judge（验收按 verify 选路，#1224）；库里已有的 verify 顺序发布时不覆盖，没有这一行才按这里的顺序补上。",
+  "_说明": "路由两层的默认骨架（#574，specs/509 方案第八节）：purposes 是「用途 → 模型顺序」，models 是「模型 → 路由顺序」，加一个能跑某个模型的新渠道，只在这个模型下加一项。路由写 routes.id（渠道:账号池:执行方式 拼出来的那个，和目录配置 deploy/catalog.json 一致），一条路由只属于它自己的模型。enabled 是这条路由在它的模型下的开关、不分用途：关着的照样挂着，不派、探针也不探。发布时只补缺装进库（deploy/release.sh 的 load_routing，库里已有的用途、模型不覆盖），选路、路由探针、切号都按库里那两张表（#574），不读旧的 stage_policy_routes；骨架的开关照旧目录配置里「开过的」那几条（Grok 4.7 在 execute、ui、verify 里是开着的，所以这里开着；default 里它排倒数第二）。创始人 2026-10-06 定的角色（法国引擎整晚跑）：lead 类用途（default 兜底的 triage、spec、plan、review、research）Sonnet 5.5 排第一，execute、ui 仍是 Grok 4.7 第一，verify 仍是 GPT 5.6 luna 第一（创始人 2026-10-07 睡前：reviewer 默认 gpt-6-sol 走 mirasim，要加回只进 verify、不进 execute、ui；现在 gpt-6-sol 在下面 models 里挂着、关着、不进任何用途，要开另开 PR 或在驾驶舱改）；2026-10-08（#1286）起目录配置跟着版本走（deploy/catalog.json），骨架引用的模型和路由必须都在它里面，否则发版装载器拒装（测试盯着），新补的模型和路由在 models 里一律先关着（enabled: false）、不进 purposes 的顺序，所以不改现有派活；Sonnet 5.5 在这三个用途里排在 Opus 5.5 前面；GLM 5.3 flash（Mirasim 的 zcode 执行体）加在 default、verify、execute、ui 的末尾，开关开着。硬禁令（GPT 不做界面、不用 Fable）由代码管，不写在这里：ui 的模型顺序里没有 GPT 是照旧目录配置抄的。judge 先只用 TypeSafe 的 Jev（设计文档第十一节）：旧配置里 judge 挂着两条关着的 Claude，两层里开关跟着路由走、不分用途，要保持 judge 不用 Claude 就不把 Opus 和 Sonnet、也不把 GLM 排进它的模型顺序。每条路由还能写 effort（思考档位，#470：low / medium / high / xhigh / max，这条路由的执行方式不认的装进库时报错）：不写 = 没配，起会话用 high（创始人 2026-09-28 拍的默认），所以这里一条都没写；它是这条路由的上限，按改动面分的快档只会往下压。档位是运行时配置、以库里为准（驾驶舱改，决定 0011 第 7 条）：这里的值只在模型第一次装进库时写进去；本机指挥官起工人（worker.mjs）读的是这份文件（读不到法国库）。页面和接口只列 execute、ui、verify、judge（验收按 verify 选路，#1224）；库里已有的 verify 顺序发布时不覆盖，没有这一行才按这里的顺序补上。",
   "purposes": {
     "default": [
       "sonnet-5.5",
@@ -54,6 +54,19 @@
     "cursor-auto": [{ "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false }],
     "grok-4.7": [{ "routeId": "grok:grok-4.7:grok", "enabled": true }],
     "glm-5.3-flash": [{ "routeId": "mirasim-relay:glm-5.3-flash:mirasim", "enabled": true }],
-    "jev-1.13": [{ "routeId": "jev:jev-1.13:api-shell", "enabled": true }]
+    "jev-1.13": [{ "routeId": "jev:jev-1.13:api-shell", "enabled": true }],
+    "gpt-6-sol": [{ "routeId": "mirasim-relay:gpt-6-sol:mirasim", "enabled": false }],
+    "gpt-6-luna": [{ "routeId": "mirasim-relay:gpt-6-luna:mirasim", "enabled": false }],
+    "gpt-6-astra": [{ "routeId": "mirasim-relay:gpt-6-astra:mirasim", "enabled": false }],
+    "gpt-5.6-sol": [{ "routeId": "mirasim-relay:gpt-5.6-sol:mirasim", "enabled": false }],
+    "gpt-5.6-terra": [{ "routeId": "mirasim-relay:gpt-5.6-terra:mirasim", "enabled": false }],
+    "glm-5.3": [{ "routeId": "mirasim-relay:glm-5.3:mirasim", "enabled": false }],
+    "deepseek-v4-pro": [{ "routeId": "mirasim-relay:deepseek-v4-pro:mirasim", "enabled": false }],
+    "haiku-4.5": [
+      { "routeId": "claude-solo:haiku-4.5:claude-code", "enabled": false },
+      { "routeId": "claude-carpool:haiku-4.5:claude-code", "enabled": false }
+    ],
+    "grok-4.7-fast": [{ "routeId": "grok:grok-4.7-fast:grok", "enabled": false }],
+    "grok-4.6": [{ "routeId": "grok:grok-4.6:grok", "enabled": false }]
   }
 }

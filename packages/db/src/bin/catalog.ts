@@ -1,5 +1,5 @@
 // 目录装载器的命令行入口，发布脚本在迁移之后调：DATABASE_URL=… node packages/db/src/bin/catalog.ts [目录配置文件]
-// 配置文件默认 /etc/fleet-dao/catalog.json，也可以用环境变量 FLEET_CATALOG 指定。
+// 配置文件默认是这一版自带的 deploy/catalog.json，也可以用环境变量 FLEET_CATALOG 指定。
 // 只补缺、跑几遍都一样；缺文件、格式错、引用不存在都退出 1，库里一行不写。
 import { errMessage } from '@fleet-dao/shared/util';
 import { catalogPath, formatCatalogResult, loadCatalog, readCatalogFile } from '../catalog.ts';
