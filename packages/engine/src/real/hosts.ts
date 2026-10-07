@@ -725,6 +725,10 @@ export const MIRASIM_AGENT_BY_MODEL: Readonly<Record<string, string>> = {
   'gpt-5.6-luna': 'codex',
   // codex 执行体认的模型串（服务端 0.0.425 的执行体表，默认 gpt-6-sol）；服务端里没有 gpt-6.1-sol 这个串
   'gpt-6-sol': 'codex',
+  // 中转名单里 sol 很可能叫这个名（创始人一直说的 gpt-6.1-sol）。来源：2026-10-01 实测六个 codex 模型全成、读回就是
+  // gpt-6.1-sol（docs/archive/progress-2026-10-01.md）；服务端 0.0.425 对不在它模型表里的串原样放行，对在表内但不在
+  // 中转名单里的串（gpt-6-sol）悄悄换成 gpt-6-astra，所以点 gpt-6-sol 探不通、点 gpt-6.1-sol 才可能通（待探针验证，#1298）
+  'gpt-6.1-sol': 'codex',
   'gpt-6-luna': 'codex',
   'gpt-6-astra': 'codex',
   'gpt-5.6-sol': 'codex',

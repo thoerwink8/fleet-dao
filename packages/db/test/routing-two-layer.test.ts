@@ -234,10 +234,12 @@ describe('默认配置 routing.default.json', () => {
       'mirasim-relay',
       'mirasim',
       'gpt-6-sol',
-      'gpt-6-sol',
+      // 模型 id 是 gpt-6-sol，点名的串是中转名单里的 gpt-6.1-sol（点 gpt-6-sol 会被服务端悄悄换成 gpt-6-astra，#1298）
+      'gpt-6.1-sol',
     ]);
     expect(example.models.find((m) => m.id === 'gpt-6-sol')?.family).toBe('gpt');
-    expect(JSON.stringify(example)).not.toContain('gpt-6.1-sol');
+    // 模型 id 不叫 gpt-6.1-sol：只有这一条路由的点名串是它
+    expect(example.models.some((m) => m.id === 'gpt-6.1-sol')).toBe(false);
   });
 
   it('目录里每个没排进任何用途的模型（先「可选」的）：骨架 models 里有它，目录里它的每条路由都在、且全部关着（新补的不改现有派活，#1286）', async () => {
