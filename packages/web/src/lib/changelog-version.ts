@@ -3,7 +3,8 @@
 // 「这一版」的候选＝开着的版本里程碑里 N 最小的那张（和发布判法同一条）。
 // 候选已经有发布标记：它算已发布，「这一版」取下一个号；下一个号也发过就继续往后，直到不再撞上。
 // 候选自己没有标记就不动：版本号可以不连续（更早的号发过，不代表这一版要按「已发布的最大号 +1」猜）。
-// 发布那条线撞上「这一版已经写进 CHANGELOG」是拒绝再发，不在这里改。
+// 真后端同一条在 packages/api/src/release-version.ts 的 openMilestonesForChangelog。
+// pnpm publish:pr 不走这条：标题里已经有这一版、里程碑还开着，发起仍然拒绝。
 
 export interface ReleaseMilestone {
   number: number;

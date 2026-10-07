@@ -2,7 +2,7 @@
 // /changelog 页的钉子（#227 切片、#725）：
 // - 仓根的 CHANGELOG.md 真能被 vite 的 ?raw 读到、共享的 splitChangelog 真能切出来；
 // - 解析失败，lib 抛错，页面给 LoadError——不能拿空、0 或 ok 冒充没事；
-// - 「发布 v<N>」的版本号只听后端（/api/release/version，和 pnpm publish:pr 同一份判法）：读不到、定不了就照实说，
+// - 「发布 v<N>」的版本号只听后端（/api/release/version）：读不到、定不了就照实说，
 //   不显示 v1、不显示 0；点下去再核一次，和按钮上写的对不上就拒绝；弹窗里是现在的做法（release/v<N> + pnpm publish:pr）；
 // - 演示版不带这一页：导航不给 module（演示版 NAV 自动不收）；仓根的 CHANGELOG.md 里有仓名 fleet，
 //   演示版扫描（build/scan.ts）已把「fleet」列进内置禁词——这一页万一被错误地放进演示版路由，构建时会红。

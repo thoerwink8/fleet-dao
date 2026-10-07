@@ -1,6 +1,8 @@
-// /api/release/version（#725）：/changelog 页「发布 v<N>」的版本号，和 `pnpm publish:pr` 同一份判法（conventions 的 releaseVersion）。
-// 故意造出的失败：读不到里程碑、一张版本里程碑都没开、CHANGELOG.md 读不了或认不出、受管的仓里没有 fleet-dao、没接上、
-// 读超时——都照实回 unreadable / blocked 带原因，不回 v1、不回 0、不拿「上一版 +1」顶。
+// /api/release/version（#725）：/changelog 页「这一版」的版本号。已发布的号来自仓根 CHANGELOG.md 的 ## [vN] - 日期
+// （splitChangelog 的 released；发布收尾打的 git tag 不在这条接口里读）。这一版的候选是开着的 v<N> 里程碑里 N 最小的那张。
+// 同一个号不能既在 released 里、又当这一版：有发布标记就判成已发布，这一版取下一个还没有标记的号。
+// 故意造出的失败：读不到里程碑、一张版本里程碑都没开、CHANGELOG.md 读不了或认不出、已经发到比候选还新、
+// 受管的仓里没有 fleet-dao、没接上、读超时——都照实回 unreadable / blocked 带原因，不回 v1、不回 0。
 import { ReleaseVersionResponse, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import type { MemoryData } from '@fleet-dao/store';
 import { devFixtures } from '@fleet-dao/store';
@@ -71,6 +73,53 @@ describe('/api/release/version：定得出', () => {
     );
     expect(body).toMatchObject({ state: 'ok', version: 'v3', milestone: V3, others: [V4] });
   });
+
+  it('同一版本既有发布标记又被当成这一版：判成已发布，这一版取下一个号', async () => {
+    // 开着的只有 v3，CHANGELOG 里已经有 ## [v3]。不能回 v3，也不能整段 blocked 把「这一版」空着。
+    const changelog = `${NEVER_RELEASED}\n## [v3] - 2026-10-05\n\n- 第一版\n`;
+    const body = await read(
+      harness({ data: withSelf(), release: source({ changelog: async () => changelog }) }),
+    );
+    expect(body.state).toBe('ok');
+    if (body.state !== 'ok') throw new Error('不该定不出');
+    expect(body.version).not.toBe('v3');
+    expect(body.version).toBe('v4');
+    expect(body.milestone).toEqual({ number: 4, title: 'v4' });
+    expect(body.others).toEqual([]);
+  });
+
+  it('v3 已有发布标记、v4 也开着：这一版用 v4 那张，已发布的 v3 不再列进还开着的', async () => {
+    const changelog = `${NEVER_RELEASED}\n## [v3] - 2026-10-05\n\n- 第一版\n`;
+    const body = await read(
+      harness({
+        data: withSelf(),
+        release: source({
+          changelog: async () => changelog,
+          openMilestones: async () => [V4, P1, V3],
+        }),
+      }),
+    );
+    expect(body).toMatchObject({ state: 'ok', version: 'v4', milestone: V4, others: [] });
+  });
+
+  it('下一个号也有发布标记：继续往后，直到这一版不再是已发布', async () => {
+    const changelog = `${NEVER_RELEASED}\n## [v4] - 2026-10-06\n\n- 四\n\n## [v3] - 2026-10-05\n\n- 三\n`;
+    const body = await read(
+      harness({ data: withSelf(), release: source({ changelog: async () => changelog }) }),
+    );
+    expect(body.state).toBe('ok');
+    if (body.state !== 'ok') throw new Error('不该定不出');
+    expect(body.version).toBe('v5');
+    expect(body.milestone).toEqual({ number: 5, title: 'v5' });
+  });
+
+  it('更早的号发过、当前里程碑自己没有标记：这一版仍是它，不按已发布的最大号 +1', async () => {
+    const changelog = `${NEVER_RELEASED}\n## [v1] - 2026-09-01\n\n- 旧的\n`;
+    const body = await read(
+      harness({ data: withSelf(), release: source({ changelog: async () => changelog }) }),
+    );
+    expect(body).toMatchObject({ state: 'ok', version: 'v3', milestone: V3, others: [] });
+  });
 });
 
 describe('/api/release/version：故意造出的失败照实说', () => {
@@ -109,15 +158,15 @@ describe('/api/release/version：故意造出的失败照实说', () => {
     expect(body.state).toBe('blocked');
   });
 
-  it('CHANGELOG.md 里已经有这一版了：blocked，指去重跑 release 收尾，别再开发布 PR', async () => {
-    const changelog = `${NEVER_RELEASED}\n## [v3] - 2026-10-01\n\n- 第一版\n`;
+  it('CHANGELOG 已经发到比开着的里程碑还新、而这一版自己没有标记：blocked，不改口叫成下一个号', async () => {
+    const changelog = `${NEVER_RELEASED}\n## [v5] - 2026-10-01\n\n- 更后的一版\n`;
     const body = await read(
       harness({ data: withSelf(), release: source({ changelog: async () => changelog }) }),
     );
     expect(body.state).toBe('blocked');
     if (body.state !== 'blocked') throw new Error('不该定得出');
-    expect(body.why).toContain('已经有「## [v3]');
-    expect(body.why).toContain('workflow_dispatch');
+    expect(body.why).toContain('已经发到 v5');
+    expect('version' in body).toBe(false);
   });
 
   it('CHANGELOG.md 读不了：unreadable', async () => {

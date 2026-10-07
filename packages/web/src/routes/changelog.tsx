@@ -2,8 +2,8 @@
 // 数据来源是仓根的 CHANGELOG.md 在打包时被内联进来的字符串（lib/changelog.ts 用 vite 的 ?raw 取），
 // 格式解析共用 packages/shared/src/changelog.ts——和发布那条线是同一个实现，格式变了两边一样认不出。
 // 演示版不把这一页放进路由表、导航也不给它 module：CHANGELOG 里有仓名，不能进演示版产物。
-// 「发布 v<N>」按钮（#593、#725）：版本号由后端现读 GitHub 里程碑定（/api/release/version），和 `pnpm publish:pr`
-// 同一份判法（当前版本里程碑），不从更新日志「上一版 +1」推；读不到、定不了就照实说，不显示 v1、不显示 0。
+// 「发布 v<N>」按钮（#593、#725）：版本号听后端（/api/release/version）。已发布的号是 CHANGELOG 的 ## [vN]；
+// 开着的里程碑里 N 最小的那张若已有这个标记，后端判成已发布，这一版取下一个号。读不到、定不了就照实说，不显示 v1、不显示 0。
 // 按钮自己不发起：「对外发布」是人闸第一类，发起要人按、指令在人的机器上走（publish:pr 开发布 PR，合并之后
 // .github/workflows/release.yml 收尾），不让浏览器代点。点下去先再核一次版本号，和按钮上写的对不上就拒绝、说清。
 import type { UseQueryResult } from '@tanstack/react-query';
@@ -205,7 +205,7 @@ function panelTitle(release: Release): string {
 
 function versionNote(release: Release): string | undefined {
   if (release.kind !== 'ok') return undefined;
-  const from = `版本号取当前版本里程碑「${release.milestone.title}」（GitHub 上开着的 v<N> 里 N 最小的那张，和 pnpm publish:pr 同一份判法）。`;
+  const from = `版本号取当前版本里程碑「${release.milestone.title}」（GitHub 上开着的 v<N> 里、CHANGELOG 还没有发布标记的 N 最小的那张）。`;
   if (release.others.length === 0) return from;
   return `${from}还开着的别的版本里程碑：${quoted(release.others)}，这次只发 ${release.version}。`;
 }
@@ -303,8 +303,8 @@ function PublishDialog({
         <AlertDialogTitle>发布 {version}</AlertDialogTitle>
         <AlertDialogDescription>
           发布是「对外发布」人闸（AGENTS.md「什么时候停下来问我」第一类）——浏览器不替你按。版本号取当前版本里程碑「
-          {milestone.title}」（刚从 GitHub 核过，和 pnpm publish:pr 同一份判法），不按更新日志「上一版
-          +1」算。
+          {milestone.title}」（刚从 GitHub 核过）。CHANGELOG
+          里已经有发布标记的号不算这一版，不按已发布的最大号 +1 猜。
           {others.length > 0 ? `还开着的别的版本里程碑：${quoted(others)}，这次只发 ${version}。` : ''}
         </AlertDialogDescription>
       </AlertDialogHeader>
