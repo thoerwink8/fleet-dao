@@ -4,7 +4,9 @@
 //
 // 过关的顺序是先便宜的再贵的（列表里就有的，再多读一次 GitHub 的）：
 //   开关打开以后开的（0003 第 2 条）→ 作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 挂在当前版本上（第 8 条）→
-//   不是母单子单、没贴「本机做」→ 还没派过 → 现读一遍这张单（开着、不是 PR、版本和母单子单再核一遍）→ 交代齐不齐 → 容量。
+//   不是母单子单、没贴「本机做」→ 还没派过 → 现读一遍这张单（开着、不是 PR、版本和母单子单再核一遍）→ 没被开着的 PR 的
+//   「需求」栏挂着（#1197：已经有人在做；挂着的贴一次「本机做」、留一句话）→ 正文没写 .github/workflows/ 路径（#1194：
+//   引擎的令牌推不了改工作流的提交，写了的同样贴一次「本机做」、留一句话）→ 交代齐不齐 → 容量。
 // 每一道的判法都是 @fleet-dao/core 的 dispatch.ts 那几个纯函数（versionGate、familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
@@ -17,8 +19,10 @@
 //   一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
 
 import { createHash } from 'node:crypto';
+import { issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
 import {
   autoDispatchGate,
+  cleanBody,
   familyGate,
   type IssueFamily,
   type IssueMilestones,
@@ -27,6 +31,7 @@ import {
   versionGate,
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
+import { humanPart } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { GithubWhitelist } from '@fleet-dao/store';
 import { isTrusted } from '@fleet-dao/store';
@@ -99,6 +104,8 @@ export type IntakeSkipReason =
   | 'sub_issue'
   | 'reserved_local'
   | 'already_dispatched'
+  | 'pr_claimed'
+  | 'touches_workflows'
   | 'pull_request'
   | 'closed'
   | 'brief_incomplete'
@@ -155,6 +162,61 @@ export function screenPlan(plan: IntakePlan): IntakeSkip | null {
   return null;
 }
 
+/**
+ * 开着的 PR 的「需求」栏（Closes / Refs #号，同仓的）挂着哪些单：单号 → 挂着它的 PR 号（同一张单有几个 PR 挂，取号最小的）。
+ * 认法是 conventions 的 issueColumnRefs（pr-open 拒开没挂单的 PR 用的同一份）。
+ */
+export function prClaimedIssues(pulls: readonly { number: number; body: string }[]): Map<number, number> {
+  const claimed = new Map<number, number>();
+  for (const pr of [...pulls].sort((a, b) => a.number - b.number)) {
+    const { closes, refs } = issueColumnRefs(pr.body);
+    for (const n of [...closes, ...refs]) {
+      if (!claimed.has(n)) claimed.set(n, pr.number);
+    }
+  }
+  return claimed;
+}
+
+/** 单子已有 PR 在做、引擎不拉时留在单子上的话。 */
+export function prClaimedComment(prNumber: number): string {
+  return [
+    `引擎想拉起这张单，可开着的 PR #${prNumber} 的「需求」栏已经挂着它，说明已有人在做，先没派。`,
+    '',
+    `已给这张单贴了「${LOCAL_LABEL}」，引擎以后不再拉它。要交给引擎做的话，另开一张新单（不要和现有 PR 重复）。`,
+  ].join('\n');
+}
+
+/** 单正文里认「要改工作流」的三节（不含「原话」：创始人的原话里顺口提到路径不算这张单要改它）。 */
+const WORKFLOW_SECTIONS = ['场景', '已知的模块', '怎么算做完'] as const;
+const WORKFLOW_PATH = /\.github\/workflows\/[\w.*-]*/;
+
+/**
+ * 单正文的场景、已知的模块、怎么算做完三节里写到的第一个 `.github/workflows/` 路径；没写回 null。
+ * 引擎的 GitHub 令牌不能推改了工作流的提交（workflows_permission），这种单拉了只会白烧一轮（#1186 烧了约 35 万输入 token）。
+ * 正文不是文字（读不到）就抛：不当成「没写工作流路径」。正文是空的不在这里管（交代齐不齐那一道会留言）。
+ */
+export function workflowPathIn(body: unknown): string | null {
+  if (typeof body !== 'string')
+    throw new Error(`单正文读不到（拿到的是 ${body === null ? 'null' : typeof body}）`);
+  const text = cleanBody(humanPart(body));
+  if (!text) return null;
+  const doc = parseMd('单正文', text);
+  for (const name of WORKFLOW_SECTIONS) {
+    const hit = WORKFLOW_PATH.exec(sectionText(doc, name) ?? '');
+    if (hit) return hit[0];
+  }
+  return null;
+}
+
+/** 单子要改工作流、引擎不拉时留在单子上的话。 */
+export function workflowPathComment(path: string): string {
+  return [
+    `引擎想拉起这张单，可正文里写到了 \`${path}\`：引擎的 GitHub 令牌不能推改了 \`.github/workflows/\` 的提交（workflows_permission），拉了只会白烧一轮后卡在推送，先没派。`,
+    '',
+    `已给这张单贴了「${LOCAL_LABEL}」，留给本机做，引擎以后不再拉它。`,
+  ].join('\n');
+}
+
 /** 交代不全时留在单子上的话。 */
 export function incompleteComment(problems: readonly BriefProblem[]): string {
   return [
@@ -183,6 +245,10 @@ export interface IntakeDeps {
   plan(repo: IntakeRepo, issueNumber: number): Promise<IntakePlan>;
   /** 这张单是不是已经派出过（库里有任务行且不在排队，或者工作流编号用过）。读不到照抛：不当成「没派过」。 */
   dispatched(repo: IntakeRepo, issueNumber: number): Promise<boolean>;
+  /** 这个仓开着的 PR 的「需求」栏挂着的单（单号 → PR 号，见 prClaimedIssues）。读不到（含 PR 列表翻不完）照抛：不当成「没有 PR」。 */
+  openPrClaims(repo: IntakeRepo): Promise<Map<number, number>>;
+  /** 给单子贴「本机做」标签（幂等）。 */
+  markLocal(input: { repo: IntakeRepo; issueNumber: number }): Promise<void>;
   /** 读主线上的需求文档；文件不在回 null，读失败照抛。 */
   readSpecDoc(input: { repo: IntakeRepo; path: string }): Promise<{ content: string } | null>;
   /** 现在在跑的任务工作流有几条。读不到照抛：不当成「一条没有」。 */
@@ -240,6 +306,34 @@ function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
   if (UNREADABLE.has(s.reason)) t.unchecked.push(`${slug}#${issue}：没查成：${s.why}`);
 }
 
+/**
+ * 这张单引擎不该拉、要留给本机：先在单子上留一句话（幂等键只留一次），再贴「本机做」（幂等），下一轮起 localGate 就在列表里
+ * 把它挡掉。先留言后贴标签：留言失败时标签没贴，下一轮整件事重来；标签失败时下一轮留言是幂等的，只重贴标签。
+ */
+async function holdForLocal(
+  deps: IntakeDeps,
+  t: Tally,
+  repo: IntakeRepo,
+  issue: IntakeIssue,
+  hold: { reason: IntakeSkipReason; why: string; key: string; comment: string },
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const posted = await deps.comment({
+    repo,
+    issueNumber: issue.number,
+    key: hold.key,
+    body: hold.comment,
+  });
+  await deps.markLocal({ repo, issueNumber: issue.number });
+  if (posted.created) {
+    t.commented += 1;
+    deps.log('info', `拉单：${slug}#${issue.number} 不拉（${hold.why}），已贴「${LOCAL_LABEL}」并留言`, {
+      reason: hold.reason,
+    });
+  }
+  skip(t, slug, issue.number, { reason: hold.reason, why: hold.why });
+}
+
 async function intakeIssue(
   deps: IntakeDeps,
   repo: IntakeRepo,
@@ -247,6 +341,7 @@ async function intakeIssue(
   issue: IntakeIssue,
   listed: { openMilestones: MilestoneRef[] },
   whitelist: GithubWhitelist,
+  prClaims: () => Promise<Map<number, number>>,
   t: Tally,
 ): Promise<void> {
   const slug = `${repo.owner}/${repo.name}`;
@@ -262,6 +357,27 @@ async function intakeIssue(
   }
   const late = screenPlan(await deps.plan(repo, issue.number));
   if (late) return skip(t, slug, issue.number, late);
+  // 正文要改 .github/workflows/：引擎推不上去，不拉（#1194）。正文读不到就抛，这张单这一轮记没查成
+  const workflowPath = workflowPathIn(issue.body);
+  if (workflowPath !== null) {
+    return holdForLocal(deps, t, repo, issue, {
+      reason: 'touches_workflows',
+      why: `正文写了 ${workflowPath}，引擎推不了改工作流的提交`,
+      key: 'intake-touches-workflows',
+      comment: workflowPathComment(workflowPath),
+    });
+  }
+  // 已有开着的 PR 的「需求」栏挂着它：有人在做，别并行再写一遍（#1197，#1182 就是这样和已合的 PR 撞车的）。读不到 PR 列表就抛，
+  // 这张单这一轮不拉、记没查成，不当成「没有 PR」
+  const prNumber = (await prClaims()).get(issue.number);
+  if (prNumber !== undefined) {
+    return holdForLocal(deps, t, repo, issue, {
+      reason: 'pr_claimed',
+      why: `已有 PR #${prNumber} 在做`,
+      key: `intake-pr-claimed:${prNumber}`,
+      comment: prClaimedComment(prNumber),
+    });
+  }
 
   // 单子正文就用列表里读到的这份，不再读一遍；指着的需求文档要读主线上的
   const brief = await readTaskBrief(
@@ -350,10 +466,16 @@ async function intakeRepo(
     t.unchecked.push(`${slug}：开着的单读不到（${errMessage(err)}）`);
     return;
   }
+  // 开着的 PR 的挂单表：这一轮这个仓里第一张走到这道关的单才读，读一次（读失败的话，后面的单拿到的是同一个错，各自记没查成）
+  let claims: Promise<Map<number, number>> | undefined;
+  const prClaims = () => {
+    claims ??= deps.openPrClaims(repo);
+    return claims;
+  };
   for (const issue of listed.issues) {
     t.scanned += 1;
     try {
-      await intakeIssue(deps, repo, since, issue, listed, whitelist, t);
+      await intakeIssue(deps, repo, since, issue, listed, whitelist, prClaims, t);
     } catch (err) {
       // 这张单没处理成（现读、留言、起工作流出错）：记下，别的单照做
       t.unchecked.push(`${slug}#${issue.number}：${errMessage(err)}`);
