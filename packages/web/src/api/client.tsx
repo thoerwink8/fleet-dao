@@ -138,7 +138,7 @@ export interface FleetApi {
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
-  /** /changelog 页「发布 v<N>」的版本号（#725）：后端现读 GitHub 里程碑，和 pnpm publish:pr 同一份判法。 */
+  /** /changelog 页「发布 v<N>」的版本号（#725）：后端现读 GitHub 里程碑；已有发布标记的号不当这一版。 */
   releaseVersion(): Promise<ReleaseVersion>;
   /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
   franceReleaseState(): Promise<FranceReleaseState>;

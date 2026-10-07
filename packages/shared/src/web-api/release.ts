@@ -8,11 +8,11 @@ import { Time } from './internal.ts';
 const MilestoneRefSchema = z.object({ number: z.number().int().positive(), title: z.string() });
 
 /**
- * 这一版发出去叫什么：后端现读 GitHub 上开着的里程碑，照 `pnpm publish:pr` 同一份判法定（conventions 的 releaseVersion：
- * 当前版本里程碑＝开着的 v<N> 里 N 最小的那张，再拿仓根 CHANGELOG.md 已发的版本核一遍）。三种结果分开，都不拿「上一版 +1」顶：
+ * 这一版发出去叫什么：后端现读 GitHub 上开着的里程碑。候选是开着的 v<N> 里 N 最小的那张；
+ * 仓根 CHANGELOG.md 里已经有这个号（## [vN] - 日期）就判成已发布，这一版改取下一个还没有发布标记的号。
+ * 三种结果分开，都不拿 v1、不拿 0 顶：
  * - ok：定得出。
- * - blocked：读到了，判法不让发（一张版本里程碑都没开、CHANGELOG.md 已经有这一版或比它新的）；why 是判法的原话，
- *   这时跑 publish:pr 也一样被拒。
+ * - blocked：读到了，判法不让发（一张版本里程碑都没开、CHANGELOG.md 已经发到比这一版还新）；why 是判法的原话。
  * - unreadable：没读成（GitHub、CHANGELOG.md、这台后端没接上），why 写为什么。
  */
 export const ReleaseVersionResponse = z.discriminatedUnion('state', [
