@@ -12,6 +12,7 @@ import { type ReactNode, useState } from 'react';
 import { brand } from '#brand';
 import { errorText, useReleaseVersion } from '../api/client';
 import type { ReleaseVersion } from '../api/types';
+import { MarkdownLite } from '../components/markdown-lite';
 import { Empty, LoadError, Page, Panel } from '../components/page';
 import {
   AlertDialog,
@@ -24,7 +25,7 @@ import {
   AlertDialogTitle,
 } from '../components/ui/alert-dialog';
 import { Button } from '../components/ui/button';
-import { readChangelog } from '../lib/changelog';
+import { readChangelog, releasedBody } from '../lib/changelog';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -54,6 +55,8 @@ export default function Changelog() {
   const query = useReleaseVersion();
   // 点「发布」那一刻按钮上写的版本号（没定出来是 null），和点完再核的那次对得上才给命令；null = 弹窗关着
   const [asked, setAsked] = useState<{ shown: string | null; checking: boolean } | null>(null);
+  // 正文区看哪一段：null = 还没发版（默认）；否则是已发布的那一版
+  const [picked, setPicked] = useState<string | null>(null);
   let data: ReturnType<typeof readChangelog>;
   try {
     data = readChangelog();
@@ -102,41 +105,88 @@ export default function Changelog() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Panel title={panelTitle(release)} description={versionNote(release)}>
-        {release.kind === 'unreadable' ? <Alert tone="fail">读不到当前版本：{release.why}</Alert> : null}
-        {release.kind === 'blocked' ? <Alert tone="human">定不了这一版的版本号：{release.why}</Alert> : null}
-        {hasContent ? (
-          <pre className="font-sans text-[13px] leading-6 whitespace-pre-wrap text-foreground">{section}</pre>
-        ) : (
-          <Empty
-            icon={CalendarClock}
-            title="还什么都没写"
-            hint="下一次发布前，把要发出去的更新写进 CHANGELOG.md 的 Unreleased 段。"
-          />
-        )}
-      </Panel>
+      {/* 版式（驾驶舱改版 2026-10-07）：左边正文（Markdown 渲染成小标题和列表，原来是原文塞进 <pre>，「###」「- 」照原样露着），
+          右边版本目录（还没发版 + 已发布的每一版，点一版看它发了什么；原来已发布只列版本号和日期，点不开）。 */}
+      <div className="grid items-start gap-4 xl:grid-cols-4">
+        <div className="min-w-0 xl:col-span-3">
+          {picked === null ? (
+            <Panel title={panelTitle(release)} description={versionNote(release)}>
+              {release.kind === 'unreadable' ? (
+                <Alert tone="fail">读不到当前版本：{release.why}</Alert>
+              ) : null}
+              {release.kind === 'blocked' ? (
+                <Alert tone="human">定不了这一版的版本号：{release.why}</Alert>
+              ) : null}
+              {hasContent ? (
+                <MarkdownLite source={section} />
+              ) : (
+                <Empty
+                  icon={CalendarClock}
+                  title="还什么都没写"
+                  hint="下一次发布前，把要发出去的更新写进 CHANGELOG.md 的 Unreleased 段。"
+                />
+              )}
+            </Panel>
+          ) : (
+            <ReleasedPanel version={picked} date={released.find((r) => r.version === picked)?.date} />
+          )}
+        </div>
 
-      <div className="mt-6">
-        <h2 className="mb-2 text-sm font-semibold">已发布</h2>
-        {released.length === 0 ? (
-          <Panel>
+        <nav aria-label="版本" className="rounded-xl border bg-card p-2 shadow-card-edge">
+          <button
+            type="button"
+            onClick={() => setPicked(null)}
+            aria-current={picked === null ? 'true' : undefined}
+            className={cn(
+              'flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-accent',
+              picked === null && 'bg-accent font-medium',
+            )}
+          >
+            <span>还没发版</span>
+            <span className="num text-xs text-muted-foreground">{shown ?? ''}</span>
+          </button>
+          <h2 className="mt-2 px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">已发布</h2>
+          {released.length === 0 ? (
             <Empty icon={ScrollText} title="还没有发过版" hint="仓里还没有任何形式的正式发布。" />
-          </Panel>
-        ) : (
-          <Panel bodyClassName="divide-y p-0">
-            {released.map((r) => (
-              <div
+          ) : (
+            released.map((r) => (
+              <button
                 key={`${r.version}-${r.date}`}
-                className="flex items-baseline justify-between gap-3 px-4 py-3"
+                type="button"
+                onClick={() => setPicked(r.version)}
+                aria-current={picked === r.version ? 'true' : undefined}
+                className={cn(
+                  'flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent',
+                  picked === r.version && 'bg-accent',
+                )}
               >
                 <span className="num text-sm font-medium">{r.version}</span>
                 <span className="num text-xs text-muted-foreground">{r.date}</span>
-              </div>
-            ))}
-          </Panel>
-        )}
+              </button>
+            ))
+          )}
+        </nav>
       </div>
     </Page>
+  );
+}
+
+/** 已发布的那一版：正文从 CHANGELOG 里切出来；切不出就照实说没读成。 */
+function ReleasedPanel({ version, date }: { version: string; date: string | undefined }) {
+  let body: string;
+  try {
+    body = releasedBody(version);
+  } catch (error) {
+    return <LoadError error={error} what={`${version} 的更新日志`} />;
+  }
+  return (
+    <Panel title={`${version} · 已发布`} description={date ? `${date} 发出` : undefined}>
+      {body ? (
+        <MarkdownLite source={body} />
+      ) : (
+        <p className="text-sm text-muted-foreground">这一版没写正文。</p>
+      )}
+    </Panel>
   );
 }
 
