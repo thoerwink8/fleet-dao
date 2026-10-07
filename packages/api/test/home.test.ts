@@ -65,6 +65,22 @@ describe('/api/home（内存版）', () => {
     expect(JSON.stringify(home)).not.toContain('fail');
   });
 
+  it('被人暂停的单（#820 片 3）：在跑的里写 paused 加引擎写的那句话，不画成等人也不画成失败；没暂停的没有 paused', async () => {
+    const h = harness();
+    const before = HomeResponseSchema.parse(await (await getHome(h)).json());
+    expect(before.running[0]?.waitingReason).toBe('nothing');
+    expect(before.running[0]).not.toHaveProperty('paused');
+    const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
+    if (!task) throw new Error('样例数据里没有任务');
+    task.paused = '已暂停：被 frank 暂停：先看一下方向';
+    const home = HomeResponseSchema.parse(await (await getHome(h)).json());
+    expect(home.running[0]).toMatchObject({
+      waitingReason: 'paused',
+      paused: '已暂停：被 frank 暂停：先看一下方向',
+    });
+    expect(home.running[0]?.waitingSince).toBeUndefined();
+  });
+
   describe('三段流水线图（running 的 segment / worker / lastEvent、flow 三格）', () => {
     const ago = (m: number) => new Date(T0.getTime() - m * 60_000).toISOString();
     let n = 0;

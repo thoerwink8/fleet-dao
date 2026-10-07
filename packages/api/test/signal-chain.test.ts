@@ -63,18 +63,36 @@ describe('驾驶舱动作发的信号，工作流编号和信号名对得上引�
     expect(TASK_SIGNAL_NAMES.abandon).toBe('taskAbandon');
   });
 
-  it('引擎没有的动作（暂停、换路由）：409 action_not_supported 带人话原因，不写操作记录、不发信号', async () => {
+  it('「暂停」：taskPause，参数 { by, mode, reason? }（形状同 shared 的 PauseCommand，引擎照它收）', async () => {
+    const t = fakeTemporal();
+    const h = harness({ workflows: t.control });
+    const s = await h.login();
+    const res = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'pause', reason: '先看一下', mode: 'hard' }),
+    );
+    expect(res.status).toBe(200);
+    expect(t.sent).toEqual([
+      {
+        workflowId: TASK12_WORKFLOW_ID,
+        name: 'taskPause',
+        arg: { by: DEV_USER_ID, mode: 'hard', reason: '先看一下' },
+      },
+    ]);
+    expect(TASK_SIGNAL_NAMES.pause).toBe('taskPause');
+  });
+
+  it('引擎没有的动作（换路由）：409 action_not_supported 带人话原因，不写操作记录、不发信号', async () => {
     const t = fakeTemporal();
     const h = harness({ workflows: t.control });
     const s = await h.login();
     const before = h.store.data.audit.length;
-    for (const body of [{ action: 'pause' }, { action: 'reroute', routeId: 'rt-mirasim-kimi' }]) {
-      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
-      expect(res.status, body.action).toBe(409);
-      const json = (await res.json()) as { error: { code: string; message: string } };
-      expect(json.error.code).toBe('action_not_supported');
-      expect(json.error.message).toContain('叫停');
-    }
+    const body = { action: 'reroute', routeId: 'rt-mirasim-kimi' };
+    const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
+    expect(res.status).toBe(409);
+    const json = (await res.json()) as { error: { code: string; message: string } };
+    expect(json.error.code).toBe('action_not_supported');
+    expect(json.error.message).toContain('叫停');
     expect(t.sent).toEqual([]);
     expect(h.store.data.audit.length).toBe(before);
   });

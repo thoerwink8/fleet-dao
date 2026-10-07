@@ -3,7 +3,7 @@
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { RouteChoice } from '../ports.ts';
-import type { AbandonCommand } from '../task-contract.ts';
+import type { AbandonCommand, PauseCommand } from '../task-contract.ts';
 
 /** 放弃：从各处抛到最外层收尾。 */
 export class Abandoned extends Error {
@@ -11,6 +11,16 @@ export class Abandoned extends Error {
   constructor(command: AbandonCommand) {
     super(`被 ${command.by} 放弃：${command.reason}`);
     this.name = 'Abandoned';
+    this.command = command;
+  }
+}
+
+/** hard 暂停把正在跑的动手会话取消了（#820 片 3）：从 cancellable 抛到动手会话那一段，那里按「被人暂停」接着停、等继续后重跑。 */
+export class PausedInterrupt extends Error {
+  readonly command: PauseCommand;
+  constructor(command: PauseCommand) {
+    super(`被 ${command.by} 暂停`);
+    this.name = 'PausedInterrupt';
     this.command = command;
   }
 }

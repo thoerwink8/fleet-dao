@@ -91,6 +91,11 @@ export interface Task {
   specDir?: string;
   /** 做完标准（从需求文档来），fleet task 给会话看。 */
   acceptance?: string[];
+  /**
+   * 被人暂停了（#820 片 3）：引擎写在 tasks.phase='paused' 时，这里是它写的那句「已暂停：被谁暂停、为什么」；没暂停没有这个键。
+   * 暂停的单 state 仍是 running（只停这一张、能继续），所以是否暂停只看这个键，不看 state。
+   */
+  paused?: string;
   createdAt: string;
 }
 

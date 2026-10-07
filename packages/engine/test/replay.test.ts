@@ -14,7 +14,7 @@ const DIR = fileURLToPath(new URL('./replay/fixtures/', import.meta.url));
 const files = readdirSync(DIR).filter((f) => f.startsWith('task-') && f.endsWith('.json'));
 
 /** 必须有的场景：没有它们，「扫完 0 条」和「一条样本都没扫到」就分不开了。 */
-const REQUIRED = ['task-merged', 'task-parked-brief', 'task-parked-guarded', 'task-merging'];
+const REQUIRED = ['task-merged', 'task-parked-brief', 'task-parked-guarded', 'task-merging', 'task-paused'];
 
 const HOW =
   '这份历史是过去的代码真走过的路：现在的代码走不出同样的步骤 = 在途的任务会变僵尸。' +
@@ -54,6 +54,18 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
       );
     });
   }
+
+  it('task-paused 夹具真走过暂停那一支：历史里有 taskPause 信号和 patched 的标记（不是一份和别的夹具一样的历史）', () => {
+    const text = readFileSync(`${DIR}task-paused.json`, 'utf8');
+    expect(text).toContain('taskPause');
+    // patched() 的标记在历史里是 core_patch，编号藏在 base64 里
+    const marker = Buffer.from(JSON.stringify({ id: 'task-pause', deprecated: false })).toString('base64');
+    expect(text).toContain(marker);
+    // 对照：没有暂停的夹具里没有这两样
+    const plain = readFileSync(`${DIR}task-merged.json`, 'utf8');
+    expect(plain).not.toContain('taskPause');
+    expect(plain).not.toContain(marker);
+  });
 
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {
     const { workflowId, history } = load('task-merged.json');

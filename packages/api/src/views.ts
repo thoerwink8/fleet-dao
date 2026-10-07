@@ -432,7 +432,7 @@ export function pendingDecisionByTask(input: {
 /**
  * 「在跑的」：没结束的需求（done / stopped / failed 之外）。在哪一段、谁在做、最近一次事件从三段流水推（home-flow.ts 的
  * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：有人在等创始人回答
- * （state=asking，只有旧会话留下的单会是这个状态）→ founder_decision（有 decision 级通知就从它的时刻起算，没有就不给起点）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
+ * （state=asking，只有旧会话留下的单会是这个状态）→ founder_decision；被人暂停（#820 片 3，Task.paused）→ paused，排在最前（有 decision 级通知就从它的时刻起算，没有就不给起点）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
  * 在合并 → merge_queue；其余 nothing。额度、内存、CI 这几种等 segment 之外的信号才分得出，分不出时不猜。
  */
 export function homeRunning(input: {
@@ -457,28 +457,33 @@ export function homeRunning(input: {
       const asking = t.state === 'asking';
       const flow = taskFlow(t, input.segmentRunsOf(t.id));
       const decision = input.decisionOf(t.id);
-      const waitingReason: HomeRunning['waitingReason'] = asking
-        ? 'founder_decision'
-        : queued
-          ? 'queue'
-          : flow.segment === 'verify_pending'
-            ? 'verify_round'
-            : flow.segment === 'merge'
-              ? 'merge_queue'
-              : 'nothing';
-      const waitingSince = asking
-        ? decision?.since
-        : queued
-          ? queued.queuedAt
-          : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-            ? flow.stageSince
-            : undefined;
+      const waitingReason: HomeRunning['waitingReason'] = t.paused
+        ? 'paused'
+        : asking
+          ? 'founder_decision'
+          : queued
+            ? 'queue'
+            : flow.segment === 'verify_pending'
+              ? 'verify_round'
+              : flow.segment === 'merge'
+                ? 'merge_queue'
+                : 'nothing';
+      const waitingSince = t.paused
+        ? undefined
+        : asking
+          ? decision?.since
+          : queued
+            ? queued.queuedAt
+            : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+              ? flow.stageSince
+              : undefined;
       return {
         issueNumber: t.issueNumber,
         title: t.title,
         repo: repo ? `${repo.owner}/${repo.name}` : '（仓不在库里）',
         segment: flow.segment,
         waitingReason,
+        ...(t.paused ? { paused: t.paused } : {}),
         ...(waitingSince ? { waitingSince } : {}),
         taskSince: t.createdAt,
         ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),

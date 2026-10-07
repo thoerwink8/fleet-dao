@@ -24,17 +24,20 @@ import type { Worktree } from '../ports.ts';
 import {
   type AbandonCommand,
   type GuardedPaths,
+  PAUSED_BY_HUMAN,
+  type PauseCommand,
   type TaskPhase,
   type TaskStatus,
   type TaskWait,
   type TaskWorkflowInput,
   taskAbandonSignal,
   taskContinueSignal,
+  taskPauseSignal,
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../task-contract.ts';
 import { failureOf, iso, judgeRetrying } from './kit.ts';
-import { Abandoned, bump, stripUndefined, ZERO } from './task-support.ts';
+import { Abandoned, bump, PausedInterrupt, stripUndefined, ZERO } from './task-support.ts';
 
 export class TaskRuntime {
   readonly input: TaskWorkflowInput;
@@ -46,6 +49,14 @@ export class TaskRuntime {
   private abandon: AbandonCommand | null = null;
   private parks = 0;
   private cancelRunning: (() => void) | null = null;
+  /** 正在跑的这个长活动是不是「hard 暂停能取消的」（只有动手会话）。 */
+  private runningPausable = false;
+  /** 有人要暂停（#820 片 3）：停在下一个检查点（checkpoint），点「继续」才放；已经有一个在了，后来的不覆盖（谁点的、为什么保持第一次）。 */
+  private pauseReq: PauseCommand | null = null;
+  /** 暂停停着等「继续」的这一段（pauseReq 已经生效）。 */
+  private holding = false;
+  /** hard 暂停取消了正在跑的动手会话：cancellable 里看到取消时，分得清是暂停取消的还是别的。 */
+  private pauseCancelled = false;
 
   // ---- 一张单走到哪了（各阶段读写）
   branch = '';
@@ -79,6 +90,16 @@ export class TaskRuntime {
     };
     setHandler(taskContinueSignal, () => {
       this.continued += 1;
+      // 还没停下（没到检查点）就收到「继续」：撤掉这次暂停请求；已经停着的由 holdPaused 看 continued 放行
+      if (!this.holding) this.pauseReq = null;
+    });
+    setHandler(taskPauseSignal, (command) => {
+      if (this.pauseReq) return;
+      this.pauseReq = command;
+      if (command.mode === 'hard' && this.runningPausable) {
+        this.pauseCancelled = true;
+        this.cancelRunning?.();
+      }
     });
     setHandler(taskRouteWakeSignal, () => {
       this.routeWakes += 1;
@@ -117,6 +138,50 @@ export class TaskRuntime {
     if (this.abandon) throw new Abandoned(this.abandon);
   }
 
+  /**
+   * 检查点：放弃了就抛 Abandoned；有人要暂停（#820 片 3）就停在这里等「继续」，回来的时候已经继续了。
+   * 起新会话、选路、起新一步之前都过这里：暂停之后不再起新会话（soft 手上这一段做完；hard 动手会话当场停，见 cancellable）。
+   * 老历史重放走不到暂停那一支（没有 taskPause 信号），所以平时不多调任何活动。
+   */
+  async checkpoint(): Promise<void> {
+    this.guard();
+    if (this.pauseReq !== null) await this.holdPaused(this.pauseReq);
+  }
+
+  /** 暂停的原因怎么写给人看：谁、为什么（没写原因就只写谁）。 */
+  pauseNote(command: PauseCommand): string {
+    return `${PAUSED_BY_HUMAN}（${command.by}）${command.reason ? `：${command.reason}` : ''}`;
+  }
+
+  /** 停着等「继续」或「放弃」：库里 phase=paused、state 仍是 running，不报警（不是出了问题），继续后回到原来的阶段。 */
+  private async holdPaused(command: PauseCommand): Promise<void> {
+    // 老历史里没有这一支：patched() 为假就当没有（走不到：老历史没有 taskPause 信号）
+    if (!patched('task-pause')) return;
+    const before = this.continued;
+    const previous = { phase: this.status.phase, doing: this.status.doing, waiting: this.status.waiting };
+    this.holding = true;
+    this.status.phase = 'paused';
+    this.status.doing = `已暂停：${this.pauseNote(command)}`;
+    // 状态和等待一起落下（驾驶舱、巡检一读就是完整的「已暂停，在等继续」），再写库
+    this.status.waiting = {
+      kind: 'paused',
+      detail: `已暂停（等「继续」或「放弃」）：${this.pauseNote(command)}`,
+      since: iso(Date.now()),
+    };
+    try {
+      await this.mirror('running');
+      await condition(() => this.continued > before || this.abandon !== null);
+    } finally {
+      this.holding = false;
+    }
+    this.pauseReq = null;
+    this.guard();
+    this.status.phase = previous.phase;
+    this.status.doing = previous.doing;
+    this.status.waiting = previous.waiting;
+    await this.mirror('running');
+  }
+
   /** 把此刻的样子写给驾驶舱（读库的那一侧）。写不进去只记日志：驾驶舱晚一会儿看到，不挡干活。 */
   async mirror(state: TaskState): Promise<void> {
     try {
@@ -148,8 +213,10 @@ export class TaskRuntime {
 
   /** 睡 seconds 秒；放弃了马上醒、抛 Abandoned。 */
   async pause(kind: TaskWait['kind'], detail: string, seconds: number): Promise<void> {
-    await this.waiting(kind, detail, () => condition(() => this.abandon !== null, `${seconds} seconds`));
-    this.guard();
+    await this.waiting(kind, detail, () =>
+      condition(() => this.abandon !== null || this.pauseReq !== null, `${seconds} seconds`),
+    );
+    await this.checkpoint();
   }
 
   /**
@@ -171,27 +238,38 @@ export class TaskRuntime {
     mark: number,
   ): Promise<'woken' | 'timeout'> {
     const woken = await this.waiting(kind, detail, () =>
-      condition(() => this.abandon !== null || this.routeWakes > mark, `${seconds} seconds`),
+      condition(
+        () => this.abandon !== null || this.pauseReq !== null || this.routeWakes > mark,
+        `${seconds} seconds`,
+      ),
     );
-    this.guard();
+    await this.checkpoint();
     return woken ? 'woken' : 'timeout';
   }
 
   /** 把一段长活动放进可取消的范围：放弃的信号一到就取消它（活动心跳，收得到），结果抛 Abandoned。 */
-  async cancellable<T>(fn: () => Promise<T>): Promise<T> {
+  async cancellable<T>(fn: () => Promise<T>, options: { pausable?: boolean } = {}): Promise<T> {
     // 放弃的信号可能在上一个 await（比如换阶段落库）期间就到了：那时还没有可取消的范围，cancelRunning 是空的，
     // 信号只记了下来；这里不先看一眼，长活动就照常起、再没人去取消它，一直跑到它自己的限时（#706）。
     // 老历史里这一步没有这道检查：patched() 为假就照旧。
     if (patched('cancellable-guard')) this.guard();
+    // hard 暂停的信号在这一段起之前就到了（前面落库那一步期间）：不起，当场按被暂停处理
+    if (options.pausable && this.pauseReq?.mode === 'hard') throw new PausedInterrupt(this.pauseReq);
     const scope = new CancellationScope({ cancellable: true });
     this.cancelRunning = () => scope.cancel();
+    this.runningPausable = options.pausable === true;
     try {
       return await scope.run(fn);
     } catch (error) {
       if (this.abandon && isCancellation(error)) throw new Abandoned(this.abandon);
+      if (this.pauseCancelled && this.pauseReq && isCancellation(error)) {
+        throw new PausedInterrupt(this.pauseReq);
+      }
       throw error;
     } finally {
       this.cancelRunning = null;
+      this.runningPausable = false;
+      this.pauseCancelled = false;
     }
   }
 
@@ -237,7 +315,7 @@ export class TaskRuntime {
     let counters = ZERO;
     let previousMessage: string | undefined;
     for (;;) {
-      this.guard();
+      await this.checkpoint();
       try {
         return await fn();
       } catch (error) {

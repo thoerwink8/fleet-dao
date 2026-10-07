@@ -18,7 +18,12 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import type { EngineJobs, EngineTasks } from '../../src/activities.ts';
 import { WORKFLOW_TYPES } from '../../src/contract.ts';
 import { createFakeWorld, type FakeScript, type FakeWorld } from '../../src/fakes.ts';
-import { type TaskStatus, type TaskWorkflowInput, taskStatusQuery } from '../../src/task-contract.ts';
+import {
+  type TaskStatus,
+  type TaskWorkflowInput,
+  taskPauseSignal,
+  taskStatusQuery,
+} from '../../src/task-contract.ts';
 import { createEnv, engineBundle, REPO, waitUntil, withWorker } from '../support.ts';
 import { scripted } from '../task-script.ts';
 
@@ -87,6 +92,16 @@ const SCENARIOS: Record<string, Scenario> = {
       const handle = await startTask(r);
       await taskStatusUntil(handle, (s) => s.waiting?.kind === 'human', '改标准，停下等创始人');
       return { 'task-parked-guarded': handle };
+    },
+  },
+  // 被人暂停（#820 片 3）：读完交代、第一个检查点就停进已暂停，等「继续」。历史里带 patched('task-pause') 的标记。
+  'task-paused': {
+    tasks: scripted().tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.signal(taskPauseSignal, { by: 'recorder', mode: 'soft', reason: '录夹具' });
+      await taskStatusUntil(handle, (s) => s.phase === 'paused', '停进已暂停');
+      return { 'task-paused': handle };
     },
   },
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。

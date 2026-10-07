@@ -7,6 +7,7 @@ import type { Repo, StageKind } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
+  type PauseCommand,
   type RouteWakeCommand,
   TASK_SIGNAL_NAMES,
 } from '@fleet-dao/shared/task-signals';
@@ -47,11 +48,20 @@ export interface TaskWorkflowInput {
   title: string;
 }
 
-export type TaskPhase = 'brief' | 'implement' | 'ci' | 'verify' | 'merge' | 'parked' | 'done' | 'abandoned';
+export type TaskPhase =
+  | 'brief'
+  | 'implement'
+  | 'ci'
+  | 'verify'
+  | 'merge'
+  | 'parked'
+  | 'paused'
+  | 'done'
+  | 'abandoned';
 
 /** 在等什么（驾驶舱「在跑的」每张单显示卡在哪一环、在等谁）。 */
 export interface TaskWait {
-  kind: 'human' | 'slot' | 'quota' | 'ci' | 'merge' | 'retry';
+  kind: 'human' | 'slot' | 'quota' | 'ci' | 'merge' | 'retry' | 'paused';
   detail: string;
   /** ISO 时刻。 */
   since: string;
@@ -81,11 +91,12 @@ export interface TaskRun {
 
 // 信号的名字和参数形状在 shared/task-signals.ts：驾驶舱后端发信号也从那里拿，两边不各拼一遍（#901）。
 // 路由叫醒（RouteWakeCommand）只有引擎进程自己发（real/route-wake.ts），信号丢了也不会等超过 MAX_ROUTE_WAIT_SECONDS。
-export type { AbandonCommand, ContinueCommand, RouteWakeCommand };
+export type { AbandonCommand, ContinueCommand, PauseCommand, RouteWakeCommand };
 
 export const taskContinueSignal = defineSignal<[ContinueCommand]>(TASK_SIGNAL_NAMES.continue);
 export const taskAbandonSignal = defineSignal<[AbandonCommand]>(TASK_SIGNAL_NAMES.abandon);
 export const taskRouteWakeSignal = defineSignal<[RouteWakeCommand]>(TASK_SIGNAL_NAMES.routeWake);
+export const taskPauseSignal = defineSignal<[PauseCommand]>(TASK_SIGNAL_NAMES.pause);
 export const taskStatusQuery = defineQuery<TaskStatus>('taskStatus');
 
 // ---- 新增的活动（EngineActivities 里的「任务」一组）
@@ -131,6 +142,12 @@ export interface RunSegmentInput {
  * 提示词里带上 interrupted。和 runner/one-shot.ts 的结局 org_switch 是同一个词。
  */
 export const ORG_SWITCH_CODE = 'org_switch';
+
+/**
+ * 单任务被人暂停（#820 片 3）：hard 暂停停下的动手会话，原因写这一句，重跑时和切号一样进提示词的 interrupted（树里留着上一次的东西，接着干）。
+ * 借 org_switch 的位置：工作流这一侧当切号停下对待（不算失败、不记账、不换模型）；runs 表的结局不新增 paused（要改 CHECK 约束，方案 §要定的 4）。
+ */
+export const PAUSED_BY_HUMAN = '被人暂停';
 
 /** 动手会话没跑成时给失败分流的证据（字段照 FailureEvidence，工作流补上 routeId 这些再交给分流）。 */
 export type SegmentEvidence = Pick<

@@ -13,6 +13,7 @@ import {
   CircleDot,
   Hourglass,
   MessageCircleQuestion,
+  Pause,
   ShieldQuestion,
   TriangleAlert,
 } from 'lucide-react';
@@ -45,6 +46,7 @@ export const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   verify_round: '等第二意见',
   founder_decision: '等你拍',
   merge_queue: '等合并队列',
+  paused: '已暂停',
   nothing: '在跑',
 };
 
@@ -58,6 +60,8 @@ export function needsFounder(item: HomeRunning): boolean {
  * 「还没验」（verify_pending / ci / verify_round / merge_queue）单独画：不是 fail 红，也不是「正常在跑」绿。
  */
 export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
+  // 被人暂停（#820 片 3）：等待色（黄系），不是失败红，也不是等你拍；人让它停的，点「继续」才走
+  if (item.waitingReason === 'paused') return { tone: 'stall', icon: Pause };
   if (item.lastEvent?.tone === 'trouble') return { tone: 'fail', icon: TriangleAlert };
   if (needsFounder(item)) return { tone: 'human', icon: MessageCircleQuestion };
   switch (item.segment) {
@@ -78,6 +82,7 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
 
 /** 卡片上那句「在哪一段」：排在对题、但一笔流水都还没有的，是排着队还没开始，不写「在对题」。 */
 export function statusTextOf(item: HomeRunning): string {
+  if (item.waitingReason === 'paused') return '已暂停';
   const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !needsFounder(item);
   return item.segment === null
     ? SEGMENT_NOT_WIRED

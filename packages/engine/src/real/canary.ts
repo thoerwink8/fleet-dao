@@ -88,7 +88,7 @@ export function canaryViewOf(raw: unknown, workflowId: string): CanaryView {
   return {
     phase: r.phase,
     doing: r.doing,
-    parked: r.phase === 'parked' || waiting?.kind === 'human',
+    parked: r.phase === 'parked' || r.phase === 'paused' || waiting?.kind === 'human',
     waiting,
     prNumber: prNumber ?? null,
     lastProblem,

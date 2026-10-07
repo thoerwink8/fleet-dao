@@ -1225,28 +1225,33 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const asking = t.task.state === 'asking';
           const flow = taskFlow(t.task, viewsOf(t));
           const decision = pendingOf(t);
-          const waitingReason = asking
-            ? ('founder_decision' as const)
-            : queued
-              ? ('queue' as const)
-              : flow.segment === 'verify_pending'
-                ? ('verify_round' as const)
-                : flow.segment === 'merge'
-                  ? ('merge_queue' as const)
-                  : ('nothing' as const);
-          const waitingSince = asking
-            ? decision?.since
-            : queued
-              ? queued.queuedAt
-              : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-                ? flow.stageSince
-                : undefined;
+          const waitingReason = t.task.paused
+            ? ('paused' as const)
+            : asking
+              ? ('founder_decision' as const)
+              : queued
+                ? ('queue' as const)
+                : flow.segment === 'verify_pending'
+                  ? ('verify_round' as const)
+                  : flow.segment === 'merge'
+                    ? ('merge_queue' as const)
+                    : ('nothing' as const);
+          const waitingSince = t.task.paused
+            ? undefined
+            : asking
+              ? decision?.since
+              : queued
+                ? queued.queuedAt
+                : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                  ? flow.stageSince
+                  : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,
             repo: repoName(t.task.repoId),
             segment: flow.segment,
             waitingReason,
+            ...(t.task.paused ? { paused: t.task.paused } : {}),
             ...(waitingSince ? { waitingSince } : {}),
             taskSince: t.task.createdAt,
             ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
@@ -1521,12 +1526,21 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const actor = meActor();
       switch (body.action) {
         case 'pause':
+          if (tv.task.paused !== undefined) {
+            throw new ApiError(
+              409,
+              'already_paused',
+              `这张单已经暂停了（${tv.task.paused}），点「继续」接着走`,
+            );
+          }
           tv.paused = true;
+          tv.task.paused = `已暂停：被人暂停（${actor.name}）${body.reason ? `：${body.reason}` : ''}`;
           for (const s of tv.subtasks) s.paused = true;
           log(tv, { source: 'person', kind: 'pause', text: body.reason ? `暂停：${body.reason}` : '暂停' });
           break;
         case 'resume':
           tv.paused = false;
+          delete tv.task.paused;
           for (const s of tv.subtasks) s.paused = false;
           log(tv, { source: 'person', kind: 'resume', text: '继续' });
           break;
@@ -1537,6 +1551,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             if (s.subtask.state !== 'merged') setSubState(tv, s, 'stopped');
           }
           tv.paused = false;
+          delete tv.task.paused;
           setTaskState(tv, 'stopped');
           log(tv, { source: 'person', kind: 'stop', text: body.reason ? `叫停：${body.reason}` : '叫停' });
           break;

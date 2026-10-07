@@ -10,7 +10,19 @@ export const TASK_SIGNAL_NAMES = {
   abandon: 'taskAbandon',
   /** 「叫醒」等路由的活（#194）：只有引擎进程自己发，驾驶舱后端不发。 */
   routeWake: 'taskRouteWake',
+  /** 「暂停」（#820 片 3）：这一张单停在下一个检查点，不起新会话；点「继续」（taskContinue）接着走。 */
+  pause: 'taskPause',
 } as const;
+
+/**
+ * 「暂停」（#820 片 3）：只停这一张单，之后能「继续」（和「放弃」不同，放弃是终局）。by 写谁点的，reason 是为什么停。
+ * mode：soft（默认）＝手上这一段做完，下一个检查点停，不起新会话；hard＝动手的会话马上停下（树里留着的改动，继续后原树原分支接着干）。
+ */
+export interface PauseCommand {
+  by: string;
+  reason?: string;
+  mode?: 'soft' | 'hard';
+}
 
 /** 「继续」：停着等人的任务接着走。by 写谁点的，note 是留给下一个看的人的话。 */
 export interface ContinueCommand {

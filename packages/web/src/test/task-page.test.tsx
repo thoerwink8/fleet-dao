@@ -2,7 +2,7 @@
 // 任务页（#216）：三段的单按段、按模型显示耗时、token、花费，每一笔逐个列；读不到的写「没读到」和原因，不写 0。
 // 老流程的单照旧是会话时间线加「时间与用量」。每条读不到的路径都故意造一次。
 import { readSegmentRun, type SegmentRunFacts, summarizeUsage, TaskDetailResponse } from '@fleet-dao/shared';
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
@@ -245,5 +245,44 @@ describe('【失败】读不到的都写明，不写 0', () => {
     expect(within(row).getByText('在跑')).toBeTruthy();
     expect(within(row).getByText(/已跑 30 分钟/)).toBeTruthy();
     expect(row.querySelectorAll('[data-unread-item]')).toHaveLength(0);
+  });
+});
+
+describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处）', () => {
+  const actionBox = async () => {
+    await screen.findByRole('heading', { level: 1 });
+    return document.querySelector('[data-task-actions]') as HTMLElement | null;
+  };
+
+  test('在跑的单：页头有暂停、继续、叫停三个按钮；没有换模型', async () => {
+    open('/tasks/t-12');
+    await waitFor(async () => expect(await actionBox()).not.toBeNull());
+    const box = (await actionBox()) as HTMLElement;
+    expect([...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['暂停', '继续', '叫停']);
+    expect(within(box).queryByText('换模型')).toBeNull();
+  });
+
+  test('点暂停、选「做完这一段再停」：页上写「已暂停」和原因（等待色，不是失败红），按钮不再有「暂停」；点继续后恢复', async () => {
+    const api = createMockApi({ live: false });
+    open('/tasks/t-12', api);
+    await waitFor(async () => expect(await actionBox()).not.toBeNull());
+    fireEvent.click(within((await actionBox()) as HTMLElement).getByRole('button', { name: '暂停' }));
+    fireEvent.click(await screen.findByRole('button', { name: '做完这一段再停' }));
+    await waitFor(() => expect(document.querySelector('[data-paused-note]')).not.toBeNull());
+    expect(screen.getByText('已暂停')).toBeTruthy();
+    expect(document.querySelector('[data-paused-note]')?.textContent).toContain('已暂停：被人暂停');
+    const box = (await actionBox()) as HTMLElement;
+    expect([...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['继续', '叫停']);
+    fireEvent.click(within(box).getByRole('button', { name: '继续' }));
+    await waitFor(() => expect(document.querySelector('[data-paused-note]')).toBeNull());
+    expect(
+      [...((await actionBox()) as HTMLElement).querySelectorAll('button')].map((b) => b.textContent),
+    ).toEqual(['暂停', '继续', '叫停']);
+  });
+
+  test('【故意造出的失败】已结束的单：一个按钮都不画', async () => {
+    open('/tasks/t-11');
+    await screen.findByRole('heading', { level: 1 });
+    expect(await actionBox()).toBeNull();
   });
 });

@@ -97,6 +97,7 @@ export function targetOfItem(item: HomeRunning, remote: boolean): ActionTarget |
     issueNumber: item.issueNumber,
     title: item.title,
     state: item.waitingReason === 'founder_decision' ? 'asking' : 'running',
+    ...(item.paused === undefined ? {} : { paused: item.paused }),
   };
 }
 

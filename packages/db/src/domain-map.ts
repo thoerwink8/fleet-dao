@@ -68,6 +68,8 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     priority: r.priority,
     specDir: opt(r.specDir),
     acceptance: r.acceptance,
+    // 引擎暂停这张单（#820 片 3）时写 phase='paused'、doing='已暂停：…'；doing 是空的也不能当没暂停
+    paused: r.phase === 'paused' ? (r.doing ?? '已暂停') : undefined,
     createdAt: r.createdAt.toISOString(),
   });
 
