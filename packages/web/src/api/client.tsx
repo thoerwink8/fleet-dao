@@ -271,12 +271,23 @@ export function useAllBoards(): { boards: Board[]; isLoading: boolean; error: un
   };
 }
 
+/** 后端说没有这个东西（404）：不是没读成，是真没有；重试也不会有。 */
+export function isNotFound(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404;
+}
+
+/**
+ * 一张单的详情。404（没有这张单）不重试：重试只会让页面多转一会儿圈。别的失败照全局默认重试一次。
+ * 页面要自己记住上一次的失败（routes/task.tsx）：没读到过数据的查询一被实时推送叫去重读，React Query 会把它的
+ * error 清空、退回 pending，页面就从「没有这张单」跳回加载骨架，推送来得勤就一直在转。
+ */
 export function useTaskDetail(taskId: string | undefined) {
   const api = useApi();
   return useQuery({
     queryKey: keys.task(taskId ?? ''),
     queryFn: () => api.task(taskId ?? ''),
     enabled: Boolean(taskId),
+    retry: (failures, err) => !isNotFound(err) && failures < 1,
   });
 }
 

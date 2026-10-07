@@ -91,11 +91,15 @@ test.describe('单子详情', () => {
     await expect(page.getByText('这张单还没跑过')).toBeVisible();
   });
 
-  test('不存在的单：明确写「没有这个任务」，给回主页的路', async ({ page, problems }) => {
+  test('不存在的单：明确写「没有这张单」，正文里给回主页的路，不停在加载骨架', async ({ page, problems }) => {
     problems.allow('HTTP 404');
     problems.allow('status of 404');
-    await page.goto('/tasks/00000000-0000-4000-8000-00000000dead');
-    await expect(page.getByText(/没有这个任务|读不到|没读到/).first()).toBeVisible();
-    await expect(page.getByRole('link', { name: '回主页' })).toBeVisible();
+    for (const id of ['00000000-0000-4000-8000-00000000dead', 't-1']) {
+      await page.goto(`/tasks/${id}`);
+      const alert = page.getByRole('alert').filter({ hasText: '没有这张单' });
+      await expect(alert).toBeVisible();
+      await expect(alert.getByRole('link', { name: '回主页' })).toBeVisible();
+      await expect(page.locator('main [aria-busy]')).toHaveCount(0);
+    }
   });
 });
