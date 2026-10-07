@@ -116,12 +116,6 @@ gw() {
   esac
 }
 gw_calls() { grep -cE "^($1)( |$)" "$GWD/calls"; } # 某种命令调过几次（「receive」「receive a」「has|activate」）
-# 里程碑发版后置关（dispatch_off_on_milestone）换成桩：只记哪一版发布成功后叫了它；它自己的判法在 release-dispatch.test.sh
-OFF_CALLS=()
-dispatch_off_on_milestone() { OFF_CALLS+=("${1:0:1}"); }
-# 引擎总开关发版后置关（engine_off_after_release，#1086）同样换成桩；它自己的判法在 release-engine-off.test.sh
-ENGINE_OFF_CALLS=()
-engine_off_after_release() { ENGINE_OFF_CALLS+=("${1:0:1}"); }
 health_gate() {
   if [[ "${GATE[$1]:-ok}" == ok ]]; then return 0; fi
   red "桩：${1:0:12} 健康检查不过"
@@ -149,7 +143,12 @@ reset
 do_release "$B" >/dev/null
 check "发 B 之后在用 B" "$(current_sha)" "$B"
 check "上一版是 A" "$(previous_sha)" "$A"
-check "发布成功之后各叫了一次置关判断（A、B）" "${OFF_CALLS[*]}" "a b"
+# 发完不碰引擎总开关和项目的「让 AI 接活」（#1256，决定 0032 第 4 条）：这两个开关的暂停和恢复在发版车、驾驶舱按钮的接活脚本里。
+# 这些函数和命令一旦又出现在 release.sh 里，发完一律置关就回来了：这里红
+check "release.sh 里没有发完置关的函数（dispatch_off_on_milestone、engine_off_after_release）" \
+  "$(declare -F dispatch_off_on_milestone engine_off_after_release | wc -l)" 0
+check "release.sh 里没有 fleet-api engine on|off、dispatch --all 这样的命令" \
+  "$(grep -cE 'fleet-api\.ts (engine|dispatch)' "$HERE/../release.sh")" 0
 
 echo "== 同一个提交再发一遍：什么都不变"
 reset
@@ -158,28 +157,18 @@ do_release "$B" >/dev/null
 check "再发 B：改动 0 处" "${#CHANGES[@]}" 0
 check "再发 B：历史没变" "$(events)" "$before"
 
-echo "== 【故意造出的失败】发布后置关没成（#1121）：版本已切、健康检查已过，发布仍算成——没有红，只单独记一条提醒，结论退出码 3"
+echo "== 【故意造出的失败】发布后的收尾提醒（post_alert，#1121）：不记红，结论退出码是 3；红和提醒一起有，红优先"
+# 发完置关删了（#1256），release.sh 里暂时没有谁调 post_alert；这条出口留着，直接调它核对结论的退出码
 reset
 POST_ALERTS=()
-saved_off_calls=("${OFF_CALLS[@]}")
-real_engine_off_stub=$(declare -f engine_off_after_release)
-engine_off_after_release() {
-  post_alert "桩：${1:0:12} 引擎总开关没能关上"
-  return 1
-}
-before=$(events)
-do_release "$B" >/dev/null
-check "发布后置关没成：在用的还是 B" "$(current_sha)" "$B"
-check "发布后置关没成：不记红、不连坐整版" "${#REDS[@]}" 0
-check "发布后置关没成：单独记了一条提醒" "${#POST_ALERTS[@]}" 1
-check "发布后置关没成：历史里没有被记成不健康、也没退回" "$(events)" "$before"
 code=$( (
   unset -f finish_hook
+  post_alert "桩：提醒"
   finish
 ) >/dev/null 2>&1
   echo $?
 )
-check "发布后置关没成：结论退出码是 3（和红的 1、待配的 2 分开）" "$code" 3
+check "只有提醒、没有红：结论退出码是 3（和红的 1、待配的 2 分开）" "$code" 3
 POST_ALERTS=()
 code=$( (
   unset -f finish_hook
@@ -190,8 +179,8 @@ code=$( (
   echo $?
 )
 check "红和提醒一起有：红优先，退出码 1" "$code" 1
-eval "$real_engine_off_stub"
-OFF_CALLS=("${saved_off_calls[@]}")
+reset
+POST_ALERTS=()
 
 echo "== 新版健康检查不过：自动退回上一版，并报红"
 GATE[$C]=bad
@@ -201,8 +190,6 @@ check "C 不过之后在用的是 B" "$(current_sha)" "$B"
 check "报了红" "$((${#REDS[@]} > 0))" 1
 check "历史：C 记成不健康、B 是自动退回的" "$(events)" "a:release b:release c:release c:unhealthy b:auto-rollback "
 check "上一版跳过不健康的 C，是 A" "$(previous_sha)" "$A"
-check "C 没过健康检查：没叫置关判断（只有发布成功才叫；再发 B 那次叫了一次 B，退回 B 不算）" "${OFF_CALLS[*]}" "a b b"
-check "引擎总开关置关和项目开关同一个时机：发布成功才叫，C 没过、退回 B 都不叫" "${ENGINE_OFF_CALLS[*]}" "a b b"
 
 echo "== 一键退回：退到 A；再退一次回到 B（B 健康）"
 reset

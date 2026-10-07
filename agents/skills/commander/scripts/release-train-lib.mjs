@@ -8,8 +8,9 @@
 //   4 发版（对外发布，必须带 --founder-ok）→5 等部署→6 验证→7 恢复→8 派清单。状态记在 ~/.fleet-dao/release-train.json，
 //   停在「卡住」（blocked）或「没成」（failed）时再跑一次 start（同一个目标）从停下的那一步接着走；换目标要先 abort。
 // - 暂停本机＝写 ~/.fleet-dao/release-train.paused，worker.mjs start 见标记就不起新工人（worker-lib.mjs 的 readPauseMarker）。
-// - 暂停法国＝fleet-api engine off（关着时不拉单、不派活、不起干活的会话；在跑的做完当前一步）。法国发版后默认保持关
-//   （release.sh 每次发版成功后自己置关，#1086 3/4）；只有 --restore 且 --founder-ok 里写明授权，才把暂停前开着的总开关和各仓开关原样开回去。
+// - 暂停法国＝fleet-api engine off（关着时不拉单、不派活、不起干活的会话；在跑的做完当前一步）。第 2 步先记下总开关和各仓接活开关，
+//   第 7 步发完、健康检查过了，按记下的恢复：开着的开回、关着的保持关，恢复不成功就是没成（退出码 2，不当成成功）。
+//   release.sh 发完不再置关（决定 0032 第 4 条、#1256）；--restore 留着当「明写要开回」的写法，和默认一样，不再要创始人逐次授权（只是还原）。
 // - 读不到就是读不到：读不到法国会话数、总开关、主线 CI 时不往下走（也不当成 0 或绿），回 { ok: false, why }。
 // - 所有打出来和记下来的字过 scrubText（令牌、邮箱、IP、长串抹掉）；ssh 的名字不进输出。
 // - 退出码：0 做完了（或 abort 做完了）；1 用法不对或被拒（没带 --founder-ok、已有一趟在走）；2 没做成（读不到、命令失败）；
@@ -60,11 +61,12 @@ export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的
         本机在跑的工人、挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
         --sha：ssh 到法国跑 release.sh <提交>；--tag：pnpm publish:pr（要在 release/vN 分支上）→ 等合并 → 等 release.yml 打标记 → 法国自动发布接手
         --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
-        --restore：发版后把暂停前开着的总开关、各仓开关原样开回去；--founder-ok 的原话里必须写明授权（含「恢复」「开回」「开引擎」之类的字）；
-        不给就保持关（发版后默认关，开不开页面上说了算）
-        停在「卡住」或「没成」时，同一个目标再跑一次 start 从停下的那一步接着走
+        发完、健康检查过了，法国按暂停前记下的恢复：总开关和各仓接活开关开着的开回、关着的保持关（写操作记录；开不回去算没成、退出码 2）
+        --restore：明写「发完开回去」，和不给一样（默认就恢复，不再要创始人逐次授权）
+        停在「卡住」或「没成」时，同一个目标再跑一次 start 从停下的那一步接着走（恢复没成也是这样重试）
   status          看这一趟走到哪、暂停标记在不在、拖后腿的是谁（只读）
-  abort           撤暂停、恢复原状：清本机标记；还没发版就把法国总开关开回暂停前的样子；已经发了版就保持关
+  abort           撤暂停、恢复原状：清本机标记；还没发版就把法国总开关开回暂停前的样子；已经动手发过版就保持关（不知道发成没有、健康没确认；
+                  确认没事后自己到环境页或 fleet-api engine on 开）。想让它确认健康后自动恢复，别 abort，同一个目标再跑一次 start
 退出码：0 做完了；1 用法不对或被拒；2 没做成（读不到、命令失败）；3 卡住（到点还有拖后腿的，名单已列出）。`;
 
 class UsageError extends Error {}
@@ -162,13 +164,6 @@ function parseArgs(argv, valueOptions, flagNames = []) {
   }
   return { options, flags };
 }
-
-/** founder-ok 的原话里有没有写明「发完把引擎开回去」的授权。 */
-export const RESTORE_AUTH = /恢复|开回|重新开|重新打开|开引擎|打开引擎|开起来|restore/i;
-/** 授权的话前面带了否定（「不用恢复」「别开回去」）就不算。 */
-const RESTORE_NEG =
-  /(不用|不要|不必|别|不许|不准|无需|不|no)\s*(恢复|开回|重新开|重新打开|开引擎|打开引擎|开起来|restore)/i;
-export const restoreAuthorized = (text) => RESTORE_AUTH.test(text) && !RESTORE_NEG.test(text);
 
 // —— 读各处的现状（全部经 io；读不到都是 { ok: false, why }） ——
 
@@ -662,45 +657,55 @@ async function phaseVerify(io, state) {
   return { ok: true };
 }
 
-/** 7 恢复：本机清标记；法国默认保持关，只有 --restore（原话里写明授权）才开回去。 */
+/**
+ * 7 恢复：本机清标记；法国按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：总开关发版前开着的开回、关着的保持关；
+ * 各仓「让 AI 接活」发版前开着的、现在不是开着的开回，关着的不动。恢复动作经 fleet-api 写操作记录。
+ * 恢复不成功（读不到、开不回去、读回来不对）是「没成」：退出码 2、写明发版已经发出去了只是没恢复，同一个目标再跑一次 start 重试这一步。
+ */
 async function phaseRestore(io, state) {
   const was = clearMarker(io);
   state.marker = false;
   saveState(io, state);
   sayTo(io, `恢复：本机暂停标记${was ? '已清' : '本来就不在'}，worker.mjs start 又能起工人了`);
+  const before = state.before;
+  if (before === null || before === undefined || typeof before.master !== 'boolean')
+    return failed(
+      '恢复没成：第 2 步没记下发版前的开关状态（state.before 缺），不敢猜着开或关；发版已经发出去了，到驾驶舱环境页核对总开关和各仓「让 AI 接活」',
+    );
   const eng = await engineStatus(io);
-  if (!eng.ok) return failed(eng.why);
-  const wasOn = state.before?.master === true;
-  if (!(state.restore && wasOn)) {
-    if (eng.on) {
-      const off = await engineSet(
-        io,
-        false,
-        `发版后默认保持关（release-train，目标 ${targetText(state.target)}）`,
-      );
-      if (!off.ok) return failed(off.why);
-    }
+  if (!eng.ok) return failed(`恢复没成（发版已经发出去了）：${eng.why}`);
+  if (!before.master) {
     sayTo(
       io,
-      `恢复：法国总开关保持关${wasOn ? '（暂停前是开着的；没带 --restore，开不开页面上说了算）' : ''}`,
+      eng.legacy
+        ? '恢复：发版前法国还没有引擎总开关，没什么要恢复的'
+        : `恢复：法国总开关发版前就关着，保持关${eng.on ? '（现在是开着的：发版期间有人开了，没动）' : ''}`,
     );
     return { ok: true };
   }
-  const reason = `发版后按创始人授权恢复（release-train，目标 ${targetText(state.target)}）`;
-  const on = await engineSet(io, true, reason);
-  if (!on.ok) return failed(on.why);
+  const reason = `发版后恢复发版前的状态（release-train，目标 ${targetText(state.target)}）`;
+  const problems = [];
+  if (!eng.on) {
+    const on = await engineSet(io, true, reason);
+    if (!on.ok) problems.push(on.why);
+  }
   const opened = [];
-  for (const r of state.before.repos ?? []) {
+  for (const r of before.repos ?? []) {
     if (!r.on) continue;
     const d = await dispatchSet(io, r.repo, reason);
-    if (!d.ok) return failed(d.why);
-    opened.push(r.repo);
+    if (!d.ok) problems.push(d.why);
+    else opened.push(r.repo);
   }
   const back = await engineStatus(io);
-  if (!back.ok || !back.on) return failed(`开回去之后读回来不对：${back.ok ? '总开关还是关着' : back.why}`);
+  if (!back.ok) problems.push(`开回去之后读不回总开关：${back.why}`);
+  else if (!back.on) problems.push('开回去之后读回来总开关还是关着');
+  if (problems.length > 0)
+    return failed(
+      `恢复没成：发版已经发出去了，但发版前开着的引擎没能全部恢复：\n- ${problems.join('\n- ')}\n到驾驶舱环境页或 fleet-api engine on 手动开；同一个目标再跑一次 start 会重试这一步`,
+    );
   sayTo(
     io,
-    `恢复：法国总开关已开回，各仓开回 ${opened.length} 个${opened.length ? `（${opened.join('、')}）` : ''}`,
+    `恢复：法国总开关已开回（发版前开着），各仓开回 ${opened.length} 个${opened.length ? `（${opened.join('、')}）` : ''}`,
   );
   return { ok: true };
 }
@@ -853,7 +858,9 @@ async function runFrom(io, state) {
       warnTo(io, `第 ${p} 步「${PHASES[p]}」${r.kind === 'blocked' ? '卡住了' : '没成'}：${r.why}`);
       warnTo(
         io,
-        `现场没动（暂停标记${state.marker ? '还在' : '没写'}）。同一个目标再跑一次 start 从这一步接着走；不走了就 node release-train.mjs abort`,
+        p >= PHASES.indexOf('恢复')
+          ? '版本已经发出去了，这一步只是恢复发版前的开关没成。同一个目标再跑一次 start 只重试这一步'
+          : `现场没动（暂停标记${state.marker ? '还在' : '没写'}）。同一个目标再跑一次 start 从这一步接着走；不走了就 node release-train.mjs abort`,
       );
       return r.kind === 'blocked' ? 3 : 2;
     }
@@ -879,14 +886,8 @@ async function cmdStart(p, io) {
     warnTo(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带，什么都没做（连暂停都没暂停）');
     return 1;
   }
+  // --restore 和不给一样：发完都恢复到发版前（还原不需要创始人逐次授权）；留着只是让老命令行、明写的人不报「不认识的参数」
   const restore = p.flags.has('restore');
-  if (restore && !restoreAuthorized(founderOk)) {
-    warnTo(
-      io,
-      '--restore 要创始人在 --founder-ok 的原话里写明授权发完把引擎开回去（含「恢复」「开回」「开引擎」之类的字）：原话里没有，什么都没做',
-    );
-    return 1;
-  }
   const target = sha !== undefined ? { kind: 'sha', value: sha } : { kind: 'tag', value: tag };
 
   const read = readState(io);
@@ -953,7 +954,7 @@ async function cmdStatus(io) {
   const words = { running: '在走', blocked: '卡住了', failed: '没成', done: '做完了', aborted: '已撤销' };
   sayTo(
     io,
-    `发版（${targetText(s.target)}${s.restore ? '，发完恢复' : ''}）：${words[s.status] ?? s.status}，第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」，${s.startedAt} 起，${s.updatedAt} 更新`,
+    `发版（${targetText(s.target)}，发完恢复发版前的开关）：${words[s.status] ?? s.status}，第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」，${s.startedAt} 起，${s.updatedAt} 更新`,
   );
   sayTo(
     io,
@@ -993,7 +994,12 @@ async function cmdAbort(io) {
       code = 2;
     } else sayTo(io, '法国总开关已开回暂停前的样子（开着）。各仓的「让 AI 接活」开关暂停期间没动过');
   } else if (s.release?.started) {
-    sayTo(io, '已经动手发过版：法国总开关保持关（发版后默认关），要开到驾驶舱环境页点开');
+    sayTo(
+      io,
+      s.before?.master === true
+        ? '已经动手发过版：不知道发成没有、健康没确认，法国总开关保持关（发版前是开着的）。确认没事后到驾驶舱环境页或 fleet-api engine on 自己开'
+        : '已经动手发过版：法国总开关发版前就是关着的，保持关',
+    );
   } else {
     sayTo(io, '法国总开关暂停前就是关着的（或还没暂停），没动');
   }
