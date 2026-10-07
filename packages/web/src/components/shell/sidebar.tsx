@@ -6,7 +6,7 @@ import { useNodeSelection, withNode } from '../../lib/node';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
-import { type NavItem, visibleNav } from './nav';
+import { NAV_ITEMS, type NavItem, visibleNav } from './nav';
 
 /** 侧栏角标：数字，或者「!」表示没读成（不拿 0 冒充没事）。 */
 function useBadges(): Record<string, number | '!'> {
@@ -60,7 +60,8 @@ function Item({
   const link = (
     <NavLink
       to={withNode(item.to, nodeId)}
-      end={item.to === '/'}
+      // 别的导航项挂在它下面时（/routing 和 /routing/status）只在正好是它时亮，不然两项一起亮
+      end={item.to === '/' || NAV_ITEMS.some((o) => o.to.startsWith(`${item.to}/`))}
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
@@ -78,9 +79,6 @@ function Item({
           ) : null}
           <Icon className="size-4 shrink-0" aria-hidden />
           {collapsed ? null : <span className="min-w-0 flex-1 truncate">{item.label}</span>}
-          {!collapsed && item.soon ? (
-            <span className="rounded border border-dashed px-1 text-micro leading-4 text-faint">后续</span>
-          ) : null}
           {badge === '!' || badge > 0 ? (
             <span
               title={badge === '!' ? '没读成' : undefined}
@@ -101,10 +99,7 @@ function Item({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{link}</TooltipTrigger>
-      <TooltipContent side="right">
-        {item.label}
-        {item.soon ? '（后续）' : ''}
-      </TooltipContent>
+      <TooltipContent side="right">{item.label}</TooltipContent>
     </Tooltip>
   );
 }
