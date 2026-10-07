@@ -104,7 +104,7 @@ describe('用哪个模型', () => {
       if (!el) throw new Error('没写派不出');
       return el;
     });
-    expect(alert.textContent).toContain('不在「写码」用途的路由两层里');
+    expect(alert.textContent).toContain('不在「动手」用途的路由两层里');
   });
 });
 

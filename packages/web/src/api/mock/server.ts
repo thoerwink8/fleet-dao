@@ -48,6 +48,7 @@ import {
   ReposResponse,
   ROUTE_PROBE_ACTION,
   ROUTE_PROBE_TARGET,
+  ROUTING_PURPOSE_IDS,
   type Route,
   RouteProbeNowRequest,
   RouteProbeNowResponse,
@@ -1631,7 +1632,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       const t = now();
       // 假数据的路由两层就是 st.purposes / st.routing（和真后端那两张表一个形状）：没配的用途照真后端写成缺口。
-      const purposes = StageKindSchema.options.map((purpose) => {
+      // 只列流程里真在用的用途（shared 的 ROUTING_PURPOSE_IDS），和真接口同一份。
+      const purposes = ROUTING_PURPOSE_IDS.map((purpose) => {
         const modelIds = st.purposes[purpose] ?? [];
         if (modelIds.length === 0) {
           return {

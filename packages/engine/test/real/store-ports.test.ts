@@ -407,8 +407,8 @@ describe('选路', () => {
       expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     });
 
-    it('战绩算进三段的结局：动手按写码、验收按审查（SEGMENT_STAGE），各算各的用途', async () => {
-      await world(t.db);
+    it('战绩算进三段的结局：动手按 execute、验收按 verify（SEGMENT_STAGE），各算各的用途', async () => {
+      await world(t.db, { stages: ['execute', 'verify', 'review'] });
       // 10 笔里成 4 笔（低于五成，算战绩差）；每笔隔 7 小时（熔断看 6 小时内的失败率，一次只有一笔；连败最多两笔，不熔断）
       const pattern = ['fail', 'ok', 'fail', 'ok', 'fail', 'fail', 'ok', 'fail', 'fail', 'ok'] as const;
       let hoursAgo = 150;
@@ -426,13 +426,15 @@ describe('选路', () => {
       const execute = await pick({ stage: 'execute' });
       expect(execute).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       expect(execute.ok && execute.why).toContain('战绩差（近期 10 次成 4 次），往后放');
-      // 动手的结局不算进审查用途的战绩
-      expect(await pick({ stage: 'review' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+      // 动手的结局不算进验收用途的战绩
+      expect(await pick({ stage: 'verify' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
 
       await poor('verify');
-      const review = await pick({ stage: 'review' });
-      expect(review).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
-      expect(review.ok && review.why).toContain('战绩差（近期 10 次成 4 次），往后放');
+      const verify = await pick({ stage: 'verify' });
+      expect(verify).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(verify.ok && verify.why).toContain('战绩差（近期 10 次成 4 次），往后放');
+      // review 还在库里，但验收的结局不再算到它头上
+      expect(await pick({ stage: 'review' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     });
 
     it('熔断半开时，这条路由上开着的三段会话就是在途的试探：只放一个', async () => {

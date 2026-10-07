@@ -16,6 +16,7 @@
 // - 读库读不到 → **抛**（调用方判「没查成」；抛出去的那条经 invokeVerifier → 没讨论成 → failure 状态）；
 // - 读到了、这一族确实没候选 → 回 undefined（换下一个族是对的，不是失败）。
 
+import { SEGMENT_STAGE } from '@fleet-dao/shared/flow-purposes';
 import type { PickRouteInput, PickRouteResult, RouteChoice } from './ports.ts';
 
 /** 这一层从选路拿到的「一个族此刻能不能派」的答案；`undefined` = 这个族没有能派的路由。 */
@@ -68,8 +69,8 @@ export async function pickFamilyModel(
 /**
  * 生产装配用的一份：把「按族挑一条路由」接到引擎现成的 `pickRoute` 端口上（`EnginePorts.pickRoute`）。
  *
- * `stage` 用 `'review'`（审查那一步的阶段名，shared 的 StageKind）——**不是** `'verify'`：`'verify'` 那个阶段名是
- * Fusion「开 PR 前验证」那一步的语义；冷调用这一遍只是「起一次别家的一次性会话看一眼」，用审查那一步的路由配置。
+ * `stage` 用页面上叫「验收」的那一格（shared 的 `SEGMENT_STAGE.verify`，就是 `verify`）。骨架里给 verify 排的顺序因此
+ * 真被验收用上。不另用 `review`：那一格已经不在路由页上。
  *
  * 语义（三条，和 routing 那一份不重复）：
  * - 避开**除了这一族以外的全部**家族：选路按族挡，不避开的话每次都会挑回同一族（顺序里排最前的那一族），
@@ -85,7 +86,7 @@ export async function pickFamilyModel(
 export function familyPickerFrom(
   pickRoute: (input: PickRouteInput) => Promise<PickRouteResult>,
   order: readonly string[],
-  stage: PickRouteInput['stage'] = 'review',
+  stage: PickRouteInput['stage'] = SEGMENT_STAGE.verify,
   /**
    * 某一族派不出时（选路回 ok: false）告诉调用方原因：等空位、等额度的和一条路由都没有的要分得开——前者过一会儿再来就行，
    * 后者才是做不出来。pickRouteForFamily 只回 undefined，这个信息不然就丢了。

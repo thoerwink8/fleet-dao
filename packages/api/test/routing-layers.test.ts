@@ -60,7 +60,7 @@ const SAMPLE_MODELS = {
 };
 
 describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
-  it('接上了：每个用途按 StageKind 的先后各一份，模型、路由按两层的先后，名字从目录里查，原因照写', async () => {
+  it('接上了：只列流程里在用的用途，模型、路由按两层的先后，名字从目录里查，原因照写', async () => {
     current = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
     await setLayers(
       {
@@ -76,17 +76,11 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
 
     expect(body.unavailable).toBeUndefined();
     expect(body.asOf).toBe(T0.toISOString());
-    expect(body.purposes.map((p) => p.purpose)).toEqual([
-      'triage',
-      'spec',
-      'plan',
-      'execute',
-      'ui',
-      'review',
-      'verify',
-      'research',
-      'judge',
-    ]);
+    expect(body.purposes.map((p) => p.purpose)).toEqual(['execute', 'ui', 'verify', 'judge']);
+    // 库里有 plan、review 的行也不列：triage、spec、plan、research 以及 review 都不进用途列表
+    for (const gone of ['triage', 'spec', 'plan', 'research', 'review'] as const) {
+      expect(body.purposes.find((p) => p.purpose === gone)).toBeUndefined();
+    }
     const by = new Map(body.purposes.map((p) => [p.purpose, p]));
 
     // 写码：Opus 那条三件事都过 → 活；名字是目录里的，不是编号
@@ -129,22 +123,17 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
       reason: '命中禁令：（样例）库里另配的禁令：Kimi 暂不进 UI',
     });
 
-    // 第二意见：唯一一条路额度不知道 → 整层不知道
-    expect(by.get('review')?.verdict).toBe('unknown');
-
-    // 方案：排进去的模型下一条路由都没有 → 死，缺口照写；名字、族从目录里查
-    const plan = by.get('plan');
-    expect(plan?.verdict).toBe('dead');
-    expect(plan?.problems).toEqual(['模型 fable-5.1 没有路由（routing_catalog 里一条都没有）']);
-    expect(plan?.models).toEqual([
-      { modelId: 'fable-5.1', displayName: 'Fable 5.1', family: 'claude', verdict: 'dead', routes: [] },
-    ]);
-
-    // 没配的用途：死，写明没配，不给空的当「没有」
-    expect(by.get('triage')).toEqual({
-      purpose: 'triage',
+    // 没配的用途（验收、判断这次没插行）：死，写明没配，不给空的当「没有」。库里的 plan 行不在这份列表里。
+    expect(by.get('verify')).toEqual({
+      purpose: 'verify',
       verdict: 'dead',
-      problems: ['用途 triage 没配模型顺序'],
+      problems: ['用途 verify 没配模型顺序'],
+      models: [],
+    });
+    expect(by.get('judge')).toEqual({
+      purpose: 'judge',
+      verdict: 'dead',
+      problems: ['用途 judge 没配模型顺序'],
       models: [],
     });
   });

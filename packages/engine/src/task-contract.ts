@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo, StageKind } from '@fleet-dao/shared';
+import type { Repo } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -29,13 +29,11 @@ export const MERGE_POLL_MINUTES = 15;
 export const ROUTE_RETRY_SECONDS = 60;
 
 /**
- * 三段里经选路的那几段各按哪个用途选（路由两层的用途）：动手按写码（工作流的 pick）；验收按审查（cold-verify-pick.ts 写了为什么
- * 不是 verify）。选路的战绩按它把 runs 里这一段的结局算到这个用途上（real/store-ports.ts）：两边读这一份，改一处两边一起变。
- * 对题还不经选路，不在这里。
+ * 三段里经选路的那几段各按哪个用途选。定义在 shared 的 flow-purposes.ts：动手按 execute，验收按页面上叫「验收」的那一格
+ * （verify）。选路的战绩按它把 runs 里这一段的结局算到这个用途上（real/store-ports.ts）：引擎和路由页读同一份，改一处两边一起变。
+ * 对题不经选路，不在这里。界面活按 UI_PURPOSE（ui）。
  */
-export const SEGMENT_STAGE = { manual: 'execute', verify: 'review' } as const satisfies Partial<
-  Record<'scope' | 'manual' | 'verify', StageKind>
->;
+export { SEGMENT_STAGE } from '@fleet-dao/shared/flow-purposes';
 
 export { taskBranch } from './task-branch.ts';
 
