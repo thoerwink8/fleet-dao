@@ -66,7 +66,7 @@ import { productionMemoryPeak } from './memory-peak.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
-import { quotaReadJob } from './quota-read.ts';
+import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -300,11 +300,39 @@ function isMissingPath(r: { code: number | null; stderr: string }): boolean {
   return r.code === 2 && /No such file or directory/.test(r.stderr);
 }
 
-/** 经 exec 以那个会话用户 cat 一个文件：值不上命令行、不进日志（只有路径在 argv 里）。 */
-async function catAsUser(exec: UserExec, user: SessionUser, path: string): Promise<string> {
-  const r = await execAs(exec, user, ['/bin/cat', '--', path], 'mirasim-cat');
-  if (r.code !== 0) throw new Error(describeFailure(`读 ${path}`, r));
+/**
+ * 经 exec 以那个会话用户 cat 一个文件：值不上命令行、不进日志（只有路径在 argv 里；错误里只有路径和 cat 的 stderr，没有内容）。
+ * 读不了抛错、不回空串；没有这个文件、没权限分别带 code ENOENT、EACCES（和 node:fs 一样，额度读取器按它写「读不到」的原因）。
+ */
+export async function catAsUser(
+  exec: UserExec,
+  user: SessionUser,
+  path: string,
+  tag = 'mirasim-cat',
+): Promise<string> {
+  const r = await execAs(exec, user, ['/bin/cat', '--', path], tag);
+  if (r.code !== 0) {
+    const err = new Error(describeFailure(`读 ${path}`, r)) as NodeJS.ErrnoException;
+    if (/No such file or directory/.test(r.stderr)) err.code = 'ENOENT';
+    else if (/Permission denied/.test(r.stderr)) err.code = 'EACCES';
+    throw err;
+  }
   return r.stdout.toString('utf8');
+}
+
+/** 额度读取里凭据在会话用户家里的两种读取器（Cursor、Grok）：引擎用户读不到，经 exec 以会话用户读（#1195）。Mirasim 池要走桥接，不在这里。 */
+export const QUOTA_USER_READERS = ['cursor-dashboard', 'grok-billing'] as const;
+
+export function quotaAsUser(
+  exec: UserExec,
+  user: SessionUser,
+  home: string,
+): NonNullable<QuotaReadWiring['asUser']> {
+  return {
+    readers: QUOTA_USER_READERS,
+    readFile: (path) => catAsUser(exec, user, path, 'quota-cat'),
+    homeDir: home.replaceAll('{user}', user),
+  };
 }
 
 /** 经 exec 以那个会话用户列一个目录：LedgerFs 的 readdir 要的形状（没有这个目录时抛 code 为 ENOENT 的错，和 node:fs 一样）。 */
@@ -549,7 +577,8 @@ export function realPortsFromEnv(
       log: (level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}),
     }),
     // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
-    quotaRead: quotaReadJob({ db }),
+    // Cursor、Grok 池的登录文件在会话用户家里，引擎用户读不到：这两种读取器读文件经 exec 以会话用户读（#1195）
+    quotaRead: quotaReadJob({ db, asUser: quotaAsUser(exec, sessionUser, config.mirasimHome) }),
     // 拼车额度盯读（#194）：每分钟起一条，按情况读开放接口、交给切号当场判
     carpoolWatch: carpoolWatchJob({
       db,

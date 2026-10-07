@@ -175,3 +175,68 @@ describe('一轮读完所有池：每个池一定有一条结果', () => {
     expect(runs).toBe(1);
   });
 });
+
+describe('凭据在别的用户家里（asUser，#1195）', () => {
+  // 假读取器：把拿到的 readFile、homeDir 原样交回，看读取器用的是哪一份
+  const probe: Reader = async (ctx) => {
+    const text = await ctx.readFile(`${ctx.homeDir}/cred`);
+    return { windows: [reading(ctx.pool.poolId, 'x')], notes: [`homeDir=${ctx.homeDir}`, `got=${text}`] };
+  };
+  const readers = { 'cursor-dashboard': probe, 'grok-billing': probe, 'mirasim-relay': probe };
+  const asUser = (readFile: (p: string) => Promise<string>) => ({
+    readers: ['cursor-dashboard', 'grok-billing'] as const,
+    readFile,
+    homeDir: '/home/session',
+  });
+
+  it('点名的读取器读文件走 asUser、~ 展开到那个用户的家；没点名的照旧用引擎自己的', async () => {
+    const report = await readAllQuotas(
+      {
+        pools: [
+          pool('c', { reader: 'cursor-dashboard' } as Partial<PoolConfig>),
+          pool('g', { reader: 'grok-billing' } as Partial<PoolConfig>),
+          pool('m'),
+        ],
+      },
+      fakeDeps({
+        readers,
+        readFile: async (p) => `engine:${p}`,
+        asUser: asUser(async (p) => `user:${p}`),
+      }),
+    );
+    const notes = report.results.map((r) => (r.ok ? r.notes.join(' ') : r.error.message));
+    expect(notes[0]).toContain('got=user:/home/session/cred');
+    expect(notes[1]).toContain('got=user:/home/session/cred');
+    expect(notes[2]).toContain('got=engine:/home/tester/cred'); // Mirasim 池不碰
+  });
+
+  it('故意造失败：一个池以会话用户读不到，报它的读取错、其余池照常读成', async () => {
+    const report = await readAllQuotas(
+      {
+        pools: [
+          pool('c', { reader: 'cursor-dashboard' } as Partial<PoolConfig>),
+          pool('g', { reader: 'grok-billing' } as Partial<PoolConfig>),
+        ],
+      },
+      fakeDeps({
+        readers: {
+          ...readers,
+          'cursor-dashboard': async () => {
+            throw new QuotaReadError('no_credentials', '读不到 Cursor 登录文件（ENOENT）');
+          },
+        },
+        asUser: asUser(async () => 'ok'),
+      }),
+    );
+    expect(report.results.map(code)).toEqual(['no_credentials', 'ok']);
+  });
+
+  it('没配 asUser：读取器用引擎自己的 readFile 和 homeDir（老行为不变）', async () => {
+    const report = await readAllQuotas(
+      { pools: [pool('c', { reader: 'cursor-dashboard' } as Partial<PoolConfig>)] },
+      fakeDeps({ readers, readFile: async (p) => `engine:${p}` }),
+    );
+    const r = report.results[0];
+    expect(r?.ok && r.notes.join(' ')).toContain('got=engine:/home/tester/cred');
+  });
+});
