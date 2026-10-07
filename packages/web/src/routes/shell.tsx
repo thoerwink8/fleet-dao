@@ -109,7 +109,7 @@ function Frame() {
 
   // 演示版：这一页所在的模块没开放，就不渲染它（它的数据也就不去读）。
   const blocked = demoBlocked(location.pathname);
-  // 看板多机：选了远程环境（?node=）时，只有主页和环境页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
+  // 看板多机：选了远程环境（?node=）时，只有主页和法国页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
   const { nodeId } = useNodeSelection();
   const onlyLocal = !isDemo() && nodeId !== null && !isRemotePage(location.pathname);
 

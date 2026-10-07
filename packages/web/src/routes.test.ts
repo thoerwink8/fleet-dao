@@ -62,6 +62,7 @@ describe('路由表：正式驾驶舱', () => {
       '/routing',
       '/efforts',
       '/env',
+      '/france',
       '/demo-links',
       '/changelog',
     ]) {
@@ -100,8 +101,9 @@ describe('路由表：演示版（游客，不登录）', () => {
       '/changelog',
       '/routing',
       '/efforts',
-      // 环境页（#820 片 1）露机器名、在用版本、在跑会话数（R10）：演示版里不放这一页。
+      // 法国页和它的旧地址 /env 露机器名、在用版本、在跑会话数（R10）：演示版里不放。
       '/env',
+      '/france',
       '/models',
       '/billing',
       '/record',
@@ -134,7 +136,7 @@ describe('路由表：演示版（游客，不登录）', () => {
       (n) => (n.module !== undefined) !== pages.includes(n.to) && n.to !== '/',
     ).map((n) => n.to);
     // 主页（/）在演示版里另有页（不是这个外壳里的那个 index），所以豁免；其余页：有模块 ⇔ 有路由。
-    // 环境页（#820 片 1）没有 module、演示版路由表里也不放 → 两边都是「没有」，照样对得上。
+    // 法国页没有 module、演示版路由表里也不放 → 两边都是「没有」，照样对得上。
     expect(broken).toEqual([]);
   });
 

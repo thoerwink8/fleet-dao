@@ -70,7 +70,7 @@ export function useMasterView(): { view: MasterView; remote: boolean; nodeId: st
 }
 
 /**
- * 顶栏常驻的小胶囊：引擎开着还是关着，一眼看得见。点它去环境页（那里能点开关）。关着用等待色（不是红：关着是常态、
+ * 顶栏常驻的小胶囊：引擎开着还是关着，一眼看得见。点它去法国页（那里能点开关）。关着用等待色（不是红：关着是常态、
  * 不是坏了），开着用完成色；读不到用虚线框写「没查成」。演示版不显示。
  */
 export function EngineMasterBadge() {
@@ -100,9 +100,9 @@ export function EngineMasterBadge() {
     <Tooltip>
       <TooltipTrigger asChild>
         <Link
-          to={withNode('/env', nodeId)}
+          to={withNode('/france', nodeId)}
           data-engine-master={view.kind === 'ok' ? (view.master.on ? 'on' : 'off') : view.kind}
-          aria-label={`${label}${remote ? '（远程环境，只读）' : ''}，去环境页`}
+          aria-label={`${label}${remote ? '（远程环境，只读）' : ''}，去法国页`}
           className={cn(
             'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2 text-xs whitespace-nowrap transition-colors hover:bg-accent sm:flex',
             on && 'border-st-done/40 text-ink-done',
@@ -116,7 +116,7 @@ export function EngineMasterBadge() {
       </TooltipTrigger>
       <TooltipContent className="max-w-80">
         {detail}
-        {remote ? '（远程环境只读：要开关请到那台上操作，说明在环境页）' : null}
+        {remote ? '（远程环境只读：要开关请到那台上操作，说明在法国页）' : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -140,8 +140,8 @@ export function EngineMasterRelation() {
     <p className="mb-3 text-xs text-muted-foreground" data-testid="engine-master-relation">
       每个项目的「让 AI 接活」要和<strong className="font-medium text-foreground">引擎总开关</strong>
       一起看：总开关关＝全停，开＝只有这里接活开着的项目才派。总开关{state}（
-      <Link to="/env" className="underline underline-offset-2 hover:text-foreground">
-        去环境页开关
+      <Link to="/france" className="underline underline-offset-2 hover:text-foreground">
+        去法国页开关
       </Link>
       ）。
     </p>
