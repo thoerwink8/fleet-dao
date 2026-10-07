@@ -3,10 +3,10 @@
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
 // 替别的用户写（--user，法国装机）时开会话那条不登记（HookSkip）：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；
 // 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
-import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName } from './quiet-win.ts';
+import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName, replaceExe } from './quiet-win.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, lstatOrNull, relOf, type Sources, writeAtomic } from './sync.ts';
 import {
@@ -214,6 +214,8 @@ function scriptsKey(ctx: Ctx): { abs: string; key: string } {
 }
 
 const LAUNCHER_KEY = '~/.fleet-dao/bin';
+// 同一份 exe。叫这个名字时把自身参数转给 node.exe，给 MCP 的 command 用。
+const QUIET_NODE = 'quiet-node.exe';
 
 /** 这台要登记成静默启动器的脚本（路径里有 shell 元字符的不在内，那些仍走 node） */
 function launcherScripts(ctx: Ctx, targets: HookTarget[]): string[] {
@@ -227,7 +229,7 @@ function launcherScripts(ctx: Ctx, targets: HookTarget[]): string[] {
 }
 
 function exeBase(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1);
+  return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
 }
 
 /** 启动器在不在、是不是不带控制台的程序。Linux、或路径不安全退回 node 时，不报这一行 */
@@ -236,8 +238,11 @@ function checkLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
   if (scripts.length === 0) return null;
   const missing: string[] = [];
   const bad: string[] = [];
-  for (const script of scripts) {
-    const exe = hookCommand(ctx.home, ctx.platform, script);
+  const paths = [
+    ...scripts.map((script) => hookCommand(ctx.home, ctx.platform, script)),
+    join(ctx.home, '.fleet-dao', 'bin', QUIET_NODE),
+  ];
+  for (const exe of paths) {
     if (!existsSync(exe)) {
       missing.push(exeBase(exe));
       continue;
@@ -262,13 +267,16 @@ function installLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
     const dir = join(ctx.home, '.fleet-dao', 'bin');
     mkdirSync(dir, { recursive: true });
     let changed = false;
+    const names = new Set<string>([QUIET_NODE]);
     for (const script of scripts) {
       const name = quietExeName(script);
-      if (name === null) continue;
+      if (name !== null) names.add(name);
+    }
+    for (const name of names) {
       const dest = join(dir, name);
       const have = existsSync(dest) ? readFileSync(dest) : null;
       if (have === null || !have.equals(bytes)) {
-        writeFileSync(dest, bytes);
+        replaceExe(dest, bytes);
         changed = true;
       }
     }

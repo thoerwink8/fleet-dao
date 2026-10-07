@@ -161,4 +161,32 @@ test.describe('其余页面', () => {
     await page.goto('/no-such-page');
     await expect(page.getByRole('link', { name: /主页/ }).first()).toBeVisible();
   });
+
+  test('没做的页不占侧栏：模型目录、账单、战绩、判断题记录都不在导航里；直接打开写明「还没做」', async ({
+    page,
+  }) => {
+    await page.goto('/');
+    const nav = page.getByRole('navigation', { name: '主导航' });
+    await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
+    for (const label of ['模型目录', '账单', '战绩', 'Jev 判断']) {
+      await expect(nav.getByRole('link', { name: label })).toHaveCount(0);
+    }
+    await page.goto('/models');
+    await expect(page.getByText('这一页还没做')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '模型目录' })).toBeVisible();
+  });
+
+  test('外壳尺寸生效：顶栏 52px 高、侧栏 232px 宽（尺寸 token 放错命名空间时类名会静默失效）', async ({
+    page,
+  }) => {
+    await page.goto('/schedules');
+    await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
+    const header = await page.locator('main').evaluate((m) => {
+      const top = m.parentElement?.querySelector('header')?.getBoundingClientRect().height;
+      const side = document.querySelector('aside')?.getBoundingClientRect().width;
+      return { top, side };
+    });
+    expect(header.top).toBe(52);
+    expect(header.side).toBe(232);
+  });
 });

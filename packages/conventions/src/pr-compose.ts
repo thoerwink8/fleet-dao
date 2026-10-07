@@ -4,6 +4,7 @@
 // - 「做了什么」：这条分支相对 origin/<base> 的提交说明（只取第一行；一条就是一句话，多条列成短列表）。
 // - 「需求」：--closes <号> → Closes #号；--refs <号> → Refs #号；--no-issue "<理由>" 照旧由 prOpen 写成「无：理由」；
 //   --new-issue "<标题>" 当场开一张单（复用 issue-new.ts 的 issueNew，类别 --kind、里程碑 --milestone 必须给，缺了拒开）并 Closes 它。
+//   这张单一律贴「本机做」（--local 加了不报错，也不多贴一次）：随 PR 开出的单已经有人在做，不靠人记得加 --local（#1199）。
 // - 改标准：--founder-quote "<原话>" --at "<时间>" 在「需求」栏下面另起一行写「人闸：改标准」、再写一段「创始人原话」，并等价于
 //   --founder-approved（旧的 --founder-approved 加手写段落照旧能用）。
 // 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用。
@@ -28,6 +29,9 @@ export interface CliDeps extends OpenDeps {
 /** 「做了什么」里最多列几条提交说明，再多的写「……另有 N 条」。 */
 const MAX_COMMITS = 8;
 
+/** --new-issue 开的单已经有人在做：写进新单正文、PR 需求栏和命令输出。 */
+export const NEW_ISSUE_LOCAL_LINE = '这张单随 PR 开出，已贴本机做，引擎不拉';
+
 export interface BodyParts {
   /** 提交说明，从早到晚。 */
   did: readonly string[];
@@ -35,6 +39,8 @@ export interface BodyParts {
   refs: readonly number[];
   /** 创始人原话和时间：给了就写「人闸：改标准」和「创始人原话」。 */
   founder?: { quote: string; at: string } | undefined;
+  /** --new-issue：需求栏写明这张单已贴本机做、引擎不拉。 */
+  withNewIssue?: boolean;
 }
 
 /** 拼正文：栏的写法和 .github/pull_request_template.md 一样（测试里对着模板查）。 */
@@ -50,6 +56,7 @@ export function composeBody(p: BodyParts): string {
   const need = [
     ...p.closes.map((n) => `Closes #${n}`),
     ...p.refs.map((n) => `Refs #${n}`),
+    ...(p.withNewIssue ? [NEW_ISSUE_LOCAL_LINE] : []),
     ...(p.founder ? [GATE_LINE] : []),
   ];
   const lines = [
@@ -69,6 +76,8 @@ export function composeIssueBody(title: string, did: readonly string[], quote: s
   const scene = did.map((s) => `- ${s.replace(/\s+/g, ' ').trim()}`).join('\n');
   return [
     '## 场景',
+    '',
+    NEW_ISSUE_LOCAL_LINE,
     '',
     `${title}（pnpm pr:open --new-issue 随 PR 一起开的单，分支上的提交：）`,
     scene,
@@ -192,7 +201,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
     (values.kind !== undefined || values.milestone !== undefined || values.local !== undefined)
   ) {
     err(
-      '--kind / --milestone / --local 只配 --new-issue 用（给新开的单挂类别、里程碑、「本机做」）：什么也没做。',
+      '--kind / --milestone / --local 只配 --new-issue 用（给新开的单挂类别、里程碑；「本机做」随单自动贴）：什么也没做。',
     );
     return 1;
   }
@@ -260,11 +269,13 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
             newIssue,
             '--body-file',
             issueBody,
-            ...(values.local === true ? ['--local'] : []),
+            // 一律贴「本机做」，和建单同一次；人再加 --local 也只传一次，不报错
+            '--local',
           ],
           { gh: deps.issueGh, cwd: deps.cwd },
         );
         out(`开了单 #${r.number}（${r.milestone}）：${r.url}`);
+        out(NEW_ISSUE_LOCAL_LINE);
         closeNumbers = [r.number];
       } catch (e) {
         err(
@@ -281,6 +292,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         closes: closeNumbers,
         refs: refs.filter((n): n is number => n !== undefined),
         founder: quote && at ? { quote, at } : undefined,
+        withNewIssue: newIssue !== undefined,
       }),
     );
     return prOpen(
