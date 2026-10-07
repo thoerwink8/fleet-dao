@@ -63,6 +63,11 @@ export interface ReconcileCheckDeps extends Pick<AlertSweepDeps, 'alerts' | 'now
   auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
   /** 额度表（db 的 quotaTable，按 now 判过期）。 */
   quotaPools(now: Date): Promise<QuotaTablePool[]>;
+  /**
+   * 额度配置写明不读的池（deploy/quota.json 的 notRead）。不查、不报；开着的旧提醒撤掉。
+   * 不给就当没有。读不到要抛，不许回空列表冒充「这些池都要读」。
+   */
+  quotaNotRead?: () => Promise<readonly string[]>;
   ledgers(input: {
     since: Date;
     prs: { owner: string; name: string; number: number }[];
@@ -315,10 +320,19 @@ export function quotaAlertKey(poolId: string): string {
  * 每个在用的账号池额度读数不超过 30 分钟（设计 §6，#76）：定时读额度（jobs/quota-read.ts）自己对「连着两轮没读成」报警，
  * 这里是兜底——它没在跑、跑了没写库、或上游数冻住，读数照样会旧，只有按「库里最近读成时刻」查才看得见。
  * 在用 = 渠道开着、有路由挂在它上面、没过期；关掉的、没路由用的、过期了的池读不到是应该的，不报。
+ * 额度配置 notRead 里的池不查（没有这种数据）：开着的旧提醒撤掉，不再报读数过期。
  */
 export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
   const now = deps.now();
+  let notRead = new Set<string>();
+  if (deps.quotaNotRead) {
+    try {
+      notRead = new Set(await deps.quotaNotRead());
+    } catch (err) {
+      return { ...part, failed: `读额度配置里不读的池没成，这一轮不查也不撤：${errMessage(err)}` };
+    }
+  }
   let pools: Awaited<ReturnType<ReconcileCheckDeps['quotaPools']>>;
   try {
     pools = await deps.quotaPools(now);
@@ -340,6 +354,7 @@ export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<Swe
 
   const overdue = new Set<string>();
   for (const p of pools) {
+    if (notRead.has(p.poolId)) continue;
     if (
       !p.channelEnabled ||
       p.routeCount === 0 ||
@@ -376,7 +391,11 @@ export async function checkQuotaFreshness(deps: ReconcileCheckDeps): Promise<Swe
   }
   for (const dedupeKey of open ?? []) {
     if (overdue.has(dedupeKey)) continue;
-    await resolveOne(deps, part, dedupeKey, '读新了，或这个池不再在用');
+    const poolId = dedupeKey.slice(QUOTA_ALERT_PREFIX.length);
+    const why = notRead.has(poolId)
+      ? '额度配置写明不读这个池（没有这种数据），不再报读数过期'
+      : '读新了，或这个池不再在用';
+    await resolveOne(deps, part, dedupeKey, why);
   }
   return part;
 }

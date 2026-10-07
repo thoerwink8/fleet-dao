@@ -187,7 +187,7 @@ function checkPool(p: unknown, i: number, problems: string[]): void {
 export function parseQuotaConfig(raw: unknown): QuotaConfig {
   const problems: string[] = [];
   if (!isRecord(raw)) throw new QuotaConfigError(['顶层要是对象']);
-  checkUnknownKeys(raw, ['timeoutMs', 'pools'], '顶层', problems);
+  checkUnknownKeys(raw, ['timeoutMs', 'pools', 'notRead'], '顶层', problems);
   if (raw.timeoutMs !== undefined && !isPositiveInt(raw.timeoutMs))
     problems.push('timeoutMs 要是正整数（毫秒）');
   if (!Array.isArray(raw.pools) || raw.pools.length === 0) {
@@ -202,8 +202,35 @@ export function parseQuotaConfig(raw: unknown): QuotaConfig {
       ids.add(p.poolId);
     }
   });
+  checkNotRead(raw, ids, problems);
   if (problems.length) throw new QuotaConfigError(problems);
   return raw as unknown as QuotaConfig;
+}
+
+/** 写明不读的池：要有池号和原因，不能和 pools 里的重复（又读又不读认不出）。 */
+function checkNotRead(raw: Record<string, unknown>, poolIds: ReadonlySet<string>, problems: string[]): void {
+  if (raw.notRead === undefined) return;
+  if (!Array.isArray(raw.notRead)) {
+    problems.push('notRead 要是数组');
+    return;
+  }
+  const seen = new Set<string>();
+  raw.notRead.forEach((item: unknown, i) => {
+    const where = `notRead[${i}]`;
+    if (!isRecord(item)) {
+      problems.push(`${where} 要是对象`);
+      return;
+    }
+    checkUnknownKeys(item, ['poolId', 'why'], where, problems);
+    if (!isNonEmptyString(item.poolId)) problems.push(`${where}.poolId 要有`);
+    else {
+      if (seen.has(item.poolId)) problems.push(`${where}.poolId ${item.poolId} 重复`);
+      seen.add(item.poolId);
+      if (poolIds.has(item.poolId))
+        problems.push(`${where}.poolId ${item.poolId} 已经在 pools 里，不能又写不读`);
+    }
+    if (!isNonEmptyString(item.why)) problems.push(`${where}.why 要写明为什么不读`);
+  });
 }
 
 /** 读配置文件并校验。文件不在、不是 JSON、内容不对都抛 QuotaConfigError。 */

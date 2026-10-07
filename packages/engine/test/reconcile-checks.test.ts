@@ -61,6 +61,7 @@ function world(
     reposFn?: ReconcileCheckDeps['repos'];
     ledgers?: ReconcileCheckDeps['ledgers'];
     quotaPools?: ReconcileCheckDeps['quotaPools'];
+    quotaNotRead?: ReconcileCheckDeps['quotaNotRead'];
   } = {},
 ): World {
   const raised: Raised[] = [];
@@ -72,6 +73,7 @@ function world(
     repos: over.reposFn ?? (async () => over.repos ?? []),
     auditMergedPrs: over.audit ?? (async () => audit([])),
     quotaPools: over.quotaPools ?? (async () => []),
+    ...(over.quotaNotRead ? { quotaNotRead: over.quotaNotRead } : {}),
     async ledgers(input) {
       ledgerCalls.push(input);
       return over.ledgers ? over.ledgers(input) : [];
@@ -536,6 +538,43 @@ describe('额度读数新不新鲜（checkQuotaFreshness，#76）', () => {
     expect(w.resolved.map((r) => r.dedupeKey)).toEqual([quotaAlertKey('p1')]);
     expect(other.resolvedAt).toBeNull();
     expect(QUOTA_ALERT_PREFIX).toBe('reconcile:quota:');
+  });
+
+  it('额度配置写明不读的池：不报读数过期，开着的旧提醒撤掉', async () => {
+    const old = openAlert(quotaAlertKey('jev'));
+    const w = world({
+      open: [old],
+      quotaPools: async () => [
+        quotaPool({ poolId: 'jev', readOverdue: true, lastReadOkAt: null, dataAt: null }),
+        quotaPool({ poolId: 'p1', readOverdue: true, lastReadOkAt: new Date(NOW.getTime() - 50 * 60_000) }),
+      ],
+      quotaNotRead: async () => ['jev'],
+    });
+    const part = await checkQuotaFreshness(w.deps);
+    expect(part.scanned).toBe(1);
+    expect(w.raised.map((r) => r.dedupeKey)).toEqual([quotaAlertKey('p1')]);
+    expect(w.resolved).toEqual([
+      {
+        dedupeKey: quotaAlertKey('jev'),
+        why: '额度配置写明不读这个池（没有这种数据），不再报读数过期',
+      },
+    ]);
+  });
+
+  it('【故意造出的失败】不读名单读不出来：这一轮不查也不撤，旧提醒留着', async () => {
+    const old = openAlert(quotaAlertKey('jev'));
+    const w = world({
+      open: [old],
+      quotaPools: async () => [quotaPool({ poolId: 'jev', readOverdue: true, lastReadOkAt: null })],
+      quotaNotRead: async () => {
+        throw new Error('额度配置读不到');
+      },
+    });
+    const part = await checkQuotaFreshness(w.deps);
+    expect(part.failed).toBe('读额度配置里不读的池没成，这一轮不查也不撤：额度配置读不到');
+    expect(w.raised).toEqual([]);
+    expect(w.resolved).toEqual([]);
+    expect(old.resolvedAt).toBeNull();
   });
 
   it('【故意造出的失败】读额度表抛错：记 failed，不当成都新鲜，旧提醒不撤', async () => {

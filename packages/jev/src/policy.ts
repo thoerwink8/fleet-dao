@@ -4,8 +4,8 @@ export interface JevPolicy {
   /** 每天最多问几道题（一次问几道算几次）；设置里的 judge.dailyCallLimit 优先。 */
   dailyCallLimit: number;
   /**
-   * 按量计费的后端（TypeSafe）每天最多花多少美元，到了就停调、走默认。默认沿用旧系统的日帽，
-   * 也是额度读取器里 Jev 那个池的上限（deploy/quota.json）；设置里的 judge.dailyUsdCap 优先。
+   * 按量计费的后端（TypeSafe）每天最多花多少美元，到了就停调、走默认。默认沿用旧系统的日帽。
+   * 额度读取器不读这个池（没有日账文件，deploy/quota.json 写了为什么）；设置里的 judge.dailyUsdCap 优先。
    */
   dailyUsdCap: number;
 }

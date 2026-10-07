@@ -96,6 +96,21 @@ function world(
 }
 
 describe('定时读额度', () => {
+  it('配置写明不读的池：不读、撤掉 quota-read 旧提醒，不当成没读成', async () => {
+    const w = world([ok('p1')], {
+      loadConfig: async () =>
+        ({
+          pools: [{ poolId: 'p1' }],
+          notRead: [{ poolId: 'jev', why: '没有日账' }],
+        }) as unknown as QuotaConfig,
+    });
+    const run = await runQuotaReadJob(w.deps);
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 1 });
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+    expect(w.resolved).toContain(poolAlertKey('jev'));
+    expect(w.raised.map((a) => a.key)).not.toContain(poolAlertKey('jev'));
+  });
+
   it('读成：写库、撤掉这个池的旧提醒、这一轮记 ok', async () => {
     const w = world([ok('p1'), ok('p2')]);
     const run = await runQuotaReadJob(w.deps);

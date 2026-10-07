@@ -107,11 +107,17 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
     expect(facts('claude-carpool')).toEqual(['fleet-agent-carpool', 'carpool', 4]);
   });
 
-  it('账号池和额度读取器的配置样例一一对应（额度按池入库，池不在库里就写不进去）', () => {
+  it('账号池和额度配置对得上；只有 jev 不进额度配置（没有日账，花费在 jev_answers，不写按日文件）', () => {
     const quota = JSON.parse(repoFile('deploy/quota.json')) as {
       pools: { poolId: string; channelId: string }[];
     };
-    expect(quotaOnlyAndCatalogOnly(example().pools, quota.pools)).toEqual({ quotaOnly: [], catalogOnly: [] });
+    expect(quotaOnlyAndCatalogOnly(example().pools, quota.pools)).toEqual({
+      quotaOnly: [],
+      catalogOnly: ['jev@jev'],
+    });
+    const notRead = (quota as { notRead?: { poolId: string; why: string }[] }).notRead ?? [];
+    expect(notRead.map((p) => p.poolId)).toEqual(['jev']);
+    expect(notRead[0]?.why).toContain('没有旧系统的日账');
   });
 
   it('【故意造出失败】额度配置少一个目录里有的池（或多一个目录里没有的池），对照就判红', () => {
@@ -121,12 +127,12 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
     const missing = quota.pools.filter((p) => p.poolId !== 'grok');
     expect(quotaOnlyAndCatalogOnly(example().pools, missing)).toEqual({
       quotaOnly: [],
-      catalogOnly: ['grok@xai'],
+      catalogOnly: ['grok@xai', 'jev@jev'],
     });
     const extra = [...quota.pools, { poolId: 'ghost', channelId: 'x' }];
     expect(quotaOnlyAndCatalogOnly(example().pools, extra)).toEqual({
       quotaOnly: ['ghost@x'],
-      catalogOnly: [],
+      catalogOnly: ['jev@jev'],
     });
   });
 

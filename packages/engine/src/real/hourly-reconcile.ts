@@ -5,6 +5,7 @@
 // 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
+import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
   alertByKey,
   type Db,
@@ -344,6 +345,8 @@ export function hourlyReconcileJob(
       repos: managedRepos,
       auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
       quotaPools: (now) => quotaTable(w.db, { now }),
+      // 配置写明不读的池（现在是 jev：没有日账）。读不到配置要抛，不许当成「都要读」。
+      quotaNotRead: async () => (await loadQuotaConfig()).notRead?.map((p) => p.poolId) ?? [],
       ledgers: (input) => mergedPrLedgers(w.db, input),
       async approval(id) {
         const a = await getApproval(w.db, id);
