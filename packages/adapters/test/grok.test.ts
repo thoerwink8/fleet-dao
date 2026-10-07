@@ -86,6 +86,7 @@ describe('grok 参数', () => {
     // max 是 Claude 的档，Grok 不认【故意造出的失败】
     expect(() => buildGrokArgs({ ...base, reasoningEffort: 'max' })).toThrow('不支持');
     expect(() => buildGrokArgs({ ...base, maxTurns: 0 })).toThrow('max turns');
+    expect(() => buildGrokArgs({ ...base, cwd: '' })).toThrow('没给工作树');
   });
 
   it('模型核对：带渠道后缀算同一个，换代不算', () => {
