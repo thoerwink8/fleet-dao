@@ -42,6 +42,13 @@ Environment=USER=@@SESSION_USER@@
 # （packages/adapters/src/grok/run.ts 的 GROK_UNATTENDED_ENV）
 Environment=GROK_FOLDER_TRUST=0
 Environment=GROK_ASK_USER_QUESTION=0
+# Mirasim 自己出网（中转签票、续期、设备验证）不借 agent 的代理（#1274）：不设这个，它会读会话用户 ~/.claude/settings.json 里
+# reclaude 写的 HTTPS_PROXY（指 reclaude 守护的临时端口），守护一死（法国 2026-10-01 18:01 重启后就没再起）settings 里还留着
+# 旧端口，签票一律 connect ECONNREFUSED 127.0.0.1:<旧端口>，中转路由全不通；守护活着时，非 Claude Code 的流量穿过它还会让
+# reclaude 设备约 90 秒后被服务端解绑（docs/reference/deploy.md P39、docs/reference/quota.md Q21、adapters.md CC-10）。
+# 这两个开关不许被当成「多余」去掉
+Environment=MIRASIM_NO_AGENT_EGRESS=1
+Environment=MIRASIM_ACCOUNT_USAGE_PROBE=0
 ExecStart=/home/@@SESSION_USER@@/.mirasim-remote/current/node /home/@@SESSION_USER@@/.mirasim-remote/current/server.cjs --port @@MIRASIM_SESSION_PORT@@ --host 127.0.0.1 --no-open --no-im --workdir /home/@@SESSION_USER@@
 Restart=on-failure
 RestartSec=5
