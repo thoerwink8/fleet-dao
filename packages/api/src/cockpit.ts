@@ -100,7 +100,6 @@ const DEFAULT_STOP_REASON = '驾驶舱上点了叫停';
 
 /** 引擎没有接收处的动作，各自该怎么说（驾驶舱原样显示）。 */
 const UNSUPPORTED_ACTION_WHY = {
-  pause: '任务工作流没有「暂停」：它只会在碰到问题时自己停下等人。想让它别再做，请用「叫停」',
   reroute: '任务工作流没有「中途换路由」：每一段会话开始前它自己按路由顺序选路。想让它别再做，请用「叫停」',
 } as const;
 
@@ -322,9 +321,20 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       case 'stop':
         signal = { name: TASK_SIGNAL_NAMES.abandon, by, reason: body.reason ?? DEFAULT_STOP_REASON };
         break;
-      // 引擎的任务工作流没有「暂停」「中途换路由」的接收处（它只会碰到问题自己停下等人、每一段重新选路）：
-      // 发了也没人收，所以当场回明确的 409，不记操作、不假装发出去了（#901）。要补就先在引擎里接上、再回这里。
+      // 暂停（#820 片 3）：只停这一张单、能继续（继续就是上面的 taskContinue）。已经停着的再点暂停回 409，不重复发信号。
       case 'pause':
+        if (task.paused !== undefined) {
+          throw new ApiError(409, 'already_paused', `这张单已经暂停了（${task.paused}），点「继续」接着走`);
+        }
+        signal = {
+          name: TASK_SIGNAL_NAMES.pause,
+          by,
+          mode: body.mode ?? 'soft',
+          ...(body.reason ? { reason: body.reason } : {}),
+        };
+        break;
+      // 引擎的任务工作流没有「中途换路由」的接收处（每一段重新选路）：发了也没人收，所以当场回明确的 409，
+      // 不记操作、不假装发出去了（#901）。要补就先在引擎里接上、再回这里。
       case 'reroute':
         throw new ApiError(409, 'action_not_supported', UNSUPPORTED_ACTION_WHY[body.action]);
     }

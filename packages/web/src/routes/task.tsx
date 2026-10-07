@@ -14,6 +14,7 @@ import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { StatusChip } from '../components/status';
+import { ACTIONS, type ActionTarget, availableActions, useTaskActions } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
 import { UsagePanel } from '../components/usage';
@@ -22,6 +23,7 @@ import { NotOpen } from '../demo/views';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
+import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
@@ -42,7 +44,13 @@ function Back() {
 function Header({ d, now }: { d: TaskDetail; now: number }) {
   return (
     <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <StatusChip tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
+      {d.task.paused === undefined ? (
+        <StatusChip tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
+      ) : (
+        // 暂停的单 state 仍是「在干活」，但人让它停了：等待色（黄系），不画成失败红（#820 片 3）
+        <StatusChip tone="stall" label="已暂停" />
+      )}
+      {d.task.paused === undefined ? null : <span data-paused-note>{d.task.paused}</span>}
       <RepoLink
         repo={d.repo}
         kind="issues"
@@ -53,6 +61,44 @@ function Header({ d, now }: { d: TaskDetail; now: number }) {
       </RepoLink>
       <span className="num">开单 {formatAgo(d.task.createdAt, now)}</span>
     </span>
+  );
+}
+
+/**
+ * 暂停、继续、叫停（#820 片 3，#856 第 1 处）：和首页看板上同一份动作定义（components/task-actions.tsx），点了发到后端
+ * POST /api/tasks/:taskId/actions。结束了的单一个都不画；演示版不能写，不画。叫停是终局，对话框里写明不能恢复。
+ */
+function ActionButtons({ d }: { d: TaskDetail }) {
+  const { trigger } = useTaskActions();
+  if (isDemo()) return null;
+  const target: ActionTarget = {
+    taskId: d.task.id,
+    issueNumber: d.task.issueNumber,
+    title: d.task.title,
+    state: d.task.state,
+    paused: d.task.paused,
+  };
+  const actions = availableActions(target);
+  if (!actions.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" data-task-actions>
+      {actions.map((a) => {
+        const def = ACTIONS[a];
+        const Icon = def.icon;
+        return (
+          <Button
+            key={a}
+            size="sm"
+            variant="outline"
+            className={cn('h-8', def.danger && 'text-ink-fail')}
+            onClick={() => trigger(a, target)}
+          >
+            <Icon />
+            {def.label}
+          </Button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -185,7 +231,12 @@ export default function TaskPage() {
         )
       }
       description={d ? <Header d={d} now={now} /> : undefined}
-      actions={<Back />}
+      actions={
+        <>
+          {d ? <ActionButtons d={d} /> : null}
+          <Back />
+        </>
+      }
     >
       {error && isNotFound(error) ? (
         <Missing taskId={taskId} />

@@ -989,6 +989,18 @@ describe('status 查询、巡检仓配置的读法', () => {
         WF,
       ),
     ).toMatchObject({ parked: false, prNumber: 13 });
+    // 被人暂停（#820 片 3）：阶段是 paused，巡检按「停下等人」看，不当成在正常推进
+    expect(
+      canaryViewOf(
+        {
+          ...raw,
+          phase: 'paused',
+          doing: '已暂停：被人暂停（frank）',
+          waiting: { kind: 'paused', detail: '已暂停', since: at(0) },
+        },
+        WF,
+      ),
+    ).toMatchObject({ phase: 'paused', parked: true });
     // Fusion 的 status（step、parked）不是任务工作流的：认不出
     expect(() => canaryViewOf({ step: 'plan', parked: false }, WF)).toThrow('认不出');
     expect(() => canaryViewOf({ ...raw, waiting: 'x' }, WF)).toThrow('waiting');

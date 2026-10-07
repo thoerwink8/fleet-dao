@@ -19,7 +19,7 @@ import {
 } from '../task-contract.ts';
 import { failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { Abandoned, type Avoid, bump, NO_AVOID, widen, ZERO } from './task-support.ts';
+import { Abandoned, type Avoid, bump, NO_AVOID, PausedInterrupt, widen, ZERO } from './task-support.ts';
 
 /**
  * 动手会话：选路 → 起 → 没跑成按失败分流（原路重试 / 换路由 / 换模型 / 挂起）。会话只试一次，换谁由这里定。
@@ -40,7 +40,7 @@ export async function writeSession(
   // 上一次渠道运行中失败、该换渠道（#1118）：交给下一次选路标成不可用并记顺到谁；选路问过一次就清掉
   let failedChannel: FailedChannel | undefined;
   for (;;) {
-    rt.guard();
+    await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
     const route = await pickRoute(rt, avoid, stick, failedChannel);
     failedChannel = undefined;
     rt.families.add(route.family);
@@ -49,29 +49,38 @@ export async function writeSession(
     let evidence: SegmentEvidence | null = null;
     let infra: unknown = null;
     try {
-      const res = await rt.cancellable(() =>
-        rt.acts.runSegment({
-          schemaVersion: 1,
-          taskId: rt.input.taskId,
-          repo: rt.input.repo,
-          issueNumber: rt.input.issueNumber,
-          route,
-          worktreePath: wt.path,
-          branch: rt.branch,
-          baseSha: rt.since,
-          brief,
-          tier,
-          feedback: rt.feedback,
-          timeoutMinutes: SEGMENT_MINUTES,
-          ...(interrupted ? { interrupted } : {}),
-          // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
-          ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
-        }),
+      // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
+      const res = await rt.cancellable(
+        () =>
+          rt.acts.runSegment({
+            schemaVersion: 1,
+            taskId: rt.input.taskId,
+            repo: rt.input.repo,
+            issueNumber: rt.input.issueNumber,
+            route,
+            worktreePath: wt.path,
+            branch: rt.branch,
+            baseSha: rt.since,
+            brief,
+            tier,
+            feedback: rt.feedback,
+            timeoutMinutes: SEGMENT_MINUTES,
+            ...(interrupted ? { interrupted } : {}),
+            // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
+            ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
+          }),
+        { pausable: true },
       );
       if (res.ok) return;
       evidence = res.evidence;
     } catch (error) {
       if (error instanceof Abandoned || isCancellation(error)) throw error;
+      if (error instanceof PausedInterrupt) {
+        // 被人暂停停下的这一段（借 org_switch 的位置，task-contract.ts 的 PAUSED_BY_HUMAN）：不算失败、不记账、不换模型；
+        // 回到循环头停在检查点，继续后在原分支原树上重跑，提示词带上被停下的原因
+        interrupted = rt.pauseNote(error.command);
+        continue;
+      }
       infra = error;
     }
     const failure = infra
@@ -142,7 +151,7 @@ async function pickRoute(
   failedChannel?: FailedChannel,
 ): Promise<RouteChoice> {
   for (;;) {
-    rt.guard();
+    await rt.checkpoint();
     // 叫醒的记号要在问选路之前取（#194 方案 4.3）：问的这一下读的是切号完成之前的事实，期间到的叫醒要让下面的等待当场醒
     const mark = rt.routeWakeMark();
     const got: PickRouteResult = await rt.step('pickRoute', () =>

@@ -21,6 +21,7 @@ import {
   type TaskWorkflowInput,
   taskAbandonSignal,
   taskContinueSignal,
+  taskPauseSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
@@ -1042,5 +1043,195 @@ describe('任务工作流 · 渠道运行中失败停下报人，不再换同一
     expect(picks[1]?.avoidRouteIds).toEqual([]);
     expect(picks[1]?.stickRouteId).toBeUndefined();
     expect(world.count('createWorktree')).toBe(1);
+  });
+});
+
+describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeout: 60_000 }, () => {
+  const paused = (s: TaskStatus) => s.phase === 'paused';
+  /** 第一次会话挂着，直到放行（或收到取消）；之后的会话直接跑成。 */
+  const gated = () => {
+    const gate = { release: () => {}, aborted: false };
+    const open = new Promise<void>((resolve) => {
+      gate.release = resolve;
+    });
+    const segment = (n: number, signal: AbortSignal): Promise<RunSegmentResult> => {
+      if (n !== 1) return Promise.resolve(OK_SEGMENT);
+      return new Promise((resolve) => {
+        void open.then(() => resolve(OK_SEGMENT));
+        const onAbort = () => {
+          gate.aborted = true;
+          resolve({
+            ok: false,
+            runId: 'r',
+            outcome: 'killed',
+            evidence: { code: 'aborted', message: '被取消', quotaExhausted: false },
+          });
+        };
+        if (signal.aborted) onAbort();
+        signal.addEventListener('abort', onAbort);
+      });
+    };
+    return { gate, segment };
+  };
+
+  it('soft：会话在跑时点暂停，这一段做完就停（不读交付、不起新会话、不报警），库里 phase=paused 而 state 仍是 running；继续后回到原来的阶段接着走，做完', async () => {
+    const world = createFakeWorld();
+    const { gate, segment } = gated();
+    const { tasks, calls } = scripted({ segment: (_i, n, signal) => segment(n, signal) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
+        await h.signal(taskPauseSignal, { by: 'frank', reason: '先看一下方向', mode: 'soft' });
+        gate.release();
+        const s = await statusUntil(h, paused, '停进已暂停');
+        expect(s.doing).toContain('被人暂停（frank）：先看一下方向');
+        expect(s.waiting).toMatchObject({ kind: 'paused' });
+        // 停着：这一段做完了，但不往下读交付；没有报警（不是出了问题）
+        expect(calls.delivery).toBe(0);
+        expect(world.alerts).toEqual([]);
+        await waitUntil(() => world.states.at(-1)?.phase === 'paused', '已暂停写进库');
+        expect(world.states.at(-1)).toMatchObject({ state: 'running', phase: 'paused' });
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    // 只起过一次会话：暂停和继续没有多起、也没有重跑
+    expect(calls.segment).toHaveLength(1);
+    // 继续之后回到暂停前的阶段（implement），再往下走；库里 phase 先 paused 后 implement
+    const phases = world.states.map((x) => x.phase);
+    const at = phases.indexOf('paused');
+    expect(at).toBeGreaterThan(-1);
+    expect(phases.indexOf('implement', at)).toBeGreaterThan(at);
+    expect(world.states.at(-1)).toMatchObject({ state: 'done' });
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('hard：会话被取消，停进已暂停；继续后在同一个分支、同一棵树上重跑这一段，提示里带「被人暂停」，轮数不多算，不报警', async () => {
+    const world = createFakeWorld();
+    const { gate, segment } = gated();
+    const { tasks, calls } = scripted({ segment: (_i, n, signal) => segment(n, signal) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
+        await h.signal(taskPauseSignal, { by: 'frank', reason: '跑偏了', mode: 'hard' });
+        await statusUntil(h, paused, '停进已暂停');
+        // 停着的时候不起新会话
+        expect(calls.segment).toHaveLength(1);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    // 取消送进了第一次会话（心跳带过去，工人收工前一定到）
+    expect(gate.aborted).toBe(true);
+    expect(calls.segment).toHaveLength(2);
+    const [first, second] = calls.segment;
+    expect(second?.branch).toBe(first?.branch);
+    expect(second?.worktreePath).toBe(first?.worktreePath);
+    expect(second?.baseSha).toBe(first?.baseSha);
+    expect(first?.interrupted).toBeUndefined();
+    expect(second?.interrupted).toBe('被人暂停（frank）：跑偏了');
+    expect(world.count('createWorktree')).toBe(1);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('暂停了别的单照常：一张停着，另一张走完', async () => {
+    const world = createFakeWorld();
+    const { gate, segment } = gated();
+    const { tasks, calls } = scripted({
+      segment: (i, n, signal) => (i.issueNumber === 12 ? segment(n, signal) : Promise.resolve(OK_SEGMENT)),
+    });
+    const other = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const a = await start(q, input({ issueNumber: 12 }));
+        await waitUntil(() => calls.segment.some((x) => x.issueNumber === 12), 'A 的会话在跑');
+        await a.signal(taskPauseSignal, { by: 'frank', mode: 'soft' });
+        gate.release();
+        await statusUntil(a, paused, 'A 停进已暂停');
+        const b = await start(q, input({ issueNumber: 13 }));
+        // 不用 result()：等结果时测试服务端会跳时间，没有定时器的 A 会被跳到工作流超时
+        await statusUntil(b, (x) => x.phase === 'done', 'B 走完');
+        // B 走完时 A 还停着
+        expect((await statusOf(a)).phase).toBe('paused');
+        expect(world.states.filter((x) => x.issueNumber === 13).at(-1)).toMatchObject({ state: 'done' });
+        await a.signal(taskContinueSignal, { by: 'frank' });
+        return a.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(other.outcome).toBe('merged');
+  });
+
+  it('还没停下（没到检查点）就点继续：撤掉这次暂停，不停下', async () => {
+    const world = createFakeWorld();
+    const { gate, segment } = gated();
+    const { tasks, calls } = scripted({ segment: (_i, n, signal) => segment(n, signal) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
+        await h.signal(taskPauseSignal, { by: 'frank', mode: 'soft' });
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        gate.release();
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.states.map((x) => x.phase)).not.toContain('paused');
+  });
+
+  it('暂停着点「放弃」：照常收尾（存档收树），结局 abandoned', async () => {
+    const world = createFakeWorld();
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        // 信号在第一个检查点之前到：读完交代就停进已暂停
+        await h.signal(taskPauseSignal, { by: 'frank' });
+        await statusUntil(h, paused, '停进已暂停');
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不做了' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.states.at(-1)).toMatchObject({ state: 'stopped' });
+  });
+
+  it('【故意造出的失败】暂停着、没人点继续：不会自己往下走（过了两小时也没有读交付、没有新会话）', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted();
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await h.signal(taskPauseSignal, { by: 'frank' });
+        await statusUntil(h, paused, '停进已暂停');
+        await env.sleep('2 hours');
+        expect((await statusOf(h)).phase).toBe('paused');
+        expect(calls.segment).toHaveLength(0);
+        expect(calls.delivery).toBe(0);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '收工' });
+        await h.result();
+      },
+      { tasks },
+    );
   });
 });

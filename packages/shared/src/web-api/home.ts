@@ -37,8 +37,12 @@ export const HomeRunningSchema = z.object({
     'verify_round',
     'founder_decision',
     'merge_queue',
+    /** 被人暂停了（#820 片 3）：不是失败也不是等人，是人让它停的；note 在 paused 里。 */
+    'paused',
     'nothing',
   ]),
+  /** 被人暂停时引擎写的那句「已暂停：被谁暂停、为什么」；waitingReason === 'paused' 才有。 */
+  paused: z.string().optional(),
   /** 从什么时候起在等；waitingReason === 'nothing' 时没有。 */
   waitingSince: Time.optional(),
   /** 单子进库的时刻（「已经多久」的起点）。 */

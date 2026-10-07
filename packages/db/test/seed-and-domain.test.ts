@@ -155,6 +155,12 @@ describe('库里的行 → 领域对象', () => {
       acceptance: [],
       createdAt: ago(MIN).toISOString(),
     });
+    // 引擎暂停这张单（#820 片 3）写 phase='paused'：领域对象带 paused（取 doing 那句）；别的 phase 不带；doing 空了也认暂停
+    expect(toTask({ ...task, phase: 'paused', doing: '已暂停：被 frank 暂停' }).paused).toBe(
+      '已暂停：被 frank 暂停',
+    );
+    expect(toTask({ ...task, phase: 'paused', doing: null }).paused).toBe('已暂停');
+    expect(toTask({ ...task, phase: 'implement', doing: '动手第 1 轮' })).not.toHaveProperty('paused');
     expect(toSessionRun(run)).toEqual({
       id: run.id,
       taskId: task.id,

@@ -29,6 +29,8 @@ export const TaskSchema = z.object({
   state: TaskStateSchema,
   priority: z.number(),
   specDir: z.string().optional(),
+  /** 被人暂停了（#820 片 3）：引擎写的「已暂停：被谁暂停、为什么」；没暂停没有这个键。暂停的单 state 仍是 running。 */
+  paused: z.string().optional(),
   createdAt: Time,
 });
 
@@ -212,7 +214,12 @@ export const TaskDetailResponse = z.object({
 // —— 发给工作流的信号 ——
 
 export const TaskActionRequest = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('pause'), reason: z.string().max(500).optional() }),
+  z.object({
+    action: z.literal('pause'),
+    reason: z.string().max(500).optional(),
+    /** soft（默认）＝手上这一段做完再停；hard＝动手的会话马上停下（继续后原树原分支接着干）。 */
+    mode: z.enum(['soft', 'hard']).optional(),
+  }),
   z.object({ action: z.literal('resume') }),
   z.object({ action: z.literal('stop'), reason: z.string().max(500).optional() }),
   z.object({

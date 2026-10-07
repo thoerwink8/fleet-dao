@@ -17,6 +17,7 @@ import {
   type TaskWorkflowInput,
   taskAbandonSignal,
   taskContinueSignal,
+  taskPauseSignal,
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
@@ -61,11 +62,17 @@ const parksOnce = () =>
   });
 
 describe('任务工作流听的信号名，和驾驶舱后端发的是同一份', { timeout: 60_000 }, () => {
-  it('引擎注册的信号名就是 shared/task-signals.ts 里那三个（后端不会比引擎先改名）', () => {
+  it('引擎注册的信号名就是 shared/task-signals.ts 里那四个（后端不会比引擎先改名）', () => {
     expect(taskContinueSignal.name).toBe(TASK_SIGNAL_NAMES.continue);
     expect(taskAbandonSignal.name).toBe(TASK_SIGNAL_NAMES.abandon);
     expect(taskRouteWakeSignal.name).toBe(TASK_SIGNAL_NAMES.routeWake);
-    expect(Object.values(TASK_SIGNAL_NAMES)).toEqual(['taskContinue', 'taskAbandon', 'taskRouteWake']);
+    expect(taskPauseSignal.name).toBe(TASK_SIGNAL_NAMES.pause);
+    expect(Object.values(TASK_SIGNAL_NAMES)).toEqual([
+      'taskContinue',
+      'taskAbandon',
+      'taskRouteWake',
+      'taskPause',
+    ]);
   });
 
   it('停着等人：按名字发 taskContinue（后端的参数形状 { by }）它接着走，做完', async () => {
@@ -102,6 +109,43 @@ describe('任务工作流听的信号名，和驾驶舱后端发的是同一份'
     );
     expect(run.outcome).toBe('abandoned');
     expect(world.states.at(-1)).toMatchObject({ state: 'stopped' });
+  });
+
+  it('引擎里注册了读者的信号名，就是 TASK_SIGNAL_NAMES 的全集：加了名字没接读者（发出去没人收）这里会红', async () => {
+    const contract = await import('../src/task-contract.ts');
+    const registered: string[] = [];
+    for (const v of Object.values(contract) as unknown[]) {
+      const x = v as { type?: unknown; name?: unknown } | null;
+      if (typeof x === 'object' && x !== null && x.type === 'signal' && typeof x.name === 'string') {
+        registered.push(x.name);
+      }
+    }
+    registered.sort();
+    expect(registered).toEqual(Object.values(TASK_SIGNAL_NAMES).sort());
+    // 对照（故意造出的失败）：多出一个没有读者的名字，这条比对就对不上
+    expect([...registered, 'taskNobodyReads'].sort()).not.toEqual(Object.values(TASK_SIGNAL_NAMES).sort());
+  });
+
+  it('按名字发 taskPause（后端的参数形状 { by, mode, reason }）：停进已暂停；再按名字发 taskContinue 接着走，做完', async () => {
+    const world = createFakeWorld();
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await h.signal(TASK_SIGNAL_NAMES.pause, { by: 'user-1', mode: 'soft', reason: '先看一下' });
+        await pollQuery(
+          () => h.query<TaskStatus>(taskStatusQuery),
+          (s) => s.phase === 'paused',
+          '停进已暂停',
+        );
+        await h.signal(TASK_SIGNAL_NAMES.continue, { by: 'user-1' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
   });
 
   it('以前后端发的老名字（resume、stop、pause、reroute、answer、requireApproval、agentEvent）：工作流不理，仍然停着', async () => {

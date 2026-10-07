@@ -311,7 +311,7 @@ describe('看板与任务', () => {
 
 describe('发给工作流的信号', () => {
   // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成引擎起的那条任务工作流（task:<仓>#<号>）。
-  // 信号名只有引擎真有人听的两个（继续、放弃）；整条链的钉子在 signal-chain.test.ts。
+  // 信号名只有引擎真有人听的三个（继续、放弃、暂停）；整条链的钉子在 signal-chain.test.ts。
   const TASK12_WORKFLOW_ID = taskWorkflowId({ owner: 'example', name: 'canary' }, 12);
 
   it('继续、叫停：发给这个任务的任务工作流，并写操作记录', async () => {
@@ -329,17 +329,81 @@ describe('发给工作流的信号', () => {
     expect(h.store.data.audit.slice(-2).map((a) => a.action)).toEqual(['task.resume', 'task.stop']);
   });
 
-  it('暂停、换路由：引擎没有这两个动作，409 action_not_supported，不写操作记录、不发信号', async () => {
+  it('换路由：引擎没有这个动作，409 action_not_supported，不写操作记录、不发信号', async () => {
     const h = harness();
     const s = await h.login();
     const before = h.store.data.audit.length;
-    for (const body of [{ action: 'pause' }, { action: 'reroute', routeId: 'rt-mirasim-kimi' }]) {
-      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
-      expect(res.status, body.action).toBe(409);
-      expect(await errorCode(res)).toBe('action_not_supported');
-    }
+    const body = { action: 'reroute', routeId: 'rt-mirasim-kimi' };
+    const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
+    expect(res.status).toBe(409);
+    expect(await errorCode(res)).toBe('action_not_supported');
     expect(h.signals).toHaveLength(0);
     expect(h.store.data.audit.length).toBe(before);
+  });
+
+  it('暂停（#820 片 3）：真发 taskPause 给这个任务的任务工作流，默认 soft，带原因和谁点的，并写操作记录', async () => {
+    const h = harness();
+    const s = await h.login();
+    const res = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'pause', reason: '先看一下方向' }),
+    );
+    expect(res.status).toBe(200);
+    const hard = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'pause', mode: 'hard' }),
+    );
+    expect(hard.status).toBe(200);
+    expect(h.signals.map((x) => [x.workflowId, x.signal.name])).toEqual([
+      [TASK12_WORKFLOW_ID, 'taskPause'],
+      [TASK12_WORKFLOW_ID, 'taskPause'],
+    ]);
+    expect(h.signals[0]?.signal).toEqual({
+      name: 'taskPause',
+      by: DEV_USER_ID,
+      mode: 'soft',
+      reason: '先看一下方向',
+    });
+    expect(h.signals[1]?.signal).toEqual({ name: 'taskPause', by: DEV_USER_ID, mode: 'hard' });
+    expect(h.store.data.audit.slice(-2).map((a) => [a.action, a.ok])).toEqual([
+      ['task.pause', true],
+      ['task.pause', true],
+    ]);
+  });
+
+  it('【故意造出的失败】已结束的单暂停：409 task_finished，不发信号、不写操作记录', async () => {
+    const h = harness();
+    const s = await h.login();
+    const before = h.store.data.audit.length;
+    const res = await h.cockpit.request(
+      `/api/tasks/${IDS.task13}/actions`,
+      write('POST', s, { action: 'pause' }),
+    );
+    expect(res.status).toBe(409);
+    expect(await errorCode(res)).toBe('task_finished');
+    expect(h.signals).toHaveLength(0);
+    expect(h.store.data.audit.length).toBe(before);
+  });
+
+  it('【故意造出的失败】已经暂停着的单再点暂停：409 already_paused，不重复发信号；继续照常发', async () => {
+    const h = harness();
+    const s = await h.login();
+    const task = h.store.data.tasks.find((x) => x.id === IDS.task12);
+    if (!task) throw new Error('样例数据里要有 task12');
+    task.paused = '已暂停：被 frank 暂停';
+    const res = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'pause' }),
+    );
+    expect(res.status).toBe(409);
+    expect(await errorCode(res)).toBe('already_paused');
+    expect(h.signals).toHaveLength(0);
+    const resume = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'resume' }),
+    );
+    expect(resume.status).toBe(200);
+    expect(h.signals.map((x) => x.signal.name)).toEqual(['taskContinue']);
   });
 
   it('任务已结束、工作流不在了：409；先记后做——发起那条在前，没做成再追加一条 ok=false', async () => {

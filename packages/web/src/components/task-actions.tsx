@@ -52,6 +52,8 @@ export interface ActionTarget {
   /** 需求级在跑的会话（分诊、写需求文档、写方案）。 */
   activity?: Activity | undefined;
   sub?: BoardSubtask | undefined;
+  /** 被人暂停着（引擎写的那句「已暂停：…」，#820 片 3）：这时不再给「暂停」，只给「继续」「叫停」。 */
+  paused?: string | undefined;
 }
 
 export function targetOf(t: BoardTask, sub?: BoardSubtask): ActionTarget {
@@ -83,15 +85,19 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
 };
 
 /**
- * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（继续、叫停）。暂停、换模型引擎没有这两个动作
+ * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停）。换模型引擎没有这个动作
  * （后端回 409 action_not_supported，api/src/cockpit.ts；#901），所以不画：画出来点了只会弹一句「做不到」。
- * 叫停、继续对整个需求生效，只放在需求上。接口里没有「暂停中」这个状态，「继续」一直给出来，由后端判断（没停着等人就没有收信的）。
- * 现在页面上没有谁用这个函数（看板删了以后没有调用方，#856）；将来哪个页面接这排按钮，都从这里取。
+ * 暂停、叫停、继续对整个需求生效，只放在需求上。暂停了的单不再给「暂停」（后端也回 409 already_paused）；
+ * 没暂停的「继续」也一直给出来：停下等人（碰到问题自己停的）也是点它，由后端判断（没停着就没有收信的）。
+ * 任务页（routes/task.tsx）和首页看板的卡片都从这里取。
  */
 export function availableActions(target: ActionTarget): UiAction[] {
   if (isTaskFinished(target)) return [];
   const list: UiAction[] = [];
-  if (!target.sub) list.push('resume', 'stop');
+  if (!target.sub) {
+    if (target.paused === undefined) list.push('pause');
+    list.push('resume', 'stop');
+  }
   return list;
 }
 
@@ -100,7 +106,11 @@ export function targetName(t: ActionTarget): string {
   return t.sub ? `${n} 子任务 ${letterOf(t.sub.index)}` : n;
 }
 
-type DialogState = { kind: 'route'; target: ActionTarget } | { kind: 'stop'; target: ActionTarget } | null;
+type DialogState =
+  | { kind: 'route'; target: ActionTarget }
+  | { kind: 'stop'; target: ActionTarget }
+  | { kind: 'pause'; target: ActionTarget }
+  | null;
 
 interface TaskActionsApi {
   trigger(action: UiAction, target: ActionTarget): void;
@@ -118,7 +128,12 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
       try {
         await mutateAsync({ taskId: target.taskId, body });
         toast.success(`${label}：${targetName(target)}`, {
-          description: body.action === 'pause' ? '当前会话停在干净的点，做完的已提交' : undefined,
+          description:
+            body.action === 'pause'
+              ? body.mode === 'hard'
+                ? '动手的会话已叫停，树里留着的改动继续后接着干'
+                : '手上这一段做完就停，不再起新会话'
+              : undefined,
         });
       } catch (e) {
         toast.error(`${label}没成功`, { description: errorText(e) });
@@ -131,6 +146,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
     (action: UiAction, target: ActionTarget) => {
       if (action === 'reroute') setDialog({ kind: 'route', target });
       else if (action === 'stop') setDialog({ kind: 'stop', target });
+      else if (action === 'pause') setDialog({ kind: 'pause', target });
       else void send(target, { action }, ACTIONS[action].label);
     },
     [send],
@@ -153,6 +169,35 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
           close();
         }}
       />
+      <AlertDialog open={dialog?.kind === 'pause'} onOpenChange={(o) => !o && close()}>
+        <AlertDialogContent>
+          {dialog?.kind === 'pause' ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>暂停 {targetName(dialog.target)}？</AlertDialogTitle>
+                <AlertDialogDescription>
+                  只停这一张单，别的单照常；点「继续」接着走（和「叫停」不同，叫停不能恢复）。
+                  「做完这一段再停」会等手上这一段做完；「立刻停下」会把在跑的动手会话叫停，继续后在原分支原树上重跑。
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>先不</AlertDialogCancel>
+                <AlertDialogAction
+                  variant="outline"
+                  onClick={() => void send(dialog.target, { action: 'pause', mode: 'hard' }, '暂停')}
+                >
+                  立刻停下
+                </AlertDialogAction>
+                <AlertDialogAction
+                  onClick={() => void send(dialog.target, { action: 'pause', mode: 'soft' }, '暂停')}
+                >
+                  做完这一段再停
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : null}
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog open={dialog?.kind === 'stop'} onOpenChange={(o) => !o && close()}>
         <AlertDialogContent>
           {dialog?.kind === 'stop' ? (
@@ -160,7 +205,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
               <AlertDialogHeader>
                 <AlertDialogTitle>叫停 {targetName(dialog.target)}？</AlertDialogTitle>
                 <AlertDialogDescription>
-                  在跑的会话停在干净的点，做完的已提交；之后这个需求不再往下走，要做可以重新开。
+                  在跑的会话停在干净的点，做完的已提交；之后这个需求不再往下走，不能恢复（只想先停一停请用「暂停」），要做可以重新开。
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

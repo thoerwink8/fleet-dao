@@ -25,6 +25,9 @@
 // - 动手会话只试一次（activity-options.ts 的 segment 档）：基础设施的失败由 task-session.ts 按失败分流重试、换路由、挂起，不靠 Temporal 自动再起一遍。
 // - 切号停下的动手会话（码 org_switch，#59）不算失败：失败分流 OS1 马上接着干、不记账、不看上一次的原文（不会凑成「同因连挂」）；
 //   选路照常选到切过去的那个池，同一棵树、同一个分支重跑这一段，提示词带上被停下的原因（interrupted）。
+// - 暂停（#820 片 3，taskPause 信号）只停这一张单、能「继续」：停在检查点（rt.checkpoint，起新会话、选路、起新一步之前），库里 phase=paused、
+//   state 仍是 running，不报警；soft 手上这一段做完，hard 把动手会话取消、继续后在原树原分支上重跑（提示词带「被人暂停」，task-session.ts）。
+//   检查点只在收到信号时才多调活动，老历史重放不受影响（patched('task-pause')，test/replay.test.ts 的夹具）。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
 import { CancellationScope, isCancellation, log, workflowInfo } from '@temporalio/workflow';
@@ -63,7 +66,7 @@ class TaskFlow {
     await rt.mirror('running');
 
     for (;;) {
-      rt.guard();
+      await rt.checkpoint();
       if (rt.round >= MAX_IMPLEMENT_ROUNDS) {
         await rt.park(
           `动手 ${MAX_IMPLEMENT_ROUNDS} 轮都没过`,
@@ -88,6 +91,7 @@ class TaskFlow {
   private async deliver(brief: TaskBrief): Promise<'rework' | { commit?: string | undefined }> {
     const rt = this.rt;
     for (;;) {
+      await rt.checkpoint();
       const ci = await waitForCi(rt);
       if (ci.kind === 'merged') return { commit: ci.mergeCommit };
       if (ci.kind === 'rework') return 'rework';

@@ -108,6 +108,8 @@ const TASK_PHASE_STAGE: Readonly<Record<TaskPhase, CanaryStage | null>> = {
   merge: 'merge',
   done: 'close',
   parked: null,
+  // 被人暂停（#820 片 3）：和停下等人一样不落在哪一步，巡检看到它按「停下等人」报（real/canary.ts 把 paused 也算 parked）
+  paused: null,
   abandoned: null,
 };
 
@@ -150,7 +152,7 @@ export interface CanaryView {
   phase: string;
   /** 白话：正在做什么。 */
   doing: string;
-  /** 停下等人（阶段是 parked，或在等的是人）。 */
+  /** 停下等人（阶段是 parked 或 paused＝被人暂停，或在等的是人）。 */
   parked: boolean;
   waiting: { kind: string; detail: string } | null;
   prNumber: number | null;

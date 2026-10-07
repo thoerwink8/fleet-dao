@@ -121,21 +121,62 @@ function backend() {
 
 const FAILED = new ApiError(409, 'task_finished', '任务已经结束（done），不能再暂停');
 
-describe('暂停、继续：点了就发请求，成功、失败都有话说', () => {
-  test('暂停：发 {action:pause}，成功提示里写明「停在干净的点」', async () => {
+/** 暂停先弹一个选择（做完这一段再停 / 立刻停下）：点其中一个。 */
+const confirmPause = (name = '做完这一段再停') =>
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name }));
+
+describe('暂停（#820 片 3）：先选怎么停，再发请求', () => {
+  const open = async () => {
     const { api, taskAction } = backend();
     const task = (await board(api))[0];
     if (!task) throw new Error('没有任务');
     renderApp(<Buttons target={targetOf(task)} />, { api });
     press('pause');
+    expect(await screen.findByText(`暂停 #${task.issueNumber}？`)).toBeTruthy();
+    return { taskAction, task };
+  };
+
+  test('点暂停只弹选择，还没发请求；点「先不」关掉，仍然没发', async () => {
+    const { taskAction, task } = await open();
+    expect(taskAction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '先不' }));
+    await waitFor(() => expect(screen.queryByText(`暂停 #${task.issueNumber}？`)).toBeNull());
+    expect(taskAction).not.toHaveBeenCalled();
+  });
+
+  test('「做完这一段再停」：发 {action:pause, mode:soft}，提示写明手上这一段做完就停', async () => {
+    const { taskAction, task } = await open();
+    confirmPause();
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
-    expect(taskAction).toHaveBeenCalledExactlyOnceWith(task.id, { action: 'pause' });
+    expect(taskAction).toHaveBeenCalledExactlyOnceWith(task.id, { action: 'pause', mode: 'soft' });
     expect(toast.success).toHaveBeenCalledWith(`暂停：#${task.issueNumber}`, {
-      description: '当前会话停在干净的点，做完的已提交',
+      description: '手上这一段做完就停，不再起新会话',
     });
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  test('「立刻停下」：发 {action:pause, mode:hard}，提示写明动手会话叫停、继续后接着干', async () => {
+    const { taskAction, task } = await open();
+    confirmPause('立刻停下');
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(taskAction).toHaveBeenCalledExactlyOnceWith(task.id, { action: 'pause', mode: 'hard' });
+    expect(toast.success).toHaveBeenCalledWith(`暂停：#${task.issueNumber}`, {
+      description: '动手的会话已叫停，树里留着的改动继续后接着干',
+    });
+  });
+
+  test('【故意造出的失败】后端拒了（409 已经暂停）：弹「暂停没成功」和后端的原因，不弹成功', async () => {
+    const { taskAction } = await open();
+    taskAction.mockRejectedValueOnce(new ApiError(409, 'already_paused', '这张单已经暂停了'));
+    confirmPause();
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('暂停没成功', { description: '这张单已经暂停了' }),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe('继续：点了就发请求，成功、失败都有话说', () => {
   test('继续：发 {action:resume}，成功提示没有多余的说明', async () => {
     const { api, taskAction } = backend();
     const task = (await board(api))[0];
@@ -147,23 +188,17 @@ describe('暂停、继续：点了就发请求，成功、失败都有话说', (
     expect(toast.success).toHaveBeenCalledWith(`继续：#${task.issueNumber}`, { description: undefined });
   });
 
-  test.each([
-    ['pause', '暂停'],
-    ['resume', '继续'],
-  ] as const)(
-    '【故意造出的失败】%s 被后端拒（409）：弹「%s没成功」和后端的原因，不弹成功',
-    async (action, label) => {
-      const { api, taskAction } = backend();
-      taskAction.mockRejectedValueOnce(FAILED);
-      const task = (await board(api))[0];
-      if (!task) throw new Error('没有任务');
-      renderApp(<Buttons target={targetOf(task)} />, { api });
-      press(action);
-      await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
-      expect(toast.error).toHaveBeenCalledWith(`${label}没成功`, { description: FAILED.message });
-      expect(toast.success).not.toHaveBeenCalled();
-    },
-  );
+  test('【故意造出的失败】继续被后端拒（409）：弹「继续没成功」和后端的原因，不弹成功', async () => {
+    const { api, taskAction } = backend();
+    taskAction.mockRejectedValueOnce(FAILED);
+    const task = (await board(api))[0];
+    if (!task) throw new Error('没有任务');
+    renderApp(<Buttons target={targetOf(task)} />, { api });
+    press('resume');
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(toast.error).toHaveBeenCalledWith('继续没成功', { description: FAILED.message });
+    expect(toast.success).not.toHaveBeenCalled();
+  });
 
   test('【故意造出的失败】断网（不是 ApiError 的错误）也照实弹出来', async () => {
     const { api, taskAction } = backend();
@@ -171,9 +206,9 @@ describe('暂停、继续：点了就发请求，成功、失败都有话说', (
     const task = (await board(api))[0];
     if (!task) throw new Error('没有任务');
     renderApp(<Buttons target={targetOf(task)} />, { api });
-    press('pause');
+    press('resume');
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('暂停没成功', { description: 'Failed to fetch' }),
+      expect(toast.error).toHaveBeenCalledWith('继续没成功', { description: 'Failed to fetch' }),
     );
   });
 });
