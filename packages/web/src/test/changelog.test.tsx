@@ -11,7 +11,7 @@ import { splitChangelog } from '@fleet-dao/shared';
 import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
-import { createMockApi, type MockApi } from '../api/mock/server';
+import { createMockApi, MOCK_RELEASED_VERSIONS, type MockApi } from '../api/mock/server';
 import type { ReleaseVersion } from '../api/types';
 import { NAV } from '../components/shell/nav';
 import { readChangelog } from '../lib/changelog';
@@ -71,6 +71,17 @@ describe('lib/changelog', () => {
 });
 
 describe('/changelog 页', () => {
+  test('假数据：v3 已有发布标记就不当这一版，这一版取下一个号', async () => {
+    const released = readChangelog().released.map((item) => item.version);
+    expect(released).toContain('v3');
+    expect([...MOCK_RELEASED_VERSIONS.map((item) => item.version)].sort()).toEqual([...released].sort());
+    renderApp(<ChangelogPage />);
+    expect(await screen.findByRole('heading', { name: '还没发版 · 这一版是 v4' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '还没发版 · 这一版是 v3' })).toBeNull();
+    expect(screen.getByRole('button', { name: '发布 v4' })).toBeTruthy();
+    expect(screen.getByText('2026-10-05')).toBeTruthy();
+  });
+
   test('当前版本里程碑是 v3：按钮、标题都写 v3（不是按更新日志「上一版 +1」的 v1），还有「已发布」', async () => {
     renderApp(<ChangelogPage />, { api: releasing(ok('v3', V3)) });
     expect(await screen.findByRole('button', { name: '发布 v3' })).toBeTruthy();
