@@ -106,6 +106,38 @@ describe('familyPickerFrom：接到真选路上（避开别的族、不替选路
     expect(port.calls[0]?.stage).toBe('review');
   });
 
+  it('界面活（uiWork）：每一族的选路请求都带 uiWork: true；非界面活的请求里没有这个字段', async () => {
+    const answer = (): PickRouteResult => ({
+      ok: true,
+      route: { routeId: 'r', poolId: 'p', modelId: 'grok-x', family: 'grok', hostId: 'grok' },
+      why: '这一族有得派',
+    });
+    const ui = fakePort(answer);
+    const uiDeps = familyPickerFrom(ui.pickRoute, ORDER, 'review', undefined, true)('task-1');
+    await uiDeps.pickRouteForFamily('gpt');
+    await uiDeps.pickRouteForFamily('grok');
+    expect(ui.calls.map((c) => c.uiWork)).toEqual([true, true]);
+    const plain = fakePort(answer);
+    await familyPickerFrom(plain.pickRoute, ORDER)('task-1').pickRouteForFamily('grok');
+    expect(plain.calls[0]).not.toHaveProperty('uiWork');
+  });
+
+  it('【故意造出的失败】选路因硬禁令回「没有路由」（GPT 遇上界面活）→ 这一族没有，pickFamilyModel 往下问下一家', async () => {
+    const port = fakePort((input) =>
+      input.uiWork && !(input.avoidFamilies ?? []).includes('gpt')
+        ? { ok: false, waitFor: 'none', detail: '犯禁令：GPT 不做 UI 类活' }
+        : {
+            ok: true,
+            route: { routeId: 'r', poolId: 'p', modelId: 'grok-x', family: 'grok', hostId: 'grok' },
+            why: '有得派',
+          },
+    );
+    const deps = familyPickerFrom(port.pickRoute, ORDER, 'review', undefined, true)('task-1');
+    const got = await pickFamilyModel(ORDER, 'claude', deps);
+    expect(got?.family).toBe('grok');
+    expect(port.calls.map((c) => (c.avoidFamilies ?? []).includes('gpt'))).toEqual([false, true]);
+  });
+
   it('【故意造出的失败】选路回了别的族（渠道自己挑模型的）→ 当成没挑到，不替它改名', async () => {
     const port = fakePort(() => ({
       ok: true,

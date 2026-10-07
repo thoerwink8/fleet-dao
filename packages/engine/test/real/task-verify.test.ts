@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { RouteLaunchFacts } from '@fleet-dao/db';
 import type { PullFacts } from '@fleet-dao/github';
+import { hardBanFor } from '@fleet-dao/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../../src/ports.ts';
@@ -76,7 +77,7 @@ const pullFacts = (over: Partial<PullFacts> = {}): PullFacts => ({
 
 const FILES: DiffFile[] = [
   {
-    filename: 'web/status.tsx',
+    filename: 'src/status.ts',
     status: 'added',
     patch: '@@ -0,0 +1 @@\n+export const Status = 1;',
     changes: 1,
@@ -95,6 +96,12 @@ const okRoute = (family: ModelFamily): PickRouteResult => ({
     hostId: 'claude-code',
   },
   why: '测试',
+});
+
+const subjectOf = (route: { modelId: string; family: string }) => ({
+  id: route.modelId,
+  family: route.family,
+  displayName: route.modelId,
 });
 
 let root: string;
@@ -184,7 +191,12 @@ function rig(
       asked.push(input);
       if (opts.pickRouteError) throw opts.pickRouteError;
       const family = FAMILY_ORDER.find((f) => !(input.avoidFamilies ?? []).includes(f));
-      return (family && picks[family]) || { ok: false, waitFor: 'none', detail: '没有路由' };
+      const pick = family ? picks[family] : undefined;
+      // 真选路的硬禁令（shared 的 hardBanFor，和 routing/filter.ts 同一份）：界面活按 ui 判，GPT 一条路由都派不出
+      if (pick?.ok && hardBanFor(subjectOf(pick.route), input.uiWork ? 'ui' : input.stage)) {
+        return { ok: false, waitFor: 'none', detail: '犯禁令：GPT 不做 UI 类活' };
+      }
+      return pick || { ok: false, waitFor: 'none', detail: '没有路由' };
     },
     spawner: {
       routeFacts: async (id) =>
@@ -313,6 +325,70 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     expect(got.pass).toBe(true);
     expect(r.specs[0]?.prompt).toContain('web/logo.png');
     expect(r.specs[0]?.prompt).toContain('没有文本改动');
+  });
+});
+
+describe('界面活的验收不派 GPT（#1262：GPT 不做界面、不审界面）', { timeout: 30_000 }, () => {
+  const UI_FILES: DiffFile[] = [
+    { filename: 'packages/web/src/status.tsx', status: 'added', patch: '@@ -0,0 +1 @@\n+x', changes: 1 },
+  ];
+  const BOTH = { gpt: okRoute('gpt'), grok: okRoute('grok') };
+
+  it('界面单：选路带 uiWork，GPT 排第一也被跳过，往下问 grok，会话派给 grok；notes 不带「没认出」', async () => {
+    const r = rig({ files: UI_FILES, picks: BOTH });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(r.asked.length).toBeGreaterThan(0);
+    expect(r.asked.every((a) => a.uiWork === true)).toBe(true);
+    expect(r.asked.map((a) => a.avoidFamilies?.includes('gpt'))).toEqual([false, true]);
+    expect(r.started).toEqual([expect.objectContaining({ routeId: 'route-grok' })]);
+    expect(got.notes).not.toContain('没认出');
+  });
+
+  it('非界面单：不带 uiWork，GPT 照旧排第一、派给 GPT', async () => {
+    const r = rig({ files: FILES, picks: BOTH });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(r.asked.every((a) => a.uiWork === undefined)).toBe(true);
+    expect(r.started).toEqual([expect.objectContaining({ routeId: 'route-gpt' })]);
+    expect(got.notes).not.toContain('没认出');
+  });
+
+  it('【故意造出的失败】界面单、只有 GPT 有路由：没有别家可验，unavailable，一个会话都没起（不拿 GPT 顶）', async () => {
+    const r = rig({ files: UI_FILES, picks: { gpt: okRoute('gpt') } });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toContain('没讨论成');
+    expect(r.specs).toHaveLength(0);
+    expect(r.started).toHaveLength(0);
+  });
+
+  // 文件名读不成（GitHub 不会这样给，但读不成就是认不出）：diff 照样拼得出来，验收照跑，所以走到选路这一步
+  const NAMELESS: DiffFile[] = [
+    { filename: '', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b', changes: 2 },
+  ];
+
+  it('【故意造出的失败】认不出是不是界面活（有文件名读不成）：按界面活处理、不派 GPT，notes 写明没认出', async () => {
+    const r = rig({ files: NAMELESS, picks: BOTH });
+    const got = await r.run(r.input(), ctx());
+    expect(r.asked.every((a) => a.uiWork === true)).toBe(true);
+    expect(r.started).toEqual([expect.objectContaining({ routeId: 'route-grok' })]);
+    expect(got.notes).toContain('没认出是不是界面活，按界面活处理');
+  });
+
+  it('【故意造出的失败】认不出、又只有 GPT 有路由：不派 GPT，unavailable 的结果上也写明没认出', async () => {
+    const r = rig({ files: NAMELESS, picks: { gpt: okRoute('gpt') } });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toContain('没讨论成');
+    expect(r.specs).toHaveLength(0);
+    expect(got.notes).toContain('没认出是不是界面活，按界面活处理');
+  });
+
+  it('【故意造出的失败】PR 没有任何改动文件：本来就验不了（unavailable），结果上也写明没认出，不当成「不是界面」', async () => {
+    const r = rig({ files: [], picks: BOTH });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeDefined();
+    expect(r.specs).toHaveLength(0);
+    expect(got.notes).toContain('没认出是不是界面活，按界面活处理');
   });
 });
 

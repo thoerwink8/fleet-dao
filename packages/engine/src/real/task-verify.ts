@@ -40,6 +40,7 @@ import {
   ROUTE_RETRY_SECONDS,
   SEGMENT_STAGE,
 } from '../task-contract.ts';
+import { judgeUiWork, UI_UNRECOGNIZED_NOTE } from '../ui-work.ts';
 import { FAMILY_ORDER, invokeVerifier } from '../verifier-invoke.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
@@ -175,6 +176,17 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const files = await mapped(() => deps.gh.pullFiles({ repo, prNumber, signal: ctx.signal }));
     ctx.heartbeat();
 
+    // 界面活（改到页面代码，或没认出）：选路带 uiWork，GPT 不派（含审界面）；没认出的要在结论 notes 里写明
+    const ui = judgeUiWork(files.map((f) => f.filename));
+    if (ui.uiWork) log('验收按界面活选路（GPT 不派）', { prNumber, recognized: ui.recognized, why: ui.why });
+    const withUiNote = (result: ColdVerifyResult): ColdVerifyResult =>
+      ui.recognized
+        ? result
+        : {
+            ...result,
+            notes: result.notes ? `${result.notes}；${UI_UNRECOGNIZED_NOTE}` : UI_UNRECOGNIZED_NOTE,
+          };
+
     const seen: Seen = {};
     const waits: PickWait[] = [];
     // 选路给这一次验收预占的名额（#757）：每挑中一次记下，收场（下面的 finally）一个个放掉，开跑了的放一次什么都不做
@@ -197,6 +209,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           });
         }
       },
+      ui.uiWork,
     )(input.taskId);
     // 挑中路由就登记（#59）：切号照它停下这一次验收；收场（下面的 finally）走
     let ticket: OneShotTicket | undefined;
@@ -362,7 +375,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     if (run.sourceProblem !== undefined) {
       if (seen.headMoved !== undefined)
         return { pass: false, problems: [], round, headMoved: seen.headMoved };
-      return { pass: false, problems: [], round, unavailable: run.sourceProblem };
+      return withUiNote({ pass: false, problems: [], round, unavailable: run.sourceProblem });
     }
     if (run.wait !== undefined) return { pass: false, problems: [], round, retry: retryFor(run.wait) };
     const verdict = run.verdict;
@@ -377,18 +390,18 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       );
     }
     if (!verdict.pass && verdict.problems.length === 0) {
-      return {
+      return withUiNote({
         pass: false,
         problems: [],
         round,
         unavailable: '验收说没过，却没有写出任何一条问题：没法交给写代码的会话去改，要人看',
-      };
+      });
     }
-    return {
+    return withUiNote({
       pass: verdict.pass,
       problems: verdict.problems,
       round: verdict.round,
       ...(verdict.notes === undefined ? {} : { notes: verdict.notes }),
-    };
+    });
   };
 }
