@@ -191,6 +191,48 @@ export const RoutingLayerPurposeSchema = z.object({
   models: z.array(RoutingLayerModelSchema),
 });
 
+/** 渠道里看见、目录的上游串和别名都对不上的模型。只列，不加进目录。 */
+export const ModelRosterMissingSchema = z.object({
+  channelId: Id,
+  channelName: z.string().min(1),
+  modelKey: z.string().min(1).max(2000),
+  firstSeenAt: Time,
+  lastSeenAt: Time,
+});
+
+/** 目录里有这条路由，最近一次读成的名册里已经没有它的上游串和别名。 */
+export const ModelRosterGoneRouteSchema = z.object({
+  channelId: Id,
+  channelName: z.string().min(1),
+  routeId: Id,
+  modelId: Id,
+  /** 目录写的上游串；没写上游串、用别名顶上时是别名。都没写就是空串。 */
+  upstreamModel: z.string().max(2000),
+});
+
+export const ModelRosterFailureSchema = z.object({
+  channelId: Id,
+  channelName: z.string().min(1),
+  code: z.string().min(1).max(80),
+  message: z.string().min(1).max(2000),
+});
+
+export const ModelRosterNotYetSchema = z.object({
+  channelId: Id,
+  channelName: z.string().min(1),
+});
+
+/**
+ * 四个渠道的名册和目录的差。四张表都空才是对得上；有失败、还没读过，页面不能写「都对得上」。
+ * 只读、只列，不带「加进目录」之类的动作。
+ */
+export const ModelRosterDiffSchema = z.object({
+  missingFromCatalog: z.array(ModelRosterMissingSchema),
+  goneRoutes: z.array(ModelRosterGoneRouteSchema),
+  failed: z.array(ModelRosterFailureSchema),
+  notYet: z.array(ModelRosterNotYetSchema),
+});
+
 export const RoutingLayersResponse = z.object({
   /** 现算的时刻。 */
   asOf: Time,
@@ -198,6 +240,10 @@ export const RoutingLayersResponse = z.object({
   purposes: z.array(RoutingLayerPurposeSchema),
   /** 这里读不了路由两层（开发环境的内存版没有这两张表）：写明为什么，不拿空列表冒充「都没配」。 */
   unavailable: z.string().optional(),
+  /** 渠道名册和目录的差。没给、或给了 modelRosterUnavailable，都不能当成「都对得上」。 */
+  modelRoster: ModelRosterDiffSchema.optional(),
+  /** 名册这一层没接上、或这一下没读成。写明为什么。 */
+  modelRosterUnavailable: z.string().optional(),
 });
 
 // —— 思考档位（#470）：路由两层里每个模型下的每条路由，起会话想多深 ——

@@ -4,6 +4,7 @@ import type { Config } from './config.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { IntentStore } from './intent-store.ts';
+import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
 import type {
@@ -50,6 +51,11 @@ export interface Deps {
    * 另写一句 unavailable，不拿空列表冒充「都没配」。
    */
   routingLayers?: RoutingLayersPort | undefined;
+  /**
+   * 渠道模型名册和目录的差（#1302，model-roster.ts）。没给（开发、内存版）的路由页照样回两层，
+   * 另写一句 modelRosterUnavailable，不拿「都对得上」顶。
+   */
+  modelRoster?: ModelRosterPort | undefined;
   /**
    * 会话用户切号的现状（#194，org-switch-view.ts）：驾驶舱额度页顶上「挂着独享；拼车预计几点恢复」读它。没给（开发、内存版没有
    * 那张表）的额度页照样回，另写一句 unavailable，不拿空冒充「没事」。
