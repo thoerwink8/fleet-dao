@@ -2,6 +2,7 @@
 // 四样 token 折成输入当量。后端的任务详情、网页的演示数据和会话时间线（一次会话也按它算）都调这一份，免得几处算法不一样。
 // 读不到的另记次数（missing*），不当成 0：没读到的那一项不往合计里加任何东西。
 import type { BillingKind, SegmentKind, SegmentTier, SessionRun, StageKind } from './domain.ts';
+import type { CostEstimate } from './model-prices.ts';
 import { SEGMENT_KINDS, type SegmentRunView } from './segment-runs.ts';
 
 /**
@@ -128,6 +129,11 @@ export interface UsageTotals {
   missingCost: number;
   cost: CostByBilling;
   /**
+   * 三段的流水里执行体没报花费的那几笔，按模型目录的单价估（model-prices.ts）：runs 笔估成了、合计 usd；noPrice 笔目录里
+   * 没有单价；noTokens 笔 token 没读全估不了。估出来的是「按 API 价值多少」，不是账单。老流程的会话不估（都是 0）。
+   */
+  estimate: CostEstimateTotals;
+  /**
    * 排队、干活时长（毫秒），和库里 queue_ms / run_ms 同一个算法；时刻认不出或倒着的记 missingTime。
    * 三段的一笔没有排队这回事（runs 表不记）：干活 = 结束 − 开始，排队不加，记一次 noQueue——排队合计要把它算作没读到。
    */
@@ -135,6 +141,13 @@ export interface UsageTotals {
   runMs: number;
   missingTime: number;
   noQueue: number;
+}
+
+export interface CostEstimateTotals {
+  runs: number;
+  usd: number;
+  noPrice: number;
+  noTokens: number;
 }
 
 export interface ModelUsageTotals extends UsageTotals {
@@ -184,6 +197,7 @@ export type SegmentUsageFacts = Pick<
   | 'cacheReadTokens'
   | 'cacheWriteTokens'
   | 'costUsd'
+  | 'estimate'
   | 'unread'
 >;
 
@@ -207,6 +221,7 @@ function emptyTotals(): UsageTotals {
     costUsd: 0,
     missingCost: 0,
     cost: { metered: emptyShare(), subscription: emptyShare(), unknown: emptyShare() },
+    estimate: { runs: 0, usd: 0, noPrice: 0, noTokens: 0 },
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
@@ -233,14 +248,14 @@ function durations(run: RunUsageFacts, endedAt: string): { queueMs: number; runM
   return queueMs >= 0 && runMs >= 0 ? { queueMs, runMs } : undefined;
 }
 
-function add(t: UsageTotals, run: RunUsageFacts): void {
+function add(t: UsageTotals, run: RunUsageFacts, estimate: CostEstimate | undefined): void {
   if (run.endedAt === undefined) {
     t.running += 1;
     return;
   }
   t.runs += 1;
   if (run.startedAt === undefined) t.notStarted += 1;
-  addReadings(t, run);
+  addReadings(t, run, estimate);
   const spent = durations(run, run.endedAt);
   if (spent) {
     t.queueMs += spent.queueMs;
@@ -257,7 +272,7 @@ function addSegment(t: UsageTotals, run: SegmentUsageFacts): void {
   t.runs += 1;
   t.noQueue += 1;
   if (run.outcome === 'spawn_failed' || run.outcome === 'admission_blocked') t.notStarted += 1;
-  addReadings(t, run);
+  addReadings(t, run, run.estimate);
   const ms = run.durationMs;
   if (ms !== undefined && Number.isFinite(ms) && ms >= 0) t.runMs += ms;
   else t.missingTime += 1;
@@ -267,6 +282,7 @@ function addSegment(t: UsageTotals, run: SegmentUsageFacts): void {
 function addReadings(
   t: UsageTotals,
   run: TokenCounts & { costUsd?: number | undefined; billing?: BillingKind | undefined },
+  estimate: CostEstimate | undefined,
 ): void {
   const input = tokens(run.inputTokens);
   const output = tokens(run.outputTokens);
@@ -296,6 +312,12 @@ function addReadings(
     t.missingCost += 1;
     share.missing += 1;
   }
+  if (estimate?.kind === 'estimated') {
+    t.estimate.runs += 1;
+    // 到小数点后 6 位：一笔笔加会带出浮点尾巴
+    t.estimate.usd = Math.round((t.estimate.usd + estimate.usd) * 1_000_000) / 1_000_000;
+  } else if (estimate?.kind === 'noPrice') t.estimate.noPrice += 1;
+  else if (estimate?.kind === 'noTokens') t.estimate.noTokens += 1;
 }
 
 function modelOf(
@@ -330,9 +352,10 @@ export function summarizeUsage(
       stage = { stage: run.stage, ...emptyTotals() };
       byStage.set(run.stage, stage);
     }
-    add(total, run);
-    add(modelOf(byModel, run), run);
-    add(stage, run);
+    // 老流程（Fusion，已被替代）的会话不估：它记的模型是路由编号，对不上目录；只估三段的流水（readSegmentRun 里估好）
+    add(total, run, undefined);
+    add(modelOf(byModel, run), run, undefined);
+    add(stage, run, undefined);
   }
   const bySegment = new Map<
     SegmentKind | null,

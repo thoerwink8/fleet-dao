@@ -20,6 +20,7 @@ import {
   UpdateRepoDispatchRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
+  UpdateTaskRoutePinRequest,
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
@@ -232,6 +233,11 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     async taskAction(taskId, body) {
       await send('POST', apiUrl(R.taskAction.path, { taskId }), R.taskAction.response, {
         body: TaskActionRequest.parse(body),
+      });
+    },
+    async updateTaskRoutePin(taskId, body) {
+      return send('PUT', apiUrl(R.updateTaskRoutePin.path, { taskId }), R.updateTaskRoutePin.response, {
+        body: UpdateTaskRoutePinRequest.parse(body),
       });
     },
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),

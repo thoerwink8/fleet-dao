@@ -980,9 +980,43 @@ export function createSeed(now: number): MockState {
   ]);
   addSeg('t-14', [
     seg('t-14', 14, 'scope', 'opus-5.5', -150, -141),
+    {
+      // 拼车池上跑的一轮：执行体没报花费（订阅制），页面按模型目录的单价估一个数、标「估算」
+      id: 'seg-t-14-manual-170',
+      segment: 'manual',
+      taskId: 't-14',
+      issueNumber: 14,
+      model: 'opus-5.5',
+      channel: 'ch-claude',
+      tier: 'medium',
+      startedAt: at(-140),
+      endedAt: at(-139),
+      outcome: 'failed',
+      failureReason: '上游 529 过载，换路由重来',
+      inputTokens: 8_200,
+      outputTokens: 600,
+      cacheReadTokens: 96_000,
+      cacheWriteTokens: 12_000,
+    },
     seg('t-14', 14, 'manual', 'opus-5.5', -138, -52, { tier: 'medium' }),
     seg('t-14', 14, 'verify', 'gpt-5.6-luna', -6),
   ]);
+  // 人在单子页给 #14 指定了模型：动手用 Kimi（下一轮生效），验收钉 Grok
+  {
+    const t14 = tasks.find((x) => x.task.id === 't-14');
+    if (t14) {
+      t14.routePins = [
+        {
+          segment: 'manual',
+          modelId: 'kimi-k3',
+          setBy: 'u-lan',
+          setAt: at(-20),
+          reason: '想看看 Kimi 写得怎么样',
+        },
+        { segment: 'verify', modelId: 'grok-4.7', setBy: 'u-lan', setAt: at(-18) },
+      ];
+    }
+  }
   addSeg('t-15', [seg('t-15', 15, 'scope', 'opus-5.5', -93)]);
   addSeg('t-16', [
     seg('t-16', 16, 'scope', 'sonnet-5', -70, -60),

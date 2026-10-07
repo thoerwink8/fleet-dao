@@ -126,11 +126,31 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
   );
 }
 
-/** 花费一格：按量是真花的钱，放大写；没有按量的写套餐内折合；读不到的写明。 */
+/**
+ * 花费一格：按量是真花的钱，放大写；没有按量的写套餐内折合；执行体一笔花费都没报（订阅制）时写按目录单价的估算；
+ * 估都估不了的写明为什么（没有单价、token 没读全），不写 0。
+ */
 function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   const { metered, subscription, unknown } = t.cost;
   const pick = metered.runs ? metered : subscription.runs ? subscription : unknown;
   const r = reading(pick.usd, pick.missing, pick.runs);
+  const e = t.estimate;
+  const estimateNotes = [
+    e.runs ? `另估 ${formatUsd(e.usd)}` : '',
+    e.noPrice ? `${e.noPrice} 笔没有单价` : '',
+    e.noTokens ? `${e.noTokens} 笔估不了` : '',
+  ].filter(Boolean);
+  if (r.kind === 'missing' && (e.runs || e.noPrice || e.noTokens)) {
+    // 一笔都没报花费：大字写估算（标「估算」），估不了的写原因
+    return (
+      <Stat
+        label="花费"
+        value={e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了'}
+        accent={e.runs ? undefined : 'text-ink-stall'}
+        hint={['执行体没报花费，按目录单价 × token 估', ...estimateNotes.slice(e.runs ? 1 : 0)].join(' · ')}
+      />
+    );
+  }
   const kind =
     pick === metered
       ? '按量（真花的钱）'
@@ -155,7 +175,12 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
       hint={
         r.kind === 'none'
           ? notYet
-          : [kind, r.kind === 'partial' ? `另有 ${r.missing} 次没读到` : '', ...rest]
+          : [
+              kind,
+              r.kind === 'partial' && !estimateNotes.length ? `另有 ${r.missing} 次没读到` : '',
+              ...estimateNotes,
+              ...rest,
+            ]
               .filter(Boolean)
               .join(' · ')
       }
@@ -421,18 +446,41 @@ function runFigures(run: SegmentRunView): string[] {
       `${prefix}${formatUsd(run.costUsd)}${run.billing === undefined ? '（分不清按量、套餐内）' : ''}`,
     );
   }
+  if (run.estimate?.kind === 'estimated') parts.push(`估算 ${formatUsd(run.estimate.usd)}（按目录单价）`);
   if (run.memoryPeakMb !== undefined) parts.push(`内存峰值 ${formatCount(run.memoryPeakMb)} MB`);
   return parts;
 }
 
-function RunRow({ run, repo, now }: { run: SegmentRunView; repo: Repo; now: number }) {
+/** 这一笔没报花费、也估不了：为什么（没有单价、token 没读全）。 */
+function estimateGap(run: SegmentRunView): string | undefined {
+  if (run.estimate?.kind === 'noPrice') return `${run.estimate.why}，估不了`;
+  if (run.estimate?.kind === 'noTokens') return run.estimate.why;
+  return undefined;
+}
+
+function RunRow({
+  run,
+  repo,
+  now,
+  nth,
+}: {
+  run: SegmentRunView;
+  repo: Repo;
+  now: number;
+  /** 这一段的第几次（按起跑先后）。 */
+  nth: number;
+}) {
   const live = liveMs(run, now);
+  const gap = estimateGap(run);
   const timeUnread = run.unread.some((n) => n.item === 'time');
   const figures = runFigures(run);
   return (
     <li className="py-3" data-run={run.id}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <SegmentTag segment={run.segment} />
+        <span className="num text-caption text-muted-foreground" data-nth={nth}>
+          第 {nth} 次
+        </span>
         <span className="num text-sub font-medium">{run.modelName}</span>
         {run.tier ? (
           <span className="text-caption text-muted-foreground">{tierLabel[run.tier]}</span>
@@ -493,6 +541,11 @@ function RunRow({ run, repo, now }: { run: SegmentRunView; repo: Repo; now: numb
           {run.branch ? <span className="num truncate">{run.branch}</span> : null}
         </div>
       ) : null}
+      {gap ? (
+        <p className="mt-1 text-caption text-ink-stall" data-estimate-gap>
+          花费 · {gap}
+        </p>
+      ) : null}
       {run.failureReason ? (
         <p className="mt-1 text-caption text-muted-foreground">为什么没成：{run.failureReason}</p>
       ) : null}
@@ -518,8 +571,14 @@ export function SegmentRunList({ d, now }: { d: TaskDetail; now: number }) {
       bodyClassName="px-4 py-1"
     >
       <ol className="divide-y">
-        {d.segmentRuns.map((run) => (
-          <RunRow key={run.id} run={run} repo={d.repo} now={now} />
+        {d.segmentRuns.map((run, i) => (
+          <RunRow
+            key={run.id}
+            run={run}
+            repo={d.repo}
+            now={now}
+            nth={d.segmentRuns.slice(0, i + 1).filter((r) => r.segment === run.segment).length}
+          />
         ))}
       </ol>
     </Panel>

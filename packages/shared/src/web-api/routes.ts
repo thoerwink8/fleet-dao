@@ -51,7 +51,13 @@ import {
   UpdateSettingRequest,
   UpdateSettingResponse,
 } from './settings.ts';
-import { TaskActionRequest, TaskActionResponse, TaskDetailResponse } from './task.ts';
+import {
+  TaskActionRequest,
+  TaskActionResponse,
+  TaskDetailResponse,
+  UpdateTaskRoutePinRequest,
+  UpdateTaskRoutePinResponse,
+} from './task.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 
@@ -90,6 +96,13 @@ export const WebRoutes = {
     path: '/tasks/:taskId/actions',
     request: TaskActionRequest,
     response: TaskActionResponse,
+  },
+  /** 给这张单的一段（动手、验收）指定模型或清掉指定（task_route_pins）；引擎下一次给这一段选路就照它。网关通行证不认。 */
+  updateTaskRoutePin: {
+    method: 'PUT',
+    path: '/tasks/:taskId/route-pin',
+    request: UpdateTaskRoutePinRequest,
+    response: UpdateTaskRoutePinResponse,
   },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
   routingLayers: { method: 'GET', path: '/routing/layers', response: RoutingLayersResponse },

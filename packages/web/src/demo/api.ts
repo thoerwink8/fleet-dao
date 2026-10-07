@@ -46,6 +46,8 @@ export function createDemoApi(inner: MockApi): FleetApi {
     board: async (repoId) => redactBoard(await inner.board(repoId), detailLevel()),
     task: async (taskId) => redactTaskDetail(await inner.task(taskId), detailLevel()),
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
+    // 指定模型要读路由两层（演示版没有路由页），写一律拒
+    updateTaskRoutePin: () => Promise.reject(hidden('指定模型')),
     routing: () => inner.routing(),
     // 路由页只在正式驾驶舱里有（演示版没有这个模块）。
     routingLayers: () => Promise.reject(hidden('路由')),

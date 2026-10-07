@@ -109,6 +109,8 @@ describe('一张单按模型、按阶段、整张合计', () => {
         subscription: { runs: 1, usd: 0.25, missing: 0 },
         unknown: { runs: 0, usd: 0, missing: 0 },
       },
+      // 报了花费的不另估
+      estimate: { runs: 0, usd: 0, noPrice: 0, noTokens: 0 },
       queueMs: 60_000,
       runMs: 600_000,
       missingTime: 0,

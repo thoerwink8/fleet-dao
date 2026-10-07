@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：任务详情，和发给工作流的信号。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
+import type { CostEstimate } from '../model-prices.ts';
 import type { SegmentRunView } from '../segment-runs.ts';
 import type { TaskUsage } from '../usage.ts';
 import { BoardSubtaskSchema, RepoSchema } from './board.ts';
@@ -72,6 +73,8 @@ export const UsageTotalsSchema = z.object({
   missingCost: Count,
   /** 花费按计费方式分开：按量（真花的钱）、套餐内（按 API 价折合，不另花钱）、渠道查不到分不清的。 */
   cost: z.object({ metered: CostShareSchema, subscription: CostShareSchema, unknown: CostShareSchema }),
+  /** 没报花费的那几笔按模型目录的单价估（model-prices.ts）：估成了几笔、合计；没有单价几笔；token 没读全几笔。 */
+  estimate: z.object({ runs: Count, usd: z.number().min(0), noPrice: Count, noTokens: Count }),
   queueMs: Count,
   runMs: Count,
   missingTime: Count,
@@ -102,6 +105,15 @@ export const UnreadNoteSchema = z.object({
   reason: z.string().min(1),
 });
 
+/** 一笔没报花费时按目录单价的估算（model-prices.ts 的 CostEstimate）。 */
+export const CostEstimateSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('estimated'), usd: z.number().min(0) }),
+  z.object({ kind: z.literal('noPrice'), why: z.string().min(1) }),
+  z.object({ kind: z.literal('noTokens'), why: z.string().min(1) }),
+]);
+/** 编译期闸：和 model-prices.ts 的形状一字不差。 */
+export const COST_ESTIMATE_MATCHES: Same<z.infer<typeof CostEstimateSchema>, CostEstimate> = true;
+
 /**
  * 三段（库里的 runs 表）的一笔，读好给页面的样子：只给认得出的值，认不出、没记的写在 unread 里带原因，不拿 0 顶。
  * 怎么读见 segment-runs.ts。
@@ -130,6 +142,8 @@ export const SegmentRunSchema = z.object({
   cacheReadTokens: Count.optional(),
   cacheWriteTokens: Count.optional(),
   costUsd: z.number().min(0).optional(),
+  /** 执行体没报花费（订阅制）时按目录单价估的；报了花费的、在跑的、没起来的没有。 */
+  estimate: CostEstimateSchema.optional(),
   memoryPeakMb: Count.optional(),
   failureReason: z.string().optional(),
   prNumber: z.number().int().positive().optional(),
@@ -141,6 +155,46 @@ export const SegmentRunSchema = z.object({
 /** 编译期闸：和 segment-runs.ts 读出来的形状一字不差。 */
 export const SEGMENT_RUN_MATCHES_READING: Same<z.infer<typeof SegmentRunSchema>, SegmentRunView> = true;
 
+// —— 按单指定模型（驾驶舱改版 2026-10-07：「每个任务能点进去随意切换模型」）——
+// 存在库里（task_route_pins），引擎每次给这张单的这一段选路时现读（engine 的 real/store-ports.ts）：在跑的这一轮不打断，
+// 下一次选路（下一轮、重试、验收开始）就按它；指定的模型派不出时引擎停下等人、写明原因，不悄悄换别的。
+
+/** 经选路的两段：动手、验收（对题在对话里做，不经引擎选路，指定不了）。 */
+export const RoutedSegmentSchema = z.enum(['manual', 'verify']);
+
+export const TaskRoutePinSchema = z.object({
+  segment: RoutedSegmentSchema,
+  /** 指定的模型（模型目录的 id）；没有 = 清掉了指定、回到自动。 */
+  modelId: z.string().optional(),
+  /** 还钉到了这个模型下的哪条路由；没有 = 这个模型下按路由顺序挑。 */
+  routeId: z.string().optional(),
+  /** 谁定的（用户编号）。 */
+  setBy: z.string(),
+  setAt: Time,
+  reason: z.string().optional(),
+});
+
+export const TaskRoutePinsSchema = z.object({
+  /** 每段最多一条；没有这一段的 = 从没指定过，自动。 */
+  pins: z.array(TaskRoutePinSchema),
+  /** 这里读不了（开发环境的内存版没有这张表）：写明为什么，不拿空列表冒充「没指定」。 */
+  unavailable: z.string().optional(),
+});
+
+/** 指定或清掉一段的模型。modelId 为 null = 清掉、回到自动；routeId 只在给了 modelId 时能给，而且要是这个模型的路由。 */
+export const UpdateTaskRoutePinRequest = z
+  .object({
+    segment: RoutedSegmentSchema,
+    modelId: Id.nullable(),
+    routeId: Id.nullable().optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .refine((b) => !b.routeId || b.modelId, {
+    message: '只给路由不给模型不行：清掉指定时 routeId 也要空',
+    path: ['routeId'],
+  });
+export const UpdateTaskRoutePinResponse = TaskRoutePinSchema;
+
 export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
@@ -151,6 +205,8 @@ export const TaskDetailResponse = z.object({
   segmentRuns: z.array(SegmentRunSchema),
   /** 用量：老流程的会话加三段的流水整张合计、按模型；会话按阶段、三段按段（每段再按模型）。 */
   usage: TaskUsageSchema,
+  /** 这张单每段指定的模型（动手、验收）。 */
+  routePins: TaskRoutePinsSchema,
 });
 
 // —— 发给工作流的信号 ——

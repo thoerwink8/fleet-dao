@@ -32,12 +32,13 @@ import {
   integer,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { routes } from './catalog.ts';
+import { models, routes } from './catalog.ts';
 import { tasks } from './work.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
@@ -192,5 +193,41 @@ export const poolReservations = pgTable(
     check('pool_reservations_expires_after_reserved', sql`${t.expiresAt} > ${t.reservedAt}`),
     uniqueIndex('pool_reservations_task_segment_uq').on(t.taskId, t.segment),
     index('pool_reservations_route_idx').on(t.routeId),
+  ],
+);
+
+/**
+ * 人给一张单的一段（动手、验收）指定的模型（驾驶舱改版 2026-10-07：「每个任务能点进去随意切换模型」）。驾驶舱单子页写
+ * （api 的 task-route-pins.ts，和操作记录同一个事务），引擎每次给这张单的这一段选路时现读（engine 的 real/store-ports.ts）：
+ * 只派这个模型（钉了路由的只派那条）的路由，派不出就等或停下等人、写明原因，不悄悄换别的；在跑的那一轮不打断。
+ * 一张单一段一行，改就覆盖写；model_id 为空 = 清掉了指定、回到自动（不删行：谁什么时候清的留着）。
+ */
+export const taskRoutePins = pgTable(
+  'task_route_pins',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    /** 哪一段（ROUTED_SEGMENTS）：对题不经选路，指定不了。 */
+    segment: text('segment').$type<RoutedSegment>().notNull(),
+    /** 指定的模型；空 = 自动（按路由两层的顺序）。 */
+    modelId: text('model_id').references(() => models.id),
+    /** 还钉到这个模型下的哪条路由；空 = 这个模型下按路由顺序挑。只能是这个模型的路由（下面的复合外键）。 */
+    routeId: text('route_id'),
+    /** 谁定的（驾驶舱用户编号）。 */
+    setBy: text('set_by').notNull(),
+    setAt: timestamp('set_at', tz).notNull(),
+    reason: text('reason'),
+  },
+  (t) => [
+    primaryKey({ name: 'task_route_pins_pk', columns: [t.taskId, t.segment] }),
+    check('task_route_pins_segment_routed', sql`${t.segment} in ('manual', 'verify')`),
+    check('task_route_pins_route_needs_model', sql`${t.routeId} is null or ${t.modelId} is not null`),
+    // 钉的路由要挂在钉的模型下（routes_id_model_unique）：不许钉一条别的模型的路由
+    foreignKey({
+      name: 'task_route_pins_route_of_model_fk',
+      columns: [t.routeId, t.modelId],
+      foreignColumns: [routes.id, routes.modelId],
+    }),
   ],
 );

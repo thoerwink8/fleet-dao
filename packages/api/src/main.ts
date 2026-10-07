@@ -58,6 +58,7 @@ import { pgRoutingOrder } from './routing-order.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { readEnvSnapshot, readHomeSnapshot } from './snapshots.ts';
+import { pgTaskRoutePins } from './task-route-pins.ts';
 import { connectTemporal, ENGINE_OFF } from './temporal.ts';
 import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
@@ -221,6 +222,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     routingEfforts: pgRoutingEfforts(db, now),
     // 路由两层的先后和开关（母单 #1089）：驾驶舱「路由」页改的就是选路读的那两张表的 position、enabled
     routingOrder: pgRoutingOrder(db, now),
+    // 按单指定模型（驾驶舱改版 2026-10-07）：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
+    taskRoutePins: pgTaskRoutePins(db, now),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /changelog 的发布版本号（#725）：里程碑现读 GitHub，已发的版本看这一版自己带的 CHANGELOG.md

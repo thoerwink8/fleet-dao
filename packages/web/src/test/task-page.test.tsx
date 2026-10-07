@@ -118,6 +118,7 @@ function detailWith(facts: SegmentRunFacts[], state: TaskDetail['task']['state']
     runs: [],
     segmentRuns,
     usage: summarizeUsage([], segmentRuns),
+    routePins: { pins: [] },
   });
 }
 
@@ -184,11 +185,13 @@ describe('【失败】读不到的都写明，不写 0', () => {
     const box = await panel('三段');
     const manual = segmentRow(box, 'manual');
     // token、缓存、当量、花费四格各写一次没读到（只有一个模型，不再多一行）；没有哪格写成 0
+    // 花费那格另写为什么也估不了（token 没读全，按目录单价估不出来），不拿 0 顶
     expect([...manual.querySelectorAll('[data-unread]')].map((n) => n.textContent)).toEqual([
       '没读到',
       '没读到',
       '没读到',
       '套餐内 · 花费没读到',
+      '1 笔 token 没读全，估不了',
     ]);
     expect(within(manual).queryByText('0 / 0')).toBeNull();
     expect(within(manual).queryByText('0')).toBeNull();

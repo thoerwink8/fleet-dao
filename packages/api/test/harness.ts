@@ -142,6 +142,8 @@ export interface HarnessOptions {
   routingEfforts?: Deps['routingEfforts'];
   /** 路由两层的先后和开关（母单 #1089）；不给就是没接上（内存版、开发环境一样）。 */
   routingOrder?: Deps['routingOrder'];
+  /** 按单指定模型（驾驶舱改版 2026-10-07）；不给就是没接上（内存版、开发环境一样）。 */
+  taskRoutePins?: Deps['taskRoutePins'];
   /** 会话用户切号的现状（#194，额度页顶上一行）；不给就是没接上（内存版、开发环境一样）。 */
   orgSwitch?: Deps['orgSwitch'];
   /** 拼车额度对账（#194 方案 4.7）；不给就是没接上。 */
@@ -191,6 +193,7 @@ function wire<S extends Store>(
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
     ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),
+    ...(options.taskRoutePins ? { taskRoutePins: options.taskRoutePins } : {}),
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
     ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
     ...(options.release ? { release: options.release } : {}),

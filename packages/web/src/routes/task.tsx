@@ -1,4 +1,5 @@
-// 任务页（/tasks/:taskId）：一张单走了哪几段、每段每个模型花了多久、多少 token 和钱（#216）。
+// 任务页（/tasks/:taskId）：一张单走了哪几段、每段每个模型花了多久、多少 token 和钱（#216）；动手、验收各用哪个模型，
+// 能在这里指定或回到自动（驾驶舱改版 2026-10-07，components/task-model-pins.tsx）。执行体没报花费的按目录单价估、标「估算」。
 // 主页「在跑的」卡片、「要你拍的」都链到这里。三段的单读 runs 表的流水（segmentRuns、usage.bySegment）；
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
@@ -12,13 +13,14 @@ import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { StatusChip } from '../components/status';
+import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
 import { UsagePanel } from '../components/usage';
-import { canSee } from '../demo/access';
+import { canSee, isDemo } from '../demo/access';
 import { NotOpen } from '../demo/views';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { taskStateLabel, taskTone } from '../lib/status';
+import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
@@ -77,22 +79,40 @@ function SessionPart({ d, now, mixed }: { d: TaskDetail; now: number; mixed: boo
   );
 }
 
+/** 「用哪个模型」：演示版没有路由页、改不了，不画；结束了的单从没指定过，也没什么可看的，不画。 */
+function Pins({ d, now }: { d: TaskDetail; now: number }) {
+  if (isDemo()) return null;
+  if (isTaskFinished(d.task) && !d.routePins.pins.length && !d.routePins.unavailable) return null;
+  return <TaskModelPins d={d} now={now} />;
+}
+
 function Body({ d, now }: { d: TaskDetail; now: number }) {
   if (!d.segmentRuns.length && !d.runs.length) {
     return (
-      <Panel>
-        <Empty
-          icon={ListChecks}
-          title="这张单还没跑过"
-          hint="三段（对题、动手、验收）跑起来以后，每一笔都记在这里。"
-        />
-      </Panel>
+      <>
+        <Panel>
+          <Empty
+            icon={ListChecks}
+            title="这张单还没跑过"
+            hint="三段（对题、动手、验收）跑起来以后，每一笔都记在这里。"
+          />
+        </Panel>
+        <Pins d={d} now={now} />
+      </>
     );
   }
-  if (!d.segmentRuns.length) return <SessionPart d={d} now={now} mixed={false} />;
+  if (!d.segmentRuns.length) {
+    return (
+      <>
+        <SessionPart d={d} now={now} mixed={false} />
+        <Pins d={d} now={now} />
+      </>
+    );
+  }
   return (
     <>
       <SegmentStats d={d} now={now} />
+      <Pins d={d} now={now} />
       <div className="mt-4 space-y-4">
         <SegmentBreakdown d={d} now={now} />
         <SegmentRunList d={d} now={now} />
