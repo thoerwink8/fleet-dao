@@ -20,6 +20,7 @@ import {
   runIntakeJob,
   screenListed,
   screenPlan,
+  workflowPathIn,
 } from '../src/jobs/intake.ts';
 
 const NOW = new Date('2026-10-02T14:00:00.000Z');
@@ -311,6 +312,96 @@ describe('runIntakeJob · 一轮', () => {
     expect(noLabel.started).toEqual([]);
     expect(b.outcome).toBe('partial');
     expect(b.why).toContain('标签接口 502');
+  });
+
+  it('正文的「已知的模块」写了 .github/workflows/ 路径 → 不起，留一句话、贴一次「本机做」，不读 PR 列表（#1194）', async () => {
+    const body = BODY.replace(
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '- `.github/workflows/ci.yml`：CI 工作流',
+    );
+    let prRead = 0;
+    const h = harness(
+      {
+        async openPrClaims() {
+          prRead += 1;
+          return new Map();
+        },
+      },
+      { issues: [issue({ body })] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.key).toBe('intake-touches-workflows');
+    expect(h.comments[0]?.body).toContain('.github/workflows/ci.yml');
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(prRead).toBe(0);
+    await runIntakeJob(h.deps);
+    expect(h.comments).toHaveLength(1); // 再来一轮不重复留言
+  });
+
+  it('场景、怎么算做完里写了工作流路径也算；只在「原话」里提到不算（照拉）', async () => {
+    const inScene = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: BODY.replace('创始人要在驾驶舱', '要改 .github/workflows/ 下的 ci.yml，创始人要在驾驶舱'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inScene.deps);
+    expect(inScene.started).toEqual([]);
+    expect(inScene.localMarked).toEqual([12]);
+
+    const inCriteria = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: BODY.replace('1. 页面上能看到', '1. `.github/workflows/ci.yml` 里有一步；页面上能看到'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inCriteria.deps);
+    expect(inCriteria.started).toEqual([]);
+
+    const inQuote = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: BODY.replace(
+              '「我回来打开驾驶舱',
+              '「顺口说一句 .github/workflows/ci.yml 慢。我回来打开驾驶舱',
+            ),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inQuote.deps);
+    expect(inQuote.started).toHaveLength(1);
+    expect(inQuote.localMarked).toEqual([]);
+  });
+
+  it('workflowPathIn：没写返回 null；正文不是文字（读不到）抛错，不当成没写（故意造出失败）', () => {
+    expect(workflowPathIn(BODY)).toBeNull();
+    expect(workflowPathIn('')).toBeNull();
+    expect(() => workflowPathIn(undefined)).toThrow(/读不到/);
+    expect(() => workflowPathIn(null)).toThrow(/读不到/);
+  });
+
+  it('正文读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（partial）', async () => {
+    const h = harness({}, { issues: [issue({ body: null as unknown as string })] });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(h.comments).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('单正文读不到');
   });
 
   it('登记的是 5 分钟一轮、连着三轮没跑成才过期', () => {
