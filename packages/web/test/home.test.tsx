@@ -2,15 +2,18 @@
 // 主页（/）三块骨架的测试：
 // - 路由进来的四种状态：loading（骨架屏）/ error（照实说没读成）/ notWired（整块待实现）/ data（真的有数据，三块各自画出来）。
 // - 「verify_pending」「还没验」不画成失败红：卡片上有专属的 badge，不接 fail 颜色。
+// - 「在跑的」是初版那样的思维导图看板（中心 → 三段 → 单子）；手机上是树形列表。
 // - 持续状态条有问题也用提示色，不伪装成失败。
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MotionGlobalConfig } from 'motion/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiProvider } from '../src/api/client';
 import { createMockApi } from '../src/api/mock/server';
 import type { HomeData, HomeState } from '../src/components/home/types';
+import { TaskActionsProvider } from '../src/components/task-actions';
 import { ThemeProvider } from '../src/components/theme-provider';
 import { TooltipProvider } from '../src/components/ui/tooltip';
 import Home from '../src/routes/home';
@@ -22,6 +25,9 @@ vi.mock('../src/api/client', async () => {
 });
 
 import { useHome } from '../src/api/client';
+
+// 看板详情从右边滑进来（motion）：happy-dom 里卸载时取消动画会抛一个没人接的 AbortError，测试里不放动画
+MotionGlobalConfig.skipAnimations = true;
 
 afterEach(cleanup);
 
@@ -35,7 +41,9 @@ function renderHome(state: HomeState) {
         <ApiProvider api={api}>
           <ThemeProvider>
             <TooltipProvider>
-              <Home />
+              <TaskActionsProvider>
+                <Home />
+              </TaskActionsProvider>
             </TooltipProvider>
           </ThemeProvider>
         </ApiProvider>
@@ -155,8 +163,10 @@ describe('home（/）：四种状态', () => {
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
   });
 
-  test('data：三块各画出有数据的样子', () => {
+  test('data：三块各画出有数据的样子', async () => {
     renderHome({ status: 'data', data: SAMPLE });
+    // 「在跑的」画布按需加载、排完版才有卡片
+    await screen.findByText('清理：删编排层、删 Fusion');
     // 决策块
     expect(screen.getByText(/PR #421「把路由配置改两层」要审/)).toBeTruthy();
     expect(screen.getByText(/#509：v3 第三阶段要不要先开演练场/)).toBeTruthy();
@@ -171,11 +181,17 @@ describe('home（/）：四种状态', () => {
     // 状态条
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
     expect(screen.getByText(/12 在线 · 2 探不通/)).toBeTruthy();
-    expect(screen.getByText(/引擎已停用/)).toBeTruthy();
+    // 引擎那一格（看板中心节点上也写一遍，这里只认状态条里的）
+    expect(
+      Array.from(document.querySelectorAll('[data-health-chip]')).some((el) =>
+        /引擎已停用/.test(el.textContent ?? ''),
+      ),
+    ).toBe(true);
   });
 
-  test('verify_pending 卡片的 badge 不是 fail 红色（还没验不显示成失败）', () => {
+  test('verify_pending 卡片的 badge 不是 fail 红色（还没验不显示成失败）', async () => {
     renderHome({ status: 'data', data: SAMPLE });
+    await waitFor(() => expect(document.querySelector('[data-running-card="verify_pending"]')).toBeTruthy());
     const card = document.querySelector('[data-running-card="verify_pending"]');
     expect(card).toBeTruthy();
     const chip = card?.querySelector('[class*="bg-st-"]');
@@ -204,9 +220,16 @@ function ticket(n: number, over: Partial<HomeData['running'][number]> = {}): Hom
   };
 }
 
-describe('home（/）：三段流水线图', () => {
-  test('三条泳道固定对题 → 动手 → 验收，头上写在途数和平均耗时；没有样本写「还没有跑完的样本」，不写 0', () => {
+describe('home（/）：在跑的思维导图看板（初版看板的样子，数据是三段流水）', () => {
+  // 画布按需加载、ELK 排完版才挂节点：都要等
+  const nodeOf = (prefix: string) => document.querySelector(`.react-flow__node[data-id^="${prefix}"]`);
+  const waitBoard = () =>
+    waitFor(() => expect(document.querySelector('[data-flow-lane="scope"]')).toBeTruthy());
+
+  test('中心一个、三段固定对题 → 动手 → 验收，段上写在途数和平均耗时；没有样本写「还没有跑完的样本」，不写 0', async () => {
     renderHome({ status: 'data', data: SAMPLE });
+    await waitBoard();
+    expect(nodeOf('root')).toBeTruthy();
     const lanes = Array.from(document.querySelectorAll('[data-flow-lane]'));
     expect(lanes.map((l) => l.getAttribute('data-flow-lane'))).toEqual(['scope', 'manual', 'verify']);
     expect(lanes[0]?.textContent).toContain('对题');
@@ -216,7 +239,7 @@ describe('home（/）：三段流水线图', () => {
     expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
   });
 
-  test('对题没有样本（#761：在对话里做的，runs 里本来就没有）写「不计」；动手、验收没有样本照旧写「还没有跑完的样本」，不写成不计', () => {
+  test('对题没有样本（#761：在对话里做的，runs 里本来就没有）写「不计」；动手、验收没有样本照旧写「还没有跑完的样本」', async () => {
     renderHome({
       status: 'data',
       data: {
@@ -228,35 +251,55 @@ describe('home（/）：三段流水线图', () => {
         ],
       },
     });
+    await waitBoard();
     const lanes = Array.from(document.querySelectorAll('[data-flow-lane]'));
     expect(lanes[0]?.textContent).toContain('在对话里做的，不计耗时');
-    expect(lanes[0]?.textContent).not.toContain('还没有跑完的样本');
     expect(lanes[1]?.textContent).toContain('还没有跑完的样本');
     expect(lanes[1]?.textContent).not.toContain('不计');
-    expect(lanes[2]?.textContent).toContain('还没有跑完的样本');
     expect(lanes[2]?.textContent).not.toContain('不计');
   });
 
-  test('卡片：单号、标题、谁在做、本段待了多久、最近事件；等你拍的有标记和要拍的事', () => {
+  test('卡片：单号、标题、谁在做、本段待了多久、最近事件；等你拍的有标记、要拍的事另挂一片叶子', async () => {
     renderHome({ status: 'data', data: SAMPLE });
-    const doing = document.querySelector('[data-id^="ticket:556"]');
+    await waitBoard();
+    const doing = nodeOf('ticket:556');
     expect(doing?.textContent).toContain('#556');
     expect(doing?.textContent).toContain('Opus 5.5');
     expect(doing?.textContent).toContain('本段');
     expect(doing?.textContent).toContain('最近：动手开跑 · Opus 5.5');
-    const asking = document.querySelector('[data-id^="ticket:450"]');
+    const asking = nodeOf('ticket:450');
     expect(asking?.querySelector('[data-needs-founder="true"]')).toBeTruthy();
     expect(asking?.textContent).toContain('要你拍：要不要先开演练场？');
     expect(asking?.textContent).toContain('没有进程在跑');
+    expect(nodeOf('ask:450')?.textContent).toContain('要不要先开演练场？');
   });
 
-  test('点卡片进单子详情（链接指向任务页）', () => {
+  test('卡片右上角的链接进单子详情（站内任务页）', async () => {
     renderHome({ status: 'data', data: SAMPLE });
-    const link = document.querySelector('[data-id^="ticket:556"] a');
-    expect(link?.getAttribute('href')).toBe('/home3');
+    await waitBoard();
+    expect(nodeOf('ticket:556')?.querySelector('a')?.getAttribute('href')).toBe('/home3');
   });
 
-  test('出问题（超时 / 失败）的卡画成 fail 红，和「还没验」「在等」分开', () => {
+  test('单击卡片：右边滑出详情，写在哪一段、谁在做、在等什么，底下「打开单子详情」', async () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    await waitBoard();
+    fireEvent.click(nodeOf('ticket:76') as Element);
+    const panel = await waitFor(() => {
+      const el = document.querySelector('[data-board-detail]');
+      expect(el).toBeTruthy();
+      return el as HTMLElement;
+    });
+    expect(panel.textContent).toContain('路由配置改两层');
+    expect(panel.textContent).toContain('等 CI 走完');
+    expect(panel.textContent).toContain('还没验');
+    expect(
+      within(panel)
+        .getByRole('link', { name: /打开单子详情/ })
+        .getAttribute('href'),
+    ).toBe('/home3');
+  });
+
+  test('出问题（超时 / 失败）的卡画成 fail 红，和「还没验」「在等」分开', async () => {
     renderHome({
       status: 'data',
       data: {
@@ -269,40 +312,56 @@ describe('home（/）：三段流水线图', () => {
         ],
       },
     });
-    const bad = document.querySelector('[data-id^="ticket:1:"]');
+    await waitFor(() => expect(nodeOf('ticket:1:')).toBeTruthy());
+    const bad = nodeOf('ticket:1:');
     expect(bad?.querySelector('[class*="bg-st-fail"]')).toBeTruthy();
     expect(bad?.textContent).toContain('动手超时：30 分钟没交活');
-    const pending = document.querySelector('[data-id^="ticket:2:"]');
+    const pending = nodeOf('ticket:2:');
     expect(pending?.querySelector('[class*="bg-st-fail"]')).toBeNull();
     expect(pending?.textContent).toContain('等第二意见');
   });
 
-  test('一条泳道里单子多：只摆前 5 张，多的合成「还有 N 张」，不是丢掉', () => {
+  test('单子多：一张不少全画上（画布能缩放、收进视野），不合成「还有 N 张」', async () => {
     const running = Array.from({ length: 8 }, (_, i) => ticket(100 + i));
     renderHome({ status: 'data', data: { ...SAMPLE, running } });
-    expect(document.querySelectorAll('[data-id^="ticket:"]').length).toBe(5);
-    expect(document.querySelector('[data-id="more:manual"]')?.textContent).toContain('还有 3 张');
+    await waitFor(() =>
+      expect(document.querySelectorAll('.react-flow__node[data-id^="ticket:"]').length).toBe(8),
+    );
   });
 
-  test('超长标题：一行截断、悬停能看全，不撑破卡片', () => {
+  test('超长标题：最多两行截断、悬停能看全，不撑破卡片', async () => {
     const long = '一个非常非常长的标题'.repeat(12);
     renderHome({ status: 'data', data: { ...SAMPLE, running: [ticket(7, { title: long })] } });
-    const link = document.querySelector('[data-id^="ticket:7:"] a');
-    expect(link?.getAttribute('title')).toBe(long);
-    const titleEl = Array.from(link?.querySelectorAll('span') ?? []).find((el) => el.textContent === long);
-    expect(titleEl?.className).toContain('truncate');
+    await waitFor(() => expect(nodeOf('ticket:7:')).toBeTruthy());
+    const titleEl = nodeOf('ticket:7:')?.querySelector(`[title="${long}"]`);
+    expect(titleEl?.className).toContain('line-clamp-2');
   });
 
-  test('推不出在哪一段的单（segment=null）落进「还没分段」泳道，且只在有这样的单时才出现', () => {
+  test('推不出在哪一段的单（segment=null）挂在「还没分段」下面，且只在有这样的单时才出现', async () => {
     renderHome({ status: 'data', data: { ...SAMPLE, running: [ticket(9, { segment: null })] } });
-    const lanes = Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) =>
-      l.getAttribute('data-flow-lane'),
-    );
-    expect(lanes).toEqual(['scope', 'manual', 'verify', 'none']);
-    expect(screen.getByText('还没分段')).toBeTruthy();
+    await waitFor(() => expect(document.querySelector('[data-flow-lane="none"]')).toBeTruthy());
+    expect(
+      Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) => l.getAttribute('data-flow-lane')),
+    ).toEqual(['scope', 'manual', 'verify', 'none']);
     cleanup();
     renderHome({ status: 'data', data: SAMPLE });
+    await waitBoard();
     expect(document.querySelector('[data-flow-lane="none"]')).toBeNull();
+  });
+
+  test('「只看卡住的」：只剩等你拍、出问题的单，三段还在；工具条写「几 / 几 张单」', async () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    await waitBoard();
+    fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
+    await waitFor(() =>
+      expect(
+        Array.from(document.querySelectorAll('.react-flow__node[data-id^="ticket:"]')).map((n) =>
+          n.getAttribute('data-id'),
+        ),
+      ).toEqual(['ticket:450:thoerwink8/fleet-dao']),
+    );
+    expect(document.querySelectorAll('[data-flow-lane]').length).toBe(3);
+    expect(document.querySelector('[data-board-toolbar]')?.textContent).toMatch(/1\s*\/\s*3\s*张单/);
   });
 
   test('读不到：写明没读成并带「重试」，点了真的重试；不是空图', () => {
@@ -367,42 +426,42 @@ describe('home（/）：引擎那一格（#902 D7）', () => {
   });
 });
 
-describe('home（/）：窄屏上流水线图竖着叠（#902 D11）', () => {
-  const realRect = Element.prototype.getBoundingClientRect;
+describe('home（/）：手机上看板退化成可折叠的树形列表', () => {
   afterEach(() => {
-    Element.prototype.getBoundingClientRect = realRect;
+    vi.restoreAllMocks();
   });
-  const narrow = (width: number) => {
-    Element.prototype.getBoundingClientRect = function (this: Element) {
-      return {
-        x: 0,
-        y: 0,
-        left: 0,
-        top: 0,
-        right: width,
-        bottom: 100,
-        width,
-        height: 100,
-        toJSON() {},
-      } as DOMRect;
-    };
+  const phone = () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query.includes('max-width: 767px'),
+          media: query,
+          onchange: null,
+          addEventListener() {},
+          removeEventListener() {},
+          addListener() {},
+          removeListener() {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    );
   };
 
-  test('容器 340 宽（手机）：标成竖叠、没有缩放按钮、三条泳道还在、每张单还是一个节点', () => {
-    narrow(340);
+  test('手机宽度：没有画布，一段一组、组里每张单一张卡（整张卡点进单子详情）', () => {
+    phone();
     renderHome({ status: 'data', data: SAMPLE });
-    expect(document.querySelector('[data-flow-stacked="true"]')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '放大' })).toBeNull();
+    expect(document.querySelector('[data-board-tree]')).toBeTruthy();
+    expect(document.querySelector('.react-flow')).toBeNull();
     expect(
       Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) => l.getAttribute('data-flow-lane')),
     ).toEqual(['scope', 'manual', 'verify']);
-    expect(document.querySelectorAll('[data-id^="ticket:"]').length).toBe(SAMPLE.running.length);
+    expect(document.querySelectorAll('[data-running-card]').length).toBe(SAMPLE.running.length);
+    expect(document.querySelector('[data-running-card="doing"] a')?.getAttribute('href')).toBe('/home3');
   });
 
-  test('容器 1200 宽（桌面）：横排、有缩放按钮', () => {
-    narrow(1200);
+  test('手机上「只看卡住的」照样能用', () => {
+    phone();
     renderHome({ status: 'data', data: SAMPLE });
-    expect(document.querySelector('[data-flow-stacked="false"]')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '放大' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
+    expect(document.querySelectorAll('[data-running-card]').length).toBe(1);
   });
 });

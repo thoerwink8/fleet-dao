@@ -34,6 +34,9 @@ describe('/api/home（内存版）', () => {
     expect(home.running.map((r) => r.issueNumber)).toEqual([12]);
     expect(home.running[0]?.segment).toBeNull();
     expect(home.running[0]?.waitingReason).toBe('nothing');
+    // 首页看板上「继续 / 叫停」要库里的任务编号：和详情链接是同一张单
+    expect(home.running[0]?.taskId).toBeTruthy();
+    expect(home.running[0]?.link).toBe(`/tasks/${home.running[0]?.taskId}`);
 
     // 做完的：merged PR #39，反查到挂的单 #13 的标题；开着的 #41 不在这里。
     expect(home.done.map((d) => d.prNumber)).toEqual([39]);

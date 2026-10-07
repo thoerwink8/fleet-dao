@@ -179,12 +179,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   { files: [`${W}components/password-field.tsx`], specs: [spec('01-login'), spec('10-credentials')] },
   // 主页（02）；07c 在主页上切环境，08 从别页点回主页
   {
-    files: [
-      `${W}routes/home.tsx`,
-      `${W}components/home/`,
-      `${W}components/not-built.tsx`,
-      `${W}lib/home-flow-layout.ts`,
-    ],
+    files: [`${W}routes/home.tsx`, `${W}components/home/`, `${W}components/not-built.tsx`],
     specs: [spec('02-home'), spec('07c-nodes'), spec('08-backend-down')],
   },
   // 主页和单子详情共用

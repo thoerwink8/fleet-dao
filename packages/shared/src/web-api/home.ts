@@ -59,6 +59,8 @@ export const HomeRunningSchema = z.object({
     .optional(),
   /** 站内路径：任务详情。 */
   link: z.string(),
+  /** 库里的任务编号：首页看板上「继续 / 叫停」这类快捷操作要它（POST /api/tasks/:taskId/actions）。老环境推来的快照里没有，没有就不画操作。 */
+  taskId: Id.optional(),
 });
 
 /**
