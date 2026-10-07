@@ -52,8 +52,7 @@ export function digestEvidence(fields: readonly EvidenceField[], evidence: Evide
 const DAY = 24 * 3_600_000;
 
 /**
- * 每日上限的「今天」从 UTC 0 点算起：和额度读取器里 Jev 那个池的窗口一致（deploy/quota.json，
- * anchor 00:00Z、24 小时），驾驶舱额度页上的「今天花了多少」和这里停不停调用的是同一个数。
+ * 每日上限的「今天」从 UTC 0 点算起。花费记在 jev_answers，不写日账文件，额度读取器不读这个池。
  */
 export function dayStart(now: Date): Date {
   const t = now.getTime();

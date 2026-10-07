@@ -1,9 +1,10 @@
 {
-  "_说明": "额度读取器的配置（#1289）：读哪些池、各池凭据文件放在哪（只有池名和文件路径，不是密钥本身）。随发布的那一版带着，引擎的 quota-read 直接读它所在那一版的这份（packages/adapters/src/quota/config.ts 的默认路径），不再有手放的 /etc/fleet-dao/quota.json；FLEET_QUOTA_CONFIG 只给命令行和测试换位置。每个池的 poolId 要和目录配置（deploy/examples/catalog.example.json）的账号池 id 一一对上，packages/db/test/catalog.test.ts 钉着，少一个就红。密钥本身（Key 文件、各家 auth.json）仍然手放在机器上，不进仓；凭据缺失时该池如实报「读不到」（no_credentials），不会因此少读池。凭据在会话用户 fleet-agent-carpool 家里的，路径写它家里的绝对路径。以 _ 开头的键是注释。",
+  "_说明": "额度读取器的配置（#1289）：读哪些池、各池凭据文件放在哪（只有池名和文件路径，不是密钥本身）。随发布的那一版带着，引擎的 quota-read 直接读它所在那一版的这份（packages/adapters/src/quota/config.ts 的默认路径），不再有手放的 /etc/fleet-dao/quota.json；FLEET_QUOTA_CONFIG 只给命令行和测试换位置。写在这里的池，poolId 要和目录配置（deploy/catalog.json）的账号池 id 对上，packages/db/test/catalog.test.ts 钉着，多一个或少一个不是下面写明的例外就红。密钥本身（Key 文件、各家 auth.json）仍然手放在机器上，不进仓；凭据缺失时该池如实报「读不到」（no_credentials），不会因此少读池。凭据在会话用户 fleet-agent-carpool 家里的，路径写它家里的绝对路径。以 _ 开头的键是注释。",
+  "_jev不配": "目录里有 jev 池，这里不配。新系统没有旧系统的日账：会话用户家里没有 ~/.dao（也就没有 ~/.dao/judge-spend），packages/jev 把每次花费写进库里的 jev_answers，不写按日的 token 文件。配上那个目录，引擎用户每轮都报 no_usage_source（家目录 750，它连「目录不存在」都看不成，只会看到 EACCES）。每天花多少由 packages/jev 的 dailyUsdCap 自己停调用，不靠额度读取器。",
   "timeoutMs": 30000,
   "pools": [
     {
-      "_说明": "Claude 订阅·独享组织。跑 Claude Code 自带的 /usage（本地命令，不调模型、不花额度）。只能读这台机器当前挂的组织。",
+      "_说明": "Claude 订阅·独享组织。跑 Claude Code 自带的 /usage（本地命令，不调模型、不花额度）。只能读这台机器当前挂的组织。reclaude 在会话用户家里，引擎里经 fleet-agent-scope 以会话用户的身份起（和账本、Mirasim 桥接同一条 exec），不由引擎用户直接 spawn。",
       "poolId": "claude-solo",
       "channelId": "claude-sub",
       "name": "Claude 订阅 · 独享组织",
@@ -44,28 +45,6 @@
       "name": "Grok 订阅（Grok Build）",
       "reader": "grok-billing",
       "authFile": "/home/fleet-agent-carpool/.grok/auth.json"
-    },
-    {
-      "_说明": "Jev 判断题小模型：按量计费、没有账单接口，按我们自己的用量估；上限是自己定的日帽。现在读旧系统的日账，引擎接上库后删掉 usage 这一项。",
-      "poolId": "jev",
-      "channelId": "jev",
-      "name": "Jev 判断题",
-      "reader": "estimate",
-      "windows": [
-        {
-          "label": "day_usd",
-          "window": "period_usd",
-          "unit": "usd",
-          "periodHours": 24,
-          "anchor": "2026-01-01T00:00:00Z",
-          "limit": 0.3
-        }
-      ],
-      "usage": {
-        "type": "daily-token-files",
-        "dir": "/home/fleet-agent-carpool/.dao/judge-spend",
-        "usdPerMTok": 0.042
-      }
     }
   ]
 }

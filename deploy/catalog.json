@@ -1,5 +1,5 @@
 {
-  "_说明": "目录配置：族、渠道、账号池、模型、路由。这就是真文件，跟着版本走（#1286：不再有 /etc 下的一份、不再经保险箱放上去）：发布脚本在迁移之后跑这一版自带的 packages/db/src/bin/catalog.ts 装进库，只补缺，库里已有的行（驾驶舱里改过的）不覆盖；所以加模型、加路由就是改这个文件、合进主线、发版，见 docs/ops.md 第九节「目录配置」。各用途（阶段）用什么先后不在这里——那是路由两层（用途 → 模型、模型 → 路由），骨架在 packages/db/routing.default.json，发布时装进库（#574）；骨架里的模型和路由必须都在这里，否则发版装载器拒装。新补的模型在骨架里一律先关着（enabled: false）、不进任何用途的顺序，等人在驾驶舱或另开 PR 打开。目录里没有账号、邮箱、组织编号：账号池 id 是代号，账号和凭据在各自的机器配置里。账号池 id 要和额度读取器配置（仓里 deploy/quota.json）的 poolId 一一对上（packages/db/test/catalog.test.ts 钉着）。以 _ 开头的键是注释。",
+  "_说明": "目录配置：族、渠道、账号池、模型、路由。这就是真文件，跟着版本走（#1286：不再有 /etc 下的一份、不再经保险箱放上去）：发布脚本在迁移之后跑这一版自带的 packages/db/src/bin/catalog.ts 装进库，只补缺，库里已有的行（驾驶舱里改过的）不覆盖；所以加模型、加路由就是改这个文件、合进主线、发版，见 docs/ops.md 第九节「目录配置」。各用途（阶段）用什么先后不在这里——那是路由两层（用途 → 模型、模型 → 路由），骨架在 packages/db/routing.default.json，发布时装进库（#574）；骨架里的模型和路由必须都在这里，否则发版装载器拒装。新补的模型在骨架里一律先关着（enabled: false）、不进任何用途的顺序，等人在驾驶舱或另开 PR 打开。目录里没有账号、邮箱、组织编号：账号池 id 是代号，账号和凭据在各自的机器配置里。账号池 id 要和额度读取器配置（仓里 deploy/quota.json）的 poolId 对上（packages/db/test/catalog.test.ts 钉着；jev 不进额度配置，那里写了为什么）。以 _ 开头的键是注释。",
   "families": [
     { "id": "claude", "displayName": "Claude", "vendor": "Anthropic" },
     { "id": "gpt", "displayName": "GPT", "vendor": "OpenAI" },
@@ -16,7 +16,7 @@
     { "id": "cursor", "name": "Cursor 订阅", "billing": "subscription", "enabled": true },
     { "id": "xai", "name": "Grok 订阅（Grok Build）", "billing": "subscription", "enabled": true },
     {
-      "_说明": "TypeSafe 的 Jev 判断题：按量计费（design「已定」第 21 条算套餐内）、没有账单接口；每天的花费上限在 packages/jev 的 dailyUsdCap 和额度读取器配置里。只挂判断阶段。",
+      "_说明": "TypeSafe 的 Jev 判断题：按量计费（design「已定」第 21 条算套餐内）、没有账单接口；每天的花费上限在 packages/jev 的 dailyUsdCap（驾驶舱设置 judge.dailyUsdCap 优先）。额度读取器不读这个池。只挂判断阶段。",
       "id": "jev",
       "name": "Jev 判断题",
       "billing": "metered",
@@ -59,7 +59,7 @@
       "maxConcurrency": 6
     },
     {
-      "_说明": "Jev 判断题：不跑会话，只记额度（额度读取器按用量估）。判断用途（路由两层）排第一的路由 jev:jev-1.13:api-shell 挂在这里。",
+      "_说明": "Jev 判断题：不跑会话。花费记在 jev_answers，由 dailyUsdCap 自己停；没有旧系统的日账，额度读取器不读这个池（deploy/quota.json 写了为什么）。判断用途（路由两层）排第一的路由 jev:jev-1.13:api-shell 挂在这里。",
       "id": "jev",
       "channelId": "jev",
       "maxConcurrency": 1

@@ -132,11 +132,11 @@ async function readPool(
     now,
     signal: controller.signal,
     fetch: deps.fetch,
-    runCommand: deps.runCommand,
+    runCommand: user?.runCommand ?? deps.runCommand,
     readFile: user?.readFile ?? deps.readFile,
     listDir: deps.listDir,
     openWebSocket: deps.openWebSocket,
-    workDir: deps.workDir,
+    workDir: user?.workDir ?? deps.workDir,
     homeDir: user?.homeDir ?? deps.homeDir,
     env: deps.env,
     shared<T>(key: string, fn: () => Promise<T>): Promise<T> {

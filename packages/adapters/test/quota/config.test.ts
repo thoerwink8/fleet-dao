@@ -38,7 +38,7 @@ describe('仓里的额度配置和校验同步', () => {
     expect(config.pools.length).toBeGreaterThan(0);
   });
 
-  it('deploy/quota.json 过得了校验，六个池一个不少', async () => {
+  it('deploy/quota.json 过得了校验；五个池在读，jev 不配（没有日账）', async () => {
     const config = await loadQuotaConfig(REPO_QUOTA_CONFIG);
     expect(config.pools.map((p) => p.poolId)).toEqual([
       'claude-solo',
@@ -46,8 +46,13 @@ describe('仓里的额度配置和校验同步', () => {
       'mirasim-relay',
       'cursor',
       'grok',
-      'jev',
     ]);
+    const text = await readFile(REPO_QUOTA_CONFIG, 'utf8');
+    expect(text).toContain('"_jev不配"');
+    // 说明里会点出旧目录的名字；真正不许的是还有池配着那条用量。
+    const raw = JSON.parse(text) as { pools: { usage?: unknown; poolId?: string }[] };
+    expect(raw.pools.map((p) => p.poolId)).not.toContain('jev');
+    expect(raw.pools.every((p) => p.usage === undefined)).toBe(true);
   });
 
   it('凭据路径都是写死的绝对路径：没有占位符，会话用户的文件写它家里的路径', async () => {
@@ -65,7 +70,7 @@ describe('仓里的额度配置和校验同步', () => {
         ],
       ]),
     ) as Record<string, (string | undefined)[]>;
-    for (const poolId of ['claude-solo', 'mirasim-relay', 'cursor', 'grok', 'jev']) {
+    for (const poolId of ['claude-solo', 'mirasim-relay', 'cursor', 'grok']) {
       const own = (paths[poolId] ?? []).filter((v): v is string => typeof v === 'string');
       expect(own.length, poolId).toBeGreaterThan(0);
       for (const v of own) expect(v, poolId).toMatch(/^\/home\/fleet-agent-carpool\//);

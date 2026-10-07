@@ -288,3 +288,130 @@ describe('catAsUser：读不了就抛错，不回空串', () => {
     expect(await catAsUser(exec, USER, '/ok')).toBe('hello');
   });
 });
+
+const RECLAUDE = `/home/${USER}/.local/bin/reclaude`;
+const QUOTA_CWD = `/home/${USER}/.cache/fleet-dao/quota-cwd`;
+const ORG_LIST = '* 1\tn\tpersonal\tx\n';
+const USAGE_STDOUT = [
+  JSON.stringify({
+    type: 'assistant',
+    usage_report: {
+      rate_limits: {
+        limits: [{ kind: 'session', percent: 2, resets_at: '2026-10-08T12:00:00Z' }],
+        extra_usage: { is_enabled: false },
+      },
+    },
+  }),
+  JSON.stringify({ type: 'result', num_turns: 0, total_cost_usd: 0 }),
+].join('\n');
+
+/** 假的会话用户通道：mkdir / ls 当目录是空的；reclaude 按参数回话。 */
+function fakeSessionChannel(reclaude: (argv: string[]) => Partial<UserCommandResult>) {
+  const commands: UserCommand[] = [];
+  const exec = async (c: UserCommand): Promise<UserCommandResult> => {
+    commands.push(c);
+    const base = { stdout: Buffer.alloc(0), stderr: '', timedOut: false, aborted: false, code: 0 };
+    if (c.argv[0] === '/bin/mkdir' || c.argv[0] === '/bin/ls') return base;
+    const hit = reclaude(c.argv);
+    return { ...base, ...hit, stdout: hit.stdout ?? Buffer.alloc(0) };
+  };
+  return { exec, commands };
+}
+
+const claudeConfig = (): QuotaConfig =>
+  ({
+    pools: [
+      {
+        poolId: 'claude-solo',
+        channelId: 'claude-sub',
+        name: 'Claude 订阅 · 独享组织',
+        reader: 'claude-usage',
+        command: [RECLAUDE],
+        orgKind: 'solo',
+      },
+    ],
+  }) as unknown as QuotaConfig;
+
+describe('额度读取：claude-solo 经会话用户通道起 reclaude，不由引擎用户直接 spawn', () => {
+  function wire(reclaude: (argv: string[]) => Partial<UserCommandResult>) {
+    const { exec, commands } = fakeSessionChannel(reclaude);
+    const refuse = (what: string) => () => {
+      throw new Error(`引擎自己的身份不该碰 ${what}`);
+    };
+    const io = {
+      fetch: refuse('fetch'),
+      runCommand: refuse('runCommand（reclaude 要经会话用户起）'),
+      readFile: refuse('readFile'),
+      listDir: refuse('listDir'),
+      openWebSocket: refuse('openWebSocket'),
+      workDir: async () => '/home/engine-user/.cache/fleet-dao/quota-cwd',
+      homeDir: '/home/engine-user',
+      env: { PATH: '/usr/bin', HOME: '/home/engine-user' },
+    } as unknown as NonNullable<Parameters<typeof quotaReadJob>[0]['io']>;
+    const wired = quotaReadJob({
+      db: {} as Db,
+      io,
+      now: () => NOW,
+      asUser: quotaAsUser(exec, USER, DEFAULT_MIRASIM_HOME),
+    })();
+    const saved: PoolQuotaSnapshot[] = [];
+    const raised: { key: string; title: string; body: string }[] = [];
+    const resolved: string[] = [];
+    const runJob = (loadConfig: () => Promise<QuotaConfig>) =>
+      runQuotaReadJob({
+        ...wired,
+        loadConfig,
+        save: async (s) => {
+          saved.push(s);
+        },
+        lastReadOk: async (ids) => new Map(ids.map((id) => [id, null])),
+        raise: async (a) => {
+          raised.push(a);
+        },
+        resolve: async (key) => {
+          resolved.push(key);
+        },
+        runs: { start: async () => 1, finish: async () => undefined },
+        log: () => undefined,
+      });
+    return { commands, saved, raised, resolved, runJob, read: () => wired.read(claudeConfig()) };
+  }
+
+  const okReclaude = (argv: string[]): Partial<UserCommandResult> => {
+    if (argv.includes('org')) return { stdout: Buffer.from(ORG_LIST) };
+    if (argv.includes('/usage')) return { stdout: Buffer.from(USAGE_STDOUT) };
+    return { code: 1, stderr: `没认：${argv.join(' ')}` };
+  };
+
+  it('读成写进库、quota-read:claude-solo 提醒撤掉；命令是以会话用户跑它家里的 reclaude，工作目录在它家里', async () => {
+    const w = wire(okReclaude);
+    const run = await w.runJob(async () => claudeConfig());
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 1 });
+    expect(w.saved.map((s) => s.poolId)).toEqual(['claude-solo']);
+    expect(w.saved[0]?.windows.map((x) => x.label)).toContain('session');
+    expect(w.resolved).toContain('quota-read:claude-solo');
+    expect(w.raised).toEqual([]);
+    const reclaude = w.commands.filter((c) => c.argv[0] === RECLAUDE);
+    expect(reclaude.length).toBeGreaterThan(0);
+    expect(reclaude.every((c) => c.user === USER && c.cwd === QUOTA_CWD)).toBe(true);
+    expect(w.commands.some((c) => c.cwd.startsWith('/home/engine-user'))).toBe(false);
+  });
+
+  it('【故意造出的失败】会话用户通道里 reclaude 起不来（EACCES）：报明确原因，不写库、不当成空读数或 ok', async () => {
+    const w = wire(() => ({
+      code: null,
+      spawnError: `spawn ${RECLAUDE} EACCES`,
+    }));
+    const report = await w.read();
+    const r = report.results[0];
+    expect(r).toMatchObject({ ok: false, error: { code: 'unreachable' } });
+    expect(r && !r.ok && r.error.message).toContain(`reclaude org list 起不来：spawn ${RECLAUDE} EACCES`);
+    expect(r && !r.ok && 'windows' in r).toBe(false);
+    const run = await w.runJob(async () => claudeConfig());
+    expect(run.outcome).toBe('partial');
+    expect(w.saved).toEqual([]);
+    expect(w.raised.map((a) => a.key)).toEqual(['quota-read:claude-solo']);
+    expect(w.raised[0]?.body).toContain('EACCES');
+    expect(w.resolved).not.toContain('quota-read:claude-solo');
+  });
+});

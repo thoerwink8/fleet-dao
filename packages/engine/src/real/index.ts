@@ -12,8 +12,10 @@ import {
   parseSessionProxy,
   SESSION_USERS,
   type SessionUser,
+  sessionProxyEnv,
   switchSessionOrg,
 } from '@fleet-dao/adapters';
+import type { RunCommand } from '@fleet-dao/adapters/quota';
 import {
   createDb,
   type Db,
@@ -79,7 +81,7 @@ import {
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
-import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
+import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
@@ -322,10 +324,82 @@ export async function catAsUser(
 }
 
 /**
- * 额度读取里凭据在会话用户家里的三种读取器：引擎用户读不到。Cursor、Grok 经 exec 以会话用户读文件（#1195）；
- * Mirasim 池的令牌在会话用户家里、口又只许会话用户连，经桥接以会话用户的身份连（#1284，和账本、路由探针同一条路）。
+ * 以会话用户的身份起一条命令（claude-usage 起 reclaude）。和账本、Mirasim 桥接同一条 exec：fleet-agent-scope 降权后再跑，
+ * 引擎用户不直接 spawn 会话用户家里的二进制（那是 EACCES）。代理写上 /usr/bin/env 的参数，和读组织同一条（session-org.ts）；
+ * 没登记代理就不加。通道自己没起来、代理认不出，收成 spawnError 交回读取器，由它写成「起不来」的原因，不抛成空读数。
  */
-export const QUOTA_USER_READERS = ['cursor-dashboard', 'grok-billing', 'mirasim-relay'] as const;
+export function runCommandAsUser(exec: UserExec, user: SessionUser, proxy?: string): RunCommand {
+  return async (argv, { cwd, signal }) => {
+    let full = argv;
+    if (proxy) {
+      try {
+        const envArgs = Object.entries(sessionProxyEnv(proxy)).map(([k, v]) => `${k}=${v}`);
+        full = ['/usr/bin/env', ...envArgs, ...argv];
+      } catch (e) {
+        return {
+          code: null,
+          stdout: '',
+          stderr: '',
+          killed: false,
+          spawnError: errMessage(e),
+        };
+      }
+    }
+    let r: Awaited<ReturnType<UserExec>>;
+    try {
+      r = await exec({
+        user,
+        cwd,
+        argv: full,
+        timeoutMs: SESSION_ORG_TIMEOUT_MS,
+        scopeId: `quota-claude-${randomUUID().slice(0, 8)}`,
+        ...(signal ? { signal } : {}),
+      });
+    } catch (e) {
+      return { code: null, stdout: '', stderr: '', killed: false, spawnError: errMessage(e) };
+    }
+    return {
+      code: r.code,
+      stdout: r.stdout.toString('utf8'),
+      stderr: r.stderr,
+      killed: r.timedOut || r.aborted,
+      ...(r.spawnError ? { spawnError: r.spawnError } : {}),
+    };
+  };
+}
+
+/**
+ * 额度读取起 Claude Code 的工作目录：以会话用户建在它家里，每次核对是空的真目录。
+ * 引擎自己家的那份（quotaWorkDir）会话用户进不去；在 /tmp 或它的家目录根上起，会把那里的项目设置和钩子一起加载。
+ */
+export async function quotaCwdAsUser(exec: UserExec, user: SessionUser, home: string): Promise<string> {
+  const dir = `${home.replaceAll('{user}', user)}/.cache/fleet-dao/quota-cwd`;
+  const made = await execAs(exec, user, ['/bin/mkdir', '-p', '--', dir], 'quota-cwd');
+  if (made.code !== 0) throw new Error(describeFailure(`建额度读取目录 ${dir}`, made));
+  const listed = await execAs(exec, user, ['/bin/ls', '-A', '--', dir], 'quota-cwd-ls');
+  if (listed.code !== 0) throw new Error(describeFailure(`列额度读取目录 ${dir}`, listed));
+  const entries = listed.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (entries.length) {
+    throw new Error(`${dir} 不是空的（${entries.slice(0, 3).join('、')}），不在里面起 Claude Code`);
+  }
+  return dir;
+}
+
+/**
+ * 额度读取里凭据或二进制在会话用户家里的读取器：引擎用户读不到、也起不来。
+ * Cursor、Grok 经 exec 以会话用户读文件（#1195）；Mirasim 池经桥接以会话用户的身份连（#1284，和账本同一条路）；
+ * claude-usage 经同一条 exec 起 reclaude（二进制在会话用户家里，引擎用户直接 spawn 是 EACCES）。
+ */
+export const QUOTA_USER_READERS = [
+  'cursor-dashboard',
+  'grok-billing',
+  'mirasim-relay',
+  'claude-usage',
+] as const;
 
 export function quotaAsUser(
   exec: UserExec,
@@ -333,11 +407,15 @@ export function quotaAsUser(
   home: string,
   /** 给了就让 mirasim-relay 读取器经桥接连（mirasimDepsFor 的 connect）；不给它就仍读令牌文件、直连，在法国必然 EACCES。 */
   mirasim?: { connect(user: SessionUser): MirasimConnect },
+  /** 会话出网的代理（法国直连不给）。claude-usage 起 reclaude 时写上，和读组织同一条。 */
+  proxy?: string,
 ): NonNullable<QuotaReadWiring['asUser']> {
   return {
     readers: QUOTA_USER_READERS,
     readFile: (path) => catAsUser(exec, user, path, 'quota-cat'),
     homeDir: home.replaceAll('{user}', user),
+    runCommand: runCommandAsUser(exec, user, proxy),
+    workDir: () => quotaCwdAsUser(exec, user, home),
     ...(mirasim ? { connectMirasim: mirasim.connect(user) } : {}),
   };
 }
@@ -583,9 +661,12 @@ export function realPortsFromEnv(
       now: () => new Date(),
       log: (level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}),
     }),
-    // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警
-    // Cursor、Grok 池的登录文件在会话用户家里，引擎用户读不到：这两种读取器读文件经 exec 以会话用户读（#1195）
-    quotaRead: quotaReadJob({ db, asUser: quotaAsUser(exec, sessionUser, config.mirasimHome, mirasim) }),
+    // 定时读额度（#76）：读成的写 quota_windows，读不到按规矩报警。
+    // Cursor、Grok 的登录文件、Mirasim 的桥接、独享组织的 reclaude 都在会话用户那边：经 quotaAsUser 以它的身份读、起。
+    quotaRead: quotaReadJob({
+      db,
+      asUser: quotaAsUser(exec, sessionUser, config.mirasimHome, mirasim, config.sessionProxy),
+    }),
     // 拼车额度盯读（#194）：每分钟起一条，按情况读开放接口、交给切号当场判
     carpoolWatch: carpoolWatchJob({
       db,

@@ -92,6 +92,13 @@ export interface QuotaDeps extends QuotaIo {
      * 就不再读令牌文件、不再自己开 WebSocket。读不到、连不上要抛错。
      */
     connectMirasim?: () => Promise<MirasimWire>;
+    /**
+     * 以会话用户的身份起命令（claude-usage 起 reclaude）。二进制在会话用户家里，引擎用户直接 spawn 是 EACCES。
+     * 没给就用上面的 runCommand。起不来要在结果里带 spawnError，不许抛成没原因的空读数。
+     */
+    runCommand?: RunCommand;
+    /** 会话用户进得去的工作目录。没给就用上面的 workDir（引擎自己的家，会话用户进不去）。 */
+    workDir?: () => Promise<string>;
   };
 }
 
