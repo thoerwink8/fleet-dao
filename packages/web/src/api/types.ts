@@ -54,6 +54,7 @@ import type {
   PoolsResponse,
   PoolViewSchema,
   QuotaWindowViewSchema,
+  ReleaseCardSchema,
   ReleaseVersionResponse,
   RepoDispatchResponse,
   RepoSchema,
@@ -218,6 +219,8 @@ export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
+/** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
+export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 /** /france 页「发版预检」一次一回：done 带输出、退出码；起进程都没起来走 unreadable。 */
 export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
 

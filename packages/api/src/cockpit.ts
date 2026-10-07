@@ -66,6 +66,7 @@ import {
   WorkflowTargetNotFoundError,
   WorkflowUnavailableError,
 } from './ports.ts';
+import { registerReleaseCardRoutes } from './release-card.ts';
 import { registerReleaseRoutes } from './release-version.ts';
 import { soloReserveView } from './reserve-view.ts';
 import { registerRouteProbeRoutes } from './route-probe-now.ts';
@@ -639,6 +640,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerReleaseRoutes(app, deps);
   registerFranceReleaseRoutes(app, deps);
+  registerReleaseCardRoutes(app, deps);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */
   async function settingsView() {

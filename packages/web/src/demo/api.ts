@@ -99,6 +99,7 @@ export function createDemoApi(inner: MockApi): FleetApi {
     releaseVersion: () => Promise.reject(hidden('发布')),
     // /france 页同样不进演示版：发版一键的两条也不给。
     franceReleaseState: () => Promise.reject(hidden('发版一键')),
+    franceReleaseCard: () => Promise.reject(hidden('发版卡')),
     francePreflight: () => Promise.reject(hidden('发版一键')),
     // 发演示链接只在正式驾驶舱里有。
     demoLinks: () => Promise.reject(hidden('发演示链接')),

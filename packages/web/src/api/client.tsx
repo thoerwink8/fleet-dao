@@ -37,6 +37,7 @@ import type {
   Notifications,
   PoolHolds,
   Pools,
+  ReleaseCard,
   ReleaseVersion,
   Repo,
   RepoDispatch,
@@ -140,6 +141,8 @@ export interface FleetApi {
   releaseVersion(): Promise<ReleaseVersion>;
   /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
   franceReleaseState(): Promise<FranceReleaseState>;
+  /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务，每行各自带没查成的原因。 */
+  franceReleaseCard(): Promise<ReleaseCard>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
   /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
@@ -202,6 +205,7 @@ export const keys = {
   settings: ['settings'] as const,
   releaseVersion: ['release-version'] as const,
   franceReleaseState: ['france-release-state'] as const,
+  franceReleaseCard: ['france-release-card'] as const,
   demoLinks: ['demo-links'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
@@ -445,6 +449,20 @@ export function useFranceReleaseState() {
     queryKey: keys.franceReleaseState,
     queryFn: () => api.franceReleaseState(),
     refetchInterval: 30_000,
+    enabled: !isDemo(),
+  });
+}
+
+/**
+ * /france 页「发版」卡（#1231）：1 分钟重拉一次（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
+ * 只有正式驾驶舱才有，不查 demo 模块。
+ */
+export function useFranceReleaseCard() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceReleaseCard,
+    queryFn: () => api.franceReleaseCard(),
+    refetchInterval: 60_000,
     enabled: !isDemo(),
   });
 }

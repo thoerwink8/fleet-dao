@@ -41,6 +41,7 @@ import {
   poolFull,
   poolHoldsView,
   type RealtimeTable,
+  ReleaseCardSchema,
   ReleaseVersionResponse,
   RepoDispatchResponse,
   ReposResponse,
@@ -1923,6 +1924,47 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       // 假数据：这台后端不是法国，装作「没在走」（开发 mock 看到的就是这个；真法国机器装的是正式环境）。
       return FranceReleaseStateSchema.parse({ state: 'idle', asOf: iso() });
+    },
+    async franceReleaseCard() {
+      await wait();
+      // 假数据：主线比线上多 7 个提交、CI 绿；真数据由法国那台的后端现读 GitHub 和发布目录。
+      const ago = (min: number) => new Date(now() - min * 60_000).toISOString();
+      const head = '2005b2909c4f8e0a1d3e5f7a9b1c3d5e7f9a1b3c';
+      const live = '6896b3cb4d2e8f0a1b3c5d7e9f1a3b5c7d9e1f3a';
+      return ReleaseCardSchema.parse({
+        mainline: {
+          state: 'ok',
+          commit: { sha: head, short: head.slice(0, 12), title: '刷新 CI 测试耗时表 (#1230)', at: ago(12) },
+          ci: { state: 'green' },
+        },
+        deployed: {
+          state: 'ok',
+          sha: live,
+          short: live.slice(0, 12),
+          title: '探针每次结论落一条历史 (#1225)',
+          titleWhy: null,
+          deployedAt: ago(60 * 5),
+          deployedAtWhy: null,
+        },
+        gap: {
+          state: 'ahead',
+          count: 7,
+          prs: [
+            { number: 1230, title: '刷新 CI 测试耗时表' },
+            { number: 1229, title: '单任务暂停与恢复片 3：任务页暂停继续叫停按钮' },
+            { number: 1228, title: '额度读取：两个池读登录文件改以会话用户身份读' },
+            { number: 1226, title: '每周刷新 CI 测试耗时表：只取 PR 触发的全量运行日志' },
+            { number: 1224, title: '路由页：渠道开关改写入口' },
+          ],
+          nonPr: 0,
+        },
+        lastDone: {
+          state: 'ok',
+          pr: { number: 1230, title: '刷新 CI 测试耗时表', mergedAt: ago(12) },
+          issue: { state: 'ok', number: 1192, title: '引擎每周刷新 CI 测试耗时表', alsoCloses: [] },
+        },
+        asOf: iso(),
+      });
     },
     async francePreflight() {
       await wait();

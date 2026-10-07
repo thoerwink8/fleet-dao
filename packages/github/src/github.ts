@@ -92,6 +92,7 @@ import {
   type Reconciler,
   type ReconcilerOptions,
 } from './reconcile.ts';
+import { createReleaseFacts, type ReleaseFactsReader } from './release-facts.ts';
 import { RepoFactsCache } from './repos.ts';
 import { type SyncMainlineInput, type SyncMainlineResult, syncMainline } from './sync.ts';
 import { requiredPermissions } from './token-scopes.ts';
@@ -207,6 +208,8 @@ export interface GitHub {
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 引擎的通用 GitHub 读写口（「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言（名字沿用 #348 的「claims」）。 */
   claims: ClaimsGitHub;
+  /** 驾驶舱「发版」卡和「发布到法国」按钮读的 GitHub 现状（「引擎」机器人，只读，release-facts.ts）。 */
+  releaseFacts: ReleaseFactsReader;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
   selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;
   /**
@@ -355,6 +358,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     renewInteractionLimit: (input, ctx) => renewInteractionLimit(deps, input, ctx),
     commitIdentity: (repo) => deps.bots.identity('agent', repo),
     claims: createClaimsGitHub(deps),
+    releaseFacts: createReleaseFacts(client),
     async selfCheck(repos) {
       const out: SelfCheckItem[] = [];
       for (const repo of repos) {

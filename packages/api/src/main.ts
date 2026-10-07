@@ -6,7 +6,7 @@
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub } from '@fleet-dao/github';
+import { createGitHub, type ReleaseFactsReader } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import {
   createMemoryStore,
@@ -51,6 +51,7 @@ import { ListenFdError, startListeners } from './listen.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
 import type { GitHubEventSink } from './ports.ts';
+import { liveReleaseCardPort } from './release-card.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
@@ -69,10 +70,26 @@ const log = jsonLogger();
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
  * 同一份凭据还给 /changelog 的发布版本号读里程碑（release-version.ts，「引擎」机器人）；凭据没读到时那边照实报读不到。
  */
+/** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */
+function credentialsMissingFacts(why: string): ReleaseFactsReader {
+  const fail = async (): Promise<never> => {
+    throw new Error(`GitHub 机器人的凭据没读到（${why}）`);
+  };
+  return {
+    mainlineHead: fail,
+    commit: fail,
+    mainCi: fail,
+    compare: fail,
+    lastMergedPull: fail,
+    issueTitle: fail,
+  };
+}
+
 function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
   openMilestones: ReleaseSource['openMilestones'];
+  releaseFacts: ReleaseFactsReader;
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
@@ -80,6 +97,7 @@ function githubMirror(db: Db): {
     return {
       sink: gh.eventSink({ async wake() {} }),
       openMilestones: (repo, signal) => gh.readOpenMilestones({ repo, signal }),
+      releaseFacts: gh.releaseFacts,
     };
   } catch (err) {
     log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像', { error: String(err) });
@@ -90,6 +108,7 @@ function githubMirror(db: Db): {
       openMilestones: async () => {
         throw new Error(`GitHub 机器人的凭据没读到（${String(err)}）`);
       },
+      releaseFacts: credentialsMissingFacts(String(err)),
     };
   }
 }
@@ -231,6 +250,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     // /france 页发版一键（#618）：读 ~/.fleet-dao/release-train.*、起 pnpm release:onekey preflight。
     // 只在正式环境装：开发、内存版起这条命令会在开发者本机的仓里发，会害人以为发的是这台，所以不装、接口回「没接上」。
     ...(production ? { franceRelease: liveFranceReleasePort(log) } : {}),
+    // /france 页「发版」卡（#1231）：主线头、CI、PR 现读 GitHub（同一份机器人凭据），法国在用的提交读发布目录；只在正式环境装
+    ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,

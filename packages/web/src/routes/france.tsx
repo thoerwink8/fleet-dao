@@ -14,10 +14,17 @@
 import { ArrowRight, Rocket } from 'lucide-react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
-import { useEnv, useFrancePreflight, useFranceReleaseState, useJobs } from '../api/client';
+import {
+  useEnv,
+  useFrancePreflight,
+  useFranceReleaseCard,
+  useFranceReleaseState,
+  useJobs,
+} from '../api/client';
 import type { FrancePreflightResponse, FranceReleaseState, JobView } from '../api/types';
 import { factCells } from '../components/env-facts';
 import { LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { ReleaseCardBody } from '../components/release-card';
 import { Button } from '../components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { formatAgo } from '../lib/format';
@@ -220,6 +227,7 @@ export default function France() {
   const env = useEnv();
   const jobs = useJobs();
   const release = useFranceReleaseState();
+  const card = useFranceReleaseCard();
   const preflight = useFrancePreflight();
   const now = useNow();
   const facts = env.data?.facts;
@@ -295,15 +303,29 @@ export default function France() {
           )}
         </Panel>
 
-        <Panel title="发版一键" description="只到预检；真发版走 pnpm release:onekey start，不在页面上发。">
-          {release.error ? (
-            <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
-          ) : release.isLoading || !release.data ? (
-            <LoadingRows rows={2} />
-          ) : (
-            <ReleaseBody release={release.data} preflight={preflight} />
-          )}
-        </Panel>
+        <div className="space-y-4">
+          <Panel
+            title="发版"
+            description="主线最新、法国在用、差几个、最近做完的一个任务；每一行读不到就写没查成和原因。"
+          >
+            {card.error ? (
+              <LoadError what="发版卡" error={card.error} onRetry={() => void card.refetch()} />
+            ) : card.isLoading || !card.data ? (
+              <LoadingRows rows={4} />
+            ) : (
+              <ReleaseCardBody card={card.data} now={now} />
+            )}
+          </Panel>
+          <Panel title="发版一键" description="只到预检；真发版走 pnpm release:onekey start，不在页面上发。">
+            {release.error ? (
+              <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
+            ) : release.isLoading || !release.data ? (
+              <LoadingRows rows={2} />
+            ) : (
+              <ReleaseBody release={release.data} preflight={preflight} />
+            )}
+          </Panel>
+        </div>
       </div>
     </Page>
   );
