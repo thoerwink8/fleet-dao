@@ -1160,8 +1160,13 @@ describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeou
         gate.release();
         await statusUntil(a, paused, 'A 停进已暂停');
         const b = await start(q, input({ issueNumber: 13 }));
-        // 不用 result()：等结果时测试服务端会跳时间，没有定时器的 A 会被跳到工作流超时
+        // 不用 result()：等结果时测试服务端会跳时间，没有定时器的 A 会被跳到工作流超时。
+        // set('done') 先改查询里的 phase，state=done 要等后面的 mirror 写进库；不等这一笔，读到的还是上一笔 running。
         await statusUntil(b, (x) => x.phase === 'done', 'B 走完');
+        await waitUntil(
+          () => world.states.filter((x) => x.issueNumber === 13).at(-1)?.state === 'done',
+          'B 的完成写进库',
+        );
         // B 走完时 A 还停着
         expect((await statusOf(a)).phase).toBe('paused');
         expect(world.states.filter((x) => x.issueNumber === 13).at(-1)).toMatchObject({ state: 'done' });
