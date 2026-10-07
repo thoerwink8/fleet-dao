@@ -62,6 +62,9 @@ function fakeGh(open: PlanIssue[], others: PlanIssue[] = [], fail?: string) {
     async subIssues() {
       return [];
     },
+    async recentPulls() {
+      return [];
+    },
   };
   return { gh, asked };
 }

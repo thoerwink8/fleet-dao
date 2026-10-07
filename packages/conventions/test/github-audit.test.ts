@@ -2,7 +2,7 @@
 // 读不到、认不出的每一条都故意造出来，断言是「没查成」，不是「没有断裂」。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import type { PlanIssue } from '../src/github-api.ts';
+import type { PlanIssue, PullBody } from '../src/github-api.ts';
 import { auditGitHub } from '../src/github-audit.ts';
 import { addToOrder } from '../src/plan-view.ts';
 import { fakeReader, issue, type Method, milestone, order, V0, V1, type World } from './fake-github.ts';
@@ -205,6 +205,97 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
       }),
     );
     expect(r.texts[0]).toContain('先后里有 #30，可它不是这个版本里的单');
+  });
+});
+
+const pull = (number: number, body: string, extra: Partial<PullBody> = {}): PullBody => ({
+  number,
+  title: `PR ${number}`,
+  body,
+  headRef: `feat/${number}`,
+  state: 'closed',
+  mergedAt: '2026-10-02T00:00:00Z',
+  ...extra,
+});
+/** PR 正文：「需求」栏下面写这几行。 */
+const column = (first: string, ...more: string[]) => [`**需求**：${first}`, ...more, ''].join('\n');
+const REFS_30 = column('Refs #30');
+
+describe('GitHub 对账：合并了的 PR 提到它、它却还开着（#995 拍 1 的 B）', () => {
+  const withPulls = (...pulls: PullBody[]) =>
+    editWorld((w) => {
+      w.pulls = pulls;
+    });
+  const merged = (r: { findings: { key: string }[] }) =>
+    r.findings.filter((f) => f.key.startsWith('merged-open:'));
+
+  it('合并了的 PR 在「需求」栏 Refs 它、它还开着：报，挂在这张单上，说清是哪张 PR 和怎么收', async () => {
+    const r = await audit(withPulls(pull(500, REFS_30)));
+    expect(r.findings).toEqual([expect.objectContaining({ issue: 30, key: 'merged-open:30:500' })]);
+    expect(r.texts[0]).toContain('#30 开着，但 PR #500「PR 500」');
+    expect(r.texts[0]).toContain('pnpm issue:close 30');
+    expect(r.texts[0]).toContain('分片、关不了它');
+  });
+
+  it('有好几张合并的 PR 提到它：只报最近合并的那一张', async () => {
+    const r = await audit(
+      withPulls(
+        pull(500, REFS_30, { mergedAt: '2026-10-01T00:00:00Z' }),
+        pull(501, REFS_30, { mergedAt: '2026-10-02T00:00:00Z' }),
+      ),
+    );
+    expect(merged(r).map((f) => f.key)).toEqual(['merged-open:30:501']);
+  });
+
+  it('不该报：那一行写明「分片、关不了它」', async () => {
+    const r = await audit(withPulls(pull(500, column('Refs #30（分片，关不了它）'))));
+    expect(merged(r)).toEqual([]);
+  });
+
+  it('不该报：还有开着的 PR 的「需求」栏挂着它（活还在做）', async () => {
+    const r = await audit(
+      withPulls(pull(500, REFS_30), pull(501, REFS_30, { state: 'open', mergedAt: null })),
+    );
+    expect(merged(r)).toEqual([]);
+  });
+
+  it('不该报：引擎任务流程的 PR（它的单引擎自己关）', async () => {
+    const r = await audit(withPulls(pull(500, REFS_30, { headRef: 'fleet/30-t0123abcd' })));
+    expect(merged(r)).toEqual([]);
+  });
+
+  it('不该报：只是关了没合并的 PR；Closes（合并时 GitHub 自己关，开着是有人重开）', async () => {
+    const r = await audit(withPulls(pull(500, REFS_30, { mergedAt: null }), pull(501, column('Closes #30'))));
+    expect(merged(r)).toEqual([]);
+  });
+
+  it('不该报：母单、「本机做」标签的单、下面还有开着子单的单', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        patch(w, 30, { labels: ['杂项', '本机做'] });
+        patch(w, 20, { labels: ['缺陷', '母单'] });
+        w.pulls = [pull(500, column('Refs #30', 'Refs #20', 'Refs #10'))];
+      }),
+    );
+    expect(merged(r)).toEqual([]);
+  });
+
+  it('不该报：这张单已经关了', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        patch(w, 30, { state: 'closed', stateReason: 'completed' });
+        w.pulls = [pull(500, REFS_30)];
+      }),
+    );
+    expect(merged(r)).toEqual([]);
+  });
+
+  it('【故意造出的失败】读不到 PR：没查成，不当成没有断裂；别的几条照查', async () => {
+    const r = await audit(withPulls(pull(500, REFS_30)), {
+      fail: { recentPulls: new Error('GitHub 回了 502') },
+    });
+    expect(r.notQueried).toEqual(['读不到最近的 PR（GitHub 回了 502），合并了却还开着的单没核']);
+    expect(merged(r)).toEqual([]);
   });
 });
 

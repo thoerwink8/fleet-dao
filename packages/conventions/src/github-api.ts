@@ -56,7 +56,27 @@ export interface GitHubReader {
   milestoneIssues(milestone: number): Promise<PlanIssue[]>;
   /** 这张单的子单（GitHub 自带的子议题），按母单页面上排的先后。 */
   subIssues(n: number): Promise<PlanIssue[]>;
+  /**
+   * 开着的 PR 和最近关掉的 PR（按更新时间新的在前，读 RECENT_PULL_PAGES 页）：带标题、正文、头分支、合并时间。
+   * 对账查「合并的 PR 提到、单却还开着」（github-audit.ts，#995 拍 1 的 B）用；最近关掉的只读一个窗口，不翻全部历史。
+   */
+  recentPulls(): Promise<PullBody[]>;
 }
+
+/** 对账看「需求」栏用的一张 PR：开着的、合并了的、关了没合的都在。 */
+export interface PullBody {
+  number: number;
+  title: string;
+  /** 正文原文；GitHub 回 null 的当空串。 */
+  body: string;
+  headRef: string;
+  state: 'open' | 'closed';
+  /** 合并的时间（ISO）；没合并是 null。 */
+  mergedAt: string | null;
+}
+
+/** recentPulls 读最近关掉的 PR 的页数（每页 100 张）。 */
+export const RECENT_PULL_PAGES = 3;
 
 /** 欠账检查、对账往单上留言用（要能写 issue 的令牌）。 */
 export interface GitHubCommenter {
@@ -333,6 +353,21 @@ export function liveGitHub(
       const rows = await pages(`/repos/${repo}/issues/${n}/sub_issues?per_page=100`, what);
       return rows.map((r) => toPlanIssue(r, what));
     },
+    async recentPulls() {
+      const what = '开着的和最近关掉的 PR';
+      const rows: unknown[] = [...(await pages(`/repos/${repo}/pulls?state=open&per_page=100`, what))];
+      for (let page = 1; page <= RECENT_PULL_PAGES; page++) {
+        const res = await get(
+          `/repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`,
+        );
+        if (!res.ok) throw failed(res, what);
+        const data = await json(res, what);
+        if (!Array.isArray(data)) throw new Error(`读${what}，读回来的不是列表`);
+        rows.push(...data);
+        if (data.length < 100) break;
+      }
+      return rows.map((r) => toPullBody(r, what));
+    },
     comments: readComments,
     async comment(n, body) {
       const res = await get(`/repos/${repo}/issues/${n}/comments`, {
@@ -598,6 +633,21 @@ function toRelease(raw: unknown, what: string): GitHubRelease {
 /** 分支名放进网址：按 / 分段各自转义（分支名里可以有 /）。 */
 function encRef(branch: string): string {
   return branch.split('/').map(encodeURIComponent).join('/');
+}
+
+/** 接口回来的一张 PR：号、标题、正文、头分支、状态、合并时间；缺字段、认不出就抛（漏认一张合并了的 PR 会让对账以为没人提过那张单）。 */
+export function toPullBody(raw: unknown, what = 'PR'): PullBody {
+  const bad = (field: string) => new Error(`读${what}，有一条认不出（${field}）`);
+  if (!isObject(raw)) throw bad('不是对象');
+  const { number, title, body, state, merged_at, head } = raw;
+  if (typeof number !== 'number') throw bad('number');
+  if (typeof title !== 'string') throw bad(`#${number} 的 title`);
+  if (body !== null && typeof body !== 'string') throw bad(`#${number} 的 body`);
+  if (state !== 'open' && state !== 'closed') throw bad(`#${number} 的 state`);
+  if (!('merged_at' in raw) || (merged_at !== null && !isTime(merged_at)))
+    throw bad(`#${number} 的 merged_at`);
+  if (!isObject(head) || typeof head.ref !== 'string') throw bad(`#${number} 的 head`);
+  return { number, title, body: body ?? '', headRef: head.ref, state, mergedAt: merged_at };
 }
 
 /** 接口回来的一个 PR，只取头、目标分支和状态；缺字段、认不出就抛，不猜（漏认一个开着的 PR 会把它的分支删掉）。 */

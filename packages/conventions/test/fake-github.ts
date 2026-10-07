@@ -1,5 +1,5 @@
 // 测试用的假 GitHub（内存里的里程碑、单子、子单）：计划（plan-view）和对账（github-audit）的测试共用，不打真接口。
-import type { GitHubReader, MilestoneDetail, PlanIssue } from '../src/github-api.ts';
+import type { GitHubReader, MilestoneDetail, PlanIssue, PullBody } from '../src/github-api.ts';
 
 export const V1 = 'v1 Fusion 接活';
 export const V0 = 'v0 试跑';
@@ -38,6 +38,8 @@ export interface World {
   issues: PlanIssue[];
   /** 母单 → 子单号，按 GitHub 上排的先后。 */
   subs: Record<number, number[]>;
+  /** 开着的和最近关掉的 PR（对账查「合并了却还开着」用）；不给就是没有。 */
+  pulls?: PullBody[];
 }
 
 export type Method = keyof GitHubReader;
@@ -80,6 +82,10 @@ export function fakeReader(
     async subIssues(n) {
       hit('subIssues');
       return (w.subs[n] ?? []).map(find);
+    },
+    async recentPulls() {
+      hit('recentPulls');
+      return w.pulls ?? [];
     },
   };
   return { reader, calls };
