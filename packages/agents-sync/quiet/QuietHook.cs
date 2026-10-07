@@ -1,6 +1,8 @@
-// Windows-subsystem hook launcher. A bare path is CreateProcess'd by Grok with no cmd window.
-// /target:winexe allocates no console; node is started with CREATE_NO_WINDOW.
-// The file name picks the script: quiet-session-start.exe runs ../hooks/session-start.mjs.
+// Windows-subsystem launcher. /target:winexe allocates no console; node is started
+// with CREATE_NO_WINDOW. Two names, one binary:
+//   quiet-session-start.exe runs ../hooks/session-start.mjs (hook command is one path, no args,
+//   because a space would make Grok hand the command to cmd).
+//   quiet-node.exe forwards its own arguments to node.exe (MCP command + args).
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -50,13 +52,23 @@ class QuietHook {
   static int Run() {
     string exe = Process.GetCurrentProcess().MainModule.FileName;
     string name = Path.GetFileNameWithoutExtension(exe);
+    string node = FindNode();
+    if (node == null) return Fail("node.exe is not on PATH");
+    if (name.Equals("quiet-node", StringComparison.OrdinalIgnoreCase)) {
+      string[] args = Environment.GetCommandLineArgs();
+      if (args.Length < 2) return Fail("quiet-node needs the node arguments");
+      string tail = "";
+      for (int i = 1; i < args.Length; i++) {
+        if (i > 1) tail += " ";
+        tail += Quote(args[i]);
+      }
+      return Exec(node, tail);
+    }
     if (!name.StartsWith("quiet-")) return Fail("launcher name does not start with quiet-");
     string scriptName = name.Substring("quiet-".Length) + ".mjs";
     string script = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(exe), "..", "hooks", scriptName));
     if (!File.Exists(script)) return Fail("hook script missing: " + script);
-    string node = FindNode();
-    if (node == null) return Fail("node.exe is not on PATH");
-    return Exec(node, script);
+    return Exec(node, Quote(script));
   }
 
   static string FindNode() {
@@ -83,7 +95,7 @@ class QuietHook {
     return "\"" + s.Replace("\"", "\\\"") + "\"";
   }
 
-  static int Exec(string node, string script) {
+  static int Exec(string node, string tail) {
     IntPtr hin = GetStdHandle(-10);
     IntPtr hout = GetStdHandle(-11);
     IntPtr herr = GetStdHandle(-12);
@@ -99,7 +111,7 @@ class QuietHook {
       si.hStdError = herr;
     }
     PROCESS_INFORMATION pi;
-    string cmd = Quote(node) + " " + Quote(script);
+    string cmd = Quote(node) + " " + tail;
     if (!CreateProcess(node, cmd, IntPtr.Zero, IntPtr.Zero, true, CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi))
       return Fail("CreateProcess node failed (" + Marshal.GetLastWin32Error() + ")");
     WaitForSingleObject(pi.hProcess, 0xFFFFFFFF);
