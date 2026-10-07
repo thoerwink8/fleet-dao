@@ -1026,7 +1026,14 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     expect(mirasimAgentFor('claude-sonnet-5-5')).toBe('claude');
     expect(mirasimAgentFor('glm-5.3-flash')).toBe('zcode');
     expect(mirasimAgentFor('gpt-5.6-luna')).toBe('codex');
-    for (const m of ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
+    for (const m of [
+      'gpt-6-sol',
+      'gpt-6.1-sol',
+      'gpt-6-luna',
+      'gpt-6-astra',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+    ]) {
       expect(mirasimAgentFor(m), m).toBe('codex');
     }
     expect(mirasimAgentFor('glm-5.3')).toBe('zcode');
@@ -1041,9 +1048,19 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     }
   });
 
-  // Mirasim 服务端 0.0.425（2026-10-07 在法国读 server.cjs）里各执行体认的模型串。服务端没有 gpt-6.1-sol，只有 gpt-6-sol。
+  // Mirasim 服务端 0.0.425（2026-10-07 在法国读 server.cjs）里各执行体认的模型串。服务端静态表里 sol 只有 gpt-6-sol；
+  // gpt-6.1-sol 是中转名单里的名（不在服务端静态表里）：2026-10-01 实测六个 codex 模型全成、读回就是它
+  // （docs/archive/progress-2026-10-01.md），0.0.425 对表外的串原样放行。
   const MIRASIM_KNOWN_MODELS: Readonly<Record<string, readonly string[]>> = {
-    codex: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+    codex: [
+      'gpt-6-astra',
+      'gpt-6-sol',
+      'gpt-6.1-sol',
+      'gpt-6-luna',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+    ],
     zcode: ['glm-5.3', 'glm-5.3-flash'],
     dsh: ['deepseek-flash', 'deepseek-v4-pro'],
     pi: ['kimi-k3'],
@@ -1060,9 +1077,9 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     expect(unknownToMirasim(MIRASIM_AGENT_BY_MODEL)).toEqual([]);
   });
 
-  it('【故意造出的失败】映射里有服务端认不出的模型串（例如 gpt-6.1-sol）、或挂错执行体：报认不出', () => {
-    expect(unknownToMirasim({ ...MIRASIM_AGENT_BY_MODEL, 'gpt-6.1-sol': 'codex' })).toEqual([
-      'gpt-6.1-sol→codex',
+  it('【故意造出的失败】映射里有服务端认不出的模型串（例如 gpt-7-sol）、或挂错执行体：报认不出', () => {
+    expect(unknownToMirasim({ ...MIRASIM_AGENT_BY_MODEL, 'gpt-7-sol': 'codex' })).toEqual([
+      'gpt-7-sol→codex',
     ]);
     expect(unknownToMirasim({ 'glm-5.3': 'codex' })).toEqual(['glm-5.3→codex']);
   });

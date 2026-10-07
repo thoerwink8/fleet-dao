@@ -90,6 +90,22 @@ describe('judgeRun', () => {
     ).toBe('session_mismatch');
   });
 
+  it('因模型对不上被我们停掉：有读回的串就写明点名的和实际的，没有就退回通用一句', () => {
+    const killedFacts: RunFacts = {
+      ...clean,
+      killed: 'model_mismatch',
+      mismatch: { kind: 'model', expected: 'gpt-6-sol', observed: 'gpt-6-astra' },
+    };
+    expect(judgeRun(killedFacts)).toEqual({
+      outcome: 'failed',
+      reason: 'model_mismatch',
+      detail: '实际回话的模型不是点名的那个：点名 gpt-6-sol，实际 gpt-6-astra，已停',
+    });
+    expect(judgeRun({ ...clean, killed: 'model_mismatch' }).detail).toBe(
+      '实际回话的模型不是点名的那个，已停',
+    );
+  });
+
   it('不是进程的插头（Mirasim）：没有退出码也能判，没终帧时说「会话结束」并带上最后的原话', () => {
     expect(judgeRun({ terminal: { isError: false, detail: 'done' }, quotaExhausted: false }).outcome).toBe(
       'ok',

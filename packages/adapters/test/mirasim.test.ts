@@ -387,6 +387,29 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('model_mismatch');
   });
 
+  it('读回的模型和点名的对不上：判不通，原因里写明点名的和读回的两个串（gpt-6-sol 被换成 gpt-6-astra 那次）', async () => {
+    // 2026-10-07 法国实测：点名 gpt-6-sol，服务端 0.0.425 发现它不在中转名单里，悄悄换成名单第一个 gpt-6-astra，
+    // 快照里读回的就是 gpt-6-astra。以前原因只剩「不是点名的那个」，看不出换成了谁。
+    const server = new FakeMirasim({
+      reply: accepted(kimi),
+      // 拷一份再改：kimi.stream 是各条用例共用的，原地改会串到别的用例
+      stream: structuredClone(kimi.stream.slice(0, 6)).map((f) => {
+        const patch = (f as { patch?: { set?: Record<string, unknown> } }).patch;
+        if (patch?.set?.model === 'kimi-code/k3') patch.set.model = 'gpt-6-astra';
+        const snap = (f as { snapshot?: Record<string, unknown> }).snapshot;
+        if (snap?.model === 'kimi-code/k3') snap.model = 'gpt-6-astra';
+        return f;
+      }),
+    });
+    const report = await runMirasim(spec({ expectModel: 'gpt-6-sol' }), { connect: server.connect });
+    expect(report.killed?.reason).toBe('model_mismatch');
+    expect(report.session.state.model).toBe('gpt-6-astra');
+    const verdict = judgeRun(mirasimRunSummary(report).facts);
+    expect(verdict.outcome).toBe('failed');
+    expect(verdict.reason).toBe('model_mismatch');
+    expect(verdict.detail).toContain('点名 gpt-6-sol，实际 gpt-6-astra');
+  });
+
   it('回读的模型名只多一点方括号后缀：认成同一个，不当成点错模型把它停掉', async () => {
     // 2026-10-02 实测：claude 的点名 `claude-opus-5-5`、服务端回读 `claude-opus-5-5[1m]`，
     // `[1m]` 只是上下文窗口标记。一字不差的比对会把 7 个 claude 模型全判成 model_mismatch

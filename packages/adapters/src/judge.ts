@@ -91,6 +91,12 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
   if (facts.killed === 'idle_timeout') {
     return { outcome: 'stalled', reason: 'idle_timeout', detail: KILL_TEXT.idle_timeout };
   }
+  // 中途发现模型不对被我们停掉的：插头把点名的和读回的一起交过来，原因里写明两个串（不然只剩一句
+  // 「不是点名的那个」，看不出服务端换成了谁，2026-10-07 gpt-6-sol 路由探针因此查了半天）
+  if (facts.killed === 'model_mismatch' && facts.mismatch?.kind === 'model') {
+    const { expected, observed } = facts.mismatch;
+    return failed('model_mismatch', `${MISMATCH_TEXT.model}：点名 ${expected}，实际 ${observed}，已停`);
+  }
   if (facts.killed) return failed(facts.killed, KILL_TEXT[facts.killed]);
   if (facts.mismatch) {
     const { kind, expected, observed } = facts.mismatch;
