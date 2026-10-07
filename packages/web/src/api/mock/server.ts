@@ -7,14 +7,8 @@ import {
   AuditResponse,
   AuthConfigResponse,
   BoardResponse,
-  CreateDemoLinkRequest,
-  CreateDemoLinkResponse,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
-  DEMO_MODULES,
-  DEMO_STRICT_DEFAULT,
-  DemoLinksResponse,
-  type DemoScope,
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
@@ -75,7 +69,6 @@ import {
   TaskDetailResponse,
   taskFlow,
   UpdateCredentialsRequest,
-  UpdateDemoDefaultRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
   UpdateRepoDispatchRequest,
@@ -89,9 +82,8 @@ import {
   windowAppliesTo,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
-import type { AuditEntry, DemoLink, LiveEvent } from '../types';
+import type { AuditEntry, LiveEvent } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 
@@ -187,7 +179,7 @@ function page<T extends { id: string }>(
 }
 
 /**
- * 主页引擎那一格的演示：默认正常；地址上加 ?mockEngine=off / down / unknown 看另外三种（开发、演示版看样子用，真后端不读它）。
+ * 主页引擎那一格的演示：默认正常；地址上加 ?mockEngine=off / down / unknown 看另外三种（开发看样子用，真后端不读它）。
  * 认不出的值按正常算，不报错：它只影响假数据的样子。
  */
 function mockEngine() {
@@ -264,11 +256,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
-  const demo: {
-    links: Omit<DemoLink, 'expired'>[];
-    defaultScope: DemoScope;
-    defaultPublished: boolean;
-  } = { links: [], defaultScope: DEMO_STRICT_DEFAULT, defaultPublished: false };
 
   /** 假数据里的账密（只在这个模拟器里存明文，真后端只存哈希）：没设过就是空的。 */
   const mockCreds: { username?: string; password?: string; changedAt?: string } = {};
@@ -2057,80 +2044,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async francePreflight() {
       await wait();
       // 假数据不起子进程：装作这台后端没接上那一条发布命令（真法国机器才装得上）。
-      // 这份假数据也进演示版的包：话术里别带演示版禁词、真命令名（build/scan.ts）。
+      // 话术里别带真命令名。
       return FrancePreflightResponseSchema.parse({
         state: 'unreadable',
         why: '这是假后端：这台机器上没装真的发布命令；只读预检和起飞用的正式环境才有这颗按钮',
         asOf: iso(),
       });
-    },
-    async demoLinks() {
-      await wait();
-      return DemoLinksResponse.parse({
-        configured: true,
-        links: demo.links.map((l) => ({ ...l, expired: Date.parse(l.expiresAt) <= now() })),
-        defaultScope: demo.defaultScope,
-        defaultPublished: demo.defaultPublished,
-      });
-    },
-    async createDemoLink(raw) {
-      await wait();
-      const body = CreateDemoLinkRequest.parse(raw);
-      const bytes = crypto.getRandomValues(new Uint8Array(32));
-      const token = btoa(String.fromCharCode(...bytes))
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
-      const id = await sha256Hex(token);
-      const link = {
-        id,
-        modules: DEMO_MODULES.filter((m) => body.modules.includes(m)),
-        detail: body.detail,
-        expiresAt: new Date(now() + body.expiresInDays * 86_400_000).toISOString(),
-        ...(body.note ? { note: body.note } : {}),
-        createdAt: iso(),
-        createdBy: st.me.user.id,
-      };
-      audit({
-        actor: meActor(),
-        action: 'demo.link.create',
-        target: `demo-link:${id.slice(0, 12)}`,
-        via: 'cockpit',
-      });
-      demo.links.unshift(link);
-      return CreateDemoLinkResponse.parse({ link: { ...link, expired: false }, token });
-    },
-    async revokeDemoLink(linkId) {
-      await wait();
-      const i = demo.links.findIndex((l) => l.id === linkId);
-      if (i < 0) throw new ApiError(404, 'demo_link_not_found', '没有这条演示链接（可能已经作废了）');
-      audit({
-        actor: meActor(),
-        action: 'demo.link.revoke',
-        target: `demo-link:${linkId.slice(0, 12)}`,
-        via: 'cockpit',
-      });
-      demo.links.splice(i, 1);
-    },
-    async updateDemoDefault(raw) {
-      await wait();
-      const body = UpdateDemoDefaultRequest.parse(raw);
-      const before = demo.defaultScope;
-      demo.defaultScope = {
-        v: 1,
-        modules: DEMO_MODULES.filter((m) => body.modules.includes(m)),
-        detail: body.detail,
-      };
-      demo.defaultPublished = true;
-      audit({
-        actor: meActor(),
-        action: 'demo.default.update',
-        target: 'demo:default',
-        before,
-        after: demo.defaultScope,
-        via: 'cockpit',
-      });
-      return demo.defaultScope;
     },
     subscribe(listener, onStatus) {
       listeners.add(listener);

@@ -1,7 +1,6 @@
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
-import type { DemoPublisher } from './demo.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { IntentStore } from './intent-store.ts';
@@ -103,8 +102,6 @@ export interface Deps {
   shutdownSignal?: AbortSignal | undefined;
   log: Logger;
   now: () => Date;
-  /** 演示版可见范围的发布处；null = 没配（FLEET_DEMO_DIR）。 */
-  demo: DemoPublisher | null;
   /**
    * 只有测试传入。不设时新哈希用 password.ts 的 SCRYPT_PARAMS（N=2^15、r=8、p=3）。
    * 改这里之前必须知道：不读环境变量，生产装配（main.ts）不设它；设了也只影响新算的哈希，验旧哈希仍看哈希自己带的参数。

@@ -26,7 +26,6 @@ import {
   useResolveNotification,
 } from '../../api/client';
 import type { Notification } from '../../api/types';
-import { canSee, isDemo } from '../../demo/access';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection, withNode } from '../../lib/node';
@@ -74,7 +73,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
           <Search />
         </Button>
         <LiveIndicator />
-        {canSee('notifications') && nodeId === null ? <NotificationBell /> : null}
+        {nodeId === null ? <NotificationBell /> : null}
         <ThemeMenu />
         <UserMenu />
       </div>
@@ -86,7 +85,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
  * 顶栏环境切换器（看板多机；替掉原来没用的「切换仓」、合并原来的环境名徽标 #820 片 1）：常驻「现在看的是哪一台」，
  * 点开列出本台和每个远程环境（本机 WSL）、各自上报于几分钟前或失联多久，选哪个就把它记在网址参数 ?node=（留在当前这一页）。
  * 本台的名字跟着 /me 带回（后端的 FLEET_MACHINE_NAME），读不到就照实写「认不出」，不猜成某一台；远程环境的列表读不成就在
- * 下拉里写原因，不当成「没有远程环境」。演示版没有切换器（不露机器名）。
+ * 下拉里写原因，不当成「没有远程环境」。
  */
 function EnvSwitcher() {
   const { data: me } = useMe();
@@ -94,7 +93,7 @@ function EnvSwitcher() {
   const { nodeId, select } = useNodeSelection();
   const navigate = useNavigate();
   const now = useNow();
-  if (!me || isDemo()) return null;
+  if (!me) return null;
   const { env } = me;
   const remote = nodes.data?.nodes ?? [];
   const selected = nodeId === null ? undefined : remote.find((n) => n.id === nodeId);
@@ -421,25 +420,17 @@ function UserMenu() {
       <DropdownMenuContent align="end" className="w-52">
         <DropdownMenuLabel>
           <div className="text-sm">{user?.displayName}</div>
-          <div className="text-xs font-normal text-muted-foreground">
-            {api.source === 'demo' ? '访客 · 演示版不用登录' : '创始人'}
-          </div>
+          <div className="text-xs font-normal text-muted-foreground">创始人</div>
         </DropdownMenuLabel>
-        {canSee('settings') ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => navigate('/settings')}>
-              <Settings />
-              设置
-            </DropdownMenuItem>
-          </>
-        ) : null}
-        {api.source === 'demo' ? null : (
-          <DropdownMenuItem disabled={api.source === 'mock'} onSelect={() => void logout()}>
-            <LogOut />
-            {api.source === 'mock' ? '退出（假数据模式不用登录）' : '退出登录'}
-          </DropdownMenuItem>
-        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => navigate('/settings')}>
+          <Settings />
+          设置
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={api.source === 'mock'} onSelect={() => void logout()}>
+          <LogOut />
+          {api.source === 'mock' ? '退出（假数据模式不用登录）' : '退出登录'}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

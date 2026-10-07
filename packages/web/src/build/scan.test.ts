@@ -1,9 +1,9 @@
-// 演示版产物扫描：先造一份带真名的产物看它报红，改干净后再看它变绿；空目录、源码对照文件、配置里加的词也各试一次。
+// 公开页面文字扫描：先造一份带真名的目录看它报红，改干净后再看它变绿；空目录、源码对照文件、调用方给的词也各试一次。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
-import { BUILTIN_TERMS, forbiddenTerms, scanDir } from './scan';
+import { BUILTIN_TERMS, scanDir } from './scan';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -12,7 +12,7 @@ afterEach(() => {
 
 /** 一份最小的「产物」：页面、脚本、样式、字体。 */
 function out(files: Record<string, string>): string {
-  const d = mkdtempSync(join(tmpdir(), 'demo-scan-'));
+  const d = mkdtempSync(join(tmpdir(), 'public-scan-'));
   dirs.push(d);
   for (const [name, body] of Object.entries(files)) {
     mkdirSync(join(d, name, '..'), { recursive: true });
@@ -22,14 +22,13 @@ function out(files: Record<string, string>): string {
 }
 
 const CLEAN = {
-  'index.html':
-    '<!doctype html><title>子午（演示版）</title><script src="/demo/assets/entry-a1b2.js"></script>',
-  'assets/entry-a1b2.js': 'const t="演示版·全是假数据";export{t};',
+  'index.html': '<!doctype html><title>子午</title><script src="/assets/entry-a1b2.js"></script>',
+  'assets/entry-a1b2.js': 'const t="全是样例数据";export{t};',
   'assets/app-c3d4.css': '.a{color:red}',
   'assets/inter-e5f6.woff2': '\u0000\u0001binary',
 };
 
-describe('演示版产物扫描', () => {
+describe('公开页面文字扫描', () => {
   test('干净的产物：扫到了文件、没有命中', () => {
     const r = scanDir(out(CLEAN));
     expect(r.files).toBe(4);
@@ -117,12 +116,10 @@ describe('演示版产物扫描', () => {
     expect(withComment.hits.map((h) => h.term)).toEqual(['sourceMappingURL']);
   });
 
-  test('配置里加的词（真域名）：给了就拦，没给就不拦', () => {
+  test('调用方自己给的词表：给了就拦，没给就不拦', () => {
     const d = out({ ...CLEAN, 'index.html': '<a href="https://cockpit.example.test/">x</a>' });
     expect(scanDir(d).hits).toEqual([]);
-    const terms = forbiddenTerms(' cockpit.example.test, other.example.test ');
-    expect(terms).toContain('cockpit.example.test');
-    expect(scanDir(d, terms).hits.map((h) => h.term)).toEqual(['cockpit.example.test']);
+    expect(scanDir(d, ['cockpit.example.test']).hits.map((h) => h.term)).toEqual(['cockpit.example.test']);
   });
 
   test('一个文件都没扫到就报错，不冒充「扫了没事」', () => {

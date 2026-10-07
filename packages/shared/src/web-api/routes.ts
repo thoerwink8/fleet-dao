@@ -11,14 +11,6 @@ import {
   UpdateCredentialsRequest,
 } from './auth.ts';
 import { BoardResponse, ReposResponse } from './board.ts';
-import {
-  CreateDemoLinkRequest,
-  CreateDemoLinkResponse,
-  DemoLinksResponse,
-  RevokeDemoLinkResponse,
-  UpdateDemoDefaultRequest,
-  UpdateDemoDefaultResponse,
-} from './demo.ts';
 import { RepoDispatchResponse, UpdateRepoDispatchRequest, UpdateRepoDispatchResponse } from './dispatch.ts';
 import { EnvResponseSchema } from './env.ts';
 import {
@@ -178,20 +170,6 @@ export const WebRoutes = {
     path: '/settings/:key',
     request: UpdateSettingRequest,
     response: UpdateSettingResponse,
-  },
-  demoLinks: { method: 'GET', path: '/demo/links', response: DemoLinksResponse },
-  createDemoLink: {
-    method: 'POST',
-    path: '/demo/links',
-    request: CreateDemoLinkRequest,
-    response: CreateDemoLinkResponse,
-  },
-  revokeDemoLink: { method: 'DELETE', path: '/demo/links/:linkId', response: RevokeDemoLinkResponse },
-  updateDemoDefault: {
-    method: 'PUT',
-    path: '/demo/default',
-    request: UpdateDemoDefaultRequest,
-    response: UpdateDemoDefaultResponse,
   },
 } as const;
 

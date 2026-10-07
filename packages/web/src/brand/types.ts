@@ -1,11 +1,7 @@
-// 品牌：正式驾驶舱和演示版各一套名字、图标、说法。代码里统一 `import { brand } from '#brand'`：
-// 正式构建按 package.json 的 imports 解析到 cockpit.tsx；演示版构建由 vite.config.ts 把 #brand 换成 demo.tsx——
-// 正式那套名字根本不进演示版的包（打包后还有一道扫描兜底，见 src/build/scan.ts）。
+// 品牌：驾驶舱的名字、图标、说法。代码里统一 `import { brand } from '#brand'`，按 package.json 的 imports 解析到 cockpit.tsx。
 import type { ComponentType } from 'react';
 
 export interface Brand {
-  /** cockpit = 正式驾驶舱；demo = 演示版（假数据、不连后端、换了一套名字）。 */
-  kind: 'cockpit' | 'demo';
   /** 左上角、启动画面上的名字。 */
   name: string;
   /** 自己叫什么：页面上说到自己时用（「××启动中…」「谁能进××」）。 */
@@ -35,10 +31,9 @@ export interface Brand {
     solo: string;
   };
   /**
-   * 调度台里转述本项目规矩的两条阶段说明：正式版照原话，演示版换成样例说法
-   * （原话拿一句去 GitHub 搜就能对上公开仓）。
+   * 调度台里转述本项目规矩的两条阶段说明。
    */
   stageHints: { triage: string; ui: string };
-  /** 仓库里某个 PR、issue 的外链；演示版一律不给（不带任何外链）。 */
+  /** 仓库里某个 PR、issue 的外链；不给就只显示文字。 */
   repoLink(repo: { owner: string; name: string }, kind: 'pull' | 'issues', n: number): string | undefined;
 }

@@ -10,9 +10,7 @@
   "scripts": {
     "dev": "react-router dev",
     "dev:mock": "react-router dev --mode mock",
-    "dev:demo": "node scripts/demo.ts dev",
     "build": "react-router build",
-    "build:demo": "node scripts/demo.ts build",
     "preview": "vite preview --outDir dist/client",
     "e2e": "playwright test -c e2e/playwright.config.ts",
     "e2e:serve": "node e2e/support/serve.ts"

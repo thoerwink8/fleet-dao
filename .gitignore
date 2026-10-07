@@ -1,6 +1,5 @@
 node_modules/
 dist/
-dist-demo/
 coverage/
 *.tsbuildinfo
 *.local

@@ -22,7 +22,6 @@ function Mark({ className }: { className?: string }) {
 }
 
 export const brand: Brand = {
-  kind: 'cockpit',
   name: '驾驶舱',
   product: '驾驶舱',
   title: (page) => (page ? `${page} · 驾驶舱` : '驾驶舱'),

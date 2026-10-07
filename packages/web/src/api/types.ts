@@ -13,12 +13,7 @@ import type {
   ChangeEventSchema,
   ChannelSchema,
   ChannelStateSchema,
-  CreateDemoLinkRequest,
-  CreateDemoLinkResponse,
   CredentialsResponse,
-  DemoLinkSchema,
-  DemoLinksResponse,
-  DemoScopeSchema,
   EffortModelSchema,
   EnvEngineSchema,
   EnvFact as EnvFactBase,
@@ -78,7 +73,6 @@ import type {
   TaskActionRequest,
   TaskDetailResponse,
   UpdateCredentialsRequest,
-  UpdateDemoDefaultRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
   UpdateRepoDispatchRequest,
@@ -225,13 +219,6 @@ export type ReleasedCommits = z.infer<typeof ReleasedCommitsSchema>;
 export type ReleaseRequestResult = z.infer<typeof ReleaseRequestResponse>;
 /** /france 页「发版预检」一次一回：done 带输出、退出码；起进程都没起来走 unreadable。 */
 export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
-
-export type DemoLinks = z.infer<typeof DemoLinksResponse>;
-export type DemoLink = z.infer<typeof DemoLinkSchema>;
-export type DemoScopeView = z.infer<typeof DemoScopeSchema>;
-export type CreateDemoLinkBody = z.input<typeof CreateDemoLinkRequest>;
-export type CreatedDemoLink = z.infer<typeof CreateDemoLinkResponse>;
-export type UpdateDemoDefaultBody = z.input<typeof UpdateDemoDefaultRequest>;
 
 /** 实时推送（SSE，事件名见 SSE_EVENTS）：ready = 连上了，全量重拉一次；change = 某张表某一行变了；resync = 断过，全量重拉。 */
 export type LiveEvent =

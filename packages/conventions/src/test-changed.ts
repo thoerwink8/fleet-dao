@@ -168,7 +168,7 @@ export function selectTests(
   const plan = planCi({ event: 'pull_request', changed, graph });
   const ciOnly = [
     ...(plan.biome ? ['格式和类型（biome、tsc）'] : []),
-    ...(plan.web ? ['演示版打包'] : []),
+    ...(plan.web ? ['驾驶舱前端打包'] : []),
     ...(plan.e2e === 'all'
       ? ['驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）']
       : plan.e2e.length > 0

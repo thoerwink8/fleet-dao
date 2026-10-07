@@ -6,7 +6,6 @@ import {
   AUTH_PREFIX,
   AuthRoutes,
   ChangeEventSchema,
-  CreateDemoLinkRequest,
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
@@ -16,7 +15,6 @@ import {
   SSE_EVENTS,
   TaskActionRequest,
   UpdateCredentialsRequest,
-  UpdateDemoDefaultRequest,
   UpdateModelRouteRequest,
   UpdateRepoDispatchRequest,
   UpdateRouteEffortRequest,
@@ -314,21 +312,6 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: R.franceRelease.request.parse({ sha }),
       }),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
-    demoLinks: () => send('GET', apiUrl(R.demoLinks.path), R.demoLinks.response),
-    async createDemoLink(body) {
-      return send('POST', apiUrl(R.createDemoLink.path), R.createDemoLink.response, {
-        body: CreateDemoLinkRequest.parse(body),
-      });
-    },
-    async revokeDemoLink(linkId) {
-      await send('DELETE', apiUrl(R.revokeDemoLink.path, { linkId }), R.revokeDemoLink.response);
-    },
-    async updateDemoDefault(body) {
-      const res = await send('PUT', apiUrl(R.updateDemoDefault.path), R.updateDemoDefault.response, {
-        body: UpdateDemoDefaultRequest.parse(body),
-      });
-      return res.defaultScope;
-    },
     subscribe(listener, onStatus) {
       const make = opts.eventSource ?? ((url: string) => new EventSource(url, { withCredentials: true }));
       const url = apiUrl(R.events.path);

@@ -19,7 +19,6 @@ import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
 import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed } from '../src/changes.ts';
 import type { Config } from '../src/config.ts';
-import type { DemoPublisher } from '../src/demo.ts';
 import type { Deps } from '../src/deps.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { createMemoryIntentStore } from '../src/intent-store.ts';
@@ -66,7 +65,6 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     cookieSecure: true,
     quotaStaleAfterMs: 30 * 60_000,
     sseHeartbeatMs: 60_000,
-    demoDir: null,
     temporalAddress: '127.0.0.1:7243',
     temporalNamespace: 'fleet',
     fleetTaskQueue: 'fleet',
@@ -128,8 +126,6 @@ export interface HarnessOptions {
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
-  /** 演示版的发布处；不给就是没配。 */
-  demo?: DemoPublisher | null;
   /** 飞书网关来没来过的记录（/healthz 的 feishu_gateway）；不给就不记。 */
   gatewaySeen?: Deps['gatewaySeen'];
   /** 意图存储（#553）；不给就是一份跟着测试时钟走的内存版，null 是没接上。 */
@@ -188,7 +184,6 @@ function wire<S extends Store>(
     log,
     now,
     health: options.health ?? [],
-    demo: options.demo ?? null,
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),

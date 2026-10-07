@@ -4,12 +4,11 @@
 // - 写的时候带「我看到的」顺序（点的那一刻页面上画着的）：别人先改了后端回 409，这里把原话（让刷新后再改）弹出来，库里不动。
 //   不先改缓存冒充改成了：写完不管成败都重拉路由两层（client.tsx 的 useMovePurposeModel / useUpdateModelRoute），页面按库里现在的顺序重排。
 // - 选了远程环境（?node=，本机 WSL 的快照）时整块置灰：这页的写只会落到本台的库，不能顶着别的环境的名字去改；写「去那台上操作」。
-//   演示版同理（它的写口本来就回 403，页面上不再给按钮）。
 
 import { ArrowDown, ArrowUp } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { errorText, useApi, useMovePurposeModel, useUpdateModelRoute } from '../api/client';
+import { errorText, useMovePurposeModel, useUpdateModelRoute } from '../api/client';
 import type { MoveDirection } from '../api/types';
 import { useSelectedNodeId } from '../lib/node';
 import { useSelectedNodeName } from './node-notice';
@@ -43,7 +42,7 @@ export interface OrderItem {
 }
 
 interface RoutingEdit {
-  /** 不能改的原因（远程环境的快照、演示版）；null = 能改。 */
+  /** 不能改的原因（远程环境的快照）；null = 能改。 */
   disabledWhy: string | null;
   /** 用途下的模型上移 / 下移（点了先确认）。items 是此刻页面上画着的先后。 */
   moveModel(args: {
@@ -90,7 +89,6 @@ function swapped(items: readonly OrderItem[], index: number, direction: MoveDire
 const names = (items: readonly OrderItem[]) => items.map((i) => i.name).join(' → ');
 
 export function RoutingEditProvider({ children }: { children: ReactNode }) {
-  const api = useApi();
   const nodeId = useSelectedNodeId();
   const nodeName = useSelectedNodeName();
   const moveModelMutation = useMovePurposeModel();
@@ -99,11 +97,7 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
 
   const disabledWhy =
-    api.source === 'demo'
-      ? '演示版只读'
-      : nodeId !== null
-        ? `现在看的是${nodeName ?? nodeId}，这一页的先后和开关只能改本台的：去那台上操作`
-        : null;
+    nodeId !== null ? `现在看的是${nodeName ?? nodeId}，这一页的先后和开关只能改本台的：去那台上操作` : null;
 
   const ask = useCallback((a: Ask) => setAsking(a), []);
 
@@ -207,7 +201,7 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** 一行右边的「上移 / 下移」：已经在头 / 尾的那个键置灰；不能改（远程快照、演示版）时两个都置灰。 */
+/** 一行右边的「上移 / 下移」：已经在头 / 尾的那个键置灰；不能改（远程快照）时两个都置灰。 */
 export function MoveButtons({
   label,
   canUp,

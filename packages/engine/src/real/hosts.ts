@@ -716,19 +716,25 @@ export function grokReport(report: GrokRunReport): HostReport {
 
 /**
  * 路由的 upstreamModel → Mirasim 服务端认的执行体名（docs/reference/adapters.md 第五~七节；对应
- * deploy/examples/catalog.example.json 里 mirasim-relay 池现在的六条路由）。认不出的模型串明确报错、不落到某个默认
+ * deploy/examples/catalog.example.json 里 mirasim-relay 池的路由）。认不出的模型串明确报错、不落到某个默认
  * 执行体上——新增一条 Mirasim 路由时要把这张表也改了，不然只会在真起会话那一刻才报错（mirasimAgentFor 抛出）。
  */
 export const MIRASIM_AGENT_BY_MODEL: Readonly<Record<string, string>> = {
   'claude-opus-5-5': 'claude',
   'claude-sonnet-5-5': 'claude',
   'gpt-5.6-luna': 'codex',
-  'gpt-6.1-sol': 'codex',
+  // codex 执行体认的模型串（服务端 0.0.425 的执行体表，默认 gpt-6-sol）；服务端里没有 gpt-6.1-sol 这个串
+  'gpt-6-sol': 'codex',
+  'gpt-6-luna': 'codex',
+  'gpt-6-astra': 'codex',
+  'gpt-5.6-sol': 'codex',
+  'gpt-5.6-terra': 'codex',
   'kimi-k3': 'pi',
   'deepseek-flash': 'dsh',
-  // zcode 是 Mirasim 服务端自带的执行体（智谱 GLM）：服务端 0.0.414 的执行体表里它只带 glm-5.3、glm-5.3-flash，默认 glm-5.3-flash；
+  // zcode 是 Mirasim 服务端自带的执行体（智谱 GLM）：服务端 0.0.425 的执行体表里它只带 glm-5.3、glm-5.3-flash，默认 glm-5.3-flash；
   // 没有仓内实跑记录，法国的 Mirasim 里有没有、登没登录由路由探针判（探不通就不派）
   'glm-5.3-flash': 'zcode',
+  'glm-5.3': 'zcode',
 };
 
 /** pi 起会话不带 model（吃服务端全局默认 agents.pi.model），只拿 expectModel 核对回读的快照符不符（PI-02）。 */

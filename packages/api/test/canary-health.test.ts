@@ -1,5 +1,5 @@
 // /healthz 的 canary 项（健康页「全流程巡检」，#223）：最近一轮的结论和时间。通过而且不旧是好的；断了、没跑成、太久没跑完一轮、
-// 一轮都还没跑完是红。每一种对外的说法都拿演示版打包扫描的同一份名单扫：不带仓名、单号和断的原因原文（原因只进日志）。
+// 一轮都还没跑完是红。每一种对外的说法都拿公开页禁用词名单（web/src/build/scan.ts）扫：不带仓名、单号和断的原因原文（原因只进日志）。
 import {
   CANARY_RUN_TIMEOUT_MINUTES,
   type CanaryRunRow,
@@ -189,7 +189,7 @@ describe('canary 项怎么判', () => {
     });
   });
 
-  it('每一种对外的说法都拿演示版打包扫描的名单扫一遍：没有内部名', async () => {
+  it('每一种对外的说法都拿公开页禁用词名单扫一遍：没有内部名', async () => {
     const scan = (await import(/* @vite-ignore */ SCAN)) as {
       BUILTIN_TERMS: readonly string[];
       scanText(file: string, text: string, terms: readonly string[]): { term: string }[];

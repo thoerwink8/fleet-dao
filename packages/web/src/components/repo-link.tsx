@@ -1,4 +1,4 @@
-// 仓库里的 PR、issue：正式驾驶舱给外链，演示版不给（只显示文字，不带任何外链）。
+// 仓库里的 PR、issue：按品牌拼外链；品牌不给链接时只显示文字。
 
 import type { ReactNode } from 'react';
 import { brand } from '#brand';

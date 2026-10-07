@@ -84,7 +84,7 @@ const STAGE_TONE: Record<Handling['stage'], Tone> = {
   deployed: 'done',
 };
 
-/** 跟进单、PR：正式驾驶舱是外链，演示版只是文字（RepoLink 按品牌定）。 */
+/** 跟进单、PR：外链（RepoLink 按品牌拼）。 */
 function WorkLink({
   repo,
   kind,

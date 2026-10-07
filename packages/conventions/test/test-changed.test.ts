@@ -260,10 +260,10 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     });
   });
 
-  it('CI 另外还跑的（格式和类型、演示版、装机测试）写出来，免得以为这里绿了 CI 一定绿', () => {
+  it('CI 另外还跑的（格式和类型、前端打包、装机测试）写出来，免得以为这里绿了 CI 一定绿', () => {
     expect(selectTests(['packages/web/src/app.css'], GRAPH).ciOnly).toEqual([
       '格式和类型（biome、tsc）',
-      '演示版打包',
+      '驾驶舱前端打包',
       '驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）',
       '装机测试（deploy/test/run.sh）',
     ]);
