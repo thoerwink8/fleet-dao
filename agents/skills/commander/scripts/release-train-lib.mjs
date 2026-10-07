@@ -212,7 +212,48 @@ function ciRef(state) {
   return state.target.sha ?? (state.target.kind === 'sha' ? state.target.value : 'main');
 }
 
+/**
+ * 后备读法（check-runs 接口读不出时用；2026-10-07 夜它连着回 HTTP 500 一个多小时，发版车整个被卡住）：
+ * 看这个提交的 ci 工作流运行。ci 工作流里就含汇总检查（check），它的结论就是汇总的结论。
+ * 只对点名的提交用（主线头没有提交号，不走这条）；读不到照旧回 unknown，不拿空顶。
+ */
+async function mainCiByRuns(io, ref) {
+  const full = gh(io, ['api', `repos/{owner}/{repo}/commits/${ref}`, '--jq', '.sha']);
+  const sha = String(full.stdout ?? '').trim();
+  if (didNotRun(full) || full.status !== 0 || !/^[0-9a-f]{40}$/.test(sha))
+    return { verdict: 'unknown', why: `提交号补不全：${tailOf(full)}` };
+  const r = gh(io, [
+    'api',
+    `repos/{owner}/{repo}/actions/runs?head_sha=${sha}&per_page=20`,
+    '--jq',
+    '[.workflow_runs[] | select(.name=="ci") | {status,conclusion}]',
+  ]);
+  if (didNotRun(r) || r.status !== 0) return { verdict: 'unknown', why: `ci 工作流运行读不到：${tailOf(r)}` };
+  let runs;
+  try {
+    runs = JSON.parse(String(r.stdout).trim() || '[]');
+  } catch (e) {
+    return { verdict: 'unknown', why: `ci 工作流运行的回话不是 JSON（${e.message}）` };
+  }
+  if (!Array.isArray(runs)) return { verdict: 'unknown', why: 'ci 工作流运行的回话认不出（不是列表）' };
+  const name = `要发的提交 ${ref.slice(0, 8)}`;
+  if (runs.length === 0) return { verdict: 'pending', why: `${name}还没有 ci 工作流运行` };
+  if (runs.some((x) => x.status !== 'completed')) return { verdict: 'pending', why: `${name}的 CI 还在跑` };
+  if (runs.every((x) => x.conclusion === 'success')) return { verdict: 'green', why: '' };
+  return { verdict: 'red', why: `${name}的 CI 是红的（${runs.map((x) => x.conclusion).join('、')}）` };
+}
+
+/** check-runs 读不出时，点名的提交改看 ci 工作流运行；两处都读不出才是 unknown。 */
 async function mainCi(io, ref = 'main') {
+  const byChecks = await mainCiByChecks(io, ref);
+  if (byChecks.verdict !== 'unknown' || ref === 'main') return byChecks;
+  const byRuns = await mainCiByRuns(io, ref);
+  if (byRuns.verdict === 'unknown')
+    return { verdict: 'unknown', why: `${byChecks.why}；后备也读不到：${byRuns.why}` };
+  return byRuns;
+}
+
+async function mainCiByChecks(io, ref) {
   const r = gh(io, [
     'api',
     `repos/{owner}/{repo}/commits/${ref}/check-runs?per_page=100`,
