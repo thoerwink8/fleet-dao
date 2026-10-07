@@ -1,7 +1,7 @@
 // 发版一键命令（release-onekey-lib.mjs）：薄封装 release-train，只到预检。
 // 假 ssh、假 gh、假时钟；home 用真临时目录（状态文件、暂停标记是真文件）。
 // 覆盖：preflight 成功（哨兵拦在第 1 步前、状态文件删掉、暂停标记没写）、preflight 失败、
-// --founder-ok 缺失拒绝、--sha/--tag 互斥、中文摘要（主线 CI / 自动合并的 PR / 法国在跑会话数）、
+// --founder-ok 缺失拒绝、--tag 已删（决定 0032）、中文摘要（主线 CI / 自动合并的 PR / 法国在跑会话数）、
 // 已有一趟时 preflight 拒、start 透传 runTrain。
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -43,7 +43,7 @@ interface Onekey {
   runOnekey(argv: string[], io: OnekeyIo): Promise<number>;
   runPreflight(
     io: OnekeyIo,
-    target: { kind: 'sha' | 'tag'; value: string | null },
+    target: { kind: 'sha'; value: string | null },
   ): Promise<{ code: number; lines: string[] }>;
   ONEKEY_USAGE: string;
 }
@@ -184,7 +184,7 @@ describe('preflight：只读，什么都不改', () => {
     expect(text(w.out)).toContain('预检没过');
   });
 
-  it('不带 --sha/--tag 也行：只说环境', async () => {
+  it('不带 --sha 也行：只说环境', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     const code = await onekey.runOnekey(['preflight'], io(home));
@@ -192,12 +192,13 @@ describe('preflight：只读，什么都不改', () => {
     expect(text(w.out)).toContain('只说环境，没指定目标');
   });
 
-  it('--sha 和 --tag 一起给：拒（回 1）', async () => {
+  it('--tag 已经没有了（决定 0032）：拒（回 1），指到 --sha', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    const code = await onekey.runOnekey(['preflight', '--sha', SHA, '--tag', 'v12'], io(home));
+    const code = await onekey.runOnekey(['preflight', '--tag', 'v12'], io(home));
     expect(code).toBe(1);
-    expect(text(w.err)).toContain('只能给一个');
+    expect(text(w.err)).toContain('--tag 已经没有了');
+    expect(text(w.err)).toContain('--sha');
     expect(w.calls).toEqual([]);
   });
 
@@ -249,19 +250,18 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
     expect(existsSync(stateFilePath(home))).toBe(false);
   });
 
-  it('--sha 和 --tag 一起给：拒（回 1）', async () => {
+  it('start 带 --tag：拒（回 1），什么都没做', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    const code = await onekey.runOnekey(
-      ['start', '--sha', SHA, '--tag', 'v12', '--founder-ok', FOUNDER],
-      io(home),
-    );
+    const code = await onekey.runOnekey(['start', '--tag', 'v12', '--founder-ok', FOUNDER], io(home));
     expect(code).toBe(1);
-    expect(text(w.err)).toContain('只能给一个');
+    expect(text(w.err)).toContain('--tag 已经没有了');
     expect(w.calls).toEqual([]);
+    expect(w.sshCalls).toEqual([]);
+    expect(existsSync(markerFile(home))).toBe(false);
   });
 
-  it('--sha 和 --tag 都不给：拒（回 1）', async () => {
+  it('--sha 不给：拒（回 1）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     const code = await onekey.runOnekey(['start', '--founder-ok', FOUNDER], io(home));

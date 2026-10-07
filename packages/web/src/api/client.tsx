@@ -35,7 +35,6 @@ import type {
   ReleaseCard,
   ReleasedCommits,
   ReleaseRequestResult,
-  ReleaseVersion,
   Repo,
   RepoDispatch,
   RouteProbeNowBody,
@@ -133,8 +132,6 @@ export interface FleetApi {
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
-  /** 版本号接口（#725）：页面已经不读它（#1255，更新日志页去掉「发布 v<N>」）；后端接口和这一条跟着决定 0032 的片 3 一起删。 */
-  releaseVersion(): Promise<ReleaseVersion>;
   /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
   franceReleaseState(): Promise<FranceReleaseState>;
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务，每行各自带没查成的原因。 */

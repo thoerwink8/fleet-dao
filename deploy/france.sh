@@ -15,7 +15,8 @@
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
-#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）
+#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）、
+#                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
 #                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
 #                                   人工档（lib/human-tier.sh：建用户、防火墙、sudoers）只在整套跑时做。
@@ -128,6 +129,7 @@ NFT_FILE=/etc/fleet-dao/nftables.nft
 # 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
 MIRASIM_SESSION_PORT=4318
+MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 # AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
 # fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
 # 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
@@ -687,7 +689,7 @@ setup_mirasim_session() {
   fi
   render "$DEPLOY_DIR/france/fleet-mirasim-session.service" \
     SESSION_USER="$u" MIRASIM_SESSION_PORT="$MIRASIM_SESSION_PORT"
-  put_file /etc/systemd/system/fleet-mirasim-session.service root:root 644 "$RENDERED"
+  put_file "$MIRASIM_SESSION_UNIT_FILE" root:root 644 "$RENDERED"
   unit_changed=$WROTE
   if ((unit_changed)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-mirasim-session.service "$unit_changed"
@@ -1412,8 +1414,20 @@ readback_mirasim() {
       continue
     fi
     check_mirasim_session_unit "$u" fleet-mirasim-session.service "$MIRASIM_SESSION_PORT"
+    check_mirasim_session_unit_file "$u" "$MIRASIM_SESSION_UNIT_FILE" "$DEPLOY_DIR/france/fleet-mirasim-session.service" "$MIRASIM_SESSION_PORT"
     check_mirasim "$u"
   done
+}
+
+# 自动档只读回常驻单元这一层（活没活、health、单元文件内容对不对）；令牌 check_mirasim 是创始人手装服务端的事，不归自动档
+readback_mirasim_session_unit() {
+  local u=${SESSION_USERS[0]}
+  if ! id "$u" >/dev/null 2>&1; then
+    pending "$u 这个用户还没有，Mirasim 常驻单元没查"
+    return 0
+  fi
+  check_mirasim_session_unit "$u" fleet-mirasim-session.service "$MIRASIM_SESSION_PORT"
+  check_mirasim_session_unit_file "$u" "$MIRASIM_SESSION_UNIT_FILE" "$DEPLOY_DIR/france/fleet-mirasim-session.service" "$MIRASIM_SESSION_PORT"
 }
 
 readback_wireguard() {
@@ -1458,6 +1472,10 @@ setup_auto_tier() {
   setup_slice
   retire_old_units
   setup_auto_release
+  # Mirasim 常驻单元（#1274：只在整套装机时装，后来改的单元文件一直落不到法国）：它只是个 systemd 单元，
+  # 不碰权限和钥匙；服务端本体不在就记待配、不装（待配不算红）；单元文件内容真变了才重启，会话断开只此一次。
+  # 放最后，它出问题不挡前面自动发布单元的装。
+  setup_mirasim_session
 }
 
 # 自动档只读回它装的那几样（整套的读回里别的项、状态文件上一轮的结果不归这里管，免得别的毛病让这一档每个提交都判红）
@@ -1475,6 +1493,7 @@ readback_auto_tier() {
   for u in "${AUTO_RELEASE_UNITS[@]}"; do
     if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
   done
+  readback_mirasim_session_unit
 }
 
 auto_tier_main() {

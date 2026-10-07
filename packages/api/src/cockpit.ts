@@ -1,5 +1,5 @@
 // 驾驶舱接口（/api）：看板、任务、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
-// 读一律从数据库读（不直接查 GitHub；唯一的例外是 /changelog 的发布版本号，现读 GitHub 里程碑，见 release-version.ts）；
+// 读一律从数据库读（不直接查 GitHub；例外是发版卡，现读 GitHub 的主线头和 CI，见 release-card.ts）；
 // 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
 
 import {
@@ -67,7 +67,6 @@ import {
 } from './ports.ts';
 import { registerReleaseCardRoutes } from './release-card.ts';
 import { registerReleaseRequestRoutes } from './release-request.ts';
-import { registerReleaseRoutes } from './release-version.ts';
 import { soloReserveView } from './reserve-view.ts';
 import { registerRouteProbeRoutes } from './route-probe-now.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
@@ -715,7 +714,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerDispatchRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
-  registerReleaseRoutes(app, deps);
   registerFranceReleaseRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);
   registerReleaseRequestRoutes(app, deps, actorOf);

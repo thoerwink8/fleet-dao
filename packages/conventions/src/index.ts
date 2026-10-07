@@ -136,7 +136,6 @@ export {
 } from './pr-columns.ts';
 export { annotation } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
-export { releaseVersion } from './publish-actions.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {
   type ChangedFile,

@@ -32,7 +32,6 @@ import {
   ResolveNotificationResponse,
 } from './notifications.ts';
 import { PoolsResponse } from './pools.ts';
-import { ReleaseVersionResponse } from './release.ts';
 import {
   MovePurposeModelRequest,
   MovePurposeModelResponse,
@@ -172,8 +171,6 @@ export const WebRoutes = {
     request: UpdateSettingRequest,
     response: UpdateSettingResponse,
   },
-  /** /changelog 页「发布 v<N>」的版本号（#725）：现读 GitHub 里程碑；已有发布标记的号不当这一版。 */
-  releaseVersion: { method: 'GET', path: '/release/version', response: ReleaseVersionResponse },
 } as const;
 
 /**

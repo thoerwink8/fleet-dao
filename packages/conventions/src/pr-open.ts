@@ -17,7 +17,19 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { issueColumnRefs, withIssueColumn } from './pr-columns.ts';
-import { parseCreatedPr } from './publish-actions.ts';
+
+/**
+ * 从 gh pr create 的输出里认 PR 号。gh 正常时最后一行是 PR 地址（…/pull/<N>）；输出里认不出 PR 号直接抛错——
+ * 「退出了但没拿到号」不能让开 PR 的人当「已经开了」。
+ */
+export function parseCreatedPr(stdout: string): { pr: number; url: string } {
+  const url = stdout.trim().split('\n').pop()?.trim() ?? '';
+  const m = /\/pull\/(\d+)$/.exec(url)?.[1];
+  if (!m) {
+    throw new Error(`gh pr create 退出码 0，可输出里认不出 PR 号：${stdout.slice(0, 200)}`);
+  }
+  return { pr: Number(m), url };
+}
 
 export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-file <正文文件> | 生成正文的参数] [--draft] [--base <分支>] [--no-automerge]
   在要开 PR 的分支上跑（先 git push）。开 PR，没碰改标准路径就当场挂自动合并（squash）。
