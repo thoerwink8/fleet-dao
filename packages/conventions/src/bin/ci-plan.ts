@@ -82,11 +82,19 @@ if (event === 'pull_request') {
 }
 
 const repo = fsRepo(root);
-const assigned = assignTests(planCi({ event: planEvent, changed, graph: readGraph(repo) }), {
-  all: listTestFiles(repo),
-  timings: parseTimings(repo.read(TIMINGS_FILE)),
-  read: (rel) => repo.read(rel),
-});
+const assigned = assignTests(
+  planCi({
+    event: planEvent,
+    changed,
+    graph: readGraph(repo),
+    specExists: (rel) => repo.exists(rel),
+  }),
+  {
+    all: listTestFiles(repo),
+    timings: parseTimings(repo.read(TIMINGS_FILE)),
+    read: (rel) => repo.read(rel),
+  },
+);
 if (typeof assigned === 'string') fail(assigned);
 let { plan } = assigned;
 const { packed } = assigned;
@@ -134,7 +142,7 @@ const human = [
     (b) =>
       `- test (${b.label})：${b.files.length} 个文件，估 ${Math.round(b.estMs / 1000)} 秒（${unitsOf(b.files)}）`,
   ),
-  `web：${plan.web}  e2e：${plan.e2e}  deploy：${plan.deploy}`,
+  `web：${plan.web}  e2e：${plan.e2e === 'all' ? '全套' : plan.e2e.length === 0 ? '不跑' : plan.e2e.join('、')}  deploy：${plan.deploy}`,
 ];
 console.log(`改了 ${changed.length} 个文件（${event}${event === 'pull_request' ? `，比 ${base}` : ''}）`);
 for (const line of human) console.log(line);
