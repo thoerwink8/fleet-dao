@@ -50,7 +50,6 @@ import type { z } from 'zod';
 import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCredentialRoutes } from './credentials.ts';
-import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
@@ -713,7 +712,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   });
 
   registerCredentialRoutes(app, deps);
-  registerDemoRoutes(app, deps, actorOf);
   registerDispatchRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);

@@ -241,7 +241,7 @@ describe('按改动算要跑什么', () => {
     }
   });
 
-  it('改了 web：打包演示版、跑 deploy（发布、扫产物用它）；api、feishu 的测试读 web 的文件，也测，但不往下传到 engine', () => {
+  it('改了 web：打包驾驶舱前端、跑 deploy（发布、扫公开页面文字用它）；api、feishu 的测试读 web 的文件，也测，但不往下传到 engine', () => {
     const p = pr('packages/web/src/build/scan.ts');
     expect(p).toMatchObject({ web: true, deploy: 'all' });
     expect(units(p)).toEqual(['api', 'feishu', 'web']);
@@ -405,7 +405,7 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     const abs = join(ROOT, rel);
     if (!existsSync(abs)) return;
     for (const name of readdirSync(abs)) {
-      if (name === 'node_modules' || name === 'dist' || name === 'dist-demo') continue;
+      if (name === 'node_modules' || name === 'dist') continue;
       const r = `${rel}/${name}`;
       if (statSync(join(ROOT, r)).isDirectory()) walk(r, out);
       else if (/\.(ts|tsx|mts|mjs)$/.test(name)) out.push(r);

@@ -101,7 +101,7 @@ export function targetOfItem(item: HomeRunning, remote: boolean): ActionTarget |
   };
 }
 
-/** 单子在 GitHub 上的链接（看远程快照时用；演示版拼不出来是 undefined）。 */
+/** 单子在 GitHub 上的链接（看远程快照时用；拼不出来是 undefined）。 */
 export function githubIssueLink(item: HomeRunning): string | undefined {
   const cut = item.repo.indexOf('/');
   if (cut <= 0) return undefined;

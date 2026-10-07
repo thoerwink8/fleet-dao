@@ -32,7 +32,6 @@ import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
-import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { readEngineMaster } from './engine-switch.ts';
@@ -129,7 +128,6 @@ function load() {
 const config = load();
 const now = () => new Date();
 const feishu = config.feishu ? createFeishuAuth(config.feishu) : null;
-const demo = config.demoDir ? createDirDemoPublisher(config.demoDir) : null;
 
 /**
  * 往正式环境的看板推快照（看板多机）：配了 FLEET_NODE_REPORT_URL / _TOKEN 才建；拼快照要装好的 deps，所以先建、
@@ -170,7 +168,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       log,
       now,
       feishu,
-      demo,
       intents: createMemoryIntentStore({ now }),
       health: nodeReporter ? [nodeReporter.healthCheck] : [],
       workflows: {
@@ -224,7 +221,6 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     log,
     now,
     feishu,
-    demo,
     workflows: temporal.control,
     github: github.sink,
     gatewaySeen,
@@ -356,16 +352,6 @@ log.info('驾驶舱后端已起', {
       }
     : {}),
 });
-
-// 演示链接到期就撤掉公开的范围文件：没人打开驾驶舱时也要撤（列表接口也会顺手撤）。撤不成照实记错误，下个钟头再来。
-if (demo) {
-  const sweep = () =>
-    sweepExpiredDemoLinks(demo, now()).catch((err: unknown) =>
-      log.error('撤过期的演示链接没成', { error: String(err) }),
-    );
-  void sweep();
-  setInterval(() => void sweep(), 60 * 60_000).unref();
-}
 
 /** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的（SSE 这类）。 */
 const DRAIN_MS = 10_000;

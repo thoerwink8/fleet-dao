@@ -3,7 +3,6 @@
 // 每条写提交号、标题、发于何时；读不到写没查成和原因，不拿空列表冒充「没发过」。发布入口不在这一页：在「法国」页「在用版本」那一行。
 // CHANGELOG 对照的数据来源是仓根 CHANGELOG.md 在打包时被内联进来的字符串（lib/changelog.ts 用 vite 的 ?raw 取），
 // 格式解析共用 packages/shared/src/changelog.ts——和发布那条线是同一个实现，格式变了两边一样认不出。
-// 演示版不把这一页放进路由表、导航也不给它 module：CHANGELOG 里有仓名，不能进演示版产物。
 import { CalendarClock, GitCommitHorizontal, ScrollText } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';

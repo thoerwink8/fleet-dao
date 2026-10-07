@@ -49,7 +49,7 @@ export interface CiPlan {
   testUnits: string[];
   /** 装好箱的测试台（test-split.ts）：每台一份明确的文件清单。testUnits 不空时 assignTests 之后才有，汇总核对两边对得上。 */
   tests: TestBox[];
-  /** 演示版打包 + 扫产物。 */
+  /** 驾驶舱前端打包（packages/web 的 build，发布时也是这一道；演示版已删，#1223）。 */
   web: boolean;
   /**
    * 驾驶舱用户视角 e2e（真 Postgres + 真后端 + 真前端 + Chromium，packages/web/e2e，#930）：一个 job、要几分钟。
@@ -227,14 +227,13 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [`${W}routes/france.tsx`, `${W}routes/env.tsx`, `${W}components/engine-master-card.tsx`],
     specs: [spec('07b-env'), spec('07c-nodes')],
   },
-  // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、演示链接、找不到的页面
+  // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、找不到的页面
   {
     files: [
       `${W}routes/routing.tsx`,
       `${W}routes/routing-status.tsx`,
       `${W}routes/efforts.tsx`,
       `${W}routes/changelog.tsx`,
-      `${W}routes/demo-links.tsx`,
       `${W}routes/not-found.tsx`,
       `${W}components/channel-status.tsx`,
       `${W}components/routing-edit.tsx`,
@@ -242,7 +241,6 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
       `${W}lib/provider-status.ts`,
       `${W}lib/efforts.ts`,
       `${W}lib/changelog.ts`,
-      `${W}demo/labels.ts`,
     ],
     specs: [spec('07-other-pages')],
   },

@@ -22,7 +22,7 @@ export type HomeDecision = z.infer<typeof HomeDecisionSchema>;
 /** 「在跑的」一张单。 */
 export type HomeRunning = z.infer<typeof HomeRunningSchema>;
 
-/** 「做完的」一篇 PR：合约里的字段 + 前端拼好的链接（演示版不带外链，是 undefined）。 */
+/** 「做完的」一篇 PR：合约里的字段 + 前端拼好的链接（拼不出来是 undefined）。 */
 export type HomeDone = z.infer<typeof HomeDoneSchema> & { link: string | undefined };
 
 /** 三段流水线图头上的一格：这一段在途几张、近期平均耗时。 */

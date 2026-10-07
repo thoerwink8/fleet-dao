@@ -23,7 +23,7 @@ export const ALERT_STAGES = [
   'deployed',
 ] as const;
 
-/** 提醒挂的单、修它的 PR 在哪个仓：链接由驾驶舱按品牌拼（正式版给 GitHub 外链，演示版不给），后端不发网址。 */
+/** 提醒挂的单、修它的 PR 在哪个仓：链接由驾驶舱按品牌拼，后端不发网址。 */
 const AlertRepoSchema = z.object({ owner: z.string(), name: z.string() });
 
 export const AlertHandlingSchema = z.object({

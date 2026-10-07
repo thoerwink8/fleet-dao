@@ -11,14 +11,6 @@ import {
   UpdateCredentialsRequest,
 } from './auth.ts';
 import { BoardResponse, ReposResponse } from './board.ts';
-import {
-  CreateDemoLinkRequest,
-  CreateDemoLinkResponse,
-  DemoLinksResponse,
-  RevokeDemoLinkResponse,
-  UpdateDemoDefaultRequest,
-  UpdateDemoDefaultResponse,
-} from './demo.ts';
 import { RepoDispatchResponse, UpdateRepoDispatchRequest, UpdateRepoDispatchResponse } from './dispatch.ts';
 import { EnvResponseSchema } from './env.ts';
 import {
@@ -182,20 +174,6 @@ export const WebRoutes = {
   },
   /** /changelog 页「发布 v<N>」的版本号（#725）：现读 GitHub 里程碑；已有发布标记的号不当这一版。 */
   releaseVersion: { method: 'GET', path: '/release/version', response: ReleaseVersionResponse },
-  demoLinks: { method: 'GET', path: '/demo/links', response: DemoLinksResponse },
-  createDemoLink: {
-    method: 'POST',
-    path: '/demo/links',
-    request: CreateDemoLinkRequest,
-    response: CreateDemoLinkResponse,
-  },
-  revokeDemoLink: { method: 'DELETE', path: '/demo/links/:linkId', response: RevokeDemoLinkResponse },
-  updateDemoDefault: {
-    method: 'PUT',
-    path: '/demo/default',
-    request: UpdateDemoDefaultRequest,
-    response: UpdateDemoDefaultResponse,
-  },
 } as const;
 
 /**

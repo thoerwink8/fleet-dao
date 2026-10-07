@@ -181,7 +181,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
 
 /**
  * 整张卡片是个链接：看本台时进站内的单子详情；看别的环境的快照时站内详情读的是本台的库、对不上，
- * 改成指向 GitHub 上那张单（新窗口打开），拼不出链接（演示版）就不当链接。
+ * 改成指向 GitHub 上那张单（新窗口打开），拼不出链接就不当链接。
  */
 export function CardLink({
   item,
