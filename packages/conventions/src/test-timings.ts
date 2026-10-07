@@ -51,6 +51,20 @@ export function medianOfRuns(runs: readonly ReadonlyMap<string, number>[]): Map<
 export const TIMINGS_NOTE =
   'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
 
+/**
+ * 不指定运行时怎么挑：最近的绿的 ci.yml 里，最多往回翻这么多次，取头几轮真跑了测试的。
+ * 一轮至少这么多台成功的 `test (` 才算（按改动跑的小 PR 只有一两台，量到的文件太少）。
+ * `pnpm ci:timings` 和引擎每周刷新用同一组数字，别各写各的。
+ */
+export const TIMINGS_AUTO_RUNS = 5;
+export const TIMINGS_AUTO_SCAN = 40;
+export const TIMINGS_AUTO_MIN_BOXES = 4;
+
+/** 写进耗时表 source 的那一句。名字是「ci.yml run <编号>」或「日志文件 <文件名>」。 */
+export function timingsSource(names: readonly string[], at: Date): string {
+  return `${names.join('、')}，共 ${names.length} 轮取中位数（${at.toISOString().slice(0, 10)}）`;
+}
+
 /** 写回仓里的样子：说明、来源、按路径排好序的文件表，两格缩进、末尾换行。 */
 export function renderTimings(t: Timings): string {
   const files = Object.fromEntries(Object.entries(t.files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
