@@ -29,6 +29,9 @@ export interface PackageGraph {
   deps: Record<string, string[]>;
 }
 
+/** e2e 要跑的 spec：'all' 全套；数组是只跑这几个（仓内相对路径）；空数组不跑。见 CiPlan.e2e。 */
+export type E2eSpecs = 'all' | string[];
+
 export interface CiPlan {
   full: boolean;
   /** 为什么这么跑：全跑时是触发全跑的那几条，否则是各文件落到了哪。 */
@@ -49,11 +52,15 @@ export interface CiPlan {
   /** 演示版打包 + 扫产物。 */
   web: boolean;
   /**
-   * 驾驶舱用户视角 e2e（真 Postgres + 真后端 + 真前端 + Chromium，packages/web/e2e，#930）：一个 job、要几分钟，
-   * 所以不是每个 PR 都跑，只在 touchesE2e 认的那几处改动、或「认不出改了什么」（非 PR 事件、依赖图读不出、空改动、认不出的路径）时开。
-   * 注意它和 full 不同步：全跑是 true 的（deploy/ 脚本、根配置这类升的全跑）不一定开 e2e，见 planCi。
+   * 驾驶舱用户视角 e2e（真 Postgres + 真后端 + 真前端 + Chromium，packages/web/e2e，#930）：一个 job、要几分钟。
+   * 决定 0029（#1186）：PR 只点改动页，输出是「跑哪些 spec」而不是「跑不跑」：
+   * - `'all'`：全套 spec。非 PR 事件（每夜 schedule、主线推送）、依赖图读不出、空改动、认不出的路径、
+   *   改到 e2e 夹具、playwright 配置、ci.yml、映射表本身、映射不到页面的 web 文件，都是全套（不确定就全跑）。
+   * - 非空数组：只跑这几个 spec（仓内相对路径，来自 E2E_PAGE_MAP 或改到的 spec 文件自己）。
+   * - 空数组：这次不跑 e2e（只改 api、只改测试文件、改的页面没有 spec 盖着），回归靠每夜全量兜底；汇总 job 把 e2e job 的 skipped 当「本该跳过」。
+   * 注意它和 full 不同步：全跑（deploy/ 脚本、根配置这类升的全跑）不一定开 e2e，见 planCi。
    */
-  e2e: boolean;
+  e2e: E2eSpecs;
   /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
   deploy: DeployMode;
   /**
@@ -145,12 +152,156 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * 抓到 db/shared 的集成错；抓到了就恢复这一档触发或补针对性测试。量法：逐 PR 看 `gh pr checks <号>` 的
  * `e2e` 与 `test` 两项状态。
  */
-export const E2E_PACKAGES: readonly string[] = ['web', 'api'];
-export const E2E_FILES: readonly string[] = ['.github/workflows/ci.yml'];
-export function touchesE2e(f: string): boolean {
-  if (E2E_FILES.includes(f)) return true;
-  const pkg = /^packages\/([^/]+)\//.exec(f)?.[1];
-  return pkg !== undefined && E2E_PACKAGES.includes(pkg);
+/**
+ * **2026-10-07 再拆开（决定 0029，#1186）**：PR 只点改动页，全量回归留给每夜（非 PR 事件在 planCi 里一律 'all'）。
+ * 上面那段说的「web、api 一碰就整套」不再是现状：现在按改到的文件算出要跑哪几个 spec（e2eSpecsFor）。
+ *
+ * 判法，逐个改动文件：
+ * - 全套：`.github/workflows/ci.yml`、本文件（映射表就写在这里，改了表要全跑一遍验表）、
+ *   `packages/web/e2e/` 里 specs 以外的东西（夹具 support/、playwright 配置）、`packages/api/test/e2e/`（e2e 的备库）、
+ *   `packages/web` 里不在 E2E_PAGE_MAP 的文件（共享组件、样式、路由骨架、壳、依赖这类：不知道会碰到哪一页，不拿「没映射」冒充不用跑）。
+ * - 只那几个 spec：E2E_PAGE_MAP 里的页面私有文件；改到的 spec 文件自己（文件名合规且还在）。
+ * - 不跑：`packages/api` 的其余改动（只改后端、靠每夜全量兜底，单上第 1 条）、web 里的测试文件和 .md、
+ *   映射表里写明「没有 spec 盖着」的页面（法国总览、占位页）。
+ * 别的包、根配置、文档：和 2026-10-05 收窄后一样不触发（认不出的路径另由 planCi 的 unknown 升成全套）。
+ */
+export const E2E_SPEC_DIR = 'packages/web/e2e/specs/';
+const spec = (stem: string) => `${E2E_SPEC_DIR}${stem}.e2e.ts`;
+/** 一页的私有文件（只有这一页的路由引用它，用反向引用扫过确认）→ 点验它的 spec。files 以 / 结尾的是目录前缀，其余是整条路径；specs 为空 = 这页没有 spec。 */
+export interface E2ePageEntry {
+  files: readonly string[];
+  specs: readonly string[];
+}
+const W = 'packages/web/src/';
+export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
+  // 登录页（01）。password-field 登录页和设置页「账密登录」共用
+  { files: [`${W}routes/login.tsx`], specs: [spec('01-login')] },
+  { files: [`${W}components/password-field.tsx`], specs: [spec('01-login'), spec('10-credentials')] },
+  // 主页（02）；07c 在主页上切环境，08 从别页点回主页
+  {
+    files: [
+      `${W}routes/home.tsx`,
+      `${W}components/home/`,
+      `${W}components/not-built.tsx`,
+      `${W}lib/home-flow-layout.ts`,
+    ],
+    specs: [spec('02-home'), spec('07c-nodes'), spec('08-backend-down')],
+  },
+  // 主页和单子详情共用
+  { files: [`${W}lib/segments.ts`], specs: [spec('02-home'), spec('03-task')] },
+  // 单子详情（03）
+  {
+    files: [
+      `${W}routes/task.tsx`,
+      `${W}components/run-timeline.tsx`,
+      `${W}components/segment-usage.tsx`,
+      `${W}components/usage.tsx`,
+      `${W}components/route-label.tsx`,
+      `${W}lib/usage.ts`,
+    ],
+    specs: [spec('03-task')],
+  },
+  // 额度页（04）；05 在设置页改了开关后回额度页核对，07c 看远程环境的额度页，08 用它造后端断开
+  {
+    files: [
+      `${W}routes/quota.tsx`,
+      `${W}components/quota.tsx`,
+      `${W}components/carpool-reconcile.tsx`,
+      `${W}components/org-switch.tsx`,
+    ],
+    specs: [spec('04-quota'), spec('05-settings'), spec('07c-nodes'), spec('08-backend-down')],
+  },
+  // 设置页（05）；08 在设置页上造后端断开，10 是设置页的「账密登录」一节
+  {
+    files: [
+      `${W}routes/settings.tsx`,
+      `${W}components/pool-holds.tsx`,
+      `${W}components/repo-dispatch.tsx`,
+      `${W}lib/pool-holds.ts`,
+      `${W}lib/reserve.ts`,
+    ],
+    specs: [spec('05-settings'), spec('07b-env'), spec('08-backend-down'), spec('10-credentials')],
+  },
+  { files: [`${W}components/credentials-section.tsx`], specs: [spec('10-credentials')] },
+  // 通知中心（06）；08 站内跳到它造后端断开
+  { files: [`${W}routes/notifications.tsx`], specs: [spec('06-notifications'), spec('08-backend-down')] },
+  // 环境页（07b、07c 并排看多机）
+  {
+    files: [`${W}routes/env.tsx`, `${W}components/engine-master-card.tsx`],
+    specs: [spec('07b-env'), spec('07c-nodes')],
+  },
+  // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、演示链接、找不到的页面
+  {
+    files: [
+      `${W}routes/routing.tsx`,
+      `${W}routes/routing-status.tsx`,
+      `${W}routes/efforts.tsx`,
+      `${W}routes/changelog.tsx`,
+      `${W}routes/demo-links.tsx`,
+      `${W}routes/not-found.tsx`,
+      `${W}components/channel-status.tsx`,
+      `${W}components/routing-edit.tsx`,
+      `${W}lib/channel-status.ts`,
+      `${W}lib/provider-status.ts`,
+      `${W}lib/efforts.ts`,
+      `${W}lib/changelog.ts`,
+      `${W}demo/labels.ts`,
+    ],
+    specs: [spec('07-other-pages')],
+  },
+  // 定时任务页：08 点它造后端 500
+  {
+    files: [`${W}routes/schedules.tsx`, `${W}lib/schedule.ts`],
+    specs: [spec('07-other-pages'), spec('08-backend-down')],
+  },
+  // 操作记录页和设置页共用 lib/audit；10 也去操作记录里核对
+  {
+    files: [`${W}routes/audit.tsx`, `${W}lib/audit.ts`],
+    specs: [spec('05-settings'), spec('07-other-pages'), spec('10-credentials')],
+  },
+  // 法国总览和占位页：没有任何 spec 点它们（specs 里没有 goto），改它们不跑 e2e，靠每夜全量里别页的回归兜底
+  { files: [`${W}routes/france.tsx`, `${W}routes/soon.tsx`], specs: [] },
+];
+
+/** 夹具、配置、备库：e2e 自己的地基，改了就是全套。 */
+const E2E_FULL_PREFIXES: readonly string[] = ['packages/web/e2e/', 'packages/api/test/e2e/'];
+const E2E_FULL_FILES: readonly string[] = ['.github/workflows/ci.yml', 'packages/conventions/src/ci-plan.ts'];
+/** 合规的 spec 文件名（会被原样交给 playwright 当参数，所以只认安全字符）。 */
+const E2E_SPEC_FILE = /^packages\/web\/e2e\/specs\/[A-Za-z0-9._-]+\.e2e\.ts$/;
+/** web 里只给 vitest 用的：改了不影响 e2e 起的真前端。 */
+const WEB_TEST_FILE = /\.test\.tsx?$/;
+const WEB_TEST_DIR = 'packages/web/src/test/';
+
+/**
+ * 这批改动要跑的 e2e spec（规则见上面 E2E_PAGE_MAP 的注释）。specExists 给了时，改到的 spec 文件已经不在了（删了）就不再点名它；
+ * 映射表里的 spec 不做存在检查（表里写错了让 playwright 找不到、job 红，比悄悄少跑好；有测试核对表里每条都在）。
+ */
+export function e2eSpecsFor(changed: readonly string[], specExists?: (rel: string) => boolean): E2eSpecs {
+  const specs = new Set<string>();
+  for (const f of changed) {
+    if (f.endsWith('.md')) continue;
+    if (E2E_FULL_FILES.includes(f)) return 'all';
+    if (E2E_SPEC_FILE.test(f)) {
+      if (specExists === undefined || specExists(f)) specs.add(f);
+      continue;
+    }
+    if (E2E_FULL_PREFIXES.some((p) => f.startsWith(p))) return 'all';
+    const pkg = /^packages\/([^/]+)\//.exec(f)?.[1];
+    if (pkg !== 'web') continue; // api 的其余改动（只改后端）和别的包都不开
+    if (WEB_TEST_FILE.test(f) || f.startsWith(WEB_TEST_DIR)) continue;
+    const hit = E2E_PAGE_MAP.find((e) => e.files.some((p) => (p.endsWith('/') ? f.startsWith(p) : f === p)));
+    if (hit === undefined) return 'all';
+    for (const s of hit.specs) specs.add(s);
+  }
+  return [...specs].sort();
+}
+
+/** 这份 e2e 清单要不要起 e2e job。 */
+export const e2eRuns = (e: E2eSpecs): boolean => e === 'all' || e.length > 0;
+
+/** 写进 $GITHUB_OUTPUT 的 e2e 值：'all' | 空格隔开的 spec 路径（相对 packages/web，e2e job 在那里跑 playwright）| 空串（不跑）。 */
+export function e2eOutput(e: E2eSpecs): string {
+  return e === 'all' ? 'all' : e.map((s) => s.replace(/^packages\/web\//, '')).join(' ');
 }
 
 /** 仓根的配置：改到任何一个，所有包都受影响（PATH_RULES 全跑；ci-cache.ts 的缓存键也认这一份）。 */
@@ -275,8 +426,8 @@ export function readGraph(repo: RepoView): PackageGraph | string {
 export const unitPath = (u: string) => (u === AGENTS_UNIT ? 'agents/' : `packages/${u}/`);
 const unitProject = (u: string) => (u === AGENTS_UNIT ? 'agents' : `packages/${u}`);
 
-/** e2e 默认开：升全跑的原因里有「认不出改了什么」时不能拿它冒充可以少跑；只有 planCi 能确定「全跑是因为 deploy/、根配置这类、没碰 e2e 认的路径」时才传 false。 */
-function fullPlan(reasons: string[], e2e = true): CiPlan {
+/** e2e 默认全套：升全跑的原因里有「认不出改了什么」时不能拿它冒充可以少跑；只有 planCi 能确定「全跑是因为 deploy/、根配置这类、没碰 e2e 认的路径」时才传别的清单。 */
+function fullPlan(reasons: string[], e2e: E2eSpecs = 'all'): CiPlan {
   return {
     full: true,
     reasons,
@@ -315,6 +466,8 @@ export interface PlanInput {
   graph: PackageGraph | string;
   /** 包外路径的去处；只在测试里换掉（ci-plan.test.ts 拿漏记一处的版本核对扫描器查不查得出来）。 */
   rules?: readonly Rule[];
+  /** 仓里有没有这个文件：e2e 清单里改到的 spec 文件被删了就不再点名。不给 = 都当还在。 */
+  specExists?: (rel: string) => boolean;
 }
 
 /** 测试读这些包的文件、package.json 里却没依赖它们的单元（TEST_READS；不往下传）。 */
@@ -380,14 +533,14 @@ function sortChanges(
   return s;
 }
 
-export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput): CiPlan {
+export function planCi({ event, changed, graph, rules = PATH_RULES, specExists }: PlanInput): CiPlan {
   if (event !== 'pull_request') return fullPlan([`${event} 事件：全跑（主线上兜底）`]);
   if (typeof graph === 'string') return fullPlan([`包依赖图读不出（${graph}）：全跑`]);
   if (changed.length === 0) return fullPlan(['改动列表是空的：认不出这次改了什么，全跑']);
 
   const s = sortChanges(changed, (pkg) => Object.hasOwn(graph.deps, pkg), rules);
-  // e2e 单独判：全跑的原因（deploy/、根配置、CI 工作流这类）不一定碰 e2e 认的路径；认不出的路径则开（不确定就跑）
-  const e2e = s.unknown || changed.some(touchesE2e);
+  // e2e 单独判：全跑的原因（deploy/、根配置这类）不一定碰 e2e 认的路径；认不出的路径则全套（不确定就跑）
+  const e2e: E2eSpecs = s.unknown ? 'all' : e2eSpecsFor(changed, specExists);
   if (s.fullWhy.length > 0) return fullPlan(s.fullWhy, e2e);
 
   const closure = dependentsClosure(graph, s.units);
@@ -500,13 +653,13 @@ export function applyReuse(plan: CiPlan, reuse: Reuse): CiPlan {
     testUnits: [],
     tests: [],
     web: false,
-    e2e: false,
+    e2e: [],
     deploy: 'none',
     reused: reuse,
     reasons: [
       ...plan.reasons,
       `同树复用：这次主线提交的树和 PR #${reuse.pr} 的检查（运行 ${reuse.run}）测的是同一棵、基准也是上次真绿的头；` +
-        `本来要测的（${wasTesting}${plan.web ? '、web' : ''}${plan.e2e ? '、e2e' : ''}${plan.deploy === 'none' ? '' : `、deploy ${plan.deploy}`}）不再重测`,
+        `本来要测的（${wasTesting}${plan.web ? '、web' : ''}${e2eRuns(plan.e2e) ? '、e2e' : ''}${plan.deploy === 'none' ? '' : `、deploy ${plan.deploy}`}）不再重测`,
     ],
   };
 }
@@ -521,7 +674,7 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
     tsc: plan.tsc === 'all' ? 'all' : plan.tsc.join(' '),
     tests: JSON.stringify(plan.tests),
     web: String(plan.web),
-    e2e: String(plan.e2e),
+    e2e: e2eOutput(plan.e2e),
     deploy: plan.deploy,
     deploy_matrix: JSON.stringify(deployMatrix(plan.deploy)),
     // 复用的那次 PR 检查的运行号；没复用是空串。汇总 job 核它和 plan 里的是同一份。
@@ -541,7 +694,7 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
  */
 export const PLANNED_JOBS = ['test', 'web', 'e2e', 'deploy'] as const;
 /**
- * 全跑（plan.full）时必须开的 job：e2e 不在里面——它按 touchesE2e 单独判（全跑的原因是 deploy/ 或根配置时不开），
+ * 全跑（plan.full）时必须开的 job：e2e 不在里面——它按 e2eSpecsFor 单独判（全跑的原因是 deploy/ 或根配置时不开），
  * 开不开由 changes 的 e2e 输出和 plan.e2e 对账（同一份），汇总照 plan.e2e 核 job 的结果。
  */
 const FULL_JOBS = PLANNED_JOBS.filter((j) => j !== 'e2e');
@@ -559,7 +712,8 @@ export const ALWAYS_TESTS: readonly string[] = Object.freeze([
 function expected(plan: CiPlan, job: (typeof PLANNED_JOBS)[number]): boolean {
   if (job === 'test') return plan.tests.length > 0;
   if (job === 'deploy') return plan.deploy !== 'none';
-  return plan[job];
+  if (job === 'web') return plan.web;
+  return e2eRuns(plan.e2e);
 }
 
 function parsePlan(text: unknown): CiPlan | string {
@@ -577,7 +731,7 @@ function parsePlan(text: unknown): CiPlan | string {
     typeof o.full !== 'boolean' ||
     typeof o.biome !== 'boolean' ||
     typeof o.web !== 'boolean' ||
-    typeof o.e2e !== 'boolean' ||
+    !(o.e2e === 'all' || (Array.isArray(o.e2e) && o.e2e.every((x) => typeof x === 'string'))) ||
     !(DEPLOY_MODES as readonly unknown[]).includes(o.deploy) ||
     !Array.isArray(o.tests) ||
     !(o.tsc === 'all' || Array.isArray(o.tsc)) ||
@@ -590,7 +744,7 @@ function parsePlan(text: unknown): CiPlan | string {
   if ('reused' in o && o.reused !== undefined) {
     const reused = reuseOf(o.reused);
     if (reused === null) return 'changes 给的 plan 里 reused（同树复用）字段不齐全';
-    if (o.full || o.testUnits?.length || o.tests?.length || o.web || o.e2e || o.deploy !== 'none')
+    if (o.full || o.testUnits?.length || o.tests?.length || o.web || e2eRuns(o.e2e) || o.deploy !== 'none')
       return 'plan 说复用了同树的 PR 检查，却还有要测的 test、web、e2e、deploy';
     return { ...(o as CiPlan), reused };
   }
@@ -664,7 +818,7 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
   if (n.changes?.outputs?.tests !== JSON.stringify(plan.tests))
     bad('changes 给 test job 铺矩阵的 tests 和 plan 里的测试台不是同一份');
   // e2e job 的 if 读的是 outputs.e2e：必须和 plan 里核过的是同一份（不然 job 的开关和汇总核的「本该跑不跑」各说各的）
-  if (n.changes?.outputs?.e2e !== String(plan.e2e))
+  if (n.changes?.outputs?.e2e !== e2eOutput(plan.e2e))
     bad('changes 给 e2e job 的开关（outputs.e2e）和 plan 里的 e2e 不是同一份');
   if (plan.full && (FULL_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');

@@ -14,6 +14,7 @@
 //   「测试读包外文件」的清单）没有这个洞，代价是比按文件多跑一些。
 import {
   ALWAYS_TESTS,
+  e2eOutput,
   type Fallback,
   fallbackUnits,
   PATH_RULES,
@@ -168,9 +169,13 @@ export function selectTests(
   const ciOnly = [
     ...(plan.biome ? ['格式和类型（biome、tsc）'] : []),
     ...(plan.web ? ['演示版打包'] : []),
-    ...(plan.e2e
+    ...(plan.e2e === 'all'
       ? ['驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）']
-      : []),
+      : plan.e2e.length > 0
+        ? [
+            `驾驶舱 e2e 只点改动页（pnpm --filter @fleet-dao/web e2e ${e2eOutput(plan.e2e)}，要真 Postgres，见 packages/web/e2e/README.md）`,
+          ]
+        : []),
     ...(plan.deploy === 'none'
       ? []
       : [`装机测试（deploy/test/run.sh${plan.deploy === 'ops' ? ' --ops' : ''}）`]),
