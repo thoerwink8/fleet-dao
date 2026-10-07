@@ -1026,6 +1026,7 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     expect(mirasimAgentFor('claude-sonnet-5-5')).toBe('claude');
     expect(mirasimAgentFor('glm-5.3-flash')).toBe('zcode');
     expect(mirasimAgentFor('gpt-5.6-luna')).toBe('codex');
+    expect(mirasimAgentFor('gpt-6.1-sol')).toBe('codex');
     expect(mirasimAgentFor('kimi-k3')).toBe('pi');
     expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
   });

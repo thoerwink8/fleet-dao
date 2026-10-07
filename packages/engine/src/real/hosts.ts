@@ -723,6 +723,7 @@ export const MIRASIM_AGENT_BY_MODEL: Readonly<Record<string, string>> = {
   'claude-opus-5-5': 'claude',
   'claude-sonnet-5-5': 'claude',
   'gpt-5.6-luna': 'codex',
+  'gpt-6.1-sol': 'codex',
   'kimi-k3': 'pi',
   'deepseek-flash': 'dsh',
   // zcode 是 Mirasim 服务端自带的执行体（智谱 GLM）：服务端 0.0.414 的执行体表里它只带 glm-5.3、glm-5.3-flash，默认 glm-5.3-flash；
