@@ -39,6 +39,11 @@ export interface PortContext {
   readonly attempt: number;
   /** 上一次尝试最后一次心跳带的内容；接着干的时候用。 */
   readonly lastHeartbeat: unknown;
+  /**
+   * 这次活动所在的工作流编号（重做后是 task:<仓>#<号>:r2）。没给就退回第一代的编号：
+   * 活动测试不经 Temporal，上下文里没有这一项。
+   */
+  readonly workflowId?: string;
 }
 
 /** 端口抛这个，错误码和「能不能重试」原样过 Temporal 边界，失败分流按错误码判。 */

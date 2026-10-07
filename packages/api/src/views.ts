@@ -492,6 +492,7 @@ export function homeRunning(input: {
         ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
         link: `/tasks/${t.id}`,
         taskId: t.id,
+        state: t.state,
       };
     });
 }

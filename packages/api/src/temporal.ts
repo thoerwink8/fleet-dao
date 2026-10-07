@@ -7,8 +7,21 @@
 // 真客户端由 connectTemporal 用 @temporalio/client 的懒连接（Connection.lazy）装配：这一步不连网络，
 // Temporal 没起来时后端照样能起，真正发信号或查健康才会报错。测试一律用假客户端（TemporalClientLike /
 // EnginePollerSource 的最小形状），不碰真网络；connectTemporal 本身没有自动化测试覆盖（要连真 Temporal）。
-import { taskWorkflowId } from '@fleet-dao/shared';
-import { Client, Connection } from '@temporalio/client';
+import {
+  generationLife,
+  readTaskGenerations,
+  redoTask,
+  type SeenLife,
+  signalTaskWorkflowId,
+} from '@fleet-dao/engine/jobs/redo';
+import { TASK_WORKFLOW_TYPE, taskWorkflowId } from '@fleet-dao/shared';
+import {
+  Client,
+  Connection,
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowNotFoundError,
+} from '@temporalio/client';
+import type { TaskRedoPort } from './deps.ts';
 import { PublicHealthError } from './health.ts';
 import type { BoardStore } from './ports.ts';
 import {
@@ -250,11 +263,90 @@ function enginePollerSourceFromClient(client: Client, config: TemporalConnection
  * createEnginePollerCheck 里，用假客户端测过；这里只是把真客户端接进那两个函数，没有自动化测试覆盖
  * （测试规矩不许连真网络），改动后要在真机上核对。
  */
-export function connectTemporal(config: TemporalConnectionConfig): TemporalConnection {
+async function seenLife(client: Client, workflowId: string): Promise<SeenLife> {
+  try {
+    const described = await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+      client.workflow.getHandle(workflowId).describe(),
+    );
+    return generationLife(described.status.name) === 'running' ? 'running' : 'closed';
+  } catch (err) {
+    if (err instanceof WorkflowNotFoundError) return 'missing';
+    throw err;
+  }
+}
+
+/** 真 Temporal 上的重做：顺着代数 describe，只在都终止时用新编号起下一代（REJECT_DUPLICATE，不盖旧执行）。 */
+export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskRedoPort {
+  return {
+    async redo(input) {
+      const repo = { owner: input.repo.owner, name: input.repo.name };
+      const read = await readTaskGenerations(repo, input.issueNumber, async (workflowId) => {
+        try {
+          const life = await seenLife(client, workflowId);
+          if (life === 'missing') return { life: 'missing' };
+          return { life: life === 'running' ? 'running' : 'terminated', record: { workflowId } };
+        } catch {
+          return { life: 'unknown' };
+        }
+      });
+      if (!read.ok) return read;
+      const generations = read.generations;
+      return redoTask({
+        list: async () => generations,
+        start: async (workflowId) => {
+          try {
+            await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+              client.workflow.start(TASK_WORKFLOW_TYPE, {
+                taskQueue,
+                workflowId,
+                args: [
+                  {
+                    schemaVersion: 1,
+                    taskId: input.taskId,
+                    repo: {
+                      id: input.repo.id,
+                      owner: input.repo.owner,
+                      name: input.repo.name,
+                      defaultBranch: input.repo.defaultBranch,
+                      testCommand: input.repo.testCommand,
+                    },
+                    issueNumber: input.issueNumber,
+                    title: input.title,
+                  },
+                ],
+                workflowIdConflictPolicy: 'FAIL',
+                workflowIdReusePolicy: 'REJECT_DUPLICATE',
+              }),
+            );
+            return 'started';
+          } catch (err) {
+            if (err instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
+            throw err;
+          }
+        },
+      });
+    },
+  };
+}
+
+export function connectTemporal(
+  config: TemporalConnectionConfig,
+): TemporalConnection & { taskRedo: TaskRedoPort } {
   const connection = Connection.lazy({ address: config.address });
   const client = new Client({ connection, namespace: config.namespace });
+  const control = createTemporalWorkflowControl(client);
   return {
-    control: createTemporalWorkflowControl(client),
+    control: {
+      ...control,
+      runningTaskWorkflow(repo, issueNumber) {
+        return signalTaskWorkflowId(repo, issueNumber, (id) => seenLife(client, id)).catch((err: unknown) => {
+          if (err instanceof WorkflowUnavailableError) throw err;
+          if (isUnavailable(err)) throw new WorkflowUnavailableError('Temporal 连不上或没回应', err);
+          throw new WorkflowUnavailableError('查在跑的任务工作流没成', err);
+        });
+      },
+    },
+    taskRedo: createTemporalTaskRedo(client, config.taskQueue),
     check: createNamespaceCheck(
       {
         async describeNamespace(namespace) {

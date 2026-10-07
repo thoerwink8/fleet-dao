@@ -5,7 +5,7 @@
 // （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
 // 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件就不删，报「要人拍」（删数据要人拍），列出前几个、写明
 // 一共几个。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
-// 改之前必须知道：「在用」只认任务工作流（task:）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
+// 改之前必须知道：「在用」只认任务工作流（task:，含重做后的 :rN）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
 // 里一起认。认漏了还有一道：树里有没结束的会话（session_runs）就不碰。
 // 顺带撤提醒：子任务报的「工作树没收掉」（sub:<子任务>:worktree）、Fusion 报的（req:<仓>#<号>:worktree，按这张需求的
 // Fusion 树认）树不在了、被删了、改成要人拍了就撤；
@@ -16,7 +16,7 @@ import type { SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
 import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { subtaskWorkflowId, taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
 import type { TreeLeftovers } from '../real/user-git.ts';
 import { STAGE_NAMES } from '../routing/names.ts';
@@ -30,6 +30,7 @@ import {
   stamp,
   type WorkflowReader,
 } from './reconcile-common.ts';
+import { runningTaskWorkflowId } from './redo.ts';
 
 /** 「工作树没收掉」：子任务收尾删树没成时报的（workflows/subtask.ts），键是 sub:<子任务编号>:worktree。 */
 export const SUBTASK_TREE_ALERT =
@@ -182,7 +183,7 @@ interface Sweep {
 
 /**
  * 这张单的任务工作流在跑，或者它的哪个子任务工作流还在跑（旧的 Fusion 收尾时子任务还在撤合并队列、收树）：这张单的树都算在用。
- * 任务工作流的树名（<号>-t<8 位>）和子任务的树名同一个样子，认的是 task:<仓>#<号>（#901：以前这里只认已经没有的 req:，
+ * 任务工作流的树名（<号>-t<8 位>）和子任务的树名同一个样子，认的是 task:<仓>#<号>（含重做后的 :rN。#901：以前这里只认已经没有的 req:，
  * 任务工作流等 CI、等合并时没有开着的会话，树会被当残留删掉）。
  */
 function issueUse(s: Sweep, repo: Repo, issueNumber: number): Promise<IssueUse> {
@@ -190,12 +191,18 @@ function issueUse(s: Sweep, repo: Repo, issueNumber: number): Promise<IssueUse> 
   let use = s.uses.get(key);
   if (!use) {
     use = (async () => {
-      const req = taskWorkflowId(repo, issueNumber);
       const facts = await s.deps.issue({ ...repo, issueNumber });
-      if ((await s.deps.workflows.state(req)).state === 'running') return { runningBy: req, facts };
+      const workflows = s.deps.workflows;
+      const running = await runningTaskWorkflowId(repo, issueNumber, async (id) => {
+        const st = await workflows.state(id);
+        if (st.state === 'running') return 'running';
+        if (st.state === 'missing') return 'missing';
+        return 'closed';
+      });
+      if (running) return { runningBy: running, facts };
       for (const sub of facts?.subtasks ?? []) {
         const id = subtaskWorkflowId(sub.id);
-        if ((await s.deps.workflows.state(id)).state === 'running') return { runningBy: id, facts };
+        if ((await workflows.state(id)).state === 'running') return { runningBy: id, facts };
       }
       return { runningBy: null, facts };
     })();

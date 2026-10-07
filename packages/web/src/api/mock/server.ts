@@ -117,7 +117,13 @@ const STAGE_WORDS: Record<StageKind, string> = {
   research: '调研',
   judge: '判断',
 };
-const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
+const ACTION_WORDS = {
+  pause: '暂停',
+  resume: '继续',
+  stop: '叫停',
+  reroute: '换路由',
+  redo: '重做',
+} as const;
 const STALE_MS = 30 * 60_000;
 /** 路由两层里在它的模型下一开始关着的路由（照仓里默认骨架：中转那条 Opus 关着）；每个假后端各拷一份，页面上点开关改的是拷贝。 */
 const MOCK_SWITCHED_OFF_AT_START = new Set(['r-rl-opus']);
@@ -1271,6 +1277,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
             link: `/tasks/${t.task.id}`,
             taskId: t.task.id,
+            state: t.task.state,
           };
         });
       const flow = flowStages(st.tasks.flatMap(viewsOf), running);
@@ -1557,6 +1564,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       const body = TaskActionRequest.parse(raw);
       const tv = findTask(taskId);
+      if (body.action === 'redo') {
+        if (tv.task.state === 'stalled') {
+          throw new ApiError(409, 'redo_refused', '上一代还在跑，先叫停再重做');
+        }
+        if (tv.task.state !== 'stopped') {
+          throw new ApiError(
+            409,
+            'redo_not_allowed',
+            `这张单现在是${tv.task.state}，只有已叫停或挂起的才能重做`,
+          );
+        }
+        setTaskState(tv, 'running');
+        audit({
+          actor: meActor(),
+          action: 'task.redo',
+          target: `task:${taskId}`,
+          via: 'cockpit',
+        });
+        emit('tasks', taskId);
+        return;
+      }
       if (TERMINAL.has(tv.task.state)) {
         throw new ApiError(
           409,

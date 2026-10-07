@@ -85,7 +85,7 @@ export const noticeLevelMeta: Record<NotificationLevel, { label: string; tone: T
   daily: { label: '日报', tone: 'wait' },
 };
 
-/** 后端不再接受暂停、叫停、换路由的需求（和后端的 isTaskFinished 一致：做完、叫停、失败）。 */
+/** 做完、叫停、失败：后端不再接受暂停、叫停、换路由。已叫停仍可以重做。 */
 export function isTaskFinished(t: { state: TaskState }): boolean {
   return t.state === 'done' || t.state === 'stopped' || t.state === 'failed';
 }

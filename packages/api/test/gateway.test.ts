@@ -46,6 +46,7 @@ describe('飞书网关通行证', () => {
       { action: 'pause', reason: '飞书里点的暂停' },
       { action: 'resume' },
       { action: 'reroute', routeId: 'route-x' },
+      { action: 'redo' },
     ]) {
       const res = await h.cockpit.request(
         `/api/tasks/${IDS.task12}/actions`,

@@ -26,10 +26,16 @@ describe('availableActions：只画引擎真有人听的动作', () => {
     expect(availableActions({ ...base, sub })).toEqual([]);
   });
 
-  test('已结束的（做完、叫停、没做完）一个都不画，暂停着的也一样', () => {
-    for (const state of ['done', 'stopped', 'failed'] as const) {
+  test('做完、失败一个都不画；已叫停只给重做', () => {
+    for (const state of ['done', 'failed'] as const) {
       expect(availableActions({ ...base, state }), state).toEqual([]);
       expect(availableActions({ ...base, state, paused: '已暂停：…' }), state).toEqual([]);
     }
+    expect(availableActions({ ...base, state: 'stopped' })).toEqual(['redo']);
+    expect(availableActions({ ...base, state: 'stopped', paused: '已暂停：…' })).toEqual(['redo']);
+  });
+
+  test('挂起的单：暂停、继续、叫停，再加重新做（工作流还在跑时由后端拒绝）', () => {
+    expect(availableActions({ ...base, state: 'stalled' })).toEqual(['pause', 'resume', 'stop', 'redo']);
   });
 });

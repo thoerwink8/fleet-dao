@@ -15,6 +15,7 @@
     "@fleet-dao/conventions": "workspace:*",
     "@fleet-dao/core": "workspace:*",
     "@fleet-dao/db": "workspace:*",
+    "@fleet-dao/engine": "workspace:*",
     "@fleet-dao/github": "workspace:*",
     "@fleet-dao/jev": "workspace:*",
     "@fleet-dao/shared": "workspace:*",

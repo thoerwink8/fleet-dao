@@ -88,7 +88,8 @@ export function itemOf(data: BoardNodeData): HomeRunning | undefined {
 /**
  * 单子的操作对象（继续 / 叫停走 task-actions 那一份定义）。
  * 没有 taskId（老环境推来的快照）或看的是远程快照：不给，节点上就不画操作——画出来点了只会报错或改错台。
- * 首页上的单都还开着（/api/home 只给没进终态的），等你拍的记成 asking，其余记成 running：只用来判「还能不能操作」。
+ * 首页上的单都还开着（/api/home 只给没进终态的）。快照里带了 state 就用它（挂起才画得出「重做」）；
+ * 老环境没带 state 时，等你拍的记成 asking，其余记成 running。
  */
 export function targetOfItem(item: HomeRunning, remote: boolean): ActionTarget | undefined {
   if (remote || item.taskId === undefined) return undefined;
@@ -96,7 +97,7 @@ export function targetOfItem(item: HomeRunning, remote: boolean): ActionTarget |
     taskId: item.taskId,
     issueNumber: item.issueNumber,
     title: item.title,
-    state: item.waitingReason === 'founder_decision' ? 'asking' : 'running',
+    state: item.state ?? (item.waitingReason === 'founder_decision' ? 'asking' : 'running'),
     ...(item.paused === undefined ? {} : { paused: item.paused }),
   };
 }

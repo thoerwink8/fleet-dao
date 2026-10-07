@@ -32,6 +32,11 @@ export interface WorkflowControl {
    * 工作流不存在或已结束时抛 WorkflowGoneError；Temporal 连不上、超时时抛 WorkflowUnavailableError。
    */
   signal(workflowId: string, signal: TaskSignal): Promise<void>;
+  /**
+   * 这张单的信号该打到哪一代（在跑的，或都结束了就最高的那一代）。没给就用第一代编号。
+   * 问不清抛 WorkflowUnavailableError，不假装打到第一代。
+   */
+  runningTaskWorkflow?(repo: { owner: string; name: string }, issueNumber: number): Promise<string>;
 }
 
 export class WorkflowGoneError extends Error {

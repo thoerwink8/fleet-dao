@@ -9,7 +9,8 @@
     "./failure": "./src/failure/index.ts",
     "./routing": "./src/routing/index.ts",
     "./worker": "./src/worker.ts",
-    "./fakes": "./src/fakes.ts"
+    "./fakes": "./src/fakes.ts",
+    "./jobs/redo": "./src/jobs/redo.ts"
   },
   "scripts": {
     "start": "node src/main.ts"

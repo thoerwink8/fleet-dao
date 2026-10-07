@@ -1,7 +1,7 @@
 // 快捷操作只有这一份定义：悬停条、右键菜单、侧边详情、手机列表、任务详情都从这里取，行为一致。
 // 能做的动作以 shared/web-api.ts 的 TaskActionRequest 为准：暂停、继续、叫停、换路由（可指定子任务）。没有「回答追问」：v3 没有 AI 追问这一环（#928）。
 import type { LucideIcon } from 'lucide-react';
-import { CircleStop, Pause, Play, Shuffle } from 'lucide-react';
+import { CircleStop, Pause, Play, RotateCcw, Shuffle } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, usePools, useRoutingLayers, useTaskAction } from '../api/client';
@@ -67,7 +67,7 @@ export function targetOf(t: BoardTask, sub?: BoardSubtask): ActionTarget {
   };
 }
 
-export type UiAction = 'reroute' | 'pause' | 'resume' | 'stop';
+export type UiAction = 'reroute' | 'pause' | 'resume' | 'stop' | 'redo';
 
 export interface ActionDef {
   label: string;
@@ -82,22 +82,25 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
   pause: { label: '暂停', icon: Pause, key: 'P' },
   resume: { label: '继续', icon: Play, key: 'C' },
   stop: { label: '叫停', icon: CircleStop, key: 'X', danger: true },
+  redo: { label: '重做', icon: RotateCcw, key: 'R' },
 };
 
 /**
- * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停）。换模型引擎没有这个动作
+ * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停、重做）。换模型引擎没有这个动作
  * （后端回 409 action_not_supported，api/src/cockpit.ts；#901），所以不画：画出来点了只会弹一句「做不到」。
- * 暂停、叫停、继续对整个需求生效，只放在需求上。暂停了的单不再给「暂停」（后端也回 409 already_paused）；
+ * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。暂停了的单不再给「暂停」（后端也回 409 already_paused）；
  * 没暂停的「继续」也一直给出来：停下等人（碰到问题自己停的）也是点它，由后端判断（没停着就没有收信的）。
+ * 已叫停的只给「重做」。挂起的工作流还在跑，按钮也给，引擎会拒绝并说明先叫停。做完、失败不给。
  * 任务页（routes/task.tsx）和首页看板的卡片都从这里取。
  */
 export function availableActions(target: ActionTarget): UiAction[] {
+  if (target.sub) return [];
+  if (target.state === 'stopped') return ['redo'];
   if (isTaskFinished(target)) return [];
   const list: UiAction[] = [];
-  if (!target.sub) {
-    if (target.paused === undefined) list.push('pause');
-    list.push('resume', 'stop');
-  }
+  if (target.paused === undefined) list.push('pause');
+  list.push('resume', 'stop');
+  if (target.state === 'stalled') list.push('redo');
   return list;
 }
 
@@ -110,6 +113,7 @@ type DialogState =
   | { kind: 'route'; target: ActionTarget }
   | { kind: 'stop'; target: ActionTarget }
   | { kind: 'pause'; target: ActionTarget }
+  | { kind: 'redo'; target: ActionTarget }
   | null;
 
 interface TaskActionsApi {
@@ -133,7 +137,9 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
               ? body.mode === 'hard'
                 ? '动手的会话已叫停，树里留着的改动继续后接着干'
                 : '手上这一段做完就停，不再起新会话'
-              : undefined,
+              : body.action === 'redo'
+                ? '新的一代已经起了。旧工作树里没推上去的东西不会跟着过来。'
+                : undefined,
         });
       } catch (e) {
         toast.error(`${label}没成功`, { description: errorText(e) });
@@ -147,6 +153,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
       if (action === 'reroute') setDialog({ kind: 'route', target });
       else if (action === 'stop') setDialog({ kind: 'stop', target });
       else if (action === 'pause') setDialog({ kind: 'pause', target });
+      else if (action === 'redo') setDialog({ kind: 'redo', target });
       else void send(target, { action }, ACTIONS[action].label);
     },
     [send],
@@ -205,7 +212,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
               <AlertDialogHeader>
                 <AlertDialogTitle>叫停 {targetName(dialog.target)}？</AlertDialogTitle>
                 <AlertDialogDescription>
-                  在跑的会话停在干净的点，做完的已提交；之后这个需求不再往下走，不能恢复（只想先停一停请用「暂停」），要做可以重新开。
+                  在跑的会话停在干净的点，做完的已提交；之后这个需求不再往下走，不能恢复（只想先停一停请用「暂停」）。要再做，等它停下来后点「重做」。
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -215,6 +222,26 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
                   onClick={() => void send(dialog.target, { action: 'stop' }, '叫停')}
                 >
                   叫停
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : null}
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={dialog?.kind === 'redo'} onOpenChange={(o) => !o && close()}>
+        <AlertDialogContent>
+          {dialog?.kind === 'redo' ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>重做 {targetName(dialog.target)}？</AlertDialogTitle>
+                <AlertDialogDescription>
+                  会给这张单再起一代，旧的记录留着。旧工作树里没推上去的东西会丢掉；已经推上去的分支还在。
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>先不</AlertDialogCancel>
+                <AlertDialogAction onClick={() => void send(dialog.target, { action: 'redo' }, '重做')}>
+                  重做
                 </AlertDialogAction>
               </AlertDialogFooter>
             </>
