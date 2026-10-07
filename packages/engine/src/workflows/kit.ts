@@ -101,3 +101,39 @@ export function failureOf(error: unknown, source: string): FailureInfo {
   }
   return { source, code: 'UNKNOWN', message: String(cause), retryable: null };
 }
+
+/** 活动失败里带的冲突文件名（PortError.details.conflictFiles）；没有就从原文「有冲突：a、b。」里拆。 */
+export function conflictFilesOf(error: unknown, message: string): string[] {
+  const fromDetails = fileList(detailRecord(error)?.conflictFiles);
+  if (fromDetails.length > 0) return fromDetails;
+  const matched = /(?:有冲突|真冲突)：([^。\n]+)/.exec(message);
+  return fileList(matched?.[1]?.split('、'));
+}
+
+/**
+ * 这次合并有没有把冲突标记留在树里（PortError.details.pending）。
+ * 没带这个字段的老失败：原文让会话自己 git merge、且没说树里留着标记，就是合并还没开始。其余当成标记还在。
+ */
+export function conflictPendingOf(error: unknown, message: string): boolean {
+  const pending = detailRecord(error)?.pending;
+  if (typeof pending === 'boolean') return pending;
+  if (message.includes('git merge ') && !message.includes('树里留着冲突标记')) return false;
+  return true;
+}
+
+function detailRecord(error: unknown): { conflictFiles?: unknown; pending?: unknown } | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === 'object'; depth += 1) {
+    const record = current as { details?: unknown; cause?: unknown };
+    const first = Array.isArray(record.details) ? record.details[0] : undefined;
+    if (first !== null && typeof first === 'object')
+      return first as { conflictFiles?: unknown; pending?: unknown };
+    current = record.cause;
+  }
+  return undefined;
+}
+
+function fileList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter((item) => item.length > 0);
+}

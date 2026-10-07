@@ -56,6 +56,7 @@ import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
+import { modelRosterFields } from './model-roster.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
 import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
@@ -513,6 +514,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   });
 
   // 路由两层每一层现在活着吗（#574）：读的时候现算，不存。读不到回 503 写明没读成；没接上写 unavailable。
+  // 渠道模型差集（#1302）只在两层读成时附上。没接上、读不到写 modelRosterUnavailable，不把整页打成 503，也不写成都对得上。
   app.get(WebRoutes.routingLayers.path, async (c) => {
     const now = deps.now();
     if (!deps.routingLayers) {
@@ -532,9 +534,13 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       throw new ApiError(503, 'routing_layers_unreadable', cause);
     }
     const [models, channels] = await Promise.all([store.listModels(), store.listChannels()]);
+    const roster = await modelRosterFields(deps.modelRoster, (err) => {
+      deps.log.error('渠道模型表没读成', { error: fullStack(err) });
+    });
     return reply(c, RoutingLayersResponse, {
       asOf: now.toISOString(),
       purposes: routingLayersView(layers, { models, channels }),
+      ...roster,
     });
   });
 

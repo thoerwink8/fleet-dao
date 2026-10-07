@@ -10,6 +10,7 @@ export * from './queries/canary.ts';
 export * from './queries/candidates.ts';
 export * from './queries/carpool-spend.ts';
 export * from './queries/channel-fallback.ts';
+export * from './queries/channel-models.ts';
 export * from './queries/engine.ts';
 export * from './queries/engine-master.ts';
 export * from './queries/history.ts';

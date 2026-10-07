@@ -30,6 +30,12 @@
 //   检查点只在收到信号时才多调活动，老历史重放不受影响（patched('task-pause')，test/replay.test.ts 的夹具）。
 // - 第 2 轮起、动手会话起之前先把最新主线并进任务分支（#1246，task-sync.ts；patched('sync-mainline-before-implement')）：并上了就推、树跟着快进；
 //   并出冲突把文件名记进返工意见交给这一轮的会话；没查成记下照旧往下走。验收前不并（并了头就变）。
+// - 推分支并主线撞上内容冲突（MERGE_CONFLICT，patched('conflict-handoff-keeps-tree')）：不在 push 这一步里原地重试。
+//   内容冲突：树里留着合并的冲突标记，交回下一轮动手会话。合并还没开始（没跟踪的文件挡着）：原反馈留着，让会话自己 git merge 那个提交。
+//   交回时 MERGE_HEAD 还在，或 git diff --check（工作区、暂存区，或这次提交进 HEAD 的）还有冲突标记，不算交活、不推。
+//   上一轮没解就在反馈里补一句；反馈和上一轮一字不差才挂起，提醒里写冲突文件和工作树路径。
+//   会话删掉标记并 git add、没提交时，这一轮可能只读到占位：文件名用上一轮反馈里的，不把占位当成文件名。
+//   老历史没有这个标记，照旧在 step 里重试。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
 import { CancellationScope, isCancellation, log, workflowInfo } from '@temporalio/workflow';
@@ -50,7 +56,13 @@ import { waitForCi } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
 import { writeSession } from './task-session.ts';
-import { Abandoned } from './task-support.ts';
+import {
+  Abandoned,
+  ConflictHandoff,
+  conflictFilesForHandoff,
+  conflictHandoffLine,
+  taskPrDid,
+} from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
 import { coldVerifyPr } from './task-verify.ts';
 
@@ -147,7 +159,9 @@ class TaskFlow {
         baseSha: rt.since,
       }),
     );
-    // 老历史里读交付的结果没有 leftover 这个字段：当作没有
+    // 老历史里读交付的结果没有 leftover、conflicts：当作没有
+    const conflicts = delivery.conflicts ?? [];
+    if (conflicts.length > 0) return this.conflictStillThere(wt, conflicts);
     const leftover = delivery.leftover ?? [];
     if (delivery.commits === 0 || leftover.length > 0) {
       const left =
@@ -161,15 +175,23 @@ class TaskFlow {
         delivery.commits === 0 ? '会话跑完没有提交' : '会话跑完工作树里还有没提交的改动';
       return false;
     }
-    const pushed = await rt.step('pushBranch', () =>
-      rt.acts.pushBranch({
-        taskId: rt.input.taskId,
-        repo: rt.input.repo,
-        worktreePath: wt.path,
-        branch: rt.branch,
-        head: delivery.head,
-      }),
-    );
+    let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
+    try {
+      pushed = await rt.step('pushBranch', () =>
+        rt.acts.pushBranch({
+          taskId: rt.input.taskId,
+          repo: rt.input.repo,
+          worktreePath: wt.path,
+          branch: rt.branch,
+          head: delivery.head,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof ConflictHandoff) {
+        return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
+      }
+      throw error;
+    }
     rt.head = pushed.head;
     rt.since = delivery.head;
     rt.changedFiles = pushed.changedFiles ?? delivery.changedFiles;
@@ -183,10 +205,7 @@ class TaskFlow {
           title: rt.input.title,
           body: {
             requirement: rt.input.issueNumber,
-            did: [
-              `按 #${rt.input.issueNumber} 的要求动手（第 ${rt.round} 轮）`,
-              `改了 ${rt.changedFiles.length} 个文件`,
-            ],
+            did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length),
             verified: ['CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）'],
           },
         }),
@@ -196,6 +215,30 @@ class TaskFlow {
     await rt.advance('implement', `第 ${rt.round} 轮推上去了，PR #${rt.prNumber}`);
     rt.feedback = [];
     return true;
+  }
+
+  /**
+   * 冲突还在：交给下一轮会话。反馈和上一轮一字不差就挂起，提醒里写冲突文件和树的位置。
+   * blocked 有值：合并没开始，用原反馈（含要并的提交），不说树里留着冲突标记。
+   */
+  private async conflictStillThere(
+    wt: Worktree,
+    files: readonly string[],
+    blocked?: string | null,
+  ): Promise<boolean> {
+    const rt = this.rt;
+    // 合并还没开始：文件名在原反馈里，不改写成占位。标记删了没提交：这一轮可能只剩占位，沿用上一轮的文件名。
+    const names = blocked != null ? files : conflictFilesForHandoff(files, rt.feedback);
+    const line = conflictHandoffLine(names, rt.feedback, blocked);
+    if (rt.feedback.includes(line)) {
+      const shown = names.join('、') || '（没读到冲突文件名）';
+      const where = `冲突文件：${shown}。工作树：${wt.path}`;
+      await rt.park(`和上一次的原文一字不差，原路再试不会变。${where}`, where);
+      return false;
+    }
+    rt.feedback = [line];
+    rt.status.lastProblem = '和主线有冲突';
+    return false;
   }
 
   private async ensureWorktree(): Promise<Worktree> {

@@ -1703,7 +1703,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         });
         return { purpose, verdict: layerVerdict(models.map((m) => m.verdict)), problems: [], models };
       });
-      return RoutingLayersResponse.parse({ asOf: iso(), purposes });
+      return RoutingLayersResponse.parse({
+        asOf: iso(),
+        purposes,
+        // 假数据没有渠道名册：差集是空的，页面写「都对得上」。真的差集由接口从库里给。
+        modelRoster: { missingFromCatalog: [], goneRoutes: [], failed: [], notYet: [] },
+      });
     },
     async routingEfforts() {
       await wait();

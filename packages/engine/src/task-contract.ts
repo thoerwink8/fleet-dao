@@ -177,6 +177,11 @@ export interface DeliveryRead {
    * 真实现一定给；老历史里没有这个字段（当作没有）。
    */
   leftover?: string[];
+  /**
+   * 还没解完的冲突：MERGE_HEAD 还在，或 git diff --check 看到冲突标记。有就不算交活，也不进下一步。
+   * 真实现一定给（没有就是空数组）；老历史里没有这个字段（当作没有）。
+   */
+  conflicts?: string[];
 }
 
 export interface ColdVerifyInput {

@@ -41,6 +41,11 @@ import type { WorkTrees } from './worktrees.ts';
 
 export { toPortError } from './mirror.ts';
 
+/** 冲突交回会话时后半句。pending＝树里留着这次合并的冲突标记；否则合并没开始，让会话自己再并。 */
+function conflictHow(pending: boolean, sha: string): string {
+  return pending ? '树里留着冲突标记，解完 `git add` 并提交' : `在树里 git merge ${sha} 解掉冲突、提交后再交`;
+}
+
 /** 引擎用到的那几样；测试给假的。 */
 export type EngineGitHub = Pick<
   GitHub,
@@ -279,7 +284,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         );
       }
       // 推的必须含最新主线（github 包核，不含就拒）：主线在会话干活时动过，先把它并进会话的树再推。
-      // 并出冲突就撤掉，交失败分流退回会话去解（MC1）；树里已经有新主线的提交，会话照着 git merge 就行。
+      // 内容冲突不撤：MERGE_HEAD 和冲突标记留在树里，交回会话解（MC1）。撤掉的话会话看到干净的树，不知道冲突在哪。
       // 会话一个新提交都没有就不并（并出来的只有一个并提交，是空交付）。
       const incoming = await headOfIncoming(t);
       if (head === incoming) {
@@ -299,15 +304,20 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         );
         await fetchBundle(t, bytes, ref);
       }
-      // 最新主线已经在树里：先钉上再并（并出冲突退回会话时，会话照着 git merge 它，pnpm test:changed 也和它比）
+      // 最新主线已经在树里：先钉上再并。内容冲突留下合并状态交给会话解；合并没开始的仍让会话自己 git merge。
+      // pnpm test:changed 和钉住的主线比。
       await pinMainline(t, input.repo.defaultBranch, main.head);
       if (!(await isAncestor(t, main.head, head))) {
         const merged = await mergeInto(t, main.head);
         if ('conflict' in merged) {
+          const names = merged.conflict.slice(0, 10).join('、');
           throw new PortError(
             'MERGE_CONFLICT',
-            `推之前把最新主线 ${main.head.slice(0, 7)} 并进来有冲突：${merged.conflict.slice(0, 10).join('、')}。在树里 git merge ${main.head} 解掉冲突、提交后再交`,
-            { retryable: false, details: { mainline: main.head, conflictFiles: merged.conflict } },
+            `推之前把最新主线 ${main.head.slice(0, 7)} 并进来有冲突：${names}。${conflictHow(merged.pending, main.head)}`,
+            {
+              retryable: false,
+              details: { mainline: main.head, conflictFiles: merged.conflict, pending: merged.pending },
+            },
           );
         }
         head = merged.merged;
@@ -384,10 +394,14 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         }
         const merged = await mergeInto(t, freshHead);
         if ('conflict' in merged) {
+          const names = merged.conflict.slice(0, 10).join('、');
           throw new PortError(
             'MERGE_CONFLICT',
-            `推 ${input.branch} 时发现远端头 ${freshHead.slice(0, 7)} 和要推的 ${head.slice(0, 7)} 都往前走了、内容上真冲突：${merged.conflict.slice(0, 10).join('、')}。在树里 git merge ${freshHead} 解掉冲突、提交后再交`,
-            { retryable: false, details: { remoteHead: freshHead, conflictFiles: merged.conflict } },
+            `推 ${input.branch} 时发现远端头 ${freshHead.slice(0, 7)} 和要推的 ${head.slice(0, 7)} 都往前走了、内容上真冲突：${names}。${conflictHow(merged.pending, freshHead)}`,
+            {
+              retryable: false,
+              details: { remoteHead: freshHead, conflictFiles: merged.conflict, pending: merged.pending },
+            },
           );
         }
         return { head: merged.merged, needsPush: true };

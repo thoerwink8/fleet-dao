@@ -371,7 +371,7 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
 
-  it('并出冲突：撤掉这次合并（树回到会话交的头、没有并了一半的状态），报 MERGE_CONFLICT 带冲突的文件，不推', async () => {
+  it('并出冲突：留下冲突标记和 MERGE_HEAD，报 MERGE_CONFLICT 带冲突的文件，不推', async () => {
     const { ports, calls, trees } = setup();
     const dir = await seededTree(trees);
     writeFileSync(join(dir, 'a.ts'), 'export const a = 100;\n');
@@ -385,16 +385,16 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(err).toMatchObject({
       code: 'MERGE_CONFLICT',
       retryable: false,
-      details: { mainline: main, conflictFiles: ['a.ts'] },
+      details: { mainline: main, conflictFiles: ['a.ts'], pending: true },
     });
-    expect((err as Error).message).toContain(`git merge ${main}`);
+    expect((err as Error).message).toContain('解完 `git add` 并提交');
+    expect((err as Error).message).toContain('a.ts');
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
-    // 没有并了一半的文件、没暂存东西（端口那边的 git 在 Windows 上带着系统级的 autocrlf，工作树里的换行符会跟着变：
-    // 这里也按 autocrlf 比，只看内容）
-    expect(git(dir, 'ls-files', '-u')).toBe('');
-    expect(git(dir, '-c', 'core.autocrlf=true', 'status', '--porcelain', '--untracked-files=no')).toBe('');
-    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
-    // 新主线的提交已经在树里：会话照着 git merge 就能解；origin/main 也钉到了它（test:changed 和它比）
+    // 冲突状态原样留给会话：撤掉的话会话看到干净的树，不知道冲突在哪
+    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+    expect(git(dir, 'ls-files', '-u')).toContain('a.ts');
+    expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toContain('<<<<<<<');
+    // 新主线的提交已经在树里；origin/main 也钉到了它（test:changed 和它比）
     expect(git(dir, 'cat-file', '-t', main)).toBe('commit');
     expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(main);
     expect(calls.pushBranch ?? []).toHaveLength(0);
@@ -413,9 +413,11 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(err).toMatchObject({
       code: 'MERGE_CONFLICT',
       retryable: false,
-      details: { mainline: main, conflictFiles: ['b.ts'] },
+      details: { mainline: main, conflictFiles: ['b.ts'], pending: false },
     });
     expect((err as Error).message).toContain('b.ts');
+    expect((err as Error).message).toContain(`git merge ${main}`);
+    expect((err as Error).message).not.toContain('树里留着冲突标记');
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
     expect(readFileSync(join(dir, 'b.ts'), 'utf8')).toBe('// 会话的草稿\n');
     expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
