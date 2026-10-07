@@ -263,7 +263,7 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     ]);
     // 作者是 claude：按 0006 顺序问的第一家是 gpt
     expect(r.asked.map((a) => a.avoidFamilies?.includes('gpt'))).toEqual([false]);
-    expect(r.asked[0]).toMatchObject({ taskId: TASK_ID, stage: 'review' });
+    expect(r.asked[0]).toMatchObject({ taskId: TASK_ID, stage: 'verify' });
     // 会话：空目录归会话用户、会话在里面起、收场删掉
     expect(r.specs).toHaveLength(1);
     const cwd = r.specs[0]?.cwd ?? '';
@@ -611,7 +611,7 @@ describe('发布排空看得见验收会话（#957）', { timeout: 30_000 }, () 
   const abortable = (signal: AbortSignal) =>
     new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
 
-  it('验收会话在跑时，排空报「还有 1 个」（review 阶段、这张单、在跑）；到截止停下它，回 retry、不贴 failure，清单走空', async () => {
+  it('验收会话在跑时，排空报「还有 1 个」（verify 用途、这张单、在跑）；到截止停下它，回 retry、不贴 failure，清单走空', async () => {
     const drain = createEngineDrain();
     const sessions = oneShotSessions({ drain });
     let resolveStarted: () => void = () => {};
@@ -633,7 +633,7 @@ describe('发布排空看得见验收会话（#957）', { timeout: 30_000 }, () 
     pending.catch(() => undefined);
     await started;
     expect(drain.inFlight()).toEqual([
-      expect.objectContaining({ stage: 'review', taskId: TASK_ID, phase: 'running' }),
+      expect.objectContaining({ stage: 'verify', taskId: TASK_ID, phase: 'running' }),
     ]);
     drain.cordon({ source: 'release', since: 'x', until: new Date(0).toISOString(), why: '发布 aaaa' });
     const seen: number[] = [];

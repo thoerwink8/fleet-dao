@@ -4,6 +4,7 @@
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
 
+import { routingPurposeOf, SCOPE_NO_ROUTE } from '@fleet-dao/shared';
 import { Route as RouteIcon, TriangleAlert } from 'lucide-react';
 import { type ReactNode, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router';
@@ -58,6 +59,11 @@ const DESCRIPTION =
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
 
+/** 这一格在路由页上的名字。不在对照里的用途不该被画出来（调用方先滤掉）。 */
+function purposeLabel(purpose: RoutingLayerPurpose['purpose']): string {
+  return routingPurposeOf(purpose)?.label ?? stageLabel[purpose];
+}
+
 export default function Routing() {
   const { data, error, isLoading } = useRoutingLayers();
   const [params] = useSearchParams();
@@ -90,7 +96,9 @@ export default function Routing() {
     );
   }
 
-  const selected = pickPurpose(data.purposes, params.get('purpose'));
+  // 只画对照里的用途。接口要是还带回老的（分诊、方案、审查……），当没点名，不占一格。
+  const purposes = data.purposes.filter((p) => routingPurposeOf(p.purpose));
+  const selected = pickPurpose(purposes, params.get('purpose'));
   // 窄屏上清单在上、详情在下：点了就滚到详情（宽屏两栏并排，不用滚）
   const reveal = () => {
     if (!window.matchMedia?.('(max-width: 1279px)').matches) return;
@@ -102,10 +110,10 @@ export default function Routing() {
       title="路由"
       description={DESCRIPTION}
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
-      actions={data.purposes.length > 0 ? <Summary purposes={data.purposes} asOf={data.asOf} /> : undefined}
+      actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
     >
       <ChannelSummary layers={data} />
-      {data.purposes.length === 0 || !selected ? (
+      {purposes.length === 0 || !selected ? (
         <Panel>
           <Empty
             icon={RouteIcon}
@@ -115,7 +123,7 @@ export default function Routing() {
         </Panel>
       ) : (
         <div className="grid items-start gap-4 xl:grid-cols-routing">
-          <PurposeList purposes={data.purposes} selected={selected.purpose} onPick={reveal} />
+          <PurposeList purposes={purposes} selected={selected.purpose} onPick={reveal} />
           <div ref={detail} className="min-w-0 scroll-mt-4">
             <RoutingEditProvider>
               <PurposeDetail purpose={selected} />
@@ -163,55 +171,82 @@ function PurposeList({
   selected: string;
   onPick: () => void;
 }) {
+  const flow = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside !== true);
+  const aside = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside === true);
   return (
     <nav aria-label="用途" className="min-w-0">
+      <p className="mb-2 rounded-xl border border-dashed bg-card px-3.5 py-3 text-sm text-muted-foreground">
+        对题：{SCOPE_NO_ROUTE}
+      </p>
       <ul className="space-y-2">
-        {purposes.map((p) => {
-          const line = purposeLine(p);
-          const active = p.purpose === selected;
-          return (
-            <li key={p.purpose}>
-              <Link
-                to={{ search: `?purpose=${p.purpose}` }}
-                replace
-                preventScrollReset
-                onClick={onPick}
-                aria-current={active ? 'true' : undefined}
-                className={cn(
-                  'block rounded-xl border bg-card px-3.5 py-3 shadow-card-edge transition-colors hover:border-border-strong',
-                  active && 'border-border-strong bg-muted/60',
-                )}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold">{stageLabel[p.purpose]}</span>
-                  <span className="num text-caption text-muted-foreground">{p.purpose}</span>
-                  <StatusChip
-                    tone={verdictTone[p.verdict]}
-                    label={purposeVerdictLabel[p.verdict]}
-                    className="ml-auto"
-                  />
-                </div>
-                {p.models.length > 0 ? (
-                  <ol aria-label="模型顺序" className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-caption">
-                    {p.models.map((m, i) => (
-                      <li key={m.modelId} className="inline-flex items-center gap-1">
-                        <StatusDot tone={verdictTone[m.verdict]} className="size-1.5" />
-                        <span className="num text-muted-foreground">{i + 1}</span>
-                        <span className={m.verdict === 'live' ? undefined : toneText[verdictTone[m.verdict]]}>
-                          {m.displayName}
-                        </span>
-                        <span className="sr-only">：{verdictLabel[m.verdict]}</span>
-                      </li>
-                    ))}
-                  </ol>
-                ) : null}
-                <p className={cn('mt-1.5 text-caption', lineInk(line.tone))}>{line.text}</p>
-              </Link>
-            </li>
-          );
-        })}
+        {flow.map((p) => (
+          <PurposeItem key={p.purpose} purpose={p} selected={selected} onPick={onPick} />
+        ))}
       </ul>
+      {aside.length > 0 ? (
+        <div className="mt-4">
+          <p className="mb-2 px-1 text-caption text-muted-foreground">不是流程里的一段</p>
+          <ul className="space-y-2">
+            {aside.map((p) => (
+              <PurposeItem key={p.purpose} purpose={p} selected={selected} onPick={onPick} />
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </nav>
+  );
+}
+
+function PurposeItem({
+  purpose: p,
+  selected,
+  onPick,
+}: {
+  purpose: RoutingLayerPurpose;
+  selected: string;
+  onPick: () => void;
+}) {
+  const line = purposeLine(p);
+  const active = p.purpose === selected;
+  return (
+    <li>
+      <Link
+        to={{ search: `?purpose=${p.purpose}` }}
+        replace
+        preventScrollReset
+        onClick={onPick}
+        aria-current={active ? 'true' : undefined}
+        className={cn(
+          'block rounded-xl border bg-card px-3.5 py-3 shadow-card-edge transition-colors hover:border-border-strong',
+          active && 'border-border-strong bg-muted/60',
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">{purposeLabel(p.purpose)}</span>
+          <span className="num text-caption text-muted-foreground">{p.purpose}</span>
+          <StatusChip
+            tone={verdictTone[p.verdict]}
+            label={purposeVerdictLabel[p.verdict]}
+            className="ml-auto"
+          />
+        </div>
+        {p.models.length > 0 ? (
+          <ol aria-label="模型顺序" className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-caption">
+            {p.models.map((m, i) => (
+              <li key={m.modelId} className="inline-flex items-center gap-1">
+                <StatusDot tone={verdictTone[m.verdict]} className="size-1.5" />
+                <span className="num text-muted-foreground">{i + 1}</span>
+                <span className={m.verdict === 'live' ? undefined : toneText[verdictTone[m.verdict]]}>
+                  {m.displayName}
+                </span>
+                <span className="sr-only">：{verdictLabel[m.verdict]}</span>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+        <p className={cn('mt-1.5 text-caption', lineInk(line.tone))}>{line.text}</p>
+      </Link>
+    </li>
   );
 }
 
@@ -225,7 +260,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
     <Panel
       title={
         <span className="flex items-center gap-2">
-          {stageLabel[p.purpose]}
+          {purposeLabel(p.purpose)}
           <span className="num text-caption font-normal text-muted-foreground">{p.purpose}</span>
         </span>
       }
@@ -307,13 +342,13 @@ function ModelBlock({
         <StatusChip tone={verdictTone[m.verdict]} label={verdictLabel[m.verdict]} />
         <span className="ml-auto text-caption text-muted-foreground">{modelSummary(m)}</span>
         <MoveButtons
-          label={`${m.displayName}（${stageLabel[purpose]}里的先后）`}
+          label={`${m.displayName}（${purposeLabel(purpose)}里的先后）`}
           canUp={index > 0}
           canDown={index < modelItems.length - 1}
           onMove={(direction) =>
             edit.moveModel({
               purpose,
-              purposeName: stageLabel[purpose],
+              purposeName: purposeLabel(purpose),
               items: modelItems,
               index,
               direction,

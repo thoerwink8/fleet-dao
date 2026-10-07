@@ -27,23 +27,30 @@ const routeItem = (routeId: string) => {
 };
 
 describe('路由页：每一层现在活着吗', () => {
-  test('九个用途各一项；进来先看派不出去的那个（没配模型顺序的 verify），缺口照写；顶上数清各几个', async () => {
+  test('只列在用的四个用途；没点名先看靠后备撑着的验收；对题不选路；Jev 单列', async () => {
     renderApp(<RoutingPage />, { route: '/routing' });
     const links = await purposeLinks();
-    expect(links).toHaveLength(9);
+    expect(links).toHaveLength(4);
+    expect(links[0]?.textContent).toContain('动手');
+    expect(links[0]?.textContent).not.toContain('动手 · 界面');
+    expect(links[1]?.textContent).toContain('动手 · 界面');
+    expect(links[2]?.textContent).toContain('验收');
+    expect(links[3]?.textContent).toContain('Jev 判断');
+    expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
+    expect(screen.getByText('不是流程里的一段')).toBeTruthy();
     const current = links.filter((a) => a.getAttribute('aria-current') === 'true');
     expect(current).toHaveLength(1);
-    expect(current[0]?.textContent).toContain('开 PR 前验证');
-    expect(current[0]?.textContent).toContain('派不出去');
-    // 清单那一行和详情的缺口栏各写一遍
-    expect(screen.getAllByText('用途 verify 没配模型顺序')).toHaveLength(2);
-    expect(screen.getByText('8 个派得出去')).toBeTruthy();
+    expect(current[0]?.textContent).toContain('验收');
+    for (const gone of ['分诊', '需求文档', '方案', '调研', '第二意见', '开 PR 前验证']) {
+      expect(screen.queryByText(gone)).toBeNull();
+    }
+    expect(screen.getByText('4 个派得出去')).toBeTruthy();
     expect(screen.getByText('0 个不知道')).toBeTruthy();
-    expect(screen.getByText('1 个派不出去')).toBeTruthy();
+    expect(screen.getByText('0 个派不出去')).toBeTruthy();
   });
 
-  test('点名一个用途：首选模型不行时写明顺位第一条活的在第几个模型，不知道的原因照写，顺位第一条活的那条标出来', async () => {
-    renderApp(<RoutingPage />, { route: '/routing?purpose=review' });
+  test('点名验收：首选模型不行时写明顺位第一条活的在第几个模型，不知道的原因照写，顺位第一条活的那条标出来', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     await purposeLinks();
     // 清单那一行和详情的副标题各一遍
     expect(
@@ -172,12 +179,11 @@ describe('路由页：每一层现在活着吗', () => {
     expect(free.textContent).not.toContain('满了，等空位');
   });
 
-  test('网址里点名的用途写错了：照没点名算（先看派不出去的），不留一块空详情', async () => {
-    renderApp(<RoutingPage />, { route: '/routing?purpose=nope' });
+  test('网址里点了已不存在的用途（plan）：照没点名算（先看靠后备撑着的验收），不留一块空详情', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=plan' });
     const links = await purposeLinks();
-    expect(links.find((a) => a.getAttribute('aria-current') === 'true')?.textContent).toContain(
-      '开 PR 前验证',
-    );
+    expect(links.find((a) => a.getAttribute('aria-current') === 'true')?.textContent).toContain('验收');
+    expect(screen.queryByText('方案')).toBeNull();
   });
 
   test('【故意造出的失败】读不到：写「路由两层没读成」和原因，不画清单、不报几个派得出去', async () => {

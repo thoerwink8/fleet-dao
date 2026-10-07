@@ -6,13 +6,13 @@ import { type Db, type RoutingLayers, type RoutingRouteView, routingLayers } fro
 import {
   type Channel,
   type Model,
+  ROUTING_PURPOSE_IDS,
   type RoutingLayerPurposeSchema,
   type RoutingLayerRouteSchema,
-  StageKindSchema,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
-/** 读路由两层的口子：每个用途一份，按 StageKind 的先后。读不到抛。 */
+/** 读路由两层的口子：流程里真在用的用途各一份（shared 的 ROUTING_PURPOSE_IDS），按那份的先后。读不到抛。 */
 export interface RoutingLayersPort {
   read(input: { now: Date; staleAfterMs: number }): Promise<RoutingLayers[]>;
 }
@@ -20,9 +20,7 @@ export interface RoutingLayersPort {
 export function pgRoutingLayers(db: Db): RoutingLayersPort {
   return {
     read: ({ now, staleAfterMs }) =>
-      Promise.all(
-        StageKindSchema.options.map((purpose) => routingLayers(db, purpose, { now, staleAfterMs })),
-      ),
+      Promise.all(ROUTING_PURPOSE_IDS.map((purpose) => routingLayers(db, purpose, { now, staleAfterMs }))),
   };
 }
 

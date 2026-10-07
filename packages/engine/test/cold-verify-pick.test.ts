@@ -1,6 +1,7 @@
 // 按族挑模型（#555-2 装配侧）的测试：0006 的顺序、跳过写这张单的族、挑不出来回 undefined（不许拿默认模型顶上）、
 // 选路回了别的族不替它改名、读库读不到要**抛**（不许当成「这个族没有」——那是拿没查成当没问题）。
 
+import { acceptancePurpose } from '@fleet-dao/shared/flow-purposes';
 import { describe, expect, it } from 'vitest';
 import { type FamilyPickDeps, familyPickerFrom, pickFamilyModel } from '../src/cold-verify-pick.ts';
 import type { PickRouteInput, PickRouteResult } from '../src/ports.ts';
@@ -103,7 +104,8 @@ describe('familyPickerFrom：接到真选路上（避开别的族、不替选路
     const got = await deps.pickRouteForFamily('claude');
     expect(got?.modelId).toBe('claude-x');
     expect(port.calls[0]?.avoidFamilies?.sort()).toEqual(['deepseek', 'gpt', 'grok', 'kimi']);
-    expect(port.calls[0]?.stage).toBe('review');
+    // 【故意造出的失败】冷验收实际拿去选路的用途，不是页面上叫「验收」的那一格就红
+    expect(port.calls[0]?.stage).toBe(acceptancePurpose());
   });
 
   it('界面活（uiWork）：每一族的选路请求都带 uiWork: true；非界面活的请求里没有这个字段', async () => {
