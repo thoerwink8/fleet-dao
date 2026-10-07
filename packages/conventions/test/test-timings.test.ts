@@ -1,8 +1,8 @@
 // 刷新耗时表（src/test-timings.ts、bin/ci-timings.ts）：从 `gh run view --log` 认出每个测试文件的耗时、和旧表合并、写回仓里。
 // 带【故意造出失败的】的：日志里认不出东西时必须退出 2、不写半张表。
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
@@ -190,5 +190,86 @@ describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', { ti
     expect(run(['--weird']).status).toBe(2);
     expect(run(['--run', 'abc', '--out', out]).status).toBe(2);
     expect(existsSync(out)).toBe(false);
+  });
+});
+
+/** 假的 gh：记下参数，运行列表按给的回，测试台数和日志固定。不连 GitHub。 */
+function fakeGh(dir: string, runs: { databaseId: number; event?: string }[]): NodeJS.ProcessEnv {
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const calls = join(dir, 'calls.log');
+  const gh = join(bin, 'gh');
+  const logLine = `test (1/4)\tx\t2026-10-04T00:00:00Z  ✓ ${SELF} (10 tests) 100ms\n`;
+  writeFileSync(
+    gh,
+    [
+      '#!/usr/bin/env node',
+      "import { appendFileSync } from 'node:fs';",
+      'const args = process.argv.slice(2);',
+      `appendFileSync(${JSON.stringify(calls)}, \`\${JSON.stringify(args)}\\n\`);`,
+      `const runs = ${JSON.stringify(runs)};`,
+      "if (args[0] === 'run' && args[1] === 'list') {",
+      '  process.stdout.write(JSON.stringify(runs));',
+      '  process.exit(0);',
+      '}',
+      "if (args.includes('--jq')) {",
+      "  process.stdout.write('4\\n');",
+      '  process.exit(0);',
+      '}',
+      "if (args.includes('--log')) {",
+      `  process.stdout.write(${JSON.stringify(logLine)});`,
+      '  process.exit(0);',
+      '}',
+      "process.stderr.write('没想到的 gh：' + args.join(' '));",
+      'process.exit(1);',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(gh, 0o755);
+  return { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`, GH_CALLS: calls };
+}
+
+describe('入口不给 --run：只取 PR 触发的运行（假 gh，不连 GitHub）', { timeout: 0 }, () => {
+  const bin = fileURLToPath(new URL('../src/bin/ci-timings.ts', import.meta.url));
+
+  function go(runs: { databaseId: number; event?: string }[]) {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-timings-gh-'));
+    const env = fakeGh(dir, runs);
+    const out = join(dir, 'timings.json');
+    const r = runChild(process.execPath, [bin, '--out', out], { env });
+    const calls = readFileSync(env.GH_CALLS ?? '', 'utf8')
+      .trim()
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as string[]);
+    return { r, out, calls };
+  }
+
+  it('【故意造出失败的】运行列表混进 push：退出 2、报没查成，不拿这批运行刷表', () => {
+    // 名单里有能刷的 PR 运行。混进 push 仍要整批停下：滤掉 push、只用旁边的 PR 刷，这条就绿不了。
+    const { r, out } = go([
+      { databaseId: 11, event: 'pull_request' },
+      { databaseId: 13, event: 'push' },
+    ]);
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toMatch(/没查成.*13.*不是 PR/);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it('只有 PR 运行：取运行列表带 event=pull_request，照常刷表', () => {
+    const { r, out, calls } = go([
+      { databaseId: 11, event: 'pull_request' },
+      { databaseId: 12, event: 'pull_request' },
+    ]);
+    expect(r.status, r.stderr).toBe(0);
+    const list = calls.find((a) => a[0] === 'run' && a[1] === 'list');
+    if (list === undefined) throw new Error(`没有 gh run list：${JSON.stringify(calls)}`);
+    expect(list[list.indexOf('--event') + 1]).toBe('pull_request');
+    const t = parseTimings(readFileSync(out, 'utf8'));
+    if (typeof t === 'string') throw new Error(t);
+    expect(t.files[SELF]).toBe(100);
+    expect(t.source).toContain('ci.yml run 11');
+    expect(t.source).toContain('ci.yml run 12');
+    expect(t.source).toContain('共 2 轮取中位数');
   });
 });
