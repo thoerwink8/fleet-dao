@@ -196,7 +196,7 @@ export default function Notifications() {
                 status === s ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
               )}
             >
-              {s === 'open' ? '待处理' : '全部（含已处理）'}
+              {s === 'open' ? '待处理' : '连已处理的一起看'}
             </button>
           ))}
         </div>

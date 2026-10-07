@@ -32,10 +32,8 @@ const PLANS: Record<
       '每个订阅浪费了多少额度',
       '按量渠道的月度上限和已花',
     ],
-    related: [
-      { to: '/quota', label: '额度' },
-      { to: '/settings#fees', label: '订阅月费' },
-    ],
+    // 原来还有一条「订阅月费」指向 /settings#fees：设置页没有这一节，点了落空，删掉
+    related: [{ to: '/quota', label: '额度' }],
   },
   '/record': {
     title: '战绩',

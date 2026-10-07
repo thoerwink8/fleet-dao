@@ -55,7 +55,7 @@ test.describe('通知中心', () => {
     const audit = (await api.get('/api/audit?limit=50')) as Audit;
     expect(audit.items.some((a) => a.action === 'notification.resolve')).toBe(true);
 
-    await page.getByRole('tab', { name: '全部（含已处理）' }).click();
+    await page.getByRole('tab', { name: '连已处理的一起看' }).click();
     await expect(page.getByText(/我处理于/)).toBeVisible();
     // 处理一个不存在的：后端回 404 明确的话
     const gone = await api.send(
