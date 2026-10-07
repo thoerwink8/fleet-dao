@@ -982,7 +982,7 @@ describe('防「别的测试也通读全仓」悄悄多出一个', () => {
     const walk = (rel: string) => {
       const fs = fsHashFs(ROOT);
       for (const name of fs.list(rel) ?? []) {
-        if (name === 'node_modules' || name === 'dist' || name === 'dist-demo') continue;
+        if (name === 'node_modules' || name === 'dist') continue;
         const child = `${rel}/${name}`;
         const sub = fs.list(child);
         if (sub !== undefined) walk(child);

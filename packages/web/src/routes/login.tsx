@@ -7,7 +7,7 @@
 
 import { AUTH_PREFIX, AuthRoutes } from '@fleet-dao/shared';
 import { useQueryClient } from '@tanstack/react-query';
-import { LoaderCircle, LogIn, Presentation } from 'lucide-react';
+import { LoaderCircle, LogIn } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
@@ -18,7 +18,6 @@ import { PasswordField } from '../components/password-field';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
-import { DEMO_URL } from '../demo/url';
 import { loginErrorText, PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
 
 export function meta() {
@@ -297,15 +296,6 @@ export default function LoginPage() {
             }
           </p>
         ) : null}
-        {/* 演示版是另一个单页（假数据、不用登录），地址由构建配置给（FLEET_DEMO_URL）：整页跳过去，不走站内路由。 */}
-        <a
-          href={DEMO_URL}
-          className="mt-6 flex items-center justify-center gap-1.5 rounded-xl border border-dashed px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
-        >
-          <Presentation className="size-4" aria-hidden />
-          没有账号？看演示版
-          <span className="text-xs text-faint">（假数据，不用登录）</span>
-        </a>
       </div>
     </main>
   );

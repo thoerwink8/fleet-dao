@@ -21,9 +21,6 @@ const ACTION_LABEL: Record<string, string> = {
   'notification.resolve': '处理了提醒',
   'setting.update': '改了设置',
   'agent.done_rejected': '「做完了」被退回',
-  'demo.link.create': '发了演示链接',
-  'demo.link.revoke': '作废了演示链接',
-  'demo.default.update': '改了演示版的默认范围',
   'credentials.set': '设了账密登录',
   'credentials.change': '改了账密登录',
   [AUTO_DISPATCH_ENABLE]: '开启了「让 AI 接活」',
@@ -107,10 +104,6 @@ export function targetLabel(
       return '账号的登录方式';
     case 'notification':
       return '一条提醒';
-    case 'demo-link':
-      return `演示链接 ${id.slice(0, 8)}`;
-    case 'demo':
-      return id === 'default' ? '演示版的默认范围' : `演示版 ${id}`;
     default:
       return target;
   }

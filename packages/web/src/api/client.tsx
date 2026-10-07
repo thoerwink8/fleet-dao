@@ -13,16 +13,11 @@ import {
 import { createContext, type ReactNode, useContext, useEffect, useRef, useSyncExternalStore } from 'react';
 import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
-import { canSee, isDemo } from '../demo/access';
 import type {
   Audit,
   AuthConfig,
   Board,
-  CreateDemoLinkBody,
-  CreatedDemoLink,
   Credentials,
-  DemoLinks,
-  DemoScopeView,
   EnvResponse,
   FrancePreflightResponse,
   FranceReleaseState,
@@ -56,7 +51,6 @@ import type {
   TaskDetail,
   TaskRoutePin,
   UpdateCredentialsBody,
-  UpdateDemoDefaultBody,
   UpdatedModelRoute,
   UpdatedRepoDispatch,
   UpdatedRouteEffort,
@@ -70,8 +64,8 @@ import type {
 export type LiveStatus = 'connecting' | 'open' | 'down';
 
 export interface FleetApi {
-  /** 数据来自哪里：真后端、假数据，还是演示版（假数据 + 可见范围）。界面上要写明。 */
-  readonly source: 'http' | 'mock' | 'demo';
+  /** 数据来自哪里：真后端，还是假数据（本机 --mode mock）。界面上要写明。 */
+  readonly source: 'http' | 'mock';
   authConfig(): Promise<AuthConfig>;
   devLogin(userId: string): Promise<Me>;
   feishuAccess(code: string): Promise<Me>;
@@ -89,7 +83,7 @@ export interface FleetApi {
   repos(): Promise<{ repos: Repo[] }>;
   /** 每个项目的「让 AI 接活」现在开还是关、什么时候开的（设置页「仓库」一节）。 */
   repoDispatch(): Promise<{ repos: RepoDispatch[] }>;
-  /** 开、关一个项目的「让 AI 接活」（写操作记录）；本来就是那个状态时 changed=false。没有这个项目 404。演示版只读：直接拒。 */
+  /** 开、关一个项目的「让 AI 接活」（写操作记录）；本来就是那个状态时 changed=false。没有这个项目 404。 */
   updateRepoDispatch(repoId: string, body: UpdateRepoDispatchBody): Promise<UpdatedRepoDispatch>;
   /** 新主页（/）的一屏三块 + 持续状态条（#589）。 */
   home(): Promise<HomeResponse>;
@@ -98,7 +92,7 @@ export interface FleetApi {
    * 只读、不跨环境：读的是本后端自己库里的现成读法（和主页、额度页、/healthz 同一份）。
    */
   env(): Promise<EnvResponse>;
-  /** 看板多机：本台（名字、引擎）加每个远程环境的新鲜度。演示版没有（不露机器名）。 */
+  /** 看板多机：本台（名字、引擎）加每个远程环境的新鲜度。 */
   nodes(): Promise<Nodes>;
   /** 一个远程环境最近一次推来的主页、环境页快照加新鲜度（只读展示用）；没推过 404（node_never_reported）。 */
   node(nodeId: string): Promise<NodeDetail>;
@@ -151,11 +145,6 @@ export interface FleetApi {
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
-  /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
-  demoLinks(): Promise<DemoLinks>;
-  createDemoLink(body: CreateDemoLinkBody): Promise<CreatedDemoLink>;
-  revokeDemoLink(linkId: string): Promise<void>;
-  updateDemoDefault(body: UpdateDemoDefaultBody): Promise<DemoScopeView>;
   /** 订阅实时推送，返回取消订阅的函数。onStatus 报连接状态（给顶栏的「实时」小灯）。 */
   subscribe(listener: (event: LiveEvent) => void, onStatus?: (status: LiveStatus) => void): () => void;
 }
@@ -212,7 +201,6 @@ export const keys = {
   franceReleaseState: ['france-release-state'] as const,
   franceReleaseCard: ['france-release-card'] as const,
   franceReleasedCommits: ['france-released-commits'] as const,
-  demoLinks: ['demo-links'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
   nodes: ['nodes'] as const,
@@ -406,7 +394,6 @@ export function useJobs() {
     queryKey: keys.jobs,
     queryFn: () => api.jobs(),
     refetchInterval: 30_000,
-    enabled: canSee('schedules'),
   });
 }
 
@@ -415,7 +402,6 @@ export function useNotifications(status: 'open' | 'all' = 'open') {
   return useQuery({
     queryKey: keys.notifications(status),
     queryFn: () => api.notifications({ status, limit: 200 }),
-    enabled: canSee('notifications'),
   });
 }
 
@@ -427,24 +413,17 @@ export function useAudit(target?: string) {
     queryFn: ({ pageParam }) => api.audit({ target, cursor: pageParam, limit: 100 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor,
-    enabled: canSee('audit'),
   });
 }
 
 export function useSettings() {
   const api = useApi();
-  return useQuery({ queryKey: keys.settings, queryFn: () => api.settings(), enabled: canSee('settings') });
-}
-
-export function useDemoLinks() {
-  const api = useApi();
-  return useQuery({ queryKey: keys.demoLinks, queryFn: () => api.demoLinks() });
+  return useQuery({ queryKey: keys.settings, queryFn: () => api.settings() });
 }
 
 /**
  * /france 页发版一键（#618）：release-train 此刻的状态（在走 / 暂停 / 没在走 / 读不到）。
  * 30 秒重拉一次：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
- * 只有正式驾驶舱才有这一节（演示版不挂 france 这条路由），不查 demo 模块。
  */
 export function useFranceReleaseState() {
   const api = useApi();
@@ -452,13 +431,11 @@ export function useFranceReleaseState() {
     queryKey: keys.franceReleaseState,
     queryFn: () => api.franceReleaseState(),
     refetchInterval: 30_000,
-    enabled: !isDemo(),
   });
 }
 
 /**
  * /france 页「发版」卡（#1231）：1 分钟重拉一次（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
- * 只有正式驾驶舱才有，不查 demo 模块。
  */
 export function useFranceReleaseCard() {
   const api = useApi();
@@ -466,13 +443,11 @@ export function useFranceReleaseCard() {
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
     refetchInterval: 60_000,
-    enabled: !isDemo(),
   });
 }
 
 /**
  * /changelog 页「已发布的提交」（#1255）：读法国发布历史；发了新版会自己变，页面开着每 5 分钟重拉一次。读不到后端也照实显示「没查成」。
- * 只有正式驾驶舱才有，不查 demo 模块。
  */
 export function useFranceReleasedCommits() {
   const api = useApi();
@@ -480,7 +455,6 @@ export function useFranceReleasedCommits() {
     queryKey: keys.franceReleasedCommits,
     queryFn: () => api.franceReleasedCommits(),
     refetchInterval: 300_000,
-    enabled: !isDemo(),
   });
 }
 
@@ -512,8 +486,7 @@ export function useFrancePreflight() {
 
 /**
  * 环境页的读取（#820 片 1）：这一台环境现在怎样。顶栏徽标不用它（名字跟着 /me 带回），只有开着环境页时才拉。
- * 只读、不跨环境。演示版没有这一页（导航不给 module、路由表也不放），所以这里只在正式驾驶舱里取；
- * 每分钟重拉一次——健康、在跑的会话这些没有实时推送。
+ * 只读、不跨环境。每分钟重拉一次——健康、在跑的会话这些没有实时推送。
  */
 export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
@@ -521,7 +494,7 @@ export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
     queryKey: keys.env,
     queryFn: () => api.env(),
     refetchInterval: 60_000,
-    enabled: enabled && !isDemo(),
+    enabled,
   });
 }
 
@@ -563,7 +536,7 @@ function homeStateOf(query: {
 
 /**
  * 看板多机：本台加每个远程环境（本机 WSL）的新鲜度。别的环境推来快照时 node_reports 推送叫它重拉；
- * 新鲜度按时间变（推送停了没有事件），所以每 30 秒也重拉一次。演示版不读（不露机器名）。
+ * 新鲜度按时间变（推送停了没有事件），所以每 30 秒也重拉一次。
  */
 export function useNodes() {
   const api = useApi();
@@ -571,7 +544,6 @@ export function useNodes() {
     queryKey: keys.nodes,
     queryFn: () => api.nodes(),
     refetchInterval: 30_000,
-    enabled: !isDemo(),
   });
 }
 
@@ -585,7 +557,7 @@ export function useNode(nodeId: string | null) {
     queryKey: keys.node(nodeId ?? ''),
     queryFn: () => api.node(nodeId ?? ''),
     refetchInterval: 30_000,
-    enabled: nodeId !== null && !isDemo(),
+    enabled: nodeId !== null,
     retry: retryUnlessMissing,
   });
 }
@@ -598,7 +570,6 @@ export function useNodeSnapshots(ids: readonly string[]) {
       queryKey: keys.node(id),
       queryFn: () => api.node(id),
       refetchInterval: 30_000,
-      enabled: !isDemo(),
       retry: retryUnlessMissing,
     })),
   });
@@ -626,25 +597,6 @@ export function useNodeHome(nodeId: string | null): {
 }
 
 // ---------- 写 ----------
-
-/** 发链接、作废、改默认范围：做完都重拉列表，操作记录里也多一条。 */
-function useDemoMutation<V, R>(fn: (api: FleetApi, v: V) => Promise<R>) {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (v: V) => fn(api, v),
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: keys.demoLinks });
-      qc.invalidateQueries({ queryKey: ['audit'] });
-    },
-  });
-}
-
-export const useCreateDemoLink = () =>
-  useDemoMutation((api, body: CreateDemoLinkBody) => api.createDemoLink(body));
-export const useRevokeDemoLink = () => useDemoMutation((api, id: string) => api.revokeDemoLink(id));
-export const useUpdateDemoDefault = () =>
-  useDemoMutation((api, body: UpdateDemoDefaultBody) => api.updateDemoDefault(body));
 
 export function useTaskAction() {
   const api = useApi();

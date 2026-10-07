@@ -8,14 +8,11 @@ import { LogoMark } from '../components/logo';
 import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
 import { CommandMenu } from '../components/shell/command-menu';
-import { demoBlocked } from '../components/shell/nav';
 import { SidebarNav } from '../components/shell/sidebar';
 import { Topbar } from '../components/shell/topbar';
 import { TaskActionsProvider } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet';
-import { isDemo } from '../demo/access';
-import { DemoBanner, NotOpen } from '../demo/views';
 import { useLocalState } from '../lib/hooks';
 import { useNodeSelection } from '../lib/node';
 import { cn } from '../lib/utils';
@@ -107,15 +104,12 @@ function Frame() {
   useLiveSync(Boolean(me));
   useNoticeToasts();
 
-  // 演示版：这一页所在的模块没开放，就不渲染它（它的数据也就不去读）。
-  const blocked = demoBlocked(location.pathname);
   // 看板多机：选了远程环境（?node=）时，只有主页和法国页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
   const { nodeId } = useNodeSelection();
-  const onlyLocal = !isDemo() && nodeId !== null && !isRemotePage(location.pathname);
+  const onlyLocal = nodeId !== null && !isRemotePage(location.pathname);
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
-      {isDemo() ? <DemoBanner /> : null}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <aside
           className={cn(
@@ -128,7 +122,7 @@ function Frame() {
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
           <main className="relative min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-            {blocked ? <NotOpen /> : onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
+            {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
           </main>
         </div>
       </div>

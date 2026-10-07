@@ -1,9 +1,9 @@
-// 第三方许可证声明：演示版是公开发出去的，用到的第三方库（多是 MIT）的许可证要求随分发附上版权和许可声明，
-// 而演示版的包去掉了全部注释，所以打包时另生成一份 licenses.txt 放在产物根上（页面上不放链接）。
+// 第三方许可证声明：用到的第三方库（多是 MIT）的许可证要求随分发附上版权和许可声明，
+// 所以打包时另生成一份 licenses.txt 放在产物根上（页面上不放链接）。
 // 汇总用 vite 自带的 build.license：它按打包图里的模块认包、读包里的许可证文件，写出一份 JSON（LICENSE_DATA）。
 // 这里补它不管的两件事再写成声明：样式表里按包名引进来的库（Tailwind 这类不进打包图，vite 认不出），
-// 指向代码托管网站的链接（换成占位：打包扫描照样扫这份文件）。认不出许可证的库让打包失败。
-// 演示版构建完由 scripts/demo.ts 查声明在不在（assertLicenses）。这个文件只在打包时在 Node 里跑，不进浏览器的包。
+// 指向代码托管网站的链接（换成占位）。认不出许可证的库让打包失败。
+// 这个文件只在打包时在 Node 里跑，不进浏览器的包。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Plugin } from 'vite';
@@ -112,19 +112,6 @@ export function renderLicenses(entries: readonly LicenseEntry[]): string {
   );
   const head = `${TITLE}\n\n源码可按名称和版本号从 npm 仓库（https://www.npmjs.com）取得。`;
   return `${BOM}${[head, ...items].join('\n\n')}\n`;
-}
-
-/** 构建完查产物里的声明：没有、不是这里生成的、一项都没列，都报错。返回列了几个库。 */
-export function assertLicenses(clientDir: string): number {
-  const file = join(clientDir, LICENSES_FILE);
-  if (!existsSync(file))
-    throw new Error(`产物里没有第三方许可证声明 ${LICENSES_FILE}：许可证要求随分发附上声明，没有它不能发`);
-  const text = readFileSync(file, 'utf8');
-  if (!text.startsWith(`${BOM}${TITLE}`))
-    throw new Error(`${LICENSES_FILE} 开头不是「${TITLE}」：不是打包时生成的那份`);
-  const n = text.split('\n').filter((l) => l === RULE).length;
-  if (!n) throw new Error(`${LICENSES_FILE} 一个库都没列`);
-  return n;
 }
 
 function toPath(id: string): string {

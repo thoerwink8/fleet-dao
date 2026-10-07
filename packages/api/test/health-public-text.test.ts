@@ -1,5 +1,5 @@
 // 公开的健康报告（/healthz 公网打得到，健康页原样显示）不带内部名：src 里每一种对外的失败原因各造一次，
-// 拿演示版打包扫描的同一份名单扫（packages/web/src/build/scan.ts 的 BUILTIN_TERMS，别另抄）。
+// 拿公开页禁用词名单扫（packages/web/src/build/scan.ts 的 BUILTIN_TERMS，别另抄）。
 // 名单在别的包里：写成静态 import，tsc 会把 web 的源文件算进 api 这个 composite 项目报错，所以在运行时 import。
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -55,10 +55,10 @@ interface Scan {
 const SCAN = '../../web/src/build/scan.ts';
 const loadScan = async () => (await import(/* @vite-ignore */ SCAN)) as Scan;
 
-/** 名单里公开页本来就要写的两个词：Temporal 是 P0 验收要看的一项；「驾驶舱」是正式版、演示版都用的中性叫法（#54 第 4 条）。 */
+/** 名单里公开页本来就要写的两个词：Temporal 是 P0 验收要看的一项；「驾驶舱」是公开页上用的中性叫法（#54 第 4 条）。 */
 const PUBLIC_OK = ['temporal', '驾驶舱'];
 
-/** 和演示版产物同一套比法（不分大小写，短名按整词）扫每一份报告的 JSON 原文：/healthz 回的就是它。 */
+/** 和 scan.ts 同一套比法（不分大小写，短名按整词）扫每一份报告的 JSON 原文：/healthz 回的就是它。 */
 function scanReports(scan: Scan, reports: Record<string, HealthReport>): Hit[] {
   const terms = scan.BUILTIN_TERMS.filter((t) => !PUBLIC_OK.includes(t));
   return Object.entries(reports).flatMap(([name, report]) =>
@@ -262,7 +262,7 @@ async function publicFailures(log: Logger) {
 
 describe('公开的健康报告', () => {
   it(
-    '每一种对外的失败原因：照实报红，原因里没有演示版打包扫描名单上的词；内部细节只进日志',
+    '每一种对外的失败原因：照实报红，原因里没有公开页禁用词名单上的词；内部细节只进日志',
     async () => {
       const scan = await loadScan();
       // 名单读到了：空名单什么都扫不出来，不能当成干净

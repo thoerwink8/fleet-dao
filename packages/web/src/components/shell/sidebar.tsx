@@ -6,7 +6,7 @@ import { useNodeSelection, withNode } from '../../lib/node';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
-import { NAV_ITEMS, type NavItem, visibleNav } from './nav';
+import { NAV, NAV_ITEMS, type NavItem } from './nav';
 
 /** 侧栏角标：数字，或者「!」表示没读成（不拿 0 冒充没事）。 */
 function useBadges(): Record<string, number | '!'> {
@@ -131,7 +131,7 @@ export function SidebarNav({
         )}
       </div>
       <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 scrollbar-thin" aria-label="主导航">
-        {visibleNav().map((g) => (
+        {NAV.map((g) => (
           <div key={g.group} className="mt-3 first:mt-1">
             {collapsed ? (
               <div className="mx-auto my-2 h-px w-6 bg-border" />

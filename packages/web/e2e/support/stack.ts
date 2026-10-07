@@ -171,7 +171,6 @@ async function warmUp(webOrigin: string, facts: E2eFacts): Promise<void> {
       '/schedules',
       '/audit',
       '/changelog',
-      '/demo-links',
       `/tasks/${facts.tasks.done}`,
     ];
     for (const p of paths) {

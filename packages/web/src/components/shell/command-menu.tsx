@@ -13,7 +13,7 @@ import {
   CommandList,
   CommandSeparator,
 } from '../ui/command';
-import { visibleNav } from './nav';
+import { NAV } from './nav';
 
 /** ⌘K：跳页面、切仓、切主题。 */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
@@ -43,22 +43,20 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
       <CommandList className="max-h-command-list">
         <CommandEmpty>没找到</CommandEmpty>
         <CommandGroup heading="跳转">
-          {visibleNav()
-            .flatMap((g) => g.items)
-            .map((item) => {
-              const Icon = item.icon;
-              return (
-                <CommandItem
-                  key={item.to}
-                  value={`${item.label} ${item.hint}`}
-                  onSelect={() => run(() => navigate(item.to))}
-                >
-                  <Icon />
-                  {item.label}
-                  <span className="truncate text-xs text-muted-foreground">{item.hint}</span>
-                </CommandItem>
-              );
-            })}
+          {NAV.flatMap((g) => g.items).map((item) => {
+            const Icon = item.icon;
+            return (
+              <CommandItem
+                key={item.to}
+                value={`${item.label} ${item.hint}`}
+                onSelect={() => run(() => navigate(item.to))}
+              >
+                <Icon />
+                {item.label}
+                <span className="truncate text-xs text-muted-foreground">{item.hint}</span>
+              </CommandItem>
+            );
+          })}
         </CommandGroup>
         <CommandSeparator />
         {repos.length ? (

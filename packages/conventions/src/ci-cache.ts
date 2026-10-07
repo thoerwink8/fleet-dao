@@ -54,7 +54,6 @@ export interface HashFs {
 const SKIP_DIRS = new Set([
   'node_modules',
   'dist',
-  'dist-demo',
   'coverage',
   '_tmp',
   '.git',

@@ -22,7 +22,6 @@ import { FAVICON, LogoMark } from './components/logo';
 import { ThemeProvider, useTheme } from './components/theme-provider';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from './components/ui/tooltip';
-import { loadDemoScope } from './demo/access';
 import { THEME_BOOT_SCRIPT } from './lib/theme';
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -49,9 +48,7 @@ export function Layout({ children }: { children: ReactNode }) {
 }
 
 // 根路由带一个 clientLoader：构建时只渲染下面的启动画面，应用本体只在浏览器里跑。
-// 演示版在这里先把可见范围读好，页面一出来就是按范围收好的样子（不先露再收）。
 export async function clientLoader() {
-  await loadDemoScope();
   return null;
 }
 

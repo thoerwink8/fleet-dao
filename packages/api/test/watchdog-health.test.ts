@@ -1,6 +1,6 @@
 // /healthz 的 watchdog 项（健康页「看门狗」，#203）和后端看着看门狗的那一下：看门狗自己停了、没跑成，它自己报不了，
 // 后端按登记表上它那一行现算。需求里「看门狗自己停了也要能被发现」在这里故意造：停了、没跑成、从没跑过、没登记都红，
-// 后端推一条「看门狗停了」，好了自己撤、写明为什么。每一种对外的说法都拿演示版打包扫描的同一份名单扫：不带任务名、原因原文。
+// 后端推一条「看门狗停了」，好了自己撤、写明为什么。每一种对外的说法都拿公开页禁用词名单（web/src/build/scan.ts）扫：不带任务名、原因原文。
 import {
   finishScheduleRun,
   type JobHealth,
@@ -147,7 +147,7 @@ describe('watchdog 项怎么判', () => {
     ).toEqual({ ok: true, note: '刚登记，第一轮还没跑完' });
   });
 
-  it('每一种对外的说法都拿演示版打包扫描的名单扫一遍：没有内部名', async () => {
+  it('每一种对外的说法都拿公开页禁用词名单扫一遍：没有内部名', async () => {
     const scan = (await import(/* @vite-ignore */ SCAN)) as {
       BUILTIN_TERMS: readonly string[];
       scanText(file: string, text: string, terms: readonly string[]): { term: string }[];

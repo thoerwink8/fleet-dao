@@ -5,8 +5,6 @@
 // - 页面顶上是只读的「已发布的提交」（读法国发布历史）：每条提交号、标题、发于何时；读不到整份写没查成和原因，
 //   某一条标题读不到只那一条写原因，接口挂了写没读成；一条记录都没有写明「还没有发布记录」，不当成没查成；
 // - 页面上没有「发布 v<N>」按钮和弹窗，没有「版本里程碑发版」的说法（发版单位是主线提交，决定 0032）；
-// - 演示版不带这一页：导航不给 module（演示版 NAV 自动不收）；仓根的 CHANGELOG.md 里有仓名 fleet，
-//   演示版扫描（build/scan.ts）已把「fleet」列进内置禁词——这一页万一被错误地放进演示版路由，构建时会红。
 
 import { splitChangelog } from '@fleet-dao/shared';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
@@ -14,7 +12,6 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { ReleasedCommits } from '../api/types';
-import { NAV } from '../components/shell/nav';
 import { readChangelog } from '../lib/changelog';
 import ChangelogPage from '../routes/changelog';
 import { renderApp } from './harness';
@@ -166,15 +163,5 @@ describe('/changelog 页：故意造出的失败照实说', () => {
     renderApp(<ChangelogPage />, { api: released({ state: 'ok', commits: [], asOf: AS_OF }) });
     expect(await screen.findByText('法国的发布历史里还没有发布记录')).toBeTruthy();
     expect(commitsPanel().textContent).not.toContain('没查成');
-  });
-});
-
-describe('演示版不泄仓名', () => {
-  test('导航里 /changelog 不给 module——演示版 NAV 自动不收它', () => {
-    const all = NAV.flatMap((g) => g.items);
-    const entry = all.find((i) => i.to === '/changelog');
-    expect(entry, 'NAV 里要挂 /changelog').toBeDefined();
-    // 不给 module 是刻意的：visibleNav() 在演示版里只留 module 给了的，这一页不会进演示版产物。
-    expect(entry?.module).toBeUndefined();
   });
 });

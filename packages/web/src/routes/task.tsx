@@ -17,8 +17,6 @@ import { ACTIONS, type ActionTarget, availableActions, useTaskActions } from '..
 import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
 import { UsagePanel } from '../components/usage';
-import { canSee, isDemo } from '../demo/access';
-import { NotOpen } from '../demo/views';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { useShownError } from '../lib/shown-error';
@@ -66,11 +64,10 @@ function Header({ d, now }: { d: TaskDetail; now: number }) {
 
 /**
  * 暂停、继续、叫停（#820 片 3，#856 第 1 处）：和首页看板上同一份动作定义（components/task-actions.tsx），点了发到后端
- * POST /api/tasks/:taskId/actions。结束了的单一个都不画；演示版不能写，不画。叫停是终局，对话框里写明不能恢复。
+ * POST /api/tasks/:taskId/actions。结束了的单一个都不画。叫停是终局，对话框里写明不能恢复。
  */
 function ActionButtons({ d }: { d: TaskDetail }) {
   const { trigger } = useTaskActions();
-  if (isDemo()) return null;
   const target: ActionTarget = {
     taskId: d.task.id,
     issueNumber: d.task.issueNumber,
@@ -126,9 +123,8 @@ function SessionPart({ d, now, mixed }: { d: TaskDetail; now: number; mixed: boo
   );
 }
 
-/** 「用哪个模型」：演示版没有路由页、改不了，不画；结束了的单从没指定过，也没什么可看的，不画。 */
+/** 「用哪个模型」：结束了的单从没指定过，也没什么可看的，不画。 */
 function Pins({ d, now }: { d: TaskDetail; now: number }) {
-  if (isDemo()) return null;
   if (isTaskFinished(d.task) && !d.routePins.pins.length && !d.routePins.unavailable) return null;
   return <TaskModelPins d={d} now={now} />;
 }
@@ -200,7 +196,6 @@ export default function TaskPage() {
   // 推送重读会把从没读成过的查询退回骨架：显示记住的那次失败（lib/shown-error.ts）
   const error = useShownError(taskId, detail);
   const now = useNow();
-  if (!canSee('task')) return <NotOpen />;
   const d = detail.data;
   return (
     <Page
