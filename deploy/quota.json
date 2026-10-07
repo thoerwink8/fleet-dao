@@ -1,0 +1,71 @@
+{
+  "_说明": "额度读取器的配置（#1289）：读哪些池、各池凭据文件放在哪（只有池名和文件路径，不是密钥本身）。随发布的那一版带着，引擎的 quota-read 直接读它所在那一版的这份（packages/adapters/src/quota/config.ts 的默认路径），不再有手放的 /etc/fleet-dao/quota.json；FLEET_QUOTA_CONFIG 只给命令行和测试换位置。每个池的 poolId 要和目录配置（deploy/examples/catalog.example.json）的账号池 id 一一对上，packages/db/test/catalog.test.ts 钉着，少一个就红。密钥本身（Key 文件、各家 auth.json）仍然手放在机器上，不进仓；凭据缺失时该池如实报「读不到」（no_credentials），不会因此少读池。凭据在会话用户 fleet-agent-carpool 家里的，路径写它家里的绝对路径。以 _ 开头的键是注释。",
+  "timeoutMs": 30000,
+  "pools": [
+    {
+      "_说明": "Claude 订阅·独享组织。跑 Claude Code 自带的 /usage（本地命令，不调模型、不花额度）。只能读这台机器当前挂的组织。",
+      "poolId": "claude-solo",
+      "channelId": "claude-sub",
+      "name": "Claude 订阅 · 独享组织",
+      "reader": "claude-usage",
+      "command": ["/home/fleet-agent-carpool/.local/bin/reclaude"],
+      "orgKind": "solo",
+      "timeoutMs": 120000
+    },
+    {
+      "_说明": "Claude 订阅·拼车组织。读 reclaude 开放接口里拼车成员的 5 小时美元上限（/usage 看不见它），Key 是账号级的：不看这台机器挂哪个组织。Key 文件里只放 rck_ 开头的那一行，手放，引擎自己读得到。",
+      "poolId": "claude-carpool",
+      "channelId": "claude-sub",
+      "name": "Claude 订阅 · 拼车组织",
+      "reader": "reclaude-carpool",
+      "keyFile": "/etc/fleet-dao/reclaude-api.key"
+    },
+    {
+      "_说明": "引擎里经桥接以会话用户的身份连（#1284、#1288），端口、令牌文件现找，下面的 port、tokenFile 只给引擎之外的命令行读取用。Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
+      "poolId": "mirasim-relay",
+      "channelId": "mirasim",
+      "name": "Mirasim 中转账号",
+      "reader": "mirasim-relay",
+      "port": 4316,
+      "tokenFile": "/home/fleet-agent-carpool/.mirasim/run/local-4316.token"
+    },
+    {
+      "_说明": "Cursor 订阅（#1195）。引擎读它的登录文件时以会话用户的身份读（文件在会话用户家里，引擎用户进不去）。读的是 cursor-agent 浏览器登录落下的 auth.json（要有 accessToken）；法国 cursor-agent 用的是 API 密钥文件 ~/.cursor/fleet-api-key，是另一个文件、Dashboard 认不认这把密钥没核实；没有 auth.json 时这个池如实报「读不到」，不当成 0。",
+      "poolId": "cursor",
+      "channelId": "cursor",
+      "name": "Cursor 订阅",
+      "reader": "cursor-dashboard",
+      "authFile": "/home/fleet-agent-carpool/.config/cursor/auth.json"
+    },
+    {
+      "_说明": "Grok 订阅（#1195）。同样以会话用户的身份读登录文件（grok login 落下的，grok 自己续期）。令牌过期读取器不自己续，报「要让 grok 自己续一下」。",
+      "poolId": "grok",
+      "channelId": "xai",
+      "name": "Grok 订阅（Grok Build）",
+      "reader": "grok-billing",
+      "authFile": "/home/fleet-agent-carpool/.grok/auth.json"
+    },
+    {
+      "_说明": "Jev 判断题小模型：按量计费、没有账单接口，按我们自己的用量估；上限是自己定的日帽。现在读旧系统的日账，引擎接上库后删掉 usage 这一项。",
+      "poolId": "jev",
+      "channelId": "jev",
+      "name": "Jev 判断题",
+      "reader": "estimate",
+      "windows": [
+        {
+          "label": "day_usd",
+          "window": "period_usd",
+          "unit": "usd",
+          "periodHours": 24,
+          "anchor": "2026-01-01T00:00:00Z",
+          "limit": 0.3
+        }
+      ],
+      "usage": {
+        "type": "daily-token-files",
+        "dir": "/home/fleet-agent-carpool/.dao/judge-spend",
+        "usdPerMTok": 0.042
+      }
+    }
+  ]
+}

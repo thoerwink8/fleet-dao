@@ -13,7 +13,7 @@ const HELP = `用法：node packages/adapters/src/quota/cli.ts [选项]
 读每个账号池、每个时间窗的额度，打印一张表。
 
   --json            打印完整结果（JSON），给程序读
-  --config <文件>   配置文件；默认取环境变量 FLEET_QUOTA_CONFIG，再没有就是 /etc/fleet-dao/quota.json
+  --config <文件>   配置文件；默认取环境变量 FLEET_QUOTA_CONFIG，再没有就是这一版自带的 deploy/quota.json
   --pool <池>       只读这个池（可以给多次）
   --tz <时区>       清零时间按这个时区显示，例如 Asia/Shanghai；默认本机时区
   -h, --help        显示本说明

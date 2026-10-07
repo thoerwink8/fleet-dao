@@ -21,6 +21,19 @@ const EXAMPLE_PATH = 'deploy/examples/catalog.example.json';
 const exampleText = repoFile(EXAMPLE_PATH);
 const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 
+/** 目录里的账号池和额度配置里的池对不上的两边：只在额度配置里的、只在目录里的（都按「池号@渠道」排好）。 */
+function quotaOnlyAndCatalogOnly(
+  catalogPools: { id: string; channelId: string }[],
+  quotaPools: { poolId: string; channelId: string }[],
+) {
+  const cat = new Set(catalogPools.map((p) => `${p.id}@${p.channelId}`));
+  const quota = new Set(quotaPools.map((p) => `${p.poolId}@${p.channelId}`));
+  return {
+    quotaOnly: [...quota].filter((k) => !cat.has(k)).sort(),
+    catalogOnly: [...cat].filter((k) => !quota.has(k)).sort(),
+  };
+}
+
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
 const GROK_ROUTE = 'grok:grok-4.7:grok';
 /** Mirasim 中转的 DeepSeek Flash（#345，创始人 2026-09-27 拍「mirasim 额度不够，先只开这一条」）。 */
@@ -95,14 +108,26 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
   });
 
   it('账号池和额度读取器的配置样例一一对应（额度按池入库，池不在库里就写不进去）', () => {
-    const quota = JSON.parse(repoFile('deploy/examples/quota.example.json')) as {
+    const quota = JSON.parse(repoFile('deploy/quota.json')) as {
       pools: { poolId: string; channelId: string }[];
     };
-    const pairs = (list: { id: string; channelId: string }[]) =>
-      list.map((p) => `${p.id}@${p.channelId}`).sort();
-    expect(pairs(example().pools)).toEqual(
-      pairs(quota.pools.map((p) => ({ id: p.poolId, channelId: p.channelId }))),
-    );
+    expect(quotaOnlyAndCatalogOnly(example().pools, quota.pools)).toEqual({ quotaOnly: [], catalogOnly: [] });
+  });
+
+  it('【故意造出失败】额度配置少一个目录里有的池（或多一个目录里没有的池），对照就判红', () => {
+    const quota = JSON.parse(repoFile('deploy/quota.json')) as {
+      pools: { poolId: string; channelId: string }[];
+    };
+    const missing = quota.pools.filter((p) => p.poolId !== 'grok');
+    expect(quotaOnlyAndCatalogOnly(example().pools, missing)).toEqual({
+      quotaOnly: [],
+      catalogOnly: ['grok@xai'],
+    });
+    const extra = [...quota.pools, { poolId: 'ghost', channelId: 'x' }];
+    expect(quotaOnlyAndCatalogOnly(example().pools, extra)).toEqual({
+      quotaOnly: ['ghost@x'],
+      catalogOnly: [],
+    });
   });
 
   it('上游名字和插头、额度读取器的真夹具对得上', () => {
