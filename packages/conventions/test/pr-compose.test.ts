@@ -146,9 +146,33 @@ describe('pnpm pr:open 自己生成正文', () => {
     for (const h of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完'])
       expect(w.issueBodies[0]).toContain(h);
     expect(w.issueBodies[0]).toContain('无（AI 发现）');
-    expect(w.bodies[0]).toBe('**做了什么**：加个东西\n\n**需求**：\nCloses #55\n');
+    expect(w.issueBodies[0]).toContain('这张单随 PR 开出，已贴本机做，引擎不拉');
+    expect(w.bodies[0]).toBe(
+      '**做了什么**：加个东西\n\n**需求**：\nCloses #55\n这张单随 PR 开出，已贴本机做，引擎不拉\n',
+    );
     expect(w.text()).toContain('开了单 #55');
+    expect(w.out.join('\n')).toContain('这张单随 PR 开出，已贴本机做，引擎不拉');
     expect(w.calls[1]).toEqual(['pr', 'edit', '42', '--milestone', 'v4 统一与验收']);
+    // --local 仍可加：不报错，标签只贴一次
+    expect(create.filter((x) => x === '本机做')).toEqual(['本机做']);
+  });
+
+  it('【故意造出的失败】--new-issue 不加 --local 也在同一次 gh issue create 里贴「本机做」；把自动贴标去掉这条就红', async () => {
+    const w = world({
+      replies: [CREATED, ok(), files('a.ts'), ok()],
+      lookups: [ok('[false,"v4 统一与验收"]')],
+      issueReplies: [{ code: 0, stdout: 'https://github.com/o/r/issues/55\n', stderr: '' }],
+    });
+    expect(await w.run('--new-issue', '删掉没人用的残留', '--kind', '杂项', '--milestone', '未排期')).toBe(0);
+    expect(w.issueCalls).toHaveLength(1);
+    const create = w.issueCalls[0] ?? [];
+    expect(create.slice(0, 2)).toEqual(['issue', 'create']);
+    // 和类别标签同一次建单贴上，不另调一次补标签
+    expect(create.join('\n')).toContain('--label\n本机做');
+    const note = '这张单随 PR 开出，已贴本机做，引擎不拉';
+    expect(w.issueBodies[0]).toContain(note);
+    expect(w.bodies[0]).toContain(note);
+    expect(w.out.join('\n')).toContain(note);
   });
 
   it('改标准：--founder-quote 加 --at 生成「人闸：改标准」一行和「创始人原话」一段，并挂自动合并', async () => {
@@ -187,6 +211,7 @@ describe('pnpm pr:open 自己生成正文', () => {
     const body = composeIssueBody('标题', ['改了 A'], '照这么做');
     expect(body).toContain('## 原话\n\n「照这么做」');
     expect(body).toContain('- 改了 A');
+    expect(body).toContain('这张单随 PR 开出，已贴本机做，引擎不拉');
   });
 });
 
