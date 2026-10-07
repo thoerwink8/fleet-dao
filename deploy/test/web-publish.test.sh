@@ -41,7 +41,6 @@ reset() {
 config() { # FLEET_HK_PARTS：人手动发布（和 --check）的样子
   FLEET_HK_PARTS=$1
   LEGACY_KEYS=0
-  AUTO=0
 }
 said_line() { grep -cF -- "$1" "$TMP/out"; } # 上一次存进 $TMP/out 的输出里有几行带这段话
 reds_with_text() { printf '%s\n' "${REDS[@]}" | grep -cF -- "$1"; } # 红里有几条带这段话
@@ -74,8 +73,6 @@ check "根地址那一处发的是 web/，先落临时名、旧的最后删" \
 config "web gateway"
 check "web + gateway：一样只发根地址" "$(dests "$A")" "/ "
 config "gateway web"
-AUTO=1
-check "自动发布和人手动发一样：根地址照发" "$(dests "$A")" "/ "
 check "往香港发哪几样照实说（没有只核对的那一样）" "$(parts_said)" "gateway web"
 
 echo "== 香港上的静态文件归不归发布管：发 web、或老配置里还留着已删的键（要清老目录）"

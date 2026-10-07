@@ -945,112 +945,42 @@ check "这一版没有路由两层装载器：没跑它、没有红" "$(routing_
 check "这一版没有路由两层装载器：说了一声" "$(said '这一版没有路由两层装载器')" 1
 NODE=$(command -v node) || NODE=""
 
-echo "== 自动发布（--auto）：历史行带 auto；切之前看会话——在跑、读不到、认不出都不切，什么都没动（退出码 76）；--busy-ok 照切；另一个发布在跑是 75"
+echo "== 发布的历史行只记事件（不带 auto 之类的标记）；新版不过健康检查就退回；发布锁被占着就报红"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()
 MIG=()
 DB_MIG=0
 FLEET_HK_PARTS=""
 : >"$FAKE/order" # 迁移的桩（上一段换的）往这里记跑过哪一版
-# 会话列表（fleet-agent-scope list）的桩：照旁边 .mode 文件答，问一次记一行进 .calls
-SCOPE=$TMP/agent-scope
-cat >"$SCOPE" <<'EOF'
-#!/bin/bash
-echo "$*" >>"$0.calls"
-case $(cat "$0.mode") in
-idle) printf '7 inactive\n9 failed\n' ;;
-none) ;;
-busy) printf '7 inactive\n12 active\n13 activating\n' ;;
-garbled) echo 'Failed to connect to bus: No such file or directory' ;;
-*)
-  echo 'sudo: fleet-agent-scope: command not found' >&2
-  exit 1
-  ;;
-esac
-EOF
-chmod +x "$SCOPE"
-AGENT_SCOPE=$SCOPE
-scope() { # 会话列表这一轮怎么答；清掉问过几次的记录
-  printf '%s' "$1" >"$SCOPE.mode"
-  rm -f -- "$SCOPE.calls"
-}
-scope_calls() { if [[ -f "$SCOPE.calls" ]]; then grep -c . "$SCOPE.calls"; else echo 0; fi; }
 last_line() { tail -1 "$HISTORY" | cut -d' ' -f3-; } # 历史最后一行去掉时间、提交号：「事件 [标记…]」
 
-AUTO=1
-scope idle
 reset
 do_release "$A" >"$TMP/out"
-check "会话都停了：切到 A" "$(current_sha)" "$A"
-check "会话都停了：切之前问过一次会话列表" "$(scope_calls)" 1
-check "历史这一行带 auto（自动发布据此分得清哪次是人手动切的）" "$(last_line)" "release auto"
-scope none
+check "切到 A" "$(current_sha)" "$A"
+check "历史这一行只有事件，没有别的标记" "$(last_line)" "release"
 reset
 do_release "$B" >"$TMP/out"
-check "一个会话都没有：切到 B" "$(current_sha)" "$B"
-
-scope busy
-before=$(events)
-reset
-(do_release "$C") >"$TMP/out" 2>&1
-rc=$?
-check "会话在跑：退出码 76（没动，不是没成）" "$rc" 76
-check "会话在跑：不切，还在 B" "$(current_sha)" "$B"
-check "会话在跑：历史没变" "$(events)" "$before"
-check "会话在跑：说出是哪几个、这次没发" "$(said '这次没发：引擎有会话在跑（12 13），这次不切')" 1
-check "会话在跑：结论写明什么都没动" "$(said '什么都没动')" 1
-check "会话在跑：构建留着，下一轮直接用" "$([[ -f "$RELEASES/$C/.fleet-release" ]] && echo 在 || echo 没了)" 在
-check "会话在跑：迁移没跑" "$(grep -c 'migrate c' "$FAKE/order")" 0
-scope broken
-reset
-(do_release "$C") >"$TMP/out" 2>&1
-rc=$?
-check "会话列表读不到（fleet-agent-scope 没成）：按在跑算，退出码 76" "$rc" 76
-check "读不到：说没查成，不当成没有会话" "$(said '这次没发：会话在不在跑没查成')" 1
-check "读不到：它的原话进了日志" "$(said 'command not found')" 1
-check "读不到：还在 B" "$(current_sha)" "$B"
-scope garbled
-reset
-(do_release "$C") >"$TMP/out" 2>&1
-rc=$?
-check "会话列表认不出（退出码 0，却不是「编号 状态」）：按在跑算，退出码 76" "$rc" 76
-check "认不出：说认不出、带上那一行" "$(said '这次没发：会话列表认不出（有一行是「Failed to connect to bus')" 1
-check "认不出：还在 B、历史没变" "$(current_sha):$(events)" "$B:$before"
-
-BUSY_OK=1
-scope busy
+check "切到 B" "$(current_sha)" "$B"
 reset
 do_release "$C" >"$TMP/out"
-check "等空闲到了上限（--busy-ok）：会话在跑也切到 C" "$(current_sha)" "$C"
-check "--busy-ok：不去问会话列表" "$(scope_calls)" 0
-check "--busy-ok：说了照切、会话按编号续上" "$(said '等空闲到了上限，引擎有会话在跑也切')" 1
-BUSY_OK=0
+check "切到 C" "$(current_sha)" "$C"
 
-scope idle
 GATE[$D]=bad
 reset
 do_release "$D" >"$TMP/out"
-check "自动发布的新版不过健康检查：退回 C" "$(current_sha)" "$C"
-check "自动发布里的发布、不健康、自动退回都带 auto（不算人手动切的）" \
-  "$(tail -3 "$HISTORY" | cut -d' ' -f3- | tr '\n' '|')" "release auto|unhealthy auto|auto-rollback auto|"
+check "新版不过健康检查：退回 C" "$(current_sha)" "$C"
+check "发布、不健康、自动退回的历史行都不带标记" \
+  "$(tail -3 "$HISTORY" | cut -d' ' -f3- | tr '\n' '|')" "release|unhealthy|auto-rollback|"
 GATE[$D]=ok
 
-AUTO=0
-scope busy
 reset
 do_release "$E" >"$TMP/out"
-check "人手动发：不看会话（人自己定），照切到 E" "$(scope_calls):$(current_sha)" "0:$E"
-check "人手动发的：历史行不带 auto" "$(last_line)" release
+check "再发 E：切到 E" "$(current_sha)" "$E"
+check "历史行不带标记" "$(last_line)" release
 
 if command -v flock >/dev/null; then
   exec 8>>"$RELEASES/.lock"
   flock -n 8
-  AUTO=1
-  (take_lock) >"$TMP/out" 2>&1
-  rc=$?
-  check "另一个发布拿着锁：自动发布退出码 75（没动）" "$rc" 75
-  check "另一个发布拿着锁：结论写明这次没发" "$(said '这次没发：另一个发布正在跑')" 1
-  AUTO=0
   reset
   (
     take_lock >/dev/null
@@ -1105,7 +1035,6 @@ else
     if ((n > 0 && ${ENG_STUCK:-0} == 0)); then status_json $((n - 1)); fi
   }
   FLEET_SERVICES=fleet-engine
-  AUTO=0
   DRAIN_POLL=0
 
   status_json 2
@@ -1169,26 +1098,6 @@ else
   eval "$running_release_real"
   rm -f -- "$RELEASES/$E.cwd"
 
-  # 自动发布、会排空的引擎：不看会话列表（排空替它）；有会话在跑也发
-  AUTO=1
-  scope busy
-  status_json 1
-  rm -f -- "$ENG/request-seen"
-  : >"$ENG/calls"
-  reset
-  do_release "$A" >"$TMP/out"
-  check "自动发布、会排空的引擎：会话在跑也切到 A，不问会话列表" "$(current_sha):$(scope_calls)" "$A:0"
-  check "自动发布：说了不等空闲、排空" "$(said '引擎会排空')" 1
-  check "自动发布：排空请求写 auto" "$(grep -c '"by":"auto"' "$ENG/request-seen")" 1
-  # 不会排空的引擎、会话在跑：照旧 76，排空请求撤掉
-  rm -f -- "$ENG/drain.json"
-  reset
-  (do_release "$B") >"$TMP/out" 2>&1
-  rc=$?
-  check "自动发布、不会排空的引擎、会话在跑：照旧 76（什么都没动）" "$rc:$(current_sha)" "76:$A"
-  check "76 退出时排空请求撤了" "$([[ -e "$DRAIN_REQUEST" ]] && echo 还在 || echo 撤了)" 撤了
-  AUTO=0
-
   # --now：不给宽限
   NOW_MODE=1
   check "--now：宽限 0" "$(drain_grace)" 0
@@ -1218,7 +1127,6 @@ else
   unset -f systemctl sleep status_json
   FLEET_SERVICES=""
   ENGINE_STOPPED=0
-  scope idle
 fi
 
 echo "== 照期望写本机配置（#323）：切版本之前、只写期望变了的键，人手改的不改回，退回、自动退回照旧版写回去；写不成（期望认不出、线上文件认不出、一个键几行、新的 release.env 发布脚本认不出、写后读回不一致、档位认不出）就不切、一个字不写"
@@ -1234,7 +1142,6 @@ else
   GATE=()
   MIG=()
   DB_MIG=0
-  AUTO=0
   FLEET_HK_PARTS=""
   FLEET_SERVICES=""
   saved_release_env=$RELEASE_ENV
@@ -1406,16 +1313,24 @@ EOF
   FLEET_SERVICES=""
 fi
 
-echo "== 自动发布的参数：--auto 只跟一个主线上的提交，--busy-ok 只跟着 --auto，--now 不跟 --auto、--check；不对就用法错（64），什么都不做"
-AUTO=0
-BUSY_OK=0
-for args in "--auto" "$A --auto --unmerged" "$A --busy-ok" "--auto --busy-ok" "--check --auto" "--rollback --auto" \
-  "--rollback --busy-ok" "$A --auto --now" "--check --now"; do
+echo "== 参数：--auto、--busy-ok 已经删了（没有调用方），传了就用法错（64）、什么都不做；--now 不跟 --check；不对就用法错（64）"
+before=$(events)
+was_current=$(current_sha)
+was_drain=$([[ -e "$DRAIN_REQUEST" ]] && echo 有 || echo 没有)
+for args in "--auto" "$A --auto" "$A --auto --unmerged" "$A --busy-ok" "--busy-ok" "--auto --busy-ok" "$A --auto --busy-ok" \
+  "--check --auto" "--rollback --auto" "--rollback --busy-ok" "$A --auto --now" "--check --now"; do
   # shellcheck disable=SC2086 # 故意按空格拆成几个参数
-  (main $args) >/dev/null 2>&1
+  (main $args) >"$TMP/out" 2>&1
   rc=$?
   check "「${args//$A/<提交号>}」：退出 64" "$rc" 64
 done
+(main --auto) >"$TMP/out" 2>&1
+check "传 --auto：打出来的用法里没有 --auto、--busy-ok" "$(grep -c -e '--auto' -e '--busy-ok' "$TMP/out")" 0
+check "传 --auto：什么都没动（历史、在用的版本、排空请求都没变）" \
+  "$(events):$(current_sha):$([[ -e "$DRAIN_REQUEST" ]] && echo 有 || echo 没有)" "$before:$was_current:$was_drain"
+(main --help) >"$TMP/out" 2>&1
+rc=$?
+check "--help：退出 0、用法里没有 --auto、--busy-ok" "$rc:$(grep -c -e '--auto' -e '--busy-ok' "$TMP/out")" "0:0"
 
 echo "== --check 列出自动发布的读数：定时器没在跑、还没有读数、读数认不出，都照实记待处理（不当成没事）"
 if [[ -z "$NODE" ]]; then
