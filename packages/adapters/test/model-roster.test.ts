@@ -51,13 +51,13 @@ describe('命令行模型表', () => {
     if (!denied.ok) expect(denied.code).toBe('auth');
   });
 
-  it('claude 认 JSON 里的 id；不认 models 子命令是 bad_response，不是空的成功', () => {
+  it('cursor 认 JSON 里的 id；不认 models 子命令是 bad_response，不是空的成功', () => {
     const parsed = parseListedModels(
-      'claude',
+      'cursor',
       '{"data":[{"id":"claude-sonnet-5-5"},{"id":"claude-opus-5-5"}]}',
     );
     expect(parsed).toEqual({ ok: true, models: ['claude-sonnet-5-5', 'claude-opus-5-5'] });
-    const rejected = parseListedModels('claude', "error: unknown command 'models'\n");
+    const rejected = parseListedModels('cursor', "error: unknown command 'models'\n");
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) expect(rejected.code).toBe('bad_response');
   });
@@ -67,7 +67,7 @@ describe('四个渠道一起读', () => {
   it('一家崩了只记这一家，另外三家照常', async () => {
     const results = await readChannelModelRosters({
       channels,
-      commands: { cursor: ['cursor-bin'], grok: ['grok-bin'], claude: ['reclaude'] },
+      commands: { cursor: ['cursor-bin'], grok: ['grok-bin'] },
       connectMirasim: async () =>
         wireOf([
           { type: 'state', state: { agentsAvailable: ['codex'] } },
@@ -75,75 +75,84 @@ describe('四个渠道一起读', () => {
         ]),
       runCommand: scripted((argv) => {
         if (argv[0] === 'cursor-bin') throw new Error('cursor 崩了');
-        if (argv[0] === 'grok-bin') {
-          return runOf({ stdout: 'Available models:\n* grok-4.7\n', code: 0 });
-        }
-        return runOf({ stdout: 'claude-sonnet-5-5\n', code: 0 });
+        return runOf({ stdout: 'Available models:\n* grok-4.7\n', code: 0 });
       }),
     });
     const byId = new Map(results.map((r) => [r.channelId, r]));
     expect(byId.get('mirasim')).toEqual({ ok: true, channelId: 'mirasim', models: ['gpt-6.1-sol'] });
     expect(byId.get('xai')).toEqual({ ok: true, channelId: 'xai', models: ['grok-4.7'] });
-    expect(byId.get('claude-sub')).toEqual({
-      ok: true,
-      channelId: 'claude-sub',
-      models: ['claude-sonnet-5-5'],
-    });
+    // Claude 没有只读的列模型命令：明说读不成，不起命令、不给空名单
+    const claude = byId.get('claude-sub');
+    expect(claude?.ok).toBe(false);
+    if (claude && !claude.ok) expect(claude.error.code).toBe('config');
     const cursor = byId.get('cursor');
     expect(cursor?.ok).toBe(false);
     if (cursor && !cursor.ok) expect(cursor.error.code).toBe('crashed');
   });
 
-  it('密钥没放好是 no_credentials，命令不在是 config，挂住是 timeout，空输出不是成功', async () => {
+  it('密钥没放好是 no_credentials，命令不在是 config，空输出不是成功', async () => {
     const results = await readChannelModelRosters({
       channels: [
         { kind: 'cursor', channelId: 'cursor' },
         { kind: 'grok', channelId: 'xai' },
-        { kind: 'claude', channelId: 'claude-sub' },
       ],
-      commands: { cursor: ['cursor-bin'], grok: ['grok-bin'], claude: ['reclaude'] },
-      commandTimeoutMs: 30,
+      commands: { cursor: ['cursor-bin'], grok: ['grok-bin'] },
       runCommand: scripted((argv) => {
         if (argv[0] === 'cursor-bin') return runOf({ code: 78, stderr: 'Cursor 密钥没放好：文件是空的' });
-        if (argv[0] === 'grok-bin') return runOf({ code: 127, stderr: 'spawn grok ENOENT' });
-        return new Promise(() => {}) as Promise<CommandResult>;
+        return runOf({ code: 127, stderr: 'spawn grok ENOENT' });
       }),
     });
     const byId = new Map(results.map((r) => [r.channelId, r]));
-    expect(byId.get('cursor')?.ok).toBe(false);
-    if (byId.get('cursor') && !byId.get('cursor')?.ok) {
-      const cursor = byId.get('cursor');
-      if (cursor && !cursor.ok) expect(cursor.error.code).toBe('no_credentials');
-    }
+    const cursor = byId.get('cursor');
+    expect(cursor?.ok).toBe(false);
+    if (cursor && !cursor.ok) expect(cursor.error.code).toBe('no_credentials');
     const grok = byId.get('xai');
     expect(grok?.ok).toBe(false);
     if (grok && !grok.ok) expect(grok.error.code).toBe('config');
-    const claude = byId.get('claude-sub');
-    expect(claude?.ok).toBe(false);
-    if (claude && !claude.ok) expect(claude.error.code).toBe('timeout');
+    const [empty] = await readChannelModelRosters({
+      channels: [{ kind: 'grok', channelId: 'xai' }],
+      commands: { cursor: [], grok: ['grok-bin'] },
+      runCommand: scripted(() => runOf({ stdout: '', code: 0 })),
+    });
+    expect(empty?.ok).toBe(false);
+  });
+
+  it('命令挂住是 timeout', async () => {
+    const [slow] = await readChannelModelRosters({
+      channels: [{ kind: 'cursor', channelId: 'cursor' }],
+      commands: { cursor: ['cursor-bin'], grok: [] },
+      commandTimeoutMs: 30,
+      runCommand: scripted(() => new Promise(() => {}) as Promise<CommandResult>),
+    });
+    expect(slow?.ok).toBe(false);
+    if (slow && !slow.ok) expect(slow.error.code).toBe('timeout');
   });
 
   it('没给 Mirasim 桥接是 config，不拿空名单冒充', async () => {
     const [one] = await readChannelModelRosters({
       channels: [{ kind: 'mirasim', channelId: 'mirasim' }],
-      commands: { cursor: [], grok: [], claude: [] },
+      commands: { cursor: [], grok: [] },
       runCommand: scripted(() => runOf({})),
     });
     expect(one?.ok).toBe(false);
     if (one && !one.ok) expect(one.error.code).toBe('config');
   });
 
-  it('命令后面带着 models', async () => {
+  it('命令后面带着 models；Claude 不起任何命令（reclaude models 会起一个真会话）', async () => {
     const seen: string[][] = [];
-    await readChannelModelRosters({
-      channels: [{ kind: 'claude', channelId: 'claude-sub' }],
-      commands: { cursor: [], grok: [], claude: ['/bin/reclaude'] },
+    const results = await readChannelModelRosters({
+      channels: [
+        { kind: 'claude', channelId: 'claude-sub' },
+        { kind: 'cursor', channelId: 'cursor' },
+      ],
+      commands: { cursor: ['/bin/cursor-agent'], grok: [] },
       runCommand: scripted((argv) => {
         seen.push(argv);
-        return runOf({ stdout: 'claude-haiku-4-5\n' });
+        return runOf({ stdout: 'composer-2.5\n' });
       }),
     });
-    expect(seen).toEqual([['/bin/reclaude', 'models']]);
+    expect(seen).toEqual([['/bin/cursor-agent', 'models']]);
+    expect(results[0]?.ok).toBe(false);
   });
 });
 

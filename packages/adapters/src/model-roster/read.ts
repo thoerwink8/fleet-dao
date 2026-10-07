@@ -17,12 +17,11 @@ export interface ModelRosterRequest {
   commands: {
     cursor: readonly string[];
     grok: readonly string[];
-    claude: readonly string[];
   };
   runCommand: RunCommand;
   /** 传给命令的环境。会话用户那条 runCommand 会忽略它，用会话用户自己的环境。 */
   env?: Record<string, string | undefined>;
-  /** Claude 要空的真目录。起不来时三个命令行渠道都记 config，Mirasim 不受影响。 */
+  /** 命令行渠道要空的真目录。起不来时 cursor、grok 都记 config，Mirasim、Claude 不受影响。 */
   workDir?: () => Promise<string>;
   /** 不给就不直连本机 Mirasim（测试不许连真服务）。 */
   connectMirasim?: () => Promise<MirasimWire>;
@@ -85,7 +84,7 @@ async function dispatch(
     case 'grok':
       return readGrokModelRoster(channel.channelId, req, cwd, cwdError, env);
     case 'claude':
-      return readClaudeModelRoster(channel.channelId, req, cwd, cwdError, env);
+      return readClaudeModelRoster(channel.channelId);
     default:
       return rosterFailed(channel.channelId, 'config', `不认识的渠道种类：${channel.kind}`);
   }
@@ -130,22 +129,23 @@ export function readGrokModelRoster(
 }
 
 /**
- * Claude：官方命令行没有公开的 models 子命令，模型 id 跟目录里的上游串也不是同一套。
- * 仍跑同一条 reclaude 前缀加 models，认不出就 bad_response，不用 API 的 /v1/models 冒充对得上。
+ * Claude：官方命令行（reclaude 包的就是它）没有列模型的子命令。`reclaude models` 会把 models 当成提示词，
+ * 起一个真会话、可能扣额度，所以不跑它。读不成就明说读不成，不拿空名单、也不拿 API 的 /v1/models 冒充对得上。
+ * 以后有了只读的列模型来源再接这里。
  */
-export function readClaudeModelRoster(
-  channelId: string,
-  req: ModelRosterRequest,
-  cwd: string,
-  cwdError: string | undefined,
-  env: Record<string, string>,
-): Promise<ChannelModelReadResult> {
-  return readCli(channelId, 'claude', req.commands.claude, req, cwd, cwdError, env);
+export function readClaudeModelRoster(channelId: string): Promise<ChannelModelReadResult> {
+  return Promise.resolve(
+    rosterFailed(
+      channelId,
+      'config',
+      'Claude 命令行没有列模型的只读命令（reclaude models 会被当成提示词起一个会话），这个渠道的模型表读不了',
+    ),
+  );
 }
 
 async function readCli(
   channelId: string,
-  kind: 'cursor' | 'grok' | 'claude',
+  kind: 'cursor' | 'grok',
   argv: readonly string[],
   req: ModelRosterRequest,
   cwd: string,

@@ -92,10 +92,7 @@ export interface CommandStatus {
 /**
  * 退出码和报错先归类。返回 'parse' 才去认名单：非零、起不来、被杀掉都不拿输出里偶然出现的词当模型。
  */
-export function classifyModelCommand(
-  kind: 'cursor' | 'grok' | 'claude',
-  run: CommandStatus,
-): RosterFailure | 'parse' {
+export function classifyModelCommand(kind: 'cursor' | 'grok', run: CommandStatus): RosterFailure | 'parse' {
   if (run.spawnError) {
     const code = /ENOENT|not found|EACCES/i.test(run.spawnError) ? 'config' : 'unreachable';
     return { ok: false, code, message: `起不来：${redact(run.spawnError)}` };
@@ -129,7 +126,7 @@ export function classifyModelCommand(
 }
 
 /** 退出码 0 之后认名单。空的、声明没有模型的，都是 bad_response。 */
-export function parseListedModels(kind: 'cursor' | 'grok' | 'claude', stdout: string): RosterParse {
+export function parseListedModels(kind: 'cursor' | 'grok', stdout: string): RosterParse {
   const text = stripAnsi(stdout).replace(/\r\n/g, '\n');
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, code: 'bad_response', message: EMPTY_ROSTER };

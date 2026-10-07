@@ -145,7 +145,7 @@ describe('额度任务里的渠道模型名册', () => {
     const wired = quotaReadJob({
       db: {} as never,
       modelRoster: {
-        commands: { cursor: ['cursor'], grok: ['grok'], claude: ['reclaude'] },
+        commands: { cursor: ['cursor'], grok: ['grok'] },
         runCommand: async () => ({ code: 0, stdout: '', stderr: '', killed: false }),
       },
     })();

@@ -675,7 +675,6 @@ export function realPortsFromEnv(
               commands: {
                 cursor: cursorCommand(sessionUser),
                 grok: grokCommand(sessionUser),
-                claude: claudeCommand(sessionUser),
               },
               runCommand: quotaUser.runCommand,
               ...(quotaUser.workDir ? { workDir: quotaUser.workDir } : {}),

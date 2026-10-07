@@ -55,7 +55,6 @@ export interface QuotaReadWiring {
     commands: {
       cursor: readonly string[];
       grok: readonly string[];
-      claude: readonly string[];
     };
     runCommand: RunCommand;
     env?: Record<string, string | undefined>;
