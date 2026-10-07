@@ -1161,7 +1161,12 @@ describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeou
         await statusUntil(a, paused, 'A 停进已暂停');
         const b = await start(q, input({ issueNumber: 13 }));
         // 不用 result()：等结果时测试服务端会跳时间，没有定时器的 A 会被跳到工作流超时
-        await statusUntil(b, (x) => x.phase === 'done', 'B 走完');
+        // 等库里写进 done，不等 status.phase：finish() 先把 phase 置 done，之后才关单、收树、写库（#1242 偶发红就是断言抢在写库前）
+        await waitUntil(
+          () => world.states.filter((x) => x.issueNumber === 13).at(-1)?.state === 'done',
+          'B 走完（库里写进 done）',
+        );
+        expect((await statusOf(b)).phase).toBe('done');
         // B 走完时 A 还停着
         expect((await statusOf(a)).phase).toBe('paused');
         expect(world.states.filter((x) => x.issueNumber === 13).at(-1)).toMatchObject({ state: 'done' });
