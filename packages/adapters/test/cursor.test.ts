@@ -66,6 +66,7 @@ describe('cursor 参数', () => {
     expect(() =>
       buildCursorArgs({ ...base, model: 'auto', session: { mode: 'resume', id: 'x; rm -rf /' } }),
     ).toThrow('UUID');
+    expect(() => buildCursorArgs({ ...base, model: 'auto', workspace: '' })).toThrow('没给工作树');
   });
 });
 

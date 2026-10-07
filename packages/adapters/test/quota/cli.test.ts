@@ -264,4 +264,19 @@ describe('命令行入口', () => {
     expect((await run([], { FLEET_QUOTA_CONFIG: join(dir, 'missing.json') })).code).toBe(2);
     expect((await run(['--config', configPath, '--pool', 'ghost'])).code).toBe(2);
   });
+
+  it('不认识的参数、选项缺值：退出码 2，stderr 写明原因', async () => {
+    const r = await run(['--nope']);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('不认识的参数 --nope');
+
+    const m = await run(['--pool']);
+    expect(m.code).toBe(2);
+    expect(m.err).toContain('--pool 后面要跟一个值');
+
+    // 下一个参数以 -- 开头，也算没给值，不能当成池名吞掉。
+    const n = await run(['--pool', '--json']);
+    expect(n.code).toBe(2);
+    expect(n.err).toContain('--pool 后面要跟一个值');
+  });
 });
