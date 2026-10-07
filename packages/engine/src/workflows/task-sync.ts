@@ -17,8 +17,12 @@ import { Abandoned } from './task-support.ts';
 export const SYNC_UNREAD = '动手前并最新主线没查成';
 
 /** 并出冲突时进返工意见的那一句（并上最新主线的冲突，文件名逐个列）。 */
-export function conflictFeedback(files: readonly string[]): string {
-  return `和最新主线有冲突，要解决：${files.join('、') || '（没读到冲突文件名）'}`;
+export function conflictFeedback(files: readonly string[], mainlineStale?: string): string {
+  const line = `和最新主线有冲突，要解决：${files.join('、') || '（没读到冲突文件名）'}`;
+  // 最新主线没能取进会话的树（#1249）：明说树里的主线是旧的，会话先自己取到新主线再 git merge，不能当成已经是最新
+  return mainlineStale === undefined
+    ? line
+    : `${line}。注意：树里的主线是旧的（最新主线没能取进来：${mainlineStale}），先自己取到最新主线再 git merge`;
 }
 
 /** 回 'skipped'＝没到并的时候（还没推过）；'merged' / 'current' / 'conflict' / 'unread' 是并的结果，测试看。 */
@@ -42,7 +46,7 @@ export async function syncMainlineBeforeImplement(rt: TaskRuntime): Promise<Sync
       worktreePath: wt.path,
     });
     if (sync.state === 'conflict') {
-      const line = conflictFeedback(sync.conflictFiles);
+      const line = conflictFeedback(sync.conflictFiles, sync.mainlineStale);
       if (!rt.feedback.includes(line)) rt.feedback = [...rt.feedback, line];
       rt.status.lastProblem = '和主线有冲突';
       return 'conflict';

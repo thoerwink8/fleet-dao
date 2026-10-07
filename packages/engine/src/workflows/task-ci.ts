@@ -5,6 +5,7 @@
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import type { CiStep } from './task-support.ts';
+import { conflictFeedback } from './task-sync.ts';
 
 /** 等 CI。红了、有冲突：记下返工意见，回动手。读不到、头被改写：停下等人，继续后再等。 */
 export async function waitForCi(rt: TaskRuntime): Promise<CiStep> {
@@ -57,7 +58,7 @@ export async function waitForCi(rt: TaskRuntime): Promise<CiStep> {
         );
         rt.head = sync.head;
         if (sync.state === 'clean') continue;
-        rt.feedback = [`和最新主线有冲突，要解决：${sync.conflictFiles.join('、')}`];
+        rt.feedback = [conflictFeedback(sync.conflictFiles, sync.mainlineStale)];
         rt.status.lastProblem = '和主线有冲突';
         return { kind: 'rework' };
       }
