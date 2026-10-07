@@ -2,11 +2,8 @@
 // 每条命令只写库，不发信号：引擎的任务工作流不听 fleet 命令的叫醒（它只听继续、放弃、路由叫醒），以前这里发的
 // agentEvent / requireApproval 发给一个不存在的工作流、没人收（#901）。
 
-import { ASK_HOLD_NAMES, type AskHold, type AskScope, checkAsk } from '@fleet-dao/core';
 import {
   AgentRoutes,
-  AskRequest,
-  AskResponse,
   BlockedRequest,
   DoneRequest,
   HistoryRequest,
@@ -19,11 +16,10 @@ import {
 import { checkDone } from '@fleet-dao/store';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import type { z } from 'zod';
 import { verifyAgentToken } from './agent-token.ts';
 import type { Deps } from './deps.ts';
 import { ApiError, readJson, reply } from './http.ts';
-import type { AgentSession, AskRecord } from './ports.ts';
+import type { AgentSession } from './ports.ts';
 
 export type AgentEnv = { Variables: { agent: AgentSession } };
 
@@ -102,23 +98,6 @@ const TOKEN_PROBLEMS = {
   ttl_too_long: '令牌有效期超过上限，不认',
 } as const;
 
-/**
- * fleet ask 当场回什么：创始人回过这一句（同一个会话问过一模一样的）就回他的回答；不然按提问的范围——
- * 这张单范围内的按推荐先做，超出范围的另开单，碰人闸的先按推荐做、合并前等批。
- * 同一句在这之前按老问法问过（库里那一条没有范围）：照这次带的范围回。
- */
-function askReply(ask: AskRecord, scope: AskScope, recommended: string): z.input<typeof AskResponse> {
-  if (ask.answer !== undefined) return { askId: ask.id, status: 'answered', answer: ask.answer };
-  switch (ask.scope ?? scope) {
-    case 'outside':
-      return { askId: ask.id, status: 'outside' };
-    case 'hold':
-      return { askId: ask.id, status: 'held', answer: ask.recommended ?? recommended };
-    case 'task':
-      return { askId: ask.id, status: 'assumed', answer: ask.recommended ?? recommended };
-  }
-}
-
 export function agentAuth(deps: Deps): MiddlewareHandler<AgentEnv> {
   return async (c, next) => {
     const header = c.req.header('authorization');
@@ -156,19 +135,6 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
   const app = new Hono<AgentEnv>();
   app.use('*', agentAuth(deps));
   const ok = { ok: true } as const;
-
-  /**
-   * 碰了人闸的提问（scope = hold）：以前是给工作流发 requireApproval 信号，合并前等创始人批。引擎的任务工作流没有这个接收处
-   * （人闸只有它自己按改到的路径判的那一种：改标准的路径），所以现在没法按提问加人闸——明说没加上（409），
-   * 不回「已按推荐先做、合并前等批」装作拦住了。问题本身已经记在库里，驾驶舱看得到（#901）。
-   */
-  function holdMerge(hold: AskHold): never {
-    throw new ApiError(
-      409,
-      'hold_not_supported',
-      `问题已经记下，但人闸（${ASK_HOLD_NAMES[hold]}）没加上：现在的任务工作流不支持按提问追加人闸，合并前没有东西会拦`,
-    );
-  }
 
   app.get(AgentRoutes.task.path, async (c) => {
     const session = c.get('agent');
@@ -208,28 +174,6 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
     const { text } = await readJson(c, SayRequest);
     await store.appendProgress(session.runId, 'say', { text });
     return c.json(ok);
-  });
-
-  // 问他不挡路（#259）：不合格的（没带选项、没带推荐）当场退回让会话补齐；合格的记下、当场回，不等回答。
-  app.post(AgentRoutes.ask.path, async (c) => {
-    const session = c.get('agent');
-    const body = await readJson(c, AskRequest);
-    const checked = checkAsk(body);
-    if (!checked.ok) throw new ApiError(400, 'ask_incomplete', checked.why);
-    const q = checked.ask;
-    const { ask } = await store.openAsk({
-      runId: session.runId,
-      taskId: session.taskId,
-      question: q.question,
-      options: q.options,
-      scope: q.scope,
-      recommended: q.recommended,
-      ...(q.hold ? { hold: q.hold } : {}),
-    });
-    // 追问和它的 ask 进度在 openAsk 里同一事务写进去了。碰了人闸的：每次问（含重试、同一句再问）都明说没加上。
-    const hold = ask.hold ?? q.hold;
-    if (hold) holdMerge(hold);
-    return reply(c, AskResponse, askReply(ask, q.scope, q.recommended));
   });
 
   app.post(AgentRoutes.history.path, async (c) => {

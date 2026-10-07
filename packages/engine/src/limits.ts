@@ -26,14 +26,6 @@ export interface Limits {
   routeSwaps: number;
   /** 兜底梯：换模型次数。 */
   modelSwaps: number;
-  /** 分诊追问创始人的次数上限，到了按写明的假设继续。 */
-  maxQuestions: number;
-  /**
-   * 会话 fleet blocked --needs human|info 说要人才能往下做：退回让它带选项和推荐用 fleet ask 重问（#259：问他不挡路），
-   * 一个阶段最多退回几次；到数了还这样，按会话自己写的推荐或假设接着做，不再停下等人，一个字都拿不出才走失败梯子
-   * （换路由、换模型）。access、other 不退回，照旧等人。
-   */
-  reaskRounds: number;
   /** 方案不合格时重写方案的次数。 */
   planRetries: number;
   /** 没空位、没额度时隔多久再选一次路由。 */
@@ -131,8 +123,6 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   retryAttempts: 2,
   routeSwaps: 2,
   modelSwaps: 1,
-  maxQuestions: 2,
-  reaskRounds: 2,
   planRetries: 1,
   routePollSeconds: 30,
   sessionMinutes: 90,

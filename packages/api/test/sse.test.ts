@@ -10,7 +10,6 @@ import {
   openEvents as open,
   readUntil,
   viaGateway,
-  write,
 } from './harness.ts';
 
 describe('实时推送（SSE）', () => {
@@ -84,24 +83,6 @@ describe('实时推送（SSE）', () => {
     for (const id of ['1', '2', '3']) hub.publish({ type: 'change', table: 'tasks', id });
     expect(small.since(start)).toBeNull();
     expect(small.since(small.latestId())).toEqual([]);
-  });
-
-  it('写库引起的变化推给打开的页面（例：关闭旧追问，asks 表会发通知）', async () => {
-    const h = harness();
-    const session = await h.login();
-    const askId = 'a1000000-0000-4000-8000-000000000001';
-    h.store.data.asks.push({
-      id: askId,
-      taskId: IDS.task12,
-      question: '几位？',
-      options: [],
-      askedAt: h.clock.now.toISOString(),
-    });
-    const { reader } = await open(h, session.cookie);
-    const buf = await readUntil(reader, 'event: ready');
-    await h.cockpit.request(`/api/asks/${askId}/close`, write('POST', session));
-    await readUntil(reader, `{"table":"asks","id":"${askId}"}`, buf);
-    await reader.cancel();
   });
 
   it('没登录不给连；飞书网关的通行证也不给连（网关只能调约定里那几条，推送走长轮询待推送）', async () => {

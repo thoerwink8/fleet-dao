@@ -1,5 +1,5 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
-// 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
+// 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
 import {
   type Ban,
@@ -14,7 +14,6 @@ import {
   type ScheduleOutcome,
   type SegmentRun,
   type SessionRun,
-  type StageKind,
   type Subtask,
   type Task,
   taskWorkflowId,
@@ -26,13 +25,7 @@ import {
   judgeExistingCommand,
   tookOverResult,
 } from './command-logic.ts';
-import {
-  askConstraintViolation,
-  isAskOpen,
-  isNotificationOpen,
-  isSettingConflict,
-  nextSettingVersion,
-} from './console-logic.ts';
+import { isNotificationOpen, isSettingConflict, nextSettingVersion } from './console-logic.ts';
 import { clearedFailures, isLockedAt, nextFailureState, passwordNeedsUsername } from './credentials-logic.ts';
 import {
   assertOutcomeHasReason,
@@ -55,7 +48,6 @@ import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import { planSteps } from './plan-logic.ts';
 import type {
   AgentSession,
-  AskRecord,
   AuditRecord,
   CommandClaim,
   GitHubDelivery,
@@ -156,7 +148,6 @@ export interface MemoryData {
   segmentRuns: SegmentRun[];
   /** 会话进度：fleet plan 的步骤清单、测试结果都在这里（最近一条 plan 就是现行清单，kind=test 就是测试记录）。 */
   progress: ProgressRecord[];
-  asks: AskRecord[];
   /** 需求和子任务的状态变化（库里由触发器写）；建库时没给的，按建单时刻补一条初始状态。 */
   stateChanges: StateChangeRecord[];
   channels: Channel[];
@@ -192,7 +183,6 @@ export function emptyData(): MemoryData {
     runs: [],
     segmentRuns: [],
     progress: [],
-    asks: [],
     stateChanges: [],
     channels: [],
     channelStates: [],
@@ -494,19 +484,6 @@ export function createMemoryStore(
       const text = (say?.payload as { text?: unknown } | undefined)?.text;
       return say && typeof text === 'string' ? { text, at: say.at } : null;
     },
-    async listAsks(taskId) {
-      return data.asks
-        .filter((a) => a.taskId === taskId)
-        .sort((a, b) => a.askedAt.localeCompare(b.askedAt) || compareIds(a.id, b.id));
-    },
-    async getAsk(id) {
-      return data.asks.find((a) => a.id === id) ?? null;
-    },
-    async listPendingAsks() {
-      return data.asks
-        .filter((a) => a.answer === undefined)
-        .sort((a, b) => a.askedAt.localeCompare(b.askedAt) || compareIds(a.id, b.id));
-    },
     async listPullRequests(input = {}) {
       const limit = input.limit ?? 50;
       const rows = data.pullRequests.filter((p) => input.state === undefined || p.state === input.state);
@@ -520,18 +497,6 @@ export function createMemoryStore(
         return kb.localeCompare(ka);
       };
       return [...rows].sort((a, b) => byKeyDesc(a, b) || b.number - a.number).slice(0, limit);
-    },
-    async answerAsk({ askId, answer, by }, entry) {
-      const ask = data.asks.find((a) => a.id === askId);
-      if (!ask) return 'not_found';
-      if (!isAskOpen(ask)) return 'already_answered';
-      checkAudit(entry);
-      ask.answer = answer;
-      ask.answeredBy = by.id;
-      ask.answeredAt = now().toISOString();
-      audit(entry);
-      changed('asks', askId);
-      return 'ok';
     },
 
     // —— 调度台 ——
@@ -696,28 +661,6 @@ export function createMemoryStore(
     },
     async appendProgress(runId, kind, payload) {
       progress(runId, kind, payload);
-    },
-    async openAsk({ runId, taskId, question, options: choices, scope, recommended, hold }) {
-      // 和库里的约束一样、也和库一样先查约束再去重：推荐的一定在选项里，人闸只跟着 hold 走（不拿空的冒充推荐）
-      const violation = askConstraintViolation({ options: choices, recommended, scope, hold });
-      if (violation !== undefined) throw new Error(violation);
-      const existing = data.asks.find((a) => a.runId === runId && a.question === question);
-      if (existing) return { ask: existing, created: false };
-      const ask: AskRecord = {
-        id: crypto.randomUUID(),
-        taskId,
-        runId,
-        question,
-        options: choices,
-        askedAt: now().toISOString(),
-        scope,
-        recommended,
-        ...(hold ? { hold } : {}),
-      };
-      data.asks.push(ask);
-      changed('asks', ask.id);
-      progress(runId, 'ask', { askId: ask.id, question });
-      return { ask, created: true };
     },
     async searchHistory({ repoId, query, limit }) {
       const terms = query

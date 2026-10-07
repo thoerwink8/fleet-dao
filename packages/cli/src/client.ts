@@ -44,7 +44,7 @@ export interface BackendCall {
   path: string;
   body?: unknown;
   timeoutMs?: number;
-  /** 超时后要不要重试。等回答的 ask 本来就要等很久，超时就是没等到，不重试。 */
+  /** 超时后要不要重试。 */
   retryOnTimeout?: boolean;
 }
 

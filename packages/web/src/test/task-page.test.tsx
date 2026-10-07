@@ -117,7 +117,6 @@ function detailWith(facts: SegmentRunFacts[], state: TaskDetail['task']['state']
     subtasks: [],
     runs: [],
     segmentRuns,
-    asks: [],
     usage: summarizeUsage([], segmentRuns),
   });
 }

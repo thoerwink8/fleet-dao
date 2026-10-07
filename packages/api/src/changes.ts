@@ -1,5 +1,5 @@
 // 数据变化的来源：Postgres 的 LISTEN fleet_changes（频道名、会发通知的表、载荷形状都在 @fleet-dao/shared 的 realtime.ts），
-// 在进程里分发给所有订阅者（SSE、等回答的 fleet ask）。整个进程只占一条 LISTEN 连接，不是每个浏览器一条。
+// 在进程里分发给所有订阅者（SSE）。整个进程只占一条 LISTEN 连接，不是每个浏览器一条。
 
 import type { PgListen } from '@fleet-dao/db';
 import { ChangeEventSchema, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';

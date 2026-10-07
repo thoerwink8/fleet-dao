@@ -11,7 +11,7 @@ import type {
   TaskState,
 } from '@fleet-dao/shared';
 import type { AuditEntry, Notification, Setting } from '../types';
-import type { MAsk, MJob, MLog, MockState, MSubtask, MTask, PlanTemplate } from './model';
+import type { MJob, MLog, MockState, MSubtask, MTask, PlanTemplate } from './model';
 
 const MIN = 60_000;
 
@@ -113,7 +113,6 @@ export function createSeed(now: number): MockState {
     spec?: string;
     runs?: SessionRun[];
     subtasks?: MSubtask[];
-    asks?: MAsk[];
   }
   function task(s: TaskSpec): MTask {
     const t: MTask['task'] = {
@@ -128,7 +127,7 @@ export function createSeed(now: number): MockState {
       createdAt: at(s.created),
     };
     if (s.spec) t.specDir = s.spec;
-    return { task: t, runs: s.runs ?? [], subtasks: s.subtasks ?? [], paused: false, asks: s.asks ?? [] };
+    return { task: t, runs: s.runs ?? [], subtasks: s.subtasks ?? [], paused: false };
   }
   /** 分诊、需求文档、方案三段需求级会话。 */
   function frontRuns(taskId: string, start: number, planDone = true): SessionRun[] {
@@ -219,28 +218,6 @@ export function createSeed(now: number): MockState {
           work: 6.1,
           tokens: [44_300, 5200],
         }),
-      ],
-      asks: [
-        {
-          id: 'ask-12-1',
-          taskId: 't-12',
-          question: '验证码几分钟过期？',
-          options: ['5 分钟', '10 分钟'],
-          askedAt: at(-186),
-          answer: '5 分钟',
-          answeredBy: 'u-lan',
-          answeredAt: at(-184),
-        },
-        {
-          // 问他不挡路（#259）：这张单范围内的岔路，AI 按推荐先做了，他回不回都不挡
-          id: 'ask-12-2',
-          taskId: 't-12',
-          question: '验证码短信的模板用通用模板还是单独报备一个？单独报备要等一两天审核。',
-          options: ['先用通用模板', '单独报备'],
-          askedAt: at(-120),
-          scope: 'task',
-          recommended: '先用通用模板',
-        },
       ],
       subtasks: [
         sub({
@@ -415,15 +392,6 @@ export function createSeed(now: number): MockState {
       created: -95,
       spec: 'specs/15-通知再提醒',
       runs: frontRuns('t-15', -93, false),
-      asks: [
-        {
-          id: 'ask-15-1',
-          taskId: 't-15',
-          question: '再提醒时，要发一条新消息，还是把旧消息顶上来？顶上来的话列表顺序会变。',
-          options: ['发一条新消息', '把旧消息顶上来'],
-          askedAt: at(-26),
-        },
-      ],
     }),
     task({
       id: 't-16',
@@ -1916,17 +1884,6 @@ function seedLogs(state: MockState, now: number): MLog[] {
           source: 'session',
           kind: 'done',
           text: `交活：${stageSay(r.stage)}完成`,
-        });
-    }
-    for (const a of t.asks) {
-      push({ taskId: t.task.id, at: a.askedAt, source: 'session', kind: 'ask', text: `问：${a.question}` });
-      if (a.answer && a.answeredAt)
-        push({
-          taskId: t.task.id,
-          at: a.answeredAt,
-          source: 'person',
-          kind: 'answer',
-          text: `回答追问：${a.answer}`,
         });
     }
     for (const s of t.subtasks) {

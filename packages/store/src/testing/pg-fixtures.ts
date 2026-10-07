@@ -2,7 +2,6 @@
 // 按外键先后写；库自己记的东西（状态变化、自增编号）由库生成，不从这里写。
 
 import {
-  asks,
   auditLog,
   bans,
   channelStates,
@@ -221,26 +220,6 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         at: date(p.at),
         kind: p.kind,
         payload: p.payload ?? null,
-      })),
-    );
-  }
-  if (data.asks?.length) {
-    await db.insert(asks).values(
-      data.asks.map((a) => ({
-        id: a.id,
-        taskId: a.taskId,
-        runId: a.runId ?? null,
-        question: a.question,
-        options: a.options,
-        askedAt: date(a.askedAt),
-        answer: a.answer ?? null,
-        answeredBy: a.answeredBy ?? null,
-        answeredAt: dateOpt(a.answeredAt),
-        scope: a.scope ?? null,
-        recommended: a.recommended ?? null,
-        hold: a.hold ?? null,
-        followUpIssue: a.followUpIssue ?? null,
-        appliedAt: dateOpt(a.appliedAt),
       })),
     );
   }

@@ -2,8 +2,6 @@ import {
   AuditResponse,
   BoardResponse,
   JobsResponse,
-  LEGACY_ASK_CLOSED_ANSWER,
-  LegacyAsksResponse,
   NotificationsResponse,
   PoolHoldsResponse,
   PoolsResponse,
@@ -24,7 +22,6 @@ const PARAMS: Record<string, string> = {
   repoId: IDS.repo,
   taskId: IDS.task12,
   runId: DEV_RUN_ID,
-  askId: 'ask-none',
   stage: 'execute',
   channelId: 'ch-cursor',
   notificationId: IDS.notification1,
@@ -101,7 +98,7 @@ describe('看板与任务', () => {
     expect((await h.cockpit.request('/api/repos/nope/board', { headers: { cookie } })).status).toBe(404);
   });
 
-  it('任务详情带全部会话（含已结束的）与追问', async () => {
+  it('任务详情带全部会话（含已结束的）', async () => {
     const h = harness();
     const { cookie } = await h.login();
     const detail = TaskDetailResponse.parse(
@@ -114,59 +111,6 @@ describe('看板与任务', () => {
       cacheWriteTokens: 64_000,
       billing: 'subscription',
     });
-  });
-
-  it('任务详情的追问（#259）：带范围、推荐、人闸、后续单；回了的按推荐先做的带「回答之后会怎样」，老式的不带', async () => {
-    const h = harness();
-    const { cookie } = await h.login();
-    const base = { taskId: IDS.task12, runId: DEV_RUN_ID, askedAt: h.clock.now.toISOString() };
-    const answered = { answeredBy: DEV_USER_ID, answeredAt: h.clock.now.toISOString() };
-    h.store.data.asks.push(
-      { ...base, id: 'ask-a', question: '甲', options: ['4 位', '6 位'], scope: 'task', recommended: '4 位' },
-      {
-        ...base,
-        ...answered,
-        id: 'ask-b',
-        question: '乙',
-        options: ['4 位', '6 位'],
-        scope: 'task',
-        recommended: '4 位',
-        answer: '6 位',
-      },
-      {
-        ...base,
-        ...answered,
-        id: 'ask-c',
-        question: '丙',
-        options: ['留着', '删'],
-        scope: 'hold',
-        hold: 'delete',
-        recommended: '留着',
-        answer: '留着',
-      },
-      {
-        ...base,
-        id: 'ask-d',
-        question: '丁',
-        options: ['要', '不要'],
-        scope: 'outside',
-        recommended: '不要',
-        followUpIssue: 40,
-      },
-      { ...base, ...answered, id: 'ask-e', question: '戊', options: [], answer: '随便' },
-    );
-    const { asks } = TaskDetailResponse.parse(
-      await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
-    );
-    const byId = Object.fromEntries(asks.map((a) => [a.id, a]));
-    expect(byId['ask-a']).toMatchObject({ status: 'pending', scope: 'task', recommended: '4 位' });
-    expect(byId['ask-a']?.effect).toBeUndefined();
-    expect(byId['ask-b']).toMatchObject({ status: 'answered', effect: 'change' });
-    expect(byId['ask-c']).toMatchObject({ scope: 'hold', hold: 'delete', effect: 'confirmed' });
-    expect(byId['ask-d']).toMatchObject({ scope: 'outside', followUpIssue: 40 });
-    expect(byId['ask-d']?.effect).toBeUndefined();
-    expect(byId['ask-e']?.scope).toBeUndefined();
-    expect(byId['ask-e']?.effect).toBeUndefined();
   });
 
   it('任务详情带用量汇总：按模型、按阶段、整张合计；没读到的花费记次数，不当成 0；还在跑的只记在跑', async () => {
@@ -434,116 +378,6 @@ describe('发给工作流的信号', () => {
       expect(res.status, action).toBe(500);
     }
     expect(h.signals).toHaveLength(0);
-  });
-});
-
-describe('旧会话留下的追问（#928：v3 没有 AI 追问这一环，答了没人收）', () => {
-  const pushAsk = (h: ReturnType<typeof harness>, id: string, taskId: string, question = '几位？') =>
-    h.store.data.asks.push({
-      id,
-      taskId,
-      runId: DEV_RUN_ID,
-      question,
-      options: ['4', '6'],
-      askedAt: h.clock.now.toISOString(),
-    });
-
-  it('回答追问：一律 409 asks_not_received，不落库、不进操作记录、不发信号；调用方不会以为答了有用', async () => {
-    const h = harness();
-    const s = await h.login();
-    pushAsk(h, 'ask-1', IDS.task12);
-    const audits = h.store.data.audit.length;
-    const res = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '6' }));
-    expect(res.status).toBe(409);
-    const err = ((await res.json()) as { error: { code: string; message: string } }).error;
-    expect(err.code).toBe('asks_not_received');
-    expect(err.message).toContain('不再收追问回答');
-    expect(h.store.data.asks.find((a) => a.id === 'ask-1')?.answer).toBeUndefined();
-    expect(h.store.data.audit.length).toBe(audits);
-    expect(h.signals).toHaveLength(0);
-  });
-
-  it('回答追问：没有这条追问仍是 404，回答是空的仍是 400（先于 409 判，不拿 409 盖住别的错）', async () => {
-    const h = harness();
-    const s = await h.login();
-    pushAsk(h, 'ask-1', IDS.task12);
-    expect((await h.cockpit.request('/api/asks/nope/answer', write('POST', s, { answer: '6' }))).status).toBe(
-      404,
-    );
-    expect((await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '' }))).status).toBe(
-      400,
-    );
-  });
-
-  it('列出旧追问：只列没处理的，带「#12 标题」；任务已经不在库里的也列（要能被关掉），只是没有背景', async () => {
-    const h = harness();
-    const { cookie } = await h.login();
-    pushAsk(h, 'ask-1', IDS.task12, '几位？');
-    pushAsk(h, 'ask-orphan', 'task-does-not-exist', '这条指的任务不在库里了');
-    h.store.data.asks.push({
-      id: 'ask-done',
-      taskId: IDS.task12,
-      runId: DEV_RUN_ID,
-      question: '早就答过的',
-      options: [],
-      askedAt: h.clock.now.toISOString(),
-      answer: '随便',
-    });
-    const body = LegacyAsksResponse.parse(
-      await (await h.cockpit.request('/api/asks/legacy', { headers: { cookie } })).json(),
-    );
-    expect(body.items.map((i) => i.id).sort()).toEqual(['ask-1', 'ask-orphan']);
-    expect(body.items.find((i) => i.id === 'ask-1')?.context).toMatch(/^#12 /);
-    expect(body.items.find((i) => i.id === 'ask-1')?.link).toBe(`/tasks/${IDS.task12}`);
-    expect(body.items.find((i) => i.id === 'ask-orphan')?.context).toBeUndefined();
-  });
-
-  it('关闭：标成已处理（answer 写关闭那句标记）、进操作记录 ask.close、不发信号；列表里没了；再关 409；不存在 404', async () => {
-    const h = harness();
-    const s = await h.login();
-    pushAsk(h, 'ask-1', IDS.task12);
-    const res = await h.cockpit.request('/api/asks/ask-1/close', write('POST', s));
-    expect(res.status).toBe(200);
-    expect(h.store.data.asks.find((a) => a.id === 'ask-1')).toMatchObject({
-      answer: LEGACY_ASK_CLOSED_ANSWER,
-      answeredBy: DEV_USER_ID,
-    });
-    expect(h.store.data.audit.at(-1)).toMatchObject({
-      action: 'ask.close',
-      target: `task:${IDS.task12}`,
-      ok: true,
-    });
-    expect(h.signals).toHaveLength(0);
-    const list = LegacyAsksResponse.parse(
-      await (await h.cockpit.request('/api/asks/legacy', { headers: { cookie: s.cookie } })).json(),
-    );
-    expect(list.items).toEqual([]);
-    const again = await h.cockpit.request('/api/asks/ask-1/close', write('POST', s));
-    expect(again.status).toBe(409);
-    expect(await errorCode(again)).toBe('already_answered');
-    expect((await h.cockpit.request('/api/asks/nope/close', write('POST', s))).status).toBe(404);
-  });
-
-  it('关闭的追问在任务详情里不冒充「回答」：不算「按推荐先做」的后果', async () => {
-    const h = harness();
-    const s = await h.login();
-    h.store.data.asks.push({
-      id: 'ask-scoped',
-      taskId: IDS.task12,
-      runId: DEV_RUN_ID,
-      question: '先做哪个？',
-      options: ['甲', '乙'],
-      askedAt: h.clock.now.toISOString(),
-      scope: 'task',
-      recommended: '甲',
-    });
-    await h.cockpit.request('/api/asks/ask-scoped/close', write('POST', s));
-    const detail = TaskDetailResponse.parse(
-      await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie: s.cookie } })).json(),
-    );
-    const ask = detail.asks.find((a) => a.id === 'ask-scoped');
-    expect(ask).toMatchObject({ status: 'answered', answer: LEGACY_ASK_CLOSED_ANSWER });
-    expect(ask?.effect).toBeUndefined();
   });
 });
 

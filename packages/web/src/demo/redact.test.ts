@@ -46,16 +46,12 @@ describe('只看状态和耗时（status）', () => {
     expect(board.tasks.some((t) => !t.title.startsWith('需求 #'))).toBe(true);
   });
 
-  test('任务详情：原话、为什么派给它、追问的内容都收起', () => {
+  test('任务详情：原话、为什么派给它都收起', () => {
     const r = redactTaskDetail(detail, 'status');
     expect(r.task.title).toBe(`需求 #${detail.task.issueNumber}`);
     expect(r.task.rawRequest).toBe(HIDDEN_TEXT);
     expect(r.task.specDir).toBeUndefined();
     expect(r.runs.every((x) => x.whyRoute === HIDDEN_TEXT)).toBe(true);
-    for (const a of r.asks) {
-      expect(a.options).toEqual([]);
-      expect(a.answer).toBeUndefined();
-    }
   });
 
   test('提醒：标题按种类说、正文收起；操作记录：理由收起', () => {

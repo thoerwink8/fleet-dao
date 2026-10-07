@@ -367,10 +367,6 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         deliveries: [{ channel: 'feishu', messageId: 'om_dev_2', attempts: 1, lastAttemptAt: ago(6) }],
       },
     ],
-    // 追问样例不进共享 fixture：agent / 契约 / 飞书 outbox 多处按「手上的 this.store.data.asks 全表」算条数，
-    // task12 被默认是「干净」的。主页「要你拍的」的未答追问样例由 home.test 自己往 store.data 里 push（web 端 dev:mock 的那份在
-    // packages/web/src/api/mock/seed.ts 的 ask-12-2，5173 三块照常可见）。
-    asks: [],
     pullRequests: [
       {
         // 主页「做完的」：最近合进主线的 PR，正文挂了 #13（issueRefs）。

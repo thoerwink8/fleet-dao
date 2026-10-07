@@ -7,7 +7,6 @@
 //   和游标的精度一致，翻页不漏同一毫秒里的几条。
 
 import {
-  asks,
   auditLog,
   bans,
   channels,
@@ -51,8 +50,7 @@ import {
   users,
 } from '@fleet-dao/db';
 import { type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
-import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
   commandKey,
@@ -74,7 +72,6 @@ import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
 import { nextCursorOf } from './paging.ts';
 import { planSteps } from './plan-logic.ts';
 import type {
-  AskRecord,
   AuditRecord,
   AutoDispatchChange,
   CommandClaim,
@@ -111,7 +108,6 @@ const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d ? d.toISOString() : undefined);
 
 type UserRow = typeof users.$inferSelect;
-type AskRow = typeof asks.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 type NodeReportRow = typeof nodeReports.$inferSelect;
 
@@ -149,25 +145,6 @@ function toCredentials(r: UserRow): PasswordCredentials {
     passwordChangedAt: isoOpt(r.passwordChangedAt),
     failedLogins: r.failedLogins,
     lockedUntil: isoOpt(r.lockedUntil),
-  };
-}
-
-function toAsk(r: AskRow): AskRecord {
-  return {
-    id: r.id,
-    taskId: r.taskId,
-    runId: opt(r.runId),
-    question: r.question,
-    options: r.options,
-    askedAt: iso(r.askedAt),
-    answer: opt(r.answer),
-    answeredBy: opt(r.answeredBy),
-    answeredAt: isoOpt(r.answeredAt),
-    scope: opt(r.scope),
-    recommended: opt(r.recommended),
-    hold: opt(r.hold),
-    followUpIssue: opt(r.followUpIssue),
-    appliedAt: isoOpt(r.appliedAt),
   };
 }
 
@@ -481,36 +458,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const text = (row?.payload as { text?: unknown } | null | undefined)?.text;
       return row && typeof text === 'string' ? { text, at: iso(row.at) } : null;
     },
-    async listAsks(taskId) {
-      if (!isUuid(taskId)) return [];
-      const rows = await db
-        .select()
-        .from(asks)
-        .where(eq(asks.taskId, taskId))
-        .orderBy(asc(asks.askedAt), asc(asks.id));
-      return rows.map(toAsk);
-    },
-    async getAsk(id) {
-      if (!isUuid(id)) return null;
-      const [row] = await db.select().from(asks).where(eq(asks.id, id));
-      return row ? toAsk(row) : null;
-    },
-    async answerAsk({ askId, answer, by }, entry) {
-      if (!isUuid(askId)) return 'not_found';
-      return db.transaction(async (tx) => {
-        const updated = await tx
-          .update(asks)
-          .set({ answer, answeredBy: by.id, answeredAt: now() })
-          .where(and(eq(asks.id, askId), isNull(asks.answer)))
-          .returning({ id: asks.id });
-        if (updated.length === 0) {
-          const [exists] = await tx.select({ id: asks.id }).from(asks).where(eq(asks.id, askId));
-          return exists ? 'already_answered' : 'not_found';
-        }
-        await insertAudit(tx, entry);
-        return 'ok';
-      });
-    },
 
     // —— 调度台 ——
     async listChannels() {
@@ -789,38 +736,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async appendProgress(runId, kind, payload) {
       await insertProgress(runId, kind, payload);
     },
-    async openAsk({ runId, taskId, question, options: choices, scope, recommended, hold }) {
-      return db.transaction(async (tx) => {
-        // 表上唯一的冲突来源是 (run_id, md5(question)) 这条唯一索引（主键是随机 uuid），所以不写冲突目标。
-        const [inserted] = await tx
-          .insert(asks)
-          .values({
-            taskId,
-            runId,
-            question,
-            options: choices,
-            askedAt: now(),
-            scope,
-            recommended,
-            ...(hold ? { hold } : {}),
-          })
-          .onConflictDoNothing()
-          .returning();
-        if (inserted) {
-          // 和追问同一事务：不会有「追问开了、进度没记」的半截（重试走去重，补不回来）。
-          await tx
-            .insert(progressEvents)
-            .values({ runId, at: now(), kind: 'ask', payload: { askId: inserted.id, question } });
-          return { ask: toAsk(inserted), created: true };
-        }
-        const [existing] = await tx
-          .select()
-          .from(asks)
-          .where(and(eq(asks.runId, runId), sql`md5(${asks.question}) = md5(${question})`));
-        if (!existing) throw new Error(`追问写不进也读不到（会话 ${runId}）`);
-        return { ask: toAsk(existing), created: false };
-      });
-    },
     async searchHistory({ repoId, query, limit }) {
       if (!isUuid(repoId)) return [];
       return searchSpecs(db, { repoId, query, limit });
@@ -832,14 +747,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(pullRequests)
         .where(and(eq(pullRequests.repoId, repoId), eq(pullRequests.number, number)));
       return row ? toPullRequest(row) : null;
-    },
-    async listPendingAsks() {
-      const rows = await db
-        .select()
-        .from(asks)
-        .where(isNull(asks.answer))
-        .orderBy(asc(asks.askedAt), asc(asks.id));
-      return rows.map(toAsk);
     },
     async listPullRequests(input = {}) {
       const limit = input.limit ?? 50;

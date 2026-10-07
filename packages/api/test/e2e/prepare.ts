@@ -9,7 +9,7 @@
 // - 目录（族、渠道、账号池、模型、路由）、路由两层骨架、额度留量线都走发布时同一条装载链（目录配置样例
 //   deploy/examples/catalog.example.json → routing.default.json → quota-reserve.default.json），页面上看到的池和路由
 //   就是线上那一套名字；任务、会话、提醒这些「业务数据」用 store 的 devFixtures 打底，编号对到目录里的真名字上，再补 e2e 要看的几样：
-//   各池的额度读数、切号账本（要有几次接口读数，额度页才算得出「约 N 分钟后用满」）、待回答的追问、几张不同状态的单、几条不同级别的提醒。
+//   各池的额度读数、切号账本（要有几次接口读数，额度页才算得出「约 N 分钟后用满」）、几张不同状态的单、几条不同级别的提醒。
 // - 数据全部假的（名字、编号、额度都不对应真实账号）。
 // - 连不上、库名不合规、迁移或灌数据失败，一律让进程带非零退出码退出，不静默退回别的库。
 import { readFileSync } from 'node:fs';
@@ -47,18 +47,11 @@ export interface E2eFacts {
   password: string;
   tasks: { running: string; done: string; stalled: string; queued: string; failed: string; asking: string };
   issues: { running: number; done: number; stalled: number; queued: number; failed: number; asking: number };
-  /** 挂在在跑的单（#12）上的追问：不挡路，单子状态还是 running。 */
-  askId: string;
-  /** 挂在「等回答」的单（#17）上的追问：通知中心的「回答」按钮认它。 */
-  askingAskId: string;
   approvalNotificationId: string;
   alertNotificationId: string;
   pools: { carpool: string; solo: string };
 }
 
-const askId = 'a5000000-0000-4000-8000-000000000001';
-/** 第二条追问挂在一张「等回答」状态（asking）的单上：通知中心的「回答」按钮只认这种单。 */
-const askingAskId = 'a5000000-0000-4000-8000-000000000002';
 const taskIds = {
   asking: 'b0000000-0000-4000-8000-000000000017',
   stalled: 'b0000000-0000-4000-8000-000000000014',
@@ -372,25 +365,6 @@ export async function prepare(env: Record<string, string | undefined> = process.
           issueRefs: [16],
         },
       ],
-      asks: [
-        {
-          id: askId,
-          taskId: IDS.task12,
-          runId: IDS.run1,
-          question: '验证码短信走哪家通道？',
-          options: ['沿用现有的短信通道', '换一家便宜的'],
-          askedAt: ago(7),
-          scope: 'task' as const,
-          recommended: '沿用现有的短信通道',
-        },
-        {
-          id: askingAskId,
-          taskId: taskIds.asking,
-          question: '新模板的落款用谁的名字？',
-          options: ['团队名', '创始人署名'],
-          askedAt: ago(15),
-        },
-      ],
       notifications: [
         ...(base.notifications ?? []),
         {
@@ -411,7 +385,7 @@ export async function prepare(env: Record<string, string | undefined> = process.
           link: `/tasks/${taskIds.asking}`,
           taskId: taskIds.asking,
           createdAt: ago(15),
-          dedupeKey: `ask:${askingAskId}`,
+          dedupeKey: `asking:${taskIds.asking}`,
           deliveries: [],
         },
         {
@@ -518,8 +492,6 @@ export async function prepare(env: Record<string, string | undefined> = process.
         asking: taskIds.asking,
       },
       issues: { running: 12, done: 13, stalled: 14, queued: 15, failed: 16, asking: 17 },
-      askId,
-      askingAskId,
       approvalNotificationId: IDS.notification2,
       alertNotificationId: IDS.notification1,
       pools: { carpool, solo },

@@ -1,5 +1,5 @@
 // fleet --help 的全部文字。读者是 AI 会话，也是人：一眼看懂每条命令什么时候用、怎么写。
-export const MAIN_HELP = `fleet —— 在 fleet 派的会话里，向驾驶舱汇报进度、提问、交活。
+export const MAIN_HELP = `fleet —— 在 fleet 派的会话里，向驾驶舱汇报进度、交活。
 
 用法：fleet <子命令> [参数] [选项]
 
@@ -7,7 +7,6 @@ export const MAIN_HELP = `fleet —— 在 fleet 派的会话里，向驾驶舱�
   task                          看自己的任务：需求、做完标准、要改哪里、当前步骤
   plan [步骤…]                  列出或更新步骤清单（整张替换）；不带参数就只看
   say <一句话>                  报一句白话进度，例如「正在写验证码过期的测试」
-  ask <问题> -o 选项… -r 推荐   问创始人：一定带选项和推荐，按推荐先做、不停下等回答
   history <关键词> [-n 条数]    翻做过的需求和结果，开新活之前先查
   done <总结> --tests passed|failed
                                 交活：改动先在本地提交；推分支、开 PR 由引擎做。后端会核实
@@ -61,27 +60,6 @@ export const COMMAND_HELP: Record<string, string> = {
 例子：
   fleet say "原方案要改数据库表，换成只改接口层，影响面小"
 `,
-  ask: `fleet ask —— 问创始人
-
-用法：fleet ask <问题> -o <选项> -o <选项>… -r <推荐的那个> [--outside | --hold <人闸>]
-
-  创始人多半不在场，问他不许卡住活：命令当场返回，不等回答。
-  这张单范围内的岔路（默认）：按推荐先做，接着干；他之后改了，下一个存档点会告诉你。交活总结里写上这个假设。
-  -o, --option <选项>     备选答案，至少 2 个、最多 4 个
-  -r, --recommend <选项>  推荐哪个，照抄其中一个选项（必填）
-  --outside               超出这张单的范围：另开一张单等他拍，这张单绕开它接着做
-  --hold <人闸>           碰了人闸：release 对外发布、spend 花钱、delete 删数据、standard 改标准。
-                          也先按推荐做，合并前等他批
-  没带选项、没带推荐的会被后端退回（退出码 4），照提示补齐再问。
-  只有他本人才有的东西（账号、权限、登录）不是提问：用 fleet blocked "<缺什么>" --needs access，这一块等他。
-
-  问之前把问题写完整：起因、推荐哪个、为什么。
-
-例子：
-  fleet ask "验证码有效期 5 分钟还是 10 分钟？推荐 5 分钟，和短信平台默认一致" -o "5 分钟" -o "10 分钟" -r "5 分钟"
-  fleet ask "注册页也要验证码吗？这张单只管登录" -o "要" -o "不要" -r "不要" --outside
-  fleet ask "短信平台用哪家？要开按量付费" -o "阿里云" -o "腾讯云" -r "阿里云" --hold spend
-`,
   history: `fleet history —— 翻做过的需求
 
 用法：fleet history <关键词> [-n <条数>]
@@ -116,11 +94,10 @@ export const COMMAND_HELP: Record<string, string> = {
 
   --needs 需要什么才能继续：
     access   缺只有创始人本人才有的东西（权限、账号、登录）：这一块等他
-    info     缺信息（找不到资料）；要他在几个做法里挑一个的，别用这个，用 fleet ask 带选项和推荐
-    human    要人动手的事；要他拍板的用 fleet ask，按推荐先做、不停下
+    info     缺信息（找不到资料）
+    human    要人动手的事，或要他拍板的岔路：任务停下，等他在驾驶舱点「继续」或「放弃」
     other    其他
   原因写清卡在哪、试过什么（4000 字以内）。
-  报 human、info 的，引擎先退回让你带推荐用 fleet ask 问、按推荐接着干（同一步最多退回 2 次），还说要人才停下等。
 
 例子：
   fleet blocked "测试要连短信网关，沙箱里没有测试账号" --needs access
