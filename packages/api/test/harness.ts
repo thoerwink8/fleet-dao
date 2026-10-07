@@ -148,8 +148,6 @@ export interface HarnessOptions {
   orgSwitch?: Deps['orgSwitch'];
   /** 拼车额度对账（#194 方案 4.7）；不给就是没接上。 */
   carpoolReconcile?: Deps['carpoolReconcile'];
-  /** /changelog 发布版本号读里程碑和 CHANGELOG.md 的替身；不给就是没接上（内存版、开发环境一样）。 */
-  release?: Deps['release'];
   /** /france 页发版一键（#618）读状态文件、起子进程跑预检的替身；不给就是没接上（内存版、开发环境一样）。 */
   franceRelease?: Deps['franceRelease'];
   /** /france 页「发版」卡（#1231）读 GitHub 和发布目录的替身；不给就是没接上（内存版、开发环境一样）。 */
@@ -200,7 +198,6 @@ function wire<S extends Store>(
     ...(options.taskRoutePins ? { taskRoutePins: options.taskRoutePins } : {}),
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
     ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
-    ...(options.release ? { release: options.release } : {}),
     ...(options.franceRelease ? { franceRelease: options.franceRelease } : {}),
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),

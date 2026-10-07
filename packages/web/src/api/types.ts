@@ -57,7 +57,6 @@ import type {
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
-  ReleaseVersionResponse,
   RepoDispatchResponse,
   RepoSchema,
   RouteEffortSchema,
@@ -215,9 +214,6 @@ export type AuditEntry = z.infer<typeof AuditEntrySchema>;
 export type Settings = z.infer<typeof SettingsResponse>;
 export type Setting = z.infer<typeof SettingSchema>;
 export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
-
-/** 版本号接口（#725）的返回：页面已不读（#1255），片 3 随后端接口一起删。 */
-export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;

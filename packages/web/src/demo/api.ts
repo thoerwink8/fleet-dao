@@ -95,8 +95,6 @@ export function createDemoApi(inner: MockApi): FleetApi {
       need('settings', '设置');
       return inner.updateSetting(key, body);
     },
-    // /changelog 页不进演示版（路由表不放）：发布的版本号也不给。
-    releaseVersion: () => Promise.reject(hidden('发布')),
     // /france 页同样不进演示版：发版一键的两条也不给。
     franceReleaseState: () => Promise.reject(hidden('发版一键')),
     franceReleaseCard: () => Promise.reject(hidden('发版卡')),

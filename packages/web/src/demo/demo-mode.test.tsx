@@ -138,8 +138,6 @@ describe('演示版：数据层', () => {
       () => api.demoLinks(),
       // 路由两层（#574）：演示版没有这个模块，开了什么都不给
       () => api.routingLayers(),
-      // 发布的版本号（#725）：/changelog 页不进演示版
-      () => api.releaseVersion(),
     ]) {
       const err = await call().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ApiError);

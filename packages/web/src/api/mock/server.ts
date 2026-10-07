@@ -44,7 +44,6 @@ import {
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
-  ReleaseVersionResponse,
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
@@ -91,17 +90,10 @@ import {
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import { sha256Hex } from '../../demo/scope';
-import { separateReleasedFromCurrent } from '../../lib/changelog-version';
 import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, DemoLink, LiveEvent } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
-
-/**
- * 假数据里有发布标记的版本号，和仓根 CHANGELOG.md 的 ## [vN] 对齐（页面上的已发布列表读的是那份文件，测试核对两边一致）。
- * 不把 CHANGELOG.md 本身引进来：这份假数据进演示版的包，那份文件里有仓名。
- */
-export const MOCK_RELEASED_VERSIONS: readonly { version: string }[] = [{ version: 'v3' }];
 
 export interface MockOptions {
   /** 是否开模拟器；测试里关掉，手动调 tick()。 */
@@ -1969,23 +1961,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       });
       emit('settings', key);
       return UpdateSettingResponse.parse({ setting: next }).setting;
-    },
-    async releaseVersion() {
-      await wait();
-      // 开着 v3、v4。v3 已有发布标记就不能再当这一版：判成已发布，这一版取下一个号（现在是 v4）。
-      // 真后端读 GitHub，见 packages/api/src/release-version.ts。标题别带演示版禁词（build/scan.ts）。
-      const open = [
-        { version: 'v3', milestone: { number: 3, title: 'v3 三段一条龙' } },
-        { version: 'v4', milestone: { number: 4, title: 'v4 看得更清楚' } },
-      ];
-      const decided = separateReleasedFromCurrent(open, MOCK_RELEASED_VERSIONS);
-      return ReleaseVersionResponse.parse({
-        state: 'ok',
-        version: decided.version,
-        milestone: decided.milestone,
-        others: decided.others,
-        asOf: iso(),
-      });
     },
     async franceReleaseState() {
       await wait();

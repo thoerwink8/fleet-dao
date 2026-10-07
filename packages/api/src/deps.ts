@@ -18,7 +18,6 @@ import type {
 } from './ports.ts';
 import type { ReleaseCardPort } from './release-card.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
-import type { ReleaseSource } from './release-version.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 import type { RoutingOrderPort } from './routing-order.ts';
@@ -82,11 +81,6 @@ export interface Deps {
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。
    */
   deployLag?: (() => DeployLagInput) | undefined;
-  /**
-   * /changelog 页「发布 v<N>」定版本号要的两样（release-version.ts）：仓里开着的里程碑（GitHub 现读）、仓根 CHANGELOG.md。
-   * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。
-   */
-  release?: ReleaseSource | undefined;
   /**
    * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件 + 起 pnpm release:onekey preflight。
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。

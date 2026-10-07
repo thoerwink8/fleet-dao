@@ -102,7 +102,7 @@
 
 **第二块：主线同树复用（一个 PR，方案和判法见下面「D 的细节」第 6 点）**：主线这次提交的树和某次成功的 PR 检查测的是同一棵、基准也是上次真绿的头 → test、web、deploy 不重测。命中率实测（最近 49 个主线合并）：树口径 43 个（88%），严格口径 37 个（76%）。改后的实测数字（命中的主线轮次 job 数 / 机器分钟 / 墙钟）合并后用 `pnpm ci:stats --workflow ci.yml --event push --since <合并时间>` 量，写在这里。
 
-**第三块：release 工作流对普通 PR 不起机器 + lint 并行三样各记秒数（#885）**：`release.yml` 每个 PR 合并都触发，普通 PR 要起一台机器、检出、装 Node 才走到 classify 判 noop；近 30 次中位 12 秒、合计 4 机器分钟。job 级 `if` 只挡 classify 本来就判 noop 的两种（没合并、head 不带 `release/`），带 `release/` 的照起（版本号贴错、base 不对仍在 classify 报红）、手动补跑照起；`test/publish.test.ts` 把这句 if 和 `classifyPullRequestClosed` 逐个对。lint 里并行的三样现在各自把秒数写进日志分组标题。
+**第三块：release 工作流对普通 PR 不起机器 + lint 并行三样各记秒数（#885）**：`release.yml` 每个 PR 合并都触发，普通 PR 要起一台机器、检出、装 Node 才走到 classify 判 noop；近 30 次中位 12 秒、合计 4 机器分钟。job 级 `if` 只挡 classify 本来就判 noop 的两种（没合并、head 不带 `release/`），带 `release/` 的照起（版本号贴错、base 不对仍在 classify 报红）、手动补跑照起；`test/publish.test.ts` 把这句 if 和 `classifyPullRequestClosed` 逐个对。lint 里并行的三样现在各自把秒数写进日志分组标题。（`release.yml` 和 `test/publish.test.ts` 已随决定 0032 片 3 删除，这一块的第一半不再适用。）
 
 ## 第三轮结果（2026-10-04 夜，#876、#881、#885；数字都是 `pnpm ci:stats`、`gh api` 现拉的，量法见上）
 
