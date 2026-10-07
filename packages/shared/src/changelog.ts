@@ -2,7 +2,7 @@
 // 仓里现在有三头用：
 //   - packages/conventions/src/release-notes.ts、publish-actions.ts：发布那条线（发起 PR、tag、release、milestone、飞书、状态机），在这一份上再叠。
 //   - packages/web/src/lib/changelog.ts：驾驶舱 /changelog 页拿它把仓根的 CHANGELOG.md 摆出来。
-//   - packages/api/src/release-version.ts：驾驶舱后端拿已发的版本，照 publish:pr 同一份判法核这一版的版本号。
+//   - packages/api/src/release-version.ts：驾驶舱后端拿已发的版本核「这一版」；已经有发布标记的号不当这一版。
 // 改这里之前必须知道：
 // - CHANGELOG.md 的格式钉死了（Unreleased 标题、版本标题的样子见本文件里的常量）：识别不到模样就报错，不宽容。
 // - 同一个提交幂等：tag 名、release 名、milestone 名、飞书头之一是重复的话就当「做过了」，不暗示第二次。

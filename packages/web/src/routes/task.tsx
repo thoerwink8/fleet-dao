@@ -4,7 +4,6 @@
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
 import { ArrowLeft, ListChecks, SearchX } from 'lucide-react';
-import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useRouting, useTaskDetail } from '../api/client';
@@ -22,6 +21,7 @@ import { canSee, isDemo } from '../demo/access';
 import { NotOpen } from '../demo/views';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { useShownError } from '../lib/shown-error';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -194,27 +194,10 @@ function Missing({ taskId }: { taskId: string | undefined }) {
   );
 }
 
-/**
- * 页面上该显示的失败：这一次的，或者这张单上一次的。没读到过数据的查询一被重读（实时推送、点重试），React Query 会把
- * error 清空、退回 pending——不记住上一次的，页面就在「没有这张单」和加载骨架之间来回跳，推送勤就一直在转。读成了才清掉。
- */
-function useShownError(
-  taskId: string | undefined,
-  detail: { error: unknown; data: TaskDetail | undefined },
-): unknown {
-  const [held, setHeld] = useState<{ taskId: string | undefined; error: unknown } | null>(null);
-  useEffect(() => {
-    if (detail.error) setHeld({ taskId, error: detail.error });
-    else if (detail.data) setHeld(null);
-  }, [taskId, detail.error, detail.data]);
-  if (detail.error) return detail.error;
-  if (detail.data || held?.taskId !== taskId) return undefined;
-  return held?.error;
-}
-
 export default function TaskPage() {
   const { taskId } = useParams();
   const detail = useTaskDetail(taskId);
+  // 推送重读会把从没读成过的查询退回骨架：显示记住的那次失败（lib/shown-error.ts）
   const error = useShownError(taskId, detail);
   const now = useNow();
   if (!canSee('task')) return <NotOpen />;

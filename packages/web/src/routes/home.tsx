@@ -5,10 +5,10 @@
 // 版面：xl（1280）起左列要你拍的 + 做完的、右边看板（xl 左列占三分之一，2xl 起左列固定 26rem），1366×768 一进来就看得到看板
 // （指挥官 2026-10-07 定）；更窄时三块从上往下：要你拍的、看板、做完的。要你拍的永远在看板前面。
 
-import { CheckCheck, CirclePlay, Hand } from 'lucide-react';
+import { CheckCheck, CirclePlay, Hand, SearchX } from 'lucide-react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
-import { useHome, useNodeHome } from '../api/client';
+import { isNotFound, useHome, useNodeHome } from '../api/client';
 import { DecisionCard } from '../components/home/decision-card';
 import { DoneCard } from '../components/home/done-card';
 import { HealthStrip } from '../components/home/health-strip';
@@ -19,6 +19,7 @@ import { NotBuilt } from '../components/not-built';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { Button } from '../components/ui/button';
 import { useSelectedNodeId } from '../lib/node';
+import { useShownError } from '../lib/shown-error';
 
 export function meta() {
   return [{ title: brand.title('主页') }];
@@ -113,13 +114,46 @@ function HomeBody({ data, remote }: { data: HomeData; remote: boolean }) {
   );
 }
 
+/** 没有这个环境（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。 */
+function MissingEnv({ nodeId }: { nodeId: string }) {
+  return (
+    <Panel>
+      <div role="alert">
+        <Empty
+          icon={SearchX}
+          title="没有这个环境"
+          hint={
+            <>
+              <span className="block">
+                库里没有编号为「<span className="num">{nodeId}</span>
+                」的环境：可能链接里的编号写错了，或这个环境已经不在了。
+              </span>
+              <Button asChild size="sm" variant="outline" className="mt-3">
+                <Link to="/">回主页</Link>
+              </Button>
+            </>
+          }
+        />
+      </div>
+    </Panel>
+  );
+}
+
 export default function Home() {
-  // 选了远程环境（?node=）就渲染它最近一次推来的快照：同一套组件，只读、链接指向 GitHub、写按钮置灰
+  // 选了远程环境（?node=）就渲染它最近一次推来的快照：同一套组件，只读、链接指向 GitHub、写按钮置灰。
+  // 这是环境详情（接口 GET /api/nodes/:nodeId，没有单独的 /nodes/:id 路由）。
   const nodeId = useSelectedNodeId();
   const nodeName = useSelectedNodeName();
   const local = useHome({ enabled: nodeId === null });
   const remote = useNodeHome(nodeId);
-  const state = nodeId === null ? local.data : remote.data;
+  // 推送重读会把从没读成过的快照退回骨架：显示记住的那次失败
+  const remoteError = useShownError(nodeId ?? undefined, { error: remote.error, data: remote.node });
+  const state =
+    nodeId !== null && remoteError
+      ? { status: 'error' as const, error: remoteError, retry: () => void remote.refetch() }
+      : nodeId === null
+        ? local.data
+        : remote.data;
 
   return (
     <Page
@@ -135,13 +169,15 @@ export default function Home() {
           reportedAt={remote.node.reportedAt}
         />
       ) : null}
-      {state.status === 'loading' ? (
+      {nodeId !== null && state.status === 'error' && isNotFound(state.error) ? (
+        <MissingEnv nodeId={nodeId} />
+      ) : state.status === 'loading' ? (
         <div className="mt-4">
           <LoadingRows rows={6} />
         </div>
       ) : state.status === 'error' ? (
         <div className="mt-4">
-          <LoadError what="主页" error={state.error} onRetry={state.retry} />
+          <LoadError what={nodeId === null ? '主页' : '这个环境'} error={state.error} onRetry={state.retry} />
         </div>
       ) : state.status === 'notWired' ? (
         <div className="mt-4">

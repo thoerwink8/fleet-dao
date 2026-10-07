@@ -1,4 +1,4 @@
-// 刷新耗时表（test-timings.json，test-split.ts 装箱用）：从主线一轮 ci.yml 的日志（`gh run view <id> --log`）里认出每个测试文件的耗时。
+// 刷新耗时表（test-timings.json，test-split.ts 装箱用）：从 PR 触发的 ci.yml 日志（`gh run view <id> --log`）里认出每个测试文件的耗时。
 // 入口 bin/ci-timings.ts（`pnpm ci:timings`）。只在本机跑、结果进仓；CI 里不读 GitHub（#299：CI 的判定只看检出来的文件）。
 // 改这里之前必须知道：
 // - vitest 默认报告器每个文件一行 `✓ <文件> (N tests) 1234ms`（有跳过的写成 `(N tests | 1 skipped)`，慢的可能写成 `1.2s`），
@@ -52,13 +52,24 @@ export const TIMINGS_NOTE =
   'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
 
 /**
- * 不指定运行时怎么挑：最近的绿的 ci.yml 里，最多往回翻这么多次，取头几轮真跑了测试的。
+ * 不指定运行时怎么挑：最近的、PR 触发的、绿的 ci.yml 里，最多往回翻这么多次，取头几轮真跑了测试的。
  * 一轮至少这么多台成功的 `test (` 才算（按改动跑的小 PR 只有一两台，量到的文件太少）。
- * `pnpm ci:timings` 和引擎每周刷新用同一组数字，别各写各的。
+ * `pnpm ci:timings` 和引擎每周刷新用同一组数字、同一个事件，别各写各的。
  */
 export const TIMINGS_AUTO_RUNS = 5;
 export const TIMINGS_AUTO_SCAN = 40;
 export const TIMINGS_AUTO_MIN_BOXES = 4;
+/** 耗时表只认这个事件触发的运行。主线（push）多半复用同树的 PR 检查、根本不跑测试。 */
+export const TIMINGS_RUN_EVENT = 'pull_request';
+
+/**
+ * 这一轮是不是 PR 触发的。是就回 null；不是（含 event 缺了、认不出）回一句为什么。
+ * 调用方记没查成并停下，不用这批运行刷表。命令行和引擎共用这一份。
+ */
+export function notPullRequestRun(id: string, event: unknown): string | null {
+  if (event === TIMINGS_RUN_EVENT) return null;
+  return `ci.yml 运行 ${id} 不是 PR 触发的（event=${String(event)}）`;
+}
 
 /** 写进耗时表 source 的那一句。名字是「ci.yml run <编号>」或「日志文件 <文件名>」。 */
 export function timingsSource(names: readonly string[], at: Date): string {

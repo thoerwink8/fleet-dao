@@ -104,6 +104,19 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-paused': handle };
     },
   },
+  // 第一轮 CI 红了、回去动手第 2 轮、再推上去合上（#1246）：这份历史录在「第 2 轮动手前并最新主线」加进来之前的代码上，
+  // 重放它证明新加的并主线步骤被 patched('sync-mainline-before-implement') 守住了（第 2 轮动手前老历史里没有 syncMainline）。
+  'task-reworked': {
+    script: {
+      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['unit'] } : undefined),
+    },
+    tasks: scripted().tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-reworked': handle };
+    },
+  },
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
   'task-merging': {
     tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,

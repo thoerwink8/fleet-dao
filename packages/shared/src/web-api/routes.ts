@@ -177,7 +177,7 @@ export const WebRoutes = {
     request: UpdateSettingRequest,
     response: UpdateSettingResponse,
   },
-  /** /changelog 页「发布 v<N>」的版本号（#725）：现读 GitHub 里程碑，和 pnpm publish:pr 同一份判法。 */
+  /** /changelog 页「发布 v<N>」的版本号（#725）：现读 GitHub 里程碑；已有发布标记的号不当这一版。 */
   releaseVersion: { method: 'GET', path: '/release/version', response: ReleaseVersionResponse },
   demoLinks: { method: 'GET', path: '/demo/links', response: DemoLinksResponse },
   createDemoLink: {

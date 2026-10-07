@@ -22,6 +22,11 @@ export interface SyncResult {
   state: 'clean' | 'conflict';
   head: string;
   conflictFiles: string[];
+  /**
+   * 只在 conflict 且给了会话的树时可能有：最新主线没能取进树里（原因写在这），会话的树里的主线是旧的，
+   * 不能让会话以为已经是最新（#1249）。没有这个字段＝取进去了（或这次没有树，比如合并队列）。
+   */
+  mainlineStale?: string;
 }
 
 /**

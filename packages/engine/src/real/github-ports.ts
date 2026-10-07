@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { GATE_CONTEXT } from '@fleet-dao/conventions';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
-import type { CiResult } from '../decisions/types.ts';
+import { errMessage } from '@fleet-dao/shared/util';
+import type { CiResult, SyncResult } from '../decisions/types.ts';
 import {
   type EnginePorts,
   type PortContext,
@@ -467,7 +468,32 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           { retryable: false },
         );
       }
-      if (r.state === 'conflict') return { state: 'conflict', head: r.head, conflictFiles: r.conflictFiles };
+      if (r.state === 'conflict') {
+        const conflict: SyncResult = { state: 'conflict', head: r.head, conflictFiles: r.conflictFiles };
+        if (!input.worktreePath) return conflict;
+        // 冲突不推东西，可会话要解冲突得有新主线的提交（树里只有建树时钉的旧主线，#1249）：取进树、钉上；
+        // 取不到不抛、不装成已经是最新：写明原因（mainlineStale），工作流把「树里的主线是旧的」告诉会话
+        try {
+          const user = await ownerOrFail(input.worktreePath);
+          const t = treeAs(input.worktreePath, user, `sync-${input.subtaskId ?? input.taskId}`, ctx);
+          if (!(await hasCommit(t, r.mainline))) {
+            const { bytes, ref } = await bundleFromMirror(
+              gh,
+              deps.tmpDir,
+              input.repo,
+              r.mainline,
+              [r.head],
+              ctx.signal,
+            );
+            await fetchBundle(t, bytes, ref);
+          }
+          await pinMainline(t, input.repo.defaultBranch, r.mainline);
+        } catch (error) {
+          if (ctx.signal.aborted) throw error;
+          conflict.mainlineStale = errMessage(error).slice(0, 200);
+        }
+        return conflict;
+      }
       if (r.merged && input.worktreePath) {
         // 并出来的新头推上去了：会话的树快进过去，接着返工的时候基于新头。
         const user = await ownerOrFail(input.worktreePath);
