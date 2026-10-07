@@ -4,7 +4,7 @@
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库、会话用户在本机开的口只许它自己连的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
-# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、把演示版的可见范围推到香港的单元、
+# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、清掉老机器上已删的演示版单元（#1223）、
 # 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
 # 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装；它的 API 密钥由创始人放，这里只读回
 # 在不在、属主、权限，不读值，见 lib/cursor-key.sh）、
@@ -15,7 +15,7 @@
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
-#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、演示版可见范围的单元和脚本
+#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
 #                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
 #                                   人工档（lib/human-tier.sh：建用户、防火墙、sudoers）只在整套跑时做。
@@ -180,11 +180,12 @@ WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 # 发布脚本发飞书网关用的钥匙（另一把）：香港把它限死成只能跑 fleet-gateway-deploy
 GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
-# 演示版的可见范围：驾驶舱后端（fleet）写在这里（api.env 的 FLEET_DEMO_DIR 就写它，后端的单元只放行这一处可写），
-# root 的 fleet-demo-scopes 把 scopes/ 推到香港（和发静态文件同一把上传钥匙）
-DEMO_DIR=/var/lib/fleet-dao/demo
-DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
-DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
+# 已删的演示版（#1223，创始人 2026-10-07）：以前装过的推可见范围的脚本和单元，装机时停掉、删掉（retire_old_units），读回核对它们不在。
+# 它们的数据目录（/var/lib/fleet-dao/demo，#1223）不动：里面是旧的可见范围文件，要不要清由人定
+RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service) # #1223：先停触发的两个，再停服务本身
+DEMO_DIR=/var/lib/fleet-dao/demo # #1223：人工档（lib/human-tier.sh）还在建这个老目录；改人工档的文件会让 deploy_lag 要人重跑整套，所以这一行留着，另开单再删
+RETIRED_BIN=/usr/local/sbin/fleet-demo-scopes # #1223
+RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
 # 驾驶舱「发布到法国」按钮的接活（人工档，lib/human-tier.sh 的 setup_release_request）：后端（fleet）写请求到 RELEASE_REQUEST_DIR，
 # root 的 path 单元接活、走一趟发版，进度写在 TRAIN_DIR（root 的，fleet 写不进）。脚本是 deploy/france/release-request 的副本
 RELEASE_REQUEST_DIR=/var/lib/fleet-dao/release-request
@@ -778,19 +779,45 @@ setup_web_upload() {
 $line"
 }
 
-# 演示版的可见范围推到香港：范围目录一变就推（path 单元），每 10 分钟再补一次（timer）。推的脚本以 root 跑、
-# 只当数据读 fleet 写的范围文件（认不出的不推），和发布脚本用同一把上传钥匙
-setup_demo_scopes() {
-  step "演示版的可见范围推到香港（$DEMO_DIR/scopes → 香港演示版目录下的 scopes/）"
-  local u unit_changed=0
-  put_file "$DEMO_SCOPES_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-demo-scopes.sh")"
-  for u in "${DEMO_UNITS[@]}"; do
-    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/france/$u")"
-    if ((WROTE)); then unit_changed=1; fi
+# 已删的演示版（#1223）：以前装过的单元停掉、禁用、删掉，脚本删掉。已经没有就什么都不动（幂等）。
+# 停不掉、删不掉判红（读回 readback_retired_units 还会再核对一遍），不当成没事
+retire_old_units() {
+  step "清掉已删的演示版留下的单元和脚本（#1223）"
+  local u f touched=0
+  for u in "${RETIRED_UNITS[@]}"; do
+    f=$RETIRED_UNIT_DIR/$u
+    if [[ ! -e "$f" && ! -L "$f" && "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then continue; fi
+    if ! systemctl disable --now "$u" >/dev/null 2>&1 && [[ "$(systemctl is-active "$u" 2>/dev/null)" == active ]]; then
+      red "$u 停不掉（#1223）：systemctl status $u 看现场"
+      continue
+    fi
+    if ! rm -f -- "$f"; then
+      red "$f 删不掉（#1223）"
+      continue
+    fi
+    touched=1
+    changed "停掉并删掉 $u（#1223）"
   done
-  if ((unit_changed)); then systemctl daemon-reload; fi
-  ensure_unit_running fleet-demo-scopes.path "$unit_changed"
-  ensure_unit_running fleet-demo-scopes.timer "$unit_changed"
+  if ((touched)) && ! systemctl daemon-reload; then red "systemctl daemon-reload 失败（#1223）"; fi
+  if [[ -e "$RETIRED_BIN" || -L "$RETIRED_BIN" ]]; then
+    if rm -f -- "$RETIRED_BIN"; then changed "删掉 $RETIRED_BIN（#1223）"; else red "$RETIRED_BIN 删不掉（#1223）"; fi
+  fi
+}
+
+# 读回：已删的单元和脚本真不在了（文件没有、也没在跑）
+readback_retired_units() {
+  local u bad=0
+  for u in "${RETIRED_UNITS[@]}"; do
+    if [[ -e "$RETIRED_UNIT_DIR/$u" || -L "$RETIRED_UNIT_DIR/$u" ]] || [[ "$(systemctl is-active "$u" 2>/dev/null)" == active ]]; then
+      red "已删的 $u 还在（#1223）：停掉、删掉 $RETIRED_UNIT_DIR/$u 后 systemctl daemon-reload"
+      bad=1
+    fi
+  done
+  if [[ -e "$RETIRED_BIN" || -L "$RETIRED_BIN" ]]; then
+    red "已删的 $RETIRED_BIN 还在（#1223）"
+    bad=1
+  fi
+  if ((bad == 0)); then ok "已删的演示版单元和脚本都不在了（#1223）"; fi
 }
 
 # 自动发布单元：定时器每 5 分钟拉起一轮（deploy/france/auto-release），只读不发；发完版后以 root 跑 france.sh --auto-tier、替会话用户同步规矩。
@@ -887,7 +914,7 @@ readback() {
   readback_session_ports
   readback_app_config
   readback_web_upload
-  readback_demo_scopes
+  readback_retired_units
   readback_auto_release
   readback_release_request
   readback_proxy_headers
@@ -911,28 +938,6 @@ readback_auto_release() {
   check_auto_release_state "$AUTO_DIR/state.json" "$DEPLOY_DIR/france/auto-release/lib.mjs" || true
   check_auto_release_unit "$(unit_prop fleet-auto-release.service ActiveState)" \
     "$(unit_prop fleet-auto-release.service ExecMainStatus)" || true
-}
-
-# 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）
-readback_demo_scopes() {
-  local u result status at
-  for u in fleet-demo-scopes.path fleet-demo-scopes.timer; do
-    if [[ "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then red "$u 没在跑：可见范围变了不会推到香港"; fi
-  done
-  at=$(unit_prop fleet-demo-scopes.service ExecMainExitTimestamp)
-  if [[ -z "$at" ]]; then
-    pending "演示版的可见范围还一次都没推过（systemctl start fleet-demo-scopes 推一次）"
-    return 0
-  fi
-  result=$(unit_prop fleet-demo-scopes.service Result)
-  status=$(unit_prop fleet-demo-scopes.service ExecMainStatus)
-  if [[ "$result" == success ]]; then
-    ok "演示版的可见范围上次推到香港是 $at"
-  elif [[ "$status" == 1 ]]; then
-    red "演示版的范围目录里有认不出的文件，没推（别的推了）：journalctl -u fleet-demo-scopes -n 20"
-  else
-    red "演示版的可见范围上次没推成（$at，退出码 ${status:-读不到}）：journalctl -u fleet-demo-scopes -n 20"
-  fi
 }
 
 # 香港往法国转发时要清掉 Authorization 与 X-Fleet-Acting-Feishu（飞书网关的通行证和代表谁）：从公网带着这两个头
@@ -1240,7 +1245,7 @@ readback_session_ports() {
 
 readback_dirs() {
   local spec path want have bad=0
-  for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "$DEMO_DIR fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
+  for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
     "$ENGINE_STATE_DIR fleet:fleet 750" "$SESSION_IO_DIR fleet:fleet 711" "$WORK_DIR root:root 755" \
     "/opt/fleet-dao root:root 755" "/home/fleet fleet:fleet 750" "$TEMPORAL_ENV root:fleet 640" "$TEMPORAL_CONFIG root:fleet 640"; do
     path=${spec%% *}
@@ -1451,7 +1456,7 @@ readback_service_home() {
 # 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
 setup_auto_tier() {
   setup_slice
-  setup_demo_scopes
+  retire_old_units
   setup_auto_release
 }
 
@@ -1459,16 +1464,15 @@ setup_auto_tier() {
 readback_auto_tier() {
   step "读回（自动档）"
   readback_slice
+  readback_retired_units
   local u f
-  for u in fleet-demo-scopes.path fleet-demo-scopes.timer fleet-auto-release.timer; do
-    if [[ "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then red "$u 没在跑"; fi
-  done
+  if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" != active ]]; then red "fleet-auto-release.timer 没在跑"; fi
   for f in "${AUTO_RELEASE_FILES[@]}"; do
     if ! cmp -s -- "$AUTO_RELEASE_LIB/$f" "$DEPLOY_DIR/france/auto-release/$f"; then
       red "$AUTO_RELEASE_LIB/$f 和仓里的不一样（或没装）"
     fi
   done
-  for u in "${DEMO_UNITS[@]}" "${AUTO_RELEASE_UNITS[@]}"; do
+  for u in "${AUTO_RELEASE_UNITS[@]}"; do
     if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
   done
 }
@@ -1512,7 +1516,7 @@ main() {
     setup_mirasim_session
     setup_app_config
     setup_web_upload
-    setup_demo_scopes
+    retire_old_units
     setup_auto_release
     setup_release_request
     setup_agent_rules

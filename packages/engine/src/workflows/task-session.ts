@@ -6,7 +6,7 @@
 //   选路照常选到切过去的那个池，同一棵树、同一个分支重跑这一段，提示词带上被停下的原因（interrupted）。
 // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
 
-import { isCancellation } from '@temporalio/workflow';
+import { isCancellation, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
@@ -16,7 +16,9 @@ import {
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
+  UI_PURPOSE,
 } from '../task-contract.ts';
+import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
@@ -48,13 +50,20 @@ export async function writeSession(
   let interrupted: string | undefined;
   // 上一次渠道运行中失败、该换渠道（#1118）：交给下一次选路标成不可用并记顺到谁；选路问过一次就清掉
   let failedChannel: FailedChannel | undefined;
+  // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
+  // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
+  const ui: UiJudgement | undefined = patched('ui-work-implement')
+    ? judgeImplementUiWork({ touches: brief.touches, request: brief.request, changedFiles: rt.changedFiles })
+    : undefined;
+  const unrecognized = ui !== undefined && !ui.recognized ? `（${UI_UNRECOGNIZED_NOTE}）` : '';
+  if (unrecognized) rt.set('implement', `动手第 ${rt.round} 轮${unrecognized}`);
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
-    const route = await pickRoute(rt, avoid, stick, failedChannel);
+    const route = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
     failedChannel = undefined;
     rt.families.add(route.family);
     rt.attemptSeq += 1;
-    await rt.advance('implement', `第 ${rt.round} 轮：${route.modelId} 动手`);
+    await rt.advance('implement', `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}`);
     let evidence: SegmentEvidence | null = null;
     let infra: unknown = null;
     try {
@@ -167,6 +176,7 @@ async function pickRoute(
   avoid: Avoid,
   stick?: string,
   failedChannel?: FailedChannel,
+  uiWork = false,
 ): Promise<RouteChoice> {
   for (;;) {
     await rt.checkpoint();
@@ -175,7 +185,9 @@ async function pickRoute(
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,
-        stage: SEGMENT_STAGE.manual,
+        // 界面活按 ui 用途的模型顺序选，并带 uiWork：硬禁令 gpt-no-ui 按 UI 判，GPT 一条都不派（别的家都派不出就回「等」）
+        stage: uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual,
+        ...(uiWork ? { uiWork: true } : {}),
         avoidRouteIds: avoid.routeIds,
         avoidPoolIds: avoid.poolIds,
         avoidModelIds: avoid.modelIds,

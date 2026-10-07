@@ -3,7 +3,7 @@
 # shellcheck disable=SC2016 # 单引号里是给 node 的 JS、nginx 配置里的字面量，本来就不该由 shell 展开
 # shellcheck disable=SC2034 # REDS、CHANGES、PENDING 是给 source 进来的 release.sh（common.sh）里的函数读写的
 # 从公网看得到的几样不带仓名、GitHub 账号名和地址（创始人 2026-09-25，#54 第 4 条），也不让搜索引擎收录：
-# - 发布脚本生成的静态目录（这一版没有 packages/web 时：占位页当首页 + 健康页）拿演示版打包扫描的同一份名单扫
+# - 发布脚本生成的静态目录（这一版没有 packages/web 时：占位页当首页 + 健康页）拿公开页的禁词名单扫
 #   （packages/web/src/build/scan.ts 的 BUILTIN_TERMS）。构建用的是 release.sh 里的真代码 build_web，只把「以 fleet 身份跑」换成原地跑。
 # - 香港站点配置（deploy/hk/nginx-*.conf 渲染出来的）：先按 nginx 的继承规则查每一层都带 X-Robots-Tag；再真起一个 nginx
 #   （临时目录、本机回环上的临时端口、自签证书）打请求：带完整提交号的 release.json 只给隧道那头（这里拿 127.0.0.2 当法国），
@@ -140,8 +140,8 @@ else
     "$rc:$RETRY_ATTEMPTS:$([[ "$TRIAL_PORT" != "$occ_port" ]] && echo 换了)" "0:2:换了"
 fi
 
-# 公开页也会写的两个词：都在演示版的名单里，但健康页得显示 Temporal 在不在线（P0 验收看的就是它），
-# 「驾驶舱」是正式版、演示版都用的中性叫法（#54 第 4 条）
+# 公开页也会写的两个词：都在禁词名单里，但健康页得显示 Temporal 在不在线（P0 验收看的就是它），
+# 「驾驶舱」是中性叫法（#54 第 4 条）
 PUBLIC_OK='temporal 驾驶舱'
 
 # 拿 scan.ts 的内置名单（除去上面两个词）扫一个目录：打印扫了几个文件；命中了列出来、退出 1；
@@ -242,7 +242,7 @@ robots_rule() {
 # 按 hk.sh 的样子渲染一份站点模板（占位和 hk.sh 传的一样多：少给一个，render 就报红）
 render_site() { # 模板 隧道那头的地址
   render "$HERE/../hk/$1" SERVER_NAME=cockpit.example.test WEB_ROOT="$SITE" ACME_ROOT="$ACME" \
-    API_UPSTREAM=127.0.0.1:1 DEMO_PATH=/demo/ DEMO_BASE=/demo TUNNEL_PEER="$2"
+    API_UPSTREAM=127.0.0.1:1 TUNNEL_PEER="$2"
 }
 
 echo "== 发布脚本生成的静态目录（这一版没有 packages/web：占位页当首页 + 健康页）：不带仓名、GitHub 账号名和地址"
@@ -372,6 +372,7 @@ else
   printf '<html>首页</html>\n' >"$SITE/index.html"
   printf '{"commit":"%s"}\n' "$COMMIT" >"$SITE/release.json"
   printf '<html>健康页</html>\n' >"$SITE/health/index.html"
+  # 老的演示版目录（#1223 删了）故意还摆在盘上：站点配置要一律回 404，不能因为文件在就给出去
   printf '<html>演示版</html>\n' >"$SITE/demo/index.html"
   printf '{}\n' >"$SITE/demo/scopes/a.json"
   printf 'probe' >"$ACME/.well-known/acme-challenge/probe"
@@ -448,7 +449,7 @@ EOF
     TLS=(-k --resolve "cockpit.example.test:$P2:127.0.0.1")
     HTTPS=https://cockpit.example.test:$P2
     for pc in "/ 200" "/index.html 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/health/nope 404" \
-      "/robots.txt 200" "/demo 301" "/demo/ 200" "/demo/index.html 200" "/demo/tasks/x 200" "/demo/scopes/a.json 200" \
+      "/robots.txt 200" "/demo 404" "/demo/ 404" "/demo/index.html 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" \
       "/demo/scopes/nope.json 404" "/healthz 502" "/api/x 502" "/auth/x 502" "/github/webhook 502"; do
       check "https ${pc% *}（隧道外来的）：${pc#* }，带 noindex" "$(probe "${TLS[@]}" "$HTTPS${pc% *}")" "${pc#* } 1"
     done
@@ -468,8 +469,8 @@ EOF
     done
     ONLY=(--resolve "cockpit.example.test:$P3:127.0.0.1")
     HTTP=http://cockpit.example.test:$P3
-    for pc in "/ 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/robots.txt 200" "/demo 301" \
-      "/demo/ 200" "/demo/tasks/x 200" "/demo/scopes/a.json 200" "/demo/scopes/nope.json 404" \
+    for pc in "/ 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/robots.txt 200" "/demo 404" \
+      "/demo/ 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" "/demo/scopes/nope.json 404" \
       "/.well-known/acme-challenge/probe 200"; do
       check "只开 80 的模板 ${pc% *}（隧道外来的）：${pc#* }，带 noindex" "$(probe "${ONLY[@]}" "$HTTP${pc% *}")" "${pc#* } 1"
     done
@@ -584,7 +585,7 @@ EOF
   backend_rc=$?
   reset
   render "$HERE/../hk/nginx-https.conf" SERVER_NAME=cockpit.example.test WEB_ROOT="$SITE" ACME_ROOT="$ACME" \
-    API_UPSTREAM="127.0.0.1:$BACK" DEMO_PATH=/demo/ DEMO_BASE=/demo TUNNEL_PEER=127.0.0.2 >/dev/null
+    API_UPSTREAM="127.0.0.1:$BACK" TUNNEL_PEER=127.0.0.2 >/dev/null
   good=$RENDERED
   check "带假后端地址的 https 模板渲染成了" "${#REDS[@]}" 0
   K1=$(free_port)

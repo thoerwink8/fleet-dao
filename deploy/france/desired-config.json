@@ -118,10 +118,6 @@
         "value": "fleet",
         "说明": "引擎工人取活的任务队列（同 engine.env）：/healthz 的 engine 项查这条队列上有没有 poller"
       },
-      "FLEET_DEMO_DIR": {
-        "value": "/var/lib/fleet-dao/demo",
-        "说明": "演示版的可见范围写在这里（france.sh 建的目录），由 fleet-demo-scopes 推到香港"
-      },
       "FLEET_NODE_KEYS": {
         "private": "1650843456edc28f4e8c7c6a74b6b3ea06f0e024802bb38ae93cf3e9b072a2c6",
         "说明": "看板多机（全仓审查第 1 路）：收别的环境推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值。还没记指纹：第一次在法国跑 fleet-api node-key new local 贴进去之后，用法国自己的指纹钥匙算好再把这里的 null 换成指纹（docs/ops.md「接上法国看板」）。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
@@ -145,8 +141,8 @@
         "说明": "驾驶舱的域名（和香港 hk.env 的同一个）：私有值"
       },
       "FLEET_HK_PARTS": {
-        "value": "gateway web demo",
-        "说明": "往香港发哪几样：gateway 飞书网关、web 驾驶舱静态文件（根地址，对外发布）、demo 演示版（自动发布不发、只核对）"
+        "value": "gateway web",
+        "说明": "往香港发哪几样：gateway 飞书网关、web 驾驶舱静态文件（根地址，对外发布）。演示版已删（创始人 2026-10-07，#1223），发布脚本会把香港上老的演示版目录删掉"
       }
     },
     "france.env": {

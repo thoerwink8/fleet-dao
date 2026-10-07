@@ -49,3 +49,5 @@
 ## 后续
 
 - 2026-10-04（#785）：第 2 条钉进设置——各机器 `~/.claude/settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL` 设成 `claude-opus-5-5`，由同步工具从 `agents/config/claude-permissions.json` 写过去，源文件不是 Opus 或 Sonnet 就拒收，`agents/test/rules/subagent-model.rules.test.ts` 钉住。它只兜住调用和子代理定义都没写模型的（`general-purpose` 这类），Plan、`fork` 照旧跟主会话、`claude-code-guide` 定义里是 Haiku，所以第 2 条「派的时候写明模型」照旧；详见 `docs/agents-permissions.md`「子代理默认模型」。
+
+后来演示版已删（#1223，创始人 2026-10-07）：上面第 47 行提到的 `packages/web/src/build/demo-renames.ts` 随之删除，禁令理由原话不再有演示版改写。
