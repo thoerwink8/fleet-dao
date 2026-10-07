@@ -75,7 +75,10 @@ test.describe('看板多机', () => {
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'fresh');
     await expect(banner).toContainText(`${WSL}`);
     await expect(banner).toContainText('报的，只读');
-    // 在跑的单子：整张卡片是指向 GitHub 的链接，不是站内详情
+    // 在跑的单子：整张卡片是指向 GitHub 的链接，不是站内详情。
+    // 1366 宽收进视野是远景（只剩单号、没有链接），先切到中景（同 02-home 的 midZoom）。
+    await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeVisible();
+    await page.getByRole('button', { name: /^中景/ }).click();
     await expect(page.locator('[data-running-card] a').first()).toHaveAttribute(
       'href',
       /^https:\/\/github\.com\//,
