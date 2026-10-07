@@ -62,6 +62,12 @@ function baseCard(): ReleaseCard {
       pr: { number: 1230, title: '刷新耗时表', mergedAt: ASOF },
       issue: { state: 'ok', number: 1192, title: '引擎每周刷新耗时表', alsoCloses: [] },
     },
+    action: {
+      state: 'ready',
+      reasons: [],
+      installed: true,
+      last: { state: 'none', target: null, at: null, why: null, phase: null },
+    },
     asOf: ASOF,
   };
 }

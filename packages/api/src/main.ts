@@ -52,6 +52,7 @@ import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { liveReleaseCardPort } from './release-card.ts';
+import { liveReleaseRequestPort } from './release-request.ts';
 import { type ReleaseSource, repoChangelog } from './release-version.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
@@ -252,6 +253,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     ...(production ? { franceRelease: liveFranceReleasePort(log) } : {}),
     // /france 页「发版」卡（#1231）：主线头、CI、PR 现读 GitHub（同一份机器人凭据），法国在用的提交读发布目录；只在正式环境装
     ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
+    // /france 页「发布到法国」按钮（#1232）：写请求文件，法国上 root 的单元接活（人工档）；后端自己不起带 root 的进程
+    ...(production ? { releaseRequest: liveReleaseRequestPort() } : {}),
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,

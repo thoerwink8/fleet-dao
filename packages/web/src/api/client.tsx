@@ -38,6 +38,7 @@ import type {
   PoolHolds,
   Pools,
   ReleaseCard,
+  ReleaseRequestResult,
   ReleaseVersion,
   Repo,
   RepoDispatch,
@@ -143,6 +144,8 @@ export interface FleetApi {
   franceReleaseState(): Promise<FranceReleaseState>;
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务，每行各自带没查成的原因。 */
   franceReleaseCard(): Promise<ReleaseCard>;
+  /** /france 页「发布到法国」按钮（#1232）：只收提交号，后端核它等于此刻主线头、写请求文件，法国上 root 的单元接活。 */
+  franceRelease(sha: string): Promise<ReleaseRequestResult>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
   /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
@@ -464,6 +467,23 @@ export function useFranceReleaseCard() {
     queryFn: () => api.franceReleaseCard(),
     refetchInterval: 60_000,
     enabled: !isDemo(),
+  });
+}
+
+/**
+ * /france 页「发布到法国」按钮（#1232）：点「确认发布」才发，只带提交号；后端回 409 带原因（头换了、CI 不绿、已有发版在走、没装接活单元……）。
+ * 做完重拉发版卡和进度，操作记录里也多一条。
+ */
+export function useFranceRelease() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sha: string) => api.franceRelease(sha),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.franceReleaseCard });
+      qc.invalidateQueries({ queryKey: keys.franceReleaseState });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
   });
 }
 

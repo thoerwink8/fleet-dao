@@ -89,6 +89,11 @@ export const HUMAN_TIER_PATHS = [
   'deploy/lib/session-user.sh',
   'deploy/lib/login-user.sh',
   'deploy/lib/session-ports.sh',
+  // 驾驶舱「发布到法国」按钮的接活（setup_release_request）：一个由 fleet 写的文件触发 root 发版的口子，装它要人跑整套
+  'deploy/france/fleet-release-request.service',
+  'deploy/france/fleet-release-request.path',
+  'deploy/france/release-request/lib.mjs',
+  'deploy/france/release-request/fleet-release-request.mjs',
 ];
 /**
  * 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`，

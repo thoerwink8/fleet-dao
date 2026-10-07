@@ -15,8 +15,10 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
+import { type FranceReleasePort, parseTrainState } from './france-release.ts';
 import { reply } from './http.ts';
 import type { Store } from './ports.ts';
+import type { ReleaseRequestPort } from './release-request.ts';
 import { untilAborted } from './release-version.ts';
 import { findSelfRepo, SELF_REPO_NAME } from './self-repo.ts';
 import type { CockpitEnv } from './session.ts';
@@ -36,6 +38,7 @@ export interface ReleaseCardPort {
 }
 
 type Card = ReleaseCard;
+type Rows = Omit<Card, 'action'>;
 type CommitLine = Extract<Card['mainline'], { state: 'ok' }>['commit'];
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
@@ -73,16 +76,20 @@ export function closesOf(body: string): number[] {
 
 export interface BuildReleaseCardInput {
   port: ReleaseCardPort | undefined;
+  /** 「发布到法国」按钮要的几样（release-request.ts）；没给（开发、内存版）按钮置灰并写没接上。 */
+  request?: ReleaseRequestPort | undefined;
+  /** 进度记录的读口（france-release.ts）：判有没有发版在走、最近一趟的结果。 */
+  franceRelease?: FranceReleasePort | undefined;
   store: Store;
   now: () => Date;
   signal?: AbortSignal | undefined;
   timeoutMs?: number;
 }
 
-export async function buildReleaseCard(input: BuildReleaseCardInput): Promise<Card> {
+async function buildRows(input: BuildReleaseCardInput): Promise<Rows> {
   const asOf = input.now().toISOString();
   const { port } = input;
-  const allUnreadable = (why: string): Card => ({
+  const allUnreadable = (why: string): Rows => ({
     mainline: { state: 'unreadable', why },
     deployed: { state: 'unreadable', why },
     gap: { state: 'unreadable', why },
@@ -241,6 +248,125 @@ export async function buildReleaseCard(input: BuildReleaseCardInput): Promise<Ca
   return { mainline: mainline.row, deployed: deployed.row, gap, lastDone, asOf };
 }
 
+type Action = Card['action'];
+type Last = Action['last'];
+
+const NO_LAST: Last = { state: 'none', target: null, at: null, why: null, phase: null };
+
+/** 最近一次点击的结果：请求还没被接走 → pending；root 拒了的比进度记录新 → refused；否则看进度记录里这一趟；都没有 → none。读不到带原因。 */
+async function readLast(
+  request: ReleaseRequestPort,
+  franceRelease: FranceReleasePort | undefined,
+): Promise<{ last: Last; busy: boolean; busyWhy: string | null }> {
+  let pending: boolean;
+  try {
+    pending = await request.pendingRequest();
+  } catch (e) {
+    const why = `读上一份请求在不在失败：${errMessage(e)}`;
+    return { last: { ...NO_LAST, state: 'unreadable', why }, busy: true, busyWhy: why };
+  }
+  let train: { stateJson: string | null; marker: boolean } | undefined;
+  let trainWhy: string | null = null;
+  if (franceRelease === undefined) trainWhy = '这台后端没接上 release-train 进度记录的读取';
+  else {
+    try {
+      train = await franceRelease.readStateFiles();
+    } catch (e) {
+      trainWhy = `读 release-train 进度记录失败：${errMessage(e)}`;
+    }
+  }
+  let parsed: ReturnType<typeof parseTrainState> | null = null;
+  if (train?.stateJson != null) {
+    parsed = parseTrainState(train.stateJson);
+    if (!parsed.ok) trainWhy = parsed.why;
+  }
+  let refused: { at: string; sha: string | null; why: string } | null = null;
+  let lastWhy: string | null = null;
+  try {
+    const text = await request.readLast();
+    if (text !== null) {
+      const o = JSON.parse(text) as { outcome?: unknown; at?: unknown; sha?: unknown; why?: unknown };
+      if (o.outcome === 'refused' && typeof o.at === 'string' && typeof o.why === 'string') {
+        refused = { at: o.at, sha: typeof o.sha === 'string' ? o.sha : null, why: o.why };
+      }
+    }
+  } catch (e) {
+    lastWhy = `读最近一次请求的结果失败：${errMessage(e)}`;
+  }
+  const running = parsed?.ok === true && parsed.status === 'running';
+  const busyWhy = pending ? '上一份发布请求还没被法国接走' : running ? '已有发版在走' : trainWhy;
+  const busy = pending || running || trainWhy !== null;
+  if (pending) return { last: { ...NO_LAST, state: 'pending' }, busy, busyWhy };
+  if (
+    refused !== null &&
+    (parsed?.ok !== true || parsed.updatedAt === null || refused.at >= parsed.updatedAt)
+  ) {
+    return {
+      last: { state: 'refused', target: refused.sha, at: refused.at, why: refused.why, phase: null },
+      busy,
+      busyWhy,
+    };
+  }
+  if (parsed?.ok === true) {
+    return {
+      last: {
+        state: parsed.status,
+        target: parsed.target,
+        at: parsed.updatedAt,
+        why: parsed.why,
+        phase: parsed.phase,
+      },
+      busy,
+      busyWhy,
+    };
+  }
+  const unreadable = trainWhy ?? lastWhy;
+  if (unreadable !== null) {
+    return { last: { ...NO_LAST, state: 'unreadable', why: unreadable }, busy, busyWhy };
+  }
+  return { last: NO_LAST, busy, busyWhy };
+}
+
+/** 「发布到法国」按钮：能不能点、不能点的原因（每条一句话）、最近一次点击的结果。读不到的一律按不能点算，不拿「没问题」顶。 */
+export async function buildAction(input: BuildReleaseCardInput, rows: Rows): Promise<Action> {
+  const request = input.request;
+  if (!request) {
+    return {
+      state: 'blocked',
+      reasons: ['这台后端没接上发布请求（开发、内存版）：到法国那台的驾驶舱点'],
+      installed: false,
+      last: NO_LAST,
+    };
+  }
+  const reasons: string[] = [];
+  let installed = false;
+  try {
+    const r = await request.receiverInstalled();
+    installed = r.ok;
+    if (!r.ok) reasons.push(r.why);
+  } catch (e) {
+    reasons.push(`法国装没装发版接活单元没查成：${errMessage(e)}`);
+  }
+  const { last, busy, busyWhy } = await readLast(request, input.franceRelease);
+  if (busy && busyWhy !== null) reasons.push(busyWhy);
+  if (rows.mainline.state !== 'ok') reasons.push(`主线头没读到：${rows.mainline.why}`);
+  else if (rows.mainline.ci.state === 'unreadable') reasons.push(`主线 CI 没读到：${rows.mainline.ci.why}`);
+  else if (rows.mainline.ci.state !== 'green') {
+    reasons.push(
+      `主线 CI 不是绿的（${rows.mainline.ci.state === 'red' ? '红' : '还在跑'}）：${rows.mainline.ci.detail}`,
+    );
+  }
+  if (rows.deployed.state !== 'ok') reasons.push(`法国在用的提交没读到：${rows.deployed.why}`);
+  if (rows.gap.state === 'same') reasons.push('法国已经是最新，没有要发的');
+  else if (rows.gap.state === 'unreadable') reasons.push(`差几个没查成：${rows.gap.why}`);
+  return { state: reasons.length === 0 ? 'ready' : 'blocked', reasons, installed, last };
+}
+
+export async function buildReleaseCard(input: BuildReleaseCardInput): Promise<Card> {
+  const rows = await buildRows(input);
+  return { ...rows, action: await buildAction(input, rows) };
+}
+
 export function registerReleaseCardRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
   app.get('/france/release-card', async (c) =>
     reply(
@@ -248,6 +374,8 @@ export function registerReleaseCardRoutes(app: Hono<CockpitEnv>, deps: Deps): vo
       ReleaseCardSchema,
       await buildReleaseCard({
         port: deps.releaseCard,
+        request: deps.releaseRequest,
+        franceRelease: deps.franceRelease,
         store: deps.store,
         now: deps.now,
         signal: c.req.raw.signal,

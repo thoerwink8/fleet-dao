@@ -1,6 +1,6 @@
 // 法国总览（#618）：打开驾驶舱的 /france，一眼看到法国环境现在怎样——引擎在不在、在用哪版、健康红几项、定时任务跑得怎么样、发版走到哪。
 // 「发版一键」只到预检：命令后端写死 pnpm release:onekey preflight，不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做。
-// 真发版走 pnpm release:onekey start，不放页面按钮。
+// 真发版：点「发版」卡里的「发布到法国」（#1232，components/release-card.tsx；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
 //
 // 数据从哪来：
 // - 这一页全部只读，只调现成的接口：/api/env（六项事实，和环境页同一份）、/api/jobs（定时任务）、发版状态和预检。
@@ -84,7 +84,11 @@ function ReleaseBody({
           )}
         >
           {release.state === 'running'
-            ? '在走'
+            ? release.status === 'blocked'
+              ? '卡住了'
+              : release.status === 'failed'
+                ? '没成'
+                : '在走'
             : release.state === 'paused'
               ? '暂停标记没人收'
               : release.state === 'idle'
@@ -93,7 +97,7 @@ function ReleaseBody({
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
           {release.state === 'running'
-            ? `${release.phase} · ${release.target}${release.marker ? ' · 派活已暂停' : ' · 暂停标记没写'}`
+            ? `${release.phase} · ${release.target}${release.marker ? ' · 派活已暂停' : ' · 暂停标记没写'}${release.why ? ` · ${release.why}` : ''}`
             : release.state === 'paused'
               ? '暂停标记在、但一趟的记录不在：之前 abort 没把标记清掉。要发版前先用 pnpm release:onekey abort 收掉它'
               : release.state === 'idle'
@@ -316,7 +320,10 @@ export default function France() {
               <ReleaseCardBody card={card.data} now={now} />
             )}
           </Panel>
-          <Panel title="发版一键" description="只到预检；真发版走 pnpm release:onekey start，不在页面上发。">
+          <Panel
+            title="发版一键"
+            description="只到预检（只读）；真发版点上面「发版」卡里的「发布到法国」，或走 pnpm release:onekey start。"
+          >
             {release.error ? (
               <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
             ) : release.isLoading || !release.data ? (

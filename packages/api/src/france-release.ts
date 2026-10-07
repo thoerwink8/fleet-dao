@@ -38,6 +38,8 @@ const PREFLIGHT_MAX_BUFFER = 512 * 1024;
 
 const STATE_REL = join('.fleet-dao', 'release-train.json');
 const MARKER_REL = join('.fleet-dao', 'release-train.paused');
+/** 法国上驾驶舱按钮那一趟（root 的 fleet-release-request 单元）写进度的地方（归 root，后端只读）：有就读它，没有才读本机 ~。 */
+export const TRAIN_DIR = '/srv/fleet-dao-releases/.train';
 
 /**
  * 一台后端的「读 release-train 状态 + 跑预检」接口。生产（main.ts 正式装配）给真实现：
@@ -60,6 +62,10 @@ export interface FranceReleasePort {
 interface ReleaseTrainStateFile {
   /** release-train-lib.mjs 写的是 number（0..N，PHASES 数组下标）；按 number 收，转成人话。 */
   schema?: number;
+  /** running 在走；blocked 卡住；failed 没成；done 做完了；aborted 撤销了。 */
+  status?: string;
+  why?: string | null;
+  updatedAt?: string;
   phase?: number;
   target?: { kind?: string; value?: string };
   // 真文件里字段不止这些（marker、france、release、verify、restore、changes、warn 等），但页面现在只用这几样；
@@ -94,6 +100,46 @@ function describeTarget(target: ReleaseTrainStateFile['target']): string {
   return '（没写目标）';
 }
 
+const TRAIN_STATUSES = ['running', 'blocked', 'failed', 'done', 'aborted'] as const;
+export type TrainStatus = (typeof TRAIN_STATUSES)[number];
+
+/** 一份进度记录读成这一趟的样子；认不出（不是 JSON、没写 status、status 不认识）回 { ok: false }，不猜、不当成没在走。 */
+export function parseTrainState(json: string):
+  | {
+      ok: true;
+      status: TrainStatus;
+      phase: string;
+      target: string;
+      why: string | null;
+      updatedAt: string | null;
+    }
+  | { ok: false; why: string } {
+  let parsed: ReleaseTrainStateFile;
+  try {
+    parsed = JSON.parse(json) as ReleaseTrainStateFile;
+  } catch {
+    return { ok: false, why: '状态文件不是合法 JSON（不猜、不拿它当没在走）' };
+  }
+  if (parsed === null || typeof parsed !== 'object') return { ok: false, why: '状态文件不是一个对象' };
+  const status = (TRAIN_STATUSES as readonly string[]).includes(parsed.status ?? '')
+    ? (parsed.status as TrainStatus)
+    : undefined;
+  if (status === undefined) {
+    return {
+      ok: false,
+      why: `状态文件里的 status 认不出（${String(parsed.status).slice(0, 20)}）：不猜这一趟是在走还是做完了`,
+    };
+  }
+  return {
+    ok: true,
+    status,
+    phase: describePhase(parsed.phase),
+    target: describeTarget(parsed.target),
+    why: typeof parsed.why === 'string' ? parsed.why : null,
+    updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+  };
+}
+
 export async function readFranceReleaseState(
   port: FranceReleasePort | undefined,
   now: () => Date,
@@ -115,16 +161,18 @@ export async function readFranceReleaseState(
   if (files.stateJson === null) {
     return files.marker ? { state: 'paused', asOf } : { state: 'idle', asOf };
   }
-  let parsed: ReleaseTrainStateFile;
-  try {
-    parsed = JSON.parse(files.stateJson) as ReleaseTrainStateFile;
-  } catch {
-    return { state: 'unreadable', why: '状态文件不是合法 JSON（不猜、不拿它当没在走）', asOf };
+  const t = parseTrainState(files.stateJson);
+  if (!t.ok) return { state: 'unreadable', why: t.why, asOf };
+  // 做完了、撤销了的记录还留在盘上，不算「在走」（只有在走、卡住、没成的才是还没了结）
+  if (t.status === 'done' || t.status === 'aborted') {
+    return files.marker ? { state: 'paused', asOf } : { state: 'idle', asOf };
   }
   return {
     state: 'running',
-    phase: describePhase(parsed.phase),
-    target: describeTarget(parsed.target),
+    status: t.status,
+    why: t.why,
+    phase: t.phase,
+    target: t.target,
     marker: files.marker,
     asOf,
   };
@@ -186,14 +234,18 @@ export function registerFranceReleaseRoutes(app: Hono<CockpitEnv>, deps: Deps): 
  * 真 port：home 是当前用户的 ~；cwd 是 process.cwd()（release.sh 把驾驶舱后端在发布目录里起）；pnpm 走 shell:true 以便 Windows 下 .cmd 起得来。
  * 这和 release-onekey.mjs 里 run 的「Windows 下 pnpm 走 cmd.exe」等价——execFile 的 shell:true 在 Windows 上会让 cmd.exe 解析。
  */
-export function liveFranceReleasePort(log: Logger): FranceReleasePort {
+export function liveFranceReleasePort(log: Logger, trainDir: string = TRAIN_DIR): FranceReleasePort {
   const home = homedir();
   const statePath = join(home, STATE_REL);
   const markerPath = join(home, MARKER_REL);
+  const trainState = join(trainDir, 'release-train.json');
+  const trainMarker = join(trainDir, 'release-train.paused');
   return {
     async readStateFiles() {
-      const stateJson = existsSync(statePath) ? await readFile(statePath, 'utf8') : null;
-      return { stateJson, marker: existsSync(markerPath) };
+      // 驾驶舱按钮那一趟（法国上 root 写）的进度记录优先；没有就看本机 ~（指挥官在本机跑 release-train 的）
+      const statePick = existsSync(trainState) ? trainState : statePath;
+      const stateJson = existsSync(statePick) ? await readFile(statePick, 'utf8') : null;
+      return { stateJson, marker: existsSync(trainMarker) || existsSync(markerPath) };
     },
     async runPreflight() {
       // env 用 process.env 原样过（带上代理变量，让 pnpm 找得到网络；release-onekey.mjs 里 gh 自己有直连再代理的两条路）。

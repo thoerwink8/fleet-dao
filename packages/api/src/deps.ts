@@ -17,6 +17,7 @@ import type {
   WorkflowControl,
 } from './ports.ts';
 import type { ReleaseCardPort } from './release-card.ts';
+import type { ReleaseRequestPort } from './release-request.ts';
 import type { ReleaseSource } from './release-version.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
@@ -96,6 +97,11 @@ export interface Deps {
    * 只在正式环境装配（main.ts 的 liveReleaseCardPort）；没给时接口照样回，四行都写「没接上 + 原因」，不拿「已是最新」顶。
    */
   releaseCard?: ReleaseCardPort | undefined;
+  /**
+   * /france 页「发布到法国」按钮（#1232，release-request.ts）：往请求目录写请求文件，法国上 root 的单元接活。只在正式环境装配；
+   * 没给时按钮置灰写没接上、POST 回 503，不当成发了。
+   */
+  releaseRequest?: ReleaseRequestPort | undefined;
   /**
    * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。意图卡的长轮询（intent-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。

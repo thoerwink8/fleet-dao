@@ -1,0 +1,19 @@
+# 接驾驶舱「发布到法国」按钮的一份请求：核请求（提交号完整 40 位、是主线的祖先、没有别的发版在走、主线 CI 绿）→ 暂停法国引擎总开关 →
+# 等在跑的会话收尾 → release.sh <提交> → 验证 → 发完总开关保持关；进度写进 /srv/fleet-dao-releases/.train/release-train.json（页面读它）。
+# 脚本在 /usr/local/lib/fleet-dao/release-request/（deploy/france/release-request 的副本），由 fleet-release-request.path 拉起。
+# deploy/france.sh 的人工档装，别在机器上手改。规矩见 docs/ops.md 第九节「驾驶舱发布按钮」。
+# 以 root 跑、不收紧：要起发布（写 /srv、/etc/systemd，起停服务）、关引擎总开关，和手动跑 release.sh 一样。
+[Unit]
+Description=fleet-dao 接驾驶舱的发布请求
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node /usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs
+# 退出码 1（被拒，原因记在 last-request.json）、3（等收尾到点卡住，进度里写明拖后腿的）是正常的结局，不让单元显示 failed；2（没做成）才显示
+SuccessExitStatus=1 3
+# 要比脚本最坏跑的时间长：等收尾 13 分钟 + release.sh 30 分钟 + 等部署 3 分钟 + 检查 5 分钟 + 取主线、读开关等各步，再留余量
+# （deploy/test/release-request.test.mjs 从 lib.mjs 的上限算、和这里比）；到点这里被停，发布本身在 release.sh 自己的临时服务里照样跑完
+TimeoutStartSec=90min

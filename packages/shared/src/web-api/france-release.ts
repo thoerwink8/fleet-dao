@@ -11,7 +11,7 @@ import { Time } from './internal.ts';
  * - ~/.fleet-dao/release-train.json（一趟的记录；在走、卡住、没成都会在）；
  * - ~/.fleet-dao/release-train.paused（暂停标记；在走 + 已写过 = 暂停了本机和法国的派活）。
  * 三个 state 各说各的：
- * - running：状态文件在 → 正在走 or 卡住（marker + phase 给页面看是哪一段）；
+ * - running：状态文件在、状态是在走 / 卡住 / 没成 → 这一趟还没了结（status + marker + phase 给页面看是哪一段）；做完了、撤销了的记录算 idle；
  * - paused：状态文件不在、暂停标记在 → 之前暂停过、这一趟没人收（孤儿标记）。这是状态机外的情况，要让页面标出来；
  * - idle：两个文件都不在 → 没在走、也没暂停。
  * 读不到（不是这台 backend 的 home、读盘错）走 unreadable，页面画「没查成 + 原因」。
@@ -19,6 +19,10 @@ import { Time } from './internal.ts';
 export const FranceReleaseStateSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('running'),
+    /** 这一趟的状态：running 在走；blocked 卡住了（到点还有拖后腿的）；failed 没成。做完了（done）、撤销了（aborted）的归 idle，不算在走。 */
+    status: z.enum(['running', 'blocked', 'failed']),
+    /** 卡住、没成的原因；在走的是 null。 */
+    why: z.string().nullable(),
     /** state 文件里 phase 的中文名（走到第几步了；release-train 自己写的）。 */
     phase: z.string(),
     /** 目标提交或版本号，原样 show（sha 截 12 位，tag 全 show）。 */
@@ -81,6 +85,28 @@ export const ReleaseCardCiSchema = z.discriminatedUnion('state', [
   z.object({ state: z.literal('unreadable'), why: z.string() }),
 ]);
 
+/**
+ * 最近一次「发布到法国」点击的结果：none 没点过；pending 请求写了、法国还没接；refused 接活的核了没过（why 写原因，没动现场）；
+ * running / blocked / failed / done / aborted 是进度记录里这一趟的状态；unreadable 读不到（带原因，不当成「没点过」）。
+ */
+export const ReleaseLastSchema = z.object({
+  state: z.enum([
+    'none',
+    'pending',
+    'refused',
+    'running',
+    'blocked',
+    'failed',
+    'done',
+    'aborted',
+    'unreadable',
+  ]),
+  target: z.string().nullable(),
+  at: Time.nullable(),
+  why: z.string().nullable(),
+  phase: z.string().nullable(),
+});
+
 export const ReleaseCardSchema = z.object({
   /** ① 主线最新提交和它的 CI。 */
   mainline: z.discriminatedUnion('state', [
@@ -133,7 +159,29 @@ export const ReleaseCardSchema = z.object({
     }),
     z.object({ state: z.literal('unreadable'), why: z.string() }),
   ]),
+  /** ⑤ 「发布到法国」按钮（#1232）：能不能点、不能点的原因、最近一次点击的结果。 */
+  action: z.object({
+    state: z.enum(['ready', 'blocked']),
+    /** blocked 时的原因（每条一句话，页面原样列在置灰的按钮旁）；ready 时是空数组。 */
+    reasons: z.array(z.string()),
+    /** 法国上装没装接活的单元（人工档，装一次要在法国跑 france.sh）。 */
+    installed: z.boolean(),
+    last: ReleaseLastSchema,
+  }),
   asOf: Time,
 });
 
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
+
+/** 点「确认发布」：只收提交号一个参数，后端核它等于此刻主线头。 */
+export const ReleaseRequestBody = z.object({
+  sha: z.string().regex(/^[0-9a-f]{40}$/, '提交号要是完整的 40 位小写十六进制'),
+});
+export const ReleaseRequestResponse = z.object({
+  requested: z.literal(true),
+  sha: z.string(),
+  at: Time,
+});
+/** 操作记录里这一点击的动作名和原话（对外发布那一道人闸：创始人在页面上点，就是同意）。 */
+export const RELEASE_REQUEST_ACTION = 'release.request';
+export const RELEASE_REQUEST_WORD = '驾驶舱点击发布';

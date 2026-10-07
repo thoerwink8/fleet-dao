@@ -98,6 +98,58 @@ describe('/api/france/release-state', () => {
     expect(body.state).toBe('paused');
   });
 
+  it('进度记录是做完了（done）、撤销了（aborted）：不算在走，没暂停标记就是 idle，有标记还是 paused', async () => {
+    for (const status of ['done', 'aborted']) {
+      const json = JSON.stringify({
+        schema: 1,
+        phase: 8,
+        status,
+        target: { kind: 'sha', value: 'abcdef1234567890' },
+      });
+      const idle = await readState(
+        harness({
+          franceRelease: port({ readStateFiles: async () => ({ stateJson: json, marker: false }) }),
+        }),
+      );
+      expect(idle.state, status).toBe('idle');
+      const paused = await readState(
+        harness({ franceRelease: port({ readStateFiles: async () => ({ stateJson: json, marker: true }) }) }),
+      );
+      expect(paused.state, status).toBe('paused');
+    }
+  });
+
+  it('进度记录是卡住（blocked）、没成（failed）：还没了结，running 带 status 和原因', async () => {
+    for (const status of ['blocked', 'failed']) {
+      const json = JSON.stringify({
+        schema: 1,
+        phase: 3,
+        status,
+        why: '法国还有 2 个会话在跑',
+        target: { kind: 'sha', value: 'abcdef1234567890' },
+      });
+      const body = await readState(
+        harness({ franceRelease: port({ readStateFiles: async () => ({ stateJson: json, marker: true }) }) }),
+      );
+      expect(body).toMatchObject({ state: 'running', status, why: '法国还有 2 个会话在跑', marker: true });
+    }
+  });
+
+  it('进度记录没写 status、或 status 认不出：unreadable，不猜这一趟是在走还是做完了', async () => {
+    for (const json of [
+      JSON.stringify({ schema: 1, phase: 3, target: { kind: 'sha', value: 'abc' } }),
+      JSON.stringify({ schema: 1, phase: 3, status: 'weird', target: { kind: 'sha', value: 'abc' } }),
+      'null',
+    ]) {
+      const body = await readState(
+        harness({
+          franceRelease: port({ readStateFiles: async () => ({ stateJson: json, marker: false }) }),
+        }),
+      );
+      expect(body.state, json).toBe('unreadable');
+    }
+  });
+
   it('state 文件不是 JSON：unreadable，写明认不出，不拿「没在走」顶', async () => {
     const body = await readState(
       harness({

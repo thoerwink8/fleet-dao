@@ -185,6 +185,13 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 DEMO_DIR=/var/lib/fleet-dao/demo
 DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
 DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
+# 驾驶舱「发布到法国」按钮的接活（人工档，lib/human-tier.sh 的 setup_release_request）：后端（fleet）写请求到 RELEASE_REQUEST_DIR，
+# root 的 path 单元接活、走一趟发版，进度写在 TRAIN_DIR（root 的，fleet 写不进）。脚本是 deploy/france/release-request 的副本
+RELEASE_REQUEST_DIR=/var/lib/fleet-dao/release-request
+TRAIN_DIR=$RELEASES_DIR/.train
+RELEASE_REQUEST_LIB=/usr/local/lib/fleet-dao/release-request
+RELEASE_REQUEST_FILES=(lib.mjs fleet-release-request.mjs)
+RELEASE_REQUEST_UNITS=(fleet-release-request.service fleet-release-request.path)
 # 自动发布（docs/ops.md 第九节「自动发布」）：版本标记指的提交 CI 全绿就发到本机（发布脚本先排空引擎）、发完同步规矩。装的是副本：
 # 主线上改了它，下一轮发完版自动换（--auto-tier）。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
@@ -882,6 +889,7 @@ readback() {
   readback_web_upload
   readback_demo_scopes
   readback_auto_release
+  readback_release_request
   readback_proxy_headers
   readback_node_report_gate
   readback_service_home
@@ -1506,6 +1514,7 @@ main() {
     setup_web_upload
     setup_demo_scopes
     setup_auto_release
+    setup_release_request
     setup_agent_rules
     setup_cli_tools
   else

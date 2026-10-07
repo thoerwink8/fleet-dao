@@ -1,0 +1,12 @@
+# 驾驶舱「发布到法国」按钮的请求一写下就接活：驾驶舱后端（fleet，没有 root）把请求写进 /var/lib/fleet-dao/release-request/request.json，
+# 这个 path 单元（root）一见文件在，就起 fleet-release-request.service 接这一份。接活的脚本读完马上删掉请求文件，所以不会重复起。
+# 这是人工档（deploy/lib/human-tier.sh）：装一次要创始人在法国以 root 跑一遍不带参数的 deploy/france.sh；装之前驾驶舱的按钮置灰。
+[Unit]
+Description=fleet-dao 驾驶舱的发布请求一到就接活
+
+[Path]
+PathExists=/var/lib/fleet-dao/release-request/request.json
+Unit=fleet-release-request.service
+
+[Install]
+WantedBy=multi-user.target
