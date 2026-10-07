@@ -79,14 +79,32 @@ interface GhCalls {
   groomed: number;
   planned: number[];
   comments: { issueNumber: number; key: string; body: string }[];
+  labeled: { issueNumber: number; label: string }[];
 }
 
-function fakeGh(over: { issues?: unknown[]; commentCreated?: boolean } = {}): {
+function fakeGh(
+  over: {
+    issues?: unknown[];
+    commentCreated?: boolean;
+    pulls?: { number: number; body: string }[];
+    pullsFail?: boolean;
+  } = {},
+): {
   gh: IntakeGitHub;
   calls: GhCalls;
 } {
-  const calls: GhCalls = { groomed: 0, planned: [], comments: [] };
+  const calls: GhCalls = { groomed: 0, planned: [], comments: [], labeled: [] };
   const gh = {
+    claims: {
+      async openPulls() {
+        if (over.pullsFail) throw new Error('PR 列表读不到');
+        return over.pulls ?? [];
+      },
+    },
+    async addIssueLabel(input: { issueNumber: number; label: string }) {
+      calls.labeled.push({ issueNumber: input.issueNumber, label: input.label });
+      return [input.label];
+    },
     async readGroomFacts() {
       calls.groomed += 1;
       return {
@@ -303,6 +321,26 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(calls.comments[0]?.key).toMatch(/^intake-incomplete:/);
     expect(calls.comments[0]?.body).toContain('原话');
     expect(starts).toEqual([]);
+    expect(await t.db.select().from(tasks)).toHaveLength(0);
+  });
+
+  it('被开着的 PR 的「需求」栏挂着的单（#1197）：经「引擎」读 PR 列表、贴「本机做」、留言，不建任务行、不起；读不到 PR 列表不拉也不贴', async () => {
+    await seedWorld(t.db);
+    const claimed = fakeGh({ pulls: [{ number: 40, body: '**做了什么**：x\n\n**需求**：Closes #12' }] });
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(claimed.gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(claimed.calls.labeled).toEqual([{ issueNumber: 12, label: '本机做' }]);
+    expect(claimed.calls.comments[0]?.key).toBe('intake-pr-claimed:40');
+    expect(starts).toEqual([]);
+    expect(await t.db.select().from(tasks)).toHaveLength(0);
+
+    const broken = fakeGh({ pullsFail: true });
+    const second = await runIntakeJob(wire(broken.gh)(fakeClient().client, 'fleet'));
+    expect(second.outcome).toBe('partial');
+    expect(second.why).toContain('PR 列表读不到');
+    expect(broken.calls.labeled).toEqual([]);
+    expect(broken.calls.comments).toEqual([]);
     expect(await t.db.select().from(tasks)).toHaveLength(0);
   });
 });

@@ -1,6 +1,7 @@
 // 每小时对账（design 第六节「断链怎么被发现」第 4 层）：一轮 = 记下开始 → 工作树（jobs/worktree-sweep.ts：没有在跑的任务
 // 在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 核对（jobs/reconcile-checks.ts：合了的
 // PR 都记了账、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次）
+// → 单已关、任务工作流还挂着的发放弃信号（jobs/closed-issue-tasks.ts，#1198）
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）→ 结局记进 schedule_runs。
 // 核对在提醒之前：它新报的提醒这一轮还不满 24 小时，不会被再推；权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰。
 // scanned = 看了几个对象（树、探针目录、审到的合并 PR、对上单的合并 PR、没处理的提醒、
@@ -13,6 +14,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
 import { type AutoMergeCheckDeps, checkAutoMerges } from './auto-merge-check.ts';
+import { abandonClosedIssueTasks, type ClosedIssueTaskDeps } from './closed-issue-tasks.ts';
 import { checkGitHubApps, type GitHubAppCheckDeps } from './github-app-check.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import {
@@ -46,6 +48,7 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
   AlertSweepDeps &
   ReconcileCheckDeps &
   AutoMergeCheckDeps &
+  ClosedIssueTaskDeps &
   Pick<GitHubAppCheckDeps, 'apps'> & {
     runs: ScheduleRunLog;
   };
@@ -102,6 +105,8 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const ledgers = await checkLedgers(deps);
   const quota = await checkQuotaFreshness(deps);
   const autoMerges = await checkAutoMerges(deps);
+  // 单已关、任务还挂着的撤掉（#1198）：放在提醒之前，撤掉的任务那一轮之后的提醒对账再收拾它留下的提醒
+  const closedTasks = await abandonClosedIssueTasks(deps);
   let alerts: SweepPart;
   try {
     const now = await listOpen(deps);
@@ -111,7 +116,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   }
   // 权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰
   const apps = await checkGitHubApps(deps);
-  return combineParts([trees, retired, merged, ledgers, quota, autoMerges, alerts, apps]);
+  return combineParts([trees, retired, merged, ledgers, quota, autoMerges, closedTasks, alerts, apps]);
 }
 
 /**

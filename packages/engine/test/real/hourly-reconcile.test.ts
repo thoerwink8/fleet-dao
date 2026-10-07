@@ -167,6 +167,12 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
       resolve: async () => 'not_found',
       listOpenByPrefix: async () => [],
     },
+    // 单已关就撤任务（#1198）在本文件不走到 Temporal / GitHub：默认空装（这里的假客户端也列不了工作流）
+    closedIssueTasks: {
+      runningTaskWorkflowIds: async () => [],
+      issueState: async () => 'open',
+      abandon: async () => 'gone',
+    },
     ...over,
     workflows: wf,
   })({ workflow: {} as never } as never, 'fleet-test');
@@ -183,6 +189,9 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
       problems: [],
       findings: [],
     }),
+    readIssueState: async () => {
+      throw new Error('用例里不该读单状态');
+    },
     claims: new Proxy({} as HourlyReconcileWiring['gh']['claims'], {
       get: (_t, prop) => () => {
         throw new Error(`用例里不该碰 PR 读写（${String(prop)}）`);

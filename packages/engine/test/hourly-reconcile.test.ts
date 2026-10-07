@@ -91,6 +91,11 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       resolve: async () => 'not_found',
       listOpenByPrefix: async () => [],
     },
+    closedIssueTasks: {
+      runningTaskWorkflowIds: async () => [],
+      issueState: async () => 'open',
+      abandon: async () => 'gone',
+    },
     runs: {
       async start() {
         return 7;

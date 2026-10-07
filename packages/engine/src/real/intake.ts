@@ -11,6 +11,7 @@
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
 import { randomUUID } from 'node:crypto';
+import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import {
   type Db,
   finishScheduleRun,
@@ -23,11 +24,14 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
 import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
-import type { IntakeDeps } from '../jobs/intake.ts';
+import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
-export type IntakeGitHub = Pick<GitHub, 'readGroomFacts' | 'readIssuePlan' | 'readSpecDoc' | 'commentIssue'>;
+export type IntakeGitHub = Pick<
+  GitHub,
+  'readGroomFacts' | 'readIssuePlan' | 'readSpecDoc' | 'commentIssue' | 'addIssueLabel'
+> & { claims: Pick<GitHub['claims'], 'openPulls'> };
 
 export interface IntakeWiring {
   db: Db;
@@ -97,6 +101,18 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       async dispatched(repo, issueNumber) {
         const task = await taskStateByIssue(w.db, repo.id, issueNumber);
         return task !== null && task.state !== 'queued';
+      },
+      async openPrClaims(repo) {
+        // openPulls 翻不完、读不到都抛：拉单这张单这一轮不拉，记没查成
+        const pulls = await w.gh.claims.openPulls({ owner: repo.owner, name: repo.name });
+        return prClaimedIssues(pulls);
+      },
+      async markLocal({ repo, issueNumber }) {
+        await w.gh.addIssueLabel({
+          repo: { owner: repo.owner, name: repo.name },
+          issueNumber,
+          label: LOCAL_LABEL,
+        });
       },
       async readSpecDoc({ repo, path }) {
         const doc = await w.gh.readSpecDoc({ repo: { owner: repo.owner, name: repo.name }, path });
