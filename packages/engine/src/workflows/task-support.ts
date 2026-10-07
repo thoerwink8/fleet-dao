@@ -117,3 +117,71 @@ export function conflictHandoffLine(
   const base = `有冲突没解：${names}。树里留着冲突标记，解完 \`git add\` 并提交`;
   return previous.some((line) => line.includes('解完')) ? `${base}。上一轮没解` : base;
 }
+
+/** 占位不是文件名（MERGE_HEAD 还在、没读到文件名、没列出挡着的文件）。 */
+const NOT_A_PATH = /^（/;
+
+const FEEDBACK_FILE_LIST = [
+  /有冲突没解：([^。\n]+)/,
+  /有冲突：([^。\n]+)/,
+  /真冲突：([^。\n]+)/,
+  /要解决：([^。\n]+)/,
+];
+
+function realPaths(files: readonly string[]): string[] {
+  const found: string[] = [];
+  for (const file of files) {
+    const name = file.trim();
+    if (!name || NOT_A_PATH.test(name) || found.includes(name)) continue;
+    found.push(name);
+  }
+  return found;
+}
+
+/** 上一轮反馈里写过的冲突文件。删掉标记并 git add、没提交之后，这一轮可能只剩占位。 */
+export function rememberedConflictFiles(previous: readonly string[]): string[] {
+  const found: string[] = [];
+  for (const line of previous) {
+    for (const pattern of FEEDBACK_FILE_LIST) {
+      const matched = pattern.exec(line);
+      const listed = matched?.[1];
+      if (!listed) continue;
+      for (const name of realPaths(listed.split('、'))) {
+        if (!found.includes(name)) found.push(name);
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * 交回和挂起用的冲突文件名。这一轮读到的真路径优先；没有就用上一轮反馈里的。
+ * 两边都没有真路径，才留占位（MERGE_HEAD 还在、没读到文件名）。
+ */
+export function conflictFilesForHandoff(current: readonly string[], previous: readonly string[]): string[] {
+  const names = realPaths(current);
+  for (const name of rememberedConflictFiles(previous)) {
+    if (!names.includes(name)) names.push(name);
+  }
+  if (names.length > 0) return names;
+  const placeholders = current.map((file) => file.trim()).filter((file) => file.length > 0);
+  return placeholders.length > 0 ? placeholders : ['（没读到冲突文件名）'];
+}
+
+/**
+ * #1303 的根因。引擎开的 PR 正文只收这里交给 openPr 的 did，不收会话最后一句，也不收代码注释。
+ * 只写进这张单：别的单的正文保持原来两句，免得每张 PR 都带上这件事。
+ */
+export const CONFLICT_HANDOFF_CAUSE = [
+  '根因：会话没解开，不是解完了没提交。',
+  '推之前的 git merge 撞上内容冲突后会 merge --abort，会话起来时树是干净的，没有 MERGE_HEAD，不知道冲突在哪；',
+  '工作流把 MERGE_CONFLICT 当成 pushBranch 原地重试，这句反馈没进会话提示词。',
+  '下一轮原文一字不差就被挂起。',
+].join('');
+
+/** 引擎开 PR 的「做了什么」。#1303 多写根因，其余单子仍是原来两句。 */
+export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
+  const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
+  if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
+  return did;
+}

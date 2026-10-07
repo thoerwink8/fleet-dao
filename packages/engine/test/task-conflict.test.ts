@@ -119,6 +119,10 @@ describe('冲突交回会话（#1303）', { timeout: 60_000 }, () => {
     expect(feedback).toContain(RESOLVE);
     expect(feedback).not.toContain('上一轮没解');
     expect(calls.segment[0]?.feedback.join('\n') ?? '').not.toContain(RESOLVE);
+    expect(world.callsOf('openPr')[0]?.input.body.did).toEqual([
+      '按 #12 的要求动手（第 2 轮）',
+      '改了 1 个文件',
+    ]);
   });
 
   it('【故意造出的失败】会话不动、树里还有冲突标记：不算交活也不推下一步；第二轮带「上一轮没解」，仍不动才挂起', async () => {
@@ -163,6 +167,46 @@ describe('冲突交回会话（#1303）', { timeout: 60_000 }, () => {
     });
     expect(world.alerts[0]?.detail).toContain(`/fake/worktrees/${i.taskId}/`);
     expect(world.alerts[0]?.title).toContain(`/fake/worktrees/${i.taskId}/`);
+  });
+
+  it('会话删掉标记并 git add、没提交：读回只剩占位也记住原来的文件；第二轮带「上一轮没解」，仍不动才挂起', async () => {
+    const world = conflictOnce();
+    const { tasks, calls } = scripted({
+      delivery: (n) => delivered(n, n === 1 ? [] : ['（MERGE_HEAD 还在）']),
+    });
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const s = await statusUntil(h, parked, '删了标记没提交，挂起');
+        expect(s.waiting?.detail).toContain('和上一次的原文一字不差');
+        expect(s.waiting?.detail).toContain(FILE);
+        expect(s.waiting?.detail).not.toContain('（MERGE_HEAD 还在）');
+        expect(s.waiting?.detail).toContain(`/fake/worktrees/${i.taskId}/`);
+        expect(s.lastProblem).toContain(FILE);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'abandoned', prNumber: null });
+    expect(calls.segment).toHaveLength(3);
+    const second = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(second).toContain(FILE);
+    expect(second).toContain(RESOLVE);
+    expect(second).not.toContain('上一轮没解');
+    expect(second).not.toContain('（MERGE_HEAD 还在）');
+    const third = calls.segment[2]?.feedback.join('\n') ?? '';
+    expect(third).toContain('上一轮没解');
+    expect(third).toContain(FILE);
+    expect(third).toContain(RESOLVE);
+    expect(world.count('pushBranch')).toBe(1);
+    expect(world.count('openPr')).toBe(0);
+    expect(world.alerts[0]?.detail).toContain(FILE);
+    expect(world.alerts[0]?.detail).toContain(`/fake/worktrees/${i.taskId}/`);
+    expect(world.alerts[0]?.detail).not.toContain('（MERGE_HEAD 还在）');
   });
 
   it('合并还没开始：交回的仍是自己 git merge 那个提交，不说树里留着冲突标记', async () => {

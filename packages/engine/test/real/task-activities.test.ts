@@ -375,6 +375,39 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
     expect(readFileSync(join(dir, 'a.ts'), 'utf8')).toContain('<<<<<<<');
   });
 
+  it('【故意造出的失败】删掉标记并 git add、没提交：MERGE_HEAD 还在，conflicts 是冲突文件名，不是占位', async () => {
+    const { dir, base } = await tree('added-uncommitted');
+    writeFileSync(join(dir, 'a.ts'), 'export const a = 1;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'branch a');
+    git(dir, 'checkout', '-q', 'main');
+    writeFileSync(join(dir, 'a.ts'), 'export const a = 2;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'main a');
+    const main = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'checkout', '-q', 'fleet/12-t1a2b3c4d');
+    const t: UserTree = {
+      exec: localExec(),
+      user: 'fleet-agent-carpool',
+      dir,
+      scopePrefix: 'test',
+      git: 'git',
+      sh: 'sh',
+    };
+    await pinMainline(t, 'main', main);
+    try {
+      git(dir, 'merge', '--no-ff', '--no-edit', 'main');
+    } catch {
+      // 内容冲突时 git merge 退出码 1
+    }
+    writeFileSync(join(dir, 'a.ts'), 'export const a = 3;\n');
+    git(dir, 'add', '--', 'a.ts');
+    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+    expect(git(dir, 'diff', '--name-only', '--diff-filter=U')).toBe('');
+    const got = await make({ gh: fakeGh().gh }).acts.readDelivery(input(dir, base), ctx());
+    expect(got.conflicts).toEqual(['a.ts']);
+  });
+
   it('主线原样带进来的文件里就有一行七个等号，会话没改它：不算这次没解的冲突', async () => {
     const { dir, base } = await tree('from-main');
     git(dir, 'checkout', '-q', 'main');

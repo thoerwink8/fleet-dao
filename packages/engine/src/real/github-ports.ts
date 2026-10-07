@@ -41,20 +41,6 @@ import type { WorkTrees } from './worktrees.ts';
 
 export { toPortError } from './mirror.ts';
 
-/**
- * PR 说明（#1303）。验收要的根因写在这里：引擎开的 PR 正文不收会话最后一句，冷验收只看 diff。
- *
- * 做了什么：推之前并主线撞上内容冲突时，把合并状态留在树里交回会话；会话交回后标记还在（含已经 git add 并提交的）不算交活。
- * 合并还没开始的，原反馈仍让会话自己 git merge 那个提交，不说树里留着标记。
- *
- * 原因：会话没解开，不是解了没提交。两件叠在一起。
- * （1）推之前的 git merge 撞上内容冲突后会 merge --abort，会话起来时树是干净的，没有 MERGE_HEAD，不知道冲突在哪。
- * （2）工作流把这次 MERGE_CONFLICT 当成 pushBranch 原地重试，不写进返工意见，会话提示词里没有这句反馈。
- * 下一轮原文一字不差，失败分流挂起（#1264、#1287）。
- *
- * 取舍：只改推分支时这一次本地 git merge。动手前并主线、等 CI 撞上的冲突仍只把文件名写进返工意见（那一步在镜像里算的，树里本来就没开始合并）。
- * 和钉住的主线一个字节都不差的文件，即使里面有一行七个等号，也不算这次没解。
- */
 /** 冲突交回会话时后半句。pending＝树里留着这次合并的冲突标记；否则合并没开始，让会话自己再并。 */
 function conflictHow(pending: boolean, sha: string): string {
   return pending ? '树里留着冲突标记，解完 `git add` 并提交' : `在树里 git merge ${sha} 解掉冲突、提交后再交`;

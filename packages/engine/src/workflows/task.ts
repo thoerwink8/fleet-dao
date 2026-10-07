@@ -33,7 +33,9 @@
 // - 推分支并主线撞上内容冲突（MERGE_CONFLICT，patched('conflict-handoff-keeps-tree')）：不在 push 这一步里原地重试。
 //   内容冲突：树里留着合并的冲突标记，交回下一轮动手会话。合并还没开始（没跟踪的文件挡着）：原反馈留着，让会话自己 git merge 那个提交。
 //   交回时 MERGE_HEAD 还在，或 git diff --check（工作区、暂存区，或这次提交进 HEAD 的）还有冲突标记，不算交活、不推。
-//   上一轮没解就在反馈里补一句；反馈和上一轮一字不差才挂起，提醒里写冲突文件和工作树路径。老历史没有这个标记，照旧在 step 里重试。
+//   上一轮没解就在反馈里补一句；反馈和上一轮一字不差才挂起，提醒里写冲突文件和工作树路径。
+//   会话删掉标记并 git add、没提交时，这一轮可能只读到占位：文件名用上一轮反馈里的，不把占位当成文件名。
+//   老历史没有这个标记，照旧在 step 里重试。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
 import { CancellationScope, isCancellation, log, workflowInfo } from '@temporalio/workflow';
@@ -54,7 +56,13 @@ import { waitForCi } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
 import { writeSession } from './task-session.ts';
-import { Abandoned, ConflictHandoff, conflictHandoffLine } from './task-support.ts';
+import {
+  Abandoned,
+  ConflictHandoff,
+  conflictFilesForHandoff,
+  conflictHandoffLine,
+  taskPrDid,
+} from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
 import { coldVerifyPr } from './task-verify.ts';
 
@@ -197,10 +205,7 @@ class TaskFlow {
           title: rt.input.title,
           body: {
             requirement: rt.input.issueNumber,
-            did: [
-              `按 #${rt.input.issueNumber} 的要求动手（第 ${rt.round} 轮）`,
-              `改了 ${rt.changedFiles.length} 个文件`,
-            ],
+            did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length),
             verified: ['CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）'],
           },
         }),
@@ -222,10 +227,12 @@ class TaskFlow {
     blocked?: string | null,
   ): Promise<boolean> {
     const rt = this.rt;
-    const line = conflictHandoffLine(files, rt.feedback, blocked);
+    // 合并还没开始：文件名在原反馈里，不改写成占位。标记删了没提交：这一轮可能只剩占位，沿用上一轮的文件名。
+    const names = blocked != null ? files : conflictFilesForHandoff(files, rt.feedback);
+    const line = conflictHandoffLine(names, rt.feedback, blocked);
     if (rt.feedback.includes(line)) {
-      const names = files.join('、') || '（没读到冲突文件名）';
-      const where = `冲突文件：${names}。工作树：${wt.path}`;
+      const shown = names.join('、') || '（没读到冲突文件名）';
+      const where = `冲突文件：${shown}。工作树：${wt.path}`;
       await rt.park(`和上一次的原文一字不差，原路再试不会变。${where}`, where);
       return false;
     }

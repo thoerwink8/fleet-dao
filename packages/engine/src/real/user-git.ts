@@ -293,8 +293,41 @@ export async function unresolvedConflicts(
       files.add(file);
     }
   }
+  // 标记删了并 git add、合并还没提交：未合并路径和 diff --check 都空了，文件名还在合并说明里。
+  // 读不到说明才用占位，调用方再拿上一轮反馈里的文件名补挂起提醒。
+  if (left === 'yes' && files.size === 0) {
+    for (const file of await namesLeftInMerge(t)) files.add(file);
+  }
   if (left === 'yes' && files.size === 0) files.add('（MERGE_HEAD 还在）');
   return [...files].sort();
+}
+
+/** 合并说明里 `Conflicts:` 下列的路径。git 每行是 `#` 加制表符再加路径；说明文字一来就停。 */
+export function conflictFilesInMergeMessage(message: string): string[] {
+  const files: string[] = [];
+  let inList = false;
+  for (const line of message.split('\n')) {
+    if (!inList) {
+      if (/^#\s*Conflicts:\s*$/.test(line)) inList = true;
+      continue;
+    }
+    const matched = /^#\t(.*\S)\s*$/.exec(line);
+    const file = matched?.[1];
+    if (!file) break;
+    files.push(file);
+  }
+  return files;
+}
+
+/** MERGE_HEAD 还在、索引里已经没有未合并路径时，从合并说明把冲突文件名找回来。读不到就是空，不当成没有冲突。 */
+async function namesLeftInMerge(t: UserTree): Promise<string[]> {
+  const located = await run(t, [t.git ?? GIT, 'rev-parse', '--git-path', 'MERGE_MSG']);
+  if (located.code !== 0) return [];
+  const rel = text(located).trim();
+  if (!rel) return [];
+  const cat = await run(t, ['/bin/cat', '--', rel]);
+  if (cat.code !== 0) return [];
+  return conflictFilesInMergeMessage(text(cat));
 }
 
 /**
