@@ -44,6 +44,13 @@ describe('估一笔', () => {
       expect(p.inputPerMTok, id).toBeGreaterThan(0);
     }
     expect(modelPriceOf('opus-5.5')).toBeDefined();
+    // 验收默认模型 GPT 6.1 sol：官方模型页标的价（输入 2、缓存输入 0.1、输出 10），不是第三方汇总
+    expect(modelPriceOf('gpt-6.1-sol')).toMatchObject({
+      inputPerMTok: 2,
+      cacheReadPerMTok: 0.1,
+      outputPerMTok: 10,
+      source: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol',
+    });
     expect(modelPriceOf('glm-5.3-flash')).toBeUndefined();
     expect(modelPriceOf('toString')).toBeUndefined();
   });

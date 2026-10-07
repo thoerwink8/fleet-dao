@@ -63,6 +63,15 @@ export const MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
     checkedAt: '2026-10-07',
     note: '2026-07-30 降价后的价；OpenAI 不单列写缓存价，按输入价算',
   },
+  'gpt-6.1-sol': {
+    inputPerMTok: 2,
+    outputPerMTok: 10,
+    cacheReadPerMTok: 0.1,
+    cacheWritePerMTok: 2,
+    source: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol',
+    checkedAt: '2026-10-07',
+    note: '标准档价（官方页：缓存输入按输入价的 5% 算；Fast 档 2 倍、Batch/Flex 半价，这里不分）；OpenAI 不单列写缓存价，按输入价算',
+  },
 };
 
 /** 目录里这个模型的单价；没有就是 undefined（页面写「没有单价」）。 */

@@ -1,6 +1,6 @@
 // 路由两层（#574）：两张新表的约束（跑真迁移）、默认配置的读和校验、「活着吗」的存法。选路此刻仍读旧表，这里不测选路。
 import { readFileSync } from 'node:fs';
-import { routeEffortProblem } from '@fleet-dao/shared';
+import { hardBanFor, routeEffortProblem } from '@fleet-dao/shared';
 import { getTableColumns } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { parseCatalog } from '../src/catalog.ts';
@@ -155,7 +155,8 @@ describe('默认配置 routing.default.json', () => {
     }
     expect(cfg.purposes.execute?.[0]).toBe('grok-4.7');
     expect(cfg.purposes.ui?.[0]).toBe('grok-4.7');
-    expect(cfg.purposes.verify?.[0]).toBe('gpt-5.6-luna');
+    expect(cfg.purposes.verify?.[0]).toBe('gpt-6.1-sol');
+    expect(cfg.purposes.verify?.[1]).toBe('gpt-5.6-luna');
     for (const stage of ['default', 'verify', 'execute', 'ui'] as const) {
       expect(cfg.purposes[stage]?.at(-1), stage).toBe('glm-5.3-flash');
     }
@@ -174,6 +175,40 @@ describe('默认配置 routing.default.json', () => {
     const cfg = await loadRoutingConfig();
     expect(cfg.purposes.ui?.some((m) => m.startsWith('gpt'))).toBe(false);
     expect(cfg.purposes.judge).toEqual(['jev-1.13']);
+  });
+
+  it('创始人 2026-10-07：验收（verify）第一是 GPT 6.1 sol、走 Mirasim 渠道；写码、界面里没有它', async () => {
+    const cfg = await loadRoutingConfig();
+    expect(cfg.purposes.verify?.[0]).toBe('gpt-6.1-sol');
+    expect(cfg.purposes.execute).not.toContain('gpt-6.1-sol');
+    expect(cfg.purposes.ui).not.toContain('gpt-6.1-sol');
+    expect(cfg.purposes.default).not.toContain('gpt-6.1-sol');
+    expect(cfg.models['gpt-6.1-sol']?.map((r) => [r.routeId, r.enabled])).toEqual([
+      ['mirasim-relay:gpt-6.1-sol:mirasim', true],
+    ]);
+    // 路由在目录样例里：渠道是 Mirasim 中转、执行方式 mirasim、模型串是 gpt-6.1-sol、族 gpt
+    const example = parseCatalog(repoFile('deploy/examples/catalog.example.json'), 'catalog.example.json');
+    const route = example.routes.find((r) => r.id === 'mirasim-relay:gpt-6.1-sol:mirasim');
+    expect([route?.poolId, route?.hostId, route?.modelId, route?.upstreamModel]).toEqual([
+      'mirasim-relay',
+      'mirasim',
+      'gpt-6.1-sol',
+      'gpt-6.1-sol',
+    ]);
+    expect(example.models.find((m) => m.id === 'gpt-6.1-sol')?.family).toBe('gpt');
+  });
+
+  it('【故意造出的失败】gpt-6.1-sol 放进界面用途：硬禁令 gpt-no-ui 照拦；验收等别的用途不拦', () => {
+    const sol = {
+      id: 'gpt-6.1-sol',
+      family: 'gpt',
+      displayName: 'GPT 6.1 sol',
+      upstreamModel: 'gpt-6.1-sol',
+    };
+    expect(hardBanFor(sol, 'ui')?.id).toBe('gpt-no-ui');
+    expect(hardBanFor(sol, 'verify')).toBeUndefined();
+    // 骨架里把它塞进 ui 的话，「界面用途里没有 GPT」那一条的判法会抓到
+    expect(['grok-4.7', 'gpt-6.1-sol'].some((m) => m.startsWith('gpt'))).toBe(true);
   });
 
   it('【故意造出的失败】文件读不到：明确报错，不当成空配置', async () => {
