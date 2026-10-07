@@ -214,6 +214,8 @@ function scriptsKey(ctx: Ctx): { abs: string; key: string } {
 }
 
 const LAUNCHER_KEY = '~/.fleet-dao/bin';
+// 同一份 exe。叫这个名字时把自身参数转给 node.exe，给 MCP 的 command 用。
+const QUIET_NODE = 'quiet-node.exe';
 
 /** 这台要登记成静默启动器的脚本（路径里有 shell 元字符的不在内，那些仍走 node） */
 function launcherScripts(ctx: Ctx, targets: HookTarget[]): string[] {
@@ -227,7 +229,7 @@ function launcherScripts(ctx: Ctx, targets: HookTarget[]): string[] {
 }
 
 function exeBase(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1);
+  return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
 }
 
 /** 启动器在不在、是不是不带控制台的程序。Linux、或路径不安全退回 node 时，不报这一行 */
@@ -236,8 +238,11 @@ function checkLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
   if (scripts.length === 0) return null;
   const missing: string[] = [];
   const bad: string[] = [];
-  for (const script of scripts) {
-    const exe = hookCommand(ctx.home, ctx.platform, script);
+  const paths = [
+    ...scripts.map((script) => hookCommand(ctx.home, ctx.platform, script)),
+    join(ctx.home, '.fleet-dao', 'bin', QUIET_NODE),
+  ];
+  for (const exe of paths) {
     if (!existsSync(exe)) {
       missing.push(exeBase(exe));
       continue;
@@ -262,9 +267,12 @@ function installLaunchers(ctx: Ctx, targets: HookTarget[]): Line | null {
     const dir = join(ctx.home, '.fleet-dao', 'bin');
     mkdirSync(dir, { recursive: true });
     let changed = false;
+    const names = new Set<string>([QUIET_NODE]);
     for (const script of scripts) {
       const name = quietExeName(script);
-      if (name === null) continue;
+      if (name !== null) names.add(name);
+    }
+    for (const name of names) {
       const dest = join(dir, name);
       const have = existsSync(dest) ? readFileSync(dest) : null;
       if (have === null || !have.equals(bytes)) {
