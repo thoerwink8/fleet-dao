@@ -92,12 +92,18 @@ test.describe('主页', () => {
     await expect(page.getByRole('heading', { name: /登录页加验证码/ })).toBeVisible();
   });
 
-  test('宽屏上「做完的」在左列、流水线在右', async ({ page }, info) => {
-    test.skip(!info.project.name.endsWith('1920'), '2xl 以上才是双列');
+  // xl（1280）起就左右分栏（指挥官 2026-10-07 定：1366×768 一进来就要看到看板），1920、1366 两个视口都是
+  test('宽屏和笔记本上「要你拍的」「做完的」在左列、看板在右，看板一进来就在首屏里', async ({ page }) => {
     await page.goto('/');
+    const decisions = await page.getByRole('heading', { name: '要你拍的' }).boundingBox();
     const done = await page.getByRole('heading', { name: '做完的' }).boundingBox();
     const flow = await page.getByRole('heading', { name: '在跑的' }).boundingBox();
-    expect(done && flow && done.x < flow.x).toBe(true);
+    expect(decisions && done && flow && decisions.x < flow.x && done.x < flow.x).toBe(true);
+    // 看板的画布和第一张单不用滚就看得见
+    await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeInViewport();
+    const viewport = page.viewportSize();
+    const canvas = await page.locator('[data-flow-board]').first().boundingBox();
+    expect(canvas && viewport && canvas.y < viewport.height / 2).toBe(true);
   });
 
   // 缺陷 D2（#902）在 #914 之后已经不成立：停滞（超时没交活）的 #14 现在落在「动手」、画成红色「出问题了」并写明「动手超时」，
