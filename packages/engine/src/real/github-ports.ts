@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import { GATE_CONTEXT } from '@fleet-dao/conventions';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/types.ts';
 import {
@@ -427,8 +428,15 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async waitCi(input, ctx) {
+      // 等 CI 不等合并闸：引擎任务 PR 的合并闸要冷验收贴了 cold-verify 才绿，而冷验收排在这一步之后——
+      // 把它算进来，验收前它必红，会被误判成「CI 红了」白返工一轮。合并闸由合并那一步（GitHub 自动合并）等。
       const result = ciResultOf(
-        await mapped(() => gh.waitCi({ repo: input.repo, prNumber: input.prNumber, head: input.head }, ctx)),
+        await mapped(() =>
+          gh.waitCi(
+            { repo: input.repo, prNumber: input.prNumber, head: input.head, excludeChecks: [GATE_CONTEXT] },
+            ctx,
+          ),
+        ),
       );
       // CI 认了新头（新头含着老头，github 包的 waitCi 已经用 compare API 核过）：顺手把工作树也快进过去，
       // 别让「CI 查到的头」和「工作树实际的头」分家（#307/#389 那次真事：认了新头查 CI，工作树没跟上，后面

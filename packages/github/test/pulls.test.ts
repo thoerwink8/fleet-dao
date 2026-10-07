@@ -400,6 +400,34 @@ describe('等 CI', () => {
     await expect(wait(gh, pr.number)).rejects.toMatchObject({ code: 'NO_REQUIRED_CHECKS' });
   });
 
+  it('excludeChecks 去掉合并闸：必过是 [check, merge-gate]，check 绿、merge-gate 红（还没验）也判绿，不判红', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = ['check', 'merge-gate'];
+    const pr = fake.addPull({ head: { ref: 'fleet/1-t12345678', sha: A } });
+    fake.addCheck(A, 'check', 'success');
+    fake.statuses.push({
+      sha: A,
+      context: 'merge-gate',
+      state: 'failure',
+      updated_at: '2026-09-25T12:00:00Z',
+      description: '还没验：当前头上没有 cold-verify 状态',
+    });
+    const res = await wait(gh, pr.number, A, { excludeChecks: ['merge-gate'] });
+    expect(res).toMatchObject({ state: 'green', checks: [{ name: 'check', state: 'success' }] });
+    // 不去掉（人手 PR 等的老路）：合并闸红照样判红，行为不变
+    expect(await wait(gh, pr.number)).toMatchObject({ state: 'red', failedChecks: ['merge-gate'] });
+  });
+
+  it('excludeChecks 去掉合并闸后必过一条不剩：直说判不了，不当绿', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = ['merge-gate'];
+    const pr = fake.addPull({ head: { ref: 'fleet/1-t12345678', sha: A } });
+    fake.addCheck(A, 'check', 'success');
+    await expect(wait(gh, pr.number, A, { excludeChecks: ['merge-gate'] })).rejects.toMatchObject({
+      code: 'NO_REQUIRED_CHECKS',
+    });
+  });
+
   it('PR 关了、是合并关的（GitHub 自己的自动合并先合了）：merged=true，带合并提交，结构化地说清楚', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({
