@@ -162,7 +162,8 @@ test.describe('主页', () => {
     for (const r of stuck) await expect(card(page, r.issueNumber)).toHaveCount(1);
     // 三段节点还在（过滤只藏单子）
     await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
-    await page.getByRole('application').focus();
+    // React Flow 自己的外框也是 role=application：按名字认看板那一层
+    await page.getByRole('application', { name: /在跑的单的看板/ }).focus();
     await page.keyboard.press('?');
     await expect(page.getByRole('dialog', { name: /看板快捷键/ })).toBeVisible();
   });
