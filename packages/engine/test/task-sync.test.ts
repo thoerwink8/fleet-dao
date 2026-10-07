@@ -109,6 +109,22 @@ describe('动手前并最新主线（#1246）', { timeout: 60_000 }, () => {
     expect(world.count('syncMainline')).toBe(1);
   });
 
+  it('并出冲突、新主线没能取进会话的树（#1249）：返工意见里写明「树里的主线是旧的」；取进去了就不写', async () => {
+    const stale = await runReworked({
+      sync: (_i, n) =>
+        n === 1 ? { state: 'conflict', conflictFiles: ['a.ts'], mainlineStale: '镜像打包失败了' } : undefined,
+    });
+    const feedback = stale.calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(feedback).toContain('和最新主线有冲突，要解决：a.ts');
+    expect(feedback).toContain('树里的主线是旧的');
+    expect(feedback).toContain('镜像打包失败了');
+
+    const fresh = await runReworked({
+      sync: (_i, n) => (n === 1 ? { state: 'conflict', conflictFiles: ['a.ts'] } : undefined),
+    });
+    expect(fresh.calls.segment[1]?.feedback.join('\n')).not.toContain('旧的');
+  });
+
   it('【故意造出失败】并主线读不到（端口一直抛错）：记没查成、照旧往下走，不停下报警、不当成已经是最新', async () => {
     const { world, calls, run } = await runReworked({ failFirst: { syncMainline: 3 } });
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
