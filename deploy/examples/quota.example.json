@@ -21,7 +21,7 @@
       "keyFile": "/etc/fleet-dao/reclaude-api.key"
     },
     {
-      "_说明": "（Mirasim 池要走桥接，另一单，#1195 不做。）Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
+      "_说明": "引擎里经桥接以会话用户的身份连（#1284，端口、令牌文件现找，下面的 port、tokenFile 只给引擎之外的命令行读取用）。Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
       "poolId": "mirasim-relay",
       "channelId": "mirasim",
       "name": "Mirasim 中转账号",

@@ -1,6 +1,6 @@
 // 额度读取里 Cursor、Grok 池以会话用户身份读登录文件（#1195）：不连库、不连上游、不起进程，exec 和 fetch 全是假的。
 // 假凭据一律用明显的假值（fake-token-for-test）。
-import { SESSION_USERS } from '@fleet-dao/adapters';
+import { type MirasimFrame, type MirasimWire, SESSION_USERS } from '@fleet-dao/adapters';
 import type { QuotaConfig } from '@fleet-dao/adapters/quota';
 import type { Db, PoolQuotaSnapshot } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
@@ -179,6 +179,88 @@ describe('额度读取：Cursor、Grok 池以会话用户读登录文件（#1195
     expect(r.saved.map((s) => s.poolId)).toEqual(['cursor']);
     const grok = r.report.results.find((x) => x.poolId === 'grok');
     expect(grok && !grok.ok && grok.error.message).toContain('（EACCES）');
+  });
+});
+
+describe('额度读取：Mirasim 池经桥接以会话用户连，不读令牌文件、不直连（#1284）', () => {
+  const mirasimConfig = {
+    pools: [{ poolId: 'mirasim-relay', channelId: 'mirasim', name: 'Mirasim', reader: 'mirasim-relay' }],
+  } as unknown as QuotaConfig;
+  const relayFrame = {
+    type: 'relay',
+    relay: {
+      usage: {
+        ok: true,
+        capturedAt: '2026-10-07T07:59:00Z',
+        windows: [{ label: '5h', used: 10, budget: 100, resetAfterSeconds: 3600 }],
+      },
+    },
+  };
+
+  function fakeWire(frames: (MirasimFrame | 'closed')[]) {
+    const sent: MirasimFrame[] = [];
+    const queue = [...frames];
+    let closed = 0;
+    const wire: MirasimWire = {
+      send: (f) => {
+        sent.push(f);
+      },
+      next: async () => queue.shift() ?? 'timeout',
+      close: () => {
+        closed += 1;
+      },
+    };
+    return { wire, sent, closes: () => closed };
+  }
+
+  function read(connectMirasim: () => Promise<MirasimWire>) {
+    const refuse = (what: string) => () => {
+      throw new Error(`引擎自己的身份不该碰 ${what}`);
+    };
+    const io = {
+      fetch: refuse('fetch'),
+      runCommand: refuse('runCommand'),
+      readFile: refuse('readFile（令牌要由桥接以会话用户读）'),
+      listDir: refuse('listDir'),
+      openWebSocket: refuse('openWebSocket（回环口只许会话用户连）'),
+      workDir: async () => '/nowhere',
+      homeDir: '/home/engine-user',
+      env: {},
+    } as unknown as NonNullable<Parameters<typeof quotaReadJob>[0]['io']>;
+    const { exec } = fakeExec({});
+    const asUser = quotaAsUser(exec, USER, DEFAULT_MIRASIM_HOME, { connect: () => connectMirasim });
+    return quotaReadJob({ db: {} as Db, io, now: () => NOW, asUser })().read(mirasimConfig);
+  }
+
+  it('quotaAsUser 给了桥接，读取器经桥接拿 relay 帧读成；发了三帧、连接关了', async () => {
+    const w = fakeWire([{ type: 'state' }, relayFrame]);
+    const report = await read(async () => w.wire);
+    expect(report.results[0]).toMatchObject({ ok: true, poolId: 'mirasim-relay' });
+    expect(w.sent.map((f) => f.type)).toEqual(['clientHello', 'getState', 'getRelay']);
+    expect(w.closes()).toBe(1);
+  });
+
+  it('故意造失败：桥接连不上，如实报「读不到」（unreachable），不当成 0 或 ok', async () => {
+    const report = await read(async () => {
+      throw new Error('桥接没起来：退出码 1');
+    });
+    const r = report.results[0];
+    expect(r).toMatchObject({ ok: false, error: { code: 'unreachable' } });
+    expect(r && !r.ok && r.error.message).toContain('桥接没起来');
+  });
+
+  it('故意造失败：桥接中途断了，报错且连接关了', async () => {
+    const w = fakeWire(['closed']);
+    const report = await read(async () => w.wire);
+    expect(report.results[0]).toMatchObject({ ok: false, error: { code: 'unreachable' } });
+    expect(w.closes()).toBe(1);
+  });
+
+  it('上游回 error 帧：照旧报 upstream，连接关了', async () => {
+    const w = fakeWire([{ type: 'error', message: 'nope' }]);
+    const report = await read(async () => w.wire);
+    expect(report.results[0]).toMatchObject({ ok: false, error: { code: 'upstream' } });
+    expect(w.closes()).toBe(1);
   });
 });
 

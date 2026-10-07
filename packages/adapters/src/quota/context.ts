@@ -1,5 +1,6 @@
 // 读取器拿到的一切外部能力都从这里注入。库函数不给默认值：没注入就当场报错，
 // 免得测试或调用方悄悄碰到真进程、真网络、真文件。生产用 io.ts 的 productionQuotaIo()（命令行就是这么接的）。
+import type { MirasimWire } from '../mirasim/wire.ts';
 import type {
   PoolConfig,
   QuotaReading,
@@ -85,6 +86,12 @@ export interface QuotaDeps extends QuotaIo {
     readers: readonly ReaderType[];
     readFile: (path: string) => Promise<string>;
     homeDir: string;
+    /**
+     * 会话用户自己的 Mirasim 服务（mirasim-relay 读取器用）：回环口只许会话用户自己和 root 连，引擎用户直连、直读令牌都不行，
+     * 所以连接经桥接（以会话用户的身份读令牌、连口，帧经 stdin/stdout 转，令牌不经引擎传值）。给了它，mirasim-relay 读取器
+     * 就不再读令牌文件、不再自己开 WebSocket。读不到、连不上要抛错。
+     */
+    connectMirasim?: () => Promise<MirasimWire>;
   };
 }
 
@@ -103,6 +110,8 @@ export interface ReaderContext extends QuotaIo {
   /** 超时或叫停时触发；读取器把它交给 fetch、子进程和 WebSocket。 */
   signal: AbortSignal;
   usageRecords?: UsageSource;
+  /** 经桥接以会话用户的身份连这个池的 Mirasim 服务（QuotaDeps.asUser.connectMirasim）；没给就读取器自己读令牌、自己开 WebSocket。 */
+  connectMirasim?: () => Promise<MirasimWire>;
   /** 同一轮里多个池共用一次上游调用（例如两个 Claude 组织只跑一次 /usage、一次 org list）。 */
   shared<T>(key: string, fn: () => Promise<T>): Promise<T>;
 }
