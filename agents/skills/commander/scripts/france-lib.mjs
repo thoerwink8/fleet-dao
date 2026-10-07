@@ -83,7 +83,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  */
 /** @typedef {{ runs: number, usd: number, missing: number }} CostShare */
 /**
- * @typedef {{ runs: number, running: number, notStarted: number, inputTokens: number, outputTokens: number, missingTokens: number, cacheReadTokens: number, cacheWriteTokens: number, missingCache: number, inputEquivalent: number, missingEquivalent: number, costUsd: number, missingCost: number, cost: { metered: CostShare, subscription: CostShare, unknown: CostShare }, queueMs: number, runMs: number, missingTime: number, noQueue: number }} Totals
+ * @typedef {{ runs: number, running: number, notStarted: number, inputTokens: number, outputTokens: number, missingTokens: number, cacheReadTokens: number, cacheWriteTokens: number, missingCache: number, inputEquivalent: number, missingEquivalent: number, costUsd: number, missingCost: number, cost: { metered: CostShare, subscription: CostShare, unknown: CostShare }, estimate: { runs: number, usd: number, noPrice: number, noTokens: number }, queueMs: number, runMs: number, missingTime: number, noQueue: number }} Totals
  */
 
 /** @typedef {{ level: 'bad' | 'note', what: string, where: string }} Issue */
@@ -791,6 +791,8 @@ export function emptyTotals() {
     costUsd: 0,
     missingCost: 0,
     cost: { metered: emptyShare(), subscription: emptyShare(), unknown: emptyShare() },
+    // shared 的 usage.ts 只给三段的 runs 按目录单价估没报的花费；这页只读会话（session_runs），老流程不估，恒为 0
+    estimate: { runs: 0, usd: 0, noPrice: 0, noTokens: 0 },
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
