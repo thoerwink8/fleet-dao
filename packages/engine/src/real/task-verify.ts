@@ -13,7 +13,12 @@
 // - PR 的头不是要验的那个了（有人推过新提交）回 headMoved，工作流对新的头重走一遍。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
 // - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
-//   diff 超过 MAX_DIFF_CHARS、或有文本文件 GitHub 没给 diff：回 unavailable，不截断了假装看全。
+//   diff 超过 MAX_DIFF_CHARS：回 unavailable，不截断了假装看全。
+// - 有文本文件 GitHub 的文件接口没给 patch（大文件，#1308）：先用引擎镜像里的 git 补读（基线...头）；补出来超过
+//   MAX_FILE_DIFF_LINES 行就只给摘要（行数、头尾各几十行），diff 里明说「这个文件太大，只给了摘要」；接口和 git 两条路都读不到
+//   才回 unavailable，原因写明是哪个文件、哪一步没成，不当成通过。
+// - 迁移工具生成的快照（packages/db/migrations/meta/*_snapshot.json）按生成文件处理：不逐行给，只写同一 PR 里有没有
+//   对得上的迁移 sql、_journal.json、schema 改动，让验收核对对不对得上。
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；随后把取消原样抛出去。
 // - 切号叫停（#59）不是叫停：挑中路由就登记（sessions.enter），切号把这一次验收停下，回 retry（不贴 failure、不算一轮），
 //   工作流隔一会儿再验，选路照常选到切过去的那个池。
@@ -54,6 +59,14 @@ import { sweepRunDirs } from './task-segment.ts';
 export const VERIFY_MINUTES = 30;
 /** 喂给验收会话的 diff 最多多少字符（约 8 万 token）；再大一次看不全，要人看。 */
 export const MAX_DIFF_CHARS = 240_000;
+/** 补读来的单个文件 diff 最多多少行；超过只给摘要。 */
+export const MAX_FILE_DIFF_LINES = 2_000;
+/** 摘要里头、尾各给多少行。 */
+export const SUMMARY_EDGE_LINES = 40;
+/** 摘要里每行最多多少字符（防一行压缩过的超长内容撑爆提示词）。 */
+export const SUMMARY_LINE_CHARS = 300;
+/** 迁移工具生成的快照：按生成文件处理，不逐行给。 */
+const GENERATED_SNAPSHOT = /^packages\/db\/migrations\/meta\/([^/]+)_snapshot\.json$/;
 /** 会话跑着时多久报一次活着（远小于心跳超时）。 */
 export const VERIFY_HEARTBEAT_MS = 15_000;
 /** 内存放不下新会话时，隔多久再来（秒）。 */
@@ -78,6 +91,11 @@ export interface ColdVerifyActivityDeps {
   sessions?: OneShotSessions;
   timeoutMinutes?: number;
   maxDiffChars?: number;
+  /**
+   * 文件接口没给 patch 的文件，用 git 补读它的 `基线...头` diff（生产：mirrorFileDiff，读引擎镜像）。
+   * 不给 = 补不了，这样的文件照旧回 unavailable。
+   */
+  fileDiff?: FileDiffReader;
   now?: () => Date;
   /** 以下测试用。 */
   newRunId?: () => string;
@@ -94,13 +112,107 @@ export interface DiffFile {
   changes?: number;
 }
 
+/** 补读一个文件的 diff：回从第一个 `@@` 起的 unified patch；读不到抛。 */
+export type FileDiffReader = (input: {
+  repo: RepoRef;
+  branch: string;
+  baseSha: string;
+  headSha: string;
+  /** 改名的给改名前后两个路径。 */
+  paths: string[];
+  signal: AbortSignal;
+}) => Promise<string>;
+
+/** 生产的补读：把基线（主线）和 PR 分支的头抓进引擎镜像，再在镜像里 `git diff 基线...头 -- 路径`。 */
+export function mirrorFileDiff(
+  gh: Pick<EngineGitHub, 'fetchMainline' | 'fetchBranchHead' | 'readFileDiff'>,
+): FileDiffReader {
+  return async ({ repo, branch, baseSha, headSha, paths, signal }) => {
+    await mapped(() => gh.fetchMainline({ repo, signal }));
+    await mapped(() => gh.fetchBranchHead({ repo, branch, signal }));
+    const read = await mapped(() => gh.readFileDiff({ repo, baseSha, headSha, paths, signal }));
+    return read.patch;
+  };
+}
+
 const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo.owner, name: repo.name });
 const short = (sha: string) => sha.slice(0, 7);
 
+/** 太大的 unified patch → 摘要：改动行数、头尾各 SUMMARY_EDGE_LINES 行、中间省了多少行，开头明说只给了摘要。 */
+export function summarizePatch(patch: string): string {
+  const lines = patch.split('\n');
+  const added = lines.filter((l) => l.startsWith('+')).length;
+  const removed = lines.filter((l) => l.startsWith('-')).length;
+  const clip = (l: string) => (l.length > SUMMARY_LINE_CHARS ? `${l.slice(0, SUMMARY_LINE_CHARS)}…` : l);
+  const head = lines.slice(0, SUMMARY_EDGE_LINES).map(clip);
+  const tail = lines.slice(-SUMMARY_EDGE_LINES).map(clip);
+  const skipped = lines.length - head.length - tail.length;
+  return [
+    `（这个文件太大，只给了摘要：diff 共 ${lines.length} 行，其中加 ${added} 行、删 ${removed} 行；下面是头 ${head.length} 行和尾 ${tail.length} 行，中间省略 ${skipped} 行。摘要里看不到的部分不能当成没做到，也不要凭它挑毛病。）`,
+    ...head,
+    `…（省略 ${skipped} 行）…`,
+    ...tail,
+  ].join('\n');
+}
+
+/** 生成文件（迁移快照）的说明：不逐行给，列出同一 PR 里和它配套的改动，让验收核对对不对得上。 */
+function generatedSnapshotNote(f: DiffFile, all: readonly DiffFile[]): string {
+  const num = GENERATED_SNAPSHOT.exec(f.filename)?.[1] ?? '';
+  const names = (pred: (name: string) => boolean) =>
+    all
+      .map((g) => g.filename)
+      .filter(pred)
+      .join('、');
+  const sql = names((n) => new RegExp(`^packages/db/migrations/${num}_[^/]+\\.sql$`).test(n));
+  const journal = all.some((g) => g.filename === 'packages/db/migrations/meta/_journal.json');
+  const schema = names((n) => n.startsWith('packages/db/src/schema/'));
+  return [
+    `（生成文件：迁移工具生成的快照，改了 ${f.changes ?? '不知道多少'} 行，不逐行给，也不要逐行看。只核对它和同一 PR 里 schema 的改动对得上（文件名和迁移编号）。`,
+    `同一 PR 里：编号 ${num} 的迁移 sql ${sql || '没有（对不上，要查）'}；_journal.json ${journal ? '改了' : '没改（对不上，要查）'}；schema（packages/db/src/schema/）改动 ${schema || '没有（对不上，要查）'}。）`,
+  ].join('\n');
+}
+
+/**
+ * 文件接口没给 patch 的文本文件，用 git 补读；补出来超过 MAX_FILE_DIFF_LINES 行就换成摘要。
+ * 生成文件（迁移快照）不读，二进制 / 纯改名（changes 为 0）也不读。读不到抛，写明是哪个文件、哪一步没成。
+ */
+export async function fillMissingPatches(
+  files: readonly DiffFile[],
+  read: ((paths: string[]) => Promise<string>) | undefined,
+  beat: () => void = () => undefined,
+): Promise<DiffFile[]> {
+  const out: DiffFile[] = [];
+  for (const f of files) {
+    if (f.patch !== undefined || f.changes === 0 || GENERATED_SNAPSHOT.test(f.filename)) {
+      out.push(f);
+      continue;
+    }
+    const gone = `文件 ${f.filename} 的 diff GitHub 没给（改了 ${f.changes ?? '不知道多少'} 行，多半是文件太大）`;
+    if (read === undefined) {
+      throw new Error(`${gone}，也没有用 git 补读的办法：验收看不全，不截断了假装看全`);
+    }
+    beat();
+    let patch: string;
+    try {
+      patch = await read(f.previous === undefined ? [f.filename] : [f.previous, f.filename]);
+    } catch (error) {
+      throw new Error(`${gone}，用 git 补读也失败了（${errMessage(error)}）：验收看不全，不当成通过`);
+    }
+    if (patch.trim() === '') {
+      throw new Error(`${gone}，用 git 补读回来的是空的（和 GitHub 说的改动对不上）：验收看不全，不当成通过`);
+    }
+    out.push({
+      ...f,
+      patch: patch.split('\n').length > MAX_FILE_DIFF_LINES ? summarizePatch(patch) : patch,
+    });
+  }
+  return out;
+}
+
 /**
  * PR 改到的文件 → 喂给验收会话的 unified diff 和文件名单。
- * 看不全就抛（不截断）：有文本文件 GitHub 没给 diff（太大）、总长超过上限。二进制、纯改名、只改权限的文件没有文本改动，
- * 注明一句，不算看不全（GitHub 对它们回的 changes 是 0）。
+ * 看不全就抛（不截断）：有文本文件 GitHub 没给 diff（太大；要先过 fillMissingPatches 补读）、总长超过上限。二进制、纯改名、
+ * 只改权限的文件没有文本改动，注明一句，不算看不全（GitHub 对它们回的 changes 是 0）。迁移快照按生成文件写一段说明。
  */
 export function renderDiff(
   files: readonly DiffFile[],
@@ -119,7 +231,8 @@ export function renderDiff(
       f.status === 'removed' ? '+++ /dev/null' : `+++ b/${f.filename}`,
     ];
     let body: string;
-    if (f.patch !== undefined) body = f.patch;
+    if (GENERATED_SNAPSHOT.test(f.filename)) body = generatedSnapshotNote(f, files);
+    else if (f.patch !== undefined) body = f.patch;
     else if (f.changes === 0) body = '（没有文本改动：二进制文件、纯改名或只改了权限）';
     else {
       throw new Error(
@@ -254,7 +367,25 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             }
             return { head: input.headSha, baseSha: input.baseSha, branch: input.branch };
           },
-          diff: async () => renderDiff(files, maxDiffChars),
+          diff: async () => {
+            const { fileDiff } = deps;
+            const complete = await fillMissingPatches(
+              files,
+              fileDiff
+                ? (paths) =>
+                    fileDiff({
+                      repo,
+                      branch: input.branch,
+                      baseSha: input.baseSha,
+                      headSha: input.headSha,
+                      paths,
+                      signal: ctx.signal,
+                    })
+                : undefined,
+              () => ctx.heartbeat(),
+            );
+            return renderDiff(complete, maxDiffChars);
+          },
           spec: async () => {
             if (input.what.trim() === '') throw new Error('单子的「要什么」是空的');
             if (input.howToFinish.length === 0) throw new Error('单子的「怎么算做完」一条都没有');

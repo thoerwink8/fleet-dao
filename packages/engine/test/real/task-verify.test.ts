@@ -16,7 +16,12 @@ import {
   type ColdVerifyActivityDeps,
   createColdVerify,
   type DiffFile,
+  fillMissingPatches,
+  MAX_FILE_DIFF_LINES,
+  mirrorFileDiff,
   renderDiff,
+  SUMMARY_LINE_CHARS,
+  summarizePatch,
   VERIFY_ORG_SWITCH_RETRY_SECONDS,
 } from '../../src/real/task-verify.ts';
 import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
@@ -870,5 +875,215 @@ describe('renderDiff：喂给会话的 diff', () => {
       changes: 400,
     }));
     expect(() => renderDiff(files, 1_000)).toThrow(/diff 太大.*3\/3/);
+  });
+});
+
+/** n 行的假 patch：第 i 行是 `+row-i`，方便断言头尾在、中间不在。 */
+const bigPatch = (n: number) =>
+  `@@ -0,0 +1,${n} @@\n${Array.from({ length: n }, (_, i) => `+row-${i}`).join('\n')}`;
+
+describe('大文件 GitHub 不给 patch：用 git 补读、超上限给摘要、迁移快照按生成文件（#1308）', {
+  timeout: 30_000,
+}, () => {
+  const HUGE: DiffFile = { filename: 'data/huge.json', status: 'modified', changes: 90_000 };
+  const SNAPSHOT = 'packages/db/migrations/meta/0043_snapshot.json';
+
+  it('缺 patch 的大文件走 git 补：补读拿到基线、头、分支、路径；补来的 diff 进提示词；验收照跑', async () => {
+    const calls: unknown[] = [];
+    const r = rig({
+      files: [...FILES, HUGE],
+      deps: {
+        fileDiff: async (input) => {
+          calls.push(input);
+          return '@@ -1 +1 @@\n-old-line\n+new-line';
+        },
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(calls).toEqual([
+      expect.objectContaining({
+        baseSha: BASE,
+        headSha: HEAD,
+        branch: BRANCH,
+        paths: ['data/huge.json'],
+        repo: { owner: 'acme', name: 'demo' },
+      }),
+    ]);
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('diff --git a/data/huge.json b/data/huge.json');
+    expect(prompt).toContain('+new-line');
+    expect(prompt).not.toContain('只给了摘要：diff 共');
+  });
+
+  it('改名的文件补读时前后两个路径都给', async () => {
+    const seen: string[][] = [];
+    const out = await fillMissingPatches(
+      [{ filename: 'new/name.json', previous: 'old/name.json', status: 'renamed', changes: 5_000 }],
+      async (paths) => {
+        seen.push(paths);
+        return '@@ -1 +1 @@\n-a\n+b';
+      },
+    );
+    expect(seen).toEqual([['old/name.json', 'new/name.json']]);
+    expect(out[0]?.patch).toBe('@@ -1 +1 @@\n-a\n+b');
+  });
+
+  it('补出来超过上限：提示词里只有摘要（行数、头尾各几十行、中间不在），并明说「这个文件太大，只给了摘要」', async () => {
+    const r = rig({
+      files: [HUGE],
+      deps: { fileDiff: async () => bigPatch(MAX_FILE_DIFF_LINES + 500) },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain(`这个文件太大，只给了摘要：diff 共 ${MAX_FILE_DIFF_LINES + 501} 行`);
+    expect(prompt).toContain('+row-0\n');
+    expect(prompt).toContain(`+row-${MAX_FILE_DIFF_LINES + 499}`);
+    expect(prompt).not.toContain('+row-1000\n');
+    expect(prompt).toContain('省略');
+    // 摘要有上限：提示词远小于整个 patch
+    expect(prompt.length).toBeLessThan(20_000);
+  });
+
+  it('恰好在上限内：原样给，不做摘要', async () => {
+    const out = await fillMissingPatches([HUGE], async () => bigPatch(MAX_FILE_DIFF_LINES - 1));
+    expect(out[0]?.patch).toContain('+row-1000\n');
+    expect(out[0]?.patch).not.toContain('只给了摘要');
+  });
+
+  it('summarizePatch：行数、加删统计、超长行被截', () => {
+    const text = summarizePatch(`@@ -1 +1 @@\n-gone\n+${'z'.repeat(1_000)}\n${bigPatch(300)}`);
+    expect(text).toContain('这个文件太大，只给了摘要');
+    expect(text).toMatch(/共 \d+ 行，其中加 301 行、删 1 行/);
+    expect(text).not.toContain('z'.repeat(SUMMARY_LINE_CHARS + 1));
+  });
+
+  it('迁移快照按生成文件处理：不逐行给（有 patch 也不给）、不去补读；写明同一 PR 里配套的迁移 sql、_journal、schema', async () => {
+    let called = 0;
+    const r = rig({
+      files: [
+        ...FILES,
+        { filename: SNAPSHOT, status: 'added', changes: 6_103 },
+        {
+          filename: 'packages/db/migrations/0043_lowly_stark.sql',
+          status: 'added',
+          patch: '@@ -0,0 +1 @@\n+x',
+          changes: 1,
+        },
+        {
+          filename: 'packages/db/migrations/meta/_journal.json',
+          status: 'modified',
+          patch: '@@ -1 +1 @@\n-a\n+b',
+          changes: 2,
+        },
+        {
+          filename: 'packages/db/src/schema/routing.ts',
+          status: 'modified',
+          patch: '@@ -1 +1 @@\n-a\n+b',
+          changes: 2,
+        },
+      ],
+      deps: {
+        fileDiff: async () => {
+          called += 1;
+          return '@@ -1 +1 @@\n-a\n+b';
+        },
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(called).toBe(0);
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('（生成文件：迁移工具生成的快照');
+    expect(prompt).toContain('改了 6103 行');
+    expect(prompt).toContain('编号 0043 的迁移 sql packages/db/migrations/0043_lowly_stark.sql');
+    expect(prompt).toContain('_journal.json 改了');
+    expect(prompt).toContain('packages/db/src/schema/routing.ts');
+  });
+
+  it('快照带着 GitHub 给的 patch 也按生成文件处理：patch 内容不进提示词；配套的东西不在就明说对不上', () => {
+    const out = renderDiff([
+      {
+        filename: SNAPSHOT,
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-snapshot-old\n+snapshot-new',
+        changes: 2,
+      },
+    ]);
+    expect(out.diffText).not.toContain('snapshot-new');
+    expect(out.diffText).toContain('编号 0043 的迁移 sql 没有（对不上，要查）');
+    expect(out.diffText).toContain('_journal.json 没改（对不上，要查）');
+    expect(out.diffText).toContain('schema（packages/db/src/schema/）改动 没有（对不上，要查）');
+    expect(out.changedFiles).toEqual([SNAPSHOT]);
+  });
+
+  it('【故意造出的失败】GitHub 没给、git 补读也读不到：unavailable，点名文件和哪一步没成；不起会话、状态 failure，不当通过', async () => {
+    const r = rig({
+      files: [...FILES, HUGE],
+      deps: {
+        fileDiff: async () => {
+          throw new Error('镜像里没有基线提交');
+        },
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toContain('data/huge.json');
+    expect(got.unavailable).toContain('diff GitHub 没给');
+    expect(got.unavailable).toContain('git 补读也失败');
+    expect(got.unavailable).toContain('镜像里没有基线提交');
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.at(-1)?.state).toBe('failure');
+  });
+
+  it('【故意造出的失败】git 补读回来是空的（和 GitHub 说的改动对不上）：同样 unavailable，不当通过', async () => {
+    const r = rig({ files: [HUGE], deps: { fileDiff: async () => '' } });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toContain('data/huge.json');
+    expect(got.unavailable).toContain('补读回来的是空的');
+    expect(r.specs).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】补读出来的摘要加上别的文件仍超总上限：照旧 diff 太大', async () => {
+    const r = rig({
+      files: [HUGE],
+      deps: { fileDiff: async () => bigPatch(MAX_FILE_DIFF_LINES + 10), maxDiffChars: 500 },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toContain('diff 太大');
+  });
+});
+
+describe('mirrorFileDiff：生产的补读', () => {
+  it('先抓主线和分支头进镜像，再读 基线...头 的 diff；顺序对', async () => {
+    const order: string[] = [];
+    const read = mirrorFileDiff({
+      fetchMainline: async () => {
+        order.push('main');
+        return { head: BASE, defaultBranch: 'main' };
+      },
+      fetchBranchHead: async () => {
+        order.push('branch');
+        return { head: HEAD };
+      },
+      readFileDiff: async (input) => {
+        order.push(
+          `diff:${input.baseSha.slice(0, 1)}...${input.headSha.slice(0, 1)}:${input.paths.join(',')}`,
+        );
+        return { patch: '@@ -1 +1 @@\n-a\n+b' };
+      },
+    });
+    const patch = await read({
+      repo: { owner: 'acme', name: 'demo' },
+      branch: BRANCH,
+      baseSha: BASE,
+      headSha: HEAD,
+      paths: ['x.json'],
+      signal: new AbortController().signal,
+    });
+    expect(patch).toBe('@@ -1 +1 @@\n-a\n+b');
+    expect(order).toEqual(['main', 'branch', 'diff:b...a:x.json']);
   });
 });

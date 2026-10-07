@@ -59,6 +59,7 @@ export type EngineGitHub = Pick<
   | 'syncMainline'
   | 'fetchMainline'
   | 'fetchBranchHead'
+  | 'readFileDiff'
   | 'bundleCommits'
   | 'writeSpecDoc'
   | 'readSpecDoc'
