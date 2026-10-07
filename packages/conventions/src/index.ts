@@ -151,10 +151,12 @@ export { isTestFile, parseTimings, TIMINGS_FILE, type Timings } from './test-spl
 export {
   medianOfRuns,
   mergeTimings,
+  notPullRequestRun,
   parseRunLog,
   renderTimings,
   TIMINGS_AUTO_MIN_BOXES,
   TIMINGS_AUTO_RUNS,
   TIMINGS_AUTO_SCAN,
+  TIMINGS_RUN_EVENT,
   timingsSource,
 } from './test-timings.ts';
