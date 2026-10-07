@@ -139,13 +139,19 @@ test.describe('其余页面', () => {
     await shot(page, '07-操作记录');
   });
 
-  test('更新日志：读不到版本信息时明说原因，不是空白', async ({ page, shot, problems }) => {
-    problems.allow('/api/release/version');
+  test('更新日志：已发布的提交读不到时明说原因，不是空白，也没有「发布 v」', async ({
+    page,
+    shot,
+    problems,
+  }) => {
+    problems.allow('/api/france/released-commits');
     problems.allow('status of 5');
     await page.goto('/changelog');
     await expect(page.getByRole('heading', { name: '更新日志' })).toBeVisible();
-    // 开发环境没有 GitHub 凭据：要么显示版本，要么明确说读不到
-    await expect(page.getByText(/还没发版|已发|读不到|没读到|没读成|读不了/).first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: '已发布的提交' })).toBeVisible();
+    // 开发环境没有法国的发布历史：要么列出提交，要么明确说没查成
+    await expect(page.getByText(/没查成|没读成|发于/).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /发布 v/ })).toHaveCount(0);
     await shot(page, '07-更新日志');
   });
 

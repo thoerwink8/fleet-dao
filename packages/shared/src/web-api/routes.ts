@@ -25,6 +25,7 @@ import {
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
   ReleaseCardSchema,
+  ReleasedCommitsSchema,
   ReleaseRequestBody,
   ReleaseRequestResponse,
 } from './france-release.ts';
@@ -85,6 +86,8 @@ export const WebRoutes = {
   franceReleaseState: { method: 'GET', path: '/france/release-state', response: FranceReleaseStateSchema },
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务。只读，每一行各自带没查成的原因。 */
   franceReleaseCard: { method: 'GET', path: '/france/release-card', response: ReleaseCardSchema },
+  /** 更新日志页「已发布的提交」（#1255，决定 0032）：读法国的发布历史，每条写提交号、标题、发于何时。只读，读不到写没查成和原因。 */
+  franceReleasedCommits: { method: 'GET', path: '/france/released-commits', response: ReleasedCommitsSchema },
   /** /france 页「发布到法国」按钮（#1232）：只收提交号，核它等于此刻主线头，写请求文件，法国上 root 的单元接活；后端不起任何带 root 的进程。 */
   franceRelease: {
     method: 'POST',

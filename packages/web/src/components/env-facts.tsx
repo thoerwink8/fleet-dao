@@ -67,7 +67,13 @@ function shell(kind: FactKind, state: 'ok' | 'unread', look: FactLook, extra?: s
 }
 
 /** 没查成的一格：明说原因，等待色虚线（不是红、不是 0）。 */
-function NotRead({ kind, look, reason, ...head }: Head & { kind: FactKind; look: FactLook; reason: string }) {
+function NotRead({
+  kind,
+  look,
+  reason,
+  children,
+  ...head
+}: Head & { kind: FactKind; look: FactLook; reason: string; children?: ReactNode }) {
   return (
     <div {...shell(kind, 'unread', look, 'text-muted-foreground')}>
       <FactHead {...head} />
@@ -78,6 +84,7 @@ function NotRead({ kind, look, reason, ...head }: Head & { kind: FactKind; look:
         </div>
         <p className={cn('text-xs', look === 'tile' && 'mt-1')}>{reason}</p>
       </div>
+      {children}
     </div>
   );
 }
@@ -168,12 +175,15 @@ export function factCells({
   kind,
   look,
   jobCount,
+  versionExtra,
 }: {
   facts: EnvFacts;
   now: number;
   kind: FactKind;
   look: FactLook;
   jobCount?: number | undefined;
+  /** 挂在「在用版本」那一格底下的东西（#1255：发布入口）。只有本台那一列给；远程列只读，不给。版本读成读不成都挂。 */
+  versionExtra?: ReactNode;
 }): ReactNode[] {
   const base = { kind, look };
   const cells: ReactNode[] = [];
@@ -258,9 +268,16 @@ export function factCells({
             ))}
           </ul>
         ) : null}
+        {versionExtra}
       </Read>,
     );
-  } else cells.push(<NotRead key="version" {...base} {...HEADS.version} reason={facts.version.reason} />);
+  } else {
+    cells.push(
+      <NotRead key="version" {...base} {...HEADS.version} reason={facts.version.reason}>
+        {versionExtra}
+      </NotRead>,
+    );
+  }
 
   if (facts.schedule.ok) {
     const v = facts.schedule.value;

@@ -2,16 +2,18 @@
 // 故意造出的失败（每条都核「没查成 + 原因」，不拿空、0、「已是最新」顶）：相差 0 个（写「已经是最新」）、相差多个、
 // 读不到 GitHub、读不到法国在用的提交、compare 回不是前后关系、最近合并的 PR 读不到、关的单读不到、读超时、没接上。
 import type { ReleaseFactsReader } from '@fleet-dao/github';
-import { ReleaseCardSchema, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
+import { ReleaseCardSchema, ReleasedCommitsSchema, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import type { MemoryData } from '@fleet-dao/store';
 import { devFixtures } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import {
   buildReleaseCard,
+  buildReleasedCommits,
   closesOf,
   deployedAtFromHistory,
   prsFromTitles,
   type ReleaseCardPort,
+  releasedFromHistory,
 } from '../src/release-card.ts';
 import { harness, T0 } from './harness.ts';
 
@@ -326,6 +328,172 @@ describe('GET /api/france/release-card', () => {
     const res = await h.cockpit.request(PATH, { headers: { cookie } });
     expect(res.status).toBe(200);
     expect(ReleaseCardSchema.parse(await res.json()).mainline.state).toBe('unreadable');
+  });
+});
+
+// —— 更新日志页「已发布的提交」（#1255，GET /api/france/released-commits）——
+
+const RELEASED_PATH = WEB_API_PREFIX + WebRoutes.franceReleasedCommits.path;
+const OLD = `3d9c0b1a${'d'.repeat(32)}`;
+const HISTORY = [
+  `2026-10-05T01:00:00Z ${OLD} release`,
+  `2026-10-06T01:00:00Z ${LIVE} release`,
+  `2026-10-06T02:00:00Z ${LIVE} unhealthy`,
+  `2026-10-06T03:00:00Z ${HEAD} release unmerged`,
+  `2026-10-06T04:00:00Z ${LIVE} rollback`,
+  `2026-10-06T05:00:00Z ${LIVE} recovered`,
+].join('\n');
+
+async function released(p: ReleaseCardPort | undefined, opts: { timeoutMs?: number } = {}) {
+  const h = harness({ data: withSelf() });
+  return buildReleasedCommits({ port: p, store: h.store, now: () => T0, ...opts });
+}
+
+describe('已发布的提交：读到', () => {
+  it('只取切上去的三种事件（发布、回滚、自动回滚），新的在前，每条带全号、短号、标题、时间', async () => {
+    const r = await released(port({ history: async () => HISTORY }));
+    if (r.state !== 'ok') throw new Error(`应该读到：${JSON.stringify(r)}`);
+    expect(r.commits.map((c) => [c.sha, c.event, c.at])).toEqual([
+      [LIVE, 'rollback', '2026-10-06T04:00:00Z'],
+      [HEAD, 'release', '2026-10-06T03:00:00Z'],
+      [LIVE, 'release', '2026-10-06T01:00:00Z'],
+      [OLD, 'release', '2026-10-05T01:00:00Z'],
+    ]);
+    expect(r.commits[0]).toMatchObject({
+      short: LIVE.slice(0, 12),
+      title: '探针每次结论落一条历史 (#1225)',
+      titleWhy: null,
+    });
+    expect(ReleasedCommitsSchema.safeParse(r).success).toBe(true);
+  });
+
+  it('历史是空的：读成了、一条都没有（不写没查成）', async () => {
+    const r = await released(port({ history: async () => '' }));
+    expect(r).toEqual({ state: 'ok', commits: [], asOf: T0.toISOString() });
+  });
+
+  it('同一个提交出现几次只去 GitHub 读一次标题；只列最近 20 条', async () => {
+    let reads = 0;
+    const many = Array.from(
+      { length: 30 },
+      (_, i) => `2026-10-06T${String(i % 24).padStart(2, '0')}:00:00Z ${LIVE} release`,
+    ).join('\n');
+    const r = await released(
+      port(
+        { history: async () => many },
+        {
+          async commit(_repo, sha) {
+            reads += 1;
+            return { sha, title: 't', committedAt: AT };
+          },
+        },
+      ),
+    );
+    if (r.state !== 'ok') throw new Error('应该读到');
+    expect(r.commits).toHaveLength(20);
+    expect(reads).toBe(1);
+  });
+});
+
+describe('已发布的提交：故意造出的失败照实说', () => {
+  it('这台后端没接上发布历史（开发、内存版）：整份没查成 + 原因，不给空列表', async () => {
+    for (const p of [undefined, port()]) {
+      const r = await released(p);
+      expect(r).toMatchObject({ state: 'unreadable', why: expect.stringContaining('没接上') });
+      expect('commits' in r).toBe(false);
+    }
+  });
+
+  it('读发布历史失败：整份没查成，写原因', async () => {
+    const r = await released(
+      port({
+        history: async () => {
+          throw new Error('ENOENT .history');
+        },
+      }),
+    );
+    expect(r).toMatchObject({ state: 'unreadable', why: '读法国发布历史失败：ENOENT .history' });
+  });
+
+  it('历史里有认不出的行（时间坏了、提交号不是 40 位）：整份没查成，不悄悄跳过', async () => {
+    const badTime = await released(port({ history: async () => `坏时间 ${LIVE} release` }));
+    expect(badTime).toMatchObject({ state: 'unreadable', why: expect.stringContaining('时间认不出') });
+    const badSha = await released(port({ history: async () => '2026-10-06T01:00:00Z abc123 release' }));
+    expect(badSha).toMatchObject({ state: 'unreadable', why: expect.stringContaining('不是 40 位') });
+  });
+
+  it('某一条的标题读不到：那一条 title 为 null、写原因，别的条照常', async () => {
+    const r = await released(
+      port(
+        { history: async () => HISTORY },
+        {
+          async commit(_repo, sha) {
+            if (sha === HEAD) throw new Error('403');
+            return { sha, title: '好的标题', committedAt: AT };
+          },
+        },
+      ),
+    );
+    if (r.state !== 'ok') throw new Error('应该读到');
+    const head = r.commits.find((c) => c.sha === HEAD);
+    expect(head).toMatchObject({ title: null, titleWhy: '读标题失败：403' });
+    expect(r.commits.filter((c) => c.sha !== HEAD).every((c) => c.title === '好的标题')).toBe(true);
+  });
+
+  it('受管的仓里没有 fleet-dao：列表照给，每条标题写没查成和原因', async () => {
+    const h = harness();
+    const r = await buildReleasedCommits({
+      port: port({ history: async () => HISTORY }),
+      store: h.store,
+      now: () => T0,
+    });
+    if (r.state !== 'ok') throw new Error('应该读到');
+    expect(r.commits.length).toBeGreaterThan(0);
+    for (const c of r.commits) {
+      expect(c.title).toBeNull();
+      expect(c.titleWhy).toContain('fleet-dao');
+    }
+  });
+
+  it('读超时：写「N 秒没读完」，不一直等', async () => {
+    const r = await released(port({ history: () => new Promise<never>(() => {}) }), { timeoutMs: 30 });
+    expect(r).toMatchObject({ state: 'unreadable', why: expect.stringContaining('0.03 秒没读完') });
+  });
+});
+
+describe('releasedFromHistory', () => {
+  it('unhealthy、recovered 不算；后写的在前；limit 管条数', () => {
+    expect(releasedFromHistory(HISTORY, 2).map((c) => c.event)).toEqual(['rollback', 'release']);
+    expect(releasedFromHistory('')).toEqual([]);
+  });
+
+  it('只有 unhealthy 一行时不当成发布过', () => {
+    expect(releasedFromHistory(`2026-10-06T02:00:00Z ${LIVE} unhealthy`)).toEqual([]);
+  });
+});
+
+describe('GET /api/france/released-commits', () => {
+  it('登录后读得到，形状过校验', async () => {
+    const h = harness({ data: withSelf(), releaseCard: port({ history: async () => HISTORY }) });
+    const { cookie } = await h.login();
+    const res = await h.cockpit.request(RELEASED_PATH, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const body = ReleasedCommitsSchema.parse(await res.json());
+    expect(body.state).toBe('ok');
+  });
+
+  it('没登录：401，不泄漏提交', async () => {
+    const h = harness({ data: withSelf(), releaseCard: port({ history: async () => HISTORY }) });
+    const res = await h.cockpit.request(RELEASED_PATH);
+    expect(res.status).toBe(401);
+  });
+
+  it('没接上：200，整份写没接上（不是空列表）', async () => {
+    const h = harness({ data: withSelf() });
+    const { cookie } = await h.login();
+    const res = await h.cockpit.request(RELEASED_PATH, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    expect(ReleasedCommitsSchema.parse(await res.json()).state).toBe('unreadable');
   });
 });
 

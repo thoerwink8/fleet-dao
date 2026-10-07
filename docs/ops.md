@@ -715,7 +715,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 ### 驾驶舱「发布到法国」按钮（人工档，#1232）
 
-创始人在驾驶舱「法国」页的「发版」卡上点「发布到法国」（弹窗里写明要发的提交、CI 绿、带哪几个 PR、发完引擎总开关恢复到发版前），就是「对外发布」那一道人闸的同意（创始人 2026-10-07 约 19:30 在对话里同意这个设计）；这一点击在操作记录里记一条（谁、哪个提交、原话「驾驶舱点击发布」，动作 `release.request`）。
+创始人在驾驶舱「法国」页「在用版本」那一行点「发布到法国」（#1255，那一行写落后几个提交、要发的主线头；弹窗里写明要发的提交、CI 绿、带哪几个 PR、发完引擎总开关恢复到发版前），就是「对外发布」那一道人闸的同意（创始人 2026-10-07 约 19:30 在对话里同意这个设计）；这一点击在操作记录里记一条（谁、哪个提交、原话「驾驶舱点击发布」，动作 `release.request`）。
 - 后端（fleet，没有 root）只收一个参数「提交号」，核它等于此刻主线头、主线 CI 是绿的、法国在用的不是它、没有发版在走，然后往 `/var/lib/fleet-dao/release-request/request.json` 写一份 `{v,sha,at,by}`，**自己不起任何带 root 的进程**。请求目录归 fleet（750），`fleet-api.service` 的 `ReadWritePaths` 放行它。
 - root 的 `fleet-release-request.path`（`PathExists=` 请求文件）拉起 `fleet-release-request.service`（以 root 跑 `/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs`，源在 `deploy/france/release-request/`）。脚本把请求只当数据读：符号链接、超 1024 字节、键不对、提交号不是完整 40 位小写十六进制、不是主线的祖先、发布锁被占着或进度记录说有发版在走（进程还活着）、主线 CI 不是绿的或读不到，一律拒，原因写进 `/srv/fleet-dao-releases/.train/last-request.json`（驾驶舱读它告诉点的人），不动进度记录。读完马上删请求文件。
 - 过了核对就走一趟和 `release-train` 同样的发版：暂停法国引擎总开关 → 等在跑的会话收尾（最多 13 分钟，到点卡住，再点一次从头走）→ 部署检出快进、`release.sh <提交>` → 等发布历史末行是它 → `release.sh --check` → 验证 → 发完**恢复到发版前**（发版前开着的开回、关着的保持关；恢复不成功这一趟记 failed、页面红着，到环境页点开）。进度写进 `/srv/fleet-dao-releases/.train/release-train.json`（和 `release-train.json` 同一个格式，`.train` 归 root、后端只读，页面读它）。

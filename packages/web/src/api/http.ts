@@ -308,6 +308,8 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     releaseVersion: () => send('GET', apiUrl(R.releaseVersion.path), R.releaseVersion.response),
     franceReleaseState: () => send('GET', apiUrl(R.franceReleaseState.path), R.franceReleaseState.response),
     franceReleaseCard: () => send('GET', apiUrl(R.franceReleaseCard.path), R.franceReleaseCard.response),
+    franceReleasedCommits: () =>
+      send('GET', apiUrl(R.franceReleasedCommits.path), R.franceReleasedCommits.response),
     franceRelease: (sha) =>
       send('POST', apiUrl(R.franceRelease.path), R.franceRelease.response, {
         body: R.franceRelease.request.parse({ sha }),

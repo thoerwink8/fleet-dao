@@ -3,7 +3,8 @@
 // 旧地址 /env 由 routes/env.tsx 转到这里。
 //
 // 「发版一键」只到预检：命令后端写死 pnpm release:onekey preflight，不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做。
-// 真发版：点「发版」卡里的「发布到法国」（#1232，components/release-card.tsx；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
+// 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
+// 发版单位是主线提交（决定 0032）：那一行写明落后几个提交、要发的主线头提交号和标题；下面的「发版」卡只读。
 //
 // 数据从哪来（不新开接口）：
 // - /api/env（本台六项事实）、/api/jobs（定时任务）、发版状态和预检、/api/nodes（远程环境列表和快照，多台时并排）。
@@ -18,6 +19,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
 import {
+  errorText,
   isNotFound,
   useEnv,
   useFrancePreflight,
@@ -37,7 +39,7 @@ import type {
 import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { ReleaseCardBody } from '../components/release-card';
+import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { formatAgo } from '../lib/format';
@@ -414,6 +416,16 @@ export default function France() {
   // 只有一台（列表读成了、一台远程都没有）不画对照列。读列表失败也不画空的对照列，本台改用卡片，上面写明没读成。
   const comparing = remote.length > 0;
   const look = 'row' as const;
+  // 「在用版本」那一行的发布入口（#1255）：只给本台那一列；发版卡读不到写没查成和原因，不画一个点不了的假按钮。
+  const versionExtra = card.error ? (
+    <p className="mt-2 border-t pt-2 text-xs text-ink-stall" data-release-entry-unread>
+      发布入口没查成：{errorText(card.error)}
+    </p>
+  ) : !card.data ? (
+    <p className="mt-2 border-t pt-2 text-xs text-muted-foreground">正在读发布入口…</p>
+  ) : (
+    <ReleaseEntry card={card.data} now={now} />
+  );
 
   return (
     <Page
@@ -459,7 +471,7 @@ export default function France() {
               )
             }
           >
-            {factCells({ facts, now, kind: 'env', look, jobCount: jobList?.length })}
+            {factCells({ facts, now, kind: 'env', look, jobCount: jobList?.length, versionExtra })}
           </EnvColumn>
           {remote.map((n) => {
             const idx = received.findIndex((r) => r.id === n.id);
@@ -483,7 +495,14 @@ export default function France() {
             {factsSummary(facts) ? <> · {factsSummary(facts)}</> : null}
           </p>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
-            {factCells({ facts, now, kind: 'france', look: 'tile', jobCount: jobList?.length })}
+            {factCells({
+              facts,
+              now,
+              kind: 'france',
+              look: 'tile',
+              jobCount: jobList?.length,
+              versionExtra,
+            })}
           </div>
         </>
       )}
@@ -531,7 +550,7 @@ export default function France() {
         <div className="space-y-4">
           <Panel
             title="发版"
-            description="主线最新、法国在用、差几个、最近做完的一个任务；每一行读不到就写没查成和原因。"
+            description="主线最新、法国在用、差几个、最近做完的一个任务（只读）；每一行读不到就写没查成和原因。要发布，点上面「在用版本」那一行的「发布到法国」。"
           >
             {card.error ? (
               <LoadError what="发版卡" error={card.error} onRetry={() => void card.refetch()} />
@@ -543,7 +562,7 @@ export default function France() {
           </Panel>
           <Panel
             title="发版一键"
-            description="只到预检（只读）；真发版点上面「发版」卡里的「发布到法国」，或走 pnpm release:onekey start。"
+            description="只到预检（只读）；真发版点上面「在用版本」那一行的「发布到法国」，或走 pnpm release:onekey start。"
           >
             {release.error ? (
               <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
