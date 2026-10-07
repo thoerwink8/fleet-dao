@@ -1,18 +1,35 @@
 // 第二步：主页（一屏三块 + 持续状态）。每块的内容都来自真库，不是假数据。
-// 「在跑的」是三段流水线图（#914，react-flow）：每张在跑的单是一个节点 [data-id^="ticket:"]，卡片上 data-running-card 写它在哪一段；
+// 「在跑的」是初版那样的思维导图看板（React Flow + ELK：中心 → 三段 → 每张单；创始人 2026-10-07「react-flow 我还是喜欢初版那样」）：
+// 每张在跑的单是一个节点 [data-id^="ticket:"]，卡片上 data-running-card 写它在哪一段，三段节点上 data-flow-lane 写段名；
+// 排完版先「全部收进视野」，单子多时是远景（只剩单号），要看卡上的字先切到中景（midZoom）；
 // 这些段是用引擎自己的写法（db 的 startRun / finishRun）写进 runs 表的，不是直接塞行（packages/api/test/e2e/prepare.ts）。
 import { expect, test } from '../support/fixtures.ts';
 
 type Home = {
   health: { engine: { state: 'on' | 'off' | 'down' | 'unknown'; detail?: string } };
   decisions: { kind: string; id: string; title: string; link: string }[];
-  running: { issueNumber: number; title: string; segment: string | null; worker?: string; link: string }[];
+  running: {
+    issueNumber: number;
+    title: string;
+    segment: string | null;
+    worker?: string;
+    link: string;
+    waitingReason: string;
+    pendingDecision?: string;
+    lastEvent?: { tone: 'ok' | 'wait' | 'trouble' };
+  }[];
   done: { prNumber: number; title: string }[];
   flow: { segment: string; inFlight: number; avgMs?: number; samples: number }[];
 };
 
 const card = (page: import('@playwright/test').Page, issue: number) =>
   page.locator('[data-running-card]', { hasText: new RegExp(`#${issue}\\b`) });
+
+/** 切到中景：卡上出现标题、谁在做、最近一次事件（远景只剩单号）。 */
+async function midZoom(page: import('@playwright/test').Page) {
+  await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeVisible();
+  await page.getByRole('button', { name: /^中景/ }).click();
+}
 
 test.describe('主页', () => {
   test.beforeEach(async ({ login }) => login());
@@ -52,21 +69,25 @@ test.describe('主页', () => {
     expect(seg(17)).toBe('verify_pending');
     expect(seg(15)).toBe('scoping');
     await page.goto('/');
+    await midZoom(page);
     await expect(card(page, 12)).toHaveAttribute('data-running-card', 'doing');
     await expect(card(page, 17)).toHaveAttribute('data-running-card', 'verify_pending');
     await expect(card(page, 15)).toHaveAttribute('data-running-card', 'scoping');
     // #12 的卡上写着谁在做（动手那一笔跑在 Opus 5.5 上）
     await expect(card(page, 12)).toContainText('Opus 5.5');
-    // 泳道头：三段各自写在途几张和平均耗时（对题、动手有跑完的样本，验收没有 = 不给平均、不写 0）
+    // 三段节点：各自写在途几张和平均耗时（对题、动手有跑完的样本，验收没有 = 不给平均、不写 0）
     const lanes = page.locator('[data-flow-lane]');
     await expect(lanes).toHaveCount(3);
     await expect(page.locator('[data-flow-lane="manual"]')).toContainText('在途');
     await expect(page.locator('[data-flow-lane="verify"]')).not.toContainText(/平均 0/);
   });
 
-  test('点流水线上的单，进到那张单的详情', async ({ page, stack }) => {
+  test('单击看板上的单：右边滑出详情；点「打开单子详情」进到那张单的详情页', async ({ page, stack }) => {
     await page.goto('/');
     await card(page, 12).click();
+    const detail = page.locator('[data-board-detail]');
+    await expect(detail).toContainText('登录页加验证码');
+    await detail.getByRole('link', { name: /打开单子详情/ }).click();
     await expect(page).toHaveURL(new RegExp(`/tasks/${stack.facts.tasks.running}`));
     await expect(page.getByRole('heading', { name: /登录页加验证码/ })).toBeVisible();
   });
@@ -83,35 +104,68 @@ test.describe('主页', () => {
   // 不再是蓝色「在跑」。留着这条用例钉住它。
   test('停滞的单在图上画成出问题、写明原因，不装作在好好跑', async ({ page }) => {
     await page.goto('/');
+    await midZoom(page);
     await expect(card(page, 14)).toContainText('动手超时');
     await expect(card(page, 14)).toHaveAttribute('data-needs-founder', 'false');
   });
 
-  // 缺陷 D9（#902，#914 之后修）：1920×1080 上「验收」泳道的右边缘贴着面板边、被截掉一截。
-  // 根子是 react-flow 先按退路宽度排一遍、视口被居中到错位置；现在量到容器宽度才挂画布，泳道两头各留一条边距。
-  test('流水线图：每条泳道的左右边框都看得见，右边缘不贴面板边', async ({ page }) => {
+  // 原来 D9（#902）钉的是「泳道右边缘被面板截掉一截」；换成思维导图后同一件事是：排完版整张图收进画布里，一张卡都不被截。
+  test('看板：排完版整张图收进画布里（中心、三段、每张单都在画布框里，不被截掉）', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('[data-flow-board]')).toBeVisible();
-    const m = await page.evaluate(() => {
-      const frame = document.querySelector('[data-flow-board] .react-flow')?.getBoundingClientRect();
-      const lanes = [...document.querySelectorAll('.react-flow__node-lane')].map((n) =>
-        n.getBoundingClientRect(),
-      );
-      const vp = document.querySelector('.react-flow__viewport')?.getAttribute('style') ?? '';
-      return {
-        frame: frame && { left: frame.left, right: frame.right },
-        lanes: lanes.map((r) => ({ left: r.left, right: r.right })),
-        vp,
-      };
-    });
-    expect(m.frame).toBeTruthy();
-    const frame = m.frame as { left: number; right: number };
-    expect(m.lanes.length).toBe(3);
-    for (const l of m.lanes) {
-      expect(l.left, '泳道左边框要在面板里面').toBeGreaterThanOrEqual(frame.left + 4);
-      expect(l.right, '泳道右边框要在面板里面').toBeLessThanOrEqual(frame.right - 4);
-    }
-    expect(m.vp, '视口回原点，不带偏移').toContain('translate(0px, 0px)');
+    await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
+    // 收进视野是一段 450 毫秒的动画：等它停下再量
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => {
+            const frame = document.querySelector('[data-flow-board] .react-flow')?.getBoundingClientRect();
+            if (!frame) return ['没有画布'];
+            return [...document.querySelectorAll('.react-flow__node')]
+              .map((n) => ({ id: n.getAttribute('data-id'), r: n.getBoundingClientRect() }))
+              .filter(
+                ({ r }) =>
+                  r.left < frame.left ||
+                  r.right > frame.right ||
+                  r.top < frame.top ||
+                  r.bottom > frame.bottom,
+              )
+              .map(({ id }) => id);
+          }),
+        { message: '每张卡都在画布框里' },
+      )
+      .toEqual([]);
+  });
+
+  test('看板的交互照初版：「只看卡住的」只剩等你拍、出问题的；键盘 ? 打开快捷键说明', async ({
+    page,
+    api,
+  }) => {
+    const home = (await api.get('/api/home')) as Home;
+    await page.goto('/');
+    await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(home.running.length);
+    await page.getByRole('button', { name: /^只看卡住的/ }).click();
+    await expect(page).toHaveURL(/stuck=1/);
+    // 卡住的 = 等你拍（founder_decision 或挂着要你拍的事）、出问题（最近一次事件是 trouble）；按后端给的数据算，不按单号猜
+    const stuck = home.running.filter(
+      (r) =>
+        r.waitingReason === 'founder_decision' ||
+        r.pendingDecision !== undefined ||
+        r.lastEvent?.tone === 'trouble',
+    );
+    expect(
+      stuck.map((r) => r.issueNumber),
+      '#14 动手超时，算卡住',
+    ).toContain(14);
+    expect(stuck.length, '至少藏掉一张正常往前走的').toBeLessThan(home.running.length);
+    await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(stuck.length);
+    for (const r of stuck) await expect(card(page, r.issueNumber)).toHaveCount(1);
+    // 三段节点还在（过滤只藏单子）
+    await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
+    // React Flow 自己的外框也是 role=application：按名字认看板那一层
+    await page.getByRole('application', { name: /在跑的单的看板/ }).focus();
+    await page.keyboard.press('?');
+    await expect(page.getByRole('dialog', { name: /看板快捷键/ })).toBeVisible();
   });
 
   // 缺陷 D7（#902，#914 之后修）：「引擎 正常」只看配置里开没开引擎。现在开着的要真探到在线的工人；
@@ -166,46 +220,42 @@ test.describe('主页：深色主题和手机宽度', () => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow, '页面不该比屏幕宽').toBeLessThanOrEqual(1);
     await shot(page, '02-主页-手机');
-    // 流水线图在折叠线下面：滚到它再截一张
+    // 看板在折叠线下面：滚到它再截一张（手机上是树形列表，不是画布）
     await page.getByRole('heading', { name: '在跑的' }).scrollIntoViewIfNeeded();
-    await page.locator('[data-flow-board]').scrollIntoViewIfNeeded();
-    await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeVisible();
-    await shot(page, '02-主页-手机-流水线');
+    await page.locator('[data-board-tree]').scrollIntoViewIfNeeded();
+    await expect(page.locator('[data-running-card]').first()).toBeVisible();
+    await shot(page, '02-主页-手机-看板');
   });
 
-  // 缺陷 D11（#902，#914 之后修）：手机宽度上三条泳道横排、要横拖、还和页面竖向滚动抢手势。
-  // 现在窄屏改成三条泳道竖着叠：一路往下滑就能看全三段，不再横拖。
-  test('手机宽度：三条泳道竖着叠、一样宽、都在屏幕里，图上不拦手势（touch-action 留给竖向滑动）', async ({
+  // 原来 D11（#902）钉的是「手机上要横拖、和页面竖向滚动抢手势」。初版看板在手机上本来就不放画布：
+  // 退化成可折叠的树形列表（一段一组、每张单一张卡），一路往下滑就看全，没有画布也就不抢手势。
+  test('手机宽度：看板是树形列表，三段一段一组、卡都在屏幕里；没有画布、没有缩放按钮', async ({
     page,
+    api,
     shot,
   }) => {
+    const home = (await api.get('/api/home')) as Home;
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
-    const board = page.locator('[data-flow-stacked]');
-    await expect(board).toHaveAttribute('data-flow-stacked', 'true');
-    await expect(page.locator('.react-flow__node-lane')).toHaveCount(3);
-    const lanes = await page.evaluate(() =>
-      [...document.querySelectorAll('.react-flow__node-lane')].map((n) => {
+    const tree = page.locator('[data-board-tree]');
+    await expect(tree).toBeVisible();
+    await expect(page.locator('.react-flow')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '放大' })).toHaveCount(0);
+    await expect(tree.locator('[data-flow-lane]')).toHaveCount(3);
+    await expect(tree.locator('[data-running-card]')).toHaveCount(home.running.length);
+    const cards = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-board-tree] [data-running-card]')].map((n) => {
         const r = n.getBoundingClientRect();
-        return { left: r.left, right: r.right, top: r.top + window.scrollY };
+        return { left: r.left, right: r.right };
       }),
     );
-    for (const l of lanes) {
-      expect(l.left).toBeGreaterThanOrEqual(0);
-      expect(l.right, '泳道不超出屏幕').toBeLessThanOrEqual(390);
+    for (const c of cards) {
+      expect(c.left).toBeGreaterThanOrEqual(0);
+      expect(c.right, '卡片不超出屏幕').toBeLessThanOrEqual(390);
     }
-    expect(lanes[1]?.top).toBeGreaterThan(lanes[0]?.top ?? 0);
-    expect(lanes[2]?.top).toBeGreaterThan(lanes[1]?.top ?? 0);
-    expect(new Set(lanes.map((l) => Math.round(l.right - l.left))).size, '三条一样宽').toBe(1);
-    // 不拦手势：d3-zoom 默认给图写 touch-action:none，这里要被盖回 pan-y；也没有缩放按钮
-    const touch = await page.evaluate(
-      () => getComputedStyle(document.querySelector('.react-flow__renderer') as Element).touchAction,
-    );
-    expect(touch).toBe('pan-y');
-    await expect(page.getByRole('button', { name: '放大' })).toHaveCount(0);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow, '页面不该比屏幕宽').toBeLessThanOrEqual(1);
-    await board.scrollIntoViewIfNeeded();
-    await shot(page, '02-主页-手机-流水线-竖叠');
+    await tree.scrollIntoViewIfNeeded();
+    await shot(page, '02-主页-手机-看板-树形');
   });
 });

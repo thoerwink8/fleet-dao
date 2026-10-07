@@ -486,6 +486,7 @@ export function homeRunning(input: {
         ...(decision ? { pendingDecision: decision.title } : {}),
         ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
         link: `/tasks/${t.id}`,
+        taskId: t.id,
       };
     });
 }

@@ -1,4 +1,4 @@
-// 「在跑的」一张单的卡片（落在三段流水线图的某条泳道里）：单号、标题、谁在做、本段待了多久、在等谁拍什么、最近一次事件。
+// 「在跑的」一张单的卡片（手机上看板的树形列表里一行一张；颜色、说法的判法桌面看板的卡片也用）：单号、标题、谁在做、本段待了多久、在等谁拍什么、最近一次事件。
 //
 // 关键规矩（specs/509 第五节）：
 // - **verify_pending 不画成失败红**。它是「动手收了、验收还没起」的正常等待，单画一个色（stall 黄系）和「失败」红分开。
@@ -26,7 +26,7 @@ import { cn } from '../../lib/utils';
 import { useRemoteView } from '../node-notice';
 import type { HomeRunning } from './types';
 
-const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> = {
+export const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> = {
   scoping: '在对题',
   doing: '在动手',
   verifying: '在验收',
@@ -37,7 +37,7 @@ const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> = {
 /** segment 推不出（老单、runs 里没有流水）时卡上怎么写：不猜、不画成「卡住了」。 */
 const SEGMENT_NOT_WIRED = '在跑（还没记在哪一段）';
 
-const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
+export const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   queue: '排队',
   memory: '内存满，等空位',
   quota_reset: '等额度清零',
@@ -76,15 +76,22 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
   }
 }
 
+/** 卡片上那句「在哪一段」：排在对题、但一笔流水都还没有的，是排着队还没开始，不写「在对题」。 */
+export function statusTextOf(item: HomeRunning): string {
+  const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !needsFounder(item);
+  return item.segment === null
+    ? SEGMENT_NOT_WIRED
+    : notStarted
+      ? '还没开始对题'
+      : SEGMENT_LABEL[item.segment];
+}
+
 export function RunningCard({ item, className }: { item: HomeRunning; className?: string }) {
   const now = useNow();
   const { tone, icon: Icon } = toneOf(item);
   const founder = needsFounder(item);
   const since = (iso: string) => formatDuration(Math.max(0, now - Date.parse(iso)));
-  // 排在对题一栏、但一笔流水都还没有：是排着队还没开始，不写「在对题」
-  const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !founder;
-  const statusText =
-    item.segment === null ? SEGMENT_NOT_WIRED : notStarted ? '还没开始对题' : SEGMENT_LABEL[item.segment];
+  const statusText = statusTextOf(item);
   return (
     <div data-running-card={item.segment} data-needs-founder={founder} className={cn('h-full', className)}>
       <CardLink
@@ -171,19 +178,23 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
  * 整张卡片是个链接：看本台时进站内的单子详情；看别的环境的快照时站内详情读的是本台的库、对不上，
  * 改成指向 GitHub 上那张单（新窗口打开），拼不出链接（演示版）就不当链接。
  */
-function CardLink({
+export function CardLink({
   item,
   className,
   children,
+  label,
 }: {
   item: HomeRunning;
   className: string;
   children: ReactNode;
+  /** 链接只有图标、没有字时给读屏和悬停提示的话；不给就用单子标题。 */
+  label?: string;
 }) {
   const remote = useRemoteView();
+  const title = label ?? item.title;
   if (!remote) {
     return (
-      <Link to={item.link} title={item.title} className={className}>
+      <Link to={item.link} title={title} aria-label={label} className={className}>
         {children}
       </Link>
     );
@@ -195,11 +206,11 @@ function CardLink({
     item.issueNumber,
   );
   return href ? (
-    <a href={href} target="_blank" rel="noreferrer" title={item.title} className={className}>
+    <a href={href} target="_blank" rel="noreferrer" title={title} aria-label={label} className={className}>
       {children}
     </a>
   ) : (
-    <div title={item.title} className={className}>
+    <div title={title} className={className}>
       {children}
     </div>
   );

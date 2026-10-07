@@ -1254,6 +1254,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             ...(decision ? { pendingDecision: decision.title } : {}),
             ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
             link: `/tasks/${t.task.id}`,
+            taskId: t.task.id,
           };
         });
       const flow = flowStages(st.tasks.flatMap(viewsOf), running);
