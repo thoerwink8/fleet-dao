@@ -34,3 +34,4 @@
 | [0028](0028-unattended-holds-the-turn.md) | 无人值守时会话这一轮不结束：只有自己跑了 `unattended.mjs on` 才挡收尾，盯工人（`watch --wait 55`）、记进度；12 小时、20 次空转、工人都收口等自动放行；工人那一层保留 | 生效 |
 | [0029](0029-e2e-nightly-full-pr-changed-pages.md) | e2e 拆开：回归每夜在主线全量跑，PR 只点改动页（#1186）；「页面点验」和 CI 的 e2e 分开叫 | 采纳；第 3 条待 #1186 落地 |
 | [0030](0030-unattended-uses-subagents.md) | 无人值守、过夜也用 Agent 子代理，不脱离会话；脱离的工人只在创始人明说时用 | 采纳；替代 0024 的无人值守例外和 0026、0028 的工人那一层 |
+| [0031](0031-engine-intake-gate.md) | 引擎拉单门加判断：改 .github/workflows 的、被开着的 PR 引用的单不拉；pr:open --new-issue 自动贴本机做；单关了撤任务（#1194、#1197、#1198、#1199） | 采纳 |
