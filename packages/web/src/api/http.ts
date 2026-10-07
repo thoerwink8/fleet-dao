@@ -307,6 +307,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     },
     releaseVersion: () => send('GET', apiUrl(R.releaseVersion.path), R.releaseVersion.response),
     franceReleaseState: () => send('GET', apiUrl(R.franceReleaseState.path), R.franceReleaseState.response),
+    franceReleaseCard: () => send('GET', apiUrl(R.franceReleaseCard.path), R.franceReleaseCard.response),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
     demoLinks: () => send('GET', apiUrl(R.demoLinks.path), R.demoLinks.response),
     async createDemoLink(body) {

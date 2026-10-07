@@ -180,6 +180,15 @@ export {
   type Reconciler,
   type ReconcilerOptions,
 } from './reconcile.ts';
+export {
+  type CiFact,
+  type CommitFact,
+  type CompareFact,
+  createReleaseFacts,
+  type MergedPullFact,
+  RELEASE_CHECK_NAME,
+  type ReleaseFactsReader,
+} from './release-facts.ts';
 export { type BranchRules, type RepoFacts, RepoFactsCache } from './repos.ts';
 export {
   type SyncMainlineDeps,

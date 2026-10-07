@@ -58,3 +58,82 @@ export const FrancePreflightResponseSchema = z.discriminatedUnion('state', [
 
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
 export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
+
+/**
+ * 「发版」卡（#1231，GET /france/release-card）：创始人要在驾驶舱上直接看「现在主线是哪个提交、法国跑的是哪个、有多少没发、最近做完了什么」。
+ * 四行各自带「查成了 / 没查成 + 原因」（一行读不到不连累别的行）；读不到 GitHub、读不到法国在用的提交，那一行写没查成和原因，
+ * 不拿空、0 或「已是最新」顶。只读，不带任何会改法国的东西。
+ */
+const CommitLine = z.object({
+  /** 40 位全号。 */
+  sha: z.string(),
+  short: z.string(),
+  title: z.string(),
+  /** 提交时间。 */
+  at: Time,
+});
+
+/** 主线头汇总检查（check）的结果：绿、红、在跑，读不到另说。 */
+export const ReleaseCardCiSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('green') }),
+  z.object({ state: z.literal('red'), detail: z.string() }),
+  z.object({ state: z.literal('pending'), detail: z.string() }),
+  z.object({ state: z.literal('unreadable'), why: z.string() }),
+]);
+
+export const ReleaseCardSchema = z.object({
+  /** ① 主线最新提交和它的 CI。 */
+  mainline: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), commit: CommitLine, ci: ReleaseCardCiSchema }),
+    z.object({ state: z.literal('unreadable'), why: z.string() }),
+  ]),
+  /** ② 法国在用的提交。在用的提交号读到了、标题或发于何时没读到时，那一项各自带原因（不拿空串顶）。 */
+  deployed: z.discriminatedUnion('state', [
+    z.object({
+      state: z.literal('ok'),
+      sha: z.string(),
+      short: z.string(),
+      title: z.string().nullable(),
+      titleWhy: z.string().nullable(),
+      /** 发于何时（发布历史里这个提交最近一次切上去的时间）。 */
+      deployedAt: Time.nullable(),
+      deployedAtWhy: z.string().nullable(),
+    }),
+    z.object({ state: z.literal('unreadable'), why: z.string() }),
+  ]),
+  /** ③ 两者相差几个提交，最近 5 个合进去的 PR。 */
+  gap: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('same') }),
+    z.object({
+      state: z.literal('ahead'),
+      count: z.number().int().min(1),
+      prs: z.array(z.object({ number: z.number().int(), title: z.string() })).max(5),
+      /** 最近一页提交里不是 PR 合并的（提交说明末尾没有 (#号)）个数。 */
+      nonPr: z.number().int().min(0),
+    }),
+    z.object({ state: z.literal('unreadable'), why: z.string() }),
+  ]),
+  /** ④ 最近做完的一个任务：主线最近合并的一个 PR 和它关的单。 */
+  lastDone: z.discriminatedUnion('state', [
+    z.object({
+      state: z.literal('ok'),
+      pr: z.object({ number: z.number().int(), title: z.string(), mergedAt: Time }),
+      /** 它写了 Closes 的单：没写、读到、没读到各一种。 */
+      issue: z.discriminatedUnion('state', [
+        z.object({ state: z.literal('none') }),
+        z.object({
+          state: z.literal('ok'),
+          number: z.number().int(),
+          title: z.string(),
+          /** 同一个 PR 还写了 Closes 的别的单。 */
+          alsoCloses: z.array(z.number().int()),
+        }),
+        z.object({ state: z.literal('unreadable'), number: z.number().int(), why: z.string() }),
+      ]),
+    }),
+    z.object({ state: z.literal('unreadable'), why: z.string() }),
+  ]),
+  asOf: Time,
+});
+
+export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;

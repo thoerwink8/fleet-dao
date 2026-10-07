@@ -16,6 +16,7 @@ import type {
   Store,
   WorkflowControl,
 } from './ports.ts';
+import type { ReleaseCardPort } from './release-card.ts';
 import type { ReleaseSource } from './release-version.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
@@ -90,6 +91,11 @@ export interface Deps {
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。
    */
   franceRelease?: FranceReleasePort | undefined;
+  /**
+   * /france 页「发版」卡（#1231，release-card.ts）：读 GitHub 上主线头、CI、PR，和法国在用的提交（发布目录）。
+   * 只在正式环境装配（main.ts 的 liveReleaseCardPort）；没给时接口照样回，四行都写「没接上 + 原因」，不拿「已是最新」顶。
+   */
+  releaseCard?: ReleaseCardPort | undefined;
   /**
    * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。意图卡的长轮询（intent-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。

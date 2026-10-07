@@ -107,7 +107,7 @@ export function registerReleaseRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
 }
 
 /** 到时限就不等了：实现不认 signal（不停下来）也照样按读不到报。 */
-function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason);

@@ -21,7 +21,11 @@ import {
 } from './demo.ts';
 import { RepoDispatchResponse, UpdateRepoDispatchRequest, UpdateRepoDispatchResponse } from './dispatch.ts';
 import { EnvResponseSchema } from './env.ts';
-import { FrancePreflightResponseSchema, FranceReleaseStateSchema } from './france-release.ts';
+import {
+  FrancePreflightResponseSchema,
+  FranceReleaseStateSchema,
+  ReleaseCardSchema,
+} from './france-release.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
 import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
@@ -77,6 +81,8 @@ export const WebRoutes = {
   env: { method: 'GET', path: '/env', response: EnvResponseSchema },
   /** /france 页发版一键（#618）：release-train 此刻的状态（在走、暂停、没在走、读不到）。只读。 */
   franceReleaseState: { method: 'GET', path: '/france/release-state', response: FranceReleaseStateSchema },
+  /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务。只读，每一行各自带没查成的原因。 */
+  franceReleaseCard: { method: 'GET', path: '/france/release-card', response: ReleaseCardSchema },
   /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
   /** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
