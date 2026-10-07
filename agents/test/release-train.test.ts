@@ -561,6 +561,58 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
     expect(text(w.err)).toContain('主线 CI 不是绿的');
     expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
+
+  // 2026-10-07 夜：GitHub 的 check-runs 接口连着回 HTTP 500 一个多小时，发版车读不到 CI 就整个卡住。
+  // 后备：check-runs 读不出时，点名的提交改看它的 ci 工作流运行。
+  const checkRunsDown = (
+    base: ReturnType<ReturnType<typeof makeWorld>['io']>,
+    runs: { status: string; conclusion: string | null }[] | 'unreadable',
+  ) =>
+    ({
+      ...base,
+      run: (c: string, a: string[]) => {
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs'))
+          return { status: 1, stdout: '', stderr: 'gh: HTTP 500' } as CmdResult;
+        if (c === 'gh' && a[0] === 'api' && a[1] === `repos/{owner}/{repo}/commits/${SHA}`)
+          return ok(`${SHA}\n`);
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('actions/runs'))
+          return runs === 'unreadable'
+            ? ({ status: 1, stdout: '', stderr: 'gh: HTTP 500' } as CmdResult)
+            : ok(JSON.stringify(runs));
+        return base.run(c, a);
+      },
+    }) as typeof base;
+
+  it('check-runs 接口读不出：后备看 ci 工作流运行，绿了照样放行', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const code = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      checkRunsDown(io(home), [{ status: 'completed', conclusion: 'success' }]),
+    );
+    expect(code).toBe(0);
+    expect(releaseCalls(w.sshCalls).length).toBeGreaterThan(0);
+  });
+
+  it('【故意造出的失败】check-runs 读不出、后备里 ci 运行是红的：预检拒；两处都读不出也拒（不当成绿）', async () => {
+    const red = makeWorld();
+    const redCode = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      checkRunsDown(red.io(freshHome()), [{ status: 'completed', conclusion: 'failure' }]),
+    );
+    expect(redCode).toBe(2);
+    expect(text(red.w.err)).toContain('CI 是红的');
+    expect(releaseCalls(red.w.sshCalls)).toEqual([]);
+
+    const down = makeWorld();
+    const downCode = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      checkRunsDown(down.io(freshHome()), 'unreadable'),
+    );
+    expect(downCode).toBe(2);
+    expect(text(down.w.err)).toContain('后备也读不到');
+    expect(releaseCalls(down.w.sshCalls)).toEqual([]);
+  });
 });
 
 describe('abort：恢复原状', () => {
