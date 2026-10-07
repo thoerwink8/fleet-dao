@@ -61,7 +61,16 @@ const mirasim = target({
 
 interface Harness {
   deps: RouteProbeJobDeps;
-  saved: { routeId: string; state: string; at: Date; detail: string; org: string | null }[];
+  saved: {
+    routeId: string;
+    state: string;
+    at: Date;
+    detail: string;
+    org: string | null;
+    durationMs: number | null;
+    requestText: string | null;
+    responseText: string | null;
+  }[];
   finished: { id: number; result: ScheduleResult }[];
   sleeps: number[];
   after: { routeId: string; attempt: ProbeAttempt }[];
@@ -261,6 +270,30 @@ describe('一轮里读会话用户挂的组织', () => {
     const run = await runRouteProbeJob(h.deps);
     expect(h.saved).toEqual([]);
     expect(run).toMatchObject({ outcome: 'partial', scanned: 2, found: 2, online: [] });
+  });
+
+  it('真探把耗时、请求和响应交给写入；没探的这三样是空', async () => {
+    const meter = target({ routeId: 'meter', billing: 'metered', orgKind: null, poolId: 'meter' });
+    const h = harness([carpool, meter], async () => ({
+      kind: 'answered',
+      detail: '答上了：OK',
+      durationMs: 1234,
+      requestText: 'PING',
+      responseText: 'OK',
+    }));
+    await runRouteProbeJob(h.deps);
+    expect(h.saved.find((s) => s.routeId === carpool.routeId)).toMatchObject({
+      state: 'ok',
+      durationMs: 1234,
+      requestText: 'PING',
+      responseText: 'OK',
+    });
+    expect(h.saved.find((s) => s.routeId === 'meter')).toMatchObject({
+      state: 'skipped',
+      durationMs: null,
+      requestText: null,
+      responseText: null,
+    });
   });
 
   it('读法自己抛了：按认不出记（写明原因），这一轮照样跑完', async () => {
