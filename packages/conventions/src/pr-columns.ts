@@ -124,6 +124,38 @@ export function issueColumnRefs(body: string): { closes: number[]; refs: number[
   return { closes: closingIssues(col, THIS_REPO), refs: [...refs].sort((a, b) => a - b) };
 }
 
+/** 一行里写了「分片、关不了它」这类话：Refs 在这一行是有意只挂不关（母单的一片），不当成做完了。 */
+const SLICE_WORDS = /分片|关不了|不关单|没做完|未做完/;
+
+/** 「需求」栏里挂的一张单：怎么挂的（Closes 或 Refs），那一行有没有写明「分片、关不了」。 */
+export interface IssueColumnLink {
+  number: number;
+  kind: 'closes' | 'refs';
+  /** 写明是分片：合并时收口、每日对账都不把它当成「做完了」（#995 拍 1）。 */
+  slice: boolean;
+}
+
+/**
+ * 「需求」栏里逐行读出挂的单（同仓的，从小到大，同一张单 Closes 压过 Refs）。和 issueColumnRefs 认法相同，多给一样：
+ * 那一行有没有写「分片、关不了它」之类的话。合并时自动收口（close-on-merge.ts）和每日对账（github-audit.ts）靠它分开
+ * 「做完了没人关」和「有意只挂不关」。
+ */
+export function issueColumnLinks(body: string): IssueColumnLink[] {
+  const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase()) ?? '';
+  const found = new Map<number, IssueColumnLink>();
+  for (const line of col.split('\n')) {
+    const slice = SLICE_WORDS.test(line);
+    for (const number of closingIssues(line, THIS_REPO)) {
+      found.set(number, { number, kind: 'closes', slice });
+    }
+    for (const m of line.matchAll(REFS)) {
+      const number = Number(m[1]);
+      if (!found.has(number)) found.set(number, { number, kind: 'refs', slice });
+    }
+  }
+  return [...found.values()].sort((a, b) => a.number - b.number);
+}
+
 /**
  * 「需求」栏里第一个 #号（不看标题）：关单对账认合并了的 PR 挂的是哪张单，都从这来（#460）；
  * linkedIssue 在这基础上加了标题兜底。

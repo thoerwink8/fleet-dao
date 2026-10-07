@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   GATE_LINE,
+  issueColumnLinks,
   issueColumnRefs,
   linkedIssue,
   OPTIONAL_COLUMNS,
@@ -138,5 +139,26 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
   it('旧模板的「怎么验证的」「还欠什么」（#1066 删）读旧 PR 正文时还认得出栏的边界，不吞进需求栏', () => {
     expect(prColumns('需求：Closes #12\n还欠什么：无').get('需求')).toBe('Closes #12');
     expect(prColumns('做了什么：x\n怎么验证的：跑了\n需求：Refs #7').get('做了什么')).toBe('x');
+  });
+});
+
+describe('issueColumnLinks：合并收口和对账靠它分开「做完了没人关」和「有意只挂不关」（#995）', () => {
+  it('逐行读：Closes 压过 Refs，号从小到大，只认同仓', () => {
+    expect(issueColumnLinks('**需求**：Refs #9\nCloses #12\nRefs #12\nRefs o/r#5')).toEqual([
+      { number: 9, kind: 'refs', slice: false },
+      { number: 12, kind: 'closes', slice: false },
+    ]);
+  });
+
+  it('那一行写了「分片」「关不了」之类：slice 为真，别的行不受影响', () => {
+    expect(issueColumnLinks('**需求**：Refs #9（分片，关不了它）\nRefs #10')).toEqual([
+      { number: 9, kind: 'refs', slice: true },
+      { number: 10, kind: 'refs', slice: false },
+    ]);
+  });
+
+  it('没写、只写「无」、不在需求栏里：读不到', () => {
+    expect(issueColumnLinks('**需求**：无')).toEqual([]);
+    expect(issueColumnLinks('**做了什么**：Refs #9')).toEqual([]);
   });
 });

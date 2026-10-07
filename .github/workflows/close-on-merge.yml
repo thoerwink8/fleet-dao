@@ -1,0 +1,32 @@
+name: close-on-merge
+# 合并时收口（#995 拍 1 的 A，决定 0020 第 1 条，packages/conventions/src/close-on-merge.ts）：PR 合并后，读它「需求」栏挂的单，
+# 做完了没人关的（Refs 的叶子单、没有别的开着的 PR 还挂着它）用 issueClose 的逻辑关掉，其余照实列出为什么没碰。
+# 用 pull_request_target：跑的是主线上的代码，不检出、不跑 PR 里的东西；PR 的号和内容按 API 现读。
+# 红了只是这一轮没收成（读不到 GitHub、关单报错），不挡任何事；每日 github-audit 会兜底报「有合并 PR 提到、却还开着」。
+# 退出码：0 = 收完了；1 = 参数不对；2 = 没查成、没关成。
+on:
+  pull_request_target:
+    types: [closed]
+concurrency:
+  group: close-on-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+jobs:
+  close:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/close-on-merge.ts --pr ${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
