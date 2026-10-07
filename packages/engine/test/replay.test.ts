@@ -21,6 +21,7 @@ const REQUIRED = [
   'task-merging',
   'task-paused',
   'task-reworked',
+  'task-repinned',
 ];
 
 const HOW =
@@ -72,6 +73,19 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     const plain = readFileSync(`${DIR}task-merged.json`, 'utf8');
     expect(plain).not.toContain('taskPause');
     expect(plain).not.toContain(marker);
+  });
+
+  it('task-repinned 夹具真走过「现在就换」那一支（#1216）：历史里有 taskRepin 信号和 task-repin 的 patched 标记；老夹具里没有这两样', () => {
+    const text = readFileSync(`${DIR}task-repinned.json`, 'utf8');
+    expect(text).toContain('taskRepin');
+    const marker = Buffer.from(JSON.stringify({ id: 'task-repin', deprecated: false })).toString('base64');
+    expect(text).toContain(marker);
+    // 对照：老夹具里没有（新分支被 patched('task-repin') 守着，老任务照老步序重放）
+    for (const old of ['task-merged', 'task-paused', 'task-reworked']) {
+      const plain = readFileSync(`${DIR}${old}.json`, 'utf8');
+      expect(plain).not.toContain('taskRepin');
+      expect(plain).not.toContain(marker);
+    }
   });
 
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {

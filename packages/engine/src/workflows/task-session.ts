@@ -19,7 +19,16 @@ import {
 } from '../task-contract.ts';
 import { failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { Abandoned, type Avoid, bump, NO_AVOID, PausedInterrupt, widen, ZERO } from './task-support.ts';
+import {
+  Abandoned,
+  type Avoid,
+  bump,
+  NO_AVOID,
+  PausedInterrupt,
+  RepinInterrupt,
+  widen,
+  ZERO,
+} from './task-support.ts';
 
 /**
  * 动手会话：选路 → 起 → 没跑成按失败分流（原路重试 / 换路由 / 换模型 / 挂起）。会话只试一次，换谁由这里定。
@@ -79,6 +88,15 @@ export async function writeSession(
         // 被人暂停停下的这一段（借 org_switch 的位置，task-contract.ts 的 PAUSED_BY_HUMAN）：不算失败、不记账、不换模型；
         // 回到循环头停在检查点，继续后在原分支原树上重跑，提示词带上被停下的原因
         interrupted = rt.pauseNote(error.command);
+        continue;
+      }
+      if (error instanceof RepinInterrupt) {
+        // 被「现在就换」停下的这一段（#1216，也借 org_switch 的位置）：不算失败、不记账；不停下等人，直接回循环头重新选路——
+        // 选路现读驾驶舱写好的指定，新模型原分支原树重跑，提示词带上被停下的原因。人明说要换，不粘上一条路由、
+        // 也不带着之前失败攒下的避开（避开里要是有他指定的那个模型，选路就派不出了）
+        interrupted = rt.repinNote(error.command);
+        stick = undefined;
+        avoid = NO_AVOID;
         continue;
       }
       infra = error;

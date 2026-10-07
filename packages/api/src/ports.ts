@@ -6,6 +6,7 @@ import type {
   ContinueCommand,
   PauseCommand,
   RealtimeTable,
+  RepinCommand,
   Repo,
   TASK_SIGNAL_NAMES,
 } from '@fleet-dao/shared';
@@ -15,14 +16,15 @@ export * from '@fleet-dao/store';
 // —— 发给工作流的信号（Temporal）——
 
 /**
- * 驾驶舱后端能发给任务工作流的信号：只有引擎里真有人听的三个（继续、放弃、暂停；名字和参数形状在 shared/task-signals.ts，引擎的 defineSignal
+ * 驾驶舱后端能发给任务工作流的信号：只有引擎里真有人听的四个（继续、放弃、暂停、现在就换模型；名字和参数形状在 shared/task-signals.ts，引擎的 defineSignal
  * 用同一份）。以前这里还列着 pause / reroute / answer / requireApproval / agentEvent，引擎里没有一个接收处，发出去等于没发（#901）；
  * 要加新信号，先在引擎里接上、在 shared/task-signals.ts 里定名字，再回这里加。路由叫醒（taskRouteWake）只有引擎进程自己发。
  */
 export type TaskSignal =
   | ({ name: typeof TASK_SIGNAL_NAMES.continue } & ContinueCommand)
   | ({ name: typeof TASK_SIGNAL_NAMES.abandon } & AbandonCommand)
-  | ({ name: typeof TASK_SIGNAL_NAMES.pause } & PauseCommand);
+  | ({ name: typeof TASK_SIGNAL_NAMES.pause } & PauseCommand)
+  | ({ name: typeof TASK_SIGNAL_NAMES.repin } & RepinCommand);
 
 export interface WorkflowControl {
   /**

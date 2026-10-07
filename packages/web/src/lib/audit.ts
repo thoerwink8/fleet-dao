@@ -15,6 +15,7 @@ const ACTION_LABEL: Record<string, string> = {
   'task.resume': '继续了',
   'task.stop': '叫停了',
   'task.reroute': '换了路由',
+  'task.repin': '让动手会话现在就换了模型',
   'ask.answer': '回答了追问',
   'ask.close': '关闭了旧追问',
   'notification.resolve': '处理了提醒',

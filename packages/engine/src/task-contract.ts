@@ -8,6 +8,7 @@ import {
   type AbandonCommand,
   type ContinueCommand,
   type PauseCommand,
+  type RepinCommand,
   type RouteWakeCommand,
   TASK_SIGNAL_NAMES,
 } from '@fleet-dao/shared/task-signals';
@@ -91,12 +92,13 @@ export interface TaskRun {
 
 // 信号的名字和参数形状在 shared/task-signals.ts：驾驶舱后端发信号也从那里拿，两边不各拼一遍（#901）。
 // 路由叫醒（RouteWakeCommand）只有引擎进程自己发（real/route-wake.ts），信号丢了也不会等超过 MAX_ROUTE_WAIT_SECONDS。
-export type { AbandonCommand, ContinueCommand, PauseCommand, RouteWakeCommand };
+export type { AbandonCommand, ContinueCommand, PauseCommand, RepinCommand, RouteWakeCommand };
 
 export const taskContinueSignal = defineSignal<[ContinueCommand]>(TASK_SIGNAL_NAMES.continue);
 export const taskAbandonSignal = defineSignal<[AbandonCommand]>(TASK_SIGNAL_NAMES.abandon);
 export const taskRouteWakeSignal = defineSignal<[RouteWakeCommand]>(TASK_SIGNAL_NAMES.routeWake);
 export const taskPauseSignal = defineSignal<[PauseCommand]>(TASK_SIGNAL_NAMES.pause);
+export const taskRepinSignal = defineSignal<[RepinCommand]>(TASK_SIGNAL_NAMES.repin);
 export const taskStatusQuery = defineQuery<TaskStatus>('taskStatus');
 
 // ---- 新增的活动（EngineActivities 里的「任务」一组）

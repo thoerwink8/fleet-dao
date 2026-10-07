@@ -1507,6 +1507,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       if (TERMINAL.has(tv.task.state)) {
         throw new ApiError(409, 'task_finished', `任务已经结束（${tv.task.state}），不用再指定模型`);
       }
+      // 「现在就换」（#1216）和真后端同样先核：只有动手段；单子在跑、没暂停、动手这一段开着。不行 409、什么都不改
+      if (body.now) {
+        const no = (code: string, why: string) => {
+          throw new ApiError(409, code, `${why}去掉「现在就换」只改指定，下一次选路起生效`);
+        };
+        if (body.segment !== 'manual')
+          no('repin_segment_unsupported', '验收这一段不能「现在就换」：它不在能当场停下重跑的那条路上。');
+        if (tv.task.state !== 'running')
+          no('task_not_running', `这张单现在不在跑（${tv.task.state}），没有正在跑的动手会话可换。`);
+        if (tv.task.paused !== undefined)
+          no('task_paused', `这张单已经暂停了（${tv.task.paused}），没有正在跑的动手会话。`);
+        const open = (tv.segmentRuns ?? []).filter((r) => r.endedAt === undefined && r.outcome === undefined);
+        if (!open.some((r) => r.segment === 'manual')) {
+          no(
+            'segment_not_running',
+            open.length > 0
+              ? `在跑的是「${[...new Set(open.map((r) => r.segment))].join('、')}」，不是动手这一段，没有正在跑的动手会话可换。`
+              : '动手这一段现在没有在跑的会话（库里没有开着的一笔）。',
+          );
+        }
+      }
       // 和真后端（db 的 setTaskRoutePin）同样核对：模型在目录里、钉的路由是这个模型的
       if (body.modelId !== null) {
         const model = st.models.find((m) => m.id === body.modelId);
@@ -1539,6 +1560,15 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         },
         via: 'cockpit',
       });
+      if (body.now) {
+        audit({
+          actor: meActor(),
+          action: 'task.repin',
+          target: `task:${taskId}`,
+          after: { segment: body.segment },
+          via: 'cockpit',
+        });
+      }
       emit('tasks', taskId);
       return after;
     },

@@ -3,7 +3,7 @@
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { RouteChoice } from '../ports.ts';
-import type { AbandonCommand, PauseCommand } from '../task-contract.ts';
+import type { AbandonCommand, PauseCommand, RepinCommand } from '../task-contract.ts';
 
 /** 放弃：从各处抛到最外层收尾。 */
 export class Abandoned extends Error {
@@ -21,6 +21,16 @@ export class PausedInterrupt extends Error {
   constructor(command: PauseCommand) {
     super(`被 ${command.by} 暂停`);
     this.name = 'PausedInterrupt';
+    this.command = command;
+  }
+}
+
+/** 「现在就换」把正在跑的动手会话取消了（#1216）：从 cancellable 抛到动手会话那一段，那里不停下等人，直接回选路、按新指定的模型原分支重跑。 */
+export class RepinInterrupt extends Error {
+  readonly command: RepinCommand;
+  constructor(command: RepinCommand) {
+    super(`${command.by} 要求现在就换模型`);
+    this.name = 'RepinInterrupt';
     this.command = command;
   }
 }
