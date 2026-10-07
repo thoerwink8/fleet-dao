@@ -520,6 +520,45 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
     expect(text(w.err)).toContain('主线 CI 红了');
     expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
+
+  // 2026-10-07 夜：主线上自动合并一个接一个进来，主线头的 CI 每次被新合并取消重跑，「主线头 CI 空下来」等了 21 分钟都等不到。
+  // 发出去的是要发的那个提交，看它自己的 CI；不看主线头。
+  it('看的是要发的提交的 CI，不是主线头：预检、等收尾读的都是 commits/<提交号>/check-runs', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    const refs: string[] = [];
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) refs.push(a[1]);
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(0);
+    expect(refs.length).toBeGreaterThanOrEqual(2);
+    for (const r of refs) expect(r).toContain(`commits/${SHA}/check-runs`);
+  });
+
+  it('【故意造出的失败】要发的提交的 CI 红：预检就拒，什么都不动；不因为主线头是绿的放行', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) {
+          // 只有要发的提交是红的；要是还去读 commits/main，这里回绿，预检就会错放行
+          const red = a[1].includes(`commits/${SHA}/`);
+          return ok(JSON.stringify([{ status: 'completed', conclusion: red ? 'failure' : 'success' }]));
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('主线 CI 不是绿的');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+  });
 });
 
 describe('abort：恢复原状', () => {
