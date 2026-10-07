@@ -1,3 +1,4 @@
+import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
@@ -23,11 +24,25 @@ import type { RoutingLayersPort } from './routing-layers.ts';
 import type { RoutingOrderPort } from './routing-order.ts';
 import type { TaskRoutePinsPort } from './task-route-pins.ts';
 
+/** 驾驶舱点「重做」时交给引擎的那一口（真装配在 temporal.ts，用 Temporal 起下一代）。 */
+export interface TaskRedoPort {
+  redo(input: {
+    taskId: string;
+    issueNumber: number;
+    title: string;
+    repo: Repo;
+  }): Promise<{ ok: true; workflowId: string; generation: number } | { ok: false; why: string }>;
+}
+
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
 export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
+  /**
+   * 被撤或挂起的任务重做（shared/task-redo.ts）：同一张单另起一代。没给（开发环境没有 Temporal）时重做回 503，不假装起了。
+   */
+  taskRedo?: TaskRedoPort | undefined;
   changes: ChangeFeed;
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;

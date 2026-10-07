@@ -32,6 +32,7 @@ import {
   type SettingKey,
   SettingsResponse,
   TASK_SIGNAL_NAMES,
+  type Task,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -94,7 +95,13 @@ import {
 /** 读旧 pool-hold 提醒时最多翻几页没处理的提醒（每页 200 条）；翻不完明说没读全，不拿「没有」顶。 */
 const LEGACY_ALERT_PAGES = 5;
 
-const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
+const ACTION_WORDS = {
+  pause: '暂停',
+  resume: '继续',
+  stop: '叫停',
+  reroute: '换路由',
+  redo: '重做',
+} as const;
 
 /** 叫停没写原因时补的一句话：引擎的放弃信号 reason 必填（task-contract.ts 的 AbandonCommand），工作流拿它写状态。 */
 const DEFAULT_STOP_REASON = '驾驶舱上点了叫停';
@@ -123,10 +130,21 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
    * 信号没发成再追加一条 ok=false 的记录（工作流不在了 409、拼不出编号 404、Temporal 没接上或连不上 503、别的 502），
    * 每一种都给驾驶舱一句人话原因；这一条也写不进时只能留日志，但不改变返回给人的结果。
    */
+  async function workflowIdForSignal(taskId: string): Promise<string> {
+    const fallback = await taskWorkflowIdForTask(store, taskId);
+    const lookup = deps.workflows.runningTaskWorkflow;
+    if (!lookup) return fallback;
+    const task = await store.getTask(taskId);
+    if (!task) return fallback;
+    const repo = await store.getRepo(task.repoId);
+    if (!repo) return fallback;
+    return lookup({ owner: repo.owner, name: repo.name }, task.issueNumber);
+  }
+
   async function signalAndAudit(taskId: string, signal: TaskSignal, audit: NewAuditEntry): Promise<void> {
     await store.appendAudit(audit);
     try {
-      const workflowId = await taskWorkflowIdForTask(store, taskId);
+      const workflowId = await workflowIdForSignal(taskId);
       await deps.workflows.signal(workflowId, signal);
     } catch (err) {
       const gone = err instanceof WorkflowGoneError;
@@ -378,12 +396,62 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
   }
 
+  async function markRedoFailed(audit: NewAuditEntry, error: string): Promise<void> {
+    try {
+      await store.appendAudit({ ...audit, ok: false, error });
+    } catch (auditErr) {
+      deps.log.error('重做没做成，这条失败记录也没写进去', { error, auditError: String(auditErr) });
+    }
+  }
+
+  /** 重做不叫停、不改叫停的语义：只在已叫停或挂起时另起一代。做完、失败仍拒绝。库里的状态留给新工作流自己写，这里不改回排队。 */
+  async function redoAndAudit(c: Context<CockpitEnv>, task: Task): Promise<void> {
+    if (task.state !== 'stopped' && task.state !== 'stalled') {
+      throw new ApiError(409, 'redo_not_allowed', `这张单现在是${task.state}，只有已叫停或挂起的才能重做`);
+    }
+    if (!deps.taskRedo) throw new ApiError(503, 'redo_not_wired', '开发环境没有 Temporal，重做没起');
+    const audit: NewAuditEntry = {
+      actor: actorOf(c),
+      action: 'task.redo',
+      target: `task:${task.id}`,
+      via: c.get('via'),
+      ok: true,
+    };
+    await store.appendAudit(audit);
+    const repo = await store.getRepo(task.repoId);
+    if (!repo) {
+      await markRedoFailed(audit, 'repo_missing');
+      throw new ApiError(500, 'repo_missing', `任务 ${task.id} 所在的仓不在库里`);
+    }
+    try {
+      const outcome = await deps.taskRedo.redo({
+        taskId: task.id,
+        issueNumber: task.issueNumber,
+        title: task.title,
+        repo,
+      });
+      if (!outcome.ok) {
+        await markRedoFailed(audit, outcome.why);
+        throw new ApiError(409, 'redo_refused', outcome.why);
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      await markRedoFailed(audit, String(err));
+      deps.log.error('重做没起成', { taskId: task.id, error: fullStack(err) });
+      throw new ApiError(503, 'redo_unavailable', '重做没起成：工作流服务暂时连不上，稍后再试');
+    }
+  }
+
   app.post(WebRoutes.taskAction.path, async (c) => {
     const taskId = c.req.param('taskId');
     const body = await readJson(c, TaskActionRequest);
     checkGatewayTaskAction(c, body.action);
     const task = await store.getTask(taskId);
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
+    if (body.action === 'redo') {
+      await redoAndAudit(c, task);
+      return reply(c, TaskActionResponse, { ok: true });
+    }
     if (isTaskFinished(task)) {
       throw new ApiError(
         409,

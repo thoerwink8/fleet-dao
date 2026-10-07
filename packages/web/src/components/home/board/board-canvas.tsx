@@ -930,6 +930,7 @@ const SHORTCUTS: { keys: string[]; what: string }[] = [
   { keys: ['+', '-', '0'], what: '放大 / 缩小 / 全部收进视野' },
   { keys: ['Ctrl', '滚轮'], what: '缩放（不按 Ctrl 滚轮是滚页面）' },
   { keys: ['C', 'X'], what: '继续 / 叫停（对选中的单）' },
+  { keys: ['R'], what: '重做（已叫停或挂起的单）' },
   { keys: ['⌘', 'K'], what: '命令面板：跳页面、找任务、切主题' },
 ];
 

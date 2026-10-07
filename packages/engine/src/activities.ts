@@ -65,11 +65,13 @@ export const PORT_NAMES = Object.keys(PORT_KEYS) as PortName[];
 const TIMING_WRITE_BUDGET_MS = 5_000;
 
 function portContext(ctx: Context): PortContext {
+  const workflowId = ctx.info.workflowExecution?.workflowId;
   return {
     signal: ctx.cancellationSignal,
     heartbeat: (details?: unknown) => ctx.heartbeat(details),
     attempt: ctx.info.attempt,
     lastHeartbeat: ctx.info.heartbeatDetails,
+    ...(workflowId !== undefined ? { workflowId } : {}),
   };
 }
 

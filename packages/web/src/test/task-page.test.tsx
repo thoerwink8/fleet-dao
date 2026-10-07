@@ -285,4 +285,27 @@ describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处�
     await screen.findByRole('heading', { level: 1 });
     expect(await actionBox()).toBeNull();
   });
+
+  test('叫停之后可以重做：确认里写明旧工作树没推上去的东西会丢掉', async () => {
+    const api = createMockApi({ live: false });
+    open('/tasks/t-12', api);
+    await waitFor(async () => expect(await actionBox()).not.toBeNull());
+    fireEvent.click(within((await actionBox()) as HTMLElement).getByRole('button', { name: '叫停' }));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '叫停' }));
+    await waitFor(async () => {
+      const box = await actionBox();
+      expect(box && [...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['重做']);
+    });
+    fireEvent.click(within((await actionBox()) as HTMLElement).getByRole('button', { name: '重做' }));
+    expect(await screen.findByText(/没推上去/)).toBeTruthy();
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '重做' }));
+    await waitFor(async () => {
+      const box = await actionBox();
+      expect(box && [...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual([
+        '暂停',
+        '继续',
+        '叫停',
+      ]);
+    });
+  });
 });

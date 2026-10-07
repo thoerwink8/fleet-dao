@@ -194,14 +194,18 @@ type TaskAction = z.infer<typeof TaskActionRequest>['action'];
 
 /**
  * 网关能对需求做的动作只有叫停（design 第十四节：通行证只管查任务、叫停）。taskAction 是一条路由，
- * 按路径放行管不到动作，所以在这里再判：通行证漏了也不能替创始人暂停、继续、换路由。
+ * 按路径放行管不到动作，所以在这里再判：通行证漏了也不能替创始人暂停、继续、换路由、重做。
  */
 const GATEWAY_TASK_ACTIONS: ReadonlySet<TaskAction> = new Set(['stop']);
 
 /** 网关来的请求只能叫停；别的动作 403，什么都不做。驾驶舱（浏览器）来的不管。 */
 export function checkGatewayTaskAction(c: Context<CockpitEnv>, action: TaskAction): void {
   if (c.get('via') !== 'feishu' || GATEWAY_TASK_ACTIONS.has(action)) return;
-  throw new ApiError(403, 'gateway_action_not_allowed', '网关只能替创始人叫停需求，不能暂停、继续或换路由');
+  throw new ApiError(
+    403,
+    'gateway_action_not_allowed',
+    '网关只能替创始人叫停需求，不能暂停、继续、换路由或重做',
+  );
 }
 
 /** `/tasks/:taskId` → 只认一段的正则（参数里不许有斜杠）。 */

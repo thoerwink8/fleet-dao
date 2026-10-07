@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：新主页（/）：一屏三块 + 持续状态条。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
+import { TaskStateSchema } from './enums.ts';
 import { Id, Time } from './internal.ts';
 
 // —— 新主页（/）：一屏三块 + 持续状态条（#589）——
@@ -65,6 +66,8 @@ export const HomeRunningSchema = z.object({
   link: z.string(),
   /** 库里的任务编号：首页看板上「继续 / 叫停」这类快捷操作要它（POST /api/tasks/:taskId/actions）。老环境推来的快照里没有，没有就不画操作。 */
   taskId: Id.optional(),
+  /** 单子现在的状态。老环境推来的快照里没有：没有时看板仍把等你拍记成 asking、其余记成 running。有了，挂起的单才画得出「重做」。 */
+  state: TaskStateSchema.optional(),
 });
 
 /**

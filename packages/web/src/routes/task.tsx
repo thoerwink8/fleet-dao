@@ -64,7 +64,7 @@ function Header({ d, now }: { d: TaskDetail; now: number }) {
 
 /**
  * 暂停、继续、叫停（#820 片 3，#856 第 1 处）：和首页看板上同一份动作定义（components/task-actions.tsx），点了发到后端
- * POST /api/tasks/:taskId/actions。结束了的单一个都不画。叫停是终局，对话框里写明不能恢复。
+ * POST /api/tasks/:taskId/actions。做完、失败的不画。已叫停的只画「重做」。叫停不能恢复，要再做得点「重做」。
  */
 function ActionButtons({ d }: { d: TaskDetail }) {
   const { trigger } = useTaskActions();

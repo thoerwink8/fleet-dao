@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-const ACTIONS = ['pause', 'resume', 'stop', 'reroute'] as const;
+const ACTIONS = ['pause', 'resume', 'stop', 'reroute', 'redo'] as const;
 
 /** 每个快捷操作一个按钮，点了就 trigger（真页面的入口各处不同，这里只测操作本身）。 */
 function Buttons({ target }: { target: ActionTarget }) {
@@ -251,6 +251,31 @@ describe('叫停：先确认再发请求', () => {
       }),
     );
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe('重做：先说清旧工作树里没推上去的东西会丢掉，再发请求', () => {
+  const stopped = (): ActionTarget => ({
+    taskId: 't-stopped',
+    issueNumber: 12,
+    title: '重做这张',
+    state: 'stopped',
+  });
+
+  test('点重做只弹确认，还没发请求；确认后发 {action:redo}', async () => {
+    const { api, taskAction } = backend();
+    const target = stopped();
+    renderApp(<Buttons target={target} />, { api });
+    press('redo');
+    expect(await screen.findByText('重做 #12？')).toBeTruthy();
+    expect(screen.getByText(/没推上去/)).toBeTruthy();
+    expect(taskAction).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '重做' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(taskAction).toHaveBeenCalledExactlyOnceWith('t-stopped', { action: 'redo' });
+    expect(toast.success).toHaveBeenCalledWith('重做：#12', {
+      description: '新的一代已经起了。旧工作树里没推上去的东西不会跟着过来。',
+    });
   });
 });
 

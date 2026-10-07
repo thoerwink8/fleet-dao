@@ -169,6 +169,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
           log.info('（开发）发给工作流的信号', { workflowId, signal: signal.name });
         },
       },
+      // 不装 taskRedo：开发环境没有 Temporal，重做回 503，不把信号记一笔当成已经另起。
       github: {
         async accept(event) {
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
@@ -216,6 +217,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     now,
     feishu,
     workflows: temporal.control,
+    taskRedo: temporal.taskRedo,
     github: github.sink,
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表

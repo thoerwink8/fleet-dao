@@ -227,6 +227,7 @@ export const TaskActionRequest = z.discriminatedUnion('action', [
   }),
   z.object({ action: z.literal('resume') }),
   z.object({ action: z.literal('stop'), reason: z.string().max(500).optional() }),
+  z.object({ action: z.literal('redo') }),
   z.object({
     action: z.literal('reroute'),
     routeId: Id,

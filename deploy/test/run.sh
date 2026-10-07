@@ -41,6 +41,8 @@ only_ops=0
 check_shards_only=0
 shard_i=0 # 0 = 不分台，三台依次全跑
 shard_n=0
+# 上一项退出 2 时，最后一句「没跑成」改写后放进注解。日志要仓库管理员才能下，公开注解原来只有「exit code 2」。
+SKIP_WHY=""
 
 # 分台：SHARDS 的每一项是一台，里面是用空格隔开的项目名。项目名 = deploy/test 下 *.test.sh 去掉后缀；另有四个特殊项：
 # lint（语法 + shellcheck）、backup（deploy/backup/test）、node-tests（下面 NODE_TESTS 那几个 node --test）、ports（端口表）。
@@ -110,10 +112,22 @@ check_ports() {
 }
 
 run_script() { # 脚本的完整路径：0 过、2 没跑成、别的不通过
-  bash "$1"
-  case $? in
+  local out rc=0 line
+  # 先收齐再打印：退出码 2 时才能把原因写进注解。判定和原来一样，不把没跑成当成通过。
+  out=$(bash "$1" 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  case $rc in
   0) ;;
-  2) skipped=1 ;;
+  2)
+    skipped=1
+    line=$(grep '没跑成' <<<"$out" | tail -1 || true)
+    # 注解里不再出现「没跑成」这四个字：有的检查按原句出现次数认（多一行就算红）。
+    line=${line//没跑成/原因}
+    line=${line//::/：}
+    line=${line//%/%25}
+    line=${line//$'\r'/%0D}
+    SKIP_WHY=$line
+    ;;
   *) fail=1 ;;
   esac
 }
@@ -221,7 +235,8 @@ unit_node_tests() {
 }
 
 run_unit() { # 项目名
-  local unit=$1 t0=$SECONDS
+  local unit=$1 t0=$SECONDS before=$skipped
+  SKIP_WHY=""
   case "$unit" in
   lint) unit_lint ;;
   backup) run_script "$DEPLOY/backup/test/backup.test.sh" ;;
@@ -230,6 +245,9 @@ run_unit() { # 项目名
   *) run_test "$unit.test.sh" ;;
   esac
   echo "⏱ $unit $((SECONDS - t0)) 秒"
+  if ((skipped > before)); then
+    echo "::error::deploy 项 ${unit} 退出码 2${SKIP_WHY:+ ${SKIP_WHY}}"
+  fi
 }
 
 # 先核名单（--ops 也核：#662 审查第 2 轮指出这条路原来跳过了它，新加个测试没人跑也不报）。

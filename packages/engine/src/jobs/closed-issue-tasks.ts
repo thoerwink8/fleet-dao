@@ -5,7 +5,10 @@
 import type { RepoRef } from '@fleet-dao/github';
 import type { AbandonCommand } from '@fleet-dao/shared/task-signals';
 import { errMessage } from '@fleet-dao/shared/util';
+import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { ReconcileLog, SweepPart } from './reconcile-common.ts';
+
+export { parseTaskWorkflowId };
 
 /** 发「放弃」信号时记的「谁」「为什么」。 */
 export const CLOSED_ISSUE_ABANDON_BY = 'engine:hourly-reconcile';
@@ -13,7 +16,7 @@ export const CLOSED_ISSUE_ABANDON_REASON = '单已关闭';
 
 export interface ClosedIssueTaskDeps {
   closedIssueTasks: {
-    /** 在跑（含停着等人）的任务工作流编号，形如 task:<owner>/<repo>#<号>。列不出来照抛。 */
+    /** 在跑（含停着等人）的任务工作流编号，形如 task:<owner>/<repo>#<号> 或重做后的 :r2。列不出来照抛。 */
     runningTaskWorkflowIds(): Promise<string[]>;
     /** 这张单此刻开没开着。读不到、是 PR 都照抛。 */
     issueState(repo: RepoRef, issueNumber: number): Promise<'open' | 'closed'>;
@@ -22,13 +25,6 @@ export interface ClosedIssueTaskDeps {
   };
   now: () => Date;
   log: ReconcileLog;
-}
-
-/** 工作流编号拆成仓和单号（拼法在 @fleet-dao/shared/workflow-ids 的 taskWorkflowId）；认不出回 null。 */
-export function parseTaskWorkflowId(id: string): { repo: RepoRef; issueNumber: number } | null {
-  const m = /^task:([^/]+)\/([^#]+)#(\d+)$/.exec(id);
-  if (!m?.[1] || !m[2] || !m[3]) return null;
-  return { repo: { owner: m[1], name: m[2] }, issueNumber: Number(m[3]) };
 }
 
 export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promise<SweepPart> {

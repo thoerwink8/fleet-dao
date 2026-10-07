@@ -261,7 +261,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return {
               taskId: input.taskId,
               issueNumber: input.issueNumber,
-              workflowId: taskWorkflowId(input.repo, input.issueNumber),
+              workflowId: ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
               what: input.what,
               howToFinish: input.howToFinish,
             };

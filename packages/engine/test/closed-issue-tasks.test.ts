@@ -48,7 +48,14 @@ describe('parseTaskWorkflowId', () => {
     expect(parseTaskWorkflowId('task:acme/demo#12')).toEqual({
       repo: { owner: 'acme', name: 'demo' },
       issueNumber: 12,
+      generation: 1,
     });
+    expect(parseTaskWorkflowId('task:acme/demo#12:r2')).toEqual({
+      repo: { owner: 'acme', name: 'demo' },
+      issueNumber: 12,
+      generation: 2,
+    });
+    expect(parseTaskWorkflowId('task:acme/demo#12:park:1')).toBeNull();
     expect(parseTaskWorkflowId('req:acme/demo#12')).toBeNull();
     expect(parseTaskWorkflowId('task:acme/demo')).toBeNull();
   });
@@ -66,6 +73,18 @@ describe('单已关就撤掉还挂着的任务（abandonClosedIssueTasks）', ()
     ]);
     expect(CLOSED_ISSUE_ABANDON_REASON).toBe('单已关闭');
     expect(part).toEqual({ scanned: 2, found: 1, unchecked: [] });
+  });
+
+  it('重做后的编号（:r2）也认得出是哪张单，关了照样撤', async () => {
+    const w = world({
+      runningTaskWorkflowIds: async () => ['task:acme/demo#4:r2'],
+      states: { 'acme/demo#4': 'closed' },
+    });
+    const part = await abandonClosedIssueTasks(w.deps);
+    expect(w.signals).toEqual([
+      { workflowId: 'task:acme/demo#4:r2', by: CLOSED_ISSUE_ABANDON_BY, reason: CLOSED_ISSUE_ABANDON_REASON },
+    ]);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
   });
 
   it('读不到单的状态：记没查成，不发信号（不当成开着也不当成已关）', async () => {

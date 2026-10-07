@@ -64,6 +64,7 @@ grep -vF -- "$PLACE_LINE" "$OPS" >"$TMP/ops-no-place.md"
 run_ops "$TMP/ops-no-place.md"
 check "退出码" "$RC" 2
 check "place-file 报没跑成" "$(has 'place-file：没跑成')" 1
+check "注解点名是这一项，公开检查页不用下日志也能看见" "$(has '::error::deploy 项 place-file 退出码 2')" 1
 
 echo "== 参数认不出：退出 2，不当成全套或 --ops"
 run_ops "$OPS" --opz
