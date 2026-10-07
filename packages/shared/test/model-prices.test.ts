@@ -60,13 +60,14 @@ describe('估一笔', () => {
     }
     expect(modelPriceOf('opus-5.5')).toBeDefined();
     expect(modelPriceOf('cursor-auto')).toBeUndefined();
-    // 验收默认模型 GPT 6.1 sol：官方模型页标的价（输入 2、缓存输入 0.1、输出 10），不是第三方汇总
-    expect(modelPriceOf('gpt-6.1-sol')).toMatchObject({
+    // 验收默认模型 GPT 6 sol：沿用原先查到的价（输入 2、缓存输入 0.1、输出 10），不是第三方汇总
+    expect(modelPriceOf('gpt-6-sol')).toMatchObject({
       inputPerMTok: 2,
       cacheReadPerMTok: 0.1,
       outputPerMTok: 10,
-      source: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol',
+      source: 'https://developers.openai.com/api/docs/models/gpt-6-sol',
     });
+    expect(modelPriceOf('gpt-6.1-sol')).toBeUndefined();
     expect(modelPriceOf('toString')).toBeUndefined();
     expect(noPriceReasonOf('toString')).toBeUndefined();
   });
@@ -144,6 +145,16 @@ describe('单价表对得上模型目录', () => {
     // 只答判断题的 judge 模型不进三段流水，不要求有单价；被派活的模型一个不少
     expect(ids).not.toContain('jev-1.13');
     expect(ids).toEqual(expect.arrayContaining(['opus-5.5', 'kimi-k3', 'cursor-auto']));
+    expect(modelsWithoutPriceEntry(ids)).toEqual([]);
+  });
+
+  it('目录配置样例里的每个模型（除只答判断题的 Jev）也都有一项：有价，或写明没有单价的原因', () => {
+    const example = JSON.parse(
+      readFileSync(new URL('../../../deploy/examples/catalog.example.json', import.meta.url), 'utf8'),
+    ) as { models?: { id: string }[] };
+    if (!example.models?.length) throw new Error('catalog.example.json 里读不到 models');
+    const ids = example.models.map((m) => m.id).filter((id) => id !== 'jev-1.13');
+    expect(ids).toEqual(expect.arrayContaining(['gpt-6-sol', 'glm-5.3']));
     expect(modelsWithoutPriceEntry(ids)).toEqual([]);
   });
 

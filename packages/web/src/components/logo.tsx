@@ -1,4 +1,4 @@
-// 标志和标签页小图标跟着品牌走（正式驾驶舱、演示版各一套，见 src/brand/）。
+// 标志和标签页小图标跟着品牌走（见 src/brand/）。
 import { brand } from '#brand';
 
 export const LogoMark = brand.Mark;

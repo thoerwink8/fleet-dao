@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 页面上会改服务端状态的操作：设置（保存数字、免打扰时段）、通知（处理了）、演示版页（发链接、作废、发布默认范围）、
+// 页面上会改服务端状态的操作：设置（保存数字、免打扰时段）、通知（处理了）、
 // 退出登录。每个操作断言发出去的请求；失败时（校验不过、版本冲突、后端拒绝、断网）必须弹出后端的原因，不吞错、不冒充成功。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
@@ -14,7 +14,6 @@ import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import { Topbar } from '../components/shell/topbar';
 import { settingLabel } from '../lib/audit';
-import DemoLinksPage from '../routes/demo-links';
 import NotificationsPage from '../routes/notifications';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
@@ -178,163 +177,6 @@ describe('通知中心：没有追问', () => {
     expect(container.querySelector('[data-legacy-asks]')).toBeNull();
   });
 });
-describe('演示版页：发链接、作废、发布默认范围', () => {
-  const sendBtn = () => screen.getByRole('button', { name: '发链接' });
-  const form = () => formOf(sendBtn());
-
-  test('发链接：请求带勾选的模块、细节、有效期（默认 7 天）、备注；成功后口令只在「链接发好了」里显示', async () => {
-    const api = createMockApi({ live: false });
-    const create = vi.spyOn(api, 'createDemoLink');
-    renderApp(<DemoLinksPage />, { api });
-    await screen.findByRole('button', { name: '发链接' });
-    fireEvent.change(screen.getByLabelText(/^备注/), { target: { value: '  给投资人看  ' } });
-    fireEvent.click(sendBtn());
-    expect(await screen.findByText('链接发好了')).toBeTruthy();
-    expect(create).toHaveBeenCalledExactlyOnceWith({
-      modules: ['board', 'task'],
-      detail: 'titles',
-      expiresInDays: 7,
-      note: '给投资人看',
-    });
-    const url = (screen.getByLabelText('演示链接') as HTMLInputElement).value;
-    expect(url).toMatch(/[?&#]k=[\w-]{32,}/);
-  });
-
-  test('【故意造出的失败】后端拒了（500）：弹「没发成」和原因，不出现「链接发好了」', async () => {
-    const api = createMockApi({ live: false });
-    vi.spyOn(api, 'createDemoLink').mockRejectedValueOnce(new ApiError(500, 'internal', '发布目录写不进去'));
-    renderApp(<DemoLinksPage />, { api });
-    await screen.findByRole('button', { name: '发链接' });
-    fireEvent.click(sendBtn());
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith('没发成', { description: '发布目录写不进去' }),
-    );
-    expect(screen.queryByText('链接发好了')).toBeNull();
-  });
-
-  test('【故意造出的失败】一个模块都没开：发链接点不了，写「至少开一个模块」，不发请求', async () => {
-    const api = createMockApi({ live: false });
-    const create = vi.spyOn(api, 'createDemoLink');
-    renderApp(<DemoLinksPage />, { api });
-    await screen.findByRole('button', { name: '发链接' });
-    for (const box of within(form()).getAllByRole('checkbox')) {
-      if ((box as HTMLInputElement).checked) fireEvent.click(box);
-    }
-    expect(sendBtn()).toHaveProperty('disabled', true);
-    expect(screen.getByText('至少开一个模块')).toBeTruthy();
-    // 按钮点不了：浏览器里回车提交也会被挡（默认按钮不可用时不做隐式提交）
-    fireEvent.click(sendBtn());
-    expect(create).not.toHaveBeenCalled();
-  });
-
-  test('【故意造出的失败】后端没配发布目录（configured=false）：发链接点不了，写明原因', async () => {
-    const api = createMockApi({ live: false });
-    const real = await api.demoLinks();
-    Object.assign(api, { demoLinks: async () => ({ ...real, configured: false }) });
-    const create = vi.spyOn(api, 'createDemoLink');
-    renderApp(<DemoLinksPage />, { api });
-    expect(await screen.findByText(/后端没配演示版的发布目录/)).toBeTruthy();
-    expect(sendBtn()).toHaveProperty('disabled', true);
-    fireEvent.click(sendBtn());
-    expect(create).not.toHaveBeenCalled();
-  });
-
-  describe('作废', () => {
-    async function withLink(api: MockApi) {
-      const { link } = await api.createDemoLink({
-        modules: ['board'],
-        detail: 'status',
-        expiresInDays: 7,
-        note: '老王',
-      });
-      return link;
-    }
-    const rowOf = (note: string) => screen.getByText(note).closest('li') as HTMLElement;
-
-    test('点「作废」先要确认，取消不发请求；确认后发 revokeDemoLink(链接号)，提示作废了', async () => {
-      const api = createMockApi({ live: false });
-      const link = await withLink(api);
-      const revoke = vi.spyOn(api, 'revokeDemoLink');
-      renderApp(<DemoLinksPage />, { api });
-      await screen.findByText('老王');
-      fireEvent.click(within(rowOf('老王')).getByRole('button', { name: '作废' }));
-      expect(revoke).not.toHaveBeenCalled();
-      fireEvent.click(within(rowOf('老王')).getByRole('button', { name: '取消' }));
-      expect(revoke).not.toHaveBeenCalled();
-      expect(within(rowOf('老王')).getByRole('button', { name: '作废' })).toBeTruthy();
-
-      fireEvent.click(within(rowOf('老王')).getByRole('button', { name: '作废' }));
-      fireEvent.click(within(rowOf('老王')).getByRole('button', { name: '确定作废' }));
-      await waitFor(() =>
-        expect(toast.success).toHaveBeenCalledWith('作废了：拿着这条链接的人马上就只能看默认范围'),
-      );
-      expect(revoke).toHaveBeenCalledExactlyOnceWith(link.id);
-      await waitFor(() => expect(screen.queryByText('老王')).toBeNull());
-    });
-
-    test('【故意造出的失败】后端拒了（404 可能已作废）：弹「没作废成」和原因，这条仍在列表里', async () => {
-      const api = createMockApi({ live: false });
-      await withLink(api);
-      vi.spyOn(api, 'revokeDemoLink').mockRejectedValueOnce(
-        new ApiError(404, 'demo_link_not_found', '没有这条演示链接（可能已经作废了）'),
-      );
-      renderApp(<DemoLinksPage />, { api });
-      await screen.findByText('老王');
-      fireEvent.click(within(rowOf('老王')).getByRole('button', { name: '作废' }));
-      fireEvent.click(within(rowOf('老王')).getByRole('button', { name: '确定作废' }));
-      await waitFor(() =>
-        expect(toast.error).toHaveBeenCalledWith('没作废成', {
-          description: '没有这条演示链接（可能已经作废了）',
-        }),
-      );
-      expect(toast.success).not.toHaveBeenCalled();
-      expect(screen.getByText('老王')).toBeTruthy();
-    });
-  });
-
-  describe('发布默认范围', () => {
-    const publish = () => screen.getByRole('button', { name: '发布默认范围' });
-
-    test('点发布：请求里是现在勾的模块和细节；成功提示不带游客「马上」按它看的歧义', async () => {
-      const api = createMockApi({ live: false });
-      const update = vi.spyOn(api, 'updateDemoDefault');
-      const current = (await api.demoLinks()).defaultScope;
-      renderApp(<DemoLinksPage />, { api });
-      await screen.findByRole('button', { name: '发布默认范围' });
-      fireEvent.click(publish());
-      await waitFor(() =>
-        expect(toast.success).toHaveBeenCalledWith('默认范围发布了：不带链接的游客马上按它看'),
-      );
-      expect(update).toHaveBeenCalledExactlyOnceWith({ modules: current.modules, detail: current.detail });
-    });
-
-    test('【故意造出的失败】后端拒了：弹「没发布成」和原因，不弹成功', async () => {
-      const api = createMockApi({ live: false });
-      vi.spyOn(api, 'updateDemoDefault').mockRejectedValueOnce(
-        new ApiError(500, 'internal', '发布目录写不进去'),
-      );
-      renderApp(<DemoLinksPage />, { api });
-      await screen.findByRole('button', { name: '发布默认范围' });
-      fireEvent.click(publish());
-      await waitFor(() =>
-        expect(toast.error).toHaveBeenCalledWith('没发布成', { description: '发布目录写不进去' }),
-      );
-      expect(toast.success).not.toHaveBeenCalled();
-    });
-
-    test('已经发布过、又没改动：发布按钮点不了（不重复发）', async () => {
-      const api = createMockApi({ live: false });
-      const real = await api.demoLinks();
-      Object.assign(api, { demoLinks: async () => ({ ...real, defaultPublished: true }) });
-      const update = vi.spyOn(api, 'updateDemoDefault');
-      renderApp(<DemoLinksPage />, { api });
-      await screen.findByRole('button', { name: '发布默认范围' });
-      expect(publish()).toHaveProperty('disabled', true);
-      fireEvent.click(publish());
-      expect(update).not.toHaveBeenCalled();
-    });
-  });
-});
 
 describe('退出登录', () => {
   /** 一个走真后端的外壳顶栏，旁边放一个登录页占位，看退出后落到哪。 */
@@ -380,7 +222,7 @@ describe('退出登录', () => {
     expect(screen.queryByText('登录页占位')).toBeNull();
   });
 
-  test('假数据模式：退出点不了、不调 logout；演示版：根本没有退出这一项', async () => {
+  test('假数据模式：退出点不了、不调 logout', async () => {
     const logout = vi.fn(() => Promise.resolve());
     topbar(real({ logout, source: 'mock' }));
     await openMenu();
@@ -388,11 +230,5 @@ describe('退出登录', () => {
     expect(item.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(item);
     expect(logout).not.toHaveBeenCalled();
-    cleanup();
-
-    topbar(real({ logout, source: 'demo' }));
-    await openMenu();
-    await screen.findByRole('menu');
-    expect(screen.queryByRole('menuitem', { name: /退出/ })).toBeNull();
   });
 });

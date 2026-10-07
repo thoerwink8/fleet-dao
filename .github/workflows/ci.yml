@@ -472,7 +472,7 @@ jobs:
           path: ${{ runner.temp }}/fleet-test-cache
           key: ${{ steps.cache-key.outputs.cache_key }}
 
-  # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
+  # 驾驶舱前端打包（发布时也是这一道）：打不出来就红。演示版已删（#1223），不再打 build:demo、不再扫产物。
   web:
     needs: changes
     if: needs.changes.outputs.web == 'true'
@@ -488,7 +488,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter ./packages/web run build:demo
+      - run: pnpm --filter ./packages/web run build
 
   # 驾驶舱用户视角 e2e（#930，母单 #902）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端（Vite）+ Chromium，
   # 站在创始人角度逐页走（packages/web/e2e，README 有跑法）。

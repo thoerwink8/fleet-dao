@@ -1,6 +1,6 @@
-// 演示版打包后的产物扫描：出现真名、内部叫法、GitHub 地址、创始人的 GitHub 用户名、源码对照文件，就算失败。
+// 公开页面文字的禁用词名单和扫描：出现真名、内部叫法、GitHub 地址、创始人的 GitHub 用户名、源码对照文件，就算失败。
 // 名单独立写在这里，不从品牌文件（src/brand/）里读——拿被查的东西自己的说法去查它，查不出错。
-// 这个文件只在打包时由 scripts/demo.ts 在 Node 里跑，不进浏览器的包。
+// 只在测试和部署测试里在 Node 里跑（健康页、占位页、登录页的文字都拿这份名单扫），不进浏览器的包。
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
 
@@ -20,7 +20,7 @@ export interface ScanResult {
 /**
  * 内置的禁用词，按子串比、不分大小写：项目的真名和旧名、创始人的 GitHub 用户名、GitHub 地址、内部叫法、
  * 规矩原话（拿一句去 GitHub 搜就能对上公开仓）。
- * 真域名不写在公开仓里：发布时从服务器配置传进来（FLEET_DEMO_FORBID，逗号或空白分隔），见 forbiddenTerms。
+ * 真域名不写在公开仓里。
  */
 export const BUILTIN_TERMS: readonly string[] = [
   'fleet',
@@ -68,15 +68,6 @@ const TEXT = new Set([
   '.map',
   '.md',
 ]);
-
-/** 内置名单加上配置里给的（FLEET_DEMO_FORBID）。 */
-export function forbiddenTerms(extra: string | undefined): string[] {
-  const more = (extra ?? '')
-    .split(/[\s,]+/)
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  return [...new Set([...BUILTIN_TERMS, ...more])];
-}
 
 function walk(dir: string, out: string[]) {
   for (const name of readdirSync(dir)) {

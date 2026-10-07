@@ -10,7 +10,6 @@ const ME = {
   csrfToken: 'tok-1',
   env: { name: '测试机' },
 };
-const HEX = 'a'.repeat(64);
 const AT = '2026-10-04T00:00:00Z';
 
 interface Call {
@@ -127,35 +126,6 @@ const WRITES: Write[] = [
     ok: { body: { setting: { key: 'sessions.maxConcurrent', value: 8, version: 2 } } },
   },
   {
-    name: 'createDemoLink',
-    call: (api) =>
-      api.createDemoLink({ modules: ['board'], detail: 'status', expiresInDays: 7, note: '给投资人看' }),
-    method: 'POST',
-    url: '/api/demo/links',
-    body: { modules: ['board'], detail: 'status', expiresInDays: 7, note: '给投资人看' },
-    ok: {
-      body: {
-        link: { id: HEX, modules: ['board'], detail: 'status', expiresAt: AT, createdAt: AT, expired: false },
-        token: 'x'.repeat(43),
-      },
-    },
-  },
-  {
-    name: 'revokeDemoLink',
-    call: (api) => api.revokeDemoLink(HEX),
-    method: 'DELETE',
-    url: `/api/demo/links/${HEX}`,
-    ok: OK,
-  },
-  {
-    name: 'updateDemoDefault',
-    call: (api) => api.updateDemoDefault({ modules: ['board'], detail: 'status' }),
-    method: 'PUT',
-    url: '/api/demo/default',
-    body: { modules: ['board'], detail: 'status' },
-    ok: { body: { defaultScope: { v: 1, modules: ['board'], detail: 'status' } } },
-  },
-  {
     name: 'logout',
     call: (api) => api.logout(),
     method: 'POST',
@@ -245,18 +215,6 @@ describe('写请求：令牌与校验', () => {
     [
       '设置版本号是负数',
       (api: FleetApi) => api.updateSetting('sessions.maxConcurrent', { value: 1, version: -1 }),
-    ],
-    [
-      '演示链接一个模块都没开',
-      (api: FleetApi) => api.createDemoLink({ modules: [], detail: 'status', expiresInDays: 7 }),
-    ],
-    [
-      '演示链接有效期 0 天',
-      (api: FleetApi) => api.createDemoLink({ modules: ['board'], detail: 'status', expiresInDays: 0 }),
-    ],
-    [
-      '演示默认范围的详细程度不在约定里',
-      (api: FleetApi) => api.updateDemoDefault({ modules: ['board'], detail: 'everything' as never }),
     ],
     ['换模型没带路由', (api: FleetApi) => api.taskAction('t-1', { action: 'reroute' } as never)],
   ])(

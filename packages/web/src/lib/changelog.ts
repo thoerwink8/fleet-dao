@@ -3,7 +3,6 @@
 // 格式解析走共享的 splitChangelog（packages/shared/src/changelog.ts），
 // 和 packages/conventions/src/release-notes.ts 那份是同一个实现——发布那条线认不出模样的话这页一样认不出，
 // 两条线的判定只能一起换。
-// 演示版不进这一页（路由表不放、导航也不给 module），所以仓名不会被这一页带进演示版产物。
 import { type ChangelogSplit, splitChangelog } from '@fleet-dao/shared';
 import changelogText from '../../../../CHANGELOG.md?raw';
 

@@ -1,4 +1,4 @@
-// 第七步：其余页面逐个走一遍（路由、思考档位、定时任务、操作记录、更新日志、演示版、找不到的页面）。
+// 第七步：其余页面逐个走一遍（路由、思考档位、定时任务、操作记录、更新日志、找不到的页面）。
 // 创始人剧本里的「环境视图」：驾驶舱里没有叫这个名字的页面；最接近的是「路由」（每条路现在接得上吗、额度够吗、被禁了吗）
 // 和主页顶上的持续状态条，这里把路由页当它测，并在缺陷清单里记一笔。
 import { expect, onlyDesktop, test } from '../support/fixtures.ts';
@@ -153,16 +153,6 @@ test.describe('其余页面', () => {
     await expect(page.getByText(/没查成|没读成|发于/).first()).toBeVisible();
     await expect(page.getByRole('button', { name: /发布 v/ })).toHaveCount(0);
     await shot(page, '07-更新日志');
-  });
-
-  test('演示版：没配演示目录时明说，不假装「没有链接」', async ({ page, shot, problems }) => {
-    problems.allow('/api/demo/');
-    problems.allow('status of 5');
-    problems.allow('status of 4');
-    await page.goto('/demo-links');
-    await expect(page.getByRole('heading', { name: '演示版' })).toBeVisible();
-    await expect(page.getByText(/没配|没接|读不到|没读成|发不了/).first()).toBeVisible();
-    await shot(page, '07-演示版');
   });
 
   test('不存在的页面：404 页给回主页的路', async ({ page }) => {

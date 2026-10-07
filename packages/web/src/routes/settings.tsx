@@ -433,7 +433,7 @@ export default function Settings() {
     <Page title="设置" description="运行设置和仓库开关存在后端，改了写进操作记录；外观只存在这台浏览器里。">
       {/* 版式（驾驶舱改版 2026-10-07）：按用得多少排——「让 AI 接活」是最常动的开关，放最前；外观放后面。顶上一排跳转。 */}
       <nav aria-label="设置分节" className="-mt-2 mb-2 flex flex-wrap gap-1.5">
-        {SECTIONS.filter((x) => x.id !== 'account' || api.source !== 'demo').map((x) => (
+        {SECTIONS.map((x) => (
           <a
             key={x.id}
             href={`#${x.id}`}
@@ -538,17 +538,14 @@ export default function Settings() {
         )}
       </Section>
 
-      {/* 账密只在正式驾驶舱里有：演示版没有登录（也读不到这个接口） */}
-      {api.source === 'demo' ? null : (
-        <Section
-          id="account"
-          icon={KeyRound}
-          title="账密登录"
-          description={`设一个用户名和密码，飞书登录出问题时也进得去${brand.product}。`}
-        >
-          <CredentialsSection />
-        </Section>
-      )}
+      <Section
+        id="account"
+        icon={KeyRound}
+        title="账密登录"
+        description={`设一个用户名和密码，飞书登录出问题时也进得去${brand.product}。`}
+      >
+        <CredentialsSection />
+      </Section>
 
       <Section
         id="look"
@@ -604,19 +601,9 @@ export default function Settings() {
               : '假数据（编的，会自己动；页面上的操作只改这份假数据）'}
           </dd>
           <dt className="text-muted-foreground">登录</dt>
-          <dd>
-            {api.source === 'demo'
-              ? '访客（演示版不用登录）'
-              : me
-                ? `${me.user.displayName}（飞书或账密，只放行创始人）`
-                : '—'}
-          </dd>
-          {import.meta.env.MODE !== 'demo' ? (
-            <>
-              <dt className="text-muted-foreground">接口约定</dt>
-              <dd className="num text-xs leading-5">packages/shared/src/web-api.ts</dd>
-            </>
-          ) : null}
+          <dd>{me ? `${me.user.displayName}（飞书或账密，只放行创始人）` : '—'}</dd>
+          <dt className="text-muted-foreground">接口约定</dt>
+          <dd className="num text-xs leading-5">packages/shared/src/web-api.ts</dd>
         </dl>
       </Section>
     </Page>

@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import type { Plugin } from 'vite';
 import { afterEach, describe, expect, test } from 'vitest';
 import {
-  assertLicenses,
   checkEntries,
   cssPackageImports,
   findPackageDir,
@@ -115,17 +114,6 @@ describe('写成声明', () => {
     expect(scanDir(raw).hits.map((h) => `${h.file}:${h.term}`)).toEqual([`${LICENSES_FILE}:github.com`]);
     const out = tree({ 'index.html': '<!doctype html>', [LICENSES_FILE]: renderLicenses([a, b]) });
     expect(scanDir(out).hits).toEqual([]);
-  });
-
-  test('先红后绿：产物里缺了声明、是空的、一项都没列，都报错；有了就数出列了几个库', () => {
-    const d = tree({ 'index.html': '<!doctype html>' });
-    expect(() => assertLicenses(d)).toThrow(/没有第三方许可证声明/);
-    writeFileSync(join(d, LICENSES_FILE), '');
-    expect(() => assertLicenses(d)).toThrow(/开头不是/);
-    writeFileSync(join(d, LICENSES_FILE), '\uFEFF第三方开源软件许可声明\n\n');
-    expect(() => assertLicenses(d)).toThrow(/一个库都没列/);
-    writeFileSync(join(d, LICENSES_FILE), renderLicenses([a, b]));
-    expect(assertLicenses(d)).toBe(2);
   });
 });
 

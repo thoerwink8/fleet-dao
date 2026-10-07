@@ -4,7 +4,7 @@ import type { OrgSwitchView } from '../api/types';
 import { formatClock } from '../lib/format';
 import { cn } from '../lib/utils';
 
-// 两类账号叫什么走品牌文件（brand.terms.carpool / solo）：演示版的包里不许出现正式版的内部叫法（src/build/scan.ts）。
+// 两类账号叫什么走品牌文件（brand.terms.carpool / solo）。
 const carpool = () => brand.terms.carpool;
 const solo = () => brand.terms.solo;
 

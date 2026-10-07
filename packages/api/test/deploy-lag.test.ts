@@ -1,5 +1,5 @@
 // 线上读数跟不跟得上（deploy-lag.ts）：每一种「不对」和「没查成」各造一次，读的时候现算；落后主线几个提交不算毛病（发布只走驾驶舱按钮，0032）；
-// 对外的话拿演示版打包扫描的同一份名单扫；状态文件拿自动发布单元（deploy/france/auto-release/lib.mjs）真跑一轮造出来的核对，两边字段对得上；
+// 对外的话拿公开页禁用词名单扫；状态文件拿自动发布单元（deploy/france/auto-release/lib.mjs）真跑一轮造出来的核对，两边字段对得上；
 // 报警开一条、说法不变不改、好了解除，自动发布单元当场报过的不重报。
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -143,7 +143,7 @@ describe('判定：读的时候现算', () => {
     expect(v.problems[0]?.message).toBe('装机脚本落后主线 2 个相关提交、30 小时，要人重跑');
   });
 
-  it('对外的话：不带提交号、路径；和演示版打包扫描同一份名单扫', async () => {
+  it('对外的话：不带提交号、路径；和公开页禁用词名单扫', async () => {
     const scan = (await import(/* @vite-ignore */ SCAN)) as {
       BUILTIN_TERMS: readonly string[];
       scanText(file: string, text: string, terms: readonly string[]): { term: string }[];

@@ -33,7 +33,7 @@ export function DoneCard({ item, className }: { item: HomeDone; className?: stri
     'flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors hover:border-border-strong';
   return (
     <li data-done-card className={cn('block', className)}>
-      {/* 演示版不带外链：纯展示，不可点。 */}
+      {/* 没有链接时纯展示，不可点。 */}
       {item.link ? (
         <a href={item.link} target="_blank" rel="noreferrer" className={cls}>
           {body}
