@@ -23,6 +23,7 @@ import {
   applyConfig,
   CONFIG_FILES,
   ConfigError,
+  canaryRepoProblems,
   cli,
   DESIRED_FILE,
   FINGERPRINT_ALGORITHM,
@@ -30,6 +31,7 @@ import {
   fingerprintOf,
   judgeConfig,
   keyIdOf,
+  loadDesiredProfiles,
   parseApplied,
   parseDesired,
   parseEnv,
@@ -1070,6 +1072,50 @@ test('render：照仓里真的期望建新机器的三份文件——公开的�
   assert.ok(!parseEnv(text).entries.some((e) => e.key === 'FLEET_EVIL'));
   assert.match(text, /^FLEET_CANARY_REPO=$/m);
   assert.ok(!text.includes(SECRET2));
+});
+
+test('各环境的巡检仓各写各的（#1136）：真目录不抢仓，法国的值不动；故意造的第二台抢同一个仓、只改大小写、写成私有值、认不出、空着、另建一个仓', () => {
+  const deployDir = join(FRANCE_DESIRED_FILE, '..', '..');
+  const profiles = loadDesiredProfiles(deployDir);
+  assert.deepEqual(
+    profiles.map((p) => p.name),
+    ['france'],
+  );
+  assert.deepEqual(canaryRepoProblems(profiles), []);
+  const france = profiles[0].desired;
+  const franceSlug = france.files['engine.env'].find((d) => d.key === 'FLEET_CANARY_REPO');
+  assert.equal(franceSlug.kind, 'public');
+  assert.equal(franceSlug.value, 'thoerwink8/fleet-dao-canary');
+
+  const withCanary = (value) => {
+    const desired = structuredClone(france);
+    const row = desired.files['engine.env'].find((d) => d.key === 'FLEET_CANARY_REPO');
+    delete row.fp;
+    row.kind = 'public';
+    row.value = value;
+    return { name: 'other', desired };
+  };
+  const pair = (other) => canaryRepoProblems([{ name: 'france', desired: france }, other]);
+
+  assert.match(pair(withCanary('thoerwink8/fleet-dao-canary')).join('\n'), /同一个巡检仓/);
+  assert.match(pair(withCanary('Thoerwink8/Fleet-Dao-Canary')).join('\n'), /同一个巡检仓/);
+  assert.deepEqual(pair(withCanary('thoerwink8/fleet-dao-canary-other')), []);
+  assert.deepEqual(pair(withCanary('')), []);
+  assert.match(pair(withCanary('fleet-dao-canary-other')).join('\n'), /认不出/);
+
+  const hidden = structuredClone(france);
+  const hiddenRow = hidden.files['engine.env'].find((d) => d.key === 'FLEET_CANARY_REPO');
+  delete hiddenRow.value;
+  hiddenRow.kind = 'private';
+  hiddenRow.fp = 'a'.repeat(64);
+  assert.match(
+    pair({ name: 'other', desired: hidden }).join('\n'),
+    /other 的 FLEET_CANARY_REPO 写成了私有值/,
+  );
+
+  const absent = structuredClone(france);
+  absent.files['engine.env'] = absent.files['engine.env'].filter((d) => d.key !== 'FLEET_CANARY_REPO');
+  assert.deepEqual(pair({ name: 'other', desired: absent }), []);
 });
 
 test('命令行 render：打印照期望建的文件；不认识的文件、期望读不到明说没做成', async () => {

@@ -359,6 +359,49 @@ describe('runIntakeJob · 合并闸还没认冷验收', () => {
   });
 });
 
+describe('两台引擎的巡检仓互不收对方的单（#1136）', () => {
+  const repoOf = (id: string, name: string): IntakeRepo => ({ ...REPO, id, name });
+
+  it('只拉自己的巡检仓和普通项目仓：另一台的巡检仓即使开关开着、单子合格，也不读、不起', async () => {
+    const pulled: string[] = [];
+    const h = harness({
+      async repos() {
+        return [repoOf('own', 'canary-a'), repoOf('foreign', 'canary-b'), repoOf('product', 'demo')];
+      },
+      async foreignCanaries() {
+        return ['Acme/Canary-B'];
+      },
+      async openIssues(repo) {
+        pulled.push(`${repo.owner}/${repo.name}`);
+        const number = repo.name === 'demo' ? 12 : 21;
+        return { issues: [issue({ number })], openMilestones: [V1, V2] };
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(pulled.sort()).toEqual(['acme/canary-a', 'acme/demo']);
+    expect(h.started.map((s) => s.issueNumber).sort()).toEqual([12, 21]);
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.text.includes('别的环境的巡检仓跳过 1 个'))).toBe(true);
+  });
+
+  it('【故意造出的失败】各环境的巡检仓名单读不到：这一轮一张单都不拉，不当成「没有别人的仓」', async () => {
+    const h = harness({
+      async repos() {
+        return [repoOf('own', 'canary-a'), repoOf('foreign', 'canary-b')];
+      },
+      async foreignCanaries() {
+        throw new Error('deploy 目录读不到');
+      },
+    });
+    await expect(runIntakeJob(h.deps)).rejects.toThrow(/巡检仓名单读不到/);
+    expect(h.started).toEqual([]);
+    expect(h.planReads).toEqual([]);
+    const result = h.finished[0]?.result;
+    expect(result?.outcome).toBe('failed');
+    expect(result?.outcome === 'failed' ? result.why : '').toContain('deploy 目录读不到');
+  });
+});
+
 describe('runIntakeJob · 一轮', () => {
   it('开关打开以前开的老单（没贴「交给引擎」）→ 被拉', async () => {
     const h = harness({}, { issues: [issue({ createdAt: OLD })] });
