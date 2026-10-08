@@ -96,7 +96,7 @@ export function purposeLine(p: RoutingLayerPurpose): { text: string; tone: Tone 
     const n = p.models.flatMap((m) => m.routes).filter((r) => r.verdict === 'unknown').length;
     return { text: `没有确定活着的：${n} 条不知道（探针没看过、额度没读成）`, tone: 'stall' };
   }
-  if (p.models.length === 0) return { text: p.problems[0] ?? '没配模型顺序', tone: 'fail' };
+  if (p.models.length === 0) return { text: p.problems[0] ?? '这个用途没有模型，派不了', tone: 'fail' };
   return { text: '一条活的都没有：下面逐条写了为什么', tone: 'fail' };
 }
 

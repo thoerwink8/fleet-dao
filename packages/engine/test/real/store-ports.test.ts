@@ -361,12 +361,13 @@ describe('选路', () => {
     expect(unknown.ok && unknown.why).toContain('不在这个用途的路由两层顺序里');
   });
 
-  it('【故意造出的失败】用途没配模型顺序：派不出（不按编号乱挑），写明是没配、不是路由坏了', async () => {
+  it('【故意造出的失败】用途没有模型：派不出（不按编号乱挑），写明是没配、不是路由坏了', async () => {
     await world(t.db, { stages: [] });
     const r = await pick({ stage: 'plan' });
     expect(r).toMatchObject({ ok: false, waitFor: 'none' });
-    expect(!r.ok && r.detail).toContain('规划阶段还没配模型顺序（路由两层「用途 → 模型」那一层是空的）');
-    expect(!r.ok && r.detail).toContain('路由两层的配置缺口：用途 plan 没配模型顺序');
+    expect(!r.ok && r.detail).toContain('规划阶段没配模型');
+    expect(!r.ok && r.detail).toContain('不退到别的用途');
+    expect(!r.ok && r.detail).toContain('路由两层的配置缺口：这个用途没有模型，派不了');
   });
 
   it('近 7 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {

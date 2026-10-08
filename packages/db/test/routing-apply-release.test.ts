@@ -1,7 +1,7 @@
 // 发布时装路由两层（#574）：bin/routing.ts 在目录装载器之后跑 runRoutingApply。这里拿仓里真的骨架和目录配置样例走一遍：
 // 装得进去、再装一次说已齐；读不到骨架、目录还没装（骨架里的路由库里没有）都明确失败、一行不写（发布那一步跟着红）。
 import { readFileSync } from 'node:fs';
-import { and, eq, ne } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadCatalog, parseCatalog } from '../src/catalog.ts';
 import { formatRoutingApplyReport, runRoutingApply } from '../src/routing-apply.ts';
@@ -116,51 +116,21 @@ describe('发布时装路由两层（runRoutingApply）', () => {
     expect(text).not.toContain('补了模型');
   });
 
-  it('老库补新（#1351）：库里 haiku-5.5 只有 cursor 一条路由、groom 里没有它——发版后两条 claude-code 路由追加在 cursor 后面、haiku-5.5 追加在 groom 末尾；驾驶舱改过的开关不动', async () => {
+  it('用途表已有任何一行：删掉的模型不补回、改过的开关不改回', async () => {
     await loadCatalog(t.db, example());
     await runRoutingApply(t.db);
-    // 还原成「haiku-5.5 的 claude-code 路由和 groom 里的它还没进库」的老库，并模拟驾驶舱改过 cursor 路由和 groom 里 sonnet 的位置
-    await t.db
-      .delete(routingCatalog)
-      .where(
-        and(
-          eq(routingCatalog.modelId, 'haiku-5.5'),
-          ne(routingCatalog.routeId, 'cursor:haiku-5.5:cursor-agent'),
-        ),
-      );
     await t.db
       .update(routingCatalog)
-      .set({ position: 0, enabled: true })
+      .set({ enabled: false })
       .where(eq(routingCatalog.routeId, 'cursor:haiku-5.5:cursor-agent'));
-    const groomBefore = (await t.db.select().from(routingPurposeModels))
-      .filter((p) => p.purpose === 'groom' && p.modelId !== 'haiku-5.5')
-      .sort((a, b) => a.position - b.position);
-    await t.db
-      .delete(routingPurposeModels)
-      .where(and(eq(routingPurposeModels.purpose, 'groom'), eq(routingPurposeModels.modelId, 'haiku-5.5')));
-    // 老库里 groom 没有 haiku-5.5，顺序从 sonnet-5.5 起，位置整体不动
+    await t.db.delete(routingPurposeModels).where(eq(routingPurposeModels.modelId, 'haiku-5.5'));
+    const beforePurpose = await t.db.select().from(routingPurposeModels);
+    const beforeCatalog = await t.db.select().from(routingCatalog);
+    expect(beforePurpose.some((p) => p.modelId === 'haiku-5.5')).toBe(false);
+    expect(beforeCatalog.find((r) => r.routeId === 'cursor:haiku-5.5:cursor-agent')?.enabled).toBe(false);
     const out = await runRoutingApply(t.db);
-
-    const haiku = (await t.db.select().from(routingCatalog))
-      .filter((r) => r.modelId === 'haiku-5.5')
-      .sort((a, b) => a.position - b.position);
-    expect(haiku.map((r) => [r.routeId, r.position, r.enabled])).toEqual([
-      ['cursor:haiku-5.5:cursor-agent', 0, true],
-      ['claude-solo:haiku-5.5:claude-code', 1, true],
-      ['claude-carpool:haiku-5.5:claude-code', 2, false],
-    ]);
-    const groomAfter = (await t.db.select().from(routingPurposeModels))
-      .filter((p) => p.purpose === 'groom')
-      .sort((a, b) => a.position - b.position);
-    expect(groomAfter.slice(0, -1)).toEqual(groomBefore);
-    expect(groomAfter.at(-1)).toEqual({
-      purpose: 'groom',
-      modelId: 'haiku-5.5',
-      position: (groomBefore.at(-1)?.position ?? -1) + 1,
-    });
-    expect(out).toContain('给库里已有的模型追加了路由 2 行');
-    expect(out).toContain('haiku-5.5 ← claude-solo:haiku-5.5:claude-code（开）');
-    expect(out).toContain('groom ← haiku-5.5');
-    expect(await runRoutingApply(t.db)).toContain('路由两层已齐，这次一行没改');
+    expect(out).toContain('一行没改');
+    expect(await t.db.select().from(routingPurposeModels)).toEqual(beforePurpose);
+    expect(await t.db.select().from(routingCatalog)).toEqual(beforeCatalog);
   });
 });

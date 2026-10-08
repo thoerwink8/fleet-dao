@@ -88,7 +88,7 @@ function purpose(
   verdict: LivenessVerdict,
   problems: string[] = [],
 ): RoutingLayerPurpose {
-  return { purpose: name, verdict, problems, models };
+  return { purpose: name, version: 0, verdict, problems, models };
 }
 
 describe('走的是不是首选', () => {
@@ -134,9 +134,10 @@ describe('走的是不是首选', () => {
     });
   });
 
-  test('【故意造出的失败】没配模型顺序：照后端写的缺口说，不说成「没有」', () => {
-    const p = purpose('verify', [], 'dead', ['用途 verify 没配模型顺序']);
-    expect(purposeLine(p)).toEqual({ text: '用途 verify 没配模型顺序', tone: 'fail' });
+  test('【故意造出的失败】这个用途没有模型：照后端写的缺口说，派不了', () => {
+    const p = purpose('verify', [], 'dead', ['这个用途没有模型，派不了']);
+    expect(purposeLine(p)).toEqual({ text: '这个用途没有模型，派不了', tone: 'fail' });
+    expect(purposeLine(purpose('verify', [], 'dead', [])).text).toBe('这个用途没有模型，派不了');
   });
 
   test('【故意造出的失败】全死：派不出去，指向下面逐条的原因', () => {
@@ -149,7 +150,7 @@ describe('进页面先看哪个用途', () => {
   const live = purpose('triage', [model('opus', [route('a', 'live')])], 'live');
   const fallback = purpose('plan', [model('opus', [route('a', 'dead'), route('b', 'live')])], 'live');
   const unknown = purpose('review', [model('grok', [route('g', 'unknown')])], 'unknown');
-  const dead = purpose('verify', [], 'dead', ['用途 verify 没配模型顺序']);
+  const dead = purpose('verify', [], 'dead', ['这个用途没有模型，派不了']);
 
   test('网址里点名的优先', () => {
     expect(pickPurpose([live, dead], 'triage')?.purpose).toBe('triage');
