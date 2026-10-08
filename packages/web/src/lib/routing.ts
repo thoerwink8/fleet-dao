@@ -1,13 +1,13 @@
 // 路由页（/routing，#574）的白话和先看哪个：活不活由后端现算（db 的 routing-liveness.ts，判法只在那里），这里只管怎么说。
 
-import { poolFull, poolOccupied, routeProbeStaleMinutes } from '@fleet-dao/shared';
+import { poolFull, poolOccupied, routeProbeStaleMinutes, routingPurposeOf } from '@fleet-dao/shared';
 import type {
   LivenessVerdict,
   RoutingLayerModel,
   RoutingLayerPurpose,
   RoutingLayerRoute,
 } from '../api/types';
-import { hostLabel } from './catalog';
+import { hostLabel, stageLabel } from './catalog';
 import { TIME } from './format';
 import type { Tone } from './status';
 
@@ -23,6 +23,11 @@ export const purposeVerdictLabel: Record<LivenessVerdict, string> = {
   dead: '派不出去',
   unknown: '不知道',
 };
+
+/** 这一格在路由页上的名字。不在对照里的用途不该被画出来（调用方先滤掉）。 */
+export function purposeLabel(purpose: RoutingLayerPurpose['purpose']): string {
+  return routingPurposeOf(purpose)?.label ?? stageLabel[purpose];
+}
 
 /** 一条路由给人看的名字：渠道 · 账号池。执行方式另起一行（hostLabel）。 */
 export function routeTitle(r: Pick<RoutingLayerRoute, 'channelName' | 'poolId'>): string {

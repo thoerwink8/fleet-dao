@@ -1,51 +1,47 @@
-// 路由页（#574，specs/509 方案第八节「两层的每层都要能一眼看出这条现在活着吗」）：每个用途 → 模型 → 路由，每一层活 / 死 /
-// 不知道和原因。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍；先后拖动改、开关能改（母单 #1089、#1333）。
+// 路由页（#574，specs/509 方案第八节「两层的每层都要能一眼看出这条现在活着吗」；#1366 第二部分改成分块）：
+// 「用途 / 模型目录 / 渠道」三块一次看一块。每个用途按顺序排哪些模型（紧凑行：名字、状态点、开关；拖动、置顶、置底、Alt+上下键改先后），
+// 选中一个模型再看它下面每条路由现在活不活；模型目录、渠道各是一列带搜索的紧凑行。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍。
 // 改这里之前必须知道：
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
+// - 先后、开关的写走 components/routing-edit.tsx（保存契约不变：带看到的旧顺序，别人先改了回 409）。
 
 import { routingPurposeOf, SCOPE_NO_ROUTE } from '@fleet-dao/shared';
 import { Route as RouteIcon, TriangleAlert } from 'lucide-react';
-import { type ReactNode, useRef } from 'react';
+import { type KeyboardEvent, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { usePoolHolds, useRouting, useRoutingLayers } from '../api/client';
-import type {
-  LivenessFact,
-  RoutingLayerModel,
-  RoutingLayerPurpose,
-  RoutingLayerRoute,
-  RoutingLayers,
-} from '../api/types';
-import { ChannelStrip } from '../components/channel-status';
+import { usePoolHolds, useRoutingLayers } from '../api/client';
+import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import {
-  ChannelSwitch,
+  ChannelTab,
+  LIST_HEIGHT,
+  ListFilterBar,
+  ModelCatalogTab,
+  ROW_HEIGHT,
+} from '../components/routing-browse';
+import {
+  FounderOnlyBadge,
   ModelSwitch,
-  RouteSwitch,
   RoutingEditProvider,
+  type RowControls,
   SortableList,
   useRoutingEdit,
 } from '../components/routing-edit';
-import { PoolHoldControl } from '../components/routing-hold';
+import { ModelRoutes } from '../components/routing-routes';
 import { StatusChip, StatusDot } from '../components/status';
-import { Badge } from '../components/ui/badge';
-import { stageLabel } from '../lib/catalog';
-import { buildChannelCards } from '../lib/channel-status';
-import { formatAgo, formatClock, formatIn } from '../lib/format';
+import { formatClock } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { poolIsHeld } from '../lib/pool-holds';
+import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
 import {
   countByVerdict,
   firstLive,
   modelSummary,
   pickPurpose,
-  probeStale,
+  purposeLabel,
   purposeLine,
   purposeVerdictLabel,
-  routeHost,
-  routeSlots,
-  routeTitle,
   verdictLabel,
   verdictTone,
 } from '../lib/routing';
@@ -57,20 +53,24 @@ export function meta() {
 }
 
 const DESCRIPTION =
-  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。拖到新位置改先后（键盘：方向键挪，回车确认）：模型的先后只管这个用途，渠道的先后管这个模型在所有用途里。模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在这里整池暂停。下一次选路就照新的。';
+  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。改先后：拖到新位置，或点每行的置顶、置底，或聚焦后按 Alt+上下键（Alt+Home 置顶、Alt+End 置底）；模型的先后只管这个用途，渠道的先后管这个模型在所有用途里。模型、渠道、每条路由都有开关：模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在这里整池暂停。下一次选路就照新的。';
+
+const TABS = [
+  { id: 'purposes', label: '用途' },
+  { id: 'models', label: '模型目录' },
+  { id: 'channels', label: '渠道' },
+] as const;
+
+type TabId = (typeof TABS)[number]['id'];
+
+const parseTab = (raw: string | null): TabId => TABS.find((t) => t.id === raw)?.id ?? 'purposes';
 
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
 
-/** 这一格在路由页上的名字。不在对照里的用途不该被画出来（调用方先滤掉）。 */
-function purposeLabel(purpose: RoutingLayerPurpose['purpose']): string {
-  return routingPurposeOf(purpose)?.label ?? stageLabel[purpose];
-}
-
 export default function Routing() {
   const { data, error, isLoading } = useRoutingLayers();
-  const [params] = useSearchParams();
-  const detail = useRef<HTMLDivElement>(null);
+  const [params, setParams] = useSearchParams();
 
   if (error) {
     return (
@@ -101,12 +101,17 @@ export default function Routing() {
 
   // 只画对照里的用途。接口要是还带回老的（分诊、方案、审查……），当没点名，不占一格。
   const purposes = data.purposes.filter((p) => routingPurposeOf(p.purpose));
-  const selected = pickPurpose(purposes, params.get('purpose'));
-  // 窄屏上清单在上、详情在下：点了就滚到详情（宽屏两栏并排，不用滚）
-  const reveal = () => {
-    if (!window.matchMedia?.('(max-width: 1279px)').matches) return;
-    requestAnimationFrame(() => detail.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }));
-  };
+  const tab = parseTab(params.get('tab'));
+  const setTab = (id: TabId) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id === 'purposes') next.delete('tab');
+        else next.set('tab', id);
+        return next;
+      },
+      { replace: true, preventScrollReset: true },
+    );
 
   return (
     <Page
@@ -116,144 +121,92 @@ export default function Routing() {
       actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
     >
       <RoutingEditProvider>
-        <ChannelSummary layers={data} />
-        <ModelRosterNotice layers={data} />
-        {purposes.length === 0 || !selected ? (
-          <Panel>
-            <Empty
-              icon={RouteIcon}
-              title="后端一个用途都没给"
-              hint="每个用途都该有一份（没配的写明没配）：这不该发生，去看后端日志"
-            />
-          </Panel>
-        ) : (
-          <div className="grid items-start gap-4 xl:grid-cols-routing">
-            <PurposeList purposes={purposes} selected={selected.purpose} onPick={reveal} />
-            <div ref={detail} className="min-w-0 scroll-mt-4">
-              <PurposeDetail purpose={selected} />
-            </div>
-          </div>
-        )}
+        <RoutingTabs tab={tab} onPick={setTab} />
+        <div role="tabpanel" id="routing-panel" aria-labelledby={`routing-tab-${tab}`}>
+          {tab === 'models' ? <ModelCatalogTab layers={data} /> : null}
+          {tab === 'channels' ? <ChannelTab layers={data} /> : null}
+          {tab === 'purposes' ? <PurposesTab purposes={purposes} params={params} /> : null}
+        </div>
       </RoutingEditProvider>
     </Page>
   );
 }
 
-/**
- * 渠道名册和目录的差（#1302）。只列，不放按钮：加模型走改 deploy/catalog.json 的 PR。
- * 没读到、读失败、还没读过，都不写「都对得上」。两头都空、也没有失败时才写那一句。
- * 没有名册命令的渠道（#1357）另写「这个渠道靠手工登记，共 N 个」，不报没读成。
- */
-function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
-  const roster = layers.modelRoster;
-  const manual = roster?.manual ?? [];
-  const manualBlock =
-    manual.length === 0
-      ? null
-      : manual.map((item) => (
-          <p key={item.channelId}>
-            {item.channelName}：这个渠道靠手工登记，共 {item.count} 个
-          </p>
-        ));
-  let body: ReactNode;
-  if (layers.modelRosterUnavailable) {
-    body = <p>{layers.modelRosterUnavailable}</p>;
-  } else if (!roster) {
-    body = <p>渠道模型表没读到，不能当成都对得上</p>;
-  } else if (
-    roster.missingFromCatalog.length === 0 &&
-    roster.goneRoutes.length === 0 &&
-    roster.failed.length === 0 &&
-    roster.notYet.length === 0 &&
-    manual.length === 0
-  ) {
-    body = <p>都对得上</p>;
-  } else if (
-    roster.missingFromCatalog.length === 0 &&
-    roster.goneRoutes.length === 0 &&
-    roster.failed.length === 0 &&
-    roster.notYet.length === 0
-  ) {
-    body = (
-      <div className="space-y-3">
-        <p>都对得上</p>
-        {manualBlock}
-      </div>
-    );
-  } else {
-    body = (
-      <div className="space-y-3">
-        <div>
-          <h2 className="text-sm font-semibold">渠道里有、目录里还没有的模型</h2>
-          {roster.missingFromCatalog.length === 0 ? (
-            <p className="mt-1 text-muted-foreground">没有</p>
-          ) : (
-            <ul className="mt-1 list-disc pl-5">
-              {roster.missingFromCatalog.map((item) => (
-                <li key={`${item.channelId}:${item.modelKey}`}>
-                  {item.channelName}：{item.modelKey}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div>
-          <h2 className="text-sm font-semibold">目录里有、渠道已不认的路由</h2>
-          {roster.goneRoutes.length === 0 ? (
-            <p className="mt-1 text-muted-foreground">没有</p>
-          ) : (
-            <ul className="mt-1 list-disc pl-5">
-              {roster.goneRoutes.map((item) => (
-                <li key={item.routeId}>
-                  {item.channelName} 的路由 {item.routeId}（模型 {item.modelId}，
-                  {item.upstreamModel ? `上游串 ${item.upstreamModel}` : '目录没写上游串'}）
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        {roster.failed.map((item) => (
-          <p key={item.channelId}>
-            {item.channelName} 没读成（{item.code}）：{item.message}
-          </p>
-        ))}
-        {roster.notYet.map((item) => (
-          <p key={item.channelId}>{item.channelName} 还没读过</p>
-        ))}
-        {manualBlock}
-      </div>
-    );
-  }
+/** 三块的页签：一次只显示一块。方向键、Home、End 在页签间移动。 */
+function RoutingTabs({ tab, onPick }: { tab: TabId; onPick: (id: TabId) => void }) {
+  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const at = TABS.findIndex((t) => t.id === tab);
+    let to: number;
+    if (e.key === 'ArrowRight') to = (at + 1) % TABS.length;
+    else if (e.key === 'ArrowLeft') to = (at - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = TABS.length - 1;
+    else return;
+    e.preventDefault();
+    const next = TABS[to];
+    if (!next) return;
+    onPick(next.id);
+    document.getElementById(`routing-tab-${next.id}`)?.focus();
+  };
   return (
-    <section
-      aria-label="渠道模型表"
-      className="mb-4 rounded-xl border border-dashed bg-card px-4 py-3 text-sm"
-    >
-      {body}
-    </section>
+    <div role="tablist" aria-label="路由页分块" className="mb-4 flex gap-1 border-b">
+      {TABS.map((t) => {
+        const active = t.id === tab;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            id={`routing-tab-${t.id}`}
+            aria-selected={active}
+            aria-controls="routing-panel"
+            tabIndex={active ? 0 : -1}
+            onClick={() => onPick(t.id)}
+            onKeyDown={onKeyDown}
+            className={cn(
+              '-mb-px border-b-2 px-4 py-2 text-sm transition-colors hover:text-foreground',
+              active
+                ? 'border-foreground font-semibold text-foreground'
+                : 'border-transparent text-muted-foreground',
+            )}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
-/** 顶上一行渠道一览（细看、立即探测在渠道状态页）。目录读不到照说没读成，不画空的一行。 */
-function ChannelSummary({ layers }: { layers: RoutingLayers }) {
-  const routing = useRouting();
-  const now = useNow();
-  if (routing.error) {
+function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; params: URLSearchParams }) {
+  const selected = pickPurpose(purposes, params.get('purpose'));
+  // 窄屏上清单在上、详情在下：点了就滚到详情（宽屏两栏并排，不用滚）
+  const reveal = () => {
+    if (!window.matchMedia?.('(max-width: 1279px)').matches) return;
+    requestAnimationFrame(() =>
+      document
+        .getElementById('routing-purpose-detail')
+        ?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }),
+    );
+  };
+  if (purposes.length === 0 || !selected) {
     return (
-      <div className="mb-4">
-        <LoadError what="渠道状态" error={routing.error} />
-      </div>
+      <Panel>
+        <Empty
+          icon={RouteIcon}
+          title="后端一个用途都没给"
+          hint="每个用途都该有一份（没配的写明没配）：这不该发生，去看后端日志"
+        />
+      </Panel>
     );
   }
-  if (!routing.data) return null;
   return (
-    <ChannelStrip
-      cards={buildChannelCards(routing.data, layers, now)}
-      now={now}
-      extra={(card) => (
-        <ChannelSwitch channelId={card.channel.id} name={card.channel.name} enabled={card.channel.enabled} />
-      )}
-    />
+    <div className="grid items-start gap-4 xl:grid-cols-routing">
+      <PurposeList purposes={purposes} selected={selected.purpose} params={params} onPick={reveal} />
+      <div id="routing-purpose-detail" className="min-w-0 scroll-mt-4">
+        <PurposeDetail key={selected.purpose} purpose={selected} />
+      </div>
+    </div>
   );
 }
 
@@ -272,10 +225,12 @@ function Summary({ purposes, asOf }: { purposes: RoutingLayerPurpose[]; asOf: st
 function PurposeList({
   purposes,
   selected,
+  params,
   onPick,
 }: {
   purposes: RoutingLayerPurpose[];
   selected: string;
+  params: URLSearchParams;
   onPick: () => void;
 }) {
   const flow = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside !== true);
@@ -287,7 +242,7 @@ function PurposeList({
       </p>
       <ul className="space-y-2">
         {flow.map((p) => (
-          <PurposeItem key={p.purpose} purpose={p} selected={selected} onPick={onPick} />
+          <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} onPick={onPick} />
         ))}
       </ul>
       {aside.length > 0 ? (
@@ -295,7 +250,7 @@ function PurposeList({
           <p className="mb-2 px-1 text-caption text-muted-foreground">不是流程里的一段</p>
           <ul className="space-y-2">
             {aside.map((p) => (
-              <PurposeItem key={p.purpose} purpose={p} selected={selected} onPick={onPick} />
+              <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} onPick={onPick} />
             ))}
           </ul>
         </div>
@@ -307,18 +262,23 @@ function PurposeList({
 function PurposeItem({
   purpose: p,
   selected,
+  params,
   onPick,
 }: {
   purpose: RoutingLayerPurpose;
   selected: string;
+  params: URLSearchParams;
   onPick: () => void;
 }) {
   const line = purposeLine(p);
   const active = p.purpose === selected;
+  // 别的网址参数（?node=、?tab=）带着走
+  const next = new URLSearchParams(params);
+  next.set('purpose', p.purpose);
   return (
     <li>
       <Link
-        to={{ search: `?purpose=${p.purpose}` }}
+        to={{ search: `?${next}` }}
         replace
         preventScrollReset
         onClick={onPick}
@@ -366,6 +326,12 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const first = firstLive(p);
   const edit = useRoutingEdit();
   const holds = usePoolHolds();
+  // 选中看路由的模型：点过的优先；没点过，进来那一刻看顺位第一条活的所在的模型，没有就第一个。
+  // 进来时定下来就不跟着变：开关一关、先后一调，顺位第一条活的会换，不能让下面的路由跟着跳到别的模型。
+  const [picked, setPicked] = useState<string | null>(
+    () => first?.model.modelId ?? p.models[0]?.modelId ?? null,
+  );
+  const current = p.models.find((m) => m.modelId === picked) ?? p.models[0];
   return (
     <Panel
       title={
@@ -405,30 +371,28 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
         </ul>
       ) : null}
       {p.models.length > 0 ? (
-        <SortableList
-          ariaLabel="模型"
-          items={p.models}
-          itemId={(m) => m.modelId}
-          itemLabel={(m) => `${m.displayName}（${purposeLabel(p.purpose)}里的先后）`}
-          disabled={edit.disabledWhy !== null || edit.busy}
-          disabledWhy={edit.disabledWhy}
-          className="space-y-3"
-          rowClassName={() => 'overflow-hidden rounded-lg border'}
-          rowProps={(m) => ({ 'data-model': m.modelId })}
-          onSave={(order, expected, movedId) =>
-            edit.reorderModels({ purpose: p.purpose, movedId, order, expected })
-          }
-        >
-          {(m, i, handle) => (
-            <ModelBlock
-              model={m}
-              index={i}
-              handle={handle}
-              now={now}
-              firstLiveRoute={first?.model === m ? first.route.routeId : undefined}
-            />
-          )}
-        </SortableList>
+        <>
+          <ModelPriority purpose={p} selectedId={current?.modelId} onSelect={setPicked} />
+          {current ? (
+            <section
+              aria-label={`${current.displayName} 的路由`}
+              className="mt-4 overflow-hidden rounded-lg border"
+            >
+              <header className="flex flex-wrap items-baseline gap-x-2 border-b bg-muted/40 px-3 py-2">
+                <h3 className="text-sm font-semibold">{current.displayName} 的路由</h3>
+                <span className="text-caption text-muted-foreground">
+                  先后管这个模型在所有用途里 · {modelSummary(current)}
+                </span>
+              </header>
+              <ModelRoutes
+                key={current.modelId}
+                model={current}
+                now={now}
+                firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
+              />
+            </section>
+          ) : null}
+        </>
       ) : null}
       <p className="mt-4 text-caption text-muted-foreground">
         活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
@@ -439,204 +403,125 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   );
 }
 
-function ModelBlock({
-  model: m,
-  index,
-  handle,
-  now,
-  firstLiveRoute,
+/**
+ * 这个用途下的模型优先级：一行一个模型的紧凑行，拖动或置顶 / 置底 / Alt+上下键改先后，点名字在下面看它的路由。
+ * 超过 50 个模型才出搜索框和「只看已开启」，也只画窗口里的行；筛选时只显示了一部分，先后不能调（免得把看不见的行顺序弄乱）。
+ */
+function ModelPriority({
+  purpose: p,
+  selectedId,
+  onSelect,
 }: {
-  model: RoutingLayerModel;
-  index: number;
-  handle: ReactNode;
-  now: number;
-  firstLiveRoute: string | undefined;
+  purpose: RoutingLayerPurpose;
+  selectedId: string | undefined;
+  onSelect: (modelId: string) => void;
 }) {
   const edit = useRoutingEdit();
-  const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
+  const [filter, setFilter] = useState<ListFilter>(NO_FILTER);
+  const long = p.models.length > WINDOW_MIN_ROWS;
+  const filtering = long && filterActive(filter);
+  const shown = filtering
+    ? filterRows(
+        p.models,
+        filter,
+        (m) => [m.displayName, m.modelId, m.family ?? ''],
+        (m) => m.routes.some((r) => r.enabled),
+      )
+    : p.models;
+  const why =
+    edit.disabledWhy ?? (filtering ? '正在筛选，只显示了一部分：清掉搜索和「只看已开启」再调先后' : null);
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/40 px-3 py-2">
-        <span className="num grid size-5 place-items-center rounded-full bg-foreground/10 text-caption font-medium">
-          {index + 1}
-        </span>
-        <span className="text-sm font-semibold">{m.displayName}</span>
-        {m.family ? <span className="text-caption text-muted-foreground">{m.family}</span> : null}
-        <StatusChip tone={verdictTone[m.verdict]} label={verdictLabel[m.verdict]} />
-        <span className="ml-auto text-caption text-muted-foreground">{modelSummary(m)}</span>
-        <ModelSwitch
-          modelId={m.modelId}
-          modelName={m.displayName}
-          enabled={enabledRouteIds.length > 0}
-          expectedEnabled={enabledRouteIds}
-          unavailable={m.routes.length === 0}
+    <div className="overflow-hidden rounded-lg border">
+      {long ? (
+        <ListFilterBar
+          noun="模型"
+          filter={filter}
+          onChange={setFilter}
+          total={p.models.length}
+          shown={shown.length}
         />
-        {handle}
-      </div>
-      {m.routes.length === 0 ? (
-        <p className="px-3 py-2.5 text-sub text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>
+      ) : null}
+      {shown.length === 0 ? (
+        <p className="px-3 py-8 text-center text-sub text-muted-foreground">
+          没有符合的模型：换个搜索词，或关掉「只看已开启」
+        </p>
       ) : (
         <SortableList
-          ariaLabel={`${m.displayName} 的路由`}
-          items={m.routes}
-          itemId={(r) => r.routeId}
-          itemLabel={(r) => `${routeTitle(r)}（${m.displayName} 下的先后）`}
-          disabled={edit.disabledWhy !== null || edit.busy}
-          disabledWhy={edit.disabledWhy}
-          rowClassName={(r) => cn('border-b px-3 py-2.5 last:border-b-0', !r.enabled && 'bg-muted/30')}
-          rowProps={(r) => ({ 'data-route': r.routeId })}
+          ariaLabel="模型"
+          items={shown}
+          itemId={(m) => m.modelId}
+          itemLabel={(m) => `${m.displayName}（${purposeLabel(p.purpose)}里的先后）`}
+          disabled={why !== null}
+          busy={edit.busy}
+          disabledWhy={why}
+          viewport={{ height: LIST_HEIGHT, rowHeight: ROW_HEIGHT }}
+          rowClassName={(m) => cn('border-b', m.modelId === selectedId && 'bg-muted/60')}
+          rowProps={(m) => ({ 'data-model': m.modelId })}
           onSave={(order, expected, movedId) =>
-            edit.reorderRoutes({ modelId: m.modelId, movedId, order, expected })
+            edit.reorderModels({ purpose: p.purpose, movedId, order, expected })
           }
         >
-          {(r, i, routeHandle) => (
-            <RouteItem
-              route={r}
-              index={i}
-              modelId={m.modelId}
-              modelName={m.displayName}
-              handle={routeHandle}
-              now={now}
-              firstLive={r.routeId === firstLiveRoute}
+          {(m, i, controls) => (
+            <ModelRow
+              model={m}
+              position={p.models.findIndex((x) => x.modelId === m.modelId) + 1 || i + 1}
+              selected={m.modelId === selectedId}
+              onSelect={() => onSelect(m.modelId)}
+              controls={controls}
             />
           )}
         </SortableList>
       )}
-    </>
+    </div>
   );
 }
 
-function RouteItem({
-  route: r,
-  index,
-  modelId,
-  modelName,
-  handle,
-  now,
-  firstLive: isFirst,
+function ModelRow({
+  model: m,
+  position,
+  selected,
+  onSelect,
+  controls,
 }: {
-  route: RoutingLayerRoute;
-  index: number;
-  modelId: string;
-  modelName: string;
-  handle: ReactNode;
-  now: number;
-  firstLive: boolean;
+  model: RoutingLayerModel;
+  position: number;
+  selected: boolean;
+  onSelect: () => void;
+  controls: RowControls;
 }) {
-  const stale = probeStale(r, now);
-  const slots = routeSlots(r);
-  const edit = useRoutingEdit();
-  const routing = useRouting();
-  const holds = usePoolHolds();
-  const name = routeTitle(r);
-  // 目录没读到不猜渠道关没关：只有读到了且 enabled 为 false 才换成「渠道已关」。
-  const channelOff = routing.data
-    ? routing.data.channels.find((c) => c.id === r.channelId)?.enabled === false
-    : false;
-  const poolLocked = Boolean(holds.data && poolIsHeld(holds.data, r.poolId));
-  const lockWhy = holds.error
-    ? '整池暂停没读成，先不能开这条路由'
-    : poolLocked
-      ? '这个账号池整池暂停，不能单独开'
-      : null;
+  const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="num text-caption text-muted-foreground">{index + 1}.</span>
-        <span className="text-sub font-medium">{name}</span>
-        <StatusChip tone={verdictTone[r.verdict]} label={verdictLabel[r.verdict]} />
-        {r.enabled ? null : (
-          <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-            关着
-          </Badge>
-        )}
-        {isFirst ? (
-          <Badge variant="secondary" className="h-4 px-1 text-micro font-normal">
-            顺位第一条活的
-          </Badge>
+    <div className="flex h-full items-center gap-1.5 pr-2 pl-1.5">
+      {controls.grip}
+      <span className="num grid size-5 shrink-0 place-items-center rounded-full bg-foreground/10 text-caption font-medium">
+        {position}
+      </span>
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={selected}
+        aria-label={`查看 ${m.displayName} 的路由`}
+        className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
+      >
+        <StatusDot tone={verdictTone[m.verdict]} className="shrink-0" />
+        <span className="truncate text-sm font-semibold">{m.displayName}</span>
+        <span className="sr-only">：{verdictLabel[m.verdict]}</span>
+        {m.family ? (
+          <span className="hidden truncate text-caption text-muted-foreground sm:inline">{m.family}</span>
         ) : null}
-        <span className="text-caption text-muted-foreground">
-          {routeHost(r)} · <span className="num">{slots.text}</span>
-          {slots.full ? <span className="text-ink-stall">（满了，等空位，不算死）</span> : null}
+        <FounderOnlyBadge modelId={m.modelId} family={m.family} displayName={m.displayName} />
+        <span className="ml-auto hidden truncate text-caption text-muted-foreground md:inline">
+          {modelSummary(m)}
         </span>
-        <PoolHoldControl poolId={r.poolId} routeId={r.routeId} />
-        <span className="num ml-auto truncate text-micro text-faint" title={r.routeId}>
-          {r.routeId}
-        </span>
-        {channelOff ? (
-          <span className="text-caption text-muted-foreground" title="渠道关了，这里不能单独开">
-            渠道已关
-          </span>
-        ) : (
-          <RouteSwitch
-            label={name}
-            enabled={r.enabled}
-            lockedWhy={lockWhy}
-            onToggle={() =>
-              edit.toggleRoute({
-                modelId,
-                modelName,
-                routeId: r.routeId,
-                routeName: name,
-                enabled: r.enabled,
-              })
-            }
-          />
-        )}
-        {handle}
-      </div>
-      <div className="mt-2 grid gap-x-4 gap-y-2 md:grid-cols-3">
-        <Fact label="接得上" fact={r.connect}>
-          {r.probedAt ? (
-            stale ? (
-              <span className="text-ink-stall">
-                探测过期：{formatAgo(r.probedAt, now)}的结论，探针可能停了
-              </span>
-            ) : (
-              <>{formatAgo(r.probedAt, now)}探的</>
-            )
-          ) : null}{' '}
-          <Link
-            to={`/routing/status?p=${encodeURIComponent(r.channelId)}`}
-            className="underline underline-offset-2 hover:text-foreground"
-          >
-            原文、立即探测
-          </Link>
-        </Fact>
-        <Fact label="额度够" fact={r.quota}>
-          {r.exhausted.length > 0
-            ? r.exhausted.map((w) => (
-                <span key={w.label} className="block">
-                  {w.label}：{w.resetsAt ? `${formatIn(w.resetsAt, now)}清零` : '清零时刻没读到'}
-                </span>
-              ))
-            : null}
-        </Fact>
-        <Fact label="禁令与开关" fact={r.ban} />
-      </div>
-    </>
-  );
-}
-
-function Fact({ label, fact, children }: { label: string; fact: LivenessFact; children?: ReactNode }) {
-  const tone = verdictTone[fact.verdict];
-  return (
-    <div className="min-w-0">
-      <div className="text-caption text-muted-foreground">{label}</div>
-      <div className="mt-0.5 flex items-start gap-1.5 text-sub">
-        <StatusDot tone={tone} className="mt-1.5" />
-        {/* 过了的一件用灰字，没过的（死、不知道）才上色：一眼先看到卡在哪 */}
-        <span
-          className={cn(
-            'min-w-0 break-words',
-            fact.verdict === 'live' ? 'text-muted-foreground' : toneText[tone],
-          )}
-        >
-          <span className="sr-only">{verdictLabel[fact.verdict]}：</span>
-          {fact.reason}
-        </span>
-      </div>
-      {children ? <div className="mt-0.5 pl-3.5 text-caption text-muted-foreground">{children}</div> : null}
+      </button>
+      <ModelSwitch
+        modelId={m.modelId}
+        modelName={m.displayName}
+        enabled={enabledRouteIds.length > 0}
+        expectedEnabled={enabledRouteIds}
+        unavailable={m.routes.length === 0}
+      />
+      {controls.pins}
     </div>
   );
 }

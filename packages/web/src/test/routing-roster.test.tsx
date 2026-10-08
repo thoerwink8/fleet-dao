@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 路由页上的渠道模型差集（#1302）：只列，不放按钮。读不成不得写成「都对得上」。
+// 路由页「模型目录」块上的渠道模型差集（#1302，#1366 第二部分挪到这一块）：只列，不放按钮。读不成不得写成「都对得上」。
 import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -35,7 +35,7 @@ function withRoster(data: RoutingLayers): MockApi {
 describe('路由页：渠道模型表', () => {
   test('有新增、有消失：两头都列出来，没有按钮', async () => {
     renderApp(<RoutingPage />, {
-      route: '/routing?purpose=execute',
+      route: '/routing?tab=models',
       api: withRoster(
         layers({
           modelRoster: {
@@ -76,7 +76,7 @@ describe('路由页：渠道模型表', () => {
 
   test('都对得上时只写这一句', async () => {
     renderApp(<RoutingPage />, {
-      route: '/routing?purpose=execute',
+      route: '/routing?tab=models',
       api: withRoster(
         layers({
           modelRoster: { missingFromCatalog: [], goneRoutes: [], failed: [], notYet: [] },
@@ -90,7 +90,7 @@ describe('路由页：渠道模型表', () => {
 
   test('【故意造出的失败】渠道没读成：不得显示成都对得上', async () => {
     renderApp(<RoutingPage />, {
-      route: '/routing?purpose=execute',
+      route: '/routing?tab=models',
       api: withRoster(
         layers({
           modelRoster: {
@@ -119,7 +119,7 @@ describe('路由页：渠道模型表', () => {
 
   test('手工登记的渠道不报没读成，写靠手工登记、共几个', async () => {
     renderApp(<RoutingPage />, {
-      route: '/routing?purpose=execute',
+      route: '/routing?tab=models',
       api: withRoster(
         layers({
           modelRoster: {
@@ -141,7 +141,7 @@ describe('路由页：渠道模型表', () => {
 
   test('接口没给差集：写没读到，页面上那一句不是「都对得上」', async () => {
     renderApp(<RoutingPage />, {
-      route: '/routing?purpose=execute',
+      route: '/routing?tab=models',
       api: withRoster(layers()),
     });
     const section = await screen.findByRole('region', { name: '渠道模型表' });

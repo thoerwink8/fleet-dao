@@ -1,11 +1,16 @@
-// 路由页上调先后和开关（母单 #1089，#1333）：拖到目标位置改先后；每条路由、每个模型、每个渠道各有开关。
+// 路由页上调先后和开关（母单 #1089，#1333，#1366 第二部分）：拖到目标位置、每行「置顶」「置底」、聚焦后 Alt+上下键改先后；
+// 每条路由、每个模型、每个渠道各有开关。
 // 改这里之前必须知道：
-// - 开关点之前二次确认（和设置页「让 AI 接活」同一个做法），确认了才写后端。拖动不弹窗：鼠标放下、或键盘回车，才保存。
+// - 开关点之前二次确认（和设置页「让 AI 接活」同一个做法），确认了才写后端。改先后不弹窗：鼠标放下、点置顶 / 置底、按 Alt+方向键，就保存。
 // - 写的时候带「我看到的」：别人先改了后端回 409，这里把原话弹出来。不先改缓存冒充改成了：写完重拉，失败把预览清掉，顺序回到库里的。
 // - 模型开关是把这个模型下每条路由的 enabled 一次写成同一个值（没有单独的 models.enabled）。打开会把原来单独关掉的也打开。
+// - Fable 只有创始人本人在驾驶舱能打开（决定 0033）：判在后端（founder-only.ts 的 guardFounderOnly），这里不绕、不替它判，
+//   只在开关旁标一句；后端拒了，原话弹出来。
 // - 选了远程环境（?node=）时整块置灰：写只会落到本台的库。写「去那台上操作」。
+// - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，所以行内容不许撑高。
 
-import { GripVertical } from 'lucide-react';
+import { founderOnlyFor } from '@fleet-dao/shared';
+import { ArrowDownToLine, ArrowUpToLine, GripVertical } from 'lucide-react';
 import {
   createContext,
   type DragEvent,
@@ -26,6 +31,15 @@ import {
   useSetModelEnabled,
   useUpdateModelRoute,
 } from '../api/client';
+import {
+  autoScrollDelta,
+  dropOrder,
+  moveToEdge,
+  sameOrder,
+  stepOrder,
+  WINDOW_MIN_ROWS,
+  windowRange,
+} from '../lib/list-window';
 import { useSelectedNodeId } from '../lib/node';
 import { cn } from '../lib/utils';
 import { useSelectedNodeName } from './node-notice';
@@ -39,6 +53,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from './ui/alert-dialog';
+import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Switch } from './ui/switch';
 
@@ -97,9 +112,6 @@ export function useRoutingEdit(): RoutingEdit {
   if (!ctx) throw new Error('useRoutingEdit 要放在 RoutingEditProvider 里面');
   return ctx;
 }
-
-const sameOrder = (a: readonly string[], b: readonly string[]): boolean =>
-  a.length === b.length && a.every((id, i) => id === b[i]);
 
 export function RoutingEditProvider({ children }: { children: ReactNode }) {
   const nodeId = useSelectedNodeId();
@@ -240,45 +252,24 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
   );
 }
 
-const HANDLE_TITLE = '拖到新位置；键盘：方向键挪，回车确认，Esc 取消';
+const HANDLE_TITLE = '拖到新位置；键盘：Alt+上下键挪一格，Alt+Home 置顶，Alt+End 置底';
 
-function stepOrder(ids: readonly string[], movedId: string, delta: -1 | 1): string[] | null {
-  const from = ids.indexOf(movedId);
-  const to = from + delta;
-  if (from < 0 || to < 0 || to >= ids.length) return null;
-  const next = [...ids];
-  const swap = next[to];
-  if (swap === undefined) return null;
-  next[to] = movedId;
-  next[from] = swap;
-  return next;
+/** 一行的操作：拖动手柄、置顶、置底。调用方决定摆在行里哪儿。 */
+export interface RowControls {
+  grip: ReactNode;
+  pins: ReactNode;
 }
 
-function dropOrder(
-  ids: readonly string[],
-  movedId: string,
-  targetId: string,
-  edge: 'before' | 'after',
-): string[] {
-  if (movedId === targetId) return [...ids];
-  const rest = ids.filter((id) => id !== movedId);
-  const at = rest.indexOf(targetId);
-  if (at < 0) return [...ids];
-  const next = [...rest];
-  next.splice(edge === 'before' ? at : at + 1, 0, movedId);
-  return next;
-}
-
-function dropEdge(e: { clientY: number; currentTarget: EventTarget | null }): 'before' | 'after' {
-  const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
-  const rect = el?.getBoundingClientRect();
-  const mid = (rect?.top ?? 0) + (rect?.height ?? 0) / 2;
-  return e.clientY > mid ? 'after' : 'before';
+/** 窗口化的定高滚动容器：height 是可视高度，rowHeight 是每行高度，行数超过 50 才真的只画窗口里的。 */
+export interface SortViewport {
+  height: number;
+  rowHeight: number;
 }
 
 /**
- * 一列可拖动的行。鼠标拖动时只标落点，放下才交给 onSave；键盘是方向键先改预览（data-pending），回车才保存。
+ * 一列可拖动的行。鼠标拖动只标落点，放下才交给 onSave；置顶 / 置底按钮、Alt+方向键直接交给 onSave。
  * 保存失败由 onSave 抛出来，这里把预览清掉，顺序回到 items。
+ * 给了 viewport 就是定高滚动容器：拖到上下沿时容器自己滚，超过 50 行只画窗口里的行（正在拖的那行始终留着）。
  */
 export function SortableList<T>({
   ariaLabel,
@@ -290,6 +281,8 @@ export function SortableList<T>({
   className,
   rowClassName,
   rowProps,
+  viewport,
+  busy = false,
   onSave,
   children,
 }: {
@@ -303,20 +296,61 @@ export function SortableList<T>({
   className?: string;
   rowClassName?: (item: T) => string | undefined;
   rowProps?: (item: T) => Record<string, string | undefined>;
+  viewport?: SortViewport;
+  /** 别的写还在进行（开关）：先后暂时点不动，但手柄不置灰，焦点不丢。 */
+  busy?: boolean;
   onSave: (order: string[], expected: string[], movedId: string) => Promise<unknown>;
-  children: (item: T, index: number, handle: ReactNode) => ReactNode;
+  children: (item: T, index: number, controls: RowControls) => ReactNode;
 }) {
   const ids = items.map(itemId);
   const idKey = ids.join('\n');
   const [preview, setPreview] = useState<string[] | null>(null);
   const [drop, setDrop] = useState<{ id: string; edge: 'before' | 'after' } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
   const dragId = useRef<string | null>(null);
-  const off = disabled || saving;
+  const box = useRef<HTMLDivElement>(null);
+  const pointerY = useRef<number | null>(null);
+  const frame = useRef<number | null>(null);
+  const off = disabled || saving || busy;
 
   useEffect(() => {
     if (preview && sameOrder(preview, idKey.split('\n'))) setPreview(null);
   }, [preview, idKey]);
+
+  // 拖动中容器每帧按指针离上下沿的远近滚一点；放下、拖动结束、组件卸载都停
+  const track = useCallback((e: globalThis.DragEvent) => {
+    pointerY.current = e.clientY;
+  }, []);
+  const stopScroll = useCallback(() => {
+    document.removeEventListener('dragover', track);
+    pointerY.current = null;
+    if (frame.current !== null) {
+      cancelAnimationFrame(frame.current);
+      frame.current = null;
+    }
+  }, [track]);
+  const tick = useCallback(() => {
+    const el = box.current;
+    const y = pointerY.current;
+    if (el && y !== null) {
+      const rect = el.getBoundingClientRect();
+      const step = autoScrollDelta(y, rect.top, rect.bottom);
+      if (step !== 0) {
+        el.scrollTop += step;
+        setScrollTop(el.scrollTop);
+      }
+    }
+    frame.current = requestAnimationFrame(tick);
+  }, []);
+  const startScroll = useCallback(() => {
+    if (!box.current || frame.current !== null) return;
+    // 指针拖出容器（上沿以上、下沿以下）也要继续算，所以挂在整个文档上
+    document.addEventListener('dragover', track);
+    frame.current = requestAnimationFrame(tick);
+  }, [tick, track]);
+  useEffect(() => stopScroll, [stopScroll]);
 
   const shownIds = preview ?? ids;
   const byId = new Map(items.map((item) => [itemId(item), item]));
@@ -342,22 +376,26 @@ export function SortableList<T>({
     }
   };
 
+  /** 置顶 / 置底按钮、Alt+方向键共用：Alt+上下挪一格，Alt+Home / End 置顶 / 置底。 */
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>, id: string) => {
     e.stopPropagation();
-    if (off) return;
+    if (off || !e.altKey) return;
     const current = preview ?? ids;
-    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      const next = stepOrder(current, id, e.key === 'ArrowUp' ? -1 : 1);
-      if (next) setPreview(next);
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (preview && !sameOrder(preview, ids)) void save(preview, id);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      setPreview(null);
-      setDrop(null);
-    }
+    let next: string[] | null;
+    if (e.key === 'ArrowUp') next = stepOrder(current, id, -1);
+    else if (e.key === 'ArrowDown') next = stepOrder(current, id, 1);
+    else if (e.key === 'Home') next = moveToEdge(current, id, 'top');
+    else if (e.key === 'End') next = moveToEdge(current, id, 'bottom');
+    else return;
+    e.preventDefault();
+    if (next) void save(next, id);
+  };
+
+  const endDrag = () => {
+    dragId.current = null;
+    setDragging(null);
+    setDrop(null);
+    stopScroll();
   };
 
   const onDragStart = (e: DragEvent<HTMLButtonElement>, id: string) => {
@@ -367,18 +405,22 @@ export function SortableList<T>({
       return;
     }
     dragId.current = id;
+    setDragging(id);
     setPreview(null);
     setDrop(null);
     e.dataTransfer?.setData('text/plain', id);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    startScroll();
   };
 
-  const onDragOver = (e: DragEvent<HTMLLIElement>, id: string) => {
+  const onDragOver = (e: DragEvent<HTMLElement>, id: string) => {
     if (!dragId.current || off) return;
     e.preventDefault();
-    e.stopPropagation();
+    pointerY.current = e.clientY;
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    const edge = dropEdge(e);
+    const el = e.currentTarget;
+    const rect = el.getBoundingClientRect();
+    const edge = e.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
     setDrop((prev) => (prev?.id === id && prev.edge === edge ? prev : { id, edge }));
   };
 
@@ -387,55 +429,161 @@ export function SortableList<T>({
     if (!from || off) return;
     e.preventDefault();
     e.stopPropagation();
-    dragId.current = null;
-    const edge = dropEdge(e);
-    setDrop(null);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const edge = e.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+    endDrag();
     void save(dropOrder(ids, from, id, edge), from);
   };
 
-  return (
-    <ol aria-label={ariaLabel} data-pending={preview ? 'true' : undefined} className={className}>
-      {shown.map((item, index) => {
-        const id = itemId(item);
-        const edge = drop?.id === id ? drop.edge : undefined;
-        const handle = (
+  const controlsFor = (item: T): RowControls => {
+    const id = itemId(item);
+    const at = shownIds.indexOf(id);
+    const label = itemLabel(item);
+    const pin = (edge: 'top' | 'bottom') => {
+      if (off) return;
+      const next = moveToEdge(shownIds, id, edge);
+      if (next) void save(next, id);
+    };
+    const atTop = at === 0;
+    const atBottom = at === shownIds.length - 1;
+    return {
+      grip: (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          className="shrink-0 cursor-grab"
+          draggable={!off}
+          disabled={disabled}
+          aria-disabled={saving || busy || undefined}
+          title={disabledWhy ?? (saving ? '正在保存' : HANDLE_TITLE)}
+          aria-label={`拖动 ${label}`}
+          onDragStart={(e) => onDragStart(e, id)}
+          onDragEnd={endDrag}
+          onKeyDown={(e) => onKeyDown(e, id)}
+        >
+          <GripVertical aria-hidden />
+        </Button>
+      ),
+      pins: (
+        <>
           <Button
             type="button"
             variant="ghost"
             size="icon-xs"
-            className="shrink-0"
-            draggable={!off}
-            disabled={off}
-            title={disabledWhy ?? (saving ? '正在保存' : HANDLE_TITLE)}
-            aria-label={`拖动 ${itemLabel(item)}`}
-            onDragStart={(e) => onDragStart(e, id)}
-            onDragEnd={() => {
-              dragId.current = null;
-              setDrop(null);
-            }}
+            className="shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40"
+            disabled={disabled}
+            aria-disabled={saving || busy || atTop || undefined}
+            title={disabledWhy ?? (atTop ? '已经在最前' : '置顶（Alt+Home）')}
+            aria-label={`置顶 ${label}`}
+            onClick={() => pin('top')}
             onKeyDown={(e) => onKeyDown(e, id)}
           >
-            <GripVertical aria-hidden />
+            <ArrowUpToLine aria-hidden />
           </Button>
-        );
-        return (
-          <li
-            key={id}
-            {...(rowProps?.(item) ?? {})}
-            data-drop={edge}
-            className={cn(
-              rowClassName?.(item),
-              edge === 'before' && 'border-t-2 border-t-foreground',
-              edge === 'after' && 'border-b-2 border-b-foreground',
-            )}
-            onDragOver={(e) => onDragOver(e, id)}
-            onDrop={(e) => onDrop(e, id)}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40"
+            disabled={disabled}
+            aria-disabled={saving || busy || atBottom || undefined}
+            title={disabledWhy ?? (atBottom ? '已经在最后' : '置底（Alt+End）')}
+            aria-label={`置底 ${label}`}
+            onClick={() => pin('bottom')}
+            onKeyDown={(e) => onKeyDown(e, id)}
           >
-            {children(item, index, handle)}
-          </li>
-        );
-      })}
-    </ol>
+            <ArrowDownToLine aria-hidden />
+          </Button>
+        </>
+      ),
+    };
+  };
+
+  const rowEl = (item: T, index: number, style?: { top: number; height: number }) => {
+    const id = itemId(item);
+    const edge = drop?.id === id ? drop.edge : undefined;
+    return (
+      <li
+        key={id}
+        {...(rowProps?.(item) ?? {})}
+        data-drop={edge}
+        aria-posinset={viewport ? index + 1 : undefined}
+        aria-setsize={viewport ? shown.length : undefined}
+        style={
+          style
+            ? { position: 'absolute', left: 0, right: 0, top: style.top, height: style.height }
+            : undefined
+        }
+        className={cn(
+          rowClassName?.(item),
+          edge === 'before' && 'border-t-2 border-t-foreground',
+          edge === 'after' && 'border-b-2 border-b-foreground',
+        )}
+        onDragOver={(e) => onDragOver(e, id)}
+        onDrop={(e) => onDrop(e, id)}
+      >
+        {children(item, index, controlsFor(item))}
+      </li>
+    );
+  };
+
+  if (!viewport) {
+    return (
+      <ol aria-label={ariaLabel} data-pending={preview ? 'true' : undefined} className={className}>
+        {shown.map((item, index) => rowEl(item, index))}
+      </ol>
+    );
+  }
+
+  const { rowHeight, height } = viewport;
+  const total = shown.length * rowHeight;
+  const range = windowRange({ count: shown.length, rowHeight, height, scrollTop });
+  const draggedAt = dragging === null ? -1 : shownIds.indexOf(dragging);
+  const rendered: number[] = [];
+  for (let i = range.start; i < range.end; i++) rendered.push(i);
+  // 正在拖的行滚出窗口也不卸载：卸了浏览器收不到拖动结束
+  if (draggedAt >= 0 && (draggedAt < range.start || draggedAt >= range.end)) rendered.push(draggedAt);
+  return (
+    <div
+      ref={box}
+      data-sortable-box
+      data-windowed={shown.length > WINDOW_MIN_ROWS ? 'true' : undefined}
+      style={{ height: Math.min(height, total) }}
+      className="overflow-y-auto overscroll-contain"
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+    >
+      <ol
+        aria-label={ariaLabel}
+        data-pending={preview ? 'true' : undefined}
+        className={cn('relative', className)}
+        style={{ height: total }}
+      >
+        {rendered.flatMap((i) => {
+          const item = shown[i];
+          return item === undefined ? [] : [rowEl(item, i, { top: i * rowHeight, height: rowHeight })];
+        })}
+      </ol>
+    </div>
+  );
+}
+
+/** Fable 这类「只有创始人本人在驾驶舱能打开」的模型，开关旁标一句（判在后端，这里只提示，不拦也不绕）。 */
+export function FounderOnlyBadge({
+  modelId,
+  family,
+  displayName,
+}: {
+  modelId: string;
+  family?: string | undefined;
+  displayName: string;
+}) {
+  const rule = founderOnlyFor({ id: modelId, family: family ?? '', displayName });
+  if (!rule) return null;
+  return (
+    <Badge variant="outline" title={rule.reason} className="h-4 shrink-0 px-1 text-micro font-normal">
+      仅创始人可开
+    </Badge>
   );
 }
 
@@ -465,7 +613,7 @@ export function RouteSwitch({
   );
 }
 
-/** 模型级开关：开着 = 下面至少一条路由开着。一条路由都没有时置灰。 */
+/** 模型级开关：开着 = 下面至少一条路由开着。一条路由都没有（或读不到开关状态）时置灰，title 写原因。 */
 export function ModelSwitch({
   modelId,
   modelName,
@@ -477,10 +625,13 @@ export function ModelSwitch({
   modelName: string;
   enabled: boolean;
   expectedEnabled: string[];
-  unavailable?: boolean;
+  /** 不能开关的原因。 */
+  unavailable?: string | boolean;
 }) {
   const edit = useRoutingEdit();
-  const why = edit.disabledWhy ?? (unavailable ? '这个模型下一条路由都没有' : null);
+  const why =
+    edit.disabledWhy ??
+    (typeof unavailable === 'string' ? unavailable : unavailable ? '这个模型下一条路由都没有' : null);
   return (
     <Switch
       size="sm"

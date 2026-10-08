@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 路由页（#574）：每个用途 → 模型 → 路由，每一层活 / 死 / 不知道和原因都在页面上，不藏；读不到写没读成，没接上写没接上，
 // 都不画空表冒充「都没配」。
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -19,6 +19,10 @@ function withLayers(layers: RoutingLayers | (() => Promise<RoutingLayers>)): Moc
 
 const purposeLinks = async () =>
   within(await screen.findByRole('navigation', { name: '用途' })).getAllByRole('link');
+
+/** 用途页里点一个模型的名字，下面看它的路由（一次只展开一个模型）。 */
+const pickModel = async (name: string) =>
+  fireEvent.click(await screen.findByRole('button', { name: `查看 ${name} 的路由` }));
 
 const routeItem = (routeId: string) => {
   const el = document.querySelector(`[data-route="${routeId}"]`);
@@ -58,21 +62,26 @@ describe('路由页：每一层现在活着吗', () => {
     expect(
       screen.getAllByText('首选模型不行，顺位第一条活的在第 2 个模型：GPT 5.6 luna（中转站 · relay）'),
     ).toHaveLength(2);
+    // 默认展开顺位第一条活的所在的模型
+    expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     // Grok 的额度读数是 42 分钟前的：额度不知道，整条不知道（不画成活）
+    await pickModel('Grok 4.7');
     const grok = routeItem('r-grok');
     expect(within(grok).getByText('不知道', { selector: 'span' })).toBeTruthy();
     expect(grok.textContent).toContain('额度没读成、读数过期，或判不了扣不扣这条路由');
-    expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     expect(grok.textContent).not.toContain('顺位第一条活的');
   });
 
   test('写码：探了没通、模型下架、开关关着的都列出来，死因写全', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await purposeLinks();
+    await pickModel('Cursor Auto');
     expect(routeItem('r-cursor').textContent).toContain(
       '探针判不在线：连探两次都没通：等了 150 秒还没起来（第一次：进程退出（退出码 1），没有终帧）',
     );
+    await pickModel('Opus 5');
     expect(routeItem('r-ca-opus5').textContent).toContain('模型已下架');
+    await pickModel('Opus 5.5');
     const off = routeItem('r-rl-opus');
     expect(off.textContent).toContain('关着');
     expect(off.textContent).toContain('开关关着（这条路由在它的模型下关着）');
@@ -128,8 +137,10 @@ describe('路由页：每一层现在活着吗', () => {
     expect(a.textContent).toContain('7d：清零时刻没读到');
     expect(a.textContent).toContain('探测过期：2 小时前的结论，探针可能停了');
     expect(a.textContent).toContain('满了，等空位，不算死');
-    expect(screen.getByText('这个模型下一条路由都没有：排了它也派不到它')).toBeTruthy();
+    // 行上写一条路由都没有；点开它，下面写排了它也派不到它
     expect(screen.getByText('一条路由都没有')).toBeTruthy();
+    await pickModel('Kimi k3');
+    expect(screen.getByText('这个模型下一条路由都没有：排了它也派不到它')).toBeTruthy();
     expect(screen.getByText('模型 kimi-k3 没有路由（routing_catalog 里一条都没有）')).toBeTruthy();
   });
 
@@ -222,11 +233,11 @@ describe('路由页：每一层现在活着吗', () => {
   });
 });
 
-describe('路由页顶上的渠道一览（驾驶舱改版 2026-10-07：细看和立即探测在渠道状态页）', () => {
-  test('每个渠道一个小圆点加名字，点过去是渠道状态页；不通的写状态，通的不多写', async () => {
-    renderApp(<RoutingPage />, { route: '/routing' });
-    const strip = await screen.findByRole('navigation', { name: '渠道一览' });
-    const items = within(strip).getAllByRole('listitem');
+describe('路由页的「渠道」块（#1366 第二部分：细看和立即探测仍在渠道状态页）', () => {
+  test('每个渠道一行，带状态点、状态词和开关；选一个看它的路由，链接指向渠道状态页', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
+    const list = await screen.findByRole('list', { name: '渠道列表' });
+    const items = within(list).getAllByRole('listitem');
     expect(items.map((c) => c.getAttribute('data-channel')).sort()).toEqual([
       'ch-claude',
       'ch-cursor',
@@ -238,27 +249,22 @@ describe('路由页顶上的渠道一览（驾驶舱改版 2026-10-07：细看�
     // #1366 起状态词改了：暂不可用 → 故障；通 → 在线；渠道已下架 → 已关；没在配的路由里，未探 → 未被用途使用
     expect(cursor?.textContent).toContain('故障');
     expect(cursor?.getAttribute('data-kind')).toBe('fault');
-    expect(
-      within(cursor as HTMLElement)
-        .getByRole('link')
-        .getAttribute('href'),
-    ).toBe('/routing/status?p=ch-cursor');
-    expect(
-      within(strip)
-        .getByRole('link', { name: /看原文、立即探测/ })
-        .getAttribute('href'),
-    ).toBe('/routing/status');
-    // 整块渠道卡不再在路由页上画第二份
-    expect(screen.queryByRole('list', { name: '渠道状态' })).toBeNull();
+    expect(within(cursor as HTMLElement).getByRole('switch', { name: 'Cursor 的开关' })).toBeTruthy();
+    fireEvent.click(within(cursor as HTMLElement).getByRole('button', { name: '查看 Cursor 的路由' }));
+    const detail = await screen.findByRole('list', { name: 'Cursor 的路由' });
+    expect(within(detail).getByText(/探针判不在线/, { exact: false })).toBeTruthy();
+    expect(screen.getByRole('link', { name: /看原文、立即探测/ }).getAttribute('href')).toBe(
+      '/routing/status?p=ch-cursor',
+    );
   });
 
-  test('【故意造出的失败】渠道目录读不到：写没读成和原因，不画空的一行', async () => {
+  test('【故意造出的失败】渠道目录读不到：写没读成和原因，不画空的列表', async () => {
     const api = createMockApi({ live: false });
     Object.assign(api, {
       routing: () => Promise.reject(new ApiError(503, 'routing_unreadable', '库连不上')),
     });
-    renderApp(<RoutingPage />, { route: '/routing', api });
+    renderApp(<RoutingPage />, { route: '/routing?tab=channels', api });
     expect(await screen.findByText('渠道状态没读成：库连不上')).toBeTruthy();
-    expect(screen.queryByRole('navigation', { name: '渠道一览' })).toBeNull();
+    expect(screen.queryByRole('list', { name: '渠道列表' })).toBeNull();
   });
 });
