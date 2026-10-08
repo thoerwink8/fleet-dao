@@ -52,6 +52,7 @@ import { gitNetworkEnv } from './git-env.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
 import {
+  cursorBareCommand,
   cursorLaunchCommand,
   DEFAULT_CURSOR_API_KEY_FILE,
   DEFAULT_CURSOR_VERSIONS_DIR,
@@ -409,15 +410,60 @@ export function quotaAsUser(
   mirasim?: { connect(user: SessionUser): MirasimConnect },
   /** 会话出网的代理（法国直连不给）。claude-usage 起 reclaude 时写上，和读组织同一条。 */
   proxy?: string,
+  /** 给了就让 Cursor 额度读取在登录令牌被拒时刷新一次（`cursor-agent status`，不放 API 密钥）；不给就报「没有刷新手段」。 */
+  cursorVersionsDir?: string,
 ): NonNullable<QuotaReadWiring['asUser']> {
+  const runCommand = runCommandAsUser(exec, user, proxy);
   return {
     readers: QUOTA_USER_READERS,
     readFile: (path) => catAsUser(exec, user, path, 'quota-cat'),
     homeDir: home.replaceAll('{user}', user),
-    runCommand: runCommandAsUser(exec, user, proxy),
+    runCommand,
     workDir: () => quotaCwdAsUser(exec, user, home),
     ...(mirasim ? { connectMirasim: mirasim.connect(user) } : {}),
+    ...(cursorVersionsDir
+      ? {
+          refreshCursorLogin: (signal: AbortSignal) =>
+            refreshCursorLogin(runCommand, cursorVersionsDir.replaceAll('{user}', user), signal),
+        }
+      : {}),
   };
+}
+
+/** 刷新 Cursor 登录令牌的命令最长跑多久：比读取器整体的 60 秒短，这样超时由这里报成「刷新命令超时」，不是读取器的笼统超时。 */
+export const CURSOR_REFRESH_TIMEOUT_MS = 40_000;
+
+/**
+ * 以会话用户的身份跑一次 `cursor-agent status`（环境里没有 API 密钥）：cursor-agent 发现登录令牌过期会自己刷新并重写登录文件。
+ * 起不来、超时、非 0 退出都抛错并带原因（stderr/stdout 的头几行）；成功只代表命令跑完了，令牌换没换由读取器重读后再试来验。
+ */
+export async function refreshCursorLogin(
+  run: RunCommand,
+  versionsDir: string,
+  signal: AbortSignal,
+  timeoutMs = CURSOR_REFRESH_TIMEOUT_MS,
+): Promise<void> {
+  const own = new AbortController();
+  const timer = setTimeout(() => own.abort(), timeoutMs);
+  try {
+    const r = await run(cursorBareCommand(versionsDir, ['status']), {
+      cwd: '/',
+      env: {},
+      signal: AbortSignal.any([signal, own.signal]),
+    });
+    if (r.spawnError) throw new Error(`起不来：${r.spawnError}`);
+    if (r.killed) {
+      throw new Error(
+        own.signal.aborted ? `超过 ${Math.round(timeoutMs / 1000)} 秒没跑完，被叫停` : '被叫停',
+      );
+    }
+    if (r.code !== 0) {
+      const said = (r.stderr.trim() || r.stdout.trim()).split('\n').slice(0, 3).join(' / ').slice(0, 300);
+      throw new Error(`退出码 ${r.code}${said ? `：${said}` : ''}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 经 exec 以那个会话用户列一个目录：LedgerFs 的 readdir 要的形状（没有这个目录时抛 code 为 ENOENT 的错，和 node:fs 一样）。 */
@@ -643,7 +689,14 @@ export function realPortsFromEnv(
     ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
   });
   // 额度读取和模型名册共用这一份会话用户身份：二进制和 Mirasim 口都在它家里。
-  const quotaUser = quotaAsUser(exec, sessionUser, config.mirasimHome, mirasim, config.sessionProxy);
+  const quotaUser = quotaAsUser(
+    exec,
+    sessionUser,
+    config.mirasimHome,
+    mirasim,
+    config.sessionProxy,
+    config.cursorVersionsDir,
+  );
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({
       db,

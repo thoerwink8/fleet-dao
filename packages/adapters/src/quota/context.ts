@@ -99,6 +99,11 @@ export interface QuotaDeps extends QuotaIo {
     runCommand?: RunCommand;
     /** 会话用户进得去的工作目录。没给就用上面的 workDir（引擎自己的家，会话用户进不去）。 */
     workDir?: () => Promise<string>;
+    /**
+     * Cursor 登录令牌被拒时刷新它：以会话用户的身份跑一次 `cursor-agent status`（环境里不放 API 密钥），
+     * CLI 自己刷新令牌并重写登录文件。跑不起来、非 0 退出、超时都要抛错（带原因），不许吞成没事。
+     */
+    refreshCursorLogin?: (signal: AbortSignal) => Promise<void>;
   };
 }
 
@@ -119,6 +124,11 @@ export interface ReaderContext extends QuotaIo {
   usageRecords?: UsageSource;
   /** 经桥接以会话用户的身份连这个池的 Mirasim 服务（QuotaDeps.asUser.connectMirasim）；没给就读取器自己读令牌、自己开 WebSocket。 */
   connectMirasim?: () => Promise<MirasimWire>;
+  /**
+   * 刷新这个池的登录令牌（QuotaDeps.asUser.refreshCursorLogin，已绑上本次读取的 signal）；没给就是这条路没有刷新手段。
+   * 失败要抛错。读取器同一轮最多调一次（经 shared）。
+   */
+  refreshLogin?: () => Promise<void>;
   /** 同一轮里多个池共用一次上游调用（例如两个 Claude 组织只跑一次 /usage、一次 org list）。 */
   shared<T>(key: string, fn: () => Promise<T>): Promise<T>;
 }
