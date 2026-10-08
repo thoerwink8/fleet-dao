@@ -44,6 +44,22 @@ const routeRow = (routeId: string) => {
   return el;
 };
 
+/** 路由行默认折叠：点一下展开（手风琴，一次只开一条）。返回展开后的那一行。 */
+const openRoute = (routeId: string) => {
+  const row = routeRow(routeId);
+  const toggle = row.querySelector('button[aria-expanded]');
+  if (!(toggle instanceof HTMLElement)) throw new Error(`路由 ${routeId} 没有展开按钮`);
+  if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
+  return routeRow(routeId);
+};
+
+/** 详情里的探针格子条（选中渠道的）。 */
+const historyStrip = () => {
+  const el = document.querySelector('[data-history="strip"]');
+  if (!(el instanceof HTMLElement)) throw new Error('格子条还没出来');
+  return el;
+};
+
 const historyOf = (rows: ProbeHistoryCell[]): RouteProbeHistory => ({
   state: 'ok',
   ...probeHistoryStrips(rows),
@@ -120,14 +136,19 @@ describe('渠道状态页：渠道卡', () => {
     ]);
     const cursor = card('ch-cursor');
     expect(cursor.getAttribute('data-state')).toBe('down');
-    expect(cursor.textContent).toContain('暂不可用');
-    expect(cursor.textContent).toContain('连探两次都没通');
-    expect(cursor.textContent).toMatch(/选路顺延到「.+」|后面没有能用的渠道了/);
+    expect(cursor.getAttribute('data-kind')).toBe('fault');
+    expect(cursor.textContent).toContain('故障');
+    // 默认折叠成一行摘要：原因、顺延到谁在点开后的详情里，不在行上铺开
+    expect(cursor.textContent).not.toContain('连探两次都没通');
+    fireEvent.click(within(cursor).getByRole('button'));
+    await waitFor(() => expect(screen.getByRole('list', { name: 'Cursor 的路由' })).toBeTruthy());
+    expect(document.body.textContent).toContain('连探两次都没通');
+    expect(document.body.textContent).toMatch(/选路顺延到「.+」|后面没有能用的渠道了/);
     const claude = card('ch-claude');
     expect(claude.getAttribute('data-state')).toBe('ok');
     expect(claude.textContent).toMatch(/4 分钟前探的/);
     expect(card('ch-ds').textContent).toContain('按量计费，不自动探');
-    expect(items[0]?.textContent).toContain('顺位第 1');
+    expect(items.some((c) => c.textContent?.includes('顺位第 1'))).toBe(true);
     expect(list.textContent).not.toMatch(/grok-4\.7|deepseek-v4\.1-flash/);
     expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
   });
@@ -138,9 +159,13 @@ describe('渠道状态页：渠道卡', () => {
     const relay = card('ch-relay');
     expect(relay.getAttribute('data-state')).toBe('down');
     expect(within(relay).getByText('运行中失败，已顺延')).toBeTruthy();
-    expect(relay.querySelector('[data-field="reason"]')?.textContent).toContain('上游断连');
-    expect(relay.querySelector('[data-field="fallback"]')?.textContent).toBe('Claude 订阅 · Opus 5.5');
-    expect(card('ch-claude').querySelector('[data-failover]')).toBeNull();
+    fireEvent.click(within(relay).getByRole('button'));
+    await waitFor(() => expect(document.querySelector('[data-failover]')).toBeTruthy());
+    expect(document.querySelector('[data-field="reason"]')?.textContent).toContain('上游断连');
+    expect(document.querySelector('[data-field="fallback"]')?.textContent).toBe('Claude 订阅 · Opus 5.5');
+    fireEvent.click(within(card('ch-claude')).getByRole('button'));
+    await waitFor(() => expect(screen.getByRole('list', { name: 'Claude 订阅 的路由' })).toBeTruthy());
+    expect(document.querySelector('[data-failover]')).toBeNull();
   });
 
   test('上次探测超过间隔 + 3 分钟：这个渠道改成「检测中断」，别的渠道不受影响', async () => {
@@ -162,8 +187,12 @@ describe('渠道状态页：渠道卡', () => {
 describe('渠道状态页：每条路由', () => {
   test('点开 Cursor：最近一次的时刻、耗时、失败原因原文都在，不藏', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor' });
-    const row = await waitFor(() => routeRow('r-cursor'));
+    await waitFor(() => routeRow('r-cursor'));
+    // 默认折叠：故障的一行在行上写一句原因，原文、耗时在点开后
+    expect(routeRow('r-cursor').textContent).not.toContain('失败原因（原文）');
+    const row = openRoute('r-cursor');
     expect(row.getAttribute('data-probe')).toBe('failed');
+    expect(row.getAttribute('data-kind')).toBe('fault');
     expect(row.textContent).toContain('失败原因（原文）');
     expect(row.textContent).toContain('等了 150 秒还没起来');
     expect(row.textContent).toContain('最近一次');
@@ -172,7 +201,8 @@ describe('渠道状态页：每条路由', () => {
 
   test('通的路由：耗时取探针原文里的「用时 N 秒」', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
-    const row = await waitFor(() => routeRow('r-ca-opus'));
+    await waitFor(() => routeRow('r-ca-opus'));
+    const row = openRoute('r-ca-opus');
     expect(row.textContent).toContain('9 秒');
     expect(row.textContent).toContain('通过');
   });
@@ -181,9 +211,10 @@ describe('渠道状态页：每条路由', () => {
     let t = Date.now();
     const api = createMockApi({ live: false, now: () => t });
     const { qc } = renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
-    const row = await waitFor(() => routeRow('r-grok'));
+    await waitFor(() => routeRow('r-grok'));
+    const row = openRoute('r-grok');
     const before = row.textContent;
-    fireEvent.click(within(row).getByRole('button', { name: /立即探测/ }));
+    fireEvent.click(within(row).getByRole('button', { name: '立即探测' }));
     await waitFor(() => expect(routeRow('r-grok').getAttribute('data-probe')).toBe('queued'));
     expect(routeRow('r-grok').textContent).toContain('排队中');
     expect(await screen.findByText(/正在探1 条路由/)).toBeTruthy();
@@ -219,8 +250,9 @@ describe('渠道状态页：每条路由', () => {
     t += 5_000;
     await act(() => qc.invalidateQueries({ queryKey: ['route-probe'] }));
     await waitFor(() => expect(routeRow('r-ds').getAttribute('data-probe')).toBe('skipped'));
-    expect(routeRow('r-ds').textContent).toContain('按量计费的渠道不自动探');
-    expect(routeRow('r-ds').textContent).toContain('没真探');
+    const row = openRoute('r-ds');
+    expect(row.textContent).toContain('按量计费的渠道不自动探');
+    expect(row.textContent).toContain('没真探');
   });
 });
 
@@ -244,9 +276,10 @@ describe('渠道状态页：探不了要说清是哪样', () => {
     });
     expect(await screen.findByText(/引擎按配置没开（这台机器按配置没开引擎）：探不了/)).toBeTruthy();
     expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
-    const row = await waitFor(() => routeRow('r-ca-opus'));
-    expect(within(row).getByRole('button', { name: /立即探测/ })).toHaveProperty('disabled', true);
-    await waitFor(() => expect(card('ch-claude').querySelector('[data-history="strip"]')).toBeTruthy());
+    await waitFor(() => routeRow('r-ca-opus'));
+    const row = openRoute('r-ca-opus');
+    expect(within(row).getByRole('button', { name: '立即探测' })).toHaveProperty('disabled', true);
+    await waitFor(() => expect(document.querySelector('[data-history="strip"]')).toBeTruthy());
   });
 
   test('【故意造出的失败】引擎没连上：写「没连上」，不显示成通', async () => {
@@ -264,8 +297,9 @@ describe('渠道状态页：探不了要说清是哪样', () => {
         Promise.reject(new ApiError(503, 'engine_down', '探不了：引擎没连上，点了也没人接')),
     });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
-    const row = await waitFor(() => routeRow('r-grok'));
-    fireEvent.click(within(row).getByRole('button', { name: /立即探测/ }));
+    await waitFor(() => routeRow('r-grok'));
+    const row = openRoute('r-grok');
+    fireEvent.click(within(row).getByRole('button', { name: '立即探测' }));
     expect(await screen.findByText('没探成：探不了：引擎没连上，点了也没人接')).toBeTruthy();
     expect(routeRow('r-grok').getAttribute('data-probe')).toBe('ok');
   });
@@ -303,7 +337,8 @@ describe('渠道状态页：探不了要说清是哪样', () => {
       }),
     });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
-    const row = await waitFor(() => routeRow('r-grok'));
+    await waitFor(() => routeRow('r-grok'));
+    const row = openRoute('r-grok');
     await waitFor(() => expect(row.textContent).toContain('点的立即探测没成：点了 10 分钟引擎都没接手'));
   });
 });
@@ -348,11 +383,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     const api = createMockApi({ live: false });
     Object.assign(api, { routeProbeHistory: async () => cursorHistory() });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
-    const strip = await waitFor(() => {
-      const el = card('ch-cursor').querySelector('[data-history="strip"]');
-      if (!(el instanceof HTMLElement)) throw new Error('格子条还没出来');
-      return el;
-    });
+    const strip = await waitFor(historyStrip);
     expect(strip.querySelector('[data-result="passed"]')?.className).toContain('bg-st-done');
     expect(strip.querySelector('[data-result="failed"]')?.className).toContain('bg-st-fail');
     expect(strip.querySelector('[data-result="not_probed"]')?.className).toContain('bg-st-stall');
@@ -373,7 +404,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(within(detail()).getByText('2.0 秒')).toBeTruthy();
     expect(within(detail()).queryByText(/上游断了/)).toBeNull();
 
-    fireEvent.click(within(routeRow('r-cursor')).getByRole('button', { name: '看最近一次' }));
+    fireEvent.click(within(openRoute('r-cursor')).getByRole('button', { name: '看最近一次' }));
     await waitFor(() => expect(within(detail()).getByText(/按规矩没探/)).toBeTruthy());
     expect(within(detail()).getByText('没真探')).toBeTruthy();
     expect(within(detail()).getByText('（没发出去）')).toBeTruthy();
@@ -385,7 +416,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     Object.assign(api, { routeProbeHistory: async () => cursorHistory() });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
     const stats = await waitFor(() => {
-      const el = card('ch-cursor').querySelector('[data-history-stats]');
+      const el = document.querySelector('[data-history-stats]');
       if (!(el instanceof HTMLElement)) throw new Error('还没有均耗时');
       return el;
     });
@@ -415,11 +446,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
       }),
     });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
-    const strip = await waitFor(() => {
-      const el = card('ch-cursor').querySelector('[data-history="strip"]');
-      if (!(el instanceof HTMLElement)) throw new Error('格子条还没出来');
-      return el;
-    });
+    const strip = await waitFor(historyStrip);
     expect(strip.querySelectorAll('[data-cell]')).toHaveLength(60);
     expect(strip.querySelector('[data-cell="1"]')).toBeNull();
     expect(strip.querySelector('[data-cell="61"]')).toBeTruthy();
@@ -435,12 +462,12 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
       routeProbeHistory: async () => ({ state: 'unreadable' as const, why: '没查成：连不上库' }),
     });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
-    await waitFor(() => expect(card('ch-cursor').querySelector('[data-history="unreadable"]')).toBeTruthy());
-    expect(card('ch-cursor').textContent).toContain('没查成：连不上库');
+    await waitFor(() => expect(document.querySelector('[data-history="unreadable"]')).toBeTruthy());
+    expect(document.body.textContent).toContain('没查成：连不上库');
     expect(document.querySelector('[data-result]')).toBeNull();
     expect(document.querySelector('[data-history="strip"]')).toBeNull();
     const alerts = document.querySelectorAll('[data-history="unreadable"]');
-    expect(alerts.length).toBeGreaterThan(1);
+    expect(alerts.length).toBeGreaterThan(0);
     expect([...alerts].every((el) => el.textContent?.includes('没查成：连不上库'))).toBe(true);
   });
 
@@ -449,14 +476,137 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     Object.assign(api, {
       routeProbeHistory: async () => ({ state: 'ok' as const, channels: [], latestByRoute: [] }),
     });
-    renderApp(<RoutingStatus />, { route: '/routing/status', api });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude', api });
     await screen.findByRole('list', { name: '渠道状态' });
-    await waitFor(() => expect(card('ch-claude').querySelector('[data-history="strip"]')).toBeTruthy());
-    expect(card('ch-claude').textContent).toContain('还没有探针历史');
-    expect(card('ch-claude').textContent).toContain('还没有真探');
-    expect(card('ch-claude').textContent).toContain('没量到');
-    expect(card('ch-claude').textContent).not.toContain('没查成');
-    expect(card('ch-claude').querySelectorAll('[data-result="empty"]')).toHaveLength(60);
-    expect(card('ch-claude').querySelector('[data-cell]')).toBeNull();
+    const strip = await waitFor(historyStrip);
+    expect(strip.textContent).toContain('还没有探针历史');
+    expect(strip.textContent).toContain('没量到');
+    expect(strip.textContent).not.toContain('没查成');
+    expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(60);
+    expect(strip.querySelector('[data-cell]')).toBeNull();
+  });
+});
+
+describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义、筛选、搜索', () => {
+  test('默认全部折叠：一行摘要，路由原文、立即探测按钮一个都不铺', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
+    await waitFor(() => routeRow('r-ca-opus'));
+    // 渠道行：名字、状态、几条在线、最近一次探测时间，一行写完
+    expect(card('ch-claude').textContent).toMatch(/在线/);
+    expect(card('ch-claude').textContent).toMatch(/分钟前探的/);
+    // 路由行折叠：按钮 aria-expanded=false，没有原文、没有每行的「立即探测」
+    const toggles = Array.from(document.querySelectorAll('[data-route] button[aria-expanded]'));
+    expect(toggles.length).toBeGreaterThan(1);
+    expect(toggles.every((el) => el.getAttribute('aria-expanded') === 'false')).toBe(true);
+    expect(screen.queryByRole('button', { name: '立即探测' })).toBeNull();
+    expect(document.querySelector('[data-route] pre')).toBeNull();
+  });
+
+  test('手风琴：展开一条，上一条自动收起，一次只开一个', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
+    await waitFor(() => routeRow('r-ca-opus'));
+    openRoute('r-ca-opus');
+    expect(document.querySelectorAll('[data-route] button[aria-expanded="true"]')).toHaveLength(1);
+    openRoute('r-ca-sonnet');
+    const opened = document.querySelectorAll('[data-route] button[aria-expanded="true"]');
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.closest('[data-route]')?.getAttribute('data-route')).toBe('r-ca-sonnet');
+    // 再点一下自己：收起
+    fireEvent.click(opened[0] as Element);
+    expect(document.querySelectorAll('[data-route] button[aria-expanded="true"]')).toHaveLength(0);
+  });
+
+  /** 一个渠道被人关了、一个没有任何用途在用、一个真坏了：三样分开。 */
+  const semanticsApi = () => {
+    const api = createMockApi({ live: false });
+    const routing = api.routing.bind(api);
+    Object.assign(api, {
+      routing: async () => {
+        const data = await routing();
+        return {
+          ...data,
+          channels: [
+            ...data.channels,
+            { id: 'ch-off', name: '人关的渠道', billing: 'subscription' as const, enabled: false },
+            { id: 'ch-dry', name: '没人用的渠道', billing: 'subscription' as const, enabled: true },
+          ],
+          routes: [
+            ...data.routes,
+            route('r-off', 'ch-off', { modelId: data.models[0]?.id ?? 'm1' }),
+            route('r-dry', 'ch-dry', { modelId: data.models[0]?.id ?? 'm1' }),
+          ],
+        };
+      },
+    });
+    return api;
+  };
+
+  test('已关、未被用途使用不显示成故障（不画红、不进故障数）；只有探不通的才是故障', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
+    await screen.findByRole('list', { name: '渠道状态' });
+    await waitFor(() => card('ch-off'));
+    expect(card('ch-off').getAttribute('data-kind')).toBe('off');
+    expect(card('ch-off').textContent).toContain('已关');
+    expect(card('ch-off').textContent).not.toContain('故障');
+    expect(card('ch-off').className).not.toContain('st-fail');
+    expect(card('ch-dry').getAttribute('data-kind')).toBe('unused');
+    expect(card('ch-dry').textContent).toContain('未被用途使用');
+    expect(card('ch-dry').textContent).not.toContain('故障');
+    expect(card('ch-cursor').getAttribute('data-kind')).toBe('fault');
+    // 故障筛选里只有真坏的，没有已关、没用的
+    fireEvent.click(screen.getByRole('button', { name: /^故障/ }));
+    const ids = Array.from(document.querySelectorAll('[data-channel]')).map((el) =>
+      el.getAttribute('data-channel'),
+    );
+    expect(ids).toContain('ch-cursor');
+    expect(ids).not.toContain('ch-off');
+    expect(ids).not.toContain('ch-dry');
+  });
+
+  test('筛选：已关只留人关的；未使用只留没用途在用的；全部回来', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
+    await waitFor(() => card('ch-off'));
+    const shown = () =>
+      Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
+        el.getAttribute('data-channel'),
+      );
+    fireEvent.click(screen.getByRole('button', { name: /^已关/ }));
+    expect(shown()).toEqual(['ch-off']);
+    fireEvent.click(screen.getByRole('button', { name: /^未使用/ }));
+    expect(shown()).toEqual(['ch-dry']);
+    fireEvent.click(document.querySelector('[data-filter="all"]') as Element);
+    expect(shown().length).toBeGreaterThan(5);
+  });
+
+  test('故障的渠道置顶；搜索按渠道名、路由号、模型名找；搜不到写明', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
+    await waitFor(() => card('ch-off'));
+    const shown = () =>
+      Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
+        el.getAttribute('data-channel'),
+      );
+    const first = document.querySelector('ol[aria-label="渠道状态"] > [data-channel]');
+    expect(first?.getAttribute('data-kind')).toBe('fault');
+    const box = screen.getByRole('searchbox', { name: '搜索渠道' });
+    fireEvent.change(box, { target: { value: 'r-grok' } });
+    expect(shown()).toEqual(['ch-grok']);
+    fireEvent.change(box, { target: { value: '人关的' } });
+    expect(shown()).toEqual(['ch-off']);
+    fireEvent.change(box, { target: { value: '根本没有这个东西' } });
+    expect(shown()).toEqual([]);
+    expect(screen.getByText(/没有符合的渠道/)).toBeTruthy();
+  });
+
+  test('窄屏：点一行进详情页，返回回到列表（宽屏两栏并排，不看它）', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status' });
+    await screen.findByRole('list', { name: '渠道状态' });
+    const back = () => screen.queryByRole('button', { name: /返回渠道列表/ });
+    fireEvent.click(within(card('ch-grok')).getByRole('button'));
+    await waitFor(() => expect(back()).toBeTruthy());
+    const listCol = screen.getByRole('list', { name: '渠道状态' }).closest('div.hidden, div.min-w-0');
+    expect(document.querySelector('.hidden.xl\\:block')).toBeTruthy();
+    expect(listCol).toBeTruthy();
+    fireEvent.click(back() as HTMLElement);
+    expect(screen.getByRole('list', { name: '渠道状态' }).closest('.hidden')).toBeNull();
   });
 });
