@@ -1,8 +1,8 @@
-// 把默认骨架（routing.default.json）写进库的两张路由表（#574）。按行补缺（#1351）：骨架里有、库里没有的（模型, 路由）行，追加到这个模型
-// 现有路由的末尾、开关和思考档位照骨架；骨架里某用途有、库里该用途没有的模型，追加到该用途末尾。库里已有的行（驾驶舱改过的顺序、开关、
-// 思考档位）一律不动、不删。以前是「模型（用途）已有任何一行就整块跳过」，后来加给老模型的新路由、加进老用途的新模型就永远进不了库。
+// 把默认骨架（routing.default.json）写进库的两张路由表（#574）。骨架只做新装机的初始值（#1356）：
+// routing_purpose_models 已经有任何一行，就不再往用途里补模型、不再改开关、不再追加路由（创始人在页面上删掉的要留着）。
+// 一张用途行都没有的空库才按骨架整份写一次。用途还是空、但某个模型的路由层已经有行：那些行不动（不改开关），只给还没有路由行的模型写。
 // 引用对不上（模型、路由库里没有，路由不属于那个模型）、思考档位这条路由的执行方式不认、有用途既没单列又没有 default：
-// 一行不写、明确报错。
+// 先报错、一行不写（库里已经有用途行时也一样，不因为「这次本来就不改」就把坏骨架放过去）。
 // 发布时由 bin/routing.ts 在目录装载器之后调（deploy/release.sh 的 load_routing）：路由要先由目录装进库，骨架才对得上。
 import { routeEffortProblem } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
@@ -83,52 +83,50 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
       purposeRowsInserted: 0,
       catalogRowsInserted: 0,
     };
+    const existingPurposes = await tx
+      .select({ purpose: routingPurposeModels.purpose })
+      .from(routingPurposeModels);
+    if (existingPurposes.length > 0) {
+      const havePurposes = new Set(existingPurposes.map((r) => r.purpose));
+      report.purposesKept = STAGE_KINDS.filter((stage) => havePurposes.has(stage));
+      const haveModels = new Set(
+        (await tx.select({ modelId: routingCatalog.modelId }).from(routingCatalog)).map((r) => r.modelId),
+      );
+      report.modelsKept = Object.keys(cfg.models).filter((modelId) => haveModels.has(modelId));
+      return report;
+    }
     for (const stage of STAGE_KINDS) {
       const list = listFor(stage) ?? [];
-      const have = await tx
-        .select({ modelId: routingPurposeModels.modelId, position: routingPurposeModels.position })
-        .from(routingPurposeModels)
-        .where(eq(routingPurposeModels.purpose, stage));
-      const haveIds = new Set(have.map((h) => h.modelId));
-      const missingModels = list.filter((modelId) => !haveIds.has(modelId));
-      // 追加在该用途现有最大位置的后面；库里没有行就从 0 起（整个用途新装）
-      const next = have.length === 0 ? 0 : Math.max(...have.map((h) => h.position)) + 1;
-      if (missingModels.length > 0) {
+      if (list.length > 0) {
         await tx
           .insert(routingPurposeModels)
-          .values(missingModels.map((modelId, i) => ({ purpose: stage, modelId, position: next + i })));
-        report.purposeRowsInserted += missingModels.length;
+          .values(list.map((modelId, position) => ({ purpose: stage, modelId, position })));
+        report.purposeRowsInserted += list.length;
       }
-      if (have.length === 0) report.purposesApplied.push(stage);
-      else if (missingModels.length === 0) report.purposesKept.push(stage);
-      else
-        for (const modelId of missingModels) report.purposeModelsAppended.push({ purpose: stage, modelId });
+      report.purposesApplied.push(stage);
     }
     for (const [modelId, rs] of Object.entries(cfg.models)) {
       const have = await tx
-        .select({ routeId: routingCatalog.routeId, position: routingCatalog.position })
+        .select({ routeId: routingCatalog.routeId })
         .from(routingCatalog)
         .where(eq(routingCatalog.modelId, modelId));
-      const haveIds = new Set(have.map((h) => h.routeId));
-      const missingRoutes = rs.filter((r) => !haveIds.has(r.routeId));
-      const next = have.length === 0 ? 0 : Math.max(...have.map((h) => h.position)) + 1;
-      if (missingRoutes.length > 0) {
+      if (have.length > 0) {
+        report.modelsKept.push(modelId);
+        continue;
+      }
+      if (rs.length > 0) {
         await tx.insert(routingCatalog).values(
-          missingRoutes.map((r, i) => ({
+          rs.map((r, position) => ({
             modelId,
             routeId: r.routeId,
-            position: next + i,
+            position,
             enabled: r.enabled,
             effort: r.effort ?? null,
           })),
         );
-        report.catalogRowsInserted += missingRoutes.length;
+        report.catalogRowsInserted += rs.length;
       }
-      if (have.length === 0) report.modelsApplied.push(modelId);
-      else if (missingRoutes.length === 0) report.modelsKept.push(modelId);
-      else
-        for (const r of missingRoutes)
-          report.routesAppended.push({ modelId, routeId: r.routeId, enabled: r.enabled });
+      report.modelsApplied.push(modelId);
     }
     return report;
   });
@@ -178,7 +176,7 @@ export function formatRoutingApplyReport(r: RoutingApplyReport): string {
 }
 
 /**
- * 命令行（bin/routing.ts）和测试共用的一趟：读骨架 → 只补缺写进库 → 摘要。读不到、格式错、引用对不上照样抛
+ * 命令行（bin/routing.ts）和测试共用的一趟：读骨架 → 空库才写进库 → 摘要。读不到、格式错、引用对不上照样抛
  * （RoutingConfigError，库里一行不写），由命令行变成退出码 1、发布那一步红，不吞。
  */
 export async function runRoutingApply(db: Db, path: string | URL = ROUTING_DEFAULT_PATH): Promise<string> {
