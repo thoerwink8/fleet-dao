@@ -62,8 +62,8 @@
 
 | 件 | 改成什么 |
 |---|---|
-| `agents/shared-rules.md`「我的机器与模型」 | 「子代理、工人永不用 Fable；子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档，写明模型、核对实际 id，对不上、没证据或连败就升一档」，通用段仍在 2000 字以内 |
-| `agents/shared-rules.md`「无人值守」 | 去掉写死的 `model: "sonnet"`（档位看上一条），同一行顺手并掉和后半句重复的「有进展记进度、汇报」 |
+| `agents/shared-rules.md`「我的机器与模型」 | 「子代理、工人永不用 Fable；子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档，核对实际 id，不符、没证据或连败就升一档」，通用段仍在 2000 字以内 |
+| `agents/shared-rules.md`「无人值守」 | 去掉写死的 `model: "sonnet"`（档位看上一条），同一行顺手并掉和后半句重复的「有进展记进度、汇报」；「一件事过了 20 分钟还没有能推的东西，就当场拆小」原样保留 |
 | `agents/skills/commander/SKILL.md` | 「子代理的模型」改成三档并指向参考页；新增「无人值守的监控」；并发上限加「给监控留 1 个」；工具清单加 `patrol.mjs` |
 | `agents/skills/commander/references/子代理选模型.md`（新） | 原则、档位表、升级规则、交代必写、Haiku 抽查、无人值守的监控 |
 | `agents/skills/commander/scripts/patrol.mjs`、`patrol-lib.mjs`（新） | 只读巡查：不变量、基线、`DELTA`、沉默告警、`--selftest`；复用 `france-lib.mjs` 的 ssh 名字读法和 ssh 参数 |

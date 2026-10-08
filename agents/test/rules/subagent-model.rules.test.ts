@@ -6,7 +6,7 @@
 //    ~/.claude/settings.json，调用和子代理定义都没写模型时就用它。默认值只许 Opus 或 Sonnet：Haiku 只在派活时逐个显式选，
 //    兜底落到 Haiku，写代码的活就悄悄跑在小模型上了。这里自己判、不借同步工具的校验（permissions.ts 的 OPUS_OR_SONNET），
 //    那边哪天被放宽了，这条照样红。
-// 2. 通用段「我的机器与模型」：三档、写明模型并核对实际 id、升一档。
+// 2. 通用段「我的机器与模型」：三档、核对实际 id、升一档。
 // 3. 指挥官技能和它的参考页：档位表、升级规则（Haiku 一次没证据就升，Sonnet/Opus 同档两次失败升）、交代里要汇报实际模型 id、
 //    Haiku 结论动手前抽查、无人值守的监控以脚本为主。
 import { readFileSync } from 'node:fs';
@@ -67,8 +67,8 @@ function tierLine(text: string): string {
 /** 通用段那一行必须写着的 */
 const SHARED_RULES: Record<string, RegExp> = {
   三档: /子代理按性价比分 Haiku 5\.5、Sonnet 5\.5、Opus 5\.5 三档/,
-  写明模型核对实际id: /写明模型、核对实际 id/,
-  升一档: /对不上、没证据或连败就升一档/,
+  核对实际id: /三档，核对实际 id/,
+  升一档: /不符、没证据或连败就升一档/,
 };
 
 /** 指挥官技能和参考页必须写着的 */
@@ -169,7 +169,7 @@ describe('规矩：子代理默认模型只许 Opus 或 Sonnet，Haiku 只在派
 });
 
 describe('规矩：子代理按性价比分三档、核对实际 id、升一档（决定 0034）', () => {
-  it('通用段那一行：三档、写明模型并核对实际 id、升一档都在', () => {
+  it('通用段那一行：三档、核对实际 id、升一档都在', () => {
     expect(missing(SHARED_RULES, tierLine(SHARED))).toEqual([]);
   });
 
@@ -179,7 +179,7 @@ describe('规矩：子代理按性价比分三档、核对实际 id、升一档�
 
   it('【故意造出的失败】通用段拿掉升级规则、拿掉 Haiku 那一档：各自查得出来', () => {
     const line = tierLine(SHARED);
-    const noUpgrade = line.replace('，对不上、没证据或连败就升一档', '');
+    const noUpgrade = line.replace('，不符、没证据或连败就升一档', '');
     expect(noUpgrade, '那一行里找不到升级规则，这条失败造不出来').not.toBe(line);
     expect(missing(SHARED_RULES, noUpgrade)).toEqual(['升一档']);
     const noHaiku = line.replace('Haiku 5.5、', '');
