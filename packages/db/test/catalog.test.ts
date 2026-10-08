@@ -12,7 +12,16 @@ import {
   readCatalogFile,
 } from '../src/catalog.ts';
 import type { Db } from '../src/client.ts';
-import { auditLog, channels, families, models, pools, routes } from '../src/schema/index.ts';
+import {
+  auditLog,
+  channels,
+  families,
+  models,
+  pools,
+  routes,
+  routingCatalog,
+  routingPurposeModels,
+} from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { NOW } from './helpers.ts';
 
@@ -329,22 +338,26 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     expect(await catalogRows(t.db)).toEqual(before);
   });
 
-  it('模型本身、路由投给上游的名字是 Fable：一律拒收（按阶段判的那几条不再有——先后在路由两层里，没有「哪个阶段」这一说）', async () => {
+  it('Fable 进目录（决定 0033）：模型、路由（上游串是 Fable 的也算）都装得进，路由两层里没有它们的行——默认关着、不在任何用途里', async () => {
     const base = example();
-    // 模型 id 叫 opus、插头发给上游的却是 Fable。
     const solo = 'claude-solo:opus-5.5:claude-code';
+    // 模型 id 叫 opus、插头发给上游的却是 Fable：装得进。
     const fableUpstream: CatalogConfig = {
       ...base,
       routes: base.routes.map((r) => (r.id === solo ? { ...r, upstreamModel: 'claude-fable-5-1' } : r)),
     };
-    expect(await failLoad(fableUpstream)).toContain(`路由 ${solo}：不用 Fable`);
-    // 模型本身是 Fable（没挂路由也拒收）。
+    // 模型本身是 Fable（没挂路由）：装得进。
     const fableModel: CatalogConfig = {
-      ...base,
+      ...fableUpstream,
       models: [...base.models, { id: 'fable-5.1', family: 'claude', displayName: 'Fable 5.1' }],
     };
-    expect(await failLoad(fableModel)).toContain('模型 fable-5.1：不用 Fable');
-    expect(await empty()).toBe(true);
+    const result = await load(fableModel);
+    expect(result.inserted.models).toContain('fable-5.1');
+    expect(result.inserted.routes).toContain(solo);
+    expect((await t.db.select().from(models).where(eq(models.id, 'fable-5.1'))).length).toBe(1);
+    // 装载器只写目录那五张表：路由开关表和用途表一行没有，所以没有任何用途里有它、也没有一条路由是开着的
+    expect(await t.db.select().from(routingCatalog)).toEqual([]);
+    expect(await t.db.select().from(routingPurposeModels)).toEqual([]);
   });
 
   it('会话用户只许 fleet-agent-carpool：写别的报错，写已停用的 fleet-agent-dedicated 报错并说清改成什么；库里也有约束', async () => {

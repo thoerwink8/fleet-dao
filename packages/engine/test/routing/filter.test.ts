@@ -251,11 +251,11 @@ describe('候选查询给的被挡原因', () => {
 });
 
 describe('禁令用 shared 的硬禁令，候选查询漏了也挡', () => {
-  it('Fable 就算候选查询没标 banned 也挡（按显示名认）', () => {
+  it('Fable 不再是硬禁令（决定 0033）：开着、在用途里就不挡；创始人没打开（开关关着）才挡，挡在开关上', () => {
     const r = route('f', { modelId: 'x-5.1', modelName: 'Fable 5.1' });
-    const blocks = blocksFor(r, entry('f', 0), ctx());
-    expect(blocks.map((b) => b.code)).toEqual(['banned']);
-    expect(blocks[0]?.text).toContain('不用 Fable');
+    expect(blocksFor(r, entry('f', 0), ctx())).toEqual([]);
+    const closed = blocksFor(r, entry('f', 0, { enabled: false }), ctx());
+    expect(closed.map((b) => b.code)).toEqual(['switched-off']);
   });
 
   it('GPT 在 UI 阶段挡，在写码阶段不挡', () => {
@@ -282,12 +282,17 @@ describe('禁令用 shared 的硬禁令，候选查询漏了也挡', () => {
     expect(blocks.map((b) => b.text)).toEqual(['犯禁令：创始人另加：Kimi 不做审查']);
   });
 
-  it('目录里写成 opus、上游串或别名却是 Fable：照样挡；上游串正常不挡', () => {
-    const viaUpstream = route('o', { upstreamModel: 'claude-fable-5-1' });
-    expect(codes(viaUpstream)).toEqual(['banned']);
-    const viaAlias = route('o', { upstreamModel: 'claude-opus-5-5', upstreamAliases: ['fable'] });
-    expect(codes(viaAlias)).toEqual(['banned']);
-    expect(codes(route('o', { upstreamModel: 'claude-opus-5-5', upstreamAliases: ['opus'] }))).toEqual([]);
+  it('目录里写成 opus、上游串或别名却是 GPT：UI 阶段照样挡；上游串正常不挡', () => {
+    const ui = ctx({ stage: 'ui' });
+    const viaUpstream = route('o', { upstreamModel: 'gpt-5.6' });
+    expect(codes(viaUpstream, ui)).toEqual(['banned']);
+    const viaAlias = route('o', { upstreamModel: 'claude-opus-5-5', upstreamAliases: ['gpt-5.6'] });
+    expect(codes(viaAlias, ui)).toEqual(['banned']);
+    expect(codes(route('o', { upstreamModel: 'claude-opus-5-5', upstreamAliases: ['opus'] }), ui)).toEqual(
+      [],
+    );
+    // 上游串是 Fable 不挡（决定 0033）
+    expect(codes(route('o', { upstreamModel: 'claude-fable-5-1' }))).toEqual([]);
   });
 });
 
