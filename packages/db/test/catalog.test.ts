@@ -338,6 +338,21 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     expect(await catalogRows(t.db)).toEqual(before);
   });
 
+  it('发现层自动入的变体路由（auto:…）和手写路由共用（池, 模型, 执行方式）：再装一遍目录照过，不当成「同一条线」', async () => {
+    await load();
+    const base = routeOf('grok:grok-4.7:grok');
+    await t.db.insert(routes).values({
+      id: 'auto:xai:grok-4.7-fast',
+      channelId: 'xai',
+      poolId: base.poolId,
+      modelId: base.modelId,
+      hostId: base.hostId,
+      alive: false,
+      upstreamModel: 'grok-4.7-fast',
+    });
+    await expect(load()).resolves.toBeDefined();
+  });
+
   it('Fable 进目录（决定 0033）：模型、路由（上游串是 Fable 的也算）都装得进，路由两层里没有它们的行——默认关着、不在任何用途里', async () => {
     const base = example();
     const solo = 'claude-solo:opus-5.5:claude-code';

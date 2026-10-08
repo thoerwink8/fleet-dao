@@ -2,7 +2,7 @@
 import type { HostId } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { discoveredModelId, nameUpstreamModel } from '../model-naming.ts';
+import { DISCOVERED_ROUTE_PREFIX, discoveredModelId, nameUpstreamModel } from '../model-naming.ts';
 import { auditLog, families, models, pools, routes, routingCatalog } from '../schema/index.ts';
 
 const HOST_BY_CHANNEL: Record<string, HostId> = {
@@ -130,7 +130,7 @@ export async function discoverChannelModels(
       newModelIds.push(modelId);
     }
 
-    const routeId = `auto:${channelId}:${key}`;
+    const routeId = `${DISCOVERED_ROUTE_PREFIX}${channelId}:${key}`;
     const insertedRoute = await db
       .insert(routes)
       .values({

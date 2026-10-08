@@ -11,6 +11,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
+import { DISCOVERED_ROUTE_PREFIX } from './model-naming.ts';
 import { BILLING_KINDS, HOST_IDS, ORG_KINDS, RETIRED_RUN_AS_USERS, RUN_AS_USERS } from './schema/enums.ts';
 import { auditLog, channels, families, models, pools, routes } from './schema/index.ts';
 
@@ -288,7 +289,10 @@ export async function loadCatalog(
     if (problems.length > 0) throw new CatalogError('目录配置里引用了不存在的东西', problems);
 
     for (const r of config.routes) {
-      const same = [...stored.routes.values()].find((s) => s.id !== r.id && routeLine(s) === routeLine(r));
+      // 发现层自动入的变体路由（auto:…）和配置里手写的路由共用（池、模型、执行方式），不算重复。
+      const same = [...stored.routes.values()].find(
+        (s) => s.id !== r.id && !s.id.startsWith(DISCOVERED_ROUTE_PREFIX) && routeLine(s) === routeLine(r),
+      );
       if (same) problems.push(`路由 ${r.id} 和库里的 ${same.id} 是同一条线（${routeLine(r)}）`);
     }
     if (problems.length > 0) throw new CatalogError('目录配置里的路由和库里的重了', problems);
