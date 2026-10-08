@@ -2,6 +2,7 @@
 // Claude 订阅没有列模型的只读命令，不在这里补一次读取；别的渠道名册里出现 claude-* 时，正文写明怎么推断。
 // 档位、fast、thinking 是同一家族的变体。读失败的渠道不进差集，也不能当成「没有新模型」。
 // 撤只看目录里有没有这个基名，不看这一轮名册还列不列它：读失败的渠道没有名单，不能据此撤。
+// 键上还带着方括号参数的旧提醒，基名对得上目录、或对得上这一轮要推的那条时撤掉，同一家族只留一条。
 
 /** 跟 MODEL_ROSTER_CHANNELS 同一个先后，正文里渠道按这个排。 */
 const CHANNEL_ORDER = ['mirasim', 'cursor', 'xai', 'claude-sub'] as const;
@@ -36,12 +37,14 @@ export type CatalogRosterResult =
   | { ok: true; channelId: string; models: readonly string[] }
   | { ok: false; channelId: string; error: { code: string; message: string } };
 
-/** 去掉档位、fast、thinking。方括号及里面的参数留着：那是路由串的一部分，不是家族变体。 */
+/**
+ * 家族基名。先去掉方括号及里面的路由参数（context、effort、1m），再剥档位、fast、thinking。
+ * 这些都是同一家族的写法，不另算一个模型。通知正文仍写各渠道的原始串。
+ */
 export function modelBaseName(raw: string): string {
   const trimmed = raw.trim();
   const bracket = trimmed.indexOf('[');
-  let head = bracket >= 0 ? trimmed.slice(0, bracket) : trimmed;
-  const tail = bracket >= 0 ? trimmed.slice(bracket) : '';
+  let head = (bracket >= 0 ? trimmed.slice(0, bracket) : trimmed).trim();
   let changed = true;
   while (changed) {
     changed = false;
@@ -54,7 +57,7 @@ export function modelBaseName(raw: string): string {
       }
     }
   }
-  return `${head}${tail}`;
+  return head;
 }
 
 function clip(text: string, max: number): string {
@@ -130,12 +133,18 @@ export function planCatalogNewModelAlerts(input: {
     title: `目录里还没有 ${base}`,
     body: bodyFor(base, seen.get(base) ?? new Map(), note),
   }));
+  const raising = new Set(raise.map((alert) => alert.key));
   const resolve: string[] = [];
   const resolveSeen = new Set<string>();
   for (const key of input.openKeys) {
     if (!key.startsWith(CATALOG_NEW_MODEL_PREFIX) || resolveSeen.has(key)) continue;
-    const base = key.slice(CATALOG_NEW_MODEL_PREFIX.length);
-    if (!base || !catalog.has(base)) continue;
+    const base = modelBaseName(key.slice(CATALOG_NEW_MODEL_PREFIX.length));
+    if (!base) continue;
+    const canonical = `${CATALOG_NEW_MODEL_PREFIX}${base}`;
+    const inCatalog = catalog.has(base);
+    // 旧键把方括号参数算进基名。这一轮已按去掉参数的基名另推一条时，把旧键撤掉。
+    const replaced = raising.has(canonical) && key !== canonical;
+    if (!inCatalog && !replaced) continue;
     resolveSeen.add(key);
     resolve.push(key);
   }

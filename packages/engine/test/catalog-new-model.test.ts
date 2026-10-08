@@ -250,6 +250,38 @@ describe('名册对目录的新模型提醒', () => {
     expect(world.raised[0]?.body).not.toContain(INFERENCE);
   });
 
+  it('目录已有 grok-4.7 时，名册里的方括号参数不算新模型，旧的带参数键下一轮撤掉', async () => {
+    const world = harness({
+      catalog: ['grok-4.7'],
+      openKeys: ['catalog-new-model:grok-4.7[context=256k]'],
+      results: [
+        ok('cursor', ['grok-4.7[context=256k]', 'grok-4.7[context=1m,reasoning_effort=high,fast=true]']),
+      ],
+    });
+    await runQuotaReadJob(world.deps);
+    expect(world.raised).toEqual([]);
+    expect(world.resolved).toEqual(['catalog-new-model:grok-4.7[context=256k]']);
+  });
+
+  it('同一家族的不同 context 参数只推一条去掉方括号的基名，正文留原始串', async () => {
+    const world = harness({
+      catalog: ['composer-2.5[fast=true]'],
+      openKeys: ['catalog-new-model:grok-4.7[context=1m]'],
+      results: [
+        ok('xai', ['grok-4.7[context=256k]', 'grok-4.7[context=1m]']),
+        ok('cursor', ['grok-4.7-thinking-high[context=256k]']),
+      ],
+    });
+    await runQuotaReadJob(world.deps);
+    expect(world.raised.map((a) => a.key)).toEqual(['catalog-new-model:grok-4.7']);
+    const body = world.raised[0]?.body ?? '';
+    expect(body).toContain('grok-4.7[context=256k]');
+    expect(body).toContain('grok-4.7[context=1m]');
+    expect(body).toContain('grok-4.7-thinking-high[context=256k]');
+    expect(body).not.toContain(INFERENCE);
+    expect(world.resolved).toEqual(['catalog-new-model:grok-4.7[context=1m]']);
+  });
+
   // 故意造出失败：目录里已有同一基名的另一档。再推一条就是错的。这条放最后。
   it('已在目录里的不推', async () => {
     const world = harness({
