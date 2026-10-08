@@ -18,8 +18,11 @@ import {
   ChannelTab,
   LIST_HEIGHT,
   ListFilterBar,
+  MOBILE_MQ,
+  MOBILE_ROW_HEIGHT,
   ModelCatalogTab,
   ROW_HEIGHT,
+  revealOnMobile,
 } from '../components/routing-browse';
 import {
   FounderOnlyBadge,
@@ -34,7 +37,7 @@ import { AddPurposeModel, PurposeModelControls } from '../components/routing-mem
 import { ModelRoutes } from '../components/routing-routes';
 import { StatusChip } from '../components/status';
 import { formatClock } from '../lib/format';
-import { useNow } from '../lib/hooks';
+import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
 import { modelKind } from '../lib/route-kinds';
 import { routeStateTone } from '../lib/route-state';
@@ -397,8 +400,9 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           />
           {current ? (
             <section
+              id="routing-model-detail"
               aria-label={`${current.displayName} 的路由`}
-              className="mt-4 overflow-hidden rounded-lg border"
+              className="mt-4 scroll-mt-4 overflow-hidden rounded-lg border"
             >
               <header className="flex flex-wrap items-baseline gap-x-2 border-b bg-muted/40 px-3 py-2">
                 <h3 className="text-sm font-semibold">{current.displayName} 的路由</h3>
@@ -419,7 +423,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
       <p className="mt-4 text-caption text-muted-foreground">
         活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
         探针还没看过、额度没读成，不当活。引擎派活时另看账号池有没有空位
-        （满了是等，不算死）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
+        （满了是等，不算故障）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
       </p>
     </Panel>
   );
@@ -441,6 +445,7 @@ function ModelPriority({
   onError: (message: string | null) => void;
 }) {
   const edit = useRoutingEdit();
+  const mobile = useMediaQuery(MOBILE_MQ);
   const [filter, setFilter] = useState<ListFilter>(NO_FILTER);
   const long = p.models.length > WINDOW_MIN_ROWS;
   const filtering = long && filterActive(filter);
@@ -478,7 +483,7 @@ function ModelPriority({
           disabled={why !== null}
           busy={edit.busy}
           disabledWhy={why}
-          viewport={{ height: LIST_HEIGHT, rowHeight: ROW_HEIGHT }}
+          viewport={{ height: LIST_HEIGHT, rowHeight: mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT }}
           rowClassName={(m) => cn('border-b', m.modelId === selectedId && 'bg-muted/60')}
           rowProps={(m) => ({ 'data-model': m.modelId })}
           onSave={(order, expected, movedId) =>
@@ -491,7 +496,10 @@ function ModelPriority({
               model={m}
               position={p.models.findIndex((x) => x.modelId === m.modelId) + 1 || i + 1}
               selected={m.modelId === selectedId}
-              onSelect={() => onSelect(m.modelId)}
+              onSelect={() => {
+                onSelect(m.modelId);
+                revealOnMobile('routing-model-detail');
+              }}
               onError={onError}
               controls={controls}
             />
@@ -522,20 +530,21 @@ function ModelRow({
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
   const kind = modelKind(m, useKindEnv());
   return (
-    <div className="flex h-full items-center gap-1.5 pr-2 pl-1.5">
-      {controls.grip}
-      <span className="num grid size-5 shrink-0 place-items-center rounded-full bg-foreground/10 text-caption font-medium">
-        {position}
-      </span>
+    <div className="flex h-full flex-col justify-center gap-0.5 py-0.5 pr-2 pl-1.5 md:flex-row md:items-center md:gap-1.5 md:py-0">
       <button
         type="button"
         onClick={onSelect}
         aria-pressed={selected}
         aria-label={`查看 ${m.displayName} 的路由`}
-        className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
+        className="flex min-w-0 items-center gap-2 text-left md:h-full md:flex-1"
       >
         <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
-        <span className="truncate text-sm font-semibold">{m.displayName}</span>
+        <span
+          data-row-name
+          className="min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug md:truncate"
+        >
+          {m.displayName}
+        </span>
         {m.family ? (
           <span className="hidden truncate text-caption text-muted-foreground sm:inline">{m.family}</span>
         ) : null}
@@ -544,15 +553,21 @@ function ModelRow({
           {modelSummary(m)}
         </span>
       </button>
-      <PurposeModelControls purpose={purpose} model={m} onError={onError} />
-      <ModelSwitch
-        modelId={m.modelId}
-        modelName={m.displayName}
-        enabled={enabledRouteIds.length > 0}
-        expectedEnabled={enabledRouteIds}
-        unavailable={m.routes.length === 0}
-      />
-      {controls.pins}
+      <div data-row-actions className="flex flex-wrap items-center gap-0.5">
+        {controls.grip}
+        <span className="num grid size-5 shrink-0 place-items-center rounded-full bg-foreground/10 text-caption font-medium">
+          {position}
+        </span>
+        <PurposeModelControls purpose={purpose} model={m} onError={onError} />
+        <ModelSwitch
+          modelId={m.modelId}
+          modelName={m.displayName}
+          enabled={enabledRouteIds.length > 0}
+          expectedEnabled={enabledRouteIds}
+          unavailable={m.routes.length === 0}
+        />
+        {controls.pins}
+      </div>
     </div>
   );
 }

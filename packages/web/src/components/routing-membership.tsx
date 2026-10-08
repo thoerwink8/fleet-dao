@@ -4,7 +4,7 @@
 // - Fable 能不能加，页面只在按钮上标「仅创始人可开」（决定 0033）。真拒绝仍是后端的 guard。
 // - 名册接口只回「这个渠道手工登记了几个」，不回模型串。这一页把登记接口返回的串留在当次会话里，刷新就只剩个数。
 
-import { founderOnlyFor, type SessionEffort } from '@fleet-dao/shared';
+import { founderOnlyFor, type HostId, routeEffortChoices, type SessionEffort } from '@fleet-dao/shared';
 import { type FormEvent, useMemo, useState } from 'react';
 import {
   errorText,
@@ -20,7 +20,8 @@ import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EFFORT_HINT } from '../lib/efforts';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
-import { useRoutingEdit } from './routing-edit';
+import { cn } from '../lib/utils';
+import { TAP, useRoutingEdit } from './routing-edit';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -158,6 +159,25 @@ export function AddPurposeModel({
   );
 }
 
+const EFFORT_WORD: Record<SessionEffort, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '很高',
+  max: '最高',
+};
+
+/** 一档都认不了时，写明为什么。下拉置灰，只留「不另配」。 */
+function effortBlockedWhy(modelId: string, routes: readonly { hostId: HostId }[]): string | null {
+  if (supportedPurposeEfforts(modelId, routes).length > 0) return null;
+  for (const route of routes) {
+    const choices = routeEffortChoices(route.hostId, modelId);
+    if (choices.kind === 'fixed') return choices.why;
+  }
+  if (routes.length === 0) return '一条路由都没有，没有能配的档位';
+  return '这几条路由没有共同认的档位';
+}
+
 /** 用途里这一行的档位和「移出」。档位只列这个模型的路由都认的。 */
 export function PurposeModelControls({
   purpose,
@@ -174,10 +194,9 @@ export function PurposeModelControls({
   const [confirm, setConfirm] = useState(false);
   // 暂选挂在改之前的档位上：接口回了新档位，或失败清掉，下拉就回到服务端的值。
   const [draft, setDraft] = useState<{ base: string; value: string } | null>(null);
-  const supported = supportedPurposeEfforts(
-    model.modelId,
-    model.routes.map((r) => ({ hostId: r.hostId })),
-  );
+  const routeHosts = model.routes.map((r) => ({ hostId: r.hostId }));
+  const supported = supportedPurposeEfforts(model.modelId, routeHosts);
+  const blockedWhy = effortBlockedWhy(model.modelId, routeHosts);
   const current = model.effort ?? null;
   const server = current ?? '';
   const options = current !== null && !supported.includes(current) ? [current, ...supported] : supported;
@@ -217,27 +236,39 @@ export function PurposeModelControls({
   };
 
   const locked = edit.disabledWhy;
+  const blocked = blockedWhy !== null;
   return (
     <>
       <select
         aria-label={`${model.displayName} 的档位`}
-        value={value}
-        disabled={locked !== null || setEffort.isPending}
-        title={locked ?? '这个用途下另配的档位。不另配就按每条路由自己的档起会话'}
+        value={blocked ? '' : value}
+        disabled={locked !== null || setEffort.isPending || blocked}
+        title={locked ?? blockedWhy ?? '这个用途下另配的档位。不另配就按每条路由自己的档起会话'}
         onChange={(e) => void saveEffort(e.target.value)}
-        className="h-6 max-w-24 shrink-0 rounded border bg-background px-1 text-caption"
+        className={cn(
+          'h-6 max-w-28 shrink-0 rounded border bg-background px-1 text-caption disabled:cursor-not-allowed disabled:opacity-60',
+          TAP,
+        )}
       >
         <option value="">不另配</option>
-        {options.map((effort) => (
-          <option key={effort} value={effort} title={EFFORT_HINT[effort]}>
-            {effort}
-          </option>
-        ))}
+        {blocked
+          ? null
+          : options.map((effort) => (
+              <option key={effort} value={effort} title={EFFORT_HINT[effort]}>
+                {EFFORT_WORD[effort]}
+              </option>
+            ))}
       </select>
+      {blockedWhy ? (
+        <span title={blockedWhy} className="max-w-36 truncate text-micro text-muted-foreground">
+          {blockedWhy}
+        </span>
+      ) : null}
       <Button
         type="button"
         size="xs"
         variant="ghost"
+        className={TAP}
         disabled={locked !== null}
         title={locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`}
         aria-label={`把 ${model.displayName} 移出用途`}
@@ -271,14 +302,14 @@ export function PurposeModelControls({
   );
 }
 
-/** 没有名册的渠道：登记一个模型串，或撤掉这次会话里登记过的、以及手工填的那条。 */
+/** 没有名册的渠道：登记一个模型串。撤掉只在已登记列表里，每条自己一个。 */
 export function ManualModelForm({ channelId }: { channelId: string }) {
   const edit = useRoutingEdit();
   const register = useRegisterChannelModel();
   const revoke = useRevokeChannelModel();
   const [key, setKey] = useState('');
-  const [revokeKey, setRevokeKey] = useState('');
   const [keys, setKeys] = useState<string[]>([]);
+  const [noted, setNoted] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const locked = edit.disabledWhy;
 
@@ -290,6 +321,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
       const res = await register.mutateAsync({ channelId, body: { modelKey } });
       setKeys((prev) => (prev.includes(res.modelKey) ? prev : [...prev, res.modelKey]));
       setKey('');
+      setNoted(res.modelKey);
       setError(null);
     } catch (err) {
       setError(errorText(err));
@@ -301,18 +333,11 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
     try {
       await revoke.mutateAsync({ channelId, body: { modelKey } });
       setKeys((prev) => prev.filter((item) => item !== modelKey));
+      setNoted((prev) => (prev === modelKey ? null : prev));
       setError(null);
     } catch (err) {
       setError(errorText(err));
     }
-  };
-
-  const onRevokeTyped = async (e: FormEvent) => {
-    e.preventDefault();
-    const modelKey = revokeKey.trim();
-    if (!modelKey) return;
-    await drop(modelKey);
-    setRevokeKey('');
   };
 
   return (
@@ -341,6 +366,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
         <Button type="submit" size="sm" disabled={locked !== null || register.isPending || key.trim() === ''}>
           登记
         </Button>
+        {noted ? <p className="text-sub text-ink-done">已登记 {noted}</p> : null}
       </form>
       {keys.length > 0 ? (
         <ul aria-label="已登记的模型串" className="space-y-1">
@@ -351,6 +377,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
                 type="button"
                 size="xs"
                 variant="ghost"
+                className={TAP}
                 disabled={locked !== null || revoke.isPending}
                 aria-label={`撤掉 ${item}`}
                 onClick={() => void drop(item)}
@@ -361,28 +388,6 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
           ))}
         </ul>
       ) : null}
-      <form
-        aria-label="撤掉已登记的模型串"
-        className="flex flex-wrap items-center gap-2"
-        onSubmit={(e) => void onRevokeTyped(e)}
-      >
-        <input
-          aria-label="要撤掉的模型串"
-          value={revokeKey}
-          disabled={locked !== null || revoke.isPending}
-          onChange={(e) => setRevokeKey(e.target.value)}
-          placeholder="撤一条以前登记的"
-          className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-caption outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-        />
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={locked !== null || revokeKey.trim() === ''}
-        >
-          撤掉
-        </Button>
-      </form>
     </div>
   );
 }

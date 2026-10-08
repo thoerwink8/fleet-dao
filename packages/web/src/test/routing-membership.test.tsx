@@ -102,22 +102,29 @@ describe('用途：添加、移出、档位', () => {
   test('档位下拉只列这个模型认的档，选定后调用 setPurposeModelEffort', async () => {
     const execute = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('navigation', { name: '用途' });
-    const cursor = screen.getByRole('combobox', { name: 'Cursor Auto 的档位' });
+    const cursor = screen.getByRole('combobox', { name: 'Cursor Auto 的档位' }) as HTMLSelectElement;
     expect(
       within(cursor)
         .getAllByRole('option')
         .map((o) => o.textContent),
     ).toEqual(['不另配']);
+    expect(cursor.disabled).toBe(true);
+    expect(cursor.closest('li')?.textContent).toContain('不带方括号');
     execute.unmount();
     const verify = renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     const setEffort = vi.spyOn(verify.api, 'setPurposeModelEffort');
     await screen.findByRole('navigation', { name: '用途' });
     const grok = screen.getByRole('combobox', { name: 'Grok 4.7 的档位' });
-    expect(
-      within(grok)
-        .getAllByRole('option')
-        .map((o) => o.textContent),
-    ).toEqual(['不另配', 'low', 'medium', 'high', 'xhigh']);
+    const grokOptions = within(grok).getAllByRole('option');
+    expect(grokOptions.map((o) => o.textContent)).toEqual(['不另配', '低', '中', '高', '很高']);
+    expect(grokOptions.map((o) => (o as HTMLOptionElement).value)).toEqual([
+      '',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+    ]);
+    expect((grok as HTMLSelectElement).disabled).toBe(false);
     fireEvent.change(grok, { target: { value: 'high' } });
     await waitFor(() =>
       expect(setEffort).toHaveBeenCalledWith('verify', 'grok-4.7', { effort: 'high', version: 0 }),
@@ -191,10 +198,19 @@ describe('模型目录：厂家、渠道、状态、变体', () => {
     await screen.findByRole('button', { name: '展开 Grok 4.7 的变体' });
     expect(document.querySelector('li[data-catalog="grok-4.7"]')).toBeNull();
     expect(document.querySelector('li[data-catalog="grok-4.7-fast"]')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '展开 Grok 4.7 的变体' }));
+    const folded = screen.getByRole('button', { name: '展开 Grok 4.7 的变体' });
+    expect(folded.textContent).toMatch(/\d+ 个已开/);
+    expect(folded.querySelector('[data-variant-arrow]')?.getAttribute('data-variant-arrow')).toBe('closed');
+    fireEvent.click(folded);
     await waitFor(() => expect(document.querySelector('li[data-catalog="grok-4.7-fast"]')).toBeTruthy());
+    const opened = screen.getByRole('button', { name: '收起 Grok 4.7 的变体' });
+    expect(opened.querySelector('[data-variant-arrow]')?.getAttribute('data-variant-arrow')).toBe('open');
+    expect(opened.textContent).toMatch(/\d+ 个已开/);
     expect(document.querySelector('li[data-catalog="grok-4.7"]')).toBeTruthy();
     expect(document.querySelector('li[data-catalog-group]')).toBeTruthy();
+    const fast = document.querySelector('li[data-catalog="grok-4.7-fast"]') as HTMLElement;
+    expect(fast.textContent).toContain('没配进用途');
+    expect((within(fast).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
   });
 
   test('300 行按厂家筛完，仍只画窗口里的行', async () => {
@@ -226,8 +242,13 @@ describe('渠道：手工登记', () => {
     fireEvent.click(within(form).getByRole('button', { name: '登记' }));
     const list = await screen.findByRole('list', { name: '已登记的模型串' });
     await waitFor(() => expect(list.textContent).toContain('claude-sonnet-x'));
+    expect(screen.getByText('已登记 claude-sonnet-x')).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: '要撤掉的模型串' })).toBeNull();
+    expect(screen.queryByPlaceholderText('撤一条以前登记的')).toBeNull();
     expect(register).toHaveBeenCalledWith('ch-claude', { modelKey: 'claude-sonnet-x' });
-    fireEvent.click(within(list).getByRole('button', { name: '撤掉 claude-sonnet-x' }));
+    const drop = within(list).getByRole('button', { name: '撤掉 claude-sonnet-x' });
+    expect(drop.className.split(/\s+/)).toEqual(expect.arrayContaining(['min-h-9', 'min-w-9']));
+    fireEvent.click(drop);
     await waitFor(() => expect(screen.queryByRole('list', { name: '已登记的模型串' })).toBeNull());
     expect(revoke).toHaveBeenCalledWith('ch-claude', { modelKey: 'claude-sonnet-x' });
     expect(api.state().channels.some((c) => c.id === 'ch-claude')).toBe(true);
@@ -270,5 +291,46 @@ describe('写失败要露出来', () => {
       Array.from(document.querySelectorAll('li[data-model]')).map((el) => el.getAttribute('data-model')),
     ).toEqual(before);
     expect(before).not.toContain('sonnet-5');
+  });
+
+  test('【故意造出的失败】登记或撤掉接口报错：写出原因，已登记的名单不动', async () => {
+    const api = createMockApi({ live: false });
+    const register = api.registerChannelModel.bind(api);
+    const revoke = api.revokeChannelModel.bind(api);
+    let failRegister = true;
+    let failRevoke = false;
+    api.registerChannelModel = async (channelId, body) => {
+      if (failRegister) throw new ApiError(500, 'register_failed', '登记没写上');
+      return register(channelId, body);
+    };
+    api.revokeChannelModel = async (channelId, body) => {
+      if (failRevoke) throw new ApiError(500, 'revoke_failed', '撤掉没写上');
+      return revoke(channelId, body);
+    };
+    renderApp(<RoutingPage />, { route: '/routing?tab=channels', api });
+    await screen.findByRole('list', { name: '渠道列表' });
+    fireEvent.click(screen.getByRole('button', { name: '查看 Claude 订阅 的路由' }));
+    const form = await screen.findByRole('form', { name: '手工登记模型串' });
+    fireEvent.change(within(form).getByRole('textbox', { name: '模型串' }), {
+      target: { value: 'claude-sonnet-x' },
+    });
+    fireEvent.click(within(form).getByRole('button', { name: '登记' }));
+    const failed = await screen.findByRole('alert');
+    expect(failed.textContent).toContain('登记没写上');
+    expect(screen.queryByText('已登记 claude-sonnet-x')).toBeNull();
+    expect(screen.queryByRole('list', { name: '已登记的模型串' })).toBeNull();
+
+    failRegister = false;
+    fireEvent.click(within(form).getByRole('button', { name: '登记' }));
+    const list = await screen.findByRole('list', { name: '已登记的模型串' });
+    await waitFor(() => expect(list.textContent).toContain('claude-sonnet-x'));
+    expect(screen.getByText('已登记 claude-sonnet-x')).toBeTruthy();
+
+    failRevoke = true;
+    fireEvent.click(within(list).getByRole('button', { name: '撤掉 claude-sonnet-x' }));
+    const revokeAlert = await screen.findByRole('alert');
+    expect(revokeAlert.textContent).toContain('撤掉没写上');
+    expect(screen.getByRole('list', { name: '已登记的模型串' }).textContent).toContain('claude-sonnet-x');
+    expect(screen.queryByText('已登记 claude-sonnet-x')).toBeTruthy();
   });
 });
