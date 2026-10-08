@@ -2,6 +2,7 @@
 // 每个返回都按 shared/web-api.ts 校验后才交出去（和真后端的 reply 一样），报错的 code 和白话也照真后端。
 // 页面上的操作会真的改这里的状态并留下操作记录；刷新页面就回到初始盘面。
 import {
+  AddPurposeModelRequest,
   AUTO_DISPATCH_DISABLE,
   AUTO_DISPATCH_ENABLE,
   AuditResponse,
@@ -17,6 +18,7 @@ import {
   FranceReleaseStateSchema,
   flowStages,
   foldRouteProbeRequests,
+  founderOnlyDenial,
   GROOM_ACTION,
   GROOM_TARGET,
   GroomNowRequest,
@@ -30,6 +32,8 @@ import {
   hardBanFor,
   JobsResponse,
   judgeGroomRequest,
+  ManualModelRequest,
+  ManualModelResponse,
   MeResponse,
   MovePurposeModelRequest,
   MovePurposeModelResponse,
@@ -41,6 +45,7 @@ import {
   PoolHoldsResponse,
   PoolsResponse,
   type ProbeHistoryCell,
+  PurposeMembershipResponse,
   poolFull,
   poolHoldsView,
   probeHistoryStrips,
@@ -48,6 +53,7 @@ import {
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
+  RemovePurposeModelRequest,
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
@@ -74,6 +80,7 @@ import {
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
   SetModelEnabledResponse,
+  SetPurposeModelEffortRequest,
   type SettingKey,
   SettingsResponse,
   type StageKind,
@@ -356,6 +363,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const queuedAt = new Map<string, number>();
   /** 每条路由配的思考档位（#470）：没有就是没配。种子里一条 Grok 配了 medium，页面上能看到「配过」的样子。 */
   const mockEfforts = new Map<string, SessionEffort>([['r-grok', 'medium']]);
+  /** 用途成员的版本和这一用途下另配的档（#1356）。没改过版本是 0，没另配不放进这张表。 */
+  const purposeVersion = new Map<string, number>();
+  const purposeEffort = new Map<string, SessionEffort>();
+  /** 手工登记的模型串。名册接口只回个数，串本身记在这里，撤掉才从这里消失。 */
+  const manualKeys = new Map<string, string[]>();
+  const slotKey = (purpose: string, modelId: string) => `${purpose}\0${modelId}`;
   /** 在它的模型下关着的路由（母单 #1089 起页面能开关，所以是这个假后端自己的一份）。 */
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
@@ -436,6 +449,54 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   }
 
   const meActor = () => ({ kind: 'user' as const, id: st.me.user.id, name: st.me.user.displayName });
+  const purposeOr404 = (purposeParam: string): StageKind => {
+    const purpose = StageKindSchema.safeParse(purposeParam);
+    if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
+    return purpose.data;
+  };
+  const assertPurposeVersion = (purpose: string, version: number) => {
+    const current = purposeVersion.get(purpose) ?? 0;
+    if (current !== version) {
+      throw new ApiError(409, 'conflict', '这个用途刚被别人改过，刷新后再改', { version: current });
+    }
+  };
+  const bumpPurpose = (purpose: string) => {
+    const next = (purposeVersion.get(purpose) ?? 0) + 1;
+    purposeVersion.set(purpose, next);
+    return next;
+  };
+  const membershipOrder = (purpose: StageKind) =>
+    (st.purposes[purpose] ?? []).map((modelId) => ({
+      modelId,
+      effort: purposeEffort.get(slotKey(purpose, modelId)) ?? null,
+    }));
+  const catalogModel = (modelId: string) => {
+    const model = st.models.find((m) => m.id === modelId);
+    if (!model) throw new ApiError(404, 'model_not_found', `目录里没有模型 ${modelId}`);
+    return model;
+  };
+  const assertFounderCanWrite = (model: { id: string; family: string; displayName: string }) => {
+    const why = founderOnlyDenial(
+      { id: model.id, family: model.family, displayName: model.displayName },
+      { label: st.me.user.displayName, founderInCockpit: st.me.user.role === 'founder' },
+    );
+    if (why) throw new ApiError(403, 'founder_only', why);
+  };
+  const assertPurposeEffort = (modelId: string, effort: SessionEffort | null) => {
+    if (effort === null) return;
+    for (const route of st.routes.filter((r) => r.modelId === modelId)) {
+      const why = routeEffortProblem(route.hostId, modelId, effort);
+      if (why) throw new ApiError(422, 'effort_invalid', why);
+    }
+  };
+  const handChannel = (channelId: string) => {
+    const channel = st.channels.find((c) => c.id === channelId);
+    if (!channel) throw new ApiError(404, 'channel_not_found', '没有这个渠道');
+    if (channel.id !== 'claude-sub' && channel.name !== 'Claude 订阅') {
+      throw new ApiError(422, 'not_manual', '这个渠道有名册命令，不用手工登记');
+    }
+    return channel;
+  };
   const engine = { kind: 'engine' as const, id: 'engine', name: '引擎' };
 
   function audit(e: Omit<AuditEntry, 'id' | 'at' | 'ok'> & { ok?: boolean }) {
@@ -1881,7 +1942,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         if (modelIds.length === 0) {
           return {
             purpose,
-            version: 0,
+            version: purposeVersion.get(purpose) ?? 0,
             verdict: 'dead' as const,
             problems: ['这个用途没有模型，派不了'],
             models: [],
@@ -1892,27 +1953,40 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const routes = (st.routing[modelId] ?? [])
             .flatMap((routeId) => st.routes.find((r) => r.id === routeId) ?? [])
             .map((r) => mockRouteLiveness(r, purpose, t));
+          const effort = purposeEffort.get(slotKey(purpose, modelId));
           return {
             modelId,
             displayName: model?.displayName ?? modelId,
             ...(model ? { family: model.family } : {}),
             verdict: layerVerdict(routes.map((r) => r.verdict)),
             routes,
+            ...(effort ? { effort } : {}),
           };
         });
         return {
           purpose,
-          version: 0,
+          version: purposeVersion.get(purpose) ?? 0,
           verdict: layerVerdict(models.map((m) => m.verdict)),
           problems: [],
           models,
         };
       });
+      const manual = [...manualKeys.entries()].flatMap(([channelId, keys]) => {
+        if (keys.length === 0) return [];
+        const channel = st.channels.find((c) => c.id === channelId);
+        return [{ channelId, channelName: channel?.name ?? channelId, count: keys.length }];
+      });
       return RoutingLayersResponse.parse({
         asOf: iso(),
         purposes,
-        // 假数据没有渠道名册：差集是空的，页面写「都对得上」。真的差集由接口从库里给。
-        modelRoster: { missingFromCatalog: [], goneRoutes: [], failed: [], notYet: [] },
+        // 假数据没有渠道名册：差集是空的，页面写「都对得上」。登记过的手工渠道才带上个数。
+        modelRoster: {
+          missingFromCatalog: [],
+          goneRoutes: [],
+          failed: [],
+          notYet: [],
+          ...(manual.length > 0 ? { manual } : {}),
+        },
       });
     },
     async routingEfforts() {
@@ -2054,6 +2128,89 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       }
       return MovePurposeModelResponse.parse({ purpose: purpose.data, order: order.after });
     },
+    async addPurposeModel(purposeParam, raw) {
+      await wait();
+      const body = AddPurposeModelRequest.parse(raw);
+      const purpose = purposeOr404(purposeParam);
+      assertPurposeVersion(purpose, body.version);
+      const model = catalogModel(body.modelId);
+      assertFounderCanWrite(model);
+      const list = [...(st.purposes[purpose] ?? [])];
+      if (list.includes(body.modelId)) {
+        throw new ApiError(409, 'already_in_purpose', `模型 ${body.modelId} 已经在用途 ${purpose} 里`);
+      }
+      const position = body.position ?? list.length;
+      if (!Number.isInteger(position) || position < 0 || position > list.length) {
+        throw new ApiError(
+          422,
+          'position_invalid',
+          `位置 ${String(position)} 不在 0 到 ${list.length} 之间（${list.length} 是接到末尾）`,
+        );
+      }
+      const effort = body.effort ?? null;
+      assertPurposeEffort(body.modelId, effort);
+      const ban = hardBanFor(model, purpose);
+      if (ban) throw new ApiError(422, 'model_not_allowed', ban.reason);
+      list.splice(position, 0, body.modelId);
+      st.purposes[purpose] = list;
+      if (effort === null) purposeEffort.delete(slotKey(purpose, body.modelId));
+      else purposeEffort.set(slotKey(purpose, body.modelId), effort);
+      const version = bumpPurpose(purpose);
+      audit({
+        actor: meActor(),
+        action: 'routing.purpose.add',
+        target: `stage:${purpose}`,
+        after: { modelId: body.modelId, position, effort },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return PurposeMembershipResponse.parse({ purpose, version, order: membershipOrder(purpose) });
+    },
+    async removePurposeModel(purposeParam, modelId, raw) {
+      await wait();
+      const body = RemovePurposeModelRequest.parse(raw);
+      const purpose = purposeOr404(purposeParam);
+      assertPurposeVersion(purpose, body.version);
+      const list = [...(st.purposes[purpose] ?? [])];
+      if (!list.includes(modelId)) {
+        throw new ApiError(404, 'model_not_found', `用途 ${purpose} 下没有模型 ${modelId}`);
+      }
+      st.purposes[purpose] = list.filter((id) => id !== modelId);
+      purposeEffort.delete(slotKey(purpose, modelId));
+      const version = bumpPurpose(purpose);
+      audit({
+        actor: meActor(),
+        action: 'routing.purpose.remove',
+        target: `stage:${purpose}`,
+        after: { modelId },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return PurposeMembershipResponse.parse({ purpose, version, order: membershipOrder(purpose) });
+    },
+    async setPurposeModelEffort(purposeParam, modelId, raw) {
+      await wait();
+      const body = SetPurposeModelEffortRequest.parse(raw);
+      const purpose = purposeOr404(purposeParam);
+      assertPurposeVersion(purpose, body.version);
+      const list = st.purposes[purpose] ?? [];
+      if (!list.includes(modelId)) {
+        throw new ApiError(404, 'model_not_found', `用途 ${purpose} 下没有模型 ${modelId}`);
+      }
+      assertPurposeEffort(modelId, body.effort);
+      if (body.effort === null) purposeEffort.delete(slotKey(purpose, modelId));
+      else purposeEffort.set(slotKey(purpose, modelId), body.effort);
+      const version = bumpPurpose(purpose);
+      audit({
+        actor: meActor(),
+        action: 'routing.purpose.effort',
+        target: `stage:${purpose}`,
+        after: { modelId, effort: body.effort },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return PurposeMembershipResponse.parse({ purpose, version, order: membershipOrder(purpose) });
+    },
     async updateModelRoute(modelId, routeId, raw) {
       await wait();
       const body = UpdateModelRouteRequest.parse(raw);
@@ -2158,6 +2315,52 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...(body.reason ? { reason: body.reason } : {}),
       });
       return SetChannelEnabledResponse.parse({ channelId, enabled: body.enabled });
+    },
+    async registerChannelModel(channelId, raw) {
+      await wait();
+      const body = ManualModelRequest.parse(raw);
+      handChannel(channelId);
+      const keys = manualKeys.get(channelId) ?? [];
+      if (keys.includes(body.modelKey)) throw new ApiError(409, 'already_registered', '这个模型串已经登记过');
+      const next = [...keys, body.modelKey];
+      manualKeys.set(channelId, next);
+      audit({
+        actor: meActor(),
+        action: 'catalog.manual.register',
+        target: `channel:${channelId}`,
+        after: { modelKey: body.modelKey, count: next.length },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return ManualModelResponse.parse({
+        channelId,
+        modelKey: body.modelKey,
+        source: '手工',
+        count: next.length,
+      });
+    },
+    async revokeChannelModel(channelId, raw) {
+      await wait();
+      const body = ManualModelRequest.parse(raw);
+      handChannel(channelId);
+      const keys = manualKeys.get(channelId) ?? [];
+      if (!keys.includes(body.modelKey)) throw new ApiError(404, 'not_registered', '没有这条手工登记');
+      const next = keys.filter((key) => key !== body.modelKey);
+      manualKeys.set(channelId, next);
+      audit({
+        actor: meActor(),
+        action: 'catalog.manual.revoke',
+        target: `channel:${channelId}`,
+        after: { modelKey: body.modelKey, count: next.length },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return ManualModelResponse.parse({
+        channelId,
+        modelKey: body.modelKey,
+        source: '手工',
+        count: next.length,
+      });
     },
     async pools() {
       await wait();

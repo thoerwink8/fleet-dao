@@ -14,6 +14,7 @@ import { createContext, type ReactNode, useContext, useEffect, useRef, useSyncEx
 import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
 import type {
+  AddPurposeModelBody,
   Audit,
   AuthConfig,
   Board,
@@ -27,6 +28,8 @@ import type {
   HomeResponse,
   Jobs,
   LiveEvent,
+  ManualModelBody,
+  ManualModelResult,
   Me,
   MovedPurposeModel,
   MovePurposeModelBody,
@@ -35,9 +38,11 @@ import type {
   Notifications,
   PoolHolds,
   Pools,
+  PurposeMembership,
   ReleaseCard,
   ReleasedCommits,
   ReleaseRequestResult,
+  RemovePurposeModelBody,
   Repo,
   RepoDispatch,
   RouteProbeHistory,
@@ -51,6 +56,7 @@ import type {
   SetChannelEnabledResult,
   SetModelEnabledBody,
   SetModelEnabledResult,
+  SetPurposeModelEffortBody,
   Setting,
   SettingKey,
   Settings,
@@ -134,12 +140,30 @@ export interface FleetApi {
   ): Promise<UpdatedRouteEffort>;
   /** 用途下的一个模型上移 / 下移一位（母单 #1089）：expected 是改之前看到的模型先后，对不上 409，已在最上 / 最下 422。 */
   movePurposeModel(purpose: string, modelId: string, body: MovePurposeModelBody): Promise<MovedPurposeModel>;
+  /** 把目录里的一个模型加进用途。已经在里面 409，硬禁令 422，版本对不上 409。 */
+  addPurposeModel(purpose: string, body: AddPurposeModelBody): Promise<PurposeMembership>;
+  /** 把模型移出用途。用途可以变空。版本对不上 409。 */
+  removePurposeModel(
+    purpose: string,
+    modelId: string,
+    body: RemovePurposeModelBody,
+  ): Promise<PurposeMembership>;
+  /** 改这个用途下这个模型的档位。effort 为 null = 不另配。模型不认这一档 422。 */
+  setPurposeModelEffort(
+    purpose: string,
+    modelId: string,
+    body: SetPurposeModelEffortBody,
+  ): Promise<PurposeMembership>;
   /** 模型下的一条渠道上移 / 下移一位、拖到新先后，或开 / 关（母单 #1089）：同样带看到的旧值。 */
   updateModelRoute(modelId: string, routeId: string, body: UpdateModelRouteBody): Promise<UpdatedModelRoute>;
   /** 模型级开关：开则下面的路由全开，关则全关。expectedEnabled 是改之前开着的路由编号。 */
   setModelEnabled(modelId: string, body: SetModelEnabledBody): Promise<SetModelEnabledResult>;
   /** 渠道级开关（channels.enabled）。expected 是改之前看到的开关。 */
   setChannelEnabled(channelId: string, body: SetChannelEnabledBody): Promise<SetChannelEnabledResult>;
+  /** 没有名册的渠道：登记一个模型串。有名册命令的渠道 422，重复登记 409。 */
+  registerChannelModel(channelId: string, body: ManualModelBody): Promise<ManualModelResult>;
+  /** 撤掉手工登记的模型串。不删目录里的路由。没登记过 404。 */
+  revokeChannelModel(channelId: string, body: ManualModelBody): Promise<ManualModelResult>;
   pools(): Promise<Pools>;
   /** 整池暂停现状（#746）：开关（到期标红）、认不出的、还靠旧提醒顶着的。新建、撤回走 updateSetting('engine.poolHolds')。 */
   poolHolds(): Promise<PoolHolds>;
@@ -720,6 +744,45 @@ export function useMovePurposeModel() {
 }
 
 /**
+ * 用途里加模型、移出、改档位（#1380）。不先改缓存：版本对不上、硬禁令、档位不认，都等后端回了才算数。
+ * 成没成都重拉路由两层，页面上永远是库里现在的名单。
+ */
+function usePurposeMembership(
+  run: (
+    api: FleetApi,
+    vars: { purpose: string; modelId?: string; body: unknown },
+  ) => Promise<PurposeMembership>,
+) {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { purpose: string; modelId?: string; body: unknown }) => run(api, vars),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+export function useAddPurposeModel() {
+  return usePurposeMembership((api, vars) =>
+    api.addPurposeModel(vars.purpose, vars.body as AddPurposeModelBody),
+  );
+}
+
+export function useRemovePurposeModel() {
+  return usePurposeMembership((api, vars) =>
+    api.removePurposeModel(vars.purpose, vars.modelId ?? '', vars.body as RemovePurposeModelBody),
+  );
+}
+
+export function useSetPurposeModelEffort() {
+  return usePurposeMembership((api, vars) =>
+    api.setPurposeModelEffort(vars.purpose, vars.modelId ?? '', vars.body as SetPurposeModelEffortBody),
+  );
+}
+
+/**
  * 改模型下渠道的先后，以及路由页上的渠道开关（每条路由一个，确认后发 op:'enable'）。
  * #856 第 2 处判定：渠道这一级的总开关（旧的 useUpdateChannel、PATCH /api/routing/channels/:id）是有意撤掉的，
  * 不是漏了入口。#928 把它标成看板删除后没人用的残留，#972 从契约、后端、前端一起删了；
@@ -775,6 +838,31 @@ export function useSetChannelEnabled() {
       qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
+}
+
+/** 手工登记、撤掉一个模型串。名册差集和路由目录一起重拉；页面上已登记的名单另由这次的返回维护。 */
+function useManualModel(kind: 'register' | 'revoke') {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ channelId, body }: { channelId: string; body: ManualModelBody }) =>
+      kind === 'register'
+        ? api.registerChannelModel(channelId, body)
+        : api.revokeChannelModel(channelId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routing });
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+export function useRegisterChannelModel() {
+  return useManualModel('register');
+}
+
+export function useRevokeChannelModel() {
+  return useManualModel('revoke');
 }
 
 export function useResolveNotification() {

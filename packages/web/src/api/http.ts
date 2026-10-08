@@ -2,6 +2,7 @@
 // 路径和形状全部取自 WebRoutes / AuthRoutes，不在这里另写。
 
 import {
+  AddPurposeModelRequest,
   ApiErrorBody,
   AUTH_PREFIX,
   AuthRoutes,
@@ -10,11 +11,14 @@ import {
   DevLoginRequest,
   FeishuAccessRequest,
   GroomNowRequest,
+  ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
+  RemovePurposeModelRequest,
   RouteProbeNowRequest,
   SetChannelEnabledRequest,
   SetModelEnabledRequest,
+  SetPurposeModelEffortRequest,
   SSE_EVENTS,
   TaskActionRequest,
   UpdateCredentialsRequest,
@@ -275,6 +279,27 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: MovePurposeModelRequest.parse(body),
       });
     },
+    async addPurposeModel(purpose, body) {
+      return send('POST', apiUrl(R.addPurposeModel.path, { purpose }), R.addPurposeModel.response, {
+        body: AddPurposeModelRequest.parse(body),
+      });
+    },
+    async removePurposeModel(purpose, modelId, body) {
+      return send(
+        'DELETE',
+        apiUrl(R.removePurposeModel.path, { purpose, modelId }),
+        R.removePurposeModel.response,
+        { body: RemovePurposeModelRequest.parse(body) },
+      );
+    },
+    async setPurposeModelEffort(purpose, modelId, body) {
+      return send(
+        'PUT',
+        apiUrl(R.setPurposeModelEffort.path, { purpose, modelId }),
+        R.setPurposeModelEffort.response,
+        { body: SetPurposeModelEffortRequest.parse(body) },
+      );
+    },
     async updateModelRoute(modelId, routeId, body) {
       return send('PUT', apiUrl(R.updateModelRoute.path, { modelId, routeId }), R.updateModelRoute.response, {
         body: UpdateModelRouteRequest.parse(body),
@@ -288,6 +313,21 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     async setChannelEnabled(channelId, body) {
       return send('PUT', apiUrl(R.setChannelEnabled.path, { channelId }), R.setChannelEnabled.response, {
         body: SetChannelEnabledRequest.parse(body),
+      });
+    },
+    async registerChannelModel(channelId, body) {
+      return send(
+        'POST',
+        apiUrl(R.registerChannelModel.path, { channelId }),
+        R.registerChannelModel.response,
+        {
+          body: ManualModelRequest.parse(body),
+        },
+      );
+    },
+    async revokeChannelModel(channelId, body) {
+      return send('DELETE', apiUrl(R.revokeChannelModel.path, { channelId }), R.revokeChannelModel.response, {
+        body: ManualModelRequest.parse(body),
       });
     },
     pools: () => send('GET', apiUrl(R.pools.path), R.pools.response),

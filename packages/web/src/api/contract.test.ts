@@ -16,16 +16,8 @@ function used(prefix: string): Set<string> {
 }
 
 /** 契约里有、前端（http.ts）没用的：key → 为什么。 */
-/** 契约里有、页面故意不调的。groomStatus / groomNow 已由设置页接上（#1335 第 4 片），不在这里。 */
-const WEB_NOT_USED: Record<string, string> = {
-  // 配置层页面还没做（#1354 第五片），这片只做后端
-  addPurposeModel: '配置层页面还没做（#1354 第五片），这片只做后端',
-  removePurposeModel: '配置层页面还没做（#1354 第五片），这片只做后端',
-  setPurposeModelEffort: '配置层页面还没做（#1354 第五片），这片只做后端',
-  // 名册差集页只展示这一句，这一片不在页面上放登记按钮
-  registerChannelModel: '手工登记的写口已有，页面这一片不放按钮',
-  revokeChannelModel: '撤销手工登记的写口已有，页面这一片不放按钮',
-};
+/** 契约里有、页面故意不调的。用途成员和手工登记已由路由页接上（#1380），不在这里。 */
+const WEB_NOT_USED: Record<string, string> = {};
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch
   feishuLogin: '浏览器整页跳转，不走 fetch',

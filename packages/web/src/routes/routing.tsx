@@ -30,6 +30,7 @@ import {
   useRoutingEdit,
 } from '../components/routing-edit';
 import { KindDot, useKindEnv } from '../components/routing-kinds';
+import { AddPurposeModel, PurposeModelControls } from '../components/routing-membership';
 import { ModelRoutes } from '../components/routing-routes';
 import { StatusChip } from '../components/status';
 import { formatClock } from '../lib/format';
@@ -333,6 +334,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const first = firstLive(p);
   const edit = useRoutingEdit();
   const holds = usePoolHolds();
+  const [membershipError, setMembershipError] = useState<string | null>(null);
   // 选中看路由的模型：点过的优先；没点过，进来那一刻看顺位第一条活的所在的模型，没有就第一个。
   // 进来时定下来就不跟着变：开关一关、先后一调，顺位第一条活的会换，不能让下面的路由跟着跳到别的模型。
   const [picked, setPicked] = useState<string | null>(
@@ -356,7 +358,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           role="note"
           className="mb-3 rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-sub text-muted-foreground"
         >
-          {edit.disabledWhy}。先后和开关都不能改。
+          {edit.disabledWhy}。先后、开关、添加和档位都不能改。
         </p>
       ) : null}
       {holds.error ? (
@@ -364,6 +366,14 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           整池暂停没读成，路由先不能单独开。
         </p>
       ) : null}
+      {membershipError ? (
+        <p role="alert" className="mb-3 rounded-lg border border-ink-fail px-3 py-2 text-sub text-ink-fail">
+          {membershipError}
+        </p>
+      ) : null}
+      <div className="mb-3">
+        <AddPurposeModel purpose={p} onError={setMembershipError} />
+      </div>
       {p.problems.length > 0 ? (
         <ul
           aria-label="配置缺口"
@@ -379,7 +389,12 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
       ) : null}
       {p.models.length > 0 ? (
         <>
-          <ModelPriority purpose={p} selectedId={current?.modelId} onSelect={setPicked} />
+          <ModelPriority
+            purpose={p}
+            selectedId={current?.modelId}
+            onSelect={setPicked}
+            onError={setMembershipError}
+          />
           {current ? (
             <section
               aria-label={`${current.displayName} 的路由`}
@@ -418,10 +433,12 @@ function ModelPriority({
   purpose: p,
   selectedId,
   onSelect,
+  onError,
 }: {
   purpose: RoutingLayerPurpose;
   selectedId: string | undefined;
   onSelect: (modelId: string) => void;
+  onError: (message: string | null) => void;
 }) {
   const edit = useRoutingEdit();
   const [filter, setFilter] = useState<ListFilter>(NO_FILTER);
@@ -470,10 +487,12 @@ function ModelPriority({
         >
           {(m, i, controls) => (
             <ModelRow
+              purpose={p}
               model={m}
               position={p.models.findIndex((x) => x.modelId === m.modelId) + 1 || i + 1}
               selected={m.modelId === selectedId}
               onSelect={() => onSelect(m.modelId)}
+              onError={onError}
               controls={controls}
             />
           )}
@@ -484,16 +503,20 @@ function ModelPriority({
 }
 
 function ModelRow({
+  purpose,
   model: m,
   position,
   selected,
   onSelect,
+  onError,
   controls,
 }: {
+  purpose: RoutingLayerPurpose;
   model: RoutingLayerModel;
   position: number;
   selected: boolean;
   onSelect: () => void;
+  onError: (message: string | null) => void;
   controls: RowControls;
 }) {
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
@@ -521,6 +544,7 @@ function ModelRow({
           {modelSummary(m)}
         </span>
       </button>
+      <PurposeModelControls purpose={purpose} model={m} onError={onError} />
       <ModelSwitch
         modelId={m.modelId}
         modelName={m.displayName}
