@@ -304,8 +304,11 @@ function PurposeItem({
           active && 'border-border-strong bg-muted/60',
         )}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-sm font-semibold">{purposeLabel(p.purpose)}</span>
+          {p.purpose === 'groom' ? (
+            <span className="text-caption text-muted-foreground">这里配指挥官用的模型</span>
+          ) : null}
           <span className="num text-caption text-muted-foreground">{p.purpose}</span>
           <StatusChip
             tone={verdictTone[p.verdict]}

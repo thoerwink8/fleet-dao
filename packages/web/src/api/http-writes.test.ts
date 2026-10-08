@@ -140,6 +140,26 @@ const WRITES: Write[] = [
     ok: { body: { channelId: 'ch-relay', enabled: false } },
   },
   {
+    name: 'groomNow',
+    call: (api) => api.groomNow('r-orbit', { reason: '老单堆了' }),
+    method: 'POST',
+    url: '/api/repos/r-orbit/dispatch/groom',
+    body: { reason: '老单堆了' },
+    ok: {
+      body: {
+        request: {
+          requestId: 'g-1',
+          repo: 'acme/orbit',
+          source: 'http',
+          requestedAt: AT,
+          by: 'u-a',
+          state: 'queued',
+        },
+        remainingAfter: 2,
+      },
+    },
+  },
+  {
     name: 'resolveNotification',
     call: (api) => api.resolveNotification('n-1'),
     method: 'POST',

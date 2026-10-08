@@ -61,7 +61,9 @@ export function RepoDispatchControl({
           {row.on ? '接活中' : '关着'}
         </span>
         <span className="ml-2" data-testid={`dispatch-note-${repoId}`}>
-          {row.on && row.since ? `${formatDateTime(row.since)} 开的` : '只收单、不派活'}
+          {row.on && row.since
+            ? `${formatDateTime(row.since)} 开的`
+            : '只有本机 fleet-api dispatch-issue 点名派'}
         </span>
       </div>
       <>
@@ -82,8 +84,8 @@ export function RepoDispatchControl({
               </AlertDialogTitle>
               <AlertDialogDescription>
                 {target
-                  ? '开启后引擎下一轮拉单就开始往这个项目派活，并记一条操作记录。'
-                  : '关闭后引擎只收单、显示，不再拉新单派活；这个开关只管拉单和派活，不会叫停已经在做的需求。并记一条操作记录。'}
+                  ? '开启后，引擎每 5 分钟自己按准入和排序挑单（老单要指挥官整理过）；没单可挑会自动叫指挥官整理。并记一条操作记录。'
+                  : '关闭后，只有本机 fleet-api dispatch-issue 点名派。已经在做的需求不会被叫停。并记一条操作记录。'}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

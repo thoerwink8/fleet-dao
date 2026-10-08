@@ -88,7 +88,7 @@ test.describe('设置页', () => {
     await page.goto('/settings');
     const row = page.getByTestId(`dispatch-${first.repoId}`);
     await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('关着');
-    await expect(row).toContainText('只收单、不派活');
+    await expect(row).toContainText('fleet-api dispatch-issue');
     await shot(page, '05-设置-仓库-关着');
 
     // 点开启先弹确认；点「先不」什么都不改

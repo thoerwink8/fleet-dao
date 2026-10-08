@@ -60,6 +60,12 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     ]);
   });
 
+  test('操作记录变了：整理待办的现状跟着重拉（它是从记录现算的）', () => {
+    const { qc, called } = spy();
+    applyOne(qc, { type: 'change', table: 'audit_log', id: 'a1' });
+    expect(called()).toEqual(['audit', 'groom-status']);
+  });
+
   test('认不出的表、断线重连：全部重拉——宁可多拉，不把漏收当没变化', () => {
     const { qc, called } = spy();
     // 后端比前端先上新表时（部署先后），表名会不在这份名单里。

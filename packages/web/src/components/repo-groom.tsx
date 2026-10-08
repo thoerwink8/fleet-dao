@@ -1,0 +1,234 @@
+import { useId, useState } from 'react';
+import { toast } from 'sonner';
+import { errorText, useGroomNow, useGroomStatus } from '../api/client';
+import type { GroomStatus } from '../api/types';
+import { formatDateTime } from '../lib/format';
+import { LoadError } from './page';
+import { RepoLink } from './repo-link';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
+import { Button } from './ui/button';
+import { Label } from './ui/label';
+import { Textarea } from './ui/textarea';
+
+type GroomRequest = GroomStatus['recent'][number];
+
+const STATE_WORD: Record<GroomRequest['state'], string> = {
+  queued: '排队',
+  running: '在做',
+  done: '做成了',
+  failed: '没做成',
+  expired: '作废了',
+};
+
+function whenOf(row: GroomRequest): string {
+  return row.finishedAt ?? row.startedAt ?? row.requestedAt;
+}
+
+function IssueNums({
+  repo,
+  items,
+}: {
+  repo: { owner: string; name: string };
+  items: { n: number; title?: string }[];
+}) {
+  return items.map((item, i) => (
+    <span key={item.n}>
+      {i > 0 ? '、' : null}
+      <RepoLink repo={repo} kind="issues" n={item.n} className="num underline underline-offset-2">
+        #{item.n}
+      </RepoLink>
+      {item.title ? <span className="ml-1 text-muted-foreground">{item.title}</span> : null}
+    </span>
+  ));
+}
+
+/** 最近一次做成了什么：开了、补了、建议关、贴要人拍，单号链到 GitHub。 */
+function ResultSummary({
+  result,
+  repo,
+}: {
+  result: NonNullable<GroomRequest['result']>;
+  repo: { owner: string; name: string };
+}) {
+  const lines: { label: string; items: { n: number; title?: string }[] }[] = [
+    { label: '开了', items: result.opened.map((o) => ({ n: o.number, title: o.title })) },
+    { label: '补了', items: result.amended.map((n) => ({ n })) },
+    { label: '建议关', items: result.suggestedClose.map((n) => ({ n })) },
+    { label: '贴要人拍', items: result.flagged.map((n) => ({ n })) },
+  ];
+  return (
+    <ul aria-label="最近一次结果" className="mt-1 space-y-0.5 text-xs">
+      {lines.map((line) => (
+        <li key={line.label}>
+          {line.label} {line.items.length} 张{line.items.length > 0 ? '：' : null}
+          <IssueNums repo={repo} items={line.items} />
+        </li>
+      ))}
+      {result.summary ? <li className="text-muted-foreground">{result.summary}</li> : null}
+    </ul>
+  );
+}
+
+/**
+ * 设置页每个仓「让 AI 接活」旁边的「指挥官整理待办」。
+ * 次数和最近结果读 GET；按钮先确认（原因可空）再 POST。被拒时把后端的原话留下，不换成「出错了」。
+ */
+export function RepoGroomControl({
+  repoId,
+  repo,
+}: {
+  repoId: string;
+  repo: { owner: string; name: string };
+}) {
+  const name = `${repo.owner}/${repo.name}`;
+  const query = useGroomStatus(repoId);
+  const groom = useGroomNow();
+  const [asking, setAsking] = useState(false);
+  const [reason, setReason] = useState('');
+  const [writeError, setWriteError] = useState<unknown>(null);
+  const reasonId = useId();
+  const status = query.data;
+  const latest = status?.recent[0];
+  const older = status?.recent.slice(1) ?? [];
+  const busy = status?.busy === true;
+
+  const confirm = () => {
+    const text = reason.trim();
+    setWriteError(null);
+    groom.mutate(
+      { repoId, body: text ? { reason: text } : {} },
+      {
+        onSuccess: () => {
+          setAsking(false);
+          setReason('');
+          toast.success(`已叫指挥官整理：${name}`);
+        },
+        onError: (e) => {
+          setAsking(false);
+          setWriteError(e);
+          toast.error('没叫成', { description: errorText(e) });
+        },
+      },
+    );
+  };
+
+  return (
+    <section
+      data-testid={`groom-${repoId}`}
+      aria-label={`${name} 的指挥官整理待办`}
+      className="min-w-0 rounded-lg border border-dashed px-3 py-2.5"
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <h3 className="text-xs font-medium">指挥官整理待办</h3>
+        {status ? (
+          <span className="num text-xs text-muted-foreground" data-testid={`groom-quota-${repoId}`}>
+            今日剩余 {status.quota.remaining}/{status.quota.max}
+          </span>
+        ) : null}
+        {busy ? <span className="text-xs font-medium text-ink-stall">整理中</span> : null}
+      </div>
+
+      {query.isLoading ? <p className="mt-1 text-xs text-muted-foreground">在读…</p> : null}
+      {query.error ? (
+        <div className="mt-2">
+          <LoadError what="指挥官整理待办" error={query.error} />
+        </div>
+      ) : null}
+      {status && status.unreadable > 0 ? (
+        <p className="mt-1 text-xs text-ink-fail">有 {status.unreadable} 条记录没读懂，下面不是全部。</p>
+      ) : null}
+
+      {status && latest ? (
+        <div className="mt-1.5">
+          <p className="text-xs">
+            最近一次：{STATE_WORD[latest.state]} ·{' '}
+            <span className="num">{formatDateTime(whenOf(latest))}</span>
+          </p>
+          {latest.why ? (
+            <p className="mt-0.5 break-words text-xs text-muted-foreground">{latest.why}</p>
+          ) : null}
+          {latest.result ? <ResultSummary result={latest.result} repo={repo} /> : null}
+          {!latest.result && (latest.state === 'queued' || latest.state === 'running') ? (
+            <p className="mt-0.5 text-xs text-muted-foreground">还没有结果</p>
+          ) : null}
+        </div>
+      ) : status ? (
+        <p className="mt-1.5 text-xs text-muted-foreground">还没整理过</p>
+      ) : null}
+
+      {older.length > 0 ? (
+        <ul aria-label="更早的整理" className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+          {older.map((row) => (
+            <li key={row.requestId} className="break-words">
+              {STATE_WORD[row.state]} · <span className="num">{formatDateTime(whenOf(row))}</span>
+              {row.why ? ` · ${row.why}` : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      <div className="mt-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={groom.isPending || busy || query.isLoading}
+          onClick={() => {
+            setReason('');
+            setAsking(true);
+          }}
+          aria-label={`让指挥官整理 ${name} 的待办`}
+        >
+          让指挥官整理
+        </Button>
+      </div>
+      {writeError ? (
+        <p role="alert" className="mt-1.5 break-words text-xs text-ink-fail">
+          {errorText(writeError)}
+        </p>
+      ) : null}
+
+      <AlertDialog open={asking} onOpenChange={setAsking}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>让指挥官整理 {name} 的待办？</AlertDialogTitle>
+            <AlertDialogDescription>
+              记一条操作记录，引擎几秒内接手。同一时刻全局只做一次，这个仓每 24 小时最多 3 次。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="grid gap-1.5">
+            <Label htmlFor={reasonId}>原因（可以不填）</Label>
+            <Textarea
+              id={reasonId}
+              value={reason}
+              maxLength={500}
+              placeholder="为什么现在整理"
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={groom.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                confirm();
+              }}
+            >
+              {groom.isPending ? '正在提交' : '确认整理'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
+  );
+}
