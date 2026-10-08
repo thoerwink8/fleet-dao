@@ -296,6 +296,22 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(run.why).toContain('acme/widgets：列合并的 PR 失败：403');
   });
 
+  it('【故意造出的失败】整池暂停到期的飞书没推成：这一轮是 partial，不记成 ok', async () => {
+    const h = harness({
+      poolHoldPush: async () => ({
+        scanned: 1,
+        found: 0,
+        unchecked: [
+          '整池暂停到期，飞书没推成：飞书推送没配：引擎环境里没有 FLEET_FEISHU_WEBHOOK，这条推不出去',
+        ],
+      }),
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('飞书没推成');
+    expect(run.why).toContain('没配');
+  });
+
   it('【故意造出的失败】读合了的 PR 的记账没成：这一轮不记 ok，写明是记账那部分', async () => {
     const h = harness({
       ledgers: async () => {

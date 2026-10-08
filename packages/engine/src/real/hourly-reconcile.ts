@@ -20,6 +20,7 @@ import {
   openSessionTrees,
   prHeadsOfBranch,
   quotaTable,
+  readPoolHoldsSetting,
   resolveAlertWithReason,
   startScheduleRun,
   subtaskTreeRefs,
@@ -36,11 +37,13 @@ import { WORKFLOW_TYPES } from '../contract.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
+import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
+import { feishuWebhookSender } from './feishu-webhook.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -399,6 +402,23 @@ export function hourlyReconcileJob(
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
       },
+      poolHoldPush: () =>
+        pushOverduePoolHolds({
+          now,
+          readSetting: () => readPoolHoldsSetting(w.db),
+          sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
+          markSent: async (x) => {
+            await upsertAlert(w.db, {
+              dedupeKey: x.dedupeKey,
+              level: 'daily',
+              taskId: null,
+              title: x.title,
+              body: x.body,
+              link: x.link,
+            });
+          },
+          send: feishuWebhookSender({ env: process.env }),
+        }),
       now,
       log,
       ...(w.inspectMax === undefined ? {} : { inspectMax: w.inspectMax }),

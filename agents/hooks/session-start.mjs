@@ -19,7 +19,11 @@
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 4. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
 //    gh 没查成说一行没查成，不当成「没有」。这一件和进度单 #1055、扫工作树一起走第 1 件的三分钟门。
-// 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、工作树、工人状态）一律不出。
+// 5. 法国库里的整池暂停（设置 engine.poolHolds，#954）：复查日期到了（北京时间）提示一句（池、原因、负责人、到驾驶舱设置页「整池暂停」撤）。
+//    只在这台配了登法国的 ssh 时查：~/.fleet-dao/france-ssh，或真开会话时进程里的 FLEET_FRANCE_SSH。没配不出声，不当成没到期。
+//    当库被测试调用时不读进程环境，免得测试机上的环境变量把 ssh 打出去；真开会话（本文件当主程序）才把进程环境传进去。
+//    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
+// 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
@@ -684,6 +688,198 @@ export function checkProgressIssue({ cwd, git, run, mirror = null }) {
   ];
 }
 
+/** 和 packages/shared 的 DEFAULT_POOL_HOLD_OWNER 同一个字。钩子装到机器上，不能 import 那个包。 */
+const DEFAULT_POOL_HOLD_OWNER = '指挥官';
+const FRANCE_SSH_ENV = 'FLEET_FRANCE_SSH';
+const POOL_HOLD_SEEN = 'pool-holds-seen.json';
+const POOL_HOLD_SSH_MS = 8_000;
+const POOL_HOLD_SQL = "SELECT value FROM settings WHERE key = 'engine.poolHolds'";
+const POOL_HOLD_DB = "dbname=fleet options='-c default_transaction_read_only=on'";
+const POOL_HOLD_KEYS = new Set(['reason', 'decidedBy', 'revokeWhen', 'reviewBy', 'owner']);
+
+const shQuote = (s) => `'${String(s).replaceAll("'", `'\\''`)}'`;
+
+function franceHost({ home, env, readText }) {
+  const fromEnv = env && typeof env[FRANCE_SSH_ENV] === 'string' ? env[FRANCE_SSH_ENV].trim() : '';
+  let raw = fromEnv;
+  let from = `环境变量 ${FRANCE_SSH_ENV}`;
+  if (!raw) {
+    const file = join(home, '.fleet-dao', 'france-ssh');
+    let text;
+    try {
+      text = (readText ?? readFileSync)(file, 'utf8');
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { ok: false, kind: 'not-configured' };
+      return { ok: false, kind: 'bad-config', why: '登法国的 ssh 配置读不了' };
+    }
+    raw =
+      String(text)
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l !== '' && !l.startsWith('#')) ?? '';
+    from = '登法国的 ssh 配置';
+    if (!raw) return { ok: false, kind: 'bad-config', why: '登法国的 ssh 配置是空的' };
+  }
+  if (!/^[A-Za-z0-9_][A-Za-z0-9._@-]{0,200}$/.test(raw)) {
+    return { ok: false, kind: 'bad-config', why: `${from}里的 ssh 名字认不出` };
+  }
+  return { ok: true, host: raw };
+}
+
+const scrubHost = (text, host) =>
+  String(text ?? '')
+    .split(host)
+    .join('（名字已隐去）')
+    .slice(0, 180);
+
+/**
+ * 读法国库里的 engine.poolHolds。同步、只读。没配登法国的 ssh 回 { ok: true, skipped: true }（不出声）。
+ * env 不传就不看进程环境。成功和失败都按 QUIET_MS 记在 ~/.fleet-dao/pool-holds-seen.json，免得每条消息都 ssh。
+ * 原因里不带 ssh 名字（可能是 IP）。
+ */
+export function readFrancePoolHolds({ home, env, spawn = spawnSync, now = Date.now(), readText, writeText }) {
+  const dir = join(home, '.fleet-dao');
+  const cacheFile = join(dir, POOL_HOLD_SEEN);
+  let cached = null;
+  try {
+    cached = JSON.parse((readText ?? readFileSync)(cacheFile, 'utf8'));
+  } catch {
+    cached = null;
+  }
+  if (
+    cached &&
+    typeof cached.at === 'number' &&
+    now - cached.at < QUIET_MS &&
+    now - cached.at > -5_000 &&
+    cached.read
+  ) {
+    return cached.read;
+  }
+  const host = franceHost({ home, env, readText });
+  if (!host.ok && host.kind === 'not-configured') return { ok: true, skipped: true };
+  if (!host.ok) return { ok: false, why: host.why };
+  const remote = [
+    'sudo',
+    '-n',
+    '-u',
+    'fleet',
+    'psql',
+    '-X',
+    '-q',
+    '-t',
+    '-A',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-d',
+    shQuote(POOL_HOLD_DB),
+    '-c',
+    shQuote(POOL_HOLD_SQL),
+  ].join(' ');
+  const r = spawn(
+    'ssh',
+    [
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'Compression=yes',
+      '-o',
+      'ConnectTimeout=10',
+      '-o',
+      'ServerAliveInterval=10',
+      '-o',
+      'ServerAliveCountMax=3',
+      host.host,
+      remote,
+    ],
+    { encoding: 'utf8', timeout: POOL_HOLD_SSH_MS, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let read;
+  if (r?.error || r?.status !== 0) {
+    const detail = r?.error
+      ? (r.error.code ?? r.error.message ?? 'ssh 没起来')
+      : String(r?.stderr ?? '')
+          .trim()
+          .split('\n')[0] || `退出码 ${r?.status ?? '无'}`;
+    read = { ok: false, why: `连不上法国（${scrubHost(detail, host.host)}）` };
+  } else {
+    const stdout = String(r.stdout ?? '').trim();
+    if (stdout === '') read = { ok: true, value: undefined };
+    else {
+      try {
+        read = { ok: true, value: JSON.parse(stdout) };
+      } catch {
+        read = { ok: false, why: '库里的值不是 JSON' };
+      }
+    }
+  }
+  try {
+    mkdirSync(dir, { recursive: true });
+    (writeText ?? writeFileSync)(cacheFile, JSON.stringify({ at: now, read }));
+  } catch {
+    // 缓存写不上照样把这次的结果交出去
+  }
+  return read;
+}
+
+const holdText = (entry, key) => (typeof entry[key] === 'string' ? entry[key].trim() : '');
+
+function holdDay(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/** 读到的整池暂停 → 要说的几行。没配（skipped）、库里没有这一项：不出声。认不出、没查成：明说，不当成没到期。 */
+export function poolHoldPromptLines(read, today) {
+  if (!read || read.skipped) return [];
+  if (!read.ok) return [`整池暂停没查成：${read.why}。有没有到期的不知道。`];
+  const value = read.value;
+  if (value === undefined) return [];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return ['整池暂停整份认不出，当不了没到期。到驾驶舱设置页「整池暂停」看。'];
+  }
+  const overdue = [];
+  const bad = [];
+  for (const [poolId, entry] of Object.entries(value)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      bad.push(poolId);
+      continue;
+    }
+    const extra = Object.keys(entry).some((k) => !POOL_HOLD_KEYS.has(k));
+    const reason = holdText(entry, 'reason');
+    const reviewBy = holdText(entry, 'reviewBy');
+    const ownerRaw = entry.owner;
+    const ownerBad = ownerRaw !== undefined && (typeof ownerRaw !== 'string' || ownerRaw.trim() === '');
+    if (
+      extra ||
+      !reason ||
+      !holdText(entry, 'decidedBy') ||
+      !holdText(entry, 'revokeWhen') ||
+      !holdDay(reviewBy) ||
+      ownerBad
+    ) {
+      bad.push(poolId);
+      continue;
+    }
+    if (today < reviewBy) continue;
+    const owner = typeof ownerRaw === 'string' && ownerRaw.trim() ? ownerRaw.trim() : DEFAULT_POOL_HOLD_OWNER;
+    const days = Math.round(
+      (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${reviewBy}T00:00:00Z`)) / 86_400_000,
+    );
+    const when = days <= 0 ? '就是今天' : `已过 ${days} 天`;
+    overdue.push(
+      `整池暂停到期：${poolId}（原因：${reason}；负责人：${owner}；复查日期 ${reviewBy}，${when}）。到驾驶舱设置页「整池暂停」撤或续期，引擎不会自动撤。`,
+    );
+  }
+  const lines = [...overdue];
+  if (bad.length > 0) {
+    lines.push(
+      `整池暂停有 ${bad.length} 条认不出（${bad.join('、')}），当不了没到期。到驾驶舱设置页「整池暂停」看。`,
+    );
+  }
+  return lines;
+}
+
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
 export function sessionStart({
   cwd,
@@ -697,6 +893,7 @@ export function sessionStart({
   idlePr = idlePrRunner(),
   progress = progressRunner(),
   env = process.env,
+  poolHolds = null,
 }) {
   // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上。
   // 问 GitHub、扫工作树看 session-net；git fetch 看 fetch-ok（子代理刚取成过就不再取）。两扇门都是三分钟。
@@ -713,12 +910,19 @@ export function sessionStart({
   // 注进工人的开场它会当成自己的活（2026-10-05 审计 N5），还白占 8–11 秒
   if (worker)
     return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
+  let holdRead = { ok: true, skipped: true };
+  try {
+    holdRead = (poolHolds ?? (() => readFrancePoolHolds({ home, now, spawn: spawnSync })))();
+  } catch (err) {
+    holdRead = { ok: false, why: err?.message ?? String(err) };
+  }
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
   const syncDir = source ? source.syncDirIn(home) : null;
   return [
     ...(here.line ? [here.line] : []),
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
+    ...poolHoldPromptLines(holdRead, beijingToday(now)),
     ...checkDirectives(cwd, localGit),
     ...(quiet
       ? []
@@ -1042,13 +1246,15 @@ if (isMain()) {
     } catch {
       // 输入读不懂不要紧：会话目录退回到钩子自己的工作目录
     }
+    const home = homedir();
     lines = sessionStart({
       cwd: pickCwd(input),
-      home: homedir(),
+      home,
       git: gitRunner(),
       sync: syncRunner(),
       localGit: gitRunner(GREP_MS),
       sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
+      poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
     });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];

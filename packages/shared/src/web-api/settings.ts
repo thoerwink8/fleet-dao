@@ -42,18 +42,29 @@ const HoldText = z.string().trim().min(1, '不能留空').max(500, '最多 500 �
 /**
  * 一条整池暂停（#746）：通用段里「临时调整」的五列（内容 = 哪个池，下面四项），缺一项写不进去，多一项也不收（认不出明确失败）。
  * reason 为什么停；decidedBy 谁拍的（原话加日期）；revokeWhen 撤回条件；reviewBy 最迟复查日期（北京时间）。
+ * owner 负责人（#954）：没写按「指挥官」（展示时补，不写进库）；空字符串不收。老数据没有这一项，仍算认得出。
  */
 export const PoolHoldSchema = z.strictObject({
   reason: HoldText,
   decidedBy: HoldText,
   revokeWhen: HoldText,
   reviewBy: BeijingDateSchema,
+  owner: HoldText.optional(),
 });
 /** 账号池编号 → 这个池的整池暂停。没有这个池的条目 = 没暂停；撤回 = 把这个池的条目删掉（撤回原因写在这次改动的 reason，进操作记录）。 */
 export const PoolHoldsSettingSchema = z.record(z.string().min(1), PoolHoldSchema);
 
-/** 整池暂停的现状（现算）：设置里认得出的、认不出的、还靠旧提醒顶着的、到期没复查的。 */
-export const PoolHoldViewSchema = PoolHoldSchema.extend({
+/**
+ * 整池暂停的现状（现算）：设置里认得出的、认不出的、还靠旧提醒顶着的、到期没复查的。
+ * owner 在这里是必填：库里没写的，视图补成「指挥官」（resolvePoolHolds）。不从 PoolHoldSchema 上 extend，
+ * 免得可选的 owner 盖住必填。
+ */
+export const PoolHoldViewSchema = z.strictObject({
+  reason: HoldText,
+  decidedBy: HoldText,
+  revokeWhen: HoldText,
+  reviewBy: BeijingDateSchema,
+  owner: HoldText,
   poolId: z.string(),
   /** 到了最迟复查日期（当天及以后）还开着：标红，不自动撤，等人撤或续期。 */
   overdue: z.boolean(),
@@ -109,8 +120,9 @@ export const SETTING_SCHEMAS = {
    */
   'engine.quotaReserve': QuotaReserveSettingSchema,
   /**
-   * 整池暂停（#746，创始人 2026-10-02 拍开关留在库里当指令）：{池编号: {reason, decidedBy, revokeWhen, reviewBy}}。选路、切号整池避开；
-   * 探针探通、会话跑通都撤不掉它，只有人撤（驾驶舱设置页撤回要写原因，进操作记录）。过了 reviewBy 标红、不自动撤。
+   * 整池暂停（#746，创始人 2026-10-02 拍开关留在库里当指令）：{池编号: {reason, decidedBy, revokeWhen, reviewBy, owner?}}。
+   * 选路、切号整池避开；探针探通、会话跑通都撤不掉它，只有人撤（驾驶舱设置页撤回、续期、改负责人要写原因，进操作记录）。
+   * 过了 reviewBy 标红、不自动撤。负责人没写按「指挥官」，空着不收。
    * 没设过 = 没有暂停；认不出（整份或某个池的那一项）按暂停办并报警，不当成能用。
    */
   'engine.poolHolds': PoolHoldsSettingSchema,
