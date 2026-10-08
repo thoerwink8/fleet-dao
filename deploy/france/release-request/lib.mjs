@@ -27,6 +27,7 @@ export const LAST_FILE = `${TRAIN_DIR}/last-request.json`;
 export const MARKER_FILE = `${TRAIN_DIR}/release-train.paused`;
 export const CHECKOUT = '/srv/fleet-dao';
 export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
+/** 部署检出上的入口。发之前 prepareCheckout 把检出快进到目标提交；release.sh 自己再把那一版的包交给它自带的脚本（#1294）。 */
 export const RELEASE_SH = `${CHECKOUT}/deploy/release.sh`;
 export const AGENT_SCOPE = '/usr/local/sbin/fleet-agent-scope';
 export const HISTORY_FILE = `${RELEASES}/.history`;

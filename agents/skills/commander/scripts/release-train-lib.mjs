@@ -24,6 +24,7 @@ export const STATE_REL = join('.fleet-dao', 'release-train.json');
 export const RELEASES = '/srv/fleet-dao-releases';
 /** 法国上的管理命令入口和发布脚本（docs/ops.md 第九节）。 */
 export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
+/** 法国部署检出上的入口（/srv/fleet-dao，不是在用目录 current 里那份）。发版时这份脚本先收下目标提交的包，再交给那一版自带的 release.sh（#1294）。--check 仍跑这份。 */
 export const RELEASE_SH = '/srv/fleet-dao/deploy/release.sh';
 export const HISTORY_FILE = `${RELEASES}/.history`;
 export const LOCK_FILE = `${RELEASES}/.lock`;
