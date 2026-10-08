@@ -1,7 +1,11 @@
-// 快捷操作只有这一份定义：悬停条、右键菜单、侧边详情、手机列表、任务详情都从这里取，行为一致。
-// 页面上给的动作：暂停、继续、叫停、重做。没有「换模型」：任务工作流没有中途换路由，后端对 reroute 固定回 409
-// action_not_supported（api/src/cockpit.ts，#901、#856）。要换这张单用的模型，在任务页「用哪个模型」里指定
-// （components/task-model-pins.tsx：下一次选路起生效，动手这一轮可以「现在就换」）。
+// 快捷操作只有这一份定义（#856 第 1 处）。
+// 判定：暂停、继续、叫停不是漏了入口。#820 片 3（#1203，PR #1229）已经接到任务页和首页看板；重做是 #1307。
+// 各处按钮收成 ActionButtons / useTargetActions，调用方：
+// - 任务详情 routes/task.tsx、看板侧边详情 home/board/detail-panel.tsx：ActionButtons
+// - 悬停条和右键 home/board/nodes.tsx、手机列表 home/board/board-tree.tsx：useTargetActions
+// - 选中卡片后的快捷键 home/board/board-canvas.tsx：shortcutAction
+// 没有「换模型」：任务工作流没有中途换路由，后端对 reroute 固定回 409 action_not_supported
+// （api/src/cockpit.ts）。要换这张单用的模型，在任务页「用哪个模型」里指定（task-model-pins.tsx）。
 // 没有「回答追问」：v3 没有 AI 追问这一环（#928）。
 import type { LucideIcon } from 'lucide-react';
 import { CircleStop, Pause, Play, RotateCcw } from 'lucide-react';
@@ -10,6 +14,7 @@ import { toast } from 'sonner';
 import { errorText, useTaskAction } from '../api/client';
 import type { Activity, BoardSubtask, BoardTask, TaskActionBody, TaskState } from '../api/types';
 import { isTaskFinished, letterOf } from '../lib/status';
+import { cn } from '../lib/utils';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,6 +25,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from './ui/alert-dialog';
+import { Button } from './ui/button';
 
 /** 一个操作对着谁：需求，或需求下的某个子任务。 */
 export interface ActionTarget {
@@ -67,7 +73,7 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
  * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。暂停了的单不再给「暂停」（后端也回 409 already_paused）；
  * 没暂停的「继续」也一直给出来：停下等人（碰到问题自己停的）也是点它，由后端判断（没停着就没有收信的）。
  * 已叫停的只给「重做」。挂起的工作流还在跑，按钮也给，引擎会拒绝并说明先叫停。做完、失败不给。
- * 任务页（routes/task.tsx）和首页看板的卡片都从这里取。
+ * 任务页、看板侧边详情、悬停条、右键、手机列表、快捷键都经 ActionButtons / useTargetActions / shortcutAction 取这一份。
  */
 export function availableActions(target: ActionTarget): UiAction[] {
   if (target.sub) return [];
@@ -219,4 +225,52 @@ export function useTaskActions(): TaskActionsApi {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('缺少 TaskActionsProvider');
   return ctx;
+}
+
+export interface RunnableAction {
+  action: UiAction;
+  def: ActionDef;
+  run: () => void;
+}
+
+/** 这一处该画的动作，带上点了怎么发。没有对象、或这一状态下没有动作，就是空的。 */
+export function useTargetActions(target: ActionTarget | undefined): RunnableAction[] {
+  const { trigger } = useTaskActions();
+  if (!target) return [];
+  return availableActions(target).map((action) => ({
+    action,
+    def: ACTIONS[action],
+    run: () => trigger(action, target),
+  }));
+}
+
+/** 任务页和看板侧边详情上的一排字按钮。没有该画的动作时什么都不画。 */
+export function ActionButtons({ target, className }: { target: ActionTarget; className?: string }) {
+  const entries = useTargetActions(target);
+  if (!entries.length) return null;
+  return (
+    <div className={cn('flex flex-wrap items-center gap-1.5', className)} data-task-actions>
+      {entries.map(({ action, def, run }) => {
+        const Icon = def.icon;
+        return (
+          <Button
+            key={action}
+            size="sm"
+            variant="outline"
+            className={cn('h-8', def.danger && 'text-ink-fail')}
+            onClick={run}
+          >
+            <Icon />
+            {def.label}
+          </Button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 看板上选中卡片后按的那个键对应哪个动作。对不上（或这一状态下不给）就是 undefined。 */
+export function shortcutAction(target: ActionTarget, key: string): UiAction | undefined {
+  const upper = key.toUpperCase();
+  return availableActions(target).find((action) => ACTIONS[action].key === upper);
 }

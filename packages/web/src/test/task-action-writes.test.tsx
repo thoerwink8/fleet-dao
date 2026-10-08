@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // 快捷操作（暂停、继续、叫停、重做）会改服务端状态：点了发什么请求、成功说什么、失败时必须把后端的原因
 // 弹出来（toast.error），不吞错、不冒充成功；叫停、暂停、重做先确认。
+// 按钮就是页面上那一份 ActionButtons（任务页、看板侧边详情用它；手机列表的菜单另有 page-actions.test.tsx）。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -17,7 +18,7 @@ vi.mock('sonner', () => ({ toast, Toaster: () => null }));
 import { ApiError } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { BoardTask } from '../api/types';
-import { type ActionTarget, targetOf, useTaskActions } from '../components/task-actions';
+import { ActionButtons, type ActionTarget, targetOf } from '../components/task-actions';
 import { renderApp } from './harness';
 
 beforeEach(() => {
@@ -25,27 +26,27 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-const ACTIONS = ['pause', 'resume', 'stop', 'redo'] as const;
+const LABEL = { pause: '暂停', resume: '继续', stop: '叫停', redo: '重做' } as const;
 
-/** 每个快捷操作一个按钮，点了就 trigger（真页面的入口各处不同，这里只测操作本身）。 */
+/** 页面上的那一排按钮（做完、失败的不画；已叫停只画重做）。 */
 function Buttons({ target }: { target: ActionTarget }) {
-  const { trigger } = useTaskActions();
-  return (
-    <div>
-      {ACTIONS.map((a) => (
-        <button key={a} type="button" onClick={() => trigger(a, target)}>
-          do-{a}
-        </button>
-      ))}
-    </div>
-  );
+  return <ActionButtons target={target} />;
 }
 
-const press = (action: (typeof ACTIONS)[number]) =>
-  fireEvent.click(screen.getByRole('button', { name: `do-${action}` }));
+const press = (action: keyof typeof LABEL) =>
+  fireEvent.click(screen.getByRole('button', { name: LABEL[action] }));
 
 async function board(api: MockApi): Promise<BoardTask[]> {
   return (await api.board('r-orbit')).tasks;
+}
+
+/** 还能暂停 / 继续 / 叫停的一张（做完、叫停、失败的页面上不画这些按钮）。 */
+async function liveTask(api: MockApi): Promise<BoardTask> {
+  const task = (await board(api)).find(
+    (t) => t.state !== 'done' && t.state !== 'stopped' && t.state !== 'failed',
+  );
+  if (!task) throw new Error('没有还能操作的任务');
+  return task;
 }
 
 /** 假后端：taskAction 用 spy 记下请求（默认成功）。 */
@@ -64,8 +65,7 @@ const confirmPause = (name = '做完这一段再停') =>
 describe('暂停（#820 片 3）：先选怎么停，再发请求', () => {
   const open = async () => {
     const { api, taskAction } = backend();
-    const task = (await board(api))[0];
-    if (!task) throw new Error('没有任务');
+    const task = await liveTask(api);
     renderApp(<Buttons target={targetOf(task)} />, { api });
     press('pause');
     expect(await screen.findByText(`暂停 #${task.issueNumber}？`)).toBeTruthy();
@@ -115,8 +115,7 @@ describe('暂停（#820 片 3）：先选怎么停，再发请求', () => {
 describe('继续：点了就发请求，成功、失败都有话说', () => {
   test('继续：发 {action:resume}，成功提示没有多余的说明', async () => {
     const { api, taskAction } = backend();
-    const task = (await board(api))[0];
-    if (!task) throw new Error('没有任务');
+    const task = await liveTask(api);
     renderApp(<Buttons target={targetOf(task)} />, { api });
     press('resume');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
@@ -127,8 +126,7 @@ describe('继续：点了就发请求，成功、失败都有话说', () => {
   test('【故意造出的失败】继续被后端拒（409）：弹「继续没成功」和后端的原因，不弹成功', async () => {
     const { api, taskAction } = backend();
     taskAction.mockRejectedValueOnce(FAILED);
-    const task = (await board(api))[0];
-    if (!task) throw new Error('没有任务');
+    const task = await liveTask(api);
     renderApp(<Buttons target={targetOf(task)} />, { api });
     press('resume');
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
@@ -139,8 +137,7 @@ describe('继续：点了就发请求，成功、失败都有话说', () => {
   test('【故意造出的失败】断网（不是 ApiError 的错误）也照实弹出来', async () => {
     const { api, taskAction } = backend();
     taskAction.mockRejectedValueOnce(new TypeError('Failed to fetch'));
-    const task = (await board(api))[0];
-    if (!task) throw new Error('没有任务');
+    const task = await liveTask(api);
     renderApp(<Buttons target={targetOf(task)} />, { api });
     press('resume');
     await waitFor(() =>
@@ -152,8 +149,7 @@ describe('继续：点了就发请求，成功、失败都有话说', () => {
 describe('叫停：先确认再发请求', () => {
   const open = async () => {
     const { api, taskAction } = backend();
-    const task = (await board(api))[0];
-    if (!task) throw new Error('没有任务');
+    const task = await liveTask(api);
     renderApp(<Buttons target={targetOf(task)} />, { api });
     press('stop');
     expect(await screen.findByText(`叫停 #${task.issueNumber}？`)).toBeTruthy();

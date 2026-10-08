@@ -13,7 +13,7 @@ import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { StatusChip } from '../components/status';
-import { ACTIONS, type ActionTarget, availableActions, useTaskActions } from '../components/task-actions';
+import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
 import { UsagePanel } from '../components/usage';
@@ -21,7 +21,6 @@ import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { useShownError } from '../lib/shown-error';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
-import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
@@ -63,39 +62,20 @@ function Header({ d, now }: { d: TaskDetail; now: number }) {
 }
 
 /**
- * 暂停、继续、叫停（#820 片 3，#856 第 1 处）：和首页看板上同一份动作定义（components/task-actions.tsx），点了发到后端
- * POST /api/tasks/:taskId/actions。做完、失败的不画。已叫停的只画「重做」。叫停不能恢复，要再做得点「重做」。
+ * 暂停、继续、叫停、重做（#820 片 3 已接到这一页，#856 第 1 处核对后仍用这一份 ActionButtons）。
+ * 点了发 POST /api/tasks/:taskId/actions。做完、失败的不画。已叫停的只画「重做」。
  */
-function ActionButtons({ d }: { d: TaskDetail }) {
-  const { trigger } = useTaskActions();
-  const target: ActionTarget = {
-    taskId: d.task.id,
-    issueNumber: d.task.issueNumber,
-    title: d.task.title,
-    state: d.task.state,
-    paused: d.task.paused,
-  };
-  const actions = availableActions(target);
-  if (!actions.length) return null;
+function TaskActionBar({ d }: { d: TaskDetail }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5" data-task-actions>
-      {actions.map((a) => {
-        const def = ACTIONS[a];
-        const Icon = def.icon;
-        return (
-          <Button
-            key={a}
-            size="sm"
-            variant="outline"
-            className={cn('h-8', def.danger && 'text-ink-fail')}
-            onClick={() => trigger(a, target)}
-          >
-            <Icon />
-            {def.label}
-          </Button>
-        );
-      })}
-    </div>
+    <ActionButtons
+      target={{
+        taskId: d.task.id,
+        issueNumber: d.task.issueNumber,
+        title: d.task.title,
+        state: d.task.state,
+        paused: d.task.paused,
+      }}
+    />
   );
 }
 
@@ -211,7 +191,7 @@ export default function TaskPage() {
       description={d ? <Header d={d} now={now} /> : undefined}
       actions={
         <>
-          {d ? <ActionButtons d={d} /> : null}
+          {d ? <TaskActionBar d={d} /> : null}
           <Back />
         </>
       }

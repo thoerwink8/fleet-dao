@@ -47,7 +47,7 @@ import { type Tone, toneLabel } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { useRemoteView } from '../../node-notice';
 import { StatusDot } from '../../status';
-import { ACTIONS, availableActions, useTaskActions } from '../../task-actions';
+import { shortcutAction, useTaskActions } from '../../task-actions';
 import { useTheme } from '../../theme-provider';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../ui/dialog';
@@ -510,7 +510,7 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
     const item = itemOf(sel.data);
     const target = item ? targetOfItem(item, remote) : undefined;
     if (!target) return;
-    const hit = availableActions(target).find((a) => ACTIONS[a].key === key.toUpperCase());
+    const hit = shortcutAction(target, key);
     if (hit) {
       e.preventDefault();
       trigger(hit, target);
