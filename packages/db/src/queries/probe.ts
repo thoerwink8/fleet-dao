@@ -1,6 +1,7 @@
 // 路由探针（design 第九节「路由探针」）：读每条路由探得了探不了的事实，写一条路由的结论。
 // routes.alive 只由探针和熔断写：这里是探针那一半。库里约束 alive 为真时结论必须是 ok，不许拿默认值、手改冒充在线。
 import type { BillingKind, HostId, OrgKind, RouteProbeState } from '@fleet-dao/shared';
+import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { asc, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -15,8 +16,23 @@ import {
 } from '../schema/index.ts';
 import { noteRouteProbed } from './channel-fallback.ts';
 
-/** 每条路由留下的历史条数：渠道状态页的柱条就是这么多格。 */
-export const ROUTE_PROBE_HISTORY_KEEP = 60;
+/** 每条路由留下的历史条数：和渠道状态页一条条带的格数是同一个数（shared 的 PROBE_HISTORY_SLOTS）。 */
+export const ROUTE_PROBE_HISTORY_KEEP = PROBE_HISTORY_SLOTS;
+
+/** 「用时 N 秒」：老结论只写在 probe_detail 里，回填时把它还原成毫秒。认不出、装不进整数列就空着。 */
+const LATENCY_SEC = /用时\s*(\d+)\s*秒/;
+const DURATION_MS_MAX = 2_147_483_647;
+
+export function durationMsFromProbeDetail(detail: string | null): number | null {
+  if (!detail) return null;
+  const matched = LATENCY_SEC.exec(detail);
+  if (!matched?.[1]) return null;
+  const seconds = Number(matched[1]);
+  if (!Number.isSafeInteger(seconds) || seconds < 0) return null;
+  const ms = seconds * 1000;
+  if (ms > DURATION_MS_MAX) return null;
+  return ms;
+}
 /** 请求原文、响应原文、失败原因的长度上限。超了截断，并在末尾标明原文多长。 */
 export const ROUTE_PROBE_HISTORY_TEXT_MAX = 4_000;
 
@@ -180,6 +196,89 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
     await noteRouteProbed(tx, { routeId: w.routeId, state: w.state, at: w.at });
     return 'saved';
   });
+}
+
+export interface ProbeHistoryJoined {
+  id: number;
+  routeId: string;
+  channelId: string;
+  probedAt: Date;
+  result: RouteProbeHistoryResult;
+  durationMs: number | null;
+  failureReason: string | null;
+  requestText: string | null;
+  responseText: string | null;
+}
+
+/**
+ * 老结论还没进历史表时补一条（路由上的 probe_state / probed_at / probe_detail）。
+ * 已经有历史的路由不动。耗时只从「用时 N 秒」还原，请求和响应原文老列里没有，写空。
+ * 同一事务里加锁，免得两个人同时打开页面各补一条。回补了几条。
+ */
+export async function backfillProbeHistoryFromRoutes(db: Db): Promise<number> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(11391312)`);
+    const have = await tx.selectDistinct({ routeId: routeProbeHistory.routeId }).from(routeProbeHistory);
+    const known = new Set(have.map((row) => row.routeId));
+    const listed = await tx
+      .select({
+        id: routes.id,
+        probeState: routes.probeState,
+        probedAt: routes.probedAt,
+        probeDetail: routes.probeDetail,
+      })
+      .from(routes);
+    const missing = listed.filter(
+      (row): row is typeof row & { probeState: RouteProbeState; probedAt: Date } =>
+        row.probeState !== null && row.probedAt !== null && !known.has(row.id),
+    );
+    if (missing.length === 0) return 0;
+    await tx.insert(routeProbeHistory).values(
+      missing.map((row) => {
+        const result = historyResultOf(row.probeState);
+        const detail = row.probeDetail?.trim() ? clipProbeText(row.probeDetail) : '';
+        return {
+          routeId: row.id,
+          probedAt: row.probedAt,
+          result,
+          durationMs: durationMsFromProbeDetail(row.probeDetail),
+          // 通过没有失败原因。不通、没探沿用老结论的原文；空的写一句，免得整批回填被约束打回。
+          failureReason: result === 'passed' ? null : detail || '（回填时这条老结论没有原因）',
+          requestText: null,
+          responseText: null,
+        };
+      }),
+    );
+    return missing.length;
+  });
+}
+
+/**
+ * 还在的路由的全部探针历史，旧的在前（同一时刻先写入的在前），带上渠道。
+ * 路由已经删了的历史不在这里：页面按渠道画，删了的路由归不到渠道上。
+ * 一条都没有：回空数组（还没写下过结论，也没有能回填的老结论）。
+ * 库读不到：抛错，不回空数组冒充没有历史。
+ */
+export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined[]> {
+  try {
+    return await db
+      .select({
+        id: routeProbeHistory.id,
+        routeId: routeProbeHistory.routeId,
+        channelId: routes.channelId,
+        probedAt: routeProbeHistory.probedAt,
+        result: routeProbeHistory.result,
+        durationMs: routeProbeHistory.durationMs,
+        failureReason: routeProbeHistory.failureReason,
+        requestText: routeProbeHistory.requestText,
+        responseText: routeProbeHistory.responseText,
+      })
+      .from(routeProbeHistory)
+      .innerJoin(routes, eq(routes.id, routeProbeHistory.routeId))
+      .orderBy(asc(routeProbeHistory.probedAt), asc(routeProbeHistory.id));
+  } catch (err) {
+    throw new Error(`读不到探针历史（route_probe_history）：${errMessage(err)}`, { cause: err });
+  }
 }
 
 /**

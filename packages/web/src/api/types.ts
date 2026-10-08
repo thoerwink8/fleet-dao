@@ -55,6 +55,7 @@ import type {
   RepoDispatchResponse,
   RepoSchema,
   RouteEffortSchema,
+  RouteProbeHistoryResponse,
   RouteProbeNowRequest,
   RouteProbeNowResponse,
   RouteProbeRequestSchema,
@@ -138,6 +139,10 @@ export type LivenessFact = z.infer<typeof LivenessFactSchema>;
 
 /** 渠道状态页的立即探测（驾驶舱改版 2026-10-07）：最近点过的、引擎接没接、每条的结论。 */
 export type RouteProbeStatus = z.infer<typeof RouteProbeStatusResponse>;
+/** 探针真历史（#1139）：每个渠道近 60 次，或没查成。 */
+export type RouteProbeHistory = z.infer<typeof RouteProbeHistoryResponse>;
+export type ProbeHistoryChannel = Extract<RouteProbeHistory, { state: 'ok' }>['channels'][number];
+export type ProbeHistoryCell = ProbeHistoryChannel['cells'][number];
 export type RouteProbeRequest = z.infer<typeof RouteProbeRequestSchema>;
 export type RouteProbeResult = z.infer<typeof RouteProbeResultSchema>;
 export type RouteProbeNowBody = z.input<typeof RouteProbeNowRequest>;

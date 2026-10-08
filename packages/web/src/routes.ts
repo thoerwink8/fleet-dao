@@ -14,7 +14,7 @@ export default [
     route('changelog', 'routes/changelog.tsx'),
     // 路由两层每一层现在活着吗（#574）
     route('routing', 'routes/routing.tsx'),
-    // 渠道状态（#1087）：按供应商聚合的卡，左边看近 60 次柱条、点开看每条的 request/response。
+    // 渠道状态（#1087、#1139）：每个渠道一张卡，近 60 次格子，点开看那一次的耗时和原文。
     route('routing/status', 'routes/routing-status.tsx'),
     // 每条路由起会话的思考档位（#470）
     route('efforts', 'routes/efforts.tsx'),

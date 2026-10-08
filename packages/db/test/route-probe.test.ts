@@ -3,8 +3,10 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { toRoute } from '../src/domain-map.ts';
 import {
+  backfillProbeHistoryFromRoutes,
   ROUTE_PROBE_HISTORY_KEEP,
   ROUTE_PROBE_HISTORY_TEXT_MAX,
+  readProbeHistoryJoined,
   readRouteProbeHistory,
   routeProbeTargets,
   saveRouteProbe,
@@ -369,8 +371,55 @@ describe('探针历史', () => {
       const err = await readRouteProbeHistory(t.db, 'car', 10).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain('route_probe_history');
+      await expect(readProbeHistoryJoined(t.db)).rejects.toThrow(/读不到探针历史/);
     } finally {
       await t.client.exec('alter table route_probe_history_unreadable rename to route_probe_history');
     }
+  });
+
+  it('老结论回填一条：耗时从「用时 N 秒」还原，再跑一次不重复；按渠道读得回', async () => {
+    await t.db
+      .update(routes)
+      .set({
+        alive: true,
+        probeState: 'ok',
+        probedAt: NOW,
+        probeDetail: '答上了：OK · 用时 9 秒',
+      })
+      .where(eq(routes.id, 'car'));
+    await addRoute(t.db, {
+      id: 'meter',
+      channelId: 'api-metered',
+      poolId: 'metered',
+      modelId: 'kimi-k3',
+      alive: false,
+    });
+    await t.db
+      .update(routes)
+      .set({ probeState: 'skipped', probedAt: at(1), probeDetail: '按量计费，不自动探' })
+      .where(eq(routes.id, 'meter'));
+
+    expect(await backfillProbeHistoryFromRoutes(t.db)).toBe(2);
+    expect(await backfillProbeHistoryFromRoutes(t.db)).toBe(0);
+
+    const joined = await readProbeHistoryJoined(t.db);
+    expect(joined).toMatchObject([
+      {
+        routeId: 'car',
+        channelId: 'claude-subscription',
+        result: 'passed',
+        durationMs: 9000,
+        failureReason: null,
+        requestText: null,
+        responseText: null,
+      },
+      {
+        routeId: 'meter',
+        channelId: 'api-metered',
+        result: 'not_probed',
+        durationMs: null,
+        failureReason: '按量计费，不自动探',
+      },
+    ]);
   });
 });

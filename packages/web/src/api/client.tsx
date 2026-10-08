@@ -37,6 +37,7 @@ import type {
   ReleaseRequestResult,
   Repo,
   RepoDispatch,
+  RouteProbeHistory,
   RouteProbeNowBody,
   RouteProbeNowResult,
   RouteProbeStatus,
@@ -107,6 +108,8 @@ export interface FleetApi {
   routeProbeStatus(): Promise<RouteProbeStatus>;
   /** 立即探测：routeIds 不给 = 全部路由。引擎关着 409、没连上 503（消息写明是哪样）。 */
   routeProbeNow(body: RouteProbeNowBody): Promise<RouteProbeNowResult>;
+  /** 探针真历史（#1139）。引擎关着也读得到；库读不到 state=unreadable，why 写没查成。 */
+  routeProbeHistory(): Promise<RouteProbeHistory>;
   /** 每个模型下每条路由起会话的思考档位（#470）。 */
   routingEfforts(): Promise<RoutingEfforts>;
   /** 改一条路由的思考档位：effort 写 null = 回到没配（默认档）；expected 是改之前看到的，对不上 409。 */
@@ -189,6 +192,7 @@ export const keys = {
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
   routeProbe: ['route-probe'] as const,
+  probeHistory: ['probe-history'] as const,
   pools: ['pools'] as const,
   poolHolds: ['pool-holds'] as const,
   jobs: ['jobs'] as const,
@@ -342,9 +346,20 @@ export function useRouteProbeStatus() {
     if (before && [...finished].some((id) => !before.has(id))) {
       qc.invalidateQueries({ queryKey: keys.routing });
       qc.invalidateQueries({ queryKey: keys.routingLayers });
+      qc.invalidateQueries({ queryKey: keys.probeHistory });
     }
   }, [data, qc]);
   return query;
+}
+
+/** 探针真历史（#1139）。和路由目录一样 30 秒拉一次：探针不推送，引擎关着这一份照样读。 */
+export function useProbeHistory() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.probeHistory,
+    queryFn: () => api.routeProbeHistory(),
+    refetchInterval: 30_000,
+  });
 }
 
 /** 点「立即探测」：成了马上重拉现状（页面立刻看到排队）；没成的错误原样交给页面（引擎关着、没连上各有一句话）。 */

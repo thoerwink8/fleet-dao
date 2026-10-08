@@ -6,7 +6,7 @@
 // - 持续状态条有问题也用提示色，不伪装成失败。
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MotionGlobalConfig } from 'motion/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -28,6 +28,9 @@ import { useHome } from '../src/api/client';
 
 // 看板详情从右边滑进来（motion）：happy-dom 里卸载时取消动画会抛一个没人接的 AbortError，测试里不放动画
 MotionGlobalConfig.skipAnimations = true;
+
+// 画布按需加载，ELK 排完版才挂节点。findBy / waitFor 默认只等 1 秒，CI 上第一次排版会超过。
+configure({ asyncUtilTimeout: 10_000 });
 
 afterEach(cleanup);
 
