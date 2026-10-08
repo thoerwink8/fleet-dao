@@ -1087,3 +1087,141 @@ describe('mirrorFileDiff：生产的补读', () => {
     expect(order).toEqual(['main', 'branch', 'diff:b...a:x.json']);
   });
 });
+
+/** 会话退出 1，终帧和 stderr 都是这句。令牌样字符串要能被脱敏认出来。 */
+const TOKEN_LIKE = 'sk-fakefakefake1';
+
+function crashed(detail: string, stderrTail = detail): HostReport {
+  return report('', {
+    facts: {
+      exitCode: 1,
+      terminal: { isError: true, detail },
+      quotaExhausted: false,
+    } as RunFacts,
+    stderrTail,
+  });
+}
+
+describe('验收会话撞上游临时故障：等一会儿再验，认不出就换下一条路由', { timeout: 30_000 }, () => {
+  it('503 容量满 → retry，不停下，只起了这一条路由', async () => {
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      driverRun: async () => crashed('gpt-6.1-sol 当前容量已满（503 Service Unavailable）'),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.afterSeconds).toBeGreaterThan(0);
+    expect(got.retry?.reason).toMatch(/容量已满|路由繁忙/);
+    expect(r.specs).toHaveLength(1);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+    expect(r.recorded[0]?.failureReason).toContain('当前容量已满');
+  });
+
+  it('429 限流 → retry，不停下', async () => {
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      driverRun: async () => crashed('429 Too Many Requests'),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.reason).toMatch(/限流/);
+    expect(got.retry?.afterSeconds).toBeGreaterThan(0);
+    expect(r.specs).toHaveLength(1);
+  });
+
+  it('连接被重置 → retry，不停下', async () => {
+    const r = rig({
+      driverRun: async () => crashed('上游把连接被重置了'),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.reason).toMatch(/网络不通|连接被重置/);
+    expect(r.specs).toHaveLength(1);
+  });
+
+  it('流中断（stream disconnected before completion）→ retry，不停下', async () => {
+    const r = rig({
+      driverRun: async () => crashed('stream disconnected before completion: error sending request'),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.afterSeconds).toBeGreaterThan(0);
+    expect(r.specs).toHaveLength(1);
+  });
+
+  it('此刻派不出（几家里有的没空位、有的一条路由都没有）→ retry 等一会儿，不是 unavailable，没起会话', async () => {
+    const r = rig({
+      picks: {
+        gpt: { ok: false, waitFor: 'slot', detail: 'cursor 池并发满了（4/4）', retryAfterSeconds: 20 },
+        claude: { ok: false, waitFor: 'none', detail: '没有路由' },
+        deepseek: { ok: false, waitFor: 'slot', detail: 'cursor 池并发满了（4/4）' },
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: 20 });
+    expect(got.retry?.reason).toContain('cursor 池并发满了');
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+  });
+
+  it('认不出的失败 → 换下一条家族不同于作者的路由，验成', async () => {
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      driverRun: async (_spec, _hooks, n) => (n === 1 ? crashed('xyzzy-no-rule-match') : report(MODEL_PASS)),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ pass: true, problems: [] });
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toBeUndefined();
+    expect(r.recorded.map((row) => row.routeId)).toEqual(['route-gpt', 'route-grok']);
+    expect(r.recorded.map((row) => row.routeId)).not.toContain('route-claude');
+    expect(r.posted.at(-1)?.state).toBe('success');
+  });
+
+  it('所有路由都失败 → 停下，说明列出每条路由和报错尾巴，不含令牌', async () => {
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      driverRun: async (_spec, _hooks, n) =>
+        crashed(`xyzzy-no-rule-match-${n === 1 ? 'gpt' : 'grok'} ${TOKEN_LIKE}`),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.retry).toBeUndefined();
+    expect(got.unavailable).toContain('route-gpt');
+    expect(got.unavailable).toContain('route-grok');
+    expect(got.unavailable).toContain('xyzzy-no-rule-match-gpt');
+    expect(got.unavailable).toContain('xyzzy-no-rule-match-grok');
+    expect(got.unavailable).not.toContain(TOKEN_LIKE);
+    expect(got.unavailable).toContain('<密钥>');
+    expect(r.recorded.map((row) => row.routeId)).toEqual(['route-gpt', 'route-grok']);
+  });
+
+  it('failure_reason 带报错尾巴（脱敏后最多 600 字），不含令牌样字符串', async () => {
+    const padding = Array.from({ length: 120 }, (_, i) => `pad${i}`).join(' ');
+    const detail = `${padding} 当前容量已满（503 Service Unavailable） ${TOKEN_LIKE}`;
+    const r = rig({ driverRun: async () => crashed(detail) });
+    const got = await r.run(r.input(), ctx());
+    expect(got.retry).toBeDefined();
+    const reason = r.recorded[0]?.failureReason ?? '';
+    expect(reason.startsWith('exit=1 killed=false；')).toBe(true);
+    const tail = reason.slice('exit=1 killed=false；'.length);
+    expect(tail.length).toBeGreaterThan(0);
+    expect(tail.length).toBeLessThanOrEqual(600);
+    expect(reason).toContain('当前容量已满');
+    expect(reason).not.toContain(TOKEN_LIKE);
+    expect(reason).not.toContain('pad0');
+    expect(reason).toContain('<密钥>');
+  });
+
+  it('【故意造出的失败】容量满被判成 unavailable 时这条该红：应是 retry、不停下', async () => {
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      driverRun: async () => crashed('gpt-6.1-sol 当前容量已满（503 Service Unavailable）'),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toBeDefined();
+  });
+});

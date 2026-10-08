@@ -327,8 +327,15 @@
     {
       "idx": 46,
       "version": "7",
-      "when": 1791474308021,
-      "tag": "0046_lyrical_magneto",
+      "when": 1791475875822,
+      "tag": "0046_manual_models_executor",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791477880849,
+      "tag": "0047_discovery_variants_gone",
       "breakpoints": true
     }
   ]

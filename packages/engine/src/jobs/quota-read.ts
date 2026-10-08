@@ -74,7 +74,13 @@ export interface QuotaReadJobDeps {
 
 /** 名册一步的结果。跟 adapters 的读法、db 的写入同一形状，这里不依赖那两个包的类型。 */
 export type ChannelModelRosterResult =
-  | { ok: true; channelId: string; models: readonly string[] }
+  | {
+      ok: true;
+      channelId: string;
+      models: readonly string[];
+      /** 名册帧上的执行体。没有就由写入方按前缀判。 */
+      executors?: readonly { modelKey: string; executor: string }[];
+    }
   | { ok: false; channelId: string; error: { code: string; message: string } };
 
 /** 这一轮整个没跑成（配置读不到、读取整体抛了）：结局已记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */

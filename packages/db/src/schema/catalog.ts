@@ -145,6 +145,11 @@ export const routes = pgTable(
     variantContext: text('variant_context'),
     /** 渠道最近一次读成的名册里已经没有这条路由（#1355）。不删。再次出现就清掉。 */
     goneAt: timestamp('gone_at', tz),
+    /**
+     * Mirasim 这条路由该起的执行体（名册帧的 agent，或按上游串前缀判出来的）。
+     * 空 = 还没盖过，选路当时按前缀现判。字面「执行体未知」不是执行体名：选路不派。
+     */
+    executor: text('executor'),
   },
   (t) => [
     foreignKey({
@@ -179,6 +184,7 @@ export const routes = pgTable(
       'routes_variant_context_nonempty',
       sql`${t.variantContext} is null or length(btrim(${t.variantContext})) > 0`,
     ),
+    check('routes_executor_nonempty', sql`${t.executor} is null or length(btrim(${t.executor})) > 0`),
   ],
 );
 

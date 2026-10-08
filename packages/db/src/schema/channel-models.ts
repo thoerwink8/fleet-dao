@@ -15,6 +15,8 @@ export const channelSeenModels = pgTable(
       .references(() => channels.id),
     /** 渠道自己的模型串，跟路由的上游串、别名原样比，不归一。 */
     modelKey: text('model_key').notNull(),
+    /** 名册 = 只读命令读到的；手工 = 没有名册命令的渠道由人登记的。自动再读到时不改这一列。 */
+    source: text('source').notNull().default('名册'),
     firstSeenAt: timestamp('first_seen_at', tz).notNull(),
     lastSeenAt: timestamp('last_seen_at', tz).notNull(),
   },
@@ -22,6 +24,7 @@ export const channelSeenModels = pgTable(
     primaryKey({ name: 'channel_seen_models_pk', columns: [t.channelId, t.modelKey] }),
     check('channel_seen_models_key_nonempty', sql`length(btrim(${t.modelKey})) > 0`),
     check('channel_seen_models_last_after_first', sql`${t.lastSeenAt} >= ${t.firstSeenAt}`),
+    check('channel_seen_models_source_known', sql`${t.source} in ('名册', '手工')`),
   ],
 );
 

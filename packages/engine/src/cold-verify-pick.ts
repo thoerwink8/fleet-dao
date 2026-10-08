@@ -99,6 +99,8 @@ export function familyPickerFrom(
   uiWork = false,
 ): (taskId: string) => FamilyPickDeps {
   const all = order.map((f) => f.trim()).filter((f) => f !== '');
+  // 这一轮已经挑中并交出去的路由：同一族再问时避开，好换这一族的下一条。没派成的不记。
+  const skipped: string[] = [];
   return (taskId) => ({
     async pickRouteForFamily(family) {
       const want = family.trim().toLowerCase();
@@ -106,8 +108,7 @@ export function familyPickerFrom(
         taskId,
         stage,
         avoidFamilies: all.filter((f) => f.toLowerCase() !== want),
-        // 只按族挑一条：这些字段都是「这一步要什么」的其余部分，冷调用这一遍不挑它们（空 = 不管）。
-        avoidRouteIds: [],
+        avoidRouteIds: [...skipped],
         avoidPoolIds: [],
         avoidModelIds: [],
         ...(uiWork ? { uiWork: true } : {}),
@@ -117,6 +118,7 @@ export function familyPickerFrom(
         return undefined;
       }
       if (got.route.family.trim().toLowerCase() !== want) return undefined;
+      skipped.push(got.route.routeId);
       return got.route;
     },
   });

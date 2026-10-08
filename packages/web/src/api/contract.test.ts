@@ -22,6 +22,9 @@ const WEB_NOT_USED: Record<string, string> = {
   addPurposeModel: '配置层页面还没做（#1354 第五片），这片只做后端',
   removePurposeModel: '配置层页面还没做（#1354 第五片），这片只做后端',
   setPurposeModelEffort: '配置层页面还没做（#1354 第五片），这片只做后端',
+  // 名册差集页只展示这一句，这一片不在页面上放登记按钮
+  registerChannelModel: '手工登记的写口已有，页面这一片不放按钮',
+  revokeChannelModel: '撤销手工登记的写口已有，页面这一片不放按钮',
 };
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch

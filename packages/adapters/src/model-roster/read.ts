@@ -66,7 +66,22 @@ async function readOne(
   if (models.length === 0) {
     return rosterFailed(channel.channelId, 'bad_response', '渠道回了空名单，不当成一个模型都没有');
   }
-  return { ok: true, channelId: channel.channelId, models };
+  const keep = new Set(models);
+  const executors: { modelKey: string; executor: string }[] = [];
+  const seen = new Set<string>();
+  for (const row of result.executors ?? []) {
+    const modelKey = row.modelKey.trim();
+    const executor = row.executor.trim();
+    if (!modelKey || !executor || !keep.has(modelKey) || seen.has(modelKey)) continue;
+    seen.add(modelKey);
+    executors.push({ modelKey, executor });
+  }
+  return {
+    ok: true,
+    channelId: channel.channelId,
+    models,
+    ...(executors.length > 0 ? { executors } : {}),
+  };
 }
 
 async function dispatch(
@@ -103,7 +118,12 @@ export async function readMirasimModelRoster(
     ...(req.perAgentMs !== undefined ? { perAgentMs: req.perAgentMs } : {}),
   });
   if (!parsed.ok) return rosterFailed(channelId, parsed.code, parsed.message);
-  return { ok: true, channelId, models: parsed.models };
+  return {
+    ok: true,
+    channelId,
+    models: parsed.models,
+    ...(parsed.executors && parsed.executors.length > 0 ? { executors: parsed.executors } : {}),
+  };
 }
 
 /** cursor-agent models。密钥没放好、二进制不在，分别是 no_credentials、config。 */

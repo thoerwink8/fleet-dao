@@ -3,5 +3,5 @@
 export * from './breaker.ts';
 export * from './classify.ts';
 export type { FailureRule, Kind, RuleHit } from './rules.ts';
-export { matchRule, RULES } from './rules.ts';
+export { isUpstreamBlip, matchRule, RULES } from './rules.ts';
 export * from './types.ts';

@@ -6,9 +6,11 @@
 // 改这里之前必须知道：
 // - 结论只有引擎机器人贴的 cold-verify 才算数：没贴上、贴在旧头上都等于没验。所以开跑前先贴 pending（贴不上就不起会话），
 //   会话跑完贴 success / failure；贴不上抛错，工作流按失败分流处理，不当成验过。
-// - 「做不出来」和「没过」是两回事：读不到 PR 或 diff、diff 太大、没有别家的模型、会话没跑成、结论认不出，一律回 unavailable
-//   （工作流停下报人，不让写代码的会话白改一轮）；只有会话跑成、写出了算挡的问题才回 pass: false 加 problems。
-// - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机）回 retry，工作流隔一会儿再来，不算一轮、不报人。
+// - 「做不出来」和「没过」是两回事：读不到 PR 或 diff、diff 太大、没有别家的模型、认得出原因的会话失败（额度用完、登录失效）、
+//   结论认不出，回 unavailable（工作流停下报人，不让写代码的会话白改一轮）；只有会话跑成、写出了算挡的问题才回 pass: false 加 problems。
+//   认不出原因的会话失败先换验收用途里下一条家族不同于作者的路由再验，都不行才 unavailable，说明里列出试过的路由和报错尾巴。
+// - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机、上游临时故障）回 retry，工作流隔一会儿再来，不算一轮、不报人。
+//   上游临时故障认的是失败分流规则表上标了 blip 的那些（容量满、503、限流、连接被重置），不在这里另写关键词。
 //   选路回「一条能用的都没有」（waitFor 为 none）不算这一类：等也等不来。
 // - PR 的头不是要验的那个了（有人推过新提交）回 headMoved，工作流对新的头重走一遍。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
@@ -475,6 +477,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             seen.admission = true;
             return '机器内存放不下新会话';
           }
+          if (verdict.upstreamRetry) return verdict.upstreamRetry.reason;
           if (
             verdict.session === undefined &&
             waits.length > 0 &&
@@ -508,7 +511,19 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         return { pass: false, problems: [], round, headMoved: seen.headMoved };
       return withUiNote({ pass: false, problems: [], round, unavailable: run.sourceProblem });
     }
-    if (run.wait !== undefined) return { pass: false, problems: [], round, retry: retryFor(run.wait) };
+    if (run.wait !== undefined) {
+      const again = run.verdict?.upstreamRetry;
+      // 上游临时故障的等待秒数在分流表上，不走选路那一档（那一档这时是空的，算出来是无穷）。
+      if (again) {
+        return {
+          pass: false,
+          problems: [],
+          round,
+          retry: { wait: 'slot', reason: again.reason, afterSeconds: again.afterSeconds },
+        };
+      }
+      return { pass: false, problems: [], round, retry: retryFor(run.wait) };
+    }
     const verdict = run.verdict;
     if (verdict === undefined) {
       // 读得到、没在等、也没有结论：不会发生；真发生了是这一层自己的毛病，明说，不当成过

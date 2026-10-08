@@ -117,6 +117,28 @@ describe('路由页：渠道模型表', () => {
     expect(within(section).queryByRole('button')).toBeNull();
   });
 
+  test('手工登记的渠道不报没读成，写靠手工登记、共几个', async () => {
+    renderApp(<RoutingPage />, {
+      route: '/routing?purpose=execute',
+      api: withRoster(
+        layers({
+          modelRoster: {
+            missingFromCatalog: [],
+            goneRoutes: [],
+            failed: [],
+            notYet: [{ channelId: 'xai', channelName: 'Grok 订阅' }],
+            manual: [{ channelId: 'claude-sub', channelName: 'Claude 订阅', count: 2 }],
+          },
+        }),
+      ),
+    });
+    const section = await screen.findByRole('region', { name: '渠道模型表' });
+    expect(section.textContent).toContain('Claude 订阅：这个渠道靠手工登记，共 2 个');
+    expect(section.textContent).not.toContain('Claude 订阅 没读成');
+    expect(section.textContent).toContain('Grok 订阅 还没读过');
+    expect(within(section).queryByRole('button')).toBeNull();
+  });
+
   test('接口没给差集：写没读到，页面上那一句不是「都对得上」', async () => {
     renderApp(<RoutingPage />, {
       route: '/routing?purpose=execute',

@@ -52,13 +52,18 @@ function listedKeys(route: { upstreamModel: string | null; upstreamAliases: read
 /**
  * 一个渠道这一次读成的名单。调用方要包在和名册写入同一笔事务里：这里失败，整笔一起回滚。
  * 新路由不进任何用途，routing_catalog.enabled 写 false。变体写在路由上，不写进起会话的档位列。
+ * 没有名册命令、靠手工登记的渠道（#1371）：给的只是登记过的那几个串，不是完整名单，所以 markGone 要关（不能拿它判别的路由消失），
+ * 登记自己有操作记录，writeAudit 也关。
  */
 export async function discoverChannelModels(
   db: Db,
   channelId: string,
   modelKeys: readonly string[],
   now: Date,
+  options: { markGone?: boolean; writeAudit?: boolean } = {},
 ): Promise<DiscoverResult> {
+  const markGone = options.markGone ?? true;
+  const writeAudit = options.writeAudit ?? true;
   const hostId = HOST_BY_CHANNEL[channelId];
   if (!hostId) throw new Error(`渠道 ${channelId} 没有对应的执行方式，路由挂不上去`);
   const poolRows = await db
@@ -153,22 +158,26 @@ export async function discoverChannelModels(
   }
 
   let goneMarked = 0;
-  for (const route of existing) {
-    if (matched.has(route.id) || route.goneAt) continue;
-    await db.update(routes).set({ goneAt: now }).where(eq(routes.id, route.id));
-    goneMarked += 1;
+  if (markGone) {
+    for (const route of existing) {
+      if (matched.has(route.id) || route.goneAt) continue;
+      await db.update(routes).set({ goneAt: now }).where(eq(routes.id, route.id));
+      goneMarked += 1;
+    }
   }
 
   const counts = { modelsAdded, routesAdded, goneMarked, goneCleared };
-  await db.insert(auditLog).values({
-    at: now,
-    actorKind: 'engine',
-    actorId: 'model-roster',
-    action: 'catalog.discover',
-    target: `channel:${channelId}`,
-    after: counts,
-    reason: '名册读成，自动入库',
-    via: 'engine',
-  });
+  if (writeAudit) {
+    await db.insert(auditLog).values({
+      at: now,
+      actorKind: 'engine',
+      actorId: 'model-roster',
+      action: 'catalog.discover',
+      target: `channel:${channelId}`,
+      after: counts,
+      reason: '名册读成，自动入库',
+      via: 'engine',
+    });
+  }
   return { ...counts, newModelIds };
 }

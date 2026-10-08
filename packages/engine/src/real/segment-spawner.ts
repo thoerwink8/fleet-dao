@@ -205,6 +205,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         ...(deps.sudo ? { sudo: deps.sudo } : {}),
       },
       model: route.upstreamModel ?? route.modelId,
+      ...(route.executor ? { executor: route.executor } : {}),
       // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
       ...(route.effort !== null ? { effort: route.effort } : {}),
       ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),

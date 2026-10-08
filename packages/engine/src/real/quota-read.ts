@@ -21,9 +21,9 @@ import {
   type UsageSource,
 } from '@fleet-dao/adapters/quota';
 import {
+  autoModelRosterChannels,
   type Db,
   finishScheduleRun,
-  MODEL_ROSTER_CHANNELS,
   modelRosterDue,
   type PoolRunUsage,
   poolLastReadOk,
@@ -128,7 +128,7 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
             due: (at: Date) => modelRosterDue(w.db, at),
             read: () =>
               readChannelModelRosters({
-                channels: MODEL_ROSTER_CHANNELS,
+                channels: autoModelRosterChannels(),
                 commands: roster.commands,
                 runCommand: roster.runCommand,
                 ...(roster.env ? { env: roster.env } : {}),
