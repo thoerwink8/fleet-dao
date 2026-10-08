@@ -14,6 +14,19 @@ import type {
 } from '../api/types';
 import { TIME } from './format';
 import { type Failover, failoverOf } from './provider-status';
+import {
+  classifyProbe,
+  classifyRoute,
+  countKinds,
+  type KindCounts,
+  matchesFilter,
+  type RouteStateKind,
+  rollupKind,
+  routeStateLabel,
+  routeStateTone,
+  routeStateWhy,
+  type StateFilter,
+} from './route-state';
 import type { Tone } from './status';
 
 /** 探针的结论超过「探测间隔 + 这么多分钟」还没更新，卡片就改成「检测中断」（mirastatus 同一个口径：不拿旧绿灯掩盖中断）。 */
@@ -57,6 +70,12 @@ export interface ChannelCard {
   fallback?: string;
   /** 运行中失败被标不可用（#1118）：为什么、顺延到谁、下次探测；没出过事或已恢复没有。 */
   failover?: Failover;
+  /** 这个渠道整体是哪一种（#1366，lib/route-state.ts）：故障、已关、未被用途使用……「死」不再把它们混在一起。 */
+  kind: RouteStateKind;
+  /** 渠道下每条路由各是哪一种，数出来的。 */
+  counts: KindCounts;
+  /** 渠道下是不是有该修的路由（整个渠道故障，或部分路不通）：告警口径、故障筛选只看它。 */
+  hasFault: boolean;
 }
 
 const LATENCY = /用时\s*(\d+)\s*秒/;
@@ -121,6 +140,56 @@ function collect(
   return { seen, routes };
 }
 
+/** 状态筛选：故障看「有没有该修的路由」（整个渠道故障或部分路故障），其余看渠道整体是哪一种。 */
+export function channelMatchesFilter(c: ChannelCard, filter: StateFilter): boolean {
+  if (filter === 'fault') return c.hasFault;
+  return matchesFilter(c.kind, filter);
+}
+
+/** 已下架的模型：下架时间已过。 */
+function retiredModelIds(models: readonly Model[], now: number): Set<string> {
+  return new Set(
+    models.filter((m) => m.retiredAt !== undefined && Date.parse(m.retiredAt) <= now).map((m) => m.id),
+  );
+}
+
+/**
+ * 目录里每条路由此刻是哪一种（#1366）：后端的「死」拆开。有用途在用的（路由两层里有它）用后端的三件事 + 开关，
+ * 没有用途在用的看探针原始结论；渠道关了、模型下架、整池暂停先说。渠道状态页的路由行和渠道卡共用这一份。
+ */
+export function routeKindMap(
+  routing: { channels: readonly Channel[]; routes: readonly Route[]; models: readonly Model[] },
+  layers: RoutingLayers,
+  now: number,
+  poolHeld: (poolId: string) => boolean = () => false,
+): Map<string, RouteStateKind> {
+  const retired = retiredModelIds(routing.models, now);
+  const enabled = new Map(routing.channels.map((c) => [c.id, c.enabled]));
+  // 路由两层里每条路由的后端结论（同一条路由在几个用途里是同一份）：有它就是有用途在用
+  const layerRoute = new Map<string, RoutingLayerRoute>();
+  for (const purpose of layers.purposes) {
+    for (const model of purpose.models) {
+      for (const r of model.routes) if (!layerRoute.has(r.routeId)) layerRoute.set(r.routeId, r);
+    }
+  }
+  const out = new Map<string, RouteStateKind>();
+  for (const r of routing.routes) {
+    const ctx = {
+      channelEnabled: enabled.get(r.channelId),
+      modelRetired: retired.has(r.modelId),
+      poolHeld: poolHeld(r.poolId),
+    };
+    const lr = layerRoute.get(r.id);
+    out.set(
+      r.id,
+      lr
+        ? classifyRoute(lr, { ...ctx, usedByPurpose: true })
+        : classifyProbe(r.probe, { ...ctx, usedByPurpose: false }),
+    );
+  }
+  return out;
+}
+
 const FIRST_REASON_MAX = 140;
 
 function clip(text: string): string {
@@ -141,39 +210,53 @@ export function buildChannelCards(
   },
   layers: RoutingLayers,
   now: number,
+  /** 账号池整池暂停了吗（路由页、渠道状态页从 usePoolHolds 传）；不给当没有暂停。 */
+  poolHeld: (poolId: string) => boolean = () => false,
 ): ChannelCard[] {
-  const retired = new Set(
-    routing.models
-      .filter((m) => m.retiredAt !== undefined && Date.parse(m.retiredAt) <= now)
-      .map((m) => m.id),
-  );
+  const retired = retiredModelIds(routing.models, now);
   const { seen, routes: active } = collect(layers, retired);
   const rawRoute = new Map(routing.routes.map((r) => [r.id, r]));
+  const kindOf = routeKindMap(routing, layers, now, poolHeld);
+
+  /** 这个渠道下每条路由各是哪一种：「死」拆开，已关、没用、下架、暂停都不是故障。 */
+  const kindsOf = (channel: Channel): RouteStateKind[] =>
+    routing.routes.filter((r) => r.channelId === channel.id).map((r) => kindOf.get(r.id) ?? 'unused');
 
   const cards = routing.channels.map((channel): ChannelCard => {
-    const mine = channel.enabled ? (active.get(channel.id) ?? []) : [];
+    const kinds = kindsOf(channel);
+    const counts = countKinds(kinds);
+    // 暂停的账号池不探，也不算「在用」：它的路由单独记成池暂停
+    const mine = channel.enabled ? (active.get(channel.id) ?? []).filter((r) => !poolHeld(r.poolId)) : [];
     if (!channel.enabled) {
       return {
         channel,
         state: 'off',
         interrupted: false,
-        label: '渠道已下架',
-        tone: 'stop',
-        reason: '目录里这个渠道已下架，选路不派它',
+        label: routeStateLabel.off,
+        tone: routeStateTone.off,
+        reason: '渠道开关关着：选路不派它，不算坏',
         deadRoutes: 0,
         activeRoutes: 0,
+        kind: 'off',
+        counts,
+        hasFault: false,
       };
     }
     if (mine.length === 0) {
+      // 没在用：是人把路由都关了、池暂停、模型下架，还是压根没有用途排它，各是各的词
+      const kind = rollupKind(kinds);
       return {
         channel,
         state: 'idle',
         interrupted: false,
-        label: '没在配的路由里，未探',
-        tone: 'stop',
-        reason: '没有哪个阶段在用这个渠道，不花额度去探；哪个阶段用上它，下一轮就探',
+        label: routeStateLabel[kind],
+        tone: routeStateTone[kind] === 'fail' ? 'stop' : routeStateTone[kind],
+        reason: routeStateWhy[kind],
         deadRoutes: 0,
         activeRoutes: 0,
+        kind,
+        counts,
+        hasFault: false,
       };
     }
 
@@ -201,15 +284,15 @@ export function buildChannelCards(
     let reason: string | undefined;
     if (live.length > 0 && dead.length === 0) {
       state = 'ok';
-      label = '通';
+      label = routeStateLabel.live;
       tone = 'done';
     } else if (live.length > 0) {
       state = 'partial';
-      label = '部分路不通';
+      label = '部分路故障';
       tone = 'stall';
     } else if (dead.length > 0) {
       state = 'down';
-      label = '暂不可用';
+      label = routeStateLabel.fault;
       tone = 'fail';
     } else {
       state = 'unknown';
@@ -242,8 +325,19 @@ export function buildChannelCards(
       label = '检测中断';
       tone = 'stall';
     }
+    const kind: RouteStateKind =
+      state === 'down'
+        ? 'fault'
+        : state === 'unknown'
+          ? probed.length === 0
+            ? 'unprobed'
+            : 'unknown'
+          : 'live';
     return {
       ...(failover ? { failover } : {}),
+      kind,
+      counts,
+      hasFault: state === 'down' || state === 'partial' || counts.fault > 0,
       channel,
       state,
       interrupted,
