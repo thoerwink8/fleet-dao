@@ -600,6 +600,17 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch --all off --reason "<原因>"   # 所有仓一起关（手动用；发版不再自己跑它，#1256）；只许 off
   ```
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻（重设会把已经能派的单变成「开关打开以前开的」）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
+- **关着开关时点名派单**（`fleet-api dispatch-issue`，母单 #1335 第 2 片、#1337；创始人 2026-10-08：「如果按钮不开，可以本机操纵vps派单」「按推荐」）：项目的「让 AI 接活」关着时，本机（指挥官）把某一张单立刻交给法国引擎，不用先把开关打开（打开会让引擎同时去拉别的单）。
+
+  ```
+  # 在本机，经 ssh 到法国以 root 跑（ssh 名字同 france.mjs：FLEET_FRANCE_SSH 或 ~/.fleet-dao/france-ssh 第一行）
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch-issue thoerwink8/fleet-dao 1337'
+  # 就绪度闸没过、确认没问题时（理由写进操作记录）：
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch-issue thoerwink8/fleet-dao 1337 --force --note "创始人口头说先做这张"'
+  ```
+  对这一张单跑一遍和拉单同一份的准入（判法是 `jobs/intake.ts` 导出的 `workflowPathIn`、`prClaimedIssues`、`readTaskBrief` 和 `@fleet-dao/core` 的 `versionGate`、`familyGate`、`localGate`，不复制），过了就建任务行、起任务工作流（和拉单同一个 `start`，编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`，已派过的不会重复派）。本体在引擎包（`packages/engine/src/bin/dispatch-issue.ts`，逻辑在 `jobs/dispatch-issue.ts`）：驾驶舱后端不依赖引擎包，所以 `bin/fleet-api` 见到第一个参数是 `dispatch-issue` 就转给它，其余命令照旧走后端自己的入口；同样换成 fleet 身份、带 `api.env`。**不看**「让 AI 接活」开关，但**引擎总开关关着一律拒**（说明总开关；关着的引擎不起会话，派了也只是排队）。不看容量（同时 6 条的上限是拉单的节流；这是人明说要派的一张）。
+  没过就打印是哪一道、为什么，退出码 1，不起工作流。闸分两类：**硬闸**任何情况下都不放行，`--force` 也不行——不是 issue（PR 号）或已关、作者不在白名单、母单或子单、贴了「本机做」、已有开着的 PR 的「需求」栏挂着它、正文写了 `.github/workflows/` 路径、已派过（含工作流编号用过）、版本号认不出（没查成）、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）；硬闸遇到第一个就停。**就绪度闸**一次说全，`--force` 可以放行：不是当前版本（含未排期）、改动规模是最重档（`decideTierFromModules` 判主力档）、历史失败超限（这张单以前各代任务工作流里失败收场的超过 2 条，顺着代数问 Temporal）。`--force` 必须同时带 `--note "<为什么>"`，反过来 `--note` 不带 `--force` 也拒（退出码 2）。
+  每次都写一条操作记录（`dispatch.issue`，target 是 `issue:<owner/仓>#<号>`，来源记成 engine、`ops:dispatch-issue`，reason 写明谁跑的哪条命令，after 里有 force、note、被 force 放行的闸、结果；派了 ok=true，没派和没查成 ok=false）。读不到（GitHub、Temporal、库）一律打印「没查成」、退出码 1，不当成过了；派出去之后操作记录写不进，会明说「已经派出去了」让人核对。退出码：0 派了；1 没派或没查成；2 参数不对。
   这一段是 Fusion 时代的接活逻辑（design 第九节「在哪能做与接活开关」、`docs/decisions/0003-fusion-flow.md` 第 2、8 条），009/010 完成后按三段一条龙改成「对题 → 动手 → 验收」，落地 PR 连带删改；**先别照这段做**（现行的拉单是 `intake` 那条，见第五节；这段是旧 Fusion 的接活逻辑）。看哪些单因为版本、母单子单、本机做、本机认领没派：`sudo -u fleet psql fleet -c "select delivery_id, received_at, note from github_events where note ~ 'workflow=(unscheduled|not_current_version|version_unreadable|mother_ticket|sub_issue|reserved_local|claimed_local)' order by received_at desc limit 20"`。
 - 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
 
