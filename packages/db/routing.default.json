@@ -33,7 +33,17 @@
       "glm-5.3-flash"
     ],
     "ui": ["grok-4.7", "sonnet-5.5", "opus-5.5", "kimi-k3", "deepseek-flash", "cursor-auto", "glm-5.3-flash"],
-    "judge": ["jev-1.13"]
+    "judge": ["jev-1.13"],
+    "groom": [
+      "sonnet-5.5",
+      "opus-5.5",
+      "gpt-5.6-luna",
+      "kimi-k3",
+      "deepseek-flash",
+      "cursor-auto",
+      "grok-4.7",
+      "glm-5.3-flash"
+    ]
   },
   "models": {
     "sonnet-5.5": [

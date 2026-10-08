@@ -26,6 +26,25 @@ export const LOCAL_LABEL = '本机做';
  */
 export const ENGINE_LABEL = '交给引擎';
 
+/**
+ * 「整理过」（母单 #1335 第 3 片，#1338；指挥官 2026-10-08 补：#1342 发到法国后引擎拉了两张前提已过期的老单）：临时指挥官整理待办时，
+ * 判为「仍成立、适合引擎」的单贴它。开单时间早于「让 AI 接活」打开那一刻的老单，只有贴了它（或「交给引擎」）才进拉单候选
+ * （`packages/engine/src/jobs/intake.ts` 的 `not_groomed`）；开关之后新开的单不需要。
+ */
+export const GROOMED_LABEL = '整理过';
+
+/**
+ * 「要人拍」（同上）：临时指挥官整理待办时见到涉及改标准路径、删数据、花钱、`.github/workflows/` 的单，贴它。
+ * 贴着它的单引擎一律不拉（`intake.ts` 的 `needs_human`）；要交给引擎做，先让人看过、摘掉这个标签。
+ */
+export const HUMAN_DECISION_LABEL = '要人拍';
+
+/**
+ * 「待补」（同上）：临时指挥官判为过期的单只留言建议关闭、贴它，不关；人看过决定关不关、补不补。
+ * 贴着它的单引擎一律不拉（`intake.ts` 的 `groom_pending`）；补好后摘掉。
+ */
+export const GROOM_PENDING_LABEL = '待补';
+
 /** 里程碑名字开头的阶段：「P1 核心闭环」→ 1；不是 P 加数字开头的返回 undefined。旧写法，迁到版本前用。 */
 export function milestonePhase(title: string): number | undefined {
   const m = /^P(\d+)(?:\s|$)/.exec(title.trim());

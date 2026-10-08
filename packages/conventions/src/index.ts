@@ -83,9 +83,18 @@ export {
   USAGE,
 } from './issue-new.ts';
 export {
+  type Candidate as SimilarCandidate,
+  modulePaths,
+  rankSimilar,
+  type SimilarItem,
+} from './issue-similar.ts';
+export {
   currentVersion,
   ENGINE_LABEL,
   FROZEN_LABEL,
+  GROOM_PENDING_LABEL,
+  GROOMED_LABEL,
+  HUMAN_DECISION_LABEL,
   IDLE_LABEL,
   isKindLabel,
   KIND_LABELS,
@@ -147,6 +156,7 @@ export {
   type StandardPath,
   standardFiles,
 } from './standard-paths.ts';
+export { loadStandardPaths } from './standard-paths-file.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';
 export { isTestFile, parseTimings, TIMINGS_FILE, type Timings } from './test-split.ts';
 export {

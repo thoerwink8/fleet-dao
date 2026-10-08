@@ -33,6 +33,8 @@ export const STAGE_NEEDS: Readonly<Record<StageKind, readonly Ability[]>> = {
   review: ['read', 'shell'],
   verify: ['read', 'shell'],
   research: ['read'],
+  // 临时指挥官整理待办：读仓库（只读检出）、读单子，产出结构化清单；不改文件
+  groom: ['read', 'shell'],
 };
 
 export const ABILITY_NAMES: Readonly<Record<Ability, string>> = {

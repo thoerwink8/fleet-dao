@@ -15,13 +15,15 @@ export interface RoutingPurpose {
 
 /**
  * 路由页和 /api 用途列表的顺序和名字。
- * 动手按 execute，界面活按 ui；验收按 verify；Jev 按 judge，单列，标明不是流程里的一段。
+ * 动手按 execute，界面活按 ui；验收按 verify；Jev 按 judge、整理待办按 groom，都单列，标明不是流程里的一段。
  */
 export const ROUTING_PURPOSES = [
   { purpose: 'execute', label: '动手', aside: false },
   { purpose: 'ui', label: '动手 · 界面', aside: false },
   { purpose: 'verify', label: '验收', aside: false },
   { purpose: 'judge', label: 'Jev 判断', aside: true },
+  // 临时指挥官整理待办（母单 #1335 第 3 片）：短命会话，不是流程里的一段，和 Jev 一样单列
+  { purpose: 'groom', label: '整理待办', aside: true },
 ] as const satisfies readonly RoutingPurpose[];
 
 export type RoutingPurposeId = (typeof ROUTING_PURPOSES)[number]['purpose'];

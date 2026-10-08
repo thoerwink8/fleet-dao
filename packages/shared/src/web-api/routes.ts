@@ -11,7 +11,14 @@ import {
   UpdateCredentialsRequest,
 } from './auth.ts';
 import { BoardResponse, ReposResponse } from './board.ts';
-import { RepoDispatchResponse, UpdateRepoDispatchRequest, UpdateRepoDispatchResponse } from './dispatch.ts';
+import {
+  GroomNowRequest,
+  GroomNowResponse,
+  GroomStatusResponse,
+  RepoDispatchResponse,
+  UpdateRepoDispatchRequest,
+  UpdateRepoDispatchResponse,
+} from './dispatch.ts';
 import { EnvResponseSchema } from './env.ts';
 import {
   FrancePreflightResponseSchema,
@@ -101,6 +108,18 @@ export const WebRoutes = {
     path: '/repos/:repoId/dispatch',
     request: UpdateRepoDispatchRequest,
     response: UpdateRepoDispatchResponse,
+  },
+  /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
+  groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },
+  /**
+   * 叫一次临时指挥官整理待办（和命令行 fleet-api groom、引擎拉单一轮自己叫同一个入口、同一把锁，记 groom.request 操作记录）。
+   * 拒的情况都明说：引擎总开关关着 409 engine_off、已经有一次在做 409 groom_busy、24 小时内次数用完 429 groom_daily_cap；没有这个项目 404。
+   */
+  groomNow: {
+    method: 'POST',
+    path: '/repos/:repoId/dispatch/groom',
+    request: GroomNowRequest,
+    response: GroomNowResponse,
   },
   /** 看板多机：本台加每个远程环境（本机 WSL 等）的新鲜度。收快照的写口（NODE_REPORT_PATH）不在这里：只有别的环境的后端调。 */
   nodes: { method: 'GET', path: '/nodes', response: NodesResponseSchema },

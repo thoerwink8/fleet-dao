@@ -384,6 +384,7 @@ export class FakeGitHub {
       user: i.user,
       created_at: i.created_at,
       updated_at: i.updated_at,
+      closed_at: i.state === 'closed' ? i.updated_at : null,
       labels: i.labels.map((name) => ({ name })),
       milestone: i.milestone,
     };

@@ -32,9 +32,11 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
 import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
+import { requestGroom } from '../jobs/groom-request.ts';
 import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
+import { groomRequestDeps } from './groom-request.ts';
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<
@@ -258,6 +260,12 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         return { created: posted.created };
       },
       ...(w.gateLive === undefined ? {} : { gateLive: w.gateLive }),
+      groomRequest: ({ repo, why }) =>
+        requestGroom(groomRequestDeps(w.db, now), {
+          repo: `${repo.owner}/${repo.name}`,
+          source: 'auto',
+          reason: `拉单一轮自己叫的：${why}`,
+        }),
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

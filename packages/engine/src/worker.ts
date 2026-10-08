@@ -29,6 +29,7 @@ import { startDrainStatusFile } from './drain-file.ts';
 import type { EngineMasterGate } from './engine-master.ts';
 import { createFakeWorld } from './fakes.ts';
 import { engineTimerJobs } from './jobs/engine-timers.ts';
+import { type GroomPoller, startGroomRequests } from './jobs/groom.ts';
 import { type RouteProbeNowPoller, startRouteProbeRequests } from './jobs/route-probe-now.ts';
 import { type EngineTimers, realTimerHost, startTimers } from './jobs/timers.ts';
 import type { EnginePorts } from './ports.ts';
@@ -314,6 +315,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let stopControl: (() => void) | undefined;
   let stopMaster: (() => void) | undefined;
   let probeNow: RouteProbeNowPoller | undefined;
+  let groomPoller: GroomPoller | undefined;
   try {
     // 引擎总开关（#1086）：接活之前先读一次（读不到按关），之后每 5 秒刷新；选路、一次性会话登记读缓存，定时器入口每轮现读
     if (master) {
@@ -371,6 +373,11 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
         probeNow = startRouteProbeRequests(jobs.routeProbeNow);
         console.info('立即探测已起');
       }
+      // 临时指挥官整理待办：每几秒看一眼有没有排队的（总开关关着的接手时自己判，留在队里等）
+      if (jobs.groom) {
+        groomPoller = startGroomRequests(jobs.groom);
+        console.info('整理待办的接手已起');
+      }
     }
     shutdown = installGracefulShutdown({
       worker,
@@ -392,6 +399,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     stopControl?.();
     stopMaster?.();
     probeNow?.stop();
+    groomPoller?.stop();
     await status?.flush();
     status?.stop();
     await clientConnection?.close();

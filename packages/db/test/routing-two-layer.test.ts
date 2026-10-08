@@ -214,6 +214,16 @@ describe('默认配置 routing.default.json', () => {
     ]);
   });
 
+  it('整理待办（groom，#1338）：默认顺序 Sonnet 5.5、Opus 5.5 在前，后面是其余模型，没有 Fable、没有 Jev；引用的模型都在骨架的 models 里', async () => {
+    const cfg = await loadRoutingConfig();
+    const groom = cfg.purposes.groom ?? [];
+    expect(groom.slice(0, 2)).toEqual(['sonnet-5.5', 'opus-5.5']);
+    expect(groom.length).toBeGreaterThan(2);
+    expect(groom.some((m) => /fable/i.test(m))).toBe(false);
+    expect(groom).not.toContain('jev-1.13');
+    for (const m of groom) expect(Object.keys(cfg.models), m).toContain(m);
+  });
+
   it('界面用途里没有 GPT（照旧目录配置）、判断只用 Jev', async () => {
     const cfg = await loadRoutingConfig();
     expect(cfg.purposes.ui?.some((m) => m.startsWith('gpt'))).toBe(false);

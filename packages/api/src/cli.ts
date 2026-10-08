@@ -53,6 +53,9 @@ const ENGINE_USAGE =
 /** dispatch-issue（#1337）的本体在引擎包（packages/engine/src/bin/dispatch-issue.ts）：后端不依赖引擎包，由 bin/fleet-api 按命令名转过去。这里只管 --help 列得出来。 */
 const DISPATCH_ISSUE_POINTER =
   '用法：fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]（开关关着时点名把一张单交给引擎；本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api dispatch-issue --help）';
+/** groom（#1338，叫一次临时指挥官整理待办）同样：本体在引擎包（packages/engine/src/bin/groom.ts），由 bin/fleet-api 转过去。 */
+const GROOM_POINTER =
+  '用法：fleet-api groom <owner/仓名> [--note "<为什么>"]（叫一次临时指挥官整理待办，只排队、引擎几秒内接手；本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api groom --help）';
 const NODE_KEY_USAGE =
   '用法：fleet-api node-key new <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；打印一次通行证明文和要贴进 FLEET_NODE_KEYS 的哈希）';
 const DISPATCH_USAGE =
@@ -694,6 +697,7 @@ const USAGES: Record<string, string> = {
   'set-password': USAGE,
   dispatch: DISPATCH_USAGE,
   'dispatch-issue': DISPATCH_ISSUE_POINTER,
+  groom: GROOM_POINTER,
   engine: ENGINE_USAGE,
   'node-key': NODE_KEY_USAGE,
   alert: ALERT_USAGE,
@@ -773,6 +777,12 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     // 走到这里说明没经 bin/fleet-api（它会把这个命令转给引擎包）：不假装做了
     throw new CliError(
       'dispatch-issue 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/dispatch-issue.ts）',
+      2,
+    );
+  }
+  if (command === 'groom') {
+    throw new CliError(
+      'groom 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/groom.ts）',
       2,
     );
   }

@@ -55,6 +55,7 @@ import { registerCredentialRoutes } from './credentials.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
+import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { modelRosterFields } from './model-roster.ts';
@@ -808,6 +809,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerDispatchRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
+  registerGroomRoutes(app, deps, actorOf, engineProbe);
   registerFranceReleaseRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);
   registerReleaseRequestRoutes(app, deps, actorOf);

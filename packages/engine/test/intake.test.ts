@@ -403,10 +403,58 @@ describe('两台引擎的巡检仓互不收对方的单（#1136）', () => {
 });
 
 describe('runIntakeJob · 一轮', () => {
-  it('开关打开以前开的老单（没贴「交给引擎」）→ 被拉', async () => {
+  it('开关打开以前开的老单（没贴「整理过」「交给引擎」）→ 不拉，原因是 not_groomed', async () => {
     const h = harness({}, { issues: [issue({ createdAt: OLD })] });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.logs.some((l) => l.text.includes('not_groomed'))).toBe(true);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('开关打开以前开的老单贴了「整理过」→ 被拉', async () => {
+    const h = harness({}, { issues: [issue({ createdAt: OLD, labels: ['需求', '整理过'] })] });
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('开关打开以前开的老单贴了「交给引擎」→ 被拉', async () => {
+    const h = harness({}, { issues: [issue({ createdAt: OLD, labels: ['需求', '交给引擎'] })] });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('开关之后新开的单不需要「整理过」→ 照旧被拉', async () => {
+    const h = harness({}, { issues: [issue({ createdAt: '2026-09-30T00:00:00.000Z' })] });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it.each([
+    ['待补', 'groom_pending'],
+    ['要人拍', 'needs_human'],
+  ])(
+    '贴了「%s」的单任何情况下都不拉（新单、贴了「整理过」「交给引擎」也不拉），写明原因 %s',
+    async (label, reason) => {
+      const h = harness(
+        {},
+        {
+          issues: [
+            issue({ number: 1, labels: ['需求', label] }),
+            issue({ number: 2, createdAt: OLD, labels: ['需求', '整理过', label] }),
+            issue({ number: 3, labels: ['需求', '交给引擎', label] }),
+          ],
+        },
+      );
+      await runIntakeJob(h.deps);
+      expect(h.started).toEqual([]);
+      expect(h.logs.some((l) => l.text.includes(reason))).toBe(true);
+    },
+  );
+
+  it('起之前现读到的标签里有「要人拍」（列表读到之后才贴的）→ 不起', async () => {
+    const h = harness({}, { plans: { 12: plan({ labels: ['需求', '要人拍'] }) } });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
   });
 
   it('未排期的单（没挂里程碑、没贴「交给引擎」）→ 被拉', async () => {
@@ -422,7 +470,10 @@ describe('runIntakeJob · 一轮', () => {
   });
 
   it('老单、又被开着的 PR 挂着 → 仍不拉，贴「本机做」', async () => {
-    const h = harness({}, { issues: [issue({ createdAt: OLD })], prClaims: { 12: 40 } });
+    const h = harness(
+      {},
+      { issues: [issue({ createdAt: OLD, labels: ['需求', '整理过'] })], prClaims: { 12: 40 } },
+    );
     await runIntakeJob(h.deps);
     expect(h.started).toEqual([]);
     expect(h.localMarked).toEqual([12]);
@@ -434,10 +485,10 @@ describe('runIntakeJob · 一轮', () => {
       {},
       {
         issues: [
-          issue({ number: 1, createdAt: OLD, milestone: null, labels: ['需求', '母单'] }),
-          issue({ number: 2, createdAt: OLD, milestone: null }),
-          issue({ number: 3, createdAt: OLD, milestone: null, labels: ['需求', '本机做'] }),
-          issue({ number: 4, createdAt: OLD, milestone: null, body: wf }),
+          issue({ number: 1, createdAt: OLD, milestone: null, labels: ['需求', '母单', '整理过'] }),
+          issue({ number: 2, createdAt: OLD, milestone: null, labels: ['需求', '整理过'] }),
+          issue({ number: 3, createdAt: OLD, milestone: null, labels: ['需求', '本机做', '整理过'] }),
+          issue({ number: 4, createdAt: OLD, milestone: null, body: wf, labels: ['需求', '整理过'] }),
         ],
         plans: { 2: plan({ milestone: null, parent: 9 }) },
       },
@@ -1251,10 +1302,13 @@ describe('熔断', () => {
 });
 
 describe('【故意造出的失败】旧的两道硬闸删掉之后', () => {
-  it('开关打开以前开的老单不再被 opened_before_switch 拦：被拉起，拉单日志里也没有这个原因', async () => {
+  it('整理过的老单不再被 opened_before_switch 拦：被拉起，拉单日志里也没有这个原因', async () => {
     const h = harness(
       {},
-      { issues: [issue({ createdAt: OLD, milestone: null })], plans: { 12: plan({ milestone: null }) } },
+      {
+        issues: [issue({ createdAt: OLD, milestone: null, labels: ['需求', '整理过'] })],
+        plans: { 12: plan({ milestone: null }) },
+      },
     );
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([12]);

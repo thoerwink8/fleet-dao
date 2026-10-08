@@ -1677,6 +1677,8 @@ export function createSeed(now: number): MockState {
       verify: ['grok-4.7', 'gpt-5.6-luna', 'sonnet-5'],
       research: ['gpt-5.6-luna', 'grok-4.7', 'deepseek-v4.1-flash'],
       judge: ['sonnet-5', 'deepseek-v4.1-flash'],
+      // 临时指挥官整理待办（#1338）：和真骨架一样 Sonnet、Opus 在前
+      groom: ['sonnet-5', 'opus-5.5'],
     },
     routing: {
       'opus-5.5': ['r-ca-opus', 'r-cb-opus', 'r-rl-opus'],

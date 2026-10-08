@@ -288,6 +288,127 @@ async function findLostEdit(
   return { verified: false, lost: null };
 }
 
+// —— 在正文末尾追加一段（临时指挥官补老单，母单 #1335 第 3 片）——
+
+export interface AppendIssueBodyInput {
+  repo: RepoRef;
+  issueNumber: number;
+  /** 幂等键：同一张单、同一个 key 只追加一次（正文里留一个隐藏标记，再来就不重复写）。 */
+  key: string;
+  /** 要追加的整段（自带标题）；原文一个字不动，只在末尾接上它。 */
+  text: string;
+}
+
+export interface AppendIssueBodyResult {
+  outcome: 'written' | 'unchanged';
+  /** 写的时候撞上了人手编辑，已经把人写的那一版放回来（同时报警）。 */
+  restoredHumanEdit: boolean;
+  /** 写后核对做完了；false = 没查成（写是写成了）。 */
+  verified: boolean;
+}
+
+/**
+ * 在一张单的正文末尾追加一段，原文不动。写之前先中和 @ 提醒和 <!-- -->、过卫生检查（追加的内容是 AI 写的，进公开的正文）；
+ * 同一张单的写入加锁串行；读和写之间要是插进了人手编辑，和进度段同一个办法：用编辑历史核对，把人写的那一版找回来再接上追加段。
+ */
+export async function appendIssueBody(
+  deps: Deps,
+  input: AppendIssueBodyInput,
+  ctx: ActivityContext = {},
+): Promise<AppendIssueBodyResult> {
+  const { repo, issueNumber } = input;
+  const slug = repoSlug(repo);
+  const text = neutralizeMentions(input.text).trim();
+  if (!text) throw new GitHubError('INVALID_INPUT', `给 ${slug} #${issueNumber} 追加的内容是空的`);
+  assertPublishable(
+    repo,
+    `给 ${slug} #${issueNumber} 的正文追加一段`,
+    [{ path: `#${issueNumber} 的追加段`, text }],
+    deps.hygieneRepo,
+  );
+  const marker = `<!-- fleet:append:${digest({ key: input.key })} -->`;
+  const block = `${text}\n\n${marker}`;
+  return deps.locker.withLock(`issue:${slug.toLowerCase()}#${issueNumber}`, async () => {
+    const issue = await readIssue(deps, repo, issueNumber, ctx.signal);
+    assertIssue(issue, repo);
+    const current = issue.body ?? '';
+    if (current.includes(marker)) return { outcome: 'unchanged', restoredHumanEdit: false, verified: true };
+    const next = `${current.trimEnd()}\n\n${block}\n`;
+    assertBodySize(`issue #${issueNumber} 的正文`, next);
+    await patchBody(deps, repo, issueNumber, next, ctx.signal);
+    const check = await findLostEdit(deps, repo, issueNumber, current, next, ctx.signal);
+    if (check.lost !== null) {
+      const restored = `${check.lost.trimEnd()}\n\n${block}\n`;
+      assertBodySize(`issue #${issueNumber} 的正文`, restored);
+      await patchBody(deps, repo, issueNumber, restored, ctx.signal);
+      deps.log.error('追加补充时撞上了人手编辑：已把人写的那一版放回来', {
+        repo: slug,
+        issueNumber,
+        editor: check.editor,
+      });
+      return { outcome: 'written', restoredHumanEdit: true, verified: true };
+    }
+    return { outcome: 'written', restoredHumanEdit: false, verified: check.verified };
+  });
+}
+
+// —— 最近关掉的单（开新单前查重用） ——
+
+export interface ClosedIssueRow {
+  number: number;
+  title: string;
+  body: string;
+  closedAt: string;
+}
+
+const ClosedIssueSchema = z.object({
+  number: z.number(),
+  title: z.string(),
+  body: z.string().nullable(),
+  state: z.string(),
+  closed_at: z.string().nullable(),
+  pull_request: z.unknown().optional(),
+});
+
+/** 从 since 起关掉的 issue（不含 PR），翻完页；读不到、认不出、翻不完抛错，不拿「一张都没有」顶。 */
+export async function listClosedIssues(
+  deps: Pick<Deps, 'client'>,
+  input: { repo: RepoRef; since: Date; signal?: AbortSignal | undefined },
+): Promise<ClosedIssueRow[]> {
+  const { repo, since, signal } = input;
+  const rows = await deps.client.all(
+    {
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`,
+      auth: { as: 'engine', repo },
+      query: {
+        state: 'closed',
+        since: since.toISOString(),
+        sort: 'updated',
+        direction: 'desc',
+        per_page: 100,
+      },
+      signal,
+    },
+    (d) => d,
+  );
+  const out: ClosedIssueRow[] = [];
+  for (const raw of rows) {
+    const p = ClosedIssueSchema.safeParse(raw);
+    if (!p.success) throw unexpected(`读 ${repoSlug(repo)} 最近关掉的单`, raw);
+    if (p.data.pull_request !== undefined && p.data.pull_request !== null) continue;
+    // since 按「更新」筛，关掉的时刻要自己再核一遍
+    if (p.data.closed_at === null || Date.parse(p.data.closed_at) < since.getTime()) continue;
+    out.push({
+      number: p.data.number,
+      title: p.data.title,
+      body: p.data.body ?? '',
+      closedAt: p.data.closed_at,
+    });
+  }
+  return out;
+}
+
 // —— 关单 ——
 
 export interface CloseIssueInput {
