@@ -139,7 +139,7 @@ describe('等', () => {
 });
 
 describe('派不出（要报警，附每条被挡的原因）', () => {
-  it('全被禁令、下架、关闭挡住', () => {
+  it('全被禁令、下架、关闭挡住（Fable 不在禁令里，决定 0033：它的路由关着，也就是创始人没打开，才派不出）', () => {
     const r = chooseRoute(
       input(
         [
@@ -147,12 +147,12 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
           route('r', { blockers: ['model-retired'] }),
           route('c', { blockers: ['channel-disabled'] }),
         ],
-        { order: [entry('f', 0), entry('r', 1), entry('c', 2)] },
+        { order: [entry('f', 0, { enabled: false }), entry('r', 1), entry('c', 2)] },
       ),
     );
     expect(r.kind).toBe('none');
     if (r.kind === 'none') {
-      expect(r.reason).toContain('不用 Fable');
+      expect(r.reason).toContain('在它的模型下关着');
       expect(r.reason).toContain('模型已下架');
       expect(r.reason).toContain('渠道关了');
     }
@@ -207,10 +207,23 @@ describe('任务指定了路由', () => {
   });
 
   it('被硬禁令挡：报「指定的路由用不了」，不偷偷换成别的', () => {
-    const fable = route('b', { modelId: 'fable-5.1', modelName: 'Fable 5.1' });
-    const r = chooseRoute(input([route('a'), fable], { taskRouteId: 'b' }));
+    const gpt = route('b', { modelId: 'gpt-5.6', modelName: 'GPT 5.6', family: 'gpt', hostId: 'codex' });
+    const r = chooseRoute(input([route('a'), gpt], { taskRouteId: 'b', stage: 'ui' }));
     expect(r.kind).toBe('none');
-    if (r.kind === 'none') expect(r.reason).toMatch(/^指定的路由用不了：.*不用 Fable/);
+    if (r.kind === 'none') expect(r.reason).toMatch(/^指定的路由用不了：.*GPT 不做 UI/);
+  });
+
+  it('指定 Fable（决定 0033）：创始人没打开（路由关着）用不了；打开了就用它', () => {
+    const fable = route('b', { modelId: 'fable-5.1', modelName: 'Fable 5.1' });
+    const closed = chooseRoute(
+      input([route('a'), fable], {
+        taskRouteId: 'b',
+        order: [entry('a', 0), entry('b', 1, { enabled: false })],
+      }),
+    );
+    expect(closed.kind).toBe('none');
+    if (closed.kind === 'none') expect(closed.reason).toMatch(/^指定的路由用不了：.*在它的模型下关着/);
+    expect(picked(chooseRoute(input([route('a'), fable], { taskRouteId: 'b' })))).toBe('b');
   });
 
   it('被下架、被关闭挡：同样报用不了', () => {

@@ -20,7 +20,7 @@
 | [0014](0014-progress-on-github.md) | 进度以 GitHub 为准 | 生效；计划快照被 0015 改成 `pnpm plan` 现读 |
 | [0015](0015-github-one-home.md) | GitHub 上一个事实一个家 | 生效 |
 | [0016](0016-review-gate-structural-and-after-merge.md) | 第二意见有终点：ci.yml 结构比对、CI 判法先合后审 | 被 0023 替代 |
-| [0017](0017-fable-only-in-founder-main-session.md) | Fable 只在创始人本机主对话里由他自己选 | 生效 |
+| [0017](0017-fable-only-in-founder-main-session.md) | Fable 只在创始人本机主对话里由他自己选 | 第 2、4 条生效；第 1、3 条被 0033 取代 |
 | [0018](0018-org-switch-9-answers-2026-10-04.md) | 切号方案 9 条背景的回答 | 生效 |
 | [0019](0019-founder-2026-10-05-five-answers.md) | 10-05 五件：发 v3、删追问库表、不做脱开、5 秒限时、被封号 | 生效 |
 | [0020](0020-founder-2026-10-05-chain-breaks.md) | 断链三条：关单自动收口、里程碑关前搬单、开单先查旧单 | 生效 |
@@ -36,3 +36,4 @@
 | [0030](0030-unattended-uses-subagents.md) | 无人值守、过夜也用 Agent 子代理，不脱离会话；脱离的工人只在创始人明说时用 | 采纳；替代 0024 的无人值守例外和 0026、0028 的工人那一层 |
 | [0031](0031-engine-intake-gate.md) | 引擎拉单门加判断：改 .github/workflows 的、被开着的 PR 引用的单不拉；pr:open --new-issue 自动贴本机做；单关了撤任务（#1194、#1197、#1198、#1199） | 采纳 |
 | [0032](0032-release-by-main-commit.md) | 发版的单位是主线上的一个提交，里程碑只管计划；发版后恢复发版前的引擎状态；删掉 v<N> 标记、发布 PR、CHANGELOG 自动节那一层（替代 0011 里按版本发的一半） | 采纳 |
+| [0033](0033-fable-in-catalog-founder-only-opens.md) | Fable 进目录，默认关着、不在任何用途里；只有创始人本人在驾驶舱能打开、配进用途，引擎、临时指挥官、命令行、机器通行证一律不能（取代 0017 第 1、3 条，母单 #1354） | 采纳 |

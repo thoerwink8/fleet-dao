@@ -9,7 +9,16 @@ import { clearReservations, reservePoolSlot } from '../src/queries/pool-runs.ts'
 import { type PoolQuotaSnapshot, type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
 import { finishRun, startRun } from '../src/queries/runs.ts';
 import { flattenRoutingLayers, routingLayers } from '../src/routing-layers.ts';
-import { bans, channels, models, poolReservations, pools, routes } from '../src/schema/index.ts';
+import {
+  bans,
+  channels,
+  models,
+  poolReservations,
+  pools,
+  routes,
+  routingCatalog,
+  routingPurposeModels,
+} from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -124,7 +133,7 @@ describe('某个用途的候选路由', () => {
     expect(await summary('execute')).toEqual([['r-a', ['channel-disabled', 'pool-expired']]]);
   });
 
-  it('禁令：代码里的硬禁令（GPT 不做 UI、不用 Fable）库里没有也生效，再并上库里另加的；按用途判', async () => {
+  it('禁令：代码里的硬禁令（GPT 不做 UI）库里没有也生效，再并上库里另加的；按用途判', async () => {
     expect(await t.db.select().from(bans)).toEqual([]);
     await addRoute(t.db, { id: 'gpt', poolId: 'relay-a', modelId: 'gpt-5.6-luna', hostId: 'codex' });
     await addRoute(t.db, { id: 'fable51', poolId: 'relay-a', modelId: 'fable-5.1' });
@@ -145,15 +154,45 @@ describe('某个用途的候选路由', () => {
     await t.db.insert(bans).values({ family: 'grok', stage: 'ui', reason: '创始人另加：Grok 暂不做 UI' });
     await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
     await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
+    // Fable 不再是硬禁令（决定 0033）：配进了用途、开关开着（创始人本人配的）就照常可选
     expect((await flat('ui')).map((c) => [c.routeId, c.blockers, c.banReasons])).toEqual([
       ['gpt', ['banned'], ['GPT 不做 UI 类活']],
-      ['fable51', ['banned'], ['不用 Fable（创始人定）']],
-      ['fable52', ['banned'], ['不用 Fable（创始人定）']],
+      ['fable51', [], []],
+      ['fable52', [], []],
       ['grok', ['banned'], ['创始人另加：Grok 暂不做 UI']],
     ]);
     expect(await summary('execute')).toEqual([
       ['gpt', []],
       ['grok', []],
+    ]);
+  });
+
+  it('Fable 入库默认关着、不在任何用途里：不是候选；创始人开了并配进用途才可选，关回去又挡', async () => {
+    await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
+    await addRoute(t.db, { id: 'fable52', poolId: 'relay-a', modelId: 'claude-fable-5.2' });
+    await addRoute(t.db, { id: 'lite52', poolId: 'relay-a', modelId: 'claude-lite-5.2' });
+    // 路由表里有、关着；两个用途里都没有它
+    await t.db.insert(routingCatalog).values([
+      { modelId: 'claude-fable-5.2', routeId: 'fable52', position: 0, enabled: false },
+      { modelId: 'claude-lite-5.2', routeId: 'lite52', position: 0, enabled: true },
+    ]);
+    await t.db
+      .insert(routingPurposeModels)
+      .values({ purpose: 'execute', modelId: 'claude-lite-5.2', position: 0 });
+    expect((await flat('execute')).map((c) => c.routeId)).toEqual(['lite52']);
+    // 配进用途但开关还关着：挡在开关上
+    await t.db
+      .insert(routingPurposeModels)
+      .values({ purpose: 'execute', modelId: 'claude-fable-5.2', position: 1 });
+    expect((await flat('execute')).map((c) => [c.routeId, c.blockers])).toEqual([
+      ['lite52', []],
+      ['fable52', ['switched-off']],
+    ]);
+    // 创始人打开
+    await t.db.update(routingCatalog).set({ enabled: true }).where(eq(routingCatalog.routeId, 'fable52'));
+    expect((await flat('execute')).map((c) => [c.routeId, c.blockers])).toEqual([
+      ['lite52', []],
+      ['fable52', []],
     ]);
   });
 

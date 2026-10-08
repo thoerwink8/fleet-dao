@@ -1,4 +1,11 @@
-import { type Channel, hardBanFor, type Model, type Route, type SessionRun } from '@fleet-dao/shared';
+import {
+  type Channel,
+  founderOnlyFor,
+  hardBanFor,
+  type Model,
+  type Route,
+  type SessionRun,
+} from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { SegmentRunRecord } from '../src/ports.ts';
 import {
@@ -37,20 +44,23 @@ describe('硬禁令（写死在 shared/bans.ts）', () => {
     expect(hardBanFor({ ...gpt, family: 'openai' }, 'review')).toBeUndefined();
   });
 
-  it('判路由时连上游串和别名一起看：模型叫 opus、上游发的是 Fable 或 GPT，照样拦', () => {
-    expect(hardBanFor({ ...opus, upstreamModel: 'claude-fable-5-1' }, 'execute')?.id).toBe('no-fable');
-    expect(hardBanFor({ ...opus, upstreamAliases: ['fable'] }, 'execute')?.id).toBe('no-fable');
+  it('判路由时连上游串和别名一起看：模型叫 opus、上游发的是 GPT，照样拦；是 Fable 的不再是硬禁令，改认「只有创始人能开」', () => {
+    expect(hardBanFor({ ...opus, upstreamModel: 'claude-fable-5-1' }, 'execute')).toBeUndefined();
+    expect(founderOnlyFor({ ...opus, upstreamModel: 'claude-fable-5-1' })?.id).toBe('fable-founder-only');
+    expect(founderOnlyFor({ ...opus, upstreamAliases: ['fable'] })?.id).toBe('fable-founder-only');
     expect(hardBanFor({ ...opus, upstreamModel: 'gpt-5.6' }, 'ui')?.id).toBe('gpt-no-ui');
     expect(
       hardBanFor({ ...opus, upstreamModel: 'claude-opus-5-5', upstreamAliases: [] }, 'ui'),
     ).toBeUndefined();
   });
 
-  it('Fable 按模型认（它属 claude 族），哪个阶段都不用', () => {
+  it('Fable 按模型认（它属 claude 族）：不是硬禁令了，任何阶段都不被硬禁令挡；认它的是「只有创始人本人能开」', () => {
     for (const stage of ['triage', 'execute', 'ui', 'review', undefined] as const) {
-      expect(hardBanFor(fable, stage)?.id).toBe('no-fable');
+      expect(hardBanFor(fable, stage)).toBeUndefined();
     }
-    expect(hardBanFor({ ...opus, id: 'x-FABLE' }, 'execute')?.id).toBe('no-fable');
+    expect(founderOnlyFor(fable)?.id).toBe('fable-founder-only');
+    expect(founderOnlyFor({ ...opus, id: 'x-FABLE' })?.id).toBe('fable-founder-only');
+    expect(founderOnlyFor(opus)).toBeUndefined();
     expect(hardBanFor(opus, 'execute')).toBeUndefined();
   });
 
@@ -62,7 +72,8 @@ describe('硬禁令（写死在 shared/bans.ts）', () => {
       now,
     };
     expect(routeProblem('r-gpt', 'ui', ctx)).toContain('GPT 不做 UI');
-    expect(routeProblem('r-fable', 'execute', ctx)).toContain('不用 Fable');
+    // Fable 不在这里挡了：它能不能被派，看路由开关和用途里有没有（只有创始人本人能打开 / 配进去）
+    expect(routeProblem('r-fable', 'execute', ctx)).toBeNull();
   });
 });
 

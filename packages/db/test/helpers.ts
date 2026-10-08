@@ -40,7 +40,7 @@ export async function expectViolation(write: Promise<unknown>, constraint: strin
   expect(messages.join('\n')).toContain(constraint);
 }
 
-/** 种子 + 一个渠道下的两个账号池 + 两个额外的模型（Fable 5.2 撞代码里的硬禁令，Opus 4.9 不撞）。 */
+/** 种子 + 一个渠道下的两个账号池 + 三个额外的模型（Fable 5.2 是「只有创始人能开」的那个，Lite 5.2、Opus 4.9 不是）。 */
 export async function catalog(db: Db) {
   await seed(db);
   await db.insert(channels).values({ id: 'relay', name: '中转', billing: 'subscription' });
@@ -50,6 +50,7 @@ export async function catalog(db: Db) {
   ]);
   await db.insert(models).values([
     { id: 'claude-fable-5.2', family: 'claude', displayName: 'Fable 5.2' },
+    { id: 'claude-lite-5.2', family: 'claude', displayName: 'Lite 5.2' },
     { id: 'opus-4.9', family: 'claude', displayName: 'Opus 4.9' },
   ]);
   return { channelId: 'relay' };

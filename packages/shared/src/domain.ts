@@ -273,7 +273,7 @@ export interface RouteProbe {
   detail?: string;
 }
 
-/** 全局禁令：GPT × UI、Fable × 一切。 */
+/** 全局禁令：GPT × UI（Fable 改成只有创始人本人能开，决定 0033）。 */
 export interface Ban {
   family?: string;
   modelId?: string;
