@@ -8,7 +8,7 @@
 // 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象、autoMode 不是对象/数组不是数组）就不动，报没做成——不当成空的重写。
 // 仓里的源文件读不到、不合规矩（含 bypassPermissions、autoMode 少了 "$defaults"）也报没查成、没做成，不拿空的顶上。
 // 「源文件里写 bypass 拒收」和「机器上自己设的 bypass 保留」是两件事：前者是把「不用问」推给所有机器，后者是这台自己选的做法。
-// 它的 env 只认 ENV_KEYS 登记的键（现在只有子代理默认模型 CLAUDE_CODE_SUBAGENT_MODEL，决定 0017）：写进同一份设置的 env，
+// 它的 env 只认 ENV_KEYS 登记的键（现在只有子代理默认模型 CLAUDE_CODE_SUBAGENT_MODEL，决定 0034）：写进同一份设置的 env，
 // 仓里的值每次覆盖（同 defaultMode），机器上 env 里别的变量一个不碰；源文件少写、多写不认得的键、值不合规矩都拒收。
 // 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
 // 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode、env 这两层（不写就整段不管）。
@@ -62,13 +62,15 @@ export interface PermSpec extends ListSpec {
 /**
  * 子代理默认模型（code.claude.com/docs/en/model-config、sub-agents）：先后是 调用写的 model > 子代理定义里的 model
  * （写 inherit 就跟主会话）> 这个变量 > 主会话。所以它只兜住两头都没写的（general-purpose 就是）；Plan、fork 定义里是 inherit、
- * 照旧跟主会话（主会话可能是创始人自己选的 Fable），claude-code-guide 定义里是 haiku。决定 0017。
+ * 照旧跟主会话（主会话可能是创始人自己选的 Fable），claude-code-guide 定义里是 haiku。决定 0034（子代理永不用 Fable 沿用 0017）。
  */
 export const SUBAGENT_MODEL = 'CLAUDE_CODE_SUBAGENT_MODEL';
 
 /**
- * Opus 或 Sonnet：别名 opus、sonnet，或 claude-opus-5-5、claude-sonnet-5-5 这样的完整 id，可带 [1m]。
- * Fable、Mythos、Haiku 都不算；inherit、default 也不算（等于不设，子代理就跟主会话走）。决定 0017：子代理只用 Opus 或 Sonnet。
+ * 默认值只许 Opus 或 Sonnet：别名 opus、sonnet，或 claude-opus-5-5、claude-sonnet-5-5 这样的完整 id，可带 [1m]。
+ * Fable、Mythos、Haiku 都不算；inherit、default 也不算（等于不设，子代理就跟主会话走）。
+ * 决定 0034：子代理按性价比分三档，Haiku 5.5 只在派活时逐个显式选（读多写少、好抽查的活），不当忘了写模型时的兜底——
+ * 兜底落到 Haiku，写代码的活就悄悄跑在小模型上了。
  */
 export const OPUS_OR_SONNET = /^(?:opus|sonnet|claude-(?:opus|sonnet)-\d+(?:-\d+)*)(?:\[1m\])?$/;
 
@@ -82,7 +84,7 @@ const ENV_KEYS: ReadonlyMap<string, (value: string) => string | null> = new Map(
     (value: string) =>
       OPUS_OR_SONNET.test(value)
         ? null
-        : `env.${SUBAGENT_MODEL} 是「${value}」：子代理只用 Opus 或 Sonnet（决定 0017），只认 opus、sonnet 或 claude-opus-…、claude-sonnet-… 这样的 id，拒收`,
+        : `env.${SUBAGENT_MODEL} 是「${value}」：子代理默认模型只许 Opus 或 Sonnet（决定 0034；派活时可显式用 Haiku 5.5，但它不当默认），只认 opus、sonnet 或 claude-opus-…、claude-sonnet-… 这样的 id，拒收`,
   ],
 ]);
 
@@ -143,7 +145,7 @@ function parseAutoMode(v: unknown): AutoModeSpec | string | undefined {
  */
 function parseEnv(v: unknown): Record<string, string> | string {
   const need = [...ENV_KEYS.keys()].join('、');
-  if (v === undefined) return `env 没写：${need} 要写（子代理默认模型只用 Opus 或 Sonnet，决定 0017）`;
+  if (v === undefined) return `env 没写：${need} 要写（子代理默认模型只许 Opus 或 Sonnet，决定 0034）`;
   if (!isObj(v)) return 'env 不是对象';
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(v)) {
@@ -157,7 +159,7 @@ function parseEnv(v: unknown): Record<string, string> | string {
   }
   for (const key of ENV_KEYS.keys())
     if (!(key in out))
-      return `env.${key} 没写：不写子代理就跟主会话同一个模型，主会话可能是 Fable（决定 0017），拒收`;
+      return `env.${key} 没写：不写子代理就跟主会话同一个模型，主会话可能是 Fable（子代理永不用 Fable，决定 0017、0034），拒收`;
   return out;
 }
 
