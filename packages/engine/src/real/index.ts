@@ -35,6 +35,7 @@ import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
+import { foreignCanarySlugs } from '../jobs/canary-scope.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
@@ -42,6 +43,7 @@ import type { EnginePorts } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { configFromEnv } from '../worker.ts';
 import { canaryJob } from './canary.ts';
+import { DECLARED_CANARY_DEPLOY_DIR, readDeclaredCanaryRepos } from './canary-repos.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
@@ -760,8 +762,17 @@ export function realPortsFromEnv(
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
-    // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲
-    intake: intakeJob({ db, gh }),
+    // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲。
+    // 别的环境的巡检仓不收（#1136）：名单从这一版 deploy/*/desired-config.json 来，对不上自己的 FLEET_CANARY_REPO 的不拉。
+    intake: intakeJob({
+      db,
+      gh,
+      foreignCanaries: async () => {
+        const declared = readDeclaredCanaryRepos(DECLARED_CANARY_DEPLOY_DIR);
+        if ('error' in declared) throw new Error(declared.error);
+        return foreignCanarySlugs(env.FLEET_CANARY_REPO, declared.slugs);
+      },
+    }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
     ciTimings: ciTimingsJob({ db, github: gh }),
   };

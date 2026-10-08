@@ -13,7 +13,9 @@ import { createHmac, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   chownSync,
+  existsSync,
   lstatSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -21,7 +23,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** 期望文件在仓里的位置（每一版的目录里都有一份：对账拿在用的那一版的）。 */
@@ -312,6 +314,80 @@ export function parseDesired(text) {
     bad(`少了 ${lacking.join('、')}：受管的 ${CONFIG_FILES.join('、')} 都要写上（一项都不管的写 {}）`);
   if (privateCount > 0 && fingerprint === null) bad('有私有值就要写 fingerprint（算法和钥匙编号）');
   return { formatVersion: raw.formatVersion, selfHeal: raw.selfHeal, fingerprint, files };
+}
+
+/** 巡检仓的写法：owner/name。和引擎拉单那一侧（packages/engine/src/jobs/canary-scope.ts）同一条，不分大小写。 */
+const CANARY_SLUG = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+
+/**
+ * deploy/ 下每一份 desired-config.json（没有这份文件的子目录跳过，比如 hk、test）。
+ * 认不出抛 ConfigError。返回 [{ name, desired }]，name 是目录名，desired 是 parseDesired 的结果。
+ */
+export function loadDesiredProfiles(deployDir) {
+  let names;
+  try {
+    names = readdirSync(deployDir);
+  } catch (e) {
+    throw new ConfigError(
+      `读不到各环境的期望目录 ${deployDir}：${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  const profiles = [];
+  for (const name of [...names].sort()) {
+    const path = join(deployDir, name, 'desired-config.json');
+    if (!existsSync(path)) continue;
+    let text;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (e) {
+      throw new ConfigError(
+        `读不到 deploy/${name}/desired-config.json：${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    profiles.push({ name, desired: parseDesired(text) });
+  }
+  return profiles;
+}
+
+/**
+ * 各环境的巡检仓各写各的（#1136）。
+ * 没写、公开的空串 = 这台不开巡检，不跟别人比。
+ * 写成私有值、认不出 owner/name、和另一台小写相同：各记一条。相同只报后出现的那台对着先出现的。
+ * @param {{ name: string, desired: ReturnType<typeof parseDesired> }[]} profiles
+ * @returns {string[]}
+ */
+export function canaryRepoProblems(profiles) {
+  const problems = [];
+  /** @type {Map<string, string>} 小写 owner/name → 先写出它的环境 */
+  const seen = new Map();
+  for (const { name, desired } of profiles) {
+    const list = desired?.files?.['engine.env'];
+    if (!Array.isArray(list)) continue;
+    const row = list.find((d) => d.key === 'FLEET_CANARY_REPO');
+    if (!row) continue;
+    if (row.kind === 'private') {
+      problems.push(
+        `${name} 的 FLEET_CANARY_REPO 写成了私有值：比不出是哪个巡检仓，两台会不会抢同一个仓看不出来（#1136）`,
+      );
+      continue;
+    }
+    const value = typeof row.value === 'string' ? row.value.trim() : '';
+    if (value === '') continue;
+    if (!CANARY_SLUG.test(value)) {
+      problems.push(`${name} 的 FLEET_CANARY_REPO「${value}」认不出：要写成 owner/name（#1136）`);
+      continue;
+    }
+    const slug = value.toLowerCase();
+    const first = seen.get(slug);
+    if (first !== undefined) {
+      problems.push(
+        `${name} 和 ${first} 写了同一个巡检仓 ${value}：两边的引擎会在同一个仓里开单、开 PR、把对方的单当成自己的（#1136）`,
+      );
+      continue;
+    }
+    seen.set(slug, name);
+  }
+  return problems;
 }
 
 // ── 指纹 ──

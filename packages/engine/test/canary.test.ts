@@ -570,6 +570,35 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
   };
 }
 
+describe('两台引擎各收各的留下的单（#1136）', () => {
+  it('只问自己的仓、只停自己仓的任务、只关自己仓的单', async () => {
+    const asked: string[] = [];
+    const stopped: string[] = [];
+    const closed: string[] = [];
+    const make = (repo: { owner: string; name: string }, issueNumber: number) => {
+      const h = harness({ repo });
+      h.deps.record.leftovers = async (slug) => {
+        asked.push(slug);
+        return [{ id: issueNumber, issueNumber }];
+      };
+      h.deps.workflows.stop = async (id) => {
+        stopped.push(id);
+        return 'sent';
+      };
+      h.deps.github.issueState = async () => ({ state: 'open', stateReason: null });
+      h.deps.github.closeIssue = async (n) => {
+        closed.push(`${repo.owner}/${repo.name}#${n}`);
+      };
+      return h;
+    };
+    await openCanaryRound(make({ owner: 'acme', name: 'canary-a' }, 5).deps);
+    await openCanaryRound(make({ owner: 'acme', name: 'canary-b' }, 9).deps);
+    expect(asked).toEqual(['acme/canary-a', 'acme/canary-b']);
+    expect(stopped).toEqual(['task:acme/canary-a#5', 'task:acme/canary-b#9']);
+    expect(closed).toEqual(['acme/canary-a#5', 'acme/canary-b#9']);
+  });
+});
+
 describe('开单、看一回、记结论（假的库、GitHub、Temporal）', () => {
   it('开单：开单时就挂上当前版本（v1，不是 v2）；去重键带着这一轮的编号', async () => {
     const h = harness();
