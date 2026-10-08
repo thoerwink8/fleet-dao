@@ -552,6 +552,17 @@ export function cursorLaunchCommand(versionsDir: string, apiKeyFile: string): st
   ];
 }
 
+/**
+ * 以会话用户的身份起 cursor-agent 的命令，但不放 API 密钥：只现找 current → 最新版本目录（和 cursorLaunchCommand 后一段同一份脚本），
+ * 后面的参数原样交给 cursor-agent。额度读取刷新登录令牌（`status`）用它：Dashboard 接口不认 API 密钥，带着 CURSOR_API_KEY 跑
+ * CLI 会走密钥那条认证、不刷新登录令牌。
+ */
+export function cursorBareCommand(versionsDir: string, args: readonly string[]): string[] {
+  if (!versionsDir.startsWith('/')) throw new Error(`cursor-agent 的版本目录要写绝对路径：${versionsDir}`);
+  if (CONTROL_CHAR.test(versionsDir)) throw new Error('cursor-agent 的版本目录里有控制字符，不写上命令行');
+  return ['/bin/sh', '-c', CURSOR_FIND_SCRIPT, 'cursor-agent', versionsDir, ...args];
+}
+
 function cursorDriver(
   command: (user: SessionUser) => string[],
   run: NonNullable<HostRunners['cursor-agent']>,

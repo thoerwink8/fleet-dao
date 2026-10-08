@@ -33,12 +33,12 @@ export const READERS: Record<ReaderType, Reader> = {
   estimate: readEstimate,
 };
 
-/** 默认超时：Claude 要起一次 Claude Code（reclaude 首跑还要同步配置），给足；其余是一两次 HTTP / 本机调用。 */
+/** 默认超时：Claude 要起一次 Claude Code（reclaude 首跑还要同步配置），给足；Cursor 令牌被拒时还要起一次 cursor-agent status 刷新，也给足；其余是一两次 HTTP / 本机调用。 */
 export const DEFAULT_TIMEOUT_MS: Record<ReaderType, number> = {
   'claude-usage': 120_000,
   'reclaude-carpool': 20_000,
   'mirasim-relay': 20_000,
-  'cursor-dashboard': 20_000,
+  'cursor-dashboard': 60_000,
   'grok-billing': 20_000,
   estimate: 20_000,
 };
@@ -150,6 +150,8 @@ async function readPool(
   };
   if (deps.usageRecords) ctx.usageRecords = deps.usageRecords;
   if (user?.connectMirasim) ctx.connectMirasim = user.connectMirasim;
+  const refresh = user?.refreshCursorLogin;
+  if (refresh) ctx.refreshLogin = () => refresh(controller.signal);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {

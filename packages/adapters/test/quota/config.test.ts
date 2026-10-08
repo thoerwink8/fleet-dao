@@ -80,10 +80,12 @@ describe('仓里的额度配置和校验同步', () => {
 });
 
 describe('配置校验：一次列全，不撞到第一个就停', () => {
-  it('Cursor 池认 keyFile，空字符串报出来', () => {
+  it('Cursor 池只认 authFile、baseUrl；留着老的 keyFile 会被当成多余的键报出来（Dashboard 不认 API 密钥）', () => {
     const cursor = { poolId: 'c', channelId: 'c', reader: 'cursor-dashboard' };
-    expect(problems({ pools: [{ ...cursor, keyFile: '/home/x/.cursor/fleet-api-key' }] })).toEqual([]);
-    expect(problems({ pools: [{ ...cursor, keyFile: ' ' }] })).toEqual(['pools[0].keyFile 要是非空字符串']);
+    expect(problems({ pools: [{ ...cursor, authFile: '/home/x/.config/cursor/auth.json' }] })).toEqual([]);
+    const got = problems({ pools: [{ ...cursor, keyFile: '/home/x/key' }] });
+    expect(got).toHaveLength(1);
+    expect(got[0]).toContain('keyFile');
   });
 
   it('拼错的键、重复的池、没有的读取器都报出来', () => {
