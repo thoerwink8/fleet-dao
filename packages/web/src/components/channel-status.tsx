@@ -9,9 +9,7 @@
 // - 库读不到写「没查成」，不画空格子冒充没有历史。空格子只在读成了、次数不够 60 时补位。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
-import { ArrowRight, ChevronRight, LoaderCircle, Search } from 'lucide-react';
-import type { ReactNode } from 'react';
-import { Link } from 'react-router';
+import { ChevronRight, LoaderCircle, Search } from 'lucide-react';
 import type { ProbeHistoryCell, ProbeHistoryChannel } from '../api/types';
 import type { ChannelCard } from '../lib/channel-status';
 import { formatAgo, formatClock, formatIn } from '../lib/format';
@@ -314,67 +312,5 @@ export function HistoryStrip({
         {cells.length === 0 ? '还没有探针历史 · ' : null}绿通过 · 红不通 · 黄没探
       </p>
     </div>
-  );
-}
-
-/** 路由页顶上的一行：每个渠道一个小圆点加名字，点过去看渠道状态页（原文、立即探测都在那里）。 */
-export function ChannelStrip({
-  cards,
-  now,
-  extra,
-}: {
-  cards: readonly ChannelCard[];
-  now: number;
-  /** 名字旁边再画一点（路由页的渠道开关）。渠道状态页不传。 */
-  extra?: (card: ChannelCard) => ReactNode;
-}) {
-  const bad = cards.filter((c) => c.hasFault && !c.interrupted).length;
-  return (
-    <nav
-      aria-label="渠道一览"
-      className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border bg-card px-4 py-2.5 shadow-card-edge"
-    >
-      <span className="text-sub font-semibold">渠道</span>
-      <ol className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        {cards.map((c) => {
-          const quiet = c.kind === 'off' || c.kind === 'unused' || c.kind === 'retired';
-          return (
-            <li
-              key={c.channel.id}
-              data-channel={c.channel.id}
-              data-state={c.interrupted ? 'interrupted' : c.state}
-              data-kind={c.kind}
-              className="inline-flex items-center gap-1"
-            >
-              <Link
-                to={`/routing/status?p=${encodeURIComponent(c.channel.id)}`}
-                title={[c.label, c.probedAt ? `${formatAgo(c.probedAt, now)}探的` : undefined, c.reason]
-                  .filter(Boolean)
-                  .join(' · ')}
-                className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-sub hover:bg-muted"
-              >
-                <StatusDot tone={c.tone} />
-                <span className={cn(quiet && 'text-muted-foreground')}>{c.channel.name}</span>
-                {c.state === 'ok' && !c.interrupted ? null : (
-                  <span
-                    className={cn('text-caption', quiet ? 'text-muted-foreground' : 'text-foreground/80')}
-                  >
-                    {c.label}
-                  </span>
-                )}
-              </Link>
-              {extra?.(c)}
-            </li>
-          );
-        })}
-      </ol>
-      <Link
-        to="/routing/status"
-        className="ml-auto inline-flex items-center gap-0.5 text-caption text-muted-foreground underline-offset-2 hover:underline"
-      >
-        {bad > 0 ? `${bad} 个渠道有故障，` : ''}看原文、立即探测
-        <ArrowRight className="size-3" />
-      </Link>
-    </nav>
   );
 }

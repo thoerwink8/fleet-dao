@@ -24,7 +24,11 @@ test.describe('其余页面', () => {
     await shot(page, '07-路由');
   });
 
-  test('路由：动手里把 Sonnet 5.5 用键盘上挪 → 回车才落库；再挪回去', async ({ page, api, shot }, info) => {
+  test('路由：动手里把 Sonnet 5.5 聚焦后按 Alt+上键 → 直接落库；再挪回去', async ({
+    page,
+    api,
+    shot,
+  }, info) => {
     test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
     type Layers = { purposes: { purpose: string; models: { modelId: string }[] }[] };
     const executeOrder = async () =>
@@ -40,13 +44,12 @@ test.describe('其余页面', () => {
     await expect(sonnet).toBeVisible();
     const handle = sonnet.getByRole('button', { name: '拖动 Sonnet 5.5（动手里的先后）' });
     await handle.focus();
+    // 不按 Alt 的方向键不动库；Alt+上键直接保存，不弹窗
     await page.keyboard.press('ArrowUp');
-    // 方向键只预览，确认前库里没动，也不弹窗
-    await expect(page.locator('ol[aria-label="模型"]')).toHaveAttribute('data-pending', 'true');
     expect(await executeOrder()).toEqual(before);
+    await page.keyboard.press('Alt+ArrowUp');
     await expect(page.getByRole('alertdialog')).toHaveCount(0);
     await shot(page, '07-路由-调先后确认');
-    await page.keyboard.press('Enter');
 
     // 页面按新顺序重排：Sonnet 在最前
     await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'sonnet-5.5');
@@ -68,8 +71,7 @@ test.describe('其余页面', () => {
       .locator('li[data-model="sonnet-5.5"]')
       .getByRole('button', { name: '拖动 Sonnet 5.5（动手里的先后）' })
       .focus();
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('Enter');
+    await page.keyboard.press('Alt+ArrowDown');
     await expect.poll(executeOrder).toEqual(before);
   });
 
