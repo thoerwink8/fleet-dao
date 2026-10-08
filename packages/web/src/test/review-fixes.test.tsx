@@ -8,17 +8,7 @@ import { createMockApi, type MockApi } from '../api/mock/server';
 import type { PoolView, QuotaWindowView } from '../api/types';
 import { QuotaCell } from '../components/quota';
 import { Topbar } from '../components/shell/topbar';
-import { routeOptions } from '../components/task-actions';
-import {
-  headlineText,
-  isNearlyExhausted,
-  isUseItOrLoseIt,
-  poolUsage,
-  quotaHeadline,
-  utilOf,
-  windowLength,
-  windowTitle,
-} from '../lib/catalog';
+import { isNearlyExhausted, isUseItOrLoseIt, utilOf, windowLength, windowTitle } from '../lib/catalog';
 import QuotaPage from '../routes/quota';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
@@ -44,13 +34,6 @@ const noUsage = (w: Partial<QuotaWindowView> = {}): QuotaWindowView => ({
   stale: false,
   ...w,
 });
-
-/** 假后端路由两层里写码用途的那一份（换模型对话框列的就是它）。 */
-async function executeLayers(api: MockApi) {
-  const purpose = (await api.routingLayers()).purposes.find((p) => p.purpose === 'execute');
-  if (!purpose) throw new Error('假数据的路由两层里没有写码用途');
-  return purpose;
-}
 
 /** 把假后端所有账号池的额度窗都换成「用量没读到」。 */
 function withUnknownUsage(api: MockApi): MockApi {
@@ -99,12 +82,9 @@ describe('额度：用量没读到不当 0%', () => {
     expect(isUseItOrLoseIt(w, NOW)).toBe(false);
   });
 
-  test('上游这次没报的窗（staleSince）：照样显示、注明，不参与比较和报警', () => {
+  test('上游这次没报的窗（staleSince）：照样显示、注明，不算快用完', () => {
     const gone = noUsage({ utilization: 0.95, staleSince: at(-30) });
     expect(isNearlyExhausted(gone)).toBe(false);
-    const u = poolUsage([gone, noUsage({ window: '7d', utilization: 0.2 })]);
-    expect(u.tightest?.util).toBe(0.2);
-    expect(u.unreported).toEqual([gone]);
     const { container } = render(<QuotaCell w={gone} now={NOW} />);
     expect(container.textContent).toContain('起没再报这个窗');
   });
@@ -120,17 +100,6 @@ describe('额度：用量没读到不当 0%', () => {
     expect(container.textContent).toContain('112%');
   });
 
-  test('比谁最满时只比读到用量的窗，没读到的单独列出', () => {
-    const u = poolUsage([
-      noUsage(),
-      noUsage({ window: '7d', utilization: 0.3 }),
-      noUsage({ window: '7d_model' }),
-    ]);
-    expect(u.tightest?.util).toBe(0.3);
-    expect(u.unknown.map((w) => w.window)).toEqual(['5h', '7d_model']);
-    expect(poolUsage([noUsage()]).tightest).toBeUndefined();
-  });
-
   test('额度格写「用量没读到」、不高亮、不画成 0%', () => {
     const { container } = render(<QuotaCell w={noUsage()} now={NOW} />);
     const el = container.firstElementChild as HTMLElement;
@@ -139,17 +108,6 @@ describe('额度：用量没读到不当 0%', () => {
     expect(el.dataset.unknown).toBe('true');
     expect(container.textContent).not.toContain('0%');
     expect(container.textContent).not.toContain('，先用它');
-  });
-
-  test('换模型的候选：池里用量全没读到时标「用量没读到」，不给 0%', async () => {
-    const api = withUnknownUsage(createMockApi({ live: false }));
-    const [purpose, pools] = await Promise.all([executeLayers(api), api.pools()]);
-    const all = routeOptions(purpose, pools.pools, undefined);
-    expect(all.length).toBeGreaterThan(0);
-    for (const o of all) {
-      expect(o.quota?.kind).toBe('unknown');
-      expect(o.quota && headlineText(o.quota)).toBe('用量没读到');
-    }
   });
 
   test('额度页：没读到用量的窗列进「读数过期或没查成」，不进「先用它」', async () => {
@@ -162,57 +120,8 @@ describe('额度：用量没读到不当 0%', () => {
   });
 });
 
-/** 把假后端所有账号池换成同一种额度状况。 */
-function withPools(api: MockApi, patch: Pick<PoolView, 'quotaStatus' | 'windows'>): MockApi {
-  const pools = api.pools.bind(api);
-  api.pools = async () => {
-    const res = await pools();
-    return { ...res, pools: res.pools.map((p): PoolView => ({ ...p, ...patch })) };
-  };
-  return api;
-}
-
-describe('额度：一个池一句话，各页说法一致', () => {
-  // Claude 撞到限额时就是这样：5 小时窗上游说满了、不给比例；周窗才用了一半。
-  const halfAndFull: Pick<PoolView, 'quotaStatus' | 'windows'> = {
-    quotaStatus: 'fresh',
-    windows: [
-      noUsage({ window: '7d', label: '7d', utilization: 0.5, resetsAt: at(3000) }),
-      noUsage({ upstreamStatus: 'limit_reached', statusRaw: 'rejected' }),
-    ],
-  };
-  const neverRead: Pick<PoolView, 'quotaStatus' | 'windows'> = { quotaStatus: 'unread', windows: [] };
-
-  test('有窗上游说已用满：整个池说「已用满」（排在「用了一半」前面），不说 50%、不说「用量没读到」', async () => {
-    const h = quotaHeadline(halfAndFull);
-    expect(h.kind).toBe('full');
-    expect(headlineText(h)).toBe('已用满');
-    const u = poolUsage(halfAndFull.windows);
-    expect(u.full).toHaveLength(1);
-    expect(u.unknown).toEqual([]);
-    expect(u.tightest?.util).toBe(0.5);
-
-    const api = withPools(createMockApi({ live: false }), halfAndFull);
-    const [purpose, pools] = await Promise.all([executeLayers(api), api.pools()]);
-    const options = routeOptions(purpose, pools.pools, undefined);
-    expect(options.length).toBeGreaterThan(0);
-    expect(new Set(options.map((o) => o.quota?.kind))).toEqual(new Set(['full']));
-  });
-
-  test('从没读成过的池：换模型候选写「额度没查成」，不是什么都不显示', async () => {
-    expect(headlineText(quotaHeadline(neverRead))).toBe('额度没查成');
-    // 额度表里查不到这个池，也一样说没查成；额度表本身还没读到时不下结论（对话框另有提示）。
-    expect(quotaHeadline(undefined).kind).toBe('unread');
-
-    const api = withPools(createMockApi({ live: false }), neverRead);
-    const [purpose, pools] = await Promise.all([executeLayers(api), api.pools()]);
-    const options = routeOptions(purpose, pools.pools, undefined);
-    expect(new Set(options.map((o) => o.quota?.kind))).toEqual(new Set(['unread']));
-    // 额度表还没读到：不显示用量，也不猜计费方式
-    expect(routeOptions(purpose, undefined, undefined).every((o) => !o.quota && !o.billing)).toBe(true);
-  });
-
-  test('额度格：上游说满了却没给比例，写「已用满」、条画满，不算「用量没读到」', () => {
+describe('额度格：上游说满了', () => {
+  test('上游说满了却没给比例，写「已用满」、条画满，不算「用量没读到」', () => {
     const { container } = render(<QuotaCell w={noUsage({ upstreamStatus: 'limit_reached' })} now={NOW} />);
     const el = container.firstElementChild as HTMLElement;
     expect(el.dataset.full).toBe('true');

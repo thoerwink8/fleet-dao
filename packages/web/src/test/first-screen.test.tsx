@@ -98,7 +98,7 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     expect(screen.queryByText('正在确认登录…')).toBeNull();
     expect(w.subscribed).toEqual([2]);
     await w.release();
-    // 主页用不到路由（路由两层是换模型对话框用的，没打开也不读）
+    // 主页用不到路由目录和路由两层（那两份是路由页、任务页「用哪个模型」读的）
     expect(w.called('routing')).toBe(false);
     expect(w.called('routingLayers')).toBe(false);
   });

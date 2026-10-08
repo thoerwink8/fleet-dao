@@ -308,7 +308,7 @@ export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
 /**
  * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每 30 秒重拉
  * （路由页顶部的渠道状态两份一起读，#1087）；额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。
- * enabled 为假时不读（比如换模型的对话框没打开）。
+ * enabled 为假时不读。
  */
 export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
