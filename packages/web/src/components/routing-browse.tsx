@@ -5,6 +5,7 @@
 // - 开关状态只有路由两层里有。没配进任何用途的模型读不到它的路由开着没有：开关置灰、写明原因，不画成开或关。
 // - 开关走 routing-edit.tsx 里现成的确认弹窗和接口；Fable 的「只有创始人在驾驶舱能开」判在后端，这里只标一句。
 
+import { founderOnlyFor } from '@fleet-dao/shared';
 import { Search } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link } from 'react-router';
@@ -24,15 +25,29 @@ import {
 import { modelKind } from '../lib/route-kinds';
 import { countsText } from '../lib/route-state';
 import { purposeLabel, routeTitle } from '../lib/routing';
-import { buildCatalog, type CatalogEntry, channelRoutes, isRetired } from '../lib/routing-browse';
+import {
+  buildCatalog,
+  CATALOG_STATUSES,
+  type CatalogEntry,
+  type CatalogFilter,
+  type CatalogStatus,
+  type CatalogVisual,
+  catalogFilterActive,
+  catalogMarks,
+  channelRoutes,
+  filterCatalog,
+  flattenCatalog,
+  groupCatalog,
+  NO_CATALOG_FILTER,
+} from '../lib/routing-browse';
 import { cn } from '../lib/utils';
 import { LoadError, LoadingRows, Panel } from './page';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
 import { KindDot, useKindEnv } from './routing-kinds';
+import { isManualChannel, ManualModelForm } from './routing-membership';
 import { ModelRosterNotice } from './routing-roster';
 import { ModelRoutes, RouteItem } from './routing-routes';
 import { StatusChip, StatusDot } from './status';
-import { Badge } from './ui/badge';
 
 /** 紧凑行的高度（像素）和一屏高度：窗口化按它们算位置。 */
 export const ROW_HEIGHT = 44;
@@ -45,12 +60,15 @@ export function ListFilterBar({
   onChange,
   total,
   shown,
+  active,
 }: {
   noun: string;
   filter: ListFilter;
   onChange: (next: ListFilter) => void;
   total: number;
   shown: number;
+  /** 目录上还有厂家、渠道、状态筛时，由调用方说「现在算不算在筛」。 */
+  active?: boolean;
 }) {
   return (
     <div className="space-y-2 border-b p-3">
@@ -82,7 +100,7 @@ export function ListFilterBar({
           只看已开启
         </button>
         <span className="num text-caption text-muted-foreground" aria-live="polite">
-          {filterActive(filter) ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`}
+          {(active ?? filterActive(filter)) ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`}
         </span>
       </div>
     </div>
@@ -153,23 +171,42 @@ const PROBE_WORD: Record<NonNullable<Route['probe']>['state'], string> = {
 
 // —— 模型目录 ——
 
+const STATUS_LABEL: Record<CatalogStatus, string> = {
+  discovered: '新发现',
+  retired: '已下架',
+  off: '关着',
+  locked: '锁住',
+};
+
 export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
   const routing = useRouting();
   const now = useNow();
   const entries = useMemo(() => buildCatalog(layers, routing.data), [layers, routing.data]);
-  const [filter, setFilter] = useState<ListFilter>(NO_FILTER);
+  const [filter, setFilter] = useState<CatalogFilter>(NO_CATALOG_FILTER);
+  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [picked, setPicked] = useState<string | null>(null);
-  const shown = useMemo(
-    () =>
-      filterRows(
-        entries,
-        filter,
-        (e) => [e.displayName, e.modelId, e.family],
-        (e) => e.switchKnown && e.enabled,
-      ),
-    [entries, filter],
+  const shown = useMemo(() => filterCatalog(entries, filter, now), [entries, filter, now]);
+  const visuals = useMemo(() => flattenCatalog(groupCatalog(shown), openGroups), [shown, openGroups]);
+  const vendors = useMemo(
+    () => [...new Set(entries.map((e) => e.family).filter((family) => family !== ''))].sort(),
+    [entries],
   );
-  const current = entries.find((e) => e.modelId === picked) ?? shown[0];
+  const current = shown.find((e) => e.modelId === picked) ?? shown[0];
+  const extra = filter.vendor !== '' || filter.channel !== '' || filter.statuses.length > 0;
+  const toggleGroup = (key: string) =>
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const toggleStatus = (status: CatalogStatus) =>
+    setFilter((prev) => ({
+      ...prev,
+      statuses: prev.statuses.includes(status)
+        ? prev.statuses.filter((item) => item !== status)
+        : [...prev.statuses, status],
+    }));
   return (
     <>
       <ModelRosterNotice layers={layers} />
@@ -186,28 +223,86 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
           <ListFilterBar
             noun="模型"
             filter={filter}
-            onChange={setFilter}
+            onChange={(next) =>
+              setFilter((prev) => ({ ...prev, query: next.query, onlyEnabled: next.onlyEnabled }))
+            }
             total={entries.length}
             shown={shown.length}
+            active={catalogFilterActive(filter)}
           />
+          <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+            <select
+              aria-label="按厂家筛选"
+              value={filter.vendor}
+              onChange={(e) => setFilter((prev) => ({ ...prev, vendor: e.target.value }))}
+              className="h-7 rounded-md border bg-background px-1.5 text-caption"
+            >
+              <option value="">全部厂家</option>
+              {vendors.map((vendor) => (
+                <option key={vendor} value={vendor}>
+                  {vendor}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="按渠道筛选"
+              value={filter.channel}
+              onChange={(e) => setFilter((prev) => ({ ...prev, channel: e.target.value }))}
+              className="h-7 max-w-40 rounded-md border bg-background px-1.5 text-caption"
+            >
+              <option value="">全部渠道</option>
+              {(routing.data?.channels ?? []).map((channel) => (
+                <option key={channel.id} value={channel.id}>
+                  {channel.name}
+                </option>
+              ))}
+            </select>
+            {CATALOG_STATUSES.map((status) => {
+              const on = filter.statuses.includes(status);
+              return (
+                <button
+                  key={status}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => toggleStatus(status)}
+                  className={cn(
+                    'inline-flex h-7 items-center rounded-full border px-2.5 text-caption transition-colors hover:bg-muted',
+                    on && 'border-border-strong bg-muted font-medium',
+                  )}
+                >
+                  {STATUS_LABEL[status]}
+                </button>
+              );
+            })}
+          </div>
           <WindowedRows
             ariaLabel="目录里的模型"
-            items={shown}
-            itemId={(e) => e.modelId}
+            items={visuals}
+            itemId={(row) => (row.kind === 'group' ? `group:${row.group.key}` : row.entry.modelId)}
             empty={
               entries.length === 0
                 ? '目录里一个模型都没有'
-                : '没有符合的模型：换个搜索词，或关掉「只看已开启」'
+                : extra
+                  ? '没有符合的模型：换个厂家、渠道或状态'
+                  : '没有符合的模型：换个搜索词，或关掉「只看已开启」'
             }
-            rowProps={(e) => ({ 'data-catalog': e.modelId })}
-            rowClassName={(e) => (e.modelId === current?.modelId ? 'bg-muted/60' : undefined)}
+            rowProps={(row) =>
+              row.kind === 'entry'
+                ? { 'data-catalog': row.entry.modelId }
+                : { 'data-catalog-group': row.group.key }
+            }
+            rowClassName={(row) =>
+              row.kind === 'entry' && row.entry.modelId === current?.modelId ? 'bg-muted/60' : undefined
+            }
           >
-            {(e) => (
-              <CatalogRow
-                entry={e}
+            {(row) => (
+              <CatalogVisualRow
+                row={row}
                 now={now}
-                selected={e.modelId === current?.modelId}
-                onPick={() => setPicked(e.modelId)}
+                open={row.kind === 'group' && openGroups.has(row.group.key)}
+                selected={row.kind === 'entry' && row.entry.modelId === current?.modelId}
+                onPick={(modelId) => setPicked(modelId)}
+                onToggle={toggleGroup}
               />
             )}
           </WindowedRows>
@@ -224,18 +319,76 @@ function entrySummary(e: CatalogEntry): string {
   return `${e.purposes.map(purposeLabel).join('、')} · ${e.routeCount} 条路，${live} 条活`;
 }
 
+function CatalogMark({ children, title }: { children: string; title?: string | undefined }) {
+  return (
+    <span
+      title={title}
+      className="inline-flex h-4 shrink-0 items-center rounded border border-current px-1 text-micro font-semibold text-ink-fail"
+    >
+      {children}
+    </span>
+  );
+}
+
+function CatalogVisualRow({
+  row,
+  now,
+  open,
+  selected,
+  onPick,
+  onToggle,
+}: {
+  row: CatalogVisual;
+  now: number;
+  open: boolean;
+  selected: boolean;
+  onPick: (modelId: string) => void;
+  onToggle: (key: string) => void;
+}) {
+  if (row.kind === 'group') {
+    return (
+      <div className="flex h-full items-center gap-2 px-3">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={`${open ? '收起' : '展开'} ${row.group.label} 的变体`}
+          onClick={() => onToggle(row.group.key)}
+          className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <span className="truncate text-sm font-semibold">{row.group.label}</span>
+          <span className="shrink-0 text-caption text-muted-foreground">
+            {row.group.members.length} 个变体
+          </span>
+        </button>
+      </div>
+    );
+  }
+  return (
+    <CatalogRow
+      entry={row.entry}
+      now={now}
+      nested={row.nested}
+      selected={selected}
+      onPick={() => onPick(row.entry.modelId)}
+    />
+  );
+}
+
 function CatalogRow({
   entry: e,
   now,
+  nested,
   selected,
   onPick,
 }: {
   entry: CatalogEntry;
   now: number;
+  nested: boolean;
   selected: boolean;
   onPick: () => void;
 }) {
-  const retired = isRetired(e, now);
+  const marks = catalogMarks(e, now);
+  const founder = founderOnlyFor({ id: e.modelId, family: e.family, displayName: e.displayName });
   // 状态词和颜色按路由八态合成；没配进用途的模型读不到三件事，不画态
   const kind = modelKind(e, useKindEnv());
   const why = !e.switchKnown
@@ -244,7 +397,7 @@ function CatalogRow({
       : '这个模型下一条路由都没有'
     : true;
   return (
-    <div className="flex h-full items-center gap-2 px-3">
+    <div className={cn('flex h-full items-center gap-2 px-3', nested && 'pl-6')}>
       <button
         type="button"
         onClick={onPick}
@@ -262,11 +415,9 @@ function CatalogRow({
           <span className="hidden truncate text-caption text-muted-foreground sm:inline">{e.family}</span>
         ) : null}
         <FounderOnlyBadge modelId={e.modelId} family={e.family} displayName={e.displayName} />
-        {retired ? (
-          <Badge variant="outline" className="h-4 shrink-0 px-1 text-micro font-normal">
-            已下架
-          </Badge>
-        ) : null}
+        {marks.discovered ? <CatalogMark>新发现</CatalogMark> : null}
+        {marks.retired ? <CatalogMark title="目录里标了下架">已下架</CatalogMark> : null}
+        {marks.locked && !founder ? <CatalogMark title={marks.lockWhy}>锁住</CatalogMark> : null}
         <span className="ml-auto hidden truncate text-caption text-muted-foreground md:inline">
           {entrySummary(e)}
         </span>
@@ -440,6 +591,9 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
       actions={<StatusChip tone={c.tone} label={c.label} />}
       bodyClassName="p-0"
     >
+      {isManualChannel(c.channel.id, c.channel.name, layers.modelRoster?.manual) ? (
+        <ManualModelForm channelId={c.channel.id} />
+      ) : null}
       <p className="border-b px-3 py-2 text-caption text-muted-foreground">
         {countsText(c.counts)} ·{' '}
         <Link

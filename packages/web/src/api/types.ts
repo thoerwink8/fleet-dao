@@ -2,6 +2,7 @@
 // 后端对每个返回都按同一份定义校验，前端的 HTTP 层也照它解析——字段增删改 web-api.ts，这里自动跟上。
 import type {
   ActivitySchema,
+  AddPurposeModelRequest,
   AuditEntrySchema,
   AuditResponse,
   AuthConfigResponse,
@@ -35,6 +36,8 @@ import type {
   JobViewSchema,
   LivenessFactSchema,
   LivenessVerdictSchema,
+  ManualModelRequest,
+  ManualModelResponse,
   MeResponse,
   ModelSchema,
   MovePurposeModelRequest,
@@ -51,10 +54,12 @@ import type {
   PoolSchema,
   PoolsResponse,
   PoolViewSchema,
+  PurposeMembershipResponse,
   QuotaWindowViewSchema,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
+  RemovePurposeModelRequest,
   RepoDispatchResponse,
   RepoSchema,
   RouteEffortSchema,
@@ -76,6 +81,7 @@ import type {
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
   SetModelEnabledResponse,
+  SetPurposeModelEffortRequest,
   SettingSchema,
   SettingsResponse,
   TaskActionRequest,
@@ -172,6 +178,14 @@ export type TaskRoutePin = z.infer<typeof UpdateTaskRoutePinResponse>;
 /** 路由页改先后和开关（母单 #1089）：拖到新先后、模型 / 渠道 / 每条路由的开关。 */
 export type MovePurposeModelBody = z.input<typeof MovePurposeModelRequest>;
 export type MovedPurposeModel = z.infer<typeof MovePurposeModelResponse>;
+/** 往用途里加模型、移出、改这一用途下的档位（#1356）。version 是改之前看到的。 */
+export type AddPurposeModelBody = z.input<typeof AddPurposeModelRequest>;
+export type RemovePurposeModelBody = z.input<typeof RemovePurposeModelRequest>;
+export type SetPurposeModelEffortBody = z.input<typeof SetPurposeModelEffortRequest>;
+export type PurposeMembership = z.infer<typeof PurposeMembershipResponse>;
+/** 没有名册的渠道：登记或撤掉一个模型串（#1359）。 */
+export type ManualModelBody = z.input<typeof ManualModelRequest>;
+export type ManualModelResult = z.infer<typeof ManualModelResponse>;
 export type UpdateModelRouteBody = z.input<typeof UpdateModelRouteRequest>;
 export type UpdatedModelRoute = z.infer<typeof UpdateModelRouteResponse>;
 export type MoveDirection = 'up' | 'down';
