@@ -4,7 +4,7 @@
 // 引用对不上（模型、路由库里没有，路由不属于那个模型）、思考档位这条路由的执行方式不认、有用途既没单列又没有 default：
 // 一行不写、明确报错。
 // 发布时由 bin/routing.ts 在目录装载器之后调（deploy/release.sh 的 load_routing）：路由要先由目录装进库，骨架才对得上。
-import { routeEffortProblem } from '@fleet-dao/shared';
+import { founderOnlyFor, routeEffortProblem } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.ts';
 import {
@@ -39,9 +39,11 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
   if (missing.length > 0) problems.push(`没有 default，这些用途也没单列：${missing.join('、')}`);
 
   const modelIds = Object.keys(cfg.models);
-  const knownModels = new Set(
-    (await db.select({ id: models.id }).from(models).where(inArray(models.id, modelIds))).map((m) => m.id),
-  );
+  const modelRows = await db
+    .select({ id: models.id, family: models.family, displayName: models.displayName })
+    .from(models)
+    .where(inArray(models.id, modelIds));
+  const knownModels = new Set(modelRows.map((m) => m.id));
   for (const m of modelIds) if (!knownModels.has(m)) problems.push(`模型 ${m} 库里没有`);
   const routeIds = Object.values(cfg.models).flatMap((rs) => rs.map((r) => r.routeId));
   const knownRoutes = new Map(
@@ -52,11 +54,34 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
           modelId: routes.modelId,
           hostId: routes.hostId,
           upstreamModel: routes.upstreamModel,
+          upstreamAliases: routes.upstreamAliases,
         })
         .from(routes)
         .where(inArray(routes.id, routeIds))
     ).map((r) => [r.id, r]),
   );
+  // 只有创始人本人能开的模型（Fable，决定 0033）：骨架是机器写进库的，不能替他把它配进用途或打开。
+  // 骨架里列着它、但路由是关着的、也不在任何用途里，可以（入库默认就是这样）。
+  for (const [modelId, rs] of Object.entries(cfg.models)) {
+    const row = modelRows.find((m) => m.id === modelId);
+    if (row === undefined) continue;
+    const founderOnly = [
+      founderOnlyFor(row),
+      ...rs.map((r) => {
+        const known = knownRoutes.get(r.routeId);
+        return known && founderOnlyFor({ ...row, ...known, id: row.id });
+      }),
+    ].find((rule) => rule !== undefined);
+    if (founderOnly === undefined) continue;
+    const inPurposes = STAGE_KINDS.filter((s) => listFor(s)?.includes(modelId));
+    const opened = rs.filter((r) => r.enabled).map((r) => r.routeId);
+    if (inPurposes.length > 0) {
+      problems.push(`模型 ${modelId} 在骨架里被配进用途 ${inPurposes.join('、')}：${founderOnly.reason}`);
+    }
+    if (opened.length > 0) {
+      problems.push(`模型 ${modelId} 的路由 ${opened.join('、')} 在骨架里是开着的：${founderOnly.reason}`);
+    }
+  }
   for (const [model, rs] of Object.entries(cfg.models)) {
     for (const r of rs) {
       const known = knownRoutes.get(r.routeId);

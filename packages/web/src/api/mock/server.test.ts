@@ -148,14 +148,14 @@ describe('假后端：发给工作流的信号', () => {
     expect(runs.find((r) => r.routeId === 'r-cb-opus')?.outcome).toBe('stopped');
   });
 
-  test('换到犯禁令的路由：422 route_not_allowed，白话写明原因', async () => {
+  test('换到不在线的路由：422 route_offline。Fable 不再是硬禁令（决定 0033），这条 Fable 路由挡在「没开、不在线」上，不是禁令', async () => {
     const api = fresh();
     const e = await rejects(
       api.taskAction('t-12', { action: 'reroute', routeId: 'r-rl-fable', subtaskId: 't-12-b' }),
     );
     expect(e.status).toBe(422);
-    expect(e.code).toBe('route_not_allowed');
-    expect(e.message).toContain('不用 Fable');
+    expect(e.code).toBe('route_offline');
+    expect(e.message).not.toContain('Fable');
   });
 
   test('结束了的任务不再接信号：409 task_finished', async () => {
