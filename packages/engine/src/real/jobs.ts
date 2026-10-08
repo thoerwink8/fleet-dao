@@ -9,6 +9,7 @@ import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
 import { INTAKE_JOB } from '../jobs/intake.ts';
+import { JUDGE_SELF_CHECK_JOB } from '../jobs/judge-self-check.ts';
 import { QUOTA_READ_JOB } from '../jobs/quota-read.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { ROUTE_PROBE_JOB } from '../jobs/route-probe.ts';
@@ -23,6 +24,7 @@ export const ENGINE_JOBS = [
   CANARY_JOB,
   WATCHDOG_JOB,
   INTAKE_JOB,
+  JUDGE_SELF_CHECK_JOB,
   CI_TIMINGS_JOB,
 ] as const;
 

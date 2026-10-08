@@ -94,6 +94,19 @@ export interface HourlyReconcileRun {
   why?: string | undefined;
 }
 
+/**
+ * 判断题自检一轮的结局：和记进 schedule_runs 的同一份。
+ * scanned = 看过最近一次调用（有没有都算看过），found = 自检没通过或判断题起不来。sent = 这一轮真发出去了。
+ */
+export interface JudgeSelfCheckRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
+  sent: boolean;
+  why?: string | undefined;
+}
+
 /** 子任务的分支名：fleet/<单号>-<键>。每小时对账认树（jobs/worktree-sweep.ts）还按这个拼法认老的树。 */
 export function subtaskBranch(issueNumber: number, key: string): string {
   return `fleet/${issueNumber}-${key}`;

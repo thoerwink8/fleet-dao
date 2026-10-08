@@ -1,5 +1,5 @@
 // 引擎进程里的定时器（#1072，jobs/timers.ts）：钟点格子、不叠着跑、停机后只补最近一轮、一轮失败不停定时、重启后自己恢复；
-// 和 9 个定时任务的登记（jobs/engine-timers.ts）：原来 8 个的格子是 Temporal Schedule 的 interval + offset，没改；
+// 和 10 个定时任务的登记（jobs/engine-timers.ts）：原来 8 个的格子是 Temporal Schedule 的 interval + offset，没改；
 // 耗时表是 #921 新加的，周一 06:00（北京时间）。
 // 用假的钟和假的 setTimeout，不真等。
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
@@ -353,7 +353,7 @@ describe('进程内定时器（startTimers）', () => {
   });
 });
 
-describe('9 个定时任务的登记（engineTimerJobs）', () => {
+describe('10 个定时任务的登记（engineTimerJobs）', () => {
   const never = () => {
     throw new Error('这里不该被叫');
   };
@@ -366,6 +366,7 @@ describe('9 个定时任务的登记（engineTimerJobs）', () => {
     canary: never,
     watchdog: never,
     intake: never,
+    judgeSelfCheck: never,
     ciTimings: never,
   });
   const start = vi_fn();
@@ -391,7 +392,7 @@ describe('9 个定时任务的登记（engineTimerJobs）', () => {
     expect(jobs().map((j) => j.id)).toEqual(ENGINE_JOBS.map((j) => j.id));
   });
 
-  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3、耗时表每周一 06:00（北京时间）', () => {
+  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每周一 06:00（北京时间）', () => {
     expect(jobs().map((j) => [j.id, j.everyMinutes, j.offsetMinutes ?? 0])).toEqual([
       ['github-reconcile', 15, 0],
       ['route-probe', 15, 7],
@@ -401,6 +402,7 @@ describe('9 个定时任务的登记（engineTimerJobs）', () => {
       ['canary', 360, 26],
       ['watchdog', 5, 4],
       ['intake', 5, 3],
+      ['judge-self-check', 30, 17],
       ['ci-timings', 7 * 24 * 60, 3 * 24 * 60 + 22 * 60],
     ]);
   });

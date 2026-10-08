@@ -1,5 +1,5 @@
-// 引擎的 9 个定时任务（design 第四节；#921 起多一个每周刷新耗时表）：每个任务的钟点格子、补跑窗口、一轮怎么跑，出处在这里；
-// 每周刷新耗时表的格子在 jobs/schedules.ts（单子点名登记在那里），这里只把它装进来。
+// 引擎的 10 个定时任务（design 第四节；#921 起多一个每周刷新耗时表，#1365 起多一个判断题自检）：每个任务的钟点格子、补跑窗口、一轮怎么跑，出处在这里；
+// 每周刷新耗时表和判断题自检的格子在 jobs/schedules.ts（单子点名登记在那里），这里只把它们装进来。
 // 调度本身在 jobs/timers.ts。任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号。原来 8 个的格子是 Temporal Schedule 的
 // interval + offset，没改；耗时表是新的，周一 06:00（北京时间）。#1078 起不再建 Temporal Schedule，进程内定时器按这些格子跑。
 // 引擎总开关（#1086）关着时只有标了 needsMaster 的两个不跑（拉单、巡检）。看家检查关着照跑。每周刷新耗时表也不标：它不拉单、
@@ -22,6 +22,7 @@ import {
   runHourlyReconcileJob,
 } from './hourly-reconcile.ts';
 import { INTAKE_EVERY_MINUTES, INTAKE_JOB, INTAKE_OFFSET_MINUTES, runIntakeJob } from './intake.ts';
+import { runJudgeSelfCheckJob } from './judge-self-check.ts';
 import {
   QUOTA_READ_EVERY_MINUTES,
   QUOTA_READ_JOB,
@@ -35,7 +36,7 @@ import {
   runRouteProbeJob,
 } from './route-probe.ts';
 import { routeProbeLock } from './route-probe-now.ts';
-import { ciTimingsSchedule } from './schedules.ts';
+import { ciTimingsSchedule, judgeSelfCheckSchedule } from './schedules.ts';
 import type { TimerJob } from './timers.ts';
 import { runWatchdogJob, WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
@@ -64,6 +65,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const hourlyReconcile = need(jobs, 'hourlyReconcile');
   const watchdog = need(jobs, 'watchdog');
   const intake = need(jobs, 'intake');
+  const judgeSelfCheck = need(jobs, 'judgeSelfCheck');
   const ciTimings = need(jobs, 'ciTimings');
   // 巡检的活动在工作流里跑，依赖不在这里装；但没装齐要在起的时候就发现，别等到工作流里的活动才报
   need(jobs, 'canary');
@@ -149,6 +151,8 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       needsMaster: true,
       run: () => runIntakeJob(intake(client, taskQueue)),
     },
+    // 判断题自检（#1365）。格子在 jobs/schedules.ts。不标 needsMaster：总开关关着也要能把红灯探回来。
+    judgeSelfCheckSchedule(() => runJudgeSelfCheckJob(judgeSelfCheck())),
     // 每周刷新 CI 测试耗时表（#921）。格子在 jobs/schedules.ts。不标 needsMaster：见文件头。
     ciTimingsSchedule(() => runCiTimingsJob(ciTimings())),
   ];

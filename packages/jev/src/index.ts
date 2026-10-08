@@ -10,6 +10,7 @@ export * from './effects.ts';
 export * from './evidence.ts';
 export * from './jev.ts';
 export * from './policy.ts';
+export * from './probe.ts';
 export * from './questions.ts';
 export * from './store.ts';
 export * from './verdict.ts';

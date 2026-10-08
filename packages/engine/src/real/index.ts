@@ -68,6 +68,7 @@ import { intakeJob } from './intake.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { registerEngineJobs } from './jobs.ts';
+import { judgeSelfCheckJob } from './judge-self-check.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
 import { productionMemoryPeak } from './memory-peak.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
@@ -775,6 +776,8 @@ export function realPortsFromEnv(
         return foreignCanarySlugs(env.FLEET_CANARY_REPO, declared.slugs);
       },
     }),
+    // 判断题自检（#1365）：最近一次调用失败超过 30 分钟，发一道不占额度的固定题。不看总开关。
+    judgeSelfCheck: judgeSelfCheckJob({ db, env }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
     ciTimings: ciTimingsJob({ db, github: gh }),
   };

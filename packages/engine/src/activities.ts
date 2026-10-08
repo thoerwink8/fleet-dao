@@ -17,6 +17,7 @@ import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
 import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
+import type { JudgeSelfCheckJobDeps } from './jobs/judge-self-check.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
 import type { RouteProbeNowDeps } from './jobs/route-probe-now.ts';
@@ -206,6 +207,8 @@ export interface EngineJobs {
   watchdog?: () => WatchdogDeps;
   /** 拉单（#632）：读开着开关的仓里该做的单、起任务工作流（起工作流、数在跑的用这次活动的 Temporal 客户端；taskQueue 同上）。 */
   intake?: (client: Client, taskQueue: string) => IntakeDeps;
+  /** 判断题自检（#1365）：最近一次调用失败超过 30 分钟，发一道不占额度的固定题，结果写进判断记录。不拉单。 */
+  judgeSelfCheck?: () => JudgeSelfCheckJobDeps;
   /** 每周刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
   ciTimings?: () => CiTimingsJobDeps;
 }
