@@ -33,6 +33,11 @@ export interface DiscoverCounts {
   goneCleared: number;
 }
 
+export interface DiscoverResult extends DiscoverCounts {
+  /** 这一次新插进 models 的模型 id（给「发现 N 个新模型」的通知列名字）。 */
+  newModelIds: string[];
+}
+
 function listedKeys(route: { upstreamModel: string | null; upstreamAliases: readonly string[] }): string[] {
   const out: string[] = [];
   const upstream = route.upstreamModel?.trim() ?? '';
@@ -53,7 +58,7 @@ export async function discoverChannelModels(
   channelId: string,
   modelKeys: readonly string[],
   now: Date,
-): Promise<DiscoverCounts> {
+): Promise<DiscoverResult> {
   const hostId = HOST_BY_CHANNEL[channelId];
   if (!hostId) throw new Error(`渠道 ${channelId} 没有对应的执行方式，路由挂不上去`);
   const poolRows = await db
@@ -77,6 +82,7 @@ export async function discoverChannelModels(
   const matched = new Set<string>();
   const familiesReady = new Set<string>();
   let modelsAdded = 0;
+  const newModelIds: string[] = [];
   let routesAdded = 0;
   let goneCleared = 0;
 
@@ -114,7 +120,10 @@ export async function discoverChannelModels(
       .values({ id: modelId, family: familyId, displayName: unclassified ? key : modelId })
       .onConflictDoNothing({ target: models.id })
       .returning({ id: models.id });
-    if (insertedModel.length > 0) modelsAdded += 1;
+    if (insertedModel.length > 0) {
+      modelsAdded += 1;
+      newModelIds.push(modelId);
+    }
 
     const routeId = `auto:${channelId}:${key}`;
     const insertedRoute = await db
@@ -161,5 +170,5 @@ export async function discoverChannelModels(
     reason: '名册读成，自动入库',
     via: 'engine',
   });
-  return counts;
+  return { ...counts, newModelIds };
 }

@@ -174,6 +174,34 @@ describe('上游串拆名', () => {
     });
   });
 
+  it('Mirasim：Grok 和 Gemini 也拆得出（grok-4.7 不是未归类，preview 并到同一个模型）', () => {
+    for (const version of ['4.5', '4.6', '4.7']) {
+      expect(named('mirasim', `grok-${version}`)).toEqual({
+        modelId: `grok-${version}`,
+        family: 'grok',
+        effort: null,
+        fast: false,
+        thinking: false,
+        context: null,
+      });
+    }
+    expect(named('mirasim', 'gemini-3.1-pro-preview')).toEqual({
+      modelId: 'gemini-3.1-pro',
+      family: 'gemini',
+      effort: null,
+      fast: false,
+      thinking: false,
+      context: null,
+    });
+  });
+
+  it('【故意造出的失败】名册里差集的每个 Mirasim 串都拆得出：有一个拆不出这里就红，点名是哪个', () => {
+    const unsplit = rosterDiff.mirasimMissing.filter(
+      (raw) => 'unclassified' in nameUpstreamModel('mirasim', raw),
+    );
+    expect(unsplit).toEqual([]);
+  });
+
   it('Grok：渠道编号是 xai；-build 和 -fast 并到同一个 grok 版本，不另开模型', () => {
     expect(named('xai', 'grok-4.7')).toEqual({
       modelId: 'grok-4.7',
@@ -220,10 +248,11 @@ describe('上游串拆名', () => {
   it('拆不出的返回 unclassified，模型 id 用渠道编号加原串', () => {
     expect(nameUpstreamModel('cursor', 'claude-4.6-sonnet-medium')).toEqual({ unclassified: true });
     expect(nameUpstreamModel('cursor', 'gpt-5.5-extra-high')).toEqual({ unclassified: true });
-    expect(nameUpstreamModel('mirasim', 'gemini-3.1-pro-preview')).toEqual({ unclassified: true });
+    expect(nameUpstreamModel('mirasim', 'qwen-3.7-coder')).toEqual({ unclassified: true });
+    expect(nameUpstreamModel('mirasim', 'claude-opus-5-5[2x]')).toEqual({ unclassified: true });
     expect(discoveredModelId('cursor', 'claude-4.6-sonnet-medium')).toBe('cursor:claude-4.6-sonnet-medium');
     expect(discoveredModelId('cursor', 'gpt-5.5-extra-high')).toBe('cursor:gpt-5.5-extra-high');
-    expect(discoveredModelId('mirasim', 'gemini-3.1-pro-preview')).toBe('mirasim:gemini-3.1-pro-preview');
+    expect(discoveredModelId('mirasim', 'qwen-3.7-coder')).toBe('mirasim:qwen-3.7-coder');
     expect(discoveredModelId('cursor', 'claude-opus-4-8-thinking-high-fast')).toBe('opus-4.8');
   });
 });

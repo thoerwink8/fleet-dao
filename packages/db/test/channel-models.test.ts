@@ -274,6 +274,7 @@ describe('渠道模型名册', () => {
       NOW,
     );
     expect(saved.unstored).toEqual([]);
+    expect(saved.newModelIds).toEqual(['opus-4.8']);
     const routeRows = await t.db.select().from(routes);
     const fast = routeRows.find((r) => r.upstreamModel === 'claude-opus-4-8-thinking-high-fast');
     const high = routeRows.find((r) => r.upstreamModel === 'claude-opus-4-8-thinking-high');
@@ -456,6 +457,29 @@ describe('渠道模型名册', () => {
     expect(again).toHaveLength(2);
     expect(again[1]?.after).toEqual({ modelsAdded: 0, routesAdded: 0, goneMarked: 0, goneCleared: 0 });
     expect((await t.db.select().from(routes)).filter((r) => r.channelId === 'mirasim')).toHaveLength(2);
+  });
+
+  it('Mirasim 真实名册差集整份入库：grok-4.7 等都拆对，没有一个落进未归类', async () => {
+    await seedChannels(t.db);
+    const real = JSON.parse(
+      readFileSync(new URL('./fixtures/roster-diff-2026-10-08.json', import.meta.url), 'utf8'),
+    ) as { mirasimMissing: string[]; grokRoster: string[] };
+    const saved = await saveChannelModelReads(
+      t.db,
+      [
+        ok('mirasim', [...real.mirasimMissing, 'grok-4.7', 'grok-4.6', 'grok-4.5']),
+        ok('xai', real.grokRoster),
+      ],
+      NOW,
+    );
+    expect(saved.unstored).toEqual([]);
+    expect(saved.newModelIds).toEqual(
+      expect.arrayContaining(['grok-4.7', 'grok-4.6', 'grok-4.5', 'fable-5.1']),
+    );
+    const unclassified = (await t.db.select().from(models)).filter((m) => m.family === 'unclassified');
+    expect(unclassified.map((m) => m.id)).toEqual([]);
+    const fable = (await t.db.select().from(routingCatalog)).filter((r) => r.modelId === 'fable-5.1');
+    expect(fable.map((r) => r.enabled)).toEqual([false]);
   });
 
   it('【故意造出的失败】入库后差集里仍有该串则这里红', async () => {

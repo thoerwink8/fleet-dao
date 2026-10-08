@@ -184,8 +184,9 @@ const grokBase: BaseRule = {
 
 const geminiBase: BaseRule = {
   family: 'gemini',
-  pattern: /^gemini-\d+(?:\.\d+)*-(?:flash|pro)$/,
-  modelId: (match) => match[0],
+  // -preview 是同一个模型的预览构建，并到同一个模型 id；上游原串留在路由上。
+  pattern: /^gemini-\d+(?:\.\d+)*-(?:flash|pro)(?:-preview)?$/,
+  modelId: (match) => match[0].replace(/-preview$/, ''),
 };
 
 const composerBase: BaseRule = {
@@ -242,10 +243,10 @@ const CURSOR_RULES: ChannelRule = {
   dropCursorGrokPrefix: true,
 };
 
-/** Mirasim 名册：模型 id 后面常跟 [1m]。 */
+/** Mirasim 名册：模型 id 后面常跟 [1m]。中转的有 Claude、GPT、Grok、Gemini、Kimi、GLM、DeepSeek。 */
 const MIRASIM_RULES: ChannelRule = {
   suffixes: ['effort', 'fast', 'thinking'],
-  bases: [claudeBase, gptBase, kimiCodeBase, kimiBase, glmBase, deepseekBase],
+  bases: [claudeBase, gptBase, grokBase, geminiBase, kimiCodeBase, kimiBase, glmBase, deepseekBase],
   dropCursorGrokPrefix: false,
 };
 

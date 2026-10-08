@@ -73,6 +73,8 @@ export async function modelRosterDue(db: Db, now: Date, everyMs = MODEL_ROSTER_E
 export interface SaveChannelModelReadsResult {
   /** 渠道行不在、约束没过：这一渠这轮没记上，页面上它仍是「还没读过」或留着上一次。 */
   unstored: { channelId: string; error: string }[];
+  /** 这一轮各渠道新插进目录的模型 id（去重）；没有新模型是空数组。 */
+  newModelIds: string[];
 }
 
 /**
@@ -85,8 +87,10 @@ export async function saveChannelModelReads(
   now: Date,
 ): Promise<SaveChannelModelReadsResult> {
   const unstored: { channelId: string; error: string }[] = [];
+  const newModelIds: string[] = [];
   for (const raw of results) {
     const result = normalizeChannelModelRead(raw);
+    const committed: string[] = [];
     try {
       await db.transaction(async (tx) => {
         const written = await tx
@@ -119,13 +123,15 @@ export async function saveChannelModelReads(
               set: { lastSeenAt: now },
             });
         }
-        await discoverChannelModels(tx, result.channelId, result.models, now);
+        const found = await discoverChannelModels(tx, result.channelId, result.models, now);
+        committed.push(...found.newModelIds);
       });
+      newModelIds.push(...committed);
     } catch (err) {
       unstored.push({ channelId: result.channelId, error: errMessage(err) });
     }
   }
-  return { unstored };
+  return { unstored, newModelIds: [...new Set(newModelIds)] };
 }
 
 export interface ModelRosterDiff {
