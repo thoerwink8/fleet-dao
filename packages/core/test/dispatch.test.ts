@@ -1,7 +1,7 @@
 // 派不派一张单的边界表（design 第九节「在哪能做与接活开关」）：认版本（当前版本 = 还开着的 v<N> 里程碑里 N 最小的）、
 // 母单子单这一道（#252 之前母单、子单都不自动派）、本机做这一道（#299 止血：贴了「本机做」的不自动派）。
-// 「挂在当前版本上」「未排期不碰」两道随 #1336 删了（引擎自己挑单，版本只影响排序）；「开关、开单时间」和「人明说交给 fleet」
-// 两道随旧接活删了（#901 审查：只有测试在引用）。
+// 「挂在当前版本上」「未排期不碰」从 #1336 起不再是拉单的闸（引擎自己挑单，版本只影响排序），versionGate 留给点名派单当就绪度闸；
+// 「开关、开单时间」和「人明说交给 fleet」两道随旧接活删了（#901 审查：只有测试在引用）。
 import { describe, expect, it } from 'vitest';
 import {
   currentVersion,
@@ -10,10 +10,12 @@ import {
   localGate,
   type MilestoneRef,
   milestoneVersion,
+  versionGate,
 } from '../src/dispatch.ts';
 
 const V1: MilestoneRef = { number: 8, title: 'v1 Fusion 接活' };
 const V2: MilestoneRef = { number: 9, title: 'v2 引擎打磨：环节可配、检验制度、经验库' };
+const P1: MilestoneRef = { number: 2, title: 'P1 核心闭环' };
 const BACKLOG: MilestoneRef = { number: 11, title: 'backlog 攒着的' };
 
 describe('认版本：当前版本 = 还开着的 v<N> 里程碑里 N 最小的那个', () => {
@@ -30,6 +32,67 @@ describe('认版本：当前版本 = 还开着的 v<N> 里程碑里 N 最小的�
     expect(currentVersion([BACKLOG, V2])).toEqual({ version: 2, milestone: V2 });
     expect(currentVersion([BACKLOG])).toBeNull();
     expect(currentVersion([])).toBeNull();
+  });
+});
+
+describe('版本这一道（点名派单的就绪度闸用；拉单从 #1336 起不用）', () => {
+  it('挂在当前版本上：过，带上按哪个版本', () => {
+    expect(versionGate({ milestone: V1, openMilestones: [V1, V2] })).toEqual({
+      ok: true,
+      version: 1,
+      milestone: 'v1 Fusion 接活',
+    });
+    // 里程碑刚改过名：以现读的还开着的那份为准（按编号对上）
+    expect(versionGate({ milestone: { number: 8, title: '旧名字' }, openMilestones: [V1] })).toMatchObject({
+      ok: true,
+      milestone: 'v1 Fusion 接活',
+    });
+  });
+
+  it('【故意造出的失败】未排期（没挂里程碑）：不过，写明未排期和当前版本是哪个', () => {
+    const got = versionGate({ milestone: null, openMilestones: [V1, V2] });
+    expect(got).toMatchObject({ ok: false, reason: 'unscheduled' });
+    if (got.ok) throw new Error('未排期的单不该过');
+    expect(got.why).toContain('未排期');
+    expect(got.why).toContain('当前版本是「v1 Fusion 接活」');
+  });
+
+  it('【故意造出的失败】挂在 v2 上（v1 还开着）：不过，写明挂在哪、当前版本是哪个', () => {
+    const got = versionGate({ milestone: V2, openMilestones: [V1, V2] });
+    expect(got).toMatchObject({ ok: false, reason: 'not_current_version' });
+    if (got.ok) throw new Error('v2 的单不该过');
+    expect(got.why).toContain('「v2 引擎打磨');
+    expect(got.why).toContain('当前版本是「v1 Fusion 接活」');
+  });
+
+  it('v1 关了以后 v2 就是当前版本：挂在 v2 上的过', () => {
+    expect(versionGate({ milestone: V2, openMilestones: [V2, BACKLOG] })).toMatchObject({
+      ok: true,
+      version: 2,
+    });
+  });
+
+  it('【故意造出的失败】挂在已经关了的里程碑上（旧的 P1、做完的版本）：不过', () => {
+    for (const closed of [P1, V1]) {
+      const got = versionGate({ milestone: closed, openMilestones: [V2] });
+      expect(got, closed.title).toMatchObject({ ok: false, reason: 'not_current_version' });
+      if (got.ok) throw new Error('关了的里程碑上的单不该过');
+      expect(got.why).toContain('已经关了');
+    }
+    const none = versionGate({ milestone: P1, openMilestones: [] });
+    if (none.ok) throw new Error('没有当前版本时不该过');
+    expect(none.why).toContain('没有当前版本');
+  });
+
+  it('【故意造出的失败】挂的里程碑认不出版本号：不过，说「没查成」，不当成当前版本', () => {
+    const got = versionGate({ milestone: BACKLOG, openMilestones: [BACKLOG, V1] });
+    expect(got).toMatchObject({ ok: false, reason: 'version_unreadable' });
+    if (got.ok) throw new Error('认不出版本号的不该过');
+    expect(got.why).toMatch(/^没查成：里程碑「backlog 攒着的」认不出版本号/);
+    expect(versionGate({ milestone: BACKLOG, openMilestones: [BACKLOG] })).toMatchObject({
+      ok: false,
+      reason: 'version_unreadable',
+    });
   });
 });
 

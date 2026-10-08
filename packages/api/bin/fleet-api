@@ -2,6 +2,7 @@
 # 法国上后端的管理命令（docs/ops.md 第九节「账密登录」「让 AI 接活」）：以 root 跑，
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api set-password <飞书名或用户 id> [--username <用户名>]
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner/仓名> on|off|status
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]   开关关着时点名派一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
 # 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
 # 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读，和服务里生效的一模一样。
@@ -14,7 +15,14 @@ if [[ $EUID -ne 0 ]]; then
 fi
 root=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../.." && pwd)
 if [[ -t 0 ]]; then io=--pty; else io=--pipe; fi
+# dispatch-issue（#1337，开关关着时点名派单）的本体在引擎包：准入用的交代解析、分档、拉单装配都在那边，驾驶舱后端不依赖引擎包。
+# 其余命令都是后端自己的。
+entry="$root/packages/api/src/bin/fleet-api.ts"
+if [[ "${1:-}" == "dispatch-issue" ]]; then
+  entry="$root/packages/engine/src/bin/dispatch-issue.ts"
+  shift
+fi
 exec systemd-run --quiet --wait --collect "$io" --uid=fleet --gid=fleet \
   -p EnvironmentFile=/etc/fleet-dao/api.env -p WorkingDirectory="$root" \
   -E FLEET_OPS_OPERATOR="${SUDO_USER:-root}" \
-  /usr/bin/node "$root/packages/api/src/bin/fleet-api.ts" "$@"
+  /usr/bin/node "$entry" "$@"

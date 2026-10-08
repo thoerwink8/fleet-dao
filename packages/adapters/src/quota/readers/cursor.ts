@@ -1,10 +1,11 @@
 // Cursor：Dashboard 的只读接口（cursor 网页「用量」页用的同一套），拿已登录的 accessToken 调，不起对话。
 // 一个账号分两个桶：Auto（含 Composer 等自家模型，成员表由接口给）与 API（点名的其它模型），各有百分比；另有账期美元。
+import { errMessage } from '@fleet-dao/shared/util';
 import type { Reader } from '../context.ts';
 import { fetchJson } from '../http.ts';
 import type { CursorDashboardConfig, QuotaReading, ScopeMembership, SubscriptionInfo } from '../types.ts';
 import { QuotaReadError } from '../types.ts';
-import { expandHome, isRecord, num, pruned, toIso } from '../util.ts';
+import { expandHome, isRecord, num, pruned, redact, toIso } from '../util.ts';
 
 const SOURCE = 'cursor-dashboard';
 export const DEFAULT_CURSOR_BASE_URL = 'https://api2.cursor.sh';
@@ -122,7 +123,6 @@ export function readingsFromPeriodUsage(
 export const readCursorDashboard: Reader = async (ctx) => {
   const pool = ctx.pool as CursorDashboardConfig;
   const authFile = expandHome(pool.authFile ?? '~/.config/cursor/auth.json', ctx.homeDir);
-  const keyFile = pool.keyFile ? expandHome(pool.keyFile, ctx.homeDir) : undefined;
   const baseUrl = (pool.baseUrl ?? DEFAULT_CURSOR_BASE_URL).replace(/\/+$/, '');
 
   const call = (method: Method, token: string): Promise<unknown> =>
@@ -138,73 +138,62 @@ export const readCursorDashboard: Reader = async (ctx) => {
         },
         body: '{}',
       },
-      authHint: keyFile
-        ? `API 密钥（${keyFile}）和登录令牌（${authFile}）都不被认：换一把密钥，或在这台机器上重新 cursor-agent login`
-        : '要在这台机器上重新 cursor-agent login',
+      authHint: '要在这台机器上重新 cursor-agent login',
     });
 
-  // 凭据按顺序试：先 API 密钥（法国无桌面，浏览器登录令牌落不了盘、常失效；cursor-agent 实际用的是这把），再登录令牌。
-  // 只有读不到、被拒（401/403）才换下一个；连不上、5xx 这类跟凭据无关的失败原样抛出。原因里只写来源和结果，不写任何密钥内容。
-  const sources: { label: string; path: string; read: () => Promise<string> }[] = [];
-  if (keyFile) {
-    sources.push({
-      label: 'API 密钥',
-      path: keyFile,
-      read: async () => {
-        const key = (await ctx.readFile(keyFile)).trim();
-        if (!key) throw new Error('文件是空的');
-        return key;
-      },
-    });
-  }
-  sources.push({
-    label: keyFile ? '登录令牌' : 'Cursor 登录文件',
-    path: authFile,
-    read: async () => {
+  // 读登录文件里的令牌。读不到、不是 JSON、里面没有 accessToken 都报 no_credentials，原因只写路径和现象，不写令牌内容。
+  const readToken = async (when: string): Promise<string> => {
+    try {
       const token = (JSON.parse(await ctx.readFile(authFile)) as Record<string, unknown>).accessToken;
       if (typeof token !== 'string' || !token) throw new Error('里面没有 accessToken');
       return token;
-    },
-  });
-  const outcomes: string[] = [];
-  let rejected = false;
-  let token: string | undefined;
-  let period: unknown;
-  for (const source of sources) {
-    let candidate: string;
-    try {
-      candidate = await source.read();
     } catch (e) {
       const why =
         (e as NodeJS.ErrnoException).code ?? (e instanceof SyntaxError ? '不是 JSON' : (e as Error).message);
-      outcomes.push(`${source.label}（${source.path}）读不到：${why}`);
-      continue;
+      throw new QuotaReadError(
+        'no_credentials',
+        `没有可用的 Cursor 凭据：${when}Cursor 登录文件（${authFile}）读不到：${why}。要在这台机器上 cursor-agent login`,
+      );
+    }
+  };
+  const httpOf = (e: QuotaReadError) => /HTTP (\d+)/.exec(e.message)?.[1] ?? '401/403';
+
+  // 登录令牌几个小时就过期，但 cursor-agent 自己会续：令牌被拒（401/403）时让引擎以会话用户的身份跑一次 `cursor-agent status`
+  // 刷新（ctx.refreshLogin），成功后重读登录文件再调一次；仍被拒才报「登录失效」。一轮最多刷新一次（经 shared 共用）。
+  // 连不上、5xx 这类跟凭据无关的失败原样抛出，不刷新。
+  let usable = await readToken('');
+  let period: unknown;
+  try {
+    period = await call('GetCurrentPeriodUsage', usable);
+  } catch (e) {
+    if (!(e instanceof QuotaReadError) || e.code !== 'auth') throw e;
+    const rejected = `登录令牌（${authFile}）被拒：HTTP ${httpOf(e)}`;
+    const refresh = ctx.refreshLogin;
+    if (!refresh) {
+      throw new QuotaReadError(
+        'auth',
+        `Cursor 登录失效：${rejected}；这条读法没有刷新手段。要人在这台机器上 cursor-agent login`,
+      );
     }
     try {
-      period = await call('GetCurrentPeriodUsage', candidate);
-      token = candidate;
-      break;
-    } catch (e) {
-      if (!(e instanceof QuotaReadError) || e.code !== 'auth') throw e;
-      rejected = true;
-      outcomes.push(
-        `${source.label}（${source.path}）被拒：HTTP ${/HTTP (\d+)/.exec(e.message)?.[1] ?? '401/403'}`,
+      await ctx.shared('cursor-login-refresh', () => refresh());
+    } catch (re) {
+      throw new QuotaReadError(
+        'auth',
+        `Cursor 登录失效：${rejected}；刷新令牌的命令（cursor-agent status）也没跑成：${redact(errMessage(re))}。要人在这台机器上检查 cursor-agent，必要时 cursor-agent login`,
+      );
+    }
+    usable = await readToken('刷新后重读，');
+    try {
+      period = await call('GetCurrentPeriodUsage', usable);
+    } catch (e2) {
+      if (!(e2 instanceof QuotaReadError) || e2.code !== 'auth') throw e2;
+      throw new QuotaReadError(
+        'auth',
+        `Cursor 登录失效：${rejected}；刷新过一次仍被拒（HTTP ${httpOf(e2)}），要人在这台机器上 cursor-agent login`,
       );
     }
   }
-  if (token === undefined) {
-    const detail = outcomes.join('；');
-    throw rejected
-      ? new QuotaReadError(
-          'auth',
-          `Cursor 登录失效：${detail}。要换一把 API 密钥，或在这台机器上重新 cursor-agent login`,
-        )
-      : new QuotaReadError(
-          'no_credentials',
-          `没有可用的 Cursor 凭据：${detail}。要在这台机器上 cursor-agent login 或放好 API 密钥`,
-        );
-  }
-  const usable = token;
 
   // 账期用量是主数；套餐名和「允不允许按量」只是补充，读不到只记一笔说明，不算失败。
   const [planInfo, hardLimit] = await Promise.all([
