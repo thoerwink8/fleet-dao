@@ -10,12 +10,14 @@ import { usePoolHolds, useRouting } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerRoute } from '../api/types';
 import { formatAgo, formatIn } from '../lib/format';
 import { poolIsHeld } from '../lib/pool-holds';
-import { probeStale, routeHost, routeSlots, routeTitle, verdictLabel, verdictTone } from '../lib/routing';
-import { toneText } from '../lib/status';
+import { routeKind } from '../lib/route-kinds';
+import { probeStale, routeHost, routeSlots, routeTitle } from '../lib/routing';
+import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { RouteSwitch, SortableList, useRoutingEdit } from './routing-edit';
 import { PoolHoldControl } from './routing-hold';
-import { StatusChip, StatusDot } from './status';
+import { KindChip, useKindEnv } from './routing-kinds';
+import { StatusDot } from './status';
 import { Badge } from './ui/badge';
 
 /** 一个模型下的路由，可拖动改先后（先后不分用途，管这个模型在所有用途里）。 */
@@ -95,6 +97,8 @@ export function RouteItem({
   const routing = useRouting();
   const holds = usePoolHolds();
   const name = routeTitle(r);
+  // 状态词和颜色：后端的「死」拆开，只有故障画红（lib/route-state.ts）
+  const kind = routeKind(r, modelId, useKindEnv());
   // 目录没读到不猜渠道关没关：只有读到了且 enabled 为 false 才换成「渠道已关」。
   const channelOff = routing.data
     ? routing.data.channels.find((c) => c.id === r.channelId)?.enabled === false
@@ -113,7 +117,7 @@ export function RouteItem({
         )}
         <span className="text-sub font-medium">{name}</span>
         {modelLabel ? <span className="text-caption text-muted-foreground">· {modelLabel}</span> : null}
-        <StatusChip tone={verdictTone[r.verdict]} label={verdictLabel[r.verdict]} />
+        <KindChip kind={kind} />
         {r.enabled ? null : (
           <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
             关着
@@ -157,7 +161,7 @@ export function RouteItem({
         </span>
       </div>
       <div className="mt-2 grid gap-x-4 gap-y-2 md:grid-cols-3">
-        <Fact label="接得上" fact={r.connect}>
+        <Fact label="接得上" fact={r.connect} red={kind === 'fault'}>
           {r.probedAt ? (
             stale ? (
               <span className="text-ink-stall">
@@ -189,8 +193,22 @@ export function RouteItem({
   );
 }
 
-function Fact({ label, fact, children }: { label: string; fact: LivenessFact; children?: ReactNode }) {
-  const tone = verdictTone[fact.verdict];
+/** 三件事各自的结论词：没过的不叫「死」，只有「接得上」没过、而且整条路由是故障时才画红，额度、禁令没过是暂时挡着。 */
+const FACT_WORD = { live: '通过', dead: '没过', unknown: '不知道' } as const;
+
+function Fact({
+  label,
+  fact,
+  red = false,
+  children,
+}: {
+  label: string;
+  fact: LivenessFact;
+  /** 没过的这件事可以画红（只有故障那条路由的「接得上」）。 */
+  red?: boolean;
+  children?: ReactNode;
+}) {
+  const tone: Tone = fact.verdict === 'live' ? 'done' : fact.verdict === 'dead' && red ? 'fail' : 'stall';
   return (
     <div className="min-w-0">
       <div className="text-caption text-muted-foreground">{label}</div>
@@ -203,7 +221,7 @@ function Fact({ label, fact, children }: { label: string; fact: LivenessFact; ch
             fact.verdict === 'live' ? 'text-muted-foreground' : toneText[tone],
           )}
         >
-          <span className="sr-only">{verdictLabel[fact.verdict]}：</span>
+          <span className="sr-only">{FACT_WORD[fact.verdict]}：</span>
           {fact.reason}
         </span>
       </div>

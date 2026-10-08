@@ -14,9 +14,6 @@ import type { Tone } from './status';
 /** 活 = 完成色；死 = 失败色；不知道 = 停滞色（要人看，但不是坏了）。 */
 export const verdictTone: Record<LivenessVerdict, Tone> = { live: 'done', dead: 'fail', unknown: 'stall' };
 
-/** 模型、路由这两层。 */
-export const verdictLabel: Record<LivenessVerdict, string> = { live: '活', dead: '死', unknown: '不知道' };
-
 /** 用途这一层说成派不派得出去。 */
 export const purposeVerdictLabel: Record<LivenessVerdict, string> = {
   live: '派得出去',

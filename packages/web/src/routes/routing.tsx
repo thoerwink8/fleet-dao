@@ -29,11 +29,14 @@ import {
   SortableList,
   useRoutingEdit,
 } from '../components/routing-edit';
+import { KindDot, useKindEnv } from '../components/routing-kinds';
 import { ModelRoutes } from '../components/routing-routes';
-import { StatusChip, StatusDot } from '../components/status';
+import { StatusChip } from '../components/status';
 import { formatClock } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
+import { modelKind } from '../lib/route-kinds';
+import { routeStateTone } from '../lib/route-state';
 import {
   countByVerdict,
   firstLive,
@@ -42,7 +45,6 @@ import {
   purposeLabel,
   purposeLine,
   purposeVerdictLabel,
-  verdictLabel,
   verdictTone,
 } from '../lib/routing';
 import { type Tone, toneText } from '../lib/status';
@@ -271,6 +273,7 @@ function PurposeItem({
   onPick: () => void;
 }) {
   const line = purposeLine(p);
+  const env = useKindEnv();
   const active = p.purpose === selected;
   // 别的网址参数（?node=、?tab=）带着走
   const next = new URLSearchParams(params);
@@ -302,16 +305,20 @@ function PurposeItem({
         </div>
         {p.models.length > 0 ? (
           <ol aria-label="模型顺序" className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-caption">
-            {p.models.map((m, i) => (
-              <li key={m.modelId} className="inline-flex items-center gap-1">
-                <StatusDot tone={verdictTone[m.verdict]} className="size-1.5" />
-                <span className="num text-muted-foreground">{i + 1}</span>
-                <span className={m.verdict === 'live' ? undefined : toneText[verdictTone[m.verdict]]}>
-                  {m.displayName}
-                </span>
-                <span className="sr-only">：{verdictLabel[m.verdict]}</span>
-              </li>
-            ))}
+            {p.models.map((m, i) => {
+              const kind = modelKind(m, env);
+              return (
+                <li key={m.modelId} className="inline-flex items-center gap-1">
+                  <KindDot kind={kind} whyNot="一条路由都没有" className="size-1.5" />
+                  <span className="num text-muted-foreground">{i + 1}</span>
+                  <span
+                    className={kind === null || kind === 'live' ? undefined : toneText[routeStateTone[kind]]}
+                  >
+                    {m.displayName}
+                  </span>
+                </li>
+              );
+            })}
           </ol>
         ) : null}
         <p className={cn('mt-1.5 text-caption', lineInk(line.tone))}>{line.text}</p>
@@ -490,6 +497,7 @@ function ModelRow({
   controls: RowControls;
 }) {
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
+  const kind = modelKind(m, useKindEnv());
   return (
     <div className="flex h-full items-center gap-1.5 pr-2 pl-1.5">
       {controls.grip}
@@ -503,9 +511,8 @@ function ModelRow({
         aria-label={`查看 ${m.displayName} 的路由`}
         className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
       >
-        <StatusDot tone={verdictTone[m.verdict]} className="shrink-0" />
+        <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
         <span className="truncate text-sm font-semibold">{m.displayName}</span>
-        <span className="sr-only">：{verdictLabel[m.verdict]}</span>
         {m.family ? (
           <span className="hidden truncate text-caption text-muted-foreground sm:inline">{m.family}</span>
         ) : null}

@@ -21,12 +21,14 @@ import {
   WINDOW_MIN_ROWS,
   windowRange,
 } from '../lib/list-window';
+import { modelKind } from '../lib/route-kinds';
 import { countsText } from '../lib/route-state';
-import { purposeLabel, routeTitle, verdictLabel, verdictTone } from '../lib/routing';
+import { purposeLabel, routeTitle } from '../lib/routing';
 import { buildCatalog, type CatalogEntry, channelRoutes, isRetired } from '../lib/routing-browse';
 import { cn } from '../lib/utils';
 import { LoadError, LoadingRows, Panel } from './page';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
+import { KindDot, useKindEnv } from './routing-kinds';
 import { ModelRosterNotice } from './routing-roster';
 import { ModelRoutes, RouteItem } from './routing-routes';
 import { StatusChip, StatusDot } from './status';
@@ -234,6 +236,8 @@ function CatalogRow({
   onPick: () => void;
 }) {
   const retired = isRetired(e, now);
+  // 状态词和颜色按路由八态合成；没配进用途的模型读不到三件事，不画态
+  const kind = modelKind(e, useKindEnv());
   const why = !e.switchKnown
     ? e.purposes.length === 0
       ? '还没配进任何用途，读不到它的路由开关；在用途里排上它之后才能开关'
@@ -248,9 +252,12 @@ function CatalogRow({
         aria-label={`查看 ${e.displayName} 的路由`}
         className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
       >
-        <StatusDot tone={e.verdict ? verdictTone[e.verdict] : 'stall'} className="shrink-0" />
+        <KindDot
+          kind={kind}
+          whyNot={e.purposes.length === 0 ? '没配进用途，没算过' : '一条路由都没有'}
+          className="shrink-0"
+        />
         <span className="truncate text-sm font-semibold">{e.displayName}</span>
-        <span className="sr-only">：{e.verdict ? verdictLabel[e.verdict] : '没配进用途，没算过'}</span>
         {e.family ? (
           <span className="hidden truncate text-caption text-muted-foreground sm:inline">{e.family}</span>
         ) : null}
