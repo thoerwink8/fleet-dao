@@ -52,6 +52,8 @@ export interface RouteProbeTarget {
   modelName: string;
   /** 插头实际发给上游的模型串（routes.upstream_model）；空 = 按模型目录的 id。 */
   upstreamModel: string | null;
+  /** Mirasim 记下的执行体（routes.executor）。空 = 探针按前缀现判。 */
+  executor?: string | null;
   modelRetiredAt: Date | null;
   /**
    * 有用途在用（路由两层：它在自己的模型下开着，这个模型又排进了至少一个用途，routing-layers.ts 的 routesInUse）：
@@ -89,6 +91,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     modelId: model.id,
     modelName: model.displayName,
     upstreamModel: route.upstreamModel,
+    executor: route.executor,
     modelRetiredAt: model.retiredAt,
     inUse: inUse.has(route.id),
     alive: route.alive,

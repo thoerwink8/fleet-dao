@@ -331,6 +331,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       hostId: r.hostId,
       upstreamModel: r.upstreamModel,
       upstreamAliases: r.upstreamAliases,
+      executor: r.executor,
       probedAt: r.probedAt?.toISOString() ?? null,
       probeState: r.probeState,
       probeOrg: r.probeOrg,

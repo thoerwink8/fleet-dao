@@ -28,8 +28,9 @@
 // - mirasim（#345，只留「中继额度」路由的薄插头，design 第三节第 12 条）：和前三家都不同——不是我们 spawn 一个子进程，
 //   而是引擎自己的进程（fleet 用户）经回环 ws 连一份「已经在跑」的 Mirasim 服务；工具是在那份服务的进程里执行的，所以
 //   design 第十四节要求给会话用户单独起一份（登录一次），不借旧系统那份——配好之前这条路由保持关闭（目录样例的 enabled）。
-//   服务端认的是「执行体」（agent：claude / codex / pi / dsh……），不是路由的模型 id；模型串→执行体的对应表见
-//   MIRASIM_AGENT_BY_MODEL，认不出的模型串明确报错，不落到某个默认执行体上。只留「中转」这一种路由（route: 'cloud'，
+//   服务端认的是「执行体」（agent：claude / codex / pi / dsh……），不是路由的模型 id。执行体先看路由上记下的名册字段
+//   （routes.executor），没有就按上游串前缀（shared 的 resolveMirasimExecutor）。认不出的标「执行体未知」、明确报错，
+//   不落到某个默认执行体上。只留「中转」这一种路由（route: 'cloud'，
 //   MS-28：不许反代，只能用官方客户端），所以结束后一定要给账本目录（ledgerDir）：账本没读成、没查到起针之后的 2xx
 //   都算「中转没查成」（relayUnknown，进 facts，DL3 挂起报警），不当成会话真交了活。
 //   会话号不是我们起的：server 的 accepted 帧回 sessionKey（<agent>:<uuid>），事先给不出，和 cursor 一样先回一个一眼看得出
@@ -89,6 +90,7 @@ import {
   isSessionEffort,
   modelBracketEffort,
   type ProgressEvent,
+  resolveMirasimExecutor,
   routeEffortProblem,
 } from '@fleet-dao/shared';
 import { hostName } from '../routing/names.ts';
@@ -200,6 +202,11 @@ export interface HostRunSpec {
   cgroup: CgroupScope;
   /** 发给执行体的模型串：路由的 upstream_model，没有就用模型 id。 */
   model: string;
+  /**
+   * 路由上记下的 Mirasim 执行体（routes.executor）。不给就按模型串前缀判。
+   * 「执行体未知」不是执行体名：认不出就抛，不落到默认执行体。
+   */
+  executor?: string;
   /**
    * 驾驶舱给这条路由配的思考档位（routing_catalog.effort）。不给 = 没配，用 DEFAULT_SESSION_EFFORT。
    * 模型串方括号里已经编了档位的不再另传（applySessionEffort）。
@@ -726,47 +733,18 @@ export function grokReport(report: GrokRunReport): HostReport {
 // ---- mirasim
 
 /**
- * 路由的 upstreamModel → Mirasim 服务端认的执行体名（docs/reference/adapters.md 第五~七节；对应
- * deploy/catalog.json 里 mirasim-relay 池的路由）。认不出的模型串明确报错、不落到某个默认
- * 执行体上——新增一条 Mirasim 路由时要把这张表也改了，不然只会在真起会话那一刻才报错（mirasimAgentFor 抛出）。
+ * 路由的 upstreamModel → Mirasim 服务端认的执行体名。先用路由上记下的名册字段，没有再按前缀
+ * （resolveMirasimExecutor）。认不出的模型串明确报错、不落到某个默认执行体上。
+ * pi 起会话不带 model（吃服务端全局默认 agents.pi.model），只拿 expectModel 核对回读的快照符不符（PI-02）。
+ * 前缀把 kimi- 判成 kimi；只有记下的执行体真是 pi 时才不带 model。
  */
-export const MIRASIM_AGENT_BY_MODEL: Readonly<Record<string, string>> = {
-  'claude-opus-5-5': 'claude',
-  'claude-sonnet-5-5': 'claude',
-  'gpt-5.6-luna': 'codex',
-  // codex 执行体认的模型串（服务端 0.0.425 的执行体表，默认 gpt-6-sol）；服务端里没有 gpt-6.1-sol 这个串
-  'gpt-6-sol': 'codex',
-  // 中转名单里 sol 很可能叫这个名（创始人一直说的 gpt-6.1-sol）。来源：2026-10-01 实测六个 codex 模型全成、读回就是
-  // gpt-6.1-sol（docs/archive/progress-2026-10-01.md）；服务端 0.0.425 对不在它模型表里的串原样放行，对在表内但不在
-  // 中转名单里的串（gpt-6-sol）悄悄换成 gpt-6-astra，所以点 gpt-6-sol 探不通、点 gpt-6.1-sol 才可能通（待探针验证，#1298）
-  'gpt-6.1-sol': 'codex',
-  'gpt-6-luna': 'codex',
-  'gpt-6-astra': 'codex',
-  'gpt-5.6-sol': 'codex',
-  'gpt-5.6-terra': 'codex',
-  'kimi-k3': 'pi',
-  'deepseek-flash': 'dsh',
-  // dsh 执行体在服务端 0.0.425 的执行体表里带 deepseek-flash 和 deepseek-v4-pro 两个（法国装了 dsh 本体）
-  'deepseek-v4-pro': 'dsh',
-  // 不在这里的：gemini、antigravity、qwen 执行体的模型（法国没装这几个执行体的本体，起不来；装上、探通再加）
-  // zcode 是 Mirasim 服务端自带的执行体（智谱 GLM）：服务端 0.0.425 的执行体表里它只带 glm-5.3、glm-5.3-flash，默认 glm-5.3-flash；
-  // 没有仓内实跑记录，法国的 Mirasim 里有没有、登没登录由路由探针判（探不通就不派）
-  'glm-5.3-flash': 'zcode',
-  'glm-5.3': 'zcode',
-};
-
-/** pi 起会话不带 model（吃服务端全局默认 agents.pi.model），只拿 expectModel 核对回读的快照符不符（PI-02）。 */
 const MIRASIM_MODELLESS_AGENTS = new Set(['pi']);
 
-/** 认不出的模型串明确报错（不瞎猜执行体）：故意造这条失败的测试见 hosts.test.ts「Mirasim 的驱动」。 */
-export function mirasimAgentFor(upstreamModel: string): string {
-  const agent = MIRASIM_AGENT_BY_MODEL[upstreamModel];
-  if (!agent) {
-    throw new Error(
-      `Mirasim 认不出这个模型该起哪个执行体：${upstreamModel}（现在认得 ${Object.keys(MIRASIM_AGENT_BY_MODEL).join('、')}；新路由要把 MIRASIM_AGENT_BY_MODEL 也改了）`,
-    );
-  }
-  return agent;
+/** 认不出的模型串明确报错（不瞎猜执行体）：故意造这条失败的测试见 hosts.test.ts。 */
+export function mirasimAgentFor(upstreamModel: string, rosterExecutor?: string | null): string {
+  const resolved = resolveMirasimExecutor({ rosterExecutor, upstreamModel });
+  if (!resolved.ok) throw new Error(resolved.reason);
+  return resolved.agent;
 }
 
 /** 会话号临时号的前缀：真号是服务端 accepted 帧回的 <agent>:<uuid>，起会话之前给不出（和 cursor 同一个道理）。 */
@@ -788,7 +766,7 @@ function mirasimDriver(
         throw new Error('Mirasim 没有 fork：换了账号池要开新会话带接力任务书');
       }
       const effort = applySessionEffort('mirasim', spec);
-      const agent = mirasimAgentFor(effort.model);
+      const agent = mirasimAgentFor(effort.model, spec.executor);
       const report = await run(
         {
           runId: spec.runId,

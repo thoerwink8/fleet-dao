@@ -79,7 +79,12 @@ describe('四个渠道一起读', () => {
       }),
     });
     const byId = new Map(results.map((r) => [r.channelId, r]));
-    expect(byId.get('mirasim')).toEqual({ ok: true, channelId: 'mirasim', models: ['gpt-6.1-sol'] });
+    expect(byId.get('mirasim')).toEqual({
+      ok: true,
+      channelId: 'mirasim',
+      models: ['gpt-6.1-sol'],
+      executors: [{ modelKey: 'gpt-6.1-sol', executor: 'codex' }],
+    });
     expect(byId.get('xai')).toEqual({ ok: true, channelId: 'xai', models: ['grok-4.7'] });
     // Claude 没有只读的列模型命令：明说读不成，不起命令、不给空名单
     const claude = byId.get('claude-sub');
@@ -174,7 +179,14 @@ describe('Mirasim 名册', () => {
         sent,
       ),
     );
-    expect(ok).toEqual({ ok: true, models: ['gpt-6.1-sol', 'kimi-k3'] });
+    expect(ok).toEqual({
+      ok: true,
+      models: ['gpt-6.1-sol', 'kimi-k3'],
+      executors: [
+        { modelKey: 'gpt-6.1-sol', executor: 'codex' },
+        { modelKey: 'kimi-k3', executor: 'kimi' },
+      ],
+    });
     expect(sent.map((f) => f.type)).toEqual(['clientHello', 'getState', 'getModelRoster', 'getModelRoster']);
 
     const bad = await modelsFromMirasimWire(async () =>
@@ -186,6 +198,32 @@ describe('Mirasim 名册', () => {
     );
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.code).toBe('upstream');
+  });
+
+  it('帧上没有 agent 也收下名单；条目上的 executor 盖过帧上的 agent', async () => {
+    const missingAgent = await modelsFromMirasimWire(async () =>
+      wireOf([
+        { type: 'state', state: { agentsAvailable: ['codex'] } },
+        { type: 'modelRoster', entries: [{ id: 'gpt-6-sol' }] },
+      ]),
+    );
+    expect(missingAgent).toEqual({ ok: true, models: ['gpt-6-sol'], executors: [] });
+
+    const entryWins = await modelsFromMirasimWire(async () =>
+      wireOf([
+        { type: 'state', state: { agentsAvailable: ['codex'] } },
+        {
+          type: 'modelRoster',
+          agent: 'codex',
+          entries: [{ id: 'glm-5.3-flash', executor: 'zcode' }],
+        },
+      ]),
+    );
+    expect(entryWins).toEqual({
+      ok: true,
+      models: ['glm-5.3-flash'],
+      executors: [{ modelKey: 'glm-5.3-flash', executor: 'zcode' }],
+    });
   });
 
   it('没有 agentsAvailable、或每个执行体都是空名册，是 bad_response', async () => {

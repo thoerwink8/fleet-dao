@@ -43,6 +43,8 @@ export interface PurposeRouteFacts {
     hostId: HostId;
     upstreamModel: string | null;
     upstreamAliases: string[];
+    /** Mirasim 记下的执行体（routes.executor）。别的执行方式也读出来，选路只用在 mirasim 上。 */
+    executor: string | null;
     /** 路由探针最近一次下结论的时刻（候选查询的 probedAt）：在线的一定有，过没过期由选路判。 */
     probedAt: Date | null;
     /** 那次结论是什么、下结论时会话用户挂的是哪个组织（候选查询的 probeState、probeOrg）。 */
@@ -96,6 +98,7 @@ export async function routeFactsForPurpose(
         routeId: routes.id,
         upstreamModel: routes.upstreamModel,
         upstreamAliases: routes.upstreamAliases,
+        executor: routes.executor,
         poolRunAsUser: pools.runAsUser,
         poolOrgKind: pools.orgKind,
         modelName: models.displayName,
@@ -127,6 +130,7 @@ export async function routeFactsForPurpose(
       hostId: c.hostId,
       upstreamModel: detail.upstreamModel,
       upstreamAliases: detail.upstreamAliases,
+      executor: detail.executor,
       probedAt: c.probedAt,
       probeState: c.probeState,
       probeOrg: c.probeOrg,

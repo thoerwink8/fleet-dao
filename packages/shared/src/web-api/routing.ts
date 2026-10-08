@@ -222,15 +222,35 @@ export const ModelRosterNotYetSchema = z.object({
   channelName: z.string().min(1),
 });
 
+/** 没有名册命令、靠手工登记的渠道。页面写「这个渠道靠手工登记，共 N 个」，不报没读成。 */
+export const ModelRosterManualSchema = z.object({
+  channelId: Id,
+  channelName: z.string().min(1),
+  count: z.number().int().nonnegative(),
+});
+
 /**
  * 四个渠道的名册和目录的差。四张表都空才是对得上；有失败、还没读过，页面不能写「都对得上」。
- * 只读、只列，不带「加进目录」之类的动作。
+ * manual 是手工登记的渠道，可缺（老的响应）。只读、只列，不带「加进目录」之类的动作。
  */
 export const ModelRosterDiffSchema = z.object({
   missingFromCatalog: z.array(ModelRosterMissingSchema),
   goneRoutes: z.array(ModelRosterGoneRouteSchema),
   failed: z.array(ModelRosterFailureSchema),
   notYet: z.array(ModelRosterNotYetSchema),
+  manual: z.array(ModelRosterManualSchema).optional(),
+});
+
+export const ManualModelRequest = z.object({
+  modelKey: z.string().trim().min(1).max(2000),
+  reason: z.string().trim().max(2000).optional(),
+});
+
+export const ManualModelResponse = z.object({
+  channelId: Id,
+  modelKey: z.string().min(1).max(2000),
+  source: z.literal('手工'),
+  count: z.number().int().nonnegative(),
 });
 
 export const RoutingLayersResponse = z.object({

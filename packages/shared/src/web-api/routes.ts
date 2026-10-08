@@ -40,6 +40,8 @@ import {
 } from './notifications.ts';
 import { PoolsResponse } from './pools.ts';
 import {
+  ManualModelRequest,
+  ManualModelResponse,
   MovePurposeModelRequest,
   MovePurposeModelResponse,
   RouteProbeHistoryResponse,
@@ -190,6 +192,20 @@ export const WebRoutes = {
     path: '/routing/channels/:channelId',
     request: SetChannelEnabledRequest,
     response: SetChannelEnabledResponse,
+  },
+  /** 没有名册命令的渠道：登记一个模型串。网关通行证不认。 */
+  registerChannelModel: {
+    method: 'POST',
+    path: '/routing/channels/:channelId/models',
+    request: ManualModelRequest,
+    response: ManualModelResponse,
+  },
+  /** 撤掉手工登记的模型串。不删目录里的路由。网关通行证不认。 */
+  revokeChannelModel: {
+    method: 'DELETE',
+    path: '/routing/channels/:channelId/models',
+    request: ManualModelRequest,
+    response: ManualModelResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
   /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */

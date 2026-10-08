@@ -75,6 +75,7 @@ describe('Mirasim 池只扣某一族的窗口', () => {
     poolId: 'mirasim',
     poolName: 'Mirasim 中转',
     hostId: 'mirasim',
+    upstreamModel: 'claude-opus-5-5',
     quota: 'exhausted',
     blockers: ['quota-exhausted'],
     windows: [
@@ -158,7 +159,11 @@ describe('Cursor 两个桶', () => {
 describe('额度读不到', () => {
   it('额度未知：不挡，但排在读到了的后面，理由写「额度未知」', () => {
     const unknownSolo = solo({ quota: 'unknown', windows: [] });
-    const known = route('mira-opus', { poolName: 'Mirasim 中转', hostId: 'mirasim' });
+    const known = route('mira-opus', {
+      poolName: 'Mirasim 中转',
+      hostId: 'mirasim',
+      upstreamModel: 'claude-opus-5-5',
+    });
     expect(chooseRoute(input([unknownSolo, known]))).toMatchObject({ routeId: 'mira-opus' });
     const r = chooseRoute(input([unknownSolo]));
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'solo-opus' });
