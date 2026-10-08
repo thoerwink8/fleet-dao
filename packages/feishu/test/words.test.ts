@@ -22,9 +22,17 @@ describe('北京时间', () => {
     expect(otherDay).not.toContain('24:');
   });
 
-  it('午夜这一小时都是 00:xx', () => {
-    expect(beijingClock(Date.parse('2026-10-04T16:00:00.000Z'))).toBe('00:00');
-    expect(beijingClock(Date.parse('2026-10-04T16:59:00.000Z'))).toBe('00:59');
+  it('午夜 00:00–00:59 都显示成 00:xx，不出现 24:', () => {
+    // 北京时间 2026-10-05 00:00；第 30 分钟就是验收点 2026-10-05 00:30。
+    const start = Date.parse('2026-10-04T16:00:00.000Z');
+    for (let minute = 0; minute < 60; minute++) {
+      const clock = beijingClock(start + minute * 60_000);
+      expect(clock).toBe(`00:${String(minute).padStart(2, '0')}`);
+      expect(clock).not.toContain('24:');
+    }
+    const at0030 = beijingClock(Date.parse('2026-10-04T16:30:00.000Z'));
+    expect(at0030).toBe('00:30');
+    expect(at0030).not.toContain('24:');
   });
 
   it('别的钟点仍是 24 小时制的时:分', () => {
