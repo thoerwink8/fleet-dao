@@ -60,6 +60,7 @@ export function routingLayersView(
   const channels = new Map(catalog.channels.map((c) => [c.id, c]));
   return layers.map((layer) => ({
     purpose: layer.purpose,
+    version: layer.version,
     verdict: layer.verdict,
     problems: layer.problems,
     models: layer.models.map((m) => {
@@ -69,6 +70,7 @@ export function routingLayersView(
         modelId: m.modelId,
         displayName: model?.displayName ?? m.modelId,
         ...(family ? { family } : {}),
+        ...(m.effort ? { effort: m.effort } : {}),
         verdict: m.verdict,
         routes: m.routes.map((r) => routeView(r, channels)),
       };

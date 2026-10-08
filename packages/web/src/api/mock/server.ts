@@ -1881,8 +1881,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         if (modelIds.length === 0) {
           return {
             purpose,
+            version: 0,
             verdict: 'dead' as const,
-            problems: [`用途 ${purpose} 没配模型顺序`],
+            problems: ['这个用途没有模型，派不了'],
             models: [],
           };
         }
@@ -1899,7 +1900,13 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             routes,
           };
         });
-        return { purpose, verdict: layerVerdict(models.map((m) => m.verdict)), problems: [], models };
+        return {
+          purpose,
+          version: 0,
+          verdict: layerVerdict(models.map((m) => m.verdict)),
+          problems: [],
+          models,
+        };
       });
       return RoutingLayersResponse.parse({
         asOf: iso(),

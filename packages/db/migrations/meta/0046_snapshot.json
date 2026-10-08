@@ -1,6 +1,6 @@
 {
-  "id": "87ceb5fd-b6a4-451f-8c92-e3eaad2a32e3",
-  "prevId": "46089665-ac2e-4a97-8ae8-dbc4920e2d12",
+  "id": "ce61bd16-05a8-4f6d-9650-34cd6aca27cf",
+  "prevId": "87ceb5fd-b6a4-451f-8c92-e3eaad2a32e3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -746,6 +746,36 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'{}'::text[]"
+        },
+        "variant_effort": {
+          "name": "variant_effort",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "variant_fast": {
+          "name": "variant_fast",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "variant_thinking": {
+          "name": "variant_thinking",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "variant_context": {
+          "name": "variant_context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gone_at": {
+          "name": "gone_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -773,8 +803,8 @@
       "uniqueConstraints": {
         "routes_pool_model_host_unique": {
           "name": "routes_pool_model_host_unique",
-          "nullsNotDistinct": false,
-          "columns": ["pool_id", "model_id", "host_id"]
+          "nullsNotDistinct": true,
+          "columns": ["pool_id", "model_id", "host_id", "upstream_model"]
         },
         "routes_id_model_unique": {
           "name": "routes_id_model_unique",
@@ -799,6 +829,14 @@
         "routes_probe_org_known": {
           "name": "routes_probe_org_known",
           "value": "\"routes\".\"probe_org\" is null or \"routes\".\"probe_org\" in ('solo', 'carpool')"
+        },
+        "routes_variant_effort_known": {
+          "name": "routes_variant_effort_known",
+          "value": "\"routes\".\"variant_effort\" is null or \"routes\".\"variant_effort\" in ('low', 'medium', 'high', 'xhigh', 'max')"
+        },
+        "routes_variant_context_nonempty": {
+          "name": "routes_variant_context_nonempty",
+          "value": "\"routes\".\"variant_context\" is null or length(btrim(\"routes\".\"variant_context\")) > 0"
         }
       },
       "isRLSEnabled": false

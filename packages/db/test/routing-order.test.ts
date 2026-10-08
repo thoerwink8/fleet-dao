@@ -3,16 +3,26 @@
 // 已在最上 / 最下、没有这一项、别人刚改过（看到的先后对不上）都明确拒、一行不动。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { routeFactsForPurpose } from '../src/queries/engine-route-facts.ts';
+import { EMPTY_PURPOSE_PROBLEM } from '../src/routing-layers.ts';
 import {
+  addPurposeModel,
   moveModelRoute,
   movePurposeModel,
+  removePurposeModel,
   reorderModelRoutes,
   reorderPurposeModels,
   setChannelEnabledFlag,
   setModelEnabled,
+  setPurposeModelEffort,
   setRouteEnabled,
 } from '../src/routing-order.ts';
-import { channels, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
+import {
+  channels,
+  routingCatalog,
+  routingPurposeModels,
+  routingPurposeRevisions,
+} from '../src/schema/index.ts';
 import { createTestDb, realTestPgUrl, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog } from './helpers.ts';
 
@@ -415,5 +425,210 @@ describe('路由开关', () => {
       await setRouteEnabled(t.db, { modelId: 'opus-4.9', routeId: 'a', enabled: false, expected: true }),
     ).toEqual({ ok: false, kind: 'conflict', current: false });
     expect((await t.db.select().from(routingCatalog)).length).toBe(3);
+  });
+});
+
+const purposeRows = async (purpose: 'execute' | 'review' | 'verify' | 'research' | 'ui') =>
+  (await t.db.select().from(routingPurposeModels).where(eq(routingPurposeModels.purpose, purpose))).sort(
+    (a, b) => a.position - b.position,
+  );
+
+const revisionOf = async (purpose: 'execute' | 'review' | 'verify' | 'research' | 'ui') =>
+  (await t.db.select().from(routingPurposeRevisions).where(eq(routingPurposeRevisions.purpose, purpose)))[0];
+
+describe('用途里加模型、移出、改档位（#1356）', () => {
+  it('加到末尾或指定位置、可带档位；移出后重排，移空也留着版本；别的用途的档位不动', async () => {
+    expect(await addPurposeModel(t.db, { purpose: 'execute', modelId: 'kimi-k3', version: 0 })).toMatchObject(
+      {
+        ok: true,
+        version: 1,
+        beforeVersion: 0,
+        order: [
+          { modelId: 'opus-5.5', effort: null },
+          { modelId: 'opus-4.9', effort: null },
+          { modelId: 'gpt-5.6-luna', effort: null },
+          { modelId: 'kimi-k3', effort: null },
+        ],
+      },
+    );
+    expect((await purposeRows('execute')).map((r) => [r.modelId, r.position, r.effort])).toEqual([
+      ['opus-5.5', 0, null],
+      ['opus-4.9', 1, null],
+      ['gpt-5.6-luna', 2, null],
+      ['kimi-k3', 3, null],
+    ]);
+
+    expect(
+      await addPurposeModel(t.db, {
+        purpose: 'verify',
+        modelId: 'kimi-k3',
+        position: 0,
+        effort: 'max',
+        version: 0,
+      }),
+    ).toMatchObject({ ok: true, version: 1, order: [{ modelId: 'kimi-k3', effort: 'max' }] });
+    expect(await addPurposeModel(t.db, { purpose: 'verify', modelId: 'opus-4.9', version: 1 })).toMatchObject(
+      {
+        ok: true,
+        version: 2,
+        order: [
+          { modelId: 'kimi-k3', effort: 'max' },
+          { modelId: 'opus-4.9', effort: null },
+        ],
+      },
+    );
+    expect((await purposeRows('execute')).find((r) => r.modelId === 'kimi-k3')?.effort).toBeNull();
+
+    expect(
+      await removePurposeModel(t.db, { purpose: 'verify', modelId: 'opus-4.9', version: 2 }),
+    ).toMatchObject({ ok: true, version: 3, order: [{ modelId: 'kimi-k3', effort: 'max' }] });
+    expect((await purposeRows('verify')).map((r) => [r.modelId, r.position, r.effort])).toEqual([
+      ['kimi-k3', 0, 'max'],
+    ]);
+    expect(
+      await removePurposeModel(t.db, { purpose: 'verify', modelId: 'kimi-k3', version: 3 }),
+    ).toMatchObject({
+      ok: true,
+      version: 4,
+      order: [],
+    });
+    expect(await purposeRows('verify')).toEqual([]);
+    expect(await revisionOf('verify')).toMatchObject({ version: 4 });
+    expect((await purposeRows('review')).map((r) => r.modelId)).toEqual(['opus-4.9', 'grok-4.7']);
+  });
+
+  it('改档位只改这一用途；这条模型的路由认不了就拒，路由上的档位不动', async () => {
+    expect(
+      await addPurposeModel(t.db, { purpose: 'research', modelId: 'kimi-k3', effort: 'low', version: 0 }),
+    ).toMatchObject({ ok: true, version: 1 });
+    expect(
+      await setPurposeModelEffort(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-4.9',
+        effort: 'high',
+        version: 0,
+      }),
+    ).toMatchObject({
+      ok: true,
+      version: 1,
+      order: [
+        { modelId: 'opus-5.5', effort: null },
+        { modelId: 'opus-4.9', effort: 'high' },
+        { modelId: 'gpt-5.6-luna', effort: null },
+      ],
+    });
+    expect((await purposeRows('review')).find((r) => r.modelId === 'opus-4.9')?.effort).toBeNull();
+    expect((await purposeRows('research')).find((r) => r.modelId === 'kimi-k3')?.effort).toBe('low');
+    expect((await t.db.select().from(routingCatalog)).every((r) => r.effort === null)).toBe(true);
+
+    const rejected = await setPurposeModelEffort(t.db, {
+      purpose: 'execute',
+      modelId: 'opus-4.9',
+      effort: 'max',
+      version: 1,
+    });
+    expect(rejected).toMatchObject({ ok: false, kind: 'invalid', code: 'effort_invalid' });
+    if (!rejected.ok && rejected.kind === 'invalid') expect(rejected.why).toContain('路由 c');
+    expect((await purposeRows('execute')).find((r) => r.modelId === 'opus-4.9')?.effort).toBe('high');
+    expect(await revisionOf('execute')).toMatchObject({ version: 1 });
+  });
+
+  it('重复加、模型不存在、版本对不上：明确拒绝，成员和版本都不动', async () => {
+    expect(
+      await addPurposeModel(t.db, { purpose: 'execute', modelId: 'opus-5.5', version: 0 }),
+    ).toMatchObject({
+      ok: false,
+      kind: 'already',
+      why: '模型 opus-5.5 已经在用途 execute 里',
+    });
+    expect(await addPurposeModel(t.db, { purpose: 'execute', modelId: 'no-such-model', version: 0 })).toEqual(
+      {
+        ok: false,
+        kind: 'not_found',
+        why: '目录里没有模型 no-such-model',
+      },
+    );
+    expect(await addPurposeModel(t.db, { purpose: 'verify', modelId: 'kimi-k3', version: 7 })).toEqual({
+      ok: false,
+      kind: 'conflict',
+      version: 0,
+    });
+    const badPosition = await addPurposeModel(t.db, {
+      purpose: 'verify',
+      modelId: 'kimi-k3',
+      position: 3,
+      version: 0,
+    });
+    expect(badPosition).toMatchObject({ ok: false, kind: 'invalid', code: 'position_invalid' });
+    expect(await purposeRows('execute')).toHaveLength(3);
+    expect(await purposeRows('verify')).toEqual([]);
+    expect(await revisionOf('execute')).toBeUndefined();
+    expect(await revisionOf('verify')).toBeUndefined();
+  });
+
+  it('空用途选路写明没配模型，不退到别的用途', async () => {
+    const research = await routeFactsForPurpose(t.db, 'research');
+    expect(research.configured).toBe(false);
+    expect(research.order).toEqual([]);
+    expect(research.routes).toEqual([]);
+    expect(research.problems).toEqual([EMPTY_PURPOSE_PROBLEM]);
+    const execute = await routeFactsForPurpose(t.db, 'execute');
+    expect(execute.configured).toBe(true);
+    expect(execute.routes.length).toBeGreaterThan(0);
+    expect(research.routes.map((r) => r.routeId)).not.toEqual(execute.routes.map((r) => r.routeId));
+  });
+
+  it('打开路由：挂在界面用途上的 GPT 拒开，关掉不受拦；只挂在验证用途上可以开', async () => {
+    await addRoute(t.db, { id: 'gpt-ui', poolId: 'relay-a', modelId: 'gpt-5.6-luna', hostId: 'codex' });
+    await t.db.insert(routingCatalog).values({
+      modelId: 'gpt-5.6-luna',
+      routeId: 'gpt-ui',
+      position: 0,
+      enabled: false,
+    });
+    await t.db.insert(routingPurposeModels).values({ purpose: 'ui', modelId: 'gpt-5.6-luna', position: 0 });
+    const banned = await setRouteEnabled(t.db, {
+      modelId: 'gpt-5.6-luna',
+      routeId: 'gpt-ui',
+      enabled: true,
+      expected: false,
+    });
+    expect(banned).toMatchObject({ ok: false, kind: 'banned' });
+    if (!banned.ok && banned.kind === 'banned') expect(banned.why).toContain('GPT 不做 UI 类活');
+    expect(
+      (await t.db.select().from(routingCatalog).where(eq(routingCatalog.routeId, 'gpt-ui')))[0]?.enabled,
+    ).toBe(false);
+    await t.db.update(routingCatalog).set({ enabled: true }).where(eq(routingCatalog.routeId, 'gpt-ui'));
+    expect(
+      await setRouteEnabled(t.db, {
+        modelId: 'gpt-5.6-luna',
+        routeId: 'gpt-ui',
+        enabled: false,
+        expected: true,
+      }),
+    ).toEqual({ ok: true, before: true, after: false });
+    await t.db.delete(routingPurposeModels).where(eq(routingPurposeModels.purpose, 'ui'));
+    await t.db
+      .insert(routingPurposeModels)
+      .values({ purpose: 'verify', modelId: 'gpt-5.6-luna', position: 0 });
+    expect(
+      await setRouteEnabled(t.db, {
+        modelId: 'gpt-5.6-luna',
+        routeId: 'gpt-ui',
+        enabled: true,
+        expected: false,
+      }),
+    ).toEqual({ ok: true, before: false, after: true });
+  });
+
+  it('【故意造出的失败】GPT 模型加进界面用途必须被拒，一行不写', async () => {
+    const banned = await addPurposeModel(t.db, { purpose: 'ui', modelId: 'gpt-5.6-luna', version: 0 });
+    expect(banned).toEqual({
+      ok: false,
+      kind: 'banned',
+      why: 'GPT 5.6 luna 不能用在「写界面」：GPT 不做 UI 类活',
+    });
+    expect(await purposeRows('ui')).toEqual([]);
+    expect(await revisionOf('ui')).toBeUndefined();
   });
 });

@@ -269,15 +269,20 @@ describe('saveTaskSnapshot', () => {
 describe('routeFactsForPurpose（路由两层，#574）', () => {
   const fresh = { reading: 'measured' as const, readAt: ago(MIN) };
 
-  it('【故意造出的失败】用途没配模型顺序：configured=false、problems 写明，不按 id 乱挑', async () => {
+  it('【故意造出的失败】用途没配模型：configured=false、写明没配模型，不按 id 乱挑、不退到别的用途', async () => {
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    expect(await routeFactsForPurpose(t.db, 'research', { now: NOW })).toEqual({
+    await setRoutingLayers(t.db, { purposes: { execute: ['opus-5.5'] }, models: { 'opus-5.5': ['r1'] } });
+    const none = await routeFactsForPurpose(t.db, 'research', { now: NOW });
+    expect(none).toEqual({
       purpose: 'research',
       configured: false,
       order: [],
-      problems: ['用途 research 没配模型顺序'],
+      problems: ['这个用途没有模型，派不了'],
       routes: [],
     });
+    const execute = await routeFactsForPurpose(t.db, 'execute', { now: NOW });
+    expect(execute.configured).toBe(true);
+    expect(execute.routes.map((r) => r.routeId)).toEqual(['r1']);
   });
 
   it('先后是用途下模型的先后、再是模型下路由的先后，摊平后位置从 0 重新数', async () => {
