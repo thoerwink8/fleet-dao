@@ -1,5 +1,6 @@
-// 把默认骨架（routing.default.json）写进库的两张路由表（#574）。只补缺：某个用途在 routing_purpose_models 里已有行、某个模型在
-// routing_catalog 里已有行，就不动它（驾驶舱改过的顺序、开关、思考档位不覆盖），和目录装载器同一个规矩。
+// 把默认骨架（routing.default.json）写进库的两张路由表（#574）。按行补缺（#1351）：骨架里有、库里没有的（模型, 路由）行，追加到这个模型
+// 现有路由的末尾、开关和思考档位照骨架；骨架里某用途有、库里该用途没有的模型，追加到该用途末尾。库里已有的行（驾驶舱改过的顺序、开关、
+// 思考档位）一律不动、不删。以前是「模型（用途）已有任何一行就整块跳过」，后来加给老模型的新路由、加进老用途的新模型就永远进不了库。
 // 引用对不上（模型、路由库里没有，路由不属于那个模型）、思考档位这条路由的执行方式不认、有用途既没单列又没有 default：
 // 一行不写、明确报错。
 // 发布时由 bin/routing.ts 在目录装载器之后调（deploy/release.sh 的 load_routing）：路由要先由目录装进库，骨架才对得上。
@@ -16,13 +17,17 @@ import { STAGE_KINDS } from './schema/enums.ts';
 import { models, routes, routingCatalog, routingPurposeModels } from './schema/index.ts';
 
 export interface RoutingApplyReport {
-  /** 这次写进去的用途、模型。 */
+  /** 这次整个写进去的用途、模型（库里原来一行都没有）。 */
   purposesApplied: string[];
   modelsApplied: string[];
-  /** 库里已经有行、所以没动的用途、模型。 */
+  /** 库里已经有行、骨架也没有新东西要补，所以没动的用途、模型。 */
   purposesKept: string[];
   modelsKept: string[];
-  /** 这次写进去几行：用途 → 模型那一层、模型 → 路由那一层。 */
+  /** 库里已有行的用途里，这次追加了的「用途 → 模型」行（追加在该用途末尾）。 */
+  purposeModelsAppended: { purpose: string; modelId: string }[];
+  /** 库里已有行的模型里，这次追加了的「模型 → 路由」行（追加在该模型末尾）。 */
+  routesAppended: { modelId: string; routeId: string; enabled: boolean }[];
+  /** 这次一共写进去几行（整块写的加追加的）：用途 → 模型那一层、模型 → 路由那一层。 */
   purposeRowsInserted: number;
   catalogRowsInserted: number;
 }
@@ -73,43 +78,57 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
       modelsApplied: [],
       purposesKept: [],
       modelsKept: [],
+      purposeModelsAppended: [],
+      routesAppended: [],
       purposeRowsInserted: 0,
       catalogRowsInserted: 0,
     };
     for (const stage of STAGE_KINDS) {
-      const has = await tx
-        .select()
-        .from(routingPurposeModels)
-        .where(eq(routingPurposeModels.purpose, stage))
-        .limit(1);
-      if (has.length > 0) {
-        report.purposesKept.push(stage);
-        continue;
-      }
       const list = listFor(stage) ?? [];
-      await tx
-        .insert(routingPurposeModels)
-        .values(list.map((modelId, position) => ({ purpose: stage, modelId, position })));
-      report.purposesApplied.push(stage);
-      report.purposeRowsInserted += list.length;
+      const have = await tx
+        .select({ modelId: routingPurposeModels.modelId, position: routingPurposeModels.position })
+        .from(routingPurposeModels)
+        .where(eq(routingPurposeModels.purpose, stage));
+      const haveIds = new Set(have.map((h) => h.modelId));
+      const missingModels = list.filter((modelId) => !haveIds.has(modelId));
+      // 追加在该用途现有最大位置的后面；库里没有行就从 0 起（整个用途新装）
+      const next = have.length === 0 ? 0 : Math.max(...have.map((h) => h.position)) + 1;
+      if (missingModels.length > 0) {
+        await tx
+          .insert(routingPurposeModels)
+          .values(missingModels.map((modelId, i) => ({ purpose: stage, modelId, position: next + i })));
+        report.purposeRowsInserted += missingModels.length;
+      }
+      if (have.length === 0) report.purposesApplied.push(stage);
+      else if (missingModels.length === 0) report.purposesKept.push(stage);
+      else
+        for (const modelId of missingModels) report.purposeModelsAppended.push({ purpose: stage, modelId });
     }
     for (const [modelId, rs] of Object.entries(cfg.models)) {
-      const has = await tx.select().from(routingCatalog).where(eq(routingCatalog.modelId, modelId)).limit(1);
-      if (has.length > 0) {
-        report.modelsKept.push(modelId);
-        continue;
+      const have = await tx
+        .select({ routeId: routingCatalog.routeId, position: routingCatalog.position })
+        .from(routingCatalog)
+        .where(eq(routingCatalog.modelId, modelId));
+      const haveIds = new Set(have.map((h) => h.routeId));
+      const missingRoutes = rs.filter((r) => !haveIds.has(r.routeId));
+      const next = have.length === 0 ? 0 : Math.max(...have.map((h) => h.position)) + 1;
+      if (missingRoutes.length > 0) {
+        await tx.insert(routingCatalog).values(
+          missingRoutes.map((r, i) => ({
+            modelId,
+            routeId: r.routeId,
+            position: next + i,
+            enabled: r.enabled,
+            effort: r.effort ?? null,
+          })),
+        );
+        report.catalogRowsInserted += missingRoutes.length;
       }
-      await tx.insert(routingCatalog).values(
-        rs.map((r, position) => ({
-          modelId,
-          routeId: r.routeId,
-          position,
-          enabled: r.enabled,
-          effort: r.effort ?? null,
-        })),
-      );
-      report.modelsApplied.push(modelId);
-      report.catalogRowsInserted += rs.length;
+      if (have.length === 0) report.modelsApplied.push(modelId);
+      else if (missingRoutes.length === 0) report.modelsKept.push(modelId);
+      else
+        for (const r of missingRoutes)
+          report.routesAppended.push({ modelId, routeId: r.routeId, enabled: r.enabled });
     }
     return report;
   });
@@ -121,18 +140,37 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
  */
 export function formatRoutingApplyReport(r: RoutingApplyReport): string {
   const kept = `库里已有、没动的：用途 ${r.purposesKept.length} 个、模型 ${r.modelsKept.length} 个（驾驶舱改过的不覆盖）`;
-  if (r.purposesApplied.length === 0 && r.modelsApplied.length === 0) {
+  if (
+    r.purposesApplied.length === 0 &&
+    r.modelsApplied.length === 0 &&
+    r.purposeModelsAppended.length === 0 &&
+    r.routesAppended.length === 0
+  ) {
     return `路由两层已齐，这次一行没改；${kept}`;
   }
   const lines: string[] = [];
+  if (r.routesAppended.length > 0) {
+    lines.push(
+      `给库里已有的模型追加了路由 ${r.routesAppended.length} 行（接在该模型现有路由末尾）：${r.routesAppended
+        .map((x) => `${x.modelId} ← ${x.routeId}（${x.enabled ? '开' : '关'}）`)
+        .join('、')}`,
+    );
+  }
+  if (r.purposeModelsAppended.length > 0) {
+    lines.push(
+      `给库里已有的用途追加了模型 ${r.purposeModelsAppended.length} 行（接在该用途末尾）：${r.purposeModelsAppended
+        .map((x) => `${x.purpose} ← ${x.modelId}`)
+        .join('、')}`,
+    );
+  }
   if (r.purposesApplied.length > 0) {
     lines.push(
-      `补了用途 → 模型 ${r.purposeRowsInserted} 行（${r.purposesApplied.length} 个用途：${r.purposesApplied.join('、')}）`,
+      `补了用途 → 模型 ${r.purposeRowsInserted - r.purposeModelsAppended.length} 行（${r.purposesApplied.length} 个用途：${r.purposesApplied.join('、')}）`,
     );
   }
   if (r.modelsApplied.length > 0) {
     lines.push(
-      `补了模型 → 路由 ${r.catalogRowsInserted} 行（${r.modelsApplied.length} 个模型：${r.modelsApplied.join('、')}）`,
+      `补了模型 → 路由 ${r.catalogRowsInserted - r.routesAppended.length} 行（${r.modelsApplied.length} 个模型：${r.modelsApplied.join('、')}）`,
     );
   }
   lines.push(kept);

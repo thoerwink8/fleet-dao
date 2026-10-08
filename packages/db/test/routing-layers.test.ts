@@ -9,7 +9,7 @@ import { applyRoutingDefault } from '../src/routing-apply.ts';
 import { parseRoutingConfig, RoutingConfigError } from '../src/routing-config.ts';
 import { routingLayers } from '../src/routing-layers.ts';
 import { STAGE_KINDS } from '../src/schema/enums.ts';
-import { bans, pools, routes, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
+import { bans, models, pools, routes, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, addWindow, catalog, MIN, NOW } from './helpers.ts';
 
@@ -79,7 +79,7 @@ describe('把默认骨架写进库', () => {
     expect((await t.db.select().from(routingCatalog)).length).toBe(3);
   });
 
-  it('库里已有的不覆盖：驾驶舱改过的顺序、开关、思考档位留着', async () => {
+  it('库里已有的行不覆盖：驾驶舱改过的顺序、开关、思考档位留着；骨架里库里没有的路由才追加在末尾（#1351）', async () => {
     await t.db
       .insert(routingCatalog)
       .values({ modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false, effort: 'medium' });
@@ -93,11 +93,92 @@ describe('把默认骨架写进库', () => {
       },
     });
     const report = await applyRoutingDefault(t.db, withEffort);
-    expect(report.modelsKept).toEqual(['opus-4.9']);
+    expect(report.modelsKept).toEqual([]);
+    expect(report.modelsApplied).toEqual(['claude-fable-5.2']);
+    expect(report.routesAppended).toEqual([{ modelId: 'opus-4.9', routeId: 'a-opus', enabled: true }]);
     const rows = await t.db.select().from(routingCatalog);
-    expect(rows.filter((r) => r.modelId === 'opus-4.9')).toEqual([
+    expect(rows.filter((r) => r.modelId === 'opus-4.9').sort((a, b) => a.position - b.position)).toEqual([
       { modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false, effort: 'medium' },
+      { modelId: 'opus-4.9', routeId: 'a-opus', position: 1, enabled: true, effort: 'max' },
     ]);
+  });
+
+  it('模型已有 cursor 类的老路由时，骨架新加的路由追加在末尾（位置接在现有最大位置后，开关照骨架），原顺序和开关不变；再装一次已齐', async () => {
+    await t.db.insert(routingCatalog).values({
+      modelId: 'opus-4.9',
+      routeId: 'b-opus',
+      position: 4, // 驾驶舱挪过、中间有空位
+      enabled: true,
+      effort: null,
+    });
+    const cfg = config({
+      models: {
+        'opus-4.9': [
+          { routeId: 'a-opus', enabled: false },
+          { routeId: 'b-opus', enabled: false },
+        ],
+        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+      },
+    });
+    const first = await applyRoutingDefault(t.db, cfg);
+    expect(first.routesAppended).toEqual([{ modelId: 'opus-4.9', routeId: 'a-opus', enabled: false }]);
+    const opus = (await t.db.select().from(routingCatalog))
+      .filter((r) => r.modelId === 'opus-4.9')
+      .sort((a, b) => a.position - b.position);
+    expect(opus.map((r) => [r.routeId, r.position, r.enabled])).toEqual([
+      ['b-opus', 4, true],
+      ['a-opus', 5, false],
+    ]);
+    const again = await applyRoutingDefault(t.db, cfg);
+    expect(again.routesAppended).toEqual([]);
+    expect(again.purposeModelsAppended).toEqual([]);
+    expect((await t.db.select().from(routingCatalog)).length).toBe(3);
+  });
+
+  it('用途已有行时，骨架里新加的模型追加在该用途末尾，已有的顺序不动（驾驶舱挪过的不挪回去）', async () => {
+    await t.db.insert(routingPurposeModels).values([
+      { purpose: 'ui', modelId: 'opus-4.9', position: 0 },
+      { purpose: 'ui', modelId: 'claude-fable-5.2', position: 7 },
+    ]);
+    // 库里 ui 已有 opus、fable；骨架 ui 又多了 haiku-4.5，应追加在末尾
+    await t.db.insert(models).values({ id: 'haiku-4.5', family: 'claude', displayName: 'Haiku 4.5' });
+    await addRoute(t.db, { id: 'a-haiku', poolId: 'relay-a', modelId: 'haiku-4.5' });
+    const cfg = config({
+      purposes: {
+        default: ['opus-4.9', 'haiku-4.5'],
+        ui: ['claude-fable-5.2', 'opus-4.9', 'haiku-4.5'],
+      },
+      models: {
+        'opus-4.9': [{ routeId: 'a-opus', enabled: true }],
+        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        'haiku-4.5': [{ routeId: 'a-haiku', enabled: true }],
+      },
+    });
+    const report = await applyRoutingDefault(t.db, cfg);
+    expect(report.purposeModelsAppended).toEqual([{ purpose: 'ui', modelId: 'haiku-4.5' }]);
+    expect(report.purposesKept).not.toContain('ui');
+    const ui = (await t.db.select().from(routingPurposeModels))
+      .filter((p) => p.purpose === 'ui')
+      .sort((a, b) => a.position - b.position);
+    expect(ui.map((p) => [p.modelId, p.position])).toEqual([
+      ['opus-4.9', 0],
+      ['claude-fable-5.2', 7],
+      ['haiku-4.5', 8],
+    ]);
+    // 没有行的用途（default 兜底的那些）整块装
+    expect(report.purposesApplied).toContain('execute');
+  });
+
+  it('【故意造出的失败】模型已有任何一行就整块跳过（旧行为）：后来加给它的新路由进不了库；按行补缺后必须进库、而且只多这一行', async () => {
+    await t.db
+      .insert(routingCatalog)
+      .values({ modelId: 'opus-4.9', routeId: 'a-opus', position: 0, enabled: true, effort: null });
+    const before = await t.db.select().from(routingCatalog);
+    await applyRoutingDefault(t.db, config());
+    const after = await t.db.select().from(routingCatalog);
+    expect(after.filter((r) => r.modelId === 'opus-4.9').map((r) => r.routeId)).toEqual(['a-opus', 'b-opus']);
+    expect(after.length).toBe(before.length + 2); // b-opus 和 fable 的 a-fable
+    expect(after.find((r) => r.routeId === 'a-opus')).toEqual(before[0]);
   });
 
   it('骨架里写的思考档位：模型第一次装进库时跟着写进去；没写的是空（起会话用 high）', async () => {
