@@ -5,6 +5,7 @@ import { auditLog, channels, routes, routingCatalog, routingPurposeModels } from
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
   MovePurposeModelResponse,
+  PurposeMembershipResponse,
   RoutingLayersResponse,
   SetChannelEnabledResponse,
   SetModelEnabledResponse,
@@ -254,6 +255,15 @@ describe('驾驶舱改路由先后：用途下的模型', () => {
       setChannelEnabled: async () => {
         throw new Error('不该走到这');
       },
+      addPurposeModel: async () => {
+        throw new Error('不该走到这');
+      },
+      removePurposeModel: async () => {
+        throw new Error('不该走到这');
+      },
+      setPurposeModelEffort: async () => {
+        throw new Error('不该走到这');
+      },
       subjectsOf: async () => ({ model: undefined, routes: [] }),
     };
     current = await pgHarness(t, { routingOrder: broken });
@@ -481,6 +491,15 @@ describe('驾驶舱改路由先后：模型下的渠道和开关', () => {
       setChannelEnabled: async () => {
         throw new Error('不该走到这');
       },
+      addPurposeModel: async () => {
+        throw new Error('不该走到这');
+      },
+      removePurposeModel: async () => {
+        throw new Error('不该走到这');
+      },
+      setPurposeModelEffort: async () => {
+        throw new Error('不该走到这');
+      },
       subjectsOf: async () => ({ model: undefined, routes: [] }),
     };
     current = await pgHarness(t, { routingOrder: broken });
@@ -587,5 +606,213 @@ describe('驾驶舱：拖到新位置、模型开关、渠道开关', () => {
     expect(res.status).toBe(422);
     expect(await errorCode(res)).toBe('order_invalid');
     expect(await dbModelOrder()).toEqual(MODELS);
+  });
+});
+
+const postAdd = (h: Awaited<ReturnType<typeof pgHarness>>, s: Session, purpose: string, body: unknown) =>
+  h.cockpit.request(`/api/routing/purposes/${purpose}/models`, write('POST', s, body));
+const deleteModel = (
+  h: Awaited<ReturnType<typeof pgHarness>>,
+  s: Session,
+  purpose: string,
+  modelId: string,
+  body: unknown,
+) => h.cockpit.request(`/api/routing/purposes/${purpose}/models/${modelId}`, write('DELETE', s, body));
+const putEffort = (
+  h: Awaited<ReturnType<typeof pgHarness>>,
+  s: Session,
+  purpose: string,
+  modelId: string,
+  body: unknown,
+) => h.cockpit.request(`/api/routing/purposes/${purpose}/models/${modelId}/effort`, write('PUT', s, body));
+
+const purposeAudits = async () =>
+  (await t.db.select().from(auditLog))
+    .filter((a) => a.action.startsWith('routing.purpose.'))
+    .sort((a, b) => a.id - b.id);
+
+const errorOf = async (res: Response) =>
+  ((await res.json()) as { error: { code: string; message: string; details?: unknown } }).error;
+
+describe('用途里加模型、移出、改档位（#1356）', () => {
+  it('加、改档位、移出成功并留下操作记录；移空后页面写明派不了，别的用途不动', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+
+    const added = await postAdd(current, s, 'verify', {
+      modelId: 'kimi-k3',
+      position: 0,
+      effort: 'max',
+      version: 0,
+      reason: '验证先用 Kimi',
+    });
+    expect(added.status).toBe(200);
+    expect(PurposeMembershipResponse.parse(await added.json())).toEqual({
+      purpose: 'verify',
+      version: 1,
+      order: [{ modelId: 'kimi-k3', effort: 'max' }],
+    });
+
+    const appended = await postAdd(current, s, 'verify', { modelId: 'opus-5.5', version: 1 });
+    expect(appended.status).toBe(200);
+    expect(PurposeMembershipResponse.parse(await appended.json())).toEqual({
+      purpose: 'verify',
+      version: 2,
+      order: [
+        { modelId: 'kimi-k3', effort: 'max' },
+        { modelId: 'opus-5.5', effort: null },
+      ],
+    });
+
+    const effort = await putEffort(current, s, 'verify', 'kimi-k3', { effort: 'high', version: 2 });
+    expect(effort.status).toBe(200);
+    expect(PurposeMembershipResponse.parse(await effort.json()).order).toEqual([
+      { modelId: 'kimi-k3', effort: 'high' },
+      { modelId: 'opus-5.5', effort: null },
+    ]);
+
+    const removed = await deleteModel(current, s, 'verify', 'opus-5.5', { version: 3 });
+    expect(removed.status).toBe(200);
+    expect(PurposeMembershipResponse.parse(await removed.json())).toEqual({
+      purpose: 'verify',
+      version: 4,
+      order: [{ modelId: 'kimi-k3', effort: 'high' }],
+    });
+    const emptied = await deleteModel(current, s, 'verify', 'kimi-k3', {
+      version: 4,
+      reason: '这个用途先空着',
+    });
+    expect(emptied.status).toBe(200);
+    expect(PurposeMembershipResponse.parse(await emptied.json())).toEqual({
+      purpose: 'verify',
+      version: 5,
+      order: [],
+    });
+
+    const layers = RoutingLayersResponse.parse(
+      await (await current.cockpit.request('/api/routing/layers', { headers: { cookie: s.cookie } })).json(),
+    );
+    const verify = layers.purposes.find((p) => p.purpose === 'verify');
+    expect(verify?.version).toBe(5);
+    expect(verify?.models).toEqual([]);
+    expect(verify?.problems).toEqual(['这个用途没有模型，派不了']);
+    expect(layers.purposes.find((p) => p.purpose === 'execute')?.models.map((m) => m.modelId)).toEqual(
+      MODELS,
+    );
+    expect(
+      (await t.db.select().from(routingCatalog).where(eq(routingCatalog.modelId, 'kimi-k3')))[0]?.effort ??
+        null,
+    ).toBeNull();
+    expect(
+      (
+        await t.db
+          .select()
+          .from(routingPurposeModels)
+          .where(
+            and(eq(routingPurposeModels.purpose, 'execute'), eq(routingPurposeModels.modelId, 'kimi-k3')),
+          )
+      )[0]?.effort ?? null,
+    ).toBeNull();
+
+    const logged = await purposeAudits();
+    expect(logged.map((a) => a.action)).toEqual([
+      'routing.purpose.add',
+      'routing.purpose.add',
+      'routing.purpose.effort',
+      'routing.purpose.remove',
+      'routing.purpose.remove',
+    ]);
+    expect(logged[0]).toMatchObject({
+      actorKind: 'user',
+      target: 'stage:verify',
+      via: 'cockpit',
+      ok: true,
+      reason: '验证先用 Kimi',
+      before: { version: 0, order: [] },
+      after: {
+        version: 1,
+        order: [{ modelId: 'kimi-k3', effort: 'max' }],
+        added: 'kimi-k3',
+        position: 0,
+        effort: 'max',
+      },
+    });
+    expect(logged[4]).toMatchObject({
+      action: 'routing.purpose.remove',
+      target: 'stage:verify',
+      reason: '这个用途先空着',
+      after: { version: 5, order: [], removed: 'kimi-k3' },
+    });
+  });
+
+  it('重复加、模型不存在、版本对不上、不认识的用途、没登录、网关：明确拒绝，不写、不记', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+
+    const stale = await postAdd(current, s, 'verify', { modelId: 'kimi-k3', version: 7 });
+    expect(stale.status).toBe(409);
+    expect(await errorOf(stale)).toMatchObject({ code: 'conflict', details: { version: 0 } });
+
+    const missing = await postAdd(current, s, 'verify', { modelId: 'no-such-model', version: 0 });
+    expect(missing.status).toBe(404);
+    expect(await errorOf(missing)).toMatchObject({
+      code: 'model_not_found',
+      message: '目录里没有模型 no-such-model',
+    });
+
+    const added = await postAdd(current, s, 'verify', { modelId: 'kimi-k3', version: 0 });
+    expect(added.status).toBe(200);
+    const again = await postAdd(current, s, 'verify', { modelId: 'kimi-k3', version: 1 });
+    expect(again.status).toBe(409);
+    expect(await errorOf(again)).toMatchObject({
+      code: 'already_in_purpose',
+      message: '模型 kimi-k3 已经在用途 verify 里',
+    });
+
+    const gone = await deleteModel(current, s, 'verify', 'opus-5.5', { version: 1 });
+    expect(gone.status).toBe(404);
+    expect((await errorOf(gone)).message).toBe('用途 verify 下没有模型 opus-5.5');
+
+    const noPurpose = await postAdd(current, s, 'nope', { modelId: 'kimi-k3', version: 0 });
+    expect(noPurpose.status).toBe(404);
+    expect(await errorOf(noPurpose)).toMatchObject({ code: 'purpose_not_found' });
+
+    const anon = await current.cockpit.request('/api/routing/purposes/verify/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelId: 'opus-5.5', version: 1 }),
+    });
+    expect(anon.status).toBe(401);
+    const gateway = await current.cockpit.request(
+      '/api/routing/purposes/verify/models',
+      viaGateway('POST', 'ou_dev_founder_a', { modelId: 'opus-5.5', version: 1 }),
+    );
+    expect(gateway.status).toBe(403);
+    expect(await errorCode(gateway)).toBe('gateway_route_not_allowed');
+
+    expect(
+      (await t.db.select().from(routingPurposeModels).where(eq(routingPurposeModels.purpose, 'verify'))).map(
+        (r) => r.modelId,
+      ),
+    ).toEqual(['kimi-k3']);
+    expect(await purposeAudits()).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】GPT 模型加进界面用途必须被拒，一行不写、不记操作记录', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const banned = await postAdd(current, s, 'ui', { modelId: 'gpt-5.6', version: 0 });
+    expect(banned.status).toBe(422);
+    expect(await errorOf(banned)).toEqual({
+      code: 'model_not_allowed',
+      message: 'GPT 5.6 不能用在「写界面」：GPT 不做 UI 类活',
+    });
+    expect(
+      await t.db.select().from(routingPurposeModels).where(eq(routingPurposeModels.purpose, 'ui')),
+    ).toEqual([]);
+    expect(await purposeAudits()).toEqual([]);
   });
 });

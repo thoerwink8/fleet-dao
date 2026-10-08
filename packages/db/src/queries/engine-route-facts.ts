@@ -26,7 +26,7 @@ export interface PurposeRouteFacts {
    * 开没开（routing_catalog.enabled，不分用途）；关着的照样排在里面，选路按 switched-off 挡。两层没有「钉住」：选路按没钉住算。
    */
   order: { routeId: string; position: number; enabled: boolean }[];
-  /** 配置上的缺口（用途没配模型顺序、模型下一条路由都没有）：照实给出，派不出时写进原因，不当成「没有」。 */
+  /** 配置上的缺口（用途没有模型、模型下一条路由都没有）：照实给出，派不出时写进原因，不当成「没有」。 */
   problems: string[];
   routes: {
     routeId: string;

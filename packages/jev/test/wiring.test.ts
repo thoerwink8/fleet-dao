@@ -195,11 +195,11 @@ describe('按配置和路由两层现找后端', () => {
     });
   });
 
-  it('判断用途没配模型顺序：坏了，写明没配，不回空当成没事', async () => {
+  it('判断用途没有模型：坏了，写明没配，不回空当成没事', async () => {
     await setJudgeModels([]);
     expect(await resolveJevBackend(t.db, { ...machine().at, makeBackend: fakeMake() })).toEqual({
       state: 'broken',
-      problem: '路由两层里判断用途没有派得出去的路由：用途 judge 没配模型顺序',
+      problem: '路由两层里判断用途没有派得出去的路由：这个用途没有模型，派不了',
     });
   });
 

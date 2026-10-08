@@ -1,4 +1,4 @@
-// 路由两层的读法和装载（#574）：骨架写进库只补缺、引用对不上一行不写；读出来每一层写明活着吗、为什么；
+// 路由两层的读法和装载（#574）：骨架只在用途表还是空的时候整份写一次（#1356），引用对不上一行不写；读出来每一层写明活着吗、为什么；
 // 「接得上、额度够、没被禁令挡」走选路同一份判法（evaluateRoutes），这里只验读成三件事、合成每层的结论。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -147,7 +147,7 @@ describe('把默认骨架写进库', () => {
     });
   });
 
-  it('库里已有的行不覆盖：驾驶舱改过的顺序、开关、思考档位留着；骨架里库里没有的路由才追加在末尾（#1351）', async () => {
+  it('用途还是空、模型已有路由行：不改那几行的开关和档位，也不追加；还没有路由行的模型仍按骨架写', async () => {
     await t.db
       .insert(routingCatalog)
       .values({ modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false, effort: 'medium' });
@@ -161,21 +161,21 @@ describe('把默认骨架写进库', () => {
       },
     });
     const report = await applyRoutingDefault(t.db, withEffort);
-    expect(report.modelsKept).toEqual([]);
+    expect(report.modelsKept).toEqual(['opus-4.9']);
     expect(report.modelsApplied).toEqual(['claude-lite-5.2']);
-    expect(report.routesAppended).toEqual([{ modelId: 'opus-4.9', routeId: 'a-opus', enabled: true }]);
+    expect(report.routesAppended).toEqual([]);
+    expect(report.purposesApplied).toEqual([...STAGE_KINDS]);
     const rows = await t.db.select().from(routingCatalog);
     expect(rows.filter((r) => r.modelId === 'opus-4.9').sort((a, b) => a.position - b.position)).toEqual([
       { modelId: 'opus-4.9', routeId: 'b-opus', position: 0, enabled: false, effort: 'medium' },
-      { modelId: 'opus-4.9', routeId: 'a-opus', position: 1, enabled: true, effort: 'max' },
     ]);
   });
 
-  it('模型已有 cursor 类的老路由时，骨架新加的路由追加在末尾（位置接在现有最大位置后，开关照骨架），原顺序和开关不变；再装一次已齐', async () => {
+  it('模型已有路由行时不追加、不改开关；用途写完后再装一次一行不动', async () => {
     await t.db.insert(routingCatalog).values({
       modelId: 'opus-4.9',
       routeId: 'b-opus',
-      position: 4, // 驾驶舱挪过、中间有空位
+      position: 4,
       enabled: true,
       effort: null,
     });
@@ -189,26 +189,27 @@ describe('把默认骨架写进库', () => {
       },
     });
     const first = await applyRoutingDefault(t.db, cfg);
-    expect(first.routesAppended).toEqual([{ modelId: 'opus-4.9', routeId: 'a-opus', enabled: false }]);
+    expect(first.routesAppended).toEqual([]);
     const opus = (await t.db.select().from(routingCatalog))
       .filter((r) => r.modelId === 'opus-4.9')
       .sort((a, b) => a.position - b.position);
-    expect(opus.map((r) => [r.routeId, r.position, r.enabled])).toEqual([
-      ['b-opus', 4, true],
-      ['a-opus', 5, false],
-    ]);
+    expect(opus.map((r) => [r.routeId, r.position, r.enabled])).toEqual([['b-opus', 4, true]]);
+    const beforePurpose = await t.db.select().from(routingPurposeModels);
+    const beforeCatalog = await t.db.select().from(routingCatalog);
     const again = await applyRoutingDefault(t.db, cfg);
     expect(again.routesAppended).toEqual([]);
     expect(again.purposeModelsAppended).toEqual([]);
-    expect((await t.db.select().from(routingCatalog)).length).toBe(3);
+    expect(again.purposeRowsInserted).toBe(0);
+    expect(again.catalogRowsInserted).toBe(0);
+    expect(await t.db.select().from(routingPurposeModels)).toEqual(beforePurpose);
+    expect(await t.db.select().from(routingCatalog)).toEqual(beforeCatalog);
   });
 
-  it('用途已有行时，骨架里新加的模型追加在该用途末尾，已有的顺序不动（驾驶舱挪过的不挪回去）', async () => {
+  it('用途已有任何一行：不再补模型、不再装没写过的用途、已有顺序留着', async () => {
     await t.db.insert(routingPurposeModels).values([
       { purpose: 'ui', modelId: 'opus-4.9', position: 0 },
       { purpose: 'ui', modelId: 'claude-lite-5.2', position: 7 },
     ]);
-    // 库里 ui 已有 opus、lite 5.2；骨架 ui 又多了 haiku-4.5，应追加在末尾
     await t.db.insert(models).values({ id: 'haiku-4.5', family: 'claude', displayName: 'Haiku 4.5' });
     await addRoute(t.db, { id: 'a-haiku', poolId: 'relay-a', modelId: 'haiku-4.5' });
     const cfg = config({
@@ -219,34 +220,34 @@ describe('把默认骨架写进库', () => {
       models: {
         'opus-4.9': [{ routeId: 'a-opus', enabled: true }],
         'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true }],
-        'haiku-4.5': [{ routeId: 'a-haiku', enabled: true }],
+        'haiku-4.5': [{ routeId: 'a-haiku', enabled: false }],
       },
     });
+    const beforePurpose = await t.db.select().from(routingPurposeModels);
+    const beforeCatalog = await t.db.select().from(routingCatalog);
     const report = await applyRoutingDefault(t.db, cfg);
-    expect(report.purposeModelsAppended).toEqual([{ purpose: 'ui', modelId: 'haiku-4.5' }]);
-    expect(report.purposesKept).not.toContain('ui');
-    const ui = (await t.db.select().from(routingPurposeModels))
-      .filter((p) => p.purpose === 'ui')
-      .sort((a, b) => a.position - b.position);
-    expect(ui.map((p) => [p.modelId, p.position])).toEqual([
-      ['opus-4.9', 0],
-      ['claude-lite-5.2', 7],
-      ['haiku-4.5', 8],
-    ]);
-    // 没有行的用途（default 兜底的那些）整块装
-    expect(report.purposesApplied).toContain('execute');
+    expect(report.purposeModelsAppended).toEqual([]);
+    expect(report.routesAppended).toEqual([]);
+    expect(report.purposesApplied).toEqual([]);
+    expect(report.purposeRowsInserted).toBe(0);
+    expect(report.catalogRowsInserted).toBe(0);
+    expect(await t.db.select().from(routingPurposeModels)).toEqual(beforePurpose);
+    expect(await t.db.select().from(routingCatalog)).toEqual(beforeCatalog);
   });
 
-  it('【故意造出的失败】模型已有任何一行就整块跳过（旧行为）：后来加给它的新路由进不了库；按行补缺后必须进库、而且只多这一行', async () => {
+  it('【故意造出的失败】用途表已有任何一行就按行补缺（旧行为）：缺的路由、缺的模型都必须留在外面', async () => {
     await t.db
       .insert(routingCatalog)
-      .values({ modelId: 'opus-4.9', routeId: 'a-opus', position: 0, enabled: true, effort: null });
-    const before = await t.db.select().from(routingCatalog);
-    await applyRoutingDefault(t.db, config());
-    const after = await t.db.select().from(routingCatalog);
-    expect(after.filter((r) => r.modelId === 'opus-4.9').map((r) => r.routeId)).toEqual(['a-opus', 'b-opus']);
-    expect(after.length).toBe(before.length + 2); // b-opus 和 lite 5.2 的 a-lite
-    expect(after.find((r) => r.routeId === 'a-opus')).toEqual(before[0]);
+      .values({ modelId: 'opus-4.9', routeId: 'a-opus', position: 0, enabled: true, effort: 'low' });
+    await t.db.insert(routingPurposeModels).values({ purpose: 'execute', modelId: 'opus-4.9', position: 0 });
+    const beforeCatalog = await t.db.select().from(routingCatalog);
+    const beforePurpose = await t.db.select().from(routingPurposeModels);
+    const report = await applyRoutingDefault(t.db, config());
+    expect(report.catalogRowsInserted).toBe(0);
+    expect(report.purposeRowsInserted).toBe(0);
+    expect(await t.db.select().from(routingCatalog)).toEqual(beforeCatalog);
+    expect(await t.db.select().from(routingPurposeModels)).toEqual(beforePurpose);
+    expect(beforeCatalog.find((r) => r.routeId === 'b-opus')).toBeUndefined();
   });
 
   it('骨架里写的思考档位：模型第一次装进库时跟着写进去；没写的是空（起会话用 high）', async () => {
@@ -484,7 +485,7 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
     await t.db.delete(routingPurposeModels);
     const none = await routingLayers(t.db, 'execute', { now: NOW });
     expect(none).toMatchObject({ verdict: 'dead', models: [] });
-    expect(none.problems.join('')).toContain('用途 execute 没配模型顺序');
+    expect(none.problems).toEqual(['这个用途没有模型，派不了']);
 
     await t.db.insert(routingPurposeModels).values({ purpose: 'execute', modelId: 'opus-4.9', position: 0 });
     await t.db.delete(routingCatalog);
