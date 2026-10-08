@@ -311,6 +311,9 @@ export function nameUpstreamModel(channelId: string, raw: string): NamedUpstream
   return nameWith(rule, raw) ?? { unclassified: true };
 }
 
+/** 发现层自动入目录的路由 id 前缀：`auto:<渠道>:<原串>`。同一模型的变体共用（池、模型、执行方式），装载器的「同一条线」检查要认得它们。 */
+export const DISCOVERED_ROUTE_PREFIX = 'auto:';
+
 /** 拆不出时模型 id 是「渠道:原串」，原串不改写。 */
 export function discoveredModelId(channelId: string, raw: string): string {
   const named = nameUpstreamModel(channelId, raw);
