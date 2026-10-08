@@ -54,6 +54,7 @@ const layers = (models: Record<string, RoutingLayerRoute[]>[]): RoutingLayers =>
   purposes: [
     {
       purpose: 'execute',
+      version: 0,
       verdict: 'live',
       problems: [],
       models: models.flatMap((m) =>

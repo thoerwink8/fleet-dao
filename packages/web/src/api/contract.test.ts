@@ -17,7 +17,12 @@ function used(prefix: string): Set<string> {
 
 /** 契约里有、前端（http.ts）没用的：key → 为什么。 */
 /** 契约里有、页面故意不调的。groomStatus / groomNow 已由设置页接上（#1335 第 4 片），不在这里。 */
-const WEB_NOT_USED: Record<string, string> = {};
+const WEB_NOT_USED: Record<string, string> = {
+  // 配置层页面还没做（#1354 第五片），这片只做后端
+  addPurposeModel: '配置层页面还没做（#1354 第五片），这片只做后端',
+  removePurposeModel: '配置层页面还没做（#1354 第五片），这片只做后端',
+  setPurposeModelEffort: '配置层页面还没做（#1354 第五片），这片只做后端',
+};
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch
   feishuLogin: '浏览器整页跳转，不走 fetch',

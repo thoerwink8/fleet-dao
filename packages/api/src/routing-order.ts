@@ -3,8 +3,10 @@
 // - 先后和开关是运行时配置、留在库里（决定 0011 第 7 条）：改了直接写库，引擎下一次选路就照新的，不开 PR。库里的写法在 db 的
 //   routing-order.ts（带「我看到的旧值」防两个人同时改、换位置先挪到临时位置躲唯一约束），这里只管同一个事务里记操作记录：记不下就不改。
 // - 没接上（开发环境的内存版没有路由两层那两张表）由接口回 503；写不进抛，接口回 503 写明原因。不当改成了。
-// - 操作记录：routing.order.move（模型或渠道换位置，对象 stage:<用途> 或 model:<模型>）、routing.route.enable（一条路由的开关）、routing.model.enable（模型开关）、channel.enable / channel.disable（渠道开关）。
+// - 操作记录：routing.order.move（模型或渠道换位置，对象 stage:<用途> 或 model:<模型>）、routing.route.enable（一条路由的开关）、routing.model.enable（模型开关）、channel.enable / channel.disable（渠道开关）、routing.purpose.add / routing.purpose.remove / routing.purpose.effort（加进用途、移出、改这个用途下的档位，对象 stage:<用途>）。
 import {
+  type AddPurposeModelInput,
+  addPurposeModel,
   auditLog,
   type Db,
   type MoveModelRouteInput,
@@ -13,8 +15,11 @@ import {
   models,
   moveModelRoute,
   movePurposeModel,
+  type PurposeWriteResult,
+  type RemovePurposeModelInput,
   type ReorderModelRoutesInput,
   type ReorderPurposeModelsInput,
+  removePurposeModel,
   reorderModelRoutes,
   reorderPurposeModels,
   routes,
@@ -22,19 +27,25 @@ import {
   type SetChannelEnabledFlagResult,
   type SetModelEnabledInput,
   type SetModelEnabledResult,
+  type SetPurposeModelEffortInput,
   type SetRouteEnabledInput,
   type SetRouteEnabledResult,
   setChannelEnabledFlag,
   setModelEnabled,
+  setPurposeModelEffort,
   setRouteEnabled,
 } from '@fleet-dao/db';
 import {
+  AddPurposeModelRequest,
   MovePurposeModelRequest,
   MovePurposeModelResponse,
+  PurposeMembershipResponse,
+  RemovePurposeModelRequest,
   SetChannelEnabledRequest,
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
   SetModelEnabledResponse,
+  SetPurposeModelEffortRequest,
   StageKindSchema,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
@@ -69,6 +80,12 @@ export interface RoutingOrderPort {
     input: SetChannelEnabledFlagInput,
     audit: OrderAudit,
   ): Promise<SetChannelEnabledFlagResult>;
+  /** 把目录里的模型加进用途；改成了就在同一个事务里记操作记录。 */
+  addPurposeModel(input: AddPurposeModelInput, audit: OrderAudit): Promise<PurposeWriteResult>;
+  /** 把模型移出用途；同上。用途可以变空。 */
+  removePurposeModel(input: RemovePurposeModelInput, audit: OrderAudit): Promise<PurposeWriteResult>;
+  /** 改这个用途下这个模型的档位；同上。 */
+  setPurposeModelEffort(input: SetPurposeModelEffortInput, audit: OrderAudit): Promise<PurposeWriteResult>;
   /** 一个模型和它名下路由的「被判的名字」（给「只有创始人能开」的门用，founder-only.ts）。模型库里没有 = model 为空。 */
   subjectsOf(modelId: string): Promise<FounderOnlySubjects>;
 }
@@ -171,6 +188,48 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
         const result = await setChannelEnabledFlag(tx, input);
         if (!result.ok) return result;
         await record(tx, audit, { enabled: result.before }, { enabled: result.after });
+        return result;
+      }),
+    addPurposeModel: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await addPurposeModel(tx, input);
+        if (!result.ok) return result;
+        await record(
+          tx,
+          audit,
+          { version: result.beforeVersion, order: result.before },
+          {
+            version: result.version,
+            order: result.order,
+            added: input.modelId,
+            position: input.position ?? null,
+            effort: input.effort ?? null,
+          },
+        );
+        return result;
+      }),
+    removePurposeModel: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await removePurposeModel(tx, input);
+        if (!result.ok) return result;
+        await record(
+          tx,
+          audit,
+          { version: result.beforeVersion, order: result.before },
+          { version: result.version, order: result.order, removed: input.modelId },
+        );
+        return result;
+      }),
+    setPurposeModelEffort: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await setPurposeModelEffort(tx, input);
+        if (!result.ok) return result;
+        await record(
+          tx,
+          audit,
+          { version: result.beforeVersion, order: result.before },
+          { version: result.version, order: result.order, modelId: input.modelId, effort: input.effort },
+        );
         return result;
       }),
   };
@@ -304,6 +363,7 @@ export function registerRoutingOrderRoutes(
       );
       if (!result.ok) {
         if (result.kind === 'not_found') throw new ApiError(404, 'route_not_found', result.why);
+        if (result.kind === 'banned') throw new ApiError(422, 'model_not_allowed', result.why);
         throw new ApiError(409, 'conflict', '这条路由的开关刚被别人改过，刷新后再改', {
           current: result.current,
         });
@@ -340,6 +400,7 @@ export function registerRoutingOrderRoutes(
     }
     if (!result.ok) {
       if (result.kind === 'not_found') throw new ApiError(404, 'model_not_found', result.why);
+      if (result.kind === 'banned') throw new ApiError(422, 'model_not_allowed', result.why);
       throw new ApiError(409, 'conflict', '这个模型的开关刚被别人改过，刷新后再改', {
         current: result.current,
       });
@@ -380,5 +441,109 @@ export function registerRoutingOrderRoutes(
       });
     }
     return reply(c, SetChannelEnabledResponse, { channelId, enabled: result.after });
+  });
+
+  const membershipProblem = (result: Exclude<PurposeWriteResult, { ok: true }>): ApiError => {
+    if (result.kind === 'not_found') return new ApiError(404, 'model_not_found', result.why);
+    if (result.kind === 'already') return new ApiError(409, 'already_in_purpose', result.why);
+    if (result.kind === 'banned') return new ApiError(422, 'model_not_allowed', result.why);
+    if (result.kind === 'invalid') return new ApiError(422, result.code, result.why);
+    return new ApiError(409, 'conflict', '这个用途刚被别人改过，刷新后再改', { version: result.version });
+  };
+
+  const membershipAudit = (
+    c: Context<CockpitEnv>,
+    action: string,
+    purpose: string,
+    reason?: string,
+  ): OrderAudit => ({
+    actor: actorOf(c),
+    action,
+    target: `stage:${purpose}`,
+    reason,
+    via: c.get('via'),
+    ok: true,
+  });
+
+  // 把目录里的模型加进用途。只有驾驶舱登录进得来（GATEWAY_WEB_ROUTES 里没有它）。
+  app.post(WebRoutes.addPurposeModel.path, async (c) => {
+    const purposeParam = c.req.param('purpose');
+    const body = await readJson(c, AddPurposeModelRequest);
+    const purpose = StageKindSchema.safeParse(purposeParam);
+    if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
+    if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    await requireFounderForFounderOnly(c, deps.routingOrder, body.modelId);
+    let result: PurposeWriteResult;
+    try {
+      result = await deps.routingOrder.addPurposeModel(
+        {
+          purpose: purpose.data,
+          modelId: body.modelId,
+          ...(body.position !== undefined ? { position: body.position } : {}),
+          ...(body.effort !== undefined ? { effort: body.effort } : {}),
+          version: body.version,
+        },
+        membershipAudit(c, 'routing.purpose.add', purpose.data, body.reason),
+      );
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw unwritable('往用途里加模型', { purpose: purpose.data, modelId: body.modelId }, err);
+    }
+    if (!result.ok) throw membershipProblem(result);
+    return reply(c, PurposeMembershipResponse, {
+      purpose: purpose.data,
+      version: result.version,
+      order: result.order,
+    });
+  });
+
+  app.delete(WebRoutes.removePurposeModel.path, async (c) => {
+    const purposeParam = c.req.param('purpose');
+    const modelId = c.req.param('modelId');
+    const body = await readJson(c, RemovePurposeModelRequest);
+    const purpose = StageKindSchema.safeParse(purposeParam);
+    if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
+    if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    let result: PurposeWriteResult;
+    try {
+      result = await deps.routingOrder.removePurposeModel(
+        { purpose: purpose.data, modelId, version: body.version },
+        membershipAudit(c, 'routing.purpose.remove', purpose.data, body.reason),
+      );
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw unwritable('把模型移出用途', { purpose: purpose.data, modelId }, err);
+    }
+    if (!result.ok) throw membershipProblem(result);
+    return reply(c, PurposeMembershipResponse, {
+      purpose: purpose.data,
+      version: result.version,
+      order: result.order,
+    });
+  });
+
+  app.put(WebRoutes.setPurposeModelEffort.path, async (c) => {
+    const purposeParam = c.req.param('purpose');
+    const modelId = c.req.param('modelId');
+    const body = await readJson(c, SetPurposeModelEffortRequest);
+    const purpose = StageKindSchema.safeParse(purposeParam);
+    if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
+    if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    let result: PurposeWriteResult;
+    try {
+      result = await deps.routingOrder.setPurposeModelEffort(
+        { purpose: purpose.data, modelId, effort: body.effort, version: body.version },
+        membershipAudit(c, 'routing.purpose.effort', purpose.data, body.reason),
+      );
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw unwritable('改用途下的档位', { purpose: purpose.data, modelId }, err);
+    }
+    if (!result.ok) throw membershipProblem(result);
+    return reply(c, PurposeMembershipResponse, {
+      purpose: purpose.data,
+      version: result.version,
+      order: result.order,
+    });
   });
 }

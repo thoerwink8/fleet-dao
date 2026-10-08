@@ -56,7 +56,7 @@ export type JevSetup =
 
 export type JudgeRoutePick =
   | { state: 'picked'; routeId: string; route: JudgeRoute }
-  /** 一条都派不出：problem 写明为什么（用途没配模型顺序、模型下没有路由、每条路由死在哪），不回空当成「没配」。 */
+  /** 一条都派不出：problem 写明为什么（这个用途没有模型、模型下没有路由、每条路由死在哪），不回空当成「没配」。 */
   | { state: 'none'; problem: string };
 
 const deadReasons = (l: RoutingLiveness) =>

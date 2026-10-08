@@ -223,7 +223,7 @@ interface StageFacts {
   /** 执行方式还没接上、这次不算的路由（给人看的名字）。 */
   unwired: string[];
   unwiredIds: Set<string>;
-  /** 路由两层的配置缺口（用途没配模型顺序、模型下一条路由都没有）：派不出时写进原因。 */
+  /** 路由两层的配置缺口（用途没有模型、模型下一条路由都没有）：派不出时写进原因。 */
   problems: string[];
 }
 

@@ -126,21 +126,24 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     // 没配的用途（验收、判断这次没插行）：死，写明没配，不给空的当「没有」。库里的 plan 行不在这份列表里。
     expect(by.get('verify')).toEqual({
       purpose: 'verify',
+      version: 0,
       verdict: 'dead',
-      problems: ['用途 verify 没配模型顺序'],
+      problems: ['这个用途没有模型，派不了'],
       models: [],
     });
     expect(by.get('judge')).toEqual({
       purpose: 'judge',
+      version: 0,
       verdict: 'dead',
-      problems: ['用途 judge 没配模型顺序'],
+      problems: ['这个用途没有模型，派不了'],
       models: [],
     });
     // 整理待办（groom，#1338）：路由页自动多出这一行，没配一样写明
     expect(by.get('groom')).toEqual({
       purpose: 'groom',
+      version: 0,
       verdict: 'dead',
-      problems: ['用途 groom 没配模型顺序'],
+      problems: ['这个用途没有模型，派不了'],
       models: [],
     });
   });
