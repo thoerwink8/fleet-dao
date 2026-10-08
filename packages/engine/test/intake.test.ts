@@ -218,6 +218,91 @@ describe('screenPlan · 现读之后再核一遍', () => {
   });
 });
 
+describe('交给引擎 · 只跳过开单时间和版本', () => {
+  const base = { autoDispatchSince: SINCE, issue: issue(), trusted: true, openMilestones: [V1, V2] };
+  const handed = (over: Partial<IntakeIssue> = {}) => issue({ labels: ['需求', '交给引擎'], ...over });
+
+  it('老单贴了「交给引擎」：跳过「开关打开以前开的」，被拉', () => {
+    expect(screenListed({ ...base, issue: handed({ createdAt: '2026-09-29T23:59:59.000Z' }) })).toBeNull();
+  });
+
+  it('未排期单贴了「交给引擎」：跳过版本这一道，被拉', () => {
+    expect(screenListed({ ...base, issue: handed({ milestone: null }) })).toBeNull();
+  });
+
+  it('别的版本贴了「交给引擎」：跳过版本这一道，被拉', () => {
+    expect(screenListed({ ...base, issue: handed({ milestone: V2 }) })).toBeNull();
+  });
+
+  it('没贴「交给引擎」的老单仍跳过', () => {
+    const got = screenListed({
+      ...base,
+      issue: issue({ createdAt: '2026-09-29T23:59:59.000Z' }),
+    });
+    expect(got?.reason).toBe('opened_before_switch');
+  });
+
+  it('贴了「本机做」又贴「交给引擎」（老单、未排期）：不拉，原因写明以「本机做」为准', () => {
+    const got = screenListed({
+      ...base,
+      issue: issue({
+        createdAt: '2026-09-29T23:59:59.000Z',
+        milestone: null,
+        labels: ['需求', '本机做', '交给引擎'],
+      }),
+    });
+    expect(got?.reason).toBe('reserved_local');
+    expect(got?.why).toContain('交给引擎');
+    expect(got?.why).toMatch(/以「本机做」为准/);
+  });
+
+  it('【故意造出的失败】母单贴了「交给引擎」（老单、未排期）仍不拉：标签不得绕过母单闸', () => {
+    const got = screenListed({
+      ...base,
+      issue: handed({
+        createdAt: '2026-09-29T23:59:59.000Z',
+        milestone: null,
+        labels: ['需求', '母单', '交给引擎'],
+      }),
+    });
+    expect(got?.reason).toBe('mother_ticket');
+  });
+
+  it('贴了「交给引擎」、作者不在白名单：仍不拉', () => {
+    const got = screenListed({
+      ...base,
+      trusted: false,
+      issue: handed({ createdAt: '2026-09-29T23:59:59.000Z', milestone: null }),
+    });
+    expect(got?.reason).toBe('untrusted_author');
+  });
+
+  it('未排期、贴了「交给引擎」：现读也过', () => {
+    expect(screenPlan(plan({ labels: ['需求', '交给引擎'], milestone: null }))).toBeNull();
+  });
+
+  it('别的版本、贴了「交给引擎」：现读也过', () => {
+    expect(screenPlan(plan({ labels: ['需求', '交给引擎'], milestone: V2 }))).toBeNull();
+  });
+
+  it('【故意造出的失败】子单贴了「交给引擎」、又未排期：仍不拉，标签不得绕过子单闸', () => {
+    const got = screenPlan(plan({ labels: ['需求', '交给引擎'], parent: 8, milestone: null }));
+    expect(got?.reason).toBe('sub_issue');
+  });
+
+  it('【故意造出的失败】下面挂着子单、又贴了「交给引擎」、挂在别的版本：仍不拉', () => {
+    const got = screenPlan(plan({ labels: ['需求', '交给引擎'], subIssues: 2, milestone: V2 }));
+    expect(got?.reason).toBe('mother_ticket');
+  });
+
+  it('现读时「本机做」和「交给引擎」都在：不拉，原因写明以「本机做」为准', () => {
+    const got = screenPlan(plan({ labels: ['本机做', '交给引擎'], milestone: null }));
+    expect(got?.reason).toBe('reserved_local');
+    expect(got?.why).toContain('交给引擎');
+    expect(got?.why).toMatch(/以「本机做」为准/);
+  });
+});
+
 describe('runIntakeJob · 合并闸还没认冷验收', () => {
   it('【故意造出的失败】开着「让 AI 接活」的仓、合并闸却还没认冷验收：这一轮记没跑成、一张单都不拉、不读 GitHub——开关开早了要看得见', async () => {
     const h = harness({ gateLive: false });
@@ -248,6 +333,58 @@ describe('runIntakeJob · 合并闸还没认冷验收', () => {
 });
 
 describe('runIntakeJob · 一轮', () => {
+  it('老单贴了「交给引擎」→ 拉起任务工作流', async () => {
+    const h = harness(
+      {},
+      { issues: [issue({ createdAt: '2026-09-29T23:59:59.000Z', labels: ['需求', '交给引擎'] })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('未排期单贴了「交给引擎」→ 拉起（现读也是未排期、也贴着）', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [issue({ milestone: null, labels: ['需求', '交给引擎'] })],
+        plans: { 12: plan({ milestone: null, labels: ['需求', '交给引擎'] }) },
+      },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('别的版本贴了「交给引擎」→ 拉起（现读也挂在别的版本、也贴着）', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [issue({ milestone: V2, labels: ['需求', '交给引擎'] })],
+        plans: { 12: plan({ milestone: V2, labels: ['需求', '交给引擎'] }) },
+      },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('没贴「交给引擎」的老单不拉起', async () => {
+    const h = harness({}, { issues: [issue({ createdAt: '2026-09-29T23:59:59.000Z' })] });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+  });
+
+  it('老单贴了「交给引擎」、又被开着的 PR 挂着 → 仍不拉，贴「本机做」', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [issue({ createdAt: '2026-09-29T23:59:59.000Z', labels: ['需求', '交给引擎'] })],
+        prClaims: { 12: 40 },
+      },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+  });
+
   it('一张好单 → 起一条任务工作流，记 ok（扫了 仓+单，处理了 1）', async () => {
     const h = harness();
     const run = await runIntakeJob(h.deps);

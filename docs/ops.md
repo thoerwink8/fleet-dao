@@ -352,7 +352,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 定时器在引擎进程里（#1072），重启后自己恢复，没有要人手恢复的「暂停」；引擎停了超过 15 分钟后端就推「看门狗停了」，要停引擎得先说好。
 
 拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
-- 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空），读开着的单，逐道过关——开关打开以后开的、作者在白名单里、挂在当前版本上、不是母单子单、没贴「本机做」、还没派过、现读一遍还开着、交代齐（`readTaskBrief`）、容量够（同时在跑的任务工作流 ≤ 6，一轮最多起 5 条）——过了的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。
+- 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空），读开着的单，逐道过关——开关打开以后开的（贴了「交给引擎」的老单跳过这一道）、作者在白名单里、挂在当前版本上（贴了「交给引擎」的，别的版本和未排期也跳过这一道）、不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准，原因里写明）、还没派过、现读一遍还开着、交代齐（`readTaskBrief`）、容量够（同时在跑的任务工作流 ≤ 6，一轮最多起 5 条）——过了的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。
 - 开关全关是正常的空闲：这一轮记 ok、不读 GitHub。在跑的任务数、白名单、开着的单任何一样读不到：这一轮记没跑成（`schedule_runs` 里 `failed` 或 `partial`，看门狗照登记表报），不拿 0 或「没有」顶。
 - 看：`select * from schedule_runs where job = 'intake' order by id desc limit 5`、`journalctl -u fleet-engine --since '-1h' | grep 拉单`。
 - 停：把项目的「让 AI 接活」关掉（不再有 Temporal 的暂停可手动切：定时器在引擎进程里，引擎重启后自己恢复）。引擎整个停了超过 15 分钟看门狗会报「拉单停了」，要停引擎得先说好。
@@ -595,7 +595,7 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
 
   ```
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> status   # 只看：开着还是关着、最近一次谁什么时候开关的
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> on       # 打开：记下此刻，只有这之后新开的、挂在当前版本上的独立 issue 自动派（母单、子单不派）
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> on       # 打开：记下此刻。这之后新开的、挂在当前版本上的独立 issue 自动派；老单、别的版本、未排期的贴「交给引擎」也派（母单、子单、贴了「本机做」的不派；两个标签一起贴以「本机做」为准）
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> off      # 关上：设为空，只收单、显示，不派
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch --all off --reason "<原因>"   # 所有仓一起关（手动用；发版不再自己跑它，#1256）；只许 off
   ```
@@ -621,7 +621,7 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
   - 派活不再看流程配置副本（#556 删了）：「让 AI 接活」只剩 `repos.auto_dispatch_since` 一个开关，开着，引擎每 5 分钟拉一次该做的单（`intake` 定时任务，#632）；单的交代不全、没有可用路由，工作流停下等人，提醒里报原因。核对：`sudo -u fleet psql fleet -c "select owner, name, test_command, auto_dispatch_since from repos"`。
   - 带 GitHub 账号的成员：白名单按 `users` 表认 GitHub 作者（有数字编号只按编号认），创始人那一行补上 GitHub 的数字编号和登录名，两个机器人各加一行 `role = 'bot'`（编号是 `<App 的 slug>[bot]` 这个用户的编号，不是 App 的编号）；数字编号用 `gh api users/<登录名>` 查：`sudo -u fleet psql fleet -c "update users set github_id = <编号>, github_login = '<登录名>' where id = '<创始人那一行的 id>' and github_id is null"`、`sudo -u fleet psql fleet -c "insert into users (display_name, role, github_login, github_id) values ('<slug>[bot]', 'bot', '<slug>[bot]', <编号>) on conflict (github_id) do nothing"`。
   - 加完等下一轮对账（每 15 分钟，没有手动触发的命令），已经开着的单这一轮就补进来。
-- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流。打开后，引擎拉单（第五节「拉单」）只拉开关打开之后开的、挂了当前版本里程碑的单，打开之前的老单不拉，起三段一条龙工作流；fleet-dao 和 fleet-dao-canary 现在已打开（创始人 2026-10-07 过夜放行），发版前后保持原样（发版车和驾驶舱按钮发完恢复到发版前，见下面「发完恢复到发版前的开关状态」）。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
+- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流。打开后，引擎拉单（第五节「拉单」）拉开关打开之后开的、挂了当前版本里程碑的单，也拉贴了「交给引擎」的老单、别的版本和未排期的单；没贴的老单不拉。母单、子单、贴了「本机做」的不拉（两个标签一起贴以「本机做」为准）。拉起来的是三段一条龙工作流；fleet-dao 和 fleet-dao-canary 现在已打开（创始人 2026-10-07 过夜放行），发版前后保持原样（发版车和驾驶舱按钮发完恢复到发版前，见下面「发完恢复到发版前的开关状态」）。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
 
 两台同一份（飞书网关的通行证）：法国生成，原样拷到香港，值不过屏幕。香港那头先落临时名，收到的不是完整的一行通行证（法国那头没读成、传到一半断了、读到的是报错）就不换，原来那份原样留着：
 
