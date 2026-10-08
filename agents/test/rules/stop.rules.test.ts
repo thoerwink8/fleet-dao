@@ -443,20 +443,26 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
   const SKILL = read('../../skills/commander/SKILL.md');
   const line = SHARED.split('\n').find((l) => l.startsWith('- 无人值守')) ?? '';
 
-  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、前台等待不超过 60 秒、done / needs-you / off；不再写脱离会话的工人', () => {
+  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、前台等待不超过 60 秒、done / needs-you / off；无人值守那句不再写脱离会话的工人', () => {
     expect(line).toContain('unattended.mjs on');
     expect(line).toContain('Agent 子代理');
     expect(line).toContain('不脱离会话');
     expect(line).not.toContain('worker.mjs');
     expect(line).not.toContain('--detached');
+    expect(line).not.toContain('长活交给脱离工人');
     expect(line).toContain('这一轮不结束');
     expect(line).toContain('完成通知');
     expect(line).toContain('单次前台等待不超过 60 秒');
     for (const k of ['`done`', '`needs-you`', '`off`']) expect(line).toContain(k);
+    // 要活过这一轮的长活另起一句交给脱离工人（#826），不写进上面那句无人值守
+    const longLived = SHARED.split('\n').find((l) => l.includes('长活交给脱离工人')) ?? '';
+    expect(longLived).toContain('worker.mjs start --model claude');
+    expect(longLived).toContain('无人值守不走这条');
   });
 
-  it('commander 技能：无人值守照子代理一道派活、等完成通知、不结束这一轮；脱离的工人只在创始人明说时用，旧说法（这一轮就结束、不循环 watch、无人值守起脱离工人）已删', () => {
+  it('commander 技能：无人值守照子代理一道派活、等完成通知、不结束这一轮；长活交给脱离工人，只在创始人明说时用', () => {
     expect(SKILL).toContain('然后照上面的子代理一道派活，不结束这一轮');
+    expect(SKILL).toContain('要活过这一轮的长活交给脱离工人');
     expect(SKILL).toContain('只在创始人明说「脱离会话」');
     expect(SKILL).not.toContain('只在他说了无人值守、过夜、我不在');
     expect(SKILL).not.toContain('起完工人后用 `worker.mjs watch --wait 55` 一直盯着');

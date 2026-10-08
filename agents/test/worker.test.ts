@@ -554,6 +554,8 @@ describe('start：happy path', () => {
       expect(await w.runRaw(base(w, []))).toBe(1);
       expect(w.err.join('\n')).toContain('Agent 工具');
       expect(w.err.join('\n')).toContain('--detached');
+      expect(w.err.join('\n')).toContain('长活交给脱离工人');
+      expect(w.err.join('\n')).not.toContain('超过 40 分钟');
       expect(w.gitCalls).toEqual([]);
       expect(w.pnpmCalls).toEqual([]);
       expect(w.spawnCalls).toEqual([]);
@@ -1072,6 +1074,70 @@ describe('start：【故意造出的失败】', () => {
     const args = must(w.spawnCalls[0], '没有 spawnCalls[0]').args;
     expect(args).toContain('opus');
     expect(args).not.toContain('sonnet');
+  });
+
+  it('claude（sonnet 和 opus）：起得来，status 看得到在跑，stop 杀得掉', async () => {
+    for (const [modelId, pid] of [
+      ['sonnet', 81],
+      ['opus', 82],
+    ] as const) {
+      const w = world();
+      w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+      w.pnpmReplies.push(ok());
+      w.spawnReplies.push({ pid });
+      const name = `w-${modelId}`;
+      expect(
+        await w.run([
+          'start',
+          '--model',
+          'claude',
+          '--name',
+          name,
+          '--brief',
+          brief(w),
+          '--model-id',
+          modelId,
+          '--effort',
+          'high',
+        ]),
+      ).toBe(0);
+      expect(w.meta(name)).toMatchObject({ model: 'claude', modelId, pid });
+      w.ghReplies.push(ok('[]'));
+      expect(await w.run(['status', '--name', name])).toBe(0);
+      const status = w.out.join('\n');
+      expect(status).toContain(`${name}：claude`);
+      expect(status).toContain('在跑');
+      expect(status).toContain(`pid ${pid}`);
+      w.killReplies.push({ ok: true });
+      expect(await w.run(['stop', '--name', name])).toBe(0);
+      expect(w.killed).toEqual([pid]);
+      expect(w.out.at(-1)).toContain('停了');
+    }
+  });
+
+  it('【故意造出的失败】claude 起不来（spawn 确认失败）：退出码 2，明说起不了，不写成在跑', async () => {
+    const w = world();
+    w.gitReplies.push(ok('true'), listed(w), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push(new Error('spawn node ENOENT'));
+    const code = await w.run([
+      'start',
+      '--model',
+      'claude',
+      '--name',
+      'w-fail',
+      '--brief',
+      brief(w),
+      '--model-id',
+      'opus',
+      '--effort',
+      'high',
+    ]);
+    expect(code).toBe(2);
+    expect(w.err.at(-1)).toContain('起不了 claude');
+    expect(w.err.at(-1)).toContain('spawn node ENOENT');
+    expect(w.err.at(-1)).toContain('没删');
+    expect(() => w.meta('w-fail')).toThrow();
   });
 
   it('【故意造出的失败】claude 工人要用 Fable（或别的不是 Opus、Sonnet 的型号）：拒起，不碰 git/gh/pnpm/spawn', async () => {

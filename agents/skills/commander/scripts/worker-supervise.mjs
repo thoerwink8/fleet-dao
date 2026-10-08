@@ -186,21 +186,41 @@ function parseArgv(argv) {
   return { command, args: argv.slice(at + 2), metaFile, promptFile, delays };
 }
 
-/** 真起 reclaude：输出一路原样转给自己的 stdout/stderr（日志文件），同时喂给 tracker。 */
+/**
+ * 真起 reclaude：输出一路原样转给自己的 stdout/stderr（日志文件），同时喂给 tracker。
+ * 命令不存在时 Node 的 close 码是负数（这台是 -2，进程退出变成 254），标准输出标准错误都空着，
+ * 看日志分不出「起不来」和「跑完了没说话」。确认起不来就写明原因、按退出码 1 交出去。
+ */
 function realRunChild(command, args) {
   return (extraArgs, stdinText) =>
     new Promise((resolve) => {
       const all = [...args, ...extraArgs];
-      const child =
-        process.platform === 'win32'
-          ? spawn('cmd.exe', ['/d', '/s', '/c', windowsCmdLine(command, all)], {
-              windowsHide: true,
-              windowsVerbatimArguments: true,
-              stdio: ['pipe', 'pipe', 'pipe'],
-            })
-          : spawn(command, all, { stdio: ['pipe', 'pipe', 'pipe'] });
+      let child;
+      try {
+        child =
+          process.platform === 'win32'
+            ? spawn('cmd.exe', ['/d', '/s', '/c', windowsCmdLine(command, all)], {
+                windowsHide: true,
+                windowsVerbatimArguments: true,
+                stdio: ['pipe', 'pipe', 'pipe'],
+              })
+            : spawn(command, all, { stdio: ['pipe', 'pipe', 'pipe'] });
+      } catch (e) {
+        const line = `起不来：${e instanceof Error ? e.message : String(e)}`;
+        process.stderr.write(`${line}\n`);
+        resolve({ code: 1, tracker: new EventTracker(), errTail: line });
+        return;
+      }
       const tracker = new EventTracker();
       let errTail = '';
+      let settled = false;
+      let spawnFailed = false;
+      const finish = (code) => {
+        if (settled) return;
+        settled = true;
+        tracker.end();
+        resolve({ code: spawnFailed ? 1 : (code ?? 1), tracker, errTail });
+      };
       child.stdout.setEncoding('utf8').on('data', (d) => {
         process.stdout.write(d);
         tracker.feed(d);
@@ -209,17 +229,21 @@ function realRunChild(command, args) {
         process.stderr.write(d);
         errTail = (errTail + d).slice(-4000);
       });
+      child.on('error', (e) => {
+        const line = `起不来：${e.message}`;
+        errTail = `${errTail}\n${line}`.slice(-4000);
+        process.stderr.write(`${line}\n`);
+        // 确认没起来（找不到命令、没权限）。杀不掉之类的 error 不把这次跑判成起不来。
+        if (e.code === 'ENOENT' || e.code === 'EACCES' || e.code === 'ENOTDIR') {
+          spawnFailed = true;
+          finish(1);
+        }
+      });
+      child.on('close', (code) => finish(code));
       child.stdin.on('error', () => {
         // 进程提前退出时写 stdin 会 EPIPE，结果以退出码和输出为准
       });
       child.stdin.end(stdinText);
-      child.on('error', (e) => {
-        errTail += `\n起不来：${e.message}`;
-      });
-      child.on('close', (code) => {
-        tracker.end();
-        resolve({ code, tracker, errTail });
-      });
     });
 }
 

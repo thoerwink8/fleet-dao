@@ -239,4 +239,32 @@ describe('Claude 工人外壳：网关掉线自动续跑', () => {
       sessionId: SID,
     });
   });
+
+  it('【故意造出的失败】reclaude 起不来（命令不存在）：退出码 1，日志写明起不来，不拿 254 冒充、也不当成网关错误去续跑', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-supervise-missing-'));
+    dirs.push(dir);
+    const metaFile = join(dir, 'meta.json');
+    writeFileSync(metaFile, JSON.stringify({ name: 'missing', model: 'claude' }));
+    const promptFile = join(dir, 'prompt.txt');
+    writeFileSync(promptFile, '原来的活');
+    const r = spawnSync(
+      process.execPath,
+      [
+        join(SCRIPTS, 'worker-supervise.mjs'),
+        '--meta',
+        metaFile,
+        '--prompt',
+        promptFile,
+        '--',
+        'this-command-does-not-exist-xyz',
+      ],
+      { encoding: 'utf8', timeout: 15_000 },
+    );
+    const text = `${r.stdout}\n${r.stderr}`;
+    expect(r.status, text).toBe(1);
+    expect(text).toContain('起不来');
+    expect(text).toContain('this-command-does-not-exist-xyz');
+    expect(text).not.toContain('秒后第');
+    expect(JSON.parse(readFileSync(metaFile, 'utf8')).resumes).toBeUndefined();
+  });
 });
