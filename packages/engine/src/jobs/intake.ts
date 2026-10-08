@@ -25,6 +25,8 @@
 // - 熔断（intake-pick.ts 的 decideBreaker）：最近 6 条结束的任务里失败 4 条以上就整个停拉；冷却 1 小时后只放 1 条试探，试探成功才恢复，
 //   试探失败再冷却 1 小时。进入和恢复各推一条通知。状态在设置表 engine.intakeBreaker 一行；读不到、认不出，这一轮一张单都不拉。
 // - 排序只在准入之后：先过完不用现读 GitHub 的关，排好序、有空位才现读这张单（screenPlan）再起，免得开着的老单每轮各读一次。
+// - 别的环境的巡检仓不收（#1136）：foreignCanaries 列出的 owner/name 这一轮不读单、不起任务。名单读不到就整轮没跑成，
+//   不拿空名单顶（那会把别人的巡检单拉进来）。没给这个函数 = 没有别的环境。
 
 import { createHash } from 'node:crypto';
 import { ENGINE_LABEL, issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
@@ -280,6 +282,11 @@ export function incompleteKey(problems: readonly BriefProblem[]): string {
 export interface IntakeDeps {
   /** 受管的仓（开关关着的也列出来：全关是正常的空闲，不是没扫到东西）。读不到照抛：这一轮记没跑成。 */
   repos(): Promise<IntakeRepo[]>;
+  /**
+   * 别的环境的巡检仓（owner/name，大小写无所谓）。这一轮不读这些仓的单（#1136）。
+   * 不给 = 没有别的环境。读不到照抛：不当成「没有别人的仓」。
+   */
+  foreignCanaries?(): Promise<readonly string[]>;
   /** 作者白名单。读不到照抛：不当成「没有可信的人」。 */
   whitelist(): Promise<GithubWhitelist>;
   /** 这个仓开着的单加仓里还开着的里程碑（带说明原文，排序读版本里的先后）。读不到照抛。 */
@@ -355,6 +362,8 @@ interface Tally {
   /** 熔断这一轮还允许起几条（正常是 Infinity，起一条减一）和为什么。 */
   breakerAllow: number;
   breakerWhy: string;
+  /** 别的环境的巡检仓，这一轮不读的有几个（#1136）。 */
+  foreignSkipped: number;
 }
 
 function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
@@ -651,7 +660,8 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；没派的：${skipped}`;
+  const foreign = t.foreignSkipped > 0 ? `；别的环境的巡检仓跳过 ${t.foreignSkipped} 个` : '';
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；没派的：${skipped}${foreign}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
@@ -662,6 +672,20 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     return { outcome: 'failed', why: `受管的仓读不到：${errMessage(err)}` };
   }
   if (repos.length === 0) return { outcome: 'unscanned', why: '库里没有受管的仓' };
+  let foreign = new Set<string>();
+  if (deps.foreignCanaries) {
+    try {
+      foreign = new Set((await deps.foreignCanaries()).map((s) => s.toLowerCase()));
+    } catch (err) {
+      return {
+        outcome: 'failed',
+        why: `各环境的巡检仓名单读不到，这一轮一张单都没拉：${errMessage(err)}`,
+        scanned: repos.length,
+      };
+    }
+  }
+  // 别人的巡检仓不读（#1136）。普通项目仓、自己的巡检仓照拉。
+  const pulling = repos.filter((r) => !foreign.has(`${r.owner}/${r.name}`.toLowerCase()));
   const t: Tally = {
     scanned: repos.length,
     started: 0,
@@ -674,8 +698,9 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     hourStarted: 0,
     breakerAllow: Number.POSITIVE_INFINITY,
     breakerWhy: '',
+    foreignSkipped: repos.length - pulling.length,
   };
-  if (repos.some((r) => r.autoDispatchSince !== null)) {
+  if (pulling.some((r) => r.autoDispatchSince !== null)) {
     if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
       return {
         outcome: 'failed',
@@ -712,7 +737,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
         scanned: repos.length,
       };
     }
-    for (const repo of repos) await intakeRepo(deps, repo, whitelist, t);
+    for (const repo of pulling) await intakeRepo(deps, repo, whitelist, t);
   }
   const found = t.started + t.commented;
   deps.log('info', `拉单这一轮：${summarize(t)}`, { scanned: t.scanned, found });

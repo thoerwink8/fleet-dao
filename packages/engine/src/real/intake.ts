@@ -51,6 +51,11 @@ export interface IntakeWiring {
   startTimeoutMs?: number;
   /** 测试用：换掉「合并闸认冷验收了没有」（jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
   gateLive?: boolean;
+  /**
+   * 别的环境的巡检仓（#1136）。读不到照抛，拉单这一轮记没跑成，不拿空名单顶。
+   * 不给 = 没有别的环境（测试、还没接第二台）。
+   */
+  foreignCanaries?: () => Promise<readonly string[]>;
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -84,6 +89,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
+      ...(w.foreignCanaries ? { foreignCanaries: w.foreignCanaries } : {}),
       async whitelist() {
         return githubWhitelist(await usersOnce());
       },
