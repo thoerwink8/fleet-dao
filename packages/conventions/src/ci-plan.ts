@@ -108,7 +108,9 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
 /**
  * 测试读了别的包的文件、但 package.json 里没有依赖：键是读的那个包，值是被读的包（被读的一改，读的那个跟着测；
  * 不再往下传——依赖读的那个包的，并不读被读的文件）。
- * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu/test/static.test.ts 读 web 的路由表；
+ * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu→web 留着（#984；读路由表的那处已随 #1022 删掉）；
+ * db/test/catalog.test.ts、candidates.test.ts 读 adapters 的夹具（#984，不进 package.json：db 不倒过来依赖 adapters）；
+ * db/test/claim-ledger-gone.test.ts 读 core 的 alert-work.ts；
  * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）；
  * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
  * shared/test/model-prices.test.ts 读 db 的路由骨架 routing.default.json（目录里每个模型在单价表里都得有一项，#1215）。
@@ -116,7 +118,7 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
   feishu: ['web'],
-  db: ['core'],
+  db: ['adapters', 'core'],
   shared: ['db'],
   [AGENTS_UNIT]: ['db', 'agents-sync'],
 };

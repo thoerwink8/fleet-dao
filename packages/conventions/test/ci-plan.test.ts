@@ -247,11 +247,18 @@ describe('按改动算要跑什么', () => {
     expect(units(p)).toEqual(['api', 'feishu', 'web']);
   });
 
-  it('TEST_READS 直接钉住 api→web、feishu→web；adapters 夹具改动全跑（#984：误删时错误指到这里）', () => {
-    expect(TEST_READS.api, 'TEST_READS.api→web').toContain('web');
-    expect(TEST_READS.feishu, 'TEST_READS.feishu→web').toContain('web');
-    // db 读 adapters 夹具不在 TEST_READS 里，靠 FIXTURE_PATH 全跑兜住
-    expect(pr('packages/adapters/test/fixtures/claude-code/x.ndjson').full, 'adapters 夹具全跑').toBe(true);
+  it('改了 adapters 的源码：依赖它的跟着测；db 的测试读它的夹具，也测，不往下传到依赖 db 的（#984）', () => {
+    // store 依赖 db，但不读 adapters 的夹具：db→adapters 停在 db，不把 store 拉上来
+    expect(units(pr('packages/adapters/src/x.ts'))).toEqual([
+      'adapters',
+      'agents',
+      'agents-sync',
+      'api',
+      'db',
+      'engine',
+      'jev',
+      'mirasim-reclaude',
+    ]);
   });
 
   it('改了 feishu、agents-sync：deploy/test 打包网关、跑同步脚本，要跑 deploy', () => {
@@ -377,7 +384,8 @@ describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 te
     expect(fb('packages/adapters/test/fixtures/claude-code/x.ndjson')).toEqual({
       units: ['adapters'],
       hubs: ['adapters'],
-      dependents: [...usersOf('adapters'), AGENTS_UNIT].sort(),
+      // db 读 adapters 的夹具（TEST_READS），不在 package.json 的依赖闭包里，也要留给 CI
+      dependents: [...usersOf('adapters'), AGENTS_UNIT, 'db'].sort(),
     });
     expect(fb('packages/nope/src/x.ts')).toEqual({ units: ['nope'], hubs: ['nope'], dependents: [] });
   });
@@ -508,6 +516,59 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
 
   it('每一处都落进 PATH_RULES / 依赖图 / TEST_READS', () => {
     expect(scan((changed) => pr(...changed))).toEqual([]);
+  });
+
+  /**
+   * 跨包读对账（#984）：测试文件扫出来的「这个包读了那个包」，必须在 package.json 推出的依赖图上，
+   * 或在 TEST_READS 上。被读的包源码一改就全跑的（shared）算盖住了。
+   * 只改夹具才全跑的不算：改 adapters 的源码不会因此选上 db。
+   */
+  const sourceForcesFull = (target: string) => {
+    const probe = `packages/${target}/src/x.ts`;
+    const rule = PATH_RULES.find((r) => r.match(probe));
+    return rule !== undefined && 'full' in rule;
+  };
+  const missingReadEdges = (reads: Readonly<Record<string, readonly string[]>>) => {
+    const g = graph();
+    const missed: string[] = [];
+    for (const { unit, rel } of files) {
+      if (ALWAYS.has(rel)) continue;
+      for (const ref of refs(rel)) {
+        const target = /^packages\/([^/]+)\//.exec(ref)?.[1];
+        if (target === undefined || target === unit) continue;
+        const has =
+          (g.deps[unit] ?? []).includes(target) ||
+          (reads[unit] ?? []).includes(target) ||
+          sourceForcesFull(target);
+        if (!has) missed.push(`${rel} 读 ${ref}（${unit}→${target}），依赖图和 TEST_READS 都没有这条边`);
+      }
+    }
+    return missed;
+  };
+
+  it('依赖图或 TEST_READS 盖住扫出来的每一条跨包读；api→web、feishu→web、db→adapters 都在（#984）', () => {
+    const has = (from: string, to: string) =>
+      (graph().deps[from] ?? []).includes(to) || (TEST_READS[from] ?? []).includes(to);
+    expect(has('api', 'web'), 'api→web').toBe(true);
+    expect(has('feishu', 'web'), 'feishu→web').toBe(true);
+    expect(has('db', 'adapters'), 'db→adapters').toBe(true);
+    expect(missingReadEdges(TEST_READS)).toEqual([]);
+  });
+
+  it('【故意造出的失败】删掉 db→adapters：对账必须正好红在 db 读 adapters 的那几处', () => {
+    expect(missingReadEdges(TEST_READS)).toEqual([]);
+    const dbReads = TEST_READS.db ?? [];
+    const cut = { ...TEST_READS, db: dbReads.filter((r) => r !== 'adapters') };
+    expect(dbReads, '没删成：db 的 TEST_READS 里已经没有 adapters，这条该改').toContain('adapters');
+    expect(cut.db).not.toContain('adapters');
+    const readers = files.flatMap(({ unit, rel }) => {
+      if (ALWAYS.has(rel) || unit !== 'db') return [];
+      return refs(rel)
+        .filter((ref) => /^packages\/adapters\//.test(ref))
+        .map((ref) => `${rel} 读 ${ref}（db→adapters），依赖图和 TEST_READS 都没有这条边`);
+    });
+    expect(readers.length, '没有测试读 adapters 了：这条查的漏记不存在，测试该删').toBeGreaterThan(0);
+    expect(missingReadEdges(cut)).toEqual(readers);
   });
 
   /**
