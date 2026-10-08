@@ -57,7 +57,7 @@ export async function coldVerifyPr(
       return 'head_moved';
     }
     if (res.retry) {
-      // 这会儿验不了、过一会儿就行（没空位、内存放不下、引擎在停机）：不算一轮，不停下报人
+      // 这会儿验不了、过一会儿就行（没空位、内存放不下、引擎在停机、上游临时故障）：不算一轮，不停下报人
       rt.verifyRound -= 1;
       await rt.pauseForRoute(res.retry.wait, res.retry.reason, res.retry.afterSeconds, mark);
       continue;

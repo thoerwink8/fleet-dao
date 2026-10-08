@@ -150,6 +150,29 @@ describe('familyPickerFrom：接到真选路上（避开别的族、不替选路
     expect(await deps.pickRouteForFamily('claude')).toBeUndefined();
   });
 
+  it('同一族再问一次：上一次挑中的路由放进 avoidRouteIds，好换这一族的下一条', async () => {
+    let n = 0;
+    const port = fakePort(() => {
+      n += 1;
+      return {
+        ok: true,
+        route: {
+          routeId: n === 1 ? 'r1' : 'r2',
+          poolId: 'p',
+          modelId: 'gpt-x',
+          family: 'gpt',
+          hostId: 'claude-code',
+        },
+        why: '有得派',
+      };
+    });
+    const deps = familyPickerFrom(port.pickRoute, ORDER)('task-1');
+    expect((await deps.pickRouteForFamily('gpt'))?.routeId).toBe('r1');
+    expect((await deps.pickRouteForFamily('gpt'))?.routeId).toBe('r2');
+    expect(port.calls[0]?.avoidRouteIds).toEqual([]);
+    expect(port.calls[1]?.avoidRouteIds).toEqual(['r1']);
+  });
+
   it('选路说派不出（等空位/等额度）→ 这一族这一刻没有，回 undefined', async () => {
     const port = fakePort(() => ({ ok: false, waitFor: 'slot', detail: '池满了' }));
     const deps = familyPickerFrom(port.pickRoute, ORDER)('task-1');
