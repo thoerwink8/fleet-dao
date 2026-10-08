@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/client.ts';
 import {
+  catalogModelStrings,
   channelModelDiff,
   MODEL_ROSTER_CHANNELS,
   MODEL_ROSTER_EVERY_MS,
@@ -219,6 +220,22 @@ describe('渠道模型名册', () => {
     expect(await modelRosterDue(t.db, new Date(NOW.getTime() + MODEL_ROSTER_EVERY_MS))).toBe(true);
     await saveChannelModelReads(t.db, [fail('cursor', 'auth', '要重新登录')], NOW);
     expect(await modelRosterDue(t.db, new Date(NOW.getTime() + 60_000))).toBe(false);
+  });
+
+  it('跟名册比基名时，目录串含模型编号、上游串和别名', async () => {
+    await seedChannels(t.db);
+    const strings = await catalogModelStrings(t.db);
+    expect(strings).toEqual(
+      expect.arrayContaining([
+        'sonnet',
+        'grok',
+        'bare',
+        'claude-sonnet-5-5',
+        'grok-4.7[context=256k]',
+        'grok-4.7',
+      ]),
+    );
+    expect(strings).not.toContain('');
   });
 
   it('空模型串、最近看见早于第一次、读成却带着错误，写不进去', async () => {

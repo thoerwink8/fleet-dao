@@ -3,7 +3,7 @@
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { channelModelReads, channelSeenModels, channels, routes } from '../schema/index.ts';
+import { channelModelReads, channelSeenModels, channels, models, routes } from '../schema/index.ts';
 
 /** 一天四次左右：额度任务每 15 分钟醒一次，名册没到这个间隔就跳过。四个渠道一起读。 */
 export const MODEL_ROSTER_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -229,6 +229,29 @@ export function diffChannelModels(rows: readonly DiffChannel[]): ModelRosterDiff
     }
   }
   return diff;
+}
+
+/**
+ * 目录里拿来跟名册比基名的串：全部模型编号、全部路由的上游串和别名。
+ * 空的不上。不在这里去掉档位——基名归引擎那一层，这里只把目录原文交出去。
+ */
+export async function catalogModelStrings(db: Db): Promise<string[]> {
+  const [modelRows, routeRows] = await Promise.all([
+    db.select({ id: models.id }).from(models),
+    db.select({ upstreamModel: routes.upstreamModel, upstreamAliases: routes.upstreamAliases }).from(routes),
+  ]);
+  const out: string[] = [];
+  for (const row of modelRows) {
+    if (row.id.trim()) out.push(row.id);
+  }
+  for (const row of routeRows) {
+    const upstream = row.upstreamModel?.trim() ?? '';
+    if (upstream) out.push(upstream);
+    for (const alias of row.upstreamAliases ?? []) {
+      if (alias.trim()) out.push(alias);
+    }
+  }
+  return out;
 }
 
 /** 跟目录比。只比这四个渠道；别的渠道（jev）不在这张表的范围里。 */

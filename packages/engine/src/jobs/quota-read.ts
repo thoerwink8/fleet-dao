@@ -10,11 +10,14 @@
 // - 配置 notRead 里的池不读（没有这种数据）。每轮撤掉它们的 quota-read 提醒，不留着报错。
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
 // - 渠道模型名册（#1302）是可选的一步：到了间隔才读，读失败只记在名册自己的表里。它抛了、没读成，都不改这一轮额度的结局，也不另报额度提醒。
+// - 名册读成之后跟目录比基名（#1352）：目录里没有的家族推一条要人拍（catalog-new-model:<基名>）。只提醒，不改目录、不开路由、不起会话。
+//   读失败的渠道不参与差集，也不当成没有新模型；目录里补上这个基名，下一轮自己撤。提醒写不上不改额度这一轮的结局。
 
 import type { PoolQuotaResult, QuotaConfig, QuotaReport } from '@fleet-dao/adapters/quota';
 import type { PoolQuotaSnapshot, ScheduleResult } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { QuotaReadRun } from '../contract.ts';
+import { type CatalogNewModelAlert, planCatalogNewModelAlerts } from './catalog-new-model.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
@@ -67,6 +70,14 @@ export interface QuotaReadJobDeps {
       results: readonly ChannelModelRosterResult[],
       now: Date,
     ): Promise<{ unstored: { channelId: string; error: string }[] }>;
+    /**
+     * 跟目录比基名、推要人拍、目录补上了就撤（#1352）。四个都给才做；缺一个就跳过（老测试、没接线）。
+     * 这里不起会话：名册是 read() 已经读回来的。
+     */
+    catalogStrings?: () => Promise<readonly string[]>;
+    openCatalogNewModelKeys?: () => Promise<readonly string[]>;
+    raiseDecision?: (alert: CatalogNewModelAlert) => Promise<void>;
+    resolveDecision?: (key: string) => Promise<void>;
   };
 }
 
@@ -91,6 +102,36 @@ export const isCompleteRead = (r: Extract<PoolQuotaResult, { ok: true }>): boole
 
 type Round = { result: ScheduleResult };
 
+/** 四个口子齐了才对目录做差集。缺一个就当没接上，不拿空目录去报「全是新模型」。 */
+function catalogNotifyWired(step: NonNullable<QuotaReadJobDeps['modelRoster']>): step is NonNullable<
+  QuotaReadJobDeps['modelRoster']
+> & {
+  catalogStrings: () => Promise<readonly string[]>;
+  openCatalogNewModelKeys: () => Promise<readonly string[]>;
+  raiseDecision: (alert: CatalogNewModelAlert) => Promise<void>;
+  resolveDecision: (key: string) => Promise<void>;
+} {
+  return Boolean(
+    step.catalogStrings && step.openCatalogNewModelKeys && step.raiseDecision && step.resolveDecision,
+  );
+}
+
+/** 名册已经读完、记完。差集抛了只记一行，不往外抛（调用方还要记哪些渠道没读成）。 */
+async function notifyCatalogNewModels(
+  step: NonNullable<QuotaReadJobDeps['modelRoster']>,
+  results: readonly ChannelModelRosterResult[],
+): Promise<string> {
+  if (!catalogNotifyWired(step)) return '';
+  const [catalogStrings, openKeys] = await Promise.all([
+    step.catalogStrings(),
+    step.openCatalogNewModelKeys(),
+  ]);
+  const plan = planCatalogNewModelAlerts({ results, catalogStrings, openKeys });
+  for (const alert of plan.raise) await step.raiseDecision(alert);
+  for (const key of plan.resolve) await step.resolveDecision(key);
+  return plan.unreadNote;
+}
+
 /** 名册自己消化错误。额度已经按原样记完之前、或配置还没读，都不让这一步把整轮打成失败。 */
 async function readModelRosters(deps: QuotaReadJobDeps, now: Date): Promise<void> {
   const step = deps.modelRoster;
@@ -99,10 +140,16 @@ async function readModelRosters(deps: QuotaReadJobDeps, now: Date): Promise<void
     if (!(await step.due(now))) return;
     const results = await step.read();
     const saved = await step.save(results, now);
+    let unreadNote = '';
+    try {
+      unreadNote = await notifyCatalogNewModels(step, results);
+    } catch (err) {
+      deps.log('error', '新模型提醒没写上', { error: errMessage(err) });
+    }
     const failed = results.filter((r) => !r.ok).map((r) => `${r.channelId}（${r.error.code}）`);
     const unstored = saved.unstored.map((u) => `${u.channelId}：${u.error}`);
     if (failed.length > 0 || unstored.length > 0) {
-      deps.log('warn', '渠道模型表这一轮没读全', { failed, unstored });
+      deps.log('warn', unreadNote || '渠道模型表这一轮没读全', { failed, unstored });
     }
   } catch (err) {
     deps.log('error', '渠道模型表这一轮没记上', { error: errMessage(err) });

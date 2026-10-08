@@ -21,10 +21,12 @@ import {
   type UsageSource,
 } from '@fleet-dao/adapters/quota';
 import {
+  catalogModelStrings,
   type Db,
   finishScheduleRun,
   MODEL_ROSTER_CHANNELS,
   modelRosterDue,
+  openAlertsByPrefix,
   type PoolRunUsage,
   poolLastReadOk,
   poolRunUsage,
@@ -34,6 +36,7 @@ import {
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
+import { CATALOG_NEW_MODEL_PREFIX } from '../jobs/catalog-new-model.ts';
 import type { QuotaReadJobDeps } from '../jobs/quota-read.ts';
 
 export interface QuotaReadWiring {
@@ -136,6 +139,20 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
                 ...(roster.connectMirasim ? { connectMirasim: roster.connectMirasim } : {}),
               }),
             save: (results, at) => saveChannelModelReads(w.db, results, at),
+            catalogStrings: () => catalogModelStrings(w.db),
+            openCatalogNewModelKeys: async () =>
+              (await openAlertsByPrefix(w.db, CATALOG_NEW_MODEL_PREFIX)).map((row) => row.dedupeKey),
+            raiseDecision: (alert) =>
+              upsertAlert(w.db, {
+                dedupeKey: alert.key,
+                level: alert.level,
+                taskId: null,
+                title: alert.title,
+                body: alert.body,
+                link: '/routing',
+              }).then(() => undefined),
+            resolveDecision: (key) =>
+              resolveAlertByKey(w.db, { dedupeKey: key, by: 'engine' }).then(() => undefined),
           },
         }
       : {}),
