@@ -334,3 +334,100 @@ describe('写失败要露出来', () => {
     expect(screen.queryByText('已登记 claude-sonnet-x')).toBeTruthy();
   });
 });
+
+/** Tailwind 的 md 是 768px；手机宽度按 max-width: 767px。 */
+const realMatchMedia = window.matchMedia.bind(window);
+
+function mockMobile() {
+  vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => {
+    if (query === '(max-width: 767px)') {
+      return {
+        matches: true,
+        media: query,
+        onchange: null,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {},
+        dispatchEvent() {
+          return false;
+        },
+      } as MediaQueryList;
+    }
+    return realMatchMedia(query);
+  });
+}
+
+const classTokens = (el: Element) => (el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
+
+describe('添加模型弹窗：窗口化、按厂家分组、标题靠左', () => {
+  test('321 个候选只画窗口里的行，组标题在；桌面和手机上标题都靠左', async () => {
+    const families = ['alpha', 'beta', 'gamma'] as const;
+    const models = Array.from({ length: 321 }, (_, i) => {
+      const family = families[i % 3] ?? 'alpha';
+      const n = String(Math.floor(i / 3)).padStart(3, '0');
+      return { id: `${family}-${n}`, family, displayName: `${family} ${n}` };
+    });
+    const api = createMockApi({ live: false });
+    const routing = api.routing.bind(api);
+    api.routing = async () => ({ ...(await routing()), models });
+
+    const open = async () => {
+      renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
+      await screen.findByRole('navigation', { name: '用途' });
+      fireEvent.click(screen.getByRole('button', { name: '添加模型' }));
+      return screen.findByRole('dialog');
+    };
+
+    const dialog = await open();
+    const list = await within(dialog).findByRole('list', { name: '可添加的模型' });
+    const box = list.parentElement as HTMLElement;
+    expect(box.getAttribute('data-windowed')).toBe('true');
+    const drawn = list.querySelectorAll('li');
+    expect(drawn.length).toBeGreaterThan(5);
+    expect(drawn.length).toBeLessThan(40);
+    const group = list.querySelector('[data-add-group]');
+    expect(group).toBeTruthy();
+    expect(group?.textContent).toBe('alpha');
+    expect(within(dialog).queryAllByRole('button', { name: /加进用途/ }).length).toBeLessThan(40);
+    const header = within(dialog)
+      .getByRole('heading', { name: /里加模型/ })
+      .closest('[data-slot="dialog-header"]') as HTMLElement;
+    expect(classTokens(header)).toContain('text-left');
+    expect(classTokens(header)).not.toContain('text-center');
+
+    fireEvent.scroll(box, { target: { scrollTop: 44 * 250 } });
+    await waitFor(() =>
+      expect(list.querySelector('[data-add-model]')?.getAttribute('data-add-model')).toMatch(/^gamma-/),
+    );
+    expect(list.querySelector('[data-add-model="alpha-000"]')).toBeNull();
+
+    cleanup();
+    mockMobile();
+    const narrow = await open();
+    const narrowHeader = within(narrow)
+      .getByRole('heading', { name: /里加模型/ })
+      .closest('[data-slot="dialog-header"]') as HTMLElement;
+    expect(classTokens(narrowHeader)).toContain('text-left');
+    expect(classTokens(narrowHeader)).not.toContain('text-center');
+  });
+});
+
+describe('添加模型弹窗没有候选', () => {
+  test('【故意造出的失败】全部已在用途里：显示「没有可加的模型」，不是空白', async () => {
+    const api = createMockApi({ live: false });
+    const routing = api.routing.bind(api);
+    api.routing = async () => {
+      const base = await routing();
+      const taken = new Set(['opus-5.5', 'kimi-k3', 'cursor-auto', 'opus-5']);
+      return { ...base, models: base.models.filter((m) => taken.has(m.id)) };
+    };
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
+    await screen.findByRole('navigation', { name: '用途' });
+    fireEvent.click(screen.getByRole('button', { name: '添加模型' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('没有可加的模型')).toBeTruthy();
+    expect(within(dialog).queryByRole('list', { name: '可添加的模型' })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: /加进用途/ })).toBeNull();
+  });
+});

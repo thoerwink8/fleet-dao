@@ -2,6 +2,7 @@
 // 目录会长到几百行：每块都有搜索框和「只看已开启」，行数超过 50 只画窗口里的行（lib/list-window.ts）；一次只看一块，页面不再一长条。
 // 改这里之前必须知道：
 // - 行是定高的，窗口化靠它算位置。手机宽度（md 以下）一行拆成两行，用更高的 MOBILE_ROW_HEIGHT，不能让字撑破行高。
+// - 模型目录在手机宽度不设内部定高滚动（手指落在列表上要滚的是页面）。桌面仍是 LIST_HEIGHT 的窗口。渠道列表不动。
 // - 开关状态只有路由两层里有。没配进任何用途的模型读不到它的路由开着没有：开关置灰、写明原因，不画成开或关。
 // - 开关走 routing-edit.tsx 里现成的确认弹窗和接口；Fable 的「只有创始人在驾驶舱能开」判在后端，这里只标一句。
 
@@ -148,7 +149,7 @@ export function ListFilterBar({
   );
 }
 
-/** 定高行的窗口化列表（不能拖）。行数不超过 50 全画。 */
+/** 定高行的窗口化列表（不能拖）。行数不超过 50 全画。flow 时不设内部滚动，行跟页面一起滚（手机上的模型目录）。 */
 export function WindowedRows<T>({
   ariaLabel,
   items,
@@ -157,6 +158,7 @@ export function WindowedRows<T>({
   rowProps,
   rowClassName,
   rowHeight = ROW_HEIGHT,
+  flow = false,
   children,
 }: {
   ariaLabel: string;
@@ -166,6 +168,8 @@ export function WindowedRows<T>({
   rowProps?: (item: T) => Record<string, string | undefined>;
   rowClassName?: (item: T) => string | undefined;
   rowHeight?: number;
+  /** 手机宽度：去掉内部定高滚动，行高仍给定，整列随页面滚。 */
+  flow?: boolean;
   children: (item: T) => ReactNode;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
@@ -173,6 +177,29 @@ export function WindowedRows<T>({
     return <p className="px-3 py-8 text-center text-sub text-muted-foreground">{empty}</p>;
   }
   const total = items.length * rowHeight;
+  if (flow) {
+    return (
+      <div
+        data-page-scroll="true"
+        className="h-auto overflow-visible md:h-routing-window md:overflow-y-auto md:overscroll-contain"
+      >
+        <ul aria-label={ariaLabel}>
+          {items.map((item, k) => (
+            <li
+              key={itemId(item)}
+              {...(rowProps?.(item) ?? {})}
+              aria-posinset={k + 1}
+              aria-setsize={items.length}
+              style={{ height: rowHeight }}
+              className={cn('border-b', rowClassName?.(item))}
+            >
+              {children(item)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
   const range = windowRange({ count: items.length, rowHeight, height: LIST_HEIGHT, scrollTop });
   return (
     <div
@@ -320,6 +347,7 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
           <WindowedRows
             ariaLabel="目录里的模型"
             rowHeight={rowHeightNow(mobile)}
+            flow={mobile}
             items={visuals}
             itemId={(row) => (row.kind === 'group' ? `group:${row.group.key}` : row.entry.modelId)}
             empty={

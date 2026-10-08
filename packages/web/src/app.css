@@ -87,6 +87,8 @@
   --spacing-sidebar: 232px;
   --spacing-sidebar-collapsed: 60px;
   --spacing-sidebar-sheet: 260px;
+  /* 模型目录桌面下列表定高，和 routing-browse 的 LIST_HEIGHT（440）同一数。手机上不用，列表随页面滚。 */
+  --spacing-routing-window: 440px;
   /* 弹层列表的最高：max-h-* 只认 --max-height/--height/--spacing，不认 --container。 */
   --max-height-notifications-list: 360px;
   --max-height-command-list: 440px;

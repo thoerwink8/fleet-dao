@@ -3,6 +3,7 @@
 // - 不先改页面上的名单。版本对不上、硬禁令、档位不认，都等接口回了再重拉；失败把原话写在行外的 alert 里，名单不动。
 // - Fable 能不能加，页面只在按钮上标「仅创始人可开」（决定 0033）。真拒绝仍是后端的 guard。
 // - 名册接口只回「这个渠道手工登记了几个」，不回模型串。这一页把登记接口返回的串留在当次会话里，刷新就只剩个数。
+// - 「添加模型」候选按厂家分组，行数超过 50 只画窗口里的行（lib/list-window.ts）。组标题和模型行同高，窗口才算得准。
 
 import { founderOnlyFor, type HostId, routeEffortChoices, type SessionEffort } from '@fleet-dao/shared';
 import { type FormEvent, useMemo, useState } from 'react';
@@ -16,8 +17,9 @@ import {
   useRouting,
   useSetPurposeModelEffort,
 } from '../api/client';
-import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
+import type { Model, RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EFFORT_HINT } from '../lib/efforts';
+import { WINDOW_MIN_ROWS, windowRange } from '../lib/list-window';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { cn } from '../lib/utils';
@@ -48,6 +50,125 @@ export function isManualChannel(
   );
 }
 
+/** 弹窗里一行的高度。和目录紧凑行一样，窗口化靠它算位置。 */
+const ADD_ROW_HEIGHT = 44;
+/** 弹窗候选列表的可视高度。超过 50 行只画窗口里的。 */
+const ADD_LIST_HEIGHT = 320;
+
+type AddRow = { kind: 'group'; family: string; label: string } | { kind: 'model'; model: Model };
+
+/** 按厂家分组：组标题在前，组内按显示名。没有厂家的归到「未标明厂家」。 */
+function addRows(models: readonly Model[]): AddRow[] {
+  const buckets = new Map<string, Model[]>();
+  for (const model of models) {
+    const key = model.family.trim();
+    const list = buckets.get(key);
+    if (list) list.push(model);
+    else buckets.set(key, [model]);
+  }
+  const rows: AddRow[] = [];
+  for (const key of [...buckets.keys()].sort((a, b) => a.localeCompare(b, 'zh'))) {
+    const members = buckets.get(key) ?? [];
+    members.sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh') || a.id.localeCompare(b.id));
+    rows.push({ kind: 'group', family: key, label: key === '' ? '未标明厂家' : key });
+    for (const model of members) rows.push({ kind: 'model', model });
+  }
+  return rows;
+}
+
+function addRowStyle(index: number) {
+  return {
+    position: 'absolute' as const,
+    left: 0,
+    right: 0,
+    top: index * ADD_ROW_HEIGHT,
+    height: ADD_ROW_HEIGHT,
+  };
+}
+
+function AddCandidateList({
+  rows,
+  founder,
+  pending,
+  disabledWhy,
+  onPick,
+}: {
+  rows: readonly AddRow[];
+  founder: boolean;
+  pending: boolean;
+  disabledWhy: string | null;
+  onPick: (modelId: string) => void;
+}) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const total = rows.length * ADD_ROW_HEIGHT;
+  const range = windowRange({
+    count: rows.length,
+    rowHeight: ADD_ROW_HEIGHT,
+    height: ADD_LIST_HEIGHT,
+    scrollTop,
+  });
+  return (
+    <div
+      data-windowed={rows.length > WINDOW_MIN_ROWS ? 'true' : undefined}
+      style={{ height: Math.min(ADD_LIST_HEIGHT, total) }}
+      className="overflow-y-auto overscroll-contain"
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+    >
+      <ul aria-label="可添加的模型" className="relative" style={{ height: total }}>
+        {rows.slice(range.start, range.end).map((row, k) => {
+          const index = range.start + k;
+          if (row.kind === 'group') {
+            return (
+              <li
+                key={`group:${row.family}`}
+                data-add-group={row.family}
+                aria-posinset={index + 1}
+                aria-setsize={rows.length}
+                style={addRowStyle(index)}
+                className="border-b"
+              >
+                <div className="flex h-full items-center px-2 text-caption font-semibold text-muted-foreground">
+                  {row.label}
+                </div>
+              </li>
+            );
+          }
+          const m = row.model;
+          const only = founderOnlyFor({ id: m.id, family: m.family, displayName: m.displayName });
+          const blocked = only !== undefined && !founder;
+          const why = disabledWhy ?? (blocked ? '仅创始人可开' : null);
+          return (
+            <li
+              key={m.id}
+              data-add-model={m.id}
+              aria-posinset={index + 1}
+              aria-setsize={rows.length}
+              style={addRowStyle(index)}
+              className="flex items-center gap-2 border-b px-1"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm">
+                <span className="font-medium">{m.displayName}</span>
+                <span className="ml-2 text-caption text-muted-foreground">{m.family}</span>
+              </span>
+              {only ? <span className="shrink-0 text-micro text-muted-foreground">仅创始人可开</span> : null}
+              <Button
+                type="button"
+                size="xs"
+                disabled={why !== null || pending}
+                title={why ?? undefined}
+                aria-label={`把 ${m.displayName} 加进用途`}
+                onClick={() => onPick(m.id)}
+              >
+                添加
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 export function AddPurposeModel({
   purpose,
   onError,
@@ -63,13 +184,16 @@ export function AddPurposeModel({
   const [query, setQuery] = useState('');
   const founder = me.data?.user.role === 'founder';
   const taken = useMemo(() => new Set(purpose.models.map((m) => m.modelId)), [purpose.models]);
+  const available = useMemo(
+    () => (routing.data?.models ?? []).filter((m) => !taken.has(m.id)),
+    [routing.data?.models, taken],
+  );
   const candidates = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (routing.data?.models ?? [])
-      .filter((m) => !taken.has(m.id))
-      .filter((m) => (q === '' ? true : `${m.displayName} ${m.id} ${m.family}`.toLowerCase().includes(q)))
-      .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh') || a.id.localeCompare(b.id));
-  }, [query, routing.data?.models, taken]);
+    if (q === '') return available;
+    return available.filter((m) => `${m.displayName} ${m.id} ${m.family}`.toLowerCase().includes(q));
+  }, [available, query]);
+  const rows = useMemo(() => addRows(candidates), [candidates]);
 
   const pick = async (modelId: string) => {
     try {
@@ -100,7 +224,7 @@ export function AddPurposeModel({
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
-          <DialogHeader>
+          <DialogHeader className="text-left">
             <DialogTitle>往{purposeLabel(purpose.purpose)}里加模型</DialogTitle>
             <DialogDescription>只列目录里还没排进这个用途的。选定就加到末尾。</DialogDescription>
           </DialogHeader>
@@ -119,39 +243,21 @@ export function AddPurposeModel({
             <p className="text-sub text-ink-fail">{errorText(routing.error)}</p>
           ) : !routing.data ? (
             <p className="text-sub text-muted-foreground">目录还在读</p>
-          ) : candidates.length === 0 ? (
+          ) : available.length === 0 ? (
+            <p className="text-sub text-muted-foreground">没有可加的模型</p>
+          ) : rows.length === 0 ? (
             <p className="text-sub text-muted-foreground">
               没有能加的模型：换个搜索词，或目录里的都已经在这个用途里
             </p>
           ) : (
-            <ul aria-label="可添加的模型" className="max-h-80 space-y-1 overflow-y-auto">
-              {candidates.map((m) => {
-                const only = founderOnlyFor({ id: m.id, family: m.family, displayName: m.displayName });
-                const blocked = only !== undefined && !founder;
-                const why = edit.disabledWhy ?? (blocked ? '仅创始人可开' : null);
-                return (
-                  <li key={m.id} className="flex items-center gap-2 rounded-md px-1 py-1">
-                    <span className="min-w-0 flex-1 truncate text-sm">
-                      <span className="font-medium">{m.displayName}</span>
-                      <span className="ml-2 text-caption text-muted-foreground">{m.family}</span>
-                    </span>
-                    {only ? (
-                      <span className="shrink-0 text-micro text-muted-foreground">仅创始人可开</span>
-                    ) : null}
-                    <Button
-                      type="button"
-                      size="xs"
-                      disabled={why !== null || add.isPending}
-                      title={why ?? undefined}
-                      aria-label={`把 ${m.displayName} 加进用途`}
-                      onClick={() => void pick(m.id)}
-                    >
-                      添加
-                    </Button>
-                  </li>
-                );
-              })}
-            </ul>
+            <AddCandidateList
+              key={query}
+              rows={rows}
+              founder={founder}
+              pending={add.isPending}
+              disabledWhy={edit.disabledWhy}
+              onPick={(id) => void pick(id)}
+            />
           )}
         </DialogContent>
       </Dialog>

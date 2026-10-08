@@ -548,6 +548,49 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(vendor.className).not.toContain('bg-foreground/10');
   });
 
+  test('手机宽度顶部说明折成一行「怎么用」，点开才展开；桌面直接显示全文', async () => {
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing' });
+    await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.queryByText(/每个用途按顺序排哪些模型/)).toBeNull();
+    const toggle = screen.getByRole('button', { name: '怎么用' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+
+    cleanup();
+    vi.restoreAllMocks();
+    renderApp(<RoutingPage />, { route: '/routing' });
+    await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '怎么用' })).toBeNull();
+  });
+
+  test('手机宽度模型目录去掉内部定高滚动，行随页面滚；桌面仍是 440 高的窗口', async () => {
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?tab=models', api: withModels(300) });
+    const list = await screen.findByRole('list', { name: '目录里的模型' });
+    const box = list.parentElement as HTMLElement;
+    expect(classTokens(box)).toEqual(
+      expect.arrayContaining(['h-auto', 'overflow-visible', 'md:h-routing-window', 'md:overflow-y-auto']),
+    );
+    expect(classTokens(box)).not.toContain('overflow-y-auto');
+    expect(box.style.height).toBe('');
+    expect(box.getAttribute('data-windowed')).toBeNull();
+    expect(rows('li[data-catalog]').length).toBeGreaterThan(50);
+
+    cleanup();
+    vi.restoreAllMocks();
+    renderApp(<RoutingPage />, { route: '/routing?tab=models', api: withModels(300) });
+    const desktop = await screen.findByRole('list', { name: '目录里的模型' });
+    const desktopBox = desktop.parentElement as HTMLElement;
+    expect(desktopBox.getAttribute('data-windowed')).toBe('true');
+    expect(desktopBox.style.height).toBe('440px');
+    expect(classTokens(desktopBox)).toContain('overflow-y-auto');
+    expect(rows('li[data-catalog]').length).toBeLessThan(30);
+  });
+
   test('新发现、已下架、锁住三种标记颜色互不相同', async () => {
     const api = createMockApi({ live: false });
     const routing = api.routing.bind(api);
