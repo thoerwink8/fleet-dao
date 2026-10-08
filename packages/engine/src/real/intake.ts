@@ -149,12 +149,22 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           return {
             open: {
               since: row.at,
-              trial: trial === null ? null : state === 'done' ? 'done' : state === 'failed' || state === 'stopped' ? 'failed' : 'running',
+              trial:
+                trial === null
+                  ? null
+                  : state === 'done'
+                    ? 'done'
+                    : state === 'failed' || state === 'stopped'
+                      ? 'failed'
+                      : 'running',
             },
             recent: [],
           };
         }
-        return { open: null, recent: await recentEndedTasks(w.db, { limit: BREAKER_WINDOW, after: row?.at ?? null }) };
+        return {
+          open: null,
+          recent: await recentEndedTasks(w.db, { limit: BREAKER_WINDOW, after: row?.at ?? null }),
+        };
       },
       async breakerChanged({ event, at, why }) {
         if (event === 'recover') {

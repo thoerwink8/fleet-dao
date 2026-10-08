@@ -94,7 +94,9 @@ export async function readIntakeBreaker(db: Db): Promise<IntakeBreakerRow> {
   const v = row.value as { state?: unknown; at?: unknown } | null;
   const at = typeof v?.at === 'string' ? new Date(v.at) : null;
   if ((v?.state !== 'open' && v?.state !== 'closed') || at === null || Number.isNaN(at.getTime())) {
-    throw new Error(`设置 ${INTAKE_BREAKER_SETTING} 的值认不出（要 {state: open|closed, at: 时间}）：${JSON.stringify(row.value)}`);
+    throw new Error(
+      `设置 ${INTAKE_BREAKER_SETTING} 的值认不出（要 {state: open|closed, at: 时间}）：${JSON.stringify(row.value)}`,
+    );
   }
   return { state: v.state, at };
 }

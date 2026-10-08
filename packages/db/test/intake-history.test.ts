@@ -22,8 +22,15 @@ afterAll(() => t.close());
 beforeEach(() => resetTestDb(t));
 
 /** 补一条状态变化记录（触发器记的是真实时钟，测试要定死时刻）。 */
-async function change(taskId: string, toState: 'done' | 'failed', at: Date, entity: 'task' | 'subtask' = 'task') {
-  await t.db.insert(stateChanges).values({ entity, entityId: taskId, taskId, fromState: 'running', toState, at });
+async function change(
+  taskId: string,
+  toState: 'done' | 'failed',
+  at: Date,
+  entity: 'task' | 'subtask' = 'task',
+) {
+  await t.db
+    .insert(stateChanges)
+    .values({ entity, entityId: taskId, taskId, fromState: 'running', toState, at });
 }
 
 describe('这张单失败过几次', () => {

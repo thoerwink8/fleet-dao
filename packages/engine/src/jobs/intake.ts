@@ -56,9 +56,9 @@ import {
   type BreakerEvent,
   type BreakerFacts,
   decideBreaker,
+  HOUR_MS,
   hasVisibleSignal,
   hourlyRemaining,
-  HOUR_MS,
   MAX_ISSUE_FAILURES,
   MAX_STARTS_PER_HOUR,
   type OrderBook,
@@ -501,9 +501,13 @@ async function admitIssue(
   }
   // 验收条看不看得见：只判结构（有没有代码、路径、文件名、引号里的界面文字、数字）。一条信号都没有是「拿不准」：照拉，只记一笔
   if (!hasVisibleSignal(brief.brief.acceptance)) {
-    deps.log('info', `拉单：${slug}#${issue.number} 的「怎么算做完」没认出路径、文件名或具体的现象，照拉（只记不拦）`, {
-      acceptance: brief.brief.acceptance.length,
-    });
+    deps.log(
+      'info',
+      `拉单：${slug}#${issue.number} 的「怎么算做完」没认出路径、文件名或具体的现象，照拉（只记不拦）`,
+      {
+        acceptance: brief.brief.acceptance.length,
+      },
+    );
   }
   const created = Date.parse(issue.createdAt);
   return {
@@ -511,7 +515,8 @@ async function admitIssue(
     brief: brief.brief,
     key: {
       serial: serialOf(ctx.book, issue.milestone, issue.number),
-      current: ctx.current !== undefined && issue.milestone !== null && issue.milestone.number === ctx.current,
+      current:
+        ctx.current !== undefined && issue.milestone !== null && issue.milestone.number === ctx.current,
       tierRank: brief.brief.tier.tier === 'fast' ? 0 : brief.brief.tier.tier === 'medium' ? 1 : 2,
       moduleCount,
       handed: handsToEngine(issue.labels),
@@ -547,12 +552,7 @@ function noRoom(deps: IntakeDeps, t: Tally): IntakeSkip | null {
 }
 
 /** 排好序之后，从前往后起：有空位才现读这张单再核一遍，核过了才起。 */
-async function startCandidate(
-  deps: IntakeDeps,
-  repo: IntakeRepo,
-  c: Candidate,
-  t: Tally,
-): Promise<void> {
+async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tally): Promise<void> {
   const slug = `${repo.owner}/${repo.name}`;
   const { issue } = c;
   const full = noRoom(deps, t);
@@ -607,11 +607,17 @@ async function intakeRepo(
   };
   // 版本里的先后和当前版本：排序用。先后认不出的版本，它的单算「没排进去」，原因只记日志（先后的对错归每天的 GitHub 对账管）
   const withOrder = listed.openMilestones.filter((m) => milestoneNeedsOrder(m, listed.issues));
-  const { book, problems } = readOrderBook(withOrder.map((m) => ({ ...m, description: m.description ?? '' })));
+  const { book, problems } = readOrderBook(
+    withOrder.map((m) => ({ ...m, description: m.description ?? '' })),
+  );
   if (problems.length > 0) {
-    deps.log('info', `拉单：${slug} 有版本的先后认不出，这些版本里的单排在没排进去的那档：${problems.join('；')}`, {
-      problems,
-    });
+    deps.log(
+      'info',
+      `拉单：${slug} 有版本的先后认不出，这些版本里的单排在没排进去的那档：${problems.join('；')}`,
+      {
+        problems,
+      },
+    );
   }
   const ctx = { current: currentVersion(listed.openMilestones)?.milestone.number, book };
 

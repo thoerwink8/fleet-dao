@@ -68,7 +68,9 @@ export type OrderBook = ReadonlyMap<number, ReadonlyMap<number, number>>;
  * 说明里没有先后标记、认不出的版本，这个版本的单一律算「没排进去」，原因记进 problems（调用方写日志，不拦拉单：
  * 先后的对错由每天的 GitHub 对账管）。
  */
-export function readOrderBook(milestones: readonly { number: number; title: string; description: string }[]): {
+export function readOrderBook(
+  milestones: readonly { number: number; title: string; description: string }[],
+): {
   book: OrderBook;
   problems: string[];
 } {
@@ -86,7 +88,11 @@ export function readOrderBook(milestones: readonly { number: number; title: stri
 }
 
 /** 这张单在它挂的版本的先后里排第几；没挂版本、版本没先后、没排进去都是 null。 */
-export function serialOf(book: OrderBook, milestone: { number: number } | null, issueNumber: number): number | null {
+export function serialOf(
+  book: OrderBook,
+  milestone: { number: number } | null,
+  issueNumber: number,
+): number | null {
   if (milestone === null) return null;
   return book.get(milestone.number)?.get(issueNumber) ?? null;
 }
@@ -151,7 +157,11 @@ export function decideBreaker(f: BreakerFacts, now: Date): BreakerVerdict {
   if (trial === 'running') return { allow: 0, event: null, why: '熔断中：试探的那条任务还在跑，等它的结局' };
   const readyAt = since.getTime() + BREAKER_COOLDOWN_MS;
   if (now.getTime() < readyAt) {
-    return { allow: 0, event: null, why: `熔断中：冷却到 ${new Date(readyAt).toISOString()}，之后只放 1 条试探` };
+    return {
+      allow: 0,
+      event: null,
+      why: `熔断中：冷却到 ${new Date(readyAt).toISOString()}，之后只放 1 条试探`,
+    };
   }
   return { allow: 1, event: null, why: '熔断冷却完了：这一轮只放 1 条试探，成了才恢复' };
 }
