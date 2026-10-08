@@ -60,6 +60,9 @@ export const HUMAN_TIER_PATHS = [
   'deploy/france/fleet-release-request.path',
   'deploy/france/release-request/lib.mjs',
   'deploy/france/release-request/fleet-release-request.mjs',
+  // sshd 抗扫描和 fail2ban 的 sshd jail（#1348，setup_sshd_hardening、setup_fail2ban_sshd）：改的是登录入口，配错了连 root 都登不上，要人跑整套
+  'deploy/france/sshd-hardening.conf',
+  'deploy/france/fail2ban-sshd.jail',
 ];
 /**
  * 这边发的报警都以它开头：规矩同步没成 `auto-release:rules:<提交号>`，装机自动档没装成 `auto-release:tier:<提交号>`，
