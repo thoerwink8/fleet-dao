@@ -768,6 +768,7 @@ export function realPortsFromEnv(
     intake: intakeJob({
       db,
       gh,
+      canaryRepo: env.FLEET_CANARY_REPO ?? null,
       foreignCanaries: async () => {
         const declared = readDeclaredCanaryRepos(DECLARED_CANARY_DEPLOY_DIR);
         if ('error' in declared) throw new Error(declared.error);

@@ -32,6 +32,8 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
 import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
+import { CANARY_ISSUE_TITLE_POSIX } from '../jobs/canary.ts';
+import { normalizeCanarySlug } from '../jobs/canary-scope.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
 import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
@@ -58,6 +60,26 @@ export interface IntakeWiring {
    * 不给 = 没有别的环境（测试、还没接第二台）。
    */
   foreignCanaries?: () => Promise<readonly string[]>;
+  /**
+   * 这台引擎自己的巡检仓（FLEET_CANARY_REPO，owner/name）。
+   * 给了：这个仓里标题是巡检单的任务行不计入每小时条数，拉单也认这个仓。不给 = 没有。
+   */
+  canaryRepo?: string | null;
+}
+
+/** 每小时条数里剔掉的巡检单。没配、认不出回 null（一条不剔，不当成某个仓）。 */
+function hourlyExclude(raw: string | null | undefined): {
+  owner: string;
+  name: string;
+  titlePosix: string;
+} | null {
+  const slug = normalizeCanarySlug(raw);
+  if (!slug) return null;
+  const slash = slug.indexOf('/');
+  const owner = slug.slice(0, slash);
+  const name = slug.slice(slash + 1);
+  if (!owner || !name) return null;
+  return { owner, name, titlePosix: CANARY_ISSUE_TITLE_POSIX };
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -92,6 +114,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         }));
       },
       ...(w.foreignCanaries ? { foreignCanaries: w.foreignCanaries } : {}),
+      canaryRepo: w.canaryRepo ?? null,
       async whitelist() {
         return githubWhitelist(await usersOnce());
       },
@@ -148,7 +171,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         return n;
       },
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
-      startedSince: (since) => tasksCreatedSince(w.db, since),
+      startedSince: (since) => tasksCreatedSince(w.db, since, hourlyExclude(w.canaryRepo)),
       async breaker() {
         const row = await readIntakeBreaker(w.db);
         if (row?.state === 'open') {
