@@ -12,6 +12,8 @@ import {
   MovePurposeModelRequest,
   PasswordLoginRequest,
   RouteProbeNowRequest,
+  SetChannelEnabledRequest,
+  SetModelEnabledRequest,
   SSE_EVENTS,
   TaskActionRequest,
   UpdateCredentialsRequest,
@@ -269,6 +271,16 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     async updateModelRoute(modelId, routeId, body) {
       return send('PUT', apiUrl(R.updateModelRoute.path, { modelId, routeId }), R.updateModelRoute.response, {
         body: UpdateModelRouteRequest.parse(body),
+      });
+    },
+    async setModelEnabled(modelId, body) {
+      return send('PUT', apiUrl(R.setModelEnabled.path, { modelId }), R.setModelEnabled.response, {
+        body: SetModelEnabledRequest.parse(body),
+      });
+    },
+    async setChannelEnabled(channelId, body) {
+      return send('PUT', apiUrl(R.setChannelEnabled.path, { channelId }), R.setChannelEnabled.response, {
+        body: SetChannelEnabledRequest.parse(body),
       });
     },
     pools: () => send('GET', apiUrl(R.pools.path), R.pools.response),

@@ -62,6 +62,10 @@ import {
   SETTING_SCHEMAS,
   type SessionEffort,
   type SessionRun,
+  SetChannelEnabledRequest,
+  SetChannelEnabledResponse,
+  SetModelEnabledRequest,
+  SetModelEnabledResponse,
   type SettingKey,
   SettingsResponse,
   type StageKind,
@@ -212,6 +216,41 @@ function mockEngine() {
 function mockNodeMode(): 'fresh' | 'stale' | 'never' | 'off' {
   const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockNode');
   return v === 'stale' || v === 'never' || v === 'off' ? v : 'fresh';
+}
+
+/** 新先后必须是现在这一串的重排（多了、少了、重复都不算）。 */
+function notPermutation(current: readonly string[], order: readonly string[]): boolean {
+  if (order.length !== current.length) return true;
+  const seen = new Set<string>();
+  for (const id of order) {
+    if (!current.includes(id) || seen.has(id)) return true;
+    seen.add(id);
+  }
+  return false;
+}
+
+/** 整段拖到新先后：没有 404、看到的对不上 409、不是重排 422。顺序没变也返回，调用方自己决定记不记操作记录。 */
+function mockReorder(
+  list: readonly string[],
+  key: string,
+  order: readonly string[],
+  expected: readonly string[],
+  where: string,
+  what: string,
+  notFoundCode: string,
+): { before: string[]; after: string[] } {
+  if (!list.includes(key)) throw new ApiError(404, notFoundCode, `${where}下没有${what} ${key}`);
+  if (list.length !== expected.length || list.some((x, i) => x !== expected[i])) {
+    throw new ApiError(409, 'conflict', '先后刚被别人改过，刷新后再改', { current: [...list] });
+  }
+  if (notPermutation(list, order)) throw new ApiError(422, 'order_invalid', '新先后必须是现在这一串的重排');
+  return { before: [...list], after: [...order] };
+}
+
+function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(b);
+  return a.every((id) => seen.has(id));
 }
 
 /** 在一串编号里把 key 上移 / 下移一位（真后端 db 的 routing-order.ts 的假数据版）：看到的先后对不上 409、已在头尾 422、没有 404。 */
@@ -1858,17 +1897,35 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const purpose = StageKindSchema.safeParse(purposeParam);
       if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
       const list = st.purposes[purpose.data] ?? [];
-      const order = mockMove(list, modelId, body, `用途 ${purpose.data} `, '模型', 'model_not_found');
-      st.purposes[purpose.data] = order.after;
-      audit({
-        actor: meActor(),
-        action: 'routing.order.move',
-        target: `stage:${purpose.data}`,
-        before: { order: order.before },
-        after: { order: order.after, moved: modelId, direction: body.direction },
-        via: 'cockpit',
-        ...(body.reason ? { reason: body.reason } : {}),
-      });
+      const order =
+        'order' in body
+          ? mockReorder(
+              list,
+              modelId,
+              body.order,
+              body.expected,
+              `用途 ${purpose.data} `,
+              '模型',
+              'model_not_found',
+            )
+          : mockMove(list, modelId, body, `用途 ${purpose.data} `, '模型', 'model_not_found');
+      const changed = order.before.some((id, i) => id !== order.after[i]);
+      if (changed) {
+        st.purposes[purpose.data] = order.after;
+        audit({
+          actor: meActor(),
+          action: 'routing.order.move',
+          target: `stage:${purpose.data}`,
+          before: { order: order.before },
+          after: {
+            order: order.after,
+            moved: modelId,
+            ...('direction' in body ? { direction: body.direction } : {}),
+          },
+          via: 'cockpit',
+          ...(body.reason ? { reason: body.reason } : {}),
+        });
+      }
       return MovePurposeModelResponse.parse({ purpose: purpose.data, order: order.after });
     },
     async updateModelRoute(modelId, routeId, raw) {
@@ -1896,18 +1953,85 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         });
         return UpdateModelRouteResponse.parse({ modelId, routeId, enabled: body.enabled });
       }
-      const order = mockMove(list, routeId, body, `模型 ${modelId} `, '路由', 'route_not_found');
-      st.routing[modelId] = order.after;
+      const order =
+        body.op === 'reorder'
+          ? mockReorder(
+              list,
+              routeId,
+              body.order,
+              body.expected,
+              `模型 ${modelId} `,
+              '路由',
+              'route_not_found',
+            )
+          : mockMove(list, routeId, body, `模型 ${modelId} `, '路由', 'route_not_found');
+      const changed = order.before.some((id, i) => id !== order.after[i]);
+      if (changed) {
+        st.routing[modelId] = order.after;
+        audit({
+          actor: meActor(),
+          action: 'routing.order.move',
+          target: `model:${modelId}`,
+          before: { order: order.before },
+          after: {
+            order: order.after,
+            moved: routeId,
+            ...(body.op === 'move' ? { direction: body.direction } : {}),
+          },
+          via: 'cockpit',
+          ...(body.reason ? { reason: body.reason } : {}),
+        });
+      }
+      return UpdateModelRouteResponse.parse({ modelId, routeId, order: order.after });
+    },
+    async setModelEnabled(modelId, raw) {
+      await wait();
+      const body = SetModelEnabledRequest.parse(raw);
+      const list = st.routing[modelId] ?? [];
+      if (list.length === 0) {
+        throw new ApiError(404, 'model_not_found', `模型 ${modelId} 下没有路由（路由两层里没挂）`);
+      }
+      const before = list.filter((id) => !switchedOff.has(id));
+      if (!sameIdSet(before, body.expectedEnabled)) {
+        throw new ApiError(409, 'conflict', '这个模型的开关刚被别人改过，刷新后再改', { current: before });
+      }
+      for (const id of list) {
+        if (body.enabled) switchedOff.delete(id);
+        else switchedOff.add(id);
+      }
+      const after = body.enabled ? [...list] : [];
       audit({
         actor: meActor(),
-        action: 'routing.order.move',
+        action: 'routing.model.enable',
         target: `model:${modelId}`,
-        before: { order: order.before },
-        after: { order: order.after, moved: routeId, direction: body.direction },
+        before: { enabledRouteIds: before },
+        after: { enabled: body.enabled, enabledRouteIds: after },
         via: 'cockpit',
         ...(body.reason ? { reason: body.reason } : {}),
       });
-      return UpdateModelRouteResponse.parse({ modelId, routeId, order: order.after });
+      return SetModelEnabledResponse.parse({ modelId, enabled: body.enabled, enabledRouteIds: after });
+    },
+    async setChannelEnabled(channelId, raw) {
+      await wait();
+      const body = SetChannelEnabledRequest.parse(raw);
+      const channel = st.channels.find((c) => c.id === channelId);
+      if (!channel) throw new ApiError(404, 'channel_not_found', `没有这个渠道：${channelId}`);
+      if (channel.enabled !== body.expected) {
+        throw new ApiError(409, 'conflict', '这个渠道的开关刚被别人改过，刷新后再改', {
+          current: channel.enabled,
+        });
+      }
+      channel.enabled = body.enabled;
+      audit({
+        actor: meActor(),
+        action: body.enabled ? 'channel.enable' : 'channel.disable',
+        target: `channel:${channelId}`,
+        before: { enabled: body.expected },
+        after: { enabled: body.enabled },
+        via: 'cockpit',
+        ...(body.reason ? { reason: body.reason } : {}),
+      });
+      return SetChannelEnabledResponse.parse({ channelId, enabled: body.enabled });
     },
     async pools() {
       await wait();

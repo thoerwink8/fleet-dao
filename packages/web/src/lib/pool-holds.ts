@@ -91,3 +91,14 @@ export function reviewWords(h: Pick<PoolHoldFactView, 'overdue' | 'overdueDays'>
 export function holdsNeedAttention(v: PoolHolds): boolean {
   return v.holdAll || v.problems.length > 0 || v.holds.some((h) => h.overdue);
 }
+
+/**
+ * 这个池现在算暂停：认得出的、那一项认不出的、整份认不出、还靠旧 pool-hold 提醒顶着的。
+ * 引擎选路避开的就是这些；路由页据此不让单独开路由。
+ */
+export function poolIsHeld(v: PoolHolds, poolId: string): boolean {
+  if (v.holdAll) return true;
+  if (v.holds.some((h) => h.poolId === poolId)) return true;
+  if (v.problems.some((p) => p.poolId === poolId)) return true;
+  return v.legacy.some((l) => l.poolId === poolId);
+}
