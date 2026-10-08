@@ -3,8 +3,9 @@
 // 在单子上留一条言写清缺什么，齐的起任务工作流 → 把结局记进 schedule_runs。拉单本身不动单子（不贴「在做」、不抢认领）。
 //
 // 过关的顺序是先便宜的再贵的（列表里就有的，再多读一次 GitHub 的）：
-//   开关打开以后开的（0003 第 2 条）→ 作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 挂在当前版本上（第 8 条）→
-//   不是母单子单、没贴「本机做」→ 还没派过 → 现读一遍这张单（开着、不是 PR、版本和母单子单再核一遍）→ 没被开着的 PR 的
+//   开关打开以后开的（0003 第 2 条；贴了「交给引擎」的跳过这一道）→ 作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→
+//   挂在当前版本上（第 8 条；贴了「交给引擎」的跳过这一道）→
+//   不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→ 还没派过 → 现读一遍这张单（开着、不是 PR、版本和母单子单再核一遍；贴了「交给引擎」的不再核版本）→ 没被开着的 PR 的
 //   「需求」栏挂着（#1197：已经有人在做；挂着的贴一次「本机做」、留一句话）→ 正文没写 .github/workflows/ 路径（#1194：
 //   引擎的令牌推不了改工作流的提交，写了的同样贴一次「本机做」、留一句话）→ 交代齐不齐 → 容量。
 // 每一道的判法都是 @fleet-dao/core 的 dispatch.ts 那几个纯函数（versionGate、familyGate、localGate），这里只排顺序。
@@ -19,7 +20,7 @@
 //   一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
 
 import { createHash } from 'node:crypto';
-import { issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
+import { ENGINE_LABEL, issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
 import {
   autoDispatchGate,
   cleanBody,
@@ -121,10 +122,29 @@ export interface IntakeSkip {
   why: string;
 }
 
+/** 贴了「交给引擎」：拉单跳过「开关打开以前开的」和版本这两道。名字只认 conventions 的 ENGINE_LABEL。 */
+function handsToEngine(labels: readonly string[]): boolean {
+  return labels.includes(ENGINE_LABEL);
+}
+
+/**
+ * 「本机做」这一道。只贴「本机做」用 localGate 的原话；又贴了「交给引擎」时以「本机做」为准，原因里写明冲突。
+ * 母单、子单在这之前已经判过，这个标签绕不过那一道。
+ */
+function localSkip(labels: readonly string[]): IntakeSkip | null {
+  const local = localGate({ labels });
+  if (local.ok) return null;
+  if (!handsToEngine(labels)) return { reason: local.reason, why: local.why };
+  return {
+    reason: 'reserved_local',
+    why: `贴着「${LOCAL_LABEL}」又贴着「${ENGINE_LABEL}」：以「${LOCAL_LABEL}」为准，引擎不拉`,
+  };
+}
+
 /**
  * 只看列表里就有的东西能不能判掉（不再多读一次 GitHub）。回 null＝这一道都过了，往下走。
- * 判法的出处：开关打开以后开的（dispatchDecision，0003 第 2 条）；作者白名单（公开仓唯一的门）；版本（versionGate，第 8 条）；
- * 母单标签、本机做标签（familyGate、localGate 里只靠标签的那部分；子单、挂了子单要多读一次，在 screenPlan）。
+ * 判法的出处：开关打开以后开的（0003 第 2 条；贴了「交给引擎」的跳过）；作者白名单（公开仓唯一的门）；版本（versionGate，第 8 条；
+ * 贴了「交给引擎」的跳过）；母单标签、本机做标签（familyGate、localGate 里只靠标签的那部分；子单、挂了子单要多读一次，在 screenPlan）。
  */
 export function screenListed(input: {
   autoDispatchSince: string;
@@ -133,6 +153,7 @@ export function screenListed(input: {
   openMilestones: readonly MilestoneRef[];
 }): IntakeSkip | null {
   const { issue } = input;
+  const handed = handsToEngine(issue.labels);
   const opened = Date.parse(issue.createdAt);
   if (!Number.isFinite(opened)) {
     return {
@@ -140,23 +161,34 @@ export function screenListed(input: {
       why: `开单时间认不出（${issue.createdAt}），不当成开关打开以后开的`,
     };
   }
-  if (opened < Date.parse(input.autoDispatchSince)) {
-    return { reason: 'opened_before_switch', why: '开关打开以前就开着的单不自动派（要人明说交给 fleet）' };
+  if (!handed && opened < Date.parse(input.autoDispatchSince)) {
+    return {
+      reason: 'opened_before_switch',
+      why: `开关打开以前就开着的单不自动派（要交给引擎就贴「${ENGINE_LABEL}」）`,
+    };
   }
   if (!input.trusted) return { reason: 'untrusted_author', why: '开单人不在白名单里' };
-  const version = versionGate({ milestone: issue.milestone, openMilestones: input.openMilestones });
-  if (!version.ok) return { reason: version.reason, why: version.why };
+  if (!handed) {
+    const version = versionGate({ milestone: issue.milestone, openMilestones: input.openMilestones });
+    if (!version.ok) return { reason: version.reason, why: version.why };
+  }
   const family = familyGate({ labels: issue.labels, parent: null, subIssues: 0 });
   if (!family.ok) return { reason: family.reason, why: family.why };
-  const local = localGate({ labels: issue.labels });
-  if (!local.ok) return { reason: local.reason, why: local.why };
-  return null;
+  return localSkip(issue.labels);
 }
 
-/** 现读之后的最后一道：这个号开着、是 issue；版本、母单子单、本机做按这一刻读到的再核一遍（列表读到的可能早过时了）。 */
+/**
+ * 现读之后的最后一道：这个号开着、是 issue；版本、母单子单、本机做按这一刻读到的再核一遍（列表读到的可能早过时了）。
+ * 贴了「交给引擎」的不再核版本，母单子单和「本机做」照旧核。
+ */
 export function screenPlan(plan: IntakePlan): IntakeSkip | null {
   if (plan.pullRequest) return { reason: 'pull_request', why: '这个号是 PR，不是 issue' };
   if (plan.state !== 'open') return { reason: 'closed', why: '这张单已经关了' };
+  if (handsToEngine(plan.labels)) {
+    const family = familyGate(plan);
+    if (!family.ok) return { reason: family.reason, why: family.why };
+    return localSkip(plan.labels);
+  }
   const gate = autoDispatchGate(plan);
   if (!gate.ok) return { reason: gate.reason, why: gate.why };
   return null;

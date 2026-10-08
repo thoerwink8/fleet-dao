@@ -84,6 +84,7 @@ export {
 } from './issue-new.ts';
 export {
   currentVersion,
+  ENGINE_LABEL,
   FROZEN_LABEL,
   IDLE_LABEL,
   isKindLabel,

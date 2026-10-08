@@ -2,10 +2,8 @@
 # 法国上后端的管理命令（docs/ops.md 第九节「账密登录」「让 AI 接活」）：以 root 跑，
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api set-password <飞书名或用户 id> [--username <用户名>]
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner/仓名> on|off|status
-#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
-# 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST，handover 还要连 Temporal、
-# 读 /etc/fleet-dao/github 下「引擎」机器人的凭据）去跑：
+# 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
 # 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读，和服务里生效的一模一样。
 # 标准输入是终端就给它一个伪终端（--pty：密码不回显），是管道就原样接过去（--pipe：脚本里用）。
 # 换了身份就看不出是谁跑的了：先把 root（经 sudo 跑的记 sudo 前的用户）交给命令，写进操作记录。

@@ -160,7 +160,7 @@ describe('开、关、只看', () => {
       reason: '服务器上 root 跑的 fleet-api dispatch example/canary on',
     });
     expect(t.out.at(-1)).toBe(
-      `已打开：example/canary：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上、没贴「本机做」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的不自动派，要做就重开一张新单，挂上当前版本、不贴「本机做」、不是母单也不是子单）\n` +
+      `已打开：example/canary：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上、没贴「本机做」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的，贴了「交给引擎」也派。作者不在白名单、母单和子单、贴了「本机做」的仍不派；「本机做」和「交给引擎」一起贴时以「本机做」为准）\n` +
         `最近一次开关：${since} 打开，服务器上 root 跑的 fleet-api dispatch example/canary on（操作记录 ${entry?.id}）`,
     );
 

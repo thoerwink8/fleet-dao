@@ -25,6 +25,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
+import { ENGINE_LABEL, LOCAL_LABEL } from '@fleet-dao/conventions';
 import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
@@ -402,7 +403,7 @@ const isSwitchEntry = (a: AuditRecord) =>
 function describeSwitch(label: string, since: string | null): string {
   return since === null
     ? `${label}：让 AI 接活 关着（auto_dispatch_since 为空：只收单、显示，不派）`
-    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上、没贴「本机做」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的不自动派，要做就重开一张新单，挂上当前版本、不贴「本机做」、不是母单也不是子单）`;
+    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上、没贴「${LOCAL_LABEL}」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的，贴了「${ENGINE_LABEL}」也派。作者不在白名单、母单和子单、贴了「${LOCAL_LABEL}」的仍不派；「${LOCAL_LABEL}」和「${ENGINE_LABEL}」一起贴时以「${LOCAL_LABEL}」为准）`;
 }
 
 /** 读回、status 看最近多少条和这个仓有关的操作记录。 */
