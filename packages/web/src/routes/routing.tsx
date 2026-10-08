@@ -74,27 +74,47 @@ const parseTab = (raw: string | null): TabId => TABS.find((t) => t.id === raw)?.
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
 
+/** 手机宽度说明折成一行，点开才展开；桌面仍全文。窄屏首屏要留给用途，不把说明铺满。 */
+function RoutingDescription() {
+  const mobile = useMediaQuery(MOBILE_MQ);
+  const [open, setOpen] = useState(false);
+  if (!mobile) return DESCRIPTION;
+  return (
+    <>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="block text-left"
+      >
+        怎么用
+      </button>
+      {open ? <span className="mt-1 block">{DESCRIPTION}</span> : null}
+    </>
+  );
+}
+
 export default function Routing() {
   const { data, error, isLoading } = useRoutingLayers();
   const [params, setParams] = useSearchParams();
 
   if (error) {
     return (
-      <Page title="路由" description={DESCRIPTION}>
+      <Page title="路由" description={<RoutingDescription />}>
         <LoadError what="路由两层" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="路由" description={DESCRIPTION}>
+      <Page title="路由" description={<RoutingDescription />}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="路由" description={DESCRIPTION}>
+      <Page title="路由" description={<RoutingDescription />}>
         <div
           role="note"
           className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
@@ -122,7 +142,7 @@ export default function Routing() {
   return (
     <Page
       title="路由"
-      description={DESCRIPTION}
+      description={<RoutingDescription />}
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
       actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
     >
