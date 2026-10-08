@@ -40,6 +40,7 @@ import {
   sessionUserOf,
   WIRED_HOSTS,
 } from './hosts.ts';
+import { loadHeldPools } from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { poolHoldKey } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
@@ -273,6 +274,20 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
   await resolveAlertByKey(db, { dedupeKey, by: 'engine' });
 }
 
+/**
+ * 全部路由，被人拍了整池暂停（开关 engine.poolHolds）的池打上 heldBySwitch，探针不探它们。开关认不出的池（整份或那一项）也按暂停办，
+ * 原因写「设置认不出」。库读不了照抛（这一轮记没跑成）。
+ */
+export async function probeTargetsWithHolds(db: Db, now: Date): Promise<ProbeTarget[]> {
+  const [targets, held] = await Promise.all([routeProbeTargets(db), loadHeldPools(db, now)]);
+  const reasons = new Map(held.facts.holds.map((h) => [h.poolId, h.reason]));
+  return targets.map((t) =>
+    held.switched.has(t.poolId)
+      ? { ...t, heldBySwitch: reasons.get(t.poolId) ?? '暂停设置认不出，按暂停办' }
+      : t,
+  );
+}
+
 export interface RouteProbeWiring {
   db: Db;
   trees: WorkTrees;
@@ -346,7 +361,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     WIRED_HOSTS.map((host) => [host, sessionProber(drivers[host], deps)]),
   );
   return () => ({
-    targets: () => routeProbeTargets(w.db),
+    targets: () => probeTargetsWithHolds(w.db, now()),
     probers,
     // 和选路、切号同一个读法、同一个起点：谁读到的写进前后两次读数里
     sessionOrg: () => w.sessionOrg({ by: '路由探针' }),
