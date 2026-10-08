@@ -63,6 +63,8 @@ describe('routeLaunchFacts', () => {
       orgKind: 'solo',
       // 没挂进路由两层：没配档位
       effort: null,
+      // 这条不是 Mirasim，名册没盖过执行体
+      executor: null,
     });
   });
 

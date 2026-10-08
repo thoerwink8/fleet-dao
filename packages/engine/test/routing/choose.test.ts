@@ -16,7 +16,12 @@ function picked(result: ChooseRouteResult): string {
 
 describe('派给某条路由', () => {
   it('按人排的顺序取第一条能用的，带路由的全部身份', () => {
-    const r = chooseRoute(input([route('a', { channelId: 'mirasim-cloud', hostId: 'mirasim' }), route('b')]));
+    const r = chooseRoute(
+      input([
+        route('a', { channelId: 'mirasim-cloud', hostId: 'mirasim', upstreamModel: 'claude-opus-5-5' }),
+        route('b'),
+      ]),
+    );
     expect(r).toMatchObject({
       kind: 'dispatch',
       routeId: 'a',

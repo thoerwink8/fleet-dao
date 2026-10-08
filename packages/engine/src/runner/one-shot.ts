@@ -26,6 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { redact } from '@fleet-dao/adapters';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -36,6 +37,18 @@ import type { Tier } from './tier.ts';
 
 /** 默认会话总时限（分钟）。不调传。 */
 export const DEFAULT_TIMEOUT_MINUTES = 60;
+/** 记进 runs.failure_reason 的报错尾巴最多多少字（脱敏之后按字符留末尾）。 */
+export const SESSION_ERROR_TAIL_MAX = 600;
+
+/**
+ * 会话报错的尾巴：先脱敏（令牌、邮箱、长串），再留下末尾最多 600 字。
+ * redact 超长时会在前面加一个省略号，这里再按 600 字截掉，保证不超过。空串就是没有尾巴。
+ */
+export function sessionErrorTail(text: string): string {
+  const cleaned = redact(text, SESSION_ERROR_TAIL_MAX);
+  return cleaned.length > SESSION_ERROR_TAIL_MAX ? cleaned.slice(-SESSION_ERROR_TAIL_MAX) : cleaned;
+}
+
 /** 把 stdout / stderr 落盘到 tmpDir 下的子目录名。 */
 export function runDirOf(tmpDir: string, runId: string): string {
   return join(tmpDir, runId);
@@ -388,15 +401,20 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     ...(outcome === 'org_switch' && deps.stop
       ? { failureReason: switchReason(deps.stop, '会话被停下') }
       : outcome !== 'done'
-        ? {
-            failureReason: `exit=${String(spawnResult.exitCode)} killed=${String(spawnResult.killed)}`,
-          }
+        ? { failureReason: failureWithTail(spawnResult.exitCode, spawnResult.killed, spawnResult.stderr) }
         : {}),
     runsNotWired: false,
     ...(spawnResult.facts !== undefined ? { facts: spawnResult.facts } : {}),
   };
   await settle(runDir, input, result, deps.runs);
   return result;
+}
+
+/** 会话没跑成：退出码和是不是被杀，后面接上脱敏后的报错尾巴。没有尾巴就只留前半句。 */
+function failureWithTail(exitCode: number | null, killed: boolean, stderr: string): string {
+  const base = `exit=${String(exitCode)} killed=${String(killed)}`;
+  const tail = sessionErrorTail(stderr);
+  return tail === '' ? base : `${base}；${tail}`;
 }
 
 /** 切号停下的原因：叫停信号带的那句（real/one-shot-sessions.ts 写的「切号：…」），没带就写停在哪一步。 */

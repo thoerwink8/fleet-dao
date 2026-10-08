@@ -11,6 +11,7 @@ import {
   type FailureEvidence,
   type FailurePolicy,
   type FailureVerdict,
+  isUpstreamBlip,
   RULES,
 } from '../../src/failure/index.ts';
 
@@ -524,6 +525,21 @@ describe('规则的边界', () => {
     expect(classifyFailure(session({ message: 'Resource not accessible by integration' })).rule).not.toBe(
       'GH2',
     );
+  });
+
+  it('上游临时故障标在规则表上：容量满、503、429、连接被重置是 blip；额度用满不是', () => {
+    expect(classifyFailure(session({ message: 'Selected model is at capacity' })).rule).toBe('BZ1');
+    expect(
+      classifyFailure(session({ message: 'gpt-6.1-sol 当前容量已满（503 Service Unavailable）' })).rule,
+    ).toBe('BZ1');
+    expect(classifyFailure(session({ message: '503 Service Unavailable' })).rule).toBe('UP1');
+    expect(classifyFailure(session({ message: '429 Too Many Requests' })).rule).toBe('RL3');
+    expect(classifyFailure(session({ message: '限流' })).rule).toBe('RL3');
+    expect(classifyFailure(session({ message: '连接被重置' })).rule).toBe('NT1');
+    expect(classifyFailure(session({ message: 'connection reset by peer' })).rule).toBe('NT1');
+    expect(classifyFailure(session({ message: 'stream disconnected before completion' })).rule).toBe('SB1');
+    for (const id of ['BZ1', 'RL1', 'RL3', 'UP1', 'NT1', 'SB1']) expect(isUpstreamBlip(id)).toBe(true);
+    expect(isUpstreamBlip('QT1')).toBe(false);
   });
 
   it('原文里带个 /login 的网址不算登录失效：不能因此停掉整个账号池', () => {

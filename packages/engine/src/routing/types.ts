@@ -88,6 +88,11 @@ export interface RouteFacts {
   upstreamModel: string | null;
   upstreamAliases: string[];
   /**
+   * Mirasim 路由记下的执行体（routes.executor）。不给 = 还没盖过，按上游串前缀现判。
+   * 「执行体未知」或前缀对不上：选路硬挡，不派。
+   */
+  executor?: string | null;
+  /**
    * 路由探针最近一次下结论的时刻（routes.probed_at），探针还没看过为空。在线（被挡原因里没有 offline）的一定有：
    * 库里约束 alive 为真时结论必须是 ok，没有就是输入拼错了（validate.ts 抛）。超过 routeProbeStaleMinutes(hostId)
    * 没更新（探针可能停了）照派，派工理由里写明（choose.ts 的 probeNote）。
@@ -227,7 +232,9 @@ export type BlockCode =
   | 'quota-reserve'
   /** 拼车并发登记核对不上：不往拼车池派，对上了自己恢复（#896）。 */
   | 'carpool-registry'
-  | 'org-not-live';
+  | 'org-not-live'
+  /** Mirasim 认不出该起哪个执行体：硬挡，不落到默认执行体。 */
+  | 'executor-unknown';
 
 /**
  * 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点 / org 引擎切号（会话用户挂的不是这个池的组织，引擎打算切过去）/

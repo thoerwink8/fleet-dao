@@ -142,26 +142,59 @@ export const readCursorDashboard: Reader = async (ctx) => {
     });
 
   // 读登录文件里的令牌。读不到、不是 JSON、里面没有 accessToken 都报 no_credentials，原因只写路径和现象，不写令牌内容。
+  const whyOf = (e: unknown): { why: string; enoent: boolean } => {
+    const code = (e as NodeJS.ErrnoException).code;
+    return {
+      why: code ?? (e instanceof SyntaxError ? '不是 JSON' : (e as Error).message),
+      enoent: code === 'ENOENT',
+    };
+  };
+  const noCred = (when: string, why: string, tail = ''): QuotaReadError =>
+    new QuotaReadError(
+      'no_credentials',
+      `没有可用的 Cursor 凭据：${when}Cursor 登录文件（${authFile}）读不到：${why}${tail}。要在这台机器上 cursor-agent login`,
+    );
+  const parseToken = async (): Promise<string> => {
+    const token = (JSON.parse(await ctx.readFile(authFile)) as Record<string, unknown>).accessToken;
+    if (typeof token !== 'string' || !token) throw new Error('里面没有 accessToken');
+    return token;
+  };
   const readToken = async (when: string): Promise<string> => {
     try {
-      const token = (JSON.parse(await ctx.readFile(authFile)) as Record<string, unknown>).accessToken;
-      if (typeof token !== 'string' || !token) throw new Error('里面没有 accessToken');
-      return token;
+      return await parseToken();
     } catch (e) {
-      const why =
-        (e as NodeJS.ErrnoException).code ?? (e instanceof SyntaxError ? '不是 JSON' : (e as Error).message);
-      throw new QuotaReadError(
-        'no_credentials',
-        `没有可用的 Cursor 凭据：${when}Cursor 登录文件（${authFile}）读不到：${why}。要在这台机器上 cursor-agent login`,
-      );
+      throw noCred(when, whyOf(e).why);
     }
   };
   const httpOf = (e: QuotaReadError) => /HTTP (\d+)/.exec(e.message)?.[1] ?? '401/403';
 
-  // 登录令牌几个小时就过期，但 cursor-agent 自己会续：令牌被拒（401/403）时让引擎以会话用户的身份跑一次 `cursor-agent status`
-  // 刷新（ctx.refreshLogin），成功后重读登录文件再调一次；仍被拒才报「登录失效」。一轮最多刷新一次（经 shared 共用）。
-  // 连不上、5xx 这类跟凭据无关的失败原样抛出，不刷新。
-  let usable = await readToken('');
+  // 登录文件会在 cursor-agent 会话起停时被删了重写。读到 ENOENT 时和令牌被拒一样：以会话用户跑一次
+  // `cursor-agent status`（ctx.refreshLogin）把文件写回来，再读一次。一轮最多刷新一次（和下面被拒共用 cursor-login-refresh）。
+  // 文件在但不是令牌、没有刷新手段：照旧 no_credentials，不刷新。刷新命令没跑成也报 no_credentials，不当成已刷新。
+  let usable: string;
+  try {
+    usable = await parseToken();
+  } catch (e) {
+    const { why, enoent } = whyOf(e);
+    const refresh = ctx.refreshLogin;
+    if (!enoent || !refresh) throw noCred('', why);
+    try {
+      await ctx.shared('cursor-login-refresh', () => refresh());
+    } catch (re) {
+      throw new QuotaReadError(
+        'no_credentials',
+        `没有可用的 Cursor 凭据：Cursor 登录文件（${authFile}）读不到：${why}；刷新令牌的命令（cursor-agent status）也没跑成：${redact(errMessage(re))}。要人在这台机器上检查 cursor-agent，必要时 cursor-agent login`,
+      );
+    }
+    try {
+      usable = await parseToken();
+    } catch (e2) {
+      throw noCred('', whyOf(e2).why, '；已刷新一次仍读不到');
+    }
+  }
+
+  // 登录令牌几个小时就过期，但 cursor-agent 自己会续：令牌被拒（401/403）时同样刷新一次，成功后重读再调一次；仍被拒才报「登录失效」。
+  // 连不上、5xx 这类跟凭据无关的失败原样抛出，不刷新。上面 ENOENT 若已刷新过，这里的 shared 不会再跑第二次。
   let period: unknown;
   try {
     period = await call('GetCurrentPeriodUsage', usable);
