@@ -39,28 +39,42 @@
     "sonnet-5.5": [
       { "routeId": "claude-solo:sonnet-5.5:claude-code", "enabled": true },
       { "routeId": "claude-carpool:sonnet-5.5:claude-code", "enabled": true },
-      { "routeId": "mirasim-relay:sonnet-5.5:mirasim", "enabled": false }
+      { "routeId": "mirasim-relay:sonnet-5.5:mirasim", "enabled": false },
+      { "routeId": "cursor:sonnet-5.5:cursor-agent", "enabled": false }
     ],
     "opus-5.5": [
       { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
       { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
-      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false }
+      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
+      { "routeId": "cursor:opus-5.5:cursor-agent", "enabled": false }
     ],
     "gpt-5.6-luna": [
       { "routeId": "cursor:gpt-5.6-luna:cursor-agent", "enabled": true },
       { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false }
     ],
-    "kimi-k3": [{ "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false }],
+    "kimi-k3": [
+      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
+      { "routeId": "cursor:kimi-k3:cursor-agent", "enabled": false }
+    ],
     "deepseek-flash": [{ "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": true }],
     "cursor-auto": [{ "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false }],
-    "grok-4.7": [{ "routeId": "grok:grok-4.7:grok", "enabled": true }],
+    "grok-4.7": [
+      { "routeId": "grok:grok-4.7:grok", "enabled": true },
+      { "routeId": "cursor:grok-4.7:cursor-agent", "enabled": false }
+    ],
     "glm-5.3-flash": [{ "routeId": "mirasim-relay:glm-5.3-flash:mirasim", "enabled": true }],
     "jev-1.13": [{ "routeId": "jev:jev-1.13:api-shell", "enabled": true }],
     "gpt-6-sol": [{ "routeId": "mirasim-relay:gpt-6-sol:mirasim", "enabled": true }],
     "gpt-6-luna": [{ "routeId": "mirasim-relay:gpt-6-luna:mirasim", "enabled": false }],
     "gpt-6-astra": [{ "routeId": "mirasim-relay:gpt-6-astra:mirasim", "enabled": false }],
-    "gpt-5.6-sol": [{ "routeId": "mirasim-relay:gpt-5.6-sol:mirasim", "enabled": false }],
-    "gpt-5.6-terra": [{ "routeId": "mirasim-relay:gpt-5.6-terra:mirasim", "enabled": false }],
+    "gpt-5.6-sol": [
+      { "routeId": "mirasim-relay:gpt-5.6-sol:mirasim", "enabled": false },
+      { "routeId": "cursor:gpt-5.6-sol:cursor-agent", "enabled": false }
+    ],
+    "gpt-5.6-terra": [
+      { "routeId": "mirasim-relay:gpt-5.6-terra:mirasim", "enabled": false },
+      { "routeId": "cursor:gpt-5.6-terra:cursor-agent", "enabled": false }
+    ],
     "glm-5.3": [{ "routeId": "mirasim-relay:glm-5.3:mirasim", "enabled": false }],
     "deepseek-v4-pro": [{ "routeId": "mirasim-relay:deepseek-v4-pro:mirasim", "enabled": false }],
     "haiku-4.5": [
@@ -68,6 +82,26 @@
       { "routeId": "claude-carpool:haiku-4.5:claude-code", "enabled": false }
     ],
     "grok-4.7-fast": [{ "routeId": "grok:grok-4.7-fast:grok", "enabled": false }],
-    "grok-4.6": [{ "routeId": "grok:grok-4.6:grok", "enabled": false }]
+    "grok-4.6": [
+      { "routeId": "grok:grok-4.6:grok", "enabled": false },
+      { "routeId": "cursor:grok-4.6:cursor-agent", "enabled": false }
+    ],
+    "gpt-5.5": [{ "routeId": "cursor:gpt-5.5:cursor-agent", "enabled": false }],
+    "gpt-5.4": [{ "routeId": "cursor:gpt-5.4:cursor-agent", "enabled": false }],
+    "gpt-5.3-codex": [{ "routeId": "cursor:gpt-5.3-codex:cursor-agent", "enabled": false }],
+    "gpt-5.2": [{ "routeId": "cursor:gpt-5.2:cursor-agent", "enabled": false }],
+    "opus-5": [{ "routeId": "cursor:opus-5:cursor-agent", "enabled": false }],
+    "opus-4.8": [{ "routeId": "cursor:opus-4.8:cursor-agent", "enabled": false }],
+    "opus-4.7": [{ "routeId": "cursor:opus-4.7:cursor-agent", "enabled": false }],
+    "sonnet-5": [{ "routeId": "cursor:sonnet-5:cursor-agent", "enabled": false }],
+    "haiku-5.5": [{ "routeId": "cursor:haiku-5.5:cursor-agent", "enabled": false }],
+    "grok-4.5": [{ "routeId": "cursor:grok-4.5:cursor-agent", "enabled": false }],
+    "gemini-3.8-flash": [{ "routeId": "cursor:gemini-3.8-flash:cursor-agent", "enabled": false }],
+    "gemini-3.7-flash": [{ "routeId": "cursor:gemini-3.7-flash:cursor-agent", "enabled": false }],
+    "gemini-3.6-flash": [{ "routeId": "cursor:gemini-3.6-flash:cursor-agent", "enabled": false }],
+    "gemini-3.1-pro": [{ "routeId": "cursor:gemini-3.1-pro:cursor-agent", "enabled": false }],
+    "composer-2.5": [{ "routeId": "cursor:composer-2.5:cursor-agent", "enabled": false }],
+    "muse-spark-1.3": [{ "routeId": "cursor:muse-spark-1.3:cursor-agent", "enabled": false }],
+    "glm-5.2": [{ "routeId": "cursor:glm-5.2:cursor-agent", "enabled": false }]
   }
 }

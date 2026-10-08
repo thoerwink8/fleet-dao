@@ -131,6 +131,8 @@ describe('默认配置 routing.default.json', () => {
       'claude-solo:opus-5.5:claude-code',
       'claude-carpool:opus-5.5:claude-code',
       'mirasim-relay:opus-5.5:mirasim',
+      // 2026-10-08 按 Cursor 订阅清单补的一条，关着、不进用途
+      'cursor:opus-5.5:cursor-agent',
     ]);
   });
 
@@ -205,6 +207,7 @@ describe('默认配置 routing.default.json', () => {
       ['claude-solo:sonnet-5.5:claude-code', true],
       ['claude-carpool:sonnet-5.5:claude-code', true],
       ['mirasim-relay:sonnet-5.5:mirasim', false],
+      ['cursor:sonnet-5.5:cursor-agent', false],
     ]);
     expect(cfg.models['glm-5.3-flash']?.map((r) => [r.routeId, r.enabled])).toEqual([
       ['mirasim-relay:glm-5.3-flash:mirasim', true],
