@@ -48,7 +48,7 @@ export const repos = pgTable(
     testCommand: text('test_command').notNull(),
     /**
      * 自动派活开关（design 第九节「在哪能做与接活开关」）：打开的时刻，空 = 关着。关着只收单、显示；
-     * 打开以前就开着的 issue 不自动派，要引擎做就贴「交给引擎」（design 第九节）。
+     * 开着，引擎自己按依据挑单（开单时间不再比这个时刻，#1336）。
      */
     autoDispatchSince: timestamp('auto_dispatch_since', tz),
   },

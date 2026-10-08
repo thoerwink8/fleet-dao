@@ -20,8 +20,8 @@ export const MOTHER_LABEL = '母单';
 export const LOCAL_LABEL = '本机做';
 
 /**
- * 「交给引擎」（#1321）：老单、别的版本、未排期的单贴上这个，拉单就跳过「开关打开以前开的」和版本这两道
- * （`packages/engine/src/jobs/intake.ts` 的 `screenListed` / `screenPlan`）。其余闸照旧。
+ * 「交给引擎」（#1321）：从 #1336 起不再是开门的钥匙（拉单不再看开单时间和版本，老单、未排期的单本来就进候选），
+ * 只是排序加分：同一规模档里贴了它的靠前（`packages/engine/src/jobs/intake-pick.ts` 的 `comparePick`）。任何一道闸它都绕不过。
  * 和「本机做」一起贴时以「本机做」为准。名字只写在这里，别的地方引这个常量。开单脚本不贴。
  */
 export const ENGINE_LABEL = '交给引擎';
