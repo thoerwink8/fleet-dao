@@ -80,6 +80,12 @@ describe('仓里的额度配置和校验同步', () => {
 });
 
 describe('配置校验：一次列全，不撞到第一个就停', () => {
+  it('Cursor 池认 keyFile，空字符串报出来', () => {
+    const cursor = { poolId: 'c', channelId: 'c', reader: 'cursor-dashboard' };
+    expect(problems({ pools: [{ ...cursor, keyFile: '/home/x/.cursor/fleet-api-key' }] })).toEqual([]);
+    expect(problems({ pools: [{ ...cursor, keyFile: ' ' }] })).toEqual(['pools[0].keyFile 要是非空字符串']);
+  });
+
   it('拼错的键、重复的池、没有的读取器都报出来', () => {
     const got = problems({
       pools: [

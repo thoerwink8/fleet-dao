@@ -37,11 +37,12 @@
       "tokenFile": "/home/fleet-agent-carpool/.mirasim/run/local-4316.token"
     },
     {
-      "_说明": "Cursor 订阅（#1195）。引擎读它的登录文件时以会话用户的身份读（文件在会话用户家里，引擎用户进不去）。读的是 cursor-agent 浏览器登录落下的 auth.json（要有 accessToken）；法国 cursor-agent 用的是 API 密钥文件 ~/.cursor/fleet-api-key，是另一个文件、Dashboard 认不认这把密钥没核实；没有 auth.json 时这个池如实报「读不到」，不当成 0。",
+      "_说明": "Cursor 订阅（#1195）。引擎读它的登录文件时以会话用户的身份读（文件在会话用户家里，引擎用户进不去）。优先用 cursor-agent 的 API 密钥文件 ~/.cursor/fleet-api-key（keyFile，法国无桌面，浏览器登录令牌落不了盘、常失效）当 Bearer，读不到或被拒（401/403）再退回浏览器登录落下的 auth.json 里的 accessToken；两个都不行才报「登录失效」，原因里写明两个来源各是什么结果（不写密钥内容），不当成 0。",
       "poolId": "cursor",
       "channelId": "cursor",
       "name": "Cursor 订阅",
       "reader": "cursor-dashboard",
+      "keyFile": "/home/fleet-agent-carpool/.cursor/fleet-api-key",
       "authFile": "/home/fleet-agent-carpool/.config/cursor/auth.json"
     },
     {

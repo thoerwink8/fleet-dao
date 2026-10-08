@@ -44,7 +44,7 @@ const READER_KEYS: Record<ReaderType, string[]> = {
   'claude-usage': ['command', 'orgKind', 'cwd', 'env'],
   'reclaude-carpool': ['keyFile', 'baseUrl'],
   'mirasim-relay': ['port', 'tokenFile'],
-  'cursor-dashboard': ['authFile', 'baseUrl'],
+  'cursor-dashboard': ['authFile', 'keyFile', 'baseUrl'],
   'grok-billing': ['authFile', 'baseUrl', 'clientVersion'],
   estimate: ['windows', 'usage'],
 };
@@ -155,6 +155,8 @@ function checkPool(p: unknown, i: number, problems: string[]): void {
     case 'cursor-dashboard':
       if (p.authFile !== undefined && !isNonEmptyString(p.authFile))
         problems.push(`${where}.authFile 要是非空字符串`);
+      if (p.keyFile !== undefined && !isNonEmptyString(p.keyFile))
+        problems.push(`${where}.keyFile 要是非空字符串`);
       checkUrl(p.baseUrl, `${where}.baseUrl`, problems);
       break;
     case 'grok-billing':

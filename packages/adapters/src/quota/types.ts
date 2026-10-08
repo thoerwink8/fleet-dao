@@ -150,8 +150,10 @@ export interface MirasimRelayConfig extends PoolConfigBase {
 
 export interface CursorDashboardConfig extends PoolConfigBase {
   reader: 'cursor-dashboard';
-  /** 默认 ~/.config/cursor/auth.json。 */
+  /** 浏览器登录落下的文件，默认 ~/.config/cursor/auth.json；有 keyFile 时只在密钥读不到、被拒（401/403）后才用。 */
   authFile?: string;
+  /** cursor-agent 用的 API 密钥文件（只放一行密钥，如 ~/.cursor/fleet-api-key）。给了就优先用它当 Bearer。 */
+  keyFile?: string;
   baseUrl?: string;
 }
 
