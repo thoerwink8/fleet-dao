@@ -16,11 +16,8 @@ function used(prefix: string): Set<string> {
 }
 
 /** 契约里有、前端（http.ts）没用的：key → 为什么。 */
-const WEB_NOT_USED: Record<string, string> = {
-  // 母单 #1335 第 3 片（#1338）先给接口，第 4 片做设置页仓库一节的「让指挥官整理」按钮时接上，接上就把这两条从清单里删掉
-  groomStatus: '第 4 片的页面接（#1335）',
-  groomNow: '第 4 片的页面接（#1335）',
-};
+/** 契约里有、页面故意不调的。groomStatus / groomNow 已由设置页接上（#1335 第 4 片），不在这里。 */
+const WEB_NOT_USED: Record<string, string> = {};
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch
   feishuLogin: '浏览器整页跳转，不走 fetch',

@@ -21,6 +21,9 @@ import type {
   EnvResponse,
   FrancePreflightResponse,
   FranceReleaseState,
+  GroomNowBody,
+  GroomNowResult,
+  GroomStatus,
   HomeResponse,
   Jobs,
   LiveEvent,
@@ -89,6 +92,13 @@ export interface FleetApi {
   repoDispatch(): Promise<{ repos: RepoDispatch[] }>;
   /** 开、关一个项目的「让 AI 接活」（写操作记录）；本来就是那个状态时 changed=false。没有这个项目 404。 */
   updateRepoDispatch(repoId: string, body: UpdateRepoDispatchBody): Promise<UpdatedRepoDispatch>;
+  /** 这个仓的「指挥官整理待办」：今日剩余、最近几次、有没有一次在排队或在做。没有这个项目 404。 */
+  groomStatus(repoId: string): Promise<GroomStatus>;
+  /**
+   * 叫一次临时指挥官整理待办。原因可空。
+   * 拒的情况都把后端的话抛出来：引擎没开 409、已经有一次在做 409、今天次数用完 429、记录读不到 503。
+   */
+  groomNow(repoId: string, body: GroomNowBody): Promise<GroomNowResult>;
   /** 新主页（/）的一屏三块 + 持续状态条（#589）。 */
   home(): Promise<HomeResponse>;
   /**
@@ -194,6 +204,7 @@ export const keys = {
   credentials: ['credentials'] as const,
   repos: ['repos'] as const,
   repoDispatch: ['repo-dispatch'] as const,
+  groomStatus: (repoId: string) => ['groom-status', repoId] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
   routing: ['routing'] as const,
@@ -255,6 +266,19 @@ export function useRepoDispatch() {
   return useQuery({
     queryKey: keys.repoDispatch,
     queryFn: () => api.repoDispatch(),
+    refetchInterval: 30_000,
+  });
+}
+
+/**
+ * 一个仓的「指挥官整理待办」。现状从操作记录现算，操作记录一变会重拉（见下面 audit_log）；
+ * 推送漏了也每 30 秒自己看一眼，整理中才会变成结果。
+ */
+export function useGroomStatus(repoId: string) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.groomStatus(repoId),
+    queryFn: () => api.groomStatus(repoId),
     refetchInterval: 30_000,
   });
 }
@@ -776,6 +800,21 @@ export function useUpdateRepoDispatch() {
   });
 }
 
+/**
+ * 叫一次整理。锁是全局的：成功或被拒（别人刚占上）都重拉每一个仓的这一块，不拿点击前的次数冒充现在。
+ */
+export function useGroomNow() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoId, body }: { repoId: string; body: GroomNowBody }) => api.groomNow(repoId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['groom-status'] });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
 export function useUpdateSetting() {
   const api = useApi();
   const qc = useQueryClient();
@@ -828,7 +867,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   quota_windows: [['pools'], ['routing-layers'], keys.home],
   channels: [['routing'], ['pools'], ['routing-layers'], keys.home],
   notifications: [['notifications'], keys.home],
-  audit_log: [['audit']],
+  // 整理待办的现状是从操作记录现算的：点了、接手、做完都记在这张表，各仓这一块跟着变
+  audit_log: [['audit'], ['groom-status']],
   // 引擎总开关（设置 engine.master，#1086）的状态在环境快照里，顶栏常驻显示它：设置一变，环境也跟着重拉
   settings: [['settings'], keys.env],
   // 别的环境推来了新快照：顶栏切换器和环境页的列表、选中的那个环境的主页和环境页都重拉。

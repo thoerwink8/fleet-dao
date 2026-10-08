@@ -214,6 +214,55 @@ describe('假后端：路由两层', () => {
   });
 });
 
+describe('假后端：指挥官整理待办', () => {
+  test('orbit 有一次做成、一次没做成，今日剩余 1/3，没有正在做的', async () => {
+    const s = await fresh().groomStatus('r-orbit');
+    expect(s.repo).toBe('acme/orbit');
+    expect(s.quota).toMatchObject({ used: 2, remaining: 1, max: 3 });
+    expect(s.busy).toBe(false);
+    expect(s.recent.map((r) => r.state)).toEqual(['done', 'failed']);
+    expect(s.recent[0]?.result?.opened.map((o) => o.number)).toEqual([1402]);
+    expect(s.recent[1]?.why).toContain('选不到路由');
+  });
+
+  test('别的仓还没整理过，剩余是满的', async () => {
+    const s = await fresh().groomStatus('r-canary');
+    expect(s.recent).toEqual([]);
+    expect(s.quota).toMatchObject({ used: 0, remaining: 3, max: 3 });
+    expect(s.busy).toBe(false);
+  });
+
+  test('总开关关着点整理：409，不记成点过', async () => {
+    const api = fresh();
+    const err = await rejects(api.groomNow('r-orbit', {}));
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('engine_off');
+    expect(err.message).toContain('引擎总开关关着');
+    expect((await api.groomStatus('r-orbit')).busy).toBe(false);
+  });
+
+  test('总开关开着点一下就排队；再点说已经有一次在做', async () => {
+    const api = fresh();
+    const version = (await api.settings()).settings.find((s) => s.key === 'engine.master')?.version ?? 0;
+    await api.updateSetting('engine.master', { value: true, version });
+    const first = await api.groomNow('r-orbit', { reason: '老单堆了' });
+    expect(first.request).toMatchObject({ repo: 'acme/orbit', source: 'http', state: 'queued' });
+    expect(first.remainingAfter).toBe(0);
+    const status = await api.groomStatus('r-orbit');
+    expect(status.busy).toBe(true);
+    expect(status.recent[0]?.requestId).toBe(first.request.requestId);
+    const again = await rejects(api.groomNow('r-canary', {}));
+    expect(again.status).toBe(409);
+    expect(again.code).toBe('groom_busy');
+    expect(again.message).toContain('已经有一次整理在');
+  });
+
+  test('没有这个仓：404', async () => {
+    const err = await rejects(fresh().groomStatus('no-such'));
+    expect(err).toMatchObject({ status: 404, code: 'repo_not_found' });
+  });
+});
+
 describe('假后端：设置', () => {
   test('带版本号保存；版本对不上就 409', async () => {
     const api = fresh();

@@ -27,6 +27,9 @@ import type {
   EnvVersionSchema,
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
+  GroomNowRequest,
+  GroomNowResponse,
+  GroomStatusResponse,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
@@ -113,6 +116,10 @@ export type Repo = z.infer<typeof RepoSchema>;
 export type RepoDispatch = z.infer<typeof RepoDispatchResponse>['repos'][number];
 export type UpdateRepoDispatchBody = z.input<typeof UpdateRepoDispatchRequest>;
 export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
+/** 一个仓的「指挥官整理待办」：今日剩余次数、最近几次、有没有一次在做。 */
+export type GroomStatus = z.infer<typeof GroomStatusResponse>;
+export type GroomNowBody = z.input<typeof GroomNowRequest>;
+export type GroomNowResult = z.infer<typeof GroomNowResponse>;
 
 export type Board = z.infer<typeof BoardResponse>;
 export type BoardTask = z.infer<typeof BoardTaskSchema>;

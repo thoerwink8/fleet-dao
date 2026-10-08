@@ -17,11 +17,19 @@ import {
   FranceReleaseStateSchema,
   flowStages,
   foldRouteProbeRequests,
+  GROOM_ACTION,
+  GROOM_TARGET,
+  GroomNowRequest,
+  GroomNowResponse,
+  type GroomRequestView,
+  GroomStatusResponse,
+  groomQuota,
   HARD_BANS,
   HomeResponseSchema,
   type HostId,
   hardBanFor,
   JobsResponse,
+  judgeGroomRequest,
   MeResponse,
   MovePurposeModelRequest,
   MovePurposeModelResponse,
@@ -124,6 +132,16 @@ const STAGE_WORDS: Record<StageKind, string> = {
   research: '调研',
   judge: '判断',
   groom: '整理待办',
+};
+/** 假数据里一次做成的结果：开 1、补 2、建议关 1、贴要人拍 1，单号给页面链到 GitHub。 */
+const MOCK_GROOM_OK_RESULT = {
+  opened: [{ number: 1402, title: '把整理按钮接到设置页' }],
+  amended: [1338, 1335],
+  groomed: [1338],
+  suggestedClose: [900],
+  flagged: [901],
+  rejected: [],
+  summary: '补了两张老单，开了一张。',
 };
 const ACTION_WORDS = {
   pause: '暂停',
@@ -342,6 +360,44 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
+  /**
+   * 临时指挥官整理待办的记录（新的在前）。orbit 有一次做成、一次没做成，都在 24 小时内接手过，所以今日剩余 1/3。
+   * 没有排队或在做的：按钮能点。点了以后插到最前。
+   */
+  const agoIso = (minutesAgo: number) => new Date(now() - minutesAgo * 60_000).toISOString();
+  let mockGroom: GroomRequestView[] = [
+    {
+      requestId: 'groom-seed-ok',
+      repo: 'acme/orbit',
+      source: 'http',
+      requestedAt: agoIso(90),
+      by: 'u-lan',
+      state: 'done',
+      startedAt: agoIso(89),
+      finishedAt: agoIso(50),
+      result: MOCK_GROOM_OK_RESULT,
+    },
+    {
+      requestId: 'groom-seed-fail',
+      repo: 'acme/orbit',
+      source: 'auto',
+      requestedAt: agoIso(240),
+      by: 'engine:intake',
+      state: 'failed',
+      startedAt: agoIso(239),
+      finishedAt: agoIso(220),
+      why: '选不到路由（用途 groom）：没有能用的路由',
+      result: {
+        opened: [],
+        amended: [],
+        groomed: [],
+        suggestedClose: [],
+        flagged: [],
+        rejected: [],
+        summary: '会话没起来。',
+      },
+    },
+  ];
 
   /** 假数据里的账密（只在这个模拟器里存明文，真后端只存哈希）：没设过就是空的。 */
   const mockCreds: { username?: string; password?: string; changedAt?: string } = {};
@@ -1266,6 +1322,68 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...(since ? { since } : {}),
         changed,
       });
+    },
+    async groomStatus(repoId) {
+      await wait();
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      const slug = `${repo.owner}/${repo.name}`;
+      const at = new Date(now());
+      return GroomStatusResponse.parse({
+        asOf: at.toISOString(),
+        repoId: repo.id,
+        repo: slug,
+        quota: groomQuota(mockGroom, slug, at),
+        busy: mockGroom.some((r) => r.state === 'queued' || r.state === 'running'),
+        recent: mockGroom.filter((r) => r.repo.toLowerCase() === slug.toLowerCase()).slice(0, 5),
+        unreadable: 0,
+      });
+    },
+    async groomNow(repoId, raw) {
+      await wait();
+      const body = GroomNowRequest.parse(raw);
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      const slug = `${repo.owner}/${repo.name}`;
+      const at = new Date(now());
+      const master = mockMaster();
+      const verdict = judgeGroomRequest({
+        repo: slug,
+        source: 'http',
+        now: at,
+        requests: mockGroom,
+        engine: master.on ? { on: true } : { on: false, why: master.detail },
+      });
+      if (!verdict.ok) {
+        const status = verdict.reason === 'daily_cap' ? 429 : 409;
+        const code =
+          verdict.reason === 'engine_off'
+            ? 'engine_off'
+            : verdict.reason === 'busy'
+              ? 'groom_busy'
+              : verdict.reason === 'daily_cap'
+                ? 'groom_daily_cap'
+                : 'groom_too_soon';
+        throw new ApiError(status, code, verdict.why);
+      }
+      const request: GroomRequestView = {
+        requestId: `groom-${++counter}`,
+        repo: slug,
+        source: 'http',
+        requestedAt: at.toISOString(),
+        by: st.me.user.id,
+        state: 'queued',
+      };
+      mockGroom = [request, ...mockGroom];
+      audit({
+        actor: meActor(),
+        action: GROOM_ACTION.request,
+        target: GROOM_TARGET,
+        after: { requestId: request.requestId, repo: slug, source: 'http' },
+        via: 'cockpit',
+        reason: body.reason ?? '驾驶舱上点了「让指挥官整理」',
+      });
+      return GroomNowResponse.parse({ request, remainingAfter: verdict.remainingAfter });
     },
     async home() {
       await wait();

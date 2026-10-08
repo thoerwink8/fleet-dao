@@ -37,6 +37,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(links[2]?.textContent).toContain('验收');
     expect(links[3]?.textContent).toContain('Jev 判断');
     expect(links[4]?.textContent).toContain('整理待办');
+    expect(links[4]?.textContent).toContain('这里配指挥官用的模型');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
     expect(screen.getByText('不是流程里的一段')).toBeTruthy();
     const current = links.filter((a) => a.getAttribute('aria-current') === 'true');

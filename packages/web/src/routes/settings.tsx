@@ -22,6 +22,7 @@ import { LoadError, LoadingRows, Page } from '../components/page';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { useRepo } from '../components/repo-context';
 import { RepoDispatchControl } from '../components/repo-dispatch';
+import { RepoGroomControl } from '../components/repo-groom';
 import { PaletteSwatch } from '../components/shell/palette-swatch';
 import { ModeSwitch } from '../components/shell/topbar';
 import { StatusDot } from '../components/status';
@@ -447,7 +448,7 @@ export default function Settings() {
         id="repos"
         icon={FolderGit2}
         title="仓库"
-        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」关着时引擎只收单、不派活，点开启才开始接活。"
+        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」开着：引擎每 5 分钟自己按准入和排序挑单（老单要指挥官整理过），没单可挑会自动叫指挥官整理。关着：只有本机 fleet-api dispatch-issue 点名派。"
       >
         {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
         <EngineMasterRelation />
@@ -467,21 +468,24 @@ export default function Settings() {
         {reposLoading ? <LoadingRows rows={1} /> : null}
         <ul className="max-w-4xl divide-y rounded-xl border bg-card empty:hidden">
           {repos.map((r) => (
-            <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-              <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
-              <div className="min-w-0 flex-1 basis-40">
-                <div className="num truncate text-sm font-medium">
-                  {r.owner}/{r.name}
+            <li key={r.id} className="grid gap-3 px-4 py-3 sm:grid-cols-2 sm:items-start">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+                <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
+                <div className="min-w-0 flex-1 basis-40">
+                  <div className="num truncate text-sm font-medium">
+                    {r.owner}/{r.name}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    主线 <span className="num">{r.defaultBranch}</span>
+                  </div>
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  主线 <span className="num">{r.defaultBranch}</span>
-                </div>
+                <RepoDispatchControl
+                  repoId={r.id}
+                  name={`${r.owner}/${r.name}`}
+                  row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+                />
               </div>
-              <RepoDispatchControl
-                repoId={r.id}
-                name={`${r.owner}/${r.name}`}
-                row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
-              />
+              <RepoGroomControl repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
             </li>
           ))}
           {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}

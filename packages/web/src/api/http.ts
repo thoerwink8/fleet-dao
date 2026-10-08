@@ -9,6 +9,7 @@ import {
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
+  GroomNowRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
   RouteProbeNowRequest,
@@ -223,6 +224,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     async updateRepoDispatch(repoId, body) {
       return send('PUT', apiUrl(R.updateRepoDispatch.path, { repoId }), R.updateRepoDispatch.response, {
         body: UpdateRepoDispatchRequest.parse(body),
+      });
+    },
+    groomStatus: (repoId) => send('GET', apiUrl(R.groomStatus.path, { repoId }), R.groomStatus.response),
+    async groomNow(repoId, body) {
+      return send('POST', apiUrl(R.groomNow.path, { repoId }), R.groomNow.response, {
+        body: GroomNowRequest.parse(body),
       });
     },
     home: () => send('GET', apiUrl(R.home.path), R.home.response),
