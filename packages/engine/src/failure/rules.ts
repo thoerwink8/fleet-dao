@@ -74,6 +74,11 @@ export interface FailureRule {
   humanFix?: string;
   /** 停下后人点「继续」时续同一个会话（同一条路由）：修的是这台机器或这个池，不是任务本身。 */
   resumeAfterPark?: true;
+  /**
+   * 上游临时故障：验收撞上就等一会儿再验，不停下报人。整条规则打标，这条规则认得出的其余说法
+   * （500、连不上、按分钟限流）验收也等。不在验收里另写关键词。
+   */
+  blip?: true;
 }
 
 /** 按分钟限流的原文（RL1）；拼车被拒分流（jobs/carpool-outage.ts）也按它认「不是额度用满」。 */
@@ -215,6 +220,7 @@ export const RULES: readonly FailureRule[] = [
     text: RL1_TEXT,
     maxRetries: 1,
     defaultWaitSeconds: 60,
+    blip: true,
     routeOutcome: 'fail',
   },
   // 时间窗额度用满（5 小时、周、月）。design 第一节「会话断了接着干」（2026-09-25 拍）：挂起到清零时刻，续上同一个会话，
@@ -692,6 +698,7 @@ export const RULES: readonly FailureRule[] = [
     text: /overloaded|容量已满|at capacity|high demand|繁忙|满载/i,
     statuses: [529],
     defaultWaitSeconds: 60,
+    blip: true,
     routeOutcome: 'fail',
   },
   // 没写处方的限流：上游给了时间就等那么久，没给按默认起翻倍，次数用完停下报警。
@@ -703,6 +710,7 @@ export const RULES: readonly FailureRule[] = [
     text: /rate[ _-]?limit|too many requests|temporarily limiting requests|限流/i,
     statuses: [429],
     defaultWaitSeconds: 60,
+    blip: true,
     routeOutcome: 'fail',
   },
   // 长流半路被掐：续跑同一个会话；不进路由失败率的分母（旧系统据此把一条当天真干出活的路线判死，#1386）。
@@ -725,6 +733,7 @@ export const RULES: readonly FailureRule[] = [
     text: /internal error|internal server error|server error|bad gateway|service unavailable|gateway timeout/i,
     statuses: [500, 502, 503, 504],
     weakCodes: ['transient'],
+    blip: true,
     routeOutcome: 'fail',
   },
   {
@@ -745,7 +754,8 @@ export const RULES: readonly FailureRule[] = [
       'cloud_unreachable',
       'network',
     ],
-    text: /\bE(?:CONNRESET|CONNREFUSED|CONNABORTED|TIMEDOUT|PIPE|AI_AGAIN|NOTFOUND|HOSTUNREACH|NETUNREACH)\b|socket hang up|fetch failed|connection (?:error|reset|refused|closed)|network error|tcp connect error|deadline has elapsed|error sending request|Reconnecting\.\.\.|waiting for network|Failed to reach|连不上|域名解析|建立连接失败/i,
+    text: /\bE(?:CONNRESET|CONNREFUSED|CONNABORTED|TIMEDOUT|PIPE|AI_AGAIN|NOTFOUND|HOSTUNREACH|NETUNREACH)\b|socket hang up|fetch failed|connection (?:error|reset|refused|closed)|network error|tcp connect error|deadline has elapsed|error sending request|Reconnecting\.\.\.|waiting for network|Failed to reach|连不上|域名解析|建立连接失败|连接被重置/i,
+    blip: true,
     routeOutcome: 'fail',
   },
   {
@@ -807,4 +817,9 @@ export function matchRule(scan: Scan, all: readonly FailureRule[] = RULES): Rule
     if (weak) return { rule, via: 'generic', hit: weak };
   }
   return undefined;
+}
+
+/** 这条规则是不是上游临时故障（验收撞上就等一会儿再验）。认不出、没这条规则，都不是。 */
+export function isUpstreamBlip(ruleId: string): boolean {
+  return RULES.some((rule) => rule.id === ruleId && rule.blip === true);
 }
