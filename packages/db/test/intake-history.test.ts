@@ -58,6 +58,22 @@ describe('一小时内起了几条', () => {
     await addTask(t.db, repo.id, { createdAt: ago(MIN) });
     expect(await tasksCreatedSince(t.db, ago(HOUR))).toBe(2);
   });
+
+  it('巡检仓里标题是巡检单的任务行不计入；别的仓同标题、巡检仓里的普通单都算', async () => {
+    const canary = await addRepo(t.db, 'fleet-dao-canary');
+    const other = await addRepo(t.db, 'demo');
+    const title = '巡检第 4 轮：往巡检记录追加一行';
+    await addTask(t.db, canary.id, { createdAt: ago(MIN), title });
+    await addTask(t.db, canary.id, { createdAt: ago(MIN), title: '普通单' });
+    await addTask(t.db, other.id, { createdAt: ago(MIN), title });
+    const exclude = {
+      owner: 'ACME',
+      name: 'fleet-dao-canary',
+      titlePosix: '^巡检第 [0-9]+ 轮：往巡检记录追加一行$',
+    };
+    expect(await tasksCreatedSince(t.db, ago(HOUR), exclude)).toBe(2);
+    expect(await tasksCreatedSince(t.db, ago(HOUR))).toBe(3);
+  });
 });
 
 describe('最近结束的任务', () => {

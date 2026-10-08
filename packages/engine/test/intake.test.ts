@@ -5,6 +5,7 @@
 import type { ScheduleResult } from '@fleet-dao/db';
 import { githubWhitelist } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
+import { canaryIssue } from '../src/jobs/canary.ts';
 import {
   INTAKE_JOB,
   type IntakeDeps,
@@ -1228,6 +1229,154 @@ describe('每小时限速', () => {
     const h = harness({}, { issues: many(2), hourStarted: MAX_STARTS_PER_HOUR });
     await runIntakeJob(h.deps);
     expect(h.planReads).toEqual([]);
+  });
+});
+
+describe('巡检单不占每小时名额，并排在所有候选最前', () => {
+  const CANARY_SLUG = 'acme/fleet-dao-canary';
+  const CANARY_REPO: IntakeRepo = { ...REPO, id: 'canary', name: 'fleet-dao-canary' };
+  const V_CANARY = { number: 8, title: 'v1 巡检' };
+  const FAST = bodyWith(['`packages/web/src/a.ts`']);
+
+  /** 巡检仓里 canary 开的那张：标题和正文用 canaryIssue，不另造标签。 */
+  const canaryTicket = (number = 70): IntakeIssue => {
+    const made = canaryIssue(number, NOW);
+    return issue({
+      number,
+      title: made.title,
+      body: made.body,
+      createdAt: '2026-10-02T12:00:00.000Z',
+      milestone: V_CANARY,
+    });
+  };
+
+  /**
+   * 普通仓在前、巡检仓在后（和 listIntakeRepos 按名字排时 fleet-dao 先于 fleet-dao-canary 一样）。
+   * 里程碑默认不写先后标记。
+   */
+  function across(
+    rows: { repo: IntakeRepo; issues: IntakeIssue[]; description?: string }[],
+    data: { hourStarted?: number } = {},
+  ): Harness {
+    return harness(
+      {
+        canaryRepo: CANARY_SLUG,
+        async repos() {
+          return rows.map((r) => r.repo);
+        },
+        async openIssues(repo) {
+          const found = rows.find((r) => r.repo.id === repo.id);
+          const milestone =
+            repo.id === CANARY_REPO.id
+              ? {
+                  ...V_CANARY,
+                  ...(found?.description === undefined ? {} : { description: found.description }),
+                }
+              : { ...V1, ...(found?.description === undefined ? {} : { description: found.description }) };
+          return { issues: found?.issues ?? [], openMilestones: [milestone, V2] };
+        },
+      },
+      {
+        issues: [],
+        ...(data.hourStarted === undefined ? {} : { hourStarted: data.hourStarted }),
+      },
+    );
+  }
+
+  it('同一轮里积压的老单已把 3 个名额用满时，巡检单仍被拉起，而且排在所有候选最前', async () => {
+    const olds = [1, 2, 3].map((n) => issue({ number: n, body: FAST }));
+    const h = across([
+      { repo: REPO, issues: olds },
+      { repo: CANARY_REPO, issues: [canaryTicket()] },
+    ]);
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([70, 1, 2, 3]);
+  });
+
+  it('巡检单不占名额：它起了之后，普通单仍能起够 3 条；第 4 张普通单仍被限速', async () => {
+    const regulars = [1, 2, 3, 4].map((n) =>
+      issue({ number: n, body: FAST, createdAt: '2026-10-01T00:00:00.000Z', milestone: V_CANARY }),
+    );
+    const h = across([{ repo: CANARY_REPO, issues: [...regulars, canaryTicket()] }]);
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([70, 1, 2, 3]);
+    expect(h.logs.some((l) => l.text.includes('hourly_cap×1'))).toBe(true);
+  });
+
+  it('巡检仓的里程碑没有先后标记时不打警告；别的仓缺仍打', async () => {
+    const h = across([
+      { repo: REPO, issues: [issue({ number: 1, body: FAST })] },
+      { repo: CANARY_REPO, issues: [canaryTicket()] },
+    ]);
+    await runIntakeJob(h.deps);
+    const warns = h.logs.filter((l) => l.text.includes('先后认不出')).map((l) => l.text);
+    expect(warns.some((t) => t.includes('acme/demo'))).toBe(true);
+    expect(warns.some((t) => t.includes('fleet-dao-canary'))).toBe(false);
+  });
+
+  it('巡检仓的先后写乱了仍打警告：只免「没有先后标记」', async () => {
+    const h = across([
+      {
+        repo: CANARY_REPO,
+        issues: [canaryTicket()],
+        description: '<!-- fleet:order -->\n2. #5\n<!-- /fleet:order -->',
+      },
+    ]);
+    await runIntakeJob(h.deps);
+    expect(h.logs.some((l) => l.text.includes('fleet-dao-canary') && l.text.includes('先后认不出'))).toBe(
+      true,
+    );
+  });
+
+  it('不在巡检仓、或标题不是巡检单的，不豁免每小时限速', async () => {
+    const titled = canaryTicket(70);
+    titled.milestone = V1;
+    const h = across([{ repo: REPO, issues: [issue({ number: 1, body: FAST }), titled] }], {
+      hourStarted: MAX_STARTS_PER_HOUR,
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+
+    const plain = across(
+      [{ repo: CANARY_REPO, issues: [issue({ number: 2, body: FAST, milestone: V_CANARY })] }],
+      { hourStarted: MAX_STARTS_PER_HOUR },
+    );
+    await runIntakeJob(plain.deps);
+    expect(plain.started).toEqual([]);
+    expect(plain.logs.some((l) => l.text.includes('hourly_cap×1'))).toBe(true);
+  });
+
+  it('其余闸照旧：作者不在白名单、交代不全的巡检单不拉', async () => {
+    const stranger = canaryTicket(71);
+    stranger.author = { login: 'stranger', id: 99, type: 'User' };
+    const incomplete = canaryTicket(72);
+    incomplete.body = '没有四节';
+    const h = across([{ repo: CANARY_REPO, issues: [stranger, incomplete] }]);
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.logs.some((l) => l.text.includes('untrusted_author×1'))).toBe(true);
+    expect(h.logs.some((l) => l.text.includes('brief_incomplete×1'))).toBe(true);
+  });
+
+  it('【故意造出的失败】普通单仍受限速。把巡检单的每小时豁免去掉，名额用满时限速挤掉巡检单，这条必须红', async () => {
+    // 滚动一小时已经起满 3 条。豁免在：只起巡检单，两张普通单记 hourly_cap。
+    // 豁免被去掉：巡检单和普通单一律被 hourly_cap 挤掉，started 里没有 70，这条红。
+    const h = across(
+      [
+        {
+          repo: CANARY_REPO,
+          issues: [
+            issue({ number: 1, body: FAST, milestone: V_CANARY }),
+            canaryTicket(),
+            issue({ number: 2, body: FAST, milestone: V_CANARY }),
+          ],
+        },
+      ],
+      { hourStarted: MAX_STARTS_PER_HOUR },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([70]);
+    expect(h.logs.some((l) => l.text.includes('hourly_cap×2'))).toBe(true);
   });
 });
 
