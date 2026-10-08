@@ -9,9 +9,10 @@
 // 立刻跑一轮、等结论、打印每步用时：pnpm drill（../drill.ts，同一个定时任务、同一份代码）。
 // 改这里之前必须知道：
 // - 收单靠引擎自己拉（jobs/intake.ts，每 5 分钟一轮）：巡检单要过拉单的每一道关——开单的「引擎」机器人在白名单里、
-//   交代齐（场景、原话、已知的模块、怎么算做完，runner/task-brief.ts）、规模不是最重档，还要有空位（每小时限速、熔断没停拉）。
-//   canaryIssue 的正文由测试拿
-//   真的 buildTaskBrief 核过，改正文要让那条测试照样过；「怎么算做完」下面只放验收条，别的话会被当成一条。
+//   交代齐（场景、原话、已知的模块、怎么算做完，runner/task-brief.ts）、规模不是最重档，熔断没停拉、本轮和在跑还有空位。
+//   每小时那 3 个名额不算它、它也不占（#1364：名额满了把巡检单挤掉，巡检会把通的链报成断）。认法是标题（isCanaryIssueTitle），
+//   不另贴标签。canaryIssue 的正文由测试拿真的 buildTaskBrief 核过，改正文要让那条测试照样过；「怎么算做完」下面只放验收条，
+//   别的话会被当成一条。
 // - 任务工作流走到哪只有 Temporal 一份（taskStatus 查询）；库里的任务行只在开工、停下等人、做完、放弃时写，工作流不在跑了才拿它兜。
 // - 判走到哪一步只在 canaryNext（纯函数），读东西只在 observe。
 
@@ -310,7 +311,7 @@ function intakeWords(last: CanaryDbFacts['lastIntake']): string {
   const when = `最近一轮拉单 ${stamp(last.startedAt)} 开始`;
   if (last.outcome === null) return `${when}，还没跑完`;
   if (last.outcome === 'ok') {
-    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、交代不全、每小时限速、熔断停拉……）`;
+    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、交代不全、熔断停拉、在跑满了……；巡检单不占每小时名额）`;
   }
   return `${when}，记的是 ${last.outcome}${last.why ? `：${last.why}` : ''}`;
 }
@@ -429,6 +430,22 @@ export function canaryNext(state: CanaryState, obs: CanaryObservation): CanaryDe
 
 // —— 巡检单本身 ——
 
+/** 巡检单标题。开单（canary-start 起的那一轮）写这一句，拉单也只认这一句，不另贴标签。 */
+export function canaryIssueTitle(round: number): string {
+  return `巡检第 ${round} 轮：往巡检记录追加一行`;
+}
+
+/**
+ * 这张是不是巡检开的单：标题和 canaryIssueTitle 同一句（轮次就是开单去重键 canary:<轮次> 里的那个数）。
+ * 不看标签。正文末尾 openIssue 另附的 <!-- fleet:issue:… --> 是哈希，标题对得上就够认。
+ */
+export function isCanaryIssueTitle(title: string): boolean {
+  return /^巡检第 \d+ 轮：往巡检记录追加一行$/.test(title.trim());
+}
+
+/** 和 isCanaryIssueTitle 同一句，给库里数「一小时起了几条」用（Postgres ~）。 */
+export const CANARY_ISSUE_TITLE_POSIX = '^巡检第 [0-9]+ 轮：往巡检记录追加一行$';
+
 /**
  * 巡检单的标题和正文：正文写全需求——拉单要的三栏（场景、原话、已知的模块）、要什么，最后是写了字的「## 怎么算做完」；
  * 不写「文档：」那一行（#654 起所有新单都是这样，需求就在单子正文里）。开单时还不知道单号，要追加的那一行用这一轮的编号和
@@ -437,7 +454,7 @@ export function canaryNext(state: CanaryState, obs: CanaryObservation): CanaryDe
 export function canaryIssue(round: number, openedAt: Date): { title: string; body: string } {
   const line = canaryLogLine(round, openedAt);
   return {
-    title: `巡检第 ${round} 轮：往巡检记录追加一行`,
+    title: canaryIssueTitle(round),
     body: [
       '## 场景',
       '',

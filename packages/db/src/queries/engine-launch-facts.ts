@@ -53,6 +53,8 @@ export interface RouteLaunchFacts {
   modelId: string;
   hostId: HostId;
   upstreamModel: string | null;
+  /** Mirasim 记下的执行体（routes.executor）。空 = 起会话时按前缀现判。 */
+  executor?: string | null;
   runAsUser: RunAsUser | null;
   orgKind: OrgKind | null;
   /**
@@ -82,6 +84,7 @@ export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLa
     modelId: row.route.modelId,
     hostId: row.route.hostId,
     upstreamModel: row.route.upstreamModel,
+    executor: row.route.executor,
     runAsUser: row.pool.runAsUser,
     orgKind: row.pool.orgKind,
     effort: row.effort,

@@ -38,26 +38,32 @@ export async function modelsFromMirasimWire(
     }
     if (agents.length === 0) return fail('bad_response', 'state.agentsAvailable 是空的，列不到模型');
     const ids: string[] = [];
+    const executors: { modelKey: string; executor: string }[] = [];
     for (const agent of agents) {
       if (Date.now() >= deadline) return fail('timeout', '读模型名册超过总时限，不拿读到一半的名单');
       const agentDeadline = Math.min(deadline, Date.now() + perAgent);
       wire.send({ type: 'getModelRoster', agent });
+      // 协议上执行体在帧的 agent（docs/reference/quota.md）。旧服务没带这个字段时也收下，免得干等超时。
+      // 带了就必须是刚才问的那个执行体。
       const frame = await waitFor(
         wire,
-        (item) => item.type === 'modelRoster' && item.agent === agent,
+        (item) =>
+          item.type === 'modelRoster' && (item.agent === agent || item.agent == null || item.agent === ''),
         agentDeadline,
       );
       if (frame.kind === 'timeout')
         return fail('timeout', `执行体 ${agent} 的模型名册超时，不拿读到一半的名单`);
       if (frame.kind === 'closed') return fail('unreachable', `读 ${agent} 的名册时连接断了`);
       if (frame.kind === 'error') return fail('upstream', `${agent}：${redact(frame.message)}`);
-      const parsed = idsFromRoster(agent, frame.frame.entries);
+      const frameAgent = typeof frame.frame.agent === 'string' ? frame.frame.agent : '';
+      const parsed = idsFromRoster(agent, frameAgent, frame.frame.entries);
       if (!parsed.ok) return parsed;
       ids.push(...parsed.models);
+      if (parsed.executors) executors.push(...parsed.executors);
     }
     const models = uniqueModels(ids);
     if (models.length === 0) return fail('bad_response', '每个执行体的名册都是空的，不当成一个模型都没有');
-    return { ok: true, models };
+    return { ok: true, models, executors };
   } catch (err) {
     return connectFailure(err);
   } finally {
@@ -65,18 +71,27 @@ export async function modelsFromMirasimWire(
   }
 }
 
-function idsFromRoster(agent: string, entries: unknown): RosterParse {
+function idsFromRoster(agent: string, frameAgent: string, entries: unknown): RosterParse {
   if (!Array.isArray(entries)) return fail('bad_response', `${agent} 的 modelRoster 没有 entries 数组`);
   const models: string[] = [];
+  const executors: { modelKey: string; executor: string }[] = [];
   for (const entry of entries) {
     if (!isRecord(entry) || typeof entry.id !== 'string') continue;
     const id = entry.id.trim();
-    if (id) models.push(id);
+    if (!id) continue;
+    models.push(id);
+    // 文档里的条目没有执行体字段。服务端若在条目上给了，以条目为准，否则用帧上的 agent。
+    const own =
+      (typeof entry.executor === 'string' && entry.executor.trim()) ||
+      (typeof entry.agent === 'string' && entry.agent.trim()) ||
+      '';
+    const executor = own || frameAgent.trim();
+    if (executor) executors.push({ modelKey: id, executor });
   }
   if (entries.length > 0 && models.length === 0) {
     return fail('bad_response', `${agent} 的名册有条目但没有模型 id`);
   }
-  return { ok: true, models };
+  return { ok: true, models, executors };
 }
 
 async function connectWithin(connect: () => Promise<MirasimWire>, deadline: number): Promise<MirasimWire> {

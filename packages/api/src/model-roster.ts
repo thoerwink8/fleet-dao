@@ -1,15 +1,30 @@
 // 驾驶舱路由页上的渠道模型差集（#1302）。只读库里已经记下的名册，不在请求里现连渠道。
 // 没接上由接口写 modelRosterUnavailable，不拿空差集冒充「都对得上」。
-import { channelModelDiff, type Db } from '@fleet-dao/db';
+// 没有名册命令的渠道（#1357）在这里登记、撤销：写入和操作记录是同一笔事务。
+import {
+  channelModelDiff,
+  type Db,
+  type ManualModelInput,
+  type ManualModelView,
+  registerManualModel,
+  revokeManualModel,
+} from '@fleet-dao/db';
 import type { ModelRosterDiffSchema } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
 export interface ModelRosterPort {
   read(): Promise<z.input<typeof ModelRosterDiffSchema>>;
+  /** 没接上时接口 503。老的测试只实现 read。 */
+  register?(input: ManualModelInput): Promise<ManualModelView>;
+  revoke?(input: ManualModelInput): Promise<ManualModelView>;
 }
 
 export function pgModelRoster(db: Db): ModelRosterPort {
-  return { read: () => channelModelDiff(db) };
+  return {
+    read: () => channelModelDiff(db),
+    register: (input) => registerManualModel(db, input),
+    revoke: (input) => revokeManualModel(db, input),
+  };
 }
 
 /** 开发环境、内存版没装这个口子。 */

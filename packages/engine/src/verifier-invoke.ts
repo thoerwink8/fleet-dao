@@ -22,13 +22,17 @@
 // - fetchSpec 抛错 → problems: ['读不到单子：…']、pass: false
 // - chooseModelForFamily 对每个可用家族都返回 undefined → problems: ['没讨论成：…']、pass: false
 // - one-shot outcome != 'done' 或结论行不是固定写法 → problems: ['冷调用没跑成：…']、pass: false
+// - 会话失败且失败分流认成上游临时故障（规则表上标了 blip）→ problems 空、upstreamRetry，调用方等一会儿再验
+// - 会话失败但认不出原因 → 换验收用途里下一条家族不同于作者的路由再验；都不行才在 problems 里列出每条路由和报错尾巴
 // - 结论写 fail 却没有一条属于三种能挡的问题 → 同样是「冷调用没跑成」（要人看，不当成过，也不让写代码的会话白改）
 // - 结论写 pass 但问题清单里还有算挡的 → pass: false（自相矛盾的结论不放行）
 
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
+import { classifyFailure, isUpstreamBlip } from './failure/index.ts';
+import { segmentEvidence } from './runner/evidence.ts';
 import type { OneShotDeps, OneShotInput, OneShotResult } from './runner/one-shot.ts';
-import { ONE_SHOT_OUTCOMES, runOneShot } from './runner/one-shot.ts';
+import { ONE_SHOT_OUTCOMES, runOneShot, sessionErrorTail } from './runner/one-shot.ts';
 import type { SegmentVerdict } from './runner/verdict.ts';
 import { judgeVerify } from './runner/verdict.ts';
 
@@ -86,6 +90,16 @@ export const VerifierInvokeOutputSchema = z.object({
       family: ModelFamilySchema,
       modelId: z.string(),
       routeId: z.string().optional(),
+    })
+    .optional(),
+  /**
+   * 上游临时故障（失败分流规则表上标了 blip 的）：等一会儿再验，不算没验成。
+   * 秒数是分流给的等待；调用方照它睡，不停下报人。
+   */
+  upstreamRetry: z
+    .object({
+      reason: z.string().min(1),
+      afterSeconds: z.number().positive(),
     })
     .optional(),
 });
@@ -257,6 +271,51 @@ function failureFacts(result: OneShotResult): string {
     .slice(0, 600);
 }
 
+function routeLabel(picked: PickedVerifier): string {
+  return picked.routeId ?? `${picked.family}/${picked.modelId}`;
+}
+
+function coldCallFailed(verdict: SegmentVerdict, result: OneShotResult): string {
+  const facts = failureFacts(result);
+  return `冷调用没跑成：${verdict.reason}${facts ? `；${facts}` : ''}`;
+}
+
+/** 认不出时写进停下说明的报错尾巴。脱敏、截末尾；什么都没有就写明。 */
+function listedTail(text: string): string {
+  const tail = sessionErrorTail(text);
+  return tail === '' ? '（没有报错尾巴）' : tail;
+}
+
+type SessionClass =
+  | { kind: 'blip'; reason: string; afterSeconds: number }
+  | { kind: 'unknown'; tail: string }
+  | { kind: 'known' };
+
+/** 会话失败交给失败分流：上游临时故障等一会儿，认不出换路由，其余照旧停下。关键词只在规则表里。 */
+function classOfFailed(result: OneShotResult): SessionClass {
+  const evidence = segmentEvidence(result);
+  const classified = classifyFailure({
+    source: 'session:verify',
+    routeBound: true,
+    retryable: null,
+    ...(evidence.code === undefined ? {} : { code: evidence.code }),
+    ...(evidence.message === undefined ? {} : { message: evidence.message }),
+    ...(evidence.exitCode === undefined ? {} : { exitCode: evidence.exitCode }),
+    ...(evidence.httpStatus === undefined ? {} : { httpStatus: evidence.httpStatus }),
+    ...(evidence.resetsAt === undefined ? {} : { resetsAt: evidence.resetsAt }),
+  });
+  if (isUpstreamBlip(classified.rule) && classified.action === 'retry') {
+    const delay = classified.delaySeconds;
+    return {
+      kind: 'blip',
+      reason: classified.reason,
+      afterSeconds: Number.isFinite(delay) && delay > 0 ? Math.max(1, Math.round(delay)) : 1,
+    };
+  }
+  if (classified.rule === 'FB') return { kind: 'unknown', tail: listedTail(evidence.message ?? '') };
+  return { kind: 'known' };
+}
+
 /**
  * 跑 #555-1 一轮冷调用。
  *
@@ -320,139 +379,170 @@ export async function invokeVerifier(
     };
   }
 
-  // 3. 按 0006 顺序挑家族，跳过写过这张单的所有族；挑不出 → 明确失败（不许拿默认模型顶）。
+  // 3. 按 0006 顺序挑家族，跳过写过这张单的所有族。认不出原因的会话失败先换下一条路由再验
+  // （同一族再问时避开刚试过的；选路不认避开时，同一条路由只试一次，免得死循环）。上游临时故障等一会儿再验，不换家。
+  // 认得出的别的失败马上停下。一家都挑不出 → 没讨论成（不许拿默认模型顶）。
   const avoid = new Set<string>(parsed.modelFamiliesAvoid);
-  let picked: PickedVerifier | undefined;
-  let runId: string | undefined;
-  let reservationId: string | undefined;
+  const seenRoutes = new Set<string>();
+  const misses: { route: string; tail: string }[] = [];
+  let lastSession: VerifierInvokeOutput['session'];
+  const prompt = renderPrompt(parsed, diff, spec.specDir);
+
   for (const family of FAMILY_ORDER) {
     if (avoid.has(family)) continue;
-    const m = await deps.chooseModelForFamily(family);
-    if (m !== undefined) {
-      picked = {
+    while (true) {
+      const m = await deps.chooseModelForFamily(family);
+      if (m === undefined) break;
+      const picked: PickedVerifier = {
         family,
         modelId: m.modelId,
         ...(m.channel !== undefined ? { channel: m.channel } : {}),
         ...(m.routeId !== undefined ? { routeId: m.routeId } : {}),
       };
-      runId = m.runId;
-      reservationId = m.reservationId;
-      break;
+      const label = routeLabel(picked);
+      if (seenRoutes.has(label)) break;
+      seenRoutes.add(label);
+
+      const prepared = deps.prepareCwd ? await deps.prepareCwd(picked) : undefined;
+      const oneShotInput: OneShotInput = {
+        ...(m.runId !== undefined ? { runId: m.runId } : {}),
+        ...(m.reservationId !== undefined ? { reservationId: m.reservationId } : {}),
+        segment: 'verify',
+        modelId: picked.modelId,
+        ...(picked.channel !== undefined ? { channel: picked.channel } : {}),
+        ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
+        // 记到这张单名下（#216）：验收是冷调用、不分档，不带派工档
+        taskId: parsed.taskId,
+        issueNumber: parsed.issueNumber,
+        ...(parsed.workflowId !== undefined ? { workflowId: parsed.workflowId } : {}),
+        prNumber: parsed.prNumber,
+        branch: parsed.branch,
+        prompt,
+        cwd: prepared ? prepared.cwd : deps.cwd,
+        ...(deps.timeoutMinutes !== undefined ? { timeoutMinutes: deps.timeoutMinutes } : {}),
+      };
+      let oneShotResult: OneShotResult;
+      try {
+        oneShotResult = await runOneShot(oneShotInput, deps.oneShot);
+      } finally {
+        // 备的目录会话收场后就还回去（成败都还）；还不掉不改结论，备目录的那一侧自己记日志
+        await prepared?.release().catch(() => undefined);
+      }
+      const session = {
+        runId: oneShotResult.runId,
+        outcome: oneShotResult.outcome,
+        family: picked.family,
+        modelId: picked.modelId,
+        ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
+      };
+      lastSession = session;
+      const who = `家族 ${picked.family}（model ${picked.modelId}）`;
+
+      // verdict 行 = stdout 最后一行非空（judgeVerify 按这一行判 pass / fail）。
+      const lastLineOfStdout =
+        oneShotResult.stdout
+          .trim()
+          .split('\n')
+          .filter((l) => l.trim() !== '')
+          .at(-1) ?? '';
+      const verdict: SegmentVerdict = judgeVerify(oneShotResult, { verdictLine: lastLineOfStdout });
+
+      if (verdict.kind !== 'ok') {
+        // 只有「跑了、退出失败」才看分流。超时、被杀、切号、内存放不下保持原来的停下或等待，不换路由。
+        if (oneShotResult.outcome === 'failed') {
+          const klass = classOfFailed(oneShotResult);
+          if (klass.kind === 'blip') {
+            return {
+              pass: false,
+              problems: [],
+              notes: who,
+              round: parsed.round,
+              session,
+              upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
+            };
+          }
+          if (klass.kind === 'unknown') {
+            misses.push({ route: label, tail: klass.tail });
+            continue;
+          }
+        }
+        return {
+          pass: false,
+          problems: [coldCallFailed(verdict, oneShotResult)],
+          notes: who,
+          round: parsed.round,
+          session,
+        };
+      }
+
+      const stdoutPieces = parseStdout(oneShotResult.stdout);
+      const word = readVerdict(stdoutPieces.verdictLine);
+      if (word === null) {
+        return {
+          pass: false,
+          problems: [
+            `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
+          ],
+          notes: who,
+          round: parsed.round,
+          session,
+        };
+      }
+      const notes: string[] = [who];
+      if (stdoutPieces.droppedStyleNotes > 0) {
+        notes.push(
+          `模型另外提了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已丢`,
+        );
+      }
+      if (word === 'fail' && stdoutPieces.problems.length === 0) {
+        // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——要人看
+        return {
+          pass: false,
+          problems: [
+            `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
+              stdoutPieces.droppedStyleNotes > 0
+                ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
+                : '它一条都没写'
+            }）`,
+          ],
+          notes: notes.join('；'),
+          round: parsed.round,
+          session,
+        };
+      }
+      if (word === 'pass' && stdoutPieces.problems.length > 0) {
+        notes.push(
+          `模型写了 verdict: pass，但问题清单里还有 ${stdoutPieces.problems.length} 条算挡的：自相矛盾，按没过处理`,
+        );
+      }
+      return {
+        pass: word === 'pass' && stdoutPieces.problems.length === 0,
+        problems: stdoutPieces.problems,
+        notes: notes.join('；'),
+        round: parsed.round,
+        session,
+      };
     }
   }
-  if (picked === undefined) {
-    const tried = FAMILY_ORDER.filter((f) => !avoid.has(f)).join('、');
+
+  if (misses.length > 0) {
+    const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
     return {
       pass: false,
-      problems: [
-        `没讨论成：避开的族 ${[...avoid].join('、')}，${tried ? `剩下的 ${tried}` : '一个能换的族都不剩'} 全挑不出可用模型`,
-      ],
-      notes: '0006：所有不同家族都不可用 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
+      problems: [`冷调用没跑成：认不出原因，试过的路由都没验成：${listed}`],
+      notes: '认不出原因，验收用途里还能派的路由都试过了',
       round: parsed.round,
+      ...(lastSession === undefined ? {} : { session: lastSession }),
     };
   }
 
-  // 4. 起一次 one-shot（renders prompt、跑、判结论）。
-  const prompt = renderPrompt(parsed, diff, spec.specDir);
-  const prepared = deps.prepareCwd ? await deps.prepareCwd(picked) : undefined;
-  const oneShotInput: OneShotInput = {
-    ...(runId !== undefined ? { runId } : {}),
-    ...(reservationId !== undefined ? { reservationId } : {}),
-    segment: 'verify',
-    modelId: picked.modelId,
-    ...(picked.channel !== undefined ? { channel: picked.channel } : {}),
-    ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
-    // 记到这张单名下（#216）：验收是冷调用、不分档，不带派工档
-    taskId: parsed.taskId,
-    issueNumber: parsed.issueNumber,
-    ...(parsed.workflowId !== undefined ? { workflowId: parsed.workflowId } : {}),
-    prNumber: parsed.prNumber,
-    branch: parsed.branch,
-    prompt,
-    cwd: prepared ? prepared.cwd : deps.cwd,
-    ...(deps.timeoutMinutes !== undefined ? { timeoutMinutes: deps.timeoutMinutes } : {}),
-  };
-  let oneShotResult: OneShotResult;
-  try {
-    oneShotResult = await runOneShot(oneShotInput, deps.oneShot);
-  } finally {
-    // 备的目录会话收场后就还回去（成败都还）；还不掉不改结论，备目录的那一侧自己记日志
-    await prepared?.release().catch(() => undefined);
-  }
-  const session = {
-    runId: oneShotResult.runId,
-    outcome: oneShotResult.outcome,
-    family: picked.family,
-    modelId: picked.modelId,
-    ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
-  };
-  const who = `家族 ${picked.family}（model ${picked.modelId}）`;
-
-  // verdict 行 = stdout 最后一行非空（judgeVerify 按这一行判 pass / fail）。
-  const lastLineOfStdout =
-    oneShotResult.stdout
-      .trim()
-      .split('\n')
-      .filter((l) => l.trim() !== '')
-      .at(-1) ?? '';
-  const verdict: SegmentVerdict = judgeVerify(oneShotResult, { verdictLine: lastLineOfStdout });
-
-  if (verdict.kind !== 'ok') {
-    const facts = failureFacts(oneShotResult);
-    return {
-      pass: false,
-      problems: [`冷调用没跑成：${verdict.reason}${facts ? `；${facts}` : ''}`],
-      notes: who,
-      round: parsed.round,
-      session,
-    };
-  }
-
-  const stdoutPieces = parseStdout(oneShotResult.stdout);
-  const word = readVerdict(stdoutPieces.verdictLine);
-  if (word === null) {
-    return {
-      pass: false,
-      problems: [
-        `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
-      ],
-      notes: who,
-      round: parsed.round,
-      session,
-    };
-  }
-  const notes: string[] = [who];
-  if (stdoutPieces.droppedStyleNotes > 0) {
-    notes.push(
-      `模型另外提了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已丢`,
-    );
-  }
-  if (word === 'fail' && stdoutPieces.problems.length === 0) {
-    // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——要人看
-    return {
-      pass: false,
-      problems: [
-        `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
-          stdoutPieces.droppedStyleNotes > 0
-            ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
-            : '它一条都没写'
-        }）`,
-      ],
-      notes: notes.join('；'),
-      round: parsed.round,
-      session,
-    };
-  }
-  if (word === 'pass' && stdoutPieces.problems.length > 0) {
-    notes.push(
-      `模型写了 verdict: pass，但问题清单里还有 ${stdoutPieces.problems.length} 条算挡的：自相矛盾，按没过处理`,
-    );
-  }
+  const familiesLeft = FAMILY_ORDER.filter((f) => !avoid.has(f)).join('、');
   return {
-    pass: word === 'pass' && stdoutPieces.problems.length === 0,
-    problems: stdoutPieces.problems,
-    notes: notes.join('；'),
+    pass: false,
+    problems: [
+      `没讨论成：避开的族 ${[...avoid].join('、')}，${familiesLeft ? `剩下的 ${familiesLeft}` : '一个能换的族都不剩'} 全挑不出可用模型`,
+    ],
+    notes: '0006：所有不同家族都不可用 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
     round: parsed.round,
-    session,
   };
 }
