@@ -65,8 +65,9 @@ echo "== 人工档不再建演示版老目录（#1278）；目录表那一行也
 check "human-tier.sh 不再建 DEMO_DIR" "$(grep -c 'DEMO_DIR' "$DEPLOY/lib/human-tier.sh" || true)" 0
 check "human-tier.sh 不再提 setup_demo_scopes" "$(grep -c 'setup_demo_scopes' "$DEPLOY/lib/human-tier.sh" || true)" 0
 check "france.sh 没有 DEMO_DIR= 这一行" "$(grep -c '^DEMO_DIR=' "$DEPLOY/france.sh" || true)" 0
+# 目录表那一行以竖线开头。路径两边的反引号不写进这条正则：写进单引号会让 shellcheck -S style 报 SC2016，deploy 那台就红。
 check "ops 目录表没有 /var/lib/fleet-dao/demo 那一行" \
-  "$(grep -c '^| `/var/lib/fleet-dao/demo`' "$REPO/docs/ops.md" || true)" 0
+  "$(grep -cE '^\|.*\/var\/lib\/fleet-dao\/demo' "$REPO/docs/ops.md" || true)" 0
 check "落后判法把只删这个目录剔掉，不为它单独叫人重跑" \
   "$(grep -c '^export function humanTierCommitNeedsRerun' "$DEPLOY/france/auto-release/lib.mjs")" 1
 
