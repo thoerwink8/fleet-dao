@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2154 # SESSION_USERS、PILOT_USER、RECLAUDE_*、AGENT_SCOPE_BIN 这些由 france.sh 在前面设好，这里只用
 # 装机的「人工档」：碰防火墙、sudoers、建用户、改机器上的钥匙和环境文件的那些步骤，只在人以 root 跑整个 deploy/france.sh 时做。
-# 其余（自动发布脚本副本、systemd 单元文件、fleet-agents.slice、演示版可见范围的单元）是「自动档」，由自动发布每发完一版顺带跑
+# 其余（自动发布脚本副本、systemd 单元文件、fleet-agents.slice）是「自动档」，由自动发布每发完一版顺带跑
 # bash deploy/france.sh --auto-tier（docs/ops.md 第九节「装机层」）。
 # 为什么单独成一个文件：后端的 /healthz（deploy_lag）只在人工档这几个文件自上次装机后真变了才标「装机脚本落后、要人重跑」，
 # 判法是 git log <装到的提交>..<主线> -- <这几个文件>（deploy/france/auto-release/lib.mjs 的 HUMAN_TIER_PATHS）；
 # 人工档的函数要是写在 france.sh 里，改它们和改自动档就分不出来了。改这里之前必须知道：
 # - 新加一个碰防火墙、sudoers、建用户的步骤，放这里，用到的仓里文件写进 HUMAN_TIER_PATHS（auto-release.test.mjs 核对：
 #   这里引用的每个仓里文件都被盖住）；
-# - 自动档的函数（setup_slice、setup_demo_scopes、setup_auto_release）留在 france.sh，不许碰防火墙、sudoers、建用户。
+# - 自动档的函数（setup_slice、setup_auto_release）留在 france.sh，不许碰防火墙、sudoers、建用户。
 # 要先 source common.sh，用到的变量和函数由 france.sh 设。
 
 setup_identity() {
@@ -20,7 +20,6 @@ setup_identity() {
   ensure_dir /srv/fleet-dao root:root 755
   ensure_dir "$RELEASES_DIR" root:root 755
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
-  ensure_dir "$DEMO_DIR" fleet:fleet 750
   # 引擎自己的临时目录（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）放在这下面，引擎自己建 tmp/、archive/
   ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750
   ensure_dir "$SESSION_IO_DIR" fleet:fleet 711
