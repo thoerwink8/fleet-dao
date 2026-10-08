@@ -45,7 +45,7 @@ commit() { # 说明
 run_boot() {
   rm -f -- "$MARKER" "$MARKER.ran"
   (
-    cd -- "$TMP"
+    cd -- "$TMP" || exit
     bash -c "$BOOT_TEXT" fleet-release-boot "$@"
   ) >"$TMP/out" 2>"$TMP/err"
   ENTRY_RC=$?
@@ -65,7 +65,7 @@ run_train() {
     exit 2
   fi
   (
-    cd -- "$TMP"
+    cd -- "$TMP" || exit
     bash -c "$cmd"
   ) >"$TMP/out" 2>"$TMP/err"
   ENTRY_RC=$?
@@ -132,6 +132,7 @@ echo "== 【故意造出的失败】目标版的 release.sh 是符号链接：�
 git -C "$CACHE" checkout -q -B link-branch "$OLD"
 rm -f -- "$CACHE/deploy/release.sh"
 ln -s "$TMP/followed.sh" "$CACHE/deploy/release.sh"
+# shellcheck disable=SC2016 # 单引号里的 ${MARKER:?} 要原样写进假脚本，由它执行时展开
 printf '%s\n' '#!/usr/bin/env bash' 'printf followed >"${MARKER:?}"' >"$TMP/followed.sh"
 commit "符号链接"
 LINK=$(git -C "$CACHE" rev-parse HEAD)
