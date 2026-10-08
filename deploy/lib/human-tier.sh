@@ -134,6 +134,123 @@ setup_firewall() {
   session_ports_cut "${SESSION_USERS[0]}"
 }
 
+# sshd 抗扫描（人工档，#1348）：法国 sshd 的 drop-in。为什么是人工档：它改的是登录入口，配错了连 root 都登不上来（和 sudoers、防火墙一个性质），
+# 要人以 root 整套跑一次、看着结论；装法跟 deploy/backup/install.sh 的 setup_hk_sshd 一样：放文件 → sshd -t → 过了才 reload，
+# 不过就把这份撤掉、不重载、判红。reload 不断已登录的连接。内容和为什么这么配见 deploy/france/sshd-hardening.conf。
+setup_sshd_hardening() {
+  step "sshd 抗扫描（$SSHD_HARDENING_DROPIN：未认证只等 20 秒、未认证连接槽 30:30:120、每条连接最多错 3 次；不改端口和认证方式）"
+  local err
+  if ! command -v sshd >/dev/null; then
+    red "这台没有 sshd 命令：抗扫描配置没法验，不装"
+    return 1
+  fi
+  if [[ ! -d "${SSHD_HARDENING_DROPIN%/*}" ]]; then
+    red "${SSHD_HARDENING_DROPIN%/*} 不是目录：这台的 sshd 不是按 sshd_config.d 的写法配的，不装"
+    return 1
+  fi
+  put_file "$SSHD_HARDENING_DROPIN" root:root 644 "$(<"$DEPLOY_DIR/france/sshd-hardening.conf")"
+  if ((WROTE == 0)); then return 0; fi
+  # 先验整份配置：不过就撤掉这份、不重载——sshd 配错了，下一次重启就没人登得上来
+  if ! err=$(sshd -t 2>&1); then
+    rm -f -- "$SSHD_HARDENING_DROPIN"
+    red "加上 $SSHD_HARDENING_DROPIN 之后 sshd -t 不过，已撤掉、没重载：${err:0:300}"
+    return 1
+  fi
+  if ! err=$(systemctl reload ssh.service 2>&1); then
+    red "sshd -t 过了，但 systemctl reload ssh.service 没成（配置文件已放好，下次 sshd 重启生效）：${err:0:300}"
+    return 1
+  fi
+  changed "重载 sshd（已登录的连接不受影响）"
+}
+
+# 读回：文件和仓里一样；sshd 的有效配置（sshd -T，不看文件，看真生效的）这三项就是要的值——被别处的配置抢先盖掉会在这里判红
+readback_sshd_hardening() {
+  local cfg spec key got
+  if [[ "$(cat -- "$SSHD_HARDENING_DROPIN" 2>/dev/null)" != "$(<"$DEPLOY_DIR/france/sshd-hardening.conf")" ]]; then
+    red "$SSHD_HARDENING_DROPIN 不在或和仓里 deploy/france/sshd-hardening.conf 不一样：重跑 france.sh"
+  fi
+  if ! cfg=$(sshd -T 2>&1); then
+    red "sshd -T 读不出有效配置，抗扫描三项没核对：${cfg:0:200}"
+    return 0
+  fi
+  for spec in "logingracetime 20" "maxstartups 30:30:120" "maxauthtries 3"; do
+    key=${spec%% *}
+    got=$(awk -v k="$key" '$1 == k { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$cfg")
+    if [[ "$got" == "${spec#* }" ]]; then
+      ok "sshd 有效配置 $key = $got"
+    else
+      red "sshd 有效配置 $key = 「${got:-没读到}」，应为 ${spec#* }（被别的配置文件盖了，或没重载）"
+    fi
+  done
+}
+
+# fail2ban 的 sshd jail（人工档，#1348）：装法同上，先 fail2ban-client -t 验、过了才放着并 reload，不过就撤掉这份、判红。
+# 没装 fail2ban 只记待配，不装软件包（装包是另一件事）。内容和为什么见 deploy/france/fail2ban-sshd.jail。
+setup_fail2ban_sshd() {
+  step "fail2ban 的 sshd jail（$FAIL2BAN_SSHD_JAIL：3 次失败封 1 小时、反复来的越封越长；没装 fail2ban 就只记待配，不装软件包）"
+  local err
+  if ! command -v fail2ban-client >/dev/null; then
+    pending "这台没装 fail2ban（没有 fail2ban-client）：sshd 的封禁配置没放，装好后再跑一遍 france.sh"
+    return 0
+  fi
+  if [[ ! -d "${FAIL2BAN_SSHD_JAIL%/*}" ]]; then
+    red "${FAIL2BAN_SSHD_JAIL%/*} 不是目录：fail2ban 装了但没有 jail.d，不放"
+    return 1
+  fi
+  put_file "$FAIL2BAN_SSHD_JAIL" root:root 644 "$(<"$DEPLOY_DIR/france/fail2ban-sshd.jail")"
+  if ((WROTE == 0)); then return 0; fi
+  if ! err=$(fail2ban-client -t 2>&1); then
+    rm -f -- "$FAIL2BAN_SSHD_JAIL"
+    red "放上 $FAIL2BAN_SSHD_JAIL 之后 fail2ban-client -t 不过，已撤掉、没重载：${err:0:300}"
+    return 1
+  fi
+  if [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
+    pending "fail2ban.service 没在跑：$FAIL2BAN_SSHD_JAIL 已放好，它起来时会读到；起来后再跑一遍 france.sh 读回"
+    return 0
+  fi
+  if ! err=$(fail2ban-client reload 2>&1); then
+    red "fail2ban-client reload 没成（$FAIL2BAN_SSHD_JAIL 已放好，-t 是过的）：${err:0:300}"
+    return 1
+  fi
+  changed "fail2ban-client reload"
+}
+
+# 读回：文件和仓里一样；在跑的 sshd jail 四项（maxretry、findtime、bantime、bantime.increment）就是要的值。
+# 没装、没在跑是待配；jail 不在（enabled 没生效）和值不对是红；fail2ban-client 自己答不出的也是待配，不当成对了
+readback_fail2ban_sshd() {
+  local spec key got want rc
+  if ! command -v fail2ban-client >/dev/null; then
+    pending "没装 fail2ban：sshd 的封禁（maxretry 3、封 1 小时）没查"
+    return 0
+  fi
+  if [[ "$(cat -- "$FAIL2BAN_SSHD_JAIL" 2>/dev/null)" != "$(<"$DEPLOY_DIR/france/fail2ban-sshd.jail")" ]]; then
+    red "$FAIL2BAN_SSHD_JAIL 不在或和仓里 deploy/france/fail2ban-sshd.jail 不一样：重跑 france.sh"
+  fi
+  if [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
+    pending "fail2ban.service 没在跑：sshd jail 的有效值没查"
+    return 0
+  fi
+  if ! got=$(fail2ban-client status sshd 2>&1); then
+    red "fail2ban 里没有在跑的 sshd jail（enabled = true 没生效？）：${got:0:200}"
+    return 0
+  fi
+  for spec in "maxretry 3" "findtime 600" "bantime 3600" "bantime.increment true"; do
+    key=${spec%% *}
+    want=${spec#* }
+    rc=0
+    got=$(fail2ban-client get sshd "$key" 2>&1) || rc=$?
+    got=$(tr -d '[:space:]' <<<"$got")
+    got=${got,,}
+    if ((rc != 0)); then
+      pending "fail2ban-client get sshd $key 没答出来，没核对：${got:0:120}"
+    elif [[ "$got" == "$want" ]]; then
+      ok "fail2ban sshd jail $key = $got"
+    else
+      red "fail2ban sshd jail $key = 「${got:-没读到}」，应为 $want（被别的 jail 配置盖了，或没 reload）"
+    fi
+  done
+}
+
 # 驾驶舱「发布到法国」按钮的接活（人工档，不在自动档里）：驾驶舱后端（fleet，没有 root）往 $RELEASE_REQUEST_DIR 写一份请求文件，
 # root 的 fleet-release-request.path 盯着它、起 fleet-release-request.service 走一趟发版（核请求、暂停、等收尾、release.sh、验证、发完保持关）。
 # 为什么是人工档：这是一个由 fleet 写的文件触发 root 跑发布的口子，装它等于给「驾驶舱上点一下就能让 root 发版」开了路，要创始人在法国自己跑一次整套 france.sh。

@@ -137,6 +137,8 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 - 只看不改：`bash deploy/france.sh --check`、`bash deploy/hk.sh --check`。
 - 法国经跳板登录，长连接会被重置：长命令甩到后台跑再看日志，`nohup setsid bash /srv/fleet-dao/deploy/france.sh > /root/fleet-dao-install.log 2>&1 < /dev/null &`。
 
+- 法国 sshd 抗扫描（人工档，#1348）：公网扫描器占满未认证连接槽，sshd 随机丢新连接，本机和发版车就报 `Connection timed out during banner exchange`。`france.sh` 整套跑时放两份仓里的 drop-in：`deploy/france/sshd-hardening.conf` → `/etc/ssh/sshd_config.d/50-fleet-dao-hardening.conf`（`LoginGraceTime 20`、`MaxStartups 30:30:120`、`MaxAuthTries 3`；不改端口、不改认证方式；没写 `PerSourcePenalties`，它要 OpenSSH 9.8 以上，Ubuntu 24.04 的 9.6 认不得），先 `sshd -t`，过了才 `systemctl reload ssh`（不断已登录的连接），不过就撤掉这份、不重载、判红；`deploy/france/fail2ban-sshd.jail` → `/etc/fail2ban/jail.d/fleet-dao-sshd.local`（3 次失败封 1 小时、反复来的越封越长），先 `fail2ban-client -t` 再 reload，没装 fail2ban 只记待配、不装软件包。读回用 `sshd -T` 和 `fail2ban-client get sshd …` 核对真生效的值。是人工档：改的是登录入口，两份文件登记在 `HUMAN_TIER_PATHS`，改了要人以 root 重跑 `bash /srv/fleet-dao/deploy/france.sh`；`MaxAuthTries 3` 下，agent 里钥匙多于 3 把的客户端要加 `-o IdentitiesOnly=yes`。测试 `deploy/test/sshd-hardening.test.sh`（`sshd -t` 不过撤掉文件不重载等故意造的失败）。
+
 输出与退出码：每步一行，`✓` 本来就对、`↻` 这次改了、`✗` 红、`…` 待配或没查成；自检里别家单元的问题用 `·` 和 `!` 列出（见第六节）。退出码 0 全绿，1 有红，2 没红但有待配。
 
 验证用的工具：
