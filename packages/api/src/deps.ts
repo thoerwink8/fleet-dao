@@ -17,8 +17,8 @@ import type {
   Store,
   WorkflowControl,
 } from './ports.ts';
-import type { ReleaseCardPort } from './release-card.ts';
 import type { ProbeHistoryPort } from './probe-history.ts';
+import type { ReleaseCardPort } from './release-card.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
