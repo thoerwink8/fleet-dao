@@ -15,7 +15,7 @@ import {
   withHold,
   withoutHold,
 } from '../lib/pool-holds';
-import { useRoutingEdit } from './routing-edit';
+import { TAP, useRoutingEdit } from './routing-edit';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -106,6 +106,7 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
         type="button"
         size="xs"
         variant="outline"
+        className={TAP}
         disabled={off || update.isPending}
         onClick={() => {
           setDraft({ ...EMPTY_DRAFT, poolId });

@@ -130,7 +130,7 @@ export function RouteItem({
         ) : null}
         <span className="text-caption text-muted-foreground">
           {routeHost(r)} · <span className="num">{slots.text}</span>
-          {slots.full ? <span className="text-ink-stall">（满了，等空位，不算死）</span> : null}
+          {slots.full ? <span className="text-ink-stall">（满了，等空位，不算故障）</span> : null}
         </span>
         <PoolHoldControl poolId={r.poolId} routeId={r.routeId} />
         <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">

@@ -370,3 +370,212 @@ describe('拖到容器边缘时自动滚', () => {
     fireEvent.dragEnd(grip);
   });
 });
+
+const classTokens = (el: Element) => (el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
+
+function expectTap(el: Element) {
+  const tokens = classTokens(el);
+  expect(tokens).toContain('min-h-9');
+  expect(tokens).toContain('min-w-9');
+}
+
+/** 记下没被 mock 之前的 matchMedia。反复 mock 时不能再 bind 已经套上的 spy，否则非手机查询会递归。 */
+const realMatchMedia = window.matchMedia.bind(window);
+
+/** Tailwind 的 md 是 768px；手机宽度按 max-width: 767px。 */
+function mockMobile() {
+  vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => {
+    if (query === '(max-width: 767px)') {
+      return {
+        matches: true,
+        media: query,
+        onchange: null,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {},
+        dispatchEvent() {
+          return false;
+        },
+      } as MediaQueryList;
+    }
+    return realMatchMedia(query);
+  });
+}
+
+describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
+  test('用途里的模型行：名字可换行，操作在下一行', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    await screen.findByRole('list', { name: '模型' });
+    const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
+    const shell = row.firstElementChild as HTMLElement;
+    expect(classTokens(shell)).toEqual(expect.arrayContaining(['flex-col', 'md:flex-row']));
+    const name = row.querySelector('[data-row-name]') as HTMLElement;
+    expect(name.textContent).toBe('Opus 5.5');
+    expect(classTokens(name)).toContain('break-words');
+    expect(classTokens(name)).not.toContain('truncate');
+    const actions = row.querySelector('[data-row-actions]') as HTMLElement;
+    expect(name.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expectTap(within(row).getByRole('button', { name: /^拖动 / }));
+    expectTap(within(row).getByRole('button', { name: /^置顶 / }));
+    expectTap(within(row).getByRole('button', { name: /^置底 / }));
+    expectTap(within(row).getByRole('switch'));
+    expectTap(within(row).getByRole('combobox'));
+    expectTap(within(row).getByRole('button', { name: /移出用途/ }));
+    const [pause] = await screen.findAllByRole('button', { name: /暂停账号池/ });
+    expectTap(pause as HTMLElement);
+  });
+
+  test('手机宽度定高行加高，装得下两行', async () => {
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withModels(60) });
+    await screen.findByRole('list', { name: '模型' });
+    const model = document.querySelector('li[data-model]') as HTMLElement;
+    expect(model.style.height).toBe('80px');
+    cleanup();
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?tab=models', api: withModels(60) });
+    await screen.findByRole('list', { name: '目录里的模型' });
+    const catalog = document.querySelector('li[data-catalog]') as HTMLElement;
+    expect(catalog.style.height).toBe('80px');
+    cleanup();
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
+    await screen.findByRole('list', { name: '渠道列表' });
+    const channel = document.querySelector('li[data-channel]') as HTMLElement;
+    expect(channel.style.height).toBe('80px');
+  });
+
+  test('模型目录和渠道的第二行写出厂家、状态词、几条路几条活，不用 hidden 藏', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=models' });
+    await screen.findByRole('list', { name: '目录里的模型' });
+    const grok = document.querySelector('li[data-catalog="grok-4.7"]') as HTMLElement;
+    const shell = grok.firstElementChild as HTMLElement;
+    expect(classTokens(shell)).toEqual(expect.arrayContaining(['flex-col', 'md:flex-row']));
+    const vendor = grok.querySelector('[data-vendor]') as HTMLElement;
+    const status = grok.querySelector('[data-status-word]') as HTMLElement;
+    const summary = grok.querySelector('[data-route-summary]') as HTMLElement;
+    expect(vendor.textContent).toBe('grok');
+    expect(status.textContent).toMatch(/在线|故障|已关|已下架|暂时挡着|不知道|未探|池暂停|未被用途使用/);
+    expect(summary.textContent).toMatch(/\d+ 条路，\d+ 条活/);
+    for (const el of [vendor, status, summary]) {
+      expect(classTokens(el)).not.toContain('hidden');
+    }
+    expect(grok.querySelector('[data-row-meta]')).toBeTruthy();
+
+    cleanup();
+    renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
+    await screen.findByRole('list', { name: '渠道列表' });
+    const channel = document.querySelector('li[data-channel="ch-claude"]') as HTMLElement;
+    expect(classTokens(channel.firstElementChild as HTMLElement)).toEqual(
+      expect.arrayContaining(['flex-col', 'md:flex-row']),
+    );
+    const channelStatus = channel.querySelector('[data-status-word]') as HTMLElement;
+    const channelSummary = channel.querySelector('[data-route-summary]') as HTMLElement;
+    expect(channelStatus.textContent?.trim()).not.toBe('');
+    expect(channelSummary.textContent).toMatch(/\d+ 条路，\d+ 条活/);
+    expect(classTokens(channelStatus)).not.toContain('hidden');
+    expect(classTokens(channelSummary)).not.toContain('hidden');
+  });
+
+  test('手机宽度点一行，详情滚进画面', async () => {
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?tab=models' });
+    await screen.findByRole('list', { name: '目录里的模型' });
+    const catalogDetail = document.getElementById('routing-catalog-detail');
+    expect(catalogDetail).toBeTruthy();
+    const catalogScroll = vi.spyOn(catalogDetail as HTMLElement, 'scrollIntoView');
+    fireEvent.click(screen.getByRole('button', { name: '查看 Kimi k3 的路由' }));
+    expect(catalogScroll).toHaveBeenCalled();
+    cleanup();
+
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
+    await screen.findByRole('list', { name: '渠道列表' });
+    const channelDetail = document.getElementById('routing-channel-detail');
+    expect(channelDetail).toBeTruthy();
+    const channelScroll = vi.spyOn(channelDetail as HTMLElement, 'scrollIntoView');
+    fireEvent.click(screen.getByRole('button', { name: '查看 Claude 订阅 的路由' }));
+    expect(channelScroll).toHaveBeenCalled();
+    cleanup();
+
+    mockMobile();
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    await screen.findByRole('list', { name: '模型' });
+    const modelDetail = document.getElementById('routing-model-detail');
+    expect(modelDetail).toBeTruthy();
+    const modelScroll = vi.spyOn(modelDetail as HTMLElement, 'scrollIntoView');
+    fireEvent.click(screen.getByRole('button', { name: '查看 Kimi k3 的路由' }));
+    expect(modelScroll).toHaveBeenCalled();
+  });
+
+  test('筛选按下态、厂家选中态分得开，清除筛选回到全部', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=models' });
+    await screen.findByRole('list', { name: '目录里的模型' });
+    const only = screen.getByRole('button', { name: '只看已开启' });
+    const idleOnly = only.className;
+    expect(only.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(only);
+    expect(only.getAttribute('aria-pressed')).toBe('true');
+    expect(only.className).not.toBe(idleOnly);
+    expect(only.className).toContain('border-foreground');
+    expect(only.className).toContain('bg-foreground/10');
+    expect(idleOnly).not.toContain('bg-foreground/10');
+
+    const discovered = screen.getByRole('button', { name: '新发现' });
+    const idleDiscovered = discovered.className;
+    fireEvent.click(discovered);
+    expect(discovered.getAttribute('aria-pressed')).toBe('true');
+    expect(discovered.className).not.toBe(idleDiscovered);
+    expect(discovered.className).toContain('bg-foreground/10');
+    expect(discovered.className).toContain('border-foreground');
+
+    fireEvent.click(screen.getByRole('button', { name: '清除筛选' }));
+    expect(only.getAttribute('aria-pressed')).toBe('false');
+    expect(discovered.getAttribute('aria-pressed')).toBe('false');
+
+    const vendor = screen.getByRole('combobox', { name: '按厂家筛选' }) as HTMLSelectElement;
+    const idleVendor = vendor.className;
+    fireEvent.change(vendor, { target: { value: 'grok' } });
+    expect(vendor.className).not.toBe(idleVendor);
+    expect(vendor.className).toContain('border-foreground');
+    expect(vendor.className).toContain('bg-foreground/10');
+    await waitFor(() => expect(screen.getByText(/^显示 1 \/ 共/)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: '清除筛选' }));
+    await waitFor(() => expect(screen.getByText(/^共 \d+ 个$/)).toBeTruthy());
+    expect(vendor.value).toBe('');
+    expect(vendor.className).not.toContain('bg-foreground/10');
+  });
+
+  test('新发现、已下架、锁住三种标记颜色互不相同', async () => {
+    const api = createMockApi({ live: false });
+    const routing = api.routing.bind(api);
+    api.routing = async () => {
+      const base = await routing();
+      const sample = base.routes[0];
+      if (!sample) throw new Error('目录里没有路由');
+      return {
+        ...base,
+        routes: [...base.routes, { ...sample, id: 'auto:ch-claude:extra', modelId: 'sonnet-5' }],
+      };
+    };
+    renderApp(<RoutingPage />, { route: '/routing?tab=models', api });
+    await screen.findByRole('list', { name: '目录里的模型' });
+    const mark = (id: string, label: string) => {
+      const row = document.querySelector(`li[data-catalog="${id}"]`);
+      const el = [...(row?.querySelectorAll('[data-catalog-mark]') ?? [])].find(
+        (node) => node.textContent === label,
+      );
+      if (!el) throw new Error(`没有标记 ${label}（${id}）`);
+      return el.getAttribute('class') ?? '';
+    };
+    const discovered = await waitFor(() => mark('sonnet-5', '新发现'));
+    const retired = mark('opus-5', '已下架');
+    const locked = mark('gpt-5.6-luna', '锁住');
+    expect(discovered).toMatch(/text-ink-done|text-ink-run/);
+    expect(retired).toContain('text-ink-stop');
+    expect(locked).toContain('text-ink-stall');
+    expect(new Set([discovered, retired, locked]).size).toBe(3);
+  });
+});

@@ -53,6 +53,11 @@ describe('路由页：每一层现在活着吗', () => {
     expect(screen.getByText('5 个派得出去')).toBeTruthy();
     expect(screen.getByText('0 个不知道')).toBeTruthy();
     expect(screen.getByText('0 个派不出去')).toBeTruthy();
+    const page = document.body.textContent ?? '';
+    expect(page).not.toContain('不算死');
+    expect(page).not.toContain('上移');
+    expect(page).not.toContain('下移');
+    expect(page).toContain('不算故障');
   });
 
   test('点名验收：首选模型不行时写明顺位第一条活的在第几个模型，不知道的原因照写，顺位第一条活的那条标出来', async () => {
@@ -136,7 +141,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(a.textContent).toMatch(/5h：1 小时 \d+ 分后清零|5h：1 小时后清零|5h：(89|90) 分钟后清零/);
     expect(a.textContent).toContain('7d：清零时刻没读到');
     expect(a.textContent).toContain('探测过期：2 小时前的结论，探针可能停了');
-    expect(a.textContent).toContain('满了，等空位，不算死');
+    expect(a.textContent).toContain('满了，等空位，不算故障');
     // 行上写一条路由都没有；点开它，下面写排了它也派不到它
     expect(screen.getByText('一条路由都没有')).toBeTruthy();
     await pickModel('Kimi k3');
@@ -188,7 +193,7 @@ describe('路由页：每一层现在活着吗', () => {
     await purposeLinks();
     const reserved = routeItem('rt-reserved');
     expect(reserved.textContent).toContain('占 3/3（在跑 1、已选定还没开跑 2）');
-    expect(reserved.textContent).toContain('满了，等空位，不算死');
+    expect(reserved.textContent).toContain('满了，等空位，不算故障');
     const free = routeItem('rt-free');
     expect(free.textContent).toContain('在跑 1/3');
     expect(free.textContent).not.toContain('满了，等空位');

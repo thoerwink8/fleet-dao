@@ -7,7 +7,7 @@
 // - Fable 只有创始人本人在驾驶舱能打开（决定 0033）：判在后端（founder-only.ts 的 guardFounderOnly），这里不绕、不替它判，
 //   只在开关旁标一句；后端拒了，原话弹出来。
 // - 选了远程环境（?node=）时整块置灰：写只会落到本台的库。写「去那台上操作」。
-// - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，所以行内容不许撑高。
+// - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，行高由调用方给定。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
 import { ArrowDownToLine, ArrowUpToLine, GripVertical } from 'lucide-react';
@@ -254,6 +254,9 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
 
 const HANDLE_TITLE = '拖到新位置；键盘：Alt+上下键挪一格，Alt+Home 置顶，Alt+End 置底';
 
+/** 手机上可点区域至少 36px（Tailwind 的 9）。宽屏收回原来的紧凑尺寸。 */
+export const TAP = 'min-h-9 min-w-9 md:min-h-0 md:min-w-0';
+
 /** 一行的操作：拖动手柄、置顶、置底。调用方决定摆在行里哪儿。 */
 export interface RowControls {
   grip: ReactNode;
@@ -452,7 +455,7 @@ export function SortableList<T>({
           type="button"
           variant="ghost"
           size="icon-xs"
-          className="shrink-0 cursor-grab"
+          className={cn('shrink-0 cursor-grab', TAP)}
           draggable={!off}
           disabled={disabled}
           aria-disabled={saving || busy || undefined}
@@ -471,7 +474,7 @@ export function SortableList<T>({
             type="button"
             variant="ghost"
             size="icon-xs"
-            className="shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40"
+            className={cn('shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40', TAP)}
             disabled={disabled}
             aria-disabled={saving || busy || atTop || undefined}
             title={disabledWhy ?? (atTop ? '已经在最前' : '置顶（Alt+Home）')}
@@ -485,7 +488,7 @@ export function SortableList<T>({
             type="button"
             variant="ghost"
             size="icon-xs"
-            className="shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40"
+            className={cn('shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40', TAP)}
             disabled={disabled}
             aria-disabled={saving || busy || atBottom || undefined}
             title={disabledWhy ?? (atBottom ? '已经在最后' : '置底（Alt+End）')}
@@ -606,6 +609,7 @@ export function RouteSwitch({
       size="sm"
       checked={enabled}
       disabled={why !== null}
+      className={TAP}
       title={why ?? (enabled ? '关掉这条路由' : '打开这条路由')}
       aria-label={`${label} 的开关`}
       onCheckedChange={onToggle}
@@ -637,6 +641,7 @@ export function ModelSwitch({
       size="sm"
       checked={enabled}
       disabled={why !== null}
+      className={TAP}
       title={why ?? (enabled ? '关掉这个模型（所有用途都不派）' : '打开这个模型')}
       aria-label={`${modelName} 的开关`}
       onCheckedChange={() => edit.toggleModel({ modelId, modelName, enabled, expectedEnabled })}
@@ -660,6 +665,7 @@ export function ChannelSwitch({
       size="sm"
       checked={enabled}
       disabled={edit.disabledWhy !== null}
+      className={TAP}
       title={edit.disabledWhy ?? (enabled ? '关掉这个渠道' : '打开这个渠道')}
       aria-label={`${name} 的开关`}
       onCheckedChange={() => edit.toggleChannel({ channelId, channelName: name, enabled })}
