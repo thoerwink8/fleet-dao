@@ -175,6 +175,12 @@ describe('探不探（planProbe）', () => {
     // 先后照旧：插头没接、按量、下架、没阶段在用的照原来的原因说
     expect(planProbe(target({ inUse: false }), probers, UNKNOWN, NOW)).toMatchObject({ state: 'skipped' });
   });
+
+  it('人拍了整池暂停的池不探，写明原因；不带这个标记的照探', () => {
+    const held = { ...carpool, heldBySwitch: '324 账号被封' };
+    expect(plan(held)).toMatchObject({ state: 'skipped', detail: /整池暂停（324 账号被封）：不探/ });
+    expect('probe' in plan(carpool)).toBe(true);
+  });
 });
 
 describe('一轮里读会话用户挂的组织', () => {

@@ -41,7 +41,11 @@ export const ROUTE_PROBE_CONCURRENCY = 2;
 /** 写进库的原因最长多少字：插头的报错原文可能很长，驾驶舱只要能看懂的那一截。 */
 export const ROUTE_PROBE_DETAIL_MAX = 600;
 
-export type ProbeTarget = RouteProbeTarget;
+/**
+ * heldBySwitch：这个池被人拍了整池暂停（开关 engine.poolHolds，值是写在开关里的原因）。探它没有意义——封号、欠费这类要人修的事，
+ * 探一次只会再撞一次；人撤了暂停，下一轮自然恢复探。只认开关；引擎自己写的 pool-hold: 提醒不在此列，它要靠探针探通来撤。
+ */
+export type ProbeTarget = RouteProbeTarget & { heldBySwitch?: string };
 
 /**
  * 真探一次的结果。answered = 答上了；quota = 额度用满被拒——登录、组织、上游都通，额度另有额度那一套挡（选路按额度
@@ -156,6 +160,12 @@ export function planProbe(
     return {
       state: 'skipped',
       detail: '按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）',
+    };
+  }
+  if (t.heldBySwitch !== undefined) {
+    return {
+      state: 'skipped',
+      detail: `账号池 ${t.poolId} 被人拍了整池暂停（${t.heldBySwitch}）：不探，撤了暂停下一轮恢复`,
     };
   }
   const probe = probers[t.hostId];
