@@ -2,9 +2,10 @@
 // settings（每日次数、花费上限）、audit_log（状态变化留痕）。表结构在 @fleet-dao/db。
 // 每条判断的 sample 里带 rev（题目版本）和 model（钉死的模型）。
 import { auditLog, type Db, jevAnswers, jevQuestions, settings } from '@fleet-dao/db';
-import { and, desc, eq, gte, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { FieldDigest } from './evidence.ts';
 import { DEFAULT_POLICY, type JevPolicy, mergePolicy, POLICY_SETTING_KEYS } from './policy.ts';
+import { JUDGE_PROBE_QUESTION_ID } from './probe-id.ts';
 import { type QuestionDef, renderPrompt } from './questions.ts';
 import { LOCAL_REASONS, type NotJudgedReason } from './verdict.ts';
 
@@ -138,7 +139,7 @@ export async function syncQuestionBank(
   });
 }
 
-/** 从 since 起问出去了几道题（本地拦下、没问出去的不算）。 */
+/** 从 since 起问出去了几道业务题（本地拦下、没问出去的不算）。健康自检不占每日次数。 */
 export async function countAskedSince(db: Db, since: Date): Promise<number> {
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
@@ -147,12 +148,13 @@ export async function countAskedSince(db: Db, since: Date): Promise<number> {
       and(
         gte(jevAnswers.askedAt, since),
         or(isNull(jevAnswers.failReason), notInArray(jevAnswers.failReason, [...LOCAL_REASONS])),
+        ne(jevAnswers.questionId, JUDGE_PROBE_QUESTION_ID),
       ),
     );
   return countOf(row, '今天问了几道');
 }
 
-/** 从 since 起按量计费的后端一共花了多少美元（每条判断记录里分摊的 costUsd 加总）。 */
+/** 从 since 起按量计费的后端一共花了多少美元（每条判断记录里分摊的 costUsd 加总）。健康自检不占这笔。 */
 export async function usdSpentSince(db: Db, since: Date): Promise<number> {
   const [row] = await db
     .select({
@@ -160,7 +162,13 @@ export async function usdSpentSince(db: Db, since: Date): Promise<number> {
       n: sql<number>`count(*)::int`,
     })
     .from(jevAnswers)
-    .where(and(gte(jevAnswers.askedAt, since), sql`(${jevAnswers.sample}->>'costUsd') is not null`));
+    .where(
+      and(
+        gte(jevAnswers.askedAt, since),
+        sql`(${jevAnswers.sample}->>'costUsd') is not null`,
+        ne(jevAnswers.questionId, JUDGE_PROBE_QUESTION_ID),
+      ),
+    );
   countOf(row, '今天花了多少');
   const usd = Number(row?.usd);
   if (!Number.isFinite(usd)) throw new Error(`今天花了多少没查成：读到 ${String(row?.usd)}`);
@@ -181,7 +189,7 @@ export interface SentCall {
 }
 
 /**
- * 最近一次真发给后端的调用（生产和考试都算）。本地就拦下、没发出去的（停用、到了上限、证据不全、库出错）不算；
+ * 最近一次真发给后端的调用（业务提问和健康自检都算）。本地就拦下、没发出去的（停用、到了上限、证据不全、库出错）不算；
  * 只补记花费的那一行（unrecorded）说明的是库出了问题、不是调用成没成，也不算。/healthz 的 judge 项看它：没成就报红。
  */
 export async function lastSentCall(db: Db): Promise<SentCall | undefined> {

@@ -373,9 +373,9 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
       .map((s) => s.id)
       .sort();
     // 摘出来的 8 个就是当初在 Temporal 上的那 8 个。少一个，老 Schedule 就留着和进程内定时器各跑一轮。
-    // ci-timings（#921）从没进过 Temporal，只在登记表上，不进这份删除名单。
+    // ci-timings（#921）、judge-self-check（#1365）从没进过 Temporal，只在登记表上，不进这份删除名单。
     expect(moved).toHaveLength(8);
-    expect([...moved, 'ci-timings'].sort()).toEqual(ENGINE_JOBS.map((j) => j.id).sort());
+    expect([...moved, 'ci-timings', 'judge-self-check'].sort()).toEqual(ENGINE_JOBS.map((j) => j.id).sort());
     expect(RETIRED_SCHEDULES.filter((s) => s.moved).every((s) => s.retiredBy === '#1072')).toBe(true);
   });
 

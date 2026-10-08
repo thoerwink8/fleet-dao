@@ -6,11 +6,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Db, jevAnswers } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { recordProbeCall } from '@fleet-dao/jev';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runHealthChecks } from '../src/health.ts';
 import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
 import type { Logger } from '../src/ports.ts';
-import { judgeCatalog, judgeMachine, makeFakeBackend, recordJudgeCall } from './judge-fixture.ts';
+import {
+  JUDGE_MODEL,
+  JUDGE_ROUTE,
+  judgeCatalog,
+  judgeMachine,
+  makeFakeBackend,
+  recordJudgeCall,
+} from './judge-fixture.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -86,6 +94,27 @@ describe('/healthz 的 judge 项', () => {
       tokensEstimated: false,
     });
     expect((await report(check)).item).toEqual({ ok: true });
+  });
+
+  it('自检失败：对外仍是最近一次没成，日志写明是自检失败，不带上游状态码', async () => {
+    await recordProbeCall(t.db, {
+      backend: {
+        kind: 'fake',
+        model: JUDGE_MODEL,
+        ask: async () => {
+          throw new Error('记自检不该再问');
+        },
+      },
+      routeId: JUDGE_ROUTE,
+      result: { ok: false, reason: 'overloaded', detail: 'HTTP 529 overloaded', latencyMs: 8 },
+      at: new Date('2026-10-08T21:40:00.000Z'),
+    });
+    const r = await report(
+      judgeHealthCheck({ db: t.db, location: machine().location, makeBackend: makeFakeBackend }),
+    );
+    expect(r.item).toEqual({ ok: false, code: 'judge_failing', message: '判断题最近一次调用没成' });
+    expect(r.text).not.toContain('529');
+    expect(r.logs.some((l) => l.includes('自检失败') && l.includes('overloaded'))).toBe(true);
   });
 
   it('FLEET_JEV_CONFIG 明写的文件不在：红，不是未接', async () => {

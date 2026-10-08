@@ -1,11 +1,16 @@
-// 每周刷新 CI 测试耗时表（#921）的定时登记。#1078 起引擎不再建 Temporal Schedule，钟点由 jobs/timers.ts 按这里的格子跑，
-// engine-timers.ts 把这一格装进进程内定时器。单子点名的登记文件就是这个。
+// 定时任务的格子登记。每周刷新 CI 测试耗时表（#921）和判断题自检（#1365）的格子在这里，
+// engine-timers.ts 把它们装进进程内定时器。钟点由 jobs/timers.ts 按这里的格子跑。单子点名的登记文件就是这个。
 import {
   CI_TIMINGS_EVERY_MINUTES,
   CI_TIMINGS_JOB,
   CI_TIMINGS_OFFSET_MINUTES,
   CI_TIMINGS_OVERDUE_MINUTES,
 } from './ci-timings.ts';
+import {
+  JUDGE_SELF_CHECK_EVERY_MINUTES,
+  JUDGE_SELF_CHECK_JOB,
+  JUDGE_SELF_CHECK_OFFSET_MINUTES,
+} from './judge-self-check.ts';
 import type { TimerJob } from './timers.ts';
 
 /**
@@ -19,6 +24,21 @@ export function ciTimingsSchedule(run: () => Promise<unknown>): TimerJob {
     offsetMinutes: CI_TIMINGS_OFFSET_MINUTES,
     catchupMinutes: CI_TIMINGS_EVERY_MINUTES,
     overdueMinutes: CI_TIMINGS_OVERDUE_MINUTES,
+    run,
+  };
+}
+
+/**
+ * 每 30 分钟一轮（每小时 17、47 分）。不标 needsMaster：总开关关着也要能把判断题的红灯探回来。
+ * 这一轮不拉单、不起会话。超时线和其余看家检查一样，15 分钟。
+ */
+export function judgeSelfCheckSchedule(run: () => Promise<unknown>): TimerJob {
+  return {
+    id: JUDGE_SELF_CHECK_JOB.id,
+    everyMinutes: JUDGE_SELF_CHECK_EVERY_MINUTES,
+    offsetMinutes: JUDGE_SELF_CHECK_OFFSET_MINUTES,
+    catchupMinutes: JUDGE_SELF_CHECK_EVERY_MINUTES,
+    overdueMinutes: 15,
     run,
   };
 }

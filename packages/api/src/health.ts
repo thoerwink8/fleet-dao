@@ -100,7 +100,10 @@ export function serviceHealthChecks(parts: {
    */
   engineNotWired?: string;
   githubEvents: () => Promise<void>;
-  /** 判断题（judge-health.ts）：没配报「未接」；配置起不来、最近一次真调用没成报红。 */
+  /**
+   * 判断题（judge-health.ts）：没配报「未接」；配置起不来、最近一次真调用没成报红。
+   * 失败超过 30 分钟没有新调用时，由引擎定时任务 judge-self-check 再探一次。
+   */
   judge: { check(): Promise<void>; readonly notWired?: string };
   /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在正式环境查，别处报「未接」。 */
   deployLag: { check(): Promise<void>; readonly notWired?: string };

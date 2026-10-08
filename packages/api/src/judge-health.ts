@@ -1,6 +1,8 @@
 // /healthz 的 judge 项：这台机器的判断题接没接、接了调不调得通。判法和引擎每次提问是同一份（@fleet-dao/jev 的 judgeHealth）。
 // 「未接」只有一种：没写 FLEET_JEV_CONFIG、默认位置上也没有配置文件——装配时定（之后补上配置要重启后端才显示出来）。
-// 其余只有绿和红：配置起不来（读不到、认不出、路由两层里判断用途派不出路由、钥匙读不到）报红；最近一次真调用没成报红，下一次调成了自动变绿。
+// 其余只有绿和红：配置起不来（读不到、认不出、路由两层里判断用途派不出路由、钥匙读不到）报红；最近一次真调用没成报红。
+// 失败后超过 30 分钟没有新调用时，引擎定时任务 judge-self-check 再问一道固定自检题，结果写进同一张判断记录：通过就变绿，
+// 自检也失败则继续红，日志里写明是自检失败。对外那句话不变。
 // 对外只说一句中性的话（公网看得到，不带内部名：项名叫 judge 不叫 jev，也不提上游是谁），原因只进日志。
 import type { Stats } from 'node:fs';
 import type { Db } from '@fleet-dao/db';
@@ -10,6 +12,7 @@ import {
   type JevMachineConfig,
   type JudgeRoute,
   jevConfigPresence,
+  judgeFailureNote,
   judgeHealth,
 } from '@fleet-dao/jev';
 import { PublicHealthError } from './health.ts';
@@ -48,12 +51,7 @@ export function judgeHealthCheck(deps: JudgeHealthDeps): {
         );
       }
       if (h.state === 'failing') {
-        const { call } = h;
-        throw new PublicHealthError(
-          'judge_failing',
-          '判断题最近一次调用没成',
-          `${call.at.toISOString()} 问 ${call.questionId}（判断记录 ${call.answerId}）：${call.reason ?? '没写原因'}${call.detail ? `：${call.detail}` : ''}`,
-        );
+        throw new PublicHealthError('judge_failing', '判断题最近一次调用没成', judgeFailureNote(h.call));
       }
     },
   };
