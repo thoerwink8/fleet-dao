@@ -27,15 +27,16 @@ const routeItem = (routeId: string) => {
 };
 
 describe('路由页：每一层现在活着吗', () => {
-  test('只列在用的四个用途；没点名先看靠后备撑着的验收；对题不选路；Jev 单列', async () => {
+  test('只列在用的五个用途；没点名先看靠后备撑着的验收（整理待办不抢）；对题不选路；Jev、整理待办单列', async () => {
     renderApp(<RoutingPage />, { route: '/routing' });
     const links = await purposeLinks();
-    expect(links).toHaveLength(4);
+    expect(links).toHaveLength(5);
     expect(links[0]?.textContent).toContain('动手');
     expect(links[0]?.textContent).not.toContain('动手 · 界面');
     expect(links[1]?.textContent).toContain('动手 · 界面');
     expect(links[2]?.textContent).toContain('验收');
     expect(links[3]?.textContent).toContain('Jev 判断');
+    expect(links[4]?.textContent).toContain('整理待办');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
     expect(screen.getByText('不是流程里的一段')).toBeTruthy();
     const current = links.filter((a) => a.getAttribute('aria-current') === 'true');
@@ -44,7 +45,7 @@ describe('路由页：每一层现在活着吗', () => {
     for (const gone of ['分诊', '需求文档', '方案', '调研', '第二意见', '开 PR 前验证']) {
       expect(screen.queryByText(gone)).toBeNull();
     }
-    expect(screen.getByText('4 个派得出去')).toBeTruthy();
+    expect(screen.getByText('5 个派得出去')).toBeTruthy();
     expect(screen.getByText('0 个不知道')).toBeTruthy();
     expect(screen.getByText('0 个派不出去')).toBeTruthy();
   });

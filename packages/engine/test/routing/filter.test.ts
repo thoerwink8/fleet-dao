@@ -310,8 +310,10 @@ describe('单条开关', () => {
 describe('执行方式 × 阶段是数据', () => {
   it('每个阶段都写了要什么，每个执行方式都写了会什么', () => {
     expect(Object.keys(STAGE_NEEDS).sort()).toEqual(
-      ['execute', 'judge', 'plan', 'research', 'review', 'spec', 'triage', 'ui', 'verify'].sort(),
+      ['execute', 'groom', 'judge', 'plan', 'research', 'review', 'spec', 'triage', 'ui', 'verify'].sort(),
     );
+    // 整理待办（groom，#1338）读仓库、读单子、跑只读命令，不改文件：接口外壳（只会答题）挡，命令行类都行
+    expect(STAGE_NEEDS.groom).toEqual(['read', 'shell']);
     expect(Object.keys(HOST_ABILITIES).sort()).toEqual(
       ['api-shell', 'claude-code', 'codex', 'cursor-agent', 'grok', 'mirasim'].sort(),
     );
@@ -321,6 +323,8 @@ describe('执行方式 × 阶段是数据', () => {
     expect(hostUnfit('api-shell', 'execute')).toContain('改文件');
     expect(hostUnfit('api-shell', 'ui')).toContain('改文件');
     expect(hostUnfit('api-shell', 'judge')).toBeNull();
+    expect(hostUnfit('api-shell', 'groom')).not.toBeNull();
+    expect(hostUnfit('claude-code', 'groom')).toBeNull();
     expect(hostUnfit('api-shell', 'triage')).toBeNull();
     expect(hostUnfit('claude-code', 'judge')).toBeNull();
     expect(hostUnfit('cursor-agent', 'execute')).toBeNull();
