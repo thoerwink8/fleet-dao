@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 发版自举（#1294）：入口是正在跑的这份 release.sh（部署检出 /srv/fleet-dao，往往还停在上一版，
-# 和在用版本是同一份脚本）。它先把目标提交的 deploy/ 从裸仓解开，再交给那一版自带的 release.sh。
+# 发版自举（#1294）：跑到这份 release.sh 时，它先把目标提交的 deploy/ 从裸仓解开，再交给那一版自带的
+# release.sh。发版车在检出还是旧脚本时不跑这份，那条入口在 release-boot.test.sh。
 # 在用这份和目标那一版行为不同时，跑的必须是目标那一版。
 # 【故意造出的失败】目标提交没有 deploy/release.sh，或对象读不出、不是普通文件：拒发，
 # 不接着跑现在这份（不退回用旧的）。

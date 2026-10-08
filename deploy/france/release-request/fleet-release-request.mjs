@@ -145,7 +145,7 @@ export const realIo = {
     }
     return { ok: true, running };
   },
-  /** 部署检出快进到要发的提交，入口脚本和装机脚本才是这一版。release.sh 还会再交给目标提交自带的那份（#1294）。 */
+  /** 部署检出快进到要发的提交，按钮接着跑的 release.sh 就是这一版。发版车不靠这次快进（#1294）。 */
   async prepareCheckout(sha) {
     const dirty = git(['status', '--porcelain', '--untracked-files=no']);
     if (dirty.status !== 0)

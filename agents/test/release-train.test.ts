@@ -41,6 +41,8 @@ interface TrainIo {
 }
 interface Train {
   DEFAULT_LIMITS: Record<string, number>;
+  RELEASE_SH: string;
+  releaseBootCommand(sha: string): string;
   runTrain(argv: string[], io: TrainIo): Promise<number>;
   parseWorkerStatus(out: string): { running: string[]; uncertain: string[]; unreadable: string[] };
   orderFromDescription(d: string): number[];
@@ -205,7 +207,7 @@ function makeWorld() {
       return ok('已开');
     }
     if (cmd.endsWith('release.sh --check')) return { status: w.checkExit, stdout: '', stderr: '' };
-    if (cmd.includes('/deploy/release.sh ')) {
+    if (cmd.includes('fleet-release-boot ')) {
       const sha = cmd.split(' ').at(-1);
       w.history += `\n2026-10-05T14:30:00Z ${sha} ${w.releaseWritesHistory}`;
       return { status: w.releaseExit, stdout: '', stderr: '' };
@@ -276,8 +278,18 @@ const franceBusyAfterPreflight = (w: { sessions: () => Promise<SessionsResult> }
 const franceFree = (w: { sessions: () => Promise<SessionsResult> }) => {
   w.sessions = async () => ({ ok: true, running: 0, rows: [] });
 };
-const releaseCalls = (ssh: string[]) =>
-  ssh.filter((c) => c.includes('/deploy/release.sh ') && !c.endsWith('--check'));
+const releaseCalls = (ssh: string[]) => ssh.filter((c) => c.includes('fleet-release-boot '));
+
+describe('发版入口是目标提交自带的 release.sh（#1294）', () => {
+  it('ssh 的是 release-boot，命令里不调用检出里那份', () => {
+    const cmd = train.releaseBootCommand(SHA);
+    expect(cmd.startsWith('bash -c ')).toBe(true);
+    expect(cmd.endsWith(`fleet-release-boot ${SHA}`)).toBe(true);
+    expect(cmd.includes('不改跑检出里的 release.sh')).toBe(true);
+    expect(cmd.includes('/srv/fleet-dao/deploy/release.sh')).toBe(false);
+    expect(cmd.includes(`bash ${train.RELEASE_SH}`)).toBe(false);
+  });
+});
 
 describe('暂停标记：worker.mjs start 见标记就拒', () => {
   it('发版暂停期间 start 被拒（退出码 3、说明原因、什么都没起），status 照常', async () => {
@@ -681,11 +693,15 @@ describe('整趟走完', () => {
     expect(code).toBe(0);
     const i = (needle: string) => w.sshCalls.findIndex((c) => c.includes(needle));
     expect(i(' engine off ')).toBeGreaterThan(-1);
-    expect(i(`/deploy/release.sh ${SHA}`)).toBeGreaterThan(i(' engine off '));
+    expect(i(`fleet-release-boot ${SHA}`)).toBeGreaterThan(i(' engine off '));
+    expect(w.sshCalls.filter((c) => c.includes('fleet-release-boot '))).toEqual([
+      train.releaseBootCommand(SHA),
+    ]);
+    expect(train.releaseBootCommand(SHA).includes(`bash ${train.RELEASE_SH}`)).toBe(false);
     expect(w.sshCalls.some((c) => c.endsWith('release.sh --check'))).toBe(true);
     expect(existsSync(markerFile(home))).toBe(false); // 发完清了
     expect(w.engineOn).toBe(true); // 发版前开着，发完默认开回（不用 --restore、不用授权）
-    expect(i(' engine on ')).toBeGreaterThan(i(`/deploy/release.sh ${SHA}`)); // 发完才开
+    expect(i(' engine on ')).toBeGreaterThan(i(`fleet-release-boot ${SHA}`)); // 发完才开
     expect(
       w.sshCalls.some((c) => c.includes('engine on --reason') && c.includes('发版后恢复发版前的状态')),
     ).toBe(true);
@@ -723,7 +739,7 @@ describe('整趟走完', () => {
       ...base,
       ssh: (c) => {
         const r = base.ssh(c);
-        if (c.includes('/deploy/release.sh ') && !c.endsWith('--check')) w.engineOn = true;
+        if (c.includes('fleet-release-boot ')) w.engineOn = true;
         return r;
       },
     });
@@ -786,7 +802,7 @@ describe('整趟走完', () => {
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
       ...base,
       ssh: (c) => {
-        if (c.includes('/deploy/release.sh ') && !c.endsWith('--check')) releaseDone = true;
+        if (c.includes('fleet-release-boot ')) releaseDone = true;
         // 发完版、验证之后（第 7 步）才读不到：用 --check 之后的第二次 engine status
         if (
           releaseDone &&
@@ -844,7 +860,7 @@ describe('整趟走完', () => {
     expect(code).toBe(0);
     expect(text(w.out)).toContain('在用的版本还没有引擎总开关');
     expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
-    expect(w.sshCalls.some((c) => c.includes(`/deploy/release.sh ${SHA}`))).toBe(true);
+    expect(w.sshCalls.some((c) => c.includes(`fleet-release-boot ${SHA}`))).toBe(true);
     // 【故意造出的失败】真的读不到（连不上库）还是停下
     const home2 = freshHome();
     const { w: w2, io: io2 } = makeWorld();

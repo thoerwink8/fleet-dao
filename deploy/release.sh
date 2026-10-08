@@ -14,9 +14,9 @@
 # DRAIN_GRACE 秒（和构建一起走），到点没做完的由引擎按切号那一套停下、新引擎起来按编号续上；排空完停引擎，再迁移、切版本。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
-# 入口是正在跑的这份脚本（部署检出 /srv/fleet-dao/deploy/release.sh，往往还停在上一版，不是
-# /srv/fleet-dao-releases/current 里那份）。发版拿到锁、取到目标提交之后，先把那一版的 deploy/ 解开，
-# 再交给那一版自带的 release.sh（#1294）：改了这份脚本的提交，同一次发版就用上它。那一版没有
+# 发版车不跑检出里这份（agents/skills/commander/scripts/release-boot.sh 先解开目标提交再 exec，
+# 检出还是旧的也用那一版，#1294）。这份被跑到时（驾驶舱先把检出快进、人手动、或那条自举 exec 到这份）
+# 拿到锁、取到目标提交之后，再把那一版的 deploy/ 解开交给它自带的 release.sh。那一版没有
 # deploy/release.sh、读不出、不是普通文件，就拒发，不改用现在这份。--check、--rollback 仍跑现在这份。
 set -Eeuo pipefail
 umask 022
@@ -1659,11 +1659,11 @@ check_auto_release() {
   while IFS= read -r line; do printf '  · %s\n' "$line"; done <<<"$out"
 }
 
-# 自举（#1294）。发版入口是正在跑的这份 release.sh：部署检出 /srv/fleet-dao 上的那份，驾驶舱发之前会把检出
-# 快进到目标提交，发版车和人手动发不快进，所以它经常还是上一版（也就是当时的在用版本）自带的脚本。
-# 取到目标提交之后，把那一版的 deploy/ 从裸仓解开，exec 它自带的 release.sh，后面的构建、迁移、装目录、
-# 排空、切版本、健康检查、记历史都由它做。FLEET_RELEASE_BOOTSTRAPPED=1 表示已经是那一版在跑，回 0，调用方接着做；
-# 交出去了就不返回。没有 deploy/release.sh、对象读不出、不是普通文件、解不开：回 1，调用方不许改用现在这份。
+# 自举（#1294）。跑到这份脚本时再交一次：取到目标提交之后，把那一版的 deploy/ 从裸仓解开，exec 它自带的
+# release.sh，后面的构建、迁移、装目录、排空、切版本、健康检查、记历史都由它做。发版车在检出还是旧脚本时
+# 不跑这份，而跑 release-boot.sh（技能随开会话同步，不靠这次发版才换上）。FLEET_RELEASE_BOOTSTRAPPED=1
+# 表示已经是那一版在跑，回 0，调用方接着做；交出去了就不返回。没有 deploy/release.sh、对象读不出、
+# 不是普通文件、解不开：回 1，调用方不许改用现在这份。
 hand_off_release() { # 要发的提交（空＝主线最新） 交给那一版的原样参数…
   local target=$1
   shift
