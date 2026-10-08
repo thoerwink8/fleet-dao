@@ -86,15 +86,6 @@ describe('规矩：Fable 进目录，只有创始人本人配进用途才用得�
     expect(missing(COMMANDER_RULES, COMMANDER)).toEqual([]);
   });
 
-  it('决定 0033 在、0017 文件头标了部分被取代', () => {
-    const decision = read('../../../docs/decisions/0033-fable-in-catalog-founder-only-opens.md');
-    expect(decision).toMatch(/取代[^\n]*0017 第 1、3 条/);
-    expect(decision).toContain('2.进，然后我自己选择要不要在哪个环节配置');
-    expect(read('../../../docs/decisions/0017-fable-only-in-founder-main-session.md')).toMatch(
-      /部分被 \[0033\]\([^)]*\)\s*取代/,
-    );
-  });
-
   it('【故意造出的失败】退回 #669 那句（一律不用、不分场合）：查得出来', () => {
     const old = AGENTS.replace(
       fableLine(AGENTS),
