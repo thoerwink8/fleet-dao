@@ -285,7 +285,9 @@ describe('发版入口是目标提交自带的 release.sh（#1294）', () => {
     const cmd = train.releaseBootCommand(SHA);
     expect(cmd.startsWith('bash -c ')).toBe(true);
     expect(cmd.endsWith(`fleet-release-boot ${SHA}`)).toBe(true);
-    expect(cmd.includes('不改跑检出里的 release.sh')).toBe(true);
+    expect(cmd.includes('.boot')).toBe(true); // 解到按提交号命名的私有目录
+    expect(cmd.includes('.bootstrap-entry')).toBe(false); // 不共用一个目录
+    expect(() => train.releaseBootCommand('不是提交')).toThrow(); // 【故意造出的失败】提交号认不出就不拼命令
     expect(cmd.includes('/srv/fleet-dao/deploy/release.sh')).toBe(false);
     expect(cmd.includes(`bash ${train.RELEASE_SH}`)).toBe(false);
   });

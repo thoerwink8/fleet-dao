@@ -145,7 +145,7 @@ export const realIo = {
     }
     return { ok: true, running };
   },
-  /** 部署检出快进到要发的提交，按钮接着跑的 release.sh 就是这一版。发版车不靠这次快进（#1294）。 */
+  /** 部署检出快进到要发的提交（同自动发布的 prepareCheckout）：release.sh 取自己的新版本。 */
   async prepareCheckout(sha) {
     const dirty = git(['status', '--porcelain', '--untracked-files=no']);
     if (dirty.status !== 0)
