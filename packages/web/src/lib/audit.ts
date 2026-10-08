@@ -11,6 +11,7 @@ const ACTION_LABEL: Record<string, string> = {
   'channel.disable': '下架了渠道',
   'routing.order.move': '调了路由先后',
   'routing.route.enable': '开关了路由',
+  'routing.model.enable': '开关了模型',
   'task.pause': '暂停了',
   'task.resume': '继续了',
   'task.stop': '叫停了',

@@ -24,11 +24,7 @@ test.describe('其余页面', () => {
     await shot(page, '07-路由');
   });
 
-  test('路由：动手里把 Sonnet 5.5 上移 → 确认 → 落库、进操作记录、刷新后还是新顺序；再下移放回去', async ({
-    page,
-    api,
-    shot,
-  }, info) => {
+  test('路由：动手里把 Sonnet 5.5 用键盘上挪 → 回车才落库；再挪回去', async ({ page, api, shot }, info) => {
     test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
     type Layers = { purposes: { purpose: string; models: { modelId: string }[] }[] };
     const executeOrder = async () =>
@@ -42,14 +38,15 @@ test.describe('其余页面', () => {
     await page.goto('/routing?purpose=execute');
     const sonnet = page.locator('li[data-model="sonnet-5.5"]');
     await expect(sonnet).toBeVisible();
-    await sonnet.getByRole('button', { name: /动手里的先后） 上移$/ }).click();
-    // 二次确认：写清从什么顺序变成什么顺序，确认前库里没动
-    const dialog = page.getByRole('alertdialog');
-    await expect(dialog).toContainText('把「Sonnet 5.5」在「动手」里上移一位？');
+    const handle = sonnet.getByRole('button', { name: '拖动 Sonnet 5.5（动手里的先后）' });
+    await handle.focus();
+    await page.keyboard.press('ArrowUp');
+    // 方向键只预览，确认前库里没动，也不弹窗
+    await expect(page.locator('ol[aria-label="模型"]')).toHaveAttribute('data-pending', 'true');
     expect(await executeOrder()).toEqual(before);
+    await expect(page.getByRole('alertdialog')).toHaveCount(0);
     await shot(page, '07-路由-调先后确认');
-    await dialog.getByRole('button', { name: '上移' }).click();
-    await expect(dialog).toHaveCount(0);
+    await page.keyboard.press('Enter');
 
     // 页面按新顺序重排：Sonnet 在最前
     await expect(page.locator('li[data-model]').first()).toHaveAttribute('data-model', 'sonnet-5.5');
@@ -69,9 +66,10 @@ test.describe('其余页面', () => {
     // 放回去（别的用例读的是骨架的顺序）
     await page
       .locator('li[data-model="sonnet-5.5"]')
-      .getByRole('button', { name: /动手里的先后） 下移$/ })
-      .click();
-    await page.getByRole('alertdialog').getByRole('button', { name: '下移' }).click();
+      .getByRole('button', { name: '拖动 Sonnet 5.5（动手里的先后）' })
+      .focus();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
     await expect.poll(executeOrder).toEqual(before);
   });
 

@@ -311,16 +311,25 @@ export const UpdateRouteEffortResponse = z.object({
 
 export const MoveDirectionSchema = z.enum(['up', 'down']);
 
+const OrderReason = z.string().max(500).optional();
+
 /**
- * 用途下的一个模型上移 / 下移一位。expected 填改之前看到的这个用途下的模型先后（模型编号，从先到后）：
- * 对不上返回 409（details.current 是库里现在的先后）；已经在最上 / 最下返回 422。
+ * 用途下的模型先后。两种写法：direction 上移 / 下移一位；order 把整段排成新先后（拖到目标位置）。
+ * expected 都是改之前看到的模型先后（模型编号，从先到后）：对不上返回 409（details.current 是库里现在的先后）。
+ * 已经在最上 / 最下返回 422；order 不是现在这一串的重排也返回 422。
  */
-export const MovePurposeModelRequest = z.object({
-  direction: MoveDirectionSchema,
-  expected: z.array(Id).min(1),
-  /** 写进操作记录。 */
-  reason: z.string().max(500).optional(),
-});
+export const MovePurposeModelRequest = z.union([
+  z.object({
+    order: z.array(Id).min(1),
+    expected: z.array(Id).min(1),
+    reason: OrderReason,
+  }),
+  z.object({
+    direction: MoveDirectionSchema,
+    expected: z.array(Id).min(1),
+    reason: OrderReason,
+  }),
+]);
 export const MovePurposeModelResponse = z.object({
   purpose: StageKindSchema,
   /** 改完后这个用途下的模型先后（模型编号，从先到后）。 */
@@ -337,22 +346,59 @@ export const UpdateModelRouteRequest = z.discriminatedUnion('op', [
     op: z.literal('move'),
     direction: MoveDirectionSchema,
     expected: z.array(Id).min(1),
-    reason: z.string().max(500).optional(),
+    reason: OrderReason,
+  }),
+  z.object({
+    op: z.literal('reorder'),
+    /** 改完后这个模型下的路由先后。必须是 expected 的重排。 */
+    order: z.array(Id).min(1),
+    expected: z.array(Id).min(1),
+    reason: OrderReason,
   }),
   z.object({
     op: z.literal('enable'),
     enabled: z.boolean(),
     expected: z.boolean(),
-    reason: z.string().max(500).optional(),
+    reason: OrderReason,
   }),
 ]);
 export const UpdateModelRouteResponse = z.object({
   modelId: Id,
   routeId: Id,
-  /** op=move：改完后这个模型下的路由先后；op=enable 不给。 */
+  /** op=move / reorder：改完后这个模型下的路由先后；op=enable 不给。 */
   order: z.array(Id).optional(),
-  /** op=enable：改完的开关；op=move 不给。 */
+  /** op=enable：改完的开关；换位置不给。 */
   enabled: z.boolean().optional(),
+});
+
+/**
+ * 模型级开关：开 = 这个模型下的路由全部打开，关 = 全部关掉。关了以后哪个用途都不派（选路看的还是每条路由的开关）。
+ * expectedEnabled 是改之前看到的、开着的路由编号：对不上返回 409（details.current 是现在开着的）。
+ */
+export const SetModelEnabledRequest = z.object({
+  enabled: z.boolean(),
+  expectedEnabled: z.array(Id),
+  reason: OrderReason,
+});
+export const SetModelEnabledResponse = z.object({
+  modelId: Id,
+  enabled: z.boolean(),
+  /** 改完后开着的路由编号（按先后）。 */
+  enabledRouteIds: z.array(Id),
+});
+
+/**
+ * 渠道级开关（channels.enabled）：关了，这个渠道下所有路由都不派。不是已删的 PATCH /routing/channels/:id。
+ * expected 是改之前看到的开关：对不上返回 409。
+ */
+export const SetChannelEnabledRequest = z.object({
+  enabled: z.boolean(),
+  expected: z.boolean(),
+  reason: OrderReason,
+});
+export const SetChannelEnabledResponse = z.object({
+  channelId: Id,
+  enabled: z.boolean(),
 });
 
 // —— 立即探测（驾驶舱改版，创始人 2026-10-07「渠道状态无法探测」）——

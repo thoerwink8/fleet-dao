@@ -3,7 +3,7 @@
 // - 先后和开关是运行时配置、留在库里（决定 0011 第 7 条）：改了直接写库，引擎下一次选路就照新的，不开 PR。库里的写法在 db 的
 //   routing-order.ts（带「我看到的旧值」防两个人同时改、换位置先挪到临时位置躲唯一约束），这里只管同一个事务里记操作记录：记不下就不改。
 // - 没接上（开发环境的内存版没有路由两层那两张表）由接口回 503；写不进抛，接口回 503 写明原因。不当改成了。
-// - 操作记录只有两种动作：routing.order.move（模型或渠道换位置，对象 stage:<用途> 或 model:<模型>）和 routing.route.enable（渠道开关）。
+// - 操作记录：routing.order.move（模型或渠道换位置，对象 stage:<用途> 或 model:<模型>）、routing.route.enable（一条路由的开关）、routing.model.enable（模型开关）、channel.enable / channel.disable（渠道开关）。
 import {
   auditLog,
   type Db,
@@ -12,13 +12,27 @@ import {
   type MoveResult,
   moveModelRoute,
   movePurposeModel,
+  type ReorderModelRoutesInput,
+  type ReorderPurposeModelsInput,
+  reorderModelRoutes,
+  reorderPurposeModels,
+  type SetChannelEnabledFlagInput,
+  type SetChannelEnabledFlagResult,
+  type SetModelEnabledInput,
+  type SetModelEnabledResult,
   type SetRouteEnabledInput,
   type SetRouteEnabledResult,
+  setChannelEnabledFlag,
+  setModelEnabled,
   setRouteEnabled,
 } from '@fleet-dao/db';
 import {
   MovePurposeModelRequest,
   MovePurposeModelResponse,
+  SetChannelEnabledRequest,
+  SetChannelEnabledResponse,
+  SetModelEnabledRequest,
+  SetModelEnabledResponse,
   StageKindSchema,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
@@ -40,6 +54,17 @@ export interface RoutingOrderPort {
   moveModelRoute(input: MoveModelRouteInput, audit: OrderAudit): Promise<MoveResult>;
   /** 开 / 关模型下的一条路由；同上。 */
   setRouteEnabled(input: SetRouteEnabledInput, audit: OrderAudit): Promise<SetRouteEnabledResult>;
+  /** 用途下的模型拖到新先后（整段重排）；改成了就在同一个事务里记操作记录。 */
+  reorderPurposeModels(input: ReorderPurposeModelsInput, audit: OrderAudit): Promise<MoveResult>;
+  /** 模型下的路由拖到新先后；同上。 */
+  reorderModelRoutes(input: ReorderModelRoutesInput, audit: OrderAudit): Promise<MoveResult>;
+  /** 开 / 关一个模型（它下面的路由全部一起开或关）；同上。 */
+  setModelEnabled(input: SetModelEnabledInput, audit: OrderAudit): Promise<SetModelEnabledResult>;
+  /** 开 / 关一个渠道（channels.enabled）；同上。 */
+  setChannelEnabled(
+    input: SetChannelEnabledFlagInput,
+    audit: OrderAudit,
+  ): Promise<SetChannelEnabledFlagResult>;
 }
 
 export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
@@ -96,8 +121,44 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
         );
         return result;
       }),
+    reorderPurposeModels: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await reorderPurposeModels(tx, input);
+        if (!result.ok || sameList(result.before, result.after)) return result;
+        await record(tx, audit, { order: result.before }, { order: result.after, moved: input.modelId });
+        return result;
+      }),
+    reorderModelRoutes: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await reorderModelRoutes(tx, input);
+        if (!result.ok || sameList(result.before, result.after)) return result;
+        await record(tx, audit, { order: result.before }, { order: result.after, moved: input.routeId });
+        return result;
+      }),
+    setModelEnabled: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await setModelEnabled(tx, input);
+        if (!result.ok) return result;
+        await record(
+          tx,
+          audit,
+          { enabledRouteIds: result.before },
+          { enabled: input.enabled, enabledRouteIds: result.after },
+        );
+        return result;
+      }),
+    setChannelEnabled: (input, audit) =>
+      db.transaction(async (tx) => {
+        const result = await setChannelEnabledFlag(tx, input);
+        if (!result.ok) return result;
+        await record(tx, audit, { enabled: result.before }, { enabled: result.after });
+        return result;
+      }),
   };
 }
+
+const sameList = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((x, i) => x === b[i]);
 
 /** 开发环境、内存版：没有路由两层那两张表。 */
 export const ROUTING_ORDER_NOT_HERE =
@@ -111,6 +172,7 @@ function moveProblem(
 ): ApiError {
   if (result.kind === 'not_found') return new ApiError(404, notFoundCode, result.why);
   if (result.kind === 'at_edge') return new ApiError(422, 'already_at_edge', result.why);
+  if (result.kind === 'invalid') return new ApiError(422, 'order_invalid', result.why);
   return new ApiError(409, 'conflict', `${what}的先后刚被别人改过，刷新后再改`, { current: result.current });
 }
 
@@ -137,19 +199,26 @@ export function registerRoutingOrderRoutes(
     const purpose = StageKindSchema.safeParse(purposeParam);
     if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
     if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    const audit: OrderAudit = {
+      actor: actorOf(c),
+      action: 'routing.order.move',
+      target: `stage:${purpose.data}`,
+      reason: body.reason,
+      via: c.get('via'),
+      ok: true,
+    };
     let result: MoveResult;
     try {
-      result = await deps.routingOrder.movePurposeModel(
-        { purpose: purpose.data, modelId, direction: body.direction, expected: body.expected },
-        {
-          actor: actorOf(c),
-          action: 'routing.order.move',
-          target: `stage:${purpose.data}`,
-          reason: body.reason,
-          via: c.get('via'),
-          ok: true,
-        },
-      );
+      result =
+        'order' in body
+          ? await deps.routingOrder.reorderPurposeModels(
+              { purpose: purpose.data, modelId, order: body.order, expected: body.expected },
+              audit,
+            )
+          : await deps.routingOrder.movePurposeModel(
+              { purpose: purpose.data, modelId, direction: body.direction, expected: body.expected },
+              audit,
+            );
     } catch (err) {
       throw unwritable('用途下模型的先后', { purpose: purpose.data, modelId }, err);
     }
@@ -172,11 +241,17 @@ export function registerRoutingOrderRoutes(
       ok: true,
     });
     try {
-      if (body.op === 'move') {
-        const result = await deps.routingOrder.moveModelRoute(
-          { modelId, routeId, direction: body.direction, expected: body.expected },
-          audit('routing.order.move', `model:${modelId}`),
-        );
+      if (body.op === 'move' || body.op === 'reorder') {
+        const result =
+          body.op === 'move'
+            ? await deps.routingOrder.moveModelRoute(
+                { modelId, routeId, direction: body.direction, expected: body.expected },
+                audit('routing.order.move', `model:${modelId}`),
+              )
+            : await deps.routingOrder.reorderModelRoutes(
+                { modelId, routeId, order: body.order, expected: body.expected },
+                audit('routing.order.move', `model:${modelId}`),
+              );
         if (!result.ok) throw moveProblem(result, '这个模型下渠道', 'route_not_found');
         return reply(c, UpdateModelRouteResponse, { modelId, routeId, order: result.after });
       }
@@ -195,5 +270,71 @@ export function registerRoutingOrderRoutes(
       if (err instanceof ApiError) throw err;
       throw unwritable('渠道的先后和开关', { modelId, routeId }, err);
     }
+  });
+
+  // 模型级开关：这个模型下的路由全部打开或全部关掉。选路仍看每条路由的 enabled。
+  app.put(WebRoutes.setModelEnabled.path, async (c) => {
+    const modelId = c.req.param('modelId');
+    const body = await readJson(c, SetModelEnabledRequest);
+    if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    let result: SetModelEnabledResult;
+    try {
+      result = await deps.routingOrder.setModelEnabled(
+        { modelId, enabled: body.enabled, expectedEnabled: body.expectedEnabled },
+        {
+          actor: actorOf(c),
+          action: 'routing.model.enable',
+          target: `model:${modelId}`,
+          reason: body.reason,
+          via: c.get('via'),
+          ok: true,
+        },
+      );
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw unwritable('模型的开关', { modelId }, err);
+    }
+    if (!result.ok) {
+      if (result.kind === 'not_found') throw new ApiError(404, 'model_not_found', result.why);
+      throw new ApiError(409, 'conflict', '这个模型的开关刚被别人改过，刷新后再改', {
+        current: result.current,
+      });
+    }
+    return reply(c, SetModelEnabledResponse, {
+      modelId,
+      enabled: body.enabled,
+      enabledRouteIds: result.after,
+    });
+  });
+
+  // 渠道级开关。已删的 PATCH /routing/channels/:id 不在这里，那条保持 404。
+  app.put(WebRoutes.setChannelEnabled.path, async (c) => {
+    const channelId = c.req.param('channelId');
+    const body = await readJson(c, SetChannelEnabledRequest);
+    if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    let result: SetChannelEnabledFlagResult;
+    try {
+      result = await deps.routingOrder.setChannelEnabled(
+        { channelId, enabled: body.enabled, expected: body.expected },
+        {
+          actor: actorOf(c),
+          action: body.enabled ? 'channel.enable' : 'channel.disable',
+          target: `channel:${channelId}`,
+          reason: body.reason,
+          via: c.get('via'),
+          ok: true,
+        },
+      );
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw unwritable('渠道的开关', { channelId }, err);
+    }
+    if (!result.ok) {
+      if (result.kind === 'not_found') throw new ApiError(404, 'channel_not_found', result.why);
+      throw new ApiError(409, 'conflict', '这个渠道的开关刚被别人改过，刷新后再改', {
+        current: result.current,
+      });
+    }
+    return reply(c, SetChannelEnabledResponse, { channelId, enabled: result.after });
   });
 }

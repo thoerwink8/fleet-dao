@@ -111,6 +111,35 @@ const WRITES: Write[] = [
     ok: { body: { modelId: 'opus-5.5', routeId: 'r-1', enabled: false } },
   },
   {
+    name: 'updateModelRoute（拖到新先后）',
+    call: (api) =>
+      api.updateModelRoute('opus-5.5', 'r-1', {
+        op: 'reorder',
+        order: ['r-1', 'r-0'],
+        expected: ['r-0', 'r-1'],
+      }),
+    method: 'PUT',
+    url: '/api/routing/models/opus-5.5/routes/r-1',
+    body: { op: 'reorder', order: ['r-1', 'r-0'], expected: ['r-0', 'r-1'] },
+    ok: { body: { modelId: 'opus-5.5', routeId: 'r-1', order: ['r-1', 'r-0'] } },
+  },
+  {
+    name: 'setModelEnabled',
+    call: (api) => api.setModelEnabled('opus-5.5', { enabled: false, expectedEnabled: ['r-0', 'r-1'] }),
+    method: 'PUT',
+    url: '/api/routing/models/opus-5.5',
+    body: { enabled: false, expectedEnabled: ['r-0', 'r-1'] },
+    ok: { body: { modelId: 'opus-5.5', enabled: false, enabledRouteIds: [] } },
+  },
+  {
+    name: 'setChannelEnabled',
+    call: (api) => api.setChannelEnabled('ch-relay', { enabled: false, expected: true }),
+    method: 'PUT',
+    url: '/api/routing/channels/ch-relay',
+    body: { enabled: false, expected: true },
+    ok: { body: { channelId: 'ch-relay', enabled: false } },
+  },
+  {
     name: 'resolveNotification',
     call: (api) => api.resolveNotification('n-1'),
     method: 'POST',

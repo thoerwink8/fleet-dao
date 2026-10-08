@@ -1,9 +1,15 @@
 // 驾驶舱「路由」页改先后和开关的接口（母单 #1089 第二片）：用途下的模型上移 / 下移、模型下的渠道上移 / 下移、渠道开关。
 // 真库上写路由两层那两张表（position、enabled），和操作记录同一个事务；改完 /routing/layers 读回来的就是新顺序（引擎选路也读这两张表）。
 // 没登录、没接上、别人先改了（看到的顺序对不上）、没有这一项、已在最上 / 最下、请求不合约定、网关通行证都拒，库里不动、不记操作记录。
-import { auditLog, routes, routingCatalog, routingPurposeModels } from '@fleet-dao/db';
+import { auditLog, channels, routes, routingCatalog, routingPurposeModels } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { MovePurposeModelResponse, RoutingLayersResponse, UpdateModelRouteResponse } from '@fleet-dao/shared';
+import {
+  MovePurposeModelResponse,
+  RoutingLayersResponse,
+  SetChannelEnabledResponse,
+  SetModelEnabledResponse,
+  UpdateModelRouteResponse,
+} from '@fleet-dao/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRoutingLayers } from '../src/routing-layers.ts';
@@ -236,6 +242,18 @@ describe('驾驶舱改路由先后：用途下的模型', () => {
       setRouteEnabled: async () => {
         throw new Error('不该走到这');
       },
+      reorderPurposeModels: async () => {
+        throw new Error('不该走到这');
+      },
+      reorderModelRoutes: async () => {
+        throw new Error('不该走到这');
+      },
+      setModelEnabled: async () => {
+        throw new Error('不该走到这');
+      },
+      setChannelEnabled: async () => {
+        throw new Error('不该走到这');
+      },
     };
     current = await pgHarness(t, { routingOrder: broken });
     const s = await current.login();
@@ -450,6 +468,18 @@ describe('驾驶舱改路由先后：模型下的渠道和开关', () => {
       setRouteEnabled: async () => {
         throw new Error('deadlock detected');
       },
+      reorderPurposeModels: async () => {
+        throw new Error('不该走到这');
+      },
+      reorderModelRoutes: async () => {
+        throw new Error('deadlock detected');
+      },
+      setModelEnabled: async () => {
+        throw new Error('不该走到这');
+      },
+      setChannelEnabled: async () => {
+        throw new Error('不该走到这');
+      },
     };
     current = await pgHarness(t, { routingOrder: broken });
     const s2 = await current.login();
@@ -460,5 +490,100 @@ describe('驾驶舱改路由先后：模型下的渠道和开关', () => {
     });
     expect(moved.status).toBe(503);
     expect(await errorCode(moved)).toBe('routing_order_unwritable');
+  });
+});
+
+describe('驾驶舱：拖到新位置、模型开关、渠道开关', () => {
+  it('拖动模型：一次写成新先后并记操作记录；路由两层读回来就是这个顺序', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const order = ['gpt-5.6', 'opus-5.5', 'kimi-k3'];
+    const res = await putModel(current, s, 'execute/models/opus-5.5', { order, expected: MODELS });
+    expect(res.status).toBe(200);
+    expect(MovePurposeModelResponse.parse(await res.json())).toEqual({ purpose: 'execute', order });
+    expect(await dbModelOrder()).toEqual(order);
+    const rows = (await audits()).filter((a) => a.action === 'routing.order.move');
+    expect(rows).toEqual([
+      expect.objectContaining({
+        target: 'stage:execute',
+        before: { order: MODELS },
+        after: { order, moved: 'opus-5.5' },
+      }),
+    ]);
+  });
+
+  it('关掉模型：这个模型下的路由都关着，路由两层写「开关关着」；再开全部打开', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const off = await putRoute(current, s, 'opus-5.5', {
+      enabled: false,
+      expectedEnabled: ['rt-claude-opus', 'rt-mirasim-opus'],
+    });
+    expect(off.status).toBe(200);
+    expect(SetModelEnabledResponse.parse(await off.json())).toEqual({
+      modelId: 'opus-5.5',
+      enabled: false,
+      enabledRouteIds: [],
+    });
+    const layers = RoutingLayersResponse.parse(
+      await (await current.cockpit.request('/api/routing/layers', { headers: { cookie: s.cookie } })).json(),
+    );
+    const opus = layers.purposes
+      .find((p) => p.purpose === 'execute')
+      ?.models.find((m) => m.modelId === 'opus-5.5');
+    expect(opus?.routes.every((r) => r.enabled === false && r.ban.reason.includes('开关关着'))).toBe(true);
+    const logged = await t.db.select().from(auditLog);
+    expect(logged.some((a) => a.action === 'routing.model.enable' && a.target === 'model:opus-5.5')).toBe(
+      true,
+    );
+  });
+
+  it('关掉渠道：channels.enabled 变成关，路由两层写「渠道关了」；看到的开关过期不覆盖', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const res = await current.cockpit.request(
+      '/api/routing/channels/ch-mirasim',
+      write('PUT', s, { enabled: false, expected: true, reason: '324 账号被封' }),
+    );
+    expect(res.status).toBe(200);
+    expect(SetChannelEnabledResponse.parse(await res.json())).toEqual({
+      channelId: 'ch-mirasim',
+      enabled: false,
+    });
+    expect((await t.db.select().from(channels).where(eq(channels.id, 'ch-mirasim')))[0]?.enabled).toBe(false);
+    const layers = RoutingLayersResponse.parse(
+      await (await current.cockpit.request('/api/routing/layers', { headers: { cookie: s.cookie } })).json(),
+    );
+    const mirasim = layers.purposes
+      .flatMap((p) => p.models.flatMap((m) => m.routes))
+      .filter((r) => r.channelId === 'ch-mirasim');
+    expect(mirasim.length).toBeGreaterThan(0);
+    expect(mirasim.every((r) => r.connect.reason === '渠道关了')).toBe(true);
+    const stale = await current.cockpit.request(
+      '/api/routing/channels/ch-mirasim',
+      write('PUT', s, { enabled: true, expected: true }),
+    );
+    expect(stale.status).toBe(409);
+    expect((await t.db.select().from(channels).where(eq(channels.id, 'ch-mirasim')))[0]?.enabled).toBe(false);
+    const logged = await t.db.select().from(auditLog);
+    expect(logged.some((a) => a.action === 'channel.disable' && a.target === 'channel:ch-mirasim')).toBe(
+      true,
+    );
+  });
+
+  it('【故意造出的失败】新先后不是重排：422，库里的顺序不动', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const res = await putModel(current, s, 'execute/models/opus-5.5', {
+      order: ['opus-5.5', 'opus-5.5'],
+      expected: MODELS,
+    });
+    expect(res.status).toBe(422);
+    expect(await errorCode(res)).toBe('order_invalid');
+    expect(await dbModelOrder()).toEqual(MODELS);
   });
 });

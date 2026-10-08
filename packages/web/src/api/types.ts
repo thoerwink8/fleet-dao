@@ -69,6 +69,10 @@ import type {
   RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
+  SetChannelEnabledRequest,
+  SetChannelEnabledResponse,
+  SetModelEnabledRequest,
+  SetModelEnabledResponse,
   SettingSchema,
   SettingsResponse,
   TaskActionRequest,
@@ -158,12 +162,16 @@ export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
 export type UpdateTaskRoutePinBody = z.input<typeof UpdateTaskRoutePinRequest>;
 export type TaskRoutePin = z.infer<typeof UpdateTaskRoutePinResponse>;
 
-/** 路由页改先后和开关（母单 #1089）：用途下的模型上移 / 下移、模型下的渠道上移 / 下移和开关。 */
+/** 路由页改先后和开关（母单 #1089）：拖到新先后、模型 / 渠道 / 每条路由的开关。 */
 export type MovePurposeModelBody = z.input<typeof MovePurposeModelRequest>;
 export type MovedPurposeModel = z.infer<typeof MovePurposeModelResponse>;
 export type UpdateModelRouteBody = z.input<typeof UpdateModelRouteRequest>;
 export type UpdatedModelRoute = z.infer<typeof UpdateModelRouteResponse>;
-export type MoveDirection = MovePurposeModelBody['direction'];
+export type MoveDirection = 'up' | 'down';
+export type SetModelEnabledBody = z.input<typeof SetModelEnabledRequest>;
+export type SetModelEnabledResult = z.infer<typeof SetModelEnabledResponse>;
+export type SetChannelEnabledBody = z.input<typeof SetChannelEnabledRequest>;
+export type SetChannelEnabledResult = z.infer<typeof SetChannelEnabledResponse>;
 
 /** 整池暂停的现状（#746）：开关、认不出的、旧提醒、到期没复查的。 */
 export type PoolHolds = PoolHoldsView;

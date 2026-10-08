@@ -44,6 +44,10 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
+  SetChannelEnabledBody,
+  SetChannelEnabledResult,
+  SetModelEnabledBody,
+  SetModelEnabledResult,
   Setting,
   SettingKey,
   Settings,
@@ -120,8 +124,12 @@ export interface FleetApi {
   ): Promise<UpdatedRouteEffort>;
   /** 用途下的一个模型上移 / 下移一位（母单 #1089）：expected 是改之前看到的模型先后，对不上 409，已在最上 / 最下 422。 */
   movePurposeModel(purpose: string, modelId: string, body: MovePurposeModelBody): Promise<MovedPurposeModel>;
-  /** 模型下的一条渠道上移 / 下移一位，或开 / 关（母单 #1089）：同样带看到的旧值。 */
+  /** 模型下的一条渠道上移 / 下移一位、拖到新先后，或开 / 关（母单 #1089）：同样带看到的旧值。 */
   updateModelRoute(modelId: string, routeId: string, body: UpdateModelRouteBody): Promise<UpdatedModelRoute>;
+  /** 模型级开关：开则下面的路由全开，关则全关。expectedEnabled 是改之前开着的路由编号。 */
+  setModelEnabled(modelId: string, body: SetModelEnabledBody): Promise<SetModelEnabledResult>;
+  /** 渠道级开关（channels.enabled）。expected 是改之前看到的开关。 */
+  setChannelEnabled(channelId: string, body: SetChannelEnabledBody): Promise<SetChannelEnabledResult>;
   pools(): Promise<Pools>;
   /** 整池暂停现状（#746）：开关（到期标红）、认不出的、还靠旧提醒顶着的。新建、撤回走 updateSetting('engine.poolHolds')。 */
   poolHolds(): Promise<PoolHolds>;
@@ -710,6 +718,36 @@ export function useUpdateModelRoute() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.routingLayers });
       qc.invalidateQueries({ queryKey: keys.routingEfforts });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 模型级开关。写完重拉路由两层：页面上每条路由的开关跟着变。 */
+export function useSetModelEnabled() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelId, body }: { modelId: string; body: SetModelEnabledBody }) =>
+      api.setModelEnabled(modelId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
+      qc.invalidateQueries({ queryKey: keys.routingEfforts });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 渠道级开关。渠道目录和路由两层都重拉：关了的渠道，路由上写「渠道已关」。 */
+export function useSetChannelEnabled() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ channelId, body }: { channelId: string; body: SetChannelEnabledBody }) =>
+      api.setChannelEnabled(channelId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.routing });
+      qc.invalidateQueries({ queryKey: keys.routingLayers });
       qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });

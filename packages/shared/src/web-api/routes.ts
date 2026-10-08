@@ -42,6 +42,10 @@ import {
   RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
+  SetChannelEnabledRequest,
+  SetChannelEnabledResponse,
+  SetModelEnabledRequest,
+  SetModelEnabledResponse,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
   UpdateRouteEffortRequest,
@@ -144,12 +148,29 @@ export const WebRoutes = {
     request: MovePurposeModelRequest,
     response: MovePurposeModelResponse,
   },
-  /** 模型下的一条渠道上移 / 下移一位，或开 / 关（母单 #1089）；同样带看到的旧值。网关通行证不认。 */
+  /** 模型下的一条渠道上移 / 下移一位、拖到新先后，或开 / 关（母单 #1089）；同样带看到的旧值。网关通行证不认。 */
   updateModelRoute: {
     method: 'PUT',
     path: '/routing/models/:modelId/routes/:routeId',
     request: UpdateModelRouteRequest,
     response: UpdateModelRouteResponse,
+  },
+  /** 模型级开关：开则这个模型下的路由全开，关则全关。带看到的、开着的路由编号。网关通行证不认。 */
+  setModelEnabled: {
+    method: 'PUT',
+    path: '/routing/models/:modelId',
+    request: SetModelEnabledRequest,
+    response: SetModelEnabledResponse,
+  },
+  /**
+   * 渠道级开关（channels.enabled）。不是已删的 PATCH /routing/channels/:id（那条保持 404）。
+   * 网关通行证不认。
+   */
+  setChannelEnabled: {
+    method: 'PUT',
+    path: '/routing/channels/:channelId',
+    request: SetChannelEnabledRequest,
+    response: SetChannelEnabledResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
   /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */

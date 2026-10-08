@@ -9,6 +9,7 @@
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { ArrowRight, LoaderCircle } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import type { ProbeHistoryCell, ProbeHistoryChannel } from '../api/types';
 import type { ChannelCard } from '../lib/channel-status';
@@ -298,7 +299,16 @@ function HistoryBlock({
 }
 
 /** 路由页顶上的一行：每个渠道一个小圆点加名字，点过去看渠道状态页（原文、立即探测都在那里）。 */
-export function ChannelStrip({ cards, now }: { cards: readonly ChannelCard[]; now: number }) {
+export function ChannelStrip({
+  cards,
+  now,
+  extra,
+}: {
+  cards: readonly ChannelCard[];
+  now: number;
+  /** 名字旁边再画一点（路由页的渠道开关）。渠道状态页不传。 */
+  extra?: (card: ChannelCard) => ReactNode;
+}) {
   const bad = cards.filter((c) => c.state === 'down' && !c.interrupted).length;
   return (
     <nav
@@ -314,6 +324,7 @@ export function ChannelStrip({ cards, now }: { cards: readonly ChannelCard[]; no
               key={c.channel.id}
               data-channel={c.channel.id}
               data-state={c.interrupted ? 'interrupted' : c.state}
+              className="inline-flex items-center gap-1"
             >
               <Link
                 to={`/routing/status?p=${encodeURIComponent(c.channel.id)}`}
@@ -332,6 +343,7 @@ export function ChannelStrip({ cards, now }: { cards: readonly ChannelCard[]; no
                   </span>
                 )}
               </Link>
+              {extra?.(c)}
             </li>
           );
         })}

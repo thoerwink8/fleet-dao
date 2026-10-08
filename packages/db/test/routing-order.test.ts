@@ -3,8 +3,16 @@
 // 已在最上 / 最下、没有这一项、别人刚改过（看到的先后对不上）都明确拒、一行不动。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { moveModelRoute, movePurposeModel, setRouteEnabled } from '../src/routing-order.ts';
-import { routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
+import {
+  moveModelRoute,
+  movePurposeModel,
+  reorderModelRoutes,
+  reorderPurposeModels,
+  setChannelEnabledFlag,
+  setModelEnabled,
+  setRouteEnabled,
+} from '../src/routing-order.ts';
+import { channels, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { createTestDb, realTestPgUrl, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog } from './helpers.ts';
 
@@ -269,6 +277,113 @@ describe('模型下的路由上移 / 下移', () => {
       ]);
     },
   );
+});
+
+describe('拖到新位置', () => {
+  const before = ['opus-5.5', 'opus-4.9', 'gpt-5.6-luna'];
+
+  it('整段重排：位置从 0 连续排；别的用途里的同一个模型不动', async () => {
+    const order = ['gpt-5.6-luna', 'opus-5.5', 'opus-4.9'];
+    expect(
+      await reorderPurposeModels(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        expected: before,
+        order,
+      }),
+    ).toEqual({ ok: true, before, after: order });
+    expect(await modelOrder('execute')).toEqual(order.map((id, position) => [id, position]));
+    expect(await modelOrder('review')).toEqual([
+      ['opus-4.9', 0],
+      ['grok-4.7', 1],
+    ]);
+  });
+
+  it('【故意造出的失败】不是现在这一串的重排、看到的先后过期：一行不动', async () => {
+    expect(
+      await reorderPurposeModels(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        expected: before,
+        order: ['opus-5.5', 'opus-5.5', 'opus-4.9'],
+      }),
+    ).toMatchObject({ ok: false, kind: 'invalid' });
+    expect(
+      await reorderModelRoutes(t.db, {
+        modelId: 'opus-4.9',
+        routeId: 'c',
+        expected: ['a', 'b', 'c'],
+        order: ['c', 'a', 'b'],
+      }),
+    ).toEqual({ ok: true, before: ['a', 'b', 'c'], after: ['c', 'a', 'b'] });
+    await movePurposeModel(t.db, { purpose: 'execute', modelId: 'opus-5.5', direction: 'down' });
+    expect(
+      await reorderPurposeModels(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        expected: before,
+        order: ['gpt-5.6-luna', 'opus-4.9', 'opus-5.5'],
+      }),
+    ).toMatchObject({ ok: false, kind: 'conflict' });
+    expect(await routeOrder()).toEqual([
+      ['c', 0],
+      ['a', 1],
+      ['b', 2],
+    ]);
+  });
+});
+
+describe('模型开关、渠道开关', () => {
+  it('关掉模型：这个模型下的路由全部关掉，先后不动；看到的开着的路由对不上就不覆盖', async () => {
+    expect(
+      await setModelEnabled(t.db, {
+        modelId: 'opus-4.9',
+        enabled: false,
+        expectedEnabled: ['a', 'b', 'c'],
+      }),
+    ).toEqual({ ok: true, before: ['a', 'b', 'c'], after: [] });
+    expect(
+      (await t.db.select().from(routingCatalog).where(eq(routingCatalog.modelId, 'opus-4.9')))
+        .sort((x, y) => x.position - y.position)
+        .map((r) => [r.routeId, r.enabled, r.position]),
+    ).toEqual([
+      ['a', false, 0],
+      ['b', false, 1],
+      ['c', false, 2],
+    ]);
+    expect(
+      await setModelEnabled(t.db, {
+        modelId: 'opus-4.9',
+        enabled: true,
+        expectedEnabled: ['a'],
+      }),
+    ).toEqual({ ok: false, kind: 'conflict', current: [] });
+    expect(
+      await setModelEnabled(t.db, { modelId: 'opus-4.9', enabled: true, expectedEnabled: [] }),
+    ).toMatchObject({ ok: true, after: ['a', 'b', 'c'] });
+    expect(await setModelEnabled(t.db, { modelId: 'nope', enabled: false, expectedEnabled: [] })).toEqual({
+      ok: false,
+      kind: 'not_found',
+      why: '模型 nope 下没有路由（路由两层里没挂）',
+    });
+  });
+
+  it('关掉渠道：只改 channels.enabled；看到的开关对不上就不覆盖', async () => {
+    expect(await setChannelEnabledFlag(t.db, { channelId: 'relay', enabled: false, expected: true })).toEqual(
+      { ok: true, before: true, after: false },
+    );
+    expect((await t.db.select().from(channels).where(eq(channels.id, 'relay')))[0]?.enabled).toBe(false);
+    expect(await setChannelEnabledFlag(t.db, { channelId: 'relay', enabled: true, expected: true })).toEqual({
+      ok: false,
+      kind: 'conflict',
+      current: false,
+    });
+    expect(await setChannelEnabledFlag(t.db, { channelId: 'nope', enabled: false, expected: true })).toEqual({
+      ok: false,
+      kind: 'not_found',
+      why: '没有这个渠道：nope',
+    });
+  });
 });
 
 describe('路由开关', () => {
