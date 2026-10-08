@@ -264,6 +264,7 @@ describe('驾驶舱改路由先后：用途下的模型', () => {
       setPurposeModelEffort: async () => {
         throw new Error('不该走到这');
       },
+      subjectsOf: async () => ({ model: undefined, routes: [] }),
     };
     current = await pgHarness(t, { routingOrder: broken });
     const s = await current.login();
@@ -499,6 +500,7 @@ describe('驾驶舱改路由先后：模型下的渠道和开关', () => {
       setPurposeModelEffort: async () => {
         throw new Error('不该走到这');
       },
+      subjectsOf: async () => ({ model: undefined, routes: [] }),
     };
     current = await pgHarness(t, { routingOrder: broken });
     const s2 = await current.login();

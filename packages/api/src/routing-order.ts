@@ -12,6 +12,7 @@ import {
   type MoveModelRouteInput,
   type MovePurposeModelInput,
   type MoveResult,
+  models,
   moveModelRoute,
   movePurposeModel,
   type PurposeWriteResult,
@@ -21,6 +22,7 @@ import {
   removePurposeModel,
   reorderModelRoutes,
   reorderPurposeModels,
+  routes,
   type SetChannelEnabledFlagInput,
   type SetChannelEnabledFlagResult,
   type SetModelEnabledInput,
@@ -49,8 +51,10 @@ import {
   UpdateModelRouteResponse,
   WebRoutes,
 } from '@fleet-dao/shared';
+import { eq } from 'drizzle-orm';
 import type { Context, Hono } from 'hono';
 import type { Deps } from './deps.ts';
+import { type FounderOnlySubjects, guardFounderOnly, operatorOf } from './founder-only.ts';
 import { ApiError, fullStack, readJson, reply } from './http.ts';
 import type { Actor, NewAuditEntry } from './ports.ts';
 import type { CockpitEnv } from './session.ts';
@@ -82,6 +86,8 @@ export interface RoutingOrderPort {
   removePurposeModel(input: RemovePurposeModelInput, audit: OrderAudit): Promise<PurposeWriteResult>;
   /** 改这个用途下这个模型的档位；同上。 */
   setPurposeModelEffort(input: SetPurposeModelEffortInput, audit: OrderAudit): Promise<PurposeWriteResult>;
+  /** 一个模型和它名下路由的「被判的名字」（给「只有创始人能开」的门用，founder-only.ts）。模型库里没有 = model 为空。 */
+  subjectsOf(modelId: string): Promise<FounderOnlySubjects>;
 }
 
 export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
@@ -102,6 +108,19 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
       error: audit.error ?? null,
     });
   return {
+    subjectsOf: async (modelId) => {
+      const [model] = await db.select().from(models).where(eq(models.id, modelId));
+      const rows = await db.select().from(routes).where(eq(routes.modelId, modelId));
+      return {
+        model,
+        routes: model
+          ? rows.map((r) => ({
+              routeId: r.id,
+              subject: { ...model, upstreamModel: r.upstreamModel, upstreamAliases: r.upstreamAliases },
+            }))
+          : [],
+      };
+    },
     movePurposeModel: (input, audit) =>
       db.transaction(async (tx) => {
         const result = await movePurposeModel(tx, input);
@@ -250,6 +269,25 @@ export function registerRoutingOrderRoutes(
     );
   };
 
+  /**
+   * 「只有创始人本人能开」的门（决定 0033）：开关（打开）、拖动、加进用途的接口动手之前都过这一步，同一个判法
+   * （shared 的 founderOnlyDenial）。读不到模型 / 路由的名字就抛 503，不当成「不是 Fable」放过去。
+   */
+  const requireFounderForFounderOnly = async (
+    c: Context<CockpitEnv>,
+    port: RoutingOrderPort,
+    modelId: string,
+    routeId?: string,
+  ): Promise<void> => {
+    let subjects: FounderOnlySubjects;
+    try {
+      subjects = await port.subjectsOf(modelId);
+    } catch (err) {
+      throw unwritable('模型的名字', { modelId }, err);
+    }
+    guardFounderOnly(operatorOf(c), subjects, routeId);
+  };
+
   // 用途下的一个模型上移 / 下移一位。只有网关通行证之外的登录才进得来（GATEWAY_WEB_ROUTES 里没有它）。
   app.put(WebRoutes.movePurposeModel.path, async (c) => {
     const purposeParam = c.req.param('purpose');
@@ -258,6 +296,7 @@ export function registerRoutingOrderRoutes(
     const purpose = StageKindSchema.safeParse(purposeParam);
     if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
     if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    await requireFounderForFounderOnly(c, deps.routingOrder, modelId);
     const audit: OrderAudit = {
       actor: actorOf(c),
       action: 'routing.order.move',
@@ -291,6 +330,10 @@ export function registerRoutingOrderRoutes(
     const routeId = c.req.param('routeId');
     const body = await readJson(c, UpdateModelRouteRequest);
     if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    // 关掉谁都能关（往安全那边改）；打开和换位置才要过「只有创始人能开」
+    if (body.op !== 'enable' || body.enabled) {
+      await requireFounderForFounderOnly(c, deps.routingOrder, modelId, routeId);
+    }
     const audit = (action: string, target: string): OrderAudit => ({
       actor: actorOf(c),
       action,
@@ -337,6 +380,7 @@ export function registerRoutingOrderRoutes(
     const modelId = c.req.param('modelId');
     const body = await readJson(c, SetModelEnabledRequest);
     if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    if (body.enabled) await requireFounderForFounderOnly(c, deps.routingOrder, modelId);
     let result: SetModelEnabledResult;
     try {
       result = await deps.routingOrder.setModelEnabled(
@@ -428,6 +472,7 @@ export function registerRoutingOrderRoutes(
     const purpose = StageKindSchema.safeParse(purposeParam);
     if (!purpose.success) throw new ApiError(404, 'purpose_not_found', `没有这个用途：${purposeParam}`);
     if (!deps.routingOrder) throw new ApiError(503, 'routing_order_not_wired', ROUTING_ORDER_NOT_HERE);
+    await requireFounderForFounderOnly(c, deps.routingOrder, body.modelId);
     let result: PurposeWriteResult;
     try {
       result = await deps.routingOrder.addPurposeModel(

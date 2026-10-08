@@ -1,7 +1,7 @@
 // 三段和路由页用途的对照只有这一份（#1224）。引擎验收选路用的用途必须是页面上叫「验收」的那一格：
 // 对不上就红——改了一边没改另一边，验收会按页面上调不到的顺序走。
 import { describe, expect, it } from 'vitest';
-import { hardBanFor } from '../src/bans.ts';
+import { founderOnlyFor, hardBanFor } from '../src/bans.ts';
 import {
   acceptancePurpose,
   ROUTING_PURPOSE_IDS,
@@ -26,11 +26,12 @@ describe('三段 → 用途', () => {
     ]);
   });
 
-  it('整理待办（groom，#1338）出现在路由目录里，能按用途名认出来；Fable 的硬禁令对它照旧生效', () => {
+  it('整理待办（groom，#1338）出现在路由目录里，能按用途名认出来；Fable 不再是硬禁令，改成只有创始人本人能配进用途（决定 0033）', () => {
     expect(ROUTING_PURPOSE_IDS).toContain('groom');
     expect(routingPurposeLabel('groom')).toBe('整理待办');
     const fable = { id: 'claude-fable-5.2', family: 'claude', displayName: 'Claude Fable 5.2' };
-    expect(hardBanFor(fable, 'groom')?.id).toBe('no-fable');
+    expect(hardBanFor(fable, 'groom')).toBeUndefined();
+    expect(founderOnlyFor(fable)?.id).toBe('fable-founder-only');
     const sonnet = { id: 'sonnet-5.5', family: 'claude', displayName: 'Claude Sonnet 5.5' };
     expect(hardBanFor(sonnet, 'groom')).toBeUndefined();
   });

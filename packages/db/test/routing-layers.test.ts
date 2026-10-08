@@ -24,13 +24,13 @@ afterAll(async () => {
 const config = (over: Record<string, unknown> = {}) =>
   parseRoutingConfig(
     JSON.stringify({
-      purposes: { default: ['opus-4.9'], ui: ['claude-fable-5.2', 'opus-4.9'] },
+      purposes: { default: ['opus-4.9'], ui: ['claude-lite-5.2', 'opus-4.9'] },
       models: {
         'opus-4.9': [
           { routeId: 'a-opus', enabled: true },
           { routeId: 'b-opus', enabled: true },
         ],
-        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true }],
       },
       ...over,
     }),
@@ -53,9 +53,9 @@ describe('把默认骨架写进库', () => {
     await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-4.9' });
     await addRoute(t.db, { id: 'b-opus', poolId: 'relay-b', modelId: 'opus-4.9' });
     await addRoute(t.db, {
-      id: 'a-fable',
+      id: 'a-lite',
       poolId: 'relay-a',
-      modelId: 'claude-fable-5.2',
+      modelId: 'claude-lite-5.2',
       hostId: 'mirasim',
     });
   });
@@ -63,11 +63,11 @@ describe('把默认骨架写进库', () => {
   it('每个用途都写上（没单列的用 default），模型下按顺序写路由；再装一次什么都不动', async () => {
     const first = await applyRoutingDefault(t.db, config());
     expect(first.purposesApplied).toEqual([...STAGE_KINDS]);
-    expect(first.modelsApplied.sort()).toEqual(['claude-fable-5.2', 'opus-4.9']);
+    expect(first.modelsApplied.sort()).toEqual(['claude-lite-5.2', 'opus-4.9']);
     const purposes = await t.db.select().from(routingPurposeModels);
     expect(purposes.filter((p) => p.purpose === 'ui').map((p) => [p.modelId, p.position])).toEqual(
       expect.arrayContaining([
-        ['claude-fable-5.2', 0],
+        ['claude-lite-5.2', 0],
         ['opus-4.9', 1],
       ]),
     );
@@ -77,6 +77,74 @@ describe('把默认骨架写进库', () => {
     expect(again.modelsApplied).toEqual([]);
     expect(again.purposesKept).toEqual([...STAGE_KINDS]);
     expect((await t.db.select().from(routingCatalog)).length).toBe(3);
+  });
+
+  describe('Fable（只有创始人本人能开，决定 0033）：骨架不能替他打开或配进用途', () => {
+    beforeEach(async () => {
+      await addRoute(t.db, {
+        id: 'a-fable',
+        poolId: 'relay-b',
+        modelId: 'claude-fable-5.2',
+        hostId: 'mirasim',
+      });
+    });
+
+    it('骨架里列着 Fable、路由关着、不在任何用途里：照常写进库，关着、不在用途里', async () => {
+      const report = await applyRoutingDefault(
+        t.db,
+        config({
+          purposes: { default: ['opus-4.9'] },
+          models: {
+            'opus-4.9': [{ routeId: 'a-opus', enabled: true }],
+            'claude-fable-5.2': [{ routeId: 'a-fable', enabled: false }],
+          },
+        }),
+      );
+      expect(report.modelsApplied).toContain('claude-fable-5.2');
+      expect(
+        (await t.db.select().from(routingCatalog).where(eq(routingCatalog.routeId, 'a-fable'))).map(
+          (r) => r.enabled,
+        ),
+      ).toEqual([false]);
+      expect(
+        (await t.db.select().from(routingPurposeModels)).filter((p) => p.modelId === 'claude-fable-5.2'),
+      ).toEqual([]);
+    });
+
+    it('【故意造出的失败】骨架把 Fable 配进用途、或把它的路由写成开着：拒，一行不写，原因写明', async () => {
+      const inPurpose = config({
+        purposes: { default: ['opus-4.9'], ui: ['claude-fable-5.2', 'opus-4.9'] },
+        models: {
+          'opus-4.9': [{ routeId: 'a-opus', enabled: true }],
+          'claude-fable-5.2': [{ routeId: 'a-fable', enabled: false }],
+        },
+      });
+      const opened = config({
+        purposes: { default: ['opus-4.9'] },
+        models: {
+          'opus-4.9': [{ routeId: 'a-opus', enabled: true }],
+          'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        },
+      });
+      for (const [bad, word] of [
+        [inPurpose, '被配进用途 ui'],
+        [opened, '在骨架里是开着的'],
+      ] as const) {
+        const err = await applyRoutingDefault(t.db, bad).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(RoutingConfigError);
+        expect((err as RoutingConfigError).problems.join('\n')).toContain(word);
+        expect((err as RoutingConfigError).problems.join('\n')).toContain('0033');
+      }
+      expect(await t.db.select().from(routingCatalog)).toEqual([]);
+      expect(await t.db.select().from(routingPurposeModels)).toEqual([]);
+    });
+
+    it('【故意造出的失败】路由上游串是 Fable、模型叫别的名字，开着也一样拒', async () => {
+      await t.db.update(routes).set({ upstreamModel: 'claude-fable-5-1' }).where(eq(routes.id, 'a-lite'));
+      const err = await applyRoutingDefault(t.db, config()).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(RoutingConfigError);
+      expect((err as RoutingConfigError).problems.join('\n')).toContain('claude-lite-5.2');
+    });
   });
 
   it('用途还是空、模型已有路由行：不改那几行的开关和档位，也不追加；还没有路由行的模型仍按骨架写', async () => {
@@ -89,12 +157,12 @@ describe('把默认骨架写进库', () => {
           { routeId: 'a-opus', enabled: true, effort: 'max' },
           { routeId: 'b-opus', enabled: true, effort: 'xhigh' },
         ],
-        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true }],
       },
     });
     const report = await applyRoutingDefault(t.db, withEffort);
     expect(report.modelsKept).toEqual(['opus-4.9']);
-    expect(report.modelsApplied).toEqual(['claude-fable-5.2']);
+    expect(report.modelsApplied).toEqual(['claude-lite-5.2']);
     expect(report.routesAppended).toEqual([]);
     expect(report.purposesApplied).toEqual([...STAGE_KINDS]);
     const rows = await t.db.select().from(routingCatalog);
@@ -117,7 +185,7 @@ describe('把默认骨架写进库', () => {
           { routeId: 'a-opus', enabled: false },
           { routeId: 'b-opus', enabled: false },
         ],
-        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true }],
       },
     });
     const first = await applyRoutingDefault(t.db, cfg);
@@ -140,18 +208,18 @@ describe('把默认骨架写进库', () => {
   it('用途已有任何一行：不再补模型、不再装没写过的用途、已有顺序留着', async () => {
     await t.db.insert(routingPurposeModels).values([
       { purpose: 'ui', modelId: 'opus-4.9', position: 0 },
-      { purpose: 'ui', modelId: 'claude-fable-5.2', position: 7 },
+      { purpose: 'ui', modelId: 'claude-lite-5.2', position: 7 },
     ]);
     await t.db.insert(models).values({ id: 'haiku-4.5', family: 'claude', displayName: 'Haiku 4.5' });
     await addRoute(t.db, { id: 'a-haiku', poolId: 'relay-a', modelId: 'haiku-4.5' });
     const cfg = config({
       purposes: {
         default: ['opus-4.9', 'haiku-4.5'],
-        ui: ['claude-fable-5.2', 'opus-4.9', 'haiku-4.5'],
+        ui: ['claude-lite-5.2', 'opus-4.9', 'haiku-4.5'],
       },
       models: {
         'opus-4.9': [{ routeId: 'a-opus', enabled: true }],
-        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true }],
         'haiku-4.5': [{ routeId: 'a-haiku', enabled: false }],
       },
     });
@@ -189,7 +257,7 @@ describe('把默认骨架写进库', () => {
           { routeId: 'a-opus', enabled: true, effort: 'max' },
           { routeId: 'b-opus', enabled: true },
         ],
-        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true, effort: 'low' }],
+        'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true, effort: 'low' }],
       },
     });
     await applyRoutingDefault(t.db, withEffort);
@@ -197,7 +265,7 @@ describe('把默认骨架写进库', () => {
     expect(Object.fromEntries(rows.map((r) => [r.routeId, r.effort]))).toEqual({
       'a-opus': 'max',
       'b-opus': null,
-      'a-fable': 'low',
+      'a-lite': 'low',
     });
   });
 
@@ -215,7 +283,7 @@ describe('把默认骨架写进库', () => {
           { routeId: 'a-opus', enabled: true },
           { routeId: 'g-grok', enabled: true, effort: 'max' },
         ],
-        'claude-fable-5.2': [{ routeId: 'a-fable', enabled: true }],
+        'claude-lite-5.2': [{ routeId: 'a-lite', enabled: true }],
       },
     });
     const err = await applyRoutingDefault(t.db, bad).catch((e: unknown) => e);
@@ -233,7 +301,7 @@ describe('把默认骨架写进库', () => {
       models: {
         'opus-4.9': [
           { routeId: 'a-opus', enabled: true },
-          { routeId: 'a-fable', enabled: true },
+          { routeId: 'a-lite', enabled: true },
           { routeId: 'nope', enabled: true },
         ],
         'ghost-model': [{ routeId: 'b-opus', enabled: true }],
@@ -244,7 +312,7 @@ describe('把默认骨架写进库', () => {
     const problems = (err as RoutingConfigError).problems.join('\n');
     expect(problems).toContain('模型 ghost-model 库里没有');
     expect(problems).toContain('路由 nope 库里没有');
-    expect(problems).toContain('路由 a-fable 在库里属于模型 claude-fable-5.2');
+    expect(problems).toContain('路由 a-lite 在库里属于模型 claude-lite-5.2');
     expect(await t.db.select().from(routingPurposeModels)).toEqual([]);
     expect(await t.db.select().from(routingCatalog)).toEqual([]);
   });
@@ -263,9 +331,9 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
     await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-4.9' });
     await addRoute(t.db, { id: 'b-opus', poolId: 'relay-b', modelId: 'opus-4.9', alive: false });
     await addRoute(t.db, {
-      id: 'a-fable',
+      id: 'a-lite',
       poolId: 'relay-a',
-      modelId: 'claude-fable-5.2',
+      modelId: 'claude-lite-5.2',
       hostId: 'mirasim',
     });
     await applyRoutingDefault(t.db, config());
@@ -331,11 +399,11 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
       readAt: new Date(NOW.getTime() - MIN),
       reading: 'measured',
     });
-    await t.db.insert(bans).values({ modelId: 'claude-fable-5.2', reason: '不用这个模型' });
+    await t.db.insert(bans).values({ modelId: 'claude-lite-5.2', reason: '不用这个模型' });
     const layers = await routingLayers(t.db, 'ui', { now: NOW });
-    const fable = layers.models.find((m) => m.modelId === 'claude-fable-5.2');
-    expect(fable?.verdict).toBe('dead');
-    expect(fable?.routes[0]?.liveness.ban.reason).toContain('不用这个模型');
+    const lite = layers.models.find((m) => m.modelId === 'claude-lite-5.2');
+    expect(lite?.verdict).toBe('dead');
+    expect(lite?.routes[0]?.liveness.ban.reason).toContain('不用这个模型');
     const opusA = layers.models
       .find((m) => m.modelId === 'opus-4.9')
       ?.routes.find((r) => r.candidate.routeId === 'a-opus');
@@ -343,7 +411,7 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
     await t.db.delete(bans); // 禁令优先写在原因里，要看开关就先撤掉它
     await t.db.update(routingCatalog).set({ enabled: false });
     const off = await routingLayers(t.db, 'ui', { now: NOW });
-    // fable 还被代码里的硬禁令挡着（不用 Fable），原因先写禁令；opus 的原因是开关关着
+    // 开关全关了：每条路由的原因都是开关关着
     const offOpus = off.models.find((m) => m.modelId === 'opus-4.9');
     expect(offOpus?.routes.every((r) => r.liveness.ban.reason.includes('关着'))).toBe(true);
     expect(offOpus?.verdict).toBe('dead');

@@ -1,10 +1,11 @@
 // 把默认骨架（routing.default.json）写进库的两张路由表（#574）。骨架只做新装机的初始值（#1356）：
 // routing_purpose_models 已经有任何一行，就不再往用途里补模型、不再改开关、不再追加路由（创始人在页面上删掉的要留着）。
 // 一张用途行都没有的空库才按骨架整份写一次。用途还是空、但某个模型的路由层已经有行：那些行不动（不改开关），只给还没有路由行的模型写。
-// 引用对不上（模型、路由库里没有，路由不属于那个模型）、思考档位这条路由的执行方式不认、有用途既没单列又没有 default：
-// 先报错、一行不写（库里已经有用途行时也一样，不因为「这次本来就不改」就把坏骨架放过去）。
+// 引用对不上（模型、路由库里没有，路由不属于那个模型）、思考档位这条路由的执行方式不认、有用途既没单列又没有 default、
+// 只有创始人本人能开的模型（Fable，决定 0033）被配进用途或路由写成开着：先报错、一行不写
+// （库里已经有用途行时也一样，不因为「这次本来就不改」就把坏骨架放过去）。关着、不进任何用途的可以写。
 // 发布时由 bin/routing.ts 在目录装载器之后调（deploy/release.sh 的 load_routing）：路由要先由目录装进库，骨架才对得上。
-import { routeEffortProblem } from '@fleet-dao/shared';
+import { founderOnlyFor, routeEffortProblem } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.ts';
 import {
@@ -39,9 +40,11 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
   if (missing.length > 0) problems.push(`没有 default，这些用途也没单列：${missing.join('、')}`);
 
   const modelIds = Object.keys(cfg.models);
-  const knownModels = new Set(
-    (await db.select({ id: models.id }).from(models).where(inArray(models.id, modelIds))).map((m) => m.id),
-  );
+  const modelRows = await db
+    .select({ id: models.id, family: models.family, displayName: models.displayName })
+    .from(models)
+    .where(inArray(models.id, modelIds));
+  const knownModels = new Set(modelRows.map((m) => m.id));
   for (const m of modelIds) if (!knownModels.has(m)) problems.push(`模型 ${m} 库里没有`);
   const routeIds = Object.values(cfg.models).flatMap((rs) => rs.map((r) => r.routeId));
   const knownRoutes = new Map(
@@ -52,11 +55,34 @@ export async function applyRoutingDefault(db: Db, cfg: RoutingConfig): Promise<R
           modelId: routes.modelId,
           hostId: routes.hostId,
           upstreamModel: routes.upstreamModel,
+          upstreamAliases: routes.upstreamAliases,
         })
         .from(routes)
         .where(inArray(routes.id, routeIds))
     ).map((r) => [r.id, r]),
   );
+  // 只有创始人本人能开的模型（Fable，决定 0033）：骨架是机器写进库的，不能替他把它配进用途或打开。
+  // 骨架里列着它、但路由是关着的、也不在任何用途里，可以（入库默认就是这样）。
+  for (const [modelId, rs] of Object.entries(cfg.models)) {
+    const row = modelRows.find((m) => m.id === modelId);
+    if (row === undefined) continue;
+    const founderOnly = [
+      founderOnlyFor(row),
+      ...rs.map((r) => {
+        const known = knownRoutes.get(r.routeId);
+        return known && founderOnlyFor({ ...row, ...known, id: row.id });
+      }),
+    ].find((rule) => rule !== undefined);
+    if (founderOnly === undefined) continue;
+    const inPurposes = STAGE_KINDS.filter((s) => listFor(s)?.includes(modelId));
+    const opened = rs.filter((r) => r.enabled).map((r) => r.routeId);
+    if (inPurposes.length > 0) {
+      problems.push(`模型 ${modelId} 在骨架里被配进用途 ${inPurposes.join('、')}：${founderOnly.reason}`);
+    }
+    if (opened.length > 0) {
+      problems.push(`模型 ${modelId} 的路由 ${opened.join('、')} 在骨架里是开着的：${founderOnly.reason}`);
+    }
+  }
   for (const [model, rs] of Object.entries(cfg.models)) {
     for (const r of rs) {
       const known = knownRoutes.get(r.routeId);

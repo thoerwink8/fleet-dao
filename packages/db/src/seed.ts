@@ -1,7 +1,7 @@
 // 种子：通用的族、模型、渠道类型示例。不放任何账号信息：账号池、路由、成员、额度都不放（公开仓，账号在机器本地配置）。
 // 跑几遍结果都一样。路由两层的骨架不进这里（由 packages/db/routing.default.json 装，routing-apply.ts）；旧的按阶段平铺
 // 表（stage_policies / stage_policy_routes，已删，迁移 0037）没人读了，也不种（#754）。
-// 全局禁令（GPT 不做 UI、不用 Fable）写死在 @fleet-dao/shared 的 bans.ts，不进库；bans 表只放创始人另加的。
+// 全局禁令（GPT 不做 UI）写死在 @fleet-dao/shared 的 bans.ts，不进库；bans 表只放创始人另加的。Fable 不是禁令，是「只有创始人本人能开」（同文件，决定 0033）。
 import type { Db } from './client.ts';
 import { channels, families, models } from './schema/index.ts';
 

@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyFailure } from '../../src/failure/index.ts';
 import { type ChooseRouteInput, chooseRoute, type RouteFacts } from '../../src/routing/index.ts';
-import { at, halfOpenBreaker, input, NOW, reserve, route, win } from './helpers.ts';
+import { at, entry, halfOpenBreaker, input, NOW, reserve, route, win } from './helpers.ts';
 
 const solo = (extra: Partial<RouteFacts> = {}) =>
   route('solo-opus', { poolId: 'claude-solo', poolName: '独享号', ...extra });
@@ -349,7 +349,7 @@ describe('全部并发满 / 全部额度满 / 全部被禁', () => {
     if (r.kind === 'wait') expect(r.reason).toContain('清零时刻不知道，按轮询间隔再看');
   });
 
-  it('全部被禁（UI 阶段只挂了 GPT 和 Fable）：派不出，附每条原因', () => {
+  it('全部被禁（UI 阶段挂了 GPT 和关着的 Fable）：派不出，附每条原因', () => {
     const gpt = route('gpt-ui', {
       modelId: 'gpt-5.6-luna',
       modelName: 'GPT 5.6 luna',
@@ -357,12 +357,17 @@ describe('全部并发满 / 全部额度满 / 全部被禁', () => {
       hostId: 'codex',
     });
     const fable = route('fable-ui', { modelId: 'fable-5.1', modelName: 'Fable 5.1' });
-    const r = chooseRoute(input([gpt, fable], { stage: 'ui' }));
+    const r = chooseRoute(
+      input([gpt, fable], {
+        stage: 'ui',
+        order: [entry('gpt-ui', 0), entry('fable-ui', 1, { enabled: false })],
+      }),
+    );
     expect(r.kind).toBe('none');
     if (r.kind === 'none') {
       expect(r.reason).toContain('GPT 不做 UI 类活');
-      expect(r.reason).toContain('不用 Fable');
-      expect(r.verdicts.map((v) => v.blocks.map((b) => b.code))).toEqual([['banned'], ['banned']]);
+      expect(r.reason).toContain('在它的模型下关着');
+      expect(r.verdicts.map((v) => v.blocks.map((b) => b.code))).toEqual([['banned'], ['switched-off']]);
     }
   });
 });

@@ -559,7 +559,7 @@ flowchart TD
 | `approve(gate)` / `reject(gate)` | Update | 驾驶舱、飞书 | 人闸；带校验（这个任务确实在等这道闸），回执给按钮 |
 | `answer(questionId, text)` | Update | 驾驶舱、飞书、issue 评论 | 回答追问 |
 | `pause()` / `resume()` / `stop()` | Update | 驾驶舱 | 在干净的点停下；不在可停的状态就明确拒绝（C6） |
-| `changeRoute(stepType, routeId)` | Update | 驾驶舱、AI 帅位 | 校验禁令（GPT 不碰 UI、不用 Fable）；下一次尝试生效 |
+| `changeRoute(stepType, routeId)` | Update | 驾驶舱、AI 帅位 | 校验禁令（GPT 不碰 UI；Fable 看路由开着没有，决定 0033）；下一次尝试生效 |
 | `amend(text)` | Update | 驾驶舱 | 临时追加的要求排进下一轮 |
 | `mainMoved(sha)` | Update | 后端（push 事件） | 在途分支同步主线 |
 | `progress(event)` | Signal | `fleet` 命令经后端转发 | 只作唤醒；数据本身先写 Postgres |
