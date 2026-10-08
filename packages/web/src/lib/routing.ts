@@ -35,7 +35,7 @@ export function routeHost(r: Pick<RoutingLayerRoute, 'hostId'>): string {
 
 /**
  * 这条路由的账号池占着几个名额、满没满（#800）：在跑的 + 已选定还没开跑的（选路在选定那一刻就预占名额），到上限就是满。
- * 满不满只有 shared 的 poolFull 一个判法（引擎选路、候选查询同一个）：路由页、换路由选项都经这里，不各写一份。
+ * 满不满只有 shared 的 poolFull 一个判法（引擎选路、路由页同一个）：路由页经这里，不另写一份。
  * count：没有已选定的是「1/3」，有的把两样各写明：「3/3（在跑 1、已选定还没开跑 2）」；text 是路由页那一句（加前缀「在跑」「占」）。
  */
 export function routeSlots(r: Pick<RoutingLayerRoute, 'inFlight' | 'reserved' | 'maxConcurrency'>): {

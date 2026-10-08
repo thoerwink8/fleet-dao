@@ -1,13 +1,11 @@
 // @vitest-environment happy-dom
 // 读不到的时候必须说「没读成」，不许用空列表、0 冒充「查了没事」（AGENTS.md 底线）。
 // 这里对每条这样的路径故意造一次「读不到」：假后端的某个接口直接报错，看页面怎么说。
-import { act, cleanup, fireEvent, screen } from '@testing-library/react';
-import { useEffect, useRef } from 'react';
+import { cleanup, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import { Topbar } from '../components/shell/topbar';
-import { targetOf, useTaskActions } from '../components/task-actions';
 import AuditPage from '../routes/audit';
 import NotificationsPage from '../routes/notifications';
 import SchedulesPage from '../routes/schedules';
@@ -55,48 +53,5 @@ describe('读不到时照实说，不冒充「没有」', () => {
       api: failing('notifications'),
     });
     expect(await screen.findByRole('button', { name: '提醒没读成' })).toBeTruthy();
-  });
-});
-
-/** 在测试里直接触发一个快捷操作（换模型的对话框）。 */
-function Trigger({ action }: { action: 'reroute' }) {
-  const { trigger } = useTaskActions();
-  const fired = useRef(false);
-  useEffect(() => {
-    if (fired.current) return;
-    fired.current = true;
-    trigger(action, {
-      ...targetOf({
-        id: 't-15',
-        issueNumber: 15,
-        title: '站内通知 7 天没读就再提醒一次',
-        state: 'asking',
-        priority: 3,
-        requestedBy: 'u-lan',
-        createdAt: '2026-09-25T00:00:00Z',
-        progress: { done: 0, total: 0 },
-        subtasks: [],
-      }),
-      activity: {
-        runId: 'run-x',
-        stage: 'plan',
-        routeId: 'r-ca-opus',
-        modelName: 'Opus 5.5',
-        queued: false,
-        since: '2026-09-25T00:00:00Z',
-        text: 'Opus 5.5 正在写方案',
-      },
-    });
-  }, [trigger, action]);
-  return null;
-}
-
-describe('对话框里读不到也照实说', () => {
-  test('换模型：路由两层没读成，写明现在没法换', async () => {
-    renderApp(<Trigger action="reroute" />, { api: failing('routingLayers') });
-    expect(await screen.findByText(/路由没读成，现在没法换/)).toBeTruthy();
-    await act(async () => {
-      fireEvent.keyDown(document.body, { key: 'Escape' });
-    });
   });
 });

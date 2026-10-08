@@ -10,7 +10,7 @@ import { useNow } from '../../../lib/hooks';
 import { type Tone, toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { StatusChip, StatusDot } from '../../status';
-import { ACTIONS, availableActions, useTaskActions } from '../../task-actions';
+import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
 import type { HomeRunning } from '../types';
@@ -106,10 +106,8 @@ function since(iso: string | undefined, now: number): string | undefined {
 function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) {
   const now = useNow();
   const ui = useBoardUi();
-  const { trigger } = useTaskActions();
   const tone = ticketTone(item);
   const target = targetOfItem(item, ui.remote);
-  const actions = target ? availableActions(target) : [];
   const founder = needsFounder(item);
   return (
     <div>
@@ -119,26 +117,7 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
       </Head>
       <h2 className="mt-2 text-lg leading-snug font-semibold">{item.title}</h2>
       <p className="num mt-1 text-xs text-muted-foreground">{item.repo}</p>
-      {target && actions.length ? (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {actions.map((a) => {
-            const def = ACTIONS[a];
-            const Icon = def.icon;
-            return (
-              <Button
-                key={a}
-                size="sm"
-                variant="outline"
-                className={cn('h-8', def.danger && 'text-ink-fail')}
-                onClick={() => trigger(a, target)}
-              >
-                <Icon />
-                {def.label}
-              </Button>
-            );
-          })}
-        </div>
-      ) : null}
+      {target ? <ActionButtons target={target} className="mt-3" /> : null}
 
       {founder && item.pendingDecision ? (
         <Section title="要你拍">

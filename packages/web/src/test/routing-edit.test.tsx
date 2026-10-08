@@ -2,11 +2,29 @@
 // 路由页上调先后和开关（母单 #1089 第二片）：每个用途下的模型、每个模型下的渠道各有「上移 / 下移」，渠道有开关；
 // 点之前二次确认（取消就什么都不写）、确认了带「我看到的顺序」写后端，页面按库里现在的顺序重排；
 // 别人先改了（409）退回库里的顺序；已在最上 / 最下的键置灰；选了远程环境（本机 WSL 的快照）整块置灰并写「去那台上操作」。
+// #856 第 2 处：渠道这一级的总开关 useUpdateChannel 是有意撤掉的（#972），页面上的渠道开关就是这里每条路由的开关。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+
+const { toast } = vi.hoisted(() => ({
+  toast: Object.assign(vi.fn(), {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+  }),
+}));
+vi.mock('sonner', () => ({ toast, Toaster: () => null }));
+
+import * as client from '../api/client';
 import { ApiError } from '../api/client';
 import RoutingPage from '../routes/routing';
 import { renderApp } from './harness';
+
+beforeEach(() => {
+  toast.success.mockClear();
+  toast.error.mockClear();
+});
 
 afterEach(cleanup);
 
@@ -144,6 +162,23 @@ describe('路由页：调先后和开关', () => {
     });
   });
 
+  test('【故意造出的失败】渠道开关被后端拒：弹「没改成」和后端那句，开关还是原来的', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    vi.spyOn(api, 'updateModelRoute').mockRejectedValue(
+      new ApiError(409, 'conflict', '这条路由的开关刚被别人改过，刷新后再改'),
+    );
+    await opened();
+    fireEvent.click(within(routeItem('r-cb-opus')).getByRole('switch'));
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '关闭' }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('没改成', {
+        description: '这条路由的开关刚被别人改过，刷新后再改',
+      }),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(within(routeItem('r-cb-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('true');
+  });
+
   test('【故意造出的失败】别人先改了（409）：弹窗关掉、页面还是库里现在的顺序，不当改成了', async () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     vi.spyOn(api, 'movePurposeModel').mockRejectedValue(
@@ -167,5 +202,11 @@ describe('路由页：调先后和开关', () => {
     for (const sw of screen.getAllByRole('switch')) {
       expect((sw as HTMLButtonElement).disabled).toBe(true);
     }
+  });
+});
+
+describe('渠道总开关 useUpdateChannel（#856 第 2 处）', () => {
+  test('有意撤掉：前端不再导出。页面上的渠道开关是路由页每条路由的开关，不是这条旧接口', () => {
+    expect('useUpdateChannel' in client).toBe(false);
   });
 });

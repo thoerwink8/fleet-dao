@@ -308,7 +308,7 @@ export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
 /**
  * 路由两层每一层现在活着吗（#574）。活不活由探针、额度、禁令现算：探针的结论不推送，所以和 useRouting 一样每 30 秒重拉
  * （路由页顶部的渠道状态两份一起读，#1087）；额度、渠道变了另由推送叫它重拉（下面 TABLE_KEYS）。
- * enabled 为假时不读（比如换模型的对话框没打开）。
+ * enabled 为假时不读。
  */
 export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
@@ -687,7 +687,13 @@ export function useMovePurposeModel() {
   });
 }
 
-/** 改模型下渠道的先后和开关：同上，路由两层和思考档位页（它也按这个先后列）一起重拉。 */
+/**
+ * 改模型下渠道的先后，以及路由页上的渠道开关（每条路由一个，确认后发 op:'enable'）。
+ * #856 第 2 处判定：渠道这一级的总开关（旧的 useUpdateChannel、PATCH /api/routing/channels/:id）是有意撤掉的，
+ * 不是漏了入口。#928 把它标成看板删除后没人用的残留，#972 从契约、后端、前端一起删了；
+ * packages/api 的 web-routes-contract 测试钉着这条接口保持 404，这里不再导出 useUpdateChannel，也不把它接回来。
+ * 路由两层和思考档位页（它也按这个先后列）在写完后一起重拉。
+ */
 export function useUpdateModelRoute() {
   const api = useApi();
   const qc = useQueryClient();

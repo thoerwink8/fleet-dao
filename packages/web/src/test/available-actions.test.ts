@@ -1,5 +1,5 @@
-// 该画出哪些快捷操作（task-actions.tsx 的 availableActions，#901、#820 片 3）：引擎的任务工作流听暂停、继续、叫停，
-// 换模型后端回 409 action_not_supported，所以不画——画出来点了只会弹一句「做不到」。暂停着的单不再给「暂停」。
+// 该画出哪些快捷操作（task-actions.tsx 的 availableActions，#901、#820 片 3、#856）：引擎的任务工作流听暂停、继续、叫停、重做。
+// 中途换路由（reroute）后端固定 409，页面上没有这个动作。暂停着的单不再给「暂停」。
 import { describe, expect, test } from 'vitest';
 import type { BoardSubtask } from '../api/types';
 import { type ActionTarget, availableActions } from '../components/task-actions';

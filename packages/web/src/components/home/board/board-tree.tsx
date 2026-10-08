@@ -6,7 +6,7 @@ import { useSearchParams } from 'react-router';
 import { cn } from '../../../lib/utils';
 import { useRemoteView } from '../../node-notice';
 import { StatusDot } from '../../status';
-import { ACTIONS, availableActions, useTaskActions } from '../../task-actions';
+import { useTargetActions } from '../../task-actions';
 import { Button } from '../../ui/button';
 import {
   DropdownMenu,
@@ -124,10 +124,8 @@ function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly
 
 function ActionsMenu({ item }: { item: HomeRunning }) {
   const remote = useRemoteView() !== null;
-  const { trigger } = useTaskActions();
-  const target = targetOfItem(item, remote);
-  const actions = target ? availableActions(target) : [];
-  if (!target || !actions.length) return null;
+  const entries = useTargetActions(targetOfItem(item, remote));
+  if (!entries.length) return null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -141,15 +139,10 @@ function ActionsMenu({ item }: { item: HomeRunning }) {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
-        {actions.map((a) => {
-          const def = ACTIONS[a];
+        {entries.map(({ action, def, run }) => {
           const Icon = def.icon;
           return (
-            <DropdownMenuItem
-              key={a}
-              variant={def.danger ? 'destructive' : 'default'}
-              onSelect={() => trigger(a, target)}
-            >
+            <DropdownMenuItem key={action} variant={def.danger ? 'destructive' : 'default'} onSelect={run}>
               <Icon />
               {def.label}
             </DropdownMenuItem>

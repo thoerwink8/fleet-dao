@@ -1,11 +1,9 @@
 // 路由、模型、账号池、额度窗的查询与白话名。各页都从这里拿名字，不各拼各的。
 
-import { windowAppliesTo } from '@fleet-dao/shared';
 import { brand } from '#brand';
 import type {
   BillingKind,
   HostId,
-  Model,
   PoolView,
   QuotaWindowKind,
   QuotaWindowView,
@@ -135,112 +133,6 @@ export function windowTitle(w: Pick<QuotaWindowView, 'window' | 'label' | 'scope
  */
 export function isUpstreamFull(w: QuotaWindowView): boolean {
   return !w.staleSince && w.upstreamStatus === 'limit_reached';
-}
-
-/**
- * 一个池的额度概况，按紧的程度分四堆：上游说已用满的（最紧，排最前面）、读到用量的里用得最满的那个、
- * 用量没读到的、上游这次没报的。后两堆不参与比较，但要让人看见。
- */
-export interface PoolUsage {
-  full: QuotaWindowView[];
-  tightest: { w: QuotaWindowView; util: number } | undefined;
-  unknown: QuotaWindowView[];
-  /** 读成过、但上游这次没再报的窗（staleSince）：照样显示，不参与比较。 */
-  unreported: QuotaWindowView[];
-}
-
-export function poolUsage(windows: QuotaWindowView[]): PoolUsage {
-  const full: QuotaWindowView[] = [];
-  let tightest: PoolUsage['tightest'];
-  const unknown: QuotaWindowView[] = [];
-  const unreported: QuotaWindowView[] = [];
-  for (const w of windows) {
-    const util = utilOf(w);
-    if (w.staleSince) unreported.push(w);
-    else if (isUpstreamFull(w)) full.push(w);
-    else if (util === undefined) unknown.push(w);
-    else if (!tightest || util > tightest.util) tightest = { w, util };
-  }
-  return { full, tightest, unknown, unreported };
-}
-
-/**
- * 一个池的额度说成一句话。调度台、换模型对话框、渠道页都用这一句，不各说各的：
- * 从没读成过 → 额度没查成；有窗已用满 → 已用满（哪怕别的窗才用了一半）；其次才是最满的窗用了几成。
- */
-export type QuotaHeadline =
-  | { kind: 'unread' }
-  | { kind: 'full'; w: QuotaWindowView; util: number | undefined }
-  | { kind: 'util'; w: QuotaWindowView; util: number }
-  | { kind: 'unknown'; w: QuotaWindowView }
-  | { kind: 'unreported'; w: QuotaWindowView }
-  | { kind: 'empty' }
-  /** 按路由看时：池里有窗，但都是只扣别的模型组的（routeQuotaHeadline）。 */
-  | { kind: 'unscoped' };
-
-/** pool 为 undefined 表示额度表里查不到这个池，和「一次都没读成过」一样说「额度没查成」。 */
-export function quotaHeadline(pool: Pick<PoolView, 'quotaStatus' | 'windows'> | undefined): QuotaHeadline {
-  if (!pool || pool.quotaStatus === 'unread') return { kind: 'unread' };
-  const u = poolUsage(pool.windows);
-  const [full] = u.full;
-  if (full) return { kind: 'full', w: full, util: utilOf(full) };
-  if (u.tightest) return { kind: 'util', ...u.tightest };
-  const [unknown] = u.unknown;
-  if (unknown) return { kind: 'unknown', w: unknown };
-  const [unreported] = u.unreported;
-  if (unreported) return { kind: 'unreported', w: unreported };
-  return { kind: 'empty' };
-}
-
-/**
- * 一条路由的额度概况：只算扣它的窗。账号级窗都扣；只扣一组模型的窗按 shared 的 windowAppliesTo 判
- * （和读额度、选路由同一套判法）——只有 fable 组满了时，同池的 Kimi 不算满。
- * 驾驶舱拿不到池的组成员表，按组名和模型名比；模型在目录里查不到时整池一起算（宁可说紧，不说松）。
- */
-export function routeQuotaHeadline(
-  pool: Pick<PoolView, 'quotaStatus' | 'windows'> | undefined,
-  model: Pick<Model, 'id' | 'family'> | undefined,
-): QuotaHeadline {
-  if (!pool || !model) return quotaHeadline(pool);
-  const windows = pool.windows.filter(
-    (w) =>
-      windowAppliesTo(w.scope ? { scope: w.scope } : {}, { id: model.id, family: model.family }) !== 'no',
-  );
-  if (pool.quotaStatus !== 'unread' && pool.windows.length && !windows.length) return { kind: 'unscoped' };
-  return quotaHeadline({ ...pool, windows });
-}
-
-export function headlineText(h: QuotaHeadline): string {
-  switch (h.kind) {
-    case 'unread':
-      return '额度没查成';
-    case 'full':
-      // 只扣一组模型的窗满了，写明是哪一组满了，别让人以为整个池都用不了。
-      return h.w.scope ? `${h.w.scope} 组已用满` : '已用满';
-    case 'unscoped':
-      return '没有扣它的窗';
-    case 'util':
-      return formatUtil(h.util);
-    case 'unknown':
-      return '用量没读到';
-    case 'unreported':
-      return '上游这次没报';
-    case 'empty':
-      return '上游没报额度窗';
-  }
-}
-
-/** 这句话用什么颜色：已用满红；没查成、没读到、没报黄；读到的数字照常。 */
-export function headlineInk(h: QuotaHeadline): string {
-  switch (h.kind) {
-    case 'full':
-      return 'text-ink-fail';
-    case 'util':
-    case 'unscoped':
-      return '';
-    default:
-      return 'text-ink-stall';
-  }
 }
 
 /** 快清零、还剩不少——该先用它。用量没读到、窗口长度不知道、上游这次没报、上游说已用满的都不算。 */

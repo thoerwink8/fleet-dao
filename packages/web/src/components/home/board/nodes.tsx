@@ -9,7 +9,7 @@ import { SEGMENT_UNMETERED, segmentHint, segmentLabel } from '../../../lib/segme
 import { type Tone, toneBg, toneSoft, toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { StatusChip, StatusDot } from '../../status';
-import { ACTIONS, type ActionTarget, availableActions, useTaskActions } from '../../task-actions';
+import { ACTIONS, type ActionTarget, useTargetActions } from '../../task-actions';
 import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
@@ -95,24 +95,23 @@ function Shell({
 }) {
   const ui = useBoardUi();
   const level = useZoomLevel();
-  const { trigger } = useTaskActions();
   const { hover, bind } = useHoverIntent();
   const item = itemOf(data);
   const target = item ? targetOfItem(item, ui.remote) : undefined;
-  const actions = target ? availableActions(target) : [];
+  const entries = useTargetActions(target);
   const { selected, dimmed } = useNodeView(ui.view, id);
 
   return (
     <>
-      {target && actions.length ? (
+      {target && entries.length ? (
         <NodeToolbar
           isVisible={(hover || selected) && level !== 'far' && !dimmed}
           position={Position.Top}
           offset={8}
         >
           <div {...bind} className="flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-lg">
-            {actions.map((a) => (
-              <QuickButton key={a} action={a} target={target} onRun={() => trigger(a, target)} />
+            {entries.map(({ action, run }) => (
+              <QuickButton key={action} action={action} target={target} onRun={run} />
             ))}
           </div>
         </NodeToolbar>
@@ -141,24 +140,17 @@ function Shell({
         </ContextMenuTrigger>
         <ContextMenuContent className="w-56">
           <ContextMenuLabel className="truncate text-xs text-muted-foreground">{title}</ContextMenuLabel>
-          {target
-            ? actions.map((a) => {
-                const def = ACTIONS[a];
-                const Icon = def.icon;
-                return (
-                  <ContextMenuItem
-                    key={a}
-                    variant={def.danger ? 'destructive' : 'default'}
-                    onSelect={() => trigger(a, target)}
-                  >
-                    <Icon />
-                    {def.label}
-                    <ContextMenuShortcut>{def.key}</ContextMenuShortcut>
-                  </ContextMenuItem>
-                );
-              })
-            : null}
-          {actions.length ? <ContextMenuSeparator /> : null}
+          {entries.map(({ action, def, run }) => {
+            const Icon = def.icon;
+            return (
+              <ContextMenuItem key={action} variant={def.danger ? 'destructive' : 'default'} onSelect={run}>
+                <Icon />
+                {def.label}
+                <ContextMenuShortcut>{def.key}</ContextMenuShortcut>
+              </ContextMenuItem>
+            );
+          })}
+          {entries.length ? <ContextMenuSeparator /> : null}
           <ContextMenuItem onSelect={() => ui.select(id)}>
             看详情
             <ContextMenuShortcut>Enter</ContextMenuShortcut>
