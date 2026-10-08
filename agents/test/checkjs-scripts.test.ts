@@ -13,6 +13,8 @@ const AGENTS = join(import.meta.dirname, '..');
 const CHECKED = [
   'skills/commander/scripts/france-lib.mjs',
   'skills/commander/scripts/france-query.mjs',
+  'skills/commander/scripts/patrol-lib.mjs',
+  'skills/commander/scripts/patrol.mjs',
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'hooks/pretool.mjs',

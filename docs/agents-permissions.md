@@ -107,9 +107,9 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 
 ## 子代理默认模型
 
-`~/.claude/settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL`。决定 0017（`docs/decisions/0017-fable-only-in-founder-main-session.md`，创始人 2026-10-04）：子代理永不用 Fable，只用 Opus 或 Sonnet。光靠派的时候记得写 `model` 不够：没写的子代理会跟主会话同一个模型，而创始人本机的主会话可能是他自己选的 Fable。所以把「默认子代理模型」钉进设置，由同步工具写到每台机器。
+`~/.claude/settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL`。决定 0034（`docs/decisions/0034-subagent-by-cost-effectiveness.md`，创始人 2026-10-09 授权）：子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档，永不用 Fable（沿用 0017）；**默认值只许 Opus 或 Sonnet**，Haiku 5.5 只在派活时逐个显式选，不当忘了写模型时的兜底（兜底落到 Haiku，写代码的活就悄悄跑在小模型上了）。光靠派的时候记得写 `model` 不够：没写的子代理会跟主会话同一个模型，而创始人本机的主会话可能是他自己选的 Fable。所以把「默认子代理模型」钉进设置，由同步工具写到每台机器。
 
-- **是什么**：Claude Code 的默认子代理模型只有环境变量这一种设法（`settings.json` 里没有同名的键），写在 `~/.claude/settings.json` 的 `env` 里、开会话时生效。仓里 `agents/config/claude-permissions.json` 写的是 `"env": { "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5-5" }`，即 Sonnet 5.5（创始人 2026-10-05「派活我推荐sonnet5.5>opus5.5」，原先是 Opus 5.5；Opus 仍允许）。
+- **是什么**：Claude Code 的默认子代理模型只有环境变量这一种设法（`settings.json` 里没有同名的键），写在 `~/.claude/settings.json` 的 `env` 里、开会话时生效。仓里 `agents/config/claude-permissions.json` 写的是 `"env": { "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5-5" }`，即 Sonnet 5.5（决定 0034 的默认档；原先是 Opus 5.5，Opus 仍允许当默认，Haiku 不行）。
 - **管得到哪些子代理**：先后是 调用时写的 `model` > 子代理定义里写的模型（写 `inherit` 就跟主会话）> 这个变量 > 主会话（官方文档 model-config、sub-agents 两页，和本机 Claude Code 2.1.285 的程序一致）。所以它只兜住**两头都没写**的那些：
 
   | 子代理 | 定义里写的模型 | 派的时候没写 `model`，用的是 |
@@ -120,12 +120,12 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
   | claude-code-guide | `haiku` | Haiku |
   | statusline-setup | `sonnet` | Sonnet |
 
-  所以**派子代理照旧一律写明 `model: "sonnet"`（或 `"opus"`）**（指挥官技能「派活」那条），主会话在 Fable 上时照旧别用 `fork`。这个变量是忘了写时的兜底，不是替代。
+  所以**派子代理照旧一律写明 `model`**：按决定 0034 的档位写 `"haiku"`、`"sonnet"` 或 `"opus"`（Agent 工具只收别名，所以交代里要子代理汇报首行写自己的模型 id、对不上就升档重派；细则在指挥官技能 `references/子代理选模型.md`），主会话在 Fable 上时照旧别用 `fork`。这个变量是忘了写时的兜底，不是替代。
 - **同步工具怎么写**：只写 `env` 里这一项、每次覆盖（同 `defaultMode`：机器上改成别的，哪怕也是 Opus 或 Sonnet，也报漂移、改回仓里的；要换先改仓里）；`env` 里别的变量（代理这些）一个不碰；机器上的 `env` 不是对象就整份不动、报没做成。`--user`（法国装机）跟权限一起整段不写。
-- **源文件拒收**（报没查成 / 没做成，一台机器都不写，不替它补上）：没写 `env` 或这一项；值不是 Opus 或 Sonnet（只认 `opus`、`sonnet` 或 `claude-opus-…`、`claude-sonnet-…` 这样的 id，可带 `[1m]`；Fable、Mythos、Haiku、`inherit`、`best`、`opusplan` 都不认）；`env` 里多写了同步工具没登记的变量（`env` 会推给每一台机器，要加新变量，先在 `packages/agents-sync/src/permissions.ts` 的 `ENV_KEYS` 里登记它的校验）。
-- **钉住它的测试**：`agents/test/rules/subagent-model.rules.test.ts`（改成 Fable、Haiku、`inherit` 或删掉都红；自己判、不借同步工具的校验，那边哪天被放宽了这条照样红）；同步工具这边的用例在 `packages/agents-sync/test/permissions.test.ts`。
+- **源文件拒收**（报没查成 / 没做成，一台机器都不写，不替它补上）：没写 `env` 或这一项；值不是 Opus 或 Sonnet（只认 `opus`、`sonnet` 或 `claude-opus-…`、`claude-sonnet-…` 这样的 id，可带 `[1m]`；Fable、Mythos、Haiku（含 `claude-haiku-5-5`：派活时能显式用，不能当默认）、`inherit`、`best`、`opusplan` 都不认）；`env` 里多写了同步工具没登记的变量（`env` 会推给每一台机器，要加新变量，先在 `packages/agents-sync/src/permissions.ts` 的 `ENV_KEYS` 里登记它的校验）。
+- **钉住它的测试**：`agents/test/rules/subagent-model.rules.test.ts`（默认值改成 Fable、Haiku（含 5.5）、`inherit` 或删掉都红；自己判、不借同步工具的校验，那边哪天被放宽了这条照样红）；同步工具这边的用例在 `packages/agents-sync/test/permissions.test.ts`。
 - **看过、没用的几个设置**：
-  - `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`：调用写的 `model` 和定义里写的模型都不算了，一律用这个变量（`fork` 除外），能把上面表里 Plan、claude-code-guide 那几条路也堵上；代价是派活写 `opus` 也会被改成 Sonnet、workflow 里写的模型全被忽略，比创始人选的「Opus 或 Sonnet」窄，要他拍了才能加。
+  - `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`：调用写的 `model` 和定义里写的模型都不算了，一律用这个变量（`fork` 除外），能把上面表里 Plan、claude-code-guide 那几条路也堵上；代价是派活写 `opus`、`haiku` 也会被改成 Sonnet、workflow 里写的模型全被忽略，和决定 0034 的三档冲突，不加。
   - `availableModels`（白名单，哪个设置文件里都认）、`deniedModels`（黑名单，只认系统级的托管设置）：连主会话一起管，会把创始人本机主对话里自己选 Fable 也禁掉，和决定 0017 第 4 条冲突，本机不能用。VPS、WSL 上主会话也不许用 Fable（第 3 条），那边可以用托管设置里的 `deniedModels`，要动部署，这次没做。
 - 改它是改标准（同上：这份清单在 `packages/conventions/standard-paths.json` 里）。合进主线后各台开会话时自动同步，**重开会话才生效**；查这台装没装上：`pnpm agents:sync --check` 里 `~/.claude/settings.json#permissions` 那一行会写「env.CLAUDE_CODE_SUBAGENT_MODEL 是 claude-sonnet-5-5」。
 
@@ -193,4 +193,4 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
   `~/.fleet-dao/hooks/` 下的那份。
 - 测试：`packages/agents-sync/test/permissions*.test.ts`、`sync-now.test.ts`，每条读不懂、写不成的路径都有故意造出失败的用例；
   钩子拦的规矩（含打印进程命令行那一条）在 `agents/test/rules/pretool.rules.test.ts`，改了拦什么那里会红；
-  子代理默认模型只用 Opus 或 Sonnet 钉在 `agents/test/rules/subagent-model.rules.test.ts`。
+  子代理默认模型只许 Opus 或 Sonnet、三档和升级规则钉在 `agents/test/rules/subagent-model.rules.test.ts`。

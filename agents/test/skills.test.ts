@@ -11,8 +11,20 @@ const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SKILLS = join(ROOT, 'agents', 'skills');
 const VENDOR = join(ROOT, 'agents', 'skills-vendor');
 const MAX_DESCRIPTION = 120;
-/** 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、Claude Code 内置子代理的类型名。 */
-const NOT_SKILLS = new Set(['fleet-dao', 'sub-agent', 'job-lock', 'general-purpose', 'claude-code-guide']);
+/**
+ * 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、Claude Code 内置子代理的类型名、
+ * 子代理三档的模型 id（决定 0034）。
+ */
+const NOT_SKILLS = new Set([
+  'fleet-dao',
+  'sub-agent',
+  'job-lock',
+  'general-purpose',
+  'claude-code-guide',
+  'claude-haiku-5-5',
+  'claude-sonnet-5-5',
+  'claude-opus-5-5',
+]);
 
 /** 紧挨着这些字的不算一个词的开头（只看 ASCII：中文和英文之间常不留空格）。 */
 const EDGE = '[A-Za-z0-9_.~/-]';

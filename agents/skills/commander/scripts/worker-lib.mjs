@@ -101,15 +101,16 @@ export const ROUTING_DEFAULT_REL = join(
 /** 不给 --model-id 时按骨架里哪个模型查档位：本机 grok 命令行跑的就是 grok-4.7（法国 grok 那条路由同一个命令行），codex 跑 GPT。 */
 export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet' };
 /**
- * Claude 工人只许这两族（通用段「我的机器与模型」：机器派的会话、工人永不用 Fable，只用 Opus 或 Sonnet）。
- * 不给 --model-id 用 sonnet（创始人 2026-10-05：「派活我推荐sonnet5.5>opus5.5」），要 Opus 显式给 --model-id opus；
+ * Claude 工人只许这两族：工人永不用 Fable（通用段「我的机器与模型」）；工人是写代码、开 PR 的整段活，
+ * 照决定 0034 的档位表不用 Haiku（Haiku 只给读多写少、好抽查的子代理）。
+ * 不给 --model-id 用 Sonnet 5.5 的完整 id（决定 0034：写完整 id，免得别名指到旧版），要 Opus 显式给 --model-id claude-opus-5-5；
  * 给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。
  */
-export const CLAUDE_DEFAULT_MODEL = 'sonnet';
+export const CLAUDE_DEFAULT_MODEL = 'claude-sonnet-5-5';
 export function claudeModelProblem(modelId) {
   const id = modelId ?? CLAUDE_DEFAULT_MODEL;
   if (/^(opus|sonnet)$/.test(id) || /^claude-(opus|sonnet)-[\w.-]+$/.test(id)) return null;
-  return `Claude 工人只用 Opus 或 Sonnet（机器派的会话永不用 Fable）：--model-id 给的是「${id}」，不起。`;
+  return `Claude 工人只用 Opus 或 Sonnet（工人永不用 Fable；写代码的整段活不用 Haiku，决定 0034）：--model-id 给的是「${id}」，不起。`;
 }
 /** 模型自己要连的 GitHub 域名：直连通时让它自己跑的 git/gh 绕开代理直连这几个（走代理时不加，见文件头「代理」）。 */
 export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.com'];
@@ -117,12 +118,12 @@ export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.co
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
   start --model grok|codex|kimi|claude --name <短名> --brief <文件> (--issue <单号> [--refs] | --no-issue "<理由>")
         --detached "<为什么必须脱离会话>"
-        [--detached：默认别用这条命令。派活先用 Agent 工具起 Sonnet 子代理——创始人在 Mirasim 面板里看得见、能插手（2026-10-06）；
+        [--detached：默认别用这条命令。派活先用 Agent 工具起子代理（模型照决定 0034 选档）——创始人在 Mirasim 面板里看得见、能插手（2026-10-06）；
         只有创始人说了无人值守、过夜，或活预计超过 40 分钟而他不在线，才脱离；理由必填，写进这个工人的 meta.json]
         [--repo <主检出路径>] [--model-id <型号>]
         [--issue：这个活挂哪张单，收尾交代里写死「需求」栏 Closes #号；母单的分片加 --refs 写 Refs；
         --no-issue：确实没有单，理由原样进 PR 需求栏；两个必须给一个，缺了不起（--no-ship 冒烟除外）]
-        [--model-id：claude 默认 sonnet，要 Opus 给 opus；Fable 一律拒起]
+        [--model-id：claude 默认 claude-sonnet-5-5，要 Opus 给 claude-opus-5-5；Fable、Haiku 一律拒起]
         [--effort low|medium|high|xhigh，这一次用的；不给照 ~/${ROUTING_DEFAULT_REL.replaceAll('\\', '/')} 给这个模型配的，
         没配是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
                     在主检出的 .claude/worktrees/ 下建一棵工作树、起一个模型命令行去干活（后台跑，这条命令退出它照跑）
@@ -555,7 +556,7 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
   // Claude 一律经 reclaude 起（通用段）。-p 不带位置参数时从 stdin 读提示词；工作目录由起进程那一步定（没有 --cwd 这个参数）。
   // 用户级的钩子（pretool.mjs 那几条拦截）在无头模式下照常生效，--dangerously-skip-permissions 只是不弹权限确认。
   // Mirasim 会把 CLAUDE_CODE_SUBAGENT_MODEL 从主会话的模型名继承下来（子代理跟主会话同型号），主会话是 kimi-k3 时工人
-  // 会拿着这个不存在的名字去跑，一开场就报错（2026-10-06 四个工人同这事）。--model 显式给 sonnet/opus 之后，把这个环境变量
+  // 会拿着这个不存在的名字去跑，一开场就报错（2026-10-06 四个工人同这事）。--model 显式给 Sonnet/Opus 之后，把这个环境变量
   // 覆盖成同值，免得 generate_session_title 走到主会话的 kimi-k3 再炸一次。
   if (model === 'claude') {
     const claudeId = modelId ?? CLAUDE_DEFAULT_MODEL;
@@ -703,7 +704,7 @@ function worktreeConflict(trees, worktreeDir, branch) {
 
 /**
  * --detached "<理由>"：起脱离会话的工人必须说清为什么（创始人 2026-10-06：「我认为不能脱离」「你拍板直接做」）。
- * 起因：脱离的工人是独立进程，不显示在 Mirasim 面板里，创始人看不见、没法插手；默认改成 Agent 工具起的 Sonnet 子代理。
+ * 起因：脱离的工人是独立进程，不显示在 Mirasim 面板里，创始人看不见、没法插手；默认改成 Agent 工具起的子代理（模型照决定 0034）。
  * 脱离只留给两种：创始人说了无人值守、过夜；或活预计超过 40 分钟而他不在线（子代理活在聊天这一轮里，一轮几十分钟不结束，
  * 他中途打的字会丢，2026-10-06 查到 14 条引导丢 8 条）。没给理由、理由太短都拒起，退出码 1，话里指向正确的做法。
  * @param {{ options: Map<string, string> }} p
@@ -712,7 +713,7 @@ function detachedOf(p) {
   const why = p.options.get('detached');
   if (typeof why !== 'string' || why.trim().length < 4)
     throw new UsageError(
-      '默认不起脱离会话的工人（创始人 2026-10-06：他要在 Mirasim 面板里看得见派出去的活）：派活先用 Agent 工具起 Sonnet 子代理（model: "sonnet"）。' +
+      '默认不起脱离会话的工人（创始人 2026-10-06：他要在 Mirasim 面板里看得见派出去的活）：派活先用 Agent 工具起子代理（写代码的 model: "sonnet"，档位见决定 0034）。' +
         '确实要脱离——创始人说了无人值守、过夜，或活预计超过 40 分钟而他不在线——再加 --detached "<为什么必须脱离>"。',
     );
   return why.trim();

@@ -155,7 +155,7 @@ describe('装', () => {
     expect(amOf(m)).toEqual({ environment: ['机器上的'], allow: ['机器上的'] });
   });
 
-  // 决定 0017：子代理只用 Opus 或 Sonnet。机器上被改成 Fable（谁改的都一样）：算漂移，改回仓里的
+  // 决定 0034：子代理默认模型只许 Opus 或 Sonnet、永不用 Fable。机器上被改成 Fable（谁改的都一样）：算漂移，改回仓里的
   it('【故意造出的失败】机器上的子代理默认模型是 Fable：--check 报漂移，写的时候改回仓里的，别的变量不动', () => {
     const m = machine();
     m.apply();
@@ -249,7 +249,7 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     expect(real.value.defaultMode).toBe('auto');
   });
 
-  it('子代理默认模型是 Sonnet 5.5（决定 0017：子代理只用 Sonnet 或 Opus；创始人 2026-10-05 优先 Sonnet），env 里只有这一项', () => {
+  it('子代理默认模型是 Sonnet 5.5（决定 0034：默认值只许 Opus 或 Sonnet，Haiku 5.5 派活时显式选），env 里只有这一项', () => {
     if (!real.ok) throw new Error(real.why);
     expect(real.value.env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5-5' });
   });
@@ -442,7 +442,8 @@ describe('仓里的源文件', () => {
       'autoMode.allow 里有空串',
       JSON.stringify({ ...PERMS_SPEC, autoMode: { ...PERMS_SPEC.autoMode, allow: ['$defaults', ''] } }),
     ],
-    // env：决定 0017「子代理只用 Opus 或 Sonnet」。少了子代理默认模型、值不是 Opus 或 Sonnet、多写没登记的变量都拒收，不替它补上
+    // env：决定 0034「默认值只许 Opus 或 Sonnet，Haiku 5.5 只在派活时显式选」。少了子代理默认模型、值不是 Opus 或 Sonnet
+    // （Haiku 5.5 的完整 id 也不行）、多写没登记的变量都拒收，不替它补上
     ['env 没写', JSON.stringify({ ...PERMS_SPEC, env: undefined })],
     ['env 不是对象', JSON.stringify({ ...PERMS_SPEC, env: [] })],
     ['env 里没有子代理默认模型', JSON.stringify({ ...PERMS_SPEC, env: {} })],
@@ -451,6 +452,7 @@ describe('仓里的源文件', () => {
     subagentModel('写成 Fable 带 1M', 'fable[1m]'),
     subagentModel('写成 Mythos', 'claude-mythos-5-1'),
     subagentModel('写成 Haiku 的 id', 'claude-haiku-4-5'),
+    subagentModel('写成 Haiku 5.5 的完整 id（派活时能显式用，不能当默认）', 'claude-haiku-5-5'),
     subagentModel('写成 Haiku 的别名', 'haiku'),
     subagentModel('写成 inherit（等于不设，跟主会话走）', 'inherit'),
     subagentModel('写成 best（指最强的那个，可能就是 Fable）', 'best'),
@@ -476,13 +478,16 @@ describe('仓里的源文件', () => {
     });
   }
 
-  it('子代理默认模型是 Fable：拒收的原因写明「子代理只用 Opus 或 Sonnet」、指向决定 0017', () => {
-    const [, text] = subagentModel('Fable', 'claude-fable-5-1');
-    const parsed = parsePermissions(text, '/h');
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) {
-      expect(parsed.why).toContain('子代理只用 Opus 或 Sonnet');
-      expect(parsed.why).toContain('决定 0017');
+  it('子代理默认模型是 Fable、Haiku 5.5：拒收的原因写明「默认模型只许 Opus 或 Sonnet」、指向决定 0034', () => {
+    for (const value of ['claude-fable-5-1', 'claude-haiku-5-5']) {
+      const [, text] = subagentModel(value, value);
+      const parsed = parsePermissions(text, '/h');
+      expect(parsed.ok, value).toBe(false);
+      if (!parsed.ok) {
+        expect(parsed.why).toContain('子代理默认模型只许 Opus 或 Sonnet');
+        expect(parsed.why).toContain('决定 0034');
+        expect(parsed.why).toContain('派活时可显式用 Haiku 5.5');
+      }
     }
   });
 
