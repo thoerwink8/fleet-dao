@@ -51,6 +51,7 @@ import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
+import { groomJob } from './groom.ts';
 import {
   cursorBareCommand,
   cursorLaunchCommand,
@@ -821,6 +822,18 @@ export function realPortsFromEnv(
       log: taskLog,
     }),
   };
+  // 临时指挥官整理待办（#1338，母单 #1335 第 3 片）：选路按用途 groom，会话和动手、验收会话同一份 Spawner 装配，登记进一次性会话的清单
+  // （切号、发布排空都停得下它）；会话没有 GitHub 令牌，写操作全在引擎代码里（real/groom.ts）
+  jobs.groom = groomJob({
+    db,
+    gh,
+    trees,
+    exec,
+    tmpDir: join(config.stateDir, 'tmp'),
+    spawner: segmentSpawner,
+    pickRoute: real.ports.pickRoute,
+    sessions: oneShots,
+  });
   const evidence = realReleaseEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
     readRequest: () => readDrainRequest(drainRequestFile(evidence.releasesDir)),

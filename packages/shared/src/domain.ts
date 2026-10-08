@@ -11,7 +11,8 @@ export type StageKind =
   | 'review' // 第二意见
   | 'verify' // 开 PR 前别家验证（Fusion 第 5 步）：只派别家、只读
   | 'research' // 调研
-  | 'judge'; // Jev 判断题
+  | 'judge' // Jev 判断题
+  | 'groom'; // 临时指挥官整理待办（母单 #1335 第 3 片）
 
 export type TaskState =
   | 'queued'

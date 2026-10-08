@@ -9,6 +9,10 @@
 //   还没派过 → 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
 //   留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
 //   缺则留一次言，不拉）→ 改动规模不是最重档（单子列的路径超过 50 个）。
+// 整理待办（#1338，临时指挥官，jobs/groom.ts）：开单时间早于「让 AI 接活」打开那一刻的老单，只有贴了「整理过」（整理会话判为仍成立）或
+// 「交给引擎」才进候选（指挥官 2026-10-08：#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）；开关之后新开的单照旧不需要。
+// 贴了「待补」（整理会话判过期）或「要人拍」的任何单都不进候选。每个仓走完以后，有从没整理过的老单，或有空位却一条都没起、待办里还有
+// 候选，就叫一次整理（autoGroomWhy；6 小时间隔、每天 3 次、一次一个由 requestGroom 判）。
 // 排序（intake-pick.ts 的 comparePick）：版本先后列表里的序号 → 挂当前版本的 → 规模小 → 同档里贴了「交给引擎」的 → 历史失败少 → 开单早。
 // 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
 // 空位 = 每轮最多 5 条、同时在跑最多 6 条、每小时最多起 3 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
@@ -27,7 +31,16 @@
 // - 排序只在准入之后：先过完不用现读 GitHub 的关，排好序、有空位才现读这张单（screenPlan）再起，免得开着的老单每轮各读一次。
 
 import { createHash } from 'node:crypto';
-import { ENGINE_LABEL, issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
+import {
+  ENGINE_LABEL,
+  GROOM_PENDING_LABEL,
+  GROOMED_LABEL,
+  HUMAN_DECISION_LABEL,
+  issueColumnRefs,
+  LOCAL_LABEL,
+  parseMd,
+  sectionText,
+} from '@fleet-dao/conventions';
 import {
   cleanBody,
   currentVersion,
@@ -52,6 +65,7 @@ import {
 } from '../runner/task-brief.ts';
 import { TIER_HEAVYWEIGHT_FILE_THRESHOLD } from '../runner/tier.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import { AUTO_GROOM_TEXT, autoGroomWhy, type GroomRequestOutcome } from './groom-request.ts';
 import {
   type BreakerEvent,
   type BreakerFacts,
@@ -135,6 +149,9 @@ export type IntakeSkipReason =
   | 'already_dispatched'
   | 'too_many_failures'
   | 'pr_claimed'
+  | 'needs_human'
+  | 'groom_pending'
+  | 'not_groomed'
   | 'touches_workflows'
   | 'brief_incomplete'
   | 'too_large'
@@ -174,12 +191,51 @@ function localSkip(labels: readonly string[]): IntakeSkip | null {
 }
 
 /**
+ * 临时指挥官整理待办贴的两个标签（#1338）：「要人拍」（涉及改标准、删数据、花钱、workflows，要人先拍板）和「待补」（判为过期或前提不成立，
+ * 建议关闭、等人看）。贴着任何一个，不管有没有贴「交给引擎」，引擎一律不拉。
+ */
+function groomHoldSkip(labels: readonly string[]): IntakeSkip | null {
+  if (labels.includes(HUMAN_DECISION_LABEL)) {
+    return { reason: 'needs_human', why: `贴着「${HUMAN_DECISION_LABEL}」：要人先拍板，摘掉标签才进候选` };
+  }
+  if (labels.includes(GROOM_PENDING_LABEL)) {
+    return {
+      reason: 'groom_pending',
+      why: `贴着「${GROOM_PENDING_LABEL}」：整理待办的会话判它过期或前提不成立，等人看过、补好后摘掉标签`,
+    };
+  }
+  return null;
+}
+
+/**
+ * 开单时间早于「让 AI 接活」打开那一刻的老单，只有整理会话判为仍成立（贴了「整理过」）或明说交给引擎（「交给引擎」）才进候选
+ * （指挥官 2026-10-08：#1342 发到法国后引擎第一轮就拉了两张前提已过期的老单）；开关之后新开的单照旧不需要。
+ * since 认不出时不当成「不是老单」：按老单判（宁可不拉）。
+ */
+function oldIssueSkip(issue: IntakeIssue, since: string): IntakeSkip | null {
+  const opened = Date.parse(issue.createdAt);
+  const on = Date.parse(since);
+  if (Number.isFinite(on) && opened >= on) return null;
+  if (issue.labels.includes(GROOMED_LABEL) || issue.labels.includes(ENGINE_LABEL)) return null;
+  return {
+    reason: 'not_groomed',
+    why: `开单（${issue.createdAt}）早于「让 AI 接活」打开（${since}），还没被整理会话判过仍成立：等整理（贴「${GROOMED_LABEL}」）或人贴「${ENGINE_LABEL}」`,
+  };
+}
+
+/**
  * 只看列表里就有的东西能不能判掉（不再多读一次 GitHub）。回 null＝这一道都过了，往下走。
  * 判法的出处：开单时间读得出（排序要用它做最后一档，认不出算没查成，不猜）；作者白名单（公开仓唯一的门）；母单标签、本机做标签
- * （familyGate、localGate 里只靠标签的那部分；子单、挂了子单要多读一次，在 screenPlan）。
- * 不再看「开关打开之后才开」和「挂在当前版本上」（#1336）：老单、别的版本、未排期的单和其余单一样进候选。
+ * （familyGate、localGate 里只靠标签的那部分；子单、挂了子单要多读一次，在 screenPlan）；整理待办贴的「要人拍」「待补」；
+ * 老单要「整理过」或「交给引擎」（autoDispatchSince 给了才判）。
+ * 不看「挂在当前版本上」（#1336）：别的版本、未排期的单和其余单一样进候选。
  */
-export function screenListed(input: { issue: IntakeIssue; trusted: boolean }): IntakeSkip | null {
+export function screenListed(input: {
+  issue: IntakeIssue;
+  trusted: boolean;
+  /** 「让 AI 接活」打开的时刻（ISO）；不给就不判老单。 */
+  autoDispatchSince?: string | null | undefined;
+}): IntakeSkip | null {
   const { issue } = input;
   if (!Number.isFinite(Date.parse(issue.createdAt))) {
     return {
@@ -190,7 +246,11 @@ export function screenListed(input: { issue: IntakeIssue; trusted: boolean }): I
   if (!input.trusted) return { reason: 'untrusted_author', why: '开单人不在白名单里' };
   const family = familyGate({ labels: issue.labels, parent: null, subIssues: 0 });
   if (!family.ok) return { reason: family.reason, why: family.why };
-  return localSkip(issue.labels);
+  const local = localSkip(issue.labels);
+  if (local) return local;
+  const hold = groomHoldSkip(issue.labels);
+  if (hold) return hold;
+  return input.autoDispatchSince ? oldIssueSkip(issue, input.autoDispatchSince) : null;
 }
 
 /**
@@ -202,7 +262,7 @@ export function screenPlan(plan: IntakePlan): IntakeSkip | null {
   if (plan.state !== 'open') return { reason: 'closed', why: '这张单已经关了' };
   const family = familyGate(plan);
   if (!family.ok) return { reason: family.reason, why: family.why };
-  return localSkip(plan.labels);
+  return localSkip(plan.labels) ?? groomHoldSkip(plan.labels);
 }
 
 /**
@@ -320,6 +380,11 @@ export interface IntakeDeps {
     key: string;
     body: string;
   }): Promise<{ created: boolean }>;
+  /**
+   * 叫一次临时指挥官整理待办（jobs/groom-request.ts 的 requestGroom，#1338）：拉单一轮走完一个仓，发现该叫了就调；被拒（间隔没到、
+   * 次数用完、别的在做）是正常的，回 ok:false。写不进、读不到照抛：这一轮记没查成。不给（测试）就不叫。
+   */
+  groomRequest?(input: { repo: IntakeRepo; why: string }): Promise<GroomRequestOutcome>;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -416,7 +481,11 @@ async function admitIssue(
   t: Tally,
 ): Promise<Candidate | null> {
   const slug = `${repo.owner}/${repo.name}`;
-  const early = screenListed({ issue, trusted: isTrusted(issue.author, whitelist) });
+  const early = screenListed({
+    issue,
+    trusted: isTrusted(issue.author, whitelist),
+    autoDispatchSince: repo.autoDispatchSince,
+  });
   if (early) {
     skip(t, slug, issue.number, early);
     return null;
@@ -591,6 +660,7 @@ async function intakeRepo(
   const slug = `${repo.owner}/${repo.name}`;
   if (repo.autoDispatchSince === null) return;
   t.reposOn += 1;
+  const skippedBefore = new Map(t.skipped);
   let listed: Awaited<ReturnType<IntakeDeps['openIssues']>>;
   try {
     listed = await deps.openIssues(repo);
@@ -635,11 +705,42 @@ async function intakeRepo(
   }
 
   // 第二段：排序，从前往后按空位起
+  const startedBefore = t.started;
   for (const c of sortCandidates(admitted, (x) => x.key)) {
     try {
       await startCandidate(deps, repo, c, t);
     } catch (err) {
       t.unchecked.push(`${slug}#${c.issue.number}：${errMessage(err)}`);
+    }
+  }
+
+  // 第三段：该不该叫一次临时指挥官整理待办（#1338）。只判触发条件，6 小时间隔、每日次数、锁、总开关由 requestGroom 判
+  if (deps.groomRequest) {
+    const startedHere = t.started - startedBefore;
+    const delta = (reason: IntakeSkipReason) =>
+      (t.skipped.get(reason) ?? 0) - (skippedBefore.get(reason) ?? 0);
+    const why = autoGroomWhy({
+      spare: noRoom(deps, t) === null,
+      started: startedHere,
+      backlog:
+        delta('brief_incomplete') +
+        delta('too_large') +
+        delta('too_many_failures') +
+        (admitted.length - startedHere),
+      ungroomedOld: delta('not_groomed'),
+    });
+    if (why !== null) {
+      try {
+        const got = await deps.groomRequest({ repo, why: AUTO_GROOM_TEXT[why] });
+        if (got.ok) {
+          deps.log('info', `拉单：${slug} 叫了一次整理待办（${AUTO_GROOM_TEXT[why]}）`, {
+            requestId: got.requestId,
+            remainingAfter: got.remainingAfter,
+          });
+        }
+      } catch (err) {
+        t.unchecked.push(`${slug}：叫整理待办没成（${errMessage(err)}）`);
+      }
     }
   }
 }

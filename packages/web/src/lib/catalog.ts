@@ -23,6 +23,7 @@ export const stageLabel: Record<StageKind, string> = {
   verify: '开 PR 前验证',
   research: '调研',
   judge: '判断',
+  groom: '整理待办',
 };
 
 export const hostLabel: Record<HostId, string> = {

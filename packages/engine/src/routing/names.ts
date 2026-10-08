@@ -12,6 +12,7 @@ export const STAGE_NAMES: Readonly<Record<StageKind, string>> = {
   verify: '开 PR 前验证',
   research: '调研',
   judge: '判断题',
+  groom: '整理待办',
 };
 
 export const HOST_NAMES: Readonly<Record<HostId, string>> = {

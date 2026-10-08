@@ -83,9 +83,18 @@ export {
   USAGE,
 } from './issue-new.ts';
 export {
+  type Candidate as SimilarCandidate,
+  modulePaths,
+  rankSimilar,
+  type SimilarItem,
+} from './issue-similar.ts';
+export {
   currentVersion,
   ENGINE_LABEL,
   FROZEN_LABEL,
+  GROOM_PENDING_LABEL,
+  GROOMED_LABEL,
+  HUMAN_DECISION_LABEL,
   IDLE_LABEL,
   isKindLabel,
   KIND_LABELS,

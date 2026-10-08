@@ -14,6 +14,7 @@ import {
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
+import type { GroomRunDeps } from './jobs/groom.ts';
 import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
@@ -188,6 +189,8 @@ export interface EngineJobs {
   routeProbe?: () => RouteProbeJobDeps;
   /** 驾驶舱的立即探测（jobs/route-probe-now.ts）：每几秒看一眼有没人点、接手、探、回结论。不给就不看。 */
   routeProbeNow?: () => RouteProbeNowDeps;
+  /** 临时指挥官整理待办（jobs/groom.ts，母单 #1335 第 3 片）：每几秒看一眼有没有排队的整理，有就接手、起会话、执行清单。不给就不看。 */
+  groom?: () => GroomRunDeps;
   /** 定时读额度（#76）：读配置、读各池额度、读成的写库、读失败的报警。 */
   quotaRead?: () => QuotaReadJobDeps;
   /** 拼车额度盯读（#194，给切号用）：按情况读开放接口、交给切号当场判。 */

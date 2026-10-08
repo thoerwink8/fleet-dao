@@ -59,12 +59,17 @@ import {
 } from './interaction.ts';
 import { type IssuePlan, type ReadIssuePlanInput, readIssuePlan, readOpenMilestones } from './issue-plan.ts';
 import {
+  type AppendIssueBodyInput,
+  type AppendIssueBodyResult,
+  appendIssueBody,
+  type ClosedIssueRow,
   type CloseIssueInput,
   type CloseIssueResult,
   type CommentIssueInput,
   type CommentIssueResult,
   closeIssue,
   commentIssue,
+  listClosedIssues,
   type OpenIssueInput,
   type OpenIssueResult,
   openIssue,
@@ -177,6 +182,14 @@ export interface GitHub {
   openIssue(input: OpenIssueInput, ctx?: ActivityContext): Promise<OpenIssueResult>;
   /** 在一张 issue 上留一条评论（幂等，按 key 认），不关单、不改进度段：把回答写到提问那张单上。 */
   commentIssue(input: CommentIssueInput, ctx?: ActivityContext): Promise<CommentIssueResult>;
+  /** 在一张单正文末尾追加一段，原文不动（幂等，按 key 认）：临时指挥官补老单。 */
+  appendIssueBody(input: AppendIssueBodyInput, ctx?: ActivityContext): Promise<AppendIssueBodyResult>;
+  /** 从 since 起关掉的单（不含 PR），开新单前查重用。读不到、翻不完抛错。 */
+  listClosedIssues(input: {
+    repo: RepoRef;
+    since: Date;
+    signal?: AbortSignal | undefined;
+  }): Promise<ClosedIssueRow[]>;
   renewInteractionLimit(input: InteractionLimitInput, ctx?: ActivityContext): Promise<InteractionLimitResult>;
   /** 需求文档直接写进默认分支（「引擎」机器人身份，Contents API）。 */
   writeSpecDoc(input: WriteSpecDocInput, ctx?: ActivityContext): Promise<WriteSpecDocResult>;
@@ -363,6 +376,8 @@ export function createGitHub(options: GitHubOptions): GitHub {
     closeIssue: (input, ctx) => closeIssue(deps, input, ctx),
     openIssue: (input, ctx) => openIssue(deps, input, ctx),
     commentIssue: (input, ctx) => commentIssue(deps, input, ctx),
+    appendIssueBody: (input, ctx) => appendIssueBody(deps, input, ctx),
+    listClosedIssues: (input) => listClosedIssues(deps, input),
     renewInteractionLimit: (input, ctx) => renewInteractionLimit(deps, input, ctx),
     commitIdentity: (repo) => deps.bots.identity('agent', repo),
     claims: createClaimsGitHub(deps),

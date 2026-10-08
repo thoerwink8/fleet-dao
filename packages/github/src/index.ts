@@ -121,6 +121,10 @@ export {
 } from './interaction.ts';
 export { type IssuePlan, type ReadIssuePlanInput, readIssuePlan, readOpenMilestones } from './issue-plan.ts';
 export {
+  type AppendIssueBodyInput,
+  type AppendIssueBodyResult,
+  appendIssueBody,
+  type ClosedIssueRow,
   type CloseIssueInput,
   type CloseIssueResult,
   type CommentIssueInput,
@@ -129,6 +133,7 @@ export {
   commentIssue,
   commentPull,
   ISSUE_TITLE_LIMIT,
+  listClosedIssues,
   type OpenIssueInput,
   type OpenIssueResult,
   openIssue,
