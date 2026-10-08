@@ -1,14 +1,18 @@
 // 拉单（#632 S2-2；specs/632-三段总调度/方案.md §五）：每 5 分钟一轮，引擎自己到 GitHub 读「该做的单」，替掉 webhook 接活加认领。
-// 一轮 = 记下开始 → 对每个开了「让 AI 接活」的仓：读开着的单 → 逐张过关 → 对过了关的单读一遍交代（readTaskBrief）→ 交代不全的
-// 在单子上留一条言写清缺什么，齐的起任务工作流 → 把结局记进 schedule_runs。拉单本身不动单子（不贴「在做」、不抢认领）。
+// 一轮 = 记下开始 → 对每个开了「让 AI 接活」的仓：读开着的单 → 逐张准入 → 排序 → 按空位从前往后起任务工作流 → 把结局记进 schedule_runs。
+// 拉单本身不动单子（不贴「在做」、不抢认领）。
+// 引擎自己按依据挑单（#1336，母单 #1335，创始人 2026-10-08「让ai自己挑挺好的」「按推荐」）：不再看开单时间在不在开关之后、挂没挂当前版本，
+// 老单、未排期的单和其余单一样进候选；这两条原来是硬闸，现在是排序加分，「交给引擎」标签也只是同档内的加分。
 //
-// 过关的顺序是先便宜的再贵的（列表里就有的，再多读一次 GitHub 的）：
-//   开关打开以后开的（0003 第 2 条；贴了「交给引擎」的跳过这一道）→ 作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→
-//   挂在当前版本上（第 8 条；贴了「交给引擎」的跳过这一道）→
-//   不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→ 还没派过 → 现读一遍这张单（开着、不是 PR、版本和母单子单再核一遍；贴了「交给引擎」的不再核版本）→ 没被开着的 PR 的
-//   「需求」栏挂着（#1197：已经有人在做；挂着的贴一次「本机做」、留一句话）→ 正文没写 .github/workflows/ 路径（#1194：
-//   引擎的令牌推不了改工作流的提交，写了的同样贴一次「本机做」、留一句话）→ 交代齐不齐 → 容量。
-// 每一道的判法都是 @fleet-dao/core 的 dispatch.ts 那几个纯函数（versionGate、familyGate、localGate），这里只排顺序。
+// 准入（先便宜的再贵的，不用现读 GitHub 的都在前面；排序之前一律不多读一次这张单）：
+//   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
+//   还没派过 → 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
+//   留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
+//   缺则留一次言，不拉）→ 改动规模不是最重档（单子列的路径超过 50 个）。
+// 排序（intake-pick.ts 的 comparePick）：版本先后列表里的序号 → 挂当前版本的 → 规模小 → 同档里贴了「交给引擎」的 → 历史失败少 → 开单早。
+// 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
+// 空位 = 每轮最多 5 条、同时在跑最多 6 条、每小时最多起 3 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
+// 母单子单、本机做、版本这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
 // - 读不到的不当成没有：读仓里的单失败、白名单读不出、现读一张单失败、起工作流失败，都记进 unchecked，这一轮记 partial / failed，
@@ -16,20 +20,22 @@
 // - 同一张单任何时候最多一条任务工作流：工作流编号定死（taskWorkflowId），起的时候由真实现用 REJECT_DUPLICATE；这里再用
 //   dispatched() 先挡一道，省得每 5 分钟为已经派出去的单多读一次 GitHub。重开的单、被撤掉的单都不会自己重来：要再做，在驾驶舱点「重做」（jobs/redo.ts 另起一代）。
 // - 交代不全的单只留一次言：留言的幂等键由缺的内容算出来，同一处缺法不会每 5 分钟再留一条；缺的变了才是新的一条。
-// - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条：开关刚打开、一堆单同时合格时，
-//   一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
+// - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条、每小时最多起 MAX_STARTS_PER_HOUR 条：
+//   开关刚打开、一堆单同时合格时，一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
+// - 熔断（intake-pick.ts 的 decideBreaker）：最近 6 条结束的任务里失败 4 条以上就整个停拉；冷却 1 小时后只放 1 条试探，试探成功才恢复，
+//   试探失败再冷却 1 小时。进入和恢复各推一条通知。状态在设置表 engine.intakeBreaker 一行；读不到、认不出，这一轮一张单都不拉。
+// - 排序只在准入之后：先过完不用现读 GitHub 的关，排好序、有空位才现读这张单（screenPlan）再起，免得开着的老单每轮各读一次。
 
 import { createHash } from 'node:crypto';
 import { ENGINE_LABEL, issueColumnRefs, LOCAL_LABEL, parseMd, sectionText } from '@fleet-dao/conventions';
 import {
-  autoDispatchGate,
   cleanBody,
+  currentVersion,
   familyGate,
   type IssueFamily,
   type IssueMilestones,
   localGate,
   type MilestoneRef,
-  versionGate,
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
 import { humanPart } from '@fleet-dao/github';
@@ -37,8 +43,30 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { GithubWhitelist } from '@fleet-dao/store';
 import { isTrusted } from '@fleet-dao/store';
 import type { IntakeRun } from '../contract.ts';
-import { type BriefProblem, describeBriefProblems, readTaskBrief } from '../runner/task-brief.ts';
+import {
+  type BriefProblem,
+  describeBriefProblems,
+  moduleRefsOf,
+  readTaskBrief,
+  type TaskBrief,
+} from '../runner/task-brief.ts';
+import { TIER_HEAVYWEIGHT_FILE_THRESHOLD } from '../runner/tier.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import {
+  type BreakerEvent,
+  type BreakerFacts,
+  decideBreaker,
+  hasVisibleSignal,
+  hourlyRemaining,
+  HOUR_MS,
+  MAX_ISSUE_FAILURES,
+  MAX_STARTS_PER_HOUR,
+  type OrderBook,
+  type PickKey,
+  readOrderBook,
+  serialOf,
+  sortCandidates,
+} from './intake-pick.ts';
 import { clip } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查）。 */
@@ -66,6 +94,7 @@ export const INTAKE_OFFSET_MINUTES = 3;
 export const MAX_STARTS_PER_ROUND = 5;
 /** 同时在跑的任务工作流最多几条（再多就等，不是丢）。 */
 export const MAX_RUNNING_TASKS = 6;
+export { MAX_ISSUE_FAILURES, MAX_STARTS_PER_HOUR } from './intake-pick.ts';
 /** why 最长多少字：没查成的一条一句，太多了截断（总数照写）。 */
 export const INTAKE_WHY_MAX = 1500;
 
@@ -75,9 +104,12 @@ export interface IntakeRepo {
   name: string;
   defaultBranch: string;
   testCommand: string;
-  /** 「让 AI 接活」打开的时刻（ISO）；null＝关着。 */
+  /** 「让 AI 接活」打开的时刻（ISO）；null＝关着。现在只当开关用：不再拿它和开单时间比（#1336）。 */
   autoDispatchSince: string | null;
 }
+
+/** 仓里还开着的一个里程碑；description 是说明原文（版本里的先后写在 <!-- fleet:order --> 之间）。 */
+export type IntakeMilestone = MilestoneRef & { description?: string };
 
 /** 列表里读到的一张开着的单（不含 PR）。 */
 export interface IntakeIssue {
@@ -96,33 +128,33 @@ export type IntakePlan = IssueMilestones & IssueFamily & { state: 'open' | 'clos
 
 export type IntakeSkipReason =
   | 'created_at_unreadable'
-  | 'opened_before_switch'
   | 'untrusted_author'
-  | 'unscheduled'
-  | 'not_current_version'
-  | 'version_unreadable'
   | 'mother_ticket'
   | 'sub_issue'
   | 'reserved_local'
   | 'already_dispatched'
+  | 'too_many_failures'
   | 'pr_claimed'
   | 'touches_workflows'
+  | 'brief_incomplete'
+  | 'too_large'
   | 'pull_request'
   | 'closed'
-  | 'brief_incomplete'
   | 'round_cap'
   | 'at_capacity'
+  | 'hourly_cap'
+  | 'breaker_open'
   | 'already_exists';
 
 /** 这几种是「没查成」不是「不该派」：记进 unchecked，这一轮不记 ok。 */
-const UNREADABLE: ReadonlySet<IntakeSkipReason> = new Set(['created_at_unreadable', 'version_unreadable']);
+const UNREADABLE: ReadonlySet<IntakeSkipReason> = new Set(['created_at_unreadable']);
 
 export interface IntakeSkip {
   reason: IntakeSkipReason;
   why: string;
 }
 
-/** 贴了「交给引擎」：拉单跳过「开关打开以前开的」和版本这两道。名字只认 conventions 的 ENGINE_LABEL。 */
+/** 贴了「交给引擎」：排序时同一规模档里靠前（不再绕过任何一道闸）。名字只认 conventions 的 ENGINE_LABEL。 */
 function handsToEngine(labels: readonly string[]): boolean {
   return labels.includes(ENGINE_LABEL);
 }
@@ -143,55 +175,34 @@ function localSkip(labels: readonly string[]): IntakeSkip | null {
 
 /**
  * 只看列表里就有的东西能不能判掉（不再多读一次 GitHub）。回 null＝这一道都过了，往下走。
- * 判法的出处：开关打开以后开的（0003 第 2 条；贴了「交给引擎」的跳过）；作者白名单（公开仓唯一的门）；版本（versionGate，第 8 条；
- * 贴了「交给引擎」的跳过）；母单标签、本机做标签（familyGate、localGate 里只靠标签的那部分；子单、挂了子单要多读一次，在 screenPlan）。
+ * 判法的出处：开单时间读得出（排序要用它做最后一档，认不出算没查成，不猜）；作者白名单（公开仓唯一的门）；母单标签、本机做标签
+ * （familyGate、localGate 里只靠标签的那部分；子单、挂了子单要多读一次，在 screenPlan）。
+ * 不再看「开关打开之后才开」和「挂在当前版本上」（#1336）：老单、别的版本、未排期的单和其余单一样进候选。
  */
-export function screenListed(input: {
-  autoDispatchSince: string;
-  issue: IntakeIssue;
-  trusted: boolean;
-  openMilestones: readonly MilestoneRef[];
-}): IntakeSkip | null {
+export function screenListed(input: { issue: IntakeIssue; trusted: boolean }): IntakeSkip | null {
   const { issue } = input;
-  const handed = handsToEngine(issue.labels);
-  const opened = Date.parse(issue.createdAt);
-  if (!Number.isFinite(opened)) {
+  if (!Number.isFinite(Date.parse(issue.createdAt))) {
     return {
       reason: 'created_at_unreadable',
-      why: `开单时间认不出（${issue.createdAt}），不当成开关打开以后开的`,
-    };
-  }
-  if (!handed && opened < Date.parse(input.autoDispatchSince)) {
-    return {
-      reason: 'opened_before_switch',
-      why: `开关打开以前就开着的单不自动派（要交给引擎就贴「${ENGINE_LABEL}」）`,
+      why: `开单时间认不出（${issue.createdAt}），排不了先后，不猜`,
     };
   }
   if (!input.trusted) return { reason: 'untrusted_author', why: '开单人不在白名单里' };
-  if (!handed) {
-    const version = versionGate({ milestone: issue.milestone, openMilestones: input.openMilestones });
-    if (!version.ok) return { reason: version.reason, why: version.why };
-  }
   const family = familyGate({ labels: issue.labels, parent: null, subIssues: 0 });
   if (!family.ok) return { reason: family.reason, why: family.why };
   return localSkip(issue.labels);
 }
 
 /**
- * 现读之后的最后一道：这个号开着、是 issue；版本、母单子单、本机做按这一刻读到的再核一遍（列表读到的可能早过时了）。
- * 贴了「交给引擎」的不再核版本，母单子单和「本机做」照旧核。
+ * 现读之后的最后一道（只对真有空位、马上要起的单读）：这个号开着、是 issue；母单子单、本机做按这一刻读到的再核一遍
+ * （列表读到的可能早过时了）。版本不核了（#1336：挂哪个版本只影响排序）。
  */
 export function screenPlan(plan: IntakePlan): IntakeSkip | null {
   if (plan.pullRequest) return { reason: 'pull_request', why: '这个号是 PR，不是 issue' };
   if (plan.state !== 'open') return { reason: 'closed', why: '这张单已经关了' };
-  if (handsToEngine(plan.labels)) {
-    const family = familyGate(plan);
-    if (!family.ok) return { reason: family.reason, why: family.why };
-    return localSkip(plan.labels);
-  }
-  const gate = autoDispatchGate(plan);
-  if (!gate.ok) return { reason: gate.reason, why: gate.why };
-  return null;
+  const family = familyGate(plan);
+  if (!family.ok) return { reason: family.reason, why: family.why };
+  return localSkip(plan.labels);
 }
 
 /**
@@ -271,8 +282,8 @@ export interface IntakeDeps {
   repos(): Promise<IntakeRepo[]>;
   /** 作者白名单。读不到照抛：不当成「没有可信的人」。 */
   whitelist(): Promise<GithubWhitelist>;
-  /** 这个仓开着的单加仓里还开着的里程碑。读不到照抛。 */
-  openIssues(repo: IntakeRepo): Promise<{ issues: IntakeIssue[]; openMilestones: MilestoneRef[] }>;
+  /** 这个仓开着的单加仓里还开着的里程碑（带说明原文，排序读版本里的先后）。读不到照抛。 */
+  openIssues(repo: IntakeRepo): Promise<{ issues: IntakeIssue[]; openMilestones: IntakeMilestone[] }>;
   /** 这张单此刻的样子。读不到照抛。 */
   plan(repo: IntakeRepo, issueNumber: number): Promise<IntakePlan>;
   /** 这张单是不是已经派出过（库里有任务行且不在排队，或者工作流编号用过）。读不到照抛：不当成「没派过」。 */
@@ -285,6 +296,14 @@ export interface IntakeDeps {
   readSpecDoc(input: { repo: IntakeRepo; path: string }): Promise<{ content: string } | null>;
   /** 现在在跑的任务工作流有几条。读不到照抛：不当成「一条没有」。 */
   runningTasks(): Promise<number>;
+  /** 这张单历史上失败过几次（该单任务行的失败记录）。读不到照抛：不当成「没失败过」。 */
+  failures(repo: IntakeRepo, issueNumber: number): Promise<number>;
+  /** 从 since 起建出的任务行有几条（滚动一小时限速）。读不到照抛：不当成「一条没起」。 */
+  startedSince(since: Date): Promise<number>;
+  /** 熔断此刻的样子（最近结束的任务、熔断状态、试探那条的结局）。读不到、认不出照抛：不当成「正常」。 */
+  breaker(): Promise<BreakerFacts>;
+  /** 熔断状态变了：写库并推一条通知（trip 进入、recover 恢复；retrip 只重新计冷却、不再推）。写不成照抛：这一轮不拉。 */
+  breakerChanged(input: { event: BreakerEvent; at: Date; why: string }): Promise<void>;
   /** 起任务工作流（编号定死、REJECT_DUPLICATE）：编号已经用过回 already_exists。 */
   start(input: {
     repo: IntakeRepo;
@@ -305,7 +324,7 @@ export interface IntakeDeps {
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
   /** 测试用：换掉每轮上限。 */
-  limits?: { maxStartsPerRound?: number; maxRunningTasks?: number };
+  limits?: { maxStartsPerRound?: number; maxRunningTasks?: number; maxStartsPerHour?: number };
   /** 测试用：换掉「合并闸认冷验收了没有」（默认 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
   gateLive?: boolean;
 }
@@ -331,6 +350,11 @@ interface Tally {
   reposOn: number;
   /** 这一轮开头读到的在跑条数，起一条加一。 */
   running: number;
+  /** 这一轮开头读到的滚动一小时内已起的条数，起一条加一。 */
+  hourStarted: number;
+  /** 熔断这一轮还允许起几条（正常是 Infinity，起一条减一）和为什么。 */
+  breakerAllow: number;
+  breakerWhy: string;
 }
 
 function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
@@ -366,49 +390,71 @@ async function holdForLocal(
   skip(t, slug, issue.number, { reason: hold.reason, why: hold.why });
 }
 
-async function intakeIssue(
+/** 过了准入、等排序和空位的一张单。 */
+interface Candidate {
+  issue: IntakeIssue;
+  brief: TaskBrief;
+  key: PickKey;
+}
+
+/** 单子「已知的模块」里列了多少个不同的路径（超过 50 个算最重档，见 tier.ts）。 */
+function listedModuleCount(brief: TaskBrief): number {
+  return new Set(moduleRefsOf(brief.touches).refs.map((r) => r.path)).size;
+}
+
+/**
+ * 准入：一张开着的单过完不用现读 GitHub 的所有关，回候选；不拉的记原因（该留言、该贴「本机做」的当场做）回 null。
+ * 排序要用的东西（版本里的序号、是不是当前版本、规模、失败次数、开单时刻）都在这里一起算好。
+ */
+async function admitIssue(
   deps: IntakeDeps,
   repo: IntakeRepo,
-  autoDispatchSince: string,
   issue: IntakeIssue,
-  listed: { openMilestones: MilestoneRef[] },
+  ctx: { current: number | undefined; book: OrderBook },
   whitelist: GithubWhitelist,
   prClaims: () => Promise<Map<number, number>>,
   t: Tally,
-): Promise<void> {
+): Promise<Candidate | null> {
   const slug = `${repo.owner}/${repo.name}`;
-  const early = screenListed({
-    autoDispatchSince,
-    issue,
-    trusted: isTrusted(issue.author, whitelist),
-    openMilestones: listed.openMilestones,
-  });
-  if (early) return skip(t, slug, issue.number, early);
-  if (await deps.dispatched(repo, issue.number)) {
-    return skip(t, slug, issue.number, { reason: 'already_dispatched', why: '已经派出过' });
+  const early = screenListed({ issue, trusted: isTrusted(issue.author, whitelist) });
+  if (early) {
+    skip(t, slug, issue.number, early);
+    return null;
   }
-  const late = screenPlan(await deps.plan(repo, issue.number));
-  if (late) return skip(t, slug, issue.number, late);
+  if (await deps.dispatched(repo, issue.number)) {
+    skip(t, slug, issue.number, { reason: 'already_dispatched', why: '已经派出过' });
+    return null;
+  }
+  const failures = await deps.failures(repo, issue.number);
+  if (failures > MAX_ISSUE_FAILURES) {
+    skip(t, slug, issue.number, {
+      reason: 'too_many_failures',
+      why: `这张单的任务已经失败过 ${failures} 次（上限 ${MAX_ISSUE_FAILURES}）：人看过原因后在驾驶舱点「重做」`,
+    });
+    return null;
+  }
   // 正文要改 .github/workflows/：引擎推不上去，不拉（#1194）。正文读不到就抛，这张单这一轮记没查成
   const workflowPath = workflowPathIn(issue.body);
   if (workflowPath !== null) {
-    return holdForLocal(deps, t, repo, issue, {
+    await holdForLocal(deps, t, repo, issue, {
       reason: 'touches_workflows',
       why: `正文写了 ${workflowPath}，引擎推不了改工作流的提交`,
       key: 'intake-touches-workflows',
       comment: workflowPathComment(workflowPath),
     });
+    return null;
   }
   // 已有开着的 PR 的「需求」栏挂着它：有人在做，别并行再写一遍（#1197，#1182 就是这样和已合的 PR 撞车的）。读不到 PR 列表就抛，
   // 这张单这一轮不拉、记没查成，不当成「没有 PR」
   const prNumber = (await prClaims()).get(issue.number);
   if (prNumber !== undefined) {
-    return holdForLocal(deps, t, repo, issue, {
+    await holdForLocal(deps, t, repo, issue, {
       reason: 'pr_claimed',
       why: `已有 PR #${prNumber} 在做`,
       key: `intake-pr-claimed:${prNumber}`,
       comment: prClaimedComment(prNumber),
     });
+    return null;
   }
 
   // 单子正文就用列表里读到的这份，不再读一遍；指着的需求文档要读主线上的
@@ -437,30 +483,86 @@ async function intakeIssue(
         problems: brief.problems.map((p) => p.field),
       });
     }
-    return skip(t, slug, issue.number, {
+    skip(t, slug, issue.number, {
       reason: 'brief_incomplete',
       why: brief.problems.map((p) => p.field).join('、'),
     });
+    return null;
   }
 
+  // 规模：单子列的路径超过 50 个算最重档（tier.ts），改动面太大，引擎不拉
+  const moduleCount = listedModuleCount(brief.brief);
+  if (moduleCount > TIER_HEAVYWEIGHT_FILE_THRESHOLD) {
+    skip(t, slug, issue.number, {
+      reason: 'too_large',
+      why: `单子「已知的模块」列了 ${moduleCount} 处（超过 ${TIER_HEAVYWEIGHT_FILE_THRESHOLD}），规模是最重档：先拆小再交给引擎`,
+    });
+    return null;
+  }
+  // 验收条看不看得见：只判结构（有没有代码、路径、文件名、引号里的界面文字、数字）。一条信号都没有是「拿不准」：照拉，只记一笔
+  if (!hasVisibleSignal(brief.brief.acceptance)) {
+    deps.log('info', `拉单：${slug}#${issue.number} 的「怎么算做完」没认出路径、文件名或具体的现象，照拉（只记不拦）`, {
+      acceptance: brief.brief.acceptance.length,
+    });
+  }
+  const created = Date.parse(issue.createdAt);
+  return {
+    issue,
+    brief: brief.brief,
+    key: {
+      serial: serialOf(ctx.book, issue.milestone, issue.number),
+      current: ctx.current !== undefined && issue.milestone !== null && issue.milestone.number === ctx.current,
+      tierRank: brief.brief.tier.tier === 'fast' ? 0 : brief.brief.tier.tier === 'medium' ? 1 : 2,
+      moduleCount,
+      handed: handsToEngine(issue.labels),
+      failures,
+      createdAtMs: created,
+    },
+  };
+}
+
+/**
+ * 空位：每轮条数、同时在跑、每小时、熔断，哪一个先用完就按哪一个的原因不起。回 null＝还有位子。
+ * 先看便宜的、说得最清楚的：本轮上限 → 在跑上限 → 每小时 → 熔断。
+ */
+function noRoom(deps: IntakeDeps, t: Tally): IntakeSkip | null {
   const maxStarts = deps.limits?.maxStartsPerRound ?? MAX_STARTS_PER_ROUND;
   const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
+  const maxHourly = deps.limits?.maxStartsPerHour;
   if (t.started >= maxStarts) {
-    return skip(t, slug, issue.number, {
-      reason: 'round_cap',
-      why: `这一轮已经起了 ${maxStarts} 条，其余下一轮`,
-    });
+    return { reason: 'round_cap', why: `这一轮已经起了 ${maxStarts} 条，其余下一轮` };
   }
   if (t.running >= maxRunning) {
-    return skip(t, slug, issue.number, {
-      reason: 'at_capacity',
-      why: `在跑的任务已经 ${t.running} 条（上限 ${maxRunning}），等有空的`,
-    });
+    return { reason: 'at_capacity', why: `在跑的任务已经 ${t.running} 条（上限 ${maxRunning}），等有空的` };
   }
+  const hourly = hourlyRemaining(t.hourStarted, maxHourly);
+  if (hourly <= 0) {
+    return {
+      reason: 'hourly_cap',
+      why: `最近一小时已经起了 ${t.hourStarted} 条（每小时最多 ${maxHourly ?? MAX_STARTS_PER_HOUR} 条），等滚出一小时`,
+    };
+  }
+  if (t.breakerAllow <= 0) return { reason: 'breaker_open', why: t.breakerWhy };
+  return null;
+}
+
+/** 排好序之后，从前往后起：有空位才现读这张单再核一遍，核过了才起。 */
+async function startCandidate(
+  deps: IntakeDeps,
+  repo: IntakeRepo,
+  c: Candidate,
+  t: Tally,
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const { issue } = c;
+  const full = noRoom(deps, t);
+  if (full) return skip(t, slug, issue.number, full);
+  const late = screenPlan(await deps.plan(repo, issue.number));
+  if (late) return skip(t, slug, issue.number, late);
   const got = await deps.start({
     repo,
     issueNumber: issue.number,
-    title: brief.brief.title,
+    title: c.brief.title,
     body: issue.body,
     author: issue.author,
   });
@@ -469,9 +571,14 @@ async function intakeIssue(
   }
   t.started += 1;
   t.running += 1;
+  t.hourStarted += 1;
+  t.breakerAllow -= 1;
   deps.log('info', `拉单：起了 ${slug}#${issue.number} 的任务工作流`, {
-    tier: brief.brief.tier.tier,
-    why: brief.brief.tier.reason,
+    tier: c.brief.tier.tier,
+    why: c.brief.tier.reason,
+    serial: c.key.serial,
+    current: c.key.current,
+    failures: c.key.failures,
   });
 }
 
@@ -482,14 +589,8 @@ async function intakeRepo(
   t: Tally,
 ): Promise<void> {
   const slug = `${repo.owner}/${repo.name}`;
-  const since = repo.autoDispatchSince;
-  if (since === null) return;
+  if (repo.autoDispatchSince === null) return;
   t.reposOn += 1;
-  if (!Number.isFinite(Date.parse(since))) {
-    t.reposFailed += 1;
-    t.unchecked.push(`${slug}：「让 AI 接活」打开的时刻认不出（${since}），这个仓这一轮没拉`);
-    return;
-  }
   let listed: Awaited<ReturnType<IntakeDeps['openIssues']>>;
   try {
     listed = await deps.openIssues(repo);
@@ -504,15 +605,42 @@ async function intakeRepo(
     claims ??= deps.openPrClaims(repo);
     return claims;
   };
+  // 版本里的先后和当前版本：排序用。先后认不出的版本，它的单算「没排进去」，原因只记日志（先后的对错归每天的 GitHub 对账管）
+  const withOrder = listed.openMilestones.filter((m) => milestoneNeedsOrder(m, listed.issues));
+  const { book, problems } = readOrderBook(withOrder.map((m) => ({ ...m, description: m.description ?? '' })));
+  if (problems.length > 0) {
+    deps.log('info', `拉单：${slug} 有版本的先后认不出，这些版本里的单排在没排进去的那档：${problems.join('；')}`, {
+      problems,
+    });
+  }
+  const ctx = { current: currentVersion(listed.openMilestones)?.milestone.number, book };
+
+  // 第一段：准入。不用现读 GitHub 的关都在这里过完，留言和贴「本机做」也在这里做
+  const admitted: Candidate[] = [];
   for (const issue of listed.issues) {
     t.scanned += 1;
     try {
-      await intakeIssue(deps, repo, since, issue, listed, whitelist, prClaims, t);
+      const c = await admitIssue(deps, repo, issue, ctx, whitelist, prClaims, t);
+      if (c) admitted.push(c);
     } catch (err) {
-      // 这张单没处理成（现读、留言、起工作流出错）：记下，别的单照做
+      // 这张单没处理成（读历史、留言、贴标签出错）：记下，别的单照做
       t.unchecked.push(`${slug}#${issue.number}：${errMessage(err)}`);
     }
   }
+
+  // 第二段：排序，从前往后按空位起
+  for (const c of sortCandidates(admitted, (x) => x.key)) {
+    try {
+      await startCandidate(deps, repo, c, t);
+    } catch (err) {
+      t.unchecked.push(`${slug}#${c.issue.number}：${errMessage(err)}`);
+    }
+  }
+}
+
+/** 有单挂在这个里程碑上才需要读它的先后（没单挂着的版本，先后认不出也不值得记）。 */
+function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): boolean {
+  return issues.some((i) => i.milestone?.number === m.number);
 }
 
 function summarize(t: Tally): string {
@@ -537,6 +665,9 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     reposFailed: 0,
     reposOn: 0,
     running: 0,
+    hourStarted: 0,
+    breakerAllow: Number.POSITIVE_INFINITY,
+    breakerWhy: '',
   };
   if (repos.some((r) => r.autoDispatchSince !== null)) {
     if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
@@ -554,6 +685,24 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
       return {
         outcome: 'failed',
         why: `白名单或在跑的任务数读不到，这一轮一张单都没拉：${errMessage(err)}`,
+        scanned: repos.length,
+      };
+    }
+    // 限速和熔断：读不到就不拉（不当成「一条没起」「没失败过」），状态变了先写库、推通知再拉
+    try {
+      const at = deps.now();
+      t.hourStarted = await deps.startedSince(new Date(at.getTime() - HOUR_MS));
+      const verdict = decideBreaker(await deps.breaker(), at);
+      if (verdict.event !== null) {
+        await deps.breakerChanged({ event: verdict.event, at, why: verdict.why });
+        deps.log(verdict.event === 'recover' ? 'info' : 'warn', `拉单熔断：${verdict.event}，${verdict.why}`);
+      }
+      t.breakerAllow = verdict.allow;
+      t.breakerWhy = verdict.why;
+    } catch (err) {
+      return {
+        outcome: 'failed',
+        why: `最近一小时已起的条数或熔断状态读不到（或状态写不进去），这一轮一张单都没拉：${errMessage(err)}`,
         scanned: repos.length,
       };
     }

@@ -16,6 +16,7 @@ export * from './queries/engine-master.ts';
 export * from './queries/history.ts';
 export * from './queries/idempotency.ts';
 export * from './queries/intake.ts';
+export * from './queries/intake-history.ts';
 export * from './queries/jev.ts';
 export * from './queries/pool-holds.ts';
 export * from './queries/pool-runs.ts';

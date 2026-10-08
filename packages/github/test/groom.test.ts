@@ -81,8 +81,8 @@ describe('readGroomFacts：开着的单加全部里程碑', () => {
     const got = await readGroomFacts({ client, bots }, { repo });
     expect(got).toEqual({
       milestones: [
-        { number: 3, title: 'v1 Fusion 接活', state: 'open' },
-        { number: 2, title: 'v0 老版本', state: 'closed' },
+        { number: 3, title: 'v1 Fusion 接活', state: 'open', description: '' },
+        { number: 2, title: 'v0 老版本', state: 'closed', description: '' },
       ],
       issues: [
         {
