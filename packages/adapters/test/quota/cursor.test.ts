@@ -338,3 +338,185 @@ describe('Cursor 读取器：令牌被拒时刷新一次再读', () => {
     expect(t.refreshes()).toBe(1);
   });
 });
+
+describe('Cursor 读取器：登录文件不在（ENOENT）时也刷新一次再读', () => {
+  const authPath = '/home/tester/.config/cursor/auth.json';
+  const pool = { poolId: 'cursor', channelId: 'cursor', reader: 'cursor-dashboard' as const };
+  const FRESH = 'fresh-access-token';
+  const authWith = (token: string) => JSON.stringify({ accessToken: token });
+  const happyBody = (url: string) =>
+    url.endsWith('GetCurrentPeriodUsage')
+      ? { body: period() }
+      : url.endsWith('GetPlanInfo')
+        ? { body: fixtureJson('cursor-plan-info.json') }
+        : { body: { noUsageBasedAllowed: true } };
+  const bearer = (c: { init?: RequestInit | undefined }) =>
+    ((c.init?.headers ?? {}) as Record<string, string>).Authorization;
+
+  /**
+   * 一开始没有登录文件。refresh 成功时把文件写出来（cursor-agent 起停会话会删了重写，status 再写回来）。
+   */
+  const setup = (
+    refresh: 'restore' | 'still-missing' | Error | undefined,
+    pools: (typeof pool)[] = [pool],
+  ) => {
+    const files: Record<string, string> = {};
+    let refreshes = 0;
+    const f = fakeFetch((url, init) =>
+      bearer({ init }) === `Bearer ${FRESH}` ? happyBody(url) : { status: 401, body: {} },
+    );
+    const refreshCursorLogin =
+      refresh === undefined
+        ? undefined
+        : async () => {
+            refreshes++;
+            if (refresh instanceof Error) throw refresh;
+            if (refresh === 'restore') files[authPath] = authWith(FRESH);
+          };
+    const run = async () =>
+      readAllQuotas(
+        { pools },
+        fakeDeps({
+          fetch: f.fetch,
+          readFile: fakeFiles(files),
+          asUser: {
+            readers: ['cursor-dashboard'],
+            readFile: async (p) => fakeFiles(files)(p),
+            homeDir: '/home/tester',
+            ...(refreshCursorLogin ? { refreshCursorLogin } : {}),
+          },
+        }),
+      );
+    return { run, calls: f.calls, refreshes: () => refreshes };
+  };
+  const first = (r: { results: PoolQuotaResult[] }) => r.results[0] as PoolQuotaResult;
+
+  it('登录文件不在：刷新一次把文件写回来，再读就读成；这一轮没在刷新前拿空令牌去调上游', async () => {
+    const t = setup('restore');
+    const report = await t.run();
+    expect(first(report).ok).toBe(true);
+    expect(t.refreshes()).toBe(1);
+    expect(t.calls.map(bearer)).toEqual(Array(3).fill(`Bearer ${FRESH}`));
+    expect(JSON.stringify(report)).not.toContain(FRESH);
+  });
+
+  it('登录文件不在：刷新后仍不在，报 no_credentials，原因含已刷新一次仍读不到；只刷新了一次，没去调上游', async () => {
+    const t = setup('still-missing');
+    const result = first(await t.run());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('no_credentials');
+    expect(result.error.message).toContain('已刷新一次仍读不到');
+    expect(result.error.message).toContain('读不到：ENOENT');
+    expect(t.refreshes()).toBe(1);
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it('刷新后文件在了但仍读不了（不是 JSON）：同样报 no_credentials，原因含已刷新一次仍读不到', async () => {
+    const files: Record<string, string> = {};
+    let refreshes = 0;
+    const f = fakeFetch(() => ({ status: 401, body: {} }));
+    const report = await readAllQuotas(
+      { pools: [pool] },
+      fakeDeps({
+        fetch: f.fetch,
+        readFile: fakeFiles(files),
+        asUser: {
+          readers: ['cursor-dashboard'],
+          readFile: async (p) => fakeFiles(files)(p),
+          homeDir: '/home/tester',
+          refreshCursorLogin: async () => {
+            refreshes++;
+            files[authPath] = 'not json';
+          },
+        },
+      }),
+    );
+    const result = first(report);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('no_credentials');
+    expect(result.error.message).toContain('已刷新一次仍读不到');
+    expect(result.error.message).toContain('不是 JSON');
+    expect(refreshes).toBe(1);
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('文件在但不是令牌（不是 JSON、没有 accessToken）：不刷新，照旧 no_credentials', async () => {
+    for (const bad of ['not json', '{"refreshToken":"x"}']) {
+      const files: Record<string, string> = { [authPath]: bad };
+      let refreshes = 0;
+      const f = fakeFetch(() => happyBody('GetCurrentPeriodUsage'));
+      const report = await readAllQuotas(
+        { pools: [pool] },
+        fakeDeps({
+          fetch: f.fetch,
+          readFile: fakeFiles(files),
+          asUser: {
+            readers: ['cursor-dashboard'],
+            readFile: async (p) => fakeFiles(files)(p),
+            homeDir: '/home/tester',
+            refreshCursorLogin: async () => {
+              refreshes++;
+              files[authPath] = authWith(FRESH);
+            },
+          },
+        }),
+      );
+      const result = first(report);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('no_credentials');
+      expect(result.ok ? '' : result.error.message).not.toContain('已刷新一次');
+      expect(refreshes).toBe(0);
+      expect(f.calls).toHaveLength(0);
+    }
+  });
+
+  it('没有刷新手段：文件不在就直接报 no_credentials，不说已刷新一次', async () => {
+    const t = setup(undefined);
+    const result = first(await t.run());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('no_credentials');
+    expect(result.error.message).toContain('读不到：ENOENT');
+    expect(result.error.message).not.toContain('已刷新一次');
+    expect(t.refreshes()).toBe(0);
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it('刷新命令没跑成：报 no_credentials 并写出原因，不当成已刷新、不再调上游', async () => {
+    const t = setup(new Error('cursor-agent status 退出 1：Not logged in'));
+    const result = first(await t.run());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('no_credentials');
+    expect(result.error.message).toContain('cursor-agent status');
+    expect(result.error.message).toContain('也没跑成');
+    expect(result.error.message).toContain('Not logged in');
+    expect(result.error.message).not.toContain('已刷新一次');
+    expect(t.refreshes()).toBe(1);
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it('同一轮两个 Cursor 池登录文件都不在：只刷新一次，两个池都读成', async () => {
+    const t = setup('restore', [pool, { ...pool, poolId: 'cursor-2' }]);
+    const report = await t.run();
+    expect(report.results.every((r) => r.ok)).toBe(true);
+    expect(t.refreshes()).toBe(1);
+  });
+
+  it('故意造出失败：刷新后登录文件仍不在 → 报 no_credentials，不当成读成；这一轮只刷新了一次', async () => {
+    const t = setup('still-missing', [pool, { ...pool, poolId: 'cursor-2' }]);
+    const report = await t.run();
+    expect(report.results.every((r) => !r.ok)).toBe(true);
+    for (const r of report.results) {
+      if (!r.ok) {
+        expect(r.error.code).toBe('no_credentials');
+        expect(r.error.message).toContain('已刷新一次仍读不到');
+        expect(r.error.message).toContain('读不到：ENOENT');
+      }
+    }
+    expect(t.refreshes()).toBe(1);
+    expect(t.calls).toHaveLength(0);
+  });
+});
