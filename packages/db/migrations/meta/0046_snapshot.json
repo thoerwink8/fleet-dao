@@ -1,6 +1,6 @@
 {
-  "id": "87ceb5fd-b6a4-451f-8c92-e3eaad2a32e3",
-  "prevId": "46089665-ac2e-4a97-8ae8-dbc4920e2d12",
+  "id": "da855f60-705d-4490-be81-04a9b041b480",
+  "prevId": "87ceb5fd-b6a4-451f-8c92-e3eaad2a32e3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -746,6 +746,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'{}'::text[]"
+        },
+        "executor": {
+          "name": "executor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -799,6 +805,10 @@
         "routes_probe_org_known": {
           "name": "routes_probe_org_known",
           "value": "\"routes\".\"probe_org\" is null or \"routes\".\"probe_org\" in ('solo', 'carpool')"
+        },
+        "routes_executor_nonempty": {
+          "name": "routes_executor_nonempty",
+          "value": "\"routes\".\"executor\" is null or length(btrim(\"routes\".\"executor\")) > 0"
         }
       },
       "isRLSEnabled": false
@@ -1375,6 +1385,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'名册'"
+        },
         "first_seen_at": {
           "name": "first_seen_at",
           "type": "timestamp with time zone",
@@ -1416,6 +1433,10 @@
         "channel_seen_models_last_after_first": {
           "name": "channel_seen_models_last_after_first",
           "value": "\"channel_seen_models\".\"last_seen_at\" >= \"channel_seen_models\".\"first_seen_at\""
+        },
+        "channel_seen_models_source_known": {
+          "name": "channel_seen_models_source_known",
+          "value": "\"channel_seen_models\".\"source\" in ('名册', '手工')"
         }
       },
       "isRLSEnabled": false

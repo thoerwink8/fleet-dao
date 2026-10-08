@@ -198,6 +198,40 @@ describe('第二道门：接口自己也拒非创始人本人', () => {
     ]);
   });
 
+  it('【故意造出的失败】同一来路把 Fable 加进用途：403 founder_only，用途里还是没有它', async () => {
+    current = await pgHarness(t, ports());
+    await fableCatalogClosed();
+    const app = appAs({ via: 'feishu', session: undefined });
+    const res = await app.request('/routing/purposes/ui/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelId: 'fable-5.1', version: 0 }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('founder_only');
+    expect(body.error.message).toContain('只有创始人本人在驾驶舱');
+    expect((await t.db.select().from(routingPurposeModels)).map((r) => r.modelId)).toEqual(['opus-5.5']);
+    expect(await enableAudits()).toEqual([]);
+  });
+
+  it('有浏览器登录态的创始人来路可以把 Fable 加进用途', async () => {
+    current = await pgHarness(t, ports());
+    await fableCatalogClosed();
+    const app = appAs({ via: 'cockpit', session: { sid: 's' } });
+    const res = await app.request('/routing/purposes/ui/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelId: 'fable-5.1', version: 0, reason: '创始人自己要试' }),
+    });
+    expect(res.status).toBe(200);
+    expect(
+      (await t.db.select().from(routingPurposeModels))
+        .filter((r) => r.purpose === 'ui')
+        .map((r) => r.modelId),
+    ).toEqual(['fable-5.1']);
+  });
+
   it('非创始人来路开别的模型、关 Fable 都不受这道门管', async () => {
     current = await pgHarness(t, ports());
     await fableCatalogClosed();

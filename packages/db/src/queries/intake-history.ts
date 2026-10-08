@@ -4,7 +4,7 @@
 import type { TaskState } from '@fleet-dao/shared';
 import { and, asc, count, desc, eq, gt, gte, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { settings, stateChanges, tasks } from '../schema/index.ts';
+import { repos, settings, stateChanges, tasks } from '../schema/index.ts';
 
 /** 这张单的任务进过几次「失败」（state_changes 里 to_state = failed 的任务行数）。没有任务行是 0。 */
 export async function taskFailureCount(db: Db, repoId: string, issueNumber: number): Promise<number> {
@@ -23,9 +23,39 @@ export async function taskFailureCount(db: Db, repoId: string, issueNumber: numb
   return row?.n ?? 0;
 }
 
-/** 从 since 起建出来的任务行有几条（滚动一小时限速数「已起的」）。 */
-export async function tasksCreatedSince(db: Db, since: Date): Promise<number> {
-  const [row] = await db.select({ n: count() }).from(tasks).where(gte(tasks.createdAt, since));
+/**
+ * 从计数里划掉的任务：这个仓里、标题对上 titlePosix（Postgres ~）的不算。
+ * 拉单用它把巡检单剔出每小时名额（#1364）。不给就一条不剔。
+ */
+export interface HourlyCountExclude {
+  owner: string;
+  name: string;
+  titlePosix: string;
+}
+
+/** 从 since 起建出来的任务行有几条（滚动一小时限速数「已起的」）。exclude 给了，那个仓里对得上标题的不算。 */
+export async function tasksCreatedSince(
+  db: Db,
+  since: Date,
+  exclude?: HourlyCountExclude | null,
+): Promise<number> {
+  const created = gte(tasks.createdAt, since);
+  if (!exclude) {
+    const [row] = await db.select({ n: count() }).from(tasks).where(created);
+    return row?.n ?? 0;
+  }
+  const owner = exclude.owner.toLowerCase();
+  const name = exclude.name.toLowerCase();
+  const [row] = await db
+    .select({ n: count() })
+    .from(tasks)
+    .innerJoin(repos, eq(tasks.repoId, repos.id))
+    .where(
+      and(
+        created,
+        sql`not (lower(${repos.owner}) = ${owner} and lower(${repos.name}) = ${name} and ${tasks.title} ~ ${exclude.titlePosix})`,
+      ),
+    );
   return row?.n ?? 0;
 }
 

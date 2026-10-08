@@ -3,7 +3,7 @@
 // 「接得上、额度够、没被禁令挡」不在这里再判一遍：路由一条条交给 evaluateRoutes（「为什么不能用」只有这一处判法），再由
 // livenessOf 读成三件事。
 // 空的一层是 dead（整层没人，派不出去），不是 live；没配的用途同理，写在 problems 里。
-import type { StageKind } from '@fleet-dao/shared';
+import type { SessionEffort, StageKind } from '@fleet-dao/shared';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.ts';
 import { alertByKey } from './queries/alerts.ts';
@@ -17,7 +17,15 @@ import {
   type RoutingLiveness,
   routeLiveness,
 } from './routing-liveness.ts';
-import { channels, models, pools, routes, routingCatalog, routingPurposeModels } from './schema/index.ts';
+import {
+  channels,
+  models,
+  pools,
+  routes,
+  routingCatalog,
+  routingPurposeModels,
+  routingPurposeRevisions,
+} from './schema/index.ts';
 
 export interface RoutingRouteView {
   /** 选路用的候选（含 blockers、窗口、禁令原因）。 */
@@ -29,6 +37,8 @@ export interface RoutingRouteView {
 export interface RoutingModelView {
   modelId: string;
   position: number;
+  /** 这个用途下这个模型另配的档位；空 = 没另配。 */
+  effort: SessionEffort | null;
   /** 这个模型下的路由，按 routing_catalog 的先后。 */
   routes: RoutingRouteView[];
   verdict: LivenessVerdict;
@@ -36,12 +46,17 @@ export interface RoutingModelView {
 
 export interface RoutingLayers {
   purpose: StageKind;
-  /** 这个用途的模型，按 routing_purpose_models 的先后。空 = 这个用途没配模型顺序（problems 里写明）。 */
+  /** 加进 / 移出 / 改档位用的版本。还没人用这套接口改过是 0。 */
+  version: number;
+  /** 这个用途的模型，按 routing_purpose_models 的先后。空 = 这个用途没有模型（problems 里写明）。 */
   models: RoutingModelView[];
   verdict: LivenessVerdict;
   /** 这一层空着、或模型没有路由这类配置上的缺口；照实写，不当成「没有」。 */
   problems: string[];
 }
+
+/** 页面上用途为空时显示这一句。选路遇到空用途也说「没配模型」，不退到别的用途。 */
+export const EMPTY_PURPOSE_PROBLEM = '这个用途没有模型，派不了';
 
 export async function routingLayers(
   db: Db,
@@ -51,6 +66,11 @@ export async function routingLayers(
   const now = options.now ?? new Date();
   const staleAfterMs = options.staleAfterMs ?? QUOTA_STALE_AFTER_MS;
   const problems: string[] = [];
+  const [rev] = await db
+    .select({ version: routingPurposeRevisions.version })
+    .from(routingPurposeRevisions)
+    .where(eq(routingPurposeRevisions.purpose, purpose));
+  const version = rev?.version ?? 0;
 
   const upper = await db
     .select()
@@ -58,8 +78,8 @@ export async function routingLayers(
     .where(eq(routingPurposeModels.purpose, purpose))
     .orderBy(asc(routingPurposeModels.position));
   if (upper.length === 0) {
-    problems.push(`用途 ${purpose} 没配模型顺序`);
-    return { purpose, models: [], verdict: 'dead', problems };
+    problems.push(EMPTY_PURPOSE_PROBLEM);
+    return { purpose, version, models: [], verdict: 'dead', problems };
   }
 
   // 下层一次查齐、一次交给 evaluateRoutes（额度窗、禁令、在途数各查一遍，不按模型各查一遍）；它不丢行、不改顺序。
@@ -105,11 +125,18 @@ export async function routingLayers(
     return {
       modelId: u.modelId,
       position: u.position,
+      effort: u.effort ?? null,
       routes: routeViews,
       verdict: layerLiveness(routeViews.map((r) => r.verdict)),
     };
   });
-  return { purpose, models: views, verdict: layerLiveness(views.map((m) => m.verdict)), problems };
+  return {
+    purpose,
+    version,
+    models: views,
+    verdict: layerLiveness(views.map((m) => m.verdict)),
+    problems,
+  };
 }
 
 /** 两层摊平成选路的先后：用途下模型的先后，再是模型下路由的先后（不按活不活重排，活不活由选路判）。 */

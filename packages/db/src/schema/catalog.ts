@@ -166,8 +166,8 @@ export const routes = pgTable(
 
 /**
  * 路由两层的上层「用途 → 模型顺序」（#574，specs/574-路由两层DB）：每个用途（阶段类型）一串模型，越靠前越先用。
- * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine-route-facts.ts 的 routeFactsForPurpose）；发布时由仓里的默认骨架
- * 只补缺装进来（routing-apply.ts）。两层没有「钉住」这一列，选路一律按没钉住算。
+ * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine-route-facts.ts 的 routeFactsForPurpose）。仓里的默认骨架
+ * 只在这张表还没有任何一行时写一次（routing-apply.ts，#1356）；已经有行，发版不再补模型、不再改开关。两层没有「钉住」这一列，选路一律按没钉住算。
  * 「这一层现在活着吗」不存列：它由下层现算（routing-liveness.ts 写明三件事各看哪张表的哪几列）。
  */
 export const routingPurposeModels = pgTable(
@@ -179,12 +179,36 @@ export const routingPurposeModels = pgTable(
       .references(() => models.id),
     /** 从 0 起，越小越先用。 */
     position: integer('position').notNull(),
+    /**
+     * 这个用途下这个模型起会话想用的思考档位（#1356）。空 = 这个用途没另配。
+     * 引擎起会话仍读 routing_catalog.effort（这条路由的档）；这一列给驾驶舱按用途配，下一片再接到开会话。
+     * 认不出的写法由下面的约束挡；这条模型的执行方式认不认这一档，由写入的地方照 routeEffortProblem 判。
+     */
+    effort: text('effort').$type<SessionEffort>(),
   },
   (t) => [
     primaryKey({ columns: [t.purpose, t.modelId] }),
     unique('routing_purpose_models_purpose_position_unique').on(t.purpose, t.position),
     check('routing_purpose_models_position_nonneg', sql`${t.position} >= 0`),
+    check(
+      'routing_purpose_models_effort_known',
+      sql`${t.effort} is null or ${t.effort} in (${sql.raw(SESSION_EFFORTS.map((e) => `'${e}'`).join(', '))})`,
+    ),
   ],
+);
+
+/**
+ * 每个用途一份整数版本（#1356）：加进、移出、改档位都带「我看到的版本」，对不上就整笔不写。
+ * 单独一张表，是因为用途里最后一个模型被移出后，成员行没了，版本还得在（空用途也允许）。
+ * 没有这一行 = 版本 0（还没人用这套接口改过）。成功一次加一。
+ */
+export const routingPurposeRevisions = pgTable(
+  'routing_purpose_revisions',
+  {
+    purpose: stageKind('purpose').primaryKey(),
+    version: integer('version').notNull(),
+  },
+  (t) => [check('routing_purpose_revisions_version_nonneg', sql`${t.version} >= 0`)],
 );
 
 /**
@@ -206,7 +230,7 @@ export const routingCatalog = pgTable(
     /**
      * 这条路由起会话的思考档位（#470）：空 = 没配，用 high（shared 的 DEFAULT_SESSION_EFFORT）。它是这条路由的默认也是上限，
      * 分档只往下压（engine 的 sessionEffortFor）。运行时配置、留在库里（决定 0011 第 7 条）：驾驶舱改了，下一个起的会话就照它；
-     * 仓里骨架的值只在这个模型第一次装进库时写进来（routing-apply.ts），之后改骨架不动库里的。
+     * 仓里骨架的值只在用途表还没有任何一行、并且这个模型还没有路由行时写进来（routing-apply.ts）；用途表已经有行，发版不再改这一列。
      * 这一列只挡认不出的写法；这条路由的执行方式认不认这一档（Grok 没有 max、cursor 的整串模型名配不了），由写入的地方
      * 照 shared 的 routeEffortProblem 判（setRoutingEffort、routing-apply.ts），起会话时引擎再判一次。
      */

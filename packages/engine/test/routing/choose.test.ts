@@ -170,7 +170,11 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
   it('用途没配过模型顺序：不按编号乱挑（旧系统按 id 字典序选中了 Cursor）', () => {
     const r = chooseRoute(input([route('a')], { configured: false }));
     expect(r.kind).toBe('none');
-    if (r.kind === 'none') expect(r.reason).toContain('还没配模型顺序');
+    if (r.kind === 'none') {
+      expect(r.reason).toContain('没配模型');
+      expect(r.reason).toContain('不退到别的用途');
+      expect(r.reason).not.toContain('a');
+    }
   });
 
   it('单条开关全关', () => {

@@ -73,11 +73,11 @@ describe('某个用途的候选路由', () => {
     ]);
   });
 
-  it('【故意造出的失败】用途没配模型顺序、模型下一条路由都没有：候选为空并写明，不拿全部路由凑数', async () => {
+  it('【故意造出的失败】用途没有模型、模型下一条路由都没有：候选为空并写明，不拿全部路由凑数', async () => {
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
     const none = await routingLayers(t.db, 'research', { now: NOW });
     expect(flattenRoutingLayers(none)).toEqual([]);
-    expect(none.problems).toEqual(['用途 research 没配模型顺序']);
+    expect(none.problems).toEqual(['这个用途没有模型，派不了']);
     await setRoutingLayers(t.db, { purposes: { review: ['opus-5.5'] }, models: {} });
     const empty = await routingLayers(t.db, 'review', { now: NOW });
     expect(flattenRoutingLayers(empty)).toEqual([]);

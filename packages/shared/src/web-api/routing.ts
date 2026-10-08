@@ -179,13 +179,17 @@ export const RoutingLayerModelSchema = z.object({
   verdict: LivenessVerdictSchema,
   /** 按这个模型下路由的先后。空 = 一条都没有（用途的 problems 里写明）。 */
   routes: z.array(RoutingLayerRouteSchema),
+  /** 这个用途下另配的档位；没有 = 没另配（起会话仍看路由上的档）。 */
+  effort: z.enum(SESSION_EFFORTS).nullable().optional(),
 });
 
 export const RoutingLayerPurposeSchema = z.object({
   purpose: StageKindSchema,
+  /** 加进、移出、改档位时带回的版本。还没人用这套接口改过是 0。 */
+  version: z.number().int().nonnegative(),
   /** 判法和模型那一层一样：有一个模型 live 就 live。 */
   verdict: LivenessVerdictSchema,
-  /** 配置上的缺口：这个用途没配模型顺序、某个模型下一条路由都没有。照实写，不当成「没有」。 */
+  /** 配置上的缺口：这个用途没有模型、某个模型下一条路由都没有。照实写，不当成「没有」。 */
   problems: z.array(z.string()),
   /** 按这个用途的模型先后。 */
   models: z.array(RoutingLayerModelSchema),
@@ -419,6 +423,45 @@ export const SetChannelEnabledRequest = z.object({
 export const SetChannelEnabledResponse = z.object({
   channelId: Id,
   enabled: z.boolean(),
+});
+
+// —— 用途里加模型、移出、改档位（#1356）——
+// 版本是这个用途的整数（routing_purpose_revisions）。看到的和库里对不上返回 409（details.version 是现在的），一行不写。
+// 目录里没有这个模型、用途里没有这个模型：404。已经在这个用途里：409。不认识的用途由路径判 404。
+// 硬禁令（GPT × 界面）在加进这一步拒绝，422 写明原因。
+
+export const PurposeModelSlotSchema = z.object({
+  modelId: Id,
+  /** 这个用途下的档位；null = 没另配。 */
+  effort: SessionEffortSchema.nullable(),
+});
+
+export const PurposeMembershipResponse = z.object({
+  purpose: StageKindSchema,
+  version: z.number().int().nonnegative(),
+  /** 改完后这个用途下的模型，从先到后，带着各自的档位。 */
+  order: z.array(PurposeModelSlotSchema),
+});
+
+/** 把目录里的一个模型加进用途。position 不给 = 末尾；给了必须在 0 到「现在有几条」之间（含末尾）。effort 不给 = 不另配。 */
+export const AddPurposeModelRequest = z.object({
+  modelId: Id,
+  position: z.number().int().nonnegative().optional(),
+  effort: SessionEffortSchema.nullable().optional(),
+  version: z.number().int().nonnegative(),
+  reason: OrderReason,
+});
+
+export const RemovePurposeModelRequest = z.object({
+  version: z.number().int().nonnegative(),
+  reason: OrderReason,
+});
+
+/** effort 写 null = 清掉这个用途下的档位。 */
+export const SetPurposeModelEffortRequest = z.object({
+  effort: SessionEffortSchema.nullable(),
+  version: z.number().int().nonnegative(),
+  reason: OrderReason,
 });
 
 // —— 立即探测（驾驶舱改版，创始人 2026-10-07「渠道状态无法探测」）——

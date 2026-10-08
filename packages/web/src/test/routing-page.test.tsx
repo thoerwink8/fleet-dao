@@ -87,6 +87,7 @@ describe('路由页：每一层现在活着吗', () => {
       purposes: [
         {
           purpose: 'execute',
+          version: 0,
           verdict: 'dead',
           problems: ['模型 kimi-k3 没有路由（routing_catalog 里一条都没有）'],
           models: [
@@ -157,6 +158,7 @@ describe('路由页：每一层现在活着吗', () => {
       purposes: [
         {
           purpose: 'execute',
+          version: 0,
           verdict: 'live',
           problems: [],
           models: [

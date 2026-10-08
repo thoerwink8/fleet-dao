@@ -17,8 +17,9 @@ function layers(over: Partial<RoutingLayers> = {}): RoutingLayers {
     purposes: [
       {
         purpose: 'execute',
+        version: 0,
         verdict: 'dead',
-        problems: ['用途 execute 没配模型顺序'],
+        problems: ['这个用途没有模型，派不了'],
         models: [],
       },
     ],

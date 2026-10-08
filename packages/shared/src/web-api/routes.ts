@@ -40,10 +40,13 @@ import {
 } from './notifications.ts';
 import { PoolsResponse } from './pools.ts';
 import {
+  AddPurposeModelRequest,
   ManualModelRequest,
   ManualModelResponse,
   MovePurposeModelRequest,
   MovePurposeModelResponse,
+  PurposeMembershipResponse,
+  RemovePurposeModelRequest,
   RouteProbeHistoryResponse,
   RouteProbeNowRequest,
   RouteProbeNowResponse,
@@ -55,6 +58,7 @@ import {
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
   SetModelEnabledResponse,
+  SetPurposeModelEffortRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
   UpdateRouteEffortRequest,
@@ -168,6 +172,27 @@ export const WebRoutes = {
     path: '/routing/purposes/:purpose/models/:modelId',
     request: MovePurposeModelRequest,
     response: MovePurposeModelResponse,
+  },
+  /** 把目录里的模型加进用途（末尾或指定位置，可带档位）。带版本号。网关通行证不认。页面还没接（#1354 第五片）。 */
+  addPurposeModel: {
+    method: 'POST',
+    path: '/routing/purposes/:purpose/models',
+    request: AddPurposeModelRequest,
+    response: PurposeMembershipResponse,
+  },
+  /** 把模型移出用途。用途可以变空。带版本号。网关通行证不认。 */
+  removePurposeModel: {
+    method: 'DELETE',
+    path: '/routing/purposes/:purpose/models/:modelId',
+    request: RemovePurposeModelRequest,
+    response: PurposeMembershipResponse,
+  },
+  /** 改这个用途下这个模型的档位（不影响别的用途，也不改路由上的档）。带版本号。网关通行证不认。 */
+  setPurposeModelEffort: {
+    method: 'PUT',
+    path: '/routing/purposes/:purpose/models/:modelId/effort',
+    request: SetPurposeModelEffortRequest,
+    response: PurposeMembershipResponse,
   },
   /** 模型下的一条渠道上移 / 下移一位、拖到新先后，或开 / 关（母单 #1089）；同样带看到的旧值。网关通行证不认。 */
   updateModelRoute: {

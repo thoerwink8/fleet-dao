@@ -19,6 +19,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { canaryIssueTitle } from '../../src/jobs/canary.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
 import { type IntakeGitHub, intakeJob } from '../../src/real/intake.ts';
 
@@ -55,6 +56,8 @@ const BODY = [
 
 interface Seed {
   repoSwitch?: Date | null;
+  /** 仓名。巡检接线用 fleet-dao-canary，其余测试仍是 demo。 */
+  name?: string;
 }
 
 async function seedWorld(db: Db, over: Seed = {}) {
@@ -62,7 +65,7 @@ async function seedWorld(db: Db, over: Seed = {}) {
     .insert(repos)
     .values({
       owner: 'acme',
-      name: 'demo',
+      name: over.name ?? 'demo',
       testCommand: 'pnpm check',
       autoDispatchSince: over.repoSwitch === undefined ? new Date('2026-09-30T00:00:00Z') : over.repoSwitch,
     })
@@ -189,8 +192,15 @@ function fakeClient(
 }
 
 const logs: string[] = [];
-const wire = (gh: IntakeGitHub) =>
-  intakeJob({ db: t.db, gh, now: () => NOW, log: (_l, text) => logs.push(text), gateLive: true });
+const wire = (gh: IntakeGitHub, over: { canaryRepo?: string } = {}) =>
+  intakeJob({
+    db: t.db,
+    gh,
+    now: () => NOW,
+    log: (_l, text) => logs.push(text),
+    gateLive: true,
+    ...(over.canaryRepo === undefined ? {} : { canaryRepo: over.canaryRepo }),
+  });
 
 describe('拉单的真装配', { timeout: 60_000 }, () => {
   it('开关开着的仓里一张好单：建任务行（谁要的、原话）、记操作记录、按定死的编号起任务工作流，这一轮记 ok', async () => {
@@ -400,13 +410,13 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
   /** 往库里补一批已有的任务行（各占一个号，状态各异），建出时刻定死。 */
   async function seedTasks(
     repoId: string,
-    specs: { issue: number; state: 'done' | 'failed' | 'running'; createdAt: Date }[],
+    specs: { issue: number; state: 'done' | 'failed' | 'running'; createdAt: Date; title?: string }[],
   ) {
     await t.db.insert(tasks).values(
       specs.map((s) => ({
         repoId,
         issueNumber: s.issue,
-        title: `旧任务 ${s.issue}`,
+        title: s.title ?? `旧任务 ${s.issue}`,
         rawRequest: '原话',
         requestedBy: 'founder',
         priority: s.issue,
@@ -430,6 +440,39 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     expect(run.outcome).toBe('ok');
     expect(starts).toEqual([]);
     expect(calls.planned).toEqual([]);
+  });
+
+  it('近一小时 3 条里有 1 条是巡检仓的巡检单：不计入，普通单还能再起 1 条', async () => {
+    const { repo } = await seedWorld(t.db, { name: 'fleet-dao-canary' });
+    const recent = (min: number) => new Date(NOW.getTime() - min * 60_000);
+    await seedTasks(repo.id, [
+      { issue: 101, state: 'running', createdAt: recent(10) },
+      { issue: 102, state: 'running', createdAt: recent(20) },
+      { issue: 103, state: 'done', createdAt: recent(30), title: canaryIssueTitle(4) },
+    ]);
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh, { canaryRepo: 'acme/fleet-dao-canary' })(client, 'fleet'));
+    expect(run.outcome).toBe('ok');
+    expect(starts).toHaveLength(1);
+  });
+
+  it('近一小时 3 条普通任务已经把名额用满：巡检单仍被拉起', async () => {
+    const { repo } = await seedWorld(t.db, { name: 'fleet-dao-canary' });
+    const recent = (min: number) => new Date(NOW.getTime() - min * 60_000);
+    await seedTasks(repo.id, [
+      { issue: 101, state: 'running', createdAt: recent(10) },
+      { issue: 102, state: 'running', createdAt: recent(20) },
+      { issue: 103, state: 'running', createdAt: recent(30) },
+    ]);
+    const { gh } = fakeGh({
+      issues: [groomIssue({ number: 70, title: canaryIssueTitle(9) })],
+    });
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh, { canaryRepo: 'acme/fleet-dao-canary' })(client, 'fleet'));
+    expect(run.outcome).toBe('ok');
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.options).toMatchObject({ workflowId: 'task:acme/fleet-dao-canary#70' });
   });
 
   it('一小时前建的不算：3 条都是 61 分钟前，照起', async () => {
