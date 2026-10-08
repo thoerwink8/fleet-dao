@@ -20,6 +20,7 @@ import {
   CONFIG_UNCHECKED_KEY,
   ciVerdict,
   HUMAN_TIER_PATHS,
+  humanTierCommitNeedsRerun,
   parseMainLog,
   RETIRED_ALERT_PREFIXES,
   RULES_PREFIX,
@@ -642,6 +643,79 @@ test('规矩同步给的人和 france.sh 的 AGENT_RULES_USERS 一样', () => {
   assert.match(france, /^AGENT_RULES_USERS=\("\$\{SESSION_USERS\[@\]\}" "\$PILOT_USER"\)$/m);
   assert.match(france, /^SESSION_USERS=\("\$SESSION_USER"\)$/m);
   assert.deepEqual(RULES_USERS, [sessionUser, pilot]);
+});
+
+// #1278：只删已不存在的演示版空目录。diff 行以 +/- 开头，上下文行以空格开头，和 git diff 一样。
+function rideAlongDiff() {
+  return [
+    'diff --git a/deploy/lib/human-tier.sh b/deploy/lib/human-tier.sh',
+    '--- a/deploy/lib/human-tier.sh',
+    '+++ b/deploy/lib/human-tier.sh',
+    '@@ -1,4 +1,4 @@',
+    ' #!/usr/bin/env bash',
+    '-# 其余（自动发布脚本副本、systemd 单元文件、fleet-agents.slice、演示版可见范围的单元）是「自动档」，由自动发布每发完一版顺带跑',
+    '+# 其余（自动发布脚本副本、systemd 单元文件、fleet-agents.slice）是「自动档」，由自动发布每发完一版顺带跑',
+    '@@ -8,3 +8,3 @@',
+    '-# - 自动档的函数（setup_slice、setup_demo_scopes、setup_auto_release）留在 france.sh，不许碰防火墙、sudoers、建用户。',
+    '+# - 自动档的函数（setup_slice、setup_auto_release）留在 france.sh，不许碰防火墙、sudoers、建用户。',
+    '@@ -20,4 +20,3 @@ setup_identity() {',
+    '   ensure_dir /var/lib/fleet-dao fleet:fleet 750',
+    '-  ensure_dir "$DEMO_DIR" fleet:fleet 750',
+    '   ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750',
+  ].join('\n');
+}
+
+test('【故意造出的失败】只删演示版空目录不算要人重跑；空的、读不到的、还改了别的，都算', () => {
+  const ride = rideAlongDiff();
+  assert.equal(humanTierCommitNeedsRerun(ride), false);
+  assert.equal(humanTierCommitNeedsRerun(''), true, '空 diff 不当成没改');
+  assert.equal(humanTierCommitNeedsRerun(undefined), true, '没读到 diff 当要重跑');
+  assert.equal(
+    humanTierCommitNeedsRerun(`${ride}\n+  ensure_dir /etc/fleet-dao/extra root:root 755`),
+    true,
+    '旁边再多一行就要重跑',
+  );
+  const typo = ride.replace(
+    '+# - 自动档的函数（setup_slice、setup_auto_release）留在 france.sh',
+    '+# - 自动档的函数（setup_slice、setup_firewall）留在 france.sh',
+  );
+  assert.equal(humanTierCommitNeedsRerun(typo), true, '注释里再改一个词就要重跑');
+  assert.equal(
+    humanTierCommitNeedsRerun('-  ensure_dir "$OTHER_DIR" fleet:fleet 750\n'),
+    true,
+    '删的不是演示版那个目录，照旧要重跑',
+  );
+});
+
+test('只删演示版空目录的提交不进装机落后；没附上 diff 的照旧算', async () => {
+  const ride = 'd'.repeat(40);
+  const real = 'e'.repeat(40);
+  const m = machine();
+  m.io.readSystem = async () => ({
+    applied: H0,
+    log: `${ride} 2026-10-08T01:00:00Z\n${real} 2026-10-07T01:00:00Z`,
+    diffs: { [ride]: rideAlongDiff() },
+  });
+  let st = await m.round();
+  assert.equal(st.system.behind, 1, '真改动还在，删目录那次剔掉');
+  assert.equal(st.system.oldestAt, '2026-10-07T01:00:00.000Z', '落后从真改动那次算，不从更早的删目录算');
+  assert.equal(st.system.appliedSha, H0);
+
+  m.io.readSystem = async () => ({
+    applied: H0,
+    log: `${ride} 2026-10-08T01:00:00Z`,
+    diffs: { [ride]: rideAlongDiff() },
+  });
+  st = await m.round();
+  assert.equal(st.system.behind, 0);
+  assert.equal(st.system.oldestAt, null);
+
+  m.io.readSystem = async () => ({
+    applied: H0,
+    log: `${ride} 2026-10-08T01:00:00Z`,
+  });
+  st = await m.round();
+  assert.equal(st.system.behind, 1, '没附上 diff 当要重跑，不把没看见当成可以不跑');
 });
 
 // 装机分两档（docs/ops.md 第九节「装机层」）：人工档（lib/human-tier.sh 里的函数，碰防火墙、sudoers、建用户）改了要人重跑、

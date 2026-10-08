@@ -552,7 +552,7 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
 演示版：已删（创始人 2026-10-07，#1223）。香港站点 `/demo/` 的假数据演示版、驾驶舱里发游客链接的「演示版」页、法国上推可见范围的 `fleet-demo-scopes` 单元都没了；本机假数据模式（`react-router dev --mode mock`）保留。落地分三处，都由发版带过去，不用人手改：
 
 - 发布：`FLEET_HK_PARTS` 只认 `gateway`、`web`；不再构建、不再发、不再核对演示版；发布时把香港上老的 `/demo/` 目录删掉、读回要是 404（本节发静态文件那一步）。老的 `release.env` 里留着的 `FLEET_DEMO_PATH`、`FLEET_HK_PARTS` 里的 `demo` 认下来、丢掉，期望里已去掉，下次照期望写配置时换掉。
-- 法国装机：`france.sh`（整套和 `--auto-tier` 的自动档）把老机器上还装着的 `fleet-demo-scopes.{path,timer,service}` 停掉、禁用、删掉，也删 `/usr/local/sbin/fleet-demo-scopes`，读回核对它们不在；`api.env` 的 `FLEET_DEMO_DIR` 从期望里去掉（机器上留着的老值没人读）。数据目录 `/var/lib/fleet-dao/demo` 不动（删数据要人拍）。
+- 法国装机：`france.sh`（整套和 `--auto-tier` 的自动档）把老机器上还装着的 `fleet-demo-scopes.{path,timer,service}` 停掉、禁用、删掉，也删 `/usr/local/sbin/fleet-demo-scopes`，读回核对它们不在；`api.env` 的 `FLEET_DEMO_DIR` 从期望里去掉（机器上留着的老值没人读）。数据目录 `/var/lib/fleet-dao/demo` 不动（删数据要人拍）。人工档不再建这个空目录（#1278），跟着下一次本来就要以 root 跑的整套 `france.sh` 才停建，不为它单独重跑。
 - 香港站点：`hk.sh` 重渲染站点配置，演示版那一段换成对 `/demo` 一律回 404；`hk.env` 里留着的 `FLEET_DEMO_PATH` 认得、忽略。香港 `git pull` 后重跑一遍 `hk.sh` 就换上（不重跑也行：发布脚本已经把目录删了，老站点配置对不存在的文件本来就回 404）。
 
 | 单元 | 身份 | 跑什么 | 读的配置（都在 `/etc/fleet-dao`） |
@@ -688,6 +688,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
   - 当场红：读数读不到、认不出；单元 20 分钟没报到；主线头 20 分钟没读到（单元停了时只报「没报到」一条）；在用的读不到；还没发布过；规矩同步没成、同步到哪没读到；装机自动档没装成。
   - **不红**：落后主线几个提交、主线头的 CI 红或结论读不到、在用的不在主线最近 300 个提交里。（以前这几样按「落后多久」红，按版本发时还按版本标记数；发布改走按钮以后没有人会自动去发，所以不再报。）
   - 装机层只有「人工档」会红：整套 france.sh 跑完没红时把装到的提交记进 `.auto/france-applied`；之后主线上人工档那几个文件（`deploy/lib/human-tier.sh`、`deploy/france/fleet-dao.nft`、`fleet-firewall.service`、`sudoers-fleet-dao`、`fleet-agent-scope.sh`、建用户的 `deploy/lib/session-user.sh`、`login-user.sh`、`session-ports.sh`、驾驶舱按钮的接活脚本，清单在 `deploy/france/auto-release/lib.mjs` 的 `HUMAN_TIER_PATHS`）改过、一天以上没重跑整套，红，写明要人重跑（它碰防火墙、sudoers、建用户，不自动跑）。其余装机步骤（自动发布单元的脚本副本和单元、`fleet-agents.slice`、清老单元的 `retire_old_units`、Mirasim 常驻单元 `fleet-mirasim-session.service`）是「自动档」，改了**不红**：见上一条。
+  - 只删演示版空目录不算落后（#1278）：`human-tier.sh` 里删掉 `ensure_dir "$DEMO_DIR"`、注释里的 `setup_demo_scopes` 和「演示版可见范围」，不碰防火墙、sudoers、建用户。这种 diff 由 `deploy/france/auto-release/lib.mjs` 的 `humanTierCommitNeedsRerun` 剔掉，不为它单独叫人重跑整套 `france.sh`；同一份 diff 里还有别的改动照旧要重跑，清理跟着那次一起带上。`/var/lib/fleet-dao/demo` 里已有的旧文件要不要清由创始人定（删数据，装机不删）。这份判法在自动发布的副本里，下一次发版后自动档换上才生效，不用为这件事跑整套；换上之前旧副本仍按「文件改了就算」数，合并后一天内发过一版就不会因此标红。
   - 公网看得到 `/healthz`：对外的话不带提交号和路径，细节在 `release.sh --check` 列出的「自动发布」那一段和报警正文里。不在法国的正式机器上（开发、测试）报「未接」。
 - 看：`bash /srv/fleet-dao/deploy/release.sh --check` 列出的「自动发布」那一段（定时器在不在跑、上一轮什么时候、主线头和它的 CI、在用的落后几个、这一轮读到了什么、规矩同步到哪、装机自动档和装机脚本装到哪）；`journalctl -u fleet-auto-release -n 30`（每轮一行读数）；`systemctl list-timers fleet-auto-release.timer`；发布日志在 `/srv/fleet-dao-releases/.logs/`。
 - 停、开：`systemctl disable --now fleet-auto-release.timer` 停（在跑的那一轮照样跑完；20 分钟后 `/healthz` 报自动发布没报到，该报）；`systemctl enable --now fleet-auto-release.timer` 开；马上跑一轮：`systemctl start fleet-auto-release`（别直接跑那个 `.mjs`：两轮叠着跑会互相盖读数）。停着不影响发版（按钮不经它），只是读数不更新、发完版不自动装自动档和同步规矩。

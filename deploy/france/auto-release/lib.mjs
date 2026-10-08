@@ -43,6 +43,8 @@ export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
  * 是「自动档」：发完版后由 tierStep 以 root 跑 `france.sh --auto-tier` 顺带装上，改了不算落后。
  * 新加碰防火墙 / sudoers / 建用户的步骤，写进 deploy/lib/human-tier.sh，它用到的仓里文件加到这里（测试核对：那个文件
  * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
+ * 只删掉已不存在的演示版空目录（#1278）不算落后：不为此单独叫人重跑，跟着下一次本来就要跑的整套一起带上。
+ * 判法是 humanTierCommitNeedsRerun（看这次 diff，不看「文件名出现在 git log 里」）。
  */
 export const HUMAN_TIER_PATHS = [
   'deploy/lib/human-tier.sh',
@@ -379,13 +381,68 @@ async function readCiBody(io) {
   return { body, unread };
 }
 
-/** 装机层：france.sh 装到哪个提交、那之后主线上它管的文件改过几次。读不到记 error。 */
+/**
+ * 从一行人工档 diff 里拿掉「只删演示版空目录」的那几处（#1278）。拿不掉的留下，留给调用方看还剩不剩别的改动。
+ * 只认这三处，多一个字都不算：注释里的「、演示版可见范围的单元」、`setup_demo_scopes、`，以及整行 `ensure_dir "$DEMO_DIR"`。
+ */
+const RIDE_ALONG_PHRASES = ['、演示版可见范围的单元', 'setup_demo_scopes、'];
+
+function stripRideAlong(line) {
+  let out = line;
+  for (const phrase of RIDE_ALONG_PHRASES) out = out.replaceAll(phrase, '');
+  return out;
+}
+
+function isDiffMeta(line) {
+  return (
+    line.startsWith('diff ') ||
+    line.startsWith('index ') ||
+    line.startsWith('@@') ||
+    line.startsWith('\\') ||
+    line.startsWith('+++ ') ||
+    line.startsWith('--- ')
+  );
+}
+
+/**
+ * 一次人工档 diff 要不要逼人重跑整套 france.sh。
+ * 没读到、空的，当要重跑（不拿空当「没改」）。
+ * 只删掉已不存在的演示版空目录（#1278）不要：不碰防火墙、sudoers、建用户，跟着下一次本来就要跑的整套一起带上。
+ * 同一份 diff 里只要还剩别的增删，照旧要重跑（清理跟着那次一起带上）。
+ * diff 是 `git diff <父提交> <此提交> -- HUMAN_TIER_PATHS` 的原文。
+ */
+export function humanTierCommitNeedsRerun(diff) {
+  if (typeof diff !== 'string' || diff.trim() === '') return true;
+  const pending = [];
+  let saw = false;
+  for (const line of diff.split('\n')) {
+    if (line === '' || isDiffMeta(line)) continue;
+    if (line.startsWith('+')) {
+      saw = true;
+      const added = line.slice(1);
+      const idx = pending.findIndex((old) => stripRideAlong(old) === added && stripRideAlong(old) !== old);
+      if (idx < 0) return true;
+      pending.splice(idx, 1);
+      continue;
+    }
+    if (line.startsWith('-')) {
+      saw = true;
+      pending.push(line.slice(1));
+    }
+  }
+  if (!saw) return true;
+  return pending.some((old) => !/^ensure_dir "\$DEMO_DIR" fleet:fleet 750$/.test(old.trim()));
+}
+
+/** 装机层：france.sh 装到哪个提交、那之后主线上人工档里要人重跑的改动有几次。读不到记 error。 */
 async function systemLayer(io, head) {
   try {
     const s = await io.readSystem(head);
     if (!s.applied) return { error: 'france.sh 装到哪个提交没记（跑一遍 france.sh 就有）' };
     const lag = s.log.trim() === '' ? [] : parseMainLog(s.log);
-    return { appliedSha: s.applied, behind: lag.length, oldestAt: lag.at(-1)?.at ?? null };
+    // 没附上某次的 diff（旧调用、读失败）当要重跑，不把「没看见」当成可以不跑
+    const needs = lag.filter((c) => humanTierCommitNeedsRerun(s.diffs?.[c.sha]));
+    return { appliedSha: s.applied, behind: needs.length, oldestAt: needs.at(-1)?.at ?? null };
   } catch (e) {
     return { error: why(e) };
   }

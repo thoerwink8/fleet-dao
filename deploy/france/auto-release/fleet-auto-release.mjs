@@ -105,7 +105,19 @@ export const realIo = {
       ['log', '--first-parent', '--format=%H %cI', `${applied}..${head}`, '--', ...HUMAN_TIER_PATHS],
       '数装机人工档的提交',
     );
-    return { applied, log };
+    // 每次的 diff 交给 lib.mjs 的 humanTierCommitNeedsRerun：只删演示版空目录的不算落后（#1278），
+    // 不为它单独叫人重跑。某一次读不出来就交空串，那边当成要重跑，不拿空当没事。
+    const diffs = {};
+    for (const raw of log.split('\n')) {
+      const sha = raw.trim().split(' ')[0];
+      if (!SHA.test(sha)) continue;
+      try {
+        diffs[sha] = gitOk(['diff', `${sha}^`, sha, '--', ...HUMAN_TIER_PATHS], '读人工档这一次改了什么');
+      } catch {
+        diffs[sha] = '';
+      }
+    }
+    return { applied, log, diffs };
   },
   async readCurrent() {
     let target;

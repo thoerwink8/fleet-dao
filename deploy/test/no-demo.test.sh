@@ -61,6 +61,15 @@ echo "== 仓里不再有推可见范围的单元、脚本和它的测试"
 check "没有 fleet-demo-scopes* 文件" "$(old_unit_files "$REPO")" ""
 check "没有 deploy/test/demo-scopes.test.sh" "$([[ -e "$HERE/demo-scopes.test.sh" ]] && echo 在 || echo 没有)" 没有
 
+echo "== 人工档不再建演示版老目录（#1278）；目录表那一行也没有。不为它单独重跑整套，见 ops 第九节"
+check "human-tier.sh 不再建 DEMO_DIR" "$(grep -c 'DEMO_DIR' "$DEPLOY/lib/human-tier.sh" || true)" 0
+check "human-tier.sh 不再提 setup_demo_scopes" "$(grep -c 'setup_demo_scopes' "$DEPLOY/lib/human-tier.sh" || true)" 0
+check "france.sh 没有 DEMO_DIR= 这一行" "$(grep -c '^DEMO_DIR=' "$DEPLOY/france.sh" || true)" 0
+check "ops 目录表没有 /var/lib/fleet-dao/demo 那一行" \
+  "$(grep -c '^| `/var/lib/fleet-dao/demo`' "$REPO/docs/ops.md" || true)" 0
+check "落后判法把只删这个目录剔掉，不为它单独叫人重跑" \
+  "$(grep -c '^export function humanTierCommitNeedsRerun' "$DEPLOY/france/auto-release/lib.mjs")" 1
+
 echo "== 法国的期望配置里没有演示版的键"
 check "desired-config.json 不再有 demo（FLEET_DEMO_DIR、FLEET_HK_PARTS 里的 demo）" "$(grep -c -i demo "$DEPLOY/france/desired-config.json")" 0
 check "FLEET_HK_PARTS 的值只有 gateway、web" \

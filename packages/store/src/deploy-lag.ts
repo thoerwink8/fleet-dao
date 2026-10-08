@@ -7,6 +7,8 @@
 //   装机脚本的人工档落后（要人跑）。
 // - 状态文件的字段跟 deploy/france/auto-release/lib.mjs 走（STATE_SCHEMA）；test/deploy-lag.test.ts 拿那边真跑出来的状态核对。
 // - 这一项会随时间自己变红（单元停了），发布脚本只把它标待处理、不退回（deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
+// - 人工档的 behind 由自动发布单元算好再写进来（lib.mjs 的 humanTierCommitNeedsRerun）。只删掉已不存在的演示版空目录
+//   （#1278）在那边剔掉，不算要人重跑；这里不再按文件名重数一遍。
 // - 公网看得到 /healthz：对外的话不带提交号、路径、内部名；细节只进日志和报警正文。报警只用不带时长的话，
 //   免得每 5 分钟改一次卡片（飞书免费版每月 1 万次接口调用，design 15.4）。
 import { readFileSync, readlinkSync } from 'node:fs';
