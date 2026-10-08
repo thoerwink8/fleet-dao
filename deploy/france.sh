@@ -185,7 +185,6 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 # 已删的演示版（#1223，创始人 2026-10-07）：以前装过的推可见范围的脚本和单元，装机时停掉、删掉（retire_old_units），读回核对它们不在。
 # 它们的数据目录（/var/lib/fleet-dao/demo，#1223）不动：里面是旧的可见范围文件，要不要清由人定
 RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service) # #1223：先停触发的两个，再停服务本身
-DEMO_DIR=/var/lib/fleet-dao/demo # #1223：人工档（lib/human-tier.sh）还在建这个老目录；改人工档的文件会让 deploy_lag 要人重跑整套，所以这一行留着，另开单再删
 RETIRED_BIN=/usr/local/sbin/fleet-demo-scopes # #1223
 RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
 # 驾驶舱「发布到法国」按钮的接活（人工档，lib/human-tier.sh 的 setup_release_request）：后端（fleet）写请求到 RELEASE_REQUEST_DIR，
