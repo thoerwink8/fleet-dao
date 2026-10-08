@@ -62,13 +62,32 @@ describe('路由与账号池', () => {
     );
   });
 
-  it('同一模型换一种执行方式是另一条路由；同池同模型同执行方式不许重复', async () => {
+  it('同一模型换一种执行方式是另一条路由；同池同模型同执行方式、上游串也一样不许重复', async () => {
     await addRoute(t.db, { id: 'k3-pi', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
     await addRoute(t.db, { id: 'k3-api', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'api-shell' });
     await expectViolation(
       addRoute(t.db, { id: 'k3-pi-again', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' }),
       'routes_pool_model_host_unique',
     );
+  });
+
+  it('同池同模型同执行方式、上游串不同是另一条变体', async () => {
+    await addRoute(t.db, {
+      id: 'k3-a',
+      poolId: 'relay-a',
+      modelId: 'kimi-k3',
+      hostId: 'mirasim',
+      upstreamModel: 'kimi-k3',
+    });
+    await addRoute(t.db, {
+      id: 'k3-b',
+      poolId: 'relay-a',
+      modelId: 'kimi-k3',
+      hostId: 'mirasim',
+      upstreamModel: 'kimi-k3[1m]',
+    });
+    const rows = await t.db.select().from(routes);
+    expect(rows.filter((r) => r.id === 'k3-a' || r.id === 'k3-b')).toHaveLength(2);
   });
 
   it('并发上限没有「不限」：必须是正数', async () => {

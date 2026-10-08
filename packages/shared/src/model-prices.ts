@@ -3,9 +3,8 @@
 //
 // 改这里之前必须知道：
 // - 只写查得到官方出处的价：每一项带 source（官方页链接）和 checkedAt（查的那天）。查不到官方价、或官方就不按 token 标价的模型
-//   不写进价表，写进 NO_PRICE_MODELS 并写明原因——页面写「没有单价」和原因，不显示 0、不拿别家的价或第三方汇总的数顶。
-//   模型目录（packages/db/routing.default.json）里会被派去跑三段会话的模型（出现在 judge 以外的用途里）必须在两张表里有且只有
-//   一项，新加模型没补就红（model-prices.test.ts）。只答判断题的 judge 模型不进三段流水，不在此列。
+//   不写进价表。明确没有 token 价的写进 NO_PRICE_MODELS 并写明原因。没登记的按未知单价算，页面写「未知单价」，不显示 0、
+//   不拿别家的价或第三方汇总的数顶。不再要求目录里每个模型都登记进这两张表（#1355）。
 // - 单价是 API 标价（美元 / 百万 token）。订阅、拼车的账单不按它算：估出来的数是「这一轮按 API 价值多少」，用来比各段、各模型
 //   花了多少，不是账单多出的钱（和执行体报的「套餐内折合」同一个意思）。
 // - 只估执行体没报花费的那几笔：报了的照用报的，不另估一遍。
@@ -113,7 +112,7 @@ export interface NoPrice {
 }
 
 /**
- * 模型目录里每个模型要么在 MODEL_PRICES 有单价，要么在这里写明为什么没有（测试逐个核对目录，新加模型没补就红）。
+ * 明确没有按 token 单价的模型写在这里（原因给页面）。没登记、也不在 MODEL_PRICES 里的，按未知单价算，不必先写进这张表。
  * 查不到官方价的写「查不到官方价」，不拿第三方汇总的数顶。
  */
 export const NO_PRICE_MODELS: Readonly<Record<string, NoPrice>> = {
@@ -272,7 +271,7 @@ export function estimateCostUsd(
     const reason = noPriceReasonOf(model);
     return {
       kind: 'noPrice',
-      why: reason ? `「${model}」没有按 token 的单价：${reason}` : `模型目录里没有「${model}」的单价`,
+      why: reason ? `「${model}」没有按 token 的单价：${reason}` : `「${model}」未知单价`,
     };
   }
   const missing = (Object.keys(TOKEN_NAMES) as (keyof typeof TOKEN_NAMES)[])

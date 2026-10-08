@@ -1,9 +1,10 @@
-// 渠道模型名册（#1302）：只记、只比。不改目录，不派活。
+// 渠道模型名册（#1302）：记下看见的模型。读成的同一笔事务里把新串补进目录（#1355），读失败不动目录。
 // 最近一次读失败的渠道不拿更早的名单去报「新增 / 消失」：那会把没读成说成渠道里已经没有。
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { channelModelReads, channelSeenModels, channels, routes } from '../schema/index.ts';
+import { discoverChannelModels } from './catalog-discover.ts';
 
 /** 一天四次左右：额度任务每 15 分钟醒一次，名册没到这个间隔就跳过。四个渠道一起读。 */
 export const MODEL_ROSTER_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -75,8 +76,8 @@ export interface SaveChannelModelReadsResult {
 }
 
 /**
- * 每个渠道自己一笔事务。读成：名册里的模型 last_seen 盖成这一次，不在名册里的旧行留着。
- * 读失败：只盖「最近一次读」，不动见过的模型。比库里那次还早的结果整笔丢掉。
+ * 每个渠道自己一笔事务。读成：名册里的模型 last_seen 盖成这一次，并在同一笔里把新串补进目录、给消失的路由标下架。
+ * 读失败：只盖「最近一次读」，不动见过的模型，也不动目录。比库里那次还早的结果整笔丢掉。
  */
 export async function saveChannelModelReads(
   db: Db,
@@ -118,6 +119,7 @@ export async function saveChannelModelReads(
               set: { lastSeenAt: now },
             });
         }
+        await discoverChannelModels(tx, result.channelId, result.models, now);
       });
     } catch (err) {
       unstored.push({ channelId: result.channelId, error: errMessage(err) });
@@ -151,6 +153,8 @@ interface DiffRoute {
   modelId: string;
   upstreamModel: string | null;
   upstreamAliases: readonly string[];
+  /** 已经标了「渠道已下架」的不再列进消失：标本身就是那次入库记下的。 */
+  goneAt: Date | null;
 }
 
 export interface DiffChannel {
@@ -215,6 +219,7 @@ export function diffChannelModels(rows: readonly DiffChannel[]): ModelRosterDiff
     }
     const gone = [...row.routes].sort((a, b) => (a.routeId < b.routeId ? -1 : a.routeId > b.routeId ? 1 : 0));
     for (const route of gone) {
+      if (route.goneAt) continue;
       const keys = catalogStrings(route);
       if (keys.length > 0 && keys.some((key) => seen.has(key))) continue;
       const upstream = route.upstreamModel?.trim() ?? '';
@@ -261,6 +266,7 @@ export async function channelModelDiff(db: Db): Promise<ModelRosterDiff> {
         modelId: routes.modelId,
         upstreamModel: routes.upstreamModel,
         upstreamAliases: routes.upstreamAliases,
+        goneAt: routes.goneAt,
       })
       .from(routes)
       .where(inArray(routes.channelId, ids)),
@@ -281,6 +287,7 @@ export async function channelModelDiff(db: Db): Promise<ModelRosterDiff> {
       modelId: row.modelId,
       upstreamModel: row.upstreamModel,
       upstreamAliases: row.upstreamAliases ?? [],
+      goneAt: row.goneAt,
     });
     byChannel.set(row.channelId, list);
   }
