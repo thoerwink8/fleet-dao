@@ -237,6 +237,7 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
             ...(deps.sudo ? { sudo: deps.sudo } : {}),
           },
           model: t.upstreamModel ?? t.modelId,
+          ...(t.executor ? { executor: t.executor } : {}),
           session: { mode: 'new', id: driver.newSessionId(runId).id },
           purpose: 'probe',
         },

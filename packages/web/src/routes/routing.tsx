@@ -142,9 +142,19 @@ export default function Routing() {
 /**
  * 渠道名册和目录的差（#1302）。只列，不放按钮：加模型走改 deploy/catalog.json 的 PR。
  * 没读到、读失败、还没读过，都不写「都对得上」。两头都空、也没有失败时才写那一句。
+ * 没有名册命令的渠道（#1357）另写「这个渠道靠手工登记，共 N 个」，不报没读成。
  */
 function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
   const roster = layers.modelRoster;
+  const manual = roster?.manual ?? [];
+  const manualBlock =
+    manual.length === 0
+      ? null
+      : manual.map((item) => (
+          <p key={item.channelId}>
+            {item.channelName}：这个渠道靠手工登记，共 {item.count} 个
+          </p>
+        ));
   let body: ReactNode;
   if (layers.modelRosterUnavailable) {
     body = <p>{layers.modelRosterUnavailable}</p>;
@@ -154,9 +164,22 @@ function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
     roster.missingFromCatalog.length === 0 &&
     roster.goneRoutes.length === 0 &&
     roster.failed.length === 0 &&
-    roster.notYet.length === 0
+    roster.notYet.length === 0 &&
+    manual.length === 0
   ) {
     body = <p>都对得上</p>;
+  } else if (
+    roster.missingFromCatalog.length === 0 &&
+    roster.goneRoutes.length === 0 &&
+    roster.failed.length === 0 &&
+    roster.notYet.length === 0
+  ) {
+    body = (
+      <div className="space-y-3">
+        <p>都对得上</p>
+        {manualBlock}
+      </div>
+    );
   } else {
     body = (
       <div className="space-y-3">
@@ -197,6 +220,7 @@ function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
         {roster.notYet.map((item) => (
           <p key={item.channelId}>{item.channelName} 还没读过</p>
         ))}
+        {manualBlock}
       </div>
     );
   }

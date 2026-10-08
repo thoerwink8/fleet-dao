@@ -36,7 +36,6 @@ import {
   type HostRunners,
   type HostRunSpec,
   hostDrivers,
-  MIRASIM_AGENT_BY_MODEL,
   MIRASIM_PENDING_PREFIX,
   mirasimAgentFor,
   sessionEffortFor,
@@ -1020,11 +1019,10 @@ describe('Claude Code 的驱动', () => {
   });
 });
 
-describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
-  it('现挂的路由都认得出：opus-5.5、sonnet-5.5→claude、gpt 各档→codex、kimi-k3→pi、deepseek-flash→dsh、glm-5.3、glm-5.3-flash→zcode', () => {
+describe('模型串 → Mirasim 执行体（名册字段或前缀）', () => {
+  it('前缀：claude-→claude、gpt-→codex、grok-→grok、kimi-→kimi、deepseek-→dsh', () => {
     expect(mirasimAgentFor('claude-opus-5-5')).toBe('claude');
     expect(mirasimAgentFor('claude-sonnet-5-5')).toBe('claude');
-    expect(mirasimAgentFor('glm-5.3-flash')).toBe('zcode');
     expect(mirasimAgentFor('gpt-5.6-luna')).toBe('codex');
     for (const m of [
       'gpt-6-sol',
@@ -1036,61 +1034,29 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     ]) {
       expect(mirasimAgentFor(m), m).toBe('codex');
     }
-    expect(mirasimAgentFor('glm-5.3')).toBe('zcode');
-    expect(mirasimAgentFor('kimi-k3')).toBe('pi');
+    expect(mirasimAgentFor('grok-4.7')).toBe('grok');
+    expect(mirasimAgentFor('kimi-k3')).toBe('kimi');
     expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
     expect(mirasimAgentFor('deepseek-v4-pro')).toBe('dsh');
   });
 
-  it('法国没装本体的执行体（gemini、antigravity、qwen）的模型串不在映射里：认不出就明确报错，不落到默认执行体上', () => {
-    for (const m of ['gemini-3.1-pro-preview', 'gemini-3.8-flash-medium', 'qwen3-coder-plus']) {
-      expect(() => mirasimAgentFor(m), m).toThrow('Mirasim 认不出这个模型该起哪个执行体');
-    }
+  it('名册记下的执行体盖过前缀：kimi 可以是 pi，glm 可以是 zcode', () => {
+    expect(mirasimAgentFor('kimi-k3', 'pi')).toBe('pi');
+    expect(mirasimAgentFor('glm-5.3-flash', 'zcode')).toBe('zcode');
+    expect(mirasimAgentFor('glm-5.3', 'zcode')).toBe('zcode');
   });
 
-  // Mirasim 服务端 0.0.425（2026-10-07 在法国读 server.cjs）里各执行体认的模型串。服务端静态表里 sol 只有 gpt-6-sol；
-  // gpt-6.1-sol 是中转名单里的名（不在服务端静态表里）：2026-10-01 实测六个 codex 模型全成、读回就是它
-  // （docs/archive/progress-2026-10-01.md），0.0.425 对表外的串原样放行。
-  const MIRASIM_KNOWN_MODELS: Readonly<Record<string, readonly string[]>> = {
-    codex: [
-      'gpt-6-astra',
-      'gpt-6-sol',
-      'gpt-6.1-sol',
-      'gpt-6-luna',
-      'gpt-5.6-sol',
-      'gpt-5.6-terra',
-      'gpt-5.6-luna',
-    ],
-    zcode: ['glm-5.3', 'glm-5.3-flash'],
-    dsh: ['deepseek-flash', 'deepseek-v4-pro'],
-    pi: ['kimi-k3'],
-    // claude 执行体：docs/reference/adapters.md MS-30 实测过的 7 个里去掉 fable（机器派的会话永不用 Fable）
-    claude: ['claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-opus-4-8'],
-  };
-  /** 映射里服务端认不出的条目：模型串不在它那个执行体的名单里。 */
-  const unknownToMirasim = (map: Readonly<Record<string, string>>): string[] =>
-    Object.entries(map)
-      .filter(([model, agent]) => !MIRASIM_KNOWN_MODELS[agent]?.includes(model))
-      .map(([model, agent]) => `${model}→${agent}`);
-
-  it('映射里每个模型串都在 Mirasim 服务端认得的名单里（执行体也对得上）', () => {
-    expect(unknownToMirasim(MIRASIM_AGENT_BY_MODEL)).toEqual([]);
-  });
-
-  it('【故意造出的失败】映射里有服务端认不出的模型串（例如 gpt-7-sol）、或挂错执行体：报认不出', () => {
-    expect(unknownToMirasim({ ...MIRASIM_AGENT_BY_MODEL, 'gpt-7-sol': 'codex' })).toEqual([
-      'gpt-7-sol→codex',
-    ]);
-    expect(unknownToMirasim({ 'glm-5.3': 'codex' })).toEqual(['glm-5.3→codex']);
-  });
-
-  it('插头读到认不出的输出——模型串不在这张表里：明确报错，不落到某个默认执行体上（新路由忘了改这张表会当场炸，不会悄悄派错执行体）【故意造出的失败】', () => {
+  it('【故意造出的失败】未知前缀不得落到 claude', () => {
+    expect(() => mirasimAgentFor('glm-6')).toThrow('执行体未知');
     expect(() => mirasimAgentFor('glm-6')).toThrow('Mirasim 认不出这个模型该起哪个执行体：glm-6');
-    expect(() => mirasimAgentFor('')).toThrow('Mirasim 认不出这个模型该起哪个执行体：');
-    // 报错里列出现在认得的几个，方便照着改表
-    for (const known of Object.keys(MIRASIM_AGENT_BY_MODEL)) {
-      expect(() => mirasimAgentFor('glm-6')).toThrow(new RegExp(known));
+    expect(() => mirasimAgentFor('')).toThrow('执行体未知');
+    let agent: string | undefined;
+    try {
+      agent = mirasimAgentFor('glm-6');
+    } catch {
+      agent = undefined;
     }
+    expect(agent).not.toBe('claude');
   });
 });
 
@@ -1143,21 +1109,25 @@ describe('Mirasim 的驱动（#345）', () => {
     expect(fake.specs[0]?.route).toBe('cloud');
   });
 
-  it('模型串按路由上的：agent 由 MIRASIM_AGENT_BY_MODEL 现算，一般执行体带 model；pi（kimi-k3）不带 model，只带 expectModel 核对回读的快照（PI-02）', async () => {
+  it('模型串按前缀或路由上记下的执行体：一般执行体带 model；只有执行体真是 pi 时不带 model，只带 expectModel（PI-02）', async () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
     await driver.run(mirasimSpec({ model: 'deepseek-flash' }), {});
     expect(fake.specs[0]).toMatchObject({ agent: 'dsh', model: 'deepseek-flash' });
     expect(fake.specs[0]).not.toHaveProperty('expectModel');
     await driver.run(mirasimSpec({ model: 'kimi-k3' }), {});
-    expect(fake.specs[1]).toMatchObject({ agent: 'pi', expectModel: 'kimi-k3' });
-    expect(fake.specs[1]).not.toHaveProperty('model');
-    await driver.run(mirasimSpec({ model: 'glm-5.3-flash' }), {});
-    expect(fake.specs[2]).toMatchObject({ agent: 'zcode', model: 'glm-5.3-flash' });
-    expect(fake.specs[2]).not.toHaveProperty('expectModel');
+    expect(fake.specs[1]).toMatchObject({ agent: 'kimi', model: 'kimi-k3' });
+    expect(fake.specs[1]).not.toHaveProperty('expectModel');
+    await driver.run(mirasimSpec({ model: 'kimi-k3', executor: 'pi' }), {});
+    expect(fake.specs[2]).toMatchObject({ agent: 'pi', expectModel: 'kimi-k3' });
+    expect(fake.specs[2]).not.toHaveProperty('model');
+    await driver.run(mirasimSpec({ model: 'glm-5.3-flash', executor: 'zcode' }), {});
+    expect(fake.specs[3]).toMatchObject({ agent: 'zcode', model: 'glm-5.3-flash' });
+    expect(fake.specs[3]).not.toHaveProperty('expectModel');
   });
 
-  it('模型串这张表认不出：起会话之前就拒（不起插头），和其它认不出的配置一样交回工作流换新 runId', async () => {
+  it('模型串前缀认不出：起会话之前就拒（不起插头），不落到 claude', async () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await expect(driver.run(mirasimSpec({ model: 'glm-6' }), {})).rejects.toThrow('执行体未知');
     await expect(driver.run(mirasimSpec({ model: 'glm-6' }), {})).rejects.toThrow(
       'Mirasim 认不出这个模型该起哪个执行体：glm-6',
     );
@@ -1317,7 +1287,7 @@ describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high；驾驶�
     await wired.mirasim.run(spec({ model: 'kimi-k3', effort: 'xhigh' }), {});
     expect(claude.specs[1]?.effort).toBe('medium');
     expect(grok.specs[1]?.reasoningEffort).toBe('low');
-    expect(mira.specs[1]).toMatchObject({ agent: 'pi', expectModel: 'kimi-k3', effort: 'xhigh' });
+    expect(mira.specs[1]).toMatchObject({ agent: 'kimi', model: 'kimi-k3', effort: 'xhigh' });
   });
 
   it('配了不认识的档位：报错、插头不起【故意造出的失败】', async () => {

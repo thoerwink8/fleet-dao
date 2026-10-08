@@ -5,6 +5,8 @@ export interface ChannelModelReadOk {
   ok: true;
   channelId: string;
   models: string[];
+  /** 名册帧上的执行体。没有这一项时，写入方按上游串前缀判。 */
+  executors?: { modelKey: string; executor: string }[];
 }
 
 export interface ChannelModelReadFailed {

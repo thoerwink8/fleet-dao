@@ -947,8 +947,8 @@ export function fakeMirasimRun(script: (spec: MirasimRunSpec, n: number) => Fake
 }
 
 /**
- * 一条 mirasim 路由（和目录样例同一个样子）：中转池不绑会话用户，agent 由调用方给（对应 hosts.ts 的
- * MIRASIM_AGENT_BY_MODEL）。stages 给了就挂进这些用途的路由两层（hangRoutes，位置 11）。
+ * 一条 mirasim 路由（和目录样例同一个样子）：中转池不绑会话用户。执行体按上游串前缀或 routes.executor
+ * （shared 的 resolveMirasimExecutor）。stages 给了就挂进这些用途的路由两层（hangRoutes，位置 11）。
  */
 export async function addMirasimRoute(
   db: Db,
@@ -961,7 +961,7 @@ export async function addMirasimRoute(
     .insert(pools)
     .values({ id: poolId, channelId: 'mirasim-cloud', maxConcurrency: 5 })
     .onConflictDoNothing();
-  // 种子里没有的模型串（测「目录配了、MIRASIM_AGENT_BY_MODEL 没跟上」时故意给一个没见过的）：现插一行，
+  // 种子里没有的模型串（测「目录配了、前缀认不出」时故意给一个没见过的）：现插一行，
   // 不然连 routes 外键都插不进去——生产上这一步由目录装载器做（catalog.ts 的 config.models），不是这份种子的事。
   await db
     .insert(models)

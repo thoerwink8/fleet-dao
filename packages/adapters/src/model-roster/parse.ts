@@ -5,7 +5,9 @@ import { isRecord, redact } from '../quota/util.ts';
 
 export type RosterFailure = { ok: false; code: QuotaErrorCode; message: string };
 
-export type RosterParse = { ok: true; models: string[] } | RosterFailure;
+export type RosterParse =
+  | { ok: true; models: string[]; executors?: { modelKey: string; executor: string }[] }
+  | RosterFailure;
 
 const EMPTY_ROSTER = '渠道回了空名单，不当成一个模型都没有';
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, 'g');

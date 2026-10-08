@@ -168,7 +168,10 @@ describe('R4 同模型不同执行方式是两条路由', () => {
 describe('C1 并发按账号池计', () => {
   it('独享号满了不影响别的池', () => {
     const r = chooseRoute(
-      input([route('solo', { blockers: ['no-slot'] }), route('relay', { hostId: 'mirasim' })]),
+      input([
+        route('solo', { blockers: ['no-slot'] }),
+        route('relay', { hostId: 'mirasim', upstreamModel: 'claude-opus-5-5' }),
+      ]),
     );
     expect(r).toMatchObject({ routeId: 'relay' });
   });

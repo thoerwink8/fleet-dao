@@ -817,7 +817,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     ]);
   });
 
-  it('探通：在线；以唯一的会话用户、route=cloud、模型串按路由上的、执行体按模型对应表（deepseek-flash → dsh）', async () => {
+  it('探通：在线；以唯一的会话用户、route=cloud、模型串按路由上的、执行体按上游串前缀（deepseek-flash → dsh）', async () => {
     const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
     const run = await s.round();
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
@@ -852,7 +852,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 120 * 60_000));
   });
 
-  it('路由上的模型串这张对应表认不出（新路由没跟着改 MIRASIM_AGENT_BY_MODEL）：起会话之前就被拦下，离线写明认不出', async () => {
+  it('路由上的模型串前缀认不出（glm-6）：起会话之前就被拦下，离线写明执行体未知，不落到 claude', async () => {
     const bad = await addMirasimRoute(t.db, {
       modelId: 'glm-6',
       upstreamModel: 'glm-6',
@@ -869,6 +869,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     const down = await row(bad.routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
     expect(down?.probeDetail).toContain('起会话之前就被拦下了');
+    expect(down?.probeDetail).toContain('执行体未知');
     expect(down?.probeDetail).toContain('Mirasim 认不出这个模型该起哪个执行体：glm-6');
     // 这条路由认不出，不连累另一条认得出的
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });

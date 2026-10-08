@@ -10,6 +10,7 @@ import {
   type ReserveReading,
   ROUTE_PROBE_EVERY_MINUTES,
   reserveHitText,
+  resolveMirasimExecutor,
   resolvePoolReserve,
   routeProbeStaleMinutes,
   type StageKind,
@@ -85,6 +86,8 @@ export function blocksFor(
   if (unregistered) out.push(unregistered);
   const notLive = orgBlock(route, ctx);
   if (notLive) out.push(notLive);
+  const unknownExecutor = mirasimExecutorBlock(route);
+  if (unknownExecutor) out.push(unknownExecutor);
   out.push(...shortBlocks(route, ctx));
   out.push(...reserveBlocks(route, ctx));
   return out;
@@ -92,6 +95,17 @@ export function blocksFor(
 
 function hard(code: Block['code'], text: string): Block {
   return { code, text, wait: null, until: null };
+}
+
+/** Mirasim 认不出执行体就硬挡。别的执行方式没有这一列的意思。不落到 claude。 */
+function mirasimExecutorBlock(route: RouteFacts): Block | null {
+  if (route.hostId !== 'mirasim') return null;
+  const resolved = resolveMirasimExecutor({
+    rosterExecutor: route.executor,
+    upstreamModel: route.upstreamModel?.trim() || route.modelId,
+  });
+  if (resolved.ok) return null;
+  return hard('executor-unknown', resolved.reason);
 }
 
 /** 只收晚于现在的时刻；已经过了的按不知道算。 */
