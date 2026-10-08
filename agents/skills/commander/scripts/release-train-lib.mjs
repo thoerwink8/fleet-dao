@@ -11,12 +11,16 @@
 // - 暂停法国＝fleet-api engine off（关着时不拉单、不派活、不起干活的会话；在跑的做完当前一步）。第 2 步先记下总开关和各仓接活开关，
 //   第 7 步发完、健康检查过了，按记下的恢复：开着的开回、关着的保持关，恢复不成功就是没成（退出码 2，不当成成功）。
 //   release.sh 发完不再置关（决定 0032 第 4 条、#1256）；--restore 留着当「明写要开回」的写法，和默认一样，不再要创始人逐次授权（只是还原）。
+// - 第 4 步发版不跑法国检出里的 release.sh（那份经常还是上一版）。ssh 的是 releaseBootCommand：
+//   把同目录 release-boot.sh 送过去，解开目标提交的 deploy/ 再 exec 那一版（#1294）。没有或读不出就拒，不退回检出里那份。
+//   --check 仍跑检出里那份。
 // - 读不到就是读不到：读不到法国会话数、总开关、主线 CI 时不往下走（也不当成 0 或绿），回 { ok: false, why }。
 // - 所有打出来和记下来的字过 scrubText（令牌、邮箱、IP、长串抹掉）；ssh 的名字不进输出。
 // - 退出码：0 做完了（或 abort 做完了）；1 用法不对或被拒（没带 --founder-ok、已有一趟在走）；2 没做成（读不到、命令失败）；
 //   3 卡住（到点还有拖后腿的，名单已列出；现场没动，要么再跑 start 再等，要么 abort）。
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { KIND_TASK_IDLE, scrubText } from './france-lib.mjs';
 import { pauseMarkerPath } from './worker-lib.mjs';
 
@@ -24,7 +28,17 @@ export const STATE_REL = join('.fleet-dao', 'release-train.json');
 export const RELEASES = '/srv/fleet-dao-releases';
 /** 法国上的管理命令入口和发布脚本（docs/ops.md 第九节）。 */
 export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
+/**
+ * 法国部署检出上的 release.sh（/srv/fleet-dao，不是在用目录 current 里那份）。
+ * 只给 --check 用。发版不跑这份（检出经常还停在上一版）：第 4 步走 releaseBootCommand，
+ * 解开目标提交再 exec 那一版，改了 release.sh 的这一次就生效（#1294）。
+ */
 export const RELEASE_SH = '/srv/fleet-dao/deploy/release.sh';
+/** 发版车 ssh 上去跑的自举脚本。整段随这条命令送过去，不读法国检出里的文件。 */
+export const RELEASE_BOOT_SH = readFileSync(
+  fileURLToPath(new URL('./release-boot.sh', import.meta.url)),
+  'utf8',
+);
 export const HISTORY_FILE = `${RELEASES}/.history`;
 export const LOCK_FILE = `${RELEASES}/.lock`;
 /** flock -E：另一个发布占着锁时回这个码（75，是这里自己给 flock 指定的，release.sh 没有这个码）。 */
@@ -55,7 +69,7 @@ export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的
         0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 暂停本机（写标记，worker.mjs start 拒起新工人）
         → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（等：主线 CI 绿、法国在跑会话 0，各有上限，到点停下列出拖后腿的；
         本机在跑的工人、挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
-        --sha：ssh 到法国跑 release.sh <提交>（发版的单位是主线上的一个提交，决定 0032；不再按版本标记发）
+        --sha：ssh 到法国，用目标提交自带的 release.sh 发（release-boot.sh 先解开那一版的包再 exec，不跑检出里还停着的旧脚本；决定 0032，#1294）
         --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
         发完、健康检查过了，法国按暂停前记下的恢复：总开关和各仓接活开关开着的开回、关着的保持关（写操作记录；开不回去算没成、退出码 2）
         --restore：明写「发完开回去」，和不给一样（默认就恢复，不再要创始人逐次授权）
@@ -83,6 +97,16 @@ const tailOf = (r, n = 3) =>
   );
 /** 单引号包起来交给法国的 shell：里面的单引号写成 '\'' */
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+/**
+ * 第 4 步 ssh 的命令（#1294）。不执行部署检出里的 release.sh。
+ * 把 release-boot.sh 整段送过去：收下目标提交的 deploy/，exec 那一版自带的 release.sh。
+ * 那一版没有、读不出：命令非 0，不改跑检出里那份。--check 仍用 RELEASE_SH。
+ */
+export function releaseBootCommand(sha) {
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`自举不接受这个提交号：${sha}`);
+  return `bash -c ${shq(RELEASE_BOOT_SH)} fleet-release-boot ${sha}`;
+}
 /** 命令（run/ssh）没跑成：起不来、被超时杀、ssh 自己连不上。 */
 const didNotRun = (r) => r.error || r.status === null || r.status === 255;
 const minutes = (ms) => Math.round(ms / 60_000);
@@ -578,8 +602,11 @@ async function phaseRelease(io, state) {
 
 async function releaseBySha(io, state) {
   const sha = state.target.value;
-  sayTo(io, `发版：ssh 到法国跑 release.sh ${sha.slice(0, 12)}（创始人原话：「${state.founderOk}」）`);
-  const r = await io.ssh(`bash ${RELEASE_SH} ${sha}`, { timeoutMs: io.limits.releaseMs });
+  sayTo(
+    io,
+    `发版：ssh 到法国，用目标提交 ${sha.slice(0, 12)} 自带的 release.sh（检出里那份不跑；创始人原话：「${state.founderOk}」）`,
+  );
+  const r = await io.ssh(releaseBootCommand(sha), { timeoutMs: io.limits.releaseMs });
   state.target.sha = sha;
   if (didNotRun(r))
     return failed(

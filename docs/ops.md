@@ -509,6 +509,10 @@ bash /srv/fleet-dao/deploy/release.sh --rollback   # 退回上一版
 bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自动发布的读数、服务、健康检查
 ```
 
+`--check` 和人手动敲的 `bash /srv/fleet-dao/deploy/release.sh` 跑的是部署检出 `/srv/fleet-dao/deploy/release.sh`，不是在用那一版目录（`/srv/fleet-dao-releases/current`）里的那份。检出是独立的 git 工作树，往往还停在上一次快进的提交，也就是当时的在用版本（#1294，2026-10-08 发 72a33cb5 时若直接跑检出里那份，就是在用版 baa3d01a 的脚本，目录还从手放的旧位置装，装不进这一版的模型）。
+
+发版车不跑检出里那份。`release-train.mjs` 第 4 步 ssh 的命令是技能里的 `agents/skills/commander/scripts/release-boot.sh`（开会话钩子把技能同步到本机，不靠法国检出更新、也不等这一版先发过）：它把目标提交收进裸仓 `/srv/fleet-dao-releases/.repo.git`，把那一版的 `deploy/` 解到按提交号命名的私有目录 `/srv/fleet-dao-releases/.boot/<完整提交号>`（先解到临时目录、查过再整个挪进来，挪进来以后没人改它；两天前的旧目录顺手清掉），再 exec 它自带的 `release.sh`，参数原样带过去（完整提交号在最前，`--now`、`--unmerged` 照传）。改了 `release.sh` 的这一次发版就用那一版自己的脚本，检出还是旧的也一样。两次发版同时来（A、B 不同提交）各解各的目录，A 一定跑 A 版；两个发布谁先谁后，仍由被 exec 的那份 `release.sh` 拿发布锁（`.lock`）排，历史、排空、读回也都在那份里，这里不另做一套。那一版没有 `deploy/release.sh`、是符号链接、对象读不出、包解不开、提交取不到，命令退出 1，不改跑检出里这份。`--check` 和 `--rollback` 仍跑检出里的 `release.sh`。驾驶舱按钮发之前先把检出快进到目标提交（装在机器上的接活脚本原有的一步），所以它跑检出里的就是那一版。
+
 平时发版走驾驶舱「发布到法国」按钮（发版车同一趟流程；下一节）：点一下发主线头，发之前先排空引擎（本节末尾「发布前排空」）；自动发布单元只读不发（本节末尾「自动发布」）。上面几条留给人手动发、退回、重试。
 
 发版前先用 `agents/skills/commander/scripts/release-train.mjs` 把手头的活暂停（创始人 2026-10-05 约 21:00 定的流程；用法见它的头注释）：本机写暂停标记、`worker.mjs start` 不再起新工人，法国引擎总开关关掉并等在跑的会话收尾（等收尾只等法国在跑的会话 0、主线 CI 绿；本机在跑的工人、挂了自动合并没合的 PR 只提示、不等，2026-10-06 母单 #1121：它们和法国发版无关），收尾后才发，发完打印当前版本的清单。它的第 2、3 阶段（暂停法国、等收尾）就是法国引擎的排空，在 release.sh 之前做；release.sh 自己的「发布前排空」（本节末尾）照样跑，当最后一道兜底。发版是对外发布，`release-train.mjs start` 必须带创始人这一次发版的原话，发完、健康检查过了，法国引擎总开关和各仓「让 AI 接活」恢复到发版前（开着的开回、关着的保持关，见下面「自动发布」里「发完恢复到发版前的开关状态」）。
