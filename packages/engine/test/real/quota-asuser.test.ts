@@ -165,7 +165,7 @@ describe('额度读取：Cursor、Grok 池以会话用户读登录文件（#1195
     const cursor = r.report.results.find((x) => x.poolId === 'cursor');
     expect(cursor).toMatchObject({ ok: false, error: { code: 'no_credentials' } });
     expect(cursor && !cursor.ok && cursor.error.message).toContain(
-      `读不到 Cursor 登录文件 ${cursorAuth}（ENOENT）`,
+      `Cursor 登录文件（${cursorAuth}）读不到：ENOENT`,
     );
     expect(r.raised.map((a) => a.key)).toEqual(['quota-read:cursor']);
     expect(r.run.outcome).toBe('partial');
