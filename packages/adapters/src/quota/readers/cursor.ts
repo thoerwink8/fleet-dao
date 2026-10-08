@@ -122,42 +122,94 @@ export function readingsFromPeriodUsage(
 export const readCursorDashboard: Reader = async (ctx) => {
   const pool = ctx.pool as CursorDashboardConfig;
   const authFile = expandHome(pool.authFile ?? '~/.config/cursor/auth.json', ctx.homeDir);
-  let accessToken: unknown;
-  try {
-    accessToken = (JSON.parse(await ctx.readFile(authFile)) as Record<string, unknown>).accessToken;
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code ?? '不是 JSON';
-    throw new QuotaReadError('no_credentials', `读不到 Cursor 登录文件 ${authFile}（${code}）`);
-  }
-  if (typeof accessToken !== 'string' || !accessToken) {
-    throw new QuotaReadError(
-      'no_credentials',
-      `Cursor 登录文件 ${authFile} 里没有 accessToken：要在这台机器上 cursor-agent login`,
-    );
-  }
+  const keyFile = pool.keyFile ? expandHome(pool.keyFile, ctx.homeDir) : undefined;
   const baseUrl = (pool.baseUrl ?? DEFAULT_CURSOR_BASE_URL).replace(/\/+$/, '');
 
-  const call = (method: Method): Promise<unknown> =>
+  const call = (method: Method, token: string): Promise<unknown> =>
     fetchJson(ctx, {
       name: `Cursor ${method}`,
       url: `${baseUrl}/aiserver.v1.DashboardService/${method}`,
       init: {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${accessToken}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
           'Connect-Protocol-Version': '1',
         },
         body: '{}',
       },
-      authHint: '要在这台机器上重新 cursor-agent login',
+      authHint: keyFile
+        ? `API 密钥（${keyFile}）和登录令牌（${authFile}）都不被认：换一把密钥，或在这台机器上重新 cursor-agent login`
+        : '要在这台机器上重新 cursor-agent login',
     });
 
+  // 凭据按顺序试：先 API 密钥（法国无桌面，浏览器登录令牌落不了盘、常失效；cursor-agent 实际用的是这把），再登录令牌。
+  // 只有读不到、被拒（401/403）才换下一个；连不上、5xx 这类跟凭据无关的失败原样抛出。原因里只写来源和结果，不写任何密钥内容。
+  const sources: { label: string; path: string; read: () => Promise<string> }[] = [];
+  if (keyFile) {
+    sources.push({
+      label: 'API 密钥',
+      path: keyFile,
+      read: async () => {
+        const key = (await ctx.readFile(keyFile)).trim();
+        if (!key) throw new Error('文件是空的');
+        return key;
+      },
+    });
+  }
+  sources.push({
+    label: keyFile ? '登录令牌' : 'Cursor 登录文件',
+    path: authFile,
+    read: async () => {
+      const token = (JSON.parse(await ctx.readFile(authFile)) as Record<string, unknown>).accessToken;
+      if (typeof token !== 'string' || !token) throw new Error('里面没有 accessToken');
+      return token;
+    },
+  });
+  const outcomes: string[] = [];
+  let rejected = false;
+  let token: string | undefined;
+  let period: unknown;
+  for (const source of sources) {
+    let candidate: string;
+    try {
+      candidate = await source.read();
+    } catch (e) {
+      const why =
+        (e as NodeJS.ErrnoException).code ?? (e instanceof SyntaxError ? '不是 JSON' : (e as Error).message);
+      outcomes.push(`${source.label}（${source.path}）读不到：${why}`);
+      continue;
+    }
+    try {
+      period = await call('GetCurrentPeriodUsage', candidate);
+      token = candidate;
+      break;
+    } catch (e) {
+      if (!(e instanceof QuotaReadError) || e.code !== 'auth') throw e;
+      rejected = true;
+      outcomes.push(
+        `${source.label}（${source.path}）被拒：HTTP ${/HTTP (\d+)/.exec(e.message)?.[1] ?? '401/403'}`,
+      );
+    }
+  }
+  if (token === undefined) {
+    const detail = outcomes.join('；');
+    throw rejected
+      ? new QuotaReadError(
+          'auth',
+          `Cursor 登录失效：${detail}。要换一把 API 密钥，或在这台机器上重新 cursor-agent login`,
+        )
+      : new QuotaReadError(
+          'no_credentials',
+          `没有可用的 Cursor 凭据：${detail}。要在这台机器上 cursor-agent login 或放好 API 密钥`,
+        );
+  }
+  const usable = token;
+
   // 账期用量是主数；套餐名和「允不允许按量」只是补充，读不到只记一笔说明，不算失败。
-  const [period, planInfo, hardLimit] = await Promise.all([
-    call('GetCurrentPeriodUsage'),
-    call('GetPlanInfo').catch((e: unknown) => e),
-    call('GetHardLimit').catch((e: unknown) => e),
+  const [planInfo, hardLimit] = await Promise.all([
+    call('GetPlanInfo', usable).catch((e: unknown) => e),
+    call('GetHardLimit', usable).catch((e: unknown) => e),
   ]);
   const out = readingsFromPeriodUsage(period, { poolId: pool.poolId, readAt: ctx.fetchedAt });
   const notes = [...out.notes];

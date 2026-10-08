@@ -280,7 +280,7 @@ codex exec --json -C <工作树> -m gpt-5.6-sol \
 - 登录态文件（含 accessToken；Dashboard 采样读它，WD `INDEX.md:55`；`execution-usage.mjs:650-651`）。
 - 登录：`cursor-agent login`，要真 TTY 和浏览器；`cursor-agent status / whoami` 查状态（WD `NEW-MACHINE.md` §7c）。也可用 `--api-key` / `CURSOR_API_KEY`（help）。
 - 没桌面的 Linux 服务器上登录态存不下：cursor-agent 把凭据交给系统钥匙串（libsecret），没有 Secret Service 就落不了盘，批准了 `status` 照样说没登录（法国 2026-09-27 实测；https://dev.to/milkyway008/why-your-cli-says-youre-not-logged-in-on-a-headless-linux-server-j1o ）。法国改用 API 密钥（创始人 2026-09-27 拍；https://cursor.com/docs/cli/reference/authentication ）：Cursor 后台 API Keys 页生成，放在会话用户的 `~/.cursor/fleet-api-key`（600），起 cursor-agent 前由会话用户自己读进 `CURSOR_API_KEY`；不走 `--api-key`（上了命令行，sudo 日志、`/proc` 里都看得到）。做法、放法、换法见 ops 第五节「会话用户的 Cursor 密钥」。
-- 上面那份登录态文件在 API 密钥下没有：额度读取器 `cursor-dashboard`（`packages/adapters/src/quota/readers/cursor.ts`）读的就是它，拿 API 密钥调 Dashboard 接口行不行没核实。读取器已接进引擎（#76 的 `quota-read`，每 15 分钟）：法国的额度配置里配了 Cursor 池而登录态文件不在，就照实报「没读成」（凭据类当场报警），不当成 0；要读 Cursor 池先定怎么读。
+- 上面那份登录态文件在 API 密钥下没有。额度读取器 `cursor-dashboard`（`packages/adapters/src/quota/readers/cursor.ts`）优先用密钥、失败退回登录令牌：配置里的 `keyFile`（`deploy/quota.json` 写 `/home/fleet-agent-carpool/.cursor/fleet-api-key`，经会话用户读）里的密钥先当 Bearer 调 Dashboard 接口；密钥读不到或被拒（401/403）再用 `authFile`（auth.json）里的 accessToken；两个都不行才报 auth「登录失效」（两个都读不到是 no_credentials），原因里写明两个来源各是什么结果，不写密钥内容。读取器已接进引擎（#76 的 `quota-read`，每 15 分钟）：凭据类失败照实报「没读成」（当场报警），不当成 0。
 - 国内 IP 下模型选择器只剩 Grok / Composer / Kimi / GLM，要走代理才看得到别的（WD `NEW-MACHINE.md` §7c）。
 
 ### 4.7 已知的坑 → 测试用例

@@ -149,3 +149,105 @@ describe('Cursor 读取器', () => {
     expect(code((await run(() => ({ body: '<html>login</html>' }))).result)).toBe('bad_response');
   });
 });
+
+describe('Cursor 读取器：API 密钥优先，被拒或读不到退回登录令牌', () => {
+  const keyPath = '/home/tester/.cursor/fleet-api-key';
+  const authPath = '/home/tester/.config/cursor/auth.json';
+  const pool = {
+    poolId: 'cursor',
+    channelId: 'cursor',
+    reader: 'cursor-dashboard' as const,
+    keyFile: keyPath,
+  };
+  const KEY = 'k-placeholder-key';
+  const TOKEN = 'cursor-access-token';
+  const files = {
+    [keyPath]: `${KEY}\n`,
+    [authPath]: JSON.stringify({ accessToken: TOKEN }),
+  };
+  const happyBody = (url: string) =>
+    url.endsWith('GetCurrentPeriodUsage')
+      ? { body: period() }
+      : url.endsWith('GetPlanInfo')
+        ? { body: fixtureJson('cursor-plan-info.json') }
+        : { body: { noUsageBasedAllowed: true } };
+  const bearer = (c: { init?: RequestInit | undefined }) =>
+    ((c.init?.headers ?? {}) as Record<string, string>).Authorization;
+
+  const run = async (answer: Parameters<typeof fakeFetch>[0], fileSet: Record<string, string> = files) => {
+    const f = fakeFetch(answer);
+    const report = await readAllQuotas(
+      { pools: [pool] },
+      fakeDeps({ fetch: f.fetch, readFile: fakeFiles(fileSet) }),
+    );
+    return { result: report.results[0] as PoolQuotaResult, calls: f.calls, report };
+  };
+
+  it('密钥可用时三个调用都用密钥，不碰登录令牌', async () => {
+    const { result, calls } = await run((url) => happyBody(url));
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(3);
+    for (const c of calls) expect(bearer(c)).toBe(`Bearer ${KEY}`);
+  });
+
+  it('密钥 401：退回登录令牌，后面的调用也用登录令牌', async () => {
+    const { result, calls } = await run((url, init) =>
+      bearer({ init }) === `Bearer ${KEY}` ? { status: 401, body: {} } : happyBody(url),
+    );
+    expect(result.ok).toBe(true);
+    expect(calls.map(bearer)).toEqual([
+      `Bearer ${KEY}`,
+      `Bearer ${TOKEN}`,
+      `Bearer ${TOKEN}`,
+      `Bearer ${TOKEN}`,
+    ]);
+  });
+
+  it('两个都 401：报 auth，原因写明两个来源各是什么结果，不含密钥内容', async () => {
+    const { result, report } = await run(() => ({ status: 401, body: {} }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('auth');
+    expect(result.error.message).toContain(`API 密钥（${keyPath}）被拒：HTTP 401`);
+    expect(result.error.message).toContain(`登录令牌（${authPath}）被拒：HTTP 401`);
+    const dump = JSON.stringify(report);
+    expect(dump).not.toContain(KEY);
+    expect(dump).not.toContain(TOKEN);
+  });
+
+  it('密钥文件读不到：退回登录令牌；密钥文件是空的也一样', async () => {
+    const missing = await run((url) => happyBody(url), { [authPath]: files[authPath] });
+    expect(missing.result.ok).toBe(true);
+    expect(missing.calls.map(bearer)).toEqual(Array(3).fill(`Bearer ${TOKEN}`));
+    const blank = await run((url) => happyBody(url), { ...files, [keyPath]: '  \n' });
+    expect(blank.result.ok).toBe(true);
+    expect(blank.calls.map(bearer)).toEqual(Array(3).fill(`Bearer ${TOKEN}`));
+  });
+
+  it('密钥被拒、登录文件读不到：仍是 auth（不是 no_credentials），原因里两边都写', async () => {
+    const { result } = await run(() => ({ status: 403, body: {} }), { [keyPath]: files[keyPath] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('auth');
+    expect(result.error.message).toContain('被拒：HTTP 403');
+    expect(result.error.message).toContain('读不到：ENOENT');
+  });
+
+  it('密钥不是凭据问题的失败（502）不退回登录令牌，原样报 upstream', async () => {
+    const { result, calls } = await run(() => ({ status: 502, body: 'bad gateway' }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('upstream');
+    expect(calls.every((c) => bearer(c) === `Bearer ${KEY}`)).toBe(true);
+  });
+
+  it('故意造出失败：两个文件都读不到 → no_credentials，原因里两个来源都写，没发过一次请求', async () => {
+    const { result, calls } = await run((url) => happyBody(url), {});
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('no_credentials');
+    expect(result.error.message).toContain(`API 密钥（${keyPath}）读不到：ENOENT`);
+    expect(result.error.message).toContain(`登录令牌（${authPath}）读不到：ENOENT`);
+    expect(calls).toHaveLength(0);
+  });
+});
