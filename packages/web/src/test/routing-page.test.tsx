@@ -235,7 +235,9 @@ describe('路由页顶上的渠道一览（驾驶舱改版 2026-10-07：细看�
       'ch-relay',
     ]);
     const cursor = items.find((c) => c.getAttribute('data-channel') === 'ch-cursor');
-    expect(cursor?.textContent).toContain('暂不可用');
+    // #1366 起状态词改了：暂不可用 → 故障；通 → 在线；渠道已下架 → 已关；没在配的路由里，未探 → 未被用途使用
+    expect(cursor?.textContent).toContain('故障');
+    expect(cursor?.getAttribute('data-kind')).toBe('fault');
     expect(
       within(cursor as HTMLElement)
         .getByRole('link')

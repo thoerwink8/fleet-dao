@@ -95,10 +95,11 @@ test.describe('其余页面', () => {
     const claude = list.locator('[data-channel="claude-sub"]');
     await expect(claude).toHaveAttribute('data-state', 'interrupted');
     await expect(claude).toContainText('检测中断');
-    // Grok 是 4 分钟前探通的：照常亮「通」
+    // Grok 是 4 分钟前探通的：照常亮「在线」（#1366 起不再写「通」）
     const grok = list.locator('[data-channel="xai"]');
     await expect(grok).toHaveAttribute('data-state', 'ok');
-    await expect(grok).toContainText('通');
+    await expect(grok).toHaveAttribute('data-kind', 'live');
+    await expect(grok).toContainText('在线');
     await expect(page.getByText('绿灯只表示本节点最近一轮抽测通过')).toBeVisible();
     await shot(page, '07-渠道状态');
   });
