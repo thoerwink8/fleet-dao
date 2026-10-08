@@ -186,19 +186,21 @@ describe('走到哪一步、断没断（canaryNext）', () => {
     expect(whyOf(canaryNext(state(), obs(21)))).toContain('一轮都没跑过');
   });
 
-  it('【故意造出的失败】巡检仓的「让 AI 接活」关着、或开单之后才打开：不用等期限，当场断在「收单」', () => {
+  it('【故意造出的失败】巡检仓的「让 AI 接活」关着：不用等期限，当场断在「收单」', () => {
     const off = canaryNext(
       state(),
       obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: null } }) }),
     );
     expect(off).toMatchObject({ kind: 'broken', stage: 'intake' });
     expect(whyOf(off)).toContain('「让 AI 接活」开关关着');
+  });
+
+  it('开关是开单之后才打开的不再算断（拉单不看开单时间，#1336）：照常等收单', () => {
     const late = canaryNext(
       state(),
       obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: new Date(at(1)) } }) }),
     );
-    expect(late).toMatchObject({ kind: 'broken', stage: 'intake' });
-    expect(whyOf(late)).toContain('开单之后才打开');
+    expect(late.kind).not.toBe('broken');
   });
 
   it('任务行建了、任务工作流还没起来：还在收单（起不成的下一轮拉单再起），到期限写明卡在这儿', () => {

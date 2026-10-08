@@ -1,6 +1,21 @@
 // 拉单的真装配（real/intake.ts，#632 S2-4b-3）：库是真的（PGlite 跑真迁移），GitHub 和 Temporal 客户端是假的。
 // 从受管的仓到起任务工作流走一遍：任务行、操作记录、谁要的、工作流编号和起法；重复起、不在白名单、在跑的数读不到各故意造一次。
-import { auditLog, type Db, registerScheduledJobs, repos, scheduleRuns, tasks, users } from '@fleet-dao/db';
+import {
+  auditLog,
+  type Db,
+  INTAKE_BREAKER_SETTING,
+  notifications,
+  readIntakeBreaker,
+  registerScheduledJobs,
+  repos,
+  saveTaskSnapshot,
+  scheduleRuns,
+  settings,
+  tasks,
+  upsertAlert,
+  users,
+  writeIntakeBreaker,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -342,5 +357,146 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(broken.calls.labeled).toEqual([]);
     expect(broken.calls.comments).toEqual([]);
     expect(await t.db.select().from(tasks)).toHaveLength(0);
+  });
+
+  it('开关打开以前开的老单、没挂里程碑的单：照样建任务行、起工作流（#1336 去掉了开单时间和版本这两道）', async () => {
+    await seedWorld(t.db);
+    const old = groomIssue({ number: 31, createdAt: '2026-09-01T00:00:00.000Z', milestone: V1 });
+    const unscheduled = groomIssue({ number: 32, milestone: null });
+    const { gh } = fakeGh({ issues: [old, unscheduled] });
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 2 });
+    expect(starts.map((s) => s.options.workflowId)).toEqual(['task:acme/demo#31', 'task:acme/demo#32']);
+    expect((await t.db.select().from(tasks)).map((r) => r.issueNumber).sort()).toEqual([31, 32]);
+  });
+});
+
+describe('拉单的真装配 · 每小时限速和熔断（读真库）', { timeout: 60_000 }, () => {
+  const HOURS = 60 * 60_000;
+
+  /** 往库里补一批已有的任务行（各占一个号，状态各异），建出时刻定死。 */
+  async function seedTasks(
+    repoId: string,
+    specs: { issue: number; state: 'done' | 'failed' | 'running'; createdAt: Date }[],
+  ) {
+    await t.db.insert(tasks).values(
+      specs.map((s) => ({
+        repoId,
+        issueNumber: s.issue,
+        title: `旧任务 ${s.issue}`,
+        rawRequest: '原话',
+        requestedBy: 'founder',
+        priority: s.issue,
+        state: s.state,
+        createdAt: s.createdAt,
+      })),
+    );
+  }
+  const longAgo = new Date(NOW.getTime() - 10 * HOURS);
+
+  it('一小时内已经建出 3 条任务行：这一轮一条都不起，也不去现读那张单', async () => {
+    const { repo } = await seedWorld(t.db);
+    await seedTasks(repo.id, [
+      { issue: 101, state: 'running', createdAt: new Date(NOW.getTime() - 10 * 60_000) },
+      { issue: 102, state: 'running', createdAt: new Date(NOW.getTime() - 20 * 60_000) },
+      { issue: 103, state: 'running', createdAt: new Date(NOW.getTime() - 59 * 60_000) },
+    ]);
+    const { gh, calls } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run.outcome).toBe('ok');
+    expect(starts).toEqual([]);
+    expect(calls.planned).toEqual([]);
+  });
+
+  it('一小时前建的不算：3 条都是 61 分钟前，照起', async () => {
+    const { repo } = await seedWorld(t.db);
+    await seedTasks(
+      repo.id,
+      [101, 102, 103].map((issue) => ({
+        issue,
+        state: 'running' as const,
+        createdAt: new Date(NOW.getTime() - 61 * 60_000),
+      })),
+    );
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(starts).toHaveLength(1);
+  });
+
+  it('最近 6 条结束的任务里失败 4 条：进入熔断——不起、设置表记下 open、推一条报警；下一轮冷却没到还是不起，不再推第二条', async () => {
+    const { repo } = await seedWorld(t.db);
+    const states = ['failed', 'failed', 'done', 'failed', 'done', 'failed'] as const;
+    await seedTasks(
+      repo.id,
+      states.map((state, i) => ({ issue: 201 + i, state, createdAt: longAgo })),
+    );
+    const { gh } = fakeGh();
+    const first = fakeClient();
+    await runIntakeJob(wire(gh)(first.client, 'fleet'));
+    expect(first.starts).toEqual([]);
+    const row = await readIntakeBreaker(t.db);
+    expect(row).toMatchObject({ state: 'open' });
+    const alerts = await t.db.select().from(notifications);
+    expect(alerts.filter((a) => a.dedupeKey === 'intake-breaker' && a.resolvedAt === null)).toHaveLength(1);
+
+    const again = fakeClient();
+    await runIntakeJob(wire(gh)(again.client, 'fleet'));
+    expect(again.starts).toEqual([]);
+    expect(
+      (await t.db.select().from(notifications)).filter((a) => a.dedupeKey.startsWith('intake-breaker')),
+    ).toHaveLength(1);
+  });
+
+  it('熔断着、冷却完了：只放 1 条试探；试探那条做成了，下一轮恢复——设置表记 closed、撤掉报警、推一条恢复通知', async () => {
+    await seedWorld(t.db);
+    // 3 小时前进入熔断（报警还开着）
+    const openedAt = new Date(NOW.getTime() - 3 * HOURS);
+    await writeIntakeBreaker(t.db, { state: 'open', at: openedAt, by: 'test' });
+    await upsertAlert(t.db, {
+      dedupeKey: 'intake-breaker',
+      level: 'alert',
+      taskId: null,
+      title: '停拉',
+      body: 'x',
+    });
+    const { gh } = fakeGh({
+      issues: [groomIssue({ number: 11 }), groomIssue({ number: 12 })],
+    });
+    const trial = fakeClient();
+    await runIntakeJob(wire(gh)(trial.client, 'fleet'));
+    expect(trial.starts).toHaveLength(1); // 只放 1 条试探
+    const [made] = await t.db.select().from(tasks);
+    expect(made?.state).toBe('queued');
+
+    // 试探那条做成了
+    if (!made) throw new Error('试探的任务行没建出来');
+    await saveTaskSnapshot(t.db, {
+      taskId: made.id,
+      state: 'done',
+      phase: '收尾',
+      doing: '做完了',
+      lastProblem: null,
+      subtasks: [],
+    });
+    const next = fakeClient();
+    await runIntakeJob(wire(gh)(next.client, 'fleet'));
+    expect(await readIntakeBreaker(t.db)).toMatchObject({ state: 'closed' });
+    const all = await t.db.select().from(notifications);
+    expect(all.find((a) => a.dedupeKey === 'intake-breaker')?.resolvedAt).not.toBeNull();
+    expect(all.filter((a) => a.dedupeKey.startsWith('intake-breaker:recovered'))).toHaveLength(1);
+    // 恢复的这一轮照常拉：试探用掉了 #11，没派过的 #12 这一轮起来
+    expect(next.starts).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】熔断状态那一行的值认不出：这一轮记没跑成，一张都不起，不当成正常', async () => {
+    await seedWorld(t.db);
+    await t.db.insert(settings).values({ key: INTAKE_BREAKER_SETTING, value: { state: '半开' } });
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    await expect(runIntakeJob(wire(gh)(client, 'fleet'))).rejects.toThrow(/认不出/);
+    expect(starts).toEqual([]);
   });
 });

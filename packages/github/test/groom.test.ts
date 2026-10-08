@@ -70,6 +70,20 @@ const issueRow = (over: Record<string, unknown> = {}) => ({
 });
 
 describe('readGroomFacts：开着的单加全部里程碑', () => {
+  it('里程碑说明原文带回（拉单读版本里的先后）；没写说明（null）是空串', async () => {
+    const { client } = fakeClient({
+      milestones: [
+        milestone({ description: '<!-- fleet:order -->\n1. #12\n<!-- /fleet:order -->' } as never),
+        milestone({ number: 4, title: 'v2', description: null } as never),
+      ],
+    });
+    const got = await readGroomFacts({ client, bots }, { repo });
+    expect(got.milestones.map((m) => m.description)).toEqual([
+      '<!-- fleet:order -->\n1. #12\n<!-- /fleet:order -->',
+      '',
+    ]);
+  });
+
   it('一次读全：milestones、issues 合并成 GroomFacts', async () => {
     const { client, calls } = fakeClient({
       milestones: [milestone(), milestone({ number: 2, title: 'v0 老版本', state: 'closed' })],
@@ -81,8 +95,8 @@ describe('readGroomFacts：开着的单加全部里程碑', () => {
     const got = await readGroomFacts({ client, bots }, { repo });
     expect(got).toEqual({
       milestones: [
-        { number: 3, title: 'v1 Fusion 接活', state: 'open' },
-        { number: 2, title: 'v0 老版本', state: 'closed' },
+        { number: 3, title: 'v1 Fusion 接活', state: 'open', description: '' },
+        { number: 2, title: 'v0 老版本', state: 'closed', description: '' },
       ],
       issues: [
         {

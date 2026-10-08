@@ -47,6 +47,8 @@ export interface GroomMilestone {
   number: number;
   title: string;
   state: 'open' | 'closed';
+  /** 里程碑说明原文（版本里的先后写在 <!-- fleet:order --> 标记之间，拉单排序读它）；没写是空串。 */
+  description: string;
 }
 
 export interface GroomFacts {
@@ -60,6 +62,7 @@ const MilestoneRow = z.object({
   number: z.number().int().positive(),
   title: z.string(),
   state: z.enum(['open', 'closed']),
+  description: z.string().nullable().optional(),
 });
 
 /** 只要用得到的这两下（不要整个 Deps）：测试用假客户端、假机器人判定就能喂，不用搭一整套。 */
@@ -87,7 +90,7 @@ export async function readGroomFacts(
   const milestones = milestoneRows.map((raw) => {
     const p = MilestoneRow.safeParse(raw);
     if (!p.success) throw unexpected(`读 ${slug} 的里程碑`, raw);
-    return p.data;
+    return { ...p.data, description: p.data.description ?? '' };
   });
 
   const issueRows = await deps.client.all(

@@ -406,7 +406,7 @@ const isSwitchEntry = (a: AuditRecord) =>
 function describeSwitch(label: string, since: string | null): string {
   return since === null
     ? `${label}：让 AI 接活 关着（auto_dispatch_since 为空：只收单、显示，不派）`
-    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上、没贴「${LOCAL_LABEL}」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的，贴了「${ENGINE_LABEL}」也派。作者不在白名单、母单和子单、贴了「${LOCAL_LABEL}」的仍不派；「${LOCAL_LABEL}」和「${ENGINE_LABEL}」一起贴时以「${LOCAL_LABEL}」为准）`;
+    : `${label}：让 AI 接活 开着，自 ${since} 起（引擎自己按依据挑单：开着的独立 issue 不论哪天开的、挂不挂版本，准入过了就按版本先后、当前版本、规模、失败次数、开单早晚排队，每小时最多起 3 条，失败过半会停拉；作者不在白名单、母单和子单、贴了「${LOCAL_LABEL}」的仍不派；贴「${ENGINE_LABEL}」只是同规模里排前一点；「${LOCAL_LABEL}」和「${ENGINE_LABEL}」一起贴时以「${LOCAL_LABEL}」为准）`;
 }
 
 /** 读回、status 看最近多少条和这个仓有关的操作记录。 */

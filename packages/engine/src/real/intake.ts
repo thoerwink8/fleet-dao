@@ -15,9 +15,17 @@ import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import {
   type Db,
   finishScheduleRun,
+  firstTaskCreatedSince,
   listIntakeRepos,
+  readIntakeBreaker,
+  recentEndedTasks,
+  resolveAlertWithReason,
   startScheduleRun,
+  taskFailureCount,
   taskStateByIssue,
+  tasksCreatedSince,
+  upsertAlert,
+  writeIntakeBreaker,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -25,6 +33,7 @@ import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '
 import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
+import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
@@ -45,6 +54,9 @@ export interface IntakeWiring {
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
+/** 熔断报警的编号和留痕的名字。 */
+const BREAKER_ALERT_KEY = 'intake-breaker';
+const BREAKER_ACTOR = 'engine:intake';
 
 /** 给 EngineJobs.intake 用的工厂。 */
 export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) => IntakeDeps {
@@ -93,7 +105,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           })),
           openMilestones: facts.milestones
             .filter((m) => m.state === 'open')
-            .map((m) => ({ number: m.number, title: m.title })),
+            .map((m) => ({ number: m.number, title: m.title, description: m.description })),
         };
       },
       plan: (repo, issueNumber) =>
@@ -126,6 +138,58 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           n += 1;
         }
         return n;
+      },
+      failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
+      startedSince: (since) => tasksCreatedSince(w.db, since),
+      async breaker() {
+        const row = await readIntakeBreaker(w.db);
+        if (row?.state === 'open') {
+          const trial = await firstTaskCreatedSince(w.db, row.at);
+          const state = trial?.state;
+          return {
+            open: {
+              since: row.at,
+              trial:
+                trial === null
+                  ? null
+                  : state === 'done'
+                    ? 'done'
+                    : state === 'failed' || state === 'stopped'
+                      ? 'failed'
+                      : 'running',
+            },
+            recent: [],
+          };
+        }
+        return {
+          open: null,
+          recent: await recentEndedTasks(w.db, { limit: BREAKER_WINDOW, after: row?.at ?? null }),
+        };
+      },
+      async breakerChanged({ event, at, why }) {
+        if (event === 'recover') {
+          await writeIntakeBreaker(w.db, { state: 'closed', at, by: BREAKER_ACTOR });
+          await resolveAlertWithReason(w.db, { dedupeKey: BREAKER_ALERT_KEY, by: BREAKER_ACTOR, why, at });
+          await upsertAlert(w.db, {
+            dedupeKey: `${BREAKER_ALERT_KEY}:recovered:${at.toISOString()}`,
+            level: 'daily',
+            taskId: null,
+            title: '引擎恢复拉单',
+            body: why,
+          });
+          return;
+        }
+        await writeIntakeBreaker(w.db, { state: 'open', at, by: BREAKER_ACTOR });
+        // 试探失败重新计冷却（retrip）不再推第二条：原来那条还开着
+        if (event === 'trip') {
+          await upsertAlert(w.db, {
+            dedupeKey: BREAKER_ALERT_KEY,
+            level: 'alert',
+            taskId: null,
+            title: '引擎停拉单：最近的任务失败过半',
+            body: `${why}。看是哪几张单、为什么失败；试探成功会自动恢复。`,
+          });
+        }
       },
       async start({ repo, issueNumber, title, body, author }) {
         const member = memberFor(await usersOnce(), author);

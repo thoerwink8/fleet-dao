@@ -8,8 +8,9 @@
 // failed，由看门狗（#203）照登记表报；断了的这一轮巡检自己跑成了，schedule_runs 记 ok、发现 1 个问题，报警由这里推。
 // 立刻跑一轮、等结论、打印每步用时：pnpm drill（../drill.ts，同一个定时任务、同一份代码）。
 // 改这里之前必须知道：
-// - 收单靠引擎自己拉（jobs/intake.ts，每 5 分钟一轮）：巡检单要过拉单的每一道关——开关打开以后开的、开单的「引擎」机器人在
-//   白名单里、挂在当前版本上、交代齐（场景、原话、已知的模块、怎么算做完，runner/task-brief.ts）。canaryIssue 的正文由测试拿
+// - 收单靠引擎自己拉（jobs/intake.ts，每 5 分钟一轮）：巡检单要过拉单的每一道关——开单的「引擎」机器人在白名单里、
+//   交代齐（场景、原话、已知的模块、怎么算做完，runner/task-brief.ts）、规模不是最重档，还要有空位（每小时限速、熔断没停拉）。
+//   canaryIssue 的正文由测试拿
 //   真的 buildTaskBrief 核过，改正文要让那条测试照样过；「怎么算做完」下面只放验收条，别的话会被当成一条。
 // - 任务工作流走到哪只有 Temporal 一份（taskStatus 查询）；库里的任务行只在开工、停下等人、做完、放弃时写，工作流不在跑了才拿它兜。
 // - 判走到哪一步只在 canaryNext（纯函数），读东西只在 observe。
@@ -276,11 +277,9 @@ function brokenNow(stage: CanaryStage, obs: CanaryObservation, state: CanaryStat
   const { db } = obs;
   if (!db.repo) return '巡检仓不在库里了（没受管）：拉单不看这个仓';
   if (stage === 'intake') {
+    // 开关是不是在开单之后才打开的不再是断点：拉单不看开单时间了（#1336）
     if (db.repo.autoDispatchSince === null) {
       return '巡检仓的「让 AI 接活」开关关着，拉单不拉这张单（fleet-api dispatch <巡检仓> on）';
-    }
-    if (db.repo.autoDispatchSince.getTime() > Date.parse(state.openedAt)) {
-      return '巡检仓的「让 AI 接活」开关是开单之后才打开的，拉单不拉开关打开以前开的单';
     }
   }
   const task = db.task;
@@ -311,7 +310,7 @@ function intakeWords(last: CanaryDbFacts['lastIntake']): string {
   const when = `最近一轮拉单 ${stamp(last.startedAt)} 开始`;
   if (last.outcome === null) return `${when}，还没跑完`;
   if (last.outcome === 'ok') {
-    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、没挂当前版本、交代不全……）`;
+    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、交代不全、每小时限速、熔断停拉……）`;
   }
   return `${when}，记的是 ${last.outcome}${last.why ? `：${last.why}` : ''}`;
 }
@@ -873,7 +872,7 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
     const current = currentVersion(await deps.github.openMilestones());
     if (!current) {
       return failed(
-        `巡检仓 ${slugOf(repo)} 没有开着的 v<N> 里程碑（没有当前版本）：拉单只拉挂在当前版本上的单，巡检单派不出去。给它建一个一直开着的「v1 巡检」`,
+        `巡检仓 ${slugOf(repo)} 没有开着的 v<N> 里程碑（没有当前版本）：巡检单要挂当前版本，版本进度和先后才看得见它。给它建一个一直开着的「v1 巡检」`,
       );
     }
     milestone = current.milestone;
