@@ -60,8 +60,9 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
   if (data.routes?.length) {
     // 探针的结论在库里是三列（routes.probe_state、probed_at、probe_detail）；在线的路由必须带着 ok 的结论（库里约束）
     await db.insert(routes).values(
-      data.routes.map(({ probe, ...r }) => ({
+      data.routes.map(({ probe, goneAt, ...r }) => ({
         ...r,
+        goneAt: dateOpt(goneAt),
         probeState: probe?.state ?? null,
         probedAt: probe ? new Date(probe.at) : null,
         probeDetail: probe?.detail ?? null,

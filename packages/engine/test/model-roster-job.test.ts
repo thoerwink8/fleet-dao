@@ -75,8 +75,9 @@ describe('额度任务里的渠道模型名册', () => {
         },
         save: async (results) => {
           saved.push(...results);
-          return { unstored: [] };
+          return { unstored: [], newModelIds: [] };
         },
+        notifyNewModels: async () => undefined,
       },
     });
     expect((await runQuotaReadJob(quiet.deps)).outcome).toBe('ok');
@@ -90,8 +91,9 @@ describe('额度任务里的渠道模型名册', () => {
         ],
         save: async (results) => {
           saved.push(...results);
-          return { unstored: [] };
+          return { unstored: [], newModelIds: [] };
         },
+        notifyNewModels: async () => undefined,
       },
     });
     expect((await runQuotaReadJob(due.deps)).outcome).toBe('ok');
@@ -112,11 +114,65 @@ describe('额度任务里的渠道模型名册', () => {
           throw new Error('库断了');
         },
         read: async () => [],
-        save: async () => ({ unstored: [] }),
+        save: async () => ({ unstored: [], newModelIds: [] }),
+        notifyNewModels: async () => undefined,
       },
     });
     expect((await runQuotaReadJob(world.deps)).outcome).toBe('ok');
     expect(logs).toContain('error:渠道模型表这一轮没记上');
+  });
+
+  it('入库了新模型：同一轮只推一条普通通知，列出模型名', async () => {
+    const notices: { key: string; title: string; body: string }[] = [];
+    const world = deps({
+      modelRoster: {
+        due: async () => true,
+        read: async () => [{ ok: true, channelId: 'mirasim', models: ['grok-4.7', 'claude-opus-5[1m]'] }],
+        save: async () => ({ unstored: [], newModelIds: ['grok-4.7', 'opus-5'] }),
+        notifyNewModels: async (n) => {
+          notices.push(n);
+        },
+      },
+    });
+    expect((await runQuotaReadJob(world.deps)).outcome).toBe('ok');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.title).toBe('发现 2 个新模型，已入目录、默认关着');
+    expect(notices[0]?.body).toContain('grok-4.7');
+    expect(notices[0]?.body).toContain('opus-5');
+    expect(world.raised).toEqual([]);
+  });
+
+  it('没有新模型就不推通知；通知推不出去也不改额度结局', async () => {
+    const none: string[] = [];
+    const quiet = deps({
+      modelRoster: {
+        due: async () => true,
+        read: async () => [],
+        save: async () => ({ unstored: [], newModelIds: [] }),
+        notifyNewModels: async (n) => {
+          none.push(n.key);
+        },
+      },
+    });
+    await runQuotaReadJob(quiet.deps);
+    expect(none).toEqual([]);
+
+    const logs: string[] = [];
+    const broken = deps({
+      log: (level, message) => {
+        logs.push(`${level}:${message}`);
+      },
+      modelRoster: {
+        due: async () => true,
+        read: async () => [],
+        save: async () => ({ unstored: [], newModelIds: ['grok-4.7'] }),
+        notifyNewModels: async () => {
+          throw new Error('通知库断了');
+        },
+      },
+    });
+    expect((await runQuotaReadJob(broken.deps)).outcome).toBe('ok');
+    expect(logs).toContain('error:新模型入库的通知没推出去');
   });
 
   it('额度配置读不到时名册仍尝试，结局仍是额度没跑成', async () => {
@@ -131,7 +187,8 @@ describe('额度任务里的渠道模型名册', () => {
           reads += 1;
           return [{ ok: true, channelId: 'cursor', models: ['composer-2.5'] }];
         },
-        save: async () => ({ unstored: [] }),
+        save: async () => ({ unstored: [], newModelIds: [] }),
+        notifyNewModels: async () => undefined,
       },
     });
     await expect(runQuotaReadJob(world.deps)).rejects.toBeInstanceOf(QuotaReadFailedError);

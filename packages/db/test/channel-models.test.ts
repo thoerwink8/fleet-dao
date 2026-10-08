@@ -22,6 +22,8 @@ import {
   models,
   pools,
   routes,
+  routingCatalog,
+  routingPurposeModels,
 } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { expectViolation } from './helpers.ts';
@@ -127,7 +129,7 @@ describe('渠道模型名册', () => {
     });
   });
 
-  it('新增的留下，消失的路由列出来；别名算对得上，方括号不剥，没写上游串不算对得上', async () => {
+  it('读成后同一份名单差集为空；别名算对得上所以不另插，方括号不剥，没写上游串的标下架', async () => {
     await seedChannels(t.db);
     await saveChannelModelReads(
       t.db,
@@ -143,34 +145,40 @@ describe('渠道模型名册', () => {
     expect(first.failed).toEqual([]);
     expect(first.notYet).toEqual([]);
     expect(first.manual).toEqual([{ channelId: 'claude-sub', channelName: 'Claude 订阅', count: 0 }]);
-    expect(first.missingFromCatalog.some((m) => m.channelId === 'claude-sub')).toBe(false);
-    expect(first.missingFromCatalog.map((m) => `${m.channelId}:${m.modelKey}`).sort()).toEqual([
-      'cursor:composer-2.5',
-      'mirasim:kimi-k3',
-      'xai:grok-new',
-    ]);
-    expect(first.goneRoutes.map((r) => r.routeId)).toEqual(['rt-bare']);
-    expect(first.goneRoutes[0]?.upstreamModel).toBe('');
-    const grokNew = first.missingFromCatalog.find((m) => m.modelKey === 'grok-new');
-    expect(grokNew?.channelName).toBe('Grok 订阅');
-    expect(grokNew?.firstSeenAt).toBe(NOW.toISOString());
+    expect(first.missingFromCatalog).toEqual([]);
+    expect(first.goneRoutes).toEqual([]);
+    const routeRows = await t.db.select().from(routes);
+    expect(routeRows.find((r) => r.id === 'rt-bare')?.goneAt?.toISOString()).toBe(NOW.toISOString());
+    // 手工登记渠道给的不是完整名单：rt-sonnet 在，不标下架
+    const grok = routeRows.find((r) => r.id === 'rt-grok');
+    expect(grok?.goneAt).toBeNull();
+    expect(grok?.upstreamModel).toBe('grok-4.7[context=256k]');
+    expect(
+      routeRows
+        .filter((r) => r.channelId === 'xai')
+        .map((r) => r.upstreamModel)
+        .sort(),
+    ).toEqual(['grok-4.7[context=256k]', 'grok-new']);
+    const seenFirst = await t.db.select().from(channelSeenModels);
+    expect(seenFirst.find((r) => r.modelKey === 'grok-new')?.firstSeenAt.toISOString()).toBe(
+      NOW.toISOString(),
+    );
 
     await saveChannelModelReads(t.db, [ok('xai', ['grok-new'])], LATER);
     const second = await channelModelDiff(t.db);
-    expect(second.missingFromCatalog.some((m) => m.modelKey === 'grok-4.7')).toBe(false);
-    expect(second.missingFromCatalog.find((m) => m.modelKey === 'grok-new')?.firstSeenAt).toBe(
-      NOW.toISOString(),
-    );
-    expect(second.missingFromCatalog.find((m) => m.modelKey === 'grok-new')?.lastSeenAt).toBe(
-      LATER.toISOString(),
-    );
-    expect(second.goneRoutes.map((r) => r.routeId).sort()).toEqual(['rt-bare', 'rt-grok']);
+    expect(second.missingFromCatalog).toEqual([]);
+    expect(second.goneRoutes).toEqual([]);
+    const after = await t.db.select().from(routes);
+    expect(after.find((r) => r.id === 'rt-grok')?.goneAt?.toISOString()).toBe(LATER.toISOString());
+    expect(after.find((r) => r.id === 'rt-sonnet')?.goneAt).toBeNull();
+    expect(after.filter((r) => r.upstreamModel === 'claude-new')).toHaveLength(1);
     const seen = await t.db.select().from(channelSeenModels);
-    const grok = seen.find((r) => r.modelKey === 'grok-4.7');
-    expect(grok?.lastSeenAt.toISOString()).toBe(NOW.toISOString());
-    expect(grok?.firstSeenAt.toISOString()).toBe(NOW.toISOString());
-    expect(grok?.source).toBe('名册');
+    const grokSeen = seen.find((r) => r.modelKey === 'grok-4.7');
+    expect(grokSeen?.lastSeenAt.toISOString()).toBe(NOW.toISOString());
+    expect(grokSeen?.firstSeenAt.toISOString()).toBe(NOW.toISOString());
+    expect(grokSeen?.source).toBe('名册');
     expect(seen.find((r) => r.modelKey === 'claude-new')?.source).toBe('名册');
+    expect(seen.find((r) => r.modelKey === 'grok-new')?.lastSeenAt.toISOString()).toBe(LATER.toISOString());
   });
 
   it('读不成不改上次看见的，差集里只有失败，不把旧路由说成消失；手工渠道的失败读不算没读成', async () => {
@@ -343,6 +351,34 @@ describe('渠道模型名册', () => {
     expect(kept?.lastSeenAt.toISOString()).toBe(LATER.toISOString());
   });
 
+  it('手工登记的串也走入库：目录里补一条关着的路由，别的路由不被标下架，差集为空', async () => {
+    await seedChannels(t.db);
+    await registerManualModel(t.db, {
+      channelId: 'claude-sub',
+      modelKey: 'claude-opus-5-5',
+      now: NOW,
+      ...actor,
+    });
+    const claudeRoutes = (await t.db.select().from(routes)).filter((r) => r.channelId === 'claude-sub');
+    expect(claudeRoutes.map((r) => r.upstreamModel).sort()).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(claudeRoutes.every((r) => r.goneAt === null)).toBe(true);
+    const added = claudeRoutes.find((r) => r.upstreamModel === 'claude-opus-5-5');
+    expect(added).toMatchObject({ modelId: 'opus-5.5', hostId: 'claude-code', poolId: 'claude-solo' });
+    const catalog = (await t.db.select().from(routingCatalog)).filter((r) => r.routeId === added?.id);
+    expect(catalog.map((r) => r.enabled)).toEqual([false]);
+    const diff = await channelModelDiff(t.db);
+    expect(diff.missingFromCatalog).toEqual([]);
+    expect(diff.manual).toEqual([{ channelId: 'claude-sub', channelName: 'Claude 订阅', count: 1 }]);
+  });
+
+  it('Mirasim 名册读成后，新入库的路由也盖上执行体（不留空）', async () => {
+    await seedChannels(t.db);
+    await saveChannelModelReads(t.db, [ok('mirasim', ['grok-4.7', 'claude-opus-5-5[1m]'])], NOW);
+    const mira = (await t.db.select().from(routes)).filter((r) => r.channelId === 'mirasim');
+    expect(mira).toHaveLength(2);
+    expect(mira.every((r) => r.executor !== null && r.executor !== '')).toBe(true);
+  });
+
   it('撤销只删手工登记的串，不删目录里的路由；空串、有名册的渠道、撤名册行都报错', async () => {
     await seedChannels(t.db);
     await registerManualModel(t.db, { channelId: 'claude-sub', modelKey: 'claude-new', now: NOW, ...actor });
@@ -407,7 +443,8 @@ describe('渠道模型名册', () => {
     const diff = await channelModelDiff(t.db);
     expect(diff.manual).toEqual([{ channelId: 'claude-sub', channelName: 'Claude 订阅', count: 1 }]);
     expect(diff.failed.some((f) => f.channelId === 'claude-sub')).toBe(false);
-    expect(diff.missingFromCatalog.map((m) => m.modelKey)).toEqual(['claude-new']);
+    // 登记的串当场入了目录，所以差集里没有它；没登记的 rt-sonnet 在页面上仍提示「登记里没有」，但不被标下架
+    expect(diff.missingFromCatalog).toEqual([]);
     expect(diff.goneRoutes.map((r) => r.routeId)).toContain('rt-sonnet');
   });
 
@@ -478,5 +515,229 @@ describe('渠道模型名册', () => {
     await saveChannelModelReads(t.db, [fail('mirasim', 'timeout', '超时')], LATER);
     const after = (await t.db.select().from(routes)).find((r) => r.id === 'rt-mystery');
     expect(after?.executor).toBe('执行体未知');
+  });
+
+  it('新串入库且关着，不进任何用途', async () => {
+    await seedChannels(t.db);
+    const saved = await saveChannelModelReads(
+      t.db,
+      [ok('cursor', ['claude-opus-4-8-thinking-high-fast', 'claude-opus-4-8-thinking-high'])],
+      NOW,
+    );
+    expect(saved.unstored).toEqual([]);
+    expect(saved.newModelIds).toEqual(['opus-4.8']);
+    const routeRows = await t.db.select().from(routes);
+    const fast = routeRows.find((r) => r.upstreamModel === 'claude-opus-4-8-thinking-high-fast');
+    const high = routeRows.find((r) => r.upstreamModel === 'claude-opus-4-8-thinking-high');
+    expect(fast).toMatchObject({
+      channelId: 'cursor',
+      poolId: 'cursor',
+      modelId: 'opus-4.8',
+      hostId: 'cursor-agent',
+      alive: false,
+      variantEffort: 'high',
+      variantFast: true,
+      variantThinking: true,
+      variantContext: null,
+      goneAt: null,
+    });
+    expect(high).toMatchObject({
+      modelId: 'opus-4.8',
+      variantEffort: 'high',
+      variantFast: false,
+      variantThinking: true,
+      variantContext: null,
+    });
+    const catalog = (await t.db.select().from(routingCatalog)).filter((r) => r.modelId === 'opus-4.8');
+    expect(catalog.map((r) => r.enabled)).toEqual([false, false]);
+    expect(catalog.map((r) => r.position).sort()).toEqual([0, 1]);
+    expect(catalog.map((r) => r.effort)).toEqual([null, null]);
+    expect((await t.db.select().from(routingPurposeModels)).filter((r) => r.modelId === 'opus-4.8')).toEqual(
+      [],
+    );
+
+    await saveChannelModelReads(
+      t.db,
+      [ok('cursor', ['claude-opus-4-8-thinking-high-fast', 'claude-opus-4-8-thinking-high'])],
+      LATER,
+    );
+    expect(await t.db.select().from(routes)).toHaveLength(routeRows.length);
+  });
+
+  it('拆不出的进未归类，模型 id 是渠道加原串', async () => {
+    await seedChannels(t.db);
+    await saveChannelModelReads(t.db, [ok('cursor', ['totally-unknown-model'])], NOW);
+    const fam = (await t.db.select().from(families)).find((f) => f.id === 'unclassified');
+    expect(fam).toMatchObject({ displayName: '未归类', vendor: '未知' });
+    const model = (await t.db.select().from(models)).find((m) => m.id === 'cursor:totally-unknown-model');
+    expect(model).toMatchObject({ family: 'unclassified', displayName: 'totally-unknown-model' });
+    const route = (await t.db.select().from(routes)).find((r) => r.upstreamModel === 'totally-unknown-model');
+    expect(route).toMatchObject({
+      modelId: 'cursor:totally-unknown-model',
+      variantEffort: null,
+      variantFast: null,
+      variantThinking: null,
+      variantContext: null,
+    });
+    const catalog = (await t.db.select().from(routingCatalog)).find((r) => r.routeId === route?.id);
+    expect(catalog).toMatchObject({ enabled: false, modelId: 'cursor:totally-unknown-model' });
+  });
+
+  it('渠道不再列出的路由标下架，不删；再次出现就清掉标记', async () => {
+    await seedChannels(t.db);
+    await saveChannelModelReads(t.db, [ok('mirasim', ['kimi-k3', 'claude-opus-5-5[1m]'])], NOW);
+    let rows = await t.db.select().from(routes);
+    const opus = rows.find((r) => r.upstreamModel === 'claude-opus-5-5[1m]');
+    expect(opus?.goneAt).toBeNull();
+    expect(opus?.id).toBeTruthy();
+
+    await saveChannelModelReads(t.db, [ok('mirasim', ['kimi-k3'])], LATER);
+    rows = await t.db.select().from(routes);
+    expect(rows.find((r) => r.id === opus?.id)?.goneAt?.toISOString()).toBe(LATER.toISOString());
+    expect(rows.find((r) => r.id === opus?.id)?.upstreamModel).toBe('claude-opus-5-5[1m]');
+    const diff = await channelModelDiff(t.db);
+    expect(diff.missingFromCatalog.filter((m) => m.channelId === 'mirasim')).toEqual([]);
+    expect(diff.goneRoutes.filter((r) => r.channelId === 'mirasim')).toEqual([]);
+
+    const back = new Date(LATER.getTime() + 60_000);
+    await saveChannelModelReads(t.db, [ok('mirasim', ['kimi-k3', 'claude-opus-5-5[1m]'])], back);
+    rows = await t.db.select().from(routes);
+    expect(rows.find((r) => r.id === opus?.id)?.goneAt).toBeNull();
+    expect(rows.filter((r) => r.upstreamModel === 'claude-opus-5-5[1m]')).toHaveLength(1);
+  });
+
+  it('读失败不动任何目录行，也不写自动入库的操作记录', async () => {
+    await seedChannels(t.db);
+    await saveChannelModelReads(t.db, [ok('cursor', ['composer-2.5'])], NOW);
+    const beforeRoutes = await t.db.select().from(routes);
+    const beforeModels = await t.db.select().from(models);
+    const beforeCatalog = await t.db.select().from(routingCatalog);
+    const discovers = async () =>
+      (await t.db.select().from(auditLog)).filter((r) => r.action === 'catalog.discover');
+    expect(await discovers()).toHaveLength(1);
+
+    await saveChannelModelReads(t.db, [fail('cursor', 'auth', '要重新登录')], LATER);
+    expect(await t.db.select().from(routes)).toEqual(beforeRoutes);
+    expect(await t.db.select().from(models)).toEqual(beforeModels);
+    expect(await t.db.select().from(routingCatalog)).toEqual(beforeCatalog);
+    expect(await discovers()).toHaveLength(1);
+
+    await saveChannelModelReads(t.db, [ok('cursor', [])], LATER);
+    expect(await t.db.select().from(routes)).toEqual(beforeRoutes);
+    expect(await discovers()).toHaveLength(1);
+    expect((await t.db.select().from(routes)).find((r) => r.id === 'rt-bare')?.goneAt?.toISOString()).toBe(
+      NOW.toISOString(),
+    );
+  });
+
+  it('已经在目录里的模型和路由不改名、不改开关、不补变体', async () => {
+    await seedChannels(t.db);
+    await t.db.insert(models).values({ id: 'opus-4.8', family: 'fam', displayName: '手写的名字' });
+    await t.db.insert(routes).values({
+      id: 'rt-opus',
+      channelId: 'cursor',
+      poolId: 'cursor',
+      modelId: 'opus-4.8',
+      hostId: 'cursor-agent',
+      upstreamModel: 'claude-opus-4-8-thinking-high',
+    });
+    await t.db.insert(routingCatalog).values({
+      modelId: 'opus-4.8',
+      routeId: 'rt-opus',
+      position: 0,
+      enabled: true,
+      effort: 'max',
+    });
+    const saved = await saveChannelModelReads(
+      t.db,
+      [ok('cursor', ['claude-opus-4-8-thinking-high', 'claude-opus-4-8-thinking-high-fast'])],
+      NOW,
+    );
+    expect(saved.unstored).toEqual([]);
+    const opus = (await t.db.select().from(models)).find((m) => m.id === 'opus-4.8');
+    expect(opus).toMatchObject({ displayName: '手写的名字', family: 'fam' });
+    const old = (await t.db.select().from(routes)).find((r) => r.id === 'rt-opus');
+    expect(old).toMatchObject({
+      upstreamModel: 'claude-opus-4-8-thinking-high',
+      variantEffort: null,
+      variantFast: null,
+      variantThinking: null,
+      variantContext: null,
+      goneAt: null,
+      hostId: 'cursor-agent',
+      poolId: 'cursor',
+    });
+    expect((await t.db.select().from(routingCatalog)).find((r) => r.routeId === 'rt-opus')).toMatchObject({
+      enabled: true,
+      effort: 'max',
+      position: 0,
+    });
+    const created = (await t.db.select().from(routes)).find(
+      (r) => r.upstreamModel === 'claude-opus-4-8-thinking-high-fast',
+    );
+    expect(created).toMatchObject({
+      modelId: 'opus-4.8',
+      variantEffort: 'high',
+      variantFast: true,
+      variantThinking: true,
+    });
+    expect((await t.db.select().from(routingCatalog)).find((r) => r.routeId === created?.id)).toMatchObject({
+      enabled: false,
+      effort: null,
+      position: 1,
+    });
+  });
+
+  it('每次读成写一条操作记录：新增几个模型、几条路由、标下架几条', async () => {
+    await seedChannels(t.db);
+    await saveChannelModelReads(t.db, [ok('mirasim', ['claude-opus-5-5[1m]', 'gpt-6-sol'])], NOW);
+    const first = await t.db.select().from(auditLog);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({
+      actorKind: 'engine',
+      actorId: 'model-roster',
+      action: 'catalog.discover',
+      target: 'channel:mirasim',
+      via: 'engine',
+      reason: '名册读成，自动入库',
+      ok: true,
+      after: { modelsAdded: 2, routesAdded: 2, goneMarked: 0, goneCleared: 0 },
+    });
+    await saveChannelModelReads(t.db, [ok('mirasim', ['claude-opus-5-5[1m]', 'gpt-6-sol'])], LATER);
+    const again = (await t.db.select().from(auditLog)).sort((a, b) => a.id - b.id);
+    expect(again).toHaveLength(2);
+    expect(again[1]?.after).toEqual({ modelsAdded: 0, routesAdded: 0, goneMarked: 0, goneCleared: 0 });
+    expect((await t.db.select().from(routes)).filter((r) => r.channelId === 'mirasim')).toHaveLength(2);
+  });
+
+  it('Mirasim 真实名册差集整份入库：grok-4.7 等都拆对，没有一个落进未归类', async () => {
+    await seedChannels(t.db);
+    const real = JSON.parse(
+      readFileSync(new URL('./fixtures/roster-diff-2026-10-08.json', import.meta.url), 'utf8'),
+    ) as { mirasimMissing: string[]; grokRoster: string[] };
+    const saved = await saveChannelModelReads(
+      t.db,
+      [
+        ok('mirasim', [...real.mirasimMissing, 'grok-4.7', 'grok-4.6', 'grok-4.5']),
+        ok('xai', real.grokRoster),
+      ],
+      NOW,
+    );
+    expect(saved.unstored).toEqual([]);
+    expect(saved.newModelIds).toEqual(
+      expect.arrayContaining(['grok-4.7', 'grok-4.6', 'grok-4.5', 'fable-5.1']),
+    );
+    const unclassified = (await t.db.select().from(models)).filter((m) => m.family === 'unclassified');
+    expect(unclassified.map((m) => m.id)).toEqual([]);
+    const fable = (await t.db.select().from(routingCatalog)).filter((r) => r.modelId === 'fable-5.1');
+    expect(fable.map((r) => r.enabled)).toEqual([false]);
+  });
+
+  it('【故意造出的失败】入库后差集里仍有该串则这里红', async () => {
+    await seedChannels(t.db);
+    const key = 'composer-2.5';
+    await saveChannelModelReads(t.db, [ok('cursor', [key])], NOW);
+    const diff = await channelModelDiff(t.db);
+    expect(diff.missingFromCatalog.filter((m) => m.channelId === 'cursor' && m.modelKey === key)).toEqual([]);
   });
 });

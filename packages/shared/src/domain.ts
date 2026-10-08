@@ -1,5 +1,6 @@
 // 领域对象：引擎、数据库、驾驶舱、fleet 命令、飞书网关共用的一份定义。
 // 改这里之前：数据库表结构（packages/db）以本文件为准；字段增删要同时改表和迁移。
+import type { SessionEffort } from './effort.ts';
 
 /** 流程里的一种活（库里的枚举，只增不删）。路由页和选路现在用哪些，见 flow-purposes.ts。 */
 export type StageKind =
@@ -243,6 +244,16 @@ export interface Route {
   upstreamModel?: string;
   /** 上游在别处对这条路由的叫法，和上面的模型串不同名时填，例如 Cursor 额度接口里 Auto 叫 default。 */
   upstreamAliases?: string[];
+  /** 名册拆出来的思考档位（#1355）。跟起会话的档位上限不是一回事。没有 = 这条路由不是自动入库的，或串里没有档位。 */
+  variantEffort?: SessionEffort;
+  /** 名册拆出来的 fast。没有 = 不知道。 */
+  variantFast?: boolean;
+  /** 名册拆出来的 thinking。没有 = 不知道。 */
+  variantThinking?: boolean;
+  /** 名册拆出来的上下文，例如 1m、256k。 */
+  variantContext?: string;
+  /** 渠道最近一次读成的名册里已经没有这条路由。不删。再次出现就清掉。 */
+  goneAt?: string;
 }
 
 /**

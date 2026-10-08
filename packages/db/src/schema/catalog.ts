@@ -133,6 +133,19 @@ export const routes = pgTable(
     /** 上游在别处（额度接口的成员表）对这条路由的叫法，和上面的模型串不同名时填。 */
     upstreamAliases: text('upstream_aliases').array().notNull().default(sql`'{}'::text[]`),
     /**
+     * 名册拆出来的思考档位（#1355）。跟 routing_catalog.effort 不是一回事：那一列是起会话的档位上限。
+     * 空 = 这条路由不是自动入库的，或上游串里没有档位。
+     */
+    variantEffort: text('variant_effort').$type<SessionEffort>(),
+    /** 名册拆出来的 fast。空 = 不是自动入库的，不知道有没有 fast。 */
+    variantFast: boolean('variant_fast'),
+    /** 名册拆出来的 thinking。空 = 不知道。 */
+    variantThinking: boolean('variant_thinking'),
+    /** 名册拆出来的上下文，例如 1m、256k。 */
+    variantContext: text('variant_context'),
+    /** 渠道最近一次读成的名册里已经没有这条路由（#1355）。不删。再次出现就清掉。 */
+    goneAt: timestamp('gone_at', tz),
+    /**
      * Mirasim 这条路由该起的执行体（名册帧的 agent，或按上游串前缀判出来的）。
      * 空 = 还没盖过，选路当时按前缀现判。字面「执行体未知」不是执行体名：选路不派。
      */
@@ -144,8 +157,11 @@ export const routes = pgTable(
       columns: [t.channelId, t.poolId],
       foreignColumns: [pools.channelId, pools.id],
     }),
-    // 同一模型换一种执行方式就是另一条路由；同池同模型同执行方式不许重复。
-    unique('routes_pool_model_host_unique').on(t.poolId, t.modelId, t.hostId),
+    // 同一模型换一种执行方式就是另一条路由。同池同模型同执行方式、上游串也一样（空也算一样）才是重复；
+    // 上游串不同是同一模型的另一个变体（#1355）。
+    unique('routes_pool_model_host_unique')
+      .on(t.poolId, t.modelId, t.hostId, t.upstreamModel)
+      .nullsNotDistinct(),
     // 给 routing_catalog 的复合外键用：一条路由只能挂在它自己的模型下面（id 本来就唯一，这条只为让外键能指到 (id, model_id)）。
     unique('routes_id_model_unique').on(t.id, t.modelId),
     // 不许拿默认值、手改冒充在线：在线必须是探针这一轮真探通了。结论为空时比较得 NULL、CHECK 会放行，所以包一层 coalesce。
@@ -159,6 +175,14 @@ export const routes = pgTable(
     check(
       'routes_probe_org_known',
       sql`${t.probeOrg} is null or ${t.probeOrg} in (${sql.raw(ORG_KINDS.map((k) => `'${k}'`).join(', '))})`,
+    ),
+    check(
+      'routes_variant_effort_known',
+      sql`${t.variantEffort} is null or ${t.variantEffort} in (${sql.raw(SESSION_EFFORTS.map((e) => `'${e}'`).join(', '))})`,
+    ),
+    check(
+      'routes_variant_context_nonempty',
+      sql`${t.variantContext} is null or length(btrim(${t.variantContext})) > 0`,
     ),
     check('routes_executor_nonempty', sql`${t.executor} is null or length(btrim(${t.executor})) > 0`),
   ],

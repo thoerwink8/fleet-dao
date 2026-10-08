@@ -136,6 +136,15 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
                 ...(roster.connectMirasim ? { connectMirasim: roster.connectMirasim } : {}),
               }),
             save: (results, at) => saveChannelModelReads(w.db, results, at),
+            // 普通通知（daily），不是要人拍的 decision / alert
+            notifyNewModels: (notice) =>
+              upsertAlert(w.db, {
+                dedupeKey: notice.key,
+                level: 'daily',
+                taskId: null,
+                title: notice.title,
+                body: notice.body,
+              }).then(() => undefined),
           },
         }
       : {}),

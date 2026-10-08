@@ -162,6 +162,11 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
           },
     upstreamModel: opt(r.upstreamModel),
     upstreamAliases: r.upstreamAliases,
+    variantEffort: opt(r.variantEffort),
+    variantFast: opt(r.variantFast),
+    variantThinking: opt(r.variantThinking),
+    variantContext: opt(r.variantContext),
+    goneAt: isoOpt(r.goneAt),
   });
 
 /** routeIds 按调度台的先后；disabledRouteIds 是其中关着的（必须传：漏传就把关着的全当开着）。 */

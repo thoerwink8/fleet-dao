@@ -66,7 +66,9 @@ export interface QuotaReadJobDeps {
     save(
       results: readonly ChannelModelRosterResult[],
       now: Date,
-    ): Promise<{ unstored: { channelId: string; error: string }[] }>;
+    ): Promise<{ unstored: { channelId: string; error: string }[]; newModelIds: readonly string[] }>;
+    /** 这一轮自动入库了新模型：推一条普通通知（不是要人拍，#1355）。同一轮只调一次。 */
+    notifyNewModels(notice: { key: string; title: string; body: string }): Promise<void>;
   };
 }
 
@@ -105,6 +107,16 @@ async function readModelRosters(deps: QuotaReadJobDeps, now: Date): Promise<void
     if (!(await step.due(now))) return;
     const results = await step.read();
     const saved = await step.save(results, now);
+    if (saved.newModelIds.length > 0) {
+      // 通知推不出去不算入库没成：模型已经在目录里了，只记日志
+      await step
+        .notifyNewModels({
+          key: `model-discover:${now.toISOString()}`,
+          title: `发现 ${saved.newModelIds.length} 个新模型，已入目录、默认关着`,
+          body: `新模型：${saved.newModelIds.join('、')}。路由都没进任何用途，要用请在驾驶舱路由页打开并加进用途。`,
+        })
+        .catch((err: unknown) => deps.log('error', '新模型入库的通知没推出去', { error: errMessage(err) }));
+    }
     const failed = results.filter((r) => !r.ok).map((r) => `${r.channelId}（${r.error.code}）`);
     const unstored = saved.unstored.map((u) => `${u.channelId}：${u.error}`);
     if (failed.length > 0 || unstored.length > 0) {
