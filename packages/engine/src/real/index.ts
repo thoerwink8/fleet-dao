@@ -413,7 +413,7 @@ export function quotaAsUser(
   mirasim?: { connect(user: SessionUser): MirasimConnect },
   /** 会话出网的代理（法国直连不给）。claude-usage 起 reclaude 时写上，和读组织同一条。 */
   proxy?: string,
-  /** 给了就让 Cursor 额度读取在登录令牌被拒时刷新一次（`cursor-agent status`，不放 API 密钥）；不给就报「没有刷新手段」。 */
+  /** 给了就让 Cursor 额度读取在登录令牌被拒或登录文件不在（ENOENT）时刷新一次（`cursor-agent status`，不放 API 密钥）；不给就没有刷新手段。 */
   cursorVersionsDir?: string,
 ): NonNullable<QuotaReadWiring['asUser']> {
   const runCommand = runCommandAsUser(exec, user, proxy);
@@ -437,7 +437,7 @@ export function quotaAsUser(
 export const CURSOR_REFRESH_TIMEOUT_MS = 40_000;
 
 /**
- * 以会话用户的身份跑一次 `cursor-agent status`（环境里没有 API 密钥）：cursor-agent 发现登录令牌过期会自己刷新并重写登录文件。
+ * 以会话用户的身份跑一次 `cursor-agent status`（环境里没有 API 密钥）：cursor-agent 发现登录令牌过期、或登录文件刚被会话起停删掉，会自己刷新并重写登录文件。
  * 起不来、超时、非 0 退出都抛错并带原因（stderr/stdout 的头几行）；成功只代表命令跑完了，令牌换没换由读取器重读后再试来验。
  */
 export async function refreshCursorLogin(

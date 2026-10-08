@@ -150,7 +150,7 @@ export interface MirasimRelayConfig extends PoolConfigBase {
 
 export interface CursorDashboardConfig extends PoolConfigBase {
   reader: 'cursor-dashboard';
-  /** cursor-agent 登录落下的文件，默认 ~/.config/cursor/auth.json；令牌被拒（401/403）时由引擎刷新一次后重读（ReaderContext.refreshLogin）。 */
+  /** cursor-agent 登录落下的文件，默认 ~/.config/cursor/auth.json；令牌被拒（401/403）或文件不在（ENOENT）时由引擎刷新一次后重读（ReaderContext.refreshLogin）。 */
   authFile?: string;
   baseUrl?: string;
 }

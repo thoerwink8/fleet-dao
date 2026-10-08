@@ -1,4 +1,4 @@
-// Cursor 额度读取在登录令牌被拒时，以会话用户的身份跑一次 `cursor-agent status` 刷新再读（#1340）。
+// Cursor 额度读取在登录令牌被拒、或登录文件不在（ENOENT）时，以会话用户的身份跑一次 `cursor-agent status` 刷新再读（#1340、#1369）。
 // exec、fetch 全是假的：不起进程、不连上游。假令牌一律用明显的假值。
 import { SESSION_USERS } from '@fleet-dao/adapters';
 import { type CommandResult, type QuotaIo, readAllQuotas } from '@fleet-dao/adapters/quota';
@@ -30,8 +30,9 @@ type Status =
   | { code: number | null; stderr?: string; spawnError?: string };
 
 /** 假 exec：/bin/cat 按路径给内容；/bin/sh 起的 cursor-agent status 按 status 的样子办，记下每条命令。 */
-function fakeWorld(status: Status) {
-  const files: Record<string, string> = { [AUTH]: JSON.stringify({ accessToken: STALE }) };
+function fakeWorld(status: Status, initial: 'present' | 'missing' = 'present') {
+  const files: Record<string, string> =
+    initial === 'present' ? { [AUTH]: JSON.stringify({ accessToken: STALE }) } : {};
   const commands: UserCommand[] = [];
   const exec = async (c: UserCommand): Promise<UserCommandResult> => {
     commands.push(c);
@@ -173,6 +174,33 @@ describe('额度读取：Cursor 令牌被拒，以会话用户跑 cursor-agent s
     if (!r || r.ok) return;
     expect(r.error.message).toContain('没有刷新手段');
     expect(statusCommands(w)).toHaveLength(0);
+  });
+});
+
+describe('额度读取：Cursor 登录文件不在，同样以会话用户跑 cursor-agent status 再读', () => {
+  it('ENOENT → 以会话用户跑一次 status（命令里没有密钥）→ 文件写回来 → 读成', async () => {
+    const w = fakeWorld('rewrites-token', 'missing');
+    const r = await readRound(w);
+    expect(r?.ok).toBe(true);
+    const ran = statusCommands(w);
+    expect(ran).toHaveLength(1);
+    expect(ran[0]?.user).toBe(USER);
+    expect(ran[0]?.argv.at(-1)).toBe('status');
+    expect(ran[0]?.argv.join(' ')).not.toContain('CURSOR_API_KEY');
+    expect(w.bearers.every((b) => b === `Bearer ${FRESH}`)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(FRESH);
+  });
+
+  it('status 跑完文件还是不在：报 no_credentials，原因含已刷新一次，只跑了一次 status', async () => {
+    const w = fakeWorld('does-nothing', 'missing');
+    const r = await readRound(w);
+    expect(r?.ok).toBe(false);
+    if (!r || r.ok) return;
+    expect(r.error.code).toBe('no_credentials');
+    expect(r.error.message).toContain('已刷新一次仍读不到');
+    expect(r.error.message).toContain('ENOENT');
+    expect(statusCommands(w)).toHaveLength(1);
+    expect(w.bearers).toHaveLength(0);
   });
 });
 
