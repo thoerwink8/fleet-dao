@@ -50,6 +50,7 @@ import { ListenFdError, startListeners } from './listen.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
+import { pgProbeHistory } from './probe-history.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
@@ -226,6 +227,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
     routingLayers: pgRoutingLayers(db),
+    // 探针真历史（#1139）：渠道状态页的近 60 次格子。读库，不看引擎开没开
+    probeHistory: pgProbeHistory(db),
     // 渠道模型名册和目录的差（#1302）：读库里额度任务记下的名册，请求里不现连渠道
     modelRoster: pgModelRoster(db),
     // 会话用户切号的现状（#194）：引擎落库的切号账本，额度页顶上一行

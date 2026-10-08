@@ -134,6 +134,8 @@ export interface HarnessOptions {
   alertWork?: Deps['alertWork'];
   /** 路由两层每一层现在活着吗（#574）；不给就是没接上（内存版、开发环境一样）。 */
   routingLayers?: Deps['routingLayers'];
+  /** 探针真历史（#1139）；不给就是没接上（内存版、开发环境一样）。 */
+  probeHistory?: Deps['probeHistory'];
   /** 渠道模型差集（#1302）；不给就是没接上，路由页不能写成「都对得上」。 */
   modelRoster?: Deps['modelRoster'];
   /** 每条路由的思考档位（#470）；不给就是没接上（内存版、开发环境一样）。 */
@@ -192,6 +194,7 @@ function wire<S extends Store>(
     ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
+    ...(options.probeHistory ? { probeHistory: options.probeHistory } : {}),
     ...(options.modelRoster ? { modelRoster: options.modelRoster } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
     ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),

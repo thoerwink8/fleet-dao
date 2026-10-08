@@ -1,34 +1,45 @@
-// 渠道状态页（#1087；驾驶舱改版 2026-10-07，创始人「渠道状态无法探测」）：每个渠道通不通、为什么不通，能当场再探一次。
-// 左栏按顺位排的渠道卡，右边选中渠道的每条路由：最近一次结论、耗时、时刻、失败原因原文，每条一个「立即探测」，顶上「全部立即探测」。
+// 渠道状态页（#1087；近 60 次真历史 #1139）：每个渠道一张卡，格子是每次探针，点开看那一次的耗时和原文。
+// 左栏按顺位排的渠道卡，右边选中渠道的这一次，再往下是每条路由：最近一次结论、耗时、时刻、失败原因原文，
+// 每条一个「立即探测」，顶上「全部立即探测」。
 // 改这里之前必须知道：
 // - 通不通、排第几、运行中失败、检测中断都在 lib/channel-status.ts 判，和路由页顶上那一行同一份；这里只画。
 // - 「立即探测」点下去由法国引擎接手（engine/src/jobs/route-probe-now.ts），走到哪由后端从操作记录现算；页面在探的时候
 //   每 3 秒重拉一次，探完自己把路由目录也重拉（api/client.tsx 的 useRouteProbeStatus）。
 // - 探不了要说清是哪样：引擎关着、没连上、没查成、没人接手、引擎说没探成，各有一句，不显示成「通」或空白。
-// - 近 60 次历史：探针历史表（#1196）还没合进主线，库里每条路由只有最近一次结论。位置留着、写明，不拿最近一次铺成 60 格冒充历史。
+// - 近 60 次来自探针历史（route_probe_history），本渠道所有路由按时间排，一次一格。没探和不通颜色分开。
+//   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
 
-import { ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from '@fleet-dao/shared';
+import { PROBE_HISTORY_SLOTS, ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from '@fleet-dao/shared';
 import { LoaderCircle, Radar, SatelliteDish } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import {
   errorText,
+  useProbeHistory,
   useRouteProbeNow,
   useRouteProbeStatus,
   useRouting,
   useRoutingLayers,
 } from '../api/client';
-import type { Model, Route, RouteProbeRequest, RouteProbeStatus } from '../api/types';
-import { ChannelList, FailoverNote } from '../components/channel-status';
+import type {
+  Model,
+  ProbeHistoryCell,
+  Route,
+  RouteProbeHistory,
+  RouteProbeRequest,
+  RouteProbeStatus,
+} from '../api/types';
+import { type ChannelHistory, ChannelList, FailoverNote } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
 import { buildChannelCards, type ChannelCard, channelProbeInterrupted } from '../lib/channel-status';
-import { formatAgo, formatClock, formatIn } from '../lib/format';
+import { formatAgo, formatClock, formatDateTime, formatIn } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { formatProbeMs, PROBE_RESULT_BG, PROBE_RESULT_WORD } from '../lib/probe-history-view';
 import { activeFor, activityText, isActive, lastFailureFor, probeSeconds } from '../lib/route-probe';
-import { type Tone, toneBg } from '../lib/status';
+import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -37,9 +48,6 @@ export function meta() {
 
 const DESCRIPTION =
   '每个渠道通不通、不通为什么。点「立即探测」让法国引擎现在就探，不用等下一轮（Claude 订阅 15 分钟一轮；Mirasim、Cursor、Grok 探通后 2 小时一轮）。';
-
-/** 历史条画多少格（Now Coding 式，#1196 落库后按真历史画）。 */
-const HISTORY_SLOTS = 60;
 
 const STATE_WORD: Record<NonNullable<Route['probe']>['state'], { label: string; tone: Tone }> = {
   ok: { label: '通过', tone: 'done' },
@@ -60,14 +68,51 @@ function engineBlock(status: RouteProbeStatus | undefined, error: unknown): stri
   return `没查成引擎在不在${detail}：探不了`;
 }
 
+function toHistory(data: RouteProbeHistory | undefined, error: unknown): ChannelHistory {
+  if (!data) {
+    if (error) return { state: 'unreadable', why: `没查成：${errorText(error)}` };
+    return { state: 'loading' };
+  }
+  if (data.state === 'unreadable') return { state: 'unreadable', why: data.why };
+  return { state: 'ok', channels: data.channels, latestByRoute: data.latestByRoute };
+}
+
+/** 右边正在看的那一次。点格子优先；点路由行看它自己的最近一次（挤出 60 格也算）；都没点就看这条带里最新的一格。 */
+function resolveProbe(
+  channelId: string,
+  view: ChannelHistory,
+  cellPick: { channelId: string; cellId: number } | null,
+  routePick: { channelId: string; routeId: string } | null,
+): { cell: ProbeHistoryCell | undefined; routeMissing: boolean } {
+  if (view.state !== 'ok') return { cell: undefined, routeMissing: false };
+  const strip = view.channels.find((item) => item.channelId === channelId);
+  const cells = (strip?.cells ?? []).slice(-PROBE_HISTORY_SLOTS);
+  if (cellPick?.channelId === channelId) {
+    const cell =
+      cells.find((item) => item.id === cellPick.cellId) ??
+      view.latestByRoute.find((item) => item.id === cellPick.cellId && item.channelId === channelId);
+    return { cell, routeMissing: false };
+  }
+  if (routePick?.channelId === channelId) {
+    const cell = view.latestByRoute.find(
+      (item) => item.routeId === routePick.routeId && item.channelId === channelId,
+    );
+    return { cell, routeMissing: cell === undefined };
+  }
+  return { cell: cells[cells.length - 1], routeMissing: false };
+}
+
 export default function RoutingStatus() {
   const routing = useRouting();
   const layers = useRoutingLayers();
   const probe = useRouteProbeStatus();
+  const historyQuery = useProbeHistory();
   const probeNow = useRouteProbeNow();
   const now = useNow();
   const [params, setParams] = useSearchParams();
   const [manualPick, setManualPick] = useState<string | null>(null);
+  const [cellPick, setCellPick] = useState<{ channelId: string; cellId: number } | null>(null);
+  const [routePick, setRoutePick] = useState<{ channelId: string; routeId: string } | null>(null);
 
   const cards = useMemo(
     () => (routing.data && layers.data ? buildChannelCards(routing.data, layers.data, now) : []),
@@ -75,6 +120,7 @@ export default function RoutingStatus() {
   );
   const requests = probe.data?.requests ?? [];
   const blocked = engineBlock(probe.data, probe.error);
+  const history = toHistory(historyQuery.data, historyQuery.error);
 
   if (routing.error || layers.error) {
     return (
@@ -104,6 +150,19 @@ export default function RoutingStatus() {
   const wanted = manualPick ?? params.get('p');
   const picked = cards.some((c) => c.channel.id === wanted) ? wanted : cards[0]?.channel.id;
   const current = cards.find((c) => c.channel.id === picked);
+  const focus = current ? resolveProbe(current.channel.id, history, cellPick, routePick) : undefined;
+  const pickChannel = (id: string) => {
+    setManualPick(id);
+    setCellPick(null);
+    setRoutePick(null);
+    setParams({ p: id }, { replace: true, preventScrollReset: true });
+  };
+  const pickCell = (channelId: string, cellId: number) => {
+    setManualPick(channelId);
+    setCellPick({ channelId, cellId });
+    setRoutePick(null);
+    setParams({ p: channelId }, { replace: true, preventScrollReset: true });
+  };
   const allRoutes = routing.data.routes;
   const probing = new Set(allRoutes.filter((r) => activeFor(requests, r.id)).map((r) => r.channelId));
   const open = cards.filter((c) => c.state !== 'off' && c.state !== 'idle');
@@ -153,10 +212,10 @@ export default function RoutingStatus() {
             selected={picked ?? undefined}
             probing={probing}
             now={now}
-            onPick={(id) => {
-              setManualPick(id);
-              setParams({ p: id }, { replace: true, preventScrollReset: true });
-            }}
+            history={history}
+            activeCellId={focus?.cell?.id}
+            onPick={pickChannel}
+            onPickCell={pickCell}
           />
           <ul className="mt-3 space-y-1 text-caption text-muted-foreground">
             <li>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</li>
@@ -180,6 +239,13 @@ export default function RoutingStatus() {
               blocked={blocked}
               busy={probeNow.isPending}
               now={now}
+              history={history}
+              focus={focus}
+              onPickCell={(cellId) => pickCell(current.channel.id, cellId)}
+              onPickRoute={(routeId) => {
+                setRoutePick({ channelId: current.channel.id, routeId });
+                setCellPick(null);
+              }}
               onProbe={fire}
             />
           ) : null}
@@ -279,6 +345,10 @@ function ChannelDetail({
   blocked,
   busy,
   now,
+  history,
+  focus,
+  onPickCell,
+  onPickRoute,
   onProbe,
 }: {
   card: ChannelCard;
@@ -288,6 +358,10 @@ function ChannelDetail({
   blocked: string | undefined;
   busy: boolean;
   now: number;
+  history: ChannelHistory;
+  focus: { cell: ProbeHistoryCell | undefined; routeMissing: boolean } | undefined;
+  onPickCell: (cellId: number) => void;
+  onPickRoute: (routeId: string) => void;
   onProbe: (routeIds: string[]) => void;
 }) {
   // 探过的在前、没探过的在后；同样的按编号
@@ -325,6 +399,16 @@ function ChannelDetail({
       }
     >
       {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
+      <ProbeFocus
+        history={history}
+        channelId={card.channel.id}
+        routes={routes}
+        models={models}
+        cell={focus?.cell}
+        routeMissing={focus?.routeMissing ?? false}
+        now={now}
+        onPickCell={onPickCell}
+      />
       {sorted.length === 0 ? (
         <p className="text-sub text-muted-foreground">这个渠道下一条路由都没有。</p>
       ) : (
@@ -338,6 +422,8 @@ function ChannelDetail({
               blocked={blocked}
               busy={busy}
               now={now}
+              picked={focus?.cell?.routeId === r.id}
+              onPick={() => onPickRoute(r.id)}
               onProbe={() => onProbe([r.id])}
             />
           ))}
@@ -354,6 +440,8 @@ function RouteRow({
   blocked,
   busy,
   now,
+  picked,
+  onPick,
   onProbe,
 }: {
   route: Route;
@@ -362,6 +450,8 @@ function RouteRow({
   blocked: string | undefined;
   busy: boolean;
   now: number;
+  picked: boolean;
+  onPick: () => void;
   onProbe: () => void;
 }) {
   const active = activeFor(requests, r.id);
@@ -383,6 +473,7 @@ function RouteRow({
       className={cn(
         'rounded-lg border px-3.5 py-3',
         probe?.state === 'failed' && !active && 'border-st-fail/40',
+        picked && 'ring-2 ring-ring/40',
       )}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -400,6 +491,13 @@ function RouteRow({
           <StatusChip tone={word.tone} label={word.label} />
         )}
         {stale && !active ? <StatusChip tone="stall" label="结论过期" /> : null}
+        <button
+          type="button"
+          onClick={onPick}
+          className="text-caption text-muted-foreground underline-offset-2 hover:underline"
+        >
+          看最近一次
+        </button>
         <Button
           size="xs"
           variant="outline"
@@ -459,7 +557,6 @@ function RouteRow({
           {probe ? (probe.detail ?? '（探针没写原文）') : '（还没有结论）'}
         </pre>
       </div>
-      <HistoryStrip latest={probe ? word.tone : undefined} />
     </li>
   );
 }
@@ -473,35 +570,165 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/**
- * 近 60 次历史条的位置（Now Coding 式）。探针历史表（#1196）还没合进主线：只有最右一格是真的（最近一次结论），
- * 其余画成空格、写明为什么，不拿最近一次铺满冒充历史。
- */
-function HistoryStrip({ latest }: { latest: Tone | undefined }) {
-  return (
-    <div className="mt-2.5" data-history="pending">
-      <div
-        className="flex h-4 items-end gap-[2px]"
-        role="img"
-        aria-label="近 60 次历史：还没落库，只有最近一次"
-      >
-        {Array.from({ length: HISTORY_SLOTS }, (_, i) => {
-          const last = i === HISTORY_SLOTS - 1;
-          return (
-            <span
-              // biome-ignore lint/suspicious/noArrayIndexKey: 固定 60 格占位，位置就是身份
-              key={i}
-              className={cn(
-                'h-full w-[3px] shrink-0 rounded-sm',
-                last && latest ? toneBg[latest] : 'border border-dashed border-foreground/15 bg-transparent',
-              )}
-            />
-          );
-        })}
-      </div>
-      <p className="mt-1 text-micro text-faint">
-        近 60 次：探针历史还没落库（#1196 在做），现在只有最右一格是最近一次结论
+/** 右边：正在看的那一次，和这条带上最近 60 次（新的在上）。 */
+function ProbeFocus({
+  history,
+  channelId,
+  routes,
+  models,
+  cell,
+  routeMissing,
+  now,
+  onPickCell,
+}: {
+  history: ChannelHistory;
+  channelId: string;
+  routes: readonly Route[];
+  models: readonly Model[];
+  cell: ProbeHistoryCell | undefined;
+  routeMissing: boolean;
+  now: number;
+  onPickCell: (cellId: number) => void;
+}) {
+  if (history.state === 'loading') {
+    return (
+      <p data-history="loading" className="mb-3 text-sub text-muted-foreground">
+        正在读探针历史
       </p>
+    );
+  }
+  if (history.state === 'unreadable') {
+    return (
+      <p role="alert" data-history="unreadable" className="mb-3 text-sub text-ink-fail">
+        {history.why}
+      </p>
+    );
+  }
+  const strip = history.channels.find((item) => item.channelId === channelId);
+  const cells = (strip?.cells ?? []).slice(-PROBE_HISTORY_SLOTS);
+  return (
+    <div className="mb-4">
+      <section
+        aria-label="这一次"
+        data-probe-detail={cell?.id ?? 'none'}
+        className="rounded-lg border px-3.5 py-3"
+      >
+        {routeMissing ? (
+          <p>这条路由还没有探针历史</p>
+        ) : cell ? (
+          <ProbeOnce cell={cell} routes={routes} models={models} now={now} />
+        ) : (
+          <p>还没有探针历史</p>
+        )}
+      </section>
+      {cells.length > 0 ? (
+        <ol aria-label="最近状态（60）" className="mt-2 max-h-52 space-y-0.5 overflow-auto">
+          {[...cells].reverse().map((item) => (
+            <li key={item.id}>
+              <button
+                type="button"
+                data-cell={item.id}
+                data-result={item.result}
+                aria-current={item.id === cell?.id ? 'true' : undefined}
+                onClick={() => onPickCell(item.id)}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-caption hover:bg-muted',
+                  item.id === cell?.id && 'bg-muted',
+                )}
+              >
+                <span className={cn('size-2 shrink-0 rounded-[2px]', PROBE_RESULT_BG[item.result])} />
+                <span className="num">{formatDateTime(item.probedAt)}</span>
+                <span className="min-w-0 flex-1 truncate">{item.routeId}</span>
+                <span className="num">{formatProbeMs(item.durationMs, item.result)}</span>
+                <span>{PROBE_RESULT_WORD[item.result].label}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+    </div>
+  );
+}
+
+function ProbeOnce({
+  cell,
+  routes,
+  models,
+  now,
+}: {
+  cell: ProbeHistoryCell;
+  routes: readonly Route[];
+  models: readonly Model[];
+  now: number;
+}) {
+  const route = routes.find((item) => item.id === cell.routeId);
+  const model = models.find((item) => item.id === route?.modelId);
+  const who = model ? `${model.displayName} · ${cell.routeId}` : cell.routeId;
+  const word = PROBE_RESULT_WORD[cell.result];
+  const resultText =
+    cell.result === 'passed' ? word.label : `${word.label}：${cell.failureReason ?? '（没写原因）'}`;
+  return (
+    <>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-caption sm:grid-cols-3">
+        <Fact label="时刻">
+          <span className="num">
+            {formatDateTime(cell.probedAt)}（{formatAgo(cell.probedAt, now)}）
+          </span>
+        </Fact>
+        <Fact label="路由">{who}</Fact>
+        <Fact label="耗时">
+          <span className="num">{formatProbeMs(cell.durationMs, cell.result)}</span>
+        </Fact>
+      </dl>
+      <p
+        data-field="result"
+        className={cn('mt-2 break-words text-sub', cell.result === 'failed' && 'text-ink-fail')}
+      >
+        {resultText}
+      </p>
+      <ProbeText
+        label="请求原文（REQUEST）"
+        field="request"
+        text={cell.requestText}
+        empty="（没发出去）"
+        failed={false}
+      />
+      <ProbeText
+        label="响应原文（RESPONSE）"
+        field="response"
+        text={cell.responseText}
+        empty="（没拿到）"
+        failed={cell.result === 'failed'}
+      />
+    </>
+  );
+}
+
+function ProbeText({
+  label,
+  field,
+  text,
+  empty,
+  failed,
+}: {
+  label: string;
+  field: string;
+  text: string | null;
+  empty: string;
+  failed: boolean;
+}) {
+  return (
+    <div className="mt-2.5">
+      <div className="mb-1 text-caption text-muted-foreground">{label}</div>
+      <pre
+        data-field={field}
+        className={cn(
+          'max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/40 px-2.5 py-2 font-mono text-micro',
+          failed ? 'text-ink-fail' : 'text-muted-foreground',
+        )}
+      >
+        {text ?? empty}
+      </pre>
     </div>
   );
 }

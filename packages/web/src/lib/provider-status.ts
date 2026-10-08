@@ -1,9 +1,8 @@
 // 渠道运行中失败（channel_states，#1118）：干活那边撞上了、被标不可用的渠道，为什么、顺延到谁、探针下次什么时候再看。
 // 渠道卡怎么并、怎么排在 channel-status.ts（buildChannelCards 用这里的 failoverOf），这里只管这一块。
 //
-// 原来这里还有一份「近 60 次柱条」：把同一个渠道下几条路由的最近一次结论铺成 60 格，看着像历史其实不是，和 channel-status.ts
-// 又是同一件事的第二本账（路由页说「通」、渠道状态页说「运行中失败」）。驾驶舱改版（2026-10-07）删了它：真历史等探针历史表
-// （#1196）落库后按路由画。
+// 原来这里还有一份「近 60 次柱条」：把同一个渠道下几条路由的最近一次结论铺成 60 格，看着像历史其实不是。
+// 真历史在渠道状态页，按 route_probe_history 一次一格画（#1139）。
 
 import { ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from '@fleet-dao/shared';
 import type { Channel, ChannelState, Model, Route } from '../api/types';

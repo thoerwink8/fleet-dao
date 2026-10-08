@@ -1,12 +1,15 @@
 // @vitest-environment happy-dom
-// 渠道状态页（#1087；驾驶舱改版 2026-10-07「渠道状态无法探测」）：左栏按顺位排的渠道卡，右边每条路由的最近一次结论、耗时、
-// 时刻、失败原因原文；单条、整个渠道、全部都能「立即探测」，点了马上看到排队 / 探测中，探完自己刷新。
-// 故意造出的失败：引擎关着（按钮置灰、写明）、点了被拒（写明是哪样）、立即探测的记录读不到（写没读成）、运行中失败的渠道顺到谁没有。
+// 渠道状态页（#1087；驾驶舱改版 2026-10-07「渠道状态无法探测」；近 60 次真历史 #1139）：左栏按顺位排的渠道卡，
+// 每张卡一条格子（一次探针一格），点开看那一次的耗时和原文；右边每条路由的最近一次结论。单条、整个渠道、全部都能
+// 「立即探测」，点了马上看到排队 / 探测中，探完自己刷新。
+// 故意造出的失败：引擎关着（按钮置灰、写明，历史照样在）、点了被拒（写明是哪样）、立即探测的记录读不到（写没读成）、
+// 探针历史读不到（写没查成、不画格子）、运行中失败的渠道顺到谁没有。
+import { type ProbeHistoryCell, probeHistoryStrips } from '@fleet-dao/shared';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
-import type { Channel, ChannelState, Route, RouteProbeStatus } from '../api/types';
+import type { Channel, ChannelState, Route, RouteProbeHistory, RouteProbeStatus } from '../api/types';
 import { failoverOf } from '../lib/provider-status';
 import RoutingStatus from '../routes/routing-status';
 import { renderApp } from '../test/harness';
@@ -40,6 +43,22 @@ const routeRow = (routeId: string) => {
   if (!(el instanceof HTMLElement)) throw new Error(`页面上没有路由 ${routeId}`);
   return el;
 };
+
+const historyOf = (rows: ProbeHistoryCell[]): RouteProbeHistory => ({
+  state: 'ok',
+  ...probeHistoryStrips(rows),
+});
+
+const probeCell = (
+  over: Partial<ProbeHistoryCell> &
+    Pick<ProbeHistoryCell, 'id' | 'routeId' | 'channelId' | 'probedAt' | 'result'>,
+): ProbeHistoryCell => ({
+  durationMs: null,
+  failureReason: over.result === 'passed' ? null : '原因',
+  requestText: null,
+  responseText: null,
+  ...over,
+});
 
 describe('运行中失败的渠道（#1118，failoverOf）', () => {
   const failedState = (over: Partial<ChannelState> = {}): ChannelState => ({
@@ -141,7 +160,7 @@ describe('渠道状态页：渠道卡', () => {
 });
 
 describe('渠道状态页：每条路由', () => {
-  test('点开 Cursor：最近一次的时刻、耗时、失败原因原文都在，不藏；近 60 次历史留着位置、写明还没落库', async () => {
+  test('点开 Cursor：最近一次的时刻、耗时、失败原因原文都在，不藏', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor' });
     const row = await waitFor(() => routeRow('r-cursor'));
     expect(row.getAttribute('data-probe')).toBe('failed');
@@ -149,7 +168,6 @@ describe('渠道状态页：每条路由', () => {
     expect(row.textContent).toContain('等了 150 秒还没起来');
     expect(row.textContent).toContain('最近一次');
     expect(row.textContent).toContain('耗时');
-    expect(row.querySelector('[data-history="pending"]')?.textContent).toContain('#1196');
   });
 
   test('通的路由：耗时取探针原文里的「用时 N 秒」', async () => {
@@ -228,6 +246,7 @@ describe('渠道状态页：探不了要说清是哪样', () => {
     expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
     const row = await waitFor(() => routeRow('r-ca-opus'));
     expect(within(row).getByRole('button', { name: /立即探测/ })).toHaveProperty('disabled', true);
+    await waitFor(() => expect(card('ch-claude').querySelector('[data-history="strip"]')).toBeTruthy());
   });
 
   test('【故意造出的失败】引擎没连上：写「没连上」，不显示成通', async () => {
@@ -286,5 +305,158 @@ describe('渠道状态页：探不了要说清是哪样', () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
     const row = await waitFor(() => routeRow('r-grok'));
     await waitFor(() => expect(row.textContent).toContain('点的立即探测没成：点了 10 分钟引擎都没接手'));
+  });
+});
+
+describe('渠道状态页：近 60 次真历史（#1139）', () => {
+  const t = Date.parse('2026-10-07T00:00:00.000Z');
+  const cursorHistory = (): RouteProbeHistory =>
+    historyOf([
+      probeCell({
+        id: 1,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: new Date(t - 30 * 60_000).toISOString(),
+        result: 'passed',
+        durationMs: 2000,
+        failureReason: null,
+        requestText: '只回 OK',
+        responseText: 'OK',
+      }),
+      probeCell({
+        id: 3,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: new Date(t - 15 * 60_000).toISOString(),
+        result: 'not_probed',
+        failureReason: '按规矩没探',
+      }),
+      probeCell({
+        id: 2,
+        routeId: 'r-other',
+        channelId: 'ch-cursor',
+        probedAt: new Date(t - 5 * 60_000).toISOString(),
+        result: 'failed',
+        durationMs: 4000,
+        failureReason: '上游断了',
+        requestText: 'PING',
+        responseText: 'boom',
+      }),
+    ]);
+
+  test('格子三种颜色分开；点一格看原文；点路由行看这条自己的最近一次', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, { routeProbeHistory: async () => cursorHistory() });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+    const strip = await waitFor(() => {
+      const el = card('ch-cursor').querySelector('[data-history="strip"]');
+      if (!(el instanceof HTMLElement)) throw new Error('格子条还没出来');
+      return el;
+    });
+    expect(strip.querySelector('[data-result="passed"]')?.className).toContain('bg-st-done');
+    expect(strip.querySelector('[data-result="failed"]')?.className).toContain('bg-st-fail');
+    expect(strip.querySelector('[data-result="not_probed"]')?.className).toContain('bg-st-stall');
+    expect(strip.querySelectorAll('[data-cell]')).toHaveLength(3);
+    expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(57);
+
+    const detail = () => screen.getByRole('region', { name: '这一次' });
+    await waitFor(() => expect(within(detail()).getByText(/上游断了/)).toBeTruthy());
+    expect(within(detail()).getByText('PING')).toBeTruthy();
+    expect(within(detail()).getByText('boom')).toBeTruthy();
+    expect(within(detail()).getByText('4.0 秒')).toBeTruthy();
+
+    const passed = strip.querySelector('[data-result="passed"]');
+    if (!(passed instanceof HTMLElement)) throw new Error('没有通过的格子');
+    fireEvent.click(passed);
+    await waitFor(() => expect(within(detail()).getByText('只回 OK')).toBeTruthy());
+    expect(within(detail()).getByText('OK')).toBeTruthy();
+    expect(within(detail()).getByText('2.0 秒')).toBeTruthy();
+    expect(within(detail()).queryByText(/上游断了/)).toBeNull();
+
+    fireEvent.click(within(routeRow('r-cursor')).getByRole('button', { name: '看最近一次' }));
+    await waitFor(() => expect(within(detail()).getByText(/按规矩没探/)).toBeTruthy());
+    expect(within(detail()).getByText('没真探')).toBeTruthy();
+    expect(within(detail()).getByText('（没发出去）')).toBeTruthy();
+    expect(within(detail()).getByText('（没拿到）')).toBeTruthy();
+  });
+
+  test('卡片头部的均耗时、可用率按这 60 次算：没探不进可用率，没量到的耗时不当 0', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, { routeProbeHistory: async () => cursorHistory() });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+    const stats = await waitFor(() => {
+      const el = card('ch-cursor').querySelector('[data-history-stats]');
+      if (!(el instanceof HTMLElement)) throw new Error('还没有均耗时');
+      return el;
+    });
+    expect(stats.textContent).toContain('均耗时 3.0 秒');
+    expect(stats.textContent).toContain('可用率 50%（1/2）');
+  });
+
+  test('超过 60 次只画最近 60 格，更老的不在条上', async () => {
+    const api = createMockApi({ live: false });
+    const cells = Array.from({ length: 61 }, (_, i) =>
+      probeCell({
+        id: i + 1,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+        result: 'passed',
+        durationMs: 1000,
+        failureReason: null,
+        responseText: 'OK',
+      }),
+    );
+    Object.assign(api, {
+      routeProbeHistory: async (): Promise<RouteProbeHistory> => ({
+        state: 'ok',
+        channels: [{ channelId: 'ch-cursor', cells, avgDurationMs: 1000, passed: 61, attempted: 61 }],
+        latestByRoute: [cells[60] as ProbeHistoryCell],
+      }),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+    const strip = await waitFor(() => {
+      const el = card('ch-cursor').querySelector('[data-history="strip"]');
+      if (!(el instanceof HTMLElement)) throw new Error('格子条还没出来');
+      return el;
+    });
+    expect(strip.querySelectorAll('[data-cell]')).toHaveLength(60);
+    expect(strip.querySelector('[data-cell="1"]')).toBeNull();
+    expect(strip.querySelector('[data-cell="61"]')).toBeTruthy();
+    expect(strip.querySelector('[data-result="empty"]')).toBeNull();
+    expect(within(screen.getByRole('list', { name: '最近状态（60）' })).getAllByRole('button')).toHaveLength(
+      60,
+    );
+  });
+
+  test('【故意造出的失败】库读不到：写没查成，不画格子冒充没有历史', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, {
+      routeProbeHistory: async () => ({ state: 'unreadable' as const, why: '没查成：连不上库' }),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+    await waitFor(() => expect(card('ch-cursor').querySelector('[data-history="unreadable"]')).toBeTruthy());
+    expect(card('ch-cursor').textContent).toContain('没查成：连不上库');
+    expect(document.querySelector('[data-result]')).toBeNull();
+    expect(document.querySelector('[data-history="strip"]')).toBeNull();
+    const alerts = document.querySelectorAll('[data-history="unreadable"]');
+    expect(alerts.length).toBeGreaterThan(1);
+    expect([...alerts].every((el) => el.textContent?.includes('没查成：连不上库'))).toBe(true);
+  });
+
+  test('读成了但还没有历史：补空格子，写还没有，不写没查成', async () => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, {
+      routeProbeHistory: async () => ({ state: 'ok' as const, channels: [], latestByRoute: [] }),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status', api });
+    await screen.findByRole('list', { name: '渠道状态' });
+    await waitFor(() => expect(card('ch-claude').querySelector('[data-history="strip"]')).toBeTruthy());
+    expect(card('ch-claude').textContent).toContain('还没有探针历史');
+    expect(card('ch-claude').textContent).toContain('还没有真探');
+    expect(card('ch-claude').textContent).toContain('没量到');
+    expect(card('ch-claude').textContent).not.toContain('没查成');
+    expect(card('ch-claude').querySelectorAll('[data-result="empty"]')).toHaveLength(60);
+    expect(card('ch-claude').querySelector('[data-cell]')).toBeNull();
   });
 });

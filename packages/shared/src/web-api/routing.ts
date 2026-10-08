@@ -408,6 +408,53 @@ export const RouteProbeStatusResponse = z.object({
   unavailable: z.string().optional(),
 });
 
+// —— 探针真历史（#1139）：渠道状态页的近 60 次格子 ——
+// 每次探针落一行（db 的 route_probe_history）。这里是按渠道收好的条带，旧的在左，最多 60 格。
+// 读不到、没接上：state=unreadable，why 里写「没查成」。不回空的 channels 冒充没有历史。
+
+export const ProbeHistoryResultSchema = z.enum(['passed', 'failed', 'not_probed']);
+
+export const ProbeHistoryCellSchema = z.object({
+  id: z.number().int().positive(),
+  routeId: Id,
+  channelId: Id,
+  probedAt: Time,
+  result: ProbeHistoryResultSchema,
+  /** 这一次的耗时（毫秒）。没探、没量到是 null，不当 0。 */
+  durationMs: z.number().int().nonnegative().nullable(),
+  /** 不通、没探的原因。通过是 null。 */
+  failureReason: z.string().nullable(),
+  /** 发出去的请求原文。没发出去是 null。 */
+  requestText: z.string().nullable(),
+  /** 响应原文。没拿到是 null。 */
+  responseText: z.string().nullable(),
+});
+
+export const ProbeHistoryChannelSchema = z.object({
+  channelId: Id,
+  /** 从旧到新，最多 60。不够不补假格子（页面自己补空位）。 */
+  cells: z.array(ProbeHistoryCellSchema).max(60),
+  /** 量到了耗时的那些的平均（毫秒）。一个都没有是 null。 */
+  avgDurationMs: z.number().int().nonnegative().nullable(),
+  passed: z.number().int().nonnegative(),
+  /** 通过 + 不通。没探的不进。0 = 还没有真探，页面不写成 0% 或 100%。 */
+  attempted: z.number().int().nonnegative(),
+});
+
+export const RouteProbeHistoryResponse = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    channels: z.array(ProbeHistoryChannelSchema),
+    /** 每条路由自己的最近一次。挤出 60 格的也在，点路由行用。 */
+    latestByRoute: z.array(ProbeHistoryCellSchema),
+  }),
+  z.object({
+    state: z.literal('unreadable'),
+    /** 给人看的一句，以「没查成」开头。 */
+    why: z.string().min(1),
+  }),
+]);
+
 /** routeIds 不给 = 全部路由。 */
 export const RouteProbeNowRequest = z.object({
   routeIds: z.array(Id).min(1).max(200).optional(),

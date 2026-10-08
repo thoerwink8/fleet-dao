@@ -24,6 +24,7 @@ import {
   QUOTA_RESERVE_SETTING,
   ReposResponse,
   ResolveNotificationResponse,
+  RouteProbeHistoryResponse,
   RoutingEffortsResponse,
   RoutingLayersResponse,
   RoutingResponse,
@@ -67,6 +68,7 @@ import {
   WorkflowTargetNotFoundError,
   WorkflowUnavailableError,
 } from './ports.ts';
+import { probeHistoryBody } from './probe-history.ts';
 import { registerReleaseCardRoutes } from './release-card.ts';
 import { registerReleaseRequestRoutes } from './release-request.ts';
 import { soloReserveView } from './reserve-view.ts';
@@ -511,6 +513,24 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
     // 路由在线状态就是库里探针的结论（routes.alive、probe_*，#129），原样给驾驶舱
     return reply(c, RoutingResponse, { channels, channelStates, pools, models, routes, hardBans, bans });
+  });
+
+  // 探针真历史（#1139）：近 60 次格子。不看引擎开没开。没接上、读不到都写没查成，不回空列表冒充没有历史。
+  app.get(WebRoutes.routeProbeHistory.path, async (c) => {
+    if (!deps.probeHistory) {
+      return reply(c, RouteProbeHistoryResponse, {
+        state: 'unreadable',
+        why: '没查成：探针历史没接上（这台没有库）',
+      });
+    }
+    try {
+      const rows = await deps.probeHistory.read();
+      return reply(c, RouteProbeHistoryResponse, { state: 'ok', ...probeHistoryBody(rows) });
+    } catch (err) {
+      deps.log.error('探针历史没读成', { error: fullStack(err) });
+      const cause = (err instanceof Error && err.message) || String(err);
+      return reply(c, RouteProbeHistoryResponse, { state: 'unreadable', why: `没查成：${cause}` });
+    }
   });
 
   // 路由两层每一层现在活着吗（#574）：读的时候现算，不存。读不到回 503 写明没读成；没接上写 unavailable。

@@ -35,6 +35,7 @@ import { PoolsResponse } from './pools.ts';
 import {
   MovePurposeModelRequest,
   MovePurposeModelResponse,
+  RouteProbeHistoryResponse,
   RouteProbeNowRequest,
   RouteProbeNowResponse,
   RouteProbeStatusResponse,
@@ -121,6 +122,8 @@ export const WebRoutes = {
   routingEfforts: { method: 'GET', path: '/routing/efforts', response: RoutingEffortsResponse },
   /** 立即探测的现状（驾驶舱改版 2026-10-07）：最近点过的、引擎接没接、每条的结论，加上引擎此刻在不在。 */
   routeProbeStatus: { method: 'GET', path: '/routing/probe', response: RouteProbeStatusResponse },
+  /** 探针真历史（#1139）：每个渠道近 60 次格子、均耗时、可用率。不看引擎开没开。读不到 why 写没查成。 */
+  routeProbeHistory: { method: 'GET', path: '/routing/probe-history', response: RouteProbeHistoryResponse },
   /** 立即探测：routeIds 不给 = 全部路由。引擎关着、没连上回 409 / 503 写明是哪样，不记成点过。 */
   routeProbeNow: {
     method: 'POST',

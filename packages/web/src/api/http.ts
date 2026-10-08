@@ -243,6 +243,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     routingLayers: () => send('GET', apiUrl(R.routingLayers.path), R.routingLayers.response),
     routingEfforts: () => send('GET', apiUrl(R.routingEfforts.path), R.routingEfforts.response),
     routeProbeStatus: () => send('GET', apiUrl(R.routeProbeStatus.path), R.routeProbeStatus.response),
+    routeProbeHistory: () => send('GET', apiUrl(R.routeProbeHistory.path), R.routeProbeHistory.response),
     async routeProbeNow(body) {
       return send('POST', apiUrl(R.routeProbeNow.path), R.routeProbeNow.response, {
         body: RouteProbeNowRequest.parse(body),

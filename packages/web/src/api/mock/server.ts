@@ -32,8 +32,10 @@ import {
   POOL_HOLDS_SETTING,
   PoolHoldsResponse,
   PoolsResponse,
+  type ProbeHistoryCell,
   poolFull,
   poolHoldsView,
+  probeHistoryStrips,
   type RealtimeTable,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
@@ -44,6 +46,7 @@ import {
   ROUTE_PROBE_TARGET,
   ROUTING_PURPOSE_IDS,
   type Route,
+  RouteProbeHistoryResponse,
   RouteProbeNowRequest,
   RouteProbeNowResponse,
   type RouteProbeResult,
@@ -234,6 +237,43 @@ function mockMove(
   after[index] = list[other] as string;
   after[other] = key;
   return { before: [...list], after };
+}
+
+function durationMsFromDetail(detail: string | undefined): number | null {
+  const matched = detail?.match(/用时\s*(\d+(?:\.\d+)?)\s*秒/);
+  if (!matched?.[1]) return null;
+  const ms = Math.round(Number(matched[1]) * 1000);
+  if (!Number.isFinite(ms) || ms < 0 || ms > 2_147_483_647) return null;
+  return ms;
+}
+
+/** 假数据里每条路由的最近一次结论收成一条探针历史，页面开发时格子不是空的。 */
+function mockProbeHistory(
+  routes: readonly {
+    id: string;
+    channelId: string;
+    probe?: { state: string; at: string; detail?: string };
+  }[],
+) {
+  const cells: ProbeHistoryCell[] = [];
+  for (const route of routes) {
+    const probe = route.probe;
+    if (!probe) continue;
+    const result = probe.state === 'ok' ? 'passed' : probe.state === 'failed' ? 'failed' : 'not_probed';
+    const reason = probe.detail?.trim() ? probe.detail : '（假数据没写原因）';
+    cells.push({
+      id: cells.length + 1,
+      routeId: route.id,
+      channelId: route.channelId,
+      probedAt: probe.at,
+      result,
+      durationMs: result === 'not_probed' ? null : durationMsFromDetail(probe.detail),
+      failureReason: result === 'passed' ? null : reason,
+      requestText: result === 'not_probed' ? null : '只回 OK',
+      responseText: result === 'passed' ? 'OK' : result === 'failed' ? reason : null,
+    });
+  }
+  return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
 
 export function createMockApi(opts: MockOptions = {}): MockApi {
@@ -1741,6 +1781,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         };
       });
       return RoutingEffortsResponse.parse({ defaultEffort: DEFAULT_SESSION_EFFORT, models });
+    },
+    async routeProbeHistory() {
+      await wait();
+      return mockProbeHistory(st.routes);
     },
     async routeProbeStatus() {
       await wait();

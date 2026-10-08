@@ -18,6 +18,7 @@ import type {
   WorkflowControl,
 } from './ports.ts';
 import type { ReleaseCardPort } from './release-card.ts';
+import type { ProbeHistoryPort } from './probe-history.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
@@ -66,6 +67,11 @@ export interface Deps {
    * 另写一句 unavailable，不拿空列表冒充「都没配」。
    */
   routingLayers?: RoutingLayersPort | undefined;
+  /**
+   * 探针真历史（#1139，probe-history.ts）：渠道状态页的近 60 次格子。没给（开发、内存版没有这张表）时接口写没查成，
+   * 不拿空列表冒充「还没有探测」。不看引擎开没开。
+   */
+  probeHistory?: ProbeHistoryPort | undefined;
   /**
    * 渠道模型名册和目录的差（#1302，model-roster.ts）。没给（开发、内存版）的路由页照样回两层，
    * 另写一句 modelRosterUnavailable，不拿「都对得上」顶。
