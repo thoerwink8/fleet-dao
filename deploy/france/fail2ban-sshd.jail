@@ -1,0 +1,11 @@
+# deploy/lib/human-tier.sh 的 setup_fail2ban_sshd 写的（装到 /etc/fail2ban/jail.d/fleet-dao-sshd.local），别在机器上手改，改这份再重跑 france.sh。
+# 为什么：公网扫描器反复试 ssh（2026-10-08 法国真机：sshd jail 累计封 393 个、失败 4930 次），默认的封法（maxretry 5、封 10 分钟）
+# 挡不住它们回头再来。这里 3 次失败就封，封一小时，反复来的一次比一次封得长（bantime.increment）。
+# 仓里叫 .jail 是因为 .gitignore 挡着 *.local；装到机器上的名字必须是 .local（fail2ban 的 jail.d 只读 .conf 和 .local）。
+# 只管 sshd 这一个 jail，别的 jail 不动；fail2ban 没装时装机脚本只记待配，不装软件包。
+[sshd]
+enabled = true
+maxretry = 3
+findtime = 10m
+bantime = 1h
+bantime.increment = true

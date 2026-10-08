@@ -2,7 +2,8 @@
 # shellcheck source-path=SCRIPTDIR
 # 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、会话专用用户（一个）、创始人的登录用户 pilot、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
-# 本机上只许 root 和 fleet 连 Temporal 与库、会话用户在本机开的口只许它自己连的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
+# 本机上只许 root 和 fleet 连 Temporal 与库、会话用户在本机开的口只许它自己连的 nft 表、
+# sshd 抗扫描的 drop-in 与 fail2ban 的 sshd jail（#1348；fail2ban 没装只记待配）、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
 # 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、清掉老机器上已删的演示版单元（#1223）、
 # 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
@@ -125,6 +126,10 @@ API_PORT=8787
 # 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
 NFT_FILE=/etc/fleet-dao/nftables.nft
+# sshd 抗扫描和 fail2ban 的 sshd jail（人工档，lib/human-tier.sh 的 setup_sshd_hardening、setup_fail2ban_sshd，#1348）：
+# 放的位置；内容在 deploy/france/sshd-hardening.conf、fail2ban-sshd.jail。sshd 的 drop-in 数字小的先生效，50- 排在 cloud-init 的 50-cloud-init.conf 之后
+SSHD_HARDENING_DROPIN=/etc/ssh/sshd_config.d/50-fleet-dao-hardening.conf
+FAIL2BAN_SSHD_JAIL=/etc/fail2ban/jail.d/fleet-dao-sshd.local
 # 会话用户自己的 Mirasim 服务，本地模式常驻用的固定端口（deploy/france/fleet-mirasim-session.service，#424）：
 # 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
@@ -912,6 +917,8 @@ readback() {
   readback_mirasim
   readback_wireguard
   readback_firewall
+  readback_sshd_hardening
+  readback_fail2ban_sshd
   readback_session_ports
   readback_app_config
   readback_web_upload
@@ -1527,6 +1534,8 @@ main() {
     setup_slice
     setup_sudoers
     setup_firewall
+    setup_sshd_hardening
+    setup_fail2ban_sshd
     setup_pnpm
     setup_session_pnpm
     setup_cursor_agent
