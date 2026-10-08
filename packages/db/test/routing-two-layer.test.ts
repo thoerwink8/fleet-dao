@@ -214,14 +214,40 @@ describe('默认配置 routing.default.json', () => {
     ]);
   });
 
-  it('整理待办（groom，#1338）：默认顺序 Sonnet 5.5、Opus 5.5 在前，后面是其余模型，没有 Fable、没有 Jev；引用的模型都在骨架的 models 里', async () => {
+  it('整理待办（groom，#1338、#1351）：默认顺序 Haiku 5.5 第一（创始人 2026-10-08：省钱+快），Sonnet 5.5、Opus 5.5 紧跟，后面是其余模型，没有 Fable、没有 Jev；引用的模型都在骨架的 models 里', async () => {
     const cfg = await loadRoutingConfig();
     const groom = cfg.purposes.groom ?? [];
-    expect(groom.slice(0, 2)).toEqual(['sonnet-5.5', 'opus-5.5']);
-    expect(groom.length).toBeGreaterThan(2);
+    expect(groom.slice(0, 3)).toEqual(['haiku-5.5', 'sonnet-5.5', 'opus-5.5']);
+    expect(groom.length).toBeGreaterThan(3);
     expect(groom.some((m) => /fable/i.test(m))).toBe(false);
     expect(groom).not.toContain('jev-1.13');
     for (const m of groom) expect(Object.keys(cfg.models), m).toContain(m);
+  });
+
+  it('Haiku 5.5（#1351）：骨架里路由顺序 solo → carpool → cursor、只有 solo 开着；只进 groom；目录里两条 claude-code 路由点名 claude-haiku-5-5', async () => {
+    const cfg = await loadRoutingConfig();
+    expect(cfg.models['haiku-5.5']?.map((r) => [r.routeId, r.enabled])).toEqual([
+      ['claude-solo:haiku-5.5:claude-code', true],
+      ['claude-carpool:haiku-5.5:claude-code', false],
+      ['cursor:haiku-5.5:cursor-agent', false],
+    ]);
+    const usedIn = Object.entries(cfg.purposes)
+      .filter(([, order]) => order.includes('haiku-5.5'))
+      .map(([purpose]) => purpose);
+    expect(usedIn).toEqual(['groom']);
+    const example = parseCatalog(repoFile('deploy/catalog.json'), 'deploy/catalog.json');
+    for (const [id, pool] of [
+      ['claude-solo:haiku-5.5:claude-code', 'claude-solo'],
+      ['claude-carpool:haiku-5.5:claude-code', 'claude-carpool'],
+    ] as const) {
+      const route = example.routes.find((r) => r.id === id);
+      expect([route?.poolId, route?.hostId, route?.modelId, route?.upstreamModel], id).toEqual([
+        pool,
+        'claude-code',
+        'haiku-5.5',
+        'claude-haiku-5-5',
+      ]);
+    }
   });
 
   it('界面用途里没有 GPT（照旧目录配置）、判断只用 Jev', async () => {

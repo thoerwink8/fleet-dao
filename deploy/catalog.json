@@ -361,6 +361,22 @@
       "upstreamModel": "claude-sonnet-5-thinking-high"
     },
     {
+      "_说明": "reclaude -p --model claude-haiku-5-5。2026-10-08 指挥官在法国以会话用户跑 reclaude（Claude Code 2.1.282）实测能答，modelUsage 回的就是 claude-haiku-5-5（#1351）。给临时指挥官（用途 groom）用：省钱、快。",
+      "id": "claude-solo:haiku-5.5:claude-code",
+      "poolId": "claude-solo",
+      "modelId": "haiku-5.5",
+      "hostId": "claude-code",
+      "upstreamModel": "claude-haiku-5-5"
+    },
+    {
+      "_说明": "同上，拼车池。2026-10-08 法国实测能答（#1351）。",
+      "id": "claude-carpool:haiku-5.5:claude-code",
+      "poolId": "claude-carpool",
+      "modelId": "haiku-5.5",
+      "hostId": "claude-code",
+      "upstreamModel": "claude-haiku-5-5"
+    },
+    {
       "id": "cursor:haiku-5.5:cursor-agent",
       "poolId": "cursor",
       "modelId": "haiku-5.5",
