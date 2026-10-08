@@ -15,9 +15,14 @@ export function beijingDay(ms: number): string {
   return dayFmt.format(new Date(ms));
 }
 
-/** 北京时间的「时:分」，例如 14:02。 */
+/** 北京时间的「时:分」，例如 14:02。取 0–23 时，午夜是 00。 */
 export function beijingClock(ms: number): string {
-  return new Date(ms + BEIJING_OFFSET_MS).toISOString().slice(11, 16);
+  const shifted = new Date(ms + BEIJING_OFFSET_MS);
+  const hour = shifted.getUTCHours();
+  const minute = shifted.getUTCMinutes();
+  // 认不出的时刻跟以前一样抛，不把 NaN 拼进飞书消息。
+  if (Number.isNaN(hour) || Number.isNaN(minute)) throw new RangeError('Invalid time value');
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 /** 今天的只写时刻，别的日子带上月日：「14:02」「09-24 14:02」。 */
