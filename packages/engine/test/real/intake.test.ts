@@ -359,16 +359,38 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(await t.db.select().from(tasks)).toHaveLength(0);
   });
 
-  it('开关打开以前开的老单、没挂里程碑的单：照样建任务行、起工作流（#1336 去掉了开单时间和版本这两道）', async () => {
+  it('没挂里程碑的单、整理过的老单：照样建任务行、起工作流；没整理过的老单不拉，并真的叫了一次整理待办（#1338）', async () => {
     await seedWorld(t.db);
-    const old = groomIssue({ number: 31, createdAt: '2026-09-01T00:00:00.000Z', milestone: V1 });
+    await t.db.insert(settings).values({ key: 'engine.master', value: true, updatedBy: 'test' });
+    const old = groomIssue({
+      number: 31,
+      createdAt: '2026-09-01T00:00:00.000Z',
+      milestone: V1,
+      labels: ['需求', '整理过'],
+    });
+    const ungroomed = groomIssue({ number: 33, createdAt: '2026-09-01T00:00:00.000Z', milestone: V1 });
     const unscheduled = groomIssue({ number: 32, milestone: null });
-    const { gh } = fakeGh({ issues: [old, unscheduled] });
+    const { gh } = fakeGh({ issues: [old, ungroomed, unscheduled] });
     const { client, starts } = fakeClient();
     const run = await runIntakeJob(wire(gh)(client, 'fleet'));
     expect(run).toMatchObject({ outcome: 'ok', found: 2 });
     expect(starts.map((s) => s.options.workflowId)).toEqual(['task:acme/demo#31', 'task:acme/demo#32']);
     expect((await t.db.select().from(tasks)).map((r) => r.issueNumber).sort()).toEqual([31, 32]);
+    // 有从没整理过的老单 → 记了一条「点了」（来源 auto），引擎的接手另行处理
+    const asks = (await t.db.select().from(auditLog)).filter((a) => a.target === 'groom');
+    expect(asks.map((a) => a.action)).toEqual(['groom.request']);
+    expect(asks[0]?.after).toMatchObject({ repo: 'acme/demo', source: 'auto' });
+  });
+
+  it('【故意造出的失败】总开关没开时，没整理过的老单照样不拉，叫整理被拒：不记「点了」', async () => {
+    await seedWorld(t.db);
+    const ungroomed = groomIssue({ number: 33, createdAt: '2026-09-01T00:00:00.000Z', milestone: V1 });
+    const { gh } = fakeGh({ issues: [ungroomed] });
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run.outcome).toBe('ok');
+    expect(starts).toEqual([]);
+    expect((await t.db.select().from(auditLog)).filter((a) => a.target === 'groom')).toEqual([]);
   });
 });
 

@@ -76,7 +76,7 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
 
     expect(body.unavailable).toBeUndefined();
     expect(body.asOf).toBe(T0.toISOString());
-    expect(body.purposes.map((p) => p.purpose)).toEqual(['execute', 'ui', 'verify', 'judge']);
+    expect(body.purposes.map((p) => p.purpose)).toEqual(['execute', 'ui', 'verify', 'judge', 'groom']);
     // 库里有 plan、review 的行也不列：triage、spec、plan、research 以及 review 都不进用途列表
     for (const gone of ['triage', 'spec', 'plan', 'research', 'review'] as const) {
       expect(body.purposes.find((p) => p.purpose === gone)).toBeUndefined();
@@ -134,6 +134,13 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
       purpose: 'judge',
       verdict: 'dead',
       problems: ['用途 judge 没配模型顺序'],
+      models: [],
+    });
+    // 整理待办（groom，#1338）：路由页自动多出这一行，没配一样写明
+    expect(by.get('groom')).toEqual({
+      purpose: 'groom',
+      verdict: 'dead',
+      problems: ['用途 groom 没配模型顺序'],
       models: [],
     });
   });

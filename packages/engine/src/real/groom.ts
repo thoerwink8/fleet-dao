@@ -10,8 +10,7 @@
 // - 读 GitHub、写 GitHub 都是「引擎」机器人（@fleet-dao/github）；单子正文是 AI 写的，写之前中和 @ 提醒和 <!-- -->、过卫生检查（github 包里做）。
 
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { parseStandardPaths } from '@fleet-dao/conventions';
+import { loadStandardPaths } from '@fleet-dao/conventions';
 import { type Db, listIntakeRepos, recordGroomDone, recordGroomStart, upsertAlert } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -44,9 +43,6 @@ export type GroomGitHub = Pick<
   claims: Pick<GitHub['claims'], 'openPulls'>;
   commitIdentity(repo: { owner: string; name: string }): Promise<Identity>;
 };
-
-/** 改标准的路径清单跟着引擎代码一起发布（法国是整棵 monorepo 的检出），从引擎自己的检出里读。 */
-const STANDARD_PATHS_URL = new URL('../../../conventions/standard-paths.json', import.meta.url);
 
 const toRepo = (r: Awaited<ReturnType<typeof listIntakeRepos>>[number]): IntakeRepo => ({
   id: r.id,
@@ -228,11 +224,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
       return githubWhitelist(await store.listUsers());
     },
     readFacts,
-    async standardPaths() {
-      const parsed = parseStandardPaths(await readFile(STANDARD_PATHS_URL, 'utf8'));
-      if (typeof parsed === 'string') throw new Error(`改标准的路径清单认不出：${parsed}`);
-      return parsed;
-    },
+    standardPaths: loadStandardPaths,
     runSession,
     writes: (repo) => ({
       openIssue: (i) =>

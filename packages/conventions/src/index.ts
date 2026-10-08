@@ -156,6 +156,7 @@ export {
   type StandardPath,
   standardFiles,
 } from './standard-paths.ts';
+export { loadStandardPaths } from './standard-paths-file.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';
 export { isTestFile, parseTimings, TIMINGS_FILE, type Timings } from './test-split.ts';
 export {
