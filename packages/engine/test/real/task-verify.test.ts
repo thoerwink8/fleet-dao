@@ -1140,6 +1140,32 @@ describe('验收会话撞上游临时故障：等一会儿再验，认不出就�
     expect(r.specs).toHaveLength(1);
   });
 
+  it('流中断（stream disconnected before completion）→ retry，不停下', async () => {
+    const r = rig({
+      driverRun: async () => crashed('stream disconnected before completion: error sending request'),
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.afterSeconds).toBeGreaterThan(0);
+    expect(r.specs).toHaveLength(1);
+  });
+
+  it('此刻派不出（几家里有的没空位、有的一条路由都没有）→ retry 等一会儿，不是 unavailable，没起会话', async () => {
+    const r = rig({
+      picks: {
+        gpt: { ok: false, waitFor: 'slot', detail: 'cursor 池并发满了（4/4）', retryAfterSeconds: 20 },
+        claude: { ok: false, waitFor: 'none', detail: '没有路由' },
+        deepseek: { ok: false, waitFor: 'slot', detail: 'cursor 池并发满了（4/4）' },
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: 20 });
+    expect(got.retry?.reason).toContain('cursor 池并发满了');
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+  });
+
   it('认不出的失败 → 换下一条家族不同于作者的路由，验成', async () => {
     const r = rig({
       picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },

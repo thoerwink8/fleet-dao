@@ -721,6 +721,7 @@ export const RULES: readonly FailureRule[] = [
     codes: ['incomplete', 'prompt_incomplete'],
     text: /stream disconnected|stream closed before|stream (?:ended|broken)|断流|response ended prematurely/i,
     weakCodes: ['timeout'],
+    blip: true,
     routeOutcome: 'neutral',
     hint: '续跑同一个会话',
   },

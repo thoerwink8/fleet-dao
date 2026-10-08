@@ -537,7 +537,8 @@ describe('规则的边界', () => {
     expect(classifyFailure(session({ message: '限流' })).rule).toBe('RL3');
     expect(classifyFailure(session({ message: '连接被重置' })).rule).toBe('NT1');
     expect(classifyFailure(session({ message: 'connection reset by peer' })).rule).toBe('NT1');
-    for (const id of ['BZ1', 'RL1', 'RL3', 'UP1', 'NT1']) expect(isUpstreamBlip(id)).toBe(true);
+    expect(classifyFailure(session({ message: 'stream disconnected before completion' })).rule).toBe('SB1');
+    for (const id of ['BZ1', 'RL1', 'RL3', 'UP1', 'NT1', 'SB1']) expect(isUpstreamBlip(id)).toBe(true);
     expect(isUpstreamBlip('QT1')).toBe(false);
   });
 
