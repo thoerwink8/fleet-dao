@@ -1,7 +1,7 @@
 // 整池暂停的判法（#746）：引擎选路、切号（engine 的 real/pool-holds.ts）、驾驶舱后端（api 的 pool-holds-view.ts）、设置页读同一份。
 //
 // 开关只存在库里的设置键 engine.poolHolds（形状见 web-api.ts 的 PoolHoldsSettingSchema）：{池编号: {reason, decidedBy, revokeWhen,
-// reviewBy}}，写入走设置的 PUT（带版本号、进操作记录）。它和 `pool-hold:<池>` 提醒是两回事：提醒是引擎发现登录失效、封号这类
+// reviewBy, owner?}}，写入走设置的 PUT（带版本号、进操作记录）。负责人没写，视图按「指挥官」。它和 `pool-hold:<池>` 提醒是两回事：提醒是引擎发现登录失效、封号这类
 // 「人修好了就自己撤」时写的，探针探通、会话跑通会撤；开关是人拍的临时停用，引擎任何一步都不撤它。
 //
 // 改这里之前必须知道：
@@ -14,16 +14,23 @@ import { PoolHoldSchema, type PoolHoldsResponse } from './web-api.ts';
 /** 设置表里整池暂停那一项的键（和 web-api 的 SETTING_SCHEMAS 里同名）。 */
 export const POOL_HOLDS_SETTING = 'engine.poolHolds';
 
+/** 库里没写负责人时，视图、飞书、开会话钩子都用这个（#954）。旧称帅位，现称指挥官。 */
+export const DEFAULT_POOL_HOLD_OWNER = '指挥官';
+
 export interface PoolHold {
   reason: string;
   decidedBy: string;
   revokeWhen: string;
   /** YYYY-MM-DD，北京时间。 */
   reviewBy: string;
+  /** 没写 = 库里没有这一项，视图补成 DEFAULT_POOL_HOLD_OWNER。 */
+  owner?: string;
 }
 
 export interface PoolHoldFact extends PoolHold {
   poolId: string;
+  /** 视图上永远有：库里没写的已补成默认。 */
+  owner: string;
   overdue: boolean;
   overdueDays: number;
 }
@@ -75,7 +82,7 @@ export function resolvePoolHolds(setting: unknown, now: Date): PoolHoldFacts {
       problems: [
         {
           poolId: null,
-          why: `设置 ${POOL_HOLDS_SETTING} 的值不是 {池编号: {reason, decidedBy, revokeWhen, reviewBy}}：${JSON.stringify(setting)}，所有账号池按暂停办`,
+          why: `设置 ${POOL_HOLDS_SETTING} 的值不是 {池编号: {reason, decidedBy, revokeWhen, reviewBy, owner?}}：${JSON.stringify(setting)}，所有账号池按暂停办`,
         },
       ],
       holdAll: true,
@@ -95,7 +102,12 @@ export function resolvePoolHolds(setting: unknown, now: Date): PoolHoldFacts {
       });
       continue;
     }
-    holds.push({ poolId, ...parsed.data, ...reviewStatus(parsed.data.reviewBy, now) });
+    holds.push({
+      poolId,
+      ...parsed.data,
+      owner: parsed.data.owner ?? DEFAULT_POOL_HOLD_OWNER,
+      ...reviewStatus(parsed.data.reviewBy, now),
+    });
   }
   return { holds, problems, holdAll: false, heldPoolIds };
 }
@@ -176,5 +188,29 @@ export function revocationProblem(
     .map(([poolId]) => poolId);
   return touched.length === 0
     ? null
-    : `撤回或改 ${touched.join('、')} 的暂停要写原因（撤回写为什么能撤了，续期写为什么还要停）：这次改动没带 reason`;
+    : `撤回或改 ${touched.join('、')} 的暂停要写原因（撤回写为什么能撤了，续期写为什么还要停，改负责人写为什么换人）：这次改动没带 reason`;
+}
+
+/**
+ * 到期的整池暂停拼成一条飞书正文（#954）。没到期的不写进去；一条都没有回 null（这一轮不推）。
+ * 池名用池编号（库里没有另起的显示名）。去哪撤写驾驶舱设置页。
+ */
+export function overduePoolHoldPushText(
+  holds: readonly Pick<
+    PoolHoldFact,
+    'poolId' | 'reason' | 'owner' | 'reviewBy' | 'overdue' | 'overdueDays'
+  >[],
+  today: string,
+): string | null {
+  const due = holds.filter((h) => h.overdue);
+  if (due.length === 0) return null;
+  const lines = due.map((h) => {
+    const when = h.overdueDays === 0 ? '就是今天' : `已过 ${h.overdueDays} 天`;
+    return `账号池 ${h.poolId}：原因：${h.reason}；负责人：${h.owner}；复查日期 ${h.reviewBy}（${when}）。`;
+  });
+  return [
+    `整池暂停到了复查日期（今天 ${today}，北京时间）。`,
+    ...lines,
+    '引擎不会自动撤。到驾驶舱设置页「整池暂停」撤回（要写原因），或改复查日期续期。',
+  ].join('\n');
 }

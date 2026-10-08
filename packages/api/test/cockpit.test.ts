@@ -960,7 +960,8 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         { 'claude-solo': hold({ reviewBy: undefined }) },
         { 'claude-solo': hold({ reason: ' ' }) },
         { 'claude-solo': hold({ reviewBy: '2026-02-30' }) },
-        { 'claude-solo': hold({ owner: '帅位' }) },
+        { 'claude-solo': hold({ owner: ' ' }) },
+        { 'claude-solo': hold({ note: '多余' }) },
         'on',
         null,
       ]) {
@@ -975,7 +976,16 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         target: 'setting:engine.poolHolds',
         after: { 'claude-solo': hold() },
       });
-      expect((await view(h, s.cookie)).holds.map((x) => x.poolId)).toEqual(['claude-solo']);
+      const seen = await view(h, s.cookie);
+      expect(seen.holds.map((x) => x.poolId)).toEqual(['claude-solo']);
+      expect(seen.holds[0]?.owner).toBe('指挥官');
+      const named = await put({
+        value: { 'claude-solo': hold({ owner: '张三' }) },
+        version: 1,
+        reason: '负责人改成张三',
+      });
+      expect(named.status).toBe(200);
+      expect((await view(h, s.cookie)).holds[0]?.owner).toBe('张三');
     });
 
     it('【故意造出的失败】撤回、续期没写原因：400，设置不变；写了原因才撤，原因进操作记录；撤完 /api/pool-holds 没有了', async () => {

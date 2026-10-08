@@ -1,7 +1,7 @@
 // 设置页「整池暂停」（#746）用的纯函数：从现状拼出要存的整份值、校验新建的表单、说到期状态。
-// 存的永远是整份 {池编号: {reason, decidedBy, revokeWhen, reviewBy}}，在认得出的那些上加、改、删；认不出的项带不进去
-// （服务端的 schema 整份校验），要先撤掉（撤要写原因，进操作记录）。
-import { PoolHoldSchema } from '@fleet-dao/shared';
+// 存的永远是整份 {池编号: {reason, decidedBy, revokeWhen, reviewBy, owner}}，在认得出的那些上加、改、删；认不出的项带不进去
+// （服务端的 schema 整份校验），要先撤掉（撤要写原因，进操作记录）。负责人没写时视图已补成「指挥官」，存的时候带上。
+import { DEFAULT_POOL_HOLD_OWNER, PoolHoldSchema } from '@fleet-dao/shared';
 import type { PoolHoldFactView, PoolHolds } from '../api/types';
 
 export interface HoldDraft {
@@ -10,18 +10,29 @@ export interface HoldDraft {
   decidedBy: string;
   revokeWhen: string;
   reviewBy: string;
+  owner: string;
 }
 
-export const EMPTY_DRAFT: HoldDraft = { poolId: '', reason: '', decidedBy: '', revokeWhen: '', reviewBy: '' };
+export const EMPTY_DRAFT: HoldDraft = {
+  poolId: '',
+  reason: '',
+  decidedBy: '',
+  revokeWhen: '',
+  reviewBy: '',
+  owner: DEFAULT_POOL_HOLD_OWNER,
+};
 
-type Entries = Record<string, { reason: string; decidedBy: string; revokeWhen: string; reviewBy: string }>;
+type Entries = Record<
+  string,
+  { reason: string; decidedBy: string; revokeWhen: string; reviewBy: string; owner: string }
+>;
 
 /** 现状里认得出的暂停，还原成设置里存的形状（不带 poolId、overdue 这些现算的）。 */
 export function entriesOf(holds: readonly PoolHoldFactView[]): Entries {
   return Object.fromEntries(
-    holds.map(({ poolId, reason, decidedBy, revokeWhen, reviewBy }) => [
+    holds.map(({ poolId, reason, decidedBy, revokeWhen, reviewBy, owner }) => [
       poolId,
-      { reason, decidedBy, revokeWhen, reviewBy },
+      { reason, decidedBy, revokeWhen, reviewBy, owner },
     ]),
   );
 }
@@ -31,9 +42,10 @@ const FIELD_NAMES = {
   decidedBy: '谁拍的（原话加日期）',
   revokeWhen: '什么条件下撤',
   reviewBy: '最迟复查日期',
+  owner: '负责人',
 } as const;
 
-/** 新建表单：选了池、四项都填且合格才行。返回 null = 可以存，否则是缺什么、哪项不对。 */
+/** 新建表单：选了池、四项和负责人都填且合格才行。返回 null = 可以存，否则是缺什么、哪项不对。 */
 export function draftProblem(d: HoldDraft, existing: readonly string[]): string | null {
   if (d.poolId.trim() === '') return '先选哪个账号池';
   if (existing.includes(d.poolId)) return `${d.poolId} 已经有一条暂停了，要改请用它那一行的「续期」`;
@@ -42,6 +54,7 @@ export function draftProblem(d: HoldDraft, existing: readonly string[]): string 
     decidedBy: d.decidedBy,
     revokeWhen: d.revokeWhen,
     reviewBy: d.reviewBy,
+    owner: d.owner,
   });
   if (parsed.success) return null;
   const issue = parsed.error.issues[0];
@@ -62,6 +75,7 @@ export function withHold(holds: readonly PoolHoldFactView[], d: HoldDraft): Entr
       decidedBy: d.decidedBy.trim(),
       revokeWhen: d.revokeWhen.trim(),
       reviewBy: d.reviewBy,
+      owner: d.owner.trim(),
     },
   };
 }
@@ -78,6 +92,14 @@ export function withReviewBy(holds: readonly PoolHoldFactView[], poolId: string,
   const next = entriesOf(holds);
   const mine = next[poolId];
   if (mine) next[poolId] = { ...mine, reviewBy };
+  return next;
+}
+
+/** 改一个池的负责人。 */
+export function withOwner(holds: readonly PoolHoldFactView[], poolId: string, owner: string): Entries {
+  const next = entriesOf(holds);
+  const mine = next[poolId];
+  if (mine) next[poolId] = { ...mine, owner: owner.trim() };
   return next;
 }
 

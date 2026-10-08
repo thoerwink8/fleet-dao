@@ -1,4 +1,4 @@
-import { SETTING_SCHEMAS } from '@fleet-dao/shared';
+import { DEFAULT_POOL_HOLD_OWNER, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError, errorText, usePoolHolds, usePools, useUpdateSetting } from '../api/client';
@@ -11,6 +11,7 @@ import {
   holdsNeedAttention,
   reviewWords,
   withHold,
+  withOwner,
   withoutHold,
   withReviewBy,
 } from '../lib/pool-holds';
@@ -20,12 +21,12 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 
-type RowAction = { poolId: string; kind: 'revoke' | 'renew' };
+type RowAction = { poolId: string; kind: 'revoke' | 'renew' | 'owner' };
 
 /**
- * 整池暂停（#746，设置 engine.poolHolds）：人拍的临时停用账号池。每条带原因、谁拍的（原话加日期）、撤回条件、最迟复查日期；
- * 引擎选路、切号整池避开，探针探通、会话跑通都撤不掉它，只有这里撤；撤回、续期要写原因，进操作记录。过了复查日期标红、不自动撤。
- * 设置认不出的（缺字段、日期不对）引擎按暂停办，这里明说；还靠旧的 pool-hold 提醒顶着的列出来，提示迁成开关。
+ * 整池暂停（#746，设置 engine.poolHolds）：人拍的临时停用账号池。每条带原因、谁拍的（原话加日期）、撤回条件、最迟复查日期、负责人；
+ * 引擎选路、切号整池避开，探针探通、会话跑通都撤不掉它，只有这里撤；撤回、续期、改负责人要写原因，进操作记录。过了复查日期标红、不自动撤。
+ * 负责人没写按「指挥官」。设置认不出的（缺字段、日期不对）引擎按暂停办，这里明说；还靠旧的 pool-hold 提醒顶着的列出来，提示迁成开关。
  */
 export function PoolHoldsPanel() {
   const holds = usePoolHolds();
@@ -35,6 +36,7 @@ export function PoolHoldsPanel() {
   const [action, setAction] = useState<RowAction | null>(null);
   const [reason, setReason] = useState('');
   const [renewDate, setRenewDate] = useState('');
+  const [ownerDraft, setOwnerDraft] = useState('');
   const v = holds.data;
 
   const poolName = (id: string) => {
@@ -73,21 +75,29 @@ export function PoolHoldsPanel() {
   const existing = v?.holds.map((h) => h.poolId) ?? [];
   const blocked = Boolean(v && (v.holdAll || v.problems.length > 0));
   const problem = draftProblem(draft, existing);
-  const touched = Object.values(draft).some((x) => x !== '');
+  const touched =
+    draft.poolId !== '' ||
+    draft.reason !== '' ||
+    draft.decidedBy !== '' ||
+    draft.revokeWhen !== '' ||
+    draft.reviewBy !== '' ||
+    draft.owner !== DEFAULT_POOL_HOLD_OWNER;
   const set = (k: keyof HoldDraft) => (e: { target: { value: string } }) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));
   const closeAction = () => {
     setAction(null);
     setReason('');
     setRenewDate('');
+    setOwnerDraft('');
   };
+
+  const reasonHint = (kind: RowAction['kind']) =>
+    kind === 'revoke' ? '为什么现在能撤了' : kind === 'renew' ? '为什么到这个日期还要停' : '为什么换成这个人';
 
   const submitAction = () => {
     if (!v || !action) return;
     if (reason.trim() === '') {
-      toast.error('要写原因', {
-        description: action.kind === 'revoke' ? '为什么现在能撤了' : '为什么到这个日期还要停',
-      });
+      toast.error('要写原因', { description: reasonHint(action.kind) });
       return;
     }
     if (action.kind === 'revoke') {
@@ -97,11 +107,18 @@ export function PoolHoldsPanel() {
         `已撤回：${poolName(action.poolId)}`,
         closeAction,
       );
-    } else {
+    } else if (action.kind === 'renew') {
       save(
         withReviewBy(v.holds, action.poolId, renewDate),
         reason.trim(),
         `已续期：${poolName(action.poolId)}`,
+        closeAction,
+      );
+    } else {
+      save(
+        withOwner(v.holds, action.poolId, ownerDraft),
+        reason.trim(),
+        `已改负责人：${poolName(action.poolId)}`,
         closeAction,
       );
     }
@@ -127,6 +144,17 @@ export function PoolHoldsPanel() {
               size="sm"
               variant="outline"
               disabled={update.isPending}
+              onClick={() => {
+                setOwnerDraft(h.owner);
+                setAction({ poolId: h.poolId, kind: 'owner' });
+              }}
+            >
+              改负责人
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={update.isPending}
               onClick={() => setAction({ poolId: h.poolId, kind: 'renew' })}
             >
               续期
@@ -144,6 +172,8 @@ export function PoolHoldsPanel() {
         <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
           <dt>为什么停</dt>
           <dd className="text-foreground">{h.reason}</dd>
+          <dt>负责人</dt>
+          <dd className="text-foreground">{h.owner}</dd>
           <dt>谁拍的</dt>
           <dd className="text-foreground">{h.decidedBy}</dd>
           <dt>撤回条件</dt>
@@ -169,8 +199,25 @@ export function PoolHoldsPanel() {
                 />
               </div>
             ) : null}
+            {action.kind === 'owner' ? (
+              <div className="mb-2 flex items-center gap-2">
+                <Label htmlFor="hold-owner-edit" className="text-xs">
+                  负责人
+                </Label>
+                <Input
+                  id="hold-owner-edit"
+                  value={ownerDraft}
+                  onChange={(e) => setOwnerDraft(e.target.value)}
+                  className="h-8 w-40"
+                />
+              </div>
+            ) : null}
             <Label htmlFor="hold-action-reason" className="text-xs">
-              {action.kind === 'revoke' ? '撤回原因（必填，进操作记录）' : '续期原因（必填，进操作记录）'}
+              {action.kind === 'revoke'
+                ? '撤回原因（必填，进操作记录）'
+                : action.kind === 'renew'
+                  ? '续期原因（必填，进操作记录）'
+                  : '改负责人的原因（必填，进操作记录）'}
             </Label>
             <Textarea
               id="hold-action-reason"
@@ -185,11 +232,18 @@ export function PoolHoldsPanel() {
               <Button
                 size="sm"
                 disabled={
-                  update.isPending || reason.trim() === '' || (action.kind === 'renew' && renewDate === '')
+                  update.isPending ||
+                  reason.trim() === '' ||
+                  (action.kind === 'renew' && renewDate === '') ||
+                  (action.kind === 'owner' && ownerDraft.trim() === '')
                 }
                 onClick={submitAction}
               >
-                {action.kind === 'revoke' ? '确认撤回' : '确认续期'}
+                {action.kind === 'revoke'
+                  ? '确认撤回'
+                  : action.kind === 'renew'
+                    ? '确认续期'
+                    : '确认改负责人'}
               </Button>
             </div>
           </div>
@@ -209,7 +263,7 @@ export function PoolHoldsPanel() {
         ) : null}
       </div>
       <p className="mt-0.5 text-xs text-muted-foreground">
-        临时停用一个账号池：选路不派、切号不切过去（在跑的不动）。每条要写清原因、谁拍的、撤回条件、最迟复查日期。探针探通、会话跑通都撤不掉它，只有人在这里撤（要写原因）；过了复查日期会标红，但不会自动撤。
+        临时停用一个账号池：选路不派、切号不切过去（在跑的不动）。每条要写清原因、谁拍的、撤回条件、最迟复查日期、负责人（没写按指挥官）。探针探通、会话跑通都撤不掉它，只有人在这里撤（要写原因）；过了复查日期会标红，但不会自动撤。
       </p>
       {holds.error ? <LoadError what="整池暂停" error={holds.error} /> : null}
       {!v && !holds.error ? <LoadingRows rows={1} /> : null}
@@ -404,6 +458,12 @@ export function PoolHoldsPanel() {
               onChange={set('reviewBy')}
               className="num h-9"
             />
+          </div>
+          <div className="grid gap-1 md:col-span-2">
+            <Label htmlFor="hold-owner" className="text-xs">
+              负责人
+            </Label>
+            <Input id="hold-owner" value={draft.owner} onChange={set('owner')} className="h-9" />
           </div>
           <div className="grid gap-1 md:col-span-2">
             <Label htmlFor="hold-reason" className="text-xs">

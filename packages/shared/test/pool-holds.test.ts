@@ -2,8 +2,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   beijingDateOf,
+  DEFAULT_POOL_HOLD_OWNER,
+  overduePoolHoldPushText,
   POOL_HOLDS_SETTING,
   PoolHoldSchema,
+  PoolHoldsResponse,
+  PoolHoldViewSchema,
   poolHoldsView,
   resolvePoolHolds,
   reviewStatus,
@@ -29,7 +33,7 @@ describe('开关的形状：缺一项写不进去', () => {
       expect(PoolHoldSchema.safeParse(without).success, `缺 ${k}`).toBe(false);
       expect(PoolHoldSchema.safeParse(hold({ [k]: '   ' })).success, `空白 ${k}`).toBe(false);
     }
-    expect(PoolHoldSchema.safeParse(hold({ owner: '帅位' })).success).toBe(false);
+    expect(PoolHoldSchema.safeParse(hold({ note: '多余' })).success).toBe(false);
     for (const bad of ['2026-02-30', '2026-13-01', '10/30', '2026-1-1', '明天']) {
       expect(PoolHoldSchema.safeParse(hold({ reviewBy: bad })).success, bad).toBe(false);
     }
@@ -42,6 +46,30 @@ describe('开关的形状：缺一项写不进去', () => {
     expect(schema.safeParse({ 'claude-solo': hold({ revokeWhen: undefined }) }).success).toBe(false);
     expect(schema.safeParse(null).success).toBe(false);
     expect(schema.safeParse([]).success).toBe(false);
+  });
+
+  it('负责人可写可不写：没写视图补成指挥官；空的、多出来的字段不收；视图缺负责人过不了', () => {
+    expect(PoolHoldSchema.safeParse(hold()).success).toBe(true);
+    expect(PoolHoldSchema.safeParse(hold({ owner: '张三' })).success).toBe(true);
+    expect(PoolHoldSchema.safeParse(hold({ owner: '  ' })).success).toBe(false);
+    expect(PoolHoldSchema.safeParse(hold({ owner: '' })).success).toBe(false);
+    const missing = resolvePoolHolds({ 'claude-solo': hold() }, NOW);
+    expect(missing.holds[0]?.owner).toBe(DEFAULT_POOL_HOLD_OWNER);
+    expect(resolvePoolHolds({ 'claude-solo': hold({ owner: '张三' }) }, NOW).holds[0]?.owner).toBe('张三');
+    const view = poolHoldsView(
+      { value: { 'claude-solo': hold() }, version: 1 },
+      { ok: true, alerts: [] },
+      NOW,
+    );
+    expect(PoolHoldsResponse.parse(view).holds[0]?.owner).toBe(DEFAULT_POOL_HOLD_OWNER);
+    expect(
+      PoolHoldViewSchema.safeParse({
+        ...hold(),
+        poolId: 'claude-solo',
+        overdue: false,
+        overdueDays: 0,
+      }).success,
+    ).toBe(false);
   });
 });
 
@@ -157,6 +185,13 @@ describe('revocationProblem：撤回、续期必须写原因', () => {
     expect(revocationProblem(before, { a: hold() }, '创始人说可以用了')).toBeNull();
   });
 
+  it('【故意造出的失败】改负责人没写原因：拒；写了原因才过', () => {
+    expect(revocationProblem(before, { a: hold({ owner: '张三' }), b: hold() }, undefined)).toContain('a');
+    expect(revocationProblem(before, { a: hold({ owner: '张三' }), b: hold() }, '交给张三')).toBeNull();
+    const owned = { a: hold({ owner: '张三' }), b: hold({ owner: '张三' }) };
+    expect(revocationProblem(owned, owned, undefined)).toBeNull();
+  });
+
   it('【故意造出的失败】改复查日期（续期）没写原因：拒；新建、没改动的不要原因', () => {
     expect(
       revocationProblem(before, { a: hold({ reviewBy: '2026-12-01' }), b: hold() }, undefined),
@@ -171,5 +206,29 @@ describe('revocationProblem：撤回、续期必须写原因', () => {
     expect(revocationProblem('停', {}, undefined)).toContain('认不出');
     expect(revocationProblem({ a: hold({ reviewBy: undefined }) }, {}, undefined)).toContain('a');
     expect(revocationProblem({ a: hold({ reviewBy: undefined }) }, {}, '清掉坏项')).toBeNull();
+  });
+});
+
+describe('到期飞书正文', () => {
+  it('到期的拼成一条：池名、原因、负责人、去哪撤；没到期的不写进去，一条都没有就不推', () => {
+    const f = resolvePoolHolds(
+      {
+        'claude-solo': hold({ reviewBy: '2026-10-01', owner: '张三' }),
+        relay: hold({ reviewBy: '2026-10-30' }),
+      },
+      NOW,
+    );
+    const text = overduePoolHoldPushText(f.holds, '2026-10-05');
+    expect(text).toContain('账号池 claude-solo');
+    expect(text).toContain('创始人要大用独享');
+    expect(text).toContain('张三');
+    expect(text).toContain('驾驶舱设置页「整池暂停」');
+    expect(text).not.toContain('relay');
+    expect(
+      overduePoolHoldPushText(
+        f.holds.filter((h) => !h.overdue),
+        '2026-10-05',
+      ),
+    ).toBeNull();
   });
 });

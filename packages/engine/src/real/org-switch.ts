@@ -191,7 +191,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       await alert(
         ORG_POOL_HOLD_OVERDUE_ALERT,
         `整池暂停到了复查日期：${overdue.map((h) => h.poolId).join('、')}`,
-        `${overdue.map((h) => `${h.poolId}：复查日期 ${h.reviewBy}（${h.overdueDays === 0 ? '就是今天' : `已过 ${h.overdueDays} 天`}），原因：${h.reason}；撤回条件：${h.revokeWhen}；谁拍的：${h.decidedBy}`).join('\n')}\n引擎不会自动撤它。到驾驶舱设置页「整池暂停」撤回（要写原因），或改复查日期续期。`,
+        `${overdue.map((h) => `${h.poolId}：复查日期 ${h.reviewBy}（${h.overdueDays === 0 ? '就是今天' : `已过 ${h.overdueDays} 天`}），原因：${h.reason}；负责人：${h.owner}；撤回条件：${h.revokeWhen}；谁拍的：${h.decidedBy}`).join('\n')}\n引擎不会自动撤它。到驾驶舱设置页「整池暂停」撤回（要写原因），或改复查日期续期。`,
       );
     } else {
       await settle(ORG_POOL_HOLD_OVERDUE_ALERT, '没有到期没复查的整池暂停');

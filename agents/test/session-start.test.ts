@@ -52,7 +52,18 @@ interface HookLib {
     now?: number;
     sessionId?: string | null;
     env?: Record<string, string | undefined>;
+    poolHolds?: () => { ok: boolean; skipped?: boolean; value?: unknown; why?: string };
   }): string[];
+  readFrancePoolHolds(o: {
+    home: string;
+    env?: Record<string, string | undefined>;
+    now?: number;
+    spawn?: (cmd: string, args: string[], opts: unknown) => Result;
+  }): { ok: boolean; skipped?: boolean; value?: unknown; why?: string };
+  poolHoldPromptLines(
+    read: { ok: boolean; skipped?: boolean; value?: unknown; why?: string },
+    today: string,
+  ): string[];
   RECENT_TOTAL_CHARS: number;
   checkTemporary(cwd: string, git: Git, now?: number): string[];
   checkDirectives(cwd: string, git: Git): string[];
@@ -1512,5 +1523,135 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     const again = recent({ home, now: NOW });
     expect(again.some((l) => /1 行认不出/.test(l))).toBe(true);
     expect(again.some((l) => /没收到的话.*好的那条/.test(l))).toBe(true);
+  });
+});
+
+describe('整池暂停到期（#954）', SLOW, () => {
+  const TODAY = '2026-10-05';
+  const hold = (over: Record<string, unknown> = {}) => ({
+    reason: '创始人要大用独享',
+    decidedBy: '「先停」2026-10-05',
+    revokeWhen: '创始人说可以用了',
+    reviewBy: '2026-10-30',
+    ...over,
+  });
+
+  it('到期的提示池、原因、去哪撤；没写负责人按指挥官；没到期不出声', () => {
+    const lines = hook.poolHoldPromptLines(
+      {
+        ok: true,
+        value: {
+          'claude-solo': hold({ reviewBy: '2026-10-01', owner: '张三' }),
+          relay: hold(),
+        },
+      },
+      TODAY,
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('claude-solo');
+    expect(lines[0]).toContain('创始人要大用独享');
+    expect(lines[0]).toContain('张三');
+    expect(lines[0]).toContain('驾驶舱设置页「整池暂停」');
+    expect(lines[0]).not.toContain('relay');
+    const bare = hook.poolHoldPromptLines(
+      { ok: true, value: { relay: hold({ reviewBy: '2026-10-05' }) } },
+      TODAY,
+    );
+    expect(bare[0]).toContain('负责人：指挥官');
+    expect(hook.poolHoldPromptLines({ ok: true, skipped: true }, TODAY)).toEqual([]);
+    expect(hook.poolHoldPromptLines({ ok: true, value: undefined }, TODAY)).toEqual([]);
+  });
+
+  it('【故意造出的失败】认不出、没查成：明说，不当成没到期', () => {
+    const bad = hook.poolHoldPromptLines(
+      {
+        ok: true,
+        value: { 'claude-a': hold({ reviewBy: '2026-02-30' }), relay: hold({ reviewBy: '2026-10-01' }) },
+      },
+      TODAY,
+    );
+    expect(bad.join('\n')).toContain('认不出');
+    expect(bad.join('\n')).toContain('claude-a');
+    expect(bad.join('\n')).toContain('整池暂停到期：relay');
+    expect(hook.poolHoldPromptLines({ ok: false, why: '连不上法国（退出码 255）' }, TODAY)).toEqual([
+      '整池暂停没查成：连不上法国（退出码 255）。有没有到期的不知道。',
+    ]);
+    expect(hook.poolHoldPromptLines({ ok: true, value: '停' }, TODAY)[0]).toContain('整份认不出');
+  });
+
+  it('【故意造出的失败】没配登法国的 ssh：不出声，也不去 ssh；名字坏了、连不上的原因里不带那个名字', () => {
+    const home = temp('holds');
+    let spawned = 0;
+    const spawn = () => {
+      spawned += 1;
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    expect(hook.readFrancePoolHolds({ home, now: 1, spawn })).toEqual({ ok: true, skipped: true });
+    expect(spawned).toBe(0);
+    mkdirSync(join(home, '.fleet-dao'), { recursive: true });
+    writeFileSync(join(home, '.fleet-dao', 'france-ssh'), '-evil-host\n');
+    const badName = hook.readFrancePoolHolds({ home, now: 2, spawn });
+    expect(badName.ok).toBe(false);
+    expect(JSON.stringify(badName)).not.toContain('-evil-host');
+    expect(spawned).toBe(0);
+    writeFileSync(join(home, '.fleet-dao', 'france-ssh'), 'france-box\n');
+    const down = hook.readFrancePoolHolds({
+      home,
+      now: 3,
+      spawn: () => ({
+        status: 255,
+        stdout: '',
+        stderr: 'ssh: connect to host france-box port 22: Connection refused\n',
+      }),
+    });
+    expect(down.ok).toBe(false);
+    expect(JSON.stringify(down)).not.toContain('france-box');
+    let second = 0;
+    hook.readFrancePoolHolds({
+      home,
+      now: 4,
+      spawn: () => {
+        second += 1;
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+    expect(second).toBe(0);
+  });
+
+  it('开会话见到到期的会提示；工人不查、不出这句', () => {
+    const w = world();
+    const value = { 'claude-solo': hold({ reviewBy: '2026-10-01' }) };
+    let reads = 0;
+    const poolHolds = () => {
+      reads += 1;
+      return { ok: true, value };
+    };
+    const lines = hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git,
+      sync: fakeSync().sync,
+      now: Date.parse('2026-10-05T04:00:00Z'),
+      poolHolds,
+    });
+    expect(reads).toBe(1);
+    expect(
+      lines.some((l) => l.includes('整池暂停到期：claude-solo') && l.includes('驾驶舱设置页「整池暂停」')),
+    ).toBe(true);
+    const workerReads = { n: 0 };
+    const workerLines = hook.sessionStart({
+      cwd: w.work,
+      home: w.home,
+      git,
+      sync: fakeSync().sync,
+      now: Date.parse('2026-10-05T04:00:00Z'),
+      env: { FLEET_WORKER: '1' },
+      poolHolds: () => {
+        workerReads.n += 1;
+        return { ok: true, value };
+      },
+    });
+    expect(workerReads.n).toBe(0);
+    expect(workerLines.join('\n')).not.toContain('整池暂停');
   });
 });

@@ -59,6 +59,7 @@ describe('新建', () => {
           decidedBy: '「先停」2026-10-05',
           revokeWhen: '创始人说可以用了',
           reviewBy: '2026-10-30',
+          owner: '指挥官',
         },
       },
       version: 0,
@@ -81,6 +82,24 @@ describe('新建', () => {
     expect(screen.getByRole('button', { name: '暂停这个池' })).toHaveProperty('disabled', true);
     expect(update).not.toHaveBeenCalled();
   });
+
+  test('【故意造出的失败】负责人清空：存不了，不发请求', async () => {
+    const a = api();
+    const update = vi.spyOn(a, 'updateSetting');
+    renderApp(<PoolHoldsPanel />, { api: a });
+    await screen.findByText('现在没有整池暂停。');
+    await waitFor(() => expect(screen.getByRole('option', { name: /claude-a/ })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText('哪个账号池'), { target: { value: 'claude-a' } });
+    fill('为什么停', '原因');
+    fill('谁拍的（原话加日期，例如「某某原话」2026-10-05）', '原话 2026-10-05');
+    fill('什么条件下撤', '条件');
+    fill('最迟复查日期（北京时间）', '2026-10-30');
+    expect(screen.getByLabelText('负责人')).toHaveProperty('value', '指挥官');
+    fill('负责人', '   ');
+    expect(screen.getByText(/负责人：不能留空/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '暂停这个池' })).toHaveProperty('disabled', true);
+    expect(update).not.toHaveBeenCalled();
+  });
 });
 
 describe('撤回、续期要写原因', () => {
@@ -99,7 +118,7 @@ describe('撤回、续期要写原因', () => {
     fireEvent.click(within(row).getByRole('button', { name: '确认撤回' }));
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
     expect(update).toHaveBeenCalledExactlyOnceWith('engine.poolHolds', {
-      value: { relay: hold() },
+      value: { relay: { ...hold(), owner: '指挥官' } },
       version: 1,
       reason: '创始人说独享正常跑',
     });
@@ -119,9 +138,40 @@ describe('撤回、续期要写原因', () => {
     fireEvent.click(within(row).getByRole('button', { name: '确认续期' }));
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
     expect(update).toHaveBeenCalledExactlyOnceWith('engine.poolHolds', {
-      value: { 'claude-a': hold({ reviewBy: '2026-11-30' }) },
+      value: { 'claude-a': { ...hold({ reviewBy: '2026-11-30' }), owner: '指挥官' } },
       version: 1,
       reason: '独享还要留给本机',
+    });
+  });
+
+  test('负责人能看能改：没写的显示指挥官；改要写原因，不写确认点不了', async () => {
+    const a = api();
+    await seed(a, { 'claude-a': hold({ owner: '张三' }), relay: hold() });
+    const update = vi.spyOn(a, 'updateSetting');
+    renderApp(<PoolHoldsPanel />, { api: a });
+    const row = await screen.findByTestId('hold-claude-a');
+    expect(within(row).getByText('张三')).toBeTruthy();
+    expect(within(screen.getByTestId('hold-relay')).getByText('指挥官')).toBeTruthy();
+    fireEvent.click(within(row).getByRole('button', { name: '改负责人' }));
+    const confirm = within(row).getByRole('button', { name: '确认改负责人' });
+    expect(confirm).toHaveProperty('disabled', true);
+    fireEvent.change(within(row).getByLabelText('负责人'), { target: { value: '李四' } });
+    expect(confirm).toHaveProperty('disabled', true);
+    fireEvent.click(confirm);
+    expect(update).not.toHaveBeenCalled();
+    fireEvent.change(within(row).getByLabelText('负责人'), { target: { value: '   ' } });
+    fireEvent.change(within(row).getByLabelText(/改负责人的原因/), { target: { value: '交给李四' } });
+    expect(within(row).getByRole('button', { name: '确认改负责人' })).toHaveProperty('disabled', true);
+    fireEvent.change(within(row).getByLabelText('负责人'), { target: { value: '李四' } });
+    fireEvent.click(within(row).getByRole('button', { name: '确认改负责人' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    expect(update).toHaveBeenCalledExactlyOnceWith('engine.poolHolds', {
+      value: {
+        'claude-a': { ...hold(), owner: '李四' },
+        relay: { ...hold(), owner: '指挥官' },
+      },
+      version: 1,
+      reason: '交给李四',
     });
   });
 
