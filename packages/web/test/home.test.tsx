@@ -260,7 +260,7 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
   });
 
-  test('此刻原有的分钟列不换行：耗时留在原来那一格，列宽够、不另造表头', async () => {
+  test('此刻表头不换行：分钟列有表头，表头和耗时都单行', async () => {
     localStorage.clear();
     const since = new Date(Date.now() - 40 * 60_000).toISOString();
     renderHome({
@@ -273,12 +273,16 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     const toggle = await screen.findByRole('button', { name: /个会话在干活/ });
     if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
     const panel = document.querySelector('[data-board-now]');
-    expect(panel?.querySelector('table, th')).toBeNull();
-    const minute = Array.from(panel?.querySelectorAll('span') ?? []).find(
-      (el) => el.textContent === '40 分钟',
+    const heads = Array.from(panel?.querySelectorAll('th') ?? []);
+    expect(heads.map((el) => el.textContent?.trim())).toEqual(['谁在做', '单', '在做什么', '分钟']);
+    for (const th of heads) expect(th.className).toContain('whitespace-nowrap');
+    const minuteHead = heads.find((el) => el.textContent?.trim() === '分钟');
+    expect(minuteHead?.className).toContain('w-36');
+    const minute = Array.from(panel?.querySelectorAll('td') ?? []).find(
+      (el) => el.textContent?.trim() === '40 分钟',
     );
     expect(minute?.className).toContain('whitespace-nowrap');
-    expect(minute?.className).toContain('min-w-24');
+    expect(minute?.className).toContain('w-36');
     localStorage.clear();
   });
 
