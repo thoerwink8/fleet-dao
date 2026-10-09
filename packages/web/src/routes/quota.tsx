@@ -8,6 +8,7 @@ import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
 import { OrgSwitchBanner } from '../components/org-switch';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { QuotaCell, quotaValue, readingVerb } from '../components/quota';
+import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import {
   billingLabel,
@@ -74,12 +75,21 @@ function SummaryName({ pool, w }: { pool: PoolView; w?: QuotaWindowView }) {
 }
 
 export default function Quota() {
-  const { data, error, isLoading } = usePools();
+  const { data, error, isLoading, refetch, isFetching, dataUpdatedAt } = usePools();
   const now = useNow();
+  const staleMinutes = data?.staleAfterMinutes ?? 30;
+  const refresh = (
+    <RefreshBar
+      onRefresh={() => void refetch()}
+      isFetching={isFetching}
+      dataUpdatedAt={dataUpdatedAt}
+      staleAfterMs={staleMinutes * 60_000}
+    />
+  );
 
   if (error) {
     return (
-      <Page title="额度">
+      <Page title="额度" actions={refresh}>
         <LoadError error={error} />
       </Page>
     );
@@ -102,12 +112,12 @@ export default function Quota() {
   const unreported = cells.filter(({ w }) => !w.stale && w.staleSince);
   const unread = pools.filter((p) => p.quotaStatus === 'unread');
   const kinds = [...new Set(cells.map(({ w }) => w.window))].sort((a, b) => windowRank[a] - windowRank[b]);
-  const staleMinutes = data?.staleAfterMinutes ?? 30;
 
   return (
     <Page
       title="额度"
       description="每个账号池、每个时间窗：用了多少、几点清零，每个数都写明是实读还是估算。快清零还剩不少的会高亮——调度会先用它。"
+      actions={refresh}
     >
       {isLoading || !data ? (
         <LoadingRows rows={6} />
