@@ -944,6 +944,51 @@ export function createMemoryStore(
       changed('tasks', task.id);
       return 'adopted';
     },
+    async prepareOrphanTask(input) {
+      const task = data.tasks.find((t) => t.id === input.taskId);
+      if (!task) return { status: 'not_found' };
+      if (task.state !== 'queued' && task.state !== 'stopped') return { status: 'not_orphan' };
+      const before = { title: task.title, rawRequest: task.rawRequest, state: task.state };
+      const from = task.state;
+      task.title = input.title;
+      task.rawRequest = input.rawRequest;
+      if (from !== 'queued') {
+        task.state = 'queued';
+        data.stateChanges.push({
+          id: nextId(),
+          entity: 'task',
+          entityId: task.id,
+          taskId: task.id,
+          from,
+          to: 'queued',
+          at: now().toISOString(),
+        });
+      }
+      changed('tasks', task.id);
+      return { status: 'prepared', before };
+    },
+    async restoreOrphanTask(input) {
+      const task = data.tasks.find((t) => t.id === input.taskId);
+      if (!task) return 'not_found';
+      if (task.state !== 'queued') return 'not_queued';
+      const from = task.state;
+      task.title = input.title;
+      task.rawRequest = input.rawRequest;
+      if (from !== input.state) {
+        task.state = input.state;
+        data.stateChanges.push({
+          id: nextId(),
+          entity: 'task',
+          entityId: task.id,
+          taskId: task.id,
+          from,
+          to: input.state,
+          at: now().toISOString(),
+        });
+      }
+      changed('tasks', task.id);
+      return 'restored';
+    },
     async setAutoDispatch({ repoId, on }, entry) {
       const repo = data.repos.find((r) => r.id === repoId);
       if (!repo) return 'not_found';

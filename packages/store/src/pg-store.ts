@@ -1109,6 +1109,37 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return 'adopted';
       });
     },
+    async prepareOrphanTask(input) {
+      if (!isUuid(input.taskId)) return { status: 'not_found' };
+      return db.transaction(async (tx) => {
+        const [row] = await tx.select().from(tasks).where(eq(tasks.id, input.taskId)).for('update');
+        if (!row) return { status: 'not_found' };
+        if (row.state !== 'queued' && row.state !== 'stopped') return { status: 'not_orphan' };
+        const before = { title: row.title, rawRequest: row.rawRequest, state: row.state };
+        await tx
+          .update(tasks)
+          .set({ title: input.title, rawRequest: input.rawRequest, state: 'queued' })
+          .where(eq(tasks.id, input.taskId));
+        return { status: 'prepared' as const, before };
+      });
+    },
+    async restoreOrphanTask(input) {
+      if (!isUuid(input.taskId)) return 'not_found';
+      return db.transaction(async (tx) => {
+        const [row] = await tx
+          .select({ state: tasks.state })
+          .from(tasks)
+          .where(eq(tasks.id, input.taskId))
+          .for('update');
+        if (!row) return 'not_found';
+        if (row.state !== 'queued') return 'not_queued';
+        await tx
+          .update(tasks)
+          .set({ title: input.title, rawRequest: input.rawRequest, state: input.state })
+          .where(eq(tasks.id, input.taskId));
+        return 'restored';
+      });
+    },
     async setAutoDispatch({ repoId, on }, entry) {
       if (!isUuid(repoId)) return 'not_found';
       return db.transaction(async (tx): Promise<AutoDispatchChange | 'not_found'> => {

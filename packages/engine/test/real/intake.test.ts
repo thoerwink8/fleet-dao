@@ -175,6 +175,11 @@ function fakeClient(
     describeFails?: Error;
     /** 工作流编号 → Temporal 状态名。没写的编号当不存在。 */
     statuses?: Record<string, string>;
+    /**
+     * start 返回之前跑（模拟工作流第一步已经把任务行写成 running）。
+     * 起失败时不跑：工作流没起来，不该有第一步。
+     */
+    onStart?: () => Promise<void> | void;
   } = {},
 ) {
   const starts: StartCall[] = [];
@@ -186,6 +191,7 @@ function fakeClient(
         starts.push({ type, options });
         const err = opts.startFails?.(starts.length);
         if (err) throw err;
+        await opts.onStart?.();
         return {};
       },
       getHandle(workflowId: string) {
@@ -401,6 +407,80 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     const adopt = (await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION);
     expect(adopt).toHaveLength(1);
     expect(adopt[0]?.reason).toBe(ORPHAN_TASK_ADOPT_NOTE);
+  });
+
+  it('工作流第一步先把行改成 running：标题和原话已经是当前这一代，接手成功只记一条', async () => {
+    const { repo } = await seedWorld(t.db);
+    const old = await seedOrphan(repo.id, { state: 'stopped' });
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient({
+      onStart: async () => {
+        const saved = await saveTaskSnapshot(t.db, {
+          taskId: old.id,
+          state: 'running',
+          phase: '收单',
+          doing: '正在读单',
+          lastProblem: null,
+          subtasks: [],
+        });
+        if (saved !== 'saved') throw new Error('工作流快照没写上');
+      },
+    });
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(starts).toHaveLength(1);
+    const rows = await t.db.select().from(tasks);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: old.id,
+      title: '给驾驶舱加状态',
+      rawRequest: BODY,
+      state: 'running',
+      phase: '收单',
+      doing: '正在读单',
+      lastProblem: null,
+      requestedBy: 'old-founder',
+      priority: 7,
+      specDir: 'specs/405-fleet-api-socket-activation部署',
+      docs: { requirement: 'specs/405/需求.md' },
+      acceptance: ['页面上能看到状态'],
+    });
+    expect(rows[0]?.createdAt.toISOString()).toBe(OLD.toISOString());
+    const changes = (await t.db.select().from(stateChanges)).slice().sort((a, b) => a.id - b.id);
+    expect(changes.map((c) => [c.fromState, c.toState])).toEqual([
+      [null, 'stopped'],
+      ['stopped', 'queued'],
+      ['queued', 'running'],
+    ]);
+    const adopt = (await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION);
+    expect(adopt).toHaveLength(1);
+    expect(adopt[0]).toMatchObject({ ok: true, reason: ORPHAN_TASK_ADOPT_NOTE });
+  });
+
+  it('老行还没起成工作流：标题和状态放回去，不记接手成功', async () => {
+    const { repo } = await seedWorld(t.db);
+    const old = await seedOrphan(repo.id, { state: 'stopped' });
+    const { client, starts } = fakeClient({ startFails: () => new Error('14 UNAVAILABLE') });
+    const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('UNAVAILABLE');
+    expect(starts).toHaveLength(1);
+    const rows = await t.db.select().from(tasks);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: old.id,
+      title: 'Fusion 留下的标题',
+      rawRequest: 'Fusion 留下的原话',
+      state: 'stopped',
+      phase: '分诊',
+      doing: '等着',
+      lastProblem: '上次卡在部署',
+      requestedBy: 'old-founder',
+      priority: 7,
+    });
+    expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
+      [],
+    );
   });
 
   it('有一代在跑：不接手、不起，标题不动', async () => {

@@ -1560,6 +1560,78 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         );
       });
 
+      it('起工作流之前改老行：不记操作记录；已叫停的改回排队，放回去后标题和状态还原', async () => {
+        await store.createTaskFromIssue(issueTask(), created());
+        await store.stopQueuedTask(NEW_TASK, audit({ action: 'task.stop', target: `task:${NEW_TASK}` }));
+        const ready = await store.prepareOrphanTask({
+          taskId: NEW_TASK,
+          title: '当前这一代',
+          rawRequest: '新原话',
+        });
+        expect(ready).toEqual({
+          status: 'prepared',
+          before: { title: '新需求', rawRequest: '原话', state: 'stopped' },
+        });
+        expect(await store.getTask(NEW_TASK)).toMatchObject({
+          title: '当前这一代',
+          rawRequest: '新原话',
+          state: 'queued',
+          requestedBy: IDS.founderA,
+        });
+        expect(
+          (await store.listAudit({ target: `task:${NEW_TASK}`, limit: 10 })).items.filter(
+            (a) => a.action === 'task.adopt',
+          ),
+        ).toEqual([]);
+        expect(
+          await store.restoreOrphanTask({
+            taskId: NEW_TASK,
+            title: '新需求',
+            rawRequest: '原话',
+            state: 'stopped',
+          }),
+        ).toBe('restored');
+        expect(await store.getTask(NEW_TASK)).toMatchObject({
+          title: '新需求',
+          rawRequest: '原话',
+          state: 'stopped',
+          requestedBy: IDS.founderA,
+        });
+      });
+
+      it('已经在跑的不预先改、也不放回去：一行不改', async () => {
+        expect(
+          await store.prepareOrphanTask({ taskId: IDS.task12, title: '不该改', rawRequest: '不该改' }),
+        ).toEqual({ status: 'not_orphan' });
+        expect(
+          await store.restoreOrphanTask({
+            taskId: IDS.task12,
+            title: '不该改',
+            rawRequest: '不该改',
+            state: 'queued',
+          }),
+        ).toBe('not_queued');
+        expect(await store.getTask(IDS.task12)).toMatchObject({
+          title: '登录页加验证码',
+          state: 'running',
+        });
+      });
+
+      it('预先改、放回去时没有这条或编号看不懂：not_found', async () => {
+        expect(await store.prepareOrphanTask({ taskId: OTHER_UUID, title: 'x', rawRequest: 'y' })).toEqual({
+          status: 'not_found',
+        });
+        expect(await store.prepareOrphanTask({ taskId: 'nope', title: 'x', rawRequest: 'y' })).toEqual({
+          status: 'not_found',
+        });
+        expect(
+          await store.restoreOrphanTask({ taskId: OTHER_UUID, title: 'x', rawRequest: 'y', state: 'queued' }),
+        ).toBe('not_found');
+        expect(
+          await store.restoreOrphanTask({ taskId: 'nope', title: 'x', rawRequest: 'y', state: 'queued' }),
+        ).toBe('not_found');
+      });
+
       it('接手时操作记录写不进：标题也不改', async () => {
         await store.createTaskFromIssue(issueTask(), created());
         await expect(

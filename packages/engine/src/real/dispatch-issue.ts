@@ -4,7 +4,7 @@
 //
 // 改这里之前必须知道：
 // - 起工作流还是 real/intake.ts 的 start（先建任务行，再用定死的编号起，REJECT_DUPLICATE）：已有任务工作流的不会重复派。
-//   没有工作流的 queued / stopped 老行由 start 接手，不另建一行。
+//   没有工作流的 queued / stopped 老行由 start 在起工作流之前接手，起成才记操作记录，不另建一行。
 // - 失败几条：顺着第 1、2、3… 代问 Temporal，第一个不存在就停；已经结束又不是 COMPLETED 的算一次失败；
 //   在跑的、问不清的（连不上、认不出状态）抛错，不当成 0。
 // - 操作记录经 Store.appendAudit 写，记成「引擎」那一类，reason 写明谁（FLEET_OPS_OPERATOR）跑的哪条命令。
