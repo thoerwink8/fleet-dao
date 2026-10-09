@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
@@ -14,6 +13,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type MigrationOptions, migrate } from '../src/migrate.ts';
+import { runChildOk } from './child.ts';
 
 const mini =
   'package main\nimport("encoding/json";"os";"runtime")\nvar sourceHash string\nfunc main(){if len(os.Args)>1&&os.Args[1]=="--fleet-doctor"{json.NewEncoder(os.Stdout).Encode(map[string]any{"status":"ready"});return};json.NewEncoder(os.Stdout).Encode(map[string]any{"name":"fleet-mirasim-reclaude","schema":1,"version":"2.0.0","sourceHash":sourceHash,"sourceCommit":"fixture","platform":runtime.GOOS,"arch":runtime.GOARCH})}\n';
@@ -36,9 +36,9 @@ beforeAll(() => {
   writeFileSync(join(dir, 'go.mod'), moduleText);
   writeFileSync(join(dir, 'main.go'), mini);
   nativeBinary = join(dir, process.platform === 'win32' ? 'fixture.exe' : 'fixture');
-  execFileSync('go', ['build', '-o', nativeBinary, '-ldflags', `-X main.sourceHash=${wantedHash}`, '.'], {
+  runChildOk('go', ['build', '-o', nativeBinary, '-ldflags', `-X main.sourceHash=${wantedHash}`, '.'], {
     cwd: dir,
-    timeout: 60_000,
+    limitMs: 60_000,
   });
 }, 70_000);
 afterAll(() => {
