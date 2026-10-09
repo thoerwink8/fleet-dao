@@ -13,6 +13,7 @@
     "hooks/pretool.mjs",
     "hooks/vendor-pretool.mjs",
     "hooks/pretool-codex.mjs",
+    "hooks/pretool-gemini.mjs",
     "hooks/founder-inbox.mjs",
     "hooks/fresh-main.mjs",
     "hooks/git-run.mjs",

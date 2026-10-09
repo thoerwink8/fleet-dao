@@ -33,10 +33,33 @@ const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !
  * Windows：家目录路径没有 shell 元字符时，改成 ~/.fleet-dao/bin/quiet-<脚本名>.exe 这一个路径、不加引号。
  * Grok 对这种路径直接 CreateProcess，不再套 cmd（套 cmd 就会闪黑窗口）。有元字符时退回 node 加引号。
  */
-export function hookCommand(home: string, platform: Platform, script: string): string {
+export function hookCommand(home: string, platform: Platform, script: string, nodeOnWindows = false): string {
   const nodeCmd = `node "${join(home, placeOn(HOOKS_DIR, platform), script).replaceAll('\\', '/')}"`;
-  if (platform !== 'win32') return nodeCmd;
+  if (platform !== 'win32' || nodeOnWindows) return nodeCmd;
   return bareQuietCommand(home, script) ?? nodeCmd;
+}
+
+/** 这个目标里登记的命令（targets.ts 的 nodeOnWindows：那家在 Windows 上用 PowerShell 跑钩子，不用启动器） */
+export function commandIn(t: HookTarget, home: string, platform: Platform, script: string): string {
+  return hookCommand(home, platform, script, t.nodeOnWindows === true);
+}
+
+/**
+ * 这家自己的开关把本脚本的钩子关了：返回为什么，没关返回 null。不是本脚本关的，不替人打开，报出来要人看。
+ * - claude：顶层 disableAllHooks。
+ * - gemini：hooksConfig.enabled 是 false（全关），或 hooksConfig.disabled 里列了本脚本的命令（那几条不跑；
+ *   Gemini CLI 按名字认，没起名字的钩子名字就是命令）。
+ */
+function switchedOff(root: Obj, t: HookTarget, home: string, platform: Platform): string | null {
+  if (t.format === 'claude')
+    return root.disableAllHooks === true ? 'disableAllHooks 开着、钩子一条都不跑' : null;
+  if (t.format !== 'gemini') return null;
+  const cfg = isObj(root.hooksConfig) ? root.hooksConfig : {};
+  if (cfg.enabled === false) return 'hooksConfig.enabled 是 false、钩子一条都不跑';
+  const ours = new Set(t.hooks.map((h) => commandIn(t, home, platform, h.script)));
+  const disabled: unknown[] = Array.isArray(cfg.disabled) ? cfg.disabled : [];
+  const listed = disabled.filter((x) => typeof x === 'string' && ours.has(x));
+  return listed.length ? `hooksConfig.disabled 里列了本脚本的 ${listed.length} 条、那几条不跑` : null;
 }
 
 /** 这条命令是不是本脚本管的：返回它跑的脚本名、是不是以前手装的那份；不是就返回 null */
@@ -90,18 +113,19 @@ interface Judged {
   /** 一条都没登记的事件（脚本名） */
   missing: string[];
   problems: string[];
+  /** 这家自己的开关把钩子关了（switchedOff） */
+  off: string | null;
   others: number;
   legacy: number;
 }
 
 function judge(root: unknown, t: HookTarget, home: string, platform: Platform): Judged {
-  const out: Judged = { missing: [], problems: [], others: 0, legacy: 0 };
+  const out: Judged = { missing: [], problems: [], off: null, others: 0, legacy: 0 };
   if (!isObj(root)) {
     out.problems.push('整份不是一个 JSON 对象');
     return out;
   }
-  if (t.format === 'claude' && root.disableAllHooks === true)
-    out.problems.push('disableAllHooks 开着：钩子一条都不跑');
+  out.off = switchedOff(root, t, home, platform);
   if (root.hooks === undefined) {
     out.missing.push(...t.hooks.map(specName));
     return out;
@@ -131,7 +155,7 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
     const f = mine[0] as Found;
     const wrong: string[] = [];
     if (f.handler.type !== 'command') wrong.push('type 不是 command');
-    if (f.handler.command !== hookCommand(home, platform, spec.script)) wrong.push('命令和本机该有的不一样');
+    if (f.handler.command !== commandIn(t, home, platform, spec.script)) wrong.push('命令和本机该有的不一样');
     if (f.handler.timeout !== spec.timeout)
       wrong.push(`timeout 是 ${String(f.handler.timeout)}，应是 ${spec.timeout}`);
     if (wrong.length) out.problems.push(`${spec.script}（${specName(spec)}）：${wrong.join('、')}`);
@@ -224,9 +248,11 @@ const QUIET_NODE = 'quiet-node.exe';
 function launcherScripts(ctx: Ctx, targets: HookTarget[]): string[] {
   return [
     ...new Set(
-      targets
-        .flatMap((t) => t.hooks.map((h) => h.script))
-        .filter((script) => hookCommand(ctx.home, ctx.platform, script).endsWith('.exe')),
+      targets.flatMap((t) =>
+        t.hooks
+          .map((h) => h.script)
+          .filter((script) => commandIn(t, ctx.home, ctx.platform, script).endsWith('.exe')),
+      ),
     ),
   ];
 }
@@ -326,7 +352,8 @@ function checkSettings(ctx: Ctx, t: HookTarget): Line {
   if (read.kind === 'none') return line('missing', key, `缺失——没有这个文件，${describe(t)} 钩子没装${who}`);
   if (read.kind === 'bad') return line('drift', key, `漂移——${read.why}，钩子等于没装`);
   const j = judge(read.root, t, ctx.home, ctx.platform);
-  if (j.problems.length) return line('drift', key, `漂移——${j.problems.join('；')}`);
+  const problems = [...(j.off ? [`${j.off}（不是本脚本关的，没动它）`] : []), ...j.problems];
+  if (problems.length) return line('drift', key, `漂移——${problems.join('；')}`);
   if (j.missing.length) return line('missing', key, `缺失——没登记 ${j.missing.join('、')}，钩子没装${who}`);
   return line('ok', key, `${describe(t)} 都登记了，别的 ${j.others} 条钩子不归本脚本管${who}`);
 }
@@ -372,7 +399,7 @@ function codexTrust(ctx: Ctx, t: HookTarget, backups: Backups | null): Line {
     );
   const root = read.kind === 'ok' ? read.root : {};
   const { needs, absent } = trustNeeds(abs, root, t.hooks, (script) =>
-    hookCommand(ctx.home, ctx.platform, script),
+    commandIn(t, ctx.home, ctx.platform, script),
   );
   if (!backups) return checkCodexTrust(ctx, needs, absent);
   if (absent.length) return line('failed', trustKey(ctx), `没动——${absent.join('、')} 没登记上，不记信任`);
@@ -422,7 +449,7 @@ function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj
   }
   for (const spec of t.hooks) {
     const list = Array.isArray(hooks[spec.event]) ? (hooks[spec.event] as unknown[]) : [];
-    list.push(group(spec, hookCommand(home, platform, spec.script)));
+    list.push(group(spec, commandIn(t, home, platform, spec.script)));
     hooks[spec.event] = list;
   }
   next.hooks = hooks;
@@ -447,15 +474,10 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
     if (root.hooks !== undefined && !isObj(root.hooks))
       return line('failed', key, '没动——hooks 不是对象；要人看');
     const before = judge(root, t, ctx.home, ctx.platform);
-    const disabled = t.format === 'claude' && root.disableAllHooks === true;
-    const fine = before.missing.length === 0 && before.problems.every((p) => p.startsWith('disableAllHooks'));
+    const off = before.off;
+    const fine = before.missing.length === 0 && before.problems.length === 0;
     if (fine) {
-      if (disabled)
-        return line(
-          'failed',
-          key,
-          '钩子登记着，可 disableAllHooks 开着、一条都不跑（不是本脚本开的，没动它）；要人看',
-        );
+      if (off) return line('failed', key, `钩子登记着，可${off}（不是本脚本关的，没动它）；要人看`);
       return line('ok', key, `${describe(t)} 都登记了，别的 ${before.others} 条钩子不归本脚本管${who}`);
     }
     const next = merged(root, t, ctx.home, ctx.platform);
@@ -472,12 +494,7 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
       ...(saved ? [`原文件备份在 ${saved}`] : []),
     ];
     const done = `${parts.join('，')}${who}`;
-    if (disabled)
-      return line(
-        'failed',
-        key,
-        `${done}；可 disableAllHooks 开着、一条都不跑（不是本脚本开的，没动它），要人看`,
-      );
+    if (off) return line('failed', key, `${done}；可${off}（不是本脚本关的，没动它），要人看`);
     return line('changed', key, done);
   } catch (err) {
     return line('failed', key, `没做成——${code(err)}`);
