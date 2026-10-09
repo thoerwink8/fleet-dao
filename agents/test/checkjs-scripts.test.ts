@@ -19,6 +19,8 @@ const CHECKED = [
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'hooks/pretool.mjs',
+  'hooks/vendor-pretool.mjs',
+  'hooks/pretool-codex.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
   'hooks/unattended.mjs',

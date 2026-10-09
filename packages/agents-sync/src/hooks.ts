@@ -1,4 +1,5 @@
-// 钩子：agents/hooks/ 下的脚本整份拷进 ~/.fleet-dao/hooks/，再在各家的设置文件里登记（targets.ts 的 HOOK_TARGETS）。
+// 钩子：agents/hooks/ 下的脚本整份拷进 ~/.fleet-dao/hooks/，再在各家的设置文件里登记（targets.ts 的 HOOK_TARGETS，写法见 HookFormat）。
+// Codex 的钩子还要信任了才跑：登记完替本脚本那几条记上信任（hooks-codex.ts）。
 // 设置文件里只动本脚本管的那几条：命令指向 ~/.fleet-dao/hooks/ 下的脚本，或者以前手装在 fleet-guard 目录的两条（接管时换掉）。
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
 // 替别的用户写（--user，法国装机）时开会话那条不登记（HookSkip）：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；
@@ -6,6 +7,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
+import { applyCodexTrust, checkCodexTrust, trustKey, trustNeeds } from './hooks-codex.ts';
 import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName, replaceExe } from './quiet-win.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, lstatOrNull, relOf, type Sources, writeAtomic } from './sync.ts';
@@ -98,7 +100,8 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
     out.problems.push('整份不是一个 JSON 对象');
     return out;
   }
-  if (root.disableAllHooks === true) out.problems.push('disableAllHooks 开着：钩子一条都不跑');
+  if (t.format === 'claude' && root.disableAllHooks === true)
+    out.problems.push('disableAllHooks 开着：钩子一条都不跑');
   if (root.hooks === undefined) {
     out.missing.push(...t.hooks.map(specName));
     return out;
@@ -337,9 +340,43 @@ export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
     out.push(checkScripts(ctx, src));
     const launchers = checkLaunchers(ctx, targets);
     if (launchers) out.push(launchers);
-    for (const t of targets) out.push(checkSettings(ctx, t));
+    for (const t of targets) {
+      out.push(checkSettings(ctx, t));
+      if (t.format === 'codex') out.push(codexTrust(ctx, t, null));
+    }
   }
   return [...out, ...skipLines(skip), ...gapLines(ctx)];
+}
+
+/**
+ * Codex 的信任（hooks-codex.ts）：按 hooks.json 现在的内容算本脚本那几条的键和哈希，再查或记。
+ * hooks.json 读不懂：查报没查成、写报没做成（设置那一行已经说了为什么）。
+ */
+function codexTrust(ctx: Ctx, t: HookTarget, backups: Backups | null): Line {
+  const { abs } = relOf(ctx, t.settings);
+  let read: Read;
+  try {
+    read = readSettings(abs);
+  } catch (err) {
+    return line(
+      backups ? 'failed' : 'unknown',
+      trustKey(ctx),
+      `${backups ? '没做成' : '没查成'}——hooks.json 读不了（${code(err)}）`,
+    );
+  }
+  if (read.kind === 'bad')
+    return line(
+      backups ? 'failed' : 'unknown',
+      trustKey(ctx),
+      `${backups ? '没动' : '没查成'}——hooks.json ${read.why}`,
+    );
+  const root = read.kind === 'ok' ? read.root : {};
+  const { needs, absent } = trustNeeds(abs, root, t.hooks, (script) =>
+    hookCommand(ctx.home, ctx.platform, script),
+  );
+  if (!backups) return checkCodexTrust(ctx, needs, absent);
+  if (absent.length) return line('failed', trustKey(ctx), `没动——${absent.join('、')} 没登记上，不记信任`);
+  return applyCodexTrust(ctx, needs, backups);
 }
 
 function applyScripts(ctx: Ctx, src: Sources): Line {
@@ -410,7 +447,7 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
     if (root.hooks !== undefined && !isObj(root.hooks))
       return line('failed', key, '没动——hooks 不是对象；要人看');
     const before = judge(root, t, ctx.home, ctx.platform);
-    const disabled = root.disableAllHooks === true;
+    const disabled = t.format === 'claude' && root.disableAllHooks === true;
     const fine = before.missing.length === 0 && before.problems.every((p) => p.startsWith('disableAllHooks'));
     if (fine) {
       if (disabled)
@@ -474,7 +511,14 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
       );
       continue;
     }
-    out.push(applySettings(ctx, t, backups));
+    const settings = applySettings(ctx, t, backups);
+    out.push(settings);
+    if (t.format === 'codex')
+      out.push(
+        settings.kind === 'failed'
+          ? line('failed', trustKey(ctx), '没动——钩子没登记上，不记信任')
+          : codexTrust(ctx, t, backups),
+      );
   }
   return [...out, ...skipLines(skip), ...gapLines(ctx)];
 }
