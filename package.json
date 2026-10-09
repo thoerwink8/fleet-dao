@@ -18,6 +18,7 @@
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
+    "flow:stats": "node packages/conventions/src/bin/flow-stats.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
     "intents": "node packages/conventions/src/bin/intents.ts",
     "progress:note": "node packages/conventions/src/bin/progress.ts note",

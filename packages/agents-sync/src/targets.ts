@@ -144,9 +144,19 @@ export interface HookSpec {
   timeout: number;
 }
 
+/**
+ * 钩子设置文件的写法：
+ * - claude：JSON，hooks 下按事件名各一个数组，每项 { matcher?, hooks: [{ type: 'command', command, timeout }] }；
+ *   顶层 disableAllHooks 开着就一条都不跑。
+ * - codex：和 claude 同一个写法（~/.codex/hooks.json 顶层只许 description、hooks 两个键）；每条非托管的钩子要信任了才跑，
+ *   信任记在 ~/.codex/config.toml（hooks-codex.ts）。
+ */
+export type HookFormat = 'claude' | 'codex';
+
 export interface HookTarget {
   /** 登记钩子的设置文件（JSON，钩子在它的 hooks 里） */
   settings: Place;
+  format: HookFormat;
   /** 读这份的各家；只要装了其中一家就写 */
   readers: readonly AgentId[];
   /** readers 里借道读这份的 */
@@ -176,10 +186,19 @@ export interface HookTarget {
  * pretool.mjs 见到这几个名字记完就放行（decide 不认识它们的名字，不放行会被拦）。
  * mcp__mirasim__deliver_artifact、PushNotification 同理：decide 不认识这两个名字，不放行会被拦，所以登记上、见到就放行（pretool.mjs 的 DELIVERY_TOOLS，两边一起改）。决定 0027 起不再为它们记账。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠这条放行。
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
+ *
+ * 各家自己的钩子（#232；拦命令、开会话同步两条，别的不装）。调工具前那条各家跑自己的入口 pretool-<家>.mjs：
+ * 先把那家的输入翻成 Claude 的写法，再交给 pretool.mjs 同一份判断（agents/hooks/vendor-pretool.mjs）。
+ * - Codex：~/.codex/hooks.json，写法和 Claude 一样（learn.chatgpt.com/docs/hooks）。跑命令的工具一律叫 Bash，
+ *   Codex 没有单独读文件、搜内容的工具，都走终端；matcher 是正则，锚定成 ^Bash$。开会话那条的输出
+ *   （hookSpecificOutput.additionalContext）进会话上下文；timeout 按秒算。每条非托管的钩子要信任了才跑：
+ *   信任记在 ~/.codex/config.toml 的 [hooks.state."<hooks.json 路径>:<事件>:<组>:<条>"] trusted_hash 里，
+ *   同步替本脚本登记的这几条记上（和在 Codex 里 /hooks 点信任一样），见 hooks-codex.ts。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
     settings: { win32: '.claude\\settings.json', linux: '.claude/settings.json' },
+    format: 'claude',
     readers: ['claude', 'grok', 'devin'],
     borrowed: ['grok', 'devin'],
     hooks: [
@@ -199,7 +218,19 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
       { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30000 },
     ],
   },
+  {
+    settings: { win32: '.codex\\hooks.json', linux: '.codex/hooks.json' },
+    format: 'codex',
+    readers: ['codex'],
+    hooks: [
+      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
+      { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
+    ],
+  },
 ];
+
+/** Codex 记钩子信任的地方：~/.codex/config.toml 的 [hooks.state."…"]（hooks-codex.ts） */
+export const CODEX_CONFIG: Place = { win32: '.codex\\config.toml', linux: '.codex/config.toml' };
 
 /**
  * 权限装到哪：Claude Code 的用户级权限在 ~/.claude/settings.json 的 permissions 里（code.claude.com/docs/en/permissions），
@@ -250,9 +281,8 @@ export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
 };
 
 /**
- * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232。2026-09-26 查的各家文档和本机装的版本：
- * - Codex：~/.codex/hooks.json 和 Claude 同一个格式，可每条非托管的钩子都要人在 Codex 里 /hooks 审过、信任了才跑
- *   （learn.chatgpt.com/docs/hooks）。
+ * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232（接上的从这里删掉，写进上面的 HOOK_TARGETS）。
+ * 2026-09-26 查的各家文档和本机装的版本：
  * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（TOML，事件名和 Claude 一样）。
  * - Antigravity：~/.gemini/config/hooks.json，没有开会话事件，调工具前的输入输出是另一套 JSON（antigravity.google/docs/hooks）。
  * - Gemini CLI：~/.gemini/settings.json 的 hooks，调工具前叫 BeforeTool、终端工具叫 run_shell_command（gemini-cli docs/hooks）。
@@ -260,7 +290,6 @@ export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
  * - dsh：没有自带的全局钩子，只有要手动挂的桥接插件（deepseek-harness packages/hooks）。
  */
 export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
-  codex: '它有钩子（~/.codex/hooks.json），可每条都要人在 Codex 里用 /hooks 审过、信任了才跑，本脚本还没接',
   kimi: '它有钩子（~/.kimi-code/config.toml 的 [[hooks]]，TOML），本脚本还没接',
   agy: '它的钩子是另一套（~/.gemini/config/hooks.json：没有开会话事件，调工具前的输入输出是另一种 JSON），本脚本还没接',
   gemini:
