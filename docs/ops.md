@@ -621,6 +621,14 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
   ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api groom thoerwink8/fleet-dao --note "老单堆了，先整理一遍"'
   ```
   只是排队：记一条操作记录 `groom.request`（target `groom`），法国引擎每 5 秒看一眼，接手记 `groom.start`、整理完记 `groom.done`（开了哪几张、补了哪几张、判了哪几张、用的模型和用量）并推一条总结通知；整理失败（选不到路由、模型起不来、超时、回答里没有清单、GitHub 写不进）记 `groom.done` ok=false 并推一条 alert，不当成没事。命令的本体在引擎包（`packages/engine/src/bin/groom.ts`，逻辑在 `jobs/groom-command.ts`，和 `dispatch-issue` 同样由 `bin/fleet-api` 转过去、换成 fleet 身份带 `api.env`，只连库）。拒绝都明说原因、退出码 1：引擎总开关关着（关着的引擎不起会话）、已经有一次在排队或在做（同一时刻只一个，不分仓）、这个仓滚动 24 小时已整理 3 次；退出码 2 是参数不对。要看结果：驾驶舱，或 `sudo -u fleet psql fleet -c "select at, action, ok, error, after from audit_log where target = 'groom' order by at desc limit 10"`。会话用的模型在路由页「整理待办」一行配（默认 Sonnet 5.5、Opus 5.5 在前，永不用 Fable）。
+- **续、放弃、重做一张单**（`fleet-api task`，#1402）：任务停下后，本机或法国的指挥官在命令行做，不用再靠仓外脚本直接打 Temporal。驾驶舱上的「继续」「叫停」「重做」按钮还在。
+
+  ```
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task continue thoerwink8/fleet-dao 1402 --note "卡在检查点，接着做"'
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task abandon thoerwink8/fleet-dao 1402 --note "这张不做了"'
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task redo thoerwink8/fleet-dao 1402 --note "叫停之后重来"'
+  ```
+  `continue` 发 `taskContinue`（和驾驶舱「继续」同一个信号），`abandon` 发 `taskAbandon`（和「叫停」同一个，`--note` 就是原因）。`redo` 走后端现成的 `taskRedo.redo`（`packages/api/src/temporal.ts`），只在库里这张单是已叫停或挂起时另起一代；做完、失败、还在跑的拒绝并说现在是什么状态。`--note` 必填。每条写一条操作记录（`task.continue` / `task.abandon` / `task.redo`，target `issue:<owner/仓>#<号>`，after 里有谁、哪张单、note、结果）。找不到这张单或任务工作流已经不在：退出码 1，标准输出不打成功。退出码：0 做成了；1 没做成；2 参数不对。`dispatch-issue` 碰到已派过，提示改跑这条 `redo`（驾驶舱按钮同样能点）。
 - 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
 
   ```
