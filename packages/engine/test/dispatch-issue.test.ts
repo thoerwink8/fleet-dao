@@ -1,7 +1,8 @@
 // 点名派单（jobs/dispatch-issue.ts，#1337）：过准入的被派并留操作记录；每一道没过的都打印原因、退出码非 0、不起工作流；
-// --force 只放行就绪度那几道，硬闸（作者白名单、母单子单、本机做、已有 PR、碰 workflows、已派过）怎么都不放行；
-// 总开关关着拒绝；已派过的不重复派。故意造出失败的一条（force 也过不了白名单）放最后。
+// --force 只放行就绪度那几道，硬闸（作者白名单、母单子单、本机做、已有 PR、碰 workflows、已派过、工作流没查成）怎么都不放行；
+// 总开关关着拒绝；已派过的不重复派。没有工作流的排队或已叫停老行接手再派。故意造出失败的一条（查 Temporal 失败按不确定拒绝）放最后。
 
+import type { TaskState } from '@fleet-dao/shared';
 import { githubWhitelist } from '@fleet-dao/store';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
@@ -15,6 +16,7 @@ import {
   parseDispatchIssueArgs,
   runDispatchIssue,
 } from '../src/jobs/dispatch-issue.ts';
+import type { TaskGenerationFacts } from '../src/jobs/dispatch-standing.ts';
 import type { IntakeIssue, IntakePlan, IntakeRepo } from '../src/jobs/intake.ts';
 import { failedGenerations } from '../src/real/dispatch-issue.ts';
 
@@ -88,7 +90,12 @@ interface Over {
   plan?: IntakePlan | (() => IntakePlan);
   issue?: IntakeIssue | null;
   repo?: IntakeRepo | null;
+  /** 旧测试的简写：有一条在跑的任务工作流。 */
   dispatched?: boolean;
+  taskRow?: { id: string; state: TaskState } | null;
+  generations?: TaskGenerationFacts;
+  /** 问 Temporal 时抛这个。测「不确定」，不当成没有工作流。 */
+  generationsError?: Error;
   claims?: Map<number, number>;
   failed?: number;
   startResult?: 'started' | 'already_exists';
@@ -109,7 +116,17 @@ function world(over: Over = {}): World {
       return typeof p === 'function' ? p() : p;
     },
     listIssue: async () => (over.issue === undefined ? issue() : over.issue),
-    dispatched: async () => over.dispatched ?? false,
+    issueTask: async () => {
+      if (over.taskRow !== undefined) return over.taskRow;
+      if (over.dispatched) return { id: 't-old', state: 'running' };
+      return null;
+    },
+    taskGenerations: async () => {
+      if (over.generationsError) throw over.generationsError;
+      if (over.generations) return over.generations;
+      if (over.dispatched) return { ok: true, lives: ['running'] };
+      return { ok: true, lives: [] };
+    },
     openPrClaims: async () => over.claims ?? new Map(),
     readSpecDoc: async () => null,
     failedAttempts: async () => over.failed ?? 0,
@@ -460,11 +477,94 @@ describe('failedGenerations：顺着代数问 Temporal 数失败了几条', () =
   });
 });
 
-describe('故意造出失败：force 也过不了作者白名单（放最后）', () => {
+describe('没有任务工作流的老行：不算已派出，接手再派', () => {
+  it.each(['queued', 'stopped'] as const)('%s：照常派，操作记录写明接手，force 用不上', async (state) => {
+    const w = world({
+      taskRow: { id: 'old-row', state },
+      generations: { ok: true, lives: [] },
+    });
+    const r = await dispatchIssue(w.deps, ARGS);
+    expect(r).toMatchObject({ outcome: 'started', adopted: true });
+    expect(w.started).toHaveLength(1);
+    expect(w.audits[0]).toMatchObject({ ok: true });
+    expect(w.audits[0]?.result).toContain('接手无工作流的老任务行');
+  });
+
+  it('有一代在跑：仍拒绝，指向 redo，force 也不放行', async () => {
+    const w = world({
+      taskRow: { id: 'old-row', state: 'queued' },
+      generations: { ok: true, lives: ['running'] },
+    });
+    const r = await dispatchIssue(w.deps, FORCE);
+    expect(r).toMatchObject({
+      outcome: 'refused',
+      failures: [{ reason: 'already_dispatched', forceable: false }],
+    });
+    if (r.outcome !== 'refused') throw new Error('上面已经断言是拒绝');
+    expect(r.failures[0]?.why).toContain('fleet-api task redo');
+    expect(w.started).toHaveLength(0);
+  });
+
+  it('已做完的一代：仍拒绝，指向 redo', async () => {
+    const w = world({
+      taskRow: { id: 'old-row', state: 'done' },
+      generations: { ok: true, lives: ['terminated'] },
+    });
+    const r = await dispatchIssue(w.deps, ARGS);
+    expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'already_dispatched' }] });
+    if (r.outcome !== 'refused') throw new Error('上面已经断言是拒绝');
+    expect(r.failures[0]?.why).toContain('fleet-api task redo');
+    expect(w.started).toHaveLength(0);
+  });
+
+  it('老行没有工作流，也不放宽别的硬闸（作者不在白名单仍拒）', async () => {
+    const w = world({
+      taskRow: { id: 'old-row', state: 'stopped' },
+      generations: { ok: true, lives: [] },
+      issue: issue({ author: { login: 'stranger', id: 99, type: 'User' } }),
+    });
+    const r = await dispatchIssue(w.deps, FORCE);
+    expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'untrusted_author' }] });
+    expect(w.started).toHaveLength(0);
+  });
+
+  it('排队或叫停以外的状态、又没有工作流：仍当已派出，不接手', async () => {
+    const w = world({
+      taskRow: { id: 'old-row', state: 'failed' },
+      generations: { ok: true, lives: [] },
+    });
+    const r = await dispatchIssue(w.deps, FORCE);
+    expect(r).toMatchObject({
+      outcome: 'refused',
+      failures: [{ reason: 'already_dispatched', forceable: false }],
+    });
+    expect(w.started).toHaveLength(0);
+  });
+});
+
+describe('故意造出失败：force 也过不了作者白名单', () => {
   it('陌生人开的单，带 force 和理由也派不出去', async () => {
     const w = world({ issue: issue({ author: { login: 'stranger', id: 99, type: 'User' } }) });
     const r = await dispatchIssue(w.deps, FORCE);
     expect(r.outcome).toBe('refused');
     expect(w.started).toHaveLength(0);
+  });
+});
+
+describe('故意造出失败：查 Temporal 失败按不确定拒绝（放最后）', () => {
+  it('问工作流抛错：拒绝并说明不确定，不当成没有工作流，force 也不派', async () => {
+    const w = world({
+      taskRow: { id: 'old-row', state: 'queued' },
+      generationsError: new Error('UNAVAILABLE'),
+    });
+    const r = await cli(w, ['acme/demo', '12', '--force', '--note', '我就是要派']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('workflow_unknown');
+    expect(r.err).toContain('不确定');
+    expect(r.err).toContain('没有当成没有工作流');
+    expect(r.err).toContain('UNAVAILABLE');
+    expect(r.err).toContain('force 也不放行');
+    expect(w.started).toHaveLength(0);
+    expect(w.audits[0]).toMatchObject({ ok: false });
   });
 });

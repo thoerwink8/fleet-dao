@@ -4,9 +4,11 @@
 //
 // 改这里之前必须知道：
 // - 起工作流的编号定死（taskWorkflowId），一律 REJECT_DUPLICATE（上一条跑完、停下的也不让同名再起）+ 冲突策略 FAIL：
-//   同一张单任何时候最多一条，重开的单不会自己重来。已经用过的回 already_exists，不报错。
+//   同一张单任何时候最多一条。已经用过的回 already_exists，不报错。有一代在跑或已结束的不在这里重来（走重做）。
 // - 任务行在起工作流之前建（按仓加单号唯一，同一事务写操作记录）：工作流第一步就往这一行写状态；起工作流失败了这一行留在
-//   queued，下一轮 dispatched 仍说「没派过」，会再来一遍。
+//   queued，下一轮问 Temporal 仍是没有任何一代，会再来一遍。queued / stopped 且没有任何一代的老行不另建：先改标题和原话、
+//   叫停的改回排队，再起工作流。起成了才记「接手无工作流的老任务行」（这条计进每小时名额）。起不成把行放回去、不记。
+//   不能等工作流起来再改：第一步会把行改成 running，那时再改会认成不是老行，标题和原话留在上一代，却仍记成接手成功。
 // - 在跑的任务数查 Temporal 的可见性（WorkflowType 加 ExecutionStatus），读不到就让这一轮记没跑成：不拿 0 顶。
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
@@ -21,6 +23,8 @@ import {
   recentEndedTasks,
   resolveAlertWithReason,
   startScheduleRun,
+  TASK_ADOPT_AUDIT_ACTION,
+  taskAdoptsSince,
   taskFailureCount,
   taskStateByIssue,
   tasksCreatedSince,
@@ -28,15 +32,18 @@ import {
   writeIntakeBreaker,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
-import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
+import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { CANARY_ISSUE_TITLE_POSIX } from '../jobs/canary.ts';
 import { normalizeCanarySlug } from '../jobs/canary-scope.ts';
+import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
 import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
+import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
 
@@ -141,9 +148,27 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       },
       plan: (repo, issueNumber) =>
         w.gh.readIssuePlan({ repo: { owner: repo.owner, name: repo.name }, issueNumber }),
-      async dispatched(repo, issueNumber) {
-        const task = await taskStateByIssue(w.db, repo.id, issueNumber);
-        return task !== null && task.state !== 'queued';
+      async issueTask(repo, issueNumber) {
+        return taskStateByIssue(w.db, repo.id, issueNumber);
+      },
+      async taskGenerations(repo, issueNumber) {
+        const read = await readTaskGenerations(
+          { owner: repo.owner, name: repo.name },
+          issueNumber,
+          async (workflowId) => {
+            try {
+              const described = await client.connection.withDeadline(Date.now() + startTimeoutMs, () =>
+                client.workflow.getHandle(workflowId).describe(),
+              );
+              return { life: generationLife(described.status.name), record: null };
+            } catch (err) {
+              if (err instanceof WorkflowNotFoundError) return { life: 'missing' };
+              return { life: 'unknown' };
+            }
+          },
+        );
+        if (!read.ok) return { ok: false, why: read.why };
+        return { ok: true, lives: read.generations.map((g) => g.life) };
       },
       async openPrClaims(repo) {
         // openPulls 翻不完、读不到都抛：拉单这张单这一轮不拉，记没查成
@@ -171,7 +196,15 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         return n;
       },
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
-      startedSince: (since) => tasksCreatedSince(w.db, since, hourlyExclude(w.canaryRepo)),
+      async startedSince(since) {
+        // 老行的建出时刻不在这一小时里。接手成功才记 task.adopt，和新建的行加在一起，才是这一小时真正起了几条。
+        const exclude = hourlyExclude(w.canaryRepo);
+        const [created, adopted] = await Promise.all([
+          tasksCreatedSince(w.db, since, exclude),
+          taskAdoptsSince(w.db, since, exclude),
+        ]);
+        return created + adopted;
+      },
       async breaker() {
         const row = await readIntakeBreaker(w.db);
         if (row?.state === 'open') {
@@ -244,6 +277,26 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             after: { repo: slug, issueNumber, title, by: 'engine:intake' },
           },
         );
+        const orphan =
+          !created.created && (created.task.state === 'queued' || created.task.state === 'stopped');
+        // 先改行再起。工作流第一步会把状态写成 running，之后 prepare 会认成不是老行。
+        let prepared: { title: string; rawRequest: string; state: 'queued' | 'stopped' } | null = null;
+        if (orphan) {
+          const ready = await store.prepareOrphanTask({
+            taskId: created.task.id,
+            title,
+            rawRequest: body,
+          });
+          if (ready.status === 'not_found') {
+            throw new Error(`任务 ${created.task.id} 要接手时却找不到这一行`);
+          }
+          if (ready.status === 'prepared') prepared = ready.before;
+          else {
+            log('warn', `拉单：${slug}#${issueNumber} 的任务行已经不是排队或叫停，不改标题，也不记接手成功`, {
+              taskId: created.task.id,
+            });
+          }
+        }
         const input: TaskWorkflowInput = {
           schemaVersion: 1,
           taskId: created.task.id,
@@ -267,11 +320,67 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               workflowIdReusePolicy: 'REJECT_DUPLICATE',
             }),
           );
-          return 'started';
         } catch (error) {
+          // 没起成：把改过的老行放回去，不记接手。下一轮还能再试，也不把这一次算进每小时名额。
+          if (prepared) {
+            const putBack = {
+              taskId: created.task.id,
+              title: prepared.title,
+              rawRequest: prepared.rawRequest,
+              state: prepared.state,
+            };
+            let restored: 'restored' | 'not_queued' | 'not_found';
+            try {
+              restored = await store.restoreOrphanTask(putBack);
+            } catch (restoreErr) {
+              throw new Error(
+                `任务 ${created.task.id} 的工作流没起成（${errMessage(error)}），放回老行也没做成（${errMessage(restoreErr)}）`,
+              );
+            }
+            if (restored === 'not_found') {
+              throw new Error(
+                `任务 ${created.task.id} 的工作流没起成（${errMessage(error)}），放回老行时却找不到这一行`,
+              );
+            }
+            if (restored === 'not_queued') {
+              log('warn', `拉单：${slug}#${issueNumber} 工作流没起成，老行已经不是排队，没有把标题放回去`, {
+                taskId: created.task.id,
+                error: errMessage(error),
+              });
+            }
+          }
           if (error instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
           throw error;
         }
+        if (prepared) {
+          // 行在起工作流之前已经改成当前这一代。这里只补操作记录；状态若已被第一步写成 running，也不再改回去。
+          try {
+            await store.appendAudit({
+              actor: actorFor(member),
+              action: TASK_ADOPT_AUDIT_ACTION,
+              target: `task:${created.task.id}`,
+              via: 'github',
+              ok: true,
+              reason: ORPHAN_TASK_ADOPT_NOTE,
+              before: {
+                state: prepared.state,
+                title: prepared.title,
+                rawRequest: prepared.rawRequest,
+              },
+              after: {
+                state: 'queued',
+                title,
+                rawRequest: body,
+                note: ORPHAN_TASK_ADOPT_NOTE,
+              },
+            });
+          } catch (err) {
+            throw new Error(
+              `任务 ${created.task.id} 的工作流已经起了，接手的操作记录写不进（${errMessage(err)}）`,
+            );
+          }
+        }
+        return 'started';
       },
       async comment({ repo, issueNumber, key, body }) {
         const posted = await w.gh.commentIssue({
