@@ -56,7 +56,7 @@ function endOfQuote(code: string, i: number, quote: string): number {
   return i;
 }
 
-/** 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。 */
+/** 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。相邻插值之间留空格，避免 1 和调用名粘成一个词。 */
 function readTemplate(code: string, i: number): { inner: string; end: number } {
   let inner = '';
   while (i < code.length) {
@@ -68,7 +68,7 @@ function readTemplate(code: string, i: number): { inner: string; end: number } {
     if (c === '`') return { inner, end: i + 1 };
     if (c === '$' && code[i + 1] === '{') {
       const expr = readBalanced(code, i + 1);
-      inner += expr.body;
+      inner += ` ${expr.body} `;
       i = expr.end;
       continue;
     }
@@ -166,6 +166,11 @@ describe('测试里不许同步起子进程', () => {
     expect(scanSyncChildSpawns(sample)).toEqual(['execFileSync']);
     // 块注释紧贴调用：去掉注释要留分隔空白，不能粘成 voidexecFileSync 后对不上词边界。
     expect(scanSyncChildSpawns("void/*说明*/execFileSync('git', []);")).toEqual(['execFileSync']);
+    // 相邻插值直接拼会变成 1execFileSync，词边界没了就扫不到真正的调用。
+    const hole = '$' + '{';
+    expect(scanSyncChildSpawns(`const s = \`${hole}1}${hole}execFileSync('git', [])}\`;`)).toEqual([
+      'execFileSync',
+    ]);
     expect(scanSyncChildSpawns("const e = new Error('spawnSync git ENOENT'); // execSync")).toEqual([]);
   });
 });
