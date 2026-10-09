@@ -6,6 +6,8 @@
 // （#1424，只这一轮，派前探测和人点的立即探测不看）：连着不通按 15、30、60、120、240 分钟退避，封顶 240，探通回到原节奏；
 // 已探通、又不在用途顺序前 2 位的，隔 60 分钟再探（本来更久的不改短）。会话用户挂的组织这会儿定不下来
 // （读数刚变、引擎没切过号，real/session-org.ts）：Claude 订阅池这一轮也不探、结论照旧，这一轮记 partial、写明为什么。
+// 窗口已重置、这一轮没发过探测的组织，用现有探法补发一次最小请求，把下一个窗口开起来（#49）。已探过的不重复发，
+// 也不改写路由结论。派前探测和人点的立即探测不补发。
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
 
@@ -127,6 +129,16 @@ export interface RouteProbeJobDeps {
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
   retryDelayMs?: number;
   concurrency?: number;
+  /**
+   * 读到窗口已重置的组织（quota-read 写进库的，清零时刻已过、windowState 为 reset）。
+   * 不给就不补发：测试和还没接线的进程照旧只探路由。
+   */
+  resetOrgs?: () => Promise<readonly OrgKind[]>;
+  /**
+   * 包住补发的那一次最小请求，让它扣到这个组织上。回 false = 这一次没发。
+   * 不给就直接发（单测里的探法自己计数）。真装配没挂着这个组织时先切过去、发完切回；切不成、有会话在跑就不发。
+   */
+  aroundKick?: (org: OrgKind, send: () => Promise<void>) => Promise<boolean>;
 }
 
 /** 这一轮没跑成（读不到路由、一条都没写进去）：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -483,6 +495,98 @@ async function mapLimit<T, R>(items: readonly T[], n: number, fn: (item: T) => P
   return out;
 }
 
+/** 这一轮真发出过探测的组织。包一层探法记下，不改结论。 */
+function countingProbers(
+  probers: Partial<Record<HostId, Prober>>,
+  sent: Set<OrgKind>,
+): Partial<Record<HostId, Prober>> {
+  const out: Partial<Record<HostId, Prober>> = {};
+  for (const host of Object.keys(probers) as HostId[]) {
+    const probe = probers[host];
+    if (!probe) continue;
+    out[host] = async (target) => {
+      if (target.orgKind) sent.add(target.orgKind);
+      return probe(target);
+    };
+  }
+  return out;
+}
+
+/** 补发用的一条路由：现有探法发得出去的。在用的优先，同档按路由 id，一个组织只取一条。 */
+function kickRoute(
+  targets: readonly ProbeTarget[],
+  org: OrgKind,
+  probers: Partial<Record<HostId, Prober>>,
+  now: Date,
+): ProbeTarget | null {
+  const eligible = targets.filter((t) => {
+    if (t.orgKind !== org) return false;
+    if (t.billing === 'metered') return false;
+    if (t.heldBySwitch !== undefined) return false;
+    if (!probers[t.hostId]) return false;
+    if (!t.channelEnabled) return false;
+    if (t.modelRetiredAt !== null && t.modelRetiredAt.getTime() <= now.getTime()) return false;
+    return true;
+  });
+  eligible.sort((a, b) => {
+    if (a.inUse !== b.inUse) return a.inUse ? -1 : 1;
+    return a.routeId < b.routeId ? -1 : a.routeId > b.routeId ? 1 : 0;
+  });
+  return eligible[0] ?? null;
+}
+
+/**
+ * 窗口已重置、这一轮没发过探测的组织，补发一次最小请求（#49）。已探过的不发。
+ * 不写路由结论：这一发是去开下一个窗口，不是这一轮的在线结论。不重试，只要一次。
+ * 抛了只记日志，不把已经探完的这一轮改成没跑成。派前探测不走这里。
+ */
+async function openResetWindows(
+  deps: RouteProbeJobDeps,
+  targets: readonly ProbeTarget[],
+  sent: ReadonlySet<OrgKind>,
+): Promise<void> {
+  if (!deps.resetOrgs) return;
+  try {
+    const seen = new Set<OrgKind>();
+    for (const org of await deps.resetOrgs()) {
+      if (seen.has(org) || sent.has(org)) {
+        seen.add(org);
+        continue;
+      }
+      seen.add(org);
+      const route = kickRoute(targets, org, deps.probers, deps.now());
+      if (!route) {
+        deps.log('warn', '路由探针：窗口已重置，没有能补发的路由', { org });
+        continue;
+      }
+      const probe = deps.probers[route.hostId];
+      if (!probe) continue;
+      const fire = async () => {
+        const attempt = await attemptOf(probe, route);
+        deps.log(attempt.kind === 'failed' ? 'warn' : 'info', '路由探针：窗口已重置，补发了一次最小请求', {
+          org,
+          routeId: route.routeId,
+          kind: attempt.kind,
+        });
+        if (!deps.afterProbe) return;
+        try {
+          await deps.afterProbe(route, attempt);
+        } catch (err) {
+          deps.log('error', '路由探针：补发之后的整池暂停没写上', { org, error: errMessage(err) });
+        }
+      };
+      if (!deps.aroundKick) {
+        await fire();
+        continue;
+      }
+      const placed = await deps.aroundKick(org, fire);
+      if (!placed) deps.log('info', '路由探针：窗口已重置，这一轮没补发', { org, routeId: route.routeId });
+    }
+  } catch (err) {
+    deps.log('error', '路由探针：窗口重置后的补发没跑成', { error: errMessage(err) });
+  }
+}
+
 async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleResult; online: string[] }> {
   let targets: ProbeTarget[];
   try {
@@ -501,8 +605,10 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   }
   // 切号在探之前：切过去了，这一轮探的就是切过去的组织，探完核对
   const switched = await switchBefore(deps);
-  const conclusions = await mapLimit(targets, deps.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
-    conclude(deps, t, { pace: true }),
+  const sentOrgs = new Set<OrgKind>();
+  const watching: RouteProbeJobDeps = { ...deps, probers: countingProbers(deps.probers, sentOrgs) };
+  const conclusions = await mapLimit(targets, watching.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
+    conclude(watching, t, { pace: true }),
   );
   if (deps.orgSwitch) {
     // 真探了的才算读回（放慢没真探、组织定不下来没探的，结论照旧，都不算）
@@ -571,6 +677,8 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     if (c.state === 'ok') online.push(c.target.routeId);
     else offline += 1;
   }
+  // 结论先落库，再补发：补发不改这一轮的在线结论，失败也不把这一轮改成没跑成
+  await openResetWindows(deps, targets, sentOrgs);
   const goneNote = gone.length > 0 ? `；探的时候被删掉的路由：${gone.join('、')}` : '';
   if (written === 0 && (kept + backingOff + unsettled.length === 0 || unsaved.length > 0)) {
     return {
