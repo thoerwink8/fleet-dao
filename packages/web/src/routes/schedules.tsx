@@ -39,26 +39,31 @@ export default function Schedules() {
       title="定时任务"
       description="额度读取、巡检、对账、备份……每个都记下上次跑成的时间。「查了 0 个问题」和「这次没查成」分开显示。"
     >
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="定时任务" value={count(jobs.length)} icon={CalendarClock} />
+      <div className="mb-4 grid grid-cols-2 items-stretch gap-3 md:grid-cols-4">
+        <Stat className="h-full min-w-0" label="定时任务" value={count(jobs.length)} icon={CalendarClock} />
         <Stat
+          className="h-full min-w-0"
           label="上次失败"
           value={count(failed)}
           icon={CircleX}
           accent={failed ? 'text-ink-fail' : undefined}
         />
         <Stat
+          className="h-full min-w-0"
           label="上次没查全"
           value={count(unscanned)}
           icon={ScanSearch}
           hint="跑了，但一个都没扫到，或有一部分没查成"
+          wrapHint
           accent={unscanned ? 'text-ink-stall' : undefined}
         />
         <Stat
+          className="h-full min-w-0"
           label="过期"
           value={count(notFresh)}
           icon={TimerOff}
           hint="超过期望间隔没跑成，或从没跑成过"
+          wrapHint
           accent={notFresh ? 'text-ink-stall' : undefined}
         />
       </div>

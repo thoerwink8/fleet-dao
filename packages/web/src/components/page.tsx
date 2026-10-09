@@ -82,6 +82,8 @@ export function Stat({
   icon: Icon,
   to,
   accent,
+  className,
+  wrapHint,
 }: {
   label: string;
   value: ReactNode;
@@ -90,6 +92,9 @@ export function Stat({
   to?: string | undefined;
   /** 数字的颜色类，例如 text-ink-stall。 */
   accent?: string | undefined;
+  className?: string | undefined;
+  /** 说明折行显示。不传则单行省略，别的页的指标卡维持原样。 */
+  wrapHint?: boolean | undefined;
 }) {
   const body = (
     <>
@@ -100,11 +105,17 @@ export function Stat({
       <div className={cn('num mt-2 text-stat leading-none font-semibold tracking-tight', accent)}>
         {value}
       </div>
-      {hint ? <div className="mt-2 truncate text-xs text-muted-foreground">{hint}</div> : null}
+      {hint ? (
+        <div className={cn('mt-2 text-xs text-muted-foreground', wrapHint ? 'break-words' : 'truncate')}>
+          {hint}
+        </div>
+      ) : null}
     </>
   );
-  const cls =
-    'block rounded-xl border bg-card p-4 shadow-card-edge transition-colors hover:border-border-strong';
+  const cls = cn(
+    'block rounded-xl border bg-card p-4 shadow-card-edge transition-colors hover:border-border-strong',
+    className,
+  );
   return to ? (
     <Link to={to} className={cls}>
       {body}
