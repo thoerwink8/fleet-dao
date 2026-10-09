@@ -1,4 +1,4 @@
-// 引擎总开关（#1086，设置 engine.master）在页面上的三处：顶栏常驻的「引擎 开着/关着」、设置页「仓库」一节旁边的一句关系说明，
+// 引擎总开关（#1086，设置 engine.master）在页面上的三处：顶栏常驻的「总开关 开着/关着」、设置页「仓库」一节旁边的一句关系说明，
 // 和它们共用的读法 useMasterView（环境页里能点的开关卡在 engine-master-card.tsx）。总开关关＝全停（不拉单、不派活、不起干活的
 // 会话；探针和健康检查照跑）；总开关开＝只有「让 AI 接活」开着的项目才派。
 // 改这里之前必须知道：
@@ -65,21 +65,22 @@ export function useMasterView(): { view: MasterView; remote: boolean; nodeId: st
 }
 
 /**
- * 顶栏常驻的小胶囊：引擎开着还是关着，一眼看得见。点它去法国页（那里能点开关）。关着用等待色（不是红：关着是常态、
- * 不是坏了），开着用完成色；读不到用虚线框写「没查成」。
+ * 顶栏常驻的小胶囊：总开关开着还是关着，一眼看得见（这是人给的许可，不是引擎进程活没活）。点它去法国页（那里能点开关）。
+ * 关着用等待色（不是红：关着是常态、不是坏了），开着用完成色；读不到用虚线框写「没查成」。
+ * 悬停提示仍用 describeEngineMaster 那句（关着不派活、探针照跑），不跟着按钮改名。
  */
 export function EngineMasterBadge() {
   const { view, remote, nodeId } = useMasterView();
   const label =
     view.kind === 'ok'
       ? view.master.on
-        ? '引擎 开着'
-        : '引擎 关着'
+        ? '总开关 开着'
+        : '总开关 关着'
       : view.kind === 'loading'
-        ? '引擎 …'
+        ? '总开关 …'
         : view.kind === 'absent'
-          ? '引擎 无总开关'
-          : '引擎 没查成';
+          ? '总开关 没有'
+          : '总开关 没查成';
   const on = view.kind === 'ok' && view.master.on;
   const off = view.kind === 'ok' && !view.master.on;
   const detail =

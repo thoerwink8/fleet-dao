@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 引擎总开关（#1086）在页面上的三处：顶栏常驻「引擎 开着/关着」、环境页里能点的开关卡（二次确认、写设置 engine.master、
+// 引擎总开关（#1086）在页面上的三处：顶栏常驻「总开关 开着/关着」、环境页里能点的开关卡（二次确认、写设置 engine.master、
 // 带版本防覆盖、显示谁什么时候改的）、设置页「仓库」一节写清和按项目开关的关系。选了远程环境只读、写明去那台上操作；
 // 读不到、远程快照没有这一格都如实写，不画成开也不画成关。本台的状态读设置（/api/settings），顶栏不拉整份 /api/env。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -54,36 +54,39 @@ function apiWith(row: Setting | null): MockApi & { envReads: number } {
 }
 
 describe('顶栏胶囊（EngineMasterBadge）', () => {
-  test('关着写「引擎 关着」、用等待色不是红；开着写「引擎 开着」、用完成色；从没设过按关', async () => {
+  test('关着写「总开关 关着」、用等待色不是红；开着写「总开关 开着」、用完成色；从没设过按关', async () => {
     renderApp(<EngineMasterBadge />, { api: apiWith(OFF) as unknown as FleetApi });
-    const off = await screen.findByRole('link', { name: /引擎 关着/ });
+    const off = await screen.findByRole('link', { name: /总开关 关着/ });
     expect(off.getAttribute('data-engine-master')).toBe('off');
     expect(off.className).toContain('text-ink-stall');
     expect(off.className).not.toContain('text-ink-fail');
+    // 按钮改叫总开关；悬停提示仍是原来那句（关着不派活，探针照跑）
+    expect(off.querySelector('span')?.textContent).toBe('总开关 关着');
     cleanup();
     renderApp(<EngineMasterBadge />, { api: apiWith(ON) as unknown as FleetApi });
-    const on = await screen.findByRole('link', { name: /引擎 开着/ });
+    const on = await screen.findByRole('link', { name: /总开关 开着/ });
     expect(on.getAttribute('data-engine-master')).toBe('on');
     expect(on.className).toContain('text-ink-done');
+    expect(on.querySelector('span')?.textContent).toBe('总开关 开着');
     cleanup();
     renderApp(<EngineMasterBadge />, { api: apiWith(NEVER) as unknown as FleetApi });
-    expect(await screen.findByRole('link', { name: /引擎 关着/ })).toBeTruthy();
+    expect(await screen.findByRole('link', { name: /总开关 关着/ })).toBeTruthy();
   });
 
   test('顶栏每一页都在，不能为它去拉整份 /api/env（每次要跑全套健康检查）：本台读设置', async () => {
     const api = apiWith(ON);
     renderApp(<EngineMasterBadge />, { api: api as unknown as FleetApi });
-    await screen.findByRole('link', { name: /引擎 开着/ });
+    await screen.findByRole('link', { name: /总开关 开着/ });
     expect(api.envReads).toBe(0);
   });
 
-  test('故意造出失败：设置读不到：写「引擎 没查成」，不画成开也不画成关', async () => {
+  test('故意造出失败：设置读不到：写「总开关 没查成」，不画成开也不画成关', async () => {
     const api = apiWith(ON);
     api.settings = async () => {
       throw new ApiError(500, 'internal', '库连不上（测试故意造的）');
     };
     renderApp(<EngineMasterBadge />, { api: api as unknown as FleetApi });
-    const badge = await screen.findByRole('link', { name: /引擎 没查成/ });
+    const badge = await screen.findByRole('link', { name: /总开关 没查成/ });
     expect(badge.getAttribute('data-engine-master')).toBe('error');
     expect(badge.textContent).not.toContain('开着');
     expect(badge.textContent).not.toContain('关着');
