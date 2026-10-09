@@ -2,7 +2,7 @@
 // pnpm issue:new（62 秒）、再贴创始人原话，纸面活加起来每个 PR 约 1–1.5 分钟。现在不给 --body-file 就在这里拼好再交给 prOpen
 // （pr-open.ts）——开 PR、挂单、挂里程碑、挂自动合并的闸一处不改，这里只管「正文从哪来」：
 // - 「做了什么」：这条分支相对 origin/<base> 的提交说明（只取第一行；一条就是一句话，多条列成短列表）。
-// - 「需求」：--closes <号> → Closes #号；--refs <号> → Refs #号；--no-issue "<理由>" 照旧由 prOpen 写成「无：理由」；
+// - 「需求」：--closes <号> → Closes #号；--refs <号> → Refs #号（分片、关不了它）（合并收口认这几个字才不关母单）；--no-issue "<理由>" 照旧由 prOpen 写成「无：理由」；
 //   --new-issue "<标题>" 当场开一张单（复用 issue-new.ts 的 issueNew，类别 --kind、里程碑 --milestone 必须给，缺了拒开）并 Closes 它。
 //   这张单一律贴「本机做」（--local 加了不报错，也不多贴一次）：随 PR 开出的单已经有人在做，不靠人记得加 --local（#1199）。
 // - 改标准：--founder-quote "<原话>" --at "<时间>" 在「需求」栏下面另起一行写「人闸：改标准」、再写一段「创始人原话」，并等价于
@@ -55,7 +55,7 @@ export function composeBody(p: BodyParts): string {
         ].join('\n');
   const need = [
     ...p.closes.map((n) => `Closes #${n}`),
-    ...p.refs.map((n) => `Refs #${n}`),
+    ...p.refs.map((n) => `Refs #${n}（分片、关不了它）`),
     ...(p.withNewIssue ? [NEW_ISSUE_LOCAL_LINE] : []),
     ...(p.founder ? [GATE_LINE] : []),
   ];
