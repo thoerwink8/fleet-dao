@@ -6,7 +6,8 @@ import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
-import type { EnvResponse, Jobs } from '../api/types';
+import type { EnvResponse, Jobs, Setting } from '../api/types';
+import { HealthStrip } from '../components/home/health-strip';
 import France from '../routes/france';
 import { renderApp } from '../test/harness';
 
@@ -282,5 +283,52 @@ describe('法国页：一台不画对照列，两台并排', () => {
     const local = document.querySelector('[data-env-column="local"]') as HTMLElement;
     expect(within(local).getByText('在跑')).toBeTruthy();
     expect(local.querySelectorAll('[data-env-fact]').length).toBe(6);
+  });
+});
+
+describe('总开关和引擎进程是两件事', () => {
+  test('总开关关、引擎在跑：开关和「在跑」那一格旁边都写明不派活、进程还在；健康条的名字含「引擎进程」', async () => {
+    const inner = apiWith(
+      envData({
+        engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
+        master: {
+          ok: true,
+          value: { on: false, why: 'set', detail: '关着：不拉单、不派活' },
+        },
+      }),
+      jobsData(),
+    );
+    const off: Setting = {
+      key: 'engine.master',
+      value: false,
+      version: 2,
+      updatedAt: '2026-10-05T01:00:00.000Z',
+      updatedBy: 'user:frank',
+    };
+    const api = {
+      ...inner,
+      settings: async () => {
+        const base = await inner.settings();
+        return { settings: [...base.settings.filter((s) => s.key !== 'engine.master'), off] };
+      },
+    } as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    const sentence = /总开关关着只是不派活，引擎进程还在跑/;
+    const card = await screen.findByTestId('engine-master');
+    expect(await within(card).findByText(sentence)).toBeTruthy();
+    await screen.findByText('在跑');
+    expect(tile('引擎').getByText(sentence)).toBeTruthy();
+
+    cleanup();
+    renderApp(
+      <HealthStrip
+        health={{
+          quota: { state: 'ok', detail: '够用' },
+          routes: { state: 'ok', detail: '都通' },
+          engine: { state: 'on' },
+        }}
+      />,
+    );
+    expect(screen.getByRole('status', { name: '持续状态' }).textContent).toContain('引擎进程');
   });
 });

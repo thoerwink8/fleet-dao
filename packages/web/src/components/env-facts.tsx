@@ -176,6 +176,7 @@ export function factCells({
   look,
   jobCount,
   versionExtra,
+  engineNote,
 }: {
   facts: EnvFacts;
   now: number;
@@ -184,13 +185,19 @@ export function factCells({
   jobCount?: number | undefined;
   /** 挂在「在用版本」那一格底下的东西（#1255：发布入口）。只有本台那一列给；远程列只读，不给。版本读成读不成都挂。 */
   versionExtra?: ReactNode;
+  /** 挂在「引擎」那一格底下：总开关关着、进程仍在跑时，说明这两件不是一回事。 */
+  engineNote?: ReactNode;
 }): ReactNode[] {
   const base = { kind, look };
   const cells: ReactNode[] = [];
 
   if (facts.engine.ok) {
     const w = engineWords(facts.engine.value);
-    cells.push(<Read key="engine" {...base} {...HEADS.engine} value={w.value} sub={w.sub} tone={w.tone} />);
+    cells.push(
+      <Read key="engine" {...base} {...HEADS.engine} value={w.value} sub={w.sub} tone={w.tone}>
+        {engineNote}
+      </Read>,
+    );
   } else cells.push(<NotRead key="engine" {...base} {...HEADS.engine} reason={facts.engine.reason} />);
 
   if (facts.sessions.ok) {

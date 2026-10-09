@@ -5,7 +5,7 @@
 
 import { ENGINE_MASTER_SETTING } from '@fleet-dao/shared';
 import { Power } from 'lucide-react';
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useSettings, useUpdateSetting } from '../api/client';
 import type { EnvMaster } from '../api/types';
@@ -30,7 +30,7 @@ function changedBy(m: EnvMaster): string | null {
   return `${formatDateTime(m.at)} 由 ${m.by.replace(/^user:/, '')} ${m.on ? '打开' : '关上'}`;
 }
 
-export function EngineMasterControl() {
+export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }) {
   const { view, remote } = useMasterView();
   const settings = useSettings();
   const update = useUpdateSetting();
@@ -117,6 +117,7 @@ export function EngineMasterControl() {
             AI 接活」开着的项目才派（在设置 →
             仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
           </p>
+          {standbyNote}
         </div>
         {master === null ? null : remote ? (
           <p className="max-w-64 text-xs text-muted-foreground" data-testid="engine-master-remote-note">
