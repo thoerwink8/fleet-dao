@@ -1,6 +1,6 @@
 // systemd socket activation（deploy/france/fleet-api.socket、#364）：src/listen.ts 的解析、按地址对号，
 // 都用假数据测；真 fd 的集成测试（systemd-socket-activate）证明「重启时连接排队、不拒连」，见文件末尾。
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { request } from 'node:http';
 import { connect, createServer } from 'node:net';
@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ListenFdError, matchListenTargets, startListeners } from '../src/listen.ts';
+import { runChild } from './child.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = join(HERE, 'fixtures', 'listen-fixture.ts');
@@ -111,7 +112,13 @@ describe('startListeners：LISTEN_PID / LISTEN_FDS 读不出，明确拒绝、�
 
 function hasSystemdSocketActivate(): boolean {
   if (process.platform === 'win32') return false;
-  return spawnSync('systemd-socket-activate', ['--help'], { stdio: 'ignore' }).error === undefined;
+  // 起不来、超时、被信号杀掉都会抛；工具在就返回，退出码非 0 也算在（--help 照样能证明这台机器有它）。
+  try {
+    runChild('systemd-socket-activate', ['--help']);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function freePort(): Promise<number> {
