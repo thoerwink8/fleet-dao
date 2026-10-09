@@ -1,7 +1,8 @@
-// 本包 test/ 顶层不许直接同步起子进程（#264 这一片）：spawnSync / execFileSync / execSync 只留在 child.ts。
-// 注释和引号里的字是在提这个词，不是调用，去掉再扫。只扫顶层 .ts，子目录（e2e/、quota/）本片不碰。
+// 本包 test/ 不许直接同步起子进程（#264 这一片）：spawnSync / execFileSync / execSync 只留在根上的 child.ts。
+// 递归扫 test/ 下所有 .ts（含 e2e/、quota/）。先去掉注释和引号里的字符串再找这三个名字：引号里的字是在提这个词，不是调用。
+// 只豁免 test/ 根上的 child.ts 和这份 static.test.ts；子目录里同名文件照样扫，不按文件名跳过。
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const TEST = import.meta.dirname;
@@ -111,22 +112,41 @@ function readBalanced(code: string, open: number): { body: string; end: number }
   return { body: code.slice(start), end: i };
 }
 
-/**
- * 扫同步起子进程的调用：先去掉注释和引号里的字符串，再找 spawnSync / execFileSync / execSync。
- * 传入源码时返回命中的调用名；不传时扫本包 test/ 顶层的 .ts（豁免 child.ts 和 static.test.ts 自己），返回命中的文件名。
- */
-function scanSyncChildSpawns(code: string): string[];
-function scanSyncChildSpawns(): string[];
-function scanSyncChildSpawns(code?: string): string[] {
-  const banned = /\b(spawnSync|execFileSync|execSync)\b/;
-  const callsIn = (text: string): string[] => {
-    const found = stripCommentsAndStrings(text).match(banned);
-    return found?.[0] === undefined ? [] : [found[0]];
+const BANNED = /\b(spawnSync|execFileSync|execSync)\b/;
+
+/** 一段源码里命中的调用名（先去掉注释和引号字符串）。 */
+function scanSyncChildSpawns(code: string): string[] {
+  const found = stripCommentsAndStrings(code).match(BANNED);
+  return found?.[0] === undefined ? [] : [found[0]];
+}
+
+/** 相对 test/ 的路径（统一用 /）。 */
+function rel(file: string): string {
+  return relative(TEST, file).split(sep).join('/');
+}
+
+/** 只有 test/ 根上的这两份豁免；`e2e/child.ts`、`quota/static.test.ts` 这类不算。 */
+function isExempt(file: string): boolean {
+  const r = rel(file);
+  return r === 'child.ts' || r === 'static.test.ts';
+}
+
+/** test/ 下要扫的 .ts 绝对路径。豁免只认 isExempt 里那两个相对路径。 */
+function testSources(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.ts') || isExempt(path)) continue;
+      out.push(path);
+    }
   };
-  if (code !== undefined) return callsIn(code);
-  return readdirSync(TEST)
-    .filter((name) => name.endsWith('.ts') && name !== 'child.ts' && name !== 'static.test.ts')
-    .filter((name) => callsIn(readFileSync(join(TEST, name), 'utf8')).length > 0);
+  walk(TEST);
+  return out;
 }
 
 /** 拼出 `${name}`，避免测试源码里的 ${} 被当成自己的插值。 */
@@ -140,12 +160,22 @@ function gluedTemplate(expr: string): string {
 }
 
 describe('测试里不许同步起子进程', () => {
-  it('spawnSync / execFileSync / execSync 只许在 child.ts', () => {
-    expect(scanSyncChildSpawns()).toEqual([]);
-  });
-
-  it('故意放一行违规的样本，扫得出来', () => {
-    expect(scanSyncChildSpawns(`execFileSync('git', []);`)).not.toEqual([]);
+  it('spawnSync / execFileSync / execSync 只许在 test/ 根上的 child.ts', () => {
+    const files = testSources();
+    // 一个都没扫到、或者没扫进 e2e/、quota/，不能当「没问题」：扫空也会得到空命中。
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.some((file) => rel(file).startsWith('e2e/'))).toBe(true);
+    expect(files.some((file) => rel(file).startsWith('quota/'))).toBe(true);
+    expect(isExempt(join(TEST, 'child.ts'))).toBe(true);
+    expect(isExempt(join(TEST, 'static.test.ts'))).toBe(true);
+    expect(isExempt(join(TEST, 'e2e', 'child.ts'))).toBe(false);
+    expect(isExempt(join(TEST, 'e2e', 'static.test.ts'))).toBe(false);
+    expect(isExempt(join(TEST, 'quota', 'child.ts'))).toBe(false);
+    expect(isExempt(join(TEST, 'quota', 'static.test.ts'))).toBe(false);
+    const hits = files
+      .filter((file) => scanSyncChildSpawns(readFileSync(file, 'utf8')).length > 0)
+      .map((file) => rel(file));
+    expect(hits).toEqual([]);
   });
 
   it('模板插值紧挨着前缀时，仍然命中 execFileSync', () => {
@@ -163,5 +193,9 @@ describe('测试里不许同步起子进程', () => {
   it('模板里只有普通文字和不含这三个词的插值时，不误报', () => {
     const sample = 'const s = `普通文字 ' + slot('prefix') + slot('name') + '`;';
     expect(scanSyncChildSpawns(sample)).toEqual([]);
+  });
+
+  it('故意放一行违规的样本，扫得出来', () => {
+    expect(scanSyncChildSpawns(`execFileSync('git', []);`)).not.toEqual([]);
   });
 });
