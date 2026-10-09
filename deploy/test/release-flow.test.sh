@@ -1429,7 +1429,15 @@ systemctl() {
     esac
   done
   case "$cmd" in
-  show | daemon-reload) return 0 ;;
+  show) return 0 ;;
+  daemon-reload)
+    # 第一次装 socket 之后的 daemon-reload 失败：后面恢复时的那次要能成功
+    if ((${SC_RELOAD_FAILS:-0} > 0)); then
+      SC_RELOAD_FAILS=$((SC_RELOAD_FAILS - 1))
+      return 1
+    fi
+    return 0
+    ;;
   is-enabled)
     echo disabled
     return 1
@@ -1447,10 +1455,12 @@ systemctl() {
     if [[ -n "$unit" ]]; then SC_ACTIVE[$unit]=inactive; fi
     ;;
   start | restart)
+    # enable-now,start：socket 起不来之后，把旧服务拉回来也失败
+    if [[ ",$SC_FAIL," == *",start,"* && "$unit" == fleet-api.service ]]; then return 1; fi
     if [[ -n "$unit" ]]; then SC_ACTIVE[$unit]=active; fi
     ;;
   enable)
-    if [[ "$SC_FAIL" == enable-now && "$now" == 1 && "$unit" == fleet-api.socket ]]; then return 1; fi
+    if [[ ",$SC_FAIL," == *",enable-now,"* && "$now" == 1 && "$unit" == fleet-api.socket ]]; then return 1; fi
     if [[ "$now" == 1 && -n "$unit" ]]; then SC_ACTIVE[$unit]=active; fi
     ;;
   disable)
@@ -1466,6 +1476,7 @@ sc_n() { # 这一行第几次出现的行号；没有就是 0
 reset_sc() {
   : >"$SC"
   SC_FAIL=""
+  SC_RELOAD_FAILS=0
   SC_ACTIVE=()
 }
 SVC_OLD='[Unit]
@@ -1565,6 +1576,48 @@ do_release "$B" >/dev/null 2>&1
 check "enable --now 失败：不切版本，还在 A" "$(current_sha)" "$A"
 check "enable --now 失败：发布报红" "$(reds_with 'fleet-api.socket 起不来')" 1
 check "enable --now 失败：历史没变（没记发布、也没自动退回）" "$(events)" "$was_events"
+enable_n=$(sc_n "enable --now --quiet fleet-api.socket")
+start_n=$(sc_n "start fleet-api.service")
+check "enable --now 失败：起不来之后才把旧服务拉起来" "$((start_n > enable_n && start_n > 0))" 1
+check "enable --now 失败：旧服务回到 active（自己听端口）" "${SC_ACTIVE[fleet-api.service]}" active
+check "enable --now 失败：没装上的 socket 撤了" \
+  "$([[ -e $FLEET_SYSTEMD_DIR/fleet-api.socket ]] && echo 还在 || echo 撤了)" 撤了
+check "enable --now 失败：服务单元还是旧的、不 Requires socket" \
+  "$(grep -c 'Requires=fleet-api.socket' "$FLEET_SYSTEMD_DIR/fleet-api.service" || true)" 0
+
+# 拉回来也失败：版本不动，但要另记一笔红，不能停着当没事
+rm -f -- "$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_FAIL=enable-now,start
+SC_ACTIVE[fleet-api.service]=active
+was_events=$(events)
+reset
+do_release "$B" >/dev/null 2>&1
+check "拉回旧服务也失败：不切版本，还在 A" "$(current_sha)" "$A"
+check "拉回旧服务也失败：socket 起不来仍报红" "$(reds_with 'fleet-api.socket 起不来')" 1
+check "拉回旧服务也失败：另记一笔起不回来" "$(reds_with '也起不回来')" 1
+check "拉回旧服务也失败：服务没在跑" "${SC_ACTIVE[fleet-api.service]}" inactive
+check "拉回旧服务也失败：没装上的 socket 仍撤了" \
+  "$([[ -e $FLEET_SYSTEMD_DIR/fleet-api.socket ]] && echo 还在 || echo 撤了)" 撤了
+check "拉回旧服务也失败：历史没变" "$(events)" "$was_events"
+
+# 装上 socket 文件之后 daemon-reload 失败：同样已经停过旧服务，退出前要拉回来
+rm -f -- "$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_RELOAD_FAILS=1
+SC_ACTIVE[fleet-api.service]=active
+was_events=$(events)
+reset
+do_release "$B" >/dev/null 2>&1
+check "daemon-reload 失败：不切版本，还在 A" "$(current_sha)" "$A"
+check "daemon-reload 失败：报红" "$(reds_with 'daemon-reload 失败（装')" 1
+check "daemon-reload 失败：没去 enable socket" "$(sc_n "enable --now --quiet fleet-api.socket")" 0
+check "daemon-reload 失败：旧服务回到 active" "${SC_ACTIVE[fleet-api.service]}" active
+check "daemon-reload 失败：没装上的 socket 撤了" \
+  "$([[ -e $FLEET_SYSTEMD_DIR/fleet-api.socket ]] && echo 还在 || echo 撤了)" 撤了
+check "daemon-reload 失败：历史没变" "$(events)" "$was_events"
 
 rm -f -- "$FLEET_SYSTEMD_DIR/fleet-api.socket"
 prep_ver "$C" "$SVC_NEW" "$SOCK_BODY"
@@ -1606,7 +1659,7 @@ APP_UNITS=()
 FLEET_SERVICES=""
 FLEET_HK_PARTS=$SCRIPT_HK_PARTS
 FLEET_SYSTEMD_DIR=/etc/systemd/system
-unset SC_FAIL SC_ACTIVE
+unset SC_FAIL SC_ACTIVE SC_RELOAD_FAILS
 
 echo "== 真起一个服务：切完 current 没重启就被打断，再跑同一版会重启；主进程跑的是哪一版，健康检查查得出"
 if ((EUID != 0)) || [[ ! -d /run/systemd/system ]]; then

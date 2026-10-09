@@ -926,25 +926,54 @@ running_release() { # 单元
 #   要的效果：重启时连接排在内核队列里，不会被拒。
 # - 不带（退回到没有它的老版本）、机器上有：撤掉 socket 单元（disable --now、删文件、daemon-reload），回到服务
 #   自己绑端口——不撤的话老代码不会去读 systemd 传来的 fd，端口反而没人监听。
-# 装不上（停不掉旧服务、enable 失败）在切 current 之前就返回：版本不动。
+# 装不上（停不掉旧服务、daemon-reload 失败、enable 失败）在切 current 之前就返回：版本不动。
+# 停过旧服务再失败的，不能就这么返回：端口已经没人听。退出前撤掉刚写上、还没成为监听方的 socket，
+# 把旧服务拉起来，仍由它自己绑。
 SOCKET_FORCE_RESTART=0
+# 头一次装没装成时用：disable --now 先放开 socket 可能已经攥住的端口，再删文件、daemon-reload，最后起旧服务。
+# 起不来另记一笔红（版本没动，但后端不能停着）。返回 0：原来的失败已经记过红，由调用方 return 1。
+restore_pre_socket_listen() { # 单元名 这次停过服务没有(0/1)
+  local u=$1 stopped=$2
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket
+  if [[ -e "$socket_file" ]]; then
+    if ! systemctl disable --now --quiet "$u.socket"; then
+      red "撤掉没装上的 $u.socket 失败（端口可能还被它攥着）"
+    fi
+    rm -f -- "$socket_file"
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（撤没装上的 $u.socket 之后）"
+    fi
+  fi
+  if [[ "$stopped" != 1 ]]; then return 0; fi
+  if systemctl start "$u.service" && [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+    changed "头一次装 $u.socket 没装上：把停下的 $u.service 拉回来，仍由它自己听端口"
+    return 0
+  fi
+  red "头一次装 $u.socket 没装上，停下的 $u.service 也起不回来：端口没人听。systemctl start $u.service；journalctl -u $u.service -n 50"
+}
+
 sync_socket_unit() { # 单元名 这一版的目录
   local u=$1 dir=$2
-  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket has_now=0
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket has_now=0 stopped=0
   SOCKET_FORCE_RESTART=0
   if [[ -e "$socket_file" ]]; then has_now=1; fi
   if [[ -f "$dir/.units/$u.socket" && "$has_now" == 0 ]]; then
-    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]] && ! systemctl stop "$u.service"; then
-      red "头一次装 $u.socket 之前，停不掉正占着端口的 $u.service"
-      return 1
+    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+      if ! systemctl stop "$u.service"; then
+        red "头一次装 $u.socket 之前，停不掉正占着端口的 $u.service"
+        return 1
+      fi
+      stopped=1
     fi
     put_file "$socket_file" root:root 644 "$(<"$dir/.units/$u.socket")"
     if ! systemctl daemon-reload; then
       red "systemctl daemon-reload 失败（装 $u.socket 之后）"
+      restore_pre_socket_listen "$u" "$stopped"
       return 1
     fi
     if ! systemctl enable --now --quiet "$u.socket"; then
       red "$u.socket 起不来：journalctl -u $u.socket -n 50 看现场"
+      restore_pre_socket_listen "$u" "$stopped"
       return 1
     fi
     changed "头一次给 $u 装上 socket 单元（往后重启 $u 时连接排队、不拒连）"
