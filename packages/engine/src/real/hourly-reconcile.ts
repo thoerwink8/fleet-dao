@@ -8,6 +8,7 @@ import { readdir } from 'node:fs/promises';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
   alertByKey,
+  countAlertFilings,
   type Db,
   finishScheduleRun,
   getApproval,
@@ -21,6 +22,7 @@ import {
   prHeadsOfBranch,
   quotaTable,
   readPoolHoldsSetting,
+  recordAlertFiling,
   resolveAlertWithReason,
   startScheduleRun,
   subtaskTreeRefs,
@@ -34,11 +36,17 @@ import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/work
 import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
+import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
-import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
+import {
+  beijingDayStart,
+  RECONCILE_ACTOR,
+  type WorkflowReader,
+  type WorkflowView,
+} from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
@@ -160,7 +168,7 @@ export const STANDARD_PATHS_FILE = 'packages/conventions/standard-paths.json';
 export interface HourlyReconcileWiring {
   db: Db;
   /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
-  gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState'> & AutoMergeWiringGitHub;
+  gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState' | 'openIssue'> & AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
@@ -260,6 +268,41 @@ export function hourlyReconcileJob(
     const r = await handlingOf(alertWork, ids);
     if (!r.ok) throw new Error(r.why);
     return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
+  };
+  // 立案（#1406）：没人处理超过 24 小时的卡住报警开一张未排期的缺陷单。仓优先用提醒挂着的任务的仓，
+  // 没有任务再从键和链接里认；认不出不猜。单状态的关单时刻 GitHub 这个口子不给，关了先记看见的时刻。
+  const filing: HourlyReconcileJobDeps['filing'] = {
+    async repoOf(alert) {
+      if (alert.taskId) {
+        const ctx = await taskContext(w.db, alert.taskId);
+        if (ctx) return { owner: ctx.repo.owner, name: ctx.repo.name };
+      }
+      return alertRepoFromText(alert.dedupeKey, alert.link);
+    },
+    filedToday: (repo) => countAlertFilings(w.db, `${repo.owner}/${repo.name}`, beijingDayStart(now())),
+    async issueState(repo, number) {
+      const st = await w.gh.readIssueState({ repo, issueNumber: number });
+      return { state: st.state, closedAt: null };
+    },
+    async openIssue(input) {
+      const got = await w.gh.openIssue({
+        repo: input.repo,
+        key: input.key,
+        title: input.title,
+        body: input.body,
+        labels: input.labels,
+        milestone: null,
+      });
+      return { number: got.number };
+    },
+    recordFiled: (input) =>
+      recordAlertFiling(w.db, {
+        repo: `${input.repo.owner}/${input.repo.name}`,
+        dedupeKey: input.dedupeKey,
+        number: input.number,
+        actorId: RECONCILE_ACTOR,
+        at: now(),
+      }),
   };
   // 自动合并兜底（#242）要的 GitHub：列 PR 经 claims.openPulls，把作者是不是机器人、自动合并开没开带过来；
   // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读，
@@ -369,6 +412,7 @@ export function hourlyReconcileJob(
       stageRoutable,
       stageAllOpen,
       handling,
+      filing,
       alerts: {
         listOpen: (limit) => listOpenAlerts(w.db, { limit }),
         byKey: (key) => alertByKey(w.db, key),

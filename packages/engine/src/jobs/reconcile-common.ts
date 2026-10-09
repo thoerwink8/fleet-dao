@@ -71,7 +71,7 @@ export interface SweepPart {
   failed?: string;
   /** 看了几个对象。 */
   scanned: number;
-  /** 发现、处理了几个问题（删掉的残留树、改成要人拍的树、撤掉的过时提醒、再推的提醒）。 */
+  /** 发现、处理了几个问题（删掉的残留树、改成要人拍的树、撤掉的过时提醒、再推的提醒、立的单）。 */
   found: number;
   /** 没查成的，一条一句：照实写进这一轮的 why，这一轮不记 ok。 */
   unchecked: string[];
@@ -87,9 +87,14 @@ export const clip = (text: string, max: number) => (text.length > max ? `${text.
 
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
 
-/** 北京时间的日子，例如 2026-09-26（再提醒一天一条按它分）。 */
+/** 北京时间的日子，例如 2026-09-26（再提醒一天一条、立案一天几张按它分）。 */
 export function beijingDate(at: Date): string {
   return new Date(at.getTime() + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** 北京时间这一天的 00:00（绝对时刻）。立案「每天」从这里算到下一天。 */
+export function beijingDayStart(at: Date): Date {
+  return new Date(`${beijingDate(at)}T00:00:00.000+08:00`);
 }
 
 /** 北京时间「09-26 14:02」。 */

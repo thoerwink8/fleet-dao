@@ -4,10 +4,14 @@
 //    操作记录里也有一条）。条件还在的原样留着。判法一种提醒一条（RULES），没列进来的不在这里判（见下面的清单）。
 // 2. 卡住报警（alert 这一级）超过 24 小时没人处理：再推一次——新写一条「还没处理：<原标题>」（键 remind:<原提醒>:<北京日期>，
 //    同一条一天最多一次），驾驶舱弹一条、飞书发一张新卡（原来那张卡只会原地改，沉在群里）。原来那条处理掉，再提醒跟着撤；
-//    在再提醒上点「处理」，原来那条也跟着撤。日报还没有（AI 帅位写日报没做），在那之前只靠这一下——没人管的普通提醒
-//    过了 20 分钟、60 分钟都不会再被推、也不会自动开单（#445 删掉了「提醒派单」那一层），只有这一下 24 小时才推一次。
-//    有人在处理（有人在修、PR 开着、合了、发布了）、静默了的不再推（谁在处理现算，core 的 alertHandling）；谁在处理读不到：
-//    照旧再推，记没查全（宁可多一张卡）。
+//    在再提醒上点「处理」，原来那条也跟着撤。有人在处理（有人在修、PR 开着、合了、发布了）、静默了的不再推（谁在处理现算，
+//    core 的 alertHandling）；谁在处理读不到：照旧再推，记没查全（宁可多一张卡）。
+// 3. 同一条再立案（#1406，对 #445「不自动开跟进单」的有意收窄，只这一层、还限量）：alert 级、开着、超过 24 小时、
+//    alertHandling 判为没人处理、没静默、键不是自己会撤的、正文开头还没有单号的，开一张未排期的缺陷单。四节按整理会话
+//    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
+//    而提醒还在，隔 7 天才再开。每次对账最多 2 张，每个仓每天最多 4 张。GitHub 写不进记没立成、不回写单号，下一轮再试。
+//    reconcile:* 虽在「自己会撤」的前缀里（过期兜底不碰它们），条件没了的核对那一步已经撤了，还开着的是断链，要立案。
+//    其余自己会撤的（canary、备份、切号……）不立案。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
 //
 // 各种提醒谁来撤（改这里之前先对一遍）：
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
@@ -41,12 +45,14 @@
 //   谁撤的和原因，记录不删）。要人拍的（level = decision）不在此列：那是等人定的事，不是等条件过去的提醒。真的还在的，
 //   报警者下一次再报会重新打开（upsert 把已处理的重新打开）。新加一种自己会撤的提醒，前缀加进 SELF_RESOLVING_PREFIXES。
 
+import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
 import { type AlertStage, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
+import { plainText } from './groom-plan.ts';
 import {
   type AlertStore,
   beijingDate,
@@ -63,8 +69,16 @@ import { FUSION_TREE_ALERT, KEEP_ALERT_PREFIX, SUBTASK_TREE_ALERT } from './work
 
 /** 再提醒的键：remind:<原提醒的编号>:<北京日期>。 */
 export const REMIND_PREFIX = 'remind:';
-/** 卡住报警多久没人处理就再推一次（同一条一天最多一次）。 */
+/** 卡住报警多久没人处理就再推一次、并立案（同一条再推一天最多一次）。 */
 export const REMIND_AFTER_MS = 24 * 60 * 60_000;
+/** 一次对账最多新开几张单（没立成的也占这一轮的名额，免得 GitHub 不通时把开着的全打一遍）。 */
+export const FILE_PER_RUN = 2;
+/** 一个仓一天（北京时间）最多新开几张。数操作记录里立成的，不数没写上单号的。 */
+export const FILE_PER_REPO_DAY = 4;
+/** 立案的那张关了、提醒还在：至少再隔这么久才允许另开一张。 */
+export const REFILE_AFTER_MS = 7 * 24 * 60 * 60_000;
+/** 开出去的单只贴这一个类别。不贴「要人拍」「本机做」「待补」：拉不拉由现有准入决定。 */
+export const FILE_LABELS = ['缺陷'] as const;
 /**
  * 挂起报警是不是「现在挂着的这一次」：报警写进库（updated_at）在挂起那一刻（waiting.since）之后；早过它这么多的是
  * 之前那一次（人点继续以后又挂起了）。留一分钟余量：两个时刻一个是工作流的钟、一个是库的钟。
@@ -129,11 +143,44 @@ export interface AlertSweepDeps {
   alerts: AlertStore;
   /**
    * 这批提醒（编号）此刻谁在处理（core 的 alertHandling 现算：阶段、给人看的一行）。读不到照抛。
-   * 真装配（real/hourly-reconcile.ts）一定接上；没接上的照旧按 24 小时再推。
+   * 真装配（real/hourly-reconcile.ts）一定接上；没接上的照旧按 24 小时再推，但不立案。
    */
   handling?(ids: readonly string[]): Promise<Map<string, { stage: AlertStage; line: string }>>;
+  /**
+   * 立案（开一张未排期的单、把单号写回提醒）。真装配一定接上；没接上的这一步跳过（单测只测撤和再推）。
+   * 认不出仓回 null，不许猜一个。GitHub 写不进、单状态读不到照抛。
+   */
+  filing?: AlertFiling;
   now: () => Date;
   log: ReconcileLog;
+}
+
+/** 立案开到哪个仓。 */
+export interface AlertRepo {
+  owner: string;
+  name: string;
+}
+
+/**
+ * 立案要的写和读。openIssue 的 key 同一个仓只开一张（账丢了按标记回查）；milestone 由这里传 null（未排期）。
+ */
+export interface AlertFiling {
+  repoOf(alert: AlertRow): Promise<AlertRepo | null>;
+  /** 这个仓从北京时间今天 0 点起已经立成几张。读不到照抛。 */
+  filedToday(repo: AlertRepo): Promise<number>;
+  /** 正文里那张单此刻开没开着、什么时候关的。关了但时刻读不到，closedAt 回 null（调用方先记下「看见已关」，隔 7 天再开）。 */
+  issueState(repo: AlertRepo, number: number): Promise<{ state: 'open' | 'closed'; closedAt: Date | null }>;
+  openIssue(input: {
+    repo: AlertRepo;
+    key: string;
+    title: string;
+    body: string;
+    labels: readonly string[];
+    /** null = 不挂里程碑（未排期）。 */
+    milestone: null;
+  }): Promise<{ number: number }>;
+  /** 单号已经写回提醒正文之后记一笔，供今天的限额数。写不进照抛。 */
+  recordFiled(input: { repo: AlertRepo; dedupeKey: string; number: number }): Promise<void>;
 }
 
 type Verdict =
@@ -284,6 +331,95 @@ export const RULES: readonly Rule[] = [
 /** 别处自己会撤的：过期兜底不碰。 */
 const resolvesItself = (key: string) => SELF_RESOLVING_PREFIXES.some((p) => key.startsWith(p));
 
+/**
+ * 这条键该不该立案。自己会撤的不立（条件自己会过去）。reconcile:* 除外：它在前缀清单里只为了过期兜底不撤，
+ * 条件没了的由核对那一步撤掉，轮到这里还开着就是断链还在（#1406）。
+ */
+export function eligibleToFile(key: string): boolean {
+  if (isEscalationKey(key)) return false;
+  if (key.startsWith('reconcile:')) return true;
+  return !resolvesItself(key);
+}
+
+/** 键或链接里嵌的 owner/name。认不出回 null，不拿别的仓顶。 */
+export function alertRepoFromText(dedupeKey: string, link: string | null): AlertRepo | null {
+  const from = (text: string, re: RegExp): AlertRepo | null => {
+    const m = re.exec(text);
+    return m?.[1] && m?.[2] ? { owner: m[1], name: m[2] } : null;
+  };
+  return (
+    from(dedupeKey, /(?:^|:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:[#:/]|$)/) ??
+    (link ? from(link, /github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/|$)/) : null)
+  );
+}
+
+/** 刚过 24 小时是第 1 天，满 48 小时是第 2 天。 */
+export function unhandledDays(createdAt: Date, now: Date): number {
+  return Math.max(1, Math.floor((now.getTime() - createdAt.getTime()) / REMIND_AFTER_MS));
+}
+
+/** 立案的单：四节和整理会话同一份拼法（groom-plan 的 renderNewIssueBody），原话按这条提醒写死。 */
+function stripFilingHead(body: string): string {
+  if (!body.startsWith('已立案：')) return body;
+  const cut = body.indexOf('\n\n');
+  return cut === -1 ? '' : body.slice(cut + 2);
+}
+
+export function renderAlertIssueBody(
+  alert: Pick<AlertRow, 'dedupeKey' | 'title' | 'body'>,
+  days: number,
+): string {
+  const scene = clip(
+    [plainText(alert.title), plainText(stripFilingHead(alert.body))].filter(Boolean).join('\n\n') ||
+      alert.dedupeKey,
+    4000,
+  );
+  return [
+    '## 场景',
+    '',
+    scene,
+    '',
+    '## 原话',
+    '',
+    `无（AI 发现：提醒 ${alert.dedupeKey} 第 ${days} 天没人处理）`,
+    '',
+    '## 已知的模块',
+    '',
+    '暂无',
+    '',
+    '## 怎么算做完',
+    '',
+    '- 这条提醒的条件不再成立（对账撤掉它）',
+    '',
+  ].join('\n');
+}
+
+const FILING_HEAD = /^已立案：#(\d+)（(\d{4}-\d{2}-\d{2})(?:，已关 ([^）]+))?）/;
+
+/** 正文开头的立案标记。没有（或不是我们写的那一行）回 null。 */
+export function parseFilingHead(
+  body: string,
+): { number: number; day: string; closedAt: string | null } | null {
+  const m = FILING_HEAD.exec(body);
+  if (!m?.[1] || !m[2]) return null;
+  return { number: Number(m[1]), day: m[2], closedAt: m[3] ?? null };
+}
+
+function filingHead(number: number, day: string, closedAt: string | null): string {
+  return `已立案：#${number}（${day}${closedAt ? `，已关 ${closedAt}` : ''}）`;
+}
+
+function withFilingHead(body: string, head: string): string {
+  const rest = stripFilingHead(body);
+  return rest ? `${head}\n\n${rest}` : head;
+}
+
+function issueKey(dedupeKey: string, after: number | null): string {
+  return after === null ? `alert-file:${dedupeKey}` : `alert-file:${dedupeKey}:after:${after}`;
+}
+
+const repoSlug = (repo: AlertRepo) => `${repo.owner}/${repo.name}`;
+
 /** 工作树那一部分撤的，这里不碰。 */
 const handledByTrees = (key: string) =>
   SUBTASK_TREE_ALERT.test(key) || FUSION_TREE_ALERT.test(key) || key.startsWith(KEEP_ALERT_PREFIX);
@@ -357,19 +493,177 @@ async function remind(c: Ctx, alert: AlertRow): Promise<void> {
   }
 }
 
-/** 有人在处理、静默了的（编号）：这些不按 24 小时再推。谁在处理读不到：一条都不算（照旧再推），记没查全。 */
-async function quietAlerts(c: Ctx, alerts: readonly AlertRow[]): Promise<Set<string>> {
+/**
+ * 有人在处理、静默了的（编号）：这些不按 24 小时再推，也不立案。
+ * 谁在处理读不到：一条都不算（照旧再推），记没查全，failed = true（立案整轮不做：开单宁可不开）。
+ */
+async function quietAlerts(
+  c: Ctx,
+  alerts: readonly AlertRow[],
+): Promise<{ quiet: Set<string>; failed: boolean; stage: Map<string, AlertStage> }> {
   const quiet = new Set<string>();
-  if (!c.deps.handling || alerts.length === 0) return quiet;
+  const stage = new Map<string, AlertStage>();
+  if (!c.deps.handling || alerts.length === 0) return { quiet, failed: false, stage };
   try {
     const byId = await c.deps.handling(alerts.map((a) => a.id));
     for (const [id, h] of byId) {
+      stage.set(id, h.stage);
       if (h.stage === 'silenced' || HANDLED_STAGES.includes(h.stage)) quiet.add(id);
     }
+    return { quiet, failed: false, stage };
   } catch (err) {
     c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${errMessage(err)}`);
+    return { quiet, failed: true, stage };
   }
-  return quiet;
+}
+
+/** 把立案结果写回还开着的提醒。写不进照抛（调用方记没立成，不当成写上了）。 */
+async function writeFilingHead(c: Ctx, alert: AlertRow, head: string): Promise<void> {
+  const body = withFilingHead(alert.body, head);
+  if (body === alert.body) return;
+  const r = await c.deps.alerts.updateOpen({ dedupeKey: alert.dedupeKey, body });
+  if (r !== 'ok') throw new Error('提醒已经不在开着的里面，单号没写上');
+  alert.body = body;
+}
+
+/**
+ * 这一条要不要新开一张。回 'open' 才去开；'wait' 是已经有单（开着，或关了还没到 7 天）；'skip' 是这轮先不动。
+ * 关了但不知道什么时候关的：先把看见的时刻写进正文，这一轮不开。
+ */
+async function filingPlan(
+  c: Ctx,
+  filing: AlertFiling,
+  alert: AlertRow,
+  repo: AlertRepo,
+  now: Date,
+): Promise<{ open: false } | { open: true; after: number | null }> {
+  const existing = parseFilingHead(alert.body);
+  if (!existing) return { open: true, after: null };
+  const st = await filing.issueState(repo, existing.number);
+  if (st.state === 'open') return { open: false };
+  const fromApi = st.closedAt !== null && Number.isFinite(st.closedAt.getTime()) ? st.closedAt : null;
+  const parsed = existing.closedAt ? new Date(existing.closedAt) : null;
+  const closedAt = fromApi ?? (parsed !== null && Number.isFinite(parsed.getTime()) ? parsed : null);
+  if (closedAt === null) {
+    await writeFilingHead(c, alert, filingHead(existing.number, existing.day, now.toISOString()));
+    return { open: false };
+  }
+  if (now.getTime() - closedAt.getTime() < REFILE_AFTER_MS) return { open: false };
+  return { open: true, after: existing.number };
+}
+
+/**
+ * 还开着的卡住报警里，该立案的立一张。名额：这一轮最多 FILE_PER_RUN 次尝试（开成、GitHub 写失败都算），
+ * 一个仓北京时间今天最多 FILE_PER_REPO_DAY 张立成的。认不出仓的跳过，不记没查成（不是这轮读失败）。
+ */
+async function fileStuckAlerts(
+  c: Ctx,
+  candidates: readonly AlertRow[],
+  quiet: ReadonlySet<string>,
+  handlingFailed: boolean,
+  stage: ReadonlyMap<string, AlertStage>,
+): Promise<void> {
+  const filing = c.deps.filing;
+  if (!filing) return;
+  if (!c.deps.handling || handlingFailed) {
+    if (!c.deps.handling) c.part.unchecked.push('谁在处理没接上，这一轮不立案');
+    return;
+  }
+  const now = c.deps.now();
+  const queued = candidates
+    .filter(
+      (a) =>
+        stage.get(a.id) === 'unclaimed' &&
+        !quiet.has(a.id) &&
+        eligibleToFile(a.dedupeKey) &&
+        now.getTime() - a.createdAt.getTime() >= REMIND_AFTER_MS,
+    )
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+  let attempts = 0;
+  const dailyFull = new Set<string>();
+  for (const alert of queued) {
+    // 再推那一步可能刚把这条撤了（人在再提醒上点了处理）。撤了的不再开。
+    if (!c.stillOpen.has(alert.id)) continue;
+    if (attempts >= FILE_PER_RUN) break;
+    const { dedupeKey } = alert;
+    let repo: AlertRepo | null;
+    try {
+      repo = await filing.repoOf(alert);
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${dedupeKey} 的仓没查成，没立案：${errMessage(err)}`);
+      continue;
+    }
+    if (!repo) {
+      c.deps.log('info', '每小时对账：卡住报警认不出仓，不立案', { dedupeKey });
+      continue;
+    }
+    const slug = repoSlug(repo);
+    let plan: { open: false } | { open: true; after: number | null };
+    try {
+      plan = await filingPlan(c, filing, alert, repo, now);
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${dedupeKey} 已立案的单没查成，这轮不另开：${errMessage(err)}`);
+      continue;
+    }
+    if (!plan.open) continue;
+    if (dailyFull.has(slug)) continue;
+    let today: number;
+    try {
+      today = await filing.filedToday(repo);
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${dedupeKey} 今天立了几张没查成，没立案：${errMessage(err)}`);
+      continue;
+    }
+    if (today >= FILE_PER_REPO_DAY) {
+      dailyFull.add(slug);
+      c.deps.log('info', '每小时对账：这个仓今天立案已到上限，剩下的下一轮再看', { repo: slug });
+      continue;
+    }
+    const days = unhandledDays(alert.createdAt, now);
+    const body = renderAlertIssueBody(alert, days);
+    const doc = parseMd('body.md', body);
+    const problems = requiredSectionProblems(doc);
+    if (problems.length > 0 || doneSection(doc) !== 'ok') {
+      c.part.unchecked.push(
+        `提醒 ${dedupeKey} 的单拼不出四节，没立案：${problems[0]?.why ?? '「怎么算做完」是空的'}`,
+      );
+      continue;
+    }
+    const title = clip(alert.title.replace(/\s+/g, ' ').trim() || `提醒 ${dedupeKey} 没人处理`, 200);
+    attempts += 1;
+    let number: number;
+    try {
+      const got = await filing.openIssue({
+        repo,
+        key: issueKey(dedupeKey, plan.after),
+        title,
+        body,
+        labels: FILE_LABELS,
+        milestone: null,
+      });
+      number = got.number;
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${dedupeKey} 没立成：${errMessage(err)}`);
+      continue;
+    }
+    try {
+      await writeFilingHead(c, alert, filingHead(number, beijingDate(now), null));
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${dedupeKey} 的单 #${number} 开了，正文没写上单号：${errMessage(err)}`);
+      continue;
+    }
+    try {
+      await filing.recordFiled({ repo, dedupeKey, number });
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${dedupeKey} 立了 #${number}，今天的笔数没记上：${errMessage(err)}`);
+    }
+    c.part.found += 1;
+    c.deps.log('info', '每小时对账：卡住报警超过 24 小时没人处理，立了一张单', {
+      dedupeKey,
+      number,
+      repo: slug,
+    });
+  }
 }
 
 /**
@@ -430,7 +724,7 @@ export async function sweepAlerts(
   const candidates = [...c.stillOpen.values()].filter(
     (a) => a.level === 'alert' && !isEscalationKey(a.dedupeKey),
   );
-  const quiet = await quietAlerts(c, candidates);
+  const { quiet, failed: handlingFailed, stage } = await quietAlerts(c, candidates);
   for (const alert of candidates) {
     if (quiet.has(alert.id)) continue;
     try {
@@ -439,7 +733,9 @@ export async function sweepAlerts(
       c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${errMessage(err)}`);
     }
   }
-  // 3. 原来那条已经处理了的再提醒，跟着撤
+  // 3. 同一批里该立案的立案（再推照旧；开单失败不挡再推，再推失败也不挡立案）
+  await fileStuckAlerts(c, candidates, quiet, handlingFailed, stage);
+  // 4. 原来那条已经处理了的再提醒，跟着撤
   for (const alert of open) {
     if (!alert.dedupeKey.startsWith(REMIND_PREFIX)) continue;
     const origin = alert.dedupeKey.slice(REMIND_PREFIX.length).split(':')[0] ?? '';
