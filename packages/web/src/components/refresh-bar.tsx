@@ -15,7 +15,9 @@ export function RefreshBar({
   dataUpdatedAt: number;
   staleAfterMs: number;
 }) {
-  const now = useNow();
+  const tick = useNow();
+  // 秒表一秒一拍，读完成的时刻经常比这一拍新不到一秒。直接拿去算会落进将来，显示成「1 秒后」。
+  const now = dataUpdatedAt > tick ? dataUpdatedAt : tick;
   const never = dataUpdatedAt === 0;
   const stale = !never && now - dataUpdatedAt > staleAfterMs;
   return (

@@ -22,6 +22,9 @@ test('点刷新按钮会再读一遍额度', async () => {
   const button = within(header).getByRole('button', { name: '刷新' });
   await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false));
   expect(header.textContent).toContain('最后更新');
+  // 读完成的时刻经常比秒表新不到一秒。不能因此显示成「1 秒后」。
+  expect(header.textContent).toContain('刚刚');
+  expect(header.textContent).not.toContain('秒后');
   const calls = spy.mock.calls.length;
   expect(calls).toBeGreaterThan(0);
   fireEvent.click(button);
