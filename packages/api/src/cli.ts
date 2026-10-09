@@ -18,6 +18,7 @@
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
 //   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
+//   task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"（#1402）：续、放弃、重做一张单。见 task-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
@@ -36,6 +37,14 @@ import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
 import { isCockpitUser } from './session.ts';
+import {
+  type OpenedTaskControl,
+  openTaskControl,
+  parseTaskArgs,
+  runTask,
+  TASK_USAGE,
+  TaskCliError,
+} from './task-cli.ts';
 
 export class CliError extends Error {
   readonly exitCode: number;
@@ -627,6 +636,8 @@ export interface CliDeps {
   readFile?: (path: string) => Promise<string>;
   /** 生成一把新通行证明文（node-key new 用）。不给就是真随机；测试给固定的。 */
   newToken?: () => string;
+  /** 任务工作流的信号和重做（task 命令用）。不给就是真的：懒连 Temporal，重做用 temporal.ts 的 taskRedo。 */
+  openTaskControl?: (env: CliEnv) => Promise<OpenedTaskControl>;
 }
 
 async function openPgIntents(url: string): Promise<{ intents: IntentStore; close(): Promise<void> }> {
@@ -702,6 +713,7 @@ const USAGES: Record<string, string> = {
   'node-key': NODE_KEY_USAGE,
   alert: ALERT_USAGE,
   intent: INTENT_USAGE,
+  task: TASK_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -788,6 +800,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   }
   if (command === 'alert') return runAlertCommand(rest, deps);
   if (command === 'intent') return runIntentCommand(rest, deps);
+  if (command === 'task') return runTaskCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
@@ -897,6 +910,49 @@ async function runAlertCommand(rest: readonly string[], deps: CliDeps): Promise<
   } finally {
     if (opened) await (await opened.catch(() => undefined))?.close();
     if (alertsOpened) await (await alertsOpened.catch(() => undefined))?.close();
+  }
+}
+
+/** task（#1402）：参数不对不连库。做成了打到标准输出；没做成只打标准错误，不打成功那一句。 */
+async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  if (rest.includes('--help') || rest.includes('-h')) {
+    deps.out(TASK_USAGE);
+    return 0;
+  }
+  let args: ReturnType<typeof parseTaskArgs>;
+  try {
+    args = parseTaskArgs(rest);
+  } catch (err) {
+    if (err instanceof TaskCliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    throw err;
+  }
+  let opened: { store: Store; close(): Promise<void> } | undefined;
+  let control: OpenedTaskControl | undefined;
+  try {
+    opened = await deps.openStore(databaseUrl(deps.env));
+    control = await (deps.openTaskControl ?? openTaskControl)(deps.env);
+    deps.out(
+      await runTask(args, {
+        store: opened.store,
+        workflows: control.workflows,
+        taskRedo: control.taskRedo,
+        operator: operatorName(deps.env),
+      }),
+    );
+    return 0;
+  } catch (err) {
+    if (err instanceof TaskCliError || err instanceof CliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    deps.err(`没做成：${describeDbError(err)}`);
+    return 1;
+  } finally {
+    await control?.close().catch(() => undefined);
+    await opened?.close().catch(() => undefined);
   }
 }
 

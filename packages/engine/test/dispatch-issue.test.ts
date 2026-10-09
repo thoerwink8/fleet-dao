@@ -173,6 +173,8 @@ describe('没过准入：打印是哪一道不过，非 0，不起工作流，�
     const r = await cli(w, ['acme/demo', '12']);
     expect(r.code).toBe(1);
     expect(r.err).toContain('already_dispatched');
+    expect(r.err).toContain('fleet-api task redo');
+    expect(r.err).toContain('驾驶舱');
     expect(w.started).toHaveLength(0);
     expect(w.audits).toHaveLength(1);
     expect(w.audits[0]).toMatchObject({ ok: false });
@@ -237,6 +239,9 @@ describe('已派过的不重复派', () => {
     const w = world({ startResult: 'already_exists' });
     const r = await dispatchIssue(w.deps, ARGS);
     expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'already_dispatched' }] });
+    if (r.outcome !== 'refused') throw new Error('上面已经断言是拒绝');
+    expect(r.failures[0]?.why).toContain('fleet-api task redo');
+    expect(r.failures[0]?.why).toContain('驾驶舱');
     expect(w.audits[0]).toMatchObject({ ok: false });
   });
 });
