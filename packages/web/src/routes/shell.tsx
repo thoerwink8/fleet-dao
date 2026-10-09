@@ -94,6 +94,16 @@ function useNoticeToasts() {
   }, [data, navigate]);
 }
 
+/** 跳到正文的落点。tabindex=-1：脚本能聚焦，但不进平时的 Tab 序列。 */
+const CONTENT_ID = 'main-content';
+
+function skipToContent(event: { preventDefault(): void }) {
+  const main = document.getElementById(CONTENT_ID);
+  if (!(main instanceof HTMLElement)) return;
+  event.preventDefault();
+  main.focus();
+}
+
 function Frame() {
   const location = useLocation();
   const [collapsed, setCollapsed] = useLocalState(`${brand.storagePrefix}sidebar-collapsed`, false);
@@ -109,32 +119,46 @@ function Frame() {
   const onlyLocal = nodeId !== null && !isRemotePage(location.pathname);
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-background">
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside
-          className={cn(
-            'hidden shrink-0 border-r bg-panel transition-[width] duration-200 md:block',
-            collapsed ? 'w-sidebar-collapsed' : 'w-sidebar',
-          )}
-        >
-          <SidebarNav collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
-        </aside>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
-          <main className="relative min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-            {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
-          </main>
+    <>
+      {/* 正文区之前的第一个可聚焦元素。平时不占版面，键盘聚焦才显示。 */}
+      <a href={`#${CONTENT_ID}`} className="skip-to-content" onClick={skipToContent}>
+        跳到正文
+      </a>
+      <div className="flex h-dvh flex-col overflow-hidden bg-background">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <aside
+            className={cn(
+              'hidden shrink-0 border-r bg-panel transition-[width] duration-200 md:block',
+              collapsed ? 'w-sidebar-collapsed' : 'w-sidebar',
+            )}
+          >
+            <SidebarNav collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+          </aside>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
+            <main
+              id={CONTENT_ID}
+              tabIndex={-1}
+              className="skip-target relative min-h-0 flex-1 overflow-y-auto scrollbar-thin"
+              onMouseDown={(event) => {
+                // 点空白不该把焦点抢走：只有「跳到正文」才聚焦正文区本身。
+                if (event.target === event.currentTarget) event.preventDefault();
+              }}
+            >
+              {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
+            </main>
+          </div>
         </div>
+        <Sheet open={mobileNav} onOpenChange={setMobileNav}>
+          <SheetContent side="left" className="w-sidebar-sheet bg-panel p-0">
+            <SheetTitle className="sr-only">导航</SheetTitle>
+            <SheetDescription className="sr-only">{brand.product}的全部页面</SheetDescription>
+            <SidebarNav onNavigate={() => setMobileNav(false)} />
+          </SheetContent>
+        </Sheet>
+        <CommandMenu open={cmdk} onOpenChange={setCmdk} />
       </div>
-      <Sheet open={mobileNav} onOpenChange={setMobileNav}>
-        <SheetContent side="left" className="w-sidebar-sheet bg-panel p-0">
-          <SheetTitle className="sr-only">导航</SheetTitle>
-          <SheetDescription className="sr-only">{brand.product}的全部页面</SheetDescription>
-          <SidebarNav onNavigate={() => setMobileNav(false)} />
-        </SheetContent>
-      </Sheet>
-      <CommandMenu open={cmdk} onOpenChange={setCmdk} />
-    </div>
+    </>
   );
 }
 
