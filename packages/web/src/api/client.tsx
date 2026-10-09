@@ -570,10 +570,20 @@ export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
  * 新主页（/）的聚合读取：一屏三块（要你拍的 / 在跑的 / 做完的）+ 持续状态条。
  * 后端不发网址（和 alert-work 一个规矩）：done 的跳转链接这里按品牌拼好再给卡片。
  */
-export function useHome({ enabled = true }: { enabled?: boolean } = {}): { data: HomeState } {
+export function useHome({ enabled = true }: { enabled?: boolean } = {}): {
+  data: HomeState;
+  refetch: () => Promise<unknown>;
+  isFetching: boolean;
+  dataUpdatedAt: number;
+} {
   const api = useApi();
   const query = useQuery({ queryKey: keys.home, queryFn: () => api.home(), enabled });
-  return { data: homeStateOf(query) };
+  return {
+    data: homeStateOf(query),
+    refetch: () => query.refetch(),
+    isFetching: query.isFetching,
+    dataUpdatedAt: query.dataUpdatedAt,
+  };
 }
 
 /** 一份主页数据（本台现读的、远程快照里的都一样）按品牌拼好「做完的」的链接。 */
@@ -648,7 +658,9 @@ export function useNodeHome(nodeId: string | null): {
   data: HomeState;
   node: NodeDetail | undefined;
   error: unknown;
-  refetch: () => unknown;
+  refetch: () => Promise<unknown>;
+  isFetching: boolean;
+  dataUpdatedAt: number;
 } {
   const query = useNode(nodeId);
   return {
@@ -661,6 +673,8 @@ export function useNodeHome(nodeId: string | null): {
     node: query.data,
     error: query.error,
     refetch: () => query.refetch(),
+    isFetching: query.isFetching,
+    dataUpdatedAt: query.dataUpdatedAt,
   };
 }
 

@@ -17,7 +17,9 @@ import type { HomeData } from '../components/home/types';
 import { RemoteViewProvider, SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { Button } from '../components/ui/button';
+import { TIME } from '../lib/format';
 import { useSelectedNodeId } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
 
@@ -27,6 +29,9 @@ export function meta() {
 
 const MAX_DECISIONS = 3;
 const MAX_DONE = 6;
+
+/** 本台主页靠推送更新、不自己轮询；远程快照每 30 秒重拉。超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
+const HOME_STALE_AFTER_MS = 5 * TIME.MIN;
 
 function HomeBody({ data, remote }: { data: HomeData; remote: boolean }) {
   const decisions = data.decisions.slice(0, MAX_DECISIONS);
@@ -144,6 +149,8 @@ export default function Home() {
   const nodeName = useSelectedNodeName();
   const local = useHome({ enabled: nodeId === null });
   const remote = useNodeHome(nodeId);
+  // 本台读 useHome，选了远程环境读那台的快照。刷新条跟眼下这一份主查询走。
+  const main = nodeId === null ? local : remote;
   // 推送重读会把从没读成过的快照退回骨架：显示记住的那次失败
   const remoteError = useShownError(nodeId ?? undefined, { error: remote.error, data: remote.node });
   const state =
@@ -156,8 +163,18 @@ export default function Home() {
   return (
     <Page
       title={nodeId === null ? '主页' : `主页 · ${nodeName ?? nodeId}`}
-      // 持续状态条放在标题右边：首屏的高度留给要你拍的和流水线，不再单占一行
-      actions={state.status === 'data' ? <HealthStrip health={state.data.health} /> : undefined}
+      // 刷新条和持续状态条都放在标题右边：首屏的高度留给要你拍的和流水线，不再单占一行
+      actions={
+        <>
+          {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
+          <RefreshBar
+            onRefresh={() => void main.refetch()}
+            isFetching={main.isFetching}
+            dataUpdatedAt={main.dataUpdatedAt}
+            staleAfterMs={HOME_STALE_AFTER_MS}
+          />
+        </>
+      }
       className="max-w-none"
     >
       {nodeId !== null && remote.node ? (

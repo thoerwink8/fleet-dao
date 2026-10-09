@@ -17,7 +17,8 @@ import { renderApp } from './harness';
 
 afterEach(cleanup);
 
-const skeleton = () => document.querySelector('[aria-busy]');
+// 刷新按钮一直带着 aria-busy，闲着是 false。骨架和正在转圈才是 true。
+const skeleton = () => document.querySelector('[aria-busy="true"]');
 
 function open(ui: ReactElement, route: string, api: FleetApi) {
   return renderApp(ui, { route, api, retry: 1 });
