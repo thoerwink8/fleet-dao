@@ -1481,6 +1481,165 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.stopQueuedTask('nope', stop)).toBe('not_queued');
       });
 
+      const adoptAudit = (target: string) =>
+        audit({
+          action: 'task.adopt',
+          target,
+          via: 'github',
+          reason: '接手无工作流的老任务行',
+        });
+
+      it('接手排队的老行：改标题和原话，创建时刻、优先级、提出人不动，记下那句原因', async () => {
+        const first = await store.createTaskFromIssue(issueTask(), created());
+        expect(
+          await store.adoptOrphanTask(
+            { taskId: NEW_TASK, title: '当前这一代', rawRequest: '新原话' },
+            adoptAudit(`task:${NEW_TASK}`),
+          ),
+        ).toBe('adopted');
+        expect(await store.getTask(NEW_TASK)).toMatchObject({
+          id: NEW_TASK,
+          title: '当前这一代',
+          rawRequest: '新原话',
+          state: 'queued',
+          requestedBy: IDS.founderA,
+          priority: first.task.priority,
+          createdAt: first.task.createdAt,
+          acceptance: [],
+        });
+        const audits = await store.listAudit({ target: `task:${NEW_TASK}`, limit: 10 });
+        expect(audits.items.filter((a) => a.action === 'task.adopt')).toEqual([
+          expect.objectContaining({ reason: '接手无工作流的老任务行', via: 'github', ok: true }),
+        ]);
+      });
+
+      it('接手已叫停的老行：改回排队，不另建', async () => {
+        await store.createTaskFromIssue(issueTask(), created());
+        await store.stopQueuedTask(NEW_TASK, audit({ action: 'task.stop', target: `task:${NEW_TASK}` }));
+        const before = await store.getTask(NEW_TASK);
+        expect(
+          await store.adoptOrphanTask(
+            { taskId: NEW_TASK, title: '当前这一代', rawRequest: '新原话' },
+            adoptAudit(`task:${NEW_TASK}`),
+          ),
+        ).toBe('adopted');
+        expect(await store.getTask(NEW_TASK)).toMatchObject({
+          id: NEW_TASK,
+          state: 'queued',
+          title: '当前这一代',
+          rawRequest: '新原话',
+          createdAt: before?.createdAt,
+          priority: before?.priority,
+          requestedBy: before?.requestedBy,
+        });
+        expect(await store.getTask(OTHER_UUID)).toBeNull();
+      });
+
+      it('已经在跑的不接手：一行不改、不记', async () => {
+        expect(
+          await store.adoptOrphanTask(
+            { taskId: IDS.task12, title: '不该改', rawRequest: '不该改' },
+            adoptAudit(`task:${IDS.task12}`),
+          ),
+        ).toBe('not_orphan');
+        expect(await store.getTask(IDS.task12)).toMatchObject({
+          title: '登录页加验证码',
+          state: 'running',
+        });
+        const audits = await store.listAudit({ target: `task:${IDS.task12}`, limit: 10 });
+        expect(audits.items.filter((a) => a.action === 'task.adopt')).toEqual([]);
+      });
+
+      it('没有这条、编号看不懂：not_found', async () => {
+        const missing = adoptAudit(`task:${OTHER_UUID}`);
+        expect(
+          await store.adoptOrphanTask({ taskId: OTHER_UUID, title: 'x', rawRequest: 'y' }, missing),
+        ).toBe('not_found');
+        expect(await store.adoptOrphanTask({ taskId: 'nope', title: 'x', rawRequest: 'y' }, missing)).toBe(
+          'not_found',
+        );
+      });
+
+      it('起工作流之前改老行：不记操作记录；已叫停的改回排队，放回去后标题和状态还原', async () => {
+        await store.createTaskFromIssue(issueTask(), created());
+        await store.stopQueuedTask(NEW_TASK, audit({ action: 'task.stop', target: `task:${NEW_TASK}` }));
+        const ready = await store.prepareOrphanTask({
+          taskId: NEW_TASK,
+          title: '当前这一代',
+          rawRequest: '新原话',
+        });
+        expect(ready).toEqual({
+          status: 'prepared',
+          before: { title: '新需求', rawRequest: '原话', state: 'stopped' },
+        });
+        expect(await store.getTask(NEW_TASK)).toMatchObject({
+          title: '当前这一代',
+          rawRequest: '新原话',
+          state: 'queued',
+          requestedBy: IDS.founderA,
+        });
+        expect(
+          (await store.listAudit({ target: `task:${NEW_TASK}`, limit: 10 })).items.filter(
+            (a) => a.action === 'task.adopt',
+          ),
+        ).toEqual([]);
+        expect(
+          await store.restoreOrphanTask({
+            taskId: NEW_TASK,
+            title: '新需求',
+            rawRequest: '原话',
+            state: 'stopped',
+          }),
+        ).toBe('restored');
+        expect(await store.getTask(NEW_TASK)).toMatchObject({
+          title: '新需求',
+          rawRequest: '原话',
+          state: 'stopped',
+          requestedBy: IDS.founderA,
+        });
+      });
+
+      it('已经在跑的不预先改、也不放回去：一行不改', async () => {
+        expect(
+          await store.prepareOrphanTask({ taskId: IDS.task12, title: '不该改', rawRequest: '不该改' }),
+        ).toEqual({ status: 'not_orphan' });
+        expect(
+          await store.restoreOrphanTask({
+            taskId: IDS.task12,
+            title: '不该改',
+            rawRequest: '不该改',
+            state: 'queued',
+          }),
+        ).toBe('not_queued');
+        expect(await store.getTask(IDS.task12)).toMatchObject({
+          title: '登录页加验证码',
+          state: 'running',
+        });
+      });
+
+      it('预先改、放回去时没有这条或编号看不懂：not_found', async () => {
+        expect(await store.prepareOrphanTask({ taskId: OTHER_UUID, title: 'x', rawRequest: 'y' })).toEqual({
+          status: 'not_found',
+        });
+        expect(await store.prepareOrphanTask({ taskId: 'nope', title: 'x', rawRequest: 'y' })).toEqual({
+          status: 'not_found',
+        });
+        expect(
+          await store.restoreOrphanTask({ taskId: OTHER_UUID, title: 'x', rawRequest: 'y', state: 'queued' }),
+        ).toBe('not_found');
+        expect(
+          await store.restoreOrphanTask({ taskId: 'nope', title: 'x', rawRequest: 'y', state: 'queued' }),
+        ).toBe('not_found');
+      });
+
+      it('接手时操作记录写不进：标题也不改', async () => {
+        await store.createTaskFromIssue(issueTask(), created());
+        await expect(
+          store.adoptOrphanTask({ taskId: NEW_TASK, title: '不该留下', rawRequest: '不该留下' }, badAudit()),
+        ).rejects.toThrow();
+        expect((await store.getTask(NEW_TASK))?.title).toBe('新需求');
+      });
+
       describe('「让 AI 接活」开关', () => {
         const target = `repo:${IDS.repo}`;
         const enable = audit({

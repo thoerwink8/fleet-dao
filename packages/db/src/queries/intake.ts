@@ -30,7 +30,7 @@ export async function listIntakeRepos(db: Db): Promise<IntakeRepoRow[]> {
     .orderBy(asc(repos.owner), asc(repos.name));
 }
 
-/** 这张单的任务行（没有是 null）：拉单据此判「派出过没有」。 */
+/** 这张单的任务行（没有是 null）。派出过没有不在这里判。 */
 export async function taskStateByIssue(
   db: Db,
   repoId: string,

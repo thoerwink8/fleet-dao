@@ -7,7 +7,8 @@
 //
 // 准入（先便宜的再贵的，不用现读 GitHub 的都在前面；排序之前一律不多读一次这张单）：
 //   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
-//   还没派过 → 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
+//   还没派过（和点名派单共用 readDispatchStanding：没有任务行，或行是 queued/stopped 且 Temporal 里没有任何一代；
+//   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
 //   留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
 //   缺则留一次言，不拉）→ 改动规模不是最重档（单子列的路径超过 50 个）。
 // 整理待办（#1338，临时指挥官，jobs/groom.ts）：开单时间早于「让 AI 接活」打开那一刻的老单，只有贴了「整理过」（整理会话判为仍成立）或
@@ -25,11 +26,14 @@
 // - 读不到的不当成没有：读仓里的单失败、白名单读不出、现读一张单失败、起工作流失败，都记进 unchecked，这一轮记 partial / failed，
 //   不记 ok（没跑成 ≠ 没问题）。「开关都关着」是正常的空闲，不是没扫到：scanned 里算上受管的仓，免得看门狗把空闲当成故障。
 // - 同一张单任何时候最多一条任务工作流：工作流编号定死（taskWorkflowId），起的时候由真实现用 REJECT_DUPLICATE；这里再用
-//   dispatched() 先挡一道，省得每 5 分钟为已经派出去的单多读一次 GitHub。重开的单、被撤掉的单都不会自己重来：要再做，在驾驶舱点「重做」（jobs/redo.ts 另起一代）。
+//   readDispatchStanding 先挡一道，省得每 5 分钟为已经派出去的单多读一次 GitHub。有一代在跑或已结束的，重开也不会自己重来：
+//   要再做，在驾驶舱点「重做」（jobs/redo.ts 另起一代）。只有任务行、Temporal 里没有任何一代、行还是 queued 或 stopped 的，
+//   不算派过，这一轮会接手那一行再起（不另建一行）。
 // - 交代不全的单只留一次言：留言的幂等键由缺的内容算出来，同一处缺法不会每 5 分钟再留一条；缺的变了才是新的一条。
 // - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条、每小时最多起 MAX_STARTS_PER_HOUR 条：
 //   开关刚打开、一堆单同时合格时，一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
-//   巡检单不进每小时这 3 条（本轮、在跑照样占）。库里数「一小时起了几条」时也把它剔出去（real/intake.ts）。
+//   巡检单不进每小时这 3 条（本轮、在跑照样占）。库里数「一小时起了几条」时也把它剔出去（real/intake.ts）：
+//   新建的数任务行建出时刻，接手没有工作流的老行另数这一小时里成功的 task.adopt（建出时刻已在这一小时的不重复数）。
 // - 熔断（intake-pick.ts 的 decideBreaker）：最近 6 条结束的任务里失败 4 条以上就整个停拉；冷却 1 小时后只放 1 条试探，试探成功才恢复，
 //   试探失败再冷却 1 小时。进入和恢复各推一条通知。状态在设置表 engine.intakeBreaker 一行；读不到、认不出，这一轮一张单都不拉。
 // - 排序只在准入之后：先过完不用现读 GitHub 的关，排好序、有空位才现读这张单（screenPlan）再起，免得开着的老单每轮各读一次。
@@ -72,6 +76,7 @@ import {
 import { TIER_HEAVYWEIGHT_FILE_THRESHOLD } from '../runner/tier.ts';
 import { isCanaryIssueTitle } from './canary.ts';
 import { normalizeCanarySlug } from './canary-scope.ts';
+import { type IssueTaskRow, readDispatchStanding, type TaskGenerationFacts } from './dispatch-standing.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { AUTO_GROOM_TEXT, autoGroomWhy, type GroomRequestOutcome } from './groom-request.ts';
 import {
@@ -359,8 +364,16 @@ export interface IntakeDeps {
   openIssues(repo: IntakeRepo): Promise<{ issues: IntakeIssue[]; openMilestones: IntakeMilestone[] }>;
   /** 这张单此刻的样子。读不到照抛。 */
   plan(repo: IntakeRepo, issueNumber: number): Promise<IntakePlan>;
-  /** 这张单是不是已经派出过（库里有任务行且不在排队，或者工作流编号用过）。读不到照抛：不当成「没派过」。 */
-  dispatched(repo: IntakeRepo, issueNumber: number): Promise<boolean>;
+  /**
+   * 这张单的任务行。没有是 null。读不到照抛：不当成「没派过」。
+   * 派出过没有不在这里判，和点名派单共用 readDispatchStanding。
+   */
+  issueTask(repo: IntakeRepo, issueNumber: number): Promise<IssueTaskRow | null>;
+  /**
+   * 这张单在 Temporal 里的各代。问不清回 ok:false，不许当成一代都没有。
+   * 只有任务行存在时才会被问到。
+   */
+  taskGenerations(repo: IntakeRepo, issueNumber: number): Promise<TaskGenerationFacts>;
   /** 这个仓开着的 PR 的「需求」栏挂着的单（单号 → PR 号，见 prClaimedIssues）。读不到（含 PR 列表翻不完）照抛：不当成「没有 PR」。 */
   openPrClaims(repo: IntakeRepo): Promise<Map<number, number>>;
   /** 给单子贴「本机做」标签（幂等）。 */
@@ -528,7 +541,9 @@ async function admitIssue(
     skip(t, slug, issue.number, early);
     return null;
   }
-  if (await deps.dispatched(repo, issue.number)) {
+  const standing = await readDispatchStanding(deps, repo, issue.number);
+  if (standing.kind === 'uncertain') throw new Error(standing.why);
+  if (standing.kind === 'dispatched') {
     skip(t, slug, issue.number, { reason: 'already_dispatched', why: '已经派出过' });
     return null;
   }

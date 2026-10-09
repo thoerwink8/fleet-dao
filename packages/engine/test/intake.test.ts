@@ -6,6 +6,7 @@ import type { ScheduleResult } from '@fleet-dao/db';
 import { githubWhitelist } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { canaryIssue } from '../src/jobs/canary.ts';
+import type { IssueTaskRow, TaskGenerationFacts } from '../src/jobs/dispatch-standing.ts';
 import {
   INTAKE_JOB,
   type IntakeDeps,
@@ -144,6 +145,10 @@ function harness(
   data: {
     issues?: IntakeIssue[];
     plans?: Record<number, IntakePlan>;
+    /**
+     * 这些单号当成已经有一代在跑。
+     * 没有任务行的单不在这里：默认没派过。
+     */
     dispatched?: number[];
     /** 开着的 PR 的「需求」栏挂着的单：单号 → PR 号。 */
     prClaims?: Record<number, number>;
@@ -193,8 +198,13 @@ function harness(
       planReads.push(n);
       return data.plans?.[n] ?? plan();
     },
-    async dispatched(_repo, n) {
-      return data.dispatched?.includes(n) ?? false;
+    async issueTask(_repo, n): Promise<IssueTaskRow | null> {
+      if (data.dispatched?.includes(n)) return { id: `t-${n}`, state: 'running' };
+      return null;
+    },
+    async taskGenerations(_repo, n): Promise<TaskGenerationFacts> {
+      if (data.dispatched?.includes(n)) return { ok: true, lives: ['running'] };
+      return { ok: true, lives: [] };
     },
     async openPrClaims() {
       return new Map(Object.entries(data.prClaims ?? {}).map(([n, pr]) => [Number(n), pr]));
@@ -698,6 +708,41 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.planReads).toEqual([]);
   });
 
+  it('排队或已叫停、Temporal 里没有任何一代：不算派过，照起', async () => {
+    for (const state of ['queued', 'stopped'] as const) {
+      const h = harness({
+        async issueTask() {
+          return { id: 'old-row', state };
+        },
+      });
+      await runIntakeJob(h.deps);
+      expect(h.started).toHaveLength(1);
+    }
+  });
+
+  it('有一代在跑，或已做完的一代：不再起', async () => {
+    const running = harness({
+      async issueTask() {
+        return { id: 'old-row', state: 'queued' };
+      },
+      async taskGenerations() {
+        return { ok: true, lives: ['running'] };
+      },
+    });
+    await runIntakeJob(running.deps);
+    expect(running.started).toEqual([]);
+    const done = harness({
+      async issueTask() {
+        return { id: 'old-row', state: 'done' };
+      },
+      async taskGenerations() {
+        return { ok: true, lives: ['terminated'] };
+      },
+    });
+    await runIntakeJob(done.deps);
+    expect(done.started).toEqual([]);
+  });
+
   it('起工作流时编号已经用过（上一轮其实起成了）→ 不算起了，也不算出错', async () => {
     const h = harness({
       async start() {
@@ -709,14 +754,17 @@ describe('runIntakeJob · 一轮', () => {
     expect(run.found).toBe(0);
   });
 
-  it('拉两轮同一张好单：第二轮 dispatched 说派过了，只起一条', async () => {
-    const dispatched: number[] = [];
+  it('拉两轮同一张好单：第二轮有一代在跑，只起一条', async () => {
+    const seen: number[] = [];
     const h = harness({
-      async dispatched(_r, n) {
-        return dispatched.includes(n);
+      async issueTask(_r, n) {
+        return seen.includes(n) ? { id: `t-${n}`, state: 'running' } : null;
+      },
+      async taskGenerations(_r, n) {
+        return seen.includes(n) ? { ok: true, lives: ['running'] } : { ok: true, lives: [] };
       },
       async start({ issueNumber, title, body, author }) {
-        dispatched.push(issueNumber);
+        seen.push(issueNumber);
         h.started.push({ issueNumber, title, body, author });
         return 'started';
       },
@@ -964,12 +1012,30 @@ describe('runIntakeJob · 【故意造出的失败】读不到的不当成没有
 
   it('「已经派过」读不到 → 这张记没查成，不当成没派过再起一条', async () => {
     const h = harness({
-      async dispatched() {
+      async issueTask() {
         throw new Error('库读不到');
       },
     });
     const run = await runIntakeJob(h.deps);
     expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('库读不到');
+    expect(h.started).toEqual([]);
+  });
+
+  it('问工作流抛错：这张记没查成，不当成没有工作流再起', async () => {
+    const h = harness({
+      async issueTask() {
+        return { id: 'old-row', state: 'queued' };
+      },
+      async taskGenerations() {
+        throw new Error('UNAVAILABLE');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('不确定');
+    expect(run.why).toContain('没有当成没有工作流');
+    expect(run.why).toContain('UNAVAILABLE');
     expect(h.started).toEqual([]);
   });
 

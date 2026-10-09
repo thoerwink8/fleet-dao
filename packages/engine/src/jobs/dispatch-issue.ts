@@ -3,7 +3,9 @@
 // 过了就起任务工作流（和拉单同一个 start：先建任务行，再用定死的编号起，REJECT_DUPLICATE，所以已派过的不会重复派）。
 //
 // 改这里之前必须知道：
-// - 闸分两类。「硬闸」任何情况下都不放行（--force 也不行）：不是 issue / 已关、作者不在白名单、母单子单、本机做、已派过、碰 workflows、
+// - 闸分两类。「硬闸」任何情况下都不放行（--force 也不行）：不是 issue / 已关、作者不在白名单、母单子单、本机做、已派过
+//   （有一代任务工作流在跑或已结束；只有任务行、没有任何一代、行是 queued 或 stopped 的不算，接手那一行再派）、
+//   任务工作流没查成（不确定，不当成没有工作流）、碰 workflows、
 //   已有 PR 挂着、版本认不出（没查成）、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）。
 //   「就绪度闸」--force 可以放行：不是当前版本（含未排期）、改动规模是最重档、历史失败超限。放行必须带 --note，进操作记录。
 // - 硬闸遇到第一个就停（后面的不必读）；就绪度闸全部判完一次说全，让人看清 force 放行的是哪几样。
@@ -19,6 +21,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
 import { masterOffNote } from '../engine-master.ts';
 import { readTaskBrief, type TaskBrief } from '../runner/task-brief.ts';
+import { ORPHAN_TASK_ADOPT_NOTE, readDispatchStanding } from './dispatch-standing.ts';
 import {
   type IntakeDeps,
   type IntakeIssue,
@@ -44,6 +47,7 @@ export type DispatchGateReason =
   | 'sub_issue'
   | 'reserved_local'
   | 'already_dispatched'
+  | 'workflow_unknown'
   | 'touches_workflows'
   | 'pr_claimed'
   | 'version_unreadable'
@@ -89,6 +93,8 @@ export type DispatchIssueResult =
       /** --force 放行了的就绪度闸（没用上 force 时是空的）。 */
       forced: GateFailure[];
       tier: TaskBrief['tier'];
+      /** 接手了没有任务工作流的老任务行（不另建一行）。 */
+      adopted: boolean;
     }
   | { outcome: 'refused'; failures: GateFailure[] };
 
@@ -102,7 +108,8 @@ export interface DispatchIssueDeps {
   plan: IntakeDeps['plan'];
   /** 这张单在仓里开着的单列表里的样子（标题、正文、作者）；列表里没有回 null。读不到照抛。 */
   listIssue(repo: IntakeRepo, issueNumber: number): Promise<IntakeIssue | null>;
-  dispatched: IntakeDeps['dispatched'];
+  issueTask: IntakeDeps['issueTask'];
+  taskGenerations: IntakeDeps['taskGenerations'];
   openPrClaims: IntakeDeps['openPrClaims'];
   readSpecDoc: IntakeDeps['readSpecDoc'];
   /** 这张单以前的任务工作流里失败收场的有几条。读不到照抛：不当成 0。 */
@@ -150,7 +157,8 @@ async function hardFailure(
   repo: IntakeRepo,
   issueNumber: number,
 ): Promise<
-  { failure: GateFailure } | { failure: null; issue: IntakeIssue; plan: IntakePlan; brief: TaskBrief }
+  | { failure: GateFailure }
+  | { failure: null; issue: IntakeIssue; plan: IntakePlan; brief: TaskBrief; adopted: boolean }
 > {
   const master = masterNote(await deps.engineMasterRow());
   if (!master.on) return { failure: fail('engine_off', master.why) };
@@ -171,7 +179,9 @@ async function hardFailure(
   const local = localGate(plan);
   if (!local.ok) return { failure: fail(local.reason, local.why) };
 
-  if (await deps.dispatched(repo, issueNumber)) {
+  const standing = await readDispatchStanding(deps, repo, issueNumber);
+  if (standing.kind === 'uncertain') return { failure: fail('workflow_unknown', standing.why) };
+  if (standing.kind === 'dispatched') {
     return {
       failure: fail(
         'already_dispatched',
@@ -212,7 +222,7 @@ async function hardFailure(
       failure: fail('brief_incomplete', `交代不全（任务工作流第一步会拒收，force 也派不了）：${what}`),
     };
   }
-  return { failure: null, issue, plan, brief: brief.brief };
+  return { failure: null, issue, plan, brief: brief.brief, adopted: standing.kind === 'adopt' };
 }
 
 /** 就绪度闸：全部判完一次说全。 */
@@ -238,9 +248,11 @@ async function readinessFailures(
 
 function summarize(result: DispatchIssueResult): string {
   if (result.outcome === 'started') {
-    return result.forced.length > 0
-      ? `已派（force 放行了：${result.forced.map((f) => f.reason).join('、')}）`
-      : '已派';
+    const head =
+      result.forced.length > 0
+        ? `已派（force 放行了：${result.forced.map((f) => f.reason).join('、')}）`
+        : '已派';
+    return result.adopted ? `${head}（${ORPHAN_TASK_ADOPT_NOTE}）` : head;
   }
   return `没派：${result.failures.map((f) => `${f.reason}（${f.why}）`).join('；')}`;
 }
@@ -300,7 +312,7 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
   const hard = await hardFailure(deps, repo, args.issueNumber);
   if (hard.failure) return { outcome: 'refused', failures: [hard.failure] };
 
-  const { issue, plan, brief } = hard;
+  const { issue, plan, brief, adopted } = hard;
   const soft = await readinessFailures(deps, repo, args.issueNumber, plan, brief);
   if (soft.length > 0 && !args.force) return { outcome: 'refused', failures: soft };
 
@@ -322,14 +334,14 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
       ],
     };
   }
-  return { outcome: 'started', forced: soft, tier: brief.tier };
+  return { outcome: 'started', forced: soft, tier: brief.tier, adopted };
 }
 
 // —— 命令行参数和打印 ——
 
 export const DISPATCH_ISSUE_USAGE =
   '用法：fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]（开关关着时点名把一张单交给引擎：先跑一遍拉单的准入，过了才派。' +
-  '--force 只放行就绪度闸〔不是当前版本、规模最重档、历史失败超限〕，必须带 --note；作者白名单、母单子单、本机做、已有 PR、碰 workflows、已派过任何情况下都不放行。' +
+  '--force 只放行就绪度闸〔不是当前版本、规模最重档、历史失败超限〕，必须带 --note；作者白名单、母单子单、本机做、已有 PR、碰 workflows、已有任务工作流、任务工作流没查成，任何情况下都不放行。没有工作流的排队或已叫停老行会接手再派。' +
   '不受「让 AI 接活」开关限制，但引擎总开关关着会拒。每次都写操作记录。退出码：0 派了；1 没派或没查成；2 参数不对）';
 
 export class DispatchIssueUsageError extends Error {
@@ -427,7 +439,9 @@ export async function runDispatchIssue(argv: readonly string[], io: DispatchIssu
 export function describeDispatchIssue(args: DispatchIssueArgs, result: DispatchIssueResult): string {
   const ref = `${args.owner}/${args.name}#${args.issueNumber}`;
   if (result.outcome === 'started') {
-    const lines = [`已派：${ref} 的任务工作流已经起了（${result.tier.reason}）`];
+    const lines = [
+      `已派：${ref} 的任务工作流已经起了（${result.tier.reason}）${result.adopted ? `（${ORPHAN_TASK_ADOPT_NOTE}）` : ''}`,
+    ];
     for (const f of result.forced)
       lines.push(`  force 放行：${f.reason}（${f.why}）；理由：${args.note ?? ''}`);
     return lines.join('\n');
