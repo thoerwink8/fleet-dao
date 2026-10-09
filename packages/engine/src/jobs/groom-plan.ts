@@ -13,7 +13,8 @@
 //   进 rejected 写明像谁。
 // - splitFrom 的新单标题必须带「（#<号> 第 N 片）」（N 是正整数，号和 splitFrom 一样），否则整条 rejected。
 //   总账（场景里写了「分片」，或标题、正文有「总账」「第一片」「下一片」）一次最多开 1 片；上一片还开着，或开着的 PR
-//   需求栏 Refs 着它，就不开。
+//   需求栏 Refs 着它，就不开。还要已经有合并了的分片 PR（需求栏 Refs 着这张总账）：名单是空的就不开；名单没读到
+//   （null 或不传）写成「没读到分片关系」，不开，也不写成「没有」。会话自己说已经合过不算。
 // - 补老单只往末尾接，原文、原话一个字不动：老单里已有的节（场景、已知的模块、怎么算做完写了字的）不补，已经有整理补充的单不再补。
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
 // - 涉及改标准路径、`.github/workflows/`（正文里认得出路径）或会话自己标了删数据 / 花钱的，贴「要人拍」，引擎不拉。
@@ -302,12 +303,18 @@ function ledgerSliceBlocked(
   ledger: number,
   openIssues: readonly { number: number; title: string; body: string }[],
   similar: readonly SimilarCandidate[],
+  mergedPulls: readonly { number: number; refs: readonly number[] }[] | null | undefined,
 ): string | null {
   const open = openIssues.find((i) => isOpenSliceOf(i, ledger));
   if (open) return `上一片 #${open.number}「${open.title}」还开着，这一片不开`;
   for (const c of similar) {
     if (c.kind !== 'pull') continue;
     if (issueColumnRefs(c.body).refs.includes(ledger)) return `分片 PR #${c.number} 还没合，这一片不开`;
+  }
+  // 上一片还开着、PR 还没合，先报那两样。到这里才看有没有已经合并的分片：名单没读到不能当成「一个都没有」。
+  if (mergedPulls == null) return '没读到分片关系，这一片不开';
+  if (!mergedPulls.some((p) => p.refs.includes(ledger))) {
+    return `还没有合并了的分片 PR（Refs #${ledger}），这一片不开`;
   }
   return null;
 }
@@ -346,6 +353,12 @@ export interface PlanContext {
   /** 开着的单（含陌生人开的）、最近关掉的单、开着的 PR：查重用。 */
   similar: SimilarCandidate[];
   standardPaths: readonly StandardPath[];
+  /**
+   * 这一窗口里合并了的 PR（需求栏 Refs 已抽出）。
+   * null = 没读到：总账的下一片不开，原因写「没读到分片关系」，不当成「没有」。
+   * 不传与 null 一样。空数组 = 读到了，没有合并的 PR。
+   */
+  mergedPulls?: readonly { number: number; refs: readonly number[] }[] | null;
 }
 
 export interface ExecutedPlan {
@@ -510,7 +523,7 @@ export async function executeGroomPlan(
       }
     }
     if (parent !== undefined && isLedgerIssue(parent)) {
-      const blocked = ledgerSliceBlocked(parent.number, openIssues, ctx.similar);
+      const blocked = ledgerSliceBlocked(parent.number, openIssues, ctx.similar, ctx.mergedPulls);
       if (blocked) {
         rejected.push({ what, why: blocked });
         continue;

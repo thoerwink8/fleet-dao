@@ -199,6 +199,8 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
       standardPaths,
       // 含陌生人开的：他们的正文不进提示词，但「上一片还开着」仍要认
       openIssues: facts.issues.map((i) => ({ number: i.number, title: i.title, body: i.body })),
+      // 会话说「已经合过」不算。null 是没读到，空数组是读到了、没有。
+      mergedPulls,
     },
     deps.writes(repo),
   );

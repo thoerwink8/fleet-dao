@@ -335,12 +335,60 @@ describe('executeGroomPlan · 开新单', () => {
           newItem(2, { title: '重构日志轮转策略（#139 第 3 片）', splitFrom: 139 }),
         ],
       }),
-      ctxOf([ledger]),
+      ctxOf([ledger], { mergedPulls: [{ number: 1399, refs: [139] }] }),
       f.writes,
     );
     expect(out.result.opened).toHaveLength(1);
     expect(out.result.opened[0]?.splitFrom).toBe(139);
     expect(out.result.rejected.map((r) => r.why).join('')).toContain('一次最多开 1 片');
+  });
+
+  it('总账没有已合并的分片 PR：会话写了下一片也整条被拒，不开', async () => {
+    const ledger = issue(139, { title: 'design 拆分（总账）' });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [newItem(1, { title: '统一导出报表格式（#139 第 2 片）', splitFrom: 139 })],
+      }),
+      ctxOf([ledger], { mergedPulls: [] }),
+      f.writes,
+    );
+    expect(out.result.opened).toEqual([]);
+    expect(f.calls.filter((c) => c.kind === 'openIssue')).toEqual([]);
+    expect(out.result.rejected).toHaveLength(1);
+    expect(out.result.rejected[0]?.why).toContain('还没有合并了的分片');
+    expect(out.result.rejected[0]?.why).not.toContain('没读到');
+  });
+
+  it('合并的 PR 没 Refs 这张总账：不算已有分片，下一片整条被拒', async () => {
+    const ledger = issue(139, { title: 'design 拆分（总账）' });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [newItem(1, { title: '统一导出报表格式（#139 第 2 片）', splitFrom: 139 })],
+      }),
+      ctxOf([ledger], { mergedPulls: [{ number: 1400, refs: [140] }] }),
+      f.writes,
+    );
+    expect(out.result.opened).toEqual([]);
+    expect(f.calls.filter((c) => c.kind === 'openIssue')).toEqual([]);
+    expect(out.result.rejected[0]?.why).toContain('还没有合并了的分片');
+  });
+
+  it('没读到分片关系：总账下一片不开，原因写没读到，不当成没有', async () => {
+    const ledger = issue(139, { title: 'design 拆分（总账）' });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [newItem(1, { title: '统一导出报表格式（#139 第 2 片）', splitFrom: 139 })],
+      }),
+      ctxOf([ledger], { mergedPulls: null }),
+      f.writes,
+    );
+    expect(out.result.opened).toEqual([]);
+    expect(f.calls.filter((c) => c.kind === 'openIssue')).toEqual([]);
+    expect(out.result.rejected[0]?.why).toContain('没读到分片关系');
+    expect(out.result.rejected[0]?.why).not.toContain('还没有合并');
   });
 });
 
@@ -817,6 +865,29 @@ describe('runGroomRequests · 接手一次整理', () => {
     expect(h.dones[0]?.ok).toBe(true);
     expect(h.dones[0]?.result?.rejected.map((r) => r.what)).toContain('清单里的「closeIssues」');
     expect(new Set(h.calls.map((c) => c.kind))).toEqual(new Set(['addLabel']));
+  });
+
+  it('有已合并分片时会话交的下一片会开出来；读到了但没 Refs 这张总账就拒', async () => {
+    const ledger = issue(139, { title: 'design 拆分（总账）' });
+    const answer = `\`\`\`json\n${JSON.stringify({
+      summary: '开下一片',
+      newIssues: [newItem(1, { title: '统一导出报表格式（#139 第 2 片）', splitFrom: 139 })],
+    })}\n\`\`\``;
+    const opened = runHarness({ issues: [ledger], answer });
+    opened.deps.readMergedPulls = async () => [
+      { number: 1399, title: 'design 决定表（#139 第 1 片）', body: '**需求**：Refs #139\n' },
+    ];
+    await runGroomRequests(opened.deps);
+    expect(opened.dones[0]?.ok).toBe(true);
+    expect(opened.dones[0]?.result?.opened).toHaveLength(1);
+    expect(opened.dones[0]?.result?.opened[0]?.splitFrom).toBe(139);
+
+    const none = runHarness({ issues: [ledger], answer });
+    await runGroomRequests(none.deps);
+    expect(none.dones[0]?.ok).toBe(true);
+    expect(none.dones[0]?.result?.opened ?? []).toEqual([]);
+    expect(none.calls.filter((c) => c.kind === 'openIssue')).toEqual([]);
+    expect(none.dones[0]?.result?.rejected.map((r) => r.why).join('')).toContain('还没有合并了的分片');
   });
 
   it('没读到分片关系：整理照常跑，摘要里写明，不当成没有', async () => {
