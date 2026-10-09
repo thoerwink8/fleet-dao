@@ -162,15 +162,34 @@ function maskJsonFields(text) {
 }
 
 /**
+ * URL 查询参数里的令牌（#1148）：mirasim 启动时把 `http://localhost:4318/?token=<令牌>` 整条打进 journalctl，
+ * 谁读日志谁就拿到能登录这台机器上 AI 会话的令牌。参数名（? 或 & 后面、= 前面）是下面这几类才遮：
+ * 名字里带 token / secret / password / passwd / pwd / api_key / apikey 的（access_token、refresh_token、client_secret……），
+ * 或者整个名字就是 key（`?key=` 只在 URL 查询里才认，别处的 key 满处都是）。名字不分大小写，_ 和 - 都认。
+ * 值：8 位以上的字母数字加 . _ ~ + / = - %（% 是为了百分号编码过的令牌也一并遮掉），到第一个不属于这些的字符为止。
+ * 8 位以下的值不遮（?key=en、?token=1 这类不是令牌，遮了只会把日志弄乱）。
+ */
+const URL_PARAM_NAME = `(?:[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key)[A-Za-z0-9_.-]*|key)`;
+const URL_TOKEN_PARAM = new RegExp(`(?<head>[?&]${URL_PARAM_NAME}=)[A-Za-z0-9._~+/=%-]{8,}`, 'gi');
+
+/** URL 查询参数里的令牌：参数名和 URL 其余部分照旧，值换成 *** */
+function maskUrlTokens(text) {
+  return text.replace(URL_TOKEN_PARAM, (_m, head) => `${head}${MASK}`);
+}
+
+/**
  * 把一段文字里的密钥值换成 ***。纯函数：同样的输入永远同样的输出，不改入参。
  * 遮的是：`-s VALUE`、`--secret VALUE`、`--secret=VALUE`、`-p VALUE`、`--token VALUE`、`--password VALUE`，
- * 名字带 secret/token/password/credential/key 的 JSON 字段（"clientSecret": "…"）。
+ * 名字带 secret/token/password/credential/key 的 JSON 字段（"clientSecret": "…"），
+ * URL 查询里的 `?token=…`、`&access_token=…`、`&api_key=…`、`?key=…`、`secret`、`password`（见 URL_TOKEN_PARAM）。
  * 不遮：值像路径、pid、主机名的单字母参数（ps -p 1234），别的文字一个字不改。
+ * 认不出的形状（参数名本身被百分号编码、令牌被换行拆开、不满 8 位的值）一个字不改——也就是说
+ * 「没改」不等于「没有令牌」：hasSecretValue 只说「这里遮过」，不说「这里干净」。
  */
 export function redactText(text) {
   const s = String(text);
   if (s === '') return s;
-  return maskJsonFields(maskFlags(s));
+  return maskUrlTokens(maskJsonFields(maskFlags(s)));
 }
 
 /** 一行一行过（命令行的输出按行给的）：整段的换行怎么进怎么出 */
@@ -181,7 +200,7 @@ export function redactLines(text) {
     .join('\n');
 }
 
-/** 一串文字里有没有能被打码的值：没有就不必过管道（钩子和自检用） */
+/** 一串文字里有没有认得出、能被打码的值（钩子和自检用）。false 只表示「没认出」，不表示「里面没有密钥」 */
 export function hasSecretValue(text) {
   return redactText(text) !== String(text);
 }
