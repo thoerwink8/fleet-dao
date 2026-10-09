@@ -41,6 +41,7 @@ import {
   HistoryStrip,
 } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
 import {
@@ -50,7 +51,7 @@ import {
   channelProbeInterrupted,
   routeKindMap,
 } from '../lib/channel-status';
-import { formatAgo, formatClock, formatDateTime, formatIn } from '../lib/format';
+import { formatAgo, formatClock, formatDateTime, formatIn, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import { formatProbeMs, PROBE_RESULT_BG, PROBE_RESULT_WORD } from '../lib/probe-history-view';
@@ -72,6 +73,9 @@ export function meta() {
 
 const DESCRIPTION =
   '每个渠道通不通、不通为什么。点「立即探测」让法国引擎现在就探，不用等下一轮（Claude 订阅 15 分钟一轮；Mirasim、Cursor、Grok 探通后 2 小时一轮）。';
+
+/** 渠道目录每 30 秒自己重拉。超过 5 分钟还没再读成，刷新条才标「数据已过期」。 */
+const ROUTING_STATUS_STALE_AFTER_MS = 5 * TIME.MIN;
 
 const STATE_WORD: Record<NonNullable<Route['probe']>['state'], { label: string; tone: Tone }> = {
   ok: { label: '通过', tone: 'done' },
@@ -251,6 +255,13 @@ export default function RoutingStatus() {
           {downCount > 0 ? <StatusChip tone="fail" label={`${downCount} 个故障`} /> : null}
           {unknownCount > 0 ? <StatusChip tone="stall" label={`${unknownCount} 个待查`} /> : null}
           {quietCount > 0 ? <StatusChip tone="stop" label={`${quietCount} 个已关或未使用`} /> : null}
+          <RefreshBar
+            onRefresh={() => void routing.refetch()}
+            isFetching={routing.isFetching}
+            // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
+            dataUpdatedAt={routing.dataUpdatedAt > now ? now : routing.dataUpdatedAt}
+            staleAfterMs={ROUTING_STATUS_STALE_AFTER_MS}
+          />
           <Button
             size="sm"
             onClick={() => fire()}
