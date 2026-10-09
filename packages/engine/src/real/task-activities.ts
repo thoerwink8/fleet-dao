@@ -34,6 +34,7 @@ import type {
   ReadTaskBriefInput,
   WaitMergedInput,
 } from '../task-contract.ts';
+import { MAX_MAIN_SYNCS } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import { mapped } from './mirror.ts';
@@ -52,7 +53,10 @@ import type { WorkTrees } from './worktrees.ts';
 export const MERGE_POLL_EVERY_MS = 20_000;
 
 export interface TaskActivitiesDeps {
-  gh: Pick<EngineGitHub, 'readIssue' | 'readSpecDoc' | 'readRepoFile' | 'pullFiles' | 'mergePr' | 'claims'>;
+  gh: Pick<
+    EngineGitHub,
+    'readIssue' | 'readSpecDoc' | 'readRepoFile' | 'pullFiles' | 'mergePr' | 'updateBranch' | 'claims'
+  >;
   trees: Pick<WorkTrees, 'ownerOf'>;
   exec: UserExec;
   now?: () => Date;
@@ -125,6 +129,51 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       });
       return {};
     }
+  };
+
+  /**
+   * 直接合被拒、因为落后主线（引擎同时跑多张单，主线在 CI 跑的这段时间里又进了新提交）：把 PR 同步到最新主线，
+   * 新头当 headMoved 交回去，工作流对新头重跑 CI 和验收（直接合那一道的「落后主线不许合」不放宽）。
+   * 同一张 PR 最多自动同步 MAX_MAIN_SYNCS 次，之后原样停下报人；同步时冲突也停下报人。
+   */
+  const syncBehindMain = async (
+    repo: RepoRef,
+    prNumber: number,
+    expectedHead: string,
+    syncedBefore: number,
+    behindDetail: string,
+    ctx: PortContext,
+  ): Promise<ArmAutoMergeResult> => {
+    if (syncedBefore >= MAX_MAIN_SYNCS) {
+      return {
+        armed: false,
+        merged: false,
+        why: `连着 ${MAX_MAIN_SYNCS} 次同步主线后仍落后（主线一直在动）：${behindDetail}`,
+      };
+    }
+    const synced = await mapped(() => gh.updateBranch({ repo, prNumber, expectedHead }, ctx));
+    if (synced.updated) {
+      return {
+        armed: false,
+        merged: false,
+        why: `落后主线，已把 PR #${prNumber} 同步到最新主线（第 ${syncedBefore + 1} 次，新头 ${short(synced.head)}）`,
+        headMoved: synced.head,
+        syncedMain: true,
+      };
+    }
+    if (synced.reason === 'head_moved' && synced.head !== undefined) {
+      return {
+        armed: false,
+        merged: false,
+        why: `落后主线，同步前 PR 的头先变了：${synced.detail}`,
+        headMoved: synced.head,
+      };
+    }
+    return {
+      armed: false,
+      merged: false,
+      why: `落后主线，同步主线没成（${synced.reason}）：${synced.detail}`,
+    };
   };
 
   return {
@@ -222,6 +271,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         if (merged.merged) return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
+        if (merged.reason === 'behind_main') {
+          return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, merged.detail, ctx);
+        }
         return {
           armed: false,
           merged: false,

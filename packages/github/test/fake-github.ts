@@ -157,6 +157,9 @@ export class FakeGitHub {
   refs = new Map<string, string>();
   /** compare main...<sha> 的 behind_by。 */
   behindBy = new Map<string, number>();
+  /** update-branch 的行为：conflict = 和主线冲突（422），stall = 回 202 但头一直不变，其余 = 头换成一个新的。 */
+  updateBranchMode: 'ok' | 'conflict' | 'stall' = 'ok';
+  updatedBranches = 0;
   /** compare 老头...新头的 ahead_by（默认 1）；设成 0 模拟「读到的新头其实是老头的祖先」（刚推完读到旧头）。 */
   aheadBy = new Map<string, number>();
   interaction: { limit: string; origin: string; expires_at: string } | null = null;
@@ -630,6 +633,29 @@ export class FakeGitHub {
         merged: true,
         message: 'Pull Request successfully merged',
       });
+    }
+
+    x = /^\/pulls\/(\d+)\/update-branch$/.exec(rest);
+    if (x && m === 'PUT') {
+      const pr = this.pulls.get(Number(x[1]));
+      if (!pr) return this.notFound();
+      const b = req.body as { expected_head_sha?: string };
+      if (b.expected_head_sha && b.expected_head_sha !== pr.head.sha) {
+        return this.json(422, { message: 'Expected head sha did not match current head ref.' });
+      }
+      if (this.updateBranchMode === 'conflict') {
+        pr.mergeable = false;
+        pr.mergeable_state = 'dirty';
+        return this.json(422, { message: 'merge conflict between base and head' });
+      }
+      if (this.updateBranchMode === 'ok') {
+        this.updatedBranches += 1;
+        const old = pr.head.sha;
+        pr.head.sha = this.updatedBranches.toString(16).padStart(40, 'e');
+        this.behindBy.delete(old);
+        if (this.refs.has(pr.head.ref)) this.refs.set(pr.head.ref, pr.head.sha);
+      }
+      return this.json(202, { message: 'Updating pull request branch.' });
     }
 
     // —— CI ——

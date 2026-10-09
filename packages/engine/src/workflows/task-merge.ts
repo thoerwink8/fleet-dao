@@ -58,9 +58,22 @@ export async function armAndWaitMerged(
     await rt.advance('merge', `PR #${prNumber} 挂自动合并，等合并`);
     const head: string = rt.head;
     const armed = await rt.step('armAutoMerge', () =>
-      rt.acts.armAutoMerge({ schemaVersion: 1, repo: rt.input.repo, prNumber, expectedHead: head }),
+      rt.acts.armAutoMerge({
+        schemaVersion: 1,
+        repo: rt.input.repo,
+        prNumber,
+        expectedHead: head,
+        ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
+      }),
     );
     if (armed.merged) return { kind: 'merged', commit: armed.mergeCommit };
+    if (armed.headMoved !== undefined && armed.syncedMain === true) {
+      // 落后主线、引擎已把 PR 同步到最新主线：头是自己换的，不停下等人，直接对新头重走 CI 和验收
+      rt.mainSyncs += 1;
+      rt.status.lastProblem = armed.why ?? `PR #${prNumber} 落后主线，已同步`;
+      rt.head = armed.headMoved;
+      return { kind: 'head_moved' };
+    }
     if (armed.headMoved !== undefined) {
       await rt.park('PR 的头被别人改了', headMovedDetail(armed.headMoved, head));
       rt.head = armed.headMoved;

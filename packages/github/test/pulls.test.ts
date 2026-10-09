@@ -692,3 +692,83 @@ describe('合并', () => {
     expect(fake.refs.get('task/1')).toBe(B);
   });
 });
+
+describe('同步主线（update-branch）', () => {
+  function open(fake: ReturnType<typeof setup>['fake'], headSha = A) {
+    return fake.addPull({ title: '登录页加验证码', head: { ref: 'task/1', sha: headSha } });
+  }
+
+  it('用「引擎」带头约束同步；202 之后重读，头换了才算完，回新头', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.behindBy.set(A, 3);
+    const res = await gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A });
+    expect(res.updated).toBe(true);
+    const head = res.updated ? res.head : '';
+    expect(head).not.toBe(A);
+    expect(fake.pulls.get(pr.number)?.head.sha).toBe(head);
+    const put = fake.calls('PUT', /\/update-branch$/);
+    expect(put.map((r) => r.as)).toEqual(['engine']);
+    expect(put[0]?.body).toEqual({ expected_head_sha: A });
+  });
+
+  it('【故意造出的失败】PR 的头不是要同步的那个：不发请求，说现在的头', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake, B);
+    expect(await gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A })).toMatchObject({
+      updated: false,
+      reason: 'head_moved',
+      head: B,
+    });
+    expect(fake.calls('PUT', /\/update-branch$/)).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】发请求的瞬间头被别人推走了：GitHub 拒（422），重读到新头，判 head_moved', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.before.push((req) => {
+      if (req.method === 'PUT' && req.path.endsWith('/update-branch')) {
+        fake.before.pop();
+        pr.head.sha = B;
+      }
+      return undefined;
+    });
+    expect(await gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A })).toMatchObject({
+      updated: false,
+      reason: 'head_moved',
+      head: B,
+    });
+  });
+
+  it('【故意造出的失败】和主线冲突：不当成同步成了，判 conflict', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.updateBranchMode = 'conflict';
+    expect(await gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A })).toMatchObject({
+      updated: false,
+      reason: 'conflict',
+    });
+    expect(fake.pulls.get(pr.number)?.head.sha).toBe(A);
+  });
+
+  it('【故意造出的失败】PR 已经关了：不发请求', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: A }, state: 'closed', merged: false });
+    expect(await gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A })).toMatchObject({
+      updated: false,
+      reason: 'not_open',
+    });
+    expect(fake.calls('PUT', /\/update-branch$/)).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】GitHub 收下了（202）但头一直不变：退避重读几次后报可重试，不当成同步成了', async () => {
+    const { gh, fake, sleeps } = setup();
+    const pr = open(fake);
+    fake.updateBranchMode = 'stall';
+    await expect(gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A })).rejects.toMatchObject({
+      code: 'UPDATE_BRANCH_PENDING',
+      retryable: true,
+    });
+    expect(sleeps).toEqual([1000, 2000, 4000, 8000, 16000]);
+  });
+});

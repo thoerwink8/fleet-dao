@@ -798,6 +798,69 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
     expect(calls.arm).toBe(2);
   });
 
+  it('挂自动合并时直接合被拒、因为落后主线，引擎已把 PR 同步到最新主线：不停下等人，对新头重走 CI、验收、查路径、再挂', async () => {
+    const world = createFakeWorld();
+    const synced = fakeHead(555);
+    const { tasks, calls } = scripted({
+      arm: (n) =>
+        n === 1
+          ? { armed: false, merged: false, why: '落后主线，已同步', headMoved: synced, syncedMain: true }
+          : { armed: true, merged: false },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    // 一次都没停下等人：不用点「继续」，结果直接是合了
+    expect(run).toMatchObject({ outcome: 'merged', head: synced });
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), synced]);
+    expect(calls.arm).toBe(2);
+    expect(calls.armInputs.map((i) => i.syncedBehind)).toEqual([undefined, 1]);
+    expect(calls.armInputs[1]?.expectedHead).toBe(synced);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('【故意造出的失败】主线一直在动：连着同步 3 次后第 4 次照旧停下报人（原因写清），不无限转', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      arm: (n) =>
+        n <= 3
+          ? {
+              armed: false,
+              merged: false,
+              why: '落后主线，已同步',
+              headMoved: fakeHead(600 + n),
+              syncedMain: true,
+            }
+          : n === 4
+            ? {
+                armed: false,
+                merged: false,
+                why: '连着 3 次同步主线后仍落后（主线一直在动）：主线比 PR 多 1 个提交',
+              }
+            : { armed: true, merged: false },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '自动合并没挂上，停下');
+        expect(s.lastProblem).toContain('自动合并没挂上');
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.armInputs.map((i) => i.syncedBehind)).toEqual([undefined, 1, 2, 3, 3]);
+    expect(calls.verify).toHaveLength(4);
+    // 报给人的话里写清原因
+    expect(world.alerts.map((a) => a.detail)).toEqual([expect.stringContaining('连着 3 次同步主线后仍落后')]);
+  });
+
   it('【故意造出的失败】验收没过：返工意见带进下一轮动手，不是 unavailable 那条停下报人的路', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
