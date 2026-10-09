@@ -292,7 +292,7 @@ export default function RoutingStatus() {
               {filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''}
             </p>
           ) : (
-            <div className="xl:max-h-[calc(100dvh-16rem)] xl:overflow-y-auto xl:pr-1">
+            <div className="xl:max-h-routing-pane xl:overflow-y-auto xl:pr-1">
               <ChannelList
                 cards={visible}
                 selected={picked ?? undefined}
@@ -651,7 +651,7 @@ function RouteRow({
           {r.id}
         </span>
         {active ? (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-st-run/10 px-1.5 text-[11px] font-medium leading-5 text-ink-run">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-st-run/10 px-1.5 text-caption font-medium leading-5 text-ink-run">
             <LoaderCircle className="size-3 animate-spin" aria-hidden />
             {active.state === 'running' ? '探测中' : '排队中'}
           </span>
@@ -819,7 +819,7 @@ function ProbeFocus({
                     item.id === cell?.id && 'bg-muted',
                   )}
                 >
-                  <span className={cn('size-2 shrink-0 rounded-[2px]', PROBE_RESULT_BG[item.result])} />
+                  <span className={cn('size-2 shrink-0 rounded-2', PROBE_RESULT_BG[item.result])} />
                   <span className="num">{formatDateTime(item.probedAt)}</span>
                   <span className="min-w-0 flex-1 truncate">{item.routeId}</span>
                   <span className="num">{formatProbeMs(item.durationMs, item.result)}</span>

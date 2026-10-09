@@ -48,7 +48,7 @@ function CommitList({ commits, now }: { commits: Commits; now: number }) {
       {commits.map((c) => (
         <li
           key={`${c.at}-${c.sha}-${c.event}`}
-          className="grid grid-cols-[8.5rem_minmax(0,1fr)_auto] items-baseline gap-x-3 px-4 py-2.5 text-sm"
+          className="grid grid-cols-changelog items-baseline gap-x-3 px-4 py-2.5 text-sm"
         >
           <span className="num rounded bg-muted px-1.5 py-0.5 text-center text-xs">{c.short}</span>
           <div className="min-w-0">
