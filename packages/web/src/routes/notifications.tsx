@@ -37,6 +37,16 @@ function dayOf(iso: string, now: number): string {
 
 const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
 
+/** 处理状态和级别共用这一套：灰底轨道，选中是白底卡片。 */
+const segmentTrack = 'flex max-w-full flex-wrap rounded-lg bg-muted p-1';
+
+function segmentClass(on: boolean): string {
+  return cn(
+    'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-sub transition-colors',
+    on ? 'bg-card font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+  );
+}
+
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
   if (!n.deliveries.length) return <span className="text-caption text-faint">只在{brand.product}</span>;
@@ -48,7 +58,7 @@ function Deliveries({ n }: { n: Notification }) {
           <TooltipTrigger asChild>
             <span
               className={cn(
-                'inline-flex items-center gap-1 rounded px-1.5 text-micro leading-4',
+                'inline-flex items-center gap-1 rounded px-1.5 text-caption leading-4',
                 d.delivered ? 'bg-muted text-muted-foreground' : 'bg-st-fail/10 text-ink-fail',
               )}
             >
@@ -183,7 +193,7 @@ export default function Notifications() {
       description="只有三类：要你拍的、卡住报警、日报。飞书上也推同样的三类；进度不主动推。"
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="flex rounded-lg bg-muted p-1" role="tablist" aria-label="处理状态">
+        <div className={segmentTrack} role="tablist" aria-label="处理状态">
           {(['open', 'all'] as const).map((s) => (
             <button
               key={s}
@@ -191,16 +201,13 @@ export default function Notifications() {
               role="tab"
               aria-selected={status === s}
               onClick={() => set('status', s === 'open' ? null : 'all')}
-              className={cn(
-                'h-7 rounded-md px-3 text-sub text-muted-foreground transition-colors',
-                status === s ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
-              )}
+              className={segmentClass(status === s)}
             >
               {s === 'open' ? '待处理' : '连已处理的一起看'}
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div className={segmentTrack}>
           {LEVELS.map((l) => {
             const n = all.filter((x) => l.id === 'all' || x.level === l.id).length;
             // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且列表空）才写 0。
@@ -211,12 +218,7 @@ export default function Notifications() {
                 type="button"
                 aria-pressed={level === l.id}
                 onClick={() => set('level', l.id === 'all' ? null : l.id)}
-                className={cn(
-                  'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
-                  level === l.id
-                    ? 'border-foreground bg-foreground text-background'
-                    : 'bg-card text-muted-foreground',
-                )}
+                className={segmentClass(level === l.id)}
               >
                 {l.id !== 'all' ? <StatusDot tone={noticeLevelMeta[l.id].tone} className="size-1.5" /> : null}
                 {l.label}
@@ -266,7 +268,7 @@ export default function Notifications() {
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
-                            <span className="rounded bg-muted px-1.5 text-micro text-muted-foreground">
+                            <span className="rounded bg-muted px-1.5 text-caption text-muted-foreground">
                               {noticeLevelMeta[n.level].label}
                             </span>
                           </div>
