@@ -199,3 +199,207 @@ function portRowProblems(actual: string, expected: string): OpsTableProblem[] {
   }
   return problems;
 }
+
+// 用户表（#140 第三片）：从四个部署脚本读系统用户，放进 users 区块。
+// france.sh 行首 PILOT_USER=、lib/session-user.sh 行首 SESSION_USER=、
+// hk.sh 和 lib/human-tier.sh 里写死名字的 ensure_service_user（`$u`、`"$u"` 这类不读）。
+// 读不到脚本、或哪个脚本里一个用户都没有，抛错。本片不进文档、不接命令行、不接 CI。
+
+/** 读的顺序不影响输出：读完按脚本路径、再按行号排。 */
+const USER_SCRIPTS = [
+  'deploy/france.sh',
+  'deploy/lib/session-user.sh',
+  'deploy/hk.sh',
+  'deploy/lib/human-tier.sh',
+] as const;
+
+/** 行首赋值。名字写到第一个不是用户名的字符为止，注释和缩进对不上。 */
+const PILOT_USER_LINE = /^PILOT_USER=([A-Za-z_][A-Za-z0-9_-]*)(?![A-Za-z0-9_-])/;
+const SESSION_USER_LINE = /^SESSION_USER=([A-Za-z_][A-Za-z0-9_-]*)(?![A-Za-z0-9_-])/;
+/** 允许行首缩进。第一参必须是写死的名字，`$u`、`"$u"` 对不上。 */
+const ENSURE_USER_LINE = /^[ \t]*ensure_service_user[ \t]+([A-Za-z_][A-Za-z0-9_-]*)(?=[ \t]|$)/;
+
+/** 表里一行：| 用户 | 来源常量 | 来源脚本 |。从文档区块里回读数据行用。 */
+const USER_ROW = /^\| ([A-Za-z_][A-Za-z0-9_-]*) \| ([A-Za-z_]+) \| (deploy\/[A-Za-z0-9_./-]+\.sh) \|$/;
+
+const USERS_NAME = 'users';
+/** 用户区块名字的对外写法（和端口的 BLOCK_NAME_PORTS 同一路，不各写各的字符串）。 */
+export const BLOCK_NAME_USERS = USERS_NAME;
+
+interface UserEntry {
+  /** 用户名，如 pilot。 */
+  user: string;
+  /** 来源常量：PILOT_USER、SESSION_USER，或写死名字的 ensure_service_user。 */
+  source: string;
+  /** 来源脚本，仓内路径。 */
+  script: string;
+  /** 脚本里的行号，1 起。 */
+  line: number;
+}
+
+interface UserRow {
+  user: string;
+  source: string;
+  script: string;
+}
+
+function readUserLine(script: string, line: string): { user: string; source: string } | undefined {
+  if (script === 'deploy/france.sh') {
+    const m = PILOT_USER_LINE.exec(line);
+    return m ? { user: m[1] ?? '', source: 'PILOT_USER' } : undefined;
+  }
+  if (script === 'deploy/lib/session-user.sh') {
+    const m = SESSION_USER_LINE.exec(line);
+    return m ? { user: m[1] ?? '', source: 'SESSION_USER' } : undefined;
+  }
+  const m = ENSURE_USER_LINE.exec(line);
+  return m ? { user: m[1] ?? '', source: 'ensure_service_user' } : undefined;
+}
+
+/** 读四个脚本里的系统用户。读不到脚本、或哪个脚本里一个用户都没有，抛带脚本名的错
+ *  （调用方落成「没查成」，不当成通过，也不静默给空表）。 */
+export function readUserEntries(repo: RepoView): UserEntry[] {
+  const entries: UserEntry[] = [];
+  for (const script of USER_SCRIPTS) {
+    const text = repo.read(script);
+    if (text === undefined) throw new Error(`读不到 ${script}`);
+    let found = 0;
+    for (const [i, line] of text.split('\n').entries()) {
+      const hit = readUserLine(script, line);
+      if (!hit || hit.user === '') continue;
+      found++;
+      entries.push({ user: hit.user, source: hit.source, script, line: i + 1 });
+    }
+    if (found === 0) throw new Error(`${script} 里一个用户都没读到`);
+  }
+  // 先按脚本路径、再按行号排：同一个仓怎么读输出都一样。
+  return entries.sort((a, b) => a.script.localeCompare(b.script) || a.line - b.line);
+}
+
+/** 区块标记之间那一段：前后各一个空行、中间一张三列表。 */
+export function usersTableInner(repo: RepoView): string {
+  const lines = ['| 用户 | 来源常量 | 来源脚本 |', '|---|---|---|'];
+  for (const e of readUserEntries(repo)) lines.push(`| ${e.user} | ${e.source} | ${e.script} |`);
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+/** 整个区块（含两个标记行）：开头 `<!-- fleet:users:start -->`，一张三列表（用户、来源常量、来源脚本），
+ *  结尾 `<!-- fleet:users:end -->`。同一个仓两次调用逐字相同。 */
+export function renderUsersBlock(repo: RepoView): string {
+  return `${blockMarker(USERS_NAME, 'start')}${usersTableInner(repo)}${blockMarker(USERS_NAME, 'end')}`;
+}
+
+function parseUserRows(text: string): UserRow[] {
+  const rows: UserRow[] = [];
+  for (const line of text.split('\n')) {
+    const m = USER_ROW.exec(line.trimEnd());
+    if (!m) continue;
+    rows.push({ user: m[1] ?? '', source: m[2] ?? '', script: m[3] ?? '' });
+  }
+  return rows;
+}
+
+function userRowKey(row: UserRow): string {
+  return `${row.user}\0${row.source}\0${row.script}`;
+}
+
+function sameUserRows(want: UserRow[], got: UserRow[]): boolean {
+  if (want.length !== got.length) return false;
+  const count = new Map<string, number>();
+  for (const row of want) count.set(userRowKey(row), (count.get(userRowKey(row)) ?? 0) + 1);
+  for (const row of got) {
+    const n = count.get(userRowKey(row)) ?? 0;
+    if (n === 0) return false;
+    count.set(userRowKey(row), n - 1);
+  }
+  return true;
+}
+
+function groupUserRows(rows: UserRow[]): Map<string, UserRow[]> {
+  const groups = new Map<string, UserRow[]>();
+  for (const row of rows) {
+    const key = `${row.source}\0${row.script}`;
+    const list = groups.get(key);
+    if (list) list.push(row);
+    else groups.set(key, [row]);
+  }
+  return groups;
+}
+
+function diffUserGroup(want: UserRow[], got: UserRow[]): OpsTableProblem[] {
+  const problems: OpsTableProblem[] = [];
+  const n = Math.min(want.length, got.length);
+  for (let i = 0; i < n; i++) {
+    const w = want[i];
+    const g = got[i];
+    if (!w || !g || w.user === g.user) continue;
+    problems.push({
+      notQueried: false,
+      text: `用户 ${g.user} 变了：来源常量 ${w.source}（${w.script}），文档区块里是 ${g.user}，脚本里是 ${w.user}。`,
+    });
+  }
+  for (const w of want.slice(n)) {
+    problems.push({
+      notQueried: false,
+      text: `用户 ${w.user} 少了：来源常量 ${w.source}（${w.script}），脚本里是 ${w.user}，文档区块里没有。`,
+    });
+  }
+  for (const g of got.slice(n)) {
+    problems.push({
+      notQueried: false,
+      text: `用户 ${g.user} 多了：来源常量 ${g.source}（${g.script}），文档区块里有 ${g.user}，脚本里没有。`,
+    });
+  }
+  return problems;
+}
+
+function userRowProblems(actual: string, expected: string): OpsTableProblem[] {
+  const wantRows = parseUserRows(expected);
+  const gotRows = parseUserRows(actual);
+  // 用户行的集合一样、只是顺序或空白变了：交给调用方报「不是逐字一致」，不把换序说成用户变了。
+  if (sameUserRows(wantRows, gotRows)) return [];
+  const want = groupUserRows(wantRows);
+  const got = groupUserRows(gotRows);
+  const problems: OpsTableProblem[] = [];
+  const seen = new Set<string>();
+  for (const [key, wRows] of want) {
+    seen.add(key);
+    problems.push(...diffUserGroup(wRows, got.get(key) ?? []));
+  }
+  for (const [key, gRows] of got) {
+    if (seen.has(key)) continue;
+    problems.push(...diffUserGroup([], gRows));
+  }
+  return problems;
+}
+
+/** 读 docPath，取用户区块，和 renderUsersBlock 逐字比。一致返回空数组；
+ *  不一致返回点出哪个用户多了、少了、变了的问题；
+ *  读不到文档、读不到脚本、脚本里一个用户都没读到，返回「没查成」问题，不当成通过。 */
+export function checkUsersBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
+  const doc = repo.read(docPath);
+  if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  let expected: string;
+  try {
+    expected = renderUsersBlock(repo);
+  } catch (e) {
+    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+  }
+  let span: BlockSpan;
+  try {
+    span = findBlock(doc, USERS_NAME);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return [{ notQueried: false, text: `用户区块对不上：${reason}。` }];
+  }
+  const actual = doc.slice(span.from, span.to);
+  if (actual === expected) return [];
+  const problems = userRowProblems(actual, expected);
+  if (problems.length > 0) return problems;
+  return [
+    {
+      notQueried: false,
+      text: '用户区块对不上：用户行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
+    },
+  ];
+}
