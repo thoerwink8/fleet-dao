@@ -1,11 +1,11 @@
 // 目录装载器的命令行（发布脚本在迁移之后调它，只认退出码）：文件读不到、格式认不出、没给库，一律退出非 0、说清原因，
 // 标准输出里不出「装好了」那一类话。这几条都到不了库：环境里只给 PATH，没有 DATABASE_URL。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const BIN = fileURLToPath(new URL('../src/bin/catalog.ts', import.meta.url));
 const EXAMPLE = fileURLToPath(new URL('../../../deploy/catalog.json', import.meta.url));
@@ -23,12 +23,10 @@ const temp = () => {
 };
 
 function run(...args: string[]) {
-  const r = spawnSync(process.execPath, [BIN, ...args], {
-    encoding: 'utf8',
+  const r = runChild(process.execPath, [BIN, ...args], {
     env: { PATH: process.env.PATH ?? '' },
-    timeout: SPAWN_MS,
+    limitMs: SPAWN_MS,
   });
-  if (r.error) throw r.error;
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 
