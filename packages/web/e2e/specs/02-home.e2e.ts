@@ -170,18 +170,19 @@ test.describe('主页', () => {
   });
 
   // 缺陷 D7（#902，#914 之后修）：「引擎 正常」只看配置里开没开引擎。现在开着的要真探到在线的工人；
-  // 这套 e2e 环境没有 Temporal、没有引擎，所以必须写「引擎没连上」并标红，不能写正常。
-  test('引擎那一格读真实健康：没有引擎在跑就写「引擎没连上」并标红，不写正常', async ({ page, api }) => {
+  // 这套 e2e 环境没有 Temporal、没有引擎，所以必须写「引擎进程没连上」并标红，不能写正常。
+  // 名字带「进程」：和顶栏「总开关」分开，一个是进程活没活，一个是人给的许可。
+  test('引擎那一格读真实健康：没有引擎在跑就写「引擎进程没连上」并标红，不写正常', async ({ page, api }) => {
     const home = (await api.get('/api/home')) as Home;
     expect(['down', 'off']).toContain(home.health.engine.state);
     await page.goto('/');
-    const chip = page.locator('[data-health-chip]', { hasText: '引擎' });
+    const chip = page.locator('[data-health-chip]', { hasText: '引擎进程' });
     await expect(chip).toBeVisible();
     if (home.health.engine.state === 'down') {
-      await expect(chip).toContainText('引擎没连上');
+      await expect(chip).toContainText('引擎进程没连上');
       await expect(chip).toHaveAttribute('data-health-chip', 'bad');
     } else {
-      await expect(chip).toContainText('引擎已停用');
+      await expect(chip).toContainText('引擎进程已停用');
       await expect(chip).toHaveAttribute('data-health-chip', 'warn');
     }
     await expect(chip).not.toContainText('正常');

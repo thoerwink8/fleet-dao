@@ -366,7 +366,11 @@ export function PurposeModelControls({
             ))}
       </select>
       {blockedWhy ? (
-        <span title={blockedWhy} className="max-w-36 truncate text-micro text-muted-foreground">
+        <span
+          data-row-note
+          title={blockedWhy}
+          className="order-last basis-full shrink-0 whitespace-normal break-words text-micro leading-snug text-muted-foreground md:w-full"
+        >
           {blockedWhy}
         </span>
       ) : null}

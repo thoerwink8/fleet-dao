@@ -187,7 +187,7 @@ describe('home（/）：四种状态', () => {
     // 引擎那一格（看板中心节点上也写一遍，这里只认状态条里的）
     expect(
       Array.from(document.querySelectorAll('[data-health-chip]')).some((el) =>
-        /引擎已停用/.test(el.textContent ?? ''),
+        /引擎进程已停用/.test(el.textContent ?? ''),
       ),
     ).toBe(true);
   });
@@ -417,13 +417,14 @@ describe('home（/）：引擎那一格（#902 D7）', () => {
     health: { ...SAMPLE.health, engine },
   });
 
-  test('on：写「正常」，不标色', () => {
+  test('on：写「引擎进程 正常」，不标色', () => {
     renderHome({ status: 'data', data: withEngine({ state: 'on' }) });
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('ok');
+    expect(engineChip()?.textContent).toContain('引擎进程');
     expect(engineChip()?.textContent).toContain('正常');
   });
 
-  test('down：写「引擎没连上」和原因，标红（bad），绝不写「正常」', () => {
+  test('down：写「引擎进程没连上」和原因，标红（bad），绝不写「正常」', () => {
     renderHome({
       status: 'data',
       data: withEngine({ state: 'down', detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' }),
@@ -431,24 +432,25 @@ describe('home（/）：引擎那一格（#902 D7）', () => {
     const chip = engineChip();
     expect(chip?.getAttribute('data-health-chip')).toBe('bad');
     expect(chip?.className).toContain('border-st-fail');
-    expect(chip?.textContent).toContain('引擎没连上');
+    expect(chip?.textContent).toContain('引擎进程没连上');
     expect(chip?.textContent).toContain('没有在拉活的引擎工人');
     expect(chip?.textContent).not.toContain('正常');
   });
 
-  test('off：写「引擎已停用」，用提示色（warn）不是红', () => {
+  test('off：写「引擎进程已停用」，用提示色（warn）不是红', () => {
     renderHome({
       status: 'data',
       data: withEngine({ state: 'off', detail: '这台机器按配置（release.env 的 FLEET_SERVICES）没开引擎' }),
     });
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('warn');
-    expect(engineChip()?.textContent).toContain('引擎已停用');
+    expect(engineChip()?.textContent).toContain('引擎进程已停用');
     expect(engineChip()?.className).not.toContain('border-st-fail');
   });
 
-  test('unknown：写「没查成」，灰虚线，不写正常', () => {
+  test('unknown：名字带「引擎进程」，写「没查成」，灰虚线，不写正常', () => {
     renderHome({ status: 'data', data: withEngine({ state: 'unknown' }) });
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('muted');
+    expect(engineChip()?.textContent).toContain('引擎进程');
     expect(engineChip()?.textContent).toContain('没查成');
     expect(engineChip()?.textContent).not.toContain('正常');
   });
