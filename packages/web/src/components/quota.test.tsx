@@ -211,3 +211,33 @@ describe('额度页金额和窄表', () => {
     expect(matrix?.querySelector('.quota-scroll-fade')).toBeTruthy();
   });
 });
+
+describe('窗口格子小标题', () => {
+  test('按模型组的周窗写出模型名，小标题换行，不再截成省略号', () => {
+    const el = cell({
+      window: '7d_model',
+      scope: 'opus',
+      utilization: 0.4,
+      resetsAt: at(3000),
+      reading: 'measured',
+      readAt: at(-4),
+    });
+    const title = within(el).getByText('周窗 · 单模型 · opus');
+    expect(title.textContent).toBe('周窗 · 单模型 · opus');
+    expect(title.className).not.toContain('truncate');
+    expect(title.className).toContain('break-words');
+    expect(title.getAttribute('title')).toBe('上游原名：7d_model');
+  });
+
+  test('没有 scope 的普通窗口不渲染小标题', () => {
+    const el = cell({
+      window: '5h',
+      utilization: 0.4,
+      resetsAt: at(120),
+      reading: 'measured',
+      readAt: at(-4),
+    });
+    expect(el.querySelector('[title^="上游原名"]')).toBeNull();
+    expect(el.textContent).not.toContain('5 小时窗');
+  });
+});
