@@ -6,11 +6,13 @@ import {
   INTAKE_BREAKER_SETTING,
   readIntakeBreaker,
   recentEndedTasks,
+  TASK_ADOPT_AUDIT_ACTION,
+  taskAdoptsSince,
   taskFailureCount,
   tasksCreatedSince,
   writeIntakeBreaker,
 } from '../src/queries/intake-history.ts';
-import { settings, stateChanges } from '../src/schema/index.ts';
+import { auditLog, settings, stateChanges } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, ago, HOUR, MIN, NOW } from './helpers.ts';
 
@@ -73,6 +75,54 @@ describe('一小时内起了几条', () => {
     };
     expect(await tasksCreatedSince(t.db, ago(HOUR), exclude)).toBe(2);
     expect(await tasksCreatedSince(t.db, ago(HOUR))).toBe(3);
+  });
+});
+
+describe('一小时内接手了几条老行', () => {
+  async function adopt(taskId: string, at: Date, over: Partial<typeof auditLog.$inferInsert> = {}) {
+    await t.db.insert(auditLog).values({
+      at,
+      actorKind: 'engine',
+      actorId: 'engine:intake',
+      action: TASK_ADOPT_AUDIT_ACTION,
+      target: `task:${taskId}`,
+      via: 'github',
+      ok: true,
+      reason: '接手无工作流的老任务行',
+      ...over,
+    });
+  }
+
+  it('窗口内接手成功、且建出时刻早于 since 的才算；窗口外、没做成、本小时新建的不算', async () => {
+    const repo = await addRepo(t.db, 'aaa');
+    const old = await addTask(t.db, repo.id, { createdAt: ago(2 * HOUR) });
+    const outside = await addTask(t.db, repo.id, { createdAt: ago(3 * HOUR) });
+    const failed = await addTask(t.db, repo.id, { createdAt: ago(2 * HOUR) });
+    const fresh = await addTask(t.db, repo.id, { createdAt: ago(MIN) });
+    await adopt(old.id, ago(MIN));
+    await adopt(outside.id, ago(2 * HOUR));
+    await adopt(failed.id, ago(MIN), { ok: false, error: '没写上' });
+    await adopt(fresh.id, ago(MIN));
+    expect(await taskAdoptsSince(t.db, ago(HOUR))).toBe(1);
+  });
+
+  it('巡检仓里标题是巡检单的接手不计入；别的仓同标题、巡检仓里的普通单都算', async () => {
+    const canary = await addRepo(t.db, 'fleet-dao-canary');
+    const other = await addRepo(t.db, 'demo');
+    const title = '巡检第 4 轮：往巡检记录追加一行';
+    const skipped = await addTask(t.db, canary.id, { createdAt: ago(2 * HOUR), title });
+    const plain = await addTask(t.db, canary.id, { createdAt: ago(2 * HOUR), title: '普通单' });
+    const elsewhere = await addTask(t.db, other.id, { createdAt: ago(2 * HOUR), title });
+    await adopt(skipped.id, ago(MIN));
+    await adopt(plain.id, ago(MIN));
+    await adopt(elsewhere.id, ago(MIN));
+    const exclude = {
+      owner: 'ACME',
+      name: 'fleet-dao-canary',
+      titlePosix: '^巡检第 [0-9]+ 轮：往巡检记录追加一行$',
+    };
+    expect(await taskAdoptsSince(t.db, ago(HOUR), exclude)).toBe(2);
+    expect(await taskAdoptsSince(t.db, ago(HOUR))).toBe(3);
   });
 });
 

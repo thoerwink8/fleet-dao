@@ -1095,6 +1095,20 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return 'ok';
       });
     },
+    async adoptOrphanTask(input, entry) {
+      if (!isUuid(input.taskId)) return 'not_found';
+      return db.transaction(async (tx) => {
+        const [row] = await tx.select().from(tasks).where(eq(tasks.id, input.taskId)).for('update');
+        if (!row) return 'not_found';
+        if (row.state !== 'queued' && row.state !== 'stopped') return 'not_orphan';
+        await tx
+          .update(tasks)
+          .set({ title: input.title, rawRequest: input.rawRequest, state: 'queued' })
+          .where(eq(tasks.id, input.taskId));
+        await insertAudit(tx, entry);
+        return 'adopted';
+      });
+    },
     async setAutoDispatch({ repoId, on }, entry) {
       if (!isUuid(repoId)) return 'not_found';
       return db.transaction(async (tx): Promise<AutoDispatchChange | 'not_found'> => {

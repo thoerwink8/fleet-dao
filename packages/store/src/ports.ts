@@ -532,6 +532,15 @@ export interface IntakeStore {
   /** 还在排队（从没派出去）的任务直接记成叫停；已经不在排队了就不动，返回 not_queued。 */
   stopQueuedTask(taskId: string, audit: NewAuditEntry): Promise<'ok' | 'not_queued'>;
   /**
+   * 接手一条没有任务工作流的老任务行。只认还在排队或已叫停的：标题和原话改成当前这一代，已叫停的改回排队。
+   * 不新建行，不动创建时刻、优先级、提出人、文档、验收、阶段这些历史列。别的状态回 not_orphan，一行不改、不记。
+   * 和操作记录同一事务。编号看不懂或没有这条：not_found。
+   */
+  adoptOrphanTask(
+    input: { taskId: string; title: string; rawRequest: string },
+    audit: NewAuditEntry,
+  ): Promise<'adopted' | 'not_orphan' | 'not_found'>;
+  /**
    * 「让 AI 接活」开关（repos.auto_dispatch_since，design 第九节「在哪能做与接活开关」）的写入口，
    * 服务器上的 fleet-api dispatch 和以后驾驶舱的开关（#131）都走这里。on 打开、记下此刻（只有这之后开的 issue
    * 自动派，还要挂在当前版本上，见 @fleet-dao/core 的 dispatch.ts）；off 关上、设为空。已经是要的状态就不改、不记（changed=false）：

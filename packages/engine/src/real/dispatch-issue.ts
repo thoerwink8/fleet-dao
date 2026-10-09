@@ -3,7 +3,8 @@
 // 受管的仓按名字找、引擎总开关那一行、一张单以前的任务工作流失败了几条（顺着代数问 Temporal）。
 //
 // 改这里之前必须知道：
-// - 起工作流还是 real/intake.ts 的 start（先建任务行，再用定死的编号起，REJECT_DUPLICATE）：已派过的不会重复派。
+// - 起工作流还是 real/intake.ts 的 start（先建任务行，再用定死的编号起，REJECT_DUPLICATE）：已有任务工作流的不会重复派。
+//   没有工作流的 queued / stopped 老行由 start 接手，不另建一行。
 // - 失败几条：顺着第 1、2、3… 代问 Temporal，第一个不存在就停；已经结束又不是 COMPLETED 的算一次失败；
 //   在跑的、问不清的（连不上、认不出状态）抛错，不当成 0。
 // - 操作记录经 Store.appendAudit 写，记成「引擎」那一类，reason 写明谁（FLEET_OPS_OPERATOR）跑的哪条命令。
@@ -56,7 +57,8 @@ export function dispatchIssueDeps(w: DispatchIssueWiring): DispatchIssueDeps {
       const listed = await intake.openIssues(repo);
       return listed.issues.find((i) => i.number === issueNumber) ?? null;
     },
-    dispatched: (repo, issueNumber) => intake.dispatched(repo, issueNumber),
+    issueTask: (repo, issueNumber) => intake.issueTask(repo, issueNumber),
+    taskGenerations: (repo, issueNumber) => intake.taskGenerations(repo, issueNumber),
     openPrClaims: (repo) => intake.openPrClaims(repo),
     readSpecDoc: (input) => intake.readSpecDoc(input),
     failedAttempts: (repo, issueNumber) => failedGenerations(w.client, repo, issueNumber),

@@ -4,9 +4,10 @@
 //
 // 改这里之前必须知道：
 // - 起工作流的编号定死（taskWorkflowId），一律 REJECT_DUPLICATE（上一条跑完、停下的也不让同名再起）+ 冲突策略 FAIL：
-//   同一张单任何时候最多一条，重开的单不会自己重来。已经用过的回 already_exists，不报错。
+//   同一张单任何时候最多一条。已经用过的回 already_exists，不报错。有一代在跑或已结束的不在这里重来（走重做）。
 // - 任务行在起工作流之前建（按仓加单号唯一，同一事务写操作记录）：工作流第一步就往这一行写状态；起工作流失败了这一行留在
-//   queued，下一轮 dispatched 仍说「没派过」，会再来一遍。
+//   queued，下一轮问 Temporal 仍是没有任何一代，会再来一遍。queued / stopped 且没有任何一代的老行不另建：工作流起成之后
+//   才改标题和原话、叫停的改回排队，并记「接手无工作流的老任务行」。起不成不改行、不记，也不占每小时名额。
 // - 在跑的任务数查 Temporal 的可见性（WorkflowType 加 ExecutionStatus），读不到就让这一轮记没跑成：不拿 0 顶。
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
@@ -21,6 +22,8 @@ import {
   recentEndedTasks,
   resolveAlertWithReason,
   startScheduleRun,
+  TASK_ADOPT_AUDIT_ACTION,
+  taskAdoptsSince,
   taskFailureCount,
   taskStateByIssue,
   tasksCreatedSince,
@@ -30,13 +33,15 @@ import {
 import type { GitHub } from '@fleet-dao/github';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
-import { type Client, WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
+import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { CANARY_ISSUE_TITLE_POSIX } from '../jobs/canary.ts';
 import { normalizeCanarySlug } from '../jobs/canary-scope.ts';
+import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
 import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
+import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
 
@@ -141,9 +146,27 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       },
       plan: (repo, issueNumber) =>
         w.gh.readIssuePlan({ repo: { owner: repo.owner, name: repo.name }, issueNumber }),
-      async dispatched(repo, issueNumber) {
-        const task = await taskStateByIssue(w.db, repo.id, issueNumber);
-        return task !== null && task.state !== 'queued';
+      async issueTask(repo, issueNumber) {
+        return taskStateByIssue(w.db, repo.id, issueNumber);
+      },
+      async taskGenerations(repo, issueNumber) {
+        const read = await readTaskGenerations(
+          { owner: repo.owner, name: repo.name },
+          issueNumber,
+          async (workflowId) => {
+            try {
+              const described = await client.connection.withDeadline(Date.now() + startTimeoutMs, () =>
+                client.workflow.getHandle(workflowId).describe(),
+              );
+              return { life: generationLife(described.status.name), record: null };
+            } catch (err) {
+              if (err instanceof WorkflowNotFoundError) return { life: 'missing' };
+              return { life: 'unknown' };
+            }
+          },
+        );
+        if (!read.ok) return { ok: false, why: read.why };
+        return { ok: true, lives: read.generations.map((g) => g.life) };
       },
       async openPrClaims(repo) {
         // openPulls 翻不完、读不到都抛：拉单这张单这一轮不拉，记没查成
@@ -171,7 +194,15 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         return n;
       },
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
-      startedSince: (since) => tasksCreatedSince(w.db, since, hourlyExclude(w.canaryRepo)),
+      async startedSince(since) {
+        // 老行的建出时刻不在这一小时里。接手成功才记 task.adopt，和新建的行加在一起，才是这一小时真正起了几条。
+        const exclude = hourlyExclude(w.canaryRepo);
+        const [created, adopted] = await Promise.all([
+          tasksCreatedSince(w.db, since, exclude),
+          taskAdoptsSince(w.db, since, exclude),
+        ]);
+        return created + adopted;
+      },
       async breaker() {
         const row = await readIntakeBreaker(w.db);
         if (row?.state === 'open') {
@@ -244,6 +275,8 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             after: { repo: slug, issueNumber, title, by: 'engine:intake' },
           },
         );
+        const orphan =
+          !created.created && (created.task.state === 'queued' || created.task.state === 'stopped');
         const input: TaskWorkflowInput = {
           schemaVersion: 1,
           taskId: created.task.id,
@@ -267,11 +300,42 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               workflowIdReusePolicy: 'REJECT_DUPLICATE',
             }),
           );
-          return 'started';
         } catch (error) {
+          // 没起成：老行保持原样，不记接手。下一轮还能再试，也不把这一次算进每小时名额。
           if (error instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
           throw error;
         }
+        if (orphan) {
+          // 工作流已经接下这个编号（活动还没跑，行多半还是排队或叫停）。这时才改成当前这一代，并留下那句操作记录。
+          const adoptAudit = {
+            actor: actorFor(member),
+            action: TASK_ADOPT_AUDIT_ACTION,
+            target: `task:${created.task.id}`,
+            via: 'github' as const,
+            ok: true,
+            reason: ORPHAN_TASK_ADOPT_NOTE,
+            before: {
+              state: created.task.state,
+              title: created.task.title,
+              rawRequest: created.task.rawRequest,
+            },
+            after: {
+              state: 'queued',
+              title,
+              rawRequest: body,
+              note: ORPHAN_TASK_ADOPT_NOTE,
+            },
+          };
+          const adopted = await store.adoptOrphanTask(
+            { taskId: created.task.id, title, rawRequest: body },
+            adoptAudit,
+          );
+          if (adopted === 'not_found') {
+            throw new Error(`任务 ${created.task.id} 的工作流已经起了，接手老行时却找不到这一行`);
+          }
+          if (adopted === 'not_orphan') await store.appendAudit(adoptAudit);
+        }
+        return 'started';
       },
       async comment({ repo, issueNumber, key, body }) {
         const posted = await w.gh.commentIssue({

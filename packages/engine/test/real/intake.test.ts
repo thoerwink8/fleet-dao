@@ -11,15 +11,18 @@ import {
   saveTaskSnapshot,
   scheduleRuns,
   settings,
+  stateChanges,
+  TASK_ADOPT_AUDIT_ACTION,
   tasks,
   upsertAlert,
   users,
   writeIntakeBreaker,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
+import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { canaryIssueTitle } from '../../src/jobs/canary.ts';
+import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
 import { type IntakeGitHub, intakeJob } from '../../src/real/intake.ts';
 
@@ -164,7 +167,15 @@ interface StartCall {
 }
 
 function fakeClient(
-  opts: { running?: number; listFails?: boolean; startFails?: (n: number) => Error | undefined } = {},
+  opts: {
+    running?: number;
+    listFails?: boolean;
+    startFails?: (n: number) => Error | undefined;
+    /** describe 抛这个。不是 WorkflowNotFoundError 才算问不清。 */
+    describeFails?: Error;
+    /** 工作流编号 → Temporal 状态名。没写的编号当不存在。 */
+    statuses?: Record<string, string>;
+  } = {},
 ) {
   const starts: StartCall[] = [];
   const queries: string[] = [];
@@ -176,6 +187,16 @@ function fakeClient(
         const err = opts.startFails?.(starts.length);
         if (err) throw err;
         return {};
+      },
+      getHandle(workflowId: string) {
+        return {
+          async describe() {
+            if (opts.describeFails) throw opts.describeFails;
+            const name = opts.statuses?.[workflowId];
+            if (name === undefined) throw new WorkflowNotFoundError('not found', workflowId, undefined);
+            return { status: { name } };
+          },
+        };
       },
       list(query: { query: string }) {
         queries.push(query.query);
@@ -278,7 +299,7 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(partial.outcome).toBe('partial');
     expect(partial.why).toContain('UNAVAILABLE');
     expect(await t.db.select().from(tasks)).toHaveLength(1);
-    // 第二轮：dispatched 仍是 false（还在排队），再试；这回服务端说同编号已经有了
+    // 第二轮：行还在排队、Temporal 里仍然没有一代，再试；这回服务端说同编号已经有了
     const second = fakeClient({
       startFails: () =>
         new WorkflowExecutionAlreadyStartedError('already', 'task:acme/demo#12', 'taskWorkflow'),
@@ -287,6 +308,124 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(run).toMatchObject({ outcome: 'ok', found: 0 });
     expect(await t.db.select().from(tasks)).toHaveLength(1);
     expect(second.starts).toHaveLength(1);
+  });
+
+  const OLD = new Date('2026-09-01T00:00:00.000Z');
+
+  /** 没有任务工作流的老行：历史列先写上，接手之后这些不该被清掉。 */
+  async function seedOrphan(repoId: string, over: Partial<typeof tasks.$inferInsert> = {}) {
+    const [row] = await t.db
+      .insert(tasks)
+      .values({
+        repoId,
+        issueNumber: 12,
+        title: 'Fusion 留下的标题',
+        rawRequest: 'Fusion 留下的原话',
+        requestedBy: 'old-founder',
+        priority: 7,
+        state: 'queued',
+        phase: '分诊',
+        doing: '等着',
+        lastProblem: '上次卡在部署',
+        docs: { requirement: 'specs/405/需求.md' },
+        acceptance: ['页面上能看到状态'],
+        specDir: 'specs/405-fleet-api-socket-activation部署',
+        createdAt: OLD,
+        ...over,
+      })
+      .returning();
+    if (!row) throw new Error('老行没写进去');
+    return row;
+  }
+
+  it('排队的老行、没有任何一代：接手这一行再派，不另建、不删历史', async () => {
+    const { repo } = await seedWorld(t.db);
+    const old = await seedOrphan(repo.id);
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    const rows = await t.db.select().from(tasks);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: old.id,
+      title: '给驾驶舱加状态',
+      rawRequest: BODY,
+      requestedBy: 'old-founder',
+      priority: 7,
+      state: 'queued',
+      phase: '分诊',
+      doing: '等着',
+      lastProblem: '上次卡在部署',
+      acceptance: ['页面上能看到状态'],
+      specDir: 'specs/405-fleet-api-socket-activation部署',
+      docs: { requirement: 'specs/405/需求.md' },
+    });
+    expect(rows[0]?.createdAt.toISOString()).toBe(OLD.toISOString());
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.options).toMatchObject({
+      workflowId: 'task:acme/demo#12',
+      args: [{ taskId: old.id, title: '给驾驶舱加状态' }],
+    });
+    const audit = (await t.db.select().from(auditLog)).filter((a) => a.target === `task:${old.id}`);
+    expect(audit.map((a) => a.action)).toEqual([TASK_ADOPT_AUDIT_ACTION]);
+    expect(audit[0]).toMatchObject({ ok: true, reason: ORPHAN_TASK_ADOPT_NOTE, via: 'github' });
+  });
+
+  it('已叫停的老行、没有任何一代：接手后改回排队，原来的状态变化还在', async () => {
+    const { repo } = await seedWorld(t.db);
+    const old = await seedOrphan(repo.id, { state: 'stopped' });
+    const before = (await t.db.select().from(stateChanges)).slice().sort((a, b) => a.id - b.id);
+    expect(before.map((c) => c.toState)).toEqual(['stopped']);
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    const rows = await t.db.select().from(tasks);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: old.id,
+      state: 'queued',
+      title: '给驾驶舱加状态',
+      requestedBy: 'old-founder',
+      priority: 7,
+      lastProblem: '上次卡在部署',
+    });
+    expect(rows[0]?.createdAt.toISOString()).toBe(OLD.toISOString());
+    const after = (await t.db.select().from(stateChanges)).slice().sort((a, b) => a.id - b.id);
+    expect(after.map((c) => [c.fromState, c.toState])).toEqual([
+      [null, 'stopped'],
+      ['stopped', 'queued'],
+    ]);
+    expect(starts[0]?.options).toMatchObject({ args: [{ taskId: old.id }] });
+    const adopt = (await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION);
+    expect(adopt).toHaveLength(1);
+    expect(adopt[0]?.reason).toBe(ORPHAN_TASK_ADOPT_NOTE);
+  });
+
+  it('有一代在跑：不接手、不起，标题不动', async () => {
+    const { repo } = await seedWorld(t.db);
+    await seedOrphan(repo.id);
+    const { gh, calls } = fakeGh();
+    const { client, starts } = fakeClient({ statuses: { 'task:acme/demo#12': 'RUNNING' } });
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(calls.planned).toEqual([]);
+    expect(starts).toEqual([]);
+    expect((await t.db.select().from(tasks))[0]?.title).toBe('Fusion 留下的标题');
+    expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
+      [],
+    );
+  });
+
+  it('已做完的一代：不接手、不起', async () => {
+    const { repo } = await seedWorld(t.db);
+    await seedOrphan(repo.id, { state: 'done' });
+    const { client, starts } = fakeClient({ statuses: { 'task:acme/demo#12': 'COMPLETED' } });
+    const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(starts).toEqual([]);
+    expect((await t.db.select().from(tasks))[0]).toMatchObject({ state: 'done', title: 'Fusion 留下的标题' });
   });
 
   it('已经派出去的（任务行不在排队）：不再读这张单的现状、不再起', async () => {
@@ -475,6 +614,34 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     expect(starts[0]?.options).toMatchObject({ workflowId: 'task:acme/fleet-dao-canary#70' });
   });
 
+  it('一小时内接手成功 3 条老行：和新建一样占满名额，这一轮不起、也不去现读', async () => {
+    const { repo } = await seedWorld(t.db);
+    const createdAt = new Date(NOW.getTime() - 2 * HOURS);
+    await seedTasks(
+      repo.id,
+      [101, 102, 103].map((issue) => ({ issue, state: 'running' as const, createdAt })),
+    );
+    const rows = await t.db.select().from(tasks);
+    await t.db.insert(auditLog).values(
+      rows.map((r) => ({
+        at: new Date(NOW.getTime() - 10 * 60_000),
+        actorKind: 'engine' as const,
+        actorId: 'engine:intake',
+        action: TASK_ADOPT_AUDIT_ACTION,
+        target: `task:${r.id}`,
+        via: 'github' as const,
+        ok: true,
+        reason: ORPHAN_TASK_ADOPT_NOTE,
+      })),
+    );
+    const { gh, calls } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(run.outcome).toBe('ok');
+    expect(starts).toEqual([]);
+    expect(calls.planned).toEqual([]);
+  });
+
   it('一小时前建的不算：3 条都是 61 分钟前，照起', async () => {
     const { repo } = await seedWorld(t.db);
     await seedTasks(
@@ -563,5 +730,41 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     const { client, starts } = fakeClient();
     await expect(runIntakeJob(wire(gh)(client, 'fleet'))).rejects.toThrow(/认不出/);
     expect(starts).toEqual([]);
+  });
+});
+
+describe('拉单的真装配 · 查工作流没查成（放最后）', { timeout: 60_000 }, () => {
+  it('【故意造出的失败】describe 抛错：这张记没查成，不当成没有工作流，老行不动、不另建', async () => {
+    const { repo } = await seedWorld(t.db);
+    const [old] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 12,
+        title: '旧标题',
+        rawRequest: '旧原话',
+        requestedBy: 'old-founder',
+        priority: 4,
+        state: 'queued',
+        lastProblem: '上次卡在部署',
+      })
+      .returning();
+    const { client, starts } = fakeClient({ describeFails: new Error('UNAVAILABLE') });
+    const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('不确定');
+    expect(run.why).toContain('没有当成没有工作流');
+    expect(starts).toEqual([]);
+    const rows = await t.db.select().from(tasks);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: old?.id,
+      title: '旧标题',
+      state: 'queued',
+      lastProblem: '上次卡在部署',
+    });
+    expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
+      [],
+    );
   });
 });
