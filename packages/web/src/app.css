@@ -605,6 +605,11 @@
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
 }
 
+/* 同一块区域只有一行，撑满上面定下的高度。模型少的时候外框不缩，空白留在框里。 */
+@utility grid-rows-routing-desk {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 /* ---------- 动效：在跑的东西会呼吸 ----------
  * 看板上同时在跑的卡片、圆点可能有几百个：动效只改 opacity / transform（交给合成器，不逐帧重绘），
  * 不动 box-shadow——之前呼吸光圈直接改阴影，一两百张卡一起重绘，中景掉到二三十帧。
