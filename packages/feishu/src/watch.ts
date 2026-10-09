@@ -51,6 +51,10 @@ export interface WatchDeps {
   /** 「收到」超过这么久算慢，计一次（gateway.ts 的 TARGET_ACK_MS，design 15.4：2 秒内先回「收到」）。 */
   ackTargetMs: number;
   limits?: Partial<WatchLimits> | undefined;
+  /** 写心跳时顺手做的事（上报飞书用量）。不等它：心跳这行记的是上报前已经知道的档。 */
+  onHeartbeat?: (() => void) | undefined;
+  /** 写进心跳的用量档。没给就不写这一项（旧的看守测试不带）。 */
+  feishuUsage?: (() => { level: string; sentence: string | null }) | undefined;
 }
 
 export interface Watch {
@@ -289,11 +293,13 @@ export function createWatch(deps: WatchDeps): Watch {
     },
 
     heartbeat() {
+      deps.onHeartbeat?.();
       const t = deps.now();
       const w = win;
       const acked = w.messages.count - w.messages.noAck;
       // 现算：不等 check 开了故障才说 down
       const link = down(t).length > 0 ? 'down' : incident ? 'recovering' : 'ok';
+      const usage = deps.feishuUsage?.();
       (link === 'ok' ? log.info : log.warn)('网关心跳', {
         minutes: Math.round((t - w.startedAt) / 60_000),
         link,
@@ -312,6 +318,7 @@ export function createWatch(deps: WatchDeps): Watch {
         ...(w.lastError
           ? { lastError: { loop: w.lastError.loop, at: iso(w.lastError.at), reason: w.lastError.reason } }
           : {}),
+        ...(usage ? { feishuUsage: { level: usage.level, sentence: usage.sentence } } : {}),
       });
       win = freshWindow(t);
     },

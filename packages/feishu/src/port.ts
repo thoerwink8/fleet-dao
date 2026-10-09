@@ -35,6 +35,16 @@ export interface InboundMessage {
   fromBot: boolean;
 }
 
+/** 有人进群（im.chat.member.user.added_v1）：会话、进群时刻、进来的人的 open_id。 */
+export interface InboundJoin {
+  /** 飞书事件编号；重投时相同。事件里没有就是 undefined。 */
+  eventId?: string | undefined;
+  chatId: string;
+  /** 毫秒时间戳（飞书的 create_time）。 */
+  at: number;
+  openIds: string[];
+}
+
 /** 飞书的撤回事件（im.message.recalled_v1）：不带是谁撤的、不带会话种类。 */
 export interface InboundRecall {
   messageId: string;

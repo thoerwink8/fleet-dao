@@ -2,6 +2,7 @@ import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
+import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { IntentStore } from './intent-store.ts';
@@ -57,6 +58,11 @@ export interface Deps {
    * 「没接上」（原话没存，网关标「没记成」、之后补漏），不回 200 冒充存下了。
    */
   intents?: IntentStore | undefined;
+  /**
+   * 驾驶舱提醒（#795）：白名单外的人说话或进群、飞书用量到八成。没给时记录照样存，另记一条错误，不回 5xx
+   * （再送会把同一条证据再写一遍）。生产的两套装配都给。
+   */
+  alerts?: CockpitAlerts | undefined;
   /**
    * 提醒谁在处理、修到哪（design 15.3，alert-work.ts）：驾驶舱提醒列表现算用。没给（开发、内存版）的提醒列表照样出，
    * 另写一句「谁在处理没接上」，不拿「没人在修」顶。

@@ -36,6 +36,7 @@ import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { readEngineMaster } from './engine-switch.ts';
 import { createFeishuAuth } from './feishu.ts';
+import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
 import { liveFranceReleasePort } from './france-release.ts';
 import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
@@ -164,6 +165,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       now,
       feishu,
       intents: createMemoryIntentStore({ now }),
+      alerts: memoryCockpitAlerts(store.data.notifications),
       health: nodeReporter ? [nodeReporter.healthCheck] : [],
       workflows: {
         async signal(workflowId, signal) {
@@ -223,6 +225,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),
+    alerts: pgCockpitAlerts(db),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
     alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）

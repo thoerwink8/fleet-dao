@@ -1,5 +1,13 @@
-// 网关的五条意图接口（#553 第 4 条）：门（通行证、代表哪位创始人）、收原话、撤回、补漏游标、意图卡长轮询、回执。
+// 网关的意图接口（#553 第 4 条，#795 补拒收、进群、用量）：门、收原话、撤回、补漏游标、意图卡、回执。
 // 方案第六节 B1–B6、B9、B11、B12 落在接口这一层的那半；存储那半在 intent-store-contract.ts。
+import {
+  FEISHU_JOIN_REASON,
+  FEISHU_MONTHLY_CALL_LIMIT,
+  FEISHU_OUTSIDER_JOINED_TITLE,
+  FEISHU_OUTSIDER_SPOKE_TITLE,
+  FEISHU_REJECTION_REASON,
+  FEISHU_USAGE_ALERT_TITLE,
+} from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { createMemoryIntentStore, type IntentStore } from '../src/intent-store.ts';
 import { CARD_QUIET_MS } from '../src/intents.ts';
@@ -289,5 +297,179 @@ describe('意图卡长轮询、回执', () => {
     const body = (await res.json()) as { error: { code: string; message: string } };
     expect(body.error.code).toBe('intent_cards_unreadable');
     expect(body.error.message).toContain('connection refused');
+  });
+});
+
+const SECRET = '秘密原话不要出现在拒收记录里';
+
+async function openAlerts(h: Harness) {
+  const { cookie } = await h.login();
+  const res = await h.cockpit.request('/api/notifications?status=open', { headers: { cookie } });
+  expect(res.status).toBe(200);
+  return (await res.json()) as { items: { title: string; body: string }[] };
+}
+
+describe('拒收、进群、用量（#795）', () => {
+  it('白名单外的人说话：只存群、尾号、时刻、原因；多带原文或长度就 400，驾驶舱提醒一条', async () => {
+    const intents = createMemoryIntentStore();
+    const h = harness({ intents });
+    const at = T0.toISOString();
+    const ok = await call(h, '/api/feishu/intake/rejections', {
+      body: { chatId: 'oc_team', openIdTail: 'nger', at, reason: FEISHU_REJECTION_REASON },
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ recorded: true });
+    expect(intents.data.rejections).toHaveLength(1);
+    expect(Object.keys(intents.data.rejections[0] ?? {}).sort()).toEqual([
+      'at',
+      'chatId',
+      'openIdTail',
+      'reason',
+      'receivedAt',
+    ]);
+    expect(JSON.stringify(intents.data.rejections)).not.toContain(SECRET);
+    expect(JSON.stringify(intents.data.rejections)).not.toContain('length');
+
+    const again = await call(h, '/api/feishu/intake/rejections', {
+      body: { chatId: 'oc_team', openIdTail: 'nger', at, reason: FEISHU_REJECTION_REASON },
+    });
+    expect(again.status).toBe(200);
+    expect(intents.data.rejections).toHaveLength(2);
+
+    const bad = await call(h, '/api/feishu/intake/rejections', {
+      body: {
+        chatId: 'oc_team',
+        openIdTail: 'nger',
+        at,
+        reason: FEISHU_REJECTION_REASON,
+        text: SECRET,
+        length: SECRET.length,
+      },
+    });
+    expect(bad.status).toBe(400);
+    const badBody = (await bad.json()) as { error: { code: string } };
+    expect(badBody.error.code).toBe('invalid_request');
+    expect(JSON.stringify(badBody)).not.toContain(SECRET);
+    expect(intents.data.rejections).toHaveLength(2);
+
+    const notes = await openAlerts(h);
+    const spoke = notes.items.filter((n) => n.title === FEISHU_OUTSIDER_SPOKE_TITLE);
+    expect(spoke).toHaveLength(1);
+    expect(spoke[0]?.body).toContain('nger');
+    expect(spoke[0]?.body).toContain('oc_team');
+    expect(spoke[0]?.body).not.toContain(SECRET);
+    expect(JSON.stringify(h.logs)).not.toContain(SECRET);
+  });
+
+  it('白名单外的人进群：记下尾号，驾驶舱提醒那一句', async () => {
+    const intents = createMemoryIntentStore();
+    const h = harness({ intents });
+    const at = T0.toISOString();
+    const res = await call(h, '/api/feishu/intake/joins', {
+      body: { chatId: 'oc_team', openIdTails: ['nger'], at, reason: FEISHU_JOIN_REASON },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ recorded: 1 });
+    expect(intents.data.joins.map((row) => row.openIdTail)).toEqual(['nger']);
+    expect(JSON.stringify(intents.data.joins)).not.toContain(SECRET);
+    const notes = await openAlerts(h);
+    const joined = notes.items.filter((n) => n.title === FEISHU_OUTSIDER_JOINED_TITLE);
+    expect(joined).toHaveLength(1);
+    expect(joined[0]?.body).toContain('nger');
+    expect(joined[0]?.body).toContain(FEISHU_JOIN_REASON);
+  });
+
+  it('用量按北京月累计：81% 驾驶舱报警，下一个月分开算；不到八成不报警；卡上能读出这个月的次数', async () => {
+    expect(FEISHU_MONTHLY_CALL_LIMIT).toBe(10_000);
+    const intents = createMemoryIntentStore();
+    const h = harness({ intents });
+    const sep = T0.toISOString();
+    const over = await call(h, '/api/feishu/gateway/usage', {
+      body: { reportId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', calls: 8100, at: sep },
+    });
+    expect(over.status).toBe(200);
+    expect(await over.json()).toEqual({
+      month: '2026-09',
+      calls: 8100,
+      limit: 10_000,
+      readable: true,
+    });
+    const octAt = '2026-09-30T16:00:00.000Z';
+    const oct = await call(h, '/api/feishu/gateway/usage', {
+      body: { reportId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2', calls: 5, at: octAt },
+    });
+    expect(await oct.json()).toEqual({ month: '2026-10', calls: 5, limit: 10_000, readable: true });
+
+    const cards = (await (await call(h, '/api/feishu/intent-cards?waitSeconds=0')).json()) as {
+      usage: { month: string; calls: number; limit: number; readable: boolean };
+    };
+    expect(cards.usage).toEqual({ month: '2026-09', calls: 8100, limit: 10_000, readable: true });
+    h.clock.now = new Date(octAt);
+    const cardsOct = (await (await call(h, '/api/feishu/intent-cards?waitSeconds=0')).json()) as {
+      usage: { month: string; calls: number; readable: boolean };
+    };
+    expect(cardsOct.usage).toMatchObject({ month: '2026-10', calls: 5, readable: true });
+
+    const notes = await openAlerts(h);
+    const alerts = notes.items.filter((n) => n.title === FEISHU_USAGE_ALERT_TITLE);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.body).toContain('8100/10000');
+    expect(alerts[0]?.body).toContain('已按顺序降级');
+    expect(intents.data.usage).toEqual([
+      { month: '2026-09', calls: 8100 },
+      { month: '2026-10', calls: 5 },
+    ]);
+  });
+
+  it('不到八成不报警', async () => {
+    const h = harness();
+    const res = await call(h, '/api/feishu/gateway/usage', {
+      body: { reportId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3', calls: 100, at: T0.toISOString() },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ month: '2026-09', calls: 100, readable: true });
+    const notes = await openAlerts(h);
+    expect(notes.items.some((n) => n.title === FEISHU_USAGE_ALERT_TITLE)).toBe(false);
+  });
+
+  it('同一份用量上报再来一次不加第二次（回应丢了重报）', async () => {
+    const intents = createMemoryIntentStore();
+    const h = harness({ intents });
+    const body = {
+      reportId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      calls: 8100,
+      at: T0.toISOString(),
+    };
+    const first = await call(h, '/api/feishu/gateway/usage', { body });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ month: '2026-09', calls: 8100, readable: true });
+    const again = await call(h, '/api/feishu/gateway/usage', { body: { ...body, calls: 8100 } });
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ month: '2026-09', calls: 8100, readable: true });
+    expect(intents.data.usage).toEqual([{ month: '2026-09', calls: 8100 }]);
+    const notes = await openAlerts(h);
+    expect(notes.items.filter((n) => n.title === FEISHU_USAGE_ALERT_TITLE)).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】用量读不出来：意图卡照回，readable=false，不按八成报警', async () => {
+    const memory = createMemoryIntentStore();
+    const intents: IntentStore = {
+      ...memory,
+      usageAt: async () => {
+        throw new Error('用量表读不了');
+      },
+    };
+    const h = harness({ intents });
+    const res = await call(h, '/api/feishu/intent-cards?waitSeconds=0');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      items: unknown[];
+      usage: { month: string; calls: number; limit: number; readable: boolean };
+    };
+    expect(body.items).toEqual([]);
+    expect(body.usage).toEqual({ month: '2026-09', calls: 0, limit: 10_000, readable: false });
+    const notes = await openAlerts(h);
+    expect(notes.items.some((n) => n.title === FEISHU_USAGE_ALERT_TITLE)).toBe(false);
+    expect(JSON.stringify(body)).not.toContain('用量表读不了');
   });
 });
