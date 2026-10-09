@@ -1,7 +1,7 @@
 // 提醒（notifications）的对账要用的查询：列出没处理的、按前缀连同已处理的一起列、按条件撤掉（写明谁撤的、为什么，
 // 进操作记录）、只在没有时插一条（再提醒一天一条）、只改还开着的（不把人刚处理掉的又打开）。
 // 报警本身的写法（同一件事一条、再报原地更新）在 engine-alerts.ts 的 upsertAlert。
-import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, notifications } from '../schema/index.ts';
 
@@ -174,4 +174,44 @@ export async function updateOpenAlert(
     .where(and(eq(notifications.dedupeKey, input.dedupeKey), isNull(notifications.resolvedAt)))
     .returning({ id: notifications.id });
   return row ? 'ok' : 'not_open';
+}
+
+/** 卡住报警立案记进操作记录的动作。一天几张按这个数，只数立成的（ok）。 */
+export const ALERT_FILE_ACTION = 'notification.file';
+
+/**
+ * 一张单已经开出去、单号也写回提醒之后记一笔。target 是 `repo:owner/name`（按仓限一天几张），
+ * reason 是提醒的键，after.number 是单号。写不进原样抛。
+ */
+export async function recordAlertFiling(
+  db: Db,
+  input: { repo: string; dedupeKey: string; number: number; actorId: string; at?: Date },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    at: input.at ?? new Date(),
+    actorKind: 'engine',
+    actorId: input.actorId,
+    action: ALERT_FILE_ACTION,
+    target: `repo:${input.repo}`,
+    after: { number: input.number },
+    reason: input.dedupeKey,
+    via: 'engine',
+    ok: true,
+  });
+}
+
+/** 这个仓从 since（含）起立成几张。读不到原样抛。 */
+export async function countAlertFilings(db: Db, repo: string, since: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.action, ALERT_FILE_ACTION),
+        eq(auditLog.target, `repo:${repo}`),
+        eq(auditLog.ok, true),
+        gte(auditLog.at, since),
+      ),
+    );
+  return row?.n ?? 0;
 }
