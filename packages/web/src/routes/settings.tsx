@@ -20,6 +20,7 @@ import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
 import { LoadError, LoadingRows, Page } from '../components/page';
 import { PoolHoldsPanel } from '../components/pool-holds';
+import { RefreshBar } from '../components/refresh-bar';
 import { useRepo } from '../components/repo-context';
 import { RepoDispatchControl } from '../components/repo-dispatch';
 import { RepoGroomControl } from '../components/repo-groom';
@@ -33,7 +34,7 @@ import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
 import { settingLabel } from '../lib/audit';
 import { poolTitle } from '../lib/catalog';
-import { formatAgo } from '../lib/format';
+import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
   parseReserveInput,
@@ -452,6 +453,9 @@ const SECTIONS = [
   { id: 'about', label: '关于' },
 ] as const;
 
+/** 设置靠推送更新，没有自己的轮询。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
+const SETTINGS_STALE_AFTER_MS = 5 * TIME.MIN;
+
 export default function Settings() {
   const theme = useTheme();
   const api = useApi();
@@ -463,7 +467,18 @@ export default function Settings() {
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
   return (
-    <Page title="设置" description="运行设置和仓库开关存在后端，改了写进操作记录；外观只存在这台浏览器里。">
+    <Page
+      title="设置"
+      description="运行设置和仓库开关存在后端，改了写进操作记录；外观只存在这台浏览器里。"
+      actions={
+        <RefreshBar
+          onRefresh={() => void settings.refetch()}
+          isFetching={settings.isFetching}
+          dataUpdatedAt={settings.dataUpdatedAt}
+          staleAfterMs={SETTINGS_STALE_AFTER_MS}
+        />
+      }
+    >
       {/* 版式（驾驶舱改版 2026-10-07）：按用得多少排——「让 AI 接活」是最常动的开关，放最前；外观放后面。顶上一排跳转。 */}
       <nav aria-label="设置分节" className="-mt-2 mb-2 flex flex-wrap gap-1.5">
         {SECTIONS.map((x) => (
