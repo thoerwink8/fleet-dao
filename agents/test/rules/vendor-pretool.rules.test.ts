@@ -23,6 +23,7 @@ const load = async <T>(name: string) => (await import(pathToFileURL(join(HOOKS, 
 const lib = await load<VendorLib>('vendor-pretool.mjs');
 const codex = await load<{ normalizeCodex: Normalize }>('pretool-codex.mjs');
 const gemini = await load<{ normalizeGemini: Normalize }>('pretool-gemini.mjs');
+const agy = await load<{ normalizeAgy: Normalize; agyReply(v: Verdict): string }>('pretool-agy.mjs');
 
 const RC = `.recl${'aude'}`;
 const s = `st${'ash'}`;
@@ -185,5 +186,99 @@ describe('Gemini CLI（~/.gemini/settings.json 的 BeforeTool → pretool-gemini
       JSON.stringify(call('run_shell_command', { command: 'git status' })),
     );
     expect([passed.status, passed.stdout, passed.stderr]).toEqual([0, '', '']);
+  });
+});
+
+describe('Antigravity（~/.gemini/config/hooks.json 的 fleet-dao 那一项 → pretool-agy.mjs）', () => {
+  const HOME = '/home/alice';
+  const judge = (input: unknown, platform: NodeJS.Platform = 'linux') =>
+    lib.judgeVendor(typeof input === 'string' ? input : JSON.stringify(input), agy.normalizeAgy, {
+      vendor: 'Antigravity',
+      platform,
+      cwd: '/somewhere/else',
+    });
+  const call = (name: string, args: unknown, workspace = O) => ({
+    toolCall: { name, args },
+    stepIdx: 19,
+    conversationId: 'c',
+    workspacePaths: [workspace],
+    transcriptPath: '/tmp/t.jsonl',
+    artifactDirectoryPath: '/tmp/a',
+    modelName: 'auto',
+  });
+
+  it('读密钥文件被拦：run_command 的命令、view_file、grep_search 搜到密钥目录', () => {
+    const cases: [string, unknown][] = [
+      ['run_command', { CommandLine: `cat ~/${RC}/device.json`, Cwd: O }],
+      ['view_file', { AbsolutePath: `${HOME}/${RC}/device.json` }],
+      ['grep_search', { SearchPath: `${HOME}/${RC}`, Query: 'token', MatchPerLine: true }],
+      ['grep_search', { SearchPath: '/work/other', Query: 'token', Includes: [`${HOME}/${RC}/device.json`] }],
+    ];
+    for (const [tool, args] of cases) {
+      const got = judge(call(tool, args));
+      expect([tool, got.code]).toEqual([tool, 2]);
+      expect(got.code === 2 ? got.message : '').toContain('secret-shape.mjs');
+    }
+  });
+
+  it('跑普通命令、读普通文件、只列文件名的搜索放行', () => {
+    expect(judge(call('run_command', { CommandLine: 'git status', Cwd: O }))).toEqual({ code: 0 });
+    expect(judge(call('view_file', { AbsolutePath: '/work/other/README.md' }))).toEqual({ code: 0 });
+    expect(
+      judge(
+        call('grep_search', {
+          SearchPath: '/work/other/src',
+          Query: 'TODO',
+          Includes: ['*.ts'],
+          MatchPerLine: true,
+        }),
+      ),
+    ).toEqual({ code: 0 });
+  });
+
+  it('输入里没有 cwd：会话目录取 workspacePaths，run_command 自带的 Cwd 优先；fleet-dao 里的规矩照拦', () => {
+    expect(judge(call('run_command', { CommandLine: `git ${s} pop` }, F)).code).toBe(2);
+    expect(judge(call('run_command', { CommandLine: `git ${s} pop`, Cwd: F }, O)).code).toBe(2);
+    expect(judge(call('run_command', { CommandLine: `git ${s} pop` }, O))).toEqual({ code: 0 });
+  });
+
+  it('故意造出的认不出的格式：没挂的工具名、snake_case 的 Claude 写法、没有 toolCall、args 不是对象、没有路径或命令，一律按拦处理', () => {
+    const bad: unknown[] = [
+      call('write_to_file', { TargetFile: 'x' }),
+      { tool_name: 'Bash', tool_input: { command: 'git status' }, cwd: O },
+      { stepIdx: 1 },
+      call('run_command', 'git status'),
+      call('run_command', { Cwd: O }),
+      call('view_file', { Path: 'README.md' }),
+      call('grep_search', { SearchPath: O }),
+      '不是 JSON',
+    ];
+    for (const input of bad) expect([input, judge(input).code]).toEqual([input, 2]);
+  });
+
+  it('回话照 Antigravity 的协议：拦下 { decision: deny, reason }；放行回 {}，不回 allow（allow 会绕过它自己的审批）', () => {
+    expect(JSON.parse(agy.agyReply({ code: 2, message: '理由' }))).toEqual({
+      decision: 'deny',
+      reason: '理由',
+    });
+    expect(JSON.parse(agy.agyReply({ code: 0 }))).toEqual({});
+  });
+
+  it('命令行外壳：拦下、放行都退出 0，结论在 stdout 的 JSON 里', () => {
+    const blocked = run(
+      'pretool-agy.mjs',
+      JSON.stringify(call('view_file', { AbsolutePath: `${HOME}/${RC}/device.json` })),
+    );
+    expect(blocked.status).toBe(0);
+    const verdict = JSON.parse(blocked.stdout) as { decision?: string; reason?: string };
+    expect(verdict.decision).toBe('deny');
+    expect(verdict.reason).toContain('secret-shape.mjs');
+    const passed = run(
+      'pretool-agy.mjs',
+      JSON.stringify(call('run_command', { CommandLine: 'git status', Cwd: O })),
+    );
+    expect([passed.status, JSON.parse(passed.stdout)]).toEqual([0, {}]);
+    const garbage = run('pretool-agy.mjs', '不是 JSON');
+    expect(JSON.parse(garbage.stdout).decision).toBe('deny');
   });
 });

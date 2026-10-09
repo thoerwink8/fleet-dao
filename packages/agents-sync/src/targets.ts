@@ -152,8 +152,10 @@ export interface HookSpec {
  *   信任记在 ~/.codex/config.toml（hooks-codex.ts）。
  * - gemini：和 claude 同一个写法（~/.gemini/settings.json 的 hooks），timeout 按毫秒算；
  *   hooksConfig.enabled 是 false 就一条都不跑，hooksConfig.disabled 里列了的那条不跑。
+ * - agy：JSON，顶层每一项是一个起了名字的钩子，{ enabled?, <事件>: [{ matcher, hooks: [{ type, command, timeout }] }] }；
+ *   本脚本只管名字叫 name（fleet-dao）的那一项，整项归它；那一项 enabled 是 false 就不跑。
  */
-export type HookFormat = 'claude' | 'codex' | 'gemini';
+export type HookFormat = 'claude' | 'codex' | 'gemini' | 'agy';
 
 export interface HookTarget {
   /** 登记钩子的设置文件（JSON，钩子在它的 hooks 里） */
@@ -165,6 +167,10 @@ export interface HookTarget {
    * （2026-10-09 本机试过：同一个启动器 cmd /C 下退出码 2，PowerShell 下 0）。
    */
   nodeOnWindows?: true;
+  /** agy 写法里本脚本那一项的名字（顶层的键） */
+  name?: string;
+  /** 这家有、但没登记的那类钩子和为什么（每次查、写都报一行，不假装装了） */
+  lacks?: { what: string; why: string };
   /** 读这份的各家；只要装了其中一家就写 */
   readers: readonly AgentId[];
   /** readers 里借道读这份的 */
@@ -209,6 +215,13 @@ export interface HookTarget {
  *   grep_search 搜内容（旧名 search_file_content）（docs/reference/tools.md）。glob、list_directory 只列路径，不挂。
  *   开会话叫 SessionStart，输出的 hookSpecificOutput.additionalContext 进会话上下文。用户级的钩子不用信任，项目级的才要。
  *   Windows 上 Gemini CLI 用 PowerShell 跑钩子命令（packages/core/src/hooks/hookRunner.ts），所以命令写 node（nodeOnWindows）。
+ * - Antigravity：~/.gemini/config/hooks.json，命令行、桌面版共用（antigravity.google/docs/hooks；agy 1.3.2 程序里带的
+ *   「Lifecycle Hooks (hooks.json)」一页）。顶层每项是一个起了名字的钩子，本脚本那一项叫 fleet-dao。
+ *   只有 PreToolUse、PostToolUse、PreInvocation、PostInvocation、Stop，没有开会话事件，开会话那条不登记（lacks）。
+ *   调工具前的输入是 camelCase：{ toolCall: { name, args }, workspacePaths, … }，没有会话目录；回话是 stdout 一份 JSON：
+ *   拦下 { decision: 'deny', reason }，没意见回 {}（decision 是空的按没意见处理，agy 的更新说明写过这一条；
+ *   不回 allow：allow 是「不问人直接放行」，会绕过它自己的审批）。命令在 Windows 上经 cmd /c 跑，启动器照用；timeout 按秒算。
+ *   matcher 是正则，锚定成 ^(…)$：run_command 跑命令，view_file 读文件，grep_search 搜内容。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -254,6 +267,24 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
         matcher: '^(run_shell_command|read_file|read_many_files|grep_search|search_file_content)$',
         script: 'pretool-gemini.mjs',
         timeout: 10_000,
+      },
+    ],
+  },
+  {
+    settings: { win32: '.gemini\\config\\hooks.json', linux: '.gemini/config/hooks.json' },
+    format: 'agy',
+    name: 'fleet-dao',
+    lacks: {
+      what: '开会话钩子',
+      why: 'Antigravity 没有开会话事件（只有 PreToolUse、PostToolUse、PreInvocation、PostInvocation、Stop），没登记；这台的规矩靠别家开会话、或手动跑 pnpm agents:sync 同步',
+    },
+    readers: ['agy'],
+    hooks: [
+      {
+        event: 'PreToolUse',
+        matcher: '^(run_command|view_file|grep_search)$',
+        script: 'pretool-agy.mjs',
+        timeout: 10,
       },
     ],
   },
@@ -314,13 +345,11 @@ export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
  * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232（接上的从这里删掉，写进上面的 HOOK_TARGETS）。
  * 2026-09-26 查的各家文档和本机装的版本：
  * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（TOML，事件名和 Claude 一样）。
- * - Antigravity：~/.gemini/config/hooks.json，没有开会话事件，调工具前的输入输出是另一套 JSON（antigravity.google/docs/hooks）。
  * - pi：没有配置式钩子，要写成 TypeScript 扩展（pi-coding-agent docs/extensions.md）。
  * - dsh：没有自带的全局钩子，只有要手动挂的桥接插件（deepseek-harness packages/hooks）。
  */
 export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
   kimi: '它有钩子（~/.kimi-code/config.toml 的 [[hooks]]，TOML），本脚本还没接',
-  agy: '它的钩子是另一套（~/.gemini/config/hooks.json：没有开会话事件，调工具前的输入输出是另一种 JSON），本脚本还没接',
   pi: '它没有配置式的钩子（要写成 TypeScript 扩展）',
   dsh: '它没有自带的全局钩子（只有要手动挂的桥接插件）',
 };
