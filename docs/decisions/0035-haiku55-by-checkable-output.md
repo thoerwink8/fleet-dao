@@ -30,7 +30,7 @@ haiku5.5能力边界你去探查清楚，结合网上的最佳实践，你思考
 ## 决定
 
 1. **坑：别名 `haiku` 在本机指向 Haiku 4.5，不是 5.5。** Agent 工具的 `model: "haiku"` 派出去的子代理自报 `claude-haiku-4-5-20251001`。要真 5.5，只认两条路：
-   - Agent 工具写 `subagent_type: "haiku55"`，**不传 `model`**（传了会盖过定义文件）。它是自定义子代理文件 `~/.claude/agents/haiku55.md`，frontmatter 里 `model: claude-haiku-5-5`。这台没有这个文件、或会话里没出现 `haiku55` 这一类，就是没装上，不拿 `model: "haiku"` 顶。
+   - Agent 工具写 `subagent_type: "haiku55"`，**不传 `model`**（传了会盖过定义文件）。它是自定义子代理文件 `~/.claude/agents/haiku55.md`，frontmatter 里 `model: claude-haiku-5-5`；原件在仓里 `agents/subagents/haiku55.md`，`pnpm agents:sync` 把它装到每台机器（#1393）。会话里没出现 `haiku55` 这一类，就是这台还没同步上，不拿 `model: "haiku"` 顶。
    - 命令行 `claude -p --model claude-haiku-5-5 …`。
    派完核对实际 id：交代里要它汇报首行写自己的模型 id，不是 `claude-haiku-5-5` 就停，这次当没做、升到 Sonnet 重派。命令行返回的 `costUSD` 对 5.5 不准（它不认识 5.5 的价，实测报约 0.37 美元/次），不能当账；账按官方价（输入 0.10、输出 0.50 美元/百万 token）和实际 token 算。
 2. **边界：不按活的名字，按「产出能被脚本或一条命令核对」。** 这些先给 Haiku 5.5：读码检索（回 `文件:行`）、日志和 CI 输出归纳（回证据行）、分类、准入和范围检查、评审初筛、规格明确的小函数（有测试判）、有失败测试的 bug 修复、按写全的规矩写任务书（配 `check-brief.mjs`）。核对的那条脚本或命令要在派之前就定好，写进交代。
@@ -74,4 +74,4 @@ haiku5.5能力边界你去探查清楚，结合网上的最佳实践，你思考
 
 ## 没做的
 
-- `~/.claude/agents/haiku55.md` 在仓外，只在这台机器上手建过。怎么随同步工具发到各台机器（要动 `packages/agents-sync` 的目标清单），另开单。没装上的机器照第 1 条：不拿 `model: "haiku"` 顶，直接给 Sonnet。
+- ~~`~/.claude/agents/haiku55.md` 在仓外，只在这台机器上手建过，怎么随同步工具发到各台机器另开单。~~ 2026-10-09 #1393 补上：原件放进仓里 `agents/subagents/haiku55.md`（不放 `.claude/agents/`：那里是本仓项目级的 `fleet-*` 名单，决定 0036，只在本仓生效），`packages/agents-sync/src/targets.ts` 的 `SUBAGENT_TARGET` 只列这一份，同步把它装到每台机器的 `~/.claude/agents/`，那个目录里别的手写文件不碰；内容被改过就先备份再换回仓里的。定义按第 5 条用精简配置（`tools` 白名单），正文要求汇报首行写模型 id。没同步上的机器照第 1 条：不拿 `model: "haiku"` 顶，直接给 Sonnet。

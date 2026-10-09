@@ -63,6 +63,7 @@ describe('装', () => {
           '.agents/skills': ['chain-first', 'grill-me'],
           '.claude/skills': ['chain-first', 'grill-me'],
         },
+        subagents: {},
       },
     });
     const lines = m.check();
