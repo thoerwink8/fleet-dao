@@ -54,9 +54,9 @@ export function PaletteSwatch({
           </div>
         </div>
       </div>
-      <div className="flex items-center gap-1.5 border-t bg-card px-2 py-1.5">
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 border-t bg-card px-2 py-1.5">
         <span className="text-xs font-medium">{p.name}</span>
-        <span className="num truncate text-micro text-muted-foreground">{p.en}</span>
+        <span className="num break-words text-micro leading-snug text-muted-foreground">{p.en}</span>
         {active ? <Check className="ml-auto size-3.5 shrink-0" aria-hidden /> : null}
       </div>
       {size === 'lg' ? (
