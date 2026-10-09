@@ -1,12 +1,12 @@
 // 取远端、取不成换直连再取一次（agents/hooks/fresh-main.mjs），以及起子代理前先把 origin/main 取到最新。
 // 起因（创始人 2026-10-05）：子代理的工作树从本地记着的 origin/main 切，本机取不到远端时它停在隔夜的提交上。
 // 这台机器经 reclaude 的本地口（HTTP(S)_PROXY=http://127.0.0.1:59822）出网：先照环境原样取、不改代理，没成才直连再取一次。
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 interface R {
   status: number | null;
@@ -291,7 +291,7 @@ describe('真的钩子进程：远端取不到时，建工作树的子代理被�
     made.push(root);
     const repo = join(root, 'r');
     mkdirSync(repo);
-    const g = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
+    const g = (...a: string[]) => runChild('git', a, { cwd: repo });
     g('init', '-q', '-b', 'main');
     g('remote', 'add', 'origin', join(root, 'nope.git'));
     return { repo, home: join(root, 'home') };
@@ -300,16 +300,14 @@ describe('真的钩子进程：远端取不到时，建工作树的子代理被�
   const hook = join(HOOKS, 'pretool.mjs');
   const call = (toolInput: unknown) => {
     const { repo, home } = repoWithDeadOrigin();
-    const r = spawnSync(process.execPath, [hook], {
+    const r = runChild(process.execPath, [hook], {
       input: JSON.stringify({
         tool_name: 'Agent',
         tool_input: toolInput,
         cwd: repo,
         session_id: 'fresh-main-test',
       }),
-      encoding: 'utf8',
       env: { ...process.env, FLEET_UNATTENDED_DIR: join(home, 'u'), ...PROXY },
-      timeout: 20_000,
     });
     return r;
   };

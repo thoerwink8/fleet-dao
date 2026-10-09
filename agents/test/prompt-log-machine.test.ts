@@ -1,12 +1,12 @@
 // 落盘钩子（agents/hooks/prompt-log.mjs）不记机器派的会话的提示（派活到合并提速第一片，#1066，2026-10-05 审计 N5）：
 // 工人、反方的第一条提示也走 UserPromptSubmit，原先全机一起落进「创始人最近的话」，真话被挤出最后 5 条。
 // 真 spawn 钩子、喂 stdin，看落下来的文件——和 rules/prompt-log.rules.test.ts 同一种做法（那份不动）。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const HOOK = fileURLToPath(new URL('../hooks/prompt-log.mjs', import.meta.url));
 const SO_SESSIONS = fileURLToPath(new URL('../skills/discuss/scripts/so-sessions.mjs', import.meta.url));
@@ -28,9 +28,8 @@ afterEach(() => {
 /** 像 Claude Code 那样喂一条消息进去；env 里没有的 FLEET_WORKER 一律去掉，免得这台机器自己的环境串进来。 */
 function feed(input: Record<string, unknown>, env: Record<string, string> = {}) {
   const { FLEET_WORKER: _drop, ...base } = process.env;
-  const r = spawnSync(process.execPath, [HOOK], {
+  const r = runChild(process.execPath, [HOOK], {
     input: JSON.stringify(input),
-    encoding: 'utf8',
     env: { ...base, FLEET_PROMPT_LOG_DIR: dir, FLEET_UNATTENDED_DIR: join(dir, 'unattended'), ...env },
   });
   return { code: r.status, out: r.stdout ?? '' };
@@ -44,7 +43,7 @@ function logged(): Record<string, string>[] {
 }
 
 // 每条真起 node 进程喂 stdin，开着别的会话时一次要一两秒，4 次一组超过默认的 5 秒
-describe('落盘钩子不记机器派的会话', { timeout: 30_000 }, () => {
+describe('落盘钩子不记机器派的会话', { timeout: 0 }, () => {
   it('创始人的话照旧落盘（含「hi」这种几个字的；会话目录是主检出或他自己开的非 w- 工作树）', () => {
     feed({ prompt: 'hi', prompt_id: 'p1', session_id: 's1', cwd: 'D:\\frank\\fleet-dao' });
     feed({

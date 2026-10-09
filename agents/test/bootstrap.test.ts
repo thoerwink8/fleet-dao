@@ -1,12 +1,12 @@
 // 引导钩子（agents/hooks/bootstrap.mjs，登记在仓里的 .claude/settings.json）：另一台机器上挂着旧钩子时，
 // 在 fleet-dao 检出里一开会话就发现并换新；是新的就一个字不说；不该管的机器（法国会话用户、第一次装机）不动手。
 // 全用临时目录当家目录；同步换成假的（真同步在 agents-sync 包里的测试）。
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 interface Health {
   reasons?: string[];
@@ -216,9 +216,7 @@ describe('不该管的机器不动手', () => {
     expect(out.join('')).toMatch(/引导钩子没核成.*读不了.*pnpm agents:sync/);
     expect(f.calls).toHaveLength(0);
     // 真当钩子跑也是这样：退出 0、说出来
-    const r = spawnSync(process.execPath, [HOOK], {
-      encoding: 'utf8',
-      timeout: 30_000,
+    const r = runChild(process.execPath, [HOOK], {
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });
     expect(r.status).toBe(0);
@@ -256,9 +254,7 @@ describe('真的当钩子跑（进程、退出码、标准输出）', () => {
   it('不该管的家目录：退出 0、什么也不打', () => {
     const home = mkdtempSync(join(tmpdir(), 'bootstrap-'));
     dirs.push(home);
-    const r = spawnSync(process.execPath, [HOOK], {
-      encoding: 'utf8',
-      timeout: 30_000,
+    const r = runChild(process.execPath, [HOOK], {
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });
     expect(r.status).toBe(0);
