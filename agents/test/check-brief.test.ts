@@ -1,12 +1,12 @@
 // 任务书草稿的准入检查（agents/skills/commander/scripts/check-brief.mjs，决定 0035）：补单交给 Sonnet 或 Haiku 写草稿后、开单前跑。
 // 实测（2026-10-09）Haiku 5.5 写任务书时把函数名、事件名也用反引号括进「已知的模块」，会被引擎当路径判成跨模块；规矩写全加这道脚本兜住。
 // 下面先钉合格的过，再一条条造出不合格的（缺标题、非路径行、跨包、提 workflows、验收写 grep），最后一条是读不到文件也明确失败。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const SCRIPT = fileURLToPath(new URL('../skills/commander/scripts/check-brief.mjs', import.meta.url));
 
@@ -58,7 +58,7 @@ const dir = mkdtempSync(join(tmpdir(), 'check-brief-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function cli(args: string[]) {
-  const r = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+  const r = runChild(process.execPath, [SCRIPT, ...args]);
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
 

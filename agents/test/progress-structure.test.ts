@@ -4,12 +4,12 @@
 // 「归档页里没有这个标题（否则钩子报「不止一张」）」「引导节标题不再出现在仓里任何 .md（否则别的仓用的老读法会把它当成待办）」
 // 「指向进度单的那一行还在」钉成测试；每一条都配一条故意造出失败的用例。
 // 搬走前的整份进度原文在 docs/archive/progress-2026-10-05-final.md（一行没删），这里也钉着它还在。
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChildOk } from './child.ts';
 
 interface Result {
   status: number | null;
@@ -71,11 +71,13 @@ afterEach(() => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 const g = (cwd: string, ...a: string[]) =>
-  execFileSync(
+  runChildOk(
     'git',
     ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...a],
-    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  ).trim();
+    {
+      cwd,
+    },
+  );
 
 /** 把真文件（或改过的版本）放进一个临时 git 仓，让钩子用真 git grep 读 */
 function repoWith(progress: string, arch: Record<string, string>): string {

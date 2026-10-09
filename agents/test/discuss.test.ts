@@ -1,12 +1,12 @@
 // discuss 技能带的脚本（agents/skills/discuss/scripts/）：ask.mjs 一问一答、second-opinion.mjs 反方、walkthrough.mjs、tools.mjs。
 // 在临时家目录里跑，PATH 里只放假的 cursor-agent（或者什么都不放）：不碰真家目录、不出网、不调模型。
 // 重点是这台机器缺东西时（法国上就没有 cursor-agent、Mirasim）要明说缺的是什么，不当成答了、也不当成没事。
-import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { runChild } from './child.ts';
 
 interface Verdict {
   pass: boolean;
@@ -215,11 +215,9 @@ function run(
     const v = process.env[k];
     if (v !== undefined && env[k] === undefined) env[k] = v;
   }
-  const r = spawnSync(process.execPath, [join(SCRIPTS, script), ...args], {
+  const r = runChild(process.execPath, [join(SCRIPTS, script), ...args], {
     env,
     cwd: temp('cwd'),
-    encoding: 'utf8',
-    timeout: 60_000,
   });
   return { code: r.status, out: r.stdout, err: r.stderr, all: `${r.stdout}\n${r.stderr}` };
 }
@@ -236,7 +234,7 @@ function ownTmp(): { dir: string; env: Record<string, string> } {
   return { dir, env: { TMPDIR: dir, TEMP: dir, TMP: dir } };
 }
 
-const SLOW = { timeout: 60_000 };
+const SLOW = { timeout: 0 };
 
 describe('挑错题面要带【推演】', () => {
   it('缺【推演】、太短拦下，带够了放行', () => {

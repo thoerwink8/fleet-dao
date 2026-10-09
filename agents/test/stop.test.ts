@@ -2,12 +2,12 @@
 // 真 git（临时目录里真 init 一个仓），不拿假字符串顶 git 的输出——untracked-files 的收纳规则（目录收成一条、忽略的不出现）
 // 是 git 自己的行为，拿假输出测只会测出「我以为 git 会这样」。命令行外壳、「决不拦不接着聊」由
 // agents/test/rules/stop.rules.test.ts 钉住；这里测的是纯逻辑。
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChildOk } from './child.ts';
 
 interface Result {
   status: number | null;
@@ -37,8 +37,7 @@ function temp(name: string): string {
   return dir;
 }
 
-const g = (cwd: string, ...a: string[]) =>
-  execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const g = (cwd: string, ...a: string[]) => runChildOk('git', a, { cwd });
 
 /** 真 git 仓：不用提交——git status、rev-parse --show-toplevel 在 init 完就能用 */
 function repo(): string {

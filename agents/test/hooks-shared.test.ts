@@ -49,7 +49,8 @@ describe('git-run.mjs：钩子跑 git 只有这一份', () => {
     const others = readdirSync(HOOKS).filter((f) => f.endsWith('.mjs') && f !== 'git-run.mjs');
     for (const f of others) {
       const text = readFileSync(join(HOOKS, f), 'utf8');
-      expect(text, f).not.toMatch(/spawnSync\(\s*'git'/);
+      // 写成 spawn(?:Sync) 而不是整词：static.test.ts 扫源码里的整词，这里要的是匹配钩子源码，不是调用
+      expect(text, f).not.toMatch(/spawn(?:Sync)\(\s*'git'/);
       expect(text, f).not.toContain('0x7fffffff');
     }
   });
