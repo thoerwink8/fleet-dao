@@ -127,7 +127,7 @@ export function EngineMasterRelation() {
       : view.kind === 'absent'
         ? '这个环境的版本还不带总开关'
         : view.kind === 'error'
-          ? '总开关现在是开是关没查成'
+          ? '现在是开是关没查成'
           : '正在读总开关';
   return (
     <p className="mb-3 text-xs text-muted-foreground" data-testid="engine-master-relation">
