@@ -62,7 +62,8 @@ export interface ClaimsGitHub {
   openPulls(repo: RepoRef): Promise<PullFacts[]>;
   /**
    * 从 since 起更新过、而且合并了的 PR（按更新时间从新到旧，读到更早的就停）。
-   * 翻到上限还没读出这个窗口、认不出，都抛错：调用方不能把抛错当成「一个都没有」。
+   * 停点是 updated 早于 since，不是固定页数。安全网触顶还没走出窗口、认不出，都抛错：
+   * 调用方不能把抛错当成「一个都没有」，也不能把没翻完的半截名单当成读全了。
    */
   listMergedPulls(repo: RepoRef, since: Date): Promise<PullFacts[]>;
   /** 这个提交上这个 context 最新的一条（没有是 null）。 */
@@ -84,6 +85,14 @@ export interface ClaimsGitHub {
 }
 
 const ClaimPullSchema = PullSchema.extend({ auto_merge: z.unknown().optional() });
+
+/**
+ * 列窗口里合并 PR 的翻页安全网（每页 100）。
+ * 10 页盖不住 30 天窗口：本仓 closed PR 超过 1000，第 10 页末条仍在窗口内，
+ * pages() 会整次抛「没翻完」，整理待办就读不到分片关系（法国 2026-10-09）。
+ * 100 页 = 一万条。真超过仍抛「没查全」，调用方按没读到处理。
+ */
+const MERGED_PULL_MAX_PAGES = 100;
 
 const StatusSchema = z.object({
   context: z.string(),
@@ -150,7 +159,7 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     },
 
     async listMergedPulls(repo, since) {
-      // 10 页 × 100：窗口里比这还多，pages 自己抛「没翻完」，不当成读全了
+      // 读到比 since 更早就 return，pages() 正常收尾。页数上限只是安全网，不是「只看 10 页」。
       const out: PullFacts[] = [];
       for await (const page of client.pages(
         {
@@ -159,7 +168,7 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
           auth: auth(repo),
           query: { state: 'closed', sort: 'updated', direction: 'desc', per_page: 100 },
         },
-        10,
+        MERGED_PULL_MAX_PAGES,
       )) {
         if (!Array.isArray(page.data)) throw unexpected(`列 ${repoSlug(repo)} 合并了的 PR`, page.data);
         let older = false;
