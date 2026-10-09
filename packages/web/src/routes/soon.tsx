@@ -4,26 +4,13 @@ import { brand } from '#brand';
 import { Button } from '../components/ui/button';
 
 /**
- * 还没做的页（模型目录、账单、战绩、判断题记录）：地址留着，打开写明「还没做」、以后会有什么、现在去哪看相关的。
+ * 还没做的页（账单、战绩、判断题记录）：地址留着，打开写明「还没做」、以后会有什么、现在去哪看相关的。
  * 驾驶舱改版（2026-10-07）起它们不再占侧栏：没做的页挂在导航里，点进去是空的，只会让人白跑一趟。
  */
 const PLANS: Record<
   string,
   { title: string; what: string; bullets: string[]; related: { to: string; label: string }[] }
 > = {
-  '/models': {
-    title: '模型目录',
-    what: '各家模型的清单：族、型号、在哪些路由上用、什么时候上架和下架。',
-    bullets: [
-      '模型扫描每天跑一次，新模型自动出现在这里',
-      '模型下架后，对应路由自动离线并推通知',
-      '新模型先考试，考过了再进调度台',
-    ],
-    related: [
-      { to: '/routing', label: '路由' },
-      { to: '/quota', label: '额度' },
-    ],
-  },
   '/billing': {
     title: '账单',
     what: '花了多少、值不值：每个会话记模型、路由、token、耗时和所属任务。',

@@ -24,7 +24,7 @@ import {
   windowRange,
 } from '../lib/list-window';
 import { modelKind } from '../lib/route-kinds';
-import { countsText, type KindCounts } from '../lib/route-state';
+import { countsText, type KindCounts, routeStateTone } from '../lib/route-state';
 import { purposeLabel, routeTitle } from '../lib/routing';
 import {
   buildCatalog,
@@ -513,11 +513,16 @@ function CatalogRow({
         aria-label={`查看 ${e.displayName} 的路由`}
         className="flex min-w-0 items-center gap-2 text-left md:h-full md:flex-1"
       >
-        <KindDot
-          kind={kind}
-          whyNot={e.purposes.length === 0 ? '没配进用途，没算过' : '一条路由都没有'}
-          className="shrink-0"
-        />
+        {/* 胶囊已经写「已下架」。再放 KindDot 会把同一个词再读一遍。 */}
+        {kind === 'retired' ? (
+          <StatusDot tone={routeStateTone.retired} className="shrink-0" />
+        ) : (
+          <KindDot
+            kind={kind}
+            whyNot={e.purposes.length === 0 ? '没配进用途，没算过' : '一条路由都没有'}
+            className="shrink-0"
+          />
+        )}
         <span
           data-row-name
           className="min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug md:truncate"
@@ -542,7 +547,8 @@ function CatalogRow({
           )}
         </span>
         {marks.discovered ? <CatalogMark tone="discovered">新发现</CatalogMark> : null}
-        {marks.retired ? (
+        {/* 状态胶囊已经是「已下架」就不再贴小标签；没画态的下架模型仍靠这枚标签。 */}
+        {marks.retired && kind !== 'retired' ? (
           <CatalogMark tone="retired" title="目录里标了下架">
             已下架
           </CatalogMark>

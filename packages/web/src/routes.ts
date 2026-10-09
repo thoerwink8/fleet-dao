@@ -22,8 +22,9 @@ export default [
     route('env', 'routes/env.tsx'),
     // 法国页：本台六项事实、引擎总开关、定时任务、发版；多一台机器时按台并排。
     route('france', 'routes/france.tsx'),
-    // 还没做的页：不进侧栏（驾驶舱改版 2026-10-07），地址留着、打开写明「还没做」。
-    route('models', 'routes/soon.tsx', { id: 'soon-models' }),
+    // 旧地址：模型目录做在路由页里，打开转到 /routing?tab=models。
+    route('models', 'routes/models.tsx'),
+    // 还没做的页：不进侧栏（驾驶舱改版 2026-10-07），地址留着、打开写明「还没做」。只剩账单、战绩、判断题记录。
     route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
     route('record', 'routes/soon.tsx', { id: 'soon-record' }),
     route('judge', 'routes/soon.tsx', { id: 'soon-judge' }),
