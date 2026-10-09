@@ -1,5 +1,4 @@
 // 测试用的临时「机器」：假家目录、假仓、假的可执行文件。一律放系统临时目录，不碰真家目录、不出网。
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -16,6 +15,7 @@ import { expect } from 'vitest';
 import { BEGIN, END } from '../src/block.ts';
 import { type Ctx, readSources, type Sources } from '../src/sync.ts';
 import type { AgentId, Platform } from '../src/targets.ts';
+import { runChild } from './child.ts';
 
 export const PLATFORM: Platform = process.platform === 'win32' ? 'win32' : 'linux';
 export const IS_ROOT = process.getuid?.() === 0;
@@ -105,13 +105,17 @@ export function makeRepo(
   return repo;
 }
 
-/** git 命令：身份、签名都写死，不读本机的配置（测试里提交用） */
+/** git 命令：身份、签名都写死，不读本机的配置（测试里提交用）。退出码不是 0 就抛（带上 git 自己说的）。 */
 export function git(cwd: string, ...args: string[]): string {
-  return execFileSync(
+  const r = runChild(
     'git',
     ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args],
-    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  ).trim();
+    { cwd },
+  );
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ').slice(0, 200)} 退出码 ${r.status}：${r.stderr.trim()}`);
+  }
+  return r.stdout.trim();
 }
 
 /** 把假仓做成 git 检出：提交一次，建一个裸仓当 origin 推上去，main 跟着 origin/main。返回裸仓的位置 */

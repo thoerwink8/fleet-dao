@@ -1,11 +1,11 @@
 // 全局 git 忽略（src/git-excludes.ts）：把 _tmp/ 加进这台的 core.excludesFile。真 git（假家目录，--file 指定死，
 // 不碰真机器的 ~/.gitconfig——这也是本模块自己要保证的事，这里顺带验一遍：传假的 ctx.home，读写都只发生在那下面）。
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Backups } from '../src/backup.ts';
 import { applyGitExcludes, checkGitExcludes, readExcludesFile, WANT } from '../src/git-excludes.ts';
+import { runChild } from './child.ts';
 import { cleanup, ctxFor, PLATFORM, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
@@ -36,6 +36,14 @@ function kindOf(lines: readonly { kind: string; key: string }[], key: string): s
 /** 直接用真 git 写一份 .gitconfig，不经过本模块——用来搭「用户已经设过」的场景 */
 function seedGitconfig(home: string, body: string): void {
   writeFileSync(join(home, '.gitconfig'), body);
+}
+
+/** 用真 git 写一项配置。退出码不是 0 就抛（带上 git 自己说的）。 */
+function gitConfig(file: string, key: string, value: string): void {
+  const r = runChild('git', ['config', '--file', file, key, value]);
+  if (r.status !== 0) {
+    throw new Error(`git config --file ${file} ${key} 退出码 ${r.status}：${r.stderr.trim()}`);
+  }
 }
 
 describe('全新机器：没有 .gitconfig', () => {
@@ -73,7 +81,7 @@ describe('core.excludesFile 已经指到用户自己的文件', () => {
     const m = machine();
     const mine = join(m.home, 'my-global-ignore');
     writeFileSync(mine, 'node_modules/\n.DS_Store\n');
-    execFileSync('git', ['config', '--file', m.gitconfig(), 'core.excludesFile', mine]);
+    gitConfig(m.gitconfig(), 'core.excludesFile', mine);
     expect(kindOf(m.check(), KEY)).toEqual(['missing']);
     const lines = m.apply();
     // core.excludesFile 这一项没变，不该出现在这次改动里
@@ -89,7 +97,7 @@ describe('core.excludesFile 已经指到用户自己的文件', () => {
     const m = machine();
     const mine = join(m.home, 'my-global-ignore');
     writeFileSync(mine, `before\n${WANT.replace('_tmp/', '_temp_改过了/')}\nafter\n`);
-    execFileSync('git', ['config', '--file', m.gitconfig(), 'core.excludesFile', mine]);
+    gitConfig(m.gitconfig(), 'core.excludesFile', mine);
     expect(kindOf(m.check(), KEY)).toEqual(['drift']);
     expect(m.check().find((l) => l.key === KEY)?.text).toContain('漂移');
     const lines = m.apply();
@@ -104,7 +112,7 @@ describe('core.excludesFile 已经指到用户自己的文件', () => {
     const mine = join(m.home, 'gone', 'my-global-ignore');
     // gone/ 目录建出来，但 my-global-ignore 这个文件故意不建：模拟「设过、文件却没了」
     mkdirSync(join(m.home, 'gone'), { recursive: true });
-    execFileSync('git', ['config', '--file', m.gitconfig(), 'core.excludesFile', mine]);
+    gitConfig(m.gitconfig(), 'core.excludesFile', mine);
     expect(existsSync(mine)).toBe(false);
     expect(kindOf(m.check(), '~/gone/my-global-ignore')).toEqual(['missing']);
     m.apply();
@@ -121,7 +129,7 @@ describe('标记本身坏了：不猜，报出来，不动文件', () => {
     const mine = join(m.home, 'my-global-ignore');
     const begin = WANT.split('\n')[0] as string;
     writeFileSync(mine, `${begin}\n${begin}\n_tmp/\n${WANT.split('\n')[2]}\n`);
-    execFileSync('git', ['config', '--file', m.gitconfig(), 'core.excludesFile', mine]);
+    gitConfig(m.gitconfig(), 'core.excludesFile', mine);
     const before = readFileSync(mine, 'utf8');
     expect(m.check().find((l) => l.key === KEY)?.text).toContain('标记不成对');
     const lines = m.apply();
@@ -135,7 +143,7 @@ describe('CRLF 的文件：追加、换行都跟着文件走', () => {
     const m = machine();
     const mine = join(m.home, 'my-global-ignore');
     writeFileSync(mine, 'node_modules/\r\n');
-    execFileSync('git', ['config', '--file', m.gitconfig(), 'core.excludesFile', mine]);
+    gitConfig(m.gitconfig(), 'core.excludesFile', mine);
     m.apply();
     const text = readFileSync(mine, 'utf8');
     expect(text).toContain('\r\n');
@@ -166,7 +174,7 @@ describe('readExcludesFile：按 ctx.home 走，不摸真机器', () => {
   it('两台假机器互不影响：各自的 .gitconfig 各自读', () => {
     const a = machine();
     const b = machine();
-    execFileSync('git', ['config', '--file', a.gitconfig(), 'core.excludesFile', '/a/only']);
+    gitConfig(a.gitconfig(), 'core.excludesFile', '/a/only');
     expect(readExcludesFile(a.home)).toEqual({ kind: 'set', value: '/a/only' });
     expect(readExcludesFile(b.home)).toEqual({ kind: 'unset' });
   });
