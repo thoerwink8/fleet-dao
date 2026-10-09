@@ -53,6 +53,12 @@ export function commandIn(t: HookTarget, home: string, platform: Platform, scrip
 function switchedOff(root: Obj, t: HookTarget, home: string, platform: Platform): string | null {
   if (t.format === 'claude')
     return root.disableAllHooks === true ? 'disableAllHooks 开着、钩子一条都不跑' : null;
+  if (t.format === 'agy') {
+    const box = root[agyName(t)];
+    return isObj(box) && box.enabled === false
+      ? `${agyName(t)} 那一项的 enabled 是 false、本脚本的钩子不跑`
+      : null;
+  }
   if (t.format !== 'gemini') return null;
   const cfg = isObj(root.hooksConfig) ? root.hooksConfig : {};
   if (cfg.enabled === false) return 'hooksConfig.enabled 是 false、钩子一条都不跑';
@@ -60,6 +66,22 @@ function switchedOff(root: Obj, t: HookTarget, home: string, platform: Platform)
   const disabled: unknown[] = Array.isArray(cfg.disabled) ? cfg.disabled : [];
   const listed = disabled.filter((x) => typeof x === 'string' && ours.has(x));
   return listed.length ? `hooksConfig.disabled 里列了本脚本的 ${listed.length} 条、那几条不跑` : null;
+}
+
+/** agy 写法里本脚本那一项的名字 */
+const agyName = (t: HookTarget): string => t.name ?? 'fleet-dao';
+
+/**
+ * 事件挂在哪个对象下：agy 写法是名字叫 agyName 的那一项，别的写法是 hooks。
+ * others：agy 写法里别的项（别人的钩子，本脚本只认出里面有没有自己的命令）。
+ */
+function boxes(root: Obj, t: HookTarget): { box: unknown; boxName: string; others: Obj[] } {
+  if (t.format !== 'agy') return { box: root.hooks, boxName: 'hooks', others: [] };
+  const name = agyName(t);
+  const others = Object.entries(root)
+    .filter(([k, v]) => k !== name && isObj(v))
+    .map(([, v]) => v as Obj);
+  return { box: root[name], boxName: `${name} 那一项`, others };
 }
 
 /** 这条命令是不是本脚本管的：返回它跑的脚本名、是不是以前手装的那份；不是就返回 null */
@@ -126,16 +148,23 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
     return out;
   }
   out.off = switchedOff(root, t, home, platform);
-  if (root.hooks === undefined) {
+  const { box, boxName, others: elsewhere } = boxes(root, t);
+  for (const other of elsewhere) {
+    const s = scan(other);
+    out.others += s.others;
+    for (const f of s.owned)
+      out.problems.push(`别的钩子项里也登记着本脚本的 ${f.script}（挂在 ${f.event} 上）`);
+  }
+  if (box === undefined) {
     out.missing.push(...t.hooks.map(specName));
     return out;
   }
-  if (!isObj(root.hooks)) {
-    out.problems.push('hooks 不是对象');
+  if (!isObj(box)) {
+    out.problems.push(`${boxName} 不是对象`);
     return out;
   }
-  const { owned, others } = scan(root.hooks);
-  out.others = others;
+  const { owned, others } = scan(box);
+  out.others += others;
   // 同一个脚本可以按不同的 matcher 登记几条（调工具前那条：Claude 的工具名一组、Devin 的一组），按事件加 matcher 对号
   const claimed = new Set<Found>();
   for (const spec of t.hooks) {
@@ -220,6 +249,11 @@ function wanted(ctx: Ctx, skip?: HookSkip): HookTarget[] {
   return HOOK_TARGETS.filter((t) => t.readers.some((r) => ctx.installed.has(r)))
     .map((t) => (skip ? { ...t, hooks: t.hooks.filter((h) => h.event !== skip.event) } : t))
     .filter((t) => t.hooks.length > 0);
+}
+
+/** 这家有、但没登记的那类钩子（targets.ts 的 lacks）：每次都报一行 */
+function lackLines(t: HookTarget): Line[] {
+  return t.lacks ? [line('skip', `${agentNames(t.readers)} 的${t.lacks.what}`, t.lacks.why)] : [];
 }
 
 function skipLines(skip?: HookSkip): Line[] {
@@ -368,7 +402,7 @@ export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
     const launchers = checkLaunchers(ctx, targets);
     if (launchers) out.push(launchers);
     for (const t of targets) {
-      out.push(checkSettings(ctx, t));
+      out.push(checkSettings(ctx, t), ...lackLines(t));
       if (t.format === 'codex') out.push(codexTrust(ctx, t, null));
     }
   }
@@ -431,7 +465,33 @@ function applyScripts(ctx: Ctx, src: Sources): Line {
 /** 去掉本脚本管的（含以前手装的），再按仓里的登记一遍；别的钩子原样留着 */
 function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj {
   const next = structuredClone(root);
+  if (t.format === 'agy') {
+    // 名字叫 agyName 的那一项整项归本脚本：重写，只留人设的 enabled = false；别的项里混进来的本脚本的命令摘掉
+    const name = agyName(t);
+    for (const [k, v] of Object.entries(next)) if (k !== name && isObj(v)) stripOwned(v);
+    const old = next[name];
+    const box: Obj = isObj(old) && old.enabled === false ? { enabled: false } : {};
+    for (const spec of t.hooks) {
+      const list = Array.isArray(box[spec.event]) ? (box[spec.event] as unknown[]) : [];
+      list.push(group(spec, commandIn(t, home, platform, spec.script)));
+      box[spec.event] = list;
+    }
+    next[name] = box;
+    return next;
+  }
   const hooks: Obj = isObj(next.hooks) ? next.hooks : {};
+  stripOwned(hooks);
+  for (const spec of t.hooks) {
+    const list = Array.isArray(hooks[spec.event]) ? (hooks[spec.event] as unknown[]) : [];
+    list.push(group(spec, commandIn(t, home, platform, spec.script)));
+    hooks[spec.event] = list;
+  }
+  next.hooks = hooks;
+  return next;
+}
+
+/** 按事件挂的那几组里摘掉本脚本的命令（就地改）；摘空的组去掉，摘空的事件去掉 */
+function stripOwned(hooks: Obj): void {
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
     let removed = false;
@@ -447,13 +507,6 @@ function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj
     if (removed && kept.length === 0) delete hooks[event];
     else hooks[event] = kept;
   }
-  for (const spec of t.hooks) {
-    const list = Array.isArray(hooks[spec.event]) ? (hooks[spec.event] as unknown[]) : [];
-    list.push(group(spec, commandIn(t, home, platform, spec.script)));
-    hooks[spec.event] = list;
-  }
-  next.hooks = hooks;
-  return next;
 }
 
 function group(spec: HookSpec, command: string): Obj {
@@ -471,8 +524,8 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
     if (read.kind === 'bad') return line('failed', key, `没动——${read.why}；要人看`);
     const root: unknown = read.kind === 'none' ? {} : read.root;
     if (!isObj(root)) return line('failed', key, '没动——整份不是一个 JSON 对象；要人看');
-    if (root.hooks !== undefined && !isObj(root.hooks))
-      return line('failed', key, '没动——hooks 不是对象；要人看');
+    const { box, boxName } = boxes(root, t);
+    if (box !== undefined && !isObj(box)) return line('failed', key, `没动——${boxName} 不是对象；要人看`);
     const before = judge(root, t, ctx.home, ctx.platform);
     const off = before.off;
     const fine = before.missing.length === 0 && before.problems.length === 0;
@@ -517,7 +570,8 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
       out.push(line('failed', relOf(ctx, t.settings).key, '没动——钩子脚本没装上，不登记指向空处的命令'));
       continue;
     }
-    if (launchers?.kind === 'failed') {
+    const usesLauncher = t.hooks.some((h) => commandIn(t, ctx.home, ctx.platform, h.script).endsWith('.exe'));
+    if (launchers?.kind === 'failed' && usesLauncher) {
       out.push(line('failed', relOf(ctx, t.settings).key, '没动——静默启动器没装上，不登记指向空处的命令'));
       continue;
     }
@@ -529,7 +583,7 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
       continue;
     }
     const settings = applySettings(ctx, t, backups);
-    out.push(settings);
+    out.push(settings, ...lackLines(t));
     if (t.format === 'codex')
       out.push(
         settings.kind === 'failed'
