@@ -3,8 +3,11 @@
 // 网关只调 IntentRoutes（shared 的 intent-api.ts），旧的待推送、回执、盘面、卡片登记接口一条都不调（test/static.test.ts 核对）。
 // 收事件的回调一律立刻返回（SDK 按会话排队，回调慢了会挡住后面的人），活放到后台跑。
 // 改这里之前必须知道：
-// - 收谁的：允许的群里只收创始人的，别人说的在入口就丢（不转、不存、不记原文和长度）；私聊里的陌生人一天礼貌拒一次；
-//   机器人的不收。谁是创始人只看 FEISHU_FOUNDERS，后端再按 users.feishu_open_id 认一遍（不是创始人回 403）。
+// - 收谁的：允许的群里只收创始人的，别人说的在入口就丢（不转原话、不记原文和长度），另留一条没有内容的拒收记录；
+//   白名单外的人进群，在群里说一句、让后端提醒。私聊里的陌生人一天礼貌拒一次；机器人的不收。
+//   谁是创始人只看 FEISHU_FOUNDERS，后端再按 users.feishu_open_id 认一遍（不是创始人回 403）。
+// - 飞书用量：每次成功的端口调用记一笔，心跳报给后端。到八成停「收到」、停改卡、补漏只在后端恢复时翻；
+//   读不到用量只停「收到」。还没读过之前照常发。
 // - 网关不判这句话是什么意思、归哪段：原样转，切段由后端定（packages/api/src/intents.ts）。
 // - 「收到」表情只给私聊和 @机器人 的那句（2 秒内，不等后端）；群里对聊不逐句打扰。
 // - 没存成要看得见：在那句上加「没记成」表情。连不上、超时、后端 5xx、事件残缺的，记下这个会话要补漏；
@@ -12,7 +15,25 @@
 // - 飞书上不再有按钮和菜单能办的事：旧卡上的按钮、私聊菜单一律回一句「已停用」，不悄悄不理。
 // - 日志不记原话正文，只记长度；「消息处理完」这几个字香港的 fleet-gateway-deploy status 在数，别改。
 
-import { type Acting, type Backend, BackendError, type IntakeRecall, isTransient } from './backend.ts';
+import {
+  FEISHU_JOIN_GROUP_TEXT,
+  FEISHU_JOIN_REASON,
+  FEISHU_MONTHLY_CALL_LIMIT,
+  FEISHU_REJECTION_REASON,
+  type FeishuUsageStop,
+  feishuUsageLevel,
+  feishuUsageSentence,
+  feishuUsageStops,
+  withFeishuUsageLine,
+} from '@fleet-dao/shared';
+import {
+  type Acting,
+  type Backend,
+  BackendError,
+  type FeishuUsage,
+  type IntakeRecall,
+  isTransient,
+} from './backend.ts';
 import { ActionValueSchema } from './cards.ts';
 import type { Founder } from './config.ts';
 import { IntakeShapeError, toIntake } from './intake.ts';
@@ -21,6 +42,7 @@ import type { Logger } from './log.ts';
 import {
   type FeishuPort,
   type InboundCardAction,
+  type InboundJoin,
   type InboundMenu,
   type InboundMessage,
   type InboundRecall,
@@ -96,9 +118,22 @@ export interface GatewayOptions {
   watch?: Partial<WatchLimits>;
 }
 
+export interface GatewayUsageStatus {
+  /** ok 没到八成；over 到了；unreadable 这一轮没读出来。还没问过之前是 ok。 */
+  level: 'ok' | 'over' | 'unreadable';
+  /** ok 时是 null。其余是写在卡上的那一句。 */
+  sentence: string | null;
+  stopped: FeishuUsageStop[];
+  /** 后端这个月的累计。读不到是 null，不拿 0 冒充。还没问过是 0。 */
+  calls: number | null;
+  limit: number;
+}
+
 export interface Gateway {
   onMessage(msg: InboundMessage): void;
   onRecall(evt: InboundRecall): void;
+  /** 有人进了群（im.chat.member.user.added_v1）。 */
+  onJoin(evt: InboundJoin): void;
   onCardAction(evt: InboundCardAction): void;
   onMenu(evt: InboundMenu): void;
   /** SDK 的策略层拦下的消息（不在允许的群）：只计数，不回话。 */
@@ -117,8 +152,29 @@ export interface Gateway {
   };
   /** 补漏一轮（起来时、后端从连不上变连得上时、定时；测试直接调）。同时刻只跑一轮。 */
   backfill(reason: string): Promise<void>;
+  /** 把记着的调用次数报给后端，并按回的累计决定降级。测试直接调。 */
+  reportUsage(): Promise<void>;
+  readonly status: GatewayUsageStatus;
   readonly stats: Readonly<Record<string, number>>;
   readonly watch: Watch;
+}
+
+/** 成功打出去的飞书调用才记数。失败的抛在加数之前，事件本身不是调用。 */
+function metered(port: FeishuPort, onSuccess: () => void): FeishuPort {
+  const count = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const result = await fn();
+    onSuccess();
+    return result;
+  };
+  return {
+    react: (messageId, emojiType) => count(() => port.react(messageId, emojiType)),
+    send: (to, message, opts) => count(() => port.send(to, message, opts)),
+    reply: (messageId, message, opts) => count(() => port.reply(messageId, message, opts)),
+    updateCard: (messageId, card) => count(() => port.updateCard(messageId, card)),
+    pin: (chatId, messageId) => count(() => port.pin(chatId, messageId)),
+    unreact: (messageId, reactionId) => count(() => port.unreact(messageId, reactionId)),
+    history: (req) => count(() => port.history(req)),
+  };
 }
 
 const DECLINE = '你好，我是 fleet-dao 的机器人，只替两位创始人办事。这条我没有记下，有事请直接找他们。';
@@ -146,25 +202,98 @@ export function createGateway(o: GatewayOptions): Gateway {
     });
   });
   const life = new AbortController();
+  /** 还没问过后端之前是 ok：不拿「还没读」当成「可能超了」。 */
+  const usageState: GatewayUsageStatus = {
+    level: 'ok',
+    sentence: null,
+    stopped: [],
+    calls: 0,
+    limit: FEISHU_MONTHLY_CALL_LIMIT,
+  };
+  let pendingCalls = 0;
+  let reporting: Promise<void> | null = null;
+
+  function applySnapshot(s: FeishuUsage) {
+    const level = feishuUsageLevel(s);
+    usageState.level = level;
+    usageState.limit = s.limit > 0 ? s.limit : FEISHU_MONTHLY_CALL_LIMIT;
+    usageState.calls = level === 'unreadable' ? null : s.calls;
+    usageState.stopped = feishuUsageStops(level);
+    usageState.sentence =
+      level === 'ok' ? null : feishuUsageSentence(level, { calls: s.calls, limit: usageState.limit });
+  }
+
+  function applyUnreadable() {
+    applySnapshot({ month: '1970-01', calls: 0, limit: FEISHU_MONTHLY_CALL_LIMIT, readable: false });
+  }
+
+  function reportUsage(): Promise<void> {
+    if (reporting) return reporting;
+    // 清标记要比的是包过 finally 的那个 promise。写在初始化表达式里直接点它，tsc 会判「还没赋值就用了」。
+    const slot: { current: Promise<void> | null } = { current: null };
+    const run = (async () => {
+      const delta = pendingCalls;
+      pendingCalls = 0;
+      try {
+        const snap = await o.backend.reportUsage(
+          { calls: delta, at: new Date(now()).toISOString() },
+          { timeoutMs: timing.intakeMs },
+        );
+        applySnapshot(snap);
+      } catch (err) {
+        pendingCalls += delta;
+        applyUnreadable();
+        log.error('飞书用量没报上，按读不到处理：只停「收到」表情', { error: clip(String(err), 300) });
+      }
+    })().finally(() => {
+      if (reporting === slot.current) reporting = null;
+    });
+    slot.current = run;
+    reporting = run;
+    return run;
+  }
+
+  const feishu = metered(o.feishu, () => {
+    pendingCalls += 1;
+  });
   const watch = createWatch({
-    feishu: o.feishu,
+    feishu,
     log,
     now,
     teamChatId: o.teamChatId,
     publicUrl: o.publicUrl,
     ackTargetMs: TARGET_ACK_MS,
     limits: o.watch,
+    onHeartbeat: () => {
+      void reportUsage().catch((err) => log.error('飞书用量上报没接住', { error: clip(String(err), 300) }));
+    },
+    feishuUsage: () => ({ level: usageState.level, sentence: usageState.sentence }),
   });
   /** 意图卡（#553 第 4 条）：长轮询后端要发、要改的意图卡，回复在那段第一条原话下面、之后原地改。 */
   const intentCards = createIntentCards({
     backend: o.backend,
-    feishu: o.feishu,
+    feishu,
     log,
     now,
     waitSeconds: timing.intentCardsWaitSeconds,
     watch,
+    usage: {
+      apply: applySnapshot,
+      lines: (lines) =>
+        withFeishuUsageLine(lines, {
+          calls: usageState.calls ?? 0,
+          limit: usageState.limit,
+          readable: usageState.level !== 'unreadable',
+        }),
+      cardUpdateError: () =>
+        usageState.stopped.includes('card-update')
+          ? (usageState.sentence ??
+            feishuUsageSentence('over', { calls: usageState.calls ?? 0, limit: usageState.limit }))
+          : null,
+    },
   });
   const seenMenuEvents = new Lru<string, true>(500);
+  const seenJoins = new Lru<string, true>(500);
   /** 陌生人每人每天只回一次，免得和别的机器人来回刷。 */
   const declined = new Lru<string, string>(1000);
   /** 「已停用」每张旧卡、每个点菜单的人每天只说一次。 */
@@ -178,7 +307,7 @@ export function createGateway(o: GatewayOptions): Gateway {
 
   async function reply(messageId: string, message: OutMessage, key: string): Promise<Sent | null> {
     try {
-      return await o.feishu.reply(messageId, message, { uuid: uuidFor('reply', messageId, key) });
+      return await feishu.reply(messageId, message, { uuid: uuidFor('reply', messageId, key) });
     } catch (err) {
       count('feishu_failed');
       log.error('回复没发出去', { messageId, key, error: String(err) });
@@ -188,7 +317,7 @@ export function createGateway(o: GatewayOptions): Gateway {
 
   async function send(to: Target, message: OutMessage, key: string): Promise<Sent | null> {
     try {
-      return await o.feishu.send(to, message, { uuid: uuidFor('send', JSON.stringify(to), key) });
+      return await feishu.send(to, message, { uuid: uuidFor('send', JSON.stringify(to), key) });
     } catch (err) {
       count('feishu_failed');
       log.error('消息没发出去', { key, error: String(err) });
@@ -212,9 +341,15 @@ export function createGateway(o: GatewayOptions): Gateway {
    * 超过 2 秒计一次（ack_slow），每条都记给看守，心跳里带上。
    */
   async function ack(msg: InboundMessage, receivedAt: number): Promise<number | null> {
+    if (usageState.stopped.includes('ack')) {
+      count('ack_stopped');
+      log.info('飞书用量降级：停了「收到」表情', { messageId: msg.messageId, level: usageState.level });
+      watch.acked(null);
+      return null;
+    }
     let ms: number | null;
     try {
-      await o.feishu.react(msg.messageId, o.ackEmoji);
+      await feishu.react(msg.messageId, o.ackEmoji);
       ms = now() - receivedAt;
     } catch (err) {
       count('ack_failed');
@@ -246,7 +381,7 @@ export function createGateway(o: GatewayOptions): Gateway {
   /** 在那句上加「没记成」表情；加不上记错误（没有别的地方能让人看见了）。keep：补上了要撤掉的，记下表情编号。 */
   async function markNotStored(msg: InboundMessage, keep: boolean): Promise<void> {
     try {
-      const reactionId = await o.feishu.react(msg.messageId, NOT_STORED_EMOJI);
+      const reactionId = await feishu.react(msg.messageId, NOT_STORED_EMOJI);
       if (keep)
         notStoredMarks.set(msg.messageId, { messageId: msg.messageId, chatId: msg.chatId, reactionId });
     } catch (err) {
@@ -363,7 +498,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     for (const c of containers) {
       let pageToken: string | undefined;
       for (let page = 0; page < timing.backfillPages; page++) {
-        const got = await o.feishu.history({
+        const got = await feishu.history({
           containerId: c.id,
           container: c.container,
           chatKind: cursor.chatKind,
@@ -452,7 +587,7 @@ export function createGateway(o: GatewayOptions): Gateway {
       return;
     }
     try {
-      await o.feishu.unreact(mark.messageId, mark.reactionId);
+      await feishu.unreact(mark.messageId, mark.reactionId);
       count('not_stored_cleared');
     } catch (err) {
       count('not_stored_clear_failed');
@@ -472,6 +607,11 @@ export function createGateway(o: GatewayOptions): Gateway {
    */
   function backfill(reason: string): Promise<void> {
     if (backfillRun) return backfillRun;
+    if (usageState.stopped.includes('backfill') && reason !== 'recovered') {
+      count('backfill_narrowed');
+      log.info('飞书用量降级：补漏收窄，只在后端恢复时翻一次', { reason });
+      return Promise.resolve();
+    }
     if (backfillFailedAt !== null && now() - backfillFailedAt < timing.backfillRetryMs)
       return Promise.resolve();
     backfillRun = (async () => {
@@ -611,12 +751,33 @@ export function createGateway(o: GatewayOptions): Gateway {
       const founder = founders.get(msg.senderId);
       if (!founder) {
         if (msg.chatType === 'group') {
-          // 允许的群里别人说的：入口就丢，不转、不存、不回话，日志里也不记原文和长度（方案 5.6）
+          // 允许的群里别人说的：入口就丢，不转原话、不回话，日志里也不记原文和长度（方案 5.6）。
+          // 另留一条没有内容的拒收记录：群、open_id 末 4 位、时刻、原因。
           count('dropped_not_founder');
+          const tail = msg.senderId.slice(-4);
           log.info('群里有不是创始人的人说话：没转、没存', {
             chatId: msg.chatId,
-            sender: `…${msg.senderId.slice(-4)}`,
+            sender: `…${tail}`,
           });
+          if (tail.length < 4) {
+            log.error('说话人的 open_id 不到 4 位，拒收记录不报', { chatId: msg.chatId });
+            return;
+          }
+          const at =
+            msg.createTime > 0 ? new Date(msg.createTime).toISOString() : new Date(now()).toISOString();
+          inflight.track(
+            o.backend
+              .recordRejection({
+                chatId: msg.chatId,
+                openIdTail: tail,
+                at,
+                reason: FEISHU_REJECTION_REASON,
+              })
+              .catch((err) => {
+                count('rejection_failed');
+                log.error('拒收记录没送到后端', { chatId: msg.chatId, error: clip(String(err), 300) });
+              }),
+          );
           return;
         }
         count('stranger');
@@ -625,6 +786,21 @@ export function createGateway(o: GatewayOptions): Gateway {
       }
       if (msg.chatType === 'p2p') founderChats.add(msg.chatId);
       inflight.track(intake(msg, founder, receivedAt));
+    },
+
+    onJoin(evt) {
+      if (!allowedGroups.has(evt.chatId)) {
+        count('join_ignored');
+        return;
+      }
+      if (evt.eventId) {
+        if (seenJoins.has(evt.eventId)) {
+          count('join_duplicate');
+          return;
+        }
+        seenJoins.set(evt.eventId, true);
+      }
+      inflight.track(announceJoin(evt));
     },
 
     onRecall(evt) {
@@ -699,7 +875,56 @@ export function createGateway(o: GatewayOptions): Gateway {
       recalls: () => [...missedRecalls.values()],
     },
     backfill: (reason) => backfill(reason),
+    reportUsage: () => reportUsage(),
+    get status() {
+      return {
+        level: usageState.level,
+        sentence: usageState.sentence,
+        stopped: [...usageState.stopped],
+        calls: usageState.calls,
+        limit: usageState.limit,
+      };
+    },
     stats,
     watch,
   };
+
+  /** 白名单外的人进来：群里说一句，同时把末 4 位送给后端。说明发不出去，记录照样送。 */
+  async function announceJoin(evt: InboundJoin): Promise<void> {
+    const short = evt.openIds.filter((id) => id.length < 4);
+    if (short.length > 0) {
+      log.error('进群的 open_id 不到 4 位，这几个不报', { chatId: evt.chatId, count: short.length });
+    }
+    const outsiders = evt.openIds.filter((id) => id.length >= 4 && !founders.has(id));
+    if (outsiders.length === 0) {
+      count('join_founders');
+      return;
+    }
+    count('join_outsider');
+    const tails = outsiders.map((id) => id.slice(-4));
+    try {
+      await feishu.send(
+        { chatId: evt.chatId },
+        { text: FEISHU_JOIN_GROUP_TEXT },
+        { uuid: uuidFor('join-notice', evt.eventId ?? `${evt.chatId}:${evt.at}:${tails.join(',')}`) },
+      );
+    } catch (err) {
+      count('join_notice_failed');
+      log.error('进群说明没发出去，驾驶舱提醒照样报', {
+        chatId: evt.chatId,
+        error: clip(String(err), 300),
+      });
+    }
+    try {
+      await o.backend.recordJoin({
+        chatId: evt.chatId,
+        openIdTails: tails,
+        at: new Date(evt.at).toISOString(),
+        reason: FEISHU_JOIN_REASON,
+      });
+    } catch (err) {
+      count('join_record_failed');
+      log.error('进群记录没送到后端', { chatId: evt.chatId, error: clip(String(err), 300) });
+    }
+  }
 }

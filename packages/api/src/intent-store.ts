@@ -5,7 +5,7 @@
 //   照结论写。
 // - 读不到、写不进、库里的东西认不出一律抛（调用方回 5xx 或非 0 退出码写明原因），不拿空列表、0 冒充「没有」。
 // - 写回归纳、开成单、放下和操作记录在同一个事务里：记不下就不改（Postgres 版）。
-import type { IntentCardAckSchema } from '@fleet-dao/shared';
+import { beijingMonth, type IntentCardAckSchema } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import {
   applyEdit,
@@ -132,9 +132,31 @@ export interface IntentListFilter {
   limit: number;
 }
 
+/** 拒收或进群留下的一行：没有原文、没有长度。 */
+export interface FeishuOutsiderRow {
+  chatId: string;
+  openIdTail: string;
+  at: string;
+  reason: string;
+  receivedAt: string;
+}
+
+export interface FeishuUsageMonth {
+  month: string;
+  calls: number;
+}
+
 export interface IntentStore {
   intakeMessage(m: IntakeMessage): Promise<IntakeMessageResult>;
   intakeRecall(r: IntakeRecall): Promise<IntakeRecallResult>;
+  /** 白名单群里不是创始人说的。只存这四个字段加收到时刻。 */
+  recordRejection(input: { chatId: string; openIdTail: string; at: string; reason: string }): Promise<void>;
+  /** 一次进群事件里每个白名单外的人一行。返回写下的行数。 */
+  recordJoins(input: { chatId: string; openIdTails: string[]; at: string; reason: string }): Promise<number>;
+  /** 把这次报上来的次数加进 at 所在的北京月。时刻认不出就抛，不当成 0。 */
+  addUsage(calls: number, at: string): Promise<FeishuUsageMonth>;
+  /** 读 at 所在北京月的累计。没有这一行是 0（读到了）。时刻认不出就抛。 */
+  usageAt(at: string): Promise<FeishuUsageMonth>;
   /** 带 chatId 只看这一个（没见过就是空列表，由接口回 known=false）；不带回全部见过的会话。 */
   cursors(chatId?: string): Promise<ChatCursor[]>;
   /** 到期、卡又不是最新的那些段（按到期先后，最多 limit 段）。一条原话都没剩、卡也没发过的不给（没什么可回执的）。 */
@@ -173,6 +195,9 @@ export interface MemoryIntentData {
     receivedAt: string;
     source: IntentMessageSource;
   }[];
+  rejections: FeishuOutsiderRow[];
+  joins: FeishuOutsiderRow[];
+  usage: FeishuUsageMonth[];
   nextSeq: number;
 }
 
@@ -183,7 +208,16 @@ export interface MemoryIntentStore extends IntentStore {
 
 export function createMemoryIntentStore(options: { now?: () => Date } = {}): MemoryIntentStore {
   const now = options.now ?? (() => new Date());
-  const data: MemoryIntentData = { intents: [], messages: [], recalls: [], nextSeq: 1 };
+  const data: MemoryIntentData = {
+    intents: [],
+    messages: [],
+    recalls: [],
+    rejections: [],
+    joins: [],
+    usage: [],
+    nextSeq: 1,
+  };
+  const monthOf = (at: string) => beijingMonth(Date.parse(at));
   const audits: NewAuditEntry[] = [];
 
   const candidate = (i: IntentRecord): SegmentCandidate => ({
@@ -432,6 +466,37 @@ export function createMemoryIntentStore(options: { now?: () => Date } = {}): Mem
       audits.push({ ...audit, before: auditShape(intent), after: auditShape(plan.next) });
       replace(intent, plan.next);
       return { status: 'dropped', intent: withMessages(intent) };
+    },
+
+    async recordRejection(input) {
+      data.rejections.push({ ...input, receivedAt: now().toISOString() });
+    },
+
+    async recordJoins(input) {
+      const receivedAt = now().toISOString();
+      for (const openIdTail of input.openIdTails) {
+        data.joins.push({
+          chatId: input.chatId,
+          openIdTail,
+          at: input.at,
+          reason: input.reason,
+          receivedAt,
+        });
+      }
+      return input.openIdTails.length;
+    },
+
+    async addUsage(calls, at) {
+      const month = monthOf(at);
+      const row = data.usage.find((u) => u.month === month);
+      if (row) row.calls += calls;
+      else data.usage.push({ month, calls });
+      return { month, calls: row?.calls ?? calls };
+    },
+
+    async usageAt(at) {
+      const month = monthOf(at);
+      return { month, calls: data.usage.find((u) => u.month === month)?.calls ?? 0 };
     },
   };
 }

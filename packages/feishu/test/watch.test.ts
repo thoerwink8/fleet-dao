@@ -7,7 +7,15 @@ import { createWatch, reasonOf, WATCH_LIMITS } from '../src/watch.ts';
 import { asMessage, messageEvent, TEAM } from './events.ts';
 import { apiError } from './fake-backend.ts';
 import { buttonsOf, FakeFeishu, textIn, titleOf, unavailable } from './fake-feishu.ts';
-import { type Harness, harness, type LogLine, memoryLogger, PUBLIC_URL, until } from './harness.ts';
+import {
+  type Harness,
+  harness,
+  type LogLine,
+  memoryLogger,
+  PUBLIC_URL,
+  quietCards,
+  until,
+} from './harness.ts';
 
 const SEC = 1_000;
 const MIN = 60_000;
@@ -344,7 +352,7 @@ describe('接上真网关', () => {
 
   it('起来后按时写心跳（不等停机、没人说话也写）：意图卡一轮轮走通，记在里面', async () => {
     h = await harness({ watch: { heartbeatMs: 150 } });
-    h.backend.on('GET', '/feishu/intent-cards', { body: { items: [], asOf: new Date().toISOString() } });
+    h.backend.on('GET', '/feishu/intent-cards', { body: quietCards() });
     h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
     h.gateway.start();
     const beats = () => h.logs.filter((l) => l.message === '网关心跳');
@@ -360,9 +368,7 @@ describe('接上真网关', () => {
     });
     let healthy = false;
     h.backend.on('GET', '/feishu/intent-cards', () =>
-      healthy
-        ? { body: { items: [], asOf: new Date().toISOString() } }
-        : apiError(503, 'unavailable', '后端暂时不可用'),
+      healthy ? { body: quietCards() } : apiError(503, 'unavailable', '后端暂时不可用'),
     );
     h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
     h.gateway.start();

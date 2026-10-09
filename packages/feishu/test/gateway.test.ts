@@ -19,8 +19,8 @@ import {
   TEST_GROUP,
 } from './events.ts';
 import { apiError } from './fake-backend.ts';
-import { FakeFeishu, unavailable } from './fake-feishu.ts';
-import { type Harness, harness, TOKEN, until } from './harness.ts';
+import { FakeFeishu, textIn, unavailable } from './fake-feishu.ts';
+import { type Harness, harness, quietCards, TOKEN, until } from './harness.ts';
 
 let h: Harness;
 afterEach(async () => {
@@ -163,8 +163,19 @@ describe('收原话：每一句原样转后端', () => {
   it('群里别的人说话：入口就丢，不转、不存、不回话，也不记原文和长度', async () => {
     h = await harness();
     h.backend.on('POST', '/feishu/intake/messages', STORED);
+    h.backend.on('POST', '/feishu/intake/rejections', { body: { recorded: true } });
     await say('我要开个任务', { chat: 'group', chatId: TEAM, from: STRANGER });
-    expect(h.backend.requests).toHaveLength(0);
+    expect(h.backend.calls('POST', '/feishu/intake/messages')).toHaveLength(0);
+    const rejected = h.backend.calls('POST', '/feishu/intake/rejections');
+    expect(rejected).toHaveLength(1);
+    const body = rejected[0]?.body as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['at', 'chatId', 'openIdTail', 'reason']);
+    expect(body.openIdTail).toBe('nger');
+    expect(body.chatId).toBe(TEAM);
+    const dumped = JSON.stringify(body);
+    expect(dumped).not.toContain('我要开个任务');
+    expect(dumped).not.toContain('length');
+    expect(body).not.toHaveProperty('text');
     expect(h.feishu.of('reply')).toHaveLength(0);
     expect(h.feishu.of('react')).toHaveLength(0);
     expect(h.gateway.stats).toMatchObject({ dropped_not_founder: 1 });
@@ -690,7 +701,7 @@ describe('停机与重启', () => {
 describe('意图卡循环起没起', () => {
   it('start() 之后长轮询意图卡在跑（后端没东西就空转）；stop() 之后停掉', async () => {
     h = await harness();
-    h.backend.on('GET', '/feishu/intent-cards', { body: { items: [], asOf: new Date().toISOString() } });
+    h.backend.on('GET', '/feishu/intent-cards', { body: quietCards() });
     h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
     h.gateway.start();
     await until(() => h.backend.calls('GET', '/feishu/intent-cards').length >= 1);
@@ -719,7 +730,7 @@ describe('不再调 #1022 删掉的旧接口', () => {
     h = await harness();
     for (const [method, path] of RETIRED)
       h.backend.on(method, path, apiError(404, 'not_found', '没有这个接口'));
-    h.backend.on('GET', '/feishu/intent-cards', { body: { items: [], asOf: new Date().toISOString() } });
+    h.backend.on('GET', '/feishu/intent-cards', { body: quietCards() });
     h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
     h.gateway.start();
     await until(
@@ -729,7 +740,11 @@ describe('不再调 #1022 删掉的旧接口', () => {
     );
     await h.gateway.stop(2_000);
     const retired = h.backend.requests.filter(
-      (r) => !r.path.startsWith('/feishu/intake/') && r.path !== '/feishu/intent-cards',
+      (r) =>
+        !r.path.startsWith('/feishu/intake/') &&
+        r.path !== '/feishu/intent-cards' &&
+        r.path !== '/feishu/intent-cards/acks' &&
+        r.path !== '/feishu/gateway/usage',
     );
     expect(retired.map((r) => `${r.method} ${r.path}`)).toEqual([]);
   });
@@ -753,5 +768,128 @@ describe('卡片的字没跑到别处', () => {
     expect(h.feishu.of('reply')).toHaveLength(0);
     expect(h.feishu.of('update')).toHaveLength(0);
     expect(h.feishu.newMessages()).toHaveLength(0);
+  });
+});
+
+const OVER = { month: '2026-10', calls: 8100, limit: 10_000, readable: true };
+const UNREADABLE = { month: '2026-10', calls: 0, limit: 10_000, readable: false };
+const USAGE_CARD = {
+  intentId: '11111111-0000-4000-8000-000000000795',
+  seq: 7,
+  cardRev: 1,
+  chatId: TEAM,
+  replyToMessageId: 'om_first',
+  title: '意图 7 · 已存 1 条原话',
+  lines: ['甲 1 条 · 10-09 12:00（北京时间）', 'AI 归纳：对题开单时由指挥官写，写好会更新在这里。'],
+};
+
+function cardText(call: { message?: unknown; card?: unknown } | undefined): string {
+  const direct = call?.card;
+  const nested =
+    call?.message && typeof call.message === 'object' && 'card' in call.message
+      ? (call.message as { card: unknown }).card
+      : undefined;
+  const card = direct ?? nested;
+  return card ? textIn(card as Parameters<typeof textIn>[0]) : '';
+}
+
+describe('飞书用量：八成降级、读不到只停表情', () => {
+  it('报到 81%：记上这次打出去的次数，status 写明三档一起停；补漏只在后端恢复时翻，已有的卡不再改', async () => {
+    h = await harness();
+    h.backend.on('POST', '/feishu/gateway/usage', { body: OVER });
+    h.backend.on('POST', '/feishu/intake/messages', STORED);
+    await say('给登录页加验证码');
+    await h.gateway.reportUsage();
+
+    const reported = h.backend.calls('POST', '/feishu/gateway/usage');
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.body).toMatchObject({ calls: 1 });
+    expect(h.gateway.status.level).toBe('over');
+    expect(h.gateway.status.calls).toBe(8100);
+    expect(h.gateway.status.limit).toBe(10_000);
+    expect(h.gateway.status.stopped).toEqual(['ack', 'card-update', 'backfill']);
+    expect(h.gateway.status.sentence).toContain('已按顺序降级');
+    expect(h.gateway.status.sentence).toContain('8100/10000');
+
+    await say('第二句');
+    expect(h.feishu.of('react').filter((c) => c.emoji === 'Get')).toHaveLength(1);
+    expect(h.feishu.of('reply').filter((c) => c.message && 'text' in c.message)).toHaveLength(0);
+
+    await h.gateway.backfill('tick');
+    expect(h.feishu.of('history')).toHaveLength(0);
+    expect(h.gateway.stats.backfill_narrowed).toBeGreaterThanOrEqual(1);
+
+    h.backend.on('POST', '/feishu/intake/messages', apiError(503, 'unavailable', '后端暂时不可用'));
+    const failed = await say('第一句没存成');
+    expect(h.gateway.missed.chats()).toHaveLength(1);
+    h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
+    h.feishu.scriptHistory({ messages: [], unrecognized: 0 });
+    h.backend.on('POST', '/feishu/intake/messages', STORED);
+    await say('后端好了', { chatId: failed.msg.chatId });
+    await h.gateway.backfill('recovered');
+    expect(h.feishu.of('history').length).toBeGreaterThanOrEqual(1);
+
+    let polls = 0;
+    h.backend.on('GET', '/feishu/intent-cards', () => {
+      polls += 1;
+      const item =
+        polls === 1 ? USAGE_CARD : { ...USAGE_CARD, cardRev: 2, cardMessageId: 'om_card_existing' };
+      return { body: { items: [item], asOf: new Date().toISOString(), usage: OVER } };
+    });
+    h.backend.on('POST', '/feishu/intent-cards/acks', { body: { applied: 1, skipped: 0 } });
+    h.gateway.start();
+    await until(() => h.feishu.of('reply').some((c) => cardText(c).includes('已按顺序降级')));
+    await until(() =>
+      h.backend
+        .calls('POST', '/feishu/intent-cards/acks')
+        .some((r) => JSON.stringify(r.body).includes('"failed"')),
+    );
+    expect(h.feishu.of('update')).toHaveLength(0);
+    const failedAck = JSON.stringify(h.backend.calls('POST', '/feishu/intent-cards/acks').map((r) => r.body));
+    expect(failedAck).toContain('已按顺序降级');
+    expect(h.gateway.status.sentence).toContain('已按顺序降级');
+  });
+
+  it('【故意造出的失败】用量读不到：只停「收到」表情，改卡照旧，补漏照翻', async () => {
+    h = await harness();
+    h.backend.on('POST', '/feishu/gateway/usage', apiError(500, 'usage_down', '用量表读不了'));
+    h.backend.on('GET', '/feishu/intent-cards', {
+      body: {
+        items: [{ ...USAGE_CARD, cardMessageId: 'om_card_existing' }],
+        asOf: new Date().toISOString(),
+        usage: UNREADABLE,
+      },
+    });
+    h.backend.on('POST', '/feishu/intent-cards/acks', { body: { applied: 1, skipped: 0 } });
+    h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
+    await h.gateway.reportUsage();
+    expect(h.gateway.status).toMatchObject({
+      level: 'unreadable',
+      calls: null,
+      stopped: ['ack'],
+    });
+    expect(h.gateway.status.sentence).toContain('只停「收到」');
+
+    h.backend.on('POST', '/feishu/intake/messages', STORED);
+    await say('还在说');
+    expect(h.feishu.of('react').filter((c) => c.emoji === 'Get')).toHaveLength(0);
+    expect(
+      h.feishu.of('reply').filter((c) => c.message && 'text' in c.message && c.message.text === '收到。'),
+    ).toHaveLength(0);
+
+    h.gateway.start();
+    await until(() => h.feishu.of('update').length >= 1);
+    expect(cardText(h.feishu.of('update')[0])).toContain('只停「收到」');
+    expect(h.gateway.status.stopped).toEqual(['ack']);
+
+    h.backend.on('POST', '/feishu/intake/messages', apiError(503, 'unavailable', '后端暂时不可用'));
+    await say('这句没存成');
+    expect(h.feishu.of('react').some((c) => c.emoji === NOT_STORED_EMOJI)).toBe(true);
+    h.feishu.scriptHistory({ messages: [], unrecognized: 0 });
+    const before = h.feishu.of('history').length;
+    await h.gateway.backfill('tick');
+    expect(h.feishu.of('history').length).toBeGreaterThan(before);
+    expect(h.gateway.stats.backfill_narrowed ?? 0).toBe(0);
+    expect(h.feishu.of('react').filter((c) => c.emoji === 'Get')).toHaveLength(0);
   });
 });

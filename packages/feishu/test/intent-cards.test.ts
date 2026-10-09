@@ -7,7 +7,7 @@ import { checkCard } from '../src/cards.ts';
 import { createIntentCards, intentCard } from '../src/intent-cards.ts';
 import { apiError, type FakeBackend, startFakeBackend } from './fake-backend.ts';
 import { buttonsOf, FakeFeishu, textIn, titleOf, tooOld, unavailable } from './fake-feishu.ts';
-import { type LogLine, memoryLogger, TOKEN } from './harness.ts';
+import { type LogLine, memoryLogger, quietCards, TOKEN } from './harness.ts';
 
 const ITEM = IntentCardSchema.parse({
   intentId: '11111111-0000-4000-8000-000000000001',
@@ -32,7 +32,7 @@ async function setup(
   ack: Parameters<FakeBackend['on']>[2] = { body: { applied: 1, skipped: 0 } },
 ) {
   backend = await startFakeBackend();
-  backend.on('GET', '/feishu/intent-cards', { body: { items, asOf: new Date().toISOString() } });
+  backend.on('GET', '/feishu/intent-cards', { body: quietCards(items) });
   backend.on('POST', '/feishu/intent-cards/acks', ack);
   const feishu = new FakeFeishu();
   const logs: LogLine[] = [];
@@ -157,7 +157,7 @@ describe('意图卡长轮询', () => {
     const stop = new AbortController();
     const running = s.loop.run(stop.signal);
     await new Promise((r) => setTimeout(r, 100));
-    backend.on('GET', '/feishu/intent-cards', { body: { items: [], asOf: new Date().toISOString() } });
+    backend.on('GET', '/feishu/intent-cards', { body: quietCards() });
     await new Promise((r) => setTimeout(r, 1_300));
     stop.abort();
     await running;

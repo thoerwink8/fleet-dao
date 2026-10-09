@@ -1,14 +1,16 @@
 // 飞书 SDK 这一层：用真的 LarkChannel（webhook 传输，不连长连接），HTTP 换成假的。
 // 原始事件从 SDK 的分发器进去，经它的去重、策略、排队到网关；网关往外发的每一步都是 SDK 真发的 HTTP 请求。
+
+import { FEISHU_JOIN_GROUP_TEXT, FEISHU_JOIN_REASON } from '@fleet-dao/shared';
 import type { Cache, HttpInstance } from '@larksuiteoapi/node-sdk';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createBackend } from '../src/backend.ts';
 import { createGateway, type Gateway } from '../src/gateway.ts';
 import { createLark, type Lark, sdkDetail } from '../src/lark.ts';
 import { FeishuError } from '../src/port.ts';
-import { A, B, BOT, cardEvent, menuEvent, messageEvent, recallEvent, TEAM } from './events.ts';
+import { A, B, BOT, cardEvent, menuEvent, messageEvent, recallEvent, STRANGER, TEAM } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
-import { memoryLogger, TOKEN, until } from './harness.ts';
+import { type LogLine, memoryLogger, TOKEN, until } from './harness.ts';
 
 interface HttpCall {
   method: string;
@@ -367,5 +369,89 @@ describe('飞书 SDK 这一层', () => {
     expect(
       sdkDetail([{ config: { data: secret, url: '/x' }, response: { data: { code: 1, msg: 'bad' } } }]),
     ).toBe('url=/x code=1 msg=bad');
+  });
+});
+
+/** 和长连接推来的同形。create_time 头上和事件里都给，摊平后仍是这一刻。 */
+function joinEvent(o: { openIds?: string[]; users?: unknown; chatId?: string; name?: string }) {
+  const users =
+    o.users ??
+    (o.openIds ?? [STRANGER]).map((openId) => ({
+      name: o.name ?? '不该出现的人名',
+      tenant_key: 'tenant_placeholder',
+      user_id: { union_id: '', user_id: '', open_id: openId },
+    }));
+  return {
+    schema: '2.0',
+    header: {
+      event_id: 'evt_join_0001',
+      event_type: 'im.chat.member.user.added_v1',
+      create_time: '1790000000000',
+      token: 'verification_token_placeholder',
+      app_id: 'cli_app_placeholder',
+      tenant_key: 'tenant_placeholder',
+    },
+    event: {
+      chat_id: o.chatId ?? TEAM,
+      operator_id: { union_id: '', user_id: '', open_id: A },
+      users,
+      create_time: '1790000000000',
+    },
+  };
+}
+
+describe('有人进白名单群', () => {
+  it('白名单外的人进来：群里说那一句，末 4 位送给后端，人名不进记录也不进日志', async () => {
+    const lines: LogLine[] = [];
+    const s = await start({}, memoryLogger(lines));
+    s.backend.on('POST', '/feishu/intake/joins', { body: { recorded: 1 } });
+    await s.lark.dispatch(joinEvent({ openIds: [STRANGER] }));
+    await until(() => imCalls(s).some((c) => c.path === '/open-apis/im/v1/messages'));
+    await s.gateway.idle();
+
+    const send = imCalls(s).find((c) => c.path === '/open-apis/im/v1/messages');
+    expect(send).toMatchObject({
+      method: 'POST',
+      params: { receive_id_type: 'chat_id' },
+      data: { receive_id: TEAM, msg_type: 'text' },
+    });
+    const sent = send?.data as { content: string };
+    const said = JSON.parse(sent.content) as { text: string };
+    expect(said.text).toBe(FEISHU_JOIN_GROUP_TEXT);
+    expect(s.backend.calls('POST', '/feishu/intake/joins')).toHaveLength(1);
+    expect(s.backend.calls('POST', '/feishu/intake/joins')[0]?.body).toEqual({
+      chatId: TEAM,
+      openIdTails: ['nger'],
+      at: new Date(1_790_000_000_000).toISOString(),
+      reason: FEISHU_JOIN_REASON,
+    });
+    const dumped = JSON.stringify(s.backend.requests) + JSON.stringify(lines);
+    expect(dumped).not.toContain('不该出现的人名');
+    expect(dumped).not.toContain(STRANGER);
+  });
+
+  it('进来的都是创始人：认出来了，不说话、不报', async () => {
+    const lines: LogLine[] = [];
+    const s = await start({}, memoryLogger(lines));
+    await s.lark.dispatch(joinEvent({ openIds: [A, B], name: '创始人甲' }));
+    await s.gateway.idle();
+    expect(imCalls(s).filter((c) => c.path === '/open-apis/im/v1/messages')).toHaveLength(0);
+    expect(s.backend.calls('POST', '/feishu/intake/joins')).toHaveLength(0);
+    expect(s.gateway.stats).toMatchObject({ join_founders: 1 });
+    expect(lines.some((l) => l.message === '进群事件认不出，不当没人进')).toBe(false);
+  });
+
+  it('【故意造出的失败】进群事件认不出：记错误，不当没人进，不说话、不报', async () => {
+    const lines: LogLine[] = [];
+    const s = await start({}, memoryLogger(lines));
+    const broken = joinEvent({});
+    delete (broken.event as { users?: unknown }).users;
+    await s.lark.dispatch(broken);
+    await s.gateway.idle();
+    expect(lines.some((l) => l.level === 'error' && l.message === '进群事件认不出，不当没人进')).toBe(true);
+    expect(imCalls(s).filter((c) => c.path === '/open-apis/im/v1/messages')).toHaveLength(0);
+    expect(s.backend.calls('POST', '/feishu/intake/joins')).toHaveLength(0);
+    expect(s.gateway.stats.join_outsider ?? 0).toBe(0);
+    expect(s.gateway.stats.join_founders ?? 0).toBe(0);
   });
 });

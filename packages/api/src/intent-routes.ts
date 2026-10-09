@@ -1,4 +1,5 @@
-// 网关的五条意图接口（shared 的 IntentRoutes，#553 第 4 条），挂在 /api 下：收原话、收撤回、补漏游标、取意图卡、卡的回执。
+// 网关的八条意图接口（shared 的 IntentRoutes，#553 第 4 条），挂在 /api 下：收原话、收撤回、补漏游标、取意图卡、卡的回执，
+// 外加拒收记录、进群记录、飞书接口用量（#795，方案 5.4、5.6）。
 // 和驾驶舱那套接口同一个门：只认网关通行证（checkGatewayPass），按每条的 acting 放行；收原话代表说这句话的那位创始人
 // （actingFounder，不是创始人 403）。门口验过通行证记一笔「网关来过」（/healthz 的 feishu_gateway）。
 // 改这里之前必须知道：
@@ -8,7 +9,20 @@
 // - 指挥官不走这里：他经 ssh 跑 `fleet-api intent …`（intent-cli.ts），不开对公网的口子。
 
 import {
+  beijingMonth,
+  FEISHU_MONTHLY_CALL_LIMIT,
+  FEISHU_OUTSIDER_JOINED_TITLE,
+  FEISHU_OUTSIDER_SPOKE_TITLE,
+  FEISHU_USAGE_ALERT_TITLE,
+  FeishuJoinRequest,
+  FeishuJoinResponse,
+  FeishuRejectionRequest,
+  FeishuRejectionResponse,
   type FeishuRoute,
+  FeishuUsageReportRequest,
+  FeishuUsageSnapshot,
+  feishuUsageLevel,
+  feishuUsageSentence,
   IntentCardAckRequest,
   IntentCardAckResponse,
   IntentCardsQuery,
@@ -69,6 +83,45 @@ export function intentRoutes(deps: Deps): Hono<IntentEnv> {
   const storeOf = (): IntentStore => {
     if (!deps.intents) throw new ApiError(503, 'intents_not_wired', INTENTS_NOT_WIRED);
     return deps.intents;
+  };
+
+  /** 记录已经留下。提醒没接上或写不进去只记错误，仍回 200：再送会把同一条证据再写一遍。 */
+  const raise = async (input: { dedupeKey: string; title: string; body: string }) => {
+    if (!deps.alerts) {
+      log.error('驾驶舱提醒没接上，记录已经留下', { dedupeKey: input.dedupeKey });
+      return;
+    }
+    try {
+      await deps.alerts.raise(input);
+    } catch (err) {
+      log.error('驾驶舱提醒没写成，记录已经留下', {
+        dedupeKey: input.dedupeKey,
+        error: errMessage(err).slice(0, 300),
+      });
+    }
+  };
+
+  /** 这个月的用量。读不出来按「读不到」带回（calls 不能当成真的 0），不让整批意图卡失败。 */
+  const usageSnapshot = async (store: IntentStore) => {
+    const at = deps.now();
+    try {
+      const got = await store.usageAt(at.toISOString());
+      return {
+        month: got.month,
+        calls: got.calls,
+        limit: FEISHU_MONTHLY_CALL_LIMIT,
+        readable: true as const,
+      };
+    } catch (err) {
+      log.warn('飞书用量读不出来，这一轮按读不到带给网关', { error: errMessage(err).slice(0, 300) });
+      let month = '1970-01';
+      try {
+        month = beijingMonth(at.getTime());
+      } catch {
+        // 钟本身坏了：月份用占位，readable=false 才是网关要看的。
+      }
+      return { month, calls: 0, limit: FEISHU_MONTHLY_CALL_LIMIT, readable: false as const };
+    }
   };
 
   /** 半个 emoji 换成 �（不换的话写进库会被悄悄换掉，和原始内容对不上）；换了记一笔，不记原文。 */
@@ -195,7 +248,52 @@ export function intentRoutes(deps: Deps): Hono<IntentEnv> {
     return reply(c, IntentCardsResponse, {
       items: batch.items.map(({ intent, messages }) => composeCard(intent, messages)),
       asOf: deps.now().toISOString(),
+      usage: await usageSnapshot(store),
     });
+  });
+
+  on(IntentRoutes.intakeRejection, async (c) => {
+    const body = await readJson(c, FeishuRejectionRequest);
+    await storeOf().recordRejection(body);
+    log.info('记下一条拒收', { chatId: body.chatId, openIdTail: body.openIdTail });
+    await raise({
+      dedupeKey: `feishu-outsider-spoke:${body.chatId}:${body.openIdTail}`,
+      title: FEISHU_OUTSIDER_SPOKE_TITLE,
+      body: `群 ${body.chatId}，open_id 末 4 位 ${body.openIdTail}，${body.at}。${body.reason}。没有存他的话。`,
+    });
+    return reply(c, FeishuRejectionResponse, { recorded: true });
+  });
+
+  on(IntentRoutes.intakeJoin, async (c) => {
+    const body = await readJson(c, FeishuJoinRequest);
+    const recorded = await storeOf().recordJoins(body);
+    log.info('记下一次进群', { chatId: body.chatId, outsiders: recorded });
+    await raise({
+      dedupeKey: `feishu-outsider-joined:${body.chatId}`,
+      title: FEISHU_OUTSIDER_JOINED_TITLE,
+      body: `群 ${body.chatId}，open_id 末 4 位 ${body.openIdTails.join('、')}，${body.at}。${body.reason}。`,
+    });
+    return reply(c, FeishuJoinResponse, { recorded });
+  });
+
+  on(IntentRoutes.usage, async (c) => {
+    const body = await readJson(c, FeishuUsageReportRequest);
+    const added = await storeOf().addUsage(body.calls, body.at);
+    const snapshot = {
+      month: added.month,
+      calls: added.calls,
+      limit: FEISHU_MONTHLY_CALL_LIMIT,
+      readable: true as const,
+    };
+    if (feishuUsageLevel(snapshot) === 'over') {
+      await raise({
+        dedupeKey: `feishu-usage:${added.month}`,
+        title: FEISHU_USAGE_ALERT_TITLE,
+        body: feishuUsageSentence('over', snapshot),
+      });
+    }
+    log.info('记下飞书用量', { month: added.month, calls: added.calls, added: body.calls });
+    return reply(c, FeishuUsageSnapshot, snapshot);
   });
 
   on(IntentRoutes.ackCards, async (c) => {

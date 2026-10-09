@@ -1,5 +1,5 @@
 // 调后端的客户端：带通行证；代表谁跟着路由表的 acting 走；超时、拒收、出错、形状不对分得清。
-import { IntentRoutes, WEB_API_PREFIX } from '@fleet-dao/shared';
+import { FEISHU_JOIN_REASON, FEISHU_REJECTION_REASON, IntentRoutes, WEB_API_PREFIX } from '@fleet-dao/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ACTING_HEADER,
@@ -41,6 +41,21 @@ const EVERY_CALL: Record<keyof typeof IntentRoutes, (b: Backend) => Promise<unkn
   cards: (b) => b.intentCards(0),
   ackCards: (b) =>
     b.ackIntentCards([{ intentId: 'i1', cardRev: 1, result: { status: 'updated', messageId: 'om_1' } }]),
+  intakeRejection: (b) =>
+    b.recordRejection({
+      chatId: 'oc_1',
+      openIdTail: 'nder',
+      at: new Date().toISOString(),
+      reason: FEISHU_REJECTION_REASON,
+    }),
+  intakeJoin: (b) =>
+    b.recordJoin({
+      chatId: 'oc_1',
+      openIdTails: ['nder'],
+      at: new Date().toISOString(),
+      reason: FEISHU_JOIN_REASON,
+    }),
+  usage: (b) => b.reportUsage({ calls: 0, at: new Date().toISOString() }),
 };
 
 let fake: FakeBackend;

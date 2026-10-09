@@ -1,5 +1,5 @@
-// 飞书群聊理成的「意图」（#553 第 4 条，specs/553-对题/方案.md 末节「2026-10-04 拍板」）：三张表。接口约定在 @fleet-dao/shared
-// 的 intent-api.ts。
+// 飞书群聊理成的「意图」（#553 第 4 条，specs/553-对题/方案.md 末节「2026-10-04 拍板」）：意图三张表，外加拒收、进群、
+// 用量三张（#795，方案 5.4、5.6）。接口约定在 @fleet-dao/shared 的 intent-api.ts。
 // 改这里之前必须知道：
 // - 原话原样：intent_messages.text 不截断、不改字；改过的旧版本进 edits，不覆盖；撤回只标 recalled_at，行不删。
 // - AI 归纳只由指挥官在开单时写回（summary_*），永远不进原话；没有法国的归纳会话，所以没有归纳的状态、重试那几列。
@@ -182,6 +182,56 @@ export const intentMessages = pgTable(
     ),
     index('intent_messages_intent_idx').on(t.intentId, t.sentAt),
     index('intent_messages_chat_idx').on(t.chatId, t.sentAt),
+  ],
+);
+
+/**
+ * 白名单群里不是创始人说的：只有群、open_id 末 4 位、时刻、原因。没有原文、没有长度（#795，方案 5.6）。
+ * 一次一句一条，不去重：证据要留着；驾驶舱提醒另按「群 + 尾号」收成一条。
+ */
+export const feishuRejections = pgTable(
+  'feishu_rejections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    chatId: text('chat_id').notNull(),
+    openIdTail: text('open_id_tail').notNull(),
+    at: timestamp('at', tz).notNull(),
+    reason: text('reason').notNull(),
+    receivedAt: timestamp('received_at', tz).notNull(),
+  },
+  (t) => [
+    check('feishu_rejections_tail_len', sql`char_length(${t.openIdTail}) = 4`),
+    check('feishu_rejections_reason_len', sql`char_length(${t.reason}) between 1 and 200`),
+  ],
+);
+
+/** 白名单外的人进了白名单群：一次进群事件里每个外人一行，字段和拒收一样，没有名字。 */
+export const feishuJoins = pgTable(
+  'feishu_joins',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    chatId: text('chat_id').notNull(),
+    openIdTail: text('open_id_tail').notNull(),
+    at: timestamp('at', tz).notNull(),
+    reason: text('reason').notNull(),
+    receivedAt: timestamp('received_at', tz).notNull(),
+  },
+  (t) => [
+    check('feishu_joins_tail_len', sql`char_length(${t.openIdTail}) = 4`),
+    check('feishu_joins_reason_len', sql`char_length(${t.reason}) between 1 and 200`),
+  ],
+);
+
+/** 网关这个北京月调飞书成功了多少次。没有这一行就是 0（读到了，不是读不到）。 */
+export const feishuUsageMonths = pgTable(
+  'feishu_usage_months',
+  {
+    month: text('month').primaryKey(),
+    calls: integer('calls').notNull(),
+  },
+  (t) => [
+    check('feishu_usage_months_shape', sql`${t.month} ~ '^[0-9]{4}-[0-9]{2}$'`),
+    check('feishu_usage_months_calls', sql`${t.calls} >= 0`),
   ],
 );
 

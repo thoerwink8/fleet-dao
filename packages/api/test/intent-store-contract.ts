@@ -632,5 +632,61 @@ export function describeIntentStoreContract(name: string, make: MakeIntentStore)
         expect(got.intent.dropped?.reason).toBe('闲聊');
       });
     });
+
+    describe('拒收、进群、用量（#795）', () => {
+      const sep = '2026-09-30T15:59:59.000Z';
+      const oct = '2026-09-30T16:00:00.000Z';
+      const nov = '2026-10-31T16:00:00.000Z';
+
+      it('拒收和进群只留下群、尾号、时刻、原因', async () => {
+        await store.recordRejection({
+          chatId: 'oc_team',
+          openIdTail: 'nger',
+          at: sep,
+          reason: '白名单群里不是创始人在说话',
+        });
+        expect(
+          await store.recordJoins({
+            chatId: 'oc_team',
+            openIdTails: ['nger', 'abcd'],
+            at: sep,
+            reason: '白名单外的人进了群',
+          }),
+        ).toBe(2);
+        if ('data' in store) {
+          const data = (
+            store as {
+              data: {
+                rejections: Record<string, unknown>[];
+                joins: Record<string, unknown>[];
+              };
+            }
+          ).data;
+          expect(Object.keys(data.rejections[0] ?? {}).sort()).toEqual([
+            'at',
+            'chatId',
+            'openIdTail',
+            'reason',
+            'receivedAt',
+          ]);
+          expect(data.joins.map((row) => row.openIdTail)).toEqual(['nger', 'abcd']);
+          const dumped = JSON.stringify(data);
+          expect(dumped).not.toContain('text');
+          expect(dumped).not.toContain('length');
+        }
+      });
+
+      it('用量按北京月累计；没记过的月是 0；时刻认不出就抛，不当成 0', async () => {
+        expect(await store.usageAt(sep)).toEqual({ month: '2026-09', calls: 0 });
+        expect(await store.addUsage(100, sep)).toEqual({ month: '2026-09', calls: 100 });
+        expect(await store.addUsage(8000, sep)).toEqual({ month: '2026-09', calls: 8100 });
+        expect(await store.addUsage(5, oct)).toEqual({ month: '2026-10', calls: 5 });
+        expect(await store.usageAt(sep)).toEqual({ month: '2026-09', calls: 8100 });
+        expect(await store.usageAt(oct)).toEqual({ month: '2026-10', calls: 5 });
+        expect(await store.usageAt(nov)).toEqual({ month: '2026-11', calls: 0 });
+        await expect(store.addUsage(1, 'not-a-time')).rejects.toThrow(RangeError);
+        await expect(store.usageAt('not-a-time')).rejects.toThrow(RangeError);
+      });
+    });
   });
 }
