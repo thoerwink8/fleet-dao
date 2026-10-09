@@ -1,6 +1,5 @@
 // 会话目录里的 git（以会话用户的身份跑；这里用本机执行器、真 git、临时目录）：从 bundle 建树、交 bundle、快进，
 // 没跑成的明确报错，不拿空结果冒充「没有改动」。
-import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +28,7 @@ import {
   type UserTree,
   uncommittedTracked,
 } from '../../src/real/user-git.ts';
+import { runChildOk } from '../child.ts';
 
 let root: string;
 beforeEach(() => {
@@ -47,7 +47,7 @@ const ENV = {
   GIT_CONFIG_NOSYSTEM: '1',
 };
 const sh = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
+  runChildOk('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
 
 /** 引擎这边的「镜像」：主线两次提交，导出成 bundle（引用名和 github 包的 bundleCommits 一样）。 */
 function mirror(): { dir: string; head: string; bundle: (tip: string, exclude?: string) => Buffer } {
@@ -70,13 +70,16 @@ function mirror(): { dir: string; head: string; bundle: (tip: string, exclude?: 
       sh(dir, 'update-ref', 'refs/fleet/export/0', tip);
       const file = join(root, `out-${n}.bundle`);
       sh(dir, 'bundle', 'create', file, 'refs/fleet/export/0', ...(exclude ? [`^${exclude}`] : []));
-      return execFileSync(
+      // bundle 是二进制。这里按 utf8 交回字符串，直接读会弄坏字节，所以子进程打 base64。
+      const b64 = runChildOk(
         'node',
-        ['-e', `process.stdout.write(require('fs').readFileSync(${JSON.stringify(file)}))`],
-        {
-          maxBuffer: 1 << 26,
-        },
+        [
+          '-e',
+          `process.stdout.write(require('fs').readFileSync(${JSON.stringify(file)}).toString('base64'))`,
+        ],
+        { maxBuffer: 1 << 26 },
       );
+      return Buffer.from(b64, 'base64');
     },
   };
 }
@@ -103,8 +106,8 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     // 会话干活：改文件、提交。
     writeFileSync(join(t.dir, 'a.ts'), 'export const a = 2;\n');
     writeFileSync(join(t.dir, 'b.ts'), 'export const b = 1;\n');
-    execFileSync('git', ['add', '.'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'change a, add b'], { cwd: t.dir, env: ENV });
+    runChildOk('git', ['add', '.'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'change a, add b'], { cwd: t.dir, env: ENV });
     const head = await headOf(t);
     const span = await ownSpan(t, m.head, 'main');
     expect(span).toEqual({ base: m.head, from: m.head, mainline: m.head });
@@ -185,8 +188,8 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     await pinMainline(t, 'main', m.head);
     mkdirSync(join(t.dir, 'specs', '12-登录'), { recursive: true });
     writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 方案\n');
-    execFileSync('git', ['add', '--', 'specs'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'docs: 方案'], { cwd: t.dir, env: ENV });
+    runChildOk('git', ['add', '--', 'specs'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'docs: 方案'], { cwd: t.dir, env: ENV });
     // 不关转义的话 git 列出来的是 "specs/12-\347\231\273\345\275\225/\346\226\271\346\241\210.md"
     expect(sh(t.dir, '-c', 'core.quotePath=true', 'diff', '--name-only', m.head, 'HEAD')).toContain('\\');
     expect(await changedFilesSince(t, await ownSpan(t, m.head, 'main'))).toEqual(['specs/12-登录/方案.md']);
@@ -221,8 +224,8 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     await fetchBundle(u, m.bundle(m.head), 'refs/fleet/export/0');
     await checkoutBranch(u, 'fleet/12-a', m.head);
     writeFileSync(join(u.dir, 'd.ts'), 'x\n');
-    execFileSync('git', ['add', '.'], { cwd: u.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'local'], { cwd: u.dir, env: ENV });
+    runChildOk('git', ['add', '.'], { cwd: u.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'local'], { cwd: u.dir, env: ENV });
     expect(await fastForward(u, m.bundle(next, m.head), 'refs/fleet/export/0', next)).toBe('diverged');
   });
 
@@ -237,8 +240,8 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     expect(mainlineRef('main')).toBe('refs/remotes/origin/main');
 
     writeFileSync(join(t.dir, 'b.ts'), 'export const b = 1;\n');
-    execFileSync('git', ['add', '.'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'add b'], { cwd: t.dir, env: ENV });
+    runChildOk('git', ['add', '.'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'add b'], { cwd: t.dir, env: ENV });
     expect(sh(t.dir, 'diff', '--name-only', 'origin/main...HEAD')).toBe('b.ts');
   });
 
@@ -288,8 +291,8 @@ describe('这一步自己改了什么：扣掉会话并进来的主线（#293）
   const commitFile = (dir: string, file: string, body: string, msg: string) => {
     mkdirSync(join(dir, file, '..'), { recursive: true });
     writeFileSync(join(dir, file), body);
-    execFileSync('git', ['add', '--', file], { cwd: dir });
-    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: dir, env: ENV });
+    runChildOk('git', ['add', '--', file], { cwd: dir });
+    runChildOk('git', ['commit', '-q', '-m', msg], { cwd: dir, env: ENV });
     return sh(dir, 'rev-parse', 'HEAD');
   };
   const subjects = (commits: string[]) => commits.map((l) => l.replace(/^\w+ /, ''));
@@ -361,8 +364,8 @@ describe('这一步自己改了什么：扣掉会话并进来的主线（#293）
     );
     expect(() => mergeMainline(t)).toThrow();
     writeFileSync(join(t.dir, 'a.ts'), 'export const a = 102;\n');
-    execFileSync('git', ['add', '--', 'a.ts'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '--no-edit'], { cwd: t.dir, env: ENV });
+    runChildOk('git', ['add', '--', 'a.ts'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '--no-edit'], { cwd: t.dir, env: ENV });
     const span = await ownSpan(t, base, 'main');
     // 起点是 merge-tree 算出来的树（不是提交）：a.ts 在里面是冲突标记，会话解成的样子和它不一样
     expect(span.from).not.toBe(base);
@@ -456,8 +459,8 @@ describe('并主线没并成（不是冲突）', { timeout: 60_000 }, () => {
     });
     await checkoutBranch(t, 'fleet/12-a', m.head);
     writeFileSync(join(t.dir, 'b.ts'), 'export const b = 1;\n');
-    execFileSync('git', ['add', '.'], { cwd: t.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'add b'], { cwd: t.dir, env: ENV });
+    runChildOk('git', ['add', '.'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'add b'], { cwd: t.dir, env: ENV });
     writeFileSync(join(m.dir, 'c.ts'), 'export const c = 1;\n');
     sh(m.dir, 'add', '.');
     sh(m.dir, 'commit', '-q', '-m', 'main moved');
@@ -548,8 +551,8 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
   }
   const commit = (dir: string, file: string, msg: string) => {
     writeFileSync(join(dir, file), `${msg}\n`);
-    execFileSync('git', ['add', '.'], { cwd: dir });
-    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: dir, env: ENV });
+    runChildOk('git', ['add', '.'], { cwd: dir });
+    runChildOk('git', ['commit', '-q', '-m', msg], { cwd: dir, env: ENV });
     return sh(dir, 'rev-parse', 'HEAD');
   };
 
@@ -629,8 +632,8 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     // 仓把 dist/ 当源码提交了（推上去过）：改了照算
     const u = (await checkedOut('tracked', m)).t;
     put(u.dir, 'dist/keep.js', 'v1\n');
-    execFileSync('git', ['add', '.'], { cwd: u.dir });
-    execFileSync('git', ['commit', '-q', '-m', 'commit dist'], { cwd: u.dir, env: ENV });
+    runChildOk('git', ['add', '.'], { cwd: u.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'commit dist'], { cwd: u.dir, env: ENV });
     const pushed = sh(u.dir, 'rev-parse', 'HEAD');
     expect(await treeLeftovers(u, [pushed])).toMatchObject({ dirtyCount: 0, unpushedCount: 0 });
     put(u.dir, 'dist/keep.js', 'v2\n');
@@ -715,7 +718,7 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     expect(left).toMatchObject({ kind: 'repo', dirtyCount: 2, stashes: 0, unpushedCount: 0 });
     expect(left.kind === 'repo' ? left.dirty : []).toEqual([' M a.ts', '?? new.ts']);
 
-    execFileSync('git', ['stash', '-q', '--include-untracked'], { cwd: u.dir, env: ENV });
+    runChildOk('git', ['stash', '-q', '--include-untracked'], { cwd: u.dir, env: ENV });
     expect(await treeLeftovers(u, [])).toMatchObject({ dirtyCount: 0, stashes: 1 });
   });
 

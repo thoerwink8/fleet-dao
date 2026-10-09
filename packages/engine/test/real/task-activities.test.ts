@@ -1,7 +1,6 @@
 // 任务工作流里不碰会话的五个真活动（real/task-activities.ts）：读交代、读交付（真 git）、查改标准的路径、
 // 挂自动合并（含「GitHub 说已经是 clean」）、等合并（长轮询）。每条读不到、认不出、合不了的路径都故意造一次：
 // 要抛明确的错或明确回「没成」，不拿空冒充没事。
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +10,7 @@ import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../../src/real/task-activities.ts';
 import { pinMainline, type UserTree } from '../../src/real/user-git.ts';
+import { runChildOk } from '../child.ts';
 
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
 const HEAD = 'a'.repeat(40);
@@ -210,7 +210,7 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
     GIT_CONFIG_NOSYSTEM: '1',
   };
   const git = (cwd: string, ...args: string[]) =>
-    execFileSync('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
+    runChildOk('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
 
   /** 一棵起点已钉成主线的树。同一条用例里要多棵时给不同的名字。 */
   async function tree(name = 'work'): Promise<{ dir: string; base: string }> {

@@ -1,7 +1,6 @@
 // 引擎端口 → github 包：推分支（会话用户打 bundle）、开 PR（照抄需求 issue 的标签和里程碑）、并主线后快进会话的树、
 // 在新头上跑测试（= 等 CI）、收树先存档；GitHubError 换成 PortError。github 包本身换成假的（记下每次调用），
 // 会话用户的 git 用本地 git。
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -19,6 +18,7 @@ import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { createGitHubPorts, type EngineGitHub, toPortError } from '../../src/real/github-ports.ts';
 import { checkoutBranch, fetchBundle } from '../../src/real/user-git.ts';
+import { runChildOk } from '../child.ts';
 import { fakeTrees, git, mirror } from './fixtures.ts';
 
 // 每条用例（和每条用例前建的镜像）都真跑好几次 git（Windows 上一次几百毫秒），机器忙时默认的 5 秒、10 秒不够。
@@ -64,7 +64,7 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
     commitIdentity: record('commitIdentity', () => m.gh.commitIdentity()),
     pushBranch: record('pushBranch', (input: { bundlePath: string; head: string }) => {
       // 推之前核对一下交来的包是好的：git bundle verify 在镜像里过得了。
-      execFileSync('git', ['bundle', 'verify', input.bundlePath], { cwd: m.dir, stdio: 'pipe' });
+      runChildOk('git', ['bundle', 'verify', input.bundlePath], { cwd: m.dir, stdio: 'pipe' });
       return { head: input.head, pushed: true };
     }),
     openPr: record('openPr', () => ({ number: 101, url: 'https://github.com/acme/widgets/pull/101' })),
