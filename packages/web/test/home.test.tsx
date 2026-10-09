@@ -352,8 +352,14 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(document.querySelector('[data-flow-lane="none"]')).toBeNull();
   });
 
-  test('「只看卡住的」：只剩等你拍、出问题的单，三段还在；工具条写「几 / 几 张单」', async () => {
-    renderHome({ status: 'data', data: SAMPLE });
+  test('「只看卡住的」：只剩出问题的单，不含等你拍；三段还在；工具条写「几 / 几 张单」', async () => {
+    const running = [
+      ...SAMPLE.running,
+      ticket(14, {
+        lastEvent: { text: '动手超时：30 分钟没交活', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
+      }),
+    ];
+    renderHome({ status: 'data', data: { ...SAMPLE, running } });
     await waitBoard();
     fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
     await waitFor(() =>
@@ -361,10 +367,29 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
         Array.from(document.querySelectorAll('.react-flow__node[data-id^="ticket:"]')).map((n) =>
           n.getAttribute('data-id'),
         ),
-      ).toEqual(['ticket:450:thoerwink8/fleet-dao']),
+      ).toEqual(['ticket:14:thoerwink8/fleet-dao']),
     );
     expect(document.querySelectorAll('[data-flow-lane]').length).toBe(3);
-    expect(document.querySelector('[data-board-toolbar]')?.textContent).toMatch(/1\s*\/\s*3\s*张单/);
+    expect(document.querySelector('[data-board-toolbar]')?.textContent).toMatch(/1\s*\/\s*4\s*张单/);
+  });
+
+  test('「只看等你的」：只剩等你拍的单，不含出问题', async () => {
+    const running = [
+      ...SAMPLE.running,
+      ticket(14, {
+        lastEvent: { text: '动手超时：30 分钟没交活', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
+      }),
+    ];
+    renderHome({ status: 'data', data: { ...SAMPLE, running } });
+    await waitBoard();
+    fireEvent.click(screen.getByRole('button', { name: /只看等你的/ }));
+    await waitFor(() =>
+      expect(
+        Array.from(document.querySelectorAll('.react-flow__node[data-id^="ticket:"]')).map((n) =>
+          n.getAttribute('data-id'),
+        ),
+      ).toEqual(['ticket:450:thoerwink8/fleet-dao']),
+    );
   });
 
   test('读不到：写明没读成并带「重试」，点了真的重试；不是空图', () => {
@@ -463,10 +488,21 @@ describe('home（/）：手机上看板退化成可折叠的树形列表', () =>
     expect(document.querySelector('[data-running-card="doing"] a')?.getAttribute('href')).toBe('/home3');
   });
 
-  test('手机上「只看卡住的」照样能用', () => {
+  test('手机上「只看卡住的」不含等你拍；「只看等你的」只留等你拍', () => {
     phone();
-    renderHome({ status: 'data', data: SAMPLE });
+    const running = [
+      ...SAMPLE.running,
+      ticket(14, {
+        lastEvent: { text: '动手超时', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
+      }),
+    ];
+    renderHome({ status: 'data', data: { ...SAMPLE, running } });
     fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
     expect(document.querySelectorAll('[data-running-card]').length).toBe(1);
+    expect(document.querySelector('[data-running-card]')?.textContent).toContain('#14');
+    fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
+    fireEvent.click(screen.getByRole('button', { name: /只看等你的/ }));
+    expect(document.querySelectorAll('[data-running-card]').length).toBe(1);
+    expect(document.querySelector('[data-running-card]')?.textContent).toContain('#450');
   });
 });

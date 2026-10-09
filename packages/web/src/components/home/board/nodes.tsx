@@ -14,7 +14,16 @@ import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
 import type { HomeFlowStage, HomeRunning } from '../types';
-import { itemOf, targetOfItem, useBoardUi, useHoverIntent, useNodeView, useZoomLevel } from './board-ui';
+import {
+  farCardFontPx,
+  itemOf,
+  targetOfItem,
+  useBoardUi,
+  useHoverIntent,
+  useNodeView,
+  useZoomLevel,
+  ZOOM_OF,
+} from './board-ui';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -221,20 +230,31 @@ function Handles({ side, source = true, target = true }: { side: Side; source?: 
   );
 }
 
-/** 远景：整张卡只剩状态色和大号字。 */
+/**
+ * 远档标题、编号的 CSS 字号。基准 32：远档缩放 0.4 时屏幕上是 32px；
+ * 画布最小缩放 0.15 时屏幕上仍是 12px（32 / 0.4 × 0.15）。
+ */
+const FAR_HEAD_PX = farCardFontPx(32, ZOOM_OF.far);
+/** 远档次要一行（单子标题、张数）：远档缩放下屏幕上是 16px，不小于 12。 */
+const FAR_SUB_PX = farCardFontPx(16, ZOOM_OF.far);
+
+/** 远景：整张卡只剩状态色和大号字。标题、编号按缩放倒数放大，屏幕上不小于 12px。 */
 function Far({ tone, big, small }: { tone: Tone; big: string; small?: string | undefined }) {
   return (
     <div className={cn('flex h-full flex-col items-center justify-center gap-3 px-3', toneSoft[tone])}>
       <div
-        className={cn(
-          'num max-w-full truncate text-6xl leading-none font-bold tracking-tight',
-          toneText[tone],
-        )}
+        className={cn('num max-w-full truncate leading-none font-bold tracking-tight', toneText[tone])}
+        style={{ fontSize: FAR_HEAD_PX }}
+        title={big}
       >
         {big}
       </div>
       {small ? (
-        <div className="max-w-full truncate text-3xl leading-none font-semibold text-muted-foreground">
+        <div
+          className="max-w-full truncate leading-none font-semibold text-muted-foreground"
+          style={{ fontSize: FAR_SUB_PX }}
+          title={small}
+        >
           {small}
         </div>
       ) : null}
@@ -381,7 +401,6 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
   const live = ticketLive(item);
   const founder = needsFounder(item);
   const title = `#${item.issueNumber} ${item.title}`;
-  const phase = phasesOf(item).find((p) => p.state === 'active');
   return (
     <Shell
       id={id}
@@ -393,7 +412,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
     >
       <Handles side={data.side} source={item.pendingDecision !== undefined} />
       {level === 'far' ? (
-        <Far tone={tone} big={`#${item.issueNumber}`} small={phase?.label ?? '没分段'} />
+        <Far tone={tone} big={`#${item.issueNumber}`} small={item.title} />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
@@ -449,7 +468,12 @@ export const AskNode = memo(function AskNode({ id, data }: Props) {
       <Handles side={data.side} source={false} />
       {level === 'far' ? (
         <div className={cn('flex h-full items-center justify-center', toneSoft.human)}>
-          <span className={cn('text-4xl font-bold', toneText.human)}>等你</span>
+          <span
+            className={cn('font-bold', toneText.human)}
+            style={{ fontSize: farCardFontPx(16, ZOOM_OF.far) }}
+          >
+            等你
+          </span>
         </div>
       ) : (
         <div className="flex h-full flex-col justify-center gap-1 py-2 pr-3 pl-4">
@@ -535,8 +559,12 @@ export const RootNode = memo(function RootNode({ id, data }: Props) {
       <Handle id="l" type="source" position={Position.Left} isConnectable={false} />
       {level === 'far' ? (
         <div className="flex h-full flex-col items-center justify-center gap-3 px-4">
-          <div className="num text-6xl leading-none font-bold tracking-tight">{data.counts.total}</div>
-          <div className="text-2xl text-muted-foreground">张在跑</div>
+          <div className="num leading-none font-bold tracking-tight" style={{ fontSize: FAR_HEAD_PX }}>
+            {data.counts.total}
+          </div>
+          <div className="text-muted-foreground" style={{ fontSize: FAR_SUB_PX }}>
+            张在跑
+          </div>
         </div>
       ) : (
         <div className="flex h-full flex-col py-3 pr-3.5 pl-4">

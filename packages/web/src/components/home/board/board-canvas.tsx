@@ -24,6 +24,7 @@ import {
   Hand,
   Keyboard,
   Maximize,
+  MessageCircleQuestion,
   Minus,
   Palette,
   Plus,
@@ -42,7 +43,8 @@ import {
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { useLocalState, useMediaQuery } from '../../../lib/hooks';
+import { formatDuration } from '../../../lib/format';
+import { useLocalState, useMediaQuery, useNow } from '../../../lib/hooks';
 import { type Tone, toneLabel } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { useRemoteView } from '../../node-notice';
@@ -79,7 +81,7 @@ import {
   ticketTone,
   worstTone,
 } from './model';
-import { type BoardNode, Elapsed, nodeTypes } from './nodes';
+import { type BoardNode, nodeTypes } from './nodes';
 import { toneVar } from './tones';
 
 export interface BoardCanvasProps {
@@ -207,6 +209,7 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
   const remote = useRemoteView() !== null;
   const [params, setParams] = useSearchParams();
   const stuck = params.get('stuck') === '1';
+  const needsYou = params.get('you') === '1';
   const selectedId = params.get('sel');
   const [focusMode, setFocusMode] = useState(false);
   const [help, setHelp] = useState(false);
@@ -216,15 +219,15 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
   const [view] = useState(createBoardView);
 
   const graph = useMemo(
-    () => buildGraph({ running, flow, health, filter: { stuck } }),
-    [running, flow, health, stuck],
+    () => buildGraph({ running, flow, health, filter: { stuck, needsYou } }),
+    [running, flow, health, stuck, needsYou],
   );
   const graphRef = useRef(graph);
   graphRef.current = graph;
 
   const [positions, setPositions] = useState<Positions | null>(null);
   const structureKey = graph.structureKey;
-  const viewKey = `${stuck}`;
+  const viewKey = `${stuck}:${needsYou}`;
   const fitted = useRef('');
 
   // 只有节点集合变了才重新排版；状态变化（颜色、文字）不动位置。
@@ -443,6 +446,20 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
   );
 
   const toggleStuck = useCallback(() => setParam('stuck', stuck ? null : '1'), [stuck, setParam]);
+  const toggleNeedsYou = useCallback(() => setParam('you', needsYou ? null : '1'), [needsYou, setParam]);
+  const clearFilters = useCallback(
+    () =>
+      setParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          p.delete('stuck');
+          p.delete('you');
+          return p;
+        },
+        { replace: true, preventScrollReset: true },
+      ),
+    [setParams],
+  );
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const el = e.target as HTMLElement;
@@ -482,6 +499,10 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
       case 's':
       case 'S':
         toggleStuck();
+        return;
+      case 'y':
+      case 'Y':
+        toggleNeedsYou();
         return;
       case '1':
         zoomToLevel('far');
@@ -568,9 +589,11 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
           </ReactFlow>
           <Toolbar
             stuck={stuck}
+            needsYou={needsYou}
             focusMode={focusMode}
             canFocus={selectedExists}
             onToggleStuck={toggleStuck}
+            onToggleNeedsYou={toggleNeedsYou}
             onFocus={() => setFocusMode((v) => !v)}
             onZoomLevel={zoomToLevel}
             onFit={() => fitAll()}
@@ -603,8 +626,8 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
           {graph.shown === 0 && graph.total > 0 && positions ? (
             <div className="pointer-events-none absolute inset-0 grid place-items-center">
               <div className="pointer-events-auto rounded-xl border bg-popover px-5 py-4 text-center shadow-lg">
-                <div className="text-sm font-medium">没有卡住的单</div>
-                <Button size="sm" variant="link" onClick={() => setParam('stuck', null)}>
+                <div className="text-sm font-medium">{emptyFilterCopy(stuck, needsYou)}</div>
+                <Button size="sm" variant="link" onClick={clearFilters}>
                   清掉过滤条件
                 </Button>
               </div>
@@ -663,6 +686,7 @@ function LayoutFailed({ error, blank, onRetry }: { error: Error; blank: boolean;
 
 function ToolButton({
   label,
+  tip,
   shortcut,
   active,
   onClick,
@@ -670,6 +694,8 @@ function ToolButton({
   disabled,
 }: {
   label: string;
+  /** 悬停说明。不传就用 label。 */
+  tip?: string;
   shortcut?: string;
   active?: boolean;
   onClick(): void;
@@ -683,7 +709,7 @@ function ToolButton({
           size="sm"
           variant="ghost"
           aria-pressed={active}
-          aria-label={label}
+          aria-label={tip ? `${label}：${tip}` : label}
           disabled={disabled}
           onClick={onClick}
           className={cn(
@@ -695,18 +721,26 @@ function ToolButton({
         </Button>
       </TooltipTrigger>
       <TooltipContent className="flex items-center gap-2">
-        {label}
+        {tip ?? label}
         {shortcut ? <Kbd>{shortcut}</Kbd> : null}
       </TooltipContent>
     </Tooltip>
   );
 }
 
+function emptyFilterCopy(stuck: boolean, needsYou: boolean): string {
+  if (stuck && needsYou) return '没有出问题的单，也没有等你拍的单';
+  if (stuck) return '没有出问题的单（不含等你）';
+  return '没有等你拍的单';
+}
+
 function Toolbar({
   stuck,
+  needsYou,
   focusMode,
   canFocus,
   onToggleStuck,
+  onToggleNeedsYou,
   onFocus,
   onZoomLevel,
   onFit,
@@ -715,9 +749,11 @@ function Toolbar({
   total,
 }: {
   stuck: boolean;
+  needsYou: boolean;
   focusMode: boolean;
   canFocus: boolean;
   onToggleStuck(): void;
+  onToggleNeedsYou(): void;
   onFocus(): void;
   onZoomLevel(l: ZoomLevel): void;
   onFit(): void;
@@ -728,7 +764,7 @@ function Toolbar({
   const level = useZoomLevel();
   const rf = useReactFlow();
   const levels: { id: ZoomLevel; label: string; key: string; hint: string }[] = [
-    { id: 'far', label: '远', key: '1', hint: '远景：只看色块和单号' },
+    { id: 'far', label: '远', key: '1', hint: '远景：色块、单号和标题' },
     { id: 'mid', label: '中', key: '2', hint: '中景：标题、在哪一段、谁在做' },
     { id: 'near', label: '近', key: '3', hint: '近景：在等什么、最近一次事件、耗时' },
   ];
@@ -738,9 +774,25 @@ function Toolbar({
       className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-wrap items-start gap-2"
     >
       <div className="pointer-events-auto flex items-center gap-0.5 rounded-xl border bg-popover/90 p-1 shadow-sm backdrop-blur">
-        <ToolButton label="只看卡住的：等你拍、出问题了" shortcut="S" active={stuck} onClick={onToggleStuck}>
+        <ToolButton
+          label="只看卡住的"
+          tip="出问题了（不含等你）"
+          shortcut="S"
+          active={stuck}
+          onClick={onToggleStuck}
+        >
           <TriangleAlert className="size-3.5" />
           只看卡住的
+        </ToolButton>
+        <ToolButton
+          label="只看等你的"
+          tip="等你拍（不含出问题）"
+          shortcut="Y"
+          active={needsYou}
+          onClick={onToggleNeedsYou}
+        >
+          <MessageCircleQuestion className="size-3.5" />
+          只看等你的
         </ToolButton>
         <span className="mx-0.5 h-5 w-px bg-border" />
         <ToolButton
@@ -862,7 +914,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
   return (
     <div
       data-board-now
-      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-90 max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
+      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-96 max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
     >
       <button
         type="button"
@@ -887,33 +939,45 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
       </button>
       {open && rows.length ? (
         <ul className="max-h-56 overflow-y-auto border-t py-1">
-          {rows.map((r) => {
-            const since = r.queued ? r.item.waitingSince : r.item.stageSince;
-            return (
-              <li key={nodeId.ticket(r.item)}>
-                <button
-                  type="button"
-                  onClick={() => onPick(nodeId.ticket(r.item))}
-                  className={cn(
-                    'flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent',
-                    r.queued && 'text-muted-foreground',
-                  )}
-                >
-                  <span className="num w-22 shrink-0 truncate font-medium">{r.item.worker ?? '排队'}</span>
-                  <span className="num shrink-0 text-muted-foreground">#{r.item.issueNumber}</span>
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                    {statusTextOf(r.item)} · {r.item.title}
-                  </span>
-                  <span className="num shrink-0 text-muted-foreground">
-                    {since ? <Elapsed since={since} /> : null}
-                  </span>
-                </button>
-              </li>
-            );
-          })}
+          {rows.map((r) => (
+            <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
+          ))}
         </ul>
       ) : null}
     </div>
+  );
+}
+
+/** 此刻表的一行。状态列换行，悬停能看完整的状态、标题和耗时。 */
+function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; onPick(id: string): void }) {
+  const now = useNow();
+  const since = queued ? item.waitingSince : item.stageSince;
+  const elapsed = since ? formatDuration(Math.max(0, now - Date.parse(since))) : '';
+  const status = statusTextOf(item);
+  const full = [status, item.title, elapsed].filter((part) => part !== '').join(' · ');
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onPick(nodeId.ticket(item))}
+        title={full}
+        className={cn(
+          'flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent',
+          queued && 'text-muted-foreground',
+        )}
+      >
+        <span className="num w-22 shrink-0 truncate font-medium" title={item.worker ?? '排队'}>
+          {item.worker ?? '排队'}
+        </span>
+        <span className="num shrink-0 text-muted-foreground">#{item.issueNumber}</span>
+        <span className="min-w-0 flex-1 whitespace-normal break-words text-muted-foreground" title={full}>
+          {status} · {item.title}
+        </span>
+        <span className="num shrink-0 whitespace-nowrap text-muted-foreground" title={elapsed || undefined}>
+          {elapsed}
+        </span>
+      </button>
+    </li>
   );
 }
 
@@ -925,7 +989,8 @@ const SHORTCUTS: { keys: string[]; what: string }[] = [
   { keys: ['O'], what: '打开选中单子的详情页（同双击）' },
   { keys: ['Esc'], what: '退出聚焦 / 取消选中' },
   { keys: ['F'], what: '聚焦选中的这一支，其余变暗' },
-  { keys: ['S'], what: '只看卡住的（等你拍、出问题了）' },
+  { keys: ['S'], what: '只看卡住的（出问题了，不含等你）' },
+  { keys: ['Y'], what: '只看等你的（等你拍，不含出问题）' },
   { keys: ['1', '2', '3'], what: '远景 / 中景 / 近景' },
   { keys: ['+', '-', '0'], what: '放大 / 缩小 / 全部收进视野' },
   { keys: ['Ctrl', '滚轮'], what: '缩放（不按 Ctrl 滚轮是滚页面）' },

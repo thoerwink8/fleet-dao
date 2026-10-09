@@ -1,6 +1,6 @@
 // 手机上的看板：画布换成可折叠的树形列表（初版 PR #13 的做法），信息和操作一样不少。
 // 一段一组（对题 / 动手 / 验收，有「还没分段」的单才多一组），组里每张单一张卡（整张卡点进单子详情），旁边一个操作菜单。
-import { ChevronRight, EllipsisVertical, TriangleAlert } from 'lucide-react';
+import { ChevronRight, EllipsisVertical, MessageCircleQuestion, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { cn } from '../../../lib/utils';
@@ -29,25 +29,28 @@ export function BoardTree({
 }) {
   const [params, setParams] = useSearchParams();
   const stuck = params.get('stuck') === '1';
-  const groups = groupSegments(running, flow, { stuck });
+  const needsYou = params.get('you') === '1';
+  const groups = groupSegments(running, flow, { stuck, needsYou });
   const shown = groups.reduce((n, g) => n + g.items.length, 0);
+  const toggle = (key: 'stuck' | 'you', on: boolean) =>
+    setParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (on) p.delete(key);
+        else p.set(key, '1');
+        return p;
+      },
+      { replace: true, preventScrollReset: true },
+    );
   return (
     <div className="px-3 pt-3 pb-4" data-flow-board data-board-tree>
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
           aria-pressed={stuck}
-          onClick={() =>
-            setParams(
-              (prev) => {
-                const p = new URLSearchParams(prev);
-                if (stuck) p.delete('stuck');
-                else p.set('stuck', '1');
-                return p;
-              },
-              { replace: true, preventScrollReset: true },
-            )
-          }
+          aria-label="只看卡住的：出问题了（不含等你）"
+          title="出问题了（不含等你）"
+          onClick={() => toggle('stuck', stuck)}
           className={cn(
             'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
             stuck ? 'border-foreground bg-foreground text-background' : 'bg-card text-muted-foreground',
@@ -56,10 +59,33 @@ export function BoardTree({
           <TriangleAlert className="size-3.5" />
           只看卡住的
         </button>
+        <button
+          type="button"
+          aria-pressed={needsYou}
+          aria-label="只看等你的：等你拍（不含出问题）"
+          title="等你拍（不含出问题）"
+          onClick={() => toggle('you', needsYou)}
+          className={cn(
+            'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
+            needsYou ? 'border-foreground bg-foreground text-background' : 'bg-card text-muted-foreground',
+          )}
+        >
+          <MessageCircleQuestion className="size-3.5" />
+          只看等你的
+        </button>
         <span className="num ml-auto text-xs text-muted-foreground">
           {shown}/{running.length}
         </span>
       </div>
+      {shown === 0 && (stuck || needsYou) ? (
+        <p className="mb-3 text-xs text-muted-foreground">
+          {stuck && needsYou
+            ? '没有出问题的单，也没有等你拍的单'
+            : stuck
+              ? '没有出问题的单（不含等你）'
+              : '没有等你拍的单'}
+        </p>
+      ) : null}
       <ul className="space-y-2" aria-label="三段里的单">
         {groups.map((g) => (
           <SegmentRow key={g.key} group={g} running={running} />
