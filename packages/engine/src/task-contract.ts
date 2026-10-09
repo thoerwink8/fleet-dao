@@ -280,3 +280,18 @@ export type MergeWait =
   /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
   | { state: 'unarmed' }
   | { state: 'waiting'; detail: string };
+
+/** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */
+export interface ProbeAssignedInput {
+  schemaVersion: 1;
+  routeId: string;
+  label: string;
+}
+
+/**
+ * pass：可以派。probed 为假是没真探（5 分钟内刚探通、或规矩写明不探）。unwired：这个工人没装探针，按上一次结论派，状态里不写「通」。
+ * fail：这一条本轮不能派。counted 为真才占「每轮最多当场探 3 条」的名额（组织认不出、路由被删了不占）。
+ */
+export type ProbeAssignedResult =
+  | { kind: 'pass'; label: string; detail: string; probed: boolean; unwired: boolean }
+  | { kind: 'fail'; label: string; detail: string; counted: boolean };

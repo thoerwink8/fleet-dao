@@ -202,6 +202,59 @@ export const CONFLICT_HANDOFF_CAUSE = [
   '下一轮原文一字不差就被挂起。',
 ].join('');
 
+/** 一轮选路里最多当场探几条（#1409）。超过就停下，不再往下探。 */
+export const DISPATCH_PROBE_LIMIT = 3;
+
+export interface DispatchProbeFail {
+  label: string;
+  detail: string;
+}
+
+export interface DispatchProbeRound {
+  fails: DispatchProbeFail[];
+  probed: number;
+}
+
+export const EMPTY_DISPATCH_PROBE: DispatchProbeRound = { fails: [], probed: 0 };
+
+/**
+ * 这一条探完之后接着干什么。没真探的失败（counted 为假）不占 3 条名额。
+ * 通过不改这一轮已经记下的失败：换到的那条用原来的失败名单来写「换到」。
+ */
+export function afterDispatchProbe(
+  round: DispatchProbeRound,
+  result: { label: string; detail: string; passed: boolean; counted: boolean },
+): { round: DispatchProbeRound; action: 'dispatch' | 'pick' | 'stop' } {
+  if (result.passed) return { round, action: 'dispatch' };
+  const next: DispatchProbeRound = {
+    fails: [...round.fails, { label: result.label, detail: result.detail }],
+    probed: round.probed + (result.counted ? 1 : 0),
+  };
+  if (result.counted && next.probed >= DISPATCH_PROBE_LIMIT) return { round: next, action: 'stop' };
+  return { round: next, action: 'pick' };
+}
+
+/** 返工意见和动手状态里的那一句。chosen 有值是派出去了；没有就是停下，每条带上原因。 */
+export function dispatchProbeLine(fails: readonly DispatchProbeFail[], chosen: string | null): string {
+  if (chosen && fails.length === 0) return `派前探测：${chosen} 通`;
+  if (chosen) return `派前探测：${fails.map((item) => item.label).join('、')} 不通，换到 ${chosen}`;
+  return `派前探测：${fails.map((item) => `${item.label} 不通（${item.detail}）`).join('；')}`;
+}
+
+/** 停下时写进任务状态和提醒的全文：每条结果、到了 3 条的上限、还有被挡住的候选、以及不起会话。 */
+export function dispatchProbeStopText(round: DispatchProbeRound, blockedDetail: string): string {
+  const parts = [dispatchProbeLine(round.fails, null)];
+  if (round.probed >= DISPATCH_PROBE_LIMIT) parts.push('本轮已当场探 3 条，不再往下探');
+  if (blockedDetail) parts.push(`其余候选：${blockedDetail}`);
+  parts.push('不起会话，等探针探通后再继续');
+  return parts.join('。');
+}
+
+/** 同一轮里只留最新一条派前探测，别的返工意见不动。 */
+export function withDispatchProbeNote(feedback: readonly string[], line: string): string[] {
+  return [...feedback.filter((item) => !item.startsWith('派前探测：')), line];
+}
+
 /** 引擎开 PR 的「做了什么」。#1303 多写根因，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];

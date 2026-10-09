@@ -24,11 +24,16 @@ import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
   type Avoid,
+  afterDispatchProbe,
   bump,
+  dispatchProbeLine,
+  dispatchProbeStopText,
+  EMPTY_DISPATCH_PROBE,
   NO_AVOID,
   PausedInterrupt,
   RepinInterrupt,
   widen,
+  withDispatchProbeNote,
   ZERO,
 } from './task-support.ts';
 
@@ -59,11 +64,16 @@ export async function writeSession(
   if (unrecognized) rt.set('implement', `动手第 ${rt.round} 轮${unrecognized}`);
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
-    const route = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
+    const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
     failedChannel = undefined;
+    const route = picked.route;
+    if (picked.probeNote) rt.feedback = withDispatchProbeNote(rt.feedback, picked.probeNote);
     rt.families.add(route.family);
     rt.attemptSeq += 1;
-    await rt.advance('implement', `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}`);
+    await rt.advance(
+      'implement',
+      `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
+    );
     let evidence: SegmentEvidence | null = null;
     let infra: unknown = null;
     try {
@@ -170,6 +180,7 @@ export async function writeSession(
 /**
  * 选路：排队（没空位、额度没读成）就隔一会儿再选；一条能用的都没有就停下等人。派得出就当场给动手这一段预占池的名额（#757），
  * 交回的路由带着它进 runSegment：开跑时换成开跑那一行，没开跑就收场的由 runSegment 放掉。
+ * 派之前再探一次选定的那条（#1409，patched dispatch-probe）：不通就换下一条，每轮最多探 3 条；都探不通就停下等探针恢复，不起会话。
  */
 async function pickRoute(
   rt: TaskRuntime,
@@ -177,32 +188,99 @@ async function pickRoute(
   stick?: string,
   failedChannel?: FailedChannel,
   uiWork = false,
-): Promise<RouteChoice> {
+): Promise<{ route: RouteChoice; probeNote: string | null }> {
+  const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
+  let round = EMPTY_DISPATCH_PROBE;
+  let probeAvoid: string[] = [];
+  let stickTo = stick;
+  let holdForProbe = false;
+  let lastStopDetail = '';
+  // 这一轮已经记下「全都探不通」。再选到能派的，把上次停下的原因清掉，别留在任务状态里。
+  const clearProbeStop = () => {
+    if (holdForProbe || rt.status.lastProblem?.startsWith('派前探测：')) rt.status.lastProblem = null;
+    holdForProbe = false;
+  };
+  const stopForProbe = async (blocked: string, wakeMark: number) => {
+    if (round.fails.length > 0) {
+      lastStopDetail = dispatchProbeStopText(round, blocked);
+      rt.feedback = withDispatchProbeNote(rt.feedback, dispatchProbeLine(round.fails, null));
+      rt.status.lastProblem = lastStopDetail;
+      await rt.advance('implement', lastStopDetail);
+      await rt.step('raiseAlert', () =>
+        rt.acts.raiseAlert({
+          taskId: rt.input.taskId,
+          level: 'info',
+          title: `「${stage}」阶段的路由全都熔断了`,
+          detail: lastStopDetail,
+          dedupeKey: `routing:all-open:${stage}`,
+        }),
+      );
+    }
+    holdForProbe = true;
+    round = EMPTY_DISPATCH_PROBE;
+    probeAvoid = [];
+    stickTo = undefined;
+    await rt.pauseForRoute('slot', lastStopDetail, ROUTE_RETRY_SECONDS, wakeMark);
+  };
   for (;;) {
     await rt.checkpoint();
+    // 老历史没有这个标记：不探、不改选路之后的那一步。新跑的第一次记下，后面几次走同一条。
+    const probeOn = patched('dispatch-probe');
     // 叫醒的记号要在问选路之前取（#194 方案 4.3）：问的这一下读的是切号完成之前的事实，期间到的叫醒要让下面的等待当场醒
     const mark = rt.routeWakeMark();
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,
         // 界面活按 ui 用途的模型顺序选，并带 uiWork：硬禁令 gpt-no-ui 按 UI 判，GPT 一条都不派（别的家都派不出就回「等」）
-        stage: uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual,
+        stage,
         ...(uiWork ? { uiWork: true } : {}),
-        avoidRouteIds: avoid.routeIds,
+        avoidRouteIds: [...avoid.routeIds, ...probeAvoid],
         avoidPoolIds: avoid.poolIds,
         avoidModelIds: avoid.modelIds,
-        ...(stick ? { stickRouteId: stick } : {}),
+        ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(failedChannel ? { failedChannel } : {}),
         reserve: { segment: 'manual' },
       }),
     );
-    if (got.ok) return got.route;
-    if (got.waitFor === 'none') {
-      await rt.park('没有可用的路由', got.detail);
-      avoid = NO_AVOID;
+    if (!got.ok) {
+      if (probeOn && (round.fails.length > 0 || holdForProbe)) {
+        await stopForProbe(got.waitFor === 'none' ? got.detail : '', mark);
+        continue;
+      }
+      if (got.waitFor === 'none') {
+        await rt.park('没有可用的路由', got.detail);
+        avoid = NO_AVOID;
+        continue;
+      }
+      // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒
+      await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
       continue;
     }
-    // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒
-    await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
+    if (!probeOn) return { route: got.route, probeNote: null };
+    const probe = await rt.step('probeAssignedRoute', () =>
+      rt.cancellable(() =>
+        rt.acts.probeAssignedRoute({
+          schemaVersion: 1,
+          routeId: got.route.routeId,
+          label: got.route.modelId,
+        }),
+      ),
+    );
+    if (probe.kind === 'pass' && probe.unwired) return { route: got.route, probeNote: null };
+    if (probe.kind === 'pass') {
+      clearProbeStop();
+      return { route: got.route, probeNote: dispatchProbeLine(round.fails, probe.label) };
+    }
+    const decided = afterDispatchProbe(round, {
+      label: probe.label,
+      detail: probe.detail,
+      passed: false,
+      counted: probe.counted,
+    });
+    round = decided.round;
+    if (!probeAvoid.includes(got.route.routeId)) probeAvoid = [...probeAvoid, got.route.routeId];
+    // 这一条刚探不通，别再粘着它
+    stickTo = undefined;
+    if (decided.action === 'stop') await stopForProbe('', mark);
   }
 }

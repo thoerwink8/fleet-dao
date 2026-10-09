@@ -3,6 +3,7 @@
 // 动手几轮都不过、PR 被关）；放弃（停着时、会话跑着时）。故意造的失败：没装任务活动（不许装作做过）。
 
 import { randomUUID } from 'node:crypto';
+import type { RouteProbeTarget } from '@fleet-dao/db';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
@@ -10,6 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { EngineTasks } from '../src/activities.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, FAKE_ROUTES, fakeHead } from '../src/fakes.ts';
+import type { RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
 import type { PickRouteInput, RouteChoice } from '../src/ports.ts';
 import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
@@ -1517,5 +1519,125 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
     const detail = await verifyStopDetail(env, problem);
     expect(detail.split('\n')[0]).toBe('其它');
     expect(detail.split('\n').slice(1).join('\n')).toContain(problem);
+  });
+});
+
+const PROBE_ROUTES: RouteChoice[] = [
+  { routeId: 'a', poolId: 'p1', modelId: 'glm-5.3-flash', family: 'claude', hostId: 'claude-code' },
+  { routeId: 'b', poolId: 'p2', modelId: 'deepseek-flash', family: 'claude', hostId: 'claude-code' },
+  { routeId: 'c', poolId: 'p3', modelId: 'kimi', family: 'kimi', hostId: 'api-shell' },
+];
+
+function probeTarget(route: RouteChoice): RouteProbeTarget {
+  return {
+    routeId: route.routeId,
+    hostId: route.hostId,
+    channelId: 'ch',
+    channelName: '渠道',
+    billing: 'subscription',
+    channelEnabled: true,
+    poolId: route.poolId,
+    runAsUser: null,
+    orgKind: null,
+    modelId: route.modelId,
+    modelName: route.modelId,
+    upstreamModel: route.modelId,
+    modelRetiredAt: null,
+    inUse: true,
+    alive: true,
+    previous: null,
+  };
+}
+
+/** 三条候选都当场探不通。attempt 从 1 起；passAfter 之前的路由编号按不通回。 */
+function failingProbe(passAfter: string | null): {
+  jobs: { routeProbe: () => RouteProbeJobDeps };
+  probed: () => string[];
+} {
+  const probed: string[] = [];
+  const deps: RouteProbeJobDeps = {
+    targets: async () => PROBE_ROUTES.map(probeTarget),
+    probers: {
+      'claude-code': async (target) => {
+        probed.push(target.routeId);
+        if (passAfter !== null && target.routeId === passAfter)
+          return { kind: 'answered', detail: '答上了：OK' };
+        return { kind: 'failed', detail: `${target.modelId} 网络不通` };
+      },
+      'api-shell': async (target) => {
+        probed.push(target.routeId);
+        return { kind: 'failed', detail: `${target.modelId} 网络不通` };
+      },
+    },
+    sessionOrg: async () => ({ ok: true, org: 'carpool' }),
+    save: async () => 'saved',
+    runs: { start: async () => 1, finish: async () => {} },
+    now: () => new Date('2026-10-09T08:00:00.000Z'),
+    sleep: async () => {},
+    log: () => {},
+  };
+  return { jobs: { routeProbe: () => deps }, probed: () => probed };
+}
+
+describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () => {
+  it('探不通就换下一条，会话的返工意见写明换到谁', async () => {
+    const world = createFakeWorld({ routes: PROBE_ROUTES });
+    const { tasks, calls } = scripted();
+    const probe = failingProbe('b');
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+        jobs: probe.jobs,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.segment[0]?.route.routeId).toBe('b');
+    expect(calls.segment[0]?.feedback.join('\n')).toContain(
+      '派前探测：glm-5.3-flash 不通，换到 deepseek-flash',
+    );
+    expect(
+      world.states.some((s) => s.doing.includes('派前探测：glm-5.3-flash 不通，换到 deepseek-flash')),
+    ).toBe(true);
+    expect(probe.probed()).toContain('a');
+  });
+
+  it('三条都探不通：不起会话，停下并写出每条结果，沿用全熔断提醒', async () => {
+    const world = createFakeWorld({ routes: PROBE_ROUTES });
+    const { tasks, calls } = scripted();
+    const probe = failingProbe(null);
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(
+          h,
+          (state) => state.waiting?.kind === 'slot' && state.doing.includes('不起会话'),
+          '三条都探不通，停下',
+        );
+        expect(s.phase).toBe('implement');
+        expect(s.doing).toContain('派前探测：glm-5.3-flash 不通（');
+        expect(s.doing).toContain('deepseek-flash 不通（');
+        expect(s.doing).toContain('kimi 不通（');
+        expect(s.doing).toContain('本轮已当场探 3 条，不再往下探');
+        expect(s.doing).toContain('不起会话，等探针探通后再继续');
+        expect(s.lastProblem).toBe(s.doing);
+        expect(calls.segment).toEqual([]);
+        expect(world.alerts).toContainEqual(
+          expect.objectContaining({
+            dedupeKey: 'routing:all-open:ui',
+            title: '「ui」阶段的路由全都熔断了',
+            detail: s.doing,
+          }),
+        );
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks, jobs: probe.jobs },
+    );
   });
 });

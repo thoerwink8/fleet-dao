@@ -13,6 +13,7 @@ import {
 } from './jobs/canary.ts';
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
+import { probeAssignedRoute } from './jobs/dispatch-probe.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
 import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
@@ -21,6 +22,7 @@ import type { JudgeSelfCheckJobDeps } from './jobs/judge-self-check.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
 import type { RouteProbeNowDeps } from './jobs/route-probe-now.ts';
+import { routeProbeLock } from './jobs/route-probe-now.ts';
 import type { WatchdogDeps } from './jobs/watchdog.ts';
 import {
   type ActivityTiming,
@@ -39,6 +41,7 @@ import type {
   DeliveryRead,
   GuardedPaths,
   MergeWait,
+  ProbeAssignedInput,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   RunSegmentInput,
@@ -264,6 +267,39 @@ async function canaryOpen(jobs: EngineJobs): Promise<unknown> {
   }
 }
 
+function parseProbeAssigned(input: unknown): ProbeAssignedInput {
+  const raw = input as Partial<ProbeAssignedInput> | null;
+  if (
+    raw?.schemaVersion !== 1 ||
+    typeof raw.routeId !== 'string' ||
+    raw.routeId.length === 0 ||
+    typeof raw.label !== 'string' ||
+    raw.label.length === 0
+  ) {
+    throw new PortError('INVALID_INPUT', '派前探测：要有路由编号和名字', { retryable: false });
+  }
+  return { schemaVersion: 1, routeId: raw.routeId, label: raw.label };
+}
+
+/**
+ * 派单前探选定的这一条。没装探针（假端口、测试工人）按上一次结论派，不写成「通」，免得没探过的任务状态里多一句。
+ * 读路由表失败原样抛：不把没读成当成探通。
+ */
+async function runProbeAssigned(jobs: EngineJobs, input: unknown): Promise<unknown> {
+  const parsed = parseProbeAssigned(input);
+  const make = jobs.routeProbe;
+  if (!make) {
+    return {
+      kind: 'pass',
+      label: parsed.label,
+      detail: '这个工人没装路由探针，按上一次结论派',
+      probed: false,
+      unwired: true,
+    };
+  }
+  return probeAssignedRoute(make(), routeProbeLock, parsed);
+}
+
 /** 引擎自己的活动：全流程巡检看一回、判、记。 */
 async function canaryCheck(jobs: EngineJobs, input: unknown): Promise<unknown> {
   const state = (input as { state?: CanaryState } | null)?.state;
@@ -297,6 +333,7 @@ export function createActivities(
   }
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
+  out.probeAssignedRoute = timed('probeAssignedRoute', (input) => runProbeAssigned(jobs, input), record);
   for (const name of TASK_ACTIVITY_NAMES) {
     out[name] = timed(
       name,

@@ -40,6 +40,11 @@ export const ROUTE_PROBE_RETRY_DELAY_MS = 20_000;
 export const ROUTE_PROBE_CONCURRENCY = 2;
 /** 写进库的原因最长多少字：插头的报错原文可能很长，驾驶舱只要能看懂的那一截。 */
 export const ROUTE_PROBE_DETAIL_MAX = 600;
+/**
+ * 派单前：上一次探通的结论还在这么久以内（含刚好到点）就不重复探（#1409）。已经超过才当场探这一条。
+ * 按量计费、以及 planProbe 写明不探的（含放慢的执行方式还没到再探的时候）不看这条，照旧不探。
+ */
+export const DISPATCH_PROBE_FRESH_MS = 5 * 60_000;
 
 /**
  * heldBySwitch：这个池被人拍了整池暂停（开关 engine.poolHolds，值是写在开关里的原因）。探它没有意义——封号、欠费这类要人修的事，
