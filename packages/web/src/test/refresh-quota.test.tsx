@@ -7,7 +7,10 @@ import { createMockApi } from '../api/mock/server';
 import QuotaPage from '../routes/quota';
 import { renderApp } from './harness';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 test('点刷新按钮会再读一遍额度', async () => {
   const api = createMockApi({ live: false });
@@ -22,7 +25,8 @@ test('点刷新按钮会再读一遍额度', async () => {
   const calls = spy.mock.calls.length;
   expect(calls).toBeGreaterThan(0);
   fireEvent.click(button);
-  await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(calls));
+  // 点一次只再读一遍：主查询的 refetch 会再调 pools。
+  await waitFor(() => expect(spy.mock.calls.length).toBe(calls + 1));
 });
 
 test('【故意造出的读失败】额度没读成时仍显示 LoadError', async () => {
@@ -33,4 +37,9 @@ test('【故意造出的读失败】额度没读成时仍显示 LoadError', asyn
   expect(alert.textContent).toContain('没查成');
   expect(alert.textContent).toContain('后端出错了');
   expect(alert.textContent).toContain('重试');
+  const heading = screen.getByRole('heading', { name: '额度' });
+  const header = heading.closest('header');
+  if (!(header instanceof HTMLElement)) throw new Error('标题不在页头');
+  expect(within(header).getByRole('button', { name: '刷新' })).toBeTruthy();
+  expect(screen.queryByText('还没有账号池')).toBeNull();
 });
