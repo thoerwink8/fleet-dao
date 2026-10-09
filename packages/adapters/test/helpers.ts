@@ -1,10 +1,10 @@
 // 测试共用：读夹具、建临时目录、起假执行体、跑与全局配置隔离的 git。
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach } from 'vitest';
+import { runChild } from './child.ts';
 import type { FakeScript } from './fake-agent.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,12 +91,11 @@ export function isolatedGitEnv(globalConfig = ''): Record<string, string> {
   };
 }
 
+/** 退出码不是 0 就抛（带上 stderr）。标准输出原样交回，不去掉首尾空白。 */
 export function git(cwd: string, args: string[], env: Record<string, string>, input?: string): string {
-  return execFileSync('git', args, {
-    cwd,
-    env,
-    encoding: 'utf8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    ...(input === undefined ? {} : { input }),
-  });
+  const r = runChild('git', args, { cwd, env, ...(input === undefined ? {} : { input }) });
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ').slice(0, 200)} 退出码 ${r.status}：${r.stderr}`);
+  }
+  return r.stdout;
 }

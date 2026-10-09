@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +10,7 @@ import {
   PRETOOL_SCRIPT,
   pretoolSettings,
 } from '../src/claude-code/args.ts';
+import { runChild } from './child.ts';
 
 const ID = '8e188c1c-4430-4735-9eb2-bbb3d9f012c6';
 const base: ClaudeArgsSpec = {
@@ -114,28 +114,35 @@ describe('fork（换会话用户接着干：带着旧会话的记录开一个新
 
 // 调工具前那条钩子：引擎起 Claude 带 --setting-sources project，用户级 settings.json 里登记的钩子它不读，经 --settings 带上。
 // 钩子命令在 sh -c 里跑（Claude 在 Linux 上就这么跑命令式钩子），这里照样跑出来看退出码。
-const hasSh = spawnSync('sh', ['-c', 'exit 0'], { timeout: 60_000, killSignal: 'SIGKILL' }).status === 0;
+// sh 起不来时 runChild 抛错，这台机器就没有 sh，相关用例跳过。
+const hasSh = (() => {
+  try {
+    return runChild('sh', ['-c', 'exit 0']).status === 0;
+  } catch {
+    return false;
+  }
+})();
 
 /**
- * 照 Claude 的做法跑一次钩子命令：stdin 一份钩子输入。timeoutMs 只有测超时本身的用例才改（默认 60s 太慢）。
+ * 照 Claude 的做法跑一次钩子命令：stdin 一份钩子输入。timeoutMs 传给 runChild 的 limitMs，
+ * 只有测超时本身的用例才改（默认 60s）。
  *
- * 子进程不读标准输入就退出（crash.mjs 直接 exit、找不到 node 直接 127）时，父进程写 stdin 写到一半会碰上管道已经
- * 关了（Linux 上 EPIPE、Windows 上 EOF，本机 sh 实测），r.error 照样会被设上——这只是写的时序问题，子进程其实已经
- * 正常退出、r.status 已经拿到了退出码，不算「没跑完」。真没跑完（sh 起不来、超时、被信号杀）才会 r.status 是 null。
+ * 子进程不读标准输入就退出时，父进程写 stdin 会碰上管道已经关了（Linux 上 EPIPE、Windows 上 EOF）。
+ * runChild 把这当成已经拿到退出码，不算没跑完。真没跑完（起不来、超时、被信号杀）由 runChild 抛，
+ * 这里改写成钩子那句，调用方仍看「钩子命令没跑完」。
  */
 function runHook(
   command: string,
   input: unknown,
   timeoutMs = 60_000,
 ): { status: number | null; stderr: string } {
-  const r = spawnSync('sh', ['-c', command], {
-    input: JSON.stringify(input),
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    killSignal: 'SIGKILL',
-  });
-  if (r.status === null) throw new Error(`钩子命令没跑完：${r.error?.message ?? r.signal}`);
-  return { status: r.status, stderr: r.stderr };
+  try {
+    const r = runChild('sh', ['-c', command], { input: JSON.stringify(input), limitMs: timeoutMs });
+    return { status: r.status, stderr: r.stderr };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`钩子命令没跑完：${detail}`);
+  }
 }
 
 const hookCommand = (settings: string) => {
