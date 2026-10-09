@@ -14,7 +14,7 @@ import { Panel } from './page';
 /** 「不全」小标：这个合计只加了读到的那几次。 */
 function Incomplete() {
   return (
-    <span className="rounded border border-st-stall/50 px-1 text-[10px] leading-4 font-medium text-ink-stall">
+    <span className="rounded border border-st-stall/50 px-1 text-micro leading-4 font-medium text-ink-stall">
       不全
     </span>
   );
@@ -108,16 +108,16 @@ function Total({
           <span className="text-sm font-normal text-muted-foreground">{empty}</span>
         )}
         {r.kind === 'partial' ? (
-          <p className="mt-0.5 text-[11px] font-normal text-ink-stall">
+          <p className="mt-0.5 text-caption font-normal text-ink-stall">
             另有 {r.missing} 次{why}，没算进来
           </p>
         ) : null}
         {r.kind === 'missing' ? (
-          <p className="mt-0.5 text-[11px] font-normal text-ink-stall">
+          <p className="mt-0.5 text-caption font-normal text-ink-stall">
             {r.missing} 次会话都{why}
           </p>
         ) : null}
-        {note ? <p className="mt-0.5 text-[11px] font-normal text-muted-foreground">{note}</p> : null}
+        {note ? <p className="mt-0.5 text-caption font-normal text-muted-foreground">{note}</p> : null}
       </dd>
     </div>
   );
@@ -148,7 +148,7 @@ function CostRow({
 }) {
   const r = reading(share.usd, share.missing, share.runs);
   return (
-    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2">
+    <div className="grid grid-cols-usage gap-x-2">
       <dt className="text-xs leading-5 text-muted-foreground">{label}</dt>
       <dd className="min-w-0 text-sm">
         {r.kind === 'none' ? (
@@ -165,7 +165,7 @@ function CostRow({
           </span>
         )}
         {r.kind !== 'none' ? (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {r.kind === 'partial' ? (
               <span className="text-ink-stall">另有 {r.missing} 次没读到，没算进来 · </span>
             ) : null}
@@ -257,7 +257,7 @@ function Breakdown({ usage }: { usage: TaskDetail['usage'] }) {
                   ) : null}
                 </span>
               </div>
-              <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+              <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
                 {parts.length ? <UsageParts parts={parts} /> : <span>在跑，用量等它结束才有</span>}
               </div>
             </li>
@@ -321,7 +321,7 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
 
       <Section title="额度">
         {t.running && t.runs ? (
-          <p className="mb-2 text-[11px] text-muted-foreground">
+          <p className="mb-2 text-caption text-muted-foreground">
             另有 {t.running} 个会话在跑：用量等它结束才算进来。
           </p>
         ) : null}
