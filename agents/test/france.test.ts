@@ -1346,6 +1346,11 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     has(v, 'bad', '路由 a:m:claude-code 算在线，但结论 50 分钟没更新');
     has(v, 'bad', '路由 c:m:cursor-agent 算在线，但结论 160 分钟没更新');
     expect(whats(v).some((w) => w.includes('g:m:grok') || w.includes('n:m:claude-code'))).toBe(false);
+    // 稳定类别（#1520）：发版车暂停期探针不跑，旧结论按它过滤，不匹配文案
+    const kindOf = (prefix: string) =>
+      (v.anomalies as { what: string; kind?: string }[]).find((a) => a.what.startsWith(prefix))?.kind;
+    expect(kindOf('路由 a:m:claude-code ')).toBe('route-stale');
+    expect(kindOf('路由 c:m:cursor-agent ')).toBe('route-stale');
   });
 
   it('会话跑了 90 分钟还没完、登记了 30 分钟还没起来；3 小时内没成的列成留意，更早的不列', () => {
