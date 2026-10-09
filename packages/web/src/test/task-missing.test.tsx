@@ -20,7 +20,8 @@ function open(route: string, api: FleetApi) {
   );
 }
 
-const skeleton = () => document.querySelector('[aria-busy]');
+// 加载骨架是带 aria-busy 的块。刷新按钮空闲也写 aria-busy="false"，忙时是按钮上的 "true"，都不算退回骨架。
+const skeleton = () => document.querySelector('[aria-busy="true"]:not(button)');
 
 describe('单子详情读不到', () => {
   test('【故意造出的失败】没有这张单（404）：写「没有这张单」和编号、给回主页；不重试；实时推送叫去重读也不跳回骨架', async () => {
