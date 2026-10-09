@@ -94,8 +94,10 @@ describe('静态检查', () => {
   it('旧的菜单 event_key 已经从样例配置里删掉（菜单停用了，开发者后台也该删）', () => {
     const env = read(new URL('deploy/feishu.env.example', pkg));
     expect(env).toContain('im.message.recalled_v1');
+    expect(env).toContain('im.chat.member.user.added_v1');
     expect(env).toContain('im:message.group_msg');
     expect(env).toContain('im:message:readonly');
+    expect(env).toContain('im:chat:readonly');
     // 不再要求配菜单：菜单停用了
     expect(env).toContain('菜单和卡片按钮都已停用');
     expect(env).not.toMatch(/event_key/);

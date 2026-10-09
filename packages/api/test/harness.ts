@@ -21,6 +21,7 @@ import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed }
 import type { Config } from '../src/config.ts';
 import type { Deps } from '../src/deps.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
+import { memoryCockpitAlerts, pgCockpitAlerts } from '../src/feishu-alerts.ts';
 import { createMemoryIntentStore } from '../src/intent-store.ts';
 import type { ScryptParams } from '../src/password.ts';
 import type {
@@ -130,6 +131,8 @@ export interface HarnessOptions {
   gatewaySeen?: Deps['gatewaySeen'];
   /** 意图存储（#553）；不给就是一份跟着测试时钟走的内存版，null 是没接上。 */
   intents?: Deps['intents'] | null;
+  /** 驾驶舱提醒（#795）。不给时内存版写进 store.data.notifications，库版写进 notifications 表。 */
+  alerts?: Deps['alerts'];
   /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
   alertWork?: Deps['alertWork'];
   /** 路由两层每一层现在活着吗（#574）；不给就是没接上（内存版、开发环境一样）。 */
@@ -192,6 +195,7 @@ function wire<S extends Store>(
     health: options.health ?? [],
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
+    ...(options.alerts ? { alerts: options.alerts } : {}),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.probeHistory ? { probeHistory: options.probeHistory } : {}),
@@ -267,7 +271,13 @@ export function harness(
     now: () => new Date(clock.now),
     onChange: (table, id) => changes.publish({ type: 'change', table, id }),
   });
-  return { ...wire(store, changes, clock, options), changes };
+  return {
+    ...wire(store, changes, clock, {
+      ...options,
+      alerts: options.alerts ?? memoryCockpitAlerts(store.data.notifications),
+    }),
+    changes,
+  };
 }
 
 /**
@@ -299,7 +309,10 @@ export async function pgHarness(
   );
   // 等 LISTEN 真接上，免得测试里的第一次写入赶在它前面。
   for (let i = 0; i < 100 && !feed.status().healthy; i++) await new Promise((r) => setTimeout(r, 5));
-  const h = wire(createPgStore(t.db, { now: () => new Date(clock.now) }), feed, clock, options);
+  const h = wire(createPgStore(t.db, { now: () => new Date(clock.now) }), feed, clock, {
+    ...options,
+    alerts: options.alerts ?? pgCockpitAlerts(t.db),
+  });
   return { ...h, feed, stop: () => feed.stop() };
 }
 
