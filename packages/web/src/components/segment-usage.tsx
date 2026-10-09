@@ -126,12 +126,21 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
   );
 }
 
+function shareText(r: Reading): string {
+  if (r.kind === 'none') return '—';
+  if (r.kind === 'missing') return '没读到';
+  return formatUsd(r.value);
+}
+
 /**
- * 花费一格：按量是真花的钱，放大写；没有按量的写套餐内折合；执行体一笔花费都没报（订阅制）时写按目录单价的估算；
- * 估都估不了的写明为什么（没有单价、token 没读全），不写 0。
+ * 花费一格：按量、套餐内折合上下两行，各带标签。大字只给按量（真花的钱）；折合用小字，不跟大字并排。
+ * 执行体一笔花费都没报（订阅制）时仍写按目录单价的估算；估都估不了的写明为什么，不写 0。
  */
 function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   const { metered, subscription, unknown } = t.cost;
+  const meteredR = reading(metered.usd, metered.missing, metered.runs);
+  const subR = reading(subscription.usd, subscription.missing, subscription.runs);
+  const unknownR = reading(unknown.usd, unknown.missing, unknown.runs);
   const pick = metered.runs ? metered : subscription.runs ? subscription : unknown;
   const r = reading(pick.usd, pick.missing, pick.runs);
   const e = t.estimate;
@@ -151,39 +160,47 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
       />
     );
   }
-  const kind =
-    pick === metered
-      ? '按量（真花的钱）'
-      : pick === subscription
-        ? '套餐内，按 API 价折合'
-        : '分不清按量、套餐内';
-  const rest = [
-    pick !== subscription && subscription.runs ? `套餐内折合 ${formatUsd(subscription.usd)}` : '',
-    pick !== unknown && unknown.runs ? `分不清的 ${formatUsd(unknown.usd)}` : '',
+  if (r.kind === 'none') return <Stat label="花费" value="—" hint={notYet} />;
+  const meteredLarge = meteredR.kind === 'full' || meteredR.kind === 'partial';
+  const notes = [
+    meteredR.kind === 'partial' ? `按量另有 ${meteredR.missing} 次没读到` : '',
+    subR.kind === 'partial' ? `套餐内另有 ${subR.missing} 次没读到` : '',
+    unknownR.kind === 'full' || unknownR.kind === 'partial' ? `分不清 ${formatUsd(unknownR.value)}` : '',
+    unknownR.kind === 'missing' ? '分不清 · 花费没读到' : '',
+    unknownR.kind === 'partial' ? `分不清的另有 ${unknownR.missing} 次没读到` : '',
+    ...estimateNotes,
   ].filter(Boolean);
   return (
     <Stat
       label="花费"
       value={
-        r.kind === 'missing'
-          ? '没读到'
-          : r.kind === 'none'
-            ? '—'
-            : `${pick === subscription ? '折合 ' : ''}${formatUsd(r.value)}`
+        <span data-cost className="flex flex-col items-start gap-2 font-normal tracking-normal">
+          <span className="flex flex-col items-start gap-1">
+            <span
+              className="text-xs leading-normal font-normal text-muted-foreground"
+              title="按量计费：真花的钱"
+            >
+              按量
+            </span>
+            <span
+              className={cn(
+                'num',
+                meteredLarge ? 'text-stat leading-none font-semibold' : 'text-sm leading-normal font-medium',
+                meteredR.kind === 'missing' && 'text-ink-stall',
+              )}
+            >
+              {shareText(meteredR)}
+            </span>
+          </span>
+          <span
+            className="text-xs leading-normal font-normal text-muted-foreground"
+            title="套餐内：按 API 价折合，账单不因它多一笔"
+          >
+            <span>套餐内折合</span> {shareText(subR)}
+          </span>
+        </span>
       }
-      accent={r.kind === 'missing' ? 'text-ink-stall' : undefined}
-      hint={
-        r.kind === 'none'
-          ? notYet
-          : [
-              kind,
-              r.kind === 'partial' && !estimateNotes.length ? `另有 ${r.missing} 次没读到` : '',
-              ...estimateNotes,
-              ...rest,
-            ]
-              .filter(Boolean)
-              .join(' · ')
-      }
+      hint={notes.length ? notes.join(' · ') : undefined}
     />
   );
 }

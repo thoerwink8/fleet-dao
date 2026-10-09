@@ -112,11 +112,16 @@ describe('暂停（#820 片 3）：先选怎么停，再发请求', () => {
   });
 });
 
+/** 继续只在已经暂停时能点。 */
+function pausedTarget(task: Awaited<ReturnType<typeof liveTask>>) {
+  return { ...targetOf(task), paused: '已暂停：被人暂停（测试）' };
+}
+
 describe('继续：点了就发请求，成功、失败都有话说', () => {
   test('继续：发 {action:resume}，成功提示没有多余的说明', async () => {
     const { api, taskAction } = backend();
     const task = await liveTask(api);
-    renderApp(<Buttons target={targetOf(task)} />, { api });
+    renderApp(<Buttons target={pausedTarget(task)} />, { api });
     press('resume');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
     expect(taskAction).toHaveBeenCalledExactlyOnceWith(task.id, { action: 'resume' });
@@ -127,7 +132,7 @@ describe('继续：点了就发请求，成功、失败都有话说', () => {
     const { api, taskAction } = backend();
     taskAction.mockRejectedValueOnce(FAILED);
     const task = await liveTask(api);
-    renderApp(<Buttons target={targetOf(task)} />, { api });
+    renderApp(<Buttons target={pausedTarget(task)} />, { api });
     press('resume');
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
     expect(toast.error).toHaveBeenCalledWith('继续没成功', { description: FAILED.message });
@@ -138,7 +143,7 @@ describe('继续：点了就发请求，成功、失败都有话说', () => {
     const { api, taskAction } = backend();
     taskAction.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const task = await liveTask(api);
-    renderApp(<Buttons target={targetOf(task)} />, { api });
+    renderApp(<Buttons target={pausedTarget(task)} />, { api });
     press('resume');
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('继续没成功', { description: 'Failed to fetch' }),
