@@ -105,7 +105,11 @@ export function OrderSummaryLine({
     >
       {summary.ok
         ? `引擎按这个先后试：开着的 ${summary.active} 个${noun}，${
-            summary.skipped > 0 ? `跳过 ${summary.skipped} 个（关着或没有可用路由），` : ''
+            summary.skipped > 0
+              ? `跳过 ${summary.skipped} 个（${
+                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着或没有可用路由'
+                }），`
+              : ''
           }排头的是配置里第 ${summary.firstPosition} 个`
         : summary.why}
     </p>

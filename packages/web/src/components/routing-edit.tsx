@@ -107,6 +107,19 @@ interface RoutingEdit {
 
 const RoutingEditContext = createContext<RoutingEdit | null>(null);
 
+/** 改先后成功。同一编号，连点时新的顶掉旧的，屏幕上只留一条。 */
+export const REORDER_SAVED_TOAST_ID = 'routing-reorder-saved';
+/** 没改成。同一编号，连点时新的顶掉旧的，不和上一条叠在一起。 */
+export const REORDER_FAILED_TOAST_ID = 'routing-reorder-failed';
+
+function toastReordered(): void {
+  toast.success('已改先后', { id: REORDER_SAVED_TOAST_ID });
+}
+
+function toastReorderFailed(e: unknown): void {
+  toast.error('没改成', { id: REORDER_FAILED_TOAST_ID, description: errorText(e) });
+}
+
 export function useRoutingEdit(): RoutingEdit {
   const ctx = useContext(RoutingEditContext);
   if (!ctx) throw new Error('useRoutingEdit 要放在 RoutingEditProvider 里面');
@@ -139,9 +152,9 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
       reorderModels: async ({ purpose, movedId, order, expected }) => {
         try {
           await moveModelMutation.mutateAsync({ purpose, modelId: movedId, body: { order, expected } });
-          toast.success('已改先后');
+          toastReordered();
         } catch (e) {
-          toast.error('没改成', { description: errorText(e) });
+          toastReorderFailed(e);
           throw e;
         }
       },
@@ -152,9 +165,9 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
             routeId: movedId,
             body: { op: 'reorder', order, expected },
           });
-          toast.success('已改先后');
+          toastReordered();
         } catch (e) {
-          toast.error('没改成', { description: errorText(e) });
+          toastReorderFailed(e);
           throw e;
         }
       },
@@ -218,7 +231,7 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
       await asking.run();
       toast.success(asking.done);
     } catch (e) {
-      toast.error('没改成', { description: errorText(e) });
+      toastReorderFailed(e);
     } finally {
       setDialogBusy(false);
       setAsking(null);
