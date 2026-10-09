@@ -3,7 +3,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
-import { LoadError } from './page';
+import { LoadError, Page } from './page';
 
 afterEach(cleanup);
 
@@ -65,5 +65,45 @@ describe('LoadError', () => {
     });
     await waitFor(() => expect(qc.getQueryData(['bad'])).toBe('ok'));
     expect(calls.good).toBe(1);
+  });
+});
+
+// #1588：1024 宽时页头 flex-wrap，标题块不能收缩，描述一长就把右侧操作区挤到下一行。
+describe('Page 页头', () => {
+  test('带操作和长描述时，md 及以上页头不换行，描述在标题块里折行', () => {
+    const { container } = render(
+      <Page
+        title="操作记录"
+        description={`这段说明很长，长到在 1024 宽会把右侧刷新条挤到下一行。${'再长一点。'.repeat(40)}`}
+        actions={<button type="button">刷新</button>}
+      >
+        正文
+      </Page>,
+    );
+    const header = container.querySelector('header');
+    expect(header).toBeTruthy();
+    expect(header?.className).toContain('flex-wrap');
+    expect(header?.className).toContain('md:flex-nowrap');
+    const titleBlock = screen.getByRole('heading', { level: 1 }).parentElement;
+    expect(titleBlock).toBe(header?.firstElementChild);
+    expect(titleBlock?.className).toContain('min-w-0');
+    expect(titleBlock?.className).toContain('md:flex-1');
+    const actions = screen.getByRole('button', { name: '刷新' }).parentElement;
+    expect(actions).toBeTruthy();
+    expect(actions?.parentElement).toBe(header);
+    expect(actions?.className).toContain('shrink-0');
+  });
+
+  test('不带操作时不渲染操作区容器', () => {
+    const { container } = render(
+      <Page title="通知" description="一句说明">
+        正文
+      </Page>,
+    );
+    const header = container.querySelector('header');
+    expect(header).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '通知' })).toBeTruthy();
+    expect(header?.querySelector(':scope > div.flex')).toBeNull();
+    expect(header?.children).toHaveLength(1);
   });
 });
