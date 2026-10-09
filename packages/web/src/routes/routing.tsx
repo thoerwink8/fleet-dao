@@ -14,6 +14,7 @@ import { brand } from '#brand';
 import { usePoolHolds, useRoutingLayers } from '../api/client';
 import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import {
   ChannelTab,
   LIST_HEIGHT,
@@ -35,7 +36,7 @@ import { KindDot, useKindEnv } from '../components/routing-kinds';
 import { AddPurposeModel, PurposeModelControls } from '../components/routing-membership';
 import { ModelRoutes, OrderSummaryLine } from '../components/routing-routes';
 import { StatusChip, StatusDot } from '../components/status';
-import { formatClock } from '../lib/format';
+import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
 import { modelKind } from '../lib/route-kinds';
@@ -70,6 +71,9 @@ type TabId = (typeof TABS)[number]['id'];
 
 const parseTab = (raw: string | null): TabId => TABS.find((t) => t.id === raw)?.id ?? 'purposes';
 
+/** 路由两层每 30 秒重拉一次。超过 5 分钟还没再读成，刷新条标「数据已过期」（正常间隔里不标）。 */
+const ROUTING_STALE_AFTER_MS = 5 * TIME.MIN;
+
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
 
@@ -92,26 +96,34 @@ function RoutingDescription() {
 }
 
 export default function Routing() {
-  const { data, error, isLoading } = useRoutingLayers();
+  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingLayers();
   const [params, setParams] = useSearchParams();
+  const refresh = (
+    <RefreshBar
+      onRefresh={() => void refetch()}
+      isFetching={isFetching}
+      dataUpdatedAt={dataUpdatedAt}
+      staleAfterMs={ROUTING_STALE_AFTER_MS}
+    />
+  );
 
   if (error) {
     return (
-      <Page title="路由" description={<RoutingDescription />}>
+      <Page title="路由" description={<RoutingDescription />} actions={refresh}>
         <LoadError what="路由两层" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="路由" description={<RoutingDescription />}>
+      <Page title="路由" description={<RoutingDescription />} actions={refresh}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="路由" description={<RoutingDescription />}>
+      <Page title="路由" description={<RoutingDescription />} actions={refresh}>
         <div
           role="note"
           className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
@@ -141,7 +153,12 @@ export default function Routing() {
       title="路由"
       description={<RoutingDescription />}
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
-      actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
+      actions={
+        <>
+          {refresh}
+          {purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : null}
+        </>
+      }
     >
       <RoutingEditProvider>
         <RoutingTabs tab={tab} onPick={setTab} />
