@@ -132,6 +132,8 @@ describe('测试里不许同步起子进程', () => {
   });
 
   it('故意放一行违规的样本，扫得出来', () => {
-    expect(scanSyncChildSpawns(`execFileSync('git', []);`)).not.toEqual([]);
+    // 扫的是这行代码本身，用普通字符串传进去。
+    const sample = "execFileSync('git', []);";
+    expect(scanSyncChildSpawns(sample)).not.toEqual([]);
   });
 });
