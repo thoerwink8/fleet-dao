@@ -40,6 +40,11 @@ export function QuotaBar({ util, className }: { util: number | undefined; classN
   );
 }
 
+/** 实读是上游读到的，时间写「读」；估算没有上游读取，按本机用量算，时间写「算」。 */
+export function readingVerb(reading: QuotaWindowView['reading']): '读' | '算' {
+  return reading === 'measured' ? '读' : '算';
+}
+
 /** 每个额度数字都要标明来源：实读（接口读到的）还是估算（按我们自己的用量算的），悬停看读法（reclaude-carpool……）。 */
 export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?: string }) {
   const measured = w.reading === 'measured';
@@ -157,7 +162,9 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           className={cn(w.stale && 'text-ink-stall')}
           title={w.stale ? '读数太旧，不能当现值用' : undefined}
         >
-          <span className="num">{formatAgo(w.readAt, now)}</span>读
+          {w.reading === 'measured' ? null : <span>按本机用量估算 · </span>}
+          <span className="num">{formatAgo(w.readAt, now)}</span>
+          {readingVerb(w.reading)}
         </span>
       </div>
       {hot && util !== undefined ? (

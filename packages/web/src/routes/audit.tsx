@@ -8,7 +8,15 @@ import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
-import { actionLabel, actorKindLabel, actorName, targetLabel, taskIndex, viaLabel } from '../lib/audit';
+import {
+  actionLabel,
+  actorKindLabel,
+  actorName,
+  auditChangeLines,
+  targetLabel,
+  taskIndex,
+  viaLabel,
+} from '../lib/audit';
 import { formatAgo, formatDateTime } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
@@ -62,6 +70,56 @@ function json(v: unknown): string {
   }
 }
 
+function OlderRecordsButton({ pending, onClick }: { pending: boolean; onClick: () => void }) {
+  return (
+    <Button size="sm" variant="ghost" onClick={onClick} disabled={pending}>
+      {pending ? '正在读更早的…' : '看更早的记录'}
+    </Button>
+  );
+}
+
+/** 展开后先看人话差异；原始 JSON 收在里面那层，默认合上。 */
+function ChangeDetails({ before, after }: { before: unknown; after: unknown }) {
+  const lines = auditChangeLines(before, after);
+  return (
+    <details className="mt-1 text-xs text-muted-foreground">
+      <summary className="cursor-pointer select-none hover:text-foreground">看改了什么</summary>
+      {lines.length > 0 ? (
+        <ul className="mt-1.5 space-y-0.5 text-sub">
+          {lines.map((line) => (
+            <li key={line.key === '' ? 'value' : line.key} className="break-words">
+              {`${line.label}：${line.before} → ${line.after}`}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-1.5 text-sub">这些字段都没变</p>
+      )}
+      <details className="mt-1.5">
+        <summary className="cursor-pointer select-none hover:text-foreground">看原始数据</summary>
+        <div className="mt-1.5 grid gap-2 md:grid-cols-2">
+          {before !== undefined ? (
+            <div>
+              <div className="mb-1">之前</div>
+              <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
+                {json(before)}
+              </pre>
+            </div>
+          ) : null}
+          {after !== undefined ? (
+            <div>
+              <div className="mb-1">之后</div>
+              <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
+                {json(after)}
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      </details>
+    </details>
+  );
+}
+
 export default function Audit() {
   const [params, setParams] = useSearchParams();
   const target = params.get('target') ?? undefined;
@@ -89,6 +147,11 @@ export default function Audit() {
     else p.delete('target');
     setParams(p, { replace: true });
   };
+  const hasOlder = Boolean(audit.hasNextPage);
+  const loadOlder = () => void audit.fetchNextPage();
+  // 已加载的都被滤掉才提换条件；没有更早的就不写「往前翻」。
+  const emptyHint =
+    all.length === 0 ? undefined : hasOlder ? '换个过滤条件，或往前翻更早的。' : '换个过滤条件。';
 
   return (
     <Page
@@ -162,7 +225,18 @@ export default function Audit() {
           <Empty
             icon={ScrollText}
             title="没有符合条件的记录"
-            hint={all.length ? '换个过滤条件，或往前翻更早的。' : undefined}
+            hint={
+              emptyHint || hasOlder ? (
+                <>
+                  {emptyHint ? <p>{emptyHint}</p> : null}
+                  {hasOlder ? (
+                    <div className="mt-2 text-foreground">
+                      <OlderRecordsButton pending={audit.isFetchingNextPage} onClick={loadOlder} />
+                    </div>
+                  ) : null}
+                </>
+              ) : undefined
+            }
           />
         ) : (
           <ol className="divide-y">
@@ -196,29 +270,7 @@ export default function Audit() {
                   ) : null}
                   {a.error ? <p className="mt-0.5 text-sub text-ink-fail">{a.error}</p> : null}
                   {a.before !== undefined || a.after !== undefined ? (
-                    <details className="mt-1 text-xs text-muted-foreground">
-                      <summary className="cursor-pointer select-none hover:text-foreground">
-                        看改了什么
-                      </summary>
-                      <div className="mt-1.5 grid gap-2 md:grid-cols-2">
-                        {a.before !== undefined ? (
-                          <div>
-                            <div className="mb-1">之前</div>
-                            <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
-                              {json(a.before)}
-                            </pre>
-                          </div>
-                        ) : null}
-                        {a.after !== undefined ? (
-                          <div>
-                            <div className="mb-1">之后</div>
-                            <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
-                              {json(a.after)}
-                            </pre>
-                          </div>
-                        ) : null}
-                      </div>
-                    </details>
+                    <ChangeDetails before={a.before} after={a.after} />
                   ) : null}
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
@@ -233,16 +285,9 @@ export default function Audit() {
             ))}
           </ol>
         )}
-        {audit.hasNextPage ? (
+        {list.length > 0 && hasOlder ? (
           <div className="border-t p-2 text-center">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => void audit.fetchNextPage()}
-              disabled={audit.isFetchingNextPage}
-            >
-              {audit.isFetchingNextPage ? '正在读更早的…' : '看更早的记录'}
-            </Button>
+            <OlderRecordsButton pending={audit.isFetchingNextPage} onClick={loadOlder} />
           </div>
         ) : null}
       </Panel>

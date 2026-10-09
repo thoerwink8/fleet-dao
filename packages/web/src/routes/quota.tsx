@@ -7,7 +7,7 @@ import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
 import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
 import { OrgSwitchBanner } from '../components/org-switch';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { QuotaCell, quotaValue } from '../components/quota';
+import { QuotaCell, quotaValue, readingVerb } from '../components/quota';
 import { Badge } from '../components/ui/badge';
 import {
   billingLabel,
@@ -60,6 +60,19 @@ function Callout({
 
 type Cell = { pool: PoolView; w: QuotaWindowView };
 
+/** 摘要卡里的名字：池名一行、窗口名一行，窄宽度换行，悬停看全文。不再单行截断。 */
+function SummaryName({ pool, w }: { pool: PoolView; w?: QuotaWindowView }) {
+  const poolName = poolTitle(pool);
+  const win = w ? windowTitle(w) : undefined;
+  const full = win ? `${poolName} · ${win}` : poolName;
+  return (
+    <span className="min-w-0 flex-1 break-words" title={full}>
+      <span className="block">{poolName}</span>
+      {win ? <span className="block">{win}</span> : null}
+    </span>
+  );
+}
+
 export default function Quota() {
   const { data, error, isLoading } = usePools();
   const now = useNow();
@@ -74,7 +87,6 @@ export default function Quota() {
 
   const pools = data?.pools ?? [];
   const cells: Cell[] = pools.flatMap((pool) => pool.windows.map((w) => ({ pool, w })));
-  const label = ({ pool, w }: Cell) => `${poolTitle(pool)} · ${windowTitle(w)}`;
   const key = ({ pool, w }: Cell, i: number) => `${pool.id}-${w.window}-${i}`;
   const hot = cells.flatMap((c) => {
     const util = utilOf(c.w);
@@ -110,8 +122,8 @@ export default function Quota() {
               hint="快清零了还剩不少，不用就浪费"
               tone="text-foreground"
               items={hot.map((c, i) => (
-                <li key={key(c, i)} className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate">{label(c)}</span>
+                <li key={key(c, i)} className="flex items-start gap-2">
+                  <SummaryName pool={c.pool} w={c.w} />
                   <span className="num shrink-0 text-muted-foreground">剩 {formatPercent(1 - c.util)}</span>
                   {c.w.resetsAt ? (
                     <span className="num shrink-0 text-xs">{formatIn(c.w.resetsAt, now)}</span>
@@ -125,8 +137,8 @@ export default function Quota() {
               hint="用了九成以上，调度会先绕开"
               tone="text-ink-fail"
               items={full.map((c, i) => (
-                <li key={key(c, i)} className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate">{label(c)}</span>
+                <li key={key(c, i)} className="flex items-start gap-2">
+                  <SummaryName pool={c.pool} w={c.w} />
                   <span className="num shrink-0 text-ink-fail">{quotaValue(c.w)}</span>
                 </li>
               ))}
@@ -138,27 +150,30 @@ export default function Quota() {
               tone="text-ink-stall"
               items={[
                 ...unread.map((p) => (
-                  <li key={`unread-${p.id}`} className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate">{poolTitle(p)}</span>
+                  <li key={`unread-${p.id}`} className="flex items-start gap-2">
+                    <SummaryName pool={p} />
                     <span className="shrink-0 text-ink-stall">没查成</span>
                   </li>
                 )),
                 ...unknownUse.map((c, i) => (
-                  <li key={`unknown-${key(c, i)}`} className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate">{label(c)}</span>
+                  <li key={`unknown-${key(c, i)}`} className="flex items-start gap-2">
+                    <SummaryName pool={c.pool} w={c.w} />
                     <span className="shrink-0 text-ink-stall">{quotaValue(c.w)}</span>
                   </li>
                 )),
                 ...unreported.map((c, i) => (
-                  <li key={`unreported-${key(c, i)}`} className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate">{label(c)}</span>
+                  <li key={`unreported-${key(c, i)}`} className="flex items-start gap-2">
+                    <SummaryName pool={c.pool} w={c.w} />
                     <span className="shrink-0 text-ink-stall">上游这次没报</span>
                   </li>
                 )),
                 ...stale.map((c, i) => (
-                  <li key={key(c, i)} className="flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate">{label(c)}</span>
-                    <span className="num shrink-0 text-ink-stall">{formatAgo(c.w.readAt, now)}读</span>
+                  <li key={key(c, i)} className="flex items-start gap-2">
+                    <SummaryName pool={c.pool} w={c.w} />
+                    <span className="num shrink-0 text-ink-stall">
+                      {formatAgo(c.w.readAt, now)}
+                      {readingVerb(c.w.reading)}
+                    </span>
                   </li>
                 )),
               ]}
