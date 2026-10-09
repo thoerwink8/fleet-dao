@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 const TEST = import.meta.dirname;
 
-/** 去掉注释和引号里的字符串（反引号 ${} 里的代码留下：那是代码，不是字面量）。 */
+/** 去掉注释和引号里的字符串（反引号 ${} 里的代码留下：那是代码，不是字面量）。注释换成一个空格，避免和前后标识符粘成一个词。 */
 function stripCommentsAndStrings(code: string): string {
   let out = '';
   let i = 0;
@@ -17,11 +17,13 @@ function stripCommentsAndStrings(code: string): string {
     if (c === '/' && n === '/') {
       const nl = code.indexOf('\n', i);
       i = nl === -1 ? code.length : nl;
+      out += ' ';
       continue;
     }
     if (c === '/' && n === '*') {
       const end = code.indexOf('*/', i + 2);
       i = end === -1 ? code.length : end + 2;
+      out += ' ';
       continue;
     }
     if (c === "'" || c === '"') {
@@ -162,6 +164,8 @@ describe('测试里不许同步起子进程', () => {
   it('故意放一行违规的样本，扫得出来', () => {
     const sample = "execFileSync('git', []);";
     expect(scanSyncChildSpawns(sample)).toEqual(['execFileSync']);
+    // 块注释紧贴调用：去掉注释要留分隔空白，不能粘成 voidexecFileSync 后对不上词边界。
+    expect(scanSyncChildSpawns("void/*说明*/execFileSync('git', []);")).toEqual(['execFileSync']);
     expect(scanSyncChildSpawns("const e = new Error('spawnSync git ENOENT'); // execSync")).toEqual([]);
   });
 });
