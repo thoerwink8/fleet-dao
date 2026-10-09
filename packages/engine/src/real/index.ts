@@ -17,6 +17,7 @@ import {
 } from '@fleet-dao/adapters';
 import type { RunCommand } from '@fleet-dao/adapters/quota';
 import {
+  closeInterruptedScheduleRuns as closeInterruptedScheduleRunsInDb,
   createDb,
   type Db,
   finishScheduleRun,
@@ -38,6 +39,7 @@ import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.
 import { foreignCanarySlugs } from '../jobs/canary-scope.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
+import type { InterruptedScheduleClose } from '../jobs/timers.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
@@ -593,6 +595,8 @@ export function realPortsFromEnv(
   master: EngineMasterGate;
   /** 总开关关着、这个定时任务这一轮被跳过：记一条 partial 进 schedule_runs（看门狗不当成「停了」，定时任务页看得到原因）。 */
   recordSkippedRun(jobId: string, why: string): Promise<void>;
+  /** 定时器起之前：超过一轮工作上限还没结束的 schedule_runs 补记成 failed（#1522）。写库失败照抛。 */
+  closeInterruptedScheduleRuns: InterruptedScheduleClose;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -888,6 +892,7 @@ export function realPortsFromEnv(
       const id = await startScheduleRun(db, jobId, at);
       await finishScheduleRun(db, id, { outcome: 'partial', why }, at);
     },
+    closeInterruptedScheduleRuns: (input) => closeInterruptedScheduleRunsInDb(db, input),
     jobLastStartedAt: async () =>
       new Map(
         (await scheduleHealth(db)).flatMap((h) =>

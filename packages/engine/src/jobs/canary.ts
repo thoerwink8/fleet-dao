@@ -670,31 +670,36 @@ async function conclude(
 export const CANARY_ABANDONED_WHY = `这一轮过了 ${CANARY_RUN_TIMEOUT_MINUTES / 60} 小时还没有结论：巡检的工作流没收尾就没了（被终止、工人丢了、看一回连着失败），下一轮开始时补记没跑成`;
 
 /**
- * 没收尾的几轮（过了一轮工作流的时限还没有结论：工作流一定已经没了）补记成没跑成，它们在 schedule_runs 的那一行也记没跑成
- * （看门狗照登记表看得见）。之后它们开成了的单照前几轮留下的单收掉。没成的写进备注，不挡这一轮。
+ * 没收尾的几轮（过了一轮工作流的时限还没有结论：工作流一定已经没了）补记成没跑成。schedule_runs 那一行走和引擎起来时
+ * 同一份补记（closeInterrupted），不另写一套。之后它们开成了的单照前几轮留下的单收掉。没成的写进备注，不挡这一轮。
  */
 async function concludeAbandoned(deps: CanaryDeps, at: Date): Promise<string[]> {
+  const before = new Date(at.getTime() - CANARY_RUN_TIMEOUT_MINUTES * 60_000);
   let lost: { id: number; scheduleRunId: number; issueNumber: number | null }[];
   try {
     lost = await deps.record.abandon({
-      before: new Date(at.getTime() - CANARY_RUN_TIMEOUT_MINUTES * 60_000),
+      before,
       why: CANARY_ABANDONED_WHY,
       at,
     });
   } catch (err) {
     return [`没补记成没收尾的几轮：${errMessage(err)}`];
   }
-  const notes: string[] = [];
-  for (const r of lost) {
-    const which = r.issueNumber === null ? '' : `（#${r.issueNumber}）`;
-    try {
-      await deps.runs.finish(r.scheduleRunId, { outcome: 'failed', why: CANARY_ABANDONED_WHY }, at);
-      notes.push(`补记了没收尾的一轮${which}：没跑成`);
-    } catch (err) {
-      notes.push(`没收尾的一轮${which}补记了，它在 schedule_runs 的那一行没记成没跑成：${errMessage(err)}`);
-    }
+  try {
+    if (!deps.runs.closeInterrupted) throw new Error('没有补记 schedule_runs 的入口');
+    await deps.runs.closeInterrupted({
+      job: CANARY_JOB.id,
+      startedBefore: before,
+      why: CANARY_ABANDONED_WHY,
+      at,
+    });
+  } catch (err) {
+    return [`没收尾的几轮在 schedule_runs 上没补记成：${errMessage(err)}`];
   }
-  return notes;
+  return lost.map((r) => {
+    const which = r.issueNumber === null ? '' : `（#${r.issueNumber}）`;
+    return `补记了没收尾的一轮${which}：没跑成`;
+  });
 }
 
 /**
