@@ -199,6 +199,117 @@ describe('派前探测', () => {
     expect(got).toMatchObject({ kind: 'pass', probed: false, label: 'glm-5.3-flash' });
   });
 
+  it('组织这会儿定不下来，且没有探通的上一次结论：不当成通，不改写', async () => {
+    for (const previous of [
+      null,
+      { state: 'failed' as const, at: new Date(NOW.getTime() - 6 * 60_000), detail: '上次没通' },
+    ]) {
+      const t = target({
+        orgKind: 'carpool',
+        alive: false,
+        previous,
+      });
+      const h = harness([t], {
+        sessionOrg: async () => ({ ok: false, pending: true, why: '切号中' }),
+      });
+      const got = await probeAssignedRoute(h.deps, createProbeLock(), {
+        routeId: t.routeId,
+        label: t.modelId,
+      });
+      expect(h.probes()).toBe(0);
+      expect(h.saved).toEqual([]);
+      expect(got.kind).toBe('fail');
+      if (got.kind !== 'fail') return;
+      expect(got.counted).toBe(false);
+      expect(got.detail).not.toContain('答上了');
+    }
+  });
+
+  it('组织这会儿定不下来，上一次探通：不探、不改写，按上一次结论派', async () => {
+    const t = target({
+      orgKind: 'carpool',
+      alive: true,
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 6 * 60_000), detail: '答上了：OK' },
+    });
+    const h = harness([t], {
+      sessionOrg: async () => ({ ok: false, pending: true, why: '切号中' }),
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(h.probes()).toBe(0);
+    expect(h.saved).toEqual([]);
+    expect(got).toMatchObject({ kind: 'pass', probed: false });
+  });
+
+  it('组织认不出：该探却探不了，当不通且不把路由写成不在线', async () => {
+    const t = target({
+      orgKind: 'carpool',
+      alive: true,
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 6 * 60_000), detail: '答上了：OK' },
+    });
+    const h = harness([t], {
+      sessionOrg: async () => ({ ok: false, why: '输出认不出' }),
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(h.probes()).toBe(0);
+    expect(h.saved).toEqual([]);
+    expect(got.kind).toBe('fail');
+    if (got.kind !== 'fail') return;
+    expect(got.counted).toBe(false);
+    expect(got.detail).toContain('认不出');
+  });
+
+  it('按量计费、上一次结论是不通：不探、不改写，按上一次结论不派', async () => {
+    const t = target({
+      billing: 'metered',
+      alive: false,
+      previous: { state: 'failed', at: new Date(NOW.getTime() - 6 * 60_000), detail: '上次没通' },
+    });
+    const h = harness([t]);
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(h.probes()).toBe(0);
+    expect(h.saved).toEqual([]);
+    expect(got.kind).toBe('fail');
+    if (got.kind !== 'fail') return;
+    expect(got.counted).toBe(false);
+    expect(got.detail).toContain('上次没通');
+    const decided = afterDispatchProbe(EMPTY_DISPATCH_PROBE, {
+      label: got.label,
+      detail: got.detail,
+      passed: false,
+      counted: got.counted,
+    });
+    expect(decided.action).toBe('pick');
+    expect(decided.round.probed).toBe(0);
+  });
+
+  it('按量计费、上一次结论不是通（skipped）：不探、不改写，不派', async () => {
+    const t = target({
+      billing: 'metered',
+      alive: false,
+      previous: {
+        state: 'skipped',
+        at: new Date(NOW.getTime() - 6 * 60_000),
+        detail: '按量计费的渠道不自动探',
+      },
+    });
+    const h = harness([t]);
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(h.probes()).toBe(0);
+    expect(h.saved).toEqual([]);
+    expect(got.kind).toBe('fail');
+  });
+
+  it('一条都没探到，候选一开始就被挡：停下通知写出每条原因', () => {
+    const blocked =
+      '第 1 条 glm-5.3-flash：不在线（探活或熔断判的）；第 2 条 deepseek-flash：不在线（探活或熔断判的）';
+    const text = dispatchProbeStopText(EMPTY_DISPATCH_PROBE, blocked);
+    expect(text.startsWith('派前探测：')).toBe(true);
+    expect(text).toContain(blocked);
+    expect(text).toContain('不起会话，等探针探通后再继续');
+    expect(text).not.toContain('本轮已当场探 3 条');
+    expect(text).not.toContain('派前探测：。');
+  });
+
   it('探针探通但结论写不进 routes：按不通，不起会话', async () => {
     const t = target();
     const h = harness([t], {

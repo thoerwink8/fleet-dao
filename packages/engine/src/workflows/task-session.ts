@@ -31,6 +31,7 @@ import {
   type Avoid,
   afterDispatchProbe,
   bump,
+  dispatchProbeBlockedLine,
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
@@ -196,7 +197,7 @@ export async function writeSession(
  * 选路：排队（没空位、额度没读成）就隔一会儿再选；一条能用的都没有就停下等人。派得出就当场给动手这一段预占池的名额（#757），
  * 交回的路由带着它进 runSegment：开跑时换成开跑那一行，没开跑就收场的由 runSegment 放掉。
  * 派之前再探一次选定的那条（#1409）：不通就先放掉这次预占（没进 runSegment，不能占着池），再换下一条，每轮最多探 3 条；
- * 都探不通或都被挡就停下等探针恢复，不起会话。
+ * 都探不通、或候选一开始就被挡，就停下等探针恢复，不起会话，并沿用全熔断提醒。
  * 没提交的避让（#1408）和这一轮探不通的避让叠在一起。避让把候选滤光时，点名原来的路由再选；还派不出就用它，但派之前照样探。
  */
 async function pickRoute(
@@ -222,9 +223,12 @@ async function pickRoute(
     holdForProbe = false;
   };
   const stopForProbe = async (blocked: string, wakeMark: number) => {
-    if (round.fails.length > 0) {
+    // 已经写下每条探不通的结果之后，醒来再选仍派不出：别用空名单把那几条盖掉。
+    if (round.fails.length > 0 || lastStopDetail === '') {
       lastStopDetail = dispatchProbeStopText(round, blocked);
-      rt.feedback = withDispatchProbeNote(rt.feedback, dispatchProbeLine(round.fails, null));
+      const line =
+        round.fails.length > 0 ? dispatchProbeLine(round.fails, null) : dispatchProbeBlockedLine(blocked);
+      rt.feedback = withDispatchProbeNote(rt.feedback, line);
       rt.status.lastProblem = lastStopDetail;
       await rt.advance('implement', lastStopDetail);
       await rt.step('raiseAlert', () =>
@@ -337,7 +341,8 @@ async function pickRoute(
           if (chosen) return chosen;
           continue;
         }
-        if (probeOn && (round.fails.length > 0 || holdForProbe)) {
+        // 还没探过、候选一开始就被挡，也走同一条停下：写出原因，沿用全熔断提醒，等探针恢复再继续。
+        if (probeOn) {
           await stopForProbe(got.detail, mark);
           continue;
         }

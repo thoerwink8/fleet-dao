@@ -279,11 +279,18 @@ export function dispatchProbeLine(fails: readonly DispatchProbeFail[], chosen: s
   return `派前探测：${fails.map((item) => `${item.label} 不通（${item.detail}）`).join('；')}`;
 }
 
+/** 一条都没当场探到就停下：原因用选路给出的每条候选，不留空的「派前探测：」。 */
+export function dispatchProbeBlockedLine(blockedDetail: string): string {
+  return blockedDetail ? `派前探测：候选都被挡住（${blockedDetail}）` : '派前探测：没有能派的候选';
+}
+
 /** 停下时写进任务状态和提醒的全文：每条结果、到了 3 条的上限、还有被挡住的候选、以及不起会话。 */
 export function dispatchProbeStopText(round: DispatchProbeRound, blockedDetail: string): string {
-  const parts = [dispatchProbeLine(round.fails, null)];
+  const head =
+    round.fails.length > 0 ? dispatchProbeLine(round.fails, null) : dispatchProbeBlockedLine(blockedDetail);
+  const parts = [head];
   if (round.probed >= DISPATCH_PROBE_LIMIT) parts.push('本轮已当场探 3 条，不再往下探');
-  if (blockedDetail) parts.push(`其余候选：${blockedDetail}`);
+  if (blockedDetail && round.fails.length > 0) parts.push(`其余候选：${blockedDetail}`);
   parts.push('不起会话，等探针探通后再继续');
   return parts.join('。');
 }

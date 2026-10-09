@@ -1683,6 +1683,49 @@ describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () =
       },
     );
   });
+
+  it('候选一开始就全被挡住、还没探过：不起会话，停下通知列出每条原因，并沿用全熔断提醒', async () => {
+    const blocked =
+      'ui阶段没有能派的路由（第 1 条 glm-5.3-flash：不在线（探活或熔断判的）；第 2 条 deepseek-flash：不在线（探活或熔断判的））';
+    const world = createFakeWorld({
+      route: () => ({ ok: false, waitFor: 'none', detail: blocked }),
+    });
+    const { tasks, calls } = scripted();
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(
+          h,
+          (state) => state.waiting?.kind === 'slot' && state.doing.includes('派前探测：'),
+          '候选都被挡住，派前探测停下',
+        );
+        expect(s.phase).toBe('implement');
+        expect(s.doing).toContain('glm-5.3-flash');
+        expect(s.doing).toContain('不在线（探活或熔断判的）');
+        expect(s.doing).toContain('deepseek-flash');
+        expect(s.doing).toContain('不起会话，等探针探通后再继续');
+        expect(s.lastProblem).toBe(s.doing);
+        expect(s.waiting?.kind).not.toBe('human');
+        expect(calls.segment).toEqual([]);
+        expect(world.alerts).toContainEqual(
+          expect.objectContaining({
+            dedupeKey: 'routing:all-open:ui',
+            title: '「ui」阶段的路由全都熔断了',
+            detail: s.doing,
+          }),
+        );
+        expect(world.alerts.some((alert) => alert.title === '没有可用的路由')).toBe(false);
+        expect(world.states.some((state) => state.doing === s.doing && state.lastProblem === s.doing)).toBe(
+          true,
+        );
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+  });
 });
 
 /** 读交付：前 zeroUntil 次没有提交，其后有。 */
