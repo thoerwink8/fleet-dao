@@ -2,6 +2,7 @@
 // 没接上的执行方式各有去处；库里对不上的明确报错，不当成「没有路由」「记上了」。
 import { randomUUID } from 'node:crypto';
 import {
+  alertByKey,
   finishRun,
   notifications,
   poolReservations,
@@ -1255,6 +1256,103 @@ describe('计时、快照', () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
+  });
+
+  it('先挂起提醒、后任务做完：撤掉 task: 挂起提醒；叫停或仍挂着不撤', async () => {
+    await world(t.db);
+    const done = await addTask(t.db);
+    const park = `task:${done.repo.owner}/${done.repo.name}#${done.task.issueNumber}:park:1`;
+    const laterGen = `task:${done.repo.owner}/${done.repo.name}#${done.task.issueNumber}:r2:park:1`;
+    const other = `req:${done.repo.owner}/${done.repo.name}#${done.task.issueNumber}:park:1`;
+    await upsertAlert(t.db, {
+      dedupeKey: park,
+      level: 'alert',
+      taskId: done.task.id,
+      title: '自动合并没挂上',
+      body: '主线比 PR 多 1 个提交：先同步主线、在新头上重测',
+    });
+    await upsertAlert(t.db, {
+      dedupeKey: laterGen,
+      level: 'alert',
+      taskId: done.task.id,
+      title: '自动合并没挂上',
+      body: '上一代也挂过',
+    });
+    await upsertAlert(t.db, {
+      dedupeKey: other,
+      level: 'alert',
+      taskId: done.task.id,
+      title: '旧挂起',
+      body: '不是任务工作流的键',
+    });
+    await ports().saveTaskState(
+      {
+        taskId: done.task.id,
+        repoId: done.repo.id,
+        issueNumber: done.task.issueNumber,
+        state: 'done',
+        phase: 'done',
+        doing: 'PR #7 已合并',
+        lastProblem: null,
+        subtasks: [],
+      },
+      ctx,
+    );
+    const withdrawn = await alertByKey(t.db, park);
+    expect(withdrawn?.body).toMatch(/^已撤：任务已经做完了，这条挂起不再成立/);
+    expect(withdrawn?.body).toContain('主线比 PR 多 1 个提交');
+    expect(withdrawn?.resolvedBy).toBe('engine:task-workflow');
+    expect(withdrawn?.resolvedAt).not.toBeNull();
+    expect((await alertByKey(t.db, laterGen))?.resolvedBy).toBe('engine:task-workflow');
+    expect((await alertByKey(t.db, other))?.resolvedAt).toBeNull();
+
+    const stopped = await addTask(t.db);
+    const stoppedKey = `task:${stopped.repo.owner}/${stopped.repo.name}#${stopped.task.issueNumber}:park:1`;
+    await upsertAlert(t.db, {
+      dedupeKey: stoppedKey,
+      level: 'alert',
+      taskId: stopped.task.id,
+      title: '自动合并没挂上',
+      body: '还停着',
+    });
+    await ports().saveTaskState(
+      {
+        taskId: stopped.task.id,
+        repoId: stopped.repo.id,
+        issueNumber: stopped.task.issueNumber,
+        state: 'stopped',
+        phase: 'abandoned',
+        doing: '被放弃',
+        lastProblem: null,
+        subtasks: [],
+      },
+      ctx,
+    );
+    expect((await alertByKey(t.db, stoppedKey))?.resolvedAt).toBeNull();
+
+    const parked = await addTask(t.db);
+    const parkedKey = `task:${parked.repo.owner}/${parked.repo.name}#${parked.task.issueNumber}:park:1`;
+    await upsertAlert(t.db, {
+      dedupeKey: parkedKey,
+      level: 'alert',
+      taskId: parked.task.id,
+      title: '自动合并没挂上',
+      body: '还挂着',
+    });
+    await ports().saveTaskState(
+      {
+        taskId: parked.task.id,
+        repoId: parked.repo.id,
+        issueNumber: parked.task.issueNumber,
+        state: 'stalled',
+        phase: 'parked',
+        doing: '停下等人：自动合并没挂上',
+        lastProblem: '自动合并没挂上',
+        subtasks: [],
+      },
+      ctx,
+    );
+    expect((await alertByKey(t.db, parkedKey))?.resolvedAt).toBeNull();
   });
 });
 
