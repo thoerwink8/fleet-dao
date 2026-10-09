@@ -465,6 +465,7 @@ interface Harness {
   calls: string[];
   boardAsked: { taskId: string; prNumber: number | null }[];
   runsFinished: { id: number; result: ScheduleResult }[];
+  closedInterrupted: { job: string; startedBefore: Date; why: string; at: Date }[];
   finished: { id: number; verdict: string; stage: string; why: string | null }[];
   alerts: {
     raised: { title: string; body: string; key?: string }[];
@@ -480,6 +481,7 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
   const calls: string[] = [];
   const boardAsked: Harness['boardAsked'] = [];
   const runsFinished: Harness['runsFinished'] = [];
+  const closedInterrupted: Harness['closedInterrupted'] = [];
   const finishedRows: Harness['finished'] = [];
   const alerts: Harness['alerts'] = { raised: [], resolved: [], resolvedKeys: [] };
   let current = facts();
@@ -492,6 +494,10 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
       start: async () => 1,
       finish: async (id, result) => {
         runsFinished.push({ id, result });
+      },
+      closeInterrupted: async (input) => {
+        closedInterrupted.push(input);
+        return [];
       },
     },
     record: {
@@ -558,6 +564,7 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
     calls,
     boardAsked,
     runsFinished,
+    closedInterrupted,
     finished: finishedRows,
     alerts,
     setFacts: (f) => {
@@ -878,7 +885,10 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     expect((asked[0]?.at.getTime() ?? 0) - (asked[0]?.before.getTime() ?? 0)).toBe(
       CANARY_RUN_TIMEOUT_MINUTES * 60_000,
     );
-    expect(h.runsFinished).toEqual([{ id: 2, result: { outcome: 'failed', why: CANARY_ABANDONED_WHY } }]);
+    expect(h.closedInterrupted).toEqual([
+      { job: 'canary', startedBefore: asked[0]?.before, why: CANARY_ABANDONED_WHY, at: asked[0]?.at },
+    ]);
+    expect(h.runsFinished).toEqual([]);
     expect(h.calls).toContain('close:5');
     expect(!r.done && r.state.notes).toEqual(['补记了没收尾的一轮（#5）：没跑成', '收掉了上一轮留下的 #5']);
   });
@@ -1201,7 +1211,8 @@ describe('总开关关着跳过的轮次也收前面断轮留下的东西（swee
     expect(h.calls).toEqual(['stop:task:acme/canary#12']);
     expect(cleaned).toEqual([3]);
     // 没收尾的那轮在 schedule_runs 里补记成没跑成（看门狗照登记表看得见）
-    expect(h.runsFinished).toEqual([{ id: 2, result: { outcome: 'failed', why: CANARY_ABANDONED_WHY } }]);
+    expect(h.closedInterrupted.map((c) => [c.job, c.why])).toEqual([['canary', CANARY_ABANDONED_WHY]]);
+    expect(h.runsFinished).toEqual([]);
     // 撤了两条：留下单连带的 PR 那条（收干净了自己撤）、上一轮断了的那些
     expect(h.alerts.resolvedKeys).toEqual([CANARY_LEFTOVER_PR_ALERT_KEY, undefined]);
     expect(notes.join('；')).toContain('收掉了上一轮留下的 #12');

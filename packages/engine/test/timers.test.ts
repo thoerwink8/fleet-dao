@@ -2,12 +2,20 @@
 // 和 10 个定时任务的登记（jobs/engine-timers.ts）：原来 8 个的格子是 Temporal Schedule 的 interval + offset，没改；
 // 耗时表是 #921 新加的，周一 06:00（北京时间）。
 // 用假的钟和假的 setTimeout，不真等。
+import { closeInterruptedScheduleRuns, registerScheduledJobs, startScheduleRun } from '@fleet-dao/db';
+import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
-import type { CanaryDeps } from '../src/jobs/canary.ts';
+import { CANARY_RUN_TIMEOUT_MINUTES, type CanaryDeps } from '../src/jobs/canary.ts';
 import { engineTimerJobs } from '../src/jobs/engine-timers.ts';
-import { latestSlot, startTimers, type TimerHost, type TimerJob } from '../src/jobs/timers.ts';
+import {
+  latestSlot,
+  startEngineTimers,
+  startTimers,
+  type TimerHost,
+  type TimerJob,
+} from '../src/jobs/timers.ts';
 import { ENGINE_JOBS } from '../src/real/jobs.ts';
 
 const MIN = 60_000;
@@ -412,6 +420,8 @@ describe('10 个定时任务的登记（engineTimerJobs）', () => {
       expect(j.catchupMinutes, j.id).toBe(j.id === 'canary' ? 60 : j.everyMinutes);
       // 耗时表要下日志，超时线是 60 分钟；其余仍是原来的 15 分钟
       expect(j.overdueMinutes, j.id).toBe(j.id === 'ci-timings' ? 60 : 15);
+      // 起来补记没收尾记录：巡检按工作流时限，其余按这一轮的工作上限（overdueMinutes）
+      expect(j.abandonAfterMinutes, j.id).toBe(j.id === 'canary' ? CANARY_RUN_TIMEOUT_MINUTES : undefined);
     }
   });
 
@@ -454,7 +464,7 @@ describe('10 个定时任务的登记（engineTimerJobs）', () => {
     j.canary = () =>
       ({
         repo: { owner: 'acme', name: 'canary' },
-        runs: { start: async () => 1, finish: async () => {} },
+        runs: { start: async () => 1, finish: async () => {}, closeInterrupted: async () => [] },
         record: {
           start: async () => 1,
           progress: async () => true,
@@ -475,3 +485,122 @@ describe('10 个定时任务的登记（engineTimerJobs）', () => {
     expect(swept[0]).toContain('总开关');
   });
 });
+
+describe('起来时补记进程中断没收尾的 schedule_runs（startEngineTimers，#1522）', () => {
+  it('先按一轮工作上限补记，再起定时器；巡检用工作流时限，不用 15 分钟', async () => {
+    const f = fakeHost(T0);
+    const seen: { id: string; startedBefore: number }[] = [];
+    const order: string[] = [];
+    let why = '';
+    await startEngineTimers(
+      [
+        job({
+          id: 'route-probe',
+          overdueMinutes: 15,
+          run: async () => {
+            order.push('run:route-probe');
+          },
+        }),
+        job({
+          id: 'canary',
+          overdueMinutes: 15,
+          abandonAfterMinutes: 330,
+          run: async () => {
+            order.push('run:canary');
+          },
+        }),
+      ],
+      f.host,
+      async (input) => {
+        order.push('close');
+        why = input.why;
+        for (const item of input.jobs)
+          seen.push({ id: item.id, startedBefore: item.startedBefore.getTime() });
+        return [8029, 4596, 2951];
+      },
+    );
+    await f.flush();
+    expect(why).toContain('没收尾');
+    expect(seen).toEqual([
+      { id: 'route-probe', startedBefore: T0 - 15 * MIN },
+      { id: 'canary', startedBefore: T0 - 330 * MIN },
+    ]);
+    expect(f.logs).toEqual(['info:进程中断没收尾，启动时补记了 3 条定时任务记录：8029、4596、2951']);
+    expect(order[0]).toBe('close');
+    expect(order).toEqual(['close', 'run:route-probe', 'run:canary']);
+  });
+
+  it(
+    '【故意造出的失败】查到超时孤儿后，补记的更新写不进要抛并记日志，定时器不起',
+    async () => {
+      const db = await createTestDb();
+      try {
+        await registerScheduledJobs(db.db, [
+          { id: 'route-probe', name: '路由探针', schedule: '每 15 分钟', expectEveryMinutes: 45 },
+        ]);
+        const id = await startScheduleRun(db.db, 'route-probe', new Date(T0 - 60 * MIN));
+        // 查询读得到这条超时行；更新被触发器拒掉。错要从真的 closeInterruptedScheduleRuns 的 update 冒出来。
+        await db.client.exec(`
+          create or replace function schedule_runs_close_boom() returns trigger
+          language plpgsql as $$
+          begin
+            raise exception '库写不进';
+          end;
+          $$
+        `);
+        await db.client.exec(`
+          create trigger schedule_runs_close_boom
+          before update on schedule_runs
+          for each row execute function schedule_runs_close_boom()
+        `);
+        const f = fakeHost(T0);
+        let ran = false;
+        const error = await startEngineTimers(
+          [
+            job({
+              id: 'route-probe',
+              overdueMinutes: 15,
+              run: async () => {
+                ran = true;
+              },
+            }),
+          ],
+          f.host,
+          (input) => closeInterruptedScheduleRuns(db.db, input),
+        ).then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+        await f.flush();
+        const text = errorText(error);
+        expect(text).toContain('补记没收尾的定时任务失败');
+        expect(text).toContain('Failed query: update');
+        expect(text).toContain('库写不进');
+        expect(ran).toBe(false);
+        expect(f.logs).toHaveLength(1);
+        expect(f.logs[0]).toContain('error:进程中断没收尾的定时任务没补记成');
+        expect(f.logs[0]).toContain('Failed query: update');
+        const { rows } = await db.client.query<{
+          outcome: string | null;
+          ended_at: string | null;
+          why: string | null;
+        }>('select outcome, ended_at, why from schedule_runs where id = $1', [id]);
+        expect(rows[0]?.outcome ?? null).toBeNull();
+        expect(rows[0]?.ended_at ?? null).toBeNull();
+        expect(rows[0]?.why ?? null).toBeNull();
+      } finally {
+        await db.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
+/** 顺着 cause 把报错拼起来。drizzle 把真正的库错误放在 cause 里，只看最外层会漏掉「库写不进」。 */
+function errorText(error: unknown): string {
+  const parts: string[] = [];
+  for (let current: unknown = error; current instanceof Error && parts.length < 8; current = current.cause) {
+    parts.push(current.message);
+  }
+  return parts.join('\n');
+}
