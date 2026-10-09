@@ -39,3 +39,4 @@
 | [0033](0033-fable-in-catalog-founder-only-opens.md) | Fable 进目录，默认关着、不在任何用途里；只有创始人本人在驾驶舱能打开、配进用途，引擎、临时指挥官、命令行、机器通行证一律不能（取代 0017 第 1、3 条，母单 #1354） | 采纳 |
 | [0034](0034-subagent-by-cost-effectiveness.md) | 子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档：Haiku 一次没证据就升、其余同档两次失败升，派时写明模型、汇报实际 id；默认值仍只许 Opus 或 Sonnet；无人值守的监控以巡查脚本为主，`ALERT` 且有变化才叫短命 Haiku（部分取代 0017 第 2 条，「永不用 Fable」保留，#1372） | 采纳；Haiku 那一档的判据、`model: "haiku"` 的派法、「一次没证据就升」被 0035 取代 |
 | [0035](0035-haiku55-by-checkable-output.md) | Haiku 5.5 按「产出能被脚本或一条命令核对」用：别名 `haiku` 在本机是 4.5，真 5.5 走 `subagent_type: "haiku55"` 并核对实际 id；先 Haiku、核对不过再升 Sonnet；交代写全硬规矩；先砍固定开销；引擎侧由创始人在驾驶舱配（部分取代 0034） | 采纳 |
+| [0036](0036-project-subagents-default.md) | 本仓的 16 个子代理（Haiku 6、Sonnet 6、Opus 4）写进仓里 `.claude/agents/fleet-*.md`，派活默认用它们；模型用完整 id、tools 白名单、带 Edit 的进独立工作树、汇报首行写模型 id；`.claude/agents/` 进标准路径（补充 0034、0035） | 采纳 |

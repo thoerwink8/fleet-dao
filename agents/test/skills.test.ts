@@ -15,7 +15,12 @@ const MAX_DESCRIPTION = 120;
  * 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、Claude Code 内置子代理的类型名、
  * 子代理三档的模型 id（决定 0034）。
  */
+/** 本仓的项目级子代理名（.claude/agents/<名>.md，决定 0036）：写在反引号里的 fleet-* 是它们，不是 skill */
+const PROJECT_SUBAGENTS = readdirSync(join(ROOT, '.claude', 'agents'))
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => f.replace(/\.md$/, ''));
 const NOT_SKILLS = new Set([
+  ...PROJECT_SUBAGENTS,
   'fleet-dao',
   'sub-agent',
   'job-lock',
