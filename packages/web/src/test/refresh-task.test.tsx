@@ -41,10 +41,12 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   const api = createMockApi({ live: false });
   const read = vi.spyOn(api, 'task');
   open('/tasks/t-c9', api);
-  await waitFor(() =>
-    expect((screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false),
-  );
-  expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
+  // 读取中不再写 disabled（一写浏览器就把键盘焦点丢到 body），用 aria-disabled 判断还在不在读。
+  await waitFor(() => {
+    const button = screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement;
+    expect(button.getAttribute('aria-disabled')).not.toBe('true');
+    expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
+  });
   expect(screen.queryByText('数据已过期')).toBeNull();
   refetch.mockClear();
   const before = read.mock.calls.length;
