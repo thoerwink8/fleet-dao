@@ -1,6 +1,6 @@
 // 路由页（#574，specs/509 方案第八节「两层的每层都要能一眼看出这条现在活着吗」；#1366 第二部分改成分块）：
 // 「用途 / 模型目录 / 渠道」三块一次看一块。每个用途按顺序排哪些模型（紧凑行：序号、名字、状态点、开关；拖动、置顶、上移、下移、置底、Alt+上下键改先后），
-// 选中一个模型再看它下面每条路由现在活不活（桌面左右并排、各自占满页面高度、内部滚动；手机整页纵向铺开）；关着的行置灰写「已跳过」，实际顺位只数开着的（lib/routing-order.ts）；模型目录、渠道各是一列带搜索的紧凑行。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍。
+// 选中一个模型再看它下面每条路由现在活不活（桌面左右并排、各自占满页面高度、内部滚动；手机整页纵向铺开）；关着的行置灰写「已跳过」，实际顺位只数开着且没下架的（lib/routing-order.ts），已下架的行写「已下架」不写名次；模型目录、渠道各是一列带搜索的紧凑行。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍。
 // 改这里之前必须知道：
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
@@ -58,7 +58,7 @@ export function meta() {
 }
 
 const DESCRIPTION =
-  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。改先后：拖到新位置，或点每行的置顶、上移、下移、置底，或聚焦后按 Alt+上下键（Alt+Home 置顶、Alt+End 置底）；模型的先后只管这个用途，渠道的先后管这个模型在所有用途里。关着的行置灰、写「已跳过」：引擎自动跳过它、顺延给下一个，行上写的「实际第几位」只数开着的。模型、渠道、每条路由都有开关：模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在这里整池暂停。下一次选路就照新的。';
+  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。改先后：拖到新位置，或点每行的置顶、上移、下移、置底，或聚焦后按 Alt+上下键（Alt+Home 置顶、Alt+End 置底）；模型的先后只管这个用途，渠道的先后管这个模型在所有用途里。关着的行置灰、写「已跳过」：引擎自动跳过它、顺延给下一个，行上写的「实际第几位」只数开着且没下架的；已下架的不占名次，行上写「已下架」。模型、渠道、每条路由都有开关：模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在这里整池暂停。下一次选路就照新的。';
 
 const TABS = [
   { id: 'purposes', label: '用途' },
@@ -277,6 +277,7 @@ function PurposeItem({
   selected: string;
   params: URLSearchParams;
 }) {
+  const env = useKindEnv();
   const active = p.purpose === selected;
   // 别的网址参数（?node=、?tab=）带着走
   const next = new URLSearchParams(params);
@@ -288,7 +289,7 @@ function PurposeItem({
         replace
         preventScrollReset
         aria-current={active ? 'true' : undefined}
-        title={purposeLine(p).text}
+        title={purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled }).text}
         className={cn(
           'inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-sm transition-colors hover:border-border-strong md:min-h-8',
           active ? 'border-foreground bg-foreground/10 font-semibold' : 'border-border bg-background',
@@ -316,7 +317,8 @@ const WIDE_MQ = '(min-width: 1280px)';
 
 function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const now = useNow();
-  const line = purposeLine(p);
+  const env = useKindEnv();
+  const line = purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled });
   const first = firstLive(p);
   const edit = useRoutingEdit();
   const holds = usePoolHolds();
@@ -416,7 +418,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
 
 /**
  * 这个用途下的模型优先级：一行一个模型的紧凑行（序号、拖动手柄、名字、状态点、开关），拖动或上移、下移、置顶、置底、Alt+上下键改先后，
- * 点名字在旁边看它的路由。关着的行置灰写「已跳过」，「实际第几位」只数开着的。
+ * 点名字在旁边看它的路由。关着的行置灰写「已跳过」，「实际第几位」只数开着且没下架的；已下架的写「已下架」，不写名次。
  * 超过 50 个模型才出搜索框和「只看已开启」，也只画窗口里的行；筛选时只显示了一部分，先后不能调（免得把看不见的行顺序弄乱）。
  */
 function ModelPriority({
@@ -446,7 +448,7 @@ function ModelPriority({
       )
     : p.models;
   // 实际顺位按整份先后算，筛选只是少画几行
-  const states = p.models.map((m) => modelSlotState(m, env.channelEnabled));
+  const states = p.models.map((m) => modelSlotState(m, env.channelEnabled, env.modelRetired(m.modelId)));
   const ranks = actualRanks(states);
   const slotOf = new Map(
     p.models.map((m, i) => [m.modelId, { state: states[i] ?? ('on' as SlotState), rank: ranks[i] ?? null }]),

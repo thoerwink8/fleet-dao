@@ -18,6 +18,7 @@ import {
   purposeLine,
   routeSlots,
 } from './routing';
+import { actualRanks, modelSlotState, slotWord } from './routing-order';
 
 describe('routeSlots：账号池满不满（#800，和引擎选路同一个判法）', () => {
   test('池上限 3、1 个在跑、2 个已选定还没开跑：满了，两样各写明（只数在跑的会说 1/3 没满）', () => {
@@ -117,6 +118,28 @@ describe('走的是不是首选', () => {
     expect(firstLive(p)).toMatchObject({ modelIndex: 1, routeIndex: 1 });
     expect(purposeLine(p)).toEqual({
       text: '首选模型不行，顺位第一条活的在第 2 个模型：GPT（Claude 订阅 · pool-y）',
+      tone: 'stall',
+    });
+  });
+
+  test('前面有一个已下架的：顶部第 N 个和这一行的实际第几位是同一个数，下架的不占名次', () => {
+    const off = model('kimi', [route('k', 'dead', { enabled: false })]);
+    const retired = model('opus-5', [route('old', 'dead')]);
+    const live = model('opus', [route('a', 'live')]);
+    const p = purpose('execute', [off, retired, live], 'live');
+    const env = {
+      retired: (id: string) => id === 'opus-5',
+      channelOpen: () => true as boolean | undefined,
+    };
+    const states = p.models.map((m) => modelSlotState(m, env.channelOpen, env.retired(m.modelId)));
+    const ranks = actualRanks(states);
+    const liveRank = ranks[2];
+    expect(states[1]).toBe('retired');
+    expect(slotWord(states[1] ?? 'retired', ranks[1] ?? null, '模型')).toBe('已下架');
+    expect(liveRank).toBe(1);
+    expect(slotWord(states[2] ?? 'on', liveRank ?? null, '模型')).toBe('实际第 1 位');
+    expect(purposeLine(p, env)).toEqual({
+      text: '首选模型不行，顺位第一条活的在第 1 个模型：OPUS（Claude 订阅 · pool-a）',
       tone: 'stall',
     });
   });
