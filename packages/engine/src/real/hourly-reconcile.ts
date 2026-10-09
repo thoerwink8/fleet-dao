@@ -41,6 +41,14 @@ import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
+import {
+  MAIN_CI_VERDICT_KEY,
+  MAIN_RECOVERED_KEY_PREFIX,
+  MAIN_RED_KEY_PREFIX,
+  mainCiVerdictTitle,
+  pushMainRed,
+  storedMainCiVerdict,
+} from '../jobs/main-red-push.ts';
 import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
 import {
   beijingDayStart,
@@ -53,6 +61,7 @@ import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { feishuWebhookSender } from './feishu-webhook.ts';
+import { mainCiRuns } from './main-ci-runs.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -471,6 +480,40 @@ export function hourlyReconcileJob(
               taskId: null,
               title: x.title,
               body: x.body,
+              link: x.link,
+            });
+          },
+          send: feishuWebhookSender({ env: process.env }),
+        }),
+      mainRedPush: () =>
+        pushMainRed({
+          listPushRuns: mainCiRuns({ client: w.gh.deps.client }),
+          previousVerdict: async () => {
+            const [stored, red, recovered] = await Promise.all([
+              alertByKey(w.db, MAIN_CI_VERDICT_KEY),
+              latestAlertByPrefix(w.db, MAIN_RED_KEY_PREFIX),
+              latestAlertByPrefix(w.db, MAIN_RECOVERED_KEY_PREFIX),
+            ]);
+            return storedMainCiVerdict(stored?.body, red, recovered);
+          },
+          sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
+          markSent: async (x) => {
+            await upsertAlert(w.db, {
+              dedupeKey: x.dedupeKey,
+              level: 'daily',
+              taskId: null,
+              title: x.title,
+              body: x.body,
+              link: x.link,
+            });
+          },
+          rememberVerdict: async (x) => {
+            await upsertAlert(w.db, {
+              dedupeKey: MAIN_CI_VERDICT_KEY,
+              level: 'daily',
+              taskId: null,
+              title: mainCiVerdictTitle(x.verdict),
+              body: x.verdict,
               link: x.link,
             });
           },
