@@ -863,3 +863,21 @@ describe('省额度（#1424）：不通退避、健康路由前 2 位以外放�
     expect('probe' in scheduled(unreadOk)).toBe(true);
   });
 });
+
+describe('窗口一重置就补发一次最小请求（#49）', () => {
+  it('组织 A 窗口已重置且这一轮没探过：补发一次；组织 B 本轮已探测：不重复发', async () => {
+    const calls: string[] = [];
+    const probe: Prober = async (t) => {
+      calls.push(t.orgKind ?? '');
+      return { kind: 'answered', detail: '答上了：OK' };
+    };
+    // 会话用户挂着拼车：拼车（B）这一轮会探；独享（A）按规矩不探。两个组织的窗口都已重置。
+    const h = harness([solo, carpool], probe, {
+      sessionOrg: async () => ON_CARPOOL,
+      resetOrgs: async () => ['solo', 'carpool'],
+    });
+    await runRouteProbeJob(h.deps);
+    expect(calls.filter((org) => org === 'solo')).toHaveLength(1);
+    expect(calls.filter((org) => org === 'carpool')).toHaveLength(1);
+  });
+});

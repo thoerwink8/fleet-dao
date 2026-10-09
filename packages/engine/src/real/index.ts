@@ -689,6 +689,11 @@ export function realPortsFromEnv(
     sessionOrg,
     // 探针那一轮里切的号：这一轮探完核对之后也叫醒（当场触发的那条路在上面 probeNow 里叫过了，两条路不重叠）
     orgSwitch: wakeAfterProbeRound(orgSwitch, routeWake),
+    // 别的组织窗口重置、这一轮没探到：空闲时切过去发一条最小请求再切回（#49）。切号就是这一份帮手。
+    kickOrg: {
+      control: sessionOrg,
+      switchTo: (to) => switchSessionOrg({ to, user: sessionUser }),
+    },
     machine: config.machine,
     ...(config.sessionProxy === undefined ? {} : { sessionProxy: config.sessionProxy }),
   });

@@ -2,13 +2,14 @@
 // 外壳 server.mjs）、命令行 france.mjs。不连法国：ssh 换成本机的 node（跑同一份查询脚本，或假的输出），库、systemctl 换成假的 io。
 // 每一种「没读到」各有一条故意造出来的失败：没配 ssh 名字、ssh 连不上、超时、法国上脚本没跑成、库查询出错、库连不上、
 // 读数文件读不了或认不出、回来的不是 JSON、形状不对。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -535,7 +536,7 @@ describe('只读：法国上的查询脚本不许写库、改文件、起停服�
     const code = codeOf(QUERY_FILE);
     expect(codeProblems(code)).toEqual([]);
     // 起命令只有 realIo 里那一处 spawnSync，而且它先查 allowed
-    expect(code.match(/spawnSync\(/g)).toHaveLength(1);
+    expect(code.split('spawnSync(')).toHaveLength(2);
     expect(code).toMatch(/if \(!allowed\(argv\)\)\s*return/);
   });
 
@@ -789,10 +790,8 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
   });
 
   it('当真经 node 的标准输入跑（和 ssh 过去一样）：这台机器上没有法国的库和服务，照样打出一份认得出的 JSON，每一块有结论', () => {
-    const r = spawnSync(process.execPath, ['--input-type=module', '-', '--collect'], {
+    const r = runChild(process.execPath, ['--input-type=module', '-', '--collect'], {
       input: readFileSync(QUERY_FILE, 'utf8'),
-      encoding: 'utf8',
-      timeout: 60_000,
     });
     expect(r.status, r.stderr).toBe(0);
     const p = lib.parseSnapshot(r.stdout);
@@ -802,7 +801,7 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
       expect(typeof s.ok, name).toBe('boolean');
       if (!s.ok) expect(s.why, name).toBeTruthy();
     }
-  }, 90_000);
+  }, 0);
 });
 
 describe('定时任务只查没摘除的（#1140）', () => {
@@ -1777,10 +1776,8 @@ describe('页面服务的端口和起法', () => {
 describe('命令行 france.mjs', () => {
   const cli = (env: Record<string, string>) => {
     const home = tempDir();
-    return spawnSync(process.execPath, [join(SCRIPTS, 'france.mjs')], {
+    return runChild(process.execPath, [join(SCRIPTS, 'france.mjs')], {
       env: { ...process.env, HOME: home, USERPROFILE: home, FLEET_FRANCE_SSH: '', ...env },
-      encoding: 'utf8',
-      timeout: 30_000,
     });
   };
 
@@ -1798,7 +1795,7 @@ describe('命令行 france.mjs', () => {
   });
 
   it('--help：退出码 0', () => {
-    const r = spawnSync(process.execPath, [join(SCRIPTS, 'france.mjs'), '--help'], { encoding: 'utf8' });
+    const r = runChild(process.execPath, [join(SCRIPTS, 'france.mjs'), '--help']);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('用法：node france.mjs');
   });

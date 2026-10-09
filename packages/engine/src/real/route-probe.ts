@@ -15,6 +15,7 @@ import {
   type MirasimConnect,
   type RateLimitReading,
   type SessionUser,
+  type SwitchSessionOrgResult,
 } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import {
@@ -24,14 +25,16 @@ import {
   routeProbeTargets,
   savePoolQuota,
   saveRouteProbe,
+  sessionOrgFacts,
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type HostId, probeBackoffNotice } from '@fleet-dao/shared';
+import { type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
 import type { ProbeAttempt, Prober, ProbeTarget, RouteProbeJobDeps } from '../jobs/route-probe.ts';
+import { ORG_NAMES } from '../routing/names.ts';
 import {
   type HostDriver,
   type HostReport,
@@ -41,7 +44,7 @@ import {
   WIRED_HOSTS,
 } from './hosts.ts';
 import { loadHeldPools } from './pool-holds.ts';
-import type { SessionOrgReader } from './session-org.ts';
+import type { SessionOrgControl, SessionOrgReader } from './session-org.ts';
 import { poolHoldKey } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -308,6 +311,14 @@ export interface RouteProbeWiring {
   sessionOrg: SessionOrgReader;
   /** 会话用户切号（real/org-switch.ts，#157）：每一轮探之前判、该切就切。不给就不切。 */
   orgSwitch?: OrgSwitchRound;
+  /**
+   * 补发最小请求时，会话用户没挂着那个组织就经现有的切号切过去、发完切回。
+   * 不给：组织对不上就不发（现有探法扣的是此刻挂着的组织，读数也会写进被探的那个池）。
+   */
+  kickOrg?: {
+    control: SessionOrgControl;
+    switchTo(to: OrgKind): Promise<SwitchSessionOrgResult>;
+  };
   machine: string;
   /** 会话出网经的代理（FLEET_SESSION_PROXY）：和干活的会话同一份，cursor-agent、grok 的探针带上（hosts.ts）。不给就直连。 */
   sessionProxy?: string;
@@ -320,6 +331,76 @@ export interface RouteProbeWiring {
   helper?: string;
   sudo?: readonly string[];
   baseEnv?: Readonly<Record<string, string | undefined>>;
+}
+
+/** 读到窗口已重置的组织（quota-read 写进库的，和切号同一个 sessionOrgFacts）。一个组织一行。 */
+async function resetOrgKinds(db: Db, now: Date): Promise<OrgKind[]> {
+  const facts = await sessionOrgFacts(db, { now });
+  const orgs: OrgKind[] = [];
+  for (const pool of facts.pools) {
+    if (pool.windows.some((window) => window.state === 'reset') && !orgs.includes(pool.orgKind)) {
+      orgs.push(pool.orgKind);
+    }
+  }
+  return orgs;
+}
+
+/**
+ * 让补发的那一次扣到这个组织上。已经挂着就直接发。没挂着、又没有在跑的 Claude 会话：切过去、发、切回。
+ * 读不到组织、有会话在跑、切不成：不发。有会话在跑时不切——切号会把这个家目录下的 Claude 会话全断。
+ */
+async function placeWindowKick(
+  w: Pick<RouteProbeWiring, 'db' | 'sessionOrg' | 'kickOrg'> & {
+    now: () => Date;
+    log: RouteProbeJobDeps['log'];
+  },
+  org: OrgKind,
+  send: () => Promise<void>,
+): Promise<boolean> {
+  w.kickOrg?.control.forget();
+  const live = await w.sessionOrg({ by: '路由探针起窗' });
+  if (!live.ok) {
+    w.log('warn', '路由探针：窗口已重置，会话用户挂的组织读不到，不补发', { org, why: live.why });
+    return false;
+  }
+  const facts = await sessionOrgFacts(w.db, { now: w.now() });
+  if (facts.busy > 0) {
+    w.log('info', '路由探针：窗口已重置，有会话在跑，不补发', { org, busy: facts.busy });
+    return false;
+  }
+  if (live.org === org) {
+    await send();
+    return true;
+  }
+  const kick = w.kickOrg;
+  if (!kick) {
+    w.log('info', '路由探针：窗口已重置，会话用户没挂着这个组织，不补发', { org, live: live.org });
+    return false;
+  }
+  const from = live.org;
+  const release = kick.control.hold(
+    `路由探针补发：把会话用户切到${ORG_NAMES[org]}组织发一次最小请求，发完切回`,
+  );
+  try {
+    const there = await kick.switchTo(org);
+    await kick.control.engineSwitched();
+    if (!there.ok) {
+      w.log('warn', '路由探针：窗口已重置，切到这个组织没成，不补发', { org, detail: there.detail });
+      return false;
+    }
+    try {
+      await send();
+      return true;
+    } finally {
+      const back = await kick.switchTo(from);
+      await kick.control.engineSwitched();
+      if (!back.ok) {
+        w.log('error', '路由探针：补发之后没切回原来的组织', { org, back: from, detail: back.detail });
+      }
+    }
+  } finally {
+    release();
+  }
 }
 
 /** 给 EngineJobs.routeProbe 用的工厂。 */
@@ -378,5 +459,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     sleep: w.sleep ?? ((ms) => sleep(ms).then(() => undefined)),
     log,
     ...(w.retryDelayMs === undefined ? {} : { retryDelayMs: w.retryDelayMs }),
+    resetOrgs: () => resetOrgKinds(w.db, now()),
+    aroundKick: (org, send) => placeWindowKick({ ...w, now, log }, org, send),
   });
 }
