@@ -1,5 +1,5 @@
 // 卡住报警立案（#1406）：超过 24 小时没人处理的开一张未排期的单，单号写回正文开头。
-// 每条失败路径都故意造一次；GitHub 写不进的那条放最后。
+// 每条失败路径都故意造一次；GitHub 写不进的后面还有一条：合并时刻读不到不跳过，放最后。
 import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
 import type { AlertStage } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
@@ -55,11 +55,14 @@ function harness(
     filedToday?: AlertFiling['filedToday'];
     issueState?: AlertFiling['issueState'];
     openIssue?: AlertFiling['openIssue'];
+    prMergedAt?: AlertSweepDeps['prMergedAt'];
+    doneItems?: AlertSweepDeps['doneItems'];
   } = {},
 ) {
   const opened: Opened[] = [];
   const recorded: { repo: string; dedupeKey: string; number: number }[] = [];
   const updated: string[] = [];
+  const inserted: { dedupeKey: string }[] = [];
   let n = 40;
   const filing: AlertFiling = {
     repoOf: async (alert) => alertRepoFromText(alert.dedupeKey, alert.link),
@@ -104,7 +107,10 @@ function harness(
         return 'ok';
       },
       raise: async () => {},
-      insertOnce: async () => ({ created: false }),
+      insertOnce: async (input) => {
+        inserted.push({ dedupeKey: input.dedupeKey });
+        return { created: false };
+      },
       updateOpen: async (x) => {
         const hit = rows.find((a) => a.dedupeKey === x.dedupeKey);
         if (!hit || hit.resolvedAt) return 'not_open';
@@ -117,6 +123,8 @@ function harness(
     },
     ...(handling ? { handling } : {}),
     filing,
+    prMergedAt: over.prMergedAt ?? (async () => new Date((over.now ?? (() => NOW))().getTime() - DAY)),
+    ...(over.doneItems ? { doneItems: over.doneItems } : {}),
     now: over.now ?? (() => NOW),
     log: () => {},
   };
@@ -124,6 +132,7 @@ function harness(
     opened,
     recorded,
     updated,
+    inserted,
     run: () =>
       sweepAlerts(
         deps,
@@ -341,5 +350,104 @@ describe('卡住报警立案', () => {
     expect(h.recorded).toEqual([]);
     expect(alert.body).toBe('原来的正文');
     expect(h.opened).toHaveLength(1);
+  });
+
+  it('已合并超过 7 天的 reconcile:pr、reconcile:ledger 不立案、不再每天重推，驾驶舱只留原来那一条', async () => {
+    const mergedAt = new Date(NOW.getTime() - 8 * DAY);
+    const origin = row({
+      id: 'pr',
+      dedupeKey: 'reconcile:pr:acme/widgets#389',
+      title: '机器人开的 PR 没经合并队列合',
+      createdAt: new Date(NOW.getTime() - 11 * DAY),
+    });
+    const ledger = row({
+      id: 'led',
+      dedupeKey: 'reconcile:ledger:acme/widgets#1230',
+      title: '合了的 PR 记账不全',
+      createdAt: new Date(NOW.getTime() - 11 * DAY),
+    });
+    const child = row({
+      id: 'child',
+      dedupeKey: 'remind:pr:2026-10-08',
+      title: '还没处理：机器人开的 PR 没经合并队列合',
+      body: '昨天推的',
+    });
+    const h = harness([origin, ledger, child], { prMergedAt: async () => mergedAt });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toEqual([]);
+    expect(h.inserted).toEqual([]);
+    expect(origin.resolvedAt).toBeNull();
+    expect(ledger.resolvedAt).toBeNull();
+    expect(origin.body).not.toContain('已立案：');
+    expect(ledger.body).not.toContain('已立案：');
+    expect(child.resolvedAt).not.toBeNull();
+    expect(child.body.startsWith('已撤：')).toBe(true);
+    expect(child.body).toContain('不再每天重推');
+  });
+
+  it('合并未满 7 天、刚好满 7 天的 reconcile:pr 仍立案', async () => {
+    const six = row({ id: 'six', dedupeKey: 'reconcile:pr:acme/widgets#9' });
+    const exact = row({ id: 'exact', dedupeKey: 'reconcile:pr:acme/widgets#10' });
+    const h = harness([six, exact], {
+      prMergedAt: async (_repo, number) => {
+        if (number === 9) return new Date(NOW.getTime() - 6 * DAY);
+        if (number === 10) return new Date(NOW.getTime() - 7 * DAY);
+        throw new Error(`不该问 #${number}`);
+      },
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened.map((o) => o.key).sort()).toEqual(
+      ['alert-file:reconcile:pr:acme/widgets#10', 'alert-file:reconcile:pr:acme/widgets#9'].sort(),
+    );
+    expect(six.body.startsWith('已立案：#')).toBe(true);
+    expect(exact.body.startsWith('已立案：#')).toBe(true);
+    expect(h.opened.every((o) => o.body.includes('- 这条提醒的条件不再成立（对账撤掉它）'))).toBe(true);
+    expect(h.opened.every((o) => !o.body.includes('diff 里看得到'))).toBe(true);
+    expect(h.inserted).toHaveLength(2);
+  });
+
+  it('不是 reconcile 的提醒照常立案，也不去问 PR 的合并时刻', async () => {
+    const alert = row({ dedupeKey: 'wf:failure:acme/widgets:rule' });
+    const h = harness([alert], {
+      prMergedAt: async () => {
+        throw new Error('不该问合并时刻');
+      },
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toHaveLength(1);
+    expect(h.opened[0]?.body).toContain('- 这条提醒的条件不再成立（对账撤掉它）');
+    expect(h.opened[0]?.body).toContain('- 造成这条提醒的问题已经改掉，diff 里看得到');
+    expect(alert.body.startsWith('已立案：#')).toBe(true);
+  });
+
+  it('怎么算做完只有「提醒的条件不再成立」、又不会自己撤的，不开单，正文写没有可做的事', async () => {
+    const alert = row({ dedupeKey: 'wf:failure:acme/widgets:rule' });
+    const h = harness([alert], {
+      doneItems: () => ['- 这条提醒的条件不再成立（对账撤掉它）'],
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toEqual([]);
+    expect(alert.body.startsWith('没有可做的事，已跳过立案\n\n')).toBe(true);
+    expect(alert.body).toContain('原来的正文');
+    expect(alert.body).not.toContain('已立案：');
+  });
+
+  it('【故意造出的失败】读不到 PR 的合并时刻：不跳过，记没查成', async () => {
+    const alert = row({ dedupeKey: 'reconcile:pr:acme/widgets#9' });
+    const h = harness([alert], {
+      prMergedAt: async () => {
+        throw new Error('GitHub 502');
+      },
+    });
+    const part = await h.run();
+    expect(h.opened).toHaveLength(1);
+    expect(alert.body.startsWith('已立案：#')).toBe(true);
+    expect(part.unchecked).toEqual([
+      '提醒 reconcile:pr:acme/widgets#9 的 PR 合并时刻没查成，不跳过：GitHub 502',
+    ]);
   });
 });

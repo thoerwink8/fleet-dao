@@ -5,13 +5,19 @@
 // 2. 卡住报警（alert 这一级）超过 24 小时没人处理：再推一次——新写一条「还没处理：<原标题>」（键 remind:<原提醒>:<北京日期>，
 //    同一条一天最多一次），驾驶舱弹一条、飞书发一张新卡（原来那张卡只会原地改，沉在群里）。原来那条处理掉，再提醒跟着撤；
 //    在再提醒上点「处理」，原来那条也跟着撤。有人在处理（有人在修、PR 开着、合了、发布了）、静默了的不再推（谁在处理现算，
-//    core 的 alertHandling）；谁在处理读不到：照旧再推，记没查全（宁可多一张卡）。
+//    core 的 alertHandling）；谁在处理读不到：照旧再推，记没查全（宁可多一张卡）。键以 reconcile:pr:、reconcile:ledger:
+//    开头、对应 PR 已合并超过 7 天的，不再每天重推：沿用静默的效果（驾驶舱留原来那一条，不发新的飞书卡），不另开通道，
+//    也不写会在 7 天后续期的静默行；已经推出去的「还没处理」跟着撤。合并时刻读不到的照旧再推，记没查成。
 // 3. 同一条再立案（#1406，对 #445「不自动开跟进单」的有意收窄，只这一层、还限量）：alert 级、开着、超过 24 小时、
 //    alertHandling 判为没人处理、没静默、键不是自己会撤的、正文开头还没有单号的，开一张未排期的缺陷单。四节按整理会话
 //    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
 //    而提醒还在，隔 7 天才再开。每次对账最多 2 张，每个仓每天最多 4 张。GitHub 写不进记没立成、不回写单号，下一轮再试。
 //    reconcile:* 虽在「自己会撤」的前缀里（过期兜底不碰它们），条件没了的核对那一步已经撤了，还开着的是断链，要立案。
 //    其余自己会撤的（canary、备份、切号……）不立案。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
+//    历史事实类不立案（#1420）：键以 reconcile:pr:、reconcile:ledger: 开头且对应 PR 已合并超过 7 天。事实已经发生、改不了，
+//    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天、别的类别照旧。
+//    读不到合并时刻不跳过，记没查成。立案前再自检：单的「怎么算做完」只有「提醒的条件不再成立」一条、且类别不在自己会撤的
+//    清单里，不开单，提醒正文写「没有可做的事，已跳过立案」。
 //
 // 各种提醒谁来撤（改这里之前先对一遍）：
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
@@ -46,7 +52,7 @@
 //   报警者下一次再报会重新打开（upsert 把已处理的重新打开）。新加一种自己会撤的提醒，前缀加进 SELF_RESOLVING_PREFIXES。
 
 import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
-import { type AlertStage, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
+import { type AlertStage, criteriaOf, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -77,6 +83,15 @@ export const FILE_PER_RUN = 2;
 export const FILE_PER_REPO_DAY = 4;
 /** 立案的那张关了、提醒还在：至少再隔这么久才允许另开一张。 */
 export const REFILE_AFTER_MS = 7 * 24 * 60 * 60_000;
+/**
+ * 历史事实：对应 PR 已合并超过这么久就不再重推、不立案（#1420）。刚好满 7 天仍算还没过，照旧立案。
+ * 不跟 REFILE_AFTER_MS 共用：那边是「单关了再隔多久」，这边是「PR 合了多久算改不了」。
+ */
+const HISTORICAL_MERGED_AFTER_MS = 7 * 24 * 60 * 60_000;
+/** 跟 jobs/reconcile-checks.ts 的前缀同一串。这里不引用那个文件：它反过来引用本文件，会绕成圈。 */
+const HISTORICAL_FACT_PREFIXES = ['reconcile:pr:', 'reconcile:ledger:'] as const;
+const SKIP_FILING_NOTE = '没有可做的事，已跳过立案';
+const HISTORICAL_KEY = /^(?:reconcile:pr:|reconcile:ledger:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)$/;
 /** 开出去的单只贴这一个类别。不贴「要人拍」「本机做」「待补」：拉不拉由现有准入决定。 */
 export const FILE_LABELS = ['缺陷'] as const;
 /**
@@ -151,6 +166,13 @@ export interface AlertSweepDeps {
    * 认不出仓回 null，不许猜一个。GitHub 写不进、单状态读不到照抛。
    */
   filing?: AlertFiling;
+  /**
+   * 历史事实类提醒（键以 reconcile:pr:、reconcile:ledger: 开头）对应 PR 的合并时刻。读不到照抛。
+   * 真装配一定接上；没接上、抛了、认不出的都不跳过，记没查成。
+   */
+  prMergedAt?(repo: AlertRepo, number: number): Promise<Date>;
+  /** 单测换立案单「怎么算做完」的条目（带「- 」）。生产不接。 */
+  doneItems?(key: string): readonly string[];
   now: () => Date;
   log: ReconcileLog;
 }
@@ -334,11 +356,23 @@ const resolvesItself = (key: string) => SELF_RESOLVING_PREFIXES.some((p) => key.
 /**
  * 这条键该不该立案。自己会撤的不立（条件自己会过去）。reconcile:* 除外：它在前缀清单里只为了过期兜底不撤，
  * 条件没了的由核对那一步撤掉，轮到这里还开着就是断链还在（#1406）。
+ * 历史事实类（键以 reconcile:pr:、reconcile:ledger: 开头，对应 PR 已合并超过 7 天）不在这道同步过滤里排除：
+ * 合并时刻要现查。再推和立案两步里跳过，原因写在文件头（#1420）。合并未满 7 天的仍从这里放行。
  */
 export function eligibleToFile(key: string): boolean {
   if (isEscalationKey(key)) return false;
   if (key.startsWith('reconcile:')) return true;
   return !resolvesItself(key);
+}
+
+/** 历史事实类的键认成哪条 PR。不是这两类回 not-historical；前缀对上但认不出仓和号回 unparsed（记没查成，不跳过）。 */
+function historicalFactTarget(
+  key: string,
+): { repo: AlertRepo; number: number } | 'not-historical' | 'unparsed' {
+  if (!HISTORICAL_FACT_PREFIXES.some((p) => key.startsWith(p))) return 'not-historical';
+  const m = HISTORICAL_KEY.exec(key);
+  if (!m?.[1] || !m[2] || !m[3]) return 'unparsed';
+  return { repo: { owner: m[1], name: m[2] }, number: Number(m[3]) };
 }
 
 /** 键或链接里嵌的 owner/name。认不出回 null，不拿别的仓顶。 */
@@ -365,15 +399,31 @@ function stripFilingHead(body: string): string {
   return cut === -1 ? '' : body.slice(cut + 2);
 }
 
+function stripSkipNote(body: string): string {
+  if (!body.startsWith(SKIP_FILING_NOTE)) return body;
+  const cut = body.indexOf('\n\n');
+  return cut === -1 ? '' : body.slice(cut + 2);
+}
+
+/** 自己会撤的只留「条件不再成立」（条件过去了对账会撤）。其余再加一条 diff 里看得见的，免得自检把正常立案拦掉。 */
+function defaultDoneItems(key: string): string[] {
+  const items = ['- 这条提醒的条件不再成立（对账撤掉它）'];
+  if (!resolvesItself(key)) items.push('- 造成这条提醒的问题已经改掉，diff 里看得到');
+  return items;
+}
+
 export function renderAlertIssueBody(
   alert: Pick<AlertRow, 'dedupeKey' | 'title' | 'body'>,
   days: number,
+  doneItems?: readonly string[],
 ): string {
   const scene = clip(
-    [plainText(alert.title), plainText(stripFilingHead(alert.body))].filter(Boolean).join('\n\n') ||
-      alert.dedupeKey,
+    [plainText(alert.title), plainText(stripSkipNote(stripFilingHead(alert.body)))]
+      .filter(Boolean)
+      .join('\n\n') || alert.dedupeKey,
     4000,
   );
+  const items = doneItems ?? defaultDoneItems(alert.dedupeKey);
   return [
     '## 场景',
     '',
@@ -389,9 +439,20 @@ export function renderAlertIssueBody(
     '',
     '## 怎么算做完',
     '',
-    '- 这条提醒的条件不再成立（对账撤掉它）',
+    ...items,
     '',
   ].join('\n');
+}
+
+/**
+ * 怎么算做完只有「提醒的条件不再成立」一条，而且这类提醒不会自己撤：开出去的单没有能做的事。
+ * 自己会撤的不在这里拦（条件过去了对账会撤，那一条就是验收）。认不出节的不拦，交给上面的四节检查。
+ */
+function filingHasNothingToDo(key: string, issueBody: string): boolean {
+  if (resolvesItself(key)) return false;
+  const parsed = criteriaOf(issueBody);
+  if (!('ok' in parsed)) return false;
+  return parsed.ok.length === 1 && (parsed.ok[0]?.includes('提醒的条件不再成立') ?? false);
 }
 
 const FILING_HEAD = /^已立案：#(\d+)（(\d{4}-\d{2}-\d{2})(?:，已关 ([^）]+))?）/;
@@ -429,6 +490,8 @@ interface Ctx {
   part: SweepPart;
   /** 这一轮之后还开着的原提醒（按编号）。 */
   stillOpen: Map<string, AlertRow>;
+  /** 这一轮已经判过的历史事实（按提醒编号）。再推和立案共用，没查成只记一次。 */
+  historical: Map<string, 'skip' | 'go'>;
 }
 
 async function resolve(c: Ctx, alert: AlertRow, why: string, by = RECONCILE_ACTOR): Promise<boolean> {
@@ -457,6 +520,62 @@ function reminderBody(alert: AlertRow, now: Date): string {
     '原来那条的正文：',
     clip(alert.body, 2000) || '（没写）',
   ].join('\n');
+}
+
+const uncheckedMergeTime = (key: string, why: string) => `提醒 ${key} 的 PR 合并时刻没查成，不跳过：${why}`;
+
+/**
+ * 这条是不是「PR 已合并超过 7 天」的历史事实。是就不再重推、不立案。
+ * 读不到、认不出、没接上：不跳过（照原来的再推和立案），记没查成。同一条这一轮只查一次。
+ */
+async function historicalSkip(c: Ctx, alert: AlertRow): Promise<boolean> {
+  const cached = c.historical.get(alert.id);
+  if (cached) return cached === 'skip';
+  const target = historicalFactTarget(alert.dedupeKey);
+  let skip = false;
+  if (target === 'unparsed') {
+    c.part.unchecked.push(uncheckedMergeTime(alert.dedupeKey, '认不出是哪条 PR'));
+  } else if (target !== 'not-historical') {
+    const read = c.deps.prMergedAt;
+    if (!read) {
+      c.part.unchecked.push(uncheckedMergeTime(alert.dedupeKey, '没接上合并时刻的读法'));
+    } else {
+      try {
+        const at = await read(target.repo, target.number);
+        if (!(at instanceof Date) || !Number.isFinite(at.getTime())) {
+          c.part.unchecked.push(uncheckedMergeTime(alert.dedupeKey, '合并时刻认不出'));
+        } else if (c.deps.now().getTime() - at.getTime() > HISTORICAL_MERGED_AFTER_MS) {
+          skip = true;
+        }
+      } catch (err) {
+        c.part.unchecked.push(uncheckedMergeTime(alert.dedupeKey, errMessage(err)));
+      }
+    }
+  }
+  c.historical.set(alert.id, skip ? 'skip' : 'go');
+  return skip;
+}
+
+/** 历史事实不再每天重推：原来那条留着，已经推出去的「还没处理」撤掉。不写静默行（静默最长 7 天，这条是一直如此）。 */
+async function settleHistorical(c: Ctx, alert: AlertRow, open: readonly AlertRow[]): Promise<void> {
+  c.deps.log('info', '每小时对账：PR 已合并超过 7 天，历史事实不再重推、不立案', {
+    dedupeKey: alert.dedupeKey,
+  });
+  for (const child of open) {
+    if (child.resolvedAt || !child.dedupeKey.startsWith(REMIND_PREFIX)) continue;
+    const rest = child.dedupeKey.slice(REMIND_PREFIX.length);
+    const cut = rest.indexOf(':');
+    if (cut < 0 || rest.slice(0, cut) !== alert.id) continue;
+    try {
+      await resolve(
+        c,
+        child,
+        '原来那条说的 PR 已经合并超过 7 天，是改不了的历史事实，不再每天重推；驾驶舱留原来那一条',
+      );
+    } catch (err) {
+      c.part.unchecked.push(`再提醒 ${child.dedupeKey} 没撤成：${errMessage(err)}`);
+    }
+  }
 }
 
 /** 再推：卡住报警超过 24 小时没人处理，一天一条；人在再提醒上点了处理，原来那条跟着撤。 */
@@ -515,6 +634,15 @@ async function quietAlerts(
     c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${errMessage(err)}`);
     return { quiet, failed: true, stage };
   }
+}
+
+/** 没有可做的事：写在提醒正文开头，不开单。已经写过的不重复写。写不进照抛。 */
+async function writeSkipNote(c: Ctx, alert: AlertRow): Promise<void> {
+  if (alert.body.startsWith(SKIP_FILING_NOTE)) return;
+  const body = alert.body ? `${SKIP_FILING_NOTE}\n\n${alert.body}` : SKIP_FILING_NOTE;
+  const r = await c.deps.alerts.updateOpen({ dedupeKey: alert.dedupeKey, body });
+  if (r !== 'ok') throw new Error('提醒已经不在开着的里面，跳过立案没写上');
+  alert.body = body;
 }
 
 /** 把立案结果写回还开着的提醒。写不进照抛（调用方记没立成，不当成写上了）。 */
@@ -584,6 +712,8 @@ async function fileStuckAlerts(
   for (const alert of queued) {
     // 再推那一步可能刚把这条撤了（人在再提醒上点了处理）。撤了的不再开。
     if (!c.stillOpen.has(alert.id)) continue;
+    // 已合并超过 7 天的历史事实：开单没有能做的事，不占这一轮的名额（#1420）。
+    if (await historicalSkip(c, alert)) continue;
     if (attempts >= FILE_PER_RUN) break;
     const { dedupeKey } = alert;
     let repo: AlertRepo | null;
@@ -620,13 +750,22 @@ async function fileStuckAlerts(
       continue;
     }
     const days = unhandledDays(alert.createdAt, now);
-    const body = renderAlertIssueBody(alert, days);
+    const body = renderAlertIssueBody(alert, days, c.deps.doneItems?.(dedupeKey));
     const doc = parseMd('body.md', body);
     const problems = requiredSectionProblems(doc);
     if (problems.length > 0 || doneSection(doc) !== 'ok') {
       c.part.unchecked.push(
         `提醒 ${dedupeKey} 的单拼不出四节，没立案：${problems[0]?.why ?? '「怎么算做完」是空的'}`,
       );
+      continue;
+    }
+    // 只有「条件不再成立」一条、又不会自己撤：开出去没有能做的事。不占这一轮的名额。
+    if (filingHasNothingToDo(dedupeKey, body)) {
+      try {
+        await writeSkipNote(c, alert);
+      } catch (err) {
+        c.part.unchecked.push(`提醒 ${dedupeKey} 没有可做的事，跳过立案没写上：${errMessage(err)}`);
+      }
       continue;
     }
     const title = clip(alert.title.replace(/\s+/g, ' ').trim() || `提醒 ${dedupeKey} 没人处理`, 200);
@@ -679,6 +818,7 @@ export async function sweepAlerts(
     deps,
     part: { scanned: open.length, found: 0, unchecked: [] },
     stillOpen: new Map(open.filter((a) => !a.dedupeKey.startsWith(REMIND_PREFIX)).map((a) => [a.id, a])),
+    historical: new Map(),
   };
   if (truncated) c.part.unchecked.push(`没处理的提醒太多，这一轮只看了前 ${open.length} 条`);
   // 1. 条件没了的撤掉；还在的留着（路由恢复了的改一句正文）
@@ -728,6 +868,11 @@ export async function sweepAlerts(
   for (const alert of candidates) {
     if (quiet.has(alert.id)) continue;
     try {
+      // 已合并超过 7 天：不发新的飞书卡（不插 remind:），原来那条留在驾驶舱。沿用静默的效果，不另开通道。
+      if (await historicalSkip(c, alert)) {
+        await settleHistorical(c, alert, open);
+        continue;
+      }
       await remind(c, alert);
     } catch (err) {
       c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${errMessage(err)}`);

@@ -167,6 +167,7 @@ export {
   type PrFile,
   pullFiles,
   readCi,
+  readPull,
   requiredChecksFor,
   type WaitCiInput,
   waitCi,
