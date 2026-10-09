@@ -23,6 +23,7 @@ const CHECKED = [
   'hooks/pretool-codex.mjs',
   'hooks/pretool-gemini.mjs',
   'hooks/pretool-agy.mjs',
+  'hooks/pretool-kimi.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
   'hooks/unattended.mjs',

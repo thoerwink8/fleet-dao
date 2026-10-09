@@ -154,8 +154,10 @@ export interface HookSpec {
  *   hooksConfig.enabled 是 false 就一条都不跑，hooksConfig.disabled 里列了的那条不跑。
  * - agy：JSON，顶层每一项是一个起了名字的钩子，{ enabled?, <事件>: [{ matcher, hooks: [{ type, command, timeout }] }] }；
  *   本脚本只管名字叫 name（fleet-dao）的那一项，整项归它；那一项 enabled 是 false 就不跑。
+ * - kimi：TOML，[[hooks]] 一条一张表，只许 event、matcher、command、timeout 四个键（多一个整份配置读不起来）。
+ *   本脚本的几条写在文件末尾一块托管块里（两行注释圈起来，hooks-kimi.ts），块外一个字不碰。
  */
-export type HookFormat = 'claude' | 'codex' | 'gemini' | 'agy';
+export type HookFormat = 'claude' | 'codex' | 'gemini' | 'agy' | 'kimi';
 
 export interface HookTarget {
   /** 登记钩子的设置文件（JSON，钩子在它的 hooks 里） */
@@ -222,6 +224,12 @@ export interface HookTarget {
  *   拦下 { decision: 'deny', reason }，没意见回 {}（decision 是空的按没意见处理，agy 的更新说明写过这一条；
  *   不回 allow：allow 是「不问人直接放行」，会绕过它自己的审批）。命令在 Windows 上经 cmd /c 跑，启动器照用；timeout 按秒算。
  *   matcher 是正则，锚定成 ^(…)$：run_command 跑命令，view_file 读文件，grep_search 搜内容。
+ * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（github.com/MoonshotAI/kimi-code docs/en/customization/hooks.md）。
+ *   事件名、输入（tool_name、tool_input、cwd）和 Claude 一样，退出码 2 拦下、stderr 是理由；别的退出码、超时一律放行（它的
+ *   fail-open，所以钩子脚本自己出错时要按拦处理并退出 2）。工具名就是 Bash、Read、Grep，matcher 锚定成 ^(Bash|Read|Grep)$。
+ *   Bash 在 Windows 上也是 Git Bash（packages/kaos/src/environment.ts）；钩子命令经 Node 的 shell: true 跑，Windows 上是
+ *   cmd（packages/agent-core-v2/src/features/externalHooks/internal/runHook.ts），启动器照用。timeout 按秒算。
+ *   开会话那条（SessionStart）只看不拦，输出不保证进会话上下文，登记它是为了开会话就同步规矩。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -288,6 +296,15 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
       },
     ],
   },
+  {
+    settings: { win32: '.kimi-code\\config.toml', linux: '.kimi-code/config.toml' },
+    format: 'kimi',
+    readers: ['kimi'],
+    hooks: [
+      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
+      { event: 'PreToolUse', matcher: '^(Bash|Read|Grep)$', script: 'pretool-kimi.mjs', timeout: 10 },
+    ],
+  },
 ];
 
 /** Codex 记钩子信任的地方：~/.codex/config.toml 的 [hooks.state."…"]（hooks-codex.ts） */
@@ -342,14 +359,12 @@ export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
 };
 
 /**
- * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232（接上的从这里删掉，写进上面的 HOOK_TARGETS）。
- * 2026-09-26 查的各家文档和本机装的版本：
- * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（TOML，事件名和 Claude 一样）。
+ * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。有自己钩子的四家（Codex、Gemini CLI、Antigravity、Kimi Code）
+ * #232 都接上了，在上面的 HOOK_TARGETS；剩下这两家没有配置式的钩子接口（2026-09-26 查的各家文档和本机装的版本）：
  * - pi：没有配置式钩子，要写成 TypeScript 扩展（pi-coding-agent docs/extensions.md）。
  * - dsh：没有自带的全局钩子，只有要手动挂的桥接插件（deepseek-harness packages/hooks）。
  */
 export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
-  kimi: '它有钩子（~/.kimi-code/config.toml 的 [[hooks]]，TOML），本脚本还没接',
   pi: '它没有配置式的钩子（要写成 TypeScript 扩展）',
   dsh: '它没有自带的全局钩子（只有要手动挂的桥接插件）',
 };

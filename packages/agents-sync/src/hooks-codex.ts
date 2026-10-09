@@ -374,7 +374,7 @@ export function scanCodexConfig(text: string): ScanResult {
 }
 
 /** TOML 基本字符串（带双引号）：反斜杠、双引号、控制字符转义 */
-function tomlString(s: string): string {
+export function tomlString(s: string): string {
   let out = '';
   for (const ch of s) {
     const c = ch.codePointAt(0) ?? 0;
@@ -454,12 +454,12 @@ export function planTrust(text: string, needs: readonly TrustNeed[]): Planned {
 
 const names = (needs: TrustNeed[]): string => needs.map((n) => n.name).join('、');
 
-type ReadConfig =
+export type ReadConfig =
   | { kind: 'absent' }
   | { kind: 'text'; text: string; mode: number }
   | { kind: 'bad'; why: string };
 
-function readConfig(abs: string): ReadConfig {
+export function readConfig(abs: string): ReadConfig {
   const st = lstatOrNull(abs);
   if (st === null) return { kind: 'absent' };
   if (st.isSymbolicLink())

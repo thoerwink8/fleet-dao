@@ -2,7 +2,7 @@
 
 - 日期：2026-10-09（北京时间）
 - 谁拍的：创始人放行做法，细节由做 #232 的会话定。原话在下面。
-- 状态：采纳。Codex 这一家随 #232 第 1 片落地，其余几家各一片。
+- 状态：采纳。#232 分四片落地：Codex（#1487）、Gemini CLI（#1489）、Antigravity（#1500）、Kimi Code（第 4 片）。
 - 关联：`packages/agents-sync/src/targets.ts`（`HOOK_TARGETS`、`HOOK_GAPS`）、`packages/agents-sync/src/hooks-codex.ts`、`agents/hooks/vendor-pretool.mjs`、`agents/hooks/pretool-<家>.mjs`、`agents/test/rules/vendor-pretool.rules.test.ts`、`docs/ops.md` 第五节「钩子」
 - 取代：无。
 

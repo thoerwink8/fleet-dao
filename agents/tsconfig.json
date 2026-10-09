@@ -15,6 +15,7 @@
     "hooks/pretool-codex.mjs",
     "hooks/pretool-gemini.mjs",
     "hooks/pretool-agy.mjs",
+    "hooks/pretool-kimi.mjs",
     "hooks/founder-inbox.mjs",
     "hooks/fresh-main.mjs",
     "hooks/git-run.mjs",
