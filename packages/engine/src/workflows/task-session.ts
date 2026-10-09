@@ -5,6 +5,8 @@
 // - 切号停下的动手会话（码 org_switch，#59）不算失败：失败分流 OS1 马上接着干、不记账、不看上一次的原文（不会凑成「同因连挂」）；
 //   选路照常选到切过去的那个池，同一棵树、同一个分支重跑这一段，提示词带上被停下的原因（interrupted）。
 // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
+// - 会话跑完却没有提交（#1408，patched('avoid-empty-commit-route')）：避让记在这张单的运行时上，下一轮选路带上。
+//   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
 
 import { isCancellation, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -25,7 +27,9 @@ import {
   Abandoned,
   type Avoid,
   bump,
+  mergeAvoid,
   NO_AVOID,
+  NO_OTHER_ROUTE,
   PausedInterrupt,
   RepinInterrupt,
   widen,
@@ -61,6 +65,11 @@ export async function writeSession(
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
     const route = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
     failedChannel = undefined;
+    if (rt.fellBackToMissRoute) {
+      rt.fellBackToMissRoute = false;
+      const note = `${NO_OTHER_ROUTE}，这一轮仍用路由 ${route.routeId}。`;
+      if (!rt.feedback.some((line) => line.includes(NO_OTHER_ROUTE))) rt.feedback = [...rt.feedback, note];
+    }
     rt.families.add(route.family);
     rt.attemptSeq += 1;
     await rt.advance('implement', `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}`);
@@ -89,7 +98,10 @@ export async function writeSession(
           }),
         { pausable: true },
       );
-      if (res.ok) return;
+      if (res.ok) {
+        rt.lastImplementRoute = route;
+        return;
+      }
       evidence = res.evidence;
     } catch (error) {
       if (error instanceof Abandoned || isCancellation(error)) throw error;
@@ -178,29 +190,59 @@ async function pickRoute(
   failedChannel?: FailedChannel,
   uiWork = false,
 ): Promise<RouteChoice> {
+  // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。
+  const avoidEmpty = patched('avoid-empty-commit-route');
+  let prefer: string | undefined;
+  let droppedDry = false;
   for (;;) {
     await rt.checkpoint();
     // 叫醒的记号要在问选路之前取（#194 方案 4.3）：问的这一下读的是切号完成之前的事实，期间到的叫醒要让下面的等待当场醒
     const mark = rt.routeWakeMark();
+    // 原路重试（stick）和「没有别的路由」的再选一次，都不再叠没提交的避让：否则刚派回去的那条又被滤掉。
+    const useDry = avoidEmpty && !droppedDry && !stick && prefer === undefined;
+    const dry = useDry ? rt.commitAvoid : NO_AVOID;
+    const merged = useDry ? mergeAvoid(avoid, dry) : avoid;
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,
         // 界面活按 ui 用途的模型顺序选，并带 uiWork：硬禁令 gpt-no-ui 按 UI 判，GPT 一条都不派（别的家都派不出就回「等」）
         stage: uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual,
         ...(uiWork ? { uiWork: true } : {}),
-        avoidRouteIds: avoid.routeIds,
-        avoidPoolIds: avoid.poolIds,
-        avoidModelIds: avoid.modelIds,
+        avoidRouteIds: merged.routeIds,
+        avoidPoolIds: merged.poolIds,
+        avoidModelIds: merged.modelIds,
         ...(stick ? { stickRouteId: stick } : {}),
+        ...(prefer ? { preferRouteId: prefer } : {}),
         ...(failedChannel ? { failedChannel } : {}),
         reserve: { segment: 'manual' },
       }),
     );
     if (got.ok) return got.route;
     if (got.waitFor === 'none') {
+      const blocked = dry.routeIds.length + dry.poolIds.length + dry.modelIds.length > 0;
+      if (useDry && blocked && rt.commitMissRoute) {
+        droppedDry = true;
+        prefer = rt.commitMissRoute.routeId;
+        rt.status.lastProblem = NO_OTHER_ROUTE;
+        rt.fellBackToMissRoute = true;
+        continue;
+      }
+      if (droppedDry && rt.commitMissRoute) {
+        rt.status.lastProblem = NO_OTHER_ROUTE;
+        rt.fellBackToMissRoute = true;
+        return rt.commitMissRoute;
+      }
       await rt.park('没有可用的路由', got.detail);
       avoid = NO_AVOID;
+      prefer = undefined;
+      droppedDry = false;
       continue;
+    }
+    // 避让放空之后还是要等（额度、空位）：不死等，照旧用原来的路由。
+    if (droppedDry && rt.commitMissRoute) {
+      rt.status.lastProblem = NO_OTHER_ROUTE;
+      rt.fellBackToMissRoute = true;
+      return rt.commitMissRoute;
     }
     // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒
     await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);

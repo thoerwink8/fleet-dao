@@ -19,6 +19,9 @@
 // 动手或验收轮数用尽后再点「继续」（patched('continue-resets-rounds')，#1404）：两轮计数都从 0 再计，并重读单子正文，
 // 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官。老历史没有这个标记，
 // 仍只把用尽的那一个计数清掉。
+// 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
+// 再避开这个模型。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
+// 轮数用尽后点「继续」把避开清掉（和上面的轮数清零同一处）。老历史没有这个标记，下一轮仍不避开。
 //
 // 改这里之前必须知道：
 // - 挂自动合并一定在冷验收通过之后。合并闸认引擎任务流程的 PR（分支 fleet/<单号>-t<8 位>）头上通过的 cold-verify（#555-2、#625），
@@ -41,7 +44,7 @@
 //   老历史没有这个标记，照旧在 step 里重试。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
-import { CancellationScope, isCancellation, log, workflowInfo } from '@temporalio/workflow';
+import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
 import type { Worktree } from '../ports.ts';
@@ -64,6 +67,8 @@ import {
   ConflictHandoff,
   conflictFilesForHandoff,
   conflictHandoffLine,
+  emptyCommitFeedback,
+  noteEmptyCommit,
   taskPrDid,
 } from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
@@ -177,15 +182,27 @@ class TaskFlow {
     if (delivery.commits === 0 || leftover.length > 0) {
       const left =
         leftover.length > 0 ? `工作树里还有没提交的改动：${leftover.slice(0, 10).join('、')}。` : '';
-      rt.feedback = [
-        delivery.commits === 0
-          ? `上一轮会话跑完了，但没有产生新的提交。改完之后要用 git commit 提交，不提交等于没做。${left}`
-          : `${left}只有提交了的才会进 PR：要么 git add 再 git commit，要么删掉不要的文件。`,
-      ];
+      const missed = rt.lastImplementRoute;
+      // 老历史没有这个标记：返工意见和选路参数都和原来一样。有提交的一轮不进这里，不触发避让。
+      if (delivery.commits === 0 && missed && patched('avoid-empty-commit-route')) {
+        const noted = noteEmptyCommit(rt.commitAvoid, missed, rt.commitMisses);
+        rt.commitAvoid = noted.avoid;
+        rt.commitMisses = noted.streak;
+        rt.commitMissRoute = missed;
+        rt.feedback = [emptyCommitFeedback(missed, noted.streak >= 2, left)];
+      } else {
+        if (delivery.commits !== 0 && patched('avoid-empty-commit-route')) rt.commitMisses = 0;
+        rt.feedback = [
+          delivery.commits === 0
+            ? `上一轮会话跑完了，但没有产生新的提交。改完之后要用 git commit 提交，不提交等于没做。${left}`
+            : `${left}只有提交了的才会进 PR：要么 git add 再 git commit，要么删掉不要的文件。`,
+        ];
+      }
       rt.status.lastProblem =
         delivery.commits === 0 ? '会话跑完没有提交' : '会话跑完工作树里还有没提交的改动';
       return false;
     }
+    if (patched('avoid-empty-commit-route')) rt.commitMisses = 0;
     let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
     try {
       pushed = await rt.step('pushBranch', () =>

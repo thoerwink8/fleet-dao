@@ -20,7 +20,7 @@ import {
 import type { EngineActivities } from '../activity-options.ts';
 import type { FailureContext, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Limits } from '../limits.ts';
-import type { Worktree } from '../ports.ts';
+import type { RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
@@ -43,8 +43,10 @@ import {
 import { conflictFilesOf, conflictPendingOf, failureOf, iso, judgeRetrying } from './kit.ts';
 import {
   Abandoned,
+  type Avoid,
   bump,
   ConflictHandoff,
+  NO_AVOID,
   PausedInterrupt,
   RepinInterrupt,
   stripUndefined,
@@ -95,6 +97,19 @@ export class TaskRuntime {
     throw new Error('重读单子还没接上（工作流自己的状态乱了）');
   };
   readonly families = new Set<string>();
+  /**
+   * 这张单里，动手会话跑完却没有提交时攒下的避让（#1408）。只活在这次运行里，下张单是新的运行时，不带着走。
+   * 轮数用尽后点「继续」清掉。
+   */
+  commitAvoid: Avoid = NO_AVOID;
+  /** 连着多少轮动手会话跑完没有提交。中间有了提交就从 0 再计。 */
+  commitMisses = 0;
+  /** 最近一轮没提交时用的路由。避让之后没有别的候选，就照旧派它。 */
+  commitMissRoute: RouteChoice | null = null;
+  /** 这一轮动手会话实际跑完时用的路由。没跑成的不算。 */
+  lastImplementRoute: RouteChoice | null = null;
+  /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
+  fellBackToMissRoute = false;
   round = 0;
   verifyRound = 0;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
@@ -327,6 +342,8 @@ export class TaskRuntime {
   async exhaustRounds(title: string, legacyDetail: string, detail: string): Promise<'legacy' | 'reset'> {
     const reset = patched('continue-resets-rounds');
     await this.park(title, reset ? detail : legacyDetail);
+    // 点「继续」清掉没提交攒下的避让，和轮数清零同一处（#1408）。老历史没有这个标记，不碰。
+    if (patched('avoid-empty-commit-route')) this.clearCommitAvoid();
     if (!reset) return 'legacy';
     this.roundResets += 1;
     if (this.roundResets > MAX_ROUND_RESETS) {
@@ -339,6 +356,14 @@ export class TaskRuntime {
     this.verifyRound = 0;
     await this.reloadBrief();
     return 'reset';
+  }
+
+  /** 「继续」之后，没提交攒下的避让不再带到后面的轮。 */
+  private clearCommitAvoid(): void {
+    this.commitAvoid = NO_AVOID;
+    this.commitMisses = 0;
+    this.commitMissRoute = null;
+    this.fellBackToMissRoute = false;
   }
 
   /** 停下等人：报警、写库、等「继续」或「放弃」。继续了回来，调用方从头再试这一步。 */
