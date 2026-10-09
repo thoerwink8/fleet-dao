@@ -5,8 +5,19 @@
 
 import { GROOM_PENDING_LABEL, GROOMED_LABEL, HUMAN_DECISION_LABEL } from '@fleet-dao/conventions';
 import { GROOM_MAX_AMENDS, GROOM_MAX_NEW_ISSUES, GROOM_MAX_REVIEWS } from '@fleet-dao/shared';
+import { GROOM_VERIFY_STOP_CATEGORIES } from '../workflows/task-support.ts';
 import { AMEND_HEADING, isLedgerIssue, isOpenSliceOf, mentionedSlice } from './groom-plan.ts';
 import type { IntakeIssue } from './intake.ts';
+
+/** 验收停下、整理能补验收条的一条。reason 是冷验收原话（通知正文第一行类别之后的那些）。 */
+export interface GroomStoppedTask {
+  issue: number;
+  category: string;
+  reason: string;
+}
+
+/** 任务表没读成时写进摘要和提示词。空数组不是这个意思。 */
+export const STOPPED_TASKS_UNREAD = '停下的任务没查成：任务表没读成。这一轮不要按这一节补验收条。';
 
 /** 提示词里每张单正文最多给多少字符；总共最多给多少。超了的只给标题和标签。 */
 export const PROMPT_BODY_CHARS = 900;
@@ -28,6 +39,11 @@ export interface GroomPromptInput {
    * null = 没读到：提示词写「没读到分片关系」，不当成一个都没有，也不点名开下一片。
    */
   mergedPulls: readonly { number: number; title: string; refs: readonly number[] }[] | null;
+  /**
+   * 验收停下、要整理补验收条的任务。
+   * null = 任务表没读成：写明没查成，不当成没有。空数组 = 读到了，没有这类停下的。
+   */
+  stoppedTasks: readonly GroomStoppedTask[] | null;
   mainHead: string;
   now: Date;
 }
@@ -131,6 +147,30 @@ function sliceSection(input: GroomPromptInput): string {
   ].join('\n');
 }
 
+function stoppedLine(task: GroomStoppedTask): string {
+  const reason = task.reason.replace(/\s+/g, ' ').trim();
+  const text = reason.length > 0 ? clip(reason, 500) : '（空）';
+  return `- #${task.issue} ${task.category}\n  原话：${text}`;
+}
+
+/** 验收停下这一节。null 写没查成，不写成没有。 */
+function stoppedSection(tasks: readonly GroomStoppedTask[] | null): string {
+  const kinds = GROOM_VERIFY_STOP_CATEGORIES.join('、');
+  const rule = [
+    `这一节只列「停下等人」、原因类别是这两类的：${kinds}。`,
+    '处置是用 amend 补充（清单里的键是 amendments；只能追加，不能改原验收条）。',
+    '补充里要写出 diff 里看得见的替代验收条，写在 note。',
+    '原「怎么算做完」已经写了字的，引擎不会改它，done 也不会被追加进去。',
+    '补不出来的报 needsHuman。',
+    `已经有「## ${AMEND_HEADING}」的补不进去，也报 needsHuman。`,
+  ];
+  let list: string;
+  if (tasks === null) list = STOPPED_TASKS_UNREAD;
+  else if (tasks.length === 0) list = '（读到了任务表，这一轮没有要补验收条的停下任务。）';
+  else list = tasks.map(stoppedLine).join('\n');
+  return ['## 验收停下的任务', ...rule, '', list].join('\n');
+}
+
 export function renderGroomPrompt(input: GroomPromptInput): string {
   const since = Date.parse(input.autoDispatchSince);
   const isOld = (i: IntakeIssue) => Date.parse(i.createdAt) < since;
@@ -174,7 +214,7 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
     '关单；改里程碑或版本先后；改老单的原文、原话；推代码、开 PR；动 .github/workflows/ 和 agents/ 下的东西；对陌生人开的单做任何事（它们不在下面的列表里）。',
     '',
     '## 优先顺序',
-    '先判「老单 / 没整理过」的（它们现在进不了引擎的候选，等你判）；再补缺节的；最后才是开新单。判断要有依据：读了才下结论，读不到就别判。',
+    '先判「老单 / 没整理过」的（它们现在进不了引擎的候选，等你判）；再补缺节的；最后才是开新单。验收停下、列在「验收停下的任务」里的，优先用 amend 补替代验收条，或报 needsHuman。判断要有依据：读了才下结论，读不到就别判。',
     '',
     '## 回答格式',
     '最后给一段 ```json 围栏，里面是一个对象，只有这四个键（别的键会被丢掉并记成越权）：',
@@ -190,6 +230,8 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
     '',
     `## 开着的单（作者在白名单里的，${input.issues.length} 张）`,
     blocks.join('\n\n') || '（没有）',
+    '',
+    stoppedSection(input.stoppedTasks),
     '',
     '## 最近 30 天关掉的单（开新单前对一下，别重复）',
     input.recentClosed.map(closedLine).join('\n') || '（没有）',
