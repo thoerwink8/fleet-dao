@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { errorText, useGroomNow, useGroomStatus } from '../api/client';
 import type { GroomStatus } from '../api/types';
 import { formatDateTime } from '../lib/format';
+import { useMasterView } from './engine-master';
 import { LoadError } from './page';
 import { RepoLink } from './repo-link';
 import {
@@ -92,6 +93,9 @@ export function RepoGroomControl({
   const name = `${repo.owner}/${repo.name}`;
   const query = useGroomStatus(repoId);
   const groom = useGroomNow();
+  const { view: masterView } = useMasterView();
+  // 读到总开关关着才提前置灰。读不到（出错、还在读、远程快照没有这一格）不冒充关着，按钮保持能点。
+  const masterOff = masterView.kind === 'ok' && !masterView.master.on;
   const [asking, setAsking] = useState(false);
   const [reason, setReason] = useState('');
   const [writeError, setWriteError] = useState<unknown>(null);
@@ -176,13 +180,14 @@ export function RepoGroomControl({
         </ul>
       ) : null}
 
-      <div className="mt-2">
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
         <Button
           type="button"
           size="sm"
           variant="outline"
-          disabled={groom.isPending || busy || query.isLoading}
+          disabled={groom.isPending || busy || query.isLoading || masterOff}
           onClick={() => {
+            if (masterOff) return;
             setReason('');
             setAsking(true);
           }}
@@ -190,6 +195,7 @@ export function RepoGroomControl({
         >
           让指挥官整理
         </Button>
+        {masterOff ? <span className="text-xs text-muted-foreground">引擎总开关关着，不整理</span> : null}
       </div>
       {writeError ? (
         <p role="alert" className="mt-1.5 break-words text-xs text-ink-fail">

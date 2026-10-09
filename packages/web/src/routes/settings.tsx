@@ -501,10 +501,8 @@ export default function Settings() {
         title="运行设置"
         description="存在后端。保存时带上你看到的版本号：别人先改了会提示你刷新再改，不会悄悄盖掉。"
       >
-        {settings.error ? <LoadError error={settings.error} /> : null}
-        {!settings.data ? (
-          <LoadingRows rows={2} />
-        ) : (
+        {/* 读失败后再重拉会先清掉 error、回到 pending。已经读过就不再画骨架。 */}
+        {settings.data ? (
           <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
             <NumberSetting
               k="sessions.maxConcurrent"
@@ -524,6 +522,10 @@ export default function Settings() {
             <QuotaReserve s={find('engine.quotaReserve')} />
             <PoolHoldsPanel />
           </div>
+        ) : settings.error ? (
+          <LoadError error={settings.error} />
+        ) : settings.isFetched ? null : (
+          <LoadingRows rows={2} />
         )}
       </Section>
 
@@ -533,12 +535,15 @@ export default function Settings() {
         title="提醒"
         description={`飞书和${brand.product}只推三类：要你拍、卡住报警、日报。进度不主动推，问了才给。`}
       >
-        {!settings.data ? (
-          <LoadingRows rows={1} />
-        ) : (
+        {/* 和运行设置同一条：出错只留报错横幅，读过之后的重拉也不画骨架。 */}
+        {settings.data ? (
           <div className="grid max-w-3xl gap-3 md:grid-cols-2">
             <QuietHours s={find('notify.quietHours')} />
           </div>
+        ) : settings.error ? (
+          <LoadError error={settings.error} />
+        ) : settings.isFetched ? null : (
+          <LoadingRows rows={1} />
         )}
       </Section>
 

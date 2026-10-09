@@ -140,6 +140,8 @@ describe('设置页：指挥官整理待办', () => {
     [503, 'groom_unreadable', '整理待办的记录没读成：库连不上'],
   ])('%s %s：把后端的原因显示出来，不报成功', async (status, code, message) => {
     const api = createMockApi({ live: false });
+    // 总开关关着时按钮提前置灰，点不到确认；这条测的是后端拒了以后的红字，先把总开关打开。
+    await engineOn(api);
     vi.spyOn(api, 'groomNow').mockRejectedValueOnce(new ApiError(status, code, message));
     renderApp(<SettingsPage />, { api, route: '/settings' });
     const panel = await screen.findByTestId(`groom-${ORBIT}`);
@@ -162,6 +164,39 @@ describe('设置页：指挥官整理待办', () => {
     expect(groomButton(panel).disabled).toBe(true);
     fireEvent.click(groomButton(panel));
     expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  test('引擎总开关关着：「让指挥官整理」置灰，旁边写明不整理', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SettingsPage />, { api, route: '/settings' });
+    const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    await waitFor(() => {
+      expect(panel.textContent).toContain('今日剩余');
+      expect(panel.textContent).toContain('引擎总开关关着，不整理');
+      expect(groomButton(panel).disabled).toBe(true);
+    });
+    fireEvent.click(groomButton(panel));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  test('引擎总开关开着：「让指挥官整理」不因此禁用', async () => {
+    const api = createMockApi({ live: false });
+    await engineOn(api);
+    renderApp(<SettingsPage />, { api, route: '/settings' });
+    const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    await waitFor(() => expect(groomButton(panel).disabled).toBe(false));
+    expect(panel.textContent).not.toContain('引擎总开关关着，不整理');
+  });
+
+  test('总开关读不到：不把「让指挥官整理」置灰', async () => {
+    const api = createMockApi({ live: false });
+    api.settings = async () => {
+      throw new ApiError(500, 'internal', '库连不上（测试故意造的）');
+    };
+    renderApp(<SettingsPage />, { api, route: '/settings' });
+    const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    await waitFor(() => expect(groomButton(panel).disabled).toBe(false));
+    expect(panel.textContent).not.toContain('引擎总开关关着，不整理');
   });
 
   test('记录没读成：写明原因，不画成「还没整理过」', async () => {

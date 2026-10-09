@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 读不到的时候必须说「没读成」，不许用空列表、0 冒充「查了没事」（AGENTS.md 底线）。
 // 这里对每条这样的路径故意造一次「读不到」：假后端的某个接口直接报错，看页面怎么说。
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -26,7 +26,22 @@ function failing(...methods: (keyof FleetApi)[]): MockApi {
 describe('读不到时照实说，不冒充「没有」', () => {
   test('设置页：接口失败写没查成，不瞒着假装出空设置', async () => {
     renderApp(<SettingsPage />, { api: failing('settings') });
-    expect(await screen.findByText(/没查成：后端出错了/)).toBeTruthy();
+    expect((await screen.findAllByText(/没查成：后端出错了/)).length).toBeGreaterThan(0);
+  });
+
+  test('设置读失败：运行设置和提醒只留报错横幅，骨架条不在', async () => {
+    renderApp(<SettingsPage />, { api: failing('settings') });
+    await waitFor(() => {
+      const run = document.getElementById('run');
+      const notify = document.getElementById('notify');
+      if (!run || !notify) throw new Error('设置页缺运行设置或提醒');
+      expect(run.querySelector('[data-slot="skeleton"]')).toBeNull();
+      expect(notify.querySelector('[data-slot="skeleton"]')).toBeNull();
+      expect(within(run).getByRole('alert').textContent).toContain('没查成');
+      expect(within(run).getByRole('button', { name: '重试' })).toBeTruthy();
+      expect(within(notify).getByRole('alert').textContent).toContain('没查成');
+      expect(within(notify).getByRole('button', { name: '重试' })).toBeTruthy();
+    });
   });
 
   test('通知中心：提醒没读成，不说「没有待处理的提醒」', async () => {
