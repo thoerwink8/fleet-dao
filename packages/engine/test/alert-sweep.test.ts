@@ -436,6 +436,23 @@ describe('卡住报警立案', () => {
     expect(alert.body).not.toContain('已立案：');
   });
 
+  it('刚报出来、还没到 24 小时的 reconcile:pr 不去问合并时刻，也不记没查成', async () => {
+    const alert = row({
+      dedupeKey: 'reconcile:pr:acme/widgets#7',
+      createdAt: new Date(NOW.getTime() - HOUR),
+    });
+    const h = harness([alert], {
+      prMergedAt: async () => {
+        throw new Error('不该问合并时刻');
+      },
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toEqual([]);
+    expect(h.inserted).toEqual([]);
+    expect(alert.body).toBe('原来的正文');
+  });
+
   it('【故意造出的失败】读不到 PR 的合并时刻：不跳过，记没查成', async () => {
     const alert = row({ dedupeKey: 'reconcile:pr:acme/widgets#9' });
     const h = harness([alert], {

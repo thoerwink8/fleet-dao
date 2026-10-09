@@ -7,7 +7,8 @@
 //    在再提醒上点「处理」，原来那条也跟着撤。有人在处理（有人在修、PR 开着、合了、发布了）、静默了的不再推（谁在处理现算，
 //    core 的 alertHandling）；谁在处理读不到：照旧再推，记没查全（宁可多一张卡）。键以 reconcile:pr:、reconcile:ledger:
 //    开头、对应 PR 已合并超过 7 天的，不再每天重推：沿用静默的效果（驾驶舱留原来那一条，不发新的飞书卡），不另开通道，
-//    也不写会在 7 天后续期的静默行；已经推出去的「还没处理」跟着撤。合并时刻读不到的照旧再推，记没查成。
+//    也不写会在 7 天后续期的静默行；已经推出去的「还没处理」跟着撤。没到 24 小时的还不重推、不立案，不去问合并时刻
+//    （刚报出来的问不到，会把整轮对账记成没查成）。到了再问；合并时刻读不到的照旧再推，记没查成。
 // 3. 同一条再立案（#1406，对 #445「不自动开跟进单」的有意收窄，只这一层、还限量）：alert 级、开着、超过 24 小时、
 //    alertHandling 判为没人处理、没静默、键不是自己会撤的、正文开头还没有单号的，开一张未排期的缺陷单。四节按整理会话
 //    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
@@ -865,11 +866,13 @@ export async function sweepAlerts(
     (a) => a.level === 'alert' && !isEscalationKey(a.dedupeKey),
   );
   const { quiet, failed: handlingFailed, stage } = await quietAlerts(c, candidates);
+  const now = deps.now();
   for (const alert of candidates) {
     if (quiet.has(alert.id)) continue;
     try {
       // 已合并超过 7 天：不发新的飞书卡（不插 remind:），原来那条留在驾驶舱。沿用静默的效果，不另开通道。
-      if (await historicalSkip(c, alert)) {
+      // 没到 24 小时还不会重推，合并时刻用不上，不去问（问不到会把这一轮记成没查成）。
+      if (now.getTime() - alert.createdAt.getTime() >= REMIND_AFTER_MS && (await historicalSkip(c, alert))) {
         await settleHistorical(c, alert, open);
         continue;
       }
