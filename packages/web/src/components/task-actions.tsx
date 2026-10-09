@@ -36,7 +36,7 @@ export interface ActionTarget {
   /** 需求级在跑的会话（分诊、写需求文档、写方案）。 */
   activity?: Activity | undefined;
   sub?: BoardSubtask | undefined;
-  /** 被人暂停着（引擎写的那句「已暂停：…」，#820 片 3）：这时不再给「暂停」，只给「继续」「叫停」。 */
+  /** 被人暂停着（引擎写的那句「已暂停：…」，#820 片 3）：这时不画「暂停」，只给「继续」「叫停」。 */
   paused?: string | undefined;
 }
 
@@ -68,22 +68,37 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
   redo: { label: '重做', icon: RotateCcw, key: 'R' },
 };
 
+/** 置灰时悬停写的原因。能点的按钮没有这句。不该出现的按钮不进这份列表，不靠置灰留在页上。 */
+export interface TaskActionButton {
+  action: UiAction;
+  disabledReason?: string;
+}
+
 /**
- * 按状态决定该画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停、重做）。
- * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。暂停了的单不再给「暂停」（后端也回 409 already_paused）；
- * 没暂停的「继续」也一直给出来：停下等人（碰到问题自己停的）也是点它，由后端判断（没停着就没有收信的）。
- * 已叫停的只给「重做」。挂起的工作流还在跑，按钮也给，引擎会拒绝并说明先叫停。做完、失败不给。
- * 任务页、看板侧边详情、悬停条、右键、手机列表、快捷键都经 ActionButtons / useTargetActions / shortcutAction 取这一份。
+ * 按状态决定画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停、重做）。
+ * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。
+ * 已暂停不画「暂停」（后端再点也回 409 already_paused），只给「继续」「叫停」。
+ * 在跑且没暂停不画「继续」，只给「暂停」「叫停」。已完成、已失败一个都不画。
+ * 已叫停只给「重做」。挂起再加「重做」（工作流还在跑时由后端拒绝）。
+ * 真要置灰的带 disabledReason，悬停写明原因；菜单和快捷键不提供点不了的。
  */
-export function availableActions(target: ActionTarget): UiAction[] {
+export function taskActionButtons(target: ActionTarget): TaskActionButton[] {
   if (target.sub) return [];
-  if (target.state === 'stopped') return ['redo'];
+  if (target.state === 'stopped') return [{ action: 'redo' }];
   if (isTaskFinished(target)) return [];
-  const list: UiAction[] = [];
-  if (target.paused === undefined) list.push('pause');
-  list.push('resume', 'stop');
-  if (target.state === 'stalled') list.push('redo');
+  const list: TaskActionButton[] = [];
+  if (target.paused === undefined) list.push({ action: 'pause' });
+  else list.push({ action: 'resume' });
+  list.push({ action: 'stop' });
+  if (target.state === 'stalled') list.push({ action: 'redo' });
   return list;
+}
+
+/** 这一状态下能点的操作。置灰的不在这里：菜单和快捷键不提供点不了的。 */
+export function availableActions(target: ActionTarget): UiAction[] {
+  return taskActionButtons(target)
+    .filter((button) => button.disabledReason === undefined)
+    .map((button) => button.action);
 }
 
 export function targetName(t: ActionTarget): string {
@@ -244,25 +259,37 @@ export function useTargetActions(target: ActionTarget | undefined): RunnableActi
   }));
 }
 
-/** 任务页和看板侧边详情上的一排字按钮。没有该画的动作时什么都不画。 */
+/** 任务页和看板侧边详情上的一排字按钮。没有该画的动作时什么都不画。置灰的悬停写明原因。 */
 export function ActionButtons({ target, className }: { target: ActionTarget; className?: string }) {
-  const entries = useTargetActions(target);
-  if (!entries.length) return null;
+  const { trigger } = useTaskActions();
+  const offers = taskActionButtons(target);
+  if (!offers.length) return null;
   return (
     <div className={cn('flex flex-wrap items-center gap-1.5', className)} data-task-actions>
-      {entries.map(({ action, def, run }) => {
+      {offers.map(({ action, disabledReason }) => {
+        const def = ACTIONS[action];
         const Icon = def.icon;
-        return (
+        const button = (
           <Button
-            key={action}
             size="sm"
             variant="outline"
+            disabled={disabledReason !== undefined}
+            title={disabledReason}
             className={cn('h-8', def.danger && 'text-ink-fail')}
-            onClick={run}
+            onClick={() => {
+              if (disabledReason !== undefined) return;
+              trigger(action, target);
+            }}
           >
             <Icon />
             {def.label}
           </Button>
+        );
+        // 置灰按钮自己不收悬停（disabled 关掉了指针），原因写在包着它的这一层上，鼠标停上去才看得到。
+        return (
+          <span key={action} title={disabledReason} className="inline-flex">
+            {button}
+          </span>
         );
       })}
     </div>

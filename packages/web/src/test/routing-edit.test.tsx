@@ -22,6 +22,10 @@ import { ApiError } from '../api/client';
 import RoutingPage from '../routes/routing';
 import { renderApp } from './harness';
 
+/** 同一类提示的固定编号：连点时新的顶掉旧的，两次必须是这一个号。 */
+const REORDER_SAVED_TOAST_ID = 'routing-reorder-saved';
+const REORDER_FAILED_TOAST_ID = 'routing-reorder-failed';
+
 beforeEach(() => {
   toast.success.mockClear();
   toast.error.mockClear();
@@ -208,6 +212,40 @@ describe('路由页：调先后和开关', () => {
     });
   });
 
+  test('连点改先后：已改先后和没改成各用固定提示编号，两次是同一个号', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    await opened();
+
+    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: '下移 Kimi k3（动手里的先后）' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(2));
+    const routeDown = () => within(routeItem('r-ca-opus')).getByRole('button', { name: /^下移 / });
+    await waitFor(() => expect(routeDown().getAttribute('aria-disabled')).toBeNull());
+    fireEvent.click(routeDown());
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(3));
+    for (const call of toast.success.mock.calls) {
+      expect(call[0]).toBe('已改先后');
+      expect(call[1]).toEqual({ id: REORDER_SAVED_TOAST_ID });
+    }
+
+    vi.spyOn(api, 'movePurposeModel').mockRejectedValue(
+      new ApiError(409, 'conflict', '这个用途下模型的先后刚被别人改过，刷新后再改'),
+    );
+    await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    for (const call of toast.error.mock.calls) {
+      expect(call[0]).toBe('没改成');
+      expect(call[1]).toMatchObject({ id: REORDER_FAILED_TOAST_ID });
+    }
+    expect(REORDER_FAILED_TOAST_ID).not.toBe(REORDER_SAVED_TOAST_ID);
+  });
+
   test('【故意造出的失败】先后没保存成：回到原来的顺序，并弹出原因', async () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     vi.spyOn(api, 'movePurposeModel').mockRejectedValue(
@@ -219,6 +257,7 @@ describe('路由页：调先后和开关', () => {
     expect(modelNames()).toEqual(['Kimi k3', 'Opus 5.5', 'Cursor Auto', 'Opus 5']);
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('没改成', {
+        id: REORDER_FAILED_TOAST_ID,
         description: '这个用途下模型的先后刚被别人改过，刷新后再改',
       }),
     );
@@ -294,6 +333,7 @@ describe('路由页：调先后和开关', () => {
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '关闭' }));
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('没改成', {
+        id: REORDER_FAILED_TOAST_ID,
         description: '这条路由的开关刚被别人改过，刷新后再改',
       }),
     );

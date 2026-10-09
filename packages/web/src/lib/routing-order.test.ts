@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, screen, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, describe, expect, test } from 'vitest';
 import RoutingPage from '../routes/routing';
@@ -44,6 +44,22 @@ describe('路由顺位：只数引擎会真派的', () => {
     expect(actualRanks(states)).toEqual([1, null, 2, null, null, 3]);
   });
 
+  test('已下架的不占实际顺位：后面开着的名次往前靠，行上写「已下架」不写名次', () => {
+    // 开着的路由本来会占一位；下架之后让出来，再下一个开着的从 2 变成接着数
+    expect(modelSlotState({ routes: [route(true)] }, open, true)).toBe('retired');
+    expect(modelSlotState({ routes: [route(false)] }, open, true)).toBe('retired');
+    const states: SlotState[] = [
+      modelSlotState({ routes: [route(true)] }, open, false),
+      modelSlotState({ routes: [route(true)] }, open, true),
+      modelSlotState({ routes: [route(false)] }, open, false),
+      modelSlotState({ routes: [route(true)] }, open, false),
+    ];
+    expect(states).toEqual(['on', 'retired', 'off', 'on']);
+    expect(actualRanks(states)).toEqual([1, null, null, 2]);
+    expect(slotWord('retired', null, '模型')).toBe('已下架');
+    expect(slotWord('on', 2, '模型')).toBe('实际第 2 位');
+  });
+
   test('每一行的话：开着写实际第几位，被跳过的写为什么', () => {
     expect(slotWord('on', 2, '模型')).toBe('实际第 2 位');
     expect(slotWord('off', null, '模型')).toBe('关着，已跳过');
@@ -73,6 +89,21 @@ describe('路由顺位：只数引擎会真派的', () => {
     expect(summarizeOrder([], '路由')).toEqual({ ok: false, why: '无可用：一个路由都没有' });
     // 开着的一行没有顺位是调用方的错，不拿默认值冒充
     expect(() => slotWord('on', null, '模型')).toThrow('实际顺位');
+  });
+});
+
+describe('已下架的模型行不写名次', () => {
+  test('动手里的 Opus 5 行写「已下架」，不写实际第几位', async () => {
+    renderApp(createElement(RoutingPage), { route: '/routing?purpose=execute' });
+    await screen.findByRole('list', { name: '模型' });
+    // 下架记在目录里，目录比用途层晚到时这一行先按开着画，到了再改成已下架
+    await waitFor(() => {
+      const slot = document.querySelector('li[data-model="opus-5"] [data-slot-state]');
+      expect(slot?.textContent).toBe('已下架');
+      expect(slot?.getAttribute('data-slot-state')).toBe('retired');
+    });
+    const row = document.querySelector('li[data-model="opus-5"]') as HTMLElement;
+    expect(row.textContent).not.toMatch(/实际第 \d+ 位/);
   });
 });
 

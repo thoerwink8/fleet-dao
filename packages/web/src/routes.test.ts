@@ -73,6 +73,11 @@ describe('路由表', () => {
     expect(paths.filter((p, i) => paths.indexOf(p) !== i)).toEqual([]);
   });
 
+  test('任务页注释写明地址是库内任务编号，不是 GitHub 单号', () => {
+    const src = readFileSync(path.join(SRC, 'routes.ts'), 'utf8');
+    expect(src).toContain('/tasks/<任务编号，库内 id，例如 t-12>，不是 GitHub 单号');
+  });
+
   test('导航里每个链接都有页接着（点了不会掉进 404）', () => {
     const pages = insideShell(table);
     const dead = NAV_ITEMS.map((n) => n.to).filter((to) => !pages.includes(to));
