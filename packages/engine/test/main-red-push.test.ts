@@ -14,7 +14,7 @@ import {
 } from '../src/jobs/main-red-push.ts';
 import type { SweepPart } from '../src/jobs/reconcile-common.ts';
 import { FEISHU_WEBHOOK_ENV, feishuWebhookSender } from '../src/real/feishu-webhook.ts';
-import { mainCiRuns } from '../src/real/main-ci-runs.ts';
+import { MAIN_CI_RUNS_PAGE, mainCiRuns } from '../src/real/main-ci-runs.ts';
 
 const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
@@ -230,6 +230,59 @@ describe('pushMainRed', () => {
   });
 });
 
+/** 一条主线 push 运行。id 从 1 起，提交号按序号铺成 40 位十六进制。 */
+function listedRun(i: number, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: i,
+    status: 'in_progress',
+    conclusion: null,
+    head_sha: i.toString(16).padStart(40, '0'),
+    head_branch: 'main',
+    event: 'push',
+    html_url: `https://github.com/thoerwink8/fleet-dao/actions/runs/${i}`,
+    ...over,
+  };
+}
+
+/** 更新的一页全是进行中，已结束的在后面。GitHub 不认 status 时就按这个原样分页。 */
+function inProgressPage(): Record<string, unknown>[] {
+  return Array.from({ length: MAIN_CI_RUNS_PAGE }, (_, i) => listedRun(1000 + i));
+}
+
+function runsClient(opts: { pages: Record<string, unknown>[][]; failPage?: number }): {
+  calls: { path: string; query?: unknown }[];
+  client: Parameters<typeof mainCiRuns>[0]['client'];
+} {
+  const calls: { path: string; query?: unknown }[] = [];
+  return {
+    calls,
+    client: {
+      async request<T = unknown>(req: GhRequest): Promise<GhResponse<T>> {
+        calls.push({ path: req.path, query: req.query });
+        const page = Number(req.query?.page ?? 1);
+        if (opts.failPage !== undefined && page === opts.failPage) throw new Error('这一页连不上');
+        return {
+          status: 200,
+          data: { workflow_runs: opts.pages[page - 1] ?? [] } as T,
+          headers: new Headers(),
+        };
+      },
+      async all<T = unknown>(req: GhRequest, itemsOf?: (data: unknown) => unknown): Promise<T[]> {
+        calls.push({ path: req.path, query: req.query });
+        const data = {
+          jobs: [
+            { id: 1, name: 'lint', conclusion: 'success' },
+            { id: 2, name: 'test (engine)', conclusion: 'failure' },
+          ],
+        };
+        const items = (itemsOf ?? ((d: unknown) => d))(data);
+        if (!Array.isArray(items)) throw new Error('not array');
+        return items as T[];
+      },
+    },
+  };
+}
+
 describe('mainCiRuns', () => {
   it('只认主线 push；失败的运行带上结论为 failure 的作业名', async () => {
     const calls: { path: string; query?: unknown }[] = [];
@@ -306,6 +359,103 @@ describe('mainCiRuns', () => {
       },
     });
     await expect(list()).rejects.toThrow(/没查成/);
+  });
+
+  it('最近一页全是进行中：翻到下一页的已结束失败，带上失败作业名', async () => {
+    const api = runsClient({
+      pages: [
+        inProgressPage(),
+        [listedRun(99, { status: 'completed', conclusion: 'failure', head_sha: SHA, html_url: URL })],
+      ],
+    });
+    const runs = await mainCiRuns(api)();
+    expect(runs.find((r) => r.status === 'completed')).toMatchObject({
+      conclusion: 'failure',
+      sha: SHA,
+      url: URL,
+      failedJobs: ['test (engine)'],
+    });
+    const listed = api.calls.filter((c) => c.path.includes('/workflows/ci.yml/runs'));
+    expect(listed.map((c) => (c.query as { page?: number }).page)).toEqual([1, 2]);
+    expect(listed[0]?.query).toMatchObject({ branch: 'main', event: 'push', status: 'completed' });
+    expect(api.calls.some((c) => c.path.includes('/actions/runs/99/jobs'))).toBe(true);
+    expect(api.calls.some((c) => c.path.includes('/actions/runs/1000/jobs'))).toBe(false);
+  });
+
+  it('翻到上限仍全是进行中：没查成，不当成没有已结束的运行', async () => {
+    let n = 0;
+    const list = mainCiRuns({
+      client: {
+        async request<T = unknown>(): Promise<GhResponse<T>> {
+          n += 1;
+          if (n > 20) throw new Error('翻太多了');
+          return { status: 200, data: { workflow_runs: inProgressPage() } as T, headers: new Headers() };
+        },
+        async all(): Promise<never[]> {
+          throw new Error('不该列作业');
+        },
+      },
+    });
+    await expect(list()).rejects.toThrow(/没查成/);
+    expect(n).toBeGreaterThan(1);
+    expect(n).toBeLessThanOrEqual(20);
+  });
+});
+
+describe('进行中占满一页时仍要推', () => {
+  it('下一页才是失败：变红推一次，不空过', async () => {
+    const api = runsClient({
+      pages: [
+        inProgressPage(),
+        [listedRun(99, { status: 'completed', conclusion: 'failure', head_sha: SHA, html_url: URL })],
+      ],
+    });
+    const w = world();
+    const part = await w.push(mainCiRuns(api));
+    expect(part).toMatchObject({ found: 1, unchecked: [] });
+    const text = w.sent[0] ?? '';
+    expect(text).toContain(SHA.slice(0, 7));
+    expect(text).toContain(URL);
+    expect(text).toContain('test (engine)');
+    expect(w.marked.map((m) => m.key)).toEqual([`feishu:main-red:${SHA}`]);
+  });
+
+  it('下一页才是成功：上一次是红就推已恢复', async () => {
+    const api = runsClient({
+      pages: [
+        inProgressPage(),
+        [listedRun(100, { status: 'completed', conclusion: 'success', head_sha: SHA2, html_url: URL2 })],
+      ],
+    });
+    const w = world();
+    await w.push([run()]);
+    const part = await w.push(mainCiRuns(api));
+    expect(part).toMatchObject({ found: 1, unchecked: [] });
+    const text = w.sent[1] ?? '';
+    expect(text).toContain('已恢复');
+    expect(text).toContain(SHA2.slice(0, 7));
+    expect(text).toContain(URL2);
+    expect(w.marked[1]?.key).toBe(`feishu:main-recovered:${SHA2}`);
+  });
+
+  it('翻页读不到：记没查成，不记已推', async () => {
+    const api = runsClient({ pages: [inProgressPage()], failPage: 2 });
+    const w = world();
+    const part = await w.push(mainCiRuns(api));
+    expect(part.found).toBe(0);
+    expect(part.unchecked.join('\n')).toContain('没查成');
+    expect(w.sent).toEqual([]);
+    expect(w.marked).toEqual([]);
+  });
+
+  it('翻完了确实没有已结束的：不推，也不记没查成', async () => {
+    const api = runsClient({ pages: [inProgressPage()] });
+    const w = world();
+    const part = await w.push(mainCiRuns(api));
+    expect(part).toMatchObject({ found: 0, unchecked: [] });
+    expect(w.sent).toEqual([]);
+    expect(w.marked).toEqual([]);
+    expect(api.calls.filter((c) => c.path.includes('/workflows/ci.yml/runs'))).toHaveLength(2);
   });
 });
 
