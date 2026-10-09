@@ -30,6 +30,31 @@ describe('engine-pulls：读 PR', () => {
       autoMerge: true,
     });
     expect((await gh.claims.openPulls(repo)).map((p) => p.number)).toEqual([pr.number]);
+    const merged = fake.addPull({
+      head: { ref: 'fix/merged', sha: sha('m') },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-10-02T00:00:00Z',
+      updated_at: '2026-10-02T00:00:00Z',
+      body: '**需求**：Refs #139\n',
+    });
+    fake.addPull({
+      head: { ref: 'fix/closed', sha: sha('c') },
+      state: 'closed',
+      merged: false,
+      merged_at: null,
+      updated_at: '2026-10-03T00:00:00Z',
+    });
+    fake.addPull({
+      head: { ref: 'fix/old', sha: sha('o') },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-08-01T00:00:00Z',
+      updated_at: '2026-08-01T00:00:00Z',
+    });
+    expect(
+      (await gh.claims.listMergedPulls(repo, new Date('2026-09-01T00:00:00Z'))).map((p) => p.number),
+    ).toEqual([merged.number]);
     expect(gh.claims.isAgentBot(fake.bots.agent)).toBe(true);
     expect(gh.claims.isAgentBot(fake.human)).toBe(false);
     expect(gh.claims.engineLogin()).toBe('fleet-test-engine[bot]');

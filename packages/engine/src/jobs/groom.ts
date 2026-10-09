@@ -13,8 +13,7 @@
 // - 记「接手」写不进就不整理（不然页面一直看到没人接手、下一眼又接一次）。记「整理完」写不进只记日志：驾驶舱 90 分钟后会把它标成没整理成。
 // - 在跑的那一次不等：停机时会话由停机收尾一起收（登记进一次性会话的清单，排空和切号都能停下它）。
 
-import type { StandardPath } from '@fleet-dao/conventions';
-import { ENGINE_LABEL, GROOMED_LABEL } from '@fleet-dao/conventions';
+import { ENGINE_LABEL, GROOMED_LABEL, issueColumnRefs, type StandardPath } from '@fleet-dao/conventions';
 import type { ClosedIssueRow } from '@fleet-dao/github';
 import {
   foldGroomRequests,
@@ -88,6 +87,11 @@ export interface GroomRunDeps {
   readFacts(repo: IntakeRepo): Promise<GroomFacts>;
   /** 改标准的路径清单（standard-paths.json）。读不到、认不出照抛：不当成「没有标准路径」。 */
   standardPaths(): Promise<readonly StandardPath[]>;
+  /**
+   * 最近一段里合并了的 PR（带正文，用来认需求栏 Refs）。
+   * 抛错 = 没读到分片关系：整理照常跑，摘要里写明，不当成「一个都没有」。
+   */
+  readMergedPulls(repo: IntakeRepo): Promise<{ number: number; title: string; body: string }[]>;
   /** 起会话（选路按用途 groom、只读检出、不带令牌）。 */
   runSession(input: GroomSessionInput): Promise<GroomSessionOutcome>;
   /** 这个仓上的写操作（只有四种，没有关单）。 */
@@ -117,6 +121,20 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
     deps.readFacts(repo),
     deps.standardPaths(),
   ]);
+  // 合并了的分片 PR 不在开着的 PR 里。这一次读失败不能拖垮整理，也不能当成「没有」
+  let mergedPulls: { number: number; title: string; refs: number[] }[] | null;
+  try {
+    const rows = await deps.readMergedPulls(repo);
+    mergedPulls = rows.map((p) => ({
+      number: p.number,
+      title: p.title,
+      refs: issueColumnRefs(p.body).refs,
+    }));
+  } catch (err) {
+    mergedPulls = null;
+    deps.log('warn', '整理待办：没读到分片关系', { repo: req.repo, error: errMessage(err) });
+  }
+  const noteUnread = (text: string) => (mergedPulls === null ? `${text}\n没读到分片关系` : text);
   // 会话只看得到、也只能点到作者在白名单里的单（陌生人的正文不进提示词）
   const trusted = new Map(
     facts.issues.filter((i) => isTrusted(i.author, whitelist)).map((i) => [i.number, i]),
@@ -133,7 +151,12 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
         .map((i) => i.number),
     ),
     recentClosed: facts.closed,
-    openPulls: facts.pulls,
+    openPulls: facts.pulls.map((p) => ({
+      number: p.number,
+      title: p.title,
+      refs: issueColumnRefs(p.body).refs,
+    })),
+    mergedPulls,
     mainHead: facts.mainHead,
     now,
   });
@@ -144,9 +167,9 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
     mainHead: facts.mainHead,
     timeoutMinutes: GROOM_SESSION_MINUTES,
   });
-  if (!session.ok) throw new GroomFailedError(`会话没跑成：${session.why}`);
+  if (!session.ok) throw new GroomFailedError(noteUnread(`会话没跑成：${session.why}`));
   const parsed = parseGroomPlan(session.answer);
-  if (!parsed.ok) throw new GroomFailedError(parsed.why);
+  if (!parsed.ok) throw new GroomFailedError(noteUnread(parsed.why));
   const executed = await executeGroomPlan(
     parsed.plan,
     {
@@ -174,12 +197,16 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
         })),
       ],
       standardPaths,
+      // 含陌生人开的：他们的正文不进提示词，但「上一片还开着」仍要认
+      openIssues: facts.issues.map((i) => ({ number: i.number, title: i.title, body: i.body })),
+      // 会话说「已经合过」不算。null 是没读到，空数组是读到了、没有。
+      mergedPulls,
     },
     deps.writes(repo),
   );
   const result: GroomResult = {
     ...executed.result,
-    summary: parsed.plan.summary || '会话没写总结',
+    summary: noteUnread(parsed.plan.summary || '会话没写总结'),
     ...(session.model === undefined ? {} : { model: session.model }),
     ...(session.routeId === undefined ? {} : { routeId: session.routeId }),
     ...(session.usage === undefined ? {} : { usage: session.usage }),
