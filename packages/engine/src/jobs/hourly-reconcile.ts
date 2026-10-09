@@ -4,6 +4,7 @@
 // → 单已关、任务工作流还挂着的发放弃信号（jobs/closed-issue-tasks.ts，#1198）
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）
 // → 整池暂停到期的飞书（jobs/pool-hold-push.ts：没配、没推成记没查成，不当成推过；不给 poolHoldPush 的单测这一项跳过）
+// → 主线红的飞书（jobs/main-red-push.ts：变红推一次、转绿推已恢复；没配、没推成、运行列表读不到记没查成，不当成推过；不给 mainRedPush 的单测这一项跳过）
 // → 结局记进 schedule_runs。
 // 核对在提醒之前：它新报的提醒这一轮还不满 24 小时，不会被再推；权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰。
 // scanned = 看了几个对象（树、探针目录、审到的合并 PR、对上单的合并 PR、没处理的提醒、
@@ -58,6 +59,11 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
      * 没推成由它自己记进 unchecked，不许记成推过。
      */
     poolHoldPush?: () => Promise<SweepPart>;
+    /**
+     * 主线 ci.yml 变红就往飞书推一条，转绿推「已恢复」。不给 = 这一轮不推（单测外壳）；真装配总会给。
+     * 没推成由它自己记进 unchecked，不许记成推过。
+     */
+    mainRedPush?: () => Promise<SweepPart>;
   };
 
 /** 这一轮没跑成：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -136,6 +142,19 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
       };
     }
   }
+  let mainRedPart: SweepPart = { scanned: 0, found: 0, unchecked: [] };
+  if (deps.mainRedPush) {
+    try {
+      mainRedPart = await deps.mainRedPush();
+    } catch (err) {
+      mainRedPart = {
+        failed: `主线红的飞书推送没跑成：${errMessage(err)}`,
+        scanned: 0,
+        found: 0,
+        unchecked: [],
+      };
+    }
+  }
   return combineParts([
     trees,
     retired,
@@ -147,6 +166,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     alerts,
     apps,
     poolHoldPart,
+    mainRedPart,
   ]);
 }
 

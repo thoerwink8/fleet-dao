@@ -48,7 +48,7 @@ export function FailoverNote({
     <dl
       data-failover
       className={cn(
-        'grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-caption',
+        'grid grid-cols-auto-fr gap-x-2 gap-y-0.5 text-caption',
         compact ? 'mt-2 text-muted-foreground' : 'mb-3 rounded-md border bg-muted/40 px-3 py-2.5 text-sub',
       )}
     >
@@ -280,7 +280,7 @@ export function HistoryStrip({
           <span
             key={slot}
             data-result="empty"
-            className="h-full min-w-0 flex-1 rounded-[2px] border border-dashed border-foreground/15"
+            className="h-full min-w-0 flex-1 rounded-2 border border-dashed border-foreground/15"
           />
         ))}
         {cells.map((cell) => {
@@ -296,7 +296,7 @@ export function HistoryStrip({
               title={`${formatClock(cell.probedAt)} ${cell.routeId} ${word.label} ${formatProbeMs(cell.durationMs, cell.result)}`}
               onClick={() => onPickCell(channelId, cell.id)}
               className={cn(
-                'h-full min-w-0 flex-1 rounded-[2px]',
+                'h-full min-w-0 flex-1 rounded-2',
                 PROBE_RESULT_BG[cell.result],
                 on && 'ring-2 ring-foreground',
               )}
