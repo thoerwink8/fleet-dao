@@ -79,7 +79,9 @@ export interface TaskActionButton {
  * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。
  * 已暂停不画「暂停」（后端再点也回 409 already_paused），只给「继续」「叫停」。
  * 在跑且没暂停不画「继续」，只给「暂停」「叫停」。已完成、已失败一个都不画。
- * 已叫停只给「重做」。挂起再加「重做」（工作流还在跑时由后端拒绝）。
+ * 已叫停只给「重做」。停滞再加「重做」（工作流还在跑时由后端拒绝）。
+ * 停滞是停下等人：等人的是「继续」或「叫停」，没有正在跑的一段可暂停，所以不画「暂停」。
+ * 合并中在等合并，同样不画「暂停」；人已经暂停过的仍给「继续」。叫停留着。
  * 真要置灰的带 disabledReason，悬停写明原因；菜单和快捷键不提供点不了的。
  */
 export function taskActionButtons(target: ActionTarget): TaskActionButton[] {
@@ -87,7 +89,10 @@ export function taskActionButtons(target: ActionTarget): TaskActionButton[] {
   if (target.state === 'stopped') return [{ action: 'redo' }];
   if (isTaskFinished(target)) return [];
   const list: TaskActionButton[] = [];
-  if (target.paused === undefined) list.push({ action: 'pause' });
+  if (target.state === 'stalled') list.push({ action: 'resume' });
+  else if (target.state === 'merging') {
+    if (target.paused !== undefined) list.push({ action: 'resume' });
+  } else if (target.paused === undefined) list.push({ action: 'pause' });
   else list.push({ action: 'resume' });
   list.push({ action: 'stop' });
   if (target.state === 'stalled') list.push({ action: 'redo' });
