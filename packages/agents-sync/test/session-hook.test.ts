@@ -1,12 +1,12 @@
 // 装进去的开会话钩子真跑一遍：agents-sync --apply 装钩子、记下检出 → 主线往前走 → --check 看得见落后几个 →
 // 开会话时钩子快进检出、用检出里的 agents-sync 同步，规矩跟上主线 → 主线上的原件坏了，同步不成，会话里有明确的提醒。
 // 仓是临时拷的一份 fleet-dao（AGENTS.md、agents/（含通用段原件 shared-rules.md）、agents-sync 本身），origin 是临时的裸仓；家目录、PATH 都是临时的。
-import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { END } from '../src/block.ts';
+import { runChild } from './child.ts';
 import { cleanup, fakeBin, get, git, gitify, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
@@ -51,25 +51,25 @@ function machine() {
     if (v !== undefined) env[k] = v;
   }
   const sync = (...args: string[]) => {
-    const r = spawnSync(
+    const r = runChild(
       process.execPath,
       [join(repo, 'packages', 'agents-sync', 'bin', 'agents-sync'), ...args, '--repo', repo, '--home', home],
-      { env, encoding: 'utf8' },
+      { env },
     );
     return { code: r.status, out: `${r.stdout}${r.stderr}` };
   };
   /** 换一个 --repo（比如同步专用的检出） */
   const syncAt = (at: string, ...args: string[]) => {
-    const r = spawnSync(
+    const r = runChild(
       process.execPath,
       [join(repo, 'packages', 'agents-sync', 'bin', 'agents-sync'), ...args, '--repo', at, '--home', home],
-      { env, encoding: 'utf8' },
+      { env },
     );
     return { code: r.status, out: `${r.stdout}${r.stderr}` };
   };
   /** 开一个会话：钩子装在家里的 ~/.fleet-dao/hooks/，会话开在别的目录（不在 fleet-dao 里） */
   const session = () => {
-    const r = spawnSync(process.execPath, [join(home, '.fleet-dao', 'hooks', 'session-start.mjs')], {
+    const r = runChild(process.execPath, [join(home, '.fleet-dao', 'hooks', 'session-start.mjs')], {
       env,
       cwd: tempDir('cwd'),
       input: JSON.stringify({
@@ -77,7 +77,6 @@ function machine() {
         source: 'startup',
         cwd: tempDir('elsewhere'),
       }),
-      encoding: 'utf8',
     });
     expect(r.status).toBe(0);
     return (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
