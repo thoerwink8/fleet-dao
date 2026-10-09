@@ -584,6 +584,26 @@
 }
 
 /*
+ * 额度表横向滚动提示。表的最小宽度是 --container-quota-table（860px）。
+ * 容器查询里写 var() 不会生效（长度对不上就不藏），所以这里写成同一个数再加 2px 边框。
+ * 容器够放下整张表时把提示藏起来，免得宽屏上也写「向右滑动」。
+ */
+.quota-matrix {
+  container-type: inline-size;
+  container-name: quota-matrix;
+}
+
+.quota-scroll-fade {
+  background: linear-gradient(to left, var(--card), transparent);
+}
+
+@container quota-matrix (min-width: 862px) {
+  .quota-scroll-hint {
+    display: none;
+  }
+}
+
+/*
  * 设置页左标题右内容的分栏（lg 以上）。宽度从 --container-settings-col 取。
  */
 @utility grid-cols-settings {
