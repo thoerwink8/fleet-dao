@@ -1980,12 +1980,14 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       return RoutingLayersResponse.parse({
         asOf: iso(),
         purposes,
-        // 假数据没有渠道名册：差集是空的，页面写「都对得上」。登记过的手工渠道才带上个数。
+        // 假数据没有渠道名册：差集按空写。个数用目录里的模型数，两边一样，页面才能写出各几个。
         modelRoster: {
           missingFromCatalog: [],
           goneRoutes: [],
           failed: [],
           notYet: [],
+          channelModelCount: st.models.length,
+          catalogCount: st.models.length,
           ...(manual.length > 0 ? { manual } : {}),
         },
       });

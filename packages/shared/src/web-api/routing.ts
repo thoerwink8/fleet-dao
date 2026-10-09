@@ -237,8 +237,9 @@ export const ModelRosterManualSchema = z.object({
 });
 
 /**
- * 四个渠道的名册和目录的差。四张表都空才是对得上；有失败、还没读过，页面不能写「都对得上」。
+ * 四个渠道的名册和目录的差。四张表都空才是对得上；有失败、还没读过，页面不能写对得上。
  * manual 是手工登记的渠道，可缺（老的响应）。只读、只列，不带「加进目录」之类的动作。
+ * channelModelCount / catalogCount 是比过的两边各有几个：没给时页面只写两边的名字，不编 0。
  */
 export const ModelRosterDiffSchema = z.object({
   missingFromCatalog: z.array(ModelRosterMissingSchema),
@@ -246,6 +247,10 @@ export const ModelRosterDiffSchema = z.object({
   failed: z.array(ModelRosterFailureSchema),
   notYet: z.array(ModelRosterNotYetSchema),
   manual: z.array(ModelRosterManualSchema).optional(),
+  /** 最近一次读成的名册里，渠道自己认的模型串一共几个。读失败、还没读过的不算。 */
+  channelModelCount: z.number().int().nonnegative().optional(),
+  /** 拿来跟名册比的目录一侧：这些路由按模型编号去重后一共几个。已经标下架的不算。 */
+  catalogCount: z.number().int().nonnegative().optional(),
 });
 
 export const ManualModelRequest = z.object({

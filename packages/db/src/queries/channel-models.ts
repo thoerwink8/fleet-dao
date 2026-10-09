@@ -181,6 +181,10 @@ export interface ModelRosterDiff {
   notYet: { channelId: string; channelName: string }[];
   /** 没有名册命令、靠手工登记的渠道。不进 failed / notYet。 */
   manual: { channelId: string; channelName: string; count: number }[];
+  /** 最近一次读成的名册里，渠道自己认的模型串一共几个。读失败、还没读过的不算。 */
+  channelModelCount: number;
+  /** 拿来跟名册比的目录一侧：这些路由按模型编号去重后一共几个。已经标下架的不算。 */
+  catalogCount: number;
 }
 
 interface DiffRoute {
@@ -228,6 +232,8 @@ export function diffChannelModels(rows: readonly DiffChannel[]): ModelRosterDiff
     failed: [],
     notYet: [],
     manual: [],
+    channelModelCount: 0,
+    catalogCount: 0,
   };
   for (const row of rows) {
     const channelName = row.channelName.trim() || row.channelId;
@@ -251,6 +257,13 @@ export function diffChannelModels(rows: readonly DiffChannel[]): ModelRosterDiff
     const known = new Set<string>();
     for (const route of row.routes) for (const key of catalogStrings(route)) known.add(key);
     const seen = new Set(row.models.map((m) => m.modelKey));
+    const catalogModels = new Set<string>();
+    for (const route of row.routes) {
+      if (route.goneAt) continue;
+      catalogModels.add(route.modelId);
+    }
+    diff.channelModelCount += seen.size;
+    diff.catalogCount += catalogModels.size;
     const models = [...row.models].sort((a, b) =>
       a.modelKey < b.modelKey ? -1 : a.modelKey > b.modelKey ? 1 : 0,
     );
