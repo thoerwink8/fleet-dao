@@ -5,7 +5,7 @@
 import { parseOrder } from '@fleet-dao/conventions';
 
 /** 每小时最多起几条任务（滚动一小时，数已建出的任务行）。 */
-export const MAX_STARTS_PER_HOUR = 6;
+export const MAX_STARTS_PER_HOUR = 12;
 /** 一张单历史上失败超过这么多次就不再拉（要再做，人看过原因后重做）。 */
 export const MAX_ISSUE_FAILURES = 2;
 /** 熔断看最近几条已结束的任务。 */
