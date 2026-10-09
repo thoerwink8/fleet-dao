@@ -21,6 +21,7 @@ const CHECKED = [
   'hooks/pretool.mjs',
   'hooks/vendor-pretool.mjs',
   'hooks/pretool-codex.mjs',
+  'hooks/pretool-gemini.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
   'hooks/unattended.mjs',

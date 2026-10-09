@@ -22,6 +22,7 @@ const HOOKS = fileURLToPath(new URL('../../hooks/', import.meta.url));
 const load = async <T>(name: string) => (await import(pathToFileURL(join(HOOKS, name)).href)) as T;
 const lib = await load<VendorLib>('vendor-pretool.mjs');
 const codex = await load<{ normalizeCodex: Normalize }>('pretool-codex.mjs');
+const gemini = await load<{ normalizeGemini: Normalize }>('pretool-gemini.mjs');
 
 const RC = `.recl${'aude'}`;
 const s = `st${'ash'}`;
@@ -93,5 +94,96 @@ describe('Codex（~/.codex/hooks.json → pretool-codex.mjs）', () => {
     const garbage = run('pretool-codex.mjs', '不是 JSON');
     expect(garbage.status).toBe(2);
     expect(garbage.stderr).toContain('按拦处理');
+  });
+});
+
+describe('Gemini CLI（~/.gemini/settings.json 的 BeforeTool → pretool-gemini.mjs）', () => {
+  const HOME = '/home/alice';
+  const judge = (input: unknown, platform: NodeJS.Platform = 'linux') =>
+    lib.judgeVendor(typeof input === 'string' ? input : JSON.stringify(input), gemini.normalizeGemini, {
+      vendor: 'Gemini CLI',
+      platform,
+      cwd: O,
+    });
+  const call = (tool_name: string, tool_input: unknown, cwd = O) => ({
+    session_id: 's',
+    transcript_path: '/tmp/t.json',
+    cwd,
+    hook_event_name: 'BeforeTool',
+    timestamp: '2026-10-09T14:00:00Z',
+    tool_name,
+    tool_input,
+  });
+
+  it('读密钥文件被拦：run_shell_command 的命令、read_file、read_many_files、grep_search 搜到密钥目录', () => {
+    const cases: [string, unknown][] = [
+      ['run_shell_command', { command: `cat ~/${RC}/device.json` }],
+      ['read_file', { file_path: `${HOME}/${RC}/device.json` }],
+      ['read_file', { absolute_path: `${HOME}/${RC}/device.json` }],
+      ['read_many_files', { include: ['README.md', `${HOME}/${RC}/*.json`] }],
+      ['grep_search', { pattern: 'token', dir_path: `${HOME}/${RC}` }],
+      ['search_file_content', { pattern: 'token', path: `${HOME}/${RC}` }],
+    ];
+    for (const [tool, args] of cases) {
+      const got = judge(call(tool, args));
+      expect([tool, got.code]).toEqual([tool, 2]);
+      expect(got.code === 2 ? got.message : '').toContain('secret-shape.mjs');
+    }
+    expect(
+      judge(call('run_shell_command', { command: `Get-Content $HOME/${RC}/device.json` }), 'win32').code,
+    ).toBe(2);
+  });
+
+  it('跑普通命令、读普通文件、在代码目录搜内容放行；排除的通配不当成要读的路径', () => {
+    expect(judge(call('run_shell_command', { command: 'git status', dir_path: 'src' }))).toEqual({ code: 0 });
+    expect(judge(call('read_file', { file_path: '/work/other/README.md' }))).toEqual({ code: 0 });
+    expect(judge(call('read_many_files', { include: ['src/**/*.ts'], exclude: ['**/.env'] }))).toEqual({
+      code: 0,
+    });
+    expect(judge(call('grep_search', { pattern: 'TODO', dir_path: 'src', exclude_pattern: '.env' }))).toEqual(
+      {
+        code: 0,
+      },
+    );
+  });
+
+  it('dir_path 是命令在哪个目录跑：fleet-dao 里的规矩按它判', () => {
+    expect(judge(call('run_shell_command', { command: `git ${s} pop`, dir_path: F }, O)).code).toBe(2);
+    expect(judge(call('run_shell_command', { command: `git ${s} pop` }, F)).code).toBe(2);
+    expect(judge(call('run_shell_command', { command: `git ${s} pop` }, O))).toEqual({ code: 0 });
+  });
+
+  it('Windows 上 Gemini CLI 用 PowerShell 跑命令：反引号不按 bash 的命令替换拦；Linux 上照拦', () => {
+    const cmd = `echo ${bt}date${bt}`;
+    expect(judge(call('run_shell_command', { command: cmd }), 'win32')).toEqual({ code: 0 });
+    expect(judge(call('run_shell_command', { command: cmd }), 'linux').code).toBe(2);
+  });
+
+  it('故意造出的认不出的格式：没挂的工具名、输入不是对象、没有路径、没有命令、不是 JSON，一律按拦处理', () => {
+    const bad: unknown[] = [
+      call('write_file', { file_path: 'x', content: 'y' }),
+      call('run_shell_command', 'git status'),
+      call('run_shell_command', { description: '没有命令' }),
+      call('read_file', { start_line: 1 }),
+      call('read_many_files', { include: 'README.md' }),
+      call('grep_search', { dir_path: 'src' }),
+      '不是 JSON',
+    ];
+    for (const input of bad) expect([input, judge(input).code]).toEqual([input, 2]);
+  });
+
+  it('命令行外壳：拦下退出码 2、理由在 stderr；放行退出码 0、stdout 空着（Gemini CLI 要求 stdout 只能是 JSON）', () => {
+    const blocked = run(
+      'pretool-gemini.mjs',
+      JSON.stringify(call('read_file', { file_path: `${HOME}/${RC}/device.json` })),
+    );
+    expect(blocked.status).toBe(2);
+    expect(blocked.stderr).toContain('secret-shape.mjs');
+    expect(blocked.stdout).toBe('');
+    const passed = run(
+      'pretool-gemini.mjs',
+      JSON.stringify(call('run_shell_command', { command: 'git status' })),
+    );
+    expect([passed.status, passed.stdout, passed.stderr]).toEqual([0, '', '']);
   });
 });

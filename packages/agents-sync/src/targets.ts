@@ -150,13 +150,21 @@ export interface HookSpec {
  *   顶层 disableAllHooks 开着就一条都不跑。
  * - codex：和 claude 同一个写法（~/.codex/hooks.json 顶层只许 description、hooks 两个键）；每条非托管的钩子要信任了才跑，
  *   信任记在 ~/.codex/config.toml（hooks-codex.ts）。
+ * - gemini：和 claude 同一个写法（~/.gemini/settings.json 的 hooks），timeout 按毫秒算；
+ *   hooksConfig.enabled 是 false 就一条都不跑，hooksConfig.disabled 里列了的那条不跑。
  */
-export type HookFormat = 'claude' | 'codex';
+export type HookFormat = 'claude' | 'codex' | 'gemini';
 
 export interface HookTarget {
   /** 登记钩子的设置文件（JSON，钩子在它的 hooks 里） */
   settings: Place;
   format: HookFormat;
+  /**
+   * Windows 上命令也写 node 加引号，不用不带控制台的启动器：这家在 Windows 上用 PowerShell 跑钩子命令。
+   * PowerShell 起不带控制台的程序不等它退出，$LASTEXITCODE 拿不到退出码 2，拦下就变成放行
+   * （2026-10-09 本机试过：同一个启动器 cmd /C 下退出码 2，PowerShell 下 0）。
+   */
+  nodeOnWindows?: true;
   /** 读这份的各家；只要装了其中一家就写 */
   readers: readonly AgentId[];
   /** readers 里借道读这份的 */
@@ -194,6 +202,13 @@ export interface HookTarget {
  *   （hookSpecificOutput.additionalContext）进会话上下文；timeout 按秒算。每条非托管的钩子要信任了才跑：
  *   信任记在 ~/.codex/config.toml 的 [hooks.state."<hooks.json 路径>:<事件>:<组>:<条>"] trusted_hash 里，
  *   同步替本脚本登记的这几条记上（和在 Codex 里 /hooks 点信任一样），见 hooks-codex.ts。
+ *   Windows 上 Codex 用 cmd /C 跑钩子命令（codex-rs/hooks/src/engine/command_runner.rs 的 build_command），启动器照用。
+ * - Gemini CLI：~/.gemini/settings.json 的 hooks（github.com/google-gemini/gemini-cli docs/hooks/reference.md）。
+ *   调工具前的事件叫 BeforeTool，timeout 按毫秒算；退出码 2 拦下、stderr 是理由；stdout 只能是 JSON，空着就是没意见。
+ *   matcher 是正则，锚定成 ^(…)$：run_shell_command 跑命令，read_file、read_many_files 读文件，
+ *   grep_search 搜内容（旧名 search_file_content）（docs/reference/tools.md）。glob、list_directory 只列路径，不挂。
+ *   开会话叫 SessionStart，输出的 hookSpecificOutput.additionalContext 进会话上下文。用户级的钩子不用信任，项目级的才要。
+ *   Windows 上 Gemini CLI 用 PowerShell 跑钩子命令（packages/core/src/hooks/hookRunner.ts），所以命令写 node（nodeOnWindows）。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -225,6 +240,21 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     hooks: [
       { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
       { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
+    ],
+  },
+  {
+    settings: { win32: '.gemini\\settings.json', linux: '.gemini/settings.json' },
+    format: 'gemini',
+    nodeOnWindows: true,
+    readers: ['gemini'],
+    hooks: [
+      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90_000 },
+      {
+        event: 'BeforeTool',
+        matcher: '^(run_shell_command|read_file|read_many_files|grep_search|search_file_content)$',
+        script: 'pretool-gemini.mjs',
+        timeout: 10_000,
+      },
     ],
   },
 ];
@@ -285,15 +315,12 @@ export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
  * 2026-09-26 查的各家文档和本机装的版本：
  * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（TOML，事件名和 Claude 一样）。
  * - Antigravity：~/.gemini/config/hooks.json，没有开会话事件，调工具前的输入输出是另一套 JSON（antigravity.google/docs/hooks）。
- * - Gemini CLI：~/.gemini/settings.json 的 hooks，调工具前叫 BeforeTool、终端工具叫 run_shell_command（gemini-cli docs/hooks）。
  * - pi：没有配置式钩子，要写成 TypeScript 扩展（pi-coding-agent docs/extensions.md）。
  * - dsh：没有自带的全局钩子，只有要手动挂的桥接插件（deepseek-harness packages/hooks）。
  */
 export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
   kimi: '它有钩子（~/.kimi-code/config.toml 的 [[hooks]]，TOML），本脚本还没接',
   agy: '它的钩子是另一套（~/.gemini/config/hooks.json：没有开会话事件，调工具前的输入输出是另一种 JSON），本脚本还没接',
-  gemini:
-    '它的钩子是另一套（~/.gemini/settings.json：调工具前叫 BeforeTool，终端工具叫 run_shell_command），本脚本还没接',
   pi: '它没有配置式的钩子（要写成 TypeScript 扩展）',
   dsh: '它没有自带的全局钩子（只有要手动挂的桥接插件）',
 };
