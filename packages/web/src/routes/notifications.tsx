@@ -203,6 +203,8 @@ export default function Notifications() {
         <div className="flex flex-wrap gap-1.5">
           {LEVELS.map((l) => {
             const n = all.filter((x) => l.id === 'all' || x.level === l.id).length;
+            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且列表空）才写 0。
+            const shown = data ? n : '—';
             return (
               <button
                 key={l.id}
@@ -218,7 +220,7 @@ export default function Notifications() {
               >
                 {l.id !== 'all' ? <StatusDot tone={noticeLevelMeta[l.id].tone} className="size-1.5" /> : null}
                 {l.label}
-                <span className="num text-caption opacity-70">{n}</span>
+                <span className="num text-caption opacity-70">{shown}</span>
               </button>
             );
           })}
