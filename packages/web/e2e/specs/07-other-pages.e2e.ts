@@ -162,9 +162,7 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('link', { name: /主页/ }).first()).toBeVisible();
   });
 
-  test('没做的页不占侧栏：模型目录、账单、战绩、判断题记录都不在导航里；直接打开写明「还没做」', async ({
-    page,
-  }) => {
+  test('没做的页不占侧栏：账单仍写「还没做」；/models 转到路由页的模型目录', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
     await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
@@ -172,8 +170,13 @@ test.describe('其余页面', () => {
       await expect(nav.getByRole('link', { name: label })).toHaveCount(0);
     }
     await page.goto('/models');
+    await expect(page).toHaveURL(/\/routing\?tab=models$/);
+    await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
+    await expect(page.getByRole('tab', { name: '模型目录' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByText('这一页还没做')).toHaveCount(0);
+    await page.goto('/billing');
     await expect(page.getByText('这一页还没做')).toBeVisible();
-    await expect(page.getByRole('heading', { name: '模型目录' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '账单' })).toBeVisible();
   });
 
   test('外壳尺寸生效：顶栏 52px 高、侧栏 232px 宽（尺寸 token 放错命名空间时类名会静默失效）', async ({

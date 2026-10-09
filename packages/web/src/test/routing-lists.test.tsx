@@ -598,7 +598,7 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(rows('li[data-catalog]').length).toBeLessThan(30);
   });
 
-  test('新发现、已下架、锁住三种标记颜色互不相同', async () => {
+  test('新发现和锁住的标记颜色不同；已下架只留状态胶囊，不再另画小标签', async () => {
     const api = createMockApi({ live: false });
     const routing = api.routing.bind(api);
     api.routing = async () => {
@@ -621,12 +621,15 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
       return el.getAttribute('class') ?? '';
     };
     const discovered = await waitFor(() => mark('sonnet-5', '新发现'));
-    const retired = mark('opus-5', '已下架');
     const locked = mark('gpt-5.6-luna', '锁住');
     expect(discovered).toMatch(/text-ink-done|text-ink-run/);
-    expect(retired).toContain('text-ink-stop');
     expect(locked).toContain('text-ink-stall');
-    expect(new Set([discovered, retired, locked]).size).toBe(3);
+    expect(discovered).not.toBe(locked);
+    const retired = document.querySelector('li[data-catalog="opus-5"]');
+    expect(retired?.querySelector('[data-catalog-mark="retired"]')).toBeNull();
+    const chip = retired?.querySelector('[data-status-word] span');
+    expect(chip?.textContent).toContain('已下架');
+    expect(chip?.className).toContain('text-ink-stop');
   });
 });
 
