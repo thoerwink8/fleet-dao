@@ -1,11 +1,11 @@
 // #1066：2026-10-05 16:56 网关 502，5 个 Claude 工人同时以「API Error: 502」退出、靠人重派（约 22 分钟）。
 // Claude 工人现在由外壳 worker-supervise.mjs 看着：网关/网络类错误退出就等一等、用同一个会话续跑。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 
@@ -212,22 +212,18 @@ describe('Claude 工人外壳：网关掉线自动续跑', () => {
     writeFileSync(metaFile, JSON.stringify({ name: 'e2e', model: 'claude' }));
     const promptFile = join(dir, 'prompt.txt');
     writeFileSync(promptFile, '原来的活');
-    const r = spawnSync(
+    const r = runChild(process.execPath, [
+      join(SCRIPTS, 'worker-supervise.mjs'),
+      '--meta',
+      metaFile,
+      '--prompt',
+      promptFile,
+      '--delays-sec',
+      '0,0',
+      '--',
       process.execPath,
-      [
-        join(SCRIPTS, 'worker-supervise.mjs'),
-        '--meta',
-        metaFile,
-        '--prompt',
-        promptFile,
-        '--delays-sec',
-        '0,0',
-        '--',
-        process.execPath,
-        fake,
-      ],
-      { encoding: 'utf8', timeout: 30_000 },
-    );
+      fake,
+    ]);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain(
       '【外壳】网关/网络错误（API Error: 502 无法连接 reclaude 网关），0 秒后第 1/2 次',

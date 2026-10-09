@@ -4,7 +4,6 @@
 // 真 git（临时目录里的裸仓当 origin），同步换成假的（agents-sync 本身的测试在它的包里，
 // 装进去的钩子真跑一遍同步在 packages/agents-sync/test/session-hook.test.ts；专用检出本身在 sync-source.test.ts）。
 // 第 3 件「生效中的临时调整」表：真 git 仓里放 .md，到期、缺列、日期认不出、表坏了、git 坏了各一条。
-import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -19,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild, runChildOk } from './child.ts';
 
 interface Result {
   status: number | null;
@@ -104,11 +104,13 @@ function temp(name: string): string {
 }
 
 const g = (cwd: string, ...a: string[]) =>
-  execFileSync(
+  runChildOk(
     'git',
     ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...a],
-    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  ).trim();
+    {
+      cwd,
+    },
+  );
 
 /** 一个裸仓当 origin，seed 往上推，work 是这台机器上的检出 */
 function world() {
@@ -152,7 +154,7 @@ function fakeSync(result: Partial<Result> = {}) {
 
 const git = hook.gitRunner();
 /** 每条都要起十几次 git（建仓、推、取），Windows 上一条要几秒 */
-const SLOW = { timeout: 120_000 };
+const SLOW = { timeout: 0 };
 
 /** 一个只有本地提交的仓：files 全部提交（untracked 里的不提交） */
 function repo(files: Record<string, string>, untracked: Record<string, string> = {}) {
@@ -429,8 +431,8 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
       stderr: '',
       error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }),
     });
-    expect(hook.syncFleet({ home: w.home, git: missing, sync: fakeSync().sync })).toMatch(
-      /这台的 git 跑不起来（起不来：spawnSync git ENOENT）/,
+    expect(hook.syncFleet({ home: w.home, git: missing, sync: fakeSync().sync })).toContain(
+      '这台的 git 跑不起来（起不来：spawnSync git ENOENT）',
     );
     const slow: Git = () => ({
       status: null,
@@ -613,9 +615,8 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
 describe('命令行外壳：一律退出 0，输出是各家都认的开会话 JSON', SLOW, () => {
   // 钩子进程的工作目录放在临时目录：输入里没有会话目录时它退回到自己的工作目录，别让它去取仓的远端
   const run = (home: string, stdin: string) =>
-    spawnSync(process.execPath, [HOOK], {
+    runChild(process.execPath, [HOOK], {
       input: stdin,
-      encoding: 'utf8',
       cwd: temp('cwd'),
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });

@@ -1,12 +1,12 @@
 // `.githooks/pre-push` 这个壳：git 给的几行参数原样转交给卫生检查、退出码原样交回。
 // 判定本身在 packages/hygiene/test/prepush.test.ts（卫生检查）和 packages/conventions/test/prepare-push.test.ts（推前预检）；
 // 这里只钉钩子文件本身怎么接：先卫生检查、再预检，两段的退出码都原样交回，前一段红了后一段不跑。
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const HOOK = fileURLToPath(new URL('../../.githooks/pre-push', import.meta.url));
 
@@ -40,10 +40,9 @@ process.exitCode = ${prepareExit};
 }
 const ranPrepare = (dir: string) => existsSync(join(dir, 'prepare.json'));
 const run = (dir: string, stdin: string) =>
-  spawnSync('sh', [HOOK, 'origin', 'https://example.test/repo.git'], {
+  runChild('sh', [HOOK, 'origin', 'https://example.test/repo.git'], {
     cwd: dir,
     input: stdin,
-    encoding: 'utf8',
   });
 
 describe('.githooks/pre-push：卫生检查 + 推前预检', () => {
