@@ -1,0 +1,429 @@
+// 主线 ci.yml 变红往飞书推一次（#766）：failure 判红、success 判绿，cancelled 和进行中的不改变上一次结论。
+// 同一个提交只推一次；转绿推「已恢复」。没配、推不出去、运行列表读不到：没查成，不记已推。
+
+import type { ScheduleResult } from '@fleet-dao/db';
+import type { GhRequest, GhResponse } from '@fleet-dao/github';
+import { describe, expect, it } from 'vitest';
+import { type HourlyReconcileJobDeps, runHourlyReconcileJob } from '../src/jobs/hourly-reconcile.ts';
+import {
+  judgeMainCi,
+  type MainCiVerdict,
+  type MainPushRun,
+  pushMainRed,
+  verdictFromAlerts,
+} from '../src/jobs/main-red-push.ts';
+import type { SweepPart } from '../src/jobs/reconcile-common.ts';
+import { FEISHU_WEBHOOK_ENV, feishuWebhookSender } from '../src/real/feishu-webhook.ts';
+import { mainCiRuns } from '../src/real/main-ci-runs.ts';
+
+const SHA = 'a'.repeat(40);
+const SHA2 = 'b'.repeat(40);
+const URL = 'https://github.com/thoerwink8/fleet-dao/actions/runs/99';
+const URL2 = 'https://github.com/thoerwink8/fleet-dao/actions/runs/100';
+const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/fake-hook-token-for-logs';
+const NOW = new Date('2026-10-10T01:41:00.000Z');
+
+const run = (over: Partial<MainPushRun> = {}): MainPushRun => ({
+  status: 'completed',
+  conclusion: 'failure',
+  sha: SHA,
+  url: URL,
+  failedJobs: ['test (engine)', 'lint'],
+  ...over,
+});
+
+function world() {
+  const sent: string[] = [];
+  const marked: { key: string; body: string }[] = [];
+  const byKey = new Map<string, string>();
+  let verdict: MainCiVerdict | null = null;
+  const push = (
+    runs: readonly MainPushRun[] | (() => Promise<readonly MainPushRun[]>),
+    send: (text: string) => Promise<void> = async (text) => {
+      sent.push(text);
+    },
+  ) =>
+    pushMainRed({
+      listPushRuns: typeof runs === 'function' ? runs : async () => runs,
+      previousVerdict: async () => verdict,
+      sentBody: async (key) => byKey.get(key) ?? null,
+      markSent: async (x) => {
+        marked.push({ key: x.dedupeKey, body: x.body });
+        byKey.set(x.dedupeKey, x.body);
+        if (x.dedupeKey.startsWith('feishu:main-red:')) verdict = 'red';
+        if (x.dedupeKey.startsWith('feishu:main-recovered:')) verdict = 'green';
+      },
+      send,
+    });
+  return { sent, marked, push };
+}
+
+describe('judgeMainCi：最近一次已结束的 push 运行', () => {
+  const rows: {
+    status: string;
+    conclusion: string | null;
+    previous: MainCiVerdict | null;
+    expect: MainCiVerdict | null;
+  }[] = [
+    { status: 'completed', conclusion: 'failure', previous: null, expect: 'red' },
+    { status: 'completed', conclusion: 'failure', previous: 'green', expect: 'red' },
+    { status: 'completed', conclusion: 'failure', previous: 'red', expect: 'red' },
+    { status: 'completed', conclusion: 'success', previous: null, expect: 'green' },
+    { status: 'completed', conclusion: 'success', previous: 'red', expect: 'green' },
+    { status: 'completed', conclusion: 'success', previous: 'green', expect: 'green' },
+    { status: 'completed', conclusion: 'cancelled', previous: 'red', expect: 'red' },
+    { status: 'completed', conclusion: 'cancelled', previous: 'green', expect: 'green' },
+    { status: 'completed', conclusion: 'cancelled', previous: null, expect: null },
+    { status: 'completed', conclusion: 'timed_out', previous: 'red', expect: 'red' },
+    { status: 'completed', conclusion: 'skipped', previous: 'green', expect: 'green' },
+    { status: 'in_progress', conclusion: null, previous: 'red', expect: 'red' },
+    { status: 'queued', conclusion: null, previous: 'green', expect: 'green' },
+    { status: 'in_progress', conclusion: 'failure', previous: null, expect: null },
+    { status: 'waiting', conclusion: null, previous: 'red', expect: 'red' },
+  ];
+
+  it.each(rows)('$status / $conclusion / 上次 $previous → $expect', (row) => {
+    expect(judgeMainCi({ status: row.status, conclusion: row.conclusion }, row.previous)).toBe(row.expect);
+  });
+
+  it('没有运行：不改变上一次结论', () => {
+    expect(judgeMainCi(null, 'red')).toBe('red');
+    expect(judgeMainCi(null, null)).toBeNull();
+  });
+});
+
+describe('verdictFromAlerts', () => {
+  const at = (iso: string, id: string) => ({ createdAt: new Date(iso), id });
+
+  it('没有记下过是 null；只有红是红；只有已恢复是绿；同一时刻 id 大的算新', () => {
+    expect(verdictFromAlerts(null, null)).toBeNull();
+    expect(verdictFromAlerts(at('2026-10-10T00:00:00Z', '1'), null)).toBe('red');
+    expect(verdictFromAlerts(null, at('2026-10-10T00:00:00Z', '1'))).toBe('green');
+    expect(verdictFromAlerts(at('2026-10-10T01:00:00Z', 'a'), at('2026-10-10T00:00:00Z', 'b'))).toBe('red');
+    expect(verdictFromAlerts(at('2026-10-10T00:00:00Z', 'a'), at('2026-10-10T01:00:00Z', 'b'))).toBe('green');
+    expect(verdictFromAlerts(at('2026-10-10T00:00:00Z', 'b'), at('2026-10-10T00:00:00Z', 'a'))).toBe('red');
+  });
+});
+
+describe('pushMainRed', () => {
+  it('变红推一条：正文含提交号前 7 位、运行链接、失败的作业名', async () => {
+    const w = world();
+    const part = await w.push([run()]);
+    expect(part).toMatchObject({ found: 1, unchecked: [] });
+    expect(w.sent).toHaveLength(1);
+    const text = w.sent[0] ?? '';
+    expect(text).toContain(SHA.slice(0, 7));
+    expect(text).not.toContain(SHA);
+    expect(text).toContain(URL);
+    expect(text).toContain('test (engine)');
+    expect(text).toContain('lint');
+    expect(w.marked.map((m) => m.key)).toEqual([`feishu:main-red:${SHA}`]);
+    expect(w.marked[0]?.body).toBe(text);
+  });
+
+  it('同一个提交第二轮不再推', async () => {
+    const w = world();
+    await w.push([run()]);
+    const again = await w.push([run()]);
+    expect(again).toMatchObject({ found: 0, unchecked: [] });
+    expect(w.sent).toHaveLength(1);
+    expect(w.marked).toHaveLength(1);
+  });
+
+  it('转绿推已恢复；本来就是绿的不推', async () => {
+    const w = world();
+    await w.push([run()]);
+    const green = await w.push([run({ conclusion: 'success', sha: SHA2, url: URL2, failedJobs: [] })]);
+    expect(green).toMatchObject({ found: 1, unchecked: [] });
+    const text = w.sent[1] ?? '';
+    expect(text).toContain('已恢复');
+    expect(text).toContain(SHA2.slice(0, 7));
+    expect(text).toContain(URL2);
+    expect(w.marked[1]?.key).toBe(`feishu:main-recovered:${SHA2}`);
+
+    const still = await w.push([run({ conclusion: 'success', sha: SHA2, url: URL2, failedJobs: [] })]);
+    expect(still.found).toBe(0);
+    expect(w.sent).toHaveLength(2);
+
+    const healthy = world();
+    const first = await healthy.push([run({ conclusion: 'success', sha: SHA, url: URL, failedJobs: [] })]);
+    expect(first).toMatchObject({ found: 0, unchecked: [] });
+    expect(healthy.sent).toEqual([]);
+  });
+
+  it('cancelled、进行中不改变上一次结论：不推', async () => {
+    const w = world();
+    await w.push([run()]);
+    const cancelled = await w.push([run({ conclusion: 'cancelled', sha: SHA2, url: URL2, failedJobs: [] })]);
+    expect(cancelled.found).toBe(0);
+    expect(w.sent).toHaveLength(1);
+
+    const busy = await w.push([
+      run({ status: 'in_progress', conclusion: null, sha: SHA2, url: URL2, failedJobs: [] }),
+      run(),
+    ]);
+    expect(busy.found).toBe(0);
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it('新的红提交再推一次；进行中的后面那次已结束的成功，从红转绿', async () => {
+    const w = world();
+    await w.push([run()]);
+    const next = await w.push([run({ sha: SHA2, url: URL2, failedJobs: ['typecheck'] })]);
+    expect(next.found).toBe(1);
+    expect(w.sent[1]).toContain('typecheck');
+    expect(w.marked[1]?.key).toBe(`feishu:main-red:${SHA2}`);
+
+    const recovered = await w.push([
+      run({ status: 'in_progress', conclusion: null, sha: 'c'.repeat(40), failedJobs: [] }),
+      run({ conclusion: 'success', sha: SHA, url: URL, failedJobs: [] }),
+    ]);
+    expect(recovered.found).toBe(1);
+    expect(w.sent[2]).toContain('已恢复');
+    expect(w.marked[2]?.key).toBe(`feishu:main-recovered:${SHA}`);
+  });
+
+  it('读运行列表失败记没查成，不记已推', async () => {
+    const w = world();
+    const part = await w.push(async () => {
+      throw new Error('ci.yml 运行列表认不出（没有 workflow_runs）');
+    });
+    expect(part.found).toBe(0);
+    expect(part.unchecked.join('\n')).toContain('没查成');
+    expect(w.marked).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it('没配、code 非 0：没查成，不记已推，下一轮还能再推', async () => {
+    const missing = world();
+    const unconfigured = feishuWebhookSender({
+      env: {},
+      fetchImpl: async () => {
+        throw new Error('不该请求');
+      },
+      sleep: async () => {},
+    });
+    const part = await missing.push([run()], unconfigured);
+    expect(part.found).toBe(0);
+    expect(part.unchecked.join('\n')).toContain('没查成');
+    expect(part.unchecked.join('\n')).toContain('没配');
+    expect(missing.marked).toEqual([]);
+
+    let codes = 0;
+    const nonzero = feishuWebhookSender({
+      env: { [FEISHU_WEBHOOK_ENV]: HOOK },
+      fetchImpl: async () => {
+        codes += 1;
+        return new Response(JSON.stringify({ code: 19021 }), { status: 200 });
+      },
+      sleep: async () => {},
+    });
+    const bad = await missing.push([run()], nonzero);
+    expect(codes).toBe(3);
+    expect(bad.found).toBe(0);
+    expect(bad.unchecked.join('\n')).toContain('没查成');
+    expect(missing.marked).toEqual([]);
+
+    const retried = await missing.push([run()]);
+    expect(retried.found).toBe(1);
+    expect(missing.sent).toHaveLength(1);
+  });
+});
+
+describe('mainCiRuns', () => {
+  it('只认主线 push；失败的运行带上结论为 failure 的作业名', async () => {
+    const calls: { path: string; query?: unknown }[] = [];
+    const list = mainCiRuns({
+      client: {
+        async request<T = unknown>(req: GhRequest): Promise<GhResponse<T>> {
+          calls.push({ path: req.path, query: req.query });
+          return {
+            status: 200,
+            data: {
+              workflow_runs: [
+                {
+                  id: 100,
+                  status: 'in_progress',
+                  conclusion: null,
+                  head_sha: SHA2,
+                  head_branch: 'main',
+                  event: 'push',
+                  html_url: URL2,
+                },
+                {
+                  id: 99,
+                  status: 'completed',
+                  conclusion: 'failure',
+                  head_sha: SHA,
+                  head_branch: 'main',
+                  event: 'push',
+                  html_url: URL,
+                },
+              ],
+            } as T,
+            headers: new Headers(),
+          };
+        },
+        async all<T = unknown>(req: GhRequest, itemsOf?: (data: unknown) => unknown): Promise<T[]> {
+          calls.push({ path: req.path });
+          const data = {
+            jobs: [
+              { id: 1, name: 'lint', conclusion: 'success' },
+              { id: 2, name: 'test (engine)', conclusion: 'failure' },
+              { id: 3, name: 'test (api)', conclusion: 'cancelled' },
+            ],
+          };
+          const items = (itemsOf ?? ((d: unknown) => d))(data);
+          if (!Array.isArray(items)) throw new Error('not array');
+          return items as T[];
+        },
+      },
+    });
+    const runs = await list();
+    expect(runs[0]).toMatchObject({ status: 'in_progress', conclusion: null, sha: SHA2, failedJobs: [] });
+    expect(runs[1]).toMatchObject({
+      status: 'completed',
+      conclusion: 'failure',
+      sha: SHA,
+      url: URL,
+      failedJobs: ['test (engine)'],
+    });
+    expect(calls[0]?.path).toContain('/actions/workflows/ci.yml/runs');
+    expect(calls[0]?.query).toMatchObject({ branch: 'main', event: 'push' });
+    expect(calls.some((c) => c.path.includes('/actions/runs/99/jobs'))).toBe(true);
+    expect(calls.some((c) => c.path.includes('/actions/runs/100/jobs'))).toBe(false);
+  });
+
+  it('【故意造出的失败】运行列表认不出：没查成，不当成没有运行', async () => {
+    const list = mainCiRuns({
+      client: {
+        async request<T = unknown>(): Promise<GhResponse<T>> {
+          return { status: 200, data: { total_count: 0 } as T, headers: new Headers() };
+        },
+        async all(): Promise<never[]> {
+          throw new Error('不该列作业');
+        },
+      },
+    });
+    await expect(list()).rejects.toThrow(/没查成/);
+  });
+});
+
+/** 外壳只要能跑一轮：主线红这一项由用例注入。 */
+function reconcileHarness(mainRedPush: () => Promise<SweepPart>): {
+  deps: HourlyReconcileJobDeps;
+  finished: { id: number; result: ScheduleResult }[];
+} {
+  const finished: { id: number; result: ScheduleResult }[] = [];
+  const deps: HourlyReconcileJobDeps = {
+    root: '/var/lib/fleet-work',
+    probeDir: '_route-probe',
+    sessionTmpDir: '_tmp',
+    machine: '法国',
+    async listDir(dir) {
+      if (dir === '/var/lib/fleet-work') return [{ name: '_route-probe', isDir: true }];
+      if (dir === '/var/lib/fleet-work/_route-probe') return [{ name: 'fleet-agent-carpool', isDir: true }];
+      throw new Error(`用例没给 ${dir}`);
+    },
+    treeFor: (repo, branch) => `/var/lib/fleet-work/${repo.owner}_${repo.name}/${branch}`,
+    ownerOf: async () => null,
+    leftovers: async () => ({ kind: 'empty' }),
+    remove: async () => ({ gone: true }),
+    issue: async () => null,
+    prHeads: async () => [],
+    subtaskTrees: async () => [],
+    openSessions: async () => [],
+    workflows: {
+      state: async () => ({ state: 'missing' }),
+      view: async () => {
+        throw new Error('不该问');
+      },
+    },
+    taskState: async () => null,
+    approval: async () => null,
+    stageRoutable: async () => ({ kind: 'none', detail: '没有在线的路由' }),
+    alerts: {
+      listOpen: async () => ({ alerts: [], truncated: false }),
+      byKey: async () => null,
+      latestByPrefix: async () => null,
+      resolve: async () => 'not_found',
+      raise: async () => {},
+      insertOnce: async () => ({ created: true }),
+      updateOpen: async () => 'not_open',
+    },
+    repos: async () => [],
+    auditMergedPrs: async () => ({
+      outcome: 'ok',
+      scanned: 0,
+      found: 0,
+      fixed: 0,
+      problems: [],
+      findings: [],
+    }),
+    quotaPools: async () => [],
+    ledgers: async () => [],
+    apps: { repos: async () => [], selfCheck: async () => [] },
+    gh: {
+      listPrs: async () => [],
+      pullFiles: async () => [],
+      checksEvaluate: async () => 'none',
+      requiredChecks: async () => ['check'],
+      readStandardPathsFile: async () => '{"paths":[]}',
+      enableAutoMerge: async () => {},
+    },
+    autoMergeAlerts: {
+      raise: async () => {},
+      resolve: async () => 'not_found',
+      listOpenByPrefix: async () => [],
+    },
+    closedIssueTasks: {
+      runningTaskWorkflowIds: async () => [],
+      issueState: async () => 'open',
+      abandon: async () => 'gone',
+    },
+    runs: {
+      async start() {
+        return 7;
+      },
+      async finish(id, result) {
+        finished.push({ id, result });
+      },
+    },
+    now: () => NOW,
+    log: () => {},
+    mainRedPush,
+  };
+  return { deps, finished };
+}
+
+describe('对账里的主线红', () => {
+  it('【故意造出的失败】webhook 回 5xx 三次：发了 3 次、没记已推、对账结果里有没查成', async () => {
+    let n = 0;
+    const marked: string[] = [];
+    const send = feishuWebhookSender({
+      env: { [FEISHU_WEBHOOK_ENV]: HOOK },
+      fetchImpl: async () => {
+        n += 1;
+        return new Response('upstream down', { status: 500 });
+      },
+      sleep: async () => {},
+    });
+    const h = reconcileHarness(() =>
+      pushMainRed({
+        listPushRuns: async () => [run()],
+        previousVerdict: async () => null,
+        sentBody: async () => null,
+        markSent: async (x) => {
+          marked.push(x.dedupeKey);
+        },
+        send,
+      }),
+    );
+    const result = await runHourlyReconcileJob(h.deps);
+    expect(n).toBe(3);
+    expect(marked).toEqual([]);
+    expect(result.outcome).not.toBe('ok');
+    expect(result.why).toContain('没查成');
+    expect(h.finished[0]?.result.outcome).not.toBe('ok');
+  });
+});

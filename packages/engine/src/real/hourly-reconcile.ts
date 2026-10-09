@@ -41,6 +41,12 @@ import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
+import {
+  MAIN_RECOVERED_KEY_PREFIX,
+  MAIN_RED_KEY_PREFIX,
+  pushMainRed,
+  verdictFromAlerts,
+} from '../jobs/main-red-push.ts';
 import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
 import {
   beijingDayStart,
@@ -53,6 +59,7 @@ import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { feishuWebhookSender } from './feishu-webhook.ts';
+import { mainCiRuns } from './main-ci-runs.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -463,6 +470,29 @@ export function hourlyReconcileJob(
         pushOverduePoolHolds({
           now,
           readSetting: () => readPoolHoldsSetting(w.db),
+          sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
+          markSent: async (x) => {
+            await upsertAlert(w.db, {
+              dedupeKey: x.dedupeKey,
+              level: 'daily',
+              taskId: null,
+              title: x.title,
+              body: x.body,
+              link: x.link,
+            });
+          },
+          send: feishuWebhookSender({ env: process.env }),
+        }),
+      mainRedPush: () =>
+        pushMainRed({
+          listPushRuns: mainCiRuns({ client: w.gh.deps.client }),
+          previousVerdict: async () => {
+            const [red, recovered] = await Promise.all([
+              latestAlertByPrefix(w.db, MAIN_RED_KEY_PREFIX),
+              latestAlertByPrefix(w.db, MAIN_RECOVERED_KEY_PREFIX),
+            ]);
+            return verdictFromAlerts(red, recovered);
+          },
           sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
           markSent: async (x) => {
             await upsertAlert(w.db, {

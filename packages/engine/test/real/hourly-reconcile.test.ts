@@ -211,8 +211,24 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
       throw new Error('用例里不该读主线上文件');
     },
     deps: new Proxy({} as HourlyReconcileWiring['gh']['deps'], {
-      get: (_t, prop) => () => {
-        throw new Error(`用例里不该碰 GitHub 的 deps（${String(prop)}）`);
+      get: (_t, prop) => {
+        // 主线红每轮都读 ci.yml。这一页是空的：没有要推的，也不算没查成。别的请求照旧不该发生。
+        if (prop === 'client') {
+          return {
+            async request(req: { path?: string }) {
+              if (typeof req.path === 'string' && req.path.includes('/actions/workflows/ci.yml/runs')) {
+                return { status: 200, data: { workflow_runs: [] }, headers: new Headers() };
+              }
+              throw new Error(`用例里不该碰 GitHub 的 deps（client.request ${req.path ?? ''}）`);
+            },
+            async all() {
+              throw new Error('用例里不该碰 GitHub 的 deps（client.all）');
+            },
+          };
+        }
+        return () => {
+          throw new Error(`用例里不该碰 GitHub 的 deps（${String(prop)}）`);
+        };
       },
     }),
     ...over,

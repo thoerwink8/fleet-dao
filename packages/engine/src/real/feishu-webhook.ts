@@ -1,4 +1,4 @@
-// 群机器人 webhook 发一条文本（#954，#766 还没做完的那条落地里，这里只取「推一次、失败重试、地址不进日志」）。
+// 群机器人 webhook 发一条文本（#954 整池暂停到期、#766 主线红：推一次、失败重试、地址不进日志）。
 // 引擎环境变量 FLEET_FEISHU_WEBHOOK。没配、地址不认、推不出去都抛，调用方记没查成，不许当成推过。
 // 不写进 deploy/france/desired-config.json：那是密钥，对账见到多出来的键会报警；法国 engine.env 由人放。
 import { errMessage } from '@fleet-dao/shared/util';
