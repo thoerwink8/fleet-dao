@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
+import { createMockApi } from '../api/mock/server';
 import type { QuotaWindowView } from '../api/types';
+import QuotaPage from '../routes/quota';
+import { renderApp } from '../test/harness';
 import { QuotaCell } from './quota';
 
 afterEach(cleanup);
@@ -113,5 +116,66 @@ describe('额度格', () => {
   test('没读到清零时间就直说', () => {
     cell({ window: 'points', utilization: 0.4, reading: 'measured', readAt: at(-1) });
     expect(screen.getByText('清零时间没读到')).toBeTruthy();
+  });
+
+  test('估算窗口写「前算」，不写「前读」', () => {
+    const el = cell({
+      window: 'month_usd',
+      unit: 'usd',
+      used: 12.5,
+      limit: 20,
+      reading: 'estimated',
+      readAt: at(-2),
+    });
+    expect(el.textContent).toContain('前算');
+    expect(el.textContent).not.toContain('前读');
+    expect(el.textContent).toContain('按本机用量估算');
+  });
+
+  test('实读窗口写「前读」', () => {
+    const el = cell({
+      window: '5h',
+      utilization: 0.4,
+      reading: 'measured',
+      readAt: at(-4),
+    });
+    expect(el.textContent).toContain('前读');
+  });
+});
+
+describe('额度页摘要卡', () => {
+  function card(title: string): HTMLElement {
+    const heading = screen.getByText(title);
+    const box = heading.closest('div.rounded-xl');
+    if (!box) throw new Error(`找不到摘要卡：${title}`);
+    return box as HTMLElement;
+  }
+
+  test('名字换行显示池名和窗口名，悬停是全文，不再单行截断', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByText('先用它');
+    const hot = card('先用它');
+    const name = within(hot).getByTitle('Claude 订阅 · claude-b · 5 小时窗');
+    expect(name.className).not.toContain('truncate');
+    expect(name.className).toContain('break-words');
+    expect(name.textContent).toContain('Claude 订阅 · claude-b');
+    expect(name.textContent).toContain('5 小时窗');
+    const full = card('快用完');
+    for (const item of within(full).getAllByTitle(/·/)) {
+      expect(item.className).not.toContain('truncate');
+      expect(item.className).toContain('break-words');
+    }
+    const stale = card('读数过期或没查成');
+    for (const item of within(stale).getAllByTitle(/·/)) {
+      expect(item.className).not.toContain('truncate');
+    }
+  });
+
+  test('过期摘要里的估算窗口写「前算」，不写「前读」', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByText('读数过期或没查成');
+    const stale = card('读数过期或没查成');
+    expect(stale.textContent).toContain('前算');
+    expect(stale.textContent).not.toContain('前读');
   });
 });
