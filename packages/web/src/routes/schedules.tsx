@@ -3,9 +3,10 @@ import { brand } from '#brand';
 import { useJobs } from '../api/client';
 import type { JobView } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel, Stat } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
-import { formatAgo, formatDateTime, formatDuration } from '../lib/format';
+import { formatAgo, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { everyText, jobStatusLabel, outcomeText } from '../lib/schedule';
 import { cn } from '../lib/utils';
@@ -22,8 +23,11 @@ function rowTone(j: JobView): 'fail' | 'stall' | null {
   return null;
 }
 
+/** 定时任务每 30 秒重拉一次。超过 5 分钟还没再读成，刷新条标「数据已过期」（正常间隔里不标）。 */
+const JOBS_STALE_AFTER_MS = 5 * TIME.MIN;
+
 export default function Schedules() {
-  const { data, error, isLoading } = useJobs();
+  const { data, error, isLoading, refetch, isFetching, dataUpdatedAt } = useJobs();
   const now = useNow();
   const jobs = data?.jobs ?? [];
   const failed = jobs.filter((j) => j.lastRun?.outcome === 'failed').length;
@@ -38,6 +42,14 @@ export default function Schedules() {
     <Page
       title="定时任务"
       description="额度读取、巡检、对账、备份……每个都记下上次跑成的时间。「查了 0 个问题」和「这次没查成」分开显示。"
+      actions={
+        <RefreshBar
+          onRefresh={() => void refetch()}
+          isFetching={isFetching}
+          dataUpdatedAt={dataUpdatedAt}
+          staleAfterMs={JOBS_STALE_AFTER_MS}
+        />
+      }
     >
       <div className="mb-4 grid grid-cols-2 items-stretch gap-3 md:grid-cols-4">
         <Stat className="h-full min-w-0" label="定时任务" value={count(jobs.length)} icon={CalendarClock} />
