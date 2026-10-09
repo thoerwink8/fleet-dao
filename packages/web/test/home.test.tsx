@@ -172,7 +172,7 @@ describe('home（/）：四种状态', () => {
     expect(card).toBeTruthy();
     const list = card?.parentElement;
     expect(list?.tagName).toBe('UL');
-    expect(list?.className).toBe('grid gap-2');
+    expect(list?.className).toBe('grid grid-cols-1 gap-2');
     const time = card?.querySelector('.whitespace-nowrap');
     expect(time?.className).toContain('text-caption');
     const split = Array.from(document.querySelectorAll('div')).find(
