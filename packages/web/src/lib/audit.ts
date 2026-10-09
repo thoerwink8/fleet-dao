@@ -209,12 +209,37 @@ function formatValue(v: unknown): string {
   return String(v);
 }
 
-function formatFieldValue(key: string, v: unknown): string {
+/** 这些字段的值是路由编号。对照表里有模型名就换掉，没有或名字是空白就留编号。 */
+const ROUTE_ID_FIELDS: ReadonlySet<string> = new Set(['enabledRouteIds', 'routeId', 'routeIds']);
+
+function namedRoute(id: string, names: ReadonlyMap<string, string> | undefined): string | undefined {
+  const name = names?.get(id)?.trim();
+  return name ? name : undefined;
+}
+
+/** 只换字符串和字符串数组里的编号；别的形状交给 formatValue，不改写。 */
+function withRouteNames(v: unknown, names: ReadonlyMap<string, string> | undefined): unknown {
+  if (!names) return v;
+  if (typeof v === 'string') return namedRoute(v, names) ?? v;
+  if (!Array.isArray(v)) return v;
+  return v.map((item) => (typeof item === 'string' ? (namedRoute(item, names) ?? item) : item));
+}
+
+function formatFieldValue(
+  key: string,
+  v: unknown,
+  routeNames: ReadonlyMap<string, string> | undefined,
+): string {
   if (key === 'stage' && typeof v === 'string' && isStage(v)) return stageLabel[v];
+  if (ROUTE_ID_FIELDS.has(key)) return formatValue(withRouteNames(v, routeNames));
   return formatValue(v);
 }
 
-function diffObjects(before: Record<string, unknown>, after: Record<string, unknown>): AuditChangeLine[] {
+function diffObjects(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  routeNames: ReadonlyMap<string, string> | undefined,
+): AuditChangeLine[] {
   const seen = new Set<string>();
   const keys: string[] = [];
   for (const key of [...Object.keys(before), ...Object.keys(after)]) {
@@ -230,21 +255,52 @@ function diffObjects(before: Record<string, unknown>, after: Record<string, unkn
     lines.push({
       key,
       label: auditFieldLabel[key] ?? key,
-      before: formatFieldValue(key, left),
-      after: formatFieldValue(key, right),
+      before: formatFieldValue(key, left, routeNames),
+      after: formatFieldValue(key, right, routeNames),
     });
   }
   return lines;
 }
 
 /**
+ * 路由编号 → 模型显示名。名字是空白、或路由对不上模型的，不收进表：显示时留原编号。
+ * 驾驶舱目录还没读到时传 undefined，同样留原编号。
+ */
+export function routeModelNames(
+  routing:
+    | {
+        models: readonly { id: string; displayName: string }[];
+        routes: readonly { id: string; modelId: string }[];
+      }
+    | undefined,
+): ReadonlyMap<string, string> {
+  const names = new Map<string, string>();
+  if (!routing) return names;
+  const byModel = new Map<string, string>();
+  for (const model of routing.models) {
+    const name = model.displayName.trim();
+    if (name) byModel.set(model.id, name);
+  }
+  for (const route of routing.routes) {
+    const name = byModel.get(route.modelId);
+    if (name) names.set(route.id, name);
+  }
+  return names;
+}
+
+/**
  * 一条记录的改之前、改之后，收成只含变化的字段。
  * 一边没有（null、undefined）当空对象；整段不是对象（比如设置的数字）收成一行「值」。
+ * routeNames 给了的话，路由编号换成模型名；表里没有、或名字是空白，留原编号。
  */
-export function auditChangeLines(before: unknown, after: unknown): AuditChangeLine[] {
+export function auditChangeLines(
+  before: unknown,
+  after: unknown,
+  routeNames?: ReadonlyMap<string, string>,
+): AuditChangeLine[] {
   const left = plainObject(before);
   const right = plainObject(after);
-  if (left && right) return diffObjects(left, right);
+  if (left && right) return diffObjects(left, right, routeNames);
   if (sameValue(before, after)) return [];
   return [{ key: '', label: '值', before: formatValue(before), after: formatValue(after) }];
 }

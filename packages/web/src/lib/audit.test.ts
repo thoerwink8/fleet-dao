@@ -54,6 +54,30 @@ describe('auditChangeLines', () => {
     ]);
   });
 
+  test('路由编号换成给出的模型名，查不到或名字是空的就留原编号', () => {
+    // 查得到的仍写成 r-ca-sonnet，或把查不到的 r-gone、空名字的 r-blank 改成别的字，这一条会红。
+    const names = new Map<string, string>([
+      ['r-ca-sonnet', 'Sonnet 5'],
+      ['r-ca-opus', 'Opus 5.5'],
+      ['r-blank', '  '],
+    ]);
+    expect(
+      auditChangeLines(
+        { routeId: 'r-ca-opus', routeIds: ['r-ca-opus', 'r-gone', 'r-blank'] },
+        { routeId: 'r-ca-sonnet', routeIds: ['r-ca-sonnet', 'r-gone', 'r-blank'] },
+        names,
+      ),
+    ).toEqual([
+      { key: 'routeId', label: '路由', before: 'Opus 5.5', after: 'Sonnet 5' },
+      {
+        key: 'routeIds',
+        label: '路由列表',
+        before: 'Opus 5.5、r-gone、r-blank',
+        after: 'Sonnet 5、r-gone、r-blank',
+      },
+    ]);
+  });
+
   test('整段不是对象：收成一行「值」；两边一样就没有行', () => {
     // 数字设置（同时跑的会话上限）没有字段名。猜一个字段名，或把没改的也列出来，这一条会红。
     expect(auditChangeLines(6, 8)).toEqual([{ key: '', label: '值', before: '6', after: '8' }]);

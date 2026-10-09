@@ -13,7 +13,7 @@ const search = () => screen.getByLabelText('搜索操作记录');
 
 describe('操作记录页', () => {
   test('展开「看改了什么」默认是人话差异，原始 JSON 在「看原始数据」里且默认合上', async () => {
-    // 展开后仍把 routeId 的 JSON 摊在外面，或没翻成「路由」，这一条会红。
+    // 展开后仍把 routeId 的 JSON 摊在外面，或人话里留着 r-ca-sonnet 没换成 Sonnet 5，这一条会红。
     renderApp(<AuditPage />);
     const summary = (await screen.findAllByText('看改了什么'))[0];
     if (!summary) throw new Error('没有「看改了什么」');
@@ -21,13 +21,13 @@ describe('操作记录页', () => {
     if (!(block instanceof HTMLElement)) throw new Error('展开区不是 details');
     fireEvent.click(summary);
     expect(within(block).getByText('阶段：（无） → 分诊')).toBeTruthy();
-    expect(within(block).getByText('路由：（无） → r-ca-sonnet')).toBeTruthy();
+    expect(await within(block).findByText('路由：（无） → Sonnet 5')).toBeTruthy();
     const rawSummary = within(block).getByText('看原始数据');
     const raw = rawSummary.closest('details');
     if (!(raw instanceof HTMLDetailsElement)) throw new Error('原始数据不是折叠');
     expect(raw.open).toBe(false);
     expect(raw.textContent).toContain('"routeId": "r-ca-sonnet"');
-    expect(raw.contains(within(block).getByText('路由：（无） → r-ca-sonnet'))).toBe(false);
+    expect(raw.contains(within(block).getByText('路由：（无） → Sonnet 5'))).toBe(false);
   });
 
   test('过滤后没有记录、也没有更早的：不提往前翻，没有按钮', async () => {

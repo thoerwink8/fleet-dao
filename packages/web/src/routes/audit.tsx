@@ -2,7 +2,7 @@ import { Bot, Cog, ScrollText, Search, Terminal, X } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { useAllBoards, useAudit, useMe } from '../api/client';
+import { useAllBoards, useAudit, useMe, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { Badge } from '../components/ui/badge';
@@ -13,6 +13,7 @@ import {
   actorKindLabel,
   actorName,
   auditChangeLines,
+  routeModelNames,
   targetLabel,
   taskIndex,
   viaLabel,
@@ -78,9 +79,17 @@ function OlderRecordsButton({ pending, onClick }: { pending: boolean; onClick: (
   );
 }
 
-/** 展开后先看人话差异；原始 JSON 收在里面那层，默认合上。 */
-function ChangeDetails({ before, after }: { before: unknown; after: unknown }) {
-  const lines = auditChangeLines(before, after);
+/** 展开后先看人话差异；原始 JSON 收在里面那层，默认合上。路由编号换成模型名，对不上的留编号。 */
+function ChangeDetails({
+  before,
+  after,
+  routeNames,
+}: {
+  before: unknown;
+  after: unknown;
+  routeNames: ReadonlyMap<string, string>;
+}) {
+  const lines = auditChangeLines(before, after, routeNames);
   return (
     <details className="mt-1 text-xs text-muted-foreground">
       <summary className="cursor-pointer select-none hover:text-foreground">看改了什么</summary>
@@ -129,6 +138,8 @@ export default function Audit() {
   const now = useNow();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]['id']>('all');
   const [q, setQ] = useState('');
+  const routing = useRouting();
+  const routeNames = routeModelNames(routing.data);
   const tasks = taskIndex(boards.flatMap((b) => b.tasks));
   const all = audit.data?.pages.flatMap((p) => p.items) ?? [];
   const list = all
@@ -260,7 +271,7 @@ export default function Audit() {
                       {targetLabel(a.target, tasks)}
                     </button>
                     {!a.ok ? (
-                      <Badge variant="outline" className="h-5 border-st-fail/50 text-micro text-ink-fail">
+                      <Badge variant="outline" className="h-5 border-st-fail/50 text-caption text-ink-fail">
                         没做成
                       </Badge>
                     ) : null}
@@ -270,14 +281,14 @@ export default function Audit() {
                   ) : null}
                   {a.error ? <p className="mt-0.5 text-sub text-ink-fail">{a.error}</p> : null}
                   {a.before !== undefined || a.after !== undefined ? (
-                    <ChangeDetails before={a.before} after={a.after} />
+                    <ChangeDetails before={a.before} after={a.after} routeNames={routeNames} />
                   ) : null}
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
                   <span className="num text-xs text-muted-foreground" title={formatDateTime(a.at)}>
                     {formatAgo(a.at, now)}
                   </span>
-                  <span className="rounded bg-muted px-1.5 text-micro leading-4 text-muted-foreground">
+                  <span className="rounded bg-muted px-1.5 text-caption leading-4 text-muted-foreground">
                     经{viaLabel[a.via]}
                   </span>
                 </div>
