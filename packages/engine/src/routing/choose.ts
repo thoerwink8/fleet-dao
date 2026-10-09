@@ -1,7 +1,12 @@
 // 选路（设计 §九「选路」五条 + §十二「一条路由报繁忙，所有任务一起避开」由熔断判定带进来）。
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 
-import { routeProbeStaleMinutes } from '@fleet-dao/shared';
+import {
+  probeCadenceMinutes,
+  ROUTE_PROBE_EVERY_MINUTES,
+  ROUTE_PROBE_STALE_MINUTES,
+  routeProbeStaleMinutes,
+} from '@fleet-dao/shared';
 import { blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { duration, routeLabel, STAGE_NAMES, stamp } from './names.ts';
@@ -153,9 +158,16 @@ function dispatch(
  */
 function probeNote(route: RouteFacts, now: number): string | null {
   // 在线的一定有时刻（validate.ts 已拦）；派得出去的都在线。
+  // 退避、或结论写了隔 60 分钟再探：过期线按那一档加两轮，不把故意放慢写成探针停了。没写原文的仍按执行方式。
   if (route.probedAt === null) return null;
   const age = now - Date.parse(route.probedAt);
-  if (age <= routeProbeStaleMinutes(route.hostId) * 60_000) return null;
+  const limit = route.probeDetail
+    ? (probeCadenceMinutes(route.hostId, route.probeDetail) +
+        ROUTE_PROBE_STALE_MINUTES -
+        ROUTE_PROBE_EVERY_MINUTES) *
+      60_000
+    : routeProbeStaleMinutes(route.hostId) * 60_000;
+  if (age <= limit) return null;
   return `在线是探针 ${duration(age)}前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派`;
 }
 

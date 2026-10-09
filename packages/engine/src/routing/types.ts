@@ -105,6 +105,8 @@ export interface RouteFacts {
    * 结论是 skipped、这里是另一个组织 = 那一轮另一个组织挂着、没探它，不是它坏了：它的组织挂上以后等下一轮探针（filter.ts）。
    */
   probeOrg?: OrgKind | null;
+  /** 探针原文。不给 = 老的输入，过期线只按执行方式。给了且写着退避或隔 60 分钟，过期线按那一档。 */
+  probeDetail?: string | null;
   /** 候选查询算好的：ok / exhausted / unknown（没读成、读数过期、判不了扣不扣）。 */
   quota: 'ok' | 'exhausted' | 'unknown';
   windows: RouteWindow[];

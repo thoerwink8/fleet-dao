@@ -6,6 +6,7 @@ import {
   type ProbeAttempt,
   type Prober,
   planProbe,
+  planScheduledProbe,
   ROUTE_PROBE_JOB,
   ROUTE_PROBE_RETRY_DELAY_MS,
   RouteProbeFailedError,
@@ -580,7 +581,8 @@ describe('一轮（runRouteProbeJob，不起 Temporal）', () => {
     const h = harness([carpool], noisy);
     await runRouteProbeJob(h.deps);
     expect(h.saved[0]?.detail.length).toBeLessThanOrEqual(600);
-    expect(h.saved[0]?.detail.endsWith('…')).toBe(true);
+    expect(h.saved[0]?.detail).toContain('…');
+    expect(h.saved[0]?.detail).toContain('退避中，下次约');
   });
 
   it('afterProbe（整池暂停的报警）写不进库：只记日志，结论照写', async () => {
@@ -724,5 +726,140 @@ describe('路由探针的结局和登记', () => {
 
   it('登记的名字、频率写的是「路由探针」、每 15 分钟', () => {
     expect(ROUTE_PROBE_JOB).toMatchObject({ id: 'route-probe', name: '路由探针', expectEveryMinutes: 45 });
+  });
+});
+
+const UNUSED_ROUTE = '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探';
+
+describe('省额度（#1424）：不通退避、健康路由前 2 位以外放慢', () => {
+  const probers = { 'claude-code': answered, grok: answered, 'cursor-agent': answered };
+  const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
+  const failed = (streak: number, minutes: number) => ({
+    state: 'failed' as const,
+    at: minutesAgo(minutes),
+    detail: `没通（连着不通 ${streak} 次）`,
+  });
+  const okAgo = (m: number) => ({ state: 'ok' as const, at: minutesAgo(m), detail: '答上了：OK' });
+  const scheduled = (t: RouteProbeTarget) =>
+    planScheduledProbe(t, probers, t.orgKind === null ? null : ON_CARPOOL, NOW);
+
+  it('连着不通逐级拉长：1 次隔 15 分钟、2 次 30、3 次 60、4 次 120，没到点不探', () => {
+    expect(scheduled(target({ alive: false, previous: failed(1, 5) }))).toMatchObject({
+      backingOff: expect.stringMatching(/退避中，下次约 \d{2}:\d{2} 再探（连着不通 1 次）/),
+    });
+    // 差半轮以内算到点：1 次的间隔是 15 分钟，10 分钟前已经该探
+    expect('probe' in scheduled(target({ alive: false, previous: failed(1, 10) }))).toBe(true);
+    expect('backingOff' in scheduled(target({ alive: false, previous: failed(2, 20) }))).toBe(true);
+    expect('probe' in scheduled(target({ alive: false, previous: failed(2, 23) }))).toBe(true);
+    expect('backingOff' in scheduled(target({ alive: false, previous: failed(3, 40) }))).toBe(true);
+    expect('probe' in scheduled(target({ alive: false, previous: failed(3, 53) }))).toBe(true);
+    expect('backingOff' in scheduled(target({ alive: false, previous: failed(4, 100) }))).toBe(true);
+    expect('probe' in scheduled(target({ alive: false, previous: failed(4, 113) }))).toBe(true);
+  });
+
+  it('退避封顶 240 分钟：第 5 次以后不再拉长', () => {
+    expect('backingOff' in scheduled(target({ alive: false, previous: failed(5, 200) }))).toBe(true);
+    expect('backingOff' in scheduled(target({ alive: false, previous: failed(9, 200) }))).toBe(true);
+    expect('probe' in scheduled(target({ alive: false, previous: failed(9, 233) }))).toBe(true);
+  });
+
+  it('退避中的那一轮不探、不重写，结论里写明下次大约几点，算看过、算不在线', async () => {
+    let calls = 0;
+    const counting: Prober = async () => {
+      calls += 1;
+      return { kind: 'failed', detail: '不该探到' };
+    };
+    const down = target({ alive: false, previous: failed(2, 20) });
+    const h = harness([down], counting);
+    const run = await runRouteProbeJob(h.deps);
+    expect(calls).toBe(0);
+    expect(h.saved).toEqual([]);
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 1, found: 1, online: [] });
+    expect(h.logs.some((l) => l.includes('退避中，下次约') && /下次约 \d{2}:\d{2} 再探/.test(l))).toBe(true);
+  });
+
+  it('探了又不通：结论带上退避那句，次数加一；到了封顶还是 240 分钟', async () => {
+    const down: Prober = async () => ({ kind: 'failed', detail: '503 容量满' });
+    const first = harness([target({ alive: false, previous: null })], down);
+    await runRouteProbeJob(first.deps);
+    expect(first.saved[0]?.detail).toContain('退避中，下次约 12:22 再探（连着不通 1 次）');
+    expect(first.saved[0]?.detail).toContain('503 容量满');
+
+    const again = harness([target({ alive: false, previous: failed(5, 233) })], down);
+    await runRouteProbeJob(again.deps);
+    expect(again.saved[0]?.detail).toContain('退避中，下次约 16:07 再探（连着不通 6 次）');
+  });
+
+  it('一次探通就回到原节奏：不再写退避，前 2 位下一轮照旧探', async () => {
+    const h = harness([target({ alive: false, probeRank: 1, previous: failed(4, 113) })], answered);
+    await runRouteProbeJob(h.deps);
+    expect(h.saved[0]).toMatchObject({ state: 'ok' });
+    expect(h.saved[0]?.detail).not.toContain('退避中');
+    const next = target({
+      alive: true,
+      probeRank: 1,
+      previous: { state: 'ok', at: minutesAgo(10), detail: h.saved[0]?.detail ?? '' },
+    });
+    expect('probe' in scheduled(next)).toBe(true);
+    const relapsed = harness(
+      [target({ alive: true, previous: { state: 'ok', at: minutesAgo(10), detail: '答上了：OK' } })],
+      async () => ({ kind: 'failed', detail: '又不通' }),
+    );
+    await runRouteProbeJob(relapsed.deps);
+    expect(relapsed.saved[0]?.detail).toContain('连着不通 1 次');
+  });
+
+  it('前 2 位保持现在的间隔；排在后面的探通了隔 60 分钟；本来更慢的不改短', () => {
+    expect('probe' in scheduled(target({ alive: true, probeRank: 1, previous: okAgo(40) }))).toBe(true);
+    expect('probe' in scheduled(target({ alive: true, probeRank: 2, previous: okAgo(40) }))).toBe(true);
+    expect(scheduled(target({ alive: true, probeRank: 3, previous: okAgo(40) }))).toMatchObject({
+      kept: expect.stringContaining('隔 60 分钟'),
+    });
+    expect('probe' in scheduled(target({ alive: true, probeRank: 3, previous: okAgo(53) }))).toBe(true);
+    // 名次读不到：不当成排在后面，照原间隔（到期该探）
+    expect('probe' in scheduled(target({ alive: true, previous: okAgo(40) }))).toBe(true);
+    const grok = target({
+      routeId: 'grok:grok-4.7:grok',
+      hostId: 'grok',
+      channelId: 'grok',
+      poolId: 'grok',
+      orgKind: null,
+      modelId: 'grok-4.7',
+      modelName: 'Grok 4.7',
+      alive: true,
+      probeRank: 5,
+      previous: okAgo(30),
+    });
+    expect(scheduled(grok)).toMatchObject({ kept: expect.stringContaining('隔 120 分钟') });
+  });
+
+  it('没启用、没被用途用上的路由不探，结论原话不变', () => {
+    expect(scheduled(target({ inUse: false, probeRank: 9, previous: failed(5, 1) }))).toEqual({
+      state: 'skipped',
+      detail: UNUSED_ROUTE,
+    });
+    expect(planProbe(target({ inUse: false }), probers, ON_CARPOOL, NOW)).toEqual({
+      state: 'skipped',
+      detail: UNUSED_ROUTE,
+    });
+  });
+
+  it('【故意造出的失败】读不到上一次探测时间：按到期该探，不跳过', () => {
+    const unread = target({
+      alive: false,
+      probeRank: 9,
+      previous: {
+        state: 'failed',
+        at: new Date(Number.NaN),
+        detail: '没通（连着不通 8 次）',
+      },
+    });
+    expect('probe' in scheduled(unread)).toBe(true);
+    const unreadOk = target({
+      alive: true,
+      probeRank: 9,
+      previous: { state: 'ok', at: new Date('不是时间'), detail: '答上了：OK' },
+    });
+    expect('probe' in scheduled(unreadOk)).toBe(true);
   });
 });

@@ -11,7 +11,7 @@
 // - 近 60 次来自探针历史（route_probe_history），本渠道所有路由按时间排，一次一格。没探和不通颜色分开。
 //   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
 
-import { PROBE_HISTORY_SLOTS, ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from '@fleet-dao/shared';
+import { PROBE_HISTORY_SLOTS, probeBackoffNotice, probeNextEveryMinutes } from '@fleet-dao/shared';
 import { ArrowLeft, ChevronDown, LoaderCircle, Radar, SatelliteDish } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
@@ -598,14 +598,20 @@ function RouteRow({
   const failure = lastFailureFor(requests, r);
   const probe = r.probe;
   const word = probe ? STATE_WORD[probe.state] : { label: '还没探到', tone: 'stop' as Tone };
-  const stale = probe ? channelProbeInterrupted({ probedAt: probe.at, hostId: r.hostId }, now) : false;
+  const notice = probe ? probeBackoffNotice(probe.detail) : null;
+  const stale = probe
+    ? channelProbeInterrupted(
+        {
+          probedAt: probe.at,
+          hostId: r.hostId,
+          ...(probe.detail !== undefined ? { detail: probe.detail } : {}),
+        },
+        now,
+      )
+    : false;
   const seconds = probeSeconds(r, requests);
-  const every = routeProbeEveryMinutes(r.hostId);
-  const nextAt = probe
-    ? new Date(
-        Date.parse(probe.at) + (probe.state === 'ok' ? every : ROUTE_PROBE_EVERY_MINUTES) * 60_000,
-      ).toISOString()
-    : undefined;
+  const every = probeNextEveryMinutes(r.hostId, probe?.state, probe?.detail);
+  const nextAt = probe ? new Date(Date.parse(probe.at) + every * 60_000).toISOString() : undefined;
   const name = model?.displayName ?? r.modelId;
   const bodyId = `route-body-${r.id}`;
   const failed = kind === 'fault';
@@ -651,6 +657,11 @@ function RouteRow({
           aria-hidden
         />
       </button>
+      {notice && !active ? (
+        <p data-probe-backoff className="px-3 pb-1.5 text-caption text-ink-stall">
+          {notice}
+        </p>
+      ) : null}
       {failed && probe?.detail && !open ? (
         <p className="truncate px-3 pb-2 text-caption text-ink-fail" title={probe.detail}>
           {probe.detail}

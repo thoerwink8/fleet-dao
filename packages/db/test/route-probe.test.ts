@@ -100,6 +100,60 @@ describe('读：每条路由探得了探不了的事实', () => {
   it('一条路由都没有：回空表（调用方记「没扫到」），不报错', async () => {
     expect(await routeProbeTargets(t.db)).toEqual([]);
   });
+
+  it('开着的名次：关着的不占位，一条路由在几个用途里取最靠前的；没排进用途的是 null', async () => {
+    await t.db.insert(pools).values({ id: 'grok', channelId: 'grok-subscription', maxConcurrency: 1 });
+    await addRoute(t.db, {
+      id: 'meter',
+      channelId: 'api-metered',
+      poolId: 'metered',
+      modelId: 'opus-5.5',
+      alive: false,
+    });
+    await addRoute(t.db, {
+      id: 'car',
+      channelId: 'claude-subscription',
+      poolId: 'claude-carpool',
+      modelId: 'opus-5.5',
+      alive: false,
+    });
+    await addRoute(t.db, { id: 'relay-opus', poolId: 'relay-a', modelId: 'opus-5.5', hostId: 'mirasim' });
+    await addRoute(t.db, { id: 'k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    await addRoute(t.db, {
+      id: 'grok',
+      channelId: 'grok-subscription',
+      poolId: 'grok',
+      modelId: 'grok-4.7',
+      hostId: 'grok',
+    });
+    await addRoute(t.db, { id: 'idle', poolId: 'relay-a', modelId: 'fable-5.1', hostId: 'mirasim' });
+    await setRoutingLayers(t.db, {
+      purposes: {
+        execute: ['opus-5.5', 'kimi-k3', 'grok-4.7'],
+        review: ['grok-4.7', 'opus-5.5'],
+      },
+      models: {
+        'opus-5.5': ['meter', 'relay-opus', 'car'],
+        'kimi-k3': ['k3'],
+        'grok-4.7': ['grok'],
+      },
+    });
+    await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.routeId, 'relay-opus'));
+    await t.db
+      .update(models)
+      .set({ retiredAt: new Date('2020-01-01T00:00:00Z') })
+      .where(eq(models.id, 'kimi-k3'));
+
+    const rank = new Map((await routeProbeTargets(t.db)).map((row) => [row.routeId, row.probeRank]));
+    // 写码：渠道关着的 meter、目录关着的 relay-opus 都不占名次；kimi 已下架也不占。car 第 1，grok 第 2。
+    // 复核：grok 排第一，所以它的名次是 1，不是写码里的 2。
+    expect(rank.get('car')).toBe(1);
+    expect(rank.get('grok')).toBe(1);
+    expect(rank.get('meter')).toBeNull();
+    expect(rank.get('relay-opus')).toBeNull();
+    expect(rank.get('k3')).toBeNull();
+    expect(rank.get('idle')).toBeNull();
+  });
 });
 
 describe('写：一条路由的结论', () => {

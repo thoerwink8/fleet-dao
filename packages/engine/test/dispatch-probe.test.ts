@@ -331,6 +331,33 @@ describe('派前探测', () => {
     expect(h.saved).toEqual([]);
   });
 
+  it('放慢的 grok-4.7 上一次探通还在 2 小时里：派前不探，按上一次结论派（通）', async () => {
+    const t = target({
+      routeId: 'grok:grok-4.7:grok',
+      hostId: 'grok',
+      modelId: 'grok-4.7',
+      modelName: 'Grok 4.7',
+      probeRank: 9,
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 70 * 60_000), detail: '答上了：OK' },
+    });
+    let called = 0;
+    const h = harness([t], {
+      probers: {
+        grok: async () => {
+          called += 1;
+          return { kind: 'answered', detail: '不该探到' };
+        },
+      },
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), {
+      routeId: t.routeId,
+      label: 'grok-4.7',
+    });
+    expect(called).toBe(0);
+    expect(h.saved).toEqual([]);
+    expect(got).toMatchObject({ kind: 'pass', probed: false, label: 'grok-4.7' });
+  });
+
   it('【故意造出的失败】探测本身抛错：按不通处理，不写成通', async () => {
     const t = target({ previous: null });
     let probes = 0;

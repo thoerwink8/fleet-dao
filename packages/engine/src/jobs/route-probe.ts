@@ -2,7 +2,9 @@
 // 切了这一轮探完核对）→ 逐条定探不探 → 该探的真起一次最小会话 → 每条写一条结论（只有 ok 在线，其余一律不在线、
 // 写明原因；Claude 订阅池的还记下那时会话用户挂的组织，选路靠它分得清「那一轮挂着别的组织、没探它」和「探了没通」，#335）
 // → 结局记进 schedule_runs。按一次的成本放慢的执行方式（cursor-agent、grok），上一次探通了、还没到再探的
-// 时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。会话用户挂的组织这会儿定不下来
+// 时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。定时这一轮另外两档也省额度
+// （#1424，只这一轮，派前探测和人点的立即探测不看）：连着不通按 15、30、60、120、240 分钟退避，封顶 240，探通回到原节奏；
+// 已探通、又不在用途顺序前 2 位的，隔 60 分钟再探（本来更久的不改短）。会话用户挂的组织这会儿定不下来
 // （读数刚变、引擎没切过号，real/session-org.ts）：Claude 订阅池这一轮也不探、结论照旧，这一轮记 partial、写明为什么。
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
@@ -11,7 +13,12 @@ import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
   type OrgKind,
+  probeBackoffMinutes,
+  probeBackoffPhrase,
+  probeFailStreak,
+  ROUTE_PROBE_DEFER_MINUTES,
   ROUTE_PROBE_EVERY_MINUTES,
+  ROUTE_PROBE_PRIMARY_COUNT,
   type RouteProbeState,
   routeProbeEveryMinutes,
 } from '@fleet-dao/shared';
@@ -149,7 +156,8 @@ export type ProbePlan =
 
 /**
  * 这条路由这一轮探不探。先后就是优先级：按量计费 → 插头没接 → 渠道下架 → 模型下架 → 没有阶段在用 → 会话用户挂着别的组织
- * → 放慢的执行方式还没到再探的时候（ROUTE_PROBE_HOST_EVERY_MINUTES：只看上一次探通了的；没通的每轮都探）。
+ * → 放慢的执行方式还没到再探的时候（ROUTE_PROBE_HOST_EVERY_MINUTES：只看上一次探通了的）。
+ * 不通的退避、不在前 2 位的放慢不在这里：只定时那一轮（planScheduledProbe）看，派前探测沿用这一份。
  * 按量计费排第一：不管插头接没接都不探（判断阶段的 Jev 就是按量的，它不经会话插头，说「派不了」反而误导）。
  * 不探的一律不在线（写明原因）；要探的交给这种执行方式的探法。live 是会话用户此刻挂的组织（带组织类型的池才用得上，
  * 别的传 null）：读不到、认不出就记没探成（failed），不拿哪个组织顶；这会儿定不下来（pending）就这一轮不探、结论照旧
@@ -225,6 +233,94 @@ export function planProbe(
   return { probe };
 }
 
+/** 差半轮以内算到点，不拖到下一轮（和放慢的执行方式同一条）。 */
+function stillWaiting(ageMs: number, everyMinutes: number): boolean {
+  return ageMs >= 0 && ageMs < (everyMinutes - ROUTE_PROBE_EVERY_MINUTES / 2) * 60_000;
+}
+
+/**
+ * 定时这一轮还没到再探的时候。回 null = 到期该探。
+ * 读不到上一次的时刻（不是有效时间）、时刻在未来：按到期该探，不跳过。
+ * 名次没给（读不到排第几）：不当成排在后面，保持原间隔。
+ */
+function paceWait(t: ProbeTarget, now: Date): { kind: 'backoff' | 'defer'; detail: string } | null {
+  const last = t.previous;
+  if (!last) return null;
+  const at = last.at instanceof Date ? last.at.getTime() : Number.NaN;
+  if (!Number.isFinite(at)) return null;
+  const age = now.getTime() - at;
+  if (age < 0) return null;
+
+  if (last.state === 'failed') {
+    // 原文没写次数：算已经不通 1 次（15 分钟），不把「没写」当成可以一直不探
+    const streak = probeFailStreak(last.detail) ?? 1;
+    const every = probeBackoffMinutes(streak);
+    if (!stillWaiting(age, every)) return null;
+    const next = new Date(at + every * 60_000);
+    return { kind: 'backoff', detail: `${probeBackoffPhrase(next)}（连着不通 ${streak} 次）` };
+  }
+
+  if (last.state === 'ok' && t.alive) {
+    const rank = t.probeRank;
+    if (rank == null || rank <= ROUTE_PROBE_PRIMARY_COUNT) return null;
+    const hostEvery = routeProbeEveryMinutes(t.hostId);
+    const every = Math.max(hostEvery, ROUTE_PROBE_DEFER_MINUTES);
+    // 这种执行方式本来就隔得更久：planProbe 已经按那个间隔放慢，这里不改短
+    if (every <= hostEvery) return null;
+    if (!stillWaiting(age, every)) return null;
+    return {
+      kind: 'defer',
+      detail: `不在用途顺序前 ${ROUTE_PROBE_PRIMARY_COUNT} 位，探通了隔 ${every} 分钟再真探；上一次探通是 ${Math.round(age / 60_000)} 分钟前`,
+    };
+  }
+  return null;
+}
+
+export type ScheduledProbePlan = ProbePlan | { backingOff: string };
+
+/**
+ * 定时这一轮探不探。先走 planProbe（按量、没启用、下架、放慢的执行方式），再看退避和前 2 位以外的放慢。
+ * 派前探测不走这里。
+ */
+export function planScheduledProbe(
+  t: ProbeTarget,
+  probers: Partial<Record<HostId, Prober>>,
+  live: LiveOrgReading | null,
+  now: Date,
+): ScheduledProbePlan {
+  const plan = planProbe(t, probers, live, now);
+  if (!('probe' in plan)) return plan;
+  const wait = paceWait(t, now);
+  if (!wait) return plan;
+  if (wait.kind === 'backoff') return { backingOff: wait.detail };
+  return { kept: wait.detail };
+}
+
+/** 这一次没探通之后，下一次定时探针隔多久。上一次不是不通从 1 次数；原文没写次数的不通算已经 1 次。 */
+function nextFailureNote(t: ProbeTarget, now: Date): string {
+  const prev = t.previous?.state === 'failed' ? (probeFailStreak(t.previous.detail) ?? 1) : 0;
+  const streak = prev + 1;
+  const next = new Date(now.getTime() + probeBackoffMinutes(streak) * 60_000);
+  return `${probeBackoffPhrase(next)}（连着不通 ${streak} 次）`;
+}
+
+/** 探通、又不在前 2 位、这种执行方式本来不到 60 分钟一探：结论里写明下次隔 60 分钟。本来更久的不写这句。 */
+function deferNote(t: ProbeTarget): string | null {
+  if (t.probeRank == null || t.probeRank <= ROUTE_PROBE_PRIMARY_COUNT) return null;
+  if (routeProbeEveryMinutes(t.hostId) >= ROUTE_PROBE_DEFER_MINUTES) return null;
+  return `不在用途前 ${ROUTE_PROBE_PRIMARY_COUNT} 位，隔 ${ROUTE_PROBE_DEFER_MINUTES} 分钟再探`;
+}
+
+/** 原因太长时先截原因，退避那句留在末尾，整段仍不超过 ROUTE_PROBE_DETAIL_MAX。 */
+function withNote(detail: string, note: string | null): string {
+  if (!note) return clip(detail);
+  const tail = `。${note}`;
+  const room = ROUTE_PROBE_DETAIL_MAX - tail.length;
+  if (room < 1) return clip(note);
+  if (detail.length <= room) return `${detail}${tail}`;
+  return `${detail.slice(0, room - 1)}…${tail}`;
+}
+
 async function attemptOf(probe: Prober, t: ProbeTarget): Promise<ProbeAttempt> {
   try {
     return await probe(t);
@@ -240,8 +336,10 @@ export interface Conclusion {
   at: Date;
   /** Claude 订阅池的路由下这个结论时会话用户挂的组织（读不到、不是 Claude 订阅池为 null），跟结论一起写进库。 */
   org: OrgKind | null;
-  /** 放慢的执行方式还没到再探的时候：不写库，上一次探通的结论照旧（算在线）。 */
+  /** 放慢的执行方式、或不在前 2 位还没到再探的时候：不写库，上一次探通的结论照旧（算在线）。 */
   kept?: boolean;
+  /** 不通之后还在退避：不写库，上一次的不通结论照旧（算不在线）。detail 里有「退避中，下次约 HH:MM 再探」。 */
+  backingOff?: boolean;
   /** 会话用户挂的组织这会儿定不下来：不写库，上一次的结论照旧（在不在线照库里那样算）。 */
   unsettled?: boolean;
   /** 没真探、没量到为 null。同一轮重试只留最终那一次的耗时和原文，第一次的原因已经写进 detail。 */
@@ -273,12 +371,32 @@ async function liveOrgOf(deps: RouteProbeJobDeps): Promise<LiveOrgReading> {
   }
 }
 
-export async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclusion> {
+export async function conclude(
+  deps: RouteProbeJobDeps,
+  t: ProbeTarget,
+  opts?: { pace?: boolean; bypassPace?: boolean },
+): Promise<Conclusion> {
   // 带组织类型的池（Claude 订阅）探之前现读一次（读成了的留一会儿）：一轮要好几分钟，中途切了号也认得出
   const live = t.orgKind === null ? null : await liveOrgOf(deps);
   // 写进库的「那时挂的组织」：读成了才有；读不到、这会儿定不下来都不写（选路就不会把它当成「另一个组织挂着时没探」）
   const org = live?.ok ? live.org : null;
-  const plan = planProbe(t, deps.probers, live, deps.now());
+  // 人点的立即探测：节奏上把上一次当没有（放慢、退避都不挡），连着不通的次数还留在 t.previous 上
+  const plan =
+    opts?.pace && !opts.bypassPace
+      ? planScheduledProbe(t, deps.probers, live, deps.now())
+      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now());
+  if ('backingOff' in plan) {
+    deps.log('info', `路由探针：${plan.backingOff}`, { routeId: t.routeId });
+    return {
+      target: t,
+      state: 'failed',
+      detail: plan.backingOff,
+      at: deps.now(),
+      org,
+      backingOff: true,
+      ...NO_CAPTURE,
+    };
+  }
   if ('kept' in plan) {
     deps.log('info', '路由探针：还没到再探的时候，结论照旧', { routeId: t.routeId, detail: plan.kept });
     return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), org, kept: true, ...NO_CAPTURE };
@@ -311,6 +429,13 @@ export async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise
       second.kind === 'failed'
         ? { ...second, detail: `连探两次都没通：${second.detail}（第一次：${first}）` }
         : { ...second, detail: `${second.detail}（第一次没通：${first}）` };
+  }
+  if (attempt.kind === 'failed') {
+    // 定时、派前、人点的都写上：驾驶舱和通知看的是这条结论，免得退避看起来像探针停了
+    attempt = { ...attempt, detail: withNote(attempt.detail, nextFailureNote(t, deps.now())) };
+  } else if (opts?.pace) {
+    const note = deferNote(t);
+    if (note) attempt = { ...attempt, detail: withNote(attempt.detail, note) };
   }
   if (deps.afterProbe) {
     try {
@@ -377,12 +502,12 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   // 切号在探之前：切过去了，这一轮探的就是切过去的组织，探完核对
   const switched = await switchBefore(deps);
   const conclusions = await mapLimit(targets, deps.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
-    conclude(deps, t),
+    conclude(deps, t, { pace: true }),
   );
   if (deps.orgSwitch) {
     // 真探了的才算读回（放慢没真探、组织定不下来没探的，结论照旧，都不算）
     const probed = conclusions
-      .filter((c) => !c.kept && !c.unsettled)
+      .filter((c) => !c.kept && !c.unsettled && !c.backingOff)
       .map((c) => ({
         routeId: c.target.routeId,
         orgKind: c.target.orgKind,
@@ -402,7 +527,14 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   let written = 0;
   let offline = 0;
   let kept = 0;
+  let backingOff = 0;
   for (const c of conclusions) {
+    if (c.backingOff) {
+      // 不重写：上一次的不通结论里已经写着下次大约几点。算看过、算不在线
+      backingOff += 1;
+      offline += 1;
+      continue;
+    }
     if (c.kept) {
       kept += 1;
       online.push(c.target.routeId);
@@ -440,7 +572,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     else offline += 1;
   }
   const goneNote = gone.length > 0 ? `；探的时候被删掉的路由：${gone.join('、')}` : '';
-  if (written === 0 && (kept + unsettled.length === 0 || unsaved.length > 0)) {
+  if (written === 0 && (kept + backingOff + unsettled.length === 0 || unsaved.length > 0)) {
     return {
       result:
         unsaved.length > 0
@@ -450,7 +582,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     };
   }
   // 结论照旧的也算看过了（放慢的上一次探通、在线；组织定不下来的照上一次的算），不在线的算进 found
-  const scanned = written + kept + unsettled.length;
+  const scanned = written + kept + backingOff + unsettled.length;
   const problems = [
     ...(unsaved.length > 0
       ? [`${unsaved.length} 条路由的结论没写进库（它们还是上一轮的样子）：${unsaved.join('；')}`]
@@ -513,7 +645,7 @@ export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promi
   );
   const probed: ProbedRoute[] = [];
   for (const c of conclusions) {
-    if (c.kept || c.unsettled) continue;
+    if (c.kept || c.unsettled || c.backingOff) continue;
     try {
       await deps.save({
         routeId: c.target.routeId,

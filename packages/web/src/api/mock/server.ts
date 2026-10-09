@@ -702,6 +702,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       quota,
       ban,
       ...(r.probe ? { probedAt: r.probe.at } : {}),
+      ...(r.probe?.detail ? { probeDetail: r.probe.detail } : {}),
       exhausted: full.map((w) => ({
         label: w.label ?? w.window,
         ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),

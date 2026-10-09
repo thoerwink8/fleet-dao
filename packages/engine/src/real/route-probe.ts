@@ -27,7 +27,7 @@ import {
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { HostId } from '@fleet-dao/shared';
+import { type HostId, probeBackoffNotice } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
@@ -263,12 +263,13 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
   const dedupeKey = poolHoldKey(t.poolId);
   if (a.kind === 'failed') {
     if (!a.poolHold) return;
+    const notice = probeBackoffNotice(a.detail);
     await upsertAlert(db, {
       dedupeKey,
       level: 'decision',
       taskId: null,
       title: `账号池 ${t.poolId} 整池暂停：${a.poolHold.title}`,
-      body: `路由探针探 ${t.routeId} 时发现的。${a.poolHold.body}`,
+      body: `路由探针探 ${t.routeId} 时发现的。${a.poolHold.body}${notice ? `。${notice}` : ''}`,
     });
     return;
   }

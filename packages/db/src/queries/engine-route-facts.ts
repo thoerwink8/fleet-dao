@@ -50,6 +50,8 @@ export interface PurposeRouteFacts {
     /** 那次结论是什么、下结论时会话用户挂的是哪个组织（候选查询的 probeState、probeOrg）。 */
     probeState: RouteCandidate['probeState'];
     probeOrg: RouteCandidate['probeOrg'];
+    /** 探针原文（routes.probe_detail）。选路用来分辨「故意隔久一点」和「探针可能停了」。 */
+    probeDetail: RouteCandidate['probeDetail'];
     quota: 'ok' | 'exhausted' | 'unknown';
     windows: {
       label: string;
@@ -134,6 +136,7 @@ export async function routeFactsForPurpose(
       probedAt: c.probedAt,
       probeState: c.probeState,
       probeOrg: c.probeOrg,
+      probeDetail: c.probeDetail,
       quota: c.quota,
       windows: c.windows.map((w) => {
         const raw = windowByKey.get(`${c.poolId}\u0000${w.label}`);
