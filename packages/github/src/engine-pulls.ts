@@ -60,6 +60,11 @@ export interface ClaimsGitHub {
   readPull(repo: RepoRef, number: number): Promise<PullFacts>;
   /** 开着的 PR（翻完页；翻不完抛错，不当成就这几个）。 */
   openPulls(repo: RepoRef): Promise<PullFacts[]>;
+  /**
+   * 从 since 起更新过、而且合并了的 PR（按更新时间从新到旧，读到更早的就停）。
+   * 翻到上限还没读出这个窗口、认不出，都抛错：调用方不能把抛错当成「一个都没有」。
+   */
+  listMergedPulls(repo: RepoRef, since: Date): Promise<PullFacts[]>;
   /** 这个提交上这个 context 最新的一条（没有是 null）。 */
   latestStatus(repo: RepoRef, sha: string, context: string): Promise<LatestStatus | null>;
   /** 以「引擎」机器人贴一条提交状态：安装令牌里没有 statuses 写权限（或读不到权限表）就抛错，不贴。 */
@@ -142,6 +147,39 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
         if (!parsed.success) throw unexpected(`列 ${repoSlug(repo)} 开着的 PR`, item);
         return factsOf(repo, parsed.data);
       });
+    },
+
+    async listMergedPulls(repo, since) {
+      // 10 页 × 100：窗口里比这还多，pages 自己抛「没翻完」，不当成读全了
+      const out: PullFacts[] = [];
+      for await (const page of client.pages(
+        {
+          method: 'GET',
+          path: `${base(repo)}/pulls`,
+          auth: auth(repo),
+          query: { state: 'closed', sort: 'updated', direction: 'desc', per_page: 100 },
+        },
+        10,
+      )) {
+        if (!Array.isArray(page.data)) throw unexpected(`列 ${repoSlug(repo)} 合并了的 PR`, page.data);
+        let older = false;
+        for (const item of page.data) {
+          const parsed = ClaimPullSchema.safeParse(item);
+          if (!parsed.success) throw unexpected(`列 ${repoSlug(repo)} 合并了的 PR`, item);
+          const updated = Date.parse(parsed.data.updated_at);
+          if (Number.isNaN(updated)) {
+            throw unexpected(`列 ${repoSlug(repo)} 合并了的 PR（updated_at 认不出）`, item);
+          }
+          if (updated < since.getTime()) {
+            older = true;
+            break;
+          }
+          const facts = factsOf(repo, parsed.data);
+          if (facts.merged) out.push(facts);
+        }
+        if (older || page.data.length < 100) return out;
+      }
+      return out;
     },
 
     async latestStatus(repo, sha, context) {
