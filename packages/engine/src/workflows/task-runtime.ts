@@ -20,10 +20,12 @@ import {
 import type { EngineActivities } from '../activity-options.ts';
 import type { FailureContext, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Limits } from '../limits.ts';
-import type { Worktree } from '../ports.ts';
+import type { RouteChoice, Worktree } from '../ports.ts';
+import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
   type GuardedPaths,
+  MAX_ROUND_RESETS,
   PAUSED_BY_HUMAN,
   type PauseCommand,
   type RepinCommand,
@@ -41,8 +43,10 @@ import {
 import { conflictFilesOf, conflictPendingOf, failureOf, iso, judgeRetrying } from './kit.ts';
 import {
   Abandoned,
+  type Avoid,
   bump,
   ConflictHandoff,
+  NO_AVOID,
   PausedInterrupt,
   RepinInterrupt,
   stripUndefined,
@@ -82,9 +86,34 @@ export class TaskRuntime {
   guardApproval: { head: string; paths: GuardedPaths } | null = null;
   changedFiles: string[] = [];
   feedback: string[] = [];
+  /**
+   * 最近一次冷验收没过的原话。推上去之后 feedback 会被清掉，验收轮数用尽时通知还要靠它，不能跟着清。
+   */
+  verifyProblems: string[] = [];
+  /** 当前单子正文读出来的交代。点「继续」重读之后换掉，验收用这一份，不用起任务时的旧版。 */
+  brief: TaskBrief | null = null;
+  /** 轮数用尽、人点「继续」之后重读单子。由 TaskFlow 接上。 */
+  reloadBrief: () => Promise<void> = async () => {
+    throw new Error('重读单子还没接上（工作流自己的状态乱了）');
+  };
   readonly families = new Set<string>();
+  /**
+   * 这张单里，动手会话跑完却没有提交时攒下的避让（#1408）。只活在这次运行里，下张单是新的运行时，不带着走。
+   * 轮数用尽后点「继续」清掉。
+   */
+  commitAvoid: Avoid = NO_AVOID;
+  /** 连着多少轮动手会话跑完没有提交。中间有了提交就从 0 再计。 */
+  commitMisses = 0;
+  /** 最近一轮没提交时用的路由。避让之后没有别的候选，就照旧派它。 */
+  commitMissRoute: RouteChoice | null = null;
+  /** 这一轮动手会话实际跑完时用的路由。没跑成的不算。 */
+  lastImplementRoute: RouteChoice | null = null;
+  /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
+  fellBackToMissRoute = false;
   round = 0;
   verifyRound = 0;
+  /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
+  private roundResets = 0;
   attemptSeq = 0;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
@@ -303,6 +332,38 @@ export class TaskRuntime {
       this.repinCancelled = false;
       this.repinReq = null;
     }
+  }
+
+  /**
+   * 轮数用尽：先停下等人。点了「继续」之后，累计不超过 3 次就把动手和验收轮数都清零并重读单子；
+   * 超过就停住，写明交给指挥官，不再清零。同一次继续里原来的上限仍在。
+   * 老历史没有 continue-resets-rounds：返回 legacy，调用方只把用尽的那一个计数清掉，不多读单子。
+   */
+  async exhaustRounds(title: string, legacyDetail: string, detail: string): Promise<'legacy' | 'reset'> {
+    const reset = patched('continue-resets-rounds');
+    await this.park(title, reset ? detail : legacyDetail);
+    // 点「继续」清掉没提交攒下的避让，和轮数清零同一处（#1408）。老历史没有这个标记，不碰。
+    if (patched('avoid-empty-commit-route')) this.clearCommitAvoid();
+    if (!reset) return 'legacy';
+    this.roundResets += 1;
+    if (this.roundResets > MAX_ROUND_RESETS) {
+      const handoff = '已继续 3 次仍没过，交指挥官';
+      for (;;) {
+        await this.park(handoff, handoff);
+      }
+    }
+    this.round = 0;
+    this.verifyRound = 0;
+    await this.reloadBrief();
+    return 'reset';
+  }
+
+  /** 「继续」之后，没提交攒下的避让不再带到后面的轮。 */
+  private clearCommitAvoid(): void {
+    this.commitAvoid = NO_AVOID;
+    this.commitMisses = 0;
+    this.commitMissRoute = null;
+    this.fellBackToMissRoute = false;
   }
 
   /** 停下等人：报警、写库、等「继续」或「放弃」。继续了回来，调用方从头再试这一步。 */

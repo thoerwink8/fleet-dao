@@ -50,6 +50,29 @@ export type CiStep =
   | { kind: 'merged'; mergeCommit?: string | undefined }
   | { kind: 'rework' };
 
+/** 验收停下时，通知正文第一行用的原因类别（#1404）。两类都沾上时先算「验收条在 diff 里证不了」。 */
+const UNPROVABLE_MARKS = ['无法证明', 'diff 未包含', '无法确认'] as const;
+const OUT_OF_SCOPE_MARKS = ['额外修改', '范围外'] as const;
+
+export function verifyStopCategory(original: string): string {
+  if (UNPROVABLE_MARKS.some((mark) => original.includes(mark))) return '验收条在 diff 里证不了';
+  if (OUT_OF_SCOPE_MARKS.some((mark) => original.includes(mark))) return 'PR 改了范围外的文件';
+  return '其它';
+}
+
+/**
+ * 验收停下的通知正文：第一行是原因类别，后面接冷验收原话。
+ * 认不出的归「其它」，原话照样留下，不吞掉。feedback 里的「验收没过：」前缀不算原话。
+ */
+export function verifyStopDetail(problems: readonly string[]): string {
+  const original = problems
+    .map((line) => line.replace(/^验收没过：/, '').trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
+  const category = verifyStopCategory(original);
+  return original.length > 0 ? `${category}\n${original}` : category;
+}
+
 /** 头被别人改了，停下等人时写的话：点「继续」之后引擎对新的头重跑 CI 和验收，不是原样接着等。 */
 export function headMovedDetail(now: string, pushed: string): string {
   return `现在的头是 ${now}，不是引擎验过、推上去的 ${pushed}。看过之后点「继续」：引擎会对新的头重跑 CI 和验收；不要这个 PR 了点「放弃」。`;
@@ -70,6 +93,44 @@ export function widen(avoid: Avoid, route: RouteChoice, scope: AvoidScope): Avoi
   if (scope === 'pool') return { ...avoid, poolIds: add(avoid.poolIds, route.poolId) };
   if (scope === 'model') return { ...avoid, modelIds: add(avoid.modelIds, route.modelId) };
   return { ...avoid, routeIds: add(avoid.routeIds, route.routeId) };
+}
+
+function unionIds(left: readonly string[], right: readonly string[]): string[] {
+  const out = [...left];
+  for (const id of right) if (!out.includes(id)) out.push(id);
+  return out;
+}
+
+/** 两份避让并成一份。顺序保持先左后右，同一编号不重复。 */
+export function mergeAvoid(left: Avoid, right: Avoid): Avoid {
+  return {
+    routeIds: unionIds(left.routeIds, right.routeIds),
+    poolIds: unionIds(left.poolIds, right.poolIds),
+    modelIds: unionIds(left.modelIds, right.modelIds),
+  };
+}
+
+/**
+ * 动手一轮跑完没有提交：下一轮避开这条路由。
+ * streak 是连着没提交的轮数（含这一轮）；到第 2 轮起，再避开这一轮的模型。早先避开的路由留着，直到「继续」清掉。
+ */
+export function noteEmptyCommit(
+  avoid: Avoid,
+  route: RouteChoice,
+  streak: number,
+): { avoid: Avoid; streak: number } {
+  const next = streak + 1;
+  const withRoute = widen(avoid, route, 'route');
+  return { avoid: next >= 2 ? widen(withRoute, route, 'model') : withRoute, streak: next };
+}
+
+/** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
+export const NO_OTHER_ROUTE = '没有别的路由可换';
+
+/** 返工意见：上一轮用的哪条路由，这一轮避开它。连着第二轮起写明也避开模型。 */
+export function emptyCommitFeedback(route: RouteChoice, avoidModel: boolean, leftover: string): string {
+  const model = avoidModel ? `，也避开模型 ${route.modelId}` : '';
+  return `上一轮用的是路由 ${route.routeId}（模型 ${route.modelId}）。这一轮避开它${model}。上一轮会话跑完了，但没有产生新的提交。改完之后要用 git commit 提交，不提交等于没做。${leftover}`;
 }
 
 export function stripUndefined<T extends object>(o: T): T {
