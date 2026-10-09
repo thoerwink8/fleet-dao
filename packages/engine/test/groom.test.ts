@@ -578,6 +578,7 @@ describe('提示词', () => {
       recentClosed: [{ number: 50, title: '关掉的单' }],
       openPulls: [{ number: 60, title: '开着的 PR' }],
       mergedPulls: [],
+      stoppedTasks: [],
       mainHead: 'a'.repeat(40),
       now: NOW,
     });
@@ -598,6 +599,7 @@ describe('提示词', () => {
     alreadyGroomed: new Set<number>(),
     recentClosed: [] as { number: number; title: string }[],
     openPulls: [] as { number: number; title: string; refs?: number[] }[],
+    stoppedTasks: [],
     mainHead: 'a'.repeat(40),
     now: NOW,
   };
@@ -729,7 +731,14 @@ function runHarness(over: {
   const notices: GroomNotice[] = [];
   const prompts: string[] = [];
   const issues = over.issues ?? [issue(1, { body: THIN_BODY })];
-  const facts: GroomFacts = { issues, openMilestones: [], closed: [], pulls: [], mainHead: 'b'.repeat(40) };
+  const facts: GroomFacts = {
+    issues,
+    openMilestones: [],
+    closed: [],
+    pulls: [],
+    stoppedTasks: [],
+    mainHead: 'b'.repeat(40),
+  };
   const deps: GroomRunDeps = {
     rows: async () => over.rows ?? [queued()],
     engineMaster: async () => over.master ?? { on: true },

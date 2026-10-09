@@ -8,15 +8,28 @@
 //   所有写操作（开单、评论、贴标签、往正文末尾追加）都在 GroomWrites 里由引擎代码执行，那里没有关单、改里程碑、推代码的入口。
 // - 登记进一次性会话的清单（oneShots.enter）：切号、发布排空都能停下它；停下的算这一次没整理成（算进今天的次数）。
 // - 读 GitHub、写 GitHub 都是「引擎」机器人（@fleet-dao/github）；单子正文是 AI 写的，写之前中和 @ 提醒和 <!-- -->、过卫生检查（github 包里做）。
+// - 任务表（停下等人）读不到：stoppedTasks 是 null，整理照常跑，摘要和提示词写没查成，不换成空数组。
 
 import { randomUUID } from 'node:crypto';
 import { loadStandardPaths } from '@fleet-dao/conventions';
-import { type Db, listIntakeRepos, recordGroomDone, recordGroomStart, upsertAlert } from '@fleet-dao/db';
+import {
+  type Db,
+  groomParkedTasks,
+  listIntakeRepos,
+  recordGroomDone,
+  recordGroomStart,
+  upsertAlert,
+} from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { createPgStore, githubWhitelist } from '@fleet-dao/store';
-import type { GroomFacts, GroomRunDeps, GroomSessionOutcome } from '../jobs/groom.ts';
-import { GROOM_CLOSED_DAYS } from '../jobs/groom.ts';
+import {
+  GROOM_CLOSED_DAYS,
+  type GroomFacts,
+  type GroomRunDeps,
+  type GroomSessionOutcome,
+  readStoppedTasks,
+} from '../jobs/groom.ts';
 import type { IntakeRepo } from '../jobs/intake.ts';
 import type { PickRouteInput, PickRouteResult, PortContext } from '../ports.ts';
 import type { UserExec } from './exec.ts';
@@ -104,6 +117,14 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
     });
     const pulls = await w.gh.claims.openPulls(r);
     const main = await mapped(() => w.gh.fetchMainline({ repo: r }));
+    const stoppedTasks = await readStoppedTasks(
+      () => groomParkedTasks(w.db, r),
+      (error) =>
+        log('warn', '整理待办：停下的任务没查成', {
+          repo: `${r.owner}/${r.name}`,
+          error: errMessage(error),
+        }),
+    );
     return {
       issues: groom.issues.map((i) => ({
         number: i.number,
@@ -123,6 +144,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
         .map((m) => ({ number: m.number, title: m.title, description: m.description })),
       closed,
       pulls: pulls.map((p) => ({ number: p.number, title: p.title, body: p.body })),
+      stoppedTasks,
       mainHead: main.head,
     };
   };
