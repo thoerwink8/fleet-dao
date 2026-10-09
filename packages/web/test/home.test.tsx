@@ -35,7 +35,12 @@ configure({ asyncUtilTimeout: 10_000 });
 afterEach(cleanup);
 
 function renderHome(state: HomeState) {
-  vi.mocked(useHome).mockReturnValue({ data: state });
+  vi.mocked(useHome).mockReturnValue({
+    data: state,
+    refetch: () => Promise.resolve(undefined),
+    isFetching: false,
+    dataUpdatedAt: state.status === 'data' ? Date.now() : 0,
+  });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const api = createMockApi({ live: false });
   return render(
