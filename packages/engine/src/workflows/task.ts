@@ -16,6 +16,9 @@
 // - 改到了「改标准」的路径（人闸第四类，要创始人同意才挂自动合并）；
 // - PR 被关了、PR 的头被别人改了。
 // 「继续」之后从头再试这一步；「放弃」收尾退出（工作树存档后删，PR 和单子不动，由人处理）。
+// 动手或验收轮数用尽后再点「继续」（patched('continue-resets-rounds')，#1404）：两轮计数都从 0 再计，并重读单子正文，
+// 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官。老历史没有这个标记，
+// 仍只把用尽的那一个计数清掉。
 //
 // 改这里之前必须知道：
 // - 挂自动合并一定在冷验收通过之后。合并闸认引擎任务流程的 PR（分支 fleet/<单号>-t<8 位>）头上通过的 cold-verify（#555-2、#625），
@@ -75,19 +78,24 @@ class TaskFlow {
 
   async run(): Promise<TaskRun> {
     const rt = this.rt;
-    const { brief, tier } = await this.readBrief();
+    let { brief, tier } = await this.readBrief();
     rt.status.tier = tier;
+    rt.reloadBrief = async () => {
+      brief = (await this.readBrief()).brief;
+    };
     rt.branch = taskBranch(rt.input.issueNumber, workflowInfo().runId);
     await rt.mirror('running');
 
     for (;;) {
       await rt.checkpoint();
       if (rt.round >= MAX_IMPLEMENT_ROUNDS) {
-        await rt.park(
+        const problems = rt.feedback.join('；') || '（没有）';
+        const mode = await rt.exhaustRounds(
           `动手 ${MAX_IMPLEMENT_ROUNDS} 轮都没过`,
-          `最近的返工意见：${rt.feedback.join('；') || '（没有）'}。点「继续」再给一整轮；或「放弃」。`,
+          `最近的返工意见：${problems}。点「继续」再给一整轮；或「放弃」。`,
+          `最近的返工意见：${problems}。点「继续」后动手和验收轮数都从 0 再计；或「放弃」。`,
         );
-        rt.round = 0;
+        if (mode === 'legacy') rt.round = 0;
       }
       rt.round += 1;
       if (!(await this.implement(brief, tier))) continue;
@@ -137,7 +145,10 @@ class TaskFlow {
           issueNumber: rt.input.issueNumber,
         }),
       );
-      if (got.ok) return { brief: got.brief, tier: got.brief.tier };
+      if (got.ok) {
+        rt.brief = got.brief;
+        return { brief: got.brief, tier: got.brief.tier };
+      }
       await rt.park('单子的交代不全，没法动手', got.problems.map((p) => `【${p.field}】${p.why}`).join('\n'));
     }
   }

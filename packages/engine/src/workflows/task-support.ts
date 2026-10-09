@@ -50,6 +50,29 @@ export type CiStep =
   | { kind: 'merged'; mergeCommit?: string | undefined }
   | { kind: 'rework' };
 
+/** 验收停下时，通知正文第一行用的原因类别（#1404）。两类都沾上时先算「验收条在 diff 里证不了」。 */
+const UNPROVABLE_MARKS = ['无法证明', 'diff 未包含', '无法确认'] as const;
+const OUT_OF_SCOPE_MARKS = ['额外修改', '范围外'] as const;
+
+export function verifyStopCategory(original: string): string {
+  if (UNPROVABLE_MARKS.some((mark) => original.includes(mark))) return '验收条在 diff 里证不了';
+  if (OUT_OF_SCOPE_MARKS.some((mark) => original.includes(mark))) return 'PR 改了范围外的文件';
+  return '其它';
+}
+
+/**
+ * 验收停下的通知正文：第一行是原因类别，后面接冷验收原话。
+ * 认不出的归「其它」，原话照样留下，不吞掉。feedback 里的「验收没过：」前缀不算原话。
+ */
+export function verifyStopDetail(problems: readonly string[]): string {
+  const original = problems
+    .map((line) => line.replace(/^验收没过：/, '').trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
+  const category = verifyStopCategory(original);
+  return original.length > 0 ? `${category}\n${original}` : category;
+}
+
 /** 头被别人改了，停下等人时写的话：点「继续」之后引擎对新的头重跑 CI 和验收，不是原样接着等。 */
 export function headMovedDetail(now: string, pushed: string): string {
   return `现在的头是 ${now}，不是引擎验过、推上去的 ${pushed}。看过之后点「继续」：引擎会对新的头重跑 CI 和验收；不要这个 PR 了点「放弃」。`;
