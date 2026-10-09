@@ -625,10 +625,16 @@
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
 }
 
-/* 任务页「三段」表（md 起）。耗时列按内容宽，不跟别的列一起被压窄，免得「40 分钟」从字中间断成两行。 */
+/*
+ * 任务页「三段」表（md 起）。表头、每一段、段里的模型行各自是独立的 grid，
+ * 这一套列宽必须逐行相同，token、缓存、当量、花费才上下对齐。
+ * 耗时列固定 8.5rem，不用 max-content：max-content 只按本行内容取宽，
+ * 表头「耗时」比数据行「在跑 40 分钟」窄，后面几列会逐行错位。
+ * 8.5rem 够「在跑 99 天 23 小时」单行放下。格子上 whitespace-nowrap，避免从「分钟」中间断开。
+ */
 @utility grid-cols-segments {
   grid-template-columns:
-    minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) max-content minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr)
+    minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) 8.5rem minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr)
     minmax(0, 2fr);
 }
 

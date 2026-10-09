@@ -205,7 +205,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   );
 }
 
-/** 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行（耗时列按内容宽、不换行），手机上两列、每格带名字；表头和每行共用。 */
+/** 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行（耗时列固定宽、不换行），手机上两列、每格带名字；表头和每行共用同一套列宽。 */
 const COLUMNS = 'grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-segments md:items-baseline md:gap-y-0';
 const ROW = cn('grid', COLUMNS);
 
@@ -217,12 +217,12 @@ function Cell({
 }: {
   label: string;
   className?: string;
-  /** 这一格的字不换行（耗时：「40 分钟」不能从字中间断开）。也不设 min-w-0，免得列被压窄后溢出去。 */
+  /** 耗时格：字不换行。电脑上 min-w-0，长句子不能把固定的耗时列撑得比别的行宽。 */
   nowrap?: boolean;
   children: ReactNode;
 }) {
   return (
-    <div className={cn(nowrap ? 'whitespace-nowrap' : 'min-w-0', className)}>
+    <div className={cn(nowrap ? 'whitespace-nowrap md:min-w-0' : 'min-w-0', className)}>
       <div className="text-caption text-muted-foreground md:hidden">{label}</div>
       <div className={cn('text-sub', nowrap ? 'whitespace-nowrap' : 'min-w-0')}>{children}</div>
     </div>
@@ -400,7 +400,11 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
       bodyClassName="px-4 py-1"
     >
       <div
-        className={cn('hidden md:grid', COLUMNS, 'border-b py-2 text-caption text-muted-foreground')}
+        className={cn(
+          'hidden md:grid',
+          COLUMNS,
+          'border-b py-2 text-caption text-muted-foreground [&>span]:min-w-0',
+        )}
         aria-hidden
       >
         <span>段 / 模型</span>
