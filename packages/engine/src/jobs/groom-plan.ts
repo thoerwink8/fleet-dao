@@ -15,6 +15,7 @@
 //   总账（场景里写了「分片」，或标题、正文有「总账」「第一片」「下一片」）一次最多开 1 片；上一片还开着，或开着的 PR
 //   需求栏 Refs 着它，就不开。还要已经有合并了的分片 PR（需求栏 Refs 着这张总账）：名单是空的就不开；名单没读到
 //   （null 或不传）写成「没读到分片关系」，不开，也不写成「没有」。会话自己说已经合过不算。
+//   已知的模块列了超过 50 个不同路径的下一片也不开（和拉单的最重档同一条线）：开出来引擎不拉，这张单还开着，后面的片也开不了。
 // - 补老单只往末尾接，原文、原话一个字不动：老单里已有的节（场景、已知的模块、怎么算做完写了字的）不补，已经有整理补充的单不再补。
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
 // - 涉及改标准路径、`.github/workflows/`（正文里认得出路径）或会话自己标了删数据 / 花钱的，贴「要人拍」，引擎不拉。
@@ -44,6 +45,8 @@ import {
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
+import { moduleItems, moduleRefsOf } from '../runner/task-brief.ts';
+import { TIER_HEAVYWEIGHT_FILE_THRESHOLD } from '../runner/tier.ts';
 import type { IntakeIssue } from './intake.ts';
 
 /** 补老单时追加的那一节的标题。 */
@@ -319,6 +322,13 @@ function ledgerSliceBlocked(
   return null;
 }
 
+/** 和拉单同一条线：反引号里认得出的不同路径超过 50 个，这一片不开。认不出的项不往上加。 */
+function ledgerPathCount(body: string): number {
+  const section = sectionText(parseMd('body.md', body), '已知的模块') ?? '';
+  const { refs } = moduleRefsOf(moduleItems(section));
+  return new Set(refs.map((r) => r.path)).size;
+}
+
 // —— 执行 ——
 
 /**
@@ -539,6 +549,16 @@ export async function executeGroomPlan(
     if (problems.length > 0 || doneSection(parseMd('body.md', body)) !== 'ok') {
       rejected.push({ what, why: problems[0]?.why ?? '「怎么算做完」一节是空的' });
       continue;
+    }
+    if (parent !== undefined && isLedgerIssue(parent)) {
+      const paths = ledgerPathCount(body);
+      if (paths > TIER_HEAVYWEIGHT_FILE_THRESHOLD) {
+        rejected.push({
+          what,
+          why: `已知的模块列了 ${paths} 个路径（超过 ${TIER_HEAVYWEIGHT_FILE_THRESHOLD}），这一片不开`,
+        });
+        continue;
+      }
     }
     const similar = rankSimilar({ title, body }, candidates);
     if (similar.length > 0) {

@@ -950,6 +950,39 @@ describe('runGroomRequests · 接手一次整理', () => {
   });
 });
 
+describe('总账下一片的规模', () => {
+  const paths = (n: number) => Array.from({ length: n }, (_, i) => `\`packages/x${i}/src/a.ts\``).join('\n');
+
+  it('已知的模块超过 50 个路径：整条被拒，不开；刚好 50 个照开', async () => {
+    const ledger = issue(139, { title: 'design 拆分（总账）' });
+    const item = (n: number, title: string) => newItem(1, { title, splitFrom: 139, modules: paths(n) });
+    const tooBig = fakeWrites();
+    const blocked = await executeGroomPlan(
+      plan({
+        newIssues: [item(51, '统一导出报表格式（#139 第 2 片）')],
+      }),
+      ctxOf([ledger], { mergedPulls: [{ number: 1399, refs: [139] }] }),
+      tooBig.writes,
+    );
+    expect(blocked.result.opened).toEqual([]);
+    expect(tooBig.calls.filter((c) => c.kind === 'openIssue')).toEqual([]);
+    expect(blocked.result.rejected).toHaveLength(1);
+    expect(blocked.result.rejected[0]?.why).toContain('51');
+    expect(blocked.result.rejected[0]?.why).toContain('50');
+
+    const edge = fakeWrites();
+    const opened = await executeGroomPlan(
+      plan({
+        newIssues: [item(50, '重构日志轮转策略（#139 第 2 片）')],
+      }),
+      ctxOf([ledger], { mergedPulls: [{ number: 1399, refs: [139] }] }),
+      edge.writes,
+    );
+    expect(opened.result.opened).toHaveLength(1);
+    expect(opened.result.rejected).toEqual([]);
+  });
+});
+
 describe('总账单号 · 故意造出的失败', () => {
   it('【故意造出的失败】总账单号不是开着的、作者在白名单里的单，整条被拒', async () => {
     const f = fakeWrites();
