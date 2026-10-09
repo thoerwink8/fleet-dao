@@ -19,10 +19,15 @@ test('点刷新按钮会再读一遍操作记录', async () => {
   const button = within(header).getByRole('button', { name: '刷新' });
   await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false));
   expect(header.textContent).toContain('最后更新');
+  expect(header.textContent).toContain('刚刚');
+  expect(header.textContent).not.toContain('秒后');
   const calls = spy.mock.calls.length;
   expect(calls).toBeGreaterThan(0);
   fireEvent.click(button);
   await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(calls));
+  const added = spy.mock.calls.slice(calls);
+  expect(added.length).toBeGreaterThan(0);
+  expect(added.every((c) => c[0]?.cursor === undefined && c[0]?.limit === 100)).toBe(true);
 });
 
 test('【故意造出的读失败】操作记录没读成时仍显示 LoadError', async () => {
