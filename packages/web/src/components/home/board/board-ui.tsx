@@ -24,6 +24,28 @@ export function farCardFontPx(basePx: number, zoom: number = ZOOM_OF.far): numbe
   return Math.max(basePx, FAR_LABEL_MIN_PX) / z;
 }
 
+/**
+ * 远档标题在预设缩放 0.4 下的设计字号，对齐 --text-strong（15px）。
+ * 屏幕上的下限对齐 --text-caption（11px）：收进视野时缩放常小于 0.4。
+ */
+export const FAR_TITLE_DESIGN_PX = 15;
+export const FAR_TITLE_FLOOR_PX = 11;
+
+/**
+ * 远档标题的 CSS 字号。用字号名，不写死像素。
+ * --fd-zoom-far 是远档预设缩放，--fd-board-zoom 是画布当前缩放（画布外壳上写）。
+ * 屏幕字号 = max(设计字号 × 当前缩放 / 预设缩放, 11)。
+ */
+export function farTitleFontSize(): string {
+  return 'max(calc(var(--text-strong) / var(--fd-zoom-far, 0.4)), calc(var(--text-caption) / var(--fd-board-zoom, 0.4)))';
+}
+
+/** 远档标题换算到屏幕上的像素，用来对验收（不小于 11）。 */
+export function farTitleScreenPx(zoom: number): number {
+  const z = zoom > 0 ? zoom : ZOOM_OF.far;
+  return Math.max((FAR_TITLE_DESIGN_PX * z) / ZOOM_OF.far, FAR_TITLE_FLOOR_PX);
+}
+
 export function levelOf(zoom: number): ZoomLevel {
   if (zoom < 0.55) return 'far';
   if (zoom < 1.2) return 'mid';

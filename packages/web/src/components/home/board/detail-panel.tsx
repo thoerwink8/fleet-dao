@@ -164,16 +164,19 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
               <>
                 {WAIT_LABEL[item.waitingReason]}
                 {item.waitingSince ? (
-                  <span className="num text-muted-foreground"> · 已 {since(item.waitingSince, now)}</span>
+                  <span className="num whitespace-nowrap text-muted-foreground">
+                    {' · 已 '}
+                    {since(item.waitingSince, now)}
+                  </span>
                 ) : null}
               </>
             )}
           </Row>
           <Row label="本段">
-            <span className="num">{since(item.stageSince, now) ?? '—'}</span>
+            <span className="num whitespace-nowrap">{since(item.stageSince, now) ?? '—'}</span>
           </Row>
           <Row label="总共">
-            <span className="num">{since(item.taskSince, now) ?? '—'}</span>
+            <span className="num whitespace-nowrap">{since(item.taskSince, now) ?? '—'}</span>
           </Row>
         </div>
       </Section>

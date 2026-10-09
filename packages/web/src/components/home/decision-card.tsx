@@ -33,11 +33,13 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
           <Icon className="size-3.5" aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-caption font-medium uppercase tracking-wide text-ink-human">
+          <div className="flex flex-nowrap items-baseline gap-x-2">
+            <span className="shrink-0 whitespace-nowrap text-caption font-medium uppercase tracking-wide text-ink-human">
               {meta.label}
             </span>
-            <span className="num text-caption text-muted-foreground">{formatAgo(decision.since, now)}</span>
+            <span className="num shrink-0 whitespace-nowrap text-caption text-muted-foreground">
+              {formatAgo(decision.since, now)}
+            </span>
           </div>
           <p className="mt-1 text-sm font-medium leading-snug">{decision.title}</p>
           {decision.context ? (
