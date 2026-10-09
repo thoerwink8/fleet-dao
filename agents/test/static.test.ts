@@ -1,21 +1,12 @@
-// 本目录 test/ 不许直接同步起子进程（#264 第 5 片）：spawnSync / execFileSync / execSync 只留在根上的 child.ts。
-// 递归扫 test/ 下所有 .ts（含 rules/ 以外的子目录），去掉注释和引号里的字符串再找这三个名字：引号里的字
+// 本目录 test/ 不许直接同步起子进程（#264 第 5、6 片）：spawnSync / execFileSync / execSync 只留在根上的 child.ts。
+// 递归扫 test/ 下所有 .ts（含 rules/ 等子目录），去掉注释和引号里的字符串再找这三个名字：引号里的字
 // （'spawnSync git ENOENT' 那种假错误）是在提这个词，不是调用。
-// 只豁免 test/ 根上的 child.ts 和这份 static.test.ts；子目录里同名文件照样扫。
-// rules/ 下四个文件（改标准路径）本片不迁：先用下面一份写死的已知名单豁免，迁完由下一片（#1474）删掉这份名单。
+// 只豁免 test/ 根上的 child.ts 和这份 static.test.ts；子目录里同名文件照样扫。rules/ 没有另外的豁免（#1474 迁完删了）。
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const TEST = import.meta.dirname;
-
-/** rules/ 下还没迁的四个文件（相对 test/ 的路径，用 / 写）。整份名单是临时的，#1474 迁完就删。 */
-const KNOWN_UNMIGRATED_RULES = [
-  'rules/foreground-wait.rules.test.ts',
-  'rules/pretool.rules.test.ts',
-  'rules/prompt-log.rules.test.ts',
-  'rules/stop.rules.test.ts',
-];
 
 /** 去掉注释和引号里的字符串（反引号 ${} 里的代码留下：那是代码，不是字面量）。 */
 function stripCommentsAndStrings(code: string): string {
@@ -132,10 +123,10 @@ function rel(file: string): string {
   return relative(TEST, file).split(sep).join('/');
 }
 
-/** 只有 test/ 根上的这两份豁免；`x/child.ts` 这类不算。rules/ 的已知名单另算。 */
+/** 只有 test/ 根上的这两份豁免；`x/child.ts` 这类不算。 */
 function isExempt(file: string): boolean {
   const r = rel(file);
-  return r === 'child.ts' || r === 'static.test.ts' || KNOWN_UNMIGRATED_RULES.includes(r);
+  return r === 'child.ts' || r === 'static.test.ts';
 }
 
 /** test/ 下所有 .ts 的绝对路径（含被豁免的，豁免交给 isExempt 判）。 */
@@ -153,7 +144,7 @@ function testSources(): string[] {
 }
 
 describe('测试里不许同步起子进程', () => {
-  it('spawnSync / execFileSync / execSync 只许在根上的 child.ts（#264 第 5 片）', () => {
+  it('spawnSync / execFileSync / execSync 只许在根上的 child.ts（#264 第 5、6 片，rules/ 也扫）', () => {
     const files = testSources();
     // 一个都没扫到、或者没扫进 rules/，不能当「没问题」
     expect(files.length).toBeGreaterThan(0);
@@ -162,17 +153,12 @@ describe('测试里不许同步起子进程', () => {
     expect(isExempt(join(TEST, 'static.test.ts'))).toBe(true);
     expect(isExempt(join(TEST, 'rules', 'child.ts'))).toBe(false);
     expect(isExempt(join(TEST, 'rules', 'static.test.ts'))).toBe(false);
+    // rules/ 下的规矩测试一个都不豁免（#1474 前有份写死的名单，迁完删了）
+    expect(isExempt(join(TEST, 'rules', 'stop.rules.test.ts'))).toBe(false);
     const hits = files.filter(
       (file) => !isExempt(file) && scanSyncChildSpawns(readFileSync(file, 'utf8')).length > 0,
     );
     expect(hits.map(rel)).toEqual([]);
-  });
-
-  it('rules/ 的已知名单里每个文件都还在、还确实有直接调用（迁完了就该从名单里删）', () => {
-    for (const name of KNOWN_UNMIGRATED_RULES) {
-      const code = readFileSync(join(TEST, name), 'utf8');
-      expect(scanSyncChildSpawns(code), name).not.toEqual([]);
-    }
   });
 
   it('故意放一行违规的样本，扫得出来；引号和注释里提到的不算', () => {

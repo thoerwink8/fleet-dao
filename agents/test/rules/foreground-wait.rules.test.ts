@@ -2,9 +2,9 @@
 // 规矩（创始人 2026-10-04「选 1」）：单次前台等待不超过 60 秒，不分无人值守与否——他在我干活时发的话只在两次工具调用的间隙送到，
 // 一条长前台等待中间没有间隙，话卡在那儿，进程一断还会丢。长的用 run_in_background，后台跑的不受限。
 // 脚本改了这条判断，这里会红；【故意造出的失败】那条证明拦得住、而且认不出的输入不会被当成超了。
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { runChild } from '../child.ts';
 
 interface PretoolLib {
   decide(raw: string, fallbackCwd?: string): { code: number; message?: string };
@@ -100,11 +100,10 @@ describe('前台等待上限', () => {
     expect(lib.foregroundWait(undefined, 'echo', 'bash')).toBeNull();
   });
 
-  it('真的从命令行进来也是退出码 2，原因在 stderr（钩子是按进程调的）', () => {
-    const r = spawnSync(process.execPath, [HOOK], {
+  // 同步起子进程：卡死由 runChild 给子进程的上限管，不靠 vitest 的超时（它打断不了同步用例，#264）
+  it('真的从命令行进来也是退出码 2，原因在 stderr（钩子是按进程调的）', { timeout: 0 }, () => {
+    const r = runChild(process.execPath, [HOOK], {
       input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'sleep 300' }, cwd: '/work/other' }),
-      encoding: 'utf8',
-      timeout: 60_000,
     });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('run_in_background');

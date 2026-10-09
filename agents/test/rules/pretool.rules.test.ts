@@ -8,12 +8,12 @@
 // 命令的输出也带密钥：打印进程命令行（ps -ef、/proc/*/cmdline、Win32_Process、挑 CommandLine 那一列）时，进程的参数里
 // 常常带着口令，接上 redact-secrets.mjs 才放行（2026-10-02 lark-mcp 的 -s <secret> 就是这么漏的，创始人拍了加这条）。
 // 命令字符串拆开拼：免得跑这条测试的命令、或者有人 grep 它时，本机的护栏把自己拦下。
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runChild } from '../child.ts';
 
 interface PretoolLib {
   decide(raw: string, fallbackCwd?: string): { code: number; message?: string };
@@ -202,17 +202,8 @@ describe('借道读这条钩子的几家：格式认得、规矩照拦', () => {
 
 // 同步起子进程：卡死由子进程自己的上限管，不靠 vitest 的超时（它打断不了同步用例，机器一忙又把慢报成红，#264）
 describe('命令行外壳：stdin 进、退出码出', { timeout: 0 }, () => {
-  const run = (stdin: string) => {
-    const r = spawnSync(process.execPath, [HOOK], {
-      input: stdin,
-      encoding: 'utf8',
-      timeout: 60_000,
-      killSignal: 'SIGKILL',
-    });
-    if (r.error !== undefined || r.status === null)
-      throw new Error(`钩子没跑完：${r.error?.message ?? r.signal}`);
-    return r;
-  };
+  // 钩子没跑完（起不来、超过上限被杀、被信号杀）runChild 直接抛，不拿 null 退出码冒充「拦下」
+  const run = (stdin: string) => runChild(process.execPath, [HOOK], { input: stdin });
 
   it('拦下：退出码 2，理由在 stderr', () => {
     const r = run(JSON.stringify({ tool_name: 'Bash', tool_input: { command: `git ${s}` }, cwd: F }));
@@ -846,19 +837,13 @@ describe('安全查看脚本 secret-shape.mjs：只打字段名、类型、长�
 
   // 同步起子进程：卡死由子进程自己的上限管，不靠 vitest 的超时（#264）
   it('命令行外壳：真起一个进程，输出、退出码和上面一样', { timeout: 0 }, () => {
-    const cli = (file: string) =>
-      spawnSync(process.execPath, [SHAPE_SCRIPT, file], {
-        encoding: 'utf8',
-        timeout: 60_000,
-        killSignal: 'SIGKILL',
-      });
+    // 子进程没跑完（起不来、超过上限被杀）runChild 直接抛，代替原来的「error 是 undefined」那一句
+    const cli = (file: string) => runChild(process.execPath, [SHAPE_SCRIPT, file]);
     const ok = cli(at('device.json'));
-    expect(ok.error).toBeUndefined();
     expect(ok.status).toBe(0);
     expect(ok.stdout).toContain('sk：字符串');
     noValue(ok.stdout);
     const missing = cli(at('missing.json'));
-    expect(missing.error).toBeUndefined();
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('读不了');
     expect(missing.stdout).toBe('');
@@ -1137,13 +1122,8 @@ describe('redactor 的命令行外壳：管道进、打码后的文字出；读�
 
   // 同步起子进程：真起一个进程，管道那一路和上面一样（#264 的写法）
   it('命令行外壳：真起一个进程，管道进、退出码 0', { timeout: 0 }, () => {
-    const r = spawnSync(process.execPath, [REDACT_CLI], {
-      input: `ps\nlark-mcp -s ${FAKE_SECRET}\n`,
-      encoding: 'utf8',
-      timeout: 60_000,
-      killSignal: 'SIGKILL',
-    });
-    expect(r.error).toBeUndefined();
+    // 子进程没跑完 runChild 直接抛，代替原来的「error 是 undefined」那一句
+    const r = runChild(process.execPath, [REDACT_CLI], { input: `ps\nlark-mcp -s ${FAKE_SECRET}\n` });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('-s ***');
     expect(r.stdout).not.toContain(FAKE_SECRET);

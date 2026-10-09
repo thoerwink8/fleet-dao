@@ -8,12 +8,12 @@
 //
 // 命令行外壳：真 spawn 这个文件、喂 stdin，看退出码、stdout 和落下来的文件——测的是钩子实际接到
 // Claude Code 输入时的样子，不是内部函数（照 stop.rules.test.ts 的做法）。
-import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { runChild } from '../child.ts';
 
 const HOOK = fileURLToPath(new URL('../../hooks/prompt-log.mjs', import.meta.url));
 const SRC = readFileSync(HOOK, 'utf8');
@@ -32,11 +32,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** 像 Claude Code 那样喂一条消息进去，收回退出码和 stdout。 */
+/** 像 Claude Code 那样喂一条消息进去，收回退出码和 stdout。子进程没跑完（起不来、卡死被杀）runChild 直接抛。 */
 function feed(input: string, env: Record<string, string> = {}) {
-  const r = spawnSync(process.execPath, [HOOK], {
+  const r = runChild(process.execPath, [HOOK], {
     input,
-    encoding: 'utf8',
     env: { ...process.env, FLEET_PROMPT_LOG_DIR: dir, FLEET_UNATTENDED_DIR: join(dir, 'unattended'), ...env },
   });
   return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
@@ -64,7 +63,8 @@ function beijingDay(ms: number) {
   return new Date(ms + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', () => {
+// 同步起子进程：卡死由 runChild 给子进程的上限管，不靠 vitest 的超时（它打断不了同步用例，机器一忙又把慢报成红，#264）
+describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { timeout: 0 }, () => {
   it('挂在 UserPromptSubmit 上，且在同步工具的清单里', () => {
     // 这一条得在清单里登记，不然本机/别家机器上根本不会装、也就不会触发。
     expect(TARGETS).toMatch(/event:\s*'UserPromptSubmit'[^}]*script:\s*'prompt-log\.mjs'/);

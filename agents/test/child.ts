@@ -26,6 +26,8 @@ export interface ChildResult {
   status: number;
   stdout: string;
   stderr: string;
+  /** 子进程的 pid。它已经退出了：要一个「一定死了的 pid」的用例拿它用（rules/stop.rules.test.ts 登记掉线的工人）。 */
+  pid: number;
 }
 
 export function runChild(command: string, args: readonly string[], options: ChildOptions = {}): ChildResult {
@@ -44,7 +46,7 @@ export function runChild(command: string, args: readonly string[], options: Chil
           : `被信号 ${r.signal} 杀掉了`;
     throw new Error(`子进程没跑完（${[command, ...args].join(' ').slice(0, 200)}）：${why}`);
   }
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, pid: r.pid };
 }
 
 /**
