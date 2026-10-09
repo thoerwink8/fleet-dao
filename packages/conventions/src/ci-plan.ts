@@ -328,6 +328,13 @@ export const PATH_RULES: readonly Rule[] = [
     deploy: 'ops',
     why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它',
   },
+  // 决定 0035 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0035-…md 核对七点都在：
+  // 只改这份决定文档也要测 agents（其余 decisions/ 是历史记录，#654，不进门）。
+  {
+    match: exact('docs/decisions/0035-haiku55-by-checkable-output.md'),
+    units: [AGENTS_UNIT],
+    why: 'subagent-model.rules.test.ts 读它核对决定 0035 的七点',
+  },
   // agents/ 是 agents-sync 的输入，也是 agents 单测的输入：通用段原件 agents/shared-rules.md 标记成对、skill 格式由
   // agents-sync 和 agents 的单测读真文件核对，通用段自己也被 agents 的钉子测试读（agents/test/rules/ 读这几条规矩在不在，#522）。
   // 仓根 AGENTS.md 只剩本仓段，照样有两家读它：agents 的字数预算测试量本仓段，agents-sync 核它不再带通用段（带了会读两遍）。

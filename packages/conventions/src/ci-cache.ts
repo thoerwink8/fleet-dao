@@ -209,6 +209,8 @@ export const EXTERNAL_INPUT_FILES: readonly string[] = [
   ...ROOT_CONFIG_FILES,
   'AGENTS.md',
   'docs/ops.md',
+  // 决定 0035 的钉子测试读它（PATH_RULES 里同一道门）
+  'docs/decisions/0035-haiku55-by-checkable-output.md',
   '.github/pull_request_template.md',
   '.gitignore',
   '.claude/settings.json',
