@@ -7,7 +7,7 @@
 ## 一条命令
 
 ```
-pnpm agents:sync              # 取远端 → 把同步专用的检出切到 origin/main → 同步（规矩、技能、钩子、权限）→ 每家一行报结果
+pnpm agents:sync              # 取远端 → 把同步专用的检出切到 origin/main → 同步（规矩、技能、子代理定义、钩子、权限）→ 每家一行报结果
 pnpm agents:sync --check      # 只读，不取远端、不写，只报差在哪
 pnpm agents:sync --offline    # 网络不通时用：不取远端，按本机上次取到的 origin/main 同步
 pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一次建、或专用检出坏了要重建时用；
@@ -120,7 +120,7 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
   | claude-code-guide | `haiku` | Haiku |
   | statusline-setup | `sonnet` | Sonnet |
 
-  所以**派子代理照旧一律写明模型**：按决定 0034、0035 的档位，Sonnet、Opus 写 `model: "sonnet"` 或 `"opus"`；Haiku 5.5 写 `subagent_type: "haiku55"`、不传 `model`（别名 `haiku` 在本机指向 Haiku 4.5；`haiku55` 是 `~/.claude/agents/haiku55.md` 里 `model: claude-haiku-5-5` 的自定义子代理）。Agent 工具的 `model` 只收别名，所以交代里要子代理汇报首行写自己的模型 id、对不上就升档重派；细则在指挥官技能 `references/子代理选模型.md`。主会话在 Fable 上时照旧别用 `fork`。这个变量是忘了写时的兜底，不是替代。
+  所以**派子代理照旧一律写明模型**：按决定 0034、0035 的档位，Sonnet、Opus 写 `model: "sonnet"` 或 `"opus"`；Haiku 5.5 写 `subagent_type: "haiku55"`、不传 `model`（别名 `haiku` 在本机指向 Haiku 4.5；`haiku55` 是 `~/.claude/agents/haiku55.md` 里 `model: claude-haiku-5-5` 的自定义子代理，原件在仓里 `agents/subagents/haiku55.md`，随 `pnpm agents:sync` 装到每台机器，#1393）。Agent 工具的 `model` 只收别名，所以交代里要子代理汇报首行写自己的模型 id、对不上就升档重派；细则在指挥官技能 `references/子代理选模型.md`。主会话在 Fable 上时照旧别用 `fork`。这个变量是忘了写时的兜底，不是替代。
 - **同步工具怎么写**：只写 `env` 里这一项、每次覆盖（同 `defaultMode`：机器上改成别的，哪怕也是 Opus 或 Sonnet，也报漂移、改回仓里的；要换先改仓里）；`env` 里别的变量（代理这些）一个不碰；机器上的 `env` 不是对象就整份不动、报没做成。`--user`（法国装机）跟权限一起整段不写。
 - **源文件拒收**（报没查成 / 没做成，一台机器都不写，不替它补上）：没写 `env` 或这一项；值不是 Opus 或 Sonnet（只认 `opus`、`sonnet` 或 `claude-opus-…`、`claude-sonnet-…` 这样的 id，可带 `[1m]`；Fable、Mythos、Haiku（含 `claude-haiku-5-5`：派活时能显式用，不能当默认）、`inherit`、`best`、`opusplan` 都不认）；`env` 里多写了同步工具没登记的变量（`env` 会推给每一台机器，要加新变量，先在 `packages/agents-sync/src/permissions.ts` 的 `ENV_KEYS` 里登记它的校验）。
 - **钉住它的测试**：`agents/test/rules/subagent-model.rules.test.ts`（默认值改成 Fable、Haiku（含 5.5）、`inherit` 或删掉都红；自己判、不借同步工具的校验，那边哪天被放宽了这条照样红）；同步工具这边的用例在 `packages/agents-sync/test/permissions.test.ts`。
