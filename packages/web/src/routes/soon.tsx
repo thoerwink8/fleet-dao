@@ -1,6 +1,7 @@
 import { ArrowRight, Construction } from 'lucide-react';
 import { Link, useLocation } from 'react-router';
 import { brand } from '#brand';
+import { Page } from '../components/page';
 import { Button } from '../components/ui/button';
 
 /**
@@ -48,43 +49,37 @@ export default function Soon() {
   const { pathname } = useLocation();
   const plan = PLANS[pathname];
   return (
-    <div className="grid min-h-full place-items-center px-6 py-12">
-      <div className="w-full max-w-xl">
-        <div className="flex items-center gap-2 text-sm text-ink-stall">
-          <Construction className="size-4" aria-hidden />
-          这一页还没做
-        </div>
-        <h1 className="mt-2 text-title font-semibold tracking-tight">{plan?.title ?? '还没做'}</h1>
-        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          {plan?.what ?? '这个地址还没有页面。'}
-        </p>
-        {plan ? (
-          <>
-            <p className="mt-5 text-xs text-muted-foreground">做好以后会有：</p>
-            <ul className="mt-2 space-y-1.5">
-              {plan.bullets.map((b) => (
-                <li key={b} className="flex gap-2 text-sm">
-                  <span className="mt-2 size-1.5 shrink-0 rounded-full bg-foreground/40" />
-                  {b}
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : null}
-        <div className="mt-6 flex flex-wrap gap-2">
-          {plan?.related.map((r) => (
-            <Button key={r.to} asChild variant="outline" size="sm">
-              <Link to={r.to}>
-                现在先看{r.label}
-                <ArrowRight />
-              </Link>
-            </Button>
-          ))}
-          <Button asChild variant="ghost" size="sm">
-            <Link to="/">回主页</Link>
-          </Button>
-        </div>
+    <Page title={plan?.title ?? '还没做'} description={plan?.what ?? '这个地址还没有页面。'}>
+      <div className="flex items-center gap-2 text-sm text-ink-stall">
+        <Construction className="size-4" aria-hidden />
+        这一页还没做
       </div>
-    </div>
+      {plan ? (
+        <>
+          <p className="mt-5 text-xs text-muted-foreground">做好以后会有：</p>
+          <ul className="mt-2 space-y-1.5">
+            {plan.bullets.map((b) => (
+              <li key={b} className="flex gap-2 text-sm">
+                <span className="mt-2 size-1.5 shrink-0 rounded-full bg-foreground/40" />
+                {b}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      <div className="mt-6 flex flex-wrap gap-2">
+        {plan?.related.map((r) => (
+          <Button key={r.to} asChild variant="outline" size="sm">
+            <Link to={r.to}>
+              现在先看{r.label}
+              <ArrowRight />
+            </Link>
+          </Button>
+        ))}
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/">回主页</Link>
+        </Button>
+      </div>
+    </Page>
   );
 }
