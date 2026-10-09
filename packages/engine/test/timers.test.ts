@@ -5,9 +5,15 @@
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
-import type { CanaryDeps } from '../src/jobs/canary.ts';
+import { CANARY_RUN_TIMEOUT_MINUTES, type CanaryDeps } from '../src/jobs/canary.ts';
 import { engineTimerJobs } from '../src/jobs/engine-timers.ts';
-import { latestSlot, startTimers, type TimerHost, type TimerJob } from '../src/jobs/timers.ts';
+import {
+  latestSlot,
+  startEngineTimers,
+  startTimers,
+  type TimerHost,
+  type TimerJob,
+} from '../src/jobs/timers.ts';
 import { ENGINE_JOBS } from '../src/real/jobs.ts';
 
 const MIN = 60_000;
@@ -412,6 +418,8 @@ describe('10 个定时任务的登记（engineTimerJobs）', () => {
       expect(j.catchupMinutes, j.id).toBe(j.id === 'canary' ? 60 : j.everyMinutes);
       // 耗时表要下日志，超时线是 60 分钟；其余仍是原来的 15 分钟
       expect(j.overdueMinutes, j.id).toBe(j.id === 'ci-timings' ? 60 : 15);
+      // 起来补记没收尾记录：巡检按工作流时限，其余按这一轮的工作上限（overdueMinutes）
+      expect(j.abandonAfterMinutes, j.id).toBe(j.id === 'canary' ? CANARY_RUN_TIMEOUT_MINUTES : undefined);
     }
   });
 
@@ -454,7 +462,7 @@ describe('10 个定时任务的登记（engineTimerJobs）', () => {
     j.canary = () =>
       ({
         repo: { owner: 'acme', name: 'canary' },
-        runs: { start: async () => 1, finish: async () => {} },
+        runs: { start: async () => 1, finish: async () => {}, closeInterrupted: async () => [] },
         record: {
           start: async () => 1,
           progress: async () => true,
@@ -473,5 +481,73 @@ describe('10 个定时任务的登记（engineTimerJobs）', () => {
     await canaryTimer?.onMasterSkip?.();
     expect(swept).toHaveLength(1);
     expect(swept[0]).toContain('总开关');
+  });
+});
+
+describe('起来时补记进程中断没收尾的 schedule_runs（startEngineTimers，#1522）', () => {
+  it('先按一轮工作上限补记，再起定时器；巡检用工作流时限，不用 15 分钟', async () => {
+    const f = fakeHost(T0);
+    const seen: { id: string; startedBefore: number }[] = [];
+    const order: string[] = [];
+    let why = '';
+    await startEngineTimers(
+      [
+        job({
+          id: 'route-probe',
+          overdueMinutes: 15,
+          run: async () => {
+            order.push('run:route-probe');
+          },
+        }),
+        job({
+          id: 'canary',
+          overdueMinutes: 15,
+          abandonAfterMinutes: 330,
+          run: async () => {
+            order.push('run:canary');
+          },
+        }),
+      ],
+      f.host,
+      async (input) => {
+        order.push('close');
+        why = input.why;
+        for (const item of input.jobs)
+          seen.push({ id: item.id, startedBefore: item.startedBefore.getTime() });
+        return [8029, 4596, 2951];
+      },
+    );
+    await f.flush();
+    expect(why).toContain('没收尾');
+    expect(seen).toEqual([
+      { id: 'route-probe', startedBefore: T0 - 15 * MIN },
+      { id: 'canary', startedBefore: T0 - 330 * MIN },
+    ]);
+    expect(f.logs).toEqual(['info:进程中断没收尾，启动时补记了 3 条定时任务记录：8029、4596、2951']);
+    expect(order[0]).toBe('close');
+    expect(order).toEqual(['close', 'run:route-probe', 'run:canary']);
+  });
+
+  it('【故意造出的失败】补记写库失败要抛并记日志，定时器不起', async () => {
+    const f = fakeHost(T0);
+    let ran = false;
+    await expect(
+      startEngineTimers(
+        [
+          job({
+            run: async () => {
+              ran = true;
+            },
+          }),
+        ],
+        f.host,
+        async () => {
+          throw new Error('库写不进');
+        },
+      ),
+    ).rejects.toThrow('库写不进');
+    await f.flush();
+    expect(ran).toBe(false);
+    expect(f.logs).toEqual(['error:进程中断没收尾的定时任务没补记成：库写不进']);
   });
 });

@@ -4,10 +4,12 @@
 // - 停机一阵再起来：只补最近一轮，不把错过的全补一遍——最近一格的钟点在补跑窗口里、且那之后没起过一轮才补，再久就等下一格；
 // - 一轮失败不停掉定时：下一格照样来（没跑成的一轮由各任务自己记进 schedule_runs，看门狗照登记表看）；
 // - 引擎重启后自己恢复：没有「暂停」这个持久状态，也就没有「重启不替人恢复暂停的」那个坑；要停就停引擎、或关项目的开关。
+// - 起来时先补记上一轮进程被腰斩、超过一轮工作上限还没结束的 schedule_runs（startEngineTimers，#1522），再按格子跑。
 // 单实例假设：法国只有一个引擎进程（一个 systemd 单元，发布是先停旧的再起新的），「不叠着跑」只在进程内保证。
 // 将来要起第二个引擎进程（多机、蓝绿并起）时，每一轮开头要先抢一把锁（比如 Postgres 咨询锁 pg_try_advisory_lock(任务编号)），
 // 抢不到就跳过这一轮——现在不做，不为没有的需求写代码。
 
+import { INTERRUPTED_SCHEDULE_WHY } from '@fleet-dao/db';
 import { type EngineMasterGate, masterOffNote } from '../engine-master.ts';
 
 const MINUTE_MS = 60_000;
@@ -25,6 +27,11 @@ export interface TimerJob {
    * （同一个任务并行：探针同时起两个会话、对账同时写同一批行）。它回来之前下一格一律跳过，看门狗照登记表报「停了」，要人看。
    */
   overdueMinutes: number;
+  /**
+   * 起来时补记没收尾的 schedule_runs 用的一轮工作上限（分钟）：开始得比这还早还没结束的，补记成没跑成。
+   * 不给就用 overdueMinutes。巡检的 schedule_run 盖住整段工作流，要给工作流时限，不是起工作流那一下的 15 分钟。
+   */
+  abandonAfterMinutes?: number;
   /**
    * 引擎总开关关着时这个任务这一轮不跑（#1086）：拉单、巡检这类会拉单、派活、起干活会话的任务标它；探针、读额度、看门狗、
    * 对账这些看家检查不标，关着照跑（创始人 2026-10-05 约 22:40：关着也要能看到渠道通不通）。闸在这里统一判，不在各任务里各加 if。
@@ -80,6 +87,50 @@ export function latestSlot(job: Pick<TimerJob, 'everyMinutes' | 'offsetMinutes'>
   const every = job.everyMinutes * MINUTE_MS;
   const offset = (job.offsetMinutes ?? 0) * MINUTE_MS;
   return Math.floor((t - offset) / every) * every + offset;
+}
+
+/** 这个任务起来时补记没收尾记录用的上限：给了 abandonAfterMinutes 用它，否则用一轮工作上限 overdueMinutes。 */
+export function abandonAfterMinutes(job: Pick<TimerJob, 'overdueMinutes' | 'abandonAfterMinutes'>): number {
+  return job.abandonAfterMinutes ?? job.overdueMinutes;
+}
+
+export interface InterruptedScheduleCloseInput {
+  jobs: readonly { id: string; startedBefore: Date }[];
+  at: Date;
+  why: string;
+}
+
+/** 写库失败照抛。真实现是 @fleet-dao/db 的 closeInterruptedScheduleRuns。 */
+export type InterruptedScheduleClose = (input: InterruptedScheduleCloseInput) => Promise<number[]>;
+
+/**
+ * 先把本进程会跑的任务里、超过一轮工作上限还没结束的 schedule_runs 补记成没跑成，再起定时器。
+ * 补记写库失败记一条 error 并照抛：定时器不起，免得悄悄留着「进行中」的孤儿行。
+ */
+export async function startEngineTimers(
+  jobs: readonly TimerJob[],
+  host: TimerHost,
+  closeInterrupted: InterruptedScheduleClose,
+): Promise<EngineTimers> {
+  const at = new Date(host.now());
+  try {
+    const ids = await closeInterrupted({
+      jobs: jobs.map((job) => ({
+        id: job.id,
+        startedBefore: new Date(at.getTime() - abandonAfterMinutes(job) * MINUTE_MS),
+      })),
+      at,
+      why: INTERRUPTED_SCHEDULE_WHY,
+    });
+    if (ids.length > 0) {
+      host.log('info', `进程中断没收尾，启动时补记了 ${ids.length} 条定时任务记录：${ids.join('、')}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    host.log('error', `进程中断没收尾的定时任务没补记成：${message}`);
+    throw error;
+  }
+  return startTimers(jobs, host);
 }
 
 export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineTimers {
