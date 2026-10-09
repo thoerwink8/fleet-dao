@@ -210,9 +210,12 @@ export default function RoutingStatus() {
     .filter((c) => channelMatchesFilter(c, filter) && (q === '' || haystack.get(c.channel.id)?.includes(q)))
     .sort((a, b) => Number(b.hasFault && !b.interrupted) - Number(a.hasFault && !a.interrupted));
 
+  // 只在筛选结果里选：原来的还在结果里就留着，不在就改看结果的第一个。
+  // 一个都不符合就空着，不退回全部渠道的第一个——否则左边写没搜到，右边还像搜到了。
   const wanted = manualPick ?? params.get('p');
-  const picked = cards.some((c) => c.channel.id === wanted) ? wanted : (visible[0] ?? cards[0])?.channel.id;
-  const current = cards.find((c) => c.channel.id === picked);
+  const stillThere = wanted !== null && visible.some((c) => c.channel.id === wanted);
+  const picked = visible.length === 0 ? undefined : stillThere ? wanted : visible[0]?.channel.id;
+  const current = picked ? cards.find((c) => c.channel.id === picked) : undefined;
   const focus = current ? resolveProbe(current.channel.id, history, cellPick, routePick) : undefined;
   const pickChannel = (id: string) => {
     setManualPick(id);
@@ -344,7 +347,14 @@ export default function RoutingStatus() {
                 onProbe={fire}
               />
             </>
-          ) : null}
+          ) : (
+            <p
+              role="status"
+              className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
+            >
+              没有可看的渠道，换个搜索词或筛选
+            </p>
+          )}
         </div>
       </div>
     </Page>

@@ -633,6 +633,37 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.getByText(/没有符合的渠道/)).toBeTruthy();
   });
 
+  test('搜索有匹配时，详情显示结果里的渠道：原来的还在结果里就留着，不在就改看第一个', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
+    await screen.findByRole('list', { name: '渠道状态' });
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Claude 订阅/ })).toBeTruthy());
+    const box = screen.getByRole('searchbox', { name: '搜索渠道' });
+    fireEvent.change(box, { target: { value: 'Claude' } });
+    expect(screen.getByRole('heading', { name: /Claude 订阅/ })).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Claude 订阅 的路由' })).toBeTruthy();
+    fireEvent.change(box, { target: { value: 'Grok' } });
+    expect(screen.getByRole('heading', { name: /Grok/ })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
+    expect(screen.getByRole('list', { name: 'Grok 的路由' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /返回渠道列表/ })).toBeTruthy();
+  });
+
+  test('搜索没有匹配时，详情不再渲染渠道，改写空态；窄屏返回按钮不出现', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
+    await screen.findByRole('list', { name: '渠道状态' });
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Claude 订阅/ })).toBeTruthy());
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索渠道' }), {
+      target: { value: 'zzz' },
+    });
+    expect(screen.getByText('没有可看的渠道，换个搜索词或筛选')).toBeTruthy();
+    expect(screen.getByText(/没有符合的渠道：「zzz」/)).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull();
+    expect(screen.queryByRole('button', { name: '探这个渠道' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /返回渠道列表/ })).toBeNull();
+    expect(screen.queryByRole('list', { name: /的路由$/ })).toBeNull();
+  });
+
   test('窄屏：点一行进详情页，返回回到列表（宽屏两栏并排，不看它）', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status' });
     await screen.findByRole('list', { name: '渠道状态' });
