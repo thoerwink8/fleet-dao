@@ -18,6 +18,24 @@
 
 ## 二、端口表
 
+<!-- fleet:ports:start -->
+
+| 变量名 | 端口号 | 来源脚本 |
+|---|---|---|
+| PG_PORT | 5432 | deploy/france.sh |
+| TEMPORAL_FRONTEND_PORT | 7243 | deploy/france.sh |
+| TEMPORAL_FRONTEND_MEMBERSHIP_PORT | 6943 | deploy/france.sh |
+| TEMPORAL_HISTORY_PORT | 7244 | deploy/france.sh |
+| TEMPORAL_HISTORY_MEMBERSHIP_PORT | 6944 | deploy/france.sh |
+| TEMPORAL_MATCHING_PORT | 7245 | deploy/france.sh |
+| TEMPORAL_MATCHING_MEMBERSHIP_PORT | 6945 | deploy/france.sh |
+| TEMPORAL_WORKER_PORT | 7249 | deploy/france.sh |
+| TEMPORAL_WORKER_MEMBERSHIP_PORT | 6949 | deploy/france.sh |
+| API_PORT | 8787 | deploy/france.sh |
+| MIRASIM_SESSION_PORT | 4318 | deploy/france.sh |
+| WG_PORT | 4500 | deploy/hk.sh |
+
+<!-- fleet:ports:end -->
 法国（除了私有项目 self-proxy 的 443，全部只绑本机或隧道地址）：
 
 | 端口 | 绑在 | 是谁 | 说明 |
