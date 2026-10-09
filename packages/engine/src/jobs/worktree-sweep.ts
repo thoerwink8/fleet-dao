@@ -42,7 +42,15 @@ export const SUBTASK_TREE_ALERT =
 export const FUSION_TREE_ALERT = /^req:([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)#([1-9]\d*):worktree$/;
 /** Fusion 的树：<需求号>-f<8 位十六进制>（contract.ts 的 fusionBranch 去掉 fleet/）。 */
 const FUSION_TREE = /^([1-9]\d*)-f[0-9a-f]{8}$/;
-/** 这里报的「树里有没推的东西，删不删要你拍」：键是 worktree:<仓那一层>/<树>。 */
+/**
+ * 这里报的「树里有没推的东西，删不删要你拍」：键是 worktree:<仓那一层>/<树>。
+ * 本机同一条检查不在这套定时活里跑（本机没起引擎，#995 已查实）。本机由开会话钩子
+ * `sweepWorktrees` 把还有没提交改动或没推提交的树记进 ~/.fleet-dao/kept-worktrees.json
+ * （刚动过也记；负责人「指挥官」、首次记下后 24 小时为期限，下次开会话再读。两小时只挡住
+ * 干净树的删除。这一轮没查成不撤已有认领）。两套清扫不合并，这是同一份「留着的树要有主」
+ * 清单的两边：查不出、记不上都照实说，不当成已经有主；没查成也不把已有的主清掉
+ * （这边没查成不撤「要人拍」，和本机留着原认领是同一条）。
+ */
 export const KEEP_ALERT_PREFIX = 'worktree:';
 /** 一轮最多看几棵残留的树（每棵要以会话用户起几个短命 scope 跑 git）；多的下一轮再看。 */
 export const INSPECT_MAX = 80;

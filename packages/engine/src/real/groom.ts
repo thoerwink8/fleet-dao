@@ -40,7 +40,7 @@ export type GroomGitHub = Pick<
   | 'fetchMainline'
   | 'bundleCommits'
 > & {
-  claims: Pick<GitHub['claims'], 'openPulls'>;
+  claims: Pick<GitHub['claims'], 'openPulls' | 'listMergedPulls'>;
   commitIdentity(repo: { owner: string; name: string }): Promise<Identity>;
 };
 
@@ -224,6 +224,11 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
       return githubWhitelist(await store.listUsers());
     },
     readFacts,
+    readMergedPulls: async (repo) => {
+      const since = new Date(now().getTime() - GROOM_CLOSED_DAYS * 24 * 60 * 60_000);
+      const pulls = await w.gh.claims.listMergedPulls(ref(repo), since);
+      return pulls.map((p) => ({ number: p.number, title: p.title, body: p.body }));
+    },
     standardPaths: loadStandardPaths,
     runSession,
     writes: (repo) => ({
