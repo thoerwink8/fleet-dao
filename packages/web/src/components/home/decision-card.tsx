@@ -34,10 +34,10 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-[11px] font-medium uppercase tracking-wide text-ink-human">
+            <span className="text-caption font-medium uppercase tracking-wide text-ink-human">
               {meta.label}
             </span>
-            <span className="num text-[11px] text-muted-foreground">{formatAgo(decision.since, now)}</span>
+            <span className="num text-caption text-muted-foreground">{formatAgo(decision.since, now)}</span>
           </div>
           <p className="mt-1 text-sm font-medium leading-snug">{decision.title}</p>
           {decision.context ? (

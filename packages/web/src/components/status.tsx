@@ -7,7 +7,7 @@ export function StatusChip({ tone, label, className }: { tone: Tone; label: stri
   return (
     <span
       className={cn(
-        'inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-[11px] font-medium leading-none whitespace-nowrap',
+        'inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-caption font-medium leading-none whitespace-nowrap',
         toneSoft[tone],
         toneText[tone],
         className,
