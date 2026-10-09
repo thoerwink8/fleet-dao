@@ -114,9 +114,12 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       data-stale={w.stale || undefined}
       data-unknown={!known || undefined}
     >
-      {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07） */}
+      {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07）。模型名放不下就换行，不单行截成「o...」。 */}
       {w.scope || w.window === 'other' ? (
-        <div className="mb-1 truncate text-caption text-muted-foreground" title={`上游原名：${w.label}`}>
+        <div
+          className="mb-1 min-w-0 break-words text-caption text-muted-foreground"
+          title={`上游原名：${w.label}`}
+        >
           {windowTitle(w)}
         </div>
       ) : null}
