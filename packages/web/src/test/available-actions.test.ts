@@ -37,12 +37,23 @@ describe('availableActions：只画引擎真有人听的动作', () => {
     expect(availableActions({ ...base, state: 'stopped', paused: '已暂停：…' })).toEqual(['redo']);
   });
 
-  test('挂起的单：没暂停给暂停、叫停、重做，不给继续；暂停着给继续、叫停、重做（工作流还在跑时由后端拒绝重做）', () => {
-    expect(availableActions({ ...base, state: 'stalled' })).toEqual(['pause', 'stop', 'redo']);
+  test('停滞：不给暂停，给继续、叫停、重做（停下等人，没有正在跑的一段可停）', () => {
+    expect(availableActions({ ...base, state: 'stalled' })).toEqual(['resume', 'stop', 'redo']);
     expect(availableActions({ ...base, state: 'stalled', paused: '已暂停：…' })).toEqual([
       'resume',
       'stop',
       'redo',
     ]);
+  });
+
+  test('合并中不给暂停：没暂停只给叫停；已经暂停给继续、叫停', () => {
+    expect(availableActions({ ...base, state: 'merging' })).toEqual(['stop']);
+    expect(availableActions({ ...base, state: 'merging', paused: '已暂停：…' })).toEqual(['resume', 'stop']);
+  });
+
+  test('排队、分诊、写方案仍给暂停、叫停', () => {
+    for (const state of ['queued', 'triaging', 'planning'] as const) {
+      expect(availableActions({ ...base, state }), state).toEqual(['pause', 'stop']);
+    }
   });
 });
