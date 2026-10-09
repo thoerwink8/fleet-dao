@@ -42,10 +42,12 @@ import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import {
+  MAIN_CI_VERDICT_KEY,
   MAIN_RECOVERED_KEY_PREFIX,
   MAIN_RED_KEY_PREFIX,
+  mainCiVerdictTitle,
   pushMainRed,
-  verdictFromAlerts,
+  storedMainCiVerdict,
 } from '../jobs/main-red-push.ts';
 import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
 import {
@@ -487,11 +489,12 @@ export function hourlyReconcileJob(
         pushMainRed({
           listPushRuns: mainCiRuns({ client: w.gh.deps.client }),
           previousVerdict: async () => {
-            const [red, recovered] = await Promise.all([
+            const [stored, red, recovered] = await Promise.all([
+              alertByKey(w.db, MAIN_CI_VERDICT_KEY),
               latestAlertByPrefix(w.db, MAIN_RED_KEY_PREFIX),
               latestAlertByPrefix(w.db, MAIN_RECOVERED_KEY_PREFIX),
             ]);
-            return verdictFromAlerts(red, recovered);
+            return storedMainCiVerdict(stored?.body, red, recovered);
           },
           sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
           markSent: async (x) => {
@@ -501,6 +504,16 @@ export function hourlyReconcileJob(
               taskId: null,
               title: x.title,
               body: x.body,
+              link: x.link,
+            });
+          },
+          rememberVerdict: async (x) => {
+            await upsertAlert(w.db, {
+              dedupeKey: MAIN_CI_VERDICT_KEY,
+              level: 'daily',
+              taskId: null,
+              title: mainCiVerdictTitle(x.verdict),
+              body: x.verdict,
               link: x.link,
             });
           },

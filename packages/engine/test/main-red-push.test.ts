@@ -10,7 +10,9 @@ import {
   type MainCiVerdict,
   type MainPushRun,
   pushMainRed,
+  storedMainCiVerdict,
   verdictFromAlerts,
+  verdictFromBody,
 } from '../src/jobs/main-red-push.ts';
 import type { SweepPart } from '../src/jobs/reconcile-common.ts';
 import { FEISHU_WEBHOOK_ENV, feishuWebhookSender } from '../src/real/feishu-webhook.ts';
@@ -37,6 +39,7 @@ function world() {
   const marked: { key: string; body: string }[] = [];
   const byKey = new Map<string, string>();
   let verdict: MainCiVerdict | null = null;
+  let rememberFault: Error | null = null;
   const push = (
     runs: readonly MainPushRun[] | (() => Promise<readonly MainPushRun[]>),
     send: (text: string) => Promise<void> = async (text) => {
@@ -48,14 +51,28 @@ function world() {
       previousVerdict: async () => verdict,
       sentBody: async (key) => byKey.get(key) ?? null,
       markSent: async (x) => {
+        // 推送键再写一次不改结论：提醒表原地更新不挪 createdAt，上一次结论只听结论行。
         marked.push({ key: x.dedupeKey, body: x.body });
         byKey.set(x.dedupeKey, x.body);
-        if (x.dedupeKey.startsWith('feishu:main-red:')) verdict = 'red';
-        if (x.dedupeKey.startsWith('feishu:main-recovered:')) verdict = 'green';
+      },
+      rememberVerdict: async (x) => {
+        if (rememberFault) {
+          const err = rememberFault;
+          rememberFault = null;
+          throw err;
+        }
+        verdict = x.verdict;
       },
       send,
     });
-  return { sent, marked, push };
+  return {
+    sent,
+    marked,
+    push,
+    breakRemember() {
+      rememberFault = new Error('结论写不进');
+    },
+  };
 }
 
 describe('judgeMainCi：最近一次已结束的 push 运行', () => {
@@ -105,6 +122,27 @@ describe('verdictFromAlerts', () => {
   });
 });
 
+describe('结论行压过推送键的建立时刻', () => {
+  const red = { createdAt: new Date('2026-10-10T00:00:00Z'), id: 'a' };
+  const recovered = { createdAt: new Date('2026-10-10T01:00:00Z'), id: 'b' };
+
+  it('正文是 red / green 就听它；过期撤掉前面加了「已撤」也认最后一行', () => {
+    expect(verdictFromBody(null)).toBeNull();
+    expect(verdictFromBody('')).toBeNull();
+    expect(verdictFromBody('red')).toBe('red');
+    expect(verdictFromBody('green')).toBe('green');
+    expect(verdictFromBody('已撤：过期\n\nred')).toBe('red');
+    expect(verdictFromBody('认不出')).toBeNull();
+  });
+
+  it('结论行说红，不再听更晚的已恢复键；没有结论行才退回去', () => {
+    expect(storedMainCiVerdict('red', red, recovered)).toBe('red');
+    expect(storedMainCiVerdict('已撤：过期\n\ngreen', red, null)).toBe('green');
+    expect(storedMainCiVerdict(null, red, recovered)).toBe('green');
+    expect(storedMainCiVerdict('认不出', red, recovered)).toBe('green');
+  });
+});
+
 describe('pushMainRed', () => {
   it('变红推一条：正文含提交号前 7 位、运行链接、失败的作业名', async () => {
     const w = world();
@@ -119,6 +157,66 @@ describe('pushMainRed', () => {
     expect(text).toContain('lint');
     expect(w.marked.map((m) => m.key)).toEqual([`feishu:main-red:${SHA}`]);
     expect(w.marked[0]?.body).toBe(text);
+  });
+
+  it('同一个提交再次变红不再推，结论仍改成红，之后别的提交转绿推已恢复', async () => {
+    const w = world();
+    const urlAgain = 'https://github.com/thoerwink8/fleet-dao/actions/runs/101';
+    const urlB = 'https://github.com/thoerwink8/fleet-dao/actions/runs/102';
+    await w.push([run()]);
+    await w.push([run({ conclusion: 'success', failedJobs: [] })]);
+    const again = await w.push([run({ url: urlAgain })]);
+    expect(again).toMatchObject({ found: 0, unchecked: [] });
+    expect(w.sent).toHaveLength(2);
+    expect(w.marked.filter((m) => m.key === `feishu:main-red:${SHA}`)).toHaveLength(1);
+
+    const recovered = await w.push([run({ conclusion: 'success', sha: SHA2, url: urlB, failedJobs: [] })]);
+    expect(recovered).toMatchObject({ found: 1, unchecked: [] });
+    expect(w.sent).toHaveLength(3);
+    const text = w.sent[2] ?? '';
+    expect(text).toContain('已恢复');
+    expect(text).toContain(SHA2.slice(0, 7));
+    expect(text).toContain(urlB);
+    expect(w.marked.filter((m) => m.key === `feishu:main-recovered:${SHA2}`)).toHaveLength(1);
+  });
+
+  it('同一个提交再次转绿不再推，结论改回绿，之后别的提交仍是绿的不推已恢复', async () => {
+    const w = world();
+    await w.push([run()]);
+    await w.push([run({ conclusion: 'success', failedJobs: [] })]);
+    await w.push([run({ url: 'https://github.com/thoerwink8/fleet-dao/actions/runs/101' })]);
+    const secondGreen = await w.push([
+      run({
+        conclusion: 'success',
+        url: 'https://github.com/thoerwink8/fleet-dao/actions/runs/103',
+        failedJobs: [],
+      }),
+    ]);
+    expect(secondGreen).toMatchObject({ found: 0, unchecked: [] });
+    expect(w.sent).toHaveLength(2);
+    expect(w.marked.filter((m) => m.key === `feishu:main-recovered:${SHA}`)).toHaveLength(1);
+
+    const later = await w.push([run({ conclusion: 'success', sha: SHA2, url: URL2, failedJobs: [] })]);
+    expect(later).toMatchObject({ found: 0, unchecked: [] });
+    expect(w.sent).toHaveLength(2);
+  });
+
+  it('再次变红时结论记不下来：没查成，下一轮记下之后别的提交转绿仍推已恢复', async () => {
+    const w = world();
+    await w.push([run()]);
+    await w.push([run({ conclusion: 'success', failedJobs: [] })]);
+    w.breakRemember();
+    const again = await w.push([run({ url: 'https://github.com/thoerwink8/fleet-dao/actions/runs/101' })]);
+    expect(again.found).toBe(0);
+    expect(again.unchecked.join('\n')).toContain('没查成');
+    expect(w.sent).toHaveLength(2);
+    expect(w.marked.filter((m) => m.key === `feishu:main-red:${SHA}`)).toHaveLength(1);
+
+    const retried = await w.push([run({ url: 'https://github.com/thoerwink8/fleet-dao/actions/runs/101' })]);
+    expect(retried).toMatchObject({ found: 0, unchecked: [] });
+    const recovered = await w.push([run({ conclusion: 'success', sha: SHA2, url: URL2, failedJobs: [] })]);
+    expect(recovered).toMatchObject({ found: 1, unchecked: [] });
+    expect(w.sent[2]).toContain('已恢复');
   });
 
   it('同一个提交第二轮不再推', async () => {
@@ -550,6 +648,7 @@ describe('对账里的主线红', () => {
   it('【故意造出的失败】webhook 回 5xx 三次：发了 3 次、没记已推、对账结果里有没查成', async () => {
     let n = 0;
     const marked: string[] = [];
+    let remembered = 0;
     const send = feishuWebhookSender({
       env: { [FEISHU_WEBHOOK_ENV]: HOOK },
       fetchImpl: async () => {
@@ -566,12 +665,16 @@ describe('对账里的主线红', () => {
         markSent: async (x) => {
           marked.push(x.dedupeKey);
         },
+        rememberVerdict: async () => {
+          remembered += 1;
+        },
         send,
       }),
     );
     const result = await runHourlyReconcileJob(h.deps);
     expect(n).toBe(3);
     expect(marked).toEqual([]);
+    expect(remembered).toBe(0);
     expect(result.outcome).not.toBe('ok');
     expect(result.why).toContain('没查成');
     expect(h.finished[0]?.result.outcome).not.toBe('ok');
