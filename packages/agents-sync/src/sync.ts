@@ -28,6 +28,7 @@ import {
   SKILL_TARGETS,
   type SkillTarget,
   STATE_DIR,
+  SUBAGENT_TARGET,
   slashed,
 } from './targets.ts';
 import { linkTarget, readTree, removeEntry, sameTree, type Tree, treeDiff, writeTree } from './tree.ts';
@@ -44,6 +45,8 @@ export interface Sources {
   hooks: { ok: true; tree: Tree } | { ok: false; why: string };
   /** agents/config/claude-permissions.json 的原文；读不到时是为什么（只影响权限那一段，别的照写）。认内容在 permissions.ts */
   permissions: { ok: true; text: string } | { ok: false; why: string };
+  /** agents/subagents/ 下 SUBAGENT_TARGET 列了名字的几份（文件名 → 原文）；读不到时是为什么（只影响子代理这一段） */
+  subagents: { ok: true; files: Map<string, string> } | { ok: false; why: string };
 }
 
 export interface Ctx {
@@ -108,8 +111,42 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
       vendor: vendorNames,
       hooks: readHooks(repo),
       permissions: readPermissionsFile(repo),
+      subagents: readSubagents(repo),
     },
   };
+}
+
+/** 用户级子代理定义的原件在仓里的目录：只读 SUBAGENT_TARGET 列了名字的几份，不扫目录 */
+export const SUBAGENTS_DIR = 'agents/subagents';
+
+/**
+ * agents/subagents/ 下列了名字的几份：读不到不挡规矩和 skill（旧检出里还没有它），子代理那一段报没查成。
+ * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，派 haiku55 派不到。
+ */
+function readSubagents(repo: string): Sources['subagents'] {
+  const files = new Map<string, string>();
+  for (const file of SUBAGENT_TARGET.files) {
+    const rel = `${SUBAGENTS_DIR}/${file}`;
+    let text: string;
+    try {
+      text = readFileSync(join(repo, ...rel.split('/')), 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT')
+        return { ok: false, why: `仓里没有 ${rel}（检出太旧或不全，或 --repo 指错了）` };
+      return { ok: false, why: `读不了仓里的 ${rel}（${code(err)}）` };
+    }
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(text);
+    if (!fm) return { ok: false, why: `仓里的 ${rel} 开头认不出 frontmatter（--- 圈起来的那几行）` };
+    const name = /^name:[ \t]*(\S+)[ \t]*\r?$/m.exec(fm[1] ?? '')?.[1];
+    const want = file.replace(/\.md$/, '');
+    if (name !== want)
+      return {
+        ok: false,
+        why: `仓里的 ${rel} 的 name 是「${name ?? '没写'}」，和文件名对不上（该是 ${want}）`,
+      };
+    files.set(file, text);
+  }
+  return { ok: true, files };
 }
 
 /** agents/config/claude-permissions.json：读不到不挡规矩和 skill（旧检出里还没有它），权限那一段报没查成 */
@@ -151,7 +188,7 @@ export function relOf(
 }
 
 /** 家里的文件该归谁：这个家目录的主人（Windows 不判） */
-function expectedOwner(ctx: Ctx): number | undefined {
+export function expectedOwner(ctx: Ctx): number | undefined {
   if (ctx.platform !== 'linux') return undefined;
   try {
     return statSync(ctx.home).uid;
@@ -326,7 +363,7 @@ export function applyRules(ctx: Ctx, src: Sources, backups: Backups): Line[] {
 
 // ── skill ──
 
-function manifestKey(ctx: Ctx): string {
+export function manifestKey(ctx: Ctx): string {
   return `~/${slashed(placeOn(STATE_DIR, ctx.platform))}/agents-sync.json`;
 }
 
@@ -443,7 +480,8 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
   }
   if (nothingToDo(src, manifest.value)) return [noSkillsLine()];
   const file = manifestPath(ctx.home, ctx.platform);
-  const m: Manifest = { skills: { ...manifest.value.skills } };
+  // 子代理那一项原样带着：这里只改 skill，写回清单时不能把它丢了
+  const m: Manifest = { ...manifest.value, skills: { ...manifest.value.skills } };
   const want = src.skills;
   const out: Line[] = [];
   for (const t of SKILL_TARGETS) {
