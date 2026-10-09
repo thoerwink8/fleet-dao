@@ -5,6 +5,7 @@ import { brand } from '#brand';
 import { useAllBoards, useAudit, useMe, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -18,13 +19,16 @@ import {
   taskIndex,
   viaLabel,
 } from '../lib/audit';
-import { formatAgo, formatDateTime } from '../lib/format';
+import { formatAgo, formatDateTime, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('操作记录') }];
 }
+
+/** 操作记录不自己轮询。过了 5 分钟没再读，刷新条标「数据已过期」。 */
+const AUDIT_STALE_AFTER_MS = 5 * TIME.MIN;
 
 const FILTERS: { id: 'all' | AuditEntry['actor']['kind']; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -168,6 +172,14 @@ export default function Audit() {
     <Page
       title="操作记录"
       description={`谁在什么时候做了什么：人的操作、${brand.terms.marshal}的调整、引擎的动作，只追加、不改、不删。先记后做，没做成的另记一条。`}
+      actions={
+        <RefreshBar
+          onRefresh={() => void audit.refetch()}
+          isFetching={audit.isFetching}
+          dataUpdatedAt={audit.dataUpdatedAt}
+          staleAfterMs={AUDIT_STALE_AFTER_MS}
+        />
+      }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div
