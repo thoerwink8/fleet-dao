@@ -280,3 +280,29 @@ export type MergeWait =
   /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
   | { state: 'unarmed' }
   | { state: 'waiting'; detail: string };
+
+/** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */
+export interface ProbeAssignedInput {
+  schemaVersion: 1;
+  routeId: string;
+  label: string;
+}
+
+/**
+ * pass：可以派。结论已经在 routes 上（这一次写上了，或 5 分钟内刚探通、或规矩写明不探）。probed 为假是没真探。
+ * fail：这一条本轮不能派。探通但结论写不进 routes 也算不通，不起会话。counted 为真才占「每轮最多当场探 3 条」的名额（组织认不出、路由被删了不占）。
+ */
+export type ProbeAssignedResult =
+  | { kind: 'pass'; label: string; detail: string; probed: boolean }
+  | { kind: 'fail'; label: string; detail: string; counted: boolean };
+
+/** 派前探测不通、这轮不用这条路由：放掉选路时预占的名额（#1409）。没进起会话，不能占着池。 */
+export interface ReleaseReservationInput {
+  schemaVersion: 1;
+  reservationId: string;
+}
+
+/** released：这一下放完了（本来就已经不在，也算放完）。 */
+export interface ReleaseReservationResult {
+  released: true;
+}

@@ -809,6 +809,8 @@ export function realPortsFromEnv(
   const taskRuns = realRuns({ db });
   // 选路给三段的一段预占的池的名额（#757）：开跑那一行（taskRuns.start）换掉，没开跑就收场的由这两个活动放掉
   const reservations = realReservations({ db });
+  // 派前探测不通时工作流放掉这次预占（#1409）：没进 runSegment，不能占到过期
+  jobs.releaseReservation = (reservationId) => reservations.release(reservationId);
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({ gh, trees, exec, log: taskLog }),

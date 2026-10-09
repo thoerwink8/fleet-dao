@@ -17,8 +17,12 @@ import {
   type GuardedPaths,
   MERGE_POLL_MINUTES,
   type MergeWait,
+  type ProbeAssignedInput,
+  type ProbeAssignedResult,
   type ReadDeliveryInput,
   type ReadTaskBriefInput,
+  type ReleaseReservationInput,
+  type ReleaseReservationResult,
   type RunSegmentInput,
   type RunSegmentResult,
   SEGMENT_MINUTES,
@@ -53,6 +57,10 @@ export type EngineActivities = PortActivities & {
   armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;
   /** 等 PR 合并（长轮询，到点回 waiting 由工作流再来一次）。 */
   waitMerged(input: WaitMergedInput): Promise<MergeWait>;
+  /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
+  probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
+  /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
+  releaseReservation(input: ReleaseReservationInput): Promise<ReleaseReservationResult>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -61,7 +69,8 @@ export type ActivityName = keyof EngineActivities;
  * quick：毫秒到秒级的记账、选路由、报警——30 秒，丢了 1 分钟内重来。
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
  * setup / ci：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
- * job：全流程巡检的开单、看一回——10 分钟，不重试：开单没成的已经记进库、回的是结论，看一回连着没成的由工作流数着（CANARY_CHECK_FAILURE_LIMIT）。
+ * job：全流程巡检的开单、看一回，以及派单前探测——10 分钟，不重试：开单没成的已经记进库、回的是结论，看一回连着没成的由工作流数着（CANARY_CHECK_FAILURE_LIMIT）。
+ * 派前探测自己回通或不通，不靠这一层再探一遍（Claude 一次加上隔 20 秒重试，放不进选路那一档 30 秒）。
  * 别的定时任务（对账、探针、读额度、看门狗……）不是活动了（#1072）：引擎的定时器直接跑，一轮的限时在 jobs/engine-timers.ts。
  * segment：一次无头会话（动手、冷验收）——限时是会话最长时间加一刻钟收尾，必须心跳；只试一次：会话贵又不幂等，
  * 活动失败怎么办（重试、换路由、挂起）由工作流按失败分流定，不在 Temporal 这一层自动再起一遍。
@@ -84,6 +93,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   waitCi: 'ci',
   canaryOpen: 'job',
   canaryCheck: 'job',
+  probeAssignedRoute: 'job',
+  releaseReservation: 'quick',
   readTaskBrief: 'git',
   runSegment: 'segment',
   readDelivery: 'git',
