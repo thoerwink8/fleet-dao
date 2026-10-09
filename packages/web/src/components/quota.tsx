@@ -120,9 +120,10 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           {windowTitle(w)}
         </div>
       ) : null}
-      <div className="flex items-baseline justify-between gap-2">
+      {/* 金额放得下就跟百分比、来源同一行；放不下就换行，不单行截成「$61.…」。 */}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
         {w.used !== undefined && w.limit !== undefined ? (
-          <span className="num min-w-0 truncate">
+          <span className="num whitespace-normal">
             <span className={cn('text-stat-num font-semibold', full && 'text-ink-fail')}>
               {amount(w, w.used)}
             </span>
@@ -135,14 +136,14 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         ) : upstreamFull ? (
           <span className="text-stat-num font-semibold text-ink-fail">已用满</span>
         ) : w.used !== undefined ? (
-          <span className="num min-w-0 truncate">
+          <span className="num whitespace-normal">
             <span className="text-stat-num font-semibold">{amount(w, w.used)}</span>
             <span className="text-xs text-muted-foreground"> 已用，上限没读到</span>
           </span>
         ) : (
           <span className="text-sub font-medium text-ink-stall">用量没读到</span>
         )}
-        <span className="flex shrink-0 items-center gap-1.5">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {w.used !== undefined && util !== undefined ? (
             <span className="num text-xs text-muted-foreground">{formatUtil(util)}</span>
           ) : null}

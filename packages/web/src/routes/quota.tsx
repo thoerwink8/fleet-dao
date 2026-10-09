@@ -200,91 +200,103 @@ export default function Quota() {
 function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKind[]; now: number }) {
   const channels = [...new Map(pools.map((p) => [p.channelId, p])).values()];
   return (
-    <div className="overflow-x-auto rounded-xl border bg-card scrollbar-thin">
-      <table className="w-full min-w-quota-table table-fixed border-collapse text-left">
-        <caption className="sr-only">每个账号池、每个时间窗的额度</caption>
-        <colgroup>
-          <col className="w-quota-row" />
-          {kinds.map((k) => (
-            <col key={k} />
-          ))}
-        </colgroup>
-        <thead>
-          <tr className="border-b bg-muted/50 text-xs text-muted-foreground">
-            <th scope="col" className="px-4 py-2 font-normal">
-              账号池
-            </th>
-            {kinds.map((k) => (
-              <th scope="col" key={k} className="px-2 py-2 font-normal">
-                {windowLabel[k]}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        {channels.map((ch) => {
-          const list = pools.filter((p) => p.channelId === ch.channelId);
-          return (
-            <tbody key={ch.channelId}>
-              <tr className="border-b bg-background/40">
-                <th scope="colgroup" colSpan={kinds.length + 1} className="px-4 py-1.5 text-xs">
-                  <span className="flex items-center gap-2">
-                    <span className="font-semibold">{ch.channelName}</span>
-                    <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-                      {ch.billing ? billingLabel[ch.billing] : '计费未知'}
-                    </Badge>
-                    {ch.channelEnabled ? null : <span className="text-muted-foreground">已下架</span>}
-                  </span>
-                </th>
-              </tr>
-              {list.map((p) => (
-                <tr key={p.id} className="border-b align-top last:border-b-0">
-                  <th scope="row" className="px-4 py-3 font-normal">
-                    <div className="num text-sm font-medium">{p.id}</div>
-                    <div className="mt-0.5 text-caption text-muted-foreground">
-                      {p.expiresAt ? (
-                        <>
-                          <span className="num">{formatDate(p.expiresAt)}</span> 到期 ·{' '}
-                          <span className="num">{formatInDays(p.expiresAt, now)}</span>
-                        </>
-                      ) : (
-                        '没有到期日'
-                      )}
-                    </div>
-                    <div className="mt-0.5 text-caption text-muted-foreground">
-                      在跑 <span className="num">{p.running}</span>/
-                      <span className="num">{p.maxConcurrency}</span>
-                    </div>
-                  </th>
-                  {kinds.map((k) => {
-                    const ws = p.windows.filter((x) => x.window === k);
-                    return (
-                      <td key={k} className="p-2">
-                        {ws.length ? (
-                          <div className="space-y-2">
-                            {ws.map((w, i) => (
-                              // biome-ignore lint/suspicious/noArrayIndexKey: 同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
-                              <QuotaCell key={i} w={w} now={now} />
-                            ))}
-                          </div>
-                        ) : (
-                          <div
-                            className={cn(
-                              'grid h-full min-h-10 place-items-center text-xs',
-                              p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
-                            )}
-                          >
-                            {p.quotaStatus === 'unread' ? '没查成' : '—'}
-                          </div>
-                        )}
-                      </td>
-                    );
-                  })}
-                </tr>
+    <div className="quota-matrix">
+      {/* 表比这一列窄时才露出来：写在表上方，第一屏就能看见；够宽时由样式藏起。 */}
+      <p className="quota-scroll-hint mb-1.5 text-right text-caption font-medium text-muted-foreground">
+        向右滑动，看其余窗口
+      </p>
+      <div className="relative">
+        <div className="overflow-x-auto rounded-xl border bg-card scrollbar-thin">
+          <table className="w-full min-w-quota-table table-fixed border-collapse text-left">
+            <caption className="sr-only">每个账号池、每个时间窗的额度</caption>
+            <colgroup>
+              <col className="w-quota-row" />
+              {kinds.map((k) => (
+                <col key={k} />
               ))}
-            </tbody>
-          );
-        })}
-      </table>
+            </colgroup>
+            <thead>
+              <tr className="border-b bg-muted/50 text-xs text-muted-foreground">
+                <th scope="col" className="px-4 py-2 font-normal">
+                  账号池
+                </th>
+                {kinds.map((k) => (
+                  <th scope="col" key={k} className="px-2 py-2 font-normal">
+                    {windowLabel[k]}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            {channels.map((ch) => {
+              const list = pools.filter((p) => p.channelId === ch.channelId);
+              return (
+                <tbody key={ch.channelId}>
+                  <tr className="border-b bg-background/40">
+                    <th scope="colgroup" colSpan={kinds.length + 1} className="px-4 py-1.5 text-xs">
+                      <span className="flex items-center gap-2">
+                        <span className="font-semibold">{ch.channelName}</span>
+                        <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
+                          {ch.billing ? billingLabel[ch.billing] : '计费未知'}
+                        </Badge>
+                        {ch.channelEnabled ? null : <span className="text-muted-foreground">已下架</span>}
+                      </span>
+                    </th>
+                  </tr>
+                  {list.map((p) => (
+                    <tr key={p.id} className="border-b align-top last:border-b-0">
+                      <th scope="row" className="px-4 py-3 font-normal">
+                        <div className="num text-sm font-medium">{p.id}</div>
+                        <div className="mt-0.5 text-caption text-muted-foreground">
+                          {p.expiresAt ? (
+                            <>
+                              <span className="num">{formatDate(p.expiresAt)}</span> 到期 ·{' '}
+                              <span className="num">{formatInDays(p.expiresAt, now)}</span>
+                            </>
+                          ) : (
+                            '没有到期日'
+                          )}
+                        </div>
+                        <div className="mt-0.5 text-caption text-muted-foreground">
+                          在跑 <span className="num">{p.running}</span>/
+                          <span className="num">{p.maxConcurrency}</span>
+                        </div>
+                      </th>
+                      {kinds.map((k) => {
+                        const ws = p.windows.filter((x) => x.window === k);
+                        return (
+                          <td key={k} className="p-2">
+                            {ws.length ? (
+                              <div className="space-y-2">
+                                {ws.map((w, i) => (
+                                  // biome-ignore lint/suspicious/noArrayIndexKey: 同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
+                                  <QuotaCell key={i} w={w} now={now} />
+                                ))}
+                              </div>
+                            ) : (
+                              <div
+                                className={cn(
+                                  'grid h-full min-h-10 place-items-center text-xs',
+                                  p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
+                                )}
+                              >
+                                {p.quotaStatus === 'unread' ? '没查成' : '—'}
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              );
+            })}
+          </table>
+        </div>
+        <div
+          className="quota-scroll-hint quota-scroll-fade pointer-events-none absolute inset-y-px right-px w-12 rounded-r-xl"
+          aria-hidden
+        />
+      </div>
     </div>
   );
 }

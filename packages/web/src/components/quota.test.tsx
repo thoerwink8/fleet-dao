@@ -179,3 +179,35 @@ describe('额度页摘要卡', () => {
     expect(stale.textContent).not.toContain('前读');
   });
 });
+
+describe('额度页金额和窄表', () => {
+  test('周期美元金额完整显示，金额元素不带省略号截断', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    const used = await screen.findByText('$61.20');
+    const amount = used.parentElement;
+    expect(amount).toBeTruthy();
+    expect(amount?.className ?? '').not.toContain('truncate');
+    expect(amount?.textContent).toContain('$61.20');
+    expect(amount?.textContent).toContain('/ $100');
+    const cell = used.closest('div.rounded-lg');
+    expect(cell).toBeTruthy();
+    const badge = within(cell as HTMLElement).getByText('实读');
+    expect(badge.closest('[data-source]')?.getAttribute('data-source')).toBe('relay-web');
+    // 别的池：月度美元仍是金额，估算标记还在；百分比窗不改成美元。
+    const month = screen.getByText('$12.50');
+    expect(month.parentElement?.className ?? '').not.toContain('truncate');
+    expect(month.parentElement?.textContent).toContain('/ $20.00');
+    expect(screen.getAllByText('估算').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('18%').length).toBeGreaterThan(0);
+  });
+
+  test('额度表可以横向滚动时，边上有「向右滑动」提示', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByRole('columnheader', { name: '周期美元' });
+    const hint = screen.getByText('向右滑动，看其余窗口');
+    const matrix = hint.closest('.quota-matrix');
+    expect(matrix).toBeTruthy();
+    expect(matrix?.querySelector('table')).toBeTruthy();
+    expect(matrix?.querySelector('.quota-scroll-fade')).toBeTruthy();
+  });
+});
