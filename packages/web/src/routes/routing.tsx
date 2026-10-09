@@ -308,8 +308,8 @@ function PurposeItem({
   );
 }
 
-/** 调整顺序用的行高（桌面）。一屏要能看见 12 行以上：行高 36、区域占满页面主体高度。手机沿用 MOBILE_ROW_HEIGHT（两行）。 */
-const ORDER_ROW_HEIGHT = 36;
+/** 调整顺序用的行高（桌面）。第一行是名字和操作，第二行是档位配不了时的长说明，所以比单行高。区域仍占满页面主体高度。手机沿用 MOBILE_ROW_HEIGHT。 */
+const ORDER_ROW_HEIGHT = 56;
 /** 不到 xl 宽（平板）时模型清单没有父元素给高度：固定放得下 13 行。 */
 const ORDER_LIST_HEIGHT = ORDER_ROW_HEIGHT * 13;
 const WIDE_MQ = '(min-width: 1280px)';
@@ -374,7 +374,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
       {p.models.length === 0 ? <AddPurposeModel purpose={p} onError={setMembershipError} /> : null}
       {p.models.length > 0 ? (
         // 桌面（xl）：左模型先后、右这个模型下的路由先后，并排，各自占满页面主体高度、内部自己滚；窄屏纵向铺开
-        <div className="grid items-stretch gap-3 xl:h-routing-desk xl:grid-cols-routing-desk">
+        <div className="grid items-stretch gap-3 xl:h-routing-desk xl:grid-cols-routing-desk xl:grid-rows-routing-desk">
           <ModelPriority
             purpose={p}
             selectedId={current?.modelId}
@@ -385,7 +385,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
             <section
               id="routing-model-detail"
               aria-label={`${current.displayName} 的路由`}
-              className="flex min-h-0 scroll-mt-4 flex-col overflow-hidden rounded-lg border bg-card"
+              className="flex h-full min-h-0 scroll-mt-4 flex-col overflow-hidden rounded-lg border bg-card"
             >
               <header className="flex flex-wrap items-baseline gap-x-2 border-b bg-muted/40 px-3 py-2">
                 <h3 className="text-sm font-semibold">{current.displayName} 的路由</h3>
@@ -465,7 +465,7 @@ function ModelPriority({
   return (
     <section
       aria-label="模型先后"
-      className="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card xl:h-full"
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border bg-card"
     >
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/40 px-3 py-2">
         <h3 className="text-sm font-semibold">模型先后</h3>
@@ -489,7 +489,7 @@ function ModelPriority({
           没有符合的模型：换个搜索词，或关掉「只看已开启」
         </p>
       ) : (
-        <div className="min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1">
           <SortableList
             ariaLabel="模型"
             items={shown}
@@ -528,6 +528,11 @@ function ModelPriority({
               />
             )}
           </SortableList>
+          {wide && shown.length > 0 && shown.length <= 4 ? (
+            <p className="pointer-events-none absolute inset-x-0 bottom-2 px-3 text-caption text-muted-foreground">
+              再往下没有更多模型
+            </p>
+          ) : null}
         </div>
       )}
     </section>
@@ -557,8 +562,8 @@ function ModelRow({
   const kind = modelKind(m, useKindEnv());
   const skipped = slot.state !== 'on';
   return (
-    <div className="flex h-full flex-col justify-center gap-0.5 py-1 pr-2 pl-1.5 md:flex-row md:items-center md:gap-1.5 md:py-0">
-      <div className="flex min-w-0 items-center gap-1.5 md:h-full md:flex-1">
+    <div className="flex h-full flex-col justify-center gap-0.5 py-1 pr-2 pl-1.5 md:flex-row md:flex-wrap md:items-center md:justify-start md:gap-x-1.5 md:gap-y-0.5 md:py-0">
+      <div className="flex min-w-0 items-center gap-1.5 md:h-auto md:min-w-min md:grow md:shrink-0">
         {controls.grip}
         <span
           data-position
@@ -574,14 +579,14 @@ function ModelRow({
           aria-label={`查看 ${m.displayName} 的路由`}
           title={modelSummary(m)}
           className={cn(
-            'flex min-h-9 min-w-0 flex-1 items-center gap-2 text-left md:h-full md:min-h-0',
+            'flex min-h-9 flex-1 items-center gap-2 text-left md:h-full md:min-h-0',
             skipped && 'opacity-60',
           )}
         >
           <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
           <span
             data-row-name
-            className="min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug md:truncate"
+            className="whitespace-normal break-words text-sm font-semibold leading-snug md:shrink-0 md:whitespace-nowrap"
           >
             {m.displayName}
           </span>
@@ -607,7 +612,7 @@ function ModelRow({
           </span>
         </button>
       </div>
-      <div data-row-actions className="flex flex-wrap items-center justify-end gap-0.5">
+      <div data-row-actions className="flex flex-wrap items-center justify-end gap-0.5 md:contents">
         <PurposeModelControls purpose={purpose} model={m} onError={onError} />
         <ModelSwitch
           modelId={m.modelId}

@@ -236,7 +236,7 @@ describe('用途里的模型清单：超过 50 个才出搜索和只看已开启
   test('滚到底画出最后一个模型，第一个卸掉', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withModels(300) });
     const list = await screen.findByRole('list', { name: '模型' });
-    fireEvent.scroll(list.parentElement as HTMLElement, { target: { scrollTop: 44 * 300 } });
+    fireEvent.scroll(list.parentElement as HTMLElement, { target: { scrollTop: 200 * 300 } });
     await waitFor(() => expect(rowIds('li[data-model]', 'data-model')).toContain('m-299'));
     expect(rowIds('li[data-model]', 'data-model')).not.toContain('m-000');
   });
