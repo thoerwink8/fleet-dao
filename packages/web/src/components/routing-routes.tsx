@@ -4,7 +4,8 @@
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
 
-import type { ReactNode } from 'react';
+import { ChevronRight } from 'lucide-react';
+import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { usePoolHolds, useRouting } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerRoute } from '../api/types';
@@ -12,6 +13,7 @@ import { formatAgo, formatIn } from '../lib/format';
 import { poolIsHeld } from '../lib/pool-holds';
 import { routeKind } from '../lib/route-kinds';
 import { probeStale, routeHost, routeSlots, routeTitle } from '../lib/routing';
+import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { RouteSwitch, SortableList, useRoutingEdit } from './routing-edit';
@@ -31,41 +33,81 @@ export function ModelRoutes({
   firstLiveRoute?: string | undefined;
 }) {
   const edit = useRoutingEdit();
+  const env = useKindEnv();
   if (m.routes.length === 0) {
     return <p className="px-3 py-2.5 text-sub text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>;
   }
+  // 引擎自动跳过关着的、顺延给下一个：实际顺位只数开着的（lib/routing-order.ts）
+  const states = m.routes.map((r) => routeSlotState(r, env.channelEnabled));
+  const ranks = actualRanks(states);
+  const slotOf = new Map(
+    m.routes.map((r, i) => [r.routeId, { state: states[i] ?? 'on', rank: ranks[i] ?? null }]),
+  );
+  const summary = summarizeOrder(states, '路由');
   return (
-    <SortableList
-      ariaLabel={`${m.displayName} 的路由`}
-      items={m.routes}
-      itemId={(r) => r.routeId}
-      itemLabel={(r) => `${routeTitle(r)}（${m.displayName} 下的先后）`}
-      disabled={edit.disabledWhy !== null}
-      busy={edit.busy}
-      disabledWhy={edit.disabledWhy}
-      rowClassName={(r) => cn('border-b px-3 py-2.5 last:border-b-0', !r.enabled && 'bg-muted/30')}
-      rowProps={(r) => ({ 'data-route': r.routeId })}
-      onSave={(order, expected, movedId) =>
-        edit.reorderRoutes({ modelId: m.modelId, movedId, order, expected })
-      }
-    >
-      {(r, i, controls) => (
-        <RouteItem
-          route={r}
-          index={i}
-          modelId={m.modelId}
-          modelName={m.displayName}
-          controls={
-            <span className="inline-flex shrink-0 items-center">
-              {controls.pins}
-              {controls.grip}
-            </span>
-          }
-          now={now}
-          firstLive={r.routeId === firstLiveRoute}
-        />
+    <>
+      <OrderSummaryLine summary={summary} noun="路由" />
+      <SortableList
+        ariaLabel={`${m.displayName} 的路由`}
+        items={m.routes}
+        itemId={(r) => r.routeId}
+        itemLabel={(r) => `${routeTitle(r)}（${m.displayName} 下的先后）`}
+        disabled={edit.disabledWhy !== null}
+        busy={edit.busy}
+        disabledWhy={edit.disabledWhy}
+        rowClassName={(r) =>
+          cn('border-b px-3 py-1.5 last:border-b-0', slotOf.get(r.routeId)?.state !== 'on' && 'bg-muted/40')
+        }
+        rowProps={(r) => ({ 'data-route': r.routeId })}
+        onSave={(order, expected, movedId) =>
+          edit.reorderRoutes({ modelId: m.modelId, movedId, order, expected })
+        }
+      >
+        {(r, i, controls) => (
+          <RouteItem
+            route={r}
+            index={i}
+            modelId={m.modelId}
+            modelName={m.displayName}
+            controls={
+              <span className="inline-flex shrink-0 items-center">
+                {controls.pins}
+                {controls.grip}
+              </span>
+            }
+            now={now}
+            firstLive={r.routeId === firstLiveRoute}
+            {...(slotOf.has(r.routeId) ? { slot: slotOf.get(r.routeId) } : {})}
+          />
+        )}
+      </SortableList>
+    </>
+  );
+}
+
+/** 这一层引擎实际会派几个、跳过几个；一个都派不了明说「无可用」，不画成没事。 */
+export function OrderSummaryLine({
+  summary,
+  noun,
+}: {
+  summary: ReturnType<typeof summarizeOrder>;
+  noun: '模型' | '路由';
+}) {
+  return (
+    <p
+      role="status"
+      data-order-summary={summary.ok ? 'ok' : 'none'}
+      className={cn(
+        'border-b px-3 py-1.5 text-caption',
+        summary.ok ? 'text-muted-foreground' : 'bg-st-fail/10 text-ink-fail',
       )}
-    </SortableList>
+    >
+      {summary.ok
+        ? `引擎按这个先后试：开着的 ${summary.active} 个${noun}，${
+            summary.skipped > 0 ? `跳过 ${summary.skipped} 个（关着或没有可用路由），` : ''
+          }排头的是配置里第 ${summary.firstPosition} 个`
+        : summary.why}
+    </p>
   );
 }
 
@@ -78,6 +120,7 @@ export function RouteItem({
   controls,
   now,
   firstLive: isFirst,
+  slot,
 }: {
   route: RoutingLayerRoute;
   /** 在模型下的第几条（从 0 起）；不给就不写序号（渠道页里的路由不分先后）。 */
@@ -90,7 +133,10 @@ export function RouteItem({
   controls?: ReactNode;
   now: number;
   firstLive?: boolean;
+  /** 在顺序里的实际顺位和是否被跳过（lib/routing-order.ts）；不给就不写（渠道页里的路由不分先后）。 */
+  slot?: { state: SlotState; rank: number | null } | undefined;
 }) {
+  const [open, setOpen] = useState(false);
   const stale = probeStale(r, now);
   const slots = routeSlots(r);
   const edit = useRoutingEdit();
@@ -111,32 +157,28 @@ export function RouteItem({
       : null;
   return (
     <>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <div className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-0.5 md:min-h-9">
         {index === undefined ? null : (
-          <span className="num text-caption text-muted-foreground">{index + 1}.</span>
+          <span className="num w-5 shrink-0 text-caption text-muted-foreground">{index + 1}.</span>
         )}
-        <span className="text-sub font-medium">{name}</span>
-        {modelLabel ? <span className="text-caption text-muted-foreground">· {modelLabel}</span> : null}
-        <KindChip kind={kind} />
-        {r.enabled ? null : (
-          <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-            关着
-          </Badge>
-        )}
-        {isFirst ? (
-          <Badge variant="secondary" className="h-4 px-1 text-micro font-normal">
-            顺位第一条活的
-          </Badge>
-        ) : null}
-        <span className="text-caption text-muted-foreground">
-          {routeHost(r)} · <span className="num">{slots.text}</span>
-          {slots.full ? <span className="text-ink-stall">（满了，等空位，不算故障）</span> : null}
+        <span className={cn('text-sub font-medium', slot && slot.state !== 'on' && 'text-muted-foreground')}>
+          {name}
         </span>
-        <PoolHoldControl poolId={r.poolId} routeId={r.routeId} />
-        <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
-          <span className="num max-w-40 truncate text-micro text-faint" title={r.routeId}>
-            {r.routeId}
+        {modelLabel ? <span className="text-caption text-muted-foreground">· {modelLabel}</span> : null}
+        {slot ? (
+          <span
+            data-slot-state={slot.state}
+            className={cn(
+              'text-caption',
+              slot.state === 'on'
+                ? 'num text-muted-foreground'
+                : 'rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground',
+            )}
+          >
+            {slotWord(slot.state, slot.rank, '路由')}
           </span>
+        ) : null}
+        <span className="ml-auto inline-flex shrink-0 items-center gap-1">
           {channelOff ? (
             <span className="text-caption text-muted-foreground" title="渠道关了，这里不能单独开">
               渠道已关
@@ -158,9 +200,45 @@ export function RouteItem({
             />
           )}
           {controls}
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={`facts-${r.routeId}`}
+            aria-label={`${open ? '收起' : '展开'} ${name} 的接得上、额度、禁令`}
+            title="接得上、额度够、禁令与开关三件事的原因"
+            onClick={() => setOpen((v) => !v)}
+            className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground min-h-9 min-w-9 md:min-h-0 md:min-w-0"
+          >
+            <ChevronRight className={cn('size-4 transition-transform', open && 'rotate-90')} aria-hidden />
+          </button>
         </span>
       </div>
-      <div className="mt-2 grid gap-x-4 gap-y-2 md:grid-cols-3">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1 pl-0 md:pl-7">
+        <KindChip kind={kind} />
+        {r.enabled || slot ? null : (
+          <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
+            关着
+          </Badge>
+        )}
+        {isFirst ? (
+          <Badge variant="secondary" className="h-4 px-1 text-micro font-normal">
+            顺位第一条活的
+          </Badge>
+        ) : null}
+        <span className="text-caption text-muted-foreground">
+          {routeHost(r)} · <span className="num">{slots.text}</span>
+          {slots.full ? <span className="text-ink-stall">（满了，等空位，不算故障）</span> : null}
+        </span>
+        <PoolHoldControl poolId={r.poolId} routeId={r.routeId} />
+        <span className="num max-w-40 truncate text-micro text-faint" title={r.routeId}>
+          {r.routeId}
+        </span>
+      </div>
+      <div
+        id={`facts-${r.routeId}`}
+        hidden={!open}
+        className="mt-1 mb-1 grid gap-x-4 gap-y-2 rounded-md bg-muted/30 p-2 md:grid-cols-3"
+      >
         <Fact label="接得上" fact={r.connect} red={kind === 'fault'}>
           {r.probedAt ? (
             stale ? (

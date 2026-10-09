@@ -10,7 +10,7 @@
 // - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，行高由调用方给定。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
-import { ArrowDownToLine, ArrowUpToLine, GripVertical } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
 import {
   createContext,
   type DragEvent,
@@ -257,17 +257,25 @@ const HANDLE_TITLE = '拖到新位置；键盘：Alt+上下键挪一格，Alt+Ho
 /** 手机上可点区域至少 36px（Tailwind 的 9）。宽屏收回原来的紧凑尺寸。 */
 export const TAP = 'min-h-9 min-w-9 md:min-h-0 md:min-w-0';
 
+/** 开关本身是个小滑块：手机上不把它撑成 36px 的圆，只把可点的范围用透明伪元素往外扩（宽屏收回）。 */
+export const SWITCH_TAP = 'relative after:absolute after:-inset-x-1.5 after:-inset-y-3 md:after:hidden';
+
 /** 一行的操作：拖动手柄、置顶、置底。调用方决定摆在行里哪儿。 */
 export interface RowControls {
   grip: ReactNode;
   pins: ReactNode;
 }
 
-/** 窗口化的定高滚动容器：height 是可视高度，rowHeight 是每行高度，行数超过 50 才真的只画窗口里的。 */
+/**
+ * 窗口化的定高滚动容器：height 是可视高度，rowHeight 是每行高度，行数超过 50 才真的只画窗口里的。
+ * height 给 'fill' = 填满父元素的高度（父元素要有确定的高度），可视高度由浏览器量出来；量不到先按 FILL_FALLBACK_HEIGHT 算。
+ */
 export interface SortViewport {
-  height: number;
+  height: number | 'fill';
   rowHeight: number;
 }
+
+const FILL_FALLBACK_HEIGHT = 560;
 
 /**
  * 一列可拖动的行。鼠标拖动只标落点，放下才交给 onSave；置顶 / 置底按钮、Alt+方向键直接交给 onSave。
@@ -312,6 +320,8 @@ export function SortableList<T>({
   const [saving, setSaving] = useState(false);
   const [dragging, setDragging] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [measured, setMeasured] = useState<number | null>(null);
+  const fill = viewport?.height === 'fill';
   const dragId = useRef<string | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const pointerY = useRef<number | null>(null);
@@ -354,6 +364,16 @@ export function SortableList<T>({
     frame.current = requestAnimationFrame(tick);
   }, [tick, track]);
   useEffect(() => stopScroll, [stopScroll]);
+
+  // fill：容器填满父元素，窗口化要的可视高度从它自己量
+  useEffect(() => {
+    const el = box.current;
+    if (!fill || !el || typeof ResizeObserver === 'undefined') return;
+    const watch = new ResizeObserver(() => setMeasured(el.clientHeight));
+    watch.observe(el);
+    setMeasured(el.clientHeight);
+    return () => watch.disconnect();
+  }, [fill]);
 
   const shownIds = preview ?? ids;
   const byId = new Map(items.map((item) => [itemId(item), item]));
@@ -447,15 +467,21 @@ export function SortableList<T>({
       const next = moveToEdge(shownIds, id, edge);
       if (next) void save(next, id);
     };
+    const step = (delta: -1 | 1) => {
+      if (off) return;
+      const next = stepOrder(shownIds, id, delta);
+      if (next) void save(next, id);
+    };
     const atTop = at === 0;
     const atBottom = at === shownIds.length - 1;
+    const pinClass = 'shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40';
     return {
       grip: (
         <Button
           type="button"
           variant="ghost"
           size="icon-xs"
-          className={cn('shrink-0 cursor-grab', TAP)}
+          className={cn('hidden shrink-0 cursor-grab md:inline-flex', TAP)}
           draggable={!off}
           disabled={disabled}
           aria-disabled={saving || busy || undefined}
@@ -474,7 +500,7 @@ export function SortableList<T>({
             type="button"
             variant="ghost"
             size="icon-xs"
-            className={cn('shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40', TAP)}
+            className={cn(pinClass, TAP)}
             disabled={disabled}
             aria-disabled={saving || busy || atTop || undefined}
             title={disabledWhy ?? (atTop ? '已经在最前' : '置顶（Alt+Home）')}
@@ -488,7 +514,35 @@ export function SortableList<T>({
             type="button"
             variant="ghost"
             size="icon-xs"
-            className={cn('shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40', TAP)}
+            className={cn(pinClass, TAP)}
+            disabled={disabled}
+            aria-disabled={saving || busy || atTop || undefined}
+            title={disabledWhy ?? (atTop ? '已经在最前' : '上移一位（Alt+↑）')}
+            aria-label={`上移 ${label}`}
+            onClick={() => step(-1)}
+            onKeyDown={(e) => onKeyDown(e, id)}
+          >
+            <ChevronUp aria-hidden />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className={cn(pinClass, TAP)}
+            disabled={disabled}
+            aria-disabled={saving || busy || atBottom || undefined}
+            title={disabledWhy ?? (atBottom ? '已经在最后' : '下移一位（Alt+↓）')}
+            aria-label={`下移 ${label}`}
+            onClick={() => step(1)}
+            onKeyDown={(e) => onKeyDown(e, id)}
+          >
+            <ChevronDown aria-hidden />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className={cn(pinClass, 'hidden md:inline-flex', TAP)}
             disabled={disabled}
             aria-disabled={saving || busy || atBottom || undefined}
             title={disabledWhy ?? (atBottom ? '已经在最后' : '置底（Alt+End）')}
@@ -539,7 +593,8 @@ export function SortableList<T>({
     );
   }
 
-  const { rowHeight, height } = viewport;
+  const { rowHeight } = viewport;
+  const height = viewport.height === 'fill' ? (measured ?? FILL_FALLBACK_HEIGHT) : viewport.height;
   const total = shown.length * rowHeight;
   const range = windowRange({ count: shown.length, rowHeight, height, scrollTop });
   const draggedAt = dragging === null ? -1 : shownIds.indexOf(dragging);
@@ -552,8 +607,8 @@ export function SortableList<T>({
       ref={box}
       data-sortable-box
       data-windowed={shown.length > WINDOW_MIN_ROWS ? 'true' : undefined}
-      style={{ height: Math.min(height, total) }}
-      className="overflow-y-auto overscroll-contain"
+      style={fill ? undefined : { height: Math.min(height, total) }}
+      className={cn('overflow-y-auto overscroll-contain', fill && 'h-full min-h-0')}
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
     >
       <ol
@@ -609,7 +664,7 @@ export function RouteSwitch({
       size="sm"
       checked={enabled}
       disabled={why !== null}
-      className={TAP}
+      className={SWITCH_TAP}
       title={why ?? (enabled ? '关掉这条路由' : '打开这条路由')}
       aria-label={`${label} 的开关`}
       onCheckedChange={onToggle}
@@ -641,7 +696,7 @@ export function ModelSwitch({
       size="sm"
       checked={enabled}
       disabled={why !== null}
-      className={TAP}
+      className={SWITCH_TAP}
       title={why ?? (enabled ? '关掉这个模型（所有用途都不派）' : '打开这个模型')}
       aria-label={`${modelName} 的开关`}
       onCheckedChange={() => edit.toggleModel({ modelId, modelName, enabled, expectedEnabled })}
@@ -665,7 +720,7 @@ export function ChannelSwitch({
       size="sm"
       checked={enabled}
       disabled={edit.disabledWhy !== null}
-      className={TAP}
+      className={SWITCH_TAP}
       title={edit.disabledWhy ?? (enabled ? '关掉这个渠道' : '打开这个渠道')}
       aria-label={`${name} 的开关`}
       onCheckedChange={() => edit.toggleChannel({ channelId, channelName: name, enabled })}

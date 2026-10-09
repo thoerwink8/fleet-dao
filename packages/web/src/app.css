@@ -89,6 +89,8 @@
   --spacing-sidebar-sheet: 260px;
   /* 模型目录桌面下列表定高，和 routing-browse 的 LIST_HEIGHT（440）同一数。手机上不用，列表随页面滚。 */
   --spacing-routing-window: 440px;
+  /* 路由页「调整顺序」区域桌面（xl）下的高度：视口高减去顶栏、页头、页签、用途按钮和这一用途的标题（约 22rem，含底部留白），内部自己滚。 */
+  --spacing-routing-desk: max(24rem, calc(100dvh - 22rem));
   /* 弹层列表的最高：max-h-* 只认 --max-height/--height/--spacing，不认 --container。 */
   --max-height-notifications-list: 360px;
   --max-height-command-list: 440px;
@@ -109,6 +111,8 @@
 
   /* 阴影：卡片描边（亮色下勾下边线）、品牌色圈（额度热）、状态色光圈（完成时一闪）。 */
   --shadow-card-edge: 0 1px 0 var(--border);
+  /* 先后列表里选中的那一行：左边一道竖线，不是整行加框。 */
+  --shadow-row-selected: inset 3px 0 0 var(--foreground);
   --shadow-brand-ring: 0 0 0 1px var(--brand);
   --shadow-done-pop: 0 0 0 4px color-mix(in oklab, var(--st-done) 30%, transparent);
 }
@@ -594,6 +598,11 @@
 /* 路由页（/routing）：左列用途清单、右边选中用途的详情（xl 以上）。左列宽从 --container-routing-list 取。 */
 @utility grid-cols-routing {
   grid-template-columns: var(--container-routing-list) minmax(0, 1fr);
+}
+
+/* 路由页「调整顺序」：左边模型先后、右边选中模型下的路由先后，并排（xl 以上）。左边略宽，一行要放下序号、名字、状态、开关和四个移动键。 */
+@utility grid-cols-routing-desk {
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
 }
 
 /* ---------- 动效：在跑的东西会呼吸 ----------
