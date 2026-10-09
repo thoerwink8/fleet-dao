@@ -169,8 +169,9 @@ describe('测试里不许同步起子进程', () => {
     expect(isExempt(join(TEST, 'static.test.ts'))).toBe(true);
     expect(isExempt(join(TEST, 'nested', 'child.ts'))).toBe(false);
     expect(isExempt(join(TEST, 'nested', 'static.test.ts'))).toBe(false);
-    const hits = files.filter((file) => scanSyncChildSpawns(readFileSync(file, 'utf8')).length > 0).map(rel);
-    expect(hits).toEqual([]);
+    // 扫本包真实的 test/（豁免根上的 child.ts 和本文件），扫描结果必须是空数组。
+    const scanned = testSources().flatMap((file) => scanSyncChildSpawns(readFileSync(file, 'utf8')));
+    expect(scanned).toEqual([]);
   });
 
   it('故意放一行违规的样本，扫得出来', () => {
