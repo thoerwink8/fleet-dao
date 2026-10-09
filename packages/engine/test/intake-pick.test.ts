@@ -98,7 +98,7 @@ describe('hasVisibleSignal · 只判结构', () => {
     ['路径', ['packages/engine/src 下新增文件']],
     ['文件名', ['intake.ts 里有这一道']],
     ['引号里的界面文字', ['页面上能看到「验收中」']],
-    ['数字', ['每小时最多起 3 条']],
+    ['数字', ['每小时最多起 6 条']],
   ])('有信号：%s', (_name, lines) => {
     expect(hasVisibleSignal(lines)).toBe(true);
   });
@@ -176,11 +176,19 @@ describe('decideBreaker · 失败过半停拉，冷却后一条试探', () => {
 
 describe('hourlyRemaining', () => {
   it(`每小时最多 ${MAX_STARTS_PER_HOUR} 条`, () => {
-    expect(MAX_STARTS_PER_HOUR).toBe(3);
-    expect(hourlyRemaining(0)).toBe(3);
-    expect(hourlyRemaining(2)).toBe(1);
-    expect(hourlyRemaining(3)).toBe(0);
+    expect(MAX_STARTS_PER_HOUR).toBe(6);
+    expect(hourlyRemaining(0)).toBe(6);
+    expect(hourlyRemaining(2)).toBe(4);
+    expect(hourlyRemaining(5)).toBe(1);
+    expect(hourlyRemaining(6)).toBe(0);
     expect(hourlyRemaining(7)).toBe(0);
     expect(hourlyRemaining(1, 5)).toBe(4);
+  });
+
+  it('【故意造出的失败】旧上限 3 不再生效：已起 3 条仍剩 3，已起 5 条剩 1、已起 6 条剩 0', () => {
+    expect(hourlyRemaining(3)).toBe(3);
+    expect(hourlyRemaining(3)).not.toBe(0);
+    expect(hourlyRemaining(5)).toBe(1);
+    expect(hourlyRemaining(6)).toBe(0);
   });
 });

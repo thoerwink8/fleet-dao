@@ -1271,24 +1271,24 @@ describe('排序 · 版本先后 → 当前版本 → 规模 → 交给引擎 �
 describe('每小时限速', () => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => issue({ number: 200 + i }));
 
-  it(`一小时里最多起 ${MAX_STARTS_PER_HOUR} 条：已经起了 2 条，这一轮只再起 1 条`, async () => {
-    const h = harness({}, { issues: many(3), hourStarted: 2 });
+  it(`一小时里最多起 ${MAX_STARTS_PER_HOUR} 条：已经起了 5 条，这一轮只再起 1 条`, async () => {
+    const h = harness({}, { issues: many(3), hourStarted: MAX_STARTS_PER_HOUR - 1 });
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([200]);
     expect(h.logs.some((l) => l.text.includes('hourly_cap×2'))).toBe(true);
   });
 
-  it(`【故意造出的失败】滚动一小时里已经起了 ${MAX_STARTS_PER_HOUR} 条：第 4 条不起，记 ok（不是没跑成）`, async () => {
+  it(`【故意造出的失败】滚动一小时里已经起了 ${MAX_STARTS_PER_HOUR} 条：第 7 条不起，记 ok（不是没跑成）`, async () => {
     const h = harness({}, { issues: many(2), hourStarted: MAX_STARTS_PER_HOUR });
     const run = await runIntakeJob(h.deps);
     expect(h.started).toEqual([]);
     expect(run.outcome).toBe('ok');
   });
 
-  it(`同一轮里也数：没起过时，8 张合格的单这一轮只起 ${MAX_STARTS_PER_HOUR} 条`, async () => {
-    const h = harness({}, { issues: many(8) });
+  it(`同一轮里也数：已经起了 3 条时，8 张合格的单这一轮只起 ${MAX_STARTS_PER_HOUR - 3} 条（旧上限 3 不再生效）`, async () => {
+    const h = harness({}, { issues: many(8), hourStarted: 3 });
     await runIntakeJob(h.deps);
-    expect(h.started).toHaveLength(MAX_STARTS_PER_HOUR);
+    expect(h.started).toHaveLength(MAX_STARTS_PER_HOUR - 3);
   });
 
   it('限速时不为排在后面的单多读 GitHub：满了就不现读', async () => {
@@ -1349,21 +1349,26 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
     );
   }
 
-  it('同一轮里积压的老单已把 3 个名额用满时，巡检单仍被拉起，而且排在所有候选最前', async () => {
+  it('这一小时前面已起 3 条、积压的老单又把剩下 3 个名额用满时，巡检单仍被拉起，而且排在所有候选最前', async () => {
     const olds = [1, 2, 3].map((n) => issue({ number: n, body: FAST }));
-    const h = across([
-      { repo: REPO, issues: olds },
-      { repo: CANARY_REPO, issues: [canaryTicket()] },
-    ]);
+    const h = across(
+      [
+        { repo: REPO, issues: olds },
+        { repo: CANARY_REPO, issues: [canaryTicket()] },
+      ],
+      { hourStarted: MAX_STARTS_PER_HOUR - 3 },
+    );
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([70, 1, 2, 3]);
   });
 
-  it('巡检单不占名额：它起了之后，普通单仍能起够 3 条；第 4 张普通单仍被限速', async () => {
+  it('巡检单不占名额：它起了之后，普通单仍能起够剩下的 3 条（这一小时前面已起 3 条）；第 4 张普通单仍被限速', async () => {
     const regulars = [1, 2, 3, 4].map((n) =>
       issue({ number: n, body: FAST, createdAt: '2026-10-01T00:00:00.000Z', milestone: V_CANARY }),
     );
-    const h = across([{ repo: CANARY_REPO, issues: [...regulars, canaryTicket()] }]);
+    const h = across([{ repo: CANARY_REPO, issues: [...regulars, canaryTicket()] }], {
+      hourStarted: MAX_STARTS_PER_HOUR - 3,
+    });
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([70, 1, 2, 3]);
     expect(h.logs.some((l) => l.text.includes('hourly_cap×1'))).toBe(true);
@@ -1425,7 +1430,7 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
   });
 
   it('【故意造出的失败】普通单仍受限速。把巡检单的每小时豁免去掉，名额用满时限速挤掉巡检单，这条必须红', async () => {
-    // 滚动一小时已经起满 3 条。豁免在：只起巡检单，两张普通单记 hourly_cap。
+    // 滚动一小时已经起满 6 条。豁免在：只起巡检单，两张普通单记 hourly_cap。
     // 豁免被去掉：巡检单和普通单一律被 hourly_cap 挤掉，started 里没有 70，这条红。
     const h = across(
       [
