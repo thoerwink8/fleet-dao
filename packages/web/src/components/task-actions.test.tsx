@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
-// 任务页顶上的暂停、继续、叫停（#1496）：按状态能点或置灰；已完成、已失败一个都不画。
-// 置灰的按钮悬停要写明为什么。地址是纯数字时，「没有这张单」要多写一句单号和任务编号的区别。
+// 任务页顶上的暂停、继续、叫停（#1496）：不该出现的不画。
+// 已暂停不画「暂停」，在跑且没暂停不画「继续」；已完成、已失败一个都不画。
+// 真要置灰的按钮，悬停要写明为什么。地址是纯数字时，「没有这张单」要多写一句单号和任务编号的区别。
 import { cleanup, screen } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -22,24 +23,22 @@ const base: ActionTarget = {
 const labels = () => [...document.querySelectorAll('[data-task-actions] button')].map((b) => b.textContent);
 
 describe('任务页操作按钮按状态', () => {
-  test('在跑且没暂停：暂停、叫停能点；继续置灰，悬停写明还没暂停', () => {
+  test('在跑且没暂停：只给暂停、叫停，不画继续', () => {
     renderApp(<ActionButtons target={base} />);
-    expect(labels()).toEqual(['暂停', '继续', '叫停']);
-    const resume = screen.getByRole('button', { name: '继续' });
-    expect((resume as HTMLButtonElement).disabled).toBe(true);
-    expect(resume.getAttribute('title')).toBe('还没暂停，没有可继续的');
-    expect((screen.getByRole('button', { name: '暂停' }) as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByRole('button', { name: '叫停' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(labels()).toEqual(['暂停', '叫停']);
+    expect(screen.queryByRole('button', { name: '继续' })).toBeNull();
+    for (const button of document.querySelectorAll('[data-task-actions] button')) {
+      expect((button as HTMLButtonElement).disabled, button.textContent ?? '').toBe(false);
+    }
   });
 
-  test('已暂停：继续、叫停能点；暂停置灰，悬停写明已经暂停', () => {
+  test('已暂停：只给继续、叫停，不画暂停', () => {
     renderApp(<ActionButtons target={{ ...base, paused: '已暂停：被人暂停（frank）' }} />);
-    expect(labels()).toEqual(['暂停', '继续', '叫停']);
-    const pause = screen.getByRole('button', { name: '暂停' });
-    expect((pause as HTMLButtonElement).disabled).toBe(true);
-    expect(pause.getAttribute('title')).toBe('已经暂停了，点「继续」接着走');
-    expect((screen.getByRole('button', { name: '继续' }) as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByRole('button', { name: '叫停' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(labels()).toEqual(['继续', '叫停']);
+    expect(screen.queryByRole('button', { name: '暂停' })).toBeNull();
+    for (const button of document.querySelectorAll('[data-task-actions] button')) {
+      expect((button as HTMLButtonElement).disabled, button.textContent ?? '').toBe(false);
+    }
   });
 
   test('已完成、已失败：不画任何按钮', () => {

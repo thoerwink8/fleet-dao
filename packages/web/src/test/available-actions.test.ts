@@ -1,6 +1,6 @@
 // 该画出哪些能点的快捷操作（task-actions.tsx 的 availableActions，#901、#820 片 3、#856、#1496）：
 // 引擎的任务工作流听暂停、继续、叫停、重做。中途换路由（reroute）后端固定 409，页面上没有这个动作。
-// 暂停着的单不再给能点的「暂停」；在跑且没暂停不再给能点的「继续」。置灰的不进这份列表。
+// 已暂停不画「暂停」；在跑且没暂停不画「继续」。置灰的不进这份列表。
 import { describe, expect, test } from 'vitest';
 import type { BoardSubtask } from '../api/types';
 import { type ActionTarget, availableActions } from '../components/task-actions';

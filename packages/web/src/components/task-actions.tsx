@@ -36,7 +36,7 @@ export interface ActionTarget {
   /** 需求级在跑的会话（分诊、写需求文档、写方案）。 */
   activity?: Activity | undefined;
   sub?: BoardSubtask | undefined;
-  /** 被人暂停着（引擎写的那句「已暂停：…」，#820 片 3）：这时「暂停」置灰，只留「继续」「叫停」能点。 */
+  /** 被人暂停着（引擎写的那句「已暂停：…」，#820 片 3）：这时不画「暂停」，只给「继续」「叫停」。 */
   paused?: string | undefined;
 }
 
@@ -68,33 +68,28 @@ export const ACTIONS: Record<UiAction, ActionDef> = {
   redo: { label: '重做', icon: RotateCcw, key: 'R' },
 };
 
-/** 置灰时悬停写的原因。能点的按钮没有这句。 */
+/** 置灰时悬停写的原因。能点的按钮没有这句。不该出现的按钮不进这份列表，不靠置灰留在页上。 */
 export interface TaskActionButton {
   action: UiAction;
   disabledReason?: string;
 }
 
-const PAUSE_DISABLED = '已经暂停了，点「继续」接着走';
-const RESUME_DISABLED = '还没暂停，没有可继续的';
-
 /**
  * 按状态决定画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停、重做）。
  * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。
- * 已暂停不给能点的「暂停」，那个按钮置灰，悬停写明已经暂停（后端再点也回 409 already_paused）。
- * 在跑且没暂停不给能点的「继续」，置灰并写明还没暂停。已完成、已失败一个都不画。
+ * 已暂停不画「暂停」（后端再点也回 409 already_paused），只给「继续」「叫停」。
+ * 在跑且没暂停不画「继续」，只给「暂停」「叫停」。已完成、已失败一个都不画。
  * 已叫停只给「重做」。挂起再加「重做」（工作流还在跑时由后端拒绝）。
- * 能点的一份给菜单和快捷键；任务页把置灰的也画上。
+ * 真要置灰的带 disabledReason，悬停写明原因；菜单和快捷键不提供点不了的。
  */
 export function taskActionButtons(target: ActionTarget): TaskActionButton[] {
   if (target.sub) return [];
   if (target.state === 'stopped') return [{ action: 'redo' }];
   if (isTaskFinished(target)) return [];
-  const paused = target.paused !== undefined;
-  const list: TaskActionButton[] = [
-    { action: 'pause', ...(paused ? { disabledReason: PAUSE_DISABLED } : {}) },
-    { action: 'resume', ...(paused ? {} : { disabledReason: RESUME_DISABLED }) },
-    { action: 'stop' },
-  ];
+  const list: TaskActionButton[] = [];
+  if (target.paused === undefined) list.push({ action: 'pause' });
+  else list.push({ action: 'resume' });
+  list.push({ action: 'stop' });
   if (target.state === 'stalled') list.push({ action: 'redo' });
   return list;
 }
