@@ -5,7 +5,7 @@
 import type { TaskBrief } from '../runner/task-brief.ts';
 import { MAX_VERIFY_ROUNDS } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { headMovedDetail } from './task-support.ts';
+import { headMovedDetail, verifyStopDetail } from './task-support.ts';
 
 /**
  * 冷验收。没过：记下问题表回动手（'rework'）；做不出来：停下等人，不让写代码的会话白改一轮；这会儿验不了、过一会儿就行：睡一会儿再来，
@@ -19,14 +19,18 @@ export async function coldVerifyPr(
   if (!wt || rt.prNumber === null || rt.head === null) {
     throw new Error('验收之前还没有 PR（工作流自己的状态乱了）');
   }
+  let current = brief;
   for (;;) {
     if (rt.verifyRound >= MAX_VERIFY_ROUNDS) {
-      await rt.park(
+      const problems = rt.feedback.join('；') || '（没有）';
+      const mode = await rt.exhaustRounds(
         `验收 ${MAX_VERIFY_ROUNDS} 轮都没过`,
-        `最近的问题：${rt.feedback.join('；') || '（没有）'}。点「继续」再验一轮；或「放弃」。`,
+        `最近的问题：${problems}。点「继续」再验一轮；或「放弃」。`,
+        verifyStopDetail(rt.verifyProblems),
       );
-      rt.verifyRound = 0;
+      if (mode === 'legacy') rt.verifyRound = 0;
     }
+    if (rt.brief) current = rt.brief;
     rt.verifyRound += 1;
     await rt.advance('verify', `验收第 ${rt.verifyRound} 轮`);
     const prNumber: number = rt.prNumber;
@@ -43,8 +47,8 @@ export async function coldVerifyPr(
           branch: rt.branch,
           baseSha: wt.baseSha,
           headSha,
-          what: brief.request,
-          howToFinish: brief.acceptance,
+          what: current.request,
+          howToFinish: current.acceptance,
           authorFamilies: [...rt.families],
           round: rt.verifyRound === 1 ? 1 : 2,
         }),
@@ -68,6 +72,7 @@ export async function coldVerifyPr(
       continue;
     }
     if (res.pass) return 'pass';
+    rt.verifyProblems = res.problems;
     rt.feedback = res.problems.map((p) => `验收没过：${p}`);
     rt.status.lastProblem = '验收没过';
     return 'rework';

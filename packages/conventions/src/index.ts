@@ -117,6 +117,18 @@ export {
   GATE_CONTEXT,
   statusByContext,
 } from './merge-gates.ts';
+// ops 表格由 deploy/ 生成（#140 第一片）：端口表纯函数 + 命令行（bin/ops-tables.ts）。
+export {
+  BLOCK_NAME_PORTS,
+  checkPortsBlock,
+  extractBlock,
+  type OpsTableProblem,
+  type PortEntry,
+  portsTableInner,
+  readPortEntries,
+  renderPortsBlock,
+  replaceBlock,
+} from './ops-tables.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
   addToOrder,
