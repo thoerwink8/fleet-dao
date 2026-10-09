@@ -62,6 +62,7 @@ cp "$REPO/agents/subagents/haiku55.md" "$R/agents/subagents/haiku55.md"
 cp "$REPO/agents/shared-rules.md" "$R/agents/shared-rules.md"
 printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/SKILL.md"
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
+printf '// 假的 Codex 调工具前钩子\n' >"$R/agents/hooks/pretool-codex.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
 printf '// 假的收尾提醒钩子\n' >"$R/agents/hooks/stop.mjs"
 printf '// 假的落盘钩子\n' >"$R/agents/hooks/prompt-log.mjs"
@@ -100,6 +101,10 @@ check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs
 check "Claude 的设置里登记了调工具前、Stop、UserPromptSubmit 三条" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
   PreToolUse,Stop,UserPromptSubmit
+check "Codex 的 hooks.json 也只登记了调工具前那条（#232）" \
+  "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.codex/hooks.json")" \
+  PreToolUse
+check "Codex 的 config.toml 替那一条记上了信任" "$(grep -c '^trusted_hash = "sha256:' "$H/.codex/config.toml")" 1
 check "写明开会话那条为什么不登记" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 1
 # 全局 git 忽略：换完身份之后才起的 git 子进程，cwd 还是原来那个仓目录（$U 摸不到）——踩过一次
 # 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好

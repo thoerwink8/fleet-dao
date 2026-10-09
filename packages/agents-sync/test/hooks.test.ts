@@ -436,13 +436,13 @@ describe('Windows 上不经 cmd 启动', () => {
 });
 
 describe('各家：装在哪、没装的说为什么', () => {
-  it('没装读这份设置的那几家：跳过，什么都不写；装了的别家逐家说为什么没装钩子', () => {
-    const m = machine(['codex', 'pi']);
+  it('没装读钩子设置的那几家：跳过，什么都不写；装了的别家逐家说为什么没装钩子', () => {
+    const m = machine(['kimi', 'pi']);
     const lines = m.apply();
     expect(kinds(lines, SCRIPTS)).toEqual(['skip']);
     expect(existsSync(join(m.home, '.fleet-dao'))).toBe(false);
     expect(existsSync(join(m.home, '.claude'))).toBe(false);
-    expect(lines.find((l) => l.key === 'Codex')?.text).toContain('/hooks 审过、信任了才跑');
+    expect(lines.find((l) => l.key === 'Kimi Code')?.text).toContain('本脚本还没接');
     expect(lines.find((l) => l.key === 'pi')?.text).toContain('没有配置式的钩子');
     expect(exitCode(lines)).toBe(0);
   });
