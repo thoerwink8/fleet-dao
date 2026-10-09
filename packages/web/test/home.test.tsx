@@ -166,6 +166,24 @@ describe('home（/）：四种状态', () => {
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
   });
 
+  test('要你拍的单列通栏，时间不换行；xl 起左右分栏还在', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    const card = document.querySelector('[data-decision-card]');
+    expect(card).toBeTruthy();
+    const list = card?.parentElement;
+    expect(list?.tagName).toBe('UL');
+    expect(list?.className).toBe('grid grid-cols-1 gap-2');
+    const time = card?.querySelector('.whitespace-nowrap');
+    expect(time?.className).toContain('text-caption');
+    const split = Array.from(document.querySelectorAll('div')).find(
+      (el) => el.className.includes('xl:grid-cols-3') && el.className.includes('2xl:grid-cols-'),
+    );
+    expect(split).toBeTruthy();
+    const done = document.querySelector('[data-done-card]')?.parentElement;
+    expect(done?.className).toContain('md:grid-cols-2');
+    expect(done?.className).toContain('xl:grid-cols-1');
+  });
+
   test('data：三块各画出有数据的样子', async () => {
     renderHome({ status: 'data', data: SAMPLE });
     // 「在跑的」画布按需加载、排完版才有卡片
@@ -242,6 +260,32 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
   });
 
+  test('此刻表头不换行：分钟列有表头，表头和耗时都单行', async () => {
+    localStorage.clear();
+    const since = new Date(Date.now() - 40 * 60_000).toISOString();
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: SAMPLE.running.map((item) => (item.worker ? { ...item, stageSince: since } : item)),
+      },
+    });
+    const toggle = await screen.findByRole('button', { name: /个会话在干活/ });
+    if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
+    const panel = document.querySelector('[data-board-now]');
+    const heads = Array.from(panel?.querySelectorAll('th') ?? []);
+    expect(heads.map((el) => el.textContent?.trim())).toEqual(['谁在做', '单', '在做什么', '分钟']);
+    for (const th of heads) expect(th.className).toContain('whitespace-nowrap');
+    const minuteHead = heads.find((el) => el.textContent?.trim() === '分钟');
+    expect(minuteHead?.className).toContain('w-36');
+    const minute = Array.from(panel?.querySelectorAll('td') ?? []).find(
+      (el) => el.textContent?.trim() === '40 分钟',
+    );
+    expect(minute?.className).toContain('whitespace-nowrap');
+    expect(minute?.className).toContain('w-36');
+    localStorage.clear();
+  });
+
   test('对题没有样本（#761：在对话里做的，runs 里本来就没有）写「不计」；动手、验收没有样本照旧写「还没有跑完的样本」', async () => {
     renderHome({
       status: 'data',
@@ -269,6 +313,10 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(doing?.textContent).toContain('#556');
     expect(doing?.textContent).toContain('Opus 5.5');
     expect(doing?.textContent).toContain('本段');
+    const stage = Array.from(doing?.querySelectorAll('span') ?? []).find((el) =>
+      (el.textContent ?? '').includes('本段'),
+    );
+    expect(stage?.className).toContain('whitespace-nowrap');
     expect(doing?.textContent).toContain('最近：动手开跑 · Opus 5.5');
     const asking = nodeOf('ticket:450');
     expect(asking?.querySelector('[data-needs-founder="true"]')).toBeTruthy();
