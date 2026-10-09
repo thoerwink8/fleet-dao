@@ -1,24 +1,13 @@
 // 推分支用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务。
 // 会话交出来的是包（git bundle）：这里在测试自己的树里打包，模拟会话用户那一步。
-import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { classifyPushFailure, execGit, type GitRunner } from '../src/git.ts';
 import type { GitHubOptions } from '../src/github.ts';
 import { fromPushFailure, validBranchName } from '../src/push.ts';
+import { gitIn, runChild, runChildBytes } from './child.ts';
 import { setup, tempDir } from './helpers.ts';
-
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', [...ID, '-c', 'core.autocrlf=false', ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
 
 let root: string;
 let remote: string;
@@ -30,47 +19,47 @@ function worktree(
   files: Record<string, string> = { [`${branch.replace(/\//g, '-')}.txt`]: branch },
 ) {
   const path = join(root, `wt-${branch.replace(/\//g, '-')}-${Math.random().toString(36).slice(2, 7)}`);
-  git(main, 'fetch', '-q', 'origin');
-  git(main, 'worktree', 'add', '-q', '-b', branch, path, 'origin/main');
-  const start = git(path, 'rev-parse', 'HEAD');
+  gitIn(main, 'fetch', '-q', 'origin');
+  gitIn(main, 'worktree', 'add', '-q', '-b', branch, path, 'origin/main');
+  const start = gitIn(path, 'rev-parse', 'HEAD');
   for (const [name, text] of Object.entries(files)) writeFileSync(join(path, name), text);
-  git(path, 'add', '-A');
-  git(path, 'commit', '-q', '-m', `work on ${branch}`);
-  return { path, start, head: git(path, 'rev-parse', 'HEAD'), bundle: bundleOf(path, start) };
+  gitIn(path, 'add', '-A');
+  gitIn(path, 'commit', '-q', '-m', `work on ${branch}`);
+  return { path, start, head: gitIn(path, 'rev-parse', 'HEAD'), bundle: bundleOf(path, start) };
 }
 
 /** 会话用户那一步：把起会话前的头之后的新提交打成包。 */
 function bundleOf(tree: string, since: string): string {
   const file = join(root, `delivery-${Math.random().toString(36).slice(2, 9)}.bundle`);
-  git(tree, 'bundle', 'create', '-q', file, 'HEAD', `^${since}`);
+  gitIn(tree, 'bundle', 'create', '-q', file, 'HEAD', `^${since}`);
   return file;
 }
 
 function advanceRemoteMain(): string {
   const tmp = join(root, `adv-${Math.random().toString(36).slice(2, 7)}`);
-  git(root, 'clone', '-q', remote, tmp);
+  gitIn(root, 'clone', '-q', remote, tmp);
   writeFileSync(join(tmp, `main-${Date.now()}-${Math.random()}.txt`), 'x');
-  git(tmp, 'add', '-A');
-  git(tmp, 'commit', '-q', '-m', 'main moves');
-  git(tmp, 'push', '-q', 'origin', 'HEAD:main');
-  return git(tmp, 'rev-parse', 'HEAD');
+  gitIn(tmp, 'add', '-A');
+  gitIn(tmp, 'commit', '-q', '-m', 'main moves');
+  gitIn(tmp, 'push', '-q', 'origin', 'HEAD:main');
+  return gitIn(tmp, 'rev-parse', 'HEAD');
 }
 
 function remoteHead(branch: string): string | null {
-  const out = git(root, 'ls-remote', remote, `refs/heads/${branch}`);
+  const out = gitIn(root, 'ls-remote', remote, `refs/heads/${branch}`);
   return out ? (out.split('\t')[0] ?? null) : null;
 }
 
 beforeAll(() => {
   root = tempDir('fleet-gh-push-');
   remote = join(root, 'remote.git');
-  git(root, 'init', '-q', '--bare', '-b', 'main', remote);
+  gitIn(root, 'init', '-q', '--bare', '-b', 'main', remote);
   main = join(root, 'main');
-  git(root, 'clone', '-q', remote, main);
+  gitIn(root, 'clone', '-q', remote, main);
   writeFileSync(join(main, 'README.md'), 'hello\n');
-  git(main, 'add', '-A');
-  git(main, 'commit', '-q', '-m', 'init');
-  git(main, 'push', '-q', 'origin', 'HEAD:main');
+  gitIn(main, 'add', '-A');
+  gitIn(main, 'commit', '-q', '-m', 'init');
+  gitIn(main, 'push', '-q', 'origin', 'HEAD:main');
 }, 60_000);
 
 function pushSetup(
@@ -206,14 +195,14 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };
     const wt = worktree('task/4-empty');
-    git(wt.path, 'revert', '--no-edit', 'HEAD');
-    const noDiff = git(wt.path, 'rev-parse', 'HEAD');
+    gitIn(wt.path, 'revert', '--no-edit', 'HEAD');
+    const noDiff = gitIn(wt.path, 'rev-parse', 'HEAD');
     await expect(
       gh.pushBranch({ repo, bundlePath: bundleOf(wt.path, wt.start), branch: 'task/4-empty', head: noDiff }),
     ).rejects.toMatchObject({
       code: 'EMPTY_DELIVERY',
     });
-    const mainline = git(wt.path, 'rev-parse', 'origin/main');
+    const mainline = gitIn(wt.path, 'rev-parse', 'origin/main');
     await expect(
       gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/4-empty', head: mainline }),
     ).rejects.toMatchObject({
@@ -245,13 +234,13 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const repo = { owner: 'acme', name: 'widgets' };
     const token = ['ghp', 'Zt4wQ9mB2xKc7RvN1pLs8HdJ3fGy6TaEu5Vo'].join('_');
     const wt = worktree('task/14-add-then-remove', { 'deploy.md': `export GH_TOKEN=${token}\n` });
-    git(wt.path, 'rm', '-q', 'deploy.md');
+    gitIn(wt.path, 'rm', '-q', 'deploy.md');
     writeFileSync(join(wt.path, 'ok.md'), '没问题\n');
-    git(wt.path, 'add', '-A');
-    git(wt.path, 'commit', '-q', '-m', '去掉 deploy.md');
-    const head = git(wt.path, 'rev-parse', 'HEAD');
+    gitIn(wt.path, 'add', '-A');
+    gitIn(wt.path, 'commit', '-q', '-m', '去掉 deploy.md');
+    const head = gitIn(wt.path, 'rev-parse', 'HEAD');
     // 总差异里没有令牌：只看总差异的闸会放过去。
-    expect(git(wt.path, 'diff', wt.start, head)).not.toContain('GH_TOKEN');
+    expect(gitIn(wt.path, 'diff', wt.start, head)).not.toContain('GH_TOKEN');
     const err = await gh
       .pushBranch({ repo, bundlePath: bundleOf(wt.path, wt.start), branch: 'task/14-add-then-remove', head })
       .then(
@@ -267,8 +256,8 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
 
     const said = worktree('task/15-message');
     const messageToken = ['ghp', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_');
-    git(said.path, 'commit', '-q', '--amend', '-m', `令牌 ${messageToken}`);
-    const saidHead = git(said.path, 'rev-parse', 'HEAD');
+    gitIn(said.path, 'commit', '-q', '--amend', '-m', `令牌 ${messageToken}`);
+    const saidHead = gitIn(said.path, 'rev-parse', 'HEAD');
     await expect(
       gh.pushBranch({
         repo,
@@ -371,9 +360,9 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/6-ff', head: wt.head });
     // 返工：第二个会话从上次推上去的头起，只交这之后的新提交
     writeFileSync(join(wt.path, 'more.txt'), 'more');
-    git(wt.path, 'add', '-A');
-    git(wt.path, 'commit', '-q', '-m', 'more');
-    const head2 = git(wt.path, 'rev-parse', 'HEAD');
+    gitIn(wt.path, 'add', '-A');
+    gitIn(wt.path, 'commit', '-q', '-m', 'more');
+    const head2 = gitIn(wt.path, 'rev-parse', 'HEAD');
     const res = await gh.pushBranch({
       repo,
       bundlePath: bundleOf(wt.path, wt.head),
@@ -390,12 +379,12 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const wt = worktree('task/7-ahead');
     await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/7-ahead', head: wt.head });
     const other = join(root, 'other-7');
-    git(root, 'clone', '-q', '-b', 'task/7-ahead', remote, other);
+    gitIn(root, 'clone', '-q', '-b', 'task/7-ahead', remote, other);
     writeFileSync(join(other, 'by-someone.txt'), 'x');
-    git(other, 'add', '-A');
-    git(other, 'commit', '-q', '-m', 'someone else');
-    git(other, 'push', '-q', 'origin', 'HEAD:task/7-ahead');
-    const theirs = git(other, 'rev-parse', 'HEAD');
+    gitIn(other, 'add', '-A');
+    gitIn(other, 'commit', '-q', '-m', 'someone else');
+    gitIn(other, 'push', '-q', 'origin', 'HEAD:task/7-ahead');
+    const theirs = gitIn(other, 'rev-parse', 'HEAD');
     await expect(
       gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/7-ahead', head: wt.head }),
     ).rejects.toMatchObject({
@@ -411,16 +400,16 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const wt = worktree('task/8-fork');
     await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/8-fork', head: wt.head });
     const other = join(root, 'other-8');
-    git(root, 'clone', '-q', '-b', 'task/8-fork', remote, other);
+    gitIn(root, 'clone', '-q', '-b', 'task/8-fork', remote, other);
     writeFileSync(join(other, 'theirs.txt'), 'x');
-    git(other, 'add', '-A');
-    git(other, 'commit', '-q', '-m', 'theirs');
-    git(other, 'push', '-q', 'origin', 'HEAD:task/8-fork');
-    const theirs = git(other, 'rev-parse', 'HEAD');
+    gitIn(other, 'add', '-A');
+    gitIn(other, 'commit', '-q', '-m', 'theirs');
+    gitIn(other, 'push', '-q', 'origin', 'HEAD:task/8-fork');
+    const theirs = gitIn(other, 'rev-parse', 'HEAD');
     writeFileSync(join(wt.path, 'ours.txt'), 'y');
-    git(wt.path, 'add', '-A');
-    git(wt.path, 'commit', '-q', '-m', 'ours');
-    const ours = git(wt.path, 'rev-parse', 'HEAD');
+    gitIn(wt.path, 'add', '-A');
+    gitIn(wt.path, 'commit', '-q', '-m', 'ours');
+    const ours = gitIn(wt.path, 'rev-parse', 'HEAD');
     await expect(
       gh.pushBranch({ repo, bundlePath: bundleOf(wt.path, wt.head), branch: 'task/8-fork', head: ours }),
     ).rejects.toMatchObject({
@@ -468,9 +457,9 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
 
     // 上一个会话的提交从没推上去，这次只交了它之后的：引擎这边补不齐
     writeFileSync(join(wt.path, 'later.txt'), 'later');
-    git(wt.path, 'add', '-A');
-    git(wt.path, 'commit', '-q', '-m', 'later');
-    const later = git(wt.path, 'rev-parse', 'HEAD');
+    gitIn(wt.path, 'add', '-A');
+    gitIn(wt.path, 'commit', '-q', '-m', 'later');
+    const later = gitIn(wt.path, 'rev-parse', 'HEAD');
     await expect(
       gh.pushBranch({
         repo,
@@ -578,11 +567,11 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
   it('缺对象的包（只带提交、不带它的树）：导入后就核出来，BUNDLE_INCOMPLETE，不可重试', async () => {
     const { gh } = pushSetup();
     const wt = worktree('task/15-missing-objects');
-    // 头照抄真包，pack 里只放提交对象本身
-    const onlyCommit = execFileSync('git', ['pack-objects', '--stdout', '-q'], {
+    // 头照抄真包，pack 里只放提交对象本身（pack-objects --stdout 的输出是二进制，走按字节交回的 runChildBytes）
+    const onlyCommit = runChildBytes('git', ['pack-objects', '--stdout', '-q'], {
       cwd: wt.path,
       input: `${wt.head}\n`,
-    });
+    }).stdout;
     const bundlePath = writeBundle(
       'missing-objects',
       Buffer.concat([splitBundle(wt.bundle).header, onlyCommit]),
@@ -638,7 +627,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const { gh } = pushSetup();
     const wt = worktree('task/18-fifo');
     const fifo = join(root, `fifo-${Math.random().toString(36).slice(2, 9)}.bundle`);
-    execFileSync('mkfifo', [fifo]);
+    runChild('mkfifo', [fifo]);
     await expect(
       gh.pushBranch({
         repo: { owner: 'acme', name: 'widgets' },
