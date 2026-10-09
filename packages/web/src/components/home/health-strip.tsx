@@ -74,17 +74,17 @@ function kindOfEngine(state: HomeHealth['engine']['state']): Kind {
   }
 }
 
-/** 引擎那一格的名字和一句话：四种状态各说各的，不共用「正常」。 */
+/** 引擎进程那一格的名字和一句话：四种状态各说各的，名字都带「进程」，和顶栏的总开关分开，不共用「正常」。 */
 function engineWords(engine: HomeHealth['engine']): { label: string; detail: string } {
   switch (engine.state) {
     case 'on':
-      return { label: '引擎', detail: '正常' };
+      return { label: '引擎进程', detail: '正常' };
     case 'off':
-      return { label: '引擎已停用', detail: engine.detail ?? '按配置没开' };
+      return { label: '引擎进程已停用', detail: engine.detail ?? '按配置没开' };
     case 'down':
-      return { label: '引擎没连上', detail: engine.detail ?? '探不到在线的工人' };
+      return { label: '引擎进程没连上', detail: engine.detail ?? '探不到在线的工人' };
     case 'unknown':
-      return { label: '引擎', detail: `没查成${engine.detail ? `：${engine.detail}` : ''}` };
+      return { label: '引擎进程', detail: `没查成${engine.detail ? `：${engine.detail}` : ''}` };
   }
 }
 
