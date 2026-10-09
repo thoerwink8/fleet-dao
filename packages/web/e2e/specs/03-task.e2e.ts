@@ -99,7 +99,8 @@ test.describe('单子详情', () => {
       const alert = page.getByRole('alert').filter({ hasText: '没有这张单' });
       await expect(alert).toBeVisible();
       await expect(alert.getByRole('link', { name: '回主页' })).toBeVisible();
-      await expect(page.locator('main [aria-busy]')).toHaveCount(0);
+      // 刷新按钮空闲也写 aria-busy="false"，忙时是按钮上的 "true"，都不算退回骨架。
+      await expect(page.locator('main [aria-busy="true"]:not(button)')).toHaveCount(0);
     }
   });
 });
