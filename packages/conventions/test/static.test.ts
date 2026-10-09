@@ -164,6 +164,13 @@ describe('测试里不许同步起子进程', () => {
     expect(hits).toEqual([]);
   });
 
+  it('扫本包真实的 test/ 仍然命中为空数组', () => {
+    const files = testSources();
+    expect(files.length).toBeGreaterThan(0);
+    const hits = files.flatMap((file) => scanSyncChildSpawns(readFileSync(file, 'utf8')));
+    expect(hits).toEqual([]);
+  });
+
   it('故意放一行违规的样本，扫得出来', () => {
     const sample = "execFileSync('git', []);";
     expect(scanSyncChildSpawns(sample)).toEqual(['execFileSync']);
