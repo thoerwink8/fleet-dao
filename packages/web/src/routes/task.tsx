@@ -9,6 +9,7 @@ import { brand } from '#brand';
 import { isNotFound, useRouting, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
@@ -17,7 +18,7 @@ import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
 import { UsagePanel } from '../components/usage';
-import { formatAgo } from '../lib/format';
+import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { useShownError } from '../lib/shown-error';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
@@ -179,6 +180,9 @@ function Missing({ taskId }: { taskId: string | undefined }) {
   );
 }
 
+/** 任务详情靠推送更新，没有自己的轮询。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
+const TASK_STALE_AFTER_MS = 5 * TIME.MIN;
+
 export default function TaskPage() {
   const { taskId } = useParams();
   const detail = useTaskDetail(taskId);
@@ -200,6 +204,12 @@ export default function TaskPage() {
       description={d ? <Header d={d} now={now} /> : undefined}
       actions={
         <>
+          <RefreshBar
+            onRefresh={() => void detail.refetch()}
+            isFetching={detail.isFetching}
+            dataUpdatedAt={detail.dataUpdatedAt}
+            staleAfterMs={TASK_STALE_AFTER_MS}
+          />
           {d ? <TaskActionBar d={d} /> : null}
           <Back />
         </>
