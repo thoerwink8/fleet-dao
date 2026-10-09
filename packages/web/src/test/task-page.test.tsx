@@ -254,15 +254,18 @@ describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处�
     return document.querySelector('[data-task-actions]') as HTMLElement | null;
   };
 
-  test('在跑的单：页头有暂停、继续、叫停三个按钮；没有换模型', async () => {
+  test('在跑的单：暂停、叫停能点，继续置灰并写明原因；没有换模型', async () => {
     open('/tasks/t-12');
     await waitFor(async () => expect(await actionBox()).not.toBeNull());
     const box = (await actionBox()) as HTMLElement;
     expect([...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['暂停', '继续', '叫停']);
+    const resume = within(box).getByRole('button', { name: '继续' });
+    expect((resume as HTMLButtonElement).disabled).toBe(true);
+    expect(resume.getAttribute('title')).toBe('还没暂停，没有可继续的');
     expect(within(box).queryByText('换模型')).toBeNull();
   });
 
-  test('点暂停、选「做完这一段再停」：页上写「已暂停」和原因（等待色，不是失败红），按钮不再有「暂停」；点继续后恢复', async () => {
+  test('点暂停、选「做完这一段再停」：页上写「已暂停」和原因（等待色，不是失败红），「暂停」置灰并写明原因；点继续后恢复', async () => {
     const api = createMockApi({ live: false });
     open('/tasks/t-12', api);
     await waitFor(async () => expect(await actionBox()).not.toBeNull());
@@ -272,12 +275,15 @@ describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处�
     expect(screen.getByText('已暂停')).toBeTruthy();
     expect(document.querySelector('[data-paused-note]')?.textContent).toContain('已暂停：被人暂停');
     const box = (await actionBox()) as HTMLElement;
-    expect([...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['继续', '叫停']);
+    expect([...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['暂停', '继续', '叫停']);
+    const pause = within(box).getByRole('button', { name: '暂停' });
+    expect((pause as HTMLButtonElement).disabled).toBe(true);
+    expect(pause.getAttribute('title')).toBe('已经暂停了，点「继续」接着走');
     fireEvent.click(within(box).getByRole('button', { name: '继续' }));
     await waitFor(() => expect(document.querySelector('[data-paused-note]')).toBeNull());
-    expect(
-      [...((await actionBox()) as HTMLElement).querySelectorAll('button')].map((b) => b.textContent),
-    ).toEqual(['暂停', '继续', '叫停']);
+    const again = (await actionBox()) as HTMLElement;
+    expect([...again.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['暂停', '继续', '叫停']);
+    expect((within(again).getByRole('button', { name: '继续' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   test('【故意造出的失败】已结束的单：一个按钮都不画', async () => {
