@@ -11,6 +11,9 @@
 //   （conventions 的 requiredSectionProblems、doneSection）核一遍。新单一律不挂里程碑（未排期）、不排进版本先后：不动先后列表。
 // - 开之前先查：开着的单、最近 30 天关掉的单、开着的 PR，标题和路径像的（conventions 的 rankSimilar，开单脚本提示重复用的同一份）就不开，
 //   进 rejected 写明像谁。
+// - splitFrom 的新单标题必须带「（#<号> 第 N 片）」（N 是正整数，号和 splitFrom 一样），否则整条 rejected。
+//   总账（场景里写了「分片」，或标题、正文有「总账」「第一片」「下一片」）一次最多开 1 片；上一片还开着，或开着的 PR
+//   需求栏 Refs 着它，就不开。
 // - 补老单只往末尾接，原文、原话一个字不动：老单里已有的节（场景、已知的模块、怎么算做完写了字的）不补，已经有整理补充的单不再补。
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
 // - 涉及改标准路径、`.github/workflows/`（正文里认得出路径）或会话自己标了删数据 / 花钱的，贴「要人拍」，引擎不拉。
@@ -21,6 +24,7 @@ import {
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
+  issueColumnRefs,
   KIND_LABELS,
   matchesStandardPath,
   modulePaths,
@@ -247,6 +251,67 @@ export function presentSections(body: string): {
   };
 }
 
+/** 标题里的「（#12 第 3 片）」。N 从 1 起，号和片数都是阿拉伯数字，括号是全角。 */
+export function sliceTitleOf(title: string): { ledger: number; index: number } | null {
+  const m = /（#(\d+) 第 ([1-9]\d*) 片）/.exec(title);
+  if (!m?.[1] || !m[2]) return null;
+  return { ledger: Number(m[1]), index: Number(m[2]) };
+}
+
+/** splitFrom 的新单标题不合规矩时的原因；合规矩回 null。 */
+export function splitTitleProblem(title: string, splitFrom: number): string | null {
+  const mark = sliceTitleOf(title);
+  if (!mark) return `标题必须带「（#${splitFrom} 第 N 片）」，缺了「第 N 片」`;
+  if (mark.ledger !== splitFrom) {
+    return `标题里写的是「（#${mark.ledger} 第 ${mark.index} 片）」，和 splitFrom #${splitFrom} 对不上`;
+  }
+  return null;
+}
+
+/**
+ * 这张开着的单是不是总账：场景那一节写了「分片」，或标题、正文里有「总账」「第一片」「下一片」。
+ * 「第 1 片」这种阿拉伯数字片号不算「第一片」，免得刚开的下一片又被当成一张新总账。
+ */
+export function isLedgerIssue(issue: { title: string; body: string }): boolean {
+  const scene = sectionText(parseMd('issue.md', issue.body), '场景') ?? '';
+  if (scene.includes('分片')) return true;
+  const blob = `${issue.title}\n${issue.body}`;
+  return blob.includes('总账') || blob.includes('第一片') || blob.includes('下一片');
+}
+
+/** 标题或正文里挂着的一片（先认规定的全角写法，再认「#12……第一片」这种手写）。 */
+export function mentionedSlice(text: string): { ledger: number; label: string } | null {
+  const strict = sliceTitleOf(text);
+  if (strict) return { ledger: strict.ledger, label: `第 ${strict.index} 片` };
+  const loose = /#(\d+)(?!\d)[^\n]{0,40}?(第\s*[0-9一二三四五六七八九十]+\s*片)/.exec(text);
+  if (!loose?.[1] || !loose[2]) return null;
+  return { ledger: Number(loose[1]), label: loose[2].replace(/\s+/g, '') };
+}
+
+/** 另一张开着的单是不是这张总账的分片（含引擎拆出来时写的「从 #N 拆出来」）。总账自己不算。 */
+export function isOpenSliceOf(
+  issue: { number: number; title: string; body: string },
+  ledger: number,
+): boolean {
+  if (issue.number === ledger) return false;
+  if (mentionedSlice(`${issue.title}\n${issue.body}`)?.ledger === ledger) return true;
+  return new RegExp(`从 #${ledger}(?!\\d) 拆出来`).test(issue.body);
+}
+
+function ledgerSliceBlocked(
+  ledger: number,
+  openIssues: readonly { number: number; title: string; body: string }[],
+  similar: readonly SimilarCandidate[],
+): string | null {
+  const open = openIssues.find((i) => isOpenSliceOf(i, ledger));
+  if (open) return `上一片 #${open.number}「${open.title}」还开着，这一片不开`;
+  for (const c of similar) {
+    if (c.kind !== 'pull') continue;
+    if (issueColumnRefs(c.body).refs.includes(ledger)) return `分片 PR #${c.number} 还没合，这一片不开`;
+  }
+  return null;
+}
+
 // —— 执行 ——
 
 /**
@@ -273,6 +338,11 @@ export interface PlanContext {
   now: Date;
   /** 开着的、作者在白名单里的单（会话只看得到、点得到这些）。 */
   trusted: ReadonlyMap<number, IntakeIssue>;
+  /**
+   * 全部开着的单（含不在白名单里的），用来认「上一片还开着」。
+   * 不传就只用 trusted：关掉的单不要混进来，混进来会把已经合完的一片当成还开着。
+   */
+  openIssues?: readonly { number: number; title: string; body: string }[];
   /** 开着的单（含陌生人开的）、最近关掉的单、开着的 PR：查重用。 */
   similar: SimilarCandidate[];
   standardPaths: readonly StandardPath[];
@@ -418,17 +488,38 @@ export async function executeGroomPlan(
   // 3. 开新单（newIssues）
   const candidates: SimilarCandidate[] = [...ctx.similar];
   const splits = new Map<number, number[]>();
+  const openIssues = ctx.openIssues ?? [...ctx.trusted.values()];
+  let ledgerSlicesOpened = 0;
   for (const { index, item } of plan.newIssues) {
     const what = `newIssues[${index}] 「${item.title}」`;
     if (opened.length >= GROOM_MAX_NEW_ISSUES) {
       rejected.push({ what, why: `超过每次最多开 ${GROOM_MAX_NEW_ISSUES} 张` });
       continue;
     }
-    if (item.splitFrom !== undefined && !ctx.trusted.has(item.splitFrom)) {
+    const parent = item.splitFrom === undefined ? undefined : ctx.trusted.get(item.splitFrom);
+    if (item.splitFrom !== undefined && parent === undefined) {
       rejected.push({ what, why: `splitFrom #${item.splitFrom} 不是开着的、作者在白名单里的单` });
       continue;
     }
     const title = item.title.replace(/\s+/g, ' ').trim();
+    if (item.splitFrom !== undefined) {
+      const titleWhy = splitTitleProblem(title, item.splitFrom);
+      if (titleWhy) {
+        rejected.push({ what, why: titleWhy });
+        continue;
+      }
+    }
+    if (parent !== undefined && isLedgerIssue(parent)) {
+      const blocked = ledgerSliceBlocked(parent.number, openIssues, ctx.similar);
+      if (blocked) {
+        rejected.push({ what, why: blocked });
+        continue;
+      }
+      if (ledgerSlicesOpened >= 1) {
+        rejected.push({ what, why: '总账的下一片一次最多开 1 片' });
+        continue;
+      }
+    }
     const body = renderNewIssueBody(item);
     // 开单脚本同一份判法再核一遍：模板拼错了、会话塞进了「涉及面」都在这里挡
     const problems = requiredSectionProblems(parseMd('body.md', body));
@@ -458,6 +549,7 @@ export async function executeGroomPlan(
     });
     if (!ok) continue;
     opened.push({ number, title, ...(item.splitFrom === undefined ? {} : { splitFrom: item.splitFrom }) });
+    if (parent !== undefined && isLedgerIssue(parent)) ledgerSlicesOpened += 1;
     if (reason !== null) flagged.push(number);
     candidates.push({ number, title, body, kind: 'issue' });
     if (item.splitFrom !== undefined)
