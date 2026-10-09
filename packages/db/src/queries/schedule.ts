@@ -1,7 +1,8 @@
 // 定时任务：登记该跑的任务、记每次跑的开始和结局；看门狗和驾驶舱按登记表逐个查新鲜度。
 // 以登记为准而不是以跑过的记录为准：一次都没跑过的任务没有记录，只看记录就永远看不见它（没跑成 ≠ 没问题）。
 import type { ScheduleOutcome } from '@fleet-dao/shared';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { errMessage } from '@fleet-dao/shared/util';
+import { and, asc, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { SCHEDULE_OUTCOMES } from '../schema/enums.ts';
 import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
@@ -84,6 +85,65 @@ export async function finishScheduleRun(
     .where(eq(scheduleRuns.id, id))
     .returning({ id: scheduleRuns.id });
   if (updated.length === 0) throw new Error(`没有这次定时任务记录：${id}`);
+}
+
+/** 进程被发版或重启腰斩、已经记下开始却没人收尾时，起来补记写的原因。 */
+export const INTERRUPTED_SCHEDULE_WHY = '进程中断没收尾，启动时补记';
+
+export interface CloseInterruptedScheduleRunsInput {
+  /** 本进程会跑的任务，和各自的补记线：开始得比这早、还没结束的才补。 */
+  jobs: readonly { id: string; startedBefore: Date }[];
+  /** 这次补记是什么时候做的。结束时刻不写它，见 closeInterruptedScheduleRuns。 */
+  at: Date;
+  /** 不给就用 INTERRUPTED_SCHEDULE_WHY。巡检补自己的没收尾轮次时换自己的原因。 */
+  why?: string;
+}
+
+/**
+ * 把还没结束、又已经超过补记线的 schedule_runs 补记成 failed，回补上的编号。
+ * 结束时刻写成开跑时刻，不写成现在：写成现在的话这行会变成「最近一次结束的」，看门狗把后面已经跑成的轮次盖成没跑成。
+ * 没超过补记线的不动（可能是这一轮还在跑）。名单以外的任务不动（不是这个进程跑的）。
+ * 写库失败照抛，不把「没补上」当成补上了。
+ */
+export async function closeInterruptedScheduleRuns(
+  db: Db,
+  input: CloseInterruptedScheduleRunsInput,
+): Promise<number[]> {
+  const why = (input.why ?? INTERRUPTED_SCHEDULE_WHY).trim();
+  if (!why) throw new Error('补记没收尾的定时任务要写为什么');
+  if (Number.isNaN(input.at.getTime())) throw new Error('补记没收尾的定时任务要有有效时刻');
+  if (input.jobs.length === 0) return [];
+  for (const job of input.jobs) {
+    if (!job.id.trim()) throw new Error('补记没收尾的定时任务要有任务编号');
+    if (Number.isNaN(job.startedBefore.getTime())) throw new Error('补记没收尾的定时任务要有有效时刻');
+  }
+  try {
+    const ids: number[] = [];
+    for (const job of input.jobs) {
+      const open = await db
+        .select({ id: scheduleRuns.id, startedAt: scheduleRuns.startedAt })
+        .from(scheduleRuns)
+        .where(
+          and(
+            eq(scheduleRuns.job, job.id),
+            isNull(scheduleRuns.endedAt),
+            lt(scheduleRuns.startedAt, job.startedBefore),
+          ),
+        )
+        .orderBy(asc(scheduleRuns.id));
+      for (const row of open) {
+        const updated = await db
+          .update(scheduleRuns)
+          .set({ endedAt: row.startedAt, outcome: 'failed', why })
+          .where(and(eq(scheduleRuns.id, row.id), isNull(scheduleRuns.endedAt)))
+          .returning({ id: scheduleRuns.id });
+        for (const written of updated) ids.push(written.id);
+      }
+    }
+    return ids;
+  } catch (error) {
+    throw new Error(`补记没收尾的定时任务失败：${errMessage(error)}`, { cause: error });
+  }
 }
 
 /**

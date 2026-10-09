@@ -31,7 +31,7 @@ import { createFakeWorld } from './fakes.ts';
 import { engineTimerJobs } from './jobs/engine-timers.ts';
 import { type GroomPoller, startGroomRequests } from './jobs/groom.ts';
 import { type RouteProbeNowPoller, startRouteProbeRequests } from './jobs/route-probe-now.ts';
-import { type EngineTimers, realTimerHost, startTimers } from './jobs/timers.ts';
+import { type EngineTimers, realTimerHost, startEngineTimers } from './jobs/timers.ts';
 import type { EnginePorts } from './ports.ts';
 
 export interface EngineConfig {
@@ -283,6 +283,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let jobLastStartedAt: (() => Promise<ReadonlyMap<string, Date>>) | undefined;
   let master: EngineMasterGate | undefined;
   let recordSkippedRun: ((jobId: string, why: string) => Promise<void>) | undefined;
+  let closeInterruptedScheduleRuns: Parameters<typeof startEngineTimers>[2] | undefined;
   let close: () => Promise<void> = async () => {};
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
@@ -299,6 +300,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     jobLastStartedAt = real.jobLastStartedAt;
     master = real.master;
     recordSkippedRun = real.recordSkippedRun;
+    closeInterruptedScheduleRuns = real.closeInterruptedScheduleRuns;
     close = real.close;
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
@@ -357,15 +359,19 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       log: (message) => console.info(message),
     });
     if (client && jobs && master && recordSkippedRun) {
-      // 定时任务的定时器（jobs/timers.ts）：引擎进程里的普通定时器，重启后自己恢复；孤儿会话收完、工人建好之后再起，一起来就能接任务工作流
+      if (!closeInterruptedScheduleRuns) throw new Error('真端口没装补记没收尾的定时任务记录');
+      // 定时任务的定时器（jobs/timers.ts）：引擎进程里的普通定时器，重启后自己恢复；孤儿会话收完、工人建好之后再起，一起来就能接任务工作流。
+      // 起之前先补记上一轮进程被腰斩、超过一轮工作上限还没结束的 schedule_runs（#1522）；写库失败照抛，定时器不起。
       const lastRuns = jobLastStartedAt?.();
-      timers = startTimers(
-        engineTimerJobs({ jobs, client, taskQueue: config.taskQueue }),
+      const timerJobs = engineTimerJobs({ jobs, client, taskQueue: config.taskQueue });
+      timers = await startEngineTimers(
+        timerJobs,
         realTimerHost(
           async (id) => (lastRuns ? ((await lastRuns).get(id) ?? null) : null),
           master,
           recordSkippedRun,
         ),
+        closeInterruptedScheduleRuns,
       );
       console.info('定时任务的定时器已起');
       // 驾驶舱的立即探测：每几秒看一眼有没人点（总开关关着也看：探针是看家检查）

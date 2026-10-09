@@ -8,6 +8,7 @@
 import {
   canaryDbFacts,
   canaryPullRequestNumber,
+  closeInterruptedScheduleRuns,
   concludeAbandonedCanaryRuns,
   type Db,
   finishCanaryRun,
@@ -162,6 +163,12 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
+        closeInterrupted: (input) =>
+          closeInterruptedScheduleRuns(w.db, {
+            jobs: [{ id: input.job, startedBefore: input.startedBefore }],
+            at: input.at,
+            why: input.why,
+          }),
       },
       record: {
         start: (input) => startCanaryRun(w.db, input),
