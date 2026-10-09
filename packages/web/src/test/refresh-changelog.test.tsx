@@ -31,15 +31,20 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   const api = createMockApi({ live: false });
   const read = vi.spyOn(api, 'franceReleasedCommits');
   renderApp(<ChangelogPage />, { api });
-  await waitFor(() =>
-    expect((screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false),
-  );
-  expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
-  refetch.mockClear();
+  await waitFor(() => expect(screen.getByText(/最后更新/).textContent).toContain('刚刚'));
+  expect(screen.queryByText('数据已过期')).toBeNull();
+
   const before = read.mock.calls.length;
   expect(before).toBeGreaterThan(0);
-  fireEvent.click(screen.getByRole('button', { name: '刷新' }));
-  expect(refetch).toHaveBeenCalledTimes(1);
+  refetch.mockClear();
+
+  // 按钮会跟着读取状态重绘。可点判断和点击必须在同一轮，晚一点 isFetching 又会把点击吃掉。
+  await waitFor(() => {
+    const button = screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    if (refetch.mock.calls.length === 0) fireEvent.click(button);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
   await waitFor(() => expect(read.mock.calls.length).toBe(before + 1));
 });
 
