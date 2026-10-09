@@ -21,7 +21,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KIND_TASK_IDLE, scrubText } from './france-lib.mjs';
+import { KIND_ROUTE_STALE, KIND_TASK_IDLE, scrubText } from './france-lib.mjs';
 import { pauseMarkerPath } from './worker-lib.mjs';
 
 export const STATE_REL = join('.fleet-dao', 'release-train.json');
@@ -361,8 +361,24 @@ async function localWorkers(io) {
 }
 
 /**
- * france.mjs --json：{ ok, code, bad, unread, note, idle, text }。退出码 2＝整个没读到。
- * 按异常的 `kind` 分类，不匹配文案（#1292）：`task-idle`（单在跑、手上没会话、N 分钟没动）不计入 bad/unread/note，只数进 idle。
+ * 暂停期必然出现、引擎一恢复就消失的异常类别 → 给人看的名字。按 `kind` 认，不匹配文案。
+ * `task-idle`：引擎不派活不起会话，在动手的单必然「没动」（#1292）。
+ * `route-stale`：路由探针要引擎开着才跑，暂停加部署超过 45 分钟，在线路由的结论必然变旧（#1520）。
+ */
+const PAUSE_KINDS = new Map([
+  [KIND_TASK_IDLE, '单没动、手上没会话'],
+  [KIND_ROUTE_STALE, '路由结论没更新'],
+]);
+
+/** 「单没动、手上没会话 2 处、路由结论没更新 0 处」：每个类别都列，0 也写出来。 */
+function pausedText(paused) {
+  const parts = [...PAUSE_KINDS].map(([k, name]) => `${name} ${paused[k] ?? 0} 处`);
+  return parts.join('、');
+}
+
+/**
+ * france.mjs --json：{ ok, code, bad, unread, note, paused, text }。退出码 2＝整个没读到。
+ * 按异常的 `kind` 分类，不匹配文案（#1292、#1520）：PAUSE_KINDS 里的类别不计入 bad/unread/note，只按类别数进 paused。
  * 为什么放在这里过滤，而不是验证前先把引擎开回来：发版车第 2 步关引擎、第 7 步才按发版前状态恢复，
  * 发版前关着的要保持关，验证前开引擎会改变这个决定（并让引擎在验证期间重新接活）。预检基线和验证用同一个函数，口径一致。
  */
@@ -383,10 +399,11 @@ async function franceHealth(io) {
     return { ok: false, why: `france.mjs --json 的输出里没有 anomalies 列表：${tailOf(r)}` };
   const count = { bad: 0, unread: 0, note: 0 };
   const shown = [];
-  let idle = 0;
+  /** @type {Record<string, number>} */
+  const paused = {};
   for (const a of view.anomalies) {
-    if (a.kind === KIND_TASK_IDLE) {
-      idle += 1;
+    if (PAUSE_KINDS.has(a.kind)) {
+      paused[a.kind] = (paused[a.kind] ?? 0) + 1;
       continue;
     }
     if (!(a.level in count))
@@ -398,7 +415,7 @@ async function franceHealth(io) {
     ok: true,
     code: r.status,
     ...count,
-    idle,
+    paused: pausedText(paused),
     text: shown.join('\n'),
   };
 }
@@ -430,7 +447,7 @@ async function phasePreflight(io, state) {
     state.baseline = { bad: health.bad, unread: health.unread, note: health.note };
     sayTo(
       io,
-      `预检：法国现状 ${health.bad} 处异常、${health.unread} 处没读到、${health.note} 处留意（记作基线，验证时只拦新增；另有 ${health.idle} 处「单没动、手上没会话」不计，暂停期必然出现）`,
+      `预检：法国现状 ${health.bad} 处异常、${health.unread} 处没读到、${health.note} 处留意（记作基线，验证时只拦新增；暂停期必然出现的不计：${health.paused}）`,
     );
   }
 
@@ -657,7 +674,8 @@ async function phaseDeploy(io, state) {
 
 /**
  * 6 验证：法国现状比预检基线没有新增异常；总开关读得到。
- * 「单没动、手上没会话」（kind task-idle）不算：引擎暂停期不派活不起会话，在动手的单必然「没动」，引擎一恢复就消失（#1292）。
+ * PAUSE_KINDS 里的类别不算：「单没动、手上没会话」（kind task-idle，#1292）、「路由结论没更新」（kind route-stale，#1520），
+ * 都是引擎暂停期必然出现、一恢复就消失的；同一个目标再跑 start 也刷新不了它们（引擎第 7 步才开回），拦了就是死循环。
  */
 async function phaseVerify(io, state) {
   const health = await franceHealth(io);
@@ -672,7 +690,7 @@ async function phaseVerify(io, state) {
   if (!eng.ok) return failed(eng.why);
   sayTo(
     io,
-    `验证：法国 ${health.bad} 处异常、${health.unread} 处没读到（预检基线 ${base.bad}、${base.unread}；暂停期「单没动」${health.idle} 处不计）；${eng.text}`,
+    `验证：法国 ${health.bad} 处异常、${health.unread} 处没读到（预检基线 ${base.bad}、${base.unread}；暂停期必然出现的不计：${health.paused}）；${eng.text}`,
   );
   return { ok: true };
 }

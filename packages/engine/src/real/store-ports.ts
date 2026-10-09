@@ -29,6 +29,8 @@ import {
   type EndedPoolRun,
   endedPoolRuns,
   markChannelDisabled,
+  openAlertKeysOfTask,
+  openAlertsByPrefix,
   openPoolRuns,
   type RunSegment,
   readQuotaReserveSetting,
@@ -36,6 +38,7 @@ import {
   recordStepTiming,
   releaseTaskReservation,
   reservePoolSlot,
+  resolveAlertWithReason,
   routeFactsForPurpose,
   saveTaskSnapshot,
   setChannelFallback,
@@ -46,6 +49,7 @@ import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
+import { isTaskParkAlertKey, TASK_DONE_PARK_ACTOR, TASK_DONE_PARK_WHY } from '../park-alerts.ts';
 import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
 import {
   type AllOpenCheck,
@@ -287,6 +291,29 @@ function judgeAllOpen(input: ChooseRouteInput): AllOpenCheck {
       throw new PortError('ROUTING_INPUT', `全熔断判不了：${error.message}`, { retryable: true });
     }
     throw error;
+  }
+}
+
+/** 任务做完：撤掉这张单还开着的 task:…:park: 提醒。req:、sub: 的旧键不动。 */
+async function resolveDoneTaskParkAlerts(
+  db: Db,
+  taskId: string,
+  workflowId: string | undefined,
+): Promise<void> {
+  const keys = new Set<string>();
+  if (UUID.test(taskId)) {
+    for (const key of await openAlertKeysOfTask(db, taskId)) keys.add(key);
+  }
+  if (workflowId?.startsWith('task:')) {
+    for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) keys.add(row.dedupeKey);
+  }
+  for (const dedupeKey of keys) {
+    if (!isTaskParkAlertKey(dedupeKey)) continue;
+    await resolveAlertWithReason(db, {
+      dedupeKey,
+      by: TASK_DONE_PARK_ACTOR,
+      why: TASK_DONE_PARK_WHY,
+    });
   }
 }
 
@@ -839,7 +866,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       });
     },
 
-    async saveTaskState(input) {
+    async saveTaskState(input, ctx) {
       const r = await saveTaskSnapshot(db, {
         taskId: input.taskId,
         state: input.state,
@@ -855,6 +882,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           retryable: false,
         });
       }
+      // 做完才撤。叫停、仍挂着（stalled / phase parked）留着：条件还在。撤失败照抛，活动重试；快照已经写下。
+      if (input.state === 'done') await resolveDoneTaskParkAlerts(db, input.taskId, ctx.workflowId);
     },
   };
 }

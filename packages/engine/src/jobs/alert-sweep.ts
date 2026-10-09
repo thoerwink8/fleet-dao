@@ -24,8 +24,10 @@
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
 //   工作树那一部分撤（jobs/worktree-sweep.ts）。
 // - <工作流>:park:<n> 挂起（任务工作流报的键是 task:<仓>#<号>:park:<n>，旧的是 req:/sub:；#901 之前这里不认 task:，
-//   任务工作流的挂起提醒永远撤不掉；读它的状态走 taskStatus 查询，real/hourly-reconcile.ts 的 taskViewOf）：工作流不在跑了、不挂着了、后来又挂起了一次（这条是旧的）就撤；「「<阶段>」没有能用的路由」
-//   挂着时路由恢复了，正文开头写一句「路由已经恢复…点继续」（不撤：任务还挂着等人点继续）。
+//   任务工作流的挂起提醒永远撤不掉；读它的状态走 taskStatus 查询，real/hourly-reconcile.ts 的 taskViewOf）：工作流不在跑了、不挂着了、后来又挂起了一次（这条是旧的）就撤。
+//   任务工作流（task:）还有一条：任务状态已经是做完了也撤（成功收尾后不再占着卡住报警）。收尾写快照当时就撤（处理人
+//   engine:task-workflow）；那一下没撤成、或发版前已经做完的，下一轮对账补撤。叫停、仍挂着不因为这条撤。
+//   「「<阶段>」没有能用的路由」挂着时路由恢复了，正文开头写一句「路由已经恢复…点继续」（不撤：任务还挂着等人点继续）。
 // - <工作流>:history 事件数到线：工作流结束了就撤。
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
 // - mq:<仓>:decide 合并队列判断出错：队列正常收工了（COMPLETED）或工作流已经不在了就撤；还在跑时判不了。
@@ -57,6 +59,7 @@ import { type AlertStage, criteriaOf, HANDLED_STAGES, isEscalationKey } from '@f
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
+import { TASK_DONE_PARK_WHY } from '../park-alerts.ts';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
 import { plainText } from './groom-plan.ts';
@@ -250,6 +253,11 @@ export const RULES: readonly Rule[] = [
     pattern: /^((?:task|req|sub):.+):park:\d+$/,
     async judge(deps, alert, m) {
       const wf = m[1] as string;
+      // 做完了就撤，不等工作流查询。工作流还显示挂着、或查询抛了，也不能把已做成的事留在卡住报警里。
+      if (wf.startsWith('task:') && alert.taskId) {
+        const state = await deps.taskState(alert.taskId);
+        if (state === 'done') return { resolve: TASK_DONE_PARK_WHY };
+      }
       const st = await deps.workflows.state(wf);
       if (st.state !== 'running') return { resolve: `任务已经不挂着了：${notRunningWords(st)}` };
       const view = await deps.workflows.view(wf);

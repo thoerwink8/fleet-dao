@@ -15,7 +15,16 @@ import { Button } from '../../ui/button';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
 import type { HomeRunning } from '../types';
 import { targetOfItem, useBoardUi } from './board-ui';
-import { type BoardNodeData, compareTickets, nodeId, phasesOf, segmentKeyOf, ticketTone } from './model';
+import {
+  type BoardNodeData,
+  compareTickets,
+  isNeedsYou,
+  isStuck,
+  nodeId,
+  phasesOf,
+  segmentKeyOf,
+  ticketTone,
+} from './model';
 import { avgText, segmentHintOf, segmentName } from './nodes';
 
 export function DetailPanel({
@@ -272,10 +281,8 @@ function RootPanel({
   onSelect(id: string): void;
 }) {
   const c = data.counts;
-  const urgent = running.filter((r) => {
-    const t = ticketTone(r);
-    return t === 'human' || t === 'fail';
-  });
+  const waiting = running.filter(isNeedsYou).sort(compareTickets);
+  const failed = running.filter(isStuck).sort(compareTickets);
   return (
     <div>
       <Head onClose={onClose}>
@@ -301,15 +308,26 @@ function RootPanel({
       {data.repos.length ? (
         <p className="num mt-1 text-xs text-muted-foreground">项目：{data.repos.join('、')}</p>
       ) : null}
-      <Section title={`要管的（${urgent.length}）`}>
-        {urgent.length ? (
+      <Section title={`等你拍（${waiting.length}）`}>
+        {waiting.length ? (
           <ul className="space-y-1.5">
-            {urgent.sort(compareTickets).map((it) => (
+            {waiting.map((it) => (
               <TicketButton key={nodeId.ticket(it)} item={it} onSelect={onSelect} />
             ))}
           </ul>
         ) : (
-          <p className="text-xs text-muted-foreground">没有等你拍、出问题的单</p>
+          <p className="text-xs text-muted-foreground">没有等你拍的单</p>
+        )}
+      </Section>
+      <Section title={`出问题（${failed.length}）`}>
+        {failed.length ? (
+          <ul className="space-y-1.5">
+            {failed.map((it) => (
+              <TicketButton key={nodeId.ticket(it)} item={it} onSelect={onSelect} />
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-muted-foreground">没有出问题的单（不含等你）</p>
         )}
       </Section>
     </div>
