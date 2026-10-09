@@ -1,6 +1,14 @@
-// ops-tables 的测试（#140 第一片）：全用内存假仓，不读盘上的 docs/ops.md 和 deploy/。
+// ops-tables 的测试（#140 第一片端口、第三片用户）：全用内存假仓，不读盘上的 docs/ops.md 和 deploy/。
 import { describe, expect, it } from 'vitest';
-import { BLOCK_NAME_PORTS, checkPortsBlock, extractBlock, renderPortsBlock } from '../src/ops-tables.ts';
+import {
+  BLOCK_NAME_PORTS,
+  checkPortsBlock,
+  checkUsersBlock,
+  extractBlock,
+  readUserEntries,
+  renderPortsBlock,
+  renderUsersBlock,
+} from '../src/ops-tables.ts';
 import type { RepoView } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
@@ -216,5 +224,219 @@ describe('checkPortsBlock', () => {
     expect(problems).toHaveLength(1);
     expect(problems[0]?.notQueried).toBe(false);
     expect(problems[0]?.text).toContain('开始标记');
+  });
+});
+
+// 用户表（#140 第三片）：四个脚本各一种写法。假仓里故意夹进不该读的行。
+const FRANCE_U = ['SESSION_USERS=("$SESSION_USER")', 'PILOT_USER=pilot', 'PILOT_HOME=/home/pilot'].join('\n');
+const HK_U = ['setup_identity() {', '  ensure_service_user fleet /home/fleet', '}'].join('\n');
+const HUMAN_U = [
+  'setup_identity() {',
+  '  ensure_service_user fleet /home/fleet',
+  '  for u in "$SESSION_USERS"; do',
+  '    ensure_service_user "$u" "/home/$u"',
+  '  done',
+  '}',
+].join('\n');
+const SESSION_U = [
+  '#!/usr/bin/env bash',
+  '# 注释里的 SESSION_USER=ghost 不算',
+  '  SESSION_USER=indented-not-read',
+  'SESSION_USER=fleet-agent-carpool',
+  'SESSION_USER_HOME_ROOT=/home',
+].join('\n');
+// human-tier.sh 里 zoo 写在 ant 前面：行号顺序和名字的字母顺序相反。
+const HUMAN_SORT = [
+  '  ensure_service_user zoo /home/zoo',
+  '    ensure_service_user "$u" "/home/$u"',
+  '  ensure_service_user ant /home/ant',
+].join('\n');
+
+function usersFiles(over: Record<string, string> = {}): Record<string, string> {
+  return {
+    'deploy/france.sh': FRANCE_U,
+    'deploy/hk.sh': HK_U,
+    'deploy/lib/human-tier.sh': HUMAN_U,
+    'deploy/lib/session-user.sh': SESSION_U,
+    ...over,
+  };
+}
+
+function usersRepoWithoutDoc(): RepoView {
+  return memRepo(usersFiles());
+}
+
+function usersRepo(): RepoView {
+  return memRepo(
+    usersFiles({
+      'docs/ops.md': ['# 运维', '', '做法写在 deploy/。', renderUsersBlock(usersRepoWithoutDoc()), ''].join(
+        '\n',
+      ),
+    }),
+  );
+}
+
+const USERS_BLOCK = [
+  '<!-- fleet:users:start -->',
+  '',
+  '| 用户 | 来源常量 | 来源脚本 |',
+  '|---|---|---|',
+  '| pilot | PILOT_USER | deploy/france.sh |',
+  '| fleet | ensure_service_user | deploy/hk.sh |',
+  '| fleet | ensure_service_user | deploy/lib/human-tier.sh |',
+  '| fleet-agent-carpool | SESSION_USER | deploy/lib/session-user.sh |',
+  '',
+  '<!-- fleet:users:end -->',
+].join('\n');
+
+const USERS_SORTED_BLOCK = [
+  '<!-- fleet:users:start -->',
+  '',
+  '| 用户 | 来源常量 | 来源脚本 |',
+  '|---|---|---|',
+  '| pilot | PILOT_USER | deploy/france.sh |',
+  '| fleet | ensure_service_user | deploy/hk.sh |',
+  '| zoo | ensure_service_user | deploy/lib/human-tier.sh |',
+  '| ant | ensure_service_user | deploy/lib/human-tier.sh |',
+  '| fleet-agent-carpool | SESSION_USER | deploy/lib/session-user.sh |',
+  '',
+  '<!-- fleet:users:end -->',
+].join('\n');
+
+describe('renderUsersBlock', () => {
+  it('两次调用逐字相同', () => {
+    const r = usersRepoWithoutDoc();
+    expect(renderUsersBlock(r)).toBe(renderUsersBlock(r));
+  });
+
+  it('按来源脚本再按行号排，输出一张三列表', () => {
+    const r = memRepo(usersFiles({ 'deploy/lib/human-tier.sh': HUMAN_SORT }));
+    expect(renderUsersBlock(r)).toBe(USERS_SORTED_BLOCK);
+    expect(renderUsersBlock(usersRepoWithoutDoc())).toBe(USERS_BLOCK);
+  });
+
+  it('ensure_service_user "$u" 这类变量名的调用不读进来', () => {
+    const users = readUserEntries(usersRepoWithoutDoc()).map((e) => e.user);
+    expect(users).not.toContain('u');
+    expect(users).not.toContain('$u');
+    expect(users).not.toContain('"$u"');
+    expect(users).toEqual(['pilot', 'fleet', 'fleet', 'fleet-agent-carpool']);
+  });
+
+  it('注释里的 SESSION_USER= 不读进来（不在行首）', () => {
+    const users = readUserEntries(usersRepoWithoutDoc()).map((e) => e.user);
+    expect(users).not.toContain('ghost');
+    expect(users).not.toContain('indented-not-read');
+  });
+
+  it('读不到脚本，抛带脚本名的错', () => {
+    const missing = memRepo({
+      'deploy/france.sh': FRANCE_U,
+      'deploy/hk.sh': HK_U,
+      'deploy/lib/human-tier.sh': HUMAN_U,
+    });
+    expect(() => readUserEntries(missing)).toThrow('读不到 deploy/lib/session-user.sh');
+  });
+
+  it('某个脚本一个用户都没读到，抛错', () => {
+    const r = memRepo(usersFiles({ 'deploy/lib/human-tier.sh': 'ensure_service_user "$u" "/home/$u"\n' }));
+    expect(() => readUserEntries(r)).toThrow('deploy/lib/human-tier.sh 里一个用户都没读到');
+  });
+});
+
+describe('checkUsersBlock', () => {
+  it('区块和生成的一致，返回空数组', () => {
+    expect(checkUsersBlock(usersRepo(), 'docs/ops.md')).toEqual([]);
+  });
+
+  it('SESSION_USER 的值改一下，问题里点出那一行；重新生成后返回空数组', () => {
+    const r = usersRepo();
+    const driftedScript = SESSION_U.replace('SESSION_USER=fleet-agent-carpool', 'SESSION_USER=renamed-user');
+    const drifted = memRepo(
+      usersFiles({
+        'deploy/lib/session-user.sh': driftedScript,
+        'docs/ops.md': r.read('docs/ops.md') ?? '',
+      }),
+    );
+    const problems = checkUsersBlock(drifted, 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.text).toContain('SESSION_USER');
+    expect(problems[0]?.text).toContain('renamed-user');
+    expect(problems[0]?.text).toContain('fleet-agent-carpool');
+    expect(problems[0]?.text).toContain('deploy/lib/session-user.sh');
+    expect(problems[0]?.notQueried).toBe(false);
+    const regenerated = memRepo(usersFiles({ 'deploy/lib/session-user.sh': driftedScript }));
+    const fixed = memRepo(
+      usersFiles({
+        'deploy/lib/session-user.sh': driftedScript,
+        'docs/ops.md': ['# 运维', '', '做法写在 deploy/。', renderUsersBlock(regenerated), ''].join('\n'),
+      }),
+    );
+    expect(checkUsersBlock(fixed, 'docs/ops.md')).toEqual([]);
+  });
+
+  it('读不到文档，返回「没查成」问题', () => {
+    const problems = checkUsersBlock(usersRepoWithoutDoc(), 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems[0]?.text).toContain('docs/ops.md');
+  });
+
+  it('读不到脚本，返回「没查成」问题', () => {
+    const r = memRepo({
+      'deploy/france.sh': FRANCE_U,
+      'deploy/hk.sh': HK_U,
+      'deploy/lib/human-tier.sh': HUMAN_U,
+      'docs/ops.md': 'x',
+    });
+    const problems = checkUsersBlock(r, 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems[0]?.text).toContain('deploy/lib/session-user.sh');
+  });
+
+  it('某个脚本一个用户都没有，返回「没查成」问题，不是空数组', () => {
+    const r = memRepo(
+      usersFiles({
+        'deploy/lib/human-tier.sh': 'echo hi\n',
+        'docs/ops.md': 'x',
+      }),
+    );
+    const problems = checkUsersBlock(r, 'docs/ops.md');
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems[0]?.text).toContain('deploy/lib/human-tier.sh');
+  });
+
+  it('同一来源里删掉前面的用户，只报少了的那一个，后面仍在的不算变了', () => {
+    const files = usersFiles({ 'deploy/lib/human-tier.sh': HUMAN_SORT });
+    const doc = renderUsersBlock(memRepo(files)).replace(
+      '| zoo | ensure_service_user | deploy/lib/human-tier.sh |\n',
+      '',
+    );
+    const problems = checkUsersBlock(memRepo({ ...files, 'docs/ops.md': doc }), 'docs/ops.md');
+    expect(problems).toEqual([
+      {
+        notQueried: false,
+        text: '用户 zoo 少了：来源常量 ensure_service_user（deploy/lib/human-tier.sh），脚本里是 zoo，文档区块里没有。',
+      },
+    ]);
+  });
+
+  // 故意造出失败：文档里的用户名被手改，核对必须报不一致，不能当成没查成或通过。
+  it('文档区块里手改一个用户名，返回非空且 notQueried 为 false', () => {
+    const r = usersRepo();
+    const edited = memRepo(
+      usersFiles({
+        'docs/ops.md': (r.read('docs/ops.md') ?? '').replace(
+          '| pilot | PILOT_USER |',
+          '| founder | PILOT_USER |',
+        ),
+      }),
+    );
+    const problems = checkUsersBlock(edited, 'docs/ops.md');
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.every((p) => p.notQueried === false)).toBe(true);
+    expect(problems.some((p) => p.text.includes('pilot') && p.text.includes('founder'))).toBe(true);
   });
 });
