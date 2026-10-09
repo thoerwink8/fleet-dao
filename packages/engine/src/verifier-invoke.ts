@@ -43,31 +43,42 @@ export type ModelFamily = (typeof FAMILY_ORDER)[number];
 export const ModelFamilySchema = z.enum(FAMILY_ORDER);
 
 /** 输入 zod：调用方现成算好的东西全在这里；diff / 要什么都不再自己翻。 */
-export const VerifierInvokeInputSchema = z.object({
-  /** 验哪张 PR（调用方必给；本模块不许替它从库里翻上一段的 PR# —— specs/509 第六节）。 */
-  prNumber: z.number().int().positive(),
-  /** PR 用的分支名；进 prompt 让模型能对得上号。 */
-  branch: z.string().min(1),
-  /** diff 的基线（base..？ = PR 引入的全部改动）。 */
-  baseSha: z.string().min(7),
-  /** 这张单在库里的 tasks.id：fetchSpec 照它找需求文档目录，这一次验收记进 runs 也挂在这张单上（#216）。 */
-  taskId: z.guid(),
-  /** 单号（GitHub issue #）：记进 runs 的这一笔要挂得上单（#216），没有就不起会话。 */
-  issueNumber: z.number().int().positive(),
-  /** 这张单的任务工作流编号（taskWorkflowId），一起记进 runs；不在任务工作流里验的不给。 */
-  workflowId: z.string().min(1).optional(),
-  /** 「要什么」原文（需求文档里的「## 场景 / 需求」段；冷调用模型要照它核）。 */
-  what: z.string().min(1),
-  /** 「怎么算做完」逐条原文。 */
-  howToFinish: z.array(z.string().min(1)).min(1),
-  /**
-   * 写过这张单的所有族（0006：全部要跳过再选）。至少一个：一个都没有就不知道该避开谁，没法保证换了家族。
-   * 一张单换过路由（先 Claude 写、后来换 GPT 写）时两族都在里面：只避开最后一个，验收的可能正是前一轮的作者。
-   */
-  modelFamiliesAvoid: z.array(ModelFamilySchema).min(1),
-  /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
-  round: z.union([z.literal(1), z.literal(2)]),
-});
+export const VerifierInvokeInputSchema = z
+  .object({
+    /** 验哪张 PR（调用方必给；本模块不许替它从库里翻上一段的 PR# —— specs/509 第六节）。 */
+    prNumber: z.number().int().positive(),
+    /** PR 用的分支名；进 prompt 让模型能对得上号。 */
+    branch: z.string().min(1),
+    /** diff 的基线（base..？ = PR 引入的全部改动）。 */
+    baseSha: z.string().min(7),
+    /** 这张单在库里的 tasks.id：fetchSpec 照它找需求文档目录，这一次验收记进 runs 也挂在这张单上（#216）。 */
+    taskId: z.guid(),
+    /** 单号（GitHub issue #）：记进 runs 的这一笔要挂得上单（#216），没有就不起会话。 */
+    issueNumber: z.number().int().positive(),
+    /** 这张单的任务工作流编号（taskWorkflowId），一起记进 runs；不在任务工作流里验的不给。 */
+    workflowId: z.string().min(1).optional(),
+    /** 「要什么」原文（需求文档里的「## 场景 / 需求」段；冷调用模型要照它核）。 */
+    what: z.string().min(1),
+    /** 「怎么算做完」逐条原文。 */
+    howToFinish: z.array(z.string().min(1)).min(1),
+    /**
+     * 写过这张单的、在 FAMILY_ORDER 里的族（0006：全部要跳过再选）。和下面的 otherAuthorFamilies 合起来至少一个：
+     * 一个都没有就不知道该避开谁，没法保证换了家族。
+     * 一张单换过路由（先 Claude 写、后来换 GPT 写）时两族都在里面：只避开最后一个，验收的可能正是前一轮的作者。
+     */
+    modelFamiliesAvoid: z.array(ModelFamilySchema),
+    /**
+     * 写过这张单、但不在 FAMILY_ORDER 里的族（目录里认得的 glm、gemini、muse）：它们不是验收候选，验收人从 FAMILY_ORDER 里挑，
+     * 必然和它们不同族，所以不进 modelFamiliesAvoid。只用来证明「作者是谁」是知道的：和 modelFamiliesAvoid 合起来至少一个。
+     */
+    otherAuthorFamilies: z.array(z.string().min(1)).optional(),
+    /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
+    round: z.union([z.literal(1), z.literal(2)]),
+  })
+  .refine((v) => v.modelFamiliesAvoid.length + (v.otherAuthorFamilies?.length ?? 0) > 0, {
+    message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
+    path: ['modelFamiliesAvoid'],
+  });
 export type VerifierInvokeInput = z.infer<typeof VerifierInvokeInputSchema>;
 
 /** 输出 zod：pass / fail + 问题清单。 */

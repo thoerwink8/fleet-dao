@@ -243,11 +243,11 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
-  it('作者族认不出（不在 0006 那五个里）→ 贴 failure，不硬跑', async () => {
+  it('作者族认不出（cursor 背后是哪家不知道，不能当不同族）→ 贴 failure，写明原因，不硬跑', async () => {
     const rec = recorder();
     let invoked = 0;
     const r = await runColdVerifyForPr(42, {
-      sources: sources({ authors: async () => ['gemini'] }),
+      sources: sources({ authors: async () => ['cursor'] }),
       invoke: async (input, deps) => {
         invoked += 1;
         return await invokeVerifier(input, deps);
@@ -259,6 +259,8 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     });
     expect(r.status.state).toBe('failure');
     expect(r.status.description).toContain('认不出');
+    expect(r.status.description).toContain('cursor');
+    expect(r.sourceProblem).toBe('作者族认不出：cursor');
     expect(invoked).toBe(0); // 压根没起调用
     expect(rec.posted.at(-1)?.state).toBe('failure');
   });
@@ -369,11 +371,11 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
     expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
-  it('【故意造出的失败】作者族里有一个认不出（claude + gemini）→ 贴 failure、不起调用：认不出的可能就是某个已知族的别名', async () => {
+  it('【故意造出的失败】作者族里有一个认不出（claude + cursor）→ 贴 failure、不起调用：认不出的可能就是某个已知族的别名', async () => {
     const rec = recorder();
     let invoked = 0;
     const r = await runColdVerifyForPr(42, {
-      sources: sources({ authors: async () => ['claude', 'gemini'] }),
+      sources: sources({ authors: async () => ['claude', 'cursor'] }),
       invoke: async (input, deps) => {
         invoked += 1;
         return await invokeVerifier(input, deps);
@@ -384,8 +386,119 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
       writeStatus: rec.writeStatus,
     });
     expect(r.status.state).toBe('failure');
-    expect(r.status.description).toContain('gemini');
+    expect(r.status.description).toContain('cursor');
     expect(invoked).toBe(0);
+  });
+
+  it('作者是 glm（目录里有、不是验收族）→ 起得了验收，验收人不是 glm，避让名单里没有 glm 也没崩', async () => {
+    const rec = recorder();
+    const seen: VerifierInvokeInput[] = [];
+    const asked: string[] = [];
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => ['glm'] }),
+      invoke: async (input, deps) => {
+        seen.push(input);
+        return await invokeVerifier(input, deps);
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: async (family) => {
+        asked.push(family);
+        return family === 'gpt' ? { modelId: 'gpt-x' } : undefined;
+      },
+      cwd: 'C:/work/x',
+      writeStatus: rec.writeStatus,
+    });
+    expect(r.status.state).toBe('success');
+    expect(r.sourceProblem).toBeUndefined();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
+    expect(seen[0]?.otherAuthorFamilies).toEqual(['glm']);
+    expect(asked).not.toContain('glm');
+    expect(asked[0]).toBe('gpt'); // 验收人从 0006 的顺序里挑，第一个就是 gpt
+  });
+
+  it('gemini、muse 作者同样认得（目录里的族）', async () => {
+    for (const author of ['gemini', ' Muse ']) {
+      const r = await runColdVerifyForPr(42, {
+        sources: sources({ authors: async () => [author] }),
+        invoke: invokeVerifier,
+        oneShot: ONE_SHOT,
+        chooseModelForFamily: PICK_CLAUDE,
+        cwd: 'C:/work/x',
+      });
+      expect(r.status.state).toBe('success');
+      expect(r.sourceProblem).toBeUndefined();
+    }
+  });
+
+  it('glm + gpt 混合作者 → 避让 gpt（glm 不进避让），验收人不是 gpt', async () => {
+    const seen: VerifierInvokeInput[] = [];
+    const asked: string[] = [];
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => ['glm', 'gpt', 'glm'] }),
+      invoke: async (input, deps) => {
+        seen.push(input);
+        return await invokeVerifier(input, deps);
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: async (family) => {
+        asked.push(family);
+        return family === 'grok' ? { modelId: 'grok-x' } : undefined;
+      },
+      cwd: 'C:/work/x',
+    });
+    expect(r.status.state).toBe('success');
+    expect(seen[0]?.modelFamiliesAvoid).toEqual(['gpt']);
+    expect(seen[0]?.otherAuthorFamilies).toEqual(['glm']);
+    expect(asked).toEqual(['grok']); // gpt 被跳过，直接问 grok
+  });
+
+  it('glm + cursor 混合 → 仍停（cursor 认不出），不起调用', async () => {
+    let invoked = 0;
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => ['glm', 'cursor'] }),
+      invoke: async (input, deps) => {
+        invoked += 1;
+        return await invokeVerifier(input, deps);
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+    });
+    expect(r.status.state).toBe('failure');
+    expect(r.sourceProblem).toBe('作者族认不出：cursor');
+    expect(invoked).toBe(0);
+  });
+
+  it('unclassified、jev、拼写不认识的串仍然认不出 → 停', async () => {
+    for (const author of ['unclassified', 'jev', 'gpt5']) {
+      let invoked = 0;
+      const r = await runColdVerifyForPr(42, {
+        sources: sources({ authors: async () => [author] }),
+        invoke: async (input, deps) => {
+          invoked += 1;
+          return await invokeVerifier(input, deps);
+        },
+        oneShot: ONE_SHOT,
+        chooseModelForFamily: PICK_CLAUDE,
+        cwd: 'C:/work/x',
+      });
+      expect(r.status.state).toBe('failure');
+      expect(r.sourceProblem).toBe(`作者族认不出：${author}`);
+      expect(invoked).toBe(0);
+    }
+  });
+
+  it('【故意造出的失败】glm 作者不得返回 sourceProblem（把 glm 当成「认不出」时这条必须红）', async () => {
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => ['glm'] }),
+      invoke: invokeVerifier,
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+    });
+    expect(r.sourceProblem).toBeUndefined();
+    expect(r.status.description).not.toContain('认不出');
   });
 
   it('【故意造出的失败】开跑前那条 pending 贴不上 → 抛出去，一次模型调用都没起（别花一次调用再发现结论贴不上）', async () => {
