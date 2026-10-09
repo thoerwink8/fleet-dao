@@ -156,10 +156,13 @@ export function LoadError({
   error,
   what,
   onRetry,
+  text,
 }: {
   error: unknown;
   what?: string | undefined;
   onRetry?: (() => void) | undefined;
+  /** 整句说明。给了就不再拼「哪一块没读成」（两条失败合成一条横幅时用）。 */
+  text?: string | undefined;
 }) {
   const qc = useQueryClient();
   const retry = onRetry ?? (() => void qc.refetchQueries({ predicate: (q) => q.state.status === 'error' }));
@@ -168,9 +171,7 @@ export function LoadError({
       role="alert"
       className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-ink-fail"
     >
-      <span>
-        {what ? `${what}没读成` : '没查成'}：{errMessage(error)}
-      </span>
+      <span>{text ?? `${what ? `${what}没读成` : '没查成'}：${errMessage(error)}`}</span>
       <Button type="button" size="xs" variant="outline" onClick={retry}>
         重试
       </Button>
