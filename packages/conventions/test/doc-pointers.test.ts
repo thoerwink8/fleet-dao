@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkDocPointers, DOCS, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
+import { checkDocPointers, DOCS, docFiles, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
@@ -364,5 +364,50 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
 
   it('都指得到', () => {
     expect(report.problems.map(formatProblem)).toEqual([]);
+  });
+});
+
+describe('文档指针：docs/design/ 下的模块文件也在要查的名单里', () => {
+  it('没有 docs/design/ 目录时，docFiles 返回正好三份', () => {
+    expect(docFiles(memRepo(BASE))).toEqual([...DOCS]);
+  });
+
+  it('有 jev.md 和 web.md 时返回五份且顺序固定，非 .md 不算', () => {
+    const repo = memRepo({
+      ...BASE,
+      'docs/design/web.md': '# web\n',
+      'docs/design/notes.txt': '不是 markdown\n',
+      'docs/design/jev.md': '# jev\n',
+    });
+    expect(docFiles(repo)).toEqual([...DOCS, 'docs/design/jev.md', 'docs/design/web.md']);
+  });
+
+  it('显式传入 files 时只查传入的，不顺带查 docs/design/', () => {
+    const repo = memRepo({
+      ...BASE,
+      'docs/design/jev.md': '见 `packages/nope/missing.ts`。\n',
+    });
+    const report = checkDocPointers(repo, ['README.md']);
+    expect(report.files).toEqual(['README.md']);
+    expect(report.problems).toEqual([]);
+  });
+});
+
+describe('文档指针：docs/design/ 里指不到的，报这份文件的行', () => {
+  it('jev.md 里的反引号路径不在仓里', () => {
+    const repo = memRepo({
+      ...BASE,
+      'docs/design/jev.md': ['# jev', '', '见 `packages/nope/missing.ts`。'].join('\n'),
+    });
+    const report = checkDocPointers(repo);
+    const problem = report.problems.find((p) => p.file === 'docs/design/jev.md');
+    expect(problem).toEqual({
+      file: 'docs/design/jev.md',
+      line: 3,
+      message: 'packages/nope/missing.ts 在仓里没有',
+    });
+    expect(
+      formatProblem(problem ?? { file: '', line: 0, message: '' }).startsWith('docs/design/jev.md:3'),
+    ).toBe(true);
   });
 });
