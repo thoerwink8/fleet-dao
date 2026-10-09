@@ -1,0 +1,62 @@
+// @vitest-environment happy-dom
+// 数据页共用的刷新条：刷新中、刚更新、过期；从没读成过（dataUpdatedAt 为 0）放最后。
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
+import { RefreshBar } from './refresh-bar';
+
+afterEach(cleanup);
+
+const MIN = 60_000;
+
+test('刷新中：按钮禁用并转圈，点了也不再读', () => {
+  const onRefresh = vi.fn();
+  render(
+    <RefreshBar
+      onRefresh={onRefresh}
+      isFetching
+      dataUpdatedAt={Date.now() - 2 * MIN}
+      staleAfterMs={10 * MIN}
+    />,
+  );
+  const button = screen.getByRole('button', { name: '刷新' });
+  expect(button.hasAttribute('disabled')).toBe(true);
+  expect(button.querySelector('.animate-spin')).toBeTruthy();
+  fireEvent.click(button);
+  expect(onRefresh).not.toHaveBeenCalled();
+});
+
+test('刚更新：显示最后更新刚刚，没有过期标记，点击调用 onRefresh', () => {
+  const onRefresh = vi.fn();
+  render(
+    <RefreshBar
+      onRefresh={onRefresh}
+      isFetching={false}
+      dataUpdatedAt={Date.now()}
+      staleAfterMs={10 * MIN}
+    />,
+  );
+  expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
+  expect(screen.queryByText('数据已过期')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+  expect(onRefresh).toHaveBeenCalledTimes(1);
+});
+
+test('过期：显示最后更新多少分钟前，并出现数据已过期', () => {
+  render(
+    <RefreshBar
+      onRefresh={() => {}}
+      isFetching={false}
+      dataUpdatedAt={Date.now() - 10 * MIN}
+      staleAfterMs={5 * MIN}
+    />,
+  );
+  expect(screen.getByText(/最后更新/).textContent).toContain('10 分钟前');
+  expect(screen.getByText('数据已过期')).toBeTruthy();
+});
+
+test('【故意造出的坏输入】dataUpdatedAt 为 0：显示还没读到过，不显示刚刚', () => {
+  render(<RefreshBar onRefresh={() => {}} isFetching={false} dataUpdatedAt={0} staleAfterMs={5 * MIN} />);
+  expect(screen.getByText('还没读到过')).toBeTruthy();
+  expect(screen.queryByText('刚刚')).toBeNull();
+  expect(screen.queryByText('数据已过期')).toBeNull();
+});
