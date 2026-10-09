@@ -98,7 +98,7 @@ describe('hasVisibleSignal · 只判结构', () => {
     ['路径', ['packages/engine/src 下新增文件']],
     ['文件名', ['intake.ts 里有这一道']],
     ['引号里的界面文字', ['页面上能看到「验收中」']],
-    ['数字', ['每小时最多起 12 条']],
+    ['数字', ['每小时最多起 20 条']],
   ])('有信号：%s', (_name, lines) => {
     expect(hasVisibleSignal(lines)).toBe(true);
   });
@@ -176,24 +176,29 @@ describe('decideBreaker · 失败过半停拉，冷却后一条试探', () => {
 
 describe('hourlyRemaining', () => {
   it(`每小时最多 ${MAX_STARTS_PER_HOUR} 条`, () => {
-    expect(MAX_STARTS_PER_HOUR).toBe(12);
-    expect(hourlyRemaining(0)).toBe(12);
-    expect(hourlyRemaining(2)).toBe(10);
-    expect(hourlyRemaining(11)).toBe(1);
-    expect(hourlyRemaining(12)).toBe(0);
-    expect(hourlyRemaining(13)).toBe(0);
+    expect(MAX_STARTS_PER_HOUR).toBe(20);
+    expect(hourlyRemaining(0)).toBe(20);
+    expect(hourlyRemaining(2)).toBe(18);
+    expect(hourlyRemaining(19)).toBe(1);
+    expect(hourlyRemaining(20)).toBe(0);
+    expect(hourlyRemaining(21)).toBe(0);
     expect(hourlyRemaining(1, 5)).toBe(4);
   });
 
-  it('【故意造出的失败】旧上限 6 不再生效：已起 6 条仍剩 6，已起 11 条剩 1、已起 12 条剩 0', () => {
-    expect(hourlyRemaining(6)).toBe(6);
-    expect(hourlyRemaining(6)).not.toBe(0);
-    expect(hourlyRemaining(11)).toBe(1);
-    expect(hourlyRemaining(12)).toBe(0);
+  it('【故意造出的失败】旧上限 12 不再生效：已起 12 条仍剩 8，已起 19 条剩 1、已起 20 条剩 0', () => {
+    expect(hourlyRemaining(12)).toBe(8);
+    expect(hourlyRemaining(12)).not.toBe(0);
+    expect(hourlyRemaining(19)).toBe(1);
+    expect(hourlyRemaining(20)).toBe(0);
   });
 
-  it('【故意造出的失败】更早的旧上限 3 也不再生效：已起 3 条仍剩 9', () => {
-    expect(hourlyRemaining(3)).toBe(9);
+  it('【故意造出的失败】更早的旧上限 6 也不再生效：已起 6 条仍剩 14', () => {
+    expect(hourlyRemaining(6)).toBe(14);
+    expect(hourlyRemaining(6)).not.toBe(0);
+  });
+
+  it('【故意造出的失败】更早的旧上限 3 也不再生效：已起 3 条仍剩 17', () => {
+    expect(hourlyRemaining(3)).toBe(17);
     expect(hourlyRemaining(3)).not.toBe(0);
   });
 });
