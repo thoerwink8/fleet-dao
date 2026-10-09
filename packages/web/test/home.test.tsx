@@ -260,6 +260,31 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
   });
 
+  test('此刻表头不换行：分钟等表头单行，分钟列够宽', async () => {
+    localStorage.clear();
+    const since = new Date(Date.now() - 40 * 60_000).toISOString();
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: SAMPLE.running.map((item) => (item.worker ? { ...item, stageSince: since } : item)),
+      },
+    });
+    const toggle = await screen.findByRole('button', { name: /个会话在干活/ });
+    if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
+    const table = document.querySelector('[data-board-now] table');
+    expect(table).toBeTruthy();
+    const heads = Array.from(table?.querySelectorAll('th') ?? []);
+    expect(heads.map((th) => th.textContent)).toEqual(['谁在做', '单', '在做什么', '分钟']);
+    for (const th of heads) expect(th.className).toContain('whitespace-nowrap');
+    const minuteHead = heads.find((th) => th.textContent === '分钟');
+    expect(minuteHead?.className).toContain('w-28');
+    const minuteCell = table?.querySelector('tbody td:last-child');
+    expect(minuteCell?.textContent).toBe('40 分钟');
+    expect(minuteCell?.className).toContain('whitespace-nowrap');
+    localStorage.clear();
+  });
+
   test('对题没有样本（#761：在对话里做的，runs 里本来就没有）写「不计」；动手、验收没有样本照旧写「还没有跑完的样本」', async () => {
     renderHome({
       status: 'data',
