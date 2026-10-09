@@ -40,10 +40,11 @@ import { useMasterView } from '../components/engine-master';
 import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
-import { formatAgo } from '../lib/format';
+import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { outcomeText } from '../lib/schedule';
@@ -332,6 +333,41 @@ function MissingSnapshot({ nodeId }: { nodeId: string }) {
   );
 }
 
+/**
+ * 这一页几块自己重拉（本台、发版卡 1 分钟，其余 30 秒）。
+ * 超过 5 分钟最旧的一块还没再读成，刷新条才标「数据已过期」（正常间隔里不标）。
+ */
+const FRANCE_STALE_AFTER_MS = 5 * TIME.MIN;
+
+type ReadBlock = {
+  refetch: () => unknown;
+  isFetching: boolean;
+  dataUpdatedAt: number;
+};
+
+/**
+ * 多块合成标题栏那一条：点刷新每块都重读；「最后更新」取已经读成过的里面最旧的一块。
+ * dataUpdatedAt 为 0 是「这块从没读成」，不是时刻，不拿来比——一块失败不能把整条写成「还没读到过」。
+ * 各块自己的「重试」不在这里。发版预检是人点的命令，不跟着重放。
+ */
+function pageRead(blocks: readonly ReadBlock[]) {
+  let oldest = 0;
+  let fetching = false;
+  for (const block of blocks) {
+    if (block.isFetching) fetching = true;
+    if (block.dataUpdatedAt > 0 && (oldest === 0 || block.dataUpdatedAt < oldest)) {
+      oldest = block.dataUpdatedAt;
+    }
+  }
+  return {
+    refetch: () => {
+      for (const block of blocks) void block.refetch();
+    },
+    isFetching: fetching,
+    dataUpdatedAt: oldest,
+  };
+}
+
 /** 总开关关着、引擎进程仍在跑时，贴在开关和「在跑」那一格旁边。 */
 function StandbyNote() {
   return (
@@ -451,10 +487,20 @@ export default function France() {
     <ReleaseEntry card={card.data} now={now} />
   );
 
+  const read = pageRead([env, nodes, jobs, release, card, ...snapshots]);
+
   return (
     <Page
       title="法国"
       description="本台的六项事实、引擎总开关、定时任务、发版。读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
+      actions={
+        <RefreshBar
+          onRefresh={() => void read.refetch()}
+          isFetching={read.isFetching}
+          dataUpdatedAt={read.dataUpdatedAt}
+          staleAfterMs={FRANCE_STALE_AFTER_MS}
+        />
+      }
     >
       <EngineMasterControl standbyNote={standby ? <StandbyNote /> : null} />
       {nodes.error ? (
