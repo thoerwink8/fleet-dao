@@ -26,8 +26,9 @@ import {
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
+import { GROOM_VERIFY_STOP_CATEGORIES } from '../workflows/task-support.ts';
 import { executeGroomPlan, type GroomWrites, parseGroomPlan } from './groom-plan.ts';
-import { renderGroomPrompt } from './groom-prompt.ts';
+import { type GroomStoppedTask, renderGroomPrompt, STOPPED_TASKS_UNREAD } from './groom-prompt.ts';
 import type { IntakeIssue, IntakeMilestone, IntakeRepo } from './intake.ts';
 
 /** 会话最长几分钟（读单、读检出、写清单）。 */
@@ -41,8 +42,64 @@ export interface GroomFacts {
   openMilestones: IntakeMilestone[];
   closed: ClosedIssueRow[];
   pulls: { number: number; title: string; body: string }[];
+  /**
+   * 停下等人、且类别是整理能补的那两类。
+   * null = 任务表没读成：这一轮记没查成，不是「没有停下的」。空数组 = 读到了，没有这类。
+   */
+  stoppedTasks: GroomStoppedTask[] | null;
   /** 主线头（完整提交号）：只读检出钉在它上面。 */
   mainHead: string;
+}
+
+/** 任务行加上还开着的提醒正文（新的在前）。读任务表的那一下抛错，不在这里吞。 */
+export interface ParkedTaskRow {
+  issue: number;
+  state: string;
+  doing: string | null;
+  alertBodies: readonly string[];
+}
+
+const GROOMABLE_STOPS = new Set<string>(GROOM_VERIFY_STOP_CATEGORIES);
+
+function splitStopAlert(body: string): { category: string; reason: string } {
+  const text = body.replace(/\r\n?/g, '\n').trim();
+  const nl = text.indexOf('\n');
+  if (nl === -1) return { category: text, reason: '' };
+  return { category: text.slice(0, nl).trim(), reason: text.slice(nl + 1).trim() };
+}
+
+/**
+ * 只留「停下等人」（stalled，doing 以「停下等人」开头）且当前提醒第一行是那两类的。
+ * 提醒正文新的在前；第一条非空的是现在这次停下的原因，更早的不算。第一行对不上类别的不重判。
+ */
+export function selectStoppedTasks(rows: readonly ParkedTaskRow[]): GroomStoppedTask[] {
+  const out: GroomStoppedTask[] = [];
+  for (const row of rows) {
+    if (row.state !== 'stalled') continue;
+    if (!(row.doing ?? '').startsWith('停下等人')) continue;
+    const body = row.alertBodies.find((item) => item.trim().length > 0);
+    if (body === undefined) continue;
+    const parsed = splitStopAlert(body);
+    if (!GROOMABLE_STOPS.has(parsed.category)) continue;
+    out.push({ issue: row.issue, category: parsed.category, reason: parsed.reason });
+  }
+  out.sort((a, b) => a.issue - b.issue);
+  return out;
+}
+
+/**
+ * 读任务表。抛了回 null：不是空数组。空数组只表示读到了、没有要放进整理的停下任务。
+ */
+export async function readStoppedTasks(
+  read: () => Promise<readonly ParkedTaskRow[]>,
+  onError?: (error: unknown) => void,
+): Promise<GroomStoppedTask[] | null> {
+  try {
+    return selectStoppedTasks(await read());
+  } catch (error) {
+    onError?.(error);
+    return null;
+  }
 }
 
 export interface GroomSessionInput {
@@ -134,7 +191,10 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
     mergedPulls = null;
     deps.log('warn', '整理待办：没读到分片关系', { repo: req.repo, error: errMessage(err) });
   }
-  const noteUnread = (text: string) => (mergedPulls === null ? `${text}\n没读到分片关系` : text);
+  const unread: string[] = [];
+  if (mergedPulls === null) unread.push('没读到分片关系');
+  if (facts.stoppedTasks === null) unread.push(STOPPED_TASKS_UNREAD);
+  const noteUnread = (text: string) => (unread.length === 0 ? text : `${text}\n${unread.join('\n')}`);
   // 会话只看得到、也只能点到作者在白名单里的单（陌生人的正文不进提示词）
   const trusted = new Map(
     facts.issues.filter((i) => isTrusted(i.author, whitelist)).map((i) => [i.number, i]),
@@ -157,6 +217,7 @@ export async function groomRepo(deps: GroomRunDeps, req: GroomRequestView): Prom
       refs: issueColumnRefs(p.body).refs,
     })),
     mergedPulls,
+    stoppedTasks: facts.stoppedTasks,
     mainHead: facts.mainHead,
     now,
   });
