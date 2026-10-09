@@ -1,5 +1,6 @@
 // 派单前探测（#1409）：选路选出要派的那一条之后、起会话之前，上一次探通超过 5 分钟就用定时探针同一份 conclude 再探一次，
 // 结论写回 routes 同一处。按量计费和 planProbe 写明不探的照旧不探、不改写。探不通写成 failed（不在线），探通后由原来的恢复路径拉起来。
+// 探通但结论写不进 routes：不能当通过去起会话（库里没有这一次的结论，5 分钟内不重复探也保不住），按不通换下一条。
 
 import { errMessage } from '@fleet-dao/shared/util';
 import type { LiveOrgReading } from '../routing/types.ts';
@@ -112,10 +113,12 @@ async function probeLocked(
 
   const written = await writeConclusion(deps, target.routeId, concluded);
   if (written.kind === 'route_not_found') return fail(input.label, '探的时候这条路由被删了', false);
-  const detail =
-    written.kind === 'write_failed' ? unwritten(concluded.detail, written.error) : concluded.detail;
-  if (concluded.state === 'ok') return pass(input.label, detail, true);
-  return fail(input.label, detail, true);
+  // 结论没落进 routes 就不能当探通：5 分钟内不重复探靠的是库里这一条。写不进去按不通换下一条，不起会话。
+  if (written.kind === 'write_failed') {
+    return fail(input.label, unwritten(concluded.detail, written.error), true);
+  }
+  if (concluded.state === 'ok') return pass(input.label, concluded.detail, true);
+  return fail(input.label, concluded.detail, true);
 }
 
 /** 当场探这一条。和定时探针、立即探测共用同一把锁，避免同一条路由同时起两个会话。targets 读不到原样抛。 */

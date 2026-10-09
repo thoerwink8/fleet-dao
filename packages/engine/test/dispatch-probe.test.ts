@@ -199,6 +199,27 @@ describe('派前探测', () => {
     expect(got).toMatchObject({ kind: 'pass', probed: false, label: 'glm-5.3-flash' });
   });
 
+  it('探针探通但结论写不进 routes：按不通，不起会话', async () => {
+    const t = target();
+    const h = harness([t], {
+      save: async () => {
+        throw new Error('库写不进去');
+      },
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), {
+      routeId: t.routeId,
+      label: t.modelId,
+    });
+    expect(got.kind).toBe('fail');
+    expect(got.kind).not.toBe('pass');
+    if (got.kind !== 'fail') return;
+    expect(got.counted).toBe(true);
+    expect(got.detail).toContain('没写进库');
+    expect(got.detail).toContain('库写不进去');
+    expect(h.probes()).toBe(1);
+    expect(h.saved).toEqual([]);
+  });
+
   it('【故意造出的失败】探测本身抛错：按不通处理，不写成通', async () => {
     const t = target({ previous: null });
     let probes = 0;

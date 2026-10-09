@@ -289,8 +289,8 @@ export interface ProbeAssignedInput {
 }
 
 /**
- * pass：可以派。probed 为假是没真探（5 分钟内刚探通、或规矩写明不探）。
- * fail：这一条本轮不能派。counted 为真才占「每轮最多当场探 3 条」的名额（组织认不出、路由被删了不占）。
+ * pass：可以派。结论已经在 routes 上（这一次写上了，或 5 分钟内刚探通、或规矩写明不探）。probed 为假是没真探。
+ * fail：这一条本轮不能派。探通但结论写不进 routes 也算不通，不起会话。counted 为真才占「每轮最多当场探 3 条」的名额（组织认不出、路由被删了不占）。
  */
 export type ProbeAssignedResult =
   | { kind: 'pass'; label: string; detail: string; probed: boolean }
