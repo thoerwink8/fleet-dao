@@ -384,7 +384,9 @@ describe('拒收、进群、用量（#795）', () => {
     const intents = createMemoryIntentStore();
     const h = harness({ intents });
     const sep = T0.toISOString();
-    const over = await call(h, '/api/feishu/gateway/usage', { body: { calls: 8100, at: sep } });
+    const over = await call(h, '/api/feishu/gateway/usage', {
+      body: { reportId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', calls: 8100, at: sep },
+    });
     expect(over.status).toBe(200);
     expect(await over.json()).toEqual({
       month: '2026-09',
@@ -393,7 +395,9 @@ describe('拒收、进群、用量（#795）', () => {
       readable: true,
     });
     const octAt = '2026-09-30T16:00:00.000Z';
-    const oct = await call(h, '/api/feishu/gateway/usage', { body: { calls: 5, at: octAt } });
+    const oct = await call(h, '/api/feishu/gateway/usage', {
+      body: { reportId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2', calls: 5, at: octAt },
+    });
     expect(await oct.json()).toEqual({ month: '2026-10', calls: 5, limit: 10_000, readable: true });
 
     const cards = (await (await call(h, '/api/feishu/intent-cards?waitSeconds=0')).json()) as {
@@ -419,11 +423,32 @@ describe('拒收、进群、用量（#795）', () => {
 
   it('不到八成不报警', async () => {
     const h = harness();
-    const res = await call(h, '/api/feishu/gateway/usage', { body: { calls: 100, at: T0.toISOString() } });
+    const res = await call(h, '/api/feishu/gateway/usage', {
+      body: { reportId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3', calls: 100, at: T0.toISOString() },
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ month: '2026-09', calls: 100, readable: true });
     const notes = await openAlerts(h);
     expect(notes.items.some((n) => n.title === FEISHU_USAGE_ALERT_TITLE)).toBe(false);
+  });
+
+  it('同一份用量上报再来一次不加第二次（回应丢了重报）', async () => {
+    const intents = createMemoryIntentStore();
+    const h = harness({ intents });
+    const body = {
+      reportId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      calls: 8100,
+      at: T0.toISOString(),
+    };
+    const first = await call(h, '/api/feishu/gateway/usage', { body });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ month: '2026-09', calls: 8100, readable: true });
+    const again = await call(h, '/api/feishu/gateway/usage', { body: { ...body, calls: 8100 } });
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ month: '2026-09', calls: 8100, readable: true });
+    expect(intents.data.usage).toEqual([{ month: '2026-09', calls: 8100 }]);
+    const notes = await openAlerts(h);
+    expect(notes.items.filter((n) => n.title === FEISHU_USAGE_ALERT_TITLE)).toHaveLength(1);
   });
 
   it('【故意造出的失败】用量读不出来：意图卡照回，readable=false，不按八成报警', async () => {

@@ -55,7 +55,12 @@ const EVERY_CALL: Record<keyof typeof IntentRoutes, (b: Backend) => Promise<unkn
       at: new Date().toISOString(),
       reason: FEISHU_JOIN_REASON,
     }),
-  usage: (b) => b.reportUsage({ calls: 0, at: new Date().toISOString() }),
+  usage: (b) =>
+    b.reportUsage({
+      reportId: '11111111-1111-4111-8111-111111111111',
+      calls: 0,
+      at: new Date().toISOString(),
+    }),
 };
 
 let fake: FakeBackend;

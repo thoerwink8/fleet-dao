@@ -153,8 +153,8 @@ export interface IntentStore {
   recordRejection(input: { chatId: string; openIdTail: string; at: string; reason: string }): Promise<void>;
   /** 一次进群事件里每个白名单外的人一行。返回写下的行数。 */
   recordJoins(input: { chatId: string; openIdTails: string[]; at: string; reason: string }): Promise<number>;
-  /** 把这次报上来的次数加进 at 所在的北京月。时刻认不出就抛，不当成 0。 */
-  addUsage(calls: number, at: string): Promise<FeishuUsageMonth>;
+  /** 把这一批次数加进 at 所在的北京月。同一个 reportId 再来不加第二次。时刻认不出就抛，不当成 0。 */
+  addUsage(reportId: string, calls: number, at: string): Promise<FeishuUsageMonth>;
   /** 读 at 所在北京月的累计。没有这一行是 0（读到了）。时刻认不出就抛。 */
   usageAt(at: string): Promise<FeishuUsageMonth>;
   /** 带 chatId 只看这一个（没见过就是空列表，由接口回 known=false）；不带回全部见过的会话。 */
@@ -217,6 +217,8 @@ export function createMemoryIntentStore(options: { now?: () => Date } = {}): Mem
     usage: [],
     nextSeq: 1,
   };
+  /** reportId → 记进了哪个月。同一份再来直接回那个月的累计，不加第二次。 */
+  const usageReports = new Map<string, string>();
   const monthOf = (at: string) => beijingMonth(Date.parse(at));
   const audits: NewAuditEntry[] = [];
 
@@ -486,12 +488,17 @@ export function createMemoryIntentStore(options: { now?: () => Date } = {}): Mem
       return input.openIdTails.length;
     },
 
-    async addUsage(calls, at) {
+    async addUsage(reportId, calls, at) {
       const month = monthOf(at);
+      const known = usageReports.get(reportId);
+      if (known !== undefined) {
+        return { month: known, calls: data.usage.find((u) => u.month === known)?.calls ?? 0 };
+      }
+      usageReports.set(reportId, month);
       const row = data.usage.find((u) => u.month === month);
       if (row) row.calls += calls;
       else data.usage.push({ month, calls });
-      return { month, calls: row?.calls ?? calls };
+      return { month, calls: data.usage.find((u) => u.month === month)?.calls ?? calls };
     },
 
     async usageAt(at) {

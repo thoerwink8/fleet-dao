@@ -3,6 +3,7 @@
 // 每条「读不到 / 认不出 / 存不进」的路径都配【故意造出的失败】测试。
 import { afterEach, describe, expect, it } from 'vitest';
 import { NOT_STORED_EMOJI, TARGET_ACK_MS } from '../src/gateway.ts';
+import { FeishuError } from '../src/port.ts';
 import {
   A,
   asAction,
@@ -891,5 +892,46 @@ describe('飞书用量：八成降级、读不到只停表情', () => {
     expect(h.feishu.of('history').length).toBeGreaterThan(before);
     expect(h.gateway.stats.backfill_narrowed ?? 0).toBe(0);
     expect(h.feishu.of('react').filter((c) => c.emoji === 'Get')).toHaveLength(0);
+  });
+
+  it('已发出但超时或失败的飞书调用也计入用量，不因为没成功就漏报', async () => {
+    h = await harness();
+    h.feishu.fail('react', new FeishuError('timeout', '加表情回应：飞书没及时回应'));
+    h.feishu.fail('reply', new FeishuError('timeout', '回复消息：飞书没及时回应'));
+    h.backend.on('POST', '/feishu/intake/messages', STORED);
+    h.backend.on('POST', '/feishu/gateway/usage', { body: OVER });
+    await say('给登录页加验证码');
+    await h.gateway.reportUsage();
+    const reported = h.backend.calls('POST', '/feishu/gateway/usage');
+    expect(reported).toHaveLength(1);
+    // 表情超时之后改回「收到」也超时：两次都已经打出去。
+    expect(reported[0]?.body).toMatchObject({ calls: 2 });
+  });
+
+  it('用量上报的回应丢了：同一份 reportId 和次数重报，期间新打的另算一批', async () => {
+    h = await harness();
+    h.backend.on('POST', '/feishu/intake/messages', STORED);
+    h.backend.on('POST', '/feishu/gateway/usage', apiError(500, 'usage_down', '回应丢了'));
+    await say('第一句');
+    await h.gateway.reportUsage();
+    const first = h.backend.calls('POST', '/feishu/gateway/usage')[0]?.body as {
+      reportId?: string;
+      calls?: number;
+    };
+    expect(first.reportId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(first.calls).toBe(1);
+
+    // 这一轮按读不到处理，停了「收到」。旧按钮的回复照样打出去，不并进还没确认的那一批。
+    await click('om_old', { a: 'ask.answer', k: 'ask-1', o: '批准', _n: 'n1' });
+    h.backend.on('POST', '/feishu/gateway/usage', { body: OVER });
+    await h.gateway.reportUsage();
+    const reported = h.backend.calls('POST', '/feishu/gateway/usage');
+    const second = reported[1]?.body as { reportId?: string; calls?: number };
+    expect(second).toEqual({ reportId: first.reportId, calls: 1, at: expect.any(String) });
+    const third = reported[2]?.body as { reportId?: string; calls?: number };
+    expect(third?.reportId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(third?.reportId).not.toBe(first.reportId);
+    expect(third?.calls).toBe(1);
+    expect(reported).toHaveLength(3);
   });
 });

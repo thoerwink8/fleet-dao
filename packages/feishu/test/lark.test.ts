@@ -8,6 +8,7 @@ import { createBackend } from '../src/backend.ts';
 import { createGateway, type Gateway } from '../src/gateway.ts';
 import { createLark, type Lark, sdkDetail } from '../src/lark.ts';
 import { FeishuError } from '../src/port.ts';
+import { measureFeishuCall } from '../src/usage-meter.ts';
 import { A, B, BOT, cardEvent, menuEvent, messageEvent, recallEvent, STRANGER, TEAM } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
 import { type LogLine, memoryLogger, TOKEN, until } from './harness.ts';
@@ -300,6 +301,30 @@ describe('飞书 SDK 这一层', () => {
     expect(err).toBeInstanceOf(FeishuError);
     expect((err as FeishuError).kind).toBe('unavailable');
     expect(flaky).toBe(3);
+  });
+
+  it('发出去的调用失败、超时、重试都计入次数，不只算最后成功的那次', async () => {
+    let flaky = 0;
+    const s = await start(
+      {
+        'POST /open-apis/im/v1/chats/oc_team/top_notice/put_top_notice': () => {
+          flaky += 1;
+          throw new Error('socket hang up');
+        },
+        'POST /open-apis/im/v1/messages/om_slow/reactions': hang,
+        'POST /open-apis/im/v1/messages': () => ({ code: 0, data: { message_id: 'om_ok', chat_id: TEAM } }),
+      },
+      memoryLogger([]),
+      { reactMs: 60, callMs: 120 },
+    );
+    const attempts: number[] = [];
+    const track = <T>(fn: () => Promise<T>) => measureFeishuCall(fn, (n) => attempts.push(n));
+    await expect(track(() => s.lark.port.pin(TEAM, 'om_x'))).rejects.toMatchObject({ kind: 'unavailable' });
+    await expect(track(() => s.lark.port.react('om_slow', 'Get'))).rejects.toMatchObject({ kind: 'timeout' });
+    await track(() => s.lark.port.send({ chatId: TEAM }, { text: 'x' }, { uuid: 'u1' }));
+    expect(flaky).toBe(3);
+    // 连不上重试 3 次、超时 1 次、成功 1 次：每次交出去都算。
+    expect(attempts).toEqual([3, 1, 1]);
   });
 
   it('飞书接口挂住：表情回应 3 秒、其余 10 秒就算超时（这里按比例缩短），不重试，记错误；每个请求也带着超时，挂住的连接会被收掉', async () => {

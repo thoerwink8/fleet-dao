@@ -37,6 +37,7 @@ import {
   type Sent,
   type Target,
 } from './port.ts';
+import { noteFeishuDispatched } from './usage-meter.ts';
 import { sleep } from './util.ts';
 
 /** 表情回应要赶「2 秒内先回应」，给 3 秒；别的调用 10 秒。 */
@@ -125,6 +126,8 @@ export function createLark(opts: LarkOptions): Lark {
     const retries = o.retries ?? 2;
     const timeoutMs = o.timeoutMs ?? timeouts.callMs;
     for (let attempt = 0; ; attempt++) {
+      // 交给 HTTP 的这一下就算一次：失败、超时飞书也可能已经计了，等成功再记会把用量算少。
+      noteFeishuDispatched();
       let err: FeishuError;
       try {
         const res = await within(timeoutMs, what, call());

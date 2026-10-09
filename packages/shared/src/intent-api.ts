@@ -25,7 +25,10 @@ export const INTENT_SUMMARY_MAX = 2_000;
 /** 放下一段意图时写的理由最长多少字。 */
 export const INTENT_REASON_MAX = 500;
 
-/** 飞书免费版每月调用上限。加表情、发卡、改卡、翻历史都算；事件和失败的调用不算。 */
+/**
+ * 飞书免费版每月调用上限。加表情、发卡、改卡、翻历史都算，事件不算。
+ * 已经打出去的失败和超时也算：飞书那边可能已经计了，只算成功会把累计算少，八成报警来得晚。
+ */
 export const FEISHU_MONTHLY_CALL_LIMIT = 10_000;
 /** 用到这个比例（含正好到）就报警，并按方案 5.4 的顺序降级。 */
 export const FEISHU_USAGE_WARN_RATIO = 0.8;
@@ -273,8 +276,13 @@ export const FeishuJoinRequest = z.strictObject({
 });
 export const FeishuJoinResponse = z.strictObject({ recorded: z.number().int().positive() });
 
-/** POST /feishu/gateway/usage（acting=none）。calls 是上次报到之后新打出去的次数，后端按 at 所在的北京月累加。 */
+/**
+ * POST /feishu/gateway/usage（acting=none）。
+ * calls 是这一批新打出去的次数（含失败、超时、重试）。reportId 由网关生成，同一批重报必须带同一个；
+ * 后端按它去重后再按 at 所在的北京月累加——回应丢了再送也不会加第二次。
+ */
 export const FeishuUsageReportRequest = z.strictObject({
+  reportId: z.uuid(),
   calls: z.number().int().min(0).max(1_000_000),
   at: Time,
 });

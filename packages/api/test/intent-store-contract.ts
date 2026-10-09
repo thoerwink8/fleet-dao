@@ -676,15 +676,20 @@ export function describeIntentStoreContract(name: string, make: MakeIntentStore)
         }
       });
 
-      it('用量按北京月累计；没记过的月是 0；时刻认不出就抛，不当成 0', async () => {
+      it('用量按北京月累计；同一份上报再来不加第二次；没记过的月是 0；时刻认不出就抛', async () => {
+        const once = '11111111-1111-4111-8111-111111111111';
+        const more = '22222222-2222-4222-8222-222222222222';
+        const next = '33333333-3333-4333-8333-333333333333';
         expect(await store.usageAt(sep)).toEqual({ month: '2026-09', calls: 0 });
-        expect(await store.addUsage(100, sep)).toEqual({ month: '2026-09', calls: 100 });
-        expect(await store.addUsage(8000, sep)).toEqual({ month: '2026-09', calls: 8100 });
-        expect(await store.addUsage(5, oct)).toEqual({ month: '2026-10', calls: 5 });
+        expect(await store.addUsage(once, 100, sep)).toEqual({ month: '2026-09', calls: 100 });
+        expect(await store.addUsage(once, 100, sep)).toEqual({ month: '2026-09', calls: 100 });
+        expect(await store.addUsage(once, 5000, sep)).toEqual({ month: '2026-09', calls: 100 });
+        expect(await store.addUsage(more, 8000, sep)).toEqual({ month: '2026-09', calls: 8100 });
+        expect(await store.addUsage(next, 5, oct)).toEqual({ month: '2026-10', calls: 5 });
         expect(await store.usageAt(sep)).toEqual({ month: '2026-09', calls: 8100 });
         expect(await store.usageAt(oct)).toEqual({ month: '2026-10', calls: 5 });
         expect(await store.usageAt(nov)).toEqual({ month: '2026-11', calls: 0 });
-        await expect(store.addUsage(1, 'not-a-time')).rejects.toThrow(RangeError);
+        await expect(store.addUsage(once, 1, 'not-a-time')).rejects.toThrow(RangeError);
         await expect(store.usageAt('not-a-time')).rejects.toThrow(RangeError);
       });
     });

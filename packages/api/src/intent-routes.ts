@@ -278,7 +278,7 @@ export function intentRoutes(deps: Deps): Hono<IntentEnv> {
 
   on(IntentRoutes.usage, async (c) => {
     const body = await readJson(c, FeishuUsageReportRequest);
-    const added = await storeOf().addUsage(body.calls, body.at);
+    const added = await storeOf().addUsage(body.reportId, body.calls, body.at);
     const snapshot = {
       month: added.month,
       calls: added.calls,

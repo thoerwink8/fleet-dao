@@ -222,7 +222,7 @@ export const feishuJoins = pgTable(
   ],
 );
 
-/** 网关这个北京月调飞书成功了多少次。没有这一行就是 0（读到了，不是读不到）。 */
+/** 网关这个北京月打出去的飞书调用（含已发出但失败或超时的）。没有这一行就是 0（读到了，不是读不到）。 */
 export const feishuUsageMonths = pgTable(
   'feishu_usage_months',
   {
@@ -232,6 +232,25 @@ export const feishuUsageMonths = pgTable(
   (t) => [
     check('feishu_usage_months_shape', sql`${t.month} ~ '^[0-9]{4}-[0-9]{2}$'`),
     check('feishu_usage_months_calls', sql`${t.calls} >= 0`),
+  ],
+);
+
+/**
+ * 每一批用量上报的凭据。同一个 reportId 再来不加第二次：
+ * 后端已经写上、回应却丢了时，网关会原样重报。
+ */
+export const feishuUsageReports = pgTable(
+  'feishu_usage_reports',
+  {
+    reportId: text('report_id').primaryKey(),
+    month: text('month').notNull(),
+    calls: integer('calls').notNull(),
+    appliedAt: timestamp('applied_at', tz).notNull(),
+  },
+  (t) => [
+    check('feishu_usage_reports_id_len', sql`char_length(${t.reportId}) between 1 and 80`),
+    check('feishu_usage_reports_month', sql`${t.month} ~ '^[0-9]{4}-[0-9]{2}$'`),
+    check('feishu_usage_reports_calls', sql`${t.calls} >= 0`),
   ],
 );
 

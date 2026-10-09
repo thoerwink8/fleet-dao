@@ -6,7 +6,8 @@
 // - 收谁的：允许的群里只收创始人的，别人说的在入口就丢（不转原话、不记原文和长度），另留一条没有内容的拒收记录；
 //   白名单外的人进群，在群里说一句、让后端提醒。私聊里的陌生人一天礼貌拒一次；机器人的不收。
 //   谁是创始人只看 FEISHU_FOUNDERS，后端再按 users.feishu_open_id 认一遍（不是创始人回 403）。
-// - 飞书用量：每次成功的端口调用记一笔，心跳报给后端。到八成停「收到」、停改卡、补漏只在后端恢复时翻；
+// - 飞书用量：每次已经打出去的端口调用记一笔（失败、超时、重试也算），心跳按批报给后端。
+//   同一批带同一个 reportId，回应丢了就原样重报，不加第二次。到八成停「收到」、停改卡、补漏只在后端恢复时翻；
 //   读不到用量只停「收到」。还没读过之前照常发。
 // - 网关不判这句话是什么意思、归哪段：原样转，切段由后端定（packages/api/src/intents.ts）。
 // - 「收到」表情只给私聊和 @机器人 的那句（2 秒内，不等后端）；群里对聊不逐句打扰。
@@ -51,6 +52,7 @@ import {
   type Sent,
   type Target,
 } from './port.ts';
+import { measureFeishuCall } from './usage-meter.ts';
 import { Inflight, Lru, uuidFor } from './util.ts';
 import { createWatch, type Watch, type WatchLimits } from './watch.ts';
 import { beijingDay, clip } from './words.ts';
@@ -159,13 +161,9 @@ export interface Gateway {
   readonly watch: Watch;
 }
 
-/** 成功打出去的飞书调用才记数。失败的抛在加数之前，事件本身不是调用。 */
-function metered(port: FeishuPort, onSuccess: () => void): FeishuPort {
-  const count = async <T>(fn: () => Promise<T>): Promise<T> => {
-    const result = await fn();
-    onSuccess();
-    return result;
-  };
+/** 一次端口调用记它实际打出去的次数（含失败、超时、重试）。事件本身不是调用，不进这里。 */
+function metered(port: FeishuPort, onAttempts: (n: number) => void): FeishuPort {
+  const count = <T>(fn: () => Promise<T>): Promise<T> => measureFeishuCall(fn, onAttempts);
   return {
     react: (messageId, emojiType) => count(() => port.react(messageId, emojiType)),
     send: (to, message, opts) => count(() => port.send(to, message, opts)),
@@ -211,6 +209,8 @@ export function createGateway(o: GatewayOptions): Gateway {
     limit: FEISHU_MONTHLY_CALL_LIMIT,
   };
   let pendingCalls = 0;
+  /** 已经取出、还没拿到后端确认的那一批。回应丢了就原样重报，不并进后来新打的。 */
+  let usageBatch: { reportId: string; calls: number; at: string } | null = null;
   let reporting: Promise<void> | null = null;
 
   function applySnapshot(s: FeishuUsage) {
@@ -232,16 +232,27 @@ export function createGateway(o: GatewayOptions): Gateway {
     // 清标记要比的是包过 finally 的那个 promise。写在初始化表达式里直接点它，tsc 会判「还没赋值就用了」。
     const slot: { current: Promise<void> | null } = { current: null };
     const run = (async () => {
-      const delta = pendingCalls;
-      pendingCalls = 0;
       try {
-        const snap = await o.backend.reportUsage(
-          { calls: delta, at: new Date(now()).toISOString() },
-          { timeoutMs: timing.intakeMs },
-        );
-        applySnapshot(snap);
+        for (;;) {
+          if (!usageBatch) {
+            usageBatch = {
+              reportId: crypto.randomUUID(),
+              calls: pendingCalls,
+              at: new Date(now()).toISOString(),
+            };
+            pendingCalls = 0;
+          }
+          const batch = usageBatch;
+          const snap = await o.backend.reportUsage(
+            { reportId: batch.reportId, calls: batch.calls, at: batch.at },
+            { timeoutMs: timing.intakeMs },
+          );
+          if (usageBatch === batch) usageBatch = null;
+          applySnapshot(snap);
+          // 这一批在路上时又打出去的，接着报，不等下一次心跳。
+          if (pendingCalls === 0) break;
+        }
       } catch (err) {
-        pendingCalls += delta;
         applyUnreadable();
         log.error('飞书用量没报上，按读不到处理：只停「收到」表情', { error: clip(String(err), 300) });
       }
@@ -253,8 +264,8 @@ export function createGateway(o: GatewayOptions): Gateway {
     return run;
   }
 
-  const feishu = metered(o.feishu, () => {
-    pendingCalls += 1;
+  const feishu = metered(o.feishu, (n) => {
+    pendingCalls += n;
   });
   const watch = createWatch({
     feishu,

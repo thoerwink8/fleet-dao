@@ -11,6 +11,7 @@ import {
   feishuJoins,
   feishuRejections,
   feishuUsageMonths,
+  feishuUsageReports,
   intentMessages,
   intentRecalls,
   intents,
@@ -605,18 +606,40 @@ export function createPgIntentStore(db: Db, options: { now?: () => Date } = {}):
       return input.openIdTails.length;
     },
 
-    async addUsage(calls, at) {
+    async addUsage(reportId, calls, at) {
       const month = beijingMonth(Date.parse(at));
-      const [row] = await db
-        .insert(feishuUsageMonths)
-        .values({ month, calls })
-        .onConflictDoUpdate({
-          target: feishuUsageMonths.month,
-          set: { calls: sql`${feishuUsageMonths.calls} + excluded.calls` },
-        })
-        .returning({ calls: feishuUsageMonths.calls });
-      if (!row) throw new Error(`飞书用量 ${month} 写不进去`);
-      return { month, calls: row.calls };
+      return db.transaction(async (tx) => {
+        const inserted = await tx
+          .insert(feishuUsageReports)
+          .values({ reportId, month, calls, appliedAt: now() })
+          .onConflictDoNothing({ target: feishuUsageReports.reportId })
+          .returning({ reportId: feishuUsageReports.reportId });
+        const read = async (which: string) => {
+          const [row] = await tx
+            .select({ calls: feishuUsageMonths.calls })
+            .from(feishuUsageMonths)
+            .where(eq(feishuUsageMonths.month, which));
+          return { month: which, calls: row?.calls ?? 0 };
+        };
+        if (inserted.length === 0) {
+          const [known] = await tx
+            .select({ month: feishuUsageReports.month })
+            .from(feishuUsageReports)
+            .where(eq(feishuUsageReports.reportId, reportId));
+          return read(known?.month ?? month);
+        }
+        if (calls === 0) return read(month);
+        const [row] = await tx
+          .insert(feishuUsageMonths)
+          .values({ month, calls })
+          .onConflictDoUpdate({
+            target: feishuUsageMonths.month,
+            set: { calls: sql`${feishuUsageMonths.calls} + excluded.calls` },
+          })
+          .returning({ calls: feishuUsageMonths.calls });
+        if (!row) throw new Error(`飞书用量 ${month} 写不进去`);
+        return { month, calls: row.calls };
+      });
     },
 
     async usageAt(at) {
