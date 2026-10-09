@@ -68,7 +68,8 @@ function readTemplate(code: string, i: number): { inner: string; end: number } {
     if (c === '`') return { inner, end: i + 1 };
     if (c === '$' && code[i + 1] === '{') {
       const expr = readBalanced(code, i + 1);
-      inner += expr.body;
+      // 两侧留空格：`${prefix}${execFileSync(...)}` 直接接上会变成 prefixexecFileSync，\b 匹配不到。
+      inner += ` ${expr.body} `;
       i = expr.end;
       continue;
     }
@@ -172,6 +173,14 @@ describe('测试里不许同步起子进程', () => {
       'spawnSync',
     ]);
     expect(scanSyncChildSpawns(`function f() { return/*注释*/execSync('git'); }`)).toEqual(['execSync']);
+    // 相邻插值不能粘成一个词，否则真实调用绕过拦截。样本拆开拼，避免源码里直接写出插值花括号。
+    const glued = (call: string) => ['const s = `', '$', '{prefix}', '$', '{', call, '}`;'].join('');
+    expect(scanSyncChildSpawns(glued("execFileSync('git', [])"))).toEqual(['execFileSync']);
+    expect(scanSyncChildSpawns(glued("spawnSync('git', [])"))).toEqual(['spawnSync']);
+    expect(scanSyncChildSpawns(glued("execSync('git')"))).toEqual(['execSync']);
+    const tagged = ['const s = tag`', '$', "{execFileSync('git', [])}`", ';'].join('');
+    expect(scanSyncChildSpawns(tagged)).toEqual(['execFileSync']);
+    expect(scanSyncChildSpawns("const s = `execFileSync('git', [])`;")).toEqual([]);
     expect(scanSyncChildSpawns(`const e = new Error('spawnSync git ENOENT'); // execSync`)).toEqual([]);
   });
 });
