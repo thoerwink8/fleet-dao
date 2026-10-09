@@ -169,6 +169,10 @@ export {
   readCi,
   readPull,
   requiredChecksFor,
+  type UpdateBranchInput,
+  type UpdateBranchRefusal,
+  type UpdateBranchResult,
+  updateBranch,
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';

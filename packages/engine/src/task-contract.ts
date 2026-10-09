@@ -31,6 +31,9 @@ export const MAX_ROUND_RESETS = 3;
 export const SEGMENT_MINUTES = 60;
 /** 等合并时每次长轮询多少分钟（工作流一直轮到合并、关闭或人放弃）。 */
 export const MERGE_POLL_MINUTES = 15;
+
+/** 直接合被拒、因为落后主线：同一个任务对同一张 PR 最多自动同步主线几次（第 N+1 次起停下报人，免得主线一直在动就一直转）。 */
+export const MAX_MAIN_SYNCS = 3;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
 
@@ -251,6 +254,11 @@ export interface ArmAutoMergeInput {
   repo: Repo;
   prNumber: number;
   expectedHead: string;
+  /**
+   * 这张 PR 已经因为落后主线自动同步过几次（工作流数；没同步过就不带）。到了 MAX_MAIN_SYNCS 次，
+   * 再落后就不同步了，原样停下报人。老历史里没有这个字段，当作 0。
+   */
+  syncedBehind?: number;
 }
 
 export interface ArmAutoMergeResult {
@@ -263,6 +271,11 @@ export interface ArmAutoMergeResult {
   why?: string;
   /** 挂的时候发现 PR 的头已经不是引擎验过、推上去的那个了（有人改过）：现在的头。老历史里没有这个字段。 */
   headMoved?: string;
+  /**
+   * headMoved 是引擎自己刚把 PR 同步到最新主线造成的（直接合被拒、因为落后主线）：工作流不停下，直接对新头重走 CI 和验收。
+   * 老历史里没有这个字段，当作没有（头是别人改的）。
+   */
+  syncedMain?: true;
 }
 
 export interface WaitMergedInput {

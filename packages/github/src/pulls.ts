@@ -894,6 +894,109 @@ export async function mergePr(
   return afterMerge(deps, input, outcome.merged, false, ctx);
 }
 
+// —— 把 PR 分支同步到最新主线 ——
+
+export interface UpdateBranchInput {
+  repo: RepoRef;
+  prNumber: number;
+  /** 只同步这个头；PR 的头已经不是它就不动（交给 GitHub 的 expected_head_sha 和这里的读回双重把关）。 */
+  expectedHead: string;
+}
+
+export type UpdateBranchRefusal = 'head_moved' | 'not_open' | 'conflict';
+
+export type UpdateBranchResult =
+  | { updated: true /** 同步之后 PR 的新头。 */; head: string }
+  | {
+      updated: false;
+      reason: UpdateBranchRefusal;
+      detail: string;
+      /** head_moved 时 PR 现在的头。 */
+      head?: string;
+    };
+
+/** 同步主线后新头出现得有多慢：GitHub 回 202 只表示排上队了，新头要重读 PR 才拿得到。 */
+const UPDATE_BRANCH_WAITS_MS = [1000, 2000, 4000, 8000, 16000];
+
+/**
+ * 把 PR 分支更新到最新主线（GitHub 的 update-branch：往 PR 分支上并一个主线的合并提交）。
+ * 用在「合并被拒、因为落后主线」之后的补救：同步完头换了，调用方要对新头重跑 CI 和验收。
+ * 不看文案分类：被拒（409、422）一律重读 PR 再判——头变了是 head_moved、重读到冲突是 conflict，其余照抛。
+ */
+export async function updateBranch(
+  deps: Deps,
+  input: UpdateBranchInput,
+  ctx: ActivityContext = {},
+): Promise<UpdateBranchResult> {
+  const { repo, prNumber, expectedHead } = input;
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
+  const slug = repoSlug(repo);
+  const head7 = (sha: string) => sha.slice(0, 7);
+
+  const before = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+  if (before.state !== 'open' || before.merged) {
+    return { updated: false, reason: 'not_open', detail: `PR #${prNumber} 已经关了或合了` };
+  }
+  if (before.head.sha !== expectedHead) {
+    return {
+      updated: false,
+      reason: 'head_moved',
+      head: before.head.sha,
+      detail: `PR #${prNumber} 的头是 ${head7(before.head.sha)}，不是要同步的 ${head7(expectedHead)}`,
+    };
+  }
+
+  const res = await deps.client.request<{ message?: string }>({
+    method: 'PUT',
+    path: `${base}/pulls/${prNumber}/update-branch`,
+    auth: { as: 'engine', repo },
+    body: { expected_head_sha: expectedHead },
+    allow: [409, 422],
+    signal: ctx.signal,
+  });
+
+  if (res.status === 409 || res.status === 422) {
+    const again = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+    const message = res.data?.message ?? '';
+    if (again.head.sha !== expectedHead) {
+      // 头已经换了（有人推了新提交，或别处刚同步过）：交给调用方对新头重走
+      return {
+        updated: false,
+        reason: 'head_moved',
+        head: again.head.sha,
+        detail: `同步时 PR #${prNumber} 的头变成了 ${head7(again.head.sha)}（${message}）`,
+      };
+    }
+    if (again.mergeable === false || again.mergeable_state === 'dirty') {
+      return {
+        updated: false,
+        reason: 'conflict',
+        detail: `把 PR #${prNumber} 同步到最新主线时和主线冲突（${message}）`,
+      };
+    }
+    throw new GitHubError(
+      'UPDATE_BRANCH_REJECTED',
+      `GitHub 不收 ${slug}#${prNumber} 的同步主线（${res.status}）：${message}`,
+      { status: res.status, retryable: true },
+    );
+  }
+
+  // 202：排上队了。新头要重读才拿得到，读到头换了才算完
+  for (let i = 0; ; i += 1) {
+    const now = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+    if (now.head.sha !== expectedHead) return { updated: true, head: now.head.sha };
+    const wait = UPDATE_BRANCH_WAITS_MS[i];
+    if (wait === undefined) {
+      throw new GitHubError(
+        'UPDATE_BRANCH_PENDING',
+        `${slug}#${prNumber} 的同步主线 GitHub 收下了，但头一直没变：稍后重试`,
+        { retryable: true },
+      );
+    }
+    await deps.client.sleep(wait, ctx.signal);
+  }
+}
+
 export function defaultCommitMessage(prNumber: number): string {
   return `由 fleet 引擎经合并队列 squash 合并（PR #${prNumber}）。`;
 }

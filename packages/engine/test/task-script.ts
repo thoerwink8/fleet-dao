@@ -5,6 +5,7 @@ import type { EngineTasks } from '../src/activities.ts';
 import { fakeHead } from '../src/fakes.ts';
 import { buildTaskBrief, type TaskBrief, type TaskBriefResult } from '../src/runner/task-brief.ts';
 import type {
+  ArmAutoMergeInput,
   ArmAutoMergeResult,
   ColdVerifyInput,
   ColdVerifyResult,
@@ -51,7 +52,7 @@ export interface Script {
   delivery: (n: number) => DeliveryRead;
   verify: (input: ColdVerifyInput, n: number) => ColdVerifyResult;
   guarded: (n: number) => GuardedPaths;
-  arm: (n: number) => ArmAutoMergeResult;
+  arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
 }
 
@@ -64,6 +65,8 @@ export interface Calls {
   verify: ColdVerifyInput[];
   guarded: number;
   arm: number;
+  /** 挂自动合并被调时收到的入参。 */
+  armInputs: ArmAutoMergeInput[];
   merged: number;
 }
 
@@ -79,6 +82,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     verify: [],
     guarded: 0,
     arm: 0,
+    armInputs: [],
     merged: 0,
   };
   const script: Script = {
@@ -127,10 +131,11 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.guarded += 1;
       return script.guarded(calls.guarded);
     },
-    async armAutoMerge() {
+    async armAutoMerge(input) {
       calls.order.push('arm');
       calls.arm += 1;
-      return script.arm(calls.arm);
+      calls.armInputs.push(input);
+      return script.arm(calls.arm, input);
     },
     async waitMerged() {
       calls.order.push('merged');

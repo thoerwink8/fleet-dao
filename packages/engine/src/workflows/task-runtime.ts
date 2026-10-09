@@ -84,6 +84,8 @@ export class TaskRuntime {
   prNumber: number | null = null;
   /** 人在哪个头上批过哪些路径（点「继续」那一刻记下）；头换了就作废，新的内容要重新批。 */
   guardApproval: { head: string; paths: GuardedPaths } | null = null;
+  /** 直接合被拒、因为落后主线，引擎已经自动把这张 PR 同步过几次主线（上限 MAX_MAIN_SYNCS，之后停下报人）。 */
+  mainSyncs = 0;
   changedFiles: string[] = [];
   feedback: string[] = [];
   /**

@@ -76,6 +76,7 @@ function fakeGh(over: Partial<Record<string, unknown>> = {}): { gh: Gh; calls: s
     readRepoFile: pick('readRepoFile'),
     pullFiles: pick('pullFiles'),
     mergePr: pick('mergePr'),
+    updateBranch: pick('updateBranch'),
     claims: {
       readPull: pick('readPull'),
       enableAutoMerge: pick('enableAutoMerge'),
@@ -587,18 +588,101 @@ describe('挂自动合并', () => {
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
   });
 
-  it('【故意造出的失败】clean 时直接合被拒（落后主线）：不当成合了，把拒绝的原因原样交出去', async () => {
-    const f = fakeGh({
+  const cleanButBehind = (over: Partial<Record<string, unknown>> = {}) =>
+    fakeGh({
       readPull: async () => pullFacts(),
       enableAutoMerge: async () => {
         throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
       },
       mergePr: async () => ({ merged: false, reason: 'behind_main', detail: '主线比 PR 多 2 个提交' }),
+      ...over,
+    });
+  const runWith = (gh: Gh, syncedBehind?: number) =>
+    make({ gh }).acts.armAutoMerge(
+      {
+        schemaVersion: 1,
+        repo: REPO,
+        prNumber: 7,
+        expectedHead: HEAD,
+        ...(syncedBehind === undefined ? {} : { syncedBehind }),
+      },
+      ctx(),
+    );
+
+  it('【故意造出的失败】clean 时直接合被拒（不是落后主线，比如 CI 不绿）：不当成合了，不去同步主线，把拒绝的原因原样交出去', async () => {
+    const f = cleanButBehind({
+      mergePr: async () => ({ merged: false, reason: 'ci_not_green', detail: 'CI 红：check' }),
     });
     const got = await run(f.gh);
     expect(got).toMatchObject({ armed: false, merged: false });
-    expect(got.why).toContain('behind_main');
+    expect(got.why).toContain('ci_not_green');
+    expect(got.why).toContain('CI 红：check');
+    expect(got.headMoved).toBeUndefined();
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
+  it('直接合被拒、因为落后主线：调一次 updateBranch 把 PR 同步到最新主线，新头当 headMoved 交回去（标明是自己同步的）', async () => {
+    const NEW = 'c'.repeat(40);
+    let asked: unknown;
+    const f = cleanButBehind({
+      updateBranch: async (input: unknown) => {
+        asked = input;
+        return { updated: true, head: NEW };
+      },
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false, headMoved: NEW, syncedMain: true });
+    expect(got.why).toContain('第 1 次');
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr', 'updateBranch']);
+    expect(asked).toMatchObject({
+      repo: { owner: REPO.owner, name: REPO.name },
+      prNumber: 7,
+      expectedHead: HEAD,
+    });
+  });
+
+  it('【故意造出的失败】已经同步满 3 次还是落后：不再同步，原样交出原因，写明「连着 3 次同步主线后仍落后」', async () => {
+    const f = cleanButBehind();
+    const got = await runWith(f.gh, 3);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('连着 3 次同步主线后仍落后');
     expect(got.why).toContain('主线比 PR 多 2 个提交');
+    expect(got.headMoved).toBeUndefined();
+    expect(got.syncedMain).toBeUndefined();
+    expect(f.calls).not.toContain('updateBranch');
+    // 第 3 次还能同步（已同步 2 次）
+    const again = cleanButBehind({ updateBranch: async () => ({ updated: true, head: 'd'.repeat(40) }) });
+    expect(await runWith(again.gh, 2)).toMatchObject({ syncedMain: true });
+  });
+
+  it('【故意造出的失败】同步主线时冲突：不当成同步成了，说清原因停下（没有 headMoved）', async () => {
+    const f = cleanButBehind({
+      updateBranch: async () => ({
+        updated: false,
+        reason: 'conflict',
+        detail: '和主线冲突（merge conflict）',
+      }),
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('同步主线没成');
+    expect(got.why).toContain('conflict');
+    expect(got.headMoved).toBeUndefined();
+    expect(got.syncedMain).toBeUndefined();
+  });
+
+  it('同步前 PR 的头先被别人改了：新头当 headMoved 交回去，但不标自己同步（工作流照旧停下等人看）', async () => {
+    const f = cleanButBehind({
+      updateBranch: async () => ({
+        updated: false,
+        reason: 'head_moved',
+        detail: '头变了',
+        head: 'e'.repeat(40),
+      }),
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false, headMoved: 'e'.repeat(40) });
+    expect(got.syncedMain).toBeUndefined();
   });
 
   it('【故意造出的失败】别的挂不上的报错（权限不够）：原样抛，不当成挂上了，也不乱走直接合', async () => {

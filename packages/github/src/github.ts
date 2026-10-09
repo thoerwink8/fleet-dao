@@ -89,6 +89,9 @@ import {
   openPr,
   type PrFile,
   pullFiles,
+  type UpdateBranchInput,
+  type UpdateBranchResult,
+  updateBranch,
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';
@@ -173,6 +176,8 @@ export interface GitHub {
   /** PR 改到的文件（翻完页、带 patch）：判「改没改到标准路径」用它（#253）。 */
   pullFiles(input: { repo: RepoRef; prNumber: number; signal?: AbortSignal }): Promise<PrFile[]>;
   mergePr(input: MergePrInput, ctx?: ActivityContext): Promise<MergePrResult>;
+  /** 把 PR 分支更新到最新主线（合并被拒、因为落后主线之后的补救；新头要调用方重跑 CI 和验收）。 */
+  updateBranch(input: UpdateBranchInput, ctx?: ActivityContext): Promise<UpdateBranchResult>;
   updateIssueProgress(
     input: UpdateIssueProgressInput,
     ctx?: ActivityContext,
@@ -372,6 +377,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     waitCi: (input, ctx) => waitCi(deps, input, ctx),
     pullFiles: (input) => pullFiles(deps, input.repo, input.prNumber, input.signal),
     mergePr: (input, ctx) => mergePr(deps, input, ctx),
+    updateBranch: (input, ctx) => updateBranch(deps, input, ctx),
     updateIssueProgress: (input, ctx) => updateIssueProgress(deps, input, ctx),
     closeIssue: (input, ctx) => closeIssue(deps, input, ctx),
     openIssue: (input, ctx) => openIssue(deps, input, ctx),
