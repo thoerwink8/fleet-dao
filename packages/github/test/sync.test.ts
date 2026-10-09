@@ -1,22 +1,11 @@
 // 并主线：用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务，和 push.test.ts 一样。
 // 这里不需要会话打包：分支本来就已经在远端（对应一张开着的 PR），syncMainline 直接在镜像里 fetch/merge/push。
-import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { execGit, type GitRunner } from '../src/git.ts';
+import { gitIn } from './child.ts';
 import { repo, setup, tempDir } from './helpers.ts';
-
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', [...ID, '-c', 'core.autocrlf=false', ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
 
 let root: string;
 let remote: string;
@@ -24,46 +13,46 @@ let remote: string;
 beforeAll(() => {
   root = tempDir('fleet-gh-sync-');
   remote = join(root, 'remote.git');
-  git(root, 'init', '-q', '--bare', '-b', 'main', remote);
+  gitIn(root, 'init', '-q', '--bare', '-b', 'main', remote);
   const seed = join(root, 'seed');
-  git(root, 'clone', '-q', remote, seed);
+  gitIn(root, 'clone', '-q', remote, seed);
   writeFileSync(join(seed, 'README.md'), 'hello\n');
-  git(seed, 'add', '-A');
-  git(seed, 'commit', '-q', '-m', 'init');
-  git(seed, 'push', '-q', 'origin', 'HEAD:main');
+  gitIn(seed, 'add', '-A');
+  gitIn(seed, 'commit', '-q', '-m', 'init');
+  gitIn(seed, 'push', '-q', 'origin', 'HEAD:main');
 }, 60_000);
 
 /** 从远端此刻的 main 切一个任务分支、写一个文件、提交、推上去（模拟已经开着的 PR 分支）。 */
 function makeBranch(branch: string, file: string, content: string): { path: string; head: string } {
   const path = join(root, `wt-${branch.replace(/\//g, '-')}-${Math.random().toString(36).slice(2, 7)}`);
-  git(root, 'clone', '-q', '-b', 'main', remote, path);
-  git(path, 'checkout', '-q', '-b', branch);
+  gitIn(root, 'clone', '-q', '-b', 'main', remote, path);
+  gitIn(path, 'checkout', '-q', '-b', branch);
   writeFileSync(join(path, file), content);
-  git(path, 'add', '-A');
-  git(path, 'commit', '-q', '-m', `work on ${branch}`);
-  git(path, 'push', '-q', 'origin', `HEAD:${branch}`);
-  return { path, head: git(path, 'rev-parse', 'HEAD') };
+  gitIn(path, 'add', '-A');
+  gitIn(path, 'commit', '-q', '-m', `work on ${branch}`);
+  gitIn(path, 'push', '-q', 'origin', `HEAD:${branch}`);
+  return { path, head: gitIn(path, 'rev-parse', 'HEAD') };
 }
 
 /** 单独起一个克隆，在远端 main 上加一个提交、推上去（模拟主线前进），回新的 main 头。 */
 function advanceMain(file: string, content: string): string {
   const tmp = join(root, `adv-${Math.random().toString(36).slice(2, 7)}`);
-  git(root, 'clone', '-q', remote, tmp);
+  gitIn(root, 'clone', '-q', remote, tmp);
   writeFileSync(join(tmp, file), content);
-  git(tmp, 'add', '-A');
-  git(tmp, 'commit', '-q', '-m', 'main moves');
-  git(tmp, 'push', '-q', 'origin', 'HEAD:main');
-  return git(tmp, 'rev-parse', 'HEAD');
+  gitIn(tmp, 'add', '-A');
+  gitIn(tmp, 'commit', '-q', '-m', 'main moves');
+  gitIn(tmp, 'push', '-q', 'origin', 'HEAD:main');
+  return gitIn(tmp, 'rev-parse', 'HEAD');
 }
 
 function remoteHead(branch: string): string | null {
-  const out = git(root, 'ls-remote', remote, `refs/heads/${branch}`);
+  const out = gitIn(root, 'ls-remote', remote, `refs/heads/${branch}`);
   return out ? (out.split('\t')[0] ?? null) : null;
 }
 
 /** 直接查裸仓（本地路径）里一个提交的父提交号，顺序和 `commit-tree -p a -p b` 一致。 */
 function parentsOf(sha: string): string[] {
-  return git(remote, 'rev-list', '--parents', '-n', '1', sha).split(/\s+/).slice(1);
+  return gitIn(remote, 'rev-list', '--parents', '-n', '1', sha).split(/\s+/).slice(1);
 }
 
 function syncSetup(runner?: GitRunner) {
@@ -103,7 +92,7 @@ describe('并主线', { timeout: 60_000 }, () => {
     advanceMain('f.txt', 'main moves again\n');
     const res = await gh.syncMainline({ repo, branch: 'task/1b-no-pr', head: branch.head });
     if (res.state !== 'clean') throw new Error(`期望 clean，实际 ${res.state}`);
-    const message = git(remote, 'log', '-1', '--format=%s', res.head);
+    const message = gitIn(remote, 'log', '-1', '--format=%s', res.head);
     expect(message).toContain('并进 task/1b-no-pr');
     expect(message).not.toContain('PR #');
   });
@@ -141,10 +130,10 @@ describe('并主线', { timeout: 60_000 }, () => {
     const { gh } = syncSetup();
     const branch = makeBranch('task/4-moved', 'e.txt', 'mine\n');
     writeFileSync(join(branch.path, 'e2.txt'), 'theirs\n');
-    git(branch.path, 'add', '-A');
-    git(branch.path, 'commit', '-q', '-m', 'someone else');
-    git(branch.path, 'push', '-q', 'origin', 'HEAD:task/4-moved');
-    const theirs = git(branch.path, 'rev-parse', 'HEAD');
+    gitIn(branch.path, 'add', '-A');
+    gitIn(branch.path, 'commit', '-q', '-m', 'someone else');
+    gitIn(branch.path, 'push', '-q', 'origin', 'HEAD:task/4-moved');
+    const theirs = gitIn(branch.path, 'rev-parse', 'HEAD');
     const res = await gh.syncMainline({ repo, prNumber: 4, branch: 'task/4-moved', head: branch.head });
     expect(res).toEqual({ state: 'head_moved', head: theirs, expectedHead: branch.head });
     expect(remoteHead('task/4-moved')).toBe(theirs);
