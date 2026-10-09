@@ -27,6 +27,7 @@ source "$DEPLOY_DIR/lib/session-proxy.sh"
 
 REPO_URL=https://github.com/thoerwink8/fleet-dao.git
 RELEASES=${FLEET_RELEASES_DIR:-/srv/fleet-dao-releases} # 只有 deploy/test/release-flow.test.sh 会改它
+FLEET_SYSTEMD_DIR=${FLEET_SYSTEMD_DIR:-/etc/systemd/system} # 单元文件装到哪；只有测试会改
 CACHE=$RELEASES/.repo.git   # 取代码用的裸仓（root 的）
 # 每切一次、每判一次记一行：时间 提交号 事件 [unmerged]。事件：release、rollback、auto-rollback（切过去）、
 # unhealthy（健康检查没过）、recovered（判过不健康的在用版本后来又过了）
@@ -489,13 +490,7 @@ build_release() { # 提交号
   fi
   printf '{"commit":"%s"}\n' "$sha" >"$stage/web/release.json"
   # 单元文件从 git 里取（不用构建目录里那份：构建时它归 fleet，root 要照着它起服务）
-  rm -rf -- "$stage/.units"
-  install -d -m 755 "$stage/.units"
-  for u in "${APP_UNITS[@]}"; do
-    if git -C "$CACHE" cat-file -e "$sha:deploy/france/$u.service" 2>/dev/null; then
-      git -C "$CACHE" show "$sha:deploy/france/$u.service" >"$stage/.units/$u.service"
-    fi
-  done
+  stage_units "$sha" "$stage"
   # 这一版带几个迁移：退回时拿它和库里跑过的条数比（见 schema_allows）
   if ! n=$(count_migrations "$stage"); then
     red "读不出 ${sha:0:12} 带几个迁移（packages/db/migrations/meta/_journal.json）"
@@ -506,6 +501,21 @@ build_release() { # 提交号
     "$(date -u +%FT%TZ)" "$ON_MAIN" "$WEB_KIND" "$n" "$gsum" >"$stage/.fleet-release"
   mv -T -- "$stage" "$dir"
   changed "构建 ${sha:0:12}：依赖装好，静态文件是$WEB_KIND${gsum:+，飞书网关打成了一个文件}"
+}
+
+# 单元文件从提交里取进这一版的 .units。`.socket` 不是每个服务都有：有就跟着 `.service` 收，没有不算错（#405）。
+stage_units() { # 提交号 暂存目录
+  local sha=$1 stage=$2 u
+  rm -rf -- "$stage/.units"
+  install -d -m 755 "$stage/.units"
+  for u in "${APP_UNITS[@]}"; do
+    if git -C "$CACHE" cat-file -e "$sha:deploy/france/$u.service" 2>/dev/null; then
+      git -C "$CACHE" show "$sha:deploy/france/$u.service" >"$stage/.units/$u.service"
+    fi
+    if git -C "$CACHE" cat-file -e "$sha:deploy/france/$u.socket" 2>/dev/null; then
+      git -C "$CACHE" show "$sha:deploy/france/$u.socket" >"$stage/.units/$u.socket"
+    fi
+  done
 }
 
 # 飞书网关：这一版有 packages/feishu，就连同依赖打成一个文件 gateway/gateway.mjs（打包、冒烟都以 fleet 跑）。
@@ -907,12 +917,128 @@ running_release() { # 单元
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then readlink -- "/proc/$pid/cwd" 2>/dev/null || true; fi
 }
 
+# socket 单元的三种转换（#364，deploy/france/fleet-api.socket）：这一版带没带它、机器上有没有已经在跑的：
+# - 带、机器上没有（头一次上 socket 激活）：服务自己正占着端口，得先停掉才腾得出来装；装上 socket 单元、
+#   enable --now，端口这时候起归 systemd 攥着；调用方（activate）看 SOCKET_FORCE_RESTART 知道这一轮要重启服务——
+#   服务这时候还没起（刚被停掉），要靠后面重启逻辑把它起来，起来时从 systemd 接手 fd，不再自己 bind。
+# - 带、机器上已经有在跑：不碰 socket 单元——改 socket 的监听地址是人工操作（会牵扯改 api.env、release.sh 的
+#   COCKPIT/AGENT_API 常量、docs/ops.md 端口表，一起改一起发），不是发布脚本自动做的事；只照常重启服务，这正是
+#   要的效果：重启时连接排在内核队列里，不会被拒。
+# - 不带（退回到没有它的老版本）、机器上有：撤掉 socket 单元（disable --now、删文件、daemon-reload），回到服务
+#   自己绑端口——不撤的话老代码不会去读 systemd 传来的 fd，端口反而没人监听。
+# 装不上（停不掉旧服务、daemon-reload 失败、enable 失败）在切 current 之前就返回：版本不动。
+# 停过旧服务再失败的，不能就这么返回：端口已经没人听。退出前撤掉刚写上、还没成为监听方的 socket，
+# 把旧服务拉起来，仍由它自己绑。
+SOCKET_FORCE_RESTART=0
+# 头一次装没装成时用：disable --now 先放开 socket 可能已经攥住的端口，再删文件、daemon-reload，最后起旧服务。
+# 起不来另记一笔红（版本没动，但后端不能停着）。返回 0：原来的失败已经记过红，由调用方 return 1。
+restore_pre_socket_listen() { # 单元名 这次停过服务没有(0/1)
+  local u=$1 stopped=$2
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket
+  if [[ -e "$socket_file" ]]; then
+    if ! systemctl disable --now --quiet "$u.socket"; then
+      red "撤掉没装上的 $u.socket 失败（端口可能还被它攥着）"
+    fi
+    rm -f -- "$socket_file"
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（撤没装上的 $u.socket 之后）"
+    fi
+  fi
+  if [[ "$stopped" != 1 ]]; then return 0; fi
+  if systemctl start "$u.service" && [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+    changed "头一次装 $u.socket 没装上：把停下的 $u.service 拉回来，仍由它自己听端口"
+    return 0
+  fi
+  red "头一次装 $u.socket 没装上，停下的 $u.service 也起不回来：端口没人听。systemctl start $u.service；journalctl -u $u.service -n 50"
+}
+
+sync_socket_unit() { # 单元名 这一版的目录
+  local u=$1 dir=$2
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket has_now=0 stopped=0
+  SOCKET_FORCE_RESTART=0
+  if [[ -e "$socket_file" ]]; then has_now=1; fi
+  if [[ -f "$dir/.units/$u.socket" && "$has_now" == 0 ]]; then
+    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+      if ! systemctl stop "$u.service"; then
+        red "头一次装 $u.socket 之前，停不掉正占着端口的 $u.service"
+        return 1
+      fi
+      stopped=1
+    fi
+    put_file "$socket_file" root:root 644 "$(<"$dir/.units/$u.socket")"
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（装 $u.socket 之后）"
+      restore_pre_socket_listen "$u" "$stopped"
+      return 1
+    fi
+    if ! systemctl enable --now --quiet "$u.socket"; then
+      red "$u.socket 起不来：journalctl -u $u.socket -n 50 看现场"
+      restore_pre_socket_listen "$u" "$stopped"
+      return 1
+    fi
+    changed "头一次给 $u 装上 socket 单元（往后重启 $u 时连接排队、不拒连）"
+    SOCKET_FORCE_RESTART=1
+  elif [[ ! -f "$dir/.units/$u.socket" && "$has_now" == 1 ]]; then
+    if ! systemctl disable --now --quiet "$u.socket"; then
+      red "撤 $u.socket 失败"
+      return 1
+    fi
+    rm -f -- "$socket_file"
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（撤 $u.socket 之后）"
+      return 1
+    fi
+    changed "撤掉 $u.socket（这一版没带它，回到 $u 自己监听端口）"
+    SOCKET_FORCE_RESTART=1
+  fi
+}
+
+# release.env 没启用这个服务：socket 也不留。留着的话端口还被攥着，服务自己又没在跑。
+drop_unused_socket() { # 单元名
+  local u=$1
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket
+  if [[ ! -e "$socket_file" ]]; then return 0; fi
+  if ! systemctl disable --now --quiet "$u.socket"; then
+    red "撤 $u.socket 失败（本机 release.env 没启用 $u）"
+    return 1
+  fi
+  rm -f -- "$socket_file"
+  if ! systemctl daemon-reload; then
+    red "systemctl daemon-reload 失败（撤 $u.socket 之后）"
+    return 1
+  fi
+  changed "撤掉 $u.socket（本机 release.env 没启用 $u）"
+}
+
+# 装了 socket 却没在听：下一次重启这个服务，端口不在 systemd 手里，又会拒连（#364）。没装这个文件就不用查。
+socket_listening() { # 服务名（不带后缀）
+  if [[ ! -e "$FLEET_SYSTEMD_DIR/$1.socket" ]]; then return 0; fi
+  if [[ "$(systemctl is-active "$1.socket" 2>/dev/null)" == active ]]; then
+    ok "$1.socket 在听"
+    return 0
+  fi
+  red "$1.socket 装了但没在跑：下次重启 $1 又会拒连。journalctl -u $1.socket -n 50"
+  return 1
+}
+
 # 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来——主进程不在这一版的目录里（包括上次切完
 # current、还没重启完就被打断）、或单元、环境文件变了，就重启；没启用的停掉撤掉；静态文件发到香港。
-# 哪一步不成就记红、返回 1，退不退由调用方定。
+# 哪一步不成就记红、返回 1，退不退由调用方定。socket 单元先同步：装不上就不切 current。
 activate() { # 提交号 事件（release / rollback / auto-rollback）
   local sha=$1 how=$2 dir=$RELEASES/$1 u reload=0 restart unit_file running
-  local -A fresh=()
+  local -A fresh=() socket_force=()
+  for u in "${APP_UNITS[@]}"; do
+    if has_service "$u"; then
+      if [[ ! -f "$dir/.units/$u.service" ]]; then
+        red "这一版没有 deploy/france/$u.service，起不了 $u"
+        return 1
+      fi
+      sync_socket_unit "$u" "$dir" || return 1
+      socket_force[$u]=$SOCKET_FORCE_RESTART
+    else
+      drop_unused_socket "$u" || return 1
+    fi
+  done
   if [[ "$(readlink -- "$RELEASES/current" 2>/dev/null)" != "$sha" ]]; then
     if ! ln -sfn -- "$sha" "$RELEASES/.current.new" || ! mv -Tf -- "$RELEASES/.current.new" "$RELEASES/current"; then
       red "把 current 切到 ${sha:0:12} 失败"
@@ -924,12 +1050,8 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     ok "current 已是 ${sha:0:12}"
   fi
   for u in "${APP_UNITS[@]}"; do
-    unit_file=/etc/systemd/system/$u.service
+    unit_file=$FLEET_SYSTEMD_DIR/$u.service
     if has_service "$u"; then
-      if [[ ! -f "$dir/.units/$u.service" ]]; then
-        red "这一版没有 deploy/france/$u.service，起不了 $u"
-        return 1
-      fi
       put_file "$unit_file" root:root 644 "$(<"$dir/.units/$u.service")"
       fresh[$u]=$WROTE
       if ((WROTE)); then reload=1; fi
@@ -949,7 +1071,9 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
   fi
   for u in $FLEET_SERVICES; do
     restart=0
-    if [[ "${fresh[$u]:-0}" == 1 ]] || env_changed_since_start "$u.service"; then restart=1; fi
+    if [[ "${fresh[$u]:-0}" == 1 || "${socket_force[$u]:-0}" == 1 ]] || env_changed_since_start "$u.service"; then
+      restart=1
+    fi
     running=$(running_release "$u.service")
     if [[ -n "$running" && "$running" != "$dir" ]]; then
       echo "  · $u 的主进程还在跑 ${running##*/}（不是这一版），要重启"
@@ -1224,6 +1348,7 @@ settle_services() {
     else
       ok "$u 起稳了（pid ${pid[$u]}，${SETTLE_SECONDS} 秒没退出）"
     fi
+    socket_listening "$u" || bad=1
   done
   return "$bad"
 }
@@ -1533,6 +1658,9 @@ do_release() { # 要发的提交（空 = 主线最新）
     ok "发布完成：在用 ${SHA:0:12}"
     # 发完不碰引擎总开关和各项目的「让 AI 接活」（决定 0032 第 4 条、#1256）：发版前后的开关状态由发版车（release-train）和驾驶舱按钮的
     # 接活脚本（deploy/france/release-request）记下、发完照记下的恢复；直接跑 release.sh（自动发布、手动）本来就没暂停过它们，原样留着。
+  elif [[ "$(current_sha)" != "$SHA" ]]; then
+    # socket 没装上（停不掉旧服务、enable 失败）时 activate 在切 current 之前就返回：版本没动，不用退
+    red "${SHA:0:12} 没切过去（见上面的红），在用的还是 $(short "$cur" 还没有)"
   elif [[ -z "$cur" ]]; then
     mark_unhealthy "$SHA"
     red "${SHA:0:12} 没过健康检查；这是头一版，没有上一版可退"
@@ -1611,6 +1739,8 @@ do_check() {
       else
         red "$s 启用了但没在跑：journalctl -u $s -n 50"
       fi
+      # 红已经记上；这里不能让返回码把 --check 后半截掐掉
+      socket_listening "$s" || true
     else
       echo "  · $s 本机没启用（$RELEASE_ENV 的 FLEET_SERVICES）"
     fi
