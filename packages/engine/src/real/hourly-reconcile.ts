@@ -20,6 +20,7 @@ import {
   mergedPrLedgers,
   openSessionTrees,
   prHeadsOfBranch,
+  pullMergedAt,
   quotaTable,
   readPoolHoldsSetting,
   recordAlertFiling,
@@ -31,7 +32,7 @@ import {
   updateOpenAlert,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type GitHub, type RepoRef, readCi, requiredChecksFor } from '@fleet-dao/github';
+import { type GitHub, type RepoRef, readCi, readPull, requiredChecksFor } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
@@ -413,6 +414,18 @@ export function hourlyReconcileJob(
       stageAllOpen,
       handling,
       filing,
+      // 历史事实类（reconcile:pr、reconcile:ledger）要合并时刻才知道该不该跳过。镜像没写上再问 GitHub；都没有就抛，上面记没查成、不跳过。
+      prMergedAt: async (repo, number) => {
+        const mirrored = await pullMergedAt(w.db, repo.owner, repo.name, number);
+        if (mirrored) return mirrored;
+        const pr = await readPull(w.gh.deps, repo, number, 'engine');
+        if (!pr.merged_at) throw new Error(`${repo.owner}/${repo.name}#${number} 没有合并时刻`);
+        const at = new Date(pr.merged_at);
+        if (!Number.isFinite(at.getTime())) {
+          throw new Error(`${repo.owner}/${repo.name}#${number} 的合并时刻认不出`);
+        }
+        return at;
+      },
       alerts: {
         listOpen: (limit) => listOpenAlerts(w.db, { limit }),
         byKey: (key) => alertByKey(w.db, key),

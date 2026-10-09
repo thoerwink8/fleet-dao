@@ -14,6 +14,24 @@ import {
   tasks,
 } from '../schema/index.ts';
 
+/**
+ * 镜像里这条 PR 的合并时刻。没有这一行、或合并时刻是空，回 null（不是读失败）。库读失败照抛。
+ * 审计补合并那一路有时不写 merged_at，调用方再去问 GitHub。
+ */
+export async function pullMergedAt(
+  db: Db,
+  owner: string,
+  name: string,
+  number: number,
+): Promise<Date | null> {
+  const [row] = await db
+    .select({ mergedAt: pullRequests.mergedAt })
+    .from(pullRequests)
+    .innerJoin(repos, eq(repos.id, pullRequests.repoId))
+    .where(and(eq(repos.owner, owner), eq(repos.name, name), eq(pullRequests.number, number)));
+  return row?.mergedAt ?? null;
+}
+
 /** 受管的仓（repos 表的每一行）：对账逐个去查。 */
 export async function listManagedRepos(db: Db): Promise<{ id: string; owner: string; name: string }[]> {
   return db
