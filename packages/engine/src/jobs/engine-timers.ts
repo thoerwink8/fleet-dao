@@ -6,7 +6,13 @@
 // 不起会话，而总开关每次发版都会关，标了就几乎刷不上。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
-import { CANARY_EVERY_HOURS, CANARY_JOB, CANARY_OFFSET_MINUTES, sweepCanaryLeftovers } from './canary.ts';
+import {
+  CANARY_EVERY_HOURS,
+  CANARY_JOB,
+  CANARY_OFFSET_MINUTES,
+  CANARY_RUN_TIMEOUT_MINUTES,
+  sweepCanaryLeftovers,
+} from './canary.ts';
 import { startCanaryWorkflow } from './canary-start.ts';
 import { CARPOOL_WATCH_EVERY_MINUTES, CARPOOL_WATCH_JOB, runCarpoolWatchJob } from './carpool-watch.ts';
 import { runCiTimingsJob } from './ci-timings.ts';
@@ -120,6 +126,8 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       offsetMinutes: CANARY_OFFSET_MINUTES,
       catchupMinutes: 60,
       overdueMinutes: OVERDUE_MINUTES,
+      // schedule_run 从开单一直开到工作流收尾，不是「起工作流」那一下。过了工作流时限才算被腰斩，免得重启把还在跑的巡检补成没跑成
+      abandonAfterMinutes: CANARY_RUN_TIMEOUT_MINUTES,
       // 巡检开一张单、等引擎拉单起任务：总开关关着时拉单不拉，开了单也永远等不到被派，所以关着时这一轮不跑（#1086）
       needsMaster: true,
       run: async () => {

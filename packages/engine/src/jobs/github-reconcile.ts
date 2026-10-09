@@ -23,10 +23,15 @@ export const GITHUB_RECONCILE_EVERY_MINUTES = 15;
 /** 每轮往回看多久：比间隔长得多，漏了一两轮（引擎重启、Temporal 停了一会儿）也捞得回来；重叠的部分由去重账认出。 */
 export const GITHUB_RECONCILE_LOOKBACK_MS = 2 * 60 * 60_000;
 
-/** schedule_runs 的读写（真实现是 @fleet-dao/db 的 startScheduleRun / finishScheduleRun）。 */
+/** schedule_runs 的读写（真实现是 @fleet-dao/db 的 startScheduleRun / finishScheduleRun / closeInterruptedScheduleRuns）。 */
 export interface ScheduleRunLog {
   start(job: string, at: Date): Promise<number>;
   finish(id: number, result: ScheduleResult, at: Date): Promise<void>;
+  /**
+   * 超过 startedBefore 还没结束的补记成 failed（和引擎起来时同一份 closeInterruptedScheduleRuns）。
+   * 写库失败照抛。没装这个入口时，巡检补记会记一条没补上，不当成补上了。
+   */
+  closeInterrupted?(input: { job: string; startedBefore: Date; why: string; at: Date }): Promise<number[]>;
 }
 
 export interface GitHubReconcileJobDeps {
