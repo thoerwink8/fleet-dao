@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { whyLeave } from '../src/close-on-merge.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import type { Gh, RunResult } from '../src/pr-arm.ts';
-import { GATE_LINE, issueColumnRefs, prColumns } from '../src/pr-columns.ts';
+import { GATE_LINE, issueColumnLinks, issueColumnRefs, prColumns } from '../src/pr-columns.ts';
 import { composeBody, composeIssueBody, prOpenCli } from '../src/pr-compose.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -116,7 +117,7 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(await w.run('--refs', '#3', '--closes', '9', '--closes', '7', '--base', 'dev')).toBe(0);
     expect(w.gitCalls[0]?.at(-1)).toBe('origin/dev..HEAD');
     expect(w.bodies[0]).toBe(
-      '**做了什么**：\n- 加字段\n- 改接口\n- 补测试\n\n**需求**：\nCloses #9\nCloses #7\nRefs #3\n',
+      '**做了什么**：\n- 加字段\n- 改接口\n- 补测试\n\n**需求**：\nCloses #9\nCloses #7\nRefs #3（分片、关不了它）\n',
     );
     expect(issueColumnRefs(w.bodies[0] ?? '')).toEqual({ closes: [7, 9], refs: [3] });
   });
@@ -199,6 +200,37 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(await w.run('--body-file', 'body.md')).toBe(0);
     expect(w.gitCalls).toEqual([]);
     expect(w.bodies).toEqual(['**做了什么**：手写\n\n**需求**：\nCloses #7\n']);
+  });
+
+  it('--refs 232：需求栏写成 Refs #232（分片、关不了它），栏位解析判为 Refs、分片，收口不去关', async () => {
+    const w = world({ replies: [CREATED, files('a.ts'), ok()] });
+    expect(await w.run('--refs', '232')).toBe(0);
+    const body = w.bodies[0] ?? '';
+    expect(prColumns(body).get('需求')).toContain('Refs #232（分片、关不了它）');
+    const links = issueColumnLinks(body);
+    expect(links).toEqual([{ number: 232, kind: 'refs', slice: true }]);
+    const link = links[0];
+    expect(link && whyLeave(link, [])).toContain('分片');
+  });
+
+  it('多个 --refs：每个号各占一行，每行都写分片、关不了它', async () => {
+    const w = world({ replies: [CREATED, files('a.ts'), ok()], lookups: [ISSUE_7, ISSUE_7] });
+    expect(await w.run('--refs', '232', '--refs', '408')).toBe(0);
+    expect(prColumns(w.bodies[0] ?? '').get('需求')).toBe(
+      'Refs #232（分片、关不了它）\nRefs #408（分片、关不了它）',
+    );
+    expect(issueColumnLinks(w.bodies[0] ?? '')).toEqual([
+      { number: 232, kind: 'refs', slice: true },
+      { number: 408, kind: 'refs', slice: true },
+    ]);
+  });
+
+  it('【故意造出的失败】手写一行只有 Refs #232、没写分片：解析成非分片，收口认成该关', () => {
+    const body = '**做了什么**：手写\n\n**需求**：\nRefs #232\n';
+    const links = issueColumnLinks(body);
+    expect(links).toEqual([{ number: 232, kind: 'refs', slice: false }]);
+    const link = links[0];
+    expect(link ? whyLeave(link, []) : '没读到').toBeUndefined();
   });
 
   it('生成出来的栏和 PR 模板一样（两栏），需求栏读得到 Closes', () => {
