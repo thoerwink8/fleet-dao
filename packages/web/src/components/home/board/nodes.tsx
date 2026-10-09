@@ -331,7 +331,7 @@ function WorkerLine({ item }: { item: HomeRunning }) {
         {item.worker ?? '没有进程在跑'}
       </span>
       {item.stageSince ? (
-        <span className="num shrink-0">
+        <span className="num shrink-0 whitespace-nowrap">
           · 本段 <Elapsed since={item.stageSince} />
         </span>
       ) : null}

@@ -956,37 +956,17 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
         />
       </button>
       {open && rows.length ? (
-        <div className="max-h-56 overflow-y-auto border-t">
-          <table className="w-full table-fixed text-xs">
-            <thead>
-              <tr className="text-left text-caption text-muted-foreground">
-                <th scope="col" className="w-32 px-3 py-1 font-normal whitespace-nowrap">
-                  谁在做
-                </th>
-                <th scope="col" className="w-12 px-1 py-1 font-normal whitespace-nowrap">
-                  单
-                </th>
-                <th scope="col" className="px-1 py-1 font-normal whitespace-nowrap">
-                  在做什么
-                </th>
-                <th scope="col" className="w-28 px-3 py-1 text-right font-normal whitespace-nowrap">
-                  分钟
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="max-h-56 overflow-y-auto border-t py-1">
+          {rows.map((r) => (
+            <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
+          ))}
+        </ul>
       ) : null}
     </div>
   );
 }
 
-/** 此刻表的一行。状态列换行；表头和分钟列不换行。 */
+/** 此刻一行。状态可以换行；右边耗时是原来的分钟列，留出列宽并且不换行。 */
 function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; onPick(id: string): void }) {
   const now = useNow();
   const since = queued ? item.waitingSince : item.stageSince;
@@ -994,31 +974,31 @@ function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; 
   const status = statusTextOf(item);
   const full = [status, item.title, elapsed].filter((part) => part !== '').join(' · ');
   return (
-    <tr
-      tabIndex={0}
-      title={full}
-      onClick={() => onPick(nodeId.ticket(item))}
-      onKeyDown={(event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        onPick(nodeId.ticket(item));
-      }}
-      className={cn('cursor-pointer hover:bg-accent', queued && 'text-muted-foreground')}
-    >
-      <td className="w-32 max-w-32 truncate px-3 py-1.5 font-medium" title={item.worker ?? '排队'}>
-        <span className="num">{item.worker ?? '排队'}</span>
-      </td>
-      <td className="num w-12 whitespace-nowrap px-1 py-1.5 text-muted-foreground">#{item.issueNumber}</td>
-      <td className="px-1 py-1.5 break-words whitespace-normal text-muted-foreground" title={full}>
-        {status} · {item.title}
-      </td>
-      <td
-        className="num w-28 whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground"
-        title={elapsed || undefined}
+    <li>
+      <button
+        type="button"
+        onClick={() => onPick(nodeId.ticket(item))}
+        title={full}
+        className={cn(
+          'flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent',
+          queued && 'text-muted-foreground',
+        )}
       >
-        {elapsed}
-      </td>
-    </tr>
+        <span className="num w-22 shrink-0 truncate font-medium" title={item.worker ?? '排队'}>
+          {item.worker ?? '排队'}
+        </span>
+        <span className="num shrink-0 text-muted-foreground">#{item.issueNumber}</span>
+        <span className="min-w-0 flex-1 whitespace-normal break-words text-muted-foreground" title={full}>
+          {status} · {item.title}
+        </span>
+        <span
+          className="num min-w-24 shrink-0 text-right whitespace-nowrap text-muted-foreground"
+          title={elapsed || undefined}
+        >
+          {elapsed}
+        </span>
+      </button>
+    </li>
   );
 }
 

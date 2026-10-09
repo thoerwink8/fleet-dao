@@ -260,7 +260,7 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(lanes[2]?.textContent).not.toMatch(/平均 0/);
   });
 
-  test('此刻表头不换行：分钟等表头单行，分钟列够宽', async () => {
+  test('此刻原有的分钟列不换行：耗时留在原来那一格，列宽够、不另造表头', async () => {
     localStorage.clear();
     const since = new Date(Date.now() - 40 * 60_000).toISOString();
     renderHome({
@@ -272,16 +272,13 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     });
     const toggle = await screen.findByRole('button', { name: /个会话在干活/ });
     if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
-    const table = document.querySelector('[data-board-now] table');
-    expect(table).toBeTruthy();
-    const heads = Array.from(table?.querySelectorAll('th') ?? []);
-    expect(heads.map((th) => th.textContent)).toEqual(['谁在做', '单', '在做什么', '分钟']);
-    for (const th of heads) expect(th.className).toContain('whitespace-nowrap');
-    const minuteHead = heads.find((th) => th.textContent === '分钟');
-    expect(minuteHead?.className).toContain('w-28');
-    const minuteCell = table?.querySelector('tbody td:last-child');
-    expect(minuteCell?.textContent).toBe('40 分钟');
-    expect(minuteCell?.className).toContain('whitespace-nowrap');
+    const panel = document.querySelector('[data-board-now]');
+    expect(panel?.querySelector('table, th')).toBeNull();
+    const minute = Array.from(panel?.querySelectorAll('span') ?? []).find(
+      (el) => el.textContent === '40 分钟',
+    );
+    expect(minute?.className).toContain('whitespace-nowrap');
+    expect(minute?.className).toContain('min-w-24');
     localStorage.clear();
   });
 
@@ -312,6 +309,10 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(doing?.textContent).toContain('#556');
     expect(doing?.textContent).toContain('Opus 5.5');
     expect(doing?.textContent).toContain('本段');
+    const stage = Array.from(doing?.querySelectorAll('span') ?? []).find((el) =>
+      (el.textContent ?? '').includes('本段'),
+    );
+    expect(stage?.className).toContain('whitespace-nowrap');
     expect(doing?.textContent).toContain('最近：动手开跑 · Opus 5.5');
     const asking = nodeOf('ticket:450');
     expect(asking?.querySelector('[data-needs-founder="true"]')).toBeTruthy();
