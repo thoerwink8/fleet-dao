@@ -5,7 +5,7 @@
 // - 发不出去的照样回执（failed 带原因），后端过一阵再给，不在这里原地重试。
 // - 一轮没走通（取不到卡、回执送不上去，包括后端读不了库回 503）抛出来，run() 退避并记给看守（5 分钟没走通往团队群报警）；
 //   绝不把「没取到」当成「没有要发的」。
-import type { Backend, IntentCard, IntentCardAck } from './backend.ts';
+import type { Backend, FeishuUsage, IntentCard, IntentCardAck } from './backend.ts';
 import type { Logger } from './log.ts';
 import { type Card, type FeishuPort, feishuErrorKind } from './port.ts';
 import { sleep, uuidFor } from './util.ts';
@@ -45,6 +45,18 @@ export interface IntentCardsDeps {
   waitSeconds?: number;
   /** 每一轮走没走通，记给网关自己的看守（watch.ts）。 */
   watch?: Pick<Watch, 'ok' | 'fail'> | undefined;
+  /**
+   * 飞书用量（#795）。长轮询带回的快照先记下，再发卡：到了八成，已有的卡不再改（回执 failed 写明），
+   * 第一张照发并把降级写在卡上；读不到只在卡上写「只停收到」，改卡照旧。
+   */
+  usage?:
+    | {
+        apply(snapshot: FeishuUsage): void;
+        lines(lines: readonly string[]): string[];
+        /** 该停改卡时回写在回执上的那句；不该停回 null。 */
+        cardUpdateError(): string | null;
+      }
+    | undefined;
 }
 
 export interface IntentCards {
@@ -68,7 +80,13 @@ export function createIntentCards(deps: IntentCardsDeps): IntentCards {
   }
 
   async function deliver(item: IntentCard): Promise<IntentCardAck['result']> {
-    const card = intentCard(item);
+    const lines = deps.usage ? deps.usage.lines(item.lines) : [...item.lines];
+    const card = intentCard({ ...item, lines });
+    const blocked = item.cardMessageId !== undefined ? deps.usage?.cardUpdateError() : null;
+    if (blocked) {
+      deps.log.info('飞书用量降级：停了改卡，只留第一张', { intentId: item.intentId, seq: item.seq });
+      return { status: 'failed', error: clip(blocked, 500) || blocked };
+    }
     try {
       if (item.cardMessageId === undefined) return await sendNew(item, card, 'first');
       try {
@@ -93,6 +111,7 @@ export function createIntentCards(deps: IntentCardsDeps): IntentCards {
 
   async function runOnce(signal?: AbortSignal): Promise<number> {
     const batch = await deps.backend.intentCards(waitSeconds, signal);
+    deps.usage?.apply(batch.usage);
     if (batch.items.length === 0) return 0;
     const acks: IntentCardAck[] = [];
     for (const item of batch.items) {

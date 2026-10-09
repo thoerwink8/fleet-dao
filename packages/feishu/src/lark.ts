@@ -3,8 +3,8 @@
 // 收法（#553 第 4 条）：允许的群里每条都收、不用 @（要飞书开发者后台给应用开「获取群组中所有消息」im:message.group_msg；
 // 没开时飞书只推 @机器人 的和私聊），@所有人 的也收；谁的话存、谁的丢由网关判（gateway.ts），这里只挡别的群。
 // Channel 没管的几处自己补：
-// - 机器人菜单事件 application.bot.menu_v6、撤回事件 im.message.recalled_v1：注册到 Channel 内部的事件分发器上
-//   （它没公开，升级 SDK 后 test/lark.test.ts 会报）；
+// - 机器人菜单事件 application.bot.menu_v6、撤回事件 im.message.recalled_v1、进群事件
+//   im.chat.member.user.added_v1：注册到 Channel 内部的事件分发器上（它没公开，升级 SDK 后 test/lark.test.ts 会报）；
 // - 发消息带 uuid（同一件事重试不重复发）：Channel.send 不带，改用它公开的 rawClient；
 // - 超时：SDK 默认的 HTTP 实例不设超时（实读为 0），飞书接口一挂住，推送和盘面这些串行的活就全停、也不报警。
 //   每次调用自己限时（表情回应 3 秒，其余 10 秒），超时记错误；HTTP 实例上也带同样的上限，挂住的连接会被收掉。
@@ -28,6 +28,7 @@ import {
   type FeishuErrorKind,
   type FeishuPort,
   type InboundCardAction,
+  type InboundJoin,
   type InboundMenu,
   type InboundMessage,
   type InboundRecall,
@@ -36,6 +37,7 @@ import {
   type Sent,
   type Target,
 } from './port.ts';
+import { noteFeishuDispatched } from './usage-meter.ts';
 import { sleep } from './util.ts';
 
 /** 表情回应要赶「2 秒内先回应」，给 3 秒；别的调用 10 秒。 */
@@ -44,6 +46,7 @@ export const FEISHU_TIMEOUTS = { reactMs: 3_000, callMs: 10_000 };
 export interface InboundHandlers {
   onMessage(msg: InboundMessage): void;
   onRecall(evt: InboundRecall): void;
+  onJoin(evt: InboundJoin): void;
   onCardAction(evt: InboundCardAction): void;
   onMenu(evt: InboundMenu): void;
   onReject(evt: { messageId: string; chatId: string; senderId: string; reason: string }): void;
@@ -75,6 +78,7 @@ export interface Lark {
 
 const MENU_EVENT = 'application.bot.menu_v6';
 const RECALL_EVENT = 'im.message.recalled_v1';
+const MEMBER_EVENT = 'im.chat.member.user.added_v1';
 /** 翻历史一页几条（飞书上限 50；补漏按顺序一页页翻，够用）。 */
 export const HISTORY_PAGE_SIZE = 50;
 
@@ -111,6 +115,7 @@ export function createLark(opts: LarkOptions): Lark {
     );
   }
   const client = channel.rawClient;
+  let joinUnrecognized = 0;
 
   /** 调一次飞书：限时；超时不重试（报出来，由调用方决定下一步）；连不上、限频有界重试。 */
   async function api<T extends { code?: number | undefined; msg?: string | undefined }>(
@@ -121,6 +126,8 @@ export function createLark(opts: LarkOptions): Lark {
     const retries = o.retries ?? 2;
     const timeoutMs = o.timeoutMs ?? timeouts.callMs;
     for (let attempt = 0; ; attempt++) {
+      // 交给 HTTP 的这一下就算一次：失败、超时飞书也可能已经计了，等成功再记会把用量算少。
+      noteFeishuDispatched();
       let err: FeishuError;
       try {
         const res = await within(timeoutMs, what, call());
@@ -293,6 +300,20 @@ export function createLark(opts: LarkOptions): Lark {
           }
           return undefined;
         },
+        [MEMBER_EVENT]: (data: unknown) => {
+          const join = toJoin(data);
+          if (join) handlers.onJoin(join);
+          else {
+            // 认不出就记错误，不当没人进。不把整条事件打进日志：里面可能有人名。
+            joinUnrecognized += 1;
+            const chatId =
+              data && typeof data === 'object' && typeof (data as { chat_id?: unknown }).chat_id === 'string'
+                ? (data as { chat_id: string }).chat_id
+                : null;
+            opts.log.error('进群事件认不出，不当没人进', { count: joinUnrecognized, chatId });
+          }
+          return undefined;
+        },
       });
     },
 
@@ -324,6 +345,37 @@ export function toInbound(msg: NormalizedMessage, botOpenId: string | undefined)
     fromBot:
       (senderType !== undefined && senderType !== 'user') || (!!botOpenId && msg.senderId === botOpenId),
   };
+}
+
+/**
+ * 进群事件（SDK 把 header 和 event 摊平）：会话、时刻、每个进来的人的 open_id 都得有。
+ * 少一样、或其中一个人没有 open_id，整条认不出（null），不拿认得出的那几个凑合。
+ */
+export function toJoin(data: unknown): InboundJoin | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as { event_id?: unknown; chat_id?: unknown; create_time?: unknown; users?: unknown };
+  if (typeof d.chat_id !== 'string' || d.chat_id.length === 0) return null;
+  const at =
+    typeof d.create_time === 'string' || typeof d.create_time === 'number'
+      ? Number(d.create_time)
+      : Number.NaN;
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (!Array.isArray(d.users) || d.users.length === 0) return null;
+  const openIds: string[] = [];
+  for (const user of d.users) {
+    if (!user || typeof user !== 'object') return null;
+    const u = user as { user_id?: unknown; open_id?: unknown };
+    let openId: string | null = null;
+    if (typeof u.open_id === 'string' && u.open_id.length > 0) openId = u.open_id;
+    else if (u.user_id && typeof u.user_id === 'object') {
+      const nested = (u.user_id as { open_id?: unknown }).open_id;
+      if (typeof nested === 'string' && nested.length > 0) openId = nested;
+    }
+    if (!openId) return null;
+    openIds.push(openId);
+  }
+  const eventId = typeof d.event_id === 'string' && d.event_id.length > 0 ? d.event_id : undefined;
+  return { ...(eventId ? { eventId } : {}), chatId: d.chat_id, at, openIds };
 }
 
 /** 撤回事件：编号、会话、撤回时刻都得有，少一样就是认不出（null）。 */

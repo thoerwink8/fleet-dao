@@ -5,7 +5,18 @@
 // - links、edits 两个 jsonb 列读出来先按形状认一遍，认不出就抛（写明哪一段、哪一列），不当成空的。
 // - 写回归纳、开成单、放下和操作记录在同一个事务里：记不下就不改。
 // - 时刻：这里自己写的（收到时刻、卡的到期、写回时刻）一律用传进来的钟，和后端其余部分同一个钟。
-import { auditLog, type Db, intentMessages, intentRecalls, intents } from '@fleet-dao/db';
+import {
+  auditLog,
+  type Db,
+  feishuJoins,
+  feishuRejections,
+  feishuUsageMonths,
+  feishuUsageReports,
+  intentMessages,
+  intentRecalls,
+  intents,
+} from '@fleet-dao/db';
+import { beijingMonth } from '@fleet-dao/shared';
 import { isUuid } from '@fleet-dao/store';
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -568,6 +579,76 @@ export function createPgIntentStore(db: Db, options: { now?: () => Date } = {}):
         await writeAudit(tx, audit, { before: auditShape(intent), after: auditShape(plan.next) });
         return { status: 'dropped', intent: { intent: plan.next, messages } } as const;
       });
+    },
+
+    async recordRejection(input) {
+      await db.insert(feishuRejections).values({
+        chatId: input.chatId,
+        openIdTail: input.openIdTail,
+        at: date(input.at),
+        reason: input.reason,
+        receivedAt: now(),
+      });
+    },
+
+    async recordJoins(input) {
+      const receivedAt = now();
+      const at = date(input.at);
+      await db.insert(feishuJoins).values(
+        input.openIdTails.map((openIdTail) => ({
+          chatId: input.chatId,
+          openIdTail,
+          at,
+          reason: input.reason,
+          receivedAt,
+        })),
+      );
+      return input.openIdTails.length;
+    },
+
+    async addUsage(reportId, calls, at) {
+      const month = beijingMonth(Date.parse(at));
+      return db.transaction(async (tx) => {
+        const inserted = await tx
+          .insert(feishuUsageReports)
+          .values({ reportId, month, calls, appliedAt: now() })
+          .onConflictDoNothing({ target: feishuUsageReports.reportId })
+          .returning({ reportId: feishuUsageReports.reportId });
+        const read = async (which: string) => {
+          const [row] = await tx
+            .select({ calls: feishuUsageMonths.calls })
+            .from(feishuUsageMonths)
+            .where(eq(feishuUsageMonths.month, which));
+          return { month: which, calls: row?.calls ?? 0 };
+        };
+        if (inserted.length === 0) {
+          const [known] = await tx
+            .select({ month: feishuUsageReports.month })
+            .from(feishuUsageReports)
+            .where(eq(feishuUsageReports.reportId, reportId));
+          return read(known?.month ?? month);
+        }
+        if (calls === 0) return read(month);
+        const [row] = await tx
+          .insert(feishuUsageMonths)
+          .values({ month, calls })
+          .onConflictDoUpdate({
+            target: feishuUsageMonths.month,
+            set: { calls: sql`${feishuUsageMonths.calls} + excluded.calls` },
+          })
+          .returning({ calls: feishuUsageMonths.calls });
+        if (!row) throw new Error(`飞书用量 ${month} 写不进去`);
+        return { month, calls: row.calls };
+      });
+    },
+
+    async usageAt(at) {
+      const month = beijingMonth(Date.parse(at));
+      const [row] = await db
+        .select({ calls: feishuUsageMonths.calls })
+        .from(feishuUsageMonths)
+        .where(eq(feishuUsageMonths.month, month));
+      return { month, calls: row?.calls ?? 0 };
     },
   };
 }

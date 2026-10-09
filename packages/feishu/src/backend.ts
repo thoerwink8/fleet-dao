@@ -5,6 +5,12 @@
 import {
   ApiErrorBody,
   type FeishuActing,
+  FeishuJoinRequest,
+  FeishuJoinResponse,
+  FeishuRejectionRequest,
+  FeishuRejectionResponse,
+  FeishuUsageReportRequest,
+  FeishuUsageSnapshot,
   IntentCardAckRequest,
   IntentCardAckResponse,
   type IntentCardAckSchema,
@@ -36,6 +42,10 @@ export type IntentCardBatch = z.output<typeof IntentCardsResponse>;
 export type IntentCard = IntentCardBatch['items'][number];
 export type IntentCardAck = z.input<typeof IntentCardAckSchema>;
 export type IntentCardAckReport = z.output<typeof IntentCardAckResponse>;
+export type FeishuRejection = z.input<typeof FeishuRejectionRequest>;
+export type FeishuJoin = z.input<typeof FeishuJoinRequest>;
+export type FeishuUsageReport = z.input<typeof FeishuUsageReportRequest>;
+export type FeishuUsage = z.output<typeof FeishuUsageSnapshot>;
 
 /**
  * unreachable = 连不上；timeout = 超时；aborted = 网关自己叫停（停机）；rejected = 4xx（带 code）；
@@ -119,6 +129,12 @@ export interface Backend {
   intentCards(waitSeconds: number, signal?: AbortSignal): Promise<IntentCardBatch>;
   /** 意图卡的回执：按条处理，后端认不出的跳过（回 skipped 数）。 */
   ackIntentCards(acks: IntentCardAck[]): Promise<IntentCardAckReport>;
+  /** 白名单群里不是创始人说的：只有群、open_id 末 4 位、时刻、原因。 */
+  recordRejection(body: FeishuRejection, opts?: CallOptions): Promise<{ recorded: true }>;
+  /** 白名单外的人进了群。 */
+  recordJoin(body: FeishuJoin, opts?: CallOptions): Promise<{ recorded: number }>;
+  /** 上次报到之后新打出去的次数。回这个月的累计。 */
+  reportUsage(body: FeishuUsageReport, opts?: CallOptions): Promise<FeishuUsage>;
 }
 
 export interface BackendOptions {
@@ -267,6 +283,27 @@ export function createBackend(options: BackendOptions): Backend {
 
     ackIntentCards: (acks) =>
       call(IntentRoutes.ackCards, { body: IntentCardAckRequest.parse({ acks }) }, IntentCardAckResponse),
+
+    recordRejection: (body, opts) =>
+      call(
+        IntentRoutes.intakeRejection,
+        { body: FeishuRejectionRequest.parse(body), timeoutMs: opts?.timeoutMs, signal: opts?.signal },
+        FeishuRejectionResponse,
+      ),
+
+    recordJoin: (body, opts) =>
+      call(
+        IntentRoutes.intakeJoin,
+        { body: FeishuJoinRequest.parse(body), timeoutMs: opts?.timeoutMs, signal: opts?.signal },
+        FeishuJoinResponse,
+      ),
+
+    reportUsage: (body, opts) =>
+      call(
+        IntentRoutes.usage,
+        { body: FeishuUsageReportRequest.parse(body), timeoutMs: opts?.timeoutMs, signal: opts?.signal },
+        FeishuUsageSnapshot,
+      ),
   };
 }
 

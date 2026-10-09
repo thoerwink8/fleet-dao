@@ -1,6 +1,6 @@
 // 飞书只做一件事：把群聊理成一段段「意图」（#553 第 4 条，specs/553-对题/方案.md 末节「2026-10-04 拍板」）。两份约定：
-// 1. 网关（packages/feishu，香港）⇄ 后端（packages/api，法国）的五条接口 IntentRoutes：收原话、收撤回、补漏游标、
-//    取要发的意图卡、卡的回执。走法和 feishu-api.ts 一样：经隧道调 /api，带网关通行证；acting=required 的带
+// 1. 网关（packages/feishu，香港）⇄ 后端（packages/api，法国）的八条接口 IntentRoutes：收原话、收撤回、补漏游标、
+//    取要发的意图卡、卡的回执，外加拒收记录、进群记录、飞书接口用量（#795，方案 5.4、5.6）。走法和 feishu-api.ts 一样：经隧道调 /api，带网关通行证；acting=required 的带
 //    X-Fleet-Acting-Feishu（说这句话的那位创始人），后端按 open_id 认人。
 // 2. 指挥官读写意图的样子：法国上 `fleet-api intent … --json` 打的就是 IntentCli* 这几种，本机 `pnpm intents` 按它解析。
 //    指挥官不经 HTTP 读写（方案 5.2：不新发长期令牌、不碰 session.ts、不多开口子），走已有的 ssh。
@@ -24,6 +24,85 @@ export const INTENT_RAW_MAX = 300_000;
 export const INTENT_SUMMARY_MAX = 2_000;
 /** 放下一段意图时写的理由最长多少字。 */
 export const INTENT_REASON_MAX = 500;
+
+/**
+ * 飞书免费版每月调用上限。加表情、发卡、改卡、翻历史都算，事件不算。
+ * 已经打出去的失败和超时也算：飞书那边可能已经计了，只算成功会把累计算少，八成报警来得晚。
+ */
+export const FEISHU_MONTHLY_CALL_LIMIT = 10_000;
+/** 用到这个比例（含正好到）就报警，并按方案 5.4 的顺序降级。 */
+export const FEISHU_USAGE_WARN_RATIO = 0.8;
+/** 白名单群里不是创始人说话：网关丢掉之后留给后端的原因。记录里没有原文。 */
+export const FEISHU_REJECTION_REASON = '白名单群里不是创始人在说话';
+/** 白名单外的人进了白名单群。 */
+export const FEISHU_JOIN_REASON = '白名单外的人进了群';
+/** 机器人在群里说的那一句（方案 5.6）。 */
+export const FEISHU_JOIN_GROUP_TEXT = '这个群的消息机器人都读得到，只存两位创始人的话';
+/** 驾驶舱提醒标题：有人在白名单群里说话，但没存。 */
+export const FEISHU_OUTSIDER_SPOKE_TITLE = '团队群里出现了白名单外的人：机器人读得到他的话，没存';
+/** 驾驶舱提醒标题：有白名单外的人进了群。 */
+export const FEISHU_OUTSIDER_JOINED_TITLE =
+  '团队群里进来了白名单外的人：机器人已在群里说明只存两位创始人的话';
+/** 驾驶舱提醒标题：这个月的飞书调用到了八成。 */
+export const FEISHU_USAGE_ALERT_TITLE = '飞书接口用量到了八成';
+
+const BEIJING_OFFSET_MS = 8 * 3_600_000;
+
+/** 北京时间的自然月，例如 2026-09。飞书额度按这个月累计（无夏令时，固定 UTC+8）。 */
+export function beijingMonth(ms: number): string {
+  const shifted = new Date(ms + BEIJING_OFFSET_MS);
+  if (Number.isNaN(shifted.getTime())) throw new RangeError('Invalid time value');
+  const year = shifted.getUTCFullYear();
+  const month = shifted.getUTCMonth() + 1;
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
+}
+
+/** ok 没到八成；over 到了八成，三档降级一起上；unreadable 读不到用量（或上限不是正数），只停「收到」表情。 */
+export function feishuUsageLevel(s: {
+  calls: number;
+  limit: number;
+  readable: boolean;
+}): 'ok' | 'over' | 'unreadable' {
+  if (!s.readable || !(s.limit > 0)) return 'unreadable';
+  if (s.calls / s.limit >= FEISHU_USAGE_WARN_RATIO) return 'over';
+  return 'ok';
+}
+
+/** 这一档要停掉的飞书动作。顺序是方案 5.4 的优先级；到了八成三档一起停，读不到只停表情。 */
+export type FeishuUsageStop = 'ack' | 'card-update' | 'backfill';
+
+export function feishuUsageStops(level: 'ok' | 'over' | 'unreadable'): FeishuUsageStop[] {
+  if (level === 'over') return ['ack', 'card-update', 'backfill'];
+  if (level === 'unreadable') return ['ack'];
+  return [];
+}
+
+/** 写在意图卡上、也写进网关 status 的那一句。ok 只报数字，不说降级。 */
+export function feishuUsageSentence(
+  level: 'ok' | 'over' | 'unreadable',
+  s: { calls: number; limit: number },
+): string {
+  if (level === 'unreadable') return '飞书接口用量读不到，按可能超了处理：只停「收到」表情';
+  const pct = s.limit > 0 ? Math.floor((s.calls / s.limit) * 100) : 0;
+  const used = `飞书接口这个月用了 ${s.calls}/${s.limit}（${pct}%）`;
+  if (level === 'over') {
+    return `${used}，已按顺序降级：停「收到」表情、停改卡（只发第一张）、补漏只在后端恢复时翻一次`;
+  }
+  return used;
+}
+
+/** 用量到了八成或读不到时，在卡的末行写明。已经写过的不重复；满 10 行就换掉最后一行，保证这句看得见。 */
+export function withFeishuUsageLine(
+  lines: readonly string[],
+  usage: { calls: number; limit: number; readable: boolean },
+): string[] {
+  const level = feishuUsageLevel(usage);
+  if (level === 'ok') return [...lines];
+  const sentence = feishuUsageSentence(level, usage);
+  if (lines.some((line) => line.includes('飞书接口'))) return [...lines];
+  if (lines.length >= 10) return [...lines.slice(0, 9), sentence];
+  return [...lines, sentence];
+}
 
 export const IntentChatKindSchema = z.enum(['p2p', 'group']);
 /** event：飞书推来的事件；backfill：网关补漏时翻飞书历史补送的。 */
@@ -157,9 +236,55 @@ export const IntentCardSchema = z.object({
     .max(10),
 });
 
+/** 这个月网关调飞书多少次。readable=false 是没读出来（不能把 calls 当成真的 0）。 */
+export const FeishuUsageSnapshot = z.strictObject({
+  /** 北京时间的自然月。 */
+  month: z.string().regex(/^\d{4}-\d{2}$/),
+  calls: z.number().int().min(0),
+  limit: z.number().int().positive(),
+  readable: z.boolean(),
+});
+
 export const IntentCardsResponse = z.object({
   items: z.array(IntentCardSchema).max(100),
   asOf: Time,
+  /** 长轮询顺便把这个月的用量带给网关，不用另等心跳。 */
+  usage: FeishuUsageSnapshot,
+});
+
+const OpenIdTail = z.string().length(4);
+const OutsiderReason = z.string().min(1).max(200);
+
+/**
+ * POST /feishu/intake/rejections（acting=none）。白名单群里不是创始人说的：只有群、open_id 末 4 位、时刻、原因。
+ * 多一个字段（原文、长度）就 400，不存。
+ */
+export const FeishuRejectionRequest = z.strictObject({
+  chatId: FeishuId,
+  openIdTail: OpenIdTail,
+  at: Time,
+  reason: OutsiderReason,
+});
+export const FeishuRejectionResponse = z.strictObject({ recorded: z.literal(true) });
+
+/** POST /feishu/intake/joins（acting=none）。一次进群事件里每个白名单外的人一条，末 4 位放在 openIdTails。 */
+export const FeishuJoinRequest = z.strictObject({
+  chatId: FeishuId,
+  openIdTails: z.array(OpenIdTail).min(1).max(50),
+  at: Time,
+  reason: OutsiderReason,
+});
+export const FeishuJoinResponse = z.strictObject({ recorded: z.number().int().positive() });
+
+/**
+ * POST /feishu/gateway/usage（acting=none）。
+ * calls 是这一批新打出去的次数（含失败、超时、重试）。reportId 由网关生成，同一批重报必须带同一个；
+ * 后端按它去重后再按 at 所在的北京月累加——回应丢了再送也不会加第二次。
+ */
+export const FeishuUsageReportRequest = z.strictObject({
+  reportId: z.uuid(),
+  calls: z.number().int().min(0).max(1_000_000),
+  at: Time,
 });
 
 /** 卡的回执：发了、改了只认飞书回的消息编号；没发成带原因，后端过一阵再给。 */
@@ -217,6 +342,27 @@ export const IntentRoutes = {
     acting: 'none',
     request: IntentCardAckRequest,
     response: IntentCardAckResponse,
+  },
+  intakeRejection: {
+    method: 'POST',
+    path: '/feishu/intake/rejections',
+    acting: 'none',
+    request: FeishuRejectionRequest,
+    response: FeishuRejectionResponse,
+  },
+  intakeJoin: {
+    method: 'POST',
+    path: '/feishu/intake/joins',
+    acting: 'none',
+    request: FeishuJoinRequest,
+    response: FeishuJoinResponse,
+  },
+  usage: {
+    method: 'POST',
+    path: '/feishu/gateway/usage',
+    acting: 'none',
+    request: FeishuUsageReportRequest,
+    response: FeishuUsageSnapshot,
   },
 } as const satisfies Record<string, FeishuRoute>;
 
