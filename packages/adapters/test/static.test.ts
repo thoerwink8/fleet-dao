@@ -19,8 +19,10 @@ function stripCommentsAndStrings(code: string): string {
       continue;
     }
     if (c === '/' && n === '*') {
+      // 留一个空格：`return/*注释*/execFileSync` 直接删掉会粘成 `returnexecFileSync`，\b 匹配不到。
       const end = code.indexOf('*/', i + 2);
       i = end === -1 ? code.length : end + 2;
+      out += ' ';
       continue;
     }
     if (c === "'" || c === '"') {
@@ -147,5 +149,15 @@ describe('测试里不许同步起子进程', () => {
   it('模板字符串里只有普通文字和不含这三个词的插值时不命中', () => {
     const plain = ['const s = `plain text ', '$', '{name} ', '$', '{prefix}`;'].join('');
     expect(scanSyncChildSpawns(plain)).toEqual([]);
+  });
+
+  it('块注释夹在词中间时仍然命中', () => {
+    expect(scanSyncChildSpawns(`function f() { return/*注释*/execFileSync('git', []); }`)).toEqual([
+      'execFileSync',
+    ]);
+    expect(scanSyncChildSpawns(`function f() { return/*注释*/spawnSync('git', []); }`)).toEqual([
+      'spawnSync',
+    ]);
+    expect(scanSyncChildSpawns(`function f() { return/*注释*/execSync('git'); }`)).toEqual(['execSync']);
   });
 });
