@@ -20,4 +20,6 @@ color: purple
 
 规矩：Node 22 可擦除类型，相对导入带 `.ts`；不碰 `agents/**`、`.github/workflows/`；不直接用 gh 开单、关单；署名行照交代里给的。
 
+工作树和 PR 的两个坑：新建的工作树没有 node_modules，先 `pnpm install --frozen-lockfile --offline`（前台跑，超过 55 秒被转后台就等完成通知）；`pnpm pr:open` 生成的 PR 正文不带署名行，开完用 `gh pr edit` 补上交代里给的那行。
+
 汇报：第一行写 `模型: <你自己的模型 id>`，然后一次汇报：改了哪些页面、PR 号、截图路径、你点验时发现但没修的问题。

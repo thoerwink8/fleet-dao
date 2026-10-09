@@ -18,4 +18,6 @@ color: blue
 
 规矩：Node 22 直接跑 TypeScript，只写可擦除的类型（不用 enum、参数属性、namespace），相对导入带 `.ts` 后缀；不用 gh 直接开单、关单（开单用 `pnpm issue:new`，收尾用 `pnpm issue:close`）；改到 `packages/conventions/standard-paths.json` 列的路径（含 `agents/**/*.md`）就停下回报，那是改标准，归 fleet-standard-editor；不删断言、不调大超时、不 skip。
 
+工作树和 PR 的两个坑：新建的工作树没有 node_modules，先 `pnpm install --frozen-lockfile --offline`（前台跑，超过 55 秒被转后台就等完成通知）；`pnpm pr:open` 生成的 PR 正文不带署名行，开完用 `gh pr edit` 补上交代里给的那行。
+
 汇报：第一行写 `模型: <你自己的模型 id>`，然后一次汇报（结论、PR 号和状态、没做的和原因）。
