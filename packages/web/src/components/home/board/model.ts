@@ -5,6 +5,7 @@
 // 创始人 2026-10-07「react-flow 我还是喜欢初版那样」，按初版的样子和手感重做，数据换成现在的三段流水（/api/home）。
 // 改这里之前必须知道：
 // - 「还没验」（verify_pending）不是失败：颜色走 stall 黄系，不进「卡住的」过滤；红只留给最近一次事件是 trouble 的单。
+// - 「卡住」只算失败色。等你色不算卡住，单独走「只看等你的」。两个过滤都开时取并集。
 // - 推不出在哪一段的单（segment=null）挂在「还没分段」下面，只有真有这样的单才出现这一支，不拿空节点占地方。
 // - 三段节点永远在（哪怕这一段 0 张）：它们是流程本身；过滤只藏单子，不藏段。
 // - 单子节点编号 ticket:<单号>:<owner/name>（e2e 按这个前缀数单子）。
@@ -88,8 +89,10 @@ export interface Graph {
 }
 
 export interface BoardFilter {
-  /** 只看卡住的：等你拍、出问题了。 */
+  /** 只看卡住的：出问题了（失败色）。不含等你拍。 */
   stuck: boolean;
+  /** 只看等你的：等你色。不含出问题。缺省等于没开。 */
+  needsYou?: boolean;
 }
 
 export const ROOT_ID = 'root';
@@ -114,10 +117,20 @@ export function ticketLive(item: HomeRunning): boolean {
   return item.worker !== undefined && ticketTone(item) === 'run';
 }
 
-/** 卡住的 = 要人管的：等你拍、出问题了。还没验、排队不算（是正常的等）。 */
+/** 卡住的 = 出问题了（失败色）。等你拍不算。还没验、排队不算（是正常的等）。 */
 export function isStuck(item: HomeRunning): boolean {
-  const tone = ticketTone(item);
-  return tone === 'human' || tone === 'fail';
+  return ticketTone(item) === 'fail';
+}
+
+/** 等你的 = 等你色。失败色、还没验、排队都不算。 */
+export function isNeedsYou(item: HomeRunning): boolean {
+  return ticketTone(item) === 'human';
+}
+
+/** 两个过滤都关：全留。开了的取并集（一张单只有一种颜色，不会同时算进两边）。 */
+function passesFilter(item: HomeRunning, filter: BoardFilter): boolean {
+  if (!filter.stuck && filter.needsYou !== true) return true;
+  return (filter.stuck && isStuck(item)) || (filter.needsYou === true && isNeedsYou(item));
 }
 
 export function countTones(items: readonly HomeRunning[]): ToneCounts {
@@ -175,7 +188,7 @@ export function groupSegments(
     return {
       key,
       stage: key === 'none' ? undefined : flow.find((f) => f.segment === key),
-      items: all.filter((r) => !filter.stuck || isStuck(r)).sort(compareTickets),
+      items: all.filter((r) => passesFilter(r, filter)).sort(compareTickets),
       total: all.length,
     };
   });
