@@ -88,9 +88,11 @@ describe('退出码', () => {
     expect(first.out).toContain('✗ ~/.claude/CLAUDE.md：缺失');
     expect(first.out).toContain('✗ ~/.claude/settings.json：缺失');
     expect(first.out).toContain('· ~/.codex/AGENTS.md：没装');
+    expect(first.out).toContain('✗ ~/.claude/agents/haiku55.md：缺失');
     const applied = run(['--apply', '--home', home, '--repo', repo]);
     expect(applied.code).toBe(0);
     expect(applied.out).toContain('↻ ~/.claude/CLAUDE.md：新建');
+    expect(applied.out).toContain('↻ ~/.claude/agents/haiku55.md：装上了');
     expect(get(home, '.claude/CLAUDE.md')).toBe(`${BLOCK}\n`);
     const again = run(['--apply', '--home', home, '--repo', repo]);
     expect(again.code).toBe(0);

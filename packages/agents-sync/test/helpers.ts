@@ -78,15 +78,22 @@ export const PERMS_SPEC = {
 };
 export const PERMS_JSON = `${JSON.stringify({ ...PERMS_SPEC, 说明: '测试用' }, null, 2)}\n`;
 
+/** 假仓里的用户级子代理定义（agents/subagents/）：名字和 targets.ts 的 SUBAGENT_TARGET 一样，内容是假的 */
+export const SUBAGENT_MD =
+  '---\nname: haiku55\ndescription: 测试用\nmodel: claude-haiku-5-5\ntools: Read, Grep\n---\n假的子代理正文\n';
+export const SUBAGENT_FILES: Record<string, string> = { 'haiku55.md': SUBAGENT_MD };
+
 /**
  * 假仓：agents/shared-rules.md 带通用段（rulesMd 为 null 时没有这份），AGENTS.md 只有本仓段；skills 为 null 时没有
- * agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/，permissions 为 null 时没有权限源文件
+ * agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/，permissions 为 null 时没有权限源文件，
+ * subagents 为 null 时没有 agents/subagents/
  */
 export function makeRepo(
   skills: Record<string, Record<string, string>> | null,
   rulesMd: string | null = SHARED_RULES_MD,
   hooks: Record<string, string> | null = HOOK_FILES,
   permissions: string | null = PERMS_JSON,
+  subagents: Record<string, string> | null = SUBAGENT_FILES,
 ): string {
   const repo = tempDir('repo');
   put(repo, 'AGENTS.md', REPO_AGENTS_MD);
@@ -102,6 +109,9 @@ export function makeRepo(
     for (const [rel, content] of Object.entries(hooks)) put(repo, `agents/hooks/${rel}`, content);
   }
   if (permissions !== null) put(repo, 'agents/config/claude-permissions.json', permissions);
+  if (subagents !== null) {
+    for (const [rel, content] of Object.entries(subagents)) put(repo, `agents/subagents/${rel}`, content);
+  }
   return repo;
 }
 

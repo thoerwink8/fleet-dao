@@ -13,6 +13,9 @@
 //    Sonnet/Opus 同档两次失败升）、交代写全硬规矩和核对办法、汇报实际模型 id、先砍固定开销、Haiku 结论动手前抽查、
 //    无人值守的监控以脚本为主、补单草稿先跑 check-brief.mjs。
 // 4. 决定 0035 的七点：坑和派法、边界、级联、交代写全、先砍固定开销、实测数据和样本小、引擎侧由创始人配。
+// 5. haiku55 随同步装到每台机器（#1393，创始人 2026-10-09 21:29～21:41「都按照你推荐，不要小修，要改彻底」）：
+//    原件 agents/subagents/haiku55.md 的 name、完整 id、精简的 tools 白名单、汇报首行写模型 id；
+//    packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 列着它（按文本核，不跨包 import）；参考页和决定 0035 写着「同步会装上」。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -25,6 +28,38 @@ const SHARED = read('../../shared-rules.md');
 const SKILL = read('../../skills/commander/SKILL.md');
 const GUIDE = read('../../skills/commander/references/子代理选模型.md');
 const DECISION = read('../../../docs/decisions/0035-haiku55-by-checkable-output.md');
+const H55 = read('../../subagents/haiku55.md');
+const TARGETS = read('../../../packages/agents-sync/src/targets.ts');
+
+/** 仓里 haiku55 定义的毛病；空数组才算对。认不出 frontmatter 明确报错，不当成没毛病 */
+function h55Problems(text: string): string[] {
+  const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
+  if (!m) throw new Error('agents/subagents/haiku55.md：认不出 frontmatter');
+  const fm: Record<string, string> = {};
+  for (const l of (m[1] ?? '').split('\n')) {
+    const kv = /^([A-Za-z]+):\s*(.*)$/.exec(l);
+    if (kv?.[1] !== undefined) fm[kv[1]] = (kv[2] ?? '').trim();
+  }
+  const out: string[] = [];
+  if (fm.name !== 'haiku55') out.push('name 不是 haiku55');
+  // 只认完整 id：别名 haiku 在本机指向 4.5，正是这个子代理要绕开的坑
+  if (fm.model !== 'claude-haiku-5-5')
+    out.push(`model 是「${fm.model ?? '没写'}」，该是完整 id claude-haiku-5-5`);
+  if (!fm.tools) out.push('没写 tools 白名单（没写就继承全部工具，含 MCP）');
+  const tools = (fm.tools ?? '').split(',').map((t) => t.trim());
+  if (tools.some((t) => ['Agent', 'Task', 'Skill'].includes(t) || t.startsWith('mcp__')))
+    out.push('tools 里有子代理、技能或 MCP，不是精简配置');
+  if (!/First line of your report: `模型: <your model id>`/.test(m[2] ?? ''))
+    out.push('正文没要求汇报首行写模型 id');
+  return out;
+}
+
+/** targets.ts 的 SUBAGENT_TARGET 里列没列 haiku55.md；认不出这一项明确报错 */
+function syncListsH55(targets: string): boolean {
+  const block = /\nexport const SUBAGENT_TARGET\b[\s\S]*?\n\};/.exec(targets)?.[0];
+  if (block === undefined) throw new Error('packages/agents-sync/src/targets.ts 里认不出 SUBAGENT_TARGET');
+  return /\bfiles:\s*\[[^\]]*'haiku55\.md'[^\]]*\]/.test(block);
+}
 
 /** 默认值只认这两家；Fable、Mythos、Haiku，还有 inherit、best、default 这类不是一个固定家的，都不算 */
 const DEFAULT_ALLOWED = ['opus', 'sonnet'];
@@ -110,6 +145,10 @@ const GUIDE_RULES: Record<string, [text: 'SKILL' | 'GUIDE', re: RegExp]> = {
   别名haiku是4点5: ['GUIDE', /别名 `haiku` 在本机指向 Haiku 4\.5，不是 5\.5/],
   派haiku55不传model: ['GUIDE', /写 `subagent_type: "haiku55"`，不传 `model`/],
   没装haiku55不拿haiku顶: ['GUIDE', /这次给 Sonnet，不拿 `"haiku"` 顶/],
+  同步装haiku55: [
+    'GUIDE',
+    /原件在仓里 `agents\/subagents\/haiku55\.md`，`pnpm agents:sync`[^\n]*装到每台机器的用户级子代理目录/,
+  ],
   costUSD不当账: ['GUIDE', /`costUSD` 对 5\.5 不准/],
   档位表Haiku: ['GUIDE', /\n\| 读码检索[^\n]*\| Haiku 5\.5（`haiku55`） \|/],
   档位表Haiku修bug: ['GUIDE', /\n\| 规格明确的小函数、有失败测试的 bug 修复 \| Haiku 5\.5（`haiku55`） \|/],
@@ -140,6 +179,7 @@ const DECISION_RULES: Record<string, RegExp> = {
   坑_别名是4点5: /别名 `haiku` 在本机指向 Haiku 4\.5/,
   坑_用haiku55: /`subagent_type: "haiku55"`，\*\*不传 `model`\*\*/,
   坑_定义文件: /`~\/\.claude\/agents\/haiku55\.md`，frontmatter 里 `model: claude-haiku-5-5`/,
+  坑_同步装上: /原件在仓里 `agents\/subagents\/haiku55\.md`，`pnpm agents:sync` 把它装到每台机器/,
   坑_命令行: /`claude -p --model claude-haiku-5-5/,
   坑_核对实际id不是就停: /不是 `claude-haiku-5-5` 就停/,
   坑_costUSD不当账: /`costUSD` 对 5\.5 不准[^\n]*不能当账/,
@@ -284,9 +324,58 @@ describe('规矩：子代理按性价比分三档、核对实际 id、Haiku 5.5 
     expect(missingGuide({ SKILL: skillNoH55, GUIDE })).toEqual(['技能派活写法', '技能监控用haiku55']);
     const decisionNoH55 = DECISION.replaceAll('haiku55', 'haiku');
     expect(decisionNoH55).not.toBe(DECISION);
-    expect(missing(DECISION_RULES, decisionNoH55)).toEqual(['坑_用haiku55', '坑_定义文件']);
+    expect(missing(DECISION_RULES, decisionNoH55)).toEqual(['坑_用haiku55', '坑_定义文件', '坑_同步装上']);
     const decisionNoCheck = DECISION.replace('不是 `claude-haiku-5-5` 就停', '对一下');
     expect(decisionNoCheck).not.toBe(DECISION);
     expect(missing(DECISION_RULES, decisionNoCheck)).toEqual(['坑_核对实际id不是就停']);
+  });
+});
+
+describe('规矩：haiku55 定义在仓里、随 agents:sync 装到每台机器（#1393）', () => {
+  it('仓里的 agents/subagents/haiku55.md：name、完整 id、精简的 tools 白名单、汇报首行写模型 id 都对', () => {
+    expect(h55Problems(H55)).toEqual([]);
+  });
+
+  it('同步工具的名单（targets.ts 的 SUBAGENT_TARGET）列着 haiku55.md', () => {
+    expect(syncListsH55(TARGETS)).toBe(true);
+  });
+
+  it('【故意造出的失败】模型改成别名、旧版、Sonnet 或删掉，删掉 tools、塞进 MCP，去掉汇报首行：都查得出来', () => {
+    for (const bad of ['haiku', 'claude-haiku-4-5', 'inherit', 'claude-sonnet-5-5']) {
+      const cut = H55.replace(/^model: .*$/m, `model: ${bad}`);
+      expect(cut, '找不到 model 那一行，这条失败造不出来').not.toBe(H55);
+      expect(h55Problems(cut), bad).toHaveLength(1);
+    }
+    const noModel = H55.replace(/^model: .*\n/m, '');
+    expect(noModel).not.toBe(H55);
+    expect(h55Problems(noModel)).toEqual(['model 是「没写」，该是完整 id claude-haiku-5-5']);
+    const noTools = H55.replace(/^tools: .*\n/m, '');
+    expect(noTools).not.toBe(H55);
+    expect(h55Problems(noTools)).toEqual(['没写 tools 白名单（没写就继承全部工具，含 MCP）']);
+    const mcp = H55.replace(/^tools: (.*)$/m, 'tools: $1, mcp__codegraph__codegraph_explore');
+    expect(mcp).not.toBe(H55);
+    expect(h55Problems(mcp)).toEqual(['tools 里有子代理、技能或 MCP，不是精简配置']);
+    const noReport = H55.replace('First line of your report: `模型: <your model id>`.', '');
+    expect(noReport).not.toBe(H55);
+    expect(h55Problems(noReport)).toEqual(['正文没要求汇报首行写模型 id']);
+    expect(() => h55Problems('没有 frontmatter')).toThrow(/认不出 frontmatter/);
+  });
+
+  it('【故意造出的失败】名单里去掉 haiku55.md、或认不出 SUBAGENT_TARGET：都查得出来', () => {
+    const dropped = TARGETS.replace(/(\nexport const SUBAGENT_TARGET\b[\s\S]*?files: \[)'haiku55\.md'/, '$1');
+    expect(dropped, 'targets.ts 里找不到那一项，这条失败造不出来').not.toBe(TARGETS);
+    expect(syncListsH55(dropped)).toBe(false);
+    const gone = TARGETS.replace('export const SUBAGENT_TARGET', 'export const SOMETHING_ELSE');
+    expect(gone).not.toBe(TARGETS);
+    expect(() => syncListsH55(gone)).toThrow(/认不出 SUBAGENT_TARGET/);
+  });
+
+  it('【故意造出的失败】参考页、决定 0035 删掉「同步会装上」：查得出来', () => {
+    const guideCut = GUIDE.replace(/原件在仓里 `agents\/subagents\/haiku55\.md`，/, '');
+    expect(guideCut, '参考页里找不到那一句，这条失败造不出来').not.toBe(GUIDE);
+    expect(missingGuide({ SKILL, GUIDE: guideCut })).toEqual(['同步装haiku55']);
+    const decisionCut = DECISION.replace(/原件在仓里 `agents\/subagents\/haiku55\.md`，/, '');
+    expect(decisionCut).not.toBe(DECISION);
+    expect(missing(DECISION_RULES, decisionCut)).toEqual(['坑_同步装上']);
   });
 });
