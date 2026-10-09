@@ -6,9 +6,11 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   alertByKey,
+  countAlertFilings,
   insertAlertOnce,
   latestAlertByPrefix,
   listOpenAlerts,
+  recordAlertFiling,
   resolveAlertWithReason,
   updateOpenAlert,
 } from '../src/queries/alerts.ts';
@@ -249,5 +251,25 @@ describe('工作树对账要的查询', () => {
       { subtaskId: sub.id, taskId: task.id, owner: 'acme', name: 'widgets', issueNumber: 160, key: 'login' },
     ]);
     expect(await subtaskTreeRefs(t.db, [])).toEqual([]);
+  });
+});
+
+describe('卡住报警立案的笔数', () => {
+  it('只数这个仓、从北京时间今天 0 点起、立成的', async () => {
+    const dayStart = new Date('2026-10-08T16:00:00.000Z');
+    const file = (repo: string, dedupeKey: string, number: number, at: string) =>
+      recordAlertFiling(t.db, {
+        repo,
+        dedupeKey,
+        number,
+        actorId: 'engine:hourly-reconcile',
+        at: new Date(at),
+      });
+    await file('acme/widgets', 'a', 1, '2026-10-09T03:00:00.000Z');
+    await file('acme/widgets', 'b', 2, '2026-10-09T04:00:00.000Z');
+    await file('other/repo', 'c', 3, '2026-10-09T03:00:00.000Z');
+    await file('acme/widgets', 'd', 4, '2026-10-08T00:00:00.000Z');
+    expect(await countAlertFilings(t.db, 'acme/widgets', dayStart)).toBe(2);
+    expect(await countAlertFilings(t.db, 'other/repo', dayStart)).toBe(1);
   });
 });

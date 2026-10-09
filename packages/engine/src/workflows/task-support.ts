@@ -293,9 +293,22 @@ export function withDispatchProbeNote(feedback: readonly string[], line: string)
   return [...feedback.filter((item) => !item.startsWith('派前探测：')), line];
 }
 
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，其余单子仍是原来两句。 */
+/**
+ * #1406 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去。
+ * 三条陈年提醒按合并事实写：reconcile:pr 是「发生过」、对账不撤，还开着就立案；
+ * 同号若是 ledger，记账齐了由核对在立案前撤掉。
+ */
+export const ALERT_FILING_PR_NOTES = [
+  'PR 说明：reconcile:* 三条若条件早已不成立，对账在立案前撤掉；仍成立的立案。canary:broken 自己会撤，不立案。',
+  'PR 说明 #389：2026-09-27 thoerwink8 手动合。这条是 reconcile:pr（发生过、对账不撤），还开着就立案；同号的 reconcile:ledger 记账已齐，核对在立案前撤掉。',
+  'PR 说明 #431：2026-09-28 thoerwink8 手动合、绕过合并队列。这条是 reconcile:pr，对账不撤，还开着就立案；同号的 reconcile:ledger 账已齐，核对在立案前撤掉。',
+  'PR 说明 #1230：2026-10-07 fleet-dao-engine 自动合并耗时表，没有合并队列幂等账。这条是 reconcile:pr（缺记录、对账不撤），还开着就立案；同号的 reconcile:ledger 条件已不成立，核对在立案前撤掉。',
+] as const;
+
+/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
+  if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
   return did;
 }

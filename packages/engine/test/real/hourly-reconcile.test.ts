@@ -192,6 +192,12 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
     readIssueState: async () => {
       throw new Error('用例里不该读单状态');
     },
+    // 立案（#1406）走到这里：默认开成一张假单。要测写失败的用例自己换。
+    openIssue: async () => ({
+      number: 9001,
+      url: 'https://github.com/acme/widgets/issues/9001',
+      created: true,
+    }),
     claims: new Proxy({} as HourlyReconcileWiring['gh']['claims'], {
       get: (_t, prop) => () => {
         throw new Error(`用例里不该碰 PR 读写（${String(prop)}）`);
