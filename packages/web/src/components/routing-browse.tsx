@@ -80,7 +80,8 @@ function filterChipClass(pressed: boolean): string {
 
 function choiceClass(selected: boolean, extra?: string): string {
   return cn(
-    'h-7 rounded-md border px-1.5 text-caption',
+    // h-7 会把「全部厂家」上下切掉。不锁死高度，上下留出内边距，字才能完整落在框里。
+    'min-h-9 rounded-md border px-2 py-1.5 text-caption leading-normal',
     selected ? 'border-foreground bg-foreground/10 font-medium' : 'border-border bg-background',
     extra,
   );
@@ -390,7 +391,8 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
 }
 
 function entrySummary(e: CatalogEntry): string {
-  if (e.purposes.length === 0) return `没配进用途 · ${e.routeCount} 条路由`;
+  // 「没配进用途」只留在行内状态那一格。备注只写路由条数，避免同一行写两遍。
+  if (e.purposes.length === 0) return `${e.routeCount} 条路由`;
   const live = e.routes.filter((r) => r.verdict === 'live').length;
   return `${e.purposes.map(purposeLabel).join('、')} · ${e.routeCount} 条路，${live} 条活`;
 }
@@ -561,9 +563,6 @@ function CatalogRow({
         <span data-route-summary className="min-w-0 truncate text-caption text-muted-foreground">
           {entrySummary(e)}
         </span>
-        {nested && e.purposes.length === 0 ? (
-          <span className="text-caption text-muted-foreground">没配进用途</span>
-        ) : null}
         <ModelSwitch
           modelId={e.modelId}
           modelName={e.displayName}

@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 // 已下架的行只留状态胶囊上的「已下架」，不再另画一枚同样的小标签。
+// 没配进用途的模型行：行内状态和备注不要各写一遍「没配进用途」。
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import RoutingPage from '../routes/routing';
@@ -15,6 +16,13 @@ function retiredLabels(root: ParentNode): number {
     if (walker.currentNode.textContent?.trim() === '已下架') n += 1;
   }
   return n;
+}
+
+/** 读屏用的 sr-only 不占画面。这里只数看得见的字。 */
+function visibleText(el: Element): string {
+  const copy = el.cloneNode(true) as HTMLElement;
+  for (const hidden of copy.querySelectorAll('.sr-only')) hidden.remove();
+  return copy.textContent ?? '';
 }
 
 const catalogRow = async (id: string) => {
@@ -49,4 +57,11 @@ describe('已下架的行不把同一件事写两遍', () => {
     expect(retiredLabels(route)).toBe(1);
     expect(route.querySelector('[data-catalog-mark="retired"]')).toBeNull();
   });
+});
+
+test('没配进用途的模型行里，「没配进用途」只出现一次', async () => {
+  renderApp(<RoutingPage />, { route: '/routing?tab=models' });
+  const fable = await catalogRow('fable-5.1');
+  const text = visibleText(fable);
+  expect(text.split('没配进用途').length - 1).toBe(1);
 });
