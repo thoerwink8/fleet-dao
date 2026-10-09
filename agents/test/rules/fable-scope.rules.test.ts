@@ -5,7 +5,7 @@
 // 第 2 条的「子代理永不用 Fable」、第 4 条（本机主对话里由他自己选）照旧；第 2 条的「只用 Sonnet 或 Opus」被决定 0034
 // （创始人 2026-10-09 00:09 授权「改成最具有性价比的调整方案……全程你拍板」）换成按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档。
 // 下面钉住这几样：通用段改写时不能悄悄丢掉哪一样，也不能悄悄退回 0017 的「机器派的会话永不用」「子代理只用 Sonnet 或 Opus」
-// 或 #669 的「一律不用」。三档的细则（升级、核对实际 id、档位表）钉在 subagent-model.rules.test.ts。
+// 或 #669 的「一律不用」。三档的细则（升级、核对实际 id、档位表、决定 0035 的 haiku55 和级联）钉在 subagent-model.rules.test.ts。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -57,7 +57,9 @@ const FORBIDDEN: Record<string, RegExp> = {
 /** 指挥官技能里派子代理那条必须写着的：不写模型、或用 fork，子代理就跟着主会话用上 Fable。 */
 const COMMANDER_RULES: Record<string, RegExp> = {
   子代理分三档: /派 Claude 子代理按性价比分三档[^\n]*Haiku 5\.5[^\n]*Sonnet 5\.5[^\n]*Opus 5\.5/,
-  派子代理写明模型: /一律写明 `"haiku"`、`"sonnet"` 或 `"opus"`/,
+  // 决定 0035：别名 haiku 在本机指向 Haiku 4.5，Haiku 5.5 改走 subagent_type: "haiku55"、不传 model
+  派子代理写明模型:
+    /`model` 写明 `"sonnet"` 或 `"opus"`；Haiku 5\.5 写 `subagent_type: "haiku55"`、不传 `model`/,
   说清不写会跟主会话同一个模型: /不写就跟主会话同一个模型/,
   说清fork写了也不管用: /`fork`[^\n]*总跟主会话同一个模型[^\n]*写了 `model` 也不管用/,
   指向决定0017: /`docs\/decisions\/0017-fable-only-in-founder-main-session\.md`/,
