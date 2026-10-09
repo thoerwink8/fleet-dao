@@ -2,7 +2,6 @@
 // 一个本地 git「镜像」（顶替 github 包的 fetchMainline / bundleCommits），一个记属主的假工作树管家，
 // 三个不起真执行体的假插头：Claude 的按剧本发事件、改工作树、交报告；cursor、grok 的拿法国真跑的过程记录
 // （packages/adapters/test/fixtures/cursor-agent、grok）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
-import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,6 +49,7 @@ import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/ex
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
 import { type SessionOrgControl, type SessionOrgDeps, sessionOrgReader } from '../../src/real/session-org.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
+import { runChildOk } from '../child.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
 export const MIN = 60_000;
@@ -97,7 +97,7 @@ const GIT_ENV = {
   GIT_CONFIG_NOSYSTEM: '1',
 };
 export const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
+  runChildOk('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
 
 /**
  * 目录：两个 Claude 订阅池各一条 Claude Code 路由（同一个会话用户），一条 codex 路由（没接上）。两个池都标成会话用户挂着的

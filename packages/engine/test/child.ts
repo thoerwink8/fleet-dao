@@ -5,6 +5,7 @@
 // 失败（本机几十个测试进程一起跑时，real/hosts 里找 cursor-agent 的那几条就这么红过）。所以卡死由这里管：子进程超过
 // 上限没退出就杀掉，抛出是哪条命令卡住。起不来、被信号杀掉也抛，不拿 null 退出码冒充「命令失败」。
 // 同样的一份在 packages/hygiene、packages/api 的 test/child.ts：各包的测试自成一体，改这份时看一眼那两份。
+// runChildOk 只加在这一份：退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。runChild 的签名和行为不动。
 import { spawnSync } from 'node:child_process';
 
 /** 一个子进程最多跑多久。只防卡死、不量快慢：正常起一个 node 或 sh 不到一秒，满载的机器上也就几秒。 */
@@ -43,4 +44,32 @@ export function runChild(command: string, args: readonly string[], options: Chil
     throw new Error(`子进程没跑完（${[command, ...args].join(' ').slice(0, 200)}）：${why}`);
   }
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+/**
+ * 从 execFileSync 迁过来的选项。encoding 为 utf8 时交回字符串（runChild 本来就按 utf8 读）。
+ * stdio 不传也是 pipe。maxBuffer 是 execFile 的输出上限，spawn 没有这一项，卡死由 runChild 的时间上限管。
+ */
+export interface ChildOkOptions extends ChildOptions {
+  encoding?: 'utf8';
+  stdio?: 'pipe';
+  maxBuffer?: number;
+}
+
+/** 退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。 */
+export function runChildOk(command: string, args: readonly string[], options: ChildOkOptions = {}): string {
+  const r = runChild(command, args, toChildOptions(options));
+  if (r.status !== 0) {
+    throw new Error(`${[command, ...args].join(' ').slice(0, 200)} 退出码 ${r.status}：${r.stderr.trim()}`);
+  }
+  return r.stdout.trim();
+}
+
+function toChildOptions(options: ChildOkOptions): ChildOptions {
+  const out: ChildOptions = {};
+  if (options.cwd !== undefined) out.cwd = options.cwd;
+  if (options.env !== undefined) out.env = options.env;
+  if (options.input !== undefined) out.input = options.input;
+  if (options.limitMs !== undefined) out.limitMs = options.limitMs;
+  return out;
 }
