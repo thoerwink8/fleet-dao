@@ -2,7 +2,12 @@
 import { renderPrBody } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
 import { conflictFilesInMergeMessage } from '../src/real/user-git.ts';
-import { CONFLICT_HANDOFF_CAUSE, conflictFilesForHandoff, taskPrDid } from '../src/workflows/task-support.ts';
+import {
+  ALERT_FILING_PR_NOTES,
+  CONFLICT_HANDOFF_CAUSE,
+  conflictFilesForHandoff,
+  taskPrDid,
+} from '../src/workflows/task-support.ts';
 
 const FILE = 'packages/engine/src/real/index.ts';
 
@@ -44,5 +49,18 @@ describe('PR 正文里的根因', () => {
     expect(body).toContain('没进会话提示词');
     expect(body).toContain('不是解完了没提交');
     expect(taskPrDid(12, 2, 1)).toEqual(['按 #12 的要求动手（第 2 轮）', '改了 1 个文件']);
+  });
+
+  it('#1406 的正文逐条写上 #389、#431、#1230 的处置，别的单子不带', () => {
+    const body = renderPrBody({
+      requirement: 1406,
+      did: taskPrDid(1406, 2, 4),
+      verified: ['相关测试'],
+    });
+    expect(body).not.toContain('另有');
+    for (const line of ALERT_FILING_PR_NOTES) expect(body).toContain(line);
+    expect(body).toContain('条件早已不成立');
+    expect(body).toContain('仍成立的立案');
+    expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
   });
 });
