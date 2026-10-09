@@ -1,4 +1,4 @@
-// 文档指针检查：docs/design.md、docs/ops.md、README.md 这几份活文档里，指向仓内文件的路径、
+// 文档指针检查：docs/design.md、docs/ops.md、README.md，以及 docs/design/ 下的 .md（目录还没有就只有前三份）里，指向仓内文件的路径、
 // 「第 X 节」「X.Y」这类章节、「「X」一节」「README「X」」这类标题，都要指得到；指不到的报 文件:行。
 // 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
 // 不以仓里现有的顶层目录或文件开头的路径（/etc/…、~/…、标签名 model/ 这类）、所在文档没有小节编号时的小数（版本号）。
@@ -18,8 +18,17 @@ import {
 } from './markdown.ts';
 import type { RepoView } from './repo.ts';
 
-/** 要查的几份活文档。 */
+/** 固定要查的三份活文档。docs/design/ 下的模块文件由 docFiles 加上。 */
 export const DOCS = ['docs/design.md', 'docs/ops.md', 'README.md'] as const;
+
+/** 这次要查的文件：上面三份，加上 docs/design/ 下按名字排的 .md。目录不存在就只有三份。 */
+export function docFiles(repo: RepoView): string[] {
+  const extra = (repo.list('docs/design') ?? [])
+    .filter((name) => name.endsWith('.md'))
+    .sort()
+    .map((name) => `docs/design/${name}`);
+  return [...DOCS, ...extra];
+}
 
 export type PointerKind = 'link' | 'path' | 'section' | 'subsection' | 'quote' | 'item' | 'title';
 
@@ -108,7 +117,7 @@ const emptyCounts = (): Record<PointerKind, number> => ({
   title: 0,
 });
 
-export function checkDocPointers(repo: RepoView, files: readonly string[] = DOCS): Report {
+export function checkDocPointers(repo: RepoView, files: readonly string[] = docFiles(repo)): Report {
   const checker = new Checker(repo);
   for (const file of files) checker.checkFile(file);
   const checked = emptyCounts();
