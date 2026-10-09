@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // 任务页顶上的暂停、继续、叫停（#1496）：不该出现的不画。
 // 已暂停不画「暂停」，在跑且没暂停不画「继续」；已完成、已失败一个都不画。
+// 停滞是停下等人，给继续、叫停、重做，不画暂停。合并中在等合并，不画暂停。
 // 真要置灰的按钮，悬停要写明为什么。地址是纯数字时，「没有这张单」要多写一句单号和任务编号的区别。
 import { cleanup, screen } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
@@ -39,6 +40,30 @@ describe('任务页操作按钮按状态', () => {
     for (const button of document.querySelectorAll('[data-task-actions] button')) {
       expect((button as HTMLButtonElement).disabled, button.textContent ?? '').toBe(false);
     }
+  });
+
+  test('停滞：不画暂停，给继续、叫停、重做', () => {
+    for (const paused of [undefined, '已暂停：停下等人'] as const) {
+      const view = renderApp(<ActionButtons target={{ ...base, state: 'stalled', paused }} />);
+      expect(labels(), paused ?? '没暂停').toEqual(['继续', '叫停', '重做']);
+      expect(screen.queryByRole('button', { name: '暂停' }), paused ?? '没暂停').toBeNull();
+      for (const button of document.querySelectorAll('[data-task-actions] button')) {
+        expect((button as HTMLButtonElement).disabled, button.textContent ?? '').toBe(false);
+      }
+      view.unmount();
+    }
+  });
+
+  test('合并中：不画暂停；没暂停只给叫停，已经暂停给继续和叫停', () => {
+    const open = renderApp(<ActionButtons target={{ ...base, state: 'merging' }} />);
+    expect(labels()).toEqual(['叫停']);
+    expect(screen.queryByRole('button', { name: '暂停' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '继续' })).toBeNull();
+    open.unmount();
+
+    renderApp(<ActionButtons target={{ ...base, state: 'merging', paused: '已暂停：等人' }} />);
+    expect(labels()).toEqual(['继续', '叫停']);
+    expect(screen.queryByRole('button', { name: '暂停' })).toBeNull();
   });
 
   test('已完成、已失败：不画任何按钮', () => {
