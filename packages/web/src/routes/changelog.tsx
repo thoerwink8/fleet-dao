@@ -11,8 +11,9 @@ import { useFranceReleasedCommits } from '../api/client';
 import type { ReleasedCommits } from '../api/types';
 import { MarkdownLite } from '../components/markdown-lite';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { readChangelog, releasedBody } from '../lib/changelog';
-import { formatAgo, formatDateTime } from '../lib/format';
+import { formatAgo, formatDateTime, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
@@ -21,6 +22,9 @@ export function meta() {
 }
 
 const EVENT_TEXT = { release: '发布', rollback: '回滚', 'auto-rollback': '自动回滚' } as const;
+
+/** 已发布的提交每 5 分钟重拉一次。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
+const CHANGELOG_STALE_AFTER_MS = 5 * TIME.MIN;
 
 type Commits = Extract<ReleasedCommits, { state: 'ok' }>['commits'];
 
@@ -73,8 +77,7 @@ function CommitList({ commits, now }: { commits: Commits; now: number }) {
   );
 }
 
-function ReleasedCommitsPanel() {
-  const query = useFranceReleasedCommits();
+function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceReleasedCommits> }) {
   const now = useNow();
   const data = query.data;
   return (
@@ -113,13 +116,27 @@ function ReleasedCommitsPanel() {
 export default function Changelog() {
   // 对照区看哪一段：null = 还没收进版本的那段（默认）；否则是 CHANGELOG 里的某一版
   const [picked, setPicked] = useState<string | null>(null);
+  const query = useFranceReleasedCommits();
+  const { refetch, isFetching, dataUpdatedAt } = query;
+  const refresh = (
+    <RefreshBar
+      onRefresh={() => void refetch()}
+      isFetching={isFetching}
+      dataUpdatedAt={dataUpdatedAt}
+      staleAfterMs={CHANGELOG_STALE_AFTER_MS}
+    />
+  );
   let data: ReturnType<typeof readChangelog>;
   try {
     data = readChangelog();
   } catch (error) {
     return (
-      <Page title="更新日志" description="法国已发布的提交，和仓根 CHANGELOG.md 的一份对照。">
-        <ReleasedCommitsPanel />
+      <Page
+        title="更新日志"
+        description="法国已发布的提交，和仓根 CHANGELOG.md 的一份对照。"
+        actions={refresh}
+      >
+        <ReleasedCommitsPanel query={query} />
         <div className="mt-4">
           <LoadError error={error} what="CHANGELOG" />
         </div>
@@ -132,8 +149,9 @@ export default function Changelog() {
     <Page
       title="更新日志"
       description="上面是法国已发布的提交（发版单位是主线提交）；下面是仓根 CHANGELOG.md 的一份对照，按版本写的记录是旧做法留下的。"
+      actions={refresh}
     >
-      <ReleasedCommitsPanel />
+      <ReleasedCommitsPanel query={query} />
 
       {/* 版式（驾驶舱改版 2026-10-07）：左边正文（Markdown 渲染成小标题和列表），右边目录（还没收进版本的 + CHANGELOG 里的每一版，点一版看正文）。 */}
       <h2 className="mt-8 mb-3 text-sm font-semibold">CHANGELOG.md 对照</h2>
