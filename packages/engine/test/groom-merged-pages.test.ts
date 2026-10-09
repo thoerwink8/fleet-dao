@@ -121,6 +121,7 @@ describe('整理待办 · closed PR 超过 10 页仍在窗口内', () => {
       openMilestones: [],
       closed: [],
       pulls: [],
+      stoppedTasks: [],
       mainHead: 'b'.repeat(40),
     };
     const logs: { level: string; message: string; fields?: Record<string, unknown> }[] = [];
