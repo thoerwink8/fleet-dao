@@ -1271,14 +1271,14 @@ describe('排序 · 版本先后 → 当前版本 → 规模 → 交给引擎 �
 describe('每小时限速', () => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => issue({ number: 200 + i }));
 
-  it(`一小时里最多起 ${MAX_STARTS_PER_HOUR} 条：已经起了 11 条，这一轮只再起 1 条`, async () => {
+  it(`一小时里最多起 ${MAX_STARTS_PER_HOUR} 条：已经起了 19 条，这一轮只再起 1 条`, async () => {
     const h = harness({}, { issues: many(3), hourStarted: MAX_STARTS_PER_HOUR - 1 });
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([200]);
     expect(h.logs.some((l) => l.text.includes('hourly_cap×2'))).toBe(true);
   });
 
-  it(`【故意造出的失败】滚动一小时里已经起了 ${MAX_STARTS_PER_HOUR} 条：第 13 条不起，记 ok（不是没跑成）`, async () => {
+  it(`【故意造出的失败】滚动一小时里已经起了 ${MAX_STARTS_PER_HOUR} 条：第 21 条不起，记 ok（不是没跑成）`, async () => {
     const h = harness({}, { issues: many(2), hourStarted: MAX_STARTS_PER_HOUR });
     const run = await runIntakeJob(h.deps);
     expect(h.started).toEqual([]);
@@ -1291,20 +1291,20 @@ describe('每小时限速', () => {
     expect(h.started).toHaveLength(3);
   });
 
-  it('【故意造出的失败】旧上限 6 不再生效：已经起了 6 条时，8 张合格的单这一轮仍能起（每轮上限 5 先到）', async () => {
-    const h = harness({}, { issues: many(8), hourStarted: 6 });
+  it('【故意造出的失败】旧上限 12 不再生效：已经起了 12 条时，8 张合格的单这一轮仍能起（每轮上限 5 先到）', async () => {
+    const h = harness({}, { issues: many(8), hourStarted: 12 });
     await runIntakeJob(h.deps);
     expect(h.started).toHaveLength(5);
     expect(h.logs.some((l) => l.text.includes('hourly_cap'))).toBe(false);
   });
 
-  it('已经起了 7 条时，8 张合格的单这一轮还能起 5 条；已经起了 11 条，只剩 1 条', async () => {
-    const seven = harness({}, { issues: many(8), hourStarted: 7 });
-    await runIntakeJob(seven.deps);
-    expect(seven.started).toHaveLength(5);
-    const eleven = harness({}, { issues: many(8), hourStarted: 11 });
-    await runIntakeJob(eleven.deps);
-    expect(eleven.started).toHaveLength(1);
+  it('已经起了 15 条时，8 张合格的单这一轮还能起 5 条；已经起了 19 条，只剩 1 条', async () => {
+    const fifteen = harness({}, { issues: many(8), hourStarted: 15 });
+    await runIntakeJob(fifteen.deps);
+    expect(fifteen.started).toHaveLength(5);
+    const nineteen = harness({}, { issues: many(8), hourStarted: 19 });
+    await runIntakeJob(nineteen.deps);
+    expect(nineteen.started).toHaveLength(1);
   });
 
   it('限速时不为排在后面的单多读 GitHub：满了就不现读', async () => {
@@ -1446,7 +1446,7 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
   });
 
   it('【故意造出的失败】普通单仍受限速。把巡检单的每小时豁免去掉，名额用满时限速挤掉巡检单，这条必须红', async () => {
-    // 滚动一小时已经起满 12 条。豁免在：只起巡检单，两张普通单记 hourly_cap。
+    // 滚动一小时已经起满 20 条。豁免在：只起巡检单，两张普通单记 hourly_cap。
     // 豁免被去掉：巡检单和普通单一律被 hourly_cap 挤掉，started 里没有 70，这条红。
     const h = across(
       [
