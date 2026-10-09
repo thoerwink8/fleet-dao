@@ -58,7 +58,7 @@ export function RunTimeline({
 
   return (
     <div>
-      <div className="mb-1 flex justify-between text-[10px] text-muted-foreground md:pl-[172px]">
+      <div className="mb-1 flex justify-between text-micro text-muted-foreground md:pl-timeline-label">
         <span className="num">{formatClock(new Date(start).toISOString())}</span>
         <span className="num">{live ? '现在' : formatClock(new Date(end).toISOString())}</span>
       </div>
@@ -71,13 +71,13 @@ export function RunTimeline({
           const running = isRunning(r);
           const usage = r.endedAt ? runUsage(r) : undefined;
           return (
-            <li key={r.id} className="grid gap-x-3 gap-y-1 md:grid-cols-[160px_1fr]">
+            <li key={r.id} className="grid gap-x-3 gap-y-1 md:grid-cols-timeline">
               <div className="min-w-0 text-xs">
                 <div className="flex items-center gap-1.5">
                   <span className="text-muted-foreground">{stageLabel[r.stage]}</span>
                   <span
                     className={cn(
-                      'rounded px-1 text-[10px]',
+                      'rounded px-1 text-micro',
                       running ? 'bg-st-run/15 text-ink-run' : 'bg-muted text-muted-foreground',
                     )}
                   >
@@ -106,7 +106,7 @@ export function RunTimeline({
                     />
                   ) : null}
                 </div>
-                <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+                <div className="mt-1 flex flex-wrap gap-x-3 text-caption text-muted-foreground">
                   {usage?.missingTime ? (
                     <span className="text-ink-stall">时刻认不出，时长没读到</span>
                   ) : (

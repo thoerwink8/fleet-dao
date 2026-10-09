@@ -42,7 +42,7 @@ function Chip({
       )}
       <Icon className="size-3 opacity-70" aria-hidden />
       <span className="shrink-0 font-medium whitespace-nowrap">{label}</span>
-      <span className="min-w-0 max-w-[320px] truncate text-[11px] opacity-90" title={detail}>
+      <span className="min-w-0 max-w-health-detail truncate text-caption opacity-90" title={detail}>
         {detail}
       </span>
     </span>
