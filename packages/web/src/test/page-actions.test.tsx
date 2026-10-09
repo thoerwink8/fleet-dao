@@ -86,9 +86,17 @@ describe('任务页上的暂停、继续、叫停、重做（#820 片 3，#856�
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  test('点继续：发 {action:resume}', async () => {
+  test('先暂停，再点继续：发 {action:resume}', async () => {
     const { taskAction } = openTask();
-    fireEvent.click(within(await actionBox()).getByRole('button', { name: '继续' }));
+    fireEvent.click(within(await actionBox()).getByRole('button', { name: '暂停' }));
+    await confirm('做完这一段再停');
+    await waitFor(() => expect(taskAction).toHaveBeenCalledWith('t-12', { action: 'pause', mode: 'soft' }));
+    const resume = () =>
+      within(document.querySelector('[data-task-actions]') as HTMLElement).getByRole('button', {
+        name: '继续',
+      });
+    await waitFor(() => expect((resume() as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(resume());
     await waitFor(() => expect(taskAction).toHaveBeenCalledWith('t-12', { action: 'resume' }));
   });
 
@@ -125,17 +133,13 @@ describe('手机上看板列表的操作菜单（#856 第 1 处）', () => {
     });
   };
 
-  test('在跑的单：菜单里有暂停、继续、叫停；点继续发 {action:resume}', async () => {
-    const api = createMockApi({ live: false });
-    const taskAction = vi.spyOn(api, 'taskAction');
-    renderApp(<BoardTree running={[runningItem]} flow={[]} />, { api });
+  test('在跑的单：菜单里有暂停、叫停，不给继续', async () => {
+    renderApp(<BoardTree running={[runningItem]} flow={[]} />);
     openMenu();
     const menu = await screen.findByRole('menu');
     expect(within(menu).getByRole('menuitem', { name: '暂停' })).toBeTruthy();
-    expect(within(menu).getByRole('menuitem', { name: '继续' })).toBeTruthy();
+    expect(within(menu).queryByRole('menuitem', { name: '继续' })).toBeNull();
     expect(within(menu).getByRole('menuitem', { name: '叫停' })).toBeTruthy();
-    fireEvent.click(within(menu).getByRole('menuitem', { name: '继续' }));
-    await waitFor(() => expect(taskAction).toHaveBeenCalledWith('t-12', { action: 'resume' }));
   });
 
   test('【故意造出的失败】继续被后端拒：弹「继续没成功」和后端的原因', async () => {
@@ -143,7 +147,13 @@ describe('手机上看板列表的操作菜单（#856 第 1 处）', () => {
     const taskAction = vi
       .spyOn(api, 'taskAction')
       .mockRejectedValueOnce(new ApiError(409, 'task_finished', '任务已经结束（done），不能再继续'));
-    renderApp(<BoardTree running={[runningItem]} flow={[]} />, { api });
+    renderApp(
+      <BoardTree
+        running={[{ ...runningItem, waitingReason: 'paused', paused: '已暂停：被人暂停（frank）' }]}
+        flow={[]}
+      />,
+      { api },
+    );
     openMenu();
     fireEvent.click(within(await screen.findByRole('menu')).getByRole('menuitem', { name: '继续' }));
     await waitFor(() =>

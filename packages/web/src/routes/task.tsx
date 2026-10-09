@@ -145,7 +145,15 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
   );
 }
 
-/** 没有这张单（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。 */
+const GITHUB_ISSUE_HINT =
+  '这看起来是 GitHub 单号。任务页地址要用任务编号（例如 t-12），到主页的在跑列表里点进去';
+
+/** 地址参数一个数字都不夹别的字：人多半把 GitHub 单号填进了任务页。 */
+function looksLikeIssueNumber(taskId: string | undefined): boolean {
+  return taskId !== undefined && /^[0-9]+$/.test(taskId);
+}
+
+/** 没有这张单（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。纯数字再补一句单号和任务编号的区别。 */
 function Missing({ taskId }: { taskId: string | undefined }) {
   return (
     <Panel>
@@ -159,6 +167,7 @@ function Missing({ taskId }: { taskId: string | undefined }) {
                 库里没有编号为「<span className="num">{taskId ?? ''}</span>
                 」的单：可能链接里的编号写错了，或这张单已经不在了。
               </span>
+              {looksLikeIssueNumber(taskId) ? <span className="mt-2 block">{GITHUB_ISSUE_HINT}</span> : null}
               <Button asChild size="sm" variant="outline" className="mt-3">
                 <Link to="/">回主页</Link>
               </Button>

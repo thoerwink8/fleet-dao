@@ -46,8 +46,8 @@
 | 7244、6944 | 127.0.0.1 | Temporal history（gRPC、membership） | |
 | 7245、6945 | 127.0.0.1 | Temporal matching | |
 | 7249、6949 | 127.0.0.1 | Temporal worker | |
-| 8787/tcp | 10.99.0.2 | 驾驶舱后端（`FLEET_COCKPIT_LISTEN`） | ufw 只在隧道网卡 `wg-fleet` 上给 10.99.0.1 放行；后端起了才有 |
-| 8788/tcp | 127.0.0.1 | fleet 命令接口（`FLEET_AGENT_LISTEN`） | 会话用得到，不对外 |
+| 8787/tcp | 10.99.0.2 | 驾驶舱后端（`FLEET_COCKPIT_LISTEN`），`fleet-api.socket` 攥着 | ufw 只在隧道网卡 `wg-fleet` 上给 10.99.0.1 放行；socket 单元在听，重启后端那几秒也不断 |
+| 8788/tcp | 127.0.0.1 | fleet 命令接口（`FLEET_AGENT_LISTEN`），`fleet-api.socket` 攥着 | 会话用得到，不对外。改这两个监听地址要三处一起改：`api.env` 的 `FLEET_COCKPIT_LISTEN`、`FLEET_AGENT_LISTEN`，`deploy/release.sh` 的 `COCKPIT`、`AGENT_API` 两个常量，`deploy/france/fleet-api.socket` 的两个 `ListenStream` |
 | 8790/tcp、udp | 10.99.0.2 | self-proxy（不归本仓管，README「两台机器」） | `self-proxy-exit.service`：「法国-中转」的出口，香港经隧道转来；ufw 只在 `wg-fleet` 上给 10.99.0.1 放行（注释 `self-proxy exit`）。别动 |
 | 443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-direct.service`：「法国-直连」入口，对公网开，ufw 注释 `self-proxy direct`。别动 |
 | 4318/tcp | 127.0.0.1 | 会话用户自己的 Mirasim 服务，本地模式常驻（`fleet-mirasim-session.service`，第五节「会话用户的 Mirasim」，#424） | 避开旧系统仍留着共用的 4316 和另外两个还可能没清干净的 4315/4317（§1.2）；引擎认端口靠现读 `local-<端口>.token` 的文件名，不认这张表 |
@@ -102,7 +102,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/postgresql/16/main/conf.d/fleet.conf` | root 644 | 库只听本机 |
 | `/etc/systemd/system/`：`fleet-temporal.service`、`fleet-agents.slice`、`fleet-firewall.service`、`postgresql@16-main.service.d/fleet.conf` | root 644 | 单元；最后那个让库的进程没了（干净退出也算）就拉起来——装包自带的是 `Restart=no` |
 | `/etc/systemd/system/fleet-mirasim-session.service` | root 644 | 会话用户自己的 Mirasim 服务，本地模式常驻（第五节「会话用户的 Mirasim」，#424）：服务端本体不在时 france.sh 不装这个单元（待配）；在了才装、`enable`、起来。归自动档：发版后 `france.sh --auto-tier` 也装它，单元文件内容真变了才重启（#1274） |
-| `/etc/systemd/system/`：`fleet-engine.service`、`fleet-api.service` | root 644 | 应用单元，发布脚本从要发的那版里取来装上，只装 `release.env` 启用了的（第九节） |
+| `/etc/systemd/system/`：`fleet-engine.service`、`fleet-api.service`、`fleet-api.socket` | root 644 | 应用单元，发布脚本从要发的那版里取来装上，只装 `release.env` 启用了的（第九节）。`fleet-api.socket` 攥着 8787 和 8788；改监听地址要 `api.env`、`release.sh` 的 `COCKPIT` 和 `AGENT_API` 两个常量、socket 单元三处一起改 |
 | `/home/fleet/.local/bin/pnpm` | fleet | corepack 的垫片，版本跟仓根 `package.json` 的 `packageManager`；发布（第九节）以 fleet 装依赖、打包用它。会话读不到 fleet 的家，用的是 `/usr/local/bin/pnpm` |
 | `/home/fleet-agent-carpool/.local/bin/reclaude` | 会话用户 | reclaude 二进制：france.sh 只在没有时装（和 pilot 同一个版本、sha256），缺了读回判红；登录见第五节 |
 | `/home/fleet-agent-carpool/.local/share/cursor-agent/versions` | 会话用户 | cursor-agent，一个版本一个目录（命令还链到 `~/.local/bin/cursor-agent`）：france.sh 照引擎的找法一个能跑的都没有时，以会话用户自己的身份跑官方安装脚本装，之后它自己升级；缺了、跑不成读回判红；不登录，用下面那把 API 密钥 |
@@ -470,8 +470,8 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 # 0. 先停自动发布单元（不然它每 5 分钟还会读一轮、发完版还会装自动档），再停应用、撤掉单元（各版代码还在 /srv/fleet-dao-releases）
 systemctl disable --now fleet-auto-release.timer
 rm /etc/systemd/system/fleet-auto-release.service /etc/systemd/system/fleet-auto-release.timer && rm -r /usr/local/lib/fleet-dao
-systemctl disable --now fleet-engine.service fleet-api.service
-rm -f /etc/systemd/system/fleet-engine.service /etc/systemd/system/fleet-api.service
+systemctl disable --now fleet-engine.service fleet-api.service fleet-api.socket
+rm -f /etc/systemd/system/fleet-engine.service /etc/systemd/system/fleet-api.service /etc/systemd/system/fleet-api.socket
 # 1. 停用，不删数据
 systemctl disable --now fleet-temporal.service fleet-agents.slice wg-quick@wg-fleet.service
 systemctl stop postgresql@16-main.service   # 库还在，start 就回来
@@ -515,7 +515,7 @@ rm /root/.ssh/authorized_keys2
 - 香港站点配置里，转发给法国的 `location` 不要自己写 `proxy_set_header`：写了一条，server 那一层的就全部不继承，清 `Authorization`、`X-Fleet-Acting-Feishu` 的两条也跟着失效（法国 france.sh 的读回会查出来）。
 - 香港到法国的连接留着复用（`deploy/hk/nginx-https.conf` 的 `upstream fleet_dao_api`）：香港到法国一趟往返约 0.2 秒，每个请求都新建连接就多付这一趟（2026-09-26 实测单个 `/api/me` 0.40 → 0.20 秒）。空闲连接由香港先关：nginx 的 `keepalive_timeout`（5 分钟）必须比法国后端的空闲超时（`packages/api/src/keep-alive.ts`，6 分钟）短，反过来后端刚关的连接 nginx 还拿去发，POST 会偶尔 502（`packages/api/test/keep-alive.test.ts` 读 nginx 配置核对两边）。所以改这两个值时先发法国后端、再重跑香港。转给法国的普通请求 1 分钟没回音回 504（连接是复用的，隧道断着时不设短了要干等 TCP 自己放弃）；实时推送 `/api/events` 单列一段，读超时 1 小时。香港是 nginx 1.18，`keepalive_time` 这类 1.19.10 才有的指令用不了。
 - 数据库迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。做不到的，退回时发布脚本会拦：库里跑过的迁移比要退到的那一版带的多，就不退（第九节）。
-- 应用单元（`deploy/france/fleet-*.service`）跟着版本走：改单元就是发一版，退回时单元也跟着退。引擎单元不能开 `NoNewPrivileges` 和挂载隔离（第五节、单元里的注释）。
+- 应用单元（`deploy/france/fleet-*.service`，以及 `fleet-api.socket`）跟着版本走：改单元就是发一版，退回时单元也跟着退。引擎单元不能开 `NoNewPrivileges` 和挂载隔离（第五节、单元里的注释）。改 `fleet-api.socket` 的监听地址要 `api.env`、`release.sh` 的 `COCKPIT` 和 `AGENT_API` 两个常量、socket 单元三处一起改（第二节端口表）。
 - 升香港网关的 node：改 `hk.sh` 顶部的 `NODE_VERSION`、`NODE_SHA256`（官方 `SHASUMS256.txt` 里 `linux-x64.tar.gz` 那一行）→ 重跑 hk.sh（网关在跑就重启，换上新 node）。旧版本的目录留着，要删手动删。
 - 还没验过的：重启机器（单元开机自起、nft 表在服务之前载入）——这一轮没重启过机器。旧系统的单元文件已经删光，开机不会再复活。
 
@@ -547,12 +547,12 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自
 2. 构建：代码解到临时目录，以 fleet 跑 `pnpm install --frozen-lockfile`（依赖整份拷进来，不和 fleet 的 pnpm 仓库共用文件）；有 `packages/web` 就构建它（产出 `dist/client`），没有就用占位页；再放上健康页 `/health/`、版本标记 `release.json`（带完整提交号，香港只给经隧道来的读）。演示版已删（#1223）：不再构建 `web-demo/`，`.fleet-release` 里也不再写 `demo_path=`。有 `packages/feishu` 就把飞书网关连同依赖打成一个文件 `gateway/gateway.mjs`（第十二节）。然后整棵树换成 root、fleet 只读，挪到 `/srv/fleet-dao-releases/<提交号>`。第三方代码不以 root 跑；root 照着起服务的单元文件，是换属主之后 root 才从 git 里取出来放进 `.units/` 的。构建日志在这一版目录的 `.fleet-build.log`。
 3. 先试通香港这次要发的那几样（`FLEET_HK_PARTS`，见本节末尾）：发静态文件（或老配置里还留着已删的演示版键、要清香港上的老目录）就 `rsync -n`（什么都不传），发网关就问一次网关入口的 `status`。不通就停，不切版本——不然健康检查必不过，新旧两版会一起被记成不健康。
 4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。迁移完装目录：以 fleet 跑这一版的目录装载器，把这一版自己带的 `deploy/catalog.json` 装进库（下面「目录配置」）；这一版没带它、装不成、装完读不回就停、不切。目录装完接着装路由两层：以 fleet 跑这一版的路由两层装载器，把这一版自己带的默认骨架 `packages/db/routing.default.json` 只补缺地装进库（下面「目录配置」末尾的「路由两层」）；装不成、读不回、装完是 0 行同样停、不切。
-5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。
+5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。这一版带 `.socket` 的（`fleet-api.socket`），切 current 之前按「这一版带不带、机器上有没有」装上、留着或撤掉；装不上（停不掉正占着端口的旧服务、socket 起不来）就不切。socket 起不来时撤掉刚写上的单元，把刚停的旧服务拉回来，端口仍由旧服务自己听。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。头一次装上 socket、或从带 socket 的版本退回到不带的，服务强制重启。
 6. 发静态文件：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`，每处都是新文件先落临时名、最后一起换上，旧文件最后删（在香港属 root）；按内容比、不带修改时间：内容没变的文件不传、不算变化。香港的 rrsync 同一时刻只让一个进来、后到的直接被拒，所以法国这头往香港推（这一步、第 3 步的试通、france.sh 读回的试跑）都先拿同一把锁 `/run/lock/fleet-dao-hk-rsync.lock` 排队，等 2 分钟还轮不到就照实报红（2026-09-26 发布撞上过，没切版本）。
    - 明写了 `web`（默认不发）：驾驶舱静态文件连健康页、`release.json` 整套发到根地址，根上不是这一版的文件会被删掉（香港上老的 `/demo/` 目录也在内，不再排除）。
    - 香港上老的 `/demo/` 目录（演示版已删，创始人 2026-10-07，#1223）：发了 `web` 的发布、或 `release.env` 里还留着已删的键（`FLEET_DEMO_PATH`、`FLEET_HK_PARTS` 里的 `demo`，读到了认下来、丢掉）的发布，经上传的路删一遍（空目录往上同步，`--delete` 只落在 `/demo/` 这一个目录里，别的一概 exclude），再读回 `https://<域名>/demo/` 要是 404：不是 404、读不出来、删不掉都报红，不当成没事；目录本来就不在也算过（一次性、幂等）；删成了顺手删掉法国上老的发布记录 `.demo-published`。香港站点配置对 `/demo` 一律回 404（不回落到首页），所以站点配置换新前后读回都是 404，不靠它判目录在不在。健康检查再读回一遍。
    接着发飞书网关（第十二节）。根地址上手放的东西，下次发布（发 `web` 时）就没了。
-7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）、飞书网关 `feishu_gateway`（网关、隧道、香港出事就红，后端刚重启、网关还在退避重连时是「没查成」）、会话账号切换 `session_org`（引擎切号没成、切完读回不在线、拼车恢复时刻读不到、组织读数变了引擎没切过号，跟着上游额度、登录、人手动切号变红）、全流程巡检 `canary`（跟着每 6 小时一轮的结论变红）、GitHub 机器人权限 `github_app`（GitHub 上的 App 权限被改了、新权限没点接受，引擎每小时自检一次）、看门狗 `watchdog`（跟着引擎每 5 分钟一轮变红，切版本那一刻它的下一轮还没来）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；香港上老的 `/demo/` 读回要是 404（不是 404 报红：被谁发回去了，或站点配置回落到首页）；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
+7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；装了 `fleet-api.socket` 的，它也要在听（没在听算没过，下次重启又会拒连）；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）、飞书网关 `feishu_gateway`（网关、隧道、香港出事就红，后端刚重启、网关还在退避重连时是「没查成」）、会话账号切换 `session_org`（引擎切号没成、切完读回不在线、拼车恢复时刻读不到、组织读数变了引擎没切过号，跟着上游额度、登录、人手动切号变红）、全流程巡检 `canary`（跟着每 6 小时一轮的结论变红）、GitHub 机器人权限 `github_app`（GitHub 上的 App 权限被改了、新权限没点接受，引擎每小时自检一次）、看门狗 `watchdog`（跟着引擎每 5 分钟一轮变红，切版本那一刻它的下一轮还没来）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；香港上老的 `/demo/` 读回要是 404（不是 404 报红：被谁发回去了，或站点配置回落到首页）；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
 8. 清旧版：留 5 版——在用的、上一版，再按最近用过的补满。
 
 同一个提交跑第二遍，结论是「本次改动 0 处」；两遍之间各拍一次 `bash deploy/lib/snapshot.sh ours`，diff 为空（快照里每一版整棵树的名字、大小、修改时间、属主、权限压成一个指纹，重新构建一定会变）。这样比之前先停自动发布单元（`systemctl stop fleet-auto-release.timer`，比完 `start`）：两遍之间它可能跑装机自动档、同步规矩，动到文件。
@@ -584,7 +584,8 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
 | 单元 | 身份 | 跑什么 | 读的配置（都在 `/etc/fleet-dao`） |
 |---|---|---|---|
 | `fleet-engine` | fleet | `node packages/engine/src/main.ts`（Temporal worker，任务队列 fleet） | `engine.env`（`FLEET_ENGINE_PORTS=real` 真端口 / `fake` 假端口，必须写；真端口另要机器名、工作树的根、reclaude 的路径，见期望 `deploy/france/desired-config.json`）、`agent-token.env`、`github/`（两个 GitHub 机器人） |
-| `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程两个监听，驾驶舱接口 `10.99.0.2:8787`、fleet 命令接口 `127.0.0.1:8788` | `api.env`、`agent-token.env`、`session-secret.env`、`gateway-token.env`、`github/`（两个机器人的 json） |
+| `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程两个监听，驾驶舱接口 `10.99.0.2:8787`、fleet 命令接口 `127.0.0.1:8788`。端口由 `fleet-api.socket` 攥着，进程从 systemd 接手 fd | `api.env`、`agent-token.env`、`session-secret.env`、`gateway-token.env`、`github/`（两个机器人的 json） |
+| `fleet-api.socket` | root | 不跑进程：两个 `ListenStream` 攥着上面那两个地址（`FreeBind=yes`，隧道没起也能先听上）。重启 `fleet-api` 时新连接排在内核队列里 | 不读配置。改监听地址要 `api.env`、`deploy/release.sh` 的 `COCKPIT`、`AGENT_API` 两个常量、这个 socket 单元三处一起改 |
 
 - 两个都是 `Restart=always`。引擎不开 `NoNewPrivileges`（要经 sudo 调 `fleet-agent-scope` 起会话），也不开挂载隔离（会话是它的子进程，会跟着看不见自己的家目录）；后端不起子进程，照常收紧。
 - `engine.env`、`api.env` 新机器由 france.sh 照这一档的期望建（私有值只留空位：飞书、GitHub 的凭据由人填在 `api.env`）。每一项「应该是什么」在仓里的 `deploy/france/desired-config.json`：公开值改期望、合进主线，发布时照期望写上、重启对应服务（本节末尾「配置进仓对账」）；只改机器的，下一轮自动发布就报不一致，发布也不替人改回（期望里 `selfHeal` 关着）。私有值只在机器上改，改完再发布一次就会重启对应服务。库连接写成 `DATABASE_URL=postgres:///fleet` 加 `PGHOST=/var/run/postgresql`：本机 socket、peer 认证，没有口令（postgres.js 不认连接串里的 `?host=`）。

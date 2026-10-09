@@ -5,8 +5,11 @@
 [Unit]
 Description=fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
-# 驾驶舱接口听隧道地址：隧道没起时绑不上，退出后按 Restart 重试，隧道起来就绑上了
-After=network-online.target wg-quick@wg-fleet.service postgresql@16-main.service fleet-temporal.service
+# 端口归 fleet-api.socket 攥着（它 FreeBind，隧道没起也能先听上）。没装那个单元的机器用的是没有 Requires 这行的旧单元，
+# 服务自己 bind。退回到不带 socket 的版本时，发布脚本先撤 socket 再换回旧单元，不会留着 Requires 去等一个不存在的单元。
+Requires=fleet-api.socket
+# 服务本身仍等隧道、库、Temporal：读配置、连库要等它们就绪。After 最前面是 socket，端口先被攥住再起进程。
+After=fleet-api.socket network-online.target wg-quick@wg-fleet.service postgresql@16-main.service fleet-temporal.service
 Wants=network-online.target
 StartLimitIntervalSec=0
 
