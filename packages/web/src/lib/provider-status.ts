@@ -4,7 +4,7 @@
 // 原来这里还有一份「近 60 次柱条」：把同一个渠道下几条路由的最近一次结论铺成 60 格，看着像历史其实不是。
 // 真历史在渠道状态页，按 route_probe_history 一次一格画（#1139）。
 
-import { ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from '@fleet-dao/shared';
+import { probeNextEveryMinutes, ROUTE_PROBE_EVERY_MINUTES } from '@fleet-dao/shared';
 import type { Channel, ChannelState, Model, Route } from '../api/types';
 
 /**
@@ -21,8 +21,8 @@ export interface Failover {
   /** 顺延到谁（渠道名和模型名）；还没派出去、或没有别的渠道可顺延为 undefined。 */
   fallback: { channelName: string; modelName: string } | undefined;
   /**
-   * 探针下一次大约几点再看引发失败的那条路由：它最近一次结论的时刻加上这种执行方式的探测间隔（上次通了的按
-   * 执行方式放慢的间隔，没通的每轮都探）。算不出（那条路由没探过 / 已被删）为 undefined，页面写「下一轮探针」。
+   * 探针下一次大约几点再看引发失败的那条路由：上次通了的按执行方式（结论写了隔 60 分钟再探的按 60 分钟和执行方式里更长的），
+   * 不通且写了连着几次的按退避那一档，没写次数的仍按每轮。算不出（那条路由没探过 / 已被删）为 undefined，页面写「下一轮探针」。
    */
   nextProbeAt: string | undefined;
   /** 探针每隔多久一轮（分钟），给页面解释用。 */
@@ -37,9 +37,7 @@ export function failoverOf(
   if (state?.status !== 'disabled') return undefined;
   const failed = state.failedRouteId ? routes.find((r) => r.id === state.failedRouteId) : undefined;
   const everyMin = failed
-    ? failed.probe?.state === 'ok'
-      ? routeProbeEveryMinutes(failed.hostId)
-      : ROUTE_PROBE_EVERY_MINUTES
+    ? probeNextEveryMinutes(failed.hostId, failed.probe?.state, failed.probe?.detail)
     : ROUTE_PROBE_EVERY_MINUTES;
   const nextProbeAt = failed?.probe
     ? new Date(Date.parse(failed.probe.at) + everyMin * 60_000).toISOString()

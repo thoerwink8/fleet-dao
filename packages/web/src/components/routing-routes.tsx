@@ -4,6 +4,7 @@
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
 
+import { probeBackoffNotice } from '@fleet-dao/shared';
 import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
@@ -138,6 +139,7 @@ export function RouteItem({
 }) {
   const [open, setOpen] = useState(false);
   const stale = probeStale(r, now);
+  const backoff = probeBackoffNotice(r.probeDetail ?? r.connect.reason);
   const slots = routeSlots(r);
   const edit = useRoutingEdit();
   const routing = useRouting();
@@ -233,6 +235,11 @@ export function RouteItem({
         <span className="num max-w-40 truncate text-micro text-faint" title={r.routeId}>
           {r.routeId}
         </span>
+        {backoff ? (
+          <span data-probe-backoff className="basis-full text-caption text-ink-stall">
+            {backoff}
+          </span>
+        ) : null}
       </div>
       <div
         id={`facts-${r.routeId}`}

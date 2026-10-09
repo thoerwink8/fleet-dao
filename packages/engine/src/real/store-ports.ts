@@ -335,6 +335,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       probedAt: r.probedAt?.toISOString() ?? null,
       probeState: r.probeState,
       probeOrg: r.probeOrg,
+      probeDetail: r.probeDetail,
       quota: r.quota,
       windows: r.windows.map((w) => ({
         label: w.label,

@@ -149,6 +149,23 @@ describe('立即探测（runRouteProbeRequests）', () => {
     expect(h.done[0]?.results[0]?.durationMs).toBeUndefined();
   });
 
+  it('退避还没到点也照探：次数接着加，不从 1 重新数', async () => {
+    const t = target({
+      alive: false,
+      previous: {
+        state: 'failed',
+        at: new Date(NOW.getTime() - 10 * 60_000),
+        detail: '503 容量满。退避中，下次约 18:00 再探（连着不通 5 次）',
+      },
+    });
+    const h = harness([request('a', [t.routeId])], [t]);
+    expect(await runRouteProbeRequests(h.deps)).toBe(1);
+    expect(h.probes()).toBe(2);
+    expect(h.saved[0]?.detail).toContain('连着不通 6 次');
+    expect(h.saved[0]?.detail).toContain('退避中，下次约');
+    expect(h.saved[0]?.detail).not.toContain('连着不通 1 次');
+  });
+
   it('【故意造出的失败】读不到路由表：回执 ok=false 写原因，不探', async () => {
     const t = target();
     const h = harness([request('a', [t.routeId])], [t], {

@@ -193,4 +193,22 @@ describe('探针结论过没过期（和引擎同一条线）', () => {
     expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(60) }), NOW)).toBe(false);
     expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(200) }), NOW)).toBe(true);
   });
+
+  test('退避中、或写了隔 60 分钟再探：过期线按那一档，不标成探针停了', () => {
+    const backing = '没通。退避中，下次约 16:07 再探（连着不通 6 次）';
+    expect(
+      probeStale(
+        route('b', 'dead', {
+          probedAt: ago(200),
+          probeDetail: backing,
+          connect: { verdict: 'dead', reason: `探针判不在线：${backing}` },
+        }),
+        NOW,
+      ),
+    ).toBe(false);
+    expect(probeStale(route('b', 'dead', { probedAt: ago(280), probeDetail: backing }), NOW)).toBe(true);
+    const deferred = '答上了：OK。不在用途前 2 位，隔 60 分钟再探';
+    expect(probeStale(route('d', 'live', { probedAt: ago(80), probeDetail: deferred }), NOW)).toBe(false);
+    expect(probeStale(route('d', 'live', { probedAt: ago(100), probeDetail: deferred }), NOW)).toBe(true);
+  });
 });

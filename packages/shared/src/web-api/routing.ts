@@ -40,8 +40,9 @@ export const ROUTE_PROBE_EVERY_MINUTES = 15;
 /** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
 export const ROUTE_PROBE_STALE_MINUTES = 45;
 /**
- * 按一次的成本放慢的执行方式（design 第九节「路由探针」：贵的放慢）：上一次探通了，隔这么久才再真探；没通的照样每轮探
- * （没登录、连不上的报错走不到模型，不扣用量）。没列的每轮都探。cursor-agent：一次最小会话约 1.3 万输入 token
+ * 按一次的成本放慢的执行方式（design 第九节「路由探针」：贵的放慢）：上一次探通了，隔这么久才再真探。
+ * 连着不通的按 route-probe-pace 逐级退避（15、30、60、120、240 分钟，封顶 240），不按这个表每轮重探。
+ * 没列的每轮都探。cursor-agent：一次最小会话约 1.3 万输入 token
  * （2026-09-27 本机实测），扣的是按月的包含用量、和创始人在编辑器里用的是同一份——每轮都探一个月约 2900 次，2 小时一次约 360 次。
  * grok：同一个道理——SuperGrok 订阅按周的额度、和创始人在 grok.com 上用的是同一份，一次最小会话光系统提示就一万多输入 token
  * （法国真跑的过程记录：一次模型调用约 1.5 万输入、其中 1.2 万走缓存）。mirasim：探通即代表真打了一次上游（MS-27，账本要
@@ -159,8 +160,10 @@ export const RoutingLayerRouteSchema = z.object({
   connect: LivenessFactSchema,
   quota: LivenessFactSchema,
   ban: LivenessFactSchema,
-  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）。 */
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）；退避、隔 60 分钟再探的按那一档。 */
   probedAt: Time.optional(),
+  /** 探针原文（routes.probe_detail）。退避、隔 60 分钟再探都写在这里，驾驶舱据此放宽「探针可能停了」。 */
+  probeDetail: z.string().optional(),
   /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
   exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
   /** 账号池此刻在跑几个、已选定还没开跑几个（#757 预占）、最多几个：两者之和到了上限就是满（shared 的 poolFull），等空位，不算死。 */

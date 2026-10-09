@@ -13,6 +13,8 @@ import {
   type RouteProbeHistoryResult,
   routeProbeHistory,
   routes,
+  routingCatalog,
+  routingPurposeModels,
 } from '../schema/index.ts';
 import { noteRouteProbed } from './channel-fallback.ts';
 
@@ -61,13 +63,88 @@ export interface RouteProbeTarget {
    */
   inUse: boolean;
   alive: boolean;
+  /**
+   * 在各用途里、开着的路由中最靠前的名次（从 1 起）。开着 = 模型下这一行开着、渠道开着、模型没下架。
+   * 关着的不占名次。一条路由进了几个用途，取最靠前的那个名次。没排进任何用途、或算不出：null
+   * （定时探针把 null 当成前 2 位，不放慢）。
+   */
+  probeRank?: number | null;
   /** 上一次的结论；探针还没看过为空。 */
   previous: { state: RouteProbeState; at: Date; detail: string | null } | null;
 }
 
+/** 排进了用途的路由，带着算名次要的开关。同一条路由可以在几个用途里各出现一次。 */
+export interface OpenRankRow {
+  purpose: string;
+  modelPosition: number;
+  routePosition: number;
+  routeId: string;
+  catalogEnabled: boolean;
+  channelEnabled: boolean;
+  retiredAt: Date | null;
+}
+
+/** 这一行占不占名次：模型下开着、渠道开着、模型还没下架（下架时刻到了或就是现在，都不算开着）。 */
+function rankOpen(row: OpenRankRow, now: Date): boolean {
+  return (
+    row.catalogEnabled &&
+    row.channelEnabled &&
+    (row.retiredAt === null || row.retiredAt.getTime() > now.getTime())
+  );
+}
+
+/**
+ * 每个用途里，开着的路由按「模型先后、再路由先后、再路由 id」从 1 起编号。关着的跳过、不占名次。
+ * 一条路由进了几个用途，留下最靠前的名次。没出现在任何用途里的不在这张表里。
+ */
+export function bestOpenRanks(rows: readonly OpenRankRow[], now: Date): Map<string, number> {
+  const byPurpose = new Map<string, OpenRankRow[]>();
+  for (const row of rows) {
+    const list = byPurpose.get(row.purpose) ?? [];
+    list.push(row);
+    byPurpose.set(row.purpose, list);
+  }
+  const best = new Map<string, number>();
+  for (const list of byPurpose.values()) {
+    const sorted = [...list].sort(
+      (a, b) =>
+        a.modelPosition - b.modelPosition ||
+        a.routePosition - b.routePosition ||
+        (a.routeId < b.routeId ? -1 : a.routeId > b.routeId ? 1 : 0),
+    );
+    let rank = 0;
+    for (const row of sorted) {
+      if (!rankOpen(row, now)) continue;
+      rank += 1;
+      const prev = best.get(row.routeId);
+      if (prev === undefined || rank < prev) best.set(row.routeId, rank);
+    }
+  }
+  return best;
+}
+
 /** 全部路由，按 id 排。连不上库、查询出错原样抛出（这一轮没跑成，由调用方记 failed）。 */
+async function openRankRows(db: Db): Promise<OpenRankRow[]> {
+  return db
+    .select({
+      purpose: routingPurposeModels.purpose,
+      modelPosition: routingPurposeModels.position,
+      routePosition: routingCatalog.position,
+      routeId: routingCatalog.routeId,
+      catalogEnabled: routingCatalog.enabled,
+      channelEnabled: channels.enabled,
+      retiredAt: models.retiredAt,
+    })
+    .from(routingPurposeModels)
+    .innerJoin(routingCatalog, eq(routingCatalog.modelId, routingPurposeModels.modelId))
+    .innerJoin(routes, eq(routes.id, routingCatalog.routeId))
+    .innerJoin(channels, eq(channels.id, routes.channelId))
+    .innerJoin(models, eq(models.id, routes.modelId));
+}
+
 export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
-  const [rows, used] = await Promise.all([
+  const now = new Date();
+  const [rows, used, ranked] = await Promise.all([
     db
       .select({ route: routes, pool: pools, channel: channels, model: models })
       .from(routes)
@@ -76,8 +153,10 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
       .innerJoin(models, eq(models.id, routes.modelId))
       .orderBy(asc(routes.id)),
     routesInUse(db),
+    openRankRows(db),
   ]);
   const inUse = new Set(used.map((u) => u.routeId));
+  const ranks = bestOpenRanks(ranked, now);
   return rows.map(({ route, pool, channel, model }) => ({
     routeId: route.id,
     hostId: route.hostId,
@@ -94,6 +173,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     executor: route.executor,
     modelRetiredAt: model.retiredAt,
     inUse: inUse.has(route.id),
+    probeRank: ranks.get(route.id) ?? null,
     alive: route.alive,
     previous:
       route.probeState === null || route.probedAt === null

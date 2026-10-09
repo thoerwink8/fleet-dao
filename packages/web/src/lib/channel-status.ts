@@ -3,7 +3,7 @@
 // 几条路由并成一句话，再按路由两层里的先后给渠道排顺位。探针报错 = 这条路暂不可用（探针写 alive=false，选路本来就不派），
 // 这里只显示，不改选路。没排进任何用途的渠道（干粉）探针不花额度去探，卡片照列、写「没在配的路由里，未探」。
 
-import { routeProbeEveryMinutes } from '@fleet-dao/shared';
+import { probeCadenceMinutes, routeProbeEveryMinutes } from '@fleet-dao/shared';
 import type {
   Channel,
   ChannelState as ChannelStateRow,
@@ -86,9 +86,18 @@ export function probeLatency(detail: string | undefined): string | undefined {
   return m ? `用时 ${m[1]} 秒` : undefined;
 }
 
-/** 这条路最近一次结论过没过「间隔 + 3 分钟」。 */
-export function channelProbeInterrupted(route: { probedAt: string; hostId: string }, now: number): boolean {
-  const limit = (routeProbeEveryMinutes(route.hostId) + CHANNEL_INTERRUPT_GRACE_MINUTES) * TIME.MIN;
+/**
+ * 这条路最近一次结论过没过「这一档间隔 + 3 分钟」。
+ * detail 里写了退避或隔 60 分钟再探时按那一档，不把故意放慢当成检测中断。不给 detail 就按执行方式。
+ */
+export function channelProbeInterrupted(
+  route: { probedAt: string; hostId: string; detail?: string | null | undefined },
+  now: number,
+): boolean {
+  const every = route.detail
+    ? probeCadenceMinutes(route.hostId, route.detail)
+    : routeProbeEveryMinutes(route.hostId);
+  const limit = (every + CHANNEL_INTERRUPT_GRACE_MINUTES) * TIME.MIN;
   return now - Date.parse(route.probedAt) > limit;
 }
 
@@ -270,7 +279,14 @@ export function buildChannelCards(
       undefined,
     );
     // 每一条探过的路都过了「间隔 + 3 分钟」才算整个渠道检测中断（慢的执行方式用它自己的间隔）
-    const interrupted = probed.length > 0 && probed.every((r) => channelProbeInterrupted(r, now));
+    const interrupted =
+      probed.length > 0 &&
+      probed.every((r) =>
+        channelProbeInterrupted(
+          { probedAt: r.probedAt, hostId: r.hostId, detail: r.probeDetail ?? r.connect.reason },
+          now,
+        ),
+      );
     const latency = probeLatency(
       live
         .map((r) => rawRoute.get(r.routeId)?.probe)

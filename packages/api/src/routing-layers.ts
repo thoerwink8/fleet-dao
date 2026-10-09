@@ -42,6 +42,7 @@ function routeView(r: RoutingRouteView, channels: ReadonlyMap<string, Channel>) 
     quota: r.liveness.quota,
     ban: r.liveness.ban,
     ...(c.probedAt ? { probedAt: c.probedAt.toISOString() } : {}),
+    ...(c.probeDetail ? { probeDetail: c.probeDetail } : {}),
     exhausted: c.windows
       .filter((w) => w.applies === 'yes' && w.state === 'exhausted')
       .map((w) => ({ label: w.label, ...(w.resetsAt ? { resetsAt: w.resetsAt.toISOString() } : {}) })),

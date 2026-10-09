@@ -351,6 +351,25 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
     expect(byId(cards, 'a')).toMatchObject({ interrupted: true, label: '检测中断' });
     expect(byId(cards, 'a').fallback).toBeUndefined();
   });
+  test('退避中的不通：按那一档，不把 40 分钟前的结论标成检测中断', () => {
+    const detail = '没通。退避中，下次约 16:07 再探（连着不通 3 次）';
+    const cards = buildChannelCards(
+      { channels: [channel('a')], routes: [], models: [] },
+      layers([
+        {
+          m1: [
+            layerRoute('a1', 'a', 'dead', {
+              probedAt: ago(40),
+              connect: { verdict: 'dead', reason: `探针判不在线：${detail}` },
+            }),
+          ],
+        },
+      ]),
+      NOW,
+    );
+    expect(byId(cards, 'a').interrupted).toBe(false);
+  });
+
   test('一个渠道有一条路刚探过：不算中断（要每条探过的路都过了才算）', () => {
     const cards = buildChannelCards(
       { channels: [channel('a')], routes: [], models: [] },

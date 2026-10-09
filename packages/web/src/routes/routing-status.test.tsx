@@ -111,6 +111,20 @@ describe('运行中失败的渠道（#1118，failoverOf）', () => {
     });
   });
 
+  test('不通且写了连着几次：下次探测按退避那一档，不按 15 分钟', () => {
+    const detail = '503 容量满。退避中，下次约 03:00 再探（连着不通 3 次）';
+    const routes = [
+      route('r1', 'c1', {
+        alive: false,
+        probe: { state: 'failed', at: '2026-10-05T01:00:00Z', detail },
+      }),
+    ];
+    expect(failoverOf(failedState(), routes, routing)).toMatchObject({
+      nextProbeAt: '2026-10-05T02:00:00.000Z',
+      probeEveryMinutes: 60,
+    });
+  });
+
   test('【故意造出的失败】顺到谁还没有、引发的路由没探过：照实写没有，不编', () => {
     const got = failoverOf(
       failedState({ fallbackChannelId: undefined, fallbackModelId: undefined }),
@@ -151,6 +165,28 @@ describe('渠道状态页：渠道卡', () => {
     expect(items.some((c) => c.textContent?.includes('顺位第 1'))).toBe(true);
     expect(list.textContent).not.toMatch(/grok-4\.7|deepseek-v4\.1-flash/);
     expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
+  });
+
+  test('退避中单独一行写下次大约几点，不带截断，也不标结论过期', async () => {
+    const api = createMockApi({ live: false });
+    const cursor = api.state().routes.find((r) => r.id === 'r-cursor');
+    if (!cursor?.probe) throw new Error('假数据没有 cursor 路由');
+    cursor.probe = {
+      state: 'failed',
+      at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      detail: '连探两次都没通：503 容量满。退避中，下次约 16:07 再探（连着不通 6 次）',
+    };
+    renderApp(<RoutingStatus />, { api, route: '/routing/status' });
+    await screen.findByRole('list', { name: '渠道状态' });
+    fireEvent.click(within(card('ch-cursor')).getByRole('button'));
+    const notice = await waitFor(() => {
+      const el = routeRow('r-cursor').querySelector('[data-probe-backoff]');
+      if (!(el instanceof HTMLElement)) throw new Error('还没有退避那一行');
+      return el;
+    });
+    expect(notice.textContent).toBe('退避中，下次约 16:07 再探');
+    expect(notice.className).not.toContain('truncate');
+    expect(routeRow('r-cursor').textContent).not.toContain('结论过期');
   });
 
   test('运行中失败（#1118）：中转站卡上写「运行中失败，已顺延」、为什么、顺到谁、下次探测；和路由页同一份判法', async () => {
