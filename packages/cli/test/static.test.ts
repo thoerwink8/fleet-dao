@@ -1,5 +1,6 @@
 // 本包 test/ 不许直接同步起子进程（#264 这一片）：本包没有 child.ts，spawnSync / execFileSync / execSync 不许出现。
-// 递归扫 test/ 下所有 .ts。先去掉注释和引号里的字符串再找这三个名字：引号里的字是在提这个词，不是调用。
+// 递归扫 test/ 下所有 .ts。先去掉注释和引号里的字符串再按词找：引号里的字是在提这个词，不是调用。
+// 反引号整段当字符串丢掉，不另扫 ${} 里的调用（和 adapters 现成扫描同一边界）。
 // 只豁免 test/ 根上的这份 static.test.ts；子目录里同名文件照样扫，不按文件名跳过。
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -7,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 const TEST = import.meta.dirname;
 
-/** 去掉注释和引号里的字符串（反引号 ${} 里的代码留下：那是代码，不是字面量）。注释换成一个空格，避免和前后标识符粘成一个词。 */
+/** 去掉注释和引号里的字符串。反引号整段丢掉，不进入 ${}。 */
 function stripCommentsAndStrings(code: string): string {
   let out = '';
   let i = 0;
@@ -17,13 +18,11 @@ function stripCommentsAndStrings(code: string): string {
     if (c === '/' && n === '/') {
       const nl = code.indexOf('\n', i);
       i = nl === -1 ? code.length : nl;
-      out += ' ';
       continue;
     }
     if (c === '/' && n === '*') {
       const end = code.indexOf('*/', i + 2);
       i = end === -1 ? code.length : end + 2;
-      out += ' ';
       continue;
     }
     if (c === "'" || c === '"') {
@@ -31,9 +30,7 @@ function stripCommentsAndStrings(code: string): string {
       continue;
     }
     if (c === '`') {
-      const template = readTemplate(code, i + 1);
-      out += stripCommentsAndStrings(template.inner);
-      i = template.end;
+      i = endOfTemplate(code, i + 1);
       continue;
     }
     out += c;
@@ -56,67 +53,37 @@ function endOfQuote(code: string, i: number, quote: string): number {
   return i;
 }
 
-/** 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。相邻插值之间留空格，避免 1 和调用名粘成一个词。 */
-function readTemplate(code: string, i: number): { inner: string; end: number } {
-  let inner = '';
+/** 从模板内容起点读到闭合反引号。不拆 ${}，里面的调用留在字符串里。 */
+function endOfTemplate(code: string, i: number): number {
   while (i < code.length) {
     const c = code[i] ?? '';
     if (c === '\\') {
       i += 2;
       continue;
     }
-    if (c === '`') return { inner, end: i + 1 };
-    if (c === '$' && code[i + 1] === '{') {
-      const expr = readBalanced(code, i + 1);
-      inner += ` ${expr.body} `;
-      i = expr.end;
-      continue;
-    }
+    if (c === '`') return i + 1;
     i++;
   }
-  return { inner, end: i };
-}
-
-function readBalanced(code: string, open: number): { body: string; end: number } {
-  let depth = 0;
-  let i = open;
-  const start = open + 1;
-  while (i < code.length) {
-    const c = code[i] ?? '';
-    if (c === "'" || c === '"') {
-      i = endOfQuote(code, i + 1, c);
-      continue;
-    }
-    if (c === '`') {
-      i = readTemplate(code, i + 1).end;
-      continue;
-    }
-    if (c === '/' && code[i + 1] === '/') {
-      const nl = code.indexOf('\n', i);
-      i = nl === -1 ? code.length : nl;
-      continue;
-    }
-    if (c === '/' && code[i + 1] === '*') {
-      const end = code.indexOf('*/', i + 2);
-      i = end === -1 ? code.length : end + 2;
-      continue;
-    }
-    if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) return { body: code.slice(start, i), end: i + 1 };
-    }
-    i++;
-  }
-  return { body: code.slice(start), end: i };
+  return i;
 }
 
 const BANNED = /\b(spawnSync|execFileSync|execSync)\b/;
 
-/** 一段源码里命中的调用名（先去掉注释和引号字符串）。 */
-function scanSyncChildSpawns(code: string): string[] {
-  const found = stripCommentsAndStrings(code).match(BANNED);
-  return found?.[0] === undefined ? [] : [found[0]];
+/**
+ * 扫同步起子进程的调用：先去掉注释和引号里的字符串，再找 spawnSync / execFileSync / execSync。
+ * 传入源码时返回命中的调用名；不传时递归扫本包 test/ 下的 .ts（只豁免根上的 static.test.ts），返回命中的相对路径。
+ */
+function scanSyncChildSpawns(code: string): string[];
+function scanSyncChildSpawns(): string[];
+function scanSyncChildSpawns(code?: string): string[] {
+  const callsIn = (text: string): string[] => {
+    const found = stripCommentsAndStrings(text).match(BANNED);
+    return found?.[0] === undefined ? [] : [found[0]];
+  };
+  if (code !== undefined) return callsIn(code);
+  return testSources()
+    .filter((file) => callsIn(readFileSync(file, 'utf8')).length > 0)
+    .map((file) => rel(file));
 }
 
 /** 相对 test/ 的路径（统一用 /）。 */
@@ -155,22 +122,10 @@ describe('测试里不许同步起子进程', () => {
     expect(isExempt(join(TEST, 'static.test.ts'))).toBe(true);
     expect(isExempt(join(TEST, 'child.ts'))).toBe(false);
     expect(isExempt(join(TEST, 'nested', 'static.test.ts'))).toBe(false);
-    const hits = files
-      .filter((file) => scanSyncChildSpawns(readFileSync(file, 'utf8')).length > 0)
-      .map((file) => rel(file));
-    expect(hits).toEqual([]);
+    expect(scanSyncChildSpawns()).toEqual([]);
   });
 
   it('故意放一行违规的样本，扫得出来', () => {
-    const sample = "execFileSync('git', []);";
-    expect(scanSyncChildSpawns(sample)).toEqual(['execFileSync']);
-    // 块注释紧贴调用：去掉注释要留分隔空白，不能粘成 voidexecFileSync 后对不上词边界。
-    expect(scanSyncChildSpawns("void/*说明*/execFileSync('git', []);")).toEqual(['execFileSync']);
-    // 相邻插值直接拼会变成 1execFileSync，词边界没了就扫不到真正的调用。
-    const hole = '$' + '{';
-    expect(scanSyncChildSpawns(`const s = \`${hole}1}${hole}execFileSync('git', [])}\`;`)).toEqual([
-      'execFileSync',
-    ]);
-    expect(scanSyncChildSpawns("const e = new Error('spawnSync git ENOENT'); // execSync")).toEqual([]);
+    expect(scanSyncChildSpawns("execFileSync('git', []);")).toEqual(['execFileSync']);
   });
 });
