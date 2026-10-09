@@ -1359,6 +1359,255 @@ EOF
   unset -f systemctl
 fi
 
+echo "== fleet-api.socket：构建收进 .units；头一次装、已有、退回；装不上不切版本；装了没在听就红（#405）"
+sock_unit=$HERE/../france/fleet-api.socket
+svc_unit=$HERE/../france/fleet-api.service
+ops_doc=$HERE/../../docs/ops.md
+check "socket 单元：两个 ListenStream 就是 release.sh 的 COCKPIT、AGENT_API" \
+  "$(grep -cE "^ListenStream=($COCKPIT|$AGENT_API)$" "$sock_unit")" 2
+check "socket 单元：FreeBind、Service、WantedBy" \
+  "$(grep -cE '^(FreeBind=yes|Service=fleet-api\.service|WantedBy=sockets\.target)$' "$sock_unit")" 3
+check "服务单元：Requires socket" "$(grep -c '^Requires=fleet-api\.socket$' "$svc_unit")" 1
+check "服务单元：After 最前面是 socket" "$(grep -c '^After=fleet-api\.socket ' "$svc_unit")" 1
+ops_socket=$(grep -c 'fleet-api\.socket' "$ops_doc" || true)
+ops_three=$(grep -c '三处一起改' "$ops_doc" || true)
+ops_addrs=$(grep -c 'api\.env.*COCKPIT.*AGENT_API' "$ops_doc" || true)
+check "ops 端口表和单元表写了 fleet-api.socket" "$((ops_socket >= 2))" 1
+check "ops 写明改监听地址要三处一起改" "$((ops_three >= 1))" 1
+check "ops 把 api.env 和 release.sh 的两个常量写在一起" "$((ops_addrs >= 1))" 1
+
+saved_cache=$CACHE
+saved_units=("${APP_UNITS[@]+"${APP_UNITS[@]}"}")
+unit_repo=$TMP/socket-units
+rm -rf -- "$unit_repo"
+mkdir -p "$unit_repo/deploy/france"
+printf '[Service]\nExecStart=/bin/true\n' >"$unit_repo/deploy/france/fleet-engine.service"
+printf '[Service]\nExecStart=/bin/true\n' >"$unit_repo/deploy/france/fleet-api.service"
+printf '[Socket]\nListenStream=10.99.0.2:8787\n' >"$unit_repo/deploy/france/fleet-api.socket"
+git -C "$unit_repo" init -q
+git -C "$unit_repo" add deploy
+git -C "$unit_repo" -c user.email=t@example.com -c user.name=t commit -q -m with-socket
+unit_sha=$(git -C "$unit_repo" rev-parse HEAD)
+CACHE=$unit_repo
+APP_UNITS=(fleet-engine fleet-api)
+mkdir -p "$TMP/stage-with"
+stage_units "$unit_sha" "$TMP/stage-with"
+check "构建：有 .socket 就和 .service 一起收进 .units" \
+  "$([[ -f $TMP/stage-with/.units/fleet-api.socket && -f $TMP/stage-with/.units/fleet-api.service && -f $TMP/stage-with/.units/fleet-engine.service ]] && echo 齐 || echo 缺)" 齐
+check "构建：没带 .socket 的服务不造一个空的" \
+  "$([[ -e $TMP/stage-with/.units/fleet-engine.socket ]] && echo 有 || echo 没有)" 没有
+rm -- "$unit_repo/deploy/france/fleet-api.socket"
+git -C "$unit_repo" add -A
+git -C "$unit_repo" -c user.email=t@example.com -c user.name=t commit -q -m no-socket
+unit_sha=$(git -C "$unit_repo" rev-parse HEAD)
+mkdir -p "$TMP/stage-without"
+stage_units "$unit_sha" "$TMP/stage-without"
+check "构建：这一版没有 .socket 不算错" "$?" 0
+check "构建：没有 .socket 就不收" \
+  "$([[ -e $TMP/stage-without/.units/fleet-api.socket ]] && echo 有 || echo 没有)" 没有
+check "构建：.service 照旧收" "$([[ -f $TMP/stage-without/.units/fleet-api.service ]] && echo 有 || echo 没有)" 有
+CACHE=$saved_cache
+if ((${#saved_units[@]})); then APP_UNITS=("${saved_units[@]}"); else APP_UNITS=(); fi
+
+# 下面几段用桩记 systemctl，单元文件落到临时目录，不碰这台机器的 systemd
+FLEET_SYSTEMD_DIR=$TMP/systemd
+mkdir -p "$FLEET_SYSTEMD_DIR"
+SC=$TMP/systemctl-calls
+declare -A SC_ACTIVE=()
+SC_FAIL=""
+: >"$SC"
+# shellcheck disable=SC2317 # 桩，由 activate / do_check 间接调用
+systemctl() {
+  printf '%s\n' "$*" >>"$SC"
+  local cmd="" unit="" a now=0
+  for a in "$@"; do
+    case "$a" in
+    --now) now=1 ;;
+    --quiet | --value | -p) ;;
+    is-active | is-enabled | start | stop | restart | enable | disable | daemon-reload | show) cmd=$a ;;
+    *.service | *.socket | *.timer) unit=$a ;;
+    esac
+  done
+  case "$cmd" in
+  show | daemon-reload) return 0 ;;
+  is-enabled)
+    echo disabled
+    return 1
+    ;;
+  is-active)
+    if [[ -z "$unit" ]]; then
+      echo inactive
+      return 1
+    fi
+    echo "${SC_ACTIVE[$unit]:-inactive}"
+    [[ "${SC_ACTIVE[$unit]:-inactive}" == active ]]
+    ;;
+  stop)
+    if [[ "$SC_FAIL" == stop && "$unit" == fleet-api.service ]]; then return 1; fi
+    if [[ -n "$unit" ]]; then SC_ACTIVE[$unit]=inactive; fi
+    ;;
+  start | restart)
+    if [[ -n "$unit" ]]; then SC_ACTIVE[$unit]=active; fi
+    ;;
+  enable)
+    if [[ "$SC_FAIL" == enable-now && "$now" == 1 && "$unit" == fleet-api.socket ]]; then return 1; fi
+    if [[ "$now" == 1 && -n "$unit" ]]; then SC_ACTIVE[$unit]=active; fi
+    ;;
+  disable)
+    if [[ "$now" == 1 && -n "$unit" ]]; then SC_ACTIVE[$unit]=inactive; fi
+    ;;
+  esac
+}
+sc_n() { # 这一行第几次出现的行号；没有就是 0
+  local n
+  n=$(grep -nxF -- "$1" "$SC" | head -1 | cut -d: -f1)
+  printf '%s' "${n:-0}"
+}
+reset_sc() {
+  : >"$SC"
+  SC_FAIL=""
+  SC_ACTIVE=()
+}
+SVC_OLD='[Unit]
+Description=old
+[Service]
+ExecStart=/bin/sleep infinity
+'
+SVC_NEW='[Unit]
+Description=new
+Requires=fleet-api.socket
+After=fleet-api.socket
+[Service]
+ExecStart=/bin/sleep infinity
+'
+SOCK_BODY='[Socket]
+ListenStream=10.99.0.2:8787
+ListenStream=127.0.0.1:8788
+FreeBind=yes
+Service=fleet-api.service
+[Install]
+WantedBy=sockets.target
+'
+prep_ver() { # 提交号 服务单元正文 socket 正文（空 = 这一版不带）
+  mkdir -p "$RELEASES/$1/.units"
+  printf 'commit=%s\nbuilt=t\non_main=1\nweb=桩\nmigrations=0\n' "$1" >"$RELEASES/$1/.fleet-release"
+  printf '%s' "$2" >"$RELEASES/$1/.units/fleet-api.service"
+  if [[ -n "$3" ]]; then
+    printf '%s' "$3" >"$RELEASES/$1/.units/fleet-api.socket"
+  else
+    rm -f -- "$RELEASES/$1/.units/fleet-api.socket"
+  fi
+}
+
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+APP_UNITS=(fleet-api)
+FLEET_SERVICES=fleet-api
+FLEET_HK_PARTS=""
+SETTLE_SECONDS=0
+DB_MIG=0
+DRAIN_WROTE=0
+ENGINE_STOPPED=0
+GATE=()
+
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+prep_ver "$A" "$SVC_NEW" "$SOCK_BODY"
+reset
+activate "$A" release >/dev/null 2>&1
+stop_n=$(sc_n "stop fleet-api.service")
+sock_n=$(sc_n "enable --now --quiet fleet-api.socket")
+start_n=$(sc_n "start fleet-api.service")
+check "头一次装：先停正占着端口的服务" "$((stop_n > 0))" 1
+check "头一次装：停了之后才把服务拉起来" "$((start_n > stop_n))" 1
+check "头一次装：socket 先于服务起来" "$((sock_n > stop_n && start_n > sock_n))" 1
+check "头一次装：socket 单元写上了驾驶舱那个地址" \
+  "$(grep -c '^ListenStream=10.99.0.2:8787$' "$FLEET_SYSTEMD_DIR/fleet-api.socket")" 1
+
+printf '%s' 'KEEP-SOCKET' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+printf '%s' "$SVC_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.service"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+reset
+activate "$B" release >/dev/null 2>&1
+check "已有 socket：systemctl 一次都没碰它" "$(grep -c 'fleet-api.socket' "$SC" || true)" 0
+check "已有 socket：文件一个字没改" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" KEEP-SOCKET
+check "已有 socket：服务照常重启" "$(($(sc_n "restart fleet-api.service") > 0))" 1
+
+printf '%s' 'SOCKET-ON-DISK' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+printf '%s' "$SVC_NEW" >"$FLEET_SYSTEMD_DIR/fleet-api.service"
+prep_ver "$C" "$SVC_OLD" ""
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$C" release >/dev/null 2>&1
+check "退回：socket 文件撤了" "$([[ -e $FLEET_SYSTEMD_DIR/fleet-api.socket ]] && echo 还在 || echo 撤了)" 撤了
+check "退回：disable --now 撤的 socket" "$(($(sc_n "disable --now --quiet fleet-api.socket") > 0))" 1
+check "退回：服务单元不再 Requires" "$(grep -c 'Requires=fleet-api.socket' "$FLEET_SYSTEMD_DIR/fleet-api.service" || true)" 0
+
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+rm -rf -- "$FLEET_SYSTEMD_DIR"
+mkdir -p "$FLEET_SYSTEMD_DIR"
+prep_ver "$A" "$SVC_OLD" ""
+reset_sc
+SC_ACTIVE[fleet-api.service]=inactive
+reset
+do_release "$A" >/dev/null 2>&1
+check "垫一版（没有 socket）：切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
+was_events=$(events)
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_FAIL=enable-now
+SC_ACTIVE[fleet-api.service]=active
+reset
+do_release "$B" >/dev/null 2>&1
+check "enable --now 失败：不切版本，还在 A" "$(current_sha)" "$A"
+check "enable --now 失败：发布报红" "$(reds_with 'fleet-api.socket 起不来')" 1
+check "enable --now 失败：历史没变（没记发布、也没自动退回）" "$(events)" "$was_events"
+
+rm -f -- "$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$C" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_FAIL=stop
+SC_ACTIVE[fleet-api.service]=active
+was_events=$(events)
+reset
+do_release "$C" >/dev/null 2>&1
+check "停不掉旧服务：不切版本，还在 A" "$(current_sha)" "$A"
+check "停不掉旧服务：报红" "$(reds_with '停不掉正占着端口的')" 1
+check "停不掉旧服务：没去 enable socket" "$(sc_n "enable --now --quiet fleet-api.socket")" 0
+check "停不掉旧服务：历史没变" "$(events)" "$was_events"
+
+printf '%s\n' '[Socket]' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+rm -f -- "$AUTO_STATE"
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=inactive
+reset
+do_check >/dev/null 2>&1
+check "装了但 socket 不 active：do_check 报红" "$(reds_with 'fleet-api.socket 装了但没在跑')" 1
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+settle_services >/dev/null 2>&1
+check "socket 在听：settle 不因此报红" "$(reds_with '装了但没在跑')" 0
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=inactive
+reset
+settle_services >/dev/null 2>&1
+check "装了但 socket 不 active：settle 报红" "$?" 1
+check "装了但 socket 不 active：settle 写明没在跑" "$(reds_with '装了但没在跑')" 1
+
+unset -f systemctl sc_n reset_sc prep_ver
+APP_UNITS=()
+FLEET_SERVICES=""
+FLEET_HK_PARTS=$SCRIPT_HK_PARTS
+FLEET_SYSTEMD_DIR=/etc/systemd/system
+unset SC_FAIL SC_ACTIVE
+
 echo "== 真起一个服务：切完 current 没重启就被打断，再跑同一版会重启；主进程跑的是哪一版，健康检查查得出"
 if ((EUID != 0)) || [[ ! -d /run/systemd/system ]]; then
   echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/run.sh）"

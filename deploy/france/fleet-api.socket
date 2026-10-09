@@ -1,0 +1,28 @@
+# fleet-dao 驾驶舱后端的监听套接字：deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；
+# 改这份、再发布一次，别在机器上手改。装了它，fleet-api.service 重启（发布切版本就会重启）不再丢请求——两个端口
+# 一直归这个 socket 单元攥着，systemd 把重启期间进来的新连接排进内核队列，等新进程起来接着 accept，不回 502、不拒连
+# （sd_listen_fds(3) 的约定，见 packages/api/src/listen.ts；Lennart Poettering「systemd for Developers I」原话
+# "we can restart the service while keeping around its sockets … Not a single connection is lost"，
+# https://0pointer.de/blog/projects/socket-activation.html）。#364：香港 nginx 经隧道转来的请求（webhook、驾驶舱）
+# 回 502、本机 AI 会话的 fleet 命令连 127.0.0.1:8788 被拒，都是没有它的时候、重启那几秒会出的老问题。
+# 两个监听要和 fleet-api.service 的 api.env（FLEET_COCKPIT_LISTEN、FLEET_AGENT_LISTEN）写同一个地址——装了这个单元，
+# 后端就不自己 bind 端口了，改地址要两边一起改（deploy/france/desired-config.json 也是同一份，deploy/release.sh 的
+# COCKPIT、AGENT_API 两个常量同样要跟着改）。
+# 一个 socket 单元里的两个 ListenStream 没法各起各的名字：FileDescriptorName 对整个单元生效，两个监听会拿到同一个
+# 名字，区分不了谁是谁。所以 packages/api/src/listen.ts 不靠名字分：先把 systemd 传来的每个 fd 都听上，再拿
+# server.address() 和这两行地址逐一比对，对不上就报错退出，不悄悄自己再 bind。
+[Unit]
+Description=fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+
+[Socket]
+ListenStream=10.99.0.2:8787
+ListenStream=127.0.0.1:8788
+# 隧道（wg-fleet）这时可能还没起：这个单元不等它，先把驾驶舱接口的地址攥住；FreeBind 允许绑一个本机现在还没有的地址
+# （IP_FREEBIND），隧道起来之后这个绑定照样管用，不用重新绑。fleet-api.service 的 [Unit] 仍然
+# After=wg-quick@wg-fleet.service：服务本身要不要真正起来（读配置、连库）还是等隧道就绪，这里只管端口攥没攥住。
+FreeBind=yes
+Service=fleet-api.service
+
+[Install]
+WantedBy=sockets.target
