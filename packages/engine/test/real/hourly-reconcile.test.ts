@@ -783,6 +783,65 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect((await alertByKey(t.db, unreadable))?.resolvedAt).toBeNull();
   });
 
+  it('先挂起提醒、后任务做完：工作流还显示挂着也撤；仍叫停或仍挂着不撤', async () => {
+    probeDir();
+    const { repo, task } = await work('running');
+    const doneKey = 'task:acme/widgets#160:park:1';
+    await alert(doneKey, { title: '自动合并没挂上', taskId: task.id });
+    await sql("update tasks set state = 'done' where id = $1", [task.id]);
+    const stopped = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 161,
+        title: '登录页加验证码',
+        rawRequest: '登录页加一个手机验证码',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state: 'stopped',
+      })
+      .returning();
+    const stalled = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 162,
+        title: '登录页加验证码',
+        rawRequest: '登录页加一个手机验证码',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state: 'stalled',
+      })
+      .returning();
+    const stoppedTask = stopped[0];
+    const stalledTask = stalled[0];
+    if (!stoppedTask || !stalledTask) throw new Error('task 没写进去');
+    const stoppedKey = 'task:acme/widgets#161:park:1';
+    const parkedKey = 'task:acme/widgets#162:park:2';
+    await alert(stoppedKey, { title: '自动合并没挂上', taskId: stoppedTask.id });
+    await alert(parkedKey, { title: '自动合并没挂上', taskId: stalledTask.id });
+    const wf = fakeWorkflows(
+      {
+        'task:acme/widgets#160': { state: 'running' },
+        'task:acme/widgets#161': { state: 'running' },
+        'task:acme/widgets#162': { state: 'running' },
+      },
+      {
+        'task:acme/widgets#160': parkedView(new Date()),
+        'task:acme/widgets#161': parkedView(new Date()),
+        'task:acme/widgets#162': parkedView(new Date()),
+      },
+    );
+    const run = await runHourlyReconcileJob(deps({ workflows: wf.reader }));
+    expect(run.outcome).toBe('ok');
+    const withdrawn = await alertByKey(t.db, doneKey);
+    expect(withdrawn?.body).toMatch(/^已撤：任务已经做完了，这条挂起不再成立/);
+    expect(withdrawn?.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(withdrawn?.resolvedAt).not.toBeNull();
+    expect((await alertByKey(t.db, stoppedKey))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, parkedKey))?.resolvedAt).toBeNull();
+  });
+
   it('事件数到线：工作流结束了才撤；需求没做完：状态不再是 failed 才撤；要人批：批了才撤', async () => {
     probeDir();
     const { task, sub } = await work('failed');

@@ -99,3 +99,12 @@ export async function openAlertsByPrefix(db: Db, prefix: string): Promise<OpenAl
     .where(and(isNull(notifications.resolvedAt), sql`starts_with(${notifications.dedupeKey}, ${prefix})`))
     .orderBy(asc(notifications.createdAt), asc(notifications.id));
 }
+
+/** 这个任务还没处理的提醒键。任务收尾时用来找挂起提醒。 */
+export async function openAlertKeysOfTask(db: Db, taskId: string): Promise<string[]> {
+  const rows = await db
+    .select({ dedupeKey: notifications.dedupeKey })
+    .from(notifications)
+    .where(and(eq(notifications.taskId, taskId), isNull(notifications.resolvedAt)));
+  return rows.map((row) => row.dedupeKey);
+}
