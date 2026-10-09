@@ -63,10 +63,10 @@ describe('路由页：每一层现在活着吗', () => {
   test('点名验收：首选模型不行时写明顺位第一条活的在第几个模型，不知道的原因照写，顺位第一条活的那条标出来', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     await purposeLinks();
-    // 清单那一行和详情的副标题各一遍
+    // 用途按钮上只有名字和个数（这句话在按钮的悬停提示里），详情标题旁写一遍
     expect(
       screen.getAllByText('首选模型不行，顺位第一条活的在第 2 个模型：GPT 5.6 luna（中转站 · relay）'),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     // 默认展开顺位第一条活的所在的模型
     expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     // Grok 的额度读数是 42 分钟前的：额度不知道，整条不知道（不画成活）

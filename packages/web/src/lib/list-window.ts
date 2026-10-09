@@ -17,7 +17,8 @@ export function windowRange(args: {
 }): { start: number; end: number } {
   const { count, rowHeight, height, scrollTop } = args;
   if (count <= WINDOW_MIN_ROWS || rowHeight <= 0) return { start: 0, end: count };
-  const first = Math.floor(Math.max(0, scrollTop) / rowHeight);
+  // 滚动位置在内容之外（行数刚变少、容器还没来得及回弹）：按最后一行算，不画出空窗口
+  const first = Math.min(count - 1, Math.floor(Math.max(0, scrollTop) / rowHeight));
   const visible = Math.ceil(height / rowHeight);
   return {
     start: Math.max(0, first - OVERSCAN),

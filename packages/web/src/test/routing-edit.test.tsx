@@ -2,7 +2,7 @@
 // 路由页调先后和开关（#1333，#1366 第二部分）：拖动、每行置顶 / 置底、聚焦后 Alt+上下键改先后（放下 / 点 / 按键就保存，失败回到原顺序）；
 // 每条路由、每个模型、每个渠道各有开关，开关确认后才写；渠道关了，下面的路由显示「渠道已关」不能单独开；
 // 整池暂停在对应池旁边设和撤。选了远程环境整块置灰并写「去那台上操作」。
-// 没有逐格「上移」「下移」按钮了（换成置顶 / 置底）。
+// 每行有「上移」「下移」「置顶」「置底」四个按钮（用的还是 movePurposeModel / updateModelRoute 的 reorder，没有新接口）。
 // #856 第 2 处：旧的 useUpdateChannel 仍不导出。新的渠道开关是 setChannelEnabled，不是那条已删的 PATCH。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -64,12 +64,12 @@ const routeOrder = () =>
 const BEFORE = ['Opus 5.5', 'Kimi k3', 'Cursor Auto', 'Opus 5'];
 
 describe('路由页：调先后和开关', () => {
-  test('没有逐格上移下移，换成置顶、置底；模型行、每条路由都有开关，开着的亮着、关着的灭着', async () => {
+  test('每行有上移、下移、置顶、置底；模型行、每条路由都有开关，开着的亮着、关着的灭着', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     expect(modelNames()).toEqual(BEFORE);
-    expect(screen.queryByRole('button', { name: /上移/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /下移/ })).toBeNull();
+    expect(screen.getByRole('button', { name: '上移 Kimi k3（动手里的先后）' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '下移 Kimi k3（动手里的先后）' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '置顶 Kimi k3（动手里的先后）' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '置底 Kimi k3（动手里的先后）' })).toBeTruthy();
     expect((modelGrip('opus-5.5') as HTMLButtonElement).disabled).toBe(false);
@@ -81,6 +81,37 @@ describe('路由页：调先后和开关', () => {
     // 选中的 Opus 5.5 下三条：前两条开着、中转那条关着
     expect(within(routeItem('r-ca-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('true');
     expect(within(routeItem('r-rl-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
+  });
+
+  test('上移、下移按钮：点一下挪一格并保存；已在最前的上移是灰的，点了不写', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    const spy = vi.spyOn(api, 'movePurposeModel');
+    await opened();
+    const upOfFirst = screen.getByRole('button', { name: '上移 Opus 5.5（动手里的先后）' });
+    expect(upOfFirst.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(upOfFirst);
+    expect(spy).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await waitFor(() => expect(modelNames()).toEqual(['Kimi k3', 'Opus 5.5', 'Cursor Auto', 'Opus 5']));
+    expect(spy).toHaveBeenCalledExactlyOnceWith('execute', 'opus-5.5', {
+      order: ['kimi-k3', 'opus-5.5', 'cursor-auto', 'opus-5'],
+      expected: ['opus-5.5', 'kimi-k3', 'cursor-auto', 'opus-5'],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '上移 Opus 5.5（动手里的先后）' }));
+    await waitFor(() => expect(modelNames()).toEqual(BEFORE));
+  });
+
+  test('路由也有上移、下移：走 updateModelRoute 的 reorder', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    const spy = vi.spyOn(api, 'updateModelRoute');
+    await opened();
+    expect(routeOrder()).toEqual(['r-ca-opus', 'r-cb-opus', 'r-rl-opus']);
+    fireEvent.click(within(routeItem('r-ca-opus')).getByRole('button', { name: /^下移 / }));
+    await waitFor(() => expect(routeOrder()).toEqual(['r-cb-opus', 'r-ca-opus', 'r-rl-opus']));
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[2]).toMatchObject({ op: 'reorder' });
   });
 
   test('Alt+下键把模型下挪一格：直接带看到的顺序保存；不按 Alt 的方向键什么也不做', async () => {

@@ -419,7 +419,12 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expectTap(within(row).getByRole('button', { name: /^拖动 / }));
     expectTap(within(row).getByRole('button', { name: /^置顶 / }));
     expectTap(within(row).getByRole('button', { name: /^置底 / }));
-    expectTap(within(row).getByRole('switch'));
+    // 开关是小滑块，不撑成圆：可点的范围用伪元素往外扩
+    expect(classTokens(within(row).getByRole('switch'))).toEqual(
+      expect.arrayContaining(['relative', 'after:absolute', 'after:-inset-y-3']),
+    );
+    expectTap(within(row).getByRole('button', { name: /^上移 / }));
+    expectTap(within(row).getByRole('button', { name: /^下移 / }));
     expectTap(within(row).getByRole('combobox'));
     expectTap(within(row).getByRole('button', { name: /移出用途/ }));
     const [pause] = await screen.findAllByRole('button', { name: /暂停账号池/ });
@@ -548,7 +553,7 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(vendor.className).not.toContain('bg-foreground/10');
   });
 
-  test('手机宽度顶部说明折成一行「怎么用」，点开才展开；桌面直接显示全文', async () => {
+  test('顶部说明折成一行「怎么用」，点开才展开（手机和桌面一样）', async () => {
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
@@ -559,12 +564,14 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
 
+    // 桌面也折起来：调整顺序的区域要占满页面主体高度，首屏留给顺序，不留给说明
     cleanup();
     vi.restoreAllMocks();
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.queryByText(/每个用途按顺序排哪些模型/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '怎么用' }));
     expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '怎么用' })).toBeNull();
   });
 
   test('手机宽度模型目录去掉内部定高滚动，行随页面滚；桌面仍是 440 高的窗口', async () => {
@@ -620,5 +627,71 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(retired).toContain('text-ink-stop');
     expect(locked).toContain('text-ink-stall');
     expect(new Set([discovered, retired, locked]).size).toBe(3);
+  });
+});
+
+describe('调整顺序：关着的行置灰写「已跳过」，实际顺位只数开着的', () => {
+  function withSkipped(models: RoutingLayerModel[]): MockApi {
+    const layers: RoutingLayers = {
+      asOf: new Date().toISOString(),
+      purposes: [{ purpose: 'execute', version: 0, verdict: 'live', problems: [], models }],
+    };
+    const api = createMockApi({ live: false });
+    return Object.assign(api, { routingLayers: async () => layers });
+  }
+
+  const slotOf = (modelId: string) =>
+    document.querySelector(`li[data-model="${modelId}"] [data-slot-state]`) as HTMLElement;
+
+  test('开着的写实际第几位（跳过关着的），关着的写「关着，已跳过」，没有路由的写「没有可用路由，已跳过」', async () => {
+    // manyModels：每第三个开着（m-000、m-003 开着）；再加一个没有路由的
+    const models = [
+      ...manyModels(6),
+      { modelId: 'm-empty', displayName: 'Empty', verdict: 'dead' as const, routes: [] },
+    ];
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withSkipped(models) });
+    await screen.findByRole('list', { name: '模型' });
+    expect(slotOf('m-000').textContent).toBe('实际第 1 位');
+    expect(slotOf('m-001').textContent).toBe('关着，已跳过');
+    expect(slotOf('m-002').textContent).toBe('关着，已跳过');
+    // 配置里排第 4，前面两个关着，实际第 2 位
+    expect(slotOf('m-003').textContent).toBe('实际第 2 位');
+    expect(slotOf('m-004').getAttribute('data-slot-state')).toBe('off');
+    expect(slotOf('m-empty').textContent).toBe('没有可用路由，已跳过');
+    // 配置序号照旧写着
+    expect(document.querySelector('li[data-model="m-003"] [data-position]')?.textContent).toBe('4');
+    // 关着的名字置灰
+    const greyed = document.querySelector('li[data-model="m-001"] button[aria-pressed]') as Element;
+    expect(classTokens(greyed)).toContain('opacity-60');
+    const summary = document.querySelector('[data-order-summary="ok"]')?.textContent;
+    expect(summary).toContain('开着的 2 个模型');
+    expect(summary).toContain('跳过 5 个');
+  });
+
+  test('故意造出失败：一个模型都不能派时，不写顺位，写「无可用」', async () => {
+    const off = manyModels(3).map((m) => ({ ...m, routes: m.routes.map((r) => ({ ...r, enabled: false })) }));
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withSkipped(off) });
+    await screen.findByRole('list', { name: '模型' });
+    expect(document.querySelector('[data-order-summary="none"]')?.textContent).toContain('无可用');
+    expect(document.body.textContent).not.toMatch(/实际第 \d+ 位/);
+    for (const m of off) expect(slotOf(m.modelId).textContent).toBe('关着，已跳过');
+  });
+
+  test('路由层：模型下关着的路由写「关着，已跳过」，开着的写实际第几位', async () => {
+    const model: RoutingLayerModel = {
+      modelId: 'm-x',
+      displayName: 'Mx',
+      family: 'claude',
+      verdict: 'live',
+      routes: [layerRoute('r-a', false), layerRoute('r-b', true), layerRoute('r-c', true)],
+    };
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withSkipped([model]) });
+    await screen.findByRole('list', { name: '模型' });
+    const slot = (id: string) =>
+      document.querySelector(`li[data-route="${id}"] [data-slot-state]`) as HTMLElement;
+    await waitFor(() => expect(slot('r-a')).toBeTruthy());
+    expect(slot('r-a').textContent).toBe('关着，已跳过');
+    expect(slot('r-b').textContent).toBe('实际第 1 位');
+    expect(slot('r-c').textContent).toBe('实际第 2 位');
   });
 });
