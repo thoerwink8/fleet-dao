@@ -1046,9 +1046,10 @@ describe('删到一半留下的空壳（目录在、.git 没了）', SLOW, () =>
   });
 });
 
-// #1007：搁过两小时、里面还有没提交的改动或没推的提交。不删（2026-10-02 靠这条救回决定 0006），
-// 记成指挥官的认领，下次开会话再读同一条期限。查不出、记不上就照实说，不当成有主。
-describe('搁过两小时、里面还有活的树：有主，不是只打一行', SLOW, () => {
+// #1007：有没提交的改动或没推的提交就有主（刚动过也算；两小时只挡住干净树的删除）。
+// 不删（2026-10-02 靠这条救回决定 0006），记成指挥官的认领，下次开会话再读同一条期限。
+// 查不出、记不上就照实说；已经认领过的，这一轮没查成不撤认领，不当成处理了。
+describe('有活的残留树：有主，不是只打一行', SLOW, () => {
   function tree(w: ReturnType<typeof world>, name: string): string {
     const dir = join(w.work, '.claude', 'worktrees', name);
     mkdirSync(join(w.work, '.claude', 'worktrees'), { recursive: true });
@@ -1108,12 +1109,42 @@ describe('搁过两小时、里面还有活的树：有主，不是只打一行'
     expect(lines.join('\n')).toMatch(/残留工作树 unpushed 有主：指挥官，.*前处理（没推上去的提交）/);
   });
 
-  it('刚动过的树不派认领（可能有人正在里面干活）', () => {
+  it('刚动过、但已有没提交的改动：不删，记上认领（负责人、期限），不是只打一行', () => {
     const w = world();
-    const dir = join(w.work, '.claude', 'worktrees', tree(w, 'just-now'));
+    const dir = join(w.work, '.claude', 'worktrees', tree(w, 'just-dirty'));
     writeFileSync(join(dir, 'notes.md'), '正在写\n');
+    const now = Date.now();
+    const lines = hook.sweepWorktrees(w.work, git, now, w.home);
+    expect(existsSync(dir)).toBe(true);
+    const text = lines.join('\n');
+    expect(text).toMatch(
+      /残留工作树 just-dirty 有主：指挥官，\d{4}-\d{2}-\d{2} \d{2}:\d{2} 北京时间前处理（没提交的改动）/,
+    );
+    expect(text).not.toMatch(/还有 \d+ 棵没清/);
+    const claim = readLedger(w.home).claims[0];
+    expect(claim?.owner).toBe('指挥官');
+    expect(claim?.why).toBe('没提交的改动');
+    expect(Date.parse(String(claim?.deadline)) - Date.parse(String(claim?.firstSeen))).toBe(24 * 60 * 60_000);
+    expect(claim?.firstSeen).toBe(new Date(now).toISOString());
+  });
+
+  it('刚动过、但有没推上去的提交：不删，同样记上认领', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', tree(w, 'just-unpushed'));
+    writeFileSync(join(dir, 'decision.md'), '# 还没进远端\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-q', '-m', '一个还没进远端的决定');
     const lines = hook.sweepWorktrees(w.work, git, Date.now(), w.home);
-    expect(lines.join('\n')).toMatch(/还有 1 棵没清.*just-now/s);
+    expect(existsSync(dir)).toBe(true);
+    expect(lines.join('\n')).toMatch(/残留工作树 just-unpushed 有主：指挥官，.*前处理（没推上去的提交）/);
+  });
+
+  it('刚动过、提交都在远端、也没有未提交的改动：不删，也不派认领（可能有人正在用）', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', tree(w, 'just-clean'));
+    const lines = hook.sweepWorktrees(w.work, git, Date.now(), w.home);
+    expect(existsSync(dir)).toBe(true);
+    expect(lines.join('\n')).toMatch(/还有 1 棵没清.*just-clean/s);
     expect(lines.join('\n')).not.toMatch(/有主/);
     expect(existsSync(ledgerPath(w.home))).toBe(false);
   });
@@ -1149,6 +1180,63 @@ describe('搁过两小时、里面还有活的树：有主，不是只打一行'
     );
     expect(lines.join('\n')).not.toMatch(/有主/);
     expect(existsSync(ledgerPath(w.home))).toBe(false);
+  });
+
+  it('【故意造出的失败】已经认领的树这一轮 git status 没跑成：原认领留着，不当成处理了，也不删', () => {
+    const w = world();
+    const stuck = join(w.work, '.claude', 'worktrees', tree(w, 'stuck'));
+    writeFileSync(join(stuck, 'notes.md'), '没提交的东西\n');
+    const now = Date.now() + 3 * 60 * 60_000;
+    hook.sweepWorktrees(w.work, git, now, w.home);
+    const before = readLedger(w.home).claims.find((c) => c.name === 'stuck');
+    expect(before?.owner).toBe('指挥官');
+
+    const also = join(w.work, '.claude', 'worktrees', tree(w, 'also-dirty'));
+    writeFileSync(join(also, 'notes.md'), '另一棵的活\n');
+    // git 的 cwd 永远是主检出，工作树在 -C 后面
+    const failing: Git = (cwd, args) =>
+      args.includes('status') && args.some((a) => a.endsWith('/stuck') || a.endsWith('\\stuck'))
+        ? { status: 1, stdout: '', stderr: 'status exploded' }
+        : git(cwd, args);
+    const lines = hook.sweepWorktrees(w.work, failing, now + 60 * 60_000, w.home);
+    expect(existsSync(stuck)).toBe(true);
+    const text = lines.join('\n');
+    expect(text).toMatch(
+      /工作树 stuck 没查成（git status 没跑成（status exploded）），原认领还在：负责人仍是指挥官，\d{4}-\d{2}-\d{2} \d{2}:\d{2} 北京时间前处理（没提交的改动）。不当成已经处理了，也没删/,
+    );
+    expect(text).toMatch(/残留工作树 also-dirty 有主：指挥官/);
+    const claims = readLedger(w.home).claims;
+    const after = claims.find((c) => c.name === 'stuck');
+    expect(after?.owner).toBe('指挥官');
+    expect(after?.deadline).toBe(before?.deadline);
+    expect(after?.firstSeen).toBe(before?.firstSeen);
+    expect(after?.why).toBe('没提交的改动');
+    expect(claims.some((c) => c.name === 'also-dirty')).toBe(true);
+  });
+
+  it('【故意造出的失败】已经认领的树这一轮最后动过的时间没查成：原认领留着，不当成没有主', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', tree(w, 'stuck'));
+    writeFileSync(join(dir, 'notes.md'), '没提交的东西\n');
+    const now = Date.now() + 3 * 60 * 60_000;
+    hook.sweepWorktrees(w.work, git, now, w.home);
+    const before = readLedger(w.home).claims.find((c) => c.name === 'stuck');
+    expect(before?.deadline).toBeTruthy();
+
+    const failing: Git = (cwd, args) =>
+      args.includes('--absolute-git-dir')
+        ? { status: 1, stdout: '', stderr: 'git-dir exploded' }
+        : git(cwd, args);
+    const lines = hook.sweepWorktrees(w.work, failing, now + 60 * 60_000, w.home);
+    expect(existsSync(dir)).toBe(true);
+    expect(lines.join('\n')).toMatch(
+      /工作树 stuck 没查成（最后动过的时间没查成），原认领还在：负责人仍是指挥官/,
+    );
+    expect(lines.join('\n')).toMatch(/不当成已经处理了，也没删/);
+    const after = readLedger(w.home).claims.find((c) => c.name === 'stuck');
+    expect(after?.owner).toBe('指挥官');
+    expect(after?.deadline).toBe(before?.deadline);
+    expect(after?.firstSeen).toBe(before?.firstSeen);
   });
 
   it('【故意造出的失败】认领清单记不上：照实说没记上，不当成有主，也不删', () => {

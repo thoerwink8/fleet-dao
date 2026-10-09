@@ -976,12 +976,15 @@ export function sessionStart({
  * 超出这三条的一律不动、也不当成「查成」——2026-10-02 清那 29 棵时，就是靠第 2 条救回了决定 0006
  * （`decision-align` 树里那份决定从没进过主线）。
  *
- * 留着的树要有主（#1007）。搁过两小时、还有没提交的改动或没推上去的提交：不删（那是别人的活，
- * 存成 ref 再从盘上收走也是删数据，没有人在旁边拍就不做），记成一条认领——负责人是指挥官，
- * 期限是首次记下之后 24 小时，落在 ~/.fleet-dao/kept-worktrees.json。下次开会话再读同一条，
- * 过了期限还在就接着报。法国那半是每小时对账的「要人拍」（worktree:<仓>/<树>，packages/engine
- * 的 worktree-sweep.ts）；本机没起引擎，不把两套清扫并成一套，只把「留着的树要有主」收成同一份
- * 清单的两边。查不出、记不上就照实说，不当成已经有主，也不改那份清单。
+ * 留着的树要有主（#1007）。有没提交的改动或没推上去的提交：不删（那是别人的活，存成 ref 再从盘上
+ * 收走也是删数据，没有人在旁边拍就不做），刚动过也记成一条认领——负责人是指挥官，期限是首次记下
+ * 之后 24 小时，落在 ~/.fleet-dao/kept-worktrees.json。下次开会话再读同一条，过了期限还在就接着报。
+ * 两小时只挡住删除：干净、提交都在远端、但刚动过的树可能有人正在用，先留着、不派认领。
+ * 这一轮没查成（最后动过的时间、git status、没列出没推的提交）：不删；已经认领过的留着原期限，
+ * 不当成处理了，也不当成没有主。查不出、记不上就照实说，不覆盖那份清单。
+ * 法国那半是每小时对账的「要人拍」（worktree:<仓>/<树>，packages/engine 的 worktree-sweep.ts）；
+ * 本机没起引擎，不把两套清扫并成一套，只把「留着的树要有主」收成同一份清单的两边
+ * （法国没查成不撤那条要人拍，本机没查成不撤已有认领）。
  */
 
 /**
@@ -1045,13 +1048,14 @@ function saveClaims(path, claims) {
 }
 
 /**
- * 把这一仓搁下的树写进认领清单。期限从第一次记下算，下次再看到不往后推。
+ * 把这一仓确认还有活的树写进认领清单。期限从第一次记下算，下次再看到不往后推。
+ * 这一轮没查成的树：已有认领原样留着，不按「本轮确认有活」的那几棵把它们重写掉。
  * 清单读不懂或写不进去：不覆盖，调用方照实说没记上。
  */
-function assignKept(home, repo, leftovers, now) {
+function assignKept(home, repo, leftovers, unchecked, now) {
   const path = keptLedgerPath(home);
   const loaded = loadClaims(path);
-  if (!loaded.ok) return { ok: false, why: loaded.why, path, claims: [] };
+  if (!loaded.ok) return { ok: false, why: loaded.why, path, claims: [], preserved: [] };
   const rest = loaded.claims.filter((c) => c.repo !== repo);
   const mine = loaded.claims.filter((c) => c.repo === repo);
   const claims = leftovers.map((tree) => {
@@ -1067,11 +1071,14 @@ function assignKept(home, repo, leftovers, now) {
       deadline: new Date(firstMs + KEEP_DEADLINE_MS).toISOString(),
     };
   });
-  const next = [...rest, ...claims];
-  if (JSON.stringify(loaded.claims) === JSON.stringify(next)) return { ok: true, path, claims };
+  const claimedKeys = new Set(claims.map((c) => c.key));
+  const uncheckedKeys = new Set(unchecked.map((u) => u.dir));
+  const preserved = mine.filter((c) => uncheckedKeys.has(c.key) && !claimedKeys.has(c.key));
+  const next = [...rest, ...claims, ...preserved];
+  if (JSON.stringify(loaded.claims) === JSON.stringify(next)) return { ok: true, path, claims, preserved };
   const saved = saveClaims(path, next);
-  if (!saved.ok) return { ok: false, why: saved.why, path, claims: [] };
-  return { ok: true, path, claims };
+  if (!saved.ok) return { ok: false, why: saved.why, path, claims: [], preserved };
+  return { ok: true, path, claims, preserved };
 }
 
 /**
@@ -1254,36 +1261,38 @@ export function sweepWorktrees(cwd, git, now = Date.now(), home = undefined) {
       else kept.push(name);
       continue;
     }
+    const treeDir = resolve(dir);
     const touched = lastTouched(dir, g);
     if (touched === null) {
-      unchecked.push({ name, why: '最后动过的时间没查成' });
-      continue;
-    }
-    if (now - touched < SWEEP_IDLE_MS) {
-      kept.push(name); // 刚动过：可能有人正在里面干活，先不派认领
+      unchecked.push({ name, dir: treeDir, why: '最后动过的时间没查成' });
       continue;
     }
     const dirty = g('-C', dir, 'status', '--porcelain');
     if (!ok(dirty)) {
-      unchecked.push({ name, why: `git status 没跑成（${why(dirty)}）` });
+      unchecked.push({ name, dir: treeDir, why: `git status 没跑成（${why(dirty)}）` });
       continue;
     }
     const unmerged = g('-C', dir, 'rev-list', 'HEAD', '--not', '--remotes');
     if (!ok(unmerged)) {
-      unchecked.push({ name, why: `没列出没推的提交（${why(unmerged)}）` });
+      unchecked.push({ name, dir: treeDir, why: `没列出没推的提交（${why(unmerged)}）` });
       continue;
     }
     const isDirty = dirty.stdout.trim() !== '';
     const isUnpushed = unmerged.stdout.trim() !== '';
     if (isDirty || isUnpushed) {
+      // 有活就认领，不论刚动过没有。两小时只挡住下面「干净树」的删除。
       const parts = [];
       if (isDirty) parts.push('没提交的改动');
       if (isUnpushed) parts.push('没推上去的提交');
       leftovers.push({
         name,
-        dir: resolve(dir),
+        dir: treeDir,
         why: parts.length === 2 ? '没提交的改动，也有没推上去的提交' : parts[0],
       });
+      continue;
+    }
+    if (now - touched < SWEEP_IDLE_MS) {
+      kept.push(name); // 干净、但刚动过：可能有人正在用，先不删、也不派认领
       continue;
     }
     if (ok(g('worktree', 'remove', '--force', dir))) removed += 1;
@@ -1326,7 +1335,7 @@ export function sweepWorktrees(cwd, git, now = Date.now(), home = undefined) {
     for (const t of leftovers) kept.push(t.name);
     for (const u of unchecked) kept.push(u.name);
   } else {
-    const assigned = assignKept(home, resolve(rootPath), leftovers, now);
+    const assigned = assignKept(home, resolve(rootPath), leftovers, unchecked, now);
     if (!assigned.ok) {
       lines.push(
         leftovers.length > 0
@@ -1348,7 +1357,19 @@ export function sweepWorktrees(cwd, git, now = Date.now(), home = undefined) {
       }
     }
     for (const u of unchecked) {
-      lines.push(`工作树 ${u.name} 没查成（${u.why}），不当成已经有人负责，也没删。`);
+      const claim = assigned.preserved.find((c) => c.key === u.dir);
+      if (!claim) {
+        lines.push(`工作树 ${u.name} 没查成（${u.why}），不当成已经有人负责，也没删。`);
+        continue;
+      }
+      const deadline = beijingStamp(Date.parse(claim.deadline));
+      const still =
+        Date.parse(claim.deadline) <= now
+          ? `原认领还在且过了期限：负责人仍是${KEEP_OWNER}（${claim.why}；期限 ${deadline}）`
+          : `原认领还在：负责人仍是${KEEP_OWNER}，${deadline}前处理（${claim.why}）`;
+      lines.push(
+        `工作树 ${u.name} 没查成（${u.why}），${still}。不当成已经处理了，也没删。记在 ${assigned.path}。`,
+      );
     }
   }
   if (kept.length > 0)
