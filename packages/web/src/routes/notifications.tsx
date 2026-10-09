@@ -5,6 +5,7 @@ import { brand } from '#brand';
 import { errorText, useMe, useNotifications, useResolveNotification } from '../api/client';
 import type { Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
 import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
@@ -155,11 +156,14 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   );
 }
 
+/** 通知靠推送更新，没有定时重拉。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
+const NOTIFICATIONS_STALE_AFTER_MS = 5 * TIME.MIN;
+
 export default function Notifications() {
   const [params, setParams] = useSearchParams();
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
-  const { data, error, isLoading } = useNotifications(status);
+  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status);
   const { data: me } = useMe();
   const resolve = useResolveNotification();
   const navigate = useNavigate();
@@ -191,6 +195,14 @@ export default function Notifications() {
     <Page
       title="通知中心"
       description="只有三类：要你拍的、卡住报警、日报。飞书上也推同样的三类；进度不主动推。"
+      actions={
+        <RefreshBar
+          onRefresh={() => void refetch()}
+          isFetching={isFetching}
+          dataUpdatedAt={dataUpdatedAt}
+          staleAfterMs={NOTIFICATIONS_STALE_AFTER_MS}
+        />
+      }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className={segmentTrack} role="tablist" aria-label="处理状态">
