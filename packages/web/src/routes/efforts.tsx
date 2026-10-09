@@ -11,10 +11,13 @@ import { brand } from '#brand';
 import { errorText, useRoutingEfforts, useUpdateRouteEffort } from '../api/client';
 import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import { ToggleGroup, ToggleGroupItem } from '../components/ui/toggle-group';
 import { hostLabel } from '../lib/catalog';
 import { EFFORT_HINT, effectiveEffort, effortCounts } from '../lib/efforts';
+import { TIME } from '../lib/format';
+import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -27,26 +30,39 @@ const DESCRIPTION =
 /** 「默认」那一格的值（不是一档，是「没配」）。 */
 const DEFAULT_VALUE = 'default';
 
+/** 思考档位没有推送，页面每 60 秒自己重拉。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
+const EFFORTS_STALE_AFTER_MS = 5 * TIME.MIN;
+
 export default function Efforts() {
-  const { data, error, isLoading } = useRoutingEfforts();
+  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingEfforts();
+  const now = useNow();
+  const refresh = (
+    <RefreshBar
+      onRefresh={() => void refetch()}
+      isFetching={isFetching}
+      // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
+      dataUpdatedAt={dataUpdatedAt > now ? now : dataUpdatedAt}
+      staleAfterMs={EFFORTS_STALE_AFTER_MS}
+    />
+  );
 
   if (error) {
     return (
-      <Page title="思考档位" description={DESCRIPTION}>
+      <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
         <LoadError what="思考档位" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="思考档位" description={DESCRIPTION}>
+      <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="思考档位" description={DESCRIPTION}>
+      <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
         <div
           role="note"
           className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
@@ -62,7 +78,10 @@ export default function Efforts() {
       title="思考档位"
       description={DESCRIPTION}
       actions={
-        data.models.length > 0 ? <Counts models={data.models} fallback={data.defaultEffort} /> : undefined
+        <>
+          {refresh}
+          {data.models.length > 0 ? <Counts models={data.models} fallback={data.defaultEffort} /> : null}
+        </>
       }
     >
       {data.models.length === 0 ? (
