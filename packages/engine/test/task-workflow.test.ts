@@ -15,6 +15,8 @@ import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
 import {
   type CheckGuardedInput,
+  MAX_IMPLEMENT_ROUNDS,
+  MAX_VERIFY_ROUNDS,
   type RunSegmentResult,
   type TaskRun,
   type TaskStatus,
@@ -1360,5 +1362,160 @@ describe('任务工作流 · 现在就换模型（#1216，taskRepin）', { timeo
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
     expect(calls.segment).toHaveLength(1);
     expect(calls.segment[0]?.interrupted).toBeUndefined();
+  });
+});
+
+const HANDOFF = '已继续 3 次仍没过，交指挥官';
+
+function briefSaying(request: string, acceptance: string[]) {
+  return { ok: true as const, brief: { ...goodBrief(), request, acceptance } };
+}
+
+/** 验收连着没过，直到停下。返回那次停下的通知正文。 */
+async function verifyStopDetail(env: TestWorkflowEnvironment, problem: string): Promise<string> {
+  const world = createFakeWorld();
+  const { tasks } = scripted({
+    verify: () => ({ pass: false, problems: [problem], round: 1 }),
+  });
+  await withWorker(
+    env,
+    world,
+    async (q) => {
+      const h = await start(q, input());
+      await statusUntil(
+        h,
+        (s) => parked(s) && (s.waiting?.detail.includes('验收 2 轮都没过') ?? false),
+        '验收停下',
+      );
+      await h.signal(taskAbandonSignal, { by: 'frank', reason: '看完原因' });
+      return h.result();
+    },
+    { tasks },
+  );
+  return world.alerts.find((alert) => alert.title.includes('验收'))?.detail ?? '';
+}
+
+describe('任务工作流 · 继续后轮数清零、验收停下写明原因（#1404）', { timeout: 60_000 }, () => {
+  it('点「继续」后动手和验收轮数从 0 再计，并真的再跑一轮；下一次验收读的是最新正文', async () => {
+    expect(MAX_IMPLEMENT_ROUNDS).toBe(3);
+    expect(MAX_VERIFY_ROUNDS).toBe(2);
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      brief: (n) => (n === 1 ? briefSaying('旧正文', ['旧验收条']) : briefSaying('新正文', ['新验收条'])),
+      verify: (_input, n) =>
+        n === 4
+          ? { pass: true, problems: [], round: 2 }
+          : { pass: false, problems: ['还没做完'], round: n === 1 ? 1 : 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await statusUntil(
+          h,
+          (s) => parked(s) && (s.waiting?.detail.includes('验收 2 轮都没过') ?? false),
+          '验收 2 轮用尽，停下',
+        );
+        expect(calls.segment).toHaveLength(3);
+        expect(calls.verify).toHaveLength(2);
+        expect(calls.verify.every((item) => item.what === '旧正文')).toBe(true);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        await waitUntil(
+          () =>
+            calls.segment.length > 3 || world.alerts.some((alert) => alert.title.includes('动手 3 轮都没过')),
+          '继续后要么再动手一轮，要么错误地立刻报动手用尽',
+        );
+        expect(world.alerts.some((alert) => alert.title.includes('动手 3 轮都没过'))).toBe(false);
+        expect(calls.verify[2]).toMatchObject({ what: '新正文', howToFinish: ['新验收条'], round: 1 });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.brief).toBe(2);
+    expect(calls.segment).toHaveLength(4);
+    expect(calls.segment[3]?.brief).toMatchObject({ request: '新正文', acceptance: ['新验收条'] });
+    expect(calls.verify.map((item) => item.round)).toEqual([1, 2, 1, 2]);
+    expect(
+      calls.verify.slice(2).every((item) => item.what === '新正文' && item.howToFinish[0] === '新验收条'),
+    ).toBe(true);
+  });
+
+  it('同一次继续里动手仍停在上限；累计继续超过 3 次不再清零，停下并写明交指挥官', async () => {
+    const world = createFakeWorld({
+      ci: () => ({ state: 'red', failedChecks: ['test (engine)'] }),
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await statusUntil(
+          h,
+          (s) => parked(s) && (s.waiting?.detail.includes('动手 3 轮都没过') ?? false),
+          '动手 3 轮用尽',
+        );
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
+        for (let time = 0; time < 3; time += 1) {
+          const before = calls.segment.length;
+          await h.signal(taskContinueSignal, { by: 'frank' });
+          await waitUntil(
+            () => calls.segment.length >= before + MAX_IMPLEMENT_ROUNDS,
+            `第 ${time + 1} 次继续后再动手到上限`,
+          );
+          await statusUntil(
+            h,
+            (s) => parked(s) && (s.waiting?.detail.includes('动手 3 轮都没过') ?? false),
+            `第 ${time + 1} 次继续用尽后再停下`,
+          );
+          expect(calls.segment).toHaveLength(before + MAX_IMPLEMENT_ROUNDS);
+        }
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 4);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        await waitUntil(
+          () =>
+            calls.segment.length > MAX_IMPLEMENT_ROUNDS * 4 ||
+            world.alerts.some((alert) => alert.detail.includes(HANDOFF)),
+          '第 4 次继续要么停住交指挥官，要么又动手',
+        );
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 4);
+        const stopped = await statusUntil(
+          h,
+          (s) => parked(s) && (s.waiting?.detail.includes(HANDOFF) ?? false),
+          '已继续 3 次仍没过',
+        );
+        expect(stopped.waiting?.detail).toContain(HANDOFF);
+        expect(world.alerts.at(-1)?.title).toBe(HANDOFF);
+        expect(world.alerts.at(-1)?.detail).toContain(HANDOFF);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '交指挥官' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 4);
+  });
+
+  it('验收停下：原话含「无法证明」时，通知第一行是「验收条在 diff 里证不了」，后面接着原话', async () => {
+    const problem = '无法证明：diff 未包含验收条要的状态，也无法确认';
+    const detail = await verifyStopDetail(env, problem);
+    expect(detail.split('\n')[0]).toBe('验收条在 diff 里证不了');
+    expect(detail).toContain(problem);
+  });
+
+  it('验收停下：原话含「额外修改」时，通知第一行是「PR 改了范围外的文件」，后面接着原话', async () => {
+    const problem = '有额外修改，动了范围外的 packages/other.ts';
+    const detail = await verifyStopDetail(env, problem);
+    expect(detail.split('\n')[0]).toBe('PR 改了范围外的文件');
+    expect(detail).toContain(problem);
+  });
+
+  it('【故意造出的失败】验收原话对不上两类时归「其它」，原文留在通知里不被吞掉', async () => {
+    const problem = '按钮颜色改深了，看不出和验收条的关系';
+    const detail = await verifyStopDetail(env, problem);
+    expect(detail.split('\n')[0]).toBe('其它');
+    expect(detail.split('\n').slice(1).join('\n')).toContain(problem);
   });
 });

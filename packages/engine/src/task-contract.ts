@@ -18,10 +18,15 @@ import type { RouteChoice } from './ports.ts';
 import type { TaskBrief } from './runner/task-brief.ts';
 import type { TierDecision } from './runner/tier.ts';
 
-/** 动手最多几轮（CI 红了、没交付、验收没过都回动手重来一轮）。人点「继续」再给一整轮。 */
+/** 动手最多几轮（CI 红了、没交付、验收没过都回动手重来一轮）。这个数不随「继续」改变。 */
 export const MAX_IMPLEMENT_ROUNDS = 3;
-/** 验收最多几轮（默认 1 轮，最多 2 轮，specs/555）。 */
+/** 验收最多几轮（默认 1 轮，最多 2 轮，specs/555）。这个数不随「继续」改变。 */
 export const MAX_VERIFY_ROUNDS = 2;
+/**
+ * 动手或验收轮数用尽后点「继续」，最多自动把两轮计数清零几次（#1404）。
+ * 超过就停下交给指挥官，不再清零。同一次继续之内仍受上面两个上限约束。
+ */
+export const MAX_ROUND_RESETS = 3;
 /** 一轮动手的会话最长多少分钟（one-shot 默认也是 60）。 */
 export const SEGMENT_MINUTES = 60;
 /** 等合并时每次长轮询多少分钟（工作流一直轮到合并、关闭或人放弃）。 */
