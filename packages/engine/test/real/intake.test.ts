@@ -646,16 +646,17 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
   }
   const longAgo = new Date(NOW.getTime() - 10 * HOURS);
 
-  it('一小时内已经建出 6 条任务行：这一轮一条都不起，也不去现读那张单', async () => {
+  /** n 条一小时内建出的任务行（5 分钟一条往前排，最老的 59 分钟前），任务号从 101 起。 */
+  const recentRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      issue: 101 + i,
+      state: 'running' as const,
+      createdAt: new Date(NOW.getTime() - Math.min(59, 5 * (i + 1)) * 60_000),
+    }));
+
+  it('一小时内已经建出 12 条任务行：这一轮一条都不起，也不去现读那张单', async () => {
     const { repo } = await seedWorld(t.db);
-    await seedTasks(repo.id, [
-      { issue: 101, state: 'running', createdAt: new Date(NOW.getTime() - 10 * 60_000) },
-      { issue: 102, state: 'running', createdAt: new Date(NOW.getTime() - 20 * 60_000) },
-      { issue: 103, state: 'running', createdAt: new Date(NOW.getTime() - 30 * 60_000) },
-      { issue: 104, state: 'running', createdAt: new Date(NOW.getTime() - 40 * 60_000) },
-      { issue: 105, state: 'running', createdAt: new Date(NOW.getTime() - 50 * 60_000) },
-      { issue: 106, state: 'running', createdAt: new Date(NOW.getTime() - 59 * 60_000) },
-    ]);
+    await seedTasks(repo.id, recentRows(12));
     const { gh, calls } = fakeGh();
     const { client, starts } = fakeClient();
     const run = await runIntakeJob(wire(gh)(client, 'fleet'));
@@ -664,16 +665,12 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     expect(calls.planned).toEqual([]);
   });
 
-  it('近一小时 6 条里有 1 条是巡检仓的巡检单：不计入，普通单还能再起 1 条', async () => {
+  it('近一小时 12 条里有 1 条是巡检仓的巡检单：不计入，普通单还能再起 1 条', async () => {
     const { repo } = await seedWorld(t.db, { name: 'fleet-dao-canary' });
     const recent = (min: number) => new Date(NOW.getTime() - min * 60_000);
     await seedTasks(repo.id, [
-      { issue: 101, state: 'running', createdAt: recent(10) },
-      { issue: 102, state: 'running', createdAt: recent(20) },
-      { issue: 103, state: 'running', createdAt: recent(25) },
-      { issue: 104, state: 'running', createdAt: recent(27) },
-      { issue: 105, state: 'running', createdAt: recent(29) },
-      { issue: 106, state: 'done', createdAt: recent(30), title: canaryIssueTitle(4) },
+      ...recentRows(11),
+      { issue: 150, state: 'done', createdAt: recent(30), title: canaryIssueTitle(4) },
     ]);
     const { gh } = fakeGh();
     const { client, starts } = fakeClient();
@@ -682,17 +679,9 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     expect(starts).toHaveLength(1);
   });
 
-  it('近一小时 6 条普通任务已经把名额用满：巡检单仍被拉起', async () => {
+  it('近一小时 12 条普通任务已经把名额用满：巡检单仍被拉起', async () => {
     const { repo } = await seedWorld(t.db, { name: 'fleet-dao-canary' });
-    const recent = (min: number) => new Date(NOW.getTime() - min * 60_000);
-    await seedTasks(repo.id, [
-      { issue: 101, state: 'running', createdAt: recent(10) },
-      { issue: 102, state: 'running', createdAt: recent(20) },
-      { issue: 103, state: 'running', createdAt: recent(30) },
-      { issue: 104, state: 'running', createdAt: recent(35) },
-      { issue: 105, state: 'running', createdAt: recent(40) },
-      { issue: 106, state: 'running', createdAt: recent(45) },
-    ]);
+    await seedTasks(repo.id, recentRows(12));
     const { gh } = fakeGh({
       issues: [groomIssue({ number: 70, title: canaryIssueTitle(9) })],
     });
@@ -703,12 +692,12 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     expect(starts[0]?.options).toMatchObject({ workflowId: 'task:acme/fleet-dao-canary#70' });
   });
 
-  it('一小时内接手成功 6 条老行：和新建一样占满名额，这一轮不起、也不去现读', async () => {
+  it('一小时内接手成功 12 条老行：和新建一样占满名额，这一轮不起、也不去现读', async () => {
     const { repo } = await seedWorld(t.db);
     const createdAt = new Date(NOW.getTime() - 2 * HOURS);
     await seedTasks(
       repo.id,
-      [101, 102, 103, 104, 105, 106].map((issue) => ({ issue, state: 'running' as const, createdAt })),
+      Array.from({ length: 12 }, (_, i) => ({ issue: 101 + i, state: 'running' as const, createdAt })),
     );
     const rows = await t.db.select().from(tasks);
     await t.db.insert(auditLog).values(
@@ -731,12 +720,12 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     expect(calls.planned).toEqual([]);
   });
 
-  it('一小时前建的不算：6 条都是 61 分钟前，照起', async () => {
+  it('一小时前建的不算：12 条都是 61 分钟前，照起', async () => {
     const { repo } = await seedWorld(t.db);
     await seedTasks(
       repo.id,
-      [101, 102, 103, 104, 105, 106].map((issue) => ({
-        issue,
+      Array.from({ length: 12 }, (_, i) => ({
+        issue: 101 + i,
         state: 'running' as const,
         createdAt: new Date(NOW.getTime() - 61 * 60_000),
       })),
