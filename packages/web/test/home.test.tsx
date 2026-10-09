@@ -166,6 +166,24 @@ describe('home（/）：四种状态', () => {
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
   });
 
+  test('要你拍的单列通栏，时间不换行；xl 起左右分栏还在', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    const card = document.querySelector('[data-decision-card]');
+    expect(card).toBeTruthy();
+    const list = card?.parentElement;
+    expect(list?.tagName).toBe('UL');
+    expect(list?.className).toBe('grid gap-2');
+    const time = card?.querySelector('.whitespace-nowrap');
+    expect(time?.className).toContain('text-caption');
+    const split = Array.from(document.querySelectorAll('div')).find(
+      (el) => el.className.includes('xl:grid-cols-3') && el.className.includes('2xl:grid-cols-'),
+    );
+    expect(split).toBeTruthy();
+    const done = document.querySelector('[data-done-card]')?.parentElement;
+    expect(done?.className).toContain('md:grid-cols-2');
+    expect(done?.className).toContain('xl:grid-cols-1');
+  });
+
   test('data：三块各画出有数据的样子', async () => {
     renderHome({ status: 'data', data: SAMPLE });
     // 「在跑的」画布按需加载、排完版才有卡片

@@ -53,7 +53,7 @@ function HomeBody({ data, remote }: { data: HomeData; remote: boolean }) {
             bodyClassName="p-3"
           >
             {decisions.length ? (
-              <ul className="grid gap-2 md:grid-cols-3 xl:grid-cols-1">
+              <ul className="grid gap-2">
                 {decisions.map((d) => (
                   <DecisionCard key={`${d.kind}:${d.id}`} decision={d} />
                 ))}

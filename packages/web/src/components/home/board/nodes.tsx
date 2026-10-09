@@ -16,6 +16,7 @@ import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-car
 import type { HomeFlowStage, HomeRunning } from '../types';
 import {
   farCardFontPx,
+  farTitleFontSize,
   itemOf,
   targetOfItem,
   useBoardUi,
@@ -231,17 +232,17 @@ function Handles({ side, source = true, target = true }: { side: Side; source?: 
 }
 
 /**
- * 远档标题、编号的 CSS 字号。基准 32：远档缩放 0.4 时屏幕上是 32px；
+ * 远档编号的 CSS 字号。基准 32：远档缩放 0.4 时屏幕上是 32px；
  * 画布最小缩放 0.15 时屏幕上仍是 12px（32 / 0.4 × 0.15）。
  */
 const FAR_HEAD_PX = farCardFontPx(32, ZOOM_OF.far);
-/** 远档次要一行（单子标题、张数）：远档缩放下屏幕上是 16px，不小于 12。 */
-const FAR_SUB_PX = farCardFontPx(16, ZOOM_OF.far);
+/** 远档标题：字号名，跟着画布当前缩放，屏幕上不小于 --text-caption（11px）。 */
+const FAR_TITLE_FONT = farTitleFontSize();
 
-/** 远景：整张卡只剩状态色和大号字。标题、编号按缩放倒数放大，屏幕上不小于 12px。 */
+/** 远景：整张卡只剩状态色和大号字。编号按缩放倒数放大；标题跟着当前缩放，屏幕上不小于 11px。 */
 function Far({ tone, big, small }: { tone: Tone; big: string; small?: string | undefined }) {
   return (
-    <div className={cn('flex h-full flex-col items-center justify-center gap-3 px-3', toneSoft[tone])}>
+    <div className={cn('flex h-full flex-col items-center justify-center gap-1 px-3', toneSoft[tone])}>
       <div
         className={cn('num max-w-full truncate leading-none font-bold tracking-tight', toneText[tone])}
         style={{ fontSize: FAR_HEAD_PX }}
@@ -252,7 +253,7 @@ function Far({ tone, big, small }: { tone: Tone; big: string; small?: string | u
       {small ? (
         <div
           className="max-w-full truncate leading-none font-semibold text-muted-foreground"
-          style={{ fontSize: FAR_SUB_PX }}
+          style={{ fontSize: FAR_TITLE_FONT }}
           title={small}
         >
           {small}
@@ -468,10 +469,7 @@ export const AskNode = memo(function AskNode({ id, data }: Props) {
       <Handles side={data.side} source={false} />
       {level === 'far' ? (
         <div className={cn('flex h-full items-center justify-center', toneSoft.human)}>
-          <span
-            className={cn('font-bold', toneText.human)}
-            style={{ fontSize: farCardFontPx(16, ZOOM_OF.far) }}
-          >
+          <span className={cn('font-bold', toneText.human)} style={{ fontSize: FAR_TITLE_FONT }}>
             等你
           </span>
         </div>
@@ -558,11 +556,11 @@ export const RootNode = memo(function RootNode({ id, data }: Props) {
       <Handle id="r" type="source" position={Position.Right} isConnectable={false} />
       <Handle id="l" type="source" position={Position.Left} isConnectable={false} />
       {level === 'far' ? (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4">
+        <div className="flex h-full flex-col items-center justify-center gap-1 px-4">
           <div className="num leading-none font-bold tracking-tight" style={{ fontSize: FAR_HEAD_PX }}>
             {data.counts.total}
           </div>
-          <div className="text-muted-foreground" style={{ fontSize: FAR_SUB_PX }}>
+          <div className="text-muted-foreground" style={{ fontSize: FAR_TITLE_FONT }}>
             张在跑
           </div>
         </div>

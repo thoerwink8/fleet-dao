@@ -17,6 +17,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useStoreApi,
 } from '@xyflow/react';
 import {
   ChevronDown,
@@ -215,7 +216,24 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
   const [help, setHelp] = useState(false);
   const { trigger } = useTaskActions();
   const rf = useReactFlow();
+  const flowStore = useStoreApi();
   const wrapper = useRef<HTMLDivElement>(null);
+  // 远档标题的字号用这两个变量：预设缩放写死一次，当前缩放跟着画布变，节点不必逐帧重画。
+  useLayoutEffect(() => {
+    const el = wrapper.current;
+    if (!el) return;
+    el.style.setProperty('--fd-zoom-far', String(ZOOM_OF.far));
+    let last = Number.NaN;
+    const apply = () => {
+      const z = flowStore.getState().transform[2];
+      const next = z > 0 ? z : ZOOM_OF.far;
+      if (next === last) return;
+      last = next;
+      el.style.setProperty('--fd-board-zoom', String(next));
+    };
+    apply();
+    return flowStore.subscribe(apply);
+  }, [flowStore]);
   const [view] = useState(createBoardView);
 
   const graph = useMemo(
