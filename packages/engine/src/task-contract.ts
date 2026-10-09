@@ -289,9 +289,20 @@ export interface ProbeAssignedInput {
 }
 
 /**
- * pass：可以派。probed 为假是没真探（5 分钟内刚探通、或规矩写明不探）。unwired：这个工人没装探针，按上一次结论派，状态里不写「通」。
+ * pass：可以派。probed 为假是没真探（5 分钟内刚探通、或规矩写明不探）。
  * fail：这一条本轮不能派。counted 为真才占「每轮最多当场探 3 条」的名额（组织认不出、路由被删了不占）。
  */
 export type ProbeAssignedResult =
-  | { kind: 'pass'; label: string; detail: string; probed: boolean; unwired: boolean }
+  | { kind: 'pass'; label: string; detail: string; probed: boolean }
   | { kind: 'fail'; label: string; detail: string; counted: boolean };
+
+/** 派前探测不通、这轮不用这条路由：放掉选路时预占的名额（#1409）。没进起会话，不能占着池。 */
+export interface ReleaseReservationInput {
+  schemaVersion: 1;
+  reservationId: string;
+}
+
+/** released：这一下放完了（本来就已经不在，也算放完）。 */
+export interface ReleaseReservationResult {
+  released: true;
+}

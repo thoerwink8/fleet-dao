@@ -9,6 +9,7 @@ import type { EngineActivities } from '../src/activity-options.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
 import type { FakeWorld } from '../src/fakes.ts';
+import type { ProbeAssignedInput } from '../src/task-contract.ts';
 import { bundleEngineWorkflows, createEngineWorker } from '../src/worker.ts';
 
 Runtime.install({ logger: new DefaultLogger('ERROR') });
@@ -64,6 +65,22 @@ export interface WorkerOptions {
   workflowBundle?: WorkflowBundle;
 }
 
+/**
+ * 测试工人没单独配探针：按「上一次结论还在 5 分钟内」回通，不测探针的任务流程照旧派得出去。
+ * 生产工人没装探针是 JOB_NOT_CONFIGURED，不走这里。
+ */
+function freshProbePass(activities: EngineActivities): EngineActivities {
+  return {
+    ...activities,
+    probeAssignedRoute: async (input: ProbeAssignedInput) => ({
+      kind: 'pass',
+      label: input.label,
+      detail: '上一次探针结论还在 5 分钟内，不重复探',
+      probed: false,
+    }),
+  };
+}
+
 /** 起一个真的引擎 worker（假端口），跑完 fn 就关。 */
 export async function withWorker<T>(
   env: TestWorkflowEnvironment,
@@ -72,6 +89,11 @@ export async function withWorker<T>(
   options: WorkerOptions = {},
 ): Promise<T> {
   const taskQueue = options.taskQueue ?? `q-${randomUUID()}`;
+  const userWrap = options.wrapActivities;
+  const wrapActivities = (activities: EngineActivities): EngineActivities => {
+    const base = options.jobs?.routeProbe ? activities : freshProbePass(activities);
+    return userWrap ? userWrap(base) : base;
+  };
   const worker = await createEngineWorker({
     config: {
       address: env.address,
@@ -85,7 +107,7 @@ export async function withWorker<T>(
     workflowBundle: options.workflowBundle ?? (await engineBundle()),
     ...(options.triage ? { triage: options.triage } : {}),
     ...(options.decide ? { decide: options.decide } : {}),
-    ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),
+    wrapActivities,
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
     ...(options.jobs ? { jobs: options.jobs } : {}),
     ...(options.tasks ? { tasks: options.tasks } : {}),

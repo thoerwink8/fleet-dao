@@ -7,7 +7,8 @@
 // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
 // - 会话跑完却没有提交（#1408，patched('avoid-empty-commit-route')）：避让记在这张单的运行时上，下一轮选路带上。
 //   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
-// - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
+// - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
+//   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
 
 import { isCancellation, patched } from '@temporalio/workflow';
@@ -194,7 +195,8 @@ export async function writeSession(
 /**
  * 选路：排队（没空位、额度没读成）就隔一会儿再选；一条能用的都没有就停下等人。派得出就当场给动手这一段预占池的名额（#757），
  * 交回的路由带着它进 runSegment：开跑时换成开跑那一行，没开跑就收场的由 runSegment 放掉。
- * 派之前再探一次选定的那条（#1409）：不通就换下一条，每轮最多探 3 条；都探不通或都被挡就停下等探针恢复，不起会话。
+ * 派之前再探一次选定的那条（#1409）：不通就先放掉这次预占（没进 runSegment，不能占着池），再换下一条，每轮最多探 3 条；
+ * 都探不通或都被挡就停下等探针恢复，不起会话。
  * 没提交的避让（#1408）和这一轮探不通的避让叠在一起。避让把候选滤光时，点名原来的路由再选；还派不出就用它，但派之前照样探。
  */
 async function pickRoute(
@@ -260,10 +262,19 @@ async function pickRoute(
         }),
       ),
     );
-    if (probe.kind === 'pass' && probe.unwired) return { route, probeNote: null };
     if (probe.kind === 'pass') {
       clearProbeStop();
       return { route, probeNote: dispatchProbeLine(round.fails, probe.label) };
+    }
+    // 探不通不会进 runSegment。预占要在换下一条或停下之前放掉，不然这一段一直占着池。
+    // 老历史没有这个标记：当时没放，重放不多调这一步。
+    if (patched('dispatch-probe-release')) {
+      const reservationId = route.reservationId;
+      if (reservationId) {
+        await rt.step('releaseReservation', () =>
+          rt.acts.releaseReservation({ schemaVersion: 1, reservationId }),
+        );
+      }
     }
     const decided = afterDispatchProbe(round, {
       label: probe.label,

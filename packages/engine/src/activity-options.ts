@@ -21,6 +21,8 @@ import {
   type ProbeAssignedResult,
   type ReadDeliveryInput,
   type ReadTaskBriefInput,
+  type ReleaseReservationInput,
+  type ReleaseReservationResult,
   type RunSegmentInput,
   type RunSegmentResult,
   SEGMENT_MINUTES,
@@ -55,8 +57,10 @@ export type EngineActivities = PortActivities & {
   armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;
   /** 等 PR 合并（长轮询，到点回 waiting 由工作流再来一次）。 */
   waitMerged(input: WaitMergedInput): Promise<MergeWait>;
-  /** 派单前对选定的这一条路由探一次（#1409）。没装探针回 unwired，不写成探通。 */
+  /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
+  /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
+  releaseReservation(input: ReleaseReservationInput): Promise<ReleaseReservationResult>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -90,6 +94,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   canaryOpen: 'job',
   canaryCheck: 'job',
   probeAssignedRoute: 'job',
+  releaseReservation: 'quick',
   readTaskBrief: 'git',
   runSegment: 'segment',
   readDelivery: 'git',

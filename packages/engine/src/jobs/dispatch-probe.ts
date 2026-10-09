@@ -17,7 +17,7 @@ import type { ProbeLock } from './route-probe-now.ts';
 const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
 
 function pass(label: string, detail: string, probed: boolean): ProbeAssignedResult {
-  return { kind: 'pass', label, detail, probed, unwired: false };
+  return { kind: 'pass', label, detail, probed };
 }
 
 function fail(label: string, detail: string, counted: boolean): ProbeAssignedResult {

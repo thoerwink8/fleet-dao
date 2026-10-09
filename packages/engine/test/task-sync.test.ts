@@ -92,7 +92,7 @@ describe('动手前并最新主线（#1246）', { timeout: 60_000 }, () => {
     const { world, calls, run } = await runReworked({});
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(world.count('syncMainline')).toBe(1);
-    expect(calls.segment[1]?.feedback).toHaveLength(1); // 只有 CI 红了那一条
+    expect(calls.segment[1]?.feedback?.filter((line) => !line.startsWith('派前探测：'))).toHaveLength(1);
     expect(calls.segment[1]?.feedback.join('\n')).toContain('test (engine)');
     expect(world.alerts).toEqual([]);
   });

@@ -1,4 +1,6 @@
 // 活动外壳：计时（排队、干活分开）、错误码过边界。用 MockActivityEnvironment，不起服务端。
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import { MockActivityEnvironment } from '@temporalio/testing';
 import { describe, expect, it } from 'vitest';
@@ -37,7 +39,14 @@ describe('活动外壳', () => {
     const activities = createActivities(createFakeWorld().ports);
     expect(Object.keys(activities).sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
     expect(
-      [...PORT_NAMES, 'canaryOpen', 'canaryCheck', 'probeAssignedRoute', ...TASK_ACTIVITY_NAMES].sort(),
+      [
+        ...PORT_NAMES,
+        'canaryOpen',
+        'canaryCheck',
+        'probeAssignedRoute',
+        'releaseReservation',
+        ...TASK_ACTIVITY_NAMES,
+      ].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });
 
@@ -128,5 +137,76 @@ describe('活动外壳', () => {
     expect(profileOptions(ACTIVITY_PROFILE.waitCi, DEFAULT_LIMITS).startToCloseTimeout).toBe('40 minutes');
     // 要人的错误码不白白重试。
     expect(quick.retry?.nonRetryableErrorTypes).toContain('WORKFLOWS_PERMISSION');
+    // 放预占是短的、幂等的删除，不占探测那一档 10 分钟。
+    expect(profileOptions(ACTIVITY_PROFILE.releaseReservation, DEFAULT_LIMITS).startToCloseTimeout).toBe(
+      '30 seconds',
+    );
+  });
+
+  it('没装路由探针：派前探测报 JOB_NOT_CONFIGURED，不当成探通', async () => {
+    const activities = createActivities(createFakeWorld().ports);
+    const error = await envWith()
+      .run(activities.probeAssignedRoute, {
+        schemaVersion: 1 as const,
+        routeId: 'r1',
+        label: 'glm-5.3-flash',
+      })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApplicationFailure);
+    const failure = error as ApplicationFailure;
+    expect(failure.type).toBe('JOB_NOT_CONFIGURED');
+    expect(failure.nonRetryable).toBe(true);
+    expect(failure.message).toContain('没装路由探针');
+    expect(failure.message).not.toContain('探通');
+  });
+
+  it('没装放预占：报 JOB_NOT_CONFIGURED，不装作放过', async () => {
+    const activities = createActivities(createFakeWorld().ports);
+    const error = await envWith()
+      .run(activities.releaseReservation, { schemaVersion: 1 as const, reservationId: 'res-1' })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApplicationFailure);
+    const failure = error as ApplicationFailure;
+    expect(failure.type).toBe('JOB_NOT_CONFIGURED');
+    expect(failure.nonRetryable).toBe(true);
+    expect(failure.message).toContain('没装放预占');
+  });
+
+  it('放预占：交给装配的回调，回 released', async () => {
+    const released: string[] = [];
+    const activities = createActivities(createFakeWorld().ports, {
+      releaseReservation: async (id) => {
+        released.push(id);
+      },
+    });
+    const got = await envWith().run(activities.releaseReservation, {
+      schemaVersion: 1 as const,
+      reservationId: 'res-1',
+    });
+    expect(got).toEqual({ released: true });
+    expect(released).toEqual(['res-1']);
+  });
+});
+
+describe('【故意造出的失败】生产装配漏接派前探测放预占（#1409）', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/real/index.ts', import.meta.url)), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+
+  it('jobs.releaseReservation 交给 reservations.release', () => {
+    expect(source).toMatch(
+      /jobs\.releaseReservation = \(reservationId\) => reservations\.release\(reservationId\)/,
+    );
+  });
+
+  it('检查本身有牙：拿掉这一行，同一个检查会红', () => {
+    const without = source.replace(
+      'jobs.releaseReservation = (reservationId) => reservations.release(reservationId);',
+      '',
+    );
+    expect(without).not.toBe(source);
+    expect(without).not.toMatch(
+      /jobs\.releaseReservation = \(reservationId\) => reservations\.release\(reservationId\)/,
+    );
   });
 });

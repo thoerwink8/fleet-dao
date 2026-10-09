@@ -80,7 +80,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
       taskId: i.taskId,
       route: { routeId: 'r1' },
       tier: { tier: 'medium' },
-      feedback: [],
+      feedback: ['派前探测：m1 通'],
     });
     expect(calls.verify[0]).toMatchObject({ prNumber: run.prNumber, round: 1, authorFamilies: ['claude'] });
     expect(calls.arm).toBe(1);
@@ -121,7 +121,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     );
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(calls.segment).toHaveLength(2);
-    expect(calls.segment[0]?.feedback).toEqual([]);
+    expect(calls.segment[0]?.feedback).toEqual(['派前探测：m1 通']);
     expect(calls.segment[1]?.feedback.join('\n')).toContain('test (engine)');
     expect(calls.segment[1]?.feedback.join('\n')).toContain('FAIL task.test.ts');
     expect(world.count('openPr')).toBe(1);
@@ -1523,9 +1523,30 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
 });
 
 const PROBE_ROUTES: RouteChoice[] = [
-  { routeId: 'a', poolId: 'p1', modelId: 'glm-5.3-flash', family: 'claude', hostId: 'claude-code' },
-  { routeId: 'b', poolId: 'p2', modelId: 'deepseek-flash', family: 'claude', hostId: 'claude-code' },
-  { routeId: 'c', poolId: 'p3', modelId: 'kimi', family: 'kimi', hostId: 'api-shell' },
+  {
+    routeId: 'a',
+    poolId: 'p1',
+    modelId: 'glm-5.3-flash',
+    family: 'claude',
+    hostId: 'claude-code',
+    reservationId: 'res-a',
+  },
+  {
+    routeId: 'b',
+    poolId: 'p2',
+    modelId: 'deepseek-flash',
+    family: 'claude',
+    hostId: 'claude-code',
+    reservationId: 'res-b',
+  },
+  {
+    routeId: 'c',
+    poolId: 'p3',
+    modelId: 'kimi',
+    family: 'kimi',
+    hostId: 'api-shell',
+    reservationId: 'res-c',
+  },
 ];
 
 function probeTarget(route: RouteChoice): RouteProbeTarget {
@@ -1580,22 +1601,30 @@ function failingProbe(passAfter: string | null): {
 }
 
 describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () => {
-  it('探不通就换下一条，会话的返工意见写明换到谁', async () => {
+  it('探不通就换下一条，会话的返工意见写明换到谁，并在再选之前放掉没派的那条预占', async () => {
     const world = createFakeWorld({ routes: PROBE_ROUTES });
     const { tasks, calls } = scripted();
     const probe = failingProbe('b');
+    const released: { id: string; picks: number }[] = [];
     const run = await withWorker(
       env,
       world,
       async (q) => (await start(q, input())).result() as Promise<TaskRun>,
       {
         tasks,
-        jobs: probe.jobs,
+        jobs: {
+          ...probe.jobs,
+          releaseReservation: async (id) => {
+            released.push({ id, picks: world.count('pickRoute') });
+          },
+        },
       },
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(1);
     expect(calls.segment[0]?.route.routeId).toBe('b');
+    expect(calls.segment[0]?.route.reservationId).toBe('res-b');
+    expect(released).toEqual([{ id: 'res-a', picks: 1 }]);
     expect(calls.segment[0]?.feedback.join('\n')).toContain(
       '派前探测：glm-5.3-flash 不通，换到 deepseek-flash',
     );
@@ -1605,10 +1634,11 @@ describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () =
     expect(probe.probed()).toContain('a');
   });
 
-  it('三条都探不通：不起会话，停下并写出每条结果，沿用全熔断提醒', async () => {
+  it('三条都探不通：不起会话，停下并写出每条结果，沿用全熔断提醒，三条预占都放掉', async () => {
     const world = createFakeWorld({ routes: PROBE_ROUTES });
     const { tasks, calls } = scripted();
     const probe = failingProbe(null);
+    const released: { id: string; picks: number }[] = [];
     await withWorker(
       env,
       world,
@@ -1627,6 +1657,11 @@ describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () =
         expect(s.doing).toContain('不起会话，等探针探通后再继续');
         expect(s.lastProblem).toBe(s.doing);
         expect(calls.segment).toEqual([]);
+        expect(released).toEqual([
+          { id: 'res-a', picks: 1 },
+          { id: 'res-b', picks: 2 },
+          { id: 'res-c', picks: 3 },
+        ]);
         expect(world.alerts).toContainEqual(
           expect.objectContaining({
             dedupeKey: 'routing:all-open:ui',
@@ -1637,7 +1672,15 @@ describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () =
         await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
         return h.result() as Promise<TaskRun>;
       },
-      { tasks, jobs: probe.jobs },
+      {
+        tasks,
+        jobs: {
+          ...probe.jobs,
+          releaseReservation: async (id) => {
+            released.push({ id, picks: world.count('pickRoute') });
+          },
+        },
+      },
     );
   });
 });

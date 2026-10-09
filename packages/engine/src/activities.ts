@@ -44,6 +44,8 @@ import type {
   ProbeAssignedInput,
   ReadDeliveryInput,
   ReadTaskBriefInput,
+  ReleaseReservationInput,
+  ReleaseReservationResult,
   RunSegmentInput,
   RunSegmentResult,
   WaitMergedInput,
@@ -191,6 +193,10 @@ export interface EngineJobs {
   githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
   /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
   routeProbe?: () => RouteProbeJobDeps;
+  /**
+   * 放掉选路时预占、这轮又不用的名额（#1409 派前探测不通）。不给，活动报 JOB_NOT_CONFIGURED，不装作放过。
+   */
+  releaseReservation?: (reservationId: string) => Promise<void>;
   /** 驾驶舱的立即探测（jobs/route-probe-now.ts）：每几秒看一眼有没人点、接手、探、回结论。不给就不看。 */
   routeProbeNow?: () => RouteProbeNowDeps;
   /** 临时指挥官整理待办（jobs/groom.ts，母单 #1335 第 3 片）：每几秒看一眼有没有排队的整理，有就接手、起会话、执行清单。不给就不看。 */
@@ -282,22 +288,43 @@ function parseProbeAssigned(input: unknown): ProbeAssignedInput {
 }
 
 /**
- * 派单前探选定的这一条。没装探针（假端口、测试工人）按上一次结论派，不写成「通」，免得没探过的任务状态里多一句。
+ * 派单前探选定的这一条。没装探针明确报 JOB_NOT_CONFIGURED，不当成探通，也不按上一次结论派。
  * 读路由表失败原样抛：不把没读成当成探通。
  */
 async function runProbeAssigned(jobs: EngineJobs, input: unknown): Promise<unknown> {
   const parsed = parseProbeAssigned(input);
   const make = jobs.routeProbe;
   if (!make) {
-    return {
-      kind: 'pass',
-      label: parsed.label,
-      detail: '这个工人没装路由探针，按上一次结论派',
-      probed: false,
-      unwired: true,
-    };
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装路由探针（假端口，或真端口没接上）：不装作探过，也不派',
+      { retryable: false },
+    );
   }
   return probeAssignedRoute(make(), routeProbeLock, parsed);
+}
+
+function parseReleaseReservation(input: unknown): ReleaseReservationInput {
+  const raw = input as Partial<ReleaseReservationInput> | null;
+  if (raw?.schemaVersion !== 1 || typeof raw.reservationId !== 'string' || raw.reservationId.length === 0) {
+    throw new PortError('INVALID_INPUT', '放预占：要有预占编号', { retryable: false });
+  }
+  return { schemaVersion: 1, reservationId: raw.reservationId };
+}
+
+/** 派前探测不通、这轮不用这条路由：放掉选路时预占的名额。没装放名额不装作放过。 */
+async function runReleaseReservation(jobs: EngineJobs, input: unknown): Promise<ReleaseReservationResult> {
+  const parsed = parseReleaseReservation(input);
+  const release = jobs.releaseReservation;
+  if (!release) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装放预占名额（假端口，或真端口没接上）：不装作放过',
+      { retryable: false },
+    );
+  }
+  await release(parsed.reservationId);
+  return { released: true };
 }
 
 /** 引擎自己的活动：全流程巡检看一回、判、记。 */
@@ -334,6 +361,7 @@ export function createActivities(
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
   out.probeAssignedRoute = timed('probeAssignedRoute', (input) => runProbeAssigned(jobs, input), record);
+  out.releaseReservation = timed('releaseReservation', (input) => runReleaseReservation(jobs, input), record);
   for (const name of TASK_ACTIVITY_NAMES) {
     out[name] = timed(
       name,
