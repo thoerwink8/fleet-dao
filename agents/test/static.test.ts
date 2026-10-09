@@ -23,6 +23,7 @@ function stripCommentsAndStrings(code: string): string {
     if (c === '/' && n === '*') {
       const end = code.indexOf('*/', i + 2);
       i = end === -1 ? code.length : end + 2;
+      out += ' ';
       continue;
     }
     if (c === "'" || c === '"') {
@@ -55,7 +56,10 @@ function endOfQuote(code: string, i: number, quote: string): number {
   return i;
 }
 
-/** 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。 */
+/**
+ * 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。
+ * 表达式前后各留一个空格：`${prefix}${execFileSync(...)}` 不能粘成 `prefixexecFileSync`，否则词边界扫不到。
+ */
 function readTemplate(code: string, i: number): { inner: string; end: number } {
   let inner = '';
   while (i < code.length) {
@@ -67,7 +71,7 @@ function readTemplate(code: string, i: number): { inner: string; end: number } {
     if (c === '`') return { inner, end: i + 1 };
     if (c === '$' && code[i + 1] === '{') {
       const expr = readBalanced(code, i + 1);
-      inner += expr.body;
+      inner += ` ${expr.body} `;
       i = expr.end;
       continue;
     }
@@ -118,6 +122,16 @@ function scanSyncChildSpawns(code: string): string[] {
   return found?.[0] === undefined ? [] : [found[0]];
 }
 
+/** 拼出 `${name}`，避免测试源码里的 ${} 被当成自己的插值。 */
+function slot(name: string): string {
+  return '$' + '{' + name + '}';
+}
+
+/** 验收样本：`const s = \`${prefix}${…}\`;`。 */
+function gluedTemplate(expr: string): string {
+  return 'const s = `' + slot('prefix') + slot(expr) + '`;';
+}
+
 /** 相对 test/ 的路径（统一用 /）。 */
 function rel(file: string): string {
   return relative(TEST, file).split(sep).join('/');
@@ -165,5 +179,24 @@ describe('测试里不许同步起子进程', () => {
     expect(scanSyncChildSpawns(`execFileSync('git', []);`)).toEqual(['execFileSync']);
     expect(scanSyncChildSpawns(`import { spawnSync } from 'node:child_process';`)).toEqual(['spawnSync']);
     expect(scanSyncChildSpawns(`const e = new Error('spawnSync git ENOENT'); // execSync`)).toEqual([]);
+  });
+
+  it.each(['execFileSync', 'spawnSync', 'execSync'])('模板插值紧挨着前缀时，仍然命中 %s', (name) => {
+    expect(scanSyncChildSpawns(gluedTemplate(`${name}('git', [])`))).toEqual([name]);
+  });
+
+  it('模板里只有普通文字和不含这三个词的插值时，不误报', () => {
+    const sample = 'const s = `普通文字 ' + slot('prefix') + slot('name') + '`;';
+    expect(scanSyncChildSpawns(sample)).toEqual([]);
+  });
+
+  it('标签模板里的插值同样扫得出来', () => {
+    expect(scanSyncChildSpawns('const s = tag`x' + slot("execSync('git')") + '`;')).toEqual(['execSync']);
+  });
+
+  it('块注释夹在词中间，两边当成两个词，不粘成一个调用名', () => {
+    expect(scanSyncChildSpawns('spawn/* x */Sync();')).toEqual([]);
+    expect(scanSyncChildSpawns('/* x */execSync();')).toEqual(['execSync']);
+    expect(scanSyncChildSpawns('const s = `' + slot('exec/* x */Sync()') + '`;')).toEqual([]);
   });
 });
