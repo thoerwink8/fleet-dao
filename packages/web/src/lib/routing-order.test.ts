@@ -1,4 +1,9 @@
-import { describe, expect, test } from 'vitest';
+// @vitest-environment happy-dom
+import { cleanup, screen } from '@testing-library/react';
+import { createElement } from 'react';
+import { afterEach, describe, expect, test } from 'vitest';
+import RoutingPage from '../routes/routing';
+import { renderApp } from '../test/harness';
 import {
   actualRanks,
   modelSlotState,
@@ -7,6 +12,10 @@ import {
   slotWord,
   summarizeOrder,
 } from './routing-order';
+
+afterEach(() => {
+  cleanup();
+});
 
 const route = (enabled: boolean, channelId = 'ch-a') => ({ enabled, channelId });
 const open = () => true;
@@ -64,5 +73,23 @@ describe('路由顺位：只数引擎会真派的', () => {
     expect(summarizeOrder([], '路由')).toEqual({ ok: false, why: '无可用：一个路由都没有' });
     // 开着的一行没有顺位是调用方的错，不拿默认值冒充
     expect(() => slotWord('on', null, '模型')).toThrow('实际顺位');
+  });
+});
+
+describe('模型行：长说明不跟名字挤在一起', () => {
+  test('说明和名字分属两个元素，悬停上是全文，名字不被截断样式挤掉', async () => {
+    renderApp(createElement(RoutingPage), { route: '/routing?purpose=review' });
+    const list = await screen.findByRole('list', { name: '模型' });
+    const row = list.querySelector('li[data-model="gpt-5.6-luna"]') as HTMLElement;
+    const name = row.querySelector('[data-row-name]') as HTMLElement;
+    const note = row.querySelector('[data-row-note]') as HTMLElement;
+    expect(name.textContent).toBe('GPT 5.6 luna');
+    expect(name.className).not.toContain('truncate');
+    expect(note.textContent).toBe('引擎还没接上，起不了会话');
+    expect(note.getAttribute('title')).toBe('引擎还没接上，起不了会话');
+    expect(name.contains(note)).toBe(false);
+    expect(note.className).not.toContain('truncate');
+    // 自己占一行：窄宽度下不再跟名字抢同一行的宽度
+    expect(note.className).toContain('basis-full');
   });
 });
