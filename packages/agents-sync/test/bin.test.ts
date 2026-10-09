@@ -1,8 +1,8 @@
 // 真起可执行入口（node bin/agents-sync），确认入口、退出码、输出接对了。
-import { spawnSync } from 'node:child_process';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 import { BLOCK, cleanup, fakeBin, get, gitDir, makeRepo, put, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
@@ -13,7 +13,7 @@ function run(args: string[], path: string): { code: number | null; out: string; 
   // git 得在 PATH 里：--apply 会跑 git-excludes.ts 的 git config，不管 --repo 是不是真的 git 检出都会跑。
   const env: Record<string, string> = { PATH: `${path}${delimiter}${gitDir()}`, PATHEXT: '.CMD' };
   if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
-  const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8' });
+  const r = runChild(process.execPath, [BIN, ...args], { env });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 

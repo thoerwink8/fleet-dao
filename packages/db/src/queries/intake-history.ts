@@ -2,9 +2,12 @@
 // 失败和结束都以 state_changes 为准（触发器写的，应用写不漏）：任务行本身只有当前状态，重做过的单看不出失败过几次。
 // 读不到照抛，不拿 0 或「没有」顶。
 import type { TaskState } from '@fleet-dao/shared';
-import { and, asc, count, desc, eq, gt, gte, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { repos, settings, stateChanges, tasks } from '../schema/index.ts';
+import { auditLog, repos, settings, stateChanges, tasks } from '../schema/index.ts';
+
+/** 接手没有任务工作流的老任务行时写的操作记录（engine real/intake.ts 用同一个名字）。 */
+export const TASK_ADOPT_AUDIT_ACTION = 'task.adopt';
 
 /** 这张单的任务进过几次「失败」（state_changes 里 to_state = failed 的任务行数）。没有任务行是 0。 */
 export async function taskFailureCount(db: Db, repoId: string, issueNumber: number): Promise<number> {
@@ -53,6 +56,46 @@ export async function tasksCreatedSince(
     .where(
       and(
         created,
+        sql`not (lower(${repos.owner}) = ${owner} and lower(${repos.name}) = ${name} and ${tasks.title} ~ ${exclude.titlePosix})`,
+      ),
+    );
+  return row?.n ?? 0;
+}
+
+/**
+ * 从 since 起接手成功的老任务行有几条（操作记录 task.adopt 且 ok）。
+ * 建出时刻已经不早于 since 的不重复数：那些行 tasksCreatedSince 已经算过。
+ * exclude 和 tasksCreatedSince 同一条巡检单口径。
+ */
+export async function taskAdoptsSince(
+  db: Db,
+  since: Date,
+  exclude?: HourlyCountExclude | null,
+): Promise<number> {
+  const base = and(
+    eq(auditLog.action, TASK_ADOPT_AUDIT_ACTION),
+    eq(auditLog.ok, true),
+    gte(auditLog.at, since),
+    lt(tasks.createdAt, since),
+  );
+  if (!exclude) {
+    const [row] = await db
+      .select({ n: count() })
+      .from(auditLog)
+      .innerJoin(tasks, sql`${auditLog.target} = 'task:' || ${tasks.id}::text`)
+      .where(base);
+    return row?.n ?? 0;
+  }
+  const owner = exclude.owner.toLowerCase();
+  const name = exclude.name.toLowerCase();
+  const [row] = await db
+    .select({ n: count() })
+    .from(auditLog)
+    .innerJoin(tasks, sql`${auditLog.target} = 'task:' || ${tasks.id}::text`)
+    .innerJoin(repos, eq(tasks.repoId, repos.id))
+    .where(
+      and(
+        base,
         sql`not (lower(${repos.owner}) = ${owner} and lower(${repos.name}) = ${name} and ${tasks.title} ~ ${exclude.titlePosix})`,
       ),
     );

@@ -1,6 +1,5 @@
 // Windows：钩子命令是不带控制台的 exe，父进程没有控制台时也不会弹出黑窗口。
 // 探测器先故意拉一个看得见标题的 cmd，确认自己真能看见窗口；看不见就不许把「静默」当成通过。
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
 import { applyHooks } from '../src/hooks.ts';
 import { type ReplaceOps, replaceExe } from '../src/quiet-win.ts';
+import { runChild } from './child.ts';
 import { cleanup, ctxFor, makeRepo, PLATFORM, sources, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
@@ -211,13 +211,12 @@ describe('静默启动器不分配控制台', () => {
         const probe = join(dir, 'probe.exe');
         const result = join(dir, 'result.txt');
         writeFileSync(cs, PROBE);
-        const compiled = spawnSync(CSC, ['/nologo', '/target:winexe', `/out:${probe}`, cs], {
-          encoding: 'utf8',
+        const compiled = runChild(CSC, ['/nologo', '/target:winexe', `/out:${probe}`, cs], {
           windowsHide: true,
         });
         expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
         const id = String(process.pid);
-        const ran = spawnSync(probe, [result, exe, id], { encoding: 'utf8', windowsHide: true });
+        const ran = runChild(probe, [result, exe, id], { windowsHide: true });
         expect(ran.status, ran.stdout + ran.stderr).toBe(0);
         const text = readFileSync(result, 'utf8');
         expect(text).toContain('visible=1');
@@ -243,11 +242,11 @@ describe('静默启动器不分配控制台', () => {
       script,
       "process.stdout.write('OUT' + process.argv[2]); process.stderr.write('ERR' + process.argv[2]); process.exit(Number(process.argv[3]));\n",
     );
-    const ran = spawnSync(exe, [script, 'abc', '7'], { encoding: 'utf8', windowsHide: true });
+    const ran = runChild(exe, [script, 'abc', '7'], { windowsHide: true });
     expect(ran.status, ran.stderr).toBe(7);
     expect(ran.stdout).toBe('OUTabc');
     expect(ran.stderr).toBe('ERRabc');
-    const none = spawnSync(exe, { encoding: 'utf8', windowsHide: true });
+    const none = runChild(exe, [], { windowsHide: true });
     expect(none.status).toBe(1);
     expect(none.stderr).toContain('quiet launcher failed:');
   });
@@ -275,13 +274,11 @@ describe('静默启动器不分配控制台', () => {
         const probe = join(dir, 'probe.exe');
         const result = join(dir, 'result.txt');
         writeFileSync(cs, NODE_PROBE);
-        const compiled = spawnSync(CSC, ['/nologo', '/target:winexe', `/out:${probe}`, cs], {
-          encoding: 'utf8',
+        const compiled = runChild(CSC, ['/nologo', '/target:winexe', `/out:${probe}`, cs], {
           windowsHide: true,
         });
         expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
-        const ran = spawnSync(probe, [result, process.execPath, exe, script, String(process.pid)], {
-          encoding: 'utf8',
+        const ran = runChild(probe, [result, process.execPath, exe, script, String(process.pid)], {
           windowsHide: true,
         });
         expect(ran.status, ran.stdout + ran.stderr).toBe(0);
@@ -306,7 +303,7 @@ describe('静默启动器不分配控制台', () => {
       join(home, '.fleet-dao', 'hooks', 'stop.mjs'),
       "let s = ''; process.stdin.on('data', (d) => { s += d; }); process.stdin.on('end', () => { process.stdout.write('OUT' + s); process.stderr.write('ERR' + s); process.exit(7); });\n",
     );
-    const ran = spawnSync(exe, { input: 'abc', encoding: 'utf8', windowsHide: true });
+    const ran = runChild(exe, [], { input: 'abc', windowsHide: true });
     expect(ran.status, ran.stderr).toBe(7);
     expect(ran.stdout).toBe('OUTabc');
     expect(ran.stderr).toBe('ERRabc');
