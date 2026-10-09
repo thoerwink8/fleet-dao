@@ -36,35 +36,6 @@
 | WG_PORT | 4500 | deploy/hk.sh |
 
 <!-- fleet:ports:end -->
-<!--
-逐行对照（在 ports 区块之外，给只看 diff 的验收核对；上面两个标记之间仍只有生成的那一张三列表。下面没有删改任何手写表）：
-france.sh 在前，同一脚本按行号升序，每一行都是区块里的「| 变量名 | 端口号 | 来源脚本 |」对上脚本里的「变量名=端口号」：
-| PG_PORT | 5432 | deploy/france.sh | == deploy/france.sh:105 PG_PORT=5432
-| TEMPORAL_FRONTEND_PORT | 7243 | deploy/france.sh | == deploy/france.sh:106 TEMPORAL_FRONTEND_PORT=7243
-| TEMPORAL_FRONTEND_MEMBERSHIP_PORT | 6943 | deploy/france.sh | == deploy/france.sh:107 TEMPORAL_FRONTEND_MEMBERSHIP_PORT=6943
-| TEMPORAL_HISTORY_PORT | 7244 | deploy/france.sh | == deploy/france.sh:108 TEMPORAL_HISTORY_PORT=7244
-| TEMPORAL_HISTORY_MEMBERSHIP_PORT | 6944 | deploy/france.sh | == deploy/france.sh:109 TEMPORAL_HISTORY_MEMBERSHIP_PORT=6944
-| TEMPORAL_MATCHING_PORT | 7245 | deploy/france.sh | == deploy/france.sh:110 TEMPORAL_MATCHING_PORT=7245
-| TEMPORAL_MATCHING_MEMBERSHIP_PORT | 6945 | deploy/france.sh | == deploy/france.sh:111 TEMPORAL_MATCHING_MEMBERSHIP_PORT=6945
-| TEMPORAL_WORKER_PORT | 7249 | deploy/france.sh | == deploy/france.sh:112 TEMPORAL_WORKER_PORT=7249
-| TEMPORAL_WORKER_MEMBERSHIP_PORT | 6949 | deploy/france.sh | == deploy/france.sh:113 TEMPORAL_WORKER_MEMBERSHIP_PORT=6949
-| API_PORT | 8787 | deploy/france.sh | == deploy/france.sh:125 API_PORT=8787
-| MIRASIM_SESSION_PORT | 4318 | deploy/france.sh | == deploy/france.sh:136 MIRASIM_SESSION_PORT=4318
-hk.sh 在后：
-| WG_PORT | 4500 | deploy/hk.sh | == deploy/hk.sh:26 WG_PORT=4500
-packages/conventions/test/ops-tables.test.ts 本片不改（diff 不包含这个文件）。文件里仍有故意失败用例，原文：
-  it('区块标记被删，返回对不上的问题（不是没查成）', () => {
-    const r = memRepo({
-      'deploy/france.sh': FRANCE,
-      'deploy/hk.sh': HK,
-      'docs/ops.md': '# 运维\n没有区块\n',
-    });
-    const problems = checkPortsBlock(r, 'docs/ops.md');
-    expect(problems).toHaveLength(1);
-    expect(problems[0]?.notQueried).toBe(false);
-    expect(problems[0]?.text).toContain('开始标记');
-  });
--->
 法国（除了私有项目 self-proxy 的 443，全部只绑本机或隧道地址）：
 
 | 端口 | 绑在 | 是谁 | 说明 |
