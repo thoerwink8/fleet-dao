@@ -6,19 +6,19 @@
 //    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、空转到上限、工人都收口了都放行。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
 // 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
-// 超时放这么宽只是兜底——挡的是「机器真的卡住了」，不是拿来盖住「一条测试起了太多子进程」：子进程的数量那边已经按规矩需要的最少次数收过（见下面那条）。
-// 同目录的先例：discuss.test.ts 的 SLOW、session-start.test.ts 的 SLOW、progress-structure.test.ts 的 SLOW。
-import { execFileSync, spawnSync } from 'node:child_process';
+// 子进程一律经 ../child.ts 的 runChild 起：每个子进程自带上限，卡死由它杀掉并抛出；用例不设 vitest 的超时（#264）。
+// 子进程的数量那边已经按规矩需要的最少次数收过（见下面那条），不靠放宽时间来盖住「一条测试起了太多子进程」。
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild, runChildOk } from '../child.ts';
 
 const HOOK = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
 
-/** 这份文件每条都起真 node 子进程（本机满载时一个 0.4 秒上下），默认 5 秒太紧：60 秒兜底（同 discuss.test.ts 的 SLOW） */
-const SLOW = { timeout: 60_000 };
+/** 同步起子进程的用例不设 vitest 的超时：它打断不了同步用例，只能事后量用时，机器一忙就把慢报成红；卡死由 runChild 的上限管（#264） */
+const SLOW = { timeout: 0 };
 
 const made: string[] = [];
 afterEach(() => {
@@ -29,8 +29,7 @@ function temp(name: string): string {
   made.push(dir);
   return dir;
 }
-const g = (cwd: string, ...a: string[]) =>
-  execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const g = (cwd: string, ...a: string[]) => runChildOk('git', a, { cwd });
 
 function repoWithStray(): string {
   const dir = temp('repo');
@@ -54,10 +53,9 @@ function isolatedEnv(stateDir: string, sessionId = '', workersDir?: string): Nod
 }
 
 function run(stdin: string, cwd?: string, env?: NodeJS.ProcessEnv) {
-  return spawnSync(process.execPath, [HOOK], {
+  return runChild(process.execPath, [HOOK], {
     input: stdin,
-    encoding: 'utf8',
-    cwd,
+    ...(cwd === undefined ? {} : { cwd }),
     env: env ?? isolatedEnv(temp('state')),
   });
 }
@@ -130,7 +128,7 @@ const UNATTENDED = fileURLToPath(UNATTENDED_URL);
 const SID = 'test-session-0001';
 
 function cli(args: string[], env: NodeJS.ProcessEnv) {
-  return spawnSync(process.execPath, [UNATTENDED, ...args], { encoding: 'utf8', env });
+  return runChild(process.execPath, [UNATTENDED, ...args], { env });
 }
 function stop(env: NodeJS.ProcessEnv, extra: Record<string, unknown> = {}) {
   const input = { hook_event_name: 'Stop', session_id: SID, cwd: temp('cwd'), ...extra };
@@ -156,15 +154,14 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     );
   /** 登记一个工人：pid 用这个测试进程自己的（一定活着）或一个已经退出的子进程的（一定死了） */
   const addWorker = (workers: string, name: string, alive: boolean, extra: Record<string, unknown> = {}) => {
-    const pid = alive ? process.pid : (spawnSync(process.execPath, ['-e', '']).pid as number);
+    const pid = alive ? process.pid : runChild(process.execPath, ['-e', '']).pid;
     mkdirSync(join(workers, name), { recursive: true });
     writeFileSync(join(workers, name, 'meta.json'), JSON.stringify({ name, pid, ...extra }));
   };
   const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
   const pretool = (env: NodeJS.ProcessEnv, toolName: string, toolInput: Record<string, unknown>) =>
-    spawnSync(process.execPath, [PRETOOL], {
+    runChild(process.execPath, [PRETOOL], {
       input: JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: temp('c'), session_id: SID }),
-      encoding: 'utf8',
       env,
     });
 
@@ -360,9 +357,8 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     const PROMPT_LOG = fileURLToPath(new URL('../../hooks/prompt-log.mjs', import.meta.url));
     const PRETOOL = fileURLToPath(new URL('../../hooks/pretool.mjs', import.meta.url));
     const say = (env: NodeJS.ProcessEnv, prompt: string) =>
-      spawnSync(process.execPath, [PROMPT_LOG], {
+      runChild(process.execPath, [PROMPT_LOG], {
         input: JSON.stringify({ session_id: SID, prompt_id: `p-${prompt.length}`, prompt }),
-        encoding: 'utf8',
         env: { ...env, FLEET_PROMPT_LOG_DIR: temp('plog') },
       });
     const tool = (
@@ -370,9 +366,8 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
       name: string,
       input: Record<string, unknown> = { command: 'echo hi' },
     ) =>
-      spawnSync(process.execPath, [PRETOOL], {
+      runChild(process.execPath, [PRETOOL], {
         input: JSON.stringify({ tool_name: name, tool_input: input, cwd: temp('c'), session_id: SID }),
-        encoding: 'utf8',
         env,
       });
     const owedPath = (dir: string) => join(dir, `${SID}.owed.json`);
@@ -422,7 +417,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     // 经子进程调 sessionLines：.mjs 没有类型声明，不在 TS 里直接 import
     const lines = (): string[] => {
       const code = `import { sessionLines } from ${JSON.stringify(UNATTENDED_URL)}; console.log(JSON.stringify(sessionLines({ dir: process.env.FLEET_UNATTENDED_DIR, sessionId: process.env.CLAUDE_CODE_SESSION_ID })));`;
-      const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
+      const r = runChild(process.execPath, ['--input-type=module', '-e', code], { env });
       expect(r.status, r.stderr).toBe(0);
       return JSON.parse(r.stdout.trim());
     };
