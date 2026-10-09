@@ -327,24 +327,32 @@ function groupUserRows(rows: UserRow[]): Map<string, UserRow[]> {
 }
 
 function diffUserGroup(want: UserRow[], got: UserRow[]): OpsTableProblem[] {
+  // 先对上用户名相同的行。按位置配对会把仍在文档里的下一行说成变了（删掉 zoo 时 ant 还在）。
+  const unmatchedGot = [...got];
+  const unmatchedWant: UserRow[] = [];
+  for (const w of want) {
+    const at = unmatchedGot.findIndex((g) => g.user === w.user);
+    if (at === -1) unmatchedWant.push(w);
+    else unmatchedGot.splice(at, 1);
+  }
   const problems: OpsTableProblem[] = [];
-  const n = Math.min(want.length, got.length);
+  const n = Math.min(unmatchedWant.length, unmatchedGot.length);
   for (let i = 0; i < n; i++) {
-    const w = want[i];
-    const g = got[i];
-    if (!w || !g || w.user === g.user) continue;
+    const w = unmatchedWant[i];
+    const g = unmatchedGot[i];
+    if (!w || !g) continue;
     problems.push({
       notQueried: false,
       text: `用户 ${g.user} 变了：来源常量 ${w.source}（${w.script}），文档区块里是 ${g.user}，脚本里是 ${w.user}。`,
     });
   }
-  for (const w of want.slice(n)) {
+  for (const w of unmatchedWant.slice(n)) {
     problems.push({
       notQueried: false,
       text: `用户 ${w.user} 少了：来源常量 ${w.source}（${w.script}），脚本里是 ${w.user}，文档区块里没有。`,
     });
   }
-  for (const g of got.slice(n)) {
+  for (const g of unmatchedGot.slice(n)) {
     problems.push({
       notQueried: false,
       text: `用户 ${g.user} 多了：来源常量 ${g.source}（${g.script}），文档区块里有 ${g.user}，脚本里没有。`,

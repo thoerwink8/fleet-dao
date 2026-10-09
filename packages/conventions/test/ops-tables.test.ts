@@ -365,13 +365,11 @@ describe('checkUsersBlock', () => {
     expect(problems[0]?.text).toContain('fleet-agent-carpool');
     expect(problems[0]?.text).toContain('deploy/lib/session-user.sh');
     expect(problems[0]?.notQueried).toBe(false);
+    const regenerated = memRepo(usersFiles({ 'deploy/lib/session-user.sh': driftedScript }));
     const fixed = memRepo(
       usersFiles({
         'deploy/lib/session-user.sh': driftedScript,
-        'docs/ops.md': (r.read('docs/ops.md') ?? '').replace(
-          '| fleet-agent-carpool | SESSION_USER |',
-          '| renamed-user | SESSION_USER |',
-        ),
+        'docs/ops.md': ['# 运维', '', '做法写在 deploy/。', renderUsersBlock(regenerated), ''].join('\n'),
       }),
     );
     expect(checkUsersBlock(fixed, 'docs/ops.md')).toEqual([]);
@@ -408,6 +406,21 @@ describe('checkUsersBlock', () => {
     expect(problems.length).toBeGreaterThan(0);
     expect(problems[0]?.notQueried).toBe(true);
     expect(problems[0]?.text).toContain('deploy/lib/human-tier.sh');
+  });
+
+  it('同一来源里删掉前面的用户，只报少了的那一个，后面仍在的不算变了', () => {
+    const files = usersFiles({ 'deploy/lib/human-tier.sh': HUMAN_SORT });
+    const doc = renderUsersBlock(memRepo(files)).replace(
+      '| zoo | ensure_service_user | deploy/lib/human-tier.sh |\n',
+      '',
+    );
+    const problems = checkUsersBlock(memRepo({ ...files, 'docs/ops.md': doc }), 'docs/ops.md');
+    expect(problems).toEqual([
+      {
+        notQueried: false,
+        text: '用户 zoo 少了：来源常量 ensure_service_user（deploy/lib/human-tier.sh），脚本里是 zoo，文档区块里没有。',
+      },
+    ]);
   });
 
   // 故意造出失败：文档里的用户名被手改，核对必须报不一致，不能当成没查成或通过。
