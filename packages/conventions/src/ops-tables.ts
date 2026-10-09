@@ -151,7 +151,15 @@ export function checkPortsBlock(repo: RepoView, docPath: string): OpsTableProble
   }
   const actual = doc.slice(span.from, span.to);
   if (actual === expected) return [];
-  return portRowProblems(actual, expected);
+  const problems = portRowProblems(actual, expected);
+  if (problems.length > 0) return problems;
+  // 端口行都对得上但区块不逐字一致：排序、空白或表头格式被手改了，也不能当成通过。
+  return [
+    {
+      notQueried: false,
+      text: '端口区块对不上：端口行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。重新生成：node packages/conventions/src/bin/ops-tables.ts --write。',
+    },
+  ];
 }
 
 function parsePortRows(text: string): Map<string, { port: string; script: string }> {

@@ -174,6 +174,38 @@ describe('checkPortsBlock', () => {
     expect(problems[0]?.notQueried).toBe(true);
   });
 
+  it('端口行都对但区块不是逐字一致（表头被改），返回问题、不当成通过', () => {
+    const r = repo();
+    const doc = r.read('docs/ops.md') ?? '';
+    const reworded = memRepo({
+      'deploy/france.sh': FRANCE,
+      'deploy/hk.sh': HK,
+      'docs/ops.md': doc.replace('| 变量名 | 端口号 | 来源脚本 |', '| Name | Port | Script |'),
+    });
+    const problems = checkPortsBlock(reworded, 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('逐字一致');
+  });
+
+  it('端口行都对但行的顺序被手改，返回问题、不当成通过', () => {
+    const r = repo();
+    const doc = r.read('docs/ops.md') ?? '';
+    const reordered = memRepo({
+      'deploy/france.sh': FRANCE,
+      'deploy/hk.sh': HK,
+      'docs/ops.md': doc
+        .replace('| PG_PORT | 5432 | deploy/france.sh |\n', '')
+        .replace(
+          '| WG_PORT | 4500 | deploy/hk.sh |',
+          '| WG_PORT | 4500 | deploy/hk.sh |\n| PG_PORT | 5432 | deploy/france.sh |',
+        ),
+    });
+    const problems = checkPortsBlock(reordered, 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+  });
+
   it('区块标记被删，返回对不上的问题（不是没查成）', () => {
     const r = memRepo({
       'deploy/france.sh': FRANCE,
