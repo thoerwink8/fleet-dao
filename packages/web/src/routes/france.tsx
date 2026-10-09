@@ -36,6 +36,7 @@ import type {
   NodeDetail,
   NodeListItem,
 } from '../api/types';
+import { useMasterView } from '../components/engine-master';
 import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
@@ -331,6 +332,15 @@ function MissingSnapshot({ nodeId }: { nodeId: string }) {
   );
 }
 
+/** 总开关关着、引擎进程仍在跑时，贴在开关和「在跑」那一格旁边。 */
+function StandbyNote() {
+  return (
+    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+      总开关关着只是不派活，引擎进程还在跑，所以这一格仍可能写「在跑」。
+    </p>
+  );
+}
+
 /** 远程环境的一列。快照按编号读，404 不重试；推送重读不清掉上一次的失败（#1221）。 */
 function RemoteColumn({
   n,
@@ -338,12 +348,14 @@ function RemoteColumn({
   now,
   selected,
   look,
+  engineNote,
 }: {
   n: NodeListItem;
   snap: { error: unknown; data: NodeDetail | undefined; refetch: () => unknown } | undefined;
   now: number;
   selected: boolean;
   look: 'row';
+  engineNote?: ReactNode;
 }) {
   const f = freshnessNow(n, now);
   const error = useShownError(n.id, { error: snap?.error, data: snap?.data });
@@ -366,7 +378,7 @@ function RemoteColumn({
       </Whole>
     ) : snap.data ? (
       <div className={cn('contents', f !== 'fresh' && '[&>*]:opacity-70')}>
-        {factCells({ facts: snap.data.env.facts, now, kind: 'env', look })}
+        {factCells({ facts: snap.data.env.facts, now, kind: 'env', look, engineNote })}
       </div>
     ) : (
       <Whole>
@@ -395,6 +407,7 @@ function RemoteColumn({
 }
 
 export default function France() {
+  const { view: masterView } = useMasterView();
   const env = useEnv();
   const nodes = useNodes();
   const jobs = useJobs();
@@ -417,6 +430,17 @@ export default function France() {
   const comparing = remote.length > 0;
   const look = 'row' as const;
   // 「在用版本」那一行的发布入口（#1255）：只给本台那一列；发版卡读不到写没查成和原因，不画一个点不了的假按钮。
+  const selectedEngine =
+    nodeId === null
+      ? facts?.engine
+      : snapshots[received.findIndex((n) => n.id === nodeId)]?.data?.env.facts.engine;
+  // 总开关是人给的许可，那一格的「在跑」是进程还活着。两件同时出现才解释，避免关着且进程也停了还说「还在跑」。
+  const standby =
+    masterView.kind === 'ok' &&
+    !masterView.master.on &&
+    selectedEngine?.ok === true &&
+    selectedEngine.value.state === 'on';
+
   const versionExtra = card.error ? (
     <p className="mt-2 border-t pt-2 text-xs text-ink-stall" data-release-entry-unread>
       发布入口没查成：{errorText(card.error)}
@@ -432,7 +456,7 @@ export default function France() {
       title="法国"
       description="本台的六项事实、引擎总开关、定时任务、发版。读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
     >
-      <EngineMasterControl />
+      <EngineMasterControl standbyNote={standby ? <StandbyNote /> : null} />
       {nodes.error ? (
         <div className="mb-3">
           <LoadError what="远程环境列表" error={nodes.error} onRetry={() => void nodes.refetch()} />
@@ -471,7 +495,15 @@ export default function France() {
               )
             }
           >
-            {factCells({ facts, now, kind: 'env', look, jobCount: jobList?.length, versionExtra })}
+            {factCells({
+              facts,
+              now,
+              kind: 'env',
+              look,
+              jobCount: jobList?.length,
+              versionExtra,
+              engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
+            })}
           </EnvColumn>
           {remote.map((n) => {
             const idx = received.findIndex((r) => r.id === n.id);
@@ -483,6 +515,7 @@ export default function France() {
                 now={now}
                 selected={nodeId === n.id}
                 look={look}
+                engineNote={nodeId === n.id && standby ? <StandbyNote /> : undefined}
               />
             );
           })}
@@ -502,6 +535,7 @@ export default function France() {
               look: 'tile',
               jobCount: jobList?.length,
               versionExtra,
+              engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
             })}
           </div>
         </>
