@@ -65,7 +65,8 @@ function readTemplate(code: string, i: number): { inner: string; end: number } {
     if (c === '`') return { inner, end: i + 1 };
     if (c === '$' && code[i + 1] === '{') {
       const expr = readBalanced(code, i + 1);
-      inner += expr.body;
+      // 两侧留空格：`${prefix}${execFileSync(...)}` 直接接上会变成 prefixexecFileSync，\b 匹配不到。
+      inner += ` ${expr.body} `;
       i = expr.end;
       continue;
     }
@@ -133,5 +134,18 @@ describe('测试里不许同步起子进程', () => {
 
   it('故意放一行违规的样本，扫得出来', () => {
     expect(scanSyncChildSpawns(`execFileSync('git', []);`)).not.toEqual([]);
+  });
+
+  it('相邻插值把调用名粘在前一个词上时仍然命中', () => {
+    // 拼出 `const s = `${prefix}${execFileSync('git', [])}`;` 这种样本。拆开写，避免字符串里直接出现插值花括号。
+    const glued = (call: string) => ['const s = `', '$', '{prefix}', '$', '{', call, '}`;'].join('');
+    expect(scanSyncChildSpawns(glued("execFileSync('git', [])"))).toEqual(['execFileSync']);
+    expect(scanSyncChildSpawns(glued("spawnSync('git', [])"))).toEqual(['spawnSync']);
+    expect(scanSyncChildSpawns(glued("execSync('git', [])"))).toEqual(['execSync']);
+  });
+
+  it('模板字符串里只有普通文字和不含这三个词的插值时不命中', () => {
+    const plain = ['const s = `plain text ', '$', '{name} ', '$', '{prefix}`;'].join('');
+    expect(scanSyncChildSpawns(plain)).toEqual([]);
   });
 });
