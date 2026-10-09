@@ -59,6 +59,51 @@ describe('engine-pulls：读 PR', () => {
     expect(gh.claims.isAgentBot(fake.human)).toBe(false);
     expect(gh.claims.engineLogin()).toBe('fleet-test-engine[bot]');
   });
+
+  it('closed PR 满 10 页还有下一页、末条仍新于 since：窗口里合并的照样读回，不整次抛没查全', async () => {
+    const { gh, fake } = setup();
+    const since = new Date('2026-09-09T00:00:00Z');
+    const newest = Date.parse('2026-10-08T00:00:00Z');
+    // 第 1 页就有一张合并的；后面 999 张只是关掉、没合并，把合并的那张挤到第 11 页
+    const early = fake.addPull({
+      head: { ref: 'fix/early', sha: sha('e') },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-10-08T00:00:00Z',
+      updated_at: new Date(newest).toISOString(),
+      body: '**需求**：Refs #10\n',
+    });
+    for (let i = 1; i < 1000; i += 1) {
+      fake.addPull({
+        head: { ref: `fix/pad-${i}`, sha: sha(`p${i}`) },
+        state: 'closed',
+        merged: false,
+        updated_at: new Date(newest - i * 1000).toISOString(),
+      });
+    }
+    const late = fake.addPull({
+      head: { ref: 'fix/late', sha: sha('l') },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-10-07T00:00:00Z',
+      updated_at: new Date(newest - 1000 * 1000).toISOString(),
+      title: 'design 决定表（#139 第 1 片）',
+      body: '**需求**：Refs #139\n',
+    });
+    fake.addPull({
+      head: { ref: 'fix/old', sha: sha('o') },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-08-01T00:00:00Z',
+      updated_at: '2026-08-01T00:00:00Z',
+      body: '**需求**：Refs #1\n',
+    });
+    const got = await gh.claims.listMergedPulls(repo, since);
+    expect(got.map((p) => p.number)).toEqual([early.number, late.number]);
+    expect(got[1]?.body).toContain('Refs #139');
+    // 第 10 页末条仍在窗口内，必须再翻第 11 页才看到更早的并停下；不能停在 10，也不能整本翻完
+    expect(fake.calls('GET', /\/pulls$/)).toHaveLength(11);
+  });
 });
 
 describe('engine-pulls：提交状态', () => {
