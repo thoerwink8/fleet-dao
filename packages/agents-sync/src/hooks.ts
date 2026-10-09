@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
 import { applyCodexTrust, checkCodexTrust, trustKey, trustNeeds } from './hooks-codex.ts';
+import { applyKimiHooks, checkKimiHooks, kimiKey } from './hooks-kimi.ts';
 import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName, replaceExe } from './quiet-win.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, lstatOrNull, relOf, type Sources, writeAtomic } from './sync.ts';
@@ -374,7 +375,14 @@ function describe(t: HookTarget): string {
   return [...new Set(t.hooks.map((h) => h.event))].join('、');
 }
 
+/** 报告里这个目标那一行的键：Kimi Code 那份配置里还有权限那块，钩子这块另起一个键 */
+function settingsKey(ctx: Ctx, t: HookTarget): string {
+  return t.format === 'kimi' ? kimiKey(ctx, t) : relOf(ctx, t.settings).key;
+}
+
 function checkSettings(ctx: Ctx, t: HookTarget): Line {
+  if (t.format === 'kimi')
+    return checkKimiHooks(ctx, t, (script) => commandIn(t, ctx.home, ctx.platform, script));
   const { abs, key } = relOf(ctx, t.settings);
   const who = whoFor(ctx, t);
   let read: Read;
@@ -517,6 +525,8 @@ function group(spec: HookSpec, command: string): Obj {
 }
 
 function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
+  if (t.format === 'kimi')
+    return applyKimiHooks(ctx, t, (script) => commandIn(t, ctx.home, ctx.platform, script), backups);
   const { rel, abs, key } = relOf(ctx, t.settings);
   const who = whoFor(ctx, t);
   try {
@@ -567,18 +577,18 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
   if (launchers) out.push(launchers);
   for (const t of targets) {
     if (scripts.kind === 'failed') {
-      out.push(line('failed', relOf(ctx, t.settings).key, '没动——钩子脚本没装上，不登记指向空处的命令'));
+      out.push(line('failed', settingsKey(ctx, t), '没动——钩子脚本没装上，不登记指向空处的命令'));
       continue;
     }
     const usesLauncher = t.hooks.some((h) => commandIn(t, ctx.home, ctx.platform, h.script).endsWith('.exe'));
     if (launchers?.kind === 'failed' && usesLauncher) {
-      out.push(line('failed', relOf(ctx, t.settings).key, '没动——静默启动器没装上，不登记指向空处的命令'));
+      out.push(line('failed', settingsKey(ctx, t), '没动——静默启动器没装上，不登记指向空处的命令'));
       continue;
     }
     const missingScript = t.hooks.find((h) => src.hooks.ok && !src.hooks.tree.has(h.script));
     if (missingScript) {
       out.push(
-        line('failed', relOf(ctx, t.settings).key, `没动——仓里的 agents/hooks/ 没有 ${missingScript.script}`),
+        line('failed', settingsKey(ctx, t), `没动——仓里的 agents/hooks/ 没有 ${missingScript.script}`),
       );
       continue;
     }

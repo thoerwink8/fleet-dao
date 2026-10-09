@@ -92,7 +92,16 @@ export function runVendor(normalize, vendor, reply) {
     reply({ code: 2, message: `fleet-guard：读不到 ${vendor} 的钩子输入（${why}），按拦处理` });
     return;
   }
-  reply(judgeVendor(raw, normalize, { vendor }));
+  /** @type {Verdict} */
+  let verdict;
+  try {
+    verdict = judgeVendor(raw, normalize, { vendor });
+  } catch (err) {
+    // 判断自己抛了也按拦处理：有的家（Kimi Code）把退出码 1 当放行，抛出去等于放行
+    const why = err instanceof Error ? err.message : String(err);
+    verdict = { code: 2, message: `fleet-guard：${vendor} 的钩子自己出错了（${why}），按拦处理` };
+  }
+  reply(verdict);
 }
 
 /**

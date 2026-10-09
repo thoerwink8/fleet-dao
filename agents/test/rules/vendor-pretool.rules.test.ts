@@ -24,6 +24,7 @@ const lib = await load<VendorLib>('vendor-pretool.mjs');
 const codex = await load<{ normalizeCodex: Normalize }>('pretool-codex.mjs');
 const gemini = await load<{ normalizeGemini: Normalize }>('pretool-gemini.mjs');
 const agy = await load<{ normalizeAgy: Normalize; agyReply(v: Verdict): string }>('pretool-agy.mjs');
+const kimi = await load<{ normalizeKimi: Normalize }>('pretool-kimi.mjs');
 
 const RC = `.recl${'aude'}`;
 const s = `st${'ash'}`;
@@ -280,5 +281,83 @@ describe('Antigravity（~/.gemini/config/hooks.json 的 fleet-dao 那一项 → 
     expect([passed.status, JSON.parse(passed.stdout)]).toEqual([0, {}]);
     const garbage = run('pretool-agy.mjs', '不是 JSON');
     expect(JSON.parse(garbage.stdout).decision).toBe('deny');
+  });
+});
+
+describe('Kimi Code（~/.kimi-code/config.toml 的 [[hooks]] → pretool-kimi.mjs）', () => {
+  const HOME = '/home/alice';
+  const judge = (input: unknown) =>
+    lib.judgeVendor(typeof input === 'string' ? input : JSON.stringify(input), kimi.normalizeKimi, {
+      vendor: 'Kimi Code',
+      platform: 'win32',
+      cwd: '/somewhere/else',
+    });
+  const call = (tool_name: string, tool_input: unknown, cwd = O) => ({
+    hook_event_name: 'PreToolUse',
+    session_id: 's',
+    session_title: 't',
+    client_type: 'kimi_code_cli',
+    cwd,
+    tool_name,
+    tool_input,
+  });
+
+  it('读密钥文件被拦：Bash 的命令、Read 的 path、Grep 搜到密钥目录', () => {
+    const cases: [string, unknown][] = [
+      ['Bash', { command: `cat ~/${RC}/device.json` }],
+      ['Read', { path: `${HOME}/${RC}/device.json` }],
+      ['Grep', { pattern: 'token', path: `${HOME}/${RC}`, output_mode: 'content' }],
+    ];
+    for (const [tool, args] of cases) {
+      const got = judge(call(tool, args));
+      expect([tool, got.code]).toEqual([tool, 2]);
+      expect(got.code === 2 ? got.message : '').toContain('secret-shape.mjs');
+    }
+  });
+
+  it('跑普通命令、读普通文件、在代码目录搜内容放行；Kimi 的 Grep 不写 output_mode 只列文件名，从项目根往下搜不按「打内容」拦', () => {
+    expect(judge(call('Bash', { command: 'git status' }))).toEqual({ code: 0 });
+    expect(judge(call('Read', { path: '/work/other/README.md' }))).toEqual({ code: 0 });
+    expect(judge(call('Grep', { pattern: 'TODO', path: '/work/other/src' }))).toEqual({ code: 0 });
+    expect(judge(call('Grep', { pattern: 'TODO', path: HOME, output_mode: 'count_matches' }))).toEqual({
+      code: 0,
+    });
+    expect(judge(call('Grep', { pattern: 'TODO', path: HOME, output_mode: 'content' })).code).toBe(2);
+  });
+
+  it('Kimi 的 Bash 在 Windows 上也是 Git Bash：反引号照拦；timeout 按秒，超过前台等待上限照拦；参数里的 cwd 优先', () => {
+    expect(judge(call('Bash', { command: `echo ${bt}date${bt}` })).code).toBe(2);
+    expect(judge(call('Bash', { command: 'pnpm test', timeout: 300 })).code).toBe(2);
+    expect(judge(call('Bash', { command: 'pnpm test', timeout: 300, run_in_background: true }))).toEqual({
+      code: 0,
+    });
+    expect(judge(call('Bash', { command: 'pnpm test', timeout: 30 }))).toEqual({ code: 0 });
+    expect(judge(call('Bash', { command: `git ${s} pop`, cwd: F }, O)).code).toBe(2);
+    expect(judge(call('Bash', { command: `git ${s} pop` }, O))).toEqual({ code: 0 });
+  });
+
+  it('故意造出的认不出的格式：没挂的工具名、输入不是对象、没有路径或命令、不是 JSON，一律按拦处理（Kimi 把别的退出码当放行，所以只能退出 2）', () => {
+    const bad: unknown[] = [
+      call('Write', { path: 'x', content: 'y' }),
+      call('Bash', 'git status'),
+      call('Bash', { description: '没有命令' }),
+      call('Read', { line_offset: 1 }),
+      call('Grep', { path: 'src' }),
+      '不是 JSON',
+    ];
+    for (const input of bad) expect([input, judge(input).code]).toEqual([input, 2]);
+  });
+
+  it('命令行外壳：拦下退出码 2、理由在 stderr；放行退出码 0、什么都不说', () => {
+    const blocked = run(
+      'pretool-kimi.mjs',
+      JSON.stringify(call('Read', { path: `${HOME}/${RC}/device.json` })),
+    );
+    expect(blocked.status).toBe(2);
+    expect(blocked.stderr).toContain('secret-shape.mjs');
+    const passed = run('pretool-kimi.mjs', JSON.stringify(call('Bash', { command: 'git status' })));
+    expect([passed.status, passed.stdout, passed.stderr]).toEqual([0, '', '']);
+    const garbage = run('pretool-kimi.mjs', '不是 JSON');
+    expect(garbage.status).toBe(2);
   });
 });
