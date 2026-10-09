@@ -2,10 +2,13 @@
 // 入口 bin/flow-stats.ts 只用本机的 gh。读不到、字段缺、合并列表或 CI 轮次列表是空的，一律抛「没查成」，不当 0。
 //
 // 开到合 = merged_at − created_at，单位分钟。中位：奇数取中间，偶数取中间两个的平均（和 ci-stats 同一条）。
-// 90 分位用最近秩：升序后下标 ceil(0.9×n)−1（n=10 取第 9 个）。引擎 PR 只认 flow-branch 那条分支名。
+// 90 分位用最近秩：升序后下标 ceil(0.9×n)−1（n=10 取第 9 个）。
+// 引擎 PR 只认下面这条：分支名整段是 fleet/<单号>-t<8 位十六进制>。和 flow-branch.ts、引擎 task-branch.ts 同一条。
 // 被取消或重跑：这一轮 conclusion 是 cancelled，或 run_attempt > 1（GitHub 对同一次运行重跑，次数从 1 起）。两样都占只计 1。
 // 失败但没取消、也没重跑的不计。每天按 merged_at 的 UTC 日；窗口里某天是 0 是量出来的，整份列表是空的才不打这份数。
-import { isFlowBranch } from './flow-branch.ts';
+
+/** 引擎 PR 的分支名。少一位、多一位、不是十六进制、大小写不对、多一层都不算。 */
+export const ENGINE_PR_BRANCH = /^fleet\/\d+-t[0-9a-f]{8}$/;
 
 export interface TierStats {
   count: number;
@@ -188,7 +191,7 @@ function compute(
     if (prev === undefined) bad(`PR ${p.number} 的合并日 ${day} 不在窗口里`);
     counts.set(day, prev + 1);
     const mins = (p.mergedMs - p.createdMs) / 60_000;
-    if (isFlowBranch(p.ref)) engineMins.push(mins);
+    if (ENGINE_PR_BRANCH.test(p.ref)) engineMins.push(mins);
     else otherMins.push(mins);
     merged += 1;
   }

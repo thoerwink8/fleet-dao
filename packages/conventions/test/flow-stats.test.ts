@@ -1,7 +1,14 @@
 // 量流程快慢（src/flow-stats.ts）：假的 GitHub 回包要和手算对得上；读不到、字段缺、列表为空抛「没查成」，不算成 0。
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { type FlowStats, flowStats, formatFlowStats, parseDays } from '../src/flow-stats.ts';
+import { FLOW_BRANCH_PATTERN } from '../src/flow-branch.ts';
+import {
+  ENGINE_PR_BRANCH,
+  type FlowStats,
+  flowStats,
+  formatFlowStats,
+  parseDays,
+} from '../src/flow-stats.ts';
 import { runChild } from './child.ts';
 
 const NOW = new Date('2026-10-08T15:00:00.000Z');
@@ -139,6 +146,59 @@ function ghOf(pulls: unknown, runs: unknown): (path: string) => unknown {
 function statsOf(pulls: unknown, runs: unknown): FlowStats {
   return flowStats(ghOf(pulls, runs), OPTS);
 }
+
+describe('引擎 PR 的分支名', () => {
+  const oneRun = {
+    total_count: 1,
+    workflow_runs: [
+      run({ id: 1, created_at: '2026-10-07T00:00:00Z', conclusion: 'success', run_attempt: 1 }),
+    ],
+  };
+
+  function tierOfRef(ref: string): 'engine' | 'other' {
+    const stats = statsOf(
+      [
+        pull({
+          number: 1,
+          created_at: '2026-10-07T00:00:00Z',
+          merged_at: '2026-10-07T01:00:00Z',
+          head: { ref },
+        }),
+      ],
+      oneRun,
+    );
+    if (stats.engine?.count === 1 && stats.other === null) return 'engine';
+    if (stats.other?.count === 1 && stats.engine === null) return 'other';
+    throw new Error(`${ref} 没有落进单一档`);
+  }
+
+  it('只认本文件这条正则：fleet/<单号>-t<8 位十六进制>，差一点点算其他', () => {
+    // 分档用的就是 flow-stats.ts 里这条正则，和合并闸认的是同一条。
+    expect(ENGINE_PR_BRANCH.source).toBe(/^fleet\/\d+-t[0-9a-f]{8}$/.source);
+    expect(ENGINE_PR_BRANCH.source).toBe(FLOW_BRANCH_PATTERN.source);
+    const engine = ['fleet/707-t01a12107', 'fleet/12-tabcdef01', 'fleet/3-t0000000a', 'fleet/1000-tffffffff'];
+    const other = [
+      'fleet/707-t01a1210', // 7 位
+      'fleet/12-t1a2b3c4de', // 9 位
+      'fleet/12-tzzzzzzzz', // 不是十六进制
+      'fleet/12-t01A12107', // 大写
+      'fleet/x-t01a12107', // 单号不是数字
+      'fleet/12-t01a12107/extra', // 多一层
+      'fleet/12-01a12107', // 没有 t
+      'Fleet/1-t01a12107', // 前缀大写
+      'feat/x',
+      'fleet/707-t01a12107 ', // 尾巴空格
+    ];
+    for (const ref of engine) {
+      expect(ENGINE_PR_BRANCH.test(ref), ref).toBe(true);
+      expect(tierOfRef(ref), ref).toBe('engine');
+    }
+    for (const ref of other) {
+      expect(ENGINE_PR_BRANCH.test(ref), ref).toBe(false);
+      expect(tierOfRef(ref), ref).toBe('other');
+    }
+  });
+});
 
 describe('假的 GitHub 回包', () => {
   it('每天合并、开到合的中位和 90 分位、被取消或重跑的轮数，和手算一致', () => {
