@@ -316,7 +316,8 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
     steps:
       # postgres:16 只给 pg 台用，所以不用 services（services 每台都起、起一次约 12 秒，别的台白等），
-      # 改成这一台自己 docker run。整条 docker run（含拉镜像）放后台跑，这一步当场结束；装依赖之后再等它起来：
+      # 改成这一台自己 docker run。镜像用 AWS 公共镜像库里的官方 postgres（public.ecr.aws/docker/library/postgres:16-alpine），不用 Docker Hub：
+      # 后者对匿名拉取限速，GitHub 共享出口 IP 常撞（toomanyrequests）。整条 docker run（含拉镜像）放后台跑，这一步当场结束；装依赖之后再等它起来：
       # 原来单独等的那 14 秒和装依赖叠在一起，不串着等。后台进程活到 job 结束（Actions 在 job 末尾才清孤儿进程）。
       - name: 起 postgres:16（只 pg 台，后台）
         if: matrix.pg
@@ -324,7 +325,7 @@ jobs:
           set -euo pipefail
           nohup docker run -d --name fleet-test-pg -p 5432:5432 \
             -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin \
-            postgres:16-alpine > "$RUNNER_TEMP/fleet-test-pg-start.log" 2>&1 &
+            public.ecr.aws/docker/library/postgres:16-alpine > "$RUNNER_TEMP/fleet-test-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -515,7 +516,7 @@ jobs:
           set -euo pipefail
           nohup docker run -d --name fleet-e2e-pg -p 5432:5432 \
             -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
-            postgres:16-alpine > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
+            public.ecr.aws/docker/library/postgres:16-alpine > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
