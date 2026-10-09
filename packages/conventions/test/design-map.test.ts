@@ -217,6 +217,30 @@ describe('design 对照清单', () => {
     expect(problems.some((p) => p.text.includes(design) && p.text.includes('不存在'))).toBe(true);
   });
 
+  it('清单键是 __proto__、packages/ 为空、设计文件不存在时，仍报多余键和缺文件', () => {
+    const design = 'docs/design/ghost.md';
+    const repo = memRepo({
+      [DESIGN_MAP_PATH]: '{"__proto__":"docs/design/ghost.md"}\n',
+      'packages/': '',
+    });
+    expect(Object.entries(readDesignMap(repo))).toEqual([['__proto__', design]]);
+    const problems = checkDesignMap(repo);
+    expect(problems).toHaveLength(2);
+    expect(problems.every((p) => p.notQueried === false)).toBe(true);
+    expect(problems.some((p) => p.text.includes('__proto__') && p.text.includes('不是目录'))).toBe(true);
+    expect(problems.some((p) => p.text.includes(design) && p.text.includes('不存在'))).toBe(true);
+  });
+
+  it('包名是 __proto__ 且设计文件在，返回空数组', () => {
+    const design = 'docs/design/ghost.md';
+    const repo = memRepo({
+      [DESIGN_MAP_PATH]: '{"__proto__":"docs/design/ghost.md"}\n',
+      [design]: '# ghost\n',
+      'packages/__proto__/src/index.ts': 'export {}\n',
+    });
+    expect(checkDesignMap(repo)).toEqual([]);
+  });
+
   it('读不到 docs/design/map.json，返回没查成', () => {
     const repo = memRepo({
       [PKG]: 'export {}\n',

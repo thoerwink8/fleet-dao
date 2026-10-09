@@ -29,7 +29,8 @@ export function readDesignMap(repo: RepoView): Record<string, string> {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`没查成：${DESIGN_MAP_PATH} 顶层不是对象。`);
   }
-  const map: Record<string, string> = {};
+  // 「__proto__」赋给普通对象会走原型 setter，这个合法键被丢掉，多余键和缺文件都漏报。
+  const map: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(parsed)) {
     if (typeof value !== 'string') {
       throw new Error(`没查成：${DESIGN_MAP_PATH} 里「${key}」的值不是字符串。`);
