@@ -149,6 +149,17 @@ describe('测试里不许同步起子进程', () => {
   it('模板字符串里只有普通文字和不含这三个词的插值时不命中', () => {
     const plain = ['const s = `plain text ', '$', '{name} ', '$', '{prefix}`;'].join('');
     expect(scanSyncChildSpawns(plain)).toEqual([]);
+    // 反引号正文里写出这三个词也只是字，不是调用；转义的 \${ 同样不是插值。
+    expect(scanSyncChildSpawns("const s = `execFileSync('git', [])`;")).toEqual([]);
+    const escaped = ['const s = `\\', '$', "{execFileSync('git', [])}`;"].join('');
+    expect(scanSyncChildSpawns(escaped)).toEqual([]);
+  });
+
+  it('标签模板的插值仍然命中', () => {
+    const tagged = (call: string) => ['const s = tag`', '$', '{', call, '}`;'].join('');
+    expect(scanSyncChildSpawns(tagged("execFileSync('git', [])"))).toEqual(['execFileSync']);
+    expect(scanSyncChildSpawns(tagged("spawnSync('git', [])"))).toEqual(['spawnSync']);
+    expect(scanSyncChildSpawns(tagged("execSync('git', [])"))).toEqual(['execSync']);
   });
 
   it('块注释夹在词中间时仍然命中', () => {
