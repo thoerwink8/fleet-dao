@@ -54,7 +54,10 @@ function endOfQuote(code: string, i: number, quote: string): number {
   return i;
 }
 
-/** 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。 */
+/**
+ * 从模板内容起点读到闭合反引号；${} 里的源码拼进 inner，交给外层再扫。
+ * 表达式前后各留一个空格：`${prefix}${execFileSync(...)}` 不能粘成 `prefixexecFileSync`，否则词边界扫不到。
+ */
 function readTemplate(code: string, i: number): { inner: string; end: number } {
   let inner = '';
   while (i < code.length) {
@@ -66,7 +69,7 @@ function readTemplate(code: string, i: number): { inner: string; end: number } {
     if (c === '`') return { inner, end: i + 1 };
     if (c === '$' && code[i + 1] === '{') {
       const expr = readBalanced(code, i + 1);
-      inner += expr.body;
+      inner += ` ${expr.body} `;
       i = expr.end;
       continue;
     }
@@ -166,4 +169,31 @@ describe('测试里不许同步起子进程', () => {
     expect(scanSyncChildSpawns(sample)).toEqual(['execFileSync']);
     expect(scanSyncChildSpawns("const e = new Error('spawnSync git ENOENT'); // execSync")).toEqual([]);
   });
+
+  it('模板插值紧挨着前缀时，仍然命中 execFileSync', () => {
+    expect(scanSyncChildSpawns(gluedTemplate("execFileSync('git', [])"))).toEqual(['execFileSync']);
+  });
+
+  it('模板插值紧挨着前缀时，仍然命中 spawnSync', () => {
+    expect(scanSyncChildSpawns(gluedTemplate("spawnSync('git', [])"))).toEqual(['spawnSync']);
+  });
+
+  it('模板插值紧挨着前缀时，仍然命中 execSync', () => {
+    expect(scanSyncChildSpawns(gluedTemplate("execSync('git', [])"))).toEqual(['execSync']);
+  });
+
+  it('模板里只有普通文字和不含这三个词的插值时，不误报', () => {
+    const sample = 'const s = `普通文字 ' + slot('prefix') + slot('name') + '`;';
+    expect(scanSyncChildSpawns(sample)).toEqual([]);
+  });
 });
+
+/** 拼出 `${name}`，避免测试源码里的 ${} 被当成自己的插值。 */
+function slot(name: string): string {
+  return '$' + '{' + name + '}';
+}
+
+/** 验收样本：`const s = \`${prefix}${…}\`;`。 */
+function gluedTemplate(expr: string): string {
+  return 'const s = `' + slot('prefix') + slot(expr) + '`;';
+}
