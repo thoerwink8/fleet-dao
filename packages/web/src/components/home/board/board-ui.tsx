@@ -12,6 +12,18 @@ export type ZoomLevel = 'far' | 'mid' | 'near';
 
 export const ZOOM_OF: Record<ZoomLevel, number> = { far: 0.4, mid: 0.85, near: 1.5 };
 
+/** 远档卡片标题、编号缩完之后，屏幕上至少这么大（px）。 */
+export const FAR_LABEL_MIN_PX = 12;
+
+/**
+ * 远档卡片标题、编号的 CSS 字号（px）。
+ * 画布按 zoom 缩小整张卡，字号乘缩放的倒数（max(基准, 12) / zoom），屏幕上不小于 12px。
+ */
+export function farCardFontPx(basePx: number, zoom: number = ZOOM_OF.far): number {
+  const z = zoom > 0 ? zoom : ZOOM_OF.far;
+  return Math.max(basePx, FAR_LABEL_MIN_PX) / z;
+}
+
 export function levelOf(zoom: number): ZoomLevel {
   if (zoom < 0.55) return 'far';
   if (zoom < 1.2) return 'mid';

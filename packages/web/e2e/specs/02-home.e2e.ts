@@ -143,7 +143,7 @@ test.describe('主页', () => {
       .toEqual([]);
   });
 
-  test('看板的交互照初版：「只看卡住的」只剩等你拍、出问题的；键盘 ? 打开快捷键说明', async ({
+  test('看板的交互照初版：「只看卡住的」只剩出问题的，不含等你拍；键盘 ? 打开快捷键说明', async ({
     page,
     api,
   }) => {
@@ -152,13 +152,8 @@ test.describe('主页', () => {
     await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(home.running.length);
     await page.getByRole('button', { name: /^只看卡住的/ }).click();
     await expect(page).toHaveURL(/stuck=1/);
-    // 卡住的 = 等你拍（founder_decision 或挂着要你拍的事）、出问题（最近一次事件是 trouble）；按后端给的数据算，不按单号猜
-    const stuck = home.running.filter(
-      (r) =>
-        r.waitingReason === 'founder_decision' ||
-        r.pendingDecision !== undefined ||
-        r.lastEvent?.tone === 'trouble',
-    );
+    // 卡住的 = 失败色（最近一次是 trouble，且不是被人暂停）。等你拍不算。按后端给的数据算，不按单号猜。
+    const stuck = home.running.filter((r) => r.waitingReason !== 'paused' && r.lastEvent?.tone === 'trouble');
     expect(
       stuck.map((r) => r.issueNumber),
       '#14 动手超时，算卡住',

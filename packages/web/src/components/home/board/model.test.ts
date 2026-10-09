@@ -5,6 +5,7 @@ import {
   buildGraph,
   countTones,
   groupSegments,
+  isNeedsYou,
   isStuck,
   lineage,
   nodeId,
@@ -128,24 +129,39 @@ describe('左右分边：两边高度尽量相等，前面的段在右边', () =
   });
 });
 
-describe('过滤「只看卡住的」', () => {
-  test('卡住的 = 等你拍、出问题了；还没验、排队不算（是正常的等）', () => {
-    expect(isStuck(RUNNING[0] as HomeRunning)).toBe(true);
+describe('过滤「只看卡住的」和「只看等你的」', () => {
+  test('卡住的 = 出问题了（失败色）；等你拍、还没验、排队不算', () => {
+    expect(isStuck(RUNNING[0] as HomeRunning)).toBe(false);
+    expect(isNeedsYou(RUNNING[0] as HomeRunning)).toBe(true);
     expect(isStuck(RUNNING[2] as HomeRunning)).toBe(true);
+    expect(isNeedsYou(RUNNING[2] as HomeRunning)).toBe(false);
     expect(isStuck(RUNNING[3] as HomeRunning)).toBe(false);
+    expect(isNeedsYou(RUNNING[3] as HomeRunning)).toBe(false);
     expect(isStuck(ticket(5, { waitingReason: 'queue' }))).toBe(false);
+    expect(isNeedsYou(ticket(5, { waitingReason: 'queue' }))).toBe(false);
+  });
+
+  test('等你拍的单不在「只看卡住的」结果里', () => {
+    const g = buildGraph({ running: RUNNING, flow: FLOW, filter: { stuck: true } });
+    const ids = g.nodes.filter((n) => n.data.kind === 'ticket').map((n) => n.id);
+    expect(ids).toEqual(['ticket:3:acme/orbit']);
+    expect(ids).not.toContain('ticket:1:acme/orbit');
+  });
+
+  test('等你拍的单在「只看等你的」结果里', () => {
+    const g = buildGraph({ running: RUNNING, flow: FLOW, filter: { stuck: false, needsYou: true } });
+    const ids = g.nodes.filter((n) => n.data.kind === 'ticket').map((n) => n.id);
+    expect(ids).toEqual(['ticket:1:acme/orbit']);
+    expect(ids).not.toContain('ticket:3:acme/orbit');
   });
 
   test('过滤只藏单子，不藏段；段上的「在途」数照旧按全部算', () => {
     const g = buildGraph({ running: RUNNING, flow: FLOW, filter: { stuck: true } });
-    expect(g.nodes.filter((n) => n.data.kind === 'ticket').map((n) => n.id)).toEqual([
-      'ticket:1:acme/orbit',
-      'ticket:3:acme/orbit',
-    ]);
+    expect(g.nodes.filter((n) => n.data.kind === 'ticket').map((n) => n.id)).toEqual(['ticket:3:acme/orbit']);
     expect(g.nodes.filter((n) => n.data.kind === 'segment')).toHaveLength(3);
     const verify = g.nodes.find((n) => n.id === 'segment:verify')?.data;
     expect(verify?.kind === 'segment' && verify.total).toBe(1);
-    expect(g.shown).toBe(2);
+    expect(g.shown).toBe(1);
     expect(g.total).toBe(4);
   });
 });
