@@ -35,7 +35,7 @@ function HomeBody({ data, remote }: { data: HomeData; remote: boolean }) {
 
   return (
     <>
-      <div className="grid items-start gap-4 xl:grid-cols-3 2xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+      <div className="grid items-start gap-4 xl:grid-cols-3 2xl:grid-cols-board">
         {/* 左列：窄屏上是 contents（两块直接当网格项，按 order 排在看板前后），xl 起才成一列 */}
         <div className="contents xl:col-start-1 xl:row-start-1 xl:flex xl:min-w-0 xl:flex-col xl:gap-4">
           <Panel

@@ -169,7 +169,7 @@ export function PoolHoldsPanel() {
             </Button>
           </span>
         </div>
-        <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+        <dl className="mt-1.5 grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
           <dt>为什么停</dt>
           <dd className="text-foreground">{h.reason}</dd>
           <dt>负责人</dt>

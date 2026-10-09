@@ -21,7 +21,7 @@ import { Button } from './ui/button';
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 py-2.5 first:pt-0 last:pb-0">
+    <div className="grid grid-cols-release gap-x-3 py-2.5 first:pt-0 last:pb-0">
       <dt className="pt-px text-xs text-muted-foreground">{label}</dt>
       <dd className="min-w-0 text-sm">{children}</dd>
     </div>
