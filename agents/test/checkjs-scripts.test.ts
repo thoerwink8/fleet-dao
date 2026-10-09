@@ -11,6 +11,7 @@ const AGENTS = join(import.meta.dirname, '..');
 
 /** 已经纳入严格检查的脚本（相对 agents/）：一个脚本补完类型就加进来，同时加进 tsconfig 的 files。 */
 const CHECKED = [
+  'skills/commander/scripts/check-brief.mjs',
   'skills/commander/scripts/france-lib.mjs',
   'skills/commander/scripts/france-query.mjs',
   'skills/commander/scripts/patrol-lib.mjs',

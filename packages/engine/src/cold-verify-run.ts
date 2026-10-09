@@ -15,6 +15,7 @@
 // 这一层只要被调了就跑；谁调它、什么时候调，见调用方（任务工作流在挂自动合并之前调）。重复贴同一条状态没有害处
 // （同一 context 同一头只留最新一条），所以「该验的没验」这件事由合并闸拦住、不由这一层猜。
 
+import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
   type ColdVerifyStatus,
@@ -34,6 +35,12 @@ import {
   type VerifierInvokeInput,
   type VerifierInvokeOutput,
 } from './verifier-invoke.ts';
+
+/**
+ * 目录里有、但不能当「认得的作者族」的：cursor（Cursor Auto 背后到底是哪家不知道，不能当成和验收人不同族）、
+ * unclassified（拆不出的串）、jev（不是写代码的模型）。再加上拼写不认识的串，都按「认不出」停。
+ */
+const NOT_A_KNOWN_AUTHOR_FAMILY: ReadonlySet<string> = new Set(['cursor', 'unclassified', 'jev']);
 
 /** 这张 PR 对着的单子：是哪张（验收这一笔记进 runs 挂在它名下，#216）、要什么、怎么算做完。 */
 export interface ColdVerifySpec {
@@ -155,20 +162,28 @@ export async function runColdVerifyForPr(
   }
 
   // 作者族必须个个都是我们认得的：认不出就挑不出「不同的族」，硬跑就可能是同族自审。一个都没有也一样。
+  // 认得 = 0006 的验收族（FAMILY_ORDER，进避让名单）+ 目录里别的真实存在的族（glm、gemini、muse，不进避让：
+  // 验收人只从 FAMILY_ORDER 里挑，必然和它们不同族）。cursor（背后是哪家不知道）、unclassified、jev 不算认得。
   const known = new Set<string>(FAMILY_ORDER);
+  const authorOnly = new Set<string>(
+    CATALOG_NAMED_FAMILIES.filter((f) => !known.has(f) && !NOT_A_KNOWN_AUTHOR_FAMILY.has(f)),
+  );
   const avoid: ModelFamily[] = [];
   const unknown: string[] = [];
+  const otherAuthors: string[] = [];
   for (const raw of authorFamilies) {
     const family = raw.trim().toLowerCase();
     if (known.has(family)) {
       if (!avoid.includes(family as ModelFamily)) avoid.push(family as ModelFamily);
+    } else if (authorOnly.has(family)) {
+      if (!otherAuthors.includes(family)) otherAuthors.push(family);
     } else unknown.push(raw);
   }
-  if (avoid.length === 0 || unknown.length > 0) {
+  if (avoid.length + otherAuthors.length === 0 || unknown.length > 0) {
     const status = coldVerifyNotRun(
-      avoid.length === 0 && unknown.length === 0
+      avoid.length + otherAuthors.length === 0 && unknown.length === 0
         ? `PR #${prNumber} 没有记下是哪一族写的：没法保证换了家族`
-        : `认不出 PR #${prNumber} 的作者族「${unknown.join('、')}」（0006 的族是 ${FAMILY_ORDER.join('、')}）：认不出就挑不出别家`,
+        : `认不出 PR #${prNumber} 的作者族「${unknown.join('、')}」（认得的是 0006 的 ${FAMILY_ORDER.join('、')}，加上目录里的 ${[...authorOnly].join('、')}）：认不出就挑不出别家`,
     );
     return await post(pr.head, status, {
       sourceProblem: `作者族认不出：${unknown.length > 0 ? unknown.join('、') : '没有记录'}`,
@@ -185,7 +200,8 @@ export async function runColdVerifyForPr(
     ...(spec.workflowId !== undefined ? { workflowId: spec.workflowId } : {}),
     what: spec.what,
     howToFinish: spec.howToFinish,
-    modelFamiliesAvoid: avoid as [ModelFamily, ...ModelFamily[]],
+    modelFamiliesAvoid: avoid,
+    ...(otherAuthors.length > 0 ? { otherAuthorFamilies: otherAuthors } : {}),
     round,
   };
   const invokeDeps: ColdVerifyInvokeDeps = {

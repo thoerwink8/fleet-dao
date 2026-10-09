@@ -271,6 +271,15 @@ const RULES_BY_CHANNEL: Record<string, ChannelRule> = {
   'claude-sub': CLAUDE_RULES,
 };
 
+/**
+ * 目录里真实存在的、能从上游串拆出来的族（上面各渠道规则表的并集，不另抄一份清单）：
+ * claude、gpt、grok、gemini、cursor、kimi、glm、muse、deepseek。unclassified 是「拆不出」，不在里面。
+ * 引擎冷验收认作者族用它（packages/engine/src/cold-verify-run.ts）。
+ */
+export const CATALOG_NAMED_FAMILIES: readonly string[] = [
+  ...new Set(Object.values(RULES_BY_CHANNEL).flatMap((rule) => rule.bases.map((base) => base.family))),
+];
+
 function matchBase(body: string, bases: readonly BaseRule[]): { modelId: string; family: string } | null {
   for (const rule of bases) {
     const match = rule.pattern.exec(body);

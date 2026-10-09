@@ -37,4 +37,5 @@
 | [0031](0031-engine-intake-gate.md) | 引擎拉单门加判断：改 .github/workflows 的、被开着的 PR 引用的单不拉；pr:open --new-issue 自动贴本机做；单关了撤任务（#1194、#1197、#1198、#1199） | 采纳 |
 | [0032](0032-release-by-main-commit.md) | 发版的单位是主线上的一个提交，里程碑只管计划；发版后恢复发版前的引擎状态；删掉 v<N> 标记、发布 PR、CHANGELOG 自动节那一层（替代 0011 里按版本发的一半） | 采纳 |
 | [0033](0033-fable-in-catalog-founder-only-opens.md) | Fable 进目录，默认关着、不在任何用途里；只有创始人本人在驾驶舱能打开、配进用途，引擎、临时指挥官、命令行、机器通行证一律不能（取代 0017 第 1、3 条，母单 #1354） | 采纳 |
-| [0034](0034-subagent-by-cost-effectiveness.md) | 子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档：Haiku 一次没证据就升、其余同档两次失败升，派时写明模型、汇报实际 id；默认值仍只许 Opus 或 Sonnet；无人值守的监控以巡查脚本为主，`ALERT` 且有变化才叫短命 Haiku（部分取代 0017 第 2 条，「永不用 Fable」保留，#1372） | 采纳 |
+| [0034](0034-subagent-by-cost-effectiveness.md) | 子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档：Haiku 一次没证据就升、其余同档两次失败升，派时写明模型、汇报实际 id；默认值仍只许 Opus 或 Sonnet；无人值守的监控以巡查脚本为主，`ALERT` 且有变化才叫短命 Haiku（部分取代 0017 第 2 条，「永不用 Fable」保留，#1372） | 采纳；Haiku 那一档的判据、`model: "haiku"` 的派法、「一次没证据就升」被 0035 取代 |
+| [0035](0035-haiku55-by-checkable-output.md) | Haiku 5.5 按「产出能被脚本或一条命令核对」用：别名 `haiku` 在本机是 4.5，真 5.5 走 `subagent_type: "haiku55"` 并核对实际 id；先 Haiku、核对不过再升 Sonnet；交代写全硬规矩；先砍固定开销；引擎侧由创始人在驾驶舱配（部分取代 0034） | 采纳 |
