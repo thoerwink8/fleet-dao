@@ -87,11 +87,13 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  */
 
 /**
- * 异常的类别（可选，稳定的英文名，给程序按类别过滤用，不要去匹配 what 的文案）。现在只有一种：
- * `task-idle`＝单在跑、手上没有会话、N 分钟没动。引擎总开关关着（发版车暂停期）时它必然出现，开回来就消失。
- * @typedef {{ level: 'bad' | 'note', what: string, where: string, kind?: 'task-idle' }} Issue
+ * 异常的类别（可选，稳定的英文名，给程序按类别过滤用，不要去匹配 what 的文案）。现在有两种，都是引擎总开关关着（发版车暂停期）时必然出现、开回来就消失的：
+ * `task-idle`＝单在跑、手上没有会话、N 分钟没动。
+ * `route-stale`＝路由算在线，但结论过了该探的时候没更新（或从没探过）：路由探针要引擎开着才跑（#1520）。
+ * @typedef {{ level: 'bad' | 'note', what: string, where: string, kind?: 'task-idle' | 'route-stale' }} Issue
  */
 export const KIND_TASK_IDLE = 'task-idle';
+export const KIND_ROUTE_STALE = 'route-stale';
 
 export const ENV_NAME = 'FLEET_FRANCE_SSH';
 /** 页面开着时多久从法国读一次。没人看就不读（不白连 ssh）。 */
@@ -1334,6 +1336,7 @@ export function buildView(snapshot) {
           bad(
             `路由 ${r.id} 算在线，但结论 ${age === null ? '从没探过' : `${age} 分钟没更新`}（过 ${staleAfter} 分钟算旧：在线是旧结论）`,
             WHERE.route,
+            KIND_ROUTE_STALE,
           );
         else if (
           r.in_use &&

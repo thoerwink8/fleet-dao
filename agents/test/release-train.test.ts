@@ -1047,6 +1047,90 @@ describe('整趟走完', () => {
     expect(text(w.err)).not.toContain('29 分钟没动');
   });
 
+  // #1520：暂停期路由探针不跑，在线路由的结论必然变旧（过 45 分钟算旧），按类别 kind 忽略，不看文案
+  const staleRoute = {
+    level: 'bad',
+    what: '路由 claude-solo:opus-5.5:claude-code 算在线，但结论 51 分钟没更新（过 45 分钟算旧：在线是旧结论）',
+    where: 'routes',
+    kind: 'route-stale',
+  };
+
+  it('暂停期多出一条「路由结论 51 分钟没更新」（kind route-stale）：第 6 步照过，发版车走完恢复本机', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceBad = 1; // 预检基线 1 条异常
+          w.franceExtra = healthCalls === 1 ? [] : [staleRoute];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(0);
+    expect(healthCalls).toBe(2);
+    expect(text(w.err)).not.toContain('多出了异常');
+    expect(text(w.out)).toContain('路由结论没更新 1 处');
+    expect(existsSync(markerFile(home))).toBe(false);
+  });
+
+  it('暂停期多出路由旧结论，同时多出一条别的异常（服务不 active）：别的那条照拦', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceBad = 1;
+          w.franceExtra =
+            healthCalls === 1
+              ? []
+              : [staleRoute, { level: 'bad', what: '服务 fleet-engine 不是 active（failed）', where: 'y' }];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(3);
+    expect(text(w.err)).toContain('多出了异常');
+    expect(text(w.err)).toContain('不是 active');
+    expect(text(w.err)).not.toContain('51 分钟没更新');
+    expect(existsSync(markerFile(home))).toBe(true);
+  });
+
+  it('【故意造出的失败】文案和路由旧结论一模一样但没带 kind：照拦，不靠文案放过', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceExtra =
+            healthCalls === 1
+              ? []
+              : [{ level: staleRoute.level, what: staleRoute.what, where: staleRoute.where }];
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    expect(code).toBe(3);
+    expect(text(w.err)).toContain('多出了异常');
+    expect(text(w.err)).toContain('51 分钟没更新');
+    expect(existsSync(markerFile(home))).toBe(true);
+  });
+
   it('新增的是「没读到」：照拦', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
