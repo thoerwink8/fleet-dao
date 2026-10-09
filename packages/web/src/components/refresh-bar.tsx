@@ -17,6 +17,8 @@ export function RefreshBar({
 }) {
   const now = useNow();
   const never = dataUpdatedAt === 0;
+  // 页内时钟一秒才跳一次。读完那一下 dataUpdatedAt 可能比时钟新，按「未来」会写成「秒后」。
+  const shownAt = dataUpdatedAt > now ? now : dataUpdatedAt;
   const stale = !never && now - dataUpdatedAt > staleAfterMs;
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -37,7 +39,7 @@ export function RefreshBar({
         <span className="text-caption text-muted-foreground">还没读到过</span>
       ) : (
         <span className="text-caption text-muted-foreground">
-          最后更新 <span className="num">{formatAgo(new Date(dataUpdatedAt).toISOString(), now)}</span>
+          最后更新 <span className="num">{formatAgo(new Date(shownAt).toISOString(), now)}</span>
         </span>
       )}
       {stale ? (

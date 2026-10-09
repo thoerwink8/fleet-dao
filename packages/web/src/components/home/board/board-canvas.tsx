@@ -17,6 +17,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useStoreApi,
 } from '@xyflow/react';
 import {
   ChevronDown,
@@ -215,7 +216,24 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
   const [help, setHelp] = useState(false);
   const { trigger } = useTaskActions();
   const rf = useReactFlow();
+  const flowStore = useStoreApi();
   const wrapper = useRef<HTMLDivElement>(null);
+  // 远档标题的字号用这两个变量：预设缩放写死一次，当前缩放跟着画布变，节点不必逐帧重画。
+  useLayoutEffect(() => {
+    const el = wrapper.current;
+    if (!el) return;
+    el.style.setProperty('--fd-zoom-far', String(ZOOM_OF.far));
+    let last = Number.NaN;
+    const apply = () => {
+      const z = flowStore.getState().transform[2];
+      const next = z > 0 ? z : ZOOM_OF.far;
+      if (next === last) return;
+      last = next;
+      el.style.setProperty('--fd-board-zoom', String(next));
+    };
+    apply();
+    return flowStore.subscribe(apply);
+  }, [flowStore]);
   const [view] = useState(createBoardView);
 
   const graph = useMemo(
@@ -938,17 +956,44 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
         />
       </button>
       {open && rows.length ? (
-        <ul className="max-h-56 overflow-y-auto border-t py-1">
-          {rows.map((r) => (
-            <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
-          ))}
-        </ul>
+        <div className="max-h-56 overflow-y-auto border-t">
+          <table className="w-full table-fixed text-xs">
+            <colgroup>
+              <col className="w-24" />
+              <col className="w-14" />
+              <col />
+              {/* 9rem：表头「分钟」和「1 小时 33 分」都放得下，不从「分钟」中间断开 */}
+              <col className="w-36" />
+            </colgroup>
+            <thead className="sticky top-0 bg-popover">
+              <tr className="text-left text-caption text-muted-foreground">
+                <th scope="col" className="w-24 px-3 py-1 font-normal whitespace-nowrap">
+                  谁在做
+                </th>
+                <th scope="col" className="w-14 px-1 py-1 font-normal whitespace-nowrap">
+                  单
+                </th>
+                <th scope="col" className="px-1 py-1 font-normal whitespace-nowrap">
+                  在做什么
+                </th>
+                <th scope="col" className="w-36 px-3 py-1 text-right font-normal whitespace-nowrap">
+                  分钟
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : null}
     </div>
   );
 }
 
-/** 此刻表的一行。状态列换行，悬停能看完整的状态、标题和耗时。 */
+/** 此刻表的一行。状态可以换行；表头和分钟列不换行。 */
 function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; onPick(id: string): void }) {
   const now = useNow();
   const since = queued ? item.waitingSince : item.stageSince;
@@ -956,28 +1001,31 @@ function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; 
   const status = statusTextOf(item);
   const full = [status, item.title, elapsed].filter((part) => part !== '').join(' · ');
   return (
-    <li>
-      <button
-        type="button"
-        onClick={() => onPick(nodeId.ticket(item))}
-        title={full}
-        className={cn(
-          'flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent',
-          queued && 'text-muted-foreground',
-        )}
+    <tr
+      tabIndex={0}
+      title={full}
+      onClick={() => onPick(nodeId.ticket(item))}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onPick(nodeId.ticket(item));
+      }}
+      className={cn('cursor-pointer hover:bg-accent', queued && 'text-muted-foreground')}
+    >
+      <td className="w-24 max-w-24 truncate px-3 py-1.5 font-medium" title={item.worker ?? '排队'}>
+        <span className="num">{item.worker ?? '排队'}</span>
+      </td>
+      <td className="num w-14 px-1 py-1.5 whitespace-nowrap text-muted-foreground">#{item.issueNumber}</td>
+      <td className="px-1 py-1.5 break-words whitespace-normal text-muted-foreground" title={full}>
+        {status} · {item.title}
+      </td>
+      <td
+        className="num w-36 px-3 py-1.5 text-right whitespace-nowrap text-muted-foreground"
+        title={elapsed || undefined}
       >
-        <span className="num w-22 shrink-0 truncate font-medium" title={item.worker ?? '排队'}>
-          {item.worker ?? '排队'}
-        </span>
-        <span className="num shrink-0 text-muted-foreground">#{item.issueNumber}</span>
-        <span className="min-w-0 flex-1 whitespace-normal break-words text-muted-foreground" title={full}>
-          {status} · {item.title}
-        </span>
-        <span className="num shrink-0 whitespace-nowrap text-muted-foreground" title={elapsed || undefined}>
-          {elapsed}
-        </span>
-      </button>
-    </li>
+        {elapsed}
+      </td>
+    </tr>
   );
 }
 

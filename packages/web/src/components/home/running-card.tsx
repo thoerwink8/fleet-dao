@@ -136,7 +136,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
           {item.stageSince ? (
             <>
               <span aria-hidden>·</span>
-              <span className="num shrink-0">本段 {since(item.stageSince)}</span>
+              <span className="num shrink-0 whitespace-nowrap">本段 {since(item.stageSince)}</span>
             </>
           ) : null}
           {item.taskSince ? (
@@ -153,7 +153,9 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
             <span className="shrink-0 text-muted-foreground">· {WAIT_LABEL[item.waitingReason]}</span>
           ) : null}
           {item.waitingSince ? (
-            <span className="num shrink-0 text-muted-foreground">{since(item.waitingSince)}</span>
+            <span className="num shrink-0 whitespace-nowrap text-muted-foreground">
+              {since(item.waitingSince)}
+            </span>
           ) : null}
         </div>
 

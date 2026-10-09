@@ -54,6 +54,19 @@ test('过期：显示最后更新多少分钟前，并出现数据已过期', ()
   expect(screen.getByText('数据已过期')).toBeTruthy();
 });
 
+test('读数时刻比页内时钟略新：仍显示刚刚，不写成秒后', () => {
+  render(
+    <RefreshBar
+      onRefresh={() => {}}
+      isFetching={false}
+      dataUpdatedAt={Date.now() + 2000}
+      staleAfterMs={10 * MIN}
+    />,
+  );
+  expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
+  expect(screen.queryByText(/秒后/)).toBeNull();
+});
+
 test('【故意造出的坏输入】dataUpdatedAt 为 0：显示还没读到过，不显示刚刚', () => {
   render(<RefreshBar onRefresh={() => {}} isFetching={false} dataUpdatedAt={0} staleAfterMs={5 * MIN} />);
   expect(screen.getByText('还没读到过')).toBeTruthy();
