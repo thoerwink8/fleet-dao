@@ -4,6 +4,7 @@
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner/仓名> on|off|status
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]   开关关着时点名派一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api groom <owner/仓名> [--note "<为什么>"]   叫一次临时指挥官整理待办（只排队，引擎几秒内接手）
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"   续、放弃、重做一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
 # 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
 # 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读，和服务里生效的一模一样。

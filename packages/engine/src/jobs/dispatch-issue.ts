@@ -172,7 +172,12 @@ async function hardFailure(
   if (!local.ok) return { failure: fail(local.reason, local.why) };
 
   if (await deps.dispatched(repo, issueNumber)) {
-    return { failure: fail('already_dispatched', '已经派出过（要再做，在驾驶舱点「重做」）') };
+    return {
+      failure: fail(
+        'already_dispatched',
+        '已经派出过（要再做，跑 fleet-api task redo <owner/仓> <单号> --note "<为什么>"，或在驾驶舱点「重做」）',
+      ),
+    };
   }
   const workflowPath = workflowPathIn(issue.body);
   if (workflowPath !== null) {
@@ -309,7 +314,12 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
   if (got === 'already_exists') {
     return {
       outcome: 'refused',
-      failures: [fail('already_dispatched', '任务工作流的编号已经用过，不重复派')],
+      failures: [
+        fail(
+          'already_dispatched',
+          '任务工作流的编号已经用过，不重复派（要再做，跑 fleet-api task redo，或在驾驶舱点「重做」）',
+        ),
+      ],
     };
   }
   return { outcome: 'started', forced: soft, tier: brief.tier };
