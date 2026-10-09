@@ -3,7 +3,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
-import { SegmentStats } from './segment-usage';
+import { SegmentBreakdown, SegmentStats } from './segment-usage';
 
 afterEach(cleanup);
 
@@ -17,5 +17,17 @@ describe('花费一格两行', () => {
     expect(lines?.className).toContain('flex-col');
     expect(metered.nextElementSibling?.className).toContain('text-stat');
     expect(folded.parentElement?.className ?? '').not.toContain('text-stat');
+  });
+});
+
+describe('三段表耗时列', () => {
+  test('「在跑 40 分钟」整句不换行，列宽跟内容走', async () => {
+    const t = Date.parse('2026-10-10T12:00:00Z');
+    const d = await createMockApi({ live: false, now: () => t }).task('t-12');
+    render(<SegmentBreakdown d={d} now={t} />);
+    const note = screen.getByText('在跑 40 分钟');
+    expect(note.closest('.whitespace-nowrap'), '耗时格要带 whitespace-nowrap').toBeTruthy();
+    const row = note.closest('[data-segment="manual"]')?.firstElementChild;
+    expect(row?.className).toContain('md:grid-cols-segments');
   });
 });

@@ -205,15 +205,26 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   );
 }
 
-/** 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行，手机上两列、每格带名字；表头和每行共用。 */
-const COLUMNS = 'grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-12 md:items-baseline md:gap-y-0';
+/** 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行（耗时列按内容宽、不换行），手机上两列、每格带名字；表头和每行共用。 */
+const COLUMNS = 'grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-segments md:items-baseline md:gap-y-0';
 const ROW = cn('grid', COLUMNS);
 
-function Cell({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+function Cell({
+  label,
+  className,
+  nowrap,
+  children,
+}: {
+  label: string;
+  className?: string;
+  /** 这一格的字不换行（耗时：「40 分钟」不能从字中间断开）。也不设 min-w-0，免得列被压窄后溢出去。 */
+  nowrap?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <div className={cn('min-w-0', className)}>
+    <div className={cn(nowrap ? 'whitespace-nowrap' : 'min-w-0', className)}>
       <div className="text-caption text-muted-foreground md:hidden">{label}</div>
-      <div className="min-w-0 text-sub">{children}</div>
+      <div className={cn('text-sub', nowrap ? 'whitespace-nowrap' : 'min-w-0')}>{children}</div>
     </div>
   );
 }
@@ -254,7 +265,7 @@ function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
   const runningNote = t.running ? (live !== undefined ? `在跑 ${formatDuration(live)}` : '在跑') : undefined;
   return (
     <>
-      <Cell label="耗时" className="md:col-span-1">
+      <Cell label="耗时" nowrap>
         <Read r={work} empty={runningNote ?? '—'}>
           {formatDuration(work.kind === 'none' || work.kind === 'missing' ? 0 : work.value)}
         </Read>
@@ -262,7 +273,7 @@ function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
           <div className="text-caption text-ink-run">{runningNote}</div>
         ) : null}
       </Cell>
-      <Cell label="token（输入 / 输出）" className="md:col-span-2">
+      <Cell label="token（输入 / 输出）">
         <Read
           r={reading(t.inputTokens + t.outputTokens, t.missingTokens, t.runs)}
           empty={t.running ? '跑完才有' : '—'}
@@ -270,7 +281,7 @@ function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
           {formatCount(t.inputTokens)} / {formatCount(t.outputTokens)}
         </Read>
       </Cell>
-      <Cell label="缓存（读 / 写）" className="md:col-span-2">
+      <Cell label="缓存（读 / 写）">
         <Read
           r={reading(t.cacheReadTokens + t.cacheWriteTokens, t.missingCache, t.runs)}
           empty={t.running ? '跑完才有' : '—'}
@@ -278,7 +289,7 @@ function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
           {formatCount(t.cacheReadTokens)} / {formatCount(t.cacheWriteTokens)}
         </Read>
       </Cell>
-      <Cell label="当量" className="md:col-span-1">
+      <Cell label="当量">
         <Read
           r={reading(t.inputEquivalent, t.missingEquivalent, t.runs)}
           empty={t.running ? '跑完才有' : '—'}
@@ -286,7 +297,7 @@ function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
           {formatCount(t.inputEquivalent)}
         </Read>
       </Cell>
-      <Cell label="花费" className="md:col-span-2">
+      <Cell label="花费">
         <CostCell t={t} />
       </Cell>
     </>
@@ -310,7 +321,7 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
   return (
     <li className="py-3" data-segment={s.segment ?? 'unknown'}>
       <div className={ROW}>
-        <div className="col-span-2 min-w-0 md:col-span-2">
+        <div className="col-span-2 min-w-0 md:col-span-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
             <span className={cn('font-medium', s.segment === null && 'text-ink-stall')}>
               {s.segment ? segmentLabel[s.segment] : UNKNOWN_SEGMENT}
@@ -334,10 +345,10 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
             </div>
           ) : null}
         </div>
-        <Cell label="次数" className="md:col-span-1">
+        <Cell label="次数">
           <span className="num">{timesText(s)}</span>
         </Cell>
-        <Cell label="派工档" className="md:col-span-1">
+        <Cell label="派工档">
           <span
             className={cn(
               tier.missing ? 'font-medium text-ink-stall' : !s.tiers.length && 'text-muted-foreground',
@@ -353,15 +364,15 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
         <ul className="mt-2 space-y-2">
           {s.byModel.map((m) => (
             <li key={m.model} className={ROW} data-model={m.model}>
-              <div className="col-span-2 min-w-0 border-l-2 pl-2 md:col-span-2">
+              <div className="col-span-2 min-w-0 border-l-2 pl-2 md:col-span-1">
                 <span className="num block truncate text-sub" title={m.model}>
                   {m.modelName}
                 </span>
               </div>
-              <Cell label="次数" className="md:col-span-1">
+              <Cell label="次数">
                 <span className="num text-muted-foreground">{timesText(m)}</span>
               </Cell>
-              <div className="hidden md:col-span-1 md:block" />
+              <div className="hidden md:block" />
               <Figures t={m} live={live(m.model)} />
             </li>
           ))}
@@ -392,14 +403,14 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
         className={cn('hidden md:grid', COLUMNS, 'border-b py-2 text-caption text-muted-foreground')}
         aria-hidden
       >
-        <span className="md:col-span-2">段 / 模型</span>
-        <span className="md:col-span-1">次数</span>
-        <span className="md:col-span-1">派工档</span>
-        <span className="md:col-span-1">耗时</span>
-        <span className="md:col-span-2">token（输入 / 输出）</span>
-        <span className="md:col-span-2">缓存（读 / 写）</span>
-        <span className="md:col-span-1">当量</span>
-        <span className="md:col-span-2">花费</span>
+        <span>段 / 模型</span>
+        <span>次数</span>
+        <span>派工档</span>
+        <span className="whitespace-nowrap">耗时</span>
+        <span>token（输入 / 输出）</span>
+        <span>缓存（读 / 写）</span>
+        <span>当量</span>
+        <span>花费</span>
       </div>
       <ul className="divide-y">
         {SEGMENT_ORDER.map((segment) => {

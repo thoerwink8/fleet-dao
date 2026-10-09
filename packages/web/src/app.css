@@ -625,6 +625,13 @@
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
 }
 
+/* 任务页「三段」表（md 起）。耗时列按内容宽，不跟别的列一起被压窄，免得「40 分钟」从字中间断成两行。 */
+@utility grid-cols-segments {
+  grid-template-columns:
+    minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) max-content minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr)
+    minmax(0, 2fr);
+}
+
 /* 同一块区域只有一行，撑满上面定下的高度。模型少的时候外框不缩，空白留在框里。 */
 @utility grid-rows-routing-desk {
   grid-template-rows: minmax(0, 1fr);
