@@ -7,7 +7,6 @@
 // 凭据从 /etc/fleet-dao/github 读（FLEET_GITHUB_APP_DIR 可改）；幂等账用内存里的 Postgres（PGlite，跑真迁移），不碰生产库。
 // 只写巡检仓：一张 issue（最后关掉）、一个分支（合并后删掉）、主线上一个改 README 的小提交。别的仓一个字不写。
 // --record：把用到的 GitHub 返回脱敏后存成测试夹具（令牌那一类接口一律不录）。
-import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +22,7 @@ import {
   repoSlug,
 } from '@fleet-dao/github';
 import { pgLedger, pgLocker } from '../../src/github-pg.ts';
+import { runChildOk } from '../child.ts';
 
 const argv = process.argv.slice(2);
 const flag = (name: string) => {
@@ -187,12 +187,10 @@ function brief(v: unknown): string {
 const root = mkdtempSync(join(tmpdir(), 'fleet-gh-e2e-'));
 const t = await createTestDb();
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, {
+  runChildOk('git', args, {
     cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-  }).trim();
+  });
 
 let gh: GitHub | undefined;
 let issueNumber: number | undefined;
