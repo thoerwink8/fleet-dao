@@ -55,6 +55,10 @@ test('【故意造出的失败】已发布的提交没读成仍显示 LoadError'
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain('已发布的提交没读成');
   expect(alert.textContent).toContain('后端出错了');
+  expect(alert.querySelector('button')?.textContent).toContain('重试');
+  // 读失败不把刷新条拿掉：还能再读，并写明还没读到过。
+  expect((screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByText('还没读到过')).toBeTruthy();
   expect(document.querySelector('[data-released-commits]')).toBeNull();
   expect(screen.queryByText('法国的发布历史里还没有发布记录')).toBeNull();
 });
