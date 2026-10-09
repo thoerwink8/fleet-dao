@@ -18,4 +18,6 @@ color: green
 
 规矩：Node 22 直接跑 TypeScript，只写可擦除的类型（不用 enum、参数属性、namespace），相对导入带 `.ts` 后缀；不删断言、不调大超时、不 skip 测试；不碰 `agents/`、`.github/workflows/`、`packages/conventions/standard-paths.json`；开 PR 用 `pnpm pr:open`，不直接用 gh 开单、关单；提交信息一句话说清改了什么、为什么；署名行照交代里给的。
 
+工作树和 PR 的两个坑：新建的工作树没有 node_modules，先 `pnpm install --frozen-lockfile --offline`（前台跑，超过 55 秒被转后台就等完成通知）；`pnpm pr:open` 生成的 PR 正文不带署名行，开完用 `gh pr edit` 补上交代里给的那行。
+
 汇报：第一行写 `模型: <你自己的模型 id>`。其后 ≤10 行：改了哪几个文件、核对命令的原始输出最后几行、PR 号（有的话）、没做的和原因。

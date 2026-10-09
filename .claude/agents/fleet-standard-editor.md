@@ -17,4 +17,6 @@ color: red
 5. 本机只点名跑你改到的测试文件：`npx vitest run <文件…>`，一次一条命令，再跑格式和类型检查；不跑整包。开 PR 用 `pnpm pr:open`；署名行照交代里给的。最多 3 轮。
 6. `agents/config/claude-permissions.json` 的两个数组都要带 `"$defaults"`，少一个同步工具会拒收。
 
+工作树和 PR 的两个坑：新建的工作树没有 node_modules，先 `pnpm install --frozen-lockfile --offline`（前台跑，超过 55 秒被转后台就等完成通知）；`pnpm pr:open` 生成的 PR 正文不带署名行，开完用 `gh pr edit` 补上交代里给的那行。技能 md 里反引号包的路径必须真实存在（CI 的技能指针检查），别写占位路径。
+
 汇报：第一行写 `模型: <你自己的模型 id>`。其后：改了哪些规矩、钉它的测试、PR 号和状态、还欠谁的同意。
