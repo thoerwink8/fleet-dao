@@ -1,4 +1,4 @@
-import { quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
+import { type QuotaWindowKind, quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
 import { BellRing, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
@@ -293,6 +293,37 @@ function SoloPaused({ s }: { s: Setting | undefined }) {
 }
 
 /**
+ * 留量线一行的窗口名。7d_model 没有组名时不要把字段名漏出来（「7d_model 周额度」），写成「单模型周额度」；
+ * 这个池的读数带了组名就写在后面。别的窗口沿用 quotaWindowName，名字不变。
+ */
+function reserveKindLabel(
+  kind: QuotaWindowKind,
+  windows: readonly { window: QuotaWindowKind; scope?: string | undefined }[],
+): string {
+  if (kind !== '7d_model') return quotaWindowName({ window: kind, label: kind });
+  const groups: string[] = [];
+  for (const w of windows) {
+    if (w.window !== '7d_model') continue;
+    const scope = w.scope?.trim();
+    if (scope && !groups.includes(scope)) groups.push(scope);
+  }
+  return groups.length > 0 ? `单模型周额度（${groups.join('、')}）` : '单模型周额度';
+}
+
+/** 仓库一节的读失败：仓列表和接活开关都失败时合成一条，只失败一边就只写那一边。 */
+function repoReadFailure(reposError: unknown, dispatchError: unknown): string | null {
+  if (reposError && dispatchError) {
+    const reposMsg = errorText(reposError);
+    const dispatchMsg = errorText(dispatchError);
+    if (reposMsg === dispatchMsg) return `仓列表和「让 AI 接活」开关没读成：${reposMsg}`;
+    return `仓列表没读成：${reposMsg}；「让 AI 接活」开关没读成：${dispatchMsg}`;
+  }
+  if (reposError) return `仓列表没读成：${errorText(reposError)}`;
+  if (dispatchError) return `「让 AI 接活」开关没读成：${errorText(dispatchError)}`;
+  return null;
+}
+
+/**
  * 各渠道的额度留量线（#194 方案 4.8）：每个渠道（账号池）每个额度窗一个「最多用到百分之几」，到了线引擎就不再往这个渠道派新活、
  * 也不切过去（在跑的不动）。线只存在库里（起始值是发布时装载器从种子文件只补缺装进去的，创始人 2026-10-05：不写死、驾驶舱可配置），
  * 这里没有任何默认值：留空 = 未配置（不限），写「不限」= 明确不限。存值认不出、库里没有这一项明确说出来，不当成不限；整份一起存，
@@ -384,7 +415,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
                   return (
                     <div key={k} className="flex items-center gap-1.5">
                       <Label htmlFor={id} className="text-xs text-muted-foreground">
-                        {quotaWindowName({ window: k, label: k })}
+                        {reserveKindLabel(k, r.pool.windows)}
                       </Label>
                       <Input
                         id={id}
@@ -428,6 +459,7 @@ export default function Settings() {
   const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
   const dispatch = useRepoDispatch();
+  const repoFailure = repoReadFailure(reposError, dispatch.error);
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
   return (
@@ -452,17 +484,12 @@ export default function Settings() {
       >
         {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
         <EngineMasterRelation />
-        {reposError ? (
+        {repoFailure ? (
           <div className="mb-3 max-w-xl">
-            <LoadError what="仓列表" error={reposError} />
-            {repos.length ? (
+            <LoadError text={repoFailure} error={reposError ?? dispatch.error} />
+            {reposError && repos.length ? (
               <p className="mt-1 text-xs text-muted-foreground">下面是上次读到的，可能不全。</p>
             ) : null}
-          </div>
-        ) : null}
-        {dispatch.error ? (
-          <div className="mb-3 max-w-xl">
-            <LoadError what="「让 AI 接活」开关" error={dispatch.error} />
           </div>
         ) : null}
         {reposLoading ? <LoadingRows rows={1} /> : null}
@@ -565,7 +592,8 @@ export default function Settings() {
         <div className="mb-5 max-w-sm">
           <ModeSwitch />
         </div>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        {/* 1024 宽时这一节已经分了左右栏，四列色卡装不下 Graphite / Tokyo Night，先两列，1280 以上再四列。 */}
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
           {PALETTES.map((p) => (
             <PaletteSwatch
               key={p.id}
