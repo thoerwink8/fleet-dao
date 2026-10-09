@@ -74,7 +74,29 @@ describe('路由页：渠道模型表', () => {
     expect(within(section).queryByRole('button')).toBeNull();
   });
 
-  test('都对得上时只写这一句', async () => {
+  test('没有差集时写明比的是渠道自己的模型表和目录，并写出各自的个数', async () => {
+    renderApp(<RoutingPage />, {
+      route: '/routing?tab=models',
+      api: withRoster(
+        layers({
+          modelRoster: {
+            missingFromCatalog: [],
+            goneRoutes: [],
+            failed: [],
+            notYet: [],
+            channelModelCount: 4,
+            catalogCount: 7,
+          },
+        }),
+      ),
+    });
+    const section = await screen.findByRole('region', { name: '渠道模型表' });
+    expect(section.textContent?.trim()).toBe('渠道自己的模型表（4 个）和目录（7 个）对得上');
+    expect(section.textContent).not.toBe('都对得上');
+    expect(within(section).queryByRole('button')).toBeNull();
+  });
+
+  test('没有差集、接口没给个数：写明两边，不编数字', async () => {
     renderApp(<RoutingPage />, {
       route: '/routing?tab=models',
       api: withRoster(
@@ -84,7 +106,29 @@ describe('路由页：渠道模型表', () => {
       ),
     });
     const section = await screen.findByRole('region', { name: '渠道模型表' });
-    expect(section.textContent?.trim()).toBe('都对得上');
+    expect(section.textContent?.trim()).toBe('渠道自己的模型表和目录对得上');
+  });
+
+  test('没有差集、只有手工登记：个数和手工登记一起写', async () => {
+    renderApp(<RoutingPage />, {
+      route: '/routing?tab=models',
+      api: withRoster(
+        layers({
+          modelRoster: {
+            missingFromCatalog: [],
+            goneRoutes: [],
+            failed: [],
+            notYet: [],
+            channelModelCount: 2,
+            catalogCount: 2,
+            manual: [{ channelId: 'claude-sub', channelName: 'Claude 订阅', count: 2 }],
+          },
+        }),
+      ),
+    });
+    const section = await screen.findByRole('region', { name: '渠道模型表' });
+    expect(section.textContent).toContain('渠道自己的模型表（2 个）和目录（2 个）对得上');
+    expect(section.textContent).toContain('Claude 订阅：这个渠道靠手工登记，共 2 个');
     expect(within(section).queryByRole('button')).toBeNull();
   });
 
@@ -111,6 +155,7 @@ describe('路由页：渠道模型表', () => {
     });
     const section = await screen.findByRole('region', { name: '渠道模型表' });
     expect(section.textContent).not.toContain('都对得上');
+    expect(section.textContent).not.toContain('渠道自己的模型表');
     expect(section.textContent).toContain('Claude 订阅 没读成（no_credentials）：没有登录');
     expect(section.textContent).toContain('Grok 订阅 还没读过');
     expect(section.textContent).toContain('没有');
@@ -146,5 +191,6 @@ describe('路由页：渠道模型表', () => {
     });
     const section = await screen.findByRole('region', { name: '渠道模型表' });
     expect(section.textContent?.trim()).toBe('渠道模型表没读到，不能当成都对得上');
+    expect(section.textContent).not.toContain('渠道自己的模型表');
   });
 });
