@@ -50,14 +50,21 @@ export type CiStep =
   | { kind: 'merged'; mergeCommit?: string | undefined }
   | { kind: 'rework' };
 
-/** 验收停下时，通知正文第一行用的原因类别（#1404）。两类都沾上时先算「验收条在 diff 里证不了」。 */
+/** 验收停下的原因类别（#1404）。通知第一行、整理提示词都用这三份，不另写一份字符串。 */
+export const VERIFY_STOP_UNPROVABLE = '验收条在 diff 里证不了';
+export const VERIFY_STOP_OUT_OF_SCOPE = 'PR 改了范围外的文件';
+export const VERIFY_STOP_OTHER = '其它';
+
+/** 整理会话用 amend 补验收条的两类（#1465）。「其它」不进那一节。两类都沾上时先算证不了。 */
+export const GROOM_VERIFY_STOP_CATEGORIES = [VERIFY_STOP_UNPROVABLE, VERIFY_STOP_OUT_OF_SCOPE] as const;
+
 const UNPROVABLE_MARKS = ['无法证明', 'diff 未包含', '无法确认'] as const;
 const OUT_OF_SCOPE_MARKS = ['额外修改', '范围外'] as const;
 
 export function verifyStopCategory(original: string): string {
-  if (UNPROVABLE_MARKS.some((mark) => original.includes(mark))) return '验收条在 diff 里证不了';
-  if (OUT_OF_SCOPE_MARKS.some((mark) => original.includes(mark))) return 'PR 改了范围外的文件';
-  return '其它';
+  if (UNPROVABLE_MARKS.some((mark) => original.includes(mark))) return VERIFY_STOP_UNPROVABLE;
+  if (OUT_OF_SCOPE_MARKS.some((mark) => original.includes(mark))) return VERIFY_STOP_OUT_OF_SCOPE;
+  return VERIFY_STOP_OTHER;
 }
 
 /**
