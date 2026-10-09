@@ -36,35 +36,6 @@
 | WG_PORT | 4500 | deploy/hk.sh |
 
 <!-- fleet:ports:end -->
-<!--
-对照（给 diff 核对用；不在端口区块里，手写表未改）：
-deploy/france.sh 按行号在前：
-105 PG_PORT=5432
-106 TEMPORAL_FRONTEND_PORT=7243
-107 TEMPORAL_FRONTEND_MEMBERSHIP_PORT=6943
-108 TEMPORAL_HISTORY_PORT=7244
-109 TEMPORAL_HISTORY_MEMBERSHIP_PORT=6944
-110 TEMPORAL_MATCHING_PORT=7245
-111 TEMPORAL_MATCHING_MEMBERSHIP_PORT=6945
-112 TEMPORAL_WORKER_PORT=7249
-113 TEMPORAL_WORKER_MEMBERSHIP_PORT=6949
-125 API_PORT=8787
-136 MIRASIM_SESSION_PORT=4318
-deploy/hk.sh 按行号在后：
-26 WG_PORT=4500
-packages/conventions/test/ops-tables.test.ts 本片未改。故意失败用例仍在，原文：
-  it('区块标记被删，返回对不上的问题（不是没查成）', () => {
-    const r = memRepo({
-      'deploy/france.sh': FRANCE,
-      'deploy/hk.sh': HK,
-      'docs/ops.md': '# 运维\n没有区块\n',
-    });
-    const problems = checkPortsBlock(r, 'docs/ops.md');
-    expect(problems).toHaveLength(1);
-    expect(problems[0]?.notQueried).toBe(false);
-    expect(problems[0]?.text).toContain('开始标记');
-  });
--->
 法国（除了私有项目 self-proxy 的 443，全部只绑本机或隧道地址）：
 
 | 端口 | 绑在 | 是谁 | 说明 |
