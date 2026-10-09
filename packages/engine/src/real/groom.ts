@@ -72,6 +72,20 @@ export interface GroomWiring {
 
 const SPAWN_MARGIN_MS = 60_000;
 
+/**
+ * 整理待办读窗口里合并了的 PR。since 是现在往回 GROOM_CLOSED_DAYS 天。
+ * listMergedPulls 翻页触顶会抛：调用方记「没读到分片关系」，不当成没有。
+ */
+export async function readGroomMergedPulls(
+  claims: GroomGitHub['claims'],
+  repo: { owner: string; name: string },
+  now: Date,
+): Promise<{ number: number; title: string; body: string }[]> {
+  const since = new Date(now.getTime() - GROOM_CLOSED_DAYS * 24 * 60 * 60_000);
+  const pulls = await claims.listMergedPulls(repo, since);
+  return pulls.map((p) => ({ number: p.number, title: p.title, body: p.body }));
+}
+
 /** 给 EngineJobs.groom 用的工厂：每一眼现装。 */
 export function groomJob(w: GroomWiring): () => GroomRunDeps {
   const now = w.now ?? (() => new Date());
@@ -224,11 +238,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
       return githubWhitelist(await store.listUsers());
     },
     readFacts,
-    readMergedPulls: async (repo) => {
-      const since = new Date(now().getTime() - GROOM_CLOSED_DAYS * 24 * 60 * 60_000);
-      const pulls = await w.gh.claims.listMergedPulls(ref(repo), since);
-      return pulls.map((p) => ({ number: p.number, title: p.title, body: p.body }));
-    },
+    readMergedPulls: (repo) => readGroomMergedPulls(w.gh.claims, ref(repo), now()),
     standardPaths: loadStandardPaths,
     runSession,
     writes: (repo) => ({
