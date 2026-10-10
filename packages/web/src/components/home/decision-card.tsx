@@ -34,9 +34,11 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-nowrap items-baseline gap-x-2">
+            {/* 种类换成 text-caption。 */}
             <span className="shrink-0 whitespace-nowrap text-caption font-medium uppercase tracking-wide text-ink-human">
               {meta.label}
             </span>
+            {/* 时间换成 text-caption。 */}
             <span className="num shrink-0 whitespace-nowrap text-caption text-muted-foreground">
               {formatAgo(decision.since, now)}
             </span>
