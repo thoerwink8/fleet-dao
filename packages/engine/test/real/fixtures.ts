@@ -47,6 +47,7 @@ import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
 import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
+import type { IqQuestion } from '../../src/real/probe-iq.ts';
 import { type SessionOrgControl, type SessionOrgDeps, sessionOrgReader } from '../../src/real/session-org.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 import { runChildOk } from '../child.ts';
@@ -1259,3 +1260,14 @@ export async function dumpDb(client: TestDb['client']): Promise<string> {
   }
   return parts.join('\n');
 }
+
+/** 探针测试固定问的那道降智题（经 routeProbeJob 的 pickQuestion 注入）和一份答对的三行回复。 */
+export const TEST_Q: IqQuestion = {
+  id: 'test-1',
+  text: '算一下 (37 + 58) × 12 - 205 等于多少？答案只写最终的数字。',
+  short: '(37+58)×12-205',
+  answer: '935',
+  kind: 'number',
+};
+export const pickTestQuestion = () => TEST_Q;
+export const REPLY = 'OK\n答案：935\n模型：Anthropic Claude Opus 5.5';

@@ -56,6 +56,8 @@ import {
   MIN,
   NOW,
   orgListRig,
+  pickTestQuestion,
+  REPLY,
   SOLO_ORG_ID,
   world,
 } from './fixtures.ts';
@@ -78,7 +80,7 @@ beforeEach(async () => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const H = 60 * MIN;
-const answered = (): FakeRunScript => ({ result: { text: 'OK' } });
+const answered = (): FakeRunScript => ({ result: { text: REPLY } });
 
 /** 接口读数的替身：本人额度还宽、拼车和独享各一个可用账号。每次现读都是新的（时刻跟着假钟走）。 */
 const healthyRead = (at: Date): CarpoolApiRead => ({
@@ -172,6 +174,7 @@ function setup(
     log: () => {},
     sleep: async () => {},
     retryDelayMs: 0,
+    pickQuestion: pickTestQuestion,
     run: { 'claude-code': fake.run },
   });
   return {

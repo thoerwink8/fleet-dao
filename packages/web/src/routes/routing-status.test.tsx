@@ -73,6 +73,11 @@ const probeCell = (
   failureReason: over.result === 'passed' ? null : '原因',
   requestText: null,
   responseText: null,
+  checkQuestion: null,
+  checkExpected: null,
+  checkAnswer: null,
+  checkPassed: null,
+  selfIdentity: null,
   ...over,
 });
 
