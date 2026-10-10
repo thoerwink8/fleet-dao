@@ -15,13 +15,17 @@
 // - 这是读别人家的文件：格式变了要能认出来——整份读不了、一行认不出都照实说「没读成」，不当成「没有」。目录不存在（这台没装
 //   Mirasim、或会话不是它起的）才是真的「没有」，不出声。
 // - 对账只按「话的开头 + 时间相近」认：同一句话 15 分钟内发过两次、只收到一次，算丢了一次（一条收到的只能对掉一条发的）。
-// - 只管最近 RECENT_MS 以内的；再早的他早重发或放弃了，列出来只会让会话去办已经办过的事。
+// - 每个 Mirasim 会话从「上一轮（含）」开始对（倒数第二轮的 startedAt），至少 RECENT_MS、至多 SPAN_MAX_MS。原来只看最近
+//   RECENT_MS：一轮跑了 95 分钟，开头丢的引导到下一轮开头已过窗口，报不出来（#1725，10-10 05:04「我确定了，可见」）。
+//   再早的他早重发或放弃了，列出来只会让会话去办已经办过的事；丢了之后他原话重发并收到了的也不列（reconcile）。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
 
-/** 最近多久以内的话算数（和 session-start.mjs 列「收到的话」同一个窗口） */
+/** 对账至少看最近多久（和 session-start.mjs 列「收到的话」同一个窗口） */
 export const RECENT_MS = 60 * 60_000;
+/** 对账最多往回看多久：上一轮开得再早也只看这么久 */
+export const SPAN_MAX_MS = 24 * 60 * 60_000;
 /** 「发了」和「收到」时刻差在这以内、开头一样，算同一条 */
 export const MATCH_MS = 15 * 60_000;
 /** 对账时话取多长的开头 */
@@ -70,9 +74,22 @@ function isFounderText(text) {
 }
 
 /**
- * 最近 RECENT_MS 内他在 Mirasim 里发出的话：开一轮的提问和中途的引导都算。
+ * 一个 Mirasim 会话从哪一刻开始对账：上一轮（倒数第二轮）的 startedAt，夹在 [now - SPAN_MAX_MS, now - RECENT_MS] 里；
+ * 不到两轮按 now - RECENT_MS。这一轮在开会话那一刻记没记进 turns.jsonl 都不要紧：没记进就多看一轮，宁多勿漏。
+ * @param {number[]} starts 这个会话各轮的 startedAt
+ * @param {number} now
+ */
+export function windowStart(starts, now) {
+  const sorted = starts.filter((t) => t <= now + 60_000).sort((a, b) => b - a);
+  const prev = sorted[1] ?? now;
+  return Math.min(now - RECENT_MS, Math.max(prev, now - SPAN_MAX_MS));
+}
+
+/**
+ * 他在 Mirasim 里发出的话（开一轮的提问和中途的引导都算），每个会话从它的 windowStart 起。
+ * since 是各会话里最早的起点（没有会话就是 now - RECENT_MS），收到的账要从这再往前 MATCH_MS 读起才配得上。
  * @param {{ home: string, now?: number, env?: Record<string, string | undefined> }} opts
- * @returns {{ absent: true } | { absent: false, entries: Sent[], problems: string[] }}
+ * @returns {{ absent: true } | { absent: false, entries: Sent[], problems: string[], since: number }}
  */
 export function sentByFounder({ home, now = Date.now(), env = process.env }) {
   const base = join(mirasimDir(env, home), 'sessions', 'claude');
@@ -81,11 +98,12 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
   const entries = [];
   /** @type {string[]} */
   const problems = [];
+  let since = now - RECENT_MS;
   let dirs;
   try {
     dirs = readdirSync(base);
   } catch (err) {
-    return { absent: false, entries, problems: [`${base} 列不了（${errCode(err)}）`] };
+    return { absent: false, entries, problems: [`${base} 列不了（${errCode(err)}）`], since };
   }
   for (const d of dirs) {
     const file = join(base, d, 'turns.jsonl');
@@ -106,6 +124,10 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
       continue;
     }
     let bad = 0;
+    /** @type {Sent[]} */
+    const mine = [];
+    /** @type {number[]} */
+    const starts = [];
     for (const row of text.split(/\r?\n/)) {
       if (!row.trim()) continue;
       let turn;
@@ -121,19 +143,23 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
       }
       const sessionId = typeof turn.sessionId === 'string' ? turn.sessionId : null;
       const startedAt = Number(turn.startedAt);
+      // 系统消息开的轮也是一轮：窗口按轮算，不按是不是他的话
+      if (Number.isFinite(startedAt) && startedAt > 0) starts.push(startedAt);
       if (isFounderText(turn.prompt) && Number.isFinite(startedAt) && startedAt > 0)
-        entries.push({ at: startedAt, text: turn.prompt, sessionId, kind: 'prompt' });
+        mine.push({ at: startedAt, text: turn.prompt, sessionId, kind: 'prompt' });
       for (const s of Array.isArray(turn.steers) ? turn.steers : []) {
         const at = Number(s?.at);
         if (isFounderText(s?.text) && Number.isFinite(at) && at > 0)
-          entries.push({ at, text: s.text, sessionId, kind: 'steer' });
+          mine.push({ at, text: s.text, sessionId, kind: 'steer' });
       }
     }
     if (bad > 0) problems.push(`${file} 里有 ${bad} 行认不出（Mirasim 换格式了？）`);
+    const from = windowStart(starts, now);
+    since = Math.min(since, from);
+    for (const e of mine) if (e.at >= from && e.at <= now + 60_000) entries.push(e);
   }
-  const recent = entries.filter((e) => now - e.at <= RECENT_MS && e.at <= now + 60_000);
-  recent.sort((a, b) => a.at - b.at);
-  return { absent: false, entries: recent, problems };
+  entries.sort((a, b) => a.at - b.at);
+  return { absent: false, entries, problems, since };
 }
 
 /**
@@ -175,8 +201,8 @@ export function reconcile(sent, received) {
         kind: s.kind,
         receivedBy: s.hit.sessionId ?? null,
       });
-    // 丢了、但他之后原话重发并收到了：那条已经办了，不再当丢的列
-    else if (!recv.some((r) => r.key === s.key && r.at >= s.at && r.at - s.at <= MATCH_MS))
+    // 丢了、但他之后原话重发并收到了（隔多久都算：窗口能到 24 小时）：那条已经办了，不再当丢的列
+    else if (!recv.some((r) => r.key === s.key && r.at >= s.at))
       lost.push({ at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind });
   }
   return { lost, matched };

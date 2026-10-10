@@ -1775,8 +1775,8 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     received(
       home,
       [
-      { at: '2026-10-10T03:40:01Z', sessionId: 's0', prompt: '更早一轮的话' },
-      { at: '2026-10-10T05:02:01Z', sessionId: 's1', prompt: '把可见范围定一下' },
+        { at: '2026-10-10T03:40:01Z', sessionId: 's0', prompt: '更早一轮的话' },
+        { at: '2026-10-10T05:02:01Z', sessionId: 's1', prompt: '把可见范围定一下' },
         { at: '2026-10-10T06:37:01Z', sessionId: 's1', prompt: '下一轮的话' },
       ],
       '2026-10-10',
@@ -1793,7 +1793,12 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
   it('对账范围：上一轮刚开 10 分钟也至少看 60 分钟；上一轮开在 24 小时以前只看 24 小时；丢了之后过了 15 分钟才原话重发收到的也不再列', () => {
     const home = temp('inbox-bounds');
     mirasim(home, 'm1', [
-      { sessionId: 's1', startedAt: T('2026-10-06T03:00:00Z'), prompt: '开工', steers: [{ text: '四十分钟前丢的', at: T('2026-10-06T03:05:00Z') }] },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-06T03:00:00Z'),
+        prompt: '开工',
+        steers: [{ text: '四十分钟前丢的', at: T('2026-10-06T03:05:00Z') }],
+      },
       { sessionId: 's1', startedAt: T('2026-10-06T03:35:00Z'), prompt: '上一轮' },
       { sessionId: 's1', startedAt: T('2026-10-06T03:44:00Z'), prompt: '这一轮' },
     ]);
@@ -1808,8 +1813,18 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
 
     const old = temp('inbox-cap');
     mirasim(old, 'm1', [
-      { sessionId: 's1', startedAt: T('2026-10-04T03:00:00Z'), prompt: '两天前那一轮', steers: [{ text: '两天前丢的', at: T('2026-10-04T03:01:00Z') }] },
-      { sessionId: 's1', startedAt: T('2026-10-05T05:00:00Z'), prompt: '昨天那一轮', steers: [{ text: '昨天丢的', at: T('2026-10-05T05:01:00Z') }] },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-04T03:00:00Z'),
+        prompt: '两天前那一轮',
+        steers: [{ text: '两天前丢的', at: T('2026-10-04T03:01:00Z') }],
+      },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-05T05:00:00Z'),
+        prompt: '昨天那一轮',
+        steers: [{ text: '昨天丢的', at: T('2026-10-05T05:01:00Z') }],
+      },
       { sessionId: 's1', startedAt: T('2026-10-06T03:44:00Z'), prompt: '这一轮' },
     ]);
     received(old, [{ at: '2026-10-05T05:00:01Z', sessionId: 's1', prompt: '昨天那一轮' }], '2026-10-05');
@@ -1827,7 +1842,9 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
       { at: '2026-10-06T03:30:00Z', sessionId: 's1', prompt: '昨天丢的' },
       { at: '2026-10-06T03:44:01Z', sessionId: 's1', prompt: '这一轮' },
     ]);
-    expect(recent({ home: old, now: NOW, sessionId: 's1' }).some((l) => l.includes('没收到的话'))).toBe(false);
+    expect(recent({ home: old, now: NOW, sessionId: 's1' }).some((l) => l.includes('没收到的话'))).toBe(
+      false,
+    );
   });
 
   it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没读全，不当成「没丢」', () => {

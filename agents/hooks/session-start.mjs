@@ -40,7 +40,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reconcile, sentByFounder } from './founder-inbox.mjs';
+import { MATCH_MS, reconcile, sentByFounder } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
@@ -498,7 +498,8 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
  * 第三种丢法（创始人 2026-10-06「你好像没接收到【选方案a】」）：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
  * Claude Code 从头没收到、prompt-log 里自然也没有。所以再拿 Mirasim 自己记的「发了的账」（founder-inbox.mjs）和这份「收到的账」对一遍，
  * 发了没收到的单独一行、放前面、叫会话先答。这一段在每一轮开头都跑（Mirasim 每轮都 --resume 起进程，SessionStart 每轮都触发），
- * 所以上一轮丢的引导下一轮一开头就补上了。
+ * 所以上一轮丢的引导下一轮一开头就补上了。对账不止看 RECENT_MS：从上一轮开头算起（founder-inbox.mjs 的 windowStart，至多 24 小时），
+ * 一轮跑得再久，开头丢的引导下一轮也报得出来（#1725）；收到的账为此要从那一刻再往前 MATCH_MS 读起，「落盘的话」那行仍只列 RECENT_MS。
  */
 export const RECENT_MS = 60 * 60_000;
 export const RECENT_CHARS = 200;
@@ -509,7 +510,11 @@ const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIF
 export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = null, env = process.env }) {
   // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份：原来这里不认 FLEET_PROMPT_LOG_DIR（全仓审查第 4 路 R4）
   const base = dir ?? logDir(process.env, home);
-  const days = new Set([beijingToday(now), beijingToday(now - RECENT_MS)]);
+  const sent = sentByFounder({ home, now, env });
+  // 收到的账读多早：对账窗口的起点再往前 MATCH_MS（开那一轮的提问可能早几秒到）；没有 Mirasim 就只读 RECENT_MS
+  const from = Math.min(now - RECENT_MS, sent.absent ? now : sent.since - MATCH_MS);
+  const days = new Set([beijingToday(now)]);
+  for (let t = from; t < now; t += 86_400_000) days.add(beijingToday(t));
   /** 收到的账：Claude Code 真收到过的（哪个会话收的都记） */
   const received = [];
   for (const day of days) {
@@ -532,7 +537,7 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
           !isMachineOpening(e.prompt) &&
           !isMachineSession({ env: {}, cwd: e.cwd }) &&
           Number.isFinite(at) &&
-          now - at <= RECENT_MS &&
+          at >= from &&
           at <= now + 60_000
         )
           received.push({
@@ -547,7 +552,6 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
   }
   const lines = [];
   // 发了的账（Mirasim 的会话记录）和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）
-  const sent = sentByFounder({ home, now, env });
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
     const { lost } = reconcile(sent.entries, received);
@@ -558,8 +562,8 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
       );
     }
   }
-  // 别的会话收到的：本会话自己收到的它早见过，不列
-  const others = received.filter((e) => !(sessionId && e.sessionId === sessionId));
+  // 别的会话最近 RECENT_MS 收到的：本会话自己收到的它早见过，不列；更早的只拿来对账
+  const others = received.filter((e) => now - e.at <= RECENT_MS && !(sessionId && e.sessionId === sessionId));
   if (others.length > 0) {
     const shown = packNewestFirst(others);
     lines.push(
