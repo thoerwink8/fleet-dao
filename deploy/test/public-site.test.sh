@@ -332,6 +332,7 @@ error_log $dir/error.log;
 events {}
 http {
     access_log off;
+    types { application/javascript js; }
     client_body_temp_path $dir/body;
     proxy_temp_path $dir/proxy;
     fastcgi_temp_path $dir/fastcgi;
@@ -616,6 +617,7 @@ error_log $NG/error.log;
 events {}
 http {
     access_log off;
+    types { application/javascript js; }
     client_body_temp_path $NG/body;
     proxy_temp_path $NG/proxy;
     fastcgi_temp_path $NG/fastcgi;
@@ -780,6 +782,7 @@ error_log $dir/error.log;
 events {}
 http {
     access_log off;
+    types { application/javascript js; }
     client_body_temp_path $dir/body;
     proxy_temp_path $dir/proxy;
     fastcgi_temp_path $dir/fastcgi;
