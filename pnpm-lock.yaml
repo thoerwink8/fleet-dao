@@ -151,6 +151,9 @@ importers:
       '@fleet-dao/github':
         specifier: workspace:*
         version: link:../github
+      '@fleet-dao/hygiene':
+        specifier: workspace:*
+        version: link:../hygiene
       '@fleet-dao/jev':
         specifier: workspace:*
         version: link:../jev

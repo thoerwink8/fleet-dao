@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RateLimitReading, RunFacts, SessionUser } from '@fleet-dao/adapters';
-import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
+import type { Db, RouteLaunchFacts, TranscriptRow } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
@@ -97,6 +97,8 @@ function harness(
     onCarpoolRejection?: (rejection: CarpoolRejection) => void;
     /** 给了就采 scope 的内存峰值（#948）；readText 假的，不碰真 cgroup。 */
     memoryPeak?: MemoryPeakDeps;
+    /** 会话过程记录（#1640）写到哪；不给就不记。 */
+    transcriptWrite?: (runId: string, rows: TranscriptRow[]) => Promise<void>;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -142,6 +144,7 @@ function harness(
     resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     ...(opts.db ? { db: opts.db } : {}),
     ...(opts.memoryPeak ? { memoryPeak: opts.memoryPeak } : {}),
+    ...(opts.transcriptWrite ? { transcriptWrite: opts.transcriptWrite, transcriptFlushMs: 5 } : {}),
     ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
@@ -667,5 +670,71 @@ describe('hostSegmentSpawner · 拼车被拒当场交给切号（#194）', () =>
     const r = await h.run();
     expect(r.outcome).toBe('failed');
     expect(h.logs.join(' ')).toContain('拼车被拒的证据没交给切号');
+  });
+});
+
+describe('hostSegmentSpawner · 会话过程记录（#1640）', () => {
+  const entry = (kind: 'assistant' | 'tool_call' | 'tool_result', text: string) => ({
+    at: '2026-10-10T00:00:00.000Z',
+    kind,
+    text,
+  });
+
+  it('提示词记第一条，插头交来的接着记，收场前全写完；编号从 0 连续', async () => {
+    const written: TranscriptRow[] = [];
+    const h = harness({
+      transcriptWrite: async (_id, rows) => void written.push(...rows),
+      driverRun: async (_spec, hooks) => {
+        hooks.onTranscript?.(entry('assistant', '我来改'), { seq: 0, replay: false });
+        hooks.onTranscript?.(entry('tool_call', 'ls'), { seq: 1, replay: false });
+        return report();
+      },
+    });
+    const r = await h.run({ prompt: '干这件事' });
+    expect(r.outcome).toBe('done');
+    // 结局交回来的时候，过程已经全在库里（没有靠定时器碰巧写完）
+    expect(written.map((w) => [w.seq, w.kind, w.text])).toEqual([
+      [0, 'prompt', '干这件事'],
+      [1, 'assistant', '我来改'],
+      [2, 'tool_call', 'ls'],
+    ]);
+  });
+
+  it('【故意造出的失败】写库抛错：只记日志，这一段的结局、回答、用量照旧', async () => {
+    const h = harness({
+      transcriptWrite: async () => {
+        throw new Error('connection terminated');
+      },
+      driverRun: async (_spec, hooks) => {
+        hooks.onTranscript?.(entry('assistant', '我来改'), { seq: 0, replay: false });
+        return report();
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('已提交，改了 tier.ts');
+    expect(h.logs.join('\n')).toContain('会话过程记录');
+    expect(h.recorded[0]).toMatchObject({ outcome: 'done' });
+  });
+
+  it('驱动抛错：结局照旧是失败，已攒的过程也写出去（出问题时最要看过程）', async () => {
+    const written: TranscriptRow[] = [];
+    const h = harness({
+      transcriptWrite: async (_id, rows) => void written.push(...rows),
+      driverRun: async (_spec, hooks) => {
+        hooks.onTranscript?.(entry('assistant', '开了个头'), { seq: 0, replay: false });
+        throw new Error('驱动炸了');
+      },
+    });
+    await expect(h.run()).rejects.toThrow();
+    expect(written.map((w) => w.kind)).toEqual(['prompt', 'assistant']);
+  });
+
+  it('不给写法也没有 db：不记，不影响任何事', async () => {
+    const h = harness();
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    expect(h.calls[0]?.hooks.onTranscript).toBeUndefined();
   });
 });

@@ -77,6 +77,7 @@ import type {
   RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
+  RunTranscriptResponse,
   SetChannelEnabledRequest,
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
@@ -134,6 +135,10 @@ export type Activity = z.infer<typeof ActivitySchema>;
 export type NowItem = z.infer<typeof NowItemSchema>;
 
 export type TaskDetail = z.infer<typeof TaskDetailResponse>;
+/** 一段会话的过程记录（#1640）：一页条目、下次从哪读、读完没有、有没有记录。 */
+export type RunTranscript = z.infer<typeof RunTranscriptResponse>;
+export type TranscriptEntry = RunTranscript['entries'][number];
+export type RunTranscriptQuery = { after?: number | undefined; limit?: number | undefined };
 export type Run = z.infer<typeof RunSchema>;
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 

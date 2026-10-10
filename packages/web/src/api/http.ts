@@ -242,6 +242,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     node: (nodeId) => send('GET', apiUrl(R.node.path, { nodeId }), R.node.response),
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),
     task: (taskId) => send('GET', apiUrl(R.task.path, { taskId }), R.task.response),
+    runTranscript: (taskId, runId, query) =>
+      send(
+        'GET',
+        apiUrl(R.runTranscript.path, { taskId, runId }, { after: query?.after, limit: query?.limit }),
+        R.runTranscript.response,
+      ),
     async taskAction(taskId, body) {
       await send('POST', apiUrl(R.taskAction.path, { taskId }), R.taskAction.response, {
         body: TaskActionRequest.parse(body),
