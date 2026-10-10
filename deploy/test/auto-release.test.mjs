@@ -717,6 +717,10 @@ const AUTO_TIER_FILES = [
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
   'deploy/france/fleet-mirasim-session.service',
   'deploy/lib/mirasim.sh',
+  // 它的健康检查（#1676）：setup_mirasim_session 顺带装，同属自动档
+  'deploy/france/fleet-mirasim-liveness.service',
+  'deploy/france/fleet-mirasim-liveness.timer',
+  'deploy/lib/mirasim-liveness.sh',
 ];
 const FULL_RUN_ONLY_FILES = [
   // source 进来的库
