@@ -93,6 +93,8 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
     },
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
+      isParked: async () => false,
+      resolveParkAlerts: async () => 0,
       issueState: async () => 'open',
       abandon: async () => 'gone',
     },
