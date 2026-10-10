@@ -83,6 +83,7 @@ export function pgLedger(db: Db): Ledger {
     openedAt: r.openedAt,
     mergedAt: r.mergedAt,
     mergeSha: r.mergeSha,
+    title: r.title,
     links: { issues: r.issueRefs, alerts: r.alertRefs },
   });
   return {
@@ -114,6 +115,7 @@ export function pgLedger(db: Db): Ledger {
           openedAt: row.openedAt ?? null,
           mergedAt: row.mergedAt ?? null,
           mergeSha: row.mergeSha ?? null,
+          title: row.title ?? null,
           issueRefs: row.links?.issues ?? [],
           alertRefs: row.links?.alerts ?? [],
         })
@@ -132,6 +134,7 @@ export function pgLedger(db: Db): Ledger {
             ...(row.openedAt === undefined ? {} : { openedAt: sql`excluded.opened_at` }),
             ...(row.mergedAt === undefined ? {} : { mergedAt: sql`excluded.merged_at` }),
             ...(row.mergeSha === undefined ? {} : { mergeSha: sql`excluded.merge_sha` }),
+            ...(row.title === undefined ? {} : { title: sql`excluded.title` }),
             ...(row.links === undefined
               ? {}
               : { issueRefs: sql`excluded.issue_refs`, alertRefs: sql`excluded.alert_refs` }),

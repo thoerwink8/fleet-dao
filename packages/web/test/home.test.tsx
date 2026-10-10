@@ -189,6 +189,20 @@ describe('home（/）：四种状态', () => {
     expect(done?.className).toContain('xl:grid-cols-1');
   });
 
+  test('做完的：有标题显示「PR #号」加标题；标题就是「PR #号」时只显示一次（#1744）', () => {
+    const first = SAMPLE.done[0];
+    if (!first) throw new Error('样例没有做完的');
+    renderHome({
+      status: 'data',
+      data: { ...SAMPLE, done: [first, { ...first, prNumber: 1741, title: 'PR #1741' }] },
+    });
+    const cards = document.querySelectorAll('[data-done-card]');
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.textContent).toContain('PR #421');
+    expect(cards[0]?.textContent).toContain('把路由配置拆成两层');
+    expect(cards[1]?.textContent?.match(/PR #1741/g)).toHaveLength(1);
+  });
+
   test('data：三块各画出有数据的样子', async () => {
     renderHome({ status: 'data', data: SAMPLE });
     // 「在跑的」画布按需加载、排完版才有卡片
