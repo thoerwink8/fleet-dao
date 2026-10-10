@@ -4,7 +4,7 @@ import { ChevronRight, EllipsisVertical, MessageCircleQuestion, TriangleAlert } 
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { formatAgo } from '../../../lib/format';
-import { useNow } from '../../../lib/hooks';
+import { useSlowNow } from '../../../lib/hooks';
 import { toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { useRemoteView } from '../../node-notice';
@@ -154,7 +154,7 @@ function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly
  */
 function TicketRow({ item }: { item: HomeRunning }) {
   const [open, setOpen] = useState(false);
-  const now = useNow();
+  const now = useSlowNow();
   const { tone } = toneOf(item);
   const stamp = item.lastEvent?.at ?? item.stageSince ?? item.taskSince;
   return (

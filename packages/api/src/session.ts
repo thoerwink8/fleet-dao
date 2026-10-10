@@ -114,8 +114,13 @@ export function reissueSession(
   writeSessionCookie(c, config, { ...claims, v: version }, now);
 }
 
+/** 给会话声明签名，得到会话 Cookie 的值。浏览器登录和命令行发会话（fleet-api session-mint）共用这一处。 */
+export function signSessionClaims(config: Config, claims: SessionClaims): string {
+  return signPayload(config.sessionSecret, SESSION_PURPOSE, claims);
+}
+
 function writeSessionCookie(c: Context, config: Config, claims: SessionClaims, now: Date): void {
-  setCookie(c, cookieNames(config).session, signPayload(config.sessionSecret, SESSION_PURPOSE, claims), {
+  setCookie(c, cookieNames(config).session, signSessionClaims(config, claims), {
     httpOnly: true,
     secure: config.cookieSecure,
     sameSite: 'Lax',

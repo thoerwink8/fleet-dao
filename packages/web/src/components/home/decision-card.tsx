@@ -4,7 +4,7 @@
 import { ArrowRight, ScrollText, Send } from 'lucide-react';
 import { Link } from 'react-router';
 import { formatAgo } from '../../lib/format';
-import { useNow } from '../../lib/hooks';
+import { useSlowNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
 import { useRemoteView } from '../node-notice';
 import { Button } from '../ui/button';
@@ -25,7 +25,7 @@ export function DecisionCard({
   /** 放在窄容器（右侧抽屉）里：不随屏宽改成左右排，一直上文下按钮。 */
   stacked?: boolean;
 }) {
-  const now = useNow();
+  const now = useSlowNow();
   const remote = useRemoteView();
   const meta = KIND_META[decision.kind];
   const Icon = meta.icon;

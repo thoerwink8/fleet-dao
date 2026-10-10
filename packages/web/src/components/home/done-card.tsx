@@ -2,12 +2,12 @@
 
 import { GitPullRequestArrow } from 'lucide-react';
 import { formatAgo } from '../../lib/format';
-import { useNow } from '../../lib/hooks';
+import { useSlowNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
 import type { HomeDone } from './types';
 
 export function DoneCard({ item, className }: { item: HomeDone; className?: string }) {
-  const now = useNow();
+  const now = useSlowNow();
   const prLabel = `PR #${item.prNumber}`;
   const body = (
     <>
