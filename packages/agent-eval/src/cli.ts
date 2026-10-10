@@ -1,4 +1,5 @@
-// 命令行：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--repeat N] [--dry-run] [--out <目录>]
+// 命令行：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--effort <档>] [--repeat N] [--dry-run] [--out <目录>]
+// --effort 盖过定义里的 effort（low、medium、high、xhigh、max），换档之前先试 effort 用；不给就照定义。
 // 退出码：全跑成了是 0（不管过不过）；有没跑成的是 2；参数不对、没选出题是 1。一次只跑一个会话，不并行。
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -8,6 +9,8 @@ import {
   buildSessionArgs,
   claudeCommand,
   displayArgs,
+  EFFORT_LEVELS,
+  type EffortLevel,
   type Launcher,
   MODEL_IDS,
   MODEL_KEYS,
@@ -20,12 +23,14 @@ import type { EvalCase } from './types.ts';
 import { REPO_ROOT, SKIPPED_SCENARIOS } from './types.ts';
 
 export const USAGE =
-  '用法：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--repeat N] [--dry-run] [--out <目录>]';
+  '用法：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--effort low|medium|high|xhigh|max] [--repeat N] [--dry-run] [--out <目录>]';
 
 export interface CliArgs {
   caseName: string | undefined;
   scenario: string | undefined;
   models: ModelKey[];
+  /** 盖过定义里的 effort；不给是 undefined（照定义）。 */
+  effort: EffortLevel | undefined;
   dryRun: boolean;
   repeat: number;
   out: string | undefined;
@@ -44,6 +49,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     caseName: undefined,
     scenario: undefined,
     models: [...MODEL_KEYS],
+    effort: undefined,
     dryRun: false,
     repeat: 1,
     out: undefined,
@@ -63,6 +69,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       const v = value();
       if (!/^[1-9][0-9]*$/.test(v)) throw new UsageError(`--repeat 要正整数：${v}`);
       a.repeat = Number(v);
+    } else if (flag === '--effort') {
+      const v = value();
+      if (!(EFFORT_LEVELS as readonly string[]).includes(v))
+        throw new UsageError(`--effort 只认 ${EFFORT_LEVELS.join('、')}：${v}`);
+      a.effort = v as EffortLevel;
     } else if (flag === '--dry-run') a.dryRun = true;
     else if (flag === '--help' || flag === '-h') a.help = true;
     else if (flag === '--model') {
@@ -104,6 +115,7 @@ export function dryRunLines(
   defs: ReadonlyMap<string, AgentDefinition>,
   command: string,
   repeat = 1,
+  effort?: EffortLevel,
 ): string[] {
   const lines = ['子代理能力探查（--dry-run：只列，不起会话）', `命令：${command}`];
   const total = cases.length * models.length;
@@ -120,7 +132,7 @@ export function dryRunLines(
       );
       lines.push(
         def
-          ? `  参数：${displayArgs(buildSessionArgs(def, MODEL_IDS[m])).join(' ')}`
+          ? `  参数：${displayArgs(buildSessionArgs(def, MODEL_IDS[m], effort)).join(' ')}`
           : `  参数：没找到定义 ${c.agent}`,
       );
       lines.push(`  stdin：提示词 ${c.prompt.length} 字；限时 10 分钟`);
@@ -183,7 +195,7 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
   }
   const command = claudeCommand();
   if (args.dryRun) {
-    for (const l of dryRunLines(cases, args.models, defs, command, args.repeat)) log(l);
+    for (const l of dryRunLines(cases, args.models, defs, command, args.repeat, args.effort)) log(l);
     return 0;
   }
 
@@ -195,11 +207,15 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
   const write = () => {
     writeFileSync(
       join(outDir, 'results.json'),
-      `${JSON.stringify({ startedAt: startedAt.toISOString(), models: args.models, skipped: SKIPPED_SCENARIOS, results }, null, 2)}\n`,
+      `${JSON.stringify({ startedAt: startedAt.toISOString(), models: args.models, effort: args.effort ?? null, skipped: SKIPPED_SCENARIOS, results }, null, 2)}\n`,
     );
     writeFileSync(
       join(outDir, 'report.md'),
-      renderReport(results, { startedAt: startedAt.toISOString(), models: args.models }),
+      renderReport(results, {
+        startedAt: startedAt.toISOString(),
+        models: args.models,
+        effort: args.effort ?? null,
+      }),
     );
   };
   const total = cases.length * args.models.length * args.repeat;
@@ -215,6 +231,7 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
           command,
           outDir,
           attempt,
+          ...(args.effort === undefined ? {} : { effort: args.effort }),
         });
         results.push(r);
         log(

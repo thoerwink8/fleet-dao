@@ -37,6 +37,11 @@ describe('parseArgs', () => {
       dryRun: true,
     });
   });
+  it('--effort 只认 claude 的五档，不给是 undefined（照定义）', () => {
+    expect(parseArgs([]).effort).toBeUndefined();
+    expect(parseArgs(['--effort', 'high']).effort).toBe('high');
+    expect(() => parseArgs(['--effort', 'turbo'])).toThrow(/只认/);
+  });
   it('不认识的参数、缺值、不认识的模型：UsageError', () => {
     expect(() => parseArgs(['--nope'])).toThrow(UsageError);
     expect(() => parseArgs(['--case'])).toThrow(/后面要跟值/);
@@ -74,7 +79,7 @@ describe('--dry-run', () => {
       '[1/3] architect/engine-concurrency-limit · fleet-architect · claude-haiku-5-5 · 加一次裁判会话',
     );
     expect(text).toContain(
-      '--model claude-opus-5-5 --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --permission-mode dontAsk --allowedTools Read,Grep,Glob,Write,Bash,WebSearch,WebFetch --append-system-prompt <定义正文',
+      '--model claude-opus-5-5 --effort high --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --permission-mode dontAsk --allowedTools Read,Grep,Glob,Write,Bash,WebSearch,WebFetch --append-system-prompt <定义正文',
     );
     expect(text).toContain('合计：1 道题 × 3 个模型 = 3 次被测会话，加 3 次裁判会话，共 6 次');
     expect(text).toContain('不做：ui-builder');
@@ -258,6 +263,7 @@ describe('renderReport', () => {
       agent: 'x',
       model: 'haiku',
       modelId: 'claude-haiku-5-5',
+      effort: 'medium',
       status: 'pass',
       pass: true,
       reason: '好',
@@ -279,6 +285,11 @@ describe('renderReport', () => {
       judgeStreamFiles: [],
     };
     const md = renderReport([r], { startedAt: 't', models: ['haiku'] });
+    expect(md).toContain('effort 照各定义');
+    expect(md).toContain('模型：claude-haiku-5-5；effort：medium');
+    expect(renderReport([r], { startedAt: 't', models: ['haiku'], effort: 'high' })).toContain(
+      'effort 一律 high（命令行盖过定义）',
+    );
     expect(md).toContain('````text\n```ts\nx\n```\n````');
     expect(md).toContain('产出（已截断）');
     expect(md).toContain('| a | 过 1 / 跑 1 遍；均 1.5 秒；均 1.5k token；全过 | — | — |');
@@ -292,6 +303,7 @@ describe('renderReport', () => {
       agent: 'x',
       model: 'haiku',
       modelId: 'claude-haiku-5-5',
+      effort: null,
       durationMs: 1000,
       inputTokens: 1,
       outputTokens: 1,
@@ -336,6 +348,7 @@ describe('renderReport', () => {
       agent: 'x',
       model: 'haiku',
       modelId: 'claude-haiku-5-5',
+      effort: null,
       status: pass ? 'pass' : 'fail',
       pass,
       reason: pass ? '好' : '差',

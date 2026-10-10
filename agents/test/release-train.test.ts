@@ -23,6 +23,9 @@ type SessionsResult =
   | { ok: false; kind: string; why: string };
 interface TrainIo {
   home: string;
+  pid?: number;
+  host?: string;
+  isAlive?: (pid: number) => boolean;
   env: Record<string, string | undefined>;
   now: () => Date;
   sleep: (ms: number) => Promise<void>;
@@ -61,6 +64,11 @@ interface Train {
     missing: number[];
   };
   USAGE: string;
+  driverVerdict(
+    s: Record<string, unknown>,
+    ctx: { now: Date; isAlive?: (pid: number) => boolean; host?: string; limits?: Record<string, number> },
+  ): { dead: boolean; unknown?: boolean; why: string };
+  trainAlertNote(ctx: { home: string; now: Date; isAlive?: (pid: number) => boolean; host?: string }): string;
 }
 interface WorkerLib {
   runWorker(argv: string[], io: Record<string, unknown>): Promise<number>;
@@ -1202,6 +1210,311 @@ describe('status', () => {
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(2);
     expect(readFileSync(join(dir, 'release-train.json'), 'utf8')).toBe('{坏的');
     expect(w.sshCalls).toEqual([]);
+  });
+});
+
+describe('驱动死了：认得出、接着走（#1674）', () => {
+  const MIN = 60_000;
+  const LIMITS = { releaseMs: 15 * MIN, deadMarginMs: 5 * MIN };
+  const withDriver = (io: TrainIo, extra: Partial<TrainIo> = {}): TrainIo => ({
+    ...io,
+    pid: 4242,
+    host: 'box',
+    isAlive: () => true,
+    ...extra,
+  });
+  const stateFile = (home: string) => join(home, '.fleet-dao', 'release-train.json');
+  const driverOf = (home: string) =>
+    (
+      JSON.parse(readFileSync(stateFile(home), 'utf8')) as {
+        driver?: { pid: number; host: string; heartbeatAt: string };
+      }
+    ).driver;
+
+  /** 一趟走到第 4 步、驱动就没了留下的现场：状态 running、总开关关着、法国发布历史由调用方定。 */
+  function deadAt4(
+    home: string,
+    w: { t: number; engineOn: boolean },
+    beatMinutesAgo: number,
+    over: Record<string, unknown> = {},
+  ) {
+    const beat = new Date(w.t - beatMinutesAgo * MIN).toISOString();
+    mkdirSync(join(home, '.fleet-dao'), { recursive: true });
+    writeFileSync(
+      stateFile(home),
+      JSON.stringify({
+        schema: 1,
+        status: 'running',
+        phase: 4,
+        startedAt: new Date(w.t - 40 * MIN).toISOString(),
+        updatedAt: beat,
+        target: { kind: 'sha', value: SHA },
+        founderOk: FOUNDER,
+        restore: false,
+        before: {
+          master: true,
+          repos: [
+            { repo: 'o/a', on: true },
+            { repo: 'o/b', on: false },
+          ],
+          recordedAt: beat,
+        },
+        baseline: { bad: 0, unread: 0, note: 2 },
+        marker: true,
+        laggards: [],
+        release: { started: true },
+        driver: { pid: 4242, host: 'box', heartbeatAt: beat },
+        ...over,
+      }),
+    );
+    w.engineOn = false;
+  }
+  const startArgs = ['start', '--sha', SHA, '--founder-ok', FOUNDER];
+
+  it('每次落盘都写 pid、机器名、心跳时刻；等收尾的轮询里心跳在走', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    franceBusyAfterPreflight(w);
+    expect(await train.runTrain(startArgs, withDriver(io(home)))).toBe(3);
+    const d = driverOf(home);
+    expect(d).toMatchObject({ pid: 4242, host: 'box' });
+    // 等收尾每圈都刷新：最后一次心跳不早于等了 2 圈之后的时刻
+    expect(Date.parse(d?.heartbeatAt ?? '')).toBeGreaterThanOrEqual(Date.parse('2026-10-05T14:00:02Z'));
+  });
+
+  it('driverVerdict：心跳在上限加余量内＝活；超过＝死；pid 不在＝死（换了机器的 pid 不算）；时刻认不出不判死', () => {
+    const now = new Date('2026-10-05T15:00:00Z');
+    const at = (min: number) => new Date(now.getTime() - min * MIN).toISOString();
+    const s = (beat: string, phase = 4) => ({
+      phase,
+      updatedAt: beat,
+      driver: { pid: 9, host: 'box', heartbeatAt: beat },
+    });
+    const ctx = { now, limits: LIMITS, host: 'box' };
+    expect(train.driverVerdict(s(at(19)), ctx).dead).toBe(false); // 第 4 步上限 15 + 余量 5 = 20
+    const old = train.driverVerdict(s(at(21)), ctx);
+    expect(old.dead).toBe(true);
+    expect(old.why).toContain('心跳');
+    expect(train.driverVerdict(s(at(1)), { ...ctx, isAlive: () => false })).toMatchObject({ dead: true });
+    expect(train.driverVerdict(s(at(1)), { ...ctx, isAlive: () => true }).dead).toBe(false);
+    // 记的是别的机器的 pid：这里查不了，只看心跳
+    expect(train.driverVerdict(s(at(1)), { ...ctx, host: 'other', isAlive: () => false }).dead).toBe(false);
+    // 第 6 步上限只有 5 分钟：同样 21 分钟前的心跳，第 4 步死了，第 6 步更死；第 3 步上限 20 分钟，21 分钟没超过 25
+    expect(train.driverVerdict(s(at(21), 3), ctx).dead).toBe(false);
+    // 老状态（没有 driver 字段）按 updatedAt 判
+    expect(train.driverVerdict({ phase: 4, updatedAt: at(30) }, ctx).dead).toBe(true);
+    // 【故意造出的失败】时刻读不出：既不是死也不是活，明说判不了
+    expect(train.driverVerdict({ phase: 4, updatedAt: '乱写的' }, ctx)).toMatchObject({
+      dead: false,
+      unknown: true,
+    });
+  });
+
+  it('status：驱动没了就写「驱动没了，停在第 4 步」并给出接着走的命令；活着的照旧写在走', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    deadAt4(home, w, 30);
+    expect(await train.runTrain(['status'], withDriver(io(home, LIMITS)))).toBe(0);
+    const out = text(w.out);
+    expect(out).toContain('驱动没了，停在第 4 步「发版」');
+    expect(out).toContain(`node release-train.mjs start --sha ${SHA.slice(0, 12)}`);
+    expect(out).toContain('--founder-ok');
+
+    const home2 = freshHome();
+    const world2 = makeWorld();
+    deadAt4(home2, world2.w, 2);
+    expect(await train.runTrain(['status'], withDriver(world2.io(home2, LIMITS)))).toBe(0);
+    expect(text(world2.w.out)).toContain('在走');
+    expect(text(world2.w.out)).toContain('驱动还活着');
+    expect(text(world2.w.out)).not.toContain('驱动没了');
+  });
+
+  it('死在第 4 步、法国已发成：start 不重发，从第 5 步起走到恢复，总开关和仓开关开回', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.history += `\n2026-10-05T13:50:00Z ${SHA} release`;
+    deadAt4(home, w, 30);
+    const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS), { pid: 5555 }));
+    expect(code).toBe(0);
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+    expect(text(w.out)).toContain('发版发成了，从第 5 步');
+    expect(text(w.out)).not.toContain('第 4 步「发版」——');
+    expect(w.engineOn).toBe(true);
+    expect(w.sshCalls.some((c) => c.includes(' dispatch o/a on'))).toBe(true);
+    expect(w.sshCalls.some((c) => c.includes(' dispatch o/b on'))).toBe(false);
+    expect(stateOf(home).status).toBe('done');
+    expect(driverOf(home)?.pid).toBe(5555); // 换成新驱动
+    expect(existsSync(markerFile(home))).toBe(false);
+  });
+
+  it('死在第 4 步、法国没发成：从第 4 步重发（发一次），再走完恢复', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld(); // 历史末行还是旧提交
+    deadAt4(home, w, 30);
+    const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS), { pid: 5555 }));
+    expect(code).toBe(0);
+    expect(releaseCalls(w.sshCalls).length).toBe(1);
+    expect(text(w.out)).toContain('目标没上');
+    expect(text(w.out)).toContain('从第 4 步「发版」重发');
+    expect(w.engineOn).toBe(true);
+    expect(stateOf(home).status).toBe('done');
+  });
+
+  it('死在第 4 步、末行是目标但事件是 unhealthy：当没发成，重发', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.history += `\n2026-10-05T13:50:00Z ${SHA} unhealthy`;
+    deadAt4(home, w, 30);
+    await train.runTrain(startArgs, withDriver(io(home, LIMITS)));
+    expect(releaseCalls(w.sshCalls).length).toBe(1);
+    expect(text(w.out)).toContain('事件是 unhealthy');
+  });
+
+  it('pid 不在：心跳再新也算死，直接接着走', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.history += `\n2026-10-05T13:50:00Z ${SHA} release`;
+    deadAt4(home, w, 1);
+    const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS), { isAlive: () => false }));
+    expect(code).toBe(0);
+    expect(text(w.out)).toContain('pid 4242）不在了');
+  });
+
+  it('【故意造出的失败】驱动活着时 start 照旧拒起：退出码 1，法国什么都没碰', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    deadAt4(home, w, 2);
+    const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS)));
+    expect(code).toBe(1);
+    expect(text(w.err)).toContain('有一趟正在走');
+    expect(text(w.err)).toContain('驱动还活着');
+    expect(w.sshCalls).toEqual([]);
+    expect(stateOf(home).status).toBe('running');
+  });
+
+  it('【故意造出的失败】驱动死了但换了目标：拒，不接别人的现场', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    deadAt4(home, w, 30);
+    const code = await train.runTrain(
+      ['start', '--sha', OLD, '--founder-ok', FOUNDER],
+      withDriver(io(home, LIMITS)),
+    );
+    expect(code).toBe(1);
+    expect(text(w.err)).toContain('驱动没了');
+    expect(w.sshCalls).toEqual([]);
+  });
+
+  it('【故意造出的失败】死在第 4 步但法国发布锁被占着：不接着走、不重发', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.lockBusy = true;
+    deadAt4(home, w, 30);
+    const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS)));
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('发布还在跑');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+    expect(stateOf(home).status).toBe('running');
+  });
+
+  it('【故意造出的失败】死在第 4 步但读不到法国发布历史：不猜，退出码 2', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    deadAt4(home, w, 30);
+    const base = withDriver(io(home, LIMITS));
+    const code = await train.runTrain(startArgs, {
+      ...base,
+      ssh: (c) => (c.startsWith('tail -n 1') ? { status: 255, stdout: '', stderr: '连不上' } : base.ssh(c)),
+    });
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('不敢猜');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+  });
+
+  it('第 4 步发版 ssh 期间定时刷新心跳：外壳每 tickMs 回调 onTick，状态里的心跳跟着走', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = withDriver(io(home));
+    const beats: string[] = [];
+    let sawTick: { tickMs: unknown; hasTick: boolean } | undefined;
+    const code = await train.runTrain(startArgs, {
+      ...base,
+      ssh: (c, opts) => {
+        const r = base.ssh(c);
+        if (!c.includes('fleet-release-boot ')) return r;
+        const o = opts as { tickMs?: number; onTick?: () => void } | undefined;
+        sawTick = { tickMs: o?.tickMs, hasTick: typeof o?.onTick === 'function' };
+        for (let i = 0; i < 3; i++) {
+          w.t += 60_000; // 假的 ssh 里过了 3 分钟，外壳每分钟回调一次
+          o?.onTick?.();
+          beats.push(driverOf(home)?.heartbeatAt ?? '');
+        }
+        return r;
+      },
+    });
+    expect(code).toBe(0);
+    expect(sawTick).toEqual({ tickMs: 1000, hasTick: true });
+    expect(new Set(beats).size).toBe(3);
+    expect(Date.parse(beats[2] ?? '')).toBeGreaterThan(Date.parse(beats[0] ?? ''));
+  });
+
+  it('status 给出的接着走命令（提交号只写前 12 位）原样拿去 start：认得是同一个目标，接着走、不被拒', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.history += `\n2026-10-05T13:50:00Z ${SHA} release`;
+    deadAt4(home, w, 30);
+    expect(await train.runTrain(['status'], withDriver(io(home, LIMITS)))).toBe(0);
+    const line = text(w.out)
+      .split('\n')
+      .find((l) => l.includes('node release-train.mjs start --sha'));
+    const m = /start --sha (\S+) --founder-ok "([^"]*)"/.exec(line ?? '');
+    expect(m).not.toBeNull();
+    expect(m?.[1]).toHaveLength(12);
+    const code = await train.runTrain(['start', '--sha', m?.[1] ?? '', '--founder-ok', m?.[2] ?? ''], {
+      ...withDriver(io(home, LIMITS), { pid: 5555 }),
+    });
+    expect(code).toBe(0);
+    expect(text(w.out)).toContain('发版发成了，从第 5 步');
+    expect(stateOf(home).status).toBe('done');
+    expect(
+      (JSON.parse(readFileSync(stateFile(home), 'utf8')) as { target: { value: string } }).target.value,
+    ).toBe(SHA); // 整串不被短的盖掉
+    expect(w.engineOn).toBe(true);
+  });
+
+  it('接着走（卡住、没成）也认前 12 位；换成别的提交仍拒', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    deadAt4(home, w, 2, { status: 'blocked' });
+    const code = await train.runTrain(
+      ['start', '--sha', OLD.slice(0, 12), '--founder-ok', FOUNDER],
+      withDriver(io(home, LIMITS)),
+    );
+    expect(code).toBe(1);
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+    const ok2 = await train.runTrain(
+      ['start', '--sha', SHA.slice(0, 12), '--founder-ok', FOUNDER],
+      withDriver(io(home, LIMITS)),
+    );
+    expect(ok2).toBe(0);
+    expect(text(w.out)).toContain('接着上一趟走');
+  });
+
+  it('trainAlertNote：驱动死了写明「死在第 N 步，没人恢复」；没有状态、卡住、读不了也各写各的', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const ctx = { home, now: new Date(w.t), host: 'box', isAlive: () => true };
+    expect(train.trainAlertNote(ctx)).toContain('没有发版车在走');
+    deadAt4(home, w, 30);
+    expect(train.trainAlertNote(ctx)).toContain('发版车驱动死在第 4 步「发版」，没人恢复');
+    deadAt4(home, w, 2);
+    expect(train.trainAlertNote(ctx)).toContain('发版车在走');
+    expect(train.trainAlertNote(ctx)).not.toContain('死在');
+    deadAt4(home, w, 2, { status: 'blocked' });
+    expect(train.trainAlertNote(ctx)).toContain('卡住了');
+    writeFileSync(stateFile(home), '{坏的');
+    expect(train.trainAlertNote(ctx)).toContain('读不到');
+    void io;
   });
 });
 
