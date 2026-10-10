@@ -69,5 +69,19 @@ describe('此刻「在做什么」列', () => {
     // 面板本体：w-lg（container-lg = 32rem）给四列留宽，max-w-full 窄画布不溢出；勿用任意值 w-[32rem]（lint-arbitrary）
     const panelClass = nowPanel.match(/data-board-now[\s\S]*?className="([^"]*)"/)?.[1] ?? '';
     expect(panelClass.split(/\s+/)).toEqual(expect.arrayContaining(['w-lg', 'max-w-full']));
+    // 四列定宽合计 30.5rem < 面板 32rem；1366/1920 画布远大于面板，max-w-full 再兜底，不会撑出画布
+    const remOf = (attr: string) => {
+      const m = attr.match(/\bw-(\d+)\b/);
+      expect(m, `col 缺 w-*：${attr}`).toBeTruthy();
+      return Number(m?.[1]) / 4; // Tailwind spacing：数字 ÷ 4 = rem
+    };
+    const colRems = cols.map(remOf);
+    expect(colRems).toEqual([6, 3.5, 12, 9]);
+    expect(colRems.reduce((a, b) => a + b, 0)).toBeLessThan(32);
+    // 表头四列与 colgroup 同宽类，对齐不漂
+    expect(nowPanel).toMatch(/<th[^>]*\bw-24\b[^>]*>\s*谁在做/);
+    expect(nowPanel).toMatch(/<th[^>]*\bw-14\b[^>]*>\s*单/);
+    expect(nowPanel).toMatch(/<th[^>]*\bw-48\b[^>]*>\s*在做什么/);
+    expect(nowPanel).toMatch(/<th[^>]*\bw-36\b[^>]*>\s*分钟/);
   });
 });
