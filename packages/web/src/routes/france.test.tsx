@@ -286,6 +286,76 @@ describe('法国页：一台不画对照列，两台并排', () => {
   });
 });
 
+describe('失联与在用版本小标题', () => {
+  test('失联环境整块置灰且不显示大号在跑', async () => {
+    const inner = createMockApi({ live: false });
+    const t = Date.now();
+    const ago = 4 * 24 * 60 * 60_000 + 6 * 60 * 60_000;
+    const snapFacts = envData({
+      engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
+      health: {
+        ok: true,
+        value: { ok: false, total: 9, failing: ['routes', 'deploy_lag'], notWired: [] },
+      },
+    }).facts;
+    const api = {
+      ...inner,
+      env: () => Promise.resolve(envData()),
+      nodes: async () => ({
+        ...(await inner.nodes()),
+        nodes: [
+          {
+            id: 'wsl',
+            name: '本机',
+            freshness: 'stale' as const,
+            receivedAt: new Date(t - ago).toISOString(),
+            reportedAt: new Date(t - ago - 1000).toISOString(),
+          },
+        ],
+      }),
+      node: async () => {
+        const detail = await inner.node('wsl');
+        return {
+          ...detail,
+          id: 'wsl',
+          name: '本机',
+          freshness: 'stale' as const,
+          receivedAt: new Date(t - ago).toISOString(),
+          reportedAt: new Date(t - ago - 1000).toISOString(),
+          env: {
+            ...detail.env,
+            name: { name: '本机' },
+            asOf: new Date(t - ago).toISOString(),
+            facts: snapFacts,
+          },
+        };
+      },
+      jobs: () => Promise.resolve(jobsData()),
+    } as unknown as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    const col = (await screen.findByRole('heading', { name: /本机/ })).closest(
+      '[data-env-column]',
+    ) as HTMLElement;
+    expect(col.getAttribute('data-env-column-state')).toBe('stale');
+    expect(col.className).toMatch(/opacity|muted|grayscale/);
+    expect(col.textContent).toContain('失联，以下是旧数据');
+    const running = within(col).getByText('在跑');
+    expect(running.className).not.toContain('text-title');
+    expect(running.className).not.toContain('text-ink-done');
+    expect(running.className).toMatch(/text-muted|text-sm|text-xs/);
+    const red = within(col).getByText('2 项红');
+    expect(red.className).not.toContain('text-title');
+    expect(red.className).not.toContain('text-ink-fail');
+  });
+
+  test('在用版本小标题为落后主线几个提交', async () => {
+    renderFrance(envData(), jobsData());
+    await screen.findByText('在用版本');
+    expect(tile('在用版本').getByText(/落后主线几个提交/)).toBeTruthy();
+    expect(tile('在用版本').queryByText(/落后主线没有/)).toBeNull();
+  });
+});
+
 describe('总开关和引擎进程是两件事', () => {
   test('总开关关、引擎在跑：开关和「在跑」那一格旁边都写明不派活、进程还在；健康条的名字含「引擎进程」', async () => {
     const inner = apiWith(
