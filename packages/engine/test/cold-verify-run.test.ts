@@ -321,8 +321,9 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
       writeStatus: rec.writeStatus,
     });
     expect(r.status.state).toBe('failure');
-    expect(r.status.description).toContain('没讨论成');
-    expect(r.sourceProblem).toContain('没讨论成');
+    // 没接 waitReason：一个模型都派不出照旧贴 failure、算「没验成」，不当成「没过」（#1731）
+    expect(r.status.description).toContain('一个模型都派不出');
+    expect(r.sourceProblem).toContain('一个模型都派不出');
     expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 

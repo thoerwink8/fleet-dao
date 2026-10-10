@@ -359,10 +359,11 @@ describe('界面活的验收不派 GPT（#1262：GPT 不做界面、不审界面
     expect(got.notes).not.toContain('没认出');
   });
 
-  it('【故意造出的失败】界面单、只有 GPT 有路由：没有别家可验，unavailable，一个会话都没起（不拿 GPT 顶）', async () => {
+  it('【故意造出的失败】界面单、只有 GPT 有路由：一个模型都派不出，回 retry 过一会儿重来，一个会话都没起（不拿 GPT 顶，#1731）', async () => {
     const r = rig({ files: UI_FILES, picks: { gpt: okRoute('gpt') } });
     const got = await r.run(r.input(), ctx());
-    expect(got.unavailable).toContain('没讨论成');
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.reason).toContain('一个模型都派不出');
     expect(r.specs).toHaveLength(0);
     expect(r.started).toHaveLength(0);
   });
@@ -380,10 +381,11 @@ describe('界面活的验收不派 GPT（#1262：GPT 不做界面、不审界面
     expect(got.notes).toContain('没认出是不是界面活，按界面活处理');
   });
 
-  it('【故意造出的失败】认不出、又只有 GPT 有路由：不派 GPT，unavailable 的结果上也写明没认出', async () => {
+  it('【故意造出的失败】认不出、又只有 GPT 有路由：不派 GPT，回 retry，结果上也写明没认出（#1731）', async () => {
     const r = rig({ files: NAMELESS, picks: { gpt: okRoute('gpt') } });
     const got = await r.run(r.input(), ctx());
-    expect(got.unavailable).toContain('没讨论成');
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry?.reason).toContain('一个模型都派不出');
     expect(r.specs).toHaveLength(0);
     expect(got.notes).toContain('没认出是不是界面活，按界面活处理');
   });
@@ -400,21 +402,13 @@ describe('界面活的验收不派 GPT（#1262：GPT 不做界面、不审界面
 describe('【故意造出的失败】做不出来：回 unavailable（工作流停下报人），并且贴 failure', {
   timeout: 30_000,
 }, () => {
-  it('没有别家的路由（一条能用的都没有）：unavailable 写明没讨论成；一个会话都没起；状态是 failure', async () => {
-    const r = rig({ picks: {} });
-    const got = await r.run(r.input(), ctx());
-    expect(got.pass).toBe(false);
-    expect(got.unavailable).toContain('没讨论成');
-    expect(got.retry).toBeUndefined();
-    expect(r.specs).toHaveLength(0);
-    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'failure']);
-  });
-
-  it('作者族认不出（cursor）：不再停下，改成两家都验；只派得出一家时仍回没讨论成，写明要两个不同的族', async () => {
+  it('作者族认不出（cursor）、只派得出一家：不停下，同族兜底验用那一家验，结论照常（#1731）', async () => {
     const r = rig();
     const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
-    expect(got.unavailable).not.toContain('作者族认不出');
-    expect(got.unavailable).toContain('两家都验要两个不同的族');
+    expect(got.unavailable).toBeUndefined();
+    expect(got.pass).toBe(true);
+    expect(got.notes?.startsWith('同族兜底验：')).toBe(true);
+    expect(r.recorded.map((row) => row.routeId)).toEqual(['route-gpt']);
     expect(r.asked.length).toBeGreaterThan(0);
   });
 
@@ -572,6 +566,20 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
       { gpt: 0, grok: 1 },
     ]);
     expect(sessions.live(new Set(['pool-gpt', 'pool-grok']))).toEqual([]);
+  });
+
+  it('一个模型都派不出（每一族都没有路由、也没有在等的）：判成等待（retry，默认秒数），没有 unavailable；状态 pending、没起会话（#1731）', async () => {
+    const r = rig({ picks: {} });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toEqual({
+      wait: 'slot',
+      reason: expect.stringContaining('一个模型都派不出'),
+      afterSeconds: 60,
+    });
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
   });
 
   it('选路没给秒数：用默认的 ROUTE_RETRY_SECONDS', async () => {

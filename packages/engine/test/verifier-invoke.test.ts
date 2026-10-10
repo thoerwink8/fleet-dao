@@ -205,7 +205,7 @@ describe('invokeVerifier：happy path', () => {
       killed: false,
     });
     const chosen: ModelFamily[] = [];
-    // 都不给：让所有 family 都被问一遍、然后 expect 「没讨论成」
+    // 都不给：让所有 family 都被问一遍、然后回等待（一个模型都派不出，#1731）
     const choose: ChooseModelForFamily = async (family) => {
       chosen.push(family);
       return undefined;
@@ -221,7 +221,7 @@ describe('invokeVerifier：happy path', () => {
       },
     );
     expect(out.pass).toBe(false);
-    expect(out.problems.join('\n')).toContain('没讨论成');
+    expect(out.routeWait?.reason).toContain('一个模型都派不出');
     // 其余四个按 FAMILY_ORDER 顺序都问了一遍；都挑不出才改两家都验，轮到避开的 kimi（也挑不出）
     expect(chosen).toEqual([...FAMILY_ORDER.filter((f) => f !== 'kimi'), 'kimi']);
   });
@@ -371,7 +371,7 @@ describe('invokeVerifier：故意造红 → 必须明确失败（不许拿「查
     expect(out.problems.join('\n')).toContain('db down');
   });
 
-  it('全家族挑不出（avoid + 剩下全 undefined）→ pass=false、problems 写明没讨论成', async () => {
+  it('全家族挑不出（avoid + 剩下全 undefined）→ pass=false、回等待（一个模型都派不出），不回没讨论成（#1731）', async () => {
     const { oneShot } = fakeOneShot({
       exitCode: 0,
       stdout: MODEL_STDOUT_PASS,
@@ -387,7 +387,9 @@ describe('invokeVerifier：故意造红 → 必须明确失败（不许拿「查
       cwd: 'C:/work/x',
     });
     expect(out.pass).toBe(false);
-    expect(out.problems.join('\n')).toContain('没讨论成');
+    expect(out.routeWait?.reason).toContain('一个模型都派不出');
+    expect(out.problems.join('\n')).not.toContain('没讨论成');
+    expect(out.session).toBeUndefined();
     // 别拿默认模型顶上
     expect(out.problems.join('\n')).not.toContain('gpt-x');
   });
@@ -444,15 +446,18 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、�
     await expect(invokeVerifier({ ...BASE_INPUT, modelFamiliesAvoid: [] }, DEPS(oneShot))).rejects.toThrow();
   });
 
-  it('剩下的族全被避开、且一家都派不出 → 没讨论成，写明只派得出 0 家', async () => {
+  it('剩下的族全被避开、且一家都派不出 → 回等待（一个模型都派不出，过一会儿重来），不回没讨论成（#1731）', async () => {
     const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
     const out = await invokeVerifier(
       { ...BASE_INPUT, modelFamiliesAvoid: [...FAMILY_ORDER] },
       DEPS(oneShot, async () => undefined),
     );
     expect(out.pass).toBe(false);
-    expect(out.problems[0]).toContain('没讨论成');
-    expect(out.problems[0]).toContain('只派得出 0 家');
+    expect(out.problems.join('\n')).not.toContain('没讨论成');
+    expect(out.routeWait).toEqual({
+      families: [],
+      reason: expect.stringContaining('一个模型都派不出，过一会儿重来'),
+    });
     expect(out.session).toBeUndefined(); // 没起会话
   });
 
@@ -945,15 +950,17 @@ describe('invokeVerifier：两家都验（#1681）', () => {
     expect(bad.problems.every((p) => p.startsWith('grok：'))).toBe(true);
   });
 
-  it('(d) 只有一个族挑得出模型 → 没讨论成，原因含「只派得出 1 家」，不当成过', async () => {
-    const { oneShot } = perModelOneShot();
+  it('(d) 只有一个族挑得出模型 → 同族兜底验：起一次会话，结论照常，notes 以「同族兜底验：」开头（#1731）', async () => {
+    const { oneShot, models } = perModelOneShot();
     const out = await invokeVerifier(
       { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
       deps(oneShot, fixedChoose({ gpt: { modelId: 'gpt-1' } })),
     );
-    expect(out.pass).toBe(false);
-    expect(out.problems.join('\n')).toContain('没讨论成');
-    expect(out.problems.join('\n')).toContain('只派得出 1 家');
+    expect(models).toEqual(['gpt-1']);
+    expect(out.pass).toBe(true);
+    expect(out.problems.join('\n')).not.toContain('没讨论成');
+    expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
+    expect(out.session?.family).toBe('gpt');
   });
 
   it('(e) 有别家可挑：照旧一家验，只起一次会话', async () => {
@@ -1087,7 +1094,7 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     expect(out.session?.family).toBe('grok');
   });
 
-  it('(e) 两家都验，第一家 pass、第二家会话超时：回 pass: false，写明冷调用没跑成', async () => {
+  it('(e) 两家都验，第一家 pass、第二家会话超时、再没有别的族：不停下，按同族兜底验用第一家的结论（#1731）', async () => {
     // 第二家一直不回，等到限时被杀（限时调到约 30 毫秒）
     const { oneShot, models } = scriptedOneShot({
       'grok-1': (cmd) =>
@@ -1102,12 +1109,14 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
     const out = await invokeVerifier(TWO, { ...deps(oneShot, choose), timeoutMinutes: 0.0005 });
     expect(models).toEqual(['gpt-1', 'grok-1']);
-    expect(out.pass).toBe(false);
-    expect(out.session?.outcome).toBe('timeout');
-    expect(out.problems.join('\n')).toContain('冷调用没跑成');
+    expect(out.pass).toBe(true);
+    expect(out.session?.family).toBe('gpt');
+    expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
+    expect(out.notes).toContain('grok-1');
+    expect(out.problems.join('\n')).not.toContain('冷调用没跑成');
   });
 
-  it('(f) 两家都验，第一家 pass、第二家结论行写法不对：回 pass: false，写明结论行不是固定写法', async () => {
+  it('(f) 两家都验，第一家 pass、第二家结论行写法不对：不停下，按同族兜底验用第一家的结论，notes 记下结论行不是固定写法（#1731）', async () => {
     const { oneShot, models } = scriptedOneShot({
       'grok-1': {
         exitCode: 0,
@@ -1119,16 +1128,18 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
     const out = await invokeVerifier(TWO, deps(oneShot, choose));
     expect(models).toEqual(['gpt-1', 'grok-1']);
-    expect(out.pass).toBe(false);
-    expect(out.problems.join('\n')).toContain('结论行不是固定写法');
+    expect(out.pass).toBe(true);
+    expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
+    expect(out.notes).toContain('结论行不是固定写法');
   });
 
-  it('两家都挑不到、也没有在等的：照旧没讨论成（只派得出 0 家），不带 routeWait', async () => {
+  it('两家都挑不到、也没有在等的：回等待（一个模型都派不出），不回没讨论成（#1731）', async () => {
     const { oneShot, models } = scriptedOneShot();
     const out = await invokeVerifier(TWO, deps(oneShot, scriptedChoose({}).choose));
     expect(models).toEqual([]);
-    expect(out.routeWait).toBeUndefined();
-    expect(out.problems.join('\n')).toContain('只派得出 0 家');
+    expect(out.routeWait?.families).toEqual([]);
+    expect(out.routeWait?.reason).toContain('一个模型都派不出');
+    expect(out.problems.join('\n')).not.toContain('没讨论成');
   });
 
   it('一家验：前面的族在等、后面的族能派，照旧派给能派的那家（不为等的那家停下）', async () => {
@@ -1138,5 +1149,83 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     expect(models).toEqual(['claude-1']);
     expect(out.pass).toBe(true);
     expect(out.routeWait).toBeUndefined();
+  });
+
+  describe('验不出来自己兜到底：同族兜底验、换候选重试、没模型就等（#1731）', () => {
+    const AUTHOR_GPT: VerifierInvokeInput = { ...BASE_INPUT, modelFamiliesAvoid: ['gpt'] };
+    /** 会话一直不回，等到限时被杀（限时调到约 30 毫秒）。 */
+    const hang = (cmd: SpawnCommand) =>
+      new Promise<SpawnOutcome>((resolve) => {
+        cmd.signal.addEventListener(
+          'abort',
+          () => resolve({ exitCode: null, stdout: '', stderr: '', killed: true }),
+          { once: true },
+        );
+      });
+
+    it('(a) 作者族 gpt、别家都没路由、gpt 能派：同族兜底验起一次会话，族 gpt，pass 就是 pass，notes 以「同族兜底验：」开头', async () => {
+      const { oneShot, models } = scriptedOneShot();
+      const { choose } = scriptedChoose({ gpt: 'gpt-1' });
+      const out = await invokeVerifier(AUTHOR_GPT, deps(oneShot, choose));
+      expect(models).toEqual(['gpt-1']);
+      expect(out.session?.family).toBe('gpt');
+      expect(out.pass).toBe(true);
+      expect(out.problems).toEqual([]);
+      expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
+      expect(out.notes).toContain('gpt');
+      expect(out.notes).toContain('gpt-1');
+      expect(out.routeWait).toBeUndefined();
+    });
+
+    it('(b) 同上、gpt 判 fail：pass: false，问题照常带出', async () => {
+      const { oneShot, models } = scriptedOneShot({
+        'gpt-1': { exitCode: 0, stdout: MODEL_STDOUT_FAIL_NOT_DONE, stderr: '', killed: false },
+      });
+      const { choose } = scriptedChoose({ gpt: 'gpt-1' });
+      const out = await invokeVerifier(AUTHOR_GPT, deps(oneShot, choose));
+      expect(models).toEqual(['gpt-1']);
+      expect(out.pass).toBe(false);
+      expect(out.problems).toEqual([
+        `${BLOCKER_KINDS[0]}：单子要 A、代码做了 B（证据：diff 第 3 行把 A 改成了 B）`,
+      ]);
+      expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
+    });
+
+    it('(c) 一个族都派不出：回 routeWait，不起会话，problems 里没有「没讨论成」', async () => {
+      const { oneShot, models } = scriptedOneShot();
+      const { choose, asked } = scriptedChoose({});
+      const out = await invokeVerifier(AUTHOR_GPT, deps(oneShot, choose));
+      expect(models).toEqual([]);
+      expect(asked).toEqual([...FAMILY_ORDER.filter((f) => f !== 'gpt'), 'gpt']);
+      expect(out.session).toBeUndefined();
+      expect(out.pass).toBe(false);
+      expect(out.routeWait).toEqual({
+        families: [],
+        reason: expect.stringContaining('一个模型都派不出，过一会儿重来'),
+      });
+      expect(out.problems.join('\n')).not.toContain('没讨论成');
+    });
+
+    it('(d) 第一个候选会话超时、第二个候选给出 pass：回 pass: true，起了两次会话', async () => {
+      const { oneShot, models } = scriptedOneShot({ 'grok-1': hang });
+      const { choose } = scriptedChoose({ grok: 'grok-1', claude: 'claude-1' });
+      const out = await invokeVerifier(AUTHOR_GPT, { ...deps(oneShot, choose), timeoutMinutes: 0.0005 });
+      expect(models).toEqual(['grok-1', 'claude-1']);
+      expect(out.pass).toBe(true);
+      expect(out.session?.family).toBe('claude');
+    });
+
+    it('(e) 所有候选会话都超时（别家、作者族兜底都试过）：回「冷调用没跑成：试过的路由都没验成」', async () => {
+      const { oneShot, models } = scriptedOneShot({ 'grok-1': hang, 'claude-1': hang, 'gpt-1': hang });
+      const { choose } = scriptedChoose({ grok: 'grok-1', claude: 'claude-1', gpt: 'gpt-1' });
+      const out = await invokeVerifier(AUTHOR_GPT, { ...deps(oneShot, choose), timeoutMinutes: 0.0005 });
+      expect(models).toEqual(['grok-1', 'claude-1', 'gpt-1']);
+      expect(out.pass).toBe(false);
+      expect(out.problems).toHaveLength(1);
+      expect(out.problems[0]?.startsWith('冷调用没跑成：试过的路由都没验成')).toBe(true);
+      expect(out.problems[0]).toContain('grok/grok-1');
+      expect(out.problems[0]).toContain('gpt/gpt-1');
+      expect(out.routeWait).toBeUndefined();
+    });
   });
 });

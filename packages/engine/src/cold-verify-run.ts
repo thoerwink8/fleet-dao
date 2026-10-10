@@ -244,7 +244,14 @@ export async function runColdVerifyForPr(
  * 但**报给人看的地方**必须分得清——前者要人查管子，后者要人改代码。判法用 verifier-invoke 自己写的那几个前缀
  * （它那几条明确失败的 problems 都以这几个词开头，见 verifier-invoke.ts 顶部注释）。
  */
-const SOURCE_PREFIXES = ['读不到 diff：', '读不到单子：', '没讨论成：', '冷调用没跑成：'] as const;
+// 「这会儿验不了：」是一个模型都派不出（#1731）：生产的 waitReason 认它回等待；没接 waitReason 的调用方也不能当成「没过」去返工
+const SOURCE_PREFIXES = [
+  '读不到 diff：',
+  '读不到单子：',
+  '没讨论成：',
+  '冷调用没跑成：',
+  '这会儿验不了：',
+] as const;
 
 const SHA40 = /^[0-9a-f]{40}$/i;
 /** 镜像目录名只收这种段：工作流编号拆出来的 owner/name 若是 `..` 就不能拿去拼路径。 */
