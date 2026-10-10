@@ -1,6 +1,6 @@
 // 临时目录：在系统临时目录下，不在仓里。夹具拷进去；要真仓的题，用 git archive <固定提交> 导一份快照（不带 .git，不建工作树）。
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { EvalCase } from './types.ts';
@@ -16,7 +16,9 @@ export function caseDirOf(c: Pick<EvalCase, 'scenario' | 'name'>): string {
 }
 
 function newRoot(tmpRoot: string | undefined): { root: string; dir: string; cleanup: () => void } {
-  const root = mkdtempSync(join(tmpRoot ?? tmpdir(), 'agent-eval-'));
+  // 先转成真路径再交给会话当工作目录：Windows 的 tmpdir() 是 8.3 短名（C:\Users\ADMINI~1\…），
+  // claude 认它不是自己的工作目录，dontAsk 下 Edit、Write 和带这个路径的 Bash 一律拒，要改文件的题就全白跑（#1641）。
+  const root = realpathSync.native(mkdtempSync(join(tmpRoot ?? tmpdir(), 'agent-eval-')));
   const dir = join(root, 'work');
   mkdirSync(dir);
   return { root, dir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
