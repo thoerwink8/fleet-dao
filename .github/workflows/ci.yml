@@ -316,16 +316,27 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
     steps:
       # postgres:16 只给 pg 台用，所以不用 services（services 每台都起、起一次约 12 秒，别的台白等），
-      # 改成这一台自己 docker run。镜像用 AWS 公共镜像库里的官方 postgres（public.ecr.aws/docker/library/postgres:16-alpine），不用 Docker Hub：
-      # 后者对匿名拉取限速，GitHub 共享出口 IP 常撞（toomanyrequests）。整条 docker run（含拉镜像）放后台跑，这一步当场结束；装依赖之后再等它起来：
-      # 原来单独等的那 14 秒和装依赖叠在一起，不串着等。后台进程活到 job 结束（Actions 在 job 末尾才清孤儿进程）。
+      # 改成这一台自己 docker run。镜像用官方 postgres:16-alpine，不从 Docker Hub 直拉（对匿名拉取限速，GitHub 共享出口 IP 常撞 toomanyrequests）：
+      # 先拉 AWS 公共镜像库（public.ecr.aws），它也会对共享出口 IP 回 toomanyrequests（2026-10-10 一小时挡了 3 个 PR），所以拉不下来隔几秒再试一次，
+      # 还不行换 Google 的 Docker Hub 镜像站（mirror.gcr.io），哪个先拉成用哪个；e2e 那台起容器是同一段，改一处两处一起改。
+      # 整条（拉镜像加 docker run）放后台跑，这一步当场结束；装依赖之后再等它起来：原来单独等的那 14 秒和装依赖叠在一起，不串着等。
+      # 后台进程活到 job 结束（Actions 在 job 末尾才清孤儿进程）。
       - name: 起 postgres:16（只 pg 台，后台）
         if: matrix.pg
         run: |
           set -euo pipefail
-          nohup docker run -d --name fleet-test-pg -p 5432:5432 \
-            -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin \
-            public.ecr.aws/docker/library/postgres:16-alpine > "$RUNNER_TEMP/fleet-test-pg-start.log" 2>&1 &
+          nohup bash -c '
+            for img in public.ecr.aws/docker/library/postgres:16-alpine public.ecr.aws/docker/library/postgres:16-alpine \
+              mirror.gcr.io/library/postgres:16-alpine mirror.gcr.io/library/postgres:16-alpine; do
+              if docker pull -q "$img"; then
+                exec docker run -d --name fleet-test-pg -p 5432:5432 \
+                  -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin "$img"
+              fi
+              sleep 4
+            done
+            echo "postgres:16-alpine 在 public.ecr.aws 和 mirror.gcr.io 各试两次都没拉下来" >&2
+            exit 1
+          ' > "$RUNNER_TEMP/fleet-test-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -511,12 +522,22 @@ jobs:
       E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
       E2E_BROWSER_CHANNEL: chromium
     steps:
+      # 拉镜像撞限速的重试和换镜像站，同 test 的 pg 台那一段（改一处两处一起改）
       - name: 起 postgres:16（后台）
         run: |
           set -euo pipefail
-          nohup docker run -d --name fleet-e2e-pg -p 5432:5432 \
-            -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
-            public.ecr.aws/docker/library/postgres:16-alpine > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
+          nohup bash -c '
+            for img in public.ecr.aws/docker/library/postgres:16-alpine public.ecr.aws/docker/library/postgres:16-alpine \
+              mirror.gcr.io/library/postgres:16-alpine mirror.gcr.io/library/postgres:16-alpine; do
+              if docker pull -q "$img"; then
+                exec docker run -d --name fleet-e2e-pg -p 5432:5432 \
+                  -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust "$img"
+              fi
+              sleep 4
+            done
+            echo "postgres:16-alpine 在 public.ecr.aws 和 mirror.gcr.io 各试两次都没拉下来" >&2
+            exit 1
+          ' > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false

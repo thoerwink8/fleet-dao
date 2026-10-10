@@ -503,6 +503,12 @@ export const RouteProbeResultSchema = z.object({
  */
 export const RouteProbeRequestStateSchema = z.enum(['queued', 'running', 'done', 'failed', 'expired']);
 
+/** 自动排的立即探测的来源：任务在这条路由上断了（引擎当场排的），不是人点的。老请求不带。 */
+export const RouteProbeSourceSchema = z.object({
+  kind: z.literal('task-route-broken'),
+  issueNumber: z.number().int().positive(),
+});
+
 export const RouteProbeRequestSchema = z.object({
   requestId: z.string().min(1),
   requestedAt: Time,
@@ -510,6 +516,8 @@ export const RouteProbeRequestSchema = z.object({
   by: z.string(),
   /** 点的是哪几条；不给 = 全部路由。 */
   routeIds: z.array(Id).optional(),
+  /** 自动排的才有：谁要的（任务断链）。不给 = 人点的。 */
+  source: RouteProbeSourceSchema.optional(),
   state: RouteProbeRequestStateSchema,
   startedAt: Time.optional(),
   finishedAt: Time.optional(),
