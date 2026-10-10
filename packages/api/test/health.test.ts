@@ -22,6 +22,13 @@ describe('健康检查', () => {
     });
   });
 
+  it('fleet 命令口（本机回环）也有 /healthz：与驾驶舱同一套检查（#1773 法国拼车会话不经隧道）', async () => {
+    const h = harness();
+    const res = await h.agent.request('/healthz');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(await (await h.cockpit.request('/healthz')).json());
+  });
+
   it('连不上库、Temporal 没接上：整体 503，逐项如实报红；内部细节（地址等）只进日志不对外', async () => {
     const internal = 'db.internal.example:5432';
     const h = harness({

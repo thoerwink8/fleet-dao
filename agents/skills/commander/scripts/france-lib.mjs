@@ -68,6 +68,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  *   routes: Section<{ rows: RouteRow[] }>,
  *   orgAudit: Section<{ rows: OrgAuditRow[] }>,
  *   repos: Section<{ rows: RepoRow[] }>,
+ *   canary: Section<{ empty: true } | { empty?: false, id: number, repo?: string | null, issue_number?: number | null, started_at: string, ended_at?: string | null, verdict: string, stage: string, why?: string | null }>,
  *   services: Section<{ units: ServiceUnit[] }>,
  *   current: Section<{ sha: string }>,
  *   autoRelease: Section<{ state: AutoReleaseState }>,
@@ -207,6 +208,7 @@ export const SECTION_NAMES = {
   routes: '路由',
   orgAudit: '切号记录',
   repos: '接活开关',
+  canary: '全流程巡检',
   services: '服务',
   current: '在用的版本',
   autoRelease: '自动发布的读数',
@@ -716,6 +718,17 @@ function checkSection(name, s) {
       break;
     case 'autoRelease':
       problem = autoReleaseProblem(s.state);
+      break;
+    case 'canary':
+      problem =
+        s.empty === true
+          ? null
+          : Number.isInteger(s.id) &&
+              typeof s.verdict === 'string' &&
+              typeof s.stage === 'string' &&
+              isIso(s.started_at)
+            ? null
+            : 'id、verdict、stage、started_at 认不出';
       break;
     default:
       problem = rowsProblem(s.rows, ROW_SPECS[name]);
@@ -1474,6 +1487,13 @@ export function buildView(snapshot) {
     };
   };
   let tasks;
+  // 全流程巡检最近一轮断了（#1773）：healthz 公网不带 why，这里把阶段和原因原文挂上
+  if (S.canary.ok && !('empty' in S.canary && S.canary.empty === true) && 'verdict' in S.canary && S.canary.verdict === 'broken') {
+    const stage = typeof S.canary.stage === 'string' ? S.canary.stage : '?';
+    const why = typeof S.canary.why === 'string' && S.canary.why ? S.canary.why : '（没写原因）';
+    bad(`全流程巡检断在「${stage}」：${why}`, '库 canary_runs / 健康检查 canary', undefined, 'canary:broken');
+  }
+
   if (S.tasks.ok) {
     const rows = S.tasks.rows.map(taskRow);
     for (const t of rows) {
@@ -1567,6 +1587,21 @@ export function buildView(snapshot) {
       repos: repos ? { ok: true, rows: repos } : { ok: false, why: whyOf('repos') },
       jobs: jobs ? { ok: true, rows: jobs } : { ok: false, why: whyOf('jobs') },
       routes: routes ? { ok: true, rows: routes } : { ok: false, why: whyOf('routes') },
+      canary: S.canary.ok
+        ? S.canary.empty === true
+          ? { ok: true, empty: true }
+          : {
+              ok: true,
+              id: S.canary.id,
+              repo: S.canary.repo,
+              issue_number: S.canary.issue_number,
+              started_at: S.canary.started_at,
+              ended_at: S.canary.ended_at,
+              verdict: S.canary.verdict,
+              stage: S.canary.stage,
+              why: S.canary.why,
+            }
+        : { ok: false, why: S.canary.why },
       notifications: S.notifications.ok
         ? { ok: true, count: S.notifications.count, rows: S.notifications.rows }
         : { ok: false, why: S.notifications.why },

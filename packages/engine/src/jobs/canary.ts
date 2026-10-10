@@ -311,7 +311,9 @@ function intakeWords(last: CanaryDbFacts['lastIntake']): string {
   const when = `最近一轮拉单 ${stamp(last.startedAt)} 开始`;
   if (last.outcome === null) return `${when}，还没跑完`;
   if (last.outcome === 'ok') {
-    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、交代不全、熔断停拉……；巡检单不占每小时名额、也不占在跑上限）`;
+    // #1773：20:46 第 27 轮（canary #83）即此形——拉单 outcome=ok、库无任务行，下一轮 :48 才起；
+    // 公开时间线见 packages/engine/test/canary-1773-forensics.test.ts。当时空位闸仍拦巡检（在跑上限），现已豁免。
+    return `${when}，跑成了却没拉起这张单（空位/准入闸跳过了它：本轮上限、熔断；在跑上限与每小时名额对巡检单已豁免 #1364/#1773；其余见引擎日志「拉单这一轮」）`;
   }
   return `${when}，记的是 ${last.outcome}${last.why ? `：${last.why}` : ''}`;
 }

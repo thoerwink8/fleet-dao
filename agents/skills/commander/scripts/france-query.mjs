@@ -177,6 +177,15 @@ export const SQL = {
 
   repos: `select coalesce(jsonb_agg(x order by x.repo), '[]'::jsonb) from (
     select owner || '/' || name as repo, auto_dispatch_since from repos) x`,
+
+  // 全流程巡检最近有结论的一轮（#1773：healthz 只说断在哪一步，why 原文在这里；没有一轮则 empty）
+  canary: `select coalesce(
+    (select jsonb_build_object(
+      'id', c.id, 'repo', c.repo, 'issue_number', c.issue_number, 'started_at', c.started_at,
+      'ended_at', c.ended_at, 'verdict', c.verdict, 'stage', c.stage, 'why', left(c.why, 800)
+    ) from canary_runs c where c.verdict is not null
+    order by c.ended_at desc nulls last, c.id desc limit 1),
+    jsonb_build_object('empty', true))`,
 };
 
 /** @param {unknown} e */
@@ -322,6 +331,20 @@ export function dbSections(io) {
     routes: shaped('routes', Array.isArray, (v) => ({ rows: v })),
     orgAudit: shaped('orgAudit', Array.isArray, (v) => ({ rows: v })),
     repos: shaped('repos', Array.isArray, (v) => ({ rows: v })),
+    canary: shaped('canary', isObj, (v) =>
+      v.empty === true
+        ? { empty: true }
+        : {
+            id: v.id,
+            repo: v.repo,
+            issue_number: v.issue_number,
+            started_at: v.started_at,
+            ended_at: v.ended_at,
+            verdict: v.verdict,
+            stage: v.stage,
+            why: v.why,
+          },
+    ),
   };
 }
 

@@ -373,6 +373,17 @@ function healthy(): Snapshot {
       },
       orgAudit: { ok: true, rows: [] },
       repos: { ok: true, rows: [{ repo: 'o/fleet-dao', auto_dispatch_since: ago(1000) }] },
+      canary: {
+        ok: true,
+        id: 27,
+        repo: 'o/fleet-dao-canary',
+        issue_number: 83,
+        started_at: ago(40),
+        ended_at: ago(20),
+        verdict: 'pass',
+        stage: 'board',
+        why: '',
+      },
       services: { ok: true, units: query.UNITS.map((unit) => ({ unit, state: 'active' })) },
       current: { ok: true, sha: SHA },
       autoRelease: {
@@ -568,6 +579,7 @@ function fakeIo(
     const value: Record<string, unknown> = {
       db: { now: AT, readOnly: 'on' },
       notifications: { count: 0, rows: [] },
+      canary: { empty: true },
     };
     const out = names.map((n) => `${query.MARK} ${n}\n${JSON.stringify(value[n] ?? [])}`).join('\n');
     return { status: 0, stdout: `${out}\n`, stderr: '', error: null };

@@ -63,6 +63,16 @@ export function buildApps(deps: Deps): Apps {
   const agent = new Hono();
   agent.onError(errorHandler(deps.log));
   agent.notFound(notFound);
+  // 只听本机回环：拼车会话在法国机上查 /healthz，不经隧道 8787（nft 只放行香港）、也不用 SSH（#1773）
+  agent.get('/healthz', async (c) => {
+    await noteExternalWatch({
+      watchId: deps.config.edgeWatchId,
+      header: c.req.header(WATCH_HEADER),
+      record: deps.recordExternalWatchRound,
+      log: deps.log,
+    });
+    return healthHandler([...deps.health, externalWatchHealthItem(deps.config.edgeWatchId)], deps.log)(c);
+  });
   agent.use(`${AGENT_API_PREFIX}/*`, jsonLimit);
   agent.route(AGENT_API_PREFIX, agentRoutes(deps));
 
