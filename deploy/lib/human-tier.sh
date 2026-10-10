@@ -54,7 +54,7 @@ setup_pilot() {
 }
 
 setup_sudoers() {
-  step "引擎起会话的脚本与 sudoers（只放行 fleet-agent-scope 这一个）"
+  step "引擎起会话的脚本与 sudoers（fleet → fleet-agent-scope；监督用 fleet-agent-carpool → fleet-api engine）"
   # 引擎（fleet）自己建不了系统级 scope，会话还得换成会话用户：给它一个只做这件事的 root 脚本，sudoers 只放行这一个。
   # polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份。
   put_file "$AGENT_SCOPE_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-agent-scope.sh")"
@@ -215,7 +215,8 @@ setup_fail2ban_sshd() {
   changed "fail2ban-client reload"
 }
 
-# 读回：文件和仓里一样；在跑的 sshd jail 四项（maxretry、findtime、bantime、bantime.increment）就是要的值。
+# 读回：文件和仓里一样；在跑的 sshd jail 四项（maxretry、findtime、bantime、bantime.increment）就是要的值；
+# ignoreip 须含 10.99.0.0/24（#1775：别把隧道对端封成 Connection refused）。
 # 没装、没在跑是待配；jail 不在（enabled 没生效）和值不对是红；fail2ban-client 自己答不出的也是待配，不当成对了
 readback_fail2ban_sshd() {
   local spec key got want rc
@@ -249,6 +250,15 @@ readback_fail2ban_sshd() {
       red "fail2ban sshd jail $key = 「${got:-没读到}」，应为 $want（被别的 jail 配置盖了，或没 reload）"
     fi
   done
+  rc=0
+  got=$(fail2ban-client get sshd ignoreip 2>&1) || rc=$?
+  if ((rc != 0)); then
+    pending "fail2ban-client get sshd ignoreip 没答出来，没核对：${got:0:120}"
+  elif grep -qF '10.99.0.0/24' <<<"$got"; then
+    ok "fail2ban sshd jail ignoreip 含 10.99.0.0/24"
+  else
+    red "fail2ban sshd jail ignoreip 里没有 10.99.0.0/24（读到「${got:0:120}」）：隧道对端失败登录会被封成 Connection refused"
+  fi
 }
 
 # 驾驶舱「发布到法国」按钮的接活（人工档，不在自动档里）：驾驶舱后端（fleet，没有 root）往 $RELEASE_REQUEST_DIR 写一份请求文件，

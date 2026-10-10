@@ -4,6 +4,7 @@
   "include": ["test"],
   "files": [
     "skills/commander/scripts/check-brief.mjs",
+    "skills/commander/scripts/ensure-france-ssh.mjs",
     "skills/commander/scripts/france-lib.mjs",
     "skills/commander/scripts/france-query.mjs",
     "skills/commander/scripts/patrol-lib.mjs",

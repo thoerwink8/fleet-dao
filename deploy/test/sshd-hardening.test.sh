@@ -9,7 +9,8 @@
 #   3. sshd 读回：有效配置三项对 → 全绿；【故意造出的失败】值被别处盖掉、sshd -T 读不出、文件被改 → 判红
 #   4. fail2ban：没装 → 只记待配（不放文件、不判红）；装了 → 放文件、-t、reload，再跑一遍不动；
 #      【故意造出的失败】-t 不过 → 文件撤掉、不 reload、判红；没在跑 → 待配、不 reload；reload 失败 → 判红
-#   5. fail2ban 读回：四项对 → 全绿；【故意造出的失败】值不对、jail 不在 → 判红；fail2ban-client 答不出 → 待配（不当成对了）
+#   5. fail2ban 读回：四项对且 ignoreip 含 10.99.0.0/24 → 全绿；【故意造出的失败】值不对、jail 不在、ignoreip 缺 WG → 判红；fail2ban-client 答不出 → 待配（不当成对了）
+#      jail 正文六项（含 ignoreip，#1775）
 # 用法：bash deploy/test/sshd-hardening.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -74,7 +75,7 @@ F2B_ACTIVE=active
 F2B_T_RC=0
 F2B_RELOAD_RC=0
 F2B_STATUS_RC=0
-declare -A F2B_GET=([maxretry]=3 [findtime]=600 [bantime]=3600 [bantime.increment]=True)
+declare -A F2B_GET=([maxretry]=3 [findtime]=600 [bantime]=3600 [bantime.increment]=True [ignoreip]=$'127.0.0.1/8\n::1\n10.99.0.0/24')
 
 # command -v 找得到函数；要演示「没装」就让它答没有
 command() {
@@ -147,7 +148,7 @@ check "没碰端口、认证方式、没写 9.6 认不得的 PerSourcePenalties"
   "$(grep -cEi '^[[:space:]]*(Port|PasswordAuthentication|PubkeyAuthentication|PermitRootLogin|PerSourcePenalties)\b' "$SSHD_CONF" || true)" 0
 has "注释里写明了没写 PerSourcePenalties 的原因" "$(<"$SSHD_CONF")" 'PerSourcePenalties.*9\.8'
 f2b=$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')
-check "fail2ban jail：只有 [sshd] 一段、五项设置" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true'
+check "fail2ban jail：只有 [sshd] 一段、六项设置（含 WG ignoreip）" "$f2b" $'[sshd]\nenabled = true\nignoreip = 127.0.0.1/8 ::1 10.99.0.0/24\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true'
 
 echo "== 2. sshd：首次装 → 放文件、sshd -t、reload；再跑一遍什么都不动"
 fresh
@@ -289,7 +290,7 @@ fresh
 setup_fail2ban_sshd >/dev/null
 fresh
 readback_fail2ban_sshd >/dev/null
-check "文件对、四项对（True 也算 true）：全绿" "${#REDS[@]} ${#PENDING[@]}" "0 0"
+check "文件对、四项对（True 也算 true）、ignoreip 含 WG：全绿" "${#REDS[@]} ${#PENDING[@]}" "0 0"
 echo "== 5b.【故意造出的失败】maxretry 还是 5（别的 jail 配置盖了或没 reload）：判红"
 F2B_GET[maxretry]=5
 fresh
@@ -308,7 +309,13 @@ fresh
 readback_fail2ban_sshd >/dev/null
 check "一条待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 F2B_GET[bantime.increment]=True
-echo "== 5e.【故意造出的失败】文件被手改过：判红"
+echo "== 5e.【故意造出的失败】ignoreip 没有 WG 网段：判红"
+F2B_GET[ignoreip]=$'127.0.0.1/8\n::1'
+fresh
+readback_fail2ban_sshd >/dev/null
+has "判红：ignoreip 缺 10.99.0.0/24" "${REDS[*]}" 'ignoreip 里没有 10.99.0.0/24'
+F2B_GET[ignoreip]=$'127.0.0.1/8\n::1\n10.99.0.0/24'
+echo "== 5f.【故意造出的失败】文件被手改过：判红"
 printf '%s\n' '[sshd]' 'maxretry = 99' >"$FAIL2BAN_SSHD_JAIL"
 fresh
 readback_fail2ban_sshd >/dev/null
