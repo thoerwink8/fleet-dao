@@ -765,6 +765,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.notifications.path, async (c) => {
     const query = readQuery(c, NotificationsQuery);
     const page = await store.listNotifications(query);
+    const counts = await store.countNotifications({ status: query.status });
     // 谁在处理、修到哪（design 15.3）：读的时候现算；没接上、读不到照实写在 handlingProblem，不拿「没人在修」顶
     const handling = deps.alertWork
       ? await handlingOf(
@@ -778,6 +779,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         return { ...notificationView(n), ...(h ? { handling: handlingView(h) } : {}) };
       }),
       nextCursor: page.nextCursor,
+      counts,
       ...(handling.ok ? {} : { handlingProblem: handling.why }),
     });
   });

@@ -3,7 +3,13 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
-import { errorText, useMe, useNotifications, useResolveNotification } from '../api/client';
+import {
+  errorText,
+  NOTIFICATIONS_PAGE,
+  useMe,
+  useNotifications,
+  useResolveNotification,
+} from '../api/client';
 import type { Me, Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
@@ -13,6 +19,7 @@ import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { pendingCount } from '../lib/notice-count';
 import { isMine, noticeLevelMeta, type Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -290,7 +297,8 @@ export default function Notifications() {
   const [params, setParams] = useSearchParams();
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
-  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status);
+  const [limit, setLimit] = useState(NOTIFICATIONS_PAGE);
+  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status, limit);
   const { data: me } = useMe();
   const resolve = useResolveNotification();
   const navigate = useNavigate();
@@ -302,6 +310,8 @@ export default function Notifications() {
   }, [level]);
 
   const all = data?.items ?? [];
+  const totalCount = data ? data.counts.decision + data.counts.alert + data.counts.daily : 0;
+  const shownTotal = level === 'all' ? totalCount : (data?.counts[level] ?? 0);
   const list = all.filter((n) => level === 'all' || n.level === level);
   // 只在「全部」级别视图折叠日报；「日报」标签页直接铺开。待处理/连已处理只影响接口过滤，不改折叠。
   const foldDaily = level === 'all';
@@ -354,9 +364,10 @@ export default function Notifications() {
         </div>
         <div className={segmentTrack}>
           {LEVELS.map((l) => {
-            const n = all.filter((x) => l.id === 'all' || x.level === l.id).length;
-            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且列表空）才写 0。
-            const shown = data ? n : '—';
+            // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
+            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
+            const n = data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null;
+            const shown = n ?? '—';
             return (
               <button
                 key={l.id}
@@ -373,6 +384,18 @@ export default function Notifications() {
           })}
         </div>
       </div>
+      {data && status === 'open' ? (
+        <p className="mb-3 text-xs text-muted-foreground" data-testid="pending-rule">
+          待处理 <span className="num">{pendingCount(data.counts)}</span>{' '}
+          条（要你拍加卡住报警），铃铛和侧栏角标同数。
+          {data.counts.daily > 0 ? (
+            <>
+              {' '}
+              日报 <span className="num">{data.counts.daily}</span> 条只是看一眼，不算待处理。
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {error ? <LoadError what="提醒" error={error} /> : null}
       {data?.handlingProblem ? (
         <p className="mb-3 text-xs text-ink-fail" role="status">
@@ -434,7 +457,22 @@ export default function Notifications() {
             </section>
           ) : null}
           {data?.nextCursor ? (
-            <p className="text-center text-xs text-muted-foreground">只显示最近 {all.length} 条。</p>
+            <div className="flex flex-col items-center gap-2 text-xs text-muted-foreground">
+              <p>
+                只取回了最近 <span className="num">{all.length}</span> 条，共{' '}
+                <span className="num">{totalCount}</span> 条
+                {level === 'all' ? '' : `（${LEVELS.find((l) => l.id === level)?.label}共 ${shownTotal} 条）`}
+                。
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isFetching}
+                onClick={() => setLimit((v) => v + NOTIFICATIONS_PAGE)}
+              >
+                再多看 {NOTIFICATIONS_PAGE} 条
+              </Button>
+            </div>
           ) : null}
           <p className="text-center text-xs text-muted-foreground">
             飞书的免打扰时段在{' '}

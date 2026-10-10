@@ -533,11 +533,17 @@ export function useJobs() {
   });
 }
 
-export function useNotifications(status: 'open' | 'all' = 'open') {
+export const NOTIFICATIONS_PAGE = 200;
+
+/** limit 是这一页最多取几条；总数看返回的 counts，不看 items.length。 */
+export function useNotifications(status: 'open' | 'all' = 'open', limit: number = NOTIFICATIONS_PAGE) {
   const api = useApi();
   return useQuery({
-    queryKey: keys.notifications(status),
-    queryFn: () => api.notifications({ status, limit: 200 }),
+    queryKey:
+      limit === NOTIFICATIONS_PAGE ? keys.notifications(status) : [...keys.notifications(status), limit],
+    queryFn: () => api.notifications({ status, limit }),
+    // 只有「多看几条」（同一状态、limit 变大）才留着上一份，切到另一个状态不拿旧列表顶。
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === status ? prev : undefined),
   });
 }
 

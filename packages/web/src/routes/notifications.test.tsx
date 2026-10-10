@@ -6,6 +6,8 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { Notification } from '../api/types';
+import { SidebarNav } from '../components/shell/sidebar';
+import { Topbar } from '../components/shell/topbar';
 import { renderApp } from '../test/harness';
 import NotificationsPage from './notifications';
 
@@ -77,6 +79,8 @@ const MIXED: Notification[] = [
   },
 ];
 
+const MIXED_COUNTS = { decision: 1, alert: 1, daily: 2 };
+
 describe('通知中心筛选条计数', () => {
   test('读失败显示 — 且有重试', async () => {
     // 四个数仍写 0，或点重试不再请求，这一条会红。
@@ -86,7 +90,7 @@ describe('通知中心筛选条计数', () => {
     api.notifications = () => {
       calls += 1;
       if (fail) return Promise.reject(new ApiError(500, 'internal', '后端出错了'));
-      return Promise.resolve({ items: [ONE] });
+      return Promise.resolve({ items: [ONE], counts: { decision: 1, alert: 0, daily: 0 } });
     };
     renderApp(<NotificationsPage />, { api });
 
@@ -111,7 +115,7 @@ describe('通知中心筛选条计数', () => {
   test('读成功无提醒显示 0', async () => {
     // 真的没有提醒时改成「—」，或空态文案变了，这一条会红。
     const api = createMockApi({ live: false });
-    api.notifications = () => Promise.resolve({ items: [] });
+    api.notifications = () => Promise.resolve({ items: [], counts: { decision: 0, alert: 0, daily: 0 } });
     renderApp(<NotificationsPage />, { api });
 
     expect(await screen.findByText('没有待处理的提醒')).toBeTruthy();
@@ -122,11 +126,80 @@ describe('通知中心筛选条计数', () => {
   });
 });
 
+describe('通知数同一口径（#1745）', () => {
+  /** 接口只取回前 2 条，但真实总数是 1 + 8 + 8 = 17。 */
+  function truncatedApi() {
+    const api = createMockApi({ live: false });
+    const calls: number[] = [];
+    api.notifications = (q) => {
+      const limit = q?.limit ?? 0;
+      calls.push(limit);
+      const items = [ONE, { ...ONE, id: 'n-y', level: 'alert' as const, title: '卡住了' }].slice(0, limit);
+      return Promise.resolve({
+        items,
+        nextCursor: 'more',
+        counts: { decision: 1, alert: 8, daily: 8 },
+      });
+    };
+    return { api, calls };
+  }
+
+  test('计数用接口总数，不拿这一页的条数封顶；待处理不含日报', async () => {
+    // 计数改回数 items.length，会是 2 而不是 17，这一条会红。
+    const { api } = truncatedApi();
+    renderApp(<NotificationsPage />, { api });
+    await waitFor(() => expect(countOf('全部')).toBe('17'));
+    expect(countOf('要你拍')).toBe('1');
+    expect(countOf('卡住报警')).toBe('8');
+    expect(countOf('日报')).toBe('8');
+    expect(screen.getByTestId('pending-rule').textContent).toContain('待处理 9 条');
+    expect(screen.getByText(/只取回了最近/).textContent).toContain('共 17 条');
+  });
+
+  test('铃铛、侧栏角标、通知中心三处待处理同数，日报不算', async () => {
+    // 任何一处改回数 items.length 或把日报算进去，这一条会红。
+    const api = createMockApi({ live: false });
+    api.notifications = () =>
+      Promise.resolve({
+        items: [ONE],
+        nextCursor: 'more',
+        counts: { decision: 1, alert: 8, daily: 8 },
+      });
+    renderApp(
+      <>
+        <Topbar onMenu={() => {}} onSearch={() => {}} />
+        <SidebarNav />
+        <NotificationsPage />
+      </>,
+      { api },
+    );
+    const bell = await screen.findByRole('button', { name: '提醒，9 条待处理' });
+    expect(bell.textContent).toBe('9');
+    const side = screen
+      .getAllByRole('link')
+      .find((a) => a.getAttribute('href')?.startsWith('/notifications'));
+    expect(side?.textContent).toContain('9');
+    await waitFor(() => expect(screen.getByTestId('pending-rule').textContent).toContain('待处理 9 条'));
+    fireEvent.click(bell);
+    expect((await screen.findByText('待处理的提醒')).parentElement?.textContent).toContain('9，另有日报 8');
+  });
+
+  test('只取了一部分时能往下翻：点「再多看」再要更多条', async () => {
+    const { api, calls } = truncatedApi();
+    renderApp(<NotificationsPage />, { api });
+    const more = await screen.findByRole('button', { name: /再多看/ });
+    const before = calls.length;
+    fireEvent.click(more);
+    await waitFor(() => expect(calls.length).toBeGreaterThan(before));
+    expect(calls.at(-1)).toBeGreaterThan(calls[0] ?? 0);
+  });
+});
+
 describe('通知中心日报折叠', () => {
   test('全部视图里日报默认折叠、点开后展开、日报标签页直接展开', async () => {
     // 全部里仍把日报一条条铺开、折叠后标题还露着、或日报页还出「日报 N 条」，这一条会红。
     const api = createMockApi({ live: false });
-    api.notifications = () => Promise.resolve({ items: MIXED });
+    api.notifications = () => Promise.resolve({ items: MIXED, counts: MIXED_COUNTS });
     renderApp(<NotificationsPage />, { api });
 
     expect(await screen.findByText('等你拍：发不发版')).toBeTruthy();
@@ -153,14 +226,14 @@ describe('通知中心日报折叠', () => {
     expect(screen.getByText('今日日报乙')).toBeTruthy();
     expect(screen.queryByText('等你拍：发不发版')).toBeNull();
     expect(screen.queryByText('卡住：测试没过')).toBeNull();
-    // 切到日报页后计数仍按当前列表（仍是同一份 open 结果）算。
+    // 切到日报页后计数仍按接口 counts 算。
     expect(countOf('全部')).toBe('4');
     expect(countOf('日报')).toBe('2');
   });
 
   test('待处理视图同样折叠日报，要你拍和卡住报警仍在列表里', async () => {
     const api = createMockApi({ live: false });
-    api.notifications = () => Promise.resolve({ items: MIXED });
+    api.notifications = () => Promise.resolve({ items: MIXED, counts: MIXED_COUNTS });
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
 
     const pending = await screen.findByRole('tab', { name: '待处理' });

@@ -597,6 +597,13 @@ export function createMemoryStore(
         nextCursor: result.nextCursor,
       };
     },
+    async countNotifications({ status }) {
+      const counts = { decision: 0, alert: 0, daily: 0 };
+      for (const n of data.notifications) {
+        if (status === 'all' || n.resolvedAt === undefined) counts[n.level] += 1;
+      }
+      return counts;
+    },
     async resolveNotification({ id, by }, entry) {
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return 'not_found';
