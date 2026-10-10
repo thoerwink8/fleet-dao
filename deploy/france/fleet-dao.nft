@@ -20,9 +20,16 @@
 #     一条路。只写得下一个会话用户：要是再加一个，它借另一个的口这里挡不住（标记只记「是不是 root 或会话用户发起的」）。
 #     连接跟踪标记只动这两位（按位或进去、按位与出来），别的程序用别的位互不干扰。
 #
-# 三、会话用户不许直连香港隧道地址的 22（#1785）。引擎任务 / 指挥官会话以会话用户跑时，曾轮着用户名试登香港 sshd，
-#     触发香港 fail2ban 把法国隧道地址封掉、发版车卡死。root 和 fleet 照旧能连（发版、备份钥匙是它们的事）；只拦会话用户。
-#     @@HK_ADDR@@ 是法国 france.sh 的 WG_HK_ADDR（10.99.0.1）。
+# 三、会话用户不许直连香港隧道地址的 22（#1785）。来源不是仓内脚本，是引擎任务 #1775 工作树下两个 Cursor 会话
+#     （用户 fleet-agent-carpool）对 10.99.0.1:22 的 nc/ssh 试探；香港 sshd 在 UTC 16:04–16:07、16:21–16:22 记到失败，
+#     第二轮触发 fail2ban 封了法国隧道地址、发版车卡在第 4 步。证据（法国本机 agent-transcripts，CST=+08:00）：
+#       · 07ba73f0-9e5f-4f80-be1e-69a0c4b5a8ce（jsonl Birth 00:03:27）：L9 `nc -vz -w3 10.99.0.1 22`；
+#         L10 `ssh … root@10.99.0.1`；L18 `for u in root ubuntu debian admin fleet fleet-backup; … ${u}@10.99.0.1`
+#       · 27b96b53-8dc8-4745-aa43-5d4ceed9324f（jsonl Birth 00:20:14）：L8 `nc -vz 10.99.0.1 22`；
+#         L9 `for user in root ubuntu fleet-agent-carpool administrator; … "$user@10.99.0.1"`
+#     旁证：会话用户 `~/.ssh/known_hosts` mtime 00:22:28（L9 用了 StrictHostKeyChecking=accept-new）。
+#     本机无 adm/journal 权限，未读法国 journalctl；UTC 16:17 的 fleet-backup 成功登录是正经备份，不是这两轮。
+#     root 和 fleet 照旧能连（发版、备份）；只拦会话用户。@@HK_ADDR@@ = france.sh 的 WG_HK_ADDR（10.99.0.1）。
 table inet fleet_dao
 delete table inet fleet_dao
 table inet fleet_dao {

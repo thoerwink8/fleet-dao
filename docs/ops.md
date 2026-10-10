@@ -52,7 +52,7 @@
 | 443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-direct.service`：「法国-直连」入口，对公网开，ufw 注释 `self-proxy direct`。别动 |
 | 4318/tcp | 127.0.0.1 | 会话用户自己的 Mirasim 服务，本地模式常驻（`fleet-mirasim-session.service`，第五节「会话用户的 Mirasim」，#424） | 避开旧系统仍留着共用的 4316 和另外两个还可能没清干净的 4315/4317（§1.2）；引擎认端口靠现读 `local-<端口>.token` 的文件名，不认这张表 |
 
-上表里除了 8788、4318，本机上只有 root 和 fleet 连得上：Temporal 没开认证，谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。拦法是一张单独的 nft 表 `inet fleet_dao`（按连接发起方的属主 skuid，别人连就被复位），由 `fleet-firewall.service` 载入。同一张表还管会话用户在回环上开的口（它的 reclaude 代理在临时端口上，现在还有 4318 这个固定端口）：只许它自己和 root 连（第五节「会话用户的口只许它自己连」，#35）——4318 是本地模式 Mirasim 服务，引擎（`fleet`）按设计要直连它，这条规则字面上不分端口地拦，`fleet` 连不连得上还没在真机上核实过，见第五节「会话用户的 Mirasim」第 2 步「已知口子（待核）」。**别启用 `nftables.service`**：它的默认配置开头是 `flush ruleset`，会把 ufw 的规则和这张表一起冲掉。
+上表里除了 8788、4318，本机上只有 root 和 fleet 连得上：Temporal 没开认证，谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。拦法是一张单独的 nft 表 `inet fleet_dao`（按连接发起方的属主 skuid，别人连就被复位），由 `fleet-firewall.service` 载入。同一张表还管会话用户在回环上开的口（它的 reclaude 代理在临时端口上，现在还有 4318 这个固定端口）：只许它自己和 root 连（第五节「会话用户的口只许它自己连」，#35）——4318 是本地模式 Mirasim 服务，引擎（`fleet`）按设计要直连它，这条规则字面上不分端口地拦，`fleet` 连不连得上还没在真机上核实过，见第五节「会话用户的 Mirasim」第 2 步「已知口子（待核）」。同一张表第三道（#1785）：会话用户不许直连香港隧道地址 `10.99.0.1:22`（见第五节「会话用户不许直连香港 22」）。**别启用 `nftables.service`**：它的默认配置开头是 `flush ruleset`，会把 ufw 的规则和这张表一起冲掉。
 
 选端口的规矩：Temporal 一律「官方默认 +10」（当初为了和旧系统的 7233/8233 错开；旧系统已清退，端口不再改）；都在 32768 以下——32768 起是临时端口段，程序运行中随手要的端口会落在里面，同段里挑端口迟早撞上。
 
@@ -486,6 +486,13 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 手动验（无害，不打真实模型调用）：`runuser -u pilot -- timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/<代理口>; printf "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: x\r\n\r\n" >&3; head -1 <&3'`：挡住时 5 秒内连不上、什么都读不到；回 `502 Bad Gateway`（而不是 `407 Proxy Authentication Required`）就是没挡住、能借。代理口是 reclaude 两个口里对这个探测回 502 的那个（`ss -ltnp` 看它的两个口，以会话用户身份逐个试）。
 - 自测：`deploy/test/session-ports.test.sh`（要 root；全在一次性的网络命名空间里，不碰宿主的防火墙）。在法国拿真账号验规则、不建临时用户：`unshare --net bash deploy/test/session-ports.test.sh --inner fleet-agent-carpool fleet pilot /usr/bin/node`。
 - 撤掉：`deploy/france/fleet-dao.nft` 里删掉第二道隔离的四条规则、`france.sh` 读回里去掉 `readback_session_ports`，再跑一遍 `france.sh`（重载是一个事务里换整张表，没有空窗）。
+
+会话用户不许直连香港 22（#1785，2026-10-11 堵上）：
+
+- 为什么：引擎任务 #1775 下两个 Cursor 会话（`07ba73f0-9e5f-4f80-be1e-69a0c4b5a8ce`、`27b96b53-8dc8-4745-aa43-5d4ceed9324f`，用户 `fleet-agent-carpool`）对 `10.99.0.1:22` 先 `nc` 再按用户名 `ssh` 试登，香港 sshd 在 UTC 16:04–16:07、16:21–16:22 记失败，第二轮触发香港 fail2ban 封法国隧道地址、发版车卡死。证据行写在 `deploy/france/fleet-dao.nft` 第三道注释和 `deploy/test/hk22-block.test.sh` 头上；本机无 adm 时读不到法国 journalctl，归因靠会话 transcript + 文件 Birth/mtime。
+- 怎么挡：`deploy/france/fleet-dao.nft` 第三道 `ip daddr <WG_HK_ADDR> tcp dport 22 meta skuid <SESSION_UID> reject with tcp reset`；`render_firewall` 传入 `HK_ADDR=$WG_HK_ADDR`。只拦会话用户；root、fleet 不拦（发版、备份钥匙）。
+- 自测：`deploy/test/hk22-block.test.sh`（不要 root，只核模板与渲染）；真连验收在 `session-ports.test.sh` 第 5 节（要 root，netns）。
+- 落地：人工档，root 重跑 `bash /srv/fleet-dao/deploy/france.sh` 后 `fleet-firewall` 重载才生效。
 
 创始人的登录用户 pilot（创始人用 Mirasim 桌面端的 ssh 远程模式连 `pilot@<法国>` 干活）：
 
