@@ -28,14 +28,16 @@ export function Page({
         className,
       )}
     >
-      <header className="mb-6 flex flex-wrap items-end justify-between gap-3 md:flex-nowrap">
-        <div className="min-w-0 md:flex-1">
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-3 lg:flex-nowrap">
+        <div className="min-w-0 lg:flex-1">
           <h1 className="text-title font-semibold tracking-tight">{title}</h1>
           {description ? (
             <div className="mt-1 max-w-3xl text-sm text-muted-foreground">{description}</div>
           ) : null}
         </div>
-        {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+        {actions ? (
+          <div className="flex max-w-full flex-wrap items-center gap-2 lg:shrink-0">{actions}</div>
+        ) : null}
       </header>
       {children}
     </div>
