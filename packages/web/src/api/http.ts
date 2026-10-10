@@ -46,6 +46,31 @@ export function sseRetryDelay(attempt: number): number {
   return Math.min(30_000, 1000 * 2 ** attempt);
 }
 
+/**
+ * 标签页转到后台多久就放掉推送连接（#1746）。香港入口是 HTTP/1.1：浏览器对同一个域名最多 6 条连接、所有标签页共用，
+ * 一条推送一直占着一条。后台开着几个驾驶舱标签，前台页面的读取（连确认登录）就排队等连接，十几秒才回来。
+ * 切走一下马上回来不算：不断、不重连。回到前台新开一条（不带上次的编号），收到 ready 全量重拉，后台期间的变化一条不漏。
+ */
+export const SSE_HIDDEN_RELEASE_MS = 10_000;
+
+/** 页面在不在前台（测试里换成假的）。 */
+export interface PageVisibility {
+  hidden(): boolean;
+  /** 可见性一变就调 fn；返回取消订阅。 */
+  onChange(fn: () => void): () => void;
+}
+
+const documentVisibility: PageVisibility | undefined =
+  typeof document === 'undefined'
+    ? undefined
+    : {
+        hidden: () => document.visibilityState === 'hidden',
+        onChange(fn) {
+          document.addEventListener('visibilitychange', fn);
+          return () => document.removeEventListener('visibilitychange', fn);
+        },
+      };
+
 /** 401 里不代表「没登录或登录过期」的 code（shared/web-api/auth.ts：PasswordLoginRequest、UpdateCredentialsRequest 的注释）。 */
 const PASSWORD_CHECK_CODES: ReadonlySet<string> = new Set(['bad_credentials', 'bad_current_password']);
 
@@ -65,6 +90,8 @@ export interface HttpApiOptions {
   onUnauthorized?: () => void;
   /** 测试里替换 EventSource。 */
   eventSource?: (url: string) => EventSource;
+  /** 测试里替换页面可见性；默认读 document（没有 document 的环境不管可见性）。 */
+  page?: PageVisibility;
 }
 
 interface SendOptions {
@@ -442,7 +469,27 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         };
       };
 
+      // 在后台：推送连接放掉了（paused），回到前台再连（SSE_HIDDEN_RELEASE_MS 的说明）
+      const page = opts.page ?? documentVisibility;
+      let paused = false;
+      let hideTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const release = () => {
+        clearTimeout(hideTimer);
+        hideTimer = undefined;
+        clearTimeout(timer);
+        timer = undefined;
+        es?.close();
+        es = undefined;
+        paused = true;
+      };
+
       const schedule = () => {
+        // 在后台不退避重连：白占一条连接、白探 /api/me，回到前台再连
+        if (page?.hidden()) {
+          release();
+          return;
+        }
         timer = setTimeout(() => void retry(), sseRetryDelay(attempt));
         attempt += 1;
       };
@@ -463,9 +510,28 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         connect();
       };
 
+      const onVisibility = () => {
+        if (stopped || !page) return;
+        if (page.hidden()) {
+          if (!paused) hideTimer ??= setTimeout(release, SSE_HIDDEN_RELEASE_MS);
+          return;
+        }
+        clearTimeout(hideTimer);
+        hideTimer = undefined;
+        if (!paused) return;
+        paused = false;
+        attempt = 0;
+        // 新开的 EventSource 不带上次的编号：后端回 ready，订阅方全量重拉
+        connect();
+      };
+      const stopWatching = page?.onChange(onVisibility);
+
       connect();
+      onVisibility();
       return () => {
         stopped = true;
+        stopWatching?.();
+        clearTimeout(hideTimer);
         clearTimeout(timer);
         es?.close();
         es = undefined;
