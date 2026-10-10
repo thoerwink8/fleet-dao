@@ -319,13 +319,14 @@ export class ClaudeStreamReader {
       this.#tx(effect, 'error', [str(frame.error), text].filter((x) => x).join('：') || '接口报错');
       return;
     }
-    const model = str(message.model);
+    const parent = str(frame.parent_tool_use_id);
+    // 模型核对只认主会话的帧：子代理（#1641，档位不同、模型不同）的帧先到也不能当成主会话用的模型
+    const model = parent ? undefined : str(message.model);
     if (model && model !== SYNTHETIC_MODEL && !this.#s.observedModel) {
       this.#s.observedModel = model;
       effect.observedModel = model;
     }
     effect.activity = true;
-    const parent = str(frame.parent_tool_use_id);
     const subagent = Boolean(parent);
     const subMeta = this.#subagentMeta(parent);
     // 子代理是另一个上下文窗口，不算进「主会话最后一条消息」；没有 usage 的帧（这条消息还没跑完 API 调用）不覆盖

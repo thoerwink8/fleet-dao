@@ -319,6 +319,38 @@ export function conflictFilesInMergeMessage(message: string): string[] {
   return files;
 }
 
+/** 以会话用户读树里的一个文件（相对路径）。不在回 null；读不了（权限、超时）抛 PortError，不当成不在。 */
+export async function readTreeFile(t: UserTree, rel: string): Promise<Buffer | null> {
+  const r = await run(t, [
+    t.sh ?? SH,
+    '-c',
+    'if [ -e "$1" ]; then exec cat -- "$1"; else exit 3; fi',
+    'sh',
+    rel,
+  ]);
+  if (r.code === 3) return null;
+  if (r.code !== 0) {
+    throw new PortError('GIT_FAILED', describeFailure(`读树里的 ${rel}`, r), {
+      retryable: !r.aborted,
+      details: { user: t.user, dir: t.dir },
+    });
+  }
+  return r.stdout;
+}
+
+/** 以会话用户把字节写进树里的一个文件（相对路径，上级目录不在就建）。写不成抛 PortError。 */
+export async function writeTreeFile(t: UserTree, rel: string, bytes: Buffer): Promise<void> {
+  const r = await run(t, [t.sh ?? SH, '-c', 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', 'sh', rel], {
+    stdin: bytes,
+  });
+  if (r.code !== 0) {
+    throw new PortError('GIT_FAILED', describeFailure(`写树里的 ${rel}`, r), {
+      retryable: !r.aborted,
+      details: { user: t.user, dir: t.dir },
+    });
+  }
+}
+
 /** MERGE_HEAD 还在、索引里已经没有未合并路径时，从合并说明把冲突文件名找回来。读不到就是空，不当成没有冲突。 */
 async function namesLeftInMerge(t: UserTree): Promise<string[]> {
   const located = await run(t, [t.git ?? GIT, 'rev-parse', '--git-path', 'MERGE_MSG']);
