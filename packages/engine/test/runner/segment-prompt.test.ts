@@ -1,7 +1,7 @@
 // 动手会话的提示词（runner/segment-prompt.ts）：交代、一次性会话的规矩、返工意见都在，且规矩和引擎后面做的事对得上。
 import { describe, expect, it } from 'vitest';
 import { ManualBriefSchema } from '../../src/runner/brief.ts';
-import { FEEDBACK_ITEM_MAX, renderSegmentPrompt } from '../../src/runner/segment-prompt.ts';
+import { FEEDBACK_ITEM_MAX, renderSegmentPrompt, SUBAGENT_HINT } from '../../src/runner/segment-prompt.ts';
 
 const brief = ManualBriefSchema.parse({
   kind: 'manual',
@@ -41,6 +41,18 @@ describe('动手会话的提示词', () => {
     expect(fresh).not.toContain('已经在主线上，不要改它');
     expect(fresh).not.toContain('需求.md');
     expect(fresh).not.toContain('整理成');
+  });
+
+  it('子代理提示（#1641）：开关关着（不给、给 false）不加；开着加一句，点名 fleet-scout、fleet-review-screen，Opus 档只在疑难时派', () => {
+    expect(render()).not.toContain('fleet-scout');
+    expect(render({ subagentHint: false })).not.toContain('fleet-scout');
+    const on = render({ subagentHint: true });
+    expect(on).toContain(SUBAGENT_HINT);
+    expect(on).toContain('`fleet-scout`');
+    expect(on).toContain('`fleet-review-screen`');
+    expect(on).toContain('只在疑难时派');
+    // 一句话：加在「怎么干」那一节里，最后一条回复的规矩还是最后一条
+    expect(on.trimEnd().endsWith('还欠什么。')).toBe(true);
   });
 
   it('返工意见按条编号带进来；一条没有就不出这一节（不留空标题）', () => {

@@ -54,6 +54,19 @@ describe('buildClaudeArgs', () => {
     expect(args).toContain('--effort');
   });
 
+  it('给了 agentsFile 就带 --agents <文件>，而且排在 --allowedTools 前面（后者吃变长参数）；不给就没有（路由探针）', () => {
+    expect(buildClaudeArgs(base)).not.toContain('--agents');
+    const args = buildClaudeArgs({
+      ...base,
+      agentsFile: '/srv/agents/subagents-abc.json',
+      allowedTools: ['Read'],
+    });
+    expect(args).toContain('--agents');
+    expect(args[args.indexOf('--agents') + 1]).toBe('/srv/agents/subagents-abc.json');
+    expect(args.indexOf('--agents')).toBeLessThan(args.indexOf('--allowedTools'));
+    expect(args.slice(-2)).toEqual(['--allowedTools', 'Read']);
+  });
+
   it('不用 --bare（经 reclaude 起会认证失败，回一条 <synthetic> 占位）', () => {
     expect(buildClaudeArgs(base)).not.toContain('--bare');
   });

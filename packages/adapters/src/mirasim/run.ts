@@ -447,6 +447,8 @@ export async function runMirasim(
     if (report.firstProgressMs === undefined && session.current && phase && !QUEUED.has(phase)) {
       report.firstProgressMs = Date.now() - t0;
     }
+    // 子代理（#1641 的 fleet-* 子代理，可能是 Haiku）跑的时候，Mirasim 会不会把快照里的 model 换成子代理的模型：没查成。
+    // 这里不改判法，留给指挥官发版后按 specs/1641-子代理分档/法国实装.md 第一节第 6 条实测；会换就改成只核第一次读到的 model。
     const model = session.state.model;
     if (!report.killed && session.current && expect && model && !modelMatches(expect, model)) {
       kill('model_mismatch');

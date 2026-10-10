@@ -45,6 +45,11 @@ export interface ClaudeArgsSpec {
    * 路由探针用：每 15 分钟一次的一问一答不留记录。干活的会话要能续，不给（默认存）。
    */
   persistSession?: boolean;
+  /**
+   * 子代理定义文件（subagents.ts 的 renderAgentsJson 写出的 JSON）：给了就带 `--agents <文件>`（需要 2.1.281 以上）。
+   * 路由探针不给：一问一答不派子代理，带上只是白加启动成本。
+   */
+  agentsFile?: string;
   /** 调工具前那条钩子的脚本，默认 PRETOOL_SCRIPT；只有测试、验收脚本改它。 */
   pretoolScript?: string;
 }
@@ -126,6 +131,8 @@ export function buildClaudeArgs(spec: ClaudeArgsSpec): string[] {
     args.push('--effort', spec.effort);
   }
   if (spec.appendSystemPrompt) args.push('--append-system-prompt', spec.appendSystemPrompt);
+  // --agents 放在 --allowedTools 前面：后者吃变长参数，放在它后面的会被当成工具名
+  if (spec.agentsFile) args.push('--agents', spec.agentsFile);
   // 变长参数放最后、值并成一个参数：它后面再没有东西可吞
   if (spec.allowedTools?.length) args.push('--allowedTools', spec.allowedTools.join(','));
   return args;

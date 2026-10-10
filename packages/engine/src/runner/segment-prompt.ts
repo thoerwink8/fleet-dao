@@ -20,7 +20,13 @@ export interface SegmentPromptInput {
   feedback: readonly string[];
   /** 这一段上一次跑到一半被停下了（切号，#59）：为什么停的那一句；没被停过的不给。 */
   interrupted?: string;
+  /** 设置 engine.subagentHint（#1641）开着才为 true：多一条「可以派哪些子代理、什么时候派」。默认关。 */
+  subagentHint?: boolean;
 }
+
+/** 提示词里那一句子代理的提示（短）：查代码派 Haiku 档的侦察，自审派 Haiku 档的自审，Opus 档只在疑难时派。 */
+export const SUBAGENT_HINT =
+  '- 可以用 Agent 工具派子代理：查代码派 `fleet-scout`，交活前自审 diff 派 `fleet-review-screen`；Opus 档的（`fleet-reviewer`、`fleet-debugger`）只在疑难时派；写代码自己写，不派写代码的子代理。';
 
 function clip(text: string): string {
   const t = text.trim();
@@ -44,6 +50,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     '- 同模块的历史单和它的 PR 在 `specs/` 与该单 `Refs` 里，先读：别人做过的就接着它做，别重做一遍（#995）。',
     ...(specDir === undefined ? [] : [`- 需求文档 \`${specDir}/需求.md\` 已经在主线上，不要改它。`]),
     '- 不要新建需求文档、结果文档：需求在单子里，做成了什么写在 PR 正文里（引擎开 PR）。',
+    ...(input.subagentHint ? [SUBAGENT_HINT] : []),
     '- 最后一条回复写三句话以内：做了什么、怎么验证的、还欠什么。',
   ];
   const interrupted = input.interrupted?.trim();

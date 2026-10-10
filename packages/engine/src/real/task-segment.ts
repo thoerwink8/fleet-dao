@@ -36,6 +36,7 @@ import { type RunSegmentInput, type RunSegmentResult, SEGMENT_STAGE } from '../t
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
+import { type SubagentGuard, writeSegmentLocalSettings } from './segment-settings.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
 
@@ -60,6 +61,13 @@ export interface RunSegmentDeps {
   /** 每一次起会话的尝试落库（channel_attempts，#1118）。 */
   attempts: ChannelAttempts;
   memoryAdmission?: MemoryAdmissionDeps;
+  /**
+   * 要挡哪些子代理的清单（#1641）：Mirasim 的会话建好树后往树里写 .claude/settings.local.json（deny 带 isolation 的、非 Claude
+   * 模型时 deny 全部）。给了而读不到清单，这一段不起会话（deny 写不上，不带着没挡的状态起）。不给 = 不写（测试）。
+   */
+  subagentGuard?: () => Promise<SubagentGuard>;
+  /** 设置 engine.subagentHint（默认关）：开着提示词多一句可以派哪些子代理。读不了记日志、按关，不挡会话。 */
+  readSubagentHint?: () => Promise<boolean>;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
   /**
@@ -210,12 +218,43 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       },
       ctx,
     );
+    // 2.5 Mirasim 的会话读树里的本地设置：写 deny（带 isolation 的子代理、非 Claude 模型时全部子代理）和并发上限（#1641）
+    if (deps.subagentGuard && routeInfo.route.hostId === 'mirasim') {
+      let guard: SubagentGuard;
+      try {
+        guard = await deps.subagentGuard();
+      } catch (error) {
+        throw new PortError('SEGMENT_SUBAGENT_GUARD', errMessage(error), { retryable: true });
+      }
+      await writeSegmentLocalSettings(
+        {
+          exec: deps.tree.exec,
+          user: routeInfo.user,
+          dir: input.worktreePath,
+          scopePrefix: `local-settings-${treeRunId}`,
+          signal: ctx.signal,
+          ...(deps.tree.gitBin ? { git: deps.tree.gitBin } : {}),
+          ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
+        },
+        guard,
+        routeInfo.route.upstreamModel ?? routeInfo.route.modelId,
+      );
+    }
     // 3. 提示词
+    let subagentHint = false;
+    if (deps.readSubagentHint) {
+      try {
+        subagentHint = await deps.readSubagentHint();
+      } catch (error) {
+        log('子代理提示的开关没读到，按关', { error: errMessage(error) });
+      }
+    }
     const prompt = renderSegmentPrompt({
       brief: manualBriefOf(input.brief, { branch: input.branch, baseSha: input.baseSha }),
       specDir: input.brief.specDir,
       feedback: input.feedback,
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
+      ...(subagentHint ? { subagentHint } : {}),
     });
     // 4. 起会话。叫停（ctx.signal）接进会话的看守；切号叫停（ticket）交给 one-shot，结局记 org_switch。
     const stopSignal = ctx.signal;

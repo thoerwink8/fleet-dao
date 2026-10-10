@@ -72,6 +72,7 @@ export const settingLabel: Record<SettingKey, string> = {
   'engine.quotaReserve': '各渠道的额度留量线',
   'engine.poolHolds': '整池暂停',
   'engine.master': '引擎总开关',
+  'engine.subagentHint': '会话提示词里提示可派的子代理',
 };
 
 function isStage(s: string): s is StageKind {

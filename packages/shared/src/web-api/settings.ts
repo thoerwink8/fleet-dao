@@ -99,6 +99,9 @@ export const PoolHoldsResponse = z.object({
   asOf: Time,
 });
 
+/** 设置表里「给会话的提示词加一句可以派哪些子代理」那一项的键（和 SETTING_SCHEMAS 里同名）。 */
+export const SUBAGENT_HINT_SETTING = 'engine.subagentHint';
+
 /** 驾驶舱能改的全局设置。新增一项就在这里加一行；不在表里的键一律拒收。 */
 export const SETTING_SCHEMAS = {
   /** 同时跑的 AI 会话上限（设计文档第四节：起步 6 个）。 */
@@ -133,6 +136,11 @@ export const SETTING_SCHEMAS = {
    * 总开关关＝全停；总开关开＝只有接活开着的项目才派。没设过 = 关（默认关）；谁在什么时候改的看 settings 行的 updatedBy/updatedAt。
    */
   'engine.master': z.boolean(),
+  /**
+   * 动手会话的提示词里加一句「可以派哪些子代理、什么时候派」（#1641：查代码派 fleet-scout，自审派 fleet-review-screen，Opus 档只在
+   * 疑难时派）。没设过 = false（默认关：验收量完再由指挥官开）。
+   */
+  'engine.subagentHint': z.boolean(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 
