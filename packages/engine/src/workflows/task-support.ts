@@ -328,21 +328,11 @@ export const FOUNDERS_INBOX_PR_NOTES = [
   'PR 说明：验法——四条新用例各在父提交 hooks 下改前红、本分支 hooks 下改后绿：①别的会话丢话不进先答 ②21:17 短句加 21:27 带下文重发不报 ③11:47 丢、15:01 同句收到不报 ④本会话真丢仍报。命令：npx vitest run agents/test/session-start.test.ts -t 「别的会话丢的话|21:17|11:47|故意造出的失败」。',
 ] as const;
 
-/**
- * #1764 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去。
- * 验收要写清：同时叫醒时等的是哪个信号/活动、哪一步可能先于订阅被漏掉；CI 日志行；连跑 20 次结果。
- */
-export const TASK_ROUTE_WAKE_PR_NOTES = [
-  'PR 说明：根因——「同时叫醒多张单」两张单都停在 pauseForRoute（condition 等 taskRouteWake，记号之后到过一次就算）；旧等法 Promise.all([a.result(), b.result()]) 走 TimeSkippingWorkflowClient.result → 全局 unlockTimeSkipping；若一张已往下跑、另一张仍在等信号或活动还在工人手里，时钟一跳即 START_TO_CLOSE。全局 pickRoute>=4 也可能被一张单多次选路凑满，漏掉仍在等信号的那张。CI run 38043069632 attempt 1 job 114187063987（test 6/8）：WorkflowFailedError: Workflow execution timed out；栈 TimeSkippingWorkflowClient.result ← task-route-wake.test.ts:219:27；Serialized Error timeoutType START_TO_CLOSE；同批有 Task not found when completing。',
-  'PR 说明：改法——按 taskId 等每张重选；waitUntil 库 done；收场只查 phase/库，不 await result()（查询不解锁跳时间）。不调大 CAP_SECONDS / describe timeout。本机连跑 20 次全过：ok=20 fail=0，耗时 11–18s/次（命令：npx vitest run packages/engine/test/task-route-wake.test.ts -t 「同时叫醒多张单」×20）。',
-] as const;
-
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1764 多写叫醒超时根因与连跑结果，其余单子仍是原来两句。 */
+/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
   if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
   if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);
-  if (issueNumber === 1764) did.push(...TASK_ROUTE_WAKE_PR_NOTES);
   return did;
 }

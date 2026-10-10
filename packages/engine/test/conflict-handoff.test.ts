@@ -7,7 +7,6 @@ import {
   CONFLICT_HANDOFF_CAUSE,
   conflictFilesForHandoff,
   FOUNDERS_INBOX_PR_NOTES,
-  TASK_ROUTE_WAKE_PR_NOTES,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 
@@ -77,23 +76,6 @@ describe('PR 正文里的根因', () => {
     expect(body).toContain('不另起一行');
     expect(body).toContain('改前红');
     expect(body).toContain('改后绿');
-    expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
-  });
-
-  it('#1764 的正文写上同时叫醒超时根因、CI 日志行和连跑 20 次结果，别的单子不带', () => {
-    const body = renderPrBody({
-      requirement: 1764,
-      did: taskPrDid(1764, 1, 3),
-      verified: ['相关测试'],
-    });
-    expect(body).not.toContain('另有');
-    for (const line of TASK_ROUTE_WAKE_PR_NOTES) expect(body).toContain(line);
-    expect(body).toContain('unlockTimeSkipping');
-    expect(body).toContain('pauseForRoute');
-    expect(body).toContain('taskRouteWake');
-    expect(body).toContain('38043069632');
-    expect(body).toContain('START_TO_CLOSE');
-    expect(body).toContain('ok=20 fail=0');
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
   });
 });

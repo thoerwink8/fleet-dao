@@ -192,15 +192,17 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
   });
 
   it('同时叫醒多张单：每张都重选、没人报警', async () => {
-    // #1764 根因（CI run 38043069632 attempt 1 job 114187063987 / test 6/8）：
-    // 两张单都停在 pauseForRoute（condition 等 taskRouteWake，记号之后到过一次就算）。
+    // #1764 偶发超时根因（CI run 38043069632 attempt 1 job 114187063987 / test 6/8）：
+    // 两张单都停在 pauseForRoute：condition 等 taskRouteWake（记号之后到过一次就算），信号可能先于
+    // 订阅到达（靠问选路前的记号不丢），也可能一张已醒去跑活动、另一张还停在 condition 或活动尚在工人手里。
     // 旧等法 Promise.all([a.result(), b.result()]) → TimeSkippingWorkflowClient.result 全局 unlockTimeSkipping；
-    // 若一张已往下跑、另一张仍在等信号或活动还在工人手里，时钟一跳即 START_TO_CLOSE
-    //（日志：WorkflowFailedError: Workflow execution timed out；栈 result ← task-route-wake.test.ts:219:27；
-    // Serialized Error timeoutType START_TO_CLOSE；同批 Task not found when completing）。
+    // 未收场那张时钟一跳即 START_TO_CLOSE（日志：WorkflowFailedError: Workflow execution timed out；
+    // 栈 TimeSkippingWorkflowClient.result ← task-route-wake.test.ts:219:27；Serialized Error
+    // timeoutType: 'START_TO_CLOSE'；同批 Temporal「Task not found when completing」）。
     // 全局 pickRoute>=4 也可能被一张单多次选路凑满，漏掉仍在等信号的那张。
-    // 改法：按 taskId 等每张重选 → waitUntil 库 done → 查 phase；绝不 await result()。不调大超时。
-    // 本机连跑 20 次全过：ok=20 fail=0，耗时 11–18s/次（详见 taskPrDid / TASK_ROUTE_WAKE_PR_NOTES）。
+    // 改法：按 taskId 等每张重选 → waitUntil 库 done → 查 phase；绝不 await result()（查询不解锁跳时间）。
+    // 不调大 CAP_SECONDS / describe timeout。本机连跑 20 次：ok=20 fail=0，耗时 10–23s/次
+    //（命令：npx vitest run packages/engine/test/task-route-wake.test.ts -t 「同时叫醒多张单」×20）。
     const world: FakeWorld = createFakeWorld({ route: waitFirst(2) });
     const { tasks } = scripted();
     const raised: string[] = [];
