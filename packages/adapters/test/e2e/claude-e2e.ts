@@ -2,7 +2,6 @@
 // 第一轮改文件并提交，判交付；第二轮续同一个会话，问第一轮的提交信息，证明上下文真的接上了。
 // 在法国 VPS 上以登录好的会话用户跑（不进 scope）：FLEET_ENV=development node packages/adapters/test/e2e/claude-e2e.ts <reclaude 绝对路径> [模型]
 // 花一点订阅额度（默认 haiku，两轮）；只动临时目录，不碰任何配置。
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +11,7 @@ import { type ClaudeCodeRunSpec, judgeClaudeRun, runClaudeCode } from '../../src
 import { costOfThisRun } from '../../src/claude-code/stream.ts';
 import { checkDelivery } from '../../src/delivery.ts';
 import { sessionProcs } from '../../src/procs.ts';
+import { runChildOk } from '../child.ts';
 
 const [reclaude, model = 'claude-haiku-4-5'] = process.argv.slice(2);
 if (!reclaude) {
@@ -20,8 +20,7 @@ if (!reclaude) {
 }
 
 const root = mkdtempSync(join(tmpdir(), 'fleet-e2e-'));
-const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => runChildOk('git', args, { cwd, encoding: 'utf8' });
 const origin = join(root, 'origin.git');
 const tree = join(root, 'tree');
 git(root, 'init', '-q', '--bare', '-b', 'main', origin);

@@ -17,8 +17,16 @@ export const FONT_SIZE_TOKENS = [
   'stat',
 ] as const;
 
+/** 聚焦圈宽（app.css 的 --ring-width-*）。不登记的话 cn() 不把它当宽度，后写的 ring-2 盖不住。 */
+export const RING_WIDTH_TOKENS = ['focus'] as const;
+
 const twMerge = extendTailwindMerge({
-  extend: { classGroups: { 'font-size': [{ text: [...FONT_SIZE_TOKENS] }] } },
+  extend: {
+    classGroups: {
+      'font-size': [{ text: [...FONT_SIZE_TOKENS] }],
+      'ring-w': [{ ring: [...RING_WIDTH_TOKENS] }],
+    },
+  },
 });
 
 export function cn(...inputs: ClassValue[]) {

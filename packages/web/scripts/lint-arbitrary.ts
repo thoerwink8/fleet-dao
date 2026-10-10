@@ -28,7 +28,8 @@ export const ALLOWLIST: readonly AllowRule[] = [
   },
   {
     pattern: /(?:^|:)data-\[/,
-    reason: 'data-[...] 是 Tailwind 的数据属性选择器，方括号里是属性名和取值，不是写死的尺寸。',
+    reason:
+      'data-[...] 选择器不算任意尺寸：方括号里是属性名和取值（例如 data-[spacing=0]），不是写死的宽高。',
   },
 ];
 
