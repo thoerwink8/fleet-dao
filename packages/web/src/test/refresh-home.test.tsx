@@ -31,8 +31,9 @@ test('点刷新按钮，调用主页主查询的 refetch', async () => {
   const api = createMockApi({ live: false });
   const home = vi.spyOn(api, 'home');
   renderApp(<HomePage />, { api });
+  // 读取中不写 disabled，等 aria-busy 变成 false 才是读完；disabled 一直是 false，会在读完前就点下去。
   await waitFor(() =>
-    expect((screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false),
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
   );
   expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
   refetch.mockClear();
