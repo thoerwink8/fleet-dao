@@ -55,6 +55,56 @@ export function readableModelName(modelId: string): string {
     .join(' ');
 }
 
+/** 表里的一行：一条「模型 × 路由」。 */
+export type EffortRow = { model: EffortModel; route: RouteEffort };
+
+/** 家族分组的先后：常用的在前，其余按名字排。 */
+const FAMILY_ORDER = ['claude', 'gpt', 'grok', 'deepseek', 'gemini', 'glm', 'kimi'] as const;
+const FAMILY_LABEL: Record<string, string> = {
+  claude: 'Claude',
+  gpt: 'GPT',
+  grok: 'Grok',
+  deepseek: 'DeepSeek',
+  gemini: 'Gemini',
+  glm: 'GLM',
+  kimi: 'Kimi',
+  cursor: 'Cursor',
+};
+
+export function familyLabel(family: string): string {
+  return FAMILY_LABEL[family.toLowerCase()] ?? family.charAt(0).toUpperCase() + family.slice(1);
+}
+
+/** 把能配的模型按家族分堆，每堆摊成「模型 × 路由」的行。没有厂家的模型不在这里（走未分类）。 */
+export function groupRowsByFamily(
+  models: readonly EffortModel[],
+): { family: string; label: string; rows: EffortRow[] }[] {
+  const byFamily = new Map<string, EffortRow[]>();
+  for (const model of models) {
+    const key = (model.family ?? '').toLowerCase();
+    const rows = byFamily.get(key) ?? [];
+    for (const route of model.routes) rows.push({ model, route });
+    byFamily.set(key, rows);
+  }
+  const rank = (f: string) => {
+    const i = (FAMILY_ORDER as readonly string[]).indexOf(f);
+    return i === -1 ? FAMILY_ORDER.length : i;
+  };
+  return [...byFamily.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([family, rows]) => ({ family, label: familyLabel(family), rows }));
+}
+
+/** 搜索：模型名、模型编号、渠道名、池、路由编号里找（不分大小写）。 */
+export function effortRowMatches(row: EffortRow, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === '') return true;
+  const { model, route } = row;
+  return [model.displayName, model.modelId, route.channelName, route.poolId, route.routeId, route.model].some(
+    (s) => s.toLowerCase().includes(q),
+  );
+}
+
 /** 一条配不了的路由，带着它所属的模型（行上要写渠道、模型名）。 */
 export type FixedEffortItem = { model: EffortModel; route: RouteEffort };
 
