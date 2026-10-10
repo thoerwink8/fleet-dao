@@ -179,6 +179,7 @@ else
   cp "$T/founder.pub" "$SESSION_SSH_ALLOW_FILE"
   put_keys() { # 公钥文件…（一个不给就是空文件）
     mkdir -p "$SESSION_SSH_KEYS_DIR"
+    rm -f -- "$SESSION_SSH_KEYS_DIR/$U" # 上一条可能把它做成了链接，不能顺链接清空别的文件
     : >"$SESSION_SSH_KEYS_DIR/$U"
     local k
     for k in "$@"; do cat -- "$k" >>"$SESSION_SSH_KEYS_DIR/$U"; done
@@ -260,7 +261,7 @@ rm -rf -- "$FAKE_HOME/.ssh"
 ln -s "$T/elsewhere" "$FAKE_HOME/.ssh" 2>/dev/null
 if [[ -L "$FAKE_HOME/.ssh" ]]; then
   quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null
-  check "家里的 .ssh 是链接：链接本身挪走（不跟着它去动别处）" "$([[ -L "$Q-3/dot-ssh" && -d "$T/elsewhere" ]] && echo 是 || echo 否)" 是
+  eq "家里的 .ssh 是链接：链接本身挪走（不跟着它去动别处）" "$([[ -L "$Q-3/dot-ssh" && -d "$T/elsewhere" ]] && echo 是 || echo 否)" 是
 else
   echo "  （这台建不了真的符号链接，跳过这一条；CI 的 Linux 上会跑）"
   rm -rf -- "$FAKE_HOME/.ssh"

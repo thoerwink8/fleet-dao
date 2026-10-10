@@ -412,8 +412,30 @@ setup_session_ssh >/dev/null
 rc=$?
 check "返回非 0、drop-in 撤掉了、没有 reload、判红一项" \
   "$rc $([[ -e "$SSHD_SESSION_USER_DROPIN" ]] && echo 还在 || echo 没有) $(count reload) ${#REDS[@]}" "1 没有 0 1"
-has "红里有 sshd -t 不过、已撤掉、没重载" "${REDS[*]}" "sshd -t 不过，已撤掉、没重载"
+has "红里有 sshd -t 不过、已撤掉、没重载" "${REDS[*]}" "sshd -t 不过，已撤掉"
+has "红里说明家里的 .ssh 没挪" "${REDS[*]}" "没挪"
 SSHD_T_RC=0
+echo "-- 7d2.【故意造出的失败】家里有钥匙 + sshd -t 不过：~/.ssh 原地不动（不能先挪走再验，不然会话用户被锁在外面）"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+put_dirty_home
+SSHD_T_RC=1
+fresh
+setup_session_ssh >/dev/null
+check "家里的 .ssh 还在、没有挪走记录"   "$([[ -f "$SESSION_USER_HOME_ROOT/$U/.ssh/authorized_keys" ]] && echo 在 || echo 没了) $(grep -c '挪到' <<<"${CHANGES[*]}" || true)" "在 0"
+echo "-- 7d3.【故意造出的失败】sshd -t 不过但有旧版 drop-in：还原旧版，不是删"
+printf '%s
+' '# 旧版' >"$SSHD_SESSION_USER_DROPIN"
+fresh
+setup_session_ssh >/dev/null
+check "drop-in 还原成旧版" "$(cat "$SSHD_SESSION_USER_DROPIN")" "# 旧版"
+SSHD_T_RC=0
+echo "-- 7d4.【故意造出的失败】sshd -t 过但 reload 失败：~/.ssh 原地不动"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+SSHD_RELOAD_RC=1
+fresh
+setup_session_ssh >/dev/null
+check "家里的 .ssh 还在、判红" "$([[ -f "$SESSION_USER_HOME_ROOT/$U/.ssh/authorized_keys" ]] && echo 在 || echo 没了) ${#REDS[@]}" "在 1"
+SSHD_RELOAD_RC=0
 echo "-- 7e.【故意造出的失败】pilot 那份读不到：不写钥匙文件、判红，drop-in 照装（会话用户登不进来，比留着家里那个口子强）"
 rm -f -- "$SSHD_SESSION_USER_DROPIN"
 rm -rf -- "${SESSION_SSH_KEYS_DIR:?}"
