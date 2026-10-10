@@ -1,7 +1,7 @@
 import { CSRF_HEADER } from '@fleet-dao/shared';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type LiveStatus } from './client';
-import { createHttpApi, sseRetryDelay } from './http';
+import { createHttpApi, SSE_HIDDEN_RELEASE_MS, sseRetryDelay } from './http';
 import type { LiveEvent } from './types';
 
 const ME = {
@@ -280,6 +280,118 @@ describe('接真后端：实时推送（SSE）', () => {
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(sources).toHaveLength(1);
     expect(statuses.at(-1)).toBe('down');
+  });
+
+  /** 假的页面可见性：hidden() 读现状，set() 切换并通知订阅的人。 */
+  function fakePage(hidden = false) {
+    const listeners = new Set<() => void>();
+    return {
+      page: {
+        hidden: () => hidden,
+        onChange(fn: () => void) {
+          listeners.add(fn);
+          return () => listeners.delete(fn);
+        },
+      },
+      set(next: boolean) {
+        hidden = next;
+        for (const fn of [...listeners]) fn();
+      },
+      listeners,
+    };
+  }
+
+  function setupPage(page: ReturnType<typeof fakePage>['page']) {
+    const sources: FakeEventSource[] = [];
+    const { fn, calls } = fakeFetch({ 'GET /api/me': () => ({ body: ME }) });
+    const api = createHttpApi({
+      fetch: fn,
+      page,
+      eventSource: (url) => {
+        const es = new FakeEventSource(url);
+        sources.push(es);
+        return es as unknown as EventSource;
+      },
+    });
+    const events: LiveEvent[] = [];
+    const statuses: LiveStatus[] = [];
+    const stop = api.subscribe(
+      (e) => events.push(e),
+      (s) => statuses.push(s),
+    );
+    return { sources, events, statuses, stop, calls };
+  }
+
+  // 香港入口是 HTTP/1.1，浏览器对同一个域名最多 6 条连接、所有标签页共用；推送一条连接一直占着。
+  // 后台开着几个驾驶舱标签，前台页面的读取（连确认登录）就排队等连接（#1746）。
+  test('标签页转到后台超过一会儿：关掉推送连接，把连接让给前台', () => {
+    vi.useFakeTimers();
+    const p = fakePage();
+    const { sources } = setupPage(p.page);
+    sources[0]?.emit('ready');
+    p.set(true);
+    vi.advanceTimersByTime(SSE_HIDDEN_RELEASE_MS - 1);
+    expect(sources[0]?.closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(sources[0]?.closed).toBe(true);
+    expect(sources).toHaveLength(1);
+  });
+
+  test('切走一下马上回来：不断推送、不重连', () => {
+    vi.useFakeTimers();
+    const p = fakePage();
+    const { sources } = setupPage(p.page);
+    p.set(true);
+    vi.advanceTimersByTime(SSE_HIDDEN_RELEASE_MS / 2);
+    p.set(false);
+    vi.advanceTimersByTime(10 * SSE_HIDDEN_RELEASE_MS);
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.closed).toBe(false);
+  });
+
+  test('回到前台：新开一条推送（不带上次的编号），收到 ready 全量重拉、补上后台期间的变化', () => {
+    vi.useFakeTimers();
+    const p = fakePage();
+    const { sources, events, statuses } = setupPage(p.page);
+    sources[0]?.emit('ready');
+    p.set(true);
+    vi.advanceTimersByTime(SSE_HIDDEN_RELEASE_MS);
+    p.set(false);
+    expect(sources).toHaveLength(2);
+    expect(statuses.at(-1)).toBe('connecting');
+    sources[1]?.emit('ready');
+    expect(events).toEqual([{ type: 'ready' }, { type: 'ready' }]);
+    expect(statuses.at(-1)).toBe('open');
+  });
+
+  test('在后台时后端断了：不在后台退避重连，回到前台再连', async () => {
+    vi.useFakeTimers();
+    const p = fakePage();
+    const { sources, calls } = setupPage(p.page);
+    p.set(true);
+    killByBackend(sources[0] as FakeEventSource);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(calls).toHaveLength(0);
+    expect(sources).toHaveLength(1);
+    p.set(false);
+    expect(sources).toHaveLength(2);
+  });
+
+  test('一打开就在后台（中键开的新标签）：照样连，过一会儿没被看就放掉', () => {
+    vi.useFakeTimers();
+    const p = fakePage(true);
+    const { sources } = setupPage(p.page);
+    expect(sources).toHaveLength(1);
+    vi.advanceTimersByTime(SSE_HIDDEN_RELEASE_MS);
+    expect(sources[0]?.closed).toBe(true);
+  });
+
+  test('取消订阅：不再听页面可见性', () => {
+    const p = fakePage();
+    const { stop } = setupPage(p.page);
+    expect(p.listeners.size).toBe(1);
+    stop();
+    expect(p.listeners.size).toBe(0);
   });
 
   test('取消订阅：关掉连接，等着的重连也不再发生', async () => {

@@ -1738,6 +1738,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         done,
         health: { quota: quotaState, routes: routesState, engine: mockEngine() },
         flow,
+        slots: {
+          running: st.pools.reduce((n, p) => n + poolRunning(p.id), 0),
+          reserved: st.pools.reduce((n, p) => n + poolReserved(p.id), 0),
+        },
         asOf: iso(),
       });
     },
@@ -1752,13 +1756,15 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async env() {
       await wait();
       const t = now();
-      const activeRuns = allRuns().filter((r) => r.endedAt === undefined);
+      // 在跑的会话只数已开工、连得到池的（和真后端的池占用同一口径）；排着的算已选定还没开跑
+      const activeRuns = allRuns().filter((r) => isRunning(r) && routeInfo(r.routeId).route !== undefined);
       const byStage: Record<string, number> = {};
       for (const r of activeRuns) byStage[r.stage] = (byStage[r.stage] ?? 0) + 1;
       const poolViews = st.pools.map((p) => {
         const windows = st.quota.filter((w) => w.poolId === p.id);
         return {
           running: poolRunning(p.id),
+          reserved: poolReserved(p.id),
           quotaStatus:
             windows.length === 0
               ? 'unread'
@@ -1780,6 +1786,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             value: {
               count: poolViews.length,
               running: poolViews.reduce((n, p) => n + p.running, 0),
+              reserved: poolViews.reduce((n, p) => n + p.reserved, 0),
               unread: poolViews.filter((p) => p.quotaStatus === 'unread').length,
               stale: poolViews.filter((p) => p.quotaStatus === 'stale').length,
             },
@@ -2642,6 +2649,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             billing: ch?.billing ?? null,
             channelEnabled: ch?.enabled ?? false,
             running: poolRunning(p.id),
+            reserved: poolReserved(p.id),
             quotaStatus: windows.length === 0 ? 'unread' : windows.some((w) => w.stale) ? 'stale' : 'fresh',
             windows,
           };

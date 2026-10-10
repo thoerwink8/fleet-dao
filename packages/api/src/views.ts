@@ -40,6 +40,7 @@ import type { z } from 'zod';
 import type {
   JobRecord,
   NotificationRecord,
+  PoolOccupancyRead,
   PullRequestRecord,
   QuotaWindowRecord,
   RunPlan,
@@ -314,19 +315,14 @@ export function buildPools(
     pools: Pool[];
     channels: Channel[];
     windows: QuotaWindowRecord[];
-    routes: Route[];
-    activeRuns: SessionRun[];
+    /** 池占用（store.poolOccupancy）：各页的在跑数、已选定数都读这一份。 */
+    occupancy: PoolOccupancyRead;
   },
   now: Date,
   staleAfterMs: number,
 ): z.input<typeof PoolViewSchema>[] {
   const channelById = new Map(input.channels.map((ch) => [ch.id, ch]));
-  const poolOfRoute = new Map(input.routes.map((r) => [r.id, r.poolId]));
-  const running = new Map<string, number>();
-  for (const run of input.activeRuns) {
-    const poolId = poolOfRoute.get(run.routeId);
-    if (poolId && run.startedAt) running.set(poolId, (running.get(poolId) ?? 0) + 1);
-  }
+  const slots = new Map(input.occupancy.pools.map((o) => [o.poolId, o]));
   // 「上游数据本身的时刻」照数据库包的算法（还在报的窗口里最新的读数时刻），不自己另算一份。
   const dataTimes = poolDataTimes(
     input.windows.map((w) => ({
@@ -375,7 +371,8 @@ export function buildPools(
       channelEnabled: channel?.enabled ?? false,
       ...(p.orgKind ? { orgKind: p.orgKind } : {}),
       maxConcurrency: p.maxConcurrency,
-      running: running.get(p.id) ?? 0,
+      running: slots.get(p.id)?.inFlight ?? 0,
+      reserved: slots.get(p.id)?.reserved ?? 0,
       expiresAt: p.expiresAt,
       quotaStatus: p.lastReadOkAt === undefined ? 'unread' : overdue ? 'stale' : 'fresh',
       lastReadOkAt: p.lastReadOkAt,
@@ -643,6 +640,11 @@ export function buildHome(input: {
       taskOfIssue: (repoId, issueNumber) => taskByIssue.get(`${repoId}#${issueNumber}`),
     }),
     health: homeHealth({ pools: input.pools, routes: input.routes, engine: input.engine }),
+    // 此刻在跑几个、已选定还没开跑几个：各池相加，和法国页、额度页、路由页同一个来源
+    slots: {
+      running: input.pools.reduce((n, p) => n + p.running, 0),
+      reserved: input.pools.reduce((n, p) => n + p.reserved, 0),
+    },
     asOf: input.now.toISOString(),
   };
 }

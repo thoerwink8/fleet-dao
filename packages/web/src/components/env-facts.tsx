@@ -179,8 +179,8 @@ function scheduleTone(v: EnvSchedule): Tone {
 
 const HEADS = {
   engine: { label: '引擎', hint: '在拉活的工人有没有', icon: Power },
-  sessions: { label: '在跑的会话', hint: '几个、各在哪一段', icon: Activity },
-  pools: { label: '池占用', hint: '几块池、在跑合计', icon: Gauge },
+  sessions: { label: '在跑的会话', hint: '已开工的，几个、各在哪一段', icon: Activity },
+  pools: { label: '池占用', hint: '几块池、在跑合计（已开工的）', icon: Gauge },
   health: { label: '健康', hint: '几项红、哪几项', icon: HeartPulse },
   version: { label: '在用版本', hint: '落后主线几个提交', icon: Tag },
   schedule: { label: '最近拉单', hint: '引擎上一轮拉单成没成', icon: CalendarClock },
@@ -252,7 +252,7 @@ export function factCells({
         {...base}
         {...HEADS.pools}
         value={`${p.count} 块`}
-        sub={`在跑 ${p.running} · 没读成 ${p.unread} · 过期 ${p.stale}`}
+        sub={`在跑 ${p.running}${p.reserved ? ` · 已选定还没开跑 ${p.reserved}` : ''} · 没读成 ${p.unread} · 过期 ${p.stale}`}
         tone={p.unread > 0 || p.stale > 0 ? 'stall' : undefined}
       />,
     );

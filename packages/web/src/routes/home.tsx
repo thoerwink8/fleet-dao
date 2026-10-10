@@ -108,7 +108,7 @@ function HomeBody({ data, remote }: { data: HomeData; remote: boolean }) {
         bodyClassName="p-0"
       >
         {data.running.length ? (
-          <RunningBoard running={data.running} flow={data.flow} health={data.health} />
+          <RunningBoard running={data.running} flow={data.flow} health={data.health} slots={data.slots} />
         ) : (
           <Empty icon={CirclePlay} title="现在没有在跑的单" hint="新接的单会出现在这里。" />
         )}

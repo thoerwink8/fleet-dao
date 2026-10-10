@@ -54,8 +54,10 @@ export const PoolViewSchema = z.object({
   /** Claude 订阅池对应的组织类型（独享 / 拼车）；不是 Claude 订阅池没有。额度页顶上的切号现状按它认出独享池。 */
   orgKind: z.enum(['solo', 'carpool']).optional(),
   maxConcurrency: z.number().int().min(0),
-  /** 正在跑的会话数。 */
+  /** 正在跑的会话数（已开工、没结束）。占着的名额 = running + reserved（shared 的 poolOccupied）。 */
   running: z.number().int().min(0),
+  /** 已选定路由、还没开跑的名额数（预占）。 */
+  reserved: z.number().int().min(0),
   expiresAt: Time.optional(),
   /**
    * 按池看，不逐窗口看（和每小时对账、选路由同一个判法，数据库包的 quotaReadOverdue）：
