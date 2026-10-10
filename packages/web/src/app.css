@@ -668,6 +668,11 @@
   grid-template-columns: var(--container-routing-list) minmax(0, 1fr);
 }
 
+/* 思考档位表（/efforts）的一行：模型 | 路由 | 当前档位 | 改档位下拉（md 以上）。 */
+@utility grid-cols-efforts {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.5fr) minmax(0, 8rem) 10rem;
+}
+
 /* 路由页「调整顺序」：左边模型先后、右边选中模型下的路由先后，并排（xl 以上）。左边略宽，一行要放下序号、名字、状态、开关和四个移动键。 */
 @utility grid-cols-routing-desk {
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);

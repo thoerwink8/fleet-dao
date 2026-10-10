@@ -50,7 +50,7 @@ const EFFORTS_STALE_AFTER_MS = 5 * TIME.MIN;
 
 /** 一行四格：模型 | 路由 | 当前档位 | 改档位。窄屏两列两行：模型+路由一行，档位+下拉一行，不横滚。 */
 const ROW_GRID =
-  'grid grid-cols-2 items-center gap-x-3 gap-y-1.5 px-4 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.5fr)_minmax(0,8rem)_10rem]';
+  'grid grid-cols-2 items-center gap-x-3 gap-y-1.5 px-4 md:grid-cols-efforts';
 
 export default function Efforts() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingEfforts();
