@@ -912,7 +912,7 @@ describe('invokeVerifier：两家都验（#1681）', () => {
       { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
       deps(oneShot, ONLY_GPT_CLAUDE),
     );
-    expect(models).toEqual(['gpt-1', 'claude-1']);
+    expect([...models].sort()).toEqual(['claude-1', 'gpt-1']); // 两家并行起，先后不定（#1704）
     expect(out.pass).toBe(true);
     expect(out.problems).toEqual([]);
     expect(out.notes).toContain('两家都验');
@@ -1069,7 +1069,7 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
       { ...BASE_INPUT, modelFamiliesAvoid: ['gpt', 'claude'] },
       deps(oneShot, choose),
     );
-    expect(models).toEqual(['gpt-1', 'claude-1']);
+    expect([...models].sort()).toEqual(['claude-1', 'gpt-1']); // 两家并行起，先后不定（#1704）
     expect(out.pass).toBe(true);
     expect(out.routeWait).toBeUndefined();
     expect(out.session?.family).toBe('claude');
@@ -1127,7 +1127,7 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     });
     const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
     const out = await invokeVerifier(TWO, deps(oneShot, choose));
-    expect(models).toEqual(['gpt-1', 'grok-1']);
+    expect([...models].sort()).toEqual(['gpt-1', 'grok-1']); // 两家并行起，先后不定（#1704）
     expect(out.pass).toBe(true);
     expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
     expect(out.notes).toContain('结论行不是固定写法');
