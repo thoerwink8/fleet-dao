@@ -4,7 +4,7 @@
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
 
-import { probeBackoffNotice } from '@fleet-dao/shared';
+import { type HostId, probeBackoffNotice, routeEffortChoices } from '@fleet-dao/shared';
 import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
@@ -14,6 +14,7 @@ import { formatAgo, formatIn } from '../lib/format';
 import { poolIsHeld } from '../lib/pool-holds';
 import { routeKind } from '../lib/route-kinds';
 import { probeStale, routeHost, routeSlots, routeTitle } from '../lib/routing';
+import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
@@ -24,8 +25,26 @@ import { StatusDot } from './status';
 import { Badge } from './ui/badge';
 
 /**
- * 档位配不了的长说明（「没有单独的档位参数……不带方括号」）只留在下拉的悬停 title 里，
- * 行内不再逐条铺开（#1754）。套在模型行外层：把 membership 写的 data-row-note 藏掉。
+ * 档位配不了时的长说明（「没有单独的档位参数……不带方括号」等）：行内不铺开，
+ * 悬停看全文（#1754）。和 membership 里下拉置灰用的同一句话。
+ */
+export function effortBlockedTitle(
+  modelId: string,
+  routes: readonly { hostId: HostId; upstreamModel?: string | undefined }[],
+): string | undefined {
+  // 和 membership 的 effortBlockedWhy 同一套话：先看有没有共同认的档，没有再取 fixed 原因。
+  if (supportedPurposeEfforts(modelId, routes).length > 0) return undefined;
+  for (const route of routes) {
+    const choices = routeEffortChoices(route.hostId, modelId);
+    if (choices.kind === 'fixed') return choices.why;
+  }
+  if (routes.length === 0) return '一条路由都没有，没有能配的档位';
+  return '这几条路由没有共同认的档位';
+}
+
+/**
+ * 套在模型行外层：把 membership 写在行内的 data-row-note 藏掉；
+ * 全文改由 ModelRow 操作区的 title={effortBlockedTitle(...)} 悬停给出。
  */
 export const hideEffortRowNoteClass = '[&_[data-row-note]]:hidden';
 

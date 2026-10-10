@@ -160,6 +160,19 @@ describe('路由页：每一层现在活着吗', () => {
     expect(routeItem('rt-off-3').textContent).toContain('关着');
   });
 
+  test('档位配不了的说明收进悬停，行内不铺开', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    await purposeLinks();
+    const row = document.querySelector('[data-model="cursor-auto"]');
+    if (!(row instanceof HTMLElement)) throw new Error('没有 Cursor Auto 行');
+    expect(row.querySelector('[data-effort-tip]')?.getAttribute('title')).toMatch(
+      /没有单独的档位参数.*不带方括号/,
+    );
+    // membership 仍写出 data-row-note；行壳带 hideEffortRowNoteClass，行内不铺开
+    expect(row.querySelector('[class*="data-row-note"]')).toBeTruthy();
+    expect(row.querySelector('[data-row-note]')?.textContent).toMatch(/不带方括号/);
+  });
+
   test('Jev 用途显示不用处理的说明', async () => {
     const now = Date.now();
     const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });

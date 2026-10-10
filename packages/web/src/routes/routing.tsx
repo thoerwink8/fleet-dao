@@ -36,6 +36,7 @@ import { KindDot, useKindEnv } from '../components/routing-kinds';
 import { AddPurposeModel, PurposeModelControls } from '../components/routing-membership';
 import {
   CollapsibleOffModelRoutes,
+  effortBlockedTitle,
   hideEffortRowNoteClass,
   ModelRoutes,
   OrderSummaryLine,
@@ -345,16 +346,27 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const edit = useRoutingEdit();
   const holds = usePoolHolds();
   const [membershipError, setMembershipError] = useState<string | null>(null);
+  const modelIsOff = (m: RoutingLayerModel) =>
+    modelSlotState(m, env.channelEnabled, env.modelRetired(m.modelId)) === 'off';
   // 选中看路由的模型：点过的优先；没点过，进来那一刻看顺位第一条活的所在的模型，没有就第一个。
   // 进来时定下来就不跟着变：开关一关、先后一调，顺位第一条活的会换，不能让下面的路由跟着跳到别的模型。
   const [picked, setPicked] = useState<string | null>(
     () => first?.model.modelId ?? p.models[0]?.modelId ?? null,
   );
+  // 点选已关模型时默认折叠；看着开着的模型被关掉则不叠折叠层，好当场核开关（#1754）。
+  const [foldOffRoutes, setFoldOffRoutes] = useState(() => {
+    const id = first?.model.modelId ?? p.models[0]?.modelId;
+    const m = id ? p.models.find((x) => x.modelId === id) : undefined;
+    return m ? modelIsOff(m) : false;
+  });
+  const selectModel = (modelId: string) => {
+    setPicked(modelId);
+    const m = p.models.find((x) => x.modelId === modelId);
+    setFoldOffRoutes(m ? modelIsOff(m) : false);
+  };
   const current = p.models.find((m) => m.modelId === picked) ?? p.models[0];
   const currentPosition = current ? p.models.findIndex((m) => m.modelId === current.modelId) + 1 : 0;
-  const currentOff =
-    current !== undefined &&
-    modelSlotState(current, env.channelEnabled, env.modelRetired(current.modelId)) === 'off';
+  const currentOff = current !== undefined && modelIsOff(current);
   return (
     <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-3">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -409,7 +421,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           <ModelPriority
             purpose={p}
             selectedId={current?.modelId}
-            onSelect={setPicked}
+            onSelect={selectModel}
             onError={setMembershipError}
           />
           {current ? (
@@ -425,7 +437,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
                 </span>
               </header>
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                {currentOff ? (
+                {currentOff && foldOffRoutes ? (
                   <CollapsibleOffModelRoutes
                     key={current.modelId}
                     model={current}
@@ -602,6 +614,8 @@ function ModelRow({
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
   const kind = modelKind(m, useKindEnv());
   const skipped = slot.state !== 'on';
+  // 档位配不了的长说明：行内藏掉，悬停操作区看全文（#1754）
+  const effortTitle = effortBlockedTitle(m.modelId, m.routes);
   return (
     <div
       className={cn(
@@ -659,7 +673,14 @@ function ModelRow({
         </button>
       </div>
       <div data-row-actions className="flex flex-wrap items-center justify-end gap-0.5 md:contents">
-        <PurposeModelControls purpose={purpose} model={m} onError={onError} />
+        {/* md:contents 时外层不占盒，title 挂在这层才能悬停看到档位说明（#1754） */}
+        <span
+          data-effort-tip={effortTitle ? '' : undefined}
+          title={effortTitle}
+          className="inline-flex flex-wrap items-center gap-0.5"
+        >
+          <PurposeModelControls purpose={purpose} model={m} onError={onError} />
+        </span>
         <ModelSwitch
           modelId={m.modelId}
           modelName={m.displayName}
